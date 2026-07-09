@@ -44,16 +44,17 @@ void AppendVertexLayout(ShaderPassDesc& pass) {
     pass.VertexLayouts.push_back(std::move(layout));
 }
 
-// 构造前向着色 pass。blend / depthWrite / cull 属 PSO 固定状态, keyword 变体无法控制,
-// 故按 opaque / transparent 分别显式配置。
+// 构造前向着色 pass 的【基线】固定状态 (不透明: 背面剔除、深度写开、无混合)。
+// blend / depthWrite / cull 属 PSO 固定状态, keyword 变体无法控制; opaque / transparent / 双面
+// 的差异不在此烘死, 而由材质经 MaterialRenderState 在 PSO 构建时覆盖 (对齐 Unity [_Prop])。
 ShaderPassDesc MakeForwardPass(
     const string& source,
     std::string_view shaderRoot,
-    render::TextureFormat colorFormat,
-    bool transparent) {
+    render::TextureFormat colorFormat) {
     ShaderPassDesc pass{};
     pass.PassTag = string{forward_pipeline::kForwardPassTag};
     pass.Source = source;
+    pass.ProgramName = string{forward_pipeline::kForwardProgramName};
     pass.VertexEntry = "VSMain";
     pass.PixelEntry = "PSMain";
     pass.Primitive = render::PrimitiveState::Default();
@@ -61,23 +62,8 @@ ShaderPassDesc MakeForwardPass(
 
     render::DepthStencilState ds = render::DepthStencilState::Default();
     ds.Format = render::TextureFormat::D32_FLOAT;
-    render::ColorTargetState color = render::ColorTargetState::Default(colorFormat);
-    if (transparent) {
-        // 透明: alpha blend, 关闭深度写 (复用不透明已写深度做遮挡), 双面可见 (不剔除)。
-        ds.DepthWriteEnable = false;
-        pass.Primitive.Cull = render::CullMode::None;
-        color.Blend = render::BlendState{
-            render::BlendComponent{
-                render::BlendFactor::SrcAlpha,
-                render::BlendFactor::OneMinusSrcAlpha,
-                render::BlendOperation::Add},
-            render::BlendComponent{
-                render::BlendFactor::One,
-                render::BlendFactor::OneMinusSrcAlpha,
-                render::BlendOperation::Add}};
-    }
     pass.DepthStencil = ds;
-    pass.ColorTargets.push_back(color);
+    pass.ColorTargets.push_back(render::ColorTargetState::Default(colorFormat));
     pass.IncludeDirs.push_back(string{shaderRoot});
     AppendVertexLayout(pass);
     return pass;
@@ -89,6 +75,7 @@ ShaderPassDesc MakeShadowCasterPass(const string& source, std::string_view shade
     ShaderPassDesc pass{};
     pass.PassTag = string{forward_pipeline::kShadowPassTag};
     pass.Source = source;
+    pass.ProgramName = string{forward_pipeline::kShadowProgramName};
     pass.VertexEntry = "VSMain";
     pass.PixelEntry = "PSMain";
     pass.Primitive = render::PrimitiveState::Default();
@@ -128,10 +115,11 @@ ShaderKeywordSet MakeForwardKeywordSet() {
     kw.Add(forward_pipeline::kKwAlphaBlend);
     kw.Add(forward_pipeline::kKwDoubleSided);
     kw.Add(forward_pipeline::kKwPointShadows);  // 管线级全局 keyword (有阴影点光源时启用)
+    kw.Add(forward_pipeline::kKwDirectionalShadows);  // 管线级全局 keyword (有阴影方向光时启用)
     return kw;
 }
 
-std::optional<ForwardShaderPair> BuildForwardShaderPair(
+std::optional<StreamingAssetRef<ShaderAsset>> BuildForwardShader(
     AssetManager& assets,
     RenderSystem& renderSystem,
     const ShaderKeywordSet& keywords,
@@ -144,29 +132,22 @@ std::optional<ForwardShaderPair> BuildForwardShaderPair(
         return std::nullopt;
     }
 
-    // shadow caster 深度 shader (所有不透明材质共用同一份源)。
-    std::optional<string> shadowSource;
+    // opaque / transparent 共享同一 forward pass (基线固定状态); blend / zwrite / cull 差异由材质
+    // 侧 MaterialRenderState 覆盖, 故只需一个 ShaderAsset。
+    vector<ShaderPassDesc> passes;
+    passes.push_back(MakeForwardPass(source.value(), shaderRoot, colorFormat));
+
+    // shadow caster 深度 pass (depth-only, 所有投影材质共用同一份源)。
     if (withShadowCaster) {
-        shadowSource = ReadForwardShaderSource(shaderRoot, forward_pipeline::kShadowPassFile);
+        std::optional<string> shadowSource = ReadForwardShaderSource(shaderRoot, forward_pipeline::kShadowPassFile);
+        if (shadowSource.has_value()) {
+            passes.push_back(MakeShadowCasterPass(shadowSource.value(), shaderRoot));
+        }
     }
 
-    vector<ShaderPassDesc> opaquePasses;
-    opaquePasses.push_back(MakeForwardPass(source.value(), shaderRoot, colorFormat, /*transparent*/ false));
-    if (shadowSource.has_value()) {
-        opaquePasses.push_back(MakeShadowCasterPass(shadowSource.value(), shaderRoot));
-    }
-
-    vector<ShaderPassDesc> transparentPasses;
-    transparentPasses.push_back(MakeForwardPass(source.value(), shaderRoot, colorFormat, /*transparent*/ true));
-
-    ForwardShaderPair pair{};
-    pair.Opaque = assets.AddReady<ShaderAsset>(
+    return assets.AddReady<ShaderAsset>(
         Guid::NewGuid(),
-        make_unique<ShaderAsset>(keywords, std::move(opaquePasses)));
-    pair.Transparent = assets.AddReady<ShaderAsset>(
-        Guid::NewGuid(),
-        make_unique<ShaderAsset>(keywords, std::move(transparentPasses)));
-    return pair;
+        make_unique<ShaderAsset>(keywords, std::move(passes)));
 }
 
 }  // namespace radray

@@ -1,4 +1,5 @@
 radray_add_test(test_binding_layout_builder SOURCES test_binding_layout_builder.cpp LINK_LIBS radraycore radrayrender)
+radray_add_test(test_reflection_serialize SOURCES test_reflection_serialize.cpp LINK_LIBS radraycore radrayrender)
 if (RADRAY_ENABLE_D3D12)
     radray_add_test(test_d3d12_binding_layout_builder SOURCES test_d3d12_binding_layout_builder.cpp LINK_LIBS radraycore radrayrender)
 endif()

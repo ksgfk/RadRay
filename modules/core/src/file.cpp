@@ -25,6 +25,57 @@ std::optional<string> ReadTextFile(const std::filesystem::path& filepath) noexce
     return str;
 }
 
+std::optional<vector<byte>> ReadBinaryFile(const std::filesystem::path& filepath) noexcept {
+    std::error_code ec{};
+    if (!std::filesystem::exists(filepath, ec) || ec) {
+        return std::nullopt;
+    }
+    std::ifstream file{filepath, std::ios::binary | std::ios::ate};
+    if (!file) {
+        return std::nullopt;
+    }
+    const std::streamsize size = file.tellg();
+    if (size < 0) {
+        return std::nullopt;
+    }
+    file.seekg(0, std::ios::beg);
+    vector<byte> data(static_cast<size_t>(size));
+    if (size > 0 && !file.read(reinterpret_cast<char*>(data.data()), size)) {
+        return std::nullopt;
+    }
+    return data;
+}
+
+bool WriteTextFile(const std::filesystem::path& filepath, std::string_view content) noexcept {
+    std::error_code ec{};
+    if (filepath.has_parent_path()) {
+        std::filesystem::create_directories(filepath.parent_path(), ec);
+    }
+    std::ofstream file{filepath, std::ios::binary | std::ios::trunc};
+    if (!file) {
+        return false;
+    }
+    if (!content.empty()) {
+        file.write(content.data(), static_cast<std::streamsize>(content.size()));
+    }
+    return static_cast<bool>(file);
+}
+
+bool WriteBinaryFile(const std::filesystem::path& filepath, std::span<const byte> data) noexcept {
+    std::error_code ec{};
+    if (filepath.has_parent_path()) {
+        std::filesystem::create_directories(filepath.parent_path(), ec);
+    }
+    std::ofstream file{filepath, std::ios::binary | std::ios::trunc};
+    if (!file) {
+        return false;
+    }
+    if (!data.empty()) {
+        file.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
+    }
+    return static_cast<bool>(file);
+}
+
 std::filesystem::path GetExecutableDirectory() noexcept {
 #if defined(RADRAY_PLATFORM_WINDOWS)
     std::wstring buf;

@@ -21,6 +21,8 @@
 #include "principled.hlsl"
 #include "light.hlsl"
 #include "point_shadow.hlsl"
+#include "shadow.hlsl"
+#include "cascade_shadow.hlsl"
 
 struct VertexInput {
     float3 Position : POSITION0;
@@ -42,9 +44,13 @@ struct VertexOutput {
 struct ViewConstants {
     float4x4 ViewProj;      // 世界 -> 裁剪
     float4 CameraPosition;  // xyz 相机世界位置
-    uint4 LightCounts;      // x = point light count, y = shadow point-light index+1 (0 = 无阴影)
+    // x = point light count, y = shadow point-light index+1 (0 = 无阴影),
+    // z = directional light count, w = directional-shadow light index+1 (0 = 无阴影)
+    uint4 LightCounts;
     PointLightGpu PointLights[RR_MAX_POINT_LIGHTS];
-    PointShadowData PointShadow;  // 投影阴影点光源的立方体阴影数据
+    DirectionalLightGpu DirectionalLights[RR_MAX_DIRECTIONAL_LIGHTS];
+    PointShadowData PointShadow;    // 投影阴影点光源的立方体阴影数据
+    ShadowParam DirectionalShadow;  // 投影级联阴影方向光的 CSM 数据
 };
 
 // per-object 常量 (b1, space1)。执行器写入 ObjectToWorld。
@@ -70,11 +76,17 @@ VK_PUSH_CONSTANT ConstantBuffer<MaterialConstants> gMaterial;
 VK_BINDING(0, 1) ConstantBuffer<ViewConstants> gView : register(b0, space1);
 VK_BINDING(1, 1) ConstantBuffer<PerObject> gPerObject : register(b1, space1);
 
-// 点光源立方体阴影图 + 比较采样器 (由 ForwardPipeline 作为管线级全局资源每 draw 绑定)。
-// _POINT_SHADOWS keyword (对应 URP 的 _MAIN_LIGHT_SHADOWS multi_compile): 本帧无任何投影阴影
-// 的点光源时该 keyword 关闭, 阴影图绑定 + 采样代码整块从变体里剔除, 省去无谓的资源绑定与 ALU。
+// 点光源立方体阴影图 + 方向光级联阴影图 + 比较采样器 (由 ForwardPipeline 作为管线级全局资源每 draw 绑定)。
+// _POINT_SHADOWS / _DIRECTIONAL_SHADOWS keyword (对应 URP 的 _MAIN_LIGHT_SHADOWS(_CASCADE)):
+// 本帧无对应类型的投影阴影时该 keyword 关闭, 阴影图绑定 + 采样代码整块从变体里剔除。
+// 比较采样器 gShadowSampler 两类阴影共用, 任一启用即声明。
 #ifdef _POINT_SHADOWS
 VK_BINDING(2, 1) TextureCube<float> gShadowCube : register(t0, space1);
+#endif
+#ifdef _DIRECTIONAL_SHADOWS
+VK_BINDING(10, 1) Texture2DArray<float> gShadowArray : register(t6, space1);
+#endif
+#if defined(_POINT_SHADOWS) || defined(_DIRECTIONAL_SHADOWS)
 VK_BINDING(3, 1) SamplerComparisonState gShadowSampler : register(s0, space1);
 #endif
 
@@ -195,6 +207,40 @@ float4 PSMain(VertexOutput input, bool isFrontFace : SV_IsFrontFace) : SV_Target
 #endif
 
     float3 Lo = float3(0.0f, 0.0f, 0.0f);
+
+    // ── 方向光 (含级联阴影) ──
+    uint dirCount = min(gView.LightCounts.z, (uint)RR_MAX_DIRECTIONAL_LIGHTS);
+#ifdef _DIRECTIONAL_SHADOWS
+    // 投影级联阴影的方向光序号 (0 = 无阴影, 否则实际序号 = dirShadowIndex1 - 1)。
+    uint dirShadowIndex1 = gView.LightCounts.w;
+#endif
+    for (uint d = 0; d < dirCount; ++d) {
+        DirectionalLightGpu DL = gView.DirectionalLights[d];
+        // Direction 是光 -> 场景的传播方向; 指向光源的方向为其反向。
+        float3 woW = normalize(-DL.Direction.xyz);
+        float3 wo = to_local(frame, woW);
+        if (wo.z <= 0.0f) {
+            continue;
+        }
+        float3 Li = eval_directional_irradiance(DL);
+#ifdef _DIRECTIONAL_SHADOWS
+        if (dirShadowIndex1 != 0u && (d + 1u) == dirShadowIndex1) {
+            // 沿法线做世界空间偏移抑制自阴影粉刺, 再逐级联比较采样。
+            float3 biasedPosW = input.WorldPosition + n * 0.02f;
+            float visibility = sample_shadow_cascade(
+                gShadowArray, gShadowSampler, gView.DirectionalShadow, biasedPosW);
+            Li *= visibility;
+        }
+#endif
+        Lo += EvalPrincipledReflection(
+                  normalize(wi), normalize(wo), albedo, metallic, roughness,
+                  specular, specTint, anisotropic, sheen,
+                  sheenTint, flatness, clearcoat, clearcoatGloss,
+                  specTrans, eta) *
+              Li;
+    }
+
+    // ── 点光源 (含立方体阴影) ──
     uint ptCount = min(gView.LightCounts.x, (uint)RR_MAX_POINT_LIGHTS);
 #ifdef _POINT_SHADOWS
     // 投影阴影的点光源序号 (0 = 无阴影, 否则实际序号 = shadowIndex1 - 1)。

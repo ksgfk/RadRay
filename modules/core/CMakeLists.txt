@@ -12,6 +12,7 @@ target_link_libraries(radraycore PUBLIC
 target_link_libraries(radraycore PRIVATE
     spdlog::spdlog
     xxHash::xxhash
+    yyjson
     $<$<PLATFORM_ID:Windows>:ole32>
     $<$<BOOL:${RADRAY_ENABLE_LIBPNG}>:png_static>
     $<$<BOOL:${RADRAY_ENABLE_LIBJPEG}>:jpeg-static>)

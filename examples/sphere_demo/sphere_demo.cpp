@@ -16,6 +16,7 @@
 #include <radray/runtime/game_framework/actor.h>
 #include <radray/runtime/components/static_mesh_component.h>
 #include <radray/runtime/components/point_light_component.h>
+#include <radray/runtime/components/directional_light_component.h>
 #include <radray/runtime/components/camera_component.h>
 #include <radray/runtime/components/camera_control_component.h>
 #include <radray/runtime/render_framework/static_mesh_scene_proxy.h>
@@ -112,16 +113,16 @@ private:
         if (renderSystem == nullptr) {
             return false;
         }
-        std::optional<ForwardShaderPair> pair = BuildForwardShaderPair(
+        std::optional<StreamingAssetRef<ShaderAsset>> shader = BuildForwardShader(
             *GetAssetManager(),
             *renderSystem,
             MakeForwardKeywordSet(),
             BackBufferFormat,
             /*withShadowCaster*/ true);
-        if (!pair.has_value()) {
+        if (!shader.has_value()) {
             return false;
         }
-        _shaders = std::move(pair.value());
+        _shaders = std::move(shader.value());
         return true;
     }
 
@@ -172,11 +173,14 @@ private:
         const ForwardMaterialConstants& mc,
         std::initializer_list<std::string_view> keywords) {
         AssetManager* assets = GetAssetManager();
-        StreamingAssetRef<ShaderAsset> shader = transparent ? _shaders.Transparent : _shaders.Opaque;
         StreamingAssetRef<MaterialAsset> mat = assets->AddReady<MaterialAsset>(
             Guid::NewGuid(),
-            make_unique<MaterialAsset>(shader));
+            make_unique<MaterialAsset>(_shaders));
         mat->SetRenderQueue(queue);
+        // PSO 固定功能状态 (blend / zwrite / cull) 由材质覆盖: 透明走 alpha blend + 关深度写 + 双面。
+        if (transparent) {
+            mat->SetRenderState(MakeForwardTransparentRenderState());
+        }
         for (std::string_view kw : keywords) {
             mat->EnableKeyword(kw);
         }
@@ -270,6 +274,19 @@ private:
         light->SetLightColor(Eigen::Vector3f{1.0f, 0.95f, 0.9f});
         light->SetIntensity(60.0f);
         light->SetAttenuationRadius(50.0f);
+
+        // 方向光 + 级联阴影 (CSM): 从斜上方照下, 让场景产生方向性阴影。
+        Actor* dirActor = GetWorld()->SpawnActor<Actor>();
+        DirectionalLightComponent* dir = dirActor->AddComponent<DirectionalLightComponent>();
+        dirActor->SetRootComponent(dir);
+        // 光照方向取自世界旋转的 +Z: 让 +Z 指向 (-0.5, -1, -0.5) 的斜下方。
+        const Eigen::Vector3f lightDir = Eigen::Vector3f{-0.5f, -1.0f, -0.5f}.normalized();
+        dir->SetWorldRotation(Eigen::Quaternionf::FromTwoVectors(Eigen::Vector3f::UnitZ(), lightDir));
+        dir->SetLightColor(Eigen::Vector3f{1.0f, 0.98f, 0.92f});
+        dir->SetIntensity(3.0f);
+        dir->SetCascadeCount(4);
+        dir->SetShadowDistance(40.0f);
+        dir->SetShadowMapResolution(2048);
     }
 
     void BuildCamera(const Eigen::Vector3f& target, float distance) {
@@ -285,7 +302,7 @@ private:
         control->BindToMainWindow(*this);
     }
 
-    ForwardShaderPair _shaders{};
+    StreamingAssetRef<ShaderAsset> _shaders{};
     vector<MeshInstance> _instances{};
 };
 

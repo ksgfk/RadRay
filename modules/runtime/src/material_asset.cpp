@@ -190,6 +190,7 @@ shared_ptr<const MaterialRenderSnapshot> MaterialAsset::CreateSnapshot(const Mat
     snapshot->Shader = _shader;
     snapshot->EnabledKeywords = _enabledKeywords;
     snapshot->RenderQueue = _renderQueue;
+    snapshot->RenderState = _renderState;
 
     if (overrides == nullptr || overrides->IsEmpty()) {
         // 无覆盖: 直接铺模板 property。

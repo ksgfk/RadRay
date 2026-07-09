@@ -125,6 +125,8 @@ private:
     MaterialConstantBinder _constantBinder;
     // 复用缓冲: 每 draw 收集快照常量供打包器消费, 避免每次分配。
     vector<MaterialConstantValue> _constantScratch;
+    // 复用缓冲: ResolvePso 里叠加材质 blend 覆盖时, 拷贝 pass 的 ColorTargets 再改, 避免每次分配。
+    vector<render::ColorTargetState> _colorTargetScratch;
 };
 
 }  // namespace radray

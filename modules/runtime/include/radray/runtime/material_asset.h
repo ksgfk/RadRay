@@ -75,6 +75,12 @@ public:
     /// 队列值 >= Transparent 视为半透明 (走 back-to-front 排序)。
     bool IsTransparent() const noexcept { return _renderQueue >= static_cast<int32_t>(RenderQueue::Transparent); }
 
+    // ─── render state (blend / zwrite / cull 覆盖, 对应 Unity 的 [_Prop] 渲染状态) ───
+    /// 材质对 PSO 固定功能状态的覆盖。默认全不覆盖 (沿用 shader pass 的基线状态)。
+    /// 由材质工厂按 alpha mode / 双面 等语义翻译填充; PSO 构建时叠加到 pass 基线之上。
+    const MaterialRenderState& GetRenderState() const noexcept { return _renderState; }
+    void SetRenderState(const MaterialRenderState& state) noexcept { _renderState = state; }
+
     // ─── property ───
     void SetFloat(std::string_view name, float value) noexcept;
     void SetVector(std::string_view name, const Eigen::Vector4f& value) noexcept;
@@ -131,6 +137,7 @@ public:
 private:
     StreamingAssetRef<ShaderAsset> _shader{};
     int32_t _renderQueue{static_cast<int32_t>(RenderQueue::Geometry)};
+    MaterialRenderState _renderState{};
     unordered_map<string, MaterialPropertyValue> _properties;
     vector<string> _enabledKeywords;
     unordered_map<string, uint32_t> _keywordIndex;  // 名字 -> 在 _enabledKeywords 的下标

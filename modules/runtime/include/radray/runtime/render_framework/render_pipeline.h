@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <optional>
 #include <span>
 #include <string_view>
 
@@ -26,6 +27,27 @@ enum class RenderQueue : int32_t {
     GeometryLast = 2500,  // 不透明与半透明的分界
     Transparent = 3000,
     Overlay = 4000,
+};
+
+/// 材质对 PSO 固定功能状态 (blend / zwrite / cull) 的覆盖 (对应 Unity ShaderLab 的
+/// [_SrcBlend] [_DstBlend] / ZWrite [_ZWrite] / Cull [_Cull])。
+///
+/// 语义: 这些状态属 PSO 固定功能段, 不影响 shader 编译产物 (bytecode), 因此不该烘进
+/// ShaderPassDesc / 变体, 而应由材质在 PSO 构建时覆盖。这样同一份 shader + 同一 keyword 表
+/// 只需一个 ShaderAsset, opaque / transparent / 双面 等差异全部落在材质侧。
+///
+/// 三态覆盖: 各字段为 nullopt / OverrideBlend=false 时【沿用 ShaderPassDesc 的 pass 基线】,
+/// 否则用给定值覆盖。Blend 用 (OverrideBlend + optional<BlendState>) 表达三态:
+/// - OverrideBlend=false: 不覆盖, 沿用 pass 基线;
+/// - OverrideBlend=true 且 Blend 有值: 覆盖为开启, 用给定 BlendState;
+/// - OverrideBlend=true 且 Blend 为 nullopt: 覆盖为【强制关闭】混合 (opaque 显式关基线里的 blend)。
+struct MaterialRenderState {
+    std::optional<render::CullMode> Cull{};
+    std::optional<bool> DepthWrite{};
+    bool OverrideBlend{false};
+    std::optional<render::BlendState> Blend{};
+
+    friend bool operator==(const MaterialRenderState&, const MaterialRenderState&) = default;
 };
 
 /// SRP-style injection point for logical rendering passes.

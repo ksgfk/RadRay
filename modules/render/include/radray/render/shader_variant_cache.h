@@ -48,6 +48,10 @@ struct ShaderVariantDescriptor {
     std::span<const StaticSamplerDescriptor> StaticSamplers{};
     HlslShaderModel SM{HlslShaderModel::SM60};
     bool IsOptimize{false};
+    // program 的稳定逻辑名 (如 "forward_pipeline/forward"). 跨进程稳定,
+    // 供预编译缓存 (PrecompiledShaderVariantCache) 定位磁盘上的烘焙产物。
+    // DXC (JIT) 缓存忽略此字段, 仅用内存 key (ProgramId/PassIndex/Bitmask) 去重。
+    std::string_view LogicalName{};
 };
 
 // 编译好的变体. 指针非拥有, 生命周期由 ShaderVariantCache 持有.
@@ -80,6 +84,22 @@ public:
 
     virtual uint32_t Count() const noexcept = 0;
 };
+
+// 预编译 shader 变体缓存 (不依赖 DXC)。
+// 从磁盘上的烘焙产物 (bakeRoot) 按 LogicalName + PassIndex + KeywordBitmask 定位变体,
+// 按 device backend 选择目标格式 (D3D12 -> dxil, Vulkan -> spirv), 读字节码 + 反射 sidecar,
+// 走 Device::CreateShader + ShaderBindingLayoutCache 得到 CompiledShaderVariant。
+//
+// 磁盘布局 (见 tools/bake_shaders.py):
+//   <bakeRoot>/<LogicalName>/pass<N>_mask<HEX>/<target>/{vs,ps,cs}.{dxil|spv}
+//                                              /<target>/{vs,ps,cs}.refl.json
+//
+// 与 DXC 缓存不同, 此实现不需要编译器, 因此始终可用 (不受 RADRAY_ENABLE_DXC 影响)。
+// device / layoutCache 生命周期须覆盖返回的缓存。
+Nullable<unique_ptr<ShaderVariantCache>> CreatePrecompiledShaderVariantCache(
+    Device* device,
+    ShaderBindingLayoutCache* layoutCache,
+    std::string_view bakeRoot) noexcept;
 
 }  // namespace radray::render
 

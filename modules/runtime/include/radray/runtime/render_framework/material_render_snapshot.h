@@ -65,6 +65,9 @@ struct MaterialRenderSnapshot {
     /// 启用的 keyword 名字 (投影用)。
     vector<string> EnabledKeywords;
     int32_t RenderQueue{static_cast<int32_t>(radray::RenderQueue::Geometry)};
+    /// 材质对 PSO 固定功能状态 (blend / zwrite / cull) 的覆盖。绑定时由 MeshPassExecutor
+    /// 叠加到 shader pass 的基线状态之上, 再交 PSO 缓存去重。
+    MaterialRenderState RenderState{};
     vector<ConstantEntry> Constants;
     vector<TextureEntry> Textures;
     vector<SamplerEntry> Samplers;

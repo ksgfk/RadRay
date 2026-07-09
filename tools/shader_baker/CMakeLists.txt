@@ -1,0 +1,5 @@
+add_executable(radray_shader_baker shader_baker_main.cpp)
+target_link_libraries(radray_shader_baker PRIVATE radraycore radrayrender)
+radray_default_compile_flags(radray_shader_baker)
+radray_optimize_flags_binary(radray_shader_baker)
+radray_set_build_path(radray_shader_baker)

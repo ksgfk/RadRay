@@ -130,6 +130,7 @@ Nullable<const render::CompiledShaderVariant*> ShaderAsset::GetOrCreateVariant(
     desc.Stages = stages;
     desc.SM = sm;
     desc.IsOptimize = false;
+    desc.LogicalName = pass.ProgramName;
     return cache.GetOrCreate(desc);
 }
 

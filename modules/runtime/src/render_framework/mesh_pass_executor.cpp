@@ -119,15 +119,41 @@ Nullable<render::GraphicsPipelineState*> MeshPassExecutor::ResolvePso(
     vector<render::VertexBufferLayout> vertexLayouts;
     BuildVertexLayouts(passDesc, vertexLayouts);
 
+    // 材质对 PSO 固定功能状态的覆盖 (blend / zwrite / cull, 对应 Unity 的 [_Prop] 渲染状态)。
+    // 以 pass 的基线固定状态为底, 材质覆盖叠加其上; 不覆盖的字段沿用基线。
+    const MaterialRenderState& rs = item.Material->RenderState;
+
     render::GraphicsPipelineStateDescriptor desc{};
     desc.BindingLayout = variant.Layout;
     desc.VS = render::ShaderEntry{.Target = variant.VS, .EntryPoint = passDesc.VertexEntry};
     desc.PS = render::ShaderEntry{.Target = variant.PS, .EntryPoint = passDesc.PixelEntry};
     desc.VertexLayouts = std::span<const render::VertexBufferLayout>{vertexLayouts.data(), vertexLayouts.size()};
+
+    // Primitive: 覆盖 cull。
     desc.Primitive = passDesc.Primitive;
+    if (rs.Cull.has_value()) {
+        desc.Primitive.Cull = rs.Cull.value();
+    }
+
+    // DepthStencil: 覆盖 zwrite (仅当 pass 有 depth-stencil 段)。
     desc.DepthStencil = passDesc.DepthStencil;
+    if (rs.DepthWrite.has_value() && desc.DepthStencil.has_value()) {
+        desc.DepthStencil->DepthWriteEnable = rs.DepthWrite.value();
+    }
+
     desc.MultiSample = passDesc.MultiSample;
-    desc.ColorTargets = std::span<const render::ColorTargetState>{passDesc.ColorTargets.data(), passDesc.ColorTargets.size()};
+
+    // ColorTargets: 覆盖每个 target 的 blend。passDesc.ColorTargets 为共享只读, 故本地拷贝再改,
+    // 拷贝存活至 GetOrCreate 返回 (PSO 缓存据展平 key 去重, 不持有 desc)。
+    if (rs.OverrideBlend) {
+        _colorTargetScratch.assign(passDesc.ColorTargets.begin(), passDesc.ColorTargets.end());
+        for (render::ColorTargetState& ct : _colorTargetScratch) {
+            ct.Blend = rs.Blend;  // 有值=覆盖为开; nullopt=强制关闭混合
+        }
+        desc.ColorTargets = std::span<const render::ColorTargetState>{_colorTargetScratch.data(), _colorTargetScratch.size()};
+    } else {
+        desc.ColorTargets = std::span<const render::ColorTargetState>{passDesc.ColorTargets.data(), passDesc.ColorTargets.size()};
+    }
     return _psoCache->GetOrCreate(desc);
 }
 

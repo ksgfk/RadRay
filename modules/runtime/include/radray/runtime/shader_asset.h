@@ -57,6 +57,10 @@ struct OwningVertexBufferLayout {
 struct ShaderPassDesc {
     string PassTag;
     string Source;
+    // program 的稳定逻辑名 (如 "forward_pipeline/forward")。跨进程稳定,
+    // 透传为 render::ShaderVariantDescriptor::LogicalName, 供预编译缓存定位磁盘产物。
+    // 为空时预编译缓存无法定位该 pass 的变体 (仅影响 DXC 缺失路径)。
+    string ProgramName;
     string VertexEntry{"VSMain"};
     string PixelEntry{"PSMain"};
     // 该 pass 的固定渲染状态 (blend / depth / raster 等)。variant 只影响编译, 不影响这些。

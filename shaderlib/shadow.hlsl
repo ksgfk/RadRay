@@ -1,16 +1,17 @@
 #ifndef RADRAY_SHADOW_HLSL
 #define RADRAY_SHADOW_HLSL
 
+// 通用阴影采样设施 (shared shadow sampling library)。
+//
+// 汇集各类阴影技术共用的采样原语: 世界->阴影 投影 (world_to_shadow_uv)、偏移 (bias)、
+// 比较采样 tap 与 PCF 核 (4-tap / 5x5 tent)。具体技术各自成文件并 #include 本文件:
+//   - cascade_shadow.hlsl: 方向光级联阴影 (Texture2DArray)
+//   - point_shadow.hlsl:   点光源立方体阴影 (TextureCube)
+//   - 本文件内: 附加光 (spot) 阴影图集 (Texture2DArray, 每光 1 slice)
+
 #include "common.hlsl"
 
-#define RADRAY_MAX_CASCADES 4
 #define RADRAY_MAX_ADD_SHADOW_SLICES 16
-
-struct ShadowParam {
-    float4x4 WorldToShadow[RADRAY_MAX_CASCADES];
-    float4 CascadeSphere[RADRAY_MAX_CASCADES]; // xyz=center, w=radius^2
-    float4 Params; // x enable, y shadowmap size(px), z cascade count, w soft mode
-};
 
 // Additional (spot) light shadow atlas. Each spot uses 1 slice.
 // (Point light cube shadows live in point_shadow.hlsl and use a TextureCube instead.)
@@ -113,22 +114,6 @@ void SampleShadow_ComputeSamples_Tent_5x5(float4 shadowmapSize, float2 coord, ou
     fetchesWeights[8] = fetchesWeightsU.z * fetchesWeightsV.z;
 }
 
-uint compute_cascade_index(ShadowParam sp, float3 posW, uint count) {
-    uint index = count;
-    [unroll]
-    for (uint i = 0; i < RADRAY_MAX_CASCADES; ++i) {
-        if (i >= count) {
-            break;
-        }
-        float3 d = posW - sp.CascadeSphere[i].xyz;
-        float dist2 = dot(d, d);
-        if (dist2 < sp.CascadeSphere[i].w && index == count) {
-            index = i;
-        }
-    }
-    return index;
-}
-
 float sample_shadow_tap(Texture2DArray<float> shadowMap, SamplerComparisonState cmp, float2 uv, float slice, float depth) {
     return shadowMap.SampleCmpLevelZero(cmp, float3(uv, slice), depth);
 }
@@ -154,41 +139,6 @@ float sample_shadow_medium(Texture2DArray<float> shadowMap, SamplerComparisonSta
         attenuation += fetchesWeights[i] * sample_shadow_tap(shadowMap, cmp, fetchesUV[i], slice, depth);
     }
     return attenuation;
-}
-
-float sample_shadow_cascade(
-    Texture2DArray<float> shadowMap,
-    SamplerComparisonState cmp,
-    ShadowParam sp,
-    float3 posW) {
-    if (sp.Params.x < 0.5f) {
-        return 1.0f;
-    }
-
-    uint count = (uint)sp.Params.z;
-    uint cascadeIndex = compute_cascade_index(sp, posW, count);
-    if (cascadeIndex >= count) {
-        return 1.0f;
-    }
-
-    bool inside;
-    float3 uvz = world_to_shadow_uv(sp.WorldToShadow[cascadeIndex], posW, inside);
-    if (!inside) {
-        return 1.0f;
-    }
-
-    float slice = (float)cascadeIndex;
-    float size = max(sp.Params.y, 1.0f);
-    float4 shadowmapSize = float4(1.0f / size, 1.0f / size, size, size);
-
-    uint softMode = (uint)sp.Params.w;
-    if (softMode == 1u) {
-        return sample_shadow_low(shadowMap, cmp, shadowmapSize, uvz.xy, slice, uvz.z);
-    }
-    if (softMode == 2u) {
-        return sample_shadow_medium(shadowMap, cmp, shadowmapSize, uvz.xy, slice, uvz.z);
-    }
-    return sample_shadow_tap(shadowMap, cmp, uvz.xy, slice, uvz.z);
 }
 
 // Sample one slice of the additional-light shadow atlas with the configured PCF mode.

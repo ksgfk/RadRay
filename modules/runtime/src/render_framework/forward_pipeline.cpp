@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstring>
 
 #include <radray/logger.h>
@@ -18,6 +19,7 @@
 #include <radray/runtime/render_framework/forward_pipeline_shader.h>
 #include <radray/runtime/render_framework/standard_material_factory.h>
 #include <radray/runtime/render_framework/light_scene_proxy.h>
+#include <radray/runtime/render_framework/directional_light_scene_proxy.h>
 #include <radray/runtime/render_framework/primitive_scene_proxy.h>
 #include <radray/runtime/render_framework/render_queue.h>
 #include <radray/runtime/render_framework/scene.h>
@@ -34,6 +36,7 @@ constexpr std::string_view kPerObjectName = "gPerObject";
 constexpr std::string_view kViewName = "gView";
 constexpr std::string_view kShadowViewName = "gShadowView";
 constexpr std::string_view kShadowCubeName = "gShadowCube";
+constexpr std::string_view kShadowArrayName = "gShadowArray";
 constexpr std::string_view kShadowSamplerName = "gShadowSampler";
 
 // cube 6 面的 forward / up 方向, 面序严格匹配 point_shadow.hlsl 的 point_shadow_cube_face:
@@ -68,6 +71,108 @@ Eigen::Matrix4f MakeCubeFaceViewProj(const Eigen::Vector3f& lightPos, uint32_t f
     return proj * view;
 }
 
+// ── 方向光级联阴影 (CSM) 计算 ──────────────────────────────────────────────
+//
+// 参考 UE5 UDirectionalLightComponent 的 practical split scheme + 稳定化 texel snapping,
+// 但采用引擎的左手 + 标准深度约定 (OrthoLH: z in [near,far] -> [0,1])。
+
+// 单个级联的划分结果。
+struct CascadeSplit {
+    float NearZ{0.0f};
+    float FarZ{0.0f};
+};
+
+// practical split scheme (Zhang et al.): 对数分布与均匀分布按 lambda 混合。
+//   uniform_i  = near + (far-near) * i/N
+//   log_i      = near * (far/near)^(i/N)
+//   split_i    = lerp(uniform_i, log_i, lambda)
+// lambda=0 纯均匀, lambda=1 纯对数。返回每级联的 [near,far] (视图空间距离)。
+void ComputeCascadeSplits(
+    float nearZ,
+    float shadowFar,
+    uint32_t cascadeCount,
+    float lambda,
+    CascadeSplit* outSplits) {
+    const float clipRange = shadowFar - nearZ;
+    const float minZ = nearZ;
+    const float maxZ = shadowFar;
+    const float ratio = maxZ / std::max(minZ, 1e-4f);
+    float lastSplit = nearZ;
+    for (uint32_t i = 0; i < cascadeCount; ++i) {
+        const float p = static_cast<float>(i + 1) / static_cast<float>(cascadeCount);
+        const float logSplit = minZ * std::pow(ratio, p);
+        const float uniformSplit = minZ + clipRange * p;
+        const float splitDist = Lerp(uniformSplit, logSplit, lambda);
+        outSplits[i].NearZ = lastSplit;
+        outSplits[i].FarZ = splitDist;
+        lastSplit = splitDist;
+    }
+}
+
+// 用相机基与视场角, 拟合 [splitNear,splitFar] 视锥切片的最小包围球 (球心沿视轴)。
+// 解析法 (MJP stable CSM): 令球心在视轴距相机 x 处, 使近/远角点等距。
+//   a2 = tanHalfH^2 + tanHalfV^2
+//   x  = (1+a2)(f+n)/2, clamp 到 [n,f]
+//   r  = 距远角点距离
+void ComputeCascadeSphere(
+    const Eigen::Vector3f& eye,
+    const Eigen::Vector3f& forward,
+    float tanHalfV,
+    float tanHalfH,
+    float splitNear,
+    float splitFar,
+    Eigen::Vector3f& outCenter,
+    float& outRadius) {
+    const float a2 = tanHalfH * tanHalfH + tanHalfV * tanHalfV;
+    float x = (1.0f + a2) * (splitFar + splitNear) * 0.5f;
+    x = Clamp(x, splitNear, splitFar);
+    const float dFar = splitFar - x;
+    const float radius = std::sqrt(dFar * dFar + splitFar * splitFar * a2);
+    outCenter = eye + forward * x;
+    outRadius = radius;
+}
+
+// 为一个级联 (包围球 center/radius, 光照方向 lightDir) 构造 世界->阴影裁剪 矩阵。
+// 稳定化: 把球心在光空间的 xy 吸附到 texel 网格 (消除相机移动时的阴影抖动)。
+// zExtend: 沿光照方向的额外深度, 用于捕获级联球之外 (上游) 的投影者。
+Eigen::Matrix4f MakeCascadeViewProj(
+    const Eigen::Vector3f& center,
+    float radius,
+    const Eigen::Vector3f& lightDir,
+    float shadowMapSize,
+    float zExtend) {
+    Eigen::Vector3f L = lightDir;
+    if (L.squaredNorm() <= 1e-8f) {
+        L = Eigen::Vector3f::UnitZ();
+    }
+    L.normalize();
+
+    // 选一个与光照方向不平行的 up。
+    Eigen::Vector3f up = std::abs(L.y()) > 0.99f ? Eigen::Vector3f::UnitX() : Eigen::Vector3f::UnitY();
+
+    // 仅旋转的光空间变换 (球心置于原点), 用于把球心投影到 texel 网格并吸附。
+    Eigen::Matrix4f rotView = LookAtFrontLH<float>(Eigen::Vector3f::Zero(), L, up);
+    Eigen::Vector3f centerLS = (rotView * center.homogeneous()).head<3>();
+
+    const float worldUnitsPerTexel = (2.0f * radius) / std::max(shadowMapSize, 1.0f);
+    centerLS.x() = std::floor(centerLS.x() / worldUnitsPerTexel) * worldUnitsPerTexel;
+    centerLS.y() = std::floor(centerLS.y() / worldUnitsPerTexel) * worldUnitsPerTexel;
+
+    // 吸附后的球心 (世界空间)。rotView 上-左 3x3 为正交阵, 逆 = 转置。
+    Eigen::Matrix3f rot = rotView.block<3, 3>(0, 0);
+    Eigen::Vector3f snappedCenter = rot.transpose() * centerLS;
+
+    // 光相机置于球后 (沿 -L), 使 near 平面能容纳上游投影者。
+    const float backExtrude = std::max(zExtend, radius);
+    Eigen::Vector3f lightEye = snappedCenter - L * (radius + backExtrude);
+    Eigen::Matrix4f view = LookAtFrontLH<float>(lightEye, L, up);
+
+    // 正交投影: xy 覆盖 [-r,r], z 覆盖 [0, 2r + backExtrude] (标准深度)。
+    const float zFar = 2.0f * radius + backExtrude;
+    Eigen::Matrix4f proj = OrthoLH<float>(-radius, radius, -radius, radius, 0.0f, zFar);
+    return proj * view;
+}
+
 /// forward 管线的标准材质工厂: 持有 forward_pass shader 对 + 共享采样器,
 /// 把中性 StandardMaterialDescription 翻译成 forward_pass 材质。
 ///
@@ -81,16 +186,16 @@ public:
     bool Initialize(AssetManager& assets, RenderSystem& renderSystem, render::TextureFormat colorFormat) {
         _assets = &assets;
 
-        std::optional<ForwardShaderPair> pair = BuildForwardShaderPair(
+        std::optional<StreamingAssetRef<ShaderAsset>> shader = BuildForwardShader(
             assets,
             renderSystem,
             MakeForwardKeywordSet(),
             colorFormat,
             /*withShadowCaster*/ true);
-        if (!pair.has_value()) {
+        if (!shader.has_value()) {
             return false;
         }
-        _shaders = std::move(pair.value());
+        _shader = std::move(shader.value());
 
         // 共享 trilinear + repeat 采样器描述 (glTF 默认 wrap)。
         // 只存 descriptor: 实际 sampler 由 SamplerCache 在绑定时去重创建并永生持有。
@@ -108,20 +213,19 @@ public:
         return true;
     }
 
-    bool IsValid() const noexcept { return _shaders.IsValid(); }
+    bool IsValid() const noexcept { return _shader.IsValid(); }
 
     StreamingAssetRef<MaterialAsset> CreateMaterial(
         const StandardMaterialDescription& desc,
         std::span<const StandardMaterialTexture> textures) override {
-        if (_assets == nullptr || !_shaders.IsValid()) {
+        if (_assets == nullptr || !_shader.IsValid()) {
             return {};
         }
 
         const bool transparent = desc.AlphaMode == StandardAlphaMode::Blend;
-        StreamingAssetRef<ShaderAsset> shader = transparent ? _shaders.Transparent : _shaders.Opaque;
         StreamingAssetRef<MaterialAsset> mat = _assets->AddReady<MaterialAsset>(
             Guid::NewGuid(),
-            make_unique<MaterialAsset>(shader));
+            make_unique<MaterialAsset>(_shader));
 
         // 渲染队列: blend -> Transparent, mask -> AlphaTest, 否则 Geometry。
         RenderQueue queue = RenderQueue::Geometry;
@@ -131,6 +235,16 @@ public:
             queue = RenderQueue::AlphaTest;
         }
         mat->SetRenderQueue(queue);
+
+        // PSO 固定功能状态 (blend / zwrite / cull): 透明走 alpha blend + 关深度写 + 双面;
+        // 不透明/mask 沿用 shader pass 基线。双面材质额外覆盖 cull=None。
+        if (transparent) {
+            mat->SetRenderState(MakeForwardTransparentRenderState());
+        } else if (desc.DoubleSided) {
+            MaterialRenderState rs{};
+            rs.Cull = render::CullMode::None;
+            mat->SetRenderState(rs);
+        }
 
         // keyword: alpha/双面。
         if (desc.AlphaMode == StandardAlphaMode::Mask) {
@@ -202,7 +316,7 @@ public:
 
 private:
     AssetManager* _assets{nullptr};
-    ForwardShaderPair _shaders{};
+    StreamingAssetRef<ShaderAsset> _shader{};
     render::SamplerDescriptor _samplerDesc{};
     StreamingAssetRef<MaterialAsset> _defaultMaterial{};
 };
@@ -210,6 +324,9 @@ private:
 }  // namespace
 
 ForwardPipeline::ShadowCasterPass::ShadowCasterPass(ForwardPipeline* owner) noexcept
+    : RenderPipelinePass(RenderPassEvent::BeforeRenderingShadows), _owner(owner) {}
+
+ForwardPipeline::DirectionalShadowCasterPass::DirectionalShadowCasterPass(ForwardPipeline* owner) noexcept
     : RenderPipelinePass(RenderPassEvent::BeforeRenderingShadows), _owner(owner) {}
 
 ForwardPipeline::ForwardColorPass::ForwardColorPass(ForwardPipeline* owner) noexcept
@@ -220,6 +337,7 @@ ForwardPipeline::ForwardPipeline(RenderSystem* renderSystem) noexcept
                   ? renderSystem->GetApplication()->GetDevice()
                   : nullptr),
       _shadowPass(this),
+      _dirShadowPass(this),
       _colorPass(this),
       _renderSystem(renderSystem) {
     if (_device != nullptr && renderSystem != nullptr) {
@@ -236,6 +354,13 @@ ForwardPipeline::ForwardPipeline(RenderSystem* renderSystem) noexcept
             std::string{kPerObjectName},
             flightCount);
         _shadowExecutor = make_unique<MeshPassExecutor>(
+            _device,
+            renderSystem->GetShaderVariantCache(),
+            renderSystem->GetGraphicsPipelineStateCache(),
+            renderSystem->GetSamplerCache(),
+            std::string{kPerObjectName},
+            flightCount);
+        _dirShadowExecutor = make_unique<MeshPassExecutor>(
             _device,
             renderSystem->GetShaderVariantCache(),
             renderSystem->GetGraphicsPipelineStateCache(),
@@ -437,6 +562,85 @@ ForwardPipeline::ShadowCube* ForwardPipeline::AcquireShadowCube(uint32_t flight,
     return &sc;
 }
 
+ForwardPipeline::ShadowArray* ForwardPipeline::AcquireShadowArray(uint32_t flight, uint32_t size, uint32_t sliceCount) {
+    if (_device == nullptr || sliceCount == 0) {
+        return nullptr;
+    }
+    sliceCount = std::min(sliceCount, kMaxCascades);
+    if (_shadowArrays.size() <= flight) {
+        _shadowArrays.resize(static_cast<size_t>(flight) + 1);
+    }
+    ShadowArray& sa = _shadowArrays[flight];
+    if (sa.Texture != nullptr && sa.Srv != nullptr && sa.Size == size && sa.SliceCount == sliceCount) {
+        return &sa;
+    }
+
+    // 首次 (或尺寸/层数变化): 重建 2DArray 深度纹理 + 2DArray SRV + 每层 DSV。
+    for (auto& dsv : sa.SliceDsv) {
+        dsv.reset();
+    }
+    sa.Srv.reset();
+    sa.Texture.reset();
+    sa.State = render::TextureState::Undefined;
+
+    render::TextureDescriptor texDesc{
+        .Dim = render::TextureDimension::Dim2DArray,
+        .Width = size,
+        .Height = size,
+        .DepthOrArraySize = sliceCount,
+        .MipLevels = 1,
+        .SampleCount = 1,
+        .Format = kShadowFormat,
+        .Memory = render::MemoryType::Device,
+        .Usage = render::TextureUse::DepthStencilWrite | render::TextureUse::Resource,
+        .Hints = render::ResourceHint::None};
+    auto texOpt = _device->CreateTexture(texDesc);
+    if (!texOpt.HasValue()) {
+        RADRAY_ERR_LOG("ForwardPipeline: failed to create shadow array texture");
+        return nullptr;
+    }
+    sa.Texture = texOpt.Release();
+    sa.Texture->SetDebugName("ForwardPipeline ShadowArray");
+
+    // 2DArray SRV (采样用, 覆盖全部层)。深度格式走 Resource usage 被映射为 R32_FLOAT 采样。
+    render::TextureViewDescriptor srvDesc{
+        .Target = sa.Texture.get(),
+        .Dim = render::TextureDimension::Dim2DArray,
+        .Format = kShadowFormat,
+        .Range = render::SubresourceRange{0, sliceCount, 0, 1},
+        .Usage = render::TextureViewUsage::Resource};
+    auto srvOpt = _device->CreateTextureView(srvDesc);
+    if (!srvOpt.HasValue()) {
+        RADRAY_ERR_LOG("ForwardPipeline: failed to create shadow array SRV");
+        sa.Texture.reset();
+        return nullptr;
+    }
+    sa.Srv = srvOpt.Release();
+
+    // 每层一个 DSV (渲染用)。
+    for (uint32_t slice = 0; slice < sliceCount; ++slice) {
+        render::TextureViewDescriptor dsvDesc{
+            .Target = sa.Texture.get(),
+            .Dim = render::TextureDimension::Dim2DArray,
+            .Format = kShadowFormat,
+            .Range = render::SubresourceRange{slice, 1, 0, 1},
+            .Usage = render::TextureViewUsage::DepthWrite};
+        auto dsvOpt = _device->CreateTextureView(dsvDesc);
+        if (!dsvOpt.HasValue()) {
+            RADRAY_ERR_LOG("ForwardPipeline: failed to create shadow array slice DSV {}", slice);
+            sa.Srv.reset();
+            sa.Texture.reset();
+            return nullptr;
+        }
+        sa.SliceDsv[slice] = dsvOpt.Release();
+    }
+
+    sa.Size = size;
+    sa.SliceCount = sliceCount;
+    sa.State = render::TextureState::Undefined;
+    return &sa;
+}
+
 bool ForwardPipeline::RenderPointShadow(
     RenderPipelineContext& ctx,
     Scene* scene,
@@ -562,6 +766,162 @@ bool ForwardPipeline::RenderPointShadow(
     return true;
 }
 
+bool ForwardPipeline::RenderDirectionalShadow(
+    RenderPipelineContext& ctx,
+    Scene* scene,
+    const DirectionalLightSceneProxy& light,
+    uint32_t flight,
+    CascadeShadowGpu& outShadow,
+    ShadowArray*& outArray) {
+    render::CommandBuffer* cmd = ctx.Frame.GetCommandBuffer();
+    if (cmd == nullptr || _dirShadowExecutor == nullptr) {
+        return false;
+    }
+
+    const uint32_t cascadeCount = std::clamp<uint32_t>(light.GetCascadeCount(), 1u, kMaxCascades);
+    const uint32_t shadowSize = light.GetShadowMapResolution();
+    ShadowArray* array = AcquireShadowArray(flight, shadowSize, cascadeCount);
+    if (array == nullptr) {
+        return false;
+    }
+
+    // ── 级联划分 (practical split scheme) ──
+    const float nearZ = std::max(_frame.CameraNearZ, 1e-3f);
+    const float shadowFar = std::max(std::min(_frame.CameraFarZ, light.GetShadowDistance()), nearZ + 1e-2f);
+    CascadeSplit splits[kMaxCascades];
+    ComputeCascadeSplits(nearZ, shadowFar, cascadeCount, light.GetCascadeSplitLambda(), splits);
+
+    // 相机基 (从 view 矩阵行取, LH: row0=right, row1=up, row2=forward)。
+    const Eigen::Matrix4f& view = _frame.CameraView;
+    const Eigen::Vector3f right = view.block<1, 3>(0, 0).transpose();
+    const Eigen::Vector3f upv = view.block<1, 3>(1, 0).transpose();
+    const Eigen::Vector3f forward = view.block<1, 3>(2, 0).transpose();
+    (void)right;
+    (void)upv;
+    const float tanHalfV = std::tan(_frame.CameraFovY * 0.5f);
+    const float tanHalfH = tanHalfV * _frame.CameraAspect;
+    const Eigen::Vector3f eye = _frame.Eye;
+    const Eigen::Vector3f lightDir = light.GetDirection();
+
+    // 逐级联: 包围球 -> 稳定正交光锥。
+    std::array<Eigen::Matrix4f, kMaxCascades> cascadeVp;
+    for (uint32_t i = 0; i < cascadeCount; ++i) {
+        Eigen::Vector3f center;
+        float radius;
+        ComputeCascadeSphere(eye, forward, tanHalfV, tanHalfH, splits[i].NearZ, splits[i].FarZ, center, radius);
+        radius = std::ceil(radius * 16.0f) / 16.0f;  // 量化半径, 进一步稳定
+        // 沿光照方向额外后拉光相机, 以捕获级联球之外 (上游) 的投影者。取半径的固定倍数
+        // (而非场景尺度): 既能覆盖多数上游投影者, 又不至于让深度范围过大丢精度。
+        const float zExtend = radius * 3.0f;
+        cascadeVp[i] = MakeCascadeViewProj(center, radius, lightDir, static_cast<float>(shadowSize), zExtend);
+
+        std::memcpy(outShadow.WorldToShadow[i], cascadeVp[i].data(), sizeof(float) * 16);
+        outShadow.CascadeSphere[i][0] = center.x();
+        outShadow.CascadeSphere[i][1] = center.y();
+        outShadow.CascadeSphere[i][2] = center.z();
+        outShadow.CascadeSphere[i][3] = radius * radius;  // shader 用 dist^2 < r^2 判定
+    }
+    // 未使用的级联填成不可命中 (半径^2 = 0)。
+    for (uint32_t i = cascadeCount; i < kMaxCascades; ++i) {
+        std::memset(outShadow.WorldToShadow[i], 0, sizeof(float) * 16);
+        outShadow.CascadeSphere[i][0] = 0.0f;
+        outShadow.CascadeSphere[i][1] = 0.0f;
+        outShadow.CascadeSphere[i][2] = 0.0f;
+        outShadow.CascadeSphere[i][3] = 0.0f;
+    }
+    outShadow.Params[0] = 1.0f;                                // enable
+    outShadow.Params[1] = static_cast<float>(shadowSize);      // shadowmap size (px)
+    outShadow.Params[2] = static_cast<float>(cascadeCount);    // cascade count
+    outShadow.Params[3] = static_cast<float>(light.GetShadowSoftMode());  // soft mode
+
+    // ── 构建 shadow caster DrawList (ShadowCaster tag) ──
+    DrawList casterList;
+    for (const unique_ptr<PrimitiveSceneProxy>& proxy : scene->Primitives()) {
+        if (proxy == nullptr) {
+            continue;
+        }
+        const uint32_t sectionCount = proxy->GetSectionCount();
+        for (uint32_t s = 0; s < sectionCount; ++s) {
+            shared_ptr<const MaterialRenderSnapshot> snapshot = proxy->GetSectionSnapshot(s);
+            if (snapshot == nullptr) {
+                continue;
+            }
+            casterList.AddPrimitive(std::move(snapshot), proxy.get(), kShadowPassTag, s, 0.0f);
+        }
+    }
+    if (casterList.Empty()) {
+        outShadow.Params[0] = 0.0f;  // 无投影者: 视为无阴影 (仍清深度并转采样布局)。
+    }
+
+    // 阴影图转 DepthWrite 布局 (整资源 barrier)。
+    if (array->State != render::TextureState::DepthWrite) {
+        render::ResourceBarrierDescriptor barrier = render::BarrierTextureDescriptor{
+            .Target = array->Texture.get(),
+            .Before = array->State,
+            .After = render::TextureState::DepthWrite};
+        cmd->ResourceBarrier(std::span{&barrier, 1});
+        array->State = render::TextureState::DepthWrite;
+    }
+
+    _dirShadowExecutor->BeginFrame(flight);
+    _dirShadowExecutor->ClearGlobals();
+
+    // 逐级联渲染: 每级联一个 depth-only render pass, 写入对应层。
+    for (uint32_t i = 0; i < cascadeCount; ++i) {
+        ShadowViewConstants sv{};
+        std::memcpy(sv.ViewProj, cascadeVp[i].data(), sizeof(float) * 16);
+        _dirShadowExecutor->SetViewConstants(
+            kShadowViewName,
+            std::span<const byte>{reinterpret_cast<const byte*>(&sv), sizeof(ShadowViewConstants)});
+
+        render::DepthStencilAttachment depthAttachment{
+            .Target = array->SliceDsv[i].get(),
+            .DepthLoad = render::LoadAction::Clear,
+            .DepthStore = render::StoreAction::Store,
+            .StencilLoad = render::LoadAction::DontCare,
+            .StencilStore = render::StoreAction::Discard,
+            .ClearValue = render::DepthStencilClearValue{1.0f, uint8_t{0}}};
+        render::RenderPassDescriptor passDesc{
+            .ColorAttachments = {},
+            .DepthStencilAttachment = depthAttachment,
+            .Name = "Directional Shadow Cascade"};
+        auto encoderOpt = cmd->BeginRenderPass(passDesc);
+        if (!encoderOpt.HasValue()) {
+            RADRAY_ERR_LOG("ForwardPipeline: failed to begin cascade pass {}", i);
+            return false;
+        }
+        auto encoder = encoderOpt.Release();
+
+        Viewport vp{
+            .X = 0.0f,
+            .Y = 0.0f,
+            .Width = static_cast<float>(shadowSize),
+            .Height = static_cast<float>(shadowSize),
+            .MinDepth = 0.0f,
+            .MaxDepth = 1.0f};
+        if (_device->GetBackend() == render::RenderBackend::Vulkan) {
+            vp.Y = static_cast<float>(shadowSize);
+            vp.Height = -static_cast<float>(shadowSize);
+        }
+        encoder->SetViewport(vp);
+        encoder->SetScissor(Rect{0, 0, shadowSize, shadowSize});
+
+        _dirShadowExecutor->Execute(encoder.get(), casterList);
+        cmd->EndRenderPass(std::move(encoder));
+    }
+
+    // 阴影图转采样布局 (ShaderRead)。
+    render::ResourceBarrierDescriptor barrier = render::BarrierTextureDescriptor{
+        .Target = array->Texture.get(),
+        .Before = render::TextureState::DepthWrite,
+        .After = render::TextureState::ShaderRead};
+    cmd->ResourceBarrier(std::span{&barrier, 1});
+    array->State = render::TextureState::ShaderRead;
+
+    outArray = array;
+    return true;
+}
+
 void ForwardPipeline::OnSetupCamera(RenderPipelineContext& ctx, const RenderCamera& camera) {
     // 重置 per-camera 共享状态 (URP: 每相机重建 CameraData)。
     _frame = FrameData{};
@@ -593,6 +953,12 @@ void ForwardPipeline::OnSetupCamera(RenderPipelineContext& ctx, const RenderCame
     _frame.Height = height;
     _frame.Flight = ctx.Frame.FlightIndex();
     _frame.Eye = eye;
+    // 相机参数 (供方向光 CSM 计算级联划分 / 视锥切片)。
+    _frame.CameraView = cameraComp->ComputeViewMatrix();
+    _frame.CameraNearZ = cameraComp->GetNearZ();
+    _frame.CameraFarZ = cameraComp->GetFarZ();
+    _frame.CameraFovY = cameraComp->GetFovY();
+    _frame.CameraAspect = aspect;
 
     // ── per-view 常量 (ViewProj + 相机位置; 灯光在 OnSetupLights 填充) ──
     ViewConstants& view = _frame.View;
@@ -641,6 +1007,35 @@ void ForwardPipeline::OnSetupLights(RenderPipelineContext& ctx, const RenderCame
     }
     view.LightCounts[0] = lightCount;
     view.LightCounts[1] = 0;  // 默认无阴影, 阴影 pass 成功后置为 index+1 (0 表示无)
+
+    // 收集方向光为 DirectionalLightGpu 数组, 选取第一盏投影阴影的方向光。
+    uint32_t dirCount = 0;
+    for (const unique_ptr<LightSceneProxy>& light : _frame.RenderScene->Lights()) {
+        if (light == nullptr || light->GetLightType() != LightType::Directional || !light->AffectsWorld()) {
+            continue;
+        }
+        if (dirCount >= kMaxDirectionalLights) {
+            break;
+        }
+        const Eigen::Vector3f dir = light->GetDirection();
+        const Eigen::Vector3f color = light->GetColor();  // = lightColor * intensity
+        DirectionalLightGpu& gpu = view.DirectionalLights[dirCount];
+        gpu.Direction[0] = dir.x();
+        gpu.Direction[1] = dir.y();
+        gpu.Direction[2] = dir.z();
+        gpu.Direction[3] = 0.0f;
+        gpu.Irradiance[0] = color.x();
+        gpu.Irradiance[1] = color.y();
+        gpu.Irradiance[2] = color.z();
+        gpu.Irradiance[3] = 0.0f;
+        if (_frame.DirShadowLight == nullptr && light->CastShadow()) {
+            _frame.DirShadowLight = light.get();
+            _frame.DirShadowLightIndex = static_cast<int32_t>(dirCount);
+        }
+        ++dirCount;
+    }
+    view.LightCounts[2] = dirCount;
+    view.LightCounts[3] = 0;  // 默认无方向光阴影, CSM pass 成功后置为 index+1
 }
 
 void ForwardPipeline::OnAddRenderPasses(RenderPipelineContext& ctx, const RenderCamera& camera) {
@@ -652,6 +1047,9 @@ void ForwardPipeline::OnAddRenderPasses(RenderPipelineContext& ctx, const Render
     // URP 风格: 按需把持有的逻辑 pass 注入本相机的执行队列, 基类按 RenderPassEvent 排序执行。
     if (_frame.ShadowLight != nullptr) {
         EnqueuePass(&_shadowPass);
+    }
+    if (_frame.DirShadowLight != nullptr) {
+        EnqueuePass(&_dirShadowPass);
     }
     EnqueuePass(&_colorPass);
 }
@@ -666,6 +1064,20 @@ void ForwardPipeline::ShadowCasterPass::Execute(RenderPipelineContext& ctx, cons
         ctx, frame.RenderScene, *frame.ShadowLight, frame.Flight, frame.View.PointShadow, frame.ShadowCube);
     if (frame.ShadowReady) {
         frame.View.LightCounts[1] = static_cast<uint32_t>(frame.ShadowLightIndex) + 1u;
+    }
+}
+
+void ForwardPipeline::DirectionalShadowCasterPass::Execute(RenderPipelineContext& ctx, const RenderCamera& camera) {
+    (void)camera;
+    FrameData& frame = _owner->_frame;
+    if (frame.DirShadowLight == nullptr || frame.RenderScene == nullptr) {
+        return;
+    }
+    const auto* dirLight = static_cast<const DirectionalLightSceneProxy*>(frame.DirShadowLight);
+    frame.DirShadowReady = _owner->RenderDirectionalShadow(
+        ctx, frame.RenderScene, *dirLight, frame.Flight, frame.View.DirectionalShadow, frame.ShadowArray);
+    if (frame.DirShadowReady) {
+        frame.View.LightCounts[3] = static_cast<uint32_t>(frame.DirShadowLightIndex) + 1u;
     }
 }
 
@@ -698,6 +1110,33 @@ void ForwardPipeline::ForwardColorPass::Execute(RenderPipelineContext& ctx, cons
         self->_executor->SetGlobalTexture(kShadowCubeName, frame.ShadowCube->Srv.get());
 
         // shadow comparison sampler (LessEqual): 标准深度, 近值小, 通过测试 (可见) 时返回 1。
+        if (self->_samplerCache != nullptr) {
+            render::SamplerDescriptor sd{};
+            sd.AddressS = render::AddressMode::ClampToEdge;
+            sd.AddressT = render::AddressMode::ClampToEdge;
+            sd.AddressR = render::AddressMode::ClampToEdge;
+            sd.MinFilter = render::FilterMode::Linear;
+            sd.MagFilter = render::FilterMode::Linear;
+            sd.MipmapFilter = render::FilterMode::Nearest;
+            sd.LodMin = 0.0f;
+            sd.LodMax = 0.0f;
+            sd.Compare = render::CompareFunction::LessEqual;
+            sd.AnisotropyClamp = 0;
+            auto samplerOpt = self->_samplerCache->GetOrCreate(sd);
+            if (samplerOpt.HasValue()) {
+                self->_executor->SetGlobalSampler(kShadowSamplerName, samplerOpt.Get());
+            }
+        }
+    }
+
+    // 方向光级联阴影: 本帧确有投影阴影的方向光时, 开启编译期 _DIRECTIONAL_SHADOWS keyword
+    // 并绑定级联阴影图 (Texture2DArray) + 比较采样器。无阴影帧关闭, 变体里整块 CSM 代码被剔除。
+    if (frame.DirShadowReady && frame.ShadowArray != nullptr && frame.ShadowArray->Srv != nullptr) {
+        self->_executor->EnableGlobalKeyword(forward_pipeline::kKwDirectionalShadows);
+        self->_executor->SetGlobalTexture(kShadowArrayName, frame.ShadowArray->Srv.get());
+
+        // 方向光级联阴影与点光源阴影共用同一比较采样器名 (gShadowSampler)。
+        // 若点光源阴影未启用则在此单独设置一次。
         if (self->_samplerCache != nullptr) {
             render::SamplerDescriptor sd{};
             sd.AddressS = render::AddressMode::ClampToEdge;

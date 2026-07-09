@@ -167,6 +167,13 @@ add_subdirectory(${RADRAY_THIRDPARTY_ROOT}/xxHash/build/cmake)
 radray_optimize_flags_library(xxhash)
 radray_set_build_path(xxhash)
 
+set(YYJSON_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(YYJSON_BUILD_MISC OFF CACHE BOOL "" FORCE)
+set(YYJSON_BUILD_DOC OFF CACHE BOOL "" FORCE)
+add_subdirectory(${RADRAY_THIRDPARTY_ROOT}/yyjson)
+radray_optimize_flags_library(yyjson)
+radray_set_build_path(yyjson)
+
 add_subdirectory(${RADRAY_THIRDPARTY_ROOT}/sigslot)
 
 # cgltf is a single-header C library; consumers provide CGLTF_IMPLEMENTATION
@@ -413,6 +420,9 @@ endif()
 add_subdirectory(modules)
 if (RADRAY_BUILD_EXAMPLES)
     add_subdirectory(examples)
+endif()
+if (RADRAY_ENABLE_DXC AND RADRAY_BUILD_RENDER)
+    add_subdirectory(tools/shader_baker)
 endif()
 if (RADRAY_BUILD_BENCHMARKS)
     add_subdirectory(benchmarks)

@@ -54,6 +54,8 @@ public:
     render::SamplerCache* GetSamplerCache() const noexcept { return _samplerCache.get(); }
     /// shader 编译默认 include 根目录 (<exe>/shaderlib)。供构建 ShaderPassDesc::IncludeDirs。
     const string& GetShaderIncludeRoot() const noexcept { return _shaderIncludeRoot; }
+    /// 预编译 shader 烘焙产物根目录 (<exe>/shadercache)。DXC 缺失时预编译缓存从此加载。
+    const string& GetShaderBakeRoot() const noexcept { return _shaderBakeRoot; }
 
 private:
     void EnsurePresentState(AppFrameContext& ctx, RenderPipelineTarget& target);
@@ -66,6 +68,7 @@ private:
     unique_ptr<render::GraphicsPipelineStateCache> _psoCache;
     unique_ptr<render::SamplerCache> _samplerCache;
     string _shaderIncludeRoot;
+    string _shaderBakeRoot;
 };
 
 template <>

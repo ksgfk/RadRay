@@ -2,6 +2,7 @@
 
 #include <limits>
 #include <optional>
+#include <string_view>
 
 #include <radray/types.h>
 #include <radray/nullable.h>
@@ -314,5 +315,19 @@ public:
 };
 
 bool IsBufferDimension(HlslSRVDimension dim) noexcept;
+
+// HlslShaderDesc 的 JSON 序列化 (供 shader 烘焙产物的 sidecar 使用)。
+//
+// 枚举以底层整数值存储 (依赖枚举声明顺序稳定); 名字 / 绑定点等以原始类型存储, 便于人读与 diff。
+// 与 tools/bake_shaders.py 写出的格式必须保持一致 (kReflectionFormatVersion 用于校验)。
+// 不依赖 DXC, 因此 DXC 关闭时预编译缓存仍可反序列化。
+
+inline constexpr uint32_t kReflectionFormatVersion = 1;
+
+/// 序列化 HlslShaderDesc 为 JSON 文本。失败返回 nullopt。
+std::optional<string> SerializeHlslShaderDesc(const HlslShaderDesc& desc) noexcept;
+
+/// 从 JSON 文本反序列化 HlslShaderDesc。失败 (格式错误 / 版本不符) 返回 nullopt。
+std::optional<HlslShaderDesc> DeserializeHlslShaderDesc(std::string_view json) noexcept;
 
 }  // namespace radray::render
