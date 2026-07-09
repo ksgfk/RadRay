@@ -26,7 +26,7 @@ namespace radray {
 namespace {
 
 // 交错顶点布局: POSITION3f + NORMAL3f + TEXCOORD2f + TANGENT4f。
-// 与 gltf_standard.hlsl 的 VertexInput 及 ToSimpleMeshResource 顺序一致。
+// 与 gltf_standard_pass.hlsl 的 VertexInput 及 ToSimpleMeshResource 顺序一致。
 struct GltfVertex {
     Eigen::Vector3f Position{Eigen::Vector3f::Zero()};
     Eigen::Vector3f Normal{Eigen::Vector3f::UnitY()};
@@ -685,13 +685,13 @@ AssetTypeId GltfAsset::GetTypeId() const noexcept {
     return runtime_type_id_v<GltfAsset>;
 }
 
-Actor* GltfAsset::SpawnScene(World& world, const GltfMaterialFactory& materialFactory) const {
+Actor* GltfAsset::SpawnScene(World& world, IStandardMaterialFactory& factory) const {
     Actor* rootActor = world.SpawnActor<Actor>();
     SceneComponent* root = rootActor->AddComponent<SceneComponent>();
     rootActor->SetRootComponent(root);
 
     // 每个有 mesh 的节点 spawn 一个 Actor, 挂 StaticMeshComponent, 用世界矩阵定位。
-    // 材质: 对该节点每个 primitive 调 materialFactory 得 MaterialAsset*, 填入 section 材质槽。
+    // 材质: 对该节点每个 primitive 调 factory 得 MaterialAsset, 填入 section 材质槽。
     for (const GltfPrimitiveDesc& primitive : _primitives) {
         if (primitive.NodeIndex < 0 || primitive.NodeIndex >= static_cast<int>(_nodes.size())) {
             continue;
@@ -712,12 +712,13 @@ Actor* GltfAsset::SpawnScene(World& world, const GltfMaterialFactory& materialFa
         component->SetRelativeRotation(rotation);
         component->SetRelativeScale(scale);
 
-        // 材质翻译 (shader-无关: 交给上层回调)。单 section 覆盖整个 primitive。
-        StreamingAssetRef<MaterialAsset> material{};
-        if (materialFactory) {
-            const uint32_t matIdx = primitive.MaterialIndex < _materials.size() ? primitive.MaterialIndex : 0;
-            const GltfMaterialDesc& desc = matIdx < _materials.size() ? _materials[matIdx] : GltfMaterialDesc{};
-            material = materialFactory(desc, std::span<const GltfTextureRef>{_textures});
+        // 材质翻译 (shader-无关: 交给当前管线的标准材质工厂)。单 section 覆盖整个 primitive。
+        const uint32_t matIdx = primitive.MaterialIndex < _materials.size() ? primitive.MaterialIndex : 0;
+        const GltfMaterialDesc& desc = matIdx < _materials.size() ? _materials[matIdx] : GltfMaterialDesc{};
+        StreamingAssetRef<MaterialAsset> material =
+            factory.CreateMaterial(desc, std::span<const GltfTextureRef>{_textures});
+        if (!material.IsValid()) {
+            material = factory.GetDefaultMaterial();  // 翻译失败: 回退到管线默认材质。
         }
         component->SetMaterial(0, std::move(material));
     }

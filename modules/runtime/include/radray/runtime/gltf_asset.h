@@ -1,13 +1,13 @@
 #pragma once
 
 #include <filesystem>
-#include <functional>
 #include <span>
 
 #include <radray/basic_math.h>
 #include <radray/runtime/asset.h>
 #include <radray/runtime/asset_manager.h>
 #include <radray/runtime/material_asset.h>
+#include <radray/runtime/render_framework/standard_material_factory.h>
 #include <radray/runtime/static_mesh.h>
 #include <radray/runtime/texture_asset.h>
 
@@ -18,62 +18,15 @@ class World;
 class FrameUploadScheduler;
 
 /// glTF alpha 混合模式 (对应 glTF 2.0 material.alphaMode)。
-enum class GltfAlphaMode {
-    Opaque,
-    Mask,
-    Blend,
-};
+using GltfAlphaMode = StandardAlphaMode;
 
 /// 一张已上传 GPU 的 glTF 纹理引用 (非拥有语义: 生命周期挂在 GltfAsset 上)。
 /// Srgb 标记该图在何种色彩空间上传 (baseColor/emissive = sRGB, 其余 = linear)。
-struct GltfTextureRef {
-    StreamingAssetRef<TextureAsset> Texture{};
-    bool Srgb{false};
-};
+using GltfTextureRef = StandardMaterialTexture;
 
-/// 中性材质描述 (shader-无关)。数值全部来自 glTF, 由上层 MaterialFactory 翻译成引擎材质。
+/// 中性材质描述 (shader-无关)。数值全部来自 glTF, 由渲染管线的标准材质工厂翻译成引擎材质。
 /// 贴图索引指向 GltfAsset::GetTextures(); -1 表示该槽无贴图。
-struct GltfMaterialDesc {
-    string Name{"Default"};
-
-    // ── core metallic-roughness ──
-    Eigen::Vector4f BaseColorFactor{1.0f, 1.0f, 1.0f, 1.0f};
-    float MetallicFactor{1.0f};
-    float RoughnessFactor{1.0f};
-    int BaseColorTexture{-1};          // sRGB
-    int MetallicRoughnessTexture{-1};  // linear (G=roughness, B=metallic)
-
-    // ── normal / occlusion / emissive ──
-    int NormalTexture{-1};   // linear
-    float NormalScale{1.0f};
-    int OcclusionTexture{-1};  // linear (R 通道)
-    float OcclusionStrength{1.0f};
-    Eigen::Vector3f EmissiveFactor{0.0f, 0.0f, 0.0f};
-    float EmissiveStrength{1.0f};  // KHR_materials_emissive_strength (无扩展时为 1)
-    int EmissiveTexture{-1};       // sRGB
-
-    // ── alpha / 双面 ──
-    GltfAlphaMode AlphaMode{GltfAlphaMode::Opaque};
-    float AlphaCutoff{0.5f};
-    bool DoubleSided{false};
-
-    // ── 扩展 (映射到 Principled 参数) ──
-    // KHR_materials_specular
-    float Specular{0.5f};
-    float SpecularTint{0.0f};
-    // KHR_materials_clearcoat
-    float Clearcoat{0.0f};
-    float ClearcoatGloss{0.0f};
-    // KHR_materials_sheen
-    float Sheen{0.0f};
-    float SheenTint{0.0f};
-
-    bool HasBaseColorTexture() const noexcept { return BaseColorTexture >= 0; }
-    bool HasMetallicRoughnessTexture() const noexcept { return MetallicRoughnessTexture >= 0; }
-    bool HasNormalTexture() const noexcept { return NormalTexture >= 0; }
-    bool HasOcclusionTexture() const noexcept { return OcclusionTexture >= 0; }
-    bool HasEmissiveTexture() const noexcept { return EmissiveTexture >= 0; }
-};
+using GltfMaterialDesc = StandardMaterialDescription;
 
 /// 一个 glTF 节点 (对应 cgltf_node)。已完成 RH->LH 反射转换。
 struct GltfNodeDesc {
@@ -102,17 +55,9 @@ struct GltfAssetLoadOptions {
     // 预留: 未来可加导入缩放 / 是否生成切线开关等。
 };
 
-/// 材质工厂回调: 把中性材质描述翻译成引擎 MaterialAsset。
-/// textures 为整个 glTF 的纹理表 (用 GltfMaterialDesc 的贴图索引下标访问)。
-/// 返回空引用表示该 primitive 不绑材质 (不会绘制)。
-/// 返回 StreamingAssetRef: MaterialAsset 生命周期由回调方 (通常经 AssetManager) 管理,
-/// 组件材质槽持该引用 (generation 检测兜底悬垂)。
-using GltfMaterialFactory =
-    std::function<StreamingAssetRef<MaterialAsset>(const GltfMaterialDesc&, std::span<const GltfTextureRef>)>;
-
 /// glTF 资产 (对应一个已解析 + GPU 上传完成的 .gltf/.glb)。
 /// 纯数据 + shader-无关: 持有节点树 / primitive (mesh refs) / 中性材质描述 / 纹理表。
-/// 场景实例化通过 SpawnScene, 材质翻译交给调用方注入的 GltfMaterialFactory。
+/// 场景实例化通过 SpawnScene, 材质翻译交给当前渲染管线的 IStandardMaterialFactory。
 class GltfAsset : public Asset {
 public:
     GltfAsset() noexcept = default;
@@ -132,8 +77,9 @@ public:
     AssetTypeId GetTypeId() const noexcept override;
 
     /// 实例化为场景 Actor 树, 返回根 Actor。
-    /// materialFactory 把每个 primitive 的中性材质描述翻译成 MaterialAsset* 塞进材质槽。
-    Actor* SpawnScene(World& world, const GltfMaterialFactory& materialFactory) const;
+    /// factory 把每个 primitive 的中性材质描述翻译成 MaterialAsset 塞进材质槽;
+    /// 某个 primitive 翻译失败时回退到 factory.GetDefaultMaterial()。
+    Actor* SpawnScene(World& world, IStandardMaterialFactory& factory) const;
 
     const std::filesystem::path& GetPath() const noexcept { return _path; }
     const vector<GltfNodeDesc>& GetNodes() const noexcept { return _nodes; }

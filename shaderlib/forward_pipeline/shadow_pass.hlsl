@@ -1,10 +1,10 @@
-// 点光源立方体阴影的深度生成 shader (shadow caster, depth-only)。
+// shadow_pass.hlsl: 点光源立方体阴影的深度生成 pass (shadow caster, depth-only)。
 //
 // 每个 cube 面各录制一次: ForwardPipeline 每面用 SetViewConstants 写入该面的
 // 世界->裁剪 矩阵 (gShadowView.ViewProj), MeshPassExecutor 每 draw 写入 gPerObject.ObjectToWorld。
 // 光栅化后由硬件把 SV_Position.z (标准深度, near=0 far=1) 写入 cube 对应面的深度 slice。
 //
-// 绑定约定与 forward.hlsl / MeshPassExecutor 对齐 (靠 cbuffer 名字被 FindParameterId 命中):
+// 绑定约定与 forward_pass.hlsl / MeshPassExecutor 对齐 (靠 cbuffer 名字被 FindParameterId 命中):
 //   - gShadowView (per-view): 由 ForwardPipeline::SetViewConstants 每面写入。
 //   - gPerObject  (per-object): 由 MeshPassExecutor 每 draw 写入 ObjectToWorld。
 // depth-only, 无 material push constant, 无 color target。PSMain 为空 (仅写深度)。

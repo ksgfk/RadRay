@@ -71,6 +71,11 @@ public:
     /// 名字借用调用方存储, 需在 Execute 期间存活。
     void SetGlobalTexture(std::string_view name, render::TextureView* view) noexcept;
     void SetGlobalSampler(std::string_view name, render::Sampler* sampler) noexcept;
+
+    /// 设置管线级 (per-pass) 的全局 shader keyword (对应 Unity 的 Shader.EnableKeyword)。
+    /// 解析变体时并入每个材质自身的 keyword 集: 用于阴影等由管线按帧决定的编译期分支,
+    /// 让无阴影帧编译进不含阴影采样的变体。名字借用调用方存储, 需在 Execute 期间存活。
+    void EnableGlobalKeyword(std::string_view name) noexcept;
     void ClearGlobals() noexcept;
 
     /// 把已排序的 DrawList 提交进一个已 BeginRenderPass 的图形编码器。
@@ -112,6 +117,8 @@ private:
     };
     vector<GlobalTexture> _globalTextures;
     vector<GlobalSampler> _globalSamplers;
+    // 管线级全局 keyword (per-pass, 非 per-material)。名字借用调用方存储。
+    vector<std::string_view> _globalKeywords;
     vector<FlightResources> _flights;
     uint32_t _currentFlight{0};
     // 材质常量打包器: 用变体反射把散字段打进所属 cbuffer 块, 整块提交 (push constant / CBV)。

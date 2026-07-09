@@ -12,6 +12,7 @@ namespace radray {
 class Application;
 class AppFrameContext;
 struct AppFrameTarget;
+class IStandardMaterialFactory;
 
 namespace render {
 class Dxc;
@@ -45,6 +46,9 @@ public:
     void ReleaseAllScenes() noexcept;
 
     Application* GetApplication() const noexcept { return _app; }
+    RenderPipeline* GetPipeline() const noexcept { return _pipeline.get(); }
+    /// 当前管线的标准材质工厂 (把中性材质描述翻译成本管线材质)。无管线/不支持时返回 null。
+    Nullable<IStandardMaterialFactory*> GetStandardMaterialFactory() noexcept;
     render::ShaderVariantCache* GetShaderVariantCache() const noexcept { return _variantCache.get(); }
     render::GraphicsPipelineStateCache* GetGraphicsPipelineStateCache() const noexcept { return _psoCache.get(); }
     render::SamplerCache* GetSamplerCache() const noexcept { return _samplerCache.get(); }

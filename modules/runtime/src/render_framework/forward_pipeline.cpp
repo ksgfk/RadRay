@@ -7,16 +7,22 @@
 #include <radray/logger.h>
 #include <radray/render/sampler_cache.h>
 #include <radray/runtime/application.h>
+#include <radray/runtime/asset_manager.h>
 #include <radray/runtime/gpu_system.h>
 #include <radray/runtime/render_system.h>
+#include <radray/runtime/window_manager.h>
 #include <radray/runtime/components/camera_component.h>
 #include <radray/runtime/game_framework/actor.h>
 #include <radray/runtime/game_framework/world.h>
 #include <radray/runtime/render_framework/material_render_snapshot.h>
+#include <radray/runtime/render_framework/forward_pipeline_shader.h>
+#include <radray/runtime/render_framework/standard_material_factory.h>
 #include <radray/runtime/render_framework/light_scene_proxy.h>
 #include <radray/runtime/render_framework/primitive_scene_proxy.h>
 #include <radray/runtime/render_framework/render_queue.h>
 #include <radray/runtime/render_framework/scene.h>
+#include <radray/runtime/material_asset.h>
+#include <radray/runtime/texture_asset.h>
 
 namespace radray {
 
@@ -62,12 +68,160 @@ Eigen::Matrix4f MakeCubeFaceViewProj(const Eigen::Vector3f& lightPos, uint32_t f
     return proj * view;
 }
 
+/// forward 管线的标准材质工厂: 持有 forward_pass shader 对 + 共享采样器,
+/// 把中性 StandardMaterialDescription 翻译成 forward_pass 材质。
+///
+/// 由 ForwardPipeline 持有并经 RenderPipeline::GetStandardMaterialFactory() 暴露 (以接口形式),
+/// 具体类型隐藏于本 .cpp; 生命周期 == 管线, 故无"须存活到 SpawnScene 结束"的裸捕获约束。
+class ForwardStandardMaterialFactory final : public IStandardMaterialFactory {
+public:
+    ForwardStandardMaterialFactory() noexcept = default;
+
+    /// 构建 forward_pass 的 opaque/transparent shader 对 (含 ShadowCaster) + 采样器。成功返回 true。
+    bool Initialize(AssetManager& assets, RenderSystem& renderSystem, render::TextureFormat colorFormat) {
+        _assets = &assets;
+
+        std::optional<ForwardShaderPair> pair = BuildForwardShaderPair(
+            assets,
+            renderSystem,
+            MakeForwardKeywordSet(),
+            colorFormat,
+            /*withShadowCaster*/ true);
+        if (!pair.has_value()) {
+            return false;
+        }
+        _shaders = std::move(pair.value());
+
+        // 共享 trilinear + repeat 采样器描述 (glTF 默认 wrap)。
+        // 只存 descriptor: 实际 sampler 由 SamplerCache 在绑定时去重创建并永生持有。
+        _samplerDesc = render::SamplerDescriptor{};
+        _samplerDesc.AddressS = render::AddressMode::Repeat;
+        _samplerDesc.AddressT = render::AddressMode::Repeat;
+        _samplerDesc.AddressR = render::AddressMode::Repeat;
+        _samplerDesc.MinFilter = render::FilterMode::Linear;
+        _samplerDesc.MagFilter = render::FilterMode::Linear;
+        _samplerDesc.MipmapFilter = render::FilterMode::Linear;
+        _samplerDesc.LodMin = 0.0f;
+        _samplerDesc.LodMax = 32.0f;
+        _samplerDesc.Compare = std::nullopt;
+        _samplerDesc.AnisotropyClamp = 8;
+        return true;
+    }
+
+    bool IsValid() const noexcept { return _shaders.IsValid(); }
+
+    StreamingAssetRef<MaterialAsset> CreateMaterial(
+        const StandardMaterialDescription& desc,
+        std::span<const StandardMaterialTexture> textures) override {
+        if (_assets == nullptr || !_shaders.IsValid()) {
+            return {};
+        }
+
+        const bool transparent = desc.AlphaMode == StandardAlphaMode::Blend;
+        StreamingAssetRef<ShaderAsset> shader = transparent ? _shaders.Transparent : _shaders.Opaque;
+        StreamingAssetRef<MaterialAsset> mat = _assets->AddReady<MaterialAsset>(
+            Guid::NewGuid(),
+            make_unique<MaterialAsset>(shader));
+
+        // 渲染队列: blend -> Transparent, mask -> AlphaTest, 否则 Geometry。
+        RenderQueue queue = RenderQueue::Geometry;
+        if (transparent) {
+            queue = RenderQueue::Transparent;
+        } else if (desc.AlphaMode == StandardAlphaMode::Mask) {
+            queue = RenderQueue::AlphaTest;
+        }
+        mat->SetRenderQueue(queue);
+
+        // keyword: alpha/双面。
+        if (desc.AlphaMode == StandardAlphaMode::Mask) {
+            mat->EnableKeyword(forward_pipeline::kKwAlphaTest);
+        }
+        if (transparent) {
+            mat->EnableKeyword(forward_pipeline::kKwAlphaBlend);
+        }
+        if (desc.DoubleSided) {
+            mat->EnableKeyword(forward_pipeline::kKwDoubleSided);
+        }
+
+        // keyword + 绑定: 贴图存在性。
+        auto bindTexture = [&](int index, std::string_view keyword, std::string_view slot) {
+            if (index < 0 || static_cast<size_t>(index) >= textures.size()) {
+                return;
+            }
+            const StreamingAssetRef<TextureAsset>& texRef = textures[static_cast<size_t>(index)].Texture;
+            TextureAsset* tex = texRef.Get();
+            if (tex == nullptr || tex->GetSrv() == nullptr) {
+                return;
+            }
+            mat->EnableKeyword(keyword);
+            // 持资产引用而非裸 SRV: 快照跨帧/跨线程持有安全 (generation 兜底悬垂)。
+            mat->SetTexture(slot, texRef);
+        };
+        bindTexture(desc.BaseColorTexture, forward_pipeline::kKwBaseColorMap, forward_pipeline::kTexBaseColor);
+        bindTexture(desc.MetallicRoughnessTexture, forward_pipeline::kKwMetalRoughMap, forward_pipeline::kTexMetalRough);
+        bindTexture(desc.NormalTexture, forward_pipeline::kKwNormalMap, forward_pipeline::kTexNormal);
+        bindTexture(desc.OcclusionTexture, forward_pipeline::kKwOcclusionMap, forward_pipeline::kTexOcclusion);
+        bindTexture(desc.EmissiveTexture, forward_pipeline::kKwEmissiveMap, forward_pipeline::kTexEmissive);
+
+        mat->SetSampler(forward_pipeline::kSamplerName, _samplerDesc);
+
+        // 常量块 (逐字段填 ForwardMaterialConstants)。
+        ForwardMaterialConstants mc{};
+        mc.BaseColor[0] = desc.BaseColorFactor.x();
+        mc.BaseColor[1] = desc.BaseColorFactor.y();
+        mc.BaseColor[2] = desc.BaseColorFactor.z();
+        mc.BaseColor[3] = desc.BaseColorFactor.w();
+        mc.Pbr[0] = desc.MetallicFactor;
+        mc.Pbr[1] = desc.RoughnessFactor;
+        mc.Pbr[2] = desc.AlphaCutoff;
+        mc.Pbr[3] = desc.NormalScale;
+        // 自发光已乘 KHR_materials_emissive_strength。
+        mc.Emissive[0] = desc.EmissiveFactor.x() * desc.EmissiveStrength;
+        mc.Emissive[1] = desc.EmissiveFactor.y() * desc.EmissiveStrength;
+        mc.Emissive[2] = desc.EmissiveFactor.z() * desc.EmissiveStrength;
+        mc.Emissive[3] = desc.OcclusionStrength;
+        mc.Principled0[0] = desc.Specular;
+        mc.Principled0[1] = desc.SpecularTint;
+        mc.Principled0[2] = desc.Clearcoat;
+        mc.Principled0[3] = desc.ClearcoatGloss;
+        mc.Principled1[0] = desc.Sheen;
+        mc.Principled1[1] = desc.SheenTint;
+        // Principled1.zw (anisotropic/flatness) 与 Principled2 (specTrans/eta) 走默认: glTF 无对应字段。
+        mc.Principled2[1] = 1.5f;  // eta 默认
+        mat->SetConstantBlock("gMaterial", &mc, sizeof(mc));
+
+        return mat;
+    }
+
+    StreamingAssetRef<MaterialAsset> GetDefaultMaterial() override {
+        if (!_defaultMaterial.IsValid()) {
+            _defaultMaterial = CreateMaterial(StandardMaterialDescription{}, {});
+        }
+        return _defaultMaterial;
+    }
+
+private:
+    AssetManager* _assets{nullptr};
+    ForwardShaderPair _shaders{};
+    render::SamplerDescriptor _samplerDesc{};
+    StreamingAssetRef<MaterialAsset> _defaultMaterial{};
+};
+
 }  // namespace
+
+ForwardPipeline::ShadowCasterPass::ShadowCasterPass(ForwardPipeline* owner) noexcept
+    : RenderPipelinePass(RenderPassEvent::BeforeRenderingShadows), _owner(owner) {}
+
+ForwardPipeline::ForwardColorPass::ForwardColorPass(ForwardPipeline* owner) noexcept
+    : RenderPipelinePass(RenderPassEvent::BeforeRenderingOpaques), _owner(owner) {}
 
 ForwardPipeline::ForwardPipeline(RenderSystem* renderSystem) noexcept
     : _device(renderSystem != nullptr && renderSystem->GetApplication() != nullptr
                   ? renderSystem->GetApplication()->GetDevice()
-                  : nullptr) {
+                  : nullptr),
+      _shadowPass(this),
+      _colorPass(this),
+      _renderSystem(renderSystem) {
     if (_device != nullptr && renderSystem != nullptr) {
         _samplerCache = renderSystem->GetSamplerCache();
         const uint32_t flightCount =
@@ -92,6 +246,28 @@ ForwardPipeline::ForwardPipeline(RenderSystem* renderSystem) noexcept
 }
 
 ForwardPipeline::~ForwardPipeline() noexcept = default;
+
+Nullable<IStandardMaterialFactory*> ForwardPipeline::GetStandardMaterialFactory() noexcept {
+    if (!_materialFactoryInit) {
+        _materialFactoryInit = true;  // 只尝试一次 (成功与否)。
+        Application* app = _renderSystem != nullptr ? _renderSystem->GetApplication() : nullptr;
+        AssetManager* assets = app != nullptr ? app->GetAssetManager() : nullptr;
+        WindowManager* windows = app != nullptr ? app->GetWindowManager() : nullptr;
+        if (assets != nullptr && windows != nullptr) {
+            const render::TextureFormat colorFormat = windows->GetMainBackBufferFormat();
+            auto factory = make_unique<ForwardStandardMaterialFactory>();
+            if (factory->Initialize(*assets, *_renderSystem, colorFormat)) {
+                _materialFactory = std::move(factory);
+            } else {
+                RADRAY_ERR_LOG("ForwardPipeline: failed to build standard material factory");
+            }
+        }
+    }
+    if (_materialFactory == nullptr) {
+        return nullptr;
+    }
+    return _materialFactory.get();
+}
 
 void ForwardPipeline::OnBuildCameraList(RenderPipelineContext& ctx, RenderCameraList& cameras) {
     cameras.Clear();
@@ -386,7 +562,9 @@ bool ForwardPipeline::RenderPointShadow(
     return true;
 }
 
-void ForwardPipeline::OnRenderCamera(RenderPipelineContext& ctx, const RenderCamera& camera) {
+void ForwardPipeline::OnSetupCamera(RenderPipelineContext& ctx, const RenderCamera& camera) {
+    // 重置 per-camera 共享状态 (URP: 每相机重建 CameraData)。
+    _frame = FrameData{};
     if (_executor == nullptr || _device == nullptr || camera.RenderScene == nullptr || camera.ViewCamera == nullptr) {
         return;
     }
@@ -397,7 +575,6 @@ void ForwardPipeline::OnRenderCamera(RenderPipelineContext& ctx, const RenderCam
     if (target.BackBuffer == nullptr || target.BackBufferView == nullptr) {
         return;
     }
-
     const render::TextureDescriptor bbDesc = target.BackBuffer->GetDesc();
     const uint32_t width = bbDesc.Width;
     const uint32_t height = bbDesc.Height;
@@ -405,32 +582,39 @@ void ForwardPipeline::OnRenderCamera(RenderPipelineContext& ctx, const RenderCam
         return;
     }
 
-    const uint32_t flight = ctx.Frame.FlightIndex();
-    render::CommandBuffer* cmd = ctx.Frame.GetCommandBuffer();
-    if (cmd == nullptr) {
-        return;
-    }
-
-    Scene* scene = camera.RenderScene;
     CameraComponent* cameraComp = camera.ViewCamera;
     const float aspect = height != 0 ? static_cast<float>(width) / static_cast<float>(height) : 1.0f;
     const Eigen::Matrix4f viewProj = cameraComp->ComputeViewProjMatrix(aspect);
     const Eigen::Vector3f eye = cameraComp->GetEyePosition();
 
-    // ── per-view 常量 (ViewProj + 相机位置 + 点光源数组) ──
-    ViewConstants view{};
+    _frame.RenderScene = camera.RenderScene;
+    _frame.Target = &target;
+    _frame.Width = width;
+    _frame.Height = height;
+    _frame.Flight = ctx.Frame.FlightIndex();
+    _frame.Eye = eye;
+
+    // ── per-view 常量 (ViewProj + 相机位置; 灯光在 OnSetupLights 填充) ──
+    ViewConstants& view = _frame.View;
     // Eigen 列主序, HLSL cbuffer float4x4 默认 column_major, 内存布局一致, 直接拷贝。
     std::memcpy(view.ViewProj, viewProj.data(), sizeof(float) * 16);
     view.CameraPosition[0] = eye.x();
     view.CameraPosition[1] = eye.y();
     view.CameraPosition[2] = eye.z();
     view.CameraPosition[3] = 1.0f;
+}
+
+void ForwardPipeline::OnSetupLights(RenderPipelineContext& ctx, const RenderCamera& camera) {
+    (void)ctx;
+    (void)camera;
+    if (_frame.RenderScene == nullptr) {
+        return;
+    }
+    ViewConstants& view = _frame.View;
 
     // 选取第一盏投影阴影的点光源 (记下它在灯光数组里的序号)。
-    int32_t shadowLightIndex = -1;
     uint32_t lightCount = 0;
-    const LightSceneProxy* shadowLight = nullptr;
-    for (const unique_ptr<LightSceneProxy>& light : scene->Lights()) {
+    for (const unique_ptr<LightSceneProxy>& light : _frame.RenderScene->Lights()) {
         if (light == nullptr || light->GetLightType() != LightType::Point || !light->AffectsWorld()) {
             continue;
         }
@@ -449,48 +633,87 @@ void ForwardPipeline::OnRenderCamera(RenderPipelineContext& ctx, const RenderCam
         gpu.Intensity[1] = color.y();
         gpu.Intensity[2] = color.z();
         gpu.Intensity[3] = 0.0f;
-        if (shadowLight == nullptr && light->CastShadow()) {
-            shadowLight = light.get();
-            shadowLightIndex = static_cast<int32_t>(lightCount);
+        if (_frame.ShadowLight == nullptr && light->CastShadow()) {
+            _frame.ShadowLight = light.get();
+            _frame.ShadowLightIndex = static_cast<int32_t>(lightCount);
         }
         ++lightCount;
     }
     view.LightCounts[0] = lightCount;
-    view.LightCounts[1] = 0;  // 默认无阴影, 成功渲染阴影后置为 index+1 (0 表示无)
+    view.LightCounts[1] = 0;  // 默认无阴影, 阴影 pass 成功后置为 index+1 (0 表示无)
+}
 
-    // ── shadow caster pass (在 forward pass 之前, 同一 command buffer) ──
-    ShadowCube* shadowCube = nullptr;
-    if (shadowLight != nullptr) {
-        if (RenderPointShadow(ctx, scene, *shadowLight, flight, view.PointShadow, shadowCube)) {
-            view.LightCounts[1] = static_cast<uint32_t>(shadowLightIndex) + 1u;
-        }
+void ForwardPipeline::OnAddRenderPasses(RenderPipelineContext& ctx, const RenderCamera& camera) {
+    (void)ctx;
+    (void)camera;
+    if (_frame.RenderScene == nullptr || _frame.Target == nullptr) {
+        return;  // OnSetupCamera 判定不可渲染
     }
+    // URP 风格: 按需把持有的逻辑 pass 注入本相机的执行队列, 基类按 RenderPassEvent 排序执行。
+    if (_frame.ShadowLight != nullptr) {
+        EnqueuePass(&_shadowPass);
+    }
+    EnqueuePass(&_colorPass);
+}
 
-    _executor->BeginFrame(flight);  // 回收该 flight 上一轮的 table / arena
-    _executor->ClearGlobals();
-    _executor->SetViewConstants(
+void ForwardPipeline::ShadowCasterPass::Execute(RenderPipelineContext& ctx, const RenderCamera& camera) {
+    (void)camera;
+    FrameData& frame = _owner->_frame;
+    if (frame.ShadowLight == nullptr || frame.RenderScene == nullptr) {
+        return;
+    }
+    frame.ShadowReady = _owner->RenderPointShadow(
+        ctx, frame.RenderScene, *frame.ShadowLight, frame.Flight, frame.View.PointShadow, frame.ShadowCube);
+    if (frame.ShadowReady) {
+        frame.View.LightCounts[1] = static_cast<uint32_t>(frame.ShadowLightIndex) + 1u;
+    }
+}
+
+void ForwardPipeline::ForwardColorPass::Execute(RenderPipelineContext& ctx, const RenderCamera& camera) {
+    (void)camera;
+    ForwardPipeline* self = _owner;
+    FrameData& frame = self->_frame;
+    if (frame.RenderScene == nullptr || frame.Target == nullptr) {
+        return;
+    }
+    render::CommandBuffer* cmd = ctx.Frame.GetCommandBuffer();
+    if (cmd == nullptr) {
+        return;
+    }
+    const AppFrameTarget& target = *frame.Target;
+    const uint32_t width = frame.Width;
+    const uint32_t height = frame.Height;
+    const uint32_t flight = frame.Flight;
+
+    self->_executor->BeginFrame(flight);  // 回收该 flight 上一轮的 table / arena
+    self->_executor->ClearGlobals();
+    self->_executor->SetViewConstants(
         kViewName,
-        std::span<const byte>{reinterpret_cast<const byte*>(&view), sizeof(ViewConstants)});
-    if (shadowCube != nullptr && shadowCube->Srv != nullptr) {
-        _executor->SetGlobalTexture(kShadowCubeName, shadowCube->Srv.get());
-    }
+        std::span<const byte>{reinterpret_cast<const byte*>(&frame.View), sizeof(ViewConstants)});
+    // 阴影相关的全局资源 / keyword 仅在本帧确有投影阴影时绑定: 开启编译期 _POINT_SHADOWS
+    // keyword 让 forward_pass.hlsl 编进阴影采样变体并绑定阴影图 + 比较采样器。无阴影帧不开,
+    // 变体里整块阴影代码被剔除, 阴影图 / 采样器绑定名不存在于变体, 跳过绑定。
+    if (frame.ShadowReady && frame.ShadowCube != nullptr && frame.ShadowCube->Srv != nullptr) {
+        self->_executor->EnableGlobalKeyword(forward_pipeline::kKwPointShadows);
+        self->_executor->SetGlobalTexture(kShadowCubeName, frame.ShadowCube->Srv.get());
 
-    // shadow comparison sampler (LessEqual): 标准深度, 近值小, 通过测试 (可见) 时返回 1。
-    if (_samplerCache != nullptr) {
-        render::SamplerDescriptor sd{};
-        sd.AddressS = render::AddressMode::ClampToEdge;
-        sd.AddressT = render::AddressMode::ClampToEdge;
-        sd.AddressR = render::AddressMode::ClampToEdge;
-        sd.MinFilter = render::FilterMode::Linear;
-        sd.MagFilter = render::FilterMode::Linear;
-        sd.MipmapFilter = render::FilterMode::Nearest;
-        sd.LodMin = 0.0f;
-        sd.LodMax = 0.0f;
-        sd.Compare = render::CompareFunction::LessEqual;
-        sd.AnisotropyClamp = 0;
-        auto samplerOpt = _samplerCache->GetOrCreate(sd);
-        if (samplerOpt.HasValue()) {
-            _executor->SetGlobalSampler(kShadowSamplerName, samplerOpt.Get());
+        // shadow comparison sampler (LessEqual): 标准深度, 近值小, 通过测试 (可见) 时返回 1。
+        if (self->_samplerCache != nullptr) {
+            render::SamplerDescriptor sd{};
+            sd.AddressS = render::AddressMode::ClampToEdge;
+            sd.AddressT = render::AddressMode::ClampToEdge;
+            sd.AddressR = render::AddressMode::ClampToEdge;
+            sd.MinFilter = render::FilterMode::Linear;
+            sd.MagFilter = render::FilterMode::Linear;
+            sd.MipmapFilter = render::FilterMode::Nearest;
+            sd.LodMin = 0.0f;
+            sd.LodMax = 0.0f;
+            sd.Compare = render::CompareFunction::LessEqual;
+            sd.AnisotropyClamp = 0;
+            auto samplerOpt = self->_samplerCache->GetOrCreate(sd);
+            if (samplerOpt.HasValue()) {
+                self->_executor->SetGlobalSampler(kShadowSamplerName, samplerOpt.Get());
+            }
         }
     }
 
@@ -498,7 +721,7 @@ void ForwardPipeline::OnRenderCamera(RenderPipelineContext& ctx, const RenderCam
     // 按 material->IsTransparent() 分成两个 list: 不透明先画 (写深度), 透明后画 (读深度做遮挡)。
     DrawList opaqueList;
     DrawList transparentList;
-    for (const unique_ptr<PrimitiveSceneProxy>& proxy : scene->Primitives()) {
+    for (const unique_ptr<PrimitiveSceneProxy>& proxy : frame.RenderScene->Primitives()) {
         if (proxy == nullptr) {
             continue;
         }
@@ -507,7 +730,7 @@ void ForwardPipeline::OnRenderCamera(RenderPipelineContext& ctx, const RenderCam
             continue;
         }
         const Eigen::Vector3f center = proxy->GetLocalToWorld().block<3, 1>(0, 3);
-        const float viewDistance = (center - eye).norm();
+        const float viewDistance = (center - frame.Eye).norm();
         for (uint32_t s = 0; s < sectionCount; ++s) {
             shared_ptr<const MaterialRenderSnapshot> snapshot = proxy->GetSectionSnapshot(s);
             if (snapshot == nullptr) {
@@ -521,7 +744,7 @@ void ForwardPipeline::OnRenderCamera(RenderPipelineContext& ctx, const RenderCam
     transparentList.SortTransparent();  // RenderQueue 升序 -> 远到近 (back-to-front)
 
     // ── 深度目标 + 单 render pass ──
-    DepthTarget* depth = AcquireDepthTarget(flight, width, height);
+    DepthTarget* depth = self->AcquireDepthTarget(flight, width, height);
     if (depth == nullptr || depth->View == nullptr) {
         return;
     }
@@ -566,7 +789,7 @@ void ForwardPipeline::OnRenderCamera(RenderPipelineContext& ctx, const RenderCam
         .Height = static_cast<float>(height),
         .MinDepth = 0.0f,
         .MaxDepth = 1.0f};
-    if (_device->GetBackend() == render::RenderBackend::Vulkan) {
+    if (self->_device->GetBackend() == render::RenderBackend::Vulkan) {
         vp.Y = static_cast<float>(height);
         vp.Height = -static_cast<float>(height);
     }
@@ -575,8 +798,8 @@ void ForwardPipeline::OnRenderCamera(RenderPipelineContext& ctx, const RenderCam
 
     // 同一 render pass、同一深度缓冲: 先不透明 (写深度), 再透明 (depth-write-off + alpha blend,
     // 复用不透明已写入的深度做遮挡测试; back-to-front 保证半透明叠加顺序正确)。
-    _executor->Execute(encoder.get(), opaqueList);
-    _executor->Execute(encoder.get(), transparentList);
+    self->_executor->Execute(encoder.get(), opaqueList);
+    self->_executor->Execute(encoder.get(), transparentList);
 
     cmd->EndRenderPass(std::move(encoder));
 }

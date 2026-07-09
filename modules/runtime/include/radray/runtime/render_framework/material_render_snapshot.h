@@ -79,6 +79,14 @@ struct MaterialRenderSnapshot {
         uint32_t passIndex,
         render::HlslShaderModel sm = render::HlslShaderModel::SM60) const noexcept;
 
+    /// 同上, 但额外并入 extraKeywords (管线级全局 keyword, 对应 Unity Shader.EnableKeyword)。
+    /// 快照自身 keyword 与 extra 取并集后投影为变体; 未在 shader 声明的名字被忽略。
+    Nullable<const render::CompiledShaderVariant*> ResolveVariant(
+        render::ShaderVariantCache& cache,
+        uint32_t passIndex,
+        std::span<const std::string_view> extraKeywords,
+        render::HlslShaderModel sm = render::HlslShaderModel::SM60) const noexcept;
+
     /// 把快照的常量 property 收集为打包器输入 (块名 / 字段名 + 字节)。
     /// 供 MaterialConstantBinder::Bind 消费; 返回的 span 借用 out 存储。
     /// out 会被清空重填; 返回项的 Bytes 借用本快照的 Constants 存储 (快照存活期内有效)。

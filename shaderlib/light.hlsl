@@ -2,7 +2,7 @@
 #define LIGHT_HLSLI
 
 #define RR_MAX_DIRECTIONAL_LIGHTS 8
-#define RR_MAX_POINT_LIGHTS 64
+#define RR_MAX_POINT_LIGHTS 8
 #define RR_MAX_SPOT_LIGHTS 64
 
 struct DirectionalLightGpu {

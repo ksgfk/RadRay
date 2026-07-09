@@ -76,6 +76,13 @@ void RenderSystem::OnInitialize() {
     _pipeline = make_unique<ForwardPipeline>(this);
 }
 
+Nullable<IStandardMaterialFactory*> RenderSystem::GetStandardMaterialFactory() noexcept {
+    if (_pipeline == nullptr) {
+        return nullptr;
+    }
+    return _pipeline->GetStandardMaterialFactory();
+}
+
 void RenderSystem::Render(AppFrameContext& ctx) {
     if (_app == nullptr || _app->GetWindowManager() == nullptr) {
         return;

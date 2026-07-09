@@ -87,9 +87,19 @@ void MeshPassExecutor::SetGlobalSampler(std::string_view name, render::Sampler* 
     _globalSamplers.push_back(GlobalSampler{std::string{name}, sampler});
 }
 
+void MeshPassExecutor::EnableGlobalKeyword(std::string_view name) noexcept {
+    for (std::string_view kw : _globalKeywords) {
+        if (kw == name) {
+            return;
+        }
+    }
+    _globalKeywords.push_back(name);
+}
+
 void MeshPassExecutor::ClearGlobals() noexcept {
     _globalTextures.clear();
     _globalSamplers.clear();
+    _globalKeywords.clear();
 }
 
 Nullable<render::GraphicsPipelineState*> MeshPassExecutor::ResolvePso(
@@ -126,8 +136,9 @@ bool MeshPassExecutor::SubmitItem(render::GraphicsCommandEncoder* encoder, const
         return false;
     }
 
-    // 1. 解析变体。
-    auto variantOpt = item.Material->ResolveVariant(*_variantCache, item.PassIndex);
+    // 1. 解析变体 (并入管线级全局 keyword, 如 _POINT_SHADOWS)。
+    auto variantOpt = item.Material->ResolveVariant(
+        *_variantCache, item.PassIndex, std::span<const std::string_view>{_globalKeywords});
     if (!variantOpt.HasValue()) {
         RADRAY_ERR_LOG("MeshPassExecutor: failed to resolve shader variant for pass {}", item.PassIndex);
         return false;
