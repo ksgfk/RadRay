@@ -118,6 +118,17 @@ void RenderPipeline::OnRender(RenderPipelineContext& ctx, const RenderCameraList
     for (const RenderCamera& camera : cameras.Cameras()) {
         OnRenderCamera(ctx, camera);
     }
+
+    // Leave the initial clear to a camera pass when possible, so a target that
+    // is about to be rendered does not need a separate clear-only render pass.
+    for (RenderPipelineTarget& target : ctx.Targets) {
+        if (!target.ContentDrawn) {
+            const std::string_view name =
+                target.Target.Window != nullptr && target.Target.Window->IsMainWindow() ? "Main Window" : "Window";
+            ClearTarget(ctx, target, name);
+            target.ContentDrawn = true;
+        }
+    }
 }
 
 void RenderPipeline::OnEndFrame(RenderPipelineContext& ctx) {
@@ -176,10 +187,6 @@ void RenderPipeline::PrepareTargets(RenderPipelineContext& ctx) {
     for (RenderPipelineTarget& target : ctx.Targets) {
         TransitionTarget(ctx, target, render::TextureState::RenderTarget);
         target.ContentDrawn = RenderTargetContent(ctx, target);
-        if (!target.ContentDrawn) {
-            ClearTarget(ctx, target, target.Target.Window != nullptr && target.Target.Window->IsMainWindow() ? "Main Window" : "Window");
-            target.ContentDrawn = true;
-        }
     }
 }
 

@@ -100,10 +100,11 @@ AssetLoadTask LoadTextureFromImageTask(
     if (!uploaded.has_value()) {
         co_return AssetLoadResult::Failure(fmt::format("texture '{}' upload recording failed", name));
     }
+    render::Device* device = frame.GetUploader().GetDevice();
     co_await frame.WaitGpu();
 
     co_return AssetLoadResult::Success(make_unique<TextureAsset>(
-        frame.GetUploader().GetDevice(),
+        device,
         std::move(name),
         std::move(uploaded->Texture),
         std::move(uploaded->Srv)));

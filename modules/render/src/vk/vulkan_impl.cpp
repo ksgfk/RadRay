@@ -738,14 +738,85 @@ static bool _UpdateBindlessDescriptorSetVulkan(
     return true;
 }
 
-static bool _WriteBufferBindingDescriptorVulkan(
+static bool _SubmitDescriptorWritesVulkan(
+    DeviceVulkan* device,
+    std::span<const PendingDescriptorWriteVulkan> pendingWrites,
+    vector<VkWriteDescriptorSet>& writes,
+    vector<VkWriteDescriptorSetAccelerationStructureKHR>& accelerationWrites) noexcept {
+    if (device == nullptr || pendingWrites.empty()) {
+        return device != nullptr;
+    }
+
+    writes.resize(pendingWrites.size());
+    accelerationWrites.resize(pendingWrites.size());
+    for (size_t i = 0; i < pendingWrites.size(); ++i) {
+        const auto& pending = pendingWrites[i];
+        if (pending.Set == VK_NULL_HANDLE) {
+            RADRAY_ERR_LOG("vk descriptor write has no destination set");
+            return false;
+        }
+
+        auto& write = writes[i];
+        write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write.pNext = nullptr;
+        write.dstSet = pending.Set;
+        write.dstBinding = pending.Binding;
+        write.dstArrayElement = pending.ArrayIndex;
+        write.descriptorCount = 1;
+        write.descriptorType = pending.Type;
+        write.pImageInfo = nullptr;
+        write.pBufferInfo = nullptr;
+        write.pTexelBufferView = nullptr;
+
+        switch (pending.Payload) {
+            case DescriptorWritePayloadVulkan::Image:
+                write.pImageInfo = &pending.ImageInfo;
+                break;
+            case DescriptorWritePayloadVulkan::Buffer:
+                write.pBufferInfo = &pending.BufferInfo;
+                break;
+            case DescriptorWritePayloadVulkan::TexelBuffer:
+                write.pTexelBufferView = &pending.TexelBufferView;
+                break;
+            case DescriptorWritePayloadVulkan::AccelerationStructure: {
+                auto& accelerationWrite = accelerationWrites[i];
+                accelerationWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR;
+                accelerationWrite.pNext = nullptr;
+                accelerationWrite.accelerationStructureCount = 1;
+                accelerationWrite.pAccelerationStructures = &pending.AccelerationStructure;
+                write.pNext = &accelerationWrite;
+                break;
+            }
+        }
+    }
+
+    device->_ftb.vkUpdateDescriptorSets(
+        device->_device,
+        static_cast<uint32_t>(writes.size()),
+        writes.data(),
+        0,
+        nullptr);
+    return true;
+}
+
+static bool _SubmitDescriptorWritesVulkan(
+    DeviceVulkan* device,
+    std::span<const PendingDescriptorWriteVulkan> pendingWrites) noexcept {
+    vector<VkWriteDescriptorSet> writes;
+    vector<VkWriteDescriptorSetAccelerationStructureKHR> accelerationWrites;
+    return _SubmitDescriptorWritesVulkan(device, pendingWrites, writes, accelerationWrites);
+}
+
+static bool _BuildBufferBindingDescriptorVulkan(
     DeviceVulkan* device,
     VkDescriptorSet set,
     uint32_t bindingIndex,
     VkDescriptorType descriptorType,
     uint32_t arrayIndex,
     const BufferBindingDescriptor& desc,
-    unordered_map<uint64_t, unique_ptr<BufferViewVulkan>>* ownedTexelViews) noexcept {
+    bool allowTexelBuffer,
+    PendingDescriptorWriteVulkan& write,
+    unique_ptr<BufferViewVulkan>& ownedTexelView) noexcept {
     if (device == nullptr || set == VK_NULL_HANDLE) {
         return false;
     }
@@ -767,21 +838,11 @@ static bool _WriteBufferBindingDescriptorVulkan(
     }
 
     auto* buffer = CastVkObject(desc.Target);
-    VkWriteDescriptorSet writeDesc{};
-    writeDesc.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writeDesc.pNext = nullptr;
-    writeDesc.dstSet = set;
-    writeDesc.dstBinding = bindingIndex;
-    writeDesc.dstArrayElement = arrayIndex;
-    writeDesc.descriptorCount = 1;
-    writeDesc.descriptorType = descriptorType;
-    writeDesc.pBufferInfo = nullptr;
-    writeDesc.pImageInfo = nullptr;
-    writeDesc.pTexelBufferView = nullptr;
-
-    VkDescriptorBufferInfo bufInfo{};
-    VkBufferView texelViewHandle = VK_NULL_HANDLE;
-    unique_ptr<BufferViewVulkan> ownedTexelView{};
+    write = {};
+    write.Set = set;
+    write.Binding = bindingIndex;
+    write.ArrayIndex = arrayIndex;
+    write.Type = descriptorType;
 
     switch (desc.Usage) {
         case BufferViewUsage::CBuffer: {
@@ -790,10 +851,10 @@ static bool _WriteBufferBindingDescriptorVulkan(
                 RADRAY_ERR_LOG("vk uniform buffer binding offset must align to CBuffer alignment");
                 return false;
             }
-            bufInfo.buffer = buffer->_buffer;
-            bufInfo.offset = desc.Range.Offset;
-            bufInfo.range = rangeSize;
-            writeDesc.pBufferInfo = &bufInfo;
+            write.Payload = DescriptorWritePayloadVulkan::Buffer;
+            write.BufferInfo.buffer = buffer->_buffer;
+            write.BufferInfo.offset = desc.Range.Offset;
+            write.BufferInfo.range = rangeSize;
             break;
         }
         case BufferViewUsage::ReadOnlyStorage:
@@ -806,15 +867,15 @@ static bool _WriteBufferBindingDescriptorVulkan(
                 RADRAY_ERR_LOG("vk structured buffer binding offset/size must align to stride");
                 return false;
             }
-            bufInfo.buffer = buffer->_buffer;
-            bufInfo.offset = desc.Range.Offset;
-            bufInfo.range = rangeSize;
-            writeDesc.pBufferInfo = &bufInfo;
+            write.Payload = DescriptorWritePayloadVulkan::Buffer;
+            write.BufferInfo.buffer = buffer->_buffer;
+            write.BufferInfo.offset = desc.Range.Offset;
+            write.BufferInfo.range = rangeSize;
             break;
         }
         case BufferViewUsage::TexelReadOnly:
         case BufferViewUsage::TexelReadWrite: {
-            if (ownedTexelViews == nullptr) {
+            if (!allowTexelBuffer) {
                 RADRAY_ERR_LOG("vk bindless arrays do not support texel buffer descriptors in this revision");
                 return false;
             }
@@ -840,13 +901,39 @@ static bool _WriteBufferBindingDescriptorVulkan(
                 return false;
             }
             ownedTexelView = texelViewOpt.Release();
-            texelViewHandle = ownedTexelView->_bufferView;
-            writeDesc.pTexelBufferView = &texelViewHandle;
+            write.Payload = DescriptorWritePayloadVulkan::TexelBuffer;
+            write.TexelBufferView = ownedTexelView->_bufferView;
             break;
         }
     }
 
-    device->_ftb.vkUpdateDescriptorSets(device->_device, 1, &writeDesc, 0, nullptr);
+    return true;
+}
+
+static bool _WriteBufferBindingDescriptorVulkan(
+    DeviceVulkan* device,
+    VkDescriptorSet set,
+    uint32_t bindingIndex,
+    VkDescriptorType descriptorType,
+    uint32_t arrayIndex,
+    const BufferBindingDescriptor& desc,
+    unordered_map<uint64_t, unique_ptr<BufferViewVulkan>>* ownedTexelViews) noexcept {
+    PendingDescriptorWriteVulkan write{};
+    unique_ptr<BufferViewVulkan> ownedTexelView{};
+    if (!_BuildBufferBindingDescriptorVulkan(
+            device,
+            set,
+            bindingIndex,
+            descriptorType,
+            arrayIndex,
+            desc,
+            ownedTexelViews != nullptr,
+            write,
+            ownedTexelView) ||
+        !_SubmitDescriptorWritesVulkan(device, std::span{&write, 1})) {
+        return false;
+    }
+
     if (ownedTexelViews != nullptr) {
         const uint64_t descriptorKey = (static_cast<uint64_t>(bindingIndex) << 32u) | static_cast<uint64_t>(arrayIndex);
         if (ownedTexelView) {
@@ -1037,6 +1124,9 @@ static bool _BindShaderParameterTableVulkan(
     PipelineLayoutVulkan* layout = table->_rootSig;
     if (layout == nullptr || !layout->IsValid()) {
         RADRAY_ERR_LOG("shader parameter table has invalid binding layout");
+        return false;
+    }
+    if (!table->FlushDescriptorWrites()) {
         return false;
     }
     boundPipeLayout = layout;
@@ -1885,6 +1975,14 @@ Nullable<unique_ptr<ShaderParameterTable>> DeviceVulkan::CreateShaderParameterTa
         if (layout->HasBindlessSet(setIndex)) {
             continue;
         }
+        auto setLayout = layout->GetSetLayout(setIndex);
+        if (!setLayout.HasValue() || setLayout.Get() == nullptr) {
+            RADRAY_ERR_LOG("internal error: vk set layout {} is unavailable", setIndex);
+            return nullptr;
+        }
+        if (setLayout.Get()->_bindings.empty()) {
+            continue;
+        }
         auto descriptorSet = CreateDescriptorSetInternal(layout, setIndex);
         if (!descriptorSet.HasValue()) {
             return nullptr;
@@ -2188,9 +2286,7 @@ Nullable<unique_ptr<GraphicsPipelineState>> DeviceVulkan::CreateGraphicsPipeline
         RADRAY_ERR_LOG("vkCreateGraphicsPipelines failed: {}", vr);
         return nullptr;
     }
-    auto result = make_unique<GraphicsPipelineVulkan>(this, pipeline);
-    result->_renderPass = std::move(renderPass);
-    return result;
+    return make_unique<GraphicsPipelineVulkan>(this, pipeline);
 }
 
 Nullable<unique_ptr<ComputePipelineState>> DeviceVulkan::CreateComputePipelineState(const ComputePipelineStateDescriptor& desc) noexcept {
@@ -3726,11 +3822,91 @@ void CommandBufferVulkan::SetDebugName(std::string_view name) noexcept {
 }
 
 void CommandBufferVulkan::DestroyImpl() noexcept {
+    _endedEncoders.clear();
+    _renderPassCache.clear();
     if (_cmdBuffer != VK_NULL_HANDLE) {
         _device->_ftb.vkFreeCommandBuffers(_device->_device, _cmdPool->_cmdPool, 1, &_cmdBuffer);
         _cmdBuffer = VK_NULL_HANDLE;
     }
     _cmdPool.reset();
+}
+
+static bool _EqualAttachmentDescriptionVulkan(
+    const VkAttachmentDescription& lhs,
+    const VkAttachmentDescription& rhs) noexcept {
+    return lhs.flags == rhs.flags &&
+           lhs.format == rhs.format &&
+           lhs.samples == rhs.samples &&
+           lhs.loadOp == rhs.loadOp &&
+           lhs.storeOp == rhs.storeOp &&
+           lhs.stencilLoadOp == rhs.stencilLoadOp &&
+           lhs.stencilStoreOp == rhs.stencilStoreOp &&
+           lhs.initialLayout == rhs.initialLayout &&
+           lhs.finalLayout == rhs.finalLayout;
+}
+
+static bool _EqualAttachmentReferenceVulkan(
+    const VkAttachmentReference& lhs,
+    const VkAttachmentReference& rhs) noexcept {
+    return lhs.attachment == rhs.attachment && lhs.layout == rhs.layout;
+}
+
+Nullable<RenderPassVulkan*> CommandBufferVulkan::GetOrCreateRenderPass(
+    std::span<const VkAttachmentDescription> attachments,
+    std::span<const VkAttachmentReference> colorAttachments,
+    std::optional<VkAttachmentReference> depthStencilAttachment) noexcept {
+    for (RenderPassCacheEntry& entry : _renderPassCache) {
+        if (entry.Attachments.size() != attachments.size() ||
+            entry.ColorAttachments.size() != colorAttachments.size() ||
+            entry.DepthStencilAttachment.has_value() != depthStencilAttachment.has_value()) {
+            continue;
+        }
+        bool matches = true;
+        for (size_t i = 0; i < attachments.size(); ++i) {
+            if (!_EqualAttachmentDescriptionVulkan(entry.Attachments[i], attachments[i])) {
+                matches = false;
+                break;
+            }
+        }
+        for (size_t i = 0; matches && i < colorAttachments.size(); ++i) {
+            if (!_EqualAttachmentReferenceVulkan(entry.ColorAttachments[i], colorAttachments[i])) {
+                matches = false;
+            }
+        }
+        if (matches && depthStencilAttachment.has_value()) {
+            matches = _EqualAttachmentReferenceVulkan(
+                entry.DepthStencilAttachment.value(), depthStencilAttachment.value());
+        }
+        if (matches) {
+            return entry.Pass.get();
+        }
+    }
+
+    VkSubpassDescription subpassDesc{};
+    subpassDesc.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    subpassDesc.colorAttachmentCount = static_cast<uint32_t>(colorAttachments.size());
+    subpassDesc.pColorAttachments = colorAttachments.empty() ? nullptr : colorAttachments.data();
+    subpassDesc.pDepthStencilAttachment = depthStencilAttachment.has_value() ? &depthStencilAttachment.value() : nullptr;
+
+    VkRenderPassCreateInfo passInfo{};
+    passInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+    passInfo.attachmentCount = static_cast<uint32_t>(attachments.size());
+    passInfo.pAttachments = attachments.empty() ? nullptr : attachments.data();
+    passInfo.subpassCount = 1;
+    passInfo.pSubpasses = &subpassDesc;
+    auto passOpt = _device->CreateRenderPass(passInfo);
+    if (!passOpt.HasValue()) {
+        return nullptr;
+    }
+
+    RenderPassCacheEntry entry{};
+    entry.Attachments.assign(attachments.begin(), attachments.end());
+    entry.ColorAttachments.assign(colorAttachments.begin(), colorAttachments.end());
+    entry.DepthStencilAttachment = depthStencilAttachment;
+    entry.Pass = passOpt.Release();
+    RenderPassVulkan* result = entry.Pass.get();
+    _renderPassCache.emplace_back(std::move(entry));
+    return result;
 }
 
 void CommandBufferVulkan::Begin() noexcept {
@@ -3955,38 +4131,22 @@ Nullable<unique_ptr<GraphicsCommandEncoder>> CommandBufferVulkan::BeginRenderPas
             return nullptr;
         }
     }
-    VkSubpassDescription subpassDesc{};
-    subpassDesc.flags = 0;
-    subpassDesc.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-    subpassDesc.inputAttachmentCount = 0;
-    subpassDesc.pInputAttachments = nullptr;
-    subpassDesc.colorAttachmentCount = static_cast<uint32_t>(colorRefs.size());
-    subpassDesc.pColorAttachments = colorRefs.empty() ? nullptr : colorRefs.data();
-    subpassDesc.pResolveAttachments = nullptr;
-    subpassDesc.pDepthStencilAttachment = desc.DepthStencilAttachment.has_value() ? &depthRef : nullptr;
-    subpassDesc.preserveAttachmentCount = 0;
-    subpassDesc.pPreserveAttachments = nullptr;
-    VkRenderPassCreateInfo passInfo{};
-    passInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-    passInfo.pNext = nullptr;
-    passInfo.flags = 0;
-    passInfo.attachmentCount = static_cast<uint32_t>(attachs.size());
-    passInfo.pAttachments = attachs.empty() ? nullptr : attachs.data();
-    passInfo.subpassCount = 1;
-    passInfo.pSubpasses = &subpassDesc;
-    passInfo.dependencyCount = 0;
-    passInfo.pDependencies = nullptr;
-    auto passOpt = _device->CreateRenderPass(passInfo);
+    auto passOpt = GetOrCreateRenderPass(
+        attachs,
+        colorRefs,
+        desc.DepthStencilAttachment.has_value()
+            ? std::make_optional(depthRef)
+            : std::optional<VkAttachmentReference>{});
     if (!passOpt.HasValue()) {
         return nullptr;
     }
-    auto passR = passOpt.Release();
-    _device->SetObjectName(desc.Name, passR->_renderPass);
+    RenderPassVulkan* pass = passOpt.Get();
+    _device->SetObjectName(desc.Name, pass->_renderPass);
     VkFramebufferCreateInfo fbInfo{};
     fbInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
     fbInfo.pNext = nullptr;
     fbInfo.flags = 0;
-    fbInfo.renderPass = passR->_renderPass;
+    fbInfo.renderPass = pass->_renderPass;
     fbInfo.attachmentCount = static_cast<uint32_t>(fbs.size());
     fbInfo.pAttachments = fbs.empty() ? nullptr : fbs.data();
     fbInfo.width = width;
@@ -4002,14 +4162,13 @@ Nullable<unique_ptr<GraphicsCommandEncoder>> CommandBufferVulkan::BeginRenderPas
     VkRenderPassBeginInfo beginInfo{};
     beginInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
     beginInfo.pNext = nullptr;
-    beginInfo.renderPass = passR->_renderPass;
+    beginInfo.renderPass = pass->_renderPass;
     beginInfo.framebuffer = framebuffer;
     beginInfo.renderArea = {{0, 0}, {fbInfo.width, fbInfo.height}};
     beginInfo.clearValueCount = static_cast<uint32_t>(clearValues.size());
     beginInfo.pClearValues = clearValues.size() == 0 ? nullptr : clearValues.data();
     _device->_ftb.vkCmdBeginRenderPass(_cmdBuffer, &beginInfo, VK_SUBPASS_CONTENTS_INLINE);
     auto encoder = make_unique<SimulateCommandEncoderVulkan>(_device, this);
-    encoder->_pass = std::move(passR);
     encoder->_framebuffer = std::move(fbR);
     return encoder;
 }
@@ -4275,7 +4434,7 @@ SimulateCommandEncoderVulkan::~SimulateCommandEncoderVulkan() noexcept {
 }
 
 bool SimulateCommandEncoderVulkan::IsValid() const noexcept {
-    return _pass != nullptr && _framebuffer != nullptr;
+    return _device != nullptr && _cmdBuffer != nullptr && _framebuffer != nullptr;
 }
 
 void SimulateCommandEncoderVulkan::Destroy() noexcept {
@@ -4288,7 +4447,8 @@ CommandBuffer* SimulateCommandEncoderVulkan::GetCommandBuffer() const noexcept {
 
 void SimulateCommandEncoderVulkan::DestroyImpl() noexcept {
     _framebuffer.reset();
-    _pass.reset();
+    _boundPso = nullptr;
+    _boundPipeLayout = nullptr;
 }
 
 void SimulateCommandEncoderVulkan::SetViewport(Viewport vp) noexcept {
@@ -4334,7 +4494,11 @@ void SimulateCommandEncoderVulkan::BindIndexBuffer(IndexBufferView ibv) noexcept
 
 void SimulateCommandEncoderVulkan::BindGraphicsPipelineState(GraphicsPipelineState* pso) noexcept {
     auto p = CastVkObject(pso);
+    if (_boundPso == p) {
+        return;
+    }
     _device->_ftb.vkCmdBindPipeline(_cmdBuffer->_cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, p->_pipeline);
+    _boundPso = p;
 }
 
 void SimulateCommandEncoderVulkan::BindShaderParameters(ShaderParameterTable* table) noexcept {
@@ -5697,9 +5861,6 @@ void GraphicsPipelineVulkan::Destroy() noexcept {
 
 void GraphicsPipelineVulkan::SetDebugName(std::string_view name) noexcept {
     _device->SetObjectName(name, _pipeline);
-    if (_renderPass) {
-        _device->SetObjectName(fmt::format("{}_RenderPass", name), _renderPass->_renderPass);
-    }
 }
 
 void GraphicsPipelineVulkan::DestroyImpl() noexcept {
@@ -5707,7 +5868,6 @@ void GraphicsPipelineVulkan::DestroyImpl() noexcept {
         _device->_ftb.vkDestroyPipeline(_device->_device, _pipeline, _device->GetAllocationCallbacks());
         _pipeline = VK_NULL_HANDLE;
     }
-    _renderPass.reset();
 }
 
 ComputePipelineVulkan::ComputePipelineVulkan(
@@ -6096,6 +6256,13 @@ void DescriptorSetVulkan::Destroy() noexcept {
     this->DestroyImpl();
 }
 
+void DescriptorSetVulkan::Reset() noexcept {
+    std::ranges::fill(_resourceWritten, uint8_t{0});
+    std::ranges::fill(_samplerWritten, uint8_t{0});
+    _pendingWrites.clear();
+    _ownedTexelBufferViews.clear();
+}
+
 void DescriptorSetVulkan::SetDebugName(std::string_view name) noexcept {
     _name = string{name};
     if (_allocation.IsValid()) {
@@ -6111,6 +6278,7 @@ void DescriptorSetVulkan::DestroyImpl() noexcept {
     _ownedTexelBufferViews.clear();
     _resourceWritten.clear();
     _samplerWritten.clear();
+    _pendingWrites.clear();
     _setIndex = 0;
     _rootSig = nullptr;
     _layout = nullptr;
@@ -6301,47 +6469,32 @@ bool DescriptorSetVulkan::SetResource(uint32_t slot, uint32_t arrayIndex, Resour
         RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "arrayIndex", binding->descriptorCount, arrayIndex);
         return false;
     }
-    VkWriteDescriptorSet writeDesc{};
-    writeDesc.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writeDesc.pNext = nullptr;
-    writeDesc.dstSet = _allocation.Set;
-    writeDesc.dstBinding = binding->binding;
-    writeDesc.dstArrayElement = arrayIndex;
-    writeDesc.descriptorCount = 1;
-    writeDesc.descriptorType = binding->descriptorType;
-    writeDesc.pBufferInfo = nullptr;
-    writeDesc.pImageInfo = nullptr;
-    writeDesc.pTexelBufferView = nullptr;
-    VkDescriptorImageInfo imgInfo{};
-    VkWriteDescriptorSetAccelerationStructureKHR asInfo{};
+    PendingDescriptorWriteVulkan write{};
+    write.Set = _allocation.Set;
+    write.Binding = binding->binding;
+    write.ArrayIndex = arrayIndex;
+    write.Type = binding->descriptorType;
     if (tag.HasFlag(RenderObjectTag::TextureView)) {
         auto tv = static_cast<ImageViewVulkan*>(view);
-        if ((tv->_mdesc.Usage == TextureViewUsage::UnorderedAccess && writeDesc.descriptorType != VK_DESCRIPTOR_TYPE_STORAGE_IMAGE) ||
-            (tv->_mdesc.Usage != TextureViewUsage::UnorderedAccess && writeDesc.descriptorType != VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE)) {
+        if ((tv->_mdesc.Usage == TextureViewUsage::UnorderedAccess && write.Type != VK_DESCRIPTOR_TYPE_STORAGE_IMAGE) ||
+            (tv->_mdesc.Usage != TextureViewUsage::UnorderedAccess && write.Type != VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE)) {
             RADRAY_ERR_LOG("descriptor type mismatch for texture view usage");
             return false;
         }
-        imgInfo.imageView = tv->_imageView;
-        imgInfo.imageLayout = TextureViewUsageToLayout(tv->_mdesc.Usage);
-        writeDesc.pImageInfo = &imgInfo;
+        write.Payload = DescriptorWritePayloadVulkan::Image;
+        write.ImageInfo.sampler = VK_NULL_HANDLE;
+        write.ImageInfo.imageView = tv->_imageView;
+        write.ImageInfo.imageLayout = TextureViewUsageToLayout(tv->_mdesc.Usage);
     } else if (tag.HasFlag(RenderObjectTag::AccelerationStructureView)) {
         auto asView = static_cast<AccelerationStructureViewVulkan*>(view);
         if (asView->_target == nullptr || asView->_target->_accelerationStructure == VK_NULL_HANDLE) {
             RADRAY_ERR_LOG("vk invalid acceleration structure view");
             return false;
         }
-        asInfo.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR;
-        asInfo.pNext = nullptr;
-        asInfo.accelerationStructureCount = 1;
-        asInfo.pAccelerationStructures = &asView->_target->_accelerationStructure;
-        writeDesc.pNext = &asInfo;
+        write.Payload = DescriptorWritePayloadVulkan::AccelerationStructure;
+        write.AccelerationStructure = asView->_target->_accelerationStructure;
     }
-    _device->_ftb.vkUpdateDescriptorSets(
-        _device->_device,
-        1,
-        &writeDesc,
-        0,
-        nullptr);
+    StageWrite(std::move(write));
     return true;
 }
 
@@ -6366,14 +6519,29 @@ bool DescriptorSetVulkan::SetBufferResource(uint32_t slot, uint32_t arrayIndex, 
         RADRAY_ERR_LOG("argument out of range '{}' expected: {}, actual: {}", "arrayIndex", binding->descriptorCount, arrayIndex);
         return false;
     }
-    return _WriteBufferBindingDescriptorVulkan(
-        _device,
-        _allocation.Set,
-        binding->binding,
-        binding->descriptorType,
-        arrayIndex,
-        desc,
-        &_ownedTexelBufferViews);
+    PendingDescriptorWriteVulkan write{};
+    unique_ptr<BufferViewVulkan> ownedTexelView{};
+    if (!_BuildBufferBindingDescriptorVulkan(
+            _device,
+            _allocation.Set,
+            binding->binding,
+            binding->descriptorType,
+            arrayIndex,
+            desc,
+            true,
+            write,
+            ownedTexelView)) {
+        return false;
+    }
+    StageWrite(std::move(write));
+
+    const uint64_t descriptorKey = (static_cast<uint64_t>(binding->binding) << 32u) | static_cast<uint64_t>(arrayIndex);
+    if (ownedTexelView) {
+        _ownedTexelBufferViews[descriptorKey] = std::move(ownedTexelView);
+    } else {
+        _ownedTexelBufferViews.erase(descriptorKey);
+    }
+    return true;
 }
 
 bool DescriptorSetVulkan::SetSampler(uint32_t slot, uint32_t arrayIndex, Sampler* sampler) noexcept {
@@ -6401,22 +6569,16 @@ bool DescriptorSetVulkan::SetSampler(uint32_t slot, uint32_t arrayIndex, Sampler
         return false;
     }
     auto* sam = CastVkObject(sampler);
-    VkDescriptorImageInfo imgInfo{};
-    imgInfo.sampler = sam->_sampler;
-    imgInfo.imageView = VK_NULL_HANDLE;
-    imgInfo.imageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    VkWriteDescriptorSet writeDesc{};
-    writeDesc.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writeDesc.pNext = nullptr;
-    writeDesc.dstSet = _allocation.Set;
-    writeDesc.dstBinding = binding->binding;
-    writeDesc.dstArrayElement = arrayIndex;
-    writeDesc.descriptorCount = 1;
-    writeDesc.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
-    writeDesc.pBufferInfo = nullptr;
-    writeDesc.pImageInfo = &imgInfo;
-    writeDesc.pTexelBufferView = nullptr;
-    _device->_ftb.vkUpdateDescriptorSets(_device->_device, 1, &writeDesc, 0, nullptr);
+    PendingDescriptorWriteVulkan write{};
+    write.Set = _allocation.Set;
+    write.Binding = binding->binding;
+    write.ArrayIndex = arrayIndex;
+    write.Type = VK_DESCRIPTOR_TYPE_SAMPLER;
+    write.Payload = DescriptorWritePayloadVulkan::Image;
+    write.ImageInfo.sampler = sam->_sampler;
+    write.ImageInfo.imageView = VK_NULL_HANDLE;
+    write.ImageInfo.imageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    StageWrite(std::move(write));
     return true;
 }
 
@@ -6447,6 +6609,19 @@ bool DescriptorSetVulkan::HasAnyWrite() const noexcept {
            std::ranges::any_of(_samplerWritten, [](uint8_t v) noexcept { return v != 0; });
 }
 
+void DescriptorSetVulkan::StageWrite(PendingDescriptorWriteVulkan write) noexcept {
+    const auto existing = std::ranges::find_if(
+        _pendingWrites,
+        [&](const PendingDescriptorWriteVulkan& pending) noexcept {
+            return pending.Binding == write.Binding && pending.ArrayIndex == write.ArrayIndex;
+        });
+    if (existing != _pendingWrites.end()) {
+        *existing = std::move(write);
+    } else {
+        _pendingWrites.push_back(std::move(write));
+    }
+}
+
 ShaderParameterTableVulkan::ShaderParameterTableVulkan(DeviceVulkan* device, PipelineLayoutVulkan* rootSig) noexcept
     : _device(device), _rootSig(rootSig) {}
 
@@ -6467,9 +6642,24 @@ void ShaderParameterTableVulkan::Destroy() noexcept {
     _sets.clear();
     _constantData.clear();
     _bindlessArrays.clear();
+    _pendingWriteScratch.clear();
+    _descriptorWriteScratch.clear();
+    _accelerationWriteScratch.clear();
     _name.clear();
     _rootSig = nullptr;
     _device = nullptr;
+}
+
+void ShaderParameterTableVulkan::Reset() noexcept {
+    for (auto& set : _sets) {
+        if (set != nullptr) {
+            set->Reset();
+        }
+    }
+    for (auto& bytes : _constantData) {
+        bytes.clear();
+    }
+    std::ranges::fill(_bindlessArrays, nullptr);
 }
 
 void ShaderParameterTableVulkan::SetDebugName(std::string_view name) noexcept {
@@ -6575,6 +6765,43 @@ bool ShaderParameterTableVulkan::IsFullyWritten() const noexcept {
         }
         if (binding.Info.Id.Value >= _constantData.size() || _constantData[binding.Info.Id.Value].empty()) {
             return false;
+        }
+    }
+    return true;
+}
+
+bool ShaderParameterTableVulkan::FlushDescriptorWrites() noexcept {
+    size_t pendingCount = 0;
+    for (const auto& set : _sets) {
+        if (set != nullptr) {
+            pendingCount += set->_pendingWrites.size();
+        }
+    }
+    if (pendingCount == 0) {
+        return true;
+    }
+
+    _pendingWriteScratch.clear();
+    _pendingWriteScratch.reserve(pendingCount);
+    for (const auto& set : _sets) {
+        if (set == nullptr) {
+            continue;
+        }
+        _pendingWriteScratch.insert(
+            _pendingWriteScratch.end(),
+            set->_pendingWrites.begin(),
+            set->_pendingWrites.end());
+    }
+    if (!_SubmitDescriptorWritesVulkan(
+            _device,
+            _pendingWriteScratch,
+            _descriptorWriteScratch,
+            _accelerationWriteScratch)) {
+        return false;
+    }
+    for (auto& set : _sets) {
+        if (set != nullptr) {
+            set->_pendingWrites.clear();
         }
     }
     return true;

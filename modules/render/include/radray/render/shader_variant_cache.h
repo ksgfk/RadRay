@@ -78,6 +78,8 @@ public:
 
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::UNKNOWN; }
 
+    virtual Nullable<const CompiledShaderVariant*> Find(const ShaderVariantKey& key) const noexcept = 0;
+
     virtual Nullable<const CompiledShaderVariant*> GetOrCreate(const ShaderVariantDescriptor& desc) noexcept = 0;
 
     virtual void Clear() noexcept = 0;

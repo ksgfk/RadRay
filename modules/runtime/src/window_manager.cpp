@@ -110,14 +110,13 @@ bool AppWindow::IsMainWindow() const noexcept {
     return _isMain;
 }
 
-render::TextureView* AppWindow::GetOrCreateBackBufferView(const render::SwapChainFrame& frame, uint32_t ownerFlightIndex) noexcept {
+render::TextureView* AppWindow::GetOrCreateBackBufferView(const render::SwapChainFrame& frame) noexcept {
     const uint32_t index = frame.GetBackBufferIndex();
     render::Texture* backBuffer = frame.GetBackBuffer();
     auto* gpuSystem = _manager->GetGpuSystem();
     BackBufferView& backBufferView = _backBufferViews[index];
     render::TextureView* view = backBufferView.View.get();
     if (view != nullptr && backBufferView.BackBuffer == backBuffer) {
-        backBufferView.FlightIndex = ownerFlightIndex;
         return view;
     }
     render::TextureDescriptor texDesc = backBuffer->GetDesc();
@@ -135,7 +134,6 @@ render::TextureView* AppWindow::GetOrCreateBackBufferView(const render::SwapChai
     auto viewPtr = viewIns.get();
     backBufferView.View = std::move(viewIns);
     backBufferView.BackBuffer = backBuffer;
-    backBufferView.FlightIndex = ownerFlightIndex;
     // 新 backbuffer（首次 / 重建）：状态必为 Undefined，下一次起始 barrier 从 Undefined 翻起。
     backBufferView.State = render::TextureState::Undefined;
     return viewPtr;
@@ -153,16 +151,6 @@ void AppWindow::SetBackBufferState(uint32_t backBufferIndex, render::TextureStat
         return;
     }
     _backBufferViews[backBufferIndex].State = state;
-}
-
-void AppWindow::ReleaseBackBufferViewsForFlight(uint32_t flightIndex) noexcept {
-    for (BackBufferView& backBufferView : _backBufferViews) {
-        if (backBufferView.View == nullptr || backBufferView.FlightIndex != flightIndex) {
-            continue;
-        }
-        backBufferView.View.reset();
-        backBufferView.BackBuffer = nullptr;
-    }
 }
 
 WindowManager::WindowManager(Application* app, const WindowManagerDescriptor& desc)
@@ -368,12 +356,6 @@ NativeWindow* WindowManager::FindFirstNativeWindow(NativeWindowType type) const 
         }
     }
     return nullptr;
-}
-
-void WindowManager::ReleaseBackBufferViewsForFlight(uint32_t flightIndex) noexcept {
-    for (const unique_ptr<AppWindow>& window : _windows) {
-        window->ReleaseBackBufferViewsForFlight(flightIndex);
-    }
 }
 
 }  // namespace radray

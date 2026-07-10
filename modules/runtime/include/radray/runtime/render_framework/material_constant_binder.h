@@ -92,6 +92,7 @@ private:
         vector<BlockLayout>& out) noexcept;
 
     unordered_map<const render::CompiledShaderVariant*, vector<BlockLayout>> _cache;
+    vector<byte> _stagingScratch;
 };
 
 }  // namespace radray

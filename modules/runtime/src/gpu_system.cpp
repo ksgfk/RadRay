@@ -583,7 +583,7 @@ std::optional<AppFrameTarget> AppFrameContext::AcquireWindow(AppWindow* window) 
     render::SwapChainFrame frame = std::move(acquire.Frame.value());
     render::Texture* backBuffer = frame.GetBackBuffer();
     const uint32_t backBufferIndex = frame.GetBackBufferIndex();
-    render::TextureView* backBufferView = window->GetOrCreateBackBufferView(frame, _flightIndex);
+    render::TextureView* backBufferView = window->GetOrCreateBackBufferView(frame);
     if (backBufferView == nullptr) {
         // 未能建立 view：丢弃该 frame（不提交）。
         return std::nullopt;

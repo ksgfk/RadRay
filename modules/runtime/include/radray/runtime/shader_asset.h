@@ -5,6 +5,7 @@
 #include <radray/types.h>
 #include <radray/render/common.h>
 #include <radray/render/shader_variant_cache.h>
+#include <radray/hash.h>
 #include <radray/runtime/asset.h>
 
 namespace radray {
@@ -41,7 +42,7 @@ public:
 
 private:
     vector<string> _names;
-    unordered_map<string, uint32_t> _index;
+    unordered_map<string, uint32_t, StringHash, StringEqual> _index;
 };
 
 /// 一个顶点缓冲布局的拥有式描述 (render::VertexBufferLayout 的 Elements 是 span, 不拥有;

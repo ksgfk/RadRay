@@ -403,6 +403,19 @@ ForwardPipeline::ForwardPipeline(RenderSystem* renderSystem) noexcept
 
 ForwardPipeline::~ForwardPipeline() noexcept = default;
 
+void ForwardPipeline::OnBeginFrame(RenderPipelineContext& ctx) {
+    const uint32_t flight = ctx.Frame.FlightIndex();
+    if (_executor != nullptr) {
+        _executor->BeginFrame(flight);
+    }
+    if (_shadowExecutor != nullptr) {
+        _shadowExecutor->BeginFrame(flight);
+    }
+    if (_dirShadowExecutor != nullptr) {
+        _dirShadowExecutor->BeginFrame(flight);
+    }
+}
+
 Nullable<IStandardMaterialFactory*> ForwardPipeline::GetStandardMaterialFactory() noexcept {
     if (!_materialFactoryInit) {
         _materialFactoryInit = true;  // 只尝试一次 (成功与否)。
@@ -731,6 +744,8 @@ bool ForwardPipeline::RenderPointShadow(
     if (casterList.Empty()) {
         // 没有投影者: 视为无阴影 (但仍需把 cube 清成远深度并转采样布局, 避免采样到脏数据)。
         outShadow.Params[3] = 0.0f;
+    } else {
+        casterList.SortOpaque();
     }
 
     // cube 转 DepthWrite 布局 (整资源 barrier)。
@@ -743,7 +758,6 @@ bool ForwardPipeline::RenderPointShadow(
         cube->State = render::TextureState::DepthWrite;
     }
 
-    _shadowExecutor->BeginFrame(flight);
     _shadowExecutor->ClearGlobals();
 
     // 逐面渲染: 每面一个 depth-only render pass, 写入对应 slice。
@@ -905,6 +919,8 @@ bool ForwardPipeline::RenderDirectionalShadow(
     }
     if (casterList.Empty()) {
         outShadow.Params[0] = 0.0f;  // 无投影者: 视为无阴影 (仍清深度并转采样布局)。
+    } else {
+        casterList.SortOpaque();
     }
 
     // 阴影图转 DepthWrite 布局 (整资源 barrier)。
@@ -917,7 +933,6 @@ bool ForwardPipeline::RenderDirectionalShadow(
         array->State = render::TextureState::DepthWrite;
     }
 
-    _dirShadowExecutor->BeginFrame(flight);
     _dirShadowExecutor->ClearGlobals();
 
     // 逐级联渲染: 每级联一个 depth-only render pass, 写入对应层。
@@ -988,6 +1003,12 @@ void ForwardPipeline::OnSetupCamera(RenderPipelineContext& ctx, const RenderCame
     const AppFrameTarget& target = *camera.Target.Get();
     if (target.BackBuffer == nullptr || target.BackBufferView == nullptr) {
         return;
+    }
+    for (RenderPipelineTarget& pipelineTarget : ctx.Targets) {
+        if (&pipelineTarget.Target == &target) {
+            _frame.PipelineTarget = &pipelineTarget;
+            break;
+        }
     }
     const render::TextureDescriptor bbDesc = target.BackBuffer->GetDesc();
     const uint32_t width = bbDesc.Width;
@@ -1151,7 +1172,6 @@ void ForwardPipeline::ForwardColorPass::Execute(RenderPipelineContext& ctx, cons
     const uint32_t height = frame.Height;
     const uint32_t flight = frame.Flight;
 
-    self->_executor->BeginFrame(flight);  // 回收该 flight 上一轮的 table / arena
     self->_executor->ClearGlobals();
     self->_executor->SetViewConstants(
         kViewName,
@@ -1254,7 +1274,9 @@ void ForwardPipeline::ForwardColorPass::Execute(RenderPipelineContext& ctx, cons
 
     render::ColorAttachment colorAttachment{
         .Target = target.BackBufferView,
-        .Load = render::LoadAction::Clear,
+        .Load = frame.PipelineTarget != nullptr && frame.PipelineTarget->ContentDrawn
+                    ? render::LoadAction::Load
+                    : render::LoadAction::Clear,
         .Store = render::StoreAction::Store,
         .ClearValue = render::ColorClearValue{{0.02f, 0.02f, 0.03f, 1.0f}}};
     render::DepthStencilAttachment depthAttachment{
@@ -1295,6 +1317,9 @@ void ForwardPipeline::ForwardColorPass::Execute(RenderPipelineContext& ctx, cons
     self->_executor->Execute(encoder.get(), transparentList);
 
     cmd->EndRenderPass(std::move(encoder));
+    if (frame.PipelineTarget != nullptr) {
+        frame.PipelineTarget->ContentDrawn = true;
+    }
 }
 
 }  // namespace radray

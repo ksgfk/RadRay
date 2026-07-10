@@ -12,6 +12,9 @@
 #include <radray/render/sampler_cache.h>
 #include <radray/render/shader_variant_cache.h>
 #include <radray/render/shader_compiler/dxc.h>
+#ifdef RADRAY_ENABLE_VULKAN
+#include <radray/render/backend/vulkan_impl.h>
+#endif
 #include <radray/runtime/asset_manager.h>
 #include <radray/runtime/material_asset.h>
 #include <radray/runtime/shader_asset.h>
@@ -245,7 +248,9 @@ TEST_P(MeshPassExecutorTest, DrawsPerObjectColorIntoRenderTarget) {
 
     // draw list (提交材质渲染快照)。
     DrawList list;
-    ASSERT_TRUE(list.AddPrimitive(material.CreateSnapshot(), &proxy, "ForwardLit", 0, 1.0f));
+    auto materialSnapshot = material.CreateSnapshot();
+    ASSERT_TRUE(list.AddPrimitive(materialSnapshot, &proxy, "ForwardLit", 0, 1.0f));
+    ASSERT_TRUE(list.AddPrimitive(materialSnapshot, &proxy, "ForwardLit", 0, 2.0f));
     list.SortOpaque();
 
     // executor (per-object cbuffer 变量名 gPerObject)。
@@ -287,7 +292,7 @@ TEST_P(MeshPassExecutorTest, DrawsPerObjectColorIntoRenderTarget) {
     encoder->SetScissor(Rect{0, 0, kRtSize, kRtSize});
 
     const uint32_t submitted = executor.Execute(encoder.get(), list);
-    EXPECT_EQ(submitted, 1u) << _ctx.JoinCapturedErrors();
+    EXPECT_EQ(submitted, 2u) << _ctx.JoinCapturedErrors();
 
     cmd->EndRenderPass(std::move(encoder));
 
@@ -301,6 +306,35 @@ TEST_P(MeshPassExecutorTest, DrawsPerObjectColorIntoRenderTarget) {
     cmd->End();
 
     ASSERT_TRUE(_ctx.SubmitAndWait(cmd.get(), &reason)) << reason << " " << _ctx.JoinCapturedErrors();
+#ifdef RADRAY_ENABLE_VULKAN
+    if (_ctx.GetBackend() == TestBackend::Vulkan) {
+        EXPECT_EQ(vulkan::CastVkObject(cmd.get())->_renderPassCache.size(), 1u);
+    }
+#endif
+
+    // 同一 flight 的下一轮应重用参数表 native storage，并在 Reset 后完整重写绑定。
+    executor.BeginFrame();
+    _ctx.ClearCapturedErrors();
+    cmd->Begin();
+    ResourceBarrierDescriptor toRtAgain = BarrierTextureDescriptor{
+        .Target = rt.get(),
+        .Before = TextureState::CopySource,
+        .After = TextureState::RenderTarget};
+    cmd->ResourceBarrier(std::span{&toRtAgain, 1});
+    auto secondEncoderOpt = cmd->BeginRenderPass(rpDesc);
+    ASSERT_TRUE(secondEncoderOpt.HasValue()) << _ctx.JoinCapturedErrors();
+    auto secondEncoder = secondEncoderOpt.Release();
+    secondEncoder->SetViewport(vp);
+    secondEncoder->SetScissor(Rect{0, 0, kRtSize, kRtSize});
+    EXPECT_EQ(executor.Execute(secondEncoder.get(), list), 2u) << _ctx.JoinCapturedErrors();
+    cmd->EndRenderPass(std::move(secondEncoder));
+    cmd->End();
+    ASSERT_TRUE(_ctx.SubmitAndWait(cmd.get(), &reason)) << reason << " " << _ctx.JoinCapturedErrors();
+#ifdef RADRAY_ENABLE_VULKAN
+    if (_ctx.GetBackend() == TestBackend::Vulkan) {
+        EXPECT_EQ(vulkan::CastVkObject(cmd.get())->_renderPassCache.size(), 1u);
+    }
+#endif
 
     auto pixelsOpt = _ctx.ReadHostVisibleBuffer(rb.get(), readbackSize, &reason);
     ASSERT_TRUE(pixelsOpt.has_value()) << reason;

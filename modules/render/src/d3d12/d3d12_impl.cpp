@@ -9,6 +9,45 @@
 
 namespace radray::render::d3d12 {
 
+namespace {
+
+bool _SamplerKeysEqual(
+    std::span<const SamplerKey> lhs,
+    std::span<const SamplerKey> rhs) noexcept {
+    return lhs.size() == rhs.size() &&
+           (lhs.empty() || std::memcmp(lhs.data(), rhs.data(), lhs.size_bytes()) == 0);
+}
+
+}  // namespace
+
+size_t SamplerDescriptorTableKeyHashD3D12::operator()(
+    const SamplerDescriptorTableKeyD3D12& key) const noexcept {
+    return (*this)(std::span<const SamplerKey>{key.Samplers});
+}
+
+size_t SamplerDescriptorTableKeyHashD3D12::operator()(
+    std::span<const SamplerKey> key) const noexcept {
+    return HashData(key.data(), key.size_bytes());
+}
+
+bool SamplerDescriptorTableKeyEqualD3D12::operator()(
+    const SamplerDescriptorTableKeyD3D12& lhs,
+    const SamplerDescriptorTableKeyD3D12& rhs) const noexcept {
+    return _SamplerKeysEqual(lhs.Samplers, rhs.Samplers);
+}
+
+bool SamplerDescriptorTableKeyEqualD3D12::operator()(
+    const SamplerDescriptorTableKeyD3D12& lhs,
+    std::span<const SamplerKey> rhs) const noexcept {
+    return _SamplerKeysEqual(lhs.Samplers, rhs);
+}
+
+bool SamplerDescriptorTableKeyEqualD3D12::operator()(
+    std::span<const SamplerKey> lhs,
+    const SamplerDescriptorTableKeyD3D12& rhs) const noexcept {
+    return _SamplerKeysEqual(lhs, rhs.Samplers);
+}
+
 static LogLevel _MapD3D12ValidationLogLevel(D3D12_MESSAGE_SEVERITY severity) noexcept {
     switch (severity) {
         case D3D12_MESSAGE_SEVERITY_CORRUPTION: return LogLevel::Critical;
@@ -252,23 +291,18 @@ static std::optional<ResourceBindType> _GetResourceViewBindType(ResourceView* vi
     return std::nullopt;
 }
 
-static bool _CopyResourceViewToGpuHeap(
-    ResourceView* view,
-    GpuDescriptorHeapViewRAII& dstHeap,
-    uint32_t dstIndex) noexcept {
-    if (view == nullptr || !dstHeap.IsValid()) {
-        return false;
+static std::optional<D3D12_CPU_DESCRIPTOR_HANDLE> _GetResourceViewCpuHandle(ResourceView* view) noexcept {
+    if (view == nullptr) {
+        return std::nullopt;
     }
     const auto tag = view->GetTag();
     if (tag.HasFlag(RenderObjectTag::TextureView)) {
-        static_cast<TextureViewD3D12*>(view)->_heapView.CopyTo(0, 1, dstHeap, dstIndex);
-        return true;
+        return static_cast<TextureViewD3D12*>(view)->_heapView.HandleCpu();
     }
     if (tag.HasFlag(RenderObjectTag::AccelerationStructureView)) {
-        static_cast<AccelerationStructureViewD3D12*>(view)->_heapView.CopyTo(0, 1, dstHeap, dstIndex);
-        return true;
+        return static_cast<AccelerationStructureViewD3D12*>(view)->_heapView.HandleCpu();
     }
-    return false;
+    return std::nullopt;
 }
 
 static bool _ResolveBufferBindingRangeSizeD3D12(const BufferBindingDescriptor& desc, uint64_t& rangeSize) noexcept {
@@ -579,11 +613,11 @@ static bool _BindDescriptorSetD3D12(
             RADRAY_ERR_LOG("sampler descriptor table is unavailable for descriptor set {}", registerSpace);
             return false;
         }
-        if (!slot->SamplerHeapView.IsValid()) {
-            RADRAY_ERR_LOG("descriptor set {} has no sampler descriptor heap slice", registerSpace);
+        if (!table->ResolveSamplerTable(registerSpace) || slot->SamplerTable == nullptr) {
+            RADRAY_ERR_LOG("descriptor set {} failed to resolve sampler descriptor table", registerSpace);
             return false;
         }
-        bindTable(rootParameterIndex.value(), slot->SamplerHeapView.GetHeap()->HandleGpu(slot->SamplerHeapView.GetStart()));
+        bindTable(rootParameterIndex.value(), slot->SamplerTable->HandleGpu());
     }
     return true;
 }
@@ -738,6 +772,7 @@ static bool _BindShaderParameterTableD3D12(
         RADRAY_ERR_LOG("shader parameter table has invalid binding layout");
         return false;
     }
+    table->FlushDescriptorCopies();
     if (boundRootSig != rootSig) {
         if (graphicsRoot) {
             cmdList->_cmdList->SetGraphicsRootSignature(rootSig->_rootSig.Get());
@@ -1165,6 +1200,7 @@ void DeviceD3D12::DestroyImpl() noexcept {
     _cpuRtvAlloc = nullptr;
     _cpuDsvAlloc = nullptr;
     _cpuSamplerAlloc = nullptr;
+    _samplerDescriptorTables.clear();
     _gpuResHeap = nullptr;
     _gpuSamplerHeap = nullptr;
     _mainAlloc = nullptr;
@@ -2221,6 +2257,41 @@ Nullable<unique_ptr<ShaderBindingLayout>> DeviceD3D12::CreateShaderBindingLayout
     return unique_ptr<ShaderBindingLayout>{layout.Release()};
 }
 
+Nullable<const GpuDescriptorHeapViewRAII*> DeviceD3D12::GetOrCreateSamplerDescriptorTable(
+    std::span<const SamplerKey> keys,
+    std::span<const D3D12_CPU_DESCRIPTOR_HANDLE> sources) noexcept {
+    if (keys.empty() || keys.size() != sources.size() || _gpuSamplerHeap == nullptr) {
+        return nullptr;
+    }
+    if (auto it = _samplerDescriptorTables.find(keys); it != _samplerDescriptorTables.end()) {
+        return &it->second;
+    }
+
+    auto allocation = _gpuSamplerHeap->Allocate(static_cast<UINT>(keys.size()));
+    if (!allocation.has_value()) {
+        RADRAY_ERR_LOG("failed to allocate shared d3d12 sampler descriptor table");
+        return nullptr;
+    }
+    GpuDescriptorHeapViewRAII heapView{_gpuSamplerHeap.get(), allocation.value()};
+    for (size_t i = 0; i < sources.size(); ++i) {
+        if (sources[i].ptr == 0) {
+            RADRAY_ERR_LOG("shared d3d12 sampler descriptor table has an invalid source at {}", i);
+            return nullptr;
+        }
+        _device->CopyDescriptorsSimple(
+            1,
+            heapView.GetHeap()->HandleCpu(heapView.GetStart() + static_cast<UINT>(i)),
+            sources[i],
+            D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
+    }
+
+    SamplerDescriptorTableKeyD3D12 key{};
+    key.Samplers.assign(keys.begin(), keys.end());
+    auto [it, inserted] = _samplerDescriptorTables.emplace(std::move(key), std::move(heapView));
+    RADRAY_UNUSED(inserted);
+    return &it->second;
+}
+
 Nullable<unique_ptr<ShaderParameterTable>> DeviceD3D12::CreateShaderParameterTable(ShaderBindingLayout* layout_) noexcept {
     auto* rootSig = CastD3D12Object(layout_);
     if (rootSig == nullptr || !rootSig->IsValid()) {
@@ -2231,7 +2302,7 @@ Nullable<unique_ptr<ShaderParameterTable>> DeviceD3D12::CreateShaderParameterTab
     table->_sets.resize(rootSig->_registerSpaceCount);
     table->_constantData.resize(static_cast<uint32_t>(rootSig->_parameterBindings.size()));
     table->_bindlessArrays.resize(rootSig->_registerSpaceCount, nullptr);
-    // 为每个非 bindless 的 register space 分配 gpu descriptor heap 切片, 内联到 DescriptorSetSlot.
+    // Resource slice 由参数表独占；sampler table 在首次绑定时按状态组合从 Device 缓存取得。
     for (uint32_t registerSpace = 0; registerSpace < rootSig->_registerSpaceCount; ++registerSpace) {
         if (rootSig->HasBindlessSet(registerSpace)) {
             continue;
@@ -2252,13 +2323,9 @@ Nullable<unique_ptr<ShaderParameterTable>> DeviceD3D12::CreateShaderParameterTab
             slot.ResourceWritten.resize(resourceDescriptorCount, 0);
         }
         if (samplerDescriptorCount > 0) {
-            auto alloc = _gpuSamplerHeap->Allocate(samplerDescriptorCount);
-            if (!alloc.has_value()) {
-                RADRAY_ERR_LOG("failed to allocate d3d12 sampler descriptor heap slice");
-                return nullptr;
-            }
-            slot.SamplerHeapView = GpuDescriptorHeapViewRAII{_gpuSamplerHeap.get(), alloc.value()};
             slot.SamplerWritten.resize(samplerDescriptorCount, 0);
+            slot.SamplerKeys.resize(samplerDescriptorCount);
+            slot.SamplerSources.resize(samplerDescriptorCount);
         }
     }
     return unique_ptr<ShaderParameterTable>{table.release()};
@@ -2788,7 +2855,9 @@ Nullable<unique_ptr<Sampler>> DeviceD3D12::CreateSampler(const SamplerDescriptor
         heapView = {alloc, opt.value()};
     }
     heapView.GetHeap()->Create(rawDesc, heapView.GetStart());
-    return make_unique<SamplerD3D12>(this, std::move(heapView));
+    auto result = make_unique<SamplerD3D12>(this, std::move(heapView));
+    result->_key = BuildSamplerKey(desc);
+    return result;
 }
 
 Nullable<unique_ptr<BindlessArray>> DeviceD3D12::CreateBindlessArray(const BindlessArrayDescriptor& desc) noexcept {
@@ -3384,6 +3453,9 @@ bool CmdRenderPassD3D12::IsValid() const noexcept {
 }
 
 void CmdRenderPassD3D12::Destroy() noexcept {
+    _boundVbvs.clear();
+    _boundPso = nullptr;
+    _boundRootSig = nullptr;
     _cmdList = nullptr;
 }
 
@@ -3446,6 +3518,9 @@ void CmdRenderPassD3D12::BindIndexBuffer(IndexBufferView ibv) noexcept {
 
 void CmdRenderPassD3D12::BindGraphicsPipelineState(GraphicsPipelineState* pso) noexcept {
     auto ps = CastD3D12Object(pso);
+    if (_boundPso == ps) {
+        return;
+    }
     _cmdList->_cmdList->SetPipelineState(ps->_pso.Get());
     _cmdList->_cmdList->IASetPrimitiveTopology(ps->_topo);
     _boundPso = ps;
@@ -4615,9 +4690,26 @@ void ShaderParameterTableD3D12::Destroy() noexcept {
     _sets.clear();  // GpuDescriptorHeapViewRAII 析构自动释放 descriptor heap 切片
     _constantData.clear();
     _bindlessArrays.clear();
+    _pendingDescriptorCopies.clear();
+    _descriptorCopySources.clear();
+    _descriptorCopyDestinations.clear();
     _name.clear();
     _rootSig = nullptr;
     _device = nullptr;
+}
+
+void ShaderParameterTableD3D12::Reset() noexcept {
+    for (auto& set : _sets) {
+        std::ranges::fill(set.ResourceWritten, uint8_t{0});
+        std::ranges::fill(set.SamplerWritten, uint8_t{0});
+        std::ranges::fill(set.SamplerSources, D3D12_CPU_DESCRIPTOR_HANDLE{});
+        set.SamplerTable = nullptr;
+    }
+    for (auto& bytes : _constantData) {
+        bytes.clear();
+    }
+    std::ranges::fill(_bindlessArrays, nullptr);
+    _pendingDescriptorCopies.clear();
 }
 
 void ShaderParameterTableD3D12::SetDebugName(std::string_view name) noexcept {
@@ -4651,10 +4743,17 @@ bool ShaderParameterTableD3D12::SetResource(ShaderParameterId id, ResourceView* 
         RADRAY_ERR_LOG("internal error: resource heap index {} is out of range", ctx.HeapIndex);
         return false;
     }
-    if (!_CopyResourceViewToGpuHeap(view, ctx.Slot->ResHeapView, ctx.HeapIndex)) {
-        RADRAY_ERR_LOG("failed to copy resource descriptor for binding parameter id {}", id.Value);
+    const auto source = _GetResourceViewCpuHandle(view);
+    if (!source.has_value()) {
+        RADRAY_ERR_LOG("failed to resolve resource descriptor for binding parameter id {}", id.Value);
         return false;
     }
+    PendingDescriptorCopy copy{};
+    copy.Source = source.value();
+    copy.Destination = ctx.Slot->ResHeapView.GetHeap()->HandleCpu(
+        ctx.Slot->ResHeapView.GetStart() + ctx.HeapIndex);
+    copy.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+    StageDescriptorCopy(copy);
     ctx.Slot->ResourceWritten[ctx.HeapIndex] = 1;
     return true;
 }
@@ -4700,17 +4799,15 @@ bool ShaderParameterTableD3D12::SetSampler(ShaderParameterId id, Sampler* sample
         return false;
     }
     const auto& ctx = ctxOpt.value();
-    if (!ctx.Slot->SamplerHeapView.IsValid()) {
-        RADRAY_ERR_LOG("descriptor set has no sampler descriptor heap slice");
-        return false;
-    }
     if (ctx.HeapIndex >= ctx.Slot->SamplerWritten.size()) {
         RADRAY_ERR_LOG("internal error: sampler heap index {} is out of range", ctx.HeapIndex);
         return false;
     }
     auto* sam = CastD3D12Object(sampler);
-    sam->_samplerView.CopyTo(0, 1, ctx.Slot->SamplerHeapView, ctx.HeapIndex);
+    ctx.Slot->SamplerKeys[ctx.HeapIndex] = sam->_key;
+    ctx.Slot->SamplerSources[ctx.HeapIndex] = sam->_samplerView.HandleCpu();
     ctx.Slot->SamplerWritten[ctx.HeapIndex] = 1;
+    ctx.Slot->SamplerTable = nullptr;
     return true;
 }
 
@@ -4771,6 +4868,76 @@ bool ShaderParameterTableD3D12::IsFullyWritten() const noexcept {
             return false;
         }
     }
+    return true;
+}
+
+void ShaderParameterTableD3D12::StageDescriptorCopy(PendingDescriptorCopy copy) noexcept {
+    const auto existing = std::ranges::find_if(
+        _pendingDescriptorCopies,
+        [&](const PendingDescriptorCopy& pending) noexcept {
+            return pending.Type == copy.Type && pending.Destination.ptr == copy.Destination.ptr;
+        });
+    if (existing != _pendingDescriptorCopies.end()) {
+        *existing = copy;
+    } else {
+        _pendingDescriptorCopies.push_back(copy);
+    }
+}
+
+void ShaderParameterTableD3D12::FlushDescriptorCopies() noexcept {
+    if (_pendingDescriptorCopies.empty()) {
+        return;
+    }
+
+    _descriptorCopySources.clear();
+    _descriptorCopyDestinations.clear();
+    _descriptorCopySources.reserve(_pendingDescriptorCopies.size());
+    _descriptorCopyDestinations.reserve(_pendingDescriptorCopies.size());
+    constexpr D3D12_DESCRIPTOR_HEAP_TYPE types[] = {
+        D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
+        D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER,
+    };
+    for (const auto type : types) {
+        _descriptorCopySources.clear();
+        _descriptorCopyDestinations.clear();
+        for (const auto& copy : _pendingDescriptorCopies) {
+            if (copy.Type != type) {
+                continue;
+            }
+            _descriptorCopySources.push_back(copy.Source);
+            _descriptorCopyDestinations.push_back(copy.Destination);
+        }
+        if (_descriptorCopySources.empty()) {
+            continue;
+        }
+        _device->_device->CopyDescriptors(
+            static_cast<UINT>(_descriptorCopyDestinations.size()),
+            _descriptorCopyDestinations.data(),
+            nullptr,
+            static_cast<UINT>(_descriptorCopySources.size()),
+            _descriptorCopySources.data(),
+            nullptr,
+            type);
+    }
+    _pendingDescriptorCopies.clear();
+}
+
+bool ShaderParameterTableD3D12::ResolveSamplerTable(uint32_t registerSpace) noexcept {
+    if (_device == nullptr || registerSpace >= _sets.size()) {
+        return false;
+    }
+    auto& slot = _sets[registerSpace];
+    if (slot.SamplerWritten.empty() || slot.SamplerTable != nullptr) {
+        return true;
+    }
+    if (!std::ranges::all_of(slot.SamplerWritten, [](uint8_t written) noexcept { return written != 0; })) {
+        return false;
+    }
+    auto table = _device->GetOrCreateSamplerDescriptorTable(slot.SamplerKeys, slot.SamplerSources);
+    if (!table.HasValue()) {
+        return false;
+    }
+    slot.SamplerTable = table.Get();
     return true;
 }
 

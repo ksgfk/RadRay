@@ -9,6 +9,7 @@
 
 #include <radray/render/backend/d3d12_helper.h>
 #include <radray/render/common.h>
+#include <radray/render/sampler_cache.h>
 
 namespace radray::render::d3d12 {
 
@@ -276,6 +277,31 @@ static_assert(is_allocator<GpuDescriptorAllocator, GpuDescriptorAllocator::Alloc
 using CpuDescriptorHeapViewRAII = DescriptorHeapViewRAII<CpuDescriptorAllocator, CpuDescriptorAllocator::Allocation>;
 using GpuDescriptorHeapViewRAII = DescriptorHeapViewRAII<GpuDescriptorAllocator, GpuDescriptorAllocator::Allocation>;
 
+struct SamplerDescriptorTableKeyD3D12 {
+    vector<SamplerKey> Samplers;
+};
+
+struct SamplerDescriptorTableKeyHashD3D12 {
+    using is_transparent = void;
+
+    size_t operator()(const SamplerDescriptorTableKeyD3D12& key) const noexcept;
+    size_t operator()(std::span<const SamplerKey> key) const noexcept;
+};
+
+struct SamplerDescriptorTableKeyEqualD3D12 {
+    using is_transparent = void;
+
+    bool operator()(
+        const SamplerDescriptorTableKeyD3D12& lhs,
+        const SamplerDescriptorTableKeyD3D12& rhs) const noexcept;
+    bool operator()(
+        const SamplerDescriptorTableKeyD3D12& lhs,
+        std::span<const SamplerKey> rhs) const noexcept;
+    bool operator()(
+        std::span<const SamplerKey> lhs,
+        const SamplerDescriptorTableKeyD3D12& rhs) const noexcept;
+};
+
 class DXGIFactoryImpl final : public DXGIFactory {
 public:
     DXGIFactoryImpl(
@@ -364,6 +390,10 @@ public:
 
     Nullable<unique_ptr<RootSigD3D12>> CreateRootSignatureInternal(const ShaderBindingLayoutDescriptor& desc) noexcept;
 
+    Nullable<const GpuDescriptorHeapViewRAII*> GetOrCreateSamplerDescriptorTable(
+        std::span<const SamplerKey> keys,
+        std::span<const D3D12_CPU_DESCRIPTOR_HANDLE> sources) noexcept;
+
     void TryDrainValidationMessages();
 
     ComPtr<ID3D12Device> _device;
@@ -377,6 +407,12 @@ public:
     unique_ptr<CpuDescriptorAllocator> _cpuSamplerAlloc;
     unique_ptr<GpuDescriptorAllocator> _gpuResHeap;
     unique_ptr<GpuDescriptorAllocator> _gpuSamplerHeap;
+    unordered_map<
+        SamplerDescriptorTableKeyD3D12,
+        GpuDescriptorHeapViewRAII,
+        SamplerDescriptorTableKeyHashD3D12,
+        SamplerDescriptorTableKeyEqualD3D12>
+        _samplerDescriptorTables;
     DeviceDetail _detail;
     CD3DX12FeatureSupport _features;
     bool _isAllowTearing = false;
@@ -987,18 +1023,23 @@ public:
 
 class ShaderParameterTableD3D12 final : public ShaderParameterTable {
 public:
-    /**
-     * 一个 register space 对应的 GPU descriptor heap 切片. 本质上只是对 DescriptorHeap 上某一段的引用,
-     * 加上写入标记, 因此内联在 ShaderParameterTableD3D12 中, 不再单独堆分配.
-     * 未使用 (无 resource/sampler descriptor) 的 space 对应的 slot 保持 heap view 无效即可.
-     */
+    struct PendingDescriptorCopy {
+        D3D12_CPU_DESCRIPTOR_HANDLE Source{};
+        D3D12_CPU_DESCRIPTOR_HANDLE Destination{};
+        D3D12_DESCRIPTOR_HEAP_TYPE Type{D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV};
+    };
+
+    /// 一个 register space 对应的 descriptor 状态。Resource descriptor 为每张参数表独占；
+    /// sampler 只保存 CPU 来源与状态 key，绑定时按完整组合取得 Device 级共享 GPU table。
     struct DescriptorSetSlot {
         GpuDescriptorHeapViewRAII ResHeapView;
-        GpuDescriptorHeapViewRAII SamplerHeapView;
+        const GpuDescriptorHeapViewRAII* SamplerTable{nullptr};
         vector<uint8_t> ResourceWritten;
         vector<uint8_t> SamplerWritten;
+        vector<SamplerKey> SamplerKeys;
+        vector<D3D12_CPU_DESCRIPTOR_HANDLE> SamplerSources;
 
-        bool HasStorage() const noexcept { return ResHeapView.IsValid() || SamplerHeapView.IsValid(); }
+        bool HasStorage() const noexcept { return ResHeapView.IsValid() || !SamplerWritten.empty(); }
     };
 
     ShaderParameterTableD3D12(DeviceD3D12* device, RootSigD3D12* rootSig) noexcept;
@@ -1007,6 +1048,8 @@ public:
     bool IsValid() const noexcept override;
 
     void Destroy() noexcept override;
+
+    void Reset() noexcept override;
 
     void SetDebugName(std::string_view name) noexcept override;
 
@@ -1023,6 +1066,12 @@ public:
     bool SetBindlessArray(ShaderParameterId id, BindlessArray* array) noexcept override;
 
     bool IsFullyWritten() const noexcept;
+
+    void StageDescriptorCopy(PendingDescriptorCopy copy) noexcept;
+
+    void FlushDescriptorCopies() noexcept;
+
+    bool ResolveSamplerTable(uint32_t registerSpace) noexcept;
 
     Nullable<DescriptorSetSlot*> GetDescriptorSetSlot(uint32_t registerSpace) noexcept;
     Nullable<const DescriptorSetSlot*> GetDescriptorSetSlot(uint32_t registerSpace) const noexcept;
@@ -1042,6 +1091,9 @@ public:
     vector<DescriptorSetSlot> _sets;
     vector<vector<byte>> _constantData;
     vector<BindlessArray*> _bindlessArrays;
+    vector<PendingDescriptorCopy> _pendingDescriptorCopies;
+    vector<D3D12_CPU_DESCRIPTOR_HANDLE> _descriptorCopySources;
+    vector<D3D12_CPU_DESCRIPTOR_HANDLE> _descriptorCopyDestinations;
     string _name;
 };
 
@@ -1061,6 +1113,7 @@ public:
 public:
     DeviceD3D12* _device;
     CpuDescriptorHeapViewRAII _samplerView;
+    SamplerKey _key{};
     string _name;
 };
 

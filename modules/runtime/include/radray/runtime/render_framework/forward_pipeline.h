@@ -107,6 +107,7 @@ public:
     Nullable<IStandardMaterialFactory*> GetStandardMaterialFactory() noexcept override;
 
 protected:
+    void OnBeginFrame(RenderPipelineContext& ctx) override;
     void OnBuildCameraList(RenderPipelineContext& ctx, RenderCameraList& cameras) override;
     void OnSetupCamera(RenderPipelineContext& ctx, const RenderCamera& camera) override;
     void OnSetupLights(RenderPipelineContext& ctx, const RenderCamera& camera) override;
@@ -146,6 +147,7 @@ private:
     struct FrameData {
         Scene* RenderScene{nullptr};
         const AppFrameTarget* Target{nullptr};
+        RenderPipelineTarget* PipelineTarget{nullptr};
         uint32_t Width{0};
         uint32_t Height{0};
         uint32_t Flight{0};

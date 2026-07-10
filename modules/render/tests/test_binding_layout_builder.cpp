@@ -57,6 +57,21 @@ public:
 
     void Destroy() noexcept override { _valid = false; }
 
+    void Reset() noexcept override {
+        LastResourceId.reset();
+        LastResourceView = nullptr;
+        LastResourceKind = LastWrittenResourceKind::None;
+        LastBufferBinding.reset();
+        LastResourceArrayIndex = 0;
+        LastSamplerId.reset();
+        LastSampler = nullptr;
+        LastSamplerArrayIndex = 0;
+        LastBytesId.reset();
+        LastBytes.clear();
+        LastBindlessId.reset();
+        LastBindlessArray = nullptr;
+    }
+
     void SetDebugName(std::string_view name) noexcept override { _name = string{name}; }
 
     ShaderBindingLayout* GetShaderBindingLayout() const noexcept override { return _layout; }
@@ -249,6 +264,13 @@ TEST(ShaderParameterTableTest, NameHelpersResolveThroughShaderBindingLayout) {
     EXPECT_EQ(table.LastBufferBinding->Stride, bufferDesc.Stride);
     EXPECT_EQ(table.LastBufferBinding->Usage, bufferDesc.Usage);
     EXPECT_FALSE(table.SetSampler("Missing", &sampler));
+
+    table.Reset();
+    EXPECT_FALSE(table.LastResourceId.has_value());
+    EXPECT_EQ(table.LastResourceKind, FakeShaderParameterTable::LastWrittenResourceKind::None);
+    EXPECT_FALSE(table.LastSamplerId.has_value());
+    EXPECT_FALSE(table.LastBytesId.has_value());
+    EXPECT_FALSE(table.LastBindlessId.has_value());
 }
 
 TEST(ShaderBindingLayoutTest, ExposesPublicShaderAbiOnly) {

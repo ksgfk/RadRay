@@ -58,13 +58,26 @@ void MeshPassExecutor::BeginFrame(uint32_t flightIndex) noexcept {
     }
     _currentFlight = flightIndex < _flights.size() ? flightIndex : 0;
     FlightResources& fr = _flights[_currentFlight];
-    fr.Tables.clear();
+    for (ParameterTableCache& cache : fr.TableCaches) {
+        if (cache.Used < cache.Tables.size()) {
+            cache.Tables.resize(cache.Used);
+        }
+        cache.Used = 0;
+    }
+    std::erase_if(fr.TableCaches, [](const ParameterTableCache& cache) noexcept {
+        return cache.Tables.empty();
+    });
+    std::erase_if(_resolvedDrawStates, [](const ResolvedDrawState& state) noexcept {
+        return state.Material.expired();
+    });
     fr.Arena.Reset();
+    _viewBindingValid = false;
 }
 
 void MeshPassExecutor::SetViewConstants(std::string_view viewCBufferName, std::span<const byte> data) noexcept {
     _viewName.assign(viewCBufferName.begin(), viewCBufferName.end());
     _viewData.assign(data.begin(), data.end());
+    _viewBindingValid = false;
 }
 
 void MeshPassExecutor::SetGlobalTexture(std::string_view name, render::TextureView* view) noexcept {
@@ -100,6 +113,98 @@ void MeshPassExecutor::ClearGlobals() noexcept {
     _globalTextures.clear();
     _globalSamplers.clear();
     _globalKeywords.clear();
+}
+
+Nullable<render::ShaderParameterTable*> MeshPassExecutor::AcquireParameterTable(
+    FlightResources& resources,
+    render::ShaderBindingLayout* layout) noexcept {
+    ParameterTableCache* cache = nullptr;
+    for (ParameterTableCache& candidate : resources.TableCaches) {
+        if (candidate.Layout == layout) {
+            cache = &candidate;
+            break;
+        }
+    }
+    if (cache == nullptr) {
+        cache = &resources.TableCaches.emplace_back(ParameterTableCache{.Layout = layout});
+    }
+    if (cache->Used == cache->Tables.size()) {
+        auto tableOpt = _device->CreateShaderParameterTable(layout);
+        if (!tableOpt.HasValue()) {
+            return nullptr;
+        }
+        cache->Tables.emplace_back(tableOpt.Release());
+    }
+    render::ShaderParameterTable* table = cache->Tables[cache->Used++].get();
+    table->Reset();
+    return table;
+}
+
+bool MeshPassExecutor::EnsureViewBinding(FlightResources& resources) noexcept {
+    if (_viewBindingValid) {
+        return true;
+    }
+    if (_viewData.empty()) {
+        return false;
+    }
+
+    auto alloc = resources.Arena.Allocate(_viewData.size());
+    if (alloc.Target == nullptr || alloc.Mapped == nullptr) {
+        RADRAY_ERR_LOG("MeshPassExecutor: per-view cbuffer allocation failed");
+        return false;
+    }
+    std::memcpy(alloc.Mapped, _viewData.data(), _viewData.size());
+    _viewBinding.Target = alloc.Target;
+    _viewBinding.Range = render::BufferRange{.Offset = alloc.Offset, .Size = _viewData.size()};
+    _viewBinding.Usage = render::BufferViewUsage::CBuffer;
+    _viewBindingValid = true;
+    return true;
+}
+
+Nullable<const MeshPassExecutor::ResolvedDrawState*> MeshPassExecutor::ResolveDrawState(const DrawItem& item) noexcept {
+    for (const ResolvedDrawState& state : _resolvedDrawStates) {
+        const bool sameOwner = !state.Material.owner_before(item.Material) &&
+                               !item.Material.owner_before(state.Material);
+        if (!sameOwner || state.PassIndex != item.PassIndex ||
+            state.GlobalKeywords.size() != _globalKeywords.size()) {
+            continue;
+        }
+        bool sameKeywords = true;
+        for (size_t i = 0; i < _globalKeywords.size(); ++i) {
+            if (state.GlobalKeywords[i] != _globalKeywords[i]) {
+                sameKeywords = false;
+                break;
+            }
+        }
+        if (sameKeywords) {
+            return &state;
+        }
+    }
+
+    auto variantOpt = item.Material->ResolveVariant(
+        *_variantCache, item.PassIndex, std::span<const std::string_view>{_globalKeywords});
+    if (!variantOpt.HasValue()) {
+        RADRAY_ERR_LOG("MeshPassExecutor: failed to resolve shader variant for pass {}", item.PassIndex);
+        return nullptr;
+    }
+    const render::CompiledShaderVariant* variant = variantOpt.Get();
+    auto psoOpt = ResolvePso(item, *variant);
+    if (!psoOpt.HasValue()) {
+        return nullptr;
+    }
+
+    vector<string> globalKeywords;
+    globalKeywords.reserve(_globalKeywords.size());
+    for (std::string_view keyword : _globalKeywords) {
+        globalKeywords.emplace_back(keyword);
+    }
+    ResolvedDrawState& state = _resolvedDrawStates.emplace_back(ResolvedDrawState{
+        .Material = item.Material,
+        .PassIndex = item.PassIndex,
+        .GlobalKeywords = std::move(globalKeywords),
+        .Variant = variant,
+        .Pso = psoOpt.Get()});
+    return &state;
 }
 
 Nullable<render::GraphicsPipelineState*> MeshPassExecutor::ResolvePso(
@@ -162,21 +267,20 @@ bool MeshPassExecutor::SubmitItem(render::GraphicsCommandEncoder* encoder, const
         return false;
     }
 
-    // 1. 解析变体 (并入管线级全局 keyword, 如 _POINT_SHADOWS)。
-    auto variantOpt = item.Material->ResolveVariant(
-        *_variantCache, item.PassIndex, std::span<const std::string_view>{_globalKeywords});
-    if (!variantOpt.HasValue()) {
-        RADRAY_ERR_LOG("MeshPassExecutor: failed to resolve shader variant for pass {}", item.PassIndex);
+    if (_flights.empty()) {
+        RADRAY_ERR_LOG("MeshPassExecutor: no flight resources (BeginFrame not called?)");
         return false;
     }
-    const render::CompiledShaderVariant& variant = *variantOpt.Get();
+    FlightResources& fr = _flights[_currentFlight];
 
-    // 2. PSO。
-    auto psoOpt = ResolvePso(item, variant);
-    if (!psoOpt.HasValue()) {
+    // 1-2. 同一 material/pass/global-keyword 状态跨帧复用，快照失效时由 BeginFrame 回收。
+    auto stateOpt = ResolveDrawState(item);
+    if (!stateOpt.HasValue()) {
         return false;
     }
-    render::GraphicsPipelineState* pso = psoOpt.Get();
+    const ResolvedDrawState& state = *stateOpt.Get();
+    const render::CompiledShaderVariant& variant = *state.Variant;
+    render::GraphicsPipelineState* pso = state.Pso;
 
     // 3. 取几何 (VB/IB + 索引范围)。
     MeshDrawArgs args = item.Proxy->GetDrawArgs(item.SectionIndex);
@@ -194,19 +298,13 @@ bool MeshPassExecutor::SubmitItem(render::GraphicsCommandEncoder* encoder, const
         return false;
     }
 
-    if (_flights.empty()) {
-        RADRAY_ERR_LOG("MeshPassExecutor: no flight resources (BeginFrame not called?)");
-        return false;
-    }
-    FlightResources& fr = _flights[_currentFlight];
-
     // 4. 参数表 (每条 draw 独立)。
-    auto tableOpt = _device->CreateShaderParameterTable(variant.Layout);
+    auto tableOpt = AcquireParameterTable(fr, variant.Layout);
     if (!tableOpt.HasValue()) {
         RADRAY_ERR_LOG("MeshPassExecutor: failed to create shader parameter table");
         return false;
     }
-    render::ShaderParameterTable* table = fr.Tables.emplace_back(tableOpt.Release()).get();
+    render::ShaderParameterTable* table = tableOpt.Get();
 
     // 4a. per-object 常量 (LocalToWorld)。cbuffer 名字未在 shader 声明时静默跳过。
     if (!_perObjectName.empty()) {
@@ -236,15 +334,10 @@ bool MeshPassExecutor::SubmitItem(render::GraphicsCommandEncoder* encoder, const
     if (!_viewName.empty() && !_viewData.empty()) {
         auto pid = table->GetShaderBindingLayout()->FindParameterId(_viewName);
         if (pid.has_value()) {
-            auto alloc = fr.Arena.Allocate(_viewData.size());
-            if (alloc.Target != nullptr && alloc.Mapped != nullptr) {
-                std::memcpy(alloc.Mapped, _viewData.data(), _viewData.size());
-                render::BufferBindingDescriptor bbd{};
-                bbd.Target = alloc.Target;
-                bbd.Range = render::BufferRange{.Offset = alloc.Offset, .Size = _viewData.size()};
-                bbd.Usage = render::BufferViewUsage::CBuffer;
-                table->SetResource(pid.value(), bbd);
+            if (!EnsureViewBinding(fr)) {
+                return false;
             }
+            table->SetResource(pid.value(), _viewBinding);
         }
     }
 

@@ -11,7 +11,7 @@ std::optional<uint32_t> ShaderKeywordSet::Add(std::string_view name) noexcept {
         RADRAY_ERR_LOG("ShaderKeywordSet::Add: empty keyword name");
         return std::nullopt;
     }
-    if (_index.find(string{name}) != _index.end()) {
+    if (_index.find(name) != _index.end()) {
         RADRAY_ERR_LOG("ShaderKeywordSet::Add: duplicate keyword '{}'", name);
         return std::nullopt;
     }
@@ -26,7 +26,7 @@ std::optional<uint32_t> ShaderKeywordSet::Add(std::string_view name) noexcept {
 }
 
 std::optional<uint32_t> ShaderKeywordSet::IndexOf(std::string_view name) const noexcept {
-    auto it = _index.find(string{name});
+    auto it = _index.find(name);
     if (it == _index.end()) {
         return std::nullopt;
     }
@@ -36,7 +36,7 @@ std::optional<uint32_t> ShaderKeywordSet::IndexOf(std::string_view name) const n
 uint64_t ShaderKeywordSet::Project(std::span<const std::string_view> enabled) const noexcept {
     uint64_t mask = 0;
     for (std::string_view name : enabled) {
-        auto it = _index.find(string{name});
+        auto it = _index.find(name);
         if (it == _index.end()) {
             continue;  // 未声明的 keyword 忽略
         }
@@ -95,6 +95,14 @@ Nullable<const render::CompiledShaderVariant*> ShaderAsset::GetOrCreateVariant(
     const ShaderPassDesc& pass = _passes[passIndex];
 
     const uint64_t bitmask = _keywords.Project(enabledKeywords);
+    const render::ShaderVariantKey key{
+        .ProgramId = _programId,
+        .PassIndex = passIndex,
+        .Bitmask = bitmask};
+    if (auto cached = cache.Find(key); cached.HasValue()) {
+        return cached;
+    }
+
     vector<string> defineStrings = _keywords.ResolveDefines(bitmask);
     vector<std::string_view> defineViews;
     defineViews.reserve(defineStrings.size());

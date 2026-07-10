@@ -220,7 +220,6 @@ public:
         void AttachInput(ImGuiSystem* system);
         NativeWindow* GetWindow() const noexcept;
         render::SwapChain* GetSwapChain() const noexcept;
-        render::TextureView* GetOrCreateBackBufferView(const render::SwapChainFrame& frame, uint32_t ownerFlightIndex) const noexcept;
     };
 
     ImGuiSystem() noexcept = default;

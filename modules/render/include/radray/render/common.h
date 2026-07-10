@@ -1735,6 +1735,10 @@ public:
 
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::ShaderParameterTable; }
 
+    /// Clears staged bindings while retaining backend descriptor storage for reuse.
+    /// Commands that previously referenced this table must have completed first.
+    virtual void Reset() noexcept = 0;
+
     virtual ShaderBindingLayout* GetShaderBindingLayout() const noexcept = 0;
 
     virtual bool SetResource(ShaderParameterId id, ResourceView* view, uint32_t arrayIndex = 0) noexcept = 0;

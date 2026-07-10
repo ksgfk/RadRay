@@ -184,14 +184,13 @@ uint32_t MaterialConstantBinder::Bind(
     }
 
     uint32_t bound = 0;
-    vector<byte> staging;  // 复用: 每块清零后打包。
     for (const BlockLayout& block : blocks) {
         if (IsReserved(block.Name, reservedBlockNames) || block.Size == 0) {
             continue;
         }
 
         // 打包整块: 先清零, 再叠加命中该块的值 (整块覆盖 or 字段写入)。
-        staging.assign(block.Size, byte{0});
+        _stagingScratch.assign(block.Size, byte{0});
         bool anyHit = false;
 
         for (const MaterialConstantValue& v : values) {
@@ -201,7 +200,7 @@ uint32_t MaterialConstantBinder::Bind(
             // 1) 整块覆盖: value 名字 == 块名 (对应 SetConstantBlock / 按块名 SetVector)。
             if (v.Name == block.Name) {
                 const size_t n = std::min<size_t>(v.Bytes.size(), block.Size);
-                std::memcpy(staging.data(), v.Bytes.data(), n);
+                std::memcpy(_stagingScratch.data(), v.Bytes.data(), n);
                 anyHit = true;
                 continue;
             }
@@ -215,7 +214,7 @@ uint32_t MaterialConstantBinder::Bind(
                 }
                 const size_t cap = block.Size - f.Offset;
                 const size_t n = std::min<size_t>({v.Bytes.size(), static_cast<size_t>(f.Size), cap});
-                std::memcpy(staging.data() + f.Offset, v.Bytes.data(), n);
+                std::memcpy(_stagingScratch.data() + f.Offset, v.Bytes.data(), n);
                 anyHit = true;
                 break;
             }
@@ -228,7 +227,7 @@ uint32_t MaterialConstantBinder::Bind(
         // 按块的绑定类型提交。
         if (block.Kind == render::ShaderParameterKind::Constant) {
             // push / root constant: 整块 SetBytes。
-            if (table.SetBytes(block.Id, staging.data(), block.Size)) {
+            if (table.SetBytes(block.Id, _stagingScratch.data(), block.Size)) {
                 ++bound;
             }
         } else {
@@ -238,7 +237,7 @@ uint32_t MaterialConstantBinder::Bind(
                 RADRAY_ERR_LOG("MaterialConstantBinder: cbuffer arena allocation failed for block '{}'", block.Name);
                 continue;
             }
-            std::memcpy(alloc.Mapped, staging.data(), block.Size);
+            std::memcpy(alloc.Mapped, _stagingScratch.data(), block.Size);
             render::BufferBindingDescriptor bbd{};
             bbd.Target = alloc.Target;
             bbd.Range = render::BufferRange{.Offset = alloc.Offset, .Size = block.Size};

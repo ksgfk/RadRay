@@ -1313,10 +1313,6 @@ render::SwapChain* ImGuiSystem::ViewportWindow::GetSwapChain() const noexcept {
     return Window != nullptr ? Window->GetSwapChain() : nullptr;
 }
 
-render::TextureView* ImGuiSystem::ViewportWindow::GetOrCreateBackBufferView(const render::SwapChainFrame& frame, uint32_t ownerFlightIndex) const noexcept {
-    return Window != nullptr ? Window->GetOrCreateBackBufferView(frame, ownerFlightIndex) : nullptr;
-}
-
 Nullable<unique_ptr<ImGuiSystem>> ImGuiSystem::Create(const ImGuiSystemDescriptor& desc) {
     auto system = make_unique<ImGuiSystem>();
     if (!system->Initialize(desc)) {

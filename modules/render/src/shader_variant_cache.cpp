@@ -68,14 +68,21 @@ public:
         _layoutCache = nullptr;
     }
 
+    Nullable<const CompiledShaderVariant*> Find(const ShaderVariantKey& key) const noexcept override {
+        if (auto it = _cache.find(key); it != _cache.end()) {
+            return &it->second.Variant;
+        }
+        return nullptr;
+    }
+
     Nullable<const CompiledShaderVariant*> GetOrCreate(const ShaderVariantDescriptor& desc) noexcept override {
         auto keyOpt = BuildShaderVariantKey(desc);
         if (!keyOpt.has_value()) {
             return nullptr;
         }
         const ShaderVariantKey& key = keyOpt.value();
-        if (auto it = _cache.find(key); it != _cache.end()) {
-            return &it->second.Variant;
+        if (auto cached = Find(key); cached.HasValue()) {
+            return cached;
         }
         if (desc.Stages.empty()) {
             RADRAY_ERR_LOG("shader variant cache: descriptor has no stages");

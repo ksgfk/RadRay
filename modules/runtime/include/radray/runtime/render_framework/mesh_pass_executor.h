@@ -16,6 +16,7 @@ namespace radray {
 
 class DrawList;
 struct DrawItem;
+struct MaterialRenderSnapshot;
 
 namespace render {
 class SamplerCache;
@@ -33,12 +34,12 @@ class SamplerCache;
 ///     5. encoder: BindPSO / BindVB / BindIB / BindShaderParameters / DrawIndexed
 ///
 /// 设计要点:
-/// - 每个 draw item 分配独立的 ShaderParameterTable (BindShaderParameters 立即录制,
-///   复用同一 table 会让后一次 SetResource 覆盖前一次已引用的描述符)。
+/// - 每个 draw item 使用独立的 ShaderParameterTable storage (BindShaderParameters 立即录制,
+///   帧内不能覆盖)。同一 flight 再次使用且 fence 完成后，table 按 binding layout 重置复用。
 /// - per-object / per-view 常量走真实 cbuffer (CBufferArena + SetResource CBuffer);
 ///   材质常量由 MaterialConstantBinder 按块的绑定类型走 push constant 或 CBV, 系统块名被跳过。
-/// - 帧内分配的 table / arena buffer 需存活到命令提交完成; 调用方在 SubmitAndWait 后
-///   再调用 BeginFrame 回收。
+/// - table / arena buffer 需存活到命令提交完成; 调用方仅在对应 flight fence 完成后
+///   再调用 BeginFrame 重置复用。
 class MeshPassExecutor {
 public:
     /// per-object 常量布局 (对应 Unity 的 UnityPerDraw / UE5 的 FPrimitiveUniformShaderParameters 精简版)。
@@ -57,13 +58,13 @@ public:
     MeshPassExecutor(const MeshPassExecutor&) = delete;
     MeshPassExecutor& operator=(const MeshPassExecutor&) = delete;
 
-    /// 开始录制指定 flight 的一帧: 回收 *该 flight* 上一轮分配的 table / arena。
+    /// 开始录制指定 flight 的一帧: 重置 *该 flight* 上一轮使用的 table / arena。
     /// 每个 flight 持有独立的 table / arena; 调用方保证同一 flightIndex 的上一轮命令
     /// 已随 fence 完成 (双缓冲下即 N-2 帧), 故此处回收不会触及仍在飞行中的其他 flight。
     void BeginFrame(uint32_t flightIndex = 0) noexcept;
 
-    /// 设置一个 per-view 常量块 (可选)。传入的字节会在每次 draw 前写入名为
-    /// viewCBufferName 的 cbuffer。传空 name 关闭该功能。
+    /// 设置一个 per-view 常量块 (可选)。传入的字节在下一次需要它的 draw 前上传一次，
+    /// 同一设置下的后续 draw 复用该 cbuffer。传空 name 关闭该功能。
     void SetViewConstants(std::string_view viewCBufferName, std::span<const byte> data) noexcept;
 
     /// 设置管线级 (per-pass) 的全局纹理 / 采样器。每次 draw 前按名字绑定 (名字未在 shader
@@ -90,14 +91,36 @@ private:
         const DrawItem& item,
         const render::CompiledShaderVariant& variant) noexcept;
 
-    // 每个 flight 独立持有 cbuffer arena + 帧内参数表, 避免在 GPU 仍读取上一帧描述符时
-    // 就 Reset/clear 导致描述符堆槽位被覆盖 (D3D12 STATIC descriptor 校验错误)。
+    struct ParameterTableCache {
+        render::ShaderBindingLayout* Layout{nullptr};
+        vector<unique_ptr<render::ShaderParameterTable>> Tables;
+        size_t Used{0};
+    };
+
+    struct ResolvedDrawState {
+        weak_ptr<const MaterialRenderSnapshot> Material;
+        uint32_t PassIndex{0};
+        vector<string> GlobalKeywords;
+        const render::CompiledShaderVariant* Variant{nullptr};
+        render::GraphicsPipelineState* Pso{nullptr};
+    };
+
+    // 每个 flight 独立持有 cbuffer arena + 参数表高水位缓存，避免在 GPU 仍读取上一帧
+    // descriptor 时就 Reset 导致描述符堆槽位被覆盖 (D3D12 STATIC descriptor 校验错误)。
     struct FlightResources {
         render::CBufferArena Arena;
-        vector<unique_ptr<render::ShaderParameterTable>> Tables;  // 帧内存活
+        vector<ParameterTableCache> TableCaches;
 
         explicit FlightResources(render::Device* device) noexcept : Arena(device) {}
     };
+
+    Nullable<render::ShaderParameterTable*> AcquireParameterTable(
+        FlightResources& resources,
+        render::ShaderBindingLayout* layout) noexcept;
+
+    bool EnsureViewBinding(FlightResources& resources) noexcept;
+
+    Nullable<const ResolvedDrawState*> ResolveDrawState(const DrawItem& item) noexcept;
 
     render::Device* _device{nullptr};
     render::ShaderVariantCache* _variantCache{nullptr};
@@ -106,6 +129,8 @@ private:
     std::string _perObjectName;
     std::string _viewName;
     vector<byte> _viewData;
+    render::BufferBindingDescriptor _viewBinding{};
+    bool _viewBindingValid{false};
     // 管线级全局纹理 / 采样器 (per-pass, 非 per-material)。名字借用调用方存储。
     struct GlobalTexture {
         std::string Name;
@@ -119,6 +144,7 @@ private:
     vector<GlobalSampler> _globalSamplers;
     // 管线级全局 keyword (per-pass, 非 per-material)。名字借用调用方存储。
     vector<std::string_view> _globalKeywords;
+    vector<ResolvedDrawState> _resolvedDrawStates;
     vector<FlightResources> _flights;
     uint32_t _currentFlight{0};
     // 材质常量打包器: 用变体反射把散字段打进所属 cbuffer 块, 整块提交 (push constant / CBV)。

@@ -36,7 +36,6 @@ public:
     struct BackBufferView {
         render::Texture* BackBuffer{nullptr};
         unique_ptr<render::TextureView> View;
-        uint32_t FlightIndex{0};
         // 该 backbuffer 上一次录制后遗留的状态。首次使用 / swapchain 重建后为 Undefined,
         // 一帧 RenderTarget→Present 后为 Present。供下一帧起始 barrier 的 Before 状态使用。
         render::TextureStates State{render::TextureState::Undefined};
@@ -57,7 +56,7 @@ public:
     NativeWindow* GetNativeWindow() const noexcept;
     render::SwapChain* GetSwapChain() const noexcept;
     bool IsMainWindow() const noexcept;
-    render::TextureView* GetOrCreateBackBufferView(const render::SwapChainFrame& frame, uint32_t ownerFlightIndex) noexcept;
+    render::TextureView* GetOrCreateBackBufferView(const render::SwapChainFrame& frame) noexcept;
     /// 读 / 写指定 backbuffer 索引的遗留状态(供起始/收尾 barrier 使用)。
     render::TextureStates GetBackBufferState(uint32_t backBufferIndex) const noexcept;
     void SetBackBufferState(uint32_t backBufferIndex, render::TextureStates state) noexcept;
@@ -67,9 +66,6 @@ public:
     bool NeedsSwapChainRecreate(std::optional<render::PresentMode> desiredPresentMode) const noexcept;
     void ResetSwapChainRecreateRequest() noexcept;
     bool RecreateSwapChain(uint32_t width, uint32_t height, render::PresentMode presentMode) noexcept;
-
-    /// 释放本窗口归属于指定 flight 的 backbuffer view（该 flight 渲染完成后调用）。
-    void ReleaseBackBufferViewsForFlight(uint32_t flightIndex) noexcept;
 
 private:
     friend class WindowManager;
@@ -113,9 +109,6 @@ public:
     void DetachAllSwapChains() noexcept;
     NativeWindow* FindMainNativeWindow(NativeWindowType type) const noexcept;
     NativeWindow* FindFirstNativeWindow(NativeWindowType type) const noexcept;
-
-    /// 释放所有窗口中归属于指定 flight 的 backbuffer view（该 flight 渲染完成后调用）。
-    void ReleaseBackBufferViewsForFlight(uint32_t flightIndex) noexcept;
 
 private:
     Application* _app;

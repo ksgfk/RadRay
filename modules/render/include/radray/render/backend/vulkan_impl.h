@@ -283,6 +283,13 @@ public:
 
 class CommandBufferVulkan final : public CommandBuffer {
 public:
+    struct RenderPassCacheEntry {
+        vector<VkAttachmentDescription> Attachments;
+        vector<VkAttachmentReference> ColorAttachments;
+        std::optional<VkAttachmentReference> DepthStencilAttachment;
+        unique_ptr<RenderPassVulkan> Pass;
+    };
+
     CommandBufferVulkan(
         DeviceVulkan* device,
         QueueVulkan* queue,
@@ -330,11 +337,17 @@ public:
 public:
     void DestroyImpl() noexcept;
 
+    Nullable<RenderPassVulkan*> GetOrCreateRenderPass(
+        std::span<const VkAttachmentDescription> attachments,
+        std::span<const VkAttachmentReference> colorAttachments,
+        std::optional<VkAttachmentReference> depthStencilAttachment) noexcept;
+
     DeviceVulkan* _device;
     QueueVulkan* _queue;
     unique_ptr<CommandPoolVulkan> _cmdPool;
     VkCommandBuffer _cmdBuffer;
     vector<unique_ptr<CommandEncoder>> _endedEncoders;
+    vector<RenderPassCacheEntry> _renderPassCache;
 };
 
 class SimulateCommandEncoderVulkan final : public GraphicsCommandEncoder {
@@ -372,8 +385,8 @@ public:
 
     DeviceVulkan* _device;
     CommandBufferVulkan* _cmdBuffer;
-    unique_ptr<RenderPassVulkan> _pass;
     unique_ptr<FrameBufferVulkan> _framebuffer;
+    GraphicsPipelineVulkan* _boundPso{nullptr};
     PipelineLayoutVulkan* _boundPipeLayout{nullptr};
 };
 
@@ -1045,7 +1058,6 @@ public:
 
     DeviceVulkan* _device;
     VkPipeline _pipeline;
-    unique_ptr<RenderPassVulkan> _renderPass;
 };
 
 class ComputePipelineVulkan final : public ComputePipelineState {
@@ -1234,6 +1246,25 @@ private:
     uint32_t _keepFreePages;
 };
 
+enum class DescriptorWritePayloadVulkan : uint8_t {
+    Image,
+    Buffer,
+    TexelBuffer,
+    AccelerationStructure,
+};
+
+struct PendingDescriptorWriteVulkan {
+    VkDescriptorSet Set{VK_NULL_HANDLE};
+    uint32_t Binding{0};
+    uint32_t ArrayIndex{0};
+    VkDescriptorType Type{VK_DESCRIPTOR_TYPE_MAX_ENUM};
+    DescriptorWritePayloadVulkan Payload{DescriptorWritePayloadVulkan::Image};
+    VkDescriptorImageInfo ImageInfo{};
+    VkDescriptorBufferInfo BufferInfo{};
+    VkBufferView TexelBufferView{VK_NULL_HANDLE};
+    VkAccelerationStructureKHR AccelerationStructure{VK_NULL_HANDLE};
+};
+
 class DescriptorSetVulkan final : public IDebugName {
 public:
     DescriptorSetVulkan(
@@ -1249,6 +1280,8 @@ public:
     bool IsValid() const noexcept;
 
     void Destroy() noexcept;
+
+    void Reset() noexcept;
 
     void SetDebugName(std::string_view name) noexcept override;
 
@@ -1271,6 +1304,8 @@ public:
     bool IsFullyWritten() const noexcept;
     bool HasAnyWrite() const noexcept;
 
+    void StageWrite(PendingDescriptorWriteVulkan write) noexcept;
+
 public:
     void DestroyImpl() noexcept;
 
@@ -1282,6 +1317,7 @@ public:
     DescriptorSetAllocatorVulkan::Allocation _allocation;
     vector<uint8_t> _resourceWritten{};
     vector<uint8_t> _samplerWritten{};
+    vector<PendingDescriptorWriteVulkan> _pendingWrites{};
     unordered_map<uint64_t, unique_ptr<BufferViewVulkan>> _ownedTexelBufferViews{};
     string _name{};
 };
@@ -1294,6 +1330,8 @@ public:
     bool IsValid() const noexcept override;
 
     void Destroy() noexcept override;
+
+    void Reset() noexcept override;
 
     void SetDebugName(std::string_view name) noexcept override;
 
@@ -1311,6 +1349,8 @@ public:
 
     bool IsFullyWritten() const noexcept;
 
+    bool FlushDescriptorWrites() noexcept;
+
     Nullable<DescriptorSetVulkan*> GetDescriptorSet(uint32_t setIndex) const noexcept;
 
     std::span<const byte> GetConstantData(ShaderParameterId id) const noexcept;
@@ -1323,6 +1363,9 @@ public:
     vector<unique_ptr<DescriptorSetVulkan>> _sets;
     vector<vector<byte>> _constantData;
     vector<BindlessArray*> _bindlessArrays;
+    vector<PendingDescriptorWriteVulkan> _pendingWriteScratch;
+    vector<VkWriteDescriptorSet> _descriptorWriteScratch;
+    vector<VkWriteDescriptorSetAccelerationStructureKHR> _accelerationWriteScratch;
     string _name{};
 };
 

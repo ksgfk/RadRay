@@ -1,5 +1,6 @@
 #include "render_test_framework.h"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstring>
@@ -11,6 +12,12 @@
 #include <radray/guid.h>
 #include <radray/render/shader_variant_cache.h>
 #include <radray/render/shader_compiler/dxc.h>
+#ifdef RADRAY_ENABLE_D3D12
+#include <radray/render/backend/d3d12_impl.h>
+#endif
+#ifdef RADRAY_ENABLE_VULKAN
+#include <radray/render/backend/vulkan_impl.h>
+#endif
 
 namespace radray::render::test {
 namespace {
@@ -79,6 +86,15 @@ void CSMain(uint3 tid : SV_DispatchThreadID) {
 #else
     gOut[tid.x] = tid.x;
 #endif
+}
+)";
+
+constexpr std::string_view kEmptyLeadingDescriptorSetShader = R"(
+[[vk::binding(0, 1)]] RWStructuredBuffer<uint> gOut : register(u0, space1);
+
+[numthreads(1, 1, 1)]
+void CSMain(uint3 tid : SV_DispatchThreadID) {
+    gOut[tid.x] = tid.x;
 }
 )";
 
@@ -277,8 +293,221 @@ protected:
             << fmt::format("Captured errors on {}:\n{}", _ctx.GetBackendName(), _ctx.JoinCapturedErrors());
     }
 
+    size_t GetPendingDescriptorUpdateCount(ShaderParameterTable* table) const noexcept {
+        switch (_ctx.GetBackend()) {
+#ifdef RADRAY_ENABLE_D3D12
+            case TestBackend::D3D12: {
+                const auto* native = d3d12::CastD3D12Object(table);
+                size_t count = native->_pendingDescriptorCopies.size();
+                for (const auto& set : native->_sets) {
+                    if (set.SamplerTable == nullptr) {
+                        count += std::ranges::count_if(
+                            set.SamplerWritten,
+                            [](uint8_t written) noexcept { return written != 0; });
+                    }
+                }
+                return count;
+            }
+#endif
+#ifdef RADRAY_ENABLE_VULKAN
+            case TestBackend::Vulkan: {
+                size_t count = 0;
+                for (const auto& set : vulkan::CastVkObject(table)->_sets) {
+                    if (set != nullptr) {
+                        count += set->_pendingWrites.size();
+                    }
+                }
+                return count;
+            }
+#endif
+        }
+        return 0;
+    }
+
     ComputeTestContext _ctx{};
 };
+
+TEST_P(ComputeBindingRuntimeTest, ShaderParameterTableResetPreservesDescriptorStorage) {
+    string reason{};
+    auto programOpt = _ctx.CreateComputeProgram(kMultiSetBufferShader, "CSMain", false, &reason);
+    ASSERT_TRUE(programOpt.has_value())
+        << fmt::format("CreateComputeProgram failed on {}: {}\n{}", _ctx.GetBackendName(), reason, _ctx.JoinCapturedErrors());
+    auto program = std::move(programOpt.value());
+    auto table = this->CreateShaderParameterTableOrNull(program.BindingLayout);
+    ASSERT_NE(table, nullptr);
+
+    switch (_ctx.GetBackend()) {
+#ifdef RADRAY_ENABLE_D3D12
+        case TestBackend::D3D12: {
+            struct SlotIdentity {
+                d3d12::DescriptorHeap* ResourceHeap;
+                UINT ResourceStart;
+            };
+            auto* native = d3d12::CastD3D12Object(table.get());
+            vector<SlotIdentity> identities;
+            identities.reserve(native->_sets.size());
+            for (auto& set : native->_sets) {
+                identities.push_back(SlotIdentity{
+                    set.ResHeapView.GetHeap(),
+                    set.ResHeapView.GetStart()});
+                std::ranges::fill(set.ResourceWritten, uint8_t{1});
+                std::ranges::fill(set.SamplerWritten, uint8_t{1});
+            }
+            native->_constantData.front().push_back(byte{1});
+            std::ranges::fill(native->_bindlessArrays, reinterpret_cast<BindlessArray*>(uintptr_t{1}));
+            native->_pendingDescriptorCopies.emplace_back();
+
+            table->Reset();
+
+            ASSERT_EQ(native->_sets.size(), identities.size());
+            for (size_t i = 0; i < identities.size(); ++i) {
+                const auto& set = native->_sets[i];
+                EXPECT_EQ(set.ResHeapView.GetHeap(), identities[i].ResourceHeap);
+                EXPECT_EQ(set.ResHeapView.GetStart(), identities[i].ResourceStart);
+                EXPECT_EQ(set.SamplerTable, nullptr);
+                EXPECT_TRUE(std::ranges::all_of(set.ResourceWritten, [](uint8_t written) { return written == 0; }));
+                EXPECT_TRUE(std::ranges::all_of(set.SamplerWritten, [](uint8_t written) { return written == 0; }));
+                EXPECT_TRUE(std::ranges::all_of(
+                    set.SamplerSources,
+                    [](D3D12_CPU_DESCRIPTOR_HANDLE source) { return source.ptr == 0; }));
+            }
+            EXPECT_TRUE(std::ranges::all_of(native->_constantData, [](const vector<byte>& bytes) { return bytes.empty(); }));
+            EXPECT_TRUE(std::ranges::all_of(native->_bindlessArrays, [](BindlessArray* array) { return array == nullptr; }));
+            EXPECT_TRUE(native->_pendingDescriptorCopies.empty());
+            break;
+        }
+#endif
+#ifdef RADRAY_ENABLE_VULKAN
+        case TestBackend::Vulkan: {
+            auto* native = vulkan::CastVkObject(table.get());
+            vector<VkDescriptorSet> handles;
+            handles.reserve(native->_sets.size());
+            for (auto& set : native->_sets) {
+                handles.push_back(set != nullptr ? set->_allocation.Set : VK_NULL_HANDLE);
+                if (set == nullptr) {
+                    continue;
+                }
+                std::ranges::fill(set->_resourceWritten, uint8_t{1});
+                std::ranges::fill(set->_samplerWritten, uint8_t{1});
+                set->_pendingWrites.emplace_back();
+            }
+            native->_constantData.front().push_back(byte{1});
+            std::ranges::fill(native->_bindlessArrays, reinterpret_cast<BindlessArray*>(uintptr_t{1}));
+
+            table->Reset();
+
+            ASSERT_EQ(native->_sets.size(), handles.size());
+            for (size_t i = 0; i < handles.size(); ++i) {
+                const auto& set = native->_sets[i];
+                EXPECT_EQ(set != nullptr ? set->_allocation.Set : VK_NULL_HANDLE, handles[i]);
+                if (set == nullptr) {
+                    continue;
+                }
+                EXPECT_TRUE(std::ranges::all_of(set->_resourceWritten, [](uint8_t written) { return written == 0; }));
+                EXPECT_TRUE(std::ranges::all_of(set->_samplerWritten, [](uint8_t written) { return written == 0; }));
+                EXPECT_TRUE(set->_pendingWrites.empty());
+            }
+            EXPECT_TRUE(std::ranges::all_of(native->_constantData, [](const vector<byte>& bytes) { return bytes.empty(); }));
+            EXPECT_TRUE(std::ranges::all_of(native->_bindlessArrays, [](BindlessArray* array) { return array == nullptr; }));
+            break;
+        }
+#endif
+    }
+}
+
+#ifdef RADRAY_ENABLE_D3D12
+TEST_P(ComputeBindingRuntimeTest, D3D12SamplerTablesShareIdenticalGpuHeapSlice) {
+    if (_ctx.GetBackend() != TestBackend::D3D12) {
+        GTEST_SKIP() << "D3D12-specific shared sampler table test";
+    }
+
+    string reason{};
+    auto programOpt = _ctx.CreateComputeProgram(kTextureSamplerShader, "CSMain", false, &reason);
+    ASSERT_TRUE(programOpt.has_value())
+        << fmt::format("CreateComputeProgram failed on D3D12: {}\n{}", reason, _ctx.JoinCapturedErrors());
+    auto program = std::move(programOpt.value());
+
+    SamplerDescriptor samplerDesc{};
+    samplerDesc.AddressS = AddressMode::ClampToEdge;
+    samplerDesc.AddressT = AddressMode::ClampToEdge;
+    samplerDesc.AddressR = AddressMode::ClampToEdge;
+    samplerDesc.MinFilter = FilterMode::Nearest;
+    samplerDesc.MagFilter = FilterMode::Nearest;
+    samplerDesc.MipmapFilter = FilterMode::Nearest;
+    samplerDesc.LodMax = 1.0f;
+    samplerDesc.AnisotropyClamp = 1;
+    auto sampler = this->CreateSamplerOrNull(samplerDesc, "Create shared-table sampler");
+    ASSERT_NE(sampler, nullptr);
+
+    constexpr uint32_t kCachedTableCount = 300;
+    vector<unique_ptr<ShaderParameterTable>> tables;
+    tables.reserve(kCachedTableCount);
+    const d3d12::GpuDescriptorHeapViewRAII* sharedTable = nullptr;
+    size_t initialCacheSize = 0;
+    for (uint32_t i = 0; i < kCachedTableCount; ++i) {
+        auto table = this->CreateShaderParameterTableOrNull(program.BindingLayout);
+        ASSERT_NE(table, nullptr) << fmt::format("failed to allocate cached table {}", i);
+        ASSERT_TRUE(table->SetSampler("gSamp", sampler.get()));
+
+        auto* native = d3d12::CastD3D12Object(table.get());
+        if (i == 0) {
+            initialCacheSize = native->_device->_samplerDescriptorTables.size();
+        }
+        ASSERT_TRUE(native->ResolveSamplerTable(0));
+        ASSERT_NE(native->_sets[0].SamplerTable, nullptr);
+        if (sharedTable == nullptr) {
+            sharedTable = native->_sets[0].SamplerTable;
+        } else {
+            EXPECT_EQ(native->_sets[0].SamplerTable, sharedTable);
+        }
+        tables.emplace_back(std::move(table));
+    }
+    EXPECT_EQ(tables.size(), kCachedTableCount);
+    auto* native = d3d12::CastD3D12Object(tables.front().get());
+    EXPECT_EQ(native->_device->_samplerDescriptorTables.size(), initialCacheSize + 1);
+
+    tables.front()->Reset();
+    EXPECT_EQ(native->_sets[0].SamplerTable, nullptr);
+    ASSERT_TRUE(tables.front()->SetSampler("gSamp", sampler.get()));
+    ASSERT_TRUE(native->ResolveSamplerTable(0));
+    EXPECT_EQ(native->_sets[0].SamplerTable, sharedTable);
+    EXPECT_EQ(native->_device->_samplerDescriptorTables.size(), initialCacheSize + 1);
+
+    SamplerDescriptor alternateDesc = samplerDesc;
+    alternateDesc.AddressS = AddressMode::Repeat;
+    auto alternateSampler = this->CreateSamplerOrNull(alternateDesc, "Create alternate shared-table sampler");
+    ASSERT_NE(alternateSampler, nullptr);
+    auto alternateTable = this->CreateShaderParameterTableOrNull(program.BindingLayout);
+    ASSERT_NE(alternateTable, nullptr);
+    ASSERT_TRUE(alternateTable->SetSampler("gSamp", alternateSampler.get()));
+    auto* alternateNative = d3d12::CastD3D12Object(alternateTable.get());
+    ASSERT_TRUE(alternateNative->ResolveSamplerTable(0));
+    EXPECT_NE(alternateNative->_sets[0].SamplerTable, sharedTable);
+    EXPECT_EQ(native->_device->_samplerDescriptorTables.size(), initialCacheSize + 2);
+    this->ExpectNoCapturedErrors();
+}
+#endif
+
+#ifdef RADRAY_ENABLE_VULKAN
+TEST_P(ComputeBindingRuntimeTest, VulkanSkipsEmptyLeadingDescriptorSetAllocation) {
+    if (_ctx.GetBackend() != TestBackend::Vulkan) {
+        GTEST_SKIP() << "Vulkan-specific descriptor allocation test";
+    }
+
+    string reason{};
+    auto programOpt = _ctx.CreateComputeProgram(kEmptyLeadingDescriptorSetShader, "CSMain", false, &reason);
+    ASSERT_TRUE(programOpt.has_value())
+        << fmt::format("CreateComputeProgram failed on Vulkan: {}\n{}", reason, _ctx.JoinCapturedErrors());
+    auto program = std::move(programOpt.value());
+
+    auto table = this->CreateShaderParameterTableOrNull(program.BindingLayout);
+    ASSERT_NE(table, nullptr);
+    auto* vkTable = vulkan::CastVkObject(table.get());
+    ASSERT_EQ(vkTable->_sets.size(), 2u);
+    EXPECT_EQ(vkTable->_sets[0], nullptr);
+    EXPECT_NE(vkTable->_sets[1], nullptr);
+}
+#endif
 
 TEST_P(ComputeBindingRuntimeTest, MultiSetBufferBindingAndPushConstantsWorks) {
     string reason{};
@@ -700,7 +929,10 @@ TEST_P(ComputeBindingRuntimeTest, TextureAndSamplerBindingWorks) {
     auto set0 = this->CreateShaderParameterTableOrNull(program.BindingLayout);
     ASSERT_NE(set0, nullptr);
     ASSERT_TRUE(set0->SetResource("gTex", textureView.get()));
+    ASSERT_TRUE(set0->SetResource("gTex", textureView.get()));
     ASSERT_TRUE(set0->SetSampler("gSamp", sampler.get()));
+    ASSERT_TRUE(set0->SetSampler("gSamp", sampler.get()));
+    EXPECT_EQ(this->GetPendingDescriptorUpdateCount(set0.get()), 2u);
 
     auto set1 = this->CreateShaderParameterTableOrNull(program.BindingLayout);
     ASSERT_NE(set1, nullptr);
@@ -725,6 +957,7 @@ TEST_P(ComputeBindingRuntimeTest, TextureAndSamplerBindingWorks) {
         << fmt::format("BeginComputePass failed on {}", _ctx.GetBackendName());
     auto encoder = encoderOpt.Release();    encoder->BindComputePipelineState(program.PipelineObject.get());
     encoder->BindShaderParameters(set0.get());
+    EXPECT_EQ(this->GetPendingDescriptorUpdateCount(set0.get()), 0u);
     encoder->BindShaderParameters(set1.get());
     encoder->Dispatch(1, 1, 1);
     cmd->EndComputePass(std::move(encoder));
@@ -753,6 +986,23 @@ TEST_P(ComputeBindingRuntimeTest, TextureAndSamplerBindingWorks) {
     constexpr uint32_t kExpectedPacked = 0xFF332211u;
     EXPECT_EQ(actual[0], kExpectedPacked)
         << fmt::format("Unexpected sampled texel on {}", _ctx.GetBackendName());
+
+    ASSERT_TRUE(set0->SetResource("gTex", textureView.get()));
+    EXPECT_EQ(this->GetPendingDescriptorUpdateCount(set0.get()), 1u);
+    auto rebindCmdOpt = _ctx.CreateCommandBuffer(&reason);
+    ASSERT_TRUE(rebindCmdOpt.HasValue())
+        << fmt::format("Create rebind command buffer failed on {}: {}", _ctx.GetBackendName(), reason);
+    auto rebindCmd = rebindCmdOpt.Release();
+    rebindCmd->Begin();
+    auto rebindEncoderOpt = rebindCmd->BeginComputePass();
+    ASSERT_TRUE(rebindEncoderOpt.HasValue());
+    auto rebindEncoder = rebindEncoderOpt.Release();
+    rebindEncoder->BindComputePipelineState(program.PipelineObject.get());
+    rebindEncoder->BindShaderParameters(set0.get());
+    EXPECT_EQ(this->GetPendingDescriptorUpdateCount(set0.get()), 0u);
+    rebindCmd->EndComputePass(std::move(rebindEncoder));
+    rebindCmd->End();
+
     this->ExpectNoCapturedErrors();
 }
 
@@ -1635,6 +1885,12 @@ TEST_P(ComputeBindingRuntimeTest, ShaderVariantCacheDistinguishesKeywords) {
     descBase.Stages = std::span{&stage, 1};
     descBase.SM = HlslShaderModel::SM60;
 
+    const ShaderVariantKey baseKey{
+        .ProgramId = programId,
+        .PassIndex = 0,
+        .Bitmask = 0};
+    EXPECT_FALSE(variantCache->Find(baseKey).HasValue());
+
     _ctx.ClearCapturedErrors();
     auto baseVariant = variantCache->GetOrCreate(descBase);
     ASSERT_TRUE(baseVariant.HasValue()) << _ctx.JoinCapturedErrors();
@@ -1643,6 +1899,8 @@ TEST_P(ComputeBindingRuntimeTest, ShaderVariantCacheDistinguishesKeywords) {
     // 缓存创建的 shader 应被赋予稳定身份.
     EXPECT_FALSE(baseVariant.Get()->CS->GetGuid().IsEmpty());
     EXPECT_EQ(variantCache->Count(), 1u);
+    ASSERT_TRUE(variantCache->Find(baseKey).HasValue());
+    EXPECT_EQ(variantCache->Find(baseKey).Get(), baseVariant.Get());
 
     // 相同 key -> 命中同一变体.
     auto baseAgain = variantCache->GetOrCreate(descBase);
@@ -1664,6 +1922,12 @@ TEST_P(ComputeBindingRuntimeTest, ShaderVariantCacheDistinguishesKeywords) {
     // 不同变体是不同的 Shader 对象, 且身份不同.
     EXPECT_NE(baseVariant.Get()->CS, scaledVariant.Get()->CS);
     EXPECT_NE(baseVariant.Get()->CS->GetGuid(), scaledVariant.Get()->CS->GetGuid());
+    const ShaderVariantKey scaledKey{
+        .ProgramId = programId,
+        .PassIndex = 0,
+        .Bitmask = 1};
+    ASSERT_TRUE(variantCache->Find(scaledKey).HasValue());
+    EXPECT_EQ(variantCache->Find(scaledKey).Get(), scaledVariant.Get());
 
     EXPECT_TRUE(_ctx.GetCapturedErrors().empty())
         << fmt::format("Captured errors on {}:\n{}", _ctx.GetBackendName(), _ctx.JoinCapturedErrors());

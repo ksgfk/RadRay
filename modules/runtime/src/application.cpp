@@ -865,12 +865,6 @@ vector<AppSubsystem*> Application::GetSubsystems() noexcept {
 
 void Application::NotifyRenderComplete(const AppRenderCompleteContext& ctx) {
     OnRenderComplete(ctx);
-
-    if (_windowManager == nullptr || _gpuSystem == nullptr) {
-        return;
-    }
-    // backbuffer view 的回收是 WindowManager 的职责：该 flight 渲染完成后释放其持有的 view。
-    _windowManager->ReleaseBackBufferViewsForFlight(ctx.FlightIndex);
 }
 
 // ════════════════════════════════════════════════════════════════
