@@ -19,6 +19,8 @@ TEST(LightComponentTest, PointLightCreatesTypedSceneProxy) {
     component.SetSourceRadius(2.0f);
     component.SetSoftSourceRadius(3.0f);
     component.SetSourceLength(4.0f);
+    component.SetShadowDepthBias(2.0f);
+    component.SetShadowNormalBias(1.5f);
 
     unique_ptr<LightSceneProxy> proxy = component.CreateSceneProxy();
     ASSERT_NE(proxy, nullptr);
@@ -34,6 +36,8 @@ TEST(LightComponentTest, PointLightCreatesTypedSceneProxy) {
     EXPECT_FLOAT_EQ(pointProxy->GetSourceRadius(), 2.0f);
     EXPECT_FLOAT_EQ(pointProxy->GetSoftSourceRadius(), 3.0f);
     EXPECT_FLOAT_EQ(pointProxy->GetSourceLength(), 4.0f);
+    EXPECT_FLOAT_EQ(pointProxy->GetShadowDepthBias(), 2.0f);
+    EXPECT_FLOAT_EQ(pointProxy->GetShadowNormalBias(), 1.5f);
     EXPECT_TRUE(proxy->GetOrigin().isApprox(Eigen::Vector3f{1.0f, 2.0f, 3.0f}));
     EXPECT_TRUE(proxy->GetColor().isApprox(Eigen::Vector3f{1.0f, 2.0f, 4.0f}));
 
@@ -86,6 +90,7 @@ TEST(LightComponentTest, DirectionalLightCreatesTypedSceneProxy) {
     const auto* dirProxy = static_cast<const DirectionalLightSceneProxy*>(proxy.get());
     EXPECT_EQ(dirProxy->GetCascadeCount(), 3u);
     EXPECT_FLOAT_EQ(dirProxy->GetShadowDistance(), 120.0f);
+    EXPECT_EQ(dirProxy->GetCascadeSplitMode(), CascadeSplitMode::Automatic);
     EXPECT_FLOAT_EQ(dirProxy->GetCascadeSplitLambda(), 0.6f);
     EXPECT_EQ(dirProxy->GetShadowMapResolution(), 1024u);
     EXPECT_FLOAT_EQ(dirProxy->GetShadowDepthBias(), 0.005f);
@@ -108,4 +113,31 @@ TEST(LightComponentTest, DirectionalLightClampsCascadeConfig) {
     EXPECT_EQ(dirProxy->GetCascadeCount(), 4u);
     EXPECT_FLOAT_EQ(dirProxy->GetCascadeSplitLambda(), 1.0f);
     EXPECT_EQ(dirProxy->GetShadowSoftMode(), 2u);
+}
+
+TEST(LightComponentTest, DirectionalLightManualCascadeSplitRatios) {
+    DirectionalLightComponent component;
+    component.SetCascadeSplitMode(CascadeSplitMode::Manual);
+    component.SetCascadeSplitRatios({0.1f, 0.3f, 0.6f});
+
+    unique_ptr<LightSceneProxy> proxy = component.CreateSceneProxy();
+    const auto* dirProxy = static_cast<const DirectionalLightSceneProxy*>(proxy.get());
+    EXPECT_EQ(dirProxy->GetCascadeSplitMode(), CascadeSplitMode::Manual);
+    const std::array<float, 3>& ratios = dirProxy->GetCascadeSplitRatios();
+    EXPECT_FLOAT_EQ(ratios[0], 0.1f);
+    EXPECT_FLOAT_EQ(ratios[1], 0.3f);
+    EXPECT_FLOAT_EQ(ratios[2], 0.6f);
+}
+
+TEST(LightComponentTest, DirectionalLightManualCascadeRatiosClampMonotonic) {
+    DirectionalLightComponent component;
+    // 乱序 + 越界: 应被 clamp 到 [0,1] 且强制单调不减。
+    component.SetCascadeSplitRatios({0.5f, 0.2f, 5.0f});
+
+    unique_ptr<LightSceneProxy> proxy = component.CreateSceneProxy();
+    const auto* dirProxy = static_cast<const DirectionalLightSceneProxy*>(proxy.get());
+    const std::array<float, 3>& ratios = dirProxy->GetCascadeSplitRatios();
+    EXPECT_FLOAT_EQ(ratios[0], 0.5f);  // clamp([0.5], 0, 1)
+    EXPECT_FLOAT_EQ(ratios[1], 0.5f);  // clamp([0.2], 0.5, 1) -> 0.5
+    EXPECT_FLOAT_EQ(ratios[2], 1.0f);  // clamp([5.0], 0.5, 1) -> 1.0
 }

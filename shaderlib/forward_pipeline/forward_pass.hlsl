@@ -225,10 +225,10 @@ float4 PSMain(VertexOutput input, bool isFrontFace : SV_IsFrontFace) : SV_Target
         float3 Li = eval_directional_irradiance(DL);
 #ifdef _DIRECTIONAL_SHADOWS
         if (dirShadowIndex1 != 0u && (d + 1u) == dirShadowIndex1) {
-            // 沿法线做世界空间偏移抑制自阴影粉刺, 再逐级联比较采样。
-            float3 biasedPosW = input.WorldPosition + n * 0.02f;
+            // 逐级联 world-space bias (depth + normal) 由采样函数内部按所选级联应用, 抑制自阴影粉刺。
             float visibility = sample_shadow_cascade(
-                gShadowArray, gShadowSampler, gView.DirectionalShadow, biasedPosW);
+                gShadowArray, gShadowSampler, gView.DirectionalShadow,
+                input.WorldPosition, n, woW);
             Li *= visibility;
         }
 #endif

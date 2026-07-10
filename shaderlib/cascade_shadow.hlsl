@@ -24,6 +24,9 @@
 struct ShadowParam {
     float4x4 WorldToShadow[RADRAY_MAX_CASCADES];  // 逐级联 世界 -> 阴影裁剪
     float4 CascadeSphere[RADRAY_MAX_CASCADES];    // xyz=中心, w=半径^2 (供选级联)
+    // 逐级联 world-space bias: xy = (depthBias, normalBias) 已按该级联的 texel 世界尺寸缩放,
+    // zw 保留。CPU 端由用户无量纲倍率 (0..N) 乘以逐级联 texelSize 得到, 故不同级联/分辨率自动一致。
+    float4 CascadeBias[RADRAY_MAX_CASCADES];
     // x = enable (>= 0.5 启用, < 0.5 直接返回无阴影)
     // y = shadowmap size (px, 供 PCF 计算 texel 尺寸)
     // z = cascade count (实际级联数)
@@ -49,15 +52,21 @@ uint compute_cascade_index(ShadowParam sp, float3 posW, uint count) {
 }
 
 // 采样方向光级联阴影, 返回可见度 [0,1] (1 = 完全受光, 0 = 完全遮蔽)。
-//   shadowMap: 级联深度图 (Texture2DArray, 标准深度, 越近值越小)
-//   cmp:       比较采样器 (CompareFunction::Less / LessEqual)
-//   sp:        该方向光的级联阴影数据
-//   posW:      着色点世界坐标 (调用方可先做 normal bias)
+//   shadowMap:  级联深度图 (Texture2DArray, 标准深度, 越近值越小)
+//   cmp:        比较采样器 (CompareFunction::Less / LessEqual)
+//   sp:         该方向光的级联阴影数据
+//   posW:       着色点世界坐标 (原始, 未加 bias)
+//   normalW:    着色点世界法线 (归一化; 用于 normal bias)
+//   dirToLight: 指向光源的方向 (归一化; 用于 depth/normal bias)
+//
+// 先按包围球选级联, 再用该级联的 world-space bias 偏移采样点 (抗自阴影粉刺), 最后逐级联比较采样。
 float sample_shadow_cascade(
     Texture2DArray<float> shadowMap,
     SamplerComparisonState cmp,
     ShadowParam sp,
-    float3 posW) {
+    float3 posW,
+    float3 normalW,
+    float3 dirToLight) {
     if (sp.Params.x < 0.5f) {
         return 1.0f;
     }
@@ -68,8 +77,12 @@ float sample_shadow_cascade(
         return 1.0f;
     }
 
+    // 逐级联 world-space bias: 沿光线方向 + 沿法线偏移采样点, 再重投影。
+    float2 bias = sp.CascadeBias[cascadeIndex].xy;
+    float3 biasedPosW = apply_shadow_bias(posW, normalW, dirToLight, bias.x, bias.y);
+
     bool inside;
-    float3 uvz = world_to_shadow_uv(sp.WorldToShadow[cascadeIndex], posW, inside);
+    float3 uvz = world_to_shadow_uv(sp.WorldToShadow[cascadeIndex], biasedPosW, inside);
     if (!inside) {
         return 1.0f;
     }

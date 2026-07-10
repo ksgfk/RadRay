@@ -155,11 +155,6 @@ function(radray_default_compile_flags target)
     if (MSVC)
         target_compile_definitions(${target} PRIVATE _CRT_SECURE_NO_WARNINGS)
         target_compile_options(${target} PRIVATE /permissive- /utf-8 /Zc:preprocessor /Zc:__cplusplus /W4 /wd4324)
-        if (NOT RADRAY_ENABLE_RTTI)
-            target_compile_options(${target} PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/GR->)
-        endif()
-    elseif(NOT RADRAY_ENABLE_RTTI)
-        target_compile_options(${target} PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-fno-rtti>)
     endif()
     target_compile_definitions(${target} PRIVATE
         $<$<PLATFORM_ID:Windows>:RADRAY_PLATFORM_WINDOWS>

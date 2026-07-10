@@ -14,7 +14,9 @@ PointLightSceneProxy::PointLightSceneProxy(const PointLightComponent& component)
       _sourceRadius(component.GetSourceRadius()),
       _softSourceRadius(component.GetSoftSourceRadius()),
       _sourceLength(component.GetSourceLength()),
-      _inverseSquared(component.UseInverseSquaredFalloff()) {
+      _inverseSquared(component.UseInverseSquaredFalloff()),
+      _shadowDepthBias(std::max(component.GetShadowDepthBias(), 0.0f)),
+      _shadowNormalBias(std::max(component.GetShadowNormalBias(), 0.0f)) {
 }
 
 PointLightSceneProxy::~PointLightSceneProxy() noexcept = default;

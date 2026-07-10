@@ -14,6 +14,7 @@
 // 结构为定长 (6 面矩阵), 可整块塞进普通 cbuffer, 无需 StructuredBuffer。
 
 #include "common.hlsl"
+#include "shadow.hlsl"
 
 // 一个投影阴影的点光源的完整阴影数据 (匹配 CPU 端 PointShadowData, 列主序)。
 struct PointShadowData {
@@ -21,8 +22,8 @@ struct PointShadowData {
     // 与 CPU 端 6 面视图矩阵生成顺序严格对齐。
     float4x4 ViewProj[6];
     float4 LightPosInvRadius;  // xyz 光源世界位置, w = 1 / radius
-    // x = depthBias (常量深度偏移, 裁剪空间 z 单位)
-    // y = normalBias (沿法线的世界空间偏移, 抗 peter-panning / 自阴影粉刺)
+    // x = depthBias (沿光线方向的世界空间偏移, 已按 texel 世界尺寸缩放)
+    // y = normalBias (沿法线的世界空间偏移, 已按 texel 世界尺寸缩放; 抗自阴影粉刺)
     // z = invResolution (1 / 阴影图边长像素数, 预留给宽 PCF)
     // w = enable (>= 0.5 启用, < 0.5 直接返回无阴影)
     float4 Params;
@@ -41,18 +42,12 @@ uint point_shadow_cube_face(float3 dir) {
     return dir.z > 0.0f ? 4u : 5u;
 }
 
-// 沿法线做世界空间偏移以抑制自阴影粉刺 (对应 UE5 的 normal bias)。
-float3 point_shadow_apply_normal_bias(float3 posW, float3 normalW, float3 dirToLight, float normalBias) {
-    float invNdotL = 1.0f - saturate(dot(dirToLight, normalW));
-    return posW + normalW * (invNdotL * normalBias);
-}
-
 // 采样点光源立方体阴影, 返回可见度 [0,1] (1 = 完全受光, 0 = 完全遮蔽)。
 //   shadowCube:  cube 深度图 (标准深度, 越近值越小)
 //   cmp:         比较采样器 (CompareFunction::Less / LessEqual)
 //   sd:          该光源的阴影数据
 //   posW:        着色点世界坐标
-//   normalW:     着色点世界法线 (用于 normal bias; 无法线可传 0 并把 normalBias 设 0)
+//   normalW:     着色点世界法线 (用于 bias; 无法线可传 0 并把 normalBias 设 0)
 float sample_point_shadow(
     TextureCube<float> shadowCube,
     SamplerComparisonState cmp,
@@ -70,8 +65,8 @@ float sample_point_shadow(
     }
     float3 dirToLight = toLight / max(dist, 1e-6f);
 
-    // normal bias: 沿法线把采样点推离表面, 再重新投影。
-    float3 biasedPosW = point_shadow_apply_normal_bias(posW, normalW, dirToLight, sd.Params.y);
+    // world-space bias: 沿光线方向 + 沿法线偏移采样点 (与级联阴影一致), 再重投影。
+    float3 biasedPosW = apply_shadow_bias(posW, normalW, dirToLight, sd.Params.x, sd.Params.y);
 
     // 用光->片元方向选面, 取该面矩阵把世界坐标重投影, 得到待比较深度。
     uint face = point_shadow_cube_face(-toLight);
@@ -79,7 +74,7 @@ float sample_point_shadow(
     if (clip.w <= 0.0f) {
         return 1.0f;
     }
-    float compareDepth = clip.z / clip.w - sd.Params.x;
+    float compareDepth = clip.z / clip.w;
 
     // 硬件比较采样: cube 采样方向为 世界空间 光->片元 向量, 硬件自动选面 + 2x2 PCF。
     return shadowCube.SampleCmpLevelZero(cmp, -toLight, compareDepth);

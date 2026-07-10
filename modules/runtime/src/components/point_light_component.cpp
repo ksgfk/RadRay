@@ -50,4 +50,14 @@ void PointLightComponent::SetSourceLength(float length) noexcept {
     MarkRenderStateDirty();
 }
 
+void PointLightComponent::SetShadowDepthBias(float bias) noexcept {
+    _shadowDepthBias = std::max(bias, 0.0f);
+    MarkRenderStateDirty();
+}
+
+void PointLightComponent::SetShadowNormalBias(float bias) noexcept {
+    _shadowNormalBias = std::max(bias, 0.0f);
+    MarkRenderStateDirty();
+}
+
 }  // namespace radray

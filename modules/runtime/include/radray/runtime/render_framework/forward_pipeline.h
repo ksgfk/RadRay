@@ -67,9 +67,10 @@ public:
     struct CascadeShadowGpu {
         float WorldToShadow[kMaxCascades][16];  // 逐级联 世界->阴影裁剪 矩阵
         float CascadeSphere[kMaxCascades][4];   // xyz=中心, w=半径^2 (供 shader 选级联)
+        float CascadeBias[kMaxCascades][4];     // xy=(depthBias, normalBias) 世界空间 (已按 texel 缩放), zw 保留
         float Params[4];                        // x enable, y shadowmap size(px), z cascade count, w soft mode
     };
-    static_assert(sizeof(CascadeShadowGpu) == kMaxCascades * 64 + kMaxCascades * 16 + 16);
+    static_assert(sizeof(CascadeShadowGpu) == kMaxCascades * 64 + kMaxCascades * 16 + kMaxCascades * 16 + 16);
 
     /// 点光源立方体阴影数据 (匹配 shaderlib/point_shadow.hlsl PointShadowData, 列主序)。
     struct PointShadowGpu {

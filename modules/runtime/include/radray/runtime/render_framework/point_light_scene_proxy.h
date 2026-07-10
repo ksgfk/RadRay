@@ -20,6 +20,10 @@ public:
     bool IsInverseSquared() const noexcept override { return _inverseSquared; }
     bool IsLocalLight() const noexcept override { return true; }
 
+    /// 阴影 bias 倍率 (无量纲, URP 风格)。
+    float GetShadowDepthBias() const noexcept { return _shadowDepthBias; }
+    float GetShadowNormalBias() const noexcept { return _shadowNormalBias; }
+
     void GetLightRenderParameters(LightRenderParameters& out) const noexcept override;
 
 private:
@@ -30,6 +34,8 @@ private:
     float _softSourceRadius{0.0f};
     float _sourceLength{0.0f};
     bool _inverseSquared{true};
+    float _shadowDepthBias{1.0f};
+    float _shadowNormalBias{1.0f};
 };
 
 }  // namespace radray

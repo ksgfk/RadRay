@@ -20,6 +20,8 @@
 #include <radray/runtime/render_framework/standard_material_factory.h>
 #include <radray/runtime/render_framework/light_scene_proxy.h>
 #include <radray/runtime/render_framework/directional_light_scene_proxy.h>
+#include <radray/runtime/components/directional_light_component.h>
+#include <radray/runtime/render_framework/point_light_scene_proxy.h>
 #include <radray/runtime/render_framework/primitive_scene_proxy.h>
 #include <radray/runtime/render_framework/render_queue.h>
 #include <radray/runtime/render_framework/scene.h>
@@ -103,6 +105,35 @@ void ComputeCascadeSplits(
         const float logSplit = minZ * std::pow(ratio, p);
         const float uniformSplit = minZ + clipRange * p;
         const float splitDist = Lerp(uniformSplit, logSplit, lambda);
+        outSplits[i].NearZ = lastSplit;
+        outSplits[i].FarZ = splitDist;
+        lastSplit = splitDist;
+    }
+}
+
+// 手动划分 (对齐 Unity URP): ratios 为 [0,1] 的累积归一化边界 (相对 [nearZ,shadowFar] 区间)。
+// 对 N 个级联使用前 N-1 个比例, 最后一个级联的远边界固定为 shadowFar。
+//   split_i.far = near + (far-near) * ratio_i     (i < N-1)
+//   split_(N-1).far = far
+// ratios 已在组件侧 clamp 到 [0,1] 且单调不减; 此处再夹一次保证有序稳健。
+void ComputeCascadeSplitsManual(
+    float nearZ,
+    float shadowFar,
+    uint32_t cascadeCount,
+    const std::array<float, 3>& ratios,
+    CascadeSplit* outSplits) {
+    const float clipRange = shadowFar - nearZ;
+    float lastSplit = nearZ;
+    float prevRatio = 0.0f;
+    for (uint32_t i = 0; i < cascadeCount; ++i) {
+        float splitDist;
+        if (i + 1 >= cascadeCount) {
+            splitDist = shadowFar;
+        } else {
+            const float r = std::clamp(ratios[i], prevRatio, 1.0f);
+            prevRatio = r;
+            splitDist = nearZ + clipRange * r;
+        }
         outSplits[i].NearZ = lastSplit;
         outSplits[i].FarZ = splitDist;
         lastSplit = splitDist;
@@ -671,10 +702,16 @@ bool ForwardPipeline::RenderPointShadow(
     outShadow.LightPosInvRadius[1] = lightPos.y();
     outShadow.LightPosInvRadius[2] = lightPos.z();
     outShadow.LightPosInvRadius[3] = radius > 0.0f ? 1.0f / radius : 0.0f;
-    outShadow.Params[0] = 0.002f;                             // depthBias (裁剪空间 z)
-    outShadow.Params[1] = radius * 0.02f;                     // normalBias (世界空间)
-    outShadow.Params[2] = 1.0f / static_cast<float>(cube->Size);  // invResolution
-    outShadow.Params[3] = 1.0f;                               // enable
+
+    // 用户无量纲 bias 倍率 (URP 风格): 乘以 cube 面的 texel 世界尺寸得到世界空间偏移。
+    // cube 每面 90° 视锥, 远平面 (距光源 radius) 处半宽 = radius, 故 frustum 宽度 = 2*radius,
+    // texelSize = 2r / size, 与级联阴影一致。
+    const auto& ptLight = static_cast<const PointLightSceneProxy&>(light);
+    const float ptTexelSize = (2.0f * radius) / static_cast<float>(cube->Size);
+    outShadow.Params[0] = ptLight.GetShadowDepthBias() * ptTexelSize;    // depthBias (世界空间)
+    outShadow.Params[1] = ptLight.GetShadowNormalBias() * ptTexelSize;   // normalBias (世界空间)
+    outShadow.Params[2] = 1.0f / static_cast<float>(cube->Size);         // invResolution
+    outShadow.Params[3] = 1.0f;                                          // enable
 
     // 构建 shadow caster DrawList (ShadowCaster tag; shader 无该 pass 的 primitive 自动跳过)。
     DrawList casterList;
@@ -785,11 +822,15 @@ bool ForwardPipeline::RenderDirectionalShadow(
         return false;
     }
 
-    // ── 级联划分 (practical split scheme) ──
+    // ── 级联划分 (自动: practical split scheme / 手动: URP 风格归一化比例) ──
     const float nearZ = std::max(_frame.CameraNearZ, 1e-3f);
     const float shadowFar = std::max(std::min(_frame.CameraFarZ, light.GetShadowDistance()), nearZ + 1e-2f);
     CascadeSplit splits[kMaxCascades];
-    ComputeCascadeSplits(nearZ, shadowFar, cascadeCount, light.GetCascadeSplitLambda(), splits);
+    if (light.GetCascadeSplitMode() == CascadeSplitMode::Manual) {
+        ComputeCascadeSplitsManual(nearZ, shadowFar, cascadeCount, light.GetCascadeSplitRatios(), splits);
+    } else {
+        ComputeCascadeSplits(nearZ, shadowFar, cascadeCount, light.GetCascadeSplitLambda(), splits);
+    }
 
     // 相机基 (从 view 矩阵行取, LH: row0=right, row1=up, row2=forward)。
     const Eigen::Matrix4f& view = _frame.CameraView;
@@ -802,6 +843,11 @@ bool ForwardPipeline::RenderDirectionalShadow(
     const float tanHalfH = tanHalfV * _frame.CameraAspect;
     const Eigen::Vector3f eye = _frame.Eye;
     const Eigen::Vector3f lightDir = light.GetDirection();
+
+    // 用户无量纲 bias 倍率 (URP 风格): 逐级联乘以该级联的 texel 世界尺寸得到实际世界偏移,
+    // 故不同分辨率 / 不同级联 frustum 大小下表现自动一致。
+    const float depthBiasScale = light.GetShadowDepthBias();
+    const float normalBiasScale = light.GetShadowNormalBias();
 
     // 逐级联: 包围球 -> 稳定正交光锥。
     std::array<Eigen::Matrix4f, kMaxCascades> cascadeVp;
@@ -820,6 +866,13 @@ bool ForwardPipeline::RenderDirectionalShadow(
         outShadow.CascadeSphere[i][1] = center.y();
         outShadow.CascadeSphere[i][2] = center.z();
         outShadow.CascadeSphere[i][3] = radius * radius;  // shader 用 dist^2 < r^2 判定
+
+        // 该级联正交视锥覆盖 [-radius, radius], 故 frustum 宽度 = 2*radius, texelSize = 2r / size。
+        const float texelSize = (2.0f * radius) / std::max(static_cast<float>(shadowSize), 1.0f);
+        outShadow.CascadeBias[i][0] = depthBiasScale * texelSize;
+        outShadow.CascadeBias[i][1] = normalBiasScale * texelSize;
+        outShadow.CascadeBias[i][2] = 0.0f;
+        outShadow.CascadeBias[i][3] = 0.0f;
     }
     // 未使用的级联填成不可命中 (半径^2 = 0)。
     for (uint32_t i = cascadeCount; i < kMaxCascades; ++i) {
@@ -828,6 +881,7 @@ bool ForwardPipeline::RenderDirectionalShadow(
         outShadow.CascadeSphere[i][1] = 0.0f;
         outShadow.CascadeSphere[i][2] = 0.0f;
         outShadow.CascadeSphere[i][3] = 0.0f;
+        std::memset(outShadow.CascadeBias[i], 0, sizeof(float) * 4);
     }
     outShadow.Params[0] = 1.0f;                                // enable
     outShadow.Params[1] = static_cast<float>(shadowSize);      // shadowmap size (px)
