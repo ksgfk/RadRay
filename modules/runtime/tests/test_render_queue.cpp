@@ -115,7 +115,7 @@ TEST(RenderQueueTest, SortOpaqueByQueueThenMaterialThenDistance) {
     MaterialAsset bg{shaderRef};
     bg.SetRenderQueue(RenderQueue::Background);
 
-    // 每个材质生成一份稳定快照, 后续用 .get() 做身份比较。
+    // 每个材质生成一份不可变快照；排序按 BindingKey 聚合而非分配地址。
     auto snapGeoA = geoA.CreateSnapshot();
     auto snapGeoB = geoB.CreateSnapshot();
     auto snapBg = bg.CreateSnapshot();
@@ -132,7 +132,7 @@ TEST(RenderQueueTest, SortOpaqueByQueueThenMaterialThenDistance) {
 
     // Background (1000) 先于 Geometry (2000)。
     EXPECT_EQ(items[0].Material.get(), snapBg.get());
-    // 剩下 3 个都是 Geometry: 按 material 快照身份聚合, 同 material 内近到远。
+    // 剩下 3 个都是 Geometry: 按 material 值聚合, 同 material 内近到远。
     EXPECT_EQ(items[1].RenderQueue, static_cast<int32_t>(RenderQueue::Geometry));
     EXPECT_EQ(items[2].RenderQueue, static_cast<int32_t>(RenderQueue::Geometry));
     EXPECT_EQ(items[3].RenderQueue, static_cast<int32_t>(RenderQueue::Geometry));

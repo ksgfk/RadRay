@@ -2,7 +2,7 @@
 
 #include <radray/basic_math.h>
 #include <radray/render/common.h>
-#include <radray/render/gpu_resource.h>
+#include <radray/runtime/gpu_resource.h>
 #include <radray/runtime/render_framework/mesh_pass_executor.h>
 #include <radray/runtime/render_framework/render_pipeline.h>
 #include <radray/types.h>
@@ -15,10 +15,7 @@ class CameraComponent;
 class LightSceneProxy;
 class DirectionalLightSceneProxy;
 class MeshPassExecutor;
-
-namespace render {
-class SamplerCache;
-}  // namespace render
+class RenderPassRegistry;
 
 /// 最小前向渲染管线: 单 forward pass, 点光源 + Principled BRDF, 支持一盏点光源的立方体阴影。
 ///
@@ -96,8 +93,9 @@ public:
 
     /// shadow caster 深度 pass 的 per-view 常量 (匹配 shadow_pass.hlsl ShadowViewConstants)。
     struct ShadowViewConstants {
-        float ViewProj[16];
+        float ViewProj[kCubeFaceCount][16];
     };
+    static_assert(sizeof(ShadowViewConstants) == kCubeFaceCount * 64);
 
     explicit ForwardPipeline(RenderSystem* renderSystem) noexcept;
     ~ForwardPipeline() noexcept override;
@@ -125,7 +123,8 @@ private:
     struct ShadowCube {
         unique_ptr<render::Texture> Texture;
         unique_ptr<render::TextureView> Srv;                        // cube SRV (采样用)
-        unique_ptr<render::TextureView> FaceDsv[kCubeFaceCount];    // 每面一个 DSV (2DArray slice)
+        unique_ptr<render::TextureView> LayeredDsv;                 // 覆盖六层的 DSV
+        unique_ptr<render::TextureView> FaceDsv[kCubeFaceCount];    // 能力 fallback，按需创建
         uint32_t Size{0};
         render::TextureStates State{render::TextureState::Undefined};
     };
@@ -211,9 +210,11 @@ private:
 
     DepthTarget* AcquireDepthTarget(uint32_t flight, uint32_t width, uint32_t height);
     ShadowCube* AcquireShadowCube(uint32_t flight, uint32_t size);
+    bool EnsureShadowCubeFaceDsvs(ShadowCube& cube);
     ShadowArray* AcquireShadowArray(uint32_t flight, uint32_t size, uint32_t sliceCount);
 
-    /// 渲染指定投影点光源的立方体阴影到 cube 各面 (6 次 render pass)。
+    /// 渲染指定投影点光源的立方体阴影。优先用 6-instance layered draw 在一次 pass 写入
+    /// cube 六层；设备能力不足时回落为逐面 pass。
     /// 填充 outShadow (供 forward pass 采样), 并把 cube 转到可采样布局。
     /// 返回 true 表示阴影可用。
     bool RenderPointShadow(
@@ -236,10 +237,10 @@ private:
         ShadowArray*& outArray);
 
     render::Device* _device{nullptr};
-    render::SamplerCache* _samplerCache{nullptr};
+    RenderPassRegistry* _renderPassRegistry{nullptr};
+    SamplerCache* _samplerCache{nullptr};
     unique_ptr<MeshPassExecutor> _executor;         // forward pass
-    unique_ptr<MeshPassExecutor> _shadowExecutor;   // shadow caster pass (独立 arena/tables)
-    unique_ptr<MeshPassExecutor> _dirShadowExecutor;  // 方向光级联阴影 pass (独立 arena/tables)
+    unique_ptr<MeshPassExecutor> _shadowExecutor;   // point/cascade shadow caster pass
     vector<DepthTarget> _depthTargets;              // per-flight
     vector<ShadowCube> _shadowCubes;                // per-flight
     vector<ShadowArray> _shadowArrays;              // per-flight (方向光 CSM)

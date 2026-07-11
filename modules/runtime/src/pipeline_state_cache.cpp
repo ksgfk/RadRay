@@ -2,20 +2,22 @@
 
 #include <radray/logger.h>
 #include <radray/render/common.h>
-#include <radray/render/pipeline_state_cache.h>
+#include <radray/runtime/pipeline_state_cache.h>
 
-namespace radray::render {
+namespace radray {
+
+using namespace render;
 
 std::optional<GraphicsPsoKey> BuildGraphicsPsoKey(const GraphicsPipelineStateDescriptor& desc) noexcept {
     GraphicsPsoKey key{};
 
-    if (desc.BindingLayout == nullptr) {
-        RADRAY_ERR_LOG("PSO cache: BindingLayout is null");
+    if (desc.PipelineLayout == nullptr) {
+        RADRAY_ERR_LOG("PSO cache: PipelineLayout is null");
         return std::nullopt;
     }
-    const Guid layoutGuid = desc.BindingLayout->GetGuid();
+    const Guid layoutGuid = desc.PipelineLayout->GetGuid();
     if (layoutGuid.IsEmpty()) {
-        RADRAY_ERR_LOG("PSO cache: BindingLayout has no cache-assigned identity (create it via ShaderBindingLayoutCache)");
+        RADRAY_ERR_LOG("PSO cache: PipelineLayout has no runtime-library identity");
         return std::nullopt;
     }
     key.LayoutId = layoutGuid;
@@ -27,7 +29,7 @@ std::optional<GraphicsPsoKey> BuildGraphicsPsoKey(const GraphicsPipelineStateDes
         }
         const Guid g = entry->Target->GetGuid();
         if (g.IsEmpty()) {
-            RADRAY_ERR_LOG("PSO cache: {} shader has no cache-assigned identity (create it via ShaderVariantCache)", name);
+            RADRAY_ERR_LOG("PSO cache: {} shader has no runtime-library identity", name);
             return false;
         }
         out = g;
@@ -137,13 +139,13 @@ std::optional<GraphicsPsoKey> BuildGraphicsPsoKey(const GraphicsPipelineStateDes
 
 std::optional<ComputePsoKey> BuildComputePsoKey(const ComputePipelineStateDescriptor& desc) noexcept {
     ComputePsoKey key{};
-    if (desc.BindingLayout == nullptr) {
-        RADRAY_ERR_LOG("PSO cache: BindingLayout is null");
+    if (desc.PipelineLayout == nullptr) {
+        RADRAY_ERR_LOG("PSO cache: PipelineLayout is null");
         return std::nullopt;
     }
-    const Guid layoutGuid = desc.BindingLayout->GetGuid();
+    const Guid layoutGuid = desc.PipelineLayout->GetGuid();
     if (layoutGuid.IsEmpty()) {
-        RADRAY_ERR_LOG("PSO cache: BindingLayout has no cache-assigned identity (create it via ShaderBindingLayoutCache)");
+        RADRAY_ERR_LOG("PSO cache: PipelineLayout has no runtime-library identity");
         return std::nullopt;
     }
     key.LayoutId = layoutGuid;
@@ -153,11 +155,123 @@ std::optional<ComputePsoKey> BuildComputePsoKey(const ComputePipelineStateDescri
     }
     const Guid csGuid = desc.CS.Target->GetGuid();
     if (csGuid.IsEmpty()) {
-        RADRAY_ERR_LOG("PSO cache: CS shader has no cache-assigned identity (create it via ShaderVariantCache)");
+        RADRAY_ERR_LOG("PSO cache: CS shader has no runtime-library identity");
         return std::nullopt;
     }
     key.CSId = csGuid;
     return key;
 }
 
-}  // namespace radray::render
+GraphicsPipelineStateLibrary::GraphicsPipelineStateLibrary(render::Device* device) noexcept
+    : _device(device) {}
+
+GraphicsPipelineStateLibrary::~GraphicsPipelineStateLibrary() noexcept {
+    Clear();
+}
+
+Nullable<render::GraphicsPipelineState*> GraphicsPipelineStateLibrary::GetOrCreate(
+    const render::GraphicsPipelineStateDescriptor& desc) noexcept {
+    auto key = BuildGraphicsPsoKey(desc);
+    if (!key.has_value()) {
+        return nullptr;
+    }
+    if (desc.CompatibleRenderPass == nullptr ||
+        !IsGraphicsPipelineCompatibleWithRenderPass(desc, *desc.CompatibleRenderPass)) {
+        RADRAY_ERR_LOG("PSO cache: explicit render pass is missing or incompatible");
+        return nullptr;
+    }
+    if (auto it = _cache.find(key.value()); it != _cache.end()) {
+        ++_hits;
+        return it->second.get();
+    }
+    ++_misses;
+    auto created = _device->CreateGraphicsPipelineState(desc);
+    if (!created.HasValue()) {
+        return nullptr;
+    }
+    auto owned = created.Release();
+    auto* result = owned.get();
+    _ids[result] = _nextId++;
+    _cache.emplace(key.value(), std::move(owned));
+    return result;
+}
+
+bool GraphicsPipelineStateLibrary::Remove(render::GraphicsPipelineState* pso) noexcept {
+    const size_t oldSize = _cache.size();
+    std::erase_if(_cache, [pso](auto& entry) noexcept {
+        if (entry.second.get() != pso) {
+            return false;
+        }
+        entry.second->Destroy();
+        return true;
+    });
+    const bool removed = oldSize != _cache.size();
+    if (removed) {
+        _ids.erase(pso);
+    }
+    return removed;
+}
+
+void GraphicsPipelineStateLibrary::Clear() noexcept {
+    for (auto& [_, pso] : _cache) {
+        if (pso != nullptr) {
+            pso->Destroy();
+        }
+    }
+    _cache.clear();
+    _ids.clear();
+}
+
+uint64_t GraphicsPipelineStateLibrary::GetId(const render::GraphicsPipelineState* pso) const noexcept {
+    auto it = _ids.find(pso);
+    return it != _ids.end() ? it->second : 0;
+}
+
+ComputePipelineStateLibrary::ComputePipelineStateLibrary(render::Device* device) noexcept
+    : _device(device) {}
+
+ComputePipelineStateLibrary::~ComputePipelineStateLibrary() noexcept {
+    Clear();
+}
+
+Nullable<render::ComputePipelineState*> ComputePipelineStateLibrary::GetOrCreate(
+    const render::ComputePipelineStateDescriptor& desc) noexcept {
+    auto key = BuildComputePsoKey(desc);
+    if (!key.has_value()) {
+        return nullptr;
+    }
+    if (auto it = _cache.find(key.value()); it != _cache.end()) {
+        return it->second.get();
+    }
+    auto created = _device->CreateComputePipelineState(desc);
+    if (!created.HasValue()) {
+        return nullptr;
+    }
+    auto owned = created.Release();
+    auto* result = owned.get();
+    _cache.emplace(key.value(), std::move(owned));
+    return result;
+}
+
+bool ComputePipelineStateLibrary::Remove(render::ComputePipelineState* pso) noexcept {
+    const size_t oldSize = _cache.size();
+    std::erase_if(_cache, [pso](auto& entry) noexcept {
+        if (entry.second.get() != pso) {
+            return false;
+        }
+        entry.second->Destroy();
+        return true;
+    });
+    return oldSize != _cache.size();
+}
+
+void ComputePipelineStateLibrary::Clear() noexcept {
+    for (auto& [_, pso] : _cache) {
+        if (pso != nullptr) {
+            pso->Destroy();
+        }
+    }
+    _cache.clear();
+}
+
+}  // namespace radray

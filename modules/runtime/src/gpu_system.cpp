@@ -5,7 +5,7 @@
 #include <radray/hash.h>
 #include <radray/logger.h>
 #include <radray/render/common.h>
-#include <radray/render/gpu_resource.h>
+#include <radray/runtime/gpu_resource.h>
 #include <radray/render/shader_compiler/dxc.h>
 #include <radray/render/shader_compiler/spvc.h>
 #include <radray/vertex_data.h>
@@ -16,6 +16,19 @@
 #include <cstring>
 
 namespace radray {
+
+namespace {
+
+constexpr uint64_t kMaxCachedStagingBytes = 64ull * 1024 * 1024;
+constexpr size_t kMaxCachedStagingBuffers = 8;
+
+render::ResourceHints GetGpuAddressPageHints(render::Device* device) noexcept {
+    return device != nullptr && device->GetBackend() == render::RenderBackend::D3D12
+               ? render::ResourceHint::Dedicated
+               : render::ResourceHint::None;
+}
+
+}  // namespace
 
 // ═══════════════════════════════════════════════════════════════
 //  FrameUploadScheduler
@@ -292,6 +305,9 @@ void GpuSystem::BeginUpdateForFlight(uint32_t flightIndex) {
     }
 
     FlightSlot& flight = _flights[flightIndex];
+    if (flight.RenderResources != nullptr) {
+        flight.RenderResources->Reset();
+    }
     flight.WaitForDestroy.clear();
     flight.FrameStartTime = std::chrono::steady_clock::now();
 }
@@ -316,6 +332,10 @@ GpuFrameProfiler::GpuFrameProfiler(render::Device* device, render::CommandQueue*
             .Size = sizeof(uint64_t) * TimestampQueryCount,
             .Memory = render::MemoryType::ReadBack,
             .Usage = render::BufferUse::CopyDestination | render::BufferUse::MapRead};
+        if (device->GetBackend() == render::RenderBackend::Vulkan) {
+            // VMA maps a complete backing block even for a 16-byte readback.
+            readbackDesc.Hints = render::ResourceHint::Dedicated;
+        }
         frame.Readback = device->CreateBuffer(readbackDesc).Unwrap();
     }
 }
@@ -410,9 +430,13 @@ GpuSystem::GpuSystem(Application* app, const GpuSystemDescriptor& desc)
     _mainQueueTrack.Fence = _device->CreateFence().Unwrap();
     _mainQueueTrack.Fence->SetDebugName("AppMainQueue");
     _flights.resize(_flightDataCount);
+    for (auto& flight : _flights) {
+        flight.RenderResources = make_unique<FrameResources>(_device);
+    }
     _uploader = make_unique<ResourceUploader>(_device, _flightDataCount);
     _frameUploadScheduler = make_unique<FrameUploadScheduler>();
-    _shaderBindingLayoutCache = _device->CreateShaderBindingLayoutCache().Unwrap();
+    _pipelineLayoutLibrary = make_unique<PipelineLayoutLibrary>(_device);
+    _renderPassRegistry = make_unique<RenderPassRegistry>(_device);
     if (desc.EnableFrameProfiler) {
         _frameProfiler = make_unique<GpuFrameProfiler>(_device, _mainQueue, _flightDataCount);
     }
@@ -420,6 +444,11 @@ GpuSystem::GpuSystem(Application* app, const GpuSystemDescriptor& desc)
 
 GpuSystem::~GpuSystem() noexcept {
     FlushAllDeferredDeletes();
+    // Binding groups and command buffers must go away before their cached
+    // pipeline layouts and render-pass objects.
+    _flights.clear();
+    _renderPassRegistry.reset();
+    _pipelineLayoutLibrary.reset();
 }
 
 void GpuSystem::RecycleRenderResource(unique_ptr<render::RenderBase> obj) noexcept {
@@ -447,6 +476,10 @@ float GpuSystem::GetLastGpuTimeMs() const noexcept {
 
 uint32_t GpuSystem::GetCurrentFlightIndex() const noexcept {
     return static_cast<uint32_t>(_nowFrameIndex % _flightDataCount);
+}
+
+FrameResources& GpuSystem::GetFrameResources(uint32_t flightIndex) noexcept {
+    return *_flights.at(flightIndex).RenderResources;
 }
 
 void GpuSystem::PumpFrameUploadScheduler() {
@@ -604,6 +637,10 @@ ResourceUploader& AppFrameContext::GetUploader() const noexcept {
     return *_gpuSystem->_uploader;
 }
 
+FrameResources& AppFrameContext::GetFrameResources() const noexcept {
+    return _gpuSystem->GetFrameResources(_flightIndex);
+}
+
 render::Device* AppFrameContext::GetDevice() const noexcept {
     return _gpuSystem->_device;
 }
@@ -628,26 +665,35 @@ StagingBufferPool::StagingBufferPool(render::Device* device, uint32_t flightCoun
 StagingBufferPool::~StagingBufferPool() noexcept = default;
 
 StagingBufferPool::Allocation StagingBufferPool::Allocate(uint64_t size) {
-    // 尝试从 free list 找一个足够大的 buffer 复用
+    // Best-fit avoids consuming a large cached upload buffer for a small copy.
+    auto best = _freeList.end();
     for (auto it = _freeList.begin(); it != _freeList.end(); ++it) {
-        if ((*it)->GetDesc().Size >= size) {
-            auto buf = std::move(*it);
-            _freeList.erase(it);
-            void* mapped = buf->Map(0, size);
-            auto* rawPtr = buf.get();
-            _active.emplace_back(ActiveBuffer{
-                .Buffer = std::move(buf),
-                .IsMapped = true,
-                .MappedSize = size});
-            return Allocation{rawPtr, mapped, 0, size};
+        if (*it == nullptr || (*it)->GetDesc().Size < size) {
+            continue;
         }
+        if (best == _freeList.end() || (*it)->GetDesc().Size < (*best)->GetDesc().Size) {
+            best = it;
+        }
+    }
+    if (best != _freeList.end()) {
+        auto buf = std::move(*best);
+        _freeList.erase(best);
+        void* mapped = buf->Map(0, size);
+        auto* rawPtr = buf.get();
+        _active.emplace_back(ActiveBuffer{
+            .Buffer = std::move(buf),
+            .IsMapped = true,
+            .MappedSize = size});
+        return Allocation{rawPtr, mapped, 0, size};
     }
     // 没有合适的，创建新的 staging buffer
     render::BufferDescriptor desc{
         .Size = size,
         .Memory = render::MemoryType::Upload,
         .Usage = render::BufferUse::CopySource | render::BufferUse::MapWrite,
-        .Hints = render::ResourceHint::None};
+        .Hints = _device->GetBackend() == render::RenderBackend::Vulkan
+                     ? render::ResourceHint::Dedicated
+                     : render::ResourceHint::None};
     auto bufOpt = _device->CreateBuffer(desc);
     if (!bufOpt.HasValue()) {
         RADRAY_ABORT("StagingBufferPool::Allocate failed to create buffer of size {}", size);
@@ -700,6 +746,25 @@ void StagingBufferPool::CollectFlight(uint32_t flightIndex) {
                      std::make_move_iterator(pending.begin()),
                      std::make_move_iterator(pending.end()));
     pending.clear();
+    TrimFreeList();
+}
+
+void StagingBufferPool::TrimFreeList() noexcept {
+    std::erase_if(_freeList, [](const auto& buffer) noexcept {
+        return buffer == nullptr || buffer->GetDesc().Size > kMaxCachedStagingBytes;
+    });
+    std::ranges::sort(_freeList, [](const auto& lhs, const auto& rhs) noexcept {
+        return lhs->GetDesc().Size < rhs->GetDesc().Size;
+    });
+
+    uint64_t cachedBytes = 0;
+    for (const auto& buffer : _freeList) {
+        cachedBytes += buffer->GetDesc().Size;
+    }
+    while (_freeList.size() > kMaxCachedStagingBuffers || cachedBytes > kMaxCachedStagingBytes) {
+        cachedBytes -= _freeList.back()->GetDesc().Size;
+        _freeList.pop_back();
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -880,14 +945,14 @@ void ResourceUploader::CollectFlight(uint32_t flightIndex) {
     _stagingPool.CollectFlight(flightIndex);
 }
 
-std::optional<render::RenderMesh> ResourceUploader::UploadMeshResource(
+std::optional<GpuMesh> ResourceUploader::UploadMeshResource(
     render::CommandBuffer* cmdBuffer,
     const MeshResource& meshResource) {
     if (meshResource.Primitives.empty()) {
         return std::nullopt;
     }
 
-    render::RenderMesh result;
+    GpuMesh result;
     vector<Nullable<render::Buffer*>> bufferByBin(meshResource.Bins.size());
 
     // 为每个 bin 创建 device-local buffer 并上传
@@ -902,7 +967,7 @@ std::optional<render::RenderMesh> ResourceUploader::UploadMeshResource(
             .Size = data.size(),
             .Memory = render::MemoryType::Device,
             .Usage = render::BufferUse::Vertex | render::BufferUse::Index | render::BufferUse::CopyDestination,
-            .Hints = render::ResourceHint::None};
+            .Hints = GetGpuAddressPageHints(_device)};
         auto bufOpt = _device->CreateBuffer(bufDesc);
         if (!bufOpt.HasValue()) {
             return std::nullopt;
@@ -918,14 +983,14 @@ std::optional<render::RenderMesh> ResourceUploader::UploadMeshResource(
                                     .After = render::BufferState::Vertex | render::BufferState::Index});
 
         bufferByBin[binIdx] = buf.get();
-        result._buffers.emplace_back(std::move(buf));
+        result.Buffers.emplace_back(std::move(buf));
     }
 
     // 为每个 primitive 构建 DrawData
     for (size_t primIdx = 0; primIdx < meshResource.Primitives.size(); ++primIdx) {
         const MeshPrimitive& prim = meshResource.Primitives[primIdx];
 
-        render::RenderMesh::DrawData drawData{};
+        GpuMesh::DrawData drawData{};
 
         // 取第一个 vertex buffer entry 构建 VBV
         if (!prim.VertexBuffers.empty()) {
@@ -947,7 +1012,7 @@ std::optional<render::RenderMesh> ResourceUploader::UploadMeshResource(
                 .Stride = prim.IndexBuffer.Stride};
         }
 
-        result._drawDatas.emplace_back(drawData);
+        result.Draws.emplace_back(drawData);
     }
 
     return result;

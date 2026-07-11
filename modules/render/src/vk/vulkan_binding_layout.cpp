@@ -324,7 +324,9 @@ bool _ParameterLess(const ParameterRecord& lhs, const ParameterRecord& rhs) noex
 
 }  // namespace
 
-std::optional<VulkanMergedBindingLayout> BuildMergedBindingLayoutVulkan(std::span<Shader*> shaders) noexcept {
+std::optional<VulkanMergedPipelineLayout> BuildMergedPipelineLayoutVulkan(
+    std::span<Shader*> shaders,
+    std::span<const BindingGroupLayout> explicitGroups) noexcept {
     vector<ParameterRecord> records{};
     records.reserve(shaders.size() * 4);
 
@@ -353,20 +355,96 @@ std::optional<VulkanMergedBindingLayout> BuildMergedBindingLayoutVulkan(std::spa
         }
     }
 
+    vector<std::pair<uint32_t, uint32_t>> declaredLocations;
+    for (const BindingGroupLayout& group : explicitGroups) {
+        for (const BindingGroupLayoutEntry& entry : group.Entries) {
+            const ShaderParameterInfo& declared = entry.Parameter;
+            const std::pair location{group.GroupIndex, entry.Binding};
+            if (std::ranges::find(declaredLocations, location) != declaredLocations.end()) {
+                RADRAY_ERR_LOG(
+                    "pipeline layout contains duplicate explicit set={} binding={}",
+                    group.GroupIndex,
+                    entry.Binding);
+                return std::nullopt;
+            }
+            declaredLocations.push_back(location);
+            const bool validKind =
+                (declared.Kind == ShaderParameterKind::Sampler &&
+                 declared.Type == ResourceBindType::Sampler) ||
+                (declared.Kind == ShaderParameterKind::Resource &&
+                 declared.Type != ResourceBindType::UNKNOWN &&
+                 declared.Type != ResourceBindType::Sampler) ||
+                declared.Kind == ShaderParameterKind::BindlessArray;
+            if (!validKind || declared.Stages == ShaderStage::UNKNOWN || declared.Count == 0) {
+                RADRAY_ERR_LOG(
+                    "invalid explicit binding '{}' at set={} binding={}",
+                    declared.Name,
+                    group.GroupIndex,
+                    entry.Binding);
+                return std::nullopt;
+            }
+
+            auto record = std::ranges::find_if(
+                records,
+                [&group, &entry](const ParameterRecord& candidate) noexcept {
+                    return candidate.Parameter.Kind != ShaderParameterKind::Constant &&
+                           candidate.Vulkan.SetIndex == group.GroupIndex &&
+                           candidate.Vulkan.BindingIndex == entry.Binding;
+                });
+            if (record != records.end()) {
+                if (record->Parameter.Name != declared.Name ||
+                    record->Parameter.Kind != declared.Kind ||
+                    record->Parameter.Type != declared.Type ||
+                    record->Parameter.Count != declared.Count ||
+                    record->Parameter.IsBindless != declared.IsBindless) {
+                    RADRAY_ERR_LOG(
+                        "explicit binding '{}' does not match reflection at set={} binding={}",
+                        declared.Name,
+                        group.GroupIndex,
+                        entry.Binding);
+                    return std::nullopt;
+                }
+                record->Parameter.Stages = declared.Stages;
+                record->Vulkan.Stages = declared.Stages;
+                continue;
+            }
+            if (declared.IsBindless || declared.Kind == ShaderParameterKind::BindlessArray) {
+                RADRAY_ERR_LOG("explicit bindless binding '{}' requires reflection metadata", declared.Name);
+                return std::nullopt;
+            }
+
+            ParameterRecord synthesized{};
+            synthesized.Parameter = declared;
+            synthesized.Parameter.IsReadOnly = !_IsRwResourceType(declared.Type);
+            synthesized.Vulkan.Name = declared.Name;
+            synthesized.Vulkan.Kind = declared.Kind;
+            synthesized.Vulkan.Stages = declared.Stages;
+            synthesized.Vulkan.SetIndex = group.GroupIndex;
+            synthesized.Vulkan.BindingIndex = entry.Binding;
+            synthesized.Vulkan.ResourceType = declared.Type;
+            synthesized.Vulkan.DescriptorCount = declared.Count;
+            synthesized.Vulkan.IsReadOnly = synthesized.Parameter.IsReadOnly;
+            synthesized.Vulkan.IsBindless = false;
+            synthesized.Vulkan.DescriptorType = MapType(declared.Type);
+            if (synthesized.Vulkan.DescriptorType == VK_DESCRIPTOR_TYPE_MAX_ENUM ||
+                !_MergeRecord(records, std::move(synthesized))) {
+                return std::nullopt;
+            }
+        }
+    }
+
     if (!_ValidateBindlessSets(records)) {
         return std::nullopt;
     }
 
     std::sort(records.begin(), records.end(), _ParameterLess);
 
-    VulkanMergedBindingLayout result{};
+    VulkanMergedPipelineLayout result{};
     result.Parameters.reserve(records.size());
     result.VulkanParameters.reserve(records.size());
     uint32_t maxSetPlusOne = 0;
     for (uint32_t i = 0; i < records.size(); ++i) {
         auto& record = records[i];
-        record.Parameter.Id = ShaderParameterId{i};
-        record.Vulkan.Id = ShaderParameterId{i};
         result.Parameters.push_back(record.Parameter);
         result.VulkanParameters.push_back(record.Vulkan);
         if (record.Parameter.Kind != ShaderParameterKind::Constant) {

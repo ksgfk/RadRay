@@ -1,9 +1,7 @@
 #include <radray/render/common.h>
 
-#include <radray/hash.h>
 #include <radray/logger.h>
 #include <radray/utility.h>
-#include <radray/render/pipeline_state_cache.h>
 
 #ifdef RADRAY_ENABLE_D3D12
 #include <radray/render/backend/d3d12_impl.h>
@@ -18,6 +16,34 @@
 #endif
 
 namespace radray::render {
+
+RenderPass::RenderPass(const RenderPassDescriptor& desc)
+    : _colorAttachments(desc.ColorAttachments.begin(), desc.ColorAttachments.end()),
+      _depthStencilAttachment(desc.DepthStencilAttachment) {}
+
+RenderPassDescriptor RenderPass::GetDesc() const noexcept {
+    return RenderPassDescriptor{
+        .ColorAttachments = std::span<const RenderPassColorAttachmentDescriptor>{_colorAttachments},
+        .DepthStencilAttachment = _depthStencilAttachment};
+}
+
+Framebuffer::Framebuffer(const FramebufferDescriptor& desc)
+    : _pass(desc.Pass),
+      _colorAttachments(desc.ColorAttachments.begin(), desc.ColorAttachments.end()),
+      _depthStencilAttachment(desc.DepthStencilAttachment),
+      _width(desc.Width),
+      _height(desc.Height),
+      _layers(desc.Layers) {}
+
+FramebufferDescriptor Framebuffer::GetDesc() const noexcept {
+    return FramebufferDescriptor{
+        .Pass = _pass,
+        .ColorAttachments = std::span<TextureView* const>{_colorAttachments},
+        .DepthStencilAttachment = _depthStencilAttachment,
+        .Width = _width,
+        .Height = _height,
+        .Layers = _layers};
+}
 
 SwapChainFrame::SwapChainFrame(SwapChainFrame&& other) noexcept {
     swap(*this, other);
@@ -58,185 +84,6 @@ bool SwapChain::ValidateFrame(const SwapChainFrame& frame, const SwapChain* expe
 
 void SwapChain::InvalidateFrame(SwapChainFrame& frame) noexcept {
     frame = SwapChainFrame{};
-}
-
-bool ShaderParameterTable::SetResource(std::string_view name, ResourceView* view, uint32_t arrayIndex) noexcept {
-    auto idOpt = ResolveParameterId(name);
-    if (!idOpt.has_value()) {
-        return false;
-    }
-    return this->SetResource(idOpt.value(), view, arrayIndex);
-}
-
-bool ShaderParameterTable::SetResource(std::string_view name, const BufferBindingDescriptor& desc, uint32_t arrayIndex) noexcept {
-    auto idOpt = ResolveParameterId(name);
-    if (!idOpt.has_value()) {
-        return false;
-    }
-    return this->SetResource(idOpt.value(), desc, arrayIndex);
-}
-
-bool ShaderParameterTable::SetSampler(std::string_view name, Sampler* sampler, uint32_t arrayIndex) noexcept {
-    auto idOpt = ResolveParameterId(name);
-    if (!idOpt.has_value()) {
-        return false;
-    }
-    return this->SetSampler(idOpt.value(), sampler, arrayIndex);
-}
-
-bool ShaderParameterTable::SetBytes(std::string_view name, const void* data, uint32_t size) noexcept {
-    auto idOpt = ResolveParameterId(name);
-    if (!idOpt.has_value()) {
-        return false;
-    }
-    return this->SetBytes(idOpt.value(), data, size);
-}
-
-bool ShaderParameterTable::SetBindlessArray(std::string_view name, BindlessArray* array) noexcept {
-    auto idOpt = ResolveParameterId(name);
-    if (!idOpt.has_value()) {
-        return false;
-    }
-    return this->SetBindlessArray(idOpt.value(), array);
-}
-
-std::optional<ShaderParameterId> ShaderParameterTable::ResolveParameterId(std::string_view name) const noexcept {
-    ShaderBindingLayout* layout = this->GetShaderBindingLayout();
-    if (layout == nullptr) {
-        return std::nullopt;
-    }
-    return layout->FindParameterId(name);
-}
-
-namespace {
-
-// 后端无关的 PSO 缓存实现: 命中失败时回退到 device 的虚函数创建 native PSO.
-class GraphicsPipelineStateCacheImpl final : public GraphicsPipelineStateCache {
-public:
-    explicit GraphicsPipelineStateCacheImpl(Device* device) noexcept : _device(device) {}
-    ~GraphicsPipelineStateCacheImpl() noexcept override { Clear(); }
-
-    bool IsValid() const noexcept override { return _device != nullptr; }
-
-    void Destroy() noexcept override {
-        Clear();
-        _device = nullptr;
-    }
-
-    Nullable<GraphicsPipelineState*> GetOrCreate(const GraphicsPipelineStateDescriptor& desc) noexcept override {
-        auto keyOpt = BuildGraphicsPsoKey(desc);
-        if (!keyOpt.has_value()) {
-            return nullptr;
-        }
-        const GraphicsPsoKey& key = keyOpt.value();
-        if (auto it = _cache.find(key); it != _cache.end()) {
-            return it->second.get();
-        }
-        auto pso = _device->CreateGraphicsPipelineState(desc);
-        if (!pso.HasValue()) {
-            return nullptr;
-        }
-        unique_ptr<GraphicsPipelineState> owned = pso.Release();
-        GraphicsPipelineState* result = owned.get();
-        _cache.emplace(key, std::move(owned));
-        return result;
-    }
-
-    bool Remove(GraphicsPipelineState* pso) noexcept override {
-        const auto oldSize = _cache.size();
-        std::erase_if(_cache, [pso](auto& kv) noexcept {
-            if (kv.second.get() != pso) {
-                return false;
-            }
-            kv.second->Destroy();
-            return true;
-        });
-        return _cache.size() != oldSize;
-    }
-
-    void Clear() noexcept override {
-        for (auto& kv : _cache) {
-            if (kv.second != nullptr) {
-                kv.second->Destroy();
-            }
-        }
-        _cache.clear();
-    }
-
-    uint32_t Count() const noexcept override { return static_cast<uint32_t>(_cache.size()); }
-
-private:
-    Device* _device;
-    unordered_map<GraphicsPsoKey, unique_ptr<GraphicsPipelineState>, PodHasher<GraphicsPsoKey>, PodEqual<GraphicsPsoKey>> _cache;
-};
-
-class ComputePipelineStateCacheImpl final : public ComputePipelineStateCache {
-public:
-    explicit ComputePipelineStateCacheImpl(Device* device) noexcept : _device(device) {}
-    ~ComputePipelineStateCacheImpl() noexcept override { Clear(); }
-
-    bool IsValid() const noexcept override { return _device != nullptr; }
-
-    void Destroy() noexcept override {
-        Clear();
-        _device = nullptr;
-    }
-
-    Nullable<ComputePipelineState*> GetOrCreate(const ComputePipelineStateDescriptor& desc) noexcept override {
-        auto keyOpt = BuildComputePsoKey(desc);
-        if (!keyOpt.has_value()) {
-            return nullptr;
-        }
-        const ComputePsoKey& key = keyOpt.value();
-        if (auto it = _cache.find(key); it != _cache.end()) {
-            return it->second.get();
-        }
-        auto pso = _device->CreateComputePipelineState(desc);
-        if (!pso.HasValue()) {
-            return nullptr;
-        }
-        unique_ptr<ComputePipelineState> owned = pso.Release();
-        ComputePipelineState* result = owned.get();
-        _cache.emplace(key, std::move(owned));
-        return result;
-    }
-
-    bool Remove(ComputePipelineState* pso) noexcept override {
-        const auto oldSize = _cache.size();
-        std::erase_if(_cache, [pso](auto& kv) noexcept {
-            if (kv.second.get() != pso) {
-                return false;
-            }
-            kv.second->Destroy();
-            return true;
-        });
-        return _cache.size() != oldSize;
-    }
-
-    void Clear() noexcept override {
-        for (auto& kv : _cache) {
-            if (kv.second != nullptr) {
-                kv.second->Destroy();
-            }
-        }
-        _cache.clear();
-    }
-
-    uint32_t Count() const noexcept override { return static_cast<uint32_t>(_cache.size()); }
-
-private:
-    Device* _device;
-    unordered_map<ComputePsoKey, unique_ptr<ComputePipelineState>, PodHasher<ComputePsoKey>, PodEqual<ComputePsoKey>> _cache;
-};
-
-}  // namespace
-
-Nullable<unique_ptr<GraphicsPipelineStateCache>> Device::CreateGraphicsPipelineStateCache() noexcept {
-    return unique_ptr<GraphicsPipelineStateCache>{make_unique<GraphicsPipelineStateCacheImpl>(this).release()};
-}
-
-Nullable<unique_ptr<ComputePipelineStateCache>> Device::CreateComputePipelineStateCache() noexcept {
-    return unique_ptr<ComputePipelineStateCache>{make_unique<ComputePipelineStateCacheImpl>(this).release()};
 }
 
 Nullable<shared_ptr<Device>> Device::Create(const DeviceDescriptor& desc) {
@@ -305,6 +152,30 @@ bool IsDepthStencilFormat(TextureFormat format) noexcept {
         case TextureFormat::D32_FLOAT_S8_UINT: return true;
         default: return false;
     }
+}
+
+bool IsGraphicsPipelineCompatibleWithRenderPass(
+    const GraphicsPipelineStateDescriptor& pipeline,
+    const RenderPass& renderPass) noexcept {
+    const RenderPassDescriptor pass = renderPass.GetDesc();
+    if (pipeline.ColorTargets.size() != pass.ColorAttachments.size()) {
+        return false;
+    }
+    for (size_t i = 0; i < pipeline.ColorTargets.size(); ++i) {
+        if (pipeline.ColorTargets[i].Format != pass.ColorAttachments[i].Format ||
+            pipeline.MultiSample.Count != pass.ColorAttachments[i].SampleCount) {
+            return false;
+        }
+    }
+    if (pipeline.DepthStencil.has_value() != pass.DepthStencilAttachment.has_value()) {
+        return false;
+    }
+    if (pipeline.DepthStencil.has_value() &&
+        (pipeline.DepthStencil->Format != pass.DepthStencilAttachment->Format ||
+         pipeline.MultiSample.Count != pass.DepthStencilAttachment->SampleCount)) {
+        return false;
+    }
+    return true;
 }
 
 bool IsUintFormat(TextureFormat format) noexcept {
@@ -716,8 +587,7 @@ std::string_view format_as(RenderObjectTag v) noexcept {
         case RenderObjectTag::RayTracingCmdEncoder: return "RayTracingCmdEncoder";
         case RenderObjectTag::Fence: return "Fence";
         case RenderObjectTag::Shader: return "Shader";
-        case RenderObjectTag::ShaderBindingLayout: return "ShaderBindingLayout";
-        case RenderObjectTag::ShaderParameterTable: return "ShaderParameterTable";
+        case RenderObjectTag::PipelineLayout: return "PipelineLayout";
         case RenderObjectTag::PipelineState: return "PipelineState";
         case RenderObjectTag::GraphicsPipelineState: return "GraphicsPipelineState";
         case RenderObjectTag::ComputePipelineState: return "ComputePipelineState";
@@ -728,6 +598,8 @@ std::string_view format_as(RenderObjectTag v) noexcept {
         case RenderObjectTag::Texture: return "Texture";
         case RenderObjectTag::AccelerationStructure: return "AccelerationStructure";
         case RenderObjectTag::ShaderBindingTable: return "ShaderBindingTable";
+        case RenderObjectTag::RenderPass: return "RenderPass";
+        case RenderObjectTag::Framebuffer: return "Framebuffer";
         case RenderObjectTag::ResourceView: return "ResourceView";
         case RenderObjectTag::TextureView: return "TextureView";
         case RenderObjectTag::AccelerationStructureView: return "AccelerationStructureView";

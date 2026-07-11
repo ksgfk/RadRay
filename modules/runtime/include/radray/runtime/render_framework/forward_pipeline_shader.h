@@ -52,6 +52,10 @@ inline constexpr std::string_view kKwPointShadows = "_POINT_SHADOWS";
 /// 级联阴影采样路径并绑定 Texture2DArray 阴影图; 无阴影时关闭, 整块 CSM 代码被剔除。
 inline constexpr std::string_view kKwDirectionalShadows = "_DIRECTIONAL_SHADOWS";
 
+/// ShadowCaster 专用 keyword：VS 以 6 个 instance 输出到 cubemap 的 6 个 array layer。
+/// 仅在设备支持从 vertex shader 写 SV_RenderTargetArrayIndex 时由点光源阴影 pass 启用。
+inline constexpr std::string_view kKwPointShadowLayered = "_POINT_SHADOW_LAYERED";
+
 /// 贴图存在性 keyword (顺序即 bit 位, 与 shader 声明一致, 勿改)。
 inline constexpr std::string_view kKwBaseColorMap = "_BASECOLOR_MAP";
 inline constexpr std::string_view kKwMetalRoughMap = "_METALROUGHNESS_MAP";
@@ -72,7 +76,7 @@ inline constexpr uint64_t kVertexStride = sizeof(float) * (3 + 3 + 2 + 4);
 
 }  // namespace forward_pipeline
 
-/// forward_pass.hlsl 的 MaterialConstants (push_constant), 逐字节对应 (float4 x6)。
+/// forward_pass.hlsl 的 MaterialConstants cbuffer, 逐字节对应 (float4 x6)。
 /// 统一覆盖程序化几何 (纯常量) 与 metallic-roughness 材质。
 struct ForwardMaterialConstants {
     float BaseColor[4];    // rgb 基础色 (= baseColorFactor), a 不透明度

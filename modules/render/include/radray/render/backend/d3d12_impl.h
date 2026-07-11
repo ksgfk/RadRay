@@ -6,10 +6,10 @@
 #include <limits>
 
 #include <radray/allocator.h>
+#include <radray/hash.h>
 
 #include <radray/render/backend/d3d12_helper.h>
 #include <radray/render/common.h>
-#include <radray/render/sampler_cache.h>
 
 namespace radray::render::d3d12 {
 
@@ -28,7 +28,11 @@ class BufferD3D12;
 class QueryPoolD3D12;
 class TextureD3D12;
 class TextureViewD3D12;
+class RenderPassD3D12;
+class FramebufferD3D12;
 class RootSigD3D12;
+class DescriptorPoolD3D12;
+class BindingGroupD3D12;
 class GraphicsPsoD3D12;
 class ComputePsoD3D12;
 class AccelerationStructureD3D12;
@@ -277,31 +281,6 @@ static_assert(is_allocator<GpuDescriptorAllocator, GpuDescriptorAllocator::Alloc
 using CpuDescriptorHeapViewRAII = DescriptorHeapViewRAII<CpuDescriptorAllocator, CpuDescriptorAllocator::Allocation>;
 using GpuDescriptorHeapViewRAII = DescriptorHeapViewRAII<GpuDescriptorAllocator, GpuDescriptorAllocator::Allocation>;
 
-struct SamplerDescriptorTableKeyD3D12 {
-    vector<SamplerKey> Samplers;
-};
-
-struct SamplerDescriptorTableKeyHashD3D12 {
-    using is_transparent = void;
-
-    size_t operator()(const SamplerDescriptorTableKeyD3D12& key) const noexcept;
-    size_t operator()(std::span<const SamplerKey> key) const noexcept;
-};
-
-struct SamplerDescriptorTableKeyEqualD3D12 {
-    using is_transparent = void;
-
-    bool operator()(
-        const SamplerDescriptorTableKeyD3D12& lhs,
-        const SamplerDescriptorTableKeyD3D12& rhs) const noexcept;
-    bool operator()(
-        const SamplerDescriptorTableKeyD3D12& lhs,
-        std::span<const SamplerKey> rhs) const noexcept;
-    bool operator()(
-        std::span<const SamplerKey> lhs,
-        const SamplerDescriptorTableKeyD3D12& rhs) const noexcept;
-};
-
 class DXGIFactoryImpl final : public DXGIFactory {
 public:
     DXGIFactoryImpl(
@@ -359,13 +338,20 @@ public:
 
     Nullable<unique_ptr<TextureView>> CreateTextureView(const TextureViewDescriptor& desc) noexcept override;
 
+    Nullable<unique_ptr<RenderPass>> CreateRenderPass(const RenderPassDescriptor& desc) noexcept override;
+
+    Nullable<unique_ptr<Framebuffer>> CreateFramebuffer(const FramebufferDescriptor& desc) noexcept override;
+
     Nullable<unique_ptr<Shader>> CreateShader(const ShaderDescriptor& desc) noexcept override;
 
-    Nullable<unique_ptr<ShaderBindingLayoutCache>> CreateShaderBindingLayoutCache() noexcept override;
+    Nullable<unique_ptr<PipelineLayout>> CreatePipelineLayout(const PipelineLayoutDescriptor& desc) noexcept override;
 
-    Nullable<unique_ptr<ShaderBindingLayout>> CreateShaderBindingLayout(const ShaderBindingLayoutDescriptor& desc) noexcept override;
+    Nullable<unique_ptr<DescriptorPool>> CreateDescriptorPool(const DescriptorPoolDescriptor& desc) noexcept override;
 
-    Nullable<unique_ptr<ShaderParameterTable>> CreateShaderParameterTable(ShaderBindingLayout* layout) noexcept override;
+    Nullable<unique_ptr<BindingGroup>> CreateBindingGroup(
+        DescriptorPool* pool,
+        PipelineLayout* layout,
+        uint32_t groupIndex) noexcept override;
 
     Nullable<unique_ptr<GraphicsPipelineState>> CreateGraphicsPipelineState(const GraphicsPipelineStateDescriptor& desc) noexcept override;
 
@@ -388,11 +374,7 @@ public:
 
     Nullable<unique_ptr<FenceD3D12>> CreateFenceD3D12(uint64_t initValue) noexcept;
 
-    Nullable<unique_ptr<RootSigD3D12>> CreateRootSignatureInternal(const ShaderBindingLayoutDescriptor& desc) noexcept;
-
-    Nullable<const GpuDescriptorHeapViewRAII*> GetOrCreateSamplerDescriptorTable(
-        std::span<const SamplerKey> keys,
-        std::span<const D3D12_CPU_DESCRIPTOR_HANDLE> sources) noexcept;
+    Nullable<unique_ptr<RootSigD3D12>> CreateRootSignatureInternal(const PipelineLayoutDescriptor& desc) noexcept;
 
     void TryDrainValidationMessages();
 
@@ -407,12 +389,6 @@ public:
     unique_ptr<CpuDescriptorAllocator> _cpuSamplerAlloc;
     unique_ptr<GpuDescriptorAllocator> _gpuResHeap;
     unique_ptr<GpuDescriptorAllocator> _gpuSamplerHeap;
-    unordered_map<
-        SamplerDescriptorTableKeyD3D12,
-        GpuDescriptorHeapViewRAII,
-        SamplerDescriptorTableKeyHashD3D12,
-        SamplerDescriptorTableKeyEqualD3D12>
-        _samplerDescriptorTables;
     DeviceDetail _detail;
     CD3DX12FeatureSupport _features;
     bool _isAllowTearing = false;
@@ -500,7 +476,7 @@ public:
 
     void ResourceBarrier(std::span<const ResourceBarrierDescriptor> barriers) noexcept override;
 
-    Nullable<unique_ptr<GraphicsCommandEncoder>> BeginRenderPass(const RenderPassDescriptor& desc) noexcept override;
+    Nullable<unique_ptr<GraphicsCommandEncoder>> BeginRenderPass(const RenderPassBeginDescriptor& desc) noexcept override;
 
     void EndRenderPass(unique_ptr<GraphicsCommandEncoder> encoder) noexcept override;
 
@@ -553,7 +529,16 @@ public:
 
     void BindIndexBuffer(IndexBufferView ibv) noexcept override;
 
-    void BindShaderParameters(ShaderParameterTable* table) noexcept override;
+    void BindBindingGroup(
+        uint32_t groupIndex,
+        BindingGroup* group,
+        std::span<const uint32_t> dynamicOffsets) noexcept override;
+
+    bool SetPushConstants(
+        PipelineLayout* layout,
+        uint32_t groupIndex,
+        uint32_t binding,
+        std::span<const byte> data) noexcept override;
 
     void BindGraphicsPipelineState(GraphicsPipelineState* pso) noexcept override;
 
@@ -579,7 +564,16 @@ public:
 
     CommandBuffer* GetCommandBuffer() const noexcept override;
 
-    void BindShaderParameters(ShaderParameterTable* table) noexcept override;
+    void BindBindingGroup(
+        uint32_t groupIndex,
+        BindingGroup* group,
+        std::span<const uint32_t> dynamicOffsets) noexcept override;
+
+    bool SetPushConstants(
+        PipelineLayout* layout,
+        uint32_t groupIndex,
+        uint32_t binding,
+        std::span<const byte> data) noexcept override;
 
     void BindComputePipelineState(ComputePipelineState* pso) noexcept override;
 
@@ -601,7 +595,16 @@ public:
 
     CommandBuffer* GetCommandBuffer() const noexcept override;
 
-    void BindShaderParameters(ShaderParameterTable* table) noexcept override;
+    void BindBindingGroup(
+        uint32_t groupIndex,
+        BindingGroup* group,
+        std::span<const uint32_t> dynamicOffsets) noexcept override;
+
+    bool SetPushConstants(
+        PipelineLayout* layout,
+        uint32_t groupIndex,
+        uint32_t binding,
+        std::span<const byte> data) noexcept override;
 
     void BuildBottomLevelAS(const BuildBottomLevelASDescriptor& desc) noexcept override;
 
@@ -768,6 +771,34 @@ public:
     DXGI_FORMAT _rawFormat;
 };
 
+class RenderPassD3D12 final : public RenderPass {
+public:
+    explicit RenderPassD3D12(const RenderPassDescriptor& desc);
+    ~RenderPassD3D12() noexcept override = default;
+
+    bool IsValid() const noexcept override;
+    void Destroy() noexcept override;
+    void SetDebugName(std::string_view name) noexcept override;
+
+private:
+    bool _valid{true};
+    string _name;
+};
+
+class FramebufferD3D12 final : public Framebuffer {
+public:
+    explicit FramebufferD3D12(const FramebufferDescriptor& desc);
+    ~FramebufferD3D12() noexcept override = default;
+
+    bool IsValid() const noexcept override;
+    void Destroy() noexcept override;
+    void SetDebugName(std::string_view name) noexcept override;
+
+private:
+    bool _valid{true};
+    string _name;
+};
+
 class Dxil final : public Shader {
 public:
     Dxil() noexcept = default;
@@ -801,10 +832,10 @@ public:
     std::optional<ShaderReflectionDesc> _reflection{};
 };
 
-class RootSigD3D12 final : public ShaderBindingLayout {
+class RootSigD3D12 final : public PipelineLayout {
 public:
     /**
-     * RootSigD3D12 唯一的辅助结构. 每个 ShaderParameter 一条, 按 ShaderParameterId 索引 (Info.Id.Value == 下标).
+     * RootSigD3D12 internal record, indexed by ParameterIndex.
      * - Info: 对外暴露的参数信息, 同时作为 FindParameter 返回指针的稳定存储
      * - RootParameterIndex: 指向 _rootParams; 静态采样器为 max()
      * - RangeIndex: 指向 _ranges[RootParameterIndex] 的对应 range; 非 descriptor table 参数为 max()
@@ -813,8 +844,11 @@ public:
      */
     struct ParameterBinding {
         ShaderParameterInfo Info{};
+        uint32_t ParameterIndex{0};
         uint32_t RegisterSpace{0};
+        uint32_t ShaderRegister{0};
         bool IsStaticSampler{false};
+        bool HasDynamicOffset{false};
         BindlessSlotType BindlessSlotType{BindlessSlotType::Multiple};
         uint32_t RootParameterIndex{std::numeric_limits<uint32_t>::max()};
         uint32_t RangeIndex{std::numeric_limits<uint32_t>::max()};
@@ -837,11 +871,21 @@ public:
 
     vector<ShaderParameterInfo> GetParameters() const noexcept override;
 
-    std::optional<ShaderParameterId> FindParameterId(std::string_view name) const noexcept override;
+    Nullable<const ShaderParameterInfo*> FindParameter(std::string_view name) const noexcept override;
 
-    Nullable<const ShaderParameterInfo*> FindParameter(ShaderParameterId id) const noexcept override;
+    std::optional<ShaderBindingLocation> FindBindingLocation(std::string_view name) const noexcept override;
 
-    Nullable<const ParameterBinding*> FindParameterBinding(ShaderParameterId id) const noexcept;
+    vector<BindingGroupLayout> GetBindingGroupLayouts() const noexcept override;
+
+    vector<PushConstantRange> GetPushConstantRanges() const noexcept override;
+
+    Nullable<const ParameterBinding*> FindParameterBinding(uint32_t parameterIndex) const noexcept;
+
+    Nullable<const ParameterBinding*> FindParameterBinding(
+        uint32_t registerSpace,
+        uint32_t shaderRegister) const noexcept;
+
+    vector<const ParameterBinding*> GetDynamicBufferBindings(uint32_t registerSpace) const noexcept;
 
     bool HasBindlessSet(uint32_t registerSpace) const noexcept;
 
@@ -862,7 +906,7 @@ public:
 public:
     DeviceD3D12* _device;
     ComPtr<ID3D12RootSignature> _rootSig;
-    // 唯一辅助结构, 按 ShaderParameterId 索引.
+    // Single internal record array, indexed by ParameterIndex.
     vector<ParameterBinding> _parameterBindings{};
     // 创建 ID3D12RootSignature 时使用的 D3D12 结构, 作为 descriptor 数量/偏移/push constant 大小的唯一数据源.
     // _ranges 必须指针稳定 (构造后不再修改), _rootParams 中 descriptor table 的 pDescriptorRanges 指向它.
@@ -1021,80 +1065,96 @@ public:
     string _name;
 };
 
-class ShaderParameterTableD3D12 final : public ShaderParameterTable {
+struct PendingDescriptorCopyD3D12 {
+    D3D12_CPU_DESCRIPTOR_HANDLE Source{};
+    D3D12_CPU_DESCRIPTOR_HANDLE Destination{};
+    D3D12_DESCRIPTOR_HEAP_TYPE Type{D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV};
+};
+
+struct DescriptorSetSlotD3D12 {
+    GpuDescriptorHeapViewRAII ResHeapView;
+    GpuDescriptorHeapViewRAII SamplerHeapView;
+    vector<uint8_t> ResourceWritten;
+    vector<uint8_t> SamplerWritten;
+
+    bool HasStorage() const noexcept { return ResHeapView.IsValid() || SamplerHeapView.IsValid(); }
+};
+
+class DescriptorPoolD3D12 final : public DescriptorPool {
 public:
-    struct PendingDescriptorCopy {
-        D3D12_CPU_DESCRIPTOR_HANDLE Source{};
-        D3D12_CPU_DESCRIPTOR_HANDLE Destination{};
-        D3D12_DESCRIPTOR_HEAP_TYPE Type{D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV};
-    };
-
-    /// 一个 register space 对应的 descriptor 状态。Resource descriptor 为每张参数表独占；
-    /// sampler 只保存 CPU 来源与状态 key，绑定时按完整组合取得 Device 级共享 GPU table。
-    struct DescriptorSetSlot {
-        GpuDescriptorHeapViewRAII ResHeapView;
-        const GpuDescriptorHeapViewRAII* SamplerTable{nullptr};
-        vector<uint8_t> ResourceWritten;
-        vector<uint8_t> SamplerWritten;
-        vector<SamplerKey> SamplerKeys;
-        vector<D3D12_CPU_DESCRIPTOR_HANDLE> SamplerSources;
-
-        bool HasStorage() const noexcept { return ResHeapView.IsValid() || !SamplerWritten.empty(); }
-    };
-
-    ShaderParameterTableD3D12(DeviceD3D12* device, RootSigD3D12* rootSig) noexcept;
-    ~ShaderParameterTableD3D12() noexcept override = default;
+    DescriptorPoolD3D12(DeviceD3D12* device, const DescriptorPoolDescriptor& desc) noexcept;
+    ~DescriptorPoolD3D12() noexcept override;
 
     bool IsValid() const noexcept override;
-
     void Destroy() noexcept override;
+    void SetDebugName(std::string_view name) noexcept override;
+    bool Reset() noexcept override;
+    DescriptorPoolDescriptor GetDesc() const noexcept override { return _desc; }
+    uint32_t GetAllocatedBindingGroupCount() const noexcept override { return _groups; }
 
+    bool Reserve(const DescriptorPoolDescriptor& usage) noexcept;
+    void Release(const DescriptorPoolDescriptor& usage) noexcept;
+
+private:
+    DeviceD3D12* _device{nullptr};
+    DescriptorPoolDescriptor _desc{};
+    DescriptorPoolDescriptor _used{};
+    uint32_t _groups{0};
+    string _name{};
+};
+
+class BindingGroupD3D12 final : public BindingGroup {
+public:
+    BindingGroupD3D12(
+        DeviceD3D12* device,
+        DescriptorPoolD3D12* pool,
+        RootSigD3D12* layout,
+        uint32_t groupIndex,
+        DescriptorSetSlotD3D12 slot,
+        uint32_t parameterCount,
+        uint32_t resourceDescriptorCount,
+        uint32_t samplerDescriptorCount,
+        const DescriptorPoolDescriptor& poolUsage) noexcept;
+    ~BindingGroupD3D12() noexcept override;
+
+    bool IsValid() const noexcept override;
+    void Destroy() noexcept override;
     void Reset() noexcept override;
-
     void SetDebugName(std::string_view name) noexcept override;
 
-    ShaderBindingLayout* GetShaderBindingLayout() const noexcept override { return _rootSig; }
+    PipelineLayout* GetPipelineLayout() const noexcept override { return _layout; }
+    uint32_t GetGroupIndex() const noexcept override { return _groupIndex; }
 
-    bool SetResource(ShaderParameterId id, ResourceView* view, uint32_t arrayIndex = 0) noexcept override;
-
-    bool SetResource(ShaderParameterId id, const BufferBindingDescriptor& desc, uint32_t arrayIndex = 0) noexcept override;
-
-    bool SetSampler(ShaderParameterId id, Sampler* sampler, uint32_t arrayIndex = 0) noexcept override;
-
-    bool SetBytes(ShaderParameterId id, const void* data, uint32_t size) noexcept override;
-
-    bool SetBindlessArray(ShaderParameterId id, BindlessArray* array) noexcept override;
+    bool SetResource(uint32_t binding, ResourceView* view, uint32_t arrayIndex = 0) noexcept override;
+    bool SetResource(uint32_t binding, const BufferBindingDescriptor& desc, uint32_t arrayIndex = 0) noexcept override;
+    bool SetSampler(uint32_t binding, Sampler* sampler, uint32_t arrayIndex = 0) noexcept override;
+    bool SetBindlessArray(uint32_t binding, BindlessArray* array) noexcept override;
 
     bool IsFullyWritten() const noexcept;
-
-    void StageDescriptorCopy(PendingDescriptorCopy copy) noexcept;
-
     void FlushDescriptorCopies() noexcept;
+    const BufferBindingDescriptor* GetDynamicBuffer(uint32_t parameterIndex) const noexcept;
 
-    bool ResolveSamplerTable(uint32_t registerSpace) noexcept;
+    DescriptorSetSlotD3D12& GetSlot() noexcept { return _slot; }
+    const DescriptorSetSlotD3D12& GetSlot() const noexcept { return _slot; }
+    BindlessArray* GetBindlessArray() const noexcept { return _bindlessArray; }
 
-    Nullable<DescriptorSetSlot*> GetDescriptorSetSlot(uint32_t registerSpace) noexcept;
-    Nullable<const DescriptorSetSlot*> GetDescriptorSetSlot(uint32_t registerSpace) const noexcept;
+private:
+    void StageDescriptorCopy(PendingDescriptorCopyD3D12 copy) noexcept;
 
-    // 指定 space 的 slot 是否至少写入过一个 descriptor.
-    bool SlotHasAnyWrite(uint32_t registerSpace) const noexcept;
-    // 指定 space 的 slot 是否已按 root signature 布局写满.
-    bool SlotIsFullyWritten(uint32_t registerSpace) const noexcept;
-
-    std::span<const byte> GetConstantData(ShaderParameterId id) const noexcept;
-
-    BindlessArray* GetBindlessArray(uint32_t registerSpace) const noexcept;
-
-public:
-    DeviceD3D12* _device;
-    RootSigD3D12* _rootSig;
-    vector<DescriptorSetSlot> _sets;
-    vector<vector<byte>> _constantData;
-    vector<BindlessArray*> _bindlessArrays;
-    vector<PendingDescriptorCopy> _pendingDescriptorCopies;
-    vector<D3D12_CPU_DESCRIPTOR_HANDLE> _descriptorCopySources;
-    vector<D3D12_CPU_DESCRIPTOR_HANDLE> _descriptorCopyDestinations;
-    string _name;
+    DeviceD3D12* _device{nullptr};
+    DescriptorPoolD3D12* _pool{nullptr};
+    RootSigD3D12* _layout{nullptr};
+    uint32_t _groupIndex{0};
+    DescriptorSetSlotD3D12 _slot{};
+    vector<std::optional<BufferBindingDescriptor>> _dynamicBuffers{};
+    BindlessArray* _bindlessArray{nullptr};
+    vector<PendingDescriptorCopyD3D12> _pendingDescriptorCopies{};
+    vector<D3D12_CPU_DESCRIPTOR_HANDLE> _descriptorCopySources{};
+    vector<D3D12_CPU_DESCRIPTOR_HANDLE> _descriptorCopyDestinations{};
+    uint32_t _resourceDescriptorCount{0};
+    uint32_t _samplerDescriptorCount{0};
+    DescriptorPoolDescriptor _poolUsage{};
+    string _name{};
 };
 
 class SamplerD3D12 final : public Sampler {
@@ -1113,7 +1173,6 @@ public:
 public:
     DeviceD3D12* _device;
     CpuDescriptorHeapViewRAII _samplerView;
-    SamplerKey _key{};
     string _name;
 };
 
@@ -1155,32 +1214,6 @@ public:
     string _name;
 };
 
-class ShaderBindingLayoutCacheD3D12 final : public ShaderBindingLayoutCache {
-public:
-    explicit ShaderBindingLayoutCacheD3D12(DeviceD3D12* device) noexcept;
-    ~ShaderBindingLayoutCacheD3D12() noexcept override;
-
-    bool IsValid() const noexcept override;
-    void Destroy() noexcept override;
-
-    Nullable<ShaderBindingLayout*> GetOrCreate(const ShaderBindingLayoutDescriptor& desc) noexcept override;
-    bool Remove(ShaderBindingLayout* layout) noexcept override;
-    void Clear() noexcept override;
-    uint32_t Count() const noexcept override;
-
-private:
-    struct Entry {
-        vector<Shader*> Shaders;
-        vector<StaticSamplerDescriptor> StaticSamplers;
-        unique_ptr<RootSigD3D12> Layout;
-    };
-
-    bool Matches(const Entry& entry, const ShaderBindingLayoutDescriptor& desc) const noexcept;
-
-    DeviceD3D12* _device;
-    vector<Entry> _entries;
-};
-
 Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc);
 
 Nullable<unique_ptr<DXGIFactory>> CreateDXGIFactory(const DXGIFactoryDescriptor& desc);
@@ -1189,9 +1222,11 @@ constexpr auto CastD3D12Object(Device* v) noexcept { return static_cast<DeviceD3
 constexpr auto CastD3D12Object(CommandQueue* v) noexcept { return static_cast<CmdQueueD3D12*>(v); }
 constexpr auto CastD3D12Object(Buffer* v) noexcept { return static_cast<BufferD3D12*>(v); }
 constexpr auto CastD3D12Object(Texture* v) noexcept { return static_cast<TextureD3D12*>(v); }
+constexpr auto CastD3D12Object(RenderPass* v) noexcept { return static_cast<RenderPassD3D12*>(v); }
+constexpr auto CastD3D12Object(Framebuffer* v) noexcept { return static_cast<FramebufferD3D12*>(v); }
 constexpr auto CastD3D12Object(Fence* v) noexcept { return static_cast<FenceD3D12*>(v); }
 constexpr auto CastD3D12Object(CommandBuffer* v) noexcept { return static_cast<CmdListD3D12*>(v); }
-constexpr auto CastD3D12Object(ShaderBindingLayout* v) noexcept { return static_cast<RootSigD3D12*>(v); }
+constexpr auto CastD3D12Object(PipelineLayout* v) noexcept { return static_cast<RootSigD3D12*>(v); }
 constexpr auto CastD3D12Object(Shader* v) noexcept { return static_cast<Dxil*>(v); }
 constexpr auto CastD3D12Object(Sampler* v) noexcept { return static_cast<SamplerD3D12*>(v); }
 constexpr auto CastD3D12Object(TextureView* v) noexcept { return static_cast<TextureViewD3D12*>(v); }
@@ -1201,13 +1236,13 @@ constexpr auto CastD3D12Object(AccelerationStructure* v) noexcept { return stati
 constexpr auto CastD3D12Object(AccelerationStructureView* v) noexcept { return static_cast<AccelerationStructureViewD3D12*>(v); }
 constexpr auto CastD3D12Object(RayTracingPipelineState* v) noexcept { return static_cast<RayTracingPsoD3D12*>(v); }
 constexpr auto CastD3D12Object(ShaderBindingTable* v) noexcept { return static_cast<ShaderBindingTableD3D12*>(v); }
-constexpr auto CastD3D12Object(ShaderParameterTable* v) noexcept { return static_cast<ShaderParameterTableD3D12*>(v); }
+constexpr auto CastD3D12Object(DescriptorPool* v) noexcept { return static_cast<DescriptorPoolD3D12*>(v); }
+constexpr auto CastD3D12Object(BindingGroup* v) noexcept { return static_cast<BindingGroupD3D12*>(v); }
 constexpr auto CastD3D12Object(QueryPool* v) noexcept { return static_cast<QueryPoolD3D12*>(v); }
 constexpr auto CastD3D12Object(DXGIFactory* v) noexcept { return static_cast<DXGIFactoryImpl*>(v); }
 
 struct D3D12BindingParameterInfo {
     string Name{};
-    ShaderParameterId Id{0};
     ShaderParameterKind Kind{ShaderParameterKind::UNKNOWN};
     bool IsAvailable{false};
     uint32_t BindingIndex{0};
@@ -1224,13 +1259,16 @@ struct D3D12BindingParameterInfo {
     ShaderStages Stages{ShaderStage::UNKNOWN};
 };
 
-struct D3D12MergedBindingLayout {
+struct D3D12MergedPipelineLayout {
     vector<ShaderParameterInfo> Parameters{};
     vector<D3D12BindingParameterInfo> D3D12Parameters{};
     uint32_t RegisterSpaceCount{0};
 };
 
-std::optional<D3D12MergedBindingLayout> BuildMergedBindingLayoutD3D12(std::span<Shader*> shaders) noexcept;
+std::optional<D3D12MergedPipelineLayout> BuildMergedPipelineLayoutD3D12(
+    std::span<Shader*> shaders,
+    std::span<const PushConstantBinding> pushConstants = {},
+    std::span<const BindingGroupLayout> explicitGroups = {}) noexcept;
 
 }  // namespace radray::render::d3d12
 

@@ -3,6 +3,9 @@
 #include <string>
 
 #include <radray/runtime_type.h>
+#include <radray/runtime/pipeline_state_cache.h>
+#include <radray/runtime/sampler_cache.h>
+#include <radray/runtime/shader_variant_library.h>
 #include <radray/runtime/render_framework/render_pipeline.h>
 #include <radray/runtime/render_framework/scene.h>
 #include <radray/types.h>
@@ -16,9 +19,6 @@ class IStandardMaterialFactory;
 
 namespace render {
 class Dxc;
-class ShaderVariantCache;
-class GraphicsPipelineStateCache;
-class SamplerCache;
 }  // namespace render
 
 /// Runtime-side renderer coordinator.
@@ -35,7 +35,7 @@ public:
     ~RenderSystem() noexcept;
 
     /// 装配阶段调用 (ServiceRegistry::Initialize)。创建 shader 编译设施:
-    /// Dxc + ShaderVariantCache + GraphicsPipelineStateCache,并把 <exe>/shaderlib
+    /// Dxc + runtime shader/PSO libraries,并把 <exe>/shaderlib
     /// 作为默认 include 根。同时实例化默认渲染管线 (ForwardPipeline)。
     void OnInitialize();
 
@@ -49,9 +49,9 @@ public:
     RenderPipeline* GetPipeline() const noexcept { return _pipeline.get(); }
     /// 当前管线的标准材质工厂 (把中性材质描述翻译成本管线材质)。无管线/不支持时返回 null。
     Nullable<IStandardMaterialFactory*> GetStandardMaterialFactory() noexcept;
-    render::ShaderVariantCache* GetShaderVariantCache() const noexcept { return _variantCache.get(); }
-    render::GraphicsPipelineStateCache* GetGraphicsPipelineStateCache() const noexcept { return _psoCache.get(); }
-    render::SamplerCache* GetSamplerCache() const noexcept { return _samplerCache.get(); }
+    ShaderVariantLibrary* GetShaderVariantLibrary() const noexcept { return _variantLibrary.get(); }
+    GraphicsPipelineStateLibrary* GetGraphicsPipelineStateLibrary() const noexcept { return _psoCache.get(); }
+    SamplerCache* GetSamplerCache() const noexcept { return _samplerCache.get(); }
     /// shader 编译默认 include 根目录 (<exe>/shaderlib)。供构建 ShaderPassDesc::IncludeDirs。
     const string& GetShaderIncludeRoot() const noexcept { return _shaderIncludeRoot; }
     /// 预编译 shader 烘焙产物根目录 (<exe>/shadercache)。DXC 缺失时预编译缓存从此加载。
@@ -64,9 +64,9 @@ private:
     unique_ptr<RenderPipeline> _pipeline;
     vector<unique_ptr<Scene>> _scenes;
     shared_ptr<render::Dxc> _dxc;
-    unique_ptr<render::ShaderVariantCache> _variantCache;
-    unique_ptr<render::GraphicsPipelineStateCache> _psoCache;
-    unique_ptr<render::SamplerCache> _samplerCache;
+    unique_ptr<ShaderVariantLibrary> _variantLibrary;
+    unique_ptr<GraphicsPipelineStateLibrary> _psoCache;
+    unique_ptr<SamplerCache> _samplerCache;
     string _shaderIncludeRoot;
     string _shaderBakeRoot;
 };

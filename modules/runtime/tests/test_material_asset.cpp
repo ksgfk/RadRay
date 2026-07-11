@@ -130,3 +130,23 @@ TEST(MaterialAssetTest, EnabledKeywordsProjectThroughShader) {
     EXPECT_EQ(defines[0], "_NORMALMAP=1");
     EXPECT_EQ(defines[1], "_ALPHATEST=1");
 }
+
+TEST(MaterialAssetTest, BindingKeyUsesSnapshotValuesNotAllocationAddress) {
+    MaterialAsset first;
+    first.SetFloat("Roughness", 0.4f);
+    first.SetVector("BaseColor", Eigen::Vector4f{0.1f, 0.2f, 0.3f, 1.0f});
+
+    MaterialAsset sameValuesDifferentInsertionOrder;
+    sameValuesDifferentInsertionOrder.SetVector(
+        "BaseColor", Eigen::Vector4f{0.1f, 0.2f, 0.3f, 1.0f});
+    sameValuesDifferentInsertionOrder.SetFloat("Roughness", 0.4f);
+
+    const auto firstSnapshot = first.CreateSnapshot();
+    const auto secondSnapshot = sameValuesDifferentInsertionOrder.CreateSnapshot();
+    ASSERT_NE(firstSnapshot.get(), secondSnapshot.get());
+    EXPECT_EQ(firstSnapshot->BindingKey, secondSnapshot->BindingKey);
+
+    sameValuesDifferentInsertionOrder.SetFloat("Roughness", 0.8f);
+    const auto changedSnapshot = sameValuesDifferentInsertionOrder.CreateSnapshot();
+    EXPECT_NE(firstSnapshot->BindingKey, changedSnapshot->BindingKey);
+}

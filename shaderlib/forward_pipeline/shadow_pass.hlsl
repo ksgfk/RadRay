@@ -1,8 +1,7 @@
 // shadow_pass.hlsl: 点光源立方体阴影的深度生成 pass (shadow caster, depth-only)。
 //
-// 每个 cube 面各录制一次: ForwardPipeline 每面用 SetViewConstants 写入该面的
-// 世界->裁剪 矩阵 (gShadowView.ViewProj), MeshPassExecutor 每 draw 写入 gPerObject.ObjectToWorld。
-// 光栅化后由硬件把 SV_Position.z (标准深度, near=0 far=1) 写入 cube 对应面的深度 slice。
+// 点光源在支持 layered VS output 的设备上以 6 个 instance 一次写入 cube 六层；
+// 方向光与能力 fallback 使用 ViewProj[0] 按 slice 录制。
 //
 // 绑定约定与 forward_pass.hlsl / MeshPassExecutor 对齐 (靠 cbuffer 名字被 FindParameterId 命中):
 //   - gShadowView (per-view): 由 ForwardPipeline::SetViewConstants 每面写入。
@@ -19,11 +18,14 @@ struct VertexInput {
 
 struct VertexOutput {
     float4 Position : SV_Position;
+#ifdef _POINT_SHADOW_LAYERED
+    uint Layer : SV_RenderTargetArrayIndex;
+#endif
 };
 
-// per-view (单面) 常量: 世界 -> 裁剪。列主序, 与 Eigen / CPU 端一致。
+// per-view 常量统一保留 6 个矩阵，使 layered/base variant 共用相同 descriptor range。
 struct ShadowViewConstants {
-    float4x4 ViewProj;
+    float4x4 ViewProj[6];
 };
 
 // per-object 常量: 执行器写入 ObjectToWorld。
@@ -31,13 +33,18 @@ struct PerObject {
     float4x4 ObjectToWorld;
 };
 
+VK_BINDING(1, 0) ConstantBuffer<PerObject> gPerObject : register(b1, space0);
 VK_BINDING(0, 1) ConstantBuffer<ShadowViewConstants> gShadowView : register(b0, space1);
-VK_BINDING(1, 1) ConstantBuffer<PerObject> gPerObject : register(b1, space1);
 
-VertexOutput VSMain(VertexInput input) {
+VertexOutput VSMain(VertexInput input, uint instanceId : SV_InstanceID) {
     VertexOutput output;
+    uint viewIndex = 0;
+#ifdef _POINT_SHADOW_LAYERED
+    viewIndex = instanceId;
+    output.Layer = viewIndex;
+#endif
     float4 worldPos = mul(gPerObject.ObjectToWorld, float4(input.Position, 1.0));
-    output.Position = mul(gShadowView.ViewProj, worldPos);
+    output.Position = mul(gShadowView.ViewProj[viewIndex], worldPos);
     return output;
 }
 

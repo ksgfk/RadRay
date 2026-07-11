@@ -216,15 +216,36 @@ void RenderPipeline::ClearTarget(RenderPipelineContext& ctx, RenderPipelineTarge
         return;
     }
 
-    render::ColorAttachment colorAttachment{
-        .Target = target.Target.BackBufferView,
+    GpuSystem* gpu = ctx.App != nullptr ? ctx.App->GetGpuSystem() : nullptr;
+    RenderPassRegistry* registry = gpu != nullptr ? gpu->GetRenderPassRegistry() : nullptr;
+    if (registry == nullptr || target.Target.BackBuffer == nullptr) {
+        return;
+    }
+    const render::TextureDescriptor texture = target.Target.BackBuffer->GetDesc();
+    render::RenderPassColorAttachmentDescriptor colorAttachment{
+        .Format = texture.Format,
+        .SampleCount = texture.SampleCount,
         .Load = render::LoadAction::Clear,
-        .Store = render::StoreAction::Store,
-        .ClearValue = render::ColorClearValue{{0.08f, 0.10f, 0.14f, 1.0f}}};
+        .Store = render::StoreAction::Store};
     render::RenderPassDescriptor renderPassDesc{
-        .ColorAttachments = std::span{&colorAttachment, 1},
+        .ColorAttachments = std::span{&colorAttachment, 1}};
+    auto passOpt = registry->GetOrCreateRenderPass(renderPassDesc);
+    render::TextureView* colorView = target.Target.BackBufferView;
+    auto framebufferOpt = passOpt.HasValue()
+                              ? registry->GetOrCreateFramebuffer(
+                                    passOpt.Get(), std::span<render::TextureView* const>{&colorView, 1},
+                                    nullptr, texture.Width, texture.Height)
+                              : Nullable<render::Framebuffer*>{};
+    if (!passOpt.HasValue() || !framebufferOpt.HasValue()) {
+        return;
+    }
+    const render::ColorClearValue clearValue{{0.08f, 0.10f, 0.14f, 1.0f}};
+    render::RenderPassBeginDescriptor beginDesc{
+        .Pass = passOpt.Get(),
+        .Target = framebufferOpt.Get(),
+        .ColorClearValues = std::span{&clearValue, 1},
         .Name = name};
-    auto encoderOpt = ctx.Frame.GetCommandBuffer()->BeginRenderPass(renderPassDesc);
+    auto encoderOpt = ctx.Frame.GetCommandBuffer()->BeginRenderPass(beginDesc);
     if (encoderOpt.HasValue()) {
         auto encoder = encoderOpt.Release();
         ctx.Frame.GetCommandBuffer()->EndRenderPass(std::move(encoder));

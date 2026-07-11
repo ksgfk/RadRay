@@ -44,6 +44,29 @@ void AppendVertexLayout(ShaderPassDesc& pass) {
     pass.VertexLayouts.push_back(std::move(layout));
 }
 
+void AddInterfaceBinding(
+    ShaderPassDesc& pass,
+    std::string_view name,
+    uint32_t group,
+    uint32_t binding,
+    render::ShaderParameterKind kind,
+    render::ResourceBindType type,
+    render::ShaderStages stages,
+    bool dynamic = false,
+    bool required = true) {
+    pass.InterfaceSchema.Bindings.push_back(ShaderInterfaceBinding{
+        .Name = string{name},
+        .Group = group,
+        .Binding = binding,
+        .Kind = kind,
+        .Type = type,
+        .Count = 1,
+        .Stages = stages,
+        .HasDynamicOffset = dynamic,
+        .IsStaticSampler = false,
+        .Required = required});
+}
+
 // 构造前向着色 pass 的【基线】固定状态 (不透明: 背面剔除、深度写开、无混合)。
 // blend / depthWrite / cull 属 PSO 固定状态, keyword 变体无法控制; opaque / transparent / 双面
 // 的差异不在此烘死, 而由材质经 MaterialRenderState 在 PSO 构建时覆盖 (对齐 Unity [_Prop])。
@@ -65,6 +88,45 @@ ShaderPassDesc MakeForwardPass(
     pass.DepthStencil = ds;
     pass.ColorTargets.push_back(render::ColorTargetState::Default(colorFormat));
     pass.IncludeDirs.push_back(string{shaderRoot});
+    pass.DynamicBufferBindings = {
+        render::DynamicBufferBinding{.Group = 0, .Binding = 1},
+        render::DynamicBufferBinding{.Group = 1, .Binding = 0}};
+    AddInterfaceBinding(
+        pass, "gPerObject", 0, 1, render::ShaderParameterKind::Resource,
+        render::ResourceBindType::CBuffer, render::ShaderStage::Vertex, true);
+    AddInterfaceBinding(
+        pass, "gView", 1, 0, render::ShaderParameterKind::Resource,
+        render::ResourceBindType::CBuffer, render::ShaderStage::Graphics, true);
+    AddInterfaceBinding(
+        pass, "gShadowCube", 1, 1, render::ShaderParameterKind::Resource,
+        render::ResourceBindType::Texture, render::ShaderStage::Pixel, false, false);
+    AddInterfaceBinding(
+        pass, "gShadowArray", 1, 2, render::ShaderParameterKind::Resource,
+        render::ResourceBindType::Texture, render::ShaderStage::Pixel, false, false);
+    AddInterfaceBinding(
+        pass, "gShadowSampler", 1, 3, render::ShaderParameterKind::Sampler,
+        render::ResourceBindType::Sampler, render::ShaderStage::Pixel, false, false);
+    AddInterfaceBinding(
+        pass, "gMaterial", 2, 0, render::ShaderParameterKind::Resource,
+        render::ResourceBindType::CBuffer, render::ShaderStage::Pixel);
+    AddInterfaceBinding(
+        pass, "gBaseColorMap", 2, 1, render::ShaderParameterKind::Resource,
+        render::ResourceBindType::Texture, render::ShaderStage::Pixel);
+    AddInterfaceBinding(
+        pass, "gMetalRoughMap", 2, 2, render::ShaderParameterKind::Resource,
+        render::ResourceBindType::Texture, render::ShaderStage::Pixel);
+    AddInterfaceBinding(
+        pass, "gNormalMap", 2, 3, render::ShaderParameterKind::Resource,
+        render::ResourceBindType::Texture, render::ShaderStage::Pixel);
+    AddInterfaceBinding(
+        pass, "gOcclusionMap", 2, 4, render::ShaderParameterKind::Resource,
+        render::ResourceBindType::Texture, render::ShaderStage::Pixel);
+    AddInterfaceBinding(
+        pass, "gEmissiveMap", 2, 5, render::ShaderParameterKind::Resource,
+        render::ResourceBindType::Texture, render::ShaderStage::Pixel);
+    AddInterfaceBinding(
+        pass, "gSampler", 2, 6, render::ShaderParameterKind::Sampler,
+        render::ResourceBindType::Sampler, render::ShaderStage::Pixel);
     AppendVertexLayout(pass);
     return pass;
 }
@@ -80,6 +142,7 @@ ShaderPassDesc MakeShadowCasterPass(const string& source, std::string_view shade
     pass.PixelEntry = "PSMain";
     pass.Primitive = render::PrimitiveState::Default();
     pass.MultiSample = render::MultiSampleState::Default();
+    pass.AllowMaterialRenderStateOverrides = false;
 
     render::DepthStencilState ds = render::DepthStencilState::Default();
     ds.Format = render::TextureFormat::D32_FLOAT;
@@ -87,6 +150,15 @@ ShaderPassDesc MakeShadowCasterPass(const string& source, std::string_view shade
     pass.DepthStencil = ds;
     // depth-only: 无 color target。
     pass.IncludeDirs.push_back(string{shaderRoot});
+    pass.DynamicBufferBindings = {
+        render::DynamicBufferBinding{.Group = 0, .Binding = 1},
+        render::DynamicBufferBinding{.Group = 1, .Binding = 0}};
+    AddInterfaceBinding(
+        pass, "gPerObject", 0, 1, render::ShaderParameterKind::Resource,
+        render::ResourceBindType::CBuffer, render::ShaderStage::Vertex, true);
+    AddInterfaceBinding(
+        pass, "gShadowView", 1, 0, render::ShaderParameterKind::Resource,
+        render::ResourceBindType::CBuffer, render::ShaderStage::Vertex, true);
     AppendVertexLayout(pass);
     return pass;
 }
@@ -116,6 +188,7 @@ ShaderKeywordSet MakeForwardKeywordSet() {
     kw.Add(forward_pipeline::kKwDoubleSided);
     kw.Add(forward_pipeline::kKwPointShadows);  // 管线级全局 keyword (有阴影点光源时启用)
     kw.Add(forward_pipeline::kKwDirectionalShadows);  // 管线级全局 keyword (有阴影方向光时启用)
+    kw.Add(forward_pipeline::kKwPointShadowLayered);  // ShadowCaster pass-local keyword
     return kw;
 }
 
@@ -135,13 +208,26 @@ std::optional<StreamingAssetRef<ShaderAsset>> BuildForwardShader(
     // opaque / transparent 共享同一 forward pass (基线固定状态); blend / zwrite / cull 差异由材质
     // 侧 MaterialRenderState 覆盖, 故只需一个 ShaderAsset。
     vector<ShaderPassDesc> passes;
-    passes.push_back(MakeForwardPass(source.value(), shaderRoot, colorFormat));
+    ShaderPassDesc forwardPass = MakeForwardPass(source.value(), shaderRoot, colorFormat);
+    forwardPass.VariantKeywordMask = keywords.Count() == ShaderKeywordSet::kMaxKeywords
+                                         ? std::numeric_limits<uint64_t>::max()
+                                         : ((uint64_t{1} << keywords.Count()) - 1u);
+    const std::optional<uint32_t> layeredKeywordIndex =
+        keywords.IndexOf(forward_pipeline::kKwPointShadowLayered);
+    if (layeredKeywordIndex.has_value()) {
+        forwardPass.VariantKeywordMask &= ~(uint64_t{1} << layeredKeywordIndex.value());
+    }
+    passes.push_back(std::move(forwardPass));
 
     // shadow caster 深度 pass (depth-only, 所有投影材质共用同一份源)。
     if (withShadowCaster) {
         std::optional<string> shadowSource = ReadForwardShaderSource(shaderRoot, forward_pipeline::kShadowPassFile);
         if (shadowSource.has_value()) {
-            passes.push_back(MakeShadowCasterPass(shadowSource.value(), shaderRoot));
+            ShaderPassDesc shadowPass = MakeShadowCasterPass(shadowSource.value(), shaderRoot);
+            shadowPass.VariantKeywordMask = layeredKeywordIndex.has_value()
+                                                ? uint64_t{1} << layeredKeywordIndex.value()
+                                                : 0;
+            passes.push_back(std::move(shadowPass));
         }
     }
 

@@ -6,7 +6,6 @@
 #include <radray/types.h>
 #include <radray/basic_math.h>
 #include <radray/render/common.h>
-#include <radray/render/shader_variant_cache.h>
 #include <radray/runtime/asset.h>
 #include <radray/runtime/asset_manager.h>
 #include <radray/runtime/shader_asset.h>
@@ -16,11 +15,8 @@
 
 namespace radray {
 
-class MaterialPropertyBlock;
-
-namespace render {
 class SamplerCache;
-}  // namespace render
+class MaterialPropertyBlock;
 
 /// 通过资产引用绑定一个【非默认子 view】的纹理 property。
 /// Texture 提供 GPU 资源与 view 缓存所有权, SubView 描述与默认全量 SRV 的差异 (mip/array/format/dim)。
@@ -53,7 +49,7 @@ using MaterialPropertyValue = std::variant<
 /// 设计要点:
 /// - 引用一个 ShaderAsset (非拥有), 提供 property 值 + 启用的 keyword 集。
 /// - keyword 集只记录名字; 投影为 bitmask / variant 由被引用的 ShaderAsset 完成。
-/// - property 按名字写入 ShaderParameterTable。未在 shader 中出现的名字被 SetXxx 忽略。
+/// - property 按名字写入 runtime 材质快照，再解析为显式 BindingGroup 绑定。
 /// - 属性/keyword 的读写是纯 CPU 策略, 可 headless 测试;
 ///   ResolveVariant / ApplyProperties 需要 device 支撑的变体缓存 / 参数表。
 class MaterialAsset : public Asset {
@@ -114,14 +110,10 @@ public:
     const vector<string>& GetEnabledKeywords() const noexcept { return _enabledKeywords; }
 
     /// 解析指定 pass 在当前 keyword 集下的变体。shader 为空 / pass 越界 / 编译失败返回 nullptr。
-    Nullable<const render::CompiledShaderVariant*> ResolveVariant(
-        render::ShaderVariantCache& cache,
+    Nullable<const CompiledShaderVariant*> ResolveVariant(
+        ShaderVariantLibrary& cache,
         uint32_t passIndex,
         render::HlslShaderModel sm = render::HlslShaderModel::SM60) noexcept;
-
-    /// 把 property 值写入给定的 ShaderParameterTable。sampler 经 samplerCache 按 descriptor
-    /// 去重取稳定指针。返回成功写入的 property 数 (被 shader 接受的)。
-    uint32_t ApplyProperties(render::ShaderParameterTable& table, render::SamplerCache& samplerCache) const noexcept;
 
     /// 生成渲染侧绘制决策快照 (由组件在 game 线程 Tick 时按需调用)。冻结当前 shader/keyword/
     /// renderQueue/常量/纹理/采样器, 供 render 线程无锁只读。

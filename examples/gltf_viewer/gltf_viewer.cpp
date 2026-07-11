@@ -146,7 +146,7 @@ int main(int argc, char* argv[]) {
     desc.WindowWidth = 1280;
     desc.WindowHeight = 720;
     desc.BackBufferFormat = GltfViewerApp::BackBufferFormat;
-    desc.PresentMode = render::PresentMode::FIFO;
+    desc.PresentMode = render::PresentMode::Immediate;
 
     std::filesystem::path gltfPath;
     for (int i = 0; i < argc; ++i) {

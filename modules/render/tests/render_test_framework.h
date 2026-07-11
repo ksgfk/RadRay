@@ -56,7 +56,8 @@ private:
 struct ComputeProgram {
     vector<byte> Blob{};
     unique_ptr<Shader> ShaderObject{};
-    ShaderBindingLayout* BindingLayout{};
+    unique_ptr<PipelineLayout> PipelineLayoutObject{};
+    PipelineLayout* PipelineLayout{};
     unique_ptr<ComputePipelineState> PipelineObject{};
 };
 
@@ -75,8 +76,6 @@ public:
     shared_ptr<Device> GetDevice() const noexcept;
 
     Device* GetDevicePtr() const noexcept;
-
-    ShaderBindingLayoutCache* GetShaderBindingLayoutCache() const noexcept;
 
     Dxc* GetDxc() const noexcept;
 
@@ -100,8 +99,14 @@ public:
 
     Nullable<unique_ptr<Sampler>> CreateSampler(const SamplerDescriptor& desc, string* reason) noexcept;
 
-    Nullable<unique_ptr<ShaderParameterTable>> CreateShaderParameterTable(
-        ShaderBindingLayout* layout,
+    Nullable<unique_ptr<DescriptorPool>> CreateDescriptorPool(
+        const DescriptorPoolDescriptor& desc,
+        string* reason) noexcept;
+
+    Nullable<unique_ptr<BindingGroup>> CreateBindingGroup(
+        DescriptorPool* pool,
+        PipelineLayout* layout,
+        uint32_t groupIndex,
         string* reason) noexcept;
 
     Nullable<unique_ptr<BindlessArray>> CreateBindlessArray(
@@ -127,7 +132,9 @@ public:
         std::string_view entryPoint,
         bool enableUnbounded,
         string* reason,
-        std::span<const StaticSamplerDescriptor> staticSamplers = {}) noexcept;
+        std::span<const StaticSamplerDescriptor> staticSamplers = {},
+        std::span<const DynamicBufferBinding> dynamicBindings = {},
+        std::span<const PushConstantBinding> pushConstantBindings = {}) noexcept;
 
     void AppendHostWriteBarrier(
         vector<ResourceBarrierDescriptor>& barriers,
@@ -146,7 +153,6 @@ private:
     TestBackend _backend{TestBackend::D3D12};
     LogCollector _logs{};
     shared_ptr<Device> _device{};
-    unique_ptr<ShaderBindingLayoutCache> _shaderBindingLayoutCache{};
     shared_ptr<Dxc> _dxc{};
     CommandQueue* _queue{nullptr};
 };

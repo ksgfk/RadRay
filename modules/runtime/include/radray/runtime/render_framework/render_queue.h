@@ -29,18 +29,28 @@ struct DrawItem {
 /// - 纯 CPU 策略, 不接触 device, 可 headless 测试。
 /// - AddPrimitive 按 PassTag (=LightMode) 过滤: material 的 shader 若无该 tag 的 pass, 整条丢弃。
 /// - 排序:
-///   - SortOpaque:  先按 RenderQueue, 再按 material 身份 (状态批处理), 再 front-to-back。
+///   - SortOpaque:  先按 RenderQueue, 再按材质值 key (状态批处理), 再 front-to-back。
 ///   - SortTransparent: 先按 RenderQueue, 再 back-to-front。
 class DrawList {
 public:
+    enum class SortMode {
+        Unsorted,
+        Opaque,
+        Transparent,
+    };
+
     DrawList() noexcept = default;
 
-    void Clear() noexcept { _items.clear(); }
+    void Clear() noexcept {
+        _items.clear();
+        _sortMode = SortMode::Unsorted;
+    }
     bool Empty() const noexcept { return _items.empty(); }
     size_t Size() const noexcept { return _items.size(); }
 
     std::span<const DrawItem> Items() const noexcept { return _items; }
     std::span<DrawItem> Items() noexcept { return _items; }
+    SortMode GetSortMode() const noexcept { return _sortMode; }
 
     /// 尝试为一个 (material 快照, proxy, section) 生成 draw item, 按 passTag 过滤。
     /// 快照 / shader 为空, 或 shader 无 passTag 对应的 pass, 返回 false (不加入)。
@@ -51,7 +61,7 @@ public:
         uint32_t sectionIndex = 0,
         float viewDistance = 0.0f) noexcept;
 
-    /// 不透明排序: RenderQueue 升序 -> material 指针 (批处理) -> ViewDistance 升序 (近到远)。
+    /// 不透明排序: RenderQueue 升序 -> material 值 key (批处理) -> ViewDistance 升序 (近到远)。
     void SortOpaque() noexcept;
 
     /// 半透明排序: RenderQueue 升序 -> ViewDistance 降序 (远到近)。
@@ -59,6 +69,7 @@ public:
 
 private:
     vector<DrawItem> _items;
+    SortMode _sortMode{SortMode::Unsorted};
 };
 
 }  // namespace radray

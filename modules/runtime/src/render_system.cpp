@@ -8,8 +8,6 @@
 #include <radray/file.h>
 #include <radray/logger.h>
 #include <radray/render/common.h>
-#include <radray/render/sampler_cache.h>
-#include <radray/render/shader_variant_cache.h>
 #include <radray/render/shader_compiler/dxc.h>
 #include <radray/runtime/application.h>
 #include <radray/runtime/gpu_system.h>
@@ -28,7 +26,7 @@ RenderSystem::~RenderSystem() noexcept {
     _pipeline.reset();  // 先析构管线 (executor 持 SamplerCache 裸指针), 再释放缓存
     _samplerCache.reset();
     _psoCache.reset();
-    _variantCache.reset();
+    _variantLibrary.reset();
     _dxc.reset();
 }
 
@@ -51,39 +49,34 @@ void RenderSystem::OnInitialize() {
     auto dxcOpt = render::CreateDxc();
     if (dxcOpt.HasValue()) {
         _dxc = dxcOpt.Release();
-        auto variantCacheOpt = render::CreateShaderVariantCache(
-            device, _dxc.get(), gpu->GetShaderBindingLayoutCache());
+        auto variantCacheOpt = CreateShaderVariantLibrary(
+            device, _dxc.get(), gpu->GetPipelineLayoutLibrary());
         if (variantCacheOpt.HasValue()) {
-            _variantCache = variantCacheOpt.Release();
+            _variantLibrary = variantCacheOpt.Release();
         } else {
-            RADRAY_ERR_LOG("RenderSystem::OnInitialize: failed to create DXC ShaderVariantCache");
+            RADRAY_ERR_LOG("RenderSystem::OnInitialize: failed to create DXC ShaderVariantLibrary");
         }
     } else {
         RADRAY_WARN_LOG("RenderSystem::OnInitialize: DXC unavailable; falling back to precompiled shader cache");
     }
 #endif
 
-    if (_variantCache == nullptr) {
+    if (_variantLibrary == nullptr) {
         // 无 DXC (或 DXC 缓存创建失败): 使用预编译缓存从磁盘加载烘焙产物。
-        auto precompiledOpt = render::CreatePrecompiledShaderVariantCache(
-            device, gpu->GetShaderBindingLayoutCache(), _shaderBakeRoot);
+        auto precompiledOpt = CreatePrecompiledShaderVariantLibrary(
+            device, gpu->GetPipelineLayoutLibrary(), _shaderBakeRoot);
         if (precompiledOpt.HasValue()) {
-            _variantCache = precompiledOpt.Release();
+            _variantLibrary = precompiledOpt.Release();
         } else {
-            RADRAY_ERR_LOG("RenderSystem::OnInitialize: failed to create precompiled ShaderVariantCache");
+            RADRAY_ERR_LOG("RenderSystem::OnInitialize: failed to create precompiled ShaderVariantLibrary");
             return;
         }
     }
 
-    auto psoCacheOpt = device->CreateGraphicsPipelineStateCache();
-    if (!psoCacheOpt.HasValue()) {
-        RADRAY_ERR_LOG("RenderSystem::OnInitialize: failed to create GraphicsPipelineStateCache");
-        return;
-    }
-    _psoCache = psoCacheOpt.Release();
+    _psoCache = make_unique<GraphicsPipelineStateLibrary>(device);
 
     // sampler 缓存: 按 descriptor 去重 + 永生持有, 使材质快照可安全持有稳定 sampler 指针。
-    _samplerCache = make_unique<render::SamplerCache>(device);
+    _samplerCache = make_unique<SamplerCache>(device);
 
     _pipeline = make_unique<ForwardPipeline>(this);
 }

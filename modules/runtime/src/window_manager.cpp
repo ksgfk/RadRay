@@ -56,7 +56,7 @@ render::SwapChain* AppWindow::AttachSwapChain(const render::SwapChainDescriptor&
 }
 
 unique_ptr<render::SwapChain> AppWindow::ReleaseSwapChain() noexcept {
-    _backBufferViews.clear();
+    ReleaseBackBufferViews();
     _requestRecreateSwapChain.store(false, std::memory_order_release);
     return _swapchain.Release();
 }
@@ -66,7 +66,7 @@ void AppWindow::DetachSwapChain() noexcept {
         auto* gpuSystem = _manager->GetGpuSystem();
         gpuSystem->WaitAndCleanupCompletedFlights();
     }
-    _backBufferViews.clear();
+    ReleaseBackBufferViews();
     _swapchain = nullptr;
     _requestRecreateSwapChain.store(false, std::memory_order_release);
 }
@@ -118,6 +118,9 @@ render::TextureView* AppWindow::GetOrCreateBackBufferView(const render::SwapChai
     render::TextureView* view = backBufferView.View.get();
     if (view != nullptr && backBufferView.BackBuffer == backBuffer) {
         return view;
+    }
+    if (view != nullptr && gpuSystem->GetRenderPassRegistry() != nullptr) {
+        gpuSystem->GetRenderPassRegistry()->RemoveFramebuffersUsing(view);
     }
     render::TextureDescriptor texDesc = backBuffer->GetDesc();
     render::TextureViewDescriptor viewDesc{
@@ -209,7 +212,7 @@ bool AppWindow::RecreateSwapChain(uint32_t width, uint32_t height, render::Prese
     if (!_swapchain) {
         return false;
     }
-    _backBufferViews.clear();
+    ReleaseBackBufferViews();
     const render::SwapChainDescriptor desc = _swapchain->GetDesc();
     const bool recreated = _swapchain->Recreate(width, height, desc.Format, presentMode);
     const uint32_t backBufferCount = _swapchain->GetBackBufferCount();
@@ -221,6 +224,17 @@ bool AppWindow::RecreateSwapChain(uint32_t width, uint32_t height, render::Prese
     }
     ResetSwapChainRecreateRequest();
     return true;
+}
+
+void AppWindow::ReleaseBackBufferViews() noexcept {
+    GpuSystem* gpuSystem = _manager != nullptr ? _manager->GetGpuSystem() : nullptr;
+    RenderPassRegistry* registry = gpuSystem != nullptr ? gpuSystem->GetRenderPassRegistry() : nullptr;
+    if (registry != nullptr) {
+        for (const BackBufferView& backBuffer : _backBufferViews) {
+            registry->RemoveFramebuffersUsing(backBuffer.View.get());
+        }
+    }
+    _backBufferViews.clear();
 }
 
 void WindowManager::DestroyWindow(AppWindow* window) noexcept {

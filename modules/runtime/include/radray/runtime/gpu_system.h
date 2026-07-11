@@ -9,11 +9,14 @@
 
 #include <radray/types.h>
 #include <radray/coroutine.h>
+#include <radray/vertex_data.h>
 #include <radray/render/common.h>
-#include <radray/render/gpu_resource.h>
 #include <radray/runtime/asset.h>
+#include <radray/runtime/gpu_resource.h>
 #include <radray/runtime/render_resource_recycler.h>
+#include <radray/runtime/render_pass_registry.h>
 #include <radray/runtime/service_registry.h>
+#include <radray/runtime/shader_variant_library.h>
 
 namespace radray::render {
 class CommandBuffer;
@@ -99,6 +102,7 @@ struct GpuFlightSlot {
     // —— 录制态（渲染线程独占）。CmdBuffer 池化复用，
     //    Targets 收集本帧 acquire 的全部窗口以支持多窗口/多 viewport。
     unique_ptr<render::CommandBuffer> CmdBuffer;
+    unique_ptr<FrameResources> RenderResources;
     vector<AcquiredTarget> Targets;
     bool ManualSubmit{false};
     bool Recording{false};
@@ -302,7 +306,8 @@ public:
     void PumpFrameUploadScheduler();
 
     render::Device* GetDevice() const noexcept { return _device; }
-    render::ShaderBindingLayoutCache* GetShaderBindingLayoutCache() const noexcept { return _shaderBindingLayoutCache.get(); }
+    PipelineLayoutLibrary* GetPipelineLayoutLibrary() const noexcept { return _pipelineLayoutLibrary.get(); }
+    RenderPassRegistry* GetRenderPassRegistry() const noexcept { return _renderPassRegistry.get(); }
     render::CommandQueue* GetMainQueue() const noexcept { return _mainQueue; }
     WindowManager* GetWindowManager() const noexcept { return _windowManager; }
     /// 注入窗口系统(非拥有)。由装配阶段(ServiceRegistry / Application)调用。
@@ -311,6 +316,7 @@ public:
     uint32_t GetFlightDataCount() const noexcept { return _flightDataCount; }
     uint64_t GetFrameIndex() const noexcept { return _nowFrameIndex; }
     uint32_t GetCurrentFlightIndex() const noexcept;
+    FrameResources& GetFrameResources(uint32_t flightIndex) noexcept;
     std::chrono::duration<float> GetLastFrameLatency() const noexcept { return _lastFrameLatency; }
     void AdvanceFrameIndex() noexcept { ++_nowFrameIndex; }
 
@@ -333,7 +339,8 @@ private:
     unique_ptr<ResourceUploader> _uploader;
     unique_ptr<FrameUploadScheduler> _frameUploadScheduler;
     unique_ptr<GpuFrameProfiler> _frameProfiler;
-    unique_ptr<render::ShaderBindingLayoutCache> _shaderBindingLayoutCache;
+    unique_ptr<PipelineLayoutLibrary> _pipelineLayoutLibrary;
+    unique_ptr<RenderPassRegistry> _renderPassRegistry;
     DeferredRenderDeleteQueue _deferredDeletes;
     uint64_t _nowFrameIndex{0};
     std::chrono::duration<float> _lastFrameLatency{};
@@ -371,6 +378,8 @@ public:
 
     /// 绑定当前 flight 的上传器；EndFlight/CollectFlight 完全由 runtime 掌管。
     ResourceUploader& GetUploader() const noexcept;
+
+    FrameResources& GetFrameResources() const noexcept;
 
     /// 逃生舱：直接拿底层对象自行处理（建资源、自定义 compute、readback、甚至自行 submit）。
     render::Device* GetDevice() const noexcept;
@@ -417,6 +426,8 @@ private:
         uint64_t MappedSize{0};
     };
 
+    void TrimFreeList() noexcept;
+
     render::Device* _device;
     vector<ActiveBuffer> _active;
     vector<vector<unique_ptr<render::Buffer>>> _pending;
@@ -448,9 +459,9 @@ public:
         render::CommandBuffer* cmdBuffer,
         const TextureUploadRequest& request);
 
-    /// 从 CPU 网格数据创建 device-local buffer 并录制上传命令，产出 RenderMesh。
-    /// 产出的 buffer 所有权在返回的 RenderMesh 中，由调用方(加载协程/资产)持有。
-    std::optional<render::RenderMesh> UploadMeshResource(
+    /// 从 CPU 网格数据创建 device-local buffer 并录制上传命令，产出 GpuMesh。
+    /// 产出的 buffer 所有权在返回的 GpuMesh 中，由调用方(加载协程/资产)持有。
+    std::optional<GpuMesh> UploadMeshResource(
         render::CommandBuffer* cmdBuffer,
         const MeshResource& meshResource);
 

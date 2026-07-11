@@ -40,13 +40,15 @@ void DrawList::SortOpaque() noexcept {
         if (a.RenderQueue != b.RenderQueue) {
             return a.RenderQueue < b.RenderQueue;
         }
-        // 同队列内按 material 快照身份聚合 (减少状态切换)。
-        if (a.Material.get() != b.Material.get()) {
-            return a.Material.get() < b.Material.get();
+        // 同队列内按不可变材质内容聚合，快照分配地址不参与排序。
+        if (a.Material->BindingKey != b.Material->BindingKey) {
+            return std::tie(a.Material->BindingKey.Lo, a.Material->BindingKey.Hi) <
+                   std::tie(b.Material->BindingKey.Lo, b.Material->BindingKey.Hi);
         }
         // 同 material 内近到远。
         return a.ViewDistance < b.ViewDistance;
     });
+    _sortMode = SortMode::Opaque;
 }
 
 void DrawList::SortTransparent() noexcept {
@@ -57,6 +59,7 @@ void DrawList::SortTransparent() noexcept {
         // 半透明远到近。
         return a.ViewDistance > b.ViewDistance;
     });
+    _sortMode = SortMode::Transparent;
 }
 
 }  // namespace radray

@@ -3,7 +3,7 @@
 #include <gtest/gtest.h>
 #include <fmt/format.h>
 
-#include <radray/render/gpu_resource.h>
+#include <radray/runtime/gpu_resource.h>
 #include <radray/runtime/texture_asset.h>
 
 namespace radray::render::test {

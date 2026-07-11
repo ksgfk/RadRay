@@ -1,19 +1,19 @@
 #include <radray/runtime/render_framework/material_render_snapshot.h>
 
 #include <radray/logger.h>
-#include <radray/render/sampler_cache.h>
+#include <radray/runtime/sampler_cache.h>
 
 namespace radray {
 
-Nullable<const render::CompiledShaderVariant*> MaterialRenderSnapshot::ResolveVariant(
-    render::ShaderVariantCache& cache,
+Nullable<const CompiledShaderVariant*> MaterialRenderSnapshot::ResolveVariant(
+    ShaderVariantLibrary& cache,
     uint32_t passIndex,
     render::HlslShaderModel sm) const noexcept {
     return ResolveVariant(cache, passIndex, std::span<const std::string_view>{}, sm);
 }
 
-Nullable<const render::CompiledShaderVariant*> MaterialRenderSnapshot::ResolveVariant(
-    render::ShaderVariantCache& cache,
+Nullable<const CompiledShaderVariant*> MaterialRenderSnapshot::ResolveVariant(
+    ShaderVariantLibrary& cache,
     uint32_t passIndex,
     std::span<const std::string_view> extraKeywords,
     render::HlslShaderModel sm) const noexcept {
@@ -33,16 +33,6 @@ Nullable<const render::CompiledShaderVariant*> MaterialRenderSnapshot::ResolveVa
     return shader->GetOrCreateVariant(cache, passIndex, enabled, sm);
 }
 
-uint32_t MaterialRenderSnapshot::ApplyProperties(render::ShaderParameterTable& table, render::SamplerCache& samplerCache) const noexcept {
-    uint32_t applied = 0;
-    for (const ConstantEntry& c : Constants) {
-        if (!c.Bytes.empty() && table.SetBytes(c.Name, c.Bytes.data(), static_cast<uint32_t>(c.Bytes.size()))) {
-            ++applied;
-        }
-    }
-    applied += ApplyResources(table, samplerCache);
-    return applied;
-}
 
 void MaterialRenderSnapshot::CollectConstants(vector<MaterialConstantValue>& out) const noexcept {
     out.clear();
@@ -57,18 +47,30 @@ void MaterialRenderSnapshot::CollectConstants(vector<MaterialConstantValue>& out
     }
 }
 
-uint32_t MaterialRenderSnapshot::ApplyResources(render::ShaderParameterTable& table, render::SamplerCache& samplerCache) const noexcept {
+
+uint32_t MaterialRenderSnapshot::ApplyResources(
+    render::BindingGroup& group,
+    const CompiledShaderVariant& variant,
+    SamplerCache& samplerCache) const noexcept {
     uint32_t applied = 0;
-    for (const TextureEntry& t : Textures) {
-        TextureAsset* tex = t.Texture.Get();
-        render::TextureView* srv = tex != nullptr ? tex->GetOrCreateSrv(t.SubView) : nullptr;
-        if (srv != nullptr && table.SetResource(t.Name, static_cast<render::ResourceView*>(srv))) {
+    for (const TextureEntry& texture : Textures) {
+        auto location = FindShaderBindingLocation(variant, texture.Name);
+        if (!location.has_value() || location->Group != group.GetGroupIndex()) {
+            continue;
+        }
+        TextureAsset* asset = texture.Texture.Get();
+        render::TextureView* view = asset != nullptr ? asset->GetOrCreateSrv(texture.SubView) : nullptr;
+        if (view != nullptr && group.SetResource(location->Binding, static_cast<render::ResourceView*>(view))) {
             ++applied;
         }
     }
-    for (const SamplerEntry& s : Samplers) {
-        render::Sampler* sampler = samplerCache.GetOrCreate(s.Desc).Get();
-        if (sampler != nullptr && table.SetSampler(s.Name, sampler)) {
+    for (const SamplerEntry& samplerEntry : Samplers) {
+        auto location = FindShaderBindingLocation(variant, samplerEntry.Name);
+        if (!location.has_value() || location->Group != group.GetGroupIndex()) {
+            continue;
+        }
+        render::Sampler* sampler = samplerCache.GetOrCreate(samplerEntry.Desc).Get();
+        if (sampler != nullptr && group.SetSampler(location->Binding, sampler)) {
             ++applied;
         }
     }

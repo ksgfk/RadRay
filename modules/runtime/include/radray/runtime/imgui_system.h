@@ -23,6 +23,8 @@ class AppWindow;
 class WindowManager;
 class AppFrameContext;
 class Application;
+class PipelineLayoutLibrary;
+class RenderPassRegistry;
 class ImGuiSystem;
 class ImGuiRenderer;
 class NativeWindow;
@@ -33,7 +35,8 @@ struct AppFrameTarget;
 
 struct ImGuiRendererDescriptor {
     render::Device* Device;
-    render::ShaderBindingLayoutCache* BindingLayoutCache;
+    PipelineLayoutLibrary* PipelineLayouts;
+    RenderPassRegistry* RenderPasses;
     render::TextureFormat RenderTargetFormat{render::TextureFormat::UNKNOWN};
     uint32_t FlightDataCount;
 };
@@ -42,7 +45,8 @@ struct ImGuiSystemDescriptor {
     AppWindow* MainWindow;
     WindowManager* Windows{nullptr};
     render::Device* Device;
-    render::ShaderBindingLayoutCache* BindingLayoutCache{nullptr};
+    PipelineLayoutLibrary* PipelineLayouts{nullptr};
+    RenderPassRegistry* RenderPasses{nullptr};
     render::TextureFormat RenderTargetFormat{render::TextureFormat::UNKNOWN};
     uint32_t FlightDataCount;
     render::CommandQueue* DirectQueue{nullptr};
@@ -110,30 +114,30 @@ public:
         ImGuiTexture(
             unique_ptr<render::Texture> texture,
             unique_ptr<render::TextureView> srv,
-            unique_ptr<render::ShaderParameterTable> parameterTable) noexcept
+            unique_ptr<render::BindingGroup> bindingGroup) noexcept
             : _texture(std::move(texture)),
               _srv(std::move(srv)),
-              _parameterTable(std::move(parameterTable)) {}
+              _bindingGroup(std::move(bindingGroup)) {}
 
         // 外部纹理：每个 flight 持有独立描述符集，避免在命令缓冲飞行中改写同一描述符集
         explicit ImGuiTexture(ExternalTag) noexcept : _isExternal(true) {}
 
         render::Texture* GetTexture() const noexcept { return _texture.get(); }
         // 普通纹理使用单一参数表；外部纹理按当前 flight 取对应参数表。
-        render::ShaderParameterTable* GetParameterTable(uint32_t flightIndex) const noexcept {
+        render::BindingGroup* GetBindingGroup(uint32_t flightIndex) const noexcept {
             if (_isExternal) {
-                return flightIndex < _externalTables.size() ? _externalTables[flightIndex].get() : nullptr;
+                return flightIndex < _externalGroups.size() ? _externalGroups[flightIndex].get() : nullptr;
             }
-            return _parameterTable.get();
+            return _bindingGroup.get();
         }
-        render::ShaderParameterTable* GetExternalTable(uint32_t flightIndex) const noexcept {
-            return flightIndex < _externalTables.size() ? _externalTables[flightIndex].get() : nullptr;
+        render::BindingGroup* GetExternalGroup(uint32_t flightIndex) const noexcept {
+            return flightIndex < _externalGroups.size() ? _externalGroups[flightIndex].get() : nullptr;
         }
-        void SetExternalTable(uint32_t flightIndex, unique_ptr<render::ShaderParameterTable> table) noexcept {
-            if (flightIndex >= _externalTables.size()) {
-                _externalTables.resize(static_cast<size_t>(flightIndex) + 1);
+        void SetExternalGroup(uint32_t flightIndex, unique_ptr<render::BindingGroup> group) noexcept {
+            if (flightIndex >= _externalGroups.size()) {
+                _externalGroups.resize(static_cast<size_t>(flightIndex) + 1);
             }
-            _externalTables[flightIndex] = std::move(table);
+            _externalGroups[flightIndex] = std::move(group);
         }
         bool UpdateExternalResource(uint32_t flightIndex, render::TextureView* srv) noexcept;
         bool IsExternal() const noexcept { return _isExternal; }
@@ -141,8 +145,8 @@ public:
     private:
         unique_ptr<render::Texture> _texture;
         unique_ptr<render::TextureView> _srv;
-        unique_ptr<render::ShaderParameterTable> _parameterTable;
-        vector<unique_ptr<render::ShaderParameterTable>> _externalTables;
+        unique_ptr<render::BindingGroup> _bindingGroup;
+        vector<unique_ptr<render::BindingGroup>> _externalGroups;
         bool _isExternal{false};
     };
 
@@ -203,9 +207,9 @@ private:
 
     ImGuiSystem* _system;
     render::Device* _device{nullptr};
-    render::ShaderBindingLayout* _bindingLayout{nullptr};
+    render::PipelineLayout* _bindingLayout{nullptr};
     unique_ptr<render::GraphicsPipelineState> _pso;
-    render::ShaderParameterId _pushConstantId{0};
+    unique_ptr<render::DescriptorPool> _descriptorPool;
     vector<unique_ptr<Frame>> _frames;
     vector<unique_ptr<ImGuiTexture>> _aliveTexs;
 };

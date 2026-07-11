@@ -253,13 +253,6 @@ bool ComputeTestContext::Initialize(TestBackend backend, string* reason) noexcep
     if (!_CreateDeviceForBackend(backend, &_logs, _device, reason)) {
         return false;
     }
-    auto cacheOpt = _device->CreateShaderBindingLayoutCache();
-    if (!cacheOpt.HasValue()) {
-        _StoreReason(reason, fmt::format("CreateShaderBindingLayoutCache failed for {}", backend));
-        this->Reset();
-        return false;
-    }
-    _shaderBindingLayoutCache = cacheOpt.Release();
     auto queueOpt = _device->GetCommandQueue(QueueType::Direct, 0);
     if (!queueOpt.HasValue()) {
         _StoreReason(reason, fmt::format("No direct queue available for {}", backend));
@@ -276,7 +269,6 @@ void ComputeTestContext::Reset() noexcept {
     }
     ClearLogCallback();
     _queue = nullptr;
-    _shaderBindingLayoutCache.reset();
     _device.reset();
 #if defined(RADRAY_ENABLE_VULKAN) && defined(RADRAY_ENABLE_SPIRV_CROSS)
     if (_backend == TestBackend::Vulkan) {
@@ -301,10 +293,6 @@ shared_ptr<Device> ComputeTestContext::GetDevice() const noexcept {
 
 Device* ComputeTestContext::GetDevicePtr() const noexcept {
     return _device.get();
-}
-
-ShaderBindingLayoutCache* ComputeTestContext::GetShaderBindingLayoutCache() const noexcept {
-    return _shaderBindingLayoutCache.get();
 }
 
 Dxc* ComputeTestContext::GetDxc() const noexcept {
@@ -437,23 +425,45 @@ Nullable<unique_ptr<Sampler>> ComputeTestContext::CreateSampler(
     return samplerOpt;
 }
 
-Nullable<unique_ptr<ShaderParameterTable>> ComputeTestContext::CreateShaderParameterTable(
-    ShaderBindingLayout* layout,
+Nullable<unique_ptr<DescriptorPool>> ComputeTestContext::CreateDescriptorPool(
+    const DescriptorPoolDescriptor& desc,
     string* reason) noexcept {
     if (_device == nullptr) {
         _StoreReason(reason, "device is not initialized");
         return nullptr;
     }
-    auto tableOpt = _device->CreateShaderParameterTable(layout);
-    if (!tableOpt.HasValue()) {
+    auto poolOpt = _device->CreateDescriptorPool(desc);
+    if (!poolOpt.HasValue()) {
         _StoreReason(
             reason,
             fmt::format(
-                "CreateShaderParameterTable failed on {}",
+                "CreateDescriptorPool failed on {}",
                 this->GetBackendName()));
         return nullptr;
     }
-    return tableOpt;
+    return poolOpt;
+}
+
+Nullable<unique_ptr<BindingGroup>> ComputeTestContext::CreateBindingGroup(
+    DescriptorPool* pool,
+    PipelineLayout* layout,
+    uint32_t groupIndex,
+    string* reason) noexcept {
+    if (_device == nullptr) {
+        _StoreReason(reason, "device is not initialized");
+        return nullptr;
+    }
+    auto groupOpt = _device->CreateBindingGroup(pool, layout, groupIndex);
+    if (!groupOpt.HasValue()) {
+        _StoreReason(
+            reason,
+            fmt::format(
+                "CreateBindingGroup failed on {} for group {}",
+                this->GetBackendName(),
+                groupIndex));
+        return nullptr;
+    }
+    return groupOpt;
 }
 
 Nullable<unique_ptr<BindlessArray>> ComputeTestContext::CreateBindlessArray(
@@ -704,9 +714,11 @@ std::optional<ComputeProgram> ComputeTestContext::CreateComputeProgram(
     std::string_view entryPoint,
     bool enableUnbounded,
     string* reason,
-    std::span<const StaticSamplerDescriptor> staticSamplers) noexcept {
-    if (_device == nullptr || _dxc == nullptr || _shaderBindingLayoutCache == nullptr) {
-        _StoreReason(reason, "device, dxc or shader binding layout cache is not initialized");
+    std::span<const StaticSamplerDescriptor> staticSamplers,
+    std::span<const DynamicBufferBinding> dynamicBindings,
+    std::span<const PushConstantBinding> pushConstantBindings) noexcept {
+    if (_device == nullptr || _dxc == nullptr) {
+        _StoreReason(reason, "device or dxc is not initialized");
         return std::nullopt;
     }
 
@@ -780,23 +792,26 @@ std::optional<ComputeProgram> ComputeTestContext::CreateComputeProgram(
     program.ShaderObject = shaderOpt.Release();
 
     Shader* shaders[] = {program.ShaderObject.get()};
-    ShaderBindingLayoutDescriptor layoutDesc{};
+    PipelineLayoutDescriptor layoutDesc{};
     layoutDesc.Shaders = shaders;
     layoutDesc.StaticSamplers = staticSamplers;
-    auto layoutOpt = _shaderBindingLayoutCache->GetOrCreate(layoutDesc);
+    layoutDesc.DynamicBufferBindings = dynamicBindings;
+    layoutDesc.PushConstantBindings = pushConstantBindings;
+    auto layoutOpt = _device->CreatePipelineLayout(layoutDesc);
     if (!layoutOpt.HasValue()) {
         _StoreReason(
             reason,
             fmt::format(
-                "CreateShaderBindingLayout failed for {} compute shader '{}'",
+                "CreatePipelineLayout failed for {} compute shader '{}'",
                 this->GetBackendName(),
                 entryPoint));
         return std::nullopt;
     }
-    program.BindingLayout = layoutOpt.Get();
+    program.PipelineLayoutObject = layoutOpt.Release();
+    program.PipelineLayout = program.PipelineLayoutObject.get();
 
     ComputePipelineStateDescriptor psoDesc{};
-    psoDesc.BindingLayout = program.BindingLayout;
+    psoDesc.PipelineLayout = program.PipelineLayout;
     psoDesc.CS = ShaderEntry{
         .Target = program.ShaderObject.get(),
         .EntryPoint = entryPoint,

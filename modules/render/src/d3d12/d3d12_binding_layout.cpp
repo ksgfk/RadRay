@@ -104,13 +104,6 @@ std::optional<std::pair<uint32_t, uint32_t>> _ResolveUnifiedBinding(
     return std::pair{binding.VkSet.value_or(binding.Space), binding.VkBinding.value_or(binding.BindPoint)};
 }
 
-bool _IsHlslPushConstantCandidate(const HlslInputBindDesc& binding, const HlslShaderBufferDesc& cbuffer) noexcept {
-    return binding.Type == HlslShaderInputType::CBUFFER &&
-           binding.BindPoint == 0 &&
-           binding.Space == 0 &&
-           cbuffer.IsViewInHlsl;
-}
-
 bool _HasSameAbi(const ParameterRecord& lhs, const ParameterRecord& rhs) noexcept {
     if (lhs.Parameter.Kind != rhs.Parameter.Kind) {
         return false;
@@ -197,7 +190,8 @@ bool _MergeRecord(vector<ParameterRecord>& records, ParameterRecord incoming) no
 bool _AppendHlslBindings(
     vector<ParameterRecord>& records,
     const HlslShaderDesc& reflection,
-    ShaderStages stages) noexcept {
+    ShaderStages stages,
+    std::span<const PushConstantBinding> pushConstants) noexcept {
     for (const auto& resource : reflection.BoundResources) {
         auto bindTypeOpt = _MapHlslResourceType(resource);
         if (!bindTypeOpt.has_value()) {
@@ -210,6 +204,12 @@ bool _AppendHlslBindings(
             return false;
         }
         const auto [registerSpace, bindingIndex] = unifiedAbiOpt.value();
+        const bool isPushConstant = resource.Type == HlslShaderInputType::CBUFFER &&
+                                    std::ranges::any_of(
+                                        pushConstants,
+                                        [registerSpace, bindingIndex](const PushConstantBinding& binding) noexcept {
+                                            return binding.Group == registerSpace && binding.Binding == bindingIndex;
+                                        });
         const bool isBindless = resource.IsUnboundArray();
 
         ParameterRecord record{};
@@ -237,7 +237,7 @@ bool _AppendHlslBindings(
                 return false;
             }
             const auto* cbuffer = cbufferOpt.Get();
-            if (_IsHlslPushConstantCandidate(resource, *cbuffer)) {
+            if (isPushConstant) {
                 record.Parameter.Kind = ShaderParameterKind::Constant;
                 record.Parameter.Type = ResourceBindType::UNKNOWN;
                 record.Parameter.Count = 1;
@@ -343,7 +343,21 @@ bool _ParameterLess(const ParameterRecord& lhs, const ParameterRecord& rhs) noex
 
 }  // namespace
 
-std::optional<D3D12MergedBindingLayout> BuildMergedBindingLayoutD3D12(std::span<Shader*> shaders) noexcept {
+std::optional<D3D12MergedPipelineLayout> BuildMergedPipelineLayoutD3D12(
+    std::span<Shader*> shaders,
+    std::span<const PushConstantBinding> pushConstants,
+    std::span<const BindingGroupLayout> explicitGroups) noexcept {
+    vector<PushConstantBinding> sortedPushConstants{pushConstants.begin(), pushConstants.end()};
+    std::ranges::sort(
+        sortedPushConstants,
+        [](const PushConstantBinding& lhs, const PushConstantBinding& rhs) noexcept {
+            return std::tie(lhs.Group, lhs.Binding) < std::tie(rhs.Group, rhs.Binding);
+        });
+    if (std::ranges::adjacent_find(sortedPushConstants) != sortedPushConstants.end()) {
+        RADRAY_ERR_LOG("pipeline layout contains duplicate push constant bindings");
+        return std::nullopt;
+    }
+
     vector<ParameterRecord> records{};
     records.reserve(shaders.size() * 4);
 
@@ -368,8 +382,101 @@ std::optional<D3D12MergedBindingLayout> BuildMergedBindingLayoutD3D12(std::span<
             RADRAY_ERR_LOG("d3d12 merged binding layout requires hlsl reflection metadata");
             return std::nullopt;
         }
-        if (!_AppendHlslBindings(records, *hlsl, stages)) {
+        if (!_AppendHlslBindings(records, *hlsl, stages, pushConstants)) {
             return std::nullopt;
+        }
+    }
+
+    for (const PushConstantBinding& expected : pushConstants) {
+        const bool found = std::ranges::any_of(records, [&expected](const ParameterRecord& record) noexcept {
+            return record.Parameter.Kind == ShaderParameterKind::Constant &&
+                   record.D3D12.RegisterSpace == expected.Group &&
+                   record.D3D12.BindingIndex == expected.Binding;
+        });
+        if (!found) {
+            RADRAY_ERR_LOG(
+                "declared push constant at group {} binding {} was not found in shader reflection",
+                expected.Group,
+                expected.Binding);
+            return std::nullopt;
+        }
+    }
+
+    vector<std::pair<uint32_t, uint32_t>> declaredLocations;
+    for (const BindingGroupLayout& group : explicitGroups) {
+        for (const BindingGroupLayoutEntry& entry : group.Entries) {
+            const ShaderParameterInfo& declared = entry.Parameter;
+            const std::pair location{group.GroupIndex, entry.Binding};
+            if (std::ranges::find(declaredLocations, location) != declaredLocations.end()) {
+                RADRAY_ERR_LOG(
+                    "pipeline layout contains duplicate explicit space={} binding={}",
+                    group.GroupIndex,
+                    entry.Binding);
+                return std::nullopt;
+            }
+            declaredLocations.push_back(location);
+            const bool validKind =
+                (declared.Kind == ShaderParameterKind::Sampler &&
+                 declared.Type == ResourceBindType::Sampler) ||
+                (declared.Kind == ShaderParameterKind::Resource &&
+                 declared.Type != ResourceBindType::UNKNOWN &&
+                 declared.Type != ResourceBindType::Sampler) ||
+                declared.Kind == ShaderParameterKind::BindlessArray;
+            if (!validKind || declared.Stages == ShaderStage::UNKNOWN || declared.Count == 0) {
+                RADRAY_ERR_LOG(
+                    "invalid explicit binding '{}' at space={} binding={}",
+                    declared.Name,
+                    group.GroupIndex,
+                    entry.Binding);
+                return std::nullopt;
+            }
+
+            auto record = std::ranges::find_if(
+                records,
+                [&declared](const ParameterRecord& candidate) noexcept {
+                    return candidate.Parameter.Kind != ShaderParameterKind::Constant &&
+                           candidate.Parameter.Name == declared.Name;
+                });
+            if (record != records.end()) {
+                if (record->D3D12.RegisterSpace != group.GroupIndex ||
+                    record->D3D12.BindingIndex != entry.Binding ||
+                    record->Parameter.Kind != declared.Kind ||
+                    record->Parameter.Type != declared.Type ||
+                    record->Parameter.Count != declared.Count ||
+                    record->Parameter.IsBindless != declared.IsBindless) {
+                    RADRAY_ERR_LOG(
+                        "explicit binding '{}' does not match reflection at space={} binding={}",
+                        declared.Name,
+                        group.GroupIndex,
+                        entry.Binding);
+                    return std::nullopt;
+                }
+                record->Parameter.Stages = declared.Stages;
+                record->D3D12.Stages = declared.Stages;
+                continue;
+            }
+            if (declared.IsBindless || declared.Kind == ShaderParameterKind::BindlessArray) {
+                RADRAY_ERR_LOG("explicit bindless binding '{}' requires reflection metadata", declared.Name);
+                return std::nullopt;
+            }
+
+            ParameterRecord synthesized{};
+            synthesized.Parameter = declared;
+            synthesized.Parameter.IsReadOnly = !_IsRwResourceType(declared.Type);
+            synthesized.D3D12.Name = declared.Name;
+            synthesized.D3D12.Kind = declared.Kind;
+            synthesized.D3D12.IsAvailable = true;
+            synthesized.D3D12.BindingIndex = entry.Binding;
+            synthesized.D3D12.ShaderRegister = entry.Binding;
+            synthesized.D3D12.RegisterSpace = group.GroupIndex;
+            synthesized.D3D12.Type = declared.Type;
+            synthesized.D3D12.Count = declared.Count;
+            synthesized.D3D12.IsReadOnly = synthesized.Parameter.IsReadOnly;
+            synthesized.D3D12.IsBindless = false;
+            synthesized.D3D12.Stages = declared.Stages;
+            if (!_MergeRecord(records, std::move(synthesized))) {
+                return std::nullopt;
+            }
         }
     }
 
@@ -379,14 +486,12 @@ std::optional<D3D12MergedBindingLayout> BuildMergedBindingLayoutD3D12(std::span<
 
     std::sort(records.begin(), records.end(), _ParameterLess);
 
-    D3D12MergedBindingLayout result{};
+    D3D12MergedPipelineLayout result{};
     result.Parameters.reserve(records.size());
     result.D3D12Parameters.reserve(records.size());
     uint32_t maxRegisterSpacePlusOne = 0;
     for (uint32_t i = 0; i < records.size(); ++i) {
         auto& record = records[i];
-        record.Parameter.Id = ShaderParameterId{i};
-        record.D3D12.Id = ShaderParameterId{i};
         result.Parameters.push_back(record.Parameter);
         result.D3D12Parameters.push_back(record.D3D12);
         if (record.Parameter.Kind != ShaderParameterKind::Constant) {

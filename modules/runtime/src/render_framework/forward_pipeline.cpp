@@ -6,7 +6,7 @@
 #include <cstring>
 
 #include <radray/logger.h>
-#include <radray/render/sampler_cache.h>
+#include <radray/runtime/sampler_cache.h>
 #include <radray/runtime/application.h>
 #include <radray/runtime/asset_manager.h>
 #include <radray/runtime/gpu_system.h>
@@ -40,6 +40,19 @@ constexpr std::string_view kShadowViewName = "gShadowView";
 constexpr std::string_view kShadowCubeName = "gShadowCube";
 constexpr std::string_view kShadowArrayName = "gShadowArray";
 constexpr std::string_view kShadowSamplerName = "gShadowSampler";
+
+ImageData MakeSolidRgba8(uint8_t r, uint8_t g, uint8_t b, uint8_t a = 255) {
+    ImageData image{};
+    image.Width = 1;
+    image.Height = 1;
+    image.Format = ImageFormat::RGBA8_BYTE;
+    image.Data = make_unique<byte[]>(4);
+    image.Data[0] = static_cast<byte>(r);
+    image.Data[1] = static_cast<byte>(g);
+    image.Data[2] = static_cast<byte>(b);
+    image.Data[3] = static_cast<byte>(a);
+    return image;
+}
 
 // cube 6 面的 forward / up 方向, 面序严格匹配 point_shadow.hlsl 的 point_shadow_cube_face:
 //   0 = +X, 1 = -X, 2 = +Y, 3 = -Y, 4 = +Z, 5 = -Z。
@@ -241,6 +254,25 @@ public:
         _samplerDesc.LodMax = 32.0f;
         _samplerDesc.Compare = std::nullopt;
         _samplerDesc.AnisotropyClamp = 8;
+
+        Application* app = renderSystem.GetApplication();
+        GpuSystem* gpu = app != nullptr ? app->GetGpuSystem() : nullptr;
+        if (gpu == nullptr) {
+            return false;
+        }
+        auto loadDefault = [&](std::string_view name, ImageData image, bool srgb) {
+            return LoadTextureAssetFromImage(
+                assets,
+                gpu->GetFrameUploadScheduler(),
+                Guid::NewGuid(),
+                string{name},
+                std::move(image),
+                TextureAssetLoadOptions{.Srgb = srgb});
+        };
+        _whiteSrgb = loadDefault("forward_default_white_srgb", MakeSolidRgba8(255, 255, 255), true);
+        _whiteLinear = loadDefault("forward_default_white", MakeSolidRgba8(255, 255, 255), false);
+        _blackLinear = loadDefault("forward_default_black", MakeSolidRgba8(0, 0, 0), false);
+        _flatNormal = loadDefault("forward_default_flat_normal", MakeSolidRgba8(128, 128, 255), false);
         return true;
     }
 
@@ -289,24 +321,27 @@ public:
         }
 
         // keyword + 绑定: 贴图存在性。
-        auto bindTexture = [&](int index, std::string_view keyword, std::string_view slot) {
-            if (index < 0 || static_cast<size_t>(index) >= textures.size()) {
-                return;
+        auto bindTexture = [&] (
+                               int index,
+                               std::string_view keyword,
+                               std::string_view slot,
+                               const StreamingAssetRef<TextureAsset>& fallback) {
+            StreamingAssetRef<TextureAsset> selected = fallback;
+            if (index >= 0 && static_cast<size_t>(index) < textures.size()) {
+                const StreamingAssetRef<TextureAsset>& texRef = textures[static_cast<size_t>(index)].Texture;
+                TextureAsset* tex = texRef.Get();
+                if (tex != nullptr && tex->GetSrv() != nullptr) {
+                    selected = texRef;
+                    mat->EnableKeyword(keyword);
+                }
             }
-            const StreamingAssetRef<TextureAsset>& texRef = textures[static_cast<size_t>(index)].Texture;
-            TextureAsset* tex = texRef.Get();
-            if (tex == nullptr || tex->GetSrv() == nullptr) {
-                return;
-            }
-            mat->EnableKeyword(keyword);
-            // 持资产引用而非裸 SRV: 快照跨帧/跨线程持有安全 (generation 兜底悬垂)。
-            mat->SetTexture(slot, texRef);
+            mat->SetTexture(slot, std::move(selected));
         };
-        bindTexture(desc.BaseColorTexture, forward_pipeline::kKwBaseColorMap, forward_pipeline::kTexBaseColor);
-        bindTexture(desc.MetallicRoughnessTexture, forward_pipeline::kKwMetalRoughMap, forward_pipeline::kTexMetalRough);
-        bindTexture(desc.NormalTexture, forward_pipeline::kKwNormalMap, forward_pipeline::kTexNormal);
-        bindTexture(desc.OcclusionTexture, forward_pipeline::kKwOcclusionMap, forward_pipeline::kTexOcclusion);
-        bindTexture(desc.EmissiveTexture, forward_pipeline::kKwEmissiveMap, forward_pipeline::kTexEmissive);
+        bindTexture(desc.BaseColorTexture, forward_pipeline::kKwBaseColorMap, forward_pipeline::kTexBaseColor, _whiteSrgb);
+        bindTexture(desc.MetallicRoughnessTexture, forward_pipeline::kKwMetalRoughMap, forward_pipeline::kTexMetalRough, _whiteLinear);
+        bindTexture(desc.NormalTexture, forward_pipeline::kKwNormalMap, forward_pipeline::kTexNormal, _flatNormal);
+        bindTexture(desc.OcclusionTexture, forward_pipeline::kKwOcclusionMap, forward_pipeline::kTexOcclusion, _whiteLinear);
+        bindTexture(desc.EmissiveTexture, forward_pipeline::kKwEmissiveMap, forward_pipeline::kTexEmissive, _blackLinear);
 
         mat->SetSampler(forward_pipeline::kSamplerName, _samplerDesc);
 
@@ -349,6 +384,10 @@ private:
     AssetManager* _assets{nullptr};
     StreamingAssetRef<ShaderAsset> _shader{};
     render::SamplerDescriptor _samplerDesc{};
+    StreamingAssetRef<TextureAsset> _whiteSrgb{};
+    StreamingAssetRef<TextureAsset> _whiteLinear{};
+    StreamingAssetRef<TextureAsset> _blackLinear{};
+    StreamingAssetRef<TextureAsset> _flatNormal{};
     StreamingAssetRef<MaterialAsset> _defaultMaterial{};
 };
 
@@ -372,48 +411,47 @@ ForwardPipeline::ForwardPipeline(RenderSystem* renderSystem) noexcept
       _colorPass(this),
       _renderSystem(renderSystem) {
     if (_device != nullptr && renderSystem != nullptr) {
+        Application* app = renderSystem->GetApplication();
+        GpuSystem* gpu = app != nullptr ? app->GetGpuSystem() : nullptr;
+        _renderPassRegistry = gpu != nullptr ? gpu->GetRenderPassRegistry() : nullptr;
         _samplerCache = renderSystem->GetSamplerCache();
-        const uint32_t flightCount =
-            renderSystem->GetApplication() != nullptr && renderSystem->GetApplication()->GetGpuSystem() != nullptr
-                ? renderSystem->GetApplication()->GetGpuSystem()->GetFlightDataCount()
-                : 1;
         _executor = make_unique<MeshPassExecutor>(
             _device,
-            renderSystem->GetShaderVariantCache(),
-            renderSystem->GetGraphicsPipelineStateCache(),
+            renderSystem->GetShaderVariantLibrary(),
+            renderSystem->GetGraphicsPipelineStateLibrary(),
             renderSystem->GetSamplerCache(),
-            std::string{kPerObjectName},
-            flightCount);
+            std::string{kPerObjectName});
         _shadowExecutor = make_unique<MeshPassExecutor>(
             _device,
-            renderSystem->GetShaderVariantCache(),
-            renderSystem->GetGraphicsPipelineStateCache(),
+            renderSystem->GetShaderVariantLibrary(),
+            renderSystem->GetGraphicsPipelineStateLibrary(),
             renderSystem->GetSamplerCache(),
-            std::string{kPerObjectName},
-            flightCount);
-        _dirShadowExecutor = make_unique<MeshPassExecutor>(
-            _device,
-            renderSystem->GetShaderVariantCache(),
-            renderSystem->GetGraphicsPipelineStateCache(),
-            renderSystem->GetSamplerCache(),
-            std::string{kPerObjectName},
-            flightCount);
+            std::string{kPerObjectName});
     }
 }
 
-ForwardPipeline::~ForwardPipeline() noexcept = default;
+ForwardPipeline::~ForwardPipeline() noexcept {
+    if (_renderPassRegistry == nullptr) {
+        return;
+    }
+    for (const DepthTarget& target : _depthTargets) {
+        _renderPassRegistry->RemoveFramebuffersUsing(target.View.get());
+    }
+    for (const ShadowCube& cube : _shadowCubes) {
+        _renderPassRegistry->RemoveFramebuffersUsing(cube.LayeredDsv.get());
+        for (const auto& face : cube.FaceDsv) {
+            _renderPassRegistry->RemoveFramebuffersUsing(face.get());
+        }
+    }
+    for (const ShadowArray& array : _shadowArrays) {
+        for (const auto& slice : array.SliceDsv) {
+            _renderPassRegistry->RemoveFramebuffersUsing(slice.get());
+        }
+    }
+}
 
 void ForwardPipeline::OnBeginFrame(RenderPipelineContext& ctx) {
-    const uint32_t flight = ctx.Frame.FlightIndex();
-    if (_executor != nullptr) {
-        _executor->BeginFrame(flight);
-    }
-    if (_shadowExecutor != nullptr) {
-        _shadowExecutor->BeginFrame(flight);
-    }
-    if (_dirShadowExecutor != nullptr) {
-        _dirShadowExecutor->BeginFrame(flight);
-    }
+    RADRAY_UNUSED(ctx);
 }
 
 Nullable<IStandardMaterialFactory*> ForwardPipeline::GetStandardMaterialFactory() noexcept {
@@ -484,6 +522,9 @@ ForwardPipeline::DepthTarget* ForwardPipeline::AcquireDepthTarget(uint32_t fligh
     }
 
     // 尺寸变化 (或首次): 重建。
+    if (_renderPassRegistry != nullptr) {
+        _renderPassRegistry->RemoveFramebuffersUsing(dt.View.get());
+    }
     dt.View.reset();
     dt.Texture.reset();
     dt.State = render::TextureState::Undefined;
@@ -538,8 +579,15 @@ ForwardPipeline::ShadowCube* ForwardPipeline::AcquireShadowCube(uint32_t flight,
         return &sc;
     }
 
-    // 首次 (或尺寸变化): 重建 cube 深度纹理 + cube SRV + 每面 DSV。
+    // 首次 (或尺寸变化): 重建 cube 深度纹理 + cube SRV + layered/逐面 DSV。
+    if (_renderPassRegistry != nullptr) {
+        _renderPassRegistry->RemoveFramebuffersUsing(sc.LayeredDsv.get());
+    }
+    sc.LayeredDsv.reset();
     for (auto& dsv : sc.FaceDsv) {
+        if (_renderPassRegistry != nullptr) {
+            _renderPassRegistry->RemoveFramebuffersUsing(dsv.get());
+        }
         dsv.reset();
     }
     sc.Srv.reset();
@@ -583,10 +631,45 @@ ForwardPipeline::ShadowCube* ForwardPipeline::AcquireShadowCube(uint32_t flight,
     }
     sc.Srv = srvOpt.Release();
 
-    // 每面一个 DSV (渲染用, 走 2DArray slice)。
-    for (uint32_t face = 0; face < kCubeFaceCount; ++face) {
-        render::TextureViewDescriptor dsvDesc{
+    // 支持 VS 写 SV_RenderTargetArrayIndex 时，单个 DSV 覆盖 cube 的全部六层。
+    if (_device->GetDetail().IsLayeredRenderingFromVertexShaderSupported) {
+        render::TextureViewDescriptor layeredDsvDesc{
             .Target = sc.Texture.get(),
+            .Dim = render::TextureDimension::Dim2DArray,
+            .Format = kShadowFormat,
+            .Range = render::SubresourceRange{0, kCubeFaceCount, 0, 1},
+            .Usage = render::TextureViewUsage::DepthWrite};
+        auto layeredDsvOpt = _device->CreateTextureView(layeredDsvDesc);
+        if (layeredDsvOpt.HasValue()) {
+            sc.LayeredDsv = layeredDsvOpt.Release();
+        } else {
+            RADRAY_WARN_LOG(
+                "ForwardPipeline: failed to create layered shadow cube DSV; using six-pass fallback");
+        }
+    }
+
+    // 正常路径只保留一个 layered DSV；逐面 DSV 仅在能力不足或 layered 提交失败时创建。
+    if (sc.LayeredDsv == nullptr && !EnsureShadowCubeFaceDsvs(sc)) {
+        sc.Srv.reset();
+        sc.Texture.reset();
+        return nullptr;
+    }
+
+    sc.Size = size;
+    sc.State = render::TextureState::Undefined;
+    return &sc;
+}
+
+bool ForwardPipeline::EnsureShadowCubeFaceDsvs(ShadowCube& cube) {
+    if (_device == nullptr || cube.Texture == nullptr) {
+        return false;
+    }
+    for (uint32_t face = 0; face < kCubeFaceCount; ++face) {
+        if (cube.FaceDsv[face] != nullptr) {
+            continue;
+        }
+        render::TextureViewDescriptor dsvDesc{
+            .Target = cube.Texture.get(),
             .Dim = render::TextureDimension::Dim2DArray,
             .Format = kShadowFormat,
             .Range = render::SubresourceRange{face, 1, 0, 1},
@@ -594,16 +677,17 @@ ForwardPipeline::ShadowCube* ForwardPipeline::AcquireShadowCube(uint32_t flight,
         auto dsvOpt = _device->CreateTextureView(dsvDesc);
         if (!dsvOpt.HasValue()) {
             RADRAY_ERR_LOG("ForwardPipeline: failed to create shadow cube face DSV {}", face);
-            sc.Srv.reset();
-            sc.Texture.reset();
-            return nullptr;
+            for (auto& dsv : cube.FaceDsv) {
+                if (_renderPassRegistry != nullptr) {
+                    _renderPassRegistry->RemoveFramebuffersUsing(dsv.get());
+                }
+                dsv.reset();
+            }
+            return false;
         }
-        sc.FaceDsv[face] = dsvOpt.Release();
+        cube.FaceDsv[face] = dsvOpt.Release();
     }
-
-    sc.Size = size;
-    sc.State = render::TextureState::Undefined;
-    return &sc;
+    return true;
 }
 
 ForwardPipeline::ShadowArray* ForwardPipeline::AcquireShadowArray(uint32_t flight, uint32_t size, uint32_t sliceCount) {
@@ -621,6 +705,9 @@ ForwardPipeline::ShadowArray* ForwardPipeline::AcquireShadowArray(uint32_t fligh
 
     // 首次 (或尺寸/层数变化): 重建 2DArray 深度纹理 + 2DArray SRV + 每层 DSV。
     for (auto& dsv : sa.SliceDsv) {
+        if (_renderPassRegistry != nullptr) {
+            _renderPassRegistry->RemoveFramebuffersUsing(dsv.get());
+        }
         dsv.reset();
     }
     sa.Srv.reset();
@@ -760,29 +847,43 @@ bool ForwardPipeline::RenderPointShadow(
 
     _shadowExecutor->ClearGlobals();
 
-    // 逐面渲染: 每面一个 depth-only render pass, 写入对应 slice。
-    for (uint32_t face = 0; face < kCubeFaceCount; ++face) {
-        ShadowViewConstants sv{};
-        std::memcpy(sv.ViewProj, faceVp[face].data(), sizeof(float) * 16);
-        _shadowExecutor->SetViewConstants(
-            kShadowViewName,
-            std::span<const byte>{reinterpret_cast<const byte*>(&sv), sizeof(ShadowViewConstants)});
+    render::RenderPassDepthStencilAttachmentDescriptor depthAttachment{
+        .Format = kShadowFormat,
+        .SampleCount = 1,
+        .DepthLoad = render::LoadAction::Clear,
+        .DepthStore = render::StoreAction::Store,
+        .StencilLoad = render::LoadAction::DontCare,
+        .StencilStore = render::StoreAction::Discard};
+    render::RenderPassDescriptor passDesc{
+        .ColorAttachments = {},
+        .DepthStencilAttachment = depthAttachment};
+    auto passOpt = _renderPassRegistry != nullptr
+                       ? _renderPassRegistry->GetOrCreateRenderPass(passDesc)
+                       : Nullable<render::RenderPass*>{};
+    if (!passOpt.HasValue()) {
+        return false;
+    }
+    render::RenderPass* renderPass = passOpt.Get();
 
-        render::DepthStencilAttachment depthAttachment{
-            .Target = cube->FaceDsv[face].get(),
-            .DepthLoad = render::LoadAction::Clear,
-            .DepthStore = render::StoreAction::Store,
-            .StencilLoad = render::LoadAction::DontCare,
-            .StencilStore = render::StoreAction::Discard,
-            .ClearValue = render::DepthStencilClearValue{1.0f, uint8_t{0}}};
-        render::RenderPassDescriptor passDesc{
-            .ColorAttachments = {},
-            .DepthStencilAttachment = depthAttachment,
-            .Name = "Point Shadow Face"};
-        auto encoderOpt = cmd->BeginRenderPass(passDesc);
+    auto renderLayerRange = [&](render::TextureView* depthView,
+                                uint32_t layerCount,
+                                uint32_t instanceCount,
+                                std::string_view name) -> std::optional<uint32_t> {
+        auto framebufferOpt = _renderPassRegistry->GetOrCreateFramebuffer(
+            renderPass, {}, depthView, cube->Size, cube->Size, layerCount);
+        if (!framebufferOpt.HasValue()) {
+            return std::nullopt;
+        }
+        render::RenderPassBeginDescriptor beginDesc{
+            .Pass = renderPass,
+            .Target = framebufferOpt.Get(),
+            .ColorClearValues = {},
+            .DepthStencilClearValue = render::DepthStencilClearValue{1.0f, uint8_t{0}},
+            .Name = name};
+        auto encoderOpt = cmd->BeginRenderPass(beginDesc);
         if (!encoderOpt.HasValue()) {
-            RADRAY_ERR_LOG("ForwardPipeline: failed to begin shadow face pass {}", face);
-            return false;
+            RADRAY_ERR_LOG("ForwardPipeline: failed to begin '{}'", name);
+            return std::nullopt;
         }
         auto encoder = encoderOpt.Release();
 
@@ -800,8 +901,54 @@ bool ForwardPipeline::RenderPointShadow(
         encoder->SetViewport(vp);
         encoder->SetScissor(Rect{0, 0, cube->Size, cube->Size});
 
-        _shadowExecutor->Execute(encoder.get(), casterList);
+        _shadowExecutor->SetRenderPass(renderPass);
+        const uint32_t submitted = _shadowExecutor->Execute(
+            encoder.get(), casterList, ctx.Frame.GetFrameResources(), instanceCount);
         cmd->EndRenderPass(std::move(encoder));
+        return submitted;
+    };
+
+    const bool useLayeredRendering =
+        _device->GetDetail().IsLayeredRenderingFromVertexShaderSupported &&
+        cube->LayeredDsv != nullptr;
+    bool pointShadowRendered = false;
+    if (useLayeredRendering) {
+        ShadowViewConstants sv{};
+        for (uint32_t face = 0; face < kCubeFaceCount; ++face) {
+            std::memcpy(sv.ViewProj[face], faceVp[face].data(), sizeof(float) * 16);
+        }
+        _shadowExecutor->SetViewConstants(
+            kShadowViewName,
+            std::span<const byte>{reinterpret_cast<const byte*>(&sv), sizeof(sv)});
+        _shadowExecutor->EnableGlobalKeyword(forward_pipeline::kKwPointShadowLayered);
+        const std::optional<uint32_t> submitted = renderLayerRange(
+            cube->LayeredDsv.get(), kCubeFaceCount, kCubeFaceCount, "Point Shadow Layered");
+        if (submitted.has_value() && submitted.value() == casterList.Size()) {
+            pointShadowRendered = true;
+        } else {
+            RADRAY_WARN_LOG(
+                "ForwardPipeline: layered point shadow failed; using six-pass fallback");
+            _shadowExecutor->ClearGlobals();
+        }
+    }
+
+    // 能力不足或 layered variant 提交失败时，保留逐面路径。
+    if (!pointShadowRendered) {
+        if (!EnsureShadowCubeFaceDsvs(*cube)) {
+            return false;
+        }
+        for (uint32_t face = 0; face < kCubeFaceCount; ++face) {
+            ShadowViewConstants sv{};
+            std::memcpy(sv.ViewProj[0], faceVp[face].data(), sizeof(float) * 16);
+            _shadowExecutor->SetViewConstants(
+                kShadowViewName,
+                std::span<const byte>{reinterpret_cast<const byte*>(&sv), sizeof(sv)});
+            const std::optional<uint32_t> submitted = renderLayerRange(
+                cube->FaceDsv[face].get(), 1, 1, "Point Shadow Face");
+            if (!submitted.has_value() || submitted.value() != casterList.Size()) {
+                return false;
+            }
+        }
     }
 
     // cube 转采样布局 (ShaderRead)。作为常规 SRV (R32_FLOAT) 在 pixel shader 里比较采样,
@@ -825,7 +972,7 @@ bool ForwardPipeline::RenderDirectionalShadow(
     CascadeShadowGpu& outShadow,
     ShadowArray*& outArray) {
     render::CommandBuffer* cmd = ctx.Frame.GetCommandBuffer();
-    if (cmd == nullptr || _dirShadowExecutor == nullptr) {
+    if (cmd == nullptr || _shadowExecutor == nullptr) {
         return false;
     }
 
@@ -933,28 +1080,46 @@ bool ForwardPipeline::RenderDirectionalShadow(
         array->State = render::TextureState::DepthWrite;
     }
 
-    _dirShadowExecutor->ClearGlobals();
+    _shadowExecutor->ClearGlobals();
+
+    render::RenderPassDepthStencilAttachmentDescriptor depthAttachment{
+        .Format = kShadowFormat,
+        .SampleCount = 1,
+        .DepthLoad = render::LoadAction::Clear,
+        .DepthStore = render::StoreAction::Store,
+        .StencilLoad = render::LoadAction::DontCare,
+        .StencilStore = render::StoreAction::Discard};
+    render::RenderPassDescriptor passDesc{
+        .ColorAttachments = {},
+        .DepthStencilAttachment = depthAttachment};
+    auto passOpt = _renderPassRegistry != nullptr
+                       ? _renderPassRegistry->GetOrCreateRenderPass(passDesc)
+                       : Nullable<render::RenderPass*>{};
+    if (!passOpt.HasValue()) {
+        return false;
+    }
+    render::RenderPass* renderPass = passOpt.Get();
 
     // 逐级联渲染: 每级联一个 depth-only render pass, 写入对应层。
     for (uint32_t i = 0; i < cascadeCount; ++i) {
         ShadowViewConstants sv{};
-        std::memcpy(sv.ViewProj, cascadeVp[i].data(), sizeof(float) * 16);
-        _dirShadowExecutor->SetViewConstants(
+        std::memcpy(sv.ViewProj[0], cascadeVp[i].data(), sizeof(float) * 16);
+        _shadowExecutor->SetViewConstants(
             kShadowViewName,
             std::span<const byte>{reinterpret_cast<const byte*>(&sv), sizeof(ShadowViewConstants)});
 
-        render::DepthStencilAttachment depthAttachment{
-            .Target = array->SliceDsv[i].get(),
-            .DepthLoad = render::LoadAction::Clear,
-            .DepthStore = render::StoreAction::Store,
-            .StencilLoad = render::LoadAction::DontCare,
-            .StencilStore = render::StoreAction::Discard,
-            .ClearValue = render::DepthStencilClearValue{1.0f, uint8_t{0}}};
-        render::RenderPassDescriptor passDesc{
-            .ColorAttachments = {},
-            .DepthStencilAttachment = depthAttachment,
+        auto framebufferOpt = _renderPassRegistry->GetOrCreateFramebuffer(
+            renderPass, {}, array->SliceDsv[i].get(), shadowSize, shadowSize);
+        if (!framebufferOpt.HasValue()) {
+            return false;
+        }
+        render::RenderPassBeginDescriptor beginDesc{
+            .Pass = renderPass,
+            .Target = framebufferOpt.Get(),
+            .ColorClearValues = {},
+            .DepthStencilClearValue = render::DepthStencilClearValue{1.0f, uint8_t{0}},
             .Name = "Directional Shadow Cascade"};
-        auto encoderOpt = cmd->BeginRenderPass(passDesc);
+        auto encoderOpt = cmd->BeginRenderPass(beginDesc);
         if (!encoderOpt.HasValue()) {
             RADRAY_ERR_LOG("ForwardPipeline: failed to begin cascade pass {}", i);
             return false;
@@ -975,7 +1140,8 @@ bool ForwardPipeline::RenderDirectionalShadow(
         encoder->SetViewport(vp);
         encoder->SetScissor(Rect{0, 0, shadowSize, shadowSize});
 
-        _dirShadowExecutor->Execute(encoder.get(), casterList);
+        _shadowExecutor->SetRenderPass(renderPass);
+        _shadowExecutor->Execute(encoder.get(), casterList, ctx.Frame.GetFrameResources());
         cmd->EndRenderPass(std::move(encoder));
     }
 
@@ -1272,25 +1438,43 @@ void ForwardPipeline::ForwardColorPass::Execute(RenderPipelineContext& ctx, cons
         depth->State = render::TextureState::DepthWrite;
     }
 
-    render::ColorAttachment colorAttachment{
-        .Target = target.BackBufferView,
+    render::RenderPassColorAttachmentDescriptor colorAttachment{
+        .Format = target.BackBuffer->GetDesc().Format,
+        .SampleCount = 1,
         .Load = frame.PipelineTarget != nullptr && frame.PipelineTarget->ContentDrawn
                     ? render::LoadAction::Load
                     : render::LoadAction::Clear,
-        .Store = render::StoreAction::Store,
-        .ClearValue = render::ColorClearValue{{0.02f, 0.02f, 0.03f, 1.0f}}};
-    render::DepthStencilAttachment depthAttachment{
-        .Target = depth->View.get(),
+        .Store = render::StoreAction::Store};
+    render::RenderPassDepthStencilAttachmentDescriptor depthAttachment{
+        .Format = kDepthFormat,
+        .SampleCount = 1,
         .DepthLoad = render::LoadAction::Clear,
         .DepthStore = render::StoreAction::Store,
         .StencilLoad = render::LoadAction::DontCare,
-        .StencilStore = render::StoreAction::Discard,
-        .ClearValue = render::DepthStencilClearValue{1.0f, uint8_t{0}}};
+        .StencilStore = render::StoreAction::Discard};
     render::RenderPassDescriptor passDesc{
         .ColorAttachments = std::span{&colorAttachment, 1},
-        .DepthStencilAttachment = depthAttachment,
+        .DepthStencilAttachment = depthAttachment};
+    auto passOpt = self->_renderPassRegistry != nullptr
+                       ? self->_renderPassRegistry->GetOrCreateRenderPass(passDesc)
+                       : Nullable<render::RenderPass*>{};
+    if (!passOpt.HasValue()) {
+        return;
+    }
+    render::TextureView* colorView = target.BackBufferView;
+    auto framebufferOpt = self->_renderPassRegistry->GetOrCreateFramebuffer(
+        passOpt.Get(), std::span<render::TextureView* const>{&colorView, 1}, depth->View.get(), width, height);
+    if (!framebufferOpt.HasValue()) {
+        return;
+    }
+    const render::ColorClearValue colorClear{{0.02f, 0.02f, 0.03f, 1.0f}};
+    render::RenderPassBeginDescriptor beginDesc{
+        .Pass = passOpt.Get(),
+        .Target = framebufferOpt.Get(),
+        .ColorClearValues = std::span{&colorClear, 1},
+        .DepthStencilClearValue = render::DepthStencilClearValue{1.0f, uint8_t{0}},
         .Name = "Forward Opaque"};
-    auto encoderOpt = cmd->BeginRenderPass(passDesc);
+    auto encoderOpt = cmd->BeginRenderPass(beginDesc);
     if (!encoderOpt.HasValue()) {
         RADRAY_ERR_LOG("ForwardPipeline: failed to begin forward render pass");
         return;
@@ -1313,8 +1497,10 @@ void ForwardPipeline::ForwardColorPass::Execute(RenderPipelineContext& ctx, cons
 
     // 同一 render pass、同一深度缓冲: 先不透明 (写深度), 再透明 (depth-write-off + alpha blend,
     // 复用不透明已写入的深度做遮挡测试; back-to-front 保证半透明叠加顺序正确)。
-    self->_executor->Execute(encoder.get(), opaqueList);
-    self->_executor->Execute(encoder.get(), transparentList);
+    FrameResources& resources = ctx.Frame.GetFrameResources();
+    self->_executor->SetRenderPass(passOpt.Get());
+    self->_executor->Execute(encoder.get(), opaqueList, resources);
+    self->_executor->Execute(encoder.get(), transparentList, resources);
 
     cmd->EndRenderPass(std::move(encoder));
     if (frame.PipelineTarget != nullptr) {

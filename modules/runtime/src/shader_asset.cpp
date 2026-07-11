@@ -66,7 +66,7 @@ ShaderAsset::ShaderAsset(ShaderKeywordSet keywords, vector<ShaderPassDesc> passe
 ShaderAsset::~ShaderAsset() noexcept = default;
 
 void ShaderAsset::OnUnload(IRenderResourceRecycler& /*recycler*/) {
-    // 编译好的变体由 render::ShaderVariantCache 持有并回收, ShaderAsset 不拥有 GPU 资源。
+    // 编译好的变体由 runtime ShaderVariantLibrary 持有并回收, ShaderAsset 不拥有 GPU 资源。
     _passes.clear();
 }
 
@@ -83,8 +83,8 @@ std::optional<uint32_t> ShaderAsset::FindPassByTag(std::string_view passTag) con
     return std::nullopt;
 }
 
-Nullable<const render::CompiledShaderVariant*> ShaderAsset::GetOrCreateVariant(
-    render::ShaderVariantCache& cache,
+Nullable<const CompiledShaderVariant*> ShaderAsset::GetOrCreateVariant(
+    ShaderVariantLibrary& cache,
     uint32_t passIndex,
     std::span<const std::string_view> enabledKeywords,
     render::HlslShaderModel sm) noexcept {
@@ -94,15 +94,7 @@ Nullable<const render::CompiledShaderVariant*> ShaderAsset::GetOrCreateVariant(
     }
     const ShaderPassDesc& pass = _passes[passIndex];
 
-    const uint64_t bitmask = _keywords.Project(enabledKeywords);
-    const render::ShaderVariantKey key{
-        .ProgramId = _programId,
-        .PassIndex = passIndex,
-        .Bitmask = bitmask};
-    if (auto cached = cache.Find(key); cached.HasValue()) {
-        return cached;
-    }
-
+    const uint64_t bitmask = _keywords.Project(enabledKeywords) & pass.VariantKeywordMask;
     vector<string> defineStrings = _keywords.ResolveDefines(bitmask);
     vector<std::string_view> defineViews;
     defineViews.reserve(defineStrings.size());
@@ -110,13 +102,13 @@ Nullable<const render::CompiledShaderVariant*> ShaderAsset::GetOrCreateVariant(
         defineViews.emplace_back(d);
     }
 
-    const render::ShaderVariantStageDesc stages[] = {
-        render::ShaderVariantStageDesc{
+    const ShaderVariantStageDesc stages[] = {
+        ShaderVariantStageDesc{
             .Source = pass.Source,
             .EntryPoint = pass.VertexEntry,
             .Stage = render::ShaderStage::Vertex,
         },
-        render::ShaderVariantStageDesc{
+        ShaderVariantStageDesc{
             .Source = pass.Source,
             .EntryPoint = pass.PixelEntry,
             .Stage = render::ShaderStage::Pixel,
@@ -129,13 +121,18 @@ Nullable<const render::CompiledShaderVariant*> ShaderAsset::GetOrCreateVariant(
         includeViews.emplace_back(dir);
     }
 
-    render::ShaderVariantDescriptor desc{};
+    ShaderVariantDescriptor desc{};
     desc.ProgramId = _programId;
     desc.PassIndex = passIndex;
     desc.KeywordBitmask = bitmask;
     desc.Defines = defineViews;
     desc.Includes = includeViews;
     desc.Stages = stages;
+    desc.DynamicBufferBindings = pass.DynamicBufferBindings;
+    desc.PushConstantBindings = pass.PushConstantBindings;
+    if (!pass.InterfaceSchema.Bindings.empty() || !pass.InterfaceSchema.PushConstants.empty()) {
+        desc.InterfaceSchema = &pass.InterfaceSchema;
+    }
     desc.SM = sm;
     desc.IsOptimize = false;
     desc.LogicalName = pass.ProgramName;

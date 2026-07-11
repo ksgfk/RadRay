@@ -16,6 +16,7 @@ vector<StaticMeshSceneProxy::Section> BuildSections(const StaticMesh& mesh) {
             .IndexCount = section.IndexCount,
             .MinVertexIndex = section.MinVertexIndex,
             .MaxVertexIndex = section.MaxVertexIndex,
+            .VertexOffset = section.VertexOffset,
         });
     }
 
@@ -38,7 +39,7 @@ StaticMeshSceneProxy::StaticMeshSceneProxy(const StaticMeshComponent& component,
 
 StaticMeshSceneProxy::~StaticMeshSceneProxy() noexcept = default;
 
-const render::RenderMesh* StaticMeshSceneProxy::GetRenderMesh() const noexcept {
+const GpuMesh* StaticMeshSceneProxy::GetRenderMesh() const noexcept {
     StaticMesh* mesh = _mesh.Get();
     if (mesh == nullptr) {
         return nullptr;
@@ -59,19 +60,19 @@ MeshDrawArgs StaticMeshSceneProxy::GetDrawArgs(uint32_t sectionIndex) const noex
     if (sectionIndex >= _sections.size()) {
         return MeshDrawArgs{};
     }
-    const render::RenderMesh* mesh = GetRenderMesh();
+    const GpuMesh* mesh = GetRenderMesh();
     if (mesh == nullptr) {
         return MeshDrawArgs{};
     }
     const Section& sec = _sections[sectionIndex];
-    if (sec.PrimitiveIndex >= mesh->_drawDatas.size()) {
+    if (sec.PrimitiveIndex >= mesh->Draws.size()) {
         return MeshDrawArgs{};
     }
     MeshDrawArgs args{};
-    args.Geometry = &mesh->_drawDatas[sec.PrimitiveIndex];
+    args.Geometry = &mesh->Draws[sec.PrimitiveIndex];
     args.FirstIndex = sec.FirstIndex;
     args.IndexCount = sec.IndexCount;
-    args.VertexOffset = 0;
+    args.VertexOffset = sec.VertexOffset;
     return args;
 }
 

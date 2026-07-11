@@ -1,10 +1,11 @@
 #pragma once
 
 #include <optional>
+#include <limits>
 
 #include <radray/types.h>
 #include <radray/render/common.h>
-#include <radray/render/shader_variant_cache.h>
+#include <radray/runtime/shader_variant_library.h>
 #include <radray/hash.h>
 #include <radray/runtime/asset.h>
 
@@ -73,15 +74,22 @@ struct ShaderPassDesc {
     vector<OwningVertexBufferLayout> VertexLayouts{};
     // shader 源里 #include 的搜索目录 (透传给 DXC 的 -I)。为空表示不额外加 include 根。
     vector<string> IncludeDirs{};
+    vector<render::DynamicBufferBinding> DynamicBufferBindings{};
+    vector<render::PushConstantBinding> PushConstantBindings{};
+    ShaderInterfaceSchema InterfaceSchema{};
+    bool AllowMaterialRenderStateOverrides{true};
+    // Only these ShaderKeywordSet bits participate in this pass. Keeping this
+    // per-pass prevents material keywords from multiplying unrelated passes.
+    uint64_t VariantKeywordMask{std::numeric_limits<uint64_t>::max()};
 };
 
 /// shader 资产 (对应 Unity 的一个 .shader / Shader 对象)。
 ///
 /// - 持有 program 身份 ProgramId (构造时生成的稳定 Guid), 独立于 AssetManager 分配的 AssetId。
-///   render::ShaderVariantCache 用 ProgramId 区分不同 program, 因此即使未入库也有效。
+///   runtime ShaderVariantLibrary 用 ProgramId 区分不同 program, 因此即使未入库也有效。
 /// - 持有 keyword 表 (全 pass 共享) + pass 列表。
 /// - GetOrCreateVariant 把 (pass, 启用 keyword) 投影为 render::ShaderVariantDescriptor,
-///   驱动 render::ShaderVariantCache 懒编译并缓存, 返回编译好的变体。
+///   驱动 runtime ShaderVariantLibrary 懒编译并缓存, 返回编译好的变体。
 class ShaderAsset : public Asset {
 public:
     ShaderAsset() noexcept;
@@ -103,8 +111,8 @@ public:
 
     /// 懒编译并缓存指定 pass 在给定启用 keyword 下的变体。
     /// enabled 中未声明的 keyword 被忽略。失败返回 nullptr。
-    Nullable<const render::CompiledShaderVariant*> GetOrCreateVariant(
-        render::ShaderVariantCache& cache,
+    Nullable<const CompiledShaderVariant*> GetOrCreateVariant(
+        ShaderVariantLibrary& cache,
         uint32_t passIndex,
         std::span<const std::string_view> enabledKeywords,
         render::HlslShaderModel sm = render::HlslShaderModel::SM60) noexcept;

@@ -44,6 +44,14 @@ struct GltfPrimitiveCpu {
     bool HasBounds{false};
 };
 
+struct PackedPrimitiveSection {
+    uint32_t FirstIndex{0};
+    uint32_t IndexCount{0};
+    uint32_t MinVertexIndex{0};
+    uint32_t MaxVertexIndex{0};
+    int32_t VertexOffset{0};
+};
+
 // ── 稳定 AssetId 派生 (同一 glTF 的同一子资源始终得到同一 Id, 便于缓存去重) ──
 
 uint64_t StableHash64(std::string_view text) noexcept {
@@ -474,15 +482,38 @@ vector<byte> ToBytes(std::span<const uint32_t> indices) {
     return bytes;
 }
 
-MeshResource MakeMeshResource(const GltfPrimitiveCpu& primitive) {
+MeshResource MakePackedMeshResource(
+    const vector<GltfPrimitiveCpu>& primitives,
+    vector<PackedPrimitiveSection>& sections) {
     MeshResource mesh;
-    mesh.Name = primitive.Name;
+    mesh.Name = "gltf_geometry";
+    vector<GltfVertex> vertices;
+    vector<uint32_t> indices;
+    sections.clear();
+    sections.reserve(primitives.size());
+    for (const GltfPrimitiveCpu& primitive : primitives) {
+        const uint32_t baseVertex = static_cast<uint32_t>(vertices.size());
+        const uint32_t firstIndex = static_cast<uint32_t>(indices.size());
+        vertices.insert(vertices.end(), primitive.Vertices.begin(), primitive.Vertices.end());
+        indices.reserve(indices.size() + primitive.Indices.size());
+        for (const uint32_t index : primitive.Indices) {
+            indices.push_back(index);
+        }
+        sections.push_back(PackedPrimitiveSection{
+            .FirstIndex = firstIndex,
+            .IndexCount = static_cast<uint32_t>(primitive.Indices.size()),
+            .MinVertexIndex = 0,
+            .MaxVertexIndex = primitive.Vertices.empty()
+                                  ? 0
+                                  : static_cast<uint32_t>(primitive.Vertices.size()) - 1u,
+            .VertexOffset = static_cast<int32_t>(baseVertex)});
+    }
 
-    vector<byte> vertexData = ToBytes(primitive.Vertices);
-    vector<byte> indexData = ToBytes(primitive.Indices);
+    vector<byte> vertexData = ToBytes(std::span<const GltfVertex>{vertices});
+    vector<byte> indexData = ToBytes(std::span<const uint32_t>{indices});
 
     MeshPrimitive meshPrimitive{};
-    meshPrimitive.VertexCount = static_cast<uint32_t>(primitive.Vertices.size());
+    meshPrimitive.VertexCount = static_cast<uint32_t>(vertices.size());
     meshPrimitive.VertexBuffers = {
         VertexBufferEntry{
             .Semantic = string{VertexSemantics::POSITION},
@@ -518,7 +549,7 @@ MeshResource MakeMeshResource(const GltfPrimitiveCpu& primitive) {
             .Stride = sizeof(GltfVertex)},
     };
     meshPrimitive.IndexBuffer.BufferIndex = 1;
-    meshPrimitive.IndexBuffer.IndexCount = static_cast<uint32_t>(primitive.Indices.size());
+    meshPrimitive.IndexBuffer.IndexCount = static_cast<uint32_t>(indices.size());
     meshPrimitive.IndexBuffer.Offset = 0;
     meshPrimitive.IndexBuffer.Stride = sizeof(uint32_t);
 
@@ -808,72 +839,93 @@ StreamingAssetRef<GltfAsset> LoadGltfAsset(
                 nodes[i].WorldMatrix = ComputeNodeWorldMatrix(nodes, static_cast<int>(i));
             }
 
-            // ── primitive 几何上传 ──
+            // ── primitive identity 去重 + 单 VB/IB packing ──
+            vector<GltfPrimitiveCpu> uniquePrimitives;
+            unordered_map<const cgltf_primitive*, uint32_t> primitiveLookup;
+            for (cgltf_size meshIndex = 0; meshIndex < data->meshes_count; ++meshIndex) {
+                const cgltf_mesh& sourceMesh = data->meshes[meshIndex];
+                const std::string_view meshName = sourceMesh.name != nullptr ? sourceMesh.name : "mesh";
+                for (cgltf_size p = 0; p < sourceMesh.primitives_count; ++p) {
+                    const cgltf_primitive* identity = &sourceMesh.primitives[p];
+                    const string primitiveName = fmt::format("{} / prim {}", meshName, p);
+                    auto primitive = ConvertPrimitive(data, *identity, primitiveName);
+                    if (!primitive.has_value()) {
+                        continue;
+                    }
+                    const uint32_t uniqueIndex = static_cast<uint32_t>(uniquePrimitives.size());
+                    primitiveLookup.emplace(identity, uniqueIndex);
+                    uniquePrimitives.push_back(std::move(primitive.value()));
+                }
+            }
+            if (uniquePrimitives.empty()) {
+                co_return AssetLoadResult::Failure("glTF has no supported triangle primitives");
+            }
+
+            vector<PackedPrimitiveSection> packedSections;
+            MeshResource packedResource = MakePackedMeshResource(uniquePrimitives, packedSections);
+            FrameUploadScope geometryFrame = co_await frameUploads.BeginUpload();
+            auto gpuMeshOpt = geometryFrame.GetUploader().UploadMeshResource(
+                geometryFrame.GetCommandBuffer(), packedResource);
+            if (!gpuMeshOpt.has_value()) {
+                co_return AssetLoadResult::Failure("gltf packed geometry upload failed");
+            }
+            co_await geometryFrame.WaitGpu();
+            auto sharedGpuMesh = make_shared<GpuMesh>(std::move(gpuMeshOpt.value()));
+
+            vector<StreamingAssetRef<StaticMesh>> meshAssets;
+            meshAssets.reserve(uniquePrimitives.size());
+            for (uint32_t i = 0; i < uniquePrimitives.size(); ++i) {
+                const GltfPrimitiveCpu& primitive = uniquePrimitives[i];
+                const PackedPrimitiveSection& section = packedSections[i];
+                auto staticMesh = make_unique<StaticMesh>(MeshResource{}, sharedGpuMesh);
+                staticMesh->SetSections(vector<StaticMeshSection>{StaticMeshSection{
+                    /*primitiveIndex*/ 0,
+                    section.FirstIndex,
+                    section.IndexCount,
+                    section.MinVertexIndex,
+                    section.MaxVertexIndex,
+                    section.VertexOffset}});
+                staticMesh->SetBounds(primitive.BoundsMin, primitive.BoundsMax);
+                meshAssets.push_back(assetManager.AddReady<StaticMesh>(
+                    MakeDerivedAssetId(path, "mesh", i), std::move(staticMesh)));
+            }
+
             vector<GltfPrimitiveDesc> primitives;
             Eigen::Vector3f sceneMin = Eigen::Vector3f::Zero();
             Eigen::Vector3f sceneMax = Eigen::Vector3f::Zero();
             bool sceneHasBounds = false;
-            uint32_t primitiveIndex = 0;
             for (cgltf_size n = 0; n < data->nodes_count; ++n) {
                 const cgltf_node& node = data->nodes[n];
                 if (node.mesh == nullptr) {
                     continue;
                 }
                 for (cgltf_size p = 0; p < node.mesh->primitives_count; ++p) {
-                    const string primitiveName = fmt::format("{} / prim {}", nodes[n].Name, p);
-                    std::optional<GltfPrimitiveCpu> primitive = ConvertPrimitive(data, node.mesh->primitives[p], primitiveName);
-                    if (!primitive.has_value()) {
+                    const cgltf_primitive* identity = &node.mesh->primitives[p];
+                    auto lookup = primitiveLookup.find(identity);
+                    if (lookup == primitiveLookup.end()) {
                         continue;
                     }
-                    const uint32_t indexCount = static_cast<uint32_t>(primitive->Indices.size());
-                    const uint32_t vertexCount = static_cast<uint32_t>(primitive->Vertices.size());
-                    const Eigen::Vector3f localMin = primitive->BoundsMin;
-                    const Eigen::Vector3f localMax = primitive->BoundsMax;
-                    const bool localHasBounds = primitive->HasBounds;
-
-                    MeshResource meshResource = MakeMeshResource(primitive.value());
-                    const AssetId meshId = MakeDerivedAssetId(path, "mesh", primitiveIndex);
-                    // 单 section 覆盖整个 primitive: LoadStaticMesh 不设 section/bounds, 用一个补齐 task 包装。
-                    StreamingAssetRef<StaticMesh> mesh = assetManager.Load<StaticMesh>(AssetLoadRequest{
-                        .Id = meshId,
-                        .Task = [](FrameUploadScheduler& uploads, MeshResource res, uint32_t idxCount, uint32_t vtxCount,
-                                   Eigen::Vector3f bMin, Eigen::Vector3f bMax) -> AssetLoadTask {
-                            FrameUploadScope frame = co_await uploads.BeginUpload();
-                            std::optional<render::RenderMesh> renderMesh =
-                                frame.GetUploader().UploadMeshResource(frame.GetCommandBuffer(), res);
-                            if (!renderMesh.has_value()) {
-                                co_return AssetLoadResult::Failure("gltf mesh upload failed");
-                            }
-                            co_await frame.WaitGpu();
-                            auto sm = make_unique<StaticMesh>(std::move(res), std::move(renderMesh.value()));
-                            vector<StaticMeshSection> sections;
-                            sections.push_back(StaticMeshSection{
-                                /*primitiveIndex*/ 0,
-                                /*firstIndex*/ 0,
-                                /*indexCount*/ idxCount,
-                                /*minVertexIndex*/ 0,
-                                /*maxVertexIndex*/ vtxCount > 0 ? vtxCount - 1 : 0});
-                            sm->SetSections(std::move(sections));
-                            sm->SetBounds(bMin, bMax);
-                            co_return AssetLoadResult::Success(std::move(sm));
-                        }(frameUploads, std::move(meshResource), indexCount, vertexCount, localMin, localMax),
-                        .DebugName = primitiveName});
-
+                    const uint32_t uniqueIndex = lookup->second;
+                    const GltfPrimitiveCpu& primitive = uniquePrimitives[uniqueIndex];
                     GltfPrimitiveDesc desc{};
-                    desc.Name = primitiveName;
+                    desc.Name = fmt::format("{} / prim {}", nodes[n].Name, p);
                     desc.NodeIndex = static_cast<int>(n);
-                    desc.MaterialIndex = primitive->MaterialIndex;
-                    desc.Mesh = mesh;
-                    desc.BoundsMin = localMin;
-                    desc.BoundsMax = localMax;
-                    desc.HasBounds = localHasBounds;
+                    desc.MaterialIndex = primitive.MaterialIndex;
+                    desc.Mesh = meshAssets[uniqueIndex];
+                    desc.BoundsMin = primitive.BoundsMin;
+                    desc.BoundsMax = primitive.BoundsMax;
+                    desc.HasBounds = primitive.HasBounds;
                     primitives.push_back(std::move(desc));
 
-                    if (localHasBounds) {
+                    if (primitive.HasBounds) {
                         UpdateBoundsWithTransformedBox(
-                            sceneMin, sceneMax, sceneHasBounds, localMin, localMax, nodes[n].WorldMatrix);
+                            sceneMin,
+                            sceneMax,
+                            sceneHasBounds,
+                            primitive.BoundsMin,
+                            primitive.BoundsMax,
+                            nodes[n].WorldMatrix);
                     }
-                    ++primitiveIndex;
                 }
             }
 

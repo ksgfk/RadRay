@@ -94,15 +94,15 @@ SpirvShaderDesc MakeSpirvShaderDesc(
 
 }  // namespace
 
-TEST(VulkanBindingLayoutBuilderTest, ReturnsEmptyLayoutForEmptyShaderList) {
-    auto merged = vulkan::BuildMergedBindingLayoutVulkan({});
+TEST(VulkanPipelineLayoutBuilderTest, ReturnsEmptyLayoutForEmptyShaderList) {
+    auto merged = vulkan::BuildMergedPipelineLayoutVulkan({});
     ASSERT_TRUE(merged.has_value());
     EXPECT_TRUE(merged->Parameters.empty());
     EXPECT_TRUE(merged->VulkanParameters.empty());
     EXPECT_EQ(merged->DescriptorSetCount, 0u);
 }
 
-TEST(VulkanBindingLayoutBuilderTest, MergesStagesAssignsIdsAndBackendMetadata) {
+TEST(VulkanPipelineLayoutBuilderTest, MergesStagesAndBackendMetadata) {
     FakeShader vs{
         ShaderStage::Vertex,
         ShaderReflectionDesc{MakeSpirvShaderDesc(
@@ -124,31 +124,27 @@ TEST(VulkanBindingLayoutBuilderTest, MergesStagesAssignsIdsAndBackendMetadata) {
             })}};
     vector<Shader*> shaders{&ps, &vs};
 
-    auto merged = vulkan::BuildMergedBindingLayoutVulkan(shaders);
+    auto merged = vulkan::BuildMergedPipelineLayoutVulkan(shaders);
     ASSERT_TRUE(merged.has_value());
 
     auto parameters = merged->Parameters;
     ASSERT_EQ(parameters.size(), 3u);
 
     EXPECT_EQ(parameters[0].Name, "Linear");
-    EXPECT_EQ(parameters[0].Id, ShaderParameterId{0});
     EXPECT_EQ(parameters[0].Kind, ShaderParameterKind::Sampler);
 
     EXPECT_EQ(parameters[1].Name, "Albedo");
-    EXPECT_EQ(parameters[1].Id, ShaderParameterId{1});
     EXPECT_EQ(parameters[1].Kind, ShaderParameterKind::Resource);
     EXPECT_EQ(parameters[1].Stages, ShaderStage::Vertex | ShaderStage::Pixel);
     EXPECT_EQ(parameters[1].Type, ResourceBindType::Texture);
     EXPECT_EQ(parameters[1].Count, 1u);
 
     EXPECT_EQ(parameters[2].Name, "Globals");
-    EXPECT_EQ(parameters[2].Id, ShaderParameterId{2});
     EXPECT_EQ(parameters[2].Kind, ShaderParameterKind::Constant);
     EXPECT_EQ(parameters[2].Stages, ShaderStage::Vertex | ShaderStage::Pixel);
     EXPECT_EQ(parameters[2].ByteSize, 16u);
 
     ASSERT_EQ(merged->VulkanParameters.size(), parameters.size());
-    EXPECT_EQ(merged->VulkanParameters[0].Id, ShaderParameterId{0});
     EXPECT_EQ(merged->VulkanParameters[0].DescriptorType, VK_DESCRIPTOR_TYPE_SAMPLER);
     EXPECT_EQ(merged->VulkanParameters[1].SetIndex, 0u);
     EXPECT_EQ(merged->VulkanParameters[1].BindingIndex, 1u);
@@ -158,23 +154,58 @@ TEST(VulkanBindingLayoutBuilderTest, MergesStagesAssignsIdsAndBackendMetadata) {
     EXPECT_EQ(merged->DescriptorSetCount, 1u);
 }
 
-TEST(VulkanBindingLayoutBuilderTest, FailsWithoutReflectionMetadata) {
-    FakeShader shader{ShaderStage::Vertex};
-    vector<Shader*> shaders{&shader};
-    EXPECT_FALSE(vulkan::BuildMergedBindingLayoutVulkan(shaders).has_value());
+TEST(VulkanPipelineLayoutBuilderTest, AppliesExplicitBindingLayoutAndAddsMissingBindings) {
+    FakeShader vs{
+        ShaderStage::Vertex,
+        ShaderReflectionDesc{MakeSpirvShaderDesc({
+            MakeSpirvBinding("Albedo", SpirvResourceKind::SeparateImage, 2, 1),
+        })}};
+    vector<Shader*> shaders{&vs};
+    const BindingGroupLayout explicitGroup{
+        .GroupIndex = 2,
+        .Entries = {
+            BindingGroupLayoutEntry{
+                .Parameter = ShaderParameterInfo{
+                    .Name = "Albedo",
+                    .Kind = ShaderParameterKind::Resource,
+                    .Stages = ShaderStage::Pixel,
+                    .Type = ResourceBindType::Texture},
+                .Binding = 1},
+            BindingGroupLayoutEntry{
+                .Parameter = ShaderParameterInfo{
+                    .Name = "Normal",
+                    .Kind = ShaderParameterKind::Resource,
+                    .Stages = ShaderStage::Pixel,
+                    .Type = ResourceBindType::Texture},
+                .Binding = 7}}};
+
+    auto merged = vulkan::BuildMergedPipelineLayoutVulkan(
+        shaders, std::span{&explicitGroup, 1});
+    ASSERT_TRUE(merged.has_value());
+    ASSERT_EQ(merged->Parameters.size(), 2u);
+    EXPECT_EQ(merged->Parameters[0].Stages, ShaderStage::Pixel);
+    EXPECT_EQ(merged->VulkanParameters[0].Stages, ShaderStage::Pixel);
+    EXPECT_EQ(merged->Parameters[1].Name, "Normal");
+    EXPECT_EQ(merged->VulkanParameters[1].BindingIndex, 7u);
 }
 
-TEST(VulkanBindingLayoutBuilderTest, FailsWithoutStageMetadata) {
+TEST(VulkanPipelineLayoutBuilderTest, FailsWithoutReflectionMetadata) {
+    FakeShader shader{ShaderStage::Vertex};
+    vector<Shader*> shaders{&shader};
+    EXPECT_FALSE(vulkan::BuildMergedPipelineLayoutVulkan(shaders).has_value());
+}
+
+TEST(VulkanPipelineLayoutBuilderTest, FailsWithoutStageMetadata) {
     FakeShader shader{
         ShaderStage::UNKNOWN,
         ShaderReflectionDesc{MakeSpirvShaderDesc({
             MakeSpirvBinding("Albedo", SpirvResourceKind::SeparateImage, 0, 1),
         })}};
     vector<Shader*> shaders{&shader};
-    EXPECT_FALSE(vulkan::BuildMergedBindingLayoutVulkan(shaders).has_value());
+    EXPECT_FALSE(vulkan::BuildMergedPipelineLayoutVulkan(shaders).has_value());
 }
 
-TEST(VulkanBindingLayoutBuilderTest, FailsWhenNameMapsToDifferentAbi) {
+TEST(VulkanPipelineLayoutBuilderTest, FailsWhenNameMapsToDifferentAbi) {
     FakeShader vs{
         ShaderStage::Vertex,
         ShaderReflectionDesc{MakeSpirvShaderDesc({
@@ -186,10 +217,10 @@ TEST(VulkanBindingLayoutBuilderTest, FailsWhenNameMapsToDifferentAbi) {
             MakeSpirvBinding("Albedo", SpirvResourceKind::SeparateImage, 0, 2),
         })}};
     vector<Shader*> shaders{&vs, &ps};
-    EXPECT_FALSE(vulkan::BuildMergedBindingLayoutVulkan(shaders).has_value());
+    EXPECT_FALSE(vulkan::BuildMergedPipelineLayoutVulkan(shaders).has_value());
 }
 
-TEST(VulkanBindingLayoutBuilderTest, FailsWhenAbiMapsToDifferentNames) {
+TEST(VulkanPipelineLayoutBuilderTest, FailsWhenAbiMapsToDifferentNames) {
     FakeShader vs{
         ShaderStage::Vertex,
         ShaderReflectionDesc{MakeSpirvShaderDesc({
@@ -201,17 +232,17 @@ TEST(VulkanBindingLayoutBuilderTest, FailsWhenAbiMapsToDifferentNames) {
             MakeSpirvBinding("Diffuse", SpirvResourceKind::SeparateImage, 0, 1),
         })}};
     vector<Shader*> shaders{&vs, &ps};
-    EXPECT_FALSE(vulkan::BuildMergedBindingLayoutVulkan(shaders).has_value());
+    EXPECT_FALSE(vulkan::BuildMergedPipelineLayoutVulkan(shaders).has_value());
 }
 
-TEST(VulkanBindingLayoutBuilderTest, BuildsBindlessSetFromUnboundedArray) {
+TEST(VulkanPipelineLayoutBuilderTest, BuildsBindlessSetFromUnboundedArray) {
     FakeShader shader{
         ShaderStage::Pixel,
         ShaderReflectionDesc{MakeSpirvShaderDesc({
             MakeSpirvBinding("Buffers", SpirvResourceKind::StorageBuffer, 0, 0, 0, true),
         })}};
     vector<Shader*> shaders{&shader};
-    auto merged = vulkan::BuildMergedBindingLayoutVulkan(shaders);
+    auto merged = vulkan::BuildMergedPipelineLayoutVulkan(shaders);
     ASSERT_TRUE(merged.has_value());
     ASSERT_EQ(merged->Parameters.size(), 1u);
     const auto& parameter = merged->Parameters[0];
@@ -225,7 +256,7 @@ TEST(VulkanBindingLayoutBuilderTest, BuildsBindlessSetFromUnboundedArray) {
     EXPECT_EQ(merged->VulkanParameters[0].BindlessSlotType, BindlessSlotType::BufferOnly);
 }
 
-TEST(VulkanBindingLayoutBuilderTest, FailsWhenBindlessSetMixesWithOrdinaryDescriptors) {
+TEST(VulkanPipelineLayoutBuilderTest, FailsWhenBindlessSetMixesWithOrdinaryDescriptors) {
     FakeShader shader{
         ShaderStage::Pixel,
         ShaderReflectionDesc{MakeSpirvShaderDesc({
@@ -233,10 +264,10 @@ TEST(VulkanBindingLayoutBuilderTest, FailsWhenBindlessSetMixesWithOrdinaryDescri
             MakeSpirvBinding("Linear", SpirvResourceKind::SeparateSampler, 0, 1),
         })}};
     vector<Shader*> shaders{&shader};
-    EXPECT_FALSE(vulkan::BuildMergedBindingLayoutVulkan(shaders).has_value());
+    EXPECT_FALSE(vulkan::BuildMergedPipelineLayoutVulkan(shaders).has_value());
 }
 
-TEST(VulkanBindingLayoutBuilderTest, FailsWhenSetContainsMultipleBindlessParameters) {
+TEST(VulkanPipelineLayoutBuilderTest, FailsWhenSetContainsMultipleBindlessParameters) {
     FakeShader shader{
         ShaderStage::Pixel,
         ShaderReflectionDesc{MakeSpirvShaderDesc({
@@ -244,10 +275,10 @@ TEST(VulkanBindingLayoutBuilderTest, FailsWhenSetContainsMultipleBindlessParamet
             MakeSpirvBinding("BuffersB", SpirvResourceKind::StorageBuffer, 0, 1, 0, true),
         })}};
     vector<Shader*> shaders{&shader};
-    EXPECT_FALSE(vulkan::BuildMergedBindingLayoutVulkan(shaders).has_value());
+    EXPECT_FALSE(vulkan::BuildMergedPipelineLayoutVulkan(shaders).has_value());
 }
 
-TEST(VulkanBindingLayoutBuilderTest, FailsWhenSameSetBindingUsesDifferentKindsOrTypes) {
+TEST(VulkanPipelineLayoutBuilderTest, FailsWhenSameSetBindingUsesDifferentKindsOrTypes) {
     FakeShader vs{
         ShaderStage::Vertex,
         ShaderReflectionDesc{MakeSpirvShaderDesc({
@@ -259,10 +290,10 @@ TEST(VulkanBindingLayoutBuilderTest, FailsWhenSameSetBindingUsesDifferentKindsOr
             MakeSpirvBinding("Linear", SpirvResourceKind::SeparateSampler, 0, 1),
         })}};
     vector<Shader*> shaders{&vs, &ps};
-    EXPECT_FALSE(vulkan::BuildMergedBindingLayoutVulkan(shaders).has_value());
+    EXPECT_FALSE(vulkan::BuildMergedPipelineLayoutVulkan(shaders).has_value());
 }
 
-TEST(VulkanBindingLayoutBuilderTest, AcceptsMatchingHlslRegisterMetadata) {
+TEST(VulkanPipelineLayoutBuilderTest, AcceptsMatchingHlslRegisterMetadata) {
     FakeShader shader{
         ShaderStage::Pixel,
         ShaderReflectionDesc{MakeSpirvShaderDesc({
@@ -270,7 +301,7 @@ TEST(VulkanBindingLayoutBuilderTest, AcceptsMatchingHlslRegisterMetadata) {
         })}};
     vector<Shader*> shaders{&shader};
 
-    auto merged = vulkan::BuildMergedBindingLayoutVulkan(shaders);
+    auto merged = vulkan::BuildMergedPipelineLayoutVulkan(shaders);
     ASSERT_TRUE(merged.has_value());
     ASSERT_EQ(merged->Parameters.size(), 1u);
     EXPECT_EQ(merged->VulkanParameters[0].SetIndex, 1u);
@@ -278,14 +309,14 @@ TEST(VulkanBindingLayoutBuilderTest, AcceptsMatchingHlslRegisterMetadata) {
     EXPECT_EQ(merged->DescriptorSetCount, 2u);
 }
 
-TEST(VulkanBindingLayoutBuilderTest, FailsWhenHlslRegisterMetadataConflictsWithVkBinding) {
+TEST(VulkanPipelineLayoutBuilderTest, FailsWhenHlslRegisterMetadataConflictsWithVkBinding) {
     FakeShader shader{
         ShaderStage::Pixel,
         ShaderReflectionDesc{MakeSpirvShaderDesc({
             MakeSpirvBinding("Albedo", SpirvResourceKind::SeparateImage, 1, 0, 1, false, true, false, SpirvImageDim::Dim2D, 0, 0),
         })}};
     vector<Shader*> shaders{&shader};
-    EXPECT_FALSE(vulkan::BuildMergedBindingLayoutVulkan(shaders).has_value());
+    EXPECT_FALSE(vulkan::BuildMergedPipelineLayoutVulkan(shaders).has_value());
 }
 
 }  // namespace radray::render

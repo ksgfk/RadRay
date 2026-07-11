@@ -8,9 +8,9 @@
 //   wi = 视线方向(指向相机), wo = 光源方向(指向光源), 均在着色局部坐标系 (n = +Z)。
 //
 // 绑定分配 (与 MeshPassExecutor + MaterialAsset 机制对齐):
-//   - gMaterial (push_constant): per-material 常量 (MaterialAsset::SetConstantBlock 写)。
-//   - gView (b0, space1):        per-view cbuffer (ForwardPipeline::SetViewConstants 写)。
-//   - gPerObject (b1, space1):   per-object cbuffer (MeshPassExecutor 写 ObjectToWorld)。
+//   - gMaterial (b0, space2):    per-material persistent cbuffer。
+//   - gView (b0, space1):        per-view dynamic cbuffer。
+//   - gPerObject (b1, space0):   per-object dynamic cbuffer。
 //   - gShadowCube(t0)/gShadowSampler(s0): 管线级全局资源 (ForwardPipeline 每 draw 绑定)。
 //   - 贴图/采样器 (space1, t1.. / s1): keyword 存在时声明。
 //
@@ -58,7 +58,7 @@ struct PerObject {
     float4x4 ObjectToWorld;
 };
 
-// per-material 常量 (push_constant)。数值参数走 cbuffer; 分支走 keyword。
+// per-material 常量。数值参数走持久 cbuffer; 分支走 keyword。
 struct MaterialConstants {
     float4 BaseColor;    // rgb 基础色 (= glTF baseColorFactor), a 不透明度
     float4 Pbr;          // x metallic, y roughness, z alphaCutoff, w normalScale
@@ -68,48 +68,36 @@ struct MaterialConstants {
     float4 Principled2;  // x spec trans, y eta, zw 保留
 };
 
-// gMaterial 作为 push/root constant, 必须落在 b0/space0 (声明在最前且不带 register):
-//   - Vulkan: VK_PUSH_CONSTANT 标记为 push constant; 与显式 register 冲突时 DXC 会静默降级,
-//     故不写 register, 靠声明顺序让 DXC 自动分配到 b0/space0。
-//   - D3D12: 后端把 b0/space0 的首个无显式 register cbuffer 识别为 root constant。
-VK_PUSH_CONSTANT ConstantBuffer<MaterialConstants> gMaterial;
+// Binding frequency ABI:
+//   space0: per-object dynamic cbuffer
+//   space1: per-view/pass resources
+//   space2: persistent per-material resources
+VK_BINDING(1, 0) ConstantBuffer<PerObject> gPerObject : register(b1, space0);
 VK_BINDING(0, 1) ConstantBuffer<ViewConstants> gView : register(b0, space1);
-VK_BINDING(1, 1) ConstantBuffer<PerObject> gPerObject : register(b1, space1);
+VK_BINDING(0, 2) ConstantBuffer<MaterialConstants> gMaterial : register(b0, space2);
 
 // 点光源立方体阴影图 + 方向光级联阴影图 + 比较采样器 (由 ForwardPipeline 作为管线级全局资源每 draw 绑定)。
 // _POINT_SHADOWS / _DIRECTIONAL_SHADOWS keyword (对应 URP 的 _MAIN_LIGHT_SHADOWS(_CASCADE)):
 // 本帧无对应类型的投影阴影时该 keyword 关闭, 阴影图绑定 + 采样代码整块从变体里剔除。
 // 比较采样器 gShadowSampler 两类阴影共用, 任一启用即声明。
 #ifdef _POINT_SHADOWS
-VK_BINDING(2, 1) TextureCube<float> gShadowCube : register(t0, space1);
+    VK_BINDING(1, 1) TextureCube<float> gShadowCube : register(t1, space1);
 #endif
 #ifdef _DIRECTIONAL_SHADOWS
-VK_BINDING(10, 1) Texture2DArray<float> gShadowArray : register(t6, space1);
+    VK_BINDING(2, 1) Texture2DArray<float> gShadowArray : register(t2, space1);
 #endif
 #if defined(_POINT_SHADOWS) || defined(_DIRECTIONAL_SHADOWS)
-VK_BINDING(3, 1) SamplerComparisonState gShadowSampler : register(s0, space1);
+    VK_BINDING(3, 1) SamplerComparisonState gShadowSampler : register(s3, space1);
 #endif
 
-// 贴图 / 采样器 (space1, t1.. 避开阴影占用的 t0; 采样器 s1 避开 s0)。
-#ifdef _BASECOLOR_MAP
-VK_BINDING(4, 1) Texture2D gBaseColorMap : register(t1, space1);
-#endif
-#ifdef _METALROUGHNESS_MAP
-VK_BINDING(5, 1) Texture2D gMetalRoughMap : register(t2, space1);
-#endif
-#ifdef _NORMAL_MAP
-VK_BINDING(6, 1) Texture2D gNormalMap : register(t3, space1);
-#endif
-#ifdef _OCCLUSION_MAP
-VK_BINDING(7, 1) Texture2D gOcclusionMap : register(t4, space1);
-#endif
-#ifdef _EMISSIVE_MAP
-VK_BINDING(8, 1) Texture2D gEmissiveMap : register(t5, space1);
-#endif
-#if defined(_BASECOLOR_MAP) || defined(_METALROUGHNESS_MAP) || defined(_NORMAL_MAP) || defined(_OCCLUSION_MAP) || defined(_EMISSIVE_MAP)
+// 贴图 / 采样器 (space2)。五个槽始终存在，keyword 只控制采样代码，绝不改变 ABI。
+VK_BINDING(1, 2) Texture2D gBaseColorMap : register(t1, space2);
+VK_BINDING(2, 2) Texture2D gMetalRoughMap : register(t2, space2);
+VK_BINDING(3, 2) Texture2D gNormalMap : register(t3, space2);
+VK_BINDING(4, 2) Texture2D gOcclusionMap : register(t4, space2);
+VK_BINDING(5, 2) Texture2D gEmissiveMap : register(t5, space2);
 #define RR_HAS_ANY_TEXTURE 1
-VK_BINDING(9, 1) SamplerState gSampler : register(s1, space1);
-#endif
+VK_BINDING(6, 2) SamplerState gSampler : register(s6, space2);
 
 VertexOutput VSMain(VertexInput input) {
     VertexOutput output;

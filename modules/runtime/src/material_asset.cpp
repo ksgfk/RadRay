@@ -4,8 +4,9 @@
 #include <utility>
 
 #include <radray/logger.h>
+#include <radray/hash.h>
 #include <radray/runtime/render_framework/material_property_block.h>
-#include <radray/render/sampler_cache.h>
+#include <radray/runtime/sampler_cache.h>
 
 namespace radray {
 
@@ -115,8 +116,8 @@ bool MaterialAsset::IsKeywordEnabled(std::string_view name) const noexcept {
     return _keywordIndex.find(string{name}) != _keywordIndex.end();
 }
 
-Nullable<const render::CompiledShaderVariant*> MaterialAsset::ResolveVariant(
-    render::ShaderVariantCache& cache,
+Nullable<const CompiledShaderVariant*> MaterialAsset::ResolveVariant(
+    ShaderVariantLibrary& cache,
     uint32_t passIndex,
     render::HlslShaderModel sm) noexcept {
     if (_shader.Get() == nullptr) {
@@ -179,6 +180,62 @@ void EmitProperty(MaterialRenderSnapshot& snapshot, const string& name, const Ma
         value);
 }
 
+MaterialBindingKey BuildMaterialBindingKey(const MaterialRenderSnapshot& snapshot) noexcept {
+    vector<uint64_t> parts;
+    auto appendBytes = [&parts](const void* data, size_t size) {
+        parts.push_back(HashData64(data, size));
+    };
+    appendBytes(&snapshot.RenderQueue, sizeof(snapshot.RenderQueue));
+    const AssetId& shaderId = snapshot.Shader.GetAssetId();
+    appendBytes(&shaderId, sizeof(shaderId));
+    const AssetHandle shaderHandle = snapshot.Shader.GetHandle();
+    appendBytes(&shaderHandle, sizeof(shaderHandle));
+
+    const auto& state = snapshot.RenderState;
+    const uint32_t stateWords[] = {
+        state.Cull.has_value() ? 1u : 0u,
+        state.Cull.has_value() ? static_cast<uint32_t>(state.Cull.value()) : 0u,
+        state.DepthWrite.has_value() ? 1u : 0u,
+        state.DepthWrite.value_or(false) ? 1u : 0u,
+        state.OverrideBlend ? 1u : 0u,
+        state.Blend.has_value() ? 1u : 0u};
+    appendBytes(stateWords, sizeof(stateWords));
+    if (state.Blend.has_value()) {
+        appendBytes(&state.Blend.value(), sizeof(state.Blend.value()));
+    }
+    for (const auto& keyword : snapshot.EnabledKeywords) {
+        appendBytes(keyword.data(), keyword.size());
+    }
+    for (const auto& constant : snapshot.Constants) {
+        uint64_t entry = HashData64(constant.Name.data(), constant.Name.size());
+        entry ^= HashData64(constant.Bytes.data(), constant.Bytes.size()) + 0x9e3779b97f4a7c15ull;
+        parts.push_back(entry);
+    }
+    for (const auto& texture : snapshot.Textures) {
+        uint64_t entry = HashData64(texture.Name.data(), texture.Name.size());
+        const AssetId& id = texture.Texture.GetAssetId();
+        entry ^= HashData64(&id, sizeof(id));
+        const AssetHandle handle = texture.Texture.GetHandle();
+        entry ^= HashData64(&handle, sizeof(handle));
+        const TextureViewKey view = BuildTextureViewKey(texture.SubView);
+        entry ^= HashData64(&view, sizeof(view));
+        parts.push_back(entry);
+    }
+    for (const auto& sampler : snapshot.Samplers) {
+        uint64_t entry = HashData64(sampler.Name.data(), sampler.Name.size());
+        const SamplerKey key = BuildSamplerKey(sampler.Desc);
+        entry ^= HashData64(&key, sizeof(key));
+        parts.push_back(entry);
+    }
+    std::ranges::sort(parts);
+    MaterialBindingKey key{.Lo = 0xcbf29ce484222325ull, .Hi = 0x84222325cbf29ce4ull};
+    for (const uint64_t part : parts) {
+        key.Lo ^= part + 0x9e3779b97f4a7c15ull + (key.Lo << 6u) + (key.Lo >> 2u);
+        key.Hi += (part ^ (part >> 29u)) * 0x94d049bb133111ebull;
+    }
+    return key;
+}
+
 }  // namespace
 
 shared_ptr<const MaterialRenderSnapshot> MaterialAsset::CreateSnapshot() const noexcept {
@@ -197,6 +254,7 @@ shared_ptr<const MaterialRenderSnapshot> MaterialAsset::CreateSnapshot(const Mat
         for (const auto& [name, value] : _properties) {
             EmitProperty(*snapshot, name, value);
         }
+        snapshot->BindingKey = BuildMaterialBindingKey(*snapshot);
         return snapshot;
     }
 
@@ -213,43 +271,9 @@ shared_ptr<const MaterialRenderSnapshot> MaterialAsset::CreateSnapshot(const Mat
     for (const auto& [name, valuePtr] : merged) {
         EmitProperty(*snapshot, name, *valuePtr);
     }
+    snapshot->BindingKey = BuildMaterialBindingKey(*snapshot);
     return snapshot;
 }
 
-uint32_t MaterialAsset::ApplyProperties(render::ShaderParameterTable& table, render::SamplerCache& samplerCache) const noexcept {
-    uint32_t applied = 0;
-    for (const auto& [name, value] : _properties) {
-        const bool ok = std::visit(
-            [&](auto&& v) -> bool {
-                using T = std::decay_t<decltype(v)>;
-                if constexpr (std::is_same_v<T, float>) {
-                    return table.SetBytes(name, &v, sizeof(float));
-                } else if constexpr (std::is_same_v<T, Eigen::Vector4f>) {
-                    // Eigen::Vector4f 内存连续 (4 个 float)。
-                    return table.SetBytes(name, v.data(), sizeof(float) * 4);
-                } else if constexpr (std::is_same_v<T, vector<byte>>) {
-                    return !v.empty() && table.SetBytes(name, v.data(), static_cast<uint32_t>(v.size()));
-                } else if constexpr (std::is_same_v<T, StreamingAssetRef<TextureAsset>>) {
-                    TextureAsset* tex = v.Get();
-                    render::TextureView* srv = tex != nullptr ? tex->GetSrv() : nullptr;
-                    return srv != nullptr && table.SetResource(name, static_cast<render::ResourceView*>(srv));
-                } else if constexpr (std::is_same_v<T, TextureSubViewRef>) {
-                    TextureAsset* tex = v.Texture.Get();
-                    render::TextureView* srv = tex != nullptr ? tex->GetOrCreateSrv(v.SubView) : nullptr;
-                    return srv != nullptr && table.SetResource(name, static_cast<render::ResourceView*>(srv));
-                } else if constexpr (std::is_same_v<T, render::SamplerDescriptor>) {
-                    render::Sampler* sampler = samplerCache.GetOrCreate(v).Get();
-                    return sampler != nullptr && table.SetSampler(name, sampler);
-                } else {
-                    return false;
-                }
-            },
-            value);
-        if (ok) {
-            ++applied;
-        }
-    }
-    return applied;
-}
 
 }  // namespace radray

@@ -57,14 +57,16 @@ AssetLoadTask LoadDemoMesh(FrameUploadScheduler& frameUploads, MeshResource mesh
     const uint32_t vertexCount = meshResource.Primitives[0].VertexCount;
 
     FrameUploadScope frame = co_await frameUploads.BeginUpload();
-    std::optional<render::RenderMesh> renderMesh =
+    std::optional<GpuMesh> renderMesh =
         frame.GetUploader().UploadMeshResource(frame.GetCommandBuffer(), meshResource);
     if (!renderMesh.has_value()) {
         co_return AssetLoadResult::Failure("demo mesh upload recording failed");
     }
     co_await frame.WaitGpu();
 
-    auto mesh = make_unique<StaticMesh>(std::move(meshResource), std::move(renderMesh.value()));
+    auto mesh = make_unique<StaticMesh>(
+        std::move(meshResource),
+        make_shared<GpuMesh>(std::move(renderMesh.value())));
     vector<StaticMeshSection> sections;
     sections.push_back(StaticMeshSection{
         /*primitiveIndex*/ 0,

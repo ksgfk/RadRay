@@ -7,7 +7,7 @@
 #include <radray/render/common.h>
 #include <radray/types.h>
 
-namespace radray::render {
+namespace radray {
 
 /// Sampler 缓存的纯 POD key (仿 GraphicsPsoKey)。
 ///
@@ -31,7 +31,7 @@ struct SamplerKey {
 static_assert(std::is_trivially_copyable_v<SamplerKey>, "SamplerKey must be trivially copyable");
 
 /// 从 SamplerDescriptor 构造清零的 POD key。
-SamplerKey BuildSamplerKey(const SamplerDescriptor& desc) noexcept;
+SamplerKey BuildSamplerKey(const render::SamplerDescriptor& desc) noexcept;
 
 /// 采样器缓存 (对应 UE5 的 GTextureSamplerStateCache / 各 RHI 后端 sampler cache)。
 ///
@@ -42,7 +42,7 @@ SamplerKey BuildSamplerKey(const SamplerDescriptor& desc) noexcept;
 /// - sampler 是纯状态对象 (无数据), 组合数有限, 永生缓存无实际内存压力。
 class SamplerCache {
 public:
-    explicit SamplerCache(Device* device) noexcept;
+    explicit SamplerCache(render::Device* device) noexcept;
     SamplerCache(const SamplerCache&) = delete;
     SamplerCache(SamplerCache&&) = delete;
     SamplerCache& operator=(const SamplerCache&) = delete;
@@ -51,11 +51,11 @@ public:
 
     /// 按 descriptor 去重取 sampler。命中返回缓存指针; 未命中创建并永生缓存。
     /// device 为空 / 创建失败返回 nullptr。返回的指针在本缓存存活期内稳定不悬垂。
-    Nullable<Sampler*> GetOrCreate(const SamplerDescriptor& desc) noexcept;
+    Nullable<render::Sampler*> GetOrCreate(const render::SamplerDescriptor& desc) noexcept;
 
 private:
-    Device* _device{nullptr};
-    unordered_map<SamplerKey, unique_ptr<Sampler>, PodHasher<SamplerKey>, PodEqual<SamplerKey>> _cache;
+    render::Device* _device{nullptr};
+    unordered_map<SamplerKey, unique_ptr<render::Sampler>, PodHasher<SamplerKey>, PodEqual<SamplerKey>> _cache;
 };
 
-}  // namespace radray::render
+}  // namespace radray

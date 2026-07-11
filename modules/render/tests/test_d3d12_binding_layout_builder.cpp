@@ -78,14 +78,14 @@ HlslShaderDesc MakeHlslShaderDesc(
 
 }  // namespace
 
-TEST(D3D12BindingLayoutBuilderTest, ReturnsEmptyLayoutForEmptyShaderList) {
-    auto merged = d3d12::BuildMergedBindingLayoutD3D12({});
+TEST(D3D12PipelineLayoutBuilderTest, ReturnsEmptyLayoutForEmptyShaderList) {
+    auto merged = d3d12::BuildMergedPipelineLayoutD3D12({});
     ASSERT_TRUE(merged.has_value());
     EXPECT_TRUE(merged->Parameters.empty());
     EXPECT_TRUE(merged->D3D12Parameters.empty());
 }
 
-TEST(D3D12BindingLayoutBuilderTest, MergesStagesAssignsIdsAndBackendMetadata) {
+TEST(D3D12PipelineLayoutBuilderTest, MergesStagesAndBackendMetadata) {
     FakeShader vs{
         ShaderStage::Vertex,
         ShaderReflectionDesc{MakeHlslShaderDesc(
@@ -108,32 +108,30 @@ TEST(D3D12BindingLayoutBuilderTest, MergesStagesAssignsIdsAndBackendMetadata) {
                 MakeCBuffer("Globals", 16, true),
             })}};
     vector<Shader*> shaders{&ps, &vs};
+    const PushConstantBinding pushConstant{.Group = 0, .Binding = 0};
 
-    auto merged = d3d12::BuildMergedBindingLayoutD3D12(shaders);
+    auto merged = d3d12::BuildMergedPipelineLayoutD3D12(
+        shaders, std::span{&pushConstant, 1});
     ASSERT_TRUE(merged.has_value());
 
     auto parameters = merged->Parameters;
     ASSERT_EQ(parameters.size(), 3u);
 
     EXPECT_EQ(parameters[0].Name, "Linear");
-    EXPECT_EQ(parameters[0].Id, ShaderParameterId{0});
     EXPECT_EQ(parameters[0].Kind, ShaderParameterKind::Sampler);
 
     EXPECT_EQ(parameters[1].Name, "Albedo");
-    EXPECT_EQ(parameters[1].Id, ShaderParameterId{1});
     EXPECT_EQ(parameters[1].Kind, ShaderParameterKind::Resource);
     EXPECT_EQ(parameters[1].Stages, ShaderStage::Vertex | ShaderStage::Pixel);
     EXPECT_EQ(parameters[1].Type, ResourceBindType::Texture);
     EXPECT_EQ(parameters[1].Count, 1u);
 
     EXPECT_EQ(parameters[2].Name, "Globals");
-    EXPECT_EQ(parameters[2].Id, ShaderParameterId{2});
     EXPECT_EQ(parameters[2].Kind, ShaderParameterKind::Constant);
     EXPECT_EQ(parameters[2].Stages, ShaderStage::Vertex | ShaderStage::Pixel);
     EXPECT_EQ(parameters[2].ByteSize, 16u);
 
     ASSERT_EQ(merged->D3D12Parameters.size(), parameters.size());
-    EXPECT_EQ(merged->D3D12Parameters[1].Id, ShaderParameterId{1});
     EXPECT_EQ(merged->D3D12Parameters[1].RegisterSpace, 0u);
     EXPECT_EQ(merged->D3D12Parameters[1].BindingIndex, 1u);
     EXPECT_EQ(merged->D3D12Parameters[1].ShaderRegister, 1u);
@@ -142,23 +140,58 @@ TEST(D3D12BindingLayoutBuilderTest, MergesStagesAssignsIdsAndBackendMetadata) {
     EXPECT_EQ(merged->RegisterSpaceCount, 1u);
 }
 
-TEST(D3D12BindingLayoutBuilderTest, FailsWithoutReflectionMetadata) {
-    FakeShader shader{ShaderStage::Vertex};
-    vector<Shader*> shaders{&shader};
-    EXPECT_FALSE(d3d12::BuildMergedBindingLayoutD3D12(shaders).has_value());
+TEST(D3D12PipelineLayoutBuilderTest, AppliesExplicitBindingLayoutAndAddsMissingBindings) {
+    FakeShader vs{
+        ShaderStage::Vertex,
+        ShaderReflectionDesc{MakeHlslShaderDesc({
+            MakeHlslBinding("Albedo", HlslShaderInputType::TEXTURE, 1, 2),
+        })}};
+    vector<Shader*> shaders{&vs};
+    const BindingGroupLayout explicitGroup{
+        .GroupIndex = 2,
+        .Entries = {
+            BindingGroupLayoutEntry{
+                .Parameter = ShaderParameterInfo{
+                    .Name = "Albedo",
+                    .Kind = ShaderParameterKind::Resource,
+                    .Stages = ShaderStage::Pixel,
+                    .Type = ResourceBindType::Texture},
+                .Binding = 1},
+            BindingGroupLayoutEntry{
+                .Parameter = ShaderParameterInfo{
+                    .Name = "Normal",
+                    .Kind = ShaderParameterKind::Resource,
+                    .Stages = ShaderStage::Pixel,
+                    .Type = ResourceBindType::Texture},
+                .Binding = 7}}};
+
+    auto merged = d3d12::BuildMergedPipelineLayoutD3D12(
+        shaders, {}, std::span{&explicitGroup, 1});
+    ASSERT_TRUE(merged.has_value());
+    ASSERT_EQ(merged->Parameters.size(), 2u);
+    EXPECT_EQ(merged->Parameters[0].Stages, ShaderStage::Pixel);
+    EXPECT_EQ(merged->D3D12Parameters[0].Stages, ShaderStage::Pixel);
+    EXPECT_EQ(merged->Parameters[1].Name, "Normal");
+    EXPECT_EQ(merged->D3D12Parameters[1].BindingIndex, 7u);
 }
 
-TEST(D3D12BindingLayoutBuilderTest, FailsWithoutStageMetadata) {
+TEST(D3D12PipelineLayoutBuilderTest, FailsWithoutReflectionMetadata) {
+    FakeShader shader{ShaderStage::Vertex};
+    vector<Shader*> shaders{&shader};
+    EXPECT_FALSE(d3d12::BuildMergedPipelineLayoutD3D12(shaders).has_value());
+}
+
+TEST(D3D12PipelineLayoutBuilderTest, FailsWithoutStageMetadata) {
     FakeShader shader{
         ShaderStage::UNKNOWN,
         ShaderReflectionDesc{MakeHlslShaderDesc({
             MakeHlslBinding("Albedo", HlslShaderInputType::TEXTURE, 1),
         })}};
     vector<Shader*> shaders{&shader};
-    EXPECT_FALSE(d3d12::BuildMergedBindingLayoutD3D12(shaders).has_value());
+    EXPECT_FALSE(d3d12::BuildMergedPipelineLayoutD3D12(shaders).has_value());
 }
 
-TEST(D3D12BindingLayoutBuilderTest, FailsWhenNameMapsToDifferentAbi) {
+TEST(D3D12PipelineLayoutBuilderTest, FailsWhenNameMapsToDifferentAbi) {
     FakeShader vs{
         ShaderStage::Vertex,
         ShaderReflectionDesc{MakeHlslShaderDesc({
@@ -170,10 +203,10 @@ TEST(D3D12BindingLayoutBuilderTest, FailsWhenNameMapsToDifferentAbi) {
             MakeHlslBinding("Albedo", HlslShaderInputType::TEXTURE, 2),
         })}};
     vector<Shader*> shaders{&vs, &ps};
-    EXPECT_FALSE(d3d12::BuildMergedBindingLayoutD3D12(shaders).has_value());
+    EXPECT_FALSE(d3d12::BuildMergedPipelineLayoutD3D12(shaders).has_value());
 }
 
-TEST(D3D12BindingLayoutBuilderTest, FailsWhenAbiMapsToDifferentNames) {
+TEST(D3D12PipelineLayoutBuilderTest, FailsWhenAbiMapsToDifferentNames) {
     FakeShader vs{
         ShaderStage::Vertex,
         ShaderReflectionDesc{MakeHlslShaderDesc({
@@ -185,17 +218,17 @@ TEST(D3D12BindingLayoutBuilderTest, FailsWhenAbiMapsToDifferentNames) {
             MakeHlslBinding("Diffuse", HlslShaderInputType::TEXTURE, 1),
         })}};
     vector<Shader*> shaders{&vs, &ps};
-    EXPECT_FALSE(d3d12::BuildMergedBindingLayoutD3D12(shaders).has_value());
+    EXPECT_FALSE(d3d12::BuildMergedPipelineLayoutD3D12(shaders).has_value());
 }
 
-TEST(D3D12BindingLayoutBuilderTest, BuildsBindlessSetFromUnboundedArray) {
+TEST(D3D12PipelineLayoutBuilderTest, BuildsBindlessSetFromUnboundedArray) {
     FakeShader shader{
         ShaderStage::Pixel,
         ShaderReflectionDesc{MakeHlslShaderDesc({
             MakeHlslBinding("Buffers", HlslShaderInputType::STRUCTURED, 0, 0, 0, HlslSRVDimension::BUFFER),
         })}};
     vector<Shader*> shaders{&shader};
-    auto merged = d3d12::BuildMergedBindingLayoutD3D12(shaders);
+    auto merged = d3d12::BuildMergedPipelineLayoutD3D12(shaders);
     ASSERT_TRUE(merged.has_value());
     ASSERT_EQ(merged->Parameters.size(), 1u);
     const auto& parameter = merged->Parameters[0];
@@ -209,7 +242,7 @@ TEST(D3D12BindingLayoutBuilderTest, BuildsBindlessSetFromUnboundedArray) {
     EXPECT_EQ(merged->D3D12Parameters[0].BindlessSlotType, BindlessSlotType::BufferOnly);
 }
 
-TEST(D3D12BindingLayoutBuilderTest, FailsWhenBindlessSetMixesWithOrdinaryDescriptors) {
+TEST(D3D12PipelineLayoutBuilderTest, FailsWhenBindlessSetMixesWithOrdinaryDescriptors) {
     FakeShader shader{
         ShaderStage::Pixel,
         ShaderReflectionDesc{MakeHlslShaderDesc({
@@ -217,10 +250,10 @@ TEST(D3D12BindingLayoutBuilderTest, FailsWhenBindlessSetMixesWithOrdinaryDescrip
             MakeHlslBinding("Sampler0", HlslShaderInputType::SAMPLER, 1, 0),
         })}};
     vector<Shader*> shaders{&shader};
-    EXPECT_FALSE(d3d12::BuildMergedBindingLayoutD3D12(shaders).has_value());
+    EXPECT_FALSE(d3d12::BuildMergedPipelineLayoutD3D12(shaders).has_value());
 }
 
-TEST(D3D12BindingLayoutBuilderTest, FailsWhenSetContainsMultipleBindlessParameters) {
+TEST(D3D12PipelineLayoutBuilderTest, FailsWhenSetContainsMultipleBindlessParameters) {
     FakeShader shader{
         ShaderStage::Pixel,
         ShaderReflectionDesc{MakeHlslShaderDesc({
@@ -228,10 +261,10 @@ TEST(D3D12BindingLayoutBuilderTest, FailsWhenSetContainsMultipleBindlessParamete
             MakeHlslBinding("BuffersB", HlslShaderInputType::STRUCTURED, 1, 0, 0, HlslSRVDimension::BUFFER),
         })}};
     vector<Shader*> shaders{&shader};
-    EXPECT_FALSE(d3d12::BuildMergedBindingLayoutD3D12(shaders).has_value());
+    EXPECT_FALSE(d3d12::BuildMergedPipelineLayoutD3D12(shaders).has_value());
 }
 
-TEST(D3D12BindingLayoutBuilderTest, AcceptsMatchingVkBindingMetadata) {
+TEST(D3D12PipelineLayoutBuilderTest, AcceptsMatchingVkBindingMetadata) {
     FakeShader shader{
         ShaderStage::Pixel,
         ShaderReflectionDesc{MakeHlslShaderDesc({
@@ -239,7 +272,7 @@ TEST(D3D12BindingLayoutBuilderTest, AcceptsMatchingVkBindingMetadata) {
         })}};
     vector<Shader*> shaders{&shader};
 
-    auto merged = d3d12::BuildMergedBindingLayoutD3D12(shaders);
+    auto merged = d3d12::BuildMergedPipelineLayoutD3D12(shaders);
     ASSERT_TRUE(merged.has_value());
     ASSERT_EQ(merged->Parameters.size(), 1u);
     EXPECT_EQ(merged->D3D12Parameters[0].RegisterSpace, 1u);
@@ -248,14 +281,14 @@ TEST(D3D12BindingLayoutBuilderTest, AcceptsMatchingVkBindingMetadata) {
     EXPECT_EQ(merged->RegisterSpaceCount, 2u);
 }
 
-TEST(D3D12BindingLayoutBuilderTest, FailsWhenVkBindingMetadataConflictsWithRegisterSpace) {
+TEST(D3D12PipelineLayoutBuilderTest, FailsWhenVkBindingMetadataConflictsWithRegisterSpace) {
     FakeShader shader{
         ShaderStage::Pixel,
         ShaderReflectionDesc{MakeHlslShaderDesc({
             MakeHlslBinding("Albedo", HlslShaderInputType::TEXTURE, 0, 0, 1, HlslSRVDimension::TEXTURE2D, 0, 1),
         })}};
     vector<Shader*> shaders{&shader};
-    EXPECT_FALSE(d3d12::BuildMergedBindingLayoutD3D12(shaders).has_value());
+    EXPECT_FALSE(d3d12::BuildMergedPipelineLayoutD3D12(shaders).has_value());
 }
 
 }  // namespace radray::render

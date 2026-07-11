@@ -3,9 +3,9 @@
 #include <optional>
 
 #include <radray/vertex_data.h>
-#include <radray/render/gpu_resource.h>
 #include <radray/runtime/asset.h>
 #include <radray/runtime/asset_manager.h>
+#include <radray/runtime/gpu_resource.h>
 
 namespace radray {
 
@@ -18,13 +18,15 @@ struct StaticMeshSection {
         uint32_t firstIndex,
         uint32_t indexCount,
         uint32_t minVertexIndex,
-        uint32_t maxVertexIndex) noexcept;
+        uint32_t maxVertexIndex,
+        int32_t vertexOffset = 0) noexcept;
 
     uint32_t PrimitiveIndex;
     uint32_t FirstIndex;
     uint32_t IndexCount;
     uint32_t MinVertexIndex;
     uint32_t MaxVertexIndex;
+    int32_t VertexOffset;
 };
 
 class StaticMesh : public Asset {
@@ -32,7 +34,7 @@ public:
     StaticMesh() noexcept;
     /// 构造即完整:CPU 网格数据 + 已上传的 GPU 渲染数据一次性交付。
     /// 由加载协程在 GPU 上传完成后调用。资产入库即处于可渲染状态,不再有二段式回填。
-    StaticMesh(MeshResource meshResource, render::RenderMesh renderMesh) noexcept;
+    StaticMesh(MeshResource meshResource, shared_ptr<GpuMesh> renderMesh) noexcept;
     ~StaticMesh() noexcept override;
 
     void OnUnload(IRenderResourceRecycler& recycler) override;
@@ -57,9 +59,9 @@ public:
     // 对应 UE5 的 FStaticMeshRenderData:持有上传后的 device-local 顶点/索引 buffer。
     // 加载协程上传完成后通过构造函数交给资产持有,资产释放(OnUnload)时一并销毁。
 
-    bool HasRenderData() const noexcept { return _renderMesh.has_value(); }
-    render::RenderMesh* GetRenderMesh() noexcept { return _renderMesh ? &_renderMesh.value() : nullptr; }
-    const render::RenderMesh* GetRenderMesh() const noexcept { return _renderMesh ? &_renderMesh.value() : nullptr; }
+    bool HasRenderData() const noexcept { return _renderMesh != nullptr; }
+    GpuMesh* GetRenderMesh() noexcept { return _renderMesh.get(); }
+    const GpuMesh* GetRenderMesh() const noexcept { return _renderMesh.get(); }
     void ClearRenderData() noexcept { _renderMesh.reset(); }
 
 private:
@@ -67,7 +69,7 @@ private:
     vector<StaticMeshSection> _sections;
     Eigen::Vector3f _boundsMin;
     Eigen::Vector3f _boundsMax;
-    std::optional<render::RenderMesh> _renderMesh;
+    shared_ptr<GpuMesh> _renderMesh;
 };
 
 /// StaticMesh 的异步加载工厂。参数为已构建好的 CPU 网格数据(MeshResource);

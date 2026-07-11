@@ -34,6 +34,8 @@ class ImageVulkan;
 class ImageViewVulkan;
 class DescriptorSetLayoutVulkan;
 class PipelineLayoutVulkan;
+class BindingDescriptorPoolVulkan;
+class BindingGroupVulkan;
 class GraphicsPipelineVulkan;
 class ComputePipelineVulkan;
 class ShaderModuleVulkan;
@@ -153,13 +155,20 @@ public:
 
     Nullable<unique_ptr<TextureView>> CreateTextureView(const TextureViewDescriptor& desc) noexcept override;
 
+    Nullable<unique_ptr<RenderPass>> CreateRenderPass(const RenderPassDescriptor& desc) noexcept override;
+
+    Nullable<unique_ptr<Framebuffer>> CreateFramebuffer(const FramebufferDescriptor& desc) noexcept override;
+
     Nullable<unique_ptr<Shader>> CreateShader(const ShaderDescriptor& desc) noexcept override;
 
-    Nullable<unique_ptr<ShaderBindingLayoutCache>> CreateShaderBindingLayoutCache() noexcept override;
+    Nullable<unique_ptr<PipelineLayout>> CreatePipelineLayout(const PipelineLayoutDescriptor& desc) noexcept override;
 
-    Nullable<unique_ptr<ShaderBindingLayout>> CreateShaderBindingLayout(const ShaderBindingLayoutDescriptor& desc) noexcept override;
+    Nullable<unique_ptr<DescriptorPool>> CreateDescriptorPool(const DescriptorPoolDescriptor& desc) noexcept override;
 
-    Nullable<unique_ptr<ShaderParameterTable>> CreateShaderParameterTable(ShaderBindingLayout* layout) noexcept override;
+    Nullable<unique_ptr<BindingGroup>> CreateBindingGroup(
+        DescriptorPool* pool,
+        PipelineLayout* layout,
+        uint32_t groupIndex) noexcept override;
 
     Nullable<unique_ptr<GraphicsPipelineState>> CreateGraphicsPipelineState(const GraphicsPipelineStateDescriptor& desc) noexcept override;
 
@@ -186,17 +195,18 @@ public:
 
     Nullable<unique_ptr<BufferViewVulkan>> CreateBufferView(const VkBufferViewCreateInfo& info) noexcept;
 
-    Nullable<unique_ptr<RenderPassVulkan>> CreateRenderPass(const VkRenderPassCreateInfo& info) noexcept;
-
     Nullable<unique_ptr<SamplerVulkan>> CreateSamplerVulkan(const SamplerDescriptor& desc) noexcept;
 
     Nullable<unique_ptr<SamplerVulkan>> CreateSamplerVulkan(const VkSamplerCreateInfo& desc) noexcept;
 
     Nullable<unique_ptr<BindlessDescriptorSetVulkan>> CreateBindlessDescriptorSetVulkan(VkDescriptorType type, uint32_t capacity) noexcept;
 
-    Nullable<unique_ptr<PipelineLayoutVulkan>> CreateRootSignatureInternal(const ShaderBindingLayoutDescriptor& desc) noexcept;
+    Nullable<unique_ptr<PipelineLayoutVulkan>> CreateRootSignatureInternal(const PipelineLayoutDescriptor& desc) noexcept;
 
-    Nullable<unique_ptr<DescriptorSetVulkan>> CreateDescriptorSetInternal(PipelineLayoutVulkan* rootSig, uint32_t setIndex) noexcept;
+    Nullable<unique_ptr<DescriptorSetVulkan>> CreateDescriptorSetInternal(
+        PipelineLayoutVulkan* rootSig,
+        uint32_t setIndex,
+        DescriptorSetAllocatorVulkan* allocator = nullptr) noexcept;
 
     const VkAllocationCallbacks* GetAllocationCallbacks() const noexcept;
 
@@ -283,13 +293,6 @@ public:
 
 class CommandBufferVulkan final : public CommandBuffer {
 public:
-    struct RenderPassCacheEntry {
-        vector<VkAttachmentDescription> Attachments;
-        vector<VkAttachmentReference> ColorAttachments;
-        std::optional<VkAttachmentReference> DepthStencilAttachment;
-        unique_ptr<RenderPassVulkan> Pass;
-    };
-
     CommandBufferVulkan(
         DeviceVulkan* device,
         QueueVulkan* queue,
@@ -310,7 +313,7 @@ public:
 
     void ResourceBarrier(std::span<const ResourceBarrierDescriptor> barriers) noexcept override;
 
-    Nullable<unique_ptr<GraphicsCommandEncoder>> BeginRenderPass(const RenderPassDescriptor& desc) noexcept override;
+    Nullable<unique_ptr<GraphicsCommandEncoder>> BeginRenderPass(const RenderPassBeginDescriptor& desc) noexcept override;
 
     void EndRenderPass(unique_ptr<GraphicsCommandEncoder> encoder) noexcept override;
 
@@ -337,17 +340,11 @@ public:
 public:
     void DestroyImpl() noexcept;
 
-    Nullable<RenderPassVulkan*> GetOrCreateRenderPass(
-        std::span<const VkAttachmentDescription> attachments,
-        std::span<const VkAttachmentReference> colorAttachments,
-        std::optional<VkAttachmentReference> depthStencilAttachment) noexcept;
-
     DeviceVulkan* _device;
     QueueVulkan* _queue;
     unique_ptr<CommandPoolVulkan> _cmdPool;
     VkCommandBuffer _cmdBuffer;
     vector<unique_ptr<CommandEncoder>> _endedEncoders;
-    vector<RenderPassCacheEntry> _renderPassCache;
 };
 
 class SimulateCommandEncoderVulkan final : public GraphicsCommandEncoder {
@@ -372,7 +369,16 @@ public:
 
     void BindIndexBuffer(IndexBufferView ibv) noexcept override;
 
-    void BindShaderParameters(ShaderParameterTable* table) noexcept override;
+    void BindBindingGroup(
+        uint32_t groupIndex,
+        BindingGroup* group,
+        std::span<const uint32_t> dynamicOffsets) noexcept override;
+
+    bool SetPushConstants(
+        PipelineLayout* layout,
+        uint32_t groupIndex,
+        uint32_t binding,
+        std::span<const byte> data) noexcept override;
 
     void BindGraphicsPipelineState(GraphicsPipelineState* pso) noexcept override;
 
@@ -385,7 +391,7 @@ public:
 
     DeviceVulkan* _device;
     CommandBufferVulkan* _cmdBuffer;
-    unique_ptr<FrameBufferVulkan> _framebuffer;
+    FrameBufferVulkan* _framebuffer{nullptr};
     GraphicsPipelineVulkan* _boundPso{nullptr};
     PipelineLayoutVulkan* _boundPipeLayout{nullptr};
 };
@@ -404,7 +410,16 @@ public:
 
     CommandBuffer* GetCommandBuffer() const noexcept override;
 
-    void BindShaderParameters(ShaderParameterTable* table) noexcept override;
+    void BindBindingGroup(
+        uint32_t groupIndex,
+        BindingGroup* group,
+        std::span<const uint32_t> dynamicOffsets) noexcept override;
+
+    bool SetPushConstants(
+        PipelineLayout* layout,
+        uint32_t groupIndex,
+        uint32_t binding,
+        std::span<const byte> data) noexcept override;
 
     void BindComputePipelineState(ComputePipelineState* pso) noexcept override;
 
@@ -432,7 +447,16 @@ public:
 
     CommandBuffer* GetCommandBuffer() const noexcept override;
 
-    void BindShaderParameters(ShaderParameterTable* table) noexcept override;
+    void BindBindingGroup(
+        uint32_t groupIndex,
+        BindingGroup* group,
+        std::span<const uint32_t> dynamicOffsets) noexcept override;
+
+    bool SetPushConstants(
+        PipelineLayout* layout,
+        uint32_t groupIndex,
+        uint32_t binding,
+        std::span<const byte> data) noexcept override;
 
     void BuildBottomLevelAS(const BuildBottomLevelASDescriptor& desc) noexcept override;
 
@@ -452,19 +476,20 @@ public:
     vector<unique_ptr<Buffer>> _keepAliveBuffers{};
 };
 
-class RenderPassVulkan final : public RenderBase {
+class RenderPassVulkan final : public RenderPass {
 public:
     RenderPassVulkan(
         DeviceVulkan* device,
-        VkRenderPass renderPass) noexcept;
+        VkRenderPass renderPass,
+        const RenderPassDescriptor& desc);
 
     ~RenderPassVulkan() noexcept override;
-
-    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::UNKNOWN; }
 
     bool IsValid() const noexcept override;
 
     void Destroy() noexcept override;
+
+    void SetDebugName(std::string_view name) noexcept override;
 
 public:
     void DestroyImpl() noexcept;
@@ -473,19 +498,20 @@ public:
     VkRenderPass _renderPass;
 };
 
-class FrameBufferVulkan final : public RenderBase {
+class FrameBufferVulkan final : public Framebuffer {
 public:
     FrameBufferVulkan(
         DeviceVulkan* device,
-        VkFramebuffer framebuffer) noexcept;
+        VkFramebuffer framebuffer,
+        const FramebufferDescriptor& desc);
 
     ~FrameBufferVulkan() noexcept override;
-
-    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::UNKNOWN; }
 
     bool IsValid() const noexcept override;
 
     void Destroy() noexcept override;
+
+    void SetDebugName(std::string_view name) noexcept override;
 
 public:
     void DestroyImpl() noexcept;
@@ -969,10 +995,10 @@ private:
 
 static_assert(is_allocator<BindlessDescAllocator, BindlessDescAllocator::Allocation>, "BindlessDescAllocator does not satisfy the allocator concept");
 
-class PipelineLayoutVulkan final : public ShaderBindingLayout {
+class PipelineLayoutVulkan final : public PipelineLayout {
 public:
     /**
-     * PipelineLayoutVulkan 唯一的辅助结构. 每个 ShaderParameter 一条, 按 ShaderParameterId 索引 (Info.Id.Value == 下标).
+     * PipelineLayoutVulkan internal record, indexed by ParameterIndex.
      * - Info: 对外暴露的参数信息, 同时作为 FindParameter 返回指针的稳定存储
      * - SetIndex/BindingIndex/DescriptorType: 对应 VkDescriptorSetLayoutBinding 的定位信息
      * - DescriptorWriteOffset: 参数在所属 set 的 resource/sampler 写入追踪数组内的起始下标
@@ -982,6 +1008,7 @@ public:
      */
     struct ParameterBinding {
         ShaderParameterInfo Info{};
+        uint32_t ParameterIndex{0};
         uint32_t SetIndex{0};
         uint32_t BindingIndex{0};
         VkDescriptorType DescriptorType{VK_DESCRIPTOR_TYPE_MAX_ENUM};
@@ -990,6 +1017,7 @@ public:
         uint32_t PushConstantSize{0};
         BindlessSlotType BindlessSlotType{BindlessSlotType::Multiple};
         bool IsStaticSampler{false};
+        bool HasDynamicOffset{false};
     };
 
     PipelineLayoutVulkan(
@@ -1008,9 +1036,13 @@ public:
 
     vector<ShaderParameterInfo> GetParameters() const noexcept override;
 
-    std::optional<ShaderParameterId> FindParameterId(std::string_view name) const noexcept override;
+    Nullable<const ShaderParameterInfo*> FindParameter(std::string_view name) const noexcept override;
 
-    Nullable<const ShaderParameterInfo*> FindParameter(ShaderParameterId id) const noexcept override;
+    std::optional<ShaderBindingLocation> FindBindingLocation(std::string_view name) const noexcept override;
+
+    vector<BindingGroupLayout> GetBindingGroupLayouts() const noexcept override;
+
+    vector<PushConstantRange> GetPushConstantRanges() const noexcept override;
 
     uint32_t GetParameterCount() const noexcept { return static_cast<uint32_t>(_parameterBindings.size()); }
 
@@ -1022,7 +1054,13 @@ public:
 
     Nullable<const ParameterBinding*> FindBindlessSet(uint32_t setIndex) const noexcept;
 
-    Nullable<const ParameterBinding*> FindParameterInfo(ShaderParameterId id) const noexcept;
+    Nullable<const ParameterBinding*> FindParameterInfo(uint32_t parameterIndex) const noexcept;
+
+    Nullable<const ParameterBinding*> FindParameterInfo(
+        uint32_t setIndex,
+        uint32_t bindingIndex) const noexcept;
+
+    vector<const ParameterBinding*> GetDynamicBufferBindings(uint32_t setIndex) const noexcept;
 
     Nullable<DescriptorSetLayoutVulkan*> GetSetLayout(uint32_t setIndex) const noexcept;
 
@@ -1032,9 +1070,11 @@ public:
     DeviceVulkan* _device;
     VkPipelineLayout _layout;
 
-    // 唯一辅助结构, 按 ShaderParameterId 索引.
+    // Single internal record array, indexed by ParameterIndex.
     vector<ParameterBinding> _parameterBindings{};
-    // 原生的 per-set descriptor set layout, 同时持有 immutable sampler 的生命周期.
+    // Resolved per-set layouts may be explicitly borrowed from another pipeline
+    // layout. Owned layouts keep immutable samplers alive.
+    vector<DescriptorSetLayoutVulkan*> _setLayouts;
     vector<unique_ptr<DescriptorSetLayoutVulkan>> _ownedLayouts;
     uint32_t _setLayoutCount{0};
 };
@@ -1218,7 +1258,14 @@ public:
         }
     };
 
-    DescriptorSetAllocatorVulkan(DeviceVulkan* device, uint32_t keepFreePages, std::optional<vector<VkDescriptorPoolSize>> specPoolSize = std::nullopt) noexcept;
+    DescriptorSetAllocatorVulkan(
+        DeviceVulkan* device,
+        uint32_t keepFreePages,
+        std::optional<vector<VkDescriptorPoolSize>> specPoolSize = std::nullopt,
+        uint32_t maxSetsPerPage = 1024,
+        uint32_t maxAllocations = std::numeric_limits<uint32_t>::max(),
+        uint32_t maxPages = std::numeric_limits<uint32_t>::max(),
+        bool strictPoolSizes = false) noexcept;
     ~DescriptorSetAllocatorVulkan() noexcept;
 
     DescriptorSetAllocatorVulkan(const DescriptorSetAllocatorVulkan&) = delete;
@@ -1232,6 +1279,10 @@ public:
 
     void Destroy(Allocation allocation) noexcept;
 
+    bool Reset() noexcept;
+
+    uint32_t GetLiveAllocationCount() const noexcept { return _liveAllocationCount; }
+
 private:
     DescriptorPoolVulkan* NewPage(
         DescriptorSetLayoutVulkan* layout,
@@ -1244,6 +1295,39 @@ private:
     size_t _hintPage{0};
     std::optional<vector<VkDescriptorPoolSize>> _specPoolSize;
     uint32_t _keepFreePages;
+    uint32_t _maxSetsPerPage{1024};
+    uint32_t _maxAllocations{std::numeric_limits<uint32_t>::max()};
+    uint32_t _maxPages{std::numeric_limits<uint32_t>::max()};
+    uint32_t _liveAllocationCount{0};
+    bool _strictPoolSizes{false};
+};
+
+class BindingDescriptorPoolVulkan final : public DescriptorPool {
+public:
+    BindingDescriptorPoolVulkan(
+        DeviceVulkan* device,
+        const DescriptorPoolDescriptor& desc,
+        unique_ptr<DescriptorSetAllocatorVulkan> allocator) noexcept;
+    ~BindingDescriptorPoolVulkan() noexcept override;
+
+    bool IsValid() const noexcept override;
+    void Destroy() noexcept override;
+    void SetDebugName(std::string_view name) noexcept override;
+    bool Reset() noexcept override;
+    DescriptorPoolDescriptor GetDesc() const noexcept override { return _desc; }
+    uint32_t GetAllocatedBindingGroupCount() const noexcept override;
+
+    DescriptorSetAllocatorVulkan* GetAllocator() const noexcept { return _allocator.get(); }
+    bool ReserveGroup(const DescriptorPoolDescriptor& usage) noexcept;
+    void ReleaseGroup(const DescriptorPoolDescriptor& usage) noexcept;
+
+private:
+    DeviceVulkan* _device{nullptr};
+    DescriptorPoolDescriptor _desc{};
+    DescriptorPoolDescriptor _used{};
+    unique_ptr<DescriptorSetAllocatorVulkan> _allocator{};
+    uint32_t _liveGroups{0};
+    string _name{};
 };
 
 enum class DescriptorWritePayloadVulkan : uint8_t {
@@ -1289,11 +1373,11 @@ public:
 
     uint32_t GetSetIndex() const noexcept { return _setIndex; }
 
-    bool WriteResource(ShaderParameterId id, ResourceView* view, uint32_t arrayIndex) noexcept;
+    bool WriteResource(uint32_t parameterIndex, ResourceView* view, uint32_t arrayIndex) noexcept;
 
-    bool WriteResource(ShaderParameterId id, const BufferBindingDescriptor& desc, uint32_t arrayIndex) noexcept;
+    bool WriteResource(uint32_t parameterIndex, const BufferBindingDescriptor& desc, uint32_t arrayIndex) noexcept;
 
-    bool WriteSampler(ShaderParameterId id, Sampler* sampler, uint32_t arrayIndex) noexcept;
+    bool WriteSampler(uint32_t parameterIndex, Sampler* sampler, uint32_t arrayIndex) noexcept;
 
     bool SetResource(uint32_t slot, uint32_t arrayIndex, ResourceView* view) noexcept;
 
@@ -1322,50 +1406,47 @@ public:
     string _name{};
 };
 
-class ShaderParameterTableVulkan final : public ShaderParameterTable {
+class BindingGroupVulkan final : public BindingGroup {
 public:
-    ShaderParameterTableVulkan(DeviceVulkan* device, PipelineLayoutVulkan* rootSig) noexcept;
-    ~ShaderParameterTableVulkan() noexcept override;
+    BindingGroupVulkan(
+        DeviceVulkan* device,
+        BindingDescriptorPoolVulkan* pool,
+        PipelineLayoutVulkan* layout,
+        uint32_t groupIndex,
+        unique_ptr<DescriptorSetVulkan> descriptorSet,
+        const DescriptorPoolDescriptor& poolUsage) noexcept;
+    ~BindingGroupVulkan() noexcept override;
 
     bool IsValid() const noexcept override;
-
     void Destroy() noexcept override;
-
     void Reset() noexcept override;
-
     void SetDebugName(std::string_view name) noexcept override;
 
-    ShaderBindingLayout* GetShaderBindingLayout() const noexcept override { return _rootSig; }
+    PipelineLayout* GetPipelineLayout() const noexcept override { return _layout; }
+    uint32_t GetGroupIndex() const noexcept override { return _groupIndex; }
 
-    bool SetResource(ShaderParameterId id, ResourceView* view, uint32_t arrayIndex = 0) noexcept override;
-
-    bool SetResource(ShaderParameterId id, const BufferBindingDescriptor& desc, uint32_t arrayIndex = 0) noexcept override;
-
-    bool SetSampler(ShaderParameterId id, Sampler* sampler, uint32_t arrayIndex = 0) noexcept override;
-
-    bool SetBytes(ShaderParameterId id, const void* data, uint32_t size) noexcept override;
-
-    bool SetBindlessArray(ShaderParameterId id, BindlessArray* array) noexcept override;
-
-    bool IsFullyWritten() const noexcept;
+    bool SetResource(uint32_t binding, ResourceView* view, uint32_t arrayIndex = 0) noexcept override;
+    bool SetResource(uint32_t binding, const BufferBindingDescriptor& desc, uint32_t arrayIndex = 0) noexcept override;
+    bool SetSampler(uint32_t binding, Sampler* sampler, uint32_t arrayIndex = 0) noexcept override;
+    bool SetBindlessArray(uint32_t binding, BindlessArray* array) noexcept override;
 
     bool FlushDescriptorWrites() noexcept;
+    DescriptorSetVulkan* GetDescriptorSet() const noexcept { return _descriptorSet.get(); }
+    BindlessArray* GetBindlessArray() const noexcept { return _bindlessArray; }
+    const BufferBindingDescriptor* GetDynamicBuffer(uint32_t parameterIndex) const noexcept;
 
-    Nullable<DescriptorSetVulkan*> GetDescriptorSet(uint32_t setIndex) const noexcept;
-
-    std::span<const byte> GetConstantData(ShaderParameterId id) const noexcept;
-
-    BindlessArray* GetBindlessArray(uint32_t setIndex) const noexcept;
-
-public:
-    DeviceVulkan* _device;
-    PipelineLayoutVulkan* _rootSig;
-    vector<unique_ptr<DescriptorSetVulkan>> _sets;
-    vector<vector<byte>> _constantData;
-    vector<BindlessArray*> _bindlessArrays;
-    vector<PendingDescriptorWriteVulkan> _pendingWriteScratch;
-    vector<VkWriteDescriptorSet> _descriptorWriteScratch;
-    vector<VkWriteDescriptorSetAccelerationStructureKHR> _accelerationWriteScratch;
+private:
+    DeviceVulkan* _device{nullptr};
+    BindingDescriptorPoolVulkan* _pool{nullptr};
+    PipelineLayoutVulkan* _layout{nullptr};
+    uint32_t _groupIndex{0};
+    unique_ptr<DescriptorSetVulkan> _descriptorSet{};
+    BindlessArray* _bindlessArray{nullptr};
+    vector<PendingDescriptorWriteVulkan> _pendingWriteScratch{};
+    vector<VkWriteDescriptorSet> _descriptorWriteScratch{};
+    vector<VkWriteDescriptorSetAccelerationStructureKHR> _accelerationWriteScratch{};
+    vector<std::optional<BufferBindingDescriptor>> _dynamicBuffers{};
+    DescriptorPoolDescriptor _poolUsage{};
     string _name{};
 };
 
@@ -1497,32 +1578,6 @@ public:
     AccelerationStructureViewDescriptor _desc;
 };
 
-class ShaderBindingLayoutCacheVulkan final : public ShaderBindingLayoutCache {
-public:
-    explicit ShaderBindingLayoutCacheVulkan(DeviceVulkan* device) noexcept;
-    ~ShaderBindingLayoutCacheVulkan() noexcept override;
-
-    bool IsValid() const noexcept override;
-    void Destroy() noexcept override;
-
-    Nullable<ShaderBindingLayout*> GetOrCreate(const ShaderBindingLayoutDescriptor& desc) noexcept override;
-    bool Remove(ShaderBindingLayout* layout) noexcept override;
-    void Clear() noexcept override;
-    uint32_t Count() const noexcept override;
-
-private:
-    struct Entry {
-        vector<Shader*> Shaders;
-        vector<StaticSamplerDescriptor> StaticSamplers;
-        unique_ptr<PipelineLayoutVulkan> Layout;
-    };
-
-    bool Matches(const Entry& entry, const ShaderBindingLayoutDescriptor& desc) const noexcept;
-
-    DeviceVulkan* _device;
-    vector<Entry> _entries;
-};
-
 Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescriptor& desc);
 
 Nullable<InstanceVulkanImpl*> InitVulkanEnvImpl(const VulkanInstanceDescriptor& desc);
@@ -1536,10 +1591,13 @@ constexpr auto CastVkObject(Fence* p) noexcept { return static_cast<FenceVulkan*
 constexpr auto CastVkObject(Buffer* p) noexcept { return static_cast<BufferVulkan*>(p); }
 constexpr auto CastVkObject(Texture* p) noexcept { return static_cast<ImageVulkan*>(p); }
 constexpr auto CastVkObject(TextureView* p) noexcept { return static_cast<ImageViewVulkan*>(p); }
+constexpr auto CastVkObject(RenderPass* p) noexcept { return static_cast<RenderPassVulkan*>(p); }
+constexpr auto CastVkObject(Framebuffer* p) noexcept { return static_cast<FrameBufferVulkan*>(p); }
 constexpr auto CastVkObject(Sampler* p) noexcept { return static_cast<SamplerVulkan*>(p); }
 constexpr auto CastVkObject(Shader* p) noexcept { return static_cast<ShaderModuleVulkan*>(p); }
-constexpr auto CastVkObject(ShaderBindingLayout* p) noexcept { return static_cast<PipelineLayoutVulkan*>(p); }
-constexpr auto CastVkObject(ShaderParameterTable* p) noexcept { return static_cast<ShaderParameterTableVulkan*>(p); }
+constexpr auto CastVkObject(PipelineLayout* p) noexcept { return static_cast<PipelineLayoutVulkan*>(p); }
+constexpr auto CastVkObject(DescriptorPool* p) noexcept { return static_cast<BindingDescriptorPoolVulkan*>(p); }
+constexpr auto CastVkObject(BindingGroup* p) noexcept { return static_cast<BindingGroupVulkan*>(p); }
 constexpr auto CastVkObject(GraphicsPipelineState* p) noexcept { return static_cast<GraphicsPipelineVulkan*>(p); }
 constexpr auto CastVkObject(ComputePipelineState* p) noexcept { return static_cast<ComputePipelineVulkan*>(p); }
 constexpr auto CastVkObject(AccelerationStructure* p) noexcept { return static_cast<AccelerationStructureVulkan*>(p); }
@@ -1551,7 +1609,6 @@ constexpr auto CastVkObject(QueryPool* p) noexcept { return static_cast<QueryPoo
 
 struct VulkanBindingParameterInfo {
     string Name{};
-    ShaderParameterId Id{0};
     ShaderParameterKind Kind{ShaderParameterKind::UNKNOWN};
     ShaderStages Stages{ShaderStage::UNKNOWN};
     uint32_t SetIndex{0};
@@ -1567,13 +1624,15 @@ struct VulkanBindingParameterInfo {
     uint32_t Size{0};
 };
 
-struct VulkanMergedBindingLayout {
+struct VulkanMergedPipelineLayout {
     vector<ShaderParameterInfo> Parameters{};
     vector<VulkanBindingParameterInfo> VulkanParameters{};
     uint32_t DescriptorSetCount{0};
 };
 
-std::optional<VulkanMergedBindingLayout> BuildMergedBindingLayoutVulkan(std::span<Shader*> shaders) noexcept;
+std::optional<VulkanMergedPipelineLayout> BuildMergedPipelineLayoutVulkan(
+    std::span<Shader*> shaders,
+    std::span<const BindingGroupLayout> explicitGroups = {}) noexcept;
 
 }  // namespace radray::render::vulkan
 

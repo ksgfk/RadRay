@@ -567,8 +567,12 @@ Nullable<unique_ptr<ImGuiRenderer>> ImGuiRenderer::Create(const ImGuiRendererDes
         RADRAY_ERR_LOG("ImGuiRendererDescriptor Device must not be null");
         return nullptr;
     }
-    if (desc.BindingLayoutCache == nullptr) {
-        RADRAY_ERR_LOG("ImGuiRendererDescriptor BindingLayoutCache must not be null");
+    if (desc.PipelineLayouts == nullptr) {
+        RADRAY_ERR_LOG("ImGuiRendererDescriptor PipelineLayouts must not be null");
+        return nullptr;
+    }
+    if (desc.RenderPasses == nullptr) {
+        RADRAY_ERR_LOG("ImGuiRendererDescriptor RenderPasses must not be null");
         return nullptr;
     }
     if (desc.RenderTargetFormat == render::TextureFormat::UNKNOWN) {
@@ -696,22 +700,21 @@ Nullable<unique_ptr<ImGuiRenderer>> ImGuiRenderer::Create(const ImGuiRendererDes
     render::StaticSamplerDescriptor staticSampler{
         .Name = "gSampler",
         .Desc = sampler};
+    const render::PushConstantBinding pushConstant{
+        .Group = 0,
+        .Binding = 0};
 
     render::Shader* shaders[] = {shaderVS.get(), shaderPS.get()};
-    render::ShaderBindingLayoutDescriptor layoutDesc{
-        std::span<render::Shader*>{shaders},
-        std::span<const render::StaticSamplerDescriptor>{&staticSampler, 1}};
+    render::PipelineLayoutDescriptor layoutDesc{
+        .Shaders = std::span<render::Shader*>{shaders},
+        .StaticSamplers = std::span<const render::StaticSamplerDescriptor>{&staticSampler, 1},
+        .PushConstantBindings = std::span<const render::PushConstantBinding>{&pushConstant, 1}};
 
-    auto layoutOpt = desc.BindingLayoutCache->GetOrCreate(layoutDesc);
+    auto layoutOpt = desc.PipelineLayouts->GetOrCreate(layoutDesc);
     if (!layoutOpt.HasValue()) {
         return nullptr;
     }
-    render::ShaderBindingLayout* bindingLayout = layoutOpt.Get();
-    auto pushConstantId = bindingLayout->FindParameterId("gPush");
-    if (!pushConstantId.has_value()) {
-        RADRAY_ERR_LOG("ImGui renderer binding layout is missing gPush");
-        return nullptr;
-    }
+    render::PipelineLayout* bindingLayout = layoutOpt.Get();
     render::VertexElement vertexElems[] = {
         {offsetof(ImDrawVert, pos), "POSITION", 0, render::VertexFormat::FLOAT32X2, 0},
         {offsetof(ImDrawVert, uv), "TEXCOORD", 0, render::VertexFormat::FLOAT32X2, 1},
@@ -740,6 +743,18 @@ Nullable<unique_ptr<ImGuiRenderer>> ImGuiRenderer::Create(const ImGuiRendererDes
         render::MultiSampleState{1, std::numeric_limits<uint64_t>::max(), false},
         std::span<const render::ColorTargetState>{&rtState, 1}};
     psoDesc.Primitive.Cull = render::CullMode::None;
+    render::RenderPassColorAttachmentDescriptor colorAttachment{
+        .Format = desc.RenderTargetFormat,
+        .SampleCount = 1,
+        .Load = render::LoadAction::Load,
+        .Store = render::StoreAction::Store};
+    render::RenderPassDescriptor renderPassDesc{
+        .ColorAttachments = std::span{&colorAttachment, 1}};
+    auto renderPassOpt = desc.RenderPasses->GetOrCreateRenderPass(renderPassDesc);
+    if (!renderPassOpt.HasValue()) {
+        return nullptr;
+    }
+    psoDesc.CompatibleRenderPass = renderPassOpt.Get();
 
     auto psoOpt = desc.Device->CreateGraphicsPipelineState(psoDesc);
     if (!psoOpt.HasValue()) {
@@ -750,7 +765,23 @@ Nullable<unique_ptr<ImGuiRenderer>> ImGuiRenderer::Create(const ImGuiRendererDes
     result->_device = desc.Device;
     result->_bindingLayout = bindingLayout;
     result->_pso = psoOpt.Release();
-    result->_pushConstantId = pushConstantId.value();
+    auto poolOpt = desc.Device->CreateDescriptorPool(render::DescriptorPoolDescriptor{
+        .MaxBindingGroups = 4096,
+        .MaxSampledTextures = 4096,
+        .MaxStorageTextures = 0,
+        .MaxUniformBuffers = 0,
+        .MaxDynamicUniformBuffers = 0,
+        .MaxStorageBuffers = 0,
+        .MaxReadOnlyTexelBuffers = 0,
+        .MaxReadWriteTexelBuffers = 0,
+        .MaxSamplers = 0,
+        .MaxAccelerationStructures = 0,
+        .Lifetime = render::DescriptorPoolLifetime::Persistent});
+    if (!poolOpt.HasValue()) {
+        return nullptr;
+    }
+    result->_descriptorPool = poolOpt.Release();
+    result->_descriptorPool->SetDebugName("imgui_descriptors");
     result->_frames.reserve(desc.FlightDataCount);
     for (uint32_t i = 0; i < desc.FlightDataCount; ++i) {
         result->_frames.emplace_back(make_unique<Frame>());
@@ -762,11 +793,11 @@ bool ImGuiRenderer::ImGuiTexture::UpdateExternalResource(uint32_t flightIndex, r
     if (srv == nullptr) {
         return false;
     }
-    render::ShaderParameterTable* table = GetExternalTable(flightIndex);
-    if (table == nullptr) {
+    render::BindingGroup* group = GetExternalGroup(flightIndex);
+    if (group == nullptr) {
         return false;
     }
-    if (!table->SetResource("gTexture", srv)) {
+    if (!group->SetResource(0, srv)) {
         return false;
     }
     return true;
@@ -799,14 +830,14 @@ ImTextureID ImGuiRenderer::CreateOrUpdateExternalTexture(ImTextureID textureId, 
 
     // 外部纹理按 flight 持有独立参数表：当前 flight 的参数表在上一轮提交后已随 fence 完成，
     // 改写它不会触及仍在飞行中的其他 flight 命令缓冲。
-    if (texture->GetExternalTable(flightIndex) == nullptr) {
-        auto tableOpt = _device->CreateShaderParameterTable(_bindingLayout);
-        if (!tableOpt.HasValue()) {
+    if (texture->GetExternalGroup(flightIndex) == nullptr) {
+        auto groupOpt = _device->CreateBindingGroup(_descriptorPool.get(), _bindingLayout, 1);
+        if (!groupOpt.HasValue()) {
             return ImTextureID_Invalid;
         }
-        auto table = tableOpt.Release();
-        table->SetDebugName(fmt::format("imgui_external_tex_table_{}", flightIndex));
-        texture->SetExternalTable(flightIndex, std::move(table));
+        auto group = groupOpt.Release();
+        group->SetDebugName(fmt::format("imgui_external_tex_group_{}", flightIndex));
+        texture->SetExternalGroup(flightIndex, std::move(group));
     }
 
     if (!texture->UpdateExternalResource(flightIndex, srv)) {
@@ -891,17 +922,17 @@ void ImGuiRenderer::ExtractDrawDataToFrame(Frame& frame, std::span<ImDrawData*> 
                 auto srv = srvOpt.Release();
                 srv->SetDebugName(fmt::format("imgui_tex_srv_{}", tex->UniqueID));
 
-                auto tableOpt = _device->CreateShaderParameterTable(_bindingLayout);
-                if (!tableOpt.HasValue()) {
+                auto groupOpt = _device->CreateBindingGroup(_descriptorPool.get(), _bindingLayout, 1);
+                if (!groupOpt.HasValue()) {
                     continue;
                 }
-                auto table = tableOpt.Release();
-                table->SetDebugName(fmt::format("imgui_tex_table_{}", tex->UniqueID));
-                if (!table->SetResource("gTexture", srv.get())) {
+                auto group = groupOpt.Release();
+                group->SetDebugName(fmt::format("imgui_tex_group_{}", tex->UniqueID));
+                if (!group->SetResource(0, srv.get())) {
                     continue;
                 }
 
-                auto& ptr = _aliveTexs.emplace_back(make_unique<ImGuiRenderer::ImGuiTexture>(std::move(texObj), std::move(srv), std::move(table)));
+                auto& ptr = _aliveTexs.emplace_back(make_unique<ImGuiRenderer::ImGuiTexture>(std::move(texObj), std::move(srv), std::move(group)));
                 tex->SetTexID(static_cast<ImTextureID>(reinterpret_cast<uintptr_t>(ptr.get())));
                 tex->BackendUserData = ptr.get();
             }
@@ -967,7 +998,9 @@ void ImGuiRenderer::ExtractDrawDataToFrame(Frame& frame, std::span<ImDrawData*> 
             .Size = static_cast<uint64_t>(vertCount) * sizeof(ImDrawVert),
             .Memory = render::MemoryType::Upload,
             .Usage = render::BufferUse::Vertex | render::BufferUse::MapWrite,
-            .Hints = render::ResourceHint::None};
+            .Hints = _device->GetBackend() == render::RenderBackend::D3D12
+                         ? render::ResourceHint::Dedicated
+                         : render::ResourceHint::None};
         auto vbOpt = _device->CreateBuffer(vbDesc);
         if (!vbOpt.HasValue()) {
             return;
@@ -986,7 +1019,9 @@ void ImGuiRenderer::ExtractDrawDataToFrame(Frame& frame, std::span<ImDrawData*> 
             .Size = static_cast<uint64_t>(idxCount) * sizeof(ImDrawIdx),
             .Memory = render::MemoryType::Upload,
             .Usage = render::BufferUse::Index | render::BufferUse::MapWrite,
-            .Hints = render::ResourceHint::None};
+            .Hints = _device->GetBackend() == render::RenderBackend::D3D12
+                         ? render::ResourceHint::Dedicated
+                         : render::ResourceHint::None};
         auto ibOpt = _device->CreateBuffer(ibDesc);
         if (!ibOpt.HasValue()) {
             return;
@@ -1180,6 +1215,13 @@ void ImGuiRenderer::OnRenderFrame(uint32_t frameIndex, Frame& frame, uint32_t dr
     push.Scale[1] = 2.0f / (T - B);
     push.Translate[0] = (R + L) / (L - R);
     push.Translate[1] = (T + B) / (B - T);
+    if (!encoder->SetPushConstants(
+            _bindingLayout,
+            0,
+            0,
+            std::as_bytes(std::span{&push, 1}))) {
+        return;
+    }
 
     const ImVec2 clipOff = drawData.DisplayPos;
     const ImVec2 clipScale = drawData.FramebufferScale;
@@ -1200,8 +1242,8 @@ void ImGuiRenderer::OnRenderFrame(uint32_t frameIndex, Frame& frame, uint32_t dr
             if (cmd.Texture == nullptr) {
                 continue;
             }
-            render::ShaderParameterTable* texTable = cmd.Texture->GetParameterTable(frameIndex);
-            if (texTable == nullptr) {
+            render::BindingGroup* textureGroup = cmd.Texture->GetBindingGroup(frameIndex);
+            if (textureGroup == nullptr) {
                 continue;
             }
 
@@ -1221,8 +1263,7 @@ void ImGuiRenderer::OnRenderFrame(uint32_t frameIndex, Frame& frame, uint32_t dr
                 .Width = static_cast<uint32_t>(clipMax.x - clipMin.x),
                 .Height = static_cast<uint32_t>(clipMax.y - clipMin.y)};
             encoder->SetScissor(scissor);
-            texTable->SetBytes(_pushConstantId, &push, sizeof(push));
-            encoder->BindShaderParameters(texTable);
+            encoder->BindBindingGroup(1, textureGroup);
             encoder->DrawIndexed(
                 cmd.ElemCount,
                 1,
@@ -1328,9 +1369,10 @@ bool ImGuiSystem::Initialize(const ImGuiSystemDescriptor& desc) {
     if (desc.MainWindow == nullptr ||
         desc.Windows == nullptr ||
         desc.Device == nullptr ||
-        desc.BindingLayoutCache == nullptr ||
+        desc.PipelineLayouts == nullptr ||
+        desc.RenderPasses == nullptr ||
         desc.DirectQueue == nullptr) {
-        RADRAY_ERR_LOG("ImGuiSystemDescriptor requires MainWindow, Windows, Device, BindingLayoutCache and DirectQueue");
+        RADRAY_ERR_LOG("ImGuiSystemDescriptor requires MainWindow, Windows, Device, PipelineLayouts, RenderPasses and DirectQueue");
         return false;
     }
     if (desc.RenderTargetFormat == render::TextureFormat::UNKNOWN) {
@@ -1359,10 +1401,11 @@ bool ImGuiSystem::Initialize(const ImGuiSystemDescriptor& desc) {
     style.FontScaleDpi = mainScale;
     io.Fonts->AddFontDefault();
     auto renderer = ImGuiRenderer::Create(ImGuiRendererDescriptor{
-        desc.Device,
-        desc.BindingLayoutCache,
-        desc.RenderTargetFormat,
-        desc.FlightDataCount});
+        .Device = desc.Device,
+        .PipelineLayouts = desc.PipelineLayouts,
+        .RenderPasses = desc.RenderPasses,
+        .RenderTargetFormat = desc.RenderTargetFormat,
+        .FlightDataCount = desc.FlightDataCount});
     if (!renderer.HasValue()) {
         return false;
     }
@@ -1478,7 +1521,8 @@ void ImGuiSystem::OnInit(Application& app) {
         .MainWindow = mainWindow,
         .Windows = windowManager,
         .Device = device,
-        .BindingLayoutCache = gpuSystem->GetShaderBindingLayoutCache(),
+        .PipelineLayouts = gpuSystem->GetPipelineLayoutLibrary(),
+        .RenderPasses = gpuSystem->GetRenderPassRegistry(),
         .RenderTargetFormat = windowManager->GetMainBackBufferFormat(),
         .FlightDataCount = gpuSystem->GetFlightDataCount(),
         .DirectQueue = gpuSystem->GetMainQueue(),
@@ -1567,15 +1611,37 @@ bool ImGuiSystem::OnRender(AppFrameContext& ctx, const AppFrameTarget& target, b
         return false;
     }
 
-    render::ColorAttachment colorAttachment{
-        .Target = target.BackBufferView,
+    RenderPassRegistry* registry = ctx.GetGpuSystem() != nullptr
+                                       ? ctx.GetGpuSystem()->GetRenderPassRegistry()
+                                       : nullptr;
+    if (registry == nullptr || target.BackBuffer == nullptr || target.BackBufferView == nullptr) {
+        return false;
+    }
+    const render::TextureDescriptor targetDesc = target.BackBuffer->GetDesc();
+    render::RenderPassColorAttachmentDescriptor colorAttachment{
+        .Format = targetDesc.Format,
+        .SampleCount = targetDesc.SampleCount,
         .Load = contentDrawn ? render::LoadAction::Load : render::LoadAction::Clear,
-        .Store = render::StoreAction::Store,
-        .ClearValue = render::ColorClearValue{{0.08f, 0.10f, 0.14f, 1.0f}}};
+        .Store = render::StoreAction::Store};
     render::RenderPassDescriptor renderPassDesc{
-        .ColorAttachments = std::span{&colorAttachment, 1},
+        .ColorAttachments = std::span{&colorAttachment, 1}};
+    auto passOpt = registry->GetOrCreateRenderPass(renderPassDesc);
+    render::TextureView* colorView = target.BackBufferView;
+    auto framebufferOpt = passOpt.HasValue()
+                              ? registry->GetOrCreateFramebuffer(
+                                    passOpt.Get(), std::span<render::TextureView* const>{&colorView, 1},
+                                    nullptr, targetDesc.Width, targetDesc.Height)
+                              : Nullable<render::Framebuffer*>{};
+    if (!passOpt.HasValue() || !framebufferOpt.HasValue()) {
+        return false;
+    }
+    const render::ColorClearValue clearValue{{0.08f, 0.10f, 0.14f, 1.0f}};
+    render::RenderPassBeginDescriptor beginDesc{
+        .Pass = passOpt.Get(),
+        .Target = framebufferOpt.Get(),
+        .ColorClearValues = std::span{&clearValue, 1},
         .Name = viewportWindow->Window != nullptr && viewportWindow->Window->IsMainWindow() ? "Main ImGui Viewport" : "ImGui Viewport"};
-    auto encoderOpt = ctx.GetCommandBuffer()->BeginRenderPass(renderPassDesc);
+    auto encoderOpt = ctx.GetCommandBuffer()->BeginRenderPass(beginDesc);
     if (!encoderOpt.HasValue()) {
         RADRAY_ABORT("failed to begin imgui render pass");
     }

@@ -7,10 +7,11 @@
 #include <cstring>
 
 #include <radray/basic_math.h>
-#include <radray/render/gpu_resource.h>
-#include <radray/render/pipeline_state_cache.h>
-#include <radray/render/sampler_cache.h>
-#include <radray/render/shader_variant_cache.h>
+#include <radray/runtime/gpu_resource.h>
+#include <radray/runtime/pipeline_state_cache.h>
+#include <radray/runtime/render_pass_registry.h>
+#include <radray/runtime/sampler_cache.h>
+#include <radray/runtime/shader_variant_library.h>
 #include <radray/render/shader_compiler/dxc.h>
 #include <radray/runtime/asset_manager.h>
 #include <radray/runtime/material_asset.h>
@@ -24,13 +25,13 @@ namespace radray::render::test {
 namespace {
 
 // 全屏三角 mesh pass, 材质参数走【真实 cbuffer】(非 push constant), 且按【字段名】设置。
-// - Material cbuffer (b0, space0): 普通 cbuffer, 含两个字段 BaseColor / Extra。
+// - Material cbuffer (b0, space2): 普通 cbuffer, 含两个字段 BaseColor / Extra。
 //   材质用 SetVector("BaseColor", ...) 按字段名设置; MaterialConstantBinder 应把它按反射
 //   偏移打进 Material 块并整块 (CBV) 提交。
-// - PerObject cbuffer (b1, space1): 系统块, 承载 ObjectToWorld, 由执行器单独填充, 打包器跳过。
+// - PerObject cbuffer (b1, space0): 系统块, 承载 ObjectToWorld, 由执行器单独填充, 打包器跳过。
 // PS 输出 = BaseColor.rgb, 从而验证按字段名设置的值确实通到了 GPU。
 constexpr std::string_view kFieldPackSource = R"(
-cbuffer Material : register(b0, space0) {
+[[vk::binding(0, 2)]] cbuffer Material : register(b0, space2) {
     float4 BaseColor;
     float4 Extra;
 };
@@ -38,7 +39,7 @@ cbuffer Material : register(b0, space0) {
 struct PerObject {
     float4x4 ObjectToWorld;
 };
-[[vk::binding(0, 1)]] ConstantBuffer<PerObject> gPerObject : register(b1, space1);
+[[vk::binding(1, 0)]] ConstantBuffer<PerObject> gPerObject : register(b1, space0);
 
 struct VSIn {
     float2 Pos : POSITION0;
@@ -50,9 +51,7 @@ struct VSOut {
 
 VSOut VSMain(VSIn i) {
     VSOut o;
-    // 引用 gPerObject 避免被优化掉 (乘 0 保持位置不变)。
-    float bias = gPerObject.ObjectToWorld[3][3] * 0.0;
-    o.Pos = float4(i.Pos, 0.0, 1.0) + bias;
+    o.Pos = mul(gPerObject.ObjectToWorld, float4(i.Pos, 0.0, 1.0));
     return o;
 }
 
@@ -129,7 +128,7 @@ public:
 private:
     unique_ptr<Buffer> _vb;
     unique_ptr<Buffer> _ib;
-    RenderMesh::DrawData _draw{};
+    GpuMesh::DrawData _draw{};
 };
 
 ShaderPassDesc MakeFieldPackPass() {
@@ -142,6 +141,7 @@ ShaderPassDesc MakeFieldPackPass() {
     pass.Primitive.Cull = CullMode::None;
     pass.MultiSample = MultiSampleState::Default();
     pass.ColorTargets.push_back(ColorTargetState::Default(kRtFormat));
+    pass.DynamicBufferBindings.push_back(DynamicBufferBinding{.Group = 0, .Binding = 1});
     OwningVertexBufferLayout layout{};
     layout.ArrayStride = sizeof(float) * 2;
     layout.StepMode = VertexStepMode::Vertex;
@@ -162,10 +162,11 @@ protected:
         if (!_ctx.Initialize(this->GetParam(), &reason)) {
             GTEST_SKIP() << fmt::format("Init failed on {}: {}", format_as(this->GetParam()), reason);
         }
-        _variantCache = CreateShaderVariantCache(
-                            _ctx.GetDevicePtr(), _ctx.GetDxc(), _ctx.GetShaderBindingLayoutCache())
+        _layoutLibrary = make_unique<PipelineLayoutLibrary>(_ctx.GetDevicePtr());
+        _variantCache = CreateShaderVariantLibrary(
+                            _ctx.GetDevicePtr(), _ctx.GetDxc(), _layoutLibrary.get())
                             .Release();
-        _psoCache = _ctx.GetDevicePtr()->CreateGraphicsPipelineStateCache().Release();
+        _psoCache = make_unique<GraphicsPipelineStateLibrary>(_ctx.GetDevicePtr());
         _samplerCache = make_unique<SamplerCache>(_ctx.GetDevicePtr());
     }
 
@@ -209,6 +210,7 @@ protected:
             return result;
         }
         auto rtv = rtvOpt.Release();
+        RenderPassRegistry renderPassRegistry{_ctx.GetDevicePtr()};
 
         const uint32_t bpp = GetTextureFormatBytesPerPixel(kRtFormat);
         const uint64_t rowAlign = std::max<uint64_t>(1, _ctx.GetDeviceDetail().TextureDataPitchAlignment);
@@ -232,7 +234,7 @@ protected:
         list.SortOpaque();
 
         MeshPassExecutor executor{_ctx.GetDevicePtr(), _variantCache.get(), _psoCache.get(), _samplerCache.get(), "gPerObject"};
-        executor.BeginFrame();
+        FrameResources frameResources{_ctx.GetDevicePtr()};
 
         auto cmdOpt = _ctx.CreateCommandBuffer(&reason);
         if (!cmdOpt.HasValue()) {
@@ -249,15 +251,31 @@ protected:
             .After = TextureState::RenderTarget};
         cmd->ResourceBarrier(std::span{&toRt, 1});
 
-        ColorAttachment color{
-            .Target = rtv.get(),
+        RenderPassColorAttachmentDescriptor color{
+            .Format = kRtFormat,
+            .SampleCount = 1,
             .Load = LoadAction::Clear,
-            .Store = StoreAction::Store,
-            .ClearValue = ColorClearValue{{0.0f, 0.0f, 0.0f, 1.0f}}};
+            .Store = StoreAction::Store};
         RenderPassDescriptor rpDesc{
-            .ColorAttachments = std::span{&color, 1},
+            .ColorAttachments = std::span{&color, 1}};
+        auto renderPassOpt = renderPassRegistry.GetOrCreateRenderPass(rpDesc);
+        TextureView* colorView = rtv.get();
+        auto framebufferOpt = renderPassOpt.HasValue()
+                                  ? renderPassRegistry.GetOrCreateFramebuffer(
+                                        renderPassOpt.Get(), std::span<TextureView* const>{&colorView, 1},
+                                        nullptr, kRtSize, kRtSize)
+                                  : Nullable<Framebuffer*>{};
+        if (!renderPassOpt.HasValue() || !framebufferOpt.HasValue()) {
+            reason = _ctx.JoinCapturedErrors();
+            return result;
+        }
+        const ColorClearValue clearValue{{0.0f, 0.0f, 0.0f, 1.0f}};
+        RenderPassBeginDescriptor beginDesc{
+            .Pass = renderPassOpt.Get(),
+            .Target = framebufferOpt.Get(),
+            .ColorClearValues = std::span{&clearValue, 1},
             .Name = "MaterialCBufferFieldTest"};
-        auto encoderOpt = cmd->BeginRenderPass(rpDesc);
+        auto encoderOpt = cmd->BeginRenderPass(beginDesc);
         if (!encoderOpt.HasValue()) {
             reason = _ctx.JoinCapturedErrors();
             return result;
@@ -272,7 +290,8 @@ protected:
         encoder->SetViewport(vp);
         encoder->SetScissor(Rect{0, 0, kRtSize, kRtSize});
 
-        const uint32_t submitted = executor.Execute(encoder.get(), list);
+        executor.SetRenderPass(renderPassOpt.Get());
+        const uint32_t submitted = executor.Execute(encoder.get(), list, frameResources);
         if (submitted != 1u) {
             reason = "submitted != 1: " + _ctx.JoinCapturedErrors();
             cmd->EndRenderPass(std::move(encoder));
@@ -319,8 +338,9 @@ protected:
     }
 
     ComputeTestContext _ctx{};
-    unique_ptr<ShaderVariantCache> _variantCache{};
-    unique_ptr<GraphicsPipelineStateCache> _psoCache{};
+    unique_ptr<PipelineLayoutLibrary> _layoutLibrary{};
+    unique_ptr<ShaderVariantLibrary> _variantCache{};
+    unique_ptr<GraphicsPipelineStateLibrary> _psoCache{};
     unique_ptr<SamplerCache> _samplerCache{};
 };
 

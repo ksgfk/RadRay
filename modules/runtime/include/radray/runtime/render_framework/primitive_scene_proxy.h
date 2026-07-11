@@ -3,7 +3,7 @@
 #include <cstdint>
 
 #include <radray/basic_math.h>
-#include <radray/render/gpu_resource.h>
+#include <radray/runtime/gpu_resource.h>
 #include <radray/types.h>
 
 namespace radray {
@@ -13,7 +13,7 @@ struct MaterialRenderSnapshot;
 
 /// 一次索引绘制的参数 (对应 UE5 的 FMeshBatchElement 的索引子集)。
 struct MeshDrawArgs {
-    const render::RenderMesh::DrawData* Geometry{nullptr};  // VB/IB view
+    const GpuMesh::DrawData* Geometry{nullptr};  // VB/IB view
     uint32_t FirstIndex{0};
     uint32_t IndexCount{0};
     int32_t VertexOffset{0};
@@ -23,12 +23,14 @@ struct MeshDrawArgs {
 /// Corresponds to UE5's FPrimitiveSceneProxy.
 class PrimitiveSceneProxy {
 public:
-    PrimitiveSceneProxy() noexcept = default;
+    PrimitiveSceneProxy() noexcept;
     PrimitiveSceneProxy(const PrimitiveSceneProxy&) = delete;
     PrimitiveSceneProxy(PrimitiveSceneProxy&&) = delete;
     PrimitiveSceneProxy& operator=(const PrimitiveSceneProxy&) = delete;
     PrimitiveSceneProxy& operator=(PrimitiveSceneProxy&&) = delete;
     virtual ~PrimitiveSceneProxy() noexcept;
+
+    uint64_t GetGeneration() const noexcept { return _generation; }
 
     /// 逐物体 local->world 变换 (对应 UE5 的 GetLocalToWorld / Unity 的 unity_ObjectToWorld)。
     /// 基类默认单位阵; 具体 proxy 覆写。
@@ -54,6 +56,9 @@ public:
     virtual shared_ptr<const MaterialRenderSnapshot> GetSectionSnapshot(uint32_t /*sectionIndex*/) const noexcept {
         return nullptr;
     }
+
+private:
+    uint64_t _generation{0};
 };
 
 }  // namespace radray

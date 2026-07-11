@@ -70,6 +70,8 @@ public:
 private:
     friend class WindowManager;
 
+    void ReleaseBackBufferViews() noexcept;
+
     WindowManager* _manager;
     unique_ptr<NativeWindow> _window;
     NativeEventPump* _pump;

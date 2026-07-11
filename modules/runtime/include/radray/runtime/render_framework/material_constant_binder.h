@@ -7,8 +7,8 @@
 
 #include <radray/types.h>
 #include <radray/render/common.h>
-#include <radray/render/gpu_resource.h>
-#include <radray/render/shader_variant_cache.h>
+#include <radray/runtime/gpu_resource.h>
+#include <radray/runtime/shader_variant_library.h>
 
 namespace radray {
 
@@ -25,17 +25,14 @@ struct MaterialConstantValue {
 ///
 /// 问题背景:
 /// - HLSL 里材质参数打包进 cbuffer 块; 但材质 API 是按【字段名】(SetFloat("_Color")) 写值。
-/// - 底层 ShaderParameterTable 只按【块名】索引参数, 且 SetBytes 只认整块 root constant。
+/// - 底层 BindingGroup 只按 cbuffer binding 接收整块数据。
 /// - 因此需要一层用 shader 反射把"字段名 -> (所属块, 块内偏移, 大小)"解析出来, 在 CPU 端
 ///   把散字段打进块的正确偏移, 再整块提交。
 ///
 /// 设计要点:
 /// - 块布局按【变体指针】缓存 (反射是 per-variant 的: keyword 变了布局可能变)。变体由
-///   ShaderVariantCache 永生持有, 指针稳定, 可安全作为 key。
-/// - 打包时区分块的绑定类型:
-///   - Kind == Constant (push/root constant): 打包成整块后走 SetBytes。
-///   - Kind == Resource (真实 cbuffer / CBV): 从 CBufferArena 分配 upload buffer,
-///     memcpy 整块后走 SetResource(BufferViewUsage::CBuffer)。
+///   ShaderVariantLibrary 永生持有, 指针稳定, 可安全作为 key。
+/// - 材质块必须是 cbuffer / CBV；从持久常量池分配并整块绑定。
 /// - 材质字段可落在【任意非系统 cbuffer】: 打包器扫所有 cbuffer 块, 按名匹配填入,
 ///   reservedBlockNames (per-object / per-view 等系统块) 被跳过。
 /// - 纯打包逻辑, 不拥有 GPU 资源; upload buffer 生命周期归传入的 arena。
@@ -56,11 +53,12 @@ public:
     /// - reservedBlockNames: 跳过的系统块名 (per-object / per-view 等, 由执行器单独填充)。
     /// 返回成功绑定的 cbuffer 块数 (至少有一个值命中的块)。
     uint32_t Bind(
-        const render::CompiledShaderVariant& variant,
-        render::ShaderParameterTable& table,
-        render::CBufferArena& arena,
+        const CompiledShaderVariant& variant,
+        render::BindingGroup& group,
+        MaterialConstantPool& pool,
         std::span<const MaterialConstantValue> values,
-        std::span<const std::string_view> reservedBlockNames) noexcept;
+        std::span<const std::string_view> reservedBlockNames,
+        vector<MaterialConstantPool::Allocation>* allocations = nullptr) noexcept;
 
     /// 清空布局缓存 (变体缓存被清空 / 重编译后调用, 避免悬垂指针命中)。
     void ClearCache() noexcept;
@@ -76,22 +74,21 @@ private:
     /// 一个可承接材质常量的 cbuffer 块。
     struct BlockLayout {
         string Name;                                     // 块名 (= binding 名)
-        render::ShaderParameterId Id{0};                 // 在 binding layout 中的参数 id
         uint32_t Size{0};                                // 整块字节数
-        render::ShaderParameterKind Kind{render::ShaderParameterKind::UNKNOWN};  // Constant / Resource
+        std::optional<render::ShaderBindingLocation> Location{};
         vector<FieldLayout> Fields;
     };
 
     /// 取变体的块布局 (命中缓存或首次从反射提取)。
-    const vector<BlockLayout>& GetOrExtract(const render::CompiledShaderVariant& variant) noexcept;
+    const vector<BlockLayout>& GetOrExtract(const CompiledShaderVariant& variant) noexcept;
 
     /// 从一个 Shader 的反射把 cbuffer 块累加进 out (按块名去重: 已存在则跳过)。
     static void AppendBlocksFromReflection(
         render::Shader* shader,
-        render::ShaderBindingLayout* layout,
+        render::PipelineLayout* layout,
         vector<BlockLayout>& out) noexcept;
 
-    unordered_map<const render::CompiledShaderVariant*, vector<BlockLayout>> _cache;
+    unordered_map<const CompiledShaderVariant*, vector<BlockLayout>> _cache;
     vector<byte> _stagingScratch;
 };
 

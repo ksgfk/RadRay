@@ -4,8 +4,9 @@
 #include <fmt/format.h>
 
 #include <radray/guid.h>
-#include <radray/render/pipeline_state_cache.h>
-#include <radray/render/shader_variant_cache.h>
+#include <radray/runtime/pipeline_state_cache.h>
+#include <radray/runtime/render_pass_registry.h>
+#include <radray/runtime/shader_variant_library.h>
 #include <radray/render/shader_compiler/dxc.h>
 #include <radray/runtime/asset_manager.h>
 #include <radray/runtime/material_asset.h>
@@ -65,10 +66,12 @@ protected:
         if (!_ctx.Initialize(this->GetParam(), &reason)) {
             GTEST_SKIP() << fmt::format("Init failed on {}: {}", format_as(this->GetParam()), reason);
         }
-        _variantCache = CreateShaderVariantCache(
-                            _ctx.GetDevicePtr(), _ctx.GetDxc(), _ctx.GetShaderBindingLayoutCache())
+        _layoutLibrary = make_unique<PipelineLayoutLibrary>(_ctx.GetDevicePtr());
+        _variantCache = CreateShaderVariantLibrary(
+                            _ctx.GetDevicePtr(), _ctx.GetDxc(), _layoutLibrary.get())
                             .Release();
-        _psoCache = _ctx.GetDevicePtr()->CreateGraphicsPipelineStateCache().Release();
+        _renderPassRegistry = make_unique<RenderPassRegistry>(_ctx.GetDevicePtr());
+        _psoCache = make_unique<GraphicsPipelineStateLibrary>(_ctx.GetDevicePtr());
     }
 
     // 模拟一个 RenderPipelinePass 的核心逻辑: 对 DrawList 中每一项,
@@ -79,19 +82,47 @@ protected:
             return nullptr;
         }
         GraphicsPipelineStateDescriptor desc{};
-        desc.BindingLayout = variant.Get()->Layout;
+        desc.PipelineLayout = variant.Get()->Layout;
         desc.VS = ShaderEntry{.Target = variant.Get()->VS, .EntryPoint = passDesc.VertexEntry};
         desc.PS = ShaderEntry{.Target = variant.Get()->PS, .EntryPoint = passDesc.PixelEntry};
         desc.Primitive = passDesc.Primitive;
         desc.DepthStencil = passDesc.DepthStencil;
         desc.MultiSample = passDesc.MultiSample;
         desc.ColorTargets = passDesc.ColorTargets;
+        vector<RenderPassColorAttachmentDescriptor> colorAttachments;
+        colorAttachments.reserve(passDesc.ColorTargets.size());
+        for (const ColorTargetState& target : passDesc.ColorTargets) {
+            colorAttachments.push_back(RenderPassColorAttachmentDescriptor{
+                .Format = target.Format,
+                .SampleCount = passDesc.MultiSample.Count,
+                .Load = LoadAction::DontCare,
+                .Store = StoreAction::Store});
+        }
+        std::optional<RenderPassDepthStencilAttachmentDescriptor> depthAttachment;
+        if (passDesc.DepthStencil.has_value()) {
+            depthAttachment = RenderPassDepthStencilAttachmentDescriptor{
+                .Format = passDesc.DepthStencil->Format,
+                .SampleCount = passDesc.MultiSample.Count,
+                .DepthLoad = LoadAction::DontCare,
+                .DepthStore = StoreAction::Store,
+                .StencilLoad = LoadAction::DontCare,
+                .StencilStore = StoreAction::Discard};
+        }
+        auto renderPass = _renderPassRegistry->GetOrCreateRenderPass(RenderPassDescriptor{
+            .ColorAttachments = colorAttachments,
+            .DepthStencilAttachment = depthAttachment});
+        if (!renderPass.HasValue()) {
+            return nullptr;
+        }
+        desc.CompatibleRenderPass = renderPass.Get();
         return _psoCache->GetOrCreate(desc);
     }
 
     ComputeTestContext _ctx{};
-    unique_ptr<ShaderVariantCache> _variantCache{};
-    unique_ptr<GraphicsPipelineStateCache> _psoCache{};
+    unique_ptr<PipelineLayoutLibrary> _layoutLibrary{};
+    unique_ptr<ShaderVariantLibrary> _variantCache{};
+    unique_ptr<RenderPassRegistry> _renderPassRegistry{};
+    unique_ptr<GraphicsPipelineStateLibrary> _psoCache{};
 };
 
 TEST_P(PipelinePassResolveTest, DrawListItemResolvesToPso) {

@@ -4,8 +4,8 @@
 
 #include <radray/types.h>
 #include <radray/render/common.h>
-#include <radray/render/shader_variant_cache.h>
 #include <radray/runtime/asset_manager.h>
+#include <radray/runtime/sampler_cache.h>
 #include <radray/runtime/shader_asset.h>
 #include <radray/runtime/texture_asset.h>
 #include <radray/runtime/render_framework/material_constant_binder.h>
@@ -13,10 +13,12 @@
 
 namespace radray {
 
-namespace render {
-class SamplerCache;
-}  // namespace render
+struct MaterialBindingKey {
+    uint64_t Lo{0};
+    uint64_t Hi{0};
 
+    friend bool operator==(const MaterialBindingKey&, const MaterialBindingKey&) noexcept = default;
+};
 
 /// 组件产出的 per-section【绘制决策快照】(对应 UE5 的 FMaterialRenderProxy, 但走不可变快照
 /// 而非 enqueue-to-RT 模型)。
@@ -36,6 +38,7 @@ class SamplerCache;
 ///   即便 MaterialAsset 在此期间被 Unload 也不悬垂。
 /// - ResolveVariant / ApplyProperties / IsTransparent 从快照自身求解, 不再回查 MaterialAsset。
 struct MaterialRenderSnapshot {
+    MaterialBindingKey BindingKey{};
     /// 一条常量 property。Name 可以是:
     /// - cbuffer 块名 (整块覆盖, 对应 SetConstantBlock);
     /// - cbuffer 块内字段名 (对应 Unity 的 SetFloat("_Color"), 由 MaterialConstantBinder
@@ -77,15 +80,15 @@ struct MaterialRenderSnapshot {
     }
 
     /// 解析指定 pass 在快照 keyword 集下的变体。shader 空 / pass 越界 / 编译失败返回 nullptr。
-    Nullable<const render::CompiledShaderVariant*> ResolveVariant(
-        render::ShaderVariantCache& cache,
+    Nullable<const CompiledShaderVariant*> ResolveVariant(
+        ShaderVariantLibrary& cache,
         uint32_t passIndex,
         render::HlslShaderModel sm = render::HlslShaderModel::SM60) const noexcept;
 
     /// 同上, 但额外并入 extraKeywords (管线级全局 keyword, 对应 Unity Shader.EnableKeyword)。
     /// 快照自身 keyword 与 extra 取并集后投影为变体; 未在 shader 声明的名字被忽略。
-    Nullable<const render::CompiledShaderVariant*> ResolveVariant(
-        render::ShaderVariantCache& cache,
+    Nullable<const CompiledShaderVariant*> ResolveVariant(
+        ShaderVariantLibrary& cache,
         uint32_t passIndex,
         std::span<const std::string_view> extraKeywords,
         render::HlslShaderModel sm = render::HlslShaderModel::SM60) const noexcept;
@@ -95,16 +98,11 @@ struct MaterialRenderSnapshot {
     /// out 会被清空重填; 返回项的 Bytes 借用本快照的 Constants 存储 (快照存活期内有效)。
     void CollectConstants(vector<MaterialConstantValue>& out) const noexcept;
 
-    /// 把快照的纹理 / 采样器 property 写入 ShaderParameterTable。sampler 经 samplerCache
-    /// 按 descriptor 去重取稳定指针。返回成功写入的 property 数。
-    /// 常量 (cbuffer 字段) 不在此处理: 由 MaterialConstantBinder 用变体反射打包。
-    uint32_t ApplyResources(render::ShaderParameterTable& table, render::SamplerCache& samplerCache) const noexcept;
+    uint32_t ApplyResources(
+        render::BindingGroup& group,
+        const CompiledShaderVariant& variant,
+        SamplerCache& samplerCache) const noexcept;
 
-    /// 把快照的 property 值写入 ShaderParameterTable。sampler 经 samplerCache 按 descriptor
-    /// 去重取稳定指针。返回成功写入的 property 数。
-    /// 注意: 常量走整块 SetBytes (仅当 Name 恰为块名且 size 匹配), 无字段级打包;
-    /// 字段级打包需用 MaterialConstantBinder。本方法保留用于 headless 测试 / 兼容路径。
-    uint32_t ApplyProperties(render::ShaderParameterTable& table, render::SamplerCache& samplerCache) const noexcept;
 };
 
 }  // namespace radray

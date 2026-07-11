@@ -360,6 +360,9 @@ enum class ResourceHint : uint32_t {
     None = 0x0,
     Dedicated = 0x1,
     External = Dedicated << 1,
+    /// Keeps a mappable buffer mapped for its lifetime. BufferUse::MapRead or
+    /// BufferUse::MapWrite must also be present.
+    PersistentMap = External << 1,
 };
 
 enum class LoadAction : int32_t {
@@ -475,9 +478,10 @@ enum class RenderObjectTag : uint32_t {
     ComputeCmdEncoder = CmdEncoder | (CmdEncoder << 2),
     Fence = CmdEncoder << 3,
     Shader = Fence << 1,
-    ShaderBindingLayout = Shader << 1,
-    ShaderParameterTable = ShaderBindingLayout << 1,
-    PipelineState = ShaderParameterTable << 1,
+    PipelineLayout = Shader << 1,
+    DescriptorPool = PipelineLayout << 1,
+    BindingGroup = DescriptorPool << 1,
+    PipelineState = BindingGroup << 1,
     GraphicsPipelineState = PipelineState | (PipelineState << 1),
     ComputePipelineState = PipelineState | (PipelineState << 2),
     SwapChain = PipelineState << 3,
@@ -494,8 +498,9 @@ enum class RenderObjectTag : uint32_t {
     AccelerationStructure = RayTracingCmdEncoder << 1,
     RayTracingPipelineState = AccelerationStructure << 1,
     ShaderBindingTable = RayTracingPipelineState << 1,
-
-    VkInstance = ShaderBindingTable << 1,
+    RenderPass = ShaderBindingTable << 1,
+    Framebuffer = RenderPass << 1,
+    VkInstance = Framebuffer << 1,
     DXGIFactory = VkInstance << 1
 };
 
@@ -571,15 +576,15 @@ class Texture;
 class TextureView;
 class AccelerationStructureView;
 class Shader;
-class ShaderBindingLayout;
-class ShaderParameterTable;
-class ShaderBindingLayoutCache;
+class PipelineLayout;
+class DescriptorPool;
+class BindingGroup;
+class RenderPass;
+class Framebuffer;
 class PipelineState;
 class GraphicsPipelineState;
 class ComputePipelineState;
 class RayTracingPipelineState;
-class GraphicsPipelineStateCache;
-class ComputePipelineStateCache;
 class ShaderBindingTable;
 class AccelerationStructure;
 class Sampler;
@@ -847,25 +852,45 @@ struct BarrierAccelerationStructureDescriptor {
 
 using ResourceBarrierDescriptor = std::variant<BarrierBufferDescriptor, BarrierTextureDescriptor, BarrierAccelerationStructureDescriptor>;
 
-struct ColorAttachment {
-    TextureView* Target{nullptr};
+struct RenderPassColorAttachmentDescriptor {
+    TextureFormat Format{TextureFormat::UNKNOWN};
+    uint32_t SampleCount{1};
     LoadAction Load{LoadAction::DontCare};
     StoreAction Store{StoreAction::Store};
-    ColorClearValue ClearValue{};
+
+    friend bool operator==(const RenderPassColorAttachmentDescriptor&, const RenderPassColorAttachmentDescriptor&) noexcept = default;
 };
 
-struct DepthStencilAttachment {
-    TextureView* Target{nullptr};
+struct RenderPassDepthStencilAttachmentDescriptor {
+    TextureFormat Format{TextureFormat::UNKNOWN};
+    uint32_t SampleCount{1};
     LoadAction DepthLoad{};
     StoreAction DepthStore{};
     LoadAction StencilLoad{};
     StoreAction StencilStore{};
-    DepthStencilClearValue ClearValue{};
+
+    friend bool operator==(const RenderPassDepthStencilAttachmentDescriptor&, const RenderPassDepthStencilAttachmentDescriptor&) noexcept = default;
 };
 
 struct RenderPassDescriptor {
-    std::span<const ColorAttachment> ColorAttachments{};
-    std::optional<DepthStencilAttachment> DepthStencilAttachment{};
+    std::span<const RenderPassColorAttachmentDescriptor> ColorAttachments{};
+    std::optional<RenderPassDepthStencilAttachmentDescriptor> DepthStencilAttachment{};
+};
+
+struct FramebufferDescriptor {
+    RenderPass* Pass{nullptr};
+    std::span<TextureView* const> ColorAttachments{};
+    TextureView* DepthStencilAttachment{nullptr};
+    uint32_t Width{0};
+    uint32_t Height{0};
+    uint32_t Layers{1};
+};
+
+struct RenderPassBeginDescriptor {
+    RenderPass* Pass{nullptr};
+    Framebuffer* Target{nullptr};
+    std::span<const ColorClearValue> ColorClearValues{};
+    std::optional<DepthStencilClearValue> DepthStencilClearValue{};
     std::string_view Name{};
 };
 
@@ -902,6 +927,27 @@ struct BindlessArrayDescriptor {
     BindlessSlotType SlotType{BindlessSlotType::Multiple};
 };
 
+enum class DescriptorPoolLifetime : uint8_t {
+    Persistent,
+    PerFlight,
+};
+
+/// Capacity is explicit so the caller, rather than the backend, owns descriptor
+/// allocation policy. Counts are totals across all binding groups in the pool.
+struct DescriptorPoolDescriptor {
+    uint32_t MaxBindingGroups{1};
+    uint32_t MaxSampledTextures{0};
+    uint32_t MaxStorageTextures{0};
+    uint32_t MaxUniformBuffers{0};
+    uint32_t MaxDynamicUniformBuffers{0};
+    uint32_t MaxStorageBuffers{0};
+    uint32_t MaxReadOnlyTexelBuffers{0};
+    uint32_t MaxReadWriteTexelBuffers{0};
+    uint32_t MaxSamplers{0};
+    uint32_t MaxAccelerationStructures{0};
+    DescriptorPoolLifetime Lifetime{DescriptorPoolLifetime::Persistent};
+};
+
 struct BufferRange {
     uint64_t Offset{0};
     uint64_t Size{0};
@@ -936,20 +982,8 @@ struct ShaderDescriptor {
     std::optional<ShaderReflectionDesc> Reflection{};
 };
 
-struct ShaderParameterId {
-    uint32_t Value{0};
-
-    constexpr ShaderParameterId() noexcept = default;
-    constexpr ShaderParameterId(uint32_t value) noexcept : Value(value) {}
-
-    constexpr operator uint32_t() const noexcept { return Value; }
-
-    friend auto operator<=>(const ShaderParameterId& lhs, const ShaderParameterId& rhs) noexcept = default;
-};
-
 struct ShaderParameterInfo {
     string Name{};
-    ShaderParameterId Id{0};
     ShaderParameterKind Kind{ShaderParameterKind::UNKNOWN};
     ShaderStages Stages{ShaderStage::UNKNOWN};
     ResourceBindType Type{ResourceBindType::UNKNOWN};
@@ -968,9 +1002,73 @@ struct StaticSamplerDescriptor {
     friend bool operator==(const StaticSamplerDescriptor&, const StaticSamplerDescriptor&) noexcept = default;
 };
 
-struct ShaderBindingLayoutDescriptor {
+struct ShaderBindingLocation {
+    uint32_t Group{0};
+    uint32_t Binding{0};
+
+    friend bool operator==(const ShaderBindingLocation&, const ShaderBindingLocation&) noexcept = default;
+};
+
+struct BindingGroupLayoutEntry {
+    ShaderParameterInfo Parameter{};
+    uint32_t Binding{0};
+    bool HasDynamicOffset{false};
+    bool IsStaticSampler{false};
+
+    friend bool operator==(const BindingGroupLayoutEntry&, const BindingGroupLayoutEntry&) noexcept = default;
+};
+
+struct BindingGroupLayout {
+    uint32_t GroupIndex{0};
+    vector<BindingGroupLayoutEntry> Entries{};
+
+    friend bool operator==(const BindingGroupLayout&, const BindingGroupLayout&) noexcept = default;
+};
+
+struct PushConstantRange {
+    string Name{};
+    uint32_t Group{0};
+    uint32_t Binding{0};
+    ShaderStages Stages{ShaderStage::UNKNOWN};
+    uint32_t Offset{0};
+    uint32_t Size{0};
+
+    friend bool operator==(const PushConstantRange&, const PushConstantRange&) noexcept = default;
+};
+
+/// Identifies a cbuffer binding whose byte offset is supplied when the binding
+/// group is bound. Group maps to HLSL register space / Vulkan descriptor set;
+/// Binding maps to the reflected shader register / Vulkan binding.
+struct DynamicBufferBinding {
+    uint32_t Group{0};
+    uint32_t Binding{0};
+
+    friend bool operator==(const DynamicBufferBinding&, const DynamicBufferBinding&) noexcept = default;
+};
+
+struct PushConstantBinding {
+    uint32_t Group{0};
+    uint32_t Binding{0};
+
+    friend bool operator==(const PushConstantBinding&, const PushConstantBinding&) noexcept = default;
+};
+
+/// Reuses an already-created binding-group layout in a new pipeline layout.
+/// The caller owns both pipeline layouts and must keep Source alive longer than
+/// the layout being created. This is explicit object reuse, not a device cache.
+struct BindingGroupLayoutReuse {
+    uint32_t Group{0};
+    PipelineLayout* Source{nullptr};
+    uint32_t SourceGroup{0};
+};
+
+struct PipelineLayoutDescriptor {
     std::span<Shader*> Shaders{};
     std::span<const StaticSamplerDescriptor> StaticSamplers{};
+    std::span<const BindingGroupLayout> BindingGroupLayouts{};
+    std::span<const BindingGroupLayoutReuse> BindingGroupLayoutReuses{};
+    std::span<const DynamicBufferBinding> DynamicBufferBindings{};
+    std::span<const PushConstantBinding> PushConstantBindings{};
 };
 
 struct VertexElement {
@@ -1140,7 +1238,7 @@ struct ShaderEntry {
 };
 
 struct GraphicsPipelineStateDescriptor {
-    ShaderBindingLayout* BindingLayout{nullptr};
+    PipelineLayout* PipelineLayout{nullptr};
     std::optional<ShaderEntry> VS{};
     std::optional<ShaderEntry> PS{};
     std::span<const VertexBufferLayout> VertexLayouts{};
@@ -1148,10 +1246,11 @@ struct GraphicsPipelineStateDescriptor {
     std::optional<DepthStencilState> DepthStencil{};
     MultiSampleState MultiSample{};
     std::span<const ColorTargetState> ColorTargets{};
+    RenderPass* CompatibleRenderPass{nullptr};
 };
 
 struct ComputePipelineStateDescriptor {
-    ShaderBindingLayout* BindingLayout{nullptr};
+    PipelineLayout* PipelineLayout{nullptr};
     ShaderEntry CS{};
 };
 
@@ -1230,7 +1329,7 @@ struct RayTracingHitGroupDescriptor {
 };
 
 struct RayTracingPipelineStateDescriptor {
-    ShaderBindingLayout* BindingLayout{nullptr};
+    PipelineLayout* PipelineLayout{nullptr};
     std::span<const RayTracingShaderEntry> ShaderEntries{};
     std::span<const RayTracingHitGroupDescriptor> HitGroups{};
     uint32_t MaxRecursionDepth{1};
@@ -1310,6 +1409,7 @@ struct DeviceDetail {
     bool IsUMA{false};
     bool IsBindlessArraySupported{false};
     bool IsRayTracingSupported{false};
+    bool IsLayeredRenderingFromVertexShaderSupported{false};
 };
 
 class Device : public enable_shared_from_this<Device>, public RenderBase {
@@ -1338,13 +1438,21 @@ public:
 
     virtual Nullable<unique_ptr<TextureView>> CreateTextureView(const TextureViewDescriptor& desc) noexcept = 0;
 
+    virtual Nullable<unique_ptr<RenderPass>> CreateRenderPass(const RenderPassDescriptor& desc) noexcept = 0;
+
+    virtual Nullable<unique_ptr<Framebuffer>> CreateFramebuffer(const FramebufferDescriptor& desc) noexcept = 0;
+
     virtual Nullable<unique_ptr<Shader>> CreateShader(const ShaderDescriptor& desc) noexcept = 0;
 
-    virtual Nullable<unique_ptr<ShaderBindingLayoutCache>> CreateShaderBindingLayoutCache() noexcept = 0;
+    virtual Nullable<unique_ptr<PipelineLayout>> CreatePipelineLayout(const PipelineLayoutDescriptor& desc) noexcept = 0;
 
-    virtual Nullable<unique_ptr<ShaderBindingLayout>> CreateShaderBindingLayout(const ShaderBindingLayoutDescriptor& desc) noexcept = 0;
+    virtual Nullable<unique_ptr<DescriptorPool>> CreateDescriptorPool(const DescriptorPoolDescriptor& desc) noexcept = 0;
 
-    virtual Nullable<unique_ptr<ShaderParameterTable>> CreateShaderParameterTable(ShaderBindingLayout* layout) noexcept = 0;
+    /// Creates one independently bindable register-space/descriptor-set group.
+    virtual Nullable<unique_ptr<BindingGroup>> CreateBindingGroup(
+        DescriptorPool* pool,
+        PipelineLayout* layout,
+        uint32_t groupIndex) noexcept = 0;
 
     virtual Nullable<unique_ptr<GraphicsPipelineState>> CreateGraphicsPipelineState(const GraphicsPipelineStateDescriptor& desc) noexcept = 0;
 
@@ -1361,12 +1469,6 @@ public:
     virtual Nullable<unique_ptr<Sampler>> CreateSampler(const SamplerDescriptor& desc) noexcept = 0;
 
     virtual Nullable<unique_ptr<BindlessArray>> CreateBindlessArray(const BindlessArrayDescriptor& desc) noexcept = 0;
-
-    // PSO 缓存工厂. 缓存与后端无关 (仅调用虚函数 CreateGraphics/ComputePipelineState),
-    // 因此在通用层提供统一实现, 无需各后端各自实现.
-    Nullable<unique_ptr<GraphicsPipelineStateCache>> CreateGraphicsPipelineStateCache() noexcept;
-
-    Nullable<unique_ptr<ComputePipelineStateCache>> CreateComputePipelineStateCache() noexcept;
 
     static Nullable<shared_ptr<Device>> Create(const DeviceDescriptor& desc);
 };
@@ -1396,7 +1498,7 @@ public:
 
     virtual void ResourceBarrier(std::span<const ResourceBarrierDescriptor> barriers) noexcept = 0;
 
-    virtual Nullable<unique_ptr<GraphicsCommandEncoder>> BeginRenderPass(const RenderPassDescriptor& desc) noexcept = 0;
+    virtual Nullable<unique_ptr<GraphicsCommandEncoder>> BeginRenderPass(const RenderPassBeginDescriptor& desc) noexcept = 0;
 
     virtual void EndRenderPass(unique_ptr<GraphicsCommandEncoder> encoder) noexcept = 0;
 
@@ -1442,7 +1544,20 @@ public:
 
     virtual CommandBuffer* GetCommandBuffer() const noexcept = 0;
 
-    virtual void BindShaderParameters(ShaderParameterTable* table) noexcept = 0;
+    /// Binds one group. Dynamic offsets are ordered by ascending binding number
+    /// among layout entries marked DynamicBufferBinding for this group.
+    virtual void BindBindingGroup(
+        uint32_t groupIndex,
+        BindingGroup* group,
+        std::span<const uint32_t> dynamicOffsets = {}) noexcept = 0;
+
+    /// Writes one reflected push/root-constant range identified by its public
+    /// register-space and binding. Forward and Shadow do not use this API.
+    virtual bool SetPushConstants(
+        PipelineLayout* layout,
+        uint32_t groupIndex,
+        uint32_t binding,
+        std::span<const byte> data) noexcept = 0;
 };
 
 class GraphicsCommandEncoder : public CommandEncoder {
@@ -1590,6 +1705,42 @@ public:
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::AccelerationStructureView; }
 };
 
+class RenderPass : public RenderBase, public IDebugName {
+public:
+    virtual ~RenderPass() noexcept = default;
+
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::RenderPass; }
+
+    RenderPassDescriptor GetDesc() const noexcept;
+
+protected:
+    explicit RenderPass(const RenderPassDescriptor& desc);
+
+private:
+    vector<RenderPassColorAttachmentDescriptor> _colorAttachments;
+    std::optional<RenderPassDepthStencilAttachmentDescriptor> _depthStencilAttachment;
+};
+
+class Framebuffer : public RenderBase, public IDebugName {
+public:
+    virtual ~Framebuffer() noexcept = default;
+
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::Framebuffer; }
+
+    FramebufferDescriptor GetDesc() const noexcept;
+
+protected:
+    explicit Framebuffer(const FramebufferDescriptor& desc);
+
+private:
+    RenderPass* _pass{nullptr};
+    vector<TextureView*> _colorAttachments;
+    TextureView* _depthStencilAttachment{nullptr};
+    uint32_t _width{0};
+    uint32_t _height{0};
+    uint32_t _layers{1};
+};
+
 class Shader : public RenderBase {
 public:
     virtual ~Shader() noexcept = default;
@@ -1609,19 +1760,23 @@ protected:
     Guid _guid{};
 };
 
-class ShaderBindingLayout : public RenderBase, public IDebugName {
+class PipelineLayout : public RenderBase, public IDebugName {
 public:
-    virtual ~ShaderBindingLayout() noexcept = default;
+    virtual ~PipelineLayout() noexcept = default;
 
-    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::ShaderBindingLayout; }
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::PipelineLayout; }
 
     virtual vector<ShaderParameterInfo> GetParameters() const noexcept = 0;
 
-    virtual std::optional<ShaderParameterId> FindParameterId(std::string_view name) const noexcept = 0;
+    virtual Nullable<const ShaderParameterInfo*> FindParameter(std::string_view name) const noexcept = 0;
 
-    virtual Nullable<const ShaderParameterInfo*> FindParameter(ShaderParameterId id) const noexcept = 0;
+    virtual std::optional<ShaderBindingLocation> FindBindingLocation(std::string_view name) const noexcept = 0;
 
-    // 缓存层分配的稳定身份. 由 ShaderBindingLayoutCache 在创建时赋值.
+    virtual vector<BindingGroupLayout> GetBindingGroupLayouts() const noexcept = 0;
+
+    virtual vector<PushConstantRange> GetPushConstantRanges() const noexcept = 0;
+
+    // Optional identity assigned by an owning runtime resource library.
     Guid GetGuid() const noexcept { return _guid; }
     void SetGuid(Guid guid) noexcept { _guid = guid; }
 
@@ -1629,59 +1784,11 @@ protected:
     Guid _guid{};
 };
 
-class ShaderBindingLayoutCache : public RenderBase {
-public:
-    virtual ~ShaderBindingLayoutCache() noexcept = default;
-
-    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::UNKNOWN; }
-
-    virtual Nullable<ShaderBindingLayout*> GetOrCreate(const ShaderBindingLayoutDescriptor& desc) noexcept = 0;
-
-    virtual bool Remove(ShaderBindingLayout* layout) noexcept = 0;
-
-    virtual void Clear() noexcept = 0;
-
-    virtual uint32_t Count() const noexcept = 0;
-};
-
 class PipelineState : public RenderBase, public IDebugName {
 public:
     virtual ~PipelineState() noexcept = default;
 
     RenderObjectTags GetTag() const noexcept override { return RenderObjectTag::PipelineState; }
-};
-
-// PSO 缓存: 相同 descriptor (经 POD key 归一化) 返回同一 PSO 对象.
-// key 从 desc 里的 ShaderBindingLayout/Shader 的缓存分配 Guid + 展平后的渲染状态构造,
-// 因此 desc 引用的 layout/shader 必须经由缓存分配身份, 否则 GetOrCreate 失败.
-class GraphicsPipelineStateCache : public RenderBase {
-public:
-    virtual ~GraphicsPipelineStateCache() noexcept = default;
-
-    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::UNKNOWN; }
-
-    virtual Nullable<GraphicsPipelineState*> GetOrCreate(const GraphicsPipelineStateDescriptor& desc) noexcept = 0;
-
-    virtual bool Remove(GraphicsPipelineState* pso) noexcept = 0;
-
-    virtual void Clear() noexcept = 0;
-
-    virtual uint32_t Count() const noexcept = 0;
-};
-
-class ComputePipelineStateCache : public RenderBase {
-public:
-    virtual ~ComputePipelineStateCache() noexcept = default;
-
-    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::UNKNOWN; }
-
-    virtual Nullable<ComputePipelineState*> GetOrCreate(const ComputePipelineStateDescriptor& desc) noexcept = 0;
-
-    virtual bool Remove(ComputePipelineState* pso) noexcept = 0;
-
-    virtual void Clear() noexcept = 0;
-
-    virtual uint32_t Count() const noexcept = 0;
 };
 
 class GraphicsPipelineState : public PipelineState {
@@ -1729,40 +1836,41 @@ public:
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::AccelerationStructure; }
 };
 
-class ShaderParameterTable : public RenderBase, public IDebugName {
+class DescriptorPool : public RenderBase, public IDebugName {
 public:
-    virtual ~ShaderParameterTable() noexcept = default;
+    virtual ~DescriptorPool() noexcept = default;
 
-    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::ShaderParameterTable; }
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::DescriptorPool; }
 
-    /// Clears staged bindings while retaining backend descriptor storage for reuse.
-    /// Commands that previously referenced this table must have completed first.
+    /// Reset is only valid after all binding groups allocated from this pool
+    /// have been destroyed and their GPU work has completed.
+    virtual bool Reset() noexcept = 0;
+
+    virtual DescriptorPoolDescriptor GetDesc() const noexcept = 0;
+
+    virtual uint32_t GetAllocatedBindingGroupCount() const noexcept = 0;
+};
+
+/// A single independently bindable resource group/register space.
+class BindingGroup : public RenderBase, public IDebugName {
+public:
+    virtual ~BindingGroup() noexcept = default;
+
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::BindingGroup; }
+
     virtual void Reset() noexcept = 0;
 
-    virtual ShaderBindingLayout* GetShaderBindingLayout() const noexcept = 0;
+    virtual PipelineLayout* GetPipelineLayout() const noexcept = 0;
 
-    virtual bool SetResource(ShaderParameterId id, ResourceView* view, uint32_t arrayIndex = 0) noexcept = 0;
+    virtual uint32_t GetGroupIndex() const noexcept = 0;
 
-    virtual bool SetResource(ShaderParameterId id, const BufferBindingDescriptor& desc, uint32_t arrayIndex = 0) noexcept = 0;
+    virtual bool SetResource(uint32_t binding, ResourceView* view, uint32_t arrayIndex = 0) noexcept = 0;
 
-    virtual bool SetSampler(ShaderParameterId id, Sampler* sampler, uint32_t arrayIndex = 0) noexcept = 0;
+    virtual bool SetResource(uint32_t binding, const BufferBindingDescriptor& desc, uint32_t arrayIndex = 0) noexcept = 0;
 
-    virtual bool SetBytes(ShaderParameterId id, const void* data, uint32_t size) noexcept = 0;
+    virtual bool SetSampler(uint32_t binding, Sampler* sampler, uint32_t arrayIndex = 0) noexcept = 0;
 
-    virtual bool SetBindlessArray(ShaderParameterId id, BindlessArray* array) noexcept = 0;
-
-    bool SetResource(std::string_view name, ResourceView* view, uint32_t arrayIndex = 0) noexcept;
-
-    bool SetResource(std::string_view name, const BufferBindingDescriptor& desc, uint32_t arrayIndex = 0) noexcept;
-
-    bool SetSampler(std::string_view name, Sampler* sampler, uint32_t arrayIndex = 0) noexcept;
-
-    bool SetBytes(std::string_view name, const void* data, uint32_t size) noexcept;
-
-    bool SetBindlessArray(std::string_view name, BindlessArray* array) noexcept;
-
-private:
-    std::optional<ShaderParameterId> ResolveParameterId(std::string_view name) const noexcept;
+    virtual bool SetBindlessArray(uint32_t binding, BindlessArray* array) noexcept = 0;
 };
 
 class Sampler : public RenderBase, public IDebugName {
@@ -1829,6 +1937,9 @@ uint32_t GetIndexFormatSizeInBytes(IndexFormat format) noexcept;
 IndexFormat SizeInBytesToIndexFormat(uint32_t size) noexcept;
 uint32_t GetTextureFormatBytesPerPixel(TextureFormat format) noexcept;
 ResourceBindType BufferViewUsageToResourceBindType(BufferViewUsage usage) noexcept;
+bool IsGraphicsPipelineCompatibleWithRenderPass(
+    const GraphicsPipelineStateDescriptor& pipeline,
+    const RenderPass& renderPass) noexcept;
 // -------------------------------------------------------------------------
 
 std::string_view format_as(RenderBackend v) noexcept;

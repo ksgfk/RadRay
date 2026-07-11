@@ -106,7 +106,8 @@ StaticMeshSection::StaticMeshSection() noexcept
       FirstIndex(0),
       IndexCount(0),
       MinVertexIndex(0),
-      MaxVertexIndex(0) {
+      MaxVertexIndex(0),
+      VertexOffset(0) {
 }
 
 StaticMeshSection::StaticMeshSection(
@@ -114,12 +115,14 @@ StaticMeshSection::StaticMeshSection(
     uint32_t firstIndex,
     uint32_t indexCount,
     uint32_t minVertexIndex,
-    uint32_t maxVertexIndex) noexcept
+    uint32_t maxVertexIndex,
+    int32_t vertexOffset) noexcept
     : PrimitiveIndex(primitiveIndex),
       FirstIndex(firstIndex),
       IndexCount(indexCount),
       MinVertexIndex(minVertexIndex),
-      MaxVertexIndex(maxVertexIndex) {
+      MaxVertexIndex(maxVertexIndex),
+      VertexOffset(vertexOffset) {
 }
 
 StaticMesh::StaticMesh() noexcept
@@ -127,7 +130,7 @@ StaticMesh::StaticMesh() noexcept
       _boundsMax(Eigen::Vector3f::Zero()) {
 }
 
-StaticMesh::StaticMesh(MeshResource meshResource, render::RenderMesh renderMesh) noexcept
+StaticMesh::StaticMesh(MeshResource meshResource, shared_ptr<GpuMesh> renderMesh) noexcept
     : _meshResource(std::move(meshResource)),
       _boundsMin(Eigen::Vector3f::Zero()),
       _boundsMax(Eigen::Vector3f::Zero()),
@@ -137,8 +140,8 @@ StaticMesh::StaticMesh(MeshResource meshResource, render::RenderMesh renderMesh)
 StaticMesh::~StaticMesh() noexcept = default;
 
 void StaticMesh::OnUnload(IRenderResourceRecycler& recycler) {
-    if (_renderMesh.has_value()) {
-        for (auto& buffer : _renderMesh->_buffers) {
+    if (_renderMesh != nullptr && _renderMesh.use_count() == 1) {
+        for (auto& buffer : _renderMesh->Buffers) {
             recycler.RecycleRenderResource(std::move(buffer));
         }
     }
@@ -232,7 +235,7 @@ AssetLoadTask LoadStaticMesh(FrameUploadScheduler& frameUploads, MeshResource me
     // GPU 上传:两阶段 await(无 callback)。BeginUpload 挂起至帧顶拿到 cmd/uploader,
     // 在本协程里 inline 录制 copy,再 co_await WaitGpu 等该 flight 的 fence。
     FrameUploadScope frame = co_await frameUploads.BeginUpload();
-    std::optional<render::RenderMesh> renderMesh =
+    std::optional<GpuMesh> renderMesh =
         frame.GetUploader().UploadMeshResource(frame.GetCommandBuffer(), meshResource);
     if (!renderMesh.has_value()) {
         co_return AssetLoadResult::Failure("static mesh upload recording failed");
@@ -240,7 +243,9 @@ AssetLoadTask LoadStaticMesh(FrameUploadScheduler& frameUploads, MeshResource me
     co_await frame.WaitGpu();
 
     co_return AssetLoadResult::Success(
-        make_unique<StaticMesh>(std::move(meshResource), std::move(renderMesh.value())));
+        make_unique<StaticMesh>(
+            std::move(meshResource),
+            make_shared<GpuMesh>(std::move(renderMesh.value()))));
 }
 
 }  // namespace radray
