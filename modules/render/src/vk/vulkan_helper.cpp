@@ -205,10 +205,10 @@ VkPipelineStageFlags BufferStateToPipelineStageFlags(BufferStates v) noexcept {
 
 VkAccessFlags TextureStateToAccessFlags(TextureStates v) noexcept {
     VkAccessFlags access = 0;
-    if (v.HasFlag(TextureState::CopySource)) {
+    if (v.HasFlag(TextureState::CopySource) || v.HasFlag(TextureState::ResolveSource)) {
         access |= VK_ACCESS_TRANSFER_READ_BIT;
     }
-    if (v.HasFlag(TextureState::CopyDestination)) {
+    if (v.HasFlag(TextureState::CopyDestination) || v.HasFlag(TextureState::ResolveDestination)) {
         access |= VK_ACCESS_TRANSFER_WRITE_BIT;
     }
     if (v.HasFlag(TextureState::ShaderRead)) {
@@ -231,7 +231,8 @@ VkAccessFlags TextureStateToAccessFlags(TextureStates v) noexcept {
 
 VkPipelineStageFlags TextureStateToPipelineStageFlags(TextureStates v, bool isSrc) noexcept {
     VkPipelineStageFlags stage = 0;
-    if (v.HasFlag(TextureState::CopySource) || v.HasFlag(TextureState::CopyDestination)) {
+    if (v.HasFlag(TextureState::CopySource) || v.HasFlag(TextureState::CopyDestination) ||
+        v.HasFlag(TextureState::ResolveSource) || v.HasFlag(TextureState::ResolveDestination)) {
         stage |= VK_PIPELINE_STAGE_TRANSFER_BIT;
     }
     if (v.HasFlag(TextureState::ShaderRead)) {
@@ -269,10 +270,10 @@ VkImageLayout TextureStateToLayout(TextureStates v) noexcept {
     if (v.HasFlag(TextureState::Present)) {
         return VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
     }
-    if (v.HasFlag(TextureState::CopySource)) {
+    if (v.HasFlag(TextureState::CopySource) || v.HasFlag(TextureState::ResolveSource)) {
         return VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
     }
-    if (v.HasFlag(TextureState::CopyDestination)) {
+    if (v.HasFlag(TextureState::CopyDestination) || v.HasFlag(TextureState::ResolveDestination)) {
         return VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     }
     if (v.HasFlag(TextureState::RenderTarget)) {

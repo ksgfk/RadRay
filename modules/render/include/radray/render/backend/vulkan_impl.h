@@ -331,6 +331,10 @@ public:
 
     void CopyTextureToBuffer(Buffer* dst, uint64_t dstOffset, Texture* src, SubresourceRange srcRange) noexcept override;
 
+    void CopyTextureToTexture(const TextureCopyDescriptor& desc) noexcept override;
+
+    void ResolveTexture(const TextureResolveDescriptor& desc) noexcept override;
+
     void ResetQueryPool(QueryPool* pool, uint32_t firstIndex, uint32_t count) noexcept override;
 
     void WriteTimestamp(const QueryTimestampDescriptor& desc) noexcept override;
@@ -386,6 +390,10 @@ public:
 
     void DrawIndexed(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance) noexcept override;
 
+    void DrawIndirect(Buffer* argumentBuffer, uint64_t argumentOffset, uint32_t drawCount) noexcept override;
+
+    void DrawIndexedIndirect(Buffer* argumentBuffer, uint64_t argumentOffset, uint32_t drawCount) noexcept override;
+
 public:
     void DestroyImpl() noexcept;
 
@@ -424,6 +432,8 @@ public:
     void BindComputePipelineState(ComputePipelineState* pso) noexcept override;
 
     void Dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ) noexcept override;
+
+    void DispatchIndirect(Buffer* argumentBuffer, uint64_t argumentOffset) noexcept override;
 
 public:
     void DestroyImpl() noexcept;
@@ -1384,6 +1394,9 @@ public:
     bool SetBufferResource(uint32_t slot, uint32_t arrayIndex, const BufferBindingDescriptor& desc) noexcept;
 
     bool SetSampler(uint32_t slot, uint32_t arrayIndex, Sampler* sampler) noexcept;
+
+    Nullable<const PipelineLayoutVulkan::ParameterBinding*> FindFirstUnwrittenParameter(
+        uint32_t* arrayIndex = nullptr) const noexcept;
 
     bool IsFullyWritten() const noexcept;
     bool HasAnyWrite() const noexcept;

@@ -17,6 +17,25 @@ static bool _BindBindingGroupD3D12(
     std::span<const uint32_t> dynamicOffsets,
     bool graphicsRoot) noexcept;
 
+static ComPtr<ID3D12CommandSignature> _CreateIndirectCommandSignature(
+    ID3D12Device* device,
+    D3D12_INDIRECT_ARGUMENT_TYPE type,
+    uint32_t byteStride) noexcept {
+    D3D12_INDIRECT_ARGUMENT_DESC argument{};
+    argument.Type = type;
+    D3D12_COMMAND_SIGNATURE_DESC desc{};
+    desc.ByteStride = byteStride;
+    desc.NumArgumentDescs = 1;
+    desc.pArgumentDescs = &argument;
+    ComPtr<ID3D12CommandSignature> result;
+    if (HRESULT hr = device->CreateCommandSignature(&desc, nullptr, IID_PPV_ARGS(result.GetAddressOf()));
+        FAILED(hr)) {
+        RADRAY_ERR_LOG("ID3D12Device::CreateCommandSignature failed: {} {}", GetErrorName(hr), hr);
+        return nullptr;
+    }
+    return result;
+}
+
 static LogLevel _MapD3D12ValidationLogLevel(D3D12_MESSAGE_SEVERITY severity) noexcept {
     switch (severity) {
         case D3D12_MESSAGE_SEVERITY_CORRUPTION: return LogLevel::Critical;
@@ -980,6 +999,12 @@ DeviceD3D12::DeviceD3D12(
       _dxgiFactory(std::move(dxgiFactory)),
       _dxgiAdapter(std::move(dxgiAdapter)),
       _mainAlloc(std::move(mainAlloc)) {
+    _drawIndirectSignature = _CreateIndirectCommandSignature(
+        _device.Get(), D3D12_INDIRECT_ARGUMENT_TYPE_DRAW, sizeof(DrawIndirectArguments));
+    _drawIndexedIndirectSignature = _CreateIndirectCommandSignature(
+        _device.Get(), D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED, sizeof(DrawIndexedIndirectArguments));
+    _dispatchIndirectSignature = _CreateIndirectCommandSignature(
+        _device.Get(), D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH, sizeof(DispatchIndirectArguments));
     _cpuResAlloc = make_unique<CpuDescriptorAllocator>(_device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 512, 1);
     _cpuRtvAlloc = make_unique<CpuDescriptorAllocator>(_device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 128, 1);
     _cpuDsvAlloc = make_unique<CpuDescriptorAllocator>(_device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_DSV, 128, 1);
@@ -1020,6 +1045,9 @@ void DeviceD3D12::DestroyImpl() noexcept {
     _cpuSamplerAlloc = nullptr;
     _gpuResHeap = nullptr;
     _gpuSamplerHeap = nullptr;
+    _drawIndirectSignature = nullptr;
+    _drawIndexedIndirectSignature = nullptr;
+    _dispatchIndirectSignature = nullptr;
     _mainAlloc = nullptr;
     _device = nullptr;
     _dxgiAdapter = nullptr;
@@ -1114,6 +1142,7 @@ Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc
     DeviceDetail& detail = result->_detail;
     detail.CBufferAlignment = D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT;
     detail.TextureDataPitchAlignment = D3D12_TEXTURE_DATA_PITCH_ALIGNMENT;
+    detail.TextureDataPlacementAlignment = D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT;
     detail.MaxVertexInputBindings = D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT;
     detail.IsBindlessArraySupported = false;
     detail.MaxRayRecursionDepth = 0;
@@ -1567,6 +1596,7 @@ Nullable<unique_ptr<TextureView>> DeviceD3D12::CreateTextureView(const TextureVi
     // https://learn.microsoft.com/zh-cn/windows/win32/direct3d12/subresources
     // 三种 slice: mip 横向, array 纵向, plane 看起来更像是通道
     auto tex = CastD3D12Object(desc.Target);
+    const bool multisampled = tex->_rawDesc.SampleDesc.Count > 1;
     CpuDescriptorHeapViewRAII heapView{};
     DXGI_FORMAT dxgiFormat;
     if (desc.Usage == TextureViewUsage::Resource) {
@@ -1596,18 +1626,28 @@ Nullable<unique_ptr<TextureView>> DeviceD3D12::CreateTextureView(const TextureVi
                 srvDesc.Texture1DArray.ArraySize = desc.Range.ArrayLayerCount == SubresourceRange::All ? static_cast<UINT>(-1) : desc.Range.ArrayLayerCount;
                 break;
             case TextureDimension::Dim2D:
-                srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-                srvDesc.Texture2D.MostDetailedMip = desc.Range.BaseMipLevel;
-                srvDesc.Texture2D.MipLevels = desc.Range.MipLevelCount == SubresourceRange::All ? static_cast<UINT>(-1) : desc.Range.MipLevelCount;
-                srvDesc.Texture2D.PlaneSlice = 0;
+                if (multisampled) {
+                    srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DMS;
+                } else {
+                    srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+                    srvDesc.Texture2D.MostDetailedMip = desc.Range.BaseMipLevel;
+                    srvDesc.Texture2D.MipLevels = desc.Range.MipLevelCount == SubresourceRange::All ? static_cast<UINT>(-1) : desc.Range.MipLevelCount;
+                    srvDesc.Texture2D.PlaneSlice = 0;
+                }
                 break;
             case TextureDimension::Dim2DArray:
-                srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
-                srvDesc.Texture2DArray.MostDetailedMip = desc.Range.BaseMipLevel;
-                srvDesc.Texture2DArray.MipLevels = desc.Range.MipLevelCount == SubresourceRange::All ? static_cast<UINT>(-1) : desc.Range.MipLevelCount;
-                srvDesc.Texture2DArray.FirstArraySlice = desc.Range.BaseArrayLayer;
-                srvDesc.Texture2DArray.ArraySize = desc.Range.ArrayLayerCount == SubresourceRange::All ? static_cast<UINT>(-1) : desc.Range.ArrayLayerCount;
-                srvDesc.Texture2DArray.PlaneSlice = 0;
+                if (multisampled) {
+                    srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DMSARRAY;
+                    srvDesc.Texture2DMSArray.FirstArraySlice = desc.Range.BaseArrayLayer;
+                    srvDesc.Texture2DMSArray.ArraySize = desc.Range.ArrayLayerCount == SubresourceRange::All ? static_cast<UINT>(-1) : desc.Range.ArrayLayerCount;
+                } else {
+                    srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
+                    srvDesc.Texture2DArray.MostDetailedMip = desc.Range.BaseMipLevel;
+                    srvDesc.Texture2DArray.MipLevels = desc.Range.MipLevelCount == SubresourceRange::All ? static_cast<UINT>(-1) : desc.Range.MipLevelCount;
+                    srvDesc.Texture2DArray.FirstArraySlice = desc.Range.BaseArrayLayer;
+                    srvDesc.Texture2DArray.ArraySize = desc.Range.ArrayLayerCount == SubresourceRange::All ? static_cast<UINT>(-1) : desc.Range.ArrayLayerCount;
+                    srvDesc.Texture2DArray.PlaneSlice = 0;
+                }
                 break;
             case TextureDimension::Dim3D:
                 srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE3D;
@@ -1664,16 +1704,26 @@ Nullable<unique_ptr<TextureView>> DeviceD3D12::CreateTextureView(const TextureVi
                 rtvDesc.Texture1DArray.ArraySize = desc.Range.ArrayLayerCount == SubresourceRange::All ? static_cast<UINT>(-1) : desc.Range.ArrayLayerCount;
                 break;
             case TextureDimension::Dim2D:
-                rtvDesc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
-                rtvDesc.Texture2D.MipSlice = desc.Range.BaseMipLevel;
-                rtvDesc.Texture2D.PlaneSlice = 0;
+                if (multisampled) {
+                    rtvDesc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2DMS;
+                } else {
+                    rtvDesc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+                    rtvDesc.Texture2D.MipSlice = desc.Range.BaseMipLevel;
+                    rtvDesc.Texture2D.PlaneSlice = 0;
+                }
                 break;
             case TextureDimension::Dim2DArray:
-                rtvDesc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2DARRAY;
-                rtvDesc.Texture2DArray.MipSlice = desc.Range.BaseMipLevel;
-                rtvDesc.Texture2DArray.FirstArraySlice = desc.Range.BaseArrayLayer;
-                rtvDesc.Texture2DArray.ArraySize = desc.Range.ArrayLayerCount == SubresourceRange::All ? static_cast<UINT>(-1) : desc.Range.ArrayLayerCount;
-                rtvDesc.Texture2DArray.PlaneSlice = 0;
+                if (multisampled) {
+                    rtvDesc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2DMSARRAY;
+                    rtvDesc.Texture2DMSArray.FirstArraySlice = desc.Range.BaseArrayLayer;
+                    rtvDesc.Texture2DMSArray.ArraySize = desc.Range.ArrayLayerCount == SubresourceRange::All ? static_cast<UINT>(-1) : desc.Range.ArrayLayerCount;
+                } else {
+                    rtvDesc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2DARRAY;
+                    rtvDesc.Texture2DArray.MipSlice = desc.Range.BaseMipLevel;
+                    rtvDesc.Texture2DArray.FirstArraySlice = desc.Range.BaseArrayLayer;
+                    rtvDesc.Texture2DArray.ArraySize = desc.Range.ArrayLayerCount == SubresourceRange::All ? static_cast<UINT>(-1) : desc.Range.ArrayLayerCount;
+                    rtvDesc.Texture2DArray.PlaneSlice = 0;
+                }
                 break;
             case TextureDimension::Dim3D:
                 rtvDesc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE3D;
@@ -1719,14 +1769,24 @@ Nullable<unique_ptr<TextureView>> DeviceD3D12::CreateTextureView(const TextureVi
                 dsvDesc.Texture1DArray.ArraySize = desc.Range.ArrayLayerCount == SubresourceRange::All ? static_cast<UINT>(-1) : desc.Range.ArrayLayerCount;
                 break;
             case TextureDimension::Dim2D:
-                dsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
-                dsvDesc.Texture2D.MipSlice = desc.Range.BaseMipLevel;
+                if (multisampled) {
+                    dsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2DMS;
+                } else {
+                    dsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+                    dsvDesc.Texture2D.MipSlice = desc.Range.BaseMipLevel;
+                }
                 break;
             case TextureDimension::Dim2DArray:
-                dsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2DARRAY;
-                dsvDesc.Texture2DArray.MipSlice = desc.Range.BaseMipLevel;
-                dsvDesc.Texture2DArray.FirstArraySlice = desc.Range.BaseArrayLayer;
-                dsvDesc.Texture2DArray.ArraySize = desc.Range.ArrayLayerCount == SubresourceRange::All ? static_cast<UINT>(-1) : desc.Range.ArrayLayerCount;
+                if (multisampled) {
+                    dsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2DMSARRAY;
+                    dsvDesc.Texture2DMSArray.FirstArraySlice = desc.Range.BaseArrayLayer;
+                    dsvDesc.Texture2DMSArray.ArraySize = desc.Range.ArrayLayerCount == SubresourceRange::All ? static_cast<UINT>(-1) : desc.Range.ArrayLayerCount;
+                } else {
+                    dsvDesc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2DARRAY;
+                    dsvDesc.Texture2DArray.MipSlice = desc.Range.BaseMipLevel;
+                    dsvDesc.Texture2DArray.FirstArraySlice = desc.Range.BaseArrayLayer;
+                    dsvDesc.Texture2DArray.ArraySize = desc.Range.ArrayLayerCount == SubresourceRange::All ? static_cast<UINT>(-1) : desc.Range.ArrayLayerCount;
+                }
                 break;
             default:
                 RADRAY_ERR_LOG("d3d12 invalid texture view dimension: {}", desc.Dim);
@@ -3430,6 +3490,167 @@ void CmdListD3D12::CopyTextureToBuffer(Buffer* dst_, uint64_t dstOffset, Texture
     }
 }
 
+void CmdListD3D12::CopyTextureToTexture(const TextureCopyDescriptor& desc) noexcept {
+    if (desc.Source == nullptr || desc.Destination == nullptr) {
+        RADRAY_ERR_LOG("d3d12 CopyTextureToTexture source or destination is null");
+        return;
+    }
+    auto* src = CastD3D12Object(desc.Source);
+    auto* dst = CastD3D12Object(desc.Destination);
+    if (!src->IsValid() || !dst->IsValid() ||
+        !src->_usage.HasFlag(TextureUse::CopySource) ||
+        !dst->_usage.HasFlag(TextureUse::CopyDestination) ||
+        src->_format != dst->_format ||
+        src->_dimension != dst->_dimension ||
+        src->_rawDesc.SampleDesc.Count != dst->_rawDesc.SampleDesc.Count ||
+        IsDepthStencilFormat(src->_format)) {
+        RADRAY_ERR_LOG("d3d12 CopyTextureToTexture requires valid, matching non-depth textures with copy usage");
+        return;
+    }
+    if (desc.Width == 0 || desc.Height == 0 || desc.Depth == 0 || desc.ArrayLayerCount == 0 ||
+        desc.SourceMipLevel >= src->_rawDesc.MipLevels ||
+        desc.DestinationMipLevel >= dst->_rawDesc.MipLevels) {
+        RADRAY_ERR_LOG("d3d12 CopyTextureToTexture invalid extent, layer count, or mip level");
+        return;
+    }
+
+    const bool is3D = src->_rawDesc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D;
+    const bool is1D = src->_rawDesc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE1D;
+    const uint32_t srcWidth = std::max<uint32_t>(static_cast<uint32_t>(src->_rawDesc.Width >> desc.SourceMipLevel), 1);
+    const uint32_t srcHeight = is1D ? 1 : std::max(src->_rawDesc.Height >> desc.SourceMipLevel, 1u);
+    const uint32_t srcDepth = is3D ? std::max<uint32_t>(src->_rawDesc.DepthOrArraySize >> desc.SourceMipLevel, 1) : 1;
+    const uint32_t dstWidth = std::max<uint32_t>(static_cast<uint32_t>(dst->_rawDesc.Width >> desc.DestinationMipLevel), 1);
+    const uint32_t dstHeight = is1D ? 1 : std::max(dst->_rawDesc.Height >> desc.DestinationMipLevel, 1u);
+    const uint32_t dstDepth = is3D ? std::max<uint32_t>(dst->_rawDesc.DepthOrArraySize >> desc.DestinationMipLevel, 1) : 1;
+    if (desc.SourceX > srcWidth || desc.Width > srcWidth - desc.SourceX ||
+        desc.SourceY > srcHeight || desc.Height > srcHeight - desc.SourceY ||
+        desc.SourceZ > srcDepth || desc.Depth > srcDepth - desc.SourceZ ||
+        desc.DestinationX > dstWidth || desc.Width > dstWidth - desc.DestinationX ||
+        desc.DestinationY > dstHeight || desc.Height > dstHeight - desc.DestinationY ||
+        desc.DestinationZ > dstDepth || desc.Depth > dstDepth - desc.DestinationZ) {
+        RADRAY_ERR_LOG("d3d12 CopyTextureToTexture region is out of bounds");
+        return;
+    }
+
+    const uint32_t srcArraySize = is3D ? 1u : src->_rawDesc.DepthOrArraySize;
+    const uint32_t dstArraySize = is3D ? 1u : dst->_rawDesc.DepthOrArraySize;
+    if (is3D) {
+        if (desc.SourceArrayLayer != 0 || desc.DestinationArrayLayer != 0 || desc.ArrayLayerCount != 1) {
+            RADRAY_ERR_LOG("d3d12 CopyTextureToTexture 3D textures require array layer zero and one layer");
+            return;
+        }
+    } else {
+        if (desc.SourceZ != 0 || desc.DestinationZ != 0 || desc.Depth != 1 ||
+            desc.SourceArrayLayer >= srcArraySize || desc.ArrayLayerCount > srcArraySize - desc.SourceArrayLayer ||
+            desc.DestinationArrayLayer >= dstArraySize || desc.ArrayLayerCount > dstArraySize - desc.DestinationArrayLayer) {
+            RADRAY_ERR_LOG("d3d12 CopyTextureToTexture invalid array-layer or depth range");
+            return;
+        }
+    }
+    if (is1D && (desc.SourceY != 0 || desc.DestinationY != 0 || desc.Height != 1)) {
+        RADRAY_ERR_LOG("d3d12 CopyTextureToTexture 1D textures require a one-texel Y extent");
+        return;
+    }
+
+    const bool multisampled = src->_rawDesc.SampleDesc.Count > 1;
+    if (multisampled &&
+        (desc.SourceX != 0 || desc.SourceY != 0 || desc.SourceZ != 0 ||
+         desc.DestinationX != 0 || desc.DestinationY != 0 || desc.DestinationZ != 0 ||
+         desc.Width != srcWidth || desc.Height != srcHeight || desc.Depth != srcDepth ||
+         desc.Width != dstWidth || desc.Height != dstHeight || desc.Depth != dstDepth)) {
+        RADRAY_ERR_LOG("d3d12 CopyTextureToTexture multisampled copies must cover whole subresources");
+        return;
+    }
+
+    D3D12_BOX sourceBox{
+        desc.SourceX,
+        desc.SourceY,
+        desc.SourceZ,
+        desc.SourceX + desc.Width,
+        desc.SourceY + desc.Height,
+        desc.SourceZ + desc.Depth};
+    for (uint32_t layer = 0; layer < desc.ArrayLayerCount; ++layer) {
+        D3D12_TEXTURE_COPY_LOCATION sourceLocation{};
+        sourceLocation.pResource = src->_tex.Get();
+        sourceLocation.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        sourceLocation.SubresourceIndex = D3D12CalcSubresource(
+            desc.SourceMipLevel,
+            desc.SourceArrayLayer + layer,
+            0,
+            src->_rawDesc.MipLevels,
+            srcArraySize);
+
+        D3D12_TEXTURE_COPY_LOCATION destinationLocation{};
+        destinationLocation.pResource = dst->_tex.Get();
+        destinationLocation.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        destinationLocation.SubresourceIndex = D3D12CalcSubresource(
+            desc.DestinationMipLevel,
+            desc.DestinationArrayLayer + layer,
+            0,
+            dst->_rawDesc.MipLevels,
+            dstArraySize);
+        _cmdList->CopyTextureRegion(
+            &destinationLocation,
+            desc.DestinationX,
+            desc.DestinationY,
+            desc.DestinationZ,
+            &sourceLocation,
+            multisampled ? nullptr : &sourceBox);
+    }
+}
+
+void CmdListD3D12::ResolveTexture(const TextureResolveDescriptor& desc) noexcept {
+    if (desc.Source == nullptr || desc.Destination == nullptr) {
+        RADRAY_ERR_LOG("d3d12 ResolveTexture source or destination is null");
+        return;
+    }
+    auto* src = CastD3D12Object(desc.Source);
+    auto* dst = CastD3D12Object(desc.Destination);
+    if (!src->IsValid() || !dst->IsValid() ||
+        !src->_usage.HasFlag(TextureUse::CopySource) ||
+        !dst->_usage.HasFlag(TextureUse::CopyDestination) ||
+        src->_rawDesc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
+        dst->_rawDesc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
+        src->_format != dst->_format || IsDepthStencilFormat(src->_format) ||
+        src->_rawDesc.SampleDesc.Count <= 1 || dst->_rawDesc.SampleDesc.Count != 1 ||
+        desc.SourceMipLevel >= src->_rawDesc.MipLevels ||
+        desc.DestinationMipLevel >= dst->_rawDesc.MipLevels ||
+        desc.ArrayLayerCount == 0) {
+        RADRAY_ERR_LOG("d3d12 ResolveTexture requires matching 2D color textures with copy usage, multisampled source, and single-sampled destination");
+        return;
+    }
+    const uint32_t srcWidth = std::max<uint32_t>(static_cast<uint32_t>(src->_rawDesc.Width >> desc.SourceMipLevel), 1);
+    const uint32_t srcHeight = std::max(src->_rawDesc.Height >> desc.SourceMipLevel, 1u);
+    const uint32_t dstWidth = std::max<uint32_t>(static_cast<uint32_t>(dst->_rawDesc.Width >> desc.DestinationMipLevel), 1);
+    const uint32_t dstHeight = std::max(dst->_rawDesc.Height >> desc.DestinationMipLevel, 1u);
+    const uint32_t srcArraySize = src->_rawDesc.DepthOrArraySize;
+    const uint32_t dstArraySize = dst->_rawDesc.DepthOrArraySize;
+    if (srcWidth != dstWidth || srcHeight != dstHeight ||
+        desc.SourceArrayLayer >= srcArraySize || desc.ArrayLayerCount > srcArraySize - desc.SourceArrayLayer ||
+        desc.DestinationArrayLayer >= dstArraySize || desc.ArrayLayerCount > dstArraySize - desc.DestinationArrayLayer) {
+        RADRAY_ERR_LOG("d3d12 ResolveTexture subresource extents or array ranges do not match");
+        return;
+    }
+
+    const DXGI_FORMAT format = MapType(src->_format);
+    for (uint32_t layer = 0; layer < desc.ArrayLayerCount; ++layer) {
+        const uint32_t sourceSubresource = D3D12CalcSubresource(
+            desc.SourceMipLevel,
+            desc.SourceArrayLayer + layer,
+            0,
+            src->_rawDesc.MipLevels,
+            srcArraySize);
+        const uint32_t destinationSubresource = D3D12CalcSubresource(
+            desc.DestinationMipLevel,
+            desc.DestinationArrayLayer + layer,
+            0,
+            dst->_rawDesc.MipLevels,
+            dstArraySize);
+        _cmdList->ResolveSubresource(
+            dst->_tex.Get(), destinationSubresource, src->_tex.Get(), sourceSubresource, format);
+    }
+}
+
 void CmdListD3D12::ResetQueryPool(QueryPool* pool_, uint32_t firstIndex, uint32_t count) noexcept {
     auto pool = CastD3D12Object(pool_);
     if (pool == nullptr || !pool->IsValid() || count == 0 || firstIndex + count > pool->_desc.Count) {
@@ -3600,6 +3821,55 @@ void CmdRenderPassD3D12::DrawIndexed(uint32_t indexCount, uint32_t instanceCount
     _cmdList->_cmdList->DrawIndexedInstanced(indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
 }
 
+static Nullable<BufferD3D12*> _ValidateIndirectBufferD3D12(
+    Buffer* argumentBuffer,
+    uint64_t argumentOffset,
+    uint32_t commandCount,
+    uint32_t commandStride) noexcept {
+    if (argumentBuffer == nullptr || commandCount == 0 || argumentOffset % 4 != 0) {
+        RADRAY_ERR_LOG("d3d12 indirect command has a null buffer, zero count, or unaligned offset");
+        return nullptr;
+    }
+    auto* buffer = CastD3D12Object(argumentBuffer);
+    const uint64_t requiredSize = static_cast<uint64_t>(commandCount) * commandStride;
+    if (!buffer->IsValid() || !buffer->_usage.HasFlag(BufferUse::Indirect) ||
+        argumentOffset > buffer->_reqSize || requiredSize > buffer->_reqSize - argumentOffset) {
+        RADRAY_ERR_LOG("d3d12 indirect argument buffer is invalid, lacks BufferUse::Indirect, or is out of bounds");
+        return nullptr;
+    }
+    return buffer;
+}
+
+void CmdRenderPassD3D12::DrawIndirect(Buffer* argumentBuffer, uint64_t argumentOffset, uint32_t drawCount) noexcept {
+    auto buffer = _ValidateIndirectBufferD3D12(
+        argumentBuffer, argumentOffset, drawCount, sizeof(DrawIndirectArguments));
+    if (!buffer || _cmdList->_device->_drawIndirectSignature == nullptr) {
+        return;
+    }
+    _cmdList->_cmdList->ExecuteIndirect(
+        _cmdList->_device->_drawIndirectSignature.Get(),
+        drawCount,
+        buffer.Get()->_buf.Get(),
+        argumentOffset,
+        nullptr,
+        0);
+}
+
+void CmdRenderPassD3D12::DrawIndexedIndirect(Buffer* argumentBuffer, uint64_t argumentOffset, uint32_t drawCount) noexcept {
+    auto buffer = _ValidateIndirectBufferD3D12(
+        argumentBuffer, argumentOffset, drawCount, sizeof(DrawIndexedIndirectArguments));
+    if (!buffer || _cmdList->_device->_drawIndexedIndirectSignature == nullptr) {
+        return;
+    }
+    _cmdList->_cmdList->ExecuteIndirect(
+        _cmdList->_device->_drawIndexedIndirectSignature.Get(),
+        drawCount,
+        buffer.Get()->_buf.Get(),
+        argumentOffset,
+        nullptr,
+        0);
+}
+
 CmdComputePassD3D12::CmdComputePassD3D12(CmdListD3D12* cmdList) noexcept
     : _cmdList(cmdList) {}
 
@@ -3646,6 +3916,21 @@ void CmdComputePassD3D12::BindComputePipelineState(ComputePipelineState* pso) no
 
 void CmdComputePassD3D12::Dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ) noexcept {
     _cmdList->_cmdList->Dispatch(groupCountX, groupCountY, groupCountZ);
+}
+
+void CmdComputePassD3D12::DispatchIndirect(Buffer* argumentBuffer, uint64_t argumentOffset) noexcept {
+    auto buffer = _ValidateIndirectBufferD3D12(
+        argumentBuffer, argumentOffset, 1, sizeof(DispatchIndirectArguments));
+    if (!buffer || _cmdList->_device->_dispatchIndirectSignature == nullptr) {
+        return;
+    }
+    _cmdList->_cmdList->ExecuteIndirect(
+        _cmdList->_device->_dispatchIndirectSignature.Get(),
+        1,
+        buffer.Get()->_buf.Get(),
+        argumentOffset,
+        nullptr,
+        0);
 }
 
 CmdRayTracingPassD3D12::CmdRayTracingPassD3D12(CmdListD3D12* cmdList) noexcept
@@ -4159,21 +4444,33 @@ bool BufferD3D12::IsValid() const noexcept {
 }
 
 void BufferD3D12::Destroy() noexcept {
+    _mappedData = nullptr;
     _buf = nullptr;
     _alloc = nullptr;
 }
 
 void* BufferD3D12::Map(uint64_t offset, uint64_t size) noexcept {
-    D3D12_RANGE range{offset, offset + size};
+    if (_hints.HasFlag(ResourceHint::PersistentMap) && _mappedData != nullptr) {
+        return static_cast<byte*>(_mappedData) + offset;
+    }
+    const D3D12_RANGE readRange = _usage.HasFlag(BufferUse::MapRead)
+                                      ? D3D12_RANGE{offset, offset + size}
+                                      : D3D12_RANGE{0, 0};
     void* ptr = nullptr;
-    if (HRESULT hr = _buf->Map(0, &range, &ptr);
+    if (HRESULT hr = _buf->Map(0, &readRange, &ptr);
         FAILED(hr)) {
         RADRAY_ABORT("ID3D12Resource::Map failed: {} {}", GetErrorName(hr), hr);
     }
-    return ptr;
+    if (_hints.HasFlag(ResourceHint::PersistentMap)) {
+        _mappedData = ptr;
+    }
+    return static_cast<byte*>(ptr) + offset;
 }
 
 void BufferD3D12::Unmap(uint64_t offset, uint64_t size) noexcept {
+    if (_hints.HasFlag(ResourceHint::PersistentMap)) {
+        return;
+    }
     D3D12_RANGE range = _usage.HasFlag(BufferUse::MapWrite)
                             ? D3D12_RANGE{offset, offset + size}
                             : D3D12_RANGE{0, 0};

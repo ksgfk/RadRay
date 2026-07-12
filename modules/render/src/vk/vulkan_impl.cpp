@@ -651,19 +651,15 @@ static bool _BindDescriptorSetVulkan(
         return false;
     }
     if (!set->IsFullyWritten()) {
-        // 找到该 set 下第一个非静态采样器/非 bindless 参数作为缺失提示.
-        string missingName{};
-        for (const auto& binding : boundPipeLayout->GetParameterBindings()) {
-            if (binding.IsStaticSampler || binding.Info.IsBindless ||
-                binding.Info.Kind == ShaderParameterKind::Constant ||
-                binding.SetIndex != setIndex) {
-                continue;
-            }
-            missingName = binding.Info.Name;
-            break;
-        }
-        if (!missingName.empty()) {
-            RADRAY_ERR_LOG("descriptor set is missing parameter '{}'", missingName);
+        uint32_t missingArrayIndex = 0;
+        const auto* missing = set->FindFirstUnwrittenParameter(&missingArrayIndex).Get();
+        if (missing != nullptr && missing->Info.Count > 1) {
+            RADRAY_ERR_LOG(
+                "descriptor set is missing parameter '{}[{}]'",
+                missing->Info.Name,
+                missingArrayIndex);
+        } else if (missing != nullptr) {
+            RADRAY_ERR_LOG("descriptor set is missing parameter '{}'", missing->Info.Name);
         } else {
             RADRAY_ERR_LOG("descriptor set is not fully written");
         }
@@ -3787,6 +3783,7 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
         detail.GpuName = props.deviceName;
         detail.CBufferAlignment = (uint32_t)deviceR->_properties.limits.minUniformBufferOffsetAlignment;
         detail.TextureDataPitchAlignment = (uint32_t)deviceR->_properties.limits.optimalBufferCopyRowPitchAlignment;
+        detail.TextureDataPlacementAlignment = deviceR->_properties.limits.optimalBufferCopyOffsetAlignment;
         detail.MaxVertexInputBindings = deviceR->_properties.limits.maxVertexInputBindings;
         detail.IsUMA = (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU);
         detail.VramBudget = GetPhysicalDeviceMemoryAllSize(selectPhyDevice.memory, VK_MEMORY_HEAP_DEVICE_LOCAL_BIT);
@@ -4470,6 +4467,156 @@ void CommandBufferVulkan::CopyTextureToBuffer(Buffer* dst_, uint64_t dstOffset, 
     }
 }
 
+void CommandBufferVulkan::CopyTextureToTexture(const TextureCopyDescriptor& desc) noexcept {
+    if (desc.Source == nullptr || desc.Destination == nullptr) {
+        RADRAY_ERR_LOG("vk CopyTextureToTexture source or destination is null");
+        return;
+    }
+    auto* src = CastVkObject(desc.Source);
+    auto* dst = CastVkObject(desc.Destination);
+    if (!src->IsValid() || !dst->IsValid() ||
+        !src->_usage.HasFlag(TextureUse::CopySource) ||
+        !dst->_usage.HasFlag(TextureUse::CopyDestination) ||
+        src->_format != dst->_format || src->_dim != dst->_dim ||
+        src->_sampleCount != dst->_sampleCount || IsDepthStencilFormat(src->_format)) {
+        RADRAY_ERR_LOG("vk CopyTextureToTexture requires valid, matching non-depth textures with copy usage");
+        return;
+    }
+    if (desc.Width == 0 || desc.Height == 0 || desc.Depth == 0 || desc.ArrayLayerCount == 0 ||
+        desc.SourceMipLevel >= src->_mipLevels || desc.DestinationMipLevel >= dst->_mipLevels) {
+        RADRAY_ERR_LOG("vk CopyTextureToTexture invalid extent, layer count, or mip level");
+        return;
+    }
+
+    const bool is3D = src->_dim == TextureDimension::Dim3D;
+    const bool is1D = src->_dim == TextureDimension::Dim1D || src->_dim == TextureDimension::Dim1DArray;
+    const uint32_t srcWidth = std::max(src->_width >> desc.SourceMipLevel, 1u);
+    const uint32_t srcHeight = is1D ? 1 : std::max(src->_height >> desc.SourceMipLevel, 1u);
+    const uint32_t srcDepth = is3D ? std::max(src->_depthOrArraySize >> desc.SourceMipLevel, 1u) : 1u;
+    const uint32_t dstWidth = std::max(dst->_width >> desc.DestinationMipLevel, 1u);
+    const uint32_t dstHeight = is1D ? 1 : std::max(dst->_height >> desc.DestinationMipLevel, 1u);
+    const uint32_t dstDepth = is3D ? std::max(dst->_depthOrArraySize >> desc.DestinationMipLevel, 1u) : 1u;
+    if (desc.SourceX > srcWidth || desc.Width > srcWidth - desc.SourceX ||
+        desc.SourceY > srcHeight || desc.Height > srcHeight - desc.SourceY ||
+        desc.SourceZ > srcDepth || desc.Depth > srcDepth - desc.SourceZ ||
+        desc.DestinationX > dstWidth || desc.Width > dstWidth - desc.DestinationX ||
+        desc.DestinationY > dstHeight || desc.Height > dstHeight - desc.DestinationY ||
+        desc.DestinationZ > dstDepth || desc.Depth > dstDepth - desc.DestinationZ) {
+        RADRAY_ERR_LOG("vk CopyTextureToTexture region is out of bounds");
+        return;
+    }
+
+    const uint32_t srcArraySize = is3D ? 1u : src->_depthOrArraySize;
+    const uint32_t dstArraySize = is3D ? 1u : dst->_depthOrArraySize;
+    if (is3D) {
+        if (desc.SourceArrayLayer != 0 || desc.DestinationArrayLayer != 0 || desc.ArrayLayerCount != 1) {
+            RADRAY_ERR_LOG("vk CopyTextureToTexture 3D textures require array layer zero and one layer");
+            return;
+        }
+    } else if (desc.SourceZ != 0 || desc.DestinationZ != 0 || desc.Depth != 1 ||
+               desc.SourceArrayLayer >= srcArraySize || desc.ArrayLayerCount > srcArraySize - desc.SourceArrayLayer ||
+               desc.DestinationArrayLayer >= dstArraySize || desc.ArrayLayerCount > dstArraySize - desc.DestinationArrayLayer) {
+        RADRAY_ERR_LOG("vk CopyTextureToTexture invalid array-layer or depth range");
+        return;
+    }
+    if (is1D && (desc.SourceY != 0 || desc.DestinationY != 0 || desc.Height != 1)) {
+        RADRAY_ERR_LOG("vk CopyTextureToTexture 1D textures require a one-texel Y extent");
+        return;
+    }
+    if (src->_sampleCount > 1 &&
+        (desc.SourceX != 0 || desc.SourceY != 0 || desc.SourceZ != 0 ||
+         desc.DestinationX != 0 || desc.DestinationY != 0 || desc.DestinationZ != 0 ||
+         desc.Width != srcWidth || desc.Height != srcHeight || desc.Depth != srcDepth ||
+         desc.Width != dstWidth || desc.Height != dstHeight || desc.Depth != dstDepth)) {
+        RADRAY_ERR_LOG("vk CopyTextureToTexture multisampled copies must cover whole subresources");
+        return;
+    }
+
+    VkImageCopy region{};
+    region.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    region.srcSubresource.mipLevel = desc.SourceMipLevel;
+    region.srcSubresource.baseArrayLayer = desc.SourceArrayLayer;
+    region.srcSubresource.layerCount = is3D ? 1u : desc.ArrayLayerCount;
+    region.srcOffset = {
+        static_cast<int32_t>(desc.SourceX),
+        static_cast<int32_t>(desc.SourceY),
+        static_cast<int32_t>(desc.SourceZ)};
+    region.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    region.dstSubresource.mipLevel = desc.DestinationMipLevel;
+    region.dstSubresource.baseArrayLayer = desc.DestinationArrayLayer;
+    region.dstSubresource.layerCount = is3D ? 1u : desc.ArrayLayerCount;
+    region.dstOffset = {
+        static_cast<int32_t>(desc.DestinationX),
+        static_cast<int32_t>(desc.DestinationY),
+        static_cast<int32_t>(desc.DestinationZ)};
+    region.extent = {desc.Width, desc.Height, desc.Depth};
+    _device->_ftb.vkCmdCopyImage(
+        _cmdBuffer,
+        src->_image,
+        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        dst->_image,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        1,
+        &region);
+}
+
+void CommandBufferVulkan::ResolveTexture(const TextureResolveDescriptor& desc) noexcept {
+    if (desc.Source == nullptr || desc.Destination == nullptr) {
+        RADRAY_ERR_LOG("vk ResolveTexture source or destination is null");
+        return;
+    }
+    auto* src = CastVkObject(desc.Source);
+    auto* dst = CastVkObject(desc.Destination);
+    const bool sourceIs2D = src->_dim == TextureDimension::Dim2D ||
+                            src->_dim == TextureDimension::Dim2DArray ||
+                            src->_dim == TextureDimension::Cube ||
+                            src->_dim == TextureDimension::CubeArray;
+    const bool destinationIs2D = dst->_dim == TextureDimension::Dim2D ||
+                                 dst->_dim == TextureDimension::Dim2DArray ||
+                                 dst->_dim == TextureDimension::Cube ||
+                                 dst->_dim == TextureDimension::CubeArray;
+    if (!src->IsValid() || !dst->IsValid() ||
+        !src->_usage.HasFlag(TextureUse::CopySource) ||
+        !dst->_usage.HasFlag(TextureUse::CopyDestination) ||
+        !sourceIs2D || !destinationIs2D ||
+        src->_format != dst->_format || IsDepthStencilFormat(src->_format) ||
+        src->_sampleCount <= 1 || dst->_sampleCount != 1 ||
+        desc.SourceMipLevel >= src->_mipLevels || desc.DestinationMipLevel >= dst->_mipLevels ||
+        desc.ArrayLayerCount == 0) {
+        RADRAY_ERR_LOG("vk ResolveTexture requires matching 2D color textures with copy usage, multisampled source, and single-sampled destination");
+        return;
+    }
+    const uint32_t srcWidth = std::max(src->_width >> desc.SourceMipLevel, 1u);
+    const uint32_t srcHeight = std::max(src->_height >> desc.SourceMipLevel, 1u);
+    const uint32_t dstWidth = std::max(dst->_width >> desc.DestinationMipLevel, 1u);
+    const uint32_t dstHeight = std::max(dst->_height >> desc.DestinationMipLevel, 1u);
+    if (srcWidth != dstWidth || srcHeight != dstHeight ||
+        desc.SourceArrayLayer >= src->_depthOrArraySize || desc.ArrayLayerCount > src->_depthOrArraySize - desc.SourceArrayLayer ||
+        desc.DestinationArrayLayer >= dst->_depthOrArraySize || desc.ArrayLayerCount > dst->_depthOrArraySize - desc.DestinationArrayLayer) {
+        RADRAY_ERR_LOG("vk ResolveTexture subresource extents or array ranges do not match");
+        return;
+    }
+
+    VkImageResolve region{};
+    region.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    region.srcSubresource.mipLevel = desc.SourceMipLevel;
+    region.srcSubresource.baseArrayLayer = desc.SourceArrayLayer;
+    region.srcSubresource.layerCount = desc.ArrayLayerCount;
+    region.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    region.dstSubresource.mipLevel = desc.DestinationMipLevel;
+    region.dstSubresource.baseArrayLayer = desc.DestinationArrayLayer;
+    region.dstSubresource.layerCount = desc.ArrayLayerCount;
+    region.extent = {srcWidth, srcHeight, 1};
+    _device->_ftb.vkCmdResolveImage(
+        _cmdBuffer,
+        src->_image,
+        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        dst->_image,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        1,
+        &region);
+}
+
 void CommandBufferVulkan::ResetQueryPool(QueryPool* pool_, uint32_t firstIndex, uint32_t count) noexcept {
     auto pool = CastVkObject(pool_);
     if (pool == nullptr || !pool->IsValid() || count == 0 || firstIndex + count > pool->_desc.Count) {
@@ -4654,6 +4801,67 @@ void SimulateCommandEncoderVulkan::DrawIndexed(uint32_t indexCount, uint32_t ins
     _device->_ftb.vkCmdDrawIndexed(_cmdBuffer->_cmdBuffer, indexCount, instanceCount, firstIndex, vertexOffset, firstInstance);
 }
 
+static Nullable<BufferVulkan*> _ValidateIndirectBufferVulkan(
+    Buffer* argumentBuffer,
+    uint64_t argumentOffset,
+    uint32_t commandCount,
+    uint32_t commandStride) noexcept {
+    if (argumentBuffer == nullptr || commandCount == 0 || argumentOffset % 4 != 0) {
+        RADRAY_ERR_LOG("vk indirect command has a null buffer, zero count, or unaligned offset");
+        return nullptr;
+    }
+    auto* buffer = CastVkObject(argumentBuffer);
+    const uint64_t requiredSize = static_cast<uint64_t>(commandCount) * commandStride;
+    if (!buffer->IsValid() || !buffer->_usage.HasFlag(BufferUse::Indirect) ||
+        argumentOffset > buffer->_reqSizeLogical || requiredSize > buffer->_reqSizeLogical - argumentOffset) {
+        RADRAY_ERR_LOG("vk indirect argument buffer is invalid, lacks BufferUse::Indirect, or is out of bounds");
+        return nullptr;
+    }
+    return buffer;
+}
+
+void SimulateCommandEncoderVulkan::DrawIndirect(Buffer* argumentBuffer, uint64_t argumentOffset, uint32_t drawCount) noexcept {
+    auto buffer = _ValidateIndirectBufferVulkan(
+        argumentBuffer, argumentOffset, drawCount, sizeof(DrawIndirectArguments));
+    if (!buffer) {
+        return;
+    }
+    const uint32_t maxBatchSize = _device->_feature.multiDrawIndirect
+                                      ? std::max(_device->_properties.limits.maxDrawIndirectCount, 1u)
+                                      : 1u;
+    for (uint32_t firstDraw = 0; firstDraw < drawCount;) {
+        const uint32_t batchSize = std::min(drawCount - firstDraw, maxBatchSize);
+        _device->_ftb.vkCmdDrawIndirect(
+            _cmdBuffer->_cmdBuffer,
+            buffer.Get()->_buffer,
+            argumentOffset + static_cast<uint64_t>(firstDraw) * sizeof(DrawIndirectArguments),
+            batchSize,
+            sizeof(DrawIndirectArguments));
+        firstDraw += batchSize;
+    }
+}
+
+void SimulateCommandEncoderVulkan::DrawIndexedIndirect(Buffer* argumentBuffer, uint64_t argumentOffset, uint32_t drawCount) noexcept {
+    auto buffer = _ValidateIndirectBufferVulkan(
+        argumentBuffer, argumentOffset, drawCount, sizeof(DrawIndexedIndirectArguments));
+    if (!buffer) {
+        return;
+    }
+    const uint32_t maxBatchSize = _device->_feature.multiDrawIndirect
+                                      ? std::max(_device->_properties.limits.maxDrawIndirectCount, 1u)
+                                      : 1u;
+    for (uint32_t firstDraw = 0; firstDraw < drawCount;) {
+        const uint32_t batchSize = std::min(drawCount - firstDraw, maxBatchSize);
+        _device->_ftb.vkCmdDrawIndexedIndirect(
+            _cmdBuffer->_cmdBuffer,
+            buffer.Get()->_buffer,
+            argumentOffset + static_cast<uint64_t>(firstDraw) * sizeof(DrawIndexedIndirectArguments),
+            batchSize,
+            sizeof(DrawIndexedIndirectArguments));
+        firstDraw += batchSize;
+    }
+}
+
 SimulateComputeEncoderVulkan::SimulateComputeEncoderVulkan(
     DeviceVulkan* device,
     CommandBufferVulkan* cmdBuffer) noexcept
@@ -4708,6 +4916,18 @@ void SimulateComputeEncoderVulkan::BindComputePipelineState(ComputePipelineState
 
 void SimulateComputeEncoderVulkan::Dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ) noexcept {
     _device->_ftb.vkCmdDispatch(_cmdBuffer->_cmdBuffer, groupCountX, groupCountY, groupCountZ);
+}
+
+void SimulateComputeEncoderVulkan::DispatchIndirect(Buffer* argumentBuffer, uint64_t argumentOffset) noexcept {
+    auto buffer = _ValidateIndirectBufferVulkan(
+        argumentBuffer, argumentOffset, 1, sizeof(DispatchIndirectArguments));
+    if (!buffer) {
+        return;
+    }
+    _device->_ftb.vkCmdDispatchIndirect(
+        _cmdBuffer->_cmdBuffer,
+        buffer.Get()->_buffer,
+        argumentOffset);
 }
 
 CommandEncoderRayTracingVulkan::CommandEncoderRayTracingVulkan(
@@ -6833,11 +7053,12 @@ bool DescriptorSetVulkan::SetSampler(uint32_t slot, uint32_t arrayIndex, Sampler
     return true;
 }
 
-bool DescriptorSetVulkan::IsFullyWritten() const noexcept {
+Nullable<const PipelineLayoutVulkan::ParameterBinding*> DescriptorSetVulkan::FindFirstUnwrittenParameter(
+    uint32_t* arrayIndex) const noexcept {
     if (!this->IsValid()) {
-        return false;
+        return nullptr;
     }
-    // 遍历该 set 下的非静态采样器/非 bindless/非 push constant 参数, 检查是否全部写满.
+    // 遍历该 set 下的非静态采样器/非 bindless/非 push constant 参数, 找到第一个未写槽位.
     for (const auto& binding : _rootSig->GetParameterBindings()) {
         if (binding.IsStaticSampler || binding.Info.IsBindless ||
             binding.Info.Kind == ShaderParameterKind::Constant ||
@@ -6848,11 +7069,18 @@ bool DescriptorSetVulkan::IsFullyWritten() const noexcept {
         for (uint32_t j = 0; j < binding.Info.Count; ++j) {
             const uint32_t index = binding.DescriptorWriteOffset + j;
             if (index >= written.size() || !written[index]) {
-                return false;
+                if (arrayIndex != nullptr) {
+                    *arrayIndex = j;
+                }
+                return &binding;
             }
         }
     }
-    return true;
+    return nullptr;
+}
+
+bool DescriptorSetVulkan::IsFullyWritten() const noexcept {
+    return this->IsValid() && !this->FindFirstUnwrittenParameter().HasValue();
 }
 
 bool DescriptorSetVulkan::HasAnyWrite() const noexcept {

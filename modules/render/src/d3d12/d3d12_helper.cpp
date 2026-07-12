@@ -1073,6 +1073,12 @@ D3D12_RESOURCE_STATES MapType(TextureStates v) noexcept {
     if (v.HasFlag(TextureState::UnorderedAccess)) {
         result |= D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
     }
+    if (v.HasFlag(TextureState::ResolveSource)) {
+        result |= D3D12_RESOURCE_STATE_RESOLVE_SOURCE;
+    }
+    if (v.HasFlag(TextureState::ResolveDestination)) {
+        result |= D3D12_RESOURCE_STATE_RESOLVE_DEST;
+    }
     return result;
 }
 

@@ -21,6 +21,7 @@
 #include <radray/runtime/components/camera_control_component.h>
 #include <radray/runtime/render_framework/static_mesh_scene_proxy.h>
 #include <radray/runtime/render_framework/forward_pipeline_shader.h>
+#include <radray/runtime/render_framework/standard_material_factory.h>
 
 #include <radray/render/common.h>
 #include <radray/basic_math.h>
@@ -28,6 +29,7 @@
 #include <radray/vertex_data.h>
 #include <radray/logger.h>
 
+#include <algorithm>
 #include <limits>
 #include <string_view>
 
@@ -86,8 +88,8 @@ public:
     static constexpr render::TextureFormat BackBufferFormat = render::TextureFormat::BGRA8_UNORM;
 
     void OnInit() override {
-        if (!BuildShaders()) {
-            RADRAY_ERR_LOG("sphere_demo: failed to build shaders");
+        if (!InitializeMaterialFactory()) {
+            RADRAY_ERR_LOG("sphere_demo: failed to initialize the standard material factory");
             return;
         }
         BuildLight();
@@ -110,22 +112,13 @@ private:
         bool Assigned{false};
     };
 
-    bool BuildShaders() {
+    bool InitializeMaterialFactory() {
         RenderSystem* renderSystem = GetRenderSystem();
         if (renderSystem == nullptr) {
             return false;
         }
-        std::optional<StreamingAssetRef<ShaderAsset>> shader = BuildForwardShader(
-            *GetAssetManager(),
-            *renderSystem,
-            MakeForwardKeywordSet(),
-            BackBufferFormat,
-            /*withShadowCaster*/ true);
-        if (!shader.has_value()) {
-            return false;
-        }
-        _shaders = std::move(shader.value());
-        return true;
+        _materialFactory = renderSystem->GetStandardMaterialFactory();
+        return _materialFactory.HasValue();
     }
 
     // proxy 由 StaticMeshComponent 异步创建。故每帧尝试, 直到 proxy 出现并绑材质到所有 section。
@@ -174,10 +167,17 @@ private:
         RenderQueue queue,
         const ForwardMaterialConstants& mc,
         std::initializer_list<std::string_view> keywords) {
-        AssetManager* assets = GetAssetManager();
-        StreamingAssetRef<MaterialAsset> mat = assets->AddReady<MaterialAsset>(
-            Guid::NewGuid(),
-            make_unique<MaterialAsset>(_shaders));
+        StandardMaterialDescription desc{};
+        desc.AlphaMode = transparent
+                             ? StandardAlphaMode::Blend
+                             : (queue == RenderQueue::AlphaTest ? StandardAlphaMode::Mask
+                                                                : StandardAlphaMode::Opaque);
+        desc.DoubleSided = std::ranges::find(keywords, forward_pipeline::kKwDoubleSided) != keywords.end();
+        StreamingAssetRef<MaterialAsset> mat = _materialFactory->CreateMaterial(desc, {});
+        if (!mat.IsValid()) {
+            RADRAY_ERR_LOG("sphere_demo: failed to create material");
+            return {};
+        }
         mat->SetRenderQueue(queue);
         // PSO 固定功能状态 (blend / zwrite / cull) 由材质覆盖: 透明走 alpha blend + 关深度写 + 双面。
         if (transparent) {
@@ -304,7 +304,7 @@ private:
         control->BindToMainWindow(*this);
     }
 
-    StreamingAssetRef<ShaderAsset> _shaders{};
+    Nullable<IStandardMaterialFactory*> _materialFactory{nullptr};
     vector<MeshInstance> _instances{};
 };
 

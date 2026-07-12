@@ -505,6 +505,8 @@ std::string_view format_as(TextureState v) noexcept {
         case TextureState::DepthRead: return "DepthRead";
         case TextureState::DepthWrite: return "DepthWrite";
         case TextureState::UnorderedAccess: return "UnorderedAccess";
+        case TextureState::ResolveSource: return "ResolveSource";
+        case TextureState::ResolveDestination: return "ResolveDestination";
     }
     Unreachable();
 }

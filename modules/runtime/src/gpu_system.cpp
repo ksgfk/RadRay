@@ -19,8 +19,7 @@ namespace radray {
 
 namespace {
 
-constexpr uint64_t kMaxCachedStagingBytes = 64ull * 1024 * 1024;
-constexpr size_t kMaxCachedStagingBuffers = 8;
+constexpr uint64_t kStagingBufferCopyAlignment = 4;
 
 render::ResourceHints GetGpuAddressPageHints(render::Device* device) noexcept {
     return device != nullptr && device->GetBackend() == render::RenderBackend::D3D12
@@ -657,112 +656,177 @@ void AppFrameContext::SetManualSubmit() noexcept {
 //  StagingBufferPool
 // ═══════════════════════════════════════════════════════════════
 
-StagingBufferPool::StagingBufferPool(render::Device* device, uint32_t flightCount) noexcept
-    : _device(device) {
+StagingBufferPool::StagingBufferPool(
+    render::Device* device,
+    uint32_t flightCount,
+    const Descriptor& desc) noexcept
+    : _device(device), _desc(desc) {
+    if (_desc.PageSize == 0) {
+        RADRAY_ABORT("StagingBufferPool page size must be non-zero");
+    }
     _pending.resize(flightCount);
 }
 
+StagingBufferPool::StagingBufferPool(render::Device* device, uint32_t flightCount) noexcept
+    : StagingBufferPool(device, flightCount, Descriptor{}) {}
+
 StagingBufferPool::~StagingBufferPool() noexcept = default;
 
-StagingBufferPool::Allocation StagingBufferPool::Allocate(uint64_t size) {
-    // Best-fit avoids consuming a large cached upload buffer for a small copy.
-    auto best = _freeList.end();
-    for (auto it = _freeList.begin(); it != _freeList.end(); ++it) {
-        if (*it == nullptr || (*it)->GetDesc().Size < size) {
-            continue;
-        }
-        if (best == _freeList.end() || (*it)->GetDesc().Size < (*best)->GetDesc().Size) {
-            best = it;
-        }
-    }
-    if (best != _freeList.end()) {
-        auto buf = std::move(*best);
-        _freeList.erase(best);
-        void* mapped = buf->Map(0, size);
-        auto* rawPtr = buf.get();
-        _active.emplace_back(ActiveBuffer{
-            .Buffer = std::move(buf),
-            .IsMapped = true,
-            .MappedSize = size});
-        return Allocation{rawPtr, mapped, 0, size};
-    }
-    // 没有合适的，创建新的 staging buffer
+StagingBufferPool::Page StagingBufferPool::CreatePage(uint64_t capacity, bool cacheable) {
     render::BufferDescriptor desc{
-        .Size = size,
+        .Size = capacity,
         .Memory = render::MemoryType::Upload,
         .Usage = render::BufferUse::CopySource | render::BufferUse::MapWrite,
-        .Hints = _device->GetBackend() == render::RenderBackend::Vulkan
-                     ? render::ResourceHint::Dedicated
-                     : render::ResourceHint::None};
-    auto bufOpt = _device->CreateBuffer(desc);
-    if (!bufOpt.HasValue()) {
-        RADRAY_ABORT("StagingBufferPool::Allocate failed to create buffer of size {}", size);
+        .Hints = render::ResourceHint::PersistentMap};
+    auto bufferOpt = _device->CreateBuffer(desc);
+    if (!bufferOpt.HasValue()) {
+        RADRAY_ABORT("StagingBufferPool failed to create upload buffer of size {}", capacity);
     }
-    auto buf = bufOpt.Release();
-    buf->SetDebugName(fmt::format("staging_{}", size));
-    void* mapped = buf->Map(0, size);
-    auto* rawPtr = buf.get();
-    _active.emplace_back(ActiveBuffer{
-        .Buffer = std::move(buf),
-        .IsMapped = true,
-        .MappedSize = size});
-    return Allocation{rawPtr, mapped, 0, size};
+    auto buffer = bufferOpt.Release();
+    const std::string_view namePrefix = cacheable ? "staging_page" : "staging_large";
+    buffer->SetDebugName(fmt::format("{}_{}", namePrefix, _nextPageId++));
+    void* mapped = buffer->Map(0, capacity);
+    if (mapped == nullptr) {
+        RADRAY_ABORT("StagingBufferPool failed to map upload buffer of size {}", capacity);
+    }
+    return Page{
+        .Buffer = std::move(buffer),
+        .Mapped = mapped,
+        .Used = 0,
+        .Cacheable = cacheable};
 }
 
-void StagingBufferPool::FlushAndUnmap(const Allocation& allocation) {
-    if (allocation.Buffer == nullptr) {
-        return;
+StagingBufferPool::Page& StagingBufferPool::AcquireStandardPage() {
+    if (!_freeList.empty()) {
+        Page page = std::move(_freeList.back());
+        _freeList.pop_back();
+        page.Used = 0;
+        _active.emplace_back(std::move(page));
+    } else {
+        _active.emplace_back(CreatePage(_desc.PageSize, true));
     }
-    for (auto& active : _active) {
-        if (active.Buffer.get() != allocation.Buffer || !active.IsMapped) {
+    return _active.back();
+}
+
+bool StagingBufferPool::TryReserve(
+    Page& page,
+    uint64_t size,
+    uint64_t alignment,
+    uint64_t& offset) noexcept {
+    if (page.Buffer == nullptr ||
+        page.Used > std::numeric_limits<uint64_t>::max() - (alignment - 1)) {
+        return false;
+    }
+    const uint64_t candidate = Align(page.Used, alignment);
+    const uint64_t capacity = page.Buffer->GetDesc().Size;
+    if (candidate > capacity || size > capacity - candidate) {
+        return false;
+    }
+    offset = candidate;
+    page.Used = candidate + size;
+    return true;
+}
+
+StagingBufferPool::Allocation StagingBufferPool::Allocate(uint64_t size, uint64_t alignment) {
+    if (size == 0) {
+        return Allocation{};
+    }
+    if (alignment == 0 || (alignment & (alignment - 1)) != 0) {
+        RADRAY_ABORT("StagingBufferPool alignment {} must be a non-zero power of two", alignment);
+    }
+    if (_device == nullptr) {
+        RADRAY_ABORT("StagingBufferPool cannot allocate without a render device");
+    }
+
+    uint64_t offset = 0;
+    for (auto& page : _active) {
+        if (!page.Cacheable || !TryReserve(page, size, alignment, offset)) {
             continue;
         }
-        active.Buffer->Unmap(allocation.Offset, allocation.Size);
-        active.IsMapped = false;
-        active.MappedSize = 0;
+        return Allocation{
+            page.Buffer.get(),
+            static_cast<byte*>(page.Mapped) + offset,
+            offset,
+            size};
+    }
+
+    Page* page = nullptr;
+    if (size <= _desc.PageSize) {
+        page = &AcquireStandardPage();
+    } else {
+        if (size > std::numeric_limits<uint64_t>::max() - (alignment - 1)) {
+            RADRAY_ABORT("StagingBufferPool allocation size {} overflows alignment {}", size, alignment);
+        }
+        const uint64_t capacity = Align(size, alignment);
+        _active.emplace_back(CreatePage(capacity, false));
+        page = &_active.back();
+    }
+    if (!TryReserve(*page, size, alignment, offset)) {
+        RADRAY_ABORT(
+            "StagingBufferPool failed to reserve {} bytes with alignment {} from a {} byte page",
+            size,
+            alignment,
+            page->Buffer->GetDesc().Size);
+    }
+    return Allocation{
+        page->Buffer.get(),
+        static_cast<byte*>(page->Mapped) + offset,
+        offset,
+        size};
+}
+
+void StagingBufferPool::Flush(const Allocation& allocation) {
+    if (allocation.Buffer == nullptr || allocation.Size == 0) {
         return;
+    }
+    for (auto& page : _active) {
+        if (page.Buffer.get() == allocation.Buffer) {
+            page.Buffer->Unmap(allocation.Offset, allocation.Size);
+            return;
+        }
     }
 }
 
 void StagingBufferPool::RetireToFlight(uint32_t flightIndex) {
-    // 移入 pending 前确保没有仍保持映射的 staging buffer。
-    for (auto& active : _active) {
-        if (active.IsMapped) {
-            active.Buffer->Unmap(0, active.MappedSize);
-            active.IsMapped = false;
-            active.MappedSize = 0;
-        }
-    }
+    RADRAY_ASSERT(flightIndex < _pending.size());
     auto& pending = _pending[flightIndex];
-    for (auto& active : _active) {
-        pending.emplace_back(std::move(active.Buffer));
-    }
+    pending.insert(
+        pending.end(),
+        std::make_move_iterator(_active.begin()),
+        std::make_move_iterator(_active.end()));
     _active.clear();
 }
 
 void StagingBufferPool::CollectFlight(uint32_t flightIndex) {
+    RADRAY_ASSERT(flightIndex < _pending.size());
     auto& pending = _pending[flightIndex];
-    _freeList.insert(_freeList.end(),
-                     std::make_move_iterator(pending.begin()),
-                     std::make_move_iterator(pending.end()));
+    for (auto& page : pending) {
+        if (page.Cacheable) {
+            page.Used = 0;
+            _freeList.emplace_back(std::move(page));
+        }
+    }
     pending.clear();
     TrimFreeList();
 }
 
 void StagingBufferPool::TrimFreeList() noexcept {
-    std::erase_if(_freeList, [](const auto& buffer) noexcept {
-        return buffer == nullptr || buffer->GetDesc().Size > kMaxCachedStagingBytes;
-    });
-    std::ranges::sort(_freeList, [](const auto& lhs, const auto& rhs) noexcept {
-        return lhs->GetDesc().Size < rhs->GetDesc().Size;
+    std::erase_if(_freeList, [this](const Page& page) noexcept {
+        return page.Buffer == nullptr ||
+               !page.Cacheable ||
+               page.Buffer->GetDesc().Size != _desc.PageSize;
     });
 
     uint64_t cachedBytes = 0;
-    for (const auto& buffer : _freeList) {
-        cachedBytes += buffer->GetDesc().Size;
+    for (const auto& page : _freeList) {
+        const uint64_t pageSize = page.Buffer->GetDesc().Size;
+        cachedBytes = pageSize > std::numeric_limits<uint64_t>::max() - cachedBytes
+                          ? std::numeric_limits<uint64_t>::max()
+                          : cachedBytes + pageSize;
     }
-    while (_freeList.size() > kMaxCachedStagingBuffers || cachedBytes > kMaxCachedStagingBytes) {
-        cachedBytes -= _freeList.back()->GetDesc().Size;
+    while (!_freeList.empty() &&
+           (_freeList.size() > _desc.MaxCachedPages || cachedBytes > _desc.MaxCachedBytes)) {
+        cachedBytes -= _freeList.back().Buffer->GetDesc().Size;
         _freeList.pop_back();
     }
 }
@@ -792,9 +856,9 @@ void ResourceUploader::UploadBuffer(
     }
 
     // 分配 staging 并拷贝 CPU 数据
-    auto alloc = _stagingPool.Allocate(size);
+    auto alloc = _stagingPool.Allocate(size, kStagingBufferCopyAlignment);
     std::memcpy(alloc.MappedPtr, request.SrcData.data(), size);
-    _stagingPool.FlushAndUnmap(alloc);
+    _stagingPool.Flush(alloc);
 
     vector<render::ResourceBarrierDescriptor> barriersBefore;
     if (_device->GetBackend() == render::RenderBackend::Vulkan) {
@@ -892,7 +956,10 @@ void ResourceUploader::UploadTexture(
     }
 
     // 分配 staging 并拷贝 CPU 数据
-    auto alloc = _stagingPool.Allocate(uploadSize.value());
+    const uint64_t placementAlignment = std::max<uint64_t>(
+        kStagingBufferCopyAlignment,
+        _device->GetDetail().TextureDataPlacementAlignment);
+    auto alloc = _stagingPool.Allocate(uploadSize.value(), placementAlignment);
     auto* dst = static_cast<byte*>(alloc.MappedPtr);
     const auto* src = request.SrcData.data();
     const uint32_t mipLevel = request.DstRange.BaseMipLevel;
@@ -909,7 +976,7 @@ void ResourceUploader::UploadTexture(
             dstOffset += dstRowPitch;
         }
     }
-    _stagingPool.FlushAndUnmap(alloc);
+    _stagingPool.Flush(alloc);
 
     vector<render::ResourceBarrierDescriptor> barriersBefore;
     if (_device->GetBackend() == render::RenderBackend::Vulkan) {

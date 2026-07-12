@@ -382,6 +382,9 @@ public:
     ComPtr<IDXGIFactory4> _dxgiFactory;
     ComPtr<IDXGIAdapter1> _dxgiAdapter;
     ComPtr<D3D12MA::Allocator> _mainAlloc;
+    ComPtr<ID3D12CommandSignature> _drawIndirectSignature;
+    ComPtr<ID3D12CommandSignature> _drawIndexedIndirectSignature;
+    ComPtr<ID3D12CommandSignature> _dispatchIndirectSignature;
     std::array<vector<unique_ptr<CmdQueueD3D12>>, (size_t)QueueType::MAX_COUNT> _queues;
     unique_ptr<CpuDescriptorAllocator> _cpuResAlloc;
     unique_ptr<CpuDescriptorAllocator> _cpuRtvAlloc;
@@ -494,6 +497,10 @@ public:
 
     void CopyTextureToBuffer(Buffer* dst, uint64_t dstOffset, Texture* src, SubresourceRange srcRange) noexcept override;
 
+    void CopyTextureToTexture(const TextureCopyDescriptor& desc) noexcept override;
+
+    void ResolveTexture(const TextureResolveDescriptor& desc) noexcept override;
+
     void ResetQueryPool(QueryPool* pool, uint32_t firstIndex, uint32_t count) noexcept override;
 
     void WriteTimestamp(const QueryTimestampDescriptor& desc) noexcept override;
@@ -546,6 +553,10 @@ public:
 
     void DrawIndexed(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance) noexcept override;
 
+    void DrawIndirect(Buffer* argumentBuffer, uint64_t argumentOffset, uint32_t drawCount) noexcept override;
+
+    void DrawIndexedIndirect(Buffer* argumentBuffer, uint64_t argumentOffset, uint32_t drawCount) noexcept override;
+
 public:
     CmdListD3D12* _cmdList;
     GraphicsPsoD3D12* _boundPso{nullptr};
@@ -578,6 +589,8 @@ public:
     void BindComputePipelineState(ComputePipelineState* pso) noexcept override;
 
     void Dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ) noexcept override;
+
+    void DispatchIndirect(Buffer* argumentBuffer, uint64_t argumentOffset) noexcept override;
 
 public:
     CmdListD3D12* _cmdList;
@@ -692,6 +705,7 @@ public:
     MemoryType _memory{};
     BufferUses _usage{BufferUse::UNKNOWN};
     ResourceHints _hints{};
+    void* _mappedData{nullptr};
 };
 
 class QueryPoolD3D12 final : public QueryPool {

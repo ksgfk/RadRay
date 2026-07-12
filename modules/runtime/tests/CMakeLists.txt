@@ -6,6 +6,7 @@ radray_add_test(test_shader_asset SOURCES test_shader_asset.cpp LINK_LIBS radray
 radray_add_test(test_material_asset SOURCES test_material_asset.cpp LINK_LIBS radraycore radrayrender radrayruntime)
 radray_add_test(test_material_property_block SOURCES test_material_property_block.cpp LINK_LIBS radraycore radrayrender radrayruntime)
 radray_add_test(test_render_queue SOURCES test_render_queue.cpp LINK_LIBS radraycore radrayrender radrayruntime)
+radray_add_test(test_staging_buffer_pool SOURCES test_staging_buffer_pool.cpp LINK_LIBS radraycore radrayrender radrayruntime)
 
 # 设备级集成测试: material -> variant -> parameter table 全链路。复用 render 测试框架
 # (仅依赖 core+render), 需要 DXC; Vulkan 后端还需 SPIR-V Cross 反射。
@@ -57,4 +58,14 @@ if (RADRAY_ENABLE_DXC AND (RADRAY_ENABLE_D3D12 OR (RADRAY_ENABLE_VULKAN AND RADR
         NO_DISCOVER)
     target_include_directories(test_material_cbuffer_field PRIVATE ${CMAKE_SOURCE_DIR}/modules/render/tests)
     radray_add_gtest_case(MaterialCBufferFieldTest TARGET test_material_cbuffer_field FILTER RenderBackends/MaterialCBufferFieldTest.*)
+
+    # Upload page 子分配: buffer/texture 共享 page，验证非零 copy offset 与回读。
+    radray_add_test(test_resource_uploader
+        SOURCES
+            test_resource_uploader.cpp
+            ${CMAKE_SOURCE_DIR}/modules/render/tests/render_test_framework.cpp
+        LINK_LIBS radraycore radrayrender radrayruntime
+        NO_DISCOVER)
+    target_include_directories(test_resource_uploader PRIVATE ${CMAKE_SOURCE_DIR}/modules/render/tests)
+    radray_add_gtest_case(ResourceUploaderRuntimeTest TARGET test_resource_uploader FILTER RenderBackends/ResourceUploaderRuntimeTest.*)
 endif()

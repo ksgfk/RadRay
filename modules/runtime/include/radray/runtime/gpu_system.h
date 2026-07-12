@@ -397,41 +397,57 @@ private:
     bool _isInModalLoop;
 };
 
-/// Upload heap staging buffer 池。按 flight index 管理回收。
+/// Upload heap staging page 池。在 page 内线性分配，按 flight index 整页回收。
 class StagingBufferPool {
 public:
     using Allocation = StagingBufferAllocation;
 
+    struct Descriptor {
+        uint64_t PageSize{8ull * 1024 * 1024};
+        uint64_t MaxCachedBytes{64ull * 1024 * 1024};
+        uint32_t MaxCachedPages{8};
+    };
+
+    StagingBufferPool(render::Device* device, uint32_t flightCount, const Descriptor& desc) noexcept;
     explicit StagingBufferPool(render::Device* device, uint32_t flightCount) noexcept;
     ~StagingBufferPool() noexcept;
     StagingBufferPool(const StagingBufferPool&) = delete;
     StagingBufferPool& operator=(const StagingBufferPool&) = delete;
 
-    /// 从 Upload heap 分配一块 staging 内存。
-    Allocation Allocate(uint64_t size);
+    /// 从 Upload page 分配一块 staging 内存。超过 page 容量的请求使用一次性 buffer。
+    Allocation Allocate(uint64_t size, uint64_t alignment = 1);
 
-    /// 刷新并解除 staging 内存映射。
-    void FlushAndUnmap(const Allocation& allocation);
+    /// 刷新 staging 写入范围；page 在整个生命期内保持映射。
+    void Flush(const Allocation& allocation);
 
-    /// 将当前所有活跃 staging buffer 移入指定 flight 的 pending 列表。
+    /// 兼容旧接口；持久映射的 page 不会真正解除映射。
+    void FlushAndUnmap(const Allocation& allocation) { Flush(allocation); }
+
+    /// 将当前所有活跃 staging page 移入指定 flight 的 pending 列表。
     void RetireToFlight(uint32_t flightIndex);
 
-    /// 回收指定 flight 的 staging buffer 到 free list。
+    /// 回收指定 flight 的标准 page 到 free list，释放一次性 buffer。
     void CollectFlight(uint32_t flightIndex);
 
 private:
-    struct ActiveBuffer {
+    struct Page {
         unique_ptr<render::Buffer> Buffer;
-        bool IsMapped{false};
-        uint64_t MappedSize{0};
+        void* Mapped{nullptr};
+        uint64_t Used{0};
+        bool Cacheable{true};
     };
 
+    Page CreatePage(uint64_t capacity, bool cacheable);
+    Page& AcquireStandardPage();
+    static bool TryReserve(Page& page, uint64_t size, uint64_t alignment, uint64_t& offset) noexcept;
     void TrimFreeList() noexcept;
 
     render::Device* _device;
-    vector<ActiveBuffer> _active;
-    vector<vector<unique_ptr<render::Buffer>>> _pending;
-    vector<unique_ptr<render::Buffer>> _freeList;
+    Descriptor _desc;
+    vector<Page> _active;
+    vector<vector<Page>> _pending;
+    vector<Page> _freeList;
+    uint64_t _nextPageId{0};
 };
 
 /// 资源上传器。录制 copy 命令到外部传入的 CommandBuffer，管理 staging 生命周期。

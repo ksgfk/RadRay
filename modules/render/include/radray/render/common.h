@@ -336,7 +336,9 @@ enum class TextureState : uint32_t {
     RenderTarget = ShaderRead << 1,
     DepthRead = RenderTarget << 1,
     DepthWrite = DepthRead << 1,
-    UnorderedAccess = DepthWrite << 1
+    UnorderedAccess = DepthWrite << 1,
+    ResolveSource = UnorderedAccess << 1,
+    ResolveDestination = ResolveSource << 1
 };
 
 enum class BufferViewUsage : uint32_t {
@@ -725,6 +727,35 @@ struct QueryResolveDescriptor {
     uint32_t Count{0};
     Buffer* Destination{nullptr};
     uint64_t DestinationOffset{0};
+};
+
+struct TextureCopyDescriptor {
+    Texture* Destination{nullptr};
+    uint32_t DestinationMipLevel{0};
+    uint32_t DestinationArrayLayer{0};
+    uint32_t DestinationX{0};
+    uint32_t DestinationY{0};
+    uint32_t DestinationZ{0};
+    Texture* Source{nullptr};
+    uint32_t SourceMipLevel{0};
+    uint32_t SourceArrayLayer{0};
+    uint32_t SourceX{0};
+    uint32_t SourceY{0};
+    uint32_t SourceZ{0};
+    uint32_t Width{0};
+    uint32_t Height{0};
+    uint32_t Depth{1};
+    uint32_t ArrayLayerCount{1};
+};
+
+struct TextureResolveDescriptor {
+    Texture* Destination{nullptr};
+    uint32_t DestinationMipLevel{0};
+    uint32_t DestinationArrayLayer{0};
+    Texture* Source{nullptr};
+    uint32_t SourceMipLevel{0};
+    uint32_t SourceArrayLayer{0};
+    uint32_t ArrayLayerCount{1};
 };
 
 struct TimestampQueryResult {
@@ -1396,10 +1427,39 @@ struct IndexBufferView {
     uint32_t Stride{0};
 };
 
+/// Binary-compatible with D3D12_DRAW_ARGUMENTS and VkDrawIndirectCommand.
+struct DrawIndirectArguments {
+    uint32_t VertexCount{0};
+    uint32_t InstanceCount{0};
+    uint32_t FirstVertex{0};
+    uint32_t FirstInstance{0};
+};
+
+/// Binary-compatible with D3D12_DRAW_INDEXED_ARGUMENTS and VkDrawIndexedIndirectCommand.
+struct DrawIndexedIndirectArguments {
+    uint32_t IndexCount{0};
+    uint32_t InstanceCount{0};
+    uint32_t FirstIndex{0};
+    int32_t VertexOffset{0};
+    uint32_t FirstInstance{0};
+};
+
+/// Binary-compatible with D3D12_DISPATCH_ARGUMENTS and VkDispatchIndirectCommand.
+struct DispatchIndirectArguments {
+    uint32_t GroupCountX{0};
+    uint32_t GroupCountY{0};
+    uint32_t GroupCountZ{0};
+};
+
+static_assert(sizeof(DrawIndirectArguments) == 16);
+static_assert(sizeof(DrawIndexedIndirectArguments) == 20);
+static_assert(sizeof(DispatchIndirectArguments) == 12);
+
 struct DeviceDetail {
     string GpuName{};
     uint32_t CBufferAlignment{0};
     uint32_t TextureDataPitchAlignment{1};
+    uint64_t TextureDataPlacementAlignment{1};
     uint64_t VramBudget{0};
     uint32_t MaxVertexInputBindings{0};
     uint32_t MaxRayRecursionDepth{0};
@@ -1516,6 +1576,12 @@ public:
 
     virtual void CopyTextureToBuffer(Buffer* dst, uint64_t dstOffset, Texture* src, SubresourceRange srcRange) noexcept = 0;
 
+    /// Source requires CopySource usage and destination requires CopyDestination usage.
+    virtual void CopyTextureToTexture(const TextureCopyDescriptor& desc) noexcept = 0;
+
+    /// Resolves multisampled color. Source requires CopySource and destination requires CopyDestination usage.
+    virtual void ResolveTexture(const TextureResolveDescriptor& desc) noexcept = 0;
+
     virtual void ResetQueryPool(QueryPool* pool, uint32_t firstIndex, uint32_t count) noexcept = 0;
 
     virtual void WriteTimestamp(const QueryTimestampDescriptor& desc) noexcept = 0;
@@ -1579,6 +1645,12 @@ public:
     virtual void Draw(uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance) noexcept = 0;
 
     virtual void DrawIndexed(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance) noexcept = 0;
+
+    /// Executes tightly packed DrawIndirectArguments records.
+    virtual void DrawIndirect(Buffer* argumentBuffer, uint64_t argumentOffset, uint32_t drawCount = 1) noexcept = 0;
+
+    /// Executes tightly packed DrawIndexedIndirectArguments records.
+    virtual void DrawIndexedIndirect(Buffer* argumentBuffer, uint64_t argumentOffset, uint32_t drawCount = 1) noexcept = 0;
 };
 
 class ComputeCommandEncoder : public CommandEncoder {
@@ -1590,6 +1662,8 @@ public:
     virtual void BindComputePipelineState(ComputePipelineState* pso) noexcept = 0;
 
     virtual void Dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ) noexcept = 0;
+
+    virtual void DispatchIndirect(Buffer* argumentBuffer, uint64_t argumentOffset) noexcept = 0;
 };
 
 class RayTracingCommandEncoder : public CommandEncoder {
@@ -1677,6 +1751,8 @@ public:
 
     virtual void* Map(uint64_t offset, uint64_t size) noexcept = 0;
 
+    /// For ResourceHint::PersistentMap, flushes the range as required while
+    /// keeping the CPU mapping valid for the buffer lifetime.
     virtual void Unmap(uint64_t offset, uint64_t size) noexcept = 0;
 
     virtual BufferDescriptor GetDesc() const noexcept = 0;
