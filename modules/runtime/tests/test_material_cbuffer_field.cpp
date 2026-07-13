@@ -26,7 +26,7 @@ namespace {
 
 // 全屏三角 mesh pass, 材质参数走【真实 cbuffer】(非 push constant), 且按【字段名】设置。
 // - Material cbuffer (b0, space2): 普通 cbuffer, 含两个字段 BaseColor / Extra。
-//   材质用 SetVector("BaseColor", ...) 按字段名设置; MaterialConstantBinder 应把它按反射
+//   材质用 SetVector("BaseColor", ...) 按字段名设置; ShaderBindingPlan 应把它按反射
 //   偏移打进 Material 块并整块 (CBV) 提交。
 // - PerObject cbuffer (b1, space0): 系统块, 承载 ObjectToWorld, 由执行器单独填充, 打包器跳过。
 // PS 输出 = BaseColor.rgb, 从而验证按字段名设置的值确实通到了 GPU。
@@ -142,6 +142,10 @@ ShaderPassDesc MakeFieldPackPass() {
     pass.MultiSample = MultiSampleState::Default();
     pass.ColorTargets.push_back(ColorTargetState::Default(kRtFormat));
     pass.DynamicBufferBindings.push_back(DynamicBufferBinding{.Group = 0, .Binding = 1});
+    pass.ParameterSources.push_back(ShaderParameterSourceDesc{
+        .Name = "gPerObject",
+        .Scope = ShaderParameterScope::Object,
+        .ProviderName = "gPerObject"});
     OwningVertexBufferLayout layout{};
     layout.ArrayStride = sizeof(float) * 2;
     layout.StepMode = VertexStepMode::Vertex;

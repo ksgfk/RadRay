@@ -44,6 +44,19 @@ void AppendVertexLayout(ShaderPassDesc& pass) {
     pass.VertexLayouts.push_back(std::move(layout));
 }
 
+void AppendPositionVertexLayout(ShaderPassDesc& pass) {
+    OwningVertexBufferLayout layout{};
+    layout.ArrayStride = forward_pipeline::kVertexStride;
+    layout.StepMode = render::VertexStepMode::Vertex;
+    layout.Elements.push_back(render::VertexElement{
+        .Offset = 0,
+        .Semantic = "POSITION",
+        .SemanticIndex = 0,
+        .Format = render::VertexFormat::FLOAT32X3,
+        .Location = 0});
+    pass.VertexLayouts.push_back(std::move(layout));
+}
+
 void AddInterfaceBinding(
     ShaderPassDesc& pass,
     std::string_view name,
@@ -65,6 +78,84 @@ void AddInterfaceBinding(
         .HasDynamicOffset = dynamic,
         .IsStaticSampler = false,
         .Required = required});
+}
+
+void AddParameterSource(
+    ShaderPassDesc& pass,
+    std::string_view name,
+    ShaderParameterScope scope,
+    std::string_view providerName = {}) {
+    pass.ParameterSources.push_back(ShaderParameterSourceDesc{
+        .Name = string{name},
+        .Scope = scope,
+        .ProviderName = providerName.empty() ? string{name} : string{providerName}});
+}
+
+render::SamplerDescriptor MakeForwardDefaultSampler() noexcept {
+    render::SamplerDescriptor desc{};
+    desc.AddressS = render::AddressMode::Repeat;
+    desc.AddressT = render::AddressMode::Repeat;
+    desc.AddressR = render::AddressMode::Repeat;
+    desc.MinFilter = render::FilterMode::Linear;
+    desc.MagFilter = render::FilterMode::Linear;
+    desc.MipmapFilter = render::FilterMode::Linear;
+    desc.LodMin = 0.0f;
+    desc.LodMax = 32.0f;
+    desc.AnisotropyClamp = 8;
+    return desc;
+}
+
+vector<ShaderPropertyDesc> MakeForwardProperties() {
+    return {
+        ShaderPropertyDesc{
+            .Name = "BaseColor",
+            .Kind = ShaderPropertyKind::Vector,
+            .DefaultValue = Eigen::Vector4f{1.0f, 1.0f, 1.0f, 1.0f}},
+        ShaderPropertyDesc{
+            .Name = "Pbr",
+            .Kind = ShaderPropertyKind::Vector,
+            .DefaultValue = Eigen::Vector4f{1.0f, 1.0f, 0.5f, 1.0f}},
+        ShaderPropertyDesc{
+            .Name = "Emissive",
+            .Kind = ShaderPropertyKind::Vector,
+            .DefaultValue = Eigen::Vector4f{0.0f, 0.0f, 0.0f, 1.0f}},
+        ShaderPropertyDesc{
+            .Name = "Principled0",
+            .Kind = ShaderPropertyKind::Vector,
+            .DefaultValue = Eigen::Vector4f{0.5f, 0.0f, 0.0f, 0.0f}},
+        ShaderPropertyDesc{
+            .Name = "Principled1",
+            .Kind = ShaderPropertyKind::Vector,
+            .DefaultValue = Eigen::Vector4f::Zero()},
+        ShaderPropertyDesc{
+            .Name = "Principled2",
+            .Kind = ShaderPropertyKind::Vector,
+            .DefaultValue = Eigen::Vector4f{0.0f, 1.5f, 0.0f, 0.0f}},
+        ShaderPropertyDesc{
+            .Name = string{forward_pipeline::kTexBaseColor},
+            .Kind = ShaderPropertyKind::Texture,
+            .DefaultValue = ShaderDefaultTexture::WhiteSrgb},
+        ShaderPropertyDesc{
+            .Name = string{forward_pipeline::kTexMetalRough},
+            .Kind = ShaderPropertyKind::Texture,
+            .DefaultValue = ShaderDefaultTexture::WhiteLinear},
+        ShaderPropertyDesc{
+            .Name = string{forward_pipeline::kTexNormal},
+            .Kind = ShaderPropertyKind::Texture,
+            .DefaultValue = ShaderDefaultTexture::FlatNormal},
+        ShaderPropertyDesc{
+            .Name = string{forward_pipeline::kTexOcclusion},
+            .Kind = ShaderPropertyKind::Texture,
+            .DefaultValue = ShaderDefaultTexture::WhiteLinear},
+        ShaderPropertyDesc{
+            .Name = string{forward_pipeline::kTexEmissive},
+            .Kind = ShaderPropertyKind::Texture,
+            .DefaultValue = ShaderDefaultTexture::BlackSrgb},
+        ShaderPropertyDesc{
+            .Name = string{forward_pipeline::kSamplerName},
+            .Kind = ShaderPropertyKind::Sampler,
+            .DefaultValue = MakeForwardDefaultSampler()},
+    };
 }
 
 // 构造前向着色 pass 的【基线】固定状态 (不透明: 背面剔除、深度写开、无混合)。
@@ -127,6 +218,18 @@ ShaderPassDesc MakeForwardPass(
     AddInterfaceBinding(
         pass, "gSampler", 2, 6, render::ShaderParameterKind::Sampler,
         render::ResourceBindType::Sampler, render::ShaderStage::Pixel);
+    AddParameterSource(pass, "gPerObject", ShaderParameterScope::Object);
+    AddParameterSource(pass, "gView", ShaderParameterScope::View);
+    AddParameterSource(pass, "gShadowCube", ShaderParameterScope::Pass);
+    AddParameterSource(pass, "gShadowArray", ShaderParameterScope::Pass);
+    AddParameterSource(pass, "gShadowSampler", ShaderParameterScope::Pass);
+    AddParameterSource(pass, "gMaterial", ShaderParameterScope::Material);
+    AddParameterSource(pass, "gBaseColorMap", ShaderParameterScope::Material);
+    AddParameterSource(pass, "gMetalRoughMap", ShaderParameterScope::Material);
+    AddParameterSource(pass, "gNormalMap", ShaderParameterScope::Material);
+    AddParameterSource(pass, "gOcclusionMap", ShaderParameterScope::Material);
+    AddParameterSource(pass, "gEmissiveMap", ShaderParameterScope::Material);
+    AddParameterSource(pass, "gSampler", ShaderParameterScope::Material);
     AppendVertexLayout(pass);
     return pass;
 }
@@ -159,7 +262,42 @@ ShaderPassDesc MakeShadowCasterPass(const string& source, std::string_view shade
     AddInterfaceBinding(
         pass, "gShadowView", 1, 0, render::ShaderParameterKind::Resource,
         render::ResourceBindType::CBuffer, render::ShaderStage::Vertex, true);
+    AddParameterSource(pass, "gPerObject", ShaderParameterScope::Object);
+    AddParameterSource(pass, "gShadowView", ShaderParameterScope::View);
     AppendVertexLayout(pass);
+    return pass;
+}
+
+ShaderPassDesc MakeErrorPass(
+    const string& source,
+    std::string_view shaderRoot,
+    render::TextureFormat colorFormat) {
+    ShaderPassDesc pass{};
+    pass.PassTag = string{forward_pipeline::kForwardPassTag};
+    pass.Source = source;
+    pass.ProgramName = string{forward_pipeline::kErrorProgramName};
+    pass.VertexEntry = "VSMain";
+    pass.PixelEntry = "PSMain";
+    pass.Primitive = render::PrimitiveState::Default();
+    pass.MultiSample = render::MultiSampleState::Default();
+    pass.AllowMaterialRenderStateOverrides = false;
+    render::DepthStencilState depth = render::DepthStencilState::Default();
+    depth.Format = render::TextureFormat::D32_FLOAT;
+    pass.DepthStencil = depth;
+    pass.ColorTargets.push_back(render::ColorTargetState::Default(colorFormat));
+    pass.IncludeDirs.push_back(string{shaderRoot});
+    pass.DynamicBufferBindings = {
+        render::DynamicBufferBinding{.Group = 0, .Binding = 1},
+        render::DynamicBufferBinding{.Group = 1, .Binding = 0}};
+    AddInterfaceBinding(
+        pass, "gPerObject", 0, 1, render::ShaderParameterKind::Resource,
+        render::ResourceBindType::CBuffer, render::ShaderStage::Vertex, true);
+    AddInterfaceBinding(
+        pass, "gView", 1, 0, render::ShaderParameterKind::Resource,
+        render::ResourceBindType::CBuffer, render::ShaderStage::Vertex, true);
+    AddParameterSource(pass, "gPerObject", ShaderParameterScope::Object);
+    AddParameterSource(pass, "gView", ShaderParameterScope::View);
+    AppendPositionVertexLayout(pass);
     return pass;
 }
 
@@ -233,7 +371,24 @@ std::optional<StreamingAssetRef<ShaderAsset>> BuildForwardShader(
 
     return assets.AddReady<ShaderAsset>(
         Guid::NewGuid(),
-        make_unique<ShaderAsset>(keywords, std::move(passes)));
+        make_unique<ShaderAsset>(keywords, std::move(passes), MakeForwardProperties()));
+}
+
+std::optional<StreamingAssetRef<ShaderAsset>> BuildForwardErrorShader(
+    AssetManager& assets,
+    RenderSystem& renderSystem,
+    render::TextureFormat colorFormat) {
+    const string shaderRoot = renderSystem.GetShaderIncludeRoot();
+    std::optional<string> source = ReadForwardShaderSource(
+        shaderRoot, forward_pipeline::kErrorPassFile);
+    if (!source.has_value()) {
+        return std::nullopt;
+    }
+    vector<ShaderPassDesc> passes;
+    passes.push_back(MakeErrorPass(*source, shaderRoot, colorFormat));
+    return assets.AddReady<ShaderAsset>(
+        Guid::NewGuid(),
+        make_unique<ShaderAsset>(ShaderKeywordSet{}, std::move(passes)));
 }
 
 }  // namespace radray

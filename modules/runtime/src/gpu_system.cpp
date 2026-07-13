@@ -539,8 +539,15 @@ void GpuSystem::EndFrameRecordAndSubmit(uint32_t flightIndex) {
 
     // ManualSubmit：应用已自行 submit/present，runtime 仅负责 End 与后续回收。
     if (record.ManualSubmit) {
+        if (record.RenderResources != nullptr && record.RenderResources->HasPendingHostWrites()) {
+            RADRAY_ABORT("frame constants were written after AppFrameContext::SetManualSubmit");
+        }
         record.Targets.clear();
         return;
+    }
+
+    if (record.RenderResources != nullptr) {
+        record.RenderResources->FlushHostWrites();
     }
 
     // 聚合全部 target 的同步对象。
@@ -649,6 +656,9 @@ render::CommandQueue* AppFrameContext::GetMainQueue() const noexcept {
 }
 
 void AppFrameContext::SetManualSubmit() noexcept {
+    if (_gpuSystem->_flights[_flightIndex].RenderResources != nullptr) {
+        _gpuSystem->_flights[_flightIndex].RenderResources->FlushHostWrites();
+    }
     _gpuSystem->_flights[_flightIndex].ManualSubmit = true;
 }
 

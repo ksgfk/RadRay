@@ -195,12 +195,6 @@ public:
 
     Nullable<unique_ptr<BufferViewVulkan>> CreateBufferView(const VkBufferViewCreateInfo& info) noexcept;
 
-    Nullable<unique_ptr<SamplerVulkan>> CreateSamplerVulkan(const SamplerDescriptor& desc) noexcept;
-
-    Nullable<unique_ptr<SamplerVulkan>> CreateSamplerVulkan(const VkSamplerCreateInfo& desc) noexcept;
-
-    Nullable<unique_ptr<BindlessDescriptorSetVulkan>> CreateBindlessDescriptorSetVulkan(VkDescriptorType type, uint32_t capacity) noexcept;
-
     Nullable<unique_ptr<PipelineLayoutVulkan>> CreateRootSignatureInternal(const PipelineLayoutDescriptor& desc) noexcept;
 
     Nullable<unique_ptr<DescriptorSetVulkan>> CreateDescriptorSetInternal(
@@ -998,7 +992,7 @@ public:
 
     VkDescriptorSetLayout GetLayout() const noexcept { return _bdls->_layout; }
 
-private:
+public:
     unique_ptr<BindlessDescriptorSetVulkan> _bdls;
     FirstFitAllocator _allocator;
 };
@@ -1293,7 +1287,7 @@ public:
 
     uint32_t GetLiveAllocationCount() const noexcept { return _liveAllocationCount; }
 
-private:
+public:
     DescriptorPoolVulkan* NewPage(
         DescriptorSetLayoutVulkan* layout,
         std::optional<uint32_t> variableDescriptorCount) noexcept;
@@ -1331,7 +1325,7 @@ public:
     bool ReserveGroup(const DescriptorPoolDescriptor& usage) noexcept;
     void ReleaseGroup(const DescriptorPoolDescriptor& usage) noexcept;
 
-private:
+public:
     DeviceVulkan* _device{nullptr};
     DescriptorPoolDescriptor _desc{};
     DescriptorPoolDescriptor _used{};
@@ -1442,13 +1436,14 @@ public:
     bool SetResource(uint32_t binding, const BufferBindingDescriptor& desc, uint32_t arrayIndex = 0) noexcept override;
     bool SetSampler(uint32_t binding, Sampler* sampler, uint32_t arrayIndex = 0) noexcept override;
     bool SetBindlessArray(uint32_t binding, BindlessArray* array) noexcept override;
+    bool IsFullyWritten() const noexcept override;
 
     bool FlushDescriptorWrites() noexcept;
     DescriptorSetVulkan* GetDescriptorSet() const noexcept { return _descriptorSet.get(); }
     BindlessArray* GetBindlessArray() const noexcept { return _bindlessArray; }
     const BufferBindingDescriptor* GetDynamicBuffer(uint32_t parameterIndex) const noexcept;
 
-private:
+public:
     DeviceVulkan* _device{nullptr};
     BindingDescriptorPoolVulkan* _pool{nullptr};
     PipelineLayoutVulkan* _layout{nullptr};

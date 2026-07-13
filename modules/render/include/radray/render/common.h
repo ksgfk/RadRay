@@ -1947,6 +1947,9 @@ public:
     virtual bool SetSampler(uint32_t binding, Sampler* sampler, uint32_t arrayIndex = 0) noexcept = 0;
 
     virtual bool SetBindlessArray(uint32_t binding, BindlessArray* array) noexcept = 0;
+
+    /// Returns true only when every non-static parameter in this group has been written.
+    virtual bool IsFullyWritten() const noexcept = 0;
 };
 
 class Sampler : public RenderBase, public IDebugName {

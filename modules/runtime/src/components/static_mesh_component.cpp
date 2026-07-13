@@ -114,6 +114,7 @@ void StaticMeshComponent::RefreshMaterialSnapshots(StaticMeshSceneProxy& proxy) 
         MaterialSlot& slot = _sectionMaterials[s];
         MaterialAsset* mat = slot.Material.Get();
         const AssetHandle handle = slot.Material.GetHandle();
+        const uint64_t materialRevision = mat != nullptr ? mat->GetRevision() : 0;
         const MaterialPropertyBlock* block = slot.PropertyBlock.get();
         const uint64_t blockVersion = block != nullptr ? block->GetVersion() : 0;
         // 脏判定: 显式置脏 / 解析指针变化 (Loading->Ready) / handle 变化 (换材质或 slot 回收复用)
@@ -121,6 +122,7 @@ void StaticMeshComponent::RefreshMaterialSnapshots(StaticMeshSceneProxy& proxy) 
         const bool needRebuild = slot.Dirty ||
                                  mat != slot.LastPtr ||
                                  handle != slot.LastHandle ||
+                                 materialRevision != slot.LastMaterialRevision ||
                                  block != slot.LastBlockPtr ||
                                  blockVersion != slot.LastBlockVersion;
         if (!needRebuild) {
@@ -129,6 +131,7 @@ void StaticMeshComponent::RefreshMaterialSnapshots(StaticMeshSceneProxy& proxy) 
         proxy.SetSectionSnapshot(s, mat != nullptr ? mat->CreateSnapshot(block) : nullptr);
         slot.LastPtr = mat;
         slot.LastHandle = handle;
+        slot.LastMaterialRevision = materialRevision;
         slot.LastBlockPtr = block;
         slot.LastBlockVersion = blockVersion;
         slot.Dirty = false;

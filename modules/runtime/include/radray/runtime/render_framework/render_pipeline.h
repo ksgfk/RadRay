@@ -17,6 +17,7 @@ class AppFrameContext;
 class CameraComponent;
 class Scene;
 class IStandardMaterialFactory;
+struct MaterialRenderSnapshot;
 
 /// 渲染队列排序值 (对应 Unity 的 Material.renderQueue)。
 /// 数值越小越先绘制; >= Transparent 的走 back-to-front 半透明排序。
@@ -155,6 +156,7 @@ public:
     /// 本管线的标准材质工厂 (把中性材质描述翻译成本管线材质)。
     /// 返回 null 表示该管线不支持标准材质导入。由管线持有, 生命周期 == 管线。
     virtual Nullable<IStandardMaterialFactory*> GetStandardMaterialFactory() noexcept { return nullptr; }
+    virtual shared_ptr<const MaterialRenderSnapshot> GetErrorMaterial() noexcept { return nullptr; }
 
 protected:
     /// Override points for concrete pipelines. They mirror SRP's frame/camera

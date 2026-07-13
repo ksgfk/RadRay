@@ -252,6 +252,7 @@ uint32_t MaterialConstantBinder::Bind(
             pool.Release(allocation);
         }
     }
+    pool.FlushHostWrites();
     return bound;
 }
 

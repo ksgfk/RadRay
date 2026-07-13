@@ -2011,11 +2011,11 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateRootSignatureInternal(cons
                            });
             });
         parameterBindings[i].HasDynamicOffset = explicitlyDynamic || std::ranges::any_of(
-            desc.DynamicBufferBindings,
-            [&](const DynamicBufferBinding& dynamicBinding) noexcept {
-                return dynamicBinding.Group == merged.D3D12Parameters[i].RegisterSpace &&
-                       dynamicBinding.Binding == merged.D3D12Parameters[i].ShaderRegister;
-            });
+                                                                         desc.DynamicBufferBindings,
+                                                                         [&](const DynamicBufferBinding& dynamicBinding) noexcept {
+                                                                             return dynamicBinding.Group == merged.D3D12Parameters[i].RegisterSpace &&
+                                                                                    dynamicBinding.Binding == merged.D3D12Parameters[i].ShaderRegister;
+                                                                         });
         if (parameterBindings[i].HasDynamicOffset &&
             (parameters[i].Type != ResourceBindType::CBuffer || parameters[i].Count != 1)) {
             RADRAY_ERR_LOG(
@@ -2274,65 +2274,9 @@ Nullable<unique_ptr<PipelineLayout>> DeviceD3D12::CreatePipelineLayout(const Pip
     return unique_ptr<PipelineLayout>{layout.Release()};
 }
 
-static DescriptorPoolDescriptor _GetBindingGroupPoolUsage(
-    PipelineLayout* layout,
-    uint32_t groupIndex) noexcept {
-    DescriptorPoolDescriptor usage{};
-    for (const BindingGroupLayout& group : layout->GetBindingGroupLayouts()) {
-        if (group.GroupIndex != groupIndex) {
-            continue;
-        }
-        for (const BindingGroupLayoutEntry& entry : group.Entries) {
-            if (entry.IsStaticSampler || entry.Parameter.IsBindless) {
-                continue;
-            }
-            const uint32_t count = entry.Parameter.Count;
-            switch (entry.Parameter.Type) {
-                case ResourceBindType::CBuffer:
-                    if (entry.HasDynamicOffset) {
-                        usage.MaxDynamicUniformBuffers += count;
-                    } else {
-                        usage.MaxUniformBuffers += count;
-                    }
-                    break;
-                case ResourceBindType::Buffer:
-                case ResourceBindType::RWBuffer:
-                    usage.MaxStorageBuffers += count;
-                    break;
-                case ResourceBindType::TexelBuffer:
-                    usage.MaxReadOnlyTexelBuffers += count;
-                    break;
-                case ResourceBindType::RWTexelBuffer:
-                    usage.MaxReadWriteTexelBuffers += count;
-                    break;
-                case ResourceBindType::Texture:
-                    usage.MaxSampledTextures += count;
-                    break;
-                case ResourceBindType::RWTexture:
-                    usage.MaxStorageTextures += count;
-                    break;
-                case ResourceBindType::Sampler:
-                    usage.MaxSamplers += count;
-                    break;
-                case ResourceBindType::AccelerationStructure:
-                    usage.MaxAccelerationStructures += count;
-                    break;
-                case ResourceBindType::UNKNOWN:
-                    break;
-            }
-        }
-        break;
-    }
-    return usage;
-}
-
 Nullable<unique_ptr<DescriptorPool>> DeviceD3D12::CreateDescriptorPool(
     const DescriptorPoolDescriptor& desc) noexcept {
-    if (desc.MaxBindingGroups == 0) {
-        RADRAY_ERR_LOG("d3d12 descriptor pool MaxBindingGroups must be greater than zero");
-        return nullptr;
-    }
-    return unique_ptr<DescriptorPool>{make_unique<DescriptorPoolD3D12>(this, desc).release()};
+    return make_unique<DescriptorPoolD3D12>(desc);
 }
 
 Nullable<unique_ptr<BindingGroup>> DeviceD3D12::CreateBindingGroup(
@@ -2360,18 +2304,13 @@ Nullable<unique_ptr<BindingGroup>> DeviceD3D12::CreateBindingGroup(
     DescriptorSetSlotD3D12 slot{};
     uint32_t resourceCount = 0;
     uint32_t samplerCount = 0;
-    const DescriptorPoolDescriptor poolUsage = _GetBindingGroupPoolUsage(layout, groupIndex);
     if (!layout->HasBindlessSet(groupIndex)) {
         resourceCount = layout->GetDescriptorSetResourceCount(groupIndex);
         samplerCount = layout->GetDescriptorSetSamplerCount(groupIndex);
-        if (!pool->Reserve(poolUsage)) {
-            return nullptr;
-        }
         if (resourceCount > 0) {
             auto allocation = _gpuResHeap->Allocate(resourceCount);
             if (!allocation.has_value()) {
                 RADRAY_ERR_LOG("failed to allocate d3d12 binding group resource descriptors");
-                pool->Release(poolUsage);
                 return nullptr;
             }
             slot.ResHeapView = GpuDescriptorHeapViewRAII{_gpuResHeap.get(), allocation.value()};
@@ -2381,7 +2320,6 @@ Nullable<unique_ptr<BindingGroup>> DeviceD3D12::CreateBindingGroup(
             auto allocation = _gpuSamplerHeap->Allocate(samplerCount);
             if (!allocation.has_value()) {
                 RADRAY_ERR_LOG("failed to allocate d3d12 binding group sampler descriptors");
-                pool->Release(poolUsage);
                 return nullptr;
             }
             slot.SamplerHeapView = GpuDescriptorHeapViewRAII{_gpuSamplerHeap.get(), allocation.value()};
@@ -2390,23 +2328,18 @@ Nullable<unique_ptr<BindingGroup>> DeviceD3D12::CreateBindingGroup(
         if (resourceCount == 0 && samplerCount == 0 &&
             layout->GetDynamicBufferBindings(groupIndex).empty()) {
             RADRAY_ERR_LOG("d3d12 binding group {} has no bindings", groupIndex);
-            pool->Release(poolUsage);
             return nullptr;
         }
-    } else if (!pool->Reserve(poolUsage)) {
-        return nullptr;
     }
 
-    return unique_ptr<BindingGroup>{make_unique<BindingGroupD3D12>(
+    return make_unique<BindingGroupD3D12>(
         this,
-        pool,
         layout,
         groupIndex,
         std::move(slot),
         static_cast<uint32_t>(layout->_parameterBindings.size()),
         resourceCount,
-        samplerCount,
-        poolUsage).release()};
+        samplerCount);
 }
 
 Nullable<unique_ptr<GraphicsPipelineState>> DeviceD3D12::CreateGraphicsPipelineState(const GraphicsPipelineStateDescriptor& desc) noexcept {
@@ -5113,29 +5046,15 @@ ShaderBindingTableRegions ShaderBindingTableD3D12::GetRegions() const noexcept {
     return regions;
 }
 
-
-DescriptorPoolD3D12::DescriptorPoolD3D12(
-    DeviceD3D12* device,
-    const DescriptorPoolDescriptor& desc) noexcept
-    : _device(device), _desc(desc) {}
-
-DescriptorPoolD3D12::~DescriptorPoolD3D12() noexcept {
-    Destroy();
-}
+DescriptorPoolD3D12::DescriptorPoolD3D12(const DescriptorPoolDescriptor& desc) noexcept
+    : _desc(desc) {}
 
 bool DescriptorPoolD3D12::IsValid() const noexcept {
-    return _device != nullptr;
+    return _valid;
 }
 
 void DescriptorPoolD3D12::Destroy() noexcept {
-    if (_groups != 0) {
-        RADRAY_ERR_LOG(
-            "cannot destroy d3d12 descriptor pool while {} binding groups are alive",
-            _groups);
-        return;
-    }
-    _device = nullptr;
-    _name.clear();
+    _valid = false;
 }
 
 void DescriptorPoolD3D12::SetDebugName(std::string_view name) noexcept {
@@ -5143,89 +5062,24 @@ void DescriptorPoolD3D12::SetDebugName(std::string_view name) noexcept {
 }
 
 bool DescriptorPoolD3D12::Reset() noexcept {
-    if (_groups != 0) {
-        RADRAY_ERR_LOG(
-            "cannot reset d3d12 descriptor pool while {} binding groups are alive",
-            _groups);
-        return false;
-    }
-    _used = {};
-    return true;
-}
-
-bool DescriptorPoolD3D12::Reserve(const DescriptorPoolDescriptor& usage) noexcept {
-    const auto fits = [](uint32_t used, uint32_t requested, uint32_t capacity) noexcept {
-        return requested <= capacity - std::min(used, capacity);
-    };
-    if (!IsValid() || _groups >= _desc.MaxBindingGroups ||
-        !fits(_used.MaxSampledTextures, usage.MaxSampledTextures, _desc.MaxSampledTextures) ||
-        !fits(_used.MaxStorageTextures, usage.MaxStorageTextures, _desc.MaxStorageTextures) ||
-        !fits(_used.MaxUniformBuffers, usage.MaxUniformBuffers, _desc.MaxUniformBuffers) ||
-        !fits(_used.MaxDynamicUniformBuffers, usage.MaxDynamicUniformBuffers, _desc.MaxDynamicUniformBuffers) ||
-        !fits(_used.MaxStorageBuffers, usage.MaxStorageBuffers, _desc.MaxStorageBuffers) ||
-        !fits(_used.MaxReadOnlyTexelBuffers, usage.MaxReadOnlyTexelBuffers, _desc.MaxReadOnlyTexelBuffers) ||
-        !fits(_used.MaxReadWriteTexelBuffers, usage.MaxReadWriteTexelBuffers, _desc.MaxReadWriteTexelBuffers) ||
-        !fits(_used.MaxSamplers, usage.MaxSamplers, _desc.MaxSamplers) ||
-        !fits(_used.MaxAccelerationStructures, usage.MaxAccelerationStructures, _desc.MaxAccelerationStructures)) {
-        RADRAY_ERR_LOG("d3d12 descriptor pool capacity exhausted");
-        return false;
-    }
-    ++_groups;
-    _used.MaxSampledTextures += usage.MaxSampledTextures;
-    _used.MaxStorageTextures += usage.MaxStorageTextures;
-    _used.MaxUniformBuffers += usage.MaxUniformBuffers;
-    _used.MaxDynamicUniformBuffers += usage.MaxDynamicUniformBuffers;
-    _used.MaxStorageBuffers += usage.MaxStorageBuffers;
-    _used.MaxReadOnlyTexelBuffers += usage.MaxReadOnlyTexelBuffers;
-    _used.MaxReadWriteTexelBuffers += usage.MaxReadWriteTexelBuffers;
-    _used.MaxSamplers += usage.MaxSamplers;
-    _used.MaxAccelerationStructures += usage.MaxAccelerationStructures;
-    return true;
-}
-
-void DescriptorPoolD3D12::Release(const DescriptorPoolDescriptor& usage) noexcept {
-    RADRAY_ASSERT(
-        _groups > 0 &&
-        _used.MaxSampledTextures >= usage.MaxSampledTextures &&
-        _used.MaxStorageTextures >= usage.MaxStorageTextures &&
-        _used.MaxUniformBuffers >= usage.MaxUniformBuffers &&
-        _used.MaxDynamicUniformBuffers >= usage.MaxDynamicUniformBuffers &&
-        _used.MaxStorageBuffers >= usage.MaxStorageBuffers &&
-        _used.MaxReadOnlyTexelBuffers >= usage.MaxReadOnlyTexelBuffers &&
-        _used.MaxReadWriteTexelBuffers >= usage.MaxReadWriteTexelBuffers &&
-        _used.MaxSamplers >= usage.MaxSamplers &&
-        _used.MaxAccelerationStructures >= usage.MaxAccelerationStructures);
-    --_groups;
-    _used.MaxSampledTextures -= usage.MaxSampledTextures;
-    _used.MaxStorageTextures -= usage.MaxStorageTextures;
-    _used.MaxUniformBuffers -= usage.MaxUniformBuffers;
-    _used.MaxDynamicUniformBuffers -= usage.MaxDynamicUniformBuffers;
-    _used.MaxStorageBuffers -= usage.MaxStorageBuffers;
-    _used.MaxReadOnlyTexelBuffers -= usage.MaxReadOnlyTexelBuffers;
-    _used.MaxReadWriteTexelBuffers -= usage.MaxReadWriteTexelBuffers;
-    _used.MaxSamplers -= usage.MaxSamplers;
-    _used.MaxAccelerationStructures -= usage.MaxAccelerationStructures;
+    return _valid;
 }
 
 BindingGroupD3D12::BindingGroupD3D12(
     DeviceD3D12* device,
-    DescriptorPoolD3D12* pool,
     RootSigD3D12* layout,
     uint32_t groupIndex,
     DescriptorSetSlotD3D12 slot,
     uint32_t parameterCount,
     uint32_t resourceDescriptorCount,
-    uint32_t samplerDescriptorCount,
-    const DescriptorPoolDescriptor& poolUsage) noexcept
+    uint32_t samplerDescriptorCount) noexcept
     : _device(device),
-      _pool(pool),
       _layout(layout),
       _groupIndex(groupIndex),
       _slot(std::move(slot)),
       _dynamicBuffers(parameterCount),
       _resourceDescriptorCount(resourceDescriptorCount),
-      _samplerDescriptorCount(samplerDescriptorCount),
-      _poolUsage(poolUsage) {}
+      _samplerDescriptorCount(samplerDescriptorCount) {}
 
 BindingGroupD3D12::~BindingGroupD3D12() noexcept {
     Destroy();
@@ -5242,13 +5096,8 @@ void BindingGroupD3D12::Destroy() noexcept {
     _pendingDescriptorCopies.clear();
     _descriptorCopySources.clear();
     _descriptorCopyDestinations.clear();
-    if (_pool != nullptr) {
-        _pool->Release(_poolUsage);
-        _pool = nullptr;
-    }
     _resourceDescriptorCount = 0;
     _samplerDescriptorCount = 0;
-    _poolUsage = {};
     _layout = nullptr;
     _device = nullptr;
     _name.clear();

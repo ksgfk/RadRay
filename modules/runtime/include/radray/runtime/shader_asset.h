@@ -6,6 +6,7 @@
 #include <radray/types.h>
 #include <radray/render/common.h>
 #include <radray/runtime/shader_variant_library.h>
+#include <radray/runtime/material_property.h>
 #include <radray/hash.h>
 #include <radray/runtime/asset.h>
 
@@ -54,6 +55,27 @@ struct OwningVertexBufferLayout {
     vector<render::VertexElement> Elements{};
 };
 
+struct ShaderPropertyDesc {
+    string Name;
+    ShaderPropertyKind Kind{ShaderPropertyKind::Float};
+    std::optional<MaterialPropertyValue> DefaultValue{};
+};
+
+enum class ShaderParameterScope {
+    Material,
+    Object,
+    View,
+    Pass,
+};
+
+/// Maps a reflected resource, cbuffer, or cbuffer field to a runtime value source.
+/// ProviderName defaults to Name when empty.
+struct ShaderParameterSourceDesc {
+    string Name;
+    ShaderParameterScope Scope{ShaderParameterScope::Material};
+    string ProviderName;
+};
+
 /// 一个渲染 pass 的描述 (对应 Unity ShaderLab 里的一个 Pass)。
 /// PassTag 对应 Unity 的 LightMode, 用于与 RenderPipelinePass 匹配。
 struct ShaderPassDesc {
@@ -77,6 +99,7 @@ struct ShaderPassDesc {
     vector<render::DynamicBufferBinding> DynamicBufferBindings{};
     vector<render::PushConstantBinding> PushConstantBindings{};
     ShaderInterfaceSchema InterfaceSchema{};
+    vector<ShaderParameterSourceDesc> ParameterSources{};
     bool AllowMaterialRenderStateOverrides{true};
     // Only these ShaderKeywordSet bits participate in this pass. Keeping this
     // per-pass prevents material keywords from multiplying unrelated passes.
@@ -93,7 +116,10 @@ struct ShaderPassDesc {
 class ShaderAsset : public Asset {
 public:
     ShaderAsset() noexcept;
-    explicit ShaderAsset(ShaderKeywordSet keywords, vector<ShaderPassDesc> passes) noexcept;
+    explicit ShaderAsset(
+        ShaderKeywordSet keywords,
+        vector<ShaderPassDesc> passes,
+        vector<ShaderPropertyDesc> properties = {}) noexcept;
     ~ShaderAsset() noexcept override;
 
     void OnUnload(IRenderResourceRecycler& recycler) override;
@@ -105,6 +131,10 @@ public:
     ShaderKeywordSet& GetKeywords() noexcept { return _keywords; }
 
     const vector<ShaderPassDesc>& GetPasses() const noexcept { return _passes; }
+
+    const vector<ShaderPropertyDesc>& GetProperties() const noexcept { return _properties; }
+    Nullable<const ShaderPropertyDesc*> FindProperty(std::string_view name) const noexcept;
+    bool HasValidMetadata() const noexcept { return _metadataValid; }
 
     /// 按 PassTag (=LightMode) 找 pass 序号。未找到返回 nullopt。
     std::optional<uint32_t> FindPassByTag(std::string_view passTag) const noexcept;
@@ -121,6 +151,8 @@ private:
     Guid _programId;
     ShaderKeywordSet _keywords;
     vector<ShaderPassDesc> _passes;
+    vector<ShaderPropertyDesc> _properties;
+    bool _metadataValid{true};
 };
 
 template <>

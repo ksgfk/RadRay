@@ -58,10 +58,53 @@ vector<string> ShaderKeywordSet::ResolveDefines(uint64_t bitmask) const noexcept
 ShaderAsset::ShaderAsset() noexcept
     : _programId(Guid::NewGuid()) {}
 
-ShaderAsset::ShaderAsset(ShaderKeywordSet keywords, vector<ShaderPassDesc> passes) noexcept
+ShaderAsset::ShaderAsset(
+    ShaderKeywordSet keywords,
+    vector<ShaderPassDesc> passes,
+    vector<ShaderPropertyDesc> properties) noexcept
     : _programId(Guid::NewGuid()),
       _keywords(std::move(keywords)),
-      _passes(std::move(passes)) {}
+      _passes(std::move(passes)),
+      _properties(std::move(properties)) {
+    for (size_t i = 0; i < _properties.size(); ++i) {
+        const ShaderPropertyDesc& property = _properties[i];
+        if (property.Name.empty()) {
+            RADRAY_ERR_LOG("ShaderAsset: property {} has an empty name", i);
+            _metadataValid = false;
+        }
+        if (property.DefaultValue.has_value() &&
+            GetMaterialPropertyKind(*property.DefaultValue) != property.Kind) {
+            RADRAY_ERR_LOG("ShaderAsset: property '{}' default value has the wrong type", property.Name);
+            _metadataValid = false;
+        }
+        for (size_t j = 0; j < i; ++j) {
+            if (_properties[j].Name == property.Name) {
+                RADRAY_ERR_LOG("ShaderAsset: duplicate property '{}'", property.Name);
+                _metadataValid = false;
+                break;
+            }
+        }
+    }
+    for (const ShaderPassDesc& pass : _passes) {
+        for (size_t i = 0; i < pass.ParameterSources.size(); ++i) {
+            const ShaderParameterSourceDesc& source = pass.ParameterSources[i];
+            if (source.Name.empty()) {
+                RADRAY_ERR_LOG("ShaderAsset: pass '{}' has an empty parameter source", pass.PassTag);
+                _metadataValid = false;
+            }
+            for (size_t j = 0; j < i; ++j) {
+                if (pass.ParameterSources[j].Name == source.Name) {
+                    RADRAY_ERR_LOG(
+                        "ShaderAsset: pass '{}' has duplicate parameter source '{}'",
+                        pass.PassTag,
+                        source.Name);
+                    _metadataValid = false;
+                    break;
+                }
+            }
+        }
+    }
+}
 
 ShaderAsset::~ShaderAsset() noexcept = default;
 
@@ -83,6 +126,15 @@ std::optional<uint32_t> ShaderAsset::FindPassByTag(std::string_view passTag) con
     return std::nullopt;
 }
 
+Nullable<const ShaderPropertyDesc*> ShaderAsset::FindProperty(std::string_view name) const noexcept {
+    for (const ShaderPropertyDesc& property : _properties) {
+        if (property.Name == name) {
+            return &property;
+        }
+    }
+    return nullptr;
+}
+
 Nullable<const CompiledShaderVariant*> ShaderAsset::GetOrCreateVariant(
     ShaderVariantLibrary& cache,
     uint32_t passIndex,
@@ -90,6 +142,10 @@ Nullable<const CompiledShaderVariant*> ShaderAsset::GetOrCreateVariant(
     render::HlslShaderModel sm) noexcept {
     if (passIndex >= _passes.size()) {
         RADRAY_ERR_LOG("ShaderAsset::GetOrCreateVariant: pass index {} out of range ({} passes)", passIndex, _passes.size());
+        return nullptr;
+    }
+    if (!_metadataValid) {
+        RADRAY_ERR_LOG("ShaderAsset::GetOrCreateVariant: shader metadata is invalid");
         return nullptr;
     }
     const ShaderPassDesc& pass = _passes[passIndex];

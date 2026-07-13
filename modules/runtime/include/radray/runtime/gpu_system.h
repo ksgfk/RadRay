@@ -386,7 +386,8 @@ public:
     render::CommandQueue* GetMainQueue() const noexcept;
     GpuSystem* GetGpuSystem() const noexcept { return _gpuSystem; }
 
-    /// 声明本帧应用自管提交，runtime 跳过 Submit/Present（仍 End cmd buffer 与回收 flight）。
+    /// 刷新当前 frame arena 的 host 写入并声明应用自管提交。调用后不得再写入 frame arena；
+    /// runtime 跳过 Submit/Present（仍 End cmd buffer 与回收 flight）。
     void SetManualSubmit() noexcept;
 
 private:

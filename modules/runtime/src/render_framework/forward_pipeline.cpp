@@ -41,19 +41,6 @@ constexpr std::string_view kShadowCubeName = "gShadowCube";
 constexpr std::string_view kShadowArrayName = "gShadowArray";
 constexpr std::string_view kShadowSamplerName = "gShadowSampler";
 
-ImageData MakeSolidRgba8(uint8_t r, uint8_t g, uint8_t b, uint8_t a = 255) {
-    ImageData image{};
-    image.Width = 1;
-    image.Height = 1;
-    image.Format = ImageFormat::RGBA8_BYTE;
-    image.Data = make_unique<byte[]>(4);
-    image.Data[0] = static_cast<byte>(r);
-    image.Data[1] = static_cast<byte>(g);
-    image.Data[2] = static_cast<byte>(b);
-    image.Data[3] = static_cast<byte>(a);
-    return image;
-}
-
 // cube 6 面的 forward / up 方向, 面序严格匹配 point_shadow.hlsl 的 point_shadow_cube_face:
 //   0 = +X, 1 = -X, 2 = +Y, 3 = -Y, 4 = +Z, 5 = -Z。
 // up 向量只影响面内朝向, 不影响 compareDepth (只依赖 forward), 取标准 cube 约定。
@@ -217,7 +204,7 @@ Eigen::Matrix4f MakeCascadeViewProj(
     return proj * view;
 }
 
-/// forward 管线的标准材质工厂: 持有 forward_pass shader 对 + 共享采样器,
+/// forward 管线的标准材质工厂: 持有 forward_pass shader,
 /// 把中性 StandardMaterialDescription 翻译成 forward_pass 材质。
 ///
 /// 由 ForwardPipeline 持有并经 RenderPipeline::GetStandardMaterialFactory() 暴露 (以接口形式),
@@ -226,7 +213,7 @@ class ForwardStandardMaterialFactory final : public IStandardMaterialFactory {
 public:
     ForwardStandardMaterialFactory() noexcept = default;
 
-    /// 构建 forward_pass 的 opaque/transparent shader 对 (含 ShadowCaster) + 采样器。成功返回 true。
+    /// 构建 forward_pass shader (含 ShadowCaster)。成功返回 true。
     bool Initialize(AssetManager& assets, RenderSystem& renderSystem, render::TextureFormat colorFormat) {
         _assets = &assets;
 
@@ -241,38 +228,6 @@ public:
         }
         _shader = std::move(shader.value());
 
-        // 共享 trilinear + repeat 采样器描述 (glTF 默认 wrap)。
-        // 只存 descriptor: 实际 sampler 由 SamplerCache 在绑定时去重创建并永生持有。
-        _samplerDesc = render::SamplerDescriptor{};
-        _samplerDesc.AddressS = render::AddressMode::Repeat;
-        _samplerDesc.AddressT = render::AddressMode::Repeat;
-        _samplerDesc.AddressR = render::AddressMode::Repeat;
-        _samplerDesc.MinFilter = render::FilterMode::Linear;
-        _samplerDesc.MagFilter = render::FilterMode::Linear;
-        _samplerDesc.MipmapFilter = render::FilterMode::Linear;
-        _samplerDesc.LodMin = 0.0f;
-        _samplerDesc.LodMax = 32.0f;
-        _samplerDesc.Compare = std::nullopt;
-        _samplerDesc.AnisotropyClamp = 8;
-
-        Application* app = renderSystem.GetApplication();
-        GpuSystem* gpu = app != nullptr ? app->GetGpuSystem() : nullptr;
-        if (gpu == nullptr) {
-            return false;
-        }
-        auto loadDefault = [&](std::string_view name, ImageData image, bool srgb) {
-            return LoadTextureAssetFromImage(
-                assets,
-                gpu->GetFrameUploadScheduler(),
-                Guid::NewGuid(),
-                string{name},
-                std::move(image),
-                TextureAssetLoadOptions{.Srgb = srgb});
-        };
-        _whiteSrgb = loadDefault("forward_default_white_srgb", MakeSolidRgba8(255, 255, 255), true);
-        _whiteLinear = loadDefault("forward_default_white", MakeSolidRgba8(255, 255, 255), false);
-        _blackLinear = loadDefault("forward_default_black", MakeSolidRgba8(0, 0, 0), false);
-        _flatNormal = loadDefault("forward_default_flat_normal", MakeSolidRgba8(128, 128, 255), false);
         return true;
     }
 
@@ -321,29 +276,21 @@ public:
         }
 
         // keyword + 绑定: 贴图存在性。
-        auto bindTexture = [&] (
-                               int index,
-                               std::string_view keyword,
-                               std::string_view slot,
-                               const StreamingAssetRef<TextureAsset>& fallback) {
-            StreamingAssetRef<TextureAsset> selected = fallback;
+        auto bindTexture = [&] (int index, std::string_view keyword, std::string_view slot) {
             if (index >= 0 && static_cast<size_t>(index) < textures.size()) {
                 const StreamingAssetRef<TextureAsset>& texRef = textures[static_cast<size_t>(index)].Texture;
                 TextureAsset* tex = texRef.Get();
                 if (tex != nullptr && tex->GetSrv() != nullptr) {
-                    selected = texRef;
+                    mat->SetTexture(slot, texRef);
                     mat->EnableKeyword(keyword);
                 }
             }
-            mat->SetTexture(slot, std::move(selected));
         };
-        bindTexture(desc.BaseColorTexture, forward_pipeline::kKwBaseColorMap, forward_pipeline::kTexBaseColor, _whiteSrgb);
-        bindTexture(desc.MetallicRoughnessTexture, forward_pipeline::kKwMetalRoughMap, forward_pipeline::kTexMetalRough, _whiteLinear);
-        bindTexture(desc.NormalTexture, forward_pipeline::kKwNormalMap, forward_pipeline::kTexNormal, _flatNormal);
-        bindTexture(desc.OcclusionTexture, forward_pipeline::kKwOcclusionMap, forward_pipeline::kTexOcclusion, _whiteLinear);
-        bindTexture(desc.EmissiveTexture, forward_pipeline::kKwEmissiveMap, forward_pipeline::kTexEmissive, _blackLinear);
-
-        mat->SetSampler(forward_pipeline::kSamplerName, _samplerDesc);
+        bindTexture(desc.BaseColorTexture, forward_pipeline::kKwBaseColorMap, forward_pipeline::kTexBaseColor);
+        bindTexture(desc.MetallicRoughnessTexture, forward_pipeline::kKwMetalRoughMap, forward_pipeline::kTexMetalRough);
+        bindTexture(desc.NormalTexture, forward_pipeline::kKwNormalMap, forward_pipeline::kTexNormal);
+        bindTexture(desc.OcclusionTexture, forward_pipeline::kKwOcclusionMap, forward_pipeline::kTexOcclusion);
+        bindTexture(desc.EmissiveTexture, forward_pipeline::kKwEmissiveMap, forward_pipeline::kTexEmissive);
 
         // 常量块 (逐字段填 ForwardMaterialConstants)。
         ForwardMaterialConstants mc{};
@@ -383,11 +330,6 @@ public:
 private:
     AssetManager* _assets{nullptr};
     StreamingAssetRef<ShaderAsset> _shader{};
-    render::SamplerDescriptor _samplerDesc{};
-    StreamingAssetRef<TextureAsset> _whiteSrgb{};
-    StreamingAssetRef<TextureAsset> _whiteLinear{};
-    StreamingAssetRef<TextureAsset> _blackLinear{};
-    StreamingAssetRef<TextureAsset> _flatNormal{};
     StreamingAssetRef<MaterialAsset> _defaultMaterial{};
 };
 
@@ -420,13 +362,15 @@ ForwardPipeline::ForwardPipeline(RenderSystem* renderSystem) noexcept
             renderSystem->GetShaderVariantLibrary(),
             renderSystem->GetGraphicsPipelineStateLibrary(),
             renderSystem->GetSamplerCache(),
-            std::string{kPerObjectName});
+            std::string{kPerObjectName},
+            renderSystem->GetShaderDefaultResourceLibrary());
         _shadowExecutor = make_unique<MeshPassExecutor>(
             _device,
             renderSystem->GetShaderVariantLibrary(),
             renderSystem->GetGraphicsPipelineStateLibrary(),
             renderSystem->GetSamplerCache(),
-            std::string{kPerObjectName});
+            std::string{kPerObjectName},
+            renderSystem->GetShaderDefaultResourceLibrary());
     }
 }
 
@@ -452,6 +396,7 @@ ForwardPipeline::~ForwardPipeline() noexcept {
 
 void ForwardPipeline::OnBeginFrame(RenderPipelineContext& ctx) {
     RADRAY_UNUSED(ctx);
+    GetErrorMaterial();
 }
 
 Nullable<IStandardMaterialFactory*> ForwardPipeline::GetStandardMaterialFactory() noexcept {
@@ -474,6 +419,38 @@ Nullable<IStandardMaterialFactory*> ForwardPipeline::GetStandardMaterialFactory(
         return nullptr;
     }
     return _materialFactory.get();
+}
+
+shared_ptr<const MaterialRenderSnapshot> ForwardPipeline::GetErrorMaterial() noexcept {
+    if (!_errorMaterialInit) {
+        Application* app = _renderSystem != nullptr ? _renderSystem->GetApplication() : nullptr;
+        AssetManager* assets = app != nullptr ? app->GetAssetManager() : nullptr;
+        WindowManager* windows = app != nullptr ? app->GetWindowManager() : nullptr;
+        if (assets == nullptr || windows == nullptr) {
+            return nullptr;
+        }
+        _errorMaterialInit = true;
+        const render::TextureFormat colorFormat = windows->GetMainBackBufferFormat();
+        auto shader = BuildForwardErrorShader(*assets, *_renderSystem, colorFormat);
+        if (shader.has_value()) {
+            StreamingAssetRef<MaterialAsset> material = assets->AddReady<MaterialAsset>(
+                Guid::NewGuid(),
+                make_unique<MaterialAsset>(*shader));
+            if (material.Get() != nullptr) {
+                _errorMaterialSnapshot = material->CreateSnapshot();
+            }
+        }
+        if (_errorMaterialSnapshot == nullptr) {
+            RADRAY_ERR_LOG("ForwardPipeline: failed to build error material");
+        }
+    }
+    if (_executor != nullptr) {
+        _executor->SetErrorMaterial(_errorMaterialSnapshot);
+    }
+    if (_shadowExecutor != nullptr) {
+        _shadowExecutor->SetErrorMaterial(_errorMaterialSnapshot);
+    }
+    return _errorMaterialSnapshot;
 }
 
 void ForwardPipeline::OnBuildCameraList(RenderPipelineContext& ctx, RenderCameraList& cameras) {

@@ -269,7 +269,7 @@ TEST_P(ComputeBindingRuntimeTest, DynamicOffsetValidationRejectsMisalignment) {
         << _ctx.JoinCapturedErrors();
 }
 
-TEST_P(ComputeBindingRuntimeTest, DescriptorPoolCapacityAndResetAreExplicit) {
+TEST_P(ComputeBindingRuntimeTest, DescriptorPoolCapacityAndResetAreBackendSpecific) {
     string reason{};
     const PushConstantBinding pushConstant{.Group = 0, .Binding = 0};
     auto programOpt = _ctx.CreateComputeProgram(
@@ -286,13 +286,14 @@ TEST_P(ComputeBindingRuntimeTest, DescriptorPoolCapacityAndResetAreExplicit) {
 
     auto first = CreateGroup(pool.get(), program.PipelineLayout, 1);
     ASSERT_NE(first, nullptr);
-    EXPECT_EQ(pool->GetAllocatedBindingGroupCount(), 1u);
-    EXPECT_FALSE(pool->Reset());
+    const bool hasNativeDescriptorPool = GetParam() == TestBackend::Vulkan;
+    EXPECT_EQ(pool->GetAllocatedBindingGroupCount(), hasNativeDescriptorPool ? 1u : 0u);
+    EXPECT_EQ(pool->Reset(), !hasNativeDescriptorPool);
 
     _ctx.ClearCapturedErrors();
     auto second = _ctx.CreateBindingGroup(pool.get(), program.PipelineLayout, 1, &reason);
-    EXPECT_FALSE(second.HasValue());
-    EXPECT_EQ(pool->GetAllocatedBindingGroupCount(), 1u);
+    EXPECT_EQ(second.HasValue(), !hasNativeDescriptorPool);
+    EXPECT_EQ(pool->GetAllocatedBindingGroupCount(), hasNativeDescriptorPool ? 1u : 0u);
 
     first.reset();
     EXPECT_EQ(pool->GetAllocatedBindingGroupCount(), 0u);
@@ -301,7 +302,7 @@ TEST_P(ComputeBindingRuntimeTest, DescriptorPoolCapacityAndResetAreExplicit) {
     EXPECT_NE(reused, nullptr);
 }
 
-TEST_P(ComputeBindingRuntimeTest, DescriptorPoolEnforcesPerTypeCapacity) {
+TEST_P(ComputeBindingRuntimeTest, DescriptorPoolPerTypeCapacityIsBackendSpecific) {
     string reason{};
     const DynamicBufferBinding dynamicBinding{.Group = 0, .Binding = 0};
     auto programOpt = _ctx.CreateComputeProgram(
@@ -321,7 +322,7 @@ TEST_P(ComputeBindingRuntimeTest, DescriptorPoolEnforcesPerTypeCapacity) {
     _ctx.ClearCapturedErrors();
     auto rejectedDynamic = _ctx.CreateBindingGroup(
         noDynamicPool.get(), program.PipelineLayout, 0, &reason);
-    EXPECT_FALSE(rejectedDynamic.HasValue());
+    EXPECT_EQ(rejectedDynamic.HasValue(), GetParam() == TestBackend::D3D12);
 
     DescriptorPoolDescriptor noStorageCapacity = MakeTestPoolDescriptor();
     noStorageCapacity.MaxDynamicUniformBuffers = 1;
@@ -333,7 +334,7 @@ TEST_P(ComputeBindingRuntimeTest, DescriptorPoolEnforcesPerTypeCapacity) {
     _ctx.ClearCapturedErrors();
     auto rejectedStorage = _ctx.CreateBindingGroup(
         noStoragePool.get(), program.PipelineLayout, 1, &reason);
-    EXPECT_FALSE(rejectedStorage.HasValue());
+    EXPECT_EQ(rejectedStorage.HasValue(), GetParam() == TestBackend::D3D12);
     _ctx.ClearCapturedErrors();
 }
 

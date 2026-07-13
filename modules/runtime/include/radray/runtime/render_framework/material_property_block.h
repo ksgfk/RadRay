@@ -5,7 +5,7 @@
 #include <radray/types.h>
 #include <radray/basic_math.h>
 #include <radray/render/common.h>
-#include <radray/runtime/material_asset.h>
+#include <radray/runtime/material_property.h>
 
 namespace radray {
 
@@ -16,7 +16,7 @@ namespace radray {
 ///   共享材质保持不变, 可被多个 primitive 复用而互不污染 (对齐 Unity 语义)。
 /// - 覆盖粒度与 MaterialAsset 完全一致: 复用 MaterialPropertyValue (float / vector /
 ///   常量块 / texture / sampler)。名字可以是 cbuffer 块名 (整块) 或块内字段名 (按偏移打包,
-///   由 MaterialConstantBinder 在绑定时解析)。
+///   由 ShaderBindingPlan 在绑定时解析)。
 /// - 只覆盖 property, 不涉及 shader / keyword / renderQueue (与 Unity 一致: PropertyBlock
 ///   不能改 shader 变体)。若需完整独立材质实例, 应另做 MaterialInstance 层。
 /// - 内部维护单调递增的版本号: 每次写入自增。组件据此做 O(1) 脏判定, 无需调用方手动标脏。

@@ -1164,7 +1164,6 @@ static bool _PushConstantsVulkan(
     return true;
 }
 
-
 InstanceVulkanImpl::InstanceVulkanImpl(
     VkInstance instance,
     std::optional<VkAllocationCallbacks> allocCb,
@@ -1795,16 +1794,16 @@ Nullable<unique_ptr<PipelineLayoutVulkan>> DeviceVulkan::CreateRootSignatureInte
             desc.BindingGroupLayouts,
             [&](const BindingGroupLayout& group) noexcept {
                 return group.GroupIndex == setIndex && std::ranges::any_of(
-                    group.Entries,
-                    [&](const BindingGroupLayoutEntry& entry) noexcept {
-                        return entry.Binding == bindingIndex && entry.HasDynamicOffset;
-                    });
+                                                           group.Entries,
+                                                           [&](const BindingGroupLayoutEntry& entry) noexcept {
+                                                               return entry.Binding == bindingIndex && entry.HasDynamicOffset;
+                                                           });
             });
         return explicitlyDynamic || std::ranges::any_of(
-            desc.DynamicBufferBindings,
-            [&](const DynamicBufferBinding& dynamicBinding) noexcept {
-                return dynamicBinding.Group == setIndex && dynamicBinding.Binding == bindingIndex;
-            });
+                                        desc.DynamicBufferBindings,
+                                        [&](const DynamicBufferBinding& dynamicBinding) noexcept {
+                                            return dynamicBinding.Group == setIndex && dynamicBinding.Binding == bindingIndex;
+                                        });
     };
 
     size_t pushConstantIndex = 0;
@@ -1878,7 +1877,7 @@ Nullable<unique_ptr<PipelineLayoutVulkan>> DeviceVulkan::CreateRootSignatureInte
             }
             vector<unique_ptr<SamplerVulkan>> immutableSamplers{};
             auto samplerBase = samplerOpt.Release();
-            immutableSamplers.emplace_back(static_cast<SamplerVulkan*>(samplerBase.release()));
+            immutableSamplers.emplace_back(StaticCastUniquePtr<SamplerVulkan>(std::move(samplerBase)));
             immutableSamplerHandles.push_back(vector<VkSampler>{immutableSamplers[0]->_sampler});
 
             binding.IsStaticSampler = true;
@@ -2120,7 +2119,6 @@ static DescriptorPoolDescriptor _GetBindingGroupPoolUsage(
     return usage;
 }
 
-
 Nullable<unique_ptr<DescriptorPool>> DeviceVulkan::CreateDescriptorPool(
     const DescriptorPoolDescriptor& desc) noexcept {
     if (desc.MaxBindingGroups == 0) {
@@ -2152,8 +2150,7 @@ Nullable<unique_ptr<DescriptorPool>> DeviceVulkan::CreateDescriptorPool(
         desc.MaxBindingGroups,
         1,
         true);
-    return unique_ptr<DescriptorPool>{
-        make_unique<BindingDescriptorPoolVulkan>(this, desc, std::move(allocator)).release()};
+    return make_unique<BindingDescriptorPoolVulkan>(this, desc, std::move(allocator));
 }
 
 Nullable<unique_ptr<BindingGroup>> DeviceVulkan::CreateBindingGroup(
@@ -2198,14 +2195,13 @@ Nullable<unique_ptr<BindingGroup>> DeviceVulkan::CreateBindingGroup(
         descriptorSet = setOpt.Release();
     }
 
-    auto group = make_unique<BindingGroupVulkan>(
+    return make_unique<BindingGroupVulkan>(
         this,
         pool,
         layout,
         groupIndex,
         std::move(descriptorSet),
         poolUsage);
-    return unique_ptr<BindingGroup>{group.release()};
 }
 
 Nullable<unique_ptr<GraphicsPipelineState>> DeviceVulkan::CreateGraphicsPipelineState(const GraphicsPipelineStateDescriptor& desc) noexcept {
@@ -2714,199 +2710,6 @@ Nullable<unique_ptr<ShaderBindingTable>> DeviceVulkan::CreateShaderBindingTable(
     }
     return make_unique<ShaderBindingTableVulkan>(this, pipeline, buffer.Release(), desc, recordStride);
 }
-
-#if 0
-Nullable<unique_ptr<DescriptorSetLayout>> DeviceVulkan::CreateDescriptorSetLayout(const DescriptorSetLayoutDescriptor& desc) noexcept {
-    auto layoutOpt = this->CreateDescriptorSetLayout(desc, {});
-    if (!layoutOpt.HasValue()) {
-        return nullptr;
-    }
-    unique_ptr<DescriptorSetLayoutVulkan> layoutOwned = layoutOpt.Release();
-    return unique_ptr<DescriptorSetLayout>(std::move(layoutOwned));
-}
-
-Nullable<unique_ptr<DescriptorSetLayoutVulkan>> DeviceVulkan::CreateDescriptorSetLayout(const DescriptorSetLayoutDescriptor& desc, std::span<const StaticSamplerDescriptor> staticSamplers) noexcept {
-    struct BindingCtx {
-        VkDescriptorSetLayoutBinding binding;
-        ResourceBindType bindType{ResourceBindType::UNKNOWN};
-        vector<unique_ptr<SamplerVulkan>> staticSamplers;
-        vector<VkSampler> tmpSS;
-    };
-    vector<BindingCtx> ctxs;
-    unordered_set<uint32_t> usedBindingSlots{};
-    for (const auto& j : desc.Bindings) {
-        if (j.Type == ResourceBindType::UNKNOWN) {
-            RADRAY_ERR_LOG("vk descriptor set layout contains unknown binding type");
-            return nullptr;
-        }
-        if (j.Count == 0) {
-            RADRAY_ERR_LOG("vk descriptor set layout binding count must be greater than 0");
-            return nullptr;
-        }
-        auto& ctx = ctxs.emplace_back();
-        ctx.binding.binding = j.Slot;
-        ctx.binding.descriptorType = MapType(j.Type);
-        ctx.binding.descriptorCount = j.Count;
-        ctx.binding.stageFlags = MapType(j.Stages);
-        ctx.bindType = j.Type;
-        if (!usedBindingSlots.insert(ctx.binding.binding).second) {
-            RADRAY_ERR_LOG("vk duplicate binding slot {}, Vulkan binding index must be unique per set", j.Slot);
-            return nullptr;
-        }
-    }
-    for (const auto& ss : staticSamplers) {
-        auto& ctx = ctxs.emplace_back();
-        ctx.binding.binding = ss.Slot;
-        ctx.binding.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
-        ctx.binding.descriptorCount = 1;
-        ctx.binding.stageFlags = MapType(ss.Stages);
-        ctx.bindType = ResourceBindType::Sampler;
-        if (!usedBindingSlots.insert(ctx.binding.binding).second) {
-            RADRAY_ERR_LOG("vk duplicate static sampler binding slot {}", ss.Slot);
-            return nullptr;
-        }
-        auto samplerOpt = this->CreateSamplerVulkan(ss.Desc);
-        if (!samplerOpt.HasValue()) {
-            return nullptr;
-        }
-        auto sampler = samplerOpt.Release();
-        ctx.tmpSS.emplace_back(sampler->_sampler);
-        ctx.staticSamplers.emplace_back(std::move(sampler));
-    }
-    vector<VkDescriptorSetLayoutBinding> bindings;
-    bindings.reserve(ctxs.size());
-    for (const auto& i : ctxs) {
-        auto b = i.binding;
-        if (i.tmpSS.empty()) {
-            b.pImmutableSamplers = nullptr;
-        } else {
-            b.pImmutableSamplers = i.tmpSS.data();
-        }
-        bindings.emplace_back(b);
-    }
-    VkDescriptorSetLayoutCreateInfo dslci{};
-    dslci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    dslci.pNext = nullptr;
-    dslci.flags = 0;
-    dslci.bindingCount = static_cast<uint32_t>(bindings.size());
-    dslci.pBindings = bindings.empty() ? nullptr : bindings.data();
-    VkDescriptorSetLayout layout = VK_NULL_HANDLE;
-    if (auto vr = _ftb.vkCreateDescriptorSetLayout(_device, &dslci, this->GetAllocationCallbacks(), &layout);
-        vr != VK_SUCCESS) {
-        RADRAY_ERR_LOG("vkCreateDescriptorSetLayout failed: {}", vr);
-        return nullptr;
-    }
-    auto result = make_unique<DescriptorSetLayoutVulkan>(this, layout);
-    result->_bindings.reserve(ctxs.size());
-    for (auto& ctx : ctxs) {
-        result->_bindings.emplace_back(ctx.binding, ctx.bindType, std::move(ctx.staticSamplers));
-    }
-    return result;
-}
-
-Nullable<unique_ptr<SamplerVulkan>> DeviceVulkan::CreateSamplerVulkan(const SamplerDescriptor& desc) noexcept {
-    VkSamplerCreateInfo createInfo{};
-    createInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-    createInfo.pNext = nullptr;
-    createInfo.flags = 0;
-    createInfo.magFilter = MapTypeFilter(desc.MagFilter);
-    createInfo.minFilter = MapTypeFilter(desc.MinFilter);
-    createInfo.mipmapMode = MapTypeMipmapMode(desc.MipmapFilter);
-    createInfo.addressModeU = MapType(desc.AddressS);
-    createInfo.addressModeV = MapType(desc.AddressT);
-    createInfo.addressModeW = MapType(desc.AddressR);
-    createInfo.mipLodBias = 0;
-    if (desc.AnisotropyClamp > 1.0f) {
-        createInfo.anisotropyEnable = VK_TRUE;
-        createInfo.maxAnisotropy = (float)desc.AnisotropyClamp;
-    } else {
-        createInfo.anisotropyEnable = VK_FALSE;
-        createInfo.maxAnisotropy = 1.0f;
-    }
-    createInfo.compareEnable = desc.Compare.has_value() ? VK_TRUE : VK_FALSE;
-    createInfo.compareOp = desc.Compare.has_value() ? MapType(desc.Compare.value()) : VK_COMPARE_OP_NEVER;
-    createInfo.minLod = desc.LodMin;
-    createInfo.maxLod = desc.LodMax;
-    createInfo.borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
-    createInfo.unnormalizedCoordinates = VK_FALSE;
-    auto samplerOpt = this->CreateSamplerVulkan(createInfo);
-    if (!samplerOpt.HasValue()) {
-        return nullptr;
-    }
-    auto sampler = samplerOpt.Release();
-    sampler->_mdesc = desc;
-    return sampler;
-}
-
-Nullable<unique_ptr<SamplerVulkan>> DeviceVulkan::CreateSamplerVulkan(const VkSamplerCreateInfo& desc) noexcept {
-    VkSampler sampler = VK_NULL_HANDLE;
-    if (auto vr = _ftb.vkCreateSampler(_device, &desc, this->GetAllocationCallbacks(), &sampler);
-        vr != VK_SUCCESS) {
-        RADRAY_ERR_LOG("vkCreateSampler failed: {}", vr);
-        return nullptr;
-    }
-    return make_unique<SamplerVulkan>(this, sampler);
-}
-
-Nullable<unique_ptr<BindlessDescriptorSetVulkan>> DeviceVulkan::CreateBindlessDescriptorSetVulkan(
-    VkDescriptorType type,
-    uint32_t capacity) noexcept {
-    if (capacity == 0) {
-        RADRAY_ERR_LOG("vk bindless descriptor set capacity must be greater than 0");
-        return nullptr;
-    }
-    auto bdls = make_unique<BindlessDescriptorSetVulkan>(this, type, capacity);
-    VkDescriptorPoolSize poolSize{type, capacity};
-    VkDescriptorPoolCreateInfo poolInfo{};
-    poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    poolInfo.pNext = nullptr;
-    poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
-    poolInfo.maxSets = 1;
-    poolInfo.poolSizeCount = 1;
-    poolInfo.pPoolSizes = &poolSize;
-    if (auto vr = _ftb.vkCreateDescriptorPool(_device, &poolInfo, this->GetAllocationCallbacks(), &bdls->_pool);
-        vr != VK_SUCCESS) {
-        RADRAY_ERR_LOG("vkCreateDescriptorPool failed: {}", vr);
-        return nullptr;
-    }
-    VkDescriptorSetLayoutBinding binding{};
-    binding.binding = 0;
-    binding.descriptorType = type;
-    binding.descriptorCount = capacity;
-    binding.stageFlags = VK_SHADER_STAGE_ALL;
-    binding.pImmutableSamplers = nullptr;
-    VkDescriptorBindingFlags bindFlags = VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT;
-    VkDescriptorSetLayoutBindingFlagsCreateInfo flagsInfo{};
-    flagsInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
-    flagsInfo.pNext = nullptr;
-    flagsInfo.bindingCount = 1;
-    flagsInfo.pBindingFlags = &bindFlags;
-    VkDescriptorSetLayoutCreateInfo layoutInfo{};
-    layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    layoutInfo.pNext = &flagsInfo;
-    layoutInfo.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
-    layoutInfo.bindingCount = 1;
-    layoutInfo.pBindings = &binding;
-    if (auto vr = _ftb.vkCreateDescriptorSetLayout(_device, &layoutInfo, this->GetAllocationCallbacks(), &bdls->_layout);
-        vr != VK_SUCCESS) {
-        RADRAY_ERR_LOG("vkCreateDescriptorSetLayout failed: {}", vr);
-        return nullptr;
-    }
-    VkDescriptorSetAllocateInfo allocInfo{};
-    allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-    allocInfo.pNext = nullptr;
-    allocInfo.descriptorPool = bdls->_pool;
-    allocInfo.descriptorSetCount = 1;
-    allocInfo.pSetLayouts = &bdls->_layout;
-    if (auto vr = _ftb.vkAllocateDescriptorSets(_device, &allocInfo, &bdls->_set);
-        vr != VK_SUCCESS) {
-        RADRAY_ERR_LOG("vkAllocateDescriptorSets failed: {}", vr);
-        return nullptr;
-    }
-    return bdls;
-}
-
-#endif
 
 Nullable<unique_ptr<Sampler>> DeviceVulkan::CreateSampler(const SamplerDescriptor& desc) noexcept {
     VkSamplerCreateInfo createInfo{};
@@ -5894,7 +5697,10 @@ void* BufferVulkan::Map(uint64_t offset, uint64_t size) noexcept {
         vmaGetMemoryTypeProperties(_device->_vma->_vma, _allocInfo.memoryType, &flags);
         if ((flags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) == 0) {
             VkDeviceSize rangeSize = size == 0 ? VK_WHOLE_SIZE : size;
-            vmaInvalidateAllocation(_device->_vma->_vma, _allocation, offset, rangeSize);
+            if (auto vr = vmaInvalidateAllocation(_device->_vma->_vma, _allocation, offset, rangeSize);
+                vr != VK_SUCCESS) {
+                RADRAY_ABORT("vmaInvalidateAllocation failed: {}", vr);
+            }
         }
     }
     return mappedData;
@@ -5906,7 +5712,10 @@ void BufferVulkan::Unmap(uint64_t offset, uint64_t size) noexcept {
         vmaGetMemoryTypeProperties(_device->_vma->_vma, _allocInfo.memoryType, &flags);
         if ((flags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) == 0) {
             VkDeviceSize rangeSize = size == 0 ? VK_WHOLE_SIZE : size;
-            vmaFlushAllocation(_device->_vma->_vma, _allocation, offset, rangeSize);
+            if (auto vr = vmaFlushAllocation(_device->_vma->_vma, _allocation, offset, rangeSize);
+                vr != VK_SUCCESS) {
+                RADRAY_ABORT("vmaFlushAllocation failed: {}", vr);
+            }
         }
     }
     if (!_hints.HasFlag(ResourceHint::PersistentMap)) {
@@ -7101,7 +6910,6 @@ void DescriptorSetVulkan::StageWrite(PendingDescriptorWriteVulkan write) noexcep
     }
 }
 
-
 BindingGroupVulkan::BindingGroupVulkan(
     DeviceVulkan* device,
     BindingDescriptorPoolVulkan* pool,
@@ -7293,6 +7101,10 @@ bool BindingGroupVulkan::SetBindlessArray(uint32_t binding, BindlessArray* array
     }
     _bindlessArray = array;
     return true;
+}
+
+bool BindingGroupVulkan::IsFullyWritten() const noexcept {
+    return _descriptorSet != nullptr && _descriptorSet->IsFullyWritten();
 }
 
 bool BindingGroupVulkan::FlushDescriptorWrites() noexcept {

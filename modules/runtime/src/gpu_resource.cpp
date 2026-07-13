@@ -9,6 +9,25 @@ namespace radray {
 
 namespace {
 
+constexpr uint64_t kNoDirtyBegin = std::numeric_limits<uint64_t>::max();
+
+void MarkDirty(uint64_t offset, uint64_t size, uint64_t& dirtyBegin, uint64_t& dirtyEnd) noexcept {
+    if (size == 0) {
+        return;
+    }
+    dirtyBegin = std::min(dirtyBegin, offset);
+    dirtyEnd = std::max(dirtyEnd, offset + size);
+}
+
+bool HasDirtyRange(uint64_t dirtyBegin, uint64_t dirtyEnd) noexcept {
+    return dirtyBegin != kNoDirtyBegin && dirtyBegin < dirtyEnd;
+}
+
+void ClearDirty(uint64_t& dirtyBegin, uint64_t& dirtyEnd) noexcept {
+    dirtyBegin = kNoDirtyBegin;
+    dirtyEnd = 0;
+}
+
 render::ResourceHints GetPersistentUploadHints(render::Device* device) noexcept {
     render::ResourceHints hints{render::ResourceHint::PersistentMap};
     if (device != nullptr && device->GetBackend() == render::RenderBackend::Vulkan) {
@@ -50,10 +69,12 @@ DynamicCBufferArena::DynamicCBufferArena(DynamicCBufferArena&& other) noexcept
     : _device(other._device),
       _blocks(std::move(other._blocks)),
       _desc(std::move(other._desc)),
+      _activeBlockIndex(other._activeBlockIndex),
       _minBlockSize(other._minBlockSize),
       _allocatedThisFrame(other._allocatedThisFrame),
       _highWatermark(other._highWatermark) {
     other._device = nullptr;
+    other._activeBlockIndex = 0;
     other._minBlockSize = 0;
     other._allocatedThisFrame = 0;
     other._highWatermark = 0;
@@ -76,6 +97,7 @@ bool DynamicCBufferArena::IsValid() const noexcept {
 void DynamicCBufferArena::Destroy() noexcept {
     _blocks.clear();
     _device = nullptr;
+    _activeBlockIndex = 0;
     _allocatedThisFrame = 0;
 }
 
@@ -90,6 +112,7 @@ DynamicCBufferArena::Allocation DynamicCBufferArena::Allocate(uint64_t size) noe
     Block* block = blockOpt.Release();
     const uint64_t offset = Align(block->Used, _desc.Alignment);
     block->Used = offset + size;
+    MarkDirty(offset, size, block->DirtyBegin, block->DirtyEnd);
     _allocatedThisFrame += Align(size, _desc.Alignment);
     _highWatermark = std::max(_highWatermark, _allocatedThisFrame);
     return Allocation{
@@ -100,13 +123,14 @@ DynamicCBufferArena::Allocation DynamicCBufferArena::Allocate(uint64_t size) noe
 }
 
 Nullable<DynamicCBufferArena::Block*> DynamicCBufferArena::GetOrCreateBlock(uint64_t size) noexcept {
-    if (!_blocks.empty()) {
-        Block* last = _blocks.back().get();
-        const auto desc = last->Buffer->GetDesc();
-        const uint64_t offset = Align(last->Used, _desc.Alignment);
+    while (_activeBlockIndex < _blocks.size()) {
+        Block* block = _blocks[_activeBlockIndex].get();
+        const auto desc = block->Buffer->GetDesc();
+        const uint64_t offset = Align(block->Used, _desc.Alignment);
         if (offset <= desc.Size && size <= desc.Size - offset) {
-            return last;
+            return block;
         }
+        ++_activeBlockIndex;
     }
 
     const string name = fmt::format("{}_{}", _desc.NamePrefix, _blocks.size());
@@ -129,27 +153,48 @@ Nullable<DynamicCBufferArena::Block*> DynamicCBufferArena::GetOrCreateBlock(uint
     }
     auto buffer = bufferOpt.Release();
     buffer->SetDebugName(name);
+    _activeBlockIndex = _blocks.size();
     return _blocks.emplace_back(make_unique<Block>(std::move(buffer))).get();
+}
+
+void DynamicCBufferArena::FlushHostWrites() noexcept {
+    for (const auto& block : _blocks) {
+        if (!HasDirtyRange(block->DirtyBegin, block->DirtyEnd)) {
+            continue;
+        }
+        block->Buffer->Unmap(block->DirtyBegin, block->DirtyEnd - block->DirtyBegin);
+        ClearDirty(block->DirtyBegin, block->DirtyEnd);
+    }
+}
+
+bool DynamicCBufferArena::HasPendingHostWrites() const noexcept {
+    return std::ranges::any_of(_blocks, [](const auto& block) noexcept {
+        return HasDirtyRange(block->DirtyBegin, block->DirtyEnd);
+    });
 }
 
 void DynamicCBufferArena::Reset() noexcept {
     _allocatedThisFrame = 0;
+    _activeBlockIndex = 0;
     if (_blocks.empty()) {
         return;
     }
     if (_blocks.size() == 1) {
-        if (_blocks.front()->Buffer->GetDesc().Size > _desc.MaxResetSize) {
-            _minBlockSize = _desc.MaxResetSize;
-            _blocks.clear();
-        } else {
-            _blocks.front()->Used = 0;
-        }
+        _blocks.front()->Used = 0;
+        ClearDirty(_blocks.front()->DirtyBegin, _blocks.front()->DirtyEnd);
         return;
     }
 
     uint64_t totalCapacity = 0;
     for (const auto& block : _blocks) {
         totalCapacity += block->Buffer->GetDesc().Size;
+    }
+    if (totalCapacity > _desc.MaxResetSize) {
+        for (const auto& block : _blocks) {
+            block->Used = 0;
+            ClearDirty(block->DirtyBegin, block->DirtyEnd);
+        }
+        return;
     }
     _minBlockSize = std::max<uint64_t>(_desc.BasicSize, 1);
     while (_minBlockSize < totalCapacity && _minBlockSize < _desc.MaxResetSize) {
@@ -163,6 +208,7 @@ void DynamicCBufferArena::Reset() noexcept {
 
 void DynamicCBufferArena::Clear() noexcept {
     _blocks.clear();
+    _activeBlockIndex = 0;
     _minBlockSize = 0;
     _allocatedThisFrame = 0;
 }
@@ -178,6 +224,7 @@ void swap(DynamicCBufferArena& a, DynamicCBufferArena& b) noexcept {
     swap(a._device, b._device);
     swap(a._blocks, b._blocks);
     swap(a._desc, b._desc);
+    swap(a._activeBlockIndex, b._activeBlockIndex);
     swap(a._minBlockSize, b._minBlockSize);
     swap(a._allocatedThisFrame, b._allocatedThisFrame);
     swap(a._highWatermark, b._highWatermark);
@@ -245,6 +292,7 @@ MaterialConstantPool::Allocation MaterialConstantPool::Allocate(uint64_t size) n
             .Size = size,
             .ReservedSize = reserved,
             .BlockIndex = free.BlockIndex};
+        MarkDirty(result.Offset, result.Size, block.DirtyBegin, block.DirtyEnd);
         free.Offset += reserved;
         free.Size -= reserved;
         if (free.Size == 0) {
@@ -267,6 +315,7 @@ MaterialConstantPool::Allocation MaterialConstantPool::Allocate(uint64_t size) n
     const uint32_t blockIndex = static_cast<uint32_t>(_blocks.size() - 1);
     const uint64_t offset = block->Used;
     block->Used += reserved;
+    MarkDirty(offset, size, block->DirtyBegin, block->DirtyEnd);
     _activeBytes += reserved;
     _highWatermark = std::max(_highWatermark, _activeBytes);
     return Allocation{
@@ -276,6 +325,22 @@ MaterialConstantPool::Allocation MaterialConstantPool::Allocate(uint64_t size) n
         .Size = size,
         .ReservedSize = reserved,
         .BlockIndex = blockIndex};
+}
+
+void MaterialConstantPool::FlushHostWrites() noexcept {
+    for (const auto& block : _blocks) {
+        if (!HasDirtyRange(block->DirtyBegin, block->DirtyEnd)) {
+            continue;
+        }
+        block->Buffer->Unmap(block->DirtyBegin, block->DirtyEnd - block->DirtyBegin);
+        ClearDirty(block->DirtyBegin, block->DirtyEnd);
+    }
+}
+
+bool MaterialConstantPool::HasPendingHostWrites() const noexcept {
+    return std::ranges::any_of(_blocks, [](const auto& block) noexcept {
+        return HasDirtyRange(block->DirtyBegin, block->DirtyEnd);
+    });
 }
 
 void MaterialConstantPool::Release(const Allocation& allocation) noexcept {
@@ -334,16 +399,29 @@ FrameResources::FrameResources(render::Device* device) noexcept
     TransientDescriptorPool->SetDebugName("frame_transient_descriptors");
 }
 
+void FrameResources::FlushHostWrites() noexcept {
+    PerObjectArena.FlushHostWrites();
+    ViewArena.FlushHostWrites();
+}
+
+bool FrameResources::HasPendingHostWrites() const noexcept {
+    return PerObjectArena.HasPendingHostWrites() || ViewArena.HasPendingHostWrites();
+}
+
 void FrameResources::Reset() noexcept {
     RetireList.clear();
     RetainedObjects.clear();
     PerObjectArena.Reset();
     ViewArena.Reset();
     ObjectBindings.clear();
-    std::erase_if(SystemGroups, [this](const FrameBindingGroupCacheEntry& entry) noexcept {
-        return entry.DynamicBuffer != nullptr &&
-               !PerObjectArena.Contains(entry.DynamicBuffer) &&
-               !ViewArena.Contains(entry.DynamicBuffer);
+    ResolvedBindingStates.clear();
+    std::erase_if(ResolvedGroups, [this](const FrameResolvedBindingGroupCacheEntry& entry) noexcept {
+        if (!entry.Persistent) {
+            return true;
+        }
+        return std::ranges::any_of(entry.DynamicBuffers, [this](render::Buffer* buffer) noexcept {
+            return !PerObjectArena.Contains(buffer) && !ViewArena.Contains(buffer);
+        });
     });
     if (TransientDescriptorPool != nullptr) {
         TransientDescriptorPool->Reset();

@@ -3,6 +3,7 @@
 #include <gtest/gtest.h>
 #include <fmt/format.h>
 
+#include <algorithm>
 #include <array>
 #include <cstring>
 
@@ -57,6 +58,184 @@ float4 PSMain(VSOut i) : SV_TARGET {
     float3 c = float3(gPerObject.ObjectToWorld[0][0], gPerObject.ObjectToWorld[1][0], gPerObject.ObjectToWorld[2][0]);
     c *= gMaterial.Tint.rgb;
     return float4(c, 1.0);
+}
+)";
+
+constexpr std::string_view kGenericBindingSource = R"(
+struct MixedData {
+    float4x4 ObjectToWorld;
+    float4 Tint;
+};
+
+[[vk::binding(2, 5)]] ConstantBuffer<MixedData> CustomData : register(b2, space5);
+[[vk::binding(4, 5)]] Texture2D DefaultTexture : register(t4, space5);
+[[vk::binding(6, 5)]] SamplerState DefaultSampler : register(s6, space5);
+
+struct VSIn {
+    float2 Pos : POSITION0;
+};
+
+struct VSOut {
+    float4 Pos : SV_POSITION;
+};
+
+VSOut VSMain(VSIn input) {
+    VSOut output;
+    output.Pos = mul(CustomData.ObjectToWorld, float4(input.Pos, 0.0, 1.0));
+    return output;
+}
+
+float4 PSMain(VSOut input) : SV_TARGET {
+    (void)input;
+    return DefaultTexture.Sample(DefaultSampler, float2(0.0, 0.0)) * CustomData.Tint;
+}
+)";
+
+constexpr std::string_view kMissingTextureSource = R"(
+[[vk::binding(0, 3)]] Texture2D MissingTexture : register(t0, space3);
+
+struct VSIn { float2 Pos : POSITION0; };
+struct VSOut { float4 Pos : SV_POSITION; };
+
+VSOut VSMain(VSIn input) {
+    VSOut output;
+    output.Pos = float4(input.Pos, 0.0, 1.0);
+    return output;
+}
+
+float4 PSMain(VSOut input) : SV_TARGET {
+    (void)input;
+    return MissingTexture.Load(int3(0, 0, 0));
+}
+)";
+
+constexpr std::string_view kUnsupportedBufferSource = R"(
+[[vk::binding(0, 3)]] StructuredBuffer<float4> UnsupportedBuffer : register(t0, space3);
+
+struct VSIn { float2 Pos : POSITION0; };
+struct VSOut { float4 Pos : SV_POSITION; };
+
+VSOut VSMain(VSIn input) {
+    VSOut output;
+    output.Pos = float4(input.Pos, 0.0, 1.0);
+    return output;
+}
+
+float4 PSMain(VSOut input) : SV_TARGET {
+    (void)input;
+    return UnsupportedBuffer[0];
+}
+)";
+
+constexpr std::string_view kUnsupportedUavSource = R"(
+[[vk::binding(0, 3)]] RWStructuredBuffer<float4> UnsupportedUav : register(u0, space3);
+
+struct VSIn { float2 Pos : POSITION0; };
+struct VSOut { float4 Pos : SV_POSITION; };
+
+VSOut VSMain(VSIn input) {
+    VSOut output;
+    output.Pos = float4(input.Pos, 0.0, 1.0);
+    return output;
+}
+
+float4 PSMain(VSOut input) : SV_TARGET {
+    (void)input;
+    UnsupportedUav[0] = float4(1.0, 0.0, 0.0, 1.0);
+    return UnsupportedUav[0];
+}
+)";
+
+constexpr std::string_view kUnsupportedArraySource = R"(
+[[vk::binding(0, 3)]] Texture2D UnsupportedTextures[2] : register(t0, space3);
+
+struct VSIn { float2 Pos : POSITION0; };
+struct VSOut { float4 Pos : SV_POSITION; };
+
+VSOut VSMain(VSIn input) {
+    VSOut output;
+    output.Pos = float4(input.Pos, 0.0, 1.0);
+    return output;
+}
+
+float4 PSMain(VSOut input) : SV_TARGET {
+    (void)input;
+    return UnsupportedTextures[0].Load(int3(0, 0, 0));
+}
+)";
+
+constexpr std::string_view kUnsupportedBindlessSource = R"(
+[[vk::binding(0, 3)]] StructuredBuffer<float4> UnsupportedBindless[] : register(t0, space3);
+
+struct VSIn { float2 Pos : POSITION0; };
+struct VSOut { float4 Pos : SV_POSITION; };
+
+VSOut VSMain(VSIn input) {
+    VSOut output;
+    output.Pos = float4(input.Pos, 0.0, 1.0);
+    return output;
+}
+
+float4 PSMain(VSOut input) : SV_TARGET {
+    (void)input;
+    return UnsupportedBindless[0][0];
+}
+)";
+
+constexpr std::string_view kUnsupportedPushConstantSource = R"(
+struct PushData { float4 Value; };
+[[vk::push_constant]] ConstantBuffer<PushData> UnsupportedPush : register(b0, space0);
+
+struct VSIn { float2 Pos : POSITION0; };
+struct VSOut { float4 Pos : SV_POSITION; };
+
+VSOut VSMain(VSIn input) {
+    VSOut output;
+    output.Pos = float4(input.Pos, 0.0, 1.0);
+    return output;
+}
+
+float4 PSMain(VSOut input) : SV_TARGET {
+    (void)input;
+    return UnsupportedPush.Value;
+}
+)";
+
+constexpr std::string_view kMissingViewProviderSource = R"(
+struct ViewData { float4 Tint; };
+[[vk::binding(0, 3)]] ConstantBuffer<ViewData> MissingView : register(b0, space3);
+
+struct VSIn { float2 Pos : POSITION0; };
+struct VSOut { float4 Pos : SV_POSITION; };
+
+VSOut VSMain(VSIn input) {
+    VSOut output;
+    output.Pos = float4(input.Pos, 0.0, 1.0);
+    return output;
+}
+
+float4 PSMain(VSOut input) : SV_TARGET {
+    (void)input;
+    return MissingView.Tint;
+}
+)";
+
+constexpr std::string_view kErrorMaterialSource = R"(
+struct ObjectData { float4x4 ObjectToWorld; };
+[[vk::binding(0, 0)]] ConstantBuffer<ObjectData> ErrorObject : register(b0, space0);
+
+struct VSIn { float2 Pos : POSITION0; };
+struct VSOut { float4 Pos : SV_POSITION; };
+
+VSOut VSMain(VSIn input) {
+    VSOut output;
+    output.Pos = mul(ErrorObject.ObjectToWorld, float4(input.Pos, 0.0, 1.0));
+    return output;
+}
+
+float4 PSMain(VSOut input) : SV_TARGET {
+    (void)input;
+    return float4(1.0, 0.0, 1.0, 1.0);
 }
 )";
 
@@ -148,7 +327,87 @@ ShaderPassDesc MakeMeshPass() {
     pass.MultiSample = MultiSampleState::Default();
     pass.ColorTargets.push_back(ColorTargetState::Default(kRtFormat));
     pass.DynamicBufferBindings.push_back(DynamicBufferBinding{.Group = 0, .Binding = 1});
+    pass.ParameterSources = {
+        ShaderParameterSourceDesc{
+            .Name = "gPerObject",
+            .Scope = ShaderParameterScope::Object,
+            .ProviderName = "gPerObject"},
+        ShaderParameterSourceDesc{
+            .Name = "gMaterial",
+            .Scope = ShaderParameterScope::Material,
+            .ProviderName = "gMaterial"}};
     // 顶点布局: 一个 float2 POSITION。
+    OwningVertexBufferLayout layout{};
+    layout.ArrayStride = sizeof(float) * 2;
+    layout.StepMode = VertexStepMode::Vertex;
+    layout.Elements.push_back(VertexElement{
+        .Offset = 0,
+        .Semantic = "POSITION",
+        .SemanticIndex = 0,
+        .Format = VertexFormat::FLOAT32X2,
+        .Location = 0});
+    pass.VertexLayouts.push_back(std::move(layout));
+    return pass;
+}
+
+ShaderPassDesc MakeGenericBindingPass() {
+    ShaderPassDesc pass{};
+    pass.PassTag = "ForwardLit";
+    pass.Source = string{kGenericBindingSource};
+    pass.VertexEntry = "VSMain";
+    pass.PixelEntry = "PSMain";
+    pass.Primitive = PrimitiveState::Default();
+    pass.Primitive.Cull = CullMode::None;
+    pass.MultiSample = MultiSampleState::Default();
+    pass.ColorTargets.push_back(ColorTargetState::Default(kRtFormat));
+    pass.DynamicBufferBindings.push_back(DynamicBufferBinding{.Group = 5, .Binding = 2});
+    pass.ParameterSources = {
+        ShaderParameterSourceDesc{
+            .Name = "CustomData.ObjectToWorld",
+            .Scope = ShaderParameterScope::Object,
+            .ProviderName = "ObjectToWorld"},
+        ShaderParameterSourceDesc{
+            .Name = "CustomData.Tint",
+            .Scope = ShaderParameterScope::Material,
+            .ProviderName = "Tint"},
+        ShaderParameterSourceDesc{
+            .Name = "DefaultTexture",
+            .Scope = ShaderParameterScope::Material},
+        ShaderParameterSourceDesc{
+            .Name = "DefaultSampler",
+            .Scope = ShaderParameterScope::Material}};
+    OwningVertexBufferLayout layout{};
+    layout.ArrayStride = sizeof(float) * 2;
+    layout.StepMode = VertexStepMode::Vertex;
+    layout.Elements.push_back(VertexElement{
+        .Offset = 0,
+        .Semantic = "POSITION",
+        .SemanticIndex = 0,
+        .Format = VertexFormat::FLOAT32X2,
+        .Location = 0});
+    pass.VertexLayouts.push_back(std::move(layout));
+    return pass;
+}
+
+ShaderPassDesc MakeSimpleUnlitPass(
+    std::string_view source,
+    bool withObjectBinding = false) {
+    ShaderPassDesc pass{};
+    pass.PassTag = "ForwardLit";
+    pass.Source = string{source};
+    pass.VertexEntry = "VSMain";
+    pass.PixelEntry = "PSMain";
+    pass.Primitive = PrimitiveState::Default();
+    pass.Primitive.Cull = CullMode::None;
+    pass.MultiSample = MultiSampleState::Default();
+    pass.ColorTargets.push_back(ColorTargetState::Default(kRtFormat));
+    if (withObjectBinding) {
+        pass.DynamicBufferBindings.push_back(DynamicBufferBinding{.Group = 0, .Binding = 0});
+        pass.ParameterSources.push_back(ShaderParameterSourceDesc{
+            .Name = "ErrorObject",
+            .Scope = ShaderParameterScope::Object,
+            .ProviderName = "ObjectToWorld"});
+    }
     OwningVertexBufferLayout layout{};
     layout.ArrayStride = sizeof(float) * 2;
     layout.StepMode = VertexStepMode::Vertex;
@@ -400,6 +659,336 @@ TEST_P(MeshPassExecutorTest, DrawsPerObjectColorIntoRenderTarget) {
     EXPECT_NEAR(center[2], expB, 2) << "B mismatch";
     EXPECT_EQ(_psoCache->Count(), 1u);
     EXPECT_EQ(_variantCache->Count(), 1u);
+}
+
+TEST_P(MeshPassExecutorTest, DrawsEmptyMaterialWithGenericMixedBindingsAndDefaults) {
+    string reason;
+    AssetManager assets;
+
+    TextureDescriptor defaultTextureDesc{};
+    defaultTextureDesc.Dim = TextureDimension::Dim2D;
+    defaultTextureDesc.Width = 1;
+    defaultTextureDesc.Height = 1;
+    defaultTextureDesc.DepthOrArraySize = 1;
+    defaultTextureDesc.MipLevels = 1;
+    defaultTextureDesc.SampleCount = 1;
+    defaultTextureDesc.Format = TextureFormat::RGBA8_UNORM;
+    defaultTextureDesc.Memory = MemoryType::Device;
+    defaultTextureDesc.Usage = TextureUse::Resource | TextureUse::CopyDestination;
+    auto defaultTextureOpt = _ctx.CreateTexture(defaultTextureDesc, &reason);
+    ASSERT_TRUE(defaultTextureOpt.HasValue()) << reason;
+    auto defaultTexture = defaultTextureOpt.Release();
+    const std::array<byte, 4> white{
+        byte{255}, byte{255}, byte{255}, byte{255}};
+    ASSERT_TRUE(_ctx.UploadTexture2D(defaultTexture.get(), white, &reason)) << reason;
+    TextureViewDescriptor defaultSrvDesc{};
+    defaultSrvDesc.Target = defaultTexture.get();
+    defaultSrvDesc.Dim = TextureDimension::Dim2D;
+    defaultSrvDesc.Format = TextureFormat::RGBA8_UNORM;
+    defaultSrvDesc.Range = SubresourceRange::AllSub();
+    defaultSrvDesc.Usage = TextureViewUsage::Resource;
+    auto defaultSrvOpt = _ctx.CreateTextureView(defaultSrvDesc, &reason);
+    ASSERT_TRUE(defaultSrvOpt.HasValue()) << reason;
+    auto defaultSrv = defaultSrvOpt.Release();
+    auto defaultTextureRef = assets.AddReady<TextureAsset>(
+        Guid::NewGuid(),
+        make_unique<TextureAsset>(
+            _ctx.GetDevicePtr(),
+            "generic_default",
+            std::move(defaultTexture),
+            std::move(defaultSrv)));
+
+    SamplerDescriptor defaultSampler{};
+    defaultSampler.AddressS = AddressMode::ClampToEdge;
+    defaultSampler.AddressT = AddressMode::ClampToEdge;
+    defaultSampler.AddressR = AddressMode::ClampToEdge;
+    defaultSampler.MinFilter = FilterMode::Nearest;
+    defaultSampler.MagFilter = FilterMode::Nearest;
+    defaultSampler.MipmapFilter = FilterMode::Nearest;
+    defaultSampler.LodMin = 0.0f;
+    defaultSampler.LodMax = 0.0f;
+
+    vector<ShaderPropertyDesc> properties{
+        ShaderPropertyDesc{
+            .Name = "Tint",
+            .Kind = ShaderPropertyKind::Vector,
+            .DefaultValue = Eigen::Vector4f{0.2f, 0.4f, 0.6f, 1.0f}},
+        ShaderPropertyDesc{
+            .Name = "DefaultTexture",
+            .Kind = ShaderPropertyKind::Texture,
+            .DefaultValue = defaultTextureRef},
+        ShaderPropertyDesc{
+            .Name = "DefaultSampler",
+            .Kind = ShaderPropertyKind::Sampler,
+            .DefaultValue = defaultSampler}};
+    vector<ShaderPassDesc> passes;
+    passes.push_back(MakeGenericBindingPass());
+    auto shaderRef = assets.AddReady<ShaderAsset>(
+        Guid::NewGuid(),
+        make_unique<ShaderAsset>(
+            ShaderKeywordSet{},
+            std::move(passes),
+            std::move(properties)));
+    MaterialAsset material{shaderRef};
+
+    TriangleProxy proxy;
+    ASSERT_TRUE(proxy.Init(_ctx, Eigen::Matrix4f::Identity(), &reason)) << reason;
+    DrawList list;
+    auto materialSnapshot = material.CreateSnapshot();
+    ASSERT_TRUE(list.AddPrimitive(materialSnapshot, &proxy, "ForwardLit"));
+
+    TextureDescriptor rtDesc{};
+    rtDesc.Dim = TextureDimension::Dim2D;
+    rtDesc.Width = kRtSize;
+    rtDesc.Height = kRtSize;
+    rtDesc.DepthOrArraySize = 1;
+    rtDesc.MipLevels = 1;
+    rtDesc.SampleCount = 1;
+    rtDesc.Format = kRtFormat;
+    rtDesc.Memory = MemoryType::Device;
+    rtDesc.Usage = TextureUse::RenderTarget | TextureUse::CopySource;
+    auto rtOpt = _ctx.CreateTexture(rtDesc, &reason);
+    ASSERT_TRUE(rtOpt.HasValue()) << reason;
+    auto rt = rtOpt.Release();
+    TextureViewDescriptor rtvDesc{};
+    rtvDesc.Target = rt.get();
+    rtvDesc.Dim = TextureDimension::Dim2D;
+    rtvDesc.Format = kRtFormat;
+    rtvDesc.Range = SubresourceRange{0, 1, 0, 1};
+    rtvDesc.Usage = TextureViewUsage::RenderTarget;
+    auto rtvOpt = _ctx.CreateTextureView(rtvDesc, &reason);
+    ASSERT_TRUE(rtvOpt.HasValue()) << reason;
+    auto rtv = rtvOpt.Release();
+
+    const uint32_t bytesPerPixel = GetTextureFormatBytesPerPixel(kRtFormat);
+    const uint64_t rowAlignment = std::max<uint64_t>(
+        1, _ctx.GetDeviceDetail().TextureDataPitchAlignment);
+    const uint64_t alignedRow = AlignUp<uint64_t>(
+        static_cast<uint64_t>(kRtSize) * bytesPerPixel,
+        rowAlignment);
+    BufferDescriptor readbackDesc{};
+    readbackDesc.Size = alignedRow * kRtSize;
+    readbackDesc.Memory = MemoryType::ReadBack;
+    readbackDesc.Usage = BufferUse::CopyDestination | BufferUse::MapRead;
+    auto readbackOpt = _ctx.CreateBuffer(readbackDesc, &reason);
+    ASSERT_TRUE(readbackOpt.HasValue()) << reason;
+    auto readback = readbackOpt.Release();
+
+    RenderPassRegistry registry{_ctx.GetDevicePtr()};
+    RenderPassColorAttachmentDescriptor color{
+        .Format = kRtFormat,
+        .SampleCount = 1,
+        .Load = LoadAction::Clear,
+        .Store = StoreAction::Store};
+    RenderPassDescriptor passDesc{.ColorAttachments = std::span{&color, 1}};
+    auto renderPass = registry.GetOrCreateRenderPass(passDesc);
+    ASSERT_TRUE(renderPass.HasValue());
+    TextureView* colorView = rtv.get();
+    auto framebuffer = registry.GetOrCreateFramebuffer(
+        renderPass.Get(),
+        std::span<TextureView* const>{&colorView, 1},
+        nullptr,
+        kRtSize,
+        kRtSize);
+    ASSERT_TRUE(framebuffer.HasValue());
+
+    auto commandOpt = _ctx.CreateCommandBuffer(&reason);
+    ASSERT_TRUE(commandOpt.HasValue()) << reason;
+    auto command = commandOpt.Release();
+    _ctx.ClearCapturedErrors();
+    command->Begin();
+    ResourceBarrierDescriptor toRenderTarget = BarrierTextureDescriptor{
+        .Target = rt.get(),
+        .Before = TextureState::Undefined,
+        .After = TextureState::RenderTarget};
+    command->ResourceBarrier(std::span{&toRenderTarget, 1});
+    const ColorClearValue clear{{0.0f, 0.0f, 0.0f, 1.0f}};
+    RenderPassBeginDescriptor begin{
+        .Pass = renderPass.Get(),
+        .Target = framebuffer.Get(),
+        .ColorClearValues = std::span{&clear, 1},
+        .Name = "GenericBindingDefaults"};
+    auto encoderOpt = command->BeginRenderPass(begin);
+    ASSERT_TRUE(encoderOpt.HasValue()) << _ctx.JoinCapturedErrors();
+    auto encoder = encoderOpt.Release();
+    Viewport viewport{
+        .X = 0.0f,
+        .Y = 0.0f,
+        .Width = static_cast<float>(kRtSize),
+        .Height = static_cast<float>(kRtSize),
+        .MinDepth = 0.0f,
+        .MaxDepth = 1.0f};
+    if (_ctx.GetDevicePtr()->GetBackend() == RenderBackend::Vulkan) {
+        viewport.Y = static_cast<float>(kRtSize);
+        viewport.Height = -static_cast<float>(kRtSize);
+    }
+    encoder->SetViewport(viewport);
+    encoder->SetScissor(Rect{0, 0, kRtSize, kRtSize});
+
+    MeshPassExecutor executor{
+        _ctx.GetDevicePtr(),
+        _variantCache.get(),
+        _psoCache.get(),
+        _samplerCache.get()};
+    FrameResources resources{_ctx.GetDevicePtr()};
+    executor.SetRenderPass(renderPass.Get());
+    EXPECT_EQ(executor.Execute(encoder.get(), list, resources), 1u)
+        << _ctx.JoinCapturedErrors();
+    EXPECT_EQ(resources.Counters.BindingPlanCacheMisses, 1u);
+    EXPECT_EQ(resources.Counters.BindingResolutionFailures, 0u);
+    EXPECT_EQ(resources.Counters.ErrorFallbackDraws, 0u);
+    EXPECT_TRUE(std::ranges::any_of(
+        resources.RetainedObjects,
+        [&](const shared_ptr<const void>& retained) noexcept {
+            return retained.get() == materialSnapshot.get();
+        }));
+    command->EndRenderPass(std::move(encoder));
+    ResourceBarrierDescriptor toCopySource = BarrierTextureDescriptor{
+        .Target = rt.get(),
+        .Before = TextureState::RenderTarget,
+        .After = TextureState::CopySource};
+    command->ResourceBarrier(std::span{&toCopySource, 1});
+    command->CopyTextureToBuffer(
+        readback.get(),
+        0,
+        rt.get(),
+        SubresourceRange{0, 1, 0, 1});
+    command->End();
+    ASSERT_TRUE(_ctx.SubmitAndWait(command.get(), &reason))
+        << reason << " " << _ctx.JoinCapturedErrors();
+    EXPECT_TRUE(_ctx.GetCapturedErrors().empty()) << _ctx.JoinCapturedErrors();
+
+    auto pixels = _ctx.ReadHostVisibleBuffer(readback.get(), readbackDesc.Size, &reason);
+    ASSERT_TRUE(pixels.has_value()) << reason;
+    const byte* center = pixels->data() +
+                         static_cast<size_t>(kRtSize / 2) * alignedRow +
+                         static_cast<size_t>(kRtSize / 2) * bytesPerPixel;
+    EXPECT_NEAR(static_cast<uint8_t>(center[0]), 51, 2);
+    EXPECT_NEAR(static_cast<uint8_t>(center[1]), 102, 2);
+    EXPECT_NEAR(static_cast<uint8_t>(center[2]), 153, 2);
+    EXPECT_EQ(static_cast<uint8_t>(center[3]), 255);
+
+    DrawList invalidList;
+    const auto addInvalidMaterial = [&](std::string_view source, bool pushConstant = false) {
+        ShaderPassDesc invalidPass = MakeSimpleUnlitPass(source);
+        if (pushConstant) {
+            invalidPass.PushConstantBindings.push_back(
+                PushConstantBinding{.Group = 0, .Binding = 0});
+        }
+        auto invalidShader = assets.AddReady<ShaderAsset>(
+            Guid::NewGuid(),
+            make_unique<ShaderAsset>(
+                ShaderKeywordSet{},
+                vector<ShaderPassDesc>{std::move(invalidPass)}));
+        MaterialAsset invalidMaterial{invalidShader};
+        return invalidList.AddPrimitive(
+            invalidMaterial.CreateSnapshot(),
+            &proxy,
+            "ForwardLit");
+    };
+    ASSERT_TRUE(addInvalidMaterial(kMissingTextureSource));
+    ASSERT_TRUE(addInvalidMaterial(kUnsupportedBufferSource));
+    ASSERT_TRUE(addInvalidMaterial(kUnsupportedUavSource));
+    ASSERT_TRUE(addInvalidMaterial(kUnsupportedArraySource));
+    ASSERT_TRUE(addInvalidMaterial(kUnsupportedBindlessSource));
+    ASSERT_TRUE(addInvalidMaterial(kUnsupportedPushConstantSource, true));
+
+    auto wrongTypeShader = assets.AddReady<ShaderAsset>(
+        Guid::NewGuid(),
+        make_unique<ShaderAsset>(
+            ShaderKeywordSet{},
+            vector<ShaderPassDesc>{MakeMeshPass()}));
+    MaterialAsset wrongTypeMaterial{wrongTypeShader};
+    wrongTypeMaterial.SetFloat("gMaterial", 1.0f);
+    ASSERT_TRUE(invalidList.AddPrimitive(
+        wrongTypeMaterial.CreateSnapshot(),
+        &proxy,
+        "ForwardLit"));
+
+    ShaderPassDesc missingProviderPass = MakeSimpleUnlitPass(kMissingViewProviderSource);
+    missingProviderPass.ParameterSources.push_back(ShaderParameterSourceDesc{
+        .Name = "MissingView",
+        .Scope = ShaderParameterScope::View,
+        .ProviderName = "MissingView"});
+    auto missingProviderShader = assets.AddReady<ShaderAsset>(
+        Guid::NewGuid(),
+        make_unique<ShaderAsset>(
+            ShaderKeywordSet{},
+            vector<ShaderPassDesc>{std::move(missingProviderPass)}));
+    MaterialAsset missingProviderMaterial{missingProviderShader};
+    ASSERT_TRUE(invalidList.AddPrimitive(
+        missingProviderMaterial.CreateSnapshot(),
+        &proxy,
+        "ForwardLit"));
+
+    auto errorShader = assets.AddReady<ShaderAsset>(
+        Guid::NewGuid(),
+        make_unique<ShaderAsset>(
+            ShaderKeywordSet{},
+            vector<ShaderPassDesc>{MakeSimpleUnlitPass(kErrorMaterialSource, true)}));
+    MaterialAsset errorMaterial{errorShader};
+    auto errorSnapshot = errorMaterial.CreateSnapshot();
+
+    _ctx.ClearCapturedErrors();
+    command->Begin();
+    ResourceBarrierDescriptor backToRenderTarget = BarrierTextureDescriptor{
+        .Target = rt.get(),
+        .Before = TextureState::CopySource,
+        .After = TextureState::RenderTarget};
+    command->ResourceBarrier(std::span{&backToRenderTarget, 1});
+    auto errorEncoderOpt = command->BeginRenderPass(begin);
+    ASSERT_TRUE(errorEncoderOpt.HasValue()) << _ctx.JoinCapturedErrors();
+    auto errorEncoder = errorEncoderOpt.Release();
+    errorEncoder->SetViewport(viewport);
+    errorEncoder->SetScissor(Rect{0, 0, kRtSize, kRtSize});
+
+    MeshPassExecutor fallbackExecutor{
+        _ctx.GetDevicePtr(),
+        _variantCache.get(),
+        _psoCache.get(),
+        _samplerCache.get(),
+        "PerObject",
+        nullptr,
+        errorSnapshot};
+    FrameResources fallbackResources{_ctx.GetDevicePtr()};
+    fallbackExecutor.SetRenderPass(renderPass.Get());
+    EXPECT_EQ(
+        fallbackExecutor.Execute(errorEncoder.get(), invalidList, fallbackResources),
+        invalidList.Size());
+    EXPECT_EQ(
+        fallbackResources.Counters.BindingResolutionFailures,
+        invalidList.Size());
+    EXPECT_EQ(
+        fallbackResources.Counters.ErrorFallbackDraws,
+        invalidList.Size());
+    EXPECT_EQ(fallbackResources.Counters.Draws, invalidList.Size());
+    _ctx.ClearCapturedErrors();
+    command->EndRenderPass(std::move(errorEncoder));
+    ResourceBarrierDescriptor errorToCopySource = BarrierTextureDescriptor{
+        .Target = rt.get(),
+        .Before = TextureState::RenderTarget,
+        .After = TextureState::CopySource};
+    command->ResourceBarrier(std::span{&errorToCopySource, 1});
+    command->CopyTextureToBuffer(
+        readback.get(),
+        0,
+        rt.get(),
+        SubresourceRange{0, 1, 0, 1});
+    command->End();
+    ASSERT_TRUE(_ctx.SubmitAndWait(command.get(), &reason))
+        << reason << " " << _ctx.JoinCapturedErrors();
+    EXPECT_TRUE(_ctx.GetCapturedErrors().empty()) << _ctx.JoinCapturedErrors();
+
+    auto fallbackPixels = _ctx.ReadHostVisibleBuffer(
+        readback.get(), readbackDesc.Size, &reason);
+    ASSERT_TRUE(fallbackPixels.has_value()) << reason;
+    const byte* fallbackCenter = fallbackPixels->data() +
+                                 static_cast<size_t>(kRtSize / 2) * alignedRow +
+                                 static_cast<size_t>(kRtSize / 2) * bytesPerPixel;
+    EXPECT_EQ(static_cast<uint8_t>(fallbackCenter[0]), 255);
+    EXPECT_EQ(static_cast<uint8_t>(fallbackCenter[1]), 0);
+    EXPECT_EQ(static_cast<uint8_t>(fallbackCenter[2]), 255);
+    EXPECT_EQ(static_cast<uint8_t>(fallbackCenter[3]), 255);
 }
 
 TEST_P(MeshPassExecutorTest, ConstantPoolsAlignGrowAndDelayReuseUntilRelease) {

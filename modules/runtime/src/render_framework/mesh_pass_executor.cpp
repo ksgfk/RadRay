@@ -9,6 +9,7 @@
 #include <radray/hash.h>
 #include <radray/runtime/sampler_cache.h>
 #include <radray/runtime/shader_asset.h>
+#include <radray/runtime/shader_default_resource_library.h>
 #include <radray/runtime/render_framework/material_render_snapshot.h>
 #include <radray/runtime/render_framework/primitive_scene_proxy.h>
 #include <radray/runtime/render_framework/render_queue.h>
@@ -52,6 +53,66 @@ struct RetiredMaterialConstants {
     }
 };
 
+const render::VertexElement* FindPositionElement(
+    const OwningVertexBufferLayout& layout) noexcept {
+    auto element = std::ranges::find_if(
+        layout.Elements,
+        [](const render::VertexElement& value) noexcept {
+            return value.Semantic == "POSITION" && value.SemanticIndex == 0;
+        });
+    return element != layout.Elements.end() ? &*element : nullptr;
+}
+
+bool HasCompatiblePositionLayout(
+    const ShaderPassDesc& source,
+    const ShaderPassDesc& fallback) noexcept {
+    const size_t count = std::min(source.VertexLayouts.size(), fallback.VertexLayouts.size());
+    for (size_t i = 0; i < count; ++i) {
+        const OwningVertexBufferLayout& sourceLayout = source.VertexLayouts[i];
+        const OwningVertexBufferLayout& fallbackLayout = fallback.VertexLayouts[i];
+        const render::VertexElement* sourcePosition = FindPositionElement(sourceLayout);
+        const render::VertexElement* fallbackPosition = FindPositionElement(fallbackLayout);
+        if (sourcePosition != nullptr && fallbackPosition != nullptr &&
+            sourceLayout.ArrayStride == fallbackLayout.ArrayStride &&
+            sourceLayout.StepMode == fallbackLayout.StepMode &&
+            sourcePosition->Offset == fallbackPosition->Offset &&
+            sourcePosition->Format == fallbackPosition->Format &&
+            sourcePosition->Location == fallbackPosition->Location) {
+            return true;
+        }
+    }
+    return false;
+}
+
+ShaderVariantKey BuildDiagnosticVariantKey(
+    const DrawItem& item,
+    std::span<const std::string_view> globalKeywords,
+    render::Device* device) {
+    ShaderVariantKey key{};
+    ShaderAsset* shader = item.Material != nullptr ? item.Material->Shader.Get() : nullptr;
+    if (shader == nullptr) {
+        return key;
+    }
+    key.ProgramId = shader->GetProgramId();
+    key.PassIndex = item.PassIndex;
+    key.Backend = device != nullptr
+                      ? static_cast<uint32_t>(device->GetBackend())
+                      : 0u;
+    key.ShaderModel = static_cast<uint32_t>(render::HlslShaderModel::SM60);
+
+    vector<std::string_view> enabled;
+    enabled.reserve(item.Material->EnabledKeywords.size() + globalKeywords.size());
+    for (const string& keyword : item.Material->EnabledKeywords) {
+        enabled.push_back(keyword);
+    }
+    enabled.insert(enabled.end(), globalKeywords.begin(), globalKeywords.end());
+    key.KeywordBitmask = shader->GetKeywords().Project(enabled);
+    if (item.PassIndex < shader->GetPasses().size()) {
+        key.KeywordBitmask &= shader->GetPasses()[item.PassIndex].VariantKeywordMask;
+    }
+    return key;
+}
+
 }  // namespace
 
 MeshPassExecutor::MeshPassExecutor(
@@ -59,37 +120,93 @@ MeshPassExecutor::MeshPassExecutor(
     ShaderVariantLibrary* variantCache,
     GraphicsPipelineStateLibrary* psoCache,
     SamplerCache* samplerCache,
-    std::string perObjectCBufferName) noexcept
+    std::string perObjectCBufferName,
+    Nullable<ShaderDefaultResourceLibrary*> defaultResources,
+    shared_ptr<const MaterialRenderSnapshot> errorMaterial) noexcept
     : _device(device),
       _variantCache(variantCache),
       _psoCache(psoCache),
       _samplerCache(samplerCache),
+      _defaultResources(defaultResources.Get()),
+      _errorMaterial(std::move(errorMaterial)),
       _perObjectName(std::move(perObjectCBufferName)) {}
 
 void MeshPassExecutor::SetViewConstants(std::string_view viewCBufferName, std::span<const byte> data) noexcept {
+    if (!_viewName.empty() && _viewName != viewCBufferName) {
+        _viewParameters.ClearConstant(_viewName);
+    }
     _viewName.assign(viewCBufferName.begin(), viewCBufferName.end());
     _viewData.assign(data.begin(), data.end());
+    if (!_viewName.empty() && !_viewData.empty()) {
+        _viewParameters.SetConstant(_viewName, _viewData);
+    } else if (!_viewName.empty()) {
+        _viewParameters.ClearConstant(_viewName);
+    }
     _viewBindingValid = false;
 }
 
-void MeshPassExecutor::SetGlobalTexture(std::string_view name, render::TextureView* view) noexcept {
-    for (GlobalTexture& g : _globalTextures) {
-        if (g.Name == name) {
-            g.View = view;
-            return;
-        }
+void MeshPassExecutor::SetViewParameter(
+    std::string_view name,
+    std::span<const byte> data) {
+    _viewParameters.SetConstant(name, data);
+    if (name == _viewName) {
+        _viewData.assign(data.begin(), data.end());
+        _viewBindingValid = false;
     }
-    _globalTextures.push_back(GlobalTexture{std::string{name}, view});
+}
+
+void MeshPassExecutor::SetViewResource(
+    std::string_view name,
+    render::ResourceView* resource) noexcept {
+    if (resource != nullptr) {
+        _viewParameters.SetResource(name, resource);
+    } else {
+        _viewParameters.ClearResource(name);
+    }
+}
+
+void MeshPassExecutor::SetViewSampler(
+    std::string_view name,
+    render::Sampler* sampler) noexcept {
+    if (sampler != nullptr) {
+        _viewParameters.SetSampler(name, sampler);
+    } else {
+        _viewParameters.ClearSampler(name);
+    }
+}
+
+void MeshPassExecutor::SetPassConstant(
+    std::string_view name,
+    std::span<const byte> data) {
+    _passParameters.SetConstant(name, data);
+}
+
+void MeshPassExecutor::SetPassResource(
+    std::string_view name,
+    render::ResourceView* resource) noexcept {
+    if (resource != nullptr) {
+        _passParameters.SetResource(name, resource);
+    } else {
+        _passParameters.ClearResource(name);
+    }
+}
+
+void MeshPassExecutor::SetPassSampler(
+    std::string_view name,
+    render::Sampler* sampler) noexcept {
+    if (sampler != nullptr) {
+        _passParameters.SetSampler(name, sampler);
+    } else {
+        _passParameters.ClearSampler(name);
+    }
+}
+
+void MeshPassExecutor::SetGlobalTexture(std::string_view name, render::TextureView* view) noexcept {
+    SetPassResource(name, view);
 }
 
 void MeshPassExecutor::SetGlobalSampler(std::string_view name, render::Sampler* sampler) noexcept {
-    for (GlobalSampler& g : _globalSamplers) {
-        if (g.Name == name) {
-            g.Sampler = sampler;
-            return;
-        }
-    }
-    _globalSamplers.push_back(GlobalSampler{std::string{name}, sampler});
+    SetPassSampler(name, sampler);
 }
 
 void MeshPassExecutor::EnableGlobalKeyword(std::string_view name) noexcept {
@@ -102,117 +219,8 @@ void MeshPassExecutor::EnableGlobalKeyword(std::string_view name) noexcept {
 }
 
 void MeshPassExecutor::ClearGlobals() noexcept {
-    _globalTextures.clear();
-    _globalSamplers.clear();
+    _passParameters.Clear();
     _globalKeywords.clear();
-}
-
-Nullable<render::BindingGroup*> MeshPassExecutor::AcquireSystemGroup(
-    FrameResources& resources,
-    const CompiledShaderVariant& variant,
-    uint32_t groupIndex,
-    render::Buffer* dynamicBuffer) noexcept {
-    render::PipelineLayout* layout = variant.Layout;
-    if (layout == nullptr) {
-        return nullptr;
-    }
-    vector<render::ResourceView*> resourceKey{};
-    vector<render::Sampler*> samplerKey{};
-    if (groupIndex == 1) {
-        resourceKey.reserve(_globalTextures.size());
-        samplerKey.reserve(_globalSamplers.size());
-        for (const GlobalTexture& global : _globalTextures) {
-            resourceKey.push_back(global.View);
-        }
-        for (const GlobalSampler& global : _globalSamplers) {
-            samplerKey.push_back(global.Sampler);
-        }
-    }
-
-    for (FrameBindingGroupCacheEntry& cache : resources.SystemGroups) {
-        if (cache.Layout == layout && cache.GroupIndex == groupIndex &&
-            cache.DynamicBuffer == dynamicBuffer && cache.Resources == resourceKey &&
-            cache.Samplers == samplerKey) {
-            ++resources.Counters.SystemGroupCacheHits;
-            return cache.Group.get();
-        }
-    }
-
-    ++resources.Counters.SystemGroupCacheMisses;
-    auto groupOpt = _device->CreateBindingGroup(
-        resources.SystemDescriptorPool.get(), layout, groupIndex);
-    if (!groupOpt.HasValue()) {
-        return nullptr;
-    }
-    auto group = groupOpt.Release();
-    render::BufferBindingDescriptor dynamicBinding{};
-    dynamicBinding.Target = dynamicBuffer;
-    dynamicBinding.Range = render::BufferRange{
-        .Offset = 0,
-        .Size = groupIndex == 0 ? sizeof(PerObjectConstants) : _viewData.size()};
-    dynamicBinding.Usage = render::BufferViewUsage::CBuffer;
-    const std::string_view dynamicName = groupIndex == 0 ? std::string_view{_perObjectName}
-                                                         : std::string_view{_viewName};
-    auto dynamicLocation = FindShaderBindingLocation(variant, dynamicName);
-    if (!dynamicLocation.has_value() || dynamicLocation->Group != groupIndex ||
-        !group->SetResource(dynamicLocation->Binding, dynamicBinding)) {
-        return nullptr;
-    }
-    uint64_t descriptorUpdates = 1;
-
-    if (groupIndex == 1) {
-        for (const GlobalTexture& global : _globalTextures) {
-            auto location = FindShaderBindingLocation(variant, global.Name);
-            if (global.View == nullptr || !location.has_value() || location->Group != groupIndex) {
-                RADRAY_ERR_LOG(
-                    "MeshPassExecutor: global texture '{}' has no binding in group {}",
-                    global.Name,
-                    groupIndex);
-                continue;
-            }
-            if (!group->SetResource(
-                    location->Binding,
-                    static_cast<render::ResourceView*>(global.View))) {
-                RADRAY_ERR_LOG(
-                    "MeshPassExecutor: failed to bind global texture '{}' at group {} binding {}",
-                    global.Name,
-                    groupIndex,
-                    location->Binding);
-                continue;
-            }
-            ++descriptorUpdates;
-        }
-        for (const GlobalSampler& global : _globalSamplers) {
-            auto location = FindShaderBindingLocation(variant, global.Name);
-            if (global.Sampler == nullptr || !location.has_value() || location->Group != groupIndex) {
-                RADRAY_ERR_LOG(
-                    "MeshPassExecutor: global sampler '{}' has no binding in group {}",
-                    global.Name,
-                    groupIndex);
-                continue;
-            }
-            if (!group->SetSampler(location->Binding, global.Sampler)) {
-                RADRAY_ERR_LOG(
-                    "MeshPassExecutor: failed to bind global sampler '{}' at group {} binding {}",
-                    global.Name,
-                    groupIndex,
-                    location->Binding);
-                continue;
-            }
-            ++descriptorUpdates;
-        }
-    }
-
-    ++resources.Counters.DescriptorGroupCreates;
-    resources.Counters.DescriptorGroupUpdates += descriptorUpdates;
-    FrameBindingGroupCacheEntry& cache = resources.SystemGroups.emplace_back(FrameBindingGroupCacheEntry{
-        .Layout = layout,
-        .GroupIndex = groupIndex,
-        .DynamicBuffer = dynamicBuffer,
-        .Resources = std::move(resourceKey),
-        .Samplers = std::move(samplerKey),
-        .Group = std::move(group)});
-    return cache.Group.get();
 }
 
 Nullable<const DynamicCBufferArena::Allocation*> MeshPassExecutor::EnsureViewBinding(
@@ -258,122 +266,6 @@ Nullable<const DynamicCBufferArena::Allocation*> MeshPassExecutor::EnsureObjectB
     return &binding.Allocation;
 }
 
-Nullable<render::BindingGroup*> MeshPassExecutor::AcquireMaterialGroup(
-    const DrawItem& item,
-    const CompiledShaderVariant& variant,
-    FrameResources& resources) noexcept {
-    if (item.Material == nullptr || variant.Layout == nullptr) {
-        return nullptr;
-    }
-    bool hasMaterialGroup = false;
-    for (const render::BindingGroupLayout& groupLayout : variant.Layout->GetBindingGroupLayouts()) {
-        if (groupLayout.GroupIndex == 2 && !groupLayout.Entries.empty()) {
-            hasMaterialGroup = true;
-            break;
-        }
-    }
-    if (!hasMaterialGroup) {
-        return nullptr;
-    }
-
-    if (_materialDescriptorPool == nullptr) {
-        auto poolOpt = _device->CreateDescriptorPool(render::DescriptorPoolDescriptor{
-            .MaxBindingGroups = 512,
-            .MaxSampledTextures = 4096,
-            .MaxStorageTextures = 128,
-            .MaxUniformBuffers = 512,
-            .MaxDynamicUniformBuffers = 0,
-            .MaxStorageBuffers = 128,
-            .MaxReadOnlyTexelBuffers = 64,
-            .MaxReadWriteTexelBuffers = 64,
-            .MaxSamplers = 4096,
-            .MaxAccelerationStructures = 0,
-            .Lifetime = render::DescriptorPoolLifetime::Persistent});
-        if (!poolOpt.HasValue()) {
-            return nullptr;
-        }
-        _materialDescriptorPool = shared_ptr<render::DescriptorPool>{poolOpt.Release()};
-        _materialDescriptorPool->SetDebugName("material_descriptors");
-    }
-    if (_materialConstantPool == nullptr) {
-        _materialConstantPool = make_shared<MaterialConstantPool>(
-            _device,
-            256 * 1024,
-            std::max<uint64_t>(256, _device->GetDetail().CBufferAlignment));
-    }
-
-    for (MaterialBinding& binding : _materialBindings) {
-        if (binding.Key == item.Material->BindingKey && binding.Layout == variant.Layout) {
-            binding.LastUsedFrame = _frameSerial;
-            ++resources.Counters.MaterialGroupCacheHits;
-            return binding.Group.get();
-        }
-    }
-
-    ++resources.Counters.MaterialGroupCacheMisses;
-    auto groupOpt = _device->CreateBindingGroup(
-        _materialDescriptorPool.get(), variant.Layout, 2);
-    if (!groupOpt.HasValue()) {
-        return nullptr;
-    }
-    auto group = groupOpt.Release();
-    ++resources.Counters.DescriptorGroupCreates;
-    item.Material->CollectConstants(_constantScratch);
-    vector<MaterialConstantPool::Allocation> constantAllocations;
-    const auto releaseConstants = [this, &constantAllocations]() noexcept {
-        for (const auto& allocation : constantAllocations) {
-            _materialConstantPool->Release(allocation);
-        }
-        constantAllocations.clear();
-    };
-    uint32_t constantBindings = 0;
-    if (!_constantScratch.empty()) {
-        const std::string_view reserved[] = {_perObjectName, _viewName};
-        constantBindings = _constantBinder.Bind(
-            variant,
-            *group,
-            *_materialConstantPool,
-            _constantScratch,
-            reserved,
-            &constantAllocations);
-        if (constantBindings == 0) {
-            releaseConstants();
-            return nullptr;
-        }
-    }
-    if (_samplerCache != nullptr) {
-        uint32_t expectedResources = 0;
-        const auto countExpected = [&](std::string_view name) {
-            auto location = FindShaderBindingLocation(variant, name);
-            if (location.has_value() && location->Group == group->GetGroupIndex()) {
-                ++expectedResources;
-            }
-        };
-        for (const auto& texture : item.Material->Textures) {
-            countExpected(texture.Name);
-        }
-        for (const auto& sampler : item.Material->Samplers) {
-            countExpected(sampler.Name);
-        }
-        const uint32_t appliedResources =
-            item.Material->ApplyResources(*group, variant, *_samplerCache);
-        if (appliedResources != expectedResources) {
-            releaseConstants();
-            return nullptr;
-        }
-        resources.Counters.DescriptorGroupUpdates += appliedResources;
-    }
-    resources.Counters.DescriptorGroupUpdates += constantBindings;
-
-    MaterialBinding& binding = _materialBindings.emplace_back(MaterialBinding{
-        .Key = item.Material->BindingKey,
-        .Snapshot = item.Material,
-        .Layout = variant.Layout,
-        .Group = std::move(group),
-        .ConstantAllocations = std::move(constantAllocations),
-        .LastUsedFrame = _frameSerial});
-    return binding.Group.get();
-}
 
 Nullable<const MeshPassExecutor::ResolvedDrawState*> MeshPassExecutor::ResolveDrawState(
     const DrawItem& item,
@@ -407,7 +299,6 @@ Nullable<const MeshPassExecutor::ResolvedDrawState*> MeshPassExecutor::ResolveDr
     resources.Counters.ShaderVariantCacheMisses +=
         variantStatsAfter.VariantMisses - variantStatsBefore.VariantMisses;
     if (!variantOpt.HasValue()) {
-        RADRAY_ERR_LOG("MeshPassExecutor: failed to resolve shader variant for pass {}", item.PassIndex);
         return nullptr;
     }
     const CompiledShaderVariant* variant = variantOpt.Get();
@@ -498,7 +389,6 @@ Nullable<const MeshDrawCommandTemplate*> MeshPassExecutor::GetOrCreateCommandTem
     const DrawItem& item,
     const ResolvedDrawState& state,
     const MeshDrawArgs& args,
-    render::BindingGroup* materialGroup,
     FrameResources& resources) noexcept {
     const auto& geometry = *args.Geometry;
     for (const auto& candidate : _commandTemplates) {
@@ -509,7 +399,6 @@ Nullable<const MeshDrawCommandTemplate*> MeshPassExecutor::GetOrCreateCommandTem
             candidate->VariantKey == state.Variant->Key &&
             candidate->MaterialKey == item.Material->BindingKey &&
             candidate->Pipeline == state.Pso &&
-            candidate->MaterialGroup == materialGroup &&
             candidate->Geometry.Vbv.Target == geometry.Vbv.Target &&
             candidate->Geometry.Vbv.Offset == geometry.Vbv.Offset &&
             candidate->Geometry.Ibv.Target == geometry.Ibv.Target &&
@@ -532,14 +421,11 @@ Nullable<const MeshDrawCommandTemplate*> MeshPassExecutor::GetOrCreateCommandTem
     command->VariantKey = state.Variant->Key;
     command->MaterialKey = item.Material->BindingKey;
     command->Pipeline = state.Pso;
-    command->Layout = state.Variant->Layout;
-    command->MaterialGroup = materialGroup;
     command->Geometry = geometry;
     command->FirstIndex = args.FirstIndex;
     command->IndexCount = args.IndexCount;
     command->VertexOffset = args.VertexOffset;
     command->PipelineId = _psoCache->GetId(state.Pso);
-    command->MaterialBindingId = item.Material->BindingKey.Lo ^ item.Material->BindingKey.Hi;
     const void* pages[] = {geometry.Vbv.Target, geometry.Ibv.Target};
     command->GeometryPageId = HashData64(pages, sizeof(pages));
     command->LastUsedFrame = _frameSerial;
@@ -548,7 +434,104 @@ Nullable<const MeshDrawCommandTemplate*> MeshPassExecutor::GetOrCreateCommandTem
     return result;
 }
 
+void MeshPassExecutor::ReportDiagnostic(
+    const DrawItem& item,
+    const ShaderBindingDiagnostic& diagnostic) noexcept {
+    ShaderBindingDiagnostic normalized = diagnostic;
+    ShaderAsset* shader = item.Material != nullptr ? item.Material->Shader.Get() : nullptr;
+    if (normalized.ProgramId.IsEmpty() && shader != nullptr) {
+        normalized.ProgramId = shader->GetProgramId();
+    }
+    normalized.PassIndex = item.PassIndex;
+    if (std::ranges::find(_reportedDiagnostics, normalized) != _reportedDiagnostics.end()) {
+        return;
+    }
+    _reportedDiagnostics.push_back(normalized);
+    const string group = normalized.Group.has_value()
+                             ? fmt::format("{}", *normalized.Group)
+                             : string{"-"};
+    const string binding = normalized.Binding.has_value()
+                               ? fmt::format("{}", *normalized.Binding)
+                               : string{"-"};
+    RADRAY_ERR_LOG(
+        "MeshPassExecutor binding invalid: shader={} pass={} variant=0x{:x} group={} binding={} reason={}",
+        normalized.ProgramId,
+        normalized.PassIndex,
+        normalized.VariantKey.KeywordBitmask,
+        group,
+        binding,
+        normalized.Reason);
+}
+
+bool MeshPassExecutor::CompileErrorFallback(
+    const DrawItem& item,
+    FrameResources& resources,
+    std::string_view reason) noexcept {
+    ShaderBindingDiagnostic diagnostic{};
+    diagnostic.PassIndex = item.PassIndex;
+    diagnostic.VariantKey = BuildDiagnosticVariantKey(item, _globalKeywords, _device);
+    diagnostic.Reason = string{reason};
+
+    ShaderAsset* sourceShader = item.Material != nullptr ? item.Material->Shader.Get() : nullptr;
+    if (sourceShader == nullptr || item.PassIndex >= sourceShader->GetPasses().size()) {
+        diagnostic.Reason = fmt::format("{}; source shader pass is unavailable", reason);
+        ReportDiagnostic(item, diagnostic);
+        return false;
+    }
+    diagnostic.ProgramId = sourceShader->GetProgramId();
+    const ShaderPassDesc& sourcePass = sourceShader->GetPasses()[item.PassIndex];
+    if (sourcePass.ColorTargets.empty()) {
+        diagnostic.Reason = fmt::format("{}; depth-only pass has no visible error fallback", reason);
+        ReportDiagnostic(item, diagnostic);
+        return false;
+    }
+    if (_errorMaterial == nullptr || _errorMaterial.get() == item.Material.get()) {
+        diagnostic.Reason = fmt::format("{}; error material is unavailable", reason);
+        ReportDiagnostic(item, diagnostic);
+        return false;
+    }
+    ShaderAsset* errorShader = _errorMaterial->Shader.Get();
+    const auto errorPassIndex = errorShader != nullptr
+                                    ? errorShader->FindPassByTag(sourcePass.PassTag)
+                                    : std::nullopt;
+    if (!errorPassIndex.has_value()) {
+        diagnostic.Reason = fmt::format(
+            "{}; error material has no pass tag '{}'",
+            reason,
+            sourcePass.PassTag);
+        ReportDiagnostic(item, diagnostic);
+        return false;
+    }
+    const ShaderPassDesc& errorPass = errorShader->GetPasses()[*errorPassIndex];
+    if (!HasCompatiblePositionLayout(sourcePass, errorPass)) {
+        diagnostic.Reason = fmt::format(
+            "{}; vertex layout has no POSITION compatible with the error material",
+            reason);
+        ReportDiagnostic(item, diagnostic);
+        return false;
+    }
+
+    DrawItem fallback = item;
+    fallback.Material = _errorMaterial;
+    fallback.PassIndex = *errorPassIndex;
+    if (!CompileCommandInternal(fallback, resources, false, true)) {
+        diagnostic.Reason = fmt::format("{}; error material compilation also failed", reason);
+        ReportDiagnostic(item, diagnostic);
+        return false;
+    }
+    _commands.back().SortMaterialKey = item.Material->BindingKey;
+    return true;
+}
+
 bool MeshPassExecutor::CompileCommand(const DrawItem& item, FrameResources& resources) noexcept {
+    return CompileCommandInternal(item, resources, true, false);
+}
+
+bool MeshPassExecutor::CompileCommandInternal(
+    const DrawItem& item,
+    FrameResources& resources,
+    bool allowErrorFallback,
+    bool isErrorFallback) noexcept {
     if (item.Material == nullptr || item.Proxy == nullptr) {
         return false;
     }
@@ -556,7 +539,18 @@ bool MeshPassExecutor::CompileCommand(const DrawItem& item, FrameResources& reso
     // 1-2. 同一 material/pass/global-keyword 状态跨帧复用，快照失效时由 BeginFrame 回收。
     auto stateOpt = ResolveDrawState(item, resources);
     if (!stateOpt.HasValue()) {
-        return false;
+        ++resources.Counters.BindingResolutionFailures;
+        ShaderBindingDiagnostic diagnostic{};
+        if (ShaderAsset* shader = item.Material->Shader.Get(); shader != nullptr) {
+            diagnostic.ProgramId = shader->GetProgramId();
+        }
+        diagnostic.PassIndex = item.PassIndex;
+        diagnostic.VariantKey = BuildDiagnosticVariantKey(item, _globalKeywords, _device);
+        diagnostic.Reason = "shader variant or pipeline creation failed";
+        ReportDiagnostic(item, diagnostic);
+        return allowErrorFallback
+                   ? CompileErrorFallback(item, resources, "shader variant or pipeline creation failed")
+                   : false;
     }
     const ResolvedDrawState& state = *stateOpt.Get();
     const CompiledShaderVariant& variant = *state.Variant;
@@ -577,61 +571,40 @@ bool MeshPassExecutor::CompileCommand(const DrawItem& item, FrameResources& reso
         return false;
     }
 
-    // 4. 编译本条 draw 的频率分组绑定。PerObject / PerView 只改变 dynamic offset；
-    // descriptor set 本身由 flight/layout 缓存复用。
-    auto objectAllocation = EnsureObjectBinding(resources, item.Proxy);
-    if (!objectAllocation.HasValue() || objectAllocation.Get()->Offset > std::numeric_limits<uint32_t>::max()) {
-        RADRAY_ERR_LOG("MeshPassExecutor: per-object cbuffer allocation failed");
-        return false;
-    }
-    auto objectGroup = AcquireSystemGroup(resources, variant, 0, objectAllocation.Get()->Target);
-    if (!objectGroup.HasValue()) {
-        RADRAY_ERR_LOG("MeshPassExecutor: failed to acquire per-object binding group");
+    BindingResolveResult bindings = ResolveBindingGroups(item, variant, resources);
+    if (bindings.Status != BindingResolveStatus::Ready) {
+        if (bindings.Status == BindingResolveStatus::Invalid) {
+            ReportDiagnostic(item, bindings.Diagnostic);
+            if (allowErrorFallback) {
+                return CompileErrorFallback(item, resources, bindings.Diagnostic.Reason);
+            }
+        }
         return false;
     }
 
-    Nullable<const DynamicCBufferArena::Allocation*> viewAllocation{};
-    Nullable<render::BindingGroup*> viewGroup{};
-    if (!_viewName.empty() && !_viewData.empty()) {
-        viewAllocation = EnsureViewBinding(resources);
-        if (!viewAllocation.HasValue() || viewAllocation.Get()->Offset > std::numeric_limits<uint32_t>::max()) {
-            RADRAY_ERR_LOG("MeshPassExecutor: per-view cbuffer allocation failed");
-            return false;
-        }
-        viewGroup = AcquireSystemGroup(resources, variant, 1, viewAllocation.Get()->Target);
-        if (!viewGroup.HasValue()) {
-            RADRAY_ERR_LOG("MeshPassExecutor: failed to acquire per-view binding group");
-            return false;
-        }
-    }
-    auto materialGroup = AcquireMaterialGroup(item, variant, resources);
-    bool needsMaterialGroup = false;
-    for (const render::BindingGroupLayout& groupLayout : variant.Layout->GetBindingGroupLayouts()) {
-        if (groupLayout.GroupIndex == 2 && !groupLayout.Entries.empty()) {
-            needsMaterialGroup = true;
-            break;
-        }
-    }
-    if (needsMaterialGroup && !materialGroup.HasValue()) {
-        return false;
+    const auto retainedSnapshot = std::static_pointer_cast<const void>(item.Material);
+    if (std::ranges::none_of(
+            resources.RetainedObjects,
+            [&](const shared_ptr<const void>& retained) noexcept {
+                return retained.get() == retainedSnapshot.get();
+            })) {
+        resources.RetainedObjects.push_back(retainedSnapshot);
     }
 
     auto commandTemplate = GetOrCreateCommandTemplate(
         item,
         state,
         args,
-        materialGroup.HasValue() ? materialGroup.Get() : nullptr,
         resources);
     if (!commandTemplate.HasValue()) {
         return false;
     }
     _commands.push_back(MeshDrawCommand{
         .Template = commandTemplate.Get(),
-        .PerObjectGroup = objectGroup.Get(),
-        .ViewGroup = viewGroup.HasValue() ? viewGroup.Get() : nullptr,
-        .PerObjectDynamicOffset = static_cast<uint32_t>(objectAllocation.Get()->Offset),
-        .ViewDynamicOffset = viewAllocation.HasValue() ? static_cast<uint32_t>(viewAllocation.Get()->Offset) : 0u,
-        .PerObjectBufferPage = reinterpret_cast<uint64_t>(objectAllocation.Get()->Target),
+        .PerObjectBufferPage = bindings.ObjectBufferPage,
+        .BindingGroups = std::move(bindings.Groups),
+        .IsErrorFallback = isErrorFallback,
+        .SortMaterialKey = item.Material->BindingKey,
         .RenderQueue = item.RenderQueue,
         .ViewDistance = item.ViewDistance});
     return true;
@@ -649,6 +622,7 @@ bool MeshPassExecutor::RecordCommand(
     if (_recorder.Pipeline != draw.Pipeline) {
         encoder->BindGraphicsPipelineState(draw.Pipeline);
         _recorder.Pipeline = draw.Pipeline;
+        _recorder.GenericGroups.clear();
         ++resources.Counters.PipelineBinds;
     }
     if (draw.Geometry.Vbv.Target != nullptr) {
@@ -671,40 +645,36 @@ bool MeshPassExecutor::RecordCommand(
         _recorder.Index = draw.Geometry.Ibv;
         _recorder.HasIndex = true;
     }
-    if (_recorder.Groups[0] != command.PerObjectGroup ||
-        _recorder.DynamicOffsets[0] != command.PerObjectDynamicOffset) {
-        encoder->BindBindingGroup(
-            0,
-            command.PerObjectGroup,
-            std::span{&command.PerObjectDynamicOffset, 1});
-        _recorder.Groups[0] = command.PerObjectGroup;
-        _recorder.DynamicOffsets[0] = command.PerObjectDynamicOffset;
-        ++resources.Counters.DescriptorGroupBinds;
-        ++resources.Counters.DynamicOffsetBinds;
-    }
-    if (command.ViewGroup != nullptr) {
-        if (_recorder.Groups[1] != command.ViewGroup ||
-            _recorder.DynamicOffsets[1] != command.ViewDynamicOffset) {
-            encoder->BindBindingGroup(1, command.ViewGroup, std::span{&command.ViewDynamicOffset, 1});
-            _recorder.Groups[1] = command.ViewGroup;
-            _recorder.DynamicOffsets[1] = command.ViewDynamicOffset;
+    for (const MeshDrawCommand::BindingGroupState& binding : command.BindingGroups) {
+        auto recorded = std::ranges::find(
+            _recorder.GenericGroups,
+            binding.GroupIndex,
+            &RecorderState::GenericGroup::GroupIndex);
+        if (recorded == _recorder.GenericGroups.end() ||
+            recorded->Group != binding.Group ||
+            recorded->DynamicOffsets != binding.DynamicOffsets) {
+            encoder->BindBindingGroup(
+                binding.GroupIndex,
+                binding.Group,
+                binding.DynamicOffsets);
+            if (recorded == _recorder.GenericGroups.end()) {
+                _recorder.GenericGroups.push_back(RecorderState::GenericGroup{
+                    .GroupIndex = binding.GroupIndex,
+                    .Group = binding.Group,
+                    .DynamicOffsets = binding.DynamicOffsets});
+            } else {
+                recorded->Group = binding.Group;
+                recorded->DynamicOffsets = binding.DynamicOffsets;
+            }
             ++resources.Counters.DescriptorGroupBinds;
-            ++resources.Counters.DynamicOffsetBinds;
+            resources.Counters.DynamicOffsetBinds += binding.DynamicOffsets.size();
         }
-    } else {
-        _recorder.Groups[1] = nullptr;
-    }
-    if (draw.MaterialGroup != nullptr) {
-        if (_recorder.Groups[2] != draw.MaterialGroup) {
-            encoder->BindBindingGroup(2, draw.MaterialGroup);
-            _recorder.Groups[2] = draw.MaterialGroup;
-            ++resources.Counters.DescriptorGroupBinds;
-        }
-    } else {
-        _recorder.Groups[2] = nullptr;
     }
     encoder->DrawIndexed(draw.IndexCount, instanceCount, draw.FirstIndex, draw.VertexOffset, 0);
     ++resources.Counters.Draws;
+    if (command.IsErrorFallback) {
+        ++resources.Counters.ErrorFallbackDraws;
+    }
     resources.Counters.DrawInstances += instanceCount;
     return true;
 }
@@ -719,15 +689,11 @@ bool MeshPassExecutor::SubmitItem(
 }
 
 void MeshPassExecutor::RetireStaleMaterialBindings(FrameResources& resources) noexcept {
-    for (auto it = _materialBindings.begin(); it != _materialBindings.end();) {
+    for (auto it = _genericMaterialBindings.begin(); it != _genericMaterialBindings.end();) {
         if (it->LastUsedFrame + 1 >= _frameSerial) {
             ++it;
             continue;
         }
-        render::BindingGroup* group = it->Group.get();
-        std::erase_if(_commandTemplates, [group](const auto& command) noexcept {
-            return command->MaterialGroup == group;
-        });
         if (it->Snapshot != nullptr) {
             resources.RetainedObjects.push_back(
                 std::static_pointer_cast<const void>(it->Snapshot));
@@ -741,7 +707,7 @@ void MeshPassExecutor::RetireStaleMaterialBindings(FrameResources& resources) no
                 std::static_pointer_cast<const void>(std::move(retiredConstants)));
         }
         resources.RetireList.emplace_back(std::move(it->Group));
-        it = _materialBindings.erase(it);
+        it = _genericMaterialBindings.erase(it);
     }
     std::erase_if(_resolvedDrawStates, [this](const ResolvedDrawState& state) noexcept {
         return state.LastUsedFrame + 1 < _frameSerial;
@@ -782,21 +748,25 @@ uint32_t MeshPassExecutor::Execute(
     for (const DrawItem& item : list.Items()) {
         CompileCommand(item, resources);
     }
+    resources.FlushHostWrites();
+    if (_materialConstantPool != nullptr) {
+        _materialConstantPool->FlushHostWrites();
+    }
     if (list.GetSortMode() == DrawList::SortMode::Opaque) {
         std::stable_sort(_commands.begin(), _commands.end(), [](const MeshDrawCommand& a, const MeshDrawCommand& b) {
             return std::tie(
                        a.RenderQueue,
                        a.Template->PipelineId,
-                       a.Template->MaterialKey.Lo,
-                       a.Template->MaterialKey.Hi,
+                       a.SortMaterialKey.Lo,
+                       a.SortMaterialKey.Hi,
                        a.PerObjectBufferPage,
                        a.Template->GeometryPageId,
                        a.ViewDistance) <
                    std::tie(
                        b.RenderQueue,
                        b.Template->PipelineId,
-                       b.Template->MaterialKey.Lo,
-                       b.Template->MaterialKey.Hi,
+                       b.SortMaterialKey.Lo,
+                       b.SortMaterialKey.Hi,
                        b.PerObjectBufferPage,
                        b.Template->GeometryPageId,
                        b.ViewDistance);
@@ -811,13 +781,13 @@ uint32_t MeshPassExecutor::Execute(
             }
             return std::tie(
                        a.Template->PipelineId,
-                       a.Template->MaterialKey.Lo,
-                       a.Template->MaterialKey.Hi,
+                       a.SortMaterialKey.Lo,
+                       a.SortMaterialKey.Hi,
                        a.PerObjectBufferPage) <
                    std::tie(
                        b.Template->PipelineId,
-                       b.Template->MaterialKey.Lo,
-                       b.Template->MaterialKey.Hi,
+                       b.SortMaterialKey.Lo,
+                       b.SortMaterialKey.Hi,
                        b.PerObjectBufferPage);
         });
     }

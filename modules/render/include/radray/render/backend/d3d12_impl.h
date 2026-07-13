@@ -794,7 +794,7 @@ public:
     void Destroy() noexcept override;
     void SetDebugName(std::string_view name) noexcept override;
 
-private:
+public:
     bool _valid{true};
     string _name;
 };
@@ -808,7 +808,7 @@ public:
     void Destroy() noexcept override;
     void SetDebugName(std::string_view name) noexcept override;
 
-private:
+public:
     bool _valid{true};
     string _name;
 };
@@ -1096,24 +1096,19 @@ struct DescriptorSetSlotD3D12 {
 
 class DescriptorPoolD3D12 final : public DescriptorPool {
 public:
-    DescriptorPoolD3D12(DeviceD3D12* device, const DescriptorPoolDescriptor& desc) noexcept;
-    ~DescriptorPoolD3D12() noexcept override;
+    explicit DescriptorPoolD3D12(const DescriptorPoolDescriptor& desc) noexcept;
+    ~DescriptorPoolD3D12() noexcept override = default;
 
     bool IsValid() const noexcept override;
     void Destroy() noexcept override;
     void SetDebugName(std::string_view name) noexcept override;
     bool Reset() noexcept override;
     DescriptorPoolDescriptor GetDesc() const noexcept override { return _desc; }
-    uint32_t GetAllocatedBindingGroupCount() const noexcept override { return _groups; }
+    uint32_t GetAllocatedBindingGroupCount() const noexcept override { return 0; }
 
-    bool Reserve(const DescriptorPoolDescriptor& usage) noexcept;
-    void Release(const DescriptorPoolDescriptor& usage) noexcept;
-
-private:
-    DeviceD3D12* _device{nullptr};
+public:
+    bool _valid{true};
     DescriptorPoolDescriptor _desc{};
-    DescriptorPoolDescriptor _used{};
-    uint32_t _groups{0};
     string _name{};
 };
 
@@ -1121,14 +1116,12 @@ class BindingGroupD3D12 final : public BindingGroup {
 public:
     BindingGroupD3D12(
         DeviceD3D12* device,
-        DescriptorPoolD3D12* pool,
         RootSigD3D12* layout,
         uint32_t groupIndex,
         DescriptorSetSlotD3D12 slot,
         uint32_t parameterCount,
         uint32_t resourceDescriptorCount,
-        uint32_t samplerDescriptorCount,
-        const DescriptorPoolDescriptor& poolUsage) noexcept;
+        uint32_t samplerDescriptorCount) noexcept;
     ~BindingGroupD3D12() noexcept override;
 
     bool IsValid() const noexcept override;
@@ -1144,7 +1137,7 @@ public:
     bool SetSampler(uint32_t binding, Sampler* sampler, uint32_t arrayIndex = 0) noexcept override;
     bool SetBindlessArray(uint32_t binding, BindlessArray* array) noexcept override;
 
-    bool IsFullyWritten() const noexcept;
+    bool IsFullyWritten() const noexcept override;
     void FlushDescriptorCopies() noexcept;
     const BufferBindingDescriptor* GetDynamicBuffer(uint32_t parameterIndex) const noexcept;
 
@@ -1152,11 +1145,10 @@ public:
     const DescriptorSetSlotD3D12& GetSlot() const noexcept { return _slot; }
     BindlessArray* GetBindlessArray() const noexcept { return _bindlessArray; }
 
-private:
+public:
     void StageDescriptorCopy(PendingDescriptorCopyD3D12 copy) noexcept;
 
     DeviceD3D12* _device{nullptr};
-    DescriptorPoolD3D12* _pool{nullptr};
     RootSigD3D12* _layout{nullptr};
     uint32_t _groupIndex{0};
     DescriptorSetSlotD3D12 _slot{};
@@ -1167,7 +1159,6 @@ private:
     vector<D3D12_CPU_DESCRIPTOR_HANDLE> _descriptorCopyDestinations{};
     uint32_t _resourceDescriptorCount{0};
     uint32_t _samplerDescriptorCount{0};
-    DescriptorPoolDescriptor _poolUsage{};
     string _name{};
 };
 

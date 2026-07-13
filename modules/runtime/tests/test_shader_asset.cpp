@@ -1,6 +1,10 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <array>
+
 #include <radray/runtime/shader_asset.h>
+#include <radray/runtime/shader_parameter_set.h>
 
 using namespace radray;
 
@@ -243,6 +247,93 @@ TEST(ShaderAssetTest, AppliesPassLocalKeywordMask) {
     ASSERT_EQ(library.Masks.size(), 2u);
     EXPECT_EQ(library.Masks[0], 0b01u);
     EXPECT_EQ(library.Masks[1], 0u);
+}
+
+TEST(ShaderAssetTest, ExposesTypedPropertyDefaults) {
+    vector<ShaderPropertyDesc> properties{
+        ShaderPropertyDesc{
+            .Name = "Roughness",
+            .Kind = ShaderPropertyKind::Float,
+            .DefaultValue = 0.5f},
+        ShaderPropertyDesc{
+            .Name = "BaseColorMap",
+            .Kind = ShaderPropertyKind::Texture,
+            .DefaultValue = ShaderDefaultTexture::WhiteSrgb}};
+    ShaderAsset asset{ShaderKeywordSet{}, {}, std::move(properties)};
+
+    ASSERT_TRUE(asset.HasValidMetadata());
+    const ShaderPropertyDesc* roughness = asset.FindProperty("Roughness").Get();
+    ASSERT_NE(roughness, nullptr);
+    ASSERT_TRUE(roughness->DefaultValue.has_value());
+    EXPECT_FLOAT_EQ(std::get<float>(*roughness->DefaultValue), 0.5f);
+    EXPECT_EQ(asset.FindProperty("Missing").Get(), nullptr);
+}
+
+TEST(ShaderAssetTest, RejectsDuplicateAndMismatchedPropertyMetadata) {
+    vector<ShaderPropertyDesc> properties{
+        ShaderPropertyDesc{
+            .Name = "Tint",
+            .Kind = ShaderPropertyKind::Float,
+            .DefaultValue = Eigen::Vector4f::Ones()},
+        ShaderPropertyDesc{
+            .Name = "Tint",
+            .Kind = ShaderPropertyKind::Vector,
+            .DefaultValue = Eigen::Vector4f::Ones()}};
+    ShaderAsset asset{ShaderKeywordSet{}, {}, std::move(properties)};
+    EXPECT_FALSE(asset.HasValidMetadata());
+}
+
+TEST(ShaderAssetTest, RejectsDuplicateParameterSourcesButAllowsPropertyBindingName) {
+    ShaderPassDesc duplicatePass{.PassTag = "Forward", .Source = ""};
+    duplicatePass.ParameterSources = {
+        ShaderParameterSourceDesc{
+            .Name = "gMaterial",
+            .Scope = ShaderParameterScope::Material},
+        ShaderParameterSourceDesc{
+            .Name = "gMaterial",
+            .Scope = ShaderParameterScope::Object}};
+    ShaderAsset duplicate{ShaderKeywordSet{}, {std::move(duplicatePass)}};
+    EXPECT_FALSE(duplicate.HasValidMetadata());
+
+    ShaderPassDesc validPass{.PassTag = "Forward", .Source = ""};
+    validPass.ParameterSources.push_back(ShaderParameterSourceDesc{
+        .Name = "Tint",
+        .Scope = ShaderParameterScope::Material});
+    vector<ShaderPropertyDesc> properties{ShaderPropertyDesc{
+        .Name = "Tint",
+        .Kind = ShaderPropertyKind::Vector,
+        .DefaultValue = Eigen::Vector4f::Ones()}};
+    ShaderAsset valid{
+        ShaderKeywordSet{},
+        {std::move(validPass)},
+        std::move(properties)};
+    EXPECT_TRUE(valid.HasValidMetadata());
+}
+
+TEST(ShaderAssetTest, ShaderParameterSetTracksSemanticRevisions) {
+    ShaderParameterSet parameters;
+    const uint64_t initial = parameters.GetRevision();
+    const std::array<byte, 4> first{byte{1}, byte{2}, byte{3}, byte{4}};
+    const std::array<byte, 4> second{byte{4}, byte{3}, byte{2}, byte{1}};
+
+    parameters.SetConstant("Value", first);
+    const uint64_t firstRevision = parameters.GetRevision();
+    EXPECT_GT(firstRevision, initial);
+    parameters.SetConstant("Value", first);
+    parameters.ClearConstant("Missing");
+    EXPECT_EQ(parameters.GetRevision(), firstRevision);
+
+    parameters.SetConstant("Value", second);
+    EXPECT_GT(parameters.GetRevision(), firstRevision);
+    const auto* value = parameters.FindConstant("Value").Get();
+    ASSERT_NE(value, nullptr);
+    EXPECT_TRUE(std::ranges::equal(value->Bytes, second));
+
+    const uint64_t secondRevision = parameters.GetRevision();
+    parameters.ClearConstant("Value");
+    EXPECT_GT(parameters.GetRevision(), secondRevision);
+    parameters.Clear();
+    EXPECT_EQ(parameters.GetRevision(), secondRevision + 1);
 }
 
 TEST(ShaderVariantKeyTest, IncludesCanonicalBindingPolicy) {

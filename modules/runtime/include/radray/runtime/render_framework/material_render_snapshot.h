@@ -5,10 +5,8 @@
 #include <radray/types.h>
 #include <radray/render/common.h>
 #include <radray/runtime/asset_manager.h>
-#include <radray/runtime/sampler_cache.h>
 #include <radray/runtime/shader_asset.h>
 #include <radray/runtime/texture_asset.h>
-#include <radray/runtime/render_framework/material_constant_binder.h>
 #include <radray/runtime/render_framework/render_pipeline.h>
 
 namespace radray {
@@ -36,16 +34,16 @@ struct MaterialBindingKey {
 ///   零裸指针: 绑定时经 TextureAsset view 缓存 / SamplerCache 换成稳定指针。
 /// - shared_ptr 引用计数自动管理生命周期: DrawItem 持一份 shared_ptr, 快照存活期覆盖整个渲染,
 ///   即便 MaterialAsset 在此期间被 Unload 也不悬垂。
-/// - ResolveVariant / ApplyProperties / IsTransparent 从快照自身求解, 不再回查 MaterialAsset。
+/// - ResolveVariant / binding resolution / IsTransparent 从快照自身求解, 不再回查 MaterialAsset。
 struct MaterialRenderSnapshot {
     MaterialBindingKey BindingKey{};
     /// 一条常量 property。Name 可以是:
     /// - cbuffer 块名 (整块覆盖, 对应 SetConstantBlock);
-    /// - cbuffer 块内字段名 (对应 Unity 的 SetFloat("_Color"), 由 MaterialConstantBinder
+    /// - cbuffer 块内字段名 (对应 Unity 的 SetFloat("_Color"), 由 binding plan
     ///   按 shader 反射的字段偏移打进所属块)。
-    /// 绑定时经 MaterialConstantBinder 用变体反射解析归属块并整块提交 (push constant 或 CBV)。
     struct ConstantEntry {
         string Name;
+        ShaderPropertyKind Kind{ShaderPropertyKind::Bytes};
         vector<byte> Bytes;
     };
     /// 一条纹理 property。绑定时经 Texture->GetOrCreateSrv(SubView) 取稳定 view 指针:
@@ -55,12 +53,19 @@ struct MaterialRenderSnapshot {
         string Name;
         StreamingAssetRef<TextureAsset> Texture{};
         TextureSubViewDesc SubView{};
+        std::optional<ShaderDefaultTexture> DefaultTexture{};
     };
     /// 一条采样器 property。存 descriptor 值 (而非裸指针): 绑定时经 SamplerCache 去重取稳定指针,
     /// 因此快照可安全跨帧/跨线程持有, 无悬垂风险 (对齐 UE5 的 sampler cache 语义)。
     struct SamplerEntry {
         string Name;
         render::SamplerDescriptor Desc{};
+    };
+
+    struct PropertyLayer {
+        vector<ConstantEntry> Constants;
+        vector<TextureEntry> Textures;
+        vector<SamplerEntry> Samplers;
     };
 
     /// shader 引用 (非拥有 streaming ref)。ResolveVariant 用它懒编译变体。
@@ -71,9 +76,8 @@ struct MaterialRenderSnapshot {
     /// 材质对 PSO 固定功能状态 (blend / zwrite / cull) 的覆盖。绑定时由 MeshPassExecutor
     /// 叠加到 shader pass 的基线状态之上, 再交 PSO 缓存去重。
     MaterialRenderState RenderState{};
-    vector<ConstantEntry> Constants;
-    vector<TextureEntry> Textures;
-    vector<SamplerEntry> Samplers;
+    PropertyLayer MaterialProperties;
+    PropertyLayer PropertyBlockProperties;
 
     bool IsTransparent() const noexcept {
         return RenderQueue >= static_cast<int32_t>(radray::RenderQueue::Transparent);
@@ -92,16 +96,6 @@ struct MaterialRenderSnapshot {
         uint32_t passIndex,
         std::span<const std::string_view> extraKeywords,
         render::HlslShaderModel sm = render::HlslShaderModel::SM60) const noexcept;
-
-    /// 把快照的常量 property 收集为打包器输入 (块名 / 字段名 + 字节)。
-    /// 供 MaterialConstantBinder::Bind 消费; 返回的 span 借用 out 存储。
-    /// out 会被清空重填; 返回项的 Bytes 借用本快照的 Constants 存储 (快照存活期内有效)。
-    void CollectConstants(vector<MaterialConstantValue>& out) const noexcept;
-
-    uint32_t ApplyResources(
-        render::BindingGroup& group,
-        const CompiledShaderVariant& variant,
-        SamplerCache& samplerCache) const noexcept;
 
 };
 

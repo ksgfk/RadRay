@@ -46,6 +46,8 @@ public:
         unique_ptr<render::Buffer> Buffer;
         void* Mapped{nullptr};
         uint64_t Used{0};
+        uint64_t DirtyBegin{std::numeric_limits<uint64_t>::max()};
+        uint64_t DirtyEnd{0};
     };
 
     DynamicCBufferArena(render::Device* device, const Descriptor& desc) noexcept;
@@ -59,6 +61,9 @@ public:
     bool IsValid() const noexcept;
     void Destroy() noexcept;
     Allocation Allocate(uint64_t size) noexcept;
+    /// Publishes all mapped writes since the previous flush. Must run before GPU submission.
+    void FlushHostWrites() noexcept;
+    bool HasPendingHostWrites() const noexcept;
     void Reset() noexcept;
     void Clear() noexcept;
     bool Contains(const render::Buffer* buffer) const noexcept;
@@ -72,6 +77,7 @@ private:
     render::Device* _device;
     vector<unique_ptr<Block>> _blocks;
     Descriptor _desc;
+    size_t _activeBlockIndex{};
     uint64_t _minBlockSize{};
     uint64_t _allocatedThisFrame{};
     uint64_t _highWatermark{};
@@ -99,6 +105,9 @@ public:
     ~MaterialConstantPool() noexcept;
 
     Allocation Allocate(uint64_t size) noexcept;
+    /// Publishes all mapped writes since the previous flush. Must run before GPU submission.
+    void FlushHostWrites() noexcept;
+    bool HasPendingHostWrites() const noexcept;
     void Release(const Allocation& allocation) noexcept;
     uint64_t GetHighWatermark() const noexcept { return _highWatermark; }
 
@@ -107,6 +116,8 @@ private:
         unique_ptr<render::Buffer> Buffer;
         void* Mapped{nullptr};
         uint64_t Used{0};
+        uint64_t DirtyBegin{std::numeric_limits<uint64_t>::max()};
+        uint64_t DirtyEnd{0};
 
         ~Block() noexcept;
     };
@@ -145,19 +156,36 @@ struct RuntimeRenderCounters {
     uint64_t SystemGroupCacheMisses{0};
     uint64_t MaterialGroupCacheHits{0};
     uint64_t MaterialGroupCacheMisses{0};
+    uint64_t BindingPlanCacheHits{0};
+    uint64_t BindingPlanCacheMisses{0};
+    uint64_t BindingResolutionFailures{0};
+    uint64_t ErrorFallbackDraws{0};
     uint64_t Draws{0};
     uint64_t DrawInstances{0};
     uint64_t ObjectArenaHighWatermark{0};
     uint64_t ViewArenaHighWatermark{0};
 };
 
-struct FrameBindingGroupCacheEntry {
+struct FrameResolvedBindingGroupCacheEntry {
     render::PipelineLayout* Layout{nullptr};
     uint32_t GroupIndex{0};
-    render::Buffer* DynamicBuffer{nullptr};
-    vector<render::ResourceView*> Resources{};
-    vector<render::Sampler*> Samplers{};
-    unique_ptr<render::BindingGroup> Group{};
+    vector<uint64_t> DescriptorKey;
+    vector<render::Buffer*> DynamicBuffers;
+    bool Persistent{false};
+    unique_ptr<render::BindingGroup> Group;
+};
+
+struct FrameResolvedBindingStateCacheEntry {
+    const void* Plan{nullptr};
+    uint32_t GroupIndex{0};
+    uint64_t MaterialKeyLo{0};
+    uint64_t MaterialKeyHi{0};
+    const void* Object{nullptr};
+    uint64_t ViewRevision{0};
+    uint64_t PassRevision{0};
+    render::BindingGroup* Group{nullptr};
+    vector<uint32_t> DynamicOffsets;
+    uint64_t ObjectBufferPage{0};
 };
 
 struct FrameObjectBinding {
@@ -169,13 +197,16 @@ class FrameResources {
 public:
     explicit FrameResources(render::Device* device) noexcept;
 
+    void FlushHostWrites() noexcept;
+    bool HasPendingHostWrites() const noexcept;
     void Reset() noexcept;
 
     DynamicCBufferArena PerObjectArena;
     DynamicCBufferArena ViewArena;
     unique_ptr<render::DescriptorPool> SystemDescriptorPool;
     unique_ptr<render::DescriptorPool> TransientDescriptorPool;
-    vector<FrameBindingGroupCacheEntry> SystemGroups;
+    vector<FrameResolvedBindingGroupCacheEntry> ResolvedGroups;
+    vector<FrameResolvedBindingStateCacheEntry> ResolvedBindingStates;
     vector<FrameObjectBinding> ObjectBindings;
     vector<shared_ptr<const void>> RetainedObjects;
     vector<unique_ptr<render::RenderBase>> RetireList;

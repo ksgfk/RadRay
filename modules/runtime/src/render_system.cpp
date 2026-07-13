@@ -13,6 +13,7 @@
 #include <radray/runtime/gpu_system.h>
 #include <radray/runtime/render_framework/forward_pipeline.h>
 #include <radray/runtime/render_framework/scene.h>
+#include <radray/runtime/shader_default_resource_library.h>
 #include <radray/runtime/window_manager.h>
 
 namespace radray {
@@ -24,6 +25,7 @@ RenderSystem::RenderSystem(Application* app) noexcept
 RenderSystem::~RenderSystem() noexcept {
     ReleaseAllScenes();
     _pipeline.reset();  // 先析构管线 (executor 持 SamplerCache 裸指针), 再释放缓存
+    _defaultResources.reset();
     _samplerCache.reset();
     _psoCache.reset();
     _variantLibrary.reset();
@@ -78,6 +80,13 @@ void RenderSystem::OnInitialize() {
     // sampler 缓存: 按 descriptor 去重 + 永生持有, 使材质快照可安全持有稳定 sampler 指针。
     _samplerCache = make_unique<SamplerCache>(device);
 
+    _defaultResources = make_unique<ShaderDefaultResourceLibrary>();
+    AssetManager* assets = _app->GetAssetManager();
+    if (assets == nullptr || !_defaultResources->Initialize(*assets, gpu->GetFrameUploadScheduler())) {
+        RADRAY_ERR_LOG("RenderSystem::OnInitialize: failed to initialize shader default resources");
+        _defaultResources.reset();
+    }
+
     _pipeline = make_unique<ForwardPipeline>(this);
 }
 
@@ -86,6 +95,10 @@ Nullable<IStandardMaterialFactory*> RenderSystem::GetStandardMaterialFactory() n
         return nullptr;
     }
     return _pipeline->GetStandardMaterialFactory();
+}
+
+shared_ptr<const MaterialRenderSnapshot> RenderSystem::GetErrorMaterial() noexcept {
+    return _pipeline != nullptr ? _pipeline->GetErrorMaterial() : nullptr;
 }
 
 void RenderSystem::Render(AppFrameContext& ctx) {

@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <radray/runtime/material_asset.h>
+#include <radray/runtime/render_framework/material_property_block.h>
 
 using namespace radray;
 
@@ -149,4 +150,131 @@ TEST(MaterialAssetTest, BindingKeyUsesSnapshotValuesNotAllocationAddress) {
     sameValuesDifferentInsertionOrder.SetFloat("Roughness", 0.8f);
     const auto changedSnapshot = sameValuesDifferentInsertionOrder.CreateSnapshot();
     EXPECT_NE(firstSnapshot->BindingKey, changedSnapshot->BindingKey);
+}
+
+TEST(MaterialAssetTest, ResolvesShaderDefaultThenOverrideAndClear) {
+    AssetManager assets;
+    vector<ShaderPropertyDesc> properties{
+        ShaderPropertyDesc{
+            .Name = "Roughness",
+            .Kind = ShaderPropertyKind::Float,
+            .DefaultValue = 0.35f}};
+    auto shader = assets.AddReady<ShaderAsset>(
+        Guid::NewGuid(),
+        make_unique<ShaderAsset>(ShaderKeywordSet{}, vector<ShaderPassDesc>{}, std::move(properties)));
+    MaterialAsset material{shader};
+
+    EXPECT_TRUE(material.HasProperty("Roughness"));
+    EXPECT_FALSE(material.GetOverride("Roughness").has_value());
+    ASSERT_TRUE(material.GetFloat("Roughness").has_value());
+    EXPECT_FLOAT_EQ(*material.GetFloat("Roughness"), 0.35f);
+
+    material.SetFloat("Roughness", 0.8f);
+    ASSERT_TRUE(material.GetOverride("Roughness").has_value());
+    EXPECT_FLOAT_EQ(*material.GetFloat("Roughness"), 0.8f);
+    material.ClearOverride("Roughness");
+    EXPECT_FALSE(material.GetOverride("Roughness").has_value());
+    EXPECT_FLOAT_EQ(*material.GetFloat("Roughness"), 0.35f);
+}
+
+TEST(MaterialAssetTest, RevisionChangesOnlyForSemanticMutations) {
+    AssetManager assets;
+    auto shader = assets.AddReady<ShaderAsset>(
+        Guid::NewGuid(),
+        make_unique<ShaderAsset>());
+    auto texture = assets.AddReady<TextureAsset>(
+        Guid::NewGuid(),
+        make_unique<TextureAsset>());
+    MaterialAsset material{shader};
+    const uint64_t initial = material.GetRevision();
+
+    material.SetFloat("Value", 1.0f);
+    const uint64_t propertyRevision = material.GetRevision();
+    EXPECT_GT(propertyRevision, initial);
+    material.SetFloat("Value", 1.0f);
+    material.ClearOverride("Missing");
+    material.DisableKeyword("MISSING");
+    material.SetRenderQueue(material.GetRenderQueue());
+    material.SetRenderState(material.GetRenderState());
+    EXPECT_EQ(material.GetRevision(), propertyRevision);
+
+    material.EnableKeyword("FEATURE");
+    const uint64_t keywordRevision = material.GetRevision();
+    EXPECT_GT(keywordRevision, propertyRevision);
+    material.EnableKeyword("FEATURE");
+    EXPECT_EQ(material.GetRevision(), keywordRevision);
+    material.DisableKeyword("FEATURE");
+    EXPECT_GT(material.GetRevision(), keywordRevision);
+
+    const uint64_t beforeQueue = material.GetRevision();
+    material.SetRenderQueue(RenderQueue::Transparent);
+    EXPECT_GT(material.GetRevision(), beforeQueue);
+    const uint64_t queueRevision = material.GetRevision();
+    material.SetRenderQueue(RenderQueue::Transparent);
+    EXPECT_EQ(material.GetRevision(), queueRevision);
+
+    MaterialRenderState state{};
+    state.Cull = render::CullMode::None;
+    material.SetRenderState(state);
+    const uint64_t stateRevision = material.GetRevision();
+    EXPECT_GT(stateRevision, queueRevision);
+    material.SetRenderState(state);
+    EXPECT_EQ(material.GetRevision(), stateRevision);
+
+    material.SetTexture("Texture", texture);
+    const uint64_t textureRevision = material.GetRevision();
+    EXPECT_GT(textureRevision, stateRevision);
+    material.SetTexture("Texture", texture);
+    EXPECT_EQ(material.GetRevision(), textureRevision);
+
+    render::SamplerDescriptor sampler{};
+    sampler.AddressS = render::AddressMode::ClampToEdge;
+    material.SetSampler("Sampler", sampler);
+    const uint64_t samplerRevision = material.GetRevision();
+    EXPECT_GT(samplerRevision, textureRevision);
+    material.SetSampler("Sampler", sampler);
+    EXPECT_EQ(material.GetRevision(), samplerRevision);
+
+    material.SetShader(shader);
+    EXPECT_EQ(material.GetRevision(), samplerRevision);
+}
+
+TEST(MaterialAssetTest, ShaderSwitchPreservesOverridesAndChangesDefaults) {
+    AssetManager assets;
+    auto makeShader = [&](float value) {
+        vector<ShaderPropertyDesc> properties{ShaderPropertyDesc{
+            .Name = "Value",
+            .Kind = ShaderPropertyKind::Float,
+            .DefaultValue = value}};
+        return assets.AddReady<ShaderAsset>(
+            Guid::NewGuid(),
+            make_unique<ShaderAsset>(ShaderKeywordSet{}, vector<ShaderPassDesc>{}, std::move(properties)));
+    };
+    auto first = makeShader(1.0f);
+    auto second = makeShader(2.0f);
+    MaterialAsset material{first};
+    material.SetFloat("Value", 3.0f);
+    const uint64_t beforeSwitch = material.GetRevision();
+
+    material.SetShader(second);
+    EXPECT_GT(material.GetRevision(), beforeSwitch);
+    EXPECT_FLOAT_EQ(*material.GetFloat("Value"), 3.0f);
+    material.ClearOverride("Value");
+    EXPECT_FLOAT_EQ(*material.GetFloat("Value"), 2.0f);
+}
+
+TEST(MaterialAssetTest, BindingKeyPreservesMaterialAndPropertyBlockLayerOrder) {
+    MaterialAsset first;
+    first.SetFloat("Value", 1.0f);
+    MaterialPropertyBlock firstBlock;
+    firstBlock.SetFloat("Value", 2.0f);
+
+    MaterialAsset second;
+    second.SetFloat("Value", 2.0f);
+    MaterialPropertyBlock secondBlock;
+    secondBlock.SetFloat("Value", 1.0f);
+
+    EXPECT_NE(
+        first.CreateSnapshot(&firstBlock)->BindingKey,
+        second.CreateSnapshot(&secondBlock)->BindingKey);
 }

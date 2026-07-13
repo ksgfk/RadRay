@@ -10,9 +10,11 @@ using namespace radray;
 
 namespace {
 
-// 从快照的 Constants 里按名字取一个 float (用于校验合并结果)。
-std::optional<float> GetConstantFloat(const MaterialRenderSnapshot& snap, std::string_view name) {
-    for (const auto& c : snap.Constants) {
+// 从快照的一层 Constants 里按名字取一个 float。
+std::optional<float> GetConstantFloat(
+    const MaterialRenderSnapshot::PropertyLayer& layer,
+    std::string_view name) {
+    for (const auto& c : layer.Constants) {
         if (c.Name == name && c.Bytes.size() == sizeof(float)) {
             float v;
             std::memcpy(&v, c.Bytes.data(), sizeof(float));
@@ -22,10 +24,12 @@ std::optional<float> GetConstantFloat(const MaterialRenderSnapshot& snap, std::s
     return std::nullopt;
 }
 
-// 统计快照 Constants 里某名字出现的次数 (校验无重复 entry)。
-uint32_t CountConstant(const MaterialRenderSnapshot& snap, std::string_view name) {
+// 统计快照单层 Constants 里某名字出现的次数。
+uint32_t CountConstant(
+    const MaterialRenderSnapshot::PropertyLayer& layer,
+    std::string_view name) {
     uint32_t n = 0;
-    for (const auto& c : snap.Constants) {
+    for (const auto& c : layer.Constants) {
         if (c.Name == name) {
             ++n;
         }
@@ -74,14 +78,14 @@ TEST(MaterialPropertyBlockTest, GetOverride) {
     EXPECT_FALSE(block.GetOverride("_Missing").has_value());
 }
 
-// ─── 快照合并 ───
+// ─── 快照分层 ───
 
 TEST(MaterialSnapshotMergeTest, NullBlockEqualsTemplate) {
     MaterialAsset mat;
     mat.SetFloat("_Metallic", 0.5f);
     auto snap = mat.CreateSnapshot(nullptr);
     ASSERT_NE(snap, nullptr);
-    auto v = GetConstantFloat(*snap, "_Metallic");
+    auto v = GetConstantFloat(snap->MaterialProperties, "_Metallic");
     ASSERT_TRUE(v.has_value());
     EXPECT_FLOAT_EQ(v.value(), 0.5f);
 }
@@ -92,7 +96,7 @@ TEST(MaterialSnapshotMergeTest, EmptyBlockEqualsTemplate) {
     MaterialPropertyBlock block;  // 空
     auto snap = mat.CreateSnapshot(&block);
     ASSERT_NE(snap, nullptr);
-    EXPECT_FLOAT_EQ(GetConstantFloat(*snap, "_Metallic").value(), 0.5f);
+    EXPECT_FLOAT_EQ(GetConstantFloat(snap->MaterialProperties, "_Metallic").value(), 0.5f);
 }
 
 TEST(MaterialSnapshotMergeTest, OverrideReplacesTemplateValue) {
@@ -102,9 +106,10 @@ TEST(MaterialSnapshotMergeTest, OverrideReplacesTemplateValue) {
     block.SetFloat("_Metallic", 0.9f);
     auto snap = mat.CreateSnapshot(&block);
     ASSERT_NE(snap, nullptr);
-    // 覆盖生效, 且不产生重复 entry。
-    EXPECT_EQ(CountConstant(*snap, "_Metallic"), 1u);
-    EXPECT_FLOAT_EQ(GetConstantFloat(*snap, "_Metallic").value(), 0.9f);
+    EXPECT_EQ(CountConstant(snap->MaterialProperties, "_Metallic"), 1u);
+    EXPECT_EQ(CountConstant(snap->PropertyBlockProperties, "_Metallic"), 1u);
+    EXPECT_FLOAT_EQ(GetConstantFloat(snap->MaterialProperties, "_Metallic").value(), 0.5f);
+    EXPECT_FLOAT_EQ(GetConstantFloat(snap->PropertyBlockProperties, "_Metallic").value(), 0.9f);
 }
 
 TEST(MaterialSnapshotMergeTest, OverrideAddsNewProperty) {
@@ -115,8 +120,8 @@ TEST(MaterialSnapshotMergeTest, OverrideAddsNewProperty) {
     auto snap = mat.CreateSnapshot(&block);
     ASSERT_NE(snap, nullptr);
     // 模板值保留, 覆盖新增值也在。
-    EXPECT_FLOAT_EQ(GetConstantFloat(*snap, "_Metallic").value(), 0.5f);
-    EXPECT_FLOAT_EQ(GetConstantFloat(*snap, "_Roughness").value(), 0.2f);
+    EXPECT_FLOAT_EQ(GetConstantFloat(snap->MaterialProperties, "_Metallic").value(), 0.5f);
+    EXPECT_FLOAT_EQ(GetConstantFloat(snap->PropertyBlockProperties, "_Roughness").value(), 0.2f);
 }
 
 TEST(MaterialSnapshotMergeTest, TemplateUnmodifiedByOverride) {
@@ -130,16 +135,16 @@ TEST(MaterialSnapshotMergeTest, TemplateUnmodifiedByOverride) {
 }
 
 TEST(MaterialSnapshotMergeTest, OverrideCanChangePropertyType) {
-    // 模板里 _P 是 float; 覆盖成 vector。合并后应只有 vector (常量 16 字节), 无重复。
+    // 模板里 _P 是 float; 覆盖层保留同名 vector，由 resolver 后应用。
     MaterialAsset mat;
     mat.SetFloat("_P", 1.0f);
     MaterialPropertyBlock block;
     block.SetVector("_P", Eigen::Vector4f{1, 2, 3, 4});
     auto snap = mat.CreateSnapshot(&block);
     ASSERT_NE(snap, nullptr);
-    EXPECT_EQ(CountConstant(*snap, "_P"), 1u);
-    // 16 字节 (vector) 而非 4 字节 (float)。
-    for (const auto& c : snap->Constants) {
+    EXPECT_EQ(CountConstant(snap->MaterialProperties, "_P"), 1u);
+    EXPECT_EQ(CountConstant(snap->PropertyBlockProperties, "_P"), 1u);
+    for (const auto& c : snap->PropertyBlockProperties.Constants) {
         if (c.Name == "_P") {
             EXPECT_EQ(c.Bytes.size(), sizeof(float) * 4);
         }

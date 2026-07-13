@@ -100,9 +100,10 @@ public:
     explicit ForwardPipeline(RenderSystem* renderSystem) noexcept;
     ~ForwardPipeline() noexcept override;
 
-    /// 本管线的标准材质工厂 (forward_pass 翻译)。首次调用时惰性构建 shader 对 + 采样器
+    /// 本管线的标准材质工厂 (forward_pass 翻译)。首次调用时惰性构建 shader
     /// (colorFormat 取主窗口 backbuffer 格式)。构建失败返回 null。
     Nullable<IStandardMaterialFactory*> GetStandardMaterialFactory() noexcept override;
+    shared_ptr<const MaterialRenderSnapshot> GetErrorMaterial() noexcept override;
 
 protected:
     void OnBeginFrame(RenderPipelineContext& ctx) override;
@@ -253,6 +254,8 @@ private:
     RenderSystem* _renderSystem{nullptr};                 // 惰性构建材质工厂时取 AssetManager / colorFormat
     unique_ptr<IStandardMaterialFactory> _materialFactory;  // 本管线的标准材质工厂 (具体类型隐藏于 .cpp)
     bool _materialFactoryInit{false};                     // 已尝试初始化 (成功与否)
+    shared_ptr<const MaterialRenderSnapshot> _errorMaterialSnapshot;
+    bool _errorMaterialInit{false};
 };
 
 }  // namespace radray

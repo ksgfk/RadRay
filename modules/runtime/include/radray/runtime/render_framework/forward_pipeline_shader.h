@@ -29,6 +29,7 @@ inline constexpr std::string_view kShadowPassTag = "ShadowCaster";
 /// forward-pipeline shader 源文件名 (位于 shaderlib/forward_pipeline/)。
 inline constexpr std::string_view kForwardPassFile = "forward_pass.hlsl";
 inline constexpr std::string_view kShadowPassFile = "shadow_pass.hlsl";
+inline constexpr std::string_view kErrorPassFile = "error_pass.hlsl";
 
 /// program 稳定逻辑名 (透传为 ShaderVariantDescriptor::LogicalName)。
 /// 跨进程稳定, 供预编译缓存 (DXC 缺失路径) 定位磁盘烘焙产物; 也是 tools/bake_shaders.py
@@ -36,6 +37,7 @@ inline constexpr std::string_view kShadowPassFile = "shadow_pass.hlsl";
 /// (blend / 深度写属 PSO 固定状态, 不影响编译产物)。
 inline constexpr std::string_view kForwardProgramName = "forward_pipeline/forward";
 inline constexpr std::string_view kShadowProgramName = "forward_pipeline/shadow";
+inline constexpr std::string_view kErrorProgramName = "forward_pipeline/error";
 
 /// alpha / 双面 keyword。
 inline constexpr std::string_view kKwAlphaTest = "_ALPHATEST_ON";
@@ -127,5 +129,10 @@ std::optional<StreamingAssetRef<ShaderAsset>> BuildForwardShader(
     const ShaderKeywordSet& keywords,
     render::TextureFormat colorFormat,
     bool withShadowCaster);
+
+std::optional<StreamingAssetRef<ShaderAsset>> BuildForwardErrorShader(
+    AssetManager& assets,
+    RenderSystem& renderSystem,
+    render::TextureFormat colorFormat);
 
 }  // namespace radray

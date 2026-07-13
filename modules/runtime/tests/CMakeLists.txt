@@ -3,10 +3,12 @@ radray_add_test(test_deferred_render_delete_queue SOURCES test_deferred_render_d
 radray_add_test(test_light_component SOURCES test_light_component.cpp LINK_LIBS radraycore radrayrender radrayruntime)
 radray_add_test(test_static_mesh_component SOURCES test_static_mesh_component.cpp LINK_LIBS radraycore radrayrender radrayruntime)
 radray_add_test(test_shader_asset SOURCES test_shader_asset.cpp LINK_LIBS radraycore radrayrender radrayruntime)
+radray_add_test(test_shader_binding_plan SOURCES test_shader_binding_plan.cpp LINK_LIBS radraycore radrayrender radrayruntime)
 radray_add_test(test_material_asset SOURCES test_material_asset.cpp LINK_LIBS radraycore radrayrender radrayruntime)
 radray_add_test(test_material_property_block SOURCES test_material_property_block.cpp LINK_LIBS radraycore radrayrender radrayruntime)
 radray_add_test(test_render_queue SOURCES test_render_queue.cpp LINK_LIBS radraycore radrayrender radrayruntime)
 radray_add_test(test_staging_buffer_pool SOURCES test_staging_buffer_pool.cpp LINK_LIBS radraycore radrayrender radrayruntime)
+radray_add_test(test_gpu_resource SOURCES test_gpu_resource.cpp LINK_LIBS radraycore radrayrender radrayruntime)
 
 # 设备级集成测试: material -> variant -> parameter table 全链路。复用 render 测试框架
 # (仅依赖 core+render), 需要 DXC; Vulkan 后端还需 SPIR-V Cross 反射。

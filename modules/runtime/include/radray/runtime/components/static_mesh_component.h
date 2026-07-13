@@ -36,19 +36,24 @@ public:
     uint32_t GetMaterialSlotCount() const noexcept { return static_cast<uint32_t>(_sectionMaterials.size()); }
 
     /// 手动标记某 section 的材质为脏, 下一帧强制重建快照。
-    /// 已知限制: MaterialAsset 的内部属性 (SetFloat 等) 变更没有 generation/版本号,
-    /// 脏重建无法自动感知同一 asset 内部参数被改。调用方改了参数后须显式调用本方法。
+    /// 常规 MaterialAsset 属性变更会通过 revision 自动感知, 无需调用本方法。
     void MarkMaterialDirty(uint32_t sectionIndex) noexcept;
 
     /// 设置某 section 的 per-primitive 参数覆盖 (对应 Unity 的 Renderer.SetPropertyBlock)。
     /// 覆盖值在生成快照时叠加到共享材质模板之上, 不修改共享 MaterialAsset。
     /// 传 nullptr 清除覆盖。block 的内部参数变更 (SetFloat 等) 通过其版本号自动感知,
-    /// 无需手动标脏 (区别于 MaterialAsset)。
+    /// 无需手动标脏。
     void SetPropertyBlock(uint32_t sectionIndex, shared_ptr<MaterialPropertyBlock> block) noexcept;
     /// 取某 section 的参数覆盖 (未设置返回 nullptr)。
     Nullable<MaterialPropertyBlock*> GetPropertyBlock(uint32_t sectionIndex) const noexcept;
     /// 清除某 section 的参数覆盖 (回落到纯共享材质)。
     void ClearPropertyBlock(uint32_t sectionIndex) noexcept;
+
+protected:
+    /// Synchronizes dirty material slots into a render proxy. TickComponent uses this
+    /// path; protected visibility also lets specialized components drive an explicit
+    /// proxy during headless tests.
+    void RefreshMaterialSnapshots(StaticMeshSceneProxy& proxy) noexcept;
 
 private:
     /// per-section 材质槽 (下标即 section index)。组件据此生成快照发布给 proxy。
@@ -58,6 +63,7 @@ private:
         shared_ptr<MaterialPropertyBlock> PropertyBlock{};  // per-primitive 参数覆盖 (可空)
         AssetHandle LastHandle{AssetHandle::Invalid()};  // 上次快照的 handle (generation 兜底)
         MaterialAsset* LastPtr{nullptr};                 // 上次快照的解析指针 (Loading->Ready 跳变检测)
+        uint64_t LastMaterialRevision{0};                // 上次快照据以生成的材质版本号
         uint64_t LastBlockVersion{0};                    // 上次快照据以生成的 block 版本号
         const MaterialPropertyBlock* LastBlockPtr{nullptr};  // 上次快照的 block 指针 (换 block 检测)
         bool Dirty{true};                                // 是否需要重建快照
@@ -69,9 +75,6 @@ private:
     void StartMeshRefreshTask();
     task<void> WaitForMeshAndRefresh(StreamingAssetRef<StaticMesh> mesh);
     bool IsCurrentMesh(const StreamingAssetRef<StaticMesh>& mesh) const noexcept;
-    /// 为脏 section 重建材质快照并发布给 proxy (game 线程调用)。无变更的 section 空转。
-    void RefreshMaterialSnapshots(StaticMeshSceneProxy& proxy) noexcept;
-
     StreamingAssetRef<StaticMesh> _mesh;
     unique_ptr<TaskScope> _meshRefreshScope;
     bool _meshRefreshCompleted{false};
