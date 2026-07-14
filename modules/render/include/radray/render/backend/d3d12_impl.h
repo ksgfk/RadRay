@@ -334,6 +334,8 @@ public:
 
     Nullable<unique_ptr<Buffer>> CreateBuffer(const BufferDescriptor& desc) noexcept override;
 
+    void FlushMappedRanges(std::span<const MappedBufferRange> ranges) noexcept override;
+
     Nullable<unique_ptr<Texture>> CreateTexture(const TextureDescriptor& desc) noexcept override;
 
     Nullable<unique_ptr<TextureView>> CreateTextureView(const TextureViewDescriptor& desc) noexcept override;
@@ -514,7 +516,7 @@ public:
     ComPtr<ID3D12CommandAllocator> _cmdAlloc;
     ComPtr<ID3D12GraphicsCommandList> _cmdList;
     D3D12_COMMAND_LIST_TYPE _type;
-    vector<ComPtr<ID3D12Resource>> _keepAliveResources;
+    vector<unique_ptr<Buffer>> _keepAliveBuffers;
 };
 
 class CmdRenderPassD3D12 final : public GraphicsCommandEncoder {
@@ -688,11 +690,17 @@ public:
 
     void* Map(uint64_t offset, uint64_t size) noexcept override;
 
-    void Unmap(uint64_t offset, uint64_t size) noexcept override;
+    void Unmap() noexcept override;
+
+    void FlushMappedRange(BufferRange range) noexcept override;
+
+    void InvalidateMappedRange(BufferRange range) noexcept override;
 
     void SetDebugName(std::string_view name) noexcept override;
 
     BufferDescriptor GetDesc() const noexcept override;
+
+    Device* GetDevice() const noexcept override { return _device; }
 
 public:
     DeviceD3D12* _device;
@@ -706,6 +714,10 @@ public:
     BufferUses _usage{BufferUse::UNKNOWN};
     ResourceHints _hints{};
     void* _mappedData{nullptr};
+    uint64_t _flushOffset{0};
+    uint64_t _flushSize{0};
+    bool _hasPendingFlush{false};
+    bool _mapped{false};
 };
 
 class QueryPoolD3D12 final : public QueryPool {

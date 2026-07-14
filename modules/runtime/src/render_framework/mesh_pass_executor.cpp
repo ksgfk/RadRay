@@ -232,12 +232,13 @@ Nullable<const DynamicCBufferArena::Allocation*> MeshPassExecutor::EnsureViewBin
         return nullptr;
     }
 
-    auto alloc = resources.ViewArena.Allocate(_viewData.size());
-    if (alloc.Target == nullptr || alloc.Mapped == nullptr) {
+    auto reservation = resources.ViewArena.Reserve(_viewData.size());
+    if (!reservation.IsValid()) {
         RADRAY_ERR_LOG("MeshPassExecutor: per-view cbuffer allocation failed");
         return nullptr;
     }
-    std::memcpy(alloc.Mapped, _viewData.data(), _viewData.size());
+    std::memcpy(reservation.Data(), _viewData.data(), _viewData.size());
+    auto alloc = reservation.Commit(_viewData.size());
     _viewAllocation = alloc;
     _viewBindingValid = true;
     _viewGeneration = resources.Generation;
@@ -255,11 +256,12 @@ Nullable<const DynamicCBufferArena::Allocation*> MeshPassExecutor::EnsureObjectB
     PerObjectConstants constants{};
     const Eigen::Matrix4f matrix = proxy->GetLocalToWorld();
     std::memcpy(constants.ObjectToWorld, matrix.data(), sizeof(constants.ObjectToWorld));
-    auto allocation = resources.PerObjectArena.Allocate(sizeof(constants));
-    if (allocation.Target == nullptr || allocation.Mapped == nullptr) {
+    auto reservation = resources.PerObjectArena.Reserve(sizeof(constants));
+    if (!reservation.IsValid()) {
         return nullptr;
     }
-    std::memcpy(allocation.Mapped, &constants, sizeof(constants));
+    std::memcpy(reservation.Data(), &constants, sizeof(constants));
+    auto allocation = reservation.Commit(sizeof(constants));
     FrameObjectBinding& binding = resources.ObjectBindings.emplace_back(FrameObjectBinding{
         .Proxy = proxy,
         .Allocation = allocation});
@@ -747,10 +749,6 @@ uint32_t MeshPassExecutor::Execute(
     _commands.reserve(list.Size());
     for (const DrawItem& item : list.Items()) {
         CompileCommand(item, resources);
-    }
-    resources.FlushHostWrites();
-    if (_materialConstantPool != nullptr) {
-        _materialConstantPool->FlushHostWrites();
     }
     if (list.GetSortMode() == DrawList::SortMode::Opaque) {
         std::stable_sort(_commands.begin(), _commands.end(), [](const MeshDrawCommand& a, const MeshDrawCommand& b) {

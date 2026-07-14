@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstring>
 
+#include <radray/scope_guard.h>
 #include <radray/utility.h>
 
 #include <fmt/format.h>
@@ -497,8 +498,7 @@ bool ComputeTestContext::SubmitAndWait(CommandBuffer* cmd, string* reason) noexc
         return false;
     }
     CommandBuffer* cmds[] = {cmd};
-    CommandQueueSubmitDescriptor submitDesc{};
-    submitDesc.CmdBuffers = cmds;
+    CommandQueueSubmitDescriptor submitDesc{.CmdBuffers = cmds};
     _queue->Submit(submitDesc);
     _queue->Wait();
     return true;
@@ -525,8 +525,11 @@ bool ComputeTestContext::WriteHostVisibleBuffer(
                 data.size()));
         return false;
     }
+    auto unmapGuard = MakeScopeGuard([&]() noexcept { buffer->Unmap(); });
     std::memcpy(mapped, data.data(), data.size());
-    buffer->Unmap(0, data.size());
+    buffer->FlushMappedRange(BufferRange{.Offset = 0, .Size = data.size()});
+    buffer->Unmap();
+    unmapGuard.Dismiss();
     return true;
 }
 
@@ -552,8 +555,11 @@ std::optional<vector<byte>> ComputeTestContext::ReadHostVisibleBuffer(
                 size));
         return std::nullopt;
     }
+    auto unmapGuard = MakeScopeGuard([&]() noexcept { buffer->Unmap(); });
+    buffer->InvalidateMappedRange(BufferRange{.Offset = 0, .Size = size});
     std::memcpy(result.data(), mapped, size);
-    buffer->Unmap(0, size);
+    buffer->Unmap();
+    unmapGuard.Dismiss();
     return result;
 }
 
@@ -834,7 +840,7 @@ void ComputeTestContext::AppendHostWriteBarrier(
     vector<ResourceBarrierDescriptor>& barriers,
     Buffer* buffer,
     BufferStates after) const noexcept {
-    if (_backend != TestBackend::Vulkan || buffer == nullptr) {
+    if (buffer == nullptr) {
         return;
     }
     barriers.push_back(BarrierBufferDescriptor{

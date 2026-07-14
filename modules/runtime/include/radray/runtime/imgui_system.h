@@ -16,6 +16,7 @@
 #include <radray/nullable.h>
 #include <radray/render/common.h>
 #include <radray/runtime/application.h>
+#include <radray/runtime/gpu_resource.h>
 
 namespace radray {
 
@@ -27,6 +28,7 @@ class PipelineLayoutLibrary;
 class RenderPassRegistry;
 class ImGuiSystem;
 class ImGuiRenderer;
+class ResourceUploader;
 class NativeWindow;
 enum class KeyCode;
 enum class MouseButton;
@@ -111,6 +113,8 @@ public:
         // 标记外部纹理构造：描述符集按 flight 延迟创建
         struct ExternalTag {};
 
+        ImGuiTexture() noexcept = default;
+
         ImGuiTexture(
             unique_ptr<render::Texture> texture,
             unique_ptr<render::TextureView> srv,
@@ -140,6 +144,10 @@ public:
             _externalGroups[flightIndex] = std::move(group);
         }
         bool UpdateExternalResource(uint32_t flightIndex, render::TextureView* srv) noexcept;
+        void InitializeOwned(
+            unique_ptr<render::Texture> texture,
+            unique_ptr<render::TextureView> srv,
+            unique_ptr<render::BindingGroup> bindingGroup) noexcept;
         bool IsExternal() const noexcept { return _isExternal; }
 
     private:
@@ -151,8 +159,12 @@ public:
     };
 
     struct UploadTexturePayload {
-        render::Texture* Dst{nullptr};
-        render::Buffer* Src{nullptr};
+        ImGuiTexture* Target{nullptr};
+        vector<byte> SrcData;
+        uint64_t SrcRowPitch{0};
+        uint64_t UniqueId{0};
+        uint32_t Width{0};
+        uint32_t Height{0};
         bool IsNew{false};
     };
 
@@ -163,14 +175,16 @@ public:
     private:
         friend class ImGuiRenderer;
 
-        unique_ptr<render::Buffer> _vb;
-        unique_ptr<render::Buffer> _ib;
+        unique_ptr<MappedUploadPage> _vb;
+        unique_ptr<MappedUploadPage> _ib;
+        vector<byte> _vertexData;
+        vector<byte> _indexData;
         vector<DrawData> _drawData;
         int32_t _vbSize{0};
         int32_t _ibSize{0};
+        uint32_t _debugViewportId{0};
 
         vector<UploadTexturePayload> _uploadTexReqs;
-        deque<unique_ptr<render::Buffer>> _tempBufs;
         deque<unique_ptr<ImGuiTexture>> _waitForFreeTexs;
     };
 
@@ -185,7 +199,11 @@ public:
     std::optional<uint32_t> FindViewportDrawDataIndex(uint32_t frameIndex, ImGuiViewport* viewport) const noexcept;
 
     void ExtractDrawData(uint32_t frameIndex);
-    void OnRenderBegin(uint32_t frameIndex, render::CommandBuffer* cmdBuffer);
+    void OnRenderBegin(
+        uint32_t frameIndex,
+        render::CommandBuffer* cmdBuffer,
+        ResourceUploader& uploader,
+        HostWriteBatch& hostWrites);
     void OnRenderViewport(uint32_t frameIndex, ImGuiViewport* viewport, render::GraphicsCommandEncoder* encoder);
     void OnRenderComplete(uint32_t frameIndex);
     void OnSwapChainRecreate(const AppSwapChainRecreateContext& ctx);
@@ -199,7 +217,11 @@ private:
     friend class ImGuiSystem;
 
     void ExtractDrawDataToFrame(Frame& frame, std::span<ImDrawData*> drawDataList);
-    void OnRenderBeginFrame(Frame& frame, render::CommandBuffer* cmdBuffer);
+    void OnRenderBeginFrame(
+        Frame& frame,
+        render::CommandBuffer* cmdBuffer,
+        ResourceUploader& uploader,
+        HostWriteBatch& hostWrites);
     void OnRenderFrame(uint32_t frameIndex, Frame& frame, uint32_t drawDataIndex, render::GraphicsCommandEncoder* encoder);
     void OnRenderCompleteFrame(Frame& frame);
     void SetupRenderStateForFrame(const Frame& frame, uint32_t drawDataIndex, render::GraphicsCommandEncoder* encoder, int32_t fbWidth, int32_t fbHeight) const;

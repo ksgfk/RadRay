@@ -7,6 +7,8 @@
 
 namespace radray {
 
+class HostWriteBatch;
+
 class GpuMesh {
 public:
     struct DrawData {
@@ -18,6 +20,73 @@ public:
     vector<DrawData> Draws;
 };
 
+class MappedUploadPage {
+public:
+    struct Allocation {
+        render::Buffer* Target{nullptr};
+        uint64_t Offset{0};
+        uint64_t Size{0};
+
+        static constexpr Allocation Invalid() noexcept { return {}; }
+        bool IsValid() const noexcept { return Target != nullptr; }
+    };
+
+    class Reservation {
+    public:
+        Reservation() noexcept = default;
+        Reservation(const Reservation&) = delete;
+        Reservation& operator=(const Reservation&) = delete;
+        Reservation(Reservation&& other) noexcept;
+        Reservation& operator=(Reservation&& other) noexcept;
+        ~Reservation() noexcept;
+
+        void* Data() const noexcept { return _data; }
+        render::Buffer* Target() const noexcept { return _target; }
+        uint64_t Offset() const noexcept { return _offset; }
+        uint64_t Capacity() const noexcept { return _capacity; }
+        bool IsValid() const noexcept { return _target != nullptr; }
+
+        Allocation Commit(uint64_t actualSize);
+
+    private:
+        friend class MappedUploadPage;
+
+        Reservation(
+            render::Buffer* target,
+            void* data,
+            uint64_t offset,
+            uint64_t capacity,
+            HostWriteBatch* hostWrites) noexcept;
+        void AbandonCheck() const noexcept;
+
+        render::Buffer* _target{nullptr};
+        void* _data{nullptr};
+        uint64_t _offset{0};
+        uint64_t _capacity{0};
+        HostWriteBatch* _hostWrites{nullptr};
+        bool _committed{true};
+    };
+
+    explicit MappedUploadPage(
+        unique_ptr<render::Buffer> buffer,
+        Nullable<HostWriteBatch*> allocationStats = nullptr) noexcept;
+    MappedUploadPage(const MappedUploadPage&) = delete;
+    MappedUploadPage& operator=(const MappedUploadPage&) = delete;
+    ~MappedUploadPage() noexcept;
+
+    Reservation Reserve(uint64_t size, uint64_t alignment, HostWriteBatch& hostWrites);
+    Reservation ReserveAt(uint64_t offset, uint64_t size, HostWriteBatch& hostWrites);
+    void Reset() noexcept { _used = 0; }
+
+    render::Buffer* GetBuffer() const noexcept { return _buffer.get(); }
+    uint64_t GetCapacity() const noexcept { return _buffer != nullptr ? _buffer->GetDesc().Size : 0; }
+    uint64_t GetUsed() const noexcept { return _used; }
+private:
+    unique_ptr<render::Buffer> _buffer;
+    void* _mapped{nullptr};
+    uint64_t _used{0};
+};
+
 class DynamicCBufferArena {
 public:
     struct Descriptor {
@@ -27,31 +96,24 @@ public:
         string NamePrefix{};
     };
 
-    struct Allocation {
-        render::Buffer* Target{nullptr};
-        void* Mapped{nullptr};
-        uint64_t Offset{0};
-        uint64_t Size{0};
-
-        static constexpr Allocation Invalid() noexcept { return Allocation{}; }
-    };
+    using Allocation = MappedUploadPage::Allocation;
+    using Reservation = MappedUploadPage::Reservation;
 
     class Block {
     public:
-        explicit Block(unique_ptr<render::Buffer> buffer) noexcept;
+        explicit Block(unique_ptr<MappedUploadPage> page) noexcept;
         Block(const Block&) = delete;
         Block& operator=(const Block&) = delete;
-        ~Block() noexcept;
+        ~Block() noexcept = default;
 
-        unique_ptr<render::Buffer> Buffer;
-        void* Mapped{nullptr};
-        uint64_t Used{0};
-        uint64_t DirtyBegin{std::numeric_limits<uint64_t>::max()};
-        uint64_t DirtyEnd{0};
+        unique_ptr<MappedUploadPage> Page;
     };
 
-    DynamicCBufferArena(render::Device* device, const Descriptor& desc) noexcept;
-    explicit DynamicCBufferArena(render::Device* device) noexcept;
+    DynamicCBufferArena(
+        render::Device* device,
+        HostWriteBatch* hostWrites,
+        const Descriptor& desc) noexcept;
+    DynamicCBufferArena(render::Device* device, HostWriteBatch* hostWrites) noexcept;
     DynamicCBufferArena(const DynamicCBufferArena&) = delete;
     DynamicCBufferArena& operator=(const DynamicCBufferArena&) = delete;
     DynamicCBufferArena(DynamicCBufferArena&& other) noexcept;
@@ -60,10 +122,7 @@ public:
 
     bool IsValid() const noexcept;
     void Destroy() noexcept;
-    Allocation Allocate(uint64_t size) noexcept;
-    /// Publishes all mapped writes since the previous flush. Must run before GPU submission.
-    void FlushHostWrites() noexcept;
-    bool HasPendingHostWrites() const noexcept;
+    Reservation Reserve(uint64_t size) noexcept;
     void Reset() noexcept;
     void Clear() noexcept;
     bool Contains(const render::Buffer* buffer) const noexcept;
@@ -75,6 +134,7 @@ private:
     Nullable<Block*> GetOrCreateBlock(uint64_t size) noexcept;
 
     render::Device* _device;
+    HostWriteBatch* _hostWrites;
     vector<unique_ptr<Block>> _blocks;
     Descriptor _desc;
     size_t _activeBlockIndex{};
@@ -87,13 +147,43 @@ class MaterialConstantPool {
 public:
     struct Allocation {
         render::Buffer* Target{nullptr};
-        void* Mapped{nullptr};
         uint64_t Offset{0};
         uint64_t Size{0};
         uint64_t ReservedSize{0};
         uint32_t BlockIndex{std::numeric_limits<uint32_t>::max()};
 
         bool IsValid() const noexcept { return Target != nullptr; }
+    };
+
+    class Reservation {
+    public:
+        Reservation() noexcept = default;
+        Reservation(const Reservation&) = delete;
+        Reservation& operator=(const Reservation&) = delete;
+        Reservation(Reservation&&) noexcept = default;
+        Reservation& operator=(Reservation&&) noexcept = default;
+
+        void* Data() const noexcept { return _reservation.Data(); }
+        render::Buffer* Target() const noexcept { return _reservation.Target(); }
+        uint64_t Offset() const noexcept { return _reservation.Offset(); }
+        uint64_t Capacity() const noexcept { return _reservation.Capacity(); }
+        bool IsValid() const noexcept { return _reservation.IsValid(); }
+
+        Allocation Commit(uint64_t actualSize);
+
+    private:
+        friend class MaterialConstantPool;
+        Reservation(
+            MappedUploadPage::Reservation reservation,
+            uint64_t reservedSize,
+            uint32_t blockIndex) noexcept
+            : _reservation(std::move(reservation)),
+              _reservedSize(reservedSize),
+              _blockIndex(blockIndex) {}
+
+        MappedUploadPage::Reservation _reservation;
+        uint64_t _reservedSize{0};
+        uint32_t _blockIndex{std::numeric_limits<uint32_t>::max()};
     };
 
     MaterialConstantPool(
@@ -104,22 +194,13 @@ public:
     MaterialConstantPool& operator=(const MaterialConstantPool&) = delete;
     ~MaterialConstantPool() noexcept;
 
-    Allocation Allocate(uint64_t size) noexcept;
-    /// Publishes all mapped writes since the previous flush. Must run before GPU submission.
-    void FlushHostWrites() noexcept;
-    bool HasPendingHostWrites() const noexcept;
+    Reservation Reserve(uint64_t size, HostWriteBatch& hostWrites) noexcept;
     void Release(const Allocation& allocation) noexcept;
     uint64_t GetHighWatermark() const noexcept { return _highWatermark; }
 
 private:
     struct Block {
-        unique_ptr<render::Buffer> Buffer;
-        void* Mapped{nullptr};
-        uint64_t Used{0};
-        uint64_t DirtyBegin{std::numeric_limits<uint64_t>::max()};
-        uint64_t DirtyEnd{0};
-
-        ~Block() noexcept;
+        unique_ptr<MappedUploadPage> Page;
     };
     struct FreeSlice {
         uint32_t BlockIndex{0};
@@ -127,7 +208,9 @@ private:
         uint64_t Size{0};
     };
 
-    Nullable<Block*> CreateBlock(uint64_t minimumSize) noexcept;
+    Nullable<Block*> CreateBlock(
+        uint64_t minimumSize,
+        HostWriteBatch& hostWrites) noexcept;
 
     render::Device* _device{nullptr};
     uint64_t _initialSize{0};
@@ -195,11 +278,10 @@ struct FrameObjectBinding {
 
 class FrameResources {
 public:
-    explicit FrameResources(render::Device* device) noexcept;
+    FrameResources(render::Device* device, HostWriteBatch* hostWrites) noexcept;
 
-    void FlushHostWrites() noexcept;
-    bool HasPendingHostWrites() const noexcept;
     void Reset() noexcept;
+    HostWriteBatch& GetHostWrites() const noexcept { return *_hostWrites; }
 
     DynamicCBufferArena PerObjectArena;
     DynamicCBufferArena ViewArena;
@@ -212,6 +294,9 @@ public:
     vector<unique_ptr<render::RenderBase>> RetireList;
     RuntimeRenderCounters Counters{};
     uint64_t Generation{1};
+
+private:
+    HostWriteBatch* _hostWrites;
 };
 
 }  // namespace radray

@@ -292,6 +292,100 @@ protected:
     inline static std::optional<string> _vulkanUnavailableReason{};
 };
 
+TEST_P(RhiCommandRuntimeTest, FlushMappedRangesAcceptsAllForPersistentAndTransientMaps) {
+    auto persistent = CreateBuffer(BufferDescriptor{
+        .Size = 64,
+        .Memory = MemoryType::Upload,
+        .Usage = BufferUse::MapWrite | BufferUse::CopySource,
+        .Hints = ResourceHint::PersistentMap});
+    auto transient = CreateBuffer(BufferDescriptor{
+        .Size = 64,
+        .Memory = MemoryType::Upload,
+        .Usage = BufferUse::MapWrite | BufferUse::CopySource});
+    ASSERT_NE(persistent, nullptr);
+    ASSERT_NE(transient, nullptr);
+
+    auto writeAndFlush = [this](Buffer* buffer) {
+        auto* mapped = static_cast<byte*>(buffer->Map(0, 64));
+        ASSERT_NE(mapped, nullptr);
+        std::memset(mapped + 8, 0x5a, 56);
+        const MappedBufferRange range{
+            .Target = buffer,
+            .Range = BufferRange{.Offset = 8, .Size = BufferRange::All()}};
+        _context.GetDevicePtr()->FlushMappedRanges(std::span{&range, 1});
+        buffer->Unmap();
+    };
+
+    writeAndFlush(persistent.get());
+    writeAndFlush(transient.get());
+}
+
+TEST_P(RhiCommandRuntimeTest, FlushMappedRangesRejectsInvalidSpanEntries) {
+    auto writable = CreateBuffer(BufferDescriptor{
+        .Size = 64,
+        .Memory = MemoryType::Upload,
+        .Usage = BufferUse::MapWrite | BufferUse::CopySource,
+        .Hints = ResourceHint::PersistentMap});
+    auto readback = CreateBuffer(BufferDescriptor{
+        .Size = 64,
+        .Memory = MemoryType::ReadBack,
+        .Usage = BufferUse::MapRead | BufferUse::CopyDestination});
+    ASSERT_NE(writable, nullptr);
+    ASSERT_NE(readback, nullptr);
+    ASSERT_NE(writable->Map(0, 64), nullptr);
+
+    const MappedBufferRange nullTarget{};
+    EXPECT_DEATH(
+        _context.GetDevicePtr()->FlushMappedRanges(std::span{&nullTarget, 1}),
+        "");
+
+    const MappedBufferRange wrongUsage{
+        .Target = readback.get(),
+        .Range = BufferRange{.Offset = 0, .Size = 0}};
+    EXPECT_DEATH(
+        _context.GetDevicePtr()->FlushMappedRanges(std::span{&wrongUsage, 1}),
+        "");
+
+    const MappedBufferRange outOfBounds{
+        .Target = writable.get(),
+        .Range = BufferRange{.Offset = 60, .Size = 8}};
+    EXPECT_DEATH(
+        _context.GetDevicePtr()->FlushMappedRanges(std::span{&outOfBounds, 1}),
+        "");
+
+    const MappedBufferRange mixed[] = {
+        MappedBufferRange{
+            .Target = writable.get(),
+            .Range = BufferRange{.Offset = 0, .Size = 4}},
+        nullTarget};
+    EXPECT_DEATH(
+        _context.GetDevicePtr()->FlushMappedRanges(mixed),
+        "");
+
+    ComputeTestContext otherContext;
+    string reason;
+    ASSERT_TRUE(otherContext.Initialize(GetParam(), &reason)) << reason;
+    auto otherBufferOpt = otherContext.CreateBuffer(
+        BufferDescriptor{
+            .Size = 64,
+            .Memory = MemoryType::Upload,
+            .Usage = BufferUse::MapWrite,
+            .Hints = ResourceHint::PersistentMap},
+        &reason);
+    ASSERT_TRUE(otherBufferOpt.HasValue()) << reason;
+    auto otherBuffer = otherBufferOpt.Release();
+    const MappedBufferRange crossDevice{
+        .Target = otherBuffer.get(),
+        .Range = BufferRange{.Offset = 0, .Size = 4}};
+    EXPECT_DEATH(
+        _context.GetDevicePtr()->FlushMappedRanges(std::span{&crossDevice, 1}),
+        "");
+
+    writable->Unmap();
+    otherBuffer.reset();
+    otherContext.Reset();
+}
+
 TEST_P(RhiCommandRuntimeTest, TextureToTextureCopyPreservesTexels) {
     constexpr uint32_t width = 4;
     constexpr uint32_t height = 4;

@@ -9,6 +9,7 @@
 
 #include <radray/basic_math.h>
 #include <radray/runtime/gpu_resource.h>
+#include <radray/runtime/gpu_system.h>
 #include <radray/runtime/pipeline_state_cache.h>
 #include <radray/runtime/render_pass_registry.h>
 #include <radray/runtime/sampler_cache.h>
@@ -436,7 +437,13 @@ protected:
         _samplerCache = make_unique<SamplerCache>(_ctx.GetDevicePtr());
     }
 
+    bool SubmitAndWait(CommandBuffer* command, string* reason) {
+        _hostWrites.Flush(*_ctx.GetDevicePtr());
+        return _ctx.SubmitAndWait(command, reason);
+    }
+
     ComputeTestContext _ctx{};
+    HostWriteBatch _hostWrites{};
     unique_ptr<PipelineLayoutLibrary> _layoutLibrary{};
     unique_ptr<ShaderVariantLibrary> _variantCache{};
     unique_ptr<GraphicsPipelineStateLibrary> _psoCache{};
@@ -516,7 +523,7 @@ TEST_P(MeshPassExecutorTest, DrawsPerObjectColorIntoRenderTarget) {
 
     // executor (per-object cbuffer 变量名 gPerObject)。
     MeshPassExecutor executor{_ctx.GetDevicePtr(), _variantCache.get(), _psoCache.get(), _samplerCache.get(), "gPerObject"};
-    FrameResources frameResources{_ctx.GetDevicePtr()};
+    FrameResources frameResources{_ctx.GetDevicePtr(), &_hostWrites};
 
     auto cmdOpt = _ctx.CreateCommandBuffer(&reason);
     ASSERT_TRUE(cmdOpt.HasValue()) << reason;
@@ -594,7 +601,7 @@ TEST_P(MeshPassExecutorTest, DrawsPerObjectColorIntoRenderTarget) {
     cmd->CopyTextureToBuffer(rb.get(), 0, rt.get(), SubresourceRange{0, 1, 0, 1});
     cmd->End();
 
-    ASSERT_TRUE(_ctx.SubmitAndWait(cmd.get(), &reason)) << reason << " " << _ctx.JoinCapturedErrors();
+    ASSERT_TRUE(SubmitAndWait(cmd.get(), &reason)) << reason << " " << _ctx.JoinCapturedErrors();
     EXPECT_EQ(renderPassRegistry.GetRenderPassCount(), 1u);
     EXPECT_EQ(renderPassRegistry.GetFramebufferCount(), 1u);
 
@@ -630,7 +637,7 @@ TEST_P(MeshPassExecutorTest, DrawsPerObjectColorIntoRenderTarget) {
     EXPECT_EQ(frameResources.Counters.DrawInstances, 12u);
     cmd->EndRenderPass(std::move(secondEncoder));
     cmd->End();
-    ASSERT_TRUE(_ctx.SubmitAndWait(cmd.get(), &reason)) << reason << " " << _ctx.JoinCapturedErrors();
+    ASSERT_TRUE(SubmitAndWait(cmd.get(), &reason)) << reason << " " << _ctx.JoinCapturedErrors();
     EXPECT_EQ(renderPassRegistry.GetRenderPassCount(), 1u);
     EXPECT_EQ(renderPassRegistry.GetFramebufferCount(), 1u);
 
@@ -830,7 +837,7 @@ TEST_P(MeshPassExecutorTest, DrawsEmptyMaterialWithGenericMixedBindingsAndDefaul
         _variantCache.get(),
         _psoCache.get(),
         _samplerCache.get()};
-    FrameResources resources{_ctx.GetDevicePtr()};
+    FrameResources resources{_ctx.GetDevicePtr(), &_hostWrites};
     executor.SetRenderPass(renderPass.Get());
     EXPECT_EQ(executor.Execute(encoder.get(), list, resources), 1u)
         << _ctx.JoinCapturedErrors();
@@ -854,7 +861,7 @@ TEST_P(MeshPassExecutorTest, DrawsEmptyMaterialWithGenericMixedBindingsAndDefaul
         rt.get(),
         SubresourceRange{0, 1, 0, 1});
     command->End();
-    ASSERT_TRUE(_ctx.SubmitAndWait(command.get(), &reason))
+    ASSERT_TRUE(SubmitAndWait(command.get(), &reason))
         << reason << " " << _ctx.JoinCapturedErrors();
     EXPECT_TRUE(_ctx.GetCapturedErrors().empty()) << _ctx.JoinCapturedErrors();
 
@@ -950,7 +957,7 @@ TEST_P(MeshPassExecutorTest, DrawsEmptyMaterialWithGenericMixedBindingsAndDefaul
         "PerObject",
         nullptr,
         errorSnapshot};
-    FrameResources fallbackResources{_ctx.GetDevicePtr()};
+    FrameResources fallbackResources{_ctx.GetDevicePtr(), &_hostWrites};
     fallbackExecutor.SetRenderPass(renderPass.Get());
     EXPECT_EQ(
         fallbackExecutor.Execute(errorEncoder.get(), invalidList, fallbackResources),
@@ -975,7 +982,7 @@ TEST_P(MeshPassExecutorTest, DrawsEmptyMaterialWithGenericMixedBindingsAndDefaul
         rt.get(),
         SubresourceRange{0, 1, 0, 1});
     command->End();
-    ASSERT_TRUE(_ctx.SubmitAndWait(command.get(), &reason))
+    ASSERT_TRUE(SubmitAndWait(command.get(), &reason))
         << reason << " " << _ctx.JoinCapturedErrors();
     EXPECT_TRUE(_ctx.GetCapturedErrors().empty()) << _ctx.JoinCapturedErrors();
 
@@ -997,14 +1004,18 @@ TEST_P(MeshPassExecutorTest, ConstantPoolsAlignGrowAndDelayReuseUntilRelease) {
 
     DynamicCBufferArena arena{
         _ctx.GetDevicePtr(),
+        &_hostWrites,
         DynamicCBufferArena::Descriptor{
             .BasicSize = alignment * 2,
             .Alignment = alignment,
             .MaxResetSize = alignment * 16,
             .NamePrefix = "arena_test"}};
-    const auto first = arena.Allocate(1);
-    const auto second = arena.Allocate(1);
-    const auto third = arena.Allocate(1);
+    auto firstReservation = arena.Reserve(1);
+    auto secondReservation = arena.Reserve(1);
+    auto thirdReservation = arena.Reserve(1);
+    const auto first = firstReservation.Commit(1);
+    const auto second = secondReservation.Commit(1);
+    const auto third = thirdReservation.Commit(1);
     ASSERT_NE(first.Target, nullptr);
     ASSERT_NE(second.Target, nullptr);
     ASSERT_NE(third.Target, nullptr);
@@ -1016,15 +1027,19 @@ TEST_P(MeshPassExecutorTest, ConstantPoolsAlignGrowAndDelayReuseUntilRelease) {
     EXPECT_EQ(arena.GetHighWatermark(), alignment * 3);
 
     arena.Reset();
-    const auto afterReset = arena.Allocate(1);
+    auto afterResetReservation = arena.Reserve(1);
+    const auto afterReset = afterResetReservation.Commit(1);
     ASSERT_NE(afterReset.Target, nullptr);
     EXPECT_EQ(afterReset.Offset, 0u);
     EXPECT_EQ(afterReset.Target->GetDesc().Size, alignment * 8);
 
     MaterialConstantPool materialPool{_ctx.GetDevicePtr(), alignment * 2, alignment};
-    const auto materialA = materialPool.Allocate(16);
-    const auto materialB = materialPool.Allocate(16);
-    const auto materialC = materialPool.Allocate(16);
+    auto materialAReservation = materialPool.Reserve(16, _hostWrites);
+    auto materialBReservation = materialPool.Reserve(16, _hostWrites);
+    auto materialCReservation = materialPool.Reserve(16, _hostWrites);
+    const auto materialA = materialAReservation.Commit(16);
+    const auto materialB = materialBReservation.Commit(16);
+    const auto materialC = materialCReservation.Commit(16);
     ASSERT_TRUE(materialA.IsValid());
     ASSERT_TRUE(materialB.IsValid());
     ASSERT_TRUE(materialC.IsValid());
@@ -1034,10 +1049,12 @@ TEST_P(MeshPassExecutorTest, ConstantPoolsAlignGrowAndDelayReuseUntilRelease) {
     EXPECT_NE(materialA.Target, materialC.Target);
     EXPECT_EQ(materialC.Target->GetDesc().Size, alignment * 4);
 
-    const auto whileRetained = materialPool.Allocate(16);
+    auto whileRetainedReservation = materialPool.Reserve(16, _hostWrites);
+    const auto whileRetained = whileRetainedReservation.Commit(16);
     EXPECT_NE(whileRetained.Target, materialA.Target);
     materialPool.Release(materialA);
-    const auto afterRelease = materialPool.Allocate(16);
+    auto afterReleaseReservation = materialPool.Reserve(16, _hostWrites);
+    const auto afterRelease = afterReleaseReservation.Commit(16);
     EXPECT_EQ(afterRelease.Target, materialA.Target);
     EXPECT_EQ(afterRelease.Offset, materialA.Offset);
 }

@@ -56,6 +56,7 @@ public:
         const CompiledShaderVariant& variant,
         render::BindingGroup& group,
         MaterialConstantPool& pool,
+        HostWriteBatch& hostWrites,
         std::span<const MaterialConstantValue> values,
         std::span<const std::string_view> reservedBlockNames,
         vector<MaterialConstantPool::Allocation>* allocations = nullptr) noexcept;

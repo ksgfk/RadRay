@@ -6,11 +6,6 @@ using namespace radray;
 
 namespace {
 
-struct FlushedRange {
-    uint64_t Offset{0};
-    uint64_t Size{0};
-};
-
 class FakeBuffer final : public render::Buffer {
 public:
     FakeBuffer(const render::BufferDescriptor& desc, uint32_t* destroyedCount)
@@ -37,16 +32,16 @@ public:
         return _storage.data() + offset;
     }
 
-    void Unmap(uint64_t offset, uint64_t size) noexcept override {
-        FlushedRanges.push_back(FlushedRange{offset, size});
-    }
+    void Unmap() noexcept override { ++UnmapCount; }
+    void FlushMappedRange(render::BufferRange) noexcept override {}
+    void InvalidateMappedRange(render::BufferRange) noexcept override {}
 
     void SetDebugName(std::string_view name) noexcept override { Name = name; }
-
     render::BufferDescriptor GetDesc() const noexcept override { return _desc; }
+    render::Device* GetDevice() const noexcept override { return nullptr; }
 
     uint32_t MapCount{0};
-    vector<FlushedRange> FlushedRanges;
+    uint32_t UnmapCount{0};
     string Name;
 
 private:
@@ -74,6 +69,8 @@ public:
         unique_ptr<render::Buffer> buffer = make_unique<FakeBuffer>(desc, &DestroyedBufferCount);
         return buffer;
     }
+
+    void FlushMappedRanges(std::span<const render::MappedBufferRange>) noexcept override {}
 
     Nullable<unique_ptr<render::Texture>> CreateTexture(const render::TextureDescriptor&) noexcept override { return nullptr; }
     Nullable<unique_ptr<render::TextureView>> CreateTextureView(const render::TextureViewDescriptor&) noexcept override { return nullptr; }
@@ -128,65 +125,72 @@ StagingBufferPool::Descriptor MakePoolDescriptor() {
 
 }  // namespace
 
-TEST(StagingBufferPoolTest, SuballocatesAlignedRangesFromPersistentPage) {
+TEST(StagingBufferPoolTest, SuballocatesAlignedRangesAndCommitsToFlightBatch) {
     FakeDevice device;
+    HostWriteBatch batch;
     StagingBufferPool pool{&device, 2, MakePoolDescriptor()};
+    pool.BeginFlight(batch);
 
-    const auto first = pool.Allocate(100, 4);
-    const auto second = pool.Allocate(100, 256);
+    auto firstReservation = pool.Reserve(100, 4);
+    auto secondReservation = pool.Reserve(100, 256);
+    const auto first = firstReservation.Commit(100);
+    const auto second = secondReservation.Commit(100);
 
-    ASSERT_NE(first.Buffer, nullptr);
-    EXPECT_EQ(first.Buffer, second.Buffer);
+    ASSERT_NE(first.Target, nullptr);
+    EXPECT_EQ(first.Target, second.Target);
     EXPECT_EQ(first.Offset, 0u);
     EXPECT_EQ(second.Offset, 256u);
-    EXPECT_EQ(
-        static_cast<byte*>(second.MappedPtr) - static_cast<byte*>(first.MappedPtr),
-        256);
+    ASSERT_EQ(batch.GetRanges().size(), 2u);
+    EXPECT_EQ(batch.GetRanges()[0].Range.Offset, 0u);
+    EXPECT_EQ(batch.GetRanges()[1].Range.Offset, 256u);
 
     ASSERT_EQ(device.BufferDescriptors.size(), 1u);
     const auto& desc = device.BufferDescriptors.front();
     EXPECT_EQ(desc.Size, 1024u);
     EXPECT_TRUE(desc.Hints.HasFlag(render::ResourceHint::PersistentMap));
     EXPECT_FALSE(desc.Hints.HasFlag(render::ResourceHint::Dedicated));
-
-    auto* buffer = static_cast<FakeBuffer*>(first.Buffer);
-    EXPECT_EQ(buffer->MapCount, 1u);
-    pool.Flush(first);
-    pool.Flush(second);
-    ASSERT_EQ(buffer->FlushedRanges.size(), 2u);
-    EXPECT_EQ(buffer->FlushedRanges[0].Offset, 0u);
-    EXPECT_EQ(buffer->FlushedRanges[0].Size, 100u);
-    EXPECT_EQ(buffer->FlushedRanges[1].Offset, 256u);
-    EXPECT_EQ(buffer->FlushedRanges[1].Size, 100u);
+    EXPECT_EQ(static_cast<FakeBuffer*>(first.Target)->MapCount, 1u);
 }
 
 TEST(StagingBufferPoolTest, ReusesPageOnlyAfterFlightCollection) {
     FakeDevice device;
+    HostWriteBatch firstBatch;
+    HostWriteBatch secondBatch;
     StagingBufferPool pool{&device, 2, MakePoolDescriptor()};
 
-    const auto first = pool.Allocate(128, 16);
-    render::Buffer* firstBuffer = first.Buffer;
+    pool.BeginFlight(firstBatch);
+    auto firstReservation = pool.Reserve(128, 16);
+    const auto first = firstReservation.Commit(128);
+    render::Buffer* firstBuffer = first.Target;
     pool.RetireToFlight(0);
 
-    const auto whilePending = pool.Allocate(128, 16);
-    EXPECT_NE(whilePending.Buffer, firstBuffer);
+    pool.BeginFlight(secondBatch);
+    auto whilePendingReservation = pool.Reserve(128, 16);
+    const auto whilePending = whilePendingReservation.Commit(128);
+    EXPECT_NE(whilePending.Target, firstBuffer);
     EXPECT_EQ(device.BufferDescriptors.size(), 2u);
     pool.RetireToFlight(1);
 
     pool.CollectFlight(0);
-    const auto reused = pool.Allocate(64, 16);
-    EXPECT_EQ(reused.Buffer, firstBuffer);
+    firstBatch.Reset();
+    pool.BeginFlight(firstBatch);
+    auto reusedReservation = pool.Reserve(64, 16);
+    const auto reused = reusedReservation.Commit(64);
+    EXPECT_EQ(reused.Target, firstBuffer);
     EXPECT_EQ(reused.Offset, 0u);
     EXPECT_EQ(device.BufferDescriptors.size(), 2u);
-    EXPECT_EQ(static_cast<FakeBuffer*>(reused.Buffer)->MapCount, 1u);
+    EXPECT_EQ(static_cast<FakeBuffer*>(reused.Target)->MapCount, 1u);
 }
 
 TEST(StagingBufferPoolTest, ReleasesOversizedBuffersInsteadOfCachingThem) {
     FakeDevice device;
+    HostWriteBatch batch;
     StagingBufferPool pool{&device, 1, MakePoolDescriptor()};
+    pool.BeginFlight(batch);
 
-    const auto first = pool.Allocate(1025, 256);
-    ASSERT_NE(first.Buffer, nullptr);
+    auto firstReservation = pool.Reserve(1025, 256);
+    const auto first = firstReservation.Commit(1025);
+    ASSERT_NE(first.Target, nullptr);
     EXPECT_EQ(first.Offset, 0u);
     ASSERT_EQ(device.BufferDescriptors.size(), 1u);
     EXPECT_EQ(device.BufferDescriptors[0].Size, 1280u);
@@ -197,7 +201,10 @@ TEST(StagingBufferPoolTest, ReleasesOversizedBuffersInsteadOfCachingThem) {
     pool.CollectFlight(0);
     EXPECT_EQ(device.DestroyedBufferCount, 1u);
 
-    const auto second = pool.Allocate(1025, 256);
-    EXPECT_NE(second.Buffer, nullptr);
+    batch.Reset();
+    pool.BeginFlight(batch);
+    auto secondReservation = pool.Reserve(1025, 256);
+    const auto second = secondReservation.Commit(1025);
+    EXPECT_NE(second.Target, nullptr);
     EXPECT_EQ(device.BufferDescriptors.size(), 2u);
 }

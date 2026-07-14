@@ -1,15 +1,13 @@
 #include <gtest/gtest.h>
 
+#include <cstring>
+
 #include <radray/runtime/gpu_resource.h>
+#include <radray/runtime/gpu_system.h>
 
 using namespace radray;
 
 namespace {
-
-struct FlushedRange {
-    uint64_t Offset{0};
-    uint64_t Size{0};
-};
 
 class FakeBuffer final : public render::Buffer {
 public:
@@ -37,16 +35,25 @@ public:
         return _storage.data() + offset;
     }
 
-    void Unmap(uint64_t offset, uint64_t size) noexcept override {
-        FlushedRanges.push_back(FlushedRange{offset, size});
+    void Unmap() noexcept override { ++UnmapCount; }
+
+    void FlushMappedRange(render::BufferRange range) noexcept override {
+        Flushes.push_back(render::MappedBufferRange{this, range});
+    }
+
+    void InvalidateMappedRange(render::BufferRange range) noexcept override {
+        Invalidates.push_back(render::MappedBufferRange{this, range});
     }
 
     void SetDebugName(std::string_view name) noexcept override { Name = name; }
 
     render::BufferDescriptor GetDesc() const noexcept override { return _desc; }
+    render::Device* GetDevice() const noexcept override { return nullptr; }
 
     uint32_t MapCount{0};
-    vector<FlushedRange> FlushedRanges;
+    uint32_t UnmapCount{0};
+    vector<render::MappedBufferRange> Flushes;
+    vector<render::MappedBufferRange> Invalidates;
     string Name;
 
 private:
@@ -73,6 +80,10 @@ public:
         BufferDescriptors.emplace_back(desc);
         unique_ptr<render::Buffer> buffer = make_unique<FakeBuffer>(desc, &DestroyedBufferCount);
         return buffer;
+    }
+
+    void FlushMappedRanges(std::span<const render::MappedBufferRange> ranges) noexcept override {
+        FlushedRanges.assign(ranges.begin(), ranges.end());
     }
 
     Nullable<unique_ptr<render::Texture>> CreateTexture(const render::TextureDescriptor&) noexcept override { return nullptr; }
@@ -116,101 +127,172 @@ public:
     Nullable<unique_ptr<render::BindlessArray>> CreateBindlessArray(const render::BindlessArrayDescriptor&) noexcept override { return nullptr; }
 
     vector<render::BufferDescriptor> BufferDescriptors;
+    vector<render::MappedBufferRange> FlushedRanges;
     uint32_t DestroyedBufferCount{0};
 };
 
+DynamicCBufferArena MakeArena(
+    FakeDevice& device,
+    HostWriteBatch& batch,
+    uint64_t pageSize = 1024,
+    uint64_t alignment = 1,
+    uint64_t maxResetSize = 4096) {
+    return DynamicCBufferArena{
+        &device,
+        &batch,
+        DynamicCBufferArena::Descriptor{
+            .BasicSize = pageSize,
+            .Alignment = alignment,
+            .MaxResetSize = maxResetSize,
+            .NamePrefix = "dynamic_test"}};
+}
+
 }  // namespace
 
-TEST(DynamicCBufferArenaTest, BatchesDirtyAllocationsIntoOneFlush) {
+TEST(MappedUploadPageTest, CommitRecordsOnlyActualPrefix) {
     FakeDevice device;
-    DynamicCBufferArena arena{
-        &device,
-        DynamicCBufferArena::Descriptor{
-            .BasicSize = 1024,
-            .Alignment = 256,
-            .MaxResetSize = 4096,
-            .NamePrefix = "dynamic_test"}};
+    HostWriteBatch batch;
+    auto buffer = device.CreateBuffer(render::BufferDescriptor{
+                                          .Size = 256,
+                                          .Memory = render::MemoryType::Upload,
+                                          .Usage = render::BufferUse::MapWrite | render::BufferUse::CopySource,
+                                          .Hints = render::ResourceHint::PersistentMap})
+                      .Unwrap();
+    MappedUploadPage page{std::move(buffer), &batch};
 
-    const auto first = arena.Allocate(100);
-    const auto second = arena.Allocate(100);
+    auto reservation = page.Reserve(128, 16, batch);
+    ASSERT_TRUE(reservation.IsValid());
+    std::memset(reservation.Data(), 0x5a, 37);
+    const auto allocation = reservation.Commit(37);
+
+    EXPECT_EQ(allocation.Offset, 0u);
+    EXPECT_EQ(allocation.Size, 37u);
+    ASSERT_EQ(batch.GetRanges().size(), 1u);
+    EXPECT_EQ(batch.GetRanges()[0].Range.Size, 37u);
+    EXPECT_EQ(batch.GetStats().PageCount, 1u);
+    EXPECT_EQ(batch.GetStats().PageCapacityBytes, 256u);
+    EXPECT_EQ(batch.GetStats().CommitCount, 1u);
+    EXPECT_EQ(batch.GetStats().CommittedBytes, 37u);
+}
+
+TEST(MappedUploadPageTest, ZeroCommitProducesNoRange) {
+    FakeDevice device;
+    HostWriteBatch batch;
+    auto arena = MakeArena(device, batch);
+
+    auto reservation = arena.Reserve(64);
+    const auto allocation = reservation.Commit(0);
+    EXPECT_TRUE(allocation.IsValid());
+    EXPECT_EQ(allocation.Size, 0u);
+    EXPECT_TRUE(batch.Empty());
+    EXPECT_EQ(batch.GetStats().CommitCount, 1u);
+    EXPECT_EQ(batch.GetStats().CommittedBytes, 0u);
+}
+
+#ifdef RADRAY_IS_DEBUG
+TEST(MappedUploadPageTest, DestroyingUncommittedReservationFails) {
+    EXPECT_DEATH(
+        {
+            FakeDevice device;
+            HostWriteBatch batch;
+            auto arena = MakeArena(device, batch);
+            auto reservation = arena.Reserve(16);
+            (void)reservation;
+        },
+        "");
+}
+
+TEST(MappedUploadPageTest, ZeroCommitAfterSealFails) {
+    EXPECT_DEATH(
+        {
+            FakeDevice device;
+            HostWriteBatch batch;
+            auto arena = MakeArena(device, batch);
+            auto reservation = arena.Reserve(16);
+            batch.Seal();
+            reservation.Commit(0);
+        },
+        "");
+}
+#endif
+
+TEST(DynamicCBufferArenaTest, CoalescesAdjacentCommitsAndKeepsSparseWritesSeparate) {
+    FakeDevice device;
+    HostWriteBatch batch;
+    auto arena = MakeArena(device, batch, 1024, 1);
+
+    auto firstReservation = arena.Reserve(32);
+    auto secondReservation = arena.Reserve(32);
+    const auto first = firstReservation.Commit(32);
+    const auto second = secondReservation.Commit(32);
     ASSERT_EQ(first.Target, second.Target);
-    ASSERT_TRUE(arena.HasPendingHostWrites());
+    ASSERT_EQ(batch.GetRanges().size(), 1u);
+    EXPECT_EQ(batch.GetRanges()[0].Range.Offset, 0u);
+    EXPECT_EQ(batch.GetRanges()[0].Range.Size, 64u);
 
-    auto* buffer = static_cast<FakeBuffer*>(first.Target);
-    arena.FlushHostWrites();
+    batch.Reset();
+    auto sparseArena = MakeArena(device, batch, 1024, 256);
+    auto sparseFirstReservation = sparseArena.Reserve(100);
+    auto sparseSecondReservation = sparseArena.Reserve(100);
+    sparseFirstReservation.Commit(100);
+    sparseSecondReservation.Commit(100);
+    ASSERT_EQ(batch.GetRanges().size(), 2u);
+    EXPECT_EQ(batch.GetRanges()[0].Range.Offset, 0u);
+    EXPECT_EQ(batch.GetRanges()[1].Range.Offset, 256u);
 
-    ASSERT_FALSE(arena.HasPendingHostWrites());
-    ASSERT_EQ(buffer->FlushedRanges.size(), 1u);
-    EXPECT_EQ(buffer->FlushedRanges[0].Offset, 0u);
-    EXPECT_EQ(buffer->FlushedRanges[0].Size, 356u);
+    ASSERT_GE(device.BufferDescriptors.size(), 2u);
     EXPECT_TRUE(device.BufferDescriptors[0].Hints.HasFlag(render::ResourceHint::PersistentMap));
-    EXPECT_TRUE(device.BufferDescriptors[0].Hints.HasFlag(render::ResourceHint::Dedicated));
-
-    arena.FlushHostWrites();
-    EXPECT_EQ(buffer->FlushedRanges.size(), 1u);
+    EXPECT_FALSE(device.BufferDescriptors[0].Hints.HasFlag(render::ResourceHint::Dedicated));
 }
 
 TEST(DynamicCBufferArenaTest, ReusesRetainedOverflowPagesAcrossResets) {
     FakeDevice device;
-    DynamicCBufferArena arena{
-        &device,
-        DynamicCBufferArena::Descriptor{
-            .BasicSize = 512,
-            .Alignment = 256,
-            .MaxResetSize = 512,
-            .NamePrefix = "overflow_test"}};
+    HostWriteBatch batch;
+    auto arena = MakeArena(device, batch, 512, 256, 512);
 
-    const auto first = arena.Allocate(100);
-    const auto second = arena.Allocate(100);
-    const auto overflow = arena.Allocate(100);
+    auto firstReservation = arena.Reserve(100);
+    auto secondReservation = arena.Reserve(100);
+    auto overflowReservation = arena.Reserve(100);
+    const auto first = firstReservation.Commit(100);
+    const auto second = secondReservation.Commit(100);
+    const auto overflow = overflowReservation.Commit(100);
     ASSERT_EQ(first.Target, second.Target);
     ASSERT_NE(first.Target, overflow.Target);
 
-    auto* firstPage = static_cast<FakeBuffer*>(first.Target);
-    auto* overflowPage = static_cast<FakeBuffer*>(overflow.Target);
-    arena.FlushHostWrites();
-    ASSERT_EQ(firstPage->FlushedRanges.size(), 1u);
-    EXPECT_EQ(firstPage->FlushedRanges[0].Size, 356u);
-    ASSERT_EQ(overflowPage->FlushedRanges.size(), 1u);
-    EXPECT_EQ(overflowPage->FlushedRanges[0].Size, 100u);
-
+    batch.Reset();
     arena.Reset();
-    const auto reusedFirst = arena.Allocate(100);
-    const auto reusedSecond = arena.Allocate(100);
-    const auto reusedOverflow = arena.Allocate(100);
+    auto reusedFirstReservation = arena.Reserve(100);
+    auto reusedSecondReservation = arena.Reserve(100);
+    auto reusedOverflowReservation = arena.Reserve(100);
+    const auto reusedFirst = reusedFirstReservation.Commit(100);
+    const auto reusedSecond = reusedSecondReservation.Commit(100);
+    const auto reusedOverflow = reusedOverflowReservation.Commit(100);
     EXPECT_EQ(reusedFirst.Target, first.Target);
     EXPECT_EQ(reusedSecond.Target, second.Target);
     EXPECT_EQ(reusedOverflow.Target, overflow.Target);
     EXPECT_EQ(device.BufferDescriptors.size(), 2u);
     EXPECT_EQ(device.DestroyedBufferCount, 0u);
-
-    arena.FlushHostWrites();
-    EXPECT_EQ(firstPage->FlushedRanges.size(), 2u);
-    EXPECT_EQ(overflowPage->FlushedRanges.size(), 2u);
 }
 
-TEST(MaterialConstantPoolTest, BatchesWritesAndTracksReusedSlices) {
+TEST(MaterialConstantPoolTest, ReusesReleasedSlicesAndRecordsCurrentBatch) {
     FakeDevice device;
+    HostWriteBatch firstBatch;
+    HostWriteBatch secondBatch;
     MaterialConstantPool pool{&device, 512, 256};
 
-    const auto first = pool.Allocate(16);
-    const auto second = pool.Allocate(16);
+    auto firstReservation = pool.Reserve(16, firstBatch);
+    auto secondReservation = pool.Reserve(16, firstBatch);
+    const auto first = firstReservation.Commit(16);
+    const auto second = secondReservation.Commit(16);
     ASSERT_EQ(first.Target, second.Target);
-    ASSERT_TRUE(pool.HasPendingHostWrites());
-
-    auto* buffer = static_cast<FakeBuffer*>(first.Target);
-    pool.FlushHostWrites();
-    ASSERT_EQ(buffer->FlushedRanges.size(), 1u);
-    EXPECT_EQ(buffer->FlushedRanges[0].Offset, 0u);
-    EXPECT_EQ(buffer->FlushedRanges[0].Size, 272u);
+    ASSERT_EQ(firstBatch.GetRanges().size(), 2u);
 
     pool.Release(first);
-    const auto reused = pool.Allocate(8);
+    auto reusedReservation = pool.Reserve(8, secondBatch);
+    const auto reused = reusedReservation.Commit(8);
     EXPECT_EQ(reused.Target, first.Target);
     EXPECT_EQ(reused.Offset, first.Offset);
-    pool.FlushHostWrites();
-
-    ASSERT_EQ(buffer->FlushedRanges.size(), 2u);
-    EXPECT_EQ(buffer->FlushedRanges[1].Offset, 0u);
-    EXPECT_EQ(buffer->FlushedRanges[1].Size, 8u);
+    ASSERT_EQ(secondBatch.GetRanges().size(), 1u);
+    EXPECT_EQ(secondBatch.GetRanges()[0].Range.Offset, first.Offset);
+    EXPECT_EQ(secondBatch.GetRanges()[0].Range.Size, 8u);
 }

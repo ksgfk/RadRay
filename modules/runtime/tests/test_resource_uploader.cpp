@@ -35,7 +35,13 @@ protected:
         return texture.HasValue() ? texture.Release() : nullptr;
     }
 
+    bool SubmitAndWait(CommandBuffer* command, string* reason) {
+        _hostWrites.Flush(*_ctx.GetDevicePtr());
+        return _ctx.SubmitAndWait(command, reason);
+    }
+
     ComputeTestContext _ctx;
+    HostWriteBatch _hostWrites;
 };
 
 TEST_P(ResourceUploaderRuntimeTest, UploadsBufferAndTextureFromNonZeroPageOffsets) {
@@ -99,6 +105,7 @@ TEST_P(ResourceUploaderRuntimeTest, UploadsBufferAndTextureFromNonZeroPageOffset
     ASSERT_TRUE(commandOpt.HasValue()) << reason;
     auto command = commandOpt.Release();
     ResourceUploader uploader{_ctx.GetDevicePtr(), 1};
+    uploader.BeginFlight(0, _hostWrites);
 
     command->Begin();
     uploader.UploadBuffer(command.get(), BufferUploadRequest{
@@ -146,7 +153,7 @@ TEST_P(ResourceUploaderRuntimeTest, UploadsBufferAndTextureFromNonZeroPageOffset
     command->End();
     uploader.EndFlight(0);
 
-    ASSERT_TRUE(_ctx.SubmitAndWait(command.get(), &reason)) << reason;
+    ASSERT_TRUE(SubmitAndWait(command.get(), &reason)) << reason;
     uploader.CollectFlight(0);
 
     const auto bufferResult = _ctx.ReadHostVisibleBuffer(bufferReadback.get(), bufferData.size(), &reason);

@@ -36,16 +36,6 @@ struct ImGuiShaderConstants {
     float Translate[2]{};
 };
 
-static uint64_t GetAlignedTextureUploadPitch(render::Device* device, ImTextureData* tex) noexcept {
-    const uint64_t pitch = static_cast<uint64_t>(tex->Width) * static_cast<uint64_t>(tex->BytesPerPixel);
-    const uint64_t alignment = std::max<uint64_t>(1, device->GetDetail().TextureDataPitchAlignment);
-    return Align(pitch, alignment);
-}
-
-static uint64_t GetAlignedTextureUploadSize(render::Device* device, ImTextureData* tex) noexcept {
-    return GetAlignedTextureUploadPitch(device, tex) * static_cast<uint64_t>(tex->Height);
-}
-
 static NativeWindow* GetPlatformWindow(ImGuiViewport* viewport) noexcept {
     if (viewport == nullptr || viewport->PlatformUserData == nullptr) {
         return nullptr;
@@ -803,6 +793,15 @@ bool ImGuiRenderer::ImGuiTexture::UpdateExternalResource(uint32_t flightIndex, r
     return true;
 }
 
+void ImGuiRenderer::ImGuiTexture::InitializeOwned(
+    unique_ptr<render::Texture> texture,
+    unique_ptr<render::TextureView> srv,
+    unique_ptr<render::BindingGroup> bindingGroup) noexcept {
+    _texture = std::move(texture);
+    _srv = std::move(srv);
+    _bindingGroup = std::move(bindingGroup);
+}
+
 bool ImGuiRenderer::OwnsTexture(const ImGuiTexture* texture) const noexcept {
     if (texture == nullptr) {
         return false;
@@ -847,10 +846,12 @@ ImTextureID ImGuiRenderer::CreateOrUpdateExternalTexture(ImTextureID textureId, 
 }
 
 void ImGuiRenderer::ExtractDrawDataToFrame(Frame& frame, std::span<ImDrawData*> drawDataList) {
-    frame._tempBufs.clear();
     frame._waitForFreeTexs.clear();
     frame._drawData.clear();
     frame._uploadTexReqs.clear();
+    frame._vertexData.clear();
+    frame._indexData.clear();
+    frame._debugViewportId = 0;
 
     int32_t totalVtxCount = 0;
     int32_t totalIdxCount = 0;
@@ -871,6 +872,7 @@ void ImGuiRenderer::ExtractDrawDataToFrame(Frame& frame, std::span<ImDrawData*> 
     if (validDrawDataCount == 0) {
         return;
     }
+    frame._debugViewportId = debugViewportId;
 
     vector<ImTextureData*> processedTextures;
     for (ImDrawData* drawData : drawDataList) {
@@ -890,49 +892,7 @@ void ImGuiRenderer::ExtractDrawDataToFrame(Frame& frame, std::span<ImDrawData*> 
             if (tex->Status == ImTextureStatus_WantCreate) {
                 IM_ASSERT(tex->TexID == ImTextureID_Invalid && tex->BackendUserData == nullptr);
                 IM_ASSERT(tex->Format == ImTextureFormat_RGBA32);
-
-                render::TextureDescriptor texDesc{
-                    .Dim = render::TextureDimension::Dim2D,
-                    .Width = static_cast<uint32_t>(tex->Width),
-                    .Height = static_cast<uint32_t>(tex->Height),
-                    .DepthOrArraySize = 1,
-                    .MipLevels = 1,
-                    .SampleCount = 1,
-                    .Format = render::TextureFormat::RGBA8_UNORM,
-                    .Memory = render::MemoryType::Device,
-                    .Usage = render::TextureUse::Resource | render::TextureUse::CopyDestination,
-                    .Hints = render::ResourceHint::None};
-                auto texObjOpt = _device->CreateTexture(texDesc);
-                if (!texObjOpt.HasValue()) {
-                    continue;
-                }
-                auto texObj = texObjOpt.Release();
-                texObj->SetDebugName(fmt::format("imgui_tex_{}", tex->UniqueID));
-
-                render::TextureViewDescriptor texViewDesc{
-                    .Target = texObj.get(),
-                    .Dim = render::TextureDimension::Dim2D,
-                    .Format = texDesc.Format,
-                    .Range = render::SubresourceRange::AllSub(),
-                    .Usage = render::TextureViewUsage::Resource};
-                auto srvOpt = _device->CreateTextureView(texViewDesc);
-                if (!srvOpt.HasValue()) {
-                    continue;
-                }
-                auto srv = srvOpt.Release();
-                srv->SetDebugName(fmt::format("imgui_tex_srv_{}", tex->UniqueID));
-
-                auto groupOpt = _device->CreateBindingGroup(_descriptorPool.get(), _bindingLayout, 1);
-                if (!groupOpt.HasValue()) {
-                    continue;
-                }
-                auto group = groupOpt.Release();
-                group->SetDebugName(fmt::format("imgui_tex_group_{}", tex->UniqueID));
-                if (!group->SetResource(0, srv.get())) {
-                    continue;
-                }
-
-                auto& ptr = _aliveTexs.emplace_back(make_unique<ImGuiRenderer::ImGuiTexture>(std::move(texObj), std::move(srv), std::move(group)));
+                auto& ptr = _aliveTexs.emplace_back(make_unique<ImGuiRenderer::ImGuiTexture>());
                 tex->SetTexID(static_cast<ImTextureID>(reinterpret_cast<uintptr_t>(ptr.get())));
                 tex->BackendUserData = ptr.get();
             }
@@ -945,29 +905,24 @@ void ImGuiRenderer::ExtractDrawDataToFrame(Frame& frame, std::span<ImDrawData*> 
                 IM_ASSERT(tex->Format == ImTextureFormat_RGBA32);
 
                 const uint64_t uploadPitchSrc = static_cast<uint64_t>(tex->Width) * static_cast<uint64_t>(tex->BytesPerPixel);
-                const uint64_t uploadPitchDst = GetAlignedTextureUploadPitch(_device, tex);
-                const uint64_t uploadSize = GetAlignedTextureUploadSize(_device, tex);
-                render::BufferDescriptor uploadDesc{
-                    .Size = uploadSize,
-                    .Memory = render::MemoryType::Upload,
-                    .Usage = render::BufferUse::CopySource | render::BufferUse::MapWrite,
-                    .Hints = render::ResourceHint::None};
-                auto uploadBufferOpt = _device->CreateBuffer(uploadDesc);
-                if (!uploadBufferOpt.HasValue()) {
-                    continue;
-                }
-
-                auto uploadBuffer = uploadBufferOpt.Release();
-                uploadBuffer->SetDebugName(fmt::format("imgui_tex_upload_{}", tex->UniqueID));
-                auto* dst = static_cast<std::byte*>(uploadBuffer->Map(0, uploadSize));
+                const uint64_t uploadSize = uploadPitchSrc * static_cast<uint64_t>(tex->Height);
+                UploadTexturePayload payload{
+                    .Target = backendTex,
+                    .SrcData = vector<byte>(uploadSize),
+                    .SrcRowPitch = uploadPitchSrc,
+                    .UniqueId = static_cast<uint64_t>(tex->UniqueID),
+                    .Width = static_cast<uint32_t>(tex->Width),
+                    .Height = static_cast<uint32_t>(tex->Height),
+                    .IsNew = tex->Status == ImTextureStatus_WantCreate};
+                auto* dst = payload.SrcData.data();
                 const auto* src = static_cast<const std::byte*>(tex->GetPixels());
                 for (int32_t y = 0; y < tex->Height; ++y) {
-                    std::memcpy(dst + static_cast<uint64_t>(y) * uploadPitchDst, src + static_cast<uint64_t>(y) * uploadPitchSrc, uploadPitchSrc);
+                    std::memcpy(
+                        dst + static_cast<uint64_t>(y) * uploadPitchSrc,
+                        src + static_cast<uint64_t>(y) * uploadPitchSrc,
+                        uploadPitchSrc);
                 }
-                uploadBuffer->Unmap(0, uploadSize);
-
-                frame._uploadTexReqs.emplace_back(backendTex->GetTexture(), uploadBuffer.get(), tex->Status == ImTextureStatus_WantCreate);
-                frame._tempBufs.emplace_back(std::move(uploadBuffer));
+                frame._uploadTexReqs.emplace_back(std::move(payload));
                 tex->SetStatus(ImTextureStatus_OK);
             }
 
@@ -988,52 +943,10 @@ void ImGuiRenderer::ExtractDrawDataToFrame(Frame& frame, std::span<ImDrawData*> 
         }
     }
 
-    if (totalVtxCount > 0 &&
-        (frame._vb == nullptr || frame._vbSize < totalVtxCount)) {
-        if (frame._vb != nullptr) {
-            frame._tempBufs.emplace_back(std::move(frame._vb));
-        }
-        const int32_t vertCount = totalVtxCount + static_cast<int32_t>(ImGuiVertexBufferExtraCount);
-        render::BufferDescriptor vbDesc{
-            .Size = static_cast<uint64_t>(vertCount) * sizeof(ImDrawVert),
-            .Memory = render::MemoryType::Upload,
-            .Usage = render::BufferUse::Vertex | render::BufferUse::MapWrite,
-            .Hints = _device->GetBackend() == render::RenderBackend::D3D12
-                         ? render::ResourceHint::Dedicated
-                         : render::ResourceHint::None};
-        auto vbOpt = _device->CreateBuffer(vbDesc);
-        if (!vbOpt.HasValue()) {
-            return;
-        }
-        frame._vb = vbOpt.Release();
-        frame._vb->SetDebugName(fmt::format("imgui_vb_{:08X}", debugViewportId));
-        frame._vbSize = vertCount;
-    }
-    if (totalIdxCount > 0 &&
-        (frame._ib == nullptr || frame._ibSize < totalIdxCount)) {
-        if (frame._ib != nullptr) {
-            frame._tempBufs.emplace_back(std::move(frame._ib));
-        }
-        const int32_t idxCount = totalIdxCount + static_cast<int32_t>(ImGuiIndexBufferExtraCount);
-        render::BufferDescriptor ibDesc{
-            .Size = static_cast<uint64_t>(idxCount) * sizeof(ImDrawIdx),
-            .Memory = render::MemoryType::Upload,
-            .Usage = render::BufferUse::Index | render::BufferUse::MapWrite,
-            .Hints = _device->GetBackend() == render::RenderBackend::D3D12
-                         ? render::ResourceHint::Dedicated
-                         : render::ResourceHint::None};
-        auto ibOpt = _device->CreateBuffer(ibDesc);
-        if (!ibOpt.HasValue()) {
-            return;
-        }
-        frame._ib = ibOpt.Release();
-        frame._ib->SetDebugName(fmt::format("imgui_ib_{:08X}", debugViewportId));
-        frame._ibSize = idxCount;
-    }
-
     if (totalVtxCount > 0) {
         const uint64_t bytes = static_cast<uint64_t>(totalVtxCount) * sizeof(ImDrawVert);
-        auto* dst = static_cast<std::byte*>(frame._vb->Map(0, bytes));
+        frame._vertexData.resize(bytes);
+        auto* dst = frame._vertexData.data();
         for (const ImDrawData* drawData : drawDataList) {
             if (drawData == nullptr || drawData->DisplaySize.x <= 0.0f || drawData->DisplaySize.y <= 0.0f) {
                 continue;
@@ -1044,11 +957,11 @@ void ImGuiRenderer::ExtractDrawDataToFrame(Frame& frame, std::span<ImDrawData*> 
                 dst += copyBytes;
             }
         }
-        frame._vb->Unmap(0, bytes);
     }
     if (totalIdxCount > 0) {
         const uint64_t bytes = static_cast<uint64_t>(totalIdxCount) * sizeof(ImDrawIdx);
-        auto* dst = static_cast<std::byte*>(frame._ib->Map(0, bytes));
+        frame._indexData.resize(bytes);
+        auto* dst = frame._indexData.data();
         for (const ImDrawData* drawData : drawDataList) {
             if (drawData == nullptr || drawData->DisplaySize.x <= 0.0f || drawData->DisplaySize.y <= 0.0f) {
                 continue;
@@ -1059,7 +972,6 @@ void ImGuiRenderer::ExtractDrawDataToFrame(Frame& frame, std::span<ImDrawData*> 
                 dst += copyBytes;
             }
         }
-        frame._ib->Unmap(0, bytes);
     }
 
     uint32_t vtxOffset = 0;
@@ -1149,42 +1061,144 @@ std::optional<uint32_t> ImGuiRenderer::FindViewportDrawDataIndex(uint32_t frameI
     return static_cast<uint32_t>(iter - drawDataList.begin());
 }
 
-void ImGuiRenderer::OnRenderBeginFrame(Frame& frame, render::CommandBuffer* cmdBuffer) {
+void ImGuiRenderer::OnRenderBeginFrame(
+    Frame& frame,
+    render::CommandBuffer* cmdBuffer,
+    ResourceUploader& uploader,
+    HostWriteBatch& hostWrites) {
     if (cmdBuffer == nullptr) {
         return;
     }
-    if (frame._uploadTexReqs.empty()) {
-        return;
+
+    vector<render::ResourceBarrierDescriptor> hostBarriers;
+    if (!frame._vertexData.empty()) {
+        const int32_t vertexCount = static_cast<int32_t>(frame._vertexData.size() / sizeof(ImDrawVert));
+        if (frame._vb == nullptr || frame._vbSize < vertexCount) {
+            frame._vbSize = vertexCount + static_cast<int32_t>(ImGuiVertexBufferExtraCount);
+            render::BufferDescriptor desc{
+                .Size = static_cast<uint64_t>(frame._vbSize) * sizeof(ImDrawVert),
+                .Memory = render::MemoryType::Upload,
+                .Usage = render::BufferUse::Vertex | render::BufferUse::MapWrite,
+                .Hints = render::ResourceHint::PersistentMap};
+            auto bufferOpt = _device->CreateBuffer(desc);
+            if (!bufferOpt.HasValue()) {
+                return;
+            }
+            auto buffer = bufferOpt.Release();
+            buffer->SetDebugName(fmt::format("imgui_vb_{:08X}", frame._debugViewportId));
+            frame._vb = make_unique<MappedUploadPage>(std::move(buffer), &hostWrites);
+        }
+        frame._vb->Reset();
+        auto reservation = frame._vb->Reserve(frame._vertexData.size(), 1, hostWrites);
+        std::memcpy(reservation.Data(), frame._vertexData.data(), frame._vertexData.size());
+        reservation.Commit(frame._vertexData.size());
+        hostBarriers.emplace_back(render::BarrierBufferDescriptor{
+            .Target = frame._vb->GetBuffer(),
+            .Before = render::BufferState::HostWrite,
+            .After = render::BufferState::Vertex});
     }
 
-    vector<render::ResourceBarrierDescriptor> barriers;
-    barriers.reserve(frame._uploadTexReqs.size());
-    for (const auto& payload : frame._uploadTexReqs) {
-        barriers.emplace_back(render::BarrierTextureDescriptor{
-            .Target = payload.Dst,
-            .Before = payload.IsNew ? render::TextureState::Undefined : render::TextureState::ShaderRead,
-            .After = render::TextureState::CopyDestination});
+    if (!frame._indexData.empty()) {
+        const int32_t indexCount = static_cast<int32_t>(frame._indexData.size() / sizeof(ImDrawIdx));
+        if (frame._ib == nullptr || frame._ibSize < indexCount) {
+            frame._ibSize = indexCount + static_cast<int32_t>(ImGuiIndexBufferExtraCount);
+            render::BufferDescriptor desc{
+                .Size = static_cast<uint64_t>(frame._ibSize) * sizeof(ImDrawIdx),
+                .Memory = render::MemoryType::Upload,
+                .Usage = render::BufferUse::Index | render::BufferUse::MapWrite,
+                .Hints = render::ResourceHint::PersistentMap};
+            auto bufferOpt = _device->CreateBuffer(desc);
+            if (!bufferOpt.HasValue()) {
+                return;
+            }
+            auto buffer = bufferOpt.Release();
+            buffer->SetDebugName(fmt::format("imgui_ib_{:08X}", frame._debugViewportId));
+            frame._ib = make_unique<MappedUploadPage>(std::move(buffer), &hostWrites);
+        }
+        frame._ib->Reset();
+        auto reservation = frame._ib->Reserve(frame._indexData.size(), 1, hostWrites);
+        std::memcpy(reservation.Data(), frame._indexData.data(), frame._indexData.size());
+        reservation.Commit(frame._indexData.size());
+        hostBarriers.emplace_back(render::BarrierBufferDescriptor{
+            .Target = frame._ib->GetBuffer(),
+            .Before = render::BufferState::HostWrite,
+            .After = render::BufferState::Index});
     }
-    cmdBuffer->ResourceBarrier(barriers);
 
-    for (const auto& payload : frame._uploadTexReqs) {
-        cmdBuffer->CopyBufferToTexture(payload.Dst, render::SubresourceRange{0, 1, 0, 1}, payload.Src, 0);
+    if (!hostBarriers.empty()) {
+        cmdBuffer->ResourceBarrier(hostBarriers);
     }
+    for (const auto& payload : frame._uploadTexReqs) {
+        if (payload.Target == nullptr) {
+            continue;
+        }
+        if (payload.IsNew) {
+            render::TextureDescriptor textureDesc{
+                .Dim = render::TextureDimension::Dim2D,
+                .Width = payload.Width,
+                .Height = payload.Height,
+                .DepthOrArraySize = 1,
+                .MipLevels = 1,
+                .SampleCount = 1,
+                .Format = render::TextureFormat::RGBA8_UNORM,
+                .Memory = render::MemoryType::Device,
+                .Usage = render::TextureUse::Resource | render::TextureUse::CopyDestination,
+                .Hints = render::ResourceHint::None};
+            auto textureOpt = _device->CreateTexture(textureDesc);
+            if (!textureOpt.HasValue()) {
+                continue;
+            }
+            auto texture = textureOpt.Release();
+            texture->SetDebugName(fmt::format("imgui_tex_{}", payload.UniqueId));
 
-    barriers.clear();
-    for (const auto& payload : frame._uploadTexReqs) {
-        barriers.emplace_back(render::BarrierTextureDescriptor{
-            .Target = payload.Dst,
-            .Before = render::TextureState::CopyDestination,
-            .After = render::TextureState::ShaderRead});
+            auto srvOpt = _device->CreateTextureView(render::TextureViewDescriptor{
+                .Target = texture.get(),
+                .Dim = render::TextureDimension::Dim2D,
+                .Format = textureDesc.Format,
+                .Range = render::SubresourceRange::AllSub(),
+                .Usage = render::TextureViewUsage::Resource});
+            if (!srvOpt.HasValue()) {
+                continue;
+            }
+            auto srv = srvOpt.Release();
+            srv->SetDebugName(fmt::format("imgui_tex_srv_{}", payload.UniqueId));
+
+            auto groupOpt = _device->CreateBindingGroup(_descriptorPool.get(), _bindingLayout, 1);
+            if (!groupOpt.HasValue()) {
+                continue;
+            }
+            auto group = groupOpt.Release();
+            group->SetDebugName(fmt::format("imgui_tex_group_{}", payload.UniqueId));
+            if (!group->SetResource(0, srv.get())) {
+                continue;
+            }
+            payload.Target->InitializeOwned(std::move(texture), std::move(srv), std::move(group));
+        }
+        if (payload.Target->GetTexture() == nullptr) {
+            continue;
+        }
+        uploader.UploadTexture(
+            cmdBuffer,
+            TextureUploadRequest{
+                .SrcData = payload.SrcData,
+                .DstTexture = payload.Target->GetTexture(),
+                .DstRange = render::SubresourceRange{0, 1, 0, 1},
+                .SrcRowPitch = payload.SrcRowPitch,
+                .Before = payload.IsNew ? render::TextureState::Undefined : render::TextureState::ShaderRead,
+                .After = render::TextureState::ShaderRead});
     }
-    cmdBuffer->ResourceBarrier(barriers);
     frame._uploadTexReqs.clear();
+    frame._vertexData.clear();
+    frame._indexData.clear();
 }
 
-void ImGuiRenderer::OnRenderBegin(uint32_t frameIndex, render::CommandBuffer* cmdBuffer) {
+void ImGuiRenderer::OnRenderBegin(
+    uint32_t frameIndex,
+    render::CommandBuffer* cmdBuffer,
+    ResourceUploader& uploader,
+    HostWriteBatch& hostWrites) {
     RADRAY_ASSERT(frameIndex < _frames.size());
-    OnRenderBeginFrame(*_frames[frameIndex], cmdBuffer);
+    OnRenderBeginFrame(*_frames[frameIndex], cmdBuffer, uploader, hostWrites);
 }
 
 void ImGuiRenderer::OnRenderFrame(uint32_t frameIndex, Frame& frame, uint32_t drawDataIndex, render::GraphicsCommandEncoder* encoder) {
@@ -1289,7 +1303,6 @@ void ImGuiRenderer::OnRenderViewport(uint32_t frameIndex, ImGuiViewport* viewpor
 
 void ImGuiRenderer::OnRenderCompleteFrame(Frame& frame) {
     frame._uploadTexReqs.clear();
-    frame._tempBufs.clear();
     frame._waitForFreeTexs.clear();
 }
 
@@ -1315,13 +1328,13 @@ void ImGuiRenderer::SetupRenderStateForFrame(const Frame& frame, uint32_t drawDa
     encoder->BindGraphicsPipelineState(_pso.get());
     if (drawData.TotalVtxCount > 0) {
         render::VertexBufferView vbv{
-            .Target = frame._vb.get(),
+            .Target = frame._vb->GetBuffer(),
             .Offset = 0,
             .Size = static_cast<uint64_t>(frame._vbSize) * sizeof(ImDrawVert)};
         encoder->BindVertexBuffer(std::span{&vbv, 1});
 
         render::IndexBufferView ibv{
-            .Target = frame._ib.get(),
+            .Target = frame._ib->GetBuffer(),
             .Offset = 0,
             .Stride = sizeof(ImDrawIdx)};
         encoder->BindIndexBuffer(ibv);
@@ -1598,7 +1611,11 @@ void ImGuiSystem::OnRenderBegin(AppFrameContext& ctx) {
     if (_renderer == nullptr) {
         return;
     }
-    _renderer->OnRenderBegin(ctx.FlightIndex(), ctx.GetCommandBuffer());
+    _renderer->OnRenderBegin(
+        ctx.FlightIndex(),
+        ctx.GetCommandBuffer(),
+        ctx.GetUploader(),
+        ctx.GetFrameResources().GetHostWrites());
 }
 
 bool ImGuiSystem::OnRender(AppFrameContext& ctx, const AppFrameTarget& target, bool contentDrawn) {

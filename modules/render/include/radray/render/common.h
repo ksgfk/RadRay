@@ -365,6 +365,8 @@ enum class ResourceHint : uint32_t {
     /// Keeps a mappable buffer mapped for its lifetime. BufferUse::MapRead or
     /// BufferUse::MapWrite must also be present.
     PersistentMap = External << 1,
+    /// The resource's GPU address must remain stable for its lifetime.
+    StableGpuAddress = PersistentMap << 1,
 };
 
 enum class LoadAction : int32_t {
@@ -992,6 +994,11 @@ struct BufferRange {
     }
 };
 
+struct MappedBufferRange {
+    Buffer* Target{nullptr};
+    BufferRange Range{};
+};
+
 struct BufferBindingDescriptor {
     Buffer* Target{nullptr};
     BufferRange Range{};
@@ -1494,6 +1501,8 @@ public:
 
     virtual Nullable<unique_ptr<Buffer>> CreateBuffer(const BufferDescriptor& desc) noexcept = 0;
 
+    virtual void FlushMappedRanges(std::span<const MappedBufferRange> ranges) noexcept = 0;
+
     virtual Nullable<unique_ptr<Texture>> CreateTexture(const TextureDescriptor& desc) noexcept = 0;
 
     virtual Nullable<unique_ptr<TextureView>> CreateTextureView(const TextureViewDescriptor& desc) noexcept = 0;
@@ -1751,11 +1760,15 @@ public:
 
     virtual void* Map(uint64_t offset, uint64_t size) noexcept = 0;
 
-    /// For ResourceHint::PersistentMap, flushes the range as required while
-    /// keeping the CPU mapping valid for the buffer lifetime.
-    virtual void Unmap(uint64_t offset, uint64_t size) noexcept = 0;
+    virtual void Unmap() noexcept = 0;
+
+    virtual void FlushMappedRange(BufferRange range) noexcept = 0;
+
+    virtual void InvalidateMappedRange(BufferRange range) noexcept = 0;
 
     virtual BufferDescriptor GetDesc() const noexcept = 0;
+
+    virtual Device* GetDevice() const noexcept = 0;
 };
 
 class Texture : public Resource {

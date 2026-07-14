@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <bit>
 #include <cstring>
+#include <radray/scope_guard.h>
 #include <type_traits>
 
 #if defined(_WIN32)
@@ -1559,7 +1560,111 @@ Nullable<unique_ptr<Buffer>> DeviceVulkan::CreateBuffer(const BufferDescriptor& 
     result->_memory = desc.Memory;
     result->_usage = desc.Usage;
     result->_hints = desc.Hints;
+    VkMemoryPropertyFlags memoryFlags{};
+    vmaGetMemoryTypeProperties(_vma->_vma, vmaAllocInfo.memoryType, &memoryFlags);
+    result->_hostCoherent = (memoryFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) != 0;
     return result;
+}
+
+void DeviceVulkan::FlushMappedRanges(std::span<const MappedBufferRange> mappedRanges) noexcept {
+    struct FlushRange {
+        VmaAllocation Allocation{VK_NULL_HANDLE};
+        VkDeviceSize Offset{0};
+        VkDeviceSize Size{0};
+    };
+
+    vector<FlushRange> ranges;
+    ranges.reserve(mappedRanges.size());
+    const uint64_t atomSize = std::max<uint64_t>(1, _properties.limits.nonCoherentAtomSize);
+
+    for (const MappedBufferRange& mappedRange : mappedRanges) {
+        if (mappedRange.Target == nullptr) {
+            RADRAY_ABORT("Vulkan mapped flush range has a null target");
+        }
+        if (mappedRange.Target->GetDevice() != this) {
+            RADRAY_ABORT("cannot flush a Vulkan mapped range across devices");
+        }
+        const BufferDescriptor desc = mappedRange.Target->GetDesc();
+        if (!desc.Usage.HasFlag(BufferUse::MapWrite)) {
+            RADRAY_ABORT("Vulkan mapped flush requires MapWrite usage");
+        }
+        const uint64_t offset = mappedRange.Range.Offset;
+        if (offset > desc.Size) {
+            RADRAY_ABORT("Vulkan mapped flush offset is outside the buffer");
+        }
+        const uint64_t size = mappedRange.Range.Size == BufferRange::All()
+                                  ? desc.Size - offset
+                                  : mappedRange.Range.Size;
+        if (size > desc.Size - offset) {
+            RADRAY_ABORT("Vulkan mapped flush range is outside the buffer");
+        }
+        auto* buffer = CastVkObject(mappedRange.Target);
+        if (!buffer->IsValid() || buffer->_allocation == VK_NULL_HANDLE) {
+            RADRAY_ABORT("cannot flush an invalid Vulkan buffer allocation");
+        }
+        if (size == 0) {
+            continue;
+        }
+        if (buffer->_hostCoherent) {
+            continue;
+        }
+        const uint64_t begin = offset & ~(atomSize - 1);
+        const uint64_t end = offset + size;
+        const uint64_t allocationSize = buffer->_allocInfo.size;
+        const uint64_t alignedEnd = std::min(
+            allocationSize,
+            end > std::numeric_limits<uint64_t>::max() - (atomSize - 1)
+                ? allocationSize
+                : Align(end, atomSize));
+        ranges.push_back(FlushRange{
+            .Allocation = buffer->_allocation,
+            .Offset = begin,
+            .Size = alignedEnd - begin});
+    }
+
+    std::sort(ranges.begin(), ranges.end(), [](const FlushRange& a, const FlushRange& b) noexcept {
+        if (a.Allocation != b.Allocation) {
+            return std::less<VmaAllocation>{}(a.Allocation, b.Allocation);
+        }
+        return a.Offset < b.Offset;
+    });
+
+    vector<FlushRange> merged;
+    merged.reserve(ranges.size());
+    for (const FlushRange& range : ranges) {
+        if (!merged.empty()) {
+            FlushRange& last = merged.back();
+            const uint64_t lastEnd = last.Offset + last.Size;
+            if (last.Allocation == range.Allocation && range.Offset <= lastEnd) {
+                last.Size = std::max(lastEnd, range.Offset + range.Size) - last.Offset;
+                continue;
+            }
+        }
+        merged.push_back(range);
+    }
+
+    vector<VmaAllocation> allocations;
+    vector<VkDeviceSize> offsets;
+    vector<VkDeviceSize> sizes;
+    allocations.reserve(merged.size());
+    offsets.reserve(merged.size());
+    sizes.reserve(merged.size());
+    for (const FlushRange& range : merged) {
+        allocations.push_back(range.Allocation);
+        offsets.push_back(range.Offset);
+        sizes.push_back(range.Size);
+    }
+    if (!allocations.empty()) {
+        if (auto vr = vmaFlushAllocations(
+                _vma->_vma,
+                static_cast<uint32_t>(allocations.size()),
+                allocations.data(),
+                offsets.data(),
+                sizes.data());
+            vr != VK_SUCCESS) {
+            RADRAY_ABORT("vmaFlushAllocations failed: {}", vr);
+        }
+    }
 }
 
 Nullable<unique_ptr<Texture>> DeviceVulkan::CreateTexture(const TextureDescriptor& desc) noexcept {
@@ -2703,8 +2808,11 @@ Nullable<unique_ptr<ShaderBindingTable>> DeviceVulkan::CreateShaderBindingTable(
         return nullptr;
     }
     uint64_t totalSize = recordStride * totalRecords;
-    auto buffer = this->CreateBuffer(
-        {totalSize, MemoryType::Upload, BufferUse::ShaderTable | BufferUse::MapWrite, ResourceHint::None});
+    auto buffer = this->CreateBuffer(BufferDescriptor{
+        .Size = totalSize,
+        .Memory = MemoryType::Upload,
+        .Usage = BufferUse::ShaderTable | BufferUse::MapWrite,
+        .Hints = ResourceHint::StableGpuAddress});
     if (!buffer.HasValue()) {
         return nullptr;
     }
@@ -4905,6 +5013,18 @@ void CommandEncoderRayTracingVulkan::BuildTopLevelAS(const BuildTopLevelASDescri
         RADRAY_ERR_LOG("BuildTopLevelAS update requested without AllowUpdate flag");
         return;
     }
+    for (const RayTracingInstanceDescriptor& instance : desc.Instances) {
+        if (instance.Blas == nullptr) {
+            RADRAY_ERR_LOG("BuildTopLevelAS instance has a null BLAS");
+            return;
+        }
+        auto* blas = CastVkObject(instance.Blas);
+        if (!blas->IsValid() || blas->_device != _device ||
+            blas->_desc.Type != AccelerationStructureType::BottomLevel) {
+            RADRAY_ERR_LOG("BuildTopLevelAS instance has an invalid BLAS");
+            return;
+        }
+    }
     auto getBufferAddress = [&](BufferVulkan* b) -> VkDeviceAddress {
         VkBufferDeviceAddressInfo info{};
         info.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
@@ -4912,41 +5032,16 @@ void CommandEncoderRayTracingVulkan::BuildTopLevelAS(const BuildTopLevelASDescri
         return _device->_ftb.vkGetBufferDeviceAddress(_device->_device, &info);
     };
     const uint64_t instanceBytes = sizeof(VkAccelerationStructureInstanceKHR) * desc.Instances.size();
-    auto instBufOpt = _device->CreateBuffer({Align(instanceBytes, 16ull),
-                                             MemoryType::Upload,
-                                             BufferUse::Scratch | BufferUse::MapWrite,
-                                             ResourceHint::None});
+    auto instBufOpt = _device->CreateBuffer(BufferDescriptor{
+        .Size = Align(instanceBytes, 16ull),
+        .Memory = MemoryType::Upload,
+        .Usage = BufferUse::Scratch | BufferUse::MapWrite,
+        .Hints = ResourceHint::StableGpuAddress});
     if (!instBufOpt.HasValue()) {
         return;
     }
     auto instBuf = instBufOpt.Release();
     instBuf->SetDebugName("vk_tlas_instances");
-    auto* mapped = static_cast<VkAccelerationStructureInstanceKHR*>(instBuf->Map(0, instanceBytes));
-    for (size_t i = 0; i < desc.Instances.size(); i++) {
-        const auto& src = desc.Instances[i];
-        auto& dst = mapped[i];
-        std::memset(&dst, 0, sizeof(dst));
-        dst.transform.matrix[0][0] = src.Transform(0, 0);
-        dst.transform.matrix[0][1] = src.Transform(0, 1);
-        dst.transform.matrix[0][2] = src.Transform(0, 2);
-        dst.transform.matrix[0][3] = src.Transform(0, 3);
-        dst.transform.matrix[1][0] = src.Transform(1, 0);
-        dst.transform.matrix[1][1] = src.Transform(1, 1);
-        dst.transform.matrix[1][2] = src.Transform(1, 2);
-        dst.transform.matrix[1][3] = src.Transform(1, 3);
-        dst.transform.matrix[2][0] = src.Transform(2, 0);
-        dst.transform.matrix[2][1] = src.Transform(2, 1);
-        dst.transform.matrix[2][2] = src.Transform(2, 2);
-        dst.transform.matrix[2][3] = src.Transform(2, 3);
-        dst.instanceCustomIndex = src.InstanceID;
-        dst.mask = src.InstanceMask;
-        dst.instanceShaderBindingTableRecordOffset = src.InstanceContributionToHitGroupIndex;
-        dst.flags = 0;
-        if (src.ForceOpaque) dst.flags |= VK_GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR;
-        if (src.ForceNoOpaque) dst.flags |= VK_GEOMETRY_INSTANCE_FORCE_NO_OPAQUE_BIT_KHR;
-        dst.accelerationStructureReference = CastVkObject(src.Blas)->_deviceAddress;
-    }
-    instBuf->Unmap(0, instanceBytes);
     auto instBufRaw = CastVkObject(instBuf.get());
 
     VkBuildAccelerationStructureFlagsKHR buildFlags = 0;
@@ -5002,6 +5097,40 @@ void CommandEncoderRayTracingVulkan::BuildTopLevelAS(const BuildTopLevelASDescri
         RADRAY_ERR_LOG("TLAS scratch buffer too small: need={}, actual={}", sizeInfo.buildScratchSize, desc.ScratchSize);
         return;
     }
+
+    auto* mapped = static_cast<VkAccelerationStructureInstanceKHR*>(instBuf->Map(0, instanceBytes));
+    if (mapped == nullptr) {
+        RADRAY_ERR_LOG("failed to map TLAS instance buffer");
+        return;
+    }
+    auto unmapGuard = MakeScopeGuard([&]() noexcept { instBuf->Unmap(); });
+    for (size_t i = 0; i < desc.Instances.size(); i++) {
+        const auto& src = desc.Instances[i];
+        auto& dst = mapped[i];
+        std::memset(&dst, 0, sizeof(dst));
+        dst.transform.matrix[0][0] = src.Transform(0, 0);
+        dst.transform.matrix[0][1] = src.Transform(0, 1);
+        dst.transform.matrix[0][2] = src.Transform(0, 2);
+        dst.transform.matrix[0][3] = src.Transform(0, 3);
+        dst.transform.matrix[1][0] = src.Transform(1, 0);
+        dst.transform.matrix[1][1] = src.Transform(1, 1);
+        dst.transform.matrix[1][2] = src.Transform(1, 2);
+        dst.transform.matrix[1][3] = src.Transform(1, 3);
+        dst.transform.matrix[2][0] = src.Transform(2, 0);
+        dst.transform.matrix[2][1] = src.Transform(2, 1);
+        dst.transform.matrix[2][2] = src.Transform(2, 2);
+        dst.transform.matrix[2][3] = src.Transform(2, 3);
+        dst.instanceCustomIndex = src.InstanceID;
+        dst.mask = src.InstanceMask;
+        dst.instanceShaderBindingTableRecordOffset = src.InstanceContributionToHitGroupIndex;
+        dst.flags = 0;
+        if (src.ForceOpaque) dst.flags |= VK_GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR;
+        if (src.ForceNoOpaque) dst.flags |= VK_GEOMETRY_INSTANCE_FORCE_NO_OPAQUE_BIT_KHR;
+        dst.accelerationStructureReference = CastVkObject(src.Blas)->_deviceAddress;
+    }
+    instBuf->FlushMappedRange(BufferRange{.Offset = 0, .Size = instanceBytes});
+    instBuf->Unmap();
+    unmapGuard.Dismiss();
     buildInfo.scratchData.deviceAddress = getBufferAddress(scratch) + desc.ScratchOffset;
 
     VkAccelerationStructureBuildRangeInfoKHR range{};
@@ -5679,6 +5808,12 @@ void BufferVulkan::DestroyImpl() noexcept {
 }
 
 void* BufferVulkan::Map(uint64_t offset, uint64_t size) noexcept {
+    if (!_usage.HasFlag(BufferUse::MapRead) && !_usage.HasFlag(BufferUse::MapWrite)) {
+        RADRAY_ABORT("cannot map a Vulkan buffer without MapRead or MapWrite usage");
+    }
+    if (offset > _reqSizeLogical || size > _reqSizeLogical - offset) {
+        RADRAY_ABORT("Vulkan buffer map range is out of bounds");
+    }
     void* mappedData = nullptr;
     if (_hints.HasFlag(ResourceHint::PersistentMap)) {
         if (_allocInfo.pMappedData == nullptr) {
@@ -5692,34 +5827,56 @@ void* BufferVulkan::Map(uint64_t offset, uint64_t size) noexcept {
         }
         mappedData = static_cast<byte*>(mappedData) + offset;
     }
-    if (_allocation != VK_NULL_HANDLE && _usage.HasFlag(BufferUse::MapRead)) {
-        VkMemoryPropertyFlags flags{};
-        vmaGetMemoryTypeProperties(_device->_vma->_vma, _allocInfo.memoryType, &flags);
-        if ((flags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) == 0) {
-            VkDeviceSize rangeSize = size == 0 ? VK_WHOLE_SIZE : size;
-            if (auto vr = vmaInvalidateAllocation(_device->_vma->_vma, _allocation, offset, rangeSize);
-                vr != VK_SUCCESS) {
-                RADRAY_ABORT("vmaInvalidateAllocation failed: {}", vr);
-            }
-        }
-    }
     return mappedData;
 }
 
-void BufferVulkan::Unmap(uint64_t offset, uint64_t size) noexcept {
-    if (_allocation != VK_NULL_HANDLE && _usage.HasFlag(BufferUse::MapWrite)) {
-        VkMemoryPropertyFlags flags{};
-        vmaGetMemoryTypeProperties(_device->_vma->_vma, _allocInfo.memoryType, &flags);
-        if ((flags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) == 0) {
-            VkDeviceSize rangeSize = size == 0 ? VK_WHOLE_SIZE : size;
-            if (auto vr = vmaFlushAllocation(_device->_vma->_vma, _allocation, offset, rangeSize);
-                vr != VK_SUCCESS) {
-                RADRAY_ABORT("vmaFlushAllocation failed: {}", vr);
-            }
-        }
-    }
+void BufferVulkan::Unmap() noexcept {
     if (!_hints.HasFlag(ResourceHint::PersistentMap)) {
         vmaUnmapMemory(_device->_vma->_vma, _allocation);
+    }
+}
+
+void BufferVulkan::FlushMappedRange(BufferRange range) noexcept {
+    const uint64_t offset = range.Offset;
+    if (!_usage.HasFlag(BufferUse::MapWrite) || offset > _reqSizeLogical) {
+        RADRAY_ABORT("invalid Vulkan mapped flush range");
+    }
+    const uint64_t size = range.Size == BufferRange::All()
+                              ? _reqSizeLogical - offset
+                              : range.Size;
+    if (size > _reqSizeLogical - offset) {
+        RADRAY_ABORT("invalid Vulkan mapped flush range");
+    }
+    if (size == 0) {
+        return;
+    }
+    if (_allocation != VK_NULL_HANDLE && !_hostCoherent) {
+        if (auto vr = vmaFlushAllocation(_device->_vma->_vma, _allocation, offset, size);
+            vr != VK_SUCCESS) {
+            RADRAY_ABORT("vmaFlushAllocation failed: {}", vr);
+        }
+    }
+}
+
+void BufferVulkan::InvalidateMappedRange(BufferRange range) noexcept {
+    const uint64_t offset = range.Offset;
+    if (!_usage.HasFlag(BufferUse::MapRead) || offset > _reqSizeLogical) {
+        RADRAY_ABORT("invalid Vulkan mapped invalidate range");
+    }
+    const uint64_t size = range.Size == BufferRange::All()
+                              ? _reqSizeLogical - offset
+                              : range.Size;
+    if (size > _reqSizeLogical - offset) {
+        RADRAY_ABORT("invalid Vulkan mapped invalidate range");
+    }
+    if (size == 0) {
+        return;
+    }
+    if (_allocation != VK_NULL_HANDLE && !_hostCoherent) {
+        if (auto vr = vmaInvalidateAllocation(_device->_vma->_vma, _allocation, offset, size);
+            vr != VK_SUCCESS) {
+            RADRAY_ABORT("vmaInvalidateAllocation failed: {}", vr);
+        }
     }
 }
 
@@ -5730,10 +5887,10 @@ void BufferVulkan::SetDebugName(std::string_view name) noexcept {
 
 BufferDescriptor BufferVulkan::GetDesc() const noexcept {
     return BufferDescriptor{
-        _reqSizeLogical,
-        _memory,
-        _usage,
-        _hints};
+        .Size = _reqSizeLogical,
+        .Memory = _memory,
+        .Usage = _usage,
+        .Hints = _hints};
 }
 
 BufferViewVulkan::BufferViewVulkan(
@@ -6298,13 +6455,13 @@ bool ShaderBindingTableVulkan::Build(std::span<const ShaderBindingTableBuildEntr
         RADRAY_ERR_LOG("invalid SBT record stride/handle size");
         return false;
     }
-    uint64_t totalSize = _buffer->GetDesc().Size;
-    auto* mapped = static_cast<byte*>(_buffer->Map(0, totalSize));
-    if (mapped == nullptr) {
-        RADRAY_ERR_LOG("failed to map SBT buffer");
-        return false;
-    }
-    std::memset(mapped, 0, static_cast<size_t>(totalSize));
+    struct ResolvedEntry {
+        uint64_t Offset{0};
+        vector<byte> Handle;
+        std::span<const byte> LocalData;
+    };
+    vector<ResolvedEntry> resolvedEntries;
+    resolvedEntries.reserve(entries.size());
     for (const auto& entry : entries) {
         uint32_t count = 0;
         uint64_t baseOffset = 0;
@@ -6328,28 +6485,41 @@ bool ShaderBindingTableVulkan::Build(std::span<const ShaderBindingTableBuildEntr
         }
         if (entry.RecordIndex >= count) {
             RADRAY_ERR_LOG("SBT record index out of range: type={}, index={}, count={}", static_cast<uint32_t>(entry.Type), entry.RecordIndex, count);
-            _buffer->Unmap(0, totalSize);
             return false;
         }
         auto handle = _pipeline->GetShaderBindingTableHandle(entry.ShaderName);
         if (!handle.has_value()) {
             RADRAY_ERR_LOG("cannot find shader handle '{}'", entry.ShaderName);
-            _buffer->Unmap(0, totalSize);
             return false;
         }
         if (entry.LocalData.size() > _recordStride - req.HandleSize) {
             RADRAY_ERR_LOG("local data too large for SBT record '{}'", entry.ShaderName);
-            _buffer->Unmap(0, totalSize);
             return false;
         }
-        uint64_t dstOffset = baseOffset + _recordStride * entry.RecordIndex;
-        auto* dst = mapped + dstOffset;
-        std::memcpy(dst, handle->data(), req.HandleSize);
+        resolvedEntries.push_back(ResolvedEntry{
+            .Offset = baseOffset + _recordStride * entry.RecordIndex,
+            .Handle = std::move(handle.value()),
+            .LocalData = entry.LocalData});
+    }
+
+    const uint64_t totalSize = _buffer->GetDesc().Size;
+    auto* mapped = static_cast<byte*>(_buffer->Map(0, totalSize));
+    if (mapped == nullptr) {
+        RADRAY_ERR_LOG("failed to map SBT buffer");
+        return false;
+    }
+    auto unmapGuard = MakeScopeGuard([&]() noexcept { _buffer->Unmap(); });
+    std::memset(mapped, 0, static_cast<size_t>(totalSize));
+    for (const ResolvedEntry& entry : resolvedEntries) {
+        auto* dst = mapped + entry.Offset;
+        std::memcpy(dst, entry.Handle.data(), req.HandleSize);
         if (!entry.LocalData.empty()) {
             std::memcpy(dst + req.HandleSize, entry.LocalData.data(), entry.LocalData.size());
         }
     }
-    _buffer->Unmap(0, totalSize);
+    _buffer->FlushMappedRange(BufferRange{.Offset = 0, .Size = totalSize});
+    _buffer->Unmap();
+    unmapGuard.Dismiss();
     _isBuilt = true;
     return true;
 }

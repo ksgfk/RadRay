@@ -539,13 +539,14 @@ MeshPassExecutor::BindingResolveResult MeshPassExecutor::ResolveBindingGroups(
                     target = sharedAllocation->Target;
                     offset = sharedAllocation->Offset;
                 } else if (groupPlan.Frequency == ShaderBindingFrequency::Material) {
-                    const auto allocation = _materialConstantPool->Allocate(bytes.size());
-                    if (!allocation.IsValid() || allocation.Mapped == nullptr) {
+                    auto reservation = _materialConstantPool->Reserve(bytes.size(), resources.GetHostWrites());
+                    if (!reservation.IsValid()) {
                         groupStatus = ValueStatus::Invalid;
                         groupError = fmt::format("failed to allocate material cbuffer '{}'", entry.Name);
                         break;
                     }
-                    std::memcpy(allocation.Mapped, bytes.data(), bytes.size());
+                    std::memcpy(reservation.Data(), bytes.data(), bytes.size());
+                    const auto allocation = reservation.Commit(bytes.size());
                     target = allocation.Target;
                     offset = allocation.Offset;
                     persistentAllocations.push_back(allocation);
@@ -554,13 +555,14 @@ MeshPassExecutor::BindingResolveResult MeshPassExecutor::ResolveBindingGroups(
                         groupPlan.Frequency == ShaderBindingFrequency::Object
                             ? resources.PerObjectArena
                             : resources.ViewArena;
-                    const auto allocation = arena.Allocate(bytes.size());
-                    if (allocation.Target == nullptr || allocation.Mapped == nullptr) {
+                    auto reservation = arena.Reserve(bytes.size());
+                    if (!reservation.IsValid()) {
                         groupStatus = ValueStatus::Invalid;
                         groupError = fmt::format("failed to allocate transient cbuffer '{}'", entry.Name);
                         break;
                     }
-                    std::memcpy(allocation.Mapped, bytes.data(), bytes.size());
+                    std::memcpy(reservation.Data(), bytes.data(), bytes.size());
+                    const auto allocation = reservation.Commit(bytes.size());
                     target = allocation.Target;
                     offset = allocation.Offset;
                 }

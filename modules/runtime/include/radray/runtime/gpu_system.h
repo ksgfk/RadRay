@@ -37,6 +37,63 @@ class FrameUploadScope;
 class WaitFrameUploadGpuAwaitable;
 struct FrameUploadRecord;
 
+struct UploadMemoryStats {
+    uint64_t PageCount{0};
+    uint64_t PageCapacityBytes{0};
+    uint64_t CommitCount{0};
+    uint64_t CommittedBytes{0};
+    uint64_t RecordedRangeCount{0};
+    uint64_t FlushedRangeCount{0};
+};
+
+class HostWriteBatch {
+public:
+    HostWriteBatch();
+
+    void Record(render::Buffer* target, render::BufferRange range);
+    void Flush(render::Device& device) noexcept;
+
+    bool Empty() const noexcept { return _ranges.empty(); }
+    bool IsSealed() const noexcept { return _sealed; }
+    std::span<const render::MappedBufferRange> GetRanges() const noexcept { return _ranges; }
+    const UploadMemoryStats& GetStats() const noexcept { return _stats; }
+
+    void Seal() noexcept { _sealed = true; }
+    void Reset() noexcept;
+    void RecordPageAllocation(uint64_t capacity) noexcept;
+
+private:
+    vector<render::MappedBufferRange> _ranges;
+    UploadMemoryStats _stats{};
+    bool _sealed{false};
+};
+
+class ScopedBufferMap {
+public:
+    ScopedBufferMap(render::Buffer* buffer, render::BufferRange range) noexcept;
+    ~ScopedBufferMap() noexcept;
+
+    ScopedBufferMap(const ScopedBufferMap&) = delete;
+    ScopedBufferMap& operator=(const ScopedBufferMap&) = delete;
+    ScopedBufferMap(ScopedBufferMap&&) = delete;
+    ScopedBufferMap& operator=(ScopedBufferMap&&) = delete;
+
+    void* Data() const noexcept { return _data; }
+
+    template <typename T>
+    T* DataAs() const noexcept {
+        return static_cast<T*>(_data);
+    }
+
+    explicit operator bool() const noexcept { return _data != nullptr; }
+
+private:
+    render::Buffer* _buffer{nullptr};
+    void* _data{nullptr};
+    render::BufferRange _range{};
+    bool _write{false};
+};
+
 enum class FrameUploadStage {
     AwaitingFrame,
     InFrame,
@@ -103,8 +160,9 @@ struct GpuFlightSlot {
     //    Targets 收集本帧 acquire 的全部窗口以支持多窗口/多 viewport。
     unique_ptr<render::CommandBuffer> CmdBuffer;
     unique_ptr<FrameResources> RenderResources;
+    HostWriteBatch HostWrites;
     vector<AcquiredTarget> Targets;
-    bool ManualSubmit{false};
+    bool Submitted{false};
     bool Recording{false};
 
     // —— 计时态（游戏线程写）。
@@ -134,11 +192,12 @@ struct TextureUploadRequest {
     render::TextureStates After{render::TextureState::ShaderRead};
 };
 
-struct StagingBufferAllocation {
-    render::Buffer* Buffer{nullptr};
-    void* MappedPtr{nullptr};
-    uint64_t Offset{0};
-    uint64_t Size{0};
+struct AppFrameSubmitDescriptor {
+    std::span<render::CommandBuffer*> CmdBuffers{};
+    std::span<render::Fence*> SignalFences{};
+    std::span<uint64_t> SignalValues{};
+    std::span<render::Fence*> WaitFences{};
+    std::span<uint64_t> WaitValues{};
 };
 
 class WaitFrameUploadGpuAwaitable {
@@ -299,7 +358,7 @@ public:
         bool isInModalLoop);
 
     /// 一帧收尾：uploader.EndFlight → CmdBuffer.End → 聚合 sync object → Submit
-    /// → 写 flight.Signal → Present 全部 target。ManualSubmit 下仅 End，跳过提交/呈现。
+    /// → 写 flight.Signal → Present 全部 target。
     void EndFrameRecordAndSubmit(uint32_t flightIndex);
 
     FrameUploadScheduler& GetFrameUploadScheduler() noexcept { return *_frameUploadScheduler; }
@@ -324,9 +383,13 @@ public:
     /// 内置 GpuFrameProfiler 在每帧 resolve 后更新；未启用时返回 0。
     float GetLastGpuTimeMs() const noexcept;
 
+    UploadMemoryStats GetUploadMemoryStats() const noexcept;
+
 private:
     friend class AppFrameContext;
     friend class Application;
+
+    void SubmitFrame(uint32_t flightIndex, const AppFrameSubmitDescriptor& desc);
 
     Application* _app;
     WindowManager* _windowManager{nullptr};
@@ -381,14 +444,13 @@ public:
 
     FrameResources& GetFrameResources() const noexcept;
 
-    /// 逃生舱：直接拿底层对象自行处理（建资源、自定义 compute、readback、甚至自行 submit）。
+    /// 逃生舱：直接拿底层设备处理建资源、自定义 compute 和 readback。
     render::Device* GetDevice() const noexcept;
-    render::CommandQueue* GetMainQueue() const noexcept;
     GpuSystem* GetGpuSystem() const noexcept { return _gpuSystem; }
 
-    /// 刷新当前 frame arena 的 host 写入并声明应用自管提交。调用后不得再写入 frame arena；
-    /// runtime 跳过 Submit/Present（仍 End cmd buffer 与回收 flight）。
-    void SetManualSubmit() noexcept;
+    /// 提交并呈现当前帧。runtime 始终注入主 command buffer、flight batch、内部 fence
+    /// 和 swapchain 同步；描述符中的对象仅作为附加提交内容。
+    void SubmitFrame(const AppFrameSubmitDescriptor& desc = {});
 
 private:
     GpuSystem* _gpuSystem;
@@ -401,7 +463,8 @@ private:
 /// Upload heap staging page 池。在 page 内线性分配，按 flight index 整页回收。
 class StagingBufferPool {
 public:
-    using Allocation = StagingBufferAllocation;
+    using Allocation = MappedUploadPage::Allocation;
+    using Reservation = MappedUploadPage::Reservation;
 
     struct Descriptor {
         uint64_t PageSize{8ull * 1024 * 1024};
@@ -415,14 +478,10 @@ public:
     StagingBufferPool(const StagingBufferPool&) = delete;
     StagingBufferPool& operator=(const StagingBufferPool&) = delete;
 
-    /// 从 Upload page 分配一块 staging 内存。超过 page 容量的请求使用一次性 buffer。
-    Allocation Allocate(uint64_t size, uint64_t alignment = 1);
+    void BeginFlight(HostWriteBatch& hostWrites);
 
-    /// 刷新 staging 写入范围；page 在整个生命期内保持映射。
-    void Flush(const Allocation& allocation);
-
-    /// 兼容旧接口；持久映射的 page 不会真正解除映射。
-    void FlushAndUnmap(const Allocation& allocation) { Flush(allocation); }
+    /// 从 Upload page 预留一块 staging 内存。超过 page 容量的请求使用一次性 buffer。
+    Reservation Reserve(uint64_t size, uint64_t alignment = 1);
 
     /// 将当前所有活跃 staging page 移入指定 flight 的 pending 列表。
     void RetireToFlight(uint32_t flightIndex);
@@ -432,15 +491,12 @@ public:
 
 private:
     struct Page {
-        unique_ptr<render::Buffer> Buffer;
-        void* Mapped{nullptr};
-        uint64_t Used{0};
+        unique_ptr<MappedUploadPage> Upload;
         bool Cacheable{true};
     };
 
     Page CreatePage(uint64_t capacity, bool cacheable);
     Page& AcquireStandardPage();
-    static bool TryReserve(Page& page, uint64_t size, uint64_t alignment, uint64_t& offset) noexcept;
     void TrimFreeList() noexcept;
 
     render::Device* _device;
@@ -449,6 +505,7 @@ private:
     vector<vector<Page>> _pending;
     vector<Page> _freeList;
     uint64_t _nextPageId{0};
+    HostWriteBatch* _hostWrites{nullptr};
 };
 
 /// 资源上传器。录制 copy 命令到外部传入的 CommandBuffer，管理 staging 生命周期。
@@ -465,6 +522,8 @@ public:
     ~ResourceUploader() noexcept;
     ResourceUploader(const ResourceUploader&) = delete;
     ResourceUploader& operator=(const ResourceUploader&) = delete;
+
+    void BeginFlight(uint32_t flightIndex, HostWriteBatch& hostWrites);
 
     /// 录制 buffer 上传命令到 cmdBuffer。
     void UploadBuffer(
@@ -494,6 +553,8 @@ public:
 private:
     render::Device* _device;
     StagingBufferPool _stagingPool;
+    uint32_t _flightCount{0};
+    uint32_t _activeFlightIndex{std::numeric_limits<uint32_t>::max()};
 };
 
 /// 依赖声明(非侵入,类外特化):GpuSystem 需要 WindowManager,复用已有 public setter。

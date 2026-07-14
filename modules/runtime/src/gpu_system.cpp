@@ -21,13 +21,116 @@ namespace {
 
 constexpr uint64_t kStagingBufferCopyAlignment = 4;
 
-render::ResourceHints GetGpuAddressPageHints(render::Device* device) noexcept {
-    return device != nullptr && device->GetBackend() == render::RenderBackend::D3D12
-               ? render::ResourceHint::Dedicated
-               : render::ResourceHint::None;
+}  // namespace
+
+HostWriteBatch::HostWriteBatch() {
+    _ranges.reserve(64);
 }
 
-}  // namespace
+void HostWriteBatch::Record(render::Buffer* target, render::BufferRange range) {
+    if (_sealed) {
+        RADRAY_ABORT("cannot record a host write after the batch has been sealed");
+    }
+    if (target == nullptr) {
+        RADRAY_ABORT("cannot record a host write for a null buffer");
+    }
+    const render::BufferDescriptor desc = target->GetDesc();
+    if (!desc.Usage.HasFlag(render::BufferUse::MapWrite) ||
+        !desc.Hints.HasFlag(render::ResourceHint::PersistentMap)) {
+        RADRAY_ABORT("host-write batches require MapWrite + PersistentMap buffers");
+    }
+    if (range.Offset > desc.Size) {
+        RADRAY_ABORT("host-write offset {} exceeds buffer size {}", range.Offset, desc.Size);
+    }
+    const uint64_t size = range.Size == render::BufferRange::All()
+                              ? desc.Size - range.Offset
+                              : range.Size;
+    if (size > desc.Size - range.Offset) {
+        RADRAY_ABORT(
+            "host-write range [{}, {}) exceeds buffer size {}",
+            range.Offset,
+            range.Offset + size,
+            desc.Size);
+    }
+
+    ++_stats.CommitCount;
+    _stats.CommittedBytes += size;
+    if (size == 0) {
+        return;
+    }
+    ++_stats.RecordedRangeCount;
+
+    const uint64_t rangeEnd = range.Offset + size;
+    if (!_ranges.empty()) {
+        render::MappedBufferRange& last = _ranges.back();
+        if (last.Target == target) {
+            const uint64_t lastEnd = last.Range.Offset + last.Range.Size;
+            if (range.Offset <= lastEnd && last.Range.Offset <= rangeEnd) {
+                const uint64_t begin = std::min(last.Range.Offset, range.Offset);
+                const uint64_t end = std::max(lastEnd, rangeEnd);
+                last.Range = render::BufferRange{.Offset = begin, .Size = end - begin};
+                return;
+            }
+        }
+    }
+    _ranges.push_back(render::MappedBufferRange{
+        .Target = target,
+        .Range = render::BufferRange{.Offset = range.Offset, .Size = size}});
+}
+
+void HostWriteBatch::Flush(render::Device& device) noexcept {
+    device.FlushMappedRanges(_ranges);
+    _stats.FlushedRangeCount += _ranges.size();
+    _ranges.clear();
+}
+
+void HostWriteBatch::Reset() noexcept {
+    _ranges.clear();
+    _sealed = false;
+}
+
+void HostWriteBatch::RecordPageAllocation(uint64_t capacity) noexcept {
+    ++_stats.PageCount;
+    _stats.PageCapacityBytes += capacity;
+}
+
+ScopedBufferMap::ScopedBufferMap(render::Buffer* buffer, render::BufferRange range) noexcept
+    : _buffer(buffer) {
+    if (_buffer == nullptr) {
+        RADRAY_ABORT("ScopedBufferMap requires a non-null buffer");
+    }
+    const render::BufferDescriptor desc = _buffer->GetDesc();
+    if (range.Offset > desc.Size) {
+        RADRAY_ABORT("ScopedBufferMap range is outside the buffer");
+    }
+    const uint64_t size = range.Size == render::BufferRange::All()
+                              ? desc.Size - range.Offset
+                              : range.Size;
+    if (size == 0 || size > desc.Size - range.Offset) {
+        RADRAY_ABORT("ScopedBufferMap range is outside the buffer");
+    }
+    const bool read = desc.Usage.HasFlag(render::BufferUse::MapRead);
+    _write = desc.Usage.HasFlag(render::BufferUse::MapWrite);
+    if (read == _write) {
+        RADRAY_ABORT("ScopedBufferMap requires exactly one of MapRead or MapWrite");
+    }
+
+    _range = render::BufferRange{.Offset = range.Offset, .Size = size};
+    _data = _buffer->Map(_range.Offset, _range.Size);
+    if (_data != nullptr && read) {
+        _buffer->InvalidateMappedRange(_range);
+    }
+}
+
+ScopedBufferMap::~ScopedBufferMap() noexcept {
+    if (_buffer == nullptr || _data == nullptr) {
+        return;
+    }
+    if (_write) {
+        _buffer->FlushMappedRange(_range);
+    }
+    _buffer->Unmap();
+}
 
 // ═══════════════════════════════════════════════════════════════
 //  FrameUploadScheduler
@@ -307,6 +410,7 @@ void GpuSystem::BeginUpdateForFlight(uint32_t flightIndex) {
     if (flight.RenderResources != nullptr) {
         flight.RenderResources->Reset();
     }
+    flight.HostWrites.Reset();
     flight.WaitForDestroy.clear();
     flight.FrameStartTime = std::chrono::steady_clock::now();
 }
@@ -331,10 +435,6 @@ GpuFrameProfiler::GpuFrameProfiler(render::Device* device, render::CommandQueue*
             .Size = sizeof(uint64_t) * TimestampQueryCount,
             .Memory = render::MemoryType::ReadBack,
             .Usage = render::BufferUse::CopyDestination | render::BufferUse::MapRead};
-        if (device->GetBackend() == render::RenderBackend::Vulkan) {
-            // VMA maps a complete backing block even for a 16-byte readback.
-            readbackDesc.Hints = render::ResourceHint::Dedicated;
-        }
         frame.Readback = device->CreateBuffer(readbackDesc).Unwrap();
     }
 }
@@ -396,13 +496,14 @@ void GpuFrameProfiler::Resolve(uint32_t flightIndex) {
     frame.Pending = false;
 
     const uint64_t mappedSize = sizeof(uint64_t) * TimestampQueryCount;
-    void* mapped = frame.Readback->Map(0, mappedSize);
-    if (mapped == nullptr) {
+    ScopedBufferMap mapping{
+        frame.Readback.get(),
+        render::BufferRange{.Offset = 0, .Size = mappedSize}};
+    if (!mapping) {
         return;
     }
     uint64_t ticks[TimestampQueryCount]{};
-    std::memcpy(ticks, mapped, mappedSize);
-    frame.Readback->Unmap(0, mappedSize);
+    std::memcpy(ticks, mapping.Data(), mappedSize);
 
     if (ticks[1] <= ticks[0]) {
         return;
@@ -430,7 +531,7 @@ GpuSystem::GpuSystem(Application* app, const GpuSystemDescriptor& desc)
     _mainQueueTrack.Fence->SetDebugName("AppMainQueue");
     _flights.resize(_flightDataCount);
     for (auto& flight : _flights) {
-        flight.RenderResources = make_unique<FrameResources>(_device);
+        flight.RenderResources = make_unique<FrameResources>(_device, &flight.HostWrites);
     }
     _uploader = make_unique<ResourceUploader>(_device, _flightDataCount);
     _frameUploadScheduler = make_unique<FrameUploadScheduler>();
@@ -473,6 +574,20 @@ float GpuSystem::GetLastGpuTimeMs() const noexcept {
     return _frameProfiler != nullptr ? _frameProfiler->GetLastGpuTimeMs() : 0.0f;
 }
 
+UploadMemoryStats GpuSystem::GetUploadMemoryStats() const noexcept {
+    UploadMemoryStats result{};
+    for (const FlightSlot& flight : _flights) {
+        const UploadMemoryStats& stats = flight.HostWrites.GetStats();
+        result.PageCount += stats.PageCount;
+        result.PageCapacityBytes += stats.PageCapacityBytes;
+        result.CommitCount += stats.CommitCount;
+        result.CommittedBytes += stats.CommittedBytes;
+        result.RecordedRangeCount += stats.RecordedRangeCount;
+        result.FlushedRangeCount += stats.FlushedRangeCount;
+    }
+    return result;
+}
+
 uint32_t GpuSystem::GetCurrentFlightIndex() const noexcept {
     return static_cast<uint32_t>(_nowFrameIndex % _flightDataCount);
 }
@@ -505,9 +620,10 @@ AppFrameContext GpuSystem::BeginFrameRecord(
         record.CmdBuffer = _device->CreateCommandBuffer(_mainQueue).Unwrap();
     }
     record.Targets.clear();
-    record.ManualSubmit = false;
+    record.Submitted = false;
     record.Recording = true;
     record.CmdBuffer->Begin();
+    _uploader->BeginFlight(flightIndex, record.HostWrites);
     // 帧顶(任何 RenderPass 之前、裸 CommandBuffer):交付本帧 cmd/uploader/flight 给等在
     // GPU 上传点的加载协程并 inline 恢复,让它们在本帧默认 cmdbuffer 上录制 copy。
     // copy 与本帧绘制同一提交,fence 完成后由 CompleteFlight 推进加载协程。
@@ -522,8 +638,22 @@ AppFrameContext GpuSystem::BeginFrameRecord(
 
 void GpuSystem::EndFrameRecordAndSubmit(uint32_t flightIndex) {
     FlightSlot& record = _flights[flightIndex];
-    if (!record.Recording) {
+    if (record.Submitted || !record.Recording) {
         return;
+    }
+    SubmitFrame(flightIndex, {});
+}
+
+void GpuSystem::SubmitFrame(
+    uint32_t flightIndex,
+    const AppFrameSubmitDescriptor& desc) {
+    FlightSlot& record = _flights.at(flightIndex);
+    if (!record.Recording || record.Submitted) {
+        RADRAY_ABORT("GpuSystem::SubmitFrame called outside an active frame");
+    }
+    if (desc.SignalFences.size() != desc.SignalValues.size() ||
+        desc.WaitFences.size() != desc.WaitValues.size()) {
+        RADRAY_ABORT("AppFrameSubmitDescriptor fence/value counts do not match");
     }
     record.Recording = false;
 
@@ -536,19 +666,6 @@ void GpuSystem::EndFrameRecordAndSubmit(uint32_t flightIndex) {
     }
 
     record.CmdBuffer->End();
-
-    // ManualSubmit：应用已自行 submit/present，runtime 仅负责 End 与后续回收。
-    if (record.ManualSubmit) {
-        if (record.RenderResources != nullptr && record.RenderResources->HasPendingHostWrites()) {
-            RADRAY_ABORT("frame constants were written after AppFrameContext::SetManualSubmit");
-        }
-        record.Targets.clear();
-        return;
-    }
-
-    if (record.RenderResources != nullptr) {
-        record.RenderResources->FlushHostWrites();
-    }
 
     // 聚合全部 target 的同步对象。
     vector<render::SwapChainSyncObject*> waitToExecute;
@@ -565,19 +682,35 @@ void GpuSystem::EndFrameRecordAndSubmit(uint32_t flightIndex) {
     }
 
     render::Fence* frameFence = _mainQueueTrack.Fence.get();
-    render::CommandBuffer* submitCmdBuffers[] = {record.CmdBuffer.get()};
-    render::Fence* signalFences[] = {frameFence};
-    uint64_t signalValues[] = {_mainQueueTrack.NextFenceValue.fetch_add(1, std::memory_order_acq_rel)};
+    vector<render::CommandBuffer*> submitCmdBuffers;
+    submitCmdBuffers.reserve(desc.CmdBuffers.size() + 1);
+    submitCmdBuffers.push_back(record.CmdBuffer.get());
+    submitCmdBuffers.insert(submitCmdBuffers.end(), desc.CmdBuffers.begin(), desc.CmdBuffers.end());
+
+    vector<render::Fence*> signalFences;
+    vector<uint64_t> signalValues;
+    signalFences.reserve(desc.SignalFences.size() + 1);
+    signalValues.reserve(desc.SignalValues.size() + 1);
+    signalFences.push_back(frameFence);
+    const uint64_t frameFenceValue = _mainQueueTrack.NextFenceValue.fetch_add(1, std::memory_order_acq_rel);
+    signalValues.push_back(frameFenceValue);
+    signalFences.insert(signalFences.end(), desc.SignalFences.begin(), desc.SignalFences.end());
+    signalValues.insert(signalValues.end(), desc.SignalValues.begin(), desc.SignalValues.end());
+
     render::CommandQueueSubmitDescriptor submitDesc{
-        .CmdBuffers = std::span{submitCmdBuffers},
-        .SignalFences = std::span{signalFences},
-        .SignalValues = std::span{signalValues},
+        .CmdBuffers = submitCmdBuffers,
+        .SignalFences = signalFences,
+        .SignalValues = signalValues,
+        .WaitFences = desc.WaitFences,
+        .WaitValues = desc.WaitValues,
         .WaitToExecute = std::span{waitToExecute},
         .ReadyToPresent = std::span{readyToPresent}};
+    record.HostWrites.Flush(*_device);
     _mainQueue->Submit(submitDesc);
+    record.HostWrites.Seal();
     _flights[flightIndex].Signal = GpuSystem::FenceSignal{
         .Fence = frameFence,
-        .Value = signalValues[0]};
+        .Value = frameFenceValue};
 
     // 逐个呈现。RequireRecreate 静默跳过，其余非 Success 记日志。
     for (FlightSlot::AcquiredTarget& target : record.Targets) {
@@ -591,6 +724,7 @@ void GpuSystem::EndFrameRecordAndSubmit(uint32_t flightIndex) {
         }
     }
     record.Targets.clear();
+    record.Submitted = true;
 }
 
 // ══════════════════════════════════════════════
@@ -651,15 +785,8 @@ render::Device* AppFrameContext::GetDevice() const noexcept {
     return _gpuSystem->_device;
 }
 
-render::CommandQueue* AppFrameContext::GetMainQueue() const noexcept {
-    return _gpuSystem->_mainQueue;
-}
-
-void AppFrameContext::SetManualSubmit() noexcept {
-    if (_gpuSystem->_flights[_flightIndex].RenderResources != nullptr) {
-        _gpuSystem->_flights[_flightIndex].RenderResources->FlushHostWrites();
-    }
-    _gpuSystem->_flights[_flightIndex].ManualSubmit = true;
+void AppFrameContext::SubmitFrame(const AppFrameSubmitDescriptor& desc) {
+    _gpuSystem->SubmitFrame(_flightIndex, desc);
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -682,7 +809,17 @@ StagingBufferPool::StagingBufferPool(render::Device* device, uint32_t flightCoun
 
 StagingBufferPool::~StagingBufferPool() noexcept = default;
 
+void StagingBufferPool::BeginFlight(HostWriteBatch& hostWrites) {
+    if (_hostWrites != nullptr) {
+        RADRAY_ABORT("StagingBufferPool::BeginFlight called while another flight is active");
+    }
+    _hostWrites = &hostWrites;
+}
+
 StagingBufferPool::Page StagingBufferPool::CreatePage(uint64_t capacity, bool cacheable) {
+    if (_hostWrites == nullptr) {
+        RADRAY_ABORT("StagingBufferPool cannot create a page outside BeginFlight/RetireToFlight");
+    }
     render::BufferDescriptor desc{
         .Size = capacity,
         .Memory = render::MemoryType::Upload,
@@ -695,14 +832,8 @@ StagingBufferPool::Page StagingBufferPool::CreatePage(uint64_t capacity, bool ca
     auto buffer = bufferOpt.Release();
     const std::string_view namePrefix = cacheable ? "staging_page" : "staging_large";
     buffer->SetDebugName(fmt::format("{}_{}", namePrefix, _nextPageId++));
-    void* mapped = buffer->Map(0, capacity);
-    if (mapped == nullptr) {
-        RADRAY_ABORT("StagingBufferPool failed to map upload buffer of size {}", capacity);
-    }
     return Page{
-        .Buffer = std::move(buffer),
-        .Mapped = mapped,
-        .Used = 0,
+        .Upload = make_unique<MappedUploadPage>(std::move(buffer), _hostWrites),
         .Cacheable = cacheable};
 }
 
@@ -710,7 +841,7 @@ StagingBufferPool::Page& StagingBufferPool::AcquireStandardPage() {
     if (!_freeList.empty()) {
         Page page = std::move(_freeList.back());
         _freeList.pop_back();
-        page.Used = 0;
+        page.Upload->Reset();
         _active.emplace_back(std::move(page));
     } else {
         _active.emplace_back(CreatePage(_desc.PageSize, true));
@@ -718,46 +849,28 @@ StagingBufferPool::Page& StagingBufferPool::AcquireStandardPage() {
     return _active.back();
 }
 
-bool StagingBufferPool::TryReserve(
-    Page& page,
-    uint64_t size,
-    uint64_t alignment,
-    uint64_t& offset) noexcept {
-    if (page.Buffer == nullptr ||
-        page.Used > std::numeric_limits<uint64_t>::max() - (alignment - 1)) {
-        return false;
-    }
-    const uint64_t candidate = Align(page.Used, alignment);
-    const uint64_t capacity = page.Buffer->GetDesc().Size;
-    if (candidate > capacity || size > capacity - candidate) {
-        return false;
-    }
-    offset = candidate;
-    page.Used = candidate + size;
-    return true;
-}
-
-StagingBufferPool::Allocation StagingBufferPool::Allocate(uint64_t size, uint64_t alignment) {
+StagingBufferPool::Reservation StagingBufferPool::Reserve(uint64_t size, uint64_t alignment) {
     if (size == 0) {
-        return Allocation{};
+        return {};
     }
     if (alignment == 0 || (alignment & (alignment - 1)) != 0) {
         RADRAY_ABORT("StagingBufferPool alignment {} must be a non-zero power of two", alignment);
     }
     if (_device == nullptr) {
-        RADRAY_ABORT("StagingBufferPool cannot allocate without a render device");
+        RADRAY_ABORT("StagingBufferPool cannot reserve without a render device");
+    }
+    if (_hostWrites == nullptr) {
+        RADRAY_ABORT("StagingBufferPool::Reserve requires an active flight");
     }
 
-    uint64_t offset = 0;
     for (auto& page : _active) {
-        if (!page.Cacheable || !TryReserve(page, size, alignment, offset)) {
+        if (!page.Cacheable) {
             continue;
         }
-        return Allocation{
-            page.Buffer.get(),
-            static_cast<byte*>(page.Mapped) + offset,
-            offset,
-            size};
+        Reservation reservation = page.Upload->Reserve(size, alignment, *_hostWrites);
+        if (reservation.IsValid()) {
+            return reservation;
+        }
     }
 
     Page* page = nullptr;
@@ -771,40 +884,29 @@ StagingBufferPool::Allocation StagingBufferPool::Allocate(uint64_t size, uint64_
         _active.emplace_back(CreatePage(capacity, false));
         page = &_active.back();
     }
-    if (!TryReserve(*page, size, alignment, offset)) {
+    Reservation reservation = page->Upload->Reserve(size, alignment, *_hostWrites);
+    if (!reservation.IsValid()) {
         RADRAY_ABORT(
             "StagingBufferPool failed to reserve {} bytes with alignment {} from a {} byte page",
             size,
             alignment,
-            page->Buffer->GetDesc().Size);
+            page->Upload->GetCapacity());
     }
-    return Allocation{
-        page->Buffer.get(),
-        static_cast<byte*>(page->Mapped) + offset,
-        offset,
-        size};
-}
-
-void StagingBufferPool::Flush(const Allocation& allocation) {
-    if (allocation.Buffer == nullptr || allocation.Size == 0) {
-        return;
-    }
-    for (auto& page : _active) {
-        if (page.Buffer.get() == allocation.Buffer) {
-            page.Buffer->Unmap(allocation.Offset, allocation.Size);
-            return;
-        }
-    }
+    return reservation;
 }
 
 void StagingBufferPool::RetireToFlight(uint32_t flightIndex) {
     RADRAY_ASSERT(flightIndex < _pending.size());
+    if (_hostWrites == nullptr) {
+        RADRAY_ABORT("StagingBufferPool::RetireToFlight requires an active flight");
+    }
     auto& pending = _pending[flightIndex];
     pending.insert(
         pending.end(),
         std::make_move_iterator(_active.begin()),
         std::make_move_iterator(_active.end()));
     _active.clear();
+    _hostWrites = nullptr;
 }
 
 void StagingBufferPool::CollectFlight(uint32_t flightIndex) {
@@ -812,7 +914,7 @@ void StagingBufferPool::CollectFlight(uint32_t flightIndex) {
     auto& pending = _pending[flightIndex];
     for (auto& page : pending) {
         if (page.Cacheable) {
-            page.Used = 0;
+            page.Upload->Reset();
             _freeList.emplace_back(std::move(page));
         }
     }
@@ -822,21 +924,21 @@ void StagingBufferPool::CollectFlight(uint32_t flightIndex) {
 
 void StagingBufferPool::TrimFreeList() noexcept {
     std::erase_if(_freeList, [this](const Page& page) noexcept {
-        return page.Buffer == nullptr ||
+        return page.Upload == nullptr ||
                !page.Cacheable ||
-               page.Buffer->GetDesc().Size != _desc.PageSize;
+               page.Upload->GetCapacity() != _desc.PageSize;
     });
 
     uint64_t cachedBytes = 0;
     for (const auto& page : _freeList) {
-        const uint64_t pageSize = page.Buffer->GetDesc().Size;
+        const uint64_t pageSize = page.Upload->GetCapacity();
         cachedBytes = pageSize > std::numeric_limits<uint64_t>::max() - cachedBytes
                           ? std::numeric_limits<uint64_t>::max()
                           : cachedBytes + pageSize;
     }
     while (!_freeList.empty() &&
            (_freeList.size() > _desc.MaxCachedPages || cachedBytes > _desc.MaxCachedBytes)) {
-        cachedBytes -= _freeList.back().Buffer->GetDesc().Size;
+        cachedBytes -= _freeList.back().Upload->GetCapacity();
         _freeList.pop_back();
     }
 }
@@ -847,11 +949,23 @@ void StagingBufferPool::TrimFreeList() noexcept {
 
 ResourceUploader::ResourceUploader(render::Device* device, uint32_t flightCount)
     : _device(device),
-      _stagingPool(device, flightCount) {
-    (void)flightCount;
-}
+      _stagingPool(device, flightCount),
+      _flightCount(flightCount) {}
 
 ResourceUploader::~ResourceUploader() noexcept = default;
+
+void ResourceUploader::BeginFlight(
+    uint32_t flightIndex,
+    HostWriteBatch& hostWrites) {
+    if (flightIndex >= _flightCount) {
+        RADRAY_ABORT("ResourceUploader flight index {} is out of range", flightIndex);
+    }
+    if (_activeFlightIndex != std::numeric_limits<uint32_t>::max()) {
+        RADRAY_ABORT("ResourceUploader already has an active flight");
+    }
+    _activeFlightIndex = flightIndex;
+    _stagingPool.BeginFlight(hostWrites);
+}
 
 void ResourceUploader::UploadBuffer(
     render::CommandBuffer* cmdBuffer,
@@ -866,17 +980,15 @@ void ResourceUploader::UploadBuffer(
     }
 
     // 分配 staging 并拷贝 CPU 数据
-    auto alloc = _stagingPool.Allocate(size, kStagingBufferCopyAlignment);
-    std::memcpy(alloc.MappedPtr, request.SrcData.data(), size);
-    _stagingPool.Flush(alloc);
+    auto reservation = _stagingPool.Reserve(size, kStagingBufferCopyAlignment);
+    std::memcpy(reservation.Data(), request.SrcData.data(), size);
+    const auto alloc = reservation.Commit(size);
 
     vector<render::ResourceBarrierDescriptor> barriersBefore;
-    if (_device->GetBackend() == render::RenderBackend::Vulkan) {
-        barriersBefore.emplace_back(render::BarrierBufferDescriptor{
-            .Target = alloc.Buffer,
-            .Before = render::BufferState::HostWrite,
-            .After = render::BufferState::CopySource});
-    }
+    barriersBefore.emplace_back(render::BarrierBufferDescriptor{
+        .Target = alloc.Target,
+        .Before = render::BufferState::HostWrite,
+        .After = render::BufferState::CopySource});
     barriersBefore.emplace_back(render::BarrierBufferDescriptor{
         .Target = request.DstBuffer,
         .Before = request.Before,
@@ -886,7 +998,7 @@ void ResourceUploader::UploadBuffer(
     // 录制 copy
     cmdBuffer->CopyBufferToBuffer(
         request.DstBuffer, request.DstOffset,
-        alloc.Buffer, alloc.Offset,
+        alloc.Target, alloc.Offset,
         size);
 
     // 录制 barrier: dst → Common
@@ -969,8 +1081,8 @@ void ResourceUploader::UploadTexture(
     const uint64_t placementAlignment = std::max<uint64_t>(
         kStagingBufferCopyAlignment,
         _device->GetDetail().TextureDataPlacementAlignment);
-    auto alloc = _stagingPool.Allocate(uploadSize.value(), placementAlignment);
-    auto* dst = static_cast<byte*>(alloc.MappedPtr);
+    auto reservation = _stagingPool.Reserve(uploadSize.value(), placementAlignment);
+    auto* dst = static_cast<byte*>(reservation.Data());
     const auto* src = request.SrcData.data();
     const uint32_t mipLevel = request.DstRange.BaseMipLevel;
     const uint32_t mipWidth = std::max(desc.Width >> mipLevel, 1u);
@@ -986,15 +1098,13 @@ void ResourceUploader::UploadTexture(
             dstOffset += dstRowPitch;
         }
     }
-    _stagingPool.Flush(alloc);
+    const auto alloc = reservation.Commit(uploadSize.value());
 
     vector<render::ResourceBarrierDescriptor> barriersBefore;
-    if (_device->GetBackend() == render::RenderBackend::Vulkan) {
-        barriersBefore.emplace_back(render::BarrierBufferDescriptor{
-            .Target = alloc.Buffer,
-            .Before = render::BufferState::HostWrite,
-            .After = render::BufferState::CopySource});
-    }
+    barriersBefore.emplace_back(render::BarrierBufferDescriptor{
+        .Target = alloc.Target,
+        .Before = render::BufferState::HostWrite,
+        .After = render::BufferState::CopySource});
     barriersBefore.emplace_back(render::BarrierTextureDescriptor{
         .Target = request.DstTexture,
         .Before = request.Before,
@@ -1004,7 +1114,7 @@ void ResourceUploader::UploadTexture(
     // 录制 copy
     cmdBuffer->CopyBufferToTexture(
         request.DstTexture, request.DstRange,
-        alloc.Buffer, alloc.Offset);
+        alloc.Target, alloc.Offset);
 
     // 录制 barrier: dst → ShaderRead
     render::ResourceBarrierDescriptor barrierAfter = render::BarrierTextureDescriptor{
@@ -1015,7 +1125,14 @@ void ResourceUploader::UploadTexture(
 }
 
 void ResourceUploader::EndFlight(uint32_t flightIndex) {
+    if (_activeFlightIndex != flightIndex) {
+        RADRAY_ABORT(
+            "ResourceUploader ended flight {} while flight {} is active",
+            flightIndex,
+            _activeFlightIndex);
+    }
     _stagingPool.RetireToFlight(flightIndex);
+    _activeFlightIndex = std::numeric_limits<uint32_t>::max();
 }
 
 void ResourceUploader::CollectFlight(uint32_t flightIndex) {
@@ -1044,7 +1161,7 @@ std::optional<GpuMesh> ResourceUploader::UploadMeshResource(
             .Size = data.size(),
             .Memory = render::MemoryType::Device,
             .Usage = render::BufferUse::Vertex | render::BufferUse::Index | render::BufferUse::CopyDestination,
-            .Hints = GetGpuAddressPageHints(_device)};
+            .Hints = render::ResourceHint::StableGpuAddress};
         auto bufOpt = _device->CreateBuffer(bufDesc);
         if (!bufOpt.HasValue()) {
             return std::nullopt;

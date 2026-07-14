@@ -9,6 +9,7 @@ radray_add_test(test_material_property_block SOURCES test_material_property_bloc
 radray_add_test(test_render_queue SOURCES test_render_queue.cpp LINK_LIBS radraycore radrayrender radrayruntime)
 radray_add_test(test_staging_buffer_pool SOURCES test_staging_buffer_pool.cpp LINK_LIBS radraycore radrayrender radrayruntime)
 radray_add_test(test_gpu_resource SOURCES test_gpu_resource.cpp LINK_LIBS radraycore radrayrender radrayruntime)
+radray_add_test(test_mapped_memory SOURCES test_mapped_memory.cpp LINK_LIBS radraycore radrayrender radrayruntime)
 
 # 设备级集成测试: material -> variant -> parameter table 全链路。复用 render 测试框架
 # (仅依赖 core+render), 需要 DXC; Vulkan 后端还需 SPIR-V Cross 反射。

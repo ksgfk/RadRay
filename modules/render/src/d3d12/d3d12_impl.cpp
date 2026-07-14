@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <limits>
 
+#include <radray/scope_guard.h>
 #include <radray/text_encoding.h>
 
 namespace radray::render::d3d12 {
@@ -1462,7 +1463,8 @@ Nullable<unique_ptr<Buffer>> DeviceD3D12::CreateBuffer(const BufferDescriptor& d
     D3D12MA::ALLOCATION_DESC allocDesc{};
     allocDesc.HeapType = MapType(desc.Memory);
     allocDesc.Flags = D3D12MA::ALLOCATION_FLAG_NONE;
-    if (desc.Hints.HasFlag(ResourceHint::Dedicated)) {
+    if (desc.Hints.HasFlag(ResourceHint::Dedicated) ||
+        desc.Hints.HasFlag(ResourceHint::StableGpuAddress)) {
         allocDesc.Flags = static_cast<D3D12MA::ALLOCATION_FLAGS>(allocDesc.Flags | D3D12MA::ALLOCATION_FLAG_COMMITTED);
     }
     ComPtr<ID3D12Resource> buffer;
@@ -1515,6 +1517,60 @@ Nullable<unique_ptr<Buffer>> DeviceD3D12::CreateBuffer(const BufferDescriptor& d
     result->_hints = desc.Hints;
     result->_reqSize = logicalSize;
     return result;
+}
+
+void DeviceD3D12::FlushMappedRanges(std::span<const MappedBufferRange> ranges) noexcept {
+    struct ValidatedRange {
+        BufferD3D12* Buffer{nullptr};
+        BufferRange Range{};
+        bool Persistent{false};
+    };
+    vector<ValidatedRange> validated;
+    validated.reserve(ranges.size());
+
+    for (const MappedBufferRange& mappedRange : ranges) {
+        if (mappedRange.Target == nullptr) {
+            RADRAY_ABORT("D3D12 mapped flush range has a null target");
+        }
+        if (mappedRange.Target->GetDevice() != this) {
+            RADRAY_ABORT("cannot flush a D3D12 mapped range across devices");
+        }
+        const BufferDescriptor desc = mappedRange.Target->GetDesc();
+        if (!desc.Usage.HasFlag(BufferUse::MapWrite)) {
+            RADRAY_ABORT("D3D12 mapped flush requires MapWrite usage");
+        }
+        const uint64_t offset = mappedRange.Range.Offset;
+        if (offset > desc.Size) {
+            RADRAY_ABORT("D3D12 mapped flush offset is outside the buffer");
+        }
+        const uint64_t size = mappedRange.Range.Size == BufferRange::All()
+                                  ? desc.Size - offset
+                                  : mappedRange.Range.Size;
+        if (size > desc.Size - offset) {
+            RADRAY_ABORT("D3D12 mapped flush range is outside the buffer");
+        }
+        auto* buffer = CastD3D12Object(mappedRange.Target);
+        if (!buffer->IsValid()) {
+            RADRAY_ABORT("cannot flush an invalid D3D12 buffer");
+        }
+        if (size == 0) {
+            continue;
+        }
+        const bool persistent = desc.Hints.HasFlag(ResourceHint::PersistentMap);
+        if (!persistent && !buffer->_mapped) {
+            RADRAY_ABORT("cannot flush a D3D12 buffer that is not mapped");
+        }
+        validated.push_back(ValidatedRange{
+            .Buffer = buffer,
+            .Range = BufferRange{.Offset = offset, .Size = size},
+            .Persistent = persistent});
+    }
+
+    for (const ValidatedRange& range : validated) {
+        if (!range.Persistent) {
+            range.Buffer->FlushMappedRange(range.Range);
+        }
+    }
 }
 
 Nullable<unique_ptr<Texture>> DeviceD3D12::CreateTexture(const TextureDescriptor& desc_) noexcept {
@@ -2837,8 +2893,11 @@ Nullable<unique_ptr<ShaderBindingTable>> DeviceD3D12::CreateShaderBindingTable(c
         return nullptr;
     }
     uint64_t totalSize = recordStride * totalRecords;
-    auto buffer = this->CreateBuffer(
-        {totalSize, MemoryType::Upload, BufferUse::ShaderTable | BufferUse::MapWrite, ResourceHint::None});
+    auto buffer = this->CreateBuffer(BufferDescriptor{
+        .Size = totalSize,
+        .Memory = MemoryType::Upload,
+        .Usage = BufferUse::ShaderTable | BufferUse::MapWrite,
+        .Hints = ResourceHint::StableGpuAddress});
     if (!buffer.HasValue()) {
         return nullptr;
     }
@@ -3078,7 +3137,7 @@ bool CmdListD3D12::IsValid() const noexcept {
 }
 
 void CmdListD3D12::Destroy() noexcept {
-    _keepAliveResources.clear();
+    _keepAliveBuffers.clear();
     _cmdAlloc = nullptr;
     _cmdList = nullptr;
 }
@@ -3091,7 +3150,7 @@ void CmdListD3D12::SetDebugName(std::string_view name) noexcept {
 }
 
 void CmdListD3D12::Begin() noexcept {
-    _keepAliveResources.clear();
+    _keepAliveBuffers.clear();
     if (HRESULT hr = _cmdAlloc->Reset();
         FAILED(hr)) {
         RADRAY_ABORT("ID3D12CommandAllocator::Reset failed: {} {}", GetErrorName(hr), hr);
@@ -3116,6 +3175,12 @@ void CmdListD3D12::ResourceBarrier(std::span<const ResourceBarrierDescriptor> ba
     for (const auto& v : barriers) {
         if (const auto* bb = std::get_if<BarrierBufferDescriptor>(&v)) {
             auto buf = CastD3D12Object(bb->Target);
+            if (bb->Before.HasFlag(BufferState::HostRead) ||
+                bb->Before.HasFlag(BufferState::HostWrite) ||
+                bb->After.HasFlag(BufferState::HostRead) ||
+                bb->After.HasFlag(BufferState::HostWrite)) {
+                continue;
+            }
             D3D12_RESOURCE_BARRIER raw{};
             if (bb->Before == BufferState::UnorderedAccess && bb->After == BufferState::UnorderedAccess) {
                 raw.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
@@ -4013,72 +4078,38 @@ void CmdRayTracingPassD3D12::BuildTopLevelAS(const BuildTopLevelASDescriptor& de
         RADRAY_ERR_LOG("BuildTopLevelAS update requested without AllowUpdate flag");
         return;
     }
+    for (const RayTracingInstanceDescriptor& instance : desc.Instances) {
+        if (instance.Blas == nullptr) {
+            RADRAY_ERR_LOG("BuildTopLevelAS instance has a null BLAS");
+            return;
+        }
+        auto* blas = CastD3D12Object(instance.Blas);
+        if (!blas->IsValid() || blas->_device != _cmdList->_device ||
+            blas->_desc.Type != AccelerationStructureType::BottomLevel) {
+            RADRAY_ERR_LOG("BuildTopLevelAS instance has an invalid BLAS");
+            return;
+        }
+    }
 
     const uint64_t instanceBufferSize = uint64_t(desc.Instances.size()) * sizeof(D3D12_RAYTRACING_INSTANCE_DESC);
-    ComPtr<ID3D12Resource> instanceBuffer;
-    D3D12_HEAP_PROPERTIES heapProps{};
-    heapProps.Type = D3D12_HEAP_TYPE_UPLOAD;
-    D3D12_RESOURCE_DESC resDesc{};
-    resDesc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-    resDesc.Alignment = 0;
-    resDesc.Width = Align(instanceBufferSize, 256ull);
-    resDesc.Height = 1;
-    resDesc.DepthOrArraySize = 1;
-    resDesc.MipLevels = 1;
-    resDesc.Format = DXGI_FORMAT_UNKNOWN;
-    resDesc.SampleDesc.Count = 1;
-    resDesc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-    if (HRESULT hr = _cmdList->_device->_device->CreateCommittedResource(
-            &heapProps,
-            D3D12_HEAP_FLAG_NONE,
-            &resDesc,
-            D3D12_RESOURCE_STATE_GENERIC_READ,
-            nullptr,
-            IID_PPV_ARGS(instanceBuffer.GetAddressOf()));
-        FAILED(hr)) {
-        RADRAY_ERR_LOG("CreateCommittedResource for TLAS instances failed: {} {}", GetErrorName(hr), hr);
+    auto instanceBufferOpt = _cmdList->_device->CreateBuffer(BufferDescriptor{
+        .Size = Align(instanceBufferSize, 256ull),
+        .Memory = MemoryType::Upload,
+        .Usage = BufferUse::MapWrite,
+        .Hints = ResourceHint::StableGpuAddress});
+    if (!instanceBufferOpt.HasValue()) {
+        RADRAY_ERR_LOG("failed to create TLAS instance buffer");
         return;
     }
-    _cmdList->_keepAliveResources.push_back(instanceBuffer);
-
-    auto* mapped = static_cast<D3D12_RAYTRACING_INSTANCE_DESC*>(nullptr);
-    D3D12_RANGE mapRange{0, static_cast<SIZE_T>(instanceBufferSize)};
-    if (HRESULT hr = instanceBuffer->Map(0, &mapRange, reinterpret_cast<void**>(&mapped));
-        FAILED(hr)) {
-        RADRAY_ERR_LOG("Map TLAS instance buffer failed: {} {}", GetErrorName(hr), hr);
-        return;
-    }
-    for (size_t i = 0; i < desc.Instances.size(); i++) {
-        const auto& src = desc.Instances[i];
-        auto& dst = mapped[i];
-        dst.Transform[0][0] = src.Transform(0, 0);
-        dst.Transform[0][1] = src.Transform(0, 1);
-        dst.Transform[0][2] = src.Transform(0, 2);
-        dst.Transform[0][3] = src.Transform(0, 3);
-        dst.Transform[1][0] = src.Transform(1, 0);
-        dst.Transform[1][1] = src.Transform(1, 1);
-        dst.Transform[1][2] = src.Transform(1, 2);
-        dst.Transform[1][3] = src.Transform(1, 3);
-        dst.Transform[2][0] = src.Transform(2, 0);
-        dst.Transform[2][1] = src.Transform(2, 1);
-        dst.Transform[2][2] = src.Transform(2, 2);
-        dst.Transform[2][3] = src.Transform(2, 3);
-        dst.InstanceID = src.InstanceID;
-        dst.InstanceMask = src.InstanceMask;
-        dst.InstanceContributionToHitGroupIndex = src.InstanceContributionToHitGroupIndex;
-        dst.Flags = D3D12_RAYTRACING_INSTANCE_FLAG_NONE;
-        if (src.ForceOpaque) dst.Flags |= D3D12_RAYTRACING_INSTANCE_FLAG_FORCE_OPAQUE;
-        if (src.ForceNoOpaque) dst.Flags |= D3D12_RAYTRACING_INSTANCE_FLAG_FORCE_NON_OPAQUE;
-        dst.AccelerationStructure = CastD3D12Object(src.Blas)->_gpuAddr;
-    }
-    D3D12_RANGE unmapRange{0, static_cast<SIZE_T>(instanceBufferSize)};
-    instanceBuffer->Unmap(0, &unmapRange);
+    auto instanceBuffer = instanceBufferOpt.Release();
+    instanceBuffer->SetDebugName("d3d12_tlas_instances");
+    auto* instanceBufferRaw = CastD3D12Object(instanceBuffer.get());
 
     D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS inputs{};
     inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
     inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
     inputs.NumDescs = static_cast<UINT>(desc.Instances.size());
-    inputs.InstanceDescs = instanceBuffer->GetGPUVirtualAddress();
+    inputs.InstanceDescs = instanceBufferRaw->_gpuAddr;
     inputs.Flags = MapBuildFlags(target->_desc.Flags);
     if (desc.Mode == AccelerationStructureBuildMode::Update) {
         inputs.Flags |= D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PERFORM_UPDATE;
@@ -4105,6 +4136,40 @@ void CmdRayTracingPassD3D12::BuildTopLevelAS(const BuildTopLevelASDescriptor& de
         return;
     }
 
+    auto* mapped = static_cast<D3D12_RAYTRACING_INSTANCE_DESC*>(
+        instanceBuffer->Map(0, instanceBufferSize));
+    if (mapped == nullptr) {
+        RADRAY_ERR_LOG("failed to map TLAS instance buffer");
+        return;
+    }
+    auto unmapGuard = MakeScopeGuard([&]() noexcept { instanceBuffer->Unmap(); });
+    for (size_t i = 0; i < desc.Instances.size(); i++) {
+        const auto& src = desc.Instances[i];
+        auto& dst = mapped[i];
+        dst.Transform[0][0] = src.Transform(0, 0);
+        dst.Transform[0][1] = src.Transform(0, 1);
+        dst.Transform[0][2] = src.Transform(0, 2);
+        dst.Transform[0][3] = src.Transform(0, 3);
+        dst.Transform[1][0] = src.Transform(1, 0);
+        dst.Transform[1][1] = src.Transform(1, 1);
+        dst.Transform[1][2] = src.Transform(1, 2);
+        dst.Transform[1][3] = src.Transform(1, 3);
+        dst.Transform[2][0] = src.Transform(2, 0);
+        dst.Transform[2][1] = src.Transform(2, 1);
+        dst.Transform[2][2] = src.Transform(2, 2);
+        dst.Transform[2][3] = src.Transform(2, 3);
+        dst.InstanceID = src.InstanceID;
+        dst.InstanceMask = src.InstanceMask;
+        dst.InstanceContributionToHitGroupIndex = src.InstanceContributionToHitGroupIndex;
+        dst.Flags = D3D12_RAYTRACING_INSTANCE_FLAG_NONE;
+        if (src.ForceOpaque) dst.Flags |= D3D12_RAYTRACING_INSTANCE_FLAG_FORCE_OPAQUE;
+        if (src.ForceNoOpaque) dst.Flags |= D3D12_RAYTRACING_INSTANCE_FLAG_FORCE_NON_OPAQUE;
+        dst.AccelerationStructure = CastD3D12Object(src.Blas)->_gpuAddr;
+    }
+    instanceBuffer->FlushMappedRange(BufferRange{.Offset = 0, .Size = instanceBufferSize});
+    instanceBuffer->Unmap();
+    unmapGuard.Dismiss();
+
     D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC build{};
     build.Inputs = inputs;
     build.DestAccelerationStructureData = target->_gpuAddr;
@@ -4113,6 +4178,7 @@ void CmdRayTracingPassD3D12::BuildTopLevelAS(const BuildTopLevelASDescriptor& de
         build.SourceAccelerationStructureData = target->_gpuAddr;
     }
     cmdList4->BuildRaytracingAccelerationStructure(&build, 0, nullptr);
+    _cmdList->_keepAliveBuffers.emplace_back(std::move(instanceBuffer));
 }
 
 void CmdRayTracingPassD3D12::BindRayTracingPipelineState(RayTracingPipelineState* pso) noexcept {
@@ -4377,12 +4443,21 @@ bool BufferD3D12::IsValid() const noexcept {
 }
 
 void BufferD3D12::Destroy() noexcept {
+    if (_mapped) {
+        Unmap();
+    }
     _mappedData = nullptr;
     _buf = nullptr;
     _alloc = nullptr;
 }
 
 void* BufferD3D12::Map(uint64_t offset, uint64_t size) noexcept {
+    if (!_usage.HasFlag(BufferUse::MapRead) && !_usage.HasFlag(BufferUse::MapWrite)) {
+        RADRAY_ABORT("cannot map a D3D12 buffer without MapRead or MapWrite usage");
+    }
+    if (offset > _reqSize || size > _reqSize - offset) {
+        RADRAY_ABORT("D3D12 buffer map range is out of bounds");
+    }
     if (_hints.HasFlag(ResourceHint::PersistentMap) && _mappedData != nullptr) {
         return static_cast<byte*>(_mappedData) + offset;
     }
@@ -4397,17 +4472,71 @@ void* BufferD3D12::Map(uint64_t offset, uint64_t size) noexcept {
     if (_hints.HasFlag(ResourceHint::PersistentMap)) {
         _mappedData = ptr;
     }
+    _mapped = true;
     return static_cast<byte*>(ptr) + offset;
 }
 
-void BufferD3D12::Unmap(uint64_t offset, uint64_t size) noexcept {
+void BufferD3D12::Unmap() noexcept {
+    if (!_mapped) {
+        return;
+    }
+    const D3D12_RANGE range = _usage.HasFlag(BufferUse::MapWrite) && _hasPendingFlush
+                                  ? D3D12_RANGE{_flushOffset, _flushOffset + _flushSize}
+                                  : D3D12_RANGE{0, 0};
+    _buf->Unmap(0, &range);
+    _mappedData = nullptr;
+    _flushOffset = 0;
+    _flushSize = 0;
+    _hasPendingFlush = false;
+    _mapped = false;
+}
+
+void BufferD3D12::FlushMappedRange(BufferRange range) noexcept {
+    const uint64_t offset = range.Offset;
+    if (!_usage.HasFlag(BufferUse::MapWrite) || offset > _reqSize) {
+        RADRAY_ABORT("invalid D3D12 mapped flush range");
+    }
+    const uint64_t size = range.Size == BufferRange::All()
+                              ? _reqSize - offset
+                              : range.Size;
+    if (size > _reqSize - offset) {
+        RADRAY_ABORT("invalid D3D12 mapped flush range");
+    }
+    if (size == 0) {
+        return;
+    }
     if (_hints.HasFlag(ResourceHint::PersistentMap)) {
         return;
     }
-    D3D12_RANGE range = _usage.HasFlag(BufferUse::MapWrite)
-                            ? D3D12_RANGE{offset, offset + size}
-                            : D3D12_RANGE{0, 0};
-    _buf->Unmap(0, &range);
+    if (!_mapped) {
+        RADRAY_ABORT("cannot flush a D3D12 buffer that is not mapped");
+    }
+    if (!_hasPendingFlush) {
+        _flushOffset = offset;
+        _flushSize = size;
+        _hasPendingFlush = true;
+        return;
+    }
+    const uint64_t begin = std::min(_flushOffset, offset);
+    const uint64_t end = std::max(_flushOffset + _flushSize, offset + size);
+    _flushOffset = begin;
+    _flushSize = end - begin;
+}
+
+void BufferD3D12::InvalidateMappedRange(BufferRange range) noexcept {
+    const uint64_t offset = range.Offset;
+    if (!_usage.HasFlag(BufferUse::MapRead) || offset > _reqSize) {
+        RADRAY_ABORT("invalid D3D12 mapped invalidate range");
+    }
+    const uint64_t size = range.Size == BufferRange::All()
+                              ? _reqSize - offset
+                              : range.Size;
+    if (size > _reqSize - offset) {
+        RADRAY_ABORT("invalid D3D12 mapped invalidate range");
+    }
+    if (size == 0) {
+        return;
+    }
 }
 
 void BufferD3D12::SetDebugName(std::string_view name) noexcept {
@@ -4417,10 +4546,10 @@ void BufferD3D12::SetDebugName(std::string_view name) noexcept {
 
 BufferDescriptor BufferD3D12::GetDesc() const noexcept {
     return BufferDescriptor{
-        _reqSize,
-        _memory,
-        _usage,
-        _hints};
+        .Size = _reqSize,
+        .Memory = _memory,
+        .Usage = _usage,
+        .Hints = _hints};
 }
 
 QueryPoolD3D12::QueryPoolD3D12(
@@ -4975,17 +5104,10 @@ bool ShaderBindingTableD3D12::Build(std::span<const ShaderBindingTableBuildEntry
         RADRAY_ERR_LOG("invalid SBT record stride/handle size");
         return false;
     }
-    uint64_t totalSize = _buffer->GetDesc().Size;
-    auto* mapped = static_cast<byte*>(_buffer->Map(0, totalSize));
-    if (mapped == nullptr) {
-        RADRAY_ERR_LOG("failed to map SBT buffer");
-        return false;
-    }
-    std::memset(mapped, 0, static_cast<size_t>(totalSize));
-    for (const auto& entry : entries) {
+    auto resolveRegion = [this](ShaderBindingTableEntryType type) noexcept {
         uint32_t count = 0;
         uint64_t baseOffset = 0;
-        switch (entry.Type) {
+        switch (type) {
             case ShaderBindingTableEntryType::RayGen:
                 count = _desc.RayGenCount;
                 baseOffset = _rayGenOffset;
@@ -5003,30 +5125,54 @@ bool ShaderBindingTableD3D12::Build(std::span<const ShaderBindingTableBuildEntry
                 baseOffset = _callableOffset;
                 break;
         }
+        return std::pair{count, baseOffset};
+    };
+    struct ResolvedEntry {
+        uint64_t Offset{0};
+        vector<byte> Handle;
+        std::span<const byte> LocalData;
+    };
+    vector<ResolvedEntry> resolvedEntries;
+    resolvedEntries.reserve(entries.size());
+    for (const auto& entry : entries) {
+        const auto [count, baseOffset] = resolveRegion(entry.Type);
         if (entry.RecordIndex >= count) {
             RADRAY_ERR_LOG("SBT record index out of range: type={}, index={}, count={}", static_cast<uint32_t>(entry.Type), entry.RecordIndex, count);
-            _buffer->Unmap(0, totalSize);
             return false;
         }
         auto handle = _pipeline->GetShaderBindingTableHandle(entry.ShaderName);
         if (!handle.has_value()) {
             RADRAY_ERR_LOG("cannot find shader handle '{}'", entry.ShaderName);
-            _buffer->Unmap(0, totalSize);
             return false;
         }
         if (entry.LocalData.size() > _recordStride - req.HandleSize) {
             RADRAY_ERR_LOG("local data too large for SBT record '{}'", entry.ShaderName);
-            _buffer->Unmap(0, totalSize);
             return false;
         }
-        uint64_t dstOffset = baseOffset + _recordStride * entry.RecordIndex;
-        auto* dst = mapped + dstOffset;
-        std::memcpy(dst, handle->data(), req.HandleSize);
+        resolvedEntries.push_back(ResolvedEntry{
+            .Offset = baseOffset + _recordStride * entry.RecordIndex,
+            .Handle = std::move(handle.value()),
+            .LocalData = entry.LocalData});
+    }
+
+    const uint64_t totalSize = _buffer->GetDesc().Size;
+    auto* mapped = static_cast<byte*>(_buffer->Map(0, totalSize));
+    if (mapped == nullptr) {
+        RADRAY_ERR_LOG("failed to map SBT buffer");
+        return false;
+    }
+    auto unmapGuard = MakeScopeGuard([&]() noexcept { _buffer->Unmap(); });
+    std::memset(mapped, 0, static_cast<size_t>(totalSize));
+    for (const ResolvedEntry& entry : resolvedEntries) {
+        auto* dst = mapped + entry.Offset;
+        std::memcpy(dst, entry.Handle.data(), req.HandleSize);
         if (!entry.LocalData.empty()) {
             std::memcpy(dst + req.HandleSize, entry.LocalData.data(), entry.LocalData.size());
         }
     }
-    _buffer->Unmap(0, totalSize);
+    _buffer->FlushMappedRange(BufferRange{.Offset = 0, .Size = totalSize});
+    _buffer->Unmap();
+    unmapGuard.Dismiss();
     _isBuilt = true;
     return true;
 }

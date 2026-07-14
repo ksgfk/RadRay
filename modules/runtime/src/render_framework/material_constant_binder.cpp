@@ -185,11 +185,11 @@ const vector<MaterialConstantBinder::BlockLayout>& MaterialConstantBinder::GetOr
     return pos->second;
 }
 
-
 uint32_t MaterialConstantBinder::Bind(
     const CompiledShaderVariant& variant,
     render::BindingGroup& group,
     MaterialConstantPool& pool,
+    HostWriteBatch& hostWrites,
     std::span<const MaterialConstantValue> values,
     std::span<const std::string_view> reservedBlockNames,
     vector<MaterialConstantPool::Allocation>* allocations) noexcept {
@@ -233,12 +233,13 @@ uint32_t MaterialConstantBinder::Bind(
             continue;
         }
 
-        auto allocation = pool.Allocate(block.Size);
-        if (allocation.Target == nullptr || allocation.Mapped == nullptr) {
+        auto reservation = pool.Reserve(block.Size, hostWrites);
+        if (!reservation.IsValid()) {
             RADRAY_ERR_LOG("MaterialConstantBinder: cbuffer allocation failed for block '{}'", block.Name);
             continue;
         }
-        std::memcpy(allocation.Mapped, _stagingScratch.data(), block.Size);
+        std::memcpy(reservation.Data(), _stagingScratch.data(), block.Size);
+        auto allocation = reservation.Commit(block.Size);
         render::BufferBindingDescriptor descriptor{};
         descriptor.Target = allocation.Target;
         descriptor.Range = render::BufferRange{.Offset = allocation.Offset, .Size = block.Size};
@@ -252,7 +253,6 @@ uint32_t MaterialConstantBinder::Bind(
             pool.Release(allocation);
         }
     }
-    pool.FlushHostWrites();
     return bound;
 }
 

@@ -151,6 +151,8 @@ public:
 
     Nullable<unique_ptr<Buffer>> CreateBuffer(const BufferDescriptor& desc) noexcept override;
 
+    void FlushMappedRanges(std::span<const MappedBufferRange> ranges) noexcept override;
+
     Nullable<unique_ptr<Texture>> CreateTexture(const TextureDescriptor& desc) noexcept override;
 
     Nullable<unique_ptr<TextureView>> CreateTextureView(const TextureViewDescriptor& desc) noexcept override;
@@ -796,11 +798,17 @@ public:
 
     void* Map(uint64_t offset, uint64_t size) noexcept override;
 
-    void Unmap(uint64_t offset, uint64_t size) noexcept override;
+    void Unmap() noexcept override;
+
+    void FlushMappedRange(BufferRange range) noexcept override;
+
+    void InvalidateMappedRange(BufferRange range) noexcept override;
 
     void SetDebugName(std::string_view name) noexcept override;
 
     BufferDescriptor GetDesc() const noexcept override;
+
+    Device* GetDevice() const noexcept override { return _device; }
 
 public:
     void DestroyImpl() noexcept;
@@ -815,6 +823,7 @@ public:
     MemoryType _memory{};
     BufferUses _usage{BufferUse::UNKNOWN};
     ResourceHints _hints{};
+    bool _hostCoherent{false};
 };
 
 class BufferViewVulkan final : public RenderBase {

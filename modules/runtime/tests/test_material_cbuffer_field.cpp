@@ -8,6 +8,7 @@
 
 #include <radray/basic_math.h>
 #include <radray/runtime/gpu_resource.h>
+#include <radray/runtime/gpu_system.h>
 #include <radray/runtime/pipeline_state_cache.h>
 #include <radray/runtime/render_pass_registry.h>
 #include <radray/runtime/sampler_cache.h>
@@ -174,6 +175,11 @@ protected:
         _samplerCache = make_unique<SamplerCache>(_ctx.GetDevicePtr());
     }
 
+    bool SubmitAndWait(CommandBuffer* command, string* reason) {
+        _hostWrites.Flush(*_ctx.GetDevicePtr());
+        return _ctx.SubmitAndWait(command, reason);
+    }
+
     // 用给定的材质快照渲染全屏三角, 回读中心像素 RGB。失败时通过 ok=false 返回。
     std::array<uint8_t, 4> RenderCenterPixel(
         shared_ptr<const MaterialRenderSnapshot> snapshot,
@@ -238,7 +244,7 @@ protected:
         list.SortOpaque();
 
         MeshPassExecutor executor{_ctx.GetDevicePtr(), _variantCache.get(), _psoCache.get(), _samplerCache.get(), "gPerObject"};
-        FrameResources frameResources{_ctx.GetDevicePtr()};
+        FrameResources frameResources{_ctx.GetDevicePtr(), &_hostWrites};
 
         auto cmdOpt = _ctx.CreateCommandBuffer(&reason);
         if (!cmdOpt.HasValue()) {
@@ -312,7 +318,7 @@ protected:
         cmd->CopyTextureToBuffer(rb.get(), 0, rt.get(), SubresourceRange{0, 1, 0, 1});
         cmd->End();
 
-        if (!_ctx.SubmitAndWait(cmd.get(), &reason)) {
+        if (!SubmitAndWait(cmd.get(), &reason)) {
             return result;
         }
 
@@ -342,6 +348,7 @@ protected:
     }
 
     ComputeTestContext _ctx{};
+    HostWriteBatch _hostWrites{};
     unique_ptr<PipelineLayoutLibrary> _layoutLibrary{};
     unique_ptr<ShaderVariantLibrary> _variantCache{};
     unique_ptr<GraphicsPipelineStateLibrary> _psoCache{};
