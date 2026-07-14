@@ -543,8 +543,9 @@ ImGuiRenderer::ImGuiRenderer() noexcept = default;
 ImGuiRenderer::~ImGuiRenderer() noexcept {
     _frames.clear();
     _aliveTexs.clear();
+    _descriptorPool.reset();
     _pso.reset();
-    _bindingLayout = nullptr;
+    _bindingLayout.reset();
     _device = nullptr;
 }
 
@@ -555,10 +556,6 @@ Nullable<unique_ptr<ImGuiRenderer>> ImGuiRenderer::Create(const ImGuiRendererDes
     }
     if (desc.Device == nullptr) {
         RADRAY_ERR_LOG("ImGuiRendererDescriptor Device must not be null");
-        return nullptr;
-    }
-    if (desc.PipelineLayouts == nullptr) {
-        RADRAY_ERR_LOG("ImGuiRendererDescriptor PipelineLayouts must not be null");
         return nullptr;
     }
     if (desc.RenderPasses == nullptr) {
@@ -700,7 +697,7 @@ Nullable<unique_ptr<ImGuiRenderer>> ImGuiRenderer::Create(const ImGuiRendererDes
         .StaticSamplers = std::span<const render::StaticSamplerDescriptor>{&staticSampler, 1},
         .PushConstantBindings = std::span<const render::PushConstantBinding>{&pushConstant, 1}};
 
-    auto layoutOpt = desc.PipelineLayouts->GetOrCreate(layoutDesc);
+    auto layoutOpt = desc.Device->CreatePipelineLayout(layoutDesc);
     if (!layoutOpt.HasValue()) {
         return nullptr;
     }
@@ -753,7 +750,7 @@ Nullable<unique_ptr<ImGuiRenderer>> ImGuiRenderer::Create(const ImGuiRendererDes
 
     auto result = make_unique<ImGuiRenderer>();
     result->_device = desc.Device;
-    result->_bindingLayout = bindingLayout;
+    result->_bindingLayout = layoutOpt.Release();
     result->_pso = psoOpt.Release();
     auto poolOpt = desc.Device->CreateDescriptorPool(render::DescriptorPoolDescriptor{
         .MaxBindingGroups = 4096,
@@ -829,7 +826,7 @@ ImTextureID ImGuiRenderer::CreateOrUpdateExternalTexture(ImTextureID textureId, 
     // 外部纹理按 flight 持有独立参数表：当前 flight 的参数表在上一轮提交后已随 fence 完成，
     // 改写它不会触及仍在飞行中的其他 flight 命令缓冲。
     if (texture->GetExternalGroup(flightIndex) == nullptr) {
-        auto groupOpt = _device->CreateBindingGroup(_descriptorPool.get(), _bindingLayout, 1);
+        auto groupOpt = _device->CreateBindingGroup(_descriptorPool.get(), _bindingLayout.get(), 1);
         if (!groupOpt.HasValue()) {
             return ImTextureID_Invalid;
         }
@@ -1162,7 +1159,7 @@ void ImGuiRenderer::OnRenderBeginFrame(
             auto srv = srvOpt.Release();
             srv->SetDebugName(fmt::format("imgui_tex_srv_{}", payload.UniqueId));
 
-            auto groupOpt = _device->CreateBindingGroup(_descriptorPool.get(), _bindingLayout, 1);
+            auto groupOpt = _device->CreateBindingGroup(_descriptorPool.get(), _bindingLayout.get(), 1);
             if (!groupOpt.HasValue()) {
                 continue;
             }
@@ -1229,7 +1226,7 @@ void ImGuiRenderer::OnRenderFrame(uint32_t frameIndex, Frame& frame, uint32_t dr
     push.Translate[0] = (R + L) / (L - R);
     push.Translate[1] = (T + B) / (B - T);
     if (!encoder->SetPushConstants(
-            _bindingLayout,
+            _bindingLayout.get(),
             0,
             0,
             std::as_bytes(std::span{&push, 1}))) {
@@ -1381,7 +1378,6 @@ bool ImGuiSystem::Initialize(const ImGuiSystemDescriptor& desc) {
     if (desc.MainWindow == nullptr ||
         desc.Windows == nullptr ||
         desc.Device == nullptr ||
-        desc.PipelineLayouts == nullptr ||
         desc.RenderPasses == nullptr ||
         desc.DirectQueue == nullptr) {
         RADRAY_ERR_LOG("ImGuiSystemDescriptor requires MainWindow, Windows, Device, PipelineLayouts, RenderPasses and DirectQueue");
@@ -1414,7 +1410,6 @@ bool ImGuiSystem::Initialize(const ImGuiSystemDescriptor& desc) {
     io.Fonts->AddFontDefault();
     auto renderer = ImGuiRenderer::Create(ImGuiRendererDescriptor{
         .Device = desc.Device,
-        .PipelineLayouts = desc.PipelineLayouts,
         .RenderPasses = desc.RenderPasses,
         .RenderTargetFormat = desc.RenderTargetFormat,
         .FlightDataCount = desc.FlightDataCount});
@@ -1533,7 +1528,6 @@ void ImGuiSystem::OnInit(Application& app) {
         .MainWindow = mainWindow,
         .Windows = windowManager,
         .Device = device,
-        .PipelineLayouts = gpuSystem->GetPipelineLayoutLibrary(),
         .RenderPasses = gpuSystem->GetRenderPassRegistry(),
         .RenderTargetFormat = windowManager->GetMainBackBufferFormat(),
         .FlightDataCount = gpuSystem->GetFlightDataCount(),
@@ -1614,7 +1608,7 @@ void ImGuiSystem::OnRenderBegin(AppFrameContext& ctx) {
         ctx.FlightIndex(),
         ctx.GetCommandBuffer(),
         ctx.GetUploader(),
-        ctx.GetFrameResources().GetHostWrites());
+        ctx.GetHostWrites());
 }
 
 bool ImGuiSystem::OnRender(AppFrameContext& ctx, const AppFrameTarget& target, bool contentDrawn) {

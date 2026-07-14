@@ -24,7 +24,6 @@ class AppWindow;
 class WindowManager;
 class AppFrameContext;
 class Application;
-class PipelineLayoutLibrary;
 class RenderPassRegistry;
 class ImGuiSystem;
 class ImGuiRenderer;
@@ -37,7 +36,6 @@ struct AppFrameTarget;
 
 struct ImGuiRendererDescriptor {
     render::Device* Device;
-    PipelineLayoutLibrary* PipelineLayouts;
     RenderPassRegistry* RenderPasses;
     render::TextureFormat RenderTargetFormat{render::TextureFormat::UNKNOWN};
     uint32_t FlightDataCount;
@@ -47,7 +45,6 @@ struct ImGuiSystemDescriptor {
     AppWindow* MainWindow;
     WindowManager* Windows{nullptr};
     render::Device* Device;
-    PipelineLayoutLibrary* PipelineLayouts{nullptr};
     RenderPassRegistry* RenderPasses{nullptr};
     render::TextureFormat RenderTargetFormat{render::TextureFormat::UNKNOWN};
     uint32_t FlightDataCount;
@@ -229,7 +226,7 @@ private:
 
     ImGuiSystem* _system;
     render::Device* _device{nullptr};
-    render::PipelineLayout* _bindingLayout{nullptr};
+    unique_ptr<render::PipelineLayout> _bindingLayout;
     unique_ptr<render::GraphicsPipelineState> _pso;
     unique_ptr<render::DescriptorPool> _descriptorPool;
     vector<unique_ptr<Frame>> _frames;

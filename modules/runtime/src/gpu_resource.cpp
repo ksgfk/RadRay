@@ -555,10 +555,9 @@ void ResourceUploader::UploadTexture(
         return;
     }
 
-    const uint64_t placementAlignment = std::max({
-        uint64_t{1},
-        static_cast<uint64_t>(bytesPerPixel),
-        _device->GetDetail().TextureDataPlacementAlignment});
+    const uint64_t placementAlignment = std::max({uint64_t{1},
+                                                  static_cast<uint64_t>(bytesPerPixel),
+                                                  _device->GetDetail().TextureDataPlacementAlignment});
     auto reservation = _stagingPool.Reserve(uploadSize.value(), placementAlignment);
     auto* dst = static_cast<byte*>(reservation.Data());
     const auto* src = request.SrcData.data();
@@ -640,11 +639,11 @@ std::optional<GpuMesh> ResourceUploader::UploadMeshResource(
         auto buf = bufOpt.Release();
         buf->SetDebugName(fmt::format("{}_{}", meshResource.Name, binIdx));
         UploadBuffer(cmdBuffer, BufferUploadRequest{
-                                  .SrcData = data,
-                                  .DstBuffer = buf.get(),
-                                  .DstOffset = 0,
-                                  .Before = render::BufferState::Common,
-                                  .After = render::BufferState::Vertex | render::BufferState::Index});
+                                    .SrcData = data,
+                                    .DstBuffer = buf.get(),
+                                    .DstOffset = 0,
+                                    .Before = render::BufferState::Common,
+                                    .After = render::BufferState::Vertex | render::BufferState::Index});
 
         bufferByBin[binIdx] = buf.get();
         result.Buffers.emplace_back(std::move(buf));
@@ -769,9 +768,9 @@ Nullable<DynamicCBufferArena::Block*> DynamicCBufferArena::GetOrCreateBlock(uint
     const uint64_t previousSize = _blocks.empty() ? 0 : _blocks.back()->Page->GetCapacity();
     const uint64_t growthSize = previousSize == 0
                                     ? _desc.BasicSize
-                                    : previousSize > std::numeric_limits<uint64_t>::max() / 2
-                                          ? std::numeric_limits<uint64_t>::max()
-                                          : previousSize * 2;
+                                : previousSize > std::numeric_limits<uint64_t>::max() / 2
+                                    ? std::numeric_limits<uint64_t>::max()
+                                    : previousSize * 2;
     render::BufferDescriptor desc{
         .Size = Align(std::max({size, _minBlockSize, growthSize}), _desc.Alignment),
         .Memory = render::MemoryType::Upload,
@@ -842,195 +841,6 @@ void swap(DynamicCBufferArena& a, DynamicCBufferArena& b) noexcept {
     swap(a._minBlockSize, b._minBlockSize);
     swap(a._allocatedThisFrame, b._allocatedThisFrame);
     swap(a._highWatermark, b._highWatermark);
-}
-
-MaterialConstantPool::Allocation MaterialConstantPool::Reservation::Commit(uint64_t actualSize) {
-    const MappedUploadPage::Allocation allocation = _reservation.Commit(actualSize);
-    if (!allocation.IsValid()) {
-        return {};
-    }
-    return Allocation{
-        .Target = allocation.Target,
-        .Offset = allocation.Offset,
-        .Size = allocation.Size,
-        .ReservedSize = _reservedSize,
-        .BlockIndex = _blockIndex};
-}
-
-MaterialConstantPool::MaterialConstantPool(
-    render::Device* device,
-    uint64_t initialSize,
-    uint64_t alignment) noexcept
-    : _device(device),
-      _initialSize(initialSize),
-      _alignment(std::max<uint64_t>(alignment, 1)) {
-    if (!std::has_single_bit(_alignment)) {
-        RADRAY_ABORT("MaterialConstantPool alignment {} is not a power of two", _alignment);
-    }
-}
-
-MaterialConstantPool::~MaterialConstantPool() noexcept = default;
-
-Nullable<MaterialConstantPool::Block*> MaterialConstantPool::CreateBlock(
-    uint64_t minimumSize,
-    HostWriteBatch& hostWrites) noexcept {
-    const uint64_t previousSize = _blocks.empty() ? 0 : _blocks.back()->Page->GetCapacity();
-    const uint64_t capacity = Align(
-        std::max(minimumSize, previousSize == 0 ? _initialSize : previousSize * 2),
-        _alignment);
-    render::BufferDescriptor desc{
-        .Size = capacity,
-        .Memory = render::MemoryType::Upload,
-        .Usage = render::BufferUse::CBuffer | render::BufferUse::MapWrite | render::BufferUse::CopySource,
-        .Hints = render::ResourceHint::PersistentMap};
-    auto bufferOpt = _device->CreateBuffer(desc);
-    if (!bufferOpt.HasValue()) {
-        return nullptr;
-    }
-    auto buffer = bufferOpt.Release();
-    buffer->SetDebugName(fmt::format("material_constants_{}", _blocks.size()));
-    auto block = make_unique<Block>();
-    block->Page = make_unique<MappedUploadPage>(std::move(buffer), &hostWrites);
-    return _blocks.emplace_back(std::move(block)).get();
-}
-
-MaterialConstantPool::Reservation MaterialConstantPool::Reserve(
-    uint64_t size,
-    HostWriteBatch& hostWrites) noexcept {
-    if (_device == nullptr || size == 0) {
-        return {};
-    }
-    const uint64_t reserved = Align(size, _alignment);
-    for (size_t i = 0; i < _freeSlices.size(); ++i) {
-        FreeSlice& free = _freeSlices[i];
-        if (free.Size < reserved || free.BlockIndex >= _blocks.size()) {
-            continue;
-        }
-        Block& block = *_blocks[free.BlockIndex];
-        auto reservation = block.Page->ReserveAt(free.Offset, size, hostWrites);
-        const uint32_t blockIndex = free.BlockIndex;
-        free.Offset += reserved;
-        free.Size -= reserved;
-        if (free.Size == 0) {
-            _freeSlices.erase(_freeSlices.begin() + static_cast<ptrdiff_t>(i));
-        }
-        _activeBytes += reserved;
-        _highWatermark = std::max(_highWatermark, _activeBytes);
-        return Reservation{std::move(reservation), reserved, blockIndex};
-    }
-
-    Block* block = _blocks.empty() ? nullptr : _blocks.back().get();
-    if (block == nullptr) {
-        auto blockOpt = CreateBlock(reserved, hostWrites);
-        if (!blockOpt.HasValue()) {
-            return {};
-        }
-        block = blockOpt.Get();
-    }
-    auto reservation = block->Page->Reserve(size, _alignment, hostWrites);
-    if (!reservation.IsValid()) {
-        auto blockOpt = CreateBlock(reserved, hostWrites);
-        if (!blockOpt.HasValue()) {
-            return {};
-        }
-        block = blockOpt.Get();
-        reservation = block->Page->Reserve(size, _alignment, hostWrites);
-    }
-    const uint32_t blockIndex = static_cast<uint32_t>(_blocks.size() - 1);
-    _activeBytes += reserved;
-    _highWatermark = std::max(_highWatermark, _activeBytes);
-    return Reservation{std::move(reservation), reserved, blockIndex};
-}
-
-void MaterialConstantPool::Release(const Allocation& allocation) noexcept {
-    if (!allocation.IsValid() || allocation.BlockIndex >= _blocks.size() || allocation.ReservedSize == 0) {
-        return;
-    }
-    _freeSlices.push_back(FreeSlice{
-        .BlockIndex = allocation.BlockIndex,
-        .Offset = allocation.Offset,
-        .Size = allocation.ReservedSize});
-    _activeBytes = allocation.ReservedSize <= _activeBytes
-                       ? _activeBytes - allocation.ReservedSize
-                       : 0;
-}
-
-FrameResources::FrameResources(
-    render::Device* device,
-    HostWriteBatch* hostWrites) noexcept
-    : PerObjectArena(
-          device,
-          hostWrites,
-          DynamicCBufferArena::Descriptor{
-              .BasicSize = 256 * 1024,
-              .Alignment = std::max<uint64_t>(256, device->GetDetail().CBufferAlignment),
-              .MaxResetSize = 4 * 1024 * 1024,
-              .NamePrefix = "per_object"}),
-      ViewArena(
-          device,
-          hostWrites,
-          DynamicCBufferArena::Descriptor{
-              .BasicSize = 256 * 1024,
-              .Alignment = std::max<uint64_t>(256, device->GetDetail().CBufferAlignment),
-              .MaxResetSize = 4 * 1024 * 1024,
-              .NamePrefix = "per_view"}),
-      SystemDescriptorPool(device->CreateDescriptorPool(render::DescriptorPoolDescriptor{
-                                                            .MaxBindingGroups = 64,
-                                                            .MaxSampledTextures = 128,
-                                                            .MaxStorageTextures = 32,
-                                                            .MaxUniformBuffers = 32,
-                                                            .MaxDynamicUniformBuffers = 64,
-                                                            .MaxStorageBuffers = 64,
-                                                            .MaxReadOnlyTexelBuffers = 16,
-                                                            .MaxReadWriteTexelBuffers = 16,
-                                                            .MaxSamplers = 64,
-                                                            .MaxAccelerationStructures = 16})
-                               .Unwrap()),
-      TransientDescriptorPool(device->CreateDescriptorPool(render::DescriptorPoolDescriptor{
-                                                               .MaxBindingGroups = 128,
-                                                               .MaxSampledTextures = 256,
-                                                               .MaxStorageTextures = 64,
-                                                               .MaxUniformBuffers = 64,
-                                                               .MaxDynamicUniformBuffers = 128,
-                                                               .MaxStorageBuffers = 128,
-                                                               .MaxReadOnlyTexelBuffers = 32,
-                                                               .MaxReadWriteTexelBuffers = 32,
-                                                               .MaxSamplers = 128,
-                                                               .MaxAccelerationStructures = 32})
-                                  .Unwrap()),
-      _hostWrites(hostWrites) {
-    if (_hostWrites == nullptr) {
-        RADRAY_ABORT("FrameResources requires a host-write batch");
-    }
-    SystemDescriptorPool->SetDebugName("frame_system_descriptors");
-    TransientDescriptorPool->SetDebugName("frame_transient_descriptors");
-}
-
-void FrameResources::Reset() noexcept {
-    if (!_hostWrites->Empty()) {
-        RADRAY_ABORT("FrameResources cannot reset before its host writes are submitted");
-    }
-    RetireList.clear();
-    RetainedObjects.clear();
-    PerObjectArena.Reset();
-    ViewArena.Reset();
-    ObjectBindings.clear();
-    ResolvedBindingStates.clear();
-    std::erase_if(ResolvedGroups, [this](const FrameResolvedBindingGroupCacheEntry& entry) noexcept {
-        if (!entry.Persistent) {
-            return true;
-        }
-        return std::ranges::any_of(entry.DynamicBuffers, [this](render::Buffer* buffer) noexcept {
-            return !PerObjectArena.Contains(buffer) && !ViewArena.Contains(buffer);
-        });
-    });
-    if (TransientDescriptorPool != nullptr) {
-        TransientDescriptorPool->Reset();
-    }
-    Counters = {};
-    Counters.ObjectArenaHighWatermark = PerObjectArena.GetHighWatermark();
-    Counters.ViewArenaHighWatermark = ViewArena.GetHighWatermark();
-    ++Generation;
 }
 
 RenderPassRegistry::RenderPassRegistry(render::Device* device) noexcept
@@ -1145,6 +955,43 @@ void RenderPassRegistry::Clear() noexcept {
         }
     }
     _passes.clear();
+}
+
+SamplerKey BuildSamplerKey(const render::SamplerDescriptor& desc) noexcept {
+    SamplerKey key{};  // 清零, 保证 padding 恒为 0 (PodHasher/PodEqual 要求)
+    key.AddressS = static_cast<int32_t>(desc.AddressS);
+    key.AddressT = static_cast<int32_t>(desc.AddressT);
+    key.AddressR = static_cast<int32_t>(desc.AddressR);
+    key.MinFilter = static_cast<int32_t>(desc.MinFilter);
+    key.MagFilter = static_cast<int32_t>(desc.MagFilter);
+    key.MipmapFilter = static_cast<int32_t>(desc.MipmapFilter);
+    key.LodMin = desc.LodMin;
+    key.LodMax = desc.LodMax;
+    key.HasCompare = desc.Compare.has_value() ? 1u : 0u;
+    key.Compare = desc.Compare.has_value() ? static_cast<int32_t>(*desc.Compare) : 0;
+    key.AnisotropyClamp = desc.AnisotropyClamp;
+    return key;
+}
+
+SamplerCache::SamplerCache(render::Device* device) noexcept
+    : _device(device) {}
+
+Nullable<render::Sampler*> SamplerCache::GetOrCreate(const render::SamplerDescriptor& desc) noexcept {
+    if (_device == nullptr) {
+        return nullptr;
+    }
+    const SamplerKey key = BuildSamplerKey(desc);
+    if (auto it = _cache.find(key); it != _cache.end()) {
+        return it->second.get();
+    }
+    auto samplerOpt = _device->CreateSampler(desc);
+    if (!samplerOpt.HasValue()) {
+        RADRAY_ERR_LOG("SamplerCache::GetOrCreate: failed to create sampler");
+        return nullptr;
+    }
+    render::Sampler* raw = samplerOpt.Get();
+    _cache.emplace(key, samplerOpt.Release());
+    return raw;
 }
 
 }  // namespace radray

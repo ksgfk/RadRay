@@ -1,8 +1,5 @@
 #include <radray/runtime/texture_asset.h>
 
-#include <algorithm>
-#include <cstring>
-
 #include <fmt/format.h>
 
 #include <radray/logger.h>

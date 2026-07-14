@@ -272,26 +272,3 @@ TEST(DynamicCBufferArenaTest, ReusesRetainedOverflowPagesAcrossResets) {
     EXPECT_EQ(device.BufferDescriptors.size(), 2u);
     EXPECT_EQ(device.DestroyedBufferCount, 0u);
 }
-
-TEST(MaterialConstantPoolTest, ReusesReleasedSlicesAndRecordsCurrentBatch) {
-    FakeDevice device;
-    HostWriteBatch firstBatch;
-    HostWriteBatch secondBatch;
-    MaterialConstantPool pool{&device, 512, 256};
-
-    auto firstReservation = pool.Reserve(16, firstBatch);
-    auto secondReservation = pool.Reserve(16, firstBatch);
-    const auto first = firstReservation.Commit(16);
-    const auto second = secondReservation.Commit(16);
-    ASSERT_EQ(first.Target, second.Target);
-    ASSERT_EQ(firstBatch.GetRanges().size(), 2u);
-
-    pool.Release(first);
-    auto reusedReservation = pool.Reserve(8, secondBatch);
-    const auto reused = reusedReservation.Commit(8);
-    EXPECT_EQ(reused.Target, first.Target);
-    EXPECT_EQ(reused.Offset, first.Offset);
-    ASSERT_EQ(secondBatch.GetRanges().size(), 1u);
-    EXPECT_EQ(secondBatch.GetRanges()[0].Range.Offset, first.Offset);
-    EXPECT_EQ(secondBatch.GetRanges()[0].Range.Size, 8u);
-}

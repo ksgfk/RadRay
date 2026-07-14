@@ -15,7 +15,6 @@
 #include <radray/runtime/gpu_resource.h>
 #include <radray/runtime/render_resource_recycler.h>
 #include <radray/runtime/service_registry.h>
-#include <radray/runtime/shader_variant_library.h>
 
 namespace radray::render {
 class CommandBuffer;
@@ -103,7 +102,6 @@ struct GpuFlightSlot {
     // —— 录制态（渲染线程独占）。CmdBuffer 池化复用，
     //    Targets 收集本帧 acquire 的全部窗口以支持多窗口/多 viewport。
     unique_ptr<render::CommandBuffer> CmdBuffer;
-    unique_ptr<FrameResources> RenderResources;
     HostWriteBatch HostWrites;
     vector<AcquiredTarget> Targets;
     bool Submitted{false};
@@ -285,7 +283,7 @@ public:
     /// 绑定当前 flight 的上传器；EndFlight/CollectFlight 完全由 runtime 掌管。
     ResourceUploader& GetUploader() const noexcept;
 
-    FrameResources& GetFrameResources() const noexcept;
+    HostWriteBatch& GetHostWrites() const noexcept;
 
     /// 逃生舱：直接拿底层设备处理建资源、自定义 compute 和 readback。
     render::Device* GetDevice() const noexcept;
@@ -341,7 +339,6 @@ public:
     void PumpFrameUploadScheduler();
 
     render::Device* GetDevice() const noexcept { return _device.get(); }
-    PipelineLayoutLibrary* GetPipelineLayoutLibrary() const noexcept { return _pipelineLayoutLibrary.get(); }
     RenderPassRegistry* GetRenderPassRegistry() const noexcept { return _renderPassRegistry.get(); }
     render::CommandQueue* GetMainQueue() const noexcept { return _mainQueue; }
     WindowManager* GetWindowManager() const noexcept { return _windowManager; }
@@ -351,7 +348,6 @@ public:
     uint32_t GetFlightDataCount() const noexcept { return _flightDataCount; }
     uint64_t GetFrameIndex() const noexcept { return _nowFrameIndex; }
     uint32_t GetCurrentFlightIndex() const noexcept;
-    FrameResources& GetFrameResources(uint32_t flightIndex) noexcept;
     std::chrono::duration<float> GetLastFrameLatency() const noexcept { return _lastFrameLatency; }
     void AdvanceFrameIndex() noexcept { ++_nowFrameIndex; }
 
@@ -380,7 +376,6 @@ private:
     unique_ptr<ResourceUploader> _uploader;
     unique_ptr<FrameUploadScheduler> _frameUploadScheduler;
     unique_ptr<GpuFrameProfiler> _frameProfiler;
-    unique_ptr<PipelineLayoutLibrary> _pipelineLayoutLibrary;
     unique_ptr<RenderPassRegistry> _renderPassRegistry;
     DeferredRenderDeleteQueue _deferredDeletes;
     uint64_t _nowFrameIndex{0};

@@ -30,6 +30,23 @@ enum class RenderQueue : int32_t {
     Overlay = 4000,
 };
 
+enum class RenderPassEvent : int32_t {
+    BeforeRendering = 0,
+    BeforeRenderingShadows = 50,
+    AfterRenderingShadows = 100,
+    BeforeRenderingPrePasses = 150,
+    AfterRenderingPrePasses = 200,
+    BeforeRenderingOpaques = 250,
+    AfterRenderingOpaques = 300,
+    BeforeRenderingSkybox = 350,
+    AfterRenderingSkybox = 400,
+    BeforeRenderingTransparents = 450,
+    AfterRenderingTransparents = 500,
+    BeforeRenderingPostProcessing = 550,
+    AfterRenderingPostProcessing = 600,
+    AfterRendering = 1000,
+};
+
 /// 材质对 PSO 固定功能状态 (blend / zwrite / cull) 的覆盖 (对应 Unity ShaderLab 的
 /// [_SrcBlend] [_DstBlend] / ZWrite [_ZWrite] / Cull [_Cull])。
 ///
@@ -51,31 +68,12 @@ struct MaterialRenderState {
     friend bool operator==(const MaterialRenderState&, const MaterialRenderState&) = default;
 };
 
-/// SRP-style injection point for logical rendering passes.
-enum class RenderPassEvent : int32_t {
-    BeforeRendering = 0,
-    BeforeRenderingShadows = 50,
-    AfterRenderingShadows = 100,
-    BeforeRenderingPrePasses = 150,
-    AfterRenderingPrePasses = 200,
-    BeforeRenderingOpaques = 250,
-    AfterRenderingOpaques = 300,
-    BeforeRenderingSkybox = 350,
-    AfterRenderingSkybox = 400,
-    BeforeRenderingTransparents = 450,
-    AfterRenderingTransparents = 500,
-    BeforeRenderingPostProcessing = 550,
-    AfterRenderingPostProcessing = 600,
-    AfterRendering = 1000,
-};
-
 struct RenderPipelineTarget {
     AppFrameTarget Target;
     render::TextureStates State{render::TextureState::Undefined};
     bool ContentDrawn{false};
 };
 
-/// Per-frame pipeline state passed through the high-level render pipeline.
 struct RenderPipelineContext {
     RenderPipelineContext(Application* app, AppFrameContext& frame, std::span<RenderPipelineTarget> targets) noexcept;
 
@@ -84,8 +82,6 @@ struct RenderPipelineContext {
     std::span<RenderPipelineTarget> Targets;
 };
 
-/// One camera render request. A camera list can contain cameras for different
-/// scenes and viewport targets; the initial runtime can still populate only one.
 struct RenderCamera {
     RenderCamera(Scene* scene, CameraComponent* camera, Nullable<AppFrameTarget*> target = nullptr) noexcept;
 
@@ -139,9 +135,9 @@ public:
     RenderPipeline& operator=(RenderPipeline&&) = delete;
     virtual ~RenderPipeline() noexcept;
 
-    /// Public frame entry points. Unlike Unity SRP, these are not called by the
-    /// engine with a ready-made List<Camera>; our RenderSystem/SceneRenderer owns
-    /// viewport targeting and lets the pipeline build or consume RenderCameraList.
+    /// 公共帧入口。与 Unity SRP 不同，这些入口不会由引擎传入一个已经准备好的
+    /// List<Camera>；视口目标由 RenderSystem/SceneRenderer 管理，并允许管线构建或使用
+    /// RenderCameraList。
     void BeginFrame(RenderPipelineContext& ctx);
     void BuildCameraList(RenderPipelineContext& ctx, RenderCameraList& cameras);
     void Render(RenderPipelineContext& ctx, const RenderCameraList& cameras);
@@ -159,9 +155,8 @@ public:
     virtual shared_ptr<const MaterialRenderSnapshot> GetErrorMaterial() noexcept { return nullptr; }
 
 protected:
-    /// Override points for concrete pipelines. They mirror SRP's frame/camera
-    /// phases, but do not directly wrap ScriptableRenderContext.Submit; command
-    /// submission remains owned by our GpuSystem/RenderSystem frame flow.
+    /// 具体管线的重写点。这些重写点对应 SRP 的帧/相机阶段，但不会直接封装
+    /// ScriptableRenderContext.Submit；命令提交仍由 GpuSystem/RenderSystem 的帧流程负责。
     virtual void OnBeginFrame(RenderPipelineContext& ctx);
     virtual void OnBuildCameraList(RenderPipelineContext& ctx, RenderCameraList& cameras);
     virtual void OnRender(RenderPipelineContext& ctx, const RenderCameraList& cameras);

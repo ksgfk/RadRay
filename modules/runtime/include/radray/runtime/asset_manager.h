@@ -20,20 +20,20 @@ template <class T>
 requires std::derived_from<T, Asset>
 class StreamingAssetRef;
 
-/// 运行时弱句柄。POD,可自由拷贝/比较。指向 AssetManager 的 slot。
-/// 带 generation 检测悬垂:slot 回收复用后旧句柄解析即失效。【不可序列化】。
-using AssetHandle = SparseSetHandle;
-
-struct AssetWaitRecord : ManualCoroutineRecord {
-    AssetHandle Handle{AssetHandle::Invalid()};
-};
-
 /// 资产 slot 的生命周期状态。
 enum class AssetState {
     Loading,   ///< 空位已占,加载协程在飞,Object 尚未就绪。
     Ready,     ///< 资产已构造,可 Resolve。
     Faulted,   ///< 加载失败。
     Canceled,  ///< 加载被取消。
+};
+
+/// 运行时弱句柄。POD,可自由拷贝/比较。指向 AssetManager 的 slot。
+/// 带 generation 检测悬垂:slot 回收复用后旧句柄解析即失效。【不可序列化】。
+using AssetHandle = SparseSetHandle;
+
+struct AssetWaitRecord : ManualCoroutineRecord {
+    AssetHandle Handle{AssetHandle::Invalid()};
 };
 
 struct AssetLoadResult {

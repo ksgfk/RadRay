@@ -5,6 +5,8 @@
 #include <span>
 
 #include <radray/nullable.h>
+#include <radray/guid.h>
+#include <radray/hash.h>
 #include <radray/render/common.h>
 #include <radray/types.h>
 
@@ -12,6 +14,7 @@ namespace radray {
 
 class MeshResource;
 
+/// 持有由网格资源创建的 GPU 缓冲区及绘制视图。
 class GpuMesh {
 public:
     struct DrawData {
@@ -32,6 +35,7 @@ struct UploadMemoryStats {
     uint64_t FlushedRangeCount{0};
 };
 
+/// 收集持久映射缓冲区的写入范围，以便统一批量刷新。
 class HostWriteBatch {
 public:
     HostWriteBatch();
@@ -54,6 +58,7 @@ private:
     bool _sealed{false};
 };
 
+/// 在作用域内映射缓冲区范围，并自动完成相应的主机访问操作。
 class ScopedBufferMap {
 public:
     ScopedBufferMap(render::Buffer* buffer, render::BufferRange range) noexcept;
@@ -97,6 +102,7 @@ struct TextureUploadRequest {
     render::TextureStates After{render::TextureState::ShaderRead};
 };
 
+/// 持有持久映射的上传缓冲区，并提供线性子分配。
 class MappedUploadPage {
 public:
     struct Allocation {
@@ -108,6 +114,7 @@ public:
         bool IsValid() const noexcept { return Target != nullptr; }
     };
 
+    /// 仅可移动的映射切片，提交时记录实际写入范围。
     class Reservation {
     public:
         Reservation() noexcept = default;
@@ -158,14 +165,14 @@ public:
     render::Buffer* GetBuffer() const noexcept { return _buffer.get(); }
     uint64_t GetCapacity() const noexcept { return _buffer != nullptr ? _buffer->GetDesc().Size : 0; }
     uint64_t GetUsed() const noexcept { return _used; }
+
 private:
     unique_ptr<render::Buffer> _buffer;
     void* _mapped{nullptr};
     uint64_t _used{0};
 };
 
-/// Upload heap staging page pool. Suballocates each page linearly and recycles
-/// whole standard pages after their associated flight has completed.
+/// 上传堆暂存页池，按页线性分配，并在关联 flight 完成后回收标准页。
 class StagingBufferPool {
 public:
     using Allocation = MappedUploadPage::Allocation;
@@ -185,14 +192,13 @@ public:
 
     void BeginFlight(HostWriteBatch& hostWrites);
 
-    /// Reserves staging memory from an upload page. Requests larger than a page
-    /// receive a one-shot buffer.
+    /// 从上传页中预留暂存内存；大于标准页的请求会使用一次性缓冲区。
     Reservation Reserve(uint64_t size, uint64_t alignment = 1);
 
-    /// Moves all active staging pages into a flight's pending list.
+    /// 将所有活跃暂存页移入指定 flight 的待回收列表。
     void RetireToFlight(uint32_t flightIndex);
 
-    /// Recycles standard pages for a completed flight and releases one-shot buffers.
+    /// 回收已完成 flight 的标准页，并释放其一次性缓冲区。
     void CollectFlight(uint32_t flightIndex);
 
 private:
@@ -214,8 +220,7 @@ private:
     HostWriteBatch* _hostWrites{nullptr};
 };
 
-/// Records copy commands to an externally supplied command buffer and manages
-/// the staging pages required by those commands.
+/// 向外部命令缓冲区记录资源复制命令，并管理所需的暂存页。
 class ResourceUploader {
 public:
     ResourceUploader(render::Device* device, uint32_t flightCount);
@@ -241,6 +246,7 @@ private:
     uint32_t _activeFlightIndex{std::numeric_limits<uint32_t>::max()};
 };
 
+/// 从上传块中分配满足对齐要求的帧内常量缓冲区切片。
 class DynamicCBufferArena {
 public:
     struct Descriptor {
@@ -253,6 +259,7 @@ public:
     using Allocation = MappedUploadPage::Allocation;
     using Reservation = MappedUploadPage::Reservation;
 
+    /// 持有一个用作 Arena 后备存储的映射上传页。
     class Block {
     public:
         explicit Block(unique_ptr<MappedUploadPage> page) noexcept;
@@ -297,162 +304,7 @@ private:
     uint64_t _highWatermark{};
 };
 
-class MaterialConstantPool {
-public:
-    struct Allocation {
-        render::Buffer* Target{nullptr};
-        uint64_t Offset{0};
-        uint64_t Size{0};
-        uint64_t ReservedSize{0};
-        uint32_t BlockIndex{std::numeric_limits<uint32_t>::max()};
-
-        bool IsValid() const noexcept { return Target != nullptr; }
-    };
-
-    class Reservation {
-    public:
-        Reservation() noexcept = default;
-        Reservation(const Reservation&) = delete;
-        Reservation& operator=(const Reservation&) = delete;
-        Reservation(Reservation&&) noexcept = default;
-        Reservation& operator=(Reservation&&) noexcept = default;
-
-        void* Data() const noexcept { return _reservation.Data(); }
-        render::Buffer* Target() const noexcept { return _reservation.Target(); }
-        uint64_t Offset() const noexcept { return _reservation.Offset(); }
-        uint64_t Capacity() const noexcept { return _reservation.Capacity(); }
-        bool IsValid() const noexcept { return _reservation.IsValid(); }
-
-        Allocation Commit(uint64_t actualSize);
-
-    private:
-        friend class MaterialConstantPool;
-        Reservation(
-            MappedUploadPage::Reservation reservation,
-            uint64_t reservedSize,
-            uint32_t blockIndex) noexcept
-            : _reservation(std::move(reservation)),
-              _reservedSize(reservedSize),
-              _blockIndex(blockIndex) {}
-
-        MappedUploadPage::Reservation _reservation;
-        uint64_t _reservedSize{0};
-        uint32_t _blockIndex{std::numeric_limits<uint32_t>::max()};
-    };
-
-    MaterialConstantPool(
-        render::Device* device,
-        uint64_t initialSize = 256 * 1024,
-        uint64_t alignment = 256) noexcept;
-    MaterialConstantPool(const MaterialConstantPool&) = delete;
-    MaterialConstantPool& operator=(const MaterialConstantPool&) = delete;
-    ~MaterialConstantPool() noexcept;
-
-    Reservation Reserve(uint64_t size, HostWriteBatch& hostWrites) noexcept;
-    void Release(const Allocation& allocation) noexcept;
-    uint64_t GetHighWatermark() const noexcept { return _highWatermark; }
-
-private:
-    struct Block {
-        unique_ptr<MappedUploadPage> Page;
-    };
-    struct FreeSlice {
-        uint32_t BlockIndex{0};
-        uint64_t Offset{0};
-        uint64_t Size{0};
-    };
-
-    Nullable<Block*> CreateBlock(
-        uint64_t minimumSize,
-        HostWriteBatch& hostWrites) noexcept;
-
-    render::Device* _device{nullptr};
-    uint64_t _initialSize{0};
-    uint64_t _alignment{0};
-    vector<unique_ptr<Block>> _blocks;
-    vector<FreeSlice> _freeSlices;
-    uint64_t _activeBytes{0};
-    uint64_t _highWatermark{0};
-};
-
-struct RuntimeRenderCounters {
-    uint64_t DescriptorGroupCreates{0};
-    uint64_t DescriptorGroupUpdates{0};
-    uint64_t DescriptorGroupBinds{0};
-    uint64_t DynamicOffsetBinds{0};
-    uint64_t PipelineBinds{0};
-    uint64_t PipelineCacheHits{0};
-    uint64_t PipelineCacheMisses{0};
-    uint64_t ShaderVariantCacheHits{0};
-    uint64_t ShaderVariantCacheMisses{0};
-    uint64_t DrawStateCacheHits{0};
-    uint64_t DrawStateCacheMisses{0};
-    uint64_t DrawCommandTemplateHits{0};
-    uint64_t DrawCommandTemplateMisses{0};
-    uint64_t SystemGroupCacheHits{0};
-    uint64_t SystemGroupCacheMisses{0};
-    uint64_t MaterialGroupCacheHits{0};
-    uint64_t MaterialGroupCacheMisses{0};
-    uint64_t BindingPlanCacheHits{0};
-    uint64_t BindingPlanCacheMisses{0};
-    uint64_t BindingResolutionFailures{0};
-    uint64_t ErrorFallbackDraws{0};
-    uint64_t Draws{0};
-    uint64_t DrawInstances{0};
-    uint64_t ObjectArenaHighWatermark{0};
-    uint64_t ViewArenaHighWatermark{0};
-};
-
-struct FrameResolvedBindingGroupCacheEntry {
-    render::PipelineLayout* Layout{nullptr};
-    uint32_t GroupIndex{0};
-    vector<uint64_t> DescriptorKey;
-    vector<render::Buffer*> DynamicBuffers;
-    bool Persistent{false};
-    unique_ptr<render::BindingGroup> Group;
-};
-
-struct FrameResolvedBindingStateCacheEntry {
-    const void* Plan{nullptr};
-    uint32_t GroupIndex{0};
-    uint64_t MaterialKeyLo{0};
-    uint64_t MaterialKeyHi{0};
-    const void* Object{nullptr};
-    uint64_t ViewRevision{0};
-    uint64_t PassRevision{0};
-    render::BindingGroup* Group{nullptr};
-    vector<uint32_t> DynamicOffsets;
-    uint64_t ObjectBufferPage{0};
-};
-
-struct FrameObjectBinding {
-    const void* Proxy{nullptr};
-    DynamicCBufferArena::Allocation Allocation{};
-};
-
-class FrameResources {
-public:
-    FrameResources(render::Device* device, HostWriteBatch* hostWrites) noexcept;
-
-    void Reset() noexcept;
-    HostWriteBatch& GetHostWrites() const noexcept { return *_hostWrites; }
-
-    DynamicCBufferArena PerObjectArena;
-    DynamicCBufferArena ViewArena;
-    unique_ptr<render::DescriptorPool> SystemDescriptorPool;
-    unique_ptr<render::DescriptorPool> TransientDescriptorPool;
-    vector<FrameResolvedBindingGroupCacheEntry> ResolvedGroups;
-    vector<FrameResolvedBindingStateCacheEntry> ResolvedBindingStates;
-    vector<FrameObjectBinding> ObjectBindings;
-    vector<shared_ptr<const void>> RetainedObjects;
-    vector<unique_ptr<render::RenderBase>> RetireList;
-    RuntimeRenderCounters Counters{};
-    uint64_t Generation{1};
-
-private:
-    HostWriteBatch* _hostWrites;
-};
-
+/// 根据创建参数缓存渲染通道和帧缓冲区。
 class RenderPassRegistry {
 public:
     explicit RenderPassRegistry(render::Device* device) noexcept;
@@ -506,6 +358,129 @@ private:
     uint64_t _renderPassMisses{0};
     uint64_t _framebufferHits{0};
     uint64_t _framebufferMisses{0};
+};
+
+/// PSO 缓存的 POD key. 所有字段为标量 (无指针/optional/span),
+/// 构造时以 `Key{}` 清零, 再逐字段赋值, 保证 padding 恒为 0, 从而可安全用于 PodHasher (byte-wise xxHash) 与 PodEqual (memcmp).
+struct GraphicsPsoKey {
+    Guid LayoutId;
+    Guid VSId;
+    Guid PSId;
+
+    // PrimitiveState 展平
+    int32_t Topology;
+    int32_t FaceClockwise;
+    int32_t Cull;
+    int32_t Poly;
+    uint32_t HasStripIndexFormat;
+    int32_t StripIndexFormat;
+    uint32_t UnclippedDepth;
+    uint32_t Conservative;
+
+    // DepthStencil 展平
+    uint32_t HasDepthStencil;
+    int32_t DSFormat;
+    int32_t DepthCompare;
+    uint32_t DepthWriteEnable;
+    int32_t DepthBiasConstant;
+    float DepthBiasSlopScale;
+    float DepthBiasClamp;
+    uint32_t HasStencil;
+    int32_t StencilFrontCompare;
+    int32_t StencilFrontFailOp;
+    int32_t StencilFrontDepthFailOp;
+    int32_t StencilFrontPassOp;
+    int32_t StencilBackCompare;
+    int32_t StencilBackFailOp;
+    int32_t StencilBackDepthFailOp;
+    int32_t StencilBackPassOp;
+    uint32_t StencilReadMask;
+    uint32_t StencilWriteMask;
+
+    // MultiSample 展平
+    uint32_t MsCount;
+    uint64_t MsMask;
+    uint32_t MsAlphaToCoverage;
+
+    // ColorTargets 展平
+    uint32_t ColorTargetCount;
+    struct ColorTargetEntry {
+        int32_t Format;
+        uint32_t HasBlend;
+        int32_t ColorSrc;
+        int32_t ColorDst;
+        int32_t ColorOp;
+        int32_t AlphaSrc;
+        int32_t AlphaDst;
+        int32_t AlphaOp;
+        uint32_t WriteMask;
+    } ColorTargets[render::kMaxColorTargets];
+
+    // VertexLayouts 展平
+    uint32_t VertexLayoutCount;
+    struct VertexLayoutEntry {
+        uint64_t ArrayStride;
+        int32_t StepMode;
+        uint32_t ElemCount;
+        struct ElemEntry {
+            uint64_t Offset;
+            char Semantic[render::kMaxSemanticLength];
+            uint32_t SemanticIndex;
+            int32_t Format;
+            uint32_t Location;
+        } Elems[render::kMaxVertexElementsPerLayout];
+    } VertexLayouts[render::kMaxVertexBufferLayouts];
+};
+
+static_assert(std::is_trivially_copyable_v<GraphicsPsoKey>, "GraphicsPsoKey must be trivially copyable");
+
+/// Sampler 缓存的纯 POD key (仿 GraphicsPsoKey)。
+///
+/// 所有字段为标量, 无指针 / optional / span。构造时以 `SamplerKey{}` 清零, 再逐字段赋值,
+/// 保证 padding 恒为 0, 从而可安全用于 PodHasher (byte-wise xxHash) 与 PodEqual (memcmp)。
+/// SamplerDescriptor::Compare 是 std::optional, 在此展平为 HasCompare + Compare 两个标量。
+struct SamplerKey {
+    int32_t AddressS;
+    int32_t AddressT;
+    int32_t AddressR;
+    int32_t MinFilter;
+    int32_t MagFilter;
+    int32_t MipmapFilter;
+    float LodMin;
+    float LodMax;
+    uint32_t HasCompare;
+    int32_t Compare;
+    uint32_t AnisotropyClamp;
+};
+
+static_assert(std::is_trivially_copyable_v<SamplerKey>, "SamplerKey must be trivially copyable");
+
+/// 从 SamplerDescriptor 构造清零的 POD key。
+SamplerKey BuildSamplerKey(const render::SamplerDescriptor& desc) noexcept;
+
+/// 采样器缓存 (对应 UE5 的 GTextureSamplerStateCache / 各 RHI 后端 sampler cache)。
+///
+/// 设计要点:
+/// - 按 SamplerDescriptor 去重: 相同状态的 sampler 只创建一次。
+/// - unique_ptr 永生持有: 一经创建即缓存到 app 生命周期结束, 从不单独释放。
+///   因此 GetOrCreate 返回的裸指针在缓存存活期内【永不悬垂】, 材质快照可安全跨帧/跨线程持有。
+/// - sampler 是纯状态对象 (无数据), 组合数有限, 永生缓存无实际内存压力。
+class SamplerCache {
+public:
+    explicit SamplerCache(render::Device* device) noexcept;
+    SamplerCache(const SamplerCache&) = delete;
+    SamplerCache(SamplerCache&&) = delete;
+    SamplerCache& operator=(const SamplerCache&) = delete;
+    SamplerCache& operator=(SamplerCache&&) = delete;
+    ~SamplerCache() noexcept = default;
+
+    /// 按 descriptor 去重取 sampler。命中返回缓存指针; 未命中创建并永生缓存。
+    /// device 为空 / 创建失败返回 nullptr。返回的指针在本缓存存活期内稳定不悬垂。
+    Nullable<render::Sampler*> GetOrCreate(const render::SamplerDescriptor& desc) noexcept;
+
+private:
+    render::Device* _device{nullptr};
+    unordered_map<SamplerKey, unique_ptr<render::Sampler>, PodHasher<SamplerKey>, PodEqual<SamplerKey>> _cache;
 };
 
 }  // namespace radray

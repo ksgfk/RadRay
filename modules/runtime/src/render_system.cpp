@@ -11,9 +11,7 @@
 #include <radray/render/shader_compiler/dxc.h>
 #include <radray/runtime/application.h>
 #include <radray/runtime/gpu_system.h>
-#include <radray/runtime/render_framework/forward_pipeline.h>
 #include <radray/runtime/render_framework/scene.h>
-#include <radray/runtime/shader_default_resource_library.h>
 #include <radray/runtime/window_manager.h>
 
 namespace radray {
@@ -25,10 +23,7 @@ RenderSystem::RenderSystem(Application* app) noexcept
 RenderSystem::~RenderSystem() noexcept {
     ReleaseAllScenes();
     _pipeline.reset();  // 先析构管线 (executor 持 SamplerCache 裸指针), 再释放缓存
-    _defaultResources.reset();
     _samplerCache.reset();
-    _psoCache.reset();
-    _variantLibrary.reset();
     _dxc.reset();
 }
 
@@ -44,51 +39,8 @@ void RenderSystem::OnInitialize() {
     _shaderIncludeRoot = (GetExecutableDirectory() / "shaderlib").string();
     // 预编译 shader 烘焙产物根目录 (DXC 缺失时从此加载)。
     _shaderBakeRoot = (GetExecutableDirectory() / "shadercache").string();
-
-    // shader 变体缓存: 优先用 DXC 做运行时 JIT 编译; DXC 不可用时回退到从磁盘
-    // 加载预编译产物 (不依赖 DXC)。任一路径成功都可继续建管线。
-#ifdef RADRAY_ENABLE_DXC
-    auto dxcOpt = render::CreateDxc();
-    if (dxcOpt.HasValue()) {
-        _dxc = dxcOpt.Release();
-        auto variantCacheOpt = CreateShaderVariantLibrary(
-            device, _dxc.get(), gpu->GetPipelineLayoutLibrary());
-        if (variantCacheOpt.HasValue()) {
-            _variantLibrary = variantCacheOpt.Release();
-        } else {
-            RADRAY_ERR_LOG("RenderSystem::OnInitialize: failed to create DXC ShaderVariantLibrary");
-        }
-    } else {
-        RADRAY_WARN_LOG("RenderSystem::OnInitialize: DXC unavailable; falling back to precompiled shader cache");
-    }
-#endif
-
-    if (_variantLibrary == nullptr) {
-        // 无 DXC (或 DXC 缓存创建失败): 使用预编译缓存从磁盘加载烘焙产物。
-        auto precompiledOpt = CreatePrecompiledShaderVariantLibrary(
-            device, gpu->GetPipelineLayoutLibrary(), _shaderBakeRoot);
-        if (precompiledOpt.HasValue()) {
-            _variantLibrary = precompiledOpt.Release();
-        } else {
-            RADRAY_ERR_LOG("RenderSystem::OnInitialize: failed to create precompiled ShaderVariantLibrary");
-            return;
-        }
-    }
-
-    _psoCache = make_unique<GraphicsPipelineStateLibrary>(
-        device, _variantLibrary.get(), gpu->GetPipelineLayoutLibrary());
-
     // sampler 缓存: 按 descriptor 去重 + 永生持有, 使材质快照可安全持有稳定 sampler 指针。
     _samplerCache = make_unique<SamplerCache>(device);
-
-    _defaultResources = make_unique<ShaderDefaultResourceLibrary>();
-    AssetManager* assets = _app->GetAssetManager();
-    if (assets == nullptr || !_defaultResources->Initialize(*assets, gpu->GetFrameUploadScheduler())) {
-        RADRAY_ERR_LOG("RenderSystem::OnInitialize: failed to initialize shader default resources");
-        _defaultResources.reset();
-    }
-
-    _pipeline = make_unique<ForwardPipeline>(this);
 }
 
 Nullable<IStandardMaterialFactory*> RenderSystem::GetStandardMaterialFactory() noexcept {
@@ -96,10 +48,6 @@ Nullable<IStandardMaterialFactory*> RenderSystem::GetStandardMaterialFactory() n
         return nullptr;
     }
     return _pipeline->GetStandardMaterialFactory();
-}
-
-shared_ptr<const MaterialRenderSnapshot> RenderSystem::GetErrorMaterial() noexcept {
-    return _pipeline != nullptr ? _pipeline->GetErrorMaterial() : nullptr;
 }
 
 void RenderSystem::Render(AppFrameContext& ctx) {
@@ -129,19 +77,18 @@ void RenderSystem::Render(AppFrameContext& ctx) {
         return;
     }
 
-    if (_pipeline == nullptr) {
+    if (_pipeline != nullptr) {
+        RenderPipelineContext pipelineCtx(_app, ctx, targets);
+        RenderCameraList cameras;
+        _pipeline->BeginFrame(pipelineCtx);
+        _pipeline->BuildCameraList(pipelineCtx, cameras);
+        _pipeline->Render(pipelineCtx, cameras);
+        _pipeline->EndFrame(pipelineCtx);
+    } else {
         for (RenderPipelineTarget& target : targets) {
-            EnsurePresentState(ctx, target);
+            EnsureRenderTargetState(ctx, target);
         }
-        return;
     }
-
-    RenderPipelineContext pipelineCtx(_app, ctx, targets);
-    RenderCameraList cameras;
-    _pipeline->BeginFrame(pipelineCtx);
-    _pipeline->BuildCameraList(pipelineCtx, cameras);
-    _pipeline->Render(pipelineCtx, cameras);
-    _pipeline->EndFrame(pipelineCtx);
 
     vector<AppSubsystem*> subsystems = _app->GetSubsystems();
     for (AppSubsystem* subsystem : subsystems) {
@@ -163,6 +110,19 @@ void RenderSystem::Render(AppFrameContext& ctx) {
     for (RenderPipelineTarget& target : targets) {
         EnsurePresentState(ctx, target);
     }
+}
+
+void RenderSystem::EnsureRenderTargetState(AppFrameContext& ctx, RenderPipelineTarget& target) {
+    if (target.Target.BackBuffer == nullptr || target.State == render::TextureState::RenderTarget) {
+        return;
+    }
+
+    render::ResourceBarrierDescriptor toRenderTarget = render::BarrierTextureDescriptor{
+        .Target = target.Target.BackBuffer,
+        .Before = target.State,
+        .After = render::TextureState::RenderTarget};
+    ctx.GetCommandBuffer()->ResourceBarrier(std::span{&toRenderTarget, 1});
+    target.State = render::TextureState::RenderTarget;
 }
 
 void RenderSystem::EnsurePresentState(AppFrameContext& ctx, RenderPipelineTarget& target) {

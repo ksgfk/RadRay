@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <limits>
-#include <ranges>
 
 #include <radray/logger.h>
 #include <radray/render/common.h>

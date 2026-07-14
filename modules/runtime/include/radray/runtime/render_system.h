@@ -1,11 +1,7 @@
 #pragma once
 
-#include <string>
-
 #include <radray/runtime_type.h>
-#include <radray/runtime/pipeline_state_cache.h>
-#include <radray/runtime/sampler_cache.h>
-#include <radray/runtime/shader_variant_library.h>
+#include <radray/runtime/gpu_resource.h>
 #include <radray/runtime/render_framework/render_pipeline.h>
 #include <radray/runtime/render_framework/scene.h>
 #include <radray/types.h>
@@ -15,8 +11,6 @@ namespace radray {
 class Application;
 class AppFrameContext;
 struct AppFrameTarget;
-class IStandardMaterialFactory;
-class ShaderDefaultResourceLibrary;
 
 namespace render {
 class Dxc;
@@ -50,29 +44,21 @@ public:
     RenderPipeline* GetPipeline() const noexcept { return _pipeline.get(); }
     /// 当前管线的标准材质工厂 (把中性材质描述翻译成本管线材质)。无管线/不支持时返回 null。
     Nullable<IStandardMaterialFactory*> GetStandardMaterialFactory() noexcept;
-    shared_ptr<const MaterialRenderSnapshot> GetErrorMaterial() noexcept;
-    ShaderVariantLibrary* GetShaderVariantLibrary() const noexcept { return _variantLibrary.get(); }
-    GraphicsPipelineStateLibrary* GetGraphicsPipelineStateLibrary() const noexcept { return _psoCache.get(); }
     SamplerCache* GetSamplerCache() const noexcept { return _samplerCache.get(); }
-    Nullable<ShaderDefaultResourceLibrary*> GetShaderDefaultResourceLibrary() const noexcept {
-        return _defaultResources.get();
-    }
     /// shader 编译默认 include 根目录 (<exe>/shaderlib)。供构建 ShaderPassDesc::IncludeDirs。
     const string& GetShaderIncludeRoot() const noexcept { return _shaderIncludeRoot; }
     /// 预编译 shader 烘焙产物根目录 (<exe>/shadercache)。DXC 缺失时预编译缓存从此加载。
     const string& GetShaderBakeRoot() const noexcept { return _shaderBakeRoot; }
 
 private:
+    void EnsureRenderTargetState(AppFrameContext& ctx, RenderPipelineTarget& target);
     void EnsurePresentState(AppFrameContext& ctx, RenderPipelineTarget& target);
 
     Application* _app{nullptr};
     unique_ptr<RenderPipeline> _pipeline;
     vector<unique_ptr<Scene>> _scenes;
     shared_ptr<render::Dxc> _dxc;
-    unique_ptr<ShaderVariantLibrary> _variantLibrary;
-    unique_ptr<GraphicsPipelineStateLibrary> _psoCache;
     unique_ptr<SamplerCache> _samplerCache;
-    unique_ptr<ShaderDefaultResourceLibrary> _defaultResources;
     string _shaderIncludeRoot;
     string _shaderBakeRoot;
 };

@@ -1,7 +1,5 @@
 #pragma once
 
-#include <optional>
-
 #include <radray/vertex_data.h>
 #include <radray/runtime/asset.h>
 #include <radray/runtime/asset_manager.h>

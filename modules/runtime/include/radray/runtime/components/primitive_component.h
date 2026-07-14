@@ -7,8 +7,6 @@ namespace radray {
 class PrimitiveSceneProxy;
 class Scene;
 
-/// Base class for components that have a render-side primitive representation.
-/// Corresponds to UE5's UPrimitiveComponent.
 class PrimitiveComponent : public SceneComponent {
 public:
     PrimitiveComponent() noexcept = default;

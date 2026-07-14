@@ -290,9 +290,6 @@ void GpuSystem::BeginUpdateForFlight(uint32_t flightIndex) {
     }
 
     FlightSlot& flight = _flights[flightIndex];
-    if (flight.RenderResources != nullptr) {
-        flight.RenderResources->Reset();
-    }
     flight.HostWrites.Reset();
     flight.WaitForDestroy.clear();
     flight.FrameStartTime = std::chrono::steady_clock::now();
@@ -431,12 +428,8 @@ GpuSystem::GpuSystem(Application* app, const GpuSystemDescriptor& desc)
     _mainQueueTrack.Fence = _device->CreateFence().Unwrap();
     _mainQueueTrack.Fence->SetDebugName("AppMainQueue");
     _flights.resize(_flightDataCount);
-    for (auto& flight : _flights) {
-        flight.RenderResources = make_unique<FrameResources>(_device.get(), &flight.HostWrites);
-    }
     _uploader = make_unique<ResourceUploader>(_device.get(), _flightDataCount);
     _frameUploadScheduler = make_unique<FrameUploadScheduler>();
-    _pipelineLayoutLibrary = make_unique<PipelineLayoutLibrary>(_device.get());
     _renderPassRegistry = make_unique<RenderPassRegistry>(_device.get());
     if (desc.EnableFrameProfiler) {
         _frameProfiler = make_unique<GpuFrameProfiler>(_device.get(), _mainQueue, _flightDataCount);
@@ -452,7 +445,6 @@ GpuSystem::~GpuSystem() noexcept {
     _frameProfiler.reset();
     _uploader.reset();
     _renderPassRegistry.reset();
-    _pipelineLayoutLibrary.reset();
     _mainQueueTrack.Fence.reset();
     _mainQueueTrack.Queue = nullptr;
     _mainQueue = nullptr;
@@ -503,10 +495,6 @@ UploadMemoryStats GpuSystem::GetUploadMemoryStats() const noexcept {
 
 uint32_t GpuSystem::GetCurrentFlightIndex() const noexcept {
     return static_cast<uint32_t>(_nowFrameIndex % _flightDataCount);
-}
-
-FrameResources& GpuSystem::GetFrameResources(uint32_t flightIndex) noexcept {
-    return *_flights.at(flightIndex).RenderResources;
 }
 
 void GpuSystem::PumpFrameUploadScheduler() {
@@ -690,8 +678,8 @@ ResourceUploader& AppFrameContext::GetUploader() const noexcept {
     return *_gpuSystem->_uploader;
 }
 
-FrameResources& AppFrameContext::GetFrameResources() const noexcept {
-    return _gpuSystem->GetFrameResources(_flightIndex);
+HostWriteBatch& AppFrameContext::GetHostWrites() const noexcept {
+    return _gpuSystem->_flights[_flightIndex].HostWrites;
 }
 
 render::Device* AppFrameContext::GetDevice() const noexcept {

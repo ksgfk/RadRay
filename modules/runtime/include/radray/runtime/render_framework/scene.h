@@ -2,9 +2,9 @@
 
 #include <span>
 
-#include <radray/runtime/render_framework/light_scene_proxy.h>
-#include <radray/runtime/render_framework/primitive_scene_proxy.h>
 #include <radray/types.h>
+#include <radray/runtime/render_framework/primitive_scene_proxy.h>
+#include <radray/runtime/render_framework/light_scene_proxy.h>
 
 namespace radray {
 

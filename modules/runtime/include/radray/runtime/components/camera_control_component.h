@@ -15,8 +15,6 @@ class NativeWindow;
 enum class Action;
 enum class MouseButton;
 
-/// Orbit/pan/dolly controller for a CameraComponent owned by the same Actor.
-/// Bind it to a window for pointer input, then TickComponent applies the result.
 class CameraControlComponent : public ActorComponent {
 public:
     CameraControlComponent() noexcept;

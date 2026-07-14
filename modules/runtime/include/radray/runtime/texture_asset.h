@@ -1,7 +1,5 @@
 #pragma once
 
-#include <filesystem>
-
 #include <radray/hash.h>
 #include <radray/image_data.h>
 #include <radray/render/common.h>
