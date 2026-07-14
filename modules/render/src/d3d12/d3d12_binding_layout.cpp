@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <tuple>
-#include <unordered_map>
 #include <utility>
 
 #include <radray/logger.h>

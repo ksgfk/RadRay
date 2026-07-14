@@ -175,6 +175,14 @@ Application::Application() noexcept = default;
 
 Application::~Application() noexcept = default;
 
+render::Device* Application::GetDevice() noexcept {
+    return _gpuSystem != nullptr ? _gpuSystem->GetDevice() : nullptr;
+}
+
+const render::Device* Application::GetDevice() const noexcept {
+    return _gpuSystem != nullptr ? _gpuSystem->GetDevice() : nullptr;
+}
+
 void Application::OnInit() {
 }
 
@@ -809,7 +817,7 @@ public:
 };
 
 AppSubsystem* Application::RegisterSubsystem(unique_ptr<AppSubsystem> subsystem) {
-    if (_windowManager != nullptr || _gpuSystem != nullptr || _renderSystem != nullptr || _assetManager != nullptr || _world != nullptr || _device != nullptr) {
+    if (_windowManager != nullptr || _gpuSystem != nullptr || _renderSystem != nullptr || _assetManager != nullptr || _world != nullptr) {
         RADRAY_ERR_LOG("Application: subsystems must be registered before Run()");
         return nullptr;
     }
@@ -968,37 +976,11 @@ int Application::Shutdown(const AppShutdownContext& ctx) {
     }
     _gpuSystem.reset();
     _windowManager.reset();
-    _device.reset();
-    _dxgiFactory.reset();
     return 0;
 }
 
 void Application::InitializeRuntime(const ApplicationRuntimeDescriptor& desc) {
     _multithreaded = desc.Multithreaded;
-
-    // —— device / instance ——
-    if (desc.Backend == render::RenderBackend::Vulkan) {
-        render::VulkanInstanceDescriptor insDesc{
-            .AppName = desc.AppName,
-            .EngineName = desc.EngineName,
-            .IsEnableDebugLayer = desc.EnableValidation,
-            .IsEnableGpuBasedValid = false};
-        render::InstanceVulkan::InitEnv(insDesc).Unwrap();
-        render::VulkanCommandQueueDescriptor queueDesc{render::QueueType::Direct, 1};
-        render::VulkanDeviceDescriptor deviceDesc{};
-        deviceDesc.Queues = std::span{&queueDesc, 1};
-        _device = render::Device::Create(deviceDesc).Unwrap();
-    } else if (desc.Backend == render::RenderBackend::D3D12) {
-        render::DXGIFactoryDescriptor dxgiDesc{};
-        dxgiDesc.IsEnableDebugLayer = desc.EnableValidation;
-        dxgiDesc.IsEnableGpuBasedValid = false;
-        _dxgiFactory = render::DXGIFactory::Create(dxgiDesc).Unwrap();
-        render::D3D12DeviceDescriptor deviceDesc{};
-        deviceDesc.Factory = _dxgiFactory.get();
-        _device = render::Device::Create(deviceDesc).Unwrap();
-    } else {
-        RADRAY_ABORT("unsupported render backend");
-    }
 
     // ════════════════════════════════════════════════════════════════
     //  phase 1:实例化全部核心服务(构造函数只做平凡/自身初始化,不碰兄弟系统)。
@@ -1010,8 +992,30 @@ void Application::InitializeRuntime(const ApplicationRuntimeDescriptor& desc) {
 #endif
     _windowManager = make_unique<WindowManager>(this, windowManagerDesc);
 
+    render::VulkanInstanceDescriptor instanceDesc{
+        .AppName = desc.AppName,
+        .EngineName = desc.EngineName,
+        .IsEnableDebugLayer = desc.EnableValidation,
+        .IsEnableGpuBasedValid = false};
+    render::DXGIFactoryDescriptor factoryDesc{
+        .IsEnableDebugLayer = desc.EnableValidation,
+        .IsEnableGpuBasedValid = false};
+    render::VulkanCommandQueueDescriptor queueDesc{render::QueueType::Direct, 1};
+    render::DeviceDescriptor deviceDesc{};
+    if (desc.Backend == render::RenderBackend::Vulkan) {
+        render::VulkanDeviceDescriptor vulkanDeviceDesc{};
+        vulkanDeviceDesc.Queues = std::span{&queueDesc, 1};
+        deviceDesc = vulkanDeviceDesc;
+    } else if (desc.Backend == render::RenderBackend::D3D12) {
+        deviceDesc = render::D3D12DeviceDescriptor{};
+    } else {
+        RADRAY_ABORT("unsupported render backend");
+    }
+
     GpuSystemDescriptor gpuSysDesc{
-        .Device = _device.get(),
+        .VulkanInstance = instanceDesc,
+        .DXGIFactory = factoryDesc,
+        .Device = deviceDesc,
         .MainQueueIndex = 0,
         .BackBufferCount = desc.BackBufferCount,
         .FlightDataCount = desc.FlightDataCount};

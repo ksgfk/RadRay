@@ -1,6 +1,7 @@
 #pragma once
 
 #include <optional>
+#include <utility>
 
 #include <radray/guid.h>
 #include <radray/hash.h>
@@ -9,6 +10,15 @@
 #include <radray/types.h>
 
 namespace radray {
+
+template <typename T>
+struct IdentifiedRenderObject {
+    explicit IdentifiedRenderObject(unique_ptr<T> object)
+        : Object(std::move(object)), Id(Guid::NewGuid()) {}
+
+    unique_ptr<T> Object;
+    Guid Id;
+};
 
 struct ShaderVariantKey {
     Guid ProgramId;
@@ -126,6 +136,7 @@ public:
     Nullable<render::PipelineLayout*> GetOrCreate(
         const render::PipelineLayoutDescriptor& desc,
         const ShaderInterfaceSchema* schema = nullptr) noexcept;
+    std::optional<Guid> FindGuid(const render::PipelineLayout& layout) const noexcept;
     void Clear() noexcept;
     uint32_t Count() const noexcept { return static_cast<uint32_t>(_entries.size()); }
     uint64_t GetHitCount() const noexcept { return _hits; }
@@ -134,7 +145,7 @@ public:
 private:
     struct Entry {
         string Key;
-        unique_ptr<render::PipelineLayout> Layout;
+        IdentifiedRenderObject<render::PipelineLayout> Layout;
     };
 
     struct BindingGroupLayoutEntry {
@@ -162,6 +173,7 @@ public:
     virtual ~ShaderVariantLibrary() noexcept = default;
     virtual Nullable<const CompiledShaderVariant*> Find(const ShaderVariantKey& key) const noexcept = 0;
     virtual Nullable<const CompiledShaderVariant*> GetOrCreate(const ShaderVariantDescriptor& desc) noexcept = 0;
+    virtual std::optional<Guid> FindGuid(const render::Shader& shader) const noexcept = 0;
     virtual void Clear() noexcept = 0;
     virtual uint32_t Count() const noexcept = 0;
     virtual ShaderVariantLibraryStats GetStats() const noexcept = 0;

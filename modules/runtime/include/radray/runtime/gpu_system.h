@@ -14,14 +14,13 @@
 #include <radray/runtime/asset.h>
 #include <radray/runtime/gpu_resource.h>
 #include <radray/runtime/render_resource_recycler.h>
-#include <radray/runtime/render_pass_registry.h>
 #include <radray/runtime/service_registry.h>
 #include <radray/runtime/shader_variant_library.h>
 
 namespace radray::render {
 class CommandBuffer;
 class Dxc;
-}
+}  // namespace radray::render
 
 namespace radray {
 
@@ -29,70 +28,13 @@ class Application;
 class AppWindow;
 class WindowManager;
 class AppFrameContext;
-class ResourceUploader;
 class StaticMesh;
 class FrameUploadScheduler;
 class BeginFrameUploadAwaitable;
 class FrameUploadScope;
 class WaitFrameUploadGpuAwaitable;
 struct FrameUploadRecord;
-
-struct UploadMemoryStats {
-    uint64_t PageCount{0};
-    uint64_t PageCapacityBytes{0};
-    uint64_t CommitCount{0};
-    uint64_t CommittedBytes{0};
-    uint64_t RecordedRangeCount{0};
-    uint64_t FlushedRangeCount{0};
-};
-
-class HostWriteBatch {
-public:
-    HostWriteBatch();
-
-    void Record(render::Buffer* target, render::BufferRange range);
-    void Flush(render::Device& device) noexcept;
-
-    bool Empty() const noexcept { return _ranges.empty(); }
-    bool IsSealed() const noexcept { return _sealed; }
-    std::span<const render::MappedBufferRange> GetRanges() const noexcept { return _ranges; }
-    const UploadMemoryStats& GetStats() const noexcept { return _stats; }
-
-    void Seal() noexcept { _sealed = true; }
-    void Reset() noexcept;
-    void RecordPageAllocation(uint64_t capacity) noexcept;
-
-private:
-    vector<render::MappedBufferRange> _ranges;
-    UploadMemoryStats _stats{};
-    bool _sealed{false};
-};
-
-class ScopedBufferMap {
-public:
-    ScopedBufferMap(render::Buffer* buffer, render::BufferRange range) noexcept;
-    ~ScopedBufferMap() noexcept;
-
-    ScopedBufferMap(const ScopedBufferMap&) = delete;
-    ScopedBufferMap& operator=(const ScopedBufferMap&) = delete;
-    ScopedBufferMap(ScopedBufferMap&&) = delete;
-    ScopedBufferMap& operator=(ScopedBufferMap&&) = delete;
-
-    void* Data() const noexcept { return _data; }
-
-    template <typename T>
-    T* DataAs() const noexcept {
-        return static_cast<T*>(_data);
-    }
-
-    explicit operator bool() const noexcept { return _data != nullptr; }
-
-private:
-    render::Buffer* _buffer{nullptr};
-    void* _data{nullptr};
-    render::BufferRange _range{};
-    bool _write{false};
-};
+class GpuSystem;
 
 enum class FrameUploadStage {
     AwaitingFrame,
@@ -102,8 +44,10 @@ enum class FrameUploadStage {
 };
 
 struct GpuSystemDescriptor {
-    render::Device* Device;
-    uint32_t MainQueueIndex;
+    render::VulkanInstanceDescriptor VulkanInstance{};
+    render::DXGIFactoryDescriptor DXGIFactory{};
+    render::DeviceDescriptor Device{};
+    uint32_t MainQueueIndex{0};
     uint32_t BackBufferCount{3};
     uint32_t FlightDataCount{2};
     bool EnableFrameProfiler{true};
@@ -171,25 +115,6 @@ struct GpuFlightSlot {
 
     // —— 提交态（渲染线程写，retire 经 _retireMutex 读后清）。
     GpuFenceSignal Signal;
-};
-
-/// 描述一次 buffer 上传操作。
-struct BufferUploadRequest {
-    std::span<const byte> SrcData;
-    render::Buffer* DstBuffer;
-    uint64_t DstOffset{0};
-    render::BufferStates Before{render::BufferState::Common};
-    render::BufferStates After{render::BufferState::Common};
-};
-
-/// 描述一次 texture 上传操作。
-struct TextureUploadRequest {
-    std::span<const byte> SrcData;
-    render::Texture* DstTexture;
-    render::SubresourceRange DstRange;
-    uint64_t SrcRowPitch{0};
-    render::TextureStates Before{render::TextureState::Undefined};
-    render::TextureStates After{render::TextureState::ShaderRead};
 };
 
 struct AppFrameSubmitDescriptor {
@@ -327,88 +252,6 @@ private:
     vector<DeferredRenderDeleteEntry> _entries;
 };
 
-class GpuSystem : public IRenderResourceRecycler {
-public:
-    using FenceSignal = GpuFenceSignal;
-    using QueueFrameTrack = GpuQueueFrameTrack;
-    using FlightSlot = GpuFlightSlot;
-
-    GpuSystem(Application* app, const GpuSystemDescriptor& desc);
-    GpuSystem(const GpuSystem&) = delete;
-    GpuSystem(GpuSystem&&) = delete;
-    GpuSystem& operator=(const GpuSystem&) = delete;
-    GpuSystem& operator=(GpuSystem&&) = delete;
-    ~GpuSystem() noexcept;
-
-    void RecycleRenderResource(unique_ptr<render::RenderBase> obj) noexcept override;
-    void ProcessDeferredDeletes() noexcept;
-    void FlushAllDeferredDeletes() noexcept;
-
-    bool CompleteFlight(uint32_t flightIndex);
-    void WaitAndCleanupCompletedFlights();
-    bool CompleteFlightIfReady(uint32_t flightIndex, bool wait);
-    void BeginUpdateForFlight(uint32_t flightIndex);
-
-    /// 一帧开头：取/建该 flight 的 CommandBuffer 并 Begin()，清空上帧 acquire 的目标。
-    /// 返回供应用在 Render 中使用的帧上下文。
-    AppFrameContext BeginFrameRecord(
-        uint32_t flightIndex,
-        std::chrono::duration<float> deltaTime,
-        std::chrono::duration<float> lastFrameLatency,
-        bool isInModalLoop);
-
-    /// 一帧收尾：uploader.EndFlight → CmdBuffer.End → 聚合 sync object → Submit
-    /// → 写 flight.Signal → Present 全部 target。
-    void EndFrameRecordAndSubmit(uint32_t flightIndex);
-
-    FrameUploadScheduler& GetFrameUploadScheduler() noexcept { return *_frameUploadScheduler; }
-    void PumpFrameUploadScheduler();
-
-    render::Device* GetDevice() const noexcept { return _device; }
-    PipelineLayoutLibrary* GetPipelineLayoutLibrary() const noexcept { return _pipelineLayoutLibrary.get(); }
-    RenderPassRegistry* GetRenderPassRegistry() const noexcept { return _renderPassRegistry.get(); }
-    render::CommandQueue* GetMainQueue() const noexcept { return _mainQueue; }
-    WindowManager* GetWindowManager() const noexcept { return _windowManager; }
-    /// 注入窗口系统(非拥有)。由装配阶段(ServiceRegistry / Application)调用。
-    void SetWindowManager(WindowManager* windowManager) noexcept { _windowManager = windowManager; }
-    uint32_t GetBackBufferCount() const noexcept { return _backBufferCount; }
-    uint32_t GetFlightDataCount() const noexcept { return _flightDataCount; }
-    uint64_t GetFrameIndex() const noexcept { return _nowFrameIndex; }
-    uint32_t GetCurrentFlightIndex() const noexcept;
-    FrameResources& GetFrameResources(uint32_t flightIndex) noexcept;
-    std::chrono::duration<float> GetLastFrameLatency() const noexcept { return _lastFrameLatency; }
-    void AdvanceFrameIndex() noexcept { ++_nowFrameIndex; }
-
-    /// 上一帧 GPU 执行耗时(毫秒)。启用 GpuSystemDescriptor::EnableFrameProfiler 后由
-    /// 内置 GpuFrameProfiler 在每帧 resolve 后更新；未启用时返回 0。
-    float GetLastGpuTimeMs() const noexcept;
-
-    UploadMemoryStats GetUploadMemoryStats() const noexcept;
-
-private:
-    friend class AppFrameContext;
-    friend class Application;
-
-    void SubmitFrame(uint32_t flightIndex, const AppFrameSubmitDescriptor& desc);
-
-    Application* _app;
-    WindowManager* _windowManager{nullptr};
-    render::Device* _device;
-    render::CommandQueue* _mainQueue;
-    const uint32_t _backBufferCount;
-    const uint32_t _flightDataCount;
-    QueueFrameTrack _mainQueueTrack;
-    vector<FlightSlot> _flights;
-    unique_ptr<ResourceUploader> _uploader;
-    unique_ptr<FrameUploadScheduler> _frameUploadScheduler;
-    unique_ptr<GpuFrameProfiler> _frameProfiler;
-    unique_ptr<PipelineLayoutLibrary> _pipelineLayoutLibrary;
-    unique_ptr<RenderPassRegistry> _renderPassRegistry;
-    DeferredRenderDeleteQueue _deferredDeletes;
-    uint64_t _nowFrameIndex{0};
-    std::chrono::duration<float> _lastFrameLatency{};
-};
-
 /// Render 回调的唯一入参，封装一帧录制 API。
 /// 生命周期仅限本次 Render 调用；runtime 在 BeginFrameRecord 构造并传入。
 class AppFrameContext {
@@ -460,104 +303,90 @@ private:
     bool _isInModalLoop;
 };
 
-/// Upload heap staging page 池。在 page 内线性分配，按 flight index 整页回收。
-class StagingBufferPool {
+class GpuSystem : public IRenderResourceRecycler {
 public:
-    using Allocation = MappedUploadPage::Allocation;
-    using Reservation = MappedUploadPage::Reservation;
+    using FenceSignal = GpuFenceSignal;
+    using QueueFrameTrack = GpuQueueFrameTrack;
+    using FlightSlot = GpuFlightSlot;
 
-    struct Descriptor {
-        uint64_t PageSize{8ull * 1024 * 1024};
-        uint64_t MaxCachedBytes{64ull * 1024 * 1024};
-        uint32_t MaxCachedPages{8};
-    };
+    GpuSystem(Application* app, const GpuSystemDescriptor& desc);
+    GpuSystem(const GpuSystem&) = delete;
+    GpuSystem(GpuSystem&&) = delete;
+    GpuSystem& operator=(const GpuSystem&) = delete;
+    GpuSystem& operator=(GpuSystem&&) = delete;
+    ~GpuSystem() noexcept;
 
-    StagingBufferPool(render::Device* device, uint32_t flightCount, const Descriptor& desc) noexcept;
-    explicit StagingBufferPool(render::Device* device, uint32_t flightCount) noexcept;
-    ~StagingBufferPool() noexcept;
-    StagingBufferPool(const StagingBufferPool&) = delete;
-    StagingBufferPool& operator=(const StagingBufferPool&) = delete;
+    void RecycleRenderResource(unique_ptr<render::RenderBase> obj) noexcept override;
+    void ProcessDeferredDeletes() noexcept;
+    void FlushAllDeferredDeletes() noexcept;
 
-    void BeginFlight(HostWriteBatch& hostWrites);
+    bool CompleteFlight(uint32_t flightIndex);
+    void WaitAndCleanupCompletedFlights();
+    bool CompleteFlightIfReady(uint32_t flightIndex, bool wait);
+    void BeginUpdateForFlight(uint32_t flightIndex);
 
-    /// 从 Upload page 预留一块 staging 内存。超过 page 容量的请求使用一次性 buffer。
-    Reservation Reserve(uint64_t size, uint64_t alignment = 1);
+    /// 一帧开头：取/建该 flight 的 CommandBuffer 并 Begin()，清空上帧 acquire 的目标。
+    /// 返回供应用在 Render 中使用的帧上下文。
+    AppFrameContext BeginFrameRecord(
+        uint32_t flightIndex,
+        std::chrono::duration<float> deltaTime,
+        std::chrono::duration<float> lastFrameLatency,
+        bool isInModalLoop);
 
-    /// 将当前所有活跃 staging page 移入指定 flight 的 pending 列表。
-    void RetireToFlight(uint32_t flightIndex);
+    /// 一帧收尾：uploader.EndFlight → CmdBuffer.End → 聚合 sync object → Submit
+    /// → 写 flight.Signal → Present 全部 target。
+    void EndFrameRecordAndSubmit(uint32_t flightIndex);
 
-    /// 回收指定 flight 的标准 page 到 free list，释放一次性 buffer。
-    void CollectFlight(uint32_t flightIndex);
+    FrameUploadScheduler& GetFrameUploadScheduler() noexcept { return *_frameUploadScheduler; }
+    void PumpFrameUploadScheduler();
+
+    render::Device* GetDevice() const noexcept { return _device.get(); }
+    PipelineLayoutLibrary* GetPipelineLayoutLibrary() const noexcept { return _pipelineLayoutLibrary.get(); }
+    RenderPassRegistry* GetRenderPassRegistry() const noexcept { return _renderPassRegistry.get(); }
+    render::CommandQueue* GetMainQueue() const noexcept { return _mainQueue; }
+    WindowManager* GetWindowManager() const noexcept { return _windowManager; }
+    /// 注入窗口系统(非拥有)。由装配阶段(ServiceRegistry / Application)调用。
+    void SetWindowManager(WindowManager* windowManager) noexcept { _windowManager = windowManager; }
+    uint32_t GetBackBufferCount() const noexcept { return _backBufferCount; }
+    uint32_t GetFlightDataCount() const noexcept { return _flightDataCount; }
+    uint64_t GetFrameIndex() const noexcept { return _nowFrameIndex; }
+    uint32_t GetCurrentFlightIndex() const noexcept;
+    FrameResources& GetFrameResources(uint32_t flightIndex) noexcept;
+    std::chrono::duration<float> GetLastFrameLatency() const noexcept { return _lastFrameLatency; }
+    void AdvanceFrameIndex() noexcept { ++_nowFrameIndex; }
+
+    /// 上一帧 GPU 执行耗时(毫秒)。启用 GpuSystemDescriptor::EnableFrameProfiler 后由
+    /// 内置 GpuFrameProfiler 在每帧 resolve 后更新；未启用时返回 0。
+    float GetLastGpuTimeMs() const noexcept;
+
+    UploadMemoryStats GetUploadMemoryStats() const noexcept;
 
 private:
-    struct Page {
-        unique_ptr<MappedUploadPage> Upload;
-        bool Cacheable{true};
-    };
+    friend class AppFrameContext;
+    friend class Application;
 
-    Page CreatePage(uint64_t capacity, bool cacheable);
-    Page& AcquireStandardPage();
-    void TrimFreeList() noexcept;
+    void SubmitFrame(uint32_t flightIndex, const AppFrameSubmitDescriptor& desc);
 
-    render::Device* _device;
-    Descriptor _desc;
-    vector<Page> _active;
-    vector<vector<Page>> _pending;
-    vector<Page> _freeList;
-    uint64_t _nextPageId{0};
-    HostWriteBatch* _hostWrites{nullptr};
+    Application* _app;
+    WindowManager* _windowManager{nullptr};
+    Nullable<render::InstanceVulkan*> _vulkanInstance{nullptr};
+    unique_ptr<render::DXGIFactory> _dxgiFactory;
+    shared_ptr<render::Device> _device;
+    render::CommandQueue* _mainQueue{nullptr};
+    const uint32_t _backBufferCount;
+    const uint32_t _flightDataCount;
+    QueueFrameTrack _mainQueueTrack;
+    vector<FlightSlot> _flights;
+    unique_ptr<ResourceUploader> _uploader;
+    unique_ptr<FrameUploadScheduler> _frameUploadScheduler;
+    unique_ptr<GpuFrameProfiler> _frameProfiler;
+    unique_ptr<PipelineLayoutLibrary> _pipelineLayoutLibrary;
+    unique_ptr<RenderPassRegistry> _renderPassRegistry;
+    DeferredRenderDeleteQueue _deferredDeletes;
+    uint64_t _nowFrameIndex{0};
+    std::chrono::duration<float> _lastFrameLatency{};
 };
 
-/// 资源上传器。录制 copy 命令到外部传入的 CommandBuffer，管理 staging 生命周期。
-///
-/// 使用流程：
-/// 1. 调用方 cmdBuffer->Begin()
-/// 2. 调用 UploadBuffer / UploadTexture / UploadMeshResource（可多次）
-/// 3. 调用 EndFlight(flightIndex) 将 staging 绑定到该 flight
-/// 4. 调用方 cmdBuffer->End() → Submit → signal fence
-/// 5. CompleteFlight 后调用 CollectFlight(flightIndex) 回收
-class ResourceUploader {
-public:
-    ResourceUploader(render::Device* device, uint32_t flightCount);
-    ~ResourceUploader() noexcept;
-    ResourceUploader(const ResourceUploader&) = delete;
-    ResourceUploader& operator=(const ResourceUploader&) = delete;
-
-    void BeginFlight(uint32_t flightIndex, HostWriteBatch& hostWrites);
-
-    /// 录制 buffer 上传命令到 cmdBuffer。
-    void UploadBuffer(
-        render::CommandBuffer* cmdBuffer,
-        const BufferUploadRequest& request);
-
-    /// 录制 texture 上传命令到 cmdBuffer。
-    void UploadTexture(
-        render::CommandBuffer* cmdBuffer,
-        const TextureUploadRequest& request);
-
-    /// 从 CPU 网格数据创建 device-local buffer 并录制上传命令，产出 GpuMesh。
-    /// 产出的 buffer 所有权在返回的 GpuMesh 中，由调用方(加载协程/资产)持有。
-    std::optional<GpuMesh> UploadMeshResource(
-        render::CommandBuffer* cmdBuffer,
-        const MeshResource& meshResource);
-
-    /// 帧末：将本帧 staging 移入指定 flight 等待 GPU 完成。
-    void EndFlight(uint32_t flightIndex);
-
-    /// CompleteFlight 后：回收 staging buffer。
-    void CollectFlight(uint32_t flightIndex);
-
-    /// 底层设备(供加载协程在 upload phase 内建 device 资源,如纹理)。
-    render::Device* GetDevice() const noexcept { return _device; }
-
-private:
-    render::Device* _device;
-    StagingBufferPool _stagingPool;
-    uint32_t _flightCount{0};
-    uint32_t _activeFlightIndex{std::numeric_limits<uint32_t>::max()};
-};
-
-/// 依赖声明(非侵入,类外特化):GpuSystem 需要 WindowManager,复用已有 public setter。
 template <>
 struct ServiceTraits<GpuSystem> {
     static constexpr auto Inject = std::tuple{&GpuSystem::SetWindowManager};

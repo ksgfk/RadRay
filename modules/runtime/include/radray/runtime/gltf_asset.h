@@ -1,7 +1,6 @@
 #pragma once
 
 #include <filesystem>
-#include <span>
 
 #include <radray/basic_math.h>
 #include <radray/runtime/asset.h>

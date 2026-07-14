@@ -2,7 +2,7 @@
 
 #include <cstring>
 
-#include <radray/runtime/gpu_system.h>
+#include <radray/runtime/gpu_resource.h>
 
 using namespace radray;
 

@@ -488,13 +488,14 @@ Nullable<render::PipelineLayout*> PipelineLayoutLibrary::GetOrCreate(
         if (entry.Key == key) {
             ++_hits;
             candidate->Destroy();
-            return entry.Layout.get();
+            return entry.Layout.Object.get();
         }
     }
     ++_misses;
-    candidate->SetGuid(Guid::NewGuid());
     auto* result = candidate.get();
-    _entries.push_back(Entry{.Key = std::move(key), .Layout = std::move(candidate)});
+    _entries.push_back(Entry{
+        .Key = std::move(key),
+        .Layout = IdentifiedRenderObject<render::PipelineLayout>{std::move(candidate)}});
     if (schema != nullptr && !schema->AllowAdditionalBindings) {
         for (const render::BindingGroupLayout& group : result->GetBindingGroupLayouts()) {
             auto groupKey = BuildBindingGroupCanonicalKey(group, desc);
@@ -517,11 +518,20 @@ Nullable<render::PipelineLayout*> PipelineLayoutLibrary::GetOrCreate(
     return result;
 }
 
+std::optional<Guid> PipelineLayoutLibrary::FindGuid(const render::PipelineLayout& layout) const noexcept {
+    for (const Entry& entry : _entries) {
+        if (entry.Layout.Object.get() == &layout) {
+            return entry.Layout.Id;
+        }
+    }
+    return std::nullopt;
+}
+
 void PipelineLayoutLibrary::Clear() noexcept {
     _bindingGroupLayouts.clear();
     for (auto entry = _entries.rbegin(); entry != _entries.rend(); ++entry) {
-        if (entry->Layout != nullptr) {
-            entry->Layout->Destroy();
+        if (entry->Layout.Object != nullptr) {
+            entry->Layout.Object->Destroy();
         }
     }
     _entries.clear();
@@ -569,6 +579,15 @@ public:
         return nullptr;
     }
 
+    std::optional<Guid> FindGuid(const render::Shader& shader) const noexcept override {
+        for (const auto& [_, module] : _modules) {
+            if (module.Shader.Object.get() == &shader) {
+                return module.Shader.Id;
+            }
+        }
+        return std::nullopt;
+    }
+
     Nullable<const CompiledShaderVariant*> GetOrCreate(const ShaderVariantDescriptor& desc) noexcept override {
         auto keyOpt = BuildShaderVariantKey(desc, _device->GetBackend());
         if (!keyOpt.has_value()) {
@@ -600,10 +619,14 @@ public:
             moduleKey.Stage = static_cast<uint32_t>(stage.Stage);
             moduleKey.BytecodeHash = HashData64(artifact.Bytecode.data(), artifact.Bytecode.size());
             Shader* raw = nullptr;
-            if (auto moduleIt = _modules.find(moduleKey); moduleIt != _modules.end() &&
-                moduleIt->second.Bytecode == artifact.Bytecode) {
+            const auto moduleIt = _modules.find(moduleKey);
+            if (moduleIt != _modules.end()) {
+                if (moduleIt->second.Bytecode != artifact.Bytecode) {
+                    RADRAY_ERR_LOG("shader variant cache: bytecode hash collision for stage {}", stage.Stage);
+                    return nullptr;
+                }
                 ++_stats.ModuleHits;
-                raw = moduleIt->second.Object.get();
+                raw = moduleIt->second.Shader.Object.get();
             } else {
                 ++_stats.ModuleMisses;
                 ShaderDescriptor shaderDesc{};
@@ -616,11 +639,12 @@ public:
                     return nullptr;
                 }
                 auto shader = shaderOpt.Release();
-                shader->SetGuid(Guid::NewGuid());
                 raw = shader.get();
                 _modules.emplace(
                     moduleKey,
-                    ModuleEntry{.Bytecode = std::move(artifact.Bytecode), .Object = std::move(shader)});
+                    ModuleEntry{
+                        .Bytecode = std::move(artifact.Bytecode),
+                        .Shader = IdentifiedRenderObject<Shader>{std::move(shader)}});
             }
             switch (stage.Stage) {
                 case ShaderStage::Vertex: entry.Variant.VS = raw; break;
@@ -711,8 +735,8 @@ public:
     void Clear() noexcept override {
         _cache.clear();
         for (auto& [_, module] : _modules) {
-            if (module.Object != nullptr) {
-                module.Object->Destroy();
+            if (module.Shader.Object != nullptr) {
+                module.Shader.Object->Destroy();
             }
         }
         _modules.clear();
@@ -736,7 +760,7 @@ private:
 
     struct ModuleEntry {
         vector<byte> Bytecode;
-        unique_ptr<Shader> Object;
+        IdentifiedRenderObject<Shader> Shader;
     };
 
     Device* _device;

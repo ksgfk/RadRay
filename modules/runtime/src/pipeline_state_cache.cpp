@@ -3,36 +3,43 @@
 #include <radray/logger.h>
 #include <radray/render/common.h>
 #include <radray/runtime/pipeline_state_cache.h>
+#include <radray/runtime/shader_variant_library.h>
 
 namespace radray {
 
 using namespace render;
 
-std::optional<GraphicsPsoKey> BuildGraphicsPsoKey(const GraphicsPipelineStateDescriptor& desc) noexcept {
+std::optional<GraphicsPsoKey> BuildGraphicsPsoKey(
+    const GraphicsPipelineStateDescriptor& desc,
+    const ShaderVariantLibrary& shaderLibrary,
+    const PipelineLayoutLibrary& layoutLibrary) noexcept {
     GraphicsPsoKey key{};
 
     if (desc.PipelineLayout == nullptr) {
         RADRAY_ERR_LOG("PSO cache: PipelineLayout is null");
         return std::nullopt;
     }
-    const Guid layoutGuid = desc.PipelineLayout->GetGuid();
-    if (layoutGuid.IsEmpty()) {
-        RADRAY_ERR_LOG("PSO cache: PipelineLayout has no runtime-library identity");
+    const auto layoutGuid = layoutLibrary.FindGuid(*desc.PipelineLayout);
+    if (!layoutGuid.has_value()) {
+        RADRAY_ERR_LOG("PSO cache: PipelineLayout is not owned by the runtime layout library");
         return std::nullopt;
     }
-    key.LayoutId = layoutGuid;
+    key.LayoutId = layoutGuid.value();
 
-    auto fillShaderGuid = [](const std::optional<ShaderEntry>& entry, Guid& out, const char* name) noexcept -> bool {
+    auto fillShaderGuid = [&shaderLibrary](
+                              const std::optional<ShaderEntry>& entry,
+                              Guid& out,
+                              const char* name) noexcept -> bool {
         if (!entry.has_value() || entry->Target == nullptr) {
             out = Guid::Empty();
             return true;
         }
-        const Guid g = entry->Target->GetGuid();
-        if (g.IsEmpty()) {
-            RADRAY_ERR_LOG("PSO cache: {} shader has no runtime-library identity", name);
+        const auto guid = shaderLibrary.FindGuid(*entry->Target);
+        if (!guid.has_value()) {
+            RADRAY_ERR_LOG("PSO cache: {} shader is not owned by the runtime shader library", name);
             return false;
         }
-        out = g;
+        out = guid.value();
         return true;
     };
     if (!fillShaderGuid(desc.VS, key.VSId, "VS")) {
@@ -137,33 +144,39 @@ std::optional<GraphicsPsoKey> BuildGraphicsPsoKey(const GraphicsPipelineStateDes
     return key;
 }
 
-std::optional<ComputePsoKey> BuildComputePsoKey(const ComputePipelineStateDescriptor& desc) noexcept {
+std::optional<ComputePsoKey> BuildComputePsoKey(
+    const ComputePipelineStateDescriptor& desc,
+    const ShaderVariantLibrary& shaderLibrary,
+    const PipelineLayoutLibrary& layoutLibrary) noexcept {
     ComputePsoKey key{};
     if (desc.PipelineLayout == nullptr) {
         RADRAY_ERR_LOG("PSO cache: PipelineLayout is null");
         return std::nullopt;
     }
-    const Guid layoutGuid = desc.PipelineLayout->GetGuid();
-    if (layoutGuid.IsEmpty()) {
-        RADRAY_ERR_LOG("PSO cache: PipelineLayout has no runtime-library identity");
+    const auto layoutGuid = layoutLibrary.FindGuid(*desc.PipelineLayout);
+    if (!layoutGuid.has_value()) {
+        RADRAY_ERR_LOG("PSO cache: PipelineLayout is not owned by the runtime layout library");
         return std::nullopt;
     }
-    key.LayoutId = layoutGuid;
+    key.LayoutId = layoutGuid.value();
     if (desc.CS.Target == nullptr) {
         RADRAY_ERR_LOG("PSO cache: compute shader is null");
         return std::nullopt;
     }
-    const Guid csGuid = desc.CS.Target->GetGuid();
-    if (csGuid.IsEmpty()) {
-        RADRAY_ERR_LOG("PSO cache: CS shader has no runtime-library identity");
+    const auto csGuid = shaderLibrary.FindGuid(*desc.CS.Target);
+    if (!csGuid.has_value()) {
+        RADRAY_ERR_LOG("PSO cache: CS shader is not owned by the runtime shader library");
         return std::nullopt;
     }
-    key.CSId = csGuid;
+    key.CSId = csGuid.value();
     return key;
 }
 
-GraphicsPipelineStateLibrary::GraphicsPipelineStateLibrary(render::Device* device) noexcept
-    : _device(device) {}
+GraphicsPipelineStateLibrary::GraphicsPipelineStateLibrary(
+    render::Device* device,
+    const ShaderVariantLibrary* shaderLibrary,
+    const PipelineLayoutLibrary* layoutLibrary) noexcept
+    : _device(device), _shaderLibrary(shaderLibrary), _layoutLibrary(layoutLibrary) {}
 
 GraphicsPipelineStateLibrary::~GraphicsPipelineStateLibrary() noexcept {
     Clear();
@@ -171,7 +184,11 @@ GraphicsPipelineStateLibrary::~GraphicsPipelineStateLibrary() noexcept {
 
 Nullable<render::GraphicsPipelineState*> GraphicsPipelineStateLibrary::GetOrCreate(
     const render::GraphicsPipelineStateDescriptor& desc) noexcept {
-    auto key = BuildGraphicsPsoKey(desc);
+    if (_shaderLibrary == nullptr || _layoutLibrary == nullptr) {
+        RADRAY_ERR_LOG("PSO cache: runtime shader or layout library is null");
+        return nullptr;
+    }
+    auto key = BuildGraphicsPsoKey(desc, *_shaderLibrary, *_layoutLibrary);
     if (!key.has_value()) {
         return nullptr;
     }
@@ -227,8 +244,11 @@ uint64_t GraphicsPipelineStateLibrary::GetId(const render::GraphicsPipelineState
     return it != _ids.end() ? it->second : 0;
 }
 
-ComputePipelineStateLibrary::ComputePipelineStateLibrary(render::Device* device) noexcept
-    : _device(device) {}
+ComputePipelineStateLibrary::ComputePipelineStateLibrary(
+    render::Device* device,
+    const ShaderVariantLibrary* shaderLibrary,
+    const PipelineLayoutLibrary* layoutLibrary) noexcept
+    : _device(device), _shaderLibrary(shaderLibrary), _layoutLibrary(layoutLibrary) {}
 
 ComputePipelineStateLibrary::~ComputePipelineStateLibrary() noexcept {
     Clear();
@@ -236,7 +256,11 @@ ComputePipelineStateLibrary::~ComputePipelineStateLibrary() noexcept {
 
 Nullable<render::ComputePipelineState*> ComputePipelineStateLibrary::GetOrCreate(
     const render::ComputePipelineStateDescriptor& desc) noexcept {
-    auto key = BuildComputePsoKey(desc);
+    if (_shaderLibrary == nullptr || _layoutLibrary == nullptr) {
+        RADRAY_ERR_LOG("PSO cache: runtime shader or layout library is null");
+        return nullptr;
+    }
+    auto key = BuildComputePsoKey(desc, *_shaderLibrary, *_layoutLibrary);
     if (!key.has_value()) {
         return nullptr;
     }

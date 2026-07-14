@@ -266,8 +266,7 @@ MeshPassExecutor::BindingResolveResult MeshPassExecutor::ResolveBindingGroups(
             .MaxReadOnlyTexelBuffers = 64,
             .MaxReadWriteTexelBuffers = 64,
             .MaxSamplers = 4096,
-            .MaxAccelerationStructures = 0,
-            .Lifetime = render::DescriptorPoolLifetime::Persistent});
+            .MaxAccelerationStructures = 0});
         if (!poolOpt.HasValue()) {
             result.Diagnostic.Reason = "failed to create the persistent material descriptor pool";
             ++resources.Counters.BindingResolutionFailures;

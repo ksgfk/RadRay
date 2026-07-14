@@ -294,21 +294,14 @@ VkImageLayout TextureStateToLayout(TextureStates v) noexcept {
     return VK_IMAGE_LAYOUT_UNDEFINED;
 }
 
-VkImageLayout TextureViewUsageToLayout(TextureViewUsages v) noexcept {
-    if (v.HasFlag(TextureViewUsage::UnorderedAccess)) {
-        return VK_IMAGE_LAYOUT_GENERAL;
-    }
-    if (v.HasFlag(TextureViewUsage::DepthWrite)) {
-        return VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-    }
-    if (v.HasFlag(TextureViewUsage::DepthRead)) {
-        return VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
-    }
-    if (v.HasFlag(TextureViewUsage::RenderTarget)) {
-        return VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    }
-    if (v.HasFlag(TextureViewUsage::Resource)) {
-        return VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+VkImageLayout TextureViewUsageToLayout(TextureViewUsage v) noexcept {
+    switch (v) {
+        case TextureViewUsage::Resource: return VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        case TextureViewUsage::RenderTarget: return VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        case TextureViewUsage::DepthRead: return VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
+        case TextureViewUsage::DepthWrite: return VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        case TextureViewUsage::UnorderedAccess: return VK_IMAGE_LAYOUT_GENERAL;
+        case TextureViewUsage::UNKNOWN: return VK_IMAGE_LAYOUT_UNDEFINED;
     }
     return VK_IMAGE_LAYOUT_UNDEFINED;
 }

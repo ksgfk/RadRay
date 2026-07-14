@@ -58,8 +58,7 @@ DescriptorPoolDescriptor MakeTestPoolDescriptor() {
         .MaxReadOnlyTexelBuffers = 0,
         .MaxReadWriteTexelBuffers = 0,
         .MaxSamplers = 0,
-        .MaxAccelerationStructures = 0,
-        .Lifetime = DescriptorPoolLifetime::Persistent};
+        .MaxAccelerationStructures = 0};
 }
 
 class ComputeBindingRuntimeTest : public ::testing::TestWithParam<TestBackend> {

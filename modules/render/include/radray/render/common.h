@@ -10,14 +10,11 @@
 #include <radray/nullable.h>
 #include <radray/enum_flags.h>
 #include <radray/basic_math.h>
-#include <radray/guid.h>
-
 #include <radray/render/shader/hlsl.h>
 #include <radray/render/shader/spirv.h>
 
 namespace radray::render {
 
-// PSO 缓存 POD key 的容量上限. 超限时 BuildKey 返回失败.
 inline constexpr uint32_t kMaxColorTargets = 8;
 inline constexpr uint32_t kMaxVertexBufferLayouts = 16;
 inline constexpr uint32_t kMaxVertexElementsPerLayout = 16;
@@ -350,23 +347,19 @@ enum class BufferViewUsage : uint32_t {
 };
 
 enum class TextureViewUsage : uint32_t {
-    UNKNOWN = 0x0,
-    Resource = 0x1,
-    RenderTarget = Resource << 1,
-    DepthRead = RenderTarget << 1,
-    DepthWrite = DepthRead << 1,
-    UnorderedAccess = DepthWrite << 1,
+    UNKNOWN,
+    Resource,
+    RenderTarget,
+    DepthRead,
+    DepthWrite,
+    UnorderedAccess,
 };
 
 enum class ResourceHint : uint32_t {
     None = 0x0,
     Dedicated = 0x1,
     External = Dedicated << 1,
-    /// Keeps a mappable buffer mapped for its lifetime. BufferUse::MapRead or
-    /// BufferUse::MapWrite must also be present.
     PersistentMap = External << 1,
-    /// The resource's GPU address must remain stable for its lifetime.
-    StableGpuAddress = PersistentMap << 1,
 };
 
 enum class LoadAction : int32_t {
@@ -535,8 +528,6 @@ struct is_flags<render::BufferUse> : public std::true_type {};
 template <>
 struct is_flags<render::TextureUse> : public std::true_type {};
 template <>
-struct is_flags<render::TextureViewUsage> : public std::true_type {};
-template <>
 struct is_flags<render::BufferState> : public std::true_type {};
 template <>
 struct is_flags<render::TextureState> : public std::true_type {};
@@ -551,7 +542,6 @@ using ResourceHints = EnumFlags<render::ResourceHint>;
 using RenderObjectTags = EnumFlags<render::RenderObjectTag>;
 using BufferUses = EnumFlags<render::BufferUse>;
 using TextureUses = EnumFlags<render::TextureUse>;
-using TextureViewUsages = EnumFlags<render::TextureViewUsage>;
 using BufferStates = EnumFlags<render::BufferState>;
 using TextureStates = EnumFlags<render::TextureState>;
 using AccelerationStructureBuildFlags = EnumFlags<render::AccelerationStructureBuildFlag>;
@@ -945,7 +935,7 @@ struct TextureViewDescriptor {
     TextureDimension Dim{TextureDimension::UNKNOWN};
     TextureFormat Format{TextureFormat::UNKNOWN};
     SubresourceRange Range{};
-    TextureViewUsages Usage{TextureViewUsage::UNKNOWN};
+    TextureViewUsage Usage{TextureViewUsage::UNKNOWN};
 };
 
 struct BufferDescriptor {
@@ -960,15 +950,8 @@ struct BindlessArrayDescriptor {
     BindlessSlotType SlotType{BindlessSlotType::Multiple};
 };
 
-enum class DescriptorPoolLifetime : uint8_t {
-    Persistent,
-    PerFlight,
-};
-
-/// Capacity is explicit so the caller, rather than the backend, owns descriptor
-/// allocation policy. Counts are totals across all binding groups in the pool.
 struct DescriptorPoolDescriptor {
-    uint32_t MaxBindingGroups{1};
+    uint32_t MaxBindingGroups{0};
     uint32_t MaxSampledTextures{0};
     uint32_t MaxStorageTextures{0};
     uint32_t MaxUniformBuffers{0};
@@ -978,7 +961,6 @@ struct DescriptorPoolDescriptor {
     uint32_t MaxReadWriteTexelBuffers{0};
     uint32_t MaxSamplers{0};
     uint32_t MaxAccelerationStructures{0};
-    DescriptorPoolLifetime Lifetime{DescriptorPoolLifetime::Persistent};
 };
 
 struct BufferRange {
@@ -1074,9 +1056,6 @@ struct PushConstantRange {
     friend bool operator==(const PushConstantRange&, const PushConstantRange&) noexcept = default;
 };
 
-/// Identifies a cbuffer binding whose byte offset is supplied when the binding
-/// group is bound. Group maps to HLSL register space / Vulkan descriptor set;
-/// Binding maps to the reflected shader register / Vulkan binding.
 struct DynamicBufferBinding {
     uint32_t Group{0};
     uint32_t Binding{0};
@@ -1091,9 +1070,6 @@ struct PushConstantBinding {
     friend bool operator==(const PushConstantBinding&, const PushConstantBinding&) noexcept = default;
 };
 
-/// Reuses an already-created binding-group layout in a new pipeline layout.
-/// The caller owns both pipeline layouts and must keep Source alive longer than
-/// the layout being created. This is explicit object reuse, not a device cache.
 struct BindingGroupLayoutReuse {
     uint32_t Group{0};
     PipelineLayout* Source{nullptr};
@@ -1434,7 +1410,6 @@ struct IndexBufferView {
     uint32_t Stride{0};
 };
 
-/// Binary-compatible with D3D12_DRAW_ARGUMENTS and VkDrawIndirectCommand.
 struct DrawIndirectArguments {
     uint32_t VertexCount{0};
     uint32_t InstanceCount{0};
@@ -1442,7 +1417,6 @@ struct DrawIndirectArguments {
     uint32_t FirstInstance{0};
 };
 
-/// Binary-compatible with D3D12_DRAW_INDEXED_ARGUMENTS and VkDrawIndexedIndirectCommand.
 struct DrawIndexedIndirectArguments {
     uint32_t IndexCount{0};
     uint32_t InstanceCount{0};
@@ -1451,7 +1425,6 @@ struct DrawIndexedIndirectArguments {
     uint32_t FirstInstance{0};
 };
 
-/// Binary-compatible with D3D12_DISPATCH_ARGUMENTS and VkDispatchIndirectCommand.
 struct DispatchIndirectArguments {
     uint32_t GroupCountX{0};
     uint32_t GroupCountY{0};
@@ -1465,6 +1438,7 @@ static_assert(sizeof(DispatchIndirectArguments) == 12);
 struct DeviceDetail {
     string GpuName{};
     uint32_t CBufferAlignment{0};
+    uint64_t BufferCopyOffsetAlignment{1};
     uint32_t TextureDataPitchAlignment{1};
     uint64_t TextureDataPlacementAlignment{1};
     uint64_t VramBudget{0};
@@ -1517,11 +1491,7 @@ public:
 
     virtual Nullable<unique_ptr<DescriptorPool>> CreateDescriptorPool(const DescriptorPoolDescriptor& desc) noexcept = 0;
 
-    /// Creates one independently bindable register-space/descriptor-set group.
-    virtual Nullable<unique_ptr<BindingGroup>> CreateBindingGroup(
-        DescriptorPool* pool,
-        PipelineLayout* layout,
-        uint32_t groupIndex) noexcept = 0;
+    virtual Nullable<unique_ptr<BindingGroup>> CreateBindingGroup(DescriptorPool* pool, PipelineLayout* layout, uint32_t groupIndex) noexcept = 0;
 
     virtual Nullable<unique_ptr<GraphicsPipelineState>> CreateGraphicsPipelineState(const GraphicsPipelineStateDescriptor& desc) noexcept = 0;
 
@@ -1585,10 +1555,8 @@ public:
 
     virtual void CopyTextureToBuffer(Buffer* dst, uint64_t dstOffset, Texture* src, SubresourceRange srcRange) noexcept = 0;
 
-    /// Source requires CopySource usage and destination requires CopyDestination usage.
     virtual void CopyTextureToTexture(const TextureCopyDescriptor& desc) noexcept = 0;
 
-    /// Resolves multisampled color. Source requires CopySource and destination requires CopyDestination usage.
     virtual void ResolveTexture(const TextureResolveDescriptor& desc) noexcept = 0;
 
     virtual void ResetQueryPool(QueryPool* pool, uint32_t firstIndex, uint32_t count) noexcept = 0;
@@ -1619,20 +1587,9 @@ public:
 
     virtual CommandBuffer* GetCommandBuffer() const noexcept = 0;
 
-    /// Binds one group. Dynamic offsets are ordered by ascending binding number
-    /// among layout entries marked DynamicBufferBinding for this group.
-    virtual void BindBindingGroup(
-        uint32_t groupIndex,
-        BindingGroup* group,
-        std::span<const uint32_t> dynamicOffsets = {}) noexcept = 0;
+    virtual void BindBindingGroup(uint32_t groupIndex, BindingGroup* group, std::span<const uint32_t> dynamicOffsets = {}) noexcept = 0;
 
-    /// Writes one reflected push/root-constant range identified by its public
-    /// register-space and binding. Forward and Shadow do not use this API.
-    virtual bool SetPushConstants(
-        PipelineLayout* layout,
-        uint32_t groupIndex,
-        uint32_t binding,
-        std::span<const byte> data) noexcept = 0;
+    virtual bool SetPushConstants(PipelineLayout* layout, uint32_t groupIndex, uint32_t binding, std::span<const byte> data) noexcept = 0;
 };
 
 class GraphicsCommandEncoder : public CommandEncoder {
@@ -1655,10 +1612,8 @@ public:
 
     virtual void DrawIndexed(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance) noexcept = 0;
 
-    /// Executes tightly packed DrawIndirectArguments records.
     virtual void DrawIndirect(Buffer* argumentBuffer, uint64_t argumentOffset, uint32_t drawCount = 1) noexcept = 0;
 
-    /// Executes tightly packed DrawIndexedIndirectArguments records.
     virtual void DrawIndexedIndirect(Buffer* argumentBuffer, uint64_t argumentOffset, uint32_t drawCount = 1) noexcept = 0;
 };
 
@@ -1839,14 +1794,6 @@ public:
     virtual ShaderStages GetStages() const noexcept = 0;
 
     virtual Nullable<const ShaderReflectionDesc*> GetReflection() const noexcept = 0;
-
-    // 缓存层分配的稳定身份. 未经缓存直接创建的 Shader 为 Guid::Empty(),
-    // 不能参与 PSO 缓存 key (BuildKey 会拒绝 Empty).
-    Guid GetGuid() const noexcept { return _guid; }
-    void SetGuid(Guid guid) noexcept { _guid = guid; }
-
-protected:
-    Guid _guid{};
 };
 
 class PipelineLayout : public RenderBase, public IDebugName {
@@ -1864,13 +1811,6 @@ public:
     virtual vector<BindingGroupLayout> GetBindingGroupLayouts() const noexcept = 0;
 
     virtual vector<PushConstantRange> GetPushConstantRanges() const noexcept = 0;
-
-    // Optional identity assigned by an owning runtime resource library.
-    Guid GetGuid() const noexcept { return _guid; }
-    void SetGuid(Guid guid) noexcept { _guid = guid; }
-
-protected:
-    Guid _guid{};
 };
 
 class PipelineState : public RenderBase, public IDebugName {
@@ -1931,8 +1871,6 @@ public:
 
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::DescriptorPool; }
 
-    /// Reset is only valid after all binding groups allocated from this pool
-    /// have been destroyed and their GPU work has completed.
     virtual bool Reset() noexcept = 0;
 
     virtual DescriptorPoolDescriptor GetDesc() const noexcept = 0;
@@ -1940,7 +1878,6 @@ public:
     virtual uint32_t GetAllocatedBindingGroupCount() const noexcept = 0;
 };
 
-/// A single independently bindable resource group/register space.
 class BindingGroup : public RenderBase, public IDebugName {
 public:
     virtual ~BindingGroup() noexcept = default;
@@ -1961,7 +1898,6 @@ public:
 
     virtual bool SetBindlessArray(uint32_t binding, BindlessArray* array) noexcept = 0;
 
-    /// Returns true only when every non-static parameter in this group has been written.
     virtual bool IsFullyWritten() const noexcept = 0;
 };
 
@@ -1985,11 +1921,6 @@ public:
 
 class InstanceVulkan : public RenderBase {
 public:
-    InstanceVulkan() noexcept = default;
-    InstanceVulkan(const InstanceVulkan&) = delete;
-    InstanceVulkan(InstanceVulkan&&) = delete;
-    InstanceVulkan& operator=(const InstanceVulkan&) = delete;
-    InstanceVulkan& operator=(InstanceVulkan&&) = delete;
     virtual ~InstanceVulkan() noexcept = default;
 
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::VkInstance; }
@@ -2004,11 +1935,6 @@ public:
 
 class DXGIFactory : public RenderBase {
 public:
-    DXGIFactory() noexcept = default;
-    DXGIFactory(const DXGIFactory&) = delete;
-    DXGIFactory(DXGIFactory&&) = delete;
-    DXGIFactory& operator=(const DXGIFactory&) = delete;
-    DXGIFactory& operator=(DXGIFactory&&) = delete;
     virtual ~DXGIFactory() noexcept = default;
 
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::DXGIFactory; }
@@ -2029,9 +1955,7 @@ uint32_t GetIndexFormatSizeInBytes(IndexFormat format) noexcept;
 IndexFormat SizeInBytesToIndexFormat(uint32_t size) noexcept;
 uint32_t GetTextureFormatBytesPerPixel(TextureFormat format) noexcept;
 ResourceBindType BufferViewUsageToResourceBindType(BufferViewUsage usage) noexcept;
-bool IsGraphicsPipelineCompatibleWithRenderPass(
-    const GraphicsPipelineStateDescriptor& pipeline,
-    const RenderPass& renderPass) noexcept;
+bool IsGraphicsPipelineCompatibleWithRenderPass(const GraphicsPipelineStateDescriptor& pipeline, const RenderPass& renderPass) noexcept;
 // -------------------------------------------------------------------------
 
 std::string_view format_as(RenderBackend v) noexcept;

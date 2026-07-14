@@ -320,7 +320,31 @@ TEST_P(RhiCommandRuntimeTest, FlushMappedRangesAcceptsAllForPersistentAndTransie
     writeAndFlush(transient.get());
 }
 
-TEST_P(RhiCommandRuntimeTest, FlushMappedRangesRejectsInvalidSpanEntries) {
+TEST_P(RhiCommandRuntimeTest, D3D12FlushMappedRangesAreNoOps) {
+    if (GetParam() != TestBackend::D3D12) {
+        GTEST_SKIP() << "D3D12-specific behavior";
+    }
+
+    auto readback = CreateBuffer(BufferDescriptor{
+        .Size = 64,
+        .Memory = MemoryType::ReadBack,
+        .Usage = BufferUse::MapRead | BufferUse::CopyDestination});
+    ASSERT_NE(readback, nullptr);
+
+    const MappedBufferRange invalidRanges[] = {
+        MappedBufferRange{},
+        MappedBufferRange{
+            .Target = readback.get(),
+            .Range = BufferRange{.Offset = 64, .Size = 1}}};
+    _context.GetDevicePtr()->FlushMappedRanges(invalidRanges);
+    readback->FlushMappedRange(BufferRange{.Offset = 64, .Size = 1});
+}
+
+TEST_P(RhiCommandRuntimeTest, VulkanFlushMappedRangesRejectsInvalidSpanEntries) {
+    if (GetParam() != TestBackend::Vulkan) {
+        GTEST_SKIP() << "Vulkan-specific behavior";
+    }
+
     auto writable = CreateBuffer(BufferDescriptor{
         .Size = 64,
         .Memory = MemoryType::Upload,
@@ -796,6 +820,142 @@ TEST_P(RhiCommandRuntimeTest, ResolveTextureConvertsMsaaColorToSingleSample) {
     EXPECT_NEAR(pixel[2], 191, 1);
     EXPECT_EQ(pixel[3], 255);
     EXPECT_TRUE(_context.GetCapturedErrors().empty()) << _context.JoinCapturedErrors();
+}
+
+TEST_P(RhiCommandRuntimeTest, TextureViewAllArrayLayersResolveToTargetExtent) {
+    auto texture = CreateTexture(TextureDescriptor{
+        .Dim = TextureDimension::Dim2DArray,
+        .Width = 4,
+        .Height = 4,
+        .DepthOrArraySize = 3,
+        .MipLevels = 1,
+        .SampleCount = 1,
+        .Format = TextureFormat::RGBA8_UNORM,
+        .Memory = MemoryType::Device,
+        .Usage = TextureUse::Resource,
+        .Hints = ResourceHint::None});
+    ASSERT_NE(texture, nullptr);
+
+    auto view = CreateTextureView(TextureViewDescriptor{
+        .Target = texture.get(),
+        .Dim = TextureDimension::Dim2DArray,
+        .Format = TextureFormat::RGBA8_UNORM,
+        .Range = SubresourceRange::AllSub(),
+        .Usage = TextureViewUsage::Resource});
+    ASSERT_NE(view, nullptr);
+    EXPECT_TRUE(_context.GetCapturedErrors().empty()) << _context.JoinCapturedErrors();
+}
+
+TEST_P(RhiCommandRuntimeTest, TextureViewSupportsCompatibleFormatOverride) {
+    auto texture = CreateTexture(TextureDescriptor{
+        .Dim = TextureDimension::Dim2D,
+        .Width = 4,
+        .Height = 4,
+        .DepthOrArraySize = 1,
+        .MipLevels = 1,
+        .SampleCount = 1,
+        .Format = TextureFormat::RGBA8_UNORM,
+        .Memory = MemoryType::Device,
+        .Usage = TextureUse::Resource,
+        .Hints = ResourceHint::None});
+    ASSERT_NE(texture, nullptr);
+
+    auto view = CreateTextureView(TextureViewDescriptor{
+        .Target = texture.get(),
+        .Dim = TextureDimension::Dim2D,
+        .Format = TextureFormat::RGBA8_UNORM_SRGB,
+        .Range = SubresourceRange::AllSub(),
+        .Usage = TextureViewUsage::Resource});
+    ASSERT_NE(view, nullptr);
+    EXPECT_TRUE(_context.GetCapturedErrors().empty()) << _context.JoinCapturedErrors();
+}
+
+TEST_P(RhiCommandRuntimeTest, TextureViewRejectsUnknownUsage) {
+    auto texture = CreateTexture(TextureDescriptor{
+        .Dim = TextureDimension::Dim2D,
+        .Width = 4,
+        .Height = 4,
+        .DepthOrArraySize = 1,
+        .MipLevels = 1,
+        .SampleCount = 1,
+        .Format = TextureFormat::RGBA8_UNORM,
+        .Memory = MemoryType::Device,
+        .Usage = TextureUse::Resource,
+        .Hints = ResourceHint::None});
+    ASSERT_NE(texture, nullptr);
+
+    _context.ClearCapturedErrors();
+    auto view = _context.GetDevicePtr()->CreateTextureView(TextureViewDescriptor{
+        .Target = texture.get(),
+        .Dim = TextureDimension::Dim2D,
+        .Format = TextureFormat::RGBA8_UNORM,
+        .Range = SubresourceRange::AllSub(),
+        .Usage = TextureViewUsage::UNKNOWN});
+    EXPECT_FALSE(view.HasValue());
+    EXPECT_FALSE(_context.GetCapturedErrors().empty());
+}
+
+TEST_P(RhiCommandRuntimeTest, TextureViewRejectsNonPortableLayerRanges) {
+    auto cubeArray = CreateTexture(TextureDescriptor{
+        .Dim = TextureDimension::CubeArray,
+        .Width = 4,
+        .Height = 4,
+        .DepthOrArraySize = 12,
+        .MipLevels = 1,
+        .SampleCount = 1,
+        .Format = TextureFormat::RGBA8_UNORM,
+        .Memory = MemoryType::Device,
+        .Usage = TextureUse::Resource,
+        .Hints = ResourceHint::None});
+    auto texture3D = CreateTexture(TextureDescriptor{
+        .Dim = TextureDimension::Dim3D,
+        .Width = 4,
+        .Height = 4,
+        .DepthOrArraySize = 4,
+        .MipLevels = 1,
+        .SampleCount = 1,
+        .Format = TextureFormat::RGBA8_UNORM,
+        .Memory = MemoryType::Device,
+        .Usage = TextureUse::Resource,
+        .Hints = ResourceHint::None});
+    ASSERT_NE(cubeArray, nullptr);
+    ASSERT_NE(texture3D, nullptr);
+
+    auto cubeArrayView = CreateTextureView(TextureViewDescriptor{
+        .Target = cubeArray.get(),
+        .Dim = TextureDimension::CubeArray,
+        .Format = TextureFormat::RGBA8_UNORM,
+        .Range = SubresourceRange::AllSub(),
+        .Usage = TextureViewUsage::Resource});
+    auto texture3DView = CreateTextureView(TextureViewDescriptor{
+        .Target = texture3D.get(),
+        .Dim = TextureDimension::Dim3D,
+        .Format = TextureFormat::RGBA8_UNORM,
+        .Range = SubresourceRange::AllSub(),
+        .Usage = TextureViewUsage::Resource});
+    ASSERT_NE(cubeArrayView, nullptr);
+    ASSERT_NE(texture3DView, nullptr);
+    EXPECT_TRUE(_context.GetCapturedErrors().empty()) << _context.JoinCapturedErrors();
+
+    _context.ClearCapturedErrors();
+    auto secondCubeView = _context.GetDevicePtr()->CreateTextureView(TextureViewDescriptor{
+        .Target = cubeArray.get(),
+        .Dim = TextureDimension::Cube,
+        .Format = TextureFormat::RGBA8_UNORM,
+        .Range = SubresourceRange{6, 6, 0, 1},
+        .Usage = TextureViewUsage::Resource});
+    EXPECT_FALSE(secondCubeView.HasValue());
+    EXPECT_FALSE(_context.GetCapturedErrors().empty());
+
+    _context.ClearCapturedErrors();
+    auto sliced3DView = _context.GetDevicePtr()->CreateTextureView(TextureViewDescriptor{
+        .Target = texture3D.get(),
+        .Dim = TextureDimension::Dim3D,
+        .Format = TextureFormat::RGBA8_UNORM,
+        .Range = SubresourceRange{1, 1, 0, 1},
+        .Usage = TextureViewUsage::Resource});
+    EXPECT_FALSE(sliced3DView.HasValue());
+    EXPECT_FALSE(_context.GetCapturedErrors().empty());
 }
 
 INSTANTIATE_TEST_SUITE_P(

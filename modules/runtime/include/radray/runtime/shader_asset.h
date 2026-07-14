@@ -82,7 +82,7 @@ struct ShaderPassDesc {
     string PassTag;
     string Source;
     // program 的稳定逻辑名 (如 "forward_pipeline/forward")。跨进程稳定,
-    // 透传为 render::ShaderVariantDescriptor::LogicalName, 供预编译缓存定位磁盘产物。
+    // 透传为 ShaderVariantDescriptor::LogicalName, 供预编译缓存定位磁盘产物。
     // 为空时预编译缓存无法定位该 pass 的变体 (仅影响 DXC 缺失路径)。
     string ProgramName;
     string VertexEntry{"VSMain"};
@@ -111,7 +111,7 @@ struct ShaderPassDesc {
 /// - 持有 program 身份 ProgramId (构造时生成的稳定 Guid), 独立于 AssetManager 分配的 AssetId。
 ///   runtime ShaderVariantLibrary 用 ProgramId 区分不同 program, 因此即使未入库也有效。
 /// - 持有 keyword 表 (全 pass 共享) + pass 列表。
-/// - GetOrCreateVariant 把 (pass, 启用 keyword) 投影为 render::ShaderVariantDescriptor,
+/// - GetOrCreateVariant 把 (pass, 启用 keyword) 投影为 ShaderVariantDescriptor,
 ///   驱动 runtime ShaderVariantLibrary 懒编译并缓存, 返回编译好的变体。
 class ShaderAsset : public Asset {
 public:

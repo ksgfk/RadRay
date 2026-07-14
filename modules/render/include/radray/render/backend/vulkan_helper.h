@@ -203,7 +203,7 @@ VkPipelineStageFlags BufferStateToPipelineStageFlags(BufferStates v) noexcept;
 VkAccessFlags TextureStateToAccessFlags(TextureStates v) noexcept;
 VkPipelineStageFlags TextureStateToPipelineStageFlags(TextureStates v, bool isSrc) noexcept;
 VkImageLayout TextureStateToLayout(TextureStates v) noexcept;
-VkImageLayout TextureViewUsageToLayout(TextureViewUsages v) noexcept;
+VkImageLayout TextureViewUsageToLayout(TextureViewUsage v) noexcept;
 
 VkQueueFlags MapType(QueueType v) noexcept;
 VkFormat MapType(TextureFormat v) noexcept;

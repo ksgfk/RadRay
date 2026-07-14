@@ -6,7 +6,7 @@
 #include <fmt/format.h>
 #include <gtest/gtest.h>
 
-#include <radray/runtime/gpu_system.h>
+#include <radray/runtime/gpu_resource.h>
 
 namespace radray::render::test {
 namespace {

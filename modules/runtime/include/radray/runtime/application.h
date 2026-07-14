@@ -7,7 +7,6 @@
 #include <radray/coroutine.h>
 #include <radray/runtime_type.h>
 #include <radray/types.h>
-#include <radray/render/common.h>
 
 namespace radray {
 
@@ -28,7 +27,9 @@ struct AppFrameTarget;
 namespace render {
 class SwapChain;
 class Device;
-class DXGIFactory;
+enum class RenderBackend;
+enum class TextureFormat;
+enum class PresentMode;
 }  // namespace render
 
 struct AppUpdateContext {
@@ -139,12 +140,12 @@ private:
     bool _initialized{false};
 };
 
-/// 一站式运行时启动描述。Application::Run(desc) 据此创建 device(+factory)、窗口系统、
-/// GpuSystem、主窗口 + swapchain、AssetManager、World,并固化帧序与 shutdown 顺序。
+/// 一站式运行时启动描述。Application::Run(desc) 据此创建 GpuSystem(由其持有 device/factory)、
+/// 窗口系统、主窗口 + swapchain、AssetManager、World,并固化帧序与 shutdown 顺序。
 /// 可选能力(例如 ImGuiSystem)由上层在 Run() 前通过 RegisterSubsystem<T>() 显式注册。
 struct ApplicationRuntimeDescriptor {
     // —— 后端 / 运行模式 ——
-    render::RenderBackend Backend{render::RenderBackend::Vulkan};
+    render::RenderBackend Backend;
     bool EnableValidation{false};
     bool Multithreaded{false};
     std::string_view AppName{"RadRay Application"};
@@ -158,8 +159,8 @@ struct ApplicationRuntimeDescriptor {
     // —— GPU / 呈现 ——
     uint32_t BackBufferCount{3};
     uint32_t FlightDataCount{2};
-    render::TextureFormat BackBufferFormat{render::TextureFormat::BGRA8_UNORM};
-    render::PresentMode PresentMode{render::PresentMode::FIFO};
+    render::TextureFormat BackBufferFormat;
+    render::PresentMode PresentMode;
 };
 
 class Application {
@@ -205,8 +206,9 @@ public:
     const ApplicationScheduler& GetScheduler() const noexcept { return _scheduler; }
     World* GetWorld() noexcept { return _world.get(); }
     const World* GetWorld() const noexcept { return _world.get(); }
-    render::Device* GetDevice() noexcept { return _device.get(); }
-    const render::Device* GetDevice() const noexcept { return _device.get(); }
+    /// 兼容性便捷入口；device 的所有权与生命周期由 GpuSystem 管理。
+    render::Device* GetDevice() noexcept;
+    const render::Device* GetDevice() const noexcept;
 
     // —— runner / 子系统调用的框架方法(已固化帧序,非游戏 override 点)——
     AppUpdateResult Update(const AppUpdateContext& ctx);
@@ -257,8 +259,6 @@ private:
     unique_ptr<AssetManager> _assetManager;
     unique_ptr<World> _world;
     vector<unique_ptr<AppSubsystem>> _subsystems;
-    shared_ptr<render::Device> _device;
-    unique_ptr<render::DXGIFactory> _dxgiFactory;
     ApplicationScheduler _scheduler;
     bool _multithreaded{false};
 };

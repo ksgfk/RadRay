@@ -765,8 +765,7 @@ Nullable<unique_ptr<ImGuiRenderer>> ImGuiRenderer::Create(const ImGuiRendererDes
         .MaxReadOnlyTexelBuffers = 0,
         .MaxReadWriteTexelBuffers = 0,
         .MaxSamplers = 0,
-        .MaxAccelerationStructures = 0,
-        .Lifetime = render::DescriptorPoolLifetime::Persistent});
+        .MaxAccelerationStructures = 0});
     if (!poolOpt.HasValue()) {
         return nullptr;
     }

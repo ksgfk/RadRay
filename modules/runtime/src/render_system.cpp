@@ -75,7 +75,8 @@ void RenderSystem::OnInitialize() {
         }
     }
 
-    _psoCache = make_unique<GraphicsPipelineStateLibrary>(device);
+    _psoCache = make_unique<GraphicsPipelineStateLibrary>(
+        device, _variantLibrary.get(), gpu->GetPipelineLayoutLibrary());
 
     // sampler 缓存: 按 descriptor 去重 + 永生持有, 使材质快照可安全持有稳定 sampler 指针。
     _samplerCache = make_unique<SamplerCache>(device);

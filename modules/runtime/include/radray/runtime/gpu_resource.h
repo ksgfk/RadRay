@@ -1,13 +1,16 @@
 #pragma once
 
 #include <limits>
+#include <optional>
+#include <span>
 
+#include <radray/nullable.h>
 #include <radray/render/common.h>
 #include <radray/types.h>
 
 namespace radray {
 
-class HostWriteBatch;
+class MeshResource;
 
 class GpuMesh {
 public:
@@ -18,6 +21,80 @@ public:
 
     vector<unique_ptr<render::Buffer>> Buffers;
     vector<DrawData> Draws;
+};
+
+struct UploadMemoryStats {
+    uint64_t PageCount{0};
+    uint64_t PageCapacityBytes{0};
+    uint64_t CommitCount{0};
+    uint64_t CommittedBytes{0};
+    uint64_t RecordedRangeCount{0};
+    uint64_t FlushedRangeCount{0};
+};
+
+class HostWriteBatch {
+public:
+    HostWriteBatch();
+
+    void Record(render::Buffer* target, render::BufferRange range);
+    void Flush(render::Device& device) noexcept;
+
+    bool Empty() const noexcept { return _ranges.empty(); }
+    bool IsSealed() const noexcept { return _sealed; }
+    std::span<const render::MappedBufferRange> GetRanges() const noexcept { return _ranges; }
+    const UploadMemoryStats& GetStats() const noexcept { return _stats; }
+
+    void Seal() noexcept { _sealed = true; }
+    void Reset() noexcept;
+    void RecordPageAllocation(uint64_t capacity) noexcept;
+
+private:
+    vector<render::MappedBufferRange> _ranges;
+    UploadMemoryStats _stats{};
+    bool _sealed{false};
+};
+
+class ScopedBufferMap {
+public:
+    ScopedBufferMap(render::Buffer* buffer, render::BufferRange range) noexcept;
+    ~ScopedBufferMap() noexcept;
+
+    ScopedBufferMap(const ScopedBufferMap&) = delete;
+    ScopedBufferMap& operator=(const ScopedBufferMap&) = delete;
+    ScopedBufferMap(ScopedBufferMap&&) = delete;
+    ScopedBufferMap& operator=(ScopedBufferMap&&) = delete;
+
+    void* Data() const noexcept { return _data; }
+
+    template <typename T>
+    T* DataAs() const noexcept {
+        return static_cast<T*>(_data);
+    }
+
+    explicit operator bool() const noexcept { return _data != nullptr; }
+
+private:
+    render::Buffer* _buffer{nullptr};
+    void* _data{nullptr};
+    render::BufferRange _range{};
+    bool _write{false};
+};
+
+struct BufferUploadRequest {
+    std::span<const byte> SrcData;
+    render::Buffer* DstBuffer;
+    uint64_t DstOffset{0};
+    render::BufferStates Before{render::BufferState::Common};
+    render::BufferStates After{render::BufferState::Common};
+};
+
+struct TextureUploadRequest {
+    std::span<const byte> SrcData;
+    render::Texture* DstTexture;
+    render::SubresourceRange DstRange;
+    uint64_t SrcRowPitch{0};
+    render::TextureStates Before{render::TextureState::Undefined};
+    render::TextureStates After{render::TextureState::ShaderRead};
 };
 
 class MappedUploadPage {
@@ -85,6 +162,83 @@ private:
     unique_ptr<render::Buffer> _buffer;
     void* _mapped{nullptr};
     uint64_t _used{0};
+};
+
+/// Upload heap staging page pool. Suballocates each page linearly and recycles
+/// whole standard pages after their associated flight has completed.
+class StagingBufferPool {
+public:
+    using Allocation = MappedUploadPage::Allocation;
+    using Reservation = MappedUploadPage::Reservation;
+
+    struct Descriptor {
+        uint64_t PageSize{8ull * 1024 * 1024};
+        uint64_t MaxCachedBytes{64ull * 1024 * 1024};
+        uint32_t MaxCachedPages{8};
+    };
+
+    StagingBufferPool(render::Device* device, uint32_t flightCount, const Descriptor& desc) noexcept;
+    explicit StagingBufferPool(render::Device* device, uint32_t flightCount) noexcept;
+    ~StagingBufferPool() noexcept;
+    StagingBufferPool(const StagingBufferPool&) = delete;
+    StagingBufferPool& operator=(const StagingBufferPool&) = delete;
+
+    void BeginFlight(HostWriteBatch& hostWrites);
+
+    /// Reserves staging memory from an upload page. Requests larger than a page
+    /// receive a one-shot buffer.
+    Reservation Reserve(uint64_t size, uint64_t alignment = 1);
+
+    /// Moves all active staging pages into a flight's pending list.
+    void RetireToFlight(uint32_t flightIndex);
+
+    /// Recycles standard pages for a completed flight and releases one-shot buffers.
+    void CollectFlight(uint32_t flightIndex);
+
+private:
+    struct Page {
+        unique_ptr<MappedUploadPage> Upload;
+        bool Cacheable{true};
+    };
+
+    Page CreatePage(uint64_t capacity, bool cacheable);
+    Page& AcquireStandardPage();
+    void TrimFreeList() noexcept;
+
+    render::Device* _device;
+    Descriptor _desc;
+    vector<Page> _active;
+    vector<vector<Page>> _pending;
+    vector<Page> _freeList;
+    uint64_t _nextPageId{0};
+    HostWriteBatch* _hostWrites{nullptr};
+};
+
+/// Records copy commands to an externally supplied command buffer and manages
+/// the staging pages required by those commands.
+class ResourceUploader {
+public:
+    ResourceUploader(render::Device* device, uint32_t flightCount);
+    ~ResourceUploader() noexcept;
+    ResourceUploader(const ResourceUploader&) = delete;
+    ResourceUploader& operator=(const ResourceUploader&) = delete;
+
+    void BeginFlight(uint32_t flightIndex, HostWriteBatch& hostWrites);
+    void UploadBuffer(render::CommandBuffer* cmdBuffer, const BufferUploadRequest& request);
+    void UploadTexture(render::CommandBuffer* cmdBuffer, const TextureUploadRequest& request);
+    std::optional<GpuMesh> UploadMeshResource(
+        render::CommandBuffer* cmdBuffer,
+        const MeshResource& meshResource);
+    void EndFlight(uint32_t flightIndex);
+    void CollectFlight(uint32_t flightIndex);
+
+    render::Device* GetDevice() const noexcept { return _device; }
+
+private:
+    render::Device* _device;
+    StagingBufferPool _stagingPool;
+    uint32_t _flightCount{0};
+    uint32_t _activeFlightIndex{std::numeric_limits<uint32_t>::max()};
 };
 
 class DynamicCBufferArena {
@@ -297,6 +451,61 @@ public:
 
 private:
     HostWriteBatch* _hostWrites;
+};
+
+class RenderPassRegistry {
+public:
+    explicit RenderPassRegistry(render::Device* device) noexcept;
+    ~RenderPassRegistry() noexcept;
+    RenderPassRegistry(const RenderPassRegistry&) = delete;
+    RenderPassRegistry& operator=(const RenderPassRegistry&) = delete;
+
+    Nullable<render::RenderPass*> GetOrCreateRenderPass(
+        const render::RenderPassDescriptor& desc) noexcept;
+
+    Nullable<render::Framebuffer*> GetOrCreateFramebuffer(
+        render::RenderPass* pass,
+        std::span<render::TextureView* const> colorAttachments,
+        render::TextureView* depthStencilAttachment,
+        uint32_t width,
+        uint32_t height,
+        uint32_t layers = 1) noexcept;
+
+    void RemoveFramebuffersUsing(render::TextureView* attachment) noexcept;
+    void ClearFramebuffers() noexcept;
+    void Clear() noexcept;
+
+    uint32_t GetRenderPassCount() const noexcept { return static_cast<uint32_t>(_passes.size()); }
+    uint32_t GetFramebufferCount() const noexcept { return static_cast<uint32_t>(_framebuffers.size()); }
+    uint64_t GetRenderPassHitCount() const noexcept { return _renderPassHits; }
+    uint64_t GetRenderPassMissCount() const noexcept { return _renderPassMisses; }
+    uint64_t GetFramebufferHitCount() const noexcept { return _framebufferHits; }
+    uint64_t GetFramebufferMissCount() const noexcept { return _framebufferMisses; }
+
+private:
+    struct PassEntry {
+        vector<render::RenderPassColorAttachmentDescriptor> ColorAttachments;
+        std::optional<render::RenderPassDepthStencilAttachmentDescriptor> DepthStencilAttachment;
+        unique_ptr<render::RenderPass> Object;
+    };
+
+    struct FramebufferEntry {
+        render::RenderPass* Pass{nullptr};
+        vector<render::TextureView*> ColorAttachments;
+        render::TextureView* DepthStencilAttachment{nullptr};
+        uint32_t Width{0};
+        uint32_t Height{0};
+        uint32_t Layers{1};
+        unique_ptr<render::Framebuffer> Object;
+    };
+
+    render::Device* _device{nullptr};
+    vector<PassEntry> _passes;
+    vector<FramebufferEntry> _framebuffers;
+    uint64_t _renderPassHits{0};
+    uint64_t _renderPassMisses{0};
+    uint64_t _framebufferHits{0};
+    uint64_t _framebufferMisses{0};
 };
 
 }  // namespace radray

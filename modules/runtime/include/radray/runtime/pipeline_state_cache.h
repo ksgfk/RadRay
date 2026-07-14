@@ -9,6 +9,9 @@
 
 namespace radray {
 
+class PipelineLayoutLibrary;
+class ShaderVariantLibrary;
+
 // PSO 缓存的 POD key. 所有字段为标量 (无指针/optional/span),
 // 构造时以 `Key{}` 清零, 再逐字段赋值, 保证 padding 恒为 0,
 // 从而可安全用于 PodHasher (byte-wise xxHash) 与 PodEqual (memcmp).
@@ -92,16 +95,25 @@ static_assert(std::is_trivially_copyable_v<ComputePsoKey>, "ComputePsoKey must b
 
 // 从 GraphicsPipelineStateDescriptor 构造 POD key.
 // 失败情形 (返回 nullopt 并记录错误):
-//   - PipelineLayout / VS / PS 为空或 Guid 为 Empty (未经缓存分配身份)
+//   - PipelineLayout / VS / PS 为空或不属于对应 runtime library
 //   - ColorTargets / VertexLayouts / 每层 Elements 数量超过上限
 //   - Semantic 字符串长度 >= kMaxSemanticLength
-std::optional<GraphicsPsoKey> BuildGraphicsPsoKey(const render::GraphicsPipelineStateDescriptor& desc) noexcept;
+std::optional<GraphicsPsoKey> BuildGraphicsPsoKey(
+    const render::GraphicsPipelineStateDescriptor& desc,
+    const ShaderVariantLibrary& shaderLibrary,
+    const PipelineLayoutLibrary& layoutLibrary) noexcept;
 
-std::optional<ComputePsoKey> BuildComputePsoKey(const render::ComputePipelineStateDescriptor& desc) noexcept;
+std::optional<ComputePsoKey> BuildComputePsoKey(
+    const render::ComputePipelineStateDescriptor& desc,
+    const ShaderVariantLibrary& shaderLibrary,
+    const PipelineLayoutLibrary& layoutLibrary) noexcept;
 
 class GraphicsPipelineStateLibrary {
 public:
-    explicit GraphicsPipelineStateLibrary(render::Device* device) noexcept;
+    GraphicsPipelineStateLibrary(
+        render::Device* device,
+        const ShaderVariantLibrary* shaderLibrary,
+        const PipelineLayoutLibrary* layoutLibrary) noexcept;
     ~GraphicsPipelineStateLibrary() noexcept;
     GraphicsPipelineStateLibrary(const GraphicsPipelineStateLibrary&) = delete;
     GraphicsPipelineStateLibrary& operator=(const GraphicsPipelineStateLibrary&) = delete;
@@ -117,6 +129,8 @@ public:
 
 private:
     render::Device* _device;
+    const ShaderVariantLibrary* _shaderLibrary;
+    const PipelineLayoutLibrary* _layoutLibrary;
     unordered_map<
         GraphicsPsoKey,
         unique_ptr<render::GraphicsPipelineState>,
@@ -131,7 +145,10 @@ private:
 
 class ComputePipelineStateLibrary {
 public:
-    explicit ComputePipelineStateLibrary(render::Device* device) noexcept;
+    ComputePipelineStateLibrary(
+        render::Device* device,
+        const ShaderVariantLibrary* shaderLibrary,
+        const PipelineLayoutLibrary* layoutLibrary) noexcept;
     ~ComputePipelineStateLibrary() noexcept;
     ComputePipelineStateLibrary(const ComputePipelineStateLibrary&) = delete;
     ComputePipelineStateLibrary& operator=(const ComputePipelineStateLibrary&) = delete;
@@ -144,6 +161,8 @@ public:
 
 private:
     render::Device* _device;
+    const ShaderVariantLibrary* _shaderLibrary;
+    const PipelineLayoutLibrary* _layoutLibrary;
     unordered_map<
         ComputePsoKey,
         unique_ptr<render::ComputePipelineState>,

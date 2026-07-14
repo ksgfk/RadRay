@@ -449,10 +449,11 @@ static std::optional<ResourceBindType> _GetResourceViewBindTypeVulkan(ResourceVi
     const auto tag = view->GetTag();
     if (tag.HasFlag(RenderObjectTag::TextureView)) {
         const auto* textureView = static_cast<ImageViewVulkan*>(view);
-        if (textureView->_mdesc.Usage == TextureViewUsage::UnorderedAccess) {
-            return ResourceBindType::RWTexture;
+        switch (textureView->_mdesc.Usage) {
+            case TextureViewUsage::Resource: return ResourceBindType::Texture;
+            case TextureViewUsage::UnorderedAccess: return ResourceBindType::RWTexture;
+            default: return std::nullopt;
         }
-        return ResourceBindType::Texture;
     }
     if (tag.HasFlag(RenderObjectTag::AccelerationStructureView)) {
         return ResourceBindType::AccelerationStructure;
@@ -757,7 +758,8 @@ static bool _UpdateBindlessDescriptorSetVulkan(
     const auto tag = view->GetTag();
     if (tag.HasFlag(RenderObjectTag::TextureView)) {
         auto* textureView = static_cast<ImageViewVulkan*>(view);
-        if (descriptorType != VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE) {
+        if (descriptorType != VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE ||
+            textureView->_mdesc.Usage != TextureViewUsage::Resource) {
             RADRAY_ERR_LOG("descriptor type mismatch for bindless texture view");
             return false;
         }
@@ -1671,7 +1673,7 @@ Nullable<unique_ptr<Texture>> DeviceVulkan::CreateTexture(const TextureDescripto
     VkImageCreateInfo imgInfo{};
     imgInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     imgInfo.pNext = nullptr;
-    imgInfo.flags = 0;
+    imgInfo.flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
     imgInfo.imageType = MapType(desc.Dim);
     imgInfo.format = MapType(desc.Format);
     imgInfo.extent.width = static_cast<uint32_t>(desc.Width);
@@ -1752,13 +1754,95 @@ Nullable<unique_ptr<Texture>> DeviceVulkan::CreateTexture(const TextureDescripto
     return result;
 }
 
+static std::optional<SubresourceRange> _ResolveTextureViewArrayRangeVulkan(
+    TextureDimension dim,
+    SubresourceRange range,
+    uint32_t targetArrayLayerCount) noexcept {
+    auto resolveRemainingLayers = [&]() noexcept {
+        if (range.ArrayLayerCount != SubresourceRange::All) {
+            return true;
+        }
+        if (range.BaseArrayLayer >= targetArrayLayerCount) {
+            RADRAY_ERR_LOG(
+                "vk texture view base array layer {} has no remaining layers in target with {} layers",
+                range.BaseArrayLayer,
+                targetArrayLayerCount);
+            return false;
+        }
+        range.ArrayLayerCount = targetArrayLayerCount - range.BaseArrayLayer;
+        return true;
+    };
+
+    switch (dim) {
+        case TextureDimension::Dim1D:
+        case TextureDimension::Dim2D:
+        case TextureDimension::Dim3D:
+            if (range.BaseArrayLayer != 0 ||
+                (range.ArrayLayerCount != 1 && range.ArrayLayerCount != SubresourceRange::All)) {
+                RADRAY_ERR_LOG(
+                    "vk {} texture view requires array range [0, 1] or all",
+                    dim);
+                return std::nullopt;
+            }
+            range.BaseArrayLayer = 0;
+            range.ArrayLayerCount = 1;
+            return range;
+        case TextureDimension::Dim1DArray:
+        case TextureDimension::Dim2DArray:
+            if (!resolveRemainingLayers()) {
+                return std::nullopt;
+            }
+            return range;
+        case TextureDimension::Cube:
+            if (!resolveRemainingLayers()) {
+                return std::nullopt;
+            }
+            if (range.BaseArrayLayer != 0 || range.ArrayLayerCount != 6) {
+                RADRAY_ERR_LOG("vk cube texture view requires array range [0, 6]");
+                return std::nullopt;
+            }
+            return range;
+        case TextureDimension::CubeArray:
+            if (!resolveRemainingLayers()) {
+                return std::nullopt;
+            }
+            if ((range.BaseArrayLayer % 6) != 0 ||
+                range.ArrayLayerCount == 0 || (range.ArrayLayerCount % 6) != 0) {
+                RADRAY_ERR_LOG(
+                    "vk cube array texture view base layer and layer count must be multiples of 6");
+                return std::nullopt;
+            }
+            return range;
+        case TextureDimension::UNKNOWN:
+            return range;
+    }
+    return range;
+}
+
 Nullable<unique_ptr<TextureView>> DeviceVulkan::CreateTextureView(const TextureViewDescriptor& desc) noexcept {
     auto image = CastVkObject(desc.Target);
-    /**
-     * https://docs.vulkan.org/refpages/latest/refpages/source/VkImageViewCreateInfo.html
-     * 如果视图类型是 1D、2D 或 3D 视图，且 layerCount 不使用 VK_REMAINING_ARRAY_LAYERS 这个特殊宏，那么 layerCount 必须为 1
-     * 由于创建 3D 纹理时 arrayLayers 必须为 1，那么取视图时 baseArrayLayer 必须严格小于 1，因此在正整数范围内必定只能为 0
-     */
+    switch (desc.Usage) {
+        case TextureViewUsage::Resource:
+        case TextureViewUsage::RenderTarget:
+        case TextureViewUsage::DepthRead:
+        case TextureViewUsage::DepthWrite:
+        case TextureViewUsage::UnorderedAccess:
+            break;
+        case TextureViewUsage::UNKNOWN:
+        default:
+            RADRAY_ERR_LOG("vk invalid texture view usage: {}", desc.Usage);
+            return nullptr;
+    }
+    const uint32_t targetArrayLayerCount =
+        image->_dim == TextureDimension::Dim1D || image->_dim == TextureDimension::Dim3D
+            ? 1
+            : image->_depthOrArraySize;
+    auto rangeOpt = _ResolveTextureViewArrayRangeVulkan(
+        desc.Dim, desc.Range, targetArrayLayerCount);
+    if (!rangeOpt.has_value()) {
+        return nullptr;
+    }
+    const SubresourceRange range = rangeOpt.value();
     VkImageViewCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
     createInfo.pNext = nullptr;
@@ -1771,18 +1855,12 @@ Nullable<unique_ptr<TextureView>> DeviceVulkan::CreateTextureView(const TextureV
         VK_COMPONENT_SWIZZLE_G,
         VK_COMPONENT_SWIZZLE_B,
         VK_COMPONENT_SWIZZLE_A};
-    uint32_t baseArrayLayer = desc.Range.BaseArrayLayer;
-    uint32_t layerCount = desc.Range.ArrayLayerCount == SubresourceRange::All ? VK_REMAINING_ARRAY_LAYERS : desc.Range.ArrayLayerCount;
-    if (desc.Dim == TextureDimension::Dim3D) {
-        baseArrayLayer = 0;
-        layerCount = 1;
-    }
     createInfo.subresourceRange = {
         ImageFormatToAspectFlags(createInfo.format),
         desc.Range.BaseMipLevel,
         desc.Range.MipLevelCount == SubresourceRange::All ? VK_REMAINING_MIP_LEVELS : desc.Range.MipLevelCount,
-        baseArrayLayer,
-        layerCount};
+        range.BaseArrayLayer,
+        range.ArrayLayerCount};
     VkImageView imageView = VK_NULL_HANDLE;
     if (auto vr = _ftb.vkCreateImageView(_device, &createInfo, this->GetAllocationCallbacks(), &imageView);
         vr != VK_SUCCESS) {
@@ -2168,7 +2246,6 @@ Nullable<unique_ptr<PipelineLayout>> DeviceVulkan::CreatePipelineLayout(const Pi
     if (!layout.HasValue()) {
         return nullptr;
     }
-    layout.Get()->SetGuid(Guid::NewGuid());
     return unique_ptr<PipelineLayout>{layout.Release()};
 }
 
@@ -2812,7 +2889,7 @@ Nullable<unique_ptr<ShaderBindingTable>> DeviceVulkan::CreateShaderBindingTable(
         .Size = totalSize,
         .Memory = MemoryType::Upload,
         .Usage = BufferUse::ShaderTable | BufferUse::MapWrite,
-        .Hints = ResourceHint::StableGpuAddress});
+        .Hints = ResourceHint::None});
     if (!buffer.HasValue()) {
         return nullptr;
     }
@@ -3693,6 +3770,7 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
         const auto& props = selectPhyDevice.properties;
         detail.GpuName = props.deviceName;
         detail.CBufferAlignment = (uint32_t)deviceR->_properties.limits.minUniformBufferOffsetAlignment;
+        detail.BufferCopyOffsetAlignment = 1;
         detail.TextureDataPitchAlignment = (uint32_t)deviceR->_properties.limits.optimalBufferCopyRowPitchAlignment;
         detail.TextureDataPlacementAlignment = deviceR->_properties.limits.optimalBufferCopyOffsetAlignment;
         detail.MaxVertexInputBindings = deviceR->_properties.limits.maxVertexInputBindings;
@@ -5036,7 +5114,7 @@ void CommandEncoderRayTracingVulkan::BuildTopLevelAS(const BuildTopLevelASDescri
         .Size = Align(instanceBytes, 16ull),
         .Memory = MemoryType::Upload,
         .Usage = BufferUse::Scratch | BufferUse::MapWrite,
-        .Hints = ResourceHint::StableGpuAddress});
+        .Hints = ResourceHint::None});
     if (!instBufOpt.HasValue()) {
         return;
     }
@@ -6897,7 +6975,17 @@ bool DescriptorSetVulkan::SetResource(uint32_t slot, uint32_t arrayIndex, Resour
     ResourceBindType requiredBindType = ResourceBindType::UNKNOWN;
     if (tag.HasFlag(RenderObjectTag::TextureView)) {
         auto tv = static_cast<ImageViewVulkan*>(view);
-        requiredBindType = tv->_mdesc.Usage == TextureViewUsage::UnorderedAccess ? ResourceBindType::RWTexture : ResourceBindType::Texture;
+        switch (tv->_mdesc.Usage) {
+            case TextureViewUsage::Resource:
+                requiredBindType = ResourceBindType::Texture;
+                break;
+            case TextureViewUsage::UnorderedAccess:
+                requiredBindType = ResourceBindType::RWTexture;
+                break;
+            default:
+                RADRAY_ERR_LOG("vk texture view usage {} cannot be bound as a resource", tv->_mdesc.Usage);
+                return false;
+        }
     } else if (tag.HasFlag(RenderObjectTag::AccelerationStructureView)) {
         requiredBindType = ResourceBindType::AccelerationStructure;
     } else {
@@ -6927,7 +7015,7 @@ bool DescriptorSetVulkan::SetResource(uint32_t slot, uint32_t arrayIndex, Resour
     if (tag.HasFlag(RenderObjectTag::TextureView)) {
         auto tv = static_cast<ImageViewVulkan*>(view);
         if ((tv->_mdesc.Usage == TextureViewUsage::UnorderedAccess && write.Type != VK_DESCRIPTOR_TYPE_STORAGE_IMAGE) ||
-            (tv->_mdesc.Usage != TextureViewUsage::UnorderedAccess && write.Type != VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE)) {
+            (tv->_mdesc.Usage == TextureViewUsage::Resource && write.Type != VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE)) {
             RADRAY_ERR_LOG("descriptor type mismatch for texture view usage");
             return false;
         }

@@ -714,9 +714,6 @@ public:
     BufferUses _usage{BufferUse::UNKNOWN};
     ResourceHints _hints{};
     void* _mappedData{nullptr};
-    uint64_t _flushOffset{0};
-    uint64_t _flushSize{0};
-    bool _hasPendingFlush{false};
     bool _mapped{false};
 };
 

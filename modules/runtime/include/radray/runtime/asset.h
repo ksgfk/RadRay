@@ -1,9 +1,10 @@
 #pragma once
 
 #include <radray/runtime_type.h>
-#include <radray/runtime/render_resource_recycler.h>
 
 namespace radray {
+
+class IRenderResourceRecycler;
 
 /// 资产的持久标识。落盘/去重缓存的 key,跨进程有效。
 using AssetId = Guid;
