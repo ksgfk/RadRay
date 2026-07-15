@@ -2,6 +2,7 @@
 
 // #define _RADRAY_ENABLE_DXC_ALLOCATOR 0 // ISSUE: dxc v1.9.2602 用户自定义 allocator, 内部释放时似乎没有正确调用户 free 导致爆炸, 先关闭 mimalloc 接管内存
 
+#include <limits>
 #include <utility>
 
 #include <radray/utility.h>
@@ -366,7 +367,7 @@ public:
     DxcImpl& operator=(DxcImpl&&) = delete;
     ~DxcImpl() noexcept override = default;
 
-    ArgsData ParseArgs(std::span<std::string_view> args) noexcept {
+    ArgsData ParseArgs(std::span<const std::string_view> args) noexcept {
         ArgsData result{};
         for (auto i : args) {
             if (i == "-spirv") {
@@ -383,7 +384,19 @@ public:
         return result;
     }
 
-    Nullable<ComPtr<IDxcResult>> CompileImpl(std::string_view code, std::span<std::string_view> args) noexcept {
+    Nullable<ComPtr<IDxcResult>> CompileImpl(
+        const DxcBuffer& buffer,
+        const wstring& sourceName,
+        std::string_view entryPoint,
+        std::string_view targetProfile,
+        std::span<const std::string_view> args) noexcept {
+        auto wentryPoint = ToWideChar(entryPoint);
+        auto wtargetProfile = ToWideChar(targetProfile);
+        if (!wentryPoint.has_value() || !wtargetProfile.has_value()) {
+            RADRAY_ERR_LOG("DXC entry point or target profile conversion failed");
+            return Nullable<ComPtr<IDxcResult>>{nullptr};
+        }
+
         vector<wstring> wargs;
         wargs.reserve(args.size());
         for (auto i : args) {
@@ -399,12 +412,32 @@ public:
         for (auto&& i : wargs) {
             argsref.emplace_back(i.c_str());
         }
-        DxcBuffer buffer{code.data(), code.size(), CP_ACP};
+
+        if (argsref.size() > std::numeric_limits<UINT32>::max()) {
+            RADRAY_ERR_LOG("DXC argument count exceeds UINT32_MAX");
+            return Nullable<ComPtr<IDxcResult>>{nullptr};
+        }
+
+        ComPtr<IDxcCompilerArgs> compilerArgs;
+        if (HRESULT hr = _utils->BuildArguments(
+                sourceName.empty() ? nullptr : sourceName.c_str(),
+                wentryPoint->c_str(),
+                wtargetProfile->c_str(),
+                argsref.empty() ? nullptr : argsref.data(),
+                static_cast<UINT32>(argsref.size()),
+                nullptr,
+                0,
+                &compilerArgs);
+            FAILED(hr)) {
+            RADRAY_ERR_LOG("IDxcUtils::BuildArguments failed: {}", hr);
+            return Nullable<ComPtr<IDxcResult>>{nullptr};
+        }
+
         ComPtr<IDxcResult> compileResult;
         if (HRESULT hr = _dxc->Compile(
                 &buffer,
-                argsref.data(),
-                (UINT32)argsref.size(),
+                compilerArgs->GetArguments(),
+                compilerArgs->GetCount(),
                 _inc.Get(),
                 IID_PPV_ARGS(&compileResult));
             FAILED(hr)) {
@@ -458,10 +491,15 @@ public:
         return {reflStart, reflStart + blob->GetBufferSize()};
     }
 
-    std::optional<DxcOutput> Compile(std::string_view code, std::span<std::string_view> args) noexcept {
+    std::optional<DxcOutput> CompileBuffer(
+        const DxcBuffer& buffer,
+        const wstring& sourceName,
+        std::string_view entryPoint,
+        std::string_view targetProfile,
+        std::span<const std::string_view> args) noexcept {
         ComPtr<IDxcResult> compileResult;
         {
-            auto compileResultOpt = CompileImpl(code, args);
+            auto compileResultOpt = CompileImpl(buffer, sourceName, entryPoint, targetProfile, args);
             if (!compileResultOpt.HasValue()) {
                 return std::nullopt;
             }
@@ -493,6 +531,56 @@ public:
             {resultData.begin(), resultData.end()},
             {reflData.begin(), reflData.end()},
             argsData.category};
+    }
+
+    std::optional<DxcOutput> CompileMemory(
+        std::string_view code,
+        std::string_view sourceName,
+        std::string_view entryPoint,
+        std::string_view targetProfile,
+        std::span<const std::string_view> args) noexcept {
+        auto wsourceName = ToWideChar(sourceName);
+        if (!wsourceName.has_value()) {
+            RADRAY_ERR_LOG("DXC source name conversion failed: {}", sourceName);
+            return std::nullopt;
+        }
+
+        const DxcBuffer buffer{code.data(), code.size(), DXC_CP_UTF8};
+        return CompileBuffer(buffer, *wsourceName, entryPoint, targetProfile, args);
+    }
+
+    std::optional<DxcOutput> CompileFile(
+        const std::filesystem::path& path,
+        std::string_view entryPoint,
+        std::string_view targetProfile,
+        std::span<const std::string_view> args) noexcept {
+        if (path.empty()) {
+            RADRAY_ERR_LOG("DXC source path is empty");
+            return std::nullopt;
+        }
+
+        wstring wpath;
+#ifdef RADRAY_PLATFORM_WINDOWS
+        const auto& nativePath = path.native();
+        wpath.assign(nativePath.begin(), nativePath.end());
+#else
+        auto convertedPath = ToWideChar(path.generic_string());
+        if (!convertedPath.has_value()) {
+            RADRAY_ERR_LOG("DXC source path conversion failed: {}", path.string());
+            return std::nullopt;
+        }
+        wpath = std::move(*convertedPath);
+#endif
+
+        UINT32 codePage = DXC_CP_UTF8;
+        ComPtr<IDxcBlobEncoding> source;
+        if (HRESULT hr = _utils->LoadFile(wpath.c_str(), &codePage, &source); FAILED(hr)) {
+            RADRAY_ERR_LOG("IDxcUtils::LoadFile failed for '{}': {}", path.string(), hr);
+            return std::nullopt;
+        }
+
+        const DxcBuffer buffer{source->GetBufferPointer(), source->GetBufferSize(), codePage};
+        return CompileBuffer(buffer, wpath, entryPoint, targetProfile, args);
     }
 
     std::optional<HlslShaderDesc> GetShaderDescFromOutput(std::span<const byte> refl) noexcept {
@@ -702,10 +790,6 @@ void Dxc::Destroy() noexcept {
     _impl.reset();
 }
 
-std::optional<DxcOutput> Dxc::Compile(std::string_view code, std::span<std::string_view> args) noexcept {
-    return static_cast<DxcImpl*>(_impl.get())->Compile(code, args);
-}
-
 static string _FormatStageAndSm(ShaderStage stage, HlslShaderModel sm) {
     auto fmtStage = [](ShaderStage stage) -> std::string_view {
         switch (stage) {
@@ -736,104 +820,74 @@ static string _FormatStageAndSm(ShaderStage stage, HlslShaderModel sm) {
     return fmt::format("{}_{}", fmtStage(stage), fmtSm(sm));
 }
 
-std::optional<DxcOutput> Dxc::Compile(
-    std::string_view code,
-    std::string_view entryPoint,
-    ShaderStage stage,
-    HlslShaderModel sm,
-    bool isOptimize,
-    std::span<std::string_view> defines,
-    std::span<std::string_view> includes,
-    bool isSpirv) noexcept {
-    string smStr = _FormatStageAndSm(stage, sm);
+static vector<std::string_view> _BuildCompileArgs(const DxcCompileOptions& options) {
     vector<std::string_view> args{};
-    if (isSpirv) {
+    if (options.IsSpirv) {
         args.emplace_back("-spirv");
         // 定义 VULKAN 宏, 使 common.hlsl 的 VK_PUSH_CONSTANT / VK_BINDING / VK_LOCATION
         // 宏展开为对应的 [[vk::...]] 属性 (否则 push constant 会被降级为普通 uniform)。
         args.emplace_back("-D");
         args.emplace_back("VULKAN=1");
-        if (stage == ShaderStage::RayGen ||
-            stage == ShaderStage::Miss ||
-            stage == ShaderStage::ClosestHit ||
-            stage == ShaderStage::AnyHit ||
-            stage == ShaderStage::Intersection ||
-            stage == ShaderStage::Callable) {
+        if (options.Stage == ShaderStage::RayGen ||
+            options.Stage == ShaderStage::Miss ||
+            options.Stage == ShaderStage::ClosestHit ||
+            options.Stage == ShaderStage::AnyHit ||
+            options.Stage == ShaderStage::Intersection ||
+            options.Stage == ShaderStage::Callable) {
             args.emplace_back("-fspv-target-env=vulkan1.2");
             args.emplace_back("-fspv-extension=SPV_KHR_ray_tracing");
         }
     }
-    args.emplace_back("-all_resources_bound");
-    {
-        args.emplace_back("-HV");
-        args.emplace_back("2021");
-    }
-    if (isOptimize) {
-        args.emplace_back("-O3");
-    } else {
-        args.emplace_back("-Od");
-        args.emplace_back("-Zi");
-    }
-    {
-        args.emplace_back("-T");
-        args.emplace_back(smStr);
-    }
-    {
-        args.emplace_back("-E");
-        args.emplace_back(entryPoint);
-    }
-    for (auto&& i : includes) {
-        args.emplace_back("-I");
-        args.emplace_back(i);
-    }
-    for (auto&& i : defines) {
-        args.emplace_back("-D");
-        args.emplace_back(i);
-    }
-    return static_cast<DxcImpl*>(_impl.get())->Compile(code, args);
-}
-
-std::optional<DxcOutput> Dxc::Compile(const DxcCompileParams& params) noexcept {
-    string smStr = _FormatStageAndSm(params.Stage, params.SM);
-    vector<std::string_view> args{};
-    if (params.IsSpirv) {
-        args.emplace_back("-spirv");
-        // 见上: 定义 VULKAN 宏使 common.hlsl 的 VK_* 宏正确展开。
-        args.emplace_back("-D");
-        args.emplace_back("VULKAN=1");
-    }
-    if (!params.EnableUnbounded) {
+    if (!options.EnableUnbounded) {
         args.emplace_back("-all_resources_bound");
     }
     {
         args.emplace_back("-HV");
         args.emplace_back("2021");
     }
-    if (params.IsOptimize) {
+    if (options.IsOptimize) {
         args.emplace_back("-O3");
     } else {
         args.emplace_back("-Od");
-        if (!params.IsSpirv) {
+        if (!options.IsSpirv) {
             args.emplace_back("-Zi");
         }
     }
-    {
-        args.emplace_back("-T");
-        args.emplace_back(smStr);
-    }
-    {
-        args.emplace_back("-E");
-        args.emplace_back(params.EntryPoint);
-    }
-    for (auto&& i : params.Includes) {
+    for (std::string_view include : options.Includes) {
         args.emplace_back("-I");
-        args.emplace_back(i);
+        args.emplace_back(include);
     }
-    for (auto&& i : params.Defines) {
+    for (std::string_view define : options.Defines) {
         args.emplace_back("-D");
-        args.emplace_back(i);
+        args.emplace_back(define);
     }
-    return static_cast<DxcImpl*>(_impl.get())->Compile(params.Code, args);
+    return args;
+}
+
+std::optional<DxcOutput> Dxc::CompileMemory(
+    std::string_view code,
+    std::string_view sourceName,
+    const DxcCompileOptions& options) noexcept {
+    const string targetProfile = _FormatStageAndSm(options.Stage, options.SM);
+    const vector<std::string_view> args = _BuildCompileArgs(options);
+    return static_cast<DxcImpl*>(_impl.get())->CompileMemory(
+        code,
+        sourceName,
+        options.EntryPoint,
+        targetProfile,
+        args);
+}
+
+std::optional<DxcOutput> Dxc::CompileFile(
+    const std::filesystem::path& path,
+    const DxcCompileOptions& options) noexcept {
+    const string targetProfile = _FormatStageAndSm(options.Stage, options.SM);
+    const vector<std::string_view> args = _BuildCompileArgs(options);
+    return static_cast<DxcImpl*>(_impl.get())->CompileFile(
+        path,
+        options.EntryPoint,
+        targetProfile,
+        args);
 }
 
 std::optional<HlslShaderDesc> Dxc::GetShaderDescFromOutput(std::span<const byte> refl) noexcept {

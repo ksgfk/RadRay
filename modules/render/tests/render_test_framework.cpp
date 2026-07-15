@@ -728,15 +728,14 @@ std::optional<ComputeProgram> ComputeTestContext::CreateComputeProgram(
         return std::nullopt;
     }
 
-    DxcCompileParams params{};
-    params.Code = source;
-    params.EntryPoint = entryPoint;
-    params.Stage = ShaderStage::Compute;
-    params.SM = HlslShaderModel::SM60;
-    params.IsOptimize = false;
-    params.IsSpirv = _backend == TestBackend::Vulkan;
-    params.EnableUnbounded = enableUnbounded;
-    auto outputOpt = _dxc->Compile(params);
+    DxcCompileOptions options{};
+    options.EntryPoint = entryPoint;
+    options.Stage = ShaderStage::Compute;
+    options.SM = HlslShaderModel::SM60;
+    options.IsOptimize = false;
+    options.IsSpirv = _backend == TestBackend::Vulkan;
+    options.EnableUnbounded = enableUnbounded;
+    auto outputOpt = _dxc->CompileMemory(source, "render_test_framework.hlsl", options);
     if (!outputOpt.has_value()) {
         _StoreReason(
             reason,

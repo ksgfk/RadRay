@@ -380,6 +380,7 @@ struct GraphicsPsoKey {
     // DepthStencil 展平
     uint32_t HasDepthStencil;
     int32_t DSFormat;
+    uint32_t DepthTestEnable;
     int32_t DepthCompare;
     uint32_t DepthWriteEnable;
     int32_t DepthBiasConstant;

@@ -1,7 +1,9 @@
 #pragma once
 
-#include <array>
-#include <type_traits>
+#include <filesystem>
+#include <optional>
+#include <span>
+#include <string_view>
 
 #include <radray/render/common.h>
 #include <radray/render/shader/hlsl.h>
@@ -12,17 +14,16 @@ class DxcOutput {
 public:
     vector<byte> Data;
     vector<byte> Refl;
-    ShaderBlobCategory Category;
+    ShaderBlobCategory Category{ShaderBlobCategory::DXIL};
 };
 
-class DxcCompileParams {
+class DxcCompileOptions {
 public:
-    std::string_view Code{};
     std::string_view EntryPoint{};
     ShaderStage Stage{};
     HlslShaderModel SM{};
-    std::span<std::string_view> Defines{};
-    std::span<std::string_view> Includes{};
+    std::span<const std::string_view> Defines{};
+    std::span<const std::string_view> Includes{};
     bool IsOptimize{};
     bool IsSpirv{};
     bool EnableUnbounded{};
@@ -31,8 +32,6 @@ public:
 }  // namespace radray::render
 
 #ifdef RADRAY_ENABLE_DXC
-
-#include <span>
 
 namespace radray::render {
 
@@ -50,19 +49,14 @@ public:
     bool IsValid() const noexcept override { return _impl != nullptr; }
     void Destroy() noexcept override;
 
-    std::optional<DxcOutput> Compile(std::string_view code, std::span<std::string_view> args) noexcept;
-
-    std::optional<DxcOutput> Compile(
+    std::optional<DxcOutput> CompileMemory(
         std::string_view code,
-        std::string_view entryPoint,
-        ShaderStage stage,
-        HlslShaderModel sm,
-        bool isOptimize,
-        std::span<std::string_view> defines = {},
-        std::span<std::string_view> includes = {},
-        bool isSpirv = false) noexcept;
+        std::string_view sourceName,
+        const DxcCompileOptions& options) noexcept;
 
-    std::optional<DxcOutput> Compile(const DxcCompileParams& params) noexcept;
+    std::optional<DxcOutput> CompileFile(
+        const std::filesystem::path& path,
+        const DxcCompileOptions& options) noexcept;
 
     std::optional<HlslShaderDesc> GetShaderDescFromOutput(std::span<const byte> refl) noexcept;
 

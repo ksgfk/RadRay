@@ -76,15 +76,14 @@ std::optional<DxcOutput> CompileSpirv(
     std::string_view source,
     std::string_view entryPoint,
     ShaderStage stage) {
-    DxcCompileParams params{};
-    params.Code = source;
-    params.EntryPoint = entryPoint;
-    params.Stage = stage;
-    params.SM = HlslShaderModel::SM60;
-    params.IsOptimize = false;
-    params.IsSpirv = true;
-    params.EnableUnbounded = false;
-    return dxc.Compile(params);
+    DxcCompileOptions options{};
+    options.EntryPoint = entryPoint;
+    options.Stage = stage;
+    options.SM = HlslShaderModel::SM60;
+    options.IsOptimize = false;
+    options.IsSpirv = true;
+    options.EnableUnbounded = false;
+    return dxc.CompileMemory(source, "test_spvc_msl.hlsl", options);
 }
 
 const MslArgument* FindArgumentByName(const MslShaderReflection& reflection, std::string_view name) {

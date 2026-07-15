@@ -20,7 +20,7 @@
         {
             "name": "win-x64",
             "hidden": true,
-            "generator": "Visual Studio 18 2026",
+            "generator": "Ninja",
             "architecture": {
                 "value": "x64",
                 "strategy": "external"
@@ -29,9 +29,11 @@
         {
             "name": "win-x64-clangcl",
             "hidden": true,
-            "inherits": [
-                "win-x64"
-            ],
+            "generator": "Visual Studio 18 2026",
+            "architecture": {
+                "value": "x64",
+                "strategy": "external"
+            },
             "toolset": {
                 "value": "ClangCL",
                 "strategy": "set"

@@ -1028,7 +1028,6 @@ std::string_view format_as(VkFormat v) noexcept {
         case VK_FORMAT_A8_UNORM: return "A8_UNORM";
         default: return "UNKNOWN";
     }
-    return "UNKNOWN";
 }
 
 std::string_view format_as(VkPresentModeKHR v) noexcept {

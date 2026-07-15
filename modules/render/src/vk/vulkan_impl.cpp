@@ -2514,9 +2514,10 @@ Nullable<unique_ptr<GraphicsPipelineState>> DeviceVulkan::CreateGraphicsPipeline
             rasterInfo.depthBiasClamp = ds.DepthBias.Clamp;
             rasterInfo.depthBiasSlopeFactor = ds.DepthBias.SlopScale;
         }
-        depthStencilInfo.depthTestEnable = VK_TRUE;
+        const bool hardwareDepthEnable = ds.DepthTestEnable || ds.DepthWriteEnable;
+        depthStencilInfo.depthTestEnable = hardwareDepthEnable ? VK_TRUE : VK_FALSE;
         depthStencilInfo.depthWriteEnable = ds.DepthWriteEnable ? VK_TRUE : VK_FALSE;
-        depthStencilInfo.depthCompareOp = MapType(ds.DepthCompare);
+        depthStencilInfo.depthCompareOp = ds.DepthTestEnable ? MapType(ds.DepthCompare) : VK_COMPARE_OP_ALWAYS;
         depthStencilInfo.depthBoundsTestEnable = VK_FALSE;
         depthStencilInfo.minDepthBounds = 0.0f;
         depthStencilInfo.maxDepthBounds = 0.0f;

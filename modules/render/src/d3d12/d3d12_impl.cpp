@@ -2506,9 +2506,10 @@ Nullable<unique_ptr<GraphicsPipelineState>> DeviceD3D12::CreateGraphicsPipelineS
     D3D12_DEPTH_STENCIL_DESC dsDesc{};
     if (desc.DepthStencil.has_value()) {
         const auto& ds = desc.DepthStencil.value();
-        dsDesc.DepthEnable = true;
+        const bool hardwareDepthEnable = ds.DepthTestEnable || ds.DepthWriteEnable;
+        dsDesc.DepthEnable = hardwareDepthEnable;
         dsDesc.DepthWriteMask = ds.DepthWriteEnable ? D3D12_DEPTH_WRITE_MASK_ALL : D3D12_DEPTH_WRITE_MASK_ZERO;
-        dsDesc.DepthFunc = MapType(ds.DepthCompare);
+        dsDesc.DepthFunc = ds.DepthTestEnable ? MapType(ds.DepthCompare) : D3D12_COMPARISON_FUNC_ALWAYS;
         dsDesc.StencilEnable = ds.Stencil.has_value();
         if (ds.Stencil.has_value()) {
             const auto& s = ds.Stencil.value();
@@ -2527,7 +2528,7 @@ Nullable<unique_ptr<GraphicsPipelineState>> DeviceD3D12::CreateGraphicsPipelineS
         }
     } else {
         dsDesc.DepthEnable = false;
-        dsDesc.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+        dsDesc.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
         dsDesc.DepthFunc = D3D12_COMPARISON_FUNC_ALWAYS;
         dsDesc.StencilEnable = false;
         dsDesc.StencilReadMask = D3D12_DEFAULT_STENCIL_READ_MASK;

@@ -21,8 +21,9 @@ using AssetTypeId = RuntimeTypeId;
 ///   自己决定上传/丢弃/释放时机。基类只提供生命周期钩子。
 /// - 资产采用【构造函数一次性初始化】:Asset 在被放入 AssetManager 时已经是完整、可用状态
 ///   (CPU 数据 + GPU 资源都已就绪)。加载/上传发生在构造之前,由加载协程完成。
-/// - Asset 本身不持有引用计数。AssetManager 不做引用计数与垃圾回收;资产生命周期由
-///   应用层显式 Unload 控制。StreamingAssetRef/StreamingAssetRefAny 均为【非拥有】弱句柄。
+/// - Asset 本身不持有引用计数;AssetManager 为每个 slot 维护独立的引用控制块。
+///   StreamingAssetRef/StreamingAssetRefAny 参与计数,引用归零的 slot 可由 CollectUnreferenced 回收。
+///   应用层仍可显式 Unload 强制回收;此时尚存引用会通过 generation 检查安全失效。
 class Asset {
 public:
     Asset() noexcept = default;

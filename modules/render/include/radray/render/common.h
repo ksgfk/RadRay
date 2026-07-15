@@ -1173,6 +1173,7 @@ struct DepthStencilState {
     CompareFunction DepthCompare{};
     DepthBiasState DepthBias{};
     std::optional<StencilState> Stencil{};
+    bool DepthTestEnable{false};
     bool DepthWriteEnable{false};
 
     constexpr static DepthStencilState Default() noexcept {
@@ -1185,6 +1186,7 @@ struct DepthStencilState {
                 0.0f,
             },
             std::nullopt,
+            true,
             true};
     }
 

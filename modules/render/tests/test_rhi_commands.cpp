@@ -75,14 +75,13 @@ std::optional<unique_ptr<Shader>> CompileShader(
     ShaderStage stage,
     vector<byte>& blob,
     string* reason) {
-    DxcCompileParams params{};
-    params.Code = source;
-    params.EntryPoint = entryPoint;
-    params.Stage = stage;
-    params.SM = HlslShaderModel::SM60;
-    params.IsOptimize = false;
-    params.IsSpirv = context.GetBackend() == TestBackend::Vulkan;
-    auto outputOpt = context.GetDxc()->Compile(params);
+    DxcCompileOptions options{};
+    options.EntryPoint = entryPoint;
+    options.Stage = stage;
+    options.SM = HlslShaderModel::SM60;
+    options.IsOptimize = false;
+    options.IsSpirv = context.GetBackend() == TestBackend::Vulkan;
+    auto outputOpt = context.GetDxc()->CompileMemory(source, "test_rhi_commands.hlsl", options);
     if (!outputOpt.has_value()) {
         *reason = fmt::format("DXC compile failed for {}", entryPoint);
         return std::nullopt;
