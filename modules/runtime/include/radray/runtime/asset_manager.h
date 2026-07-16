@@ -26,6 +26,7 @@ enum class AssetState {
     Ready,     ///< 资产已构造,可 Resolve。
     Faulted,   ///< 加载失败。
     Canceled,  ///< 加载被取消。
+    Unloaded,  ///< slot 已回收或 AssetManager 已析构。
 };
 
 /// 运行时弱句柄。POD,可自由拷贝/比较。指向 AssetManager 的 slot。
@@ -38,14 +39,23 @@ struct AssetWaitRecord : ManualCoroutineRecord {
 
 struct AssetLoadResult {
     unique_ptr<Asset> Object;
+    const RuntimeTypeInfo* TypeInfo{nullptr};
     string Error;
     bool Succeeded{false};
 
-    static AssetLoadResult Success(unique_ptr<Asset> object) noexcept {
+    static AssetLoadResult Success(unique_ptr<Asset> object, const RuntimeTypeInfo& typeInfo) noexcept {
         AssetLoadResult result;
         result.Object = std::move(object);
+        result.TypeInfo = &typeInfo;
         result.Succeeded = true;
         return result;
+    }
+
+    template <class T>
+    requires std::derived_from<T, Asset> && (!std::same_as<T, Asset>)
+    static AssetLoadResult Success(unique_ptr<T> object) noexcept {
+        unique_ptr<Asset> asset = std::move(object);
+        return Success(std::move(asset), runtime_type_info_v<T>);
     }
 
     static AssetLoadResult Failure(string error = {}) noexcept {
@@ -54,23 +64,32 @@ struct AssetLoadResult {
         return result;
     }
 
-    bool IsSuccess() const noexcept { return Succeeded && Object != nullptr; }
+    bool IsSuccess() const noexcept { return Succeeded && Object != nullptr && TypeInfo != nullptr; }
 };
 
 using AssetLoadTask = task<AssetLoadResult>;
 
-/// 引用计数控制块。由 slot 与所有 StreamingAssetRef(Any) 共享(shared_ptr)。
-/// 计数用原子变量,构造/拷贝/析构可在任意线程发生;控制块生命周期独立于 slot,
-/// 即使 slot 被强制 Unload 释放,尚存的引用仍安全地减计数(只是解析为失效)。
+/// 引用控制块。由 slot 与所有 StreamingAssetRef(Any) 共享(shared_ptr)。
+/// 生命周期独立于 slot,用于跨线程引用计数和只读状态查询。TypeInfo 在最终实例构造完成后写入,
+/// 再由 Ready 状态的 release/acquire 发布;其中 Id 始终是最终实例的精确类型 id。
 struct AssetRefControl {
     std::atomic<uint32_t> RefCount{0};
+    std::atomic<AssetState> State{AssetState::Loading};
+    const RuntimeTypeInfo* TypeInfo{nullptr};
+
+    AssetState LoadState() const noexcept {
+        return State.load(std::memory_order_acquire);
+    }
+
+    void PublishState(AssetState state) noexcept {
+        State.store(state, std::memory_order_release);
+    }
 };
 
 /// AssetManager 的加载请求。具体 loader 的参数形状完全由调用方决定；
-/// AssetManager 只消费统一的 task<AssetLoadResult> 结果。ExpectedTypeId 通常由 Load<T> 填充。
+/// AssetManager 只消费统一的 task<AssetLoadResult> 结果。
 struct AssetLoadRequest {
     AssetId Id;
-    AssetTypeId ExpectedTypeId{Guid::Empty()};
     AssetLoadTask Task;
     string DebugName{};
 };
@@ -80,9 +99,10 @@ struct AssetLoadRequest {
 /// 构造/拷贝会对目标 slot 增加引用计数,析构/移动出/Reset 则减少;引用计数归零的资产
 /// 可由 AssetManager::CollectUnreferenced 统一回收。
 ///
-/// 【线程安全】引用计数走共享的 AssetRefControl(原子),拷贝/移动/析构可在任意线程发生,
-/// 资源本身可跨线程使用。但状态查询与资产访问(Get/IsReady/Cancel/Reset...)以及 slot 表操作
-/// 只能在拥有 AssetManager 的线程(主/泵线程)进行。
+/// 【线程安全】不同引用实例可在任意线程拷贝/移动/析构/Reset,也可查询状态与类型
+/// (IsValid/IsCompleted/IsReady/IsFaulted/IsCanceled/GetTypeId/Is/CastTo)。
+/// 同一个引用实例不能与 Reset/赋值并发使用。资产访问 Get/Cancel/Wait 以及 AssetManager 的 slot 表操作
+/// 仍只能在拥有 AssetManager 的线程(主/泵线程)进行。
 class StreamingAssetRefAny {
 public:
     StreamingAssetRefAny() noexcept = default;
@@ -112,7 +132,6 @@ public:
     AssetHandle GetHandle() const noexcept { return _handle; }
     const AssetId& GetAssetId() const noexcept { return _id; }
     AssetTypeId GetTypeId() const noexcept;
-    AssetTypeId GetExpectedTypeId() const noexcept;
 
     template <class T>
     requires std::derived_from<T, Asset>
@@ -138,9 +157,9 @@ private:
     shared_ptr<AssetRefControl> _control{};
 };
 
-/// 类型安全 streaming 引用。本质是 manager + handle + 期望类型:
+/// 类型安全 streaming 引用。本质是 manager + handle + 类型视图:
 /// - Loading 时可查询状态,但 Get()/operator bool 仍为空。
-/// - Ready 且类型匹配时可直接访问资产。
+/// - Ready 且最终实例 is-a T 时可直接访问资产。
 /// - 参与引用计数(透过底层 StreamingAssetRefAny);显式 Unload 或引用归零回收后自动失效。
 template <class T>
 requires std::derived_from<T, Asset>
@@ -151,7 +170,7 @@ public:
 
     T* Get() const noexcept {
         Asset* asset = _ref.Get();
-        if (asset == nullptr || asset->GetTypeId() != runtime_type_id_v<T>) {
+        if (asset == nullptr || !_ref.template Is<T>()) {
             return nullptr;
         }
         return static_cast<T*>(asset);
@@ -161,7 +180,7 @@ public:
 
     bool IsValid() const noexcept { return _ref.IsValid(); }
     bool IsCompleted() const noexcept { return _ref.IsCompleted(); }
-    bool IsReady() const noexcept { return Get() != nullptr; }
+    bool IsReady() const noexcept { return _ref.IsReady() && _ref.template Is<T>(); }
     bool IsCompletedSuccessfully() const noexcept { return IsReady(); }
     bool IsFaulted() const noexcept { return _ref.IsFaulted(); }
     bool IsCanceled() const noexcept { return _ref.IsCanceled(); }
@@ -172,7 +191,6 @@ public:
     AssetHandle GetHandle() const noexcept { return _ref.GetHandle(); }
     const AssetId& GetAssetId() const noexcept { return _ref.GetAssetId(); }
     AssetTypeId GetTypeId() const noexcept { return _ref.GetTypeId(); }
-    AssetTypeId GetExpectedTypeId() const noexcept { return _ref.GetExpectedTypeId(); }
 
     const StreamingAssetRefAny& AsAny() const& noexcept { return _ref; }
     operator StreamingAssetRefAny() const& noexcept { return _ref; }
@@ -208,7 +226,7 @@ public:
     /// 异步发起加载。按 id 去重:命中在飞或已就绪 slot 直接复用。
     StreamingAssetRefAny Load(AssetLoadRequest request);
 
-    /// 类型化加载入口。只填充期望资产类型,不关心 loader 的参数形状。
+    /// 类型化加载入口。T 只是返回引用的类型视图,最终实例类型由 loader 的结果决定。
     template <class T>
     requires std::derived_from<T, Asset>
     StreamingAssetRef<T> Load(AssetLoadRequest request);
@@ -225,7 +243,7 @@ public:
     task<StreamingAssetRef<T>> LoadAndWait(AssetLoadRequest request);
 
     /// 不启动 task，仅按 id 去重并登记一个 ready object。主要给测试/工具使用。
-    StreamingAssetRefAny AddReady(const AssetId& id, unique_ptr<Asset> object, AssetTypeId expectedTypeId = Guid::Empty());
+    StreamingAssetRefAny AddReady(const AssetId& id, unique_ptr<Asset> object, const RuntimeTypeInfo& typeInfo);
 
     template <class T>
     requires std::derived_from<T, Asset>
@@ -276,7 +294,6 @@ private:
 
     struct AssetSlot {
         AssetId Id;
-        AssetTypeId TypeId;
         AssetState State{AssetState::Loading};
         unique_ptr<Asset> Object;
         stop_source Stop;
@@ -284,10 +301,15 @@ private:
         shared_ptr<AssetRefControl> Control{make_shared<AssetRefControl>()};
         bool PendingCanceled{false};
         bool PendingUnload{false};
+
+        void SetState(AssetState state) noexcept {
+            State = state;
+            Control->PublishState(state);
+        }
     };
 
     AssetHandle FindHandle(const AssetId& id) const noexcept;
-    AssetHandle EmplaceLoadingSlot(const AssetId& id, AssetTypeId typeId);
+    AssetHandle EmplaceLoadingSlot(const AssetId& id);
     task<void> RunLoad(AssetHandle handle, AssetLoadTask loadTask);
     void StoreLoadResult(AssetHandle handle, AssetLoadResult result) noexcept;
     void StoreLoadCanceled(AssetHandle handle) noexcept;
@@ -304,10 +326,6 @@ private:
     AssetWaitRecord* RegisterWait(AssetHandle handle, stop_token stop, std::coroutine_handle<> continuation);
 
     Nullable<Asset*> ResolveAsset(AssetHandle handle) const noexcept;
-    AssetTypeId ResolveTypeId(AssetHandle handle) const noexcept;
-    AssetTypeId ResolveExpectedTypeId(AssetHandle handle) const noexcept;
-    AssetState ResolveState(AssetHandle handle) const noexcept;
-    bool IsSlotAlive(AssetHandle handle) const noexcept;
 
     IRenderResourceRecycler* _recycler{nullptr};
     TaskScope _loadScope;
@@ -320,30 +338,32 @@ private:
 template <class T>
 requires std::derived_from<T, Asset>
 bool StreamingAssetRefAny::Is() const noexcept {
-    if (_manager == nullptr || !_handle.IsValid() || !_manager->IsSlotAlive(_handle)) {
+    if (_control == nullptr) {
         return false;
     }
-    AssetTypeId expected = _manager->ResolveExpectedTypeId(_handle);
-    if (!expected.IsEmpty()) {
-        return expected == runtime_type_id_v<T>;
+    const AssetState state = _control->LoadState();
+    if (state != AssetState::Ready) {
+        return false;
     }
-    Asset* asset = Get();
-    return asset != nullptr && asset->GetTypeId() == runtime_type_id_v<T>;
+    const RuntimeTypeInfo* typeInfo = _control->TypeInfo;
+    return typeInfo != nullptr && typeInfo->IsA(runtime_type_id_v<T>);
 }
 
 template <class T>
 requires std::derived_from<T, Asset>
 StreamingAssetRef<T> StreamingAssetRefAny::CastTo() const noexcept {
-    if (_manager == nullptr || !_handle.IsValid() || !_manager->IsSlotAlive(_handle)) {
+    if (_control == nullptr) {
         return StreamingAssetRef<T>{};
     }
-    AssetTypeId expected = _manager->ResolveExpectedTypeId(_handle);
-    if (!expected.IsEmpty() && expected != runtime_type_id_v<T>) {
+    const AssetState state = _control->LoadState();
+    if (state == AssetState::Unloaded) {
         return StreamingAssetRef<T>{};
     }
-    Asset* asset = Get();
-    if (asset != nullptr && asset->GetTypeId() != runtime_type_id_v<T>) {
-        return StreamingAssetRef<T>{};
+    if (state == AssetState::Ready) {
+        const RuntimeTypeInfo* typeInfo = _control->TypeInfo;
+        if (typeInfo == nullptr || !typeInfo->IsA(runtime_type_id_v<T>)) {
+            return StreamingAssetRef<T>{};
+        }
     }
     return StreamingAssetRef<T>{*this};
 }
@@ -351,7 +371,6 @@ StreamingAssetRef<T> StreamingAssetRefAny::CastTo() const noexcept {
 template <class T>
 requires std::derived_from<T, Asset>
 StreamingAssetRef<T> AssetManager::Load(AssetLoadRequest request) {
-    request.ExpectedTypeId = runtime_type_id_v<T>;
     return Load(std::move(request)).template CastTo<T>();
 }
 
@@ -373,7 +392,7 @@ template <class T>
 requires std::derived_from<T, Asset>
 StreamingAssetRef<T> AssetManager::AddReady(const AssetId& id, unique_ptr<T> object) {
     unique_ptr<Asset> asset = std::move(object);
-    return AddReady(id, std::move(asset), runtime_type_id_v<T>).template CastTo<T>();
+    return AddReady(id, std::move(asset), runtime_type_info_v<T>).template CastTo<T>();
 }
 
 template <class T>

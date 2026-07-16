@@ -166,6 +166,29 @@ TEST(AssetManagerTest, CpuLoadReadyAfterPump) {
     EXPECT_EQ(ref->Value(), 42);
 }
 
+TEST(AssetManagerTest, RuntimeTypeKeepsFinalIdentityAndSupportsBaseView) {
+    AssetManager mgr;
+    StreamingAssetRef<CpuAsset> ref = mgr.Load<CpuAsset>(AssetLoadRequest{
+        .Id = MakeId(34),
+        .Task = LoadCpuAsset(42)});
+
+    EXPECT_TRUE(ref.GetTypeId().IsEmpty());
+    EXPECT_FALSE(ref.AsAny().Is<CpuAsset>());
+    EXPECT_FALSE(ref.AsAny().Is<Asset>());
+
+    mgr.Pump();
+
+    EXPECT_EQ(ref.GetTypeId(), runtime_type_id_v<CpuAsset>);
+    EXPECT_TRUE(ref.AsAny().Is<CpuAsset>());
+    EXPECT_TRUE(ref.AsAny().Is<Asset>());
+    EXPECT_FALSE(ref.AsAny().Is<GpuAsset>());
+
+    StreamingAssetRef<Asset> baseRef = ref.AsAny().CastTo<Asset>();
+    ASSERT_TRUE(baseRef.IsReady());
+    EXPECT_EQ(baseRef.Get(), static_cast<Asset*>(ref.Get()));
+    EXPECT_FALSE(ref.AsAny().CastTo<GpuAsset>().IsValid());
+}
+
 TEST(AssetManagerTest, WaitCompletesAfterPumpCommitsReadyState) {
     AssetManager mgr;
     TaskScope scope;
@@ -547,6 +570,169 @@ TEST(AssetManagerTest, RefCountIsThreadSafeAcrossWorkers) {
     base.Reset();
     EXPECT_EQ(mgr.CollectUnreferenced(), 1u);
     EXPECT_EQ(mgr.GetAssetCount(), 0u);
+}
+
+TEST(AssetManagerTest, StatusQueriesAreThreadSafeDuringReadyPublication) {
+    FrameUploadScheduler frameUploads;
+    AssetManager mgr;
+    AssetId id = MakeId(31);
+    StreamingAssetRef<GpuAsset> ref = mgr.Load<GpuAsset>(AssetLoadRequest{
+        .Id = id,
+        .Task = LoadGpuAsset(frameUploads, 101)});
+
+    mgr.Pump();
+    ResourceUploader uploader{nullptr, 1};
+    frameUploads.RunUploadPhase(nullptr, uploader, 0);
+    frameUploads.NotifyFlightComplete(0);
+    frameUploads.PumpCompletedUploads();
+    ASSERT_TRUE(ref.IsValid());
+    ASSERT_FALSE(ref.IsCompleted());
+
+    constexpr uint32_t kThreadCount = 8;
+    std::atomic<uint32_t> querying{0};
+    std::atomic<bool> start{false};
+    std::atomic<bool> published{false};
+    std::atomic<bool> failed{false};
+    std::vector<std::thread> workers;
+    workers.reserve(kThreadCount);
+    for (uint32_t i = 0; i < kThreadCount; ++i) {
+        StreamingAssetRef<GpuAsset> workerRef = ref;
+        workers.emplace_back(
+            [workerRef = std::move(workerRef), &querying, &start, &published, &failed]() mutable {
+                while (!start.load(std::memory_order_acquire)) {
+                    std::this_thread::yield();
+                }
+                querying.fetch_add(1, std::memory_order_release);
+
+                uint32_t postPublishSpins = 0;
+                while (!workerRef.IsReady()) {
+                    const AssetTypeId readyType = workerRef.GetTypeId();
+                    if (!workerRef.IsValid() || workerRef.IsFaulted() || workerRef.IsCanceled() ||
+                        (!readyType.IsEmpty() && readyType != runtime_type_id_v<GpuAsset>) ||
+                        !workerRef.AsAny().CastTo<GpuAsset>().IsValid()) {
+                        failed.store(true, std::memory_order_relaxed);
+                        break;
+                    }
+                    if (published.load(std::memory_order_acquire) && ++postPublishSpins > 100000) {
+                        failed.store(true, std::memory_order_relaxed);
+                        break;
+                    }
+                    std::this_thread::yield();
+                }
+
+                if (!workerRef.IsReady() || !workerRef.IsCompleted() || workerRef.IsFaulted() ||
+                    workerRef.IsCanceled() || workerRef.GetTypeId() != runtime_type_id_v<GpuAsset> ||
+                    !workerRef.AsAny().Is<GpuAsset>() || !workerRef.AsAny().Is<Asset>()) {
+                    failed.store(true, std::memory_order_relaxed);
+                }
+            });
+    }
+
+    start.store(true, std::memory_order_release);
+    while (querying.load(std::memory_order_acquire) != kThreadCount) {
+        std::this_thread::yield();
+    }
+    mgr.Pump();
+    published.store(true, std::memory_order_release);
+
+    for (auto& worker : workers) {
+        worker.join();
+    }
+    EXPECT_FALSE(failed.load(std::memory_order_relaxed));
+    EXPECT_TRUE(ref.IsReady());
+}
+
+TEST(AssetManagerTest, StatusQueriesAreThreadSafeDuringUnload) {
+    AssetManager mgr;
+    AssetId id = MakeId(32);
+    StreamingAssetRef<CpuAsset> ref = mgr.Load<CpuAsset>(AssetLoadRequest{
+        .Id = id,
+        .Task = LoadCpuAsset(202)});
+    mgr.Pump();
+    ASSERT_TRUE(ref.IsReady());
+
+    constexpr uint32_t kThreadCount = 8;
+    std::atomic<uint32_t> querying{0};
+    std::atomic<bool> start{false};
+    std::atomic<bool> unloaded{false};
+    std::atomic<bool> failed{false};
+    std::vector<std::thread> workers;
+    workers.reserve(kThreadCount);
+    for (uint32_t i = 0; i < kThreadCount; ++i) {
+        StreamingAssetRef<CpuAsset> workerRef = ref;
+        workers.emplace_back(
+            [workerRef = std::move(workerRef), &querying, &start, &unloaded, &failed]() mutable {
+                while (!start.load(std::memory_order_acquire)) {
+                    std::this_thread::yield();
+                }
+                querying.fetch_add(1, std::memory_order_release);
+
+                uint32_t postUnloadSpins = 0;
+                while (workerRef.IsValid()) {
+                    const AssetTypeId readyType = workerRef.GetTypeId();
+                    (void)workerRef.IsCompleted();
+                    (void)workerRef.IsReady();
+                    (void)workerRef.IsFaulted();
+                    (void)workerRef.IsCanceled();
+                    (void)workerRef.AsAny().Is<CpuAsset>();
+                    (void)workerRef.AsAny().Is<Asset>();
+                    (void)workerRef.AsAny().CastTo<CpuAsset>();
+                    if (!readyType.IsEmpty() && readyType != runtime_type_id_v<CpuAsset>) {
+                        failed.store(true, std::memory_order_relaxed);
+                        break;
+                    }
+                    if (unloaded.load(std::memory_order_acquire) && ++postUnloadSpins > 100000) {
+                        failed.store(true, std::memory_order_relaxed);
+                        break;
+                    }
+                    std::this_thread::yield();
+                }
+
+                if (workerRef.IsValid() || workerRef.IsCompleted() || workerRef.IsReady() ||
+                    workerRef.IsFaulted() || workerRef.IsCanceled() ||
+                    !workerRef.GetTypeId().IsEmpty() || workerRef.AsAny().Is<CpuAsset>() ||
+                    workerRef.AsAny().Is<Asset>() ||
+                    workerRef.AsAny().CastTo<CpuAsset>().IsValid()) {
+                    failed.store(true, std::memory_order_relaxed);
+                }
+            });
+    }
+
+    start.store(true, std::memory_order_release);
+    while (querying.load(std::memory_order_acquire) != kThreadCount) {
+        std::this_thread::yield();
+    }
+    mgr.Unload(id);
+    unloaded.store(true, std::memory_order_release);
+
+    for (auto& worker : workers) {
+        worker.join();
+    }
+    EXPECT_FALSE(failed.load(std::memory_order_relaxed));
+    EXPECT_FALSE(ref.IsValid());
+}
+
+TEST(AssetManagerTest, StatusQueriesRemainSafeAfterManagerDestruction) {
+    StreamingAssetRef<CpuAsset> ref;
+    {
+        AssetManager mgr;
+        ref = mgr.Load<CpuAsset>(AssetLoadRequest{
+            .Id = MakeId(33),
+            .Task = LoadCpuAsset(303)});
+        mgr.Pump();
+        ASSERT_TRUE(ref.IsReady());
+        ASSERT_EQ(ref.GetTypeId(), runtime_type_id_v<CpuAsset>);
+    }
+
+    EXPECT_FALSE(ref.IsValid());
+    EXPECT_FALSE(ref.IsCompleted());
+    EXPECT_FALSE(ref.IsReady());
+    EXPECT_FALSE(ref.IsFaulted());
+    EXPECT_FALSE(ref.IsCanceled());
+    EXPECT_TRUE(ref.GetTypeId().IsEmpty());
+    EXPECT_FALSE(ref.AsAny().Is<CpuAsset>());
+    EXPECT_FALSE(ref.AsAny().Is<Asset>());
+    EXPECT_FALSE(ref.AsAny().CastTo<CpuAsset>().IsValid());
 }
 
 // Unload:在加载中卸载会取消任务,终态后销毁 slot。

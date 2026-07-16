@@ -88,3 +88,13 @@ TEST(RuntimeTypeIsA, CompileTimeRelationsHold) {
     EXPECT_FALSE((runtime_is_a_v<IShape, IColored>));
     EXPECT_FALSE((runtime_is_a_v<Derived, Unrelated>));
 }
+
+TEST(RuntimeTypeIsA, RuntimeTypeInfoPreservesExactIdAndMatchesBases) {
+    const RuntimeTypeInfo& info = runtime_type_info_v<Derived>;
+    EXPECT_EQ(info.Id, runtime_type_id_v<Derived>);
+    EXPECT_TRUE(info.IsA(runtime_type_id_v<Derived>));
+    EXPECT_TRUE(info.IsA(runtime_type_id_v<Base>));
+    EXPECT_TRUE(info.IsA(runtime_type_id_v<IShape>));
+    EXPECT_TRUE(info.IsA(runtime_type_id_v<IColored>));
+    EXPECT_FALSE(info.IsA(runtime_type_id_v<Unrelated>));
+}

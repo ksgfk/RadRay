@@ -11,7 +11,7 @@ using AssetId = Guid;
 
 /// 运行时类型标识。用于类型擦除后的向下转换校验(StreamingAssetRefAny -> StreamingAssetRef<T>)。
 /// 不依赖 RTTI,由资产类型手填固定 Guid,跨进程/跨模块稳定。
-/// 【限制】为扁平精确匹配:只能转换为 Load 时的确切类型,不支持转为基类。
+/// TypeId 始终表示最终实例的精确类型;Is/CastTo 通过 RuntimeTypeTrait<T>::Bases 支持基类视图。
 using AssetTypeId = RuntimeTypeId;
 
 /// 所有资产的多态基类。对应 UE5 的 UObject 资产(如 UStaticMesh)在本项目中的最小化等价物。

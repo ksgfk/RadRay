@@ -8,7 +8,7 @@
 namespace radray {
 
 /// 进程内运行时类型标识。由类型手写固定 Guid,不依赖 C++ RTTI。
-/// 只表达精确类型身份;不提供反射或注册表。
+/// 只表达精确类型身份;继承关系由 RuntimeTypeInfo 独立描述,不提供全局注册表。
 ///
 /// 【继承关系】通过 RuntimeTypeTrait<T>::Bases(直接基类列表,std::tuple<...>)可选声明。
 /// 消费方(如 ServiceRegistry)在【拥有确切静态类型】的上下文里用 static_cast 完成
@@ -73,5 +73,45 @@ struct RuntimeIsA
 /// 上下文里用 static_cast 完成(见 ServiceRegistry)。
 template <class Derived, class Base>
 inline constexpr bool runtime_is_a_v = detail::RuntimeIsA<Derived, Base>::value;
+
+/// 一个确切运行时类型的静态描述符。Id 始终是最终实例类型的精确 id;
+/// IsA 通过 RuntimeTypeTrait<T>::Bases 图判断该类型能否视为目标基类。
+/// 描述符及其函数指针均为静态生命周期,可安全发布给长寿命控制块。
+struct RuntimeTypeInfo {
+    RuntimeTypeId Id;
+    bool (*Matches)(const RuntimeTypeId& target) noexcept{nullptr};
+
+    bool IsA(const RuntimeTypeId& target) const noexcept {
+        return Matches != nullptr && Matches(target);
+    }
+};
+
+namespace detail {
+
+template <class T>
+constexpr bool RuntimeTypeMatchesId(const RuntimeTypeId& target) noexcept;
+
+template <class Bases>
+struct RuntimeTypeBasesMatcher;
+
+template <class... Bases>
+struct RuntimeTypeBasesMatcher<std::tuple<Bases...>> {
+    static constexpr bool Match(const RuntimeTypeId& target) noexcept {
+        return (RuntimeTypeMatchesId<Bases>(target) || ...);
+    }
+};
+
+template <class T>
+constexpr bool RuntimeTypeMatchesId(const RuntimeTypeId& target) noexcept {
+    return target == runtime_type_id_v<T> ||
+           RuntimeTypeBasesMatcher<runtime_type_bases_t<T>>::Match(target);
+}
+
+}  // namespace detail
+
+template <class T>
+inline constexpr RuntimeTypeInfo runtime_type_info_v{
+    runtime_type_id_v<T>,
+    &detail::RuntimeTypeMatchesId<T>};
 
 }  // namespace radray

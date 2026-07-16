@@ -146,27 +146,27 @@ Asset* StreamingAssetRefAny::Get() const noexcept {
 }
 
 bool StreamingAssetRefAny::IsValid() const noexcept {
-    return _manager != nullptr && _manager->IsSlotAlive(_handle);
+    return _control != nullptr && _control->LoadState() != AssetState::Unloaded;
 }
 
 bool StreamingAssetRefAny::IsCompleted() const noexcept {
-    if (_manager == nullptr) {
+    if (_control == nullptr) {
         return false;
     }
-    AssetState s = _manager->ResolveState(_handle);
-    return s != AssetState::Loading;
+    const AssetState state = _control->LoadState();
+    return state == AssetState::Ready || state == AssetState::Faulted || state == AssetState::Canceled;
 }
 
 bool StreamingAssetRefAny::IsReady() const noexcept {
-    return _manager != nullptr && _manager->ResolveState(_handle) == AssetState::Ready && Get() != nullptr;
+    return _control != nullptr && _control->LoadState() == AssetState::Ready;
 }
 
 bool StreamingAssetRefAny::IsFaulted() const noexcept {
-    return _manager != nullptr && _manager->ResolveState(_handle) == AssetState::Faulted;
+    return _control != nullptr && _control->LoadState() == AssetState::Faulted;
 }
 
 bool StreamingAssetRefAny::IsCanceled() const noexcept {
-    return _manager != nullptr && _manager->ResolveState(_handle) == AssetState::Canceled;
+    return _control != nullptr && _control->LoadState() == AssetState::Canceled;
 }
 
 void StreamingAssetRefAny::Cancel() const noexcept {
@@ -176,17 +176,11 @@ void StreamingAssetRefAny::Cancel() const noexcept {
 }
 
 AssetTypeId StreamingAssetRefAny::GetTypeId() const noexcept {
-    if (_manager == nullptr || !_handle.IsValid()) {
+    if (_control == nullptr || _control->LoadState() != AssetState::Ready) {
         return Guid::Empty();
     }
-    return _manager->ResolveTypeId(_handle);
-}
-
-AssetTypeId StreamingAssetRefAny::GetExpectedTypeId() const noexcept {
-    if (_manager == nullptr || !_handle.IsValid()) {
-        return Guid::Empty();
-    }
-    return _manager->ResolveExpectedTypeId(_handle);
+    const RuntimeTypeInfo* typeInfo = _control->TypeInfo;
+    return typeInfo != nullptr ? typeInfo->Id : Guid::Empty();
 }
 
 // ════════════════════════════════════════════════════════════
@@ -204,7 +198,12 @@ AssetManager::~AssetManager() noexcept {
     Pump();
 
     for (auto& slot : _slots.Values()) {
-        if (slot && slot->State == AssetState::Ready && slot->Object) {
+        if (!slot) {
+            continue;
+        }
+        const AssetState state = slot->State;
+        slot->SetState(AssetState::Unloaded);
+        if (state == AssetState::Ready && slot->Object) {
             slot->Object->OnUnload(GetRecycler());
             slot->Object.reset();
         }
@@ -219,12 +218,11 @@ AssetHandle AssetManager::FindHandle(const AssetId& id) const noexcept {
     return it->second;
 }
 
-AssetHandle AssetManager::EmplaceLoadingSlot(const AssetId& id, AssetTypeId typeId) {
+AssetHandle AssetManager::EmplaceLoadingSlot(const AssetId& id) {
     AssetHandle handle = _slots.Emplace(make_unique<AssetSlot>());
     AssetSlot* slot = _slots.Get(handle).get();
     slot->Id = id;
-    slot->TypeId = typeId;
-    slot->State = AssetState::Loading;
+    slot->SetState(AssetState::Loading);
     _idIndex.emplace(id, handle);
     return handle;
 }
@@ -242,7 +240,7 @@ StreamingAssetRefAny AssetManager::Load(AssetLoadRequest request) {
         return MakeRef(existing, request.Id);
     }
 
-    AssetHandle handle = EmplaceLoadingSlot(request.Id, request.ExpectedTypeId);
+    AssetHandle handle = EmplaceLoadingSlot(request.Id);
     _loadScope.Spawn(RunLoad(handle, std::move(request.Task)));
     _activeLoads.push_back(handle);
 
@@ -257,13 +255,16 @@ task<void> AssetManager::Wait(StreamingAssetRefAny ref) {
     }
 }
 
-StreamingAssetRefAny AssetManager::AddReady(const AssetId& id, unique_ptr<Asset> object, AssetTypeId expectedTypeId) {
+StreamingAssetRefAny AssetManager::AddReady(
+    const AssetId& id,
+    unique_ptr<Asset> object,
+    const RuntimeTypeInfo& typeInfo) {
     AssetHandle existing = FindHandle(id);
     if (existing.IsValid()) {
         return MakeRef(existing, id);
     }
-    AssetHandle handle = EmplaceLoadingSlot(id, expectedTypeId);
-    OnLoadComplete(handle, AssetLoadResult::Success(std::move(object)));
+    AssetHandle handle = EmplaceLoadingSlot(id);
+    OnLoadComplete(handle, AssetLoadResult::Success(std::move(object), typeInfo));
     return MakeRef(handle, id);
 }
 
@@ -380,7 +381,9 @@ void AssetManager::UnloadSlot(AssetHandle handle) noexcept {
         slot->Stop.request_stop();
         return;
     }
-    if (slot->State == AssetState::Ready && slot->Object) {
+    const AssetState state = slot->State;
+    slot->SetState(AssetState::Unloaded);
+    if (state == AssetState::Ready && slot->Object) {
         slot->Object->OnUnload(GetRecycler());
     }
     DestroySlot(handle);
@@ -392,6 +395,7 @@ void AssetManager::DestroySlot(AssetHandle handle) noexcept {
         return;
     }
     AssetSlot* slot = slotPtr->get();
+    slot->SetState(AssetState::Unloaded);
     _idIndex.erase(slot->Id);
     _slots.Destroy(handle);
 }
@@ -406,18 +410,20 @@ void AssetManager::OnLoadComplete(AssetHandle handle, AssetLoadResult result) no
         if (!result.Error.empty()) {
             RADRAY_ERR_LOG("AssetManager: asset load failed: {}", result.Error);
         }
-        slot->State = AssetState::Faulted;
+        slot->SetState(AssetState::Faulted);
         return;
     }
     unique_ptr<Asset> object = std::move(result.Object);
-    if (!slot->TypeId.IsEmpty() && object->GetTypeId() != slot->TypeId) {
-        RADRAY_ERR_LOG("AssetManager: loaded asset type does not match requested type");
-        slot->State = AssetState::Faulted;
+    const RuntimeTypeInfo* typeInfo = result.TypeInfo;
+    if (object->GetTypeId() != typeInfo->Id || !typeInfo->IsA(runtime_type_id_v<Asset>)) {
+        RADRAY_ERR_LOG("AssetManager: loaded asset runtime type metadata does not match the final instance");
+        slot->SetState(AssetState::Faulted);
         return;
     }
     object->_id = slot->Id;
     slot->Object = std::move(object);
-    slot->State = AssetState::Ready;
+    slot->Control->TypeInfo = typeInfo;
+    slot->SetState(AssetState::Ready);
 }
 
 void AssetManager::OnLoadStopped(AssetHandle handle) noexcept {
@@ -425,7 +431,7 @@ void AssetManager::OnLoadStopped(AssetHandle handle) noexcept {
     if (slotPtr == nullptr) {
         return;
     }
-    slotPtr->get()->State = AssetState::Canceled;
+    slotPtr->get()->SetState(AssetState::Canceled);
 }
 
 vector<AssetWaitRecord*> AssetManager::TakeWaiters(AssetHandle handle) noexcept {
@@ -459,7 +465,9 @@ void AssetManager::FinalizeTerminalSlot(AssetHandle handle) {
     }
     AssetSlot* slot = slotPtr->get();
     if (slot->PendingUnload) {
-        if (slot->State == AssetState::Ready && slot->Object) {
+        const AssetState state = slot->State;
+        slot->SetState(AssetState::Unloaded);
+        if (state == AssetState::Ready && slot->Object) {
             slot->Object->OnUnload(GetRecycler());
         }
         DestroySlot(handle);
@@ -528,38 +536,6 @@ Nullable<Asset*> AssetManager::ResolveAsset(AssetHandle handle) const noexcept {
         return nullptr;
     }
     return slot->Object.get();
-}
-
-AssetTypeId AssetManager::ResolveTypeId(AssetHandle handle) const noexcept {
-    const unique_ptr<AssetSlot>* slotPtr = _slots.TryGet(handle);
-    if (slotPtr == nullptr) {
-        return Guid::Empty();
-    }
-    const AssetSlot* slot = slotPtr->get();
-    if (slot->State != AssetState::Ready || !slot->Object) {
-        return Guid::Empty();
-    }
-    return slot->Object->GetTypeId();
-}
-
-AssetTypeId AssetManager::ResolveExpectedTypeId(AssetHandle handle) const noexcept {
-    const unique_ptr<AssetSlot>* slotPtr = _slots.TryGet(handle);
-    if (slotPtr == nullptr) {
-        return Guid::Empty();
-    }
-    return slotPtr->get()->TypeId;
-}
-
-AssetState AssetManager::ResolveState(AssetHandle handle) const noexcept {
-    const unique_ptr<AssetSlot>* slotPtr = _slots.TryGet(handle);
-    if (slotPtr == nullptr) {
-        return AssetState::Faulted;
-    }
-    return slotPtr->get()->State;
-}
-
-bool AssetManager::IsSlotAlive(AssetHandle handle) const noexcept {
-    return _slots.TryGet(handle) != nullptr;
 }
 
 }  // namespace radray
