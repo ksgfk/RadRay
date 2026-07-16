@@ -32,25 +32,19 @@ struct TextureSubViewDesc {
                Range.BaseMipLevel == all.BaseMipLevel &&
                Range.MipLevelCount == all.MipLevelCount;
     }
+
+    friend bool operator==(const TextureSubViewDesc& lhs, const TextureSubViewDesc& rhs) noexcept {
+        return lhs.Dim == rhs.Dim && lhs.Format == rhs.Format &&
+               lhs.Range.BaseArrayLayer == rhs.Range.BaseArrayLayer &&
+               lhs.Range.ArrayLayerCount == rhs.Range.ArrayLayerCount &&
+               lhs.Range.BaseMipLevel == rhs.Range.BaseMipLevel &&
+               lhs.Range.MipLevelCount == rhs.Range.MipLevelCount;
+    }
 };
 
-/// TextureAsset view 缓存的纯 POD key (仿 render::GraphicsPsoKey / SamplerKey)。
-///
-/// 所有字段为标量, 无指针 / optional / span。构造时以 `TextureViewKey{}` 清零, 再逐字段赋值,
-/// 保证 padding 恒为 0, 从而可安全用于 PodHasher (byte-wise xxHash) 与 PodEqual (memcmp)。
-struct TextureViewKey {
-    int32_t Dim;
-    int32_t Format;
-    uint32_t BaseArrayLayer;
-    uint32_t ArrayLayerCount;
-    uint32_t BaseMipLevel;
-    uint32_t MipLevelCount;
+struct TextureSubViewDescHasher {
+    size_t operator()(const TextureSubViewDesc& desc) const noexcept;
 };
-
-static_assert(std::is_trivially_copyable_v<TextureViewKey>, "TextureViewKey must be trivially copyable");
-
-/// 从 TextureSubViewDesc 构造清零的 POD key。
-TextureViewKey BuildTextureViewKey(const TextureSubViewDesc& desc) noexcept;
 
 /// GPU 贴图资产。对应 UE5 的 UTexture2D(最小化):持有已上传的 device-local
 /// render::Texture + 一个默认全量 SRV(render::TextureView), 并内建一个 view 缓存
@@ -92,7 +86,7 @@ private:
     string _name;
     unique_ptr<render::Texture> _texture;
     unique_ptr<render::TextureView> _srv;
-    unordered_map<TextureViewKey, unique_ptr<render::TextureView>, PodHasher<TextureViewKey>, PodEqual<TextureViewKey>> _viewCache;
+    unordered_map<TextureSubViewDesc, unique_ptr<render::TextureView>, TextureSubViewDescHasher> _viewCache;
 };
 
 struct TextureAssetLoadOptions {

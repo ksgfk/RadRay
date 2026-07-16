@@ -3,6 +3,7 @@
 #include <cstring>
 
 #include <radray/runtime/gpu_resource.h>
+#include <radray/runtime/texture_asset.h>
 
 using namespace radray;
 
@@ -147,6 +148,54 @@ DynamicCBufferArena MakeArena(
 }
 
 }  // namespace
+
+TEST(CacheKeyHasherTest, SamplerDescriptorUsesFieldValueSemantics) {
+    render::SamplerDescriptor firstDesc{
+        .AddressS = render::AddressMode::Repeat,
+        .AddressT = render::AddressMode::Mirror,
+        .AddressR = render::AddressMode::ClampToEdge,
+        .MinFilter = render::FilterMode::Linear,
+        .MagFilter = render::FilterMode::Nearest,
+        .MipmapFilter = render::FilterMode::Linear,
+        .LodMin = 0.0f,
+        .LodMax = 8.0f,
+        .Compare = render::CompareFunction::LessEqual,
+        .AnisotropyClamp = 4};
+    render::SamplerDescriptor secondDesc = firstDesc;
+    secondDesc.LodMin = -0.0f;
+
+    ASSERT_EQ(firstDesc, secondDesc);
+    EXPECT_EQ(
+        render::SamplerDescriptorHasher{}(firstDesc),
+        render::SamplerDescriptorHasher{}(secondDesc));
+
+    unordered_map<render::SamplerDescriptor, int, render::SamplerDescriptorHasher> cache;
+    cache.emplace(firstDesc, 1);
+    cache.insert_or_assign(secondDesc, 2);
+    EXPECT_EQ(cache.size(), 1u);
+    EXPECT_EQ(cache.at(firstDesc), 2);
+}
+
+TEST(CacheKeyHasherTest, TextureSubViewDescUsesFieldValueSemantics) {
+    const TextureSubViewDesc first{
+        .Dim = render::TextureDimension::Cube,
+        .Format = render::TextureFormat::RGBA8_UNORM,
+        .Range = {
+            .BaseArrayLayer = 6,
+            .ArrayLayerCount = 12,
+            .BaseMipLevel = 2,
+            .MipLevelCount = 5}};
+    const TextureSubViewDesc second = first;
+
+    ASSERT_EQ(first, second);
+    EXPECT_EQ(TextureSubViewDescHasher{}(first), TextureSubViewDescHasher{}(second));
+
+    unordered_map<TextureSubViewDesc, int, TextureSubViewDescHasher> cache;
+    cache.emplace(first, 1);
+    cache.insert_or_assign(second, 2);
+    EXPECT_EQ(cache.size(), 1u);
+    EXPECT_EQ(cache.at(first), 2);
+}
 
 TEST(MappedUploadPageTest, CommitRecordsOnlyActualPrefix) {
     FakeDevice device;

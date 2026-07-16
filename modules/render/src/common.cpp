@@ -1,5 +1,6 @@
 #include <radray/render/common.h>
 
+#include <radray/hash.h>
 #include <radray/logger.h>
 #include <radray/utility.h>
 
@@ -16,6 +17,22 @@
 #endif
 
 namespace radray::render {
+
+size_t SamplerDescriptorHasher::operator()(const SamplerDescriptor& desc) const noexcept {
+    HashCode hash;
+    hash.Add(static_cast<int32_t>(desc.AddressS));
+    hash.Add(static_cast<int32_t>(desc.AddressT));
+    hash.Add(static_cast<int32_t>(desc.AddressR));
+    hash.Add(static_cast<int32_t>(desc.MinFilter));
+    hash.Add(static_cast<int32_t>(desc.MagFilter));
+    hash.Add(static_cast<int32_t>(desc.MipmapFilter));
+    hash.Add(desc.LodMin);
+    hash.Add(desc.LodMax);
+    hash.Add(desc.Compare.has_value());
+    hash.Add(desc.Compare.has_value() ? static_cast<int32_t>(*desc.Compare) : 0);
+    hash.Add(desc.AnisotropyClamp);
+    return hash.ToHashCode();
+}
 
 RenderPass::RenderPass(const RenderPassDescriptor& desc)
     : _colorAttachments(desc.ColorAttachments.begin(), desc.ColorAttachments.end()),

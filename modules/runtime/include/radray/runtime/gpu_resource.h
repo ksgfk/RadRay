@@ -6,7 +6,6 @@
 
 #include <radray/nullable.h>
 #include <radray/guid.h>
-#include <radray/hash.h>
 #include <radray/render/common.h>
 #include <radray/types.h>
 
@@ -360,8 +359,7 @@ private:
     uint64_t _framebufferMisses{0};
 };
 
-/// PSO 缓存的 POD key. 所有字段为标量 (无指针/optional/span),
-/// 构造时以 `Key{}` 清零, 再逐字段赋值, 保证 padding 恒为 0, 从而可安全用于 PodHasher (byte-wise xxHash) 与 PodEqual (memcmp).
+/// PSO 缓存的 POD key. 所有字段为标量 (无指针/optional/span)。
 struct GraphicsPsoKey {
     Guid LayoutId;
     Guid VSId;
@@ -435,30 +433,6 @@ struct GraphicsPsoKey {
 
 static_assert(std::is_trivially_copyable_v<GraphicsPsoKey>, "GraphicsPsoKey must be trivially copyable");
 
-/// Sampler 缓存的纯 POD key (仿 GraphicsPsoKey)。
-///
-/// 所有字段为标量, 无指针 / optional / span。构造时以 `SamplerKey{}` 清零, 再逐字段赋值,
-/// 保证 padding 恒为 0, 从而可安全用于 PodHasher (byte-wise xxHash) 与 PodEqual (memcmp)。
-/// SamplerDescriptor::Compare 是 std::optional, 在此展平为 HasCompare + Compare 两个标量。
-struct SamplerKey {
-    int32_t AddressS;
-    int32_t AddressT;
-    int32_t AddressR;
-    int32_t MinFilter;
-    int32_t MagFilter;
-    int32_t MipmapFilter;
-    float LodMin;
-    float LodMax;
-    uint32_t HasCompare;
-    int32_t Compare;
-    uint32_t AnisotropyClamp;
-};
-
-static_assert(std::is_trivially_copyable_v<SamplerKey>, "SamplerKey must be trivially copyable");
-
-/// 从 SamplerDescriptor 构造清零的 POD key。
-SamplerKey BuildSamplerKey(const render::SamplerDescriptor& desc) noexcept;
-
 /// 采样器缓存 (对应 UE5 的 GTextureSamplerStateCache / 各 RHI 后端 sampler cache)。
 ///
 /// 设计要点:
@@ -481,7 +455,7 @@ public:
 
 private:
     render::Device* _device{nullptr};
-    unordered_map<SamplerKey, unique_ptr<render::Sampler>, PodHasher<SamplerKey>, PodEqual<SamplerKey>> _cache;
+    unordered_map<render::SamplerDescriptor, unique_ptr<render::Sampler>, render::SamplerDescriptorHasher> _cache;
 };
 
 }  // namespace radray

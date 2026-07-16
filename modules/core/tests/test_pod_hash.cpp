@@ -8,6 +8,17 @@
 
 namespace {
 
+constexpr size_t kConstexprHashCode = [] {
+    radray::HashCode hash;
+    hash.Add(size_t{1});
+    hash.Add(size_t{2});
+    return hash.ToHashCode();
+}();
+static_assert(kConstexprHashCode != 0);
+
+constexpr size_t kConstexprCombinedHash = radray::HashCode::Combine(size_t{1}, size_t{2});
+static_assert(kConstexprCombinedHash == kConstexprHashCode);
+
 struct PodKey {
     uint64_t A;
     uint32_t B;
@@ -62,4 +73,35 @@ TEST(PodHashTest, UsableAsUnorderedMapKey) {
     EXPECT_EQ(map.size(), 2u);
     EXPECT_EQ(map[MakeKey(1, 0, 0, "a")], 3);
     EXPECT_EQ(map[MakeKey(2, 0, 0, "b")], 2);
+}
+
+TEST(HashCodeTest, MatchesHashDataForWordSequence) {
+    const size_t values[] = {
+        0x01234567u,
+        0x89abcdefu,
+        0x13579bdfu,
+        0x2468ace0u,
+        0x10203040u,
+        0x50607080u,
+        0xa0b0c0d0u,
+        0xe0f00112u,
+    };
+    constexpr size_t valueCount = sizeof(values) / sizeof(values[0]);
+
+    radray::HashCode hash;
+    EXPECT_EQ(hash.ToHashCode(), radray::HashData(values, 0));
+    for (size_t count = 1; count <= valueCount; ++count) {
+        hash.Add(values[count - 1]);
+        EXPECT_EQ(hash.ToHashCode(), radray::HashData(values, count * sizeof(size_t)));
+    }
+}
+
+TEST(HashCodeTest, StaticCombineMatchesIncrementalHash) {
+    radray::HashCode hash;
+    hash.Add(size_t{0x12345678});
+    hash.Add(size_t{0x9abcdef0});
+
+    EXPECT_EQ(
+        radray::HashCode::Combine(size_t{0x12345678}, size_t{0x9abcdef0}),
+        hash.ToHashCode());
 }

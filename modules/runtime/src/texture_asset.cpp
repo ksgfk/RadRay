@@ -127,15 +127,15 @@ AssetLoadTask LoadTextureFromMemoryTask(
 
 }  // namespace
 
-TextureViewKey BuildTextureViewKey(const TextureSubViewDesc& desc) noexcept {
-    TextureViewKey key{};  // 清零, 保证 padding 恒为 0 (PodHasher/PodEqual 要求)
-    key.Dim = static_cast<int32_t>(desc.Dim);
-    key.Format = static_cast<int32_t>(desc.Format);
-    key.BaseArrayLayer = desc.Range.BaseArrayLayer;
-    key.ArrayLayerCount = desc.Range.ArrayLayerCount;
-    key.BaseMipLevel = desc.Range.BaseMipLevel;
-    key.MipLevelCount = desc.Range.MipLevelCount;
-    return key;
+size_t TextureSubViewDescHasher::operator()(const TextureSubViewDesc& desc) const noexcept {
+    HashCode hash;
+    hash.Add(static_cast<int32_t>(desc.Dim));
+    hash.Add(static_cast<int32_t>(desc.Format));
+    hash.Add(desc.Range.BaseArrayLayer);
+    hash.Add(desc.Range.ArrayLayerCount);
+    hash.Add(desc.Range.BaseMipLevel);
+    hash.Add(desc.Range.MipLevelCount);
+    return hash.ToHashCode();
 }
 
 TextureAsset::TextureAsset(
@@ -169,8 +169,7 @@ render::TextureView* TextureAsset::GetOrCreateSrv(const TextureSubViewDesc& sub)
     if (_device == nullptr || _texture == nullptr) {
         return nullptr;
     }
-    const TextureViewKey key = BuildTextureViewKey(sub);
-    if (auto it = _viewCache.find(key); it != _viewCache.end()) {
+    if (auto it = _viewCache.find(sub); it != _viewCache.end()) {
         return it->second.get();
     }
     // Format::UNKNOWN 表示沿用底层贴图格式。
@@ -190,7 +189,7 @@ render::TextureView* TextureAsset::GetOrCreateSrv(const TextureSubViewDesc& sub)
     auto view = viewOpt.Release();
     view->SetDebugName(fmt::format("texasset_subsrv_{}", _name));
     render::TextureView* raw = view.get();
-    _viewCache.emplace(key, std::move(view));
+    _viewCache.emplace(sub, std::move(view));
     return raw;
 }
 

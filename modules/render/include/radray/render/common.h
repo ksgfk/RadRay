@@ -776,6 +776,10 @@ struct SamplerDescriptor {
     friend bool operator!=(const SamplerDescriptor& lhs, const SamplerDescriptor& rhs) noexcept = default;
 };
 
+struct SamplerDescriptorHasher {
+    size_t operator()(const SamplerDescriptor& desc) const noexcept;
+};
+
 struct CommandQueueSubmitDescriptor {
     std::span<CommandBuffer*> CmdBuffers{};
     std::span<Fence*> SignalFences{};
