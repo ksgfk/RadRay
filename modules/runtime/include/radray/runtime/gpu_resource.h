@@ -9,8 +9,13 @@
 #include <radray/render/common.h>
 #include <radray/types.h>
 
+namespace radray::render {
+class Dxc;
+}  // namespace radray::render
+
 namespace radray {
 
+class AssetManager;
 class MeshResource;
 
 /// 持有由网格资源创建的 GPU 缓冲区及绘制视图。
@@ -359,80 +364,6 @@ private:
     uint64_t _framebufferMisses{0};
 };
 
-/// PSO 缓存的 POD key. 所有字段为标量 (无指针/optional/span)。
-struct GraphicsPsoKey {
-    Guid LayoutId;
-    Guid VSId;
-    Guid PSId;
-
-    // PrimitiveState 展平
-    int32_t Topology;
-    int32_t FaceClockwise;
-    int32_t Cull;
-    int32_t Poly;
-    uint32_t HasStripIndexFormat;
-    int32_t StripIndexFormat;
-    uint32_t UnclippedDepth;
-    uint32_t Conservative;
-
-    // DepthStencil 展平
-    uint32_t HasDepthStencil;
-    int32_t DSFormat;
-    uint32_t DepthTestEnable;
-    int32_t DepthCompare;
-    uint32_t DepthWriteEnable;
-    int32_t DepthBiasConstant;
-    float DepthBiasSlopScale;
-    float DepthBiasClamp;
-    uint32_t HasStencil;
-    int32_t StencilFrontCompare;
-    int32_t StencilFrontFailOp;
-    int32_t StencilFrontDepthFailOp;
-    int32_t StencilFrontPassOp;
-    int32_t StencilBackCompare;
-    int32_t StencilBackFailOp;
-    int32_t StencilBackDepthFailOp;
-    int32_t StencilBackPassOp;
-    uint32_t StencilReadMask;
-    uint32_t StencilWriteMask;
-
-    // MultiSample 展平
-    uint32_t MsCount;
-    uint64_t MsMask;
-    uint32_t MsAlphaToCoverage;
-
-    // ColorTargets 展平
-    uint32_t ColorTargetCount;
-    struct ColorTargetEntry {
-        int32_t Format;
-        uint32_t HasBlend;
-        int32_t ColorSrc;
-        int32_t ColorDst;
-        int32_t ColorOp;
-        int32_t AlphaSrc;
-        int32_t AlphaDst;
-        int32_t AlphaOp;
-        uint32_t WriteMask;
-    } ColorTargets[render::kMaxColorTargets];
-
-    // VertexLayouts 展平
-    uint32_t VertexLayoutCount;
-    struct VertexLayoutEntry {
-        uint64_t ArrayStride;
-        int32_t StepMode;
-        uint32_t ElemCount;
-        struct ElemEntry {
-            uint64_t Offset;
-            char Semantic[render::kMaxSemanticLength];
-            uint32_t SemanticIndex;
-            int32_t Format;
-            uint32_t Location;
-        } Elems[render::kMaxVertexElementsPerLayout];
-    } VertexLayouts[render::kMaxVertexBufferLayouts];
-};
-
-static_assert(std::is_trivially_copyable_v<GraphicsPsoKey>, "GraphicsPsoKey must be trivially copyable");
-
 /// 采样器缓存 (对应 UE5 的 GTextureSamplerStateCache / 各 RHI 后端 sampler cache)。
 ///
 /// 设计要点:
@@ -455,7 +386,66 @@ public:
 
 private:
     render::Device* _device{nullptr};
-    unordered_map<render::SamplerDescriptor, unique_ptr<render::Sampler>, render::SamplerDescriptorHasher> _cache;
+    unordered_map<render::SamplerDescriptor, unique_ptr<render::Sampler>> _cache;
+};
+
+/// 单 stage 编译模块的 key。
+///
+/// Defines 是根据 ShaderKeywordGroupDesc::Stages 投影到当前 Stage 后的集合。这样
+/// 只影响 pixel 的 keyword 不会导致 vertex module 被重复编译。Stage 必须是单个
+/// stage bit，而不是 Graphics 等组合值。
+struct ShaderModuleKey {
+    Guid Shader{};
+    vector<string> Defines{};
+    uint32_t PassIndex{0};
+    render::ShaderStage Stage{render::ShaderStage::UNKNOWN};
+
+    friend bool operator==(const ShaderModuleKey&, const ShaderModuleKey&) noexcept;
+};
+
+}  // namespace radray
+
+namespace std {
+
+template <>
+struct hash<radray::ShaderModuleKey> {
+    size_t operator()(const radray::ShaderModuleKey& key) const noexcept;
+};
+
+}  // namespace std
+
+namespace radray {
+
+/// 按 ShaderAsset/pass/stage/defines 编译并缓存单 stage 的 GPU shader module。
+///
+/// Device、Dxc 和 AssetManager 均为非拥有依赖，必须比缓存活得更久。缓存只在 miss
+/// 时访问 AssetManager；ShaderAsset 必须已经 Ready。返回的裸指针在 Clear 或缓存
+/// 析构前保持稳定。该类型与 AssetManager 一样只允许在其所属线程调用。
+class ShaderModuleCache {
+public:
+    ShaderModuleCache(
+        render::Device* device,
+        render::Dxc* dxc,
+        AssetManager* assetManager,
+        string shaderSourceRoot) noexcept;
+    ShaderModuleCache(const ShaderModuleCache&) = delete;
+    ShaderModuleCache(ShaderModuleCache&&) = delete;
+    ShaderModuleCache& operator=(const ShaderModuleCache&) = delete;
+    ShaderModuleCache& operator=(ShaderModuleCache&&) = delete;
+    ~ShaderModuleCache() noexcept;
+
+    /// 命中时返回已有 module；miss 时同步编译并创建。失败不写入缓存。
+    Nullable<render::Shader*> GetOrCreate(const ShaderModuleKey& key) noexcept;
+
+    void Clear() noexcept;
+    size_t GetCount() const noexcept { return _cache.size(); }
+
+private:
+    render::Device* _device{nullptr};
+    render::Dxc* _dxc{nullptr};
+    AssetManager* _assetManager{nullptr};
+    string _shaderSourceRoot;
+    unordered_map<ShaderModuleKey, unique_ptr<render::Shader>> _cache;
 };
 
 }  // namespace radray

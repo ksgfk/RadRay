@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <functional>
 #include <limits>
 #include <variant>
 #include <optional>
@@ -774,10 +775,6 @@ struct SamplerDescriptor {
 
     friend bool operator==(const SamplerDescriptor& lhs, const SamplerDescriptor& rhs) noexcept = default;
     friend bool operator!=(const SamplerDescriptor& lhs, const SamplerDescriptor& rhs) noexcept = default;
-};
-
-struct SamplerDescriptorHasher {
-    size_t operator()(const SamplerDescriptor& desc) const noexcept;
 };
 
 struct CommandQueueSubmitDescriptor {
@@ -1986,3 +1983,12 @@ std::string_view format_as(BindlessSlotType v) noexcept;
 std::string_view format_as(SwapChainStatus v) noexcept;
 
 }  // namespace radray::render
+
+namespace std {
+
+template <>
+struct hash<radray::render::SamplerDescriptor> {
+    size_t operator()(const radray::render::SamplerDescriptor& desc) const noexcept;
+};
+
+}  // namespace std

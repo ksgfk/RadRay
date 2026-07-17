@@ -61,11 +61,14 @@ using ShaderPassProgramDesc = std::variant<ShaderGraphicsPassDesc, ShaderCompute
 
 struct ShaderPassDesc {
     string Name;
-    /// 相对于 shader source root 的 UTF-8 路径，使用 '/' 分隔。
+    /// UTF-8 相对路径
     string SourcePath;
+    render::HlslShaderModel SM{render::HlslShaderModel::SM60};
     vector<ShaderKeywordGroupDesc> KeywordGroups;
     vector<ShaderTagDesc> Tags;
     ShaderPassProgramDesc Program;
+    bool IsOptimize{true};
+    bool EnableUnbounded{true};
 };
 
 /// Shader 的纯 CPU 声明资产。Pass 顺序在资产生命周期内保持稳定，可作为后续 variant/PSO

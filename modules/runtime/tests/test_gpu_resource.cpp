@@ -1,9 +1,17 @@
 #include <gtest/gtest.h>
 
 #include <cstring>
+#include <filesystem>
 
+#include <radray/file.h>
 #include <radray/runtime/gpu_resource.h>
+#include <radray/runtime/asset_manager.h>
+#include <radray/runtime/shader_asset.h>
 #include <radray/runtime/texture_asset.h>
+
+#if defined(RADRAY_ENABLE_DXC)
+#include <radray/render/shader_compiler/dxc.h>
+#endif
 
 using namespace radray;
 
@@ -63,11 +71,45 @@ private:
     bool _valid{true};
 };
 
+class FakeShader final : public render::Shader {
+public:
+    FakeShader(const render::ShaderDescriptor& desc, uint32_t* destroyCount)
+        : _stages(desc.Stages), _reflection(desc.Reflection), _destroyCount(destroyCount) {}
+
+    ~FakeShader() noexcept override { Destroy(); }
+
+    bool IsValid() const noexcept override { return _valid; }
+
+    void Destroy() noexcept override {
+        if (!_valid) {
+            return;
+        }
+        _valid = false;
+        _stages = render::ShaderStage::UNKNOWN;
+        _reflection.reset();
+        if (_destroyCount != nullptr) {
+            ++*_destroyCount;
+        }
+    }
+
+    render::ShaderStages GetStages() const noexcept override { return _stages; }
+
+    Nullable<const render::ShaderReflectionDesc*> GetReflection() const noexcept override {
+        return _reflection.has_value() ? &*_reflection : nullptr;
+    }
+
+private:
+    render::ShaderStages _stages;
+    std::optional<render::ShaderReflectionDesc> _reflection;
+    uint32_t* _destroyCount{nullptr};
+    bool _valid{true};
+};
+
 class FakeDevice final : public render::Device {
 public:
     bool IsValid() const noexcept override { return true; }
     void Destroy() noexcept override {}
-    render::RenderBackend GetBackend() noexcept override { return render::RenderBackend::Vulkan; }
+    render::RenderBackend GetBackend() noexcept override { return Backend; }
     render::DeviceDetail GetDetail() const noexcept override { return {}; }
 
     Nullable<render::CommandQueue*> GetCommandQueue(render::QueueType, uint32_t) noexcept override { return nullptr; }
@@ -90,7 +132,18 @@ public:
     Nullable<unique_ptr<render::TextureView>> CreateTextureView(const render::TextureViewDescriptor&) noexcept override { return nullptr; }
     Nullable<unique_ptr<render::RenderPass>> CreateRenderPass(const render::RenderPassDescriptor&) noexcept override { return nullptr; }
     Nullable<unique_ptr<render::Framebuffer>> CreateFramebuffer(const render::FramebufferDescriptor&) noexcept override { return nullptr; }
-    Nullable<unique_ptr<render::Shader>> CreateShader(const render::ShaderDescriptor&) noexcept override { return nullptr; }
+    Nullable<unique_ptr<render::Shader>> CreateShader(const render::ShaderDescriptor& desc) noexcept override {
+        ++ShaderCreateCount;
+        LastShaderCategory = desc.Category;
+        LastShaderStages = desc.Stages;
+        LastShaderSourceSize = desc.Source.size();
+        LastShaderHasReflection = desc.Reflection.has_value();
+        if (!AllowShaderCreation) {
+            return nullptr;
+        }
+        unique_ptr<render::Shader> shader = make_unique<FakeShader>(desc, &DestroyedShaderCount);
+        return shader;
+    }
     Nullable<unique_ptr<render::PipelineLayout>> CreatePipelineLayout(const render::PipelineLayoutDescriptor&) noexcept override { return nullptr; }
     Nullable<unique_ptr<render::DescriptorPool>> CreateDescriptorPool(const render::DescriptorPoolDescriptor&) noexcept override { return nullptr; }
     Nullable<unique_ptr<render::BindingGroup>> CreateBindingGroup(
@@ -128,7 +181,15 @@ public:
 
     vector<render::BufferDescriptor> BufferDescriptors;
     vector<render::MappedBufferRange> FlushedRanges;
+    render::RenderBackend Backend{render::RenderBackend::Vulkan};
+    render::ShaderBlobCategory LastShaderCategory{render::ShaderBlobCategory::DXIL};
+    render::ShaderStages LastShaderStages{render::ShaderStage::UNKNOWN};
+    size_t LastShaderSourceSize{0};
+    uint32_t ShaderCreateCount{0};
+    uint32_t DestroyedShaderCount{0};
     uint32_t DestroyedBufferCount{0};
+    bool LastShaderHasReflection{false};
+    bool AllowShaderCreation{false};
 };
 
 DynamicCBufferArena MakeArena(
@@ -149,7 +210,7 @@ DynamicCBufferArena MakeArena(
 
 }  // namespace
 
-TEST(CacheKeyHasherTest, SamplerDescriptorUsesFieldValueSemantics) {
+TEST(CacheKeyHashTest, SamplerDescriptorUsesFieldValueSemantics) {
     render::SamplerDescriptor firstDesc{
         .AddressS = render::AddressMode::Repeat,
         .AddressT = render::AddressMode::Mirror,
@@ -166,17 +227,17 @@ TEST(CacheKeyHasherTest, SamplerDescriptorUsesFieldValueSemantics) {
 
     ASSERT_EQ(firstDesc, secondDesc);
     EXPECT_EQ(
-        render::SamplerDescriptorHasher{}(firstDesc),
-        render::SamplerDescriptorHasher{}(secondDesc));
+        std::hash<render::SamplerDescriptor>{}(firstDesc),
+        std::hash<render::SamplerDescriptor>{}(secondDesc));
 
-    unordered_map<render::SamplerDescriptor, int, render::SamplerDescriptorHasher> cache;
+    unordered_map<render::SamplerDescriptor, int> cache;
     cache.emplace(firstDesc, 1);
     cache.insert_or_assign(secondDesc, 2);
     EXPECT_EQ(cache.size(), 1u);
     EXPECT_EQ(cache.at(firstDesc), 2);
 }
 
-TEST(CacheKeyHasherTest, TextureSubViewDescUsesFieldValueSemantics) {
+TEST(CacheKeyHashTest, TextureSubViewDescUsesFieldValueSemantics) {
     const TextureSubViewDesc first{
         .Dim = render::TextureDimension::Cube,
         .Format = render::TextureFormat::RGBA8_UNORM,
@@ -188,14 +249,160 @@ TEST(CacheKeyHasherTest, TextureSubViewDescUsesFieldValueSemantics) {
     const TextureSubViewDesc second = first;
 
     ASSERT_EQ(first, second);
-    EXPECT_EQ(TextureSubViewDescHasher{}(first), TextureSubViewDescHasher{}(second));
+    EXPECT_EQ(
+        std::hash<TextureSubViewDesc>{}(first),
+        std::hash<TextureSubViewDesc>{}(second));
 
-    unordered_map<TextureSubViewDesc, int, TextureSubViewDescHasher> cache;
+    unordered_map<TextureSubViewDesc, int> cache;
     cache.emplace(first, 1);
     cache.insert_or_assign(second, 2);
     EXPECT_EQ(cache.size(), 1u);
     EXPECT_EQ(cache.at(first), 2);
 }
+
+TEST(CacheKeyHashTest, ShaderModuleKeyUsesFieldValueSemantics) {
+    const Guid shaderId = Guid::NewGuid();
+    const ShaderModuleKey first{
+        .Shader = shaderId,
+        .Defines = {"ALPHA_TEST=1", "USE_NORMAL_MAP=1"},
+        .PassIndex = 2,
+        .Stage = render::ShaderStage::Pixel};
+    const ShaderModuleKey second = first;
+
+    ASSERT_EQ(first, second);
+    EXPECT_EQ(std::hash<ShaderModuleKey>{}(first), std::hash<ShaderModuleKey>{}(second));
+
+    unordered_map<ShaderModuleKey, int> cache;
+    cache.emplace(first, 1);
+    cache.insert_or_assign(second, 2);
+    EXPECT_EQ(cache.size(), 1u);
+    EXPECT_EQ(cache.at(first), 2);
+}
+
+#if defined(RADRAY_ENABLE_DXC)
+
+TEST(ShaderModuleCacheTest, CompilesNormalizesAndCachesReadyShaderAsset) {
+    auto dxcOpt = render::CreateDxc();
+    if (!dxcOpt.HasValue()) {
+        GTEST_SKIP() << "DXC runtime is unavailable";
+    }
+    shared_ptr<render::Dxc> dxc = dxcOpt.Release();
+
+    const std::filesystem::path shaderRoot = GetExecutableDirectory() / "shaderlib";
+    if (!std::filesystem::is_regular_file(shaderRoot / "forward_pipeline/error_pass.hlsl")) {
+        GTEST_SKIP() << "deployed shaderlib is unavailable";
+    }
+
+    const AssetId shaderId = Guid::NewGuid();
+    AssetManager assets;
+    ShaderPassDesc pass{};
+    pass.Name = "CacheTest";
+    pass.SourcePath = "forward_pipeline/error_pass.hlsl";
+    pass.SM = render::HlslShaderModel::SM66;
+    pass.IsOptimize = false;
+    pass.EnableUnbounded = false;
+    pass.KeywordGroups = {
+        ShaderKeywordGroupDesc{
+            .Alternatives = {"", "CACHE_A=1"},
+            .Stages = render::ShaderStage::Vertex},
+        ShaderKeywordGroupDesc{
+            .Alternatives = {"", "CACHE_B=1"},
+            .Stages = render::ShaderStage::Vertex}};
+    std::get<ShaderGraphicsPassDesc>(pass.Program).VertexEntry = "VSMain";
+    StreamingAssetRef<ShaderAsset> shaderAsset = assets.AddReady(
+        shaderId,
+        make_unique<ShaderAsset>(vector<ShaderPassDesc>{std::move(pass)}));
+    ASSERT_TRUE(shaderAsset.IsReady());
+
+    FakeDevice device;
+    device.Backend = render::RenderBackend::D3D12;
+    device.AllowShaderCreation = true;
+    ShaderModuleCache cache{&device, dxc.get(), &assets, shaderRoot.string()};
+
+    const ShaderModuleKey unnormalized{
+        .Shader = shaderId,
+        .Defines = {"CACHE_B=1", "", "CACHE_A=1", "CACHE_B=1"},
+        .PassIndex = 0,
+        .Stage = render::ShaderStage::Vertex};
+    auto first = cache.GetOrCreate(unnormalized);
+    ASSERT_TRUE(first.HasValue());
+
+    const ShaderModuleKey normalized{
+        .Shader = shaderId,
+        .Defines = {"CACHE_A=1", "CACHE_B=1"},
+        .PassIndex = 0,
+        .Stage = render::ShaderStage::Vertex};
+    auto second = cache.GetOrCreate(normalized);
+    ASSERT_TRUE(second.HasValue());
+
+    EXPECT_EQ(first.Get(), second.Get());
+    EXPECT_EQ(cache.GetCount(), 1u);
+    EXPECT_EQ(device.ShaderCreateCount, 1u);
+    EXPECT_EQ(device.LastShaderCategory, render::ShaderBlobCategory::DXIL);
+    EXPECT_EQ(device.LastShaderStages, render::ShaderStage::Vertex);
+    EXPECT_GT(device.LastShaderSourceSize, 0u);
+    EXPECT_TRUE(device.LastShaderHasReflection);
+
+    cache.Clear();
+    EXPECT_EQ(cache.GetCount(), 0u);
+    EXPECT_EQ(device.DestroyedShaderCount, 1u);
+
+#if defined(RADRAY_ENABLE_SPIRV_CROSS)
+    device.Backend = render::RenderBackend::Vulkan;
+    ShaderModuleCache spirvCache{&device, dxc.get(), &assets, shaderRoot.string()};
+    auto spirv = spirvCache.GetOrCreate(normalized);
+    ASSERT_TRUE(spirv.HasValue());
+    EXPECT_EQ(spirvCache.GetCount(), 1u);
+    EXPECT_EQ(device.ShaderCreateCount, 2u);
+    EXPECT_EQ(device.LastShaderCategory, render::ShaderBlobCategory::SPIRV);
+    EXPECT_EQ(device.LastShaderStages, render::ShaderStage::Vertex);
+    EXPECT_TRUE(device.LastShaderHasReflection);
+
+    spirvCache.Clear();
+    EXPECT_EQ(device.DestroyedShaderCount, 2u);
+#endif
+}
+
+TEST(ShaderModuleCacheTest, ResolvesSourceRelativeToExecutableDirectory) {
+    auto dxcOpt = render::CreateDxc();
+    if (!dxcOpt.HasValue()) {
+        GTEST_SKIP() << "DXC runtime is unavailable";
+    }
+    shared_ptr<render::Dxc> dxc = dxcOpt.Release();
+
+    const std::filesystem::path executableDirectory = GetExecutableDirectory();
+    const std::filesystem::path shaderRoot = executableDirectory / "shaderlib";
+    if (!std::filesystem::is_regular_file(shaderRoot / "forward_pipeline/error_pass.hlsl")) {
+        GTEST_SKIP() << "deployed shaderlib is unavailable";
+    }
+
+    const AssetId shaderId = Guid::NewGuid();
+    AssetManager assets;
+    ShaderPassDesc pass{};
+    pass.Name = "ExecutableRelativePathTest";
+    pass.SourcePath = "shaderlib/forward_pipeline/error_pass.hlsl";
+    std::get<ShaderGraphicsPassDesc>(pass.Program).VertexEntry = "VSMain";
+    StreamingAssetRef<ShaderAsset> shaderAsset = assets.AddReady(
+        shaderId,
+        make_unique<ShaderAsset>(vector<ShaderPassDesc>{std::move(pass)}));
+    ASSERT_TRUE(shaderAsset.IsReady());
+
+    FakeDevice device;
+    device.Backend = render::RenderBackend::D3D12;
+    device.AllowShaderCreation = true;
+    ShaderModuleCache cache{&device, dxc.get(), &assets, shaderRoot.string()};
+
+    auto shader = cache.GetOrCreate(ShaderModuleKey{
+        .Shader = shaderId,
+        .PassIndex = 0,
+        .Stage = render::ShaderStage::Vertex});
+
+    ASSERT_TRUE(shader.HasValue());
+    EXPECT_EQ(cache.GetCount(), 1u);
+    EXPECT_EQ(device.ShaderCreateCount, 1u);
+}
+
+#endif
 
 TEST(MappedUploadPageTest, CommitRecordsOnlyActualPrefix) {
     FakeDevice device;

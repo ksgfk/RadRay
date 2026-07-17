@@ -42,9 +42,18 @@ struct TextureSubViewDesc {
     }
 };
 
-struct TextureSubViewDescHasher {
-    size_t operator()(const TextureSubViewDesc& desc) const noexcept;
+}  // namespace radray
+
+namespace std {
+
+template <>
+struct hash<radray::TextureSubViewDesc> {
+    size_t operator()(const radray::TextureSubViewDesc& desc) const noexcept;
 };
+
+}  // namespace std
+
+namespace radray {
 
 /// GPU 贴图资产。对应 UE5 的 UTexture2D(最小化):持有已上传的 device-local
 /// render::Texture + 一个默认全量 SRV(render::TextureView), 并内建一个 view 缓存
@@ -86,7 +95,7 @@ private:
     string _name;
     unique_ptr<render::Texture> _texture;
     unique_ptr<render::TextureView> _srv;
-    unordered_map<TextureSubViewDesc, unique_ptr<render::TextureView>, TextureSubViewDescHasher> _viewCache;
+    unordered_map<TextureSubViewDesc, unique_ptr<render::TextureView>> _viewCache;
 };
 
 struct TextureAssetLoadOptions {

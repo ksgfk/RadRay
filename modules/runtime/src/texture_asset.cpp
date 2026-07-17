@@ -6,6 +6,18 @@
 #include <radray/runtime/gpu_system.h>
 #include <radray/runtime/image_asset.h>
 
+std::size_t std::hash<radray::TextureSubViewDesc>::operator()(
+    const radray::TextureSubViewDesc& desc) const noexcept {
+    radray::HashCode hash;
+    hash.Add(static_cast<radray::int32_t>(desc.Dim));
+    hash.Add(static_cast<radray::int32_t>(desc.Format));
+    hash.Add(desc.Range.BaseArrayLayer);
+    hash.Add(desc.Range.ArrayLayerCount);
+    hash.Add(desc.Range.BaseMipLevel);
+    hash.Add(desc.Range.MipLevelCount);
+    return hash.ToHashCode();
+}
+
 namespace radray {
 namespace {
 
@@ -126,17 +138,6 @@ AssetLoadTask LoadTextureFromMemoryTask(
 }
 
 }  // namespace
-
-size_t TextureSubViewDescHasher::operator()(const TextureSubViewDesc& desc) const noexcept {
-    HashCode hash;
-    hash.Add(static_cast<int32_t>(desc.Dim));
-    hash.Add(static_cast<int32_t>(desc.Format));
-    hash.Add(desc.Range.BaseArrayLayer);
-    hash.Add(desc.Range.ArrayLayerCount);
-    hash.Add(desc.Range.BaseMipLevel);
-    hash.Add(desc.Range.MipLevelCount);
-    return hash.ToHashCode();
-}
 
 TextureAsset::TextureAsset(
     render::Device* device,

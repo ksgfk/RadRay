@@ -45,6 +45,7 @@ public:
     /// 当前管线的标准材质工厂 (把中性材质描述翻译成本管线材质)。无管线/不支持时返回 null。
     Nullable<IStandardMaterialFactory*> GetStandardMaterialFactory() noexcept;
     SamplerCache* GetSamplerCache() const noexcept { return _samplerCache.get(); }
+    ShaderModuleCache* GetShaderModuleCache() const noexcept { return _shaderModuleCache.get(); }
     /// shader 编译默认 include 根目录 (<exe>/shaderlib)。供构建 ShaderPassDesc::IncludeDirs。
     const string& GetShaderIncludeRoot() const noexcept { return _shaderIncludeRoot; }
     /// 预编译 shader 烘焙产物根目录 (<exe>/shadercache)。DXC 缺失时预编译缓存从此加载。
@@ -58,6 +59,7 @@ private:
     unique_ptr<RenderPipeline> _pipeline;
     vector<unique_ptr<Scene>> _scenes;
     shared_ptr<render::Dxc> _dxc;
+    unique_ptr<ShaderModuleCache> _shaderModuleCache;
     unique_ptr<SamplerCache> _samplerCache;
     string _shaderIncludeRoot;
     string _shaderBakeRoot;
