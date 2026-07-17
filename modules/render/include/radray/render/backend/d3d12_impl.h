@@ -322,6 +322,10 @@ public:
 
     DeviceDetail GetDetail() const noexcept override;
 
+    bool InitializeNativeGraphicsPipelineCache(std::span<const byte> initialData) noexcept override;
+
+    std::optional<vector<byte>> SerializeNativeGraphicsPipelineCache() noexcept override;
+
     Nullable<CommandQueue*> GetCommandQueue(QueueType type, uint32_t slot) noexcept override;
 
     Nullable<unique_ptr<CommandBuffer>> CreateCommandBuffer(CommandQueue* queue) noexcept override;
@@ -387,6 +391,9 @@ public:
     ComPtr<ID3D12CommandSignature> _drawIndirectSignature;
     ComPtr<ID3D12CommandSignature> _drawIndexedIndirectSignature;
     ComPtr<ID3D12CommandSignature> _dispatchIndirectSignature;
+    ComPtr<ID3D12PipelineLibrary1> _pipelineLibrary;
+    // CreatePipelineLibrary retains its input pointer for the library lifetime.
+    vector<byte> _pipelineLibraryInitialData;
     std::array<vector<unique_ptr<CmdQueueD3D12>>, (size_t)QueueType::MAX_COUNT> _queues;
     unique_ptr<CpuDescriptorAllocator> _cpuResAlloc;
     unique_ptr<CpuDescriptorAllocator> _cpuRtvAlloc;

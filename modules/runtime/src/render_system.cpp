@@ -22,7 +22,8 @@ RenderSystem::RenderSystem(Application* app) noexcept
 
 RenderSystem::~RenderSystem() noexcept {
     ReleaseAllScenes();
-    _pipeline.reset();  // 管线/PSO 先释放，再释放其引用的 shader 和 sampler。
+    _pipeline.reset();
+    _graphicsPipelineCache.reset();  // PSO/layout 先释放，再释放其引用的 shader。
     _shaderModuleCache.reset();
     _samplerCache.reset();
     _dxc.reset();
@@ -47,21 +48,26 @@ void RenderSystem::OnInitialize() {
     auto dxcOpt = render::CreateDxc();
     if (!dxcOpt.HasValue()) {
         RADRAY_ERR_LOG("RenderSystem::OnInitialize: CreateDxc failed");
-        return;
+    } else {
+        _dxc = dxcOpt.Release();
     }
-    _dxc = dxcOpt.Release();
+#endif
 
     AssetManager* assetManager = _app->GetAssetManager();
     if (assetManager == nullptr) {
         RADRAY_ERR_LOG("RenderSystem::OnInitialize: AssetManager is null");
-        return;
     }
+    const std::filesystem::path& cachePath = _app->GetRenderCachePath();
     _shaderModuleCache = make_unique<ShaderModuleCache>(
         device,
         _dxc.get(),
         assetManager,
-        _shaderIncludeRoot);
-#endif
+        _shaderIncludeRoot,
+        cachePath);
+    _graphicsPipelineCache = make_unique<GraphicsPipelineCache>(
+        device,
+        _shaderModuleCache.get(),
+        cachePath);
 }
 
 Nullable<IStandardMaterialFactory*> RenderSystem::GetStandardMaterialFactory() noexcept {

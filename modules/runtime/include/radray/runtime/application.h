@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <concepts>
+#include <filesystem>
 #include <string_view>
 
 #include <radray/coroutine.h>
@@ -150,6 +151,9 @@ struct ApplicationRuntimeDescriptor {
     bool Multithreaded{false};
     std::string_view AppName{"RadRay Application"};
     std::string_view EngineName{"RadRay"};
+    /// Explicit writable directory for persistent shader and graphics pipeline caches.
+    /// Empty keeps both caches in memory only.
+    std::filesystem::path RenderCachePath{};
 
     // —— 主窗口 ——
     std::string_view WindowTitle{"RadRay Application"};
@@ -209,6 +213,7 @@ public:
     /// 兼容性便捷入口；device 的所有权与生命周期由 GpuSystem 管理。
     render::Device* GetDevice() noexcept;
     const render::Device* GetDevice() const noexcept;
+    const std::filesystem::path& GetRenderCachePath() const noexcept { return _renderCachePath; }
 
     // —— runner / 子系统调用的框架方法(已固化帧序,非游戏 override 点)——
     AppUpdateResult Update(const AppUpdateContext& ctx);
@@ -260,6 +265,7 @@ private:
     unique_ptr<World> _world;
     vector<unique_ptr<AppSubsystem>> _subsystems;
     ApplicationScheduler _scheduler;
+    std::filesystem::path _renderCachePath;
     bool _multithreaded{false};
 };
 

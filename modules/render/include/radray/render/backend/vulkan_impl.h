@@ -139,6 +139,10 @@ public:
 
     DeviceDetail GetDetail() const noexcept override;
 
+    bool InitializeNativeGraphicsPipelineCache(std::span<const byte> initialData) noexcept override;
+
+    std::optional<vector<byte>> SerializeNativeGraphicsPipelineCache() noexcept override;
+
     Nullable<CommandQueue*> GetCommandQueue(QueueType type, uint32_t slot) noexcept override;
 
     Nullable<unique_ptr<CommandBuffer>> CreateCommandBuffer(CommandQueue* queue) noexcept override;
@@ -217,6 +221,7 @@ public:
     InstanceVulkanImpl* _instance;
     VkPhysicalDevice _physicalDevice;
     VkDevice _device;
+    VkPipelineCache _pipelineCache{VK_NULL_HANDLE};
     std::unique_ptr<VMA> _vma;
     std::array<vector<unique_ptr<QueueVulkan>>, (size_t)QueueType::MAX_COUNT> _queues;
     std::unique_ptr<DescriptorSetAllocatorVulkan> _descSetAlloc;

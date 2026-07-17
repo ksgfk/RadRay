@@ -854,6 +854,8 @@ struct SubresourceRange {
     static constexpr SubresourceRange AllSub() noexcept {
         return SubresourceRange{0, SubresourceRange::All, 0, SubresourceRange::All};
     }
+
+    friend bool operator==(const SubresourceRange&, const SubresourceRange&) noexcept = default;
 };
 
 struct BarrierTextureDescriptor {
@@ -1264,6 +1266,8 @@ struct GraphicsPipelineStateDescriptor {
     MultiSampleState MultiSample{};
     std::span<const ColorTargetState> ColorTargets{};
     RenderPass* CompatibleRenderPass{nullptr};
+    /// Optional stable application key used only by backend-native pipeline caches.
+    std::string_view NativeCacheKey{};
 };
 
 struct ComputePipelineStateDescriptor {
@@ -1465,6 +1469,17 @@ public:
     virtual RenderBackend GetBackend() noexcept = 0;
 
     virtual DeviceDetail GetDetail() const noexcept = 0;
+
+    /// Initializes the backend-native graphics pipeline cache. Unsupported backends retain the
+    /// normal PSO creation path and accept only an empty initial blob.
+    virtual bool InitializeNativeGraphicsPipelineCache(std::span<const byte> initialData) noexcept {
+        return initialData.empty();
+    }
+
+    /// Returns the opaque backend-native cache blob. Unsupported backends return an empty blob.
+    virtual std::optional<vector<byte>> SerializeNativeGraphicsPipelineCache() noexcept {
+        return vector<byte>{};
+    }
 
     virtual Nullable<CommandQueue*> GetCommandQueue(QueueType type, uint32_t slot = 0) noexcept = 0;
 

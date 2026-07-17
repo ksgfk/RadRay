@@ -981,6 +981,7 @@ int Application::Shutdown(const AppShutdownContext& ctx) {
 
 void Application::InitializeRuntime(const ApplicationRuntimeDescriptor& desc) {
     _multithreaded = desc.Multithreaded;
+    _renderCachePath = desc.RenderCachePath;
 
     // ════════════════════════════════════════════════════════════════
     //  phase 1:实例化全部核心服务(构造函数只做平凡/自身初始化,不碰兄弟系统)。

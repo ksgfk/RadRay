@@ -1,10 +1,14 @@
 #include <gtest/gtest.h>
 
+#include <bit>
 #include <cstring>
 #include <filesystem>
 
+#include <fmt/format.h>
+
 #include <radray/file.h>
 #include <radray/runtime/gpu_resource.h>
+#include <radray/runtime/pipeline_cache.h>
 #include <radray/runtime/asset_manager.h>
 #include <radray/runtime/shader_asset.h>
 #include <radray/runtime/texture_asset.h>
@@ -105,12 +109,106 @@ private:
     bool _valid{true};
 };
 
+class FakePipelineLayout final : public render::PipelineLayout {
+public:
+    FakePipelineLayout(uint32_t* destroyCount, vector<string>* destroyOrder)
+        : _destroyCount(destroyCount), _destroyOrder(destroyOrder) {}
+
+    ~FakePipelineLayout() noexcept override { Destroy(); }
+
+    bool IsValid() const noexcept override { return _valid; }
+
+    void Destroy() noexcept override {
+        if (!_valid) {
+            return;
+        }
+        _valid = false;
+        if (_destroyCount != nullptr) {
+            ++*_destroyCount;
+        }
+        if (_destroyOrder != nullptr) {
+            _destroyOrder->emplace_back("layout");
+        }
+    }
+
+    void SetDebugName(std::string_view name) noexcept override { Name = name; }
+    vector<render::ShaderParameterInfo> GetParameters() const noexcept override { return {}; }
+    Nullable<const render::ShaderParameterInfo*> FindParameter(std::string_view) const noexcept override { return nullptr; }
+    std::optional<render::ShaderBindingLocation> FindBindingLocation(std::string_view) const noexcept override {
+        return std::nullopt;
+    }
+    vector<render::BindingGroupLayout> GetBindingGroupLayouts() const noexcept override { return {}; }
+    vector<render::PushConstantRange> GetPushConstantRanges() const noexcept override { return {}; }
+
+    string Name;
+
+private:
+    uint32_t* _destroyCount{nullptr};
+    vector<string>* _destroyOrder{nullptr};
+    bool _valid{true};
+};
+
+class FakeGraphicsPso final : public render::GraphicsPipelineState {
+public:
+    FakeGraphicsPso(uint32_t* destroyCount, vector<string>* destroyOrder)
+        : _destroyCount(destroyCount), _destroyOrder(destroyOrder) {}
+
+    ~FakeGraphicsPso() noexcept override { Destroy(); }
+
+    bool IsValid() const noexcept override { return _valid; }
+
+    void Destroy() noexcept override {
+        if (!_valid) {
+            return;
+        }
+        _valid = false;
+        if (_destroyCount != nullptr) {
+            ++*_destroyCount;
+        }
+        if (_destroyOrder != nullptr) {
+            _destroyOrder->emplace_back("pso");
+        }
+    }
+
+    void SetDebugName(std::string_view name) noexcept override { Name = name; }
+
+    string Name;
+
+private:
+    uint32_t* _destroyCount{nullptr};
+    vector<string>* _destroyOrder{nullptr};
+    bool _valid{true};
+};
+
+class FakeRenderPass final : public render::RenderPass {
+public:
+    explicit FakeRenderPass(const render::RenderPassDescriptor& desc)
+        : RenderPass(desc) {}
+
+    bool IsValid() const noexcept override { return _valid; }
+    void Destroy() noexcept override { _valid = false; }
+    void SetDebugName(std::string_view name) noexcept override { Name = name; }
+
+    string Name;
+
+private:
+    bool _valid{true};
+};
+
 class FakeDevice final : public render::Device {
 public:
     bool IsValid() const noexcept override { return true; }
     void Destroy() noexcept override {}
     render::RenderBackend GetBackend() noexcept override { return Backend; }
     render::DeviceDetail GetDetail() const noexcept override { return {}; }
+    bool InitializeNativeGraphicsPipelineCache(std::span<const byte> initialData) noexcept override {
+        ++NativeCacheInitializeCount;
+        InitialNativeCacheData.assign(initialData.begin(), initialData.end());
+        return AllowNativeCacheInitialization;
+    }
+    std::optional<vector<byte>> SerializeNativeGraphicsPipelineCache() noexcept override {
+        return NativeCacheData;
+    }
 
     Nullable<render::CommandQueue*> GetCommandQueue(render::QueueType, uint32_t) noexcept override { return nullptr; }
     Nullable<unique_ptr<render::CommandBuffer>> CreateCommandBuffer(render::CommandQueue*) noexcept override { return nullptr; }
@@ -144,7 +242,16 @@ public:
         unique_ptr<render::Shader> shader = make_unique<FakeShader>(desc, &DestroyedShaderCount);
         return shader;
     }
-    Nullable<unique_ptr<render::PipelineLayout>> CreatePipelineLayout(const render::PipelineLayoutDescriptor&) noexcept override { return nullptr; }
+    Nullable<unique_ptr<render::PipelineLayout>> CreatePipelineLayout(
+        const render::PipelineLayoutDescriptor&) noexcept override {
+        ++PipelineLayoutCreateCount;
+        if (!AllowPipelineLayoutCreation) {
+            return nullptr;
+        }
+        unique_ptr<render::PipelineLayout> layout =
+            make_unique<FakePipelineLayout>(&DestroyedPipelineLayoutCount, &DestroyedPipelineObjectOrder);
+        return layout;
+    }
     Nullable<unique_ptr<render::DescriptorPool>> CreateDescriptorPool(const render::DescriptorPoolDescriptor&) noexcept override { return nullptr; }
     Nullable<unique_ptr<render::BindingGroup>> CreateBindingGroup(
         render::DescriptorPool*,
@@ -153,8 +260,15 @@ public:
         return nullptr;
     }
     Nullable<unique_ptr<render::GraphicsPipelineState>> CreateGraphicsPipelineState(
-        const render::GraphicsPipelineStateDescriptor&) noexcept override {
-        return nullptr;
+        const render::GraphicsPipelineStateDescriptor& desc) noexcept override {
+        ++GraphicsPsoCreateCount;
+        LastNativeCacheKey = desc.NativeCacheKey;
+        if (!AllowGraphicsPsoCreation) {
+            return nullptr;
+        }
+        unique_ptr<render::GraphicsPipelineState> pso =
+            make_unique<FakeGraphicsPso>(&DestroyedGraphicsPsoCount, &DestroyedPipelineObjectOrder);
+        return pso;
     }
     Nullable<unique_ptr<render::ComputePipelineState>> CreateComputePipelineState(
         const render::ComputePipelineStateDescriptor&) noexcept override {
@@ -181,15 +295,27 @@ public:
 
     vector<render::BufferDescriptor> BufferDescriptors;
     vector<render::MappedBufferRange> FlushedRanges;
+    vector<byte> InitialNativeCacheData;
+    vector<byte> NativeCacheData;
+    string LastNativeCacheKey;
     render::RenderBackend Backend{render::RenderBackend::Vulkan};
     render::ShaderBlobCategory LastShaderCategory{render::ShaderBlobCategory::DXIL};
     render::ShaderStages LastShaderStages{render::ShaderStage::UNKNOWN};
     size_t LastShaderSourceSize{0};
     uint32_t ShaderCreateCount{0};
+    uint32_t PipelineLayoutCreateCount{0};
+    uint32_t GraphicsPsoCreateCount{0};
+    uint32_t NativeCacheInitializeCount{0};
     uint32_t DestroyedShaderCount{0};
+    uint32_t DestroyedPipelineLayoutCount{0};
+    uint32_t DestroyedGraphicsPsoCount{0};
     uint32_t DestroyedBufferCount{0};
+    vector<string> DestroyedPipelineObjectOrder;
     bool LastShaderHasReflection{false};
     bool AllowShaderCreation{false};
+    bool AllowPipelineLayoutCreation{false};
+    bool AllowGraphicsPsoCreation{false};
+    bool AllowNativeCacheInitialization{true};
 };
 
 DynamicCBufferArena MakeArena(
@@ -261,7 +387,18 @@ TEST(CacheKeyHashTest, TextureSubViewDescUsesFieldValueSemantics) {
 }
 
 TEST(CacheKeyHashTest, ShaderModuleKeyUsesFieldValueSemantics) {
-    const Guid shaderId = Guid::NewGuid();
+    const Guid shaderId{
+        0x12345678,
+        0x9abc,
+        0xdef0,
+        0x12,
+        0x34,
+        0x56,
+        0x78,
+        0x9a,
+        0xbc,
+        0xde,
+        0xf0};
     const ShaderModuleKey first{
         .Shader = shaderId,
         .Defines = {"ALPHA_TEST=1", "USE_NORMAL_MAP=1"},
@@ -277,6 +414,324 @@ TEST(CacheKeyHashTest, ShaderModuleKeyUsesFieldValueSemantics) {
     cache.insert_or_assign(second, 2);
     EXPECT_EQ(cache.size(), 1u);
     EXPECT_EQ(cache.at(first), 2);
+
+    const PipelineCacheHash stableHash = GetPipelineCacheHash(first);
+    EXPECT_EQ(stableHash.Low, 15788934165560509241ull);
+    EXPECT_EQ(stableHash.High, 7141635465429188542ull);
+}
+
+TEST(CacheKeyHashTest, PipelineKeysUseOwnedFieldValueSemantics) {
+    const ShaderModuleKey shader{
+        .Shader = Guid{
+            0x12345678,
+            0x9abc,
+            0xdef0,
+            0x12,
+            0x34,
+            0x56,
+            0x78,
+            0x9a,
+            0xbc,
+            0xde,
+            0xf0},
+        .Defines = {"USE_NORMAL_MAP=1"},
+        .PassIndex = 1,
+        .Stage = render::ShaderStage::Vertex};
+    const PipelineLayoutCacheKey layout{
+        .Shaders = {{.Module = shader, .InterfaceHash = {.Low = 10, .High = 20}}},
+        .DynamicBufferBindings = {{.Group = 1, .Binding = 2}},
+        .PushConstantBindings = {{.Group = 3, .Binding = 4}}};
+    const PipelineLayoutCacheKey layoutCopy = layout;
+    EXPECT_EQ(layout, layoutCopy);
+    EXPECT_EQ(
+        std::hash<PipelineLayoutCacheKey>{}(layout),
+        std::hash<PipelineLayoutCacheKey>{}(layoutCopy));
+
+    const PipelineCacheHash layoutHash = GetPipelineCacheHash(layout);
+    EXPECT_EQ(layoutHash.Low, 7257866048383139ull);
+    EXPECT_EQ(layoutHash.High, 16005545441609235016ull);
+
+    const GraphicsPsoCacheKey pso{
+        .PipelineLayoutHash = layoutHash,
+        .VS = GraphicsPsoCacheKey::ShaderEntryIdentity{
+            .Module = shader,
+            .BinaryHash = {.Low = 30, .High = 40},
+            .EntryPoint = "VSMain"},
+        .VertexLayouts = {{
+            .ArrayStride = 12,
+            .StepMode = render::VertexStepMode::Vertex,
+            .Elements = {{
+                .Offset = 0,
+                .Semantic = "POSITION",
+                .SemanticIndex = 0,
+                .Format = render::VertexFormat::FLOAT32X3,
+                .Location = 0}}}},
+        .Primitive = render::PrimitiveState::Default(),
+        .MultiSample = render::MultiSampleState::Default(),
+        .ColorTargets = {render::ColorTargetState::Default(render::TextureFormat::RGBA8_UNORM)}};
+    const GraphicsPsoCacheKey psoCopy = pso;
+    EXPECT_EQ(pso, psoCopy);
+    EXPECT_EQ(std::hash<GraphicsPsoCacheKey>{}(pso), std::hash<GraphicsPsoCacheKey>{}(psoCopy));
+
+    const PipelineCacheHash psoHash = GetPipelineCacheHash(pso);
+    EXPECT_EQ(psoHash.Low, 9291566581370425177ull);
+    EXPECT_EQ(psoHash.High, 6702701868706228189ull);
+
+    PipelineLayoutCacheKey nanLayout = layout;
+    nanLayout.StaticSamplers.emplace_back();
+    nanLayout.StaticSamplers.back().Desc.LodMin = std::bit_cast<float>(0x7fc00001u);
+    const PipelineLayoutCacheKey nanLayoutCopy = nanLayout;
+    EXPECT_EQ(nanLayout, nanLayoutCopy);
+    EXPECT_EQ(
+        std::hash<PipelineLayoutCacheKey>{}(nanLayout),
+        std::hash<PipelineLayoutCacheKey>{}(nanLayoutCopy));
+
+    PipelineLayoutCacheKey negativeZeroLayout = nanLayout;
+    PipelineLayoutCacheKey positiveZeroLayout = nanLayout;
+    negativeZeroLayout.StaticSamplers.back().Desc.LodMax = -0.0f;
+    positiveZeroLayout.StaticSamplers.back().Desc.LodMax = 0.0f;
+    EXPECT_NE(negativeZeroLayout, positiveZeroLayout);
+}
+
+TEST(GraphicsPipelineCacheTest, CachesPipelineLayoutsByOwnedDescriptorValues) {
+    FakeDevice device;
+    device.AllowPipelineLayoutCreation = true;
+    ShaderModuleCache shaderCache{&device, nullptr, nullptr, {}};
+    GraphicsPipelineCache cache{&device, &shaderCache};
+
+    vector<render::DynamicBufferBinding> firstDynamicBindings{{.Group = 1, .Binding = 3}};
+    vector<render::PushConstantBinding> pushConstantBindings{{.Group = 2, .Binding = 4}};
+    render::PipelineLayoutDescriptor firstDesc{
+        .DynamicBufferBindings = firstDynamicBindings,
+        .PushConstantBindings = pushConstantBindings};
+
+    auto first = cache.GetOrCreatePipelineLayout(firstDesc);
+    ASSERT_TRUE(first.HasValue());
+
+    // The cache key owns its span-backed data; changing the source vector cannot change it.
+    firstDynamicBindings[0].Binding = 99;
+    vector<render::DynamicBufferBinding> equivalentDynamicBindings{{.Group = 1, .Binding = 3}};
+    render::PipelineLayoutDescriptor equivalentDesc{
+        .DynamicBufferBindings = equivalentDynamicBindings,
+        .PushConstantBindings = pushConstantBindings};
+    auto equivalent = cache.GetOrCreatePipelineLayout(equivalentDesc);
+    ASSERT_TRUE(equivalent.HasValue());
+
+    EXPECT_EQ(first.Get(), equivalent.Get());
+    EXPECT_EQ(cache.GetPipelineLayoutCount(), 1u);
+    EXPECT_EQ(cache.GetPipelineLayoutHitCount(), 1u);
+    EXPECT_EQ(cache.GetPipelineLayoutMissCount(), 1u);
+    EXPECT_EQ(device.PipelineLayoutCreateCount, 1u);
+
+    pushConstantBindings[0].Binding = 5;
+    auto different = cache.GetOrCreatePipelineLayout(equivalentDesc);
+    ASSERT_TRUE(different.HasValue());
+    EXPECT_NE(first.Get(), different.Get());
+    EXPECT_EQ(cache.GetPipelineLayoutCount(), 2u);
+    EXPECT_EQ(device.PipelineLayoutCreateCount, 2u);
+}
+
+TEST(GraphicsPipelineCacheTest, CachesGraphicsPsosAndDestroysThemBeforeLayouts) {
+    FakeDevice device;
+    device.AllowPipelineLayoutCreation = true;
+    device.AllowGraphicsPsoCreation = true;
+    ShaderModuleCache shaderCache{&device, nullptr, nullptr, {}};
+    GraphicsPipelineCache cache{&device, &shaderCache};
+
+    auto layout = cache.GetOrCreatePipelineLayout(render::PipelineLayoutDescriptor{});
+    ASSERT_TRUE(layout.HasValue());
+
+    vector<render::RenderPassColorAttachmentDescriptor> passColors{
+        {.Format = render::TextureFormat::RGBA8_UNORM, .SampleCount = 1}};
+    const render::RenderPassDepthStencilAttachmentDescriptor passDepth{
+        .Format = render::TextureFormat::D32_FLOAT,
+        .SampleCount = 1};
+    const render::RenderPassDescriptor passDesc{
+        .ColorAttachments = passColors,
+        .DepthStencilAttachment = passDepth};
+    FakeRenderPass firstPass{passDesc};
+    FakeRenderPass compatiblePass{passDesc};
+
+    vector<render::VertexElement> elements{
+        {.Offset = 0,
+         .Semantic = "POSITION",
+         .SemanticIndex = 0,
+         .Format = render::VertexFormat::FLOAT32X3,
+         .Location = 0}};
+    vector<render::VertexBufferLayout> vertexLayouts{
+        {.ArrayStride = 12,
+         .StepMode = render::VertexStepMode::Vertex,
+         .Elements = elements}};
+    vector<render::ColorTargetState> colorTargets{
+        render::ColorTargetState::Default(render::TextureFormat::RGBA8_UNORM)};
+    render::DepthStencilState depthStencil = render::DepthStencilState::Default();
+    depthStencil.DepthTestEnable = true;
+
+    render::GraphicsPipelineStateDescriptor firstDesc{
+        .PipelineLayout = layout.Get(),
+        .VertexLayouts = vertexLayouts,
+        .Primitive = render::PrimitiveState::Default(),
+        .DepthStencil = depthStencil,
+        .MultiSample = render::MultiSampleState::Default(),
+        .ColorTargets = colorTargets,
+        .CompatibleRenderPass = &firstPass};
+    auto first = cache.GetOrCreateGraphicsPso(firstDesc);
+    ASSERT_TRUE(first.HasValue());
+
+    render::GraphicsPipelineStateDescriptor equivalentDesc = firstDesc;
+    equivalentDesc.CompatibleRenderPass = &compatiblePass;
+    auto equivalent = cache.GetOrCreateGraphicsPso(equivalentDesc);
+    ASSERT_TRUE(equivalent.HasValue());
+    EXPECT_EQ(first.Get(), equivalent.Get());
+
+    render::DepthStencilState differentDepthStencil = depthStencil;
+    differentDepthStencil.DepthTestEnable = false;
+    render::GraphicsPipelineStateDescriptor differentDesc = equivalentDesc;
+    differentDesc.DepthStencil = differentDepthStencil;
+    auto different = cache.GetOrCreateGraphicsPso(differentDesc);
+    ASSERT_TRUE(different.HasValue());
+    EXPECT_NE(first.Get(), different.Get());
+
+    EXPECT_EQ(cache.GetGraphicsPsoCount(), 2u);
+    EXPECT_EQ(cache.GetGraphicsPsoHitCount(), 1u);
+    EXPECT_EQ(cache.GetGraphicsPsoMissCount(), 2u);
+    EXPECT_EQ(device.GraphicsPsoCreateCount, 2u);
+    EXPECT_EQ(device.LastNativeCacheKey.size(), 32u);
+
+    cache.Clear();
+    EXPECT_EQ(cache.GetGraphicsPsoCount(), 0u);
+    EXPECT_EQ(cache.GetPipelineLayoutCount(), 0u);
+    EXPECT_EQ(device.DestroyedGraphicsPsoCount, 2u);
+    EXPECT_EQ(device.DestroyedPipelineLayoutCount, 1u);
+    ASSERT_EQ(device.DestroyedPipelineObjectOrder.size(), 3u);
+    EXPECT_EQ(device.DestroyedPipelineObjectOrder[0], "pso");
+    EXPECT_EQ(device.DestroyedPipelineObjectOrder[1], "pso");
+    EXPECT_EQ(device.DestroyedPipelineObjectOrder[2], "layout");
+}
+
+TEST(GraphicsPipelineCacheTest, DoesNotCacheCreationFailures) {
+    FakeDevice device;
+    ShaderModuleCache shaderCache{&device, nullptr, nullptr, {}};
+    GraphicsPipelineCache cache{&device, &shaderCache};
+
+    render::PipelineLayoutDescriptor desc{};
+    EXPECT_FALSE(cache.GetOrCreatePipelineLayout(desc).HasValue());
+    EXPECT_EQ(cache.GetPipelineLayoutCount(), 0u);
+    EXPECT_EQ(device.PipelineLayoutCreateCount, 1u);
+
+    device.AllowPipelineLayoutCreation = true;
+    EXPECT_TRUE(cache.GetOrCreatePipelineLayout(desc).HasValue());
+    EXPECT_EQ(cache.GetPipelineLayoutCount(), 1u);
+    EXPECT_EQ(device.PipelineLayoutCreateCount, 2u);
+}
+
+TEST(GraphicsPipelineCacheTest, ReloadsTypedMetadataAndNativeBlob) {
+    const std::filesystem::path cacheDirectory =
+        std::filesystem::temp_directory_path() / fmt::format("radray_pipeline_cache_{}", Guid::NewGuid());
+    const vector<byte> nativeBlob{byte{0x12}, byte{0x34}, byte{0x56}};
+
+    vector<render::RenderPassColorAttachmentDescriptor> passColors{
+        {.Format = render::TextureFormat::RGBA8_UNORM, .SampleCount = 1}};
+    const render::RenderPassDescriptor passDesc{.ColorAttachments = passColors};
+    FakeRenderPass renderPass{passDesc};
+    vector<render::ColorTargetState> colorTargets{
+        render::ColorTargetState::Default(render::TextureFormat::RGBA8_UNORM)};
+
+    {
+        FakeDevice device;
+        device.AllowPipelineLayoutCreation = true;
+        device.AllowGraphicsPsoCreation = true;
+        device.NativeCacheData = nativeBlob;
+        ShaderModuleCache shaderCache{&device, nullptr, nullptr, {}, cacheDirectory};
+        GraphicsPipelineCache cache{&device, &shaderCache, cacheDirectory};
+        auto layout = cache.GetOrCreatePipelineLayout(render::PipelineLayoutDescriptor{});
+        ASSERT_TRUE(layout.HasValue());
+        auto pso = cache.GetOrCreateGraphicsPso(render::GraphicsPipelineStateDescriptor{
+            .PipelineLayout = layout.Get(),
+            .Primitive = render::PrimitiveState::Default(),
+            .MultiSample = render::MultiSampleState::Default(),
+            .ColorTargets = colorTargets,
+            .CompatibleRenderPass = &renderPass});
+        ASSERT_TRUE(pso.HasValue());
+        ASSERT_TRUE(cache.FlushToDisk());
+    }
+
+    {
+        FakeDevice device;
+        device.AllowPipelineLayoutCreation = true;
+        device.AllowGraphicsPsoCreation = true;
+        ShaderModuleCache shaderCache{&device, nullptr, nullptr, {}, cacheDirectory};
+        GraphicsPipelineCache cache{&device, &shaderCache, cacheDirectory};
+
+        EXPECT_EQ(cache.GetPipelineLayoutCount(), 1u);
+        EXPECT_EQ(cache.GetGraphicsPsoCount(), 1u);
+        EXPECT_EQ(device.InitialNativeCacheData, nativeBlob);
+
+        auto layout = cache.GetOrCreatePipelineLayout(render::PipelineLayoutDescriptor{});
+        ASSERT_TRUE(layout.HasValue());
+        auto pso = cache.GetOrCreateGraphicsPso(render::GraphicsPipelineStateDescriptor{
+            .PipelineLayout = layout.Get(),
+            .Primitive = render::PrimitiveState::Default(),
+            .MultiSample = render::MultiSampleState::Default(),
+            .ColorTargets = colorTargets,
+            .CompatibleRenderPass = &renderPass});
+        ASSERT_TRUE(pso.HasValue());
+        EXPECT_EQ(device.PipelineLayoutCreateCount, 1u);
+        EXPECT_EQ(device.GraphicsPsoCreateCount, 1u);
+        EXPECT_EQ(cache.GetPipelineLayoutHitCount(), 1u);
+        EXPECT_EQ(cache.GetGraphicsPsoHitCount(), 1u);
+        EXPECT_EQ(device.LastNativeCacheKey.size(), 32u);
+    }
+
+    std::error_code ignored;
+    std::filesystem::remove_all(cacheDirectory, ignored);
+}
+
+TEST(GraphicsPipelineCacheTest, RejectsCorruptTruncatedAndIncompatibleDiskFiles) {
+    const std::filesystem::path cacheDirectory =
+        std::filesystem::temp_directory_path() / fmt::format("radray_pipeline_cache_invalid_{}", Guid::NewGuid());
+    const std::filesystem::path cachePath = cacheDirectory / "graphics_pipelines.vulkan.bin";
+
+    {
+        FakeDevice device;
+        device.NativeCacheData = {byte{0x12}, byte{0x34}, byte{0x56}};
+        ShaderModuleCache shaderCache{&device, nullptr, nullptr, {}, cacheDirectory};
+        GraphicsPipelineCache cache{&device, &shaderCache, cacheDirectory};
+        ASSERT_TRUE(cache.FlushToDisk());
+    }
+
+    const std::optional<vector<byte>> validFile = ReadBinaryFile(cachePath);
+    ASSERT_TRUE(validFile.has_value());
+    ASSERT_GT(validFile->size(), 20u);
+
+    const auto expectEmptyFallback = [&](std::span<const byte> fileData) {
+        ASSERT_TRUE(WriteBinaryFile(cachePath, fileData));
+        FakeDevice device;
+        ShaderModuleCache shaderCache{&device, nullptr, nullptr, {}, cacheDirectory};
+        GraphicsPipelineCache cache{&device, &shaderCache, cacheDirectory};
+        EXPECT_EQ(cache.GetPipelineLayoutCount(), 0u);
+        EXPECT_EQ(cache.GetGraphicsPsoCount(), 0u);
+        EXPECT_EQ(device.NativeCacheInitializeCount, 1u);
+        EXPECT_TRUE(device.InitialNativeCacheData.empty());
+    };
+
+    vector<byte> corrupt = *validFile;
+    corrupt.back() ^= byte{0xff};
+    expectEmptyFallback(corrupt);
+
+    vector<byte> truncated{validFile->begin(), validFile->begin() + validFile->size() / 2};
+    expectEmptyFallback(truncated);
+
+    vector<byte> unknownVersion = *validFile;
+    unknownVersion[8] ^= byte{0x7f};
+    expectEmptyFallback(unknownVersion);
+
+    vector<byte> wrongBackend = *validFile;
+    wrongBackend[12] ^= byte{0x7f};
+    expectEmptyFallback(wrongBackend);
+
+    std::error_code ignored;
+    std::filesystem::remove_all(cacheDirectory, ignored);
 }
 
 #if defined(RADRAY_ENABLE_DXC)
@@ -361,6 +816,64 @@ TEST(ShaderModuleCacheTest, CompilesNormalizesAndCachesReadyShaderAsset) {
     spirvCache.Clear();
     EXPECT_EQ(device.DestroyedShaderCount, 2u);
 #endif
+}
+
+TEST(ShaderModuleCacheTest, RebuildsShaderFromPersistedBytecodeAndReflection) {
+    auto dxcOpt = render::CreateDxc();
+    if (!dxcOpt.HasValue()) {
+        GTEST_SKIP() << "DXC runtime is unavailable";
+    }
+    shared_ptr<render::Dxc> dxc = dxcOpt.Release();
+    const std::filesystem::path shaderRoot = GetExecutableDirectory() / "shaderlib";
+    if (!std::filesystem::is_regular_file(shaderRoot / "forward_pipeline/error_pass.hlsl")) {
+        GTEST_SKIP() << "deployed shaderlib is unavailable";
+    }
+
+    const AssetId shaderId = Guid::NewGuid();
+    const ShaderModuleKey key{
+        .Shader = shaderId,
+        .PassIndex = 0,
+        .Stage = render::ShaderStage::Vertex};
+    const std::filesystem::path cacheDirectory =
+        std::filesystem::temp_directory_path() / fmt::format("radray_shader_cache_{}", Guid::NewGuid());
+    AssetManager assets;
+    ShaderPassDesc pass{};
+    pass.Name = "PersistentCacheTest";
+    pass.SourcePath = "forward_pipeline/error_pass.hlsl";
+    pass.SM = render::HlslShaderModel::SM66;
+    pass.IsOptimize = false;
+    std::get<ShaderGraphicsPassDesc>(pass.Program).VertexEntry = "VSMain";
+    StreamingAssetRef<ShaderAsset> shaderAsset = assets.AddReady(
+        shaderId,
+        make_unique<ShaderAsset>(vector<ShaderPassDesc>{std::move(pass)}));
+    ASSERT_TRUE(shaderAsset.IsReady());
+
+    size_t compiledBytecodeSize = 0;
+    {
+        FakeDevice device;
+        device.Backend = render::RenderBackend::D3D12;
+        device.AllowShaderCreation = true;
+        ShaderModuleCache cache{&device, dxc.get(), &assets, shaderRoot.string(), cacheDirectory};
+        ASSERT_TRUE(cache.GetOrCreate(key).HasValue());
+        compiledBytecodeSize = device.LastShaderSourceSize;
+        ASSERT_GT(compiledBytecodeSize, 0u);
+        ASSERT_TRUE(cache.FlushToDisk());
+    }
+
+    {
+        FakeDevice device;
+        device.Backend = render::RenderBackend::D3D12;
+        device.AllowShaderCreation = true;
+        ShaderModuleCache cache{&device, nullptr, nullptr, {}, cacheDirectory};
+        EXPECT_EQ(cache.GetCount(), 1u);
+        ASSERT_TRUE(cache.GetOrCreate(key).HasValue());
+        EXPECT_EQ(device.ShaderCreateCount, 1u);
+        EXPECT_EQ(device.LastShaderSourceSize, compiledBytecodeSize);
+        EXPECT_TRUE(device.LastShaderHasReflection);
+    }
+
+    std::error_code ignored;
+    std::filesystem::remove_all(cacheDirectory, ignored);
 }
 
 TEST(ShaderModuleCacheTest, ResolvesSourceRelativeToExecutableDirectory) {

@@ -23,8 +23,8 @@ struct TextureSubViewDesc {
     /// 默认全量 SRV 描述 (等价于 TextureAsset 构造时建的 _srv)。
     static TextureSubViewDesc Default() noexcept { return TextureSubViewDesc{}; }
 
-    bool IsDefault() const noexcept {
-        const render::SubresourceRange all = render::SubresourceRange::AllSub();
+    constexpr bool IsDefault() const noexcept {
+        constexpr render::SubresourceRange all = render::SubresourceRange::AllSub();
         return Dim == render::TextureDimension::Dim2D &&
                Format == render::TextureFormat::UNKNOWN &&
                Range.BaseArrayLayer == all.BaseArrayLayer &&
@@ -33,13 +33,7 @@ struct TextureSubViewDesc {
                Range.MipLevelCount == all.MipLevelCount;
     }
 
-    friend bool operator==(const TextureSubViewDesc& lhs, const TextureSubViewDesc& rhs) noexcept {
-        return lhs.Dim == rhs.Dim && lhs.Format == rhs.Format &&
-               lhs.Range.BaseArrayLayer == rhs.Range.BaseArrayLayer &&
-               lhs.Range.ArrayLayerCount == rhs.Range.ArrayLayerCount &&
-               lhs.Range.BaseMipLevel == rhs.Range.BaseMipLevel &&
-               lhs.Range.MipLevelCount == rhs.Range.MipLevelCount;
-    }
+    friend bool operator==(const TextureSubViewDesc& lhs, const TextureSubViewDesc& rhs) noexcept = default;
 };
 
 }  // namespace radray

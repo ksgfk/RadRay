@@ -5,17 +5,12 @@
 #include <span>
 
 #include <radray/nullable.h>
-#include <radray/guid.h>
 #include <radray/render/common.h>
+#include <radray/runtime/pipeline_cache.h>
 #include <radray/types.h>
-
-namespace radray::render {
-class Dxc;
-}  // namespace radray::render
 
 namespace radray {
 
-class AssetManager;
 class MeshResource;
 
 /// 持有由网格资源创建的 GPU 缓冲区及绘制视图。
@@ -387,65 +382,6 @@ public:
 private:
     render::Device* _device{nullptr};
     unordered_map<render::SamplerDescriptor, unique_ptr<render::Sampler>> _cache;
-};
-
-/// 单 stage 编译模块的 key。
-///
-/// Defines 是根据 ShaderKeywordGroupDesc::Stages 投影到当前 Stage 后的集合。这样
-/// 只影响 pixel 的 keyword 不会导致 vertex module 被重复编译。Stage 必须是单个
-/// stage bit，而不是 Graphics 等组合值。
-struct ShaderModuleKey {
-    Guid Shader{};
-    vector<string> Defines{};
-    uint32_t PassIndex{0};
-    render::ShaderStage Stage{render::ShaderStage::UNKNOWN};
-
-    friend bool operator==(const ShaderModuleKey&, const ShaderModuleKey&) noexcept;
-};
-
-}  // namespace radray
-
-namespace std {
-
-template <>
-struct hash<radray::ShaderModuleKey> {
-    size_t operator()(const radray::ShaderModuleKey& key) const noexcept;
-};
-
-}  // namespace std
-
-namespace radray {
-
-/// 按 ShaderAsset/pass/stage/defines 编译并缓存单 stage 的 GPU shader module。
-///
-/// Device、Dxc 和 AssetManager 均为非拥有依赖，必须比缓存活得更久。缓存只在 miss
-/// 时访问 AssetManager；ShaderAsset 必须已经 Ready。返回的裸指针在 Clear 或缓存
-/// 析构前保持稳定。该类型与 AssetManager 一样只允许在其所属线程调用。
-class ShaderModuleCache {
-public:
-    ShaderModuleCache(
-        render::Device* device,
-        render::Dxc* dxc,
-        AssetManager* assetManager,
-        string shaderSourceRoot) noexcept;
-    ShaderModuleCache(const ShaderModuleCache&) = delete;
-    ShaderModuleCache(ShaderModuleCache&&) = delete;
-    ShaderModuleCache& operator=(const ShaderModuleCache&) = delete;
-    ShaderModuleCache& operator=(ShaderModuleCache&&) = delete;
-    ~ShaderModuleCache() noexcept;
-
-    /// 命中时返回已有 module；miss 时同步编译并创建。失败不写入缓存。
-    Nullable<render::Shader*> GetOrCreate(const ShaderModuleKey& key) noexcept;
-
-    void Clear() noexcept;
-    size_t GetCount() const noexcept { return _cache.size(); }
-
-private:
-    render::Device* _device{nullptr};
-    render::Dxc* _dxc{nullptr};
-    AssetManager* _assetManager{nullptr};
-    string _shaderSourceRoot;
-    unordered_map<ShaderModuleKey, unique_ptr<render::Shader>> _cache;
 };
 
 }  // namespace radray

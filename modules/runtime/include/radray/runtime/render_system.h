@@ -2,6 +2,7 @@
 
 #include <radray/runtime_type.h>
 #include <radray/runtime/gpu_resource.h>
+#include <radray/runtime/pipeline_cache.h>
 #include <radray/runtime/render_framework/render_pipeline.h>
 #include <radray/runtime/render_framework/scene.h>
 #include <radray/types.h>
@@ -46,6 +47,7 @@ public:
     Nullable<IStandardMaterialFactory*> GetStandardMaterialFactory() noexcept;
     SamplerCache* GetSamplerCache() const noexcept { return _samplerCache.get(); }
     ShaderModuleCache* GetShaderModuleCache() const noexcept { return _shaderModuleCache.get(); }
+    GraphicsPipelineCache* GetGraphicsPipelineCache() const noexcept { return _graphicsPipelineCache.get(); }
     /// shader 编译默认 include 根目录 (<exe>/shaderlib)。供构建 ShaderPassDesc::IncludeDirs。
     const string& GetShaderIncludeRoot() const noexcept { return _shaderIncludeRoot; }
     /// 预编译 shader 烘焙产物根目录 (<exe>/shadercache)。DXC 缺失时预编译缓存从此加载。
@@ -60,6 +62,7 @@ private:
     vector<unique_ptr<Scene>> _scenes;
     shared_ptr<render::Dxc> _dxc;
     unique_ptr<ShaderModuleCache> _shaderModuleCache;
+    unique_ptr<GraphicsPipelineCache> _graphicsPipelineCache;
     unique_ptr<SamplerCache> _samplerCache;
     string _shaderIncludeRoot;
     string _shaderBakeRoot;
