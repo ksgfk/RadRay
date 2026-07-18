@@ -1,8 +1,8 @@
-#include <radray/render/shader_compiler/spvc.h>
+#include <radray/shader/spvc.h>
 
-namespace radray::render {
+namespace radray::shader {
 
-}  // namespace radray::render
+}  // namespace radray::shader
 
 #ifdef RADRAY_ENABLE_SPIRV_CROSS
 
@@ -18,7 +18,7 @@ namespace radray::render {
 #include <radray/logger.h>
 #include <radray/utility.h>
 
-namespace radray::render {
+namespace radray::shader {
 
 static uint32_t _GetScalarSize(SpirvBaseType baseType) {
     switch (baseType) {
@@ -997,6 +997,6 @@ std::optional<MslShaderReflection> ReflectSpirvAsMsl(std::span<const SpirvAsMslR
     return refl;
 }
 
-}  // namespace radray::render
+}  // namespace radray::shader
 
 #endif

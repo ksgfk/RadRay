@@ -151,8 +151,8 @@ struct ApplicationRuntimeDescriptor {
     bool Multithreaded{false};
     std::string_view AppName{"RadRay Application"};
     std::string_view EngineName{"RadRay"};
-    /// Explicit writable directory for persistent shader and graphics pipeline caches.
-    /// Empty keeps both caches in memory only.
+    /// Explicit writable directory for persistent graphics pipeline caches.
+    /// Shader bytecode is loaded from cooked ShaderAsset binaries.
     std::filesystem::path RenderCachePath{};
 
     // —— 主窗口 ——

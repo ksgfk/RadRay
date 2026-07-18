@@ -5,6 +5,7 @@
 #include <radray/render/backend/d3d12_impl.h>
 
 namespace radray::render {
+using namespace radray::shader;
 namespace {
 
 class FakeShader final : public Shader {

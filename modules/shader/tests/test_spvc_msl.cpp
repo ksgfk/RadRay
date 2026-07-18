@@ -4,10 +4,10 @@
 
 #include <gtest/gtest.h>
 
-#include <radray/render/shader_compiler/dxc.h>
-#include <radray/render/shader_compiler/spvc.h>
+#include <radray/shader/dxc.h>
+#include <radray/shader/spvc.h>
 
-namespace radray::render {
+namespace radray::shader {
 namespace {
 
 constexpr std::string_view kVertexShader = R"(
@@ -191,4 +191,4 @@ TEST(SpvcMslTest, ReflectsReadOnlyStructuredBufferAsReadOnly) {
 }
 
 }  // namespace
-}  // namespace radray::render
+}  // namespace radray::shader

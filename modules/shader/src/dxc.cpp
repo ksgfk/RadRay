@@ -1,4 +1,4 @@
-#include <radray/render/shader_compiler/dxc.h>
+#include <radray/shader/dxc.h>
 
 // #define _RADRAY_ENABLE_DXC_ALLOCATOR 0 // ISSUE: dxc v1.9.2602 用户自定义 allocator, 内部释放时似乎没有正确调用户 free 导致爆炸, 先关闭 mimalloc 接管内存
 
@@ -12,9 +12,9 @@
 #include <mimalloc.h>
 #endif
 
-namespace radray::render {
+namespace radray::shader {
 
-}  // namespace radray::render
+}  // namespace radray::shader
 
 #ifdef RADRAY_ENABLE_DXC
 
@@ -42,7 +42,7 @@ public:
 #include <radray/utility.h>
 #include <radray/dynamic_library.h>
 
-namespace radray::render {
+namespace radray::shader {
 
 static HlslCBufferType _MapCBufferType(D3D_CBUFFER_TYPE type) noexcept {
     switch (type) {
@@ -327,7 +327,7 @@ private:
 };
 #endif
 
-class DxcImpl : public Dxc::Impl {
+class Dxc::Impl {
 public:
     class ArgsData {
     public:
@@ -343,7 +343,7 @@ public:
         std::string_view ErrMsg;
     };
 
-    DxcImpl(
+    Impl(
         DynamicLibrary dxcLib,
         DynamicLibrary dxilLib,
 #if defined(RADRAY_ENABLE_MIMALLOC) && defined(_RADRAY_ENABLE_DXC_ALLOCATOR)
@@ -361,11 +361,11 @@ public:
           _utils(std::move(utils)),
           _inc(std::move(inc)) {
     }
-    DxcImpl(const DxcImpl&) = delete;
-    DxcImpl& operator=(const DxcImpl&) = delete;
-    DxcImpl(DxcImpl&&) = delete;
-    DxcImpl& operator=(DxcImpl&&) = delete;
-    ~DxcImpl() noexcept override = default;
+    Impl(const Impl&) = delete;
+    Impl& operator=(const Impl&) = delete;
+    Impl(Impl&&) = delete;
+    Impl& operator=(Impl&&) = delete;
+    ~Impl() noexcept = default;
 
     ArgsData ParseArgs(std::span<const std::string_view> args) noexcept {
         ArgsData result{};
@@ -774,7 +774,7 @@ Nullable<shared_ptr<Dxc>> CreateDxc() noexcept {
         RADRAY_ERR_LOG("DxcUtils::CreateDefaultIncludeHandler failed: {}", hr);
         return nullptr;
     }
-    auto implPtr = make_unique<DxcImpl>(
+    auto implPtr = make_unique<Dxc::Impl>(
         std::move(dxcDll),
         std::move(dxilDll),
 #if defined(RADRAY_ENABLE_MIMALLOC) && defined(_RADRAY_ENABLE_DXC_ALLOCATOR)
@@ -783,8 +783,14 @@ Nullable<shared_ptr<Dxc>> CreateDxc() noexcept {
         std::move(dxc),
         std::move(utils),
         std::move(incHandler));
-    return make_shared<Dxc>(std::move(implPtr));
+    return shared_ptr<Dxc>{new Dxc{std::move(implPtr)}};
 }
+
+Dxc::Dxc(unique_ptr<Impl> impl) noexcept
+    : _impl(std::move(impl)) {
+}
+
+Dxc::~Dxc() noexcept = default;
 
 void Dxc::Destroy() noexcept {
     _impl.reset();
@@ -870,7 +876,7 @@ std::optional<DxcOutput> Dxc::CompileMemory(
     const DxcCompileOptions& options) noexcept {
     const string targetProfile = _FormatStageAndSm(options.Stage, options.SM);
     const vector<std::string_view> args = _BuildCompileArgs(options);
-    return static_cast<DxcImpl*>(_impl.get())->CompileMemory(
+    return _impl->CompileMemory(
         code,
         sourceName,
         options.EntryPoint,
@@ -883,7 +889,7 @@ std::optional<DxcOutput> Dxc::CompileFile(
     const DxcCompileOptions& options) noexcept {
     const string targetProfile = _FormatStageAndSm(options.Stage, options.SM);
     const vector<std::string_view> args = _BuildCompileArgs(options);
-    return static_cast<DxcImpl*>(_impl.get())->CompileFile(
+    return _impl->CompileFile(
         path,
         options.EntryPoint,
         targetProfile,
@@ -891,9 +897,9 @@ std::optional<DxcOutput> Dxc::CompileFile(
 }
 
 std::optional<HlslShaderDesc> Dxc::GetShaderDescFromOutput(std::span<const byte> refl) noexcept {
-    return static_cast<DxcImpl*>(_impl.get())->GetShaderDescFromOutput(refl);
+    return _impl->GetShaderDescFromOutput(refl);
 }
 
-}  // namespace radray::render
+}  // namespace radray::shader
 
 #endif

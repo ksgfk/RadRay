@@ -1,10 +1,10 @@
-#include <radray/render/shader/spirv.h>
+#include <radray/shader/spirv.h>
 
-#include <radray/render/shader/hlsl.h>
+#include <radray/shader/hlsl.h>
 #include <radray/json.h>
 #include <radray/logger.h>
 
-namespace radray::render {
+namespace radray::shader {
 
 // ResourceBindType SpirvResourceBinding::MapResourceBindType() const noexcept {
 //     const bool isBufferImage = ImageInfo.has_value() && ImageInfo->Dim == SpirvImageDim::Buffer;
@@ -255,4 +255,4 @@ std::optional<SpirvShaderDesc> DeserializeSpirvShaderDesc(std::string_view json)
     return desc;
 }
 
-}  // namespace radray::render
+}  // namespace radray::shader

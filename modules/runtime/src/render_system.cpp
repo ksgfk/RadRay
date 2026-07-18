@@ -8,7 +8,9 @@
 #include <radray/file.h>
 #include <radray/logger.h>
 #include <radray/render/common.h>
-#include <radray/render/shader_compiler/dxc.h>
+#if defined(RADRAY_ENABLE_SHADER_JIT)
+#include <radray/shader/dxc.h>
+#endif
 #include <radray/runtime/application.h>
 #include <radray/runtime/gpu_system.h>
 #include <radray/runtime/render_framework/scene.h>
@@ -23,8 +25,6 @@ RenderSystem::RenderSystem(Application* app) noexcept
 RenderSystem::~RenderSystem() noexcept {
     ReleaseAllScenes();
     _pipeline.reset();
-    _graphicsPipelineCache.reset();  // PSO/layout 先释放，再释放其引用的 shader。
-    _shaderModuleCache.reset();
     _samplerCache.reset();
     _dxc.reset();
 }
@@ -37,37 +37,20 @@ void RenderSystem::OnInitialize() {
         return;
     }
 
-    // shaderlib 随可执行文件部署 (见 modules/runtime/CMakeLists.txt POST_BUILD)。
+#if defined(RADRAY_ENABLE_SHADER_JIT)
     _shaderIncludeRoot = (GetExecutableDirectory() / "shaderlib").string();
-    // 预编译 shader 烘焙产物根目录 (DXC 缺失时从此加载)。
-    _shaderBakeRoot = (GetExecutableDirectory() / "shadercache").string();
+#endif
     // sampler 缓存: 按 descriptor 去重 + 永生持有, 使材质快照可安全持有稳定 sampler 指针。
     _samplerCache = make_unique<SamplerCache>(device);
 
-#if defined(RADRAY_ENABLE_DXC)
-    auto dxcOpt = render::CreateDxc();
+#if defined(RADRAY_ENABLE_SHADER_JIT)
+    auto dxcOpt = shader::CreateDxc();
     if (!dxcOpt.HasValue()) {
         RADRAY_ERR_LOG("RenderSystem::OnInitialize: CreateDxc failed");
     } else {
         _dxc = dxcOpt.Release();
     }
 #endif
-
-    AssetManager* assetManager = _app->GetAssetManager();
-    if (assetManager == nullptr) {
-        RADRAY_ERR_LOG("RenderSystem::OnInitialize: AssetManager is null");
-    }
-    const std::filesystem::path& cachePath = _app->GetRenderCachePath();
-    _shaderModuleCache = make_unique<ShaderModuleCache>(
-        device,
-        _dxc.get(),
-        assetManager,
-        _shaderIncludeRoot,
-        cachePath);
-    _graphicsPipelineCache = make_unique<GraphicsPipelineCache>(
-        device,
-        _shaderModuleCache.get(),
-        cachePath);
 }
 
 Nullable<IStandardMaterialFactory*> RenderSystem::GetStandardMaterialFactory() noexcept {

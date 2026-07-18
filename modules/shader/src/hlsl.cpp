@@ -1,4 +1,4 @@
-#include <radray/render/shader/hlsl.h>
+#include <radray/shader/hlsl.h>
 
 #include <algorithm>
 
@@ -6,7 +6,7 @@
 #include <radray/json.h>
 #include <radray/logger.h>
 
-namespace radray::render {
+namespace radray::shader {
 
 bool HlslShaderTypeDesc::IsPrimitive() const noexcept {
     return Class == HlslShaderVariableClass::SCALAR ||
@@ -327,4 +327,4 @@ std::optional<HlslShaderDesc> DeserializeHlslShaderDesc(std::string_view json) n
     return desc;
 }
 
-}  // namespace radray::render
+}  // namespace radray::shader

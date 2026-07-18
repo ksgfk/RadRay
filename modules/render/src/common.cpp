@@ -417,16 +417,6 @@ std::string_view format_as(QueueType v) noexcept {
     Unreachable();
 }
 
-std::string_view format_as(ShaderBlobCategory v) noexcept {
-    switch (v) {
-        case ShaderBlobCategory::DXIL: return "DXIL";
-        case ShaderBlobCategory::SPIRV: return "SPIR-V";
-        case ShaderBlobCategory::MSL: return "MSL";
-        case ShaderBlobCategory::METALLIB: return "METALLIB";
-    }
-    Unreachable();
-}
-
 std::string_view format_as(VertexFormat v) noexcept {
     switch (v) {
         case VertexFormat::UNKNOWN: return "UNKNOWN";
@@ -638,24 +628,6 @@ std::string_view format_as(PresentMode v) noexcept {
         case PresentMode::Immediate: return "Immediate";
     }
     Unreachable();
-}
-
-std::string_view format_as(ShaderStage v) noexcept {
-    switch (v) {
-        case ShaderStage::UNKNOWN: return "UNKNOWN";
-        case ShaderStage::Vertex: return "Vertex";
-        case ShaderStage::Pixel: return "Pixel";
-        case ShaderStage::Compute: return "Compute";
-        case ShaderStage::RayGen: return "RayGen";
-        case ShaderStage::Miss: return "Miss";
-        case ShaderStage::ClosestHit: return "ClosestHit";
-        case ShaderStage::AnyHit: return "AnyHit";
-        case ShaderStage::Intersection: return "Intersection";
-        case ShaderStage::Callable: return "Callable";
-        case ShaderStage::Graphics: return "Graphics";
-        case ShaderStage::RayTracing: return "RayTracing";
-        default: return "UNKNOWN";
-    }
 }
 
 std::string_view format_as(BindlessSlotType v) noexcept {

@@ -6,10 +6,15 @@
 
 #include <radray/logger.h>
 #include <radray/render/common.h>
-#include <radray/render/shader_compiler/dxc.h>
-#include <radray/render/shader_compiler/spvc.h>
+#include <radray/shader/dxc.h>
+#include <radray/shader/spvc.h>
 
 namespace radray::render::test {
+
+using shader::CreateDxc;
+using shader::Dxc;
+using shader::ReflectSpirv;
+using shader::SpirvBytecodeView;
 
 enum class TestBackend {
     D3D12,

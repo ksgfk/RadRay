@@ -11,10 +11,18 @@
 #include <radray/nullable.h>
 #include <radray/enum_flags.h>
 #include <radray/basic_math.h>
-#include <radray/render/shader/hlsl.h>
-#include <radray/render/shader/spirv.h>
+#include <radray/shader/common.h>
+#include <radray/shader/hlsl.h>
+#include <radray/shader/spirv.h>
 
 namespace radray::render {
+
+using shader::HlslShaderDesc;
+using shader::HlslShaderModel;
+using shader::ShaderBlobCategory;
+using shader::ShaderStage;
+using shader::SpirvShaderDesc;
+using ShaderStages = radray::ShaderStages;
 
 inline constexpr uint32_t kMaxColorTargets = 8;
 inline constexpr uint32_t kMaxVertexBufferLayouts = 16;
@@ -107,31 +115,6 @@ enum class QueueType : uint32_t {
     Copy,
 
     MAX_COUNT
-};
-
-enum class ShaderStage : uint32_t {
-    UNKNOWN = 0x0,
-    Vertex = 0x1,
-    Pixel = Vertex << 1,
-
-    Compute = Pixel << 1,
-
-    RayGen = Compute << 1,
-    Miss = RayGen << 1,
-    ClosestHit = Miss << 1,
-    AnyHit = ClosestHit << 1,
-    Intersection = AnyHit << 1,
-    Callable = Intersection << 1,
-
-    Graphics = Vertex | Pixel,
-    RayTracing = RayGen | Miss | ClosestHit | AnyHit | Intersection | Callable
-};
-
-enum class ShaderBlobCategory : int32_t {
-    DXIL,
-    SPIRV,
-    MSL,
-    METALLIB
 };
 
 enum class AddressMode : int32_t {
@@ -507,11 +490,6 @@ enum class RenderObjectTag : uint32_t {
 namespace radray {
 
 template <>
-struct is_flags<render::ShaderStage> : public std::true_type {};
-template <>
-struct is_compound_enum_flags<render::ShaderStage> : public std::true_type {};
-
-template <>
 struct is_flags<render::ColorWrite> : public std::true_type {};
 template <>
 struct is_compound_enum_flags<render::ColorWrite> : public std::true_type {};
@@ -537,7 +515,6 @@ struct is_flags<render::AccelerationStructureBuildFlag> : public std::true_type 
 
 namespace render {
 
-using ShaderStages = EnumFlags<render::ShaderStage>;
 using ColorWrites = EnumFlags<render::ColorWrite>;
 using ResourceHints = EnumFlags<render::ResourceHint>;
 using RenderObjectTags = EnumFlags<render::RenderObjectTag>;
@@ -1979,7 +1956,6 @@ bool IsGraphicsPipelineCompatibleWithRenderPass(const GraphicsPipelineStateDescr
 std::string_view format_as(RenderBackend v) noexcept;
 std::string_view format_as(TextureFormat v) noexcept;
 std::string_view format_as(QueueType v) noexcept;
-std::string_view format_as(ShaderBlobCategory v) noexcept;
 std::string_view format_as(VertexFormat v) noexcept;
 std::string_view format_as(PolygonMode v) noexcept;
 std::string_view format_as(TextureDimension v) noexcept;
@@ -1993,7 +1969,6 @@ std::string_view format_as(AccelerationStructureBuildMode v) noexcept;
 std::string_view format_as(AccelerationStructureBuildFlag v) noexcept;
 std::string_view format_as(RenderObjectTag v) noexcept;
 std::string_view format_as(PresentMode v) noexcept;
-std::string_view format_as(ShaderStage v) noexcept;
 std::string_view format_as(BindlessSlotType v) noexcept;
 std::string_view format_as(SwapChainStatus v) noexcept;
 

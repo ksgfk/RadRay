@@ -55,8 +55,10 @@ cmake_dependent_option(RADRAY_BUILD_RUNTIME "Build the RadRay runtime" ON "RADRA
 cmake_dependent_option(RADRAY_ENABLE_D3D12 "Enable Direct3D 12 backend" ON "RADRAY_BUILD_RENDER AND WIN32" OFF)
 cmake_dependent_option(RADRAY_ENABLE_VULKAN "Enable Vulkan backend" ON "RADRAY_BUILD_RENDER" OFF)
 cmake_dependent_option(RADRAY_ENABLE_METAL "Enable Metal backend" ON "RADRAY_BUILD_RENDER AND APPLE" OFF)
-cmake_dependent_option(RADRAY_ENABLE_DXC "Enable DirectX Shader Compiler support" ON "RADRAY_BUILD_RENDER" OFF)
-cmake_dependent_option(RADRAY_ENABLE_SPVCROSS "Enable SPIR-V Cross support" ON "RADRAY_BUILD_RENDER" OFF)
+option(RADRAY_ENABLE_DXC "Enable DirectX Shader Compiler support" ON)
+option(RADRAY_ENABLE_SPIRV_CROSS "Enable SPIR-V Cross support" ON)
+cmake_dependent_option(RADRAY_ENABLE_SHADER_JIT "Enable runtime shader JIT compilation" ON "RADRAY_BUILD_RUNTIME AND RADRAY_ENABLE_DXC" OFF)
+cmake_dependent_option(RADRAY_BUILD_SHADER_COOKER "Build the shader cooker command-line tool" ON "RADRAY_ENABLE_DXC" OFF)
 option(RADRAY_ENABLE_MIMALLOC "Enable mimalloc as allocator" ON)
 option(RADRAY_ENABLE_ZLIB "Enable zlib support" ON)
 cmake_dependent_option(RADRAY_ENABLE_LIBPNG "Enable libpng support" ON "RADRAY_ENABLE_ZLIB" OFF)
@@ -67,6 +69,12 @@ cmake_dependent_option(RADRAY_DISABLE_IMGUI_DEMO "Disable Dear ImGui demo window
 if (NOT RADRAY_ENABLE_FREETYPE)
     set(RADRAY_ENABLE_IMGUI OFF CACHE BOOL "Enable Dear ImGui support" FORCE)
     set(RADRAY_ENABLE_IMGUI OFF)
+endif()
+if (RADRAY_ENABLE_SHADER_JIT AND NOT RADRAY_ENABLE_DXC)
+    message(FATAL_ERROR "RADRAY_ENABLE_SHADER_JIT requires RADRAY_ENABLE_DXC")
+endif()
+if (RADRAY_ENABLE_SHADER_JIT AND RADRAY_ENABLE_VULKAN AND NOT RADRAY_ENABLE_SPIRV_CROSS)
+    message(FATAL_ERROR "Vulkan shader JIT requires RADRAY_ENABLE_SPIRV_CROSS")
 endif()
 
 # 加载 manifest
@@ -202,6 +210,7 @@ if (RADRAY_ENABLE_MIMALLOC)
     # override symbols (interpose sections, operator new/delete) are included
     # in the final executable even when linked through intermediate static libs.
     add_library(mimalloc-override INTERFACE)
+    add_dependencies(mimalloc-override mimalloc-static)
     target_include_directories(mimalloc-override INTERFACE
         $<TARGET_PROPERTY:mimalloc-static,INTERFACE_INCLUDE_DIRECTORIES>)
     if (APPLE)
@@ -345,11 +354,14 @@ if (RADRAY_ENABLE_VULKAN)
     add_subdirectory(${RADRAY_THIRDPARTY_ROOT}/VulkanMemoryAllocator)
 endif()
 
-if (RADRAY_ENABLE_D3D12)
+if (RADRAY_ENABLE_D3D12 OR (WIN32 AND RADRAY_ENABLE_DXC))
     set(DXHEADERS_BUILD_TEST OFF CACHE BOOL "" FORCE)
     set(DXHEADERS_INSTALL OFF CACHE BOOL "" FORCE)
     set(DXHEADERS_BUILD_GOOGLE_TEST OFF CACHE BOOL "" FORCE)
     add_subdirectory(${RADRAY_THIRDPARTY_ROOT}/DirectX-Headers)
+endif()
+
+if (RADRAY_ENABLE_D3D12)
     add_subdirectory(${RADRAY_THIRDPARTY_ROOT}/D3D12MemoryAllocator)
     target_compile_options(D3D12MemoryAllocator PRIVATE 
         $<$<AND:$<CXX_COMPILER_ID:Clang>,$<BOOL:${MSVC}>>:-Wno-unused-variable>
@@ -360,7 +372,7 @@ if (RADRAY_ENABLE_D3D12)
     radray_set_build_path(D3D12MemoryAllocator)
 endif()
 
-if (RADRAY_ENABLE_SPVCROSS)
+if (RADRAY_ENABLE_SPIRV_CROSS)
     set(SPIRV_CROSS_CLI OFF CACHE BOOL "" FORCE)
     set(SPIRV_CROSS_ENABLE_TESTS OFF CACHE BOOL "" FORCE)
     set(SPIRV_CROSS_ENABLE_HLSL OFF CACHE BOOL "" FORCE)

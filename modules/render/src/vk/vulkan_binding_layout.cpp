@@ -5,7 +5,7 @@
 #include <utility>
 
 #include <radray/logger.h>
-#include <radray/render/shader/spirv.h>
+#include <radray/shader/spirv.h>
 
 namespace radray::render::vulkan {
 
@@ -27,43 +27,43 @@ constexpr bool _IsRwResourceType(ResourceBindType type) noexcept {
     }
 }
 
-std::optional<ResourceBindType> _MapSpirvResourceType(const SpirvResourceBinding& binding) noexcept {
-    const bool isBufferImage = binding.ImageInfo.has_value() && binding.ImageInfo->Dim == SpirvImageDim::Buffer;
+std::optional<ResourceBindType> _MapSpirvResourceType(const shader::SpirvResourceBinding& binding) noexcept {
+    const bool isBufferImage = binding.ImageInfo.has_value() && binding.ImageInfo->Dim == shader::SpirvImageDim::Buffer;
     switch (binding.Kind) {
-        case SpirvResourceKind::UniformBuffer:
+        case shader::SpirvResourceKind::UniformBuffer:
             return ResourceBindType::CBuffer;
-        case SpirvResourceKind::StorageBuffer:
+        case shader::SpirvResourceKind::StorageBuffer:
             return binding.ReadOnly && !binding.WriteOnly ? ResourceBindType::Buffer : ResourceBindType::RWBuffer;
-        case SpirvResourceKind::SampledImage:
-        case SpirvResourceKind::SeparateImage:
+        case shader::SpirvResourceKind::SampledImage:
+        case shader::SpirvResourceKind::SeparateImage:
             return isBufferImage ? ResourceBindType::TexelBuffer : ResourceBindType::Texture;
-        case SpirvResourceKind::SeparateSampler:
+        case shader::SpirvResourceKind::SeparateSampler:
             return ResourceBindType::Sampler;
-        case SpirvResourceKind::StorageImage:
+        case shader::SpirvResourceKind::StorageImage:
             return isBufferImage ? ResourceBindType::RWTexelBuffer : ResourceBindType::RWTexture;
-        case SpirvResourceKind::AccelerationStructure:
+        case shader::SpirvResourceKind::AccelerationStructure:
             return ResourceBindType::AccelerationStructure;
-        case SpirvResourceKind::PushConstant:
-        case SpirvResourceKind::UNKNOWN:
+        case shader::SpirvResourceKind::PushConstant:
+        case shader::SpirvResourceKind::UNKNOWN:
             return std::nullopt;
     }
     return std::nullopt;
 }
 
 std::optional<BindlessSlotType> _MapBindlessSlotType(
-    const SpirvResourceBinding& binding,
+    const shader::SpirvResourceBinding& binding,
     ResourceBindType type) noexcept {
     switch (type) {
         case ResourceBindType::Buffer:
         case ResourceBindType::RWBuffer:
-            if (binding.Kind != SpirvResourceKind::StorageBuffer) {
+            if (binding.Kind != shader::SpirvResourceKind::StorageBuffer) {
                 return std::nullopt;
             }
             return BindlessSlotType::BufferOnly;
         case ResourceBindType::Texture:
-            if ((binding.Kind == SpirvResourceKind::SampledImage || binding.Kind == SpirvResourceKind::SeparateImage) &&
+            if ((binding.Kind == shader::SpirvResourceKind::SampledImage || binding.Kind == shader::SpirvResourceKind::SeparateImage) &&
                 binding.ImageInfo.has_value() &&
-                binding.ImageInfo->Dim == SpirvImageDim::Dim2D) {
+                binding.ImageInfo->Dim == shader::SpirvImageDim::Dim2D) {
                 return BindlessSlotType::Texture2DOnly;
             }
             return std::nullopt;
@@ -73,7 +73,7 @@ std::optional<BindlessSlotType> _MapBindlessSlotType(
 }
 
 std::optional<std::pair<uint32_t, uint32_t>> _ResolveUnifiedBinding(
-    const SpirvResourceBinding& binding) noexcept {
+    const shader::SpirvResourceBinding& binding) noexcept {
     const bool hasHlslAbi = binding.HlslSpace.has_value() || binding.HlslRegister.has_value();
     if (hasHlslAbi && (!binding.HlslSpace.has_value() || !binding.HlslRegister.has_value())) {
         RADRAY_ERR_LOG("incomplete hlsl register metadata for '{}'", binding.Name);
@@ -188,7 +188,7 @@ bool _MergeRecord(vector<ParameterRecord>& records, ParameterRecord incoming) no
 
 bool _AppendSpirvBindings(
     vector<ParameterRecord>& records,
-    const SpirvShaderDesc& reflection,
+    const shader::SpirvShaderDesc& reflection,
     ShaderStages stages) noexcept {
     for (const auto& resource : reflection.ResourceBindings) {
         auto bindTypeOpt = _MapSpirvResourceType(resource);
@@ -231,7 +231,7 @@ bool _AppendSpirvBindings(
                     "unsupported bindless resource '{}' with kind {} and image dimension {}",
                     resource.Name,
                     static_cast<uint32_t>(resource.Kind),
-                    resource.ImageInfo.has_value() ? static_cast<uint32_t>(resource.ImageInfo->Dim) : static_cast<uint32_t>(SpirvImageDim::UNKNOWN));
+                    resource.ImageInfo.has_value() ? static_cast<uint32_t>(resource.ImageInfo->Dim) : static_cast<uint32_t>(shader::SpirvImageDim::UNKNOWN));
                 return false;
             }
             record.Parameter.Kind = ShaderParameterKind::BindlessArray;
@@ -344,7 +344,7 @@ std::optional<VulkanMergedPipelineLayout> BuildMergedPipelineLayoutVulkan(
             RADRAY_ERR_LOG("shader '{}' does not have reflection metadata", static_cast<void*>(shader));
             return std::nullopt;
         }
-        const auto* spirv = std::get_if<SpirvShaderDesc>(reflectionOpt.Get());
+        const auto* spirv = std::get_if<shader::SpirvShaderDesc>(reflectionOpt.Get());
         if (spirv == nullptr) {
             RADRAY_ERR_LOG("vk merged binding layout requires spirv reflection metadata");
             return std::nullopt;

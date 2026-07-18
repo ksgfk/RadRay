@@ -75,7 +75,7 @@ std::optional<unique_ptr<Shader>> CompileShader(
     ShaderStage stage,
     vector<byte>& blob,
     string* reason) {
-    DxcCompileOptions options{};
+    shader::DxcCompileOptions options{};
     options.EntryPoint = entryPoint;
     options.Stage = stage;
     options.SM = HlslShaderModel::SM60;

@@ -1,14 +1,14 @@
 #pragma once
 
+#include <optional>
 #include <span>
 #include <string_view>
-#include <optional>
 
-#include <radray/render/common.h>
-#include <radray/render/shader/spirv.h>
-#include <radray/render/shader/msl.h>
+#include <radray/shader/common.h>
+#include <radray/shader/msl.h>
+#include <radray/shader/spirv.h>
 
-namespace radray::render {
+namespace radray::shader {
 
 struct SpirvBytecodeView {
     std::span<const byte> Data;
@@ -32,7 +32,7 @@ struct SpirvToMslOutput {
     string MslSource;
     string EntryPointName;
 
-    inline std::span<const byte> GetBlob() const noexcept {
+    std::span<const byte> GetBlob() const noexcept {
         return std::as_bytes(std::span{MslSource.data(), MslSource.size()});
     }
 };
@@ -40,18 +40,14 @@ struct SpirvToMslOutput {
 struct SpirvAsMslReflectParams {
     std::span<const byte> SpirV;
     std::string_view EntryPoint;
-    ShaderStage Stage;
+    ShaderStage Stage{ShaderStage::UNKNOWN};
     bool UseArgumentBuffers{false};
     std::optional<uint32_t> VertexStageBufferStartIndex{};
     std::optional<uint32_t> FragmentStageBufferStartIndex{};
     std::optional<uint32_t> PushConstantBufferIndex{};
 };
 
-}  // namespace radray::render
-
-#ifdef RADRAY_ENABLE_SPIRV_CROSS
-
-namespace radray::render {
+#if defined(RADRAY_ENABLE_SPIRV_CROSS)
 
 std::optional<SpirvShaderDesc> ReflectSpirv(SpirvBytecodeView bytecode);
 
@@ -63,6 +59,6 @@ std::optional<SpirvToMslOutput> ConvertSpirvToMsl(
 
 std::optional<MslShaderReflection> ReflectSpirvAsMsl(std::span<const SpirvAsMslReflectParams> msls);
 
-}  // namespace radray::render
-
 #endif
+
+}  // namespace radray::shader

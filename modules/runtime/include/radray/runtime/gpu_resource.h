@@ -6,7 +6,6 @@
 
 #include <radray/nullable.h>
 #include <radray/render/common.h>
-#include <radray/runtime/pipeline_cache.h>
 #include <radray/types.h>
 
 namespace radray {
@@ -359,7 +358,7 @@ private:
     uint64_t _framebufferMisses{0};
 };
 
-/// 采样器缓存 (对应 UE5 的 GTextureSamplerStateCache / 各 RHI 后端 sampler cache)。
+/// 采样器缓存
 ///
 /// 设计要点:
 /// - 按 SamplerDescriptor 去重: 相同状态的 sampler 只创建一次。

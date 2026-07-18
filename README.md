@@ -14,6 +14,7 @@ TODO
 * generate compile_commands.json on win
   * python .\tools\win_gen_compile_commands.py --build-dir .\build_debug --configuration Debug
   * python .\tools\win_gen_compile_commands.py --build-dir .\build_release --configuration Release
+  * The script evaluates MSBuild projects in parallel; it does not compile or link targets.
 
 ## dev env
 

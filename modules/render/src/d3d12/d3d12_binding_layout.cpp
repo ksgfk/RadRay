@@ -5,7 +5,7 @@
 #include <utility>
 
 #include <radray/logger.h>
-#include <radray/render/shader/hlsl.h>
+#include <radray/shader/hlsl.h>
 
 namespace radray::render::d3d12 {
 
@@ -27,48 +27,48 @@ constexpr bool _IsRwResourceType(ResourceBindType type) noexcept {
     }
 }
 
-std::optional<ResourceBindType> _MapHlslResourceType(const HlslInputBindDesc& binding) noexcept {
+std::optional<ResourceBindType> _MapHlslResourceType(const shader::HlslInputBindDesc& binding) noexcept {
     switch (binding.Type) {
-        case HlslShaderInputType::CBUFFER:
+        case shader::HlslShaderInputType::CBUFFER:
             return ResourceBindType::CBuffer;
-        case HlslShaderInputType::TBUFFER:
-        case HlslShaderInputType::STRUCTURED:
-        case HlslShaderInputType::BYTEADDRESS:
+        case shader::HlslShaderInputType::TBUFFER:
+        case shader::HlslShaderInputType::STRUCTURED:
+        case shader::HlslShaderInputType::BYTEADDRESS:
             return ResourceBindType::Buffer;
-        case HlslShaderInputType::TEXTURE:
-            return IsBufferDimension(binding.Dimension) ? ResourceBindType::TexelBuffer : ResourceBindType::Texture;
-        case HlslShaderInputType::SAMPLER:
+        case shader::HlslShaderInputType::TEXTURE:
+            return shader::IsBufferDimension(binding.Dimension) ? ResourceBindType::TexelBuffer : ResourceBindType::Texture;
+        case shader::HlslShaderInputType::SAMPLER:
             return ResourceBindType::Sampler;
-        case HlslShaderInputType::UAV_RWTYPED:
-            return IsBufferDimension(binding.Dimension) ? ResourceBindType::RWTexelBuffer : ResourceBindType::RWTexture;
-        case HlslShaderInputType::UAV_RWSTRUCTURED:
-        case HlslShaderInputType::UAV_APPEND_STRUCTURED:
-        case HlslShaderInputType::UAV_CONSUME_STRUCTURED:
-        case HlslShaderInputType::UAV_RWSTRUCTURED_WITH_COUNTER:
-        case HlslShaderInputType::UAV_RWBYTEADDRESS:
+        case shader::HlslShaderInputType::UAV_RWTYPED:
+            return shader::IsBufferDimension(binding.Dimension) ? ResourceBindType::RWTexelBuffer : ResourceBindType::RWTexture;
+        case shader::HlslShaderInputType::UAV_RWSTRUCTURED:
+        case shader::HlslShaderInputType::UAV_APPEND_STRUCTURED:
+        case shader::HlslShaderInputType::UAV_CONSUME_STRUCTURED:
+        case shader::HlslShaderInputType::UAV_RWSTRUCTURED_WITH_COUNTER:
+        case shader::HlslShaderInputType::UAV_RWBYTEADDRESS:
             return ResourceBindType::RWBuffer;
-        case HlslShaderInputType::RTACCELERATIONSTRUCTURE:
+        case shader::HlslShaderInputType::RTACCELERATIONSTRUCTURE:
             return ResourceBindType::AccelerationStructure;
-        case HlslShaderInputType::UAV_FEEDBACKTEXTURE:
+        case shader::HlslShaderInputType::UAV_FEEDBACKTEXTURE:
             return ResourceBindType::RWTexture;
-        case HlslShaderInputType::UNKNOWN:
+        case shader::HlslShaderInputType::UNKNOWN:
             return std::nullopt;
     }
     return std::nullopt;
 }
 
 std::optional<BindlessSlotType> _MapBindlessSlotType(
-    const HlslInputBindDesc& binding,
+    const shader::HlslInputBindDesc& binding,
     ResourceBindType type) noexcept {
     switch (type) {
         case ResourceBindType::Buffer:
         case ResourceBindType::RWBuffer:
-            if (binding.Type == HlslShaderInputType::TEXTURE && IsBufferDimension(binding.Dimension)) {
+            if (binding.Type == shader::HlslShaderInputType::TEXTURE && shader::IsBufferDimension(binding.Dimension)) {
                 return std::nullopt;
             }
             return BindlessSlotType::BufferOnly;
         case ResourceBindType::Texture:
-            if (binding.Dimension == HlslSRVDimension::TEXTURE2D) {
+            if (binding.Dimension == shader::HlslSRVDimension::TEXTURE2D) {
                 return BindlessSlotType::Texture2DOnly;
             }
             return std::nullopt;
@@ -78,7 +78,7 @@ std::optional<BindlessSlotType> _MapBindlessSlotType(
 }
 
 std::optional<std::pair<uint32_t, uint32_t>> _ResolveUnifiedBinding(
-    const HlslInputBindDesc& binding) noexcept {
+    const shader::HlslInputBindDesc& binding) noexcept {
     const bool hasVkAbi = binding.VkSet.has_value() || binding.VkBinding.has_value();
     if (hasVkAbi && (!binding.VkSet.has_value() || !binding.VkBinding.has_value())) {
         RADRAY_ERR_LOG("incomplete vk binding metadata for '{}'", binding.Name);
@@ -188,7 +188,7 @@ bool _MergeRecord(vector<ParameterRecord>& records, ParameterRecord incoming) no
 
 bool _AppendHlslBindings(
     vector<ParameterRecord>& records,
-    const HlslShaderDesc& reflection,
+    const shader::HlslShaderDesc& reflection,
     ShaderStages stages,
     std::span<const PushConstantBinding> pushConstants) noexcept {
     for (const auto& resource : reflection.BoundResources) {
@@ -203,7 +203,7 @@ bool _AppendHlslBindings(
             return false;
         }
         const auto [registerSpace, bindingIndex] = unifiedAbiOpt.value();
-        const bool isPushConstant = resource.Type == HlslShaderInputType::CBUFFER &&
+        const bool isPushConstant = resource.Type == shader::HlslShaderInputType::CBUFFER &&
                                     std::ranges::any_of(
                                         pushConstants,
                                         [registerSpace, bindingIndex](const PushConstantBinding& binding) noexcept {
@@ -229,7 +229,7 @@ bool _AppendHlslBindings(
         record.D3D12.IsBindless = isBindless;
         record.D3D12.Stages = stages;
 
-        if (resource.Type == HlslShaderInputType::CBUFFER) {
+        if (resource.Type == shader::HlslShaderInputType::CBUFFER) {
             auto cbufferOpt = reflection.FindCBufferByName(resource.Name);
             if (!cbufferOpt.HasValue()) {
                 RADRAY_ERR_LOG("cannot find cbuffer reflection for '{}'", resource.Name);
@@ -376,7 +376,7 @@ std::optional<D3D12MergedPipelineLayout> BuildMergedPipelineLayoutD3D12(
             return std::nullopt;
         }
         const ShaderReflectionDesc& reflection = *reflectionOpt.Get();
-        const auto* hlsl = std::get_if<HlslShaderDesc>(&reflection);
+        const auto* hlsl = std::get_if<shader::HlslShaderDesc>(&reflection);
         if (hlsl == nullptr) {
             RADRAY_ERR_LOG("d3d12 merged binding layout requires hlsl reflection metadata");
             return std::nullopt;

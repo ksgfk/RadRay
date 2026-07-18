@@ -4,7 +4,7 @@ radray_add_test(test_staging_buffer_pool SOURCES test_staging_buffer_pool.cpp LI
 radray_add_test(test_gpu_resource SOURCES test_gpu_resource.cpp LINK_LIBS radraycore radrayrender radrayruntime)
 radray_add_test(test_mapped_memory SOURCES test_mapped_memory.cpp LINK_LIBS radraycore radrayrender radrayruntime)
 
-if (RADRAY_ENABLE_DXC AND (RADRAY_ENABLE_D3D12 OR (RADRAY_ENABLE_VULKAN AND RADRAY_ENABLE_SPVCROSS)))
+if (RADRAY_ENABLE_SHADER_JIT AND (RADRAY_ENABLE_D3D12 OR (RADRAY_ENABLE_VULKAN AND RADRAY_ENABLE_SPIRV_CROSS)))
     # TextureAsset view 缓存: 默认 SRV 直返, 非默认子 view 按 descriptor 去重。
     radray_add_test(test_texture_view_cache
         SOURCES
@@ -24,13 +24,4 @@ if (RADRAY_ENABLE_DXC AND (RADRAY_ENABLE_D3D12 OR (RADRAY_ENABLE_VULKAN AND RADR
         NO_DISCOVER)
     target_include_directories(test_resource_uploader PRIVATE ${CMAKE_SOURCE_DIR}/modules/render/tests)
     radray_add_gtest_case(ResourceUploaderRuntimeTest TARGET test_resource_uploader FILTER RenderBackends/ResourceUploaderRuntimeTest.*)
-
-    radray_add_test(test_pipeline_cache_runtime
-        SOURCES
-            test_pipeline_cache_runtime.cpp
-            ${CMAKE_SOURCE_DIR}/modules/render/tests/render_test_framework.cpp
-        LINK_LIBS radraycore radrayrender radrayruntime
-        NO_DISCOVER)
-    target_include_directories(test_pipeline_cache_runtime PRIVATE ${CMAKE_SOURCE_DIR}/modules/render/tests)
-    radray_add_gtest_case(PipelineCacheRuntimeTest TARGET test_pipeline_cache_runtime FILTER RenderBackends/PipelineCacheRuntimeTest.*)
 endif()

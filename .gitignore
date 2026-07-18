@@ -3,6 +3,7 @@
 .xmake
 build
 bin
+obj
 .vs
 
 scripts/options.lua
@@ -21,3 +22,4 @@ project_manifest.lock.json
 artifacts
 .kimix_cache
 .opencode
+build**

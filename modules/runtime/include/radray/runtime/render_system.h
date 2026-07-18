@@ -2,7 +2,6 @@
 
 #include <radray/runtime_type.h>
 #include <radray/runtime/gpu_resource.h>
-#include <radray/runtime/pipeline_cache.h>
 #include <radray/runtime/render_framework/render_pipeline.h>
 #include <radray/runtime/render_framework/scene.h>
 #include <radray/types.h>
@@ -13,9 +12,9 @@ class Application;
 class AppFrameContext;
 struct AppFrameTarget;
 
-namespace render {
+namespace shader {
 class Dxc;
-}  // namespace render
+}  // namespace shader
 
 /// Runtime-side renderer coordinator.
 ///
@@ -30,9 +29,7 @@ public:
     RenderSystem& operator=(RenderSystem&&) = delete;
     ~RenderSystem() noexcept;
 
-    /// 装配阶段调用 (ServiceRegistry::Initialize)。创建 shader 编译设施:
-    /// Dxc + runtime shader/PSO libraries,并把 <exe>/shaderlib
-    /// 作为默认 include 根。同时实例化默认渲染管线 (ForwardPipeline)。
+    /// 装配阶段调用。创建 runtime shader/PSO libraries；启用 JIT 时同时创建 DXC。
     void OnInitialize();
 
     void Render(AppFrameContext& ctx);
@@ -46,12 +43,8 @@ public:
     /// 当前管线的标准材质工厂 (把中性材质描述翻译成本管线材质)。无管线/不支持时返回 null。
     Nullable<IStandardMaterialFactory*> GetStandardMaterialFactory() noexcept;
     SamplerCache* GetSamplerCache() const noexcept { return _samplerCache.get(); }
-    ShaderModuleCache* GetShaderModuleCache() const noexcept { return _shaderModuleCache.get(); }
-    GraphicsPipelineCache* GetGraphicsPipelineCache() const noexcept { return _graphicsPipelineCache.get(); }
-    /// shader 编译默认 include 根目录 (<exe>/shaderlib)。供构建 ShaderPassDesc::IncludeDirs。
+    /// JIT shader 编译根目录 (<exe>/shaderlib)；关闭 JIT 时为空。
     const string& GetShaderIncludeRoot() const noexcept { return _shaderIncludeRoot; }
-    /// 预编译 shader 烘焙产物根目录 (<exe>/shadercache)。DXC 缺失时预编译缓存从此加载。
-    const string& GetShaderBakeRoot() const noexcept { return _shaderBakeRoot; }
 
 private:
     void EnsureRenderTargetState(AppFrameContext& ctx, RenderPipelineTarget& target);
@@ -60,12 +53,9 @@ private:
     Application* _app{nullptr};
     unique_ptr<RenderPipeline> _pipeline;
     vector<unique_ptr<Scene>> _scenes;
-    shared_ptr<render::Dxc> _dxc;
-    unique_ptr<ShaderModuleCache> _shaderModuleCache;
-    unique_ptr<GraphicsPipelineCache> _graphicsPipelineCache;
+    shared_ptr<shader::Dxc> _dxc;
     unique_ptr<SamplerCache> _samplerCache;
     string _shaderIncludeRoot;
-    string _shaderBakeRoot;
 };
 
 template <>

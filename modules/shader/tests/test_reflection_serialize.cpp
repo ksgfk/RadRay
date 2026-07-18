@@ -2,10 +2,10 @@
 
 #include <gtest/gtest.h>
 
-#include <radray/render/shader/hlsl.h>
-#include <radray/render/shader/spirv.h>
+#include <radray/shader/hlsl.h>
+#include <radray/shader/spirv.h>
 
-namespace radray::render {
+namespace radray::shader {
 namespace {
 
 // 构造一个字段丰富的 HlslShaderDesc, 覆盖各类嵌套结构与枚举。
@@ -248,4 +248,4 @@ TEST(ReflectionSerializeTest, EmptyDescRoundTrip) {
 }
 
 }  // namespace
-}  // namespace radray::render
+}  // namespace radray::shader

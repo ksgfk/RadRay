@@ -728,7 +728,7 @@ std::optional<ComputeProgram> ComputeTestContext::CreateComputeProgram(
         return std::nullopt;
     }
 
-    DxcCompileOptions options{};
+    shader::DxcCompileOptions options{};
     options.EntryPoint = entryPoint;
     options.Stage = ShaderStage::Compute;
     options.SM = HlslShaderModel::SM60;

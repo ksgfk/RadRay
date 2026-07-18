@@ -115,7 +115,11 @@ keyword 有两种来源：
 | D3D12 | DXIL | DXC/D3D12 reflection |
 | Vulkan | SPIR-V | SPIRV-Cross reflection |
 
-`RenderSystem` 初始化时优先创建 DXC JIT 变体库。DXC 不可用时，回退到 `<exe>/shadercache` 中的预编译字节码与 JSON 反射 sidecar。离线工具 `tools/bake_shaders.py` 和 `radray_shader_baker` 可以生成 DXIL/SPIR-V 产物。
+发布 Shader 由 `tools/shader_cooker/radray_shader_cooker` 从单资产 JSON 编译成完整的
+`ShaderAsset.bin`，文件内可同时包含 DXIL、SPIR-V、Pass 元数据、显式变体和反射数据。
+runtime `ShaderAsset` 读取该文件，`ShaderModuleCache` 只负责按需创建和缓存 GPU Shader。
+`RADRAY_ENABLE_SHADER_JIT` 开启时，缺失变体才会使用 `.bin` 内的源码配方回退到 DXC；
+关闭 JIT 的发布构建不需要部署 DXC 或 HLSL 源文件。
 
 编译产物和后续状态按层缓存：
 
@@ -509,4 +513,3 @@ meshComponent->SetPropertyBlock(sectionIndex, std::move(block));
 - 游戏线程修改、渲染线程无锁读取的不可变材质快照。
 
 对于上层应用，它提供的核心价值不是单一 PBR shader，而是把“导入器材质描述、shader 变体、参数绑定、渲染状态、资源生命周期和 draw 提交”连接成了一条可复用的运行时路径。
-

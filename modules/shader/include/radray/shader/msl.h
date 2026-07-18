@@ -7,7 +7,7 @@
 
 #include <radray/types.h>
 
-namespace radray::render {
+namespace radray::shader {
 
 enum class MslPlatform {
     MacOS,
@@ -188,4 +188,4 @@ std::string_view format_as(MslAccess v) noexcept;
 std::string_view format_as(MslTextureType v) noexcept;
 std::string_view format_as(MslStage v) noexcept;
 
-}  // namespace radray::render
+}  // namespace radray::shader
