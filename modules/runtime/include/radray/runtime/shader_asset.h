@@ -59,6 +59,7 @@ public:
 
 private:
     shader::ShaderBinary _binary;
+    bool _valid{false};
 };
 
 StreamingAssetRef<ShaderAsset> LoadShaderAsset(

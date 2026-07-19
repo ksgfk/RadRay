@@ -11,18 +11,14 @@
 //   - gMaterial (b0, space2):    per-material persistent cbuffer。
 //   - gView (b0, space1):        per-view dynamic cbuffer。
 //   - gPerObject (b1, space0):   per-object dynamic cbuffer。
-//   - gShadowCube(t0)/gShadowSampler(s0): 管线级全局资源 (ForwardPipeline 每 draw 绑定)。
-//   - 贴图/采样器 (space1, t1.. / s1): keyword 存在时声明。
+//   - gShadowCube(t1)/gShadowArray(t2)/gShadowSampler(s3): ForwardPipeline 资源。
+//   - 贴图/采样器 (space2, t1.. / s6): MaterialAsset 持久绑定。
 //
 // shader 变体 (keyword, 全 #ifdef 编译期分支, 不用 cbuffer 值做运行期 if):
 //   贴图存在性: _BASECOLOR_MAP / _METALROUGHNESS_MAP / _NORMAL_MAP / _OCCLUSION_MAP / _EMISSIVE_MAP
 //   alpha/双面: _ALPHATEST_ON (clip cutoff) / _ALPHABLEND_ON (输出 alpha) / _DOUBLESIDED_ON (背面法线翻转)
-#include "common.hlsl"
+#include "forward_pipeline/forward_interface.hlsl"
 #include "principled.hlsl"
-#include "light.hlsl"
-#include "point_shadow.hlsl"
-#include "shadow.hlsl"
-#include "cascade_shadow.hlsl"
 
 struct VertexInput {
     float3 Position : POSITION0;
@@ -39,25 +35,6 @@ struct VertexOutput {
     float4 WorldTangent : TANGENT0;  // xyz 世界切线, w 手性
 };
 
-// per-view 常量 (b0, space1)。列主序,与 Eigen / CPU 端一致。
-// 灯光以定长数组内联 (arena 缓冲不支持 StructuredBuffer, 故用 cbuffer 数组)。
-struct ViewConstants {
-    float4x4 ViewProj;      // 世界 -> 裁剪
-    float4 CameraPosition;  // xyz 相机世界位置
-    // x = point light count, y = shadow point-light index+1 (0 = 无阴影),
-    // z = directional light count, w = directional-shadow light index+1 (0 = 无阴影)
-    uint4 LightCounts;
-    PointLightGpu PointLights[RR_MAX_POINT_LIGHTS];
-    DirectionalLightGpu DirectionalLights[RR_MAX_DIRECTIONAL_LIGHTS];
-    PointShadowData PointShadow;    // 投影阴影点光源的立方体阴影数据
-    ShadowParam DirectionalShadow;  // 投影级联阴影方向光的 CSM 数据
-};
-
-// per-object 常量 (b1, space1)。执行器写入 ObjectToWorld。
-struct PerObject {
-    float4x4 ObjectToWorld;
-};
-
 // per-material 常量。数值参数走持久 cbuffer; 分支走 keyword。
 struct MaterialConstants {
     float4 BaseColor;    // rgb 基础色 (= glTF baseColorFactor), a 不透明度
@@ -68,36 +45,16 @@ struct MaterialConstants {
     float4 Principled2;  // x spec trans, y eta, zw 保留
 };
 
-// Binding frequency ABI:
-//   space0: per-object dynamic cbuffer
-//   space1: per-view/pass resources
-//   space2: persistent per-material resources
-VK_BINDING(1, 0) ConstantBuffer<PerObject> gPerObject : register(b1, space0);
-VK_BINDING(0, 1) ConstantBuffer<ViewConstants> gView : register(b0, space1);
-VK_BINDING(0, 2) ConstantBuffer<MaterialConstants> gMaterial : register(b0, space2);
-
-// 点光源立方体阴影图 + 方向光级联阴影图 + 比较采样器 (由 ForwardPipeline 作为管线级全局资源每 draw 绑定)。
-// _POINT_SHADOWS / _DIRECTIONAL_SHADOWS keyword (对应 URP 的 _MAIN_LIGHT_SHADOWS(_CASCADE)):
-// 本帧无对应类型的投影阴影时该 keyword 关闭, 阴影图绑定 + 采样代码整块从变体里剔除。
-// 比较采样器 gShadowSampler 两类阴影共用, 任一启用即声明。
-#ifdef _POINT_SHADOWS
-    VK_BINDING(1, 1) TextureCube<float> gShadowCube : register(t1, space1);
-#endif
-#ifdef _DIRECTIONAL_SHADOWS
-    VK_BINDING(2, 1) Texture2DArray<float> gShadowArray : register(t2, space1);
-#endif
-#if defined(_POINT_SHADOWS) || defined(_DIRECTIONAL_SHADOWS)
-    VK_BINDING(3, 1) SamplerComparisonState gShadowSampler : register(s3, space1);
-#endif
+RADRAY_FORWARD_MATERIAL_CBUFFER(MaterialConstants, gMaterial);
 
 // 贴图 / 采样器 (space2)。五个槽始终存在，keyword 只控制采样代码，绝不改变 ABI。
-VK_BINDING(1, 2) Texture2D gBaseColorMap : register(t1, space2);
-VK_BINDING(2, 2) Texture2D gMetalRoughMap : register(t2, space2);
-VK_BINDING(3, 2) Texture2D gNormalMap : register(t3, space2);
-VK_BINDING(4, 2) Texture2D gOcclusionMap : register(t4, space2);
-VK_BINDING(5, 2) Texture2D gEmissiveMap : register(t5, space2);
+RADRAY_FORWARD_MATERIAL_TEXTURE2D(gBaseColorMap, 1, 1);
+RADRAY_FORWARD_MATERIAL_TEXTURE2D(gMetalRoughMap, 2, 2);
+RADRAY_FORWARD_MATERIAL_TEXTURE2D(gNormalMap, 3, 3);
+RADRAY_FORWARD_MATERIAL_TEXTURE2D(gOcclusionMap, 4, 4);
+RADRAY_FORWARD_MATERIAL_TEXTURE2D(gEmissiveMap, 5, 5);
 #define RR_HAS_ANY_TEXTURE 1
-VK_BINDING(6, 2) SamplerState gSampler : register(s6, space2);
+RADRAY_FORWARD_MATERIAL_SAMPLER(gSampler, 6, 6);
 
 VertexOutput VSMain(VertexInput input) {
     VertexOutput output;

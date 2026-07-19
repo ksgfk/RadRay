@@ -1,4 +1,4 @@
-#include "common.hlsl"
+#include "forward_pipeline/forward_interface.hlsl"
 
 struct VertexInput {
     float3 Position : POSITION0;
@@ -7,17 +7,6 @@ struct VertexInput {
 struct VertexOutput {
     float4 Position : SV_Position;
 };
-
-struct PerObject {
-    float4x4 ObjectToWorld;
-};
-
-struct ViewConstants {
-    float4x4 ViewProj;
-};
-
-VK_BINDING(1, 0) ConstantBuffer<PerObject> gPerObject : register(b1, space0);
-VK_BINDING(0, 1) ConstantBuffer<ViewConstants> gView : register(b0, space1);
 
 VertexOutput VSMain(VertexInput input) {
     VertexOutput output;

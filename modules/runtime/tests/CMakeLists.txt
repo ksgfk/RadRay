@@ -3,6 +3,18 @@ radray_add_test(test_deferred_render_delete_queue SOURCES test_deferred_render_d
 radray_add_test(test_staging_buffer_pool SOURCES test_staging_buffer_pool.cpp LINK_LIBS radraycore radrayrender radrayruntime)
 radray_add_test(test_gpu_resource SOURCES test_gpu_resource.cpp LINK_LIBS radraycore radrayrender radrayruntime)
 radray_add_test(test_mapped_memory SOURCES test_mapped_memory.cpp LINK_LIBS radraycore radrayrender radrayruntime)
+radray_add_test(test_material_layout SOURCES test_material_layout.cpp LINK_LIBS radraycore radrayrender radrayruntime)
+radray_add_test(test_material_asset SOURCES test_material_asset.cpp LINK_LIBS radraycore radrayrender radrayruntime)
+
+if (TARGET radray_shader_cooker AND RADRAY_ENABLE_DXC AND RADRAY_ENABLE_SPIRV_CROSS)
+    radray_add_test(test_forward_material_cooker
+        SOURCES test_forward_material_cooker.cpp
+        LINK_LIBS radraycore radrayrender radrayruntime)
+    add_dependencies(test_forward_material_cooker radray_shader_cooker)
+    target_compile_definitions(test_forward_material_cooker PRIVATE
+        RADRAY_PROJECT_DIR="${CMAKE_SOURCE_DIR}"
+        RADRAY_SHADER_COOKER_PATH="$<TARGET_FILE:radray_shader_cooker>")
+endif()
 
 if (RADRAY_ENABLE_SHADER_JIT AND (RADRAY_ENABLE_D3D12 OR (RADRAY_ENABLE_VULKAN AND RADRAY_ENABLE_SPIRV_CROSS)))
     # TextureAsset view 缓存: 默认 SRV 直返, 非默认子 view 按 descriptor 去重。

@@ -9,6 +9,7 @@
 // depth-only, 无 material push constant, 无 color target。PSMain 为空 (仅写深度)。
 
 #include "common.hlsl"
+#include "forward_pipeline/binding_abi.hlsl"
 
 struct VertexInput {
     float3 Position : POSITION0;
@@ -33,8 +34,10 @@ struct PerObject {
     float4x4 ObjectToWorld;
 };
 
-VK_BINDING(1, 0) ConstantBuffer<PerObject> gPerObject : register(b1, space0);
-VK_BINDING(0, 1) ConstantBuffer<ShadowViewConstants> gShadowView : register(b0, space1);
+VK_BINDING(1, RADRAY_FORWARD_OBJECT_BINDING_GROUP)
+ConstantBuffer<PerObject> gPerObject : register(b1, RADRAY_FORWARD_OBJECT_SPACE);
+VK_BINDING(0, RADRAY_FORWARD_PIPELINE_BINDING_GROUP)
+ConstantBuffer<ShadowViewConstants> gShadowView : register(b0, RADRAY_FORWARD_PIPELINE_SPACE);
 
 VertexOutput VSMain(VertexInput input, uint instanceId : SV_InstanceID) {
     VertexOutput output;

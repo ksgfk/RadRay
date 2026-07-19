@@ -131,16 +131,19 @@ render::StencilState ToRenderStencilState(const shader::StencilState& value) noe
 
 ShaderAsset::ShaderAsset(vector<ShaderPassDesc> passes) noexcept {
     _binary.Asset.Passes = std::move(passes);
+    _valid = shader::IsShaderAssetDataValid(_binary.Asset, false);
 }
 
 ShaderAsset::ShaderAsset(shader::ShaderBinary binary) noexcept
     : _binary(std::move(binary)) {
+    _valid = _binary.IsValid();
 }
 
 ShaderAsset::~ShaderAsset() noexcept = default;
 
 void ShaderAsset::OnUnload(IRenderResourceRecycler& /*recycler*/) {
     _binary = {};
+    _valid = false;
 }
 
 AssetTypeId ShaderAsset::GetTypeId() const noexcept {
@@ -148,10 +151,7 @@ AssetTypeId ShaderAsset::GetTypeId() const noexcept {
 }
 
 bool ShaderAsset::IsValid() const noexcept {
-    if (_binary.Stages.empty()) {
-        return shader::IsShaderAssetDataValid(_binary.Asset, false);
-    }
-    return _binary.IsValid();
+    return _valid;
 }
 
 Nullable<const shader::CompiledShaderStage*> ShaderAsset::FindCompiledStage(

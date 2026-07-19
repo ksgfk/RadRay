@@ -168,9 +168,20 @@ bool IsPassValid(const ShaderPassDesc& pass, bool requireVariants) {
     }
 
     const uint32_t programStages = GetProgramStageMask(pass);
-    for (const ShaderKeywordGroupDesc& group : pass.KeywordGroups) {
+    unordered_map<string, size_t> keywordOwners;
+    for (size_t groupIndex = 0; groupIndex < pass.KeywordGroups.size(); ++groupIndex) {
+        const ShaderKeywordGroupDesc& group = pass.KeywordGroups[groupIndex];
         if (!IsKeywordGroupValid(group, programStages)) {
             return false;
+        }
+        for (const string& alternative : group.Alternatives) {
+            if (alternative.empty()) {
+                continue;
+            }
+            const auto [it, inserted] = keywordOwners.emplace(alternative, groupIndex);
+            if (!inserted && it->second != groupIndex) {
+                return false;
+            }
         }
     }
     for (size_t i = 0; i < pass.Tags.size(); ++i) {
@@ -218,9 +229,26 @@ bool IsShaderAssetDataValid(const ShaderAssetData& asset, bool requireVariants) 
         return false;
     }
     try {
-        return std::ranges::all_of(asset.Passes, [requireVariants](const ShaderPassDesc& pass) {
-            return IsPassValid(pass, requireVariants);
-        });
+        if (!std::ranges::all_of(asset.Passes, [requireVariants](const ShaderPassDesc& pass) {
+                return IsPassValid(pass, requireVariants);
+            })) {
+            return false;
+        }
+        unordered_map<string, ShaderKeywordScope> scopes;
+        for (const ShaderPassDesc& pass : asset.Passes) {
+            for (const ShaderKeywordGroupDesc& group : pass.KeywordGroups) {
+                for (const string& alternative : group.Alternatives) {
+                    if (alternative.empty()) {
+                        continue;
+                    }
+                    const auto [it, inserted] = scopes.emplace(alternative, group.Scope);
+                    if (!inserted && it->second != group.Scope) {
+                        return false;
+                    }
+                }
+            }
+        }
+        return true;
     } catch (...) {
         return false;
     }

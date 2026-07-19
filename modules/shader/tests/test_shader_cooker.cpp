@@ -45,10 +45,10 @@ string MakeManifest(
     }}
   }}]
 }})json",
-        kAssetId,
-        source,
-        validKeyword ? "USE_TEST=1" : "UNKNOWN=1",
-        vertexEntry);
+                       kAssetId,
+                       source,
+                       validKeyword ? "USE_TEST=1" : "UNKNOWN=1",
+                       vertexEntry);
 }
 
 int RunCooker(
