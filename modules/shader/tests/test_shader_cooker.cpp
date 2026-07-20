@@ -22,7 +22,8 @@ constexpr std::string_view kAssetId = "f03d7516-40d4-4e48-8655-f46f053ee891";
 string MakeManifest(
     bool validKeyword,
     std::string_view vertexEntry = "VSMain",
-    std::string_view source = "forward_pipeline/error_pass.hlsl") {
+    std::string_view source = "forward_pipeline/error_pass.hlsl",
+    std::string_view keywordStages = "\"vertex\", \"pixel\"") {
     return fmt::format(R"json({{
   "AssetId": "{}",
   "Passes": [{{
@@ -33,7 +34,7 @@ string MakeManifest(
     "EnableUnbounded": false,
     "Keywords": [{{
       "Scope": "local",
-      "Stages": ["vertex", "pixel"],
+      "Stages": [{}],
       "Alternatives": ["", "USE_TEST=1"]
     }}],
     "Variants": [[], ["{}"]],
@@ -47,6 +48,7 @@ string MakeManifest(
 }})json",
                        kAssetId,
                        source,
+                       keywordStages,
                        validKeyword ? "USE_TEST=1" : "UNKNOWN=1",
                        vertexEntry);
 }
@@ -91,30 +93,53 @@ TEST(ShaderCookerTest, ProducesDxilAndSpirvPartitions) {
     ASSERT_TRUE(dxil.has_value());
     EXPECT_EQ(dxil->Asset.AssetId, Guid::Parse(kAssetId));
     EXPECT_EQ(dxil->Asset.Passes.front().Name, "CookerTest");
-    EXPECT_TRUE(dxil->Find(ShaderTarget::DXIL, 0, ShaderStage::Vertex, {}).HasValue());
-    EXPECT_TRUE(dxil->Find(ShaderTarget::DXIL, 0, ShaderStage::Pixel, {"USE_TEST=1"}).HasValue());
-    EXPECT_FALSE(dxil->Find(ShaderTarget::SPIRV, 0, ShaderStage::Vertex, {}).HasValue());
+    EXPECT_TRUE(dxil->FindStageArtifact(ShaderTarget::DXIL, 0, ShaderStage::Vertex, {}).HasValue());
+    EXPECT_TRUE(dxil->FindStageArtifact(ShaderTarget::DXIL, 0, ShaderStage::Pixel, {"USE_TEST=1"}).HasValue());
+    EXPECT_FALSE(dxil->FindStageArtifact(ShaderTarget::SPIRV, 0, ShaderStage::Vertex, {}).HasValue());
+    EXPECT_TRUE(dxil->IsBakeComplete(ShaderTarget::DXIL));
 
 #if defined(RADRAY_ENABLE_SPIRV_CROSS)
     const std::filesystem::path spirvOutput = directory / "shader.spirv.bin";
     ASSERT_EQ(RunCooker(input, spirvOutput, "spirv"), 0);
     auto spirv = ReadShaderBinary(spirvOutput);
     ASSERT_TRUE(spirv.has_value());
-    EXPECT_TRUE(spirv->Find(ShaderTarget::SPIRV, 0, ShaderStage::Vertex, {}).HasValue());
-    EXPECT_TRUE(spirv->Find(ShaderTarget::SPIRV, 0, ShaderStage::Pixel, {"USE_TEST=1"}).HasValue());
-    EXPECT_FALSE(spirv->Find(ShaderTarget::DXIL, 0, ShaderStage::Vertex, {}).HasValue());
+    EXPECT_TRUE(spirv->FindStageArtifact(ShaderTarget::SPIRV, 0, ShaderStage::Vertex, {}).HasValue());
+    EXPECT_TRUE(spirv->FindStageArtifact(ShaderTarget::SPIRV, 0, ShaderStage::Pixel, {"USE_TEST=1"}).HasValue());
+    EXPECT_FALSE(spirv->FindStageArtifact(ShaderTarget::DXIL, 0, ShaderStage::Vertex, {}).HasValue());
 
     const std::filesystem::path allOutput = directory / "shader.all.bin";
     ASSERT_EQ(RunCooker(input, allOutput, "all"), 0);
     auto all = ReadShaderBinary(allOutput);
     ASSERT_TRUE(all.has_value());
-    EXPECT_TRUE(all->Find(ShaderTarget::DXIL, 0, ShaderStage::Vertex, {}).HasValue());
-    EXPECT_TRUE(all->Find(ShaderTarget::SPIRV, 0, ShaderStage::Vertex, {}).HasValue());
+    EXPECT_TRUE(all->FindStageArtifact(ShaderTarget::DXIL, 0, ShaderStage::Vertex, {}).HasValue());
+    EXPECT_TRUE(all->FindStageArtifact(ShaderTarget::SPIRV, 0, ShaderStage::Vertex, {}).HasValue());
+    EXPECT_EQ(all->ProgramVariants.size(), 4u);
 #else
     const std::filesystem::path spirvOutput = directory / "shader.spirv.bin";
     EXPECT_NE(RunCooker(input, spirvOutput, "spirv"), 0);
     EXPECT_FALSE(std::filesystem::exists(spirvOutput));
 #endif
+    std::error_code ignored;
+    std::filesystem::remove_all(directory, ignored);
+}
+
+TEST(ShaderCookerTest, DeduplicatesStageProjectedVariants) {
+    const std::filesystem::path directory =
+        std::filesystem::temp_directory_path() / fmt::format("radray_shader_cooker_projection_{}", Guid::NewGuid());
+    const std::filesystem::path input = directory / "shader.json";
+    const std::filesystem::path output = directory / "shader.bin";
+    ASSERT_TRUE(WriteTextFile(input, MakeManifest(true, "VSMain", "forward_pipeline/error_pass.hlsl", "\"pixel\"")));
+    ASSERT_EQ(RunCooker(input, output, "dxil"), 0);
+    auto binary = ReadShaderBinary(output);
+    ASSERT_TRUE(binary.has_value());
+    ASSERT_EQ(binary->ProgramVariants.size(), 2u);
+    ASSERT_EQ(binary->StageArtifacts.size(), 3u);
+    auto baseVertex = binary->FindStageArtifact(ShaderTarget::DXIL, 0, ShaderStage::Vertex, {});
+    auto keywordVertex = binary->FindStageArtifact(
+        ShaderTarget::DXIL, 0, ShaderStage::Vertex, {"USE_TEST=1"});
+    ASSERT_TRUE(baseVertex.HasValue());
+    ASSERT_TRUE(keywordVertex.HasValue());
+    EXPECT_EQ(baseVertex.Get(), keywordVertex.Get());
     std::error_code ignored;
     std::filesystem::remove_all(directory, ignored);
 }

@@ -5,8 +5,152 @@
 #include <limits>
 #include <type_traits>
 
+#include <fmt/format.h>
+
+#include <radray/file.h>
+
 namespace radray::shader {
 namespace {
+
+struct SourceFile {
+    string IdentityPath;
+    std::filesystem::path Path;
+    vector<byte> Bytes;
+};
+
+bool IsPathUnderRoot(
+    const std::filesystem::path& root,
+    const std::filesystem::path& candidate) noexcept {
+    const std::filesystem::path relative = candidate.lexically_relative(root);
+    return !relative.empty() && *relative.begin() != "..";
+}
+
+string RemoveComments(std::string_view source) {
+    enum class State : uint8_t {
+        Normal,
+        LineComment,
+        BlockComment,
+        String,
+        Character,
+    };
+    State state = State::Normal;
+    string result(source.size(), ' ');
+    bool escaped = false;
+    for (size_t i = 0; i < source.size(); ++i) {
+        const char current = source[i];
+        const char next = i + 1 < source.size() ? source[i + 1] : '\0';
+        if (current == '\n' || current == '\r') {
+            result[i] = current;
+            if (state == State::LineComment) state = State::Normal;
+            continue;
+        }
+        switch (state) {
+            case State::Normal:
+                if (current == '/' && next == '/') {
+                    state = State::LineComment;
+                    ++i;
+                } else if (current == '/' && next == '*') {
+                    state = State::BlockComment;
+                    ++i;
+                } else {
+                    result[i] = current;
+                    if (current == '"')
+                        state = State::String;
+                    else if (current == '\'')
+                        state = State::Character;
+                }
+                break;
+            case State::LineComment: break;
+            case State::BlockComment:
+                if (current == '*' && next == '/') {
+                    state = State::Normal;
+                    ++i;
+                }
+                break;
+            case State::String:
+            case State::Character:
+                result[i] = current;
+                if (escaped) {
+                    escaped = false;
+                } else if (current == '\\') {
+                    escaped = true;
+                } else if ((state == State::String && current == '"') ||
+                           (state == State::Character && current == '\'')) {
+                    state = State::Normal;
+                }
+                break;
+        }
+    }
+    return result;
+}
+
+bool ParseIncludes(
+    std::string_view source,
+    vector<string>& includes,
+    string& error) {
+    const string uncommented = RemoveComments(source);
+    const std::string_view uncommentedView{uncommented};
+    size_t lineBegin = 0;
+    while (lineBegin <= uncommentedView.size()) {
+        const size_t lineEnd = uncommentedView.find('\n', lineBegin);
+        const std::string_view line = uncommentedView.substr(
+            lineBegin,
+            lineEnd == std::string_view::npos
+                ? uncommentedView.size() - lineBegin
+                : lineEnd - lineBegin);
+        size_t offset = line.find_first_not_of(" \t");
+        if (offset != std::string_view::npos && line[offset] == '#') {
+            ++offset;
+            while (offset < line.size() && (line[offset] == ' ' || line[offset] == '\t')) {
+                ++offset;
+            }
+            constexpr std::string_view keyword = "include";
+            if (line.substr(offset, keyword.size()) == keyword) {
+                offset += keyword.size();
+                if (offset < line.size() && line[offset] != ' ' && line[offset] != '\t') {
+                    if (lineEnd == std::string_view::npos) break;
+                    lineBegin = lineEnd + 1;
+                    continue;
+                }
+                while (offset < line.size() && (line[offset] == ' ' || line[offset] == '\t')) {
+                    ++offset;
+                }
+                if (offset >= line.size() || (line[offset] != '"' && line[offset] != '<')) {
+                    error = "macro-based #include cannot be included in the shader source identity";
+                    return false;
+                }
+                const char close = line[offset] == '"' ? '"' : '>';
+                const size_t end = line.find(close, offset + 1);
+                if (end == std::string_view::npos || end == offset + 1) {
+                    error = "malformed #include directive";
+                    return false;
+                }
+                includes.emplace_back(line.substr(offset + 1, end - offset - 1));
+            }
+        }
+        if (lineEnd == std::string_view::npos) break;
+        lineBegin = lineEnd + 1;
+    }
+    return true;
+}
+
+void AppendU32(vector<byte>& output, uint32_t value) {
+    for (uint32_t i = 0; i < 4; ++i) {
+        output.emplace_back(static_cast<byte>((value >> (i * 8)) & 0xffu));
+    }
+}
+
+void AppendU64(vector<byte>& output, uint64_t value) {
+    for (uint32_t i = 0; i < 8; ++i) {
+        output.emplace_back(static_cast<byte>((value >> (i * 8)) & 0xffu));
+    }
+}
+
+void AppendString(vector<byte>& output, std::string_view value) {
+    AppendU32(output, static_cast<uint32_t>(value.size()));
+    const auto bytes = std::as_bytes(std::span{value.data(), value.size()});
+    output.insert(output.end(), bytes.begin(), bytes.end());
+}
 
 bool IsUtf8Valid(std::string_view value) noexcept {
     const auto* data = reinterpret_cast<const uint8_t*>(value.data());
@@ -120,7 +264,7 @@ bool IsKeywordGroupValid(const ShaderKeywordGroupDesc& group, uint32_t programSt
     return true;
 }
 
-bool IsPassValid(const ShaderPassDesc& pass, bool requireVariants) {
+bool IsPassValid(const ShaderPassDesc& pass, bool requireBakeSet) {
     if (!IsRelativeResourcePathValid(pass.SourcePath, false) ||
         !IsEnumInRange(pass.SM, HlslShaderModel::SM66)) {
         return false;
@@ -169,8 +313,8 @@ bool IsPassValid(const ShaderPassDesc& pass, bool requireVariants) {
 
     const uint32_t programStages = GetProgramStageMask(pass);
     unordered_map<string, size_t> keywordOwners;
-    for (size_t groupIndex = 0; groupIndex < pass.KeywordGroups.size(); ++groupIndex) {
-        const ShaderKeywordGroupDesc& group = pass.KeywordGroups[groupIndex];
+    for (size_t groupIndex = 0; groupIndex < pass.VariantDomain.KeywordGroups.size(); ++groupIndex) {
+        const ShaderKeywordGroupDesc& group = pass.VariantDomain.KeywordGroups[groupIndex];
         if (!IsKeywordGroupValid(group, programStages)) {
             return false;
         }
@@ -195,20 +339,16 @@ bool IsPassValid(const ShaderPassDesc& pass, bool requireVariants) {
         }
     }
 
-    if (requireVariants) {
-        const bool hasEmptyVariant = std::ranges::any_of(
-            pass.Variants,
-            [](const ShaderVariantDesc& variant) noexcept { return variant.Defines.empty(); });
-        if (pass.Variants.empty() || !hasEmptyVariant) return false;
-    }
-    for (size_t i = 0; i < pass.Variants.size(); ++i) {
-        vector<string> normalized = pass.Variants[i].Defines;
+    if (requireBakeSet && pass.BakeSet.Variants.empty()) return false;
+    for (size_t i = 0; i < pass.BakeSet.Variants.size(); ++i) {
+        vector<string> normalized = pass.BakeSet.Variants[i].Defines;
         NormalizeShaderDefines(normalized);
-        if (normalized != pass.Variants[i].Defines || !AreShaderDefinesValid(pass, ShaderStage::UNKNOWN, normalized)) {
+        if (normalized != pass.BakeSet.Variants[i].Defines ||
+            !AreShaderDefinesValid(pass, ShaderStage::UNKNOWN, normalized)) {
             return false;
         }
         for (size_t j = 0; j < i; ++j) {
-            if (pass.Variants[j].Defines == normalized) {
+            if (pass.BakeSet.Variants[j].Defines == normalized) {
                 return false;
             }
         }
@@ -218,25 +358,145 @@ bool IsPassValid(const ShaderPassDesc& pass, bool requireVariants) {
 
 }  // namespace
 
+ShaderSourceIdentityResult ComputeShaderSourceIdentity(
+    const std::filesystem::path& shaderRoot,
+    const ShaderPassDesc& pass) noexcept {
+    ShaderSourceIdentityResult result;
+    try {
+        std::error_code error;
+        const std::filesystem::path root = std::filesystem::weakly_canonical(shaderRoot, error);
+        if (error || !std::filesystem::is_directory(root)) {
+            result.Error = fmt::format("shader root '{}' is unavailable", shaderRoot.string());
+            return result;
+        }
+        vector<std::filesystem::path> includeRoots{root};
+        for (const string& includeDir : pass.IncludeDirs) {
+            const std::filesystem::path includeRoot = std::filesystem::weakly_canonical(
+                root / std::filesystem::path{
+                           std::u8string{includeDir.begin(), includeDir.end()}},
+                error);
+            if (error || !std::filesystem::is_directory(includeRoot) ||
+                !IsPathUnderRoot(root, includeRoot)) {
+                result.Error = fmt::format(
+                    "shader include directory '{}' is unavailable",
+                    includeDir);
+                return result;
+            }
+            includeRoots.emplace_back(includeRoot);
+        }
+
+        vector<SourceFile> files;
+        vector<std::filesystem::path> pending{
+            root / std::filesystem::path{
+                       std::u8string{pass.SourcePath.begin(), pass.SourcePath.end()}}};
+        while (!pending.empty()) {
+            const std::filesystem::path requested = std::move(pending.back());
+            pending.pop_back();
+            const std::filesystem::path path = std::filesystem::weakly_canonical(requested, error);
+            if (error || !std::filesystem::is_regular_file(path) ||
+                !IsPathUnderRoot(root, path)) {
+                result.Error = fmt::format(
+                    "shader source '{}' is missing or escapes the shader root",
+                    requested.string());
+                return result;
+            }
+            const string identityPath = path.lexically_relative(root).generic_string();
+            if (std::ranges::any_of(files, [&](const SourceFile& value) {
+                    return value.IdentityPath == identityPath;
+                })) {
+                continue;
+            }
+            auto bytes = ReadBinaryFile(path);
+            if (!bytes.has_value()) {
+                result.Error = fmt::format("failed to read shader source '{}'", path.string());
+                return result;
+            }
+            string text{
+                reinterpret_cast<const char*>(bytes->data()),
+                bytes->size()};
+            vector<string> includes;
+            if (!ParseIncludes(text, includes, result.Error)) {
+                result.Error = fmt::format("{} in '{}'", result.Error, identityPath);
+                return result;
+            }
+            files.emplace_back(SourceFile{
+                .IdentityPath = identityPath,
+                .Path = path,
+                .Bytes = std::move(*bytes)});
+            for (const string& include : includes) {
+                std::optional<std::filesystem::path> resolved;
+                vector<std::filesystem::path> searchRoots{path.parent_path()};
+                searchRoots.insert(
+                    searchRoots.end(),
+                    includeRoots.begin(),
+                    includeRoots.end());
+                for (const std::filesystem::path& searchRoot : searchRoots) {
+                    const std::filesystem::path candidate =
+                        searchRoot /
+                        std::filesystem::path{std::u8string{include.begin(), include.end()}};
+                    if (std::filesystem::is_regular_file(candidate)) {
+                        resolved = candidate;
+                        break;
+                    }
+                }
+                if (!resolved.has_value()) {
+                    result.Error = fmt::format(
+                        "include '{}' referenced by '{}' is unavailable",
+                        include,
+                        identityPath);
+                    return result;
+                }
+                pending.emplace_back(std::move(*resolved));
+            }
+        }
+
+        std::ranges::sort(files, {}, &SourceFile::IdentityPath);
+        vector<byte> identityBytes;
+        AppendString(identityBytes, "radray-source-graph-v1");
+        result.Identity.emplace();
+        for (const SourceFile& file : files) {
+            AppendString(identityBytes, file.IdentityPath);
+            AppendU64(identityBytes, static_cast<uint64_t>(file.Bytes.size()));
+            identityBytes.insert(identityBytes.end(), file.Bytes.begin(), file.Bytes.end());
+            result.Identity->Dependencies.emplace_back(file.IdentityPath);
+        }
+        if (files.empty()) {
+            result.Identity.reset();
+            result.Error = "shader source graph is empty";
+            return result;
+        }
+        result.Identity->Hash = HashShaderBytes(identityBytes);
+        return result;
+    } catch (const std::exception& error) {
+        result.Identity.reset();
+        result.Error = error.what();
+        return result;
+    } catch (...) {
+        result.Identity.reset();
+        result.Error = "failed to compute shader source identity";
+        return result;
+    }
+}
+
 void NormalizeShaderDefines(vector<string>& defines) {
     std::erase_if(defines, [](const string& value) noexcept { return value.empty(); });
     std::ranges::sort(defines);
     defines.erase(std::unique(defines.begin(), defines.end()), defines.end());
 }
 
-bool IsShaderAssetDataValid(const ShaderAssetData& asset, bool requireVariants) noexcept {
+bool IsShaderAssetDataValid(const ShaderAssetData& asset, bool requireBakeSet) noexcept {
     if (asset.Passes.empty() || asset.Passes.size() > std::numeric_limits<uint32_t>::max()) {
         return false;
     }
     try {
-        if (!std::ranges::all_of(asset.Passes, [requireVariants](const ShaderPassDesc& pass) {
-                return IsPassValid(pass, requireVariants);
+        if (!std::ranges::all_of(asset.Passes, [requireBakeSet](const ShaderPassDesc& pass) {
+                return IsPassValid(pass, requireBakeSet);
             })) {
             return false;
         }
         unordered_map<string, ShaderKeywordScope> scopes;
         for (const ShaderPassDesc& pass : asset.Passes) {
-            for (const ShaderKeywordGroupDesc& group : pass.KeywordGroups) {
+            for (const ShaderKeywordGroupDesc& group : pass.VariantDomain.KeywordGroups) {
                 for (const string& alternative : group.Alternatives) {
                     if (alternative.empty()) {
                         continue;
@@ -260,7 +520,7 @@ bool AreShaderDefinesValid(
     const vector<string>& defines) noexcept {
     for (const string& define : defines) {
         const bool declared = std::ranges::any_of(
-            pass.KeywordGroups,
+            pass.VariantDomain.KeywordGroups,
             [stage, &define](const ShaderKeywordGroupDesc& group) noexcept {
                 const bool affectsStage = stage == ShaderStage::UNKNOWN ||
                                           group.Stages == ShaderStage::UNKNOWN ||
@@ -271,7 +531,7 @@ bool AreShaderDefinesValid(
             return false;
         }
     }
-    for (const ShaderKeywordGroupDesc& group : pass.KeywordGroups) {
+    for (const ShaderKeywordGroupDesc& group : pass.VariantDomain.KeywordGroups) {
         if (stage != ShaderStage::UNKNOWN && group.Stages != ShaderStage::UNKNOWN && !group.Stages.HasFlag(stage)) {
             continue;
         }
@@ -280,7 +540,9 @@ bool AreShaderDefinesValid(
             [&defines](const string& alternative) noexcept {
                 return !alternative.empty() && std::ranges::find(defines, alternative) != defines.end();
             });
-        if (selected > 1) {
+        const bool hasDisabledAlternative =
+            std::ranges::find(group.Alternatives, string{}) != group.Alternatives.end();
+        if (selected > 1 || (selected == 0 && !hasDisabledAlternative)) {
             return false;
         }
     }
@@ -292,7 +554,7 @@ bool DoesShaderDefineAffectStage(
     std::string_view define,
     ShaderStage stage) noexcept {
     return std::ranges::any_of(
-        pass.KeywordGroups,
+        pass.VariantDomain.KeywordGroups,
         [define, stage](const ShaderKeywordGroupDesc& group) noexcept {
             const bool affectsStage = stage == ShaderStage::UNKNOWN ||
                                       group.Stages == ShaderStage::UNKNOWN ||
@@ -301,13 +563,38 @@ bool DoesShaderDefineAffectStage(
         });
 }
 
-bool IsDeclaredShaderVariant(const ShaderPassDesc& pass, const vector<string>& defines) noexcept {
+vector<string> ProjectShaderDefines(
+    const ShaderPassDesc& pass,
+    ShaderStage stage,
+    const vector<string>& defines) {
+    vector<string> result;
+    result.reserve(defines.size());
+    for (const string& define : defines) {
+        if (DoesShaderDefineAffectStage(pass, define, stage)) {
+            result.emplace_back(define);
+        }
+    }
+    NormalizeShaderDefines(result);
+    return result;
+}
+
+bool IsShaderVariantInDomain(const ShaderPassDesc& pass, const vector<string>& defines) noexcept {
     try {
         vector<string> normalized = defines;
         NormalizeShaderDefines(normalized);
-        return std::ranges::any_of(pass.Variants, [&normalized](const ShaderVariantDesc& variant) noexcept {
-            return variant.Defines == normalized;
-        });
+        return AreShaderDefinesValid(pass, ShaderStage::UNKNOWN, normalized);
+    } catch (...) {
+        return false;
+    }
+}
+
+bool IsBakedShaderVariant(const ShaderPassDesc& pass, const vector<string>& defines) noexcept {
+    try {
+        vector<string> normalized = defines;
+        NormalizeShaderDefines(normalized);
+        return std::ranges::any_of(
+            pass.BakeSet.Variants,
+            [&normalized](const ShaderVariantKey& variant) noexcept { return variant.Defines == normalized; });
     } catch (...) {
         return false;
     }

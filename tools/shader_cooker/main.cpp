@@ -8,6 +8,7 @@
 #include <string_view>
 
 #include <fmt/format.h>
+#include <fmt/ranges.h>
 
 #include <radray/json.h>
 #include <radray/shader/dxc.h>
@@ -51,10 +52,14 @@ std::optional<Arguments> ParseArguments(int argc, char** argv) {
             return std::nullopt;
         }
         const std::filesystem::path value{argv[++i]};
-        if (argument == "--input") result.Input = value;
-        else if (argument == "--output") result.Output = value;
-        else if (argument == "--shader-root") result.ShaderRoot = value;
-        else if (argument == "--target") result.Target = value.string();
+        if (argument == "--input")
+            result.Input = value;
+        else if (argument == "--output")
+            result.Output = value;
+        else if (argument == "--shader-root")
+            result.ShaderRoot = value;
+        else if (argument == "--target")
+            result.Target = value.string();
         else {
             PrintError(fmt::format("unknown argument {}", argument));
             return std::nullopt;
@@ -264,9 +269,12 @@ bool ParseStages(JsonValue value, ShaderStages& stages, string& error) {
             return false;
         }
         const std::string_view stage = value.At(i).AsString();
-        if (stage == "vertex") stages |= ShaderStage::Vertex;
-        else if (stage == "pixel") stages |= ShaderStage::Pixel;
-        else if (stage == "compute") stages |= ShaderStage::Compute;
+        if (stage == "vertex")
+            stages |= ShaderStage::Vertex;
+        else if (stage == "pixel")
+            stages |= ShaderStage::Pixel;
+        else if (stage == "compute")
+            stages |= ShaderStage::Compute;
         else {
             error = fmt::format("unsupported stage {}", stage);
             return false;
@@ -298,10 +306,14 @@ bool ParseColorTarget(JsonValue value, ShaderColorTargetDesc& result, string& er
                 return false;
             }
             const std::string_view channel = mask.At(i).AsString();
-            if (channel == "red") result.WriteMask |= ColorWrite::Red;
-            else if (channel == "green") result.WriteMask |= ColorWrite::Green;
-            else if (channel == "blue") result.WriteMask |= ColorWrite::Blue;
-            else if (channel == "alpha") result.WriteMask |= ColorWrite::Alpha;
+            if (channel == "red")
+                result.WriteMask |= ColorWrite::Red;
+            else if (channel == "green")
+                result.WriteMask |= ColorWrite::Green;
+            else if (channel == "blue")
+                result.WriteMask |= ColorWrite::Blue;
+            else if (channel == "alpha")
+                result.WriteMask |= ColorWrite::Alpha;
             else {
                 error = fmt::format("unsupported color write channel {}", channel);
                 return false;
@@ -357,7 +369,8 @@ bool ParseProgram(JsonValue value, ShaderPassProgramDesc& result, string& error)
         }
     }
     if (value.Has("Depth")) {
-        if (value["Depth"].IsString() && value["Depth"].AsString() == "none") graphics.Depth.reset();
+        if (value["Depth"].IsString() && value["Depth"].AsString() == "none")
+            graphics.Depth.reset();
         else {
             CompareFunction depth{};
             if (!ParseCompare(value["Depth"], depth)) {
@@ -435,34 +448,36 @@ bool ParsePass(JsonValue value, ShaderPassDesc& result, string& error) {
                     return false;
                 }
                 const std::string_view scope = item["Scope"].AsString();
-                if (scope == "local") group.Scope = ShaderKeywordScope::Local;
-                else if (scope == "global") group.Scope = ShaderKeywordScope::Global;
+                if (scope == "local")
+                    group.Scope = ShaderKeywordScope::Local;
+                else if (scope == "global")
+                    group.Scope = ShaderKeywordScope::Global;
                 else {
                     error = "keyword Scope must be local or global";
                     return false;
                 }
             }
             if (item.Has("Stages") && !ParseStages(item["Stages"], group.Stages, error)) return false;
-            result.KeywordGroups.emplace_back(std::move(group));
+            result.VariantDomain.KeywordGroups.emplace_back(std::move(group));
         }
     }
 
-    const JsonValue variants = value["Variants"];
-    if (!variants.IsArray() || variants.Size() == 0) {
-        error = "Variants must be a non-empty array of explicit define arrays";
+    if (value.Has("BakeSet") && value.Has("Variants")) {
+        error = "use either BakeSet or legacy Variants, not both";
         return false;
     }
-    bool hasEmptyVariant = false;
-    for (size_t i = 0; i < variants.Size(); ++i) {
-        ShaderVariantDesc variant;
-        if (!ParseStringArray(variants.At(i), variant.Defines, error)) return false;
-        NormalizeShaderDefines(variant.Defines);
-        hasEmptyVariant = hasEmptyVariant || variant.Defines.empty();
-        result.Variants.emplace_back(std::move(variant));
-    }
-    if (!hasEmptyVariant) {
-        error = "Variants must explicitly contain the empty [] variant";
-        return false;
+    if (value.Has("BakeSet") || value.Has("Variants")) {
+        const JsonValue variants = value[value.Has("BakeSet") ? "BakeSet" : "Variants"];
+        if (!variants.IsArray()) {
+            error = "BakeSet must be an array of explicit define arrays";
+            return false;
+        }
+        for (size_t i = 0; i < variants.Size(); ++i) {
+            ShaderVariantKey variant;
+            if (!ParseStringArray(variants.At(i), variant.Defines, error)) return false;
+            NormalizeShaderDefines(variant.Defines);
+            result.BakeSet.Variants.emplace_back(std::move(variant));
+        }
     }
     return true;
 }
@@ -493,7 +508,7 @@ std::optional<ShaderAssetData> ParseAsset(const std::filesystem::path& input, st
         }
         result.Passes.emplace_back(std::move(pass));
     }
-    if (!IsShaderAssetDataValid(result, true)) {
+    if (!IsShaderAssetDataValid(result, false)) {
         error = "ShaderAsset data failed semantic validation";
         return std::nullopt;
     }
@@ -535,6 +550,26 @@ bool ValidateSourcePaths(const ShaderAssetData& asset, const std::filesystem::pa
     return true;
 }
 
+bool CaptureSourceIdentities(
+    ShaderAssetData& asset,
+    const std::filesystem::path& shaderRoot,
+    string& error) {
+    for (size_t passIndex = 0; passIndex < asset.Passes.size(); ++passIndex) {
+        ShaderSourceIdentityResult identity = ComputeShaderSourceIdentity(
+            shaderRoot,
+            asset.Passes[passIndex]);
+        if (!identity.Succeeded()) {
+            error = fmt::format(
+                "pass {} source identity failed: {}",
+                passIndex,
+                identity.Error);
+            return false;
+        }
+        asset.Passes[passIndex].SourceIdentity = identity.Identity->Hash;
+    }
+    return true;
+}
+
 vector<ShaderStage> GetPassStages(const ShaderPassDesc& pass) {
     if (const auto* graphics = std::get_if<ShaderGraphicsPassDesc>(&pass.Program)) {
         vector<ShaderStage> stages{ShaderStage::Vertex};
@@ -544,13 +579,186 @@ vector<ShaderStage> GetPassStages(const ShaderPassDesc& pass) {
     return {ShaderStage::Compute};
 }
 
+template <typename T>
+uint32_t InternValue(vector<T>& table, T value) {
+    const auto it = std::ranges::find(table, value);
+    if (it != table.end()) return static_cast<uint32_t>(std::distance(table.begin(), it));
+    table.emplace_back(std::move(value));
+    return static_cast<uint32_t>(table.size() - 1);
+}
+
+std::optional<string> SerializeReflection(const ShaderReflectionDesc& reflection) {
+    if (const auto* hlsl = std::get_if<HlslShaderDesc>(&reflection)) {
+        return SerializeHlslShaderDesc(*hlsl);
+    }
+    return SerializeSpirvShaderDesc(std::get<SpirvShaderDesc>(reflection));
+}
+
+std::optional<uint32_t> InternReflection(
+    ShaderBinary& binary,
+    ShaderTarget target,
+    ShaderReflectionDesc reflection) {
+    const auto payload = SerializeReflection(reflection);
+    if (!payload.has_value()) return std::nullopt;
+    const ShaderHash hash = HashShaderBytes(std::as_bytes(std::span{payload->data(), payload->size()}));
+    for (uint32_t i = 0; i < binary.Reflections.size(); ++i) {
+        const ShaderReflectionRecord& existing = binary.Reflections[i];
+        if (existing.Target != target || existing.Hash != hash) continue;
+        const auto existingPayload = SerializeReflection(existing.Reflection);
+        if (existingPayload.has_value() && *existingPayload == *payload) return i;
+    }
+    binary.Reflections.emplace_back(ShaderReflectionRecord{
+        .Target = target,
+        .Reflection = std::move(reflection),
+        .Hash = hash});
+    return static_cast<uint32_t>(binary.Reflections.size() - 1);
+}
+
+Nullable<const ShaderStageArtifact*> FindProjectedArtifact(
+    const ShaderBinary& binary,
+    ShaderTarget target,
+    uint32_t passIndex,
+    ShaderStage stage,
+    const vector<string>& projectedDefines) {
+    const auto it = std::ranges::find_if(binary.StageArtifacts, [&](const ShaderStageArtifact& artifact) {
+        return artifact.Target == target && artifact.PassIndex == passIndex && artifact.Stage == stage &&
+               artifact.Defines == projectedDefines;
+    });
+    return it == binary.StageArtifacts.end() ? nullptr : &*it;
+}
+
+std::optional<ShaderReflectionDesc> ReflectCompiledShader(
+    Dxc& dxc,
+    ShaderTarget target,
+    ShaderStage stage,
+    std::string_view entry,
+    const DxcOutput& compiled,
+    string& error) {
+    if (target == ShaderTarget::DXIL) {
+        auto reflection = dxc.GetShaderDescFromOutput(compiled.Refl);
+        if (reflection.has_value()) return ShaderReflectionDesc{std::move(*reflection)};
+        error = fmt::format("DXIL reflection failed for entry {}", entry);
+        return std::nullopt;
+    }
+#if defined(RADRAY_ENABLE_SPIRV_CROSS)
+    auto reflection = ReflectSpirv(SpirvBytecodeView{
+        .Data = compiled.Data,
+        .EntryPointName = entry,
+        .Stage = stage});
+    if (reflection.has_value()) return ShaderReflectionDesc{std::move(*reflection)};
+    error = fmt::format("SPIR-V reflection failed for entry {}", entry);
+#else
+    (void)stage;
+    (void)compiled;
+    error = "SPIR-V target requires RADRAY_ENABLE_SPIRV_CROSS";
+#endif
+    return std::nullopt;
+}
+
+ShaderStageInterfaceBuildResult NormalizeReflection(
+    const ShaderReflectionDesc& reflection,
+    ShaderTarget target,
+    uint32_t passIndex,
+    const vector<string>& fullDefines,
+    ShaderStage stage) {
+    ShaderInterfaceNormalizationOptions options;
+    options.Context.Target = target;
+    options.Context.PassIndex = passIndex;
+    options.Context.VariantDefines = fullDefines;
+    options.Context.Stage = stage;
+    if (const auto* hlsl = std::get_if<HlslShaderDesc>(&reflection)) {
+        return NormalizeHlslInterface(*hlsl, stage, options);
+    }
+    return NormalizeSpirvInterface(std::get<SpirvShaderDesc>(reflection), stage, options);
+}
+
+string FormatDiagnostics(const vector<ShaderDiagnostic>& diagnostics) {
+    if (diagnostics.empty()) return "shader interface construction failed without a diagnostic";
+    string result;
+    for (size_t i = 0; i < diagnostics.size(); ++i) {
+        if (i != 0) result += "; ";
+        result += diagnostics[i].Message;
+    }
+    return result;
+}
+
+void AppendInterfaceFields(
+    string& result,
+    const vector<ShaderInterfaceFieldDesc>& fields,
+    std::string_view prefix) {
+    for (const ShaderInterfaceFieldDesc& field : fields) {
+        string path{prefix};
+        if (!path.empty()) path.push_back('.');
+        path += field.Name;
+        result += fmt::format(
+            " field({} off={} size={} scalar={} {}x{} array={} astride={} mstride={} major={})",
+            path,
+            field.Offset,
+            field.Size,
+            static_cast<uint32_t>(field.Type.Scalar),
+            field.Type.Rows,
+            field.Type.Columns,
+            field.Type.ArrayCount,
+            field.Type.ArrayStride,
+            field.Type.MatrixStride,
+            field.Type.RowMajor);
+        AppendInterfaceFields(result, field.Members, path);
+    }
+}
+
+string DescribeStageInterface(const ShaderStageInterfaceDesc& interface) {
+    string result = fmt::format("stage={}", interface.Stage);
+    for (const ShaderBindingGroupInterfaceDesc& group : interface.BindingGroups) {
+        result += fmt::format(" group={}", group.GroupIndex);
+        for (const ShaderBindingDesc& binding : group.Bindings) {
+            result += fmt::format(
+                " [{}:{} kind={} count={} stages={}]",
+                group.GroupIndex,
+                binding.BindingIndex,
+                static_cast<uint32_t>(binding.Kind),
+                binding.Count,
+                binding.Stages.value());
+            if (binding.Buffer.has_value()) {
+                result += fmt::format(
+                    " buffer(bytes={} stride={})",
+                    binding.Buffer->ByteSize,
+                    binding.Buffer->ElementStride);
+                AppendInterfaceFields(result, binding.Buffer->Fields, {});
+            }
+        }
+    }
+    for (const ShaderStageIoDesc& input : interface.Inputs) {
+        result += fmt::format(
+            " in({}{} loc={} builtin={} scalar={} {}x{})",
+            input.SemanticName,
+            input.SemanticIndex,
+            input.Location,
+            static_cast<uint32_t>(input.Builtin),
+            static_cast<uint32_t>(input.Type.Scalar),
+            input.Type.Rows,
+            input.Type.Columns);
+    }
+    for (const ShaderStageIoDesc& output : interface.Outputs) {
+        result += fmt::format(
+            " out({}{} loc={} builtin={} scalar={} {}x{})",
+            output.SemanticName,
+            output.SemanticIndex,
+            output.Location,
+            static_cast<uint32_t>(output.Builtin),
+            static_cast<uint32_t>(output.Type.Scalar),
+            output.Type.Rows,
+            output.Type.Columns);
+    }
+    return result;
+}
+
 bool CompileTarget(
     Dxc& dxc,
     const std::filesystem::path& shaderRoot,
-    const ShaderAssetData& asset,
+    ShaderBinary& binary,
     ShaderTarget target,
-    vector<CompiledShaderStage>& output,
     string& error) {
+    const ShaderAssetData& asset = binary.Asset;
     for (uint32_t passIndex = 0; passIndex < asset.Passes.size(); ++passIndex) {
         const ShaderPassDesc& pass = asset.Passes[passIndex];
         vector<string> includeStrings{shaderRoot.string()};
@@ -562,18 +770,25 @@ bool CompileTarget(
         includes.reserve(includeStrings.size());
         for (const string& include : includeStrings) includes.emplace_back(include);
 
-        for (const ShaderVariantDesc& variant : pass.Variants) {
+        for (const ShaderVariantKey& variant : pass.BakeSet.Variants) {
+            vector<uint32_t> stageArtifactIndices;
             for (ShaderStage stage : GetPassStages(pass)) {
                 const auto entry = FindShaderEntryPoint(pass, stage);
                 if (!entry.has_value()) {
                     error = fmt::format("pass {} has no entry point for {}", passIndex, stage);
                     return false;
                 }
-                vector<std::string_view> defines;
-                defines.reserve(variant.Defines.size());
-                for (const string& define : variant.Defines) {
-                    if (DoesShaderDefineAffectStage(pass, define, stage)) defines.emplace_back(define);
+                const vector<string> projectedDefines = ProjectShaderDefines(pass, stage, variant.Defines);
+                if (auto existing = FindProjectedArtifact(
+                        binary, target, passIndex, stage, projectedDefines);
+                    existing.HasValue()) {
+                    const uint32_t index = static_cast<uint32_t>(existing.Get() - binary.StageArtifacts.data());
+                    stageArtifactIndices.emplace_back(index);
+                    continue;
                 }
+                vector<std::string_view> defines;
+                defines.reserve(projectedDefines.size());
+                for (const string& define : projectedDefines) defines.emplace_back(define);
                 DxcCompileOptions options{
                     .EntryPoint = *entry,
                     .Stage = stage,
@@ -592,56 +807,114 @@ bool CompileTarget(
                     return false;
                 }
 
-                ShaderReflectionDesc reflection;
-                if (target == ShaderTarget::DXIL) {
-                    auto value = dxc.GetShaderDescFromOutput(compiled->Refl);
-                    if (!value.has_value()) {
-                        error = fmt::format("DXIL reflection failed for pass {} entry {}", passIndex, *entry);
-                        return false;
-                    }
-                    reflection = std::move(*value);
-                } else {
-#if defined(RADRAY_ENABLE_SPIRV_CROSS)
-                    auto value = ReflectSpirv(SpirvBytecodeView{
-                        .Data = compiled->Data,
-                        .EntryPointName = *entry,
-                        .Stage = stage});
-                    if (!value.has_value()) {
-                        error = fmt::format("SPIR-V reflection failed for pass {} entry {}", passIndex, *entry);
-                        return false;
-                    }
-                    reflection = std::move(*value);
-#else
-                    error = "SPIR-V target requires RADRAY_ENABLE_SPIRV_CROSS";
+                auto reflection = ReflectCompiledShader(dxc, target, stage, *entry, *compiled, error);
+                if (!reflection.has_value()) {
+                    error = fmt::format("pass {}: {}", passIndex, error);
                     return false;
-#endif
                 }
-                std::optional<string> reflectionPayload;
-                if (const auto* hlsl = std::get_if<HlslShaderDesc>(&reflection)) {
-                    reflectionPayload = SerializeHlslShaderDesc(*hlsl);
-                } else {
-                    reflectionPayload = SerializeSpirvShaderDesc(std::get<SpirvShaderDesc>(reflection));
-                }
-                if (!reflectionPayload.has_value()) {
-                    error = fmt::format("reflection serialization failed for pass {} entry {}", passIndex, *entry);
+                auto normalized = NormalizeReflection(*reflection, target, passIndex, variant.Defines, stage);
+                if (!normalized.Succeeded()) {
+                    error = fmt::format(
+                        "interface normalization failed for pass {} entry {} target {}: {}",
+                        passIndex,
+                        *entry,
+                        target,
+                        FormatDiagnostics(normalized.Diagnostics));
                     return false;
                 }
 
-                CompiledShaderStage record{
+                for (const ShaderStageArtifact& other : binary.StageArtifacts) {
+                    if (other.Target == target || other.PassIndex != passIndex || other.Stage != stage ||
+                        other.Defines != projectedDefines) {
+                        continue;
+                    }
+                    if (binary.StageInterfaces[other.InterfaceIndex] != *normalized.Interface) {
+                        error = fmt::format(
+                            "canonical stage interface mismatch for pass {} entry {} variant [{}] between {} and {}",
+                            passIndex,
+                            *entry,
+                            fmt::join(projectedDefines, ", "),
+                            other.Target,
+                            target);
+                        error += fmt::format(
+                            "; first: {}; second: {}",
+                            DescribeStageInterface(binary.StageInterfaces[other.InterfaceIndex]),
+                            DescribeStageInterface(*normalized.Interface));
+                        return false;
+                    }
+                }
+
+                const auto reflectionIndex = InternReflection(binary, target, std::move(*reflection));
+                if (!reflectionIndex.has_value()) {
+                    error = fmt::format("reflection serialization failed for pass {} entry {}", passIndex, *entry);
+                    return false;
+                }
+                const uint32_t interfaceIndex = InternValue(binary.StageInterfaces, std::move(*normalized.Interface));
+
+                ShaderStageArtifact artifact{
                     .Target = target,
                     .Category = GetShaderBlobCategory(target),
                     .PassIndex = passIndex,
                     .Stage = stage,
-                    .Defines = variant.Defines,
+                    .Defines = projectedDefines,
                     .EntryPoint = string{*entry},
                     .Bytecode = std::move(compiled->Data),
-                    .ReflectionPayload = std::move(*reflectionPayload),
-                    .Reflection = std::move(reflection)};
-                record.BinaryHash = HashShaderBytes(record.Bytecode);
-                record.InterfaceHash = HashShaderBytes(std::as_bytes(std::span{
-                    record.ReflectionPayload.data(), record.ReflectionPayload.size()}));
-                output.emplace_back(std::move(record));
+                    .ReflectionIndex = *reflectionIndex,
+                    .InterfaceIndex = interfaceIndex};
+                artifact.BinaryHash = HashShaderBytes(artifact.Bytecode);
+                binary.StageArtifacts.emplace_back(std::move(artifact));
+                stageArtifactIndices.emplace_back(static_cast<uint32_t>(binary.StageArtifacts.size() - 1));
             }
+
+            vector<const ShaderStageInterfaceDesc*> stageInterfaces;
+            stageInterfaces.reserve(stageArtifactIndices.size());
+            for (uint32_t artifactIndex : stageArtifactIndices) {
+                stageInterfaces.emplace_back(
+                    &binary.StageInterfaces[binary.StageArtifacts[artifactIndex].InterfaceIndex]);
+            }
+            ShaderInterfaceBuildResult programInterface;
+            ShaderDiagnosticContext programContext{
+                .Target = target,
+                .PassIndex = passIndex,
+                .VariantDefines = variant.Defines};
+            if (std::holds_alternative<ShaderGraphicsPassDesc>(pass.Program)) {
+                programInterface = stageInterfaces.size() == 1
+                                       ? MergeGraphicsStageInterfaces(*stageInterfaces[0], programContext)
+                                       : MergeGraphicsStageInterfaces(
+                                             *stageInterfaces[0],
+                                             *stageInterfaces[1],
+                                             programContext);
+            } else {
+                programInterface = BuildComputeShaderInterface(*stageInterfaces[0], programContext);
+            }
+            if (!programInterface.Succeeded()) {
+                error = fmt::format(
+                    "program interface merge failed for pass {} variant [{}]: {}",
+                    passIndex,
+                    fmt::join(variant.Defines, ", "),
+                    FormatDiagnostics(programInterface.Diagnostics));
+                return false;
+            }
+            for (const ShaderProgramVariantArtifact& other : binary.ProgramVariants) {
+                if (other.Target == target || other.PassIndex != passIndex || other.Defines != variant.Defines) continue;
+                if (binary.ProgramInterfaces[other.InterfaceIndex] != *programInterface.Interface) {
+                    error = fmt::format(
+                        "canonical program interface mismatch for pass {} variant [{}] between {} and {}",
+                        passIndex,
+                        fmt::join(variant.Defines, ", "),
+                        other.Target,
+                        target);
+                    return false;
+                }
+            }
+            const uint32_t programInterfaceIndex =
+                InternValue(binary.ProgramInterfaces, std::move(*programInterface.Interface));
+            binary.ProgramVariants.emplace_back(ShaderProgramVariantArtifact{
+                .Target = target,
+                .PassIndex = passIndex,
+                .Defines = variant.Defines,
+                .StageArtifactIndices = std::move(stageArtifactIndices),
+                .InterfaceIndex = programInterfaceIndex});
         }
     }
     return true;
@@ -665,7 +938,8 @@ int main(int argc, char** argv) {
         PrintError(error);
         return 3;
     }
-    if (!ValidateSourcePaths(*asset, arguments->ShaderRoot, error)) {
+    if (!ValidateSourcePaths(*asset, arguments->ShaderRoot, error) ||
+        !CaptureSourceIdentities(*asset, arguments->ShaderRoot, error)) {
         PrintError(error);
         return 3;
     }
@@ -678,20 +952,29 @@ int main(int argc, char** argv) {
     ShaderBinary binary;
     binary.Asset = std::move(*asset);
     if ((arguments->Target == "dxil" || arguments->Target == "all") &&
-        !CompileTarget(*dxc.Get(), arguments->ShaderRoot, binary.Asset, ShaderTarget::DXIL, binary.Stages, error)) {
+        !CompileTarget(*dxc.Get(), arguments->ShaderRoot, binary, ShaderTarget::DXIL, error)) {
         PrintError(error);
         return 4;
     }
     if ((arguments->Target == "spirv" || arguments->Target == "all") &&
-        !CompileTarget(*dxc.Get(), arguments->ShaderRoot, binary.Asset, ShaderTarget::SPIRV, binary.Stages, error)) {
+        !CompileTarget(*dxc.Get(), arguments->ShaderRoot, binary, ShaderTarget::SPIRV, error)) {
         PrintError(error);
         return 4;
     }
-    if (!binary.IsValid() || !WriteShaderBinary(arguments->Output, binary)) {
+    const bool complete =
+        (arguments->Target != "dxil" || binary.IsBakeComplete(ShaderTarget::DXIL)) &&
+        (arguments->Target != "spirv" || binary.IsBakeComplete(ShaderTarget::SPIRV)) &&
+        (arguments->Target != "all" ||
+         (binary.IsBakeComplete(ShaderTarget::DXIL) && binary.IsBakeComplete(ShaderTarget::SPIRV)));
+    if (!binary.IsValid() || !complete || !WriteShaderBinary(arguments->Output, binary)) {
         PrintError(fmt::format("failed to write '{}'", arguments->Output.string()));
         return 5;
     }
-    fmt::print("cooked {} stages to {}\n", binary.Stages.size(), arguments->Output.string());
+    fmt::print(
+        "cooked {} unique stage artifacts and {} program variants to {}\n",
+        binary.StageArtifacts.size(),
+        binary.ProgramVariants.size(),
+        arguments->Output.string());
     return 0;
 #endif
 }

@@ -1,515 +1,256 @@
-# Shader 与 Material 上层能力
+# Shader 与 Material CPU 契约
 
-本文总结 RadRay 当前 shader/material 系统向上层应用暴露的能力、典型使用路径、运行时数据流和实现边界。
+本文描述 RadRay 当前已经实现的 shader/material CPU-side 契约，以及进入 GPU binding、PSO 和 draw 链路前的明确边界。
 
-这里的“上层应用”包括：
+当前阶段只支持 VS、PS、CS。目标不是创建可执行渲染链路，而是保证离线 cooking 与运行时 JIT 都能产生同一套后端无关接口，并把 pipeline-owned 与 user-owned 参数可靠分开。
 
-- `Application`、`World`、`Actor` 与 `Component` 组成的游戏逻辑层；
-- glTF/FBX 等模型导入器；
-- 程序化几何、场景查看器和其他需要创建材质的业务代码；
-- 自定义渲染管线及自定义 HLSL shader 的实现者。
-
-当前系统整体上对应 Unity 的 `Shader + Material + MaterialPropertyBlock + SRP`：
-
-- `ShaderAsset` 描述一个图形程序、多个 Pass、keyword 和公开 property；
-- `MaterialAsset` 引用 shader，并保存参数、keyword、渲染队列和固定功能状态覆盖；
-- `MaterialPropertyBlock` 为单个 primitive/section 提供不修改共享材质的参数覆盖；
-- `IStandardMaterialFactory` 把与管线无关的标准 PBR 描述翻译为当前管线材质；
-- `MeshPassExecutor` 根据 shader 反射自动构建 binding、PSO 并提交绘制。
-
-它已经是一套可用的运行时材质框架，但还不是包含材质编辑器、节点图和资产序列化的完整美术生产系统。
-
-## 总体数据流
+## 总体结构
 
 ```mermaid
-flowchart LR
-    HLSL["HLSL + ShaderPassDesc"] --> Shader["ShaderAsset"]
-    Importer["glTF / 其他导入器"] --> Standard["StandardMaterialDescription"]
-    Standard --> Factory["IStandardMaterialFactory"]
-    Factory --> Material["MaterialAsset"]
-    Shader --> Material
-    Block["MaterialPropertyBlock"] --> Snapshot["MaterialRenderSnapshot"]
-    Material --> Snapshot
-    Snapshot --> DrawList["DrawList / PassTag 过滤与排序"]
-    DrawList --> Executor["MeshPassExecutor"]
-    Executor --> Variant["Shader 变体、反射 Binding、PSO 缓存"]
-    Variant --> RHI["D3D12 / Vulkan RHI"]
+flowchart TD
+    Source["HLSL + ShaderAssetData"] --> Offline["shader_cooker"]
+    Source --> JIT["ShaderArtifactResolver"]
+    Offline --> Binary["ShaderBinary v2"]
+    JIT --> External["external JIT cache"]
+    Binary --> Interface["ShaderInterfaceDesc"]
+    External --> Interface
+    Interface --> Policy["PipelineBindingPolicy + providers"]
+    Policy --> ProviderGroups["provider-owned groups"]
+    Policy --> UserGroups["user-owned groups"]
+    UserGroups --> ParameterSet["ShaderParameterLayout / ShaderParameterSet"]
+    ParameterSet --> Material["MaterialAsset graphics wrapper"]
 ```
 
-上层修改的是 CPU 侧 `MaterialAsset` 或 `MaterialPropertyBlock`。组件在 Tick 中把这些可变对象冻结为不可变的 `MaterialRenderSnapshot`，渲染线程只读取快照，不直接回查和修改原始材质。
+三个边界必须保持独立：
 
-## ShaderAsset：图形程序与 Pass 契约
+- `ShaderInterfaceDesc` 只描述一个具体 Pass + Variant 的物理/反射接口；
+- `PipelineBindingPolicy` 只描述当前 pipeline 独占哪些 group，以及对应 provider 是否支持实际接口；
+- `ShaderParameterSet` 只保存剩余 user-owned groups 的 CPU 参数值。
 
-### 多 Pass
+这些类型不持有 `PipelineLayout`、`BindingGroup`、descriptor、PSO 或 draw 状态。
 
-一个 `ShaderAsset` 可以持有多个 `ShaderPassDesc`。每个 Pass 可独立声明：
+## Canonical Shader Interface
 
-| 元数据 | 上层能力 |
-|---|---|
-| `PassTag` | 让渲染管线按用途选择 Pass，语义类似 Unity `LightMode` |
-| `Source` / `ProgramName` | HLSL 源码与跨进程稳定的预编译产物逻辑名 |
-| `VertexEntry` / `PixelEntry` | VS、PS 入口，默认 `VSMain` / `PSMain` |
-| `Primitive` | topology、cull、polygon mode 等光栅化基线 |
-| `DepthStencil` | 深度/模板格式、比较函数和写入状态 |
-| `ColorTargets` | 输出格式、颜色写掩码和混合基线 |
-| `MultiSample` | MSAA 状态 |
-| `VertexLayouts` | 一个或多个拥有式顶点缓冲布局 |
-| `IncludeDirs` | DXC 的 HLSL include 搜索目录 |
-| `DynamicBufferBindings` | 需要 dynamic offset 的 cbuffer binding |
-| `InterfaceSchema` | 预期 shader 资源接口，用于反射结果校验 |
-| `ParameterSources` | 把资源或 cbuffer 字段映射到 Material/Object/View/Pass 数据源 |
-| `AllowMaterialRenderStateOverrides` | 是否允许材质覆盖该 Pass 的固定功能状态 |
-| `VariantKeywordMask` | 指定该 Pass 实际参与编译的 keyword 位 |
+[`ShaderInterfaceDesc`](../modules/shader/include/radray/shader/shader_interface.h) 是一个完整 program interface：
 
-渲染队列通过 `PassTag` 查找 shader Pass：
+- graphics 由 VS 与可选 PS 的 `ShaderStageInterfaceDesc` 合并；
+- compute 由 CS stage interface 构建；
+- binding 按 `(groupIndex, bindingIndex)` 标识；
+- cbuffer/structured buffer 保留字段、嵌套成员、offset、size、array stride、matrix stride 和 matrix major；
+- texture 保留 dimension、sample type、array/multisample/depth 信息；
+- buffer 保留 kind、element stride 和 read/write access；
+- graphics 保留 vertex input、inter-stage IO 和 pixel output；
+- compute 保留 thread-group size；
+- push constant range 可被表示和哈希，但当前不进入通用 `ShaderParameterSet`。
 
-- 默认颜色 Pass 使用 `UniversalForward`；
-- 阴影深度 Pass 使用 `ShadowCaster`；
-- shader 没有目标标签时，该 primitive 不进入对应 DrawList。
+DXIL reflection 和 SPIR-V reflection 都先归一化，再参与 program merge。cooker 在同时生成两个 target 时要求同一 Pass + Variant 的 canonical interface 完全一致，否则拒绝输出。
 
-这使同一个材质可以同时提供颜色绘制、阴影投射或未来其他管线阶段，而不需要上层手工选择入口函数。
+当前已经处理的跨后端差异包括：
 
-相关实现：
+- DXIL 未使用 signature input；
+- SPIR-V inactive resource；
+- backend 生成的 IO 名称与 builtin location；
+- HLSL/SPIR-V matrix major 差异；
+- struct array 的 element stride 与成员范围；
+- raw、structured、typed buffer 和 storage resource 分类。
 
-- [`ShaderPassDesc`](../modules/runtime/include/radray/runtime/shader_asset.h)
-- [`DrawList::AddPrimitive`](../modules/runtime/src/render_framework/render_queue.cpp)
-- [`BuildForwardShader`](../modules/runtime/src/render_framework/forward_pipeline_shader.cpp)
+接口比较明确分成三种关系：
 
-### Keyword 与变体
+- `operator==` / `HashShaderInterface` 是严格 identity，包含用户可见名称；
+- `AreShaderBindingsAbiCompatible` 是对称的物理 ABI 等价，忽略名称和 stage visibility；
+- `IsShaderBindingAbiProjectionOf(actual, complete)` 是有方向的投影关系。
 
-`ShaderKeywordSet` 为 shader 声明有序 keyword 表：
+非 cbuffer 资源的投影仍要求严格物理 ABI。cbuffer 的 actual interface 可以只保留 complete layout 中 offset、size 和 type 一致的 leaf fields，并使用不大于 complete 的 `ByteSize`，从而兼容 DCE。provider schema 与 Material program completeness 共用这一个投影原语。系统没有额外的 Pipeline ABI 版本号。
 
-- 最多 64 个 keyword，对应一个 `uint64_t` bitmask；
-- keyword 加入顺序就是稳定 bit 位；
-- 材质只保存启用的名字，解析 shader 时再投影为 bitmask；
-- 未声明的 keyword 会被忽略，不产生变体位；
-- 启用位最终变为传给 DXC 的 `NAME=1` 宏；
-- `VariantKeywordMask` 可以让每个 Pass 只消费自己的 keyword。
+## VariantDomain、BakeSet 与 ShaderBinary v2
 
-keyword 有两种来源：
+[`ShaderPassDesc`](../modules/shader/include/radray/shader/shader_asset_data.h) 将两个概念分开：
 
-| 来源 | 典型用途 |
-|---|---|
-| `MaterialAsset::EnableKeyword` | 贴图是否存在、alpha test、双面等 per-material 编译分支 |
-| `MeshPassExecutor::EnableGlobalKeyword` | 本帧是否存在阴影等由渲染管线决定的全局编译分支 |
+- `ShaderVariantDomain`：keyword group 定义哪些完整组合合法；
+- `ShaderBakeSet`：指定离线实际预编译哪些合法组合。
 
-解析变体时会合并材质 keyword 与管线全局 keyword，再应用 Pass mask。默认 Forward shader 用 keyword 控制五类贴图、alpha 模式、双面、点光阴影、方向光阴影以及点光 layered shadow caster。
+`BakeSet` 可以稀疏，甚至为空。JIT 请求只需要属于 `VariantDomain`，不要求已经 baked。
 
-### 编译、反射与缓存
+keyword 会按 stage 投影。比如一个 pixel-only keyword 不进入 VS artifact key，因此多个完整 program variant 可以复用同一个 VS bytecode。
 
-`ShaderAsset::GetOrCreateVariant` 把以下信息提交给 `ShaderVariantLibrary`：
+[`ShaderBinary`](../modules/shader/include/radray/shader/shader_binary.h) 包含以下去重表：
 
-- `ProgramId` 和 Pass 序号；
-- keyword bitmask；
-- VS/PS 源码及入口；
-- include 目录；
-- shader model；
-- dynamic buffer、push constant 和 interface schema 元数据。
+1. raw reflection table；
+2. canonical stage-interface table；
+3. canonical program-interface table；
+4. target-specific stage artifact table；
+5. full variant 到 stage artifacts/program interface 的 mapping table。
 
-运行时变体 key 包含 program、Pass、backend、keyword、source version、shader model 和编译选项。同一组合只编译一次。
+`ShaderBinary::IsValid()` 只检查结构、索引、hash、reflection/interface 一致性和跨 target canonical 一致性，不要求所有 target/variant 存在。发布覆盖率由 `IsBakeComplete(target)` 单独检查。
 
-当前编译路径：
+binary format 当前为 v2，不读取旧 v1 文件。writer 会排序和重映射所有 table index，保证同一逻辑内容确定性输出；reader 会拒绝损坏、悬空索引、重复 record 和非 canonical 排序。
 
-| Backend | 字节码 | 反射 |
-|---|---|---|
-| D3D12 | DXIL | DXC/D3D12 reflection |
-| Vulkan | SPIR-V | SPIRV-Cross reflection |
+## Pipeline Provider 规则
 
-发布 Shader 由 `tools/shader_cooker/radray_shader_cooker` 从单资产 JSON 编译成完整的
-`ShaderAsset.bin`，文件内可同时包含 DXIL、SPIR-V、Pass 元数据、显式变体和反射数据。
-runtime `ShaderAsset` 读取该文件，`ShaderModuleCache` 只负责按需创建和缓存 GPU Shader。
-`RADRAY_ENABLE_SHADER_JIT` 开启时，缺失变体才会使用 `.bin` 内的源码配方回退到 DXC；
-关闭 JIT 的发布构建不需要部署 DXC 或 HLSL 源文件。
-
-编译产物和后续状态按层缓存：
-
-1. shader stage/module；
-2. 完整 shader variant；
-3. `PipelineLayout`；
-4. 反射生成的 `ShaderBindingPlan`；
-5. Graphics PSO；
-6. 材质 binding group、常量池切片、sampler 和 texture view。
-
-上层不需要为每个材质或 draw 手工创建 descriptor layout 和 PSO。
-
-相关实现：
-
-- [`ShaderVariantLibrary`](../modules/runtime/include/radray/runtime/shader_variant_library.h)
-- [`GraphicsPipelineStateLibrary`](../modules/runtime/include/radray/runtime/pipeline_state_cache.h)
-- [`RenderSystem::OnInitialize`](../modules/runtime/src/render_system.cpp)
-
-### 反射驱动的参数来源
-
-每个反射资源、cbuffer 或 cbuffer 字段都可以映射到以下 scope：
-
-| Scope | 生命周期/语义 | 当前典型 provider |
-|---|---|---|
-| `Material` | 多帧复用，同一材质值共享 | 材质常量、贴图、sampler |
-| `Object` | 每个 primitive/draw 不同 | `ObjectToWorld` |
-| `View` | 每个相机或视图共享 | `ViewProj`、相机位置、灯光数组 |
-| `Pass` | 当前渲染 Pass 共享 | 阴影图、阴影比较 sampler |
-
-`ShaderParameterSourceDesc` 支持两种粒度：
+[`PipelineBindingPolicy`](../modules/runtime/include/radray/runtime/shader_parameters.h) 以整个 group 为所有权单位。解析规则固定为：
 
 ```text
-gView                  -> 整个 cbuffer 的来源
-gView.CameraPosition   -> cbuffer 内单个字段的来源
+reserved group 未出现在 shader 中         合法，跳过
+reserved group 出现且 provider 完全支持   provider-owned
+reserved group 出现未知/冲突 binding      不兼容
+非 reserved group                         user-owned
 ```
 
-未显式声明来源的反射参数默认按 Material 处理。反射层会解析 HLSL/SPIR-V cbuffer 的字段名、偏移和大小，把 `MaterialAsset::SetFloat("Field")`、`SetVector("Field")` 等散字段自动打包到正确位置。
+provider 不会向 shader 注入未声明 binding，也不暴露 `Pipeline/View/Pass/Object` scope。一个 provider 可以允许 shader 只声明其支持 binding 的子集，并可显式列出同一位置的多个合法 ABI 投影；但只要实际 group 中出现 provider 不认识或物理布局不兼容的 binding，整组解析失败。失败 diagnostic 会携带 provider、group 和 binding。
 
-`ShaderInterfaceSchema` 还可以校验预期的 group/binding、资源种类、可见 shader stage、dynamic offset 和必需性，避免 HLSL 接口变化后静默绑定到错误位置。
+自定义 shader 可以完全不声明 pipeline 参数。使用空 policy 时，所有 binding groups 都是 user-owned。
 
-## MaterialAsset：共享材质模板
+默认 Forward policy 当前保留：
 
-`MaterialAsset` 引用一个 `ShaderAsset`，保存 property 覆盖、keyword、RenderQueue 和材质侧固定功能状态。它本身不直接拥有 shader module、texture view、sampler、descriptor 或 PSO。
+- group 0：object provider；
+- group 1：Forward pipeline provider；
+- group 2 只是 Forward shader 的材质约定，不是系统级特殊 group，因未被 policy 保留而属于用户参数。
 
-### Property 类型
+## User Parameter Layout
 
-`MaterialPropertyValue` 当前支持：
+[`ShaderParameterLayout`](../modules/runtime/include/radray/runtime/shader_parameters.h) 对所有目标 Pass/Variant 的 user-owned bindings 建立兼容并集。
 
-| 类型 | 写入 API | 语义 |
-|---|---|---|
-| `float` | `SetFloat` | 一个反射字段 |
-| `Eigen::Vector4f` | `SetVector` | 一个 `float4` 字段 |
-| `vector<byte>` | `SetConstantBlock` | 一整个 cbuffer，或自定义字节 property |
-| `StreamingAssetRef<TextureAsset>` | `SetTexture` | 纹理默认完整 SRV |
-| `TextureSubViewRef` | `SetTexture(texture, subView)` | 指定 mip、array slice 或 format 子视图 |
-| `ShaderDefaultTexture` | shader property 默认值 | White/Black linear/sRGB 或 FlatNormal |
-| `SamplerDescriptor` | `SetSampler` | 由 `SamplerCache` 去重并创建 sampler |
+稳定规则以 binding 为单位：
 
-`ShaderPropertyDesc` 为 shader property 提供名字、类型和可选默认值。默认值主要解决以下问题：
+- 某个 pass/variant 可以完全不使用一个 group 或一个 binding；
+- 同一 `(group,binding)` 一旦在多个接口中出现，名称与物理 ABI 必须兼容；
+- stage visibility 可以取并集；
+- 同名不同 location、同 location 不同类型、不同 array/resource shape 都会失败。
 
-- 材质没有提供贴图时仍能完整写入 descriptor group；
-- 新建材质无需重复填充所有数值；
-- 绑定时可以校验材质覆盖与 shader property 的类型是否一致。
+同一 cbuffer 在不同 variant 中可以只反射不同字段。layout 会将嵌套字段展开为稳定路径后形成无冲突并集：同名字段必须保持相同 offset/type/size，不同名称的字段不能占用重叠字节，最终 `ByteSize` 取所有投影的最大值。字段和 binding 均按稳定顺序排列，因此 layout hash 不依赖 baked/JIT interface 的到达顺序。显式 property alias 留给未来作者元数据，不能由相同 offset 自动推断。
 
-属性解析优先级固定为：
+采用 binding 级并集是必要的：keyword 分支经过 DCE 后，即使 HLSL 始终声明资源，不同 variant 的 reflection 仍可能只包含实际使用的 binding。Material 保存稳定超集，具体 program interface 仍保留每个 variant 的实际投影。
 
-```text
-ShaderPropertyDesc 默认值
-        < MaterialAsset property 覆盖
-        < MaterialPropertyBlock per-primitive 覆盖
-```
+字符串 API 只在名称唯一时成功。`ShaderParameterSet` 与 `MaterialAsset` 都提供 `ShaderParameterLocation{group,binding}` 加字段名的精确 setter；多 user group 出现同名 binding/field 时不会静默选错目标，也不会迫使调用方绕过 Material revision。
 
-对 cbuffer，绑定器先建立清零块并应用 shader 默认值，再依次应用材质层和 PropertyBlock 层。对 texture/sampler，则按相反方向查找第一个存在的覆盖，最终回落到 shader 默认资源。
+[`ShaderParameterSet`](../modules/runtime/include/radray/runtime/shader_parameters.h) 当前支持：
 
-### RenderQueue 与固定功能状态
+- bool/int/uint/float scalar 与任意反射 vector 宽度；
+- float matrix，按 matrix stride/major 正确打包；
+- constant array 与完整 cbuffer 写入；
+- sampled/storage texture；
+- sampler 与固定/不定长 resource array；
+- typed/structured/raw buffer；
+- 多个 user-owned group。
 
-`MaterialAsset` 可以设置任意整数 RenderQueue。内置队列与 Unity 语义相近：
+错误 scalar type、vector width、matrix shape、resource kind、array index、texture dimension/format/usage、buffer usage、range 或 structured stride 会在 setter 调用或完整性检查时被拒绝。
 
-| 队列 | 值 | 用途 |
-|---|---:|---|
-| `Background` | 1000 | 背景 |
-| `Geometry` | 2000 | 普通不透明物体 |
-| `AlphaTest` | 2450 | alpha clip 材质 |
-| `GeometryLast` | 2500 | 不透明阶段末尾 |
-| `Transparent` | 3000 | 半透明物体 |
-| `Overlay` | 4000 | 覆盖层 |
+默认状态为：
 
-队列值小于 `Transparent` 的材质进入不透明列表，排序方式是：
+- constant buffer 清零；
+- sampler 初始化为默认 `SamplerDescriptor`；
+- 固定大小的 texture/buffer/storage resource 未设置时，全 layout 的 `IsComplete()` 为 false；
+- unbounded resource array 可以为空。
 
-```text
-RenderQueue 升序 -> MaterialBindingKey 聚合 -> 距离近到远
-```
+`IsCompleteFor(ResolvedShaderBindingPlan)` 只检查一个具体 program 实际使用的 user-owned bindings。某个资源只存在于未启用的 keyword variant 时，不会阻止当前 program 使用 Material；切换到声明该资源的 variant 后，未设置值会立即变成不完整。
 
-透明材质的排序方式是：
+layout 因新 JIT variant 扩展时，cbuffer 会复制已有字节并将新增尾部清零；resource 只在严格兼容时迁移。push constant 与 acceleration structure 当前不属于通用 ParameterSet，layout 构建会显式返回 unsupported diagnostic，不会静默忽略。
 
-```text
-RenderQueue 升序 -> 距离远到近
-```
+资产作者默认值、默认 white/black/normal texture 和 property alias 尚未进入当前数据模型，不能从 reflection 推断。这些应作为未来 `ShaderPropertyDesc` 作者元数据实现，不能塞入 `ShaderInterfaceDesc`。
 
-材质可以覆盖以下 PSO 固定状态：
+## MaterialAsset
 
-- `CullMode`；
-- `DepthWrite`；
-- `BlendState`，包括显式开启或显式关闭混合。
+[`MaterialAsset`](../modules/runtime/include/radray/runtime/material_asset.h) 是 graphics-only 的轻量包装：
 
-其他状态仍取自 `ShaderPassDesc` 的 Pass 基线。`AllowMaterialRenderStateOverrides=false` 的 Pass（例如默认 ShadowCaster 和 error Pass）不接受材质覆盖。
+- 持有不可变 `ShaderAsset` 引用；
+- 持有 pipeline binding policy；
+- 持有 local keyword 状态；
+- 持有一个 multi-group `ShaderParameterSet`。
 
-相关实现：
+Material 不再接受单个裸 `bindingGroup`。layout 在 ShaderAsset/policy 改变时解析一次，参数 mutation 不会重新扫描 binary 或 backend reflection。
 
-- [`MaterialAsset`](../modules/runtime/include/radray/runtime/material_asset.h)
-- [`MaterialRenderState`](../modules/runtime/include/radray/runtime/render_framework/render_pipeline.h)
-- [`DrawList`](../modules/runtime/include/radray/runtime/render_framework/render_queue.h)
+provider-owned 参数不会出现在 Material setter 可见范围内。compute shader 不使用 `MaterialAsset`，直接构造 `ShaderParameterSet`。
 
-### MaterialPropertyBlock
+`MaterialAsset::IsReady()` 只表示 Shader 与 CPU layout 结构就绪；具体 program 的缺失资源由 `HasCompleteParametersFor()` 判断。
 
-`MaterialPropertyBlock` 对应 Unity 的同名机制。它提供与 `MaterialAsset` 相同的常量、纹理和 sampler 覆盖粒度，但只影响一个 `StaticMeshComponent` section：
+JIT program 到达后，`ApplyResolvedPrograms` 会先验证 source/program identity 是否属于当前 ShaderAsset，再按 `(pass, full defines)` 累积 target-independent canonical interface，并与全部 baked/JIT interfaces 一起构建 layout。兼容扩展会迁移已有 binding 值；同一 program 的跨 target interface 不一致或 user layout 冲突会返回带双方上下文的 diagnostic，并原子保留旧 interface 集合、layout 和 values。原始 interface 注入只是 Material 内部事务 helper，不是可绕过 provenance 的公共入口。
 
-- 不修改共享 `MaterialAsset`；
-- 多个 primitive 可以安全复用同一材质；
-- block 可以替换或清除单个 property；
-- 每次修改自动递增 version；
-- 不能修改 shader、keyword、RenderQueue 或固定功能状态。
+## 不可变 ShaderAsset 与 JIT
 
-典型用法：
+[`ShaderArtifactResolver`](../modules/runtime/include/radray/runtime/shader_asset.h) 是 `ShaderAsset` 外部的 artifact resolver。查找顺序为：
 
-```cpp
-auto block = make_shared<MaterialPropertyBlock>();
-block->SetVector("BaseColor", Eigen::Vector4f{1.0f, 0.2f, 0.1f, 1.0f});
-meshComponent->SetPropertyBlock(sectionIndex, std::move(block));
-```
+1. ShaderAsset baked program；
+2. memory program cache；
+3. disk JIT cache；
+4. async JIT compile。
 
-如果不同实例需要不同 shader 变体或透明队列，应创建独立 `MaterialAsset`，而不是使用 PropertyBlock。
+resolver 不写回 `ShaderAsset`。结果由 `ShaderResolvedProgram` 独立拥有 bytecode、raw reflection、stage interfaces 和 program interface。
 
-### 不可变渲染快照
+JIT program key 包含：
 
-`MaterialAsset` 是游戏线程可修改的共享模板，真正进入 DrawList 的是 `MaterialRenderSnapshot`。
+- source + transitive literal include content hash；
+- pass、target 和 full defines；
+- entry point、shader model、optimize/unbounded options；
+- DXC toolchain hash；
+- RadRay JIT/canonicalization schema identity。
 
-快照冻结以下状态：
+stage cache 使用 stage-projected defines，因此不同 full variant 可以共享 VS/PS/CS 编译结果。相同并发请求共享 `shared_future`；失败结果也进入 memory cache，避免每帧重试。
 
-- shader 的 streaming 引用；
-- 已启用 keyword；
-- RenderQueue 和 `MaterialRenderState`；
-- 材质常量、纹理引用、纹理子视图和 sampler descriptor；
-- 独立的 PropertyBlock 覆盖层；
-- 根据所有内容计算的 `MaterialBindingKey`。
+source graph scanner 递归处理字面量 `#include "..."` / `#include <...>`，并保守包含条件分支中的 include。宏展开 include 当前会被拒绝，因为无法在编译前可靠计算传递内容身份。
 
-`StaticMeshComponent` 为每个 section 记录材质 revision、block version、资产 handle 和解析指针。只有这些数据发生变化时才重建快照。快照通过 `shared_ptr<const MaterialRenderSnapshot>` 发布给 scene proxy，渲染线程无锁只读。
+shader cooker 会为每个 Pass 计算并持久化 source identity。存在 baked program 的 Pass 必须携带这个 identity，JIT miss 才能证明实时源码与 baked artifact 来自同一快照。完全没有 baked program 的 JIT-only manifest 可以在第一次请求时为 `(ShaderAsset instance, pass index)` 惰性封存 identity：
 
-因此，上层可以在下一帧继续修改材质，而当前已提交帧仍持有完整、稳定的旧快照。
+- 源文件未变化时继续使用同一 cache identity；
+- 源文件变化后，旧 ShaderAsset 仍可返回已有 memory/disk artifact；
+- 旧对象不能为新的 miss 编译变化后的源码；
+- hot reload 必须创建新的不可变 ShaderAsset 实例，新实例获得新的 source identity。
 
-相关实现：
+已有 pass identity 时，resolver 会先按捕获值查询 memory/disk cache，再读取当前 source graph。因而旧资产的已有 artifact 不依赖源码继续存在；只有真正的 cache miss 才要求实时源码可用且仍与该不可变对象的捕获身份一致。不同 Pass 的源码身份互不覆盖。
 
-- [`MaterialRenderSnapshot`](../modules/runtime/include/radray/runtime/render_framework/material_render_snapshot.h)
-- [`StaticMeshComponent::RefreshMaterialSnapshots`](../modules/runtime/src/components/static_mesh_component.cpp)
+每个 resolved program 还携带由 source identity、pass index、完整 defines、entry point、shader model 和编译选项计算出的稳定 program identity。Material 会重新计算并验证它，因此另一份不同源码或不同 Pass 配置的结果不能扩展当前 layout；内容完全等价的资产仍可共享 artifact cache。
 
-## 标准前向 PBR 材质
+如果同一 source/pass/variant 的 DXIL 与 SPIR-V JIT 结果 canonical interface 不同，resolver 会拒绝后到结果。若另一 target 已 baked，JIT 结果也必须与 baked interface 一致。
 
-### 与渲染管线解耦的创建入口
+`RenderSystem` 在启用 `RADRAY_ENABLE_SHADER_JIT` 时创建 DXC compiler 与 resolver。resolver 会重新从 compiler 返回的 raw reflection 构建 stage interface，并验证 target、stage、entry、projected defines 和 bytecode hash。JIT cache 文件复用 ShaderBinary v2 的完整校验与原子写入，同时嵌入并验证完整 program cache key；路径命中本身不被视为可信来源证明。
 
-模型导入器不直接创建某个具体 shader 的参数表，而是输出 `StandardMaterialDescription` 和纹理表。当前 `RenderPipeline` 通过 `IStandardMaterialFactory` 把中性描述翻译成自己的 `MaterialAsset`。
+## Diagnostic
 
-这给上层带来两个稳定入口：
+normalization、merge、provider、parameter layout 和 JIT failure 都携带结构化上下文：
 
-```cpp
-IStandardMaterialFactory* factory = renderSystem->GetStandardMaterialFactory().Get();
-StreamingAssetRef<MaterialAsset> material = factory->CreateMaterial(desc, textures);
-```
+- target；
+- pass index；
+- full variant defines；
+- stage；
+- group/binding（适用时）；
+- provider name（provider failure）。
 
-以及：
+跨 pass/variant 的 user layout 冲突同时保存当前与原始 `ShaderDiagnosticContext`，调用方可以定位冲突双方，而不是只得到 group 级错误。
 
-```cpp
-gltfAsset->SpawnScene(world, *factory);
-```
+调用方不应把 `false/nullopt` 当作唯一错误信息；cooker 和 runtime result 都保留可定位原因。
 
-后一种路径会为每个 glTF primitive 创建并设置材质；翻译失败时回退到管线默认材质。
+## 本阶段验收矩阵
 
-### 标准材质参数
+| 契约 | 直接测试证据 |
+| --- | --- |
+| DXIL/SPIR-V canonical graphics、compute interface 一致 | `ShaderInterfaceTest.DxilAndSpirvProduceEquivalent*` |
+| VariantDomain/BakeSet 分离、稀疏 binary、确定性序列化与损坏拒绝 | `ShaderBinaryTest`、`ShaderCookerTest` |
+| reserved group 缺失合法、未知 binding 拒绝、provider cbuffer projection | `ShaderBindingPolicyTest` |
+| 多 user group、类型安全 setter、资源完整性与实际 program projection | `ShaderParameterLayoutTest`、`ShaderParameterSetTest` |
+| cbuffer 字段并集、冲突双方诊断、layout 扩展保值 | `ShaderParameterLayoutTest.UnionsConstantBufferFieldProjectionsDeterministically`、`ShaderParameterSetTest.ConstantProjectionCompletenessAndLayoutGrowthPreserveValues` |
+| baked/memory/disk/JIT、请求合并、negative cache、source snapshot 与 cache provenance | `ShaderArtifactResolverTest` |
+| 真实 cooker 的 Forward/Shadow、多 target/variant 和 cbuffer field projection | `ForwardMaterialCookerTest` |
 
-`StandardMaterialDescription` 当前提供：
+## 当前明确延期
 
-| 类别 | 参数 |
-|---|---|
-| 基础 PBR | BaseColorFactor、MetallicFactor、RoughnessFactor |
-| 基础贴图 | BaseColor、MetallicRoughness |
-| 表面细节 | NormalTexture、NormalScale |
-| 遮蔽 | OcclusionTexture、OcclusionStrength |
-| 自发光 | EmissiveFactor、EmissiveStrength、EmissiveTexture |
-| Alpha | Opaque/Mask/Blend、AlphaCutoff |
-| 几何面 | DoubleSided |
-| Principled 扩展 | Specular、SpecularTint、Clearcoat、ClearcoatGloss、Sheen、SheenTint |
+本阶段没有实现以下能力：
 
-贴图色彩空间约定：
+- 从 canonical interface 创建 RHI `PipelineLayout`；
+- descriptor/constant upload；
+- GPU material cache 与跨帧回收；
+- PSO 构建、draw/dispatch 提交；
+- `BindingGroupLayout` 独立 identity；
+- push constant 的通用 user parameter 路径；
+- asset-authored property default/alias、material 文件和编辑器；
+- geometry/tessellation/ray-tracing shader stage。
 
-- BaseColor 和 Emissive 以 sRGB 纹理上传；
-- MetallicRoughness、Normal 和 Occlusion 以 linear 纹理上传；
-- metallic-roughness 贴图遵循 glTF 通道约定：G 为 roughness，B 为 metallic；
-- occlusion 使用 R 通道；
-- normal map 使用 tangent-space RGB，并由 `NormalScale` 缩放 XY。
+不要让上述 GPU 生命周期或 PSO 状态反向进入当前 CPU 数据模型。
 
-默认 shader 始终声明五个 texture binding，并用默认纹理补齐未设置槽位。keyword 只控制是否执行采样代码，不改变材质 descriptor ABI。
+## 后续迭代顺序
 
-### Alpha 和双面语义
+1. **作者元数据**：增加 `ShaderPropertyDesc`、默认资源、required/optional 策略、material serialization 和 hot-reload value migration；这些仍是 CPU/asset 能力。
+2. **BindingGroupLayout identity**：把 `BindingGroup` 从完整 `PipelineLayout` 指针解耦，binding 时按目标 group layout identity 校验。
+3. **GPU parameter projection**：依据具体 `ShaderInterfaceDesc`，从 ParameterSet 超集投影当前 program 实际使用 bindings。
+4. **material GPU cache**：以 parameter-layout hash、resource revisions 和 flight/fence 生命周期缓存 descriptor 与 constant upload。
+5. **pipeline/PSO integration**：canonical program interface 驱动 layout，bytecode artifact 驱动 shader module/PSO；provider 与 user groups 在 encoder 前汇合。
 
-| Alpha 模式 | Queue | Shader 行为 | PSO 行为 |
-|---|---:|---|---|
-| Opaque | Geometry | 输出 alpha 视为 1 | 深度写开、无混合、默认背面剔除 |
-| Mask | AlphaTest | 根据 `AlphaCutoff` 执行 `clip` | 深度写开、无混合 |
-| Blend | Transparent | 输出 BaseColor alpha | SrcAlpha 混合、深度写关、远到近排序、Cull=None |
-
-`DoubleSided` 会启用 `_DOUBLESIDED_ON`，背面像素会翻转法线，使内壁保持正确受光；非透明双面材质同时覆盖 `Cull=None`。
-
-### Principled 着色
-
-默认 [`forward_pass.hlsl`](../shaderlib/forward_pipeline/forward_pass.hlsl) 使用 [`principled.hlsl`](../shaderlib/principled.hlsl) 中的 Mitsuba3 风格 Principled Reflection，实现：
-
-- metallic/dielectric 混合；
-- GGX 各向同性和各向异性高光；
-- rough diffuse 与 retro-reflection；
-- specular tint；
-- sheen 与 sheen tint；
-- clearcoat 和 clearcoat gloss；
-- flatness 对 diffuse/subsurface 近似项的插值；
-- Fresnel 和 eta 参数。
-
-`ForwardMaterialConstants` 还暴露 `anisotropic`、`flatness`、`specTrans` 和 `eta`。标准材质工厂目前只填写 eta 默认值，不从 `StandardMaterialDescription` 暴露其余参数；程序化材质可以直接构造完整常量块。
-
-需要注意，当前入口是 `EvalPrincipledReflection`：`specTrans` 会参与能量分配，但还没有实际的透射、折射或背面 transmission lobe。
-
-### 光照、阴影和输出
-
-默认 ForwardPipeline 支持：
-
-| 能力 | 当前实现 |
-|---|---|
-| 点光源 | 最多 8 盏，inverse-square 衰减 |
-| 方向光 | 最多 8 盏 |
-| 点光阴影 | 第一盏开启阴影的点光源，1024x1024 cubemap 六面深度 |
-| 方向光阴影 | 第一盏开启阴影的方向光，最多 4 级 CSM |
-| CSM 软阴影 | 单 tap、4 tap、5x5 tent 模式 |
-| 阴影偏移 | 每级联/每 cube face 基于 texel 世界尺寸的 depth 和 normal bias |
-| 输出 | `direct lighting * AO + emissive`，随后 Reinhard tone map 和 linear-to-sRGB |
-
-点光与方向光阴影由管线全局 keyword 控制。本帧没有相应阴影时，shader 变体会完全剔除阴影资源 binding 和采样代码。
-
-## glTF 材质能力
-
-`GltfAsset` 保存 shader 无关的 `GltfMaterialDesc`，其类型就是 `StandardMaterialDescription`。导入器当前映射：
-
-- glTF 2.0 metallic-roughness；
-- BaseColor、MetallicRoughness、Normal、Occlusion、Emissive 贴图；
-- `alphaMode`、`alphaCutoff` 和 `doubleSided`；
-- `KHR_materials_emissive_strength`；
-- `KHR_materials_specular` 的 factor，以及对 specular color 的标量近似；
-- `KHR_materials_clearcoat` 的 factor/roughness 数值；
-- `KHR_materials_sheen` 颜色的标量近似；
-- 旧 specular-glossiness workflow 的降级近似：diffuse -> BaseColor，`1-glossiness` -> Roughness，Metallic=0。
-
-几何统一生成或读取 `POSITION/NORMAL/TEXCOORD0/TANGENT`，与默认 Forward shader 的交错顶点布局一致。
-
-示例：
-
-- [`examples/gltf_viewer`](../examples/gltf_viewer/gltf_viewer.cpp)
-- [`examples/sphere_demo`](../examples/sphere_demo/sphere_demo.cpp)
-
-## 上层应用的四种使用层级
-
-### 1. 直接加载 glTF
-
-适合模型查看器和一般场景应用：
-
-```cpp
-_gltfAsset = LoadGltfAsset(*assets, uploads, path);
-
-if (GltfAsset* asset = _gltfAsset.Get(); asset != nullptr) {
-    auto factory = renderSystem->GetStandardMaterialFactory();
-    if (factory != nullptr) {
-        asset->SpawnScene(world, *factory.Get());
-    }
-}
-```
-
-上层不需要知道 shader、property、keyword 和 Pass 细节。
-
-### 2. 创建程序化标准材质
-
-适合程序化几何、调试场景和业务生成的模型：
-
-```cpp
-StandardMaterialDescription desc{};
-desc.BaseColorFactor = Eigen::Vector4f{0.82f, 0.67f, 0.34f, 1.0f};
-desc.MetallicFactor = 1.0f;
-desc.RoughnessFactor = 0.35f;
-desc.AlphaMode = StandardAlphaMode::Opaque;
-
-StreamingAssetRef<MaterialAsset> material = factory->CreateMaterial(desc, {});
-meshComponent->SetMaterial(sectionIndex, material);
-```
-
-### 3. 在实例上覆盖参数
-
-适合大量共享材质、只有少量参数不同的实例：
-
-```cpp
-auto block = make_shared<MaterialPropertyBlock>();
-block->SetVector("BaseColor", instanceColor);
-meshComponent->SetPropertyBlock(sectionIndex, std::move(block));
-```
-
-### 4. 创建完全自定义 shader/material
-
-适合自定义渲染效果：
-
-1. 读取 HLSL 源码；
-2. 创建 `ShaderKeywordSet`；
-3. 为每个阶段构造 `ShaderPassDesc`；
-4. 声明 property 默认值和 `ParameterSources`；
-5. 通过 `AssetManager::AddReady<ShaderAsset>` 注册 shader；
-6. 创建引用该 shader 的 `MaterialAsset`；
-7. 设置参数、keyword、RenderQueue 和固定状态；
-8. 把材质设置到 `StaticMeshComponent` section。
-
-这条路径允许自定义顶点布局、多个 Pass 和任意兼容的材质字段，但仍受下文通用 Mesh binder 能力限制。
-
-## 失败与异步资源行为
-
-系统区分资源“暂未就绪”和“无效”：
-
-- streaming texture 仍在加载时，binding resolution 返回 `Pending`，当前 draw 暂不提交，后续帧重新解析；
-- texture 已失败、property 类型错误、缺失必需 provider 或 shader 接口不兼容时返回 `Invalid`；
-- shader 编译、PSO 构建或 binding 无效时，颜色 Pass 尝试使用 error material；
-- error shader 只依赖 per-object/per-view 常量，用醒目颜色暴露失败对象；
-- 相同 binding diagnostic 会被记录，避免每帧无限重复同一错误。
-
-默认纹理和 sampler 都由长期缓存持有，快照仅保存资产引用或 descriptor 值，避免跨线程、跨帧裸指针悬垂。
-
-## 当前边界与注意事项
-
-### Shader/Binding 边界
-
-- 高层 `ShaderAsset::GetOrCreateVariant` 当前固定构建 VS+PS 图形变体；compute 虽有底层 variant/PSO 基础设施，但没有接入 `MaterialAsset`/`MeshPassExecutor`。
-- 通用 Mesh binder 只接受单元素 cbuffer、只读 texture、sampler 和 static sampler。
-- 资源数组、bindless、UAV/storage texture、storage/structured buffer、texel buffer、加速结构尚不能通过通用材质 binder 使用。
-- `ShaderPassDesc` 可以描述 push constant layout，但通用 Mesh binder 当前会拒绝含 push constant range 的 layout。
-- `MaterialAsset::SetFloat/SetVector/SetTexture` 不会立即校验名字和类型；真正的反射匹配和错误报告发生在构建 draw binding 时。
-
-### 默认 ForwardPipeline 边界
-
-- 只有直接点光和方向光，没有 ambient、environment map、IBL、reflection probe 或 sky lighting。
-- `light.hlsl` 有 spot light 数据结构和求值函数，但 ForwardPipeline 当前不收集和着色 spot light。
-- 点光 `range` 当前用于阴影半径，但颜色求值只采用 inverse-square，并未按 range 截断。
-- 只允许第一盏投影点光和第一盏投影方向光产生阴影。
-- ShadowCaster Pass 只使用位置、对象矩阵和阴影视图，不采样材质 alpha；Mask/Blend 材质目前会投射完整几何轮廓。
-- 当前颜色 DrawList 明确“全收”，还没有视锥裁剪；透明物体按 proxy 原点距离排序，不是逐三角形排序。
-- tone mapping 和 sRGB 转换直接发生在材质 pixel shader 内，尚未形成独立 HDR 后处理链。
-
-### 标准材质和 glTF 边界
-
-- 默认 shader 固定消费 `POSITION/NORMAL/TEXCOORD0/TANGENT`，不支持 skinning、morph target 或其他顶点流。
-- 所有五类材质贴图共用一个 sampler。
-- glTF 当前只读取 UV0，没有纹理 UV 集选择和 `KHR_texture_transform`。
-- specular、clearcoat、sheen 扩展只映射数值近似，没有映射对应扩展贴图。
-- transmission、volume、IOR、iridescence、anisotropy 等 glTF 扩展尚未进入标准材质描述。
-
-### 资产与工具链边界
-
-- 当前没有 `.shader`/`.material` 文件格式或对应资产反序列化 loader。
-- 没有材质 Inspector、节点图、MaterialInstance 继承或运行时 property 枚举 UI。
-- `ShaderVariantKey` 预留了 `SourceVersion`，但 `ShaderAsset` 当前未接入源码版本更新和完整 hot reload。
-- 离线 shader bake 机制已实现，但仓库当前未提供工具默认引用的 `assets/shader_variants/forward_pipeline.json` 变体集合，需要部署方补齐。
-- RHI 枚举包含 Metal，且 render 模块有 MSL/SPIRV-Cross 工具代码；当前 runtime variant 来源和示例实际打通的是 D3D12/DXIL 与 Vulkan/SPIR-V，不应把默认材质路径视为已支持 Metal。
-
-### 当前代码契约不一致
-
-编写自定义材质 shader 时应特别注意两处现状：
-
-1. [`shaderlib/material.hlsl`](../shaderlib/material.hlsl) 仍描述旧的 `space0=View、space1=Material、push constant=Object` 约定；当前通用 Forward shader 使用 `space0=Object、space1=View/Pass、space2=Material`，并且通用 Mesh binder 不支持 push constant。新 shader 应以 [`forward_pass.hlsl`](../shaderlib/forward_pipeline/forward_pass.hlsl)、`ShaderParameterSourceDesc` 和实际反射 binding 为准。
-2. `MaterialAsset::SetConstantBlock` 头文件注释称超出 cbuffer 的数据会被截断，但当前 binding resolver 会把“输入字节数大于目标块”判定为无效。调用方应传入不大于反射块大小的数据，最好保持精确匹配。
-
-## 能力结论
-
-当前 shader/material 系统已经可以稳定支撑：
-
-- 程序化网格和多 section 材质；
-- glTF metallic-roughness 场景导入；
-- 标准 PBR、五类贴图、alpha test/alpha blend 和双面材质；
-- 材质 keyword 与管线全局 keyword 组合；
-- 点光、方向光、点光 cubemap 阴影和方向光 CSM；
-- 共享材质加 per-instance property 覆盖；
-- 反射驱动的 Object/View/Pass/Material 参数绑定；
-- D3D12/Vulkan 运行时编译、预编译 fallback 与多层缓存；
-- 游戏线程修改、渲染线程无锁读取的不可变材质快照。
-
-对于上层应用，它提供的核心价值不是单一 PBR shader，而是把“导入器材质描述、shader 变体、参数绑定、渲染状态、资源生命周期和 draw 提交”连接成了一条可复用的运行时路径。
+进入第 2 步前，不应继续扩展旧的完整 `PipelineLayout*` 绑定组复用方式。

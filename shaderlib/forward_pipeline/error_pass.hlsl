@@ -15,7 +15,6 @@ VertexOutput VSMain(VertexInput input) {
     return output;
 }
 
-float4 PSMain(VertexOutput input) : SV_Target0 {
-    (void)input;
+float4 PSMain() : SV_Target0 {
     return float4(1.0, 0.0, 1.0, 1.0);
 }

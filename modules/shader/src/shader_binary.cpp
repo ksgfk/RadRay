@@ -8,8 +8,6 @@
 #include <stdexcept>
 #include <tuple>
 
-#include <xxhash.h>
-
 #include <radray/file.h>
 #include <radray/logger.h>
 #if defined(RADRAY_PLATFORM_WINDOWS)
@@ -20,7 +18,7 @@ namespace radray::shader {
 namespace {
 
 constexpr std::array<uint8_t, 8> kMagic{'R', 'D', 'R', 'S', 'H', 'D', 'R', 0};
-constexpr uint32_t kFormatVersion = 1;
+constexpr uint32_t kFormatVersion = 2;
 constexpr uint32_t kMaxPassCount = 1u << 16;
 constexpr uint32_t kMaxRecordCount = 1u << 20;
 constexpr uint32_t kMaxVectorCount = 1u << 20;
@@ -296,14 +294,15 @@ bool ReadGraphicsPass(Reader& reader, ShaderGraphicsPassDesc& value) {
 void WritePass(Writer& writer, const ShaderPassDesc& pass) {
     writer.String(pass.Name);
     writer.String(pass.SourcePath);
+    WriteHash(writer, pass.SourceIdentity);
     WriteVector(writer, pass.IncludeDirs, [](Writer& target, const string& value) { target.String(value); });
     WriteEnum(writer, pass.SM);
-    WriteVector(writer, pass.KeywordGroups, [](Writer& target, const ShaderKeywordGroupDesc& group) {
+    WriteVector(writer, pass.VariantDomain.KeywordGroups, [](Writer& target, const ShaderKeywordGroupDesc& group) {
         WriteVector(target, group.Alternatives, [](Writer& strings, const string& value) { strings.String(value); });
         WriteEnum(target, group.Scope);
         target.U32(group.Stages.value());
     });
-    WriteVector(writer, pass.Variants, [](Writer& target, const ShaderVariantDesc& variant) {
+    WriteVector(writer, pass.BakeSet.Variants, [](Writer& target, const ShaderVariantKey& variant) {
         WriteVector(target, variant.Defines, [](Writer& strings, const string& value) { strings.String(value); });
     });
     WriteVector(writer, pass.Tags, [](Writer& target, const ShaderTagDesc& tag) {
@@ -322,9 +321,10 @@ void WritePass(Writer& writer, const ShaderPassDesc& pass) {
 
 bool ReadPass(Reader& reader, ShaderPassDesc& pass) {
     if (!reader.String(pass.Name) || !reader.String(pass.SourcePath) ||
+        !ReadHash(reader, pass.SourceIdentity) ||
         !ReadVector(reader, pass.IncludeDirs, [](Reader& source, string& value) { return source.String(value); }) ||
         !ReadEnum(reader, pass.SM, 0, static_cast<int32_t>(HlslShaderModel::SM66)) ||
-        !ReadVector(reader, pass.KeywordGroups, [](Reader& source, ShaderKeywordGroupDesc& group) {
+        !ReadVector(reader, pass.VariantDomain.KeywordGroups, [](Reader& source, ShaderKeywordGroupDesc& group) {
             uint32_t stages = 0;
             if (!ReadVector(source, group.Alternatives, [](Reader& strings, string& value) { return strings.String(value); }) ||
                 !ReadEnum(source, group.Scope, 0, static_cast<int32_t>(ShaderKeywordScope::Global)) ||
@@ -338,7 +338,7 @@ bool ReadPass(Reader& reader, ShaderPassDesc& pass) {
             group.Stages = ShaderStages{stages};
             return true;
         }) ||
-        !ReadVector(reader, pass.Variants, [](Reader& source, ShaderVariantDesc& variant) {
+        !ReadVector(reader, pass.BakeSet.Variants, [](Reader& source, ShaderVariantKey& variant) {
             return ReadVector(source, variant.Defines, [](Reader& strings, string& value) { return strings.String(value); });
         }) ||
         !ReadVector(reader, pass.Tags, [](Reader& source, ShaderTagDesc& tag) {
@@ -371,54 +371,178 @@ std::optional<ShaderReflectionDesc> DeserializeReflection(uint8_t kind, std::str
     return std::nullopt;
 }
 
-bool SameRecordKey(const CompiledShaderStage& lhs, const CompiledShaderStage& rhs) noexcept {
-    return lhs.Target == rhs.Target && lhs.PassIndex == rhs.PassIndex && lhs.Stage == rhs.Stage && lhs.Defines == rhs.Defines;
-}
-
-bool RecordKeyLess(const CompiledShaderStage* lhs, const CompiledShaderStage* rhs) noexcept {
-    return std::tie(lhs->PassIndex, lhs->Defines, lhs->Stage, lhs->Target) <
-           std::tie(rhs->PassIndex, rhs->Defines, rhs->Stage, rhs->Target);
-}
-
 bool IsKnownTarget(ShaderTarget target) noexcept {
     return target == ShaderTarget::DXIL || target == ShaderTarget::SPIRV;
 }
 
-size_t GetPassStageCount(const ShaderPassDesc& pass) noexcept {
-    if (const auto* graphics = std::get_if<ShaderGraphicsPassDesc>(&pass.Program)) {
-        return graphics->PixelEntry.has_value() ? 2u : 1u;
-    }
-    return 1u;
+bool IsSupportedStage(ShaderStage stage) noexcept {
+    return stage == ShaderStage::Vertex || stage == ShaderStage::Pixel || stage == ShaderStage::Compute;
 }
 
-bool IsRecordValid(const ShaderAssetData& asset, const CompiledShaderStage& record) {
-    if (!IsKnownTarget(record.Target) || record.PassIndex >= asset.Passes.size() ||
-        record.Stage == ShaderStage::UNKNOWN || record.Bytecode.empty() ||
-        record.ReflectionPayload.empty() || !record.Reflection.has_value() ||
-        record.Category != GetShaderBlobCategory(record.Target) || HashShaderBytes(record.Bytecode) != record.BinaryHash ||
-        HashShaderBytes(std::as_bytes(std::span{record.ReflectionPayload.data(), record.ReflectionPayload.size()})) !=
-            record.InterfaceHash) {
+vector<ShaderStage> GetPassStages(const ShaderPassDesc& pass) {
+    if (const auto* graphics = std::get_if<ShaderGraphicsPassDesc>(&pass.Program)) {
+        vector<ShaderStage> result{ShaderStage::Vertex};
+        if (graphics->PixelEntry.has_value()) result.emplace_back(ShaderStage::Pixel);
+        return result;
+    }
+    return {ShaderStage::Compute};
+}
+
+std::optional<string> SerializeReflection(const ShaderReflectionDesc& reflection) noexcept {
+    if (const auto* hlsl = std::get_if<HlslShaderDesc>(&reflection)) {
+        return SerializeHlslShaderDesc(*hlsl);
+    }
+    return SerializeSpirvShaderDesc(std::get<SpirvShaderDesc>(reflection));
+}
+
+bool ReflectionMatchesTarget(const ShaderReflectionRecord& record) noexcept {
+    return (record.Target == ShaderTarget::DXIL && std::holds_alternative<HlslShaderDesc>(record.Reflection)) ||
+           (record.Target == ShaderTarget::SPIRV && std::holds_alternative<SpirvShaderDesc>(record.Reflection));
+}
+
+bool IsReflectionValid(const ShaderReflectionRecord& record) noexcept {
+    if (!IsKnownTarget(record.Target) || !ReflectionMatchesTarget(record)) return false;
+    const auto payload = SerializeReflection(record.Reflection);
+    return payload.has_value() &&
+           HashShaderBytes(std::as_bytes(std::span{payload->data(), payload->size()})) == record.Hash;
+}
+
+bool IsStageInterfaceConsistent(
+    const ShaderReflectionRecord& reflection,
+    const ShaderStageArtifact& artifact,
+    const ShaderStageInterfaceDesc& interface) noexcept {
+    ShaderInterfaceNormalizationOptions options;
+    options.Context.Target = artifact.Target;
+    options.Context.PassIndex = artifact.PassIndex;
+    options.Context.VariantDefines = artifact.Defines;
+    options.Context.Stage = artifact.Stage;
+    if (const auto* hlsl = std::get_if<HlslShaderDesc>(&reflection.Reflection)) {
+        const auto result = NormalizeHlslInterface(*hlsl, artifact.Stage, options);
+        return result.Succeeded() && *result.Interface == interface;
+    }
+    const auto result = NormalizeSpirvInterface(
+        std::get<SpirvShaderDesc>(reflection.Reflection), artifact.Stage, options);
+    return result.Succeeded() && *result.Interface == interface;
+}
+
+bool SameStageArtifactKey(const ShaderStageArtifact& lhs, const ShaderStageArtifact& rhs) noexcept {
+    return lhs.Target == rhs.Target && lhs.PassIndex == rhs.PassIndex &&
+           lhs.Stage == rhs.Stage && lhs.Defines == rhs.Defines;
+}
+
+bool StageArtifactKeyLess(const ShaderStageArtifact& lhs, const ShaderStageArtifact& rhs) noexcept {
+    return std::tie(lhs.PassIndex, lhs.Defines, lhs.Stage, lhs.Target) <
+           std::tie(rhs.PassIndex, rhs.Defines, rhs.Stage, rhs.Target);
+}
+
+bool SameProgramKey(
+    const ShaderProgramVariantArtifact& lhs,
+    const ShaderProgramVariantArtifact& rhs) noexcept {
+    return lhs.Target == rhs.Target && lhs.PassIndex == rhs.PassIndex && lhs.Defines == rhs.Defines;
+}
+
+bool ProgramKeyLess(
+    const ShaderProgramVariantArtifact& lhs,
+    const ShaderProgramVariantArtifact& rhs) noexcept {
+    return std::tie(lhs.PassIndex, lhs.Defines, lhs.Target) <
+           std::tie(rhs.PassIndex, rhs.Defines, rhs.Target);
+}
+
+bool BytesLess(std::span<const byte> lhs, std::span<const byte> rhs) noexcept {
+    return std::lexicographical_compare(lhs.begin(), lhs.end(), rhs.begin(), rhs.end());
+}
+
+template <typename T, typename Serialize>
+bool SortSerializedTable(
+    vector<T>& table,
+    vector<uint32_t>& oldToNew,
+    Serialize&& serialize) {
+    vector<vector<byte>> keys;
+    keys.reserve(table.size());
+    for (const T& value : table) {
+        auto key = serialize(value);
+        if (!key.has_value()) return false;
+        keys.emplace_back(std::move(*key));
+    }
+    vector<uint32_t> order(table.size());
+    for (uint32_t i = 0; i < order.size(); ++i) order[i] = i;
+    std::ranges::sort(order, [&](uint32_t lhs, uint32_t rhs) {
+        return BytesLess(keys[lhs], keys[rhs]);
+    });
+    vector<T> sorted;
+    sorted.reserve(table.size());
+    oldToNew.resize(table.size());
+    for (uint32_t newIndex = 0; newIndex < order.size(); ++newIndex) {
+        oldToNew[order[newIndex]] = newIndex;
+        sorted.emplace_back(std::move(table[order[newIndex]]));
+    }
+    table = std::move(sorted);
+    return true;
+}
+
+std::optional<vector<byte>> SerializeReflectionKey(const ShaderReflectionRecord& record) noexcept {
+    const auto payload = SerializeReflection(record.Reflection);
+    if (!payload.has_value()) return std::nullopt;
+    vector<byte> result;
+    result.reserve(payload->size() + 1);
+    result.emplace_back(static_cast<byte>(record.Target));
+    const auto bytes = std::as_bytes(std::span{payload->data(), payload->size()});
+    result.insert(result.end(), bytes.begin(), bytes.end());
+    return result;
+}
+
+bool CanonicalizeBinary(const ShaderBinary& source, ShaderBinary& result) {
+    if (!source.IsValid()) return false;
+    result = source;
+
+    vector<uint32_t> reflectionRemap;
+    if (!SortSerializedTable(
+            result.Reflections,
+            reflectionRemap,
+            [](const ShaderReflectionRecord& value) { return SerializeReflectionKey(value); })) {
+        return false;
+    }
+    vector<uint32_t> stageInterfaceRemap;
+    if (!SortSerializedTable(
+            result.StageInterfaces,
+            stageInterfaceRemap,
+            [](const ShaderStageInterfaceDesc& value) { return SerializeShaderStageInterface(value); })) {
+        return false;
+    }
+    vector<uint32_t> programInterfaceRemap;
+    if (!SortSerializedTable(
+            result.ProgramInterfaces,
+            programInterfaceRemap,
+            [](const ShaderInterfaceDesc& value) { return SerializeShaderInterface(value); })) {
         return false;
     }
 
-    std::optional<string> serializedReflection;
-    if (record.Target == ShaderTarget::DXIL) {
-        const auto* reflection = std::get_if<HlslShaderDesc>(&*record.Reflection);
-        if (reflection == nullptr) return false;
-        serializedReflection = SerializeHlslShaderDesc(*reflection);
-    } else {
-        const auto* reflection = std::get_if<SpirvShaderDesc>(&*record.Reflection);
-        if (reflection == nullptr) return false;
-        serializedReflection = SerializeSpirvShaderDesc(*reflection);
+    for (ShaderStageArtifact& artifact : result.StageArtifacts) {
+        artifact.ReflectionIndex = reflectionRemap[artifact.ReflectionIndex];
+        artifact.InterfaceIndex = stageInterfaceRemap[artifact.InterfaceIndex];
     }
-    if (!serializedReflection.has_value() || *serializedReflection != record.ReflectionPayload) return false;
+    vector<uint32_t> stageArtifactOrder(result.StageArtifacts.size());
+    for (uint32_t i = 0; i < stageArtifactOrder.size(); ++i) stageArtifactOrder[i] = i;
+    std::ranges::sort(stageArtifactOrder, [&](uint32_t lhs, uint32_t rhs) {
+        return StageArtifactKeyLess(result.StageArtifacts[lhs], result.StageArtifacts[rhs]);
+    });
+    vector<uint32_t> stageArtifactRemap(result.StageArtifacts.size());
+    vector<ShaderStageArtifact> sortedArtifacts;
+    sortedArtifacts.reserve(result.StageArtifacts.size());
+    for (uint32_t newIndex = 0; newIndex < stageArtifactOrder.size(); ++newIndex) {
+        stageArtifactRemap[stageArtifactOrder[newIndex]] = newIndex;
+        sortedArtifacts.emplace_back(std::move(result.StageArtifacts[stageArtifactOrder[newIndex]]));
+    }
+    result.StageArtifacts = std::move(sortedArtifacts);
 
-    const ShaderPassDesc& pass = asset.Passes[record.PassIndex];
-    const auto entry = FindShaderEntryPoint(pass, record.Stage);
-    if (!entry.has_value() || *entry != record.EntryPoint || !IsDeclaredShaderVariant(pass, record.Defines)) return false;
-    vector<string> normalized = record.Defines;
-    NormalizeShaderDefines(normalized);
-    return normalized == record.Defines;
+    for (ShaderProgramVariantArtifact& program : result.ProgramVariants) {
+        program.InterfaceIndex = programInterfaceRemap[program.InterfaceIndex];
+        for (uint32_t& artifactIndex : program.StageArtifactIndices) {
+            artifactIndex = stageArtifactRemap[artifactIndex];
+        }
+    }
+    std::ranges::sort(result.ProgramVariants, ProgramKeyLess);
+    return result.IsValid();
 }
 
 bool ReplaceWithTemporaryFile(
@@ -438,11 +562,6 @@ bool ReplaceWithTemporaryFile(
 
 }  // namespace
 
-ShaderHash HashShaderBytes(std::span<const byte> data) noexcept {
-    const XXH128_hash_t hash = XXH3_128bits(data.data(), data.size());
-    return ShaderHash{.Low = hash.low64, .High = hash.high64};
-}
-
 ShaderBlobCategory GetShaderBlobCategory(ShaderTarget target) noexcept {
     return target == ShaderTarget::SPIRV ? ShaderBlobCategory::SPIRV : ShaderBlobCategory::DXIL;
 }
@@ -450,90 +569,288 @@ ShaderBlobCategory GetShaderBlobCategory(ShaderTarget target) noexcept {
 bool ShaderBinary::IsValid() const noexcept {
     try {
         if (Asset.AssetId.IsEmpty() || Asset.Passes.size() > kMaxPassCount ||
-            !IsShaderAssetDataValid(Asset, true) || Stages.empty() ||
-            Stages.size() > kMaxRecordCount) {
+            !IsShaderAssetDataValid(Asset, false) || Reflections.size() > kMaxRecordCount ||
+            StageInterfaces.size() > kMaxRecordCount || ProgramInterfaces.size() > kMaxRecordCount ||
+            StageArtifacts.size() > kMaxRecordCount || ProgramVariants.size() > kMaxRecordCount) {
             return false;
         }
 
-        std::array<bool, 2> targetsPresent{};
-        vector<const CompiledShaderStage*> ordered;
-        ordered.reserve(Stages.size());
-        for (const CompiledShaderStage& stage : Stages) {
-            if (!IsRecordValid(Asset, stage)) return false;
-            targetsPresent[static_cast<size_t>(stage.Target)] = true;
-            ordered.emplace_back(&stage);
+        vector<string> reflectionPayloads;
+        reflectionPayloads.reserve(Reflections.size());
+        for (size_t i = 0; i < Reflections.size(); ++i) {
+            const ShaderReflectionRecord& reflection = Reflections[i];
+            if (!IsReflectionValid(reflection)) return false;
+            auto payload = SerializeReflection(reflection.Reflection);
+            if (!payload.has_value()) return false;
+            for (size_t j = 0; j < i; ++j) {
+                if (Reflections[j].Target == reflection.Target && reflectionPayloads[j] == *payload) {
+                    return false;
+                }
+            }
+            reflectionPayloads.emplace_back(std::move(*payload));
         }
-        std::ranges::sort(ordered, RecordKeyLess);
-        for (size_t i = 1; i < ordered.size(); ++i) {
-            if (SameRecordKey(*ordered[i - 1], *ordered[i])) return false;
+        for (size_t i = 0; i < StageInterfaces.size(); ++i) {
+            if (!IsShaderStageInterfaceValid(StageInterfaces[i])) return false;
+            for (size_t j = 0; j < i; ++j) {
+                if (StageInterfaces[j] == StageInterfaces[i]) return false;
+            }
+        }
+        for (size_t i = 0; i < ProgramInterfaces.size(); ++i) {
+            if (!IsShaderInterfaceValid(ProgramInterfaces[i])) return false;
+            for (size_t j = 0; j < i; ++j) {
+                if (ProgramInterfaces[j] == ProgramInterfaces[i]) return false;
+            }
         }
 
-        size_t recordsPerTarget = 0;
-        for (const ShaderPassDesc& pass : Asset.Passes) {
-            const size_t stageCount = GetPassStageCount(pass);
-            if (pass.Variants.size() > (kMaxRecordCount - recordsPerTarget) / stageCount) return false;
-            recordsPerTarget += pass.Variants.size() * stageCount;
+        vector<bool> reflectionReferenced(Reflections.size(), false);
+        vector<bool> stageInterfaceReferenced(StageInterfaces.size(), false);
+        for (size_t i = 0; i < StageArtifacts.size(); ++i) {
+            const ShaderStageArtifact& artifact = StageArtifacts[i];
+            if (!IsKnownTarget(artifact.Target) || artifact.Category != GetShaderBlobCategory(artifact.Target) ||
+                artifact.PassIndex >= Asset.Passes.size() || !IsSupportedStage(artifact.Stage) ||
+                artifact.Bytecode.empty() || HashShaderBytes(artifact.Bytecode) != artifact.BinaryHash ||
+                artifact.ReflectionIndex >= Reflections.size() || artifact.InterfaceIndex >= StageInterfaces.size()) {
+                return false;
+            }
+            const ShaderPassDesc& pass = Asset.Passes[artifact.PassIndex];
+            const vector<ShaderStage> passStages = GetPassStages(pass);
+            if (std::ranges::find(passStages, artifact.Stage) == passStages.end()) return false;
+            const auto entry = FindShaderEntryPoint(pass, artifact.Stage);
+            if (!entry.has_value() || artifact.EntryPoint != *entry) return false;
+            vector<string> normalized = artifact.Defines;
+            NormalizeShaderDefines(normalized);
+            if (normalized != artifact.Defines ||
+                !AreShaderDefinesValid(pass, artifact.Stage, artifact.Defines)) {
+                return false;
+            }
+            const ShaderReflectionRecord& reflection = Reflections[artifact.ReflectionIndex];
+            const ShaderStageInterfaceDesc& interface = StageInterfaces[artifact.InterfaceIndex];
+            if (reflection.Target != artifact.Target || interface.Stage != artifact.Stage ||
+                !IsStageInterfaceConsistent(reflection, artifact, interface)) {
+                return false;
+            }
+            for (size_t j = 0; j < i; ++j) {
+                if (SameStageArtifactKey(StageArtifacts[j], artifact)) return false;
+            }
+            reflectionReferenced[artifact.ReflectionIndex] = true;
+            stageInterfaceReferenced[artifact.InterfaceIndex] = true;
         }
-        const size_t targetCount = std::ranges::count(targetsPresent, true);
-        if (targetCount == 0 || recordsPerTarget > kMaxRecordCount / targetCount) return false;
-        return Stages.size() == recordsPerTarget * targetCount;
+
+        vector<bool> stageArtifactReferenced(StageArtifacts.size(), false);
+        vector<bool> programInterfaceReferenced(ProgramInterfaces.size(), false);
+        for (size_t i = 0; i < ProgramVariants.size(); ++i) {
+            const ShaderProgramVariantArtifact& program = ProgramVariants[i];
+            if (!IsKnownTarget(program.Target) || program.PassIndex >= Asset.Passes.size() ||
+                program.InterfaceIndex >= ProgramInterfaces.size()) {
+                return false;
+            }
+            const ShaderPassDesc& pass = Asset.Passes[program.PassIndex];
+            vector<string> normalized = program.Defines;
+            NormalizeShaderDefines(normalized);
+            if (normalized != program.Defines || !IsBakedShaderVariant(pass, program.Defines)) return false;
+            const vector<ShaderStage> expectedStages = GetPassStages(pass);
+            if (program.StageArtifactIndices.size() != expectedStages.size()) return false;
+
+            vector<const ShaderStageInterfaceDesc*> stageInterfaces;
+            stageInterfaces.reserve(expectedStages.size());
+            for (size_t stageIndex = 0; stageIndex < expectedStages.size(); ++stageIndex) {
+                const uint32_t artifactIndex = program.StageArtifactIndices[stageIndex];
+                if (artifactIndex >= StageArtifacts.size()) return false;
+                const ShaderStageArtifact& artifact = StageArtifacts[artifactIndex];
+                if (artifact.Target != program.Target || artifact.PassIndex != program.PassIndex ||
+                    artifact.Stage != expectedStages[stageIndex] ||
+                    artifact.Defines != ProjectShaderDefines(pass, artifact.Stage, program.Defines)) {
+                    return false;
+                }
+                stageArtifactReferenced[artifactIndex] = true;
+                stageInterfaces.emplace_back(&StageInterfaces[artifact.InterfaceIndex]);
+            }
+
+            ShaderInterfaceBuildResult built;
+            if (std::holds_alternative<ShaderGraphicsPassDesc>(pass.Program)) {
+                built = stageInterfaces.size() == 1
+                            ? MergeGraphicsStageInterfaces(*stageInterfaces[0])
+                            : MergeGraphicsStageInterfaces(*stageInterfaces[0], *stageInterfaces[1]);
+            } else {
+                built = BuildComputeShaderInterface(*stageInterfaces[0]);
+            }
+            if (!built.Succeeded() || *built.Interface != ProgramInterfaces[program.InterfaceIndex]) {
+                return false;
+            }
+            for (size_t j = 0; j < i; ++j) {
+                if (SameProgramKey(ProgramVariants[j], program)) return false;
+            }
+            programInterfaceReferenced[program.InterfaceIndex] = true;
+        }
+
+        if (!std::ranges::all_of(reflectionReferenced, [](bool value) { return value; }) ||
+            !std::ranges::all_of(stageInterfaceReferenced, [](bool value) { return value; }) ||
+            !std::ranges::all_of(stageArtifactReferenced, [](bool value) { return value; }) ||
+            !std::ranges::all_of(programInterfaceReferenced, [](bool value) { return value; })) {
+            return false;
+        }
+
+        for (size_t i = 0; i < StageArtifacts.size(); ++i) {
+            for (size_t j = 0; j < i; ++j) {
+                const ShaderStageArtifact& lhs = StageArtifacts[i];
+                const ShaderStageArtifact& rhs = StageArtifacts[j];
+                if (lhs.Target != rhs.Target && lhs.PassIndex == rhs.PassIndex &&
+                    lhs.Stage == rhs.Stage && lhs.Defines == rhs.Defines &&
+                    StageInterfaces[lhs.InterfaceIndex] != StageInterfaces[rhs.InterfaceIndex]) {
+                    return false;
+                }
+            }
+        }
+        for (size_t i = 0; i < ProgramVariants.size(); ++i) {
+            for (size_t j = 0; j < i; ++j) {
+                const ShaderProgramVariantArtifact& lhs = ProgramVariants[i];
+                const ShaderProgramVariantArtifact& rhs = ProgramVariants[j];
+                if (lhs.Target != rhs.Target && lhs.PassIndex == rhs.PassIndex && lhs.Defines == rhs.Defines &&
+                    ProgramInterfaces[lhs.InterfaceIndex] != ProgramInterfaces[rhs.InterfaceIndex]) {
+                    return false;
+                }
+            }
+        }
+        return true;
     } catch (...) {
         return false;
     }
 }
 
-Nullable<const CompiledShaderStage*> ShaderBinary::Find(
+bool ShaderBinary::IsBakeComplete(ShaderTarget target) const noexcept {
+    if (!IsKnownTarget(target) || !IsValid()) return false;
+    try {
+        for (uint32_t passIndex = 0; passIndex < Asset.Passes.size(); ++passIndex) {
+            for (const ShaderVariantKey& variant : Asset.Passes[passIndex].BakeSet.Variants) {
+                if (!FindProgramVariant(target, passIndex, variant.Defines).HasValue()) return false;
+            }
+        }
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+Nullable<const ShaderStageArtifact*> ShaderBinary::FindStageArtifact(
     ShaderTarget target,
     uint32_t passIndex,
     ShaderStage stage,
-    const vector<string>& defines) const noexcept {
+    const vector<string>& fullDefines) const noexcept {
     try {
-        vector<string> normalized = defines;
+        if (!IsKnownTarget(target) || passIndex >= Asset.Passes.size() || !IsSupportedStage(stage)) return nullptr;
+        vector<string> normalized = fullDefines;
         NormalizeShaderDefines(normalized);
-        const auto it = std::ranges::find_if(Stages, [&](const CompiledShaderStage& record) noexcept {
-            return record.Target == target && record.PassIndex == passIndex && record.Stage == stage &&
-                   record.Defines == normalized;
+        if (!IsShaderVariantInDomain(Asset.Passes[passIndex], normalized)) return nullptr;
+        const vector<string> projected = ProjectShaderDefines(Asset.Passes[passIndex], stage, normalized);
+        const auto it = std::ranges::find_if(StageArtifacts, [&](const ShaderStageArtifact& artifact) noexcept {
+            return artifact.Target == target && artifact.PassIndex == passIndex && artifact.Stage == stage &&
+                   artifact.Defines == projected;
         });
-        return it == Stages.end() ? nullptr : &*it;
+        return it == StageArtifacts.end() ? nullptr : &*it;
     } catch (...) {
         return nullptr;
     }
 }
 
-bool WriteShaderBinary(const std::filesystem::path& path, const ShaderBinary& binary) noexcept {
-    if (!binary.IsValid() || path.empty()) return false;
+Nullable<const ShaderProgramVariantArtifact*> ShaderBinary::FindProgramVariant(
+    ShaderTarget target,
+    uint32_t passIndex,
+    const vector<string>& fullDefines) const noexcept {
     try {
-        Writer payload;
-        WriteGuid(payload, binary.Asset.AssetId);
-        WriteVector(payload, binary.Asset.Passes, WritePass);
+        if (!IsKnownTarget(target) || passIndex >= Asset.Passes.size()) return nullptr;
+        vector<string> normalized = fullDefines;
+        NormalizeShaderDefines(normalized);
+        if (!IsShaderVariantInDomain(Asset.Passes[passIndex], normalized)) return nullptr;
+        const auto it = std::ranges::find_if(
+            ProgramVariants,
+            [&](const ShaderProgramVariantArtifact& program) noexcept {
+                return program.Target == target && program.PassIndex == passIndex &&
+                       program.Defines == normalized;
+            });
+        return it == ProgramVariants.end() ? nullptr : &*it;
+    } catch (...) {
+        return nullptr;
+    }
+}
 
-        vector<const CompiledShaderStage*> ordered;
-        ordered.reserve(binary.Stages.size());
-        for (const CompiledShaderStage& stage : binary.Stages) ordered.emplace_back(&stage);
-        std::ranges::sort(ordered, RecordKeyLess);
-        payload.U32(static_cast<uint32_t>(ordered.size()));
-        for (const CompiledShaderStage* stage : ordered) {
-            payload.U8(static_cast<uint8_t>(stage->Target));
-            WriteEnum(payload, stage->Category);
-            payload.U32(stage->PassIndex);
-            payload.U32(static_cast<uint32_t>(stage->Stage));
-            WriteVector(payload, stage->Defines, [](Writer& target, const string& value) { target.String(value); });
-            payload.String(stage->EntryPoint);
-            WriteHash(payload, stage->BinaryHash);
-            WriteHash(payload, stage->InterfaceHash);
-            payload.SizedBytes(stage->Bytecode);
-            payload.U8(static_cast<uint8_t>(stage->Reflection->index()));
-            payload.String(stage->ReflectionPayload);
-        }
-        if (payload.Data.size() > kMaxFileSize) return false;
+Nullable<const ShaderReflectionRecord*> ShaderBinary::GetReflection(
+    const ShaderStageArtifact& artifact) const noexcept {
+    return artifact.ReflectionIndex < Reflections.size() ? &Reflections[artifact.ReflectionIndex] : nullptr;
+}
 
-        Writer file;
-        file.Bytes(std::as_bytes(std::span{kMagic}));
-        file.U32(kFormatVersion);
-        file.U64(static_cast<uint64_t>(payload.Data.size()));
-        WriteHash(file, HashShaderBytes(payload.Data));
-        file.Bytes(payload.Data);
+Nullable<const ShaderStageInterfaceDesc*> ShaderBinary::GetStageInterface(
+    const ShaderStageArtifact& artifact) const noexcept {
+    return artifact.InterfaceIndex < StageInterfaces.size() ? &StageInterfaces[artifact.InterfaceIndex] : nullptr;
+}
 
+Nullable<const ShaderInterfaceDesc*> ShaderBinary::GetProgramInterface(
+    const ShaderProgramVariantArtifact& program) const noexcept {
+    return program.InterfaceIndex < ProgramInterfaces.size() ? &ProgramInterfaces[program.InterfaceIndex] : nullptr;
+}
+
+namespace {
+
+std::optional<vector<byte>> SerializeShaderBinaryBytes(const ShaderBinary& binary) {
+    ShaderBinary canonical;
+    if (!CanonicalizeBinary(binary, canonical)) return std::nullopt;
+
+    Writer payload;
+    WriteGuid(payload, canonical.Asset.AssetId);
+    WriteVector(payload, canonical.Asset.Passes, WritePass);
+    WriteVector(payload, canonical.Reflections, [](Writer& writer, const ShaderReflectionRecord& reflection) {
+        writer.U8(static_cast<uint8_t>(reflection.Target));
+        WriteHash(writer, reflection.Hash);
+        const auto serialized = SerializeReflection(reflection.Reflection);
+        if (!serialized.has_value()) throw std::runtime_error{"reflection serialization failed"};
+        writer.String(*serialized);
+    });
+    WriteVector(payload, canonical.StageInterfaces, [](Writer& writer, const ShaderStageInterfaceDesc& interface) {
+        const auto serialized = SerializeShaderStageInterface(interface);
+        if (!serialized.has_value()) throw std::runtime_error{"stage interface serialization failed"};
+        writer.SizedBytes(*serialized);
+    });
+    WriteVector(payload, canonical.ProgramInterfaces, [](Writer& writer, const ShaderInterfaceDesc& interface) {
+        const auto serialized = SerializeShaderInterface(interface);
+        if (!serialized.has_value()) throw std::runtime_error{"program interface serialization failed"};
+        writer.SizedBytes(*serialized);
+    });
+    WriteVector(payload, canonical.StageArtifacts, [](Writer& writer, const ShaderStageArtifact& artifact) {
+        writer.U8(static_cast<uint8_t>(artifact.Target));
+        WriteEnum(writer, artifact.Category);
+        writer.U32(artifact.PassIndex);
+        writer.U32(static_cast<uint32_t>(artifact.Stage));
+        WriteVector(writer, artifact.Defines, [](Writer& strings, const string& value) { strings.String(value); });
+        writer.String(artifact.EntryPoint);
+        WriteHash(writer, artifact.BinaryHash);
+        writer.U32(artifact.ReflectionIndex);
+        writer.U32(artifact.InterfaceIndex);
+        writer.SizedBytes(artifact.Bytecode);
+    });
+    WriteVector(payload, canonical.ProgramVariants, [](Writer& writer, const ShaderProgramVariantArtifact& program) {
+        writer.U8(static_cast<uint8_t>(program.Target));
+        writer.U32(program.PassIndex);
+        WriteVector(writer, program.Defines, [](Writer& strings, const string& value) { strings.String(value); });
+        WriteVector(writer, program.StageArtifactIndices, [](Writer& indices, uint32_t value) { indices.U32(value); });
+        writer.U32(program.InterfaceIndex);
+    });
+    if (payload.Data.size() > kMaxFileSize) return std::nullopt;
+
+    Writer file;
+    file.Bytes(std::as_bytes(std::span{kMagic}));
+    file.U32(kFormatVersion);
+    file.U64(static_cast<uint64_t>(payload.Data.size()));
+    WriteHash(file, HashShaderBytes(payload.Data));
+    file.Bytes(payload.Data);
+    return std::move(file.Data);
+}
+
+}  // namespace
+
+bool WriteShaderBinary(const std::filesystem::path& path, const ShaderBinary& binary) noexcept {
+    if (path.empty()) return false;
+    try {
+        const auto data = SerializeShaderBinaryBytes(binary);
+        if (!data.has_value()) return false;
         std::error_code error;
         const std::filesystem::path parent = path.parent_path();
         if (!parent.empty()) {
@@ -544,7 +861,7 @@ bool WriteShaderBinary(const std::filesystem::path& path, const ShaderBinary& bi
         temporary += ".";
         temporary += Guid::NewGuid().ToString();
         temporary += ".tmp";
-        if (!WriteBinaryFile(temporary, file.Data)) {
+        if (!WriteBinaryFile(temporary, *data)) {
             std::filesystem::remove(temporary, error);
             return false;
         }
@@ -588,30 +905,73 @@ std::optional<ShaderBinary> ReadShaderBinary(const std::filesystem::path& path) 
             !ReadVector(payload, result.Asset.Passes, ReadPass) || result.Asset.Passes.size() > kMaxPassCount) {
             return std::nullopt;
         }
-        uint32_t recordCount = 0;
-        if (!payload.U32(recordCount) || recordCount > kMaxRecordCount) return std::nullopt;
-        result.Stages.reserve(recordCount);
-        for (uint32_t i = 0; i < recordCount; ++i) {
-            CompiledShaderStage record;
-            uint8_t target = 0;
-            uint32_t stage = 0;
-            uint8_t reflectionKind = 0;
-            if (!payload.U8(target) || target > static_cast<uint8_t>(ShaderTarget::SPIRV) ||
-                !ReadEnum(payload, record.Category, 0, static_cast<int32_t>(ShaderBlobCategory::METALLIB)) ||
-                !payload.U32(record.PassIndex) || !payload.U32(stage) ||
-                !ReadVector(payload, record.Defines, [](Reader& source, string& value) { return source.String(value); }) ||
-                !payload.String(record.EntryPoint) || !ReadHash(payload, record.BinaryHash) ||
-                !ReadHash(payload, record.InterfaceHash) || !payload.SizedBytes(record.Bytecode) ||
-                !payload.U8(reflectionKind) || reflectionKind > 1 || !payload.String(record.ReflectionPayload)) {
-                return std::nullopt;
-            }
-            record.Target = static_cast<ShaderTarget>(target);
-            record.Stage = static_cast<ShaderStage>(stage);
-            record.Reflection = DeserializeReflection(reflectionKind, record.ReflectionPayload);
-            if (!record.Reflection.has_value()) return std::nullopt;
-            result.Stages.emplace_back(std::move(record));
+        if (!ReadVector(payload, result.Reflections, [](Reader& reader, ShaderReflectionRecord& reflection) {
+                uint8_t target = 0;
+                string serialized;
+                if (!reader.U8(target) || target > static_cast<uint8_t>(ShaderTarget::SPIRV) ||
+                    !ReadHash(reader, reflection.Hash) || !reader.String(serialized)) {
+                    return false;
+                }
+                reflection.Target = static_cast<ShaderTarget>(target);
+                auto value = DeserializeReflection(target == 0 ? 0 : 1, serialized);
+                if (!value.has_value()) return false;
+                reflection.Reflection = std::move(*value);
+                return true;
+            }) ||
+            result.Reflections.size() > kMaxRecordCount || !ReadVector(payload, result.StageInterfaces, [](Reader& reader, ShaderStageInterfaceDesc& interface) {
+                vector<byte> serialized;
+                if (!reader.SizedBytes(serialized)) return false;
+                auto value = DeserializeShaderStageInterface(serialized);
+                if (!value.has_value()) return false;
+                interface = std::move(*value);
+                return true;
+            }) ||
+            result.StageInterfaces.size() > kMaxRecordCount || !ReadVector(payload, result.ProgramInterfaces, [](Reader& reader, ShaderInterfaceDesc& interface) {
+                vector<byte> serialized;
+                if (!reader.SizedBytes(serialized)) return false;
+                auto value = DeserializeShaderInterface(serialized);
+                if (!value.has_value()) return false;
+                interface = std::move(*value);
+                return true;
+            }) ||
+            result.ProgramInterfaces.size() > kMaxRecordCount || !ReadVector(payload, result.StageArtifacts, [](Reader& reader, ShaderStageArtifact& artifact) {
+                uint8_t target = 0;
+                uint32_t stage = 0;
+                if (!reader.U8(target) || target > static_cast<uint8_t>(ShaderTarget::SPIRV) ||
+                    !ReadEnum(reader, artifact.Category, 0, static_cast<int32_t>(ShaderBlobCategory::METALLIB)) ||
+                    !reader.U32(artifact.PassIndex) || !reader.U32(stage) ||
+                    !ReadVector(reader, artifact.Defines, [](Reader& strings, string& value) {
+                        return strings.String(value);
+                    }) ||
+                    !reader.String(artifact.EntryPoint) || !ReadHash(reader, artifact.BinaryHash) || !reader.U32(artifact.ReflectionIndex) || !reader.U32(artifact.InterfaceIndex) || !reader.SizedBytes(artifact.Bytecode)) {
+                    return false;
+                }
+                artifact.Target = static_cast<ShaderTarget>(target);
+                artifact.Stage = static_cast<ShaderStage>(stage);
+                return IsSupportedStage(artifact.Stage);
+            }) ||
+            result.StageArtifacts.size() > kMaxRecordCount || !ReadVector(payload, result.ProgramVariants, [](Reader& reader, ShaderProgramVariantArtifact& program) {
+                uint8_t target = 0;
+                if (!reader.U8(target) || target > static_cast<uint8_t>(ShaderTarget::SPIRV) ||
+                    !reader.U32(program.PassIndex) ||
+                    !ReadVector(reader, program.Defines, [](Reader& strings, string& value) {
+                        return strings.String(value);
+                    }) ||
+                    !ReadVector(reader, program.StageArtifactIndices, [](Reader& indices, uint32_t& value) {
+                        return indices.U32(value);
+                    }) ||
+                    !reader.U32(program.InterfaceIndex)) {
+                    return false;
+                }
+                program.Target = static_cast<ShaderTarget>(target);
+                return true;
+            }) ||
+            result.ProgramVariants.size() > kMaxRecordCount) {
+            return std::nullopt;
         }
         if (!payload.AtEnd() || !result.IsValid()) return std::nullopt;
+        const auto canonical = SerializeShaderBinaryBytes(result);
+        if (!canonical.has_value() || *canonical != *data) return std::nullopt;
         return result;
     } catch (...) {
         RADRAY_WARN_LOG("ignoring unreadable shader binary '{}'", path.string());

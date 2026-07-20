@@ -1,27 +1,32 @@
 #pragma once
 
 #include <filesystem>
+#include <limits>
 #include <optional>
 #include <span>
 #include <variant>
 
 #include <radray/nullable.h>
 #include <radray/shader/shader_asset_data.h>
-#include <radray/shader/spirv.h>
+#include <radray/shader/shader_interface.h>
 
 namespace radray::shader {
 
 using ShaderReflectionDesc = std::variant<HlslShaderDesc, SpirvShaderDesc>;
 
-struct ShaderHash {
-    uint64_t Low{0};
-    uint64_t High{0};
+inline constexpr uint32_t kInvalidShaderTableIndex = std::numeric_limits<uint32_t>::max();
 
-    friend bool operator==(const ShaderHash&, const ShaderHash&) noexcept = default;
-    friend auto operator<=>(const ShaderHash&, const ShaderHash&) noexcept = default;
+struct ShaderReflectionRecord {
+    ShaderTarget Target{ShaderTarget::DXIL};
+    ShaderReflectionDesc Reflection;
+    ShaderHash Hash{};
+
+    friend bool operator==(const ShaderReflectionRecord&, const ShaderReflectionRecord&) = default;
 };
 
-struct CompiledShaderStage {
+// One target-specific bytecode artifact. Defines are projected to this stage,
+// so multiple full program variants can reference the same artifact.
+struct ShaderStageArtifact {
     ShaderTarget Target{ShaderTarget::DXIL};
     ShaderBlobCategory Category{ShaderBlobCategory::DXIL};
     uint32_t PassIndex{0};
@@ -29,26 +34,54 @@ struct CompiledShaderStage {
     vector<string> Defines;
     string EntryPoint;
     vector<byte> Bytecode;
-    string ReflectionPayload;
-    std::optional<ShaderReflectionDesc> Reflection;
     ShaderHash BinaryHash{};
-    ShaderHash InterfaceHash{};
+    uint32_t ReflectionIndex{kInvalidShaderTableIndex};
+    uint32_t InterfaceIndex{kInvalidShaderTableIndex};
+
+    friend bool operator==(const ShaderStageArtifact&, const ShaderStageArtifact&) = default;
+};
+
+// Maps one full baked variant to its projected stage artifacts and canonical
+// program interface. Entries may be sparse across targets and variants.
+struct ShaderProgramVariantArtifact {
+    ShaderTarget Target{ShaderTarget::DXIL};
+    uint32_t PassIndex{0};
+    vector<string> Defines;
+    vector<uint32_t> StageArtifactIndices;
+    uint32_t InterfaceIndex{kInvalidShaderTableIndex};
+
+    friend bool operator==(const ShaderProgramVariantArtifact&, const ShaderProgramVariantArtifact&) = default;
 };
 
 class ShaderBinary {
 public:
     ShaderAssetData Asset;
-    vector<CompiledShaderStage> Stages;
+    vector<ShaderReflectionRecord> Reflections;
+    vector<ShaderStageInterfaceDesc> StageInterfaces;
+    vector<ShaderInterfaceDesc> ProgramInterfaces;
+    vector<ShaderStageArtifact> StageArtifacts;
+    vector<ShaderProgramVariantArtifact> ProgramVariants;
 
+    // Structural validity intentionally does not require every BakeSet entry
+    // or target to be present. Shipping completeness is checked separately.
     bool IsValid() const noexcept;
-    Nullable<const CompiledShaderStage*> Find(
+    bool IsBakeComplete(ShaderTarget target) const noexcept;
+
+    Nullable<const ShaderStageArtifact*> FindStageArtifact(
         ShaderTarget target,
         uint32_t passIndex,
         ShaderStage stage,
-        const vector<string>& defines) const noexcept;
+        const vector<string>& fullDefines) const noexcept;
+    Nullable<const ShaderProgramVariantArtifact*> FindProgramVariant(
+        ShaderTarget target,
+        uint32_t passIndex,
+        const vector<string>& fullDefines) const noexcept;
+    Nullable<const ShaderReflectionRecord*> GetReflection(const ShaderStageArtifact& artifact) const noexcept;
+    Nullable<const ShaderStageInterfaceDesc*> GetStageInterface(const ShaderStageArtifact& artifact) const noexcept;
+    Nullable<const ShaderInterfaceDesc*> GetProgramInterface(
+        const ShaderProgramVariantArtifact& program) const noexcept;
 };
 
-ShaderHash HashShaderBytes(std::span<const byte> data) noexcept;
 ShaderBlobCategory GetShaderBlobCategory(ShaderTarget target) noexcept;
 
 std::optional<ShaderBinary> ReadShaderBinary(const std::filesystem::path& path) noexcept;

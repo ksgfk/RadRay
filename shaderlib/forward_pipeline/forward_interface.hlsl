@@ -7,8 +7,8 @@
 #include "point_shadow.hlsl"
 #include "cascade_shadow.hlsl"
 
-// The Forward ABI owns all three groups. Generic shader/material code only
-// consumes the material group declared by the shader manifest.
+// Forward providers reserve object/pipeline groups. The material group is a
+// shader convention and remains user-owned because the policy does not reserve it.
 struct PerObject {
     float4x4 ObjectToWorld;
 };

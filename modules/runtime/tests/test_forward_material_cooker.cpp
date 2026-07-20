@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <array>
 #include <cstdlib>
 #include <filesystem>
@@ -11,7 +12,7 @@
 
 #include <radray/file.h>
 #include <radray/guid.h>
-#include <radray/runtime/material_layout.h>
+#include <radray/runtime/shader_parameters.h>
 #include <radray/runtime/render_framework/forward_pipeline.h>
 
 namespace radray {
@@ -49,6 +50,22 @@ string MakeForwardShaderManifest() {
       "Pixel": "PSMain",
       "ColorTargets": [{{"Index": 0}}]
     }}
+  }}, {{
+    "Name": "Shadow",
+    "Source": "forward_pipeline/shadow_pass.hlsl",
+    "ShaderModel": "6_0",
+    "Optimize": true,
+    "EnableUnbounded": false,
+    "Keywords": [
+      {{"Scope": "local", "Stages": ["vertex"], "Alternatives": ["", "_POINT_SHADOW_LAYERED=1"]}}
+    ],
+    "Variants": [[], ["_POINT_SHADOW_LAYERED=1"]],
+    "Program": {{
+      "Type": "graphics",
+      "Vertex": "VSMain",
+      "Pixel": "PSMain",
+      "ColorTargets": []
+    }}
   }}]
 }})json",
                        kAssetId);
@@ -56,11 +73,13 @@ string MakeForwardShaderManifest() {
 
 int RunCooker(
     const std::filesystem::path& input,
-    const std::filesystem::path& output) {
+    const std::filesystem::path& output,
+    std::filesystem::path shaderRoot = {}) {
     const string executable = RADRAY_SHADER_COOKER_PATH;
     const string inputString = input.string();
     const string outputString = output.string();
-    const string rootString = (std::filesystem::path{RADRAY_PROJECT_DIR} / "shaderlib").string();
+    if (shaderRoot.empty()) shaderRoot = std::filesystem::path{RADRAY_PROJECT_DIR} / "shaderlib";
+    const string rootString = shaderRoot.string();
 #ifdef _WIN32
     const std::array<const char*, 10> arguments{
         executable.c_str(),
@@ -78,6 +97,54 @@ int RunCooker(
 #endif
 }
 
+constexpr std::string_view kProjectedConstantsShader = R"hlsl(
+#ifdef VULKAN
+#define RR_BINDING(b, s) [[vk::binding(b, s)]]
+#else
+#define RR_BINDING(b, s)
+#endif
+
+struct MaterialConstants {
+    float4 First;
+    float4 Second;
+};
+
+RR_BINDING(0, 2) ConstantBuffer<MaterialConstants> gMaterial : register(b0, space2);
+
+float4 VSMain(float4 position : POSITION) : SV_Position {
+    return position;
+}
+
+float4 PSMain() : SV_Target0 {
+#if USE_SECOND
+    return gMaterial.Second;
+#else
+    return gMaterial.First;
+#endif
+}
+)hlsl";
+
+constexpr std::string_view kProjectedConstantsManifest = R"json({
+  "AssetId": "df48bf44-42ef-4506-9ea7-0b4af53cac02",
+  "Passes": [{
+    "Name": "ProjectedConstants",
+    "Source": "projection.hlsl",
+    "ShaderModel": "6_0",
+    "Optimize": true,
+    "EnableUnbounded": false,
+    "Keywords": [
+      {"Scope": "local", "Stages": ["pixel"], "Alternatives": ["", "USE_SECOND=1"]}
+    ],
+    "BakeSet": [[], ["USE_SECOND=1"]],
+    "Program": {
+      "Type": "graphics",
+      "Vertex": "VSMain",
+      "Pixel": "PSMain",
+      "ColorTargets": [{"Index": 0}]
+    }
+  }]
+})json";
+
 }  // namespace
 
 TEST(ForwardMaterialCookerTest, BuildsRuntimeLayoutAcrossBackendsAndVariants) {
@@ -90,19 +157,113 @@ TEST(ForwardMaterialCookerTest, BuildsRuntimeLayoutAcrossBackendsAndVariants) {
 
     auto binary = shader::ReadShaderBinary(output);
     ASSERT_TRUE(binary.has_value());
-    auto layout = BuildMaterialLayout(
-        binary->Stages,
-        ForwardPipeline::kMaterialBindingGroup);
-    ASSERT_TRUE(layout.has_value());
-    ASSERT_TRUE(layout->IsValid());
-    ASSERT_EQ(layout->Bindings.size(), 7u);
-    EXPECT_TRUE(layout->FindBinding("gMaterial").HasValue());
-    EXPECT_TRUE(layout->FindBinding("gBaseColorMap").HasValue());
-    EXPECT_TRUE(layout->FindBinding("gMetalRoughMap").HasValue());
-    EXPECT_TRUE(layout->FindBinding("gNormalMap").HasValue());
-    EXPECT_TRUE(layout->FindBinding("gOcclusionMap").HasValue());
-    EXPECT_TRUE(layout->FindBinding("gEmissiveMap").HasValue());
-    EXPECT_TRUE(layout->FindBinding("gSampler").HasValue());
+    for (const shader::ShaderPassDesc& pass : binary->Asset.Passes) {
+        EXPECT_NE(pass.SourceIdentity, shader::ShaderHash{});
+    }
+    ForwardPipeline pipeline;
+    auto layout = BuildShaderParameterLayout(
+        *binary,
+        pipeline.GetShaderBindingPolicy(),
+        shader::ShaderProgramKind::Graphics);
+    ASSERT_TRUE(layout.Succeeded());
+    ASSERT_TRUE(layout.Layout->IsValid());
+    ASSERT_EQ(layout.Layout->Bindings().size(), 7u);
+    EXPECT_TRUE(layout.Layout->FindBinding("gMaterial").HasValue());
+    EXPECT_TRUE(layout.Layout->FindBinding("gBaseColorMap").HasValue());
+    EXPECT_TRUE(layout.Layout->FindBinding("gMetalRoughMap").HasValue());
+    EXPECT_TRUE(layout.Layout->FindBinding("gNormalMap").HasValue());
+    EXPECT_TRUE(layout.Layout->FindBinding("gOcclusionMap").HasValue());
+    EXPECT_TRUE(layout.Layout->FindBinding("gEmissiveMap").HasValue());
+    EXPECT_TRUE(layout.Layout->FindBinding("gSampler").HasValue());
+
+    const shader::ShaderInterfaceDesc& sourceInterface = binary->ProgramInterfaces.front();
+    shader::ShaderInterfaceDesc wrongObjectLayout = sourceInterface;
+    auto objectGroup = std::ranges::find(
+        wrongObjectLayout.BindingGroups,
+        ForwardPipeline::kObjectBindingGroup,
+        &shader::ShaderBindingGroupInterfaceDesc::GroupIndex);
+    ASSERT_NE(objectGroup, wrongObjectLayout.BindingGroups.end());
+    ASSERT_EQ(objectGroup->Bindings.size(), 1u);
+    ASSERT_TRUE(objectGroup->Bindings.front().Buffer.has_value());
+    ASSERT_EQ(objectGroup->Bindings.front().Buffer->Fields.size(), 1u);
+    objectGroup->Bindings.front().Buffer->Fields.front().Type.RowMajor =
+        !objectGroup->Bindings.front().Buffer->Fields.front().Type.RowMajor;
+    auto wrongObject = ResolveShaderBindings(
+        wrongObjectLayout,
+        pipeline.GetShaderBindingPolicy());
+    ASSERT_FALSE(wrongObject.Succeeded());
+    ASSERT_EQ(wrongObject.Diagnostics.size(), 1u);
+    EXPECT_EQ(wrongObject.Diagnostics.front().Context.Group, ForwardPipeline::kObjectBindingGroup);
+    EXPECT_EQ(wrongObject.Diagnostics.front().Context.Binding, 1u);
+
+    shader::ShaderInterfaceDesc shadowTextureInterface = sourceInterface;
+    auto pipelineGroup = std::ranges::find(
+        shadowTextureInterface.BindingGroups,
+        ForwardPipeline::kPipelineBindingGroup,
+        &shader::ShaderBindingGroupInterfaceDesc::GroupIndex);
+    ASSERT_NE(pipelineGroup, shadowTextureInterface.BindingGroups.end());
+    pipelineGroup->Bindings.emplace_back(shader::ShaderBindingDesc{
+        .Name = "CustomShadowCube",
+        .BindingIndex = 1,
+        .Kind = shader::ShaderBindingKind::SampledTexture,
+        .Access = shader::ShaderResourceAccess::ReadOnly,
+        .Count = 1,
+        .Stages = shader::ShaderStage::Pixel,
+        .Texture = shader::ShaderTextureInterfaceDesc{
+            .Dimension = shader::ShaderTextureDimension::Cube,
+            .SampleType = shader::ShaderSampleType::Float}});
+    ASSERT_TRUE(ResolveShaderBindings(
+                    shadowTextureInterface,
+                    pipeline.GetShaderBindingPolicy())
+                    .Succeeded());
+    pipelineGroup->Bindings.back().Texture->Dimension = shader::ShaderTextureDimension::Dim2D;
+    auto wrongTexture = ResolveShaderBindings(
+        shadowTextureInterface,
+        pipeline.GetShaderBindingPolicy());
+    ASSERT_FALSE(wrongTexture.Succeeded());
+    EXPECT_EQ(wrongTexture.Diagnostics.front().Context.Binding, 1u);
+
+    std::error_code ignored;
+    std::filesystem::remove_all(directory, ignored);
+}
+
+TEST(ForwardMaterialCookerTest, BuildsConstantFieldUnionAcrossRealVariantsAndTargets) {
+    const std::filesystem::path directory =
+        std::filesystem::temp_directory_path() /
+        fmt::format("radray_projected_constants_{}", Guid::NewGuid());
+    const std::filesystem::path input = directory / "projection.shader.json";
+    const std::filesystem::path source = directory / "projection.hlsl";
+    const std::filesystem::path output = directory / "projection.shader.bin";
+    ASSERT_TRUE(WriteTextFile(input, kProjectedConstantsManifest));
+    ASSERT_TRUE(WriteTextFile(source, kProjectedConstantsShader));
+    ASSERT_EQ(RunCooker(input, output, directory), 0);
+
+    auto binary = shader::ReadShaderBinary(output);
+    ASSERT_TRUE(binary.has_value());
+    ASSERT_TRUE(binary->IsBakeComplete(shader::ShaderTarget::DXIL));
+    ASSERT_TRUE(binary->IsBakeComplete(shader::ShaderTarget::SPIRV));
+    ASSERT_NE(binary->Asset.Passes.front().SourceIdentity, shader::ShaderHash{});
+    auto layout = BuildShaderParameterLayout(
+        *binary,
+        PipelineBindingPolicy{},
+        shader::ShaderProgramKind::Graphics);
+    ASSERT_TRUE(layout.Succeeded());
+    auto constants = layout.Layout->FindBinding({2, 0});
+    ASSERT_TRUE(constants.HasValue());
+    ASSERT_TRUE(constants.Get()->Interface.Buffer.has_value());
+    EXPECT_EQ(constants.Get()->Interface.Buffer->ByteSize, 32u);
+    EXPECT_TRUE(layout.Layout->FindField({2, 0}, "First").HasValue());
+    EXPECT_TRUE(layout.Layout->FindField({2, 0}, "Second").HasValue());
+
+    ShaderParameterSet parameters;
+    ASSERT_TRUE(parameters.Reset(*layout.Layout));
+    for (const shader::ShaderProgramVariantArtifact& program : binary->ProgramVariants) {
+        auto plan = ResolveShaderBindings(
+            binary->ProgramInterfaces[program.InterfaceIndex],
+            PipelineBindingPolicy{});
+        ASSERT_TRUE(plan.Succeeded());
+        EXPECT_TRUE(parameters.IsCompleteFor(*plan.Plan));
+    }
 
     std::error_code ignored;
     std::filesystem::remove_all(directory, ignored);

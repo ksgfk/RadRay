@@ -13,32 +13,53 @@ using namespace radray::shader;
 
 namespace {
 
-CompiledShaderStage MakeStage(
+ShaderReflectionRecord MakeReflection(ShaderTarget target) {
+    ShaderReflectionDesc reflection;
+    std::optional<string> payload;
+    if (target == ShaderTarget::DXIL) {
+        HlslShaderDesc value;
+        value.Creator = "test";
+        payload = SerializeHlslShaderDesc(value);
+        reflection = std::move(value);
+    } else {
+        SpirvShaderDesc value;
+        payload = SerializeSpirvShaderDesc(value);
+        reflection = std::move(value);
+    }
+    EXPECT_TRUE(payload.has_value());
+    return ShaderReflectionRecord{
+        .Target = target,
+        .Reflection = std::move(reflection),
+        .Hash = HashShaderBytes(std::as_bytes(std::span{payload->data(), payload->size()}))};
+}
+
+ShaderStageInterfaceDesc MakeStageInterface(ShaderTarget target) {
+    ShaderStageInterfaceBuildResult result;
+    if (target == ShaderTarget::DXIL) {
+        result = NormalizeHlslInterface(HlslShaderDesc{}, ShaderStage::Vertex);
+    } else {
+        result = NormalizeSpirvInterface(SpirvShaderDesc{}, ShaderStage::Vertex);
+    }
+    EXPECT_TRUE(result.Succeeded());
+    return std::move(*result.Interface);
+}
+
+ShaderStageArtifact MakeArtifact(
     ShaderTarget target,
     vector<string> defines,
-    byte marker) {
-    CompiledShaderStage result;
-    result.Target = target;
-    result.Category = GetShaderBlobCategory(target);
-    result.PassIndex = 0;
-    result.Stage = ShaderStage::Vertex;
-    result.Defines = std::move(defines);
-    result.EntryPoint = "VSMain";
-    result.Bytecode = {marker, byte{0x12}, byte{0x34}};
-    if (target == ShaderTarget::DXIL) {
-        HlslShaderDesc reflection;
-        reflection.Creator = "test";
-        result.Reflection = reflection;
-        result.ReflectionPayload = SerializeHlslShaderDesc(reflection).value();
-    } else {
-        SpirvShaderDesc reflection;
-        reflection.ComputeInfo = SpirvComputeInfo{1, 1, 1};
-        result.Reflection = reflection;
-        result.ReflectionPayload = SerializeSpirvShaderDesc(reflection).value();
-    }
+    byte marker,
+    uint32_t reflectionIndex) {
+    ShaderStageArtifact result{
+        .Target = target,
+        .Category = GetShaderBlobCategory(target),
+        .PassIndex = 0,
+        .Stage = ShaderStage::Vertex,
+        .Defines = std::move(defines),
+        .EntryPoint = "VSMain",
+        .Bytecode = {marker, byte{0x12}, byte{0x34}},
+        .ReflectionIndex = reflectionIndex,
+        .InterfaceIndex = 0};
     result.BinaryHash = HashShaderBytes(result.Bytecode);
-    result.InterfaceHash = HashShaderBytes(std::as_bytes(std::span{
-        result.ReflectionPayload.data(), result.ReflectionPayload.size()}));
     return result;
 }
 
@@ -48,18 +69,53 @@ ShaderBinary MakeBinary() {
     ShaderPassDesc pass;
     pass.Name = "BinaryTest";
     pass.SourcePath = "forward_pipeline/error_pass.hlsl";
-    pass.KeywordGroups = {ShaderKeywordGroupDesc{
+    pass.SourceIdentity = {0x12345678u, 0xabcdef01u};
+    pass.VariantDomain.KeywordGroups = {ShaderKeywordGroupDesc{
         .Alternatives = {"", "USE_TEST=1"},
         .Stages = ShaderStage::Vertex}};
-    pass.Variants = {ShaderVariantDesc{}, ShaderVariantDesc{{"USE_TEST=1"}}};
+    pass.BakeSet.Variants = {ShaderVariantKey{}, ShaderVariantKey{{"USE_TEST=1"}}};
     std::get<ShaderGraphicsPassDesc>(pass.Program).VertexEntry = "VSMain";
     result.Asset.Passes.emplace_back(std::move(pass));
-    result.Stages = {
-        MakeStage(ShaderTarget::DXIL, {}, byte{0x01}),
-        MakeStage(ShaderTarget::DXIL, {"USE_TEST=1"}, byte{0x02}),
-        MakeStage(ShaderTarget::SPIRV, {}, byte{0x03}),
-        MakeStage(ShaderTarget::SPIRV, {"USE_TEST=1"}, byte{0x04})};
+
+    const ShaderStageInterfaceDesc dxilInterface = MakeStageInterface(ShaderTarget::DXIL);
+    const ShaderStageInterfaceDesc spirvInterface = MakeStageInterface(ShaderTarget::SPIRV);
+    EXPECT_EQ(dxilInterface, spirvInterface);
+    result.StageInterfaces = {dxilInterface};
+    auto program = MergeGraphicsStageInterfaces(dxilInterface);
+    EXPECT_TRUE(program.Succeeded());
+    result.ProgramInterfaces = {std::move(*program.Interface)};
+    result.Reflections = {MakeReflection(ShaderTarget::DXIL), MakeReflection(ShaderTarget::SPIRV)};
+    result.StageArtifacts = {
+        MakeArtifact(ShaderTarget::DXIL, {}, byte{0x01}, 0),
+        MakeArtifact(ShaderTarget::DXIL, {"USE_TEST=1"}, byte{0x02}, 0),
+        MakeArtifact(ShaderTarget::SPIRV, {}, byte{0x03}, 1),
+        MakeArtifact(ShaderTarget::SPIRV, {"USE_TEST=1"}, byte{0x04}, 1)};
+    result.ProgramVariants = {
+        ShaderProgramVariantArtifact{.Target = ShaderTarget::DXIL, .StageArtifactIndices = {0}, .InterfaceIndex = 0},
+        ShaderProgramVariantArtifact{
+            .Target = ShaderTarget::DXIL,
+            .Defines = {"USE_TEST=1"},
+            .StageArtifactIndices = {1},
+            .InterfaceIndex = 0},
+        ShaderProgramVariantArtifact{.Target = ShaderTarget::SPIRV, .StageArtifactIndices = {2}, .InterfaceIndex = 0},
+        ShaderProgramVariantArtifact{
+            .Target = ShaderTarget::SPIRV,
+            .Defines = {"USE_TEST=1"},
+            .StageArtifactIndices = {3},
+            .InterfaceIndex = 0}};
     return result;
+}
+
+void RemoveSpirvPartition(ShaderBinary& binary) {
+    std::erase_if(binary.ProgramVariants, [](const ShaderProgramVariantArtifact& value) {
+        return value.Target == ShaderTarget::SPIRV;
+    });
+    std::erase_if(binary.StageArtifacts, [](const ShaderStageArtifact& value) {
+        return value.Target == ShaderTarget::SPIRV;
+    });
+    std::erase_if(binary.Reflections, [](const ShaderReflectionRecord& value) {
+        return value.Target == ShaderTarget::SPIRV;
+    });
 }
 
 }  // namespace
@@ -71,6 +127,8 @@ TEST(ShaderBinaryTest, RoundTripsDeterministicallyAndFindsTargets) {
     const std::filesystem::path secondPath = directory / "second.bin";
     ShaderBinary source = MakeBinary();
     ASSERT_TRUE(source.IsValid());
+    EXPECT_TRUE(source.IsBakeComplete(ShaderTarget::DXIL));
+    EXPECT_TRUE(source.IsBakeComplete(ShaderTarget::SPIRV));
     ASSERT_TRUE(WriteShaderBinary(firstPath, source));
     const auto firstBytes = ReadBinaryFile(firstPath);
     ASSERT_TRUE(firstBytes.has_value());
@@ -78,14 +136,15 @@ TEST(ShaderBinaryTest, RoundTripsDeterministicallyAndFindsTargets) {
     auto loaded = ReadShaderBinary(firstPath);
     ASSERT_TRUE(loaded.has_value());
     EXPECT_EQ(loaded->Asset, source.Asset);
-    ASSERT_EQ(loaded->Stages.size(), 4u);
-    auto spirv = loaded->Find(ShaderTarget::SPIRV, 0, ShaderStage::Vertex, {"USE_TEST=1"});
+    ASSERT_EQ(loaded->StageArtifacts.size(), 4u);
+    auto spirv = loaded->FindStageArtifact(
+        ShaderTarget::SPIRV, 0, ShaderStage::Vertex, {"USE_TEST=1"});
     ASSERT_TRUE(spirv.HasValue());
     EXPECT_EQ(spirv.Get()->Category, ShaderBlobCategory::SPIRV);
-    EXPECT_TRUE(spirv.Get()->Reflection.has_value());
-    EXPECT_FALSE(loaded->Find(ShaderTarget::DXIL, 0, ShaderStage::Pixel, {}).HasValue());
+    EXPECT_TRUE(loaded->GetReflection(*spirv.Get()).HasValue());
+    EXPECT_FALSE(loaded->FindStageArtifact(ShaderTarget::DXIL, 0, ShaderStage::Pixel, {}).HasValue());
 
-    std::ranges::reverse(loaded->Stages);
+    std::ranges::reverse(loaded->ProgramVariants);
     ASSERT_TRUE(WriteShaderBinary(firstPath, *loaded));
     EXPECT_EQ(ReadBinaryFile(firstPath), firstBytes);
     ASSERT_TRUE(WriteShaderBinary(secondPath, *loaded));
@@ -94,37 +153,24 @@ TEST(ShaderBinaryTest, RoundTripsDeterministicallyAndFindsTargets) {
     std::filesystem::remove_all(directory, ignored);
 }
 
-TEST(ShaderBinaryTest, RequiresCompleteTargetPartitionsAndMatchingReflection) {
+TEST(ShaderBinaryTest, SeparatesStructuralValidityFromBakeCompleteness) {
     ShaderBinary source = MakeBinary();
-    EXPECT_TRUE(DoesShaderDefineAffectStage(
-        source.Asset.Passes.front(),
-        "USE_TEST=1",
-        ShaderStage::Vertex));
-    EXPECT_FALSE(DoesShaderDefineAffectStage(
-        source.Asset.Passes.front(),
-        "USE_TEST=1",
-        ShaderStage::Pixel));
-    source.Stages.erase(source.Stages.begin());
+    RemoveSpirvPartition(source);
+    ASSERT_TRUE(source.IsValid());
+    EXPECT_TRUE(source.IsBakeComplete(ShaderTarget::DXIL));
+    EXPECT_FALSE(source.IsBakeComplete(ShaderTarget::SPIRV));
+
+    source.ProgramVariants.erase(source.ProgramVariants.begin() + 1);
+    source.StageArtifacts.erase(source.StageArtifacts.begin() + 1);
+    ASSERT_TRUE(source.IsValid());
+    EXPECT_FALSE(source.IsBakeComplete(ShaderTarget::DXIL));
+
+    source = MakeBinary();
+    source.StageArtifacts.front().Target = static_cast<ShaderTarget>(2);
     EXPECT_FALSE(source.IsValid());
 
     source = MakeBinary();
-    std::erase_if(source.Stages, [](const CompiledShaderStage& stage) noexcept {
-        return stage.Target == ShaderTarget::SPIRV;
-    });
-    EXPECT_TRUE(source.IsValid());
-
-    source = MakeBinary();
-    source.Stages.front().Target = static_cast<ShaderTarget>(2);
-    EXPECT_FALSE(source.IsValid());
-
-    source = MakeBinary();
-    SpirvShaderDesc spirvReflection;
-    spirvReflection.ComputeInfo = SpirvComputeInfo{1, 1, 1};
-    source.Stages.front().Reflection = spirvReflection;
-    source.Stages.front().ReflectionPayload = SerializeSpirvShaderDesc(spirvReflection).value();
-    source.Stages.front().InterfaceHash = HashShaderBytes(std::as_bytes(std::span{
-        source.Stages.front().ReflectionPayload.data(),
-        source.Stages.front().ReflectionPayload.size()}));
+    source.StageArtifacts.front().ReflectionIndex = 1;
     EXPECT_FALSE(source.IsValid());
 
     source = MakeBinary();
@@ -132,26 +178,16 @@ TEST(ShaderBinaryTest, RequiresCompleteTargetPartitionsAndMatchingReflection) {
     EXPECT_FALSE(source.IsValid());
 
     source = MakeBinary();
-    source.Asset.Passes.front().KeywordGroups.front().Scope = static_cast<ShaderKeywordScope>(2);
+    source.Asset.Passes.front().VariantDomain.KeywordGroups.front().Scope = static_cast<ShaderKeywordScope>(2);
     EXPECT_FALSE(source.IsValid());
 
     source = MakeBinary();
-    std::get<ShaderGraphicsPassDesc>(source.Asset.Passes.front().Program).Cull = static_cast<CullMode>(3);
-    EXPECT_FALSE(source.IsValid());
-
-    source = MakeBinary();
-    source.Asset.Passes.front().SourcePath.push_back(static_cast<char>(0xff));
-    EXPECT_FALSE(source.IsValid());
-
-    source = MakeBinary();
-    source.Asset.Passes.front().Variants.erase(source.Asset.Passes.front().Variants.begin());
-    std::erase_if(source.Stages, [](const CompiledShaderStage& stage) noexcept {
-        return stage.Defines.empty();
-    });
+    source.Asset.Passes.front().BakeSet.Variants.erase(
+        source.Asset.Passes.front().BakeSet.Variants.begin());
     EXPECT_FALSE(source.IsValid());
 }
 
-TEST(ShaderBinaryTest, RejectsCorruptionTruncationAndDuplicateRecords) {
+TEST(ShaderBinaryTest, RejectsCorruptionTruncationAndDanglingRecords) {
     const std::filesystem::path directory =
         std::filesystem::temp_directory_path() / fmt::format("radray_shader_binary_invalid_{}", Guid::NewGuid());
     const std::filesystem::path path = directory / "shader.bin";
@@ -174,9 +210,13 @@ TEST(ShaderBinaryTest, RejectsCorruptionTruncationAndDuplicateRecords) {
     ASSERT_TRUE(WriteBinaryFile(path, badVersion));
     EXPECT_FALSE(ReadShaderBinary(path).has_value());
 
-    source.Stages.emplace_back(source.Stages.front());
+    source.ProgramVariants.emplace_back(source.ProgramVariants.front());
     EXPECT_FALSE(source.IsValid());
     EXPECT_FALSE(WriteShaderBinary(path, source));
+
+    source = MakeBinary();
+    source.ProgramVariants.front().StageArtifactIndices.front() = kInvalidShaderTableIndex;
+    EXPECT_FALSE(source.IsValid());
     std::error_code ignored;
     std::filesystem::remove_all(directory, ignored);
 }

@@ -1,16 +1,9 @@
 #include <radray/runtime/material_asset.h>
 
 #include <algorithm>
-#include <cstring>
 
 namespace radray {
 namespace {
-
-bool SameAssetRef(
-    const StreamingAssetRef<TextureAsset>& lhs,
-    const StreamingAssetRef<TextureAsset>& rhs) noexcept {
-    return lhs.GetAssetId() == rhs.GetAssetId() && lhs.GetHandle() == rhs.GetHandle();
-}
 
 bool GroupContainsDefine(
     const shader::ShaderKeywordGroupDesc& group,
@@ -20,204 +13,64 @@ bool GroupContainsDefine(
 
 bool ShaderDeclaresLocalDefine(const ShaderAsset& shaderAsset, std::string_view define) noexcept {
     return std::ranges::any_of(shaderAsset.GetPasses(), [define](const shader::ShaderPassDesc& pass) {
-        return std::ranges::any_of(pass.KeywordGroups, [define](const shader::ShaderKeywordGroupDesc& group) {
-            return group.Scope == shader::ShaderKeywordScope::Local && GroupContainsDefine(group, define);
-        });
+        return std::ranges::any_of(
+            pass.VariantDomain.KeywordGroups,
+            [define](const shader::ShaderKeywordGroupDesc& group) {
+                return group.Scope == shader::ShaderKeywordScope::Local && GroupContainsDefine(group, define);
+            });
     });
+}
+
+vector<ShaderProgramInterfaceRecord> CollectBakedInterfaces(
+    const shader::ShaderBinary& binary) {
+    vector<ShaderProgramInterfaceRecord> records;
+    vector<uint32_t> indices;
+    for (const shader::ShaderProgramVariantArtifact& program : binary.ProgramVariants) {
+        if (std::ranges::find(indices, program.InterfaceIndex) != indices.end()) continue;
+        indices.emplace_back(program.InterfaceIndex);
+        records.emplace_back(ShaderProgramInterfaceRecord{
+            .Interface = binary.ProgramInterfaces[program.InterfaceIndex],
+            .Context = shader::ShaderDiagnosticContext{
+                .Target = program.Target,
+                .PassIndex = program.PassIndex,
+                .VariantDefines = program.Defines}});
+    }
+    return records;
+}
+
+bool HasProgramIdentity(const ShaderProgramInterfaceRecord& record) noexcept {
+    return record.Context.PassIndex.has_value();
+}
+
+bool SameProgramIdentity(
+    const ShaderProgramInterfaceRecord& lhs,
+    const ShaderProgramInterfaceRecord& rhs) noexcept {
+    return HasProgramIdentity(lhs) && HasProgramIdentity(rhs) &&
+           lhs.Context.PassIndex == rhs.Context.PassIndex &&
+           lhs.Context.VariantDefines == rhs.Context.VariantDefines;
+}
+
+ShaderParameterLayoutBuildResult BuildMaterialLayout(
+    const ShaderAsset& shaderAsset,
+    const PipelineBindingPolicy& policy,
+    std::span<const ShaderProgramInterfaceRecord> resolvedInterfaces) {
+    vector<ShaderProgramInterfaceRecord> interfaces = CollectBakedInterfaces(shaderAsset.GetBinary());
+    interfaces.insert(
+        interfaces.end(),
+        resolvedInterfaces.begin(),
+        resolvedInterfaces.end());
+    return BuildShaderParameterLayout(
+        interfaces,
+        policy,
+        shader::ShaderProgramKind::Graphics);
 }
 
 }  // namespace
 
-bool MaterialParameterStorage::Reset(const MaterialLayout& layout) noexcept {
-    if (!layout.IsValid() || std::ranges::any_of(layout.Bindings, [](const auto& binding) {
-            return binding.Count != 1;
-        })) {
-        return false;
-    }
-    try {
-        vector<MaterialConstantBinding> constants;
-        vector<MaterialTextureBinding> textures;
-        vector<MaterialSamplerBinding> samplers;
-        for (const MaterialBindingDesc& binding : layout.Bindings) {
-            switch (binding.Kind) {
-                case MaterialBindingKind::ConstantBuffer:
-                    constants.emplace_back(MaterialConstantBinding{
-                        .Name = binding.Name,
-                        .Binding = binding.Binding,
-                        .Data = vector<byte>(binding.ByteSize)});
-                    break;
-                case MaterialBindingKind::Texture:
-                    textures.emplace_back(MaterialTextureBinding{
-                        .Name = binding.Name,
-                        .Binding = binding.Binding,
-                        .Texture = {},
-                        .View = {},
-                        .IsSet = false});
-                    break;
-                case MaterialBindingKind::Sampler:
-                    samplers.emplace_back(MaterialSamplerBinding{
-                        .Name = binding.Name,
-                        .Binding = binding.Binding,
-                        .Sampler = {}});
-                    break;
-            }
-        }
-        _layout = layout;
-        _constants = std::move(constants);
-        _textures = std::move(textures);
-        _samplers = std::move(samplers);
-        ++_revision;
-        return true;
-    } catch (...) {
-        return false;
-    }
-}
-
-MaterialParameterStorage::ConstantFieldTarget MaterialParameterStorage::FindConstantField(
-    std::string_view name) noexcept {
-    const size_t separator = name.find('.');
-    const std::string_view requestedBlock =
-        separator == std::string_view::npos ? std::string_view{} : name.substr(0, separator);
-    const std::string_view requestedField =
-        separator == std::string_view::npos ? name : name.substr(separator + 1);
-
-    ConstantFieldTarget result;
-    for (MaterialConstantBinding& block : _constants) {
-        if (!requestedBlock.empty() && block.Name != requestedBlock) {
-            continue;
-        }
-        const auto layoutBinding = _layout.FindBinding(block.Binding);
-        if (!layoutBinding.HasValue()) {
-            return {};
-        }
-        const auto field = std::ranges::find_if(
-            layoutBinding.Get()->Fields,
-            [requestedField](const MaterialFieldDesc& value) {
-                return value.Name == requestedField;
-            });
-        if (field == layoutBinding.Get()->Fields.end()) {
-            continue;
-        }
-        if (result.Block != nullptr) {
-            return {};
-        }
-        result = ConstantFieldTarget{.Block = &block, .Field = &*field};
-    }
-    return result;
-}
-
-bool MaterialParameterStorage::SetConstantField(
-    std::string_view name,
-    std::span<const byte> data) noexcept {
-    const ConstantFieldTarget target = FindConstantField(name);
-    if (target.Block == nullptr || target.Field == nullptr || target.Field->Size != data.size()) {
-        return false;
-    }
-    std::span<byte> destination{
-        target.Block->Data.data() + target.Field->Offset,
-        target.Field->Size};
-    if (!std::ranges::equal(destination, data)) {
-        std::ranges::copy(data, destination.begin());
-        ++_revision;
-    }
-    return true;
-}
-
-bool MaterialParameterStorage::SetFloat(std::string_view name, float value) noexcept {
-    return SetConstantField(name, std::as_bytes(std::span{&value, 1}));
-}
-
-bool MaterialParameterStorage::SetVector(
-    std::string_view name,
-    const Eigen::Vector4f& value) noexcept {
-    return SetConstantField(name, std::as_bytes(std::span<const float, 4>{value.data(), 4}));
-}
-
-bool MaterialParameterStorage::SetConstantBuffer(
-    std::string_view name,
-    std::span<const byte> data) noexcept {
-    const auto it = std::ranges::find_if(_constants, [name](const MaterialConstantBinding& value) {
-        return value.Name == name;
-    });
-    if (it == _constants.end() || it->Data.size() != data.size()) {
-        return false;
-    }
-    if (!std::ranges::equal(it->Data, data)) {
-        std::ranges::copy(data, it->Data.begin());
-        ++_revision;
-    }
-    return true;
-}
-
-bool MaterialParameterStorage::SetTexture(
-    std::string_view name,
-    StreamingAssetRef<TextureAsset> texture,
-    const TextureSubViewDesc& view) noexcept {
-    const auto it = std::ranges::find_if(_textures, [name](const MaterialTextureBinding& value) {
-        return value.Name == name;
-    });
-    if (it == _textures.end()) {
-        return false;
-    }
-    if (!it->IsSet || !SameAssetRef(it->Texture, texture) || it->View != view) {
-        it->Texture = std::move(texture);
-        it->View = view;
-        it->IsSet = true;
-        ++_revision;
-    }
-    return true;
-}
-
-bool MaterialParameterStorage::ClearTexture(std::string_view name) noexcept {
-    const auto it = std::ranges::find_if(_textures, [name](const MaterialTextureBinding& value) {
-        return value.Name == name;
-    });
-    if (it == _textures.end()) {
-        return false;
-    }
-    if (it->IsSet) {
-        it->Texture.Reset();
-        it->View = {};
-        it->IsSet = false;
-        ++_revision;
-    }
-    return true;
-}
-
-bool MaterialParameterStorage::SetSampler(
-    std::string_view name,
-    const render::SamplerDescriptor& sampler) noexcept {
-    const auto it = std::ranges::find_if(_samplers, [name](const MaterialSamplerBinding& value) {
-        return value.Name == name;
-    });
-    if (it == _samplers.end()) {
-        return false;
-    }
-    if (!it->Sampler.has_value() || *it->Sampler != sampler) {
-        it->Sampler = sampler;
-        ++_revision;
-    }
-    return true;
-}
-
-bool MaterialParameterStorage::ClearSampler(std::string_view name) noexcept {
-    const auto it = std::ranges::find_if(_samplers, [name](const MaterialSamplerBinding& value) {
-        return value.Name == name;
-    });
-    if (it == _samplers.end()) {
-        return false;
-    }
-    if (it->Sampler.has_value()) {
-        it->Sampler.reset();
-        ++_revision;
-    }
-    return true;
-}
-
 MaterialAsset::MaterialAsset(
     StreamingAssetRef<ShaderAsset> shaderRef,
-    uint32_t bindingGroup) noexcept
-    : _shader(std::move(shaderRef)), _bindingGroup(bindingGroup) {
+    PipelineBindingPolicy policy) noexcept
+    : _shader(std::move(shaderRef)), _policy(std::move(policy)) {
     RefreshShaderLayout();
 }
 
@@ -225,9 +78,14 @@ MaterialAsset::~MaterialAsset() noexcept = default;
 
 void MaterialAsset::OnUnload(IRenderResourceRecycler& /*recycler*/) {
     _shader.Reset();
-    _bindingGroup.reset();
+    _policy = {};
+    _parameters = {};
+    _layoutDiagnostics.clear();
+    _resolvedInterfaces.clear();
+    _resolvedSourceIdentities.clear();
     _localKeywords.clear();
-    _parameters.Reset(MaterialLayout{});
+    _layoutShader = nullptr;
+    _layoutInitialized = false;
     ++_revision;
 }
 
@@ -237,63 +95,221 @@ AssetTypeId MaterialAsset::GetTypeId() const noexcept {
 
 bool MaterialAsset::SetShader(
     StreamingAssetRef<ShaderAsset> shaderRef,
-    uint32_t bindingGroup) noexcept {
+    PipelineBindingPolicy policy) noexcept {
     const bool same = _shader.GetAssetId() == shaderRef.GetAssetId() &&
-                      _shader.GetHandle() == shaderRef.GetHandle() &&
-                      _bindingGroup == bindingGroup;
+                      _shader.GetHandle() == shaderRef.GetHandle() && _policy == policy;
     if (!same) {
         _shader = std::move(shaderRef);
-        _bindingGroup = bindingGroup;
+        _policy = std::move(policy);
+        _parameters = {};
+        _layoutDiagnostics.clear();
+        _resolvedInterfaces.clear();
+        _resolvedSourceIdentities.clear();
         _localKeywords.clear();
-        _parameters.Reset(MaterialLayout{});
+        _layoutShader = nullptr;
+        _layoutInitialized = false;
         ++_revision;
     }
     return RefreshShaderLayout();
 }
 
+bool MaterialAsset::InstallLayout(
+    ShaderParameterLayoutBuildResult result,
+    const ShaderAsset* source) noexcept {
+    _layoutDiagnostics = std::move(result.Diagnostics);
+    if (!result.Succeeded() || !_parameters.Reset(*result.Layout, true)) {
+        return false;
+    }
+    _layoutInitialized = true;
+    _layoutShader = source;
+    ++_revision;
+    return true;
+}
+
 bool MaterialAsset::RefreshShaderLayout() noexcept {
     ShaderAsset* shaderAsset = _shader.Get();
-    if (shaderAsset == nullptr || !shaderAsset->IsValid() || !_bindingGroup.has_value()) {
-        return false;
+    if (shaderAsset == nullptr || !shaderAsset->IsValid()) return false;
+    if (_layoutInitialized && _layoutShader == shaderAsset) return true;
+    if (_layoutShader != shaderAsset) {
+        _resolvedInterfaces.clear();
+        _resolvedSourceIdentities.clear();
     }
-    const auto layout = BuildMaterialLayout(
-        shaderAsset->GetBinary().Stages,
-        *_bindingGroup);
-    if (!layout.has_value()) {
-        return false;
+    return InstallLayout(
+        BuildMaterialLayout(*shaderAsset, _policy, _resolvedInterfaces),
+        shaderAsset);
+}
+
+bool MaterialAsset::ApplyResolvedInterfaces(
+    std::span<const ShaderProgramInterfaceRecord> interfaces) noexcept {
+    ShaderAsset* shaderAsset = _shader.Get();
+    if (shaderAsset == nullptr || !shaderAsset->IsValid()) return false;
+    vector<ShaderProgramInterfaceRecord> candidate =
+        _layoutShader == shaderAsset ? _resolvedInterfaces : vector<ShaderProgramInterfaceRecord>{};
+    bool changed = _layoutShader != shaderAsset;
+    for (ShaderProgramInterfaceRecord incoming : interfaces) {
+        shader::NormalizeShaderDefines(incoming.Context.VariantDefines);
+        incoming.Context.Stage = shader::ShaderStage::UNKNOWN;
+        if (incoming.Interface.Kind != shader::ShaderProgramKind::Graphics ||
+            !shader::IsShaderInterfaceValid(incoming.Interface)) {
+            _layoutDiagnostics = {ShaderBindingDiagnostic{
+                .Code = ShaderBindingDiagnosticCode::InvalidInterface,
+                .Message = "MaterialAsset only accepts valid graphics program interfaces",
+                .Context = std::move(incoming.Context)}};
+            return false;
+        }
+        if (incoming.Context.PassIndex.has_value()) {
+            const uint32_t passIndex = *incoming.Context.PassIndex;
+            if (passIndex >= shaderAsset->GetPasses().size() ||
+                !shader::IsShaderVariantInDomain(
+                    shaderAsset->GetPasses()[passIndex],
+                    incoming.Context.VariantDefines)) {
+                _layoutDiagnostics = {ShaderBindingDiagnostic{
+                    .Code = ShaderBindingDiagnosticCode::InvalidInterface,
+                    .Message = "resolved interface context is outside the ShaderAsset variant domain",
+                    .Context = std::move(incoming.Context)}};
+                return false;
+            }
+            for (const shader::ShaderProgramVariantArtifact& baked :
+                 shaderAsset->GetBinary().ProgramVariants) {
+                if (baked.PassIndex != passIndex ||
+                    baked.Defines != incoming.Context.VariantDefines) {
+                    continue;
+                }
+                const shader::ShaderInterfaceDesc& bakedInterface =
+                    shaderAsset->GetBinary().ProgramInterfaces[baked.InterfaceIndex];
+                if (bakedInterface != incoming.Interface) {
+                    _layoutDiagnostics = {ShaderBindingDiagnostic{
+                        .Code = ShaderBindingDiagnosticCode::InterfaceMismatch,
+                        .Message = "resolved interface is incompatible with the baked interface for the same program",
+                        .Context = std::move(incoming.Context),
+                        .RelatedContext = shader::ShaderDiagnosticContext{
+                            .Target = baked.Target,
+                            .PassIndex = baked.PassIndex,
+                            .VariantDefines = baked.Defines}}};
+                    return false;
+                }
+                break;
+            }
+        }
+
+        auto existing = std::ranges::find_if(candidate, [&](const ShaderProgramInterfaceRecord& value) {
+            return SameProgramIdentity(value, incoming);
+        });
+        if (existing != candidate.end()) {
+            if (existing->Interface != incoming.Interface) {
+                _layoutDiagnostics = {ShaderBindingDiagnostic{
+                    .Code = ShaderBindingDiagnosticCode::InterfaceMismatch,
+                    .Message = "the same pass and variant resolved to incompatible canonical interfaces",
+                    .Context = std::move(incoming.Context),
+                    .RelatedContext = existing->Context}};
+                return false;
+            }
+            continue;
+        }
+        if (!HasProgramIdentity(incoming) &&
+            std::ranges::any_of(candidate, [&](const ShaderProgramInterfaceRecord& value) {
+                return !HasProgramIdentity(value) && value.Interface == incoming.Interface;
+            })) {
+            continue;
+        }
+        candidate.emplace_back(std::move(incoming));
+        changed = true;
     }
-    if (_parameters.GetLayout() == *layout) {
-        return true;
+
+    if (!changed && _layoutInitialized && _layoutShader == shaderAsset) return true;
+    ShaderParameterLayoutBuildResult layout = BuildMaterialLayout(
+        *shaderAsset,
+        _policy,
+        candidate);
+    if (!InstallLayout(std::move(layout), shaderAsset)) return false;
+    _resolvedInterfaces = std::move(candidate);
+    return true;
+}
+
+bool MaterialAsset::ApplyResolvedPrograms(
+    std::span<const ShaderResolvedProgram> programs) noexcept {
+    ShaderAsset* shaderAsset = _shader.Get();
+    if (shaderAsset == nullptr || !shaderAsset->IsValid()) return false;
+    unordered_map<uint32_t, shader::ShaderHash> sourceIdentities =
+        _layoutShader == shaderAsset
+            ? _resolvedSourceIdentities
+            : unordered_map<uint32_t, shader::ShaderHash>{};
+    vector<ShaderProgramInterfaceRecord> interfaces;
+    interfaces.reserve(programs.size());
+    for (const ShaderResolvedProgram& program : programs) {
+        vector<string> normalizedDefines = program.Defines;
+        shader::NormalizeShaderDefines(normalizedDefines);
+        const bool knownTarget = program.Target == shader::ShaderTarget::DXIL ||
+                                 program.Target == shader::ShaderTarget::SPIRV;
+        if (!knownTarget || program.PassIndex >= shaderAsset->GetPasses().size() ||
+            normalizedDefines != program.Defines ||
+            !shader::IsShaderVariantInDomain(
+                shaderAsset->GetPasses()[program.PassIndex],
+                program.Defines) ||
+            ComputeShaderProgramIdentity(
+                shaderAsset->GetPasses()[program.PassIndex],
+                program.PassIndex,
+                program.Defines,
+                program.SourceIdentity) != program.ProgramIdentity ||
+            (shaderAsset->GetPasses()[program.PassIndex].SourceIdentity != shader::ShaderHash{} &&
+             shaderAsset->GetPasses()[program.PassIndex].SourceIdentity != program.SourceIdentity)) {
+            _layoutDiagnostics = {ShaderBindingDiagnostic{
+                .Code = ShaderBindingDiagnosticCode::InterfaceMismatch,
+                .Message = "resolved program provenance does not match this immutable ShaderAsset",
+                .Context = shader::ShaderDiagnosticContext{
+                    .Target = program.Target,
+                    .PassIndex = program.PassIndex,
+                    .VariantDefines = program.Defines}}};
+            return false;
+        }
+
+        const auto existing = sourceIdentities.find(program.PassIndex);
+        if (existing != sourceIdentities.end() && existing->second != program.SourceIdentity) {
+            _layoutDiagnostics = {ShaderBindingDiagnostic{
+                .Code = ShaderBindingDiagnosticCode::InterfaceMismatch,
+                .Message = "resolved programs come from different immutable shader source identities",
+                .Context = shader::ShaderDiagnosticContext{
+                    .Target = program.Target,
+                    .PassIndex = program.PassIndex,
+                    .VariantDefines = program.Defines}}};
+            return false;
+        }
+        if (program.SourceIdentity != shader::ShaderHash{}) {
+            sourceIdentities.insert_or_assign(program.PassIndex, program.SourceIdentity);
+        }
+        interfaces.emplace_back(ShaderProgramInterfaceRecord{
+            .Interface = program.Interface,
+            .Context = shader::ShaderDiagnosticContext{
+                .Target = program.Target,
+                .PassIndex = program.PassIndex,
+                .VariantDefines = program.Defines}});
     }
-    if (!_parameters.Reset(*layout)) {
-        return false;
-    }
-    ++_revision;
+    if (!ApplyResolvedInterfaces(interfaces)) return false;
+    _resolvedSourceIdentities = std::move(sourceIdentities);
     return true;
 }
 
 bool MaterialAsset::IsReady() const noexcept {
     ShaderAsset* shaderAsset = _shader.Get();
-    if (shaderAsset == nullptr || !shaderAsset->IsValid() || !_bindingGroup.has_value()) {
-        return false;
-    }
-    const auto layout = BuildMaterialLayout(
-        shaderAsset->GetBinary().Stages,
-        *_bindingGroup);
-    return layout.has_value() && _parameters.GetLayout() == *layout;
+    return shaderAsset != nullptr && shaderAsset->IsValid() && _layoutInitialized &&
+           _layoutShader == shaderAsset;
+}
+
+bool MaterialAsset::HasCompleteParametersFor(
+    const shader::ShaderInterfaceDesc& interface,
+    const shader::ShaderDiagnosticContext& context) const noexcept {
+    if (!IsReady()) return false;
+    ShaderBindingResolutionResult resolution = ResolveShaderBindings(interface, _policy, context);
+    return resolution.Succeeded() && _parameters.IsCompleteFor(*resolution.Plan);
 }
 
 bool MaterialAsset::EnableLocalKeyword(std::string_view define) noexcept {
     ShaderAsset* shaderAsset = _shader.Get();
-    if (define.empty() || shaderAsset == nullptr || !ShaderDeclaresLocalDefine(*shaderAsset, define)) {
-        return false;
-    }
+    if (define.empty() || shaderAsset == nullptr || !ShaderDeclaresLocalDefine(*shaderAsset, define)) return false;
     vector<string> next = _localKeywords;
     for (const shader::ShaderPassDesc& pass : shaderAsset->GetPasses()) {
-        for (const shader::ShaderKeywordGroupDesc& group : pass.KeywordGroups) {
-            if (group.Scope != shader::ShaderKeywordScope::Local || !GroupContainsDefine(group, define)) {
-                continue;
-            }
+        for (const shader::ShaderKeywordGroupDesc& group : pass.VariantDomain.KeywordGroups) {
+            if (group.Scope != shader::ShaderKeywordScope::Local || !GroupContainsDefine(group, define)) continue;
             std::erase_if(next, [&](const string& enabled) {
                 return enabled != define && GroupContainsDefine(group, enabled);
             });
@@ -310,13 +326,8 @@ bool MaterialAsset::EnableLocalKeyword(std::string_view define) noexcept {
 
 bool MaterialAsset::DisableLocalKeyword(std::string_view define) noexcept {
     ShaderAsset* shaderAsset = _shader.Get();
-    if (define.empty() || shaderAsset == nullptr || !ShaderDeclaresLocalDefine(*shaderAsset, define)) {
-        return false;
-    }
-    const size_t erased = std::erase(_localKeywords, define);
-    if (erased != 0) {
-        ++_revision;
-    }
+    if (define.empty() || shaderAsset == nullptr || !ShaderDeclaresLocalDefine(*shaderAsset, define)) return false;
+    if (std::erase(_localKeywords, define) != 0) ++_revision;
     return true;
 }
 
@@ -329,80 +340,256 @@ std::optional<vector<string>> MaterialAsset::ResolveVariantDefines(
     std::span<const std::string_view> pipelineGlobalDefines) const noexcept {
     try {
         ShaderAsset* shaderAsset = _shader.Get();
-        if (shaderAsset == nullptr || passIndex >= shaderAsset->GetPasses().size()) {
-            return std::nullopt;
-        }
+        if (shaderAsset == nullptr || passIndex >= shaderAsset->GetPasses().size()) return std::nullopt;
         const shader::ShaderPassDesc& pass = shaderAsset->GetPasses()[passIndex];
         vector<string> result;
         for (const string& define : _localKeywords) {
-            const bool used = std::ranges::any_of(pass.KeywordGroups, [&](const auto& group) {
-                return group.Scope == shader::ShaderKeywordScope::Local && GroupContainsDefine(group, define);
-            });
-            if (used) {
-                result.emplace_back(define);
-            }
+            const bool used = std::ranges::any_of(
+                pass.VariantDomain.KeywordGroups,
+                [&](const auto& group) {
+                    return group.Scope == shader::ShaderKeywordScope::Local && GroupContainsDefine(group, define);
+                });
+            if (used) result.emplace_back(define);
         }
         for (const std::string_view define : pipelineGlobalDefines) {
             bool global = false;
             bool local = false;
-            for (const shader::ShaderKeywordGroupDesc& group : pass.KeywordGroups) {
-                if (!GroupContainsDefine(group, define)) {
-                    continue;
-                }
+            for (const shader::ShaderKeywordGroupDesc& group : pass.VariantDomain.KeywordGroups) {
+                if (!GroupContainsDefine(group, define)) continue;
                 global = global || group.Scope == shader::ShaderKeywordScope::Global;
                 local = local || group.Scope == shader::ShaderKeywordScope::Local;
             }
-            if (local) {
-                return std::nullopt;
-            }
-            if (global) {
-                result.emplace_back(define);
-            }
+            if (local) return std::nullopt;
+            if (global) result.emplace_back(define);
         }
         shader::NormalizeShaderDefines(result);
-        if (!shader::AreShaderDefinesValid(pass, shader::ShaderStage::UNKNOWN, result) ||
-            !shader::IsDeclaredShaderVariant(pass, result)) {
-            return std::nullopt;
-        }
-        return result;
+        return shader::IsShaderVariantInDomain(pass, result)
+                   ? std::optional<vector<string>>{std::move(result)}
+                   : std::nullopt;
     } catch (...) {
         return std::nullopt;
     }
 }
 
-bool MaterialAsset::SetFloat(std::string_view name, float value) noexcept {
-    return MutateParameters([&](MaterialParameterStorage& storage) { return storage.SetFloat(name, value); });
+bool MaterialAsset::SetFloat(std::string_view name, float value, uint32_t arrayIndex) noexcept {
+    return MutateParameters([&](ShaderParameterSet& parameters) {
+        return parameters.SetFloat(name, value, arrayIndex);
+    });
 }
 
-bool MaterialAsset::SetVector(std::string_view name, const Eigen::Vector4f& value) noexcept {
-    return MutateParameters([&](MaterialParameterStorage& storage) { return storage.SetVector(name, value); });
+bool MaterialAsset::SetFloat(
+    ShaderParameterLocation location,
+    std::string_view field,
+    float value,
+    uint32_t arrayIndex) noexcept {
+    return MutateParameters([&](ShaderParameterSet& parameters) {
+        return parameters.SetFloat(location, field, value, arrayIndex);
+    });
+}
+
+bool MaterialAsset::SetInt(std::string_view name, int32_t value, uint32_t arrayIndex) noexcept {
+    return MutateParameters([&](ShaderParameterSet& parameters) {
+        return parameters.SetInt(name, value, arrayIndex);
+    });
+}
+
+bool MaterialAsset::SetInt(
+    ShaderParameterLocation location,
+    std::string_view field,
+    int32_t value,
+    uint32_t arrayIndex) noexcept {
+    return MutateParameters([&](ShaderParameterSet& parameters) {
+        return parameters.SetInt(location, field, value, arrayIndex);
+    });
+}
+
+bool MaterialAsset::SetUInt(std::string_view name, uint32_t value, uint32_t arrayIndex) noexcept {
+    return MutateParameters([&](ShaderParameterSet& parameters) {
+        return parameters.SetUInt(name, value, arrayIndex);
+    });
+}
+
+bool MaterialAsset::SetUInt(
+    ShaderParameterLocation location,
+    std::string_view field,
+    uint32_t value,
+    uint32_t arrayIndex) noexcept {
+    return MutateParameters([&](ShaderParameterSet& parameters) {
+        return parameters.SetUInt(location, field, value, arrayIndex);
+    });
+}
+
+bool MaterialAsset::SetBool(std::string_view name, bool value, uint32_t arrayIndex) noexcept {
+    return MutateParameters([&](ShaderParameterSet& parameters) {
+        return parameters.SetBool(name, value, arrayIndex);
+    });
+}
+
+bool MaterialAsset::SetBool(
+    ShaderParameterLocation location,
+    std::string_view field,
+    bool value,
+    uint32_t arrayIndex) noexcept {
+    return MutateParameters([&](ShaderParameterSet& parameters) {
+        return parameters.SetBool(location, field, value, arrayIndex);
+    });
+}
+
+bool MaterialAsset::SetVector(
+    std::string_view name,
+    const Eigen::Vector4f& value,
+    uint32_t arrayIndex) noexcept {
+    return MutateParameters([&](ShaderParameterSet& parameters) {
+        return parameters.SetVector(name, value, arrayIndex);
+    });
+}
+
+bool MaterialAsset::SetVector(
+    ShaderParameterLocation location,
+    std::string_view field,
+    const Eigen::Vector4f& value,
+    uint32_t arrayIndex) noexcept {
+    return MutateParameters([&](ShaderParameterSet& parameters) {
+        return parameters.SetVector(location, field, value, arrayIndex);
+    });
+}
+
+bool MaterialAsset::SetValue(
+    std::string_view name,
+    shader::ShaderScalarType scalar,
+    uint32_t columns,
+    std::span<const byte> data,
+    uint32_t arrayIndex) noexcept {
+    return MutateParameters([&](ShaderParameterSet& parameters) {
+        return parameters.SetValue(name, scalar, columns, data, arrayIndex);
+    });
+}
+
+bool MaterialAsset::SetValue(
+    ShaderParameterLocation location,
+    std::string_view field,
+    shader::ShaderScalarType scalar,
+    uint32_t columns,
+    std::span<const byte> data,
+    uint32_t arrayIndex) noexcept {
+    return MutateParameters([&](ShaderParameterSet& parameters) {
+        return parameters.SetValue(location, field, scalar, columns, data, arrayIndex);
+    });
+}
+
+bool MaterialAsset::SetMatrix(
+    std::string_view name,
+    std::span<const float> rowMajorValues,
+    uint32_t rows,
+    uint32_t columns,
+    uint32_t arrayIndex) noexcept {
+    return MutateParameters([&](ShaderParameterSet& parameters) {
+        return parameters.SetMatrix(name, rowMajorValues, rows, columns, arrayIndex);
+    });
+}
+
+bool MaterialAsset::SetMatrix(
+    ShaderParameterLocation location,
+    std::string_view field,
+    std::span<const float> rowMajorValues,
+    uint32_t rows,
+    uint32_t columns,
+    uint32_t arrayIndex) noexcept {
+    return MutateParameters([&](ShaderParameterSet& parameters) {
+        return parameters.SetMatrix(
+            location,
+            field,
+            rowMajorValues,
+            rows,
+            columns,
+            arrayIndex);
+    });
 }
 
 bool MaterialAsset::SetConstantBuffer(std::string_view name, std::span<const byte> data) noexcept {
-    return MutateParameters([&](MaterialParameterStorage& storage) { return storage.SetConstantBuffer(name, data); });
+    return MutateParameters([&](ShaderParameterSet& parameters) {
+        return parameters.SetConstantBuffer(name, data);
+    });
+}
+
+bool MaterialAsset::SetConstantBuffer(
+    ShaderParameterLocation location,
+    std::span<const byte> data) noexcept {
+    return MutateParameters([&](ShaderParameterSet& parameters) {
+        return parameters.SetConstantBuffer(location, data);
+    });
 }
 
 bool MaterialAsset::SetTexture(
     std::string_view name,
     StreamingAssetRef<TextureAsset> texture,
-    const TextureSubViewDesc& view) noexcept {
-    return MutateParameters([&](MaterialParameterStorage& storage) {
-        return storage.SetTexture(name, std::move(texture), view);
+    const TextureSubViewDesc& view,
+    uint32_t arrayIndex) noexcept {
+    return MutateParameters([&](ShaderParameterSet& parameters) {
+        return parameters.SetTexture(name, std::move(texture), view, arrayIndex);
     });
 }
 
-bool MaterialAsset::ClearTexture(std::string_view name) noexcept {
-    return MutateParameters([&](MaterialParameterStorage& storage) { return storage.ClearTexture(name); });
+bool MaterialAsset::SetTexture(
+    ShaderParameterLocation location,
+    StreamingAssetRef<TextureAsset> texture,
+    const TextureSubViewDesc& view,
+    uint32_t arrayIndex) noexcept {
+    return MutateParameters([&](ShaderParameterSet& parameters) {
+        return parameters.SetTexture(location, std::move(texture), view, arrayIndex);
+    });
 }
 
 bool MaterialAsset::SetSampler(
     std::string_view name,
-    const render::SamplerDescriptor& sampler) noexcept {
-    return MutateParameters([&](MaterialParameterStorage& storage) { return storage.SetSampler(name, sampler); });
+    const render::SamplerDescriptor& sampler,
+    uint32_t arrayIndex) noexcept {
+    return MutateParameters([&](ShaderParameterSet& parameters) {
+        return parameters.SetSampler(name, sampler, arrayIndex);
+    });
 }
 
-bool MaterialAsset::ClearSampler(std::string_view name) noexcept {
-    return MutateParameters([&](MaterialParameterStorage& storage) { return storage.ClearSampler(name); });
+bool MaterialAsset::SetSampler(
+    ShaderParameterLocation location,
+    const render::SamplerDescriptor& sampler,
+    uint32_t arrayIndex) noexcept {
+    return MutateParameters([&](ShaderParameterSet& parameters) {
+        return parameters.SetSampler(location, sampler, arrayIndex);
+    });
+}
+
+bool MaterialAsset::SetBuffer(
+    std::string_view name,
+    Nullable<render::Buffer*> buffer,
+    render::BufferRange range,
+    uint32_t arrayIndex) noexcept {
+    return MutateParameters([&](ShaderParameterSet& parameters) {
+        return parameters.SetBuffer(name, buffer, range, arrayIndex);
+    });
+}
+
+bool MaterialAsset::SetBuffer(
+    ShaderParameterLocation location,
+    Nullable<render::Buffer*> buffer,
+    render::BufferRange range,
+    uint32_t arrayIndex) noexcept {
+    return MutateParameters([&](ShaderParameterSet& parameters) {
+        return parameters.SetBuffer(location, buffer, range, arrayIndex);
+    });
+}
+
+bool MaterialAsset::ClearResource(std::string_view name, uint32_t arrayIndex) noexcept {
+    return MutateParameters([&](ShaderParameterSet& parameters) {
+        return parameters.ClearResource(name, arrayIndex);
+    });
+}
+
+bool MaterialAsset::ClearResource(
+    ShaderParameterLocation location,
+    uint32_t arrayIndex) noexcept {
+    return MutateParameters([&](ShaderParameterSet& parameters) {
+        return parameters.ClearResource(location, arrayIndex);
+    });
 }
 
 }  // namespace radray

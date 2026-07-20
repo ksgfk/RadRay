@@ -4,6 +4,7 @@
 
 #include <radray/runtime/application.h>
 #include <radray/runtime/gpu_system.h>
+#include <radray/runtime/shader_parameters.h>
 #include <radray/runtime/window_manager.h>
 
 namespace radray {
@@ -70,6 +71,11 @@ void RenderPipelinePass::Cleanup(RenderPipelineContext& ctx, const RenderCamera&
 }
 
 RenderPipeline::~RenderPipeline() noexcept = default;
+
+const PipelineBindingPolicy& RenderPipeline::GetShaderBindingPolicy() const noexcept {
+    static const PipelineBindingPolicy empty;
+    return empty;
+}
 
 void RenderPipeline::BeginFrame(RenderPipelineContext& ctx) {
     OnBeginFrame(ctx);

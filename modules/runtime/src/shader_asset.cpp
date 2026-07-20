@@ -1,5 +1,6 @@
 #include <radray/runtime/shader_asset.h>
 
+#include <atomic>
 #include <limits>
 #include <utility>
 
@@ -7,6 +8,12 @@
 
 namespace radray {
 namespace {
+
+std::atomic<uint64_t> gNextShaderAssetInstanceId{1};
+
+uint64_t AllocateShaderAssetInstanceId() noexcept {
+    return gNextShaderAssetInstanceId.fetch_add(1, std::memory_order_relaxed);
+}
 
 AssetLoadTask LoadShaderAssetTask(AssetId expectedId, std::filesystem::path path) {
     std::optional<shader::ShaderBinary> binary = shader::ReadShaderBinary(path);
@@ -24,6 +31,9 @@ AssetLoadTask LoadShaderAssetTask(AssetId expectedId, std::filesystem::path path
 }
 
 }  // namespace
+
+ShaderAsset::ShaderAsset() noexcept
+    : _instanceId(AllocateShaderAssetInstanceId()) {}
 
 render::CompareFunction ToRenderCompareFunction(shader::CompareFunction value) noexcept {
     switch (value) {
@@ -129,13 +139,14 @@ render::StencilState ToRenderStencilState(const shader::StencilState& value) noe
         .WriteMask = value.WriteMask};
 }
 
-ShaderAsset::ShaderAsset(vector<ShaderPassDesc> passes) noexcept {
+ShaderAsset::ShaderAsset(vector<ShaderPassDesc> passes) noexcept
+    : _instanceId(AllocateShaderAssetInstanceId()) {
     _binary.Asset.Passes = std::move(passes);
     _valid = shader::IsShaderAssetDataValid(_binary.Asset, false);
 }
 
 ShaderAsset::ShaderAsset(shader::ShaderBinary binary) noexcept
-    : _binary(std::move(binary)) {
+    : _binary(std::move(binary)), _instanceId(AllocateShaderAssetInstanceId()) {
     _valid = _binary.IsValid();
 }
 
@@ -154,12 +165,19 @@ bool ShaderAsset::IsValid() const noexcept {
     return _valid;
 }
 
-Nullable<const shader::CompiledShaderStage*> ShaderAsset::FindCompiledStage(
+Nullable<const shader::ShaderStageArtifact*> ShaderAsset::FindCompiledStage(
     shader::ShaderTarget target,
     uint32_t passIndex,
     shader::ShaderStage stage,
     const vector<string>& defines) const noexcept {
-    return _binary.Find(target, passIndex, stage, defines);
+    return _binary.FindStageArtifact(target, passIndex, stage, defines);
+}
+
+Nullable<const shader::ShaderProgramVariantArtifact*> ShaderAsset::FindProgramVariant(
+    shader::ShaderTarget target,
+    uint32_t passIndex,
+    const vector<string>& defines) const noexcept {
+    return _binary.FindProgramVariant(target, passIndex, defines);
 }
 
 std::optional<uint32_t> ShaderAsset::FindPassByName(std::string_view name) const noexcept {

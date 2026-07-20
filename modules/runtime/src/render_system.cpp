@@ -8,6 +8,7 @@
 #include <radray/file.h>
 #include <radray/logger.h>
 #include <radray/render/common.h>
+#include <radray/runtime/shader_asset.h>
 #if defined(RADRAY_ENABLE_SHADER_JIT)
 #include <radray/shader/dxc.h>
 #endif
@@ -26,6 +27,7 @@ RenderSystem::~RenderSystem() noexcept {
     ReleaseAllScenes();
     _pipeline.reset();
     _samplerCache.reset();
+    _shaderResolver.reset();
     _dxc.reset();
 }
 
@@ -49,6 +51,12 @@ void RenderSystem::OnInitialize() {
         RADRAY_ERR_LOG("RenderSystem::OnInitialize: CreateDxc failed");
     } else {
         _dxc = dxcOpt.Release();
+        _shaderResolver = make_unique<ShaderArtifactResolver>(
+            ShaderArtifactResolver::Config{
+                .ShaderRoot = _shaderIncludeRoot,
+                .DiskCacheDirectory = GetExecutableDirectory() / "shader_cache",
+                .EnableDiskCache = true},
+            CreateDxcShaderJitCompiler(_dxc));
     }
 #endif
 }

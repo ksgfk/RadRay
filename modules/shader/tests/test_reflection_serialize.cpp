@@ -49,6 +49,8 @@ HlslShaderDesc MakeHlslSample() {
     in.SystemValueType = HlslSystemValueType::UNDEFINED;
     in.ComponentType = HlslRegisterComponentType::FLOAT32;
     in.Stream = 0;
+    in.Mask = 0x7;
+    in.ReadWriteMask = 0x7;
     d.InputParameters.push_back(in);
 
     HlslSignatureParameterDesc out{};
@@ -57,6 +59,8 @@ HlslShaderDesc MakeHlslSample() {
     out.Register = 0;
     out.SystemValueType = HlslSystemValueType::TARGET;
     out.ComponentType = HlslRegisterComponentType::FLOAT32;
+    out.Mask = 0xf;
+    out.ReadWriteMask = 0xf;
     d.OutputParameters.push_back(out);
 
     HlslShaderVariableDesc var{};
@@ -75,7 +79,7 @@ HlslShaderDesc MakeHlslSample() {
     type.Columns = 4;
     type.Elements = 0;
     type.Offset = 0;
-    type.Members.push_back(HlslShaderTypeMember{.Name = "m", .Type = HlslShaderTypeId{2}});
+    type.Members.push_back(HlslShaderTypeMember{.Name = "m", .Type = HlslShaderTypeId{2}, .Offset = 16});
     d.Types.push_back(type);
 
     return d;
@@ -94,10 +98,26 @@ SpirvShaderDesc MakeSpirvSample() {
     t.MatrixStride = 16;
     t.Size = 96;
     t.RowMajor = false;
-    t.Members.push_back(SpirvTypeMember{.Name = "BaseColor", .Offset = 0, .Size = 16, .TypeIndex = 1});
+    t.Members.push_back(SpirvTypeMember{
+        .Name = "BaseColor",
+        .Offset = 0,
+        .Size = 16,
+        .TypeIndex = 1,
+        .ArraySize = 2,
+        .ArrayStride = 16,
+        .MatrixStride = 16});
     d.Types.push_back(t);
 
-    d.VertexInputs.push_back(SpirvVertexInput{.Name = "POSITION", .Location = 0, .TypeIndex = 2});
+    d.StageInputs.push_back(SpirvStageIo{
+        .Name = "in.var.POSITION",
+        .HlslSemantic = "POSITION0",
+        .Location = 0,
+        .TypeIndex = 2});
+    d.StageOutputs.push_back(SpirvStageIo{
+        .Name = "out.var.SV_Target",
+        .HlslSemantic = "SV_Target0",
+        .Location = 0,
+        .TypeIndex = 2});
 
     SpirvResourceBinding r{};
     r.Name = "gBaseColorMap";
@@ -112,6 +132,7 @@ SpirvShaderDesc MakeSpirvSample() {
     r.ReadOnly = true;
     r.WriteOnly = false;
     r.IsViewInHlsl = true;
+    r.HlslType = "texture2d";
     r.IsUnboundedArray = false;
     SpirvImageInfo img{};
     img.Dim = SpirvImageDim::Dim2D;
@@ -167,6 +188,7 @@ TEST(ReflectionSerializeTest, HlslRoundTrip) {
 
     ASSERT_EQ(d.InputParameters.size(), 1u);
     EXPECT_EQ(d.InputParameters[0].SemanticName, "POSITION");
+    EXPECT_EQ(d.InputParameters[0].Mask, 0x7);
     ASSERT_EQ(d.OutputParameters.size(), 1u);
     EXPECT_EQ(d.OutputParameters[0].SystemValueType, HlslSystemValueType::TARGET);
 
@@ -182,6 +204,7 @@ TEST(ReflectionSerializeTest, HlslRoundTrip) {
     ASSERT_EQ(d.Types[0].Members.size(), 1u);
     EXPECT_EQ(d.Types[0].Members[0].Name, "m");
     EXPECT_EQ(d.Types[0].Members[0].Type.Value, 2u);
+    EXPECT_EQ(d.Types[0].Members[0].Offset, 16u);
 }
 
 TEST(ReflectionSerializeTest, SpirvRoundTrip) {
@@ -200,10 +223,15 @@ TEST(ReflectionSerializeTest, SpirvRoundTrip) {
     ASSERT_EQ(d.Types[0].Members.size(), 1u);
     EXPECT_EQ(d.Types[0].Members[0].Name, "BaseColor");
     EXPECT_EQ(d.Types[0].Members[0].Size, 16u);
+    EXPECT_EQ(d.Types[0].Members[0].ArraySize, 2u);
+    EXPECT_EQ(d.Types[0].Members[0].ArrayStride, 16u);
+    EXPECT_EQ(d.Types[0].Members[0].MatrixStride, 16u);
 
-    ASSERT_EQ(d.VertexInputs.size(), 1u);
-    EXPECT_EQ(d.VertexInputs[0].Name, "POSITION");
-    EXPECT_EQ(d.VertexInputs[0].Location, 0u);
+    ASSERT_EQ(d.StageInputs.size(), 1u);
+    EXPECT_EQ(d.StageInputs[0].HlslSemantic, "POSITION0");
+    EXPECT_EQ(d.StageInputs[0].Location, 0u);
+    ASSERT_EQ(d.StageOutputs.size(), 1u);
+    EXPECT_EQ(d.StageOutputs[0].HlslSemantic, "SV_Target0");
 
     ASSERT_EQ(d.ResourceBindings.size(), 1u);
     const SpirvResourceBinding& b = d.ResourceBindings[0];
@@ -214,6 +242,7 @@ TEST(ReflectionSerializeTest, SpirvRoundTrip) {
     ASSERT_TRUE(b.HlslRegister.has_value());
     EXPECT_EQ(b.HlslRegister.value(), 3u);
     EXPECT_TRUE(b.IsViewInHlsl);
+    EXPECT_EQ(b.HlslType, "texture2d");
     ASSERT_TRUE(b.ImageInfo.has_value());
     EXPECT_EQ(b.ImageInfo->Dim, SpirvImageDim::Dim2D);
     EXPECT_EQ(b.ImageInfo->SampledType, 4u);

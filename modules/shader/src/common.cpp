@@ -1,6 +1,13 @@
 #include <radray/shader/common.h>
 
+#include <xxhash.h>
+
 namespace radray::shader {
+
+ShaderHash HashShaderBytes(std::span<const byte> data) noexcept {
+    const XXH128_hash_t hash = XXH3_128bits(data.data(), data.size());
+    return ShaderHash{.Low = hash.low64, .High = hash.high64};
+}
 
 std::string_view format_as(ShaderStage value) noexcept {
     switch (value) {

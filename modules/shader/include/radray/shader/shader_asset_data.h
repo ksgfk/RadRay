@@ -1,5 +1,6 @@
 #pragma once
 
+#include <filesystem>
 #include <optional>
 #include <string_view>
 #include <variant>
@@ -152,6 +153,18 @@ struct ShaderVariantKey {
 
 using ShaderVariantDesc = ShaderVariantKey;
 
+struct ShaderVariantDomain {
+    vector<ShaderKeywordGroupDesc> KeywordGroups;
+
+    friend bool operator==(const ShaderVariantDomain&, const ShaderVariantDomain&) = default;
+};
+
+struct ShaderBakeSet {
+    vector<ShaderVariantKey> Variants;
+
+    friend bool operator==(const ShaderBakeSet&, const ShaderBakeSet&) = default;
+};
+
 struct ShaderColorTargetDesc {
     uint32_t Index{0};
     std::optional<BlendState> Blend{};
@@ -195,10 +208,13 @@ using ShaderPassProgramDesc = std::variant<ShaderGraphicsPassDesc, ShaderCompute
 struct ShaderPassDesc {
     string Name;
     string SourcePath;
+    // Cooked source-graph snapshot. Zero is reserved for a JIT-only manifest
+    // that will be sealed on first resolution.
+    ShaderHash SourceIdentity{};
     vector<string> IncludeDirs;
     HlslShaderModel SM{HlslShaderModel::SM60};
-    vector<ShaderKeywordGroupDesc> KeywordGroups;
-    vector<ShaderVariantDesc> Variants;
+    ShaderVariantDomain VariantDomain;
+    ShaderBakeSet BakeSet;
     vector<ShaderTagDesc> Tags;
     ShaderPassProgramDesc Program;
     bool IsOptimize{true};
@@ -214,14 +230,37 @@ struct ShaderAssetData {
     friend bool operator==(const ShaderAssetData&, const ShaderAssetData&) = default;
 };
 
+struct ShaderSourceIdentity {
+    ShaderHash Hash{};
+    vector<string> Dependencies;
+
+    friend bool operator==(const ShaderSourceIdentity&, const ShaderSourceIdentity&) = default;
+};
+
+struct ShaderSourceIdentityResult {
+    std::optional<ShaderSourceIdentity> Identity;
+    string Error;
+
+    bool Succeeded() const noexcept { return Identity.has_value() && Error.empty(); }
+};
+
+ShaderSourceIdentityResult ComputeShaderSourceIdentity(
+    const std::filesystem::path& shaderRoot,
+    const ShaderPassDesc& pass) noexcept;
+
 void NormalizeShaderDefines(vector<string>& defines);
-bool IsShaderAssetDataValid(const ShaderAssetData& asset, bool requireVariants = false) noexcept;
+bool IsShaderAssetDataValid(const ShaderAssetData& asset, bool requireBakeSet = false) noexcept;
 bool AreShaderDefinesValid(const ShaderPassDesc& pass, ShaderStage stage, const vector<string>& defines) noexcept;
 bool DoesShaderDefineAffectStage(
     const ShaderPassDesc& pass,
     std::string_view define,
     ShaderStage stage) noexcept;
-bool IsDeclaredShaderVariant(const ShaderPassDesc& pass, const vector<string>& defines) noexcept;
+vector<string> ProjectShaderDefines(
+    const ShaderPassDesc& pass,
+    ShaderStage stage,
+    const vector<string>& defines);
+bool IsShaderVariantInDomain(const ShaderPassDesc& pass, const vector<string>& defines) noexcept;
+bool IsBakedShaderVariant(const ShaderPassDesc& pass, const vector<string>& defines) noexcept;
 std::optional<std::string_view> FindShaderEntryPoint(const ShaderPassDesc& pass, ShaderStage stage) noexcept;
 
 }  // namespace radray::shader

@@ -11,6 +11,7 @@ namespace radray {
 class Application;
 class AppFrameContext;
 struct AppFrameTarget;
+class ShaderArtifactResolver;
 
 namespace shader {
 class Dxc;
@@ -45,6 +46,7 @@ public:
     SamplerCache* GetSamplerCache() const noexcept { return _samplerCache.get(); }
     /// JIT shader 编译根目录 (<exe>/shaderlib)；关闭 JIT 时为空。
     const string& GetShaderIncludeRoot() const noexcept { return _shaderIncludeRoot; }
+    ShaderArtifactResolver* GetShaderArtifactResolver() const noexcept { return _shaderResolver.get(); }
 
 private:
     void EnsureRenderTargetState(AppFrameContext& ctx, RenderPipelineTarget& target);
@@ -54,6 +56,7 @@ private:
     unique_ptr<RenderPipeline> _pipeline;
     vector<unique_ptr<Scene>> _scenes;
     shared_ptr<shader::Dxc> _dxc;
+    unique_ptr<ShaderArtifactResolver> _shaderResolver;
     unique_ptr<SamplerCache> _samplerCache;
     string _shaderIncludeRoot;
 };

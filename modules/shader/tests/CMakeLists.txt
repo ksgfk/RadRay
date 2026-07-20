@@ -4,6 +4,9 @@ radray_add_test(test_shader_binary
 radray_add_test(test_reflection_serialize
     SOURCES test_reflection_serialize.cpp
     LINK_LIBS radraycore radrayshader)
+radray_add_test(test_shader_interface
+    SOURCES test_shader_interface.cpp
+    LINK_LIBS radraycore radrayshader)
 if (RADRAY_ENABLE_DXC AND RADRAY_ENABLE_SPIRV_CROSS)
     radray_add_test(test_spvc_msl
         SOURCES test_spvc_msl.cpp

@@ -9,6 +9,7 @@ namespace radray::shader {
 #include <algorithm>
 #include <bit>
 #include <cstring>
+#include <tuple>
 #include <utility>
 
 #include <spirv_cross.hpp>
@@ -74,10 +75,19 @@ static SpirvImageDim _GetImageDim(spv::Dim dim) {
 }
 
 struct SpirvReflectionContext {
-    const spirv_cross::Compiler& compiler;
+    spirv_cross::Compiler& compiler;
     SpirvShaderDesc& desc;
     unordered_map<uint32_t, uint32_t>& typeCache;
 };
+
+static spv::ExecutionModel _MapShaderStageToExecutionModel(ShaderStage stage) {
+    switch (stage) {
+        case ShaderStage::Vertex: return spv::ExecutionModelVertex;
+        case ShaderStage::Pixel: return spv::ExecutionModelFragment;
+        case ShaderStage::Compute: return spv::ExecutionModelGLCompute;
+        default: return spv::ExecutionModelMax;
+    }
+}
 
 static bool _IsConstantBufferViewType(
     const spirv_cross::Compiler& compiler,
@@ -246,6 +256,21 @@ static uint32_t _ReflectType(
             }
             member.Offset = compiler.type_struct_member_offset(*frame.type, static_cast<uint32_t>(i));
             const auto& memberType = compiler.get_type(frame.type->member_types[i]);
+            if (!memberType.array.empty()) {
+                member.ArraySize = memberType.array[0];
+                member.ArrayStride = compiler.type_struct_member_array_stride(
+                    *frame.type,
+                    static_cast<uint32_t>(i));
+            }
+            if (memberType.columns > 1) {
+                member.MatrixStride = compiler.type_struct_member_matrix_stride(
+                    *frame.type,
+                    static_cast<uint32_t>(i));
+            }
+            member.RowMajor = compiler.has_member_decoration(
+                frame.type->self,
+                static_cast<uint32_t>(i),
+                spv::DecorationRowMajor);
             frame.currentMemberIndex++;
             stack.push({&memberType, &member.TypeIndex, frame.depth + 1});
         } else {
@@ -285,6 +310,20 @@ static void _ProcessResource(
     binding.Binding = compiler.get_decoration(res.id, spv::DecorationBinding);
     const auto& type = compiler.get_type(res.type_id);
     binding.TypeIndex = _ReflectType(ctx, type);
+    const uint32_t userTypeCandidates[]{
+        static_cast<uint32_t>(res.id),
+        static_cast<uint32_t>(res.type_id),
+        static_cast<uint32_t>(res.base_type_id),
+        static_cast<uint32_t>(type.self),
+        static_cast<uint32_t>(type.parent_type)};
+    for (uint32_t candidate : userTypeCandidates) {
+        if (candidate == 0) continue;
+        const std::string& userType = compiler.get_decoration_string(candidate, spv::DecorationUserTypeGOOGLE);
+        if (!userType.empty()) {
+            binding.HlslType = string{userType};
+            break;
+        }
+    }
     if (!type.array.empty()) {
         binding.ArraySize = type.array[0];
         if (binding.ArraySize == 0) {
@@ -362,26 +401,64 @@ static void _ReflectResourceBindings(
     }
 }
 
-static void _ReflectVertexInputs(
+static SpirvStageIo _ReflectStageIoValue(
+    SpirvReflectionContext& ctx,
+    const spirv_cross::Resource& resource) {
+    auto& compiler = ctx.compiler;
+    SpirvStageIo result{};
+    result.Name = string{compiler.get_name(resource.id)};
+    if (result.Name.empty()) {
+        result.Name = string{resource.name};
+    }
+    if (compiler.has_decoration(resource.id, spv::DecorationHlslSemanticGOOGLE)) {
+        result.HlslSemantic = string{compiler.get_decoration_string(resource.id, spv::DecorationHlslSemanticGOOGLE)};
+    }
+    if (compiler.has_decoration(resource.id, spv::DecorationBuiltIn)) {
+        result.BuiltIn = compiler.get_decoration(resource.id, spv::DecorationBuiltIn);
+    } else {
+        result.Location = compiler.get_decoration(resource.id, spv::DecorationLocation);
+    }
+    result.TypeIndex = _ReflectType(ctx, compiler.get_type(resource.type_id));
+    return result;
+}
+
+static SpirvStageIo _ReflectBuiltInStageIoValue(
+    SpirvReflectionContext& ctx,
+    const spirv_cross::BuiltInResource& resource) {
+    SpirvStageIo result{};
+    result.Name = string{resource.resource.name};
+    result.TypeIndex = _ReflectType(ctx, ctx.compiler.get_type(resource.value_type_id));
+    result.BuiltIn = static_cast<uint32_t>(resource.builtin);
+    return result;
+}
+
+static void _ReflectStageIo(
     SpirvReflectionContext& ctx,
     const spirv_cross::ShaderResources& resources) {
-    auto& compiler = ctx.compiler;
     auto& desc = ctx.desc;
     for (const auto& input : resources.stage_inputs) {
-        SpirvVertexInput vertexInput{};
-        vertexInput.Name = string(input.name);
-        vertexInput.Location = compiler.get_decoration(input.id, spv::DecorationLocation);
-        const auto& type = compiler.get_type(input.type_id);
-        vertexInput.TypeIndex = _ReflectType(ctx, type);
-        // vertexInput.Format = _InferVertexFormat(type);
-        desc.VertexInputs.push_back(std::move(vertexInput));
+        desc.StageInputs.push_back(_ReflectStageIoValue(ctx, input));
     }
-    std::sort(
-        desc.VertexInputs.begin(),
-        desc.VertexInputs.end(),
-        [](const SpirvVertexInput& a, const SpirvVertexInput& b) {
-            return a.Location < b.Location;
-        });
+    for (const auto& output : resources.stage_outputs) {
+        desc.StageOutputs.push_back(_ReflectStageIoValue(ctx, output));
+    }
+    ctx.compiler.update_active_builtins();
+    for (const auto& input : resources.builtin_inputs) {
+        if (ctx.compiler.has_active_builtin(input.builtin, spv::StorageClassInput)) {
+            desc.StageInputs.push_back(_ReflectBuiltInStageIoValue(ctx, input));
+        }
+    }
+    for (const auto& output : resources.builtin_outputs) {
+        if (ctx.compiler.has_active_builtin(output.builtin, spv::StorageClassOutput)) {
+            desc.StageOutputs.push_back(_ReflectBuiltInStageIoValue(ctx, output));
+        }
+    }
+    const auto less = [](const SpirvStageIo& lhs, const SpirvStageIo& rhs) {
+        return std::tie(lhs.BuiltIn, lhs.Location, lhs.Name) <
+               std::tie(rhs.BuiltIn, rhs.Location, rhs.Name);
+    };
+    std::sort(desc.StageInputs.begin(), desc.StageInputs.end(), less);
+    std::sort(desc.StageOutputs.begin(), desc.StageOutputs.end(), less);
 }
 
 static void _ReflectPushConstants(
@@ -396,6 +473,7 @@ static void _ReflectPushConstants(
         range.TypeIndex = _ReflectType(ctx, type);
         range.Size = static_cast<uint32_t>(compiler.get_declared_struct_size(type));
         range.Offset = 0;
+        range.IsViewInHlsl = _InferIsViewInHlsl(compiler, pc, range.Name);
         desc.ConstantRanges.push_back(std::move(range));
     }
 }
@@ -425,11 +503,45 @@ std::optional<SpirvShaderDesc> ReflectSpirv(SpirvBytecodeView bytecode) {
         spirv_cross::Compiler compiler{
             std::bit_cast<const uint32_t*>(bytecode.Data.data()),
             bytecode.Data.size() / sizeof(uint32_t)};
-        spirv_cross::ShaderResources resources = compiler.get_shader_resources();
-        SpirvReflectionContext ctx{compiler, desc, typeCache};
-        if (bytecode.Stage == ShaderStage::Vertex) {
-            _ReflectVertexInputs(ctx, resources);
+        const spv::ExecutionModel executionModel = _MapShaderStageToExecutionModel(bytecode.Stage);
+        if (executionModel == spv::ExecutionModelMax) {
+            RADRAY_ERR_LOG("unsupported SPIR-V reflection stage {}", bytecode.Stage);
+            return std::nullopt;
         }
+        if (!bytecode.EntryPointName.empty()) {
+            compiler.set_entry_point(string{bytecode.EntryPointName}, executionModel);
+        }
+        const auto activeVariables = compiler.get_active_interface_variables();
+        compiler.set_enabled_interface_variables(activeVariables);
+        spirv_cross::ShaderResources resources = compiler.get_shader_resources();
+        const auto removeInactive = [&](auto& values) {
+            values.erase(
+                std::remove_if(values.begin(), values.end(), [&](const auto& resource) {
+                    return !activeVariables.contains(resource.id);
+                }),
+                values.end());
+        };
+        removeInactive(resources.uniform_buffers);
+        removeInactive(resources.storage_buffers);
+        removeInactive(resources.sampled_images);
+        removeInactive(resources.storage_images);
+        removeInactive(resources.separate_images);
+        removeInactive(resources.separate_samplers);
+        removeInactive(resources.acceleration_structures);
+        removeInactive(resources.push_constant_buffers);
+        removeInactive(resources.stage_inputs);
+        removeInactive(resources.stage_outputs);
+        const auto removeInactiveBuiltins = [&](auto& values) {
+            values.erase(
+                std::remove_if(values.begin(), values.end(), [&](const auto& resource) {
+                    return !activeVariables.contains(resource.resource.id);
+                }),
+                values.end());
+        };
+        removeInactiveBuiltins(resources.builtin_inputs);
+        removeInactiveBuiltins(resources.builtin_outputs);
+        SpirvReflectionContext ctx{compiler, desc, typeCache};
+        _ReflectStageIo(ctx, resources);
         _ReflectResourceBindings(ctx, resources);
         _ReflectPushConstants(ctx, resources);
         if (bytecode.Stage == ShaderStage::Compute) {
@@ -446,15 +558,6 @@ std::optional<SpirvShaderDesc> ReflectSpirv(SpirvBytecodeView bytecode) {
         return std::nullopt;
     }
     return desc;
-}
-
-static spv::ExecutionModel _MapShaderStageToExecutionModel(ShaderStage stage) {
-    switch (stage) {
-        case ShaderStage::Vertex: return spv::ExecutionModelVertex;
-        case ShaderStage::Pixel: return spv::ExecutionModelFragment;
-        case ShaderStage::Compute: return spv::ExecutionModelGLCompute;
-        default: return spv::ExecutionModelMax;
-    }
 }
 
 static std::optional<uint32_t> _GetStageBufferStartIndex(

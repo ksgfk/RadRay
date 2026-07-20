@@ -84,6 +84,7 @@ void WriteHlslType(JsonRef obj, const HlslShaderTypeDesc& t) {
         JsonRef mo = members.AppendObject();
         mo.AddString("Name", m.Name);
         mo.AddUint("Type", m.Type.Value);
+        mo.AddUint("Offset", m.Offset);
     }
 }
 
@@ -136,6 +137,8 @@ void WriteHlslSignature(JsonRef obj, const HlslSignatureParameterDesc& p) {
     obj.AddUint("SystemValueType", EnumToU(p.SystemValueType));
     obj.AddUint("ComponentType", EnumToU(p.ComponentType));
     obj.AddUint("Stream", p.Stream);
+    obj.AddUint("Mask", p.Mask);
+    obj.AddUint("ReadWriteMask", p.ReadWriteMask);
 }
 
 void ReadHlslType(const JsonValue& obj, HlslShaderTypeDesc& t) {
@@ -154,6 +157,7 @@ void ReadHlslType(const JsonValue& obj, HlslShaderTypeDesc& t) {
         HlslShaderTypeMember m{};
         m.Name = string{mo["Name"].AsString()};
         m.Type = HlslShaderTypeId{static_cast<size_t>(mo["Type"].AsUint(HlslShaderTypeId::Invalid))};
+        m.Offset = static_cast<uint32_t>(mo["Offset"].AsUint());
         t.Members.push_back(std::move(m));
     }
 }
@@ -209,6 +213,8 @@ void ReadHlslSignature(const JsonValue& obj, HlslSignatureParameterDesc& p) {
     p.SystemValueType = UToEnum<HlslSystemValueType>(obj["SystemValueType"].AsUint());
     p.ComponentType = UToEnum<HlslRegisterComponentType>(obj["ComponentType"].AsUint());
     p.Stream = static_cast<uint32_t>(obj["Stream"].AsUint());
+    p.Mask = static_cast<uint8_t>(obj["Mask"].AsUint());
+    p.ReadWriteMask = static_cast<uint8_t>(obj["ReadWriteMask"].AsUint());
 }
 
 }  // namespace

@@ -43,6 +43,7 @@ public:
 
     bool IsValid() const noexcept { return _impl != nullptr; }
     void Destroy() noexcept;
+    ShaderHash GetToolchainHash() const noexcept;
 
     std::optional<DxcOutput> CompileMemory(
         std::string_view code,

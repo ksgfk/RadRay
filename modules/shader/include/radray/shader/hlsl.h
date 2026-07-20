@@ -243,6 +243,7 @@ class HlslShaderTypeMember {
 public:
     string Name;
     HlslShaderTypeId Type{HlslShaderTypeId::Invalid};
+    uint32_t Offset{0};
 };
 
 class HlslShaderVariableDesc {
@@ -295,6 +296,8 @@ public:
     HlslSystemValueType SystemValueType{HlslSystemValueType::UNDEFINED};
     HlslRegisterComponentType ComponentType{HlslRegisterComponentType::UNKNOWN};
     uint32_t Stream{0};
+    uint8_t Mask{0};
+    uint8_t ReadWriteMask{0};
 };
 
 class HlslShaderDesc {
@@ -321,7 +324,7 @@ bool IsBufferDimension(HlslSRVDimension dim) noexcept;
 // 枚举以底层整数值存储 (依赖枚举声明顺序稳定); 名字 / 绑定点等以原始类型存储, 便于人读与 diff。
 // 不依赖 DXC, 因此 DXC 关闭时预编译缓存仍可反序列化。
 
-inline constexpr uint32_t kReflectionFormatVersion = 1;
+inline constexpr uint32_t kReflectionFormatVersion = 2;
 
 /// 序列化 HlslShaderDesc 为 JSON 文本。失败返回 nullopt。
 std::optional<string> SerializeHlslShaderDesc(const HlslShaderDesc& desc) noexcept;

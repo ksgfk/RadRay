@@ -55,6 +55,10 @@ struct SpirvTypeMember {
     uint32_t Offset{0};
     uint32_t Size{0};
     uint32_t TypeIndex{0};
+    uint32_t ArraySize{0};
+    uint32_t ArrayStride{0};
+    uint32_t MatrixStride{0};
+    bool RowMajor{false};
 };
 
 struct SpirvTypeInfo {
@@ -78,10 +82,12 @@ struct SpirvImageInfo {
     uint32_t SampledType{0};
 };
 
-struct SpirvVertexInput {
+struct SpirvStageIo {
     string Name;
+    string HlslSemantic;
     uint32_t Location{0};
     uint32_t TypeIndex{0};
+    std::optional<uint32_t> BuiltIn{};
 };
 
 struct SpirvResourceBinding {
@@ -99,6 +105,7 @@ struct SpirvResourceBinding {
     bool ReadOnly{true};
     bool WriteOnly{false};
     bool IsViewInHlsl{false};
+    string HlslType;
 
     bool IsUnboundedArray{false};
 };
@@ -120,7 +127,8 @@ struct SpirvPushConstantRange {
 class SpirvShaderDesc {
 public:
     vector<SpirvTypeInfo> Types;
-    vector<SpirvVertexInput> VertexInputs;
+    vector<SpirvStageIo> StageInputs;
+    vector<SpirvStageIo> StageOutputs;
     vector<SpirvResourceBinding> ResourceBindings;
     vector<SpirvPushConstantRange> ConstantRanges;
     std::optional<SpirvComputeInfo> ComputeInfo;

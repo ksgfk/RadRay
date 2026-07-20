@@ -285,6 +285,10 @@ static size_t _GetTypeIndex(
         auto& member = desc.Members.emplace_back();
         member.Name = memberName ? memberName : "";
         member.Type = memberTypeIdx;
+        D3D12_SHADER_TYPE_DESC memberDesc{};
+        if (memberType != nullptr && SUCCEEDED(memberType->GetDesc(&memberDesc))) {
+            member.Offset = memberDesc.Offset;
+        }
     }
     result.Types.push_back(std::move(desc));
     typeCache.push_back(type);
@@ -702,6 +706,8 @@ public:
             spDesc.SystemValueType = _MapSystemValue(paramDesc.SystemValueType);
             spDesc.ComponentType = _MapComponentType(paramDesc.ComponentType);
             spDesc.Stream = paramDesc.Stream;
+            spDesc.Mask = paramDesc.Mask;
+            spDesc.ReadWriteMask = paramDesc.ReadWriteMask;
         }
 
         for (UINT i = 0; i < shaderDesc.OutputParameters; i++) {
@@ -714,6 +720,8 @@ public:
             spDesc.SystemValueType = _MapSystemValue(paramDesc.SystemValueType);
             spDesc.ComponentType = _MapComponentType(paramDesc.ComponentType);
             spDesc.Stream = paramDesc.Stream;
+            spDesc.Mask = paramDesc.Mask;
+            spDesc.ReadWriteMask = paramDesc.ReadWriteMask;
         }
 
         return result;
@@ -794,6 +802,18 @@ Dxc::~Dxc() noexcept = default;
 
 void Dxc::Destroy() noexcept {
     _impl.reset();
+}
+
+ShaderHash Dxc::GetToolchainHash() const noexcept {
+    if (_impl == nullptr) return {};
+    ComPtr<IDxcVersionInfo> version;
+    if (FAILED(_impl->_dxc.As(&version))) return {};
+    UINT32 major = 0;
+    UINT32 minor = 0;
+    UINT32 flags = 0;
+    if (FAILED(version->GetVersion(&major, &minor)) || FAILED(version->GetFlags(&flags))) return {};
+    const string identity = fmt::format("dxc:{}:{}:{}", major, minor, flags);
+    return HashShaderBytes(std::as_bytes(std::span{identity.data(), identity.size()}));
 }
 
 static string _FormatStageAndSm(ShaderStage stage, HlslShaderModel sm) {

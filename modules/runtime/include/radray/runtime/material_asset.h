@@ -5,90 +5,42 @@
 #include <string_view>
 
 #include <radray/basic_math.h>
-#include <radray/render/common.h>
 #include <radray/runtime/asset.h>
 #include <radray/runtime/asset_manager.h>
-#include <radray/runtime/material_layout.h>
 #include <radray/runtime/shader_asset.h>
-#include <radray/runtime/texture_asset.h>
+#include <radray/runtime/shader_parameters.h>
 #include <radray/types.h>
 
 namespace radray {
 
-struct MaterialConstantBinding {
-    string Name;
-    uint32_t Binding{0};
-    vector<byte> Data;
-};
-
-struct MaterialTextureBinding {
-    string Name;
-    uint32_t Binding{0};
-    StreamingAssetRef<TextureAsset> Texture;
-    TextureSubViewDesc View{};
-    bool IsSet{false};
-};
-
-struct MaterialSamplerBinding {
-    string Name;
-    uint32_t Binding{0};
-    std::optional<render::SamplerDescriptor> Sampler;
-};
-
-class MaterialParameterStorage {
-public:
-    bool Reset(const MaterialLayout& layout) noexcept;
-
-    const MaterialLayout& GetLayout() const noexcept { return _layout; }
-    uint64_t GetRevision() const noexcept { return _revision; }
-
-    bool SetFloat(std::string_view name, float value) noexcept;
-    bool SetVector(std::string_view name, const Eigen::Vector4f& value) noexcept;
-    bool SetConstantBuffer(std::string_view name, std::span<const byte> data) noexcept;
-    bool SetTexture(
-        std::string_view name,
-        StreamingAssetRef<TextureAsset> texture,
-        const TextureSubViewDesc& view = {}) noexcept;
-    bool ClearTexture(std::string_view name) noexcept;
-    bool SetSampler(std::string_view name, const render::SamplerDescriptor& sampler) noexcept;
-    bool ClearSampler(std::string_view name) noexcept;
-
-    std::span<const MaterialConstantBinding> ConstantBindings() const noexcept { return _constants; }
-    std::span<const MaterialTextureBinding> TextureBindings() const noexcept { return _textures; }
-    std::span<const MaterialSamplerBinding> SamplerBindings() const noexcept { return _samplers; }
-
-private:
-    struct ConstantFieldTarget {
-        MaterialConstantBinding* Block{nullptr};
-        const MaterialFieldDesc* Field{nullptr};
-    };
-
-    ConstantFieldTarget FindConstantField(std::string_view name) noexcept;
-    bool SetConstantField(std::string_view name, std::span<const byte> data) noexcept;
-
-    MaterialLayout _layout;
-    vector<MaterialConstantBinding> _constants;
-    vector<MaterialTextureBinding> _textures;
-    vector<MaterialSamplerBinding> _samplers;
-    uint64_t _revision{0};
-};
-
-// The pipeline selects a shader binding group; the material owns the Local
-// keywords and runtime data reflected from that group.
+// Graphics-material wrapper over the generic, multi-group ShaderParameterSet.
+// Pipeline-owned groups are removed by the policy before the layout is built.
 class MaterialAsset final : public Asset {
 public:
     MaterialAsset() noexcept = default;
-    MaterialAsset(StreamingAssetRef<ShaderAsset> shaderRef, uint32_t bindingGroup) noexcept;
+    MaterialAsset(
+        StreamingAssetRef<ShaderAsset> shaderRef,
+        PipelineBindingPolicy policy = {}) noexcept;
     ~MaterialAsset() noexcept override;
 
     void OnUnload(IRenderResourceRecycler& recycler) override;
     AssetTypeId GetTypeId() const noexcept override;
 
     StreamingAssetRef<ShaderAsset> GetShader() const noexcept { return _shader; }
-    std::optional<uint32_t> GetBindingGroup() const noexcept { return _bindingGroup; }
-    bool SetShader(StreamingAssetRef<ShaderAsset> shaderRef, uint32_t bindingGroup) noexcept;
+    const PipelineBindingPolicy& GetBindingPolicy() const noexcept { return _policy; }
+    bool SetShader(
+        StreamingAssetRef<ShaderAsset> shaderRef,
+        PipelineBindingPolicy policy = {}) noexcept;
     bool RefreshShaderLayout() noexcept;
+    bool ApplyResolvedPrograms(
+        std::span<const ShaderResolvedProgram> programs) noexcept;
     bool IsReady() const noexcept;
+    bool HasCompleteParametersFor(
+        const shader::ShaderInterfaceDesc& interface,
+        const shader::ShaderDiagnosticContext& context = {}) const noexcept;
+    const vector<ShaderBindingDiagnostic>& GetLayoutDiagnostics() const noexcept {
+        return _layoutDiagnostics;
+    }
 
     bool EnableLocalKeyword(std::string_view define) noexcept;
     bool DisableLocalKeyword(std::string_view define) noexcept;
@@ -99,40 +51,128 @@ public:
         uint32_t passIndex,
         std::span<const std::string_view> pipelineGlobalDefines = {}) const noexcept;
 
-    bool SetFloat(std::string_view name, float value) noexcept;
-    bool SetVector(std::string_view name, const Eigen::Vector4f& value) noexcept;
+    bool SetFloat(std::string_view name, float value, uint32_t arrayIndex = 0) noexcept;
+    bool SetFloat(
+        ShaderParameterLocation location,
+        std::string_view field,
+        float value,
+        uint32_t arrayIndex = 0) noexcept;
+    bool SetInt(std::string_view name, int32_t value, uint32_t arrayIndex = 0) noexcept;
+    bool SetInt(
+        ShaderParameterLocation location,
+        std::string_view field,
+        int32_t value,
+        uint32_t arrayIndex = 0) noexcept;
+    bool SetUInt(std::string_view name, uint32_t value, uint32_t arrayIndex = 0) noexcept;
+    bool SetUInt(
+        ShaderParameterLocation location,
+        std::string_view field,
+        uint32_t value,
+        uint32_t arrayIndex = 0) noexcept;
+    bool SetBool(std::string_view name, bool value, uint32_t arrayIndex = 0) noexcept;
+    bool SetBool(
+        ShaderParameterLocation location,
+        std::string_view field,
+        bool value,
+        uint32_t arrayIndex = 0) noexcept;
+    bool SetVector(
+        std::string_view name,
+        const Eigen::Vector4f& value,
+        uint32_t arrayIndex = 0) noexcept;
+    bool SetVector(
+        ShaderParameterLocation location,
+        std::string_view field,
+        const Eigen::Vector4f& value,
+        uint32_t arrayIndex = 0) noexcept;
+    bool SetValue(
+        std::string_view name,
+        shader::ShaderScalarType scalar,
+        uint32_t columns,
+        std::span<const byte> data,
+        uint32_t arrayIndex = 0) noexcept;
+    bool SetValue(
+        ShaderParameterLocation location,
+        std::string_view field,
+        shader::ShaderScalarType scalar,
+        uint32_t columns,
+        std::span<const byte> data,
+        uint32_t arrayIndex = 0) noexcept;
+    bool SetMatrix(
+        std::string_view name,
+        std::span<const float> rowMajorValues,
+        uint32_t rows,
+        uint32_t columns,
+        uint32_t arrayIndex = 0) noexcept;
+    bool SetMatrix(
+        ShaderParameterLocation location,
+        std::string_view field,
+        std::span<const float> rowMajorValues,
+        uint32_t rows,
+        uint32_t columns,
+        uint32_t arrayIndex = 0) noexcept;
     bool SetConstantBuffer(std::string_view name, std::span<const byte> data) noexcept;
+    bool SetConstantBuffer(
+        ShaderParameterLocation location,
+        std::span<const byte> data) noexcept;
     bool SetTexture(
         std::string_view name,
         StreamingAssetRef<TextureAsset> texture,
-        const TextureSubViewDesc& view = {}) noexcept;
-    bool ClearTexture(std::string_view name) noexcept;
-    bool SetSampler(std::string_view name, const render::SamplerDescriptor& sampler) noexcept;
-    bool ClearSampler(std::string_view name) noexcept;
+        const TextureSubViewDesc& view = {},
+        uint32_t arrayIndex = 0) noexcept;
+    bool SetTexture(
+        ShaderParameterLocation location,
+        StreamingAssetRef<TextureAsset> texture,
+        const TextureSubViewDesc& view = {},
+        uint32_t arrayIndex = 0) noexcept;
+    bool SetSampler(
+        std::string_view name,
+        const render::SamplerDescriptor& sampler,
+        uint32_t arrayIndex = 0) noexcept;
+    bool SetSampler(
+        ShaderParameterLocation location,
+        const render::SamplerDescriptor& sampler,
+        uint32_t arrayIndex = 0) noexcept;
+    bool SetBuffer(
+        std::string_view name,
+        Nullable<render::Buffer*> buffer,
+        render::BufferRange range = render::BufferRange::AllRange(),
+        uint32_t arrayIndex = 0) noexcept;
+    bool SetBuffer(
+        ShaderParameterLocation location,
+        Nullable<render::Buffer*> buffer,
+        render::BufferRange range = render::BufferRange::AllRange(),
+        uint32_t arrayIndex = 0) noexcept;
+    bool ClearResource(std::string_view name, uint32_t arrayIndex = 0) noexcept;
+    bool ClearResource(
+        ShaderParameterLocation location,
+        uint32_t arrayIndex = 0) noexcept;
 
-    const MaterialParameterStorage& GetParameters() const noexcept { return _parameters; }
+    const ShaderParameterSet& GetParameters() const noexcept { return _parameters; }
     uint64_t GetRevision() const noexcept { return _revision; }
 
 private:
     template <typename F>
     bool MutateParameters(F&& mutation) noexcept {
-        if (!RefreshShaderLayout()) {
-            return false;
-        }
+        if (!RefreshShaderLayout()) return false;
         const uint64_t before = _parameters.GetRevision();
-        if (!mutation(_parameters)) {
-            return false;
-        }
-        if (_parameters.GetRevision() != before) {
-            ++_revision;
-        }
+        if (!mutation(_parameters)) return false;
+        if (_parameters.GetRevision() != before) ++_revision;
         return true;
     }
 
+    bool ApplyResolvedInterfaces(
+        std::span<const ShaderProgramInterfaceRecord> interfaces) noexcept;
+    bool InstallLayout(ShaderParameterLayoutBuildResult result, const ShaderAsset* source) noexcept;
+
     StreamingAssetRef<ShaderAsset> _shader;
-    std::optional<uint32_t> _bindingGroup;
-    MaterialParameterStorage _parameters;
+    PipelineBindingPolicy _policy;
+    ShaderParameterSet _parameters;
+    vector<ShaderBindingDiagnostic> _layoutDiagnostics;
+    vector<ShaderProgramInterfaceRecord> _resolvedInterfaces;
+    unordered_map<uint32_t, shader::ShaderHash> _resolvedSourceIdentities;
     vector<string> _localKeywords;
+    const ShaderAsset* _layoutShader{nullptr};
+    bool _layoutInitialized{false};
     uint64_t _revision{1};
 };
 

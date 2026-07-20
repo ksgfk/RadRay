@@ -1,8 +1,11 @@
 #pragma once
 
+#include <compare>
+#include <span>
 #include <string_view>
 
 #include <radray/enum_flags.h>
+#include <radray/types.h>
 
 namespace radray::shader {
 
@@ -32,6 +35,16 @@ enum class ShaderTarget : uint8_t {
     DXIL,
     SPIRV,
 };
+
+struct ShaderHash {
+    uint64_t Low{0};
+    uint64_t High{0};
+
+    friend bool operator==(const ShaderHash&, const ShaderHash&) noexcept = default;
+    friend auto operator<=>(const ShaderHash&, const ShaderHash&) noexcept = default;
+};
+
+ShaderHash HashShaderBytes(std::span<const byte> data) noexcept;
 
 std::string_view format_as(ShaderStage value) noexcept;
 std::string_view format_as(ShaderBlobCategory value) noexcept;

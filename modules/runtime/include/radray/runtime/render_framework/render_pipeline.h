@@ -17,6 +17,7 @@ class AppFrameContext;
 class CameraComponent;
 class Scene;
 class IStandardMaterialFactory;
+class PipelineBindingPolicy;
 struct MaterialRenderSnapshot;
 
 /// 渲染队列排序值 (对应 Unity 的 Material.renderQueue)。
@@ -153,6 +154,7 @@ public:
     /// 返回 null 表示该管线不支持标准材质导入。由管线持有, 生命周期 == 管线。
     virtual Nullable<IStandardMaterialFactory*> GetStandardMaterialFactory() noexcept { return nullptr; }
     virtual shared_ptr<const MaterialRenderSnapshot> GetErrorMaterial() noexcept { return nullptr; }
+    virtual const PipelineBindingPolicy& GetShaderBindingPolicy() const noexcept;
 
 protected:
     /// 具体管线的重写点。这些重写点对应 SRP 的帧/相机阶段，但不会直接封装

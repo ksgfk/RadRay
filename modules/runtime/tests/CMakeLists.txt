@@ -3,8 +3,10 @@ radray_add_test(test_deferred_render_delete_queue SOURCES test_deferred_render_d
 radray_add_test(test_staging_buffer_pool SOURCES test_staging_buffer_pool.cpp LINK_LIBS radraycore radrayrender radrayruntime)
 radray_add_test(test_gpu_resource SOURCES test_gpu_resource.cpp LINK_LIBS radraycore radrayrender radrayruntime)
 radray_add_test(test_mapped_memory SOURCES test_mapped_memory.cpp LINK_LIBS radraycore radrayrender radrayruntime)
-radray_add_test(test_material_layout SOURCES test_material_layout.cpp LINK_LIBS radraycore radrayrender radrayruntime)
 radray_add_test(test_material_asset SOURCES test_material_asset.cpp LINK_LIBS radraycore radrayrender radrayruntime)
+radray_add_test(test_shader_binding_policy SOURCES test_shader_binding_policy.cpp LINK_LIBS radraycore radrayrender radrayruntime)
+radray_add_test(test_shader_parameters SOURCES test_shader_parameters.cpp LINK_LIBS radraycore radrayrender radrayruntime)
+radray_add_test(test_shader_artifact_resolver SOURCES test_shader_artifact_resolver.cpp LINK_LIBS radraycore radrayrender radrayruntime)
 
 if (TARGET radray_shader_cooker AND RADRAY_ENABLE_DXC AND RADRAY_ENABLE_SPIRV_CROSS)
     radray_add_test(test_forward_material_cooker

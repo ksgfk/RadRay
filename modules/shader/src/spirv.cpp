@@ -59,6 +59,10 @@ void WriteSpirvType(JsonRef obj, const SpirvTypeInfo& t) {
         mo.AddUint("Offset", m.Offset);
         mo.AddUint("Size", m.Size);
         mo.AddUint("TypeIndex", m.TypeIndex);
+        mo.AddUint("ArraySize", m.ArraySize);
+        mo.AddUint("ArrayStride", m.ArrayStride);
+        mo.AddUint("MatrixStride", m.MatrixStride);
+        mo.AddBool("RowMajor", m.RowMajor);
     }
 }
 
@@ -79,6 +83,7 @@ void WriteSpirvBinding(JsonRef obj, const SpirvResourceBinding& r) {
     obj.AddBool("ReadOnly", r.ReadOnly);
     obj.AddBool("WriteOnly", r.WriteOnly);
     obj.AddBool("IsViewInHlsl", r.IsViewInHlsl);
+    obj.AddString("HlslType", r.HlslType);
     obj.AddBool("IsUnboundedArray", r.IsUnboundedArray);
     if (r.ImageInfo.has_value()) {
         const SpirvImageInfo& img = r.ImageInfo.value();
@@ -111,6 +116,10 @@ void ReadSpirvType(const JsonValue& obj, SpirvTypeInfo& t) {
         m.Offset = static_cast<uint32_t>(mo["Offset"].AsUint());
         m.Size = static_cast<uint32_t>(mo["Size"].AsUint());
         m.TypeIndex = static_cast<uint32_t>(mo["TypeIndex"].AsUint());
+        m.ArraySize = static_cast<uint32_t>(mo["ArraySize"].AsUint());
+        m.ArrayStride = static_cast<uint32_t>(mo["ArrayStride"].AsUint());
+        m.MatrixStride = static_cast<uint32_t>(mo["MatrixStride"].AsUint());
+        m.RowMajor = mo["RowMajor"].AsBool(false);
         t.Members.push_back(std::move(m));
     }
 }
@@ -132,6 +141,7 @@ void ReadSpirvBinding(const JsonValue& obj, SpirvResourceBinding& r) {
     r.ReadOnly = obj["ReadOnly"].AsBool(true);
     r.WriteOnly = obj["WriteOnly"].AsBool(false);
     r.IsViewInHlsl = obj["IsViewInHlsl"].AsBool(false);
+    r.HlslType = string{obj["HlslType"].AsString()};
     r.IsUnboundedArray = obj["IsUnboundedArray"].AsBool(false);
     if (obj.Has("ImageInfo")) {
         JsonValue io = obj["ImageInfo"];
@@ -142,6 +152,26 @@ void ReadSpirvBinding(const JsonValue& obj, SpirvResourceBinding& r) {
         img.Depth = io["Depth"].AsBool();
         img.SampledType = static_cast<uint32_t>(io["SampledType"].AsUint());
         r.ImageInfo = img;
+    }
+}
+
+void WriteSpirvStageIo(JsonRef obj, const SpirvStageIo& value) {
+    obj.AddString("Name", value.Name);
+    obj.AddString("HlslSemantic", value.HlslSemantic);
+    obj.AddUint("Location", value.Location);
+    obj.AddUint("TypeIndex", value.TypeIndex);
+    if (value.BuiltIn.has_value()) {
+        obj.AddUint("BuiltIn", *value.BuiltIn);
+    }
+}
+
+void ReadSpirvStageIo(const JsonValue& obj, SpirvStageIo& value) {
+    value.Name = string{obj["Name"].AsString()};
+    value.HlslSemantic = string{obj["HlslSemantic"].AsString()};
+    value.Location = static_cast<uint32_t>(obj["Location"].AsUint());
+    value.TypeIndex = static_cast<uint32_t>(obj["TypeIndex"].AsUint());
+    if (obj.Has("BuiltIn")) {
+        value.BuiltIn = static_cast<uint32_t>(obj["BuiltIn"].AsUint());
     }
 }
 
@@ -160,12 +190,13 @@ std::optional<string> SerializeSpirvShaderDesc(const SpirvShaderDesc& desc) noex
     for (const SpirvTypeInfo& t : desc.Types) {
         WriteSpirvType(types.AppendObject(), t);
     }
-    JsonRef vinputs = root.AddArray("VertexInputs");
-    for (const SpirvVertexInput& v : desc.VertexInputs) {
-        JsonRef vo = vinputs.AppendObject();
-        vo.AddString("Name", v.Name);
-        vo.AddUint("Location", v.Location);
-        vo.AddUint("TypeIndex", v.TypeIndex);
+    JsonRef inputs = root.AddArray("StageInputs");
+    for (const SpirvStageIo& value : desc.StageInputs) {
+        WriteSpirvStageIo(inputs.AppendObject(), value);
+    }
+    JsonRef outputs = root.AddArray("StageOutputs");
+    for (const SpirvStageIo& value : desc.StageOutputs) {
+        WriteSpirvStageIo(outputs.AppendObject(), value);
     }
     JsonRef binds = root.AddArray("ResourceBindings");
     for (const SpirvResourceBinding& r : desc.ResourceBindings) {
@@ -215,15 +246,19 @@ std::optional<SpirvShaderDesc> DeserializeSpirvShaderDesc(std::string_view json)
         ReadSpirvType(types.At(i), t);
         desc.Types.push_back(std::move(t));
     }
-    JsonValue vinputs = root["VertexInputs"];
-    desc.VertexInputs.reserve(vinputs.Size());
-    for (size_t i = 0; i < vinputs.Size(); ++i) {
-        JsonValue vo = vinputs.At(i);
-        SpirvVertexInput v{};
-        v.Name = string{vo["Name"].AsString()};
-        v.Location = static_cast<uint32_t>(vo["Location"].AsUint());
-        v.TypeIndex = static_cast<uint32_t>(vo["TypeIndex"].AsUint());
-        desc.VertexInputs.push_back(std::move(v));
+    JsonValue inputs = root["StageInputs"];
+    desc.StageInputs.reserve(inputs.Size());
+    for (size_t i = 0; i < inputs.Size(); ++i) {
+        SpirvStageIo value{};
+        ReadSpirvStageIo(inputs.At(i), value);
+        desc.StageInputs.push_back(std::move(value));
+    }
+    JsonValue outputs = root["StageOutputs"];
+    desc.StageOutputs.reserve(outputs.Size());
+    for (size_t i = 0; i < outputs.Size(); ++i) {
+        SpirvStageIo value{};
+        ReadSpirvStageIo(outputs.At(i), value);
+        desc.StageOutputs.push_back(std::move(value));
     }
     JsonValue binds = root["ResourceBindings"];
     desc.ResourceBindings.reserve(binds.Size());
