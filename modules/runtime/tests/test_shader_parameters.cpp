@@ -3,6 +3,7 @@
 
 #include <gtest/gtest.h>
 
+#include <radray/runtime/shader_binding_policy.h>
 #include <radray/runtime/shader_parameters.h>
 
 namespace radray {
@@ -34,9 +35,17 @@ shader::ShaderBindingDesc MakeConstants() {
             .ByteSize = 224,
             .Fields = {
                 shader::ShaderInterfaceFieldDesc{
-                    .Name = "BaseColor", .Offset = 0, .Size = 16, .Type = FloatType(4, 16)},
+                    .Name = "BaseColor",
+                    .Offset = 0,
+                    .Size = 16,
+                    .Type = FloatType(4, 16),
+                    .Members = {}},
                 shader::ShaderInterfaceFieldDesc{
-                    .Name = "Roughness", .Offset = 16, .Size = 4, .Type = FloatType(1, 4)},
+                    .Name = "Roughness",
+                    .Offset = 16,
+                    .Size = 4,
+                    .Type = FloatType(1, 4),
+                    .Members = {}},
                 shader::ShaderInterfaceFieldDesc{
                     .Name = "Transform",
                     .Offset = 32,
@@ -47,8 +56,9 @@ shader::ShaderBindingDesc MakeConstants() {
                         .Columns = 4,
                         .ArrayCount = 1,
                         .MatrixStride = 16,
-                        .ByteSize = 64}},
-                shader::ShaderInterfaceFieldDesc{.Name = "Weights", .Offset = 96, .Size = 32, .Type = FloatType(1, 32, 2, 16)}, shader::ShaderInterfaceFieldDesc{.Name = "Layers", .Offset = 128, .Size = 64, .Type = shader::ShaderValueTypeDesc{.Rows = 1, .Columns = 1, .ArrayCount = 2, .ArrayStride = 32, .ByteSize = 64}, .Members = {shader::ShaderInterfaceFieldDesc{.Name = "Value", .Offset = 128, .Size = 16, .Type = FloatType(4, 16)}}}, shader::ShaderInterfaceFieldDesc{.Name = "IntValue", .Offset = 192, .Size = 4, .Type = shader::ShaderValueTypeDesc{.Scalar = shader::ShaderScalarType::Int32, .Rows = 1, .Columns = 1, .ArrayCount = 1, .ByteSize = 4}}, shader::ShaderInterfaceFieldDesc{.Name = "UIntValue", .Offset = 196, .Size = 4, .Type = shader::ShaderValueTypeDesc{.Scalar = shader::ShaderScalarType::UInt32, .Rows = 1, .Columns = 1, .ArrayCount = 1, .ByteSize = 4}}, shader::ShaderInterfaceFieldDesc{.Name = "BoolValue", .Offset = 200, .Size = 4, .Type = shader::ShaderValueTypeDesc{.Scalar = shader::ShaderScalarType::Bool, .Rows = 1, .Columns = 1, .ArrayCount = 1, .ByteSize = 4}}, shader::ShaderInterfaceFieldDesc{.Name = "Float2Value", .Offset = 208, .Size = 8, .Type = FloatType(2, 8)}}}};
+                        .ByteSize = 64},
+                    .Members = {}},
+                shader::ShaderInterfaceFieldDesc{.Name = "Weights", .Offset = 96, .Size = 32, .Type = FloatType(1, 32, 2, 16), .Members = {}}, shader::ShaderInterfaceFieldDesc{.Name = "Layers", .Offset = 128, .Size = 64, .Type = shader::ShaderValueTypeDesc{.Rows = 1, .Columns = 1, .ArrayCount = 2, .ArrayStride = 32, .ByteSize = 64}, .Members = {shader::ShaderInterfaceFieldDesc{.Name = "Value", .Offset = 128, .Size = 16, .Type = FloatType(4, 16), .Members = {}}}}, shader::ShaderInterfaceFieldDesc{.Name = "IntValue", .Offset = 192, .Size = 4, .Type = shader::ShaderValueTypeDesc{.Scalar = shader::ShaderScalarType::Int32, .Rows = 1, .Columns = 1, .ArrayCount = 1, .ByteSize = 4}, .Members = {}}, shader::ShaderInterfaceFieldDesc{.Name = "UIntValue", .Offset = 196, .Size = 4, .Type = shader::ShaderValueTypeDesc{.Scalar = shader::ShaderScalarType::UInt32, .Rows = 1, .Columns = 1, .ArrayCount = 1, .ByteSize = 4}, .Members = {}}, shader::ShaderInterfaceFieldDesc{.Name = "BoolValue", .Offset = 200, .Size = 4, .Type = shader::ShaderValueTypeDesc{.Scalar = shader::ShaderScalarType::Bool, .Rows = 1, .Columns = 1, .ArrayCount = 1, .ByteSize = 4}, .Members = {}}, shader::ShaderInterfaceFieldDesc{.Name = "Float2Value", .Offset = 208, .Size = 8, .Type = FloatType(2, 8), .Members = {}}}}};
 }
 
 shader::ShaderInterfaceFieldDesc MakeConstantField(
@@ -59,7 +69,8 @@ shader::ShaderInterfaceFieldDesc MakeConstantField(
         .Name = string{name},
         .Offset = offset,
         .Size = columns * 4,
-        .Type = FloatType(columns, columns * 4)};
+        .Type = FloatType(columns, columns * 4),
+        .Members = {}};
 }
 
 shader::ShaderBindingDesc MakeProjectedConstants(
@@ -76,7 +87,12 @@ shader::ShaderInterfaceDesc MakeConstantInterface(shader::ShaderBindingDesc cons
         .Kind = shader::ShaderProgramKind::Graphics,
         .BindingGroups = {shader::ShaderBindingGroupInterfaceDesc{
             .GroupIndex = 2,
-            .Bindings = {std::move(constants)}}}};
+            .Bindings = {std::move(constants)}}},
+        .PushConstants = {},
+        .VertexInputs = {},
+        .VertexOutputs = {},
+        .PixelInputs = {},
+        .PixelOutputs = {}};
 }
 
 shader::ShaderBindingDesc MakeSampler(uint32_t binding, std::string_view name, uint32_t count = 1) {
@@ -128,7 +144,8 @@ shader::ShaderBindingDesc MakeBuffer(
             .SampleType = shader::ShaderSampleType::Float};
     } else {
         result.Buffer = shader::ShaderBufferInterfaceDesc{
-            .ElementStride = elementStride};
+            .ElementStride = elementStride,
+            .Fields = {}};
     }
     return result;
 }
@@ -159,7 +176,12 @@ shader::ShaderInterfaceDesc MakeResourceInterface() {
                     "RawBuffer",
                     shader::ShaderBindingKind::RawBuffer,
                     shader::ShaderResourceAccess::ReadWrite),
-                std::move(unbounded)}}}};
+                std::move(unbounded)}}},
+        .PushConstants = {},
+        .VertexInputs = {},
+        .VertexOutputs = {},
+        .PixelInputs = {},
+        .PixelOutputs = {}};
 }
 
 shader::ShaderInterfaceDesc MakeInterface(bool includeExtraGroup = true) {
@@ -171,7 +193,12 @@ shader::ShaderInterfaceDesc MakeInterface(bool includeExtraGroup = true) {
                 .Bindings = {MakeSampler(0, "PipelineSampler")}},
             shader::ShaderBindingGroupInterfaceDesc{
                 .GroupIndex = 2,
-                .Bindings = {MakeConstants(), MakeTexture(1, "BaseMap"), MakeSampler(2, "MaterialSampler", 2)}}}};
+                .Bindings = {MakeConstants(), MakeTexture(1, "BaseMap"), MakeSampler(2, "MaterialSampler", 2)}}},
+        .PushConstants = {},
+        .VertexInputs = {},
+        .VertexOutputs = {},
+        .PixelInputs = {},
+        .PixelOutputs = {}};
     if (includeExtraGroup) {
         result.BindingGroups.emplace_back(shader::ShaderBindingGroupInterfaceDesc{
             .GroupIndex = 4,
@@ -391,6 +418,11 @@ TEST(ShaderParameterLayoutTest, BuildsComputeParametersWithoutMaterialAsset) {
         .BindingGroups = {shader::ShaderBindingGroupInterfaceDesc{
             .GroupIndex = 3,
             .Bindings = {MakeSampler(0, "ComputeSampler")}}},
+        .PushConstants = {},
+        .VertexInputs = {},
+        .VertexOutputs = {},
+        .PixelInputs = {},
+        .PixelOutputs = {},
         .Compute = shader::ShaderComputeInterfaceDesc{8, 4, 1}};
     compute.BindingGroups.front().Bindings.front().Stages = shader::ShaderStage::Compute;
     const vector<shader::ShaderInterfaceDesc> interfaces{compute};
@@ -409,12 +441,17 @@ TEST(ShaderParameterLayoutTest, BuildsComputeParametersWithoutMaterialAsset) {
 TEST(ShaderParameterLayoutTest, ExplicitlyRejectsUnsupportedPushConstants) {
     shader::ShaderInterfaceDesc interface{
         .Kind = shader::ShaderProgramKind::Graphics,
+        .BindingGroups = {},
         .PushConstants = {shader::ShaderPushConstantRangeDesc{
             .Name = "DrawConstants",
             .Offset = 0,
             .Size = 16,
             .Stages = shader::ShaderStage::Pixel,
-            .Fields = {MakeConstantField("Value", 0)}}}};
+            .Fields = {MakeConstantField("Value", 0)}}},
+        .VertexInputs = {},
+        .VertexOutputs = {},
+        .PixelInputs = {},
+        .PixelOutputs = {}};
     const vector<shader::ShaderInterfaceDesc> interfaces{interface};
     auto layout = BuildShaderParameterLayout(
         interfaces,
@@ -497,7 +534,12 @@ TEST(ShaderParameterSetTest, LocationSettersDisambiguateDuplicateNamesAcrossGrou
                 .Bindings = {MakeConstants()}},
             shader::ShaderBindingGroupInterfaceDesc{
                 .GroupIndex = 4,
-                .Bindings = {std::move(secondConstants)}}}};
+                .Bindings = {std::move(secondConstants)}}},
+        .PushConstants = {},
+        .VertexInputs = {},
+        .VertexOutputs = {},
+        .PixelInputs = {},
+        .PixelOutputs = {}};
     const vector<shader::ShaderInterfaceDesc> interfaces{interface};
     auto layout = BuildShaderParameterLayout(
         interfaces,

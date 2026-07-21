@@ -8,10 +8,13 @@
 #include <radray/runtime/asset.h>
 #include <radray/runtime/asset_manager.h>
 #include <radray/runtime/shader_asset.h>
+#include <radray/runtime/shader_binding_policy.h>
 #include <radray/runtime/shader_parameters.h>
 #include <radray/types.h>
 
 namespace radray {
+
+struct ShaderResolvedProgram;
 
 // Graphics-material wrapper over the generic, multi-group ShaderParameterSet.
 // Pipeline-owned groups are removed by the policy before the layout is built.

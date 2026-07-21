@@ -11,3 +11,4 @@ radray_add_test(test_sparse_set SOURCES test_sparse_set.cpp LINK_LIBS radraycore
 radray_add_test(test_structured_buffer SOURCES test_structured_buffer.cpp LINK_LIBS radraycore)
 radray_add_test(test_pod_hash SOURCES test_pod_hash.cpp LINK_LIBS radraycore)
 radray_add_test(test_runtime_type SOURCES test_runtime_type.cpp LINK_LIBS radraycore)
+radray_add_test(test_binary_io SOURCES test_binary_io.cpp LINK_LIBS radraycore)

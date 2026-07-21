@@ -74,7 +74,12 @@ shader::ShaderHash HashParameterGroups(
     shader::ShaderProgramKind kind) noexcept {
     shader::ShaderInterfaceDesc identity{
         .Kind = kind,
-        .BindingGroups = groups};
+        .BindingGroups = groups,
+        .PushConstants = {},
+        .VertexInputs = {},
+        .VertexOutputs = {},
+        .PixelInputs = {},
+        .PixelOutputs = {}};
     if (kind == shader::ShaderProgramKind::Compute) {
         identity.Compute = shader::ShaderComputeInterfaceDesc{};
     }
@@ -538,49 +543,45 @@ bool CanPreserveBindingValue(
 }  // namespace
 
 bool ShaderParameterLayout::IsValid() const noexcept {
-    try {
-        size_t expectedBindingCount = 0;
-        for (const shader::ShaderBindingGroupInterfaceDesc& group : _groups) {
-            expectedBindingCount += group.Bindings.size();
+    size_t expectedBindingCount = 0;
+    for (const shader::ShaderBindingGroupInterfaceDesc& group : _groups) {
+        expectedBindingCount += group.Bindings.size();
+    }
+    if (expectedBindingCount != _bindings.size()) return false;
+    for (size_t i = 0; i < _bindings.size(); ++i) {
+        const ShaderParameterBindingDesc& binding = _bindings[i];
+        const auto group = std::ranges::find_if(_groups, [&](const auto& value) {
+            return value.GroupIndex == binding.Location.Group;
+        });
+        if (group == _groups.end()) return false;
+        const auto source = std::ranges::find_if(group->Bindings, [&](const auto& value) {
+            return value.BindingIndex == binding.Location.Binding;
+        });
+        if (source == group->Bindings.end() || *source != binding.Interface ||
+            (source->Kind == shader::ShaderBindingKind::ConstantBuffer && source->Count != 1) ||
+            source->Kind == shader::ShaderBindingKind::AccelerationStructure) {
+            return false;
         }
-        if (expectedBindingCount != _bindings.size()) return false;
-        for (size_t i = 0; i < _bindings.size(); ++i) {
-            const ShaderParameterBindingDesc& binding = _bindings[i];
-            const auto group = std::ranges::find_if(_groups, [&](const auto& value) {
-                return value.GroupIndex == binding.Location.Group;
-            });
-            if (group == _groups.end()) return false;
-            const auto source = std::ranges::find_if(group->Bindings, [&](const auto& value) {
-                return value.BindingIndex == binding.Location.Binding;
-            });
-            if (source == group->Bindings.end() || *source != binding.Interface ||
-                (source->Kind == shader::ShaderBindingKind::ConstantBuffer && source->Count != 1) ||
-                source->Kind == shader::ShaderBindingKind::AccelerationStructure) {
+        for (size_t j = 0; j < i; ++j) {
+            if (_bindings[j].Location == binding.Location) return false;
+        }
+        for (size_t j = 0; j < binding.Fields.size(); ++j) {
+            const ShaderParameterFieldDesc& field = binding.Fields[j];
+            if (field.Name.empty() || field.QualifiedName.empty() || field.Size == 0 ||
+                !binding.Interface.Buffer.has_value() ||
+                field.Offset >= binding.Interface.Buffer->ByteSize ||
+                field.Size > binding.Interface.Buffer->ByteSize - field.Offset) {
                 return false;
             }
-            for (size_t j = 0; j < i; ++j) {
-                if (_bindings[j].Location == binding.Location) return false;
-            }
-            for (size_t j = 0; j < binding.Fields.size(); ++j) {
-                const ShaderParameterFieldDesc& field = binding.Fields[j];
-                if (field.Name.empty() || field.QualifiedName.empty() || field.Size == 0 ||
-                    !binding.Interface.Buffer.has_value() ||
-                    field.Offset >= binding.Interface.Buffer->ByteSize ||
-                    field.Size > binding.Interface.Buffer->ByteSize - field.Offset) {
+            for (size_t k = 0; k < j; ++k) {
+                if (binding.Fields[k].Name == field.Name ||
+                    binding.Fields[k].QualifiedName == field.QualifiedName) {
                     return false;
-                }
-                for (size_t k = 0; k < j; ++k) {
-                    if (binding.Fields[k].Name == field.Name ||
-                        binding.Fields[k].QualifiedName == field.QualifiedName) {
-                        return false;
-                    }
                 }
             }
         }
-        return _hash != shader::ShaderHash{};
-    } catch (...) {
-        return false;
     }
+    return _hash != shader::ShaderHash{};
 }
 
 Nullable<const ShaderParameterBindingDesc*> ShaderParameterLayout::FindBinding(
@@ -636,7 +637,8 @@ ShaderParameterLayoutBuildResult BuildShaderParameterLayout(
     if (interfaces.empty()) {
         result.Diagnostics.emplace_back(ShaderBindingDiagnostic{
             .Code = ShaderBindingDiagnosticCode::InvalidInterface,
-            .Message = "parameter layout requires at least one canonical program interface"});
+            .Message = "parameter layout requires at least one canonical program interface",
+            .ProviderName = {}});
         return result;
     }
 
@@ -652,7 +654,8 @@ ShaderParameterLayoutBuildResult BuildShaderParameterLayout(
             result.Diagnostics.emplace_back(ShaderBindingDiagnostic{
                 .Code = ShaderBindingDiagnosticCode::InvalidInterface,
                 .Message = "generic shader parameters do not support user push constants",
-                .Context = record.Context});
+                .Context = record.Context,
+                .ProviderName = {}});
             return result;
         }
         auto resolution = ResolveShaderBindings(interface, policy, record.Context);
@@ -690,7 +693,8 @@ ShaderParameterLayoutBuildResult BuildShaderParameterLayout(
                         normalizedGroup.GroupIndex,
                         merge.Detail.empty() ? "incompatible layout" : merge.Detail),
                     .Context = std::move(context),
-                    .RelatedContext = std::move(merge.RelatedContext)});
+                    .RelatedContext = std::move(merge.RelatedContext),
+                    .ProviderName = {}});
                 return result;
             }
         }
@@ -698,7 +702,8 @@ ShaderParameterLayoutBuildResult BuildShaderParameterLayout(
     if (!foundProgram) {
         result.Diagnostics.emplace_back(ShaderBindingDiagnostic{
             .Code = ShaderBindingDiagnosticCode::InvalidInterface,
-            .Message = "shader binary has no baked program interface of the requested kind"});
+            .Message = "shader binary has no baked program interface of the requested kind",
+            .ProviderName = {}});
         return result;
     }
 
@@ -724,12 +729,14 @@ ShaderParameterLayoutBuildResult BuildShaderParameterLayout(
                         context.Group = group.GroupIndex;
                         context.Binding = binding.BindingIndex;
                         return context;
-                    }()});
+                    }(),
+                    .ProviderName = {}});
                 return result;
             }
             ShaderParameterBindingDesc parameter{
                 .Location = {.Group = group.GroupIndex, .Binding = binding.BindingIndex},
-                .Interface = binding};
+                .Interface = binding,
+                .Fields = {}};
             if (binding.Buffer.has_value()) {
                 AppendFields(binding.Buffer->Fields, binding.Name, {}, parameter.Fields);
             }
@@ -740,7 +747,8 @@ ShaderParameterLayoutBuildResult BuildShaderParameterLayout(
     if (!layout.IsValid()) {
         result.Diagnostics.emplace_back(ShaderBindingDiagnostic{
             .Code = ShaderBindingDiagnosticCode::InvalidInterface,
-            .Message = "resolved user parameter layout failed structural validation"});
+            .Message = "resolved user parameter layout failed structural validation",
+            .ProviderName = {}});
         return result;
     }
     result.Layout = std::move(layout);
@@ -767,7 +775,8 @@ ShaderParameterLayoutBuildResult BuildShaderParameterLayout(
         ShaderParameterLayoutBuildResult result;
         result.Diagnostics.emplace_back(ShaderBindingDiagnostic{
             .Code = ShaderBindingDiagnosticCode::InvalidInterface,
-            .Message = "parameter layout requires a structurally valid shader binary"});
+            .Message = "parameter layout requires a structurally valid shader binary",
+            .ProviderName = {}});
         return result;
     }
     vector<ShaderProgramInterfaceRecord> interfaces;
@@ -791,57 +800,55 @@ ShaderParameterLayoutBuildResult BuildShaderParameterLayout(
 bool ShaderParameterSet::Reset(
     const ShaderParameterLayout& layout,
     bool preserveCompatibleValues) noexcept {
-    try {
-        if (!layout.IsValid()) return false;
-        vector<ShaderParameterBindingValue> values;
-        values.reserve(layout.Bindings().size());
-        for (const ShaderParameterBindingDesc& binding : layout.Bindings()) {
-            ShaderParameterBindingValue value{
-                .Location = binding.Location,
-                .Kind = binding.Interface.Kind};
-            if (binding.Interface.Kind == shader::ShaderBindingKind::ConstantBuffer) {
-                value.ConstantData.resize(binding.Interface.Buffer->ByteSize, byte{0});
-            } else if (binding.Interface.Count != 0) {
-                value.Resources.resize(binding.Interface.Count);
-                if (binding.Interface.Kind == shader::ShaderBindingKind::Sampler) {
-                    for (ShaderResourceParameterValue& resource : value.Resources) {
-                        resource = render::SamplerDescriptor{};
-                    }
-                }
-            }
-            values.emplace_back(std::move(value));
-        }
-        if (preserveCompatibleValues && _layout.IsValid()) {
-            for (size_t i = 0; i < layout.Bindings().size(); ++i) {
-                const ShaderParameterBindingDesc& nextBinding = layout.Bindings()[i];
-                auto previousBinding = _layout.FindBinding(nextBinding.Location);
-                ShaderParameterBindingValue* previousValue = FindValue(nextBinding.Location);
-                if (!previousBinding.HasValue() || previousValue == nullptr ||
-                    !CanPreserveBindingValue(
-                        previousBinding.Get()->Interface,
-                        nextBinding.Interface)) {
-                    continue;
-                }
-                if (nextBinding.Interface.Kind == shader::ShaderBindingKind::ConstantBuffer) {
-                    const size_t copySize = std::min(
-                        values[i].ConstantData.size(),
-                        previousValue->ConstantData.size());
-                    std::ranges::copy_n(
-                        previousValue->ConstantData.begin(),
-                        copySize,
-                        values[i].ConstantData.begin());
-                } else {
-                    values[i].Resources = previousValue->Resources;
+    if (!layout.IsValid()) return false;
+    vector<ShaderParameterBindingValue> values;
+    values.reserve(layout.Bindings().size());
+    for (const ShaderParameterBindingDesc& binding : layout.Bindings()) {
+        ShaderParameterBindingValue value{
+            .Location = binding.Location,
+            .Kind = binding.Interface.Kind,
+            .ConstantData = {},
+            .Resources = {}};
+        if (binding.Interface.Kind == shader::ShaderBindingKind::ConstantBuffer) {
+            value.ConstantData.resize(binding.Interface.Buffer->ByteSize, byte{0});
+        } else if (binding.Interface.Count != 0) {
+            value.Resources.resize(binding.Interface.Count);
+            if (binding.Interface.Kind == shader::ShaderBindingKind::Sampler) {
+                for (ShaderResourceParameterValue& resource : value.Resources) {
+                    resource = render::SamplerDescriptor{};
                 }
             }
         }
-        _layout = layout;
-        _values = std::move(values);
-        ++_revision;
-        return true;
-    } catch (...) {
-        return false;
+        values.emplace_back(std::move(value));
     }
+    if (preserveCompatibleValues && _layout.IsValid()) {
+        for (size_t i = 0; i < layout.Bindings().size(); ++i) {
+            const ShaderParameterBindingDesc& nextBinding = layout.Bindings()[i];
+            auto previousBinding = _layout.FindBinding(nextBinding.Location);
+            ShaderParameterBindingValue* previousValue = FindValue(nextBinding.Location);
+            if (!previousBinding.HasValue() || previousValue == nullptr ||
+                !CanPreserveBindingValue(
+                    previousBinding.Get()->Interface,
+                    nextBinding.Interface)) {
+                continue;
+            }
+            if (nextBinding.Interface.Kind == shader::ShaderBindingKind::ConstantBuffer) {
+                const size_t copySize = std::min(
+                    values[i].ConstantData.size(),
+                    previousValue->ConstantData.size());
+                std::ranges::copy_n(
+                    previousValue->ConstantData.begin(),
+                    copySize,
+                    values[i].ConstantData.begin());
+            } else {
+                values[i].Resources = previousValue->Resources;
+            }
+        }
+    }
+    _layout = layout;
+    _values = std::move(values);
+    ++_revision;
+    return true;
 }
 
 bool ShaderParameterSet::IsComplete() const noexcept {
@@ -884,60 +891,56 @@ bool ShaderParameterSet::IsComplete() const noexcept {
 
 bool ShaderParameterSet::IsCompleteFor(
     const ResolvedShaderBindingPlan& plan) const noexcept {
-    try {
-        if (!_layout.IsValid() || _values.size() != _layout.Bindings().size()) return false;
-        for (const shader::ShaderBindingGroupInterfaceDesc& group : plan.UserGroups) {
-            for (const shader::ShaderBindingDesc& actual : group.Bindings) {
-                const ShaderParameterLocation location{
-                    .Group = group.GroupIndex,
-                    .Binding = actual.BindingIndex};
-                auto binding = _layout.FindBinding(location);
-                const ShaderParameterBindingValue* value = FindValue(location);
-                if (!binding.HasValue() || value == nullptr ||
-                    binding.Get()->Interface.Name != actual.Name ||
-                    !shader::IsShaderBindingAbiProjectionOf(
-                        actual,
-                        binding.Get()->Interface)) {
+    if (!_layout.IsValid() || _values.size() != _layout.Bindings().size()) return false;
+    for (const shader::ShaderBindingGroupInterfaceDesc& group : plan.UserGroups) {
+        for (const shader::ShaderBindingDesc& actual : group.Bindings) {
+            const ShaderParameterLocation location{
+                .Group = group.GroupIndex,
+                .Binding = actual.BindingIndex};
+            auto binding = _layout.FindBinding(location);
+            const ShaderParameterBindingValue* value = FindValue(location);
+            if (!binding.HasValue() || value == nullptr ||
+                binding.Get()->Interface.Name != actual.Name ||
+                !shader::IsShaderBindingAbiProjectionOf(
+                    actual,
+                    binding.Get()->Interface)) {
+                return false;
+            }
+
+            if (actual.Kind == shader::ShaderBindingKind::ConstantBuffer) {
+                if (!actual.Buffer.has_value() ||
+                    !binding.Get()->Interface.Buffer.has_value() ||
+                    value->ConstantData.size() !=
+                        binding.Get()->Interface.Buffer->ByteSize ||
+                    value->ConstantData.size() < actual.Buffer->ByteSize) {
                     return false;
                 }
-
-                if (actual.Kind == shader::ShaderBindingKind::ConstantBuffer) {
-                    if (!actual.Buffer.has_value() ||
-                        !binding.Get()->Interface.Buffer.has_value() ||
-                        value->ConstantData.size() !=
-                            binding.Get()->Interface.Buffer->ByteSize ||
-                        value->ConstantData.size() < actual.Buffer->ByteSize) {
+                continue;
+            }
+            if (actual.Count != 0 && value->Resources.size() != actual.Count) return false;
+            for (const ShaderResourceParameterValue& resource : value->Resources) {
+                if (std::holds_alternative<std::monostate>(resource)) return false;
+                if (actual.Kind == shader::ShaderBindingKind::SampledTexture ||
+                    actual.Kind == shader::ShaderBindingKind::StorageTexture) {
+                    const auto* texture = std::get_if<ShaderTextureParameterValue>(&resource);
+                    if (texture == nullptr || !IsTextureCompatible(actual, *texture)) {
                         return false;
                     }
-                    continue;
-                }
-                if (actual.Count != 0 && value->Resources.size() != actual.Count) return false;
-                for (const ShaderResourceParameterValue& resource : value->Resources) {
-                    if (std::holds_alternative<std::monostate>(resource)) return false;
-                    if (actual.Kind == shader::ShaderBindingKind::SampledTexture ||
-                        actual.Kind == shader::ShaderBindingKind::StorageTexture) {
-                        const auto* texture = std::get_if<ShaderTextureParameterValue>(&resource);
-                        if (texture == nullptr || !IsTextureCompatible(actual, *texture)) {
-                            return false;
-                        }
-                    } else if (actual.Kind == shader::ShaderBindingKind::Sampler) {
-                        if (!std::holds_alternative<render::SamplerDescriptor>(resource)) return false;
-                    } else if (IsBufferKind(actual.Kind)) {
-                        const auto* buffer = std::get_if<ShaderBufferParameterValue>(&resource);
-                        if (buffer == nullptr || !buffer->Buffer.HasValue() ||
-                            !IsBufferCompatible(actual, *buffer->Buffer.Get(), buffer->Range)) {
-                            return false;
-                        }
-                    } else {
+                } else if (actual.Kind == shader::ShaderBindingKind::Sampler) {
+                    if (!std::holds_alternative<render::SamplerDescriptor>(resource)) return false;
+                } else if (IsBufferKind(actual.Kind)) {
+                    const auto* buffer = std::get_if<ShaderBufferParameterValue>(&resource);
+                    if (buffer == nullptr || !buffer->Buffer.HasValue() ||
+                        !IsBufferCompatible(actual, *buffer->Buffer.Get(), buffer->Range)) {
                         return false;
                     }
+                } else {
+                    return false;
                 }
             }
         }
-        return true;
-    } catch (...) {
-        return false;
     }
+    return true;
 }
 
 ShaderParameterBindingValue* ShaderParameterSet::FindValue(

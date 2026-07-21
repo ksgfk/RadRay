@@ -7,7 +7,9 @@
 #include <gtest/gtest.h>
 
 #include <radray/file.h>
+#include <radray/runtime/asset_manager.h>
 #include <radray/runtime/material_asset.h>
+#include <radray/runtime/shader_artifact_resolver.h>
 #include <radray/runtime/shader_asset.h>
 #include <radray/shader/dxc.h>
 
@@ -25,6 +27,7 @@ public:
         std::this_thread::sleep_for(std::chrono::milliseconds{10});
         if (FailPixel && request.Stage == shader::ShaderStage::Pixel) {
             return ShaderJitStageCompileResult{
+                .Artifact = {},
                 .Diagnostics = {shader::ShaderDiagnostic{
                     .Code = shader::ShaderDiagnosticCode::CompilationFailed,
                     .Message = "intentional test failure",
@@ -49,14 +52,20 @@ public:
                     .Kind = shader::SpirvResourceKind::SeparateSampler,
                     .Set = 7,
                     .Binding = 0,
-                    .ArraySize = 1});
+                    .ArraySize = 1,
+                    .ImageInfo = {},
+                    .HlslType = {}});
             }
             reflection = std::move(spirv);
             interface = shader::NormalizeSpirvInterface(
                 std::get<shader::SpirvShaderDesc>(reflection),
                 request.Stage);
         }
-        if (!interface.Succeeded()) return {.Diagnostics = std::move(interface.Diagnostics)};
+        if (!interface.Succeeded()) {
+            return {
+                .Artifact = {},
+                .Diagnostics = std::move(interface.Diagnostics)};
+        }
         ShaderResolvedStageArtifact artifact{
             .Target = request.Target,
             .PassIndex = request.PassIndex,
@@ -70,7 +79,9 @@ public:
             .Interface = std::move(*interface.Interface)};
         artifact.BinaryHash = shader::HashShaderBytes(artifact.Bytecode);
         if (CorruptBinaryHash) artifact.BinaryHash.Low ^= 1;
-        return {.Artifact = std::move(artifact)};
+        return {
+            .Artifact = std::move(artifact),
+            .Diagnostics = {}};
     }
 
     std::atomic<uint32_t> VertexCalls{0};
@@ -142,6 +153,7 @@ void AddBakedDefaultProgram(shader::ShaderBinary& binary) {
             .Category = shader::ShaderBlobCategory::DXIL,
             .PassIndex = 0,
             .Stage = stage,
+            .Defines = {},
             .EntryPoint = string{*shader::FindShaderEntryPoint(binary.Asset.Passes[0], stage)},
             .Bytecode = {static_cast<byte>(index + 1)},
             .ReflectionIndex = 0,
@@ -152,6 +164,7 @@ void AddBakedDefaultProgram(shader::ShaderBinary& binary) {
     binary.ProgramVariants.emplace_back(shader::ShaderProgramVariantArtifact{
         .Target = shader::ShaderTarget::DXIL,
         .PassIndex = 0,
+        .Defines = {},
         .StageArtifactIndices = {0, 1},
         .InterfaceIndex = 0});
 }
@@ -182,18 +195,31 @@ ShaderArtifactResolver::Config MakeConfig(
         .EnableDiskCache = disk};
 }
 
+class ShaderArtifactResolverTest : public testing::Test {
+protected:
+    StreamingAssetRef<ShaderAsset> AddShaderAsset(
+        shader::ShaderBinary binary,
+        AssetId id = Guid::NewGuid()) {
+        return _assets.AddReady(
+            id,
+            make_unique<ShaderAsset>(std::move(binary)));
+    }
+
+    AssetManager _assets;
+};
+
 }  // namespace
 
-TEST(ShaderArtifactResolverTest, CoalescesProgramsAndStageProjectedVariants) {
+TEST_F(ShaderArtifactResolverTest, CoalescesProgramsAndStageProjectedVariants) {
     const std::filesystem::path root = MakeSourceTree();
     shader::ShaderBinary binary = MakeSparseBinary();
     ASSERT_TRUE(binary.IsValid());
-    ShaderAsset asset{std::move(binary)};
+    StreamingAssetRef<ShaderAsset> asset = AddShaderAsset(std::move(binary));
     auto compiler = make_shared<FakeJitCompiler>();
-    ShaderArtifactResolver resolver{MakeConfig(root), compiler};
+    ShaderArtifactResolver resolver{_assets, MakeConfig(root), compiler};
 
-    auto first = resolver.ResolveAsync(asset, shader::ShaderTarget::DXIL, 0, {});
-    auto duplicate = resolver.ResolveAsync(asset, shader::ShaderTarget::DXIL, 0, {});
+    auto first = resolver.ResolveAsync(*asset, shader::ShaderTarget::DXIL, 0, {});
+    auto duplicate = resolver.ResolveAsync(*asset, shader::ShaderTarget::DXIL, 0, {});
     ASSERT_TRUE(first.get().Succeeded());
     ASSERT_TRUE(duplicate.get().Succeeded());
     EXPECT_EQ(compiler->VertexCalls.load(), 1u);
@@ -202,7 +228,7 @@ TEST(ShaderArtifactResolverTest, CoalescesProgramsAndStageProjectedVariants) {
     EXPECT_EQ(resolver.GetStageCacheSize(), 2u);
 
     auto keyword = resolver.ResolveAsync(
-                               asset, shader::ShaderTarget::DXIL, 0, {"FEATURE=1"})
+                               *asset, shader::ShaderTarget::DXIL, 0, {"FEATURE=1"})
                        .get();
     ASSERT_TRUE(keyword.Succeeded());
     EXPECT_EQ(compiler->VertexCalls.load(), 1u);
@@ -212,18 +238,35 @@ TEST(ShaderArtifactResolverTest, CoalescesProgramsAndStageProjectedVariants) {
     std::filesystem::remove_all(root, ignored);
 }
 
-TEST(ShaderArtifactResolverTest, ResolvedProgramInitializesAJitOnlyMaterialWithoutMutatingShaderAsset) {
+TEST_F(ShaderArtifactResolverTest, RejectsUnmanagedJitOnlyAsset) {
+    const std::filesystem::path root = MakeSourceTree();
+    ShaderAsset asset{MakeSparseBinary()};
+    auto compiler = make_shared<FakeJitCompiler>();
+    ShaderArtifactResolver resolver{_assets, MakeConfig(root), compiler};
+
+    ShaderArtifactResolutionResult result =
+        resolver.ResolveAsync(asset, shader::ShaderTarget::DXIL, 0, {}).get();
+    ASSERT_FALSE(result.Succeeded());
+    ASSERT_EQ(result.Diagnostics.size(), 1u);
+    EXPECT_EQ(result.Diagnostics.front().Code, shader::ShaderDiagnosticCode::SourceUnavailable);
+    EXPECT_EQ(compiler->VertexCalls.load(), 0u);
+    EXPECT_EQ(compiler->PixelCalls.load(), 0u);
+    EXPECT_EQ(resolver.GetCapturedSourceIdentityCount(), 0u);
+
+    std::error_code ignored;
+    std::filesystem::remove_all(root, ignored);
+}
+
+TEST_F(ShaderArtifactResolverTest, ResolvedProgramInitializesAJitOnlyMaterialWithoutMutatingShaderAsset) {
     const std::filesystem::path root = MakeSourceTree();
     shader::ShaderBinary binary = MakeSparseBinary();
     ASSERT_TRUE(binary.IsValid());
-    AssetManager assets;
-    StreamingAssetRef<ShaderAsset> shaderRef =
-        assets.AddReady(Guid::NewGuid(), make_unique<ShaderAsset>(std::move(binary)));
+    StreamingAssetRef<ShaderAsset> shaderRef = AddShaderAsset(std::move(binary));
     MaterialAsset material{shaderRef};
     EXPECT_FALSE(material.IsReady());
 
     auto compiler = make_shared<FakeJitCompiler>();
-    ShaderArtifactResolver resolver{MakeConfig(root), compiler};
+    ShaderArtifactResolver resolver{_assets, MakeConfig(root), compiler};
     auto resolved = resolver.ResolveAsync(
                                 *shaderRef.Get(),
                                 shader::ShaderTarget::DXIL,
@@ -249,15 +292,15 @@ TEST(ShaderArtifactResolverTest, ResolvedProgramInitializesAJitOnlyMaterialWitho
     std::filesystem::remove_all(root, ignored);
 }
 
-TEST(ShaderArtifactResolverTest, CachesFailuresWithoutRetryingEveryRequest) {
+TEST_F(ShaderArtifactResolverTest, CachesFailuresWithoutRetryingEveryRequest) {
     const std::filesystem::path root = MakeSourceTree();
-    ShaderAsset asset{MakeSparseBinary()};
+    StreamingAssetRef<ShaderAsset> asset = AddShaderAsset(MakeSparseBinary());
     auto compiler = make_shared<FakeJitCompiler>();
     compiler->FailPixel = true;
-    ShaderArtifactResolver resolver{MakeConfig(root), compiler};
+    ShaderArtifactResolver resolver{_assets, MakeConfig(root), compiler};
 
-    auto first = resolver.ResolveAsync(asset, shader::ShaderTarget::DXIL, 0, {}).get();
-    auto second = resolver.ResolveAsync(asset, shader::ShaderTarget::DXIL, 0, {}).get();
+    auto first = resolver.ResolveAsync(*asset, shader::ShaderTarget::DXIL, 0, {}).get();
+    auto second = resolver.ResolveAsync(*asset, shader::ShaderTarget::DXIL, 0, {}).get();
     ASSERT_FALSE(first.Succeeded());
     ASSERT_FALSE(second.Succeeded());
     EXPECT_EQ(compiler->VertexCalls.load(), 1u);
@@ -266,15 +309,15 @@ TEST(ShaderArtifactResolverTest, CachesFailuresWithoutRetryingEveryRequest) {
     std::filesystem::remove_all(root, ignored);
 }
 
-TEST(ShaderArtifactResolverTest, RejectsMalformedSuccessfulCompilerArtifacts) {
+TEST_F(ShaderArtifactResolverTest, RejectsMalformedSuccessfulCompilerArtifacts) {
     const std::filesystem::path root = MakeSourceTree();
-    ShaderAsset asset{MakeSparseBinary()};
+    StreamingAssetRef<ShaderAsset> asset = AddShaderAsset(MakeSparseBinary());
     auto compiler = make_shared<FakeJitCompiler>();
     compiler->CorruptBinaryHash = true;
-    ShaderArtifactResolver resolver{MakeConfig(root), compiler};
+    ShaderArtifactResolver resolver{_assets, MakeConfig(root), compiler};
 
-    auto first = resolver.ResolveAsync(asset, shader::ShaderTarget::DXIL, 0, {}).get();
-    auto cached = resolver.ResolveAsync(asset, shader::ShaderTarget::DXIL, 0, {}).get();
+    auto first = resolver.ResolveAsync(*asset, shader::ShaderTarget::DXIL, 0, {}).get();
+    auto cached = resolver.ResolveAsync(*asset, shader::ShaderTarget::DXIL, 0, {}).get();
     ASSERT_FALSE(first.Succeeded());
     ASSERT_FALSE(cached.Succeeded());
     ASSERT_FALSE(first.Diagnostics.empty());
@@ -288,16 +331,16 @@ TEST(ShaderArtifactResolverTest, RejectsMalformedSuccessfulCompilerArtifacts) {
     std::filesystem::remove_all(root, ignored);
 }
 
-TEST(ShaderArtifactResolverTest, CapturesSourceIdentityPerAssetPass) {
+TEST_F(ShaderArtifactResolverTest, CapturesSourceIdentityPerAssetPass) {
     const std::filesystem::path root = MakeSourceTree();
     shader::ShaderBinary binary = MakeMultiPassBinary();
     ASSERT_TRUE(binary.IsValid());
-    ShaderAsset asset{std::move(binary)};
+    StreamingAssetRef<ShaderAsset> asset = AddShaderAsset(std::move(binary));
     auto compiler = make_shared<FakeJitCompiler>();
-    ShaderArtifactResolver resolver{MakeConfig(root), compiler};
+    ShaderArtifactResolver resolver{_assets, MakeConfig(root), compiler};
 
-    auto first = resolver.ResolveAsync(asset, shader::ShaderTarget::DXIL, 0, {}).get();
-    auto second = resolver.ResolveAsync(asset, shader::ShaderTarget::DXIL, 1, {}).get();
+    auto first = resolver.ResolveAsync(*asset, shader::ShaderTarget::DXIL, 0, {}).get();
+    auto second = resolver.ResolveAsync(*asset, shader::ShaderTarget::DXIL, 1, {}).get();
     ASSERT_TRUE(first.Succeeded());
     ASSERT_TRUE(second.Succeeded());
     EXPECT_EQ(compiler->VertexCalls.load(), 2u);
@@ -308,35 +351,43 @@ TEST(ShaderArtifactResolverTest, CapturesSourceIdentityPerAssetPass) {
     std::filesystem::remove_all(root, ignored);
 }
 
-TEST(ShaderArtifactResolverTest, SourceChangesRequireANewImmutableAsset) {
+TEST_F(ShaderArtifactResolverTest, SourceChangesRequireANewImmutableAsset) {
     const std::filesystem::path root = MakeSourceTree();
     shader::ShaderBinary manifest = MakeSparseBinary();
-    ShaderAsset oldAsset{manifest};
+    const AssetId assetId = Guid::NewGuid();
+    StreamingAssetRef<ShaderAsset> oldAsset = AddShaderAsset(manifest, assetId);
     auto compiler = make_shared<FakeJitCompiler>();
-    ShaderArtifactResolver resolver{MakeConfig(root), compiler};
-    ASSERT_TRUE(resolver.ResolveAsync(oldAsset, shader::ShaderTarget::DXIL, 0, {}).get().Succeeded());
+    ShaderArtifactResolver resolver{_assets, MakeConfig(root), compiler};
+    ASSERT_TRUE(resolver.ResolveAsync(*oldAsset, shader::ShaderTarget::DXIL, 0, {}).get().Succeeded());
+    ASSERT_EQ(resolver.GetCapturedSourceIdentityCount(), 1u);
 
     ASSERT_TRUE(WriteTextFile(root / "common.hlsl", "float4 SharedColor() { return 0.5; }\n"));
-    ASSERT_TRUE(resolver.ResolveAsync(oldAsset, shader::ShaderTarget::DXIL, 0, {}).get().Succeeded());
+    ASSERT_TRUE(resolver.ResolveAsync(*oldAsset, shader::ShaderTarget::DXIL, 0, {}).get().Succeeded());
     auto oldMiss = resolver.ResolveAsync(
-                               oldAsset, shader::ShaderTarget::DXIL, 0, {"FEATURE=1"})
+                               *oldAsset, shader::ShaderTarget::DXIL, 0, {"FEATURE=1"})
                        .get();
     ASSERT_FALSE(oldMiss.Succeeded());
     ASSERT_FALSE(oldMiss.Diagnostics.empty());
     EXPECT_EQ(oldMiss.Diagnostics.front().Code, shader::ShaderDiagnosticCode::SourceUnavailable);
 
-    ShaderAsset newAsset{std::move(manifest)};
+    const AssetHandle oldHandle = oldAsset->GetAssetHandle();
+    oldAsset.Reset();
+    _assets.Unload(assetId);
+    ASSERT_FALSE(_assets.IsHandleValid(oldHandle));
+    StreamingAssetRef<ShaderAsset> newAsset = AddShaderAsset(std::move(manifest), assetId);
+    ASSERT_NE(newAsset->GetAssetHandle(), oldHandle);
     auto recompiled = resolver.ResolveAsync(
-                                  newAsset, shader::ShaderTarget::DXIL, 0, {"FEATURE=1"})
+                                  *newAsset, shader::ShaderTarget::DXIL, 0, {"FEATURE=1"})
                           .get();
     ASSERT_TRUE(recompiled.Succeeded());
+    EXPECT_EQ(resolver.GetCapturedSourceIdentityCount(), 1u);
     EXPECT_EQ(compiler->VertexCalls.load(), 2u);
     EXPECT_EQ(compiler->PixelCalls.load(), 2u);
     std::error_code ignored;
     std::filesystem::remove_all(root, ignored);
 }
 
-TEST(ShaderArtifactResolverTest, CookedSourceIdentityPreventsMixingBakedAndChangedJitCode) {
+TEST_F(ShaderArtifactResolverTest, CookedSourceIdentityPreventsMixingBakedAndChangedJitCode) {
     const std::filesystem::path root = MakeSourceTree();
     shader::ShaderBinary binary = MakeSparseBinary();
     auto identity = shader::ComputeShaderSourceIdentity(
@@ -347,15 +398,15 @@ TEST(ShaderArtifactResolverTest, CookedSourceIdentityPreventsMixingBakedAndChang
     AddBakedDefaultProgram(binary);
     ASSERT_TRUE(binary.IsValid());
 
-    ShaderAsset oldAsset{std::move(binary)};
+    StreamingAssetRef<ShaderAsset> oldAsset = AddShaderAsset(std::move(binary));
     auto compiler = make_shared<FakeJitCompiler>();
-    ShaderArtifactResolver resolver{MakeConfig(root), compiler};
+    ShaderArtifactResolver resolver{_assets, MakeConfig(root), compiler};
     ASSERT_TRUE(WriteTextFile(
         root / "common.hlsl",
         "float4 SharedColor() { return 0.125; }\n"));
 
     auto staleMiss = resolver.ResolveAsync(
-                                 oldAsset,
+                                 *oldAsset,
                                  shader::ShaderTarget::DXIL,
                                  0,
                                  {"FEATURE=1"})
@@ -374,9 +425,9 @@ TEST(ShaderArtifactResolverTest, CookedSourceIdentityPreventsMixingBakedAndChang
         currentManifest.Asset.Passes.front());
     ASSERT_TRUE(currentIdentity.Succeeded());
     currentManifest.Asset.Passes.front().SourceIdentity = currentIdentity.Identity->Hash;
-    ShaderAsset currentAsset{std::move(currentManifest)};
+    StreamingAssetRef<ShaderAsset> currentAsset = AddShaderAsset(std::move(currentManifest));
     auto current = resolver.ResolveAsync(
-                               currentAsset,
+                               *currentAsset,
                                shader::ShaderTarget::DXIL,
                                0,
                                {"FEATURE=1"})
@@ -389,22 +440,22 @@ TEST(ShaderArtifactResolverTest, CookedSourceIdentityPreventsMixingBakedAndChang
     std::filesystem::remove_all(root, ignored);
 }
 
-TEST(ShaderArtifactResolverTest, PersistsSuccessfulProgramsToDisk) {
+TEST_F(ShaderArtifactResolverTest, PersistsSuccessfulProgramsToDisk) {
     const std::filesystem::path root = MakeSourceTree();
     shader::ShaderBinary manifest = MakeSparseBinary();
     {
-        ShaderAsset asset{manifest};
+        StreamingAssetRef<ShaderAsset> asset = AddShaderAsset(manifest);
         auto compiler = make_shared<FakeJitCompiler>();
-        ShaderArtifactResolver resolver{MakeConfig(root, true), compiler};
-        auto result = resolver.ResolveAsync(asset, shader::ShaderTarget::DXIL, 0, {}).get();
+        ShaderArtifactResolver resolver{_assets, MakeConfig(root, true), compiler};
+        auto result = resolver.ResolveAsync(*asset, shader::ShaderTarget::DXIL, 0, {}).get();
         ASSERT_TRUE(result.Succeeded());
         EXPECT_EQ(result.Source, ShaderArtifactSource::Jit);
     }
     {
-        ShaderAsset asset{std::move(manifest)};
+        StreamingAssetRef<ShaderAsset> asset = AddShaderAsset(std::move(manifest));
         auto compiler = make_shared<FakeJitCompiler>();
-        ShaderArtifactResolver resolver{MakeConfig(root, true), compiler};
-        auto result = resolver.ResolveAsync(asset, shader::ShaderTarget::DXIL, 0, {}).get();
+        ShaderArtifactResolver resolver{_assets, MakeConfig(root, true), compiler};
+        auto result = resolver.ResolveAsync(*asset, shader::ShaderTarget::DXIL, 0, {}).get();
         ASSERT_TRUE(result.Succeeded());
         EXPECT_EQ(result.Source, ShaderArtifactSource::DiskCache);
         EXPECT_EQ(compiler->VertexCalls.load(), 0u);
@@ -414,15 +465,15 @@ TEST(ShaderArtifactResolverTest, PersistsSuccessfulProgramsToDisk) {
     std::filesystem::remove_all(root, ignored);
 }
 
-TEST(ShaderArtifactResolverTest, RejectsDiskCacheWithWrongEmbeddedProgramKey) {
+TEST_F(ShaderArtifactResolverTest, RejectsDiskCacheWithWrongEmbeddedProgramKey) {
     const std::filesystem::path root = MakeSourceTree();
     shader::ShaderBinary manifest = MakeSparseBinary();
     {
-        ShaderAsset asset{manifest};
+        StreamingAssetRef<ShaderAsset> asset = AddShaderAsset(manifest);
         auto compiler = make_shared<FakeJitCompiler>();
-        ShaderArtifactResolver resolver{MakeConfig(root, true), compiler};
+        ShaderArtifactResolver resolver{_assets, MakeConfig(root, true), compiler};
         ASSERT_TRUE(resolver.ResolveAsync(
-                                asset,
+                                *asset,
                                 shader::ShaderTarget::DXIL,
                                 0,
                                 {})
@@ -441,11 +492,11 @@ TEST(ShaderArtifactResolverTest, RejectsDiskCacheWithWrongEmbeddedProgramKey) {
     cacheBinary->Asset.AssetId = Guid::NewGuid();
     ASSERT_TRUE(shader::WriteShaderBinary(cacheFiles.front(), *cacheBinary));
 
-    ShaderAsset asset{std::move(manifest)};
+    StreamingAssetRef<ShaderAsset> asset = AddShaderAsset(std::move(manifest));
     auto compiler = make_shared<FakeJitCompiler>();
-    ShaderArtifactResolver resolver{MakeConfig(root, true), compiler};
+    ShaderArtifactResolver resolver{_assets, MakeConfig(root, true), compiler};
     auto rebuilt = resolver.ResolveAsync(
-                               asset,
+                               *asset,
                                shader::ShaderTarget::DXIL,
                                0,
                                {})
@@ -459,12 +510,12 @@ TEST(ShaderArtifactResolverTest, RejectsDiskCacheWithWrongEmbeddedProgramKey) {
     std::filesystem::remove_all(root, ignored);
 }
 
-TEST(ShaderArtifactResolverTest, UsesCapturedDiskCacheBeforeRequiringLiveSource) {
+TEST_F(ShaderArtifactResolverTest, UsesCapturedDiskCacheBeforeRequiringLiveSource) {
     const std::filesystem::path root = MakeSourceTree();
-    ShaderAsset asset{MakeSparseBinary()};
+    StreamingAssetRef<ShaderAsset> asset = AddShaderAsset(MakeSparseBinary());
     auto compiler = make_shared<FakeJitCompiler>();
-    ShaderArtifactResolver resolver{MakeConfig(root, true), compiler};
-    ASSERT_TRUE(resolver.ResolveAsync(asset, shader::ShaderTarget::DXIL, 0, {}).get().Succeeded());
+    ShaderArtifactResolver resolver{_assets, MakeConfig(root, true), compiler};
+    ASSERT_TRUE(resolver.ResolveAsync(*asset, shader::ShaderTarget::DXIL, 0, {}).get().Succeeded());
     ASSERT_EQ(compiler->VertexCalls.load(), 1u);
     ASSERT_EQ(compiler->PixelCalls.load(), 1u);
 
@@ -474,7 +525,7 @@ TEST(ShaderArtifactResolverTest, UsesCapturedDiskCacheBeforeRequiringLiveSource)
     ASSERT_FALSE(ignored);
     ASSERT_TRUE(std::filesystem::remove(root / "common.hlsl", ignored));
     ASSERT_FALSE(ignored);
-    auto cached = resolver.ResolveAsync(asset, shader::ShaderTarget::DXIL, 0, {}).get();
+    auto cached = resolver.ResolveAsync(*asset, shader::ShaderTarget::DXIL, 0, {}).get();
     ASSERT_TRUE(cached.Succeeded());
     EXPECT_EQ(cached.Source, ShaderArtifactSource::DiskCache);
     EXPECT_EQ(compiler->VertexCalls.load(), 1u);
@@ -483,7 +534,7 @@ TEST(ShaderArtifactResolverTest, UsesCapturedDiskCacheBeforeRequiringLiveSource)
     std::filesystem::remove_all(root, ignored);
 }
 
-TEST(ShaderArtifactResolverTest, SourceIdentityTracksTransitiveIncludes) {
+TEST_F(ShaderArtifactResolverTest, SourceIdentityTracksTransitiveIncludes) {
     const std::filesystem::path root = MakeSourceTree();
     const shader::ShaderPassDesc pass = MakeSparseBinary().Asset.Passes.front();
     auto first = ComputeShaderSourceIdentity(root, pass);
@@ -497,16 +548,16 @@ TEST(ShaderArtifactResolverTest, SourceIdentityTracksTransitiveIncludes) {
     std::filesystem::remove_all(root, ignored);
 }
 
-TEST(ShaderArtifactResolverTest, RejectsCanonicalMismatchBetweenJitTargets) {
+TEST_F(ShaderArtifactResolverTest, RejectsCanonicalMismatchBetweenJitTargets) {
     const std::filesystem::path root = MakeSourceTree();
-    ShaderAsset asset{MakeSparseBinary()};
+    StreamingAssetRef<ShaderAsset> asset = AddShaderAsset(MakeSparseBinary());
     auto compiler = make_shared<FakeJitCompiler>();
     compiler->MismatchSpirv = true;
-    ShaderArtifactResolver resolver{MakeConfig(root), compiler};
+    ShaderArtifactResolver resolver{_assets, MakeConfig(root), compiler};
 
-    auto dxil = resolver.ResolveAsync(asset, shader::ShaderTarget::DXIL, 0, {}).get();
+    auto dxil = resolver.ResolveAsync(*asset, shader::ShaderTarget::DXIL, 0, {}).get();
     ASSERT_TRUE(dxil.Succeeded());
-    auto spirv = resolver.ResolveAsync(asset, shader::ShaderTarget::SPIRV, 0, {}).get();
+    auto spirv = resolver.ResolveAsync(*asset, shader::ShaderTarget::SPIRV, 0, {}).get();
     ASSERT_FALSE(spirv.Succeeded());
     ASSERT_EQ(spirv.Diagnostics.size(), 1u);
     EXPECT_EQ(spirv.Diagnostics.front().Code, shader::ShaderDiagnosticCode::InterfaceMismatch);
@@ -518,20 +569,21 @@ TEST(ShaderArtifactResolverTest, RejectsCanonicalMismatchBetweenJitTargets) {
 }
 
 #if defined(RADRAY_ENABLE_SHADER_JIT) && defined(RADRAY_ENABLE_SPIRV_CROSS)
-TEST(ShaderArtifactResolverTest, DxcJitProducesEquivalentDxilAndSpirvInterfaces) {
+TEST_F(ShaderArtifactResolverTest, DxcJitProducesEquivalentDxilAndSpirvInterfaces) {
     const std::filesystem::path root = MakeSourceTree();
-    ShaderAsset asset{MakeSparseBinary()};
+    StreamingAssetRef<ShaderAsset> asset = AddShaderAsset(MakeSparseBinary());
     auto dxc = shader::CreateDxc();
     ASSERT_TRUE(dxc.HasValue());
     ShaderArtifactResolver resolver{
+        _assets,
         MakeConfig(root),
         CreateDxcShaderJitCompiler(dxc.Release())};
-    auto dxil = resolver.ResolveAsync(asset, shader::ShaderTarget::DXIL, 0, {}).get();
-    auto spirv = resolver.ResolveAsync(asset, shader::ShaderTarget::SPIRV, 0, {}).get();
+    auto dxil = resolver.ResolveAsync(*asset, shader::ShaderTarget::DXIL, 0, {}).get();
+    auto spirv = resolver.ResolveAsync(*asset, shader::ShaderTarget::SPIRV, 0, {}).get();
     ASSERT_TRUE(dxil.Succeeded()) << (dxil.Diagnostics.empty() ? "" : dxil.Diagnostics.front().Message);
     ASSERT_TRUE(spirv.Succeeded()) << (spirv.Diagnostics.empty() ? "" : spirv.Diagnostics.front().Message);
     EXPECT_EQ(dxil.Program->Interface, spirv.Program->Interface);
-    EXPECT_EQ(asset.GetBinary().ProgramVariants.size(), 0u);
+    EXPECT_EQ(asset->GetBinary().ProgramVariants.size(), 0u);
     std::error_code ignored;
     std::filesystem::remove_all(root, ignored);
 }

@@ -3,7 +3,9 @@
 #include <gtest/gtest.h>
 
 #include <radray/runtime/material_asset.h>
+#include <radray/runtime/shader_artifact_resolver.h>
 #include <radray/runtime/shader_asset.h>
+#include <radray/runtime/shader_binding_policy.h>
 
 namespace radray {
 namespace {
@@ -139,6 +141,7 @@ ShaderResolvedProgram MakeResolvedProgram(
         .Target = target,
         .PassIndex = 0,
         .Defines = std::move(defines),
+        .Stages = {},
         .Interface = std::move(interface),
         .SourceIdentity = pass.SourceIdentity,
         .ProgramIdentity = programIdentity};

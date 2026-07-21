@@ -12,6 +12,7 @@
 
 #include <radray/file.h>
 #include <radray/guid.h>
+#include <radray/runtime/shader_binding_policy.h>
 #include <radray/runtime/shader_parameters.h>
 #include <radray/runtime/render_framework/forward_pipeline.h>
 

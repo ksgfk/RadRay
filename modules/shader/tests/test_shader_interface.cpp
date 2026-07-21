@@ -130,7 +130,8 @@ ShaderInterfaceFieldDesc MakeFloatField(
             .Rows = 1,
             .Columns = columns,
             .ArrayCount = 1,
-            .ByteSize = columns * 4}};
+            .ByteSize = columns * 4},
+        .Members = {}};
 }
 
 ShaderBindingDesc MakeConstantBuffer(
@@ -218,7 +219,10 @@ TEST(ShaderInterfaceTest, HashIsIndependentOfDeclarationOrder) {
                 .Bindings = {MakeSampler("Second", 8, ShaderStage::Pixel)}},
             ShaderBindingGroupInterfaceDesc{
                 .GroupIndex = 2,
-                .Bindings = {MakeSampler("First", 1, ShaderStage::Pixel)}}}};
+                .Bindings = {MakeSampler("First", 1, ShaderStage::Pixel)}}},
+        .PushConstants = {},
+        .Inputs = {},
+        .Outputs = {}};
     ShaderStageInterfaceDesc second{
         .Stage = ShaderStage::Pixel,
         .BindingGroups = {
@@ -227,7 +231,10 @@ TEST(ShaderInterfaceTest, HashIsIndependentOfDeclarationOrder) {
                 .Bindings = {MakeSampler("First", 1, ShaderStage::Pixel)}},
             ShaderBindingGroupInterfaceDesc{
                 .GroupIndex = 4,
-                .Bindings = {MakeSampler("Second", 8, ShaderStage::Pixel)}}}};
+                .Bindings = {MakeSampler("Second", 8, ShaderStage::Pixel)}}},
+        .PushConstants = {},
+        .Inputs = {},
+        .Outputs = {}};
 
     ASSERT_TRUE(IsShaderStageInterfaceValid(first));
     ASSERT_TRUE(IsShaderStageInterfaceValid(second));
@@ -248,7 +255,10 @@ TEST(ShaderInterfaceTest, GraphicsMergeRejectsConflictingBindings) {
         .Stage = ShaderStage::Vertex,
         .BindingGroups = {ShaderBindingGroupInterfaceDesc{
             .GroupIndex = 3,
-            .Bindings = {MakeSampler("Shared", 0, ShaderStage::Vertex)}}}};
+            .Bindings = {MakeSampler("Shared", 0, ShaderStage::Vertex)}}},
+        .PushConstants = {},
+        .Inputs = {},
+        .Outputs = {}};
     ShaderBindingDesc texture{
         .Name = "Shared",
         .BindingIndex = 0,
@@ -263,7 +273,10 @@ TEST(ShaderInterfaceTest, GraphicsMergeRejectsConflictingBindings) {
         .Stage = ShaderStage::Pixel,
         .BindingGroups = {ShaderBindingGroupInterfaceDesc{
             .GroupIndex = 3,
-            .Bindings = {std::move(texture)}}}};
+            .Bindings = {std::move(texture)}}},
+        .PushConstants = {},
+        .Inputs = {},
+        .Outputs = {}};
 
     const ShaderDiagnosticContext context{
         .Target = ShaderTarget::SPIRV,
@@ -283,6 +296,10 @@ TEST(ShaderInterfaceTest, GraphicsMergeRejectsConflictingBindings) {
 TEST(ShaderInterfaceTest, BuildsComputeProgramInterface) {
     ShaderStageInterfaceDesc stage{
         .Stage = ShaderStage::Compute,
+        .BindingGroups = {},
+        .PushConstants = {},
+        .Inputs = {},
+        .Outputs = {},
         .Compute = ShaderComputeInterfaceDesc{8, 4, 1}};
     ShaderInterfaceBuildResult result = BuildComputeShaderInterface(stage);
     ASSERT_TRUE(result.Succeeded());
@@ -301,7 +318,12 @@ TEST(ShaderInterfaceTest, RejectsMalformedProgrammaticAbiDescriptors) {
         .Kind = ShaderProgramKind::Graphics,
         .BindingGroups = {ShaderBindingGroupInterfaceDesc{
             .GroupIndex = 0,
-            .Bindings = {MakeSampler("Sampler", 0, ShaderStage::Pixel)}}}};
+            .Bindings = {MakeSampler("Sampler", 0, ShaderStage::Pixel)}}},
+        .PushConstants = {},
+        .VertexInputs = {},
+        .VertexOutputs = {},
+        .PixelInputs = {},
+        .PixelOutputs = {}};
     ASSERT_TRUE(IsShaderInterfaceValid(valid));
 
     ShaderInterfaceDesc invalidKind = valid;
@@ -350,7 +372,10 @@ TEST(ShaderInterfaceTest, RejectsMalformedProgrammaticAbiDescriptors) {
         .Stage = ShaderStage::Vertex,
         .BindingGroups = {ShaderBindingGroupInterfaceDesc{
             .GroupIndex = 0,
-            .Bindings = {MakeSampler("PixelSampler", 0, ShaderStage::Pixel)}}}};
+            .Bindings = {MakeSampler("PixelSampler", 0, ShaderStage::Pixel)}}},
+        .PushConstants = {},
+        .Inputs = {},
+        .Outputs = {}};
     EXPECT_FALSE(IsShaderStageInterfaceValid(wrongStageVisibility));
 }
 

@@ -8,7 +8,7 @@
 #include <radray/file.h>
 #include <radray/logger.h>
 #include <radray/render/common.h>
-#include <radray/runtime/shader_asset.h>
+#include <radray/runtime/shader_artifact_resolver.h>
 #if defined(RADRAY_ENABLE_SHADER_JIT)
 #include <radray/shader/dxc.h>
 #endif
@@ -34,8 +34,9 @@ RenderSystem::~RenderSystem() noexcept {
 void RenderSystem::OnInitialize() {
     GpuSystem* gpu = _app != nullptr ? _app->GetGpuSystem() : nullptr;
     render::Device* device = _app != nullptr ? _app->GetDevice() : nullptr;
-    if (gpu == nullptr || device == nullptr) {
-        RADRAY_ERR_LOG("RenderSystem::OnInitialize: GpuSystem or Device is null");
+    AssetManager* assets = _app != nullptr ? _app->GetAssetManager() : nullptr;
+    if (gpu == nullptr || device == nullptr || assets == nullptr) {
+        RADRAY_ERR_LOG("RenderSystem::OnInitialize: GpuSystem, Device, or AssetManager is null");
         return;
     }
 
@@ -52,6 +53,7 @@ void RenderSystem::OnInitialize() {
     } else {
         _dxc = dxcOpt.Release();
         _shaderResolver = make_unique<ShaderArtifactResolver>(
+            *assets,
             ShaderArtifactResolver::Config{
                 .ShaderRoot = _shaderIncludeRoot,
                 .DiskCacheDirectory = GetExecutableDirectory() / "shader_cache",

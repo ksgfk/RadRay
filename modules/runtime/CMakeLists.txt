@@ -31,9 +31,7 @@ target_link_libraries(radrayruntime PUBLIC
     radraycore
     radrayrender
     radraywindow)
-target_link_libraries(radrayruntime PRIVATE
-    cgltf::cgltf
-    xxHash::xxhash)
+target_link_libraries(radrayruntime PRIVATE cgltf::cgltf)
 target_compile_definitions(radrayruntime PUBLIC
     $<$<BOOL:${RADRAY_ENABLE_SHADER_JIT}>:RADRAY_ENABLE_SHADER_JIT>)
 if (WIN32 AND (RADRAY_ENABLE_D3D12 OR RADRAY_ENABLE_VULKAN))

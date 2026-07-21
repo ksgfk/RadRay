@@ -30,6 +30,16 @@
 - String formatting must use `fmt` library; check whether a type has `format_to` before using it.
 - Flag-style enums use `enum_flags.h` (`EnumFlags<T>`, `is_flags<T>`, `format_as`).
 
+## Runtime Header/Source Organization
+- In `modules/runtime/`, a header that declares a runtime-typed class (a class with a `RuntimeTypeTrait<T>` specialization) must remain centered on that class. It may contain only declarations that are part of, or exist solely to support, that class's responsibility. Independently usable policies, resolvers, services, and other concepts must have dedicated headers; for example, `ShaderArtifactResolver` and its resolver-specific API belong in `shader_artifact_resolver.h`, not `shader_asset.h`.
+- In `modules/runtime/`, every non-header-only component with out-of-line definitions must use a same-stem header/source pair, and those definitions must live in the matching `.cpp`. For example, `PipelineBindingPolicy` belongs in `shader_binding_policy.h` / `shader_binding_policy.cpp`, and `ShaderArtifactResolver` belongs in `shader_artifact_resolver.h` / `shader_artifact_resolver.cpp`. Do not separate declarations from a same-stem implementation file or split their implementation across differently named `.cpp` files without the user's explicit prior confirmation.
+
+## Exception Policy
+- Never add `try`/`catch` merely to preserve a `noexcept` declaration. If an exception cannot be meaningfully handled, do not catch it; allow it to propagate, or allow `std::terminate` at a `noexcept` boundary.
+- Catch only specific, recoverable exceptions and handle them explicitly. Do not use `catch (...)` to turn allocation failures, programming errors, or invariant violations into ordinary `false`, `nullopt`, or diagnostic results.
+- Avoid explicit `throw` and exception-based control flow. Prefer validation, `std::error_code`, or existing result types for expected failures.
+- Before introducing any new `try`, `catch`, or `throw`, explicitly ask the user and receive confirmation. This approval is required even when the exception construct appears necessary.
+
 ## Shader Conventions
 - Treat `shaderlib/` as the HLSL include root. Include shared shader files as `#include "common.hlsl"` or `#include "bsdf.hlsl"`, not `#include "shaderlib/common.hlsl"`.
 - Reuse existing implementations in `shaderlib/` before adding shader-local helper functions.

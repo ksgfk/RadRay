@@ -1,5 +1,6 @@
 #pragma once
 
+#include <radray/sparse_set.h>
 #include <radray/runtime_type.h>
 
 namespace radray {
@@ -8,6 +9,10 @@ class IRenderResourceRecycler;
 
 /// 资产的持久标识。落盘/去重缓存的 key,跨进程有效。
 using AssetId = Guid;
+
+/// 资产在单个 AssetManager 内的一次 slot 生命周期标识。slot 回收复用后 generation 变化。
+/// 仅用于运行时关联与悬垂检测,不可序列化。
+using AssetHandle = SparseSetHandle;
 
 /// 运行时类型标识。用于类型擦除后的向下转换校验(StreamingAssetRefAny -> StreamingAssetRef<T>)。
 /// 不依赖 RTTI,由资产类型手填固定 Guid,跨进程/跨模块稳定。
@@ -40,11 +45,13 @@ public:
     virtual AssetTypeId GetTypeId() const noexcept = 0;
 
     const AssetId& GetAssetId() const noexcept { return _id; }
+    AssetHandle GetAssetHandle() const noexcept { return _handle; }
 
 private:
     friend class AssetManager;
 
     AssetId _id;
+    AssetHandle _handle{AssetHandle::Invalid()};
 };
 
 template <>

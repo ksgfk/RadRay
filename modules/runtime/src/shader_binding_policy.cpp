@@ -1,4 +1,4 @@
-#include <radray/runtime/shader_parameters.h>
+#include <radray/runtime/shader_binding_policy.h>
 
 #include <algorithm>
 
@@ -45,14 +45,16 @@ ShaderBindingResolutionResult ResolveShaderBindings(
         result.Diagnostics.emplace_back(ShaderBindingDiagnostic{
             .Code = ShaderBindingDiagnosticCode::InvalidInterface,
             .Message = "shader binding resolution requires a valid canonical interface",
-            .Context = context});
+            .Context = context,
+            .ProviderName = {}});
         return result;
     }
     if (!policy.IsValid()) {
         result.Diagnostics.emplace_back(ShaderBindingDiagnostic{
             .Code = ShaderBindingDiagnosticCode::InvalidPolicy,
             .Message = "pipeline binding policy contains a null or duplicate group reservation",
-            .Context = context});
+            .Context = context,
+            .ProviderName = {}});
         return result;
     }
 
@@ -64,14 +66,7 @@ ShaderBindingResolutionResult ResolveShaderBindings(
             plan.UserGroups.emplace_back(group);
             continue;
         }
-        ShaderBindingProviderMatchResult match;
-        try {
-            match = reservation->Provider->Match(group);
-        } catch (const std::exception& error) {
-            match = ShaderBindingProviderMatchResult::Failure(error.what());
-        } catch (...) {
-            match = ShaderBindingProviderMatchResult::Failure("provider threw an unknown exception");
-        }
+        ShaderBindingProviderMatchResult match = reservation->Provider->Match(group);
         if (!match.Compatible) {
             shader::ShaderDiagnosticContext diagnosticContext = context;
             diagnosticContext.Group = group.GroupIndex;

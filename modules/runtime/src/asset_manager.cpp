@@ -421,6 +421,7 @@ void AssetManager::OnLoadComplete(AssetHandle handle, AssetLoadResult result) no
         return;
     }
     object->_id = slot->Id;
+    object->_handle = handle;
     slot->Object = std::move(object);
     slot->Control->TypeInfo = typeInfo;
     slot->SetState(AssetState::Ready);

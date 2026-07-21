@@ -1,5 +1,7 @@
 #include <radray/shader/shader_interface.h>
 
+#include <radray/binary_io.h>
+
 #include <algorithm>
 #include <bit>
 #include <cctype>
@@ -11,6 +13,9 @@
 
 namespace radray::shader {
 namespace {
+
+constexpr uint32_t kMaxInterfaceElementCount = 1u << 20;
+constexpr uint32_t kMaxInterfaceStringBytes = 16u << 20;
 
 constexpr bool IsSupportedStage(ShaderStage stage) noexcept {
     return stage == ShaderStage::Vertex || stage == ShaderStage::Pixel || stage == ShaderStage::Compute;
@@ -592,7 +597,9 @@ ShaderBindingGroupInterfaceDesc& FindOrAddGroup(
     uint32_t groupIndex) {
     const auto it = std::ranges::find(groups, groupIndex, &ShaderBindingGroupInterfaceDesc::GroupIndex);
     if (it != groups.end()) return *it;
-    return groups.emplace_back(ShaderBindingGroupInterfaceDesc{.GroupIndex = groupIndex});
+    return groups.emplace_back(ShaderBindingGroupInterfaceDesc{
+        .GroupIndex = groupIndex,
+        .Bindings = {}});
 }
 
 bool IsPushConstantBinding(
@@ -1285,10 +1292,11 @@ bool ValidateFields(
     const vector<ShaderInterfaceFieldDesc>& fields,
     uint32_t byteSize,
     uint32_t depth = 0) noexcept {
-    if (depth > 64) return false;
+    if (depth > 64 || fields.size() > kMaxInterfaceElementCount) return false;
     for (size_t i = 0; i < fields.size(); ++i) {
         const ShaderInterfaceFieldDesc& field = fields[i];
-        if (field.Name.empty() || field.Size == 0 || field.Offset >= byteSize || field.Size > byteSize - field.Offset ||
+        if (field.Name.empty() || field.Name.size() > kMaxInterfaceStringBytes ||
+            field.Size == 0 || field.Offset >= byteSize || field.Size > byteSize - field.Offset ||
             field.Type.Rows == 0 || field.Type.Columns == 0 || field.Type.ArrayCount == 0 ||
             field.Type.ByteSize != field.Size ||
             !IsEnumInRange(field.Type.Scalar, ShaderScalarType::Float64)) {
@@ -1355,14 +1363,16 @@ bool ValidateTexture(const ShaderBindingDesc& binding) noexcept {
 }
 
 bool ValidateBindingGroups(const vector<ShaderBindingGroupInterfaceDesc>& groups) noexcept {
+    if (groups.size() > kMaxInterfaceElementCount) return false;
     for (size_t i = 0; i < groups.size(); ++i) {
-        if (groups[i].Bindings.empty()) return false;
+        if (groups[i].Bindings.empty() || groups[i].Bindings.size() > kMaxInterfaceElementCount) return false;
         for (size_t j = 0; j < i; ++j) {
             if (groups[j].GroupIndex == groups[i].GroupIndex) return false;
         }
         for (size_t j = 0; j < groups[i].Bindings.size(); ++j) {
             const ShaderBindingDesc& binding = groups[i].Bindings[j];
-            if (binding.Name.empty() || binding.Kind == ShaderBindingKind::Unknown ||
+            if (binding.Name.empty() || binding.Name.size() > kMaxInterfaceStringBytes ||
+                binding.Kind == ShaderBindingKind::Unknown ||
                 !IsEnumInRange(binding.Kind, ShaderBindingKind::AccelerationStructure) ||
                 !IsEnumInRange(binding.Access, ShaderResourceAccess::ReadWrite) ||
                 !AreShaderStagesValid(binding.Stages)) {
@@ -1408,12 +1418,14 @@ bool ValidateBindingGroups(const vector<ShaderBindingGroupInterfaceDesc>& groups
 }
 
 bool ValidateIo(const vector<ShaderStageIoDesc>& values) noexcept {
+    if (values.size() > kMaxInterfaceElementCount) return false;
     for (size_t i = 0; i < values.size(); ++i) {
         const ShaderStageIoDesc& value = values[i];
         if (value.Type.Scalar == ShaderScalarType::Unknown ||
             !IsEnumInRange(value.Type.Scalar, ShaderScalarType::Float64) ||
             !IsEnumInRange(value.Builtin, ShaderBuiltin::StencilRef) ||
             !ValidateLeafType(value.Type) ||
+            value.SemanticName.size() > kMaxInterfaceStringBytes ||
             (value.Builtin == ShaderBuiltin::None && value.SemanticName.empty())) {
             return false;
         }
@@ -1430,9 +1442,11 @@ bool ValidateIo(const vector<ShaderStageIoDesc>& values) noexcept {
 }
 
 bool ValidatePushConstants(const vector<ShaderPushConstantRangeDesc>& ranges) noexcept {
+    if (ranges.size() > kMaxInterfaceElementCount) return false;
     for (size_t i = 0; i < ranges.size(); ++i) {
         const ShaderPushConstantRangeDesc& range = ranges[i];
-        if (range.Name.empty() || range.Size == 0 || !AreShaderStagesValid(range.Stages) ||
+        if (range.Name.empty() || range.Name.size() > kMaxInterfaceStringBytes ||
+            range.Size == 0 || !AreShaderStagesValid(range.Stages) ||
             range.Offset > std::numeric_limits<uint32_t>::max() - range.Size ||
             !ValidateFields(range.Fields, range.Offset + range.Size)) {
             return false;
@@ -1462,19 +1476,20 @@ bool ValidateInterfaceStages(
     });
 }
 
-class InterfaceWriter {
-public:
-    void U8(uint8_t value) { Data.emplace_back(static_cast<byte>(value)); }
-    void U32(uint32_t value) {
-        for (uint32_t i = 0; i < 4; ++i) U8(static_cast<uint8_t>((value >> (i * 8)) & 0xffu));
-    }
-    void String(std::string_view value) {
-        U32(static_cast<uint32_t>(value.size()));
-        for (char c : value) U8(static_cast<uint8_t>(c));
-    }
+using InterfaceWriter = BinaryWriter;
+using InterfaceReader = BinaryReader;
 
-    vector<byte> Data;
-};
+void WriteInterfaceString(InterfaceWriter& writer, std::string_view value) {
+    writer.String(value);
+}
+
+bool ReadInterfaceString(InterfaceReader& reader, string& value) {
+    std::string_view bytes;
+    if (!reader.String(bytes) || bytes.size() > kMaxInterfaceStringBytes) return false;
+    string result{bytes.begin(), bytes.end()};
+    value = std::move(result);
+    return true;
+}
 
 void WriteValueType(InterfaceWriter& writer, const ShaderValueTypeDesc& value) {
     writer.U8(static_cast<uint8_t>(value.Scalar));
@@ -1488,9 +1503,9 @@ void WriteValueType(InterfaceWriter& writer, const ShaderValueTypeDesc& value) {
 }
 
 void WriteFields(InterfaceWriter& writer, const vector<ShaderInterfaceFieldDesc>& fields) {
-    writer.U32(static_cast<uint32_t>(fields.size()));
+    writer.Size32(fields.size());
     for (const ShaderInterfaceFieldDesc& field : fields) {
-        writer.String(field.Name);
+        WriteInterfaceString(writer, field.Name);
         writer.U32(field.Offset);
         writer.U32(field.Size);
         WriteValueType(writer, field.Type);
@@ -1499,12 +1514,12 @@ void WriteFields(InterfaceWriter& writer, const vector<ShaderInterfaceFieldDesc>
 }
 
 void WriteGroups(InterfaceWriter& writer, const vector<ShaderBindingGroupInterfaceDesc>& groups) {
-    writer.U32(static_cast<uint32_t>(groups.size()));
+    writer.Size32(groups.size());
     for (const ShaderBindingGroupInterfaceDesc& group : groups) {
         writer.U32(group.GroupIndex);
-        writer.U32(static_cast<uint32_t>(group.Bindings.size()));
+        writer.Size32(group.Bindings.size());
         for (const ShaderBindingDesc& binding : group.Bindings) {
-            writer.String(binding.Name);
+            WriteInterfaceString(writer, binding.Name);
             writer.U32(binding.BindingIndex);
             writer.U8(static_cast<uint8_t>(binding.Kind));
             writer.U8(static_cast<uint8_t>(binding.Access));
@@ -1529,9 +1544,9 @@ void WriteGroups(InterfaceWriter& writer, const vector<ShaderBindingGroupInterfa
 }
 
 void WriteIo(InterfaceWriter& writer, const vector<ShaderStageIoDesc>& values) {
-    writer.U32(static_cast<uint32_t>(values.size()));
+    writer.Size32(values.size());
     for (const ShaderStageIoDesc& value : values) {
-        writer.String(value.SemanticName);
+        WriteInterfaceString(writer, value.SemanticName);
         writer.U32(value.SemanticIndex);
         writer.U32(value.Location);
         writer.U8(static_cast<uint8_t>(value.Builtin));
@@ -1540,9 +1555,9 @@ void WriteIo(InterfaceWriter& writer, const vector<ShaderStageIoDesc>& values) {
 }
 
 void WritePushConstants(InterfaceWriter& writer, const vector<ShaderPushConstantRangeDesc>& ranges) {
-    writer.U32(static_cast<uint32_t>(ranges.size()));
+    writer.Size32(ranges.size());
     for (const ShaderPushConstantRangeDesc& range : ranges) {
-        writer.String(range.Name);
+        WriteInterfaceString(writer, range.Name);
         writer.U32(range.Offset);
         writer.U32(range.Size);
         writer.U32(range.Stages.value());
@@ -1559,51 +1574,6 @@ void WriteCompute(InterfaceWriter& writer, const std::optional<ShaderComputeInte
     }
 }
 
-class InterfaceReader {
-public:
-    explicit InterfaceReader(std::span<const byte> data) noexcept : _data(data) {}
-
-    bool U8(uint8_t& value) noexcept {
-        if (_offset >= _data.size()) return false;
-        value = std::to_integer<uint8_t>(_data[_offset++]);
-        return true;
-    }
-
-    bool U32(uint32_t& value) noexcept {
-        value = 0;
-        for (uint32_t i = 0; i < 4; ++i) {
-            uint8_t part = 0;
-            if (!U8(part)) return false;
-            value |= static_cast<uint32_t>(part) << (i * 8);
-        }
-        return true;
-    }
-
-    bool Bool(bool& value) noexcept {
-        uint8_t raw = 0;
-        if (!U8(raw) || raw > 1) return false;
-        value = raw != 0;
-        return true;
-    }
-
-    bool String(string& value) {
-        uint32_t size = 0;
-        if (!U32(size) || size > kMaxStringBytes || size > _data.size() - _offset) return false;
-        value.assign(reinterpret_cast<const char*>(_data.data() + _offset), size);
-        _offset += size;
-        return true;
-    }
-
-    bool AtEnd() const noexcept { return _offset == _data.size(); }
-
-    static constexpr uint32_t kMaxElementCount = 1u << 20;
-    static constexpr uint32_t kMaxStringBytes = 16u << 20;
-
-private:
-    std::span<const byte> _data;
-    size_t _offset{0};
-};
-
 bool ReadValueType(InterfaceReader& reader, ShaderValueTypeDesc& value) noexcept {
     uint8_t scalar = 0;
     return reader.U8(scalar) && scalar <= static_cast<uint8_t>(ShaderScalarType::Float64) &&
@@ -1619,11 +1589,11 @@ bool ReadFields(
     vector<ShaderInterfaceFieldDesc>& fields,
     uint32_t depth = 0) {
     uint32_t count = 0;
-    if (depth > 64 || !reader.U32(count) || count > InterfaceReader::kMaxElementCount) return false;
+    if (depth > 64 || !reader.U32(count) || count > kMaxInterfaceElementCount) return false;
     fields.reserve(count);
     for (uint32_t i = 0; i < count; ++i) {
         ShaderInterfaceFieldDesc field;
-        if (!reader.String(field.Name) || !reader.U32(field.Offset) || !reader.U32(field.Size) ||
+        if (!ReadInterfaceString(reader, field.Name) || !reader.U32(field.Offset) || !reader.U32(field.Size) ||
             !ReadValueType(reader, field.Type) || !ReadFields(reader, field.Members, depth + 1)) {
             return false;
         }
@@ -1634,7 +1604,7 @@ bool ReadFields(
 
 bool ReadGroups(InterfaceReader& reader, vector<ShaderBindingGroupInterfaceDesc>& groups) {
     uint32_t groupCount = 0;
-    if (!reader.U32(groupCount) || groupCount > InterfaceReader::kMaxElementCount) return false;
+    if (!reader.U32(groupCount) || groupCount > kMaxInterfaceElementCount) return false;
     groups.reserve(groupCount);
     constexpr uint32_t supportedStages = static_cast<uint32_t>(ShaderStage::Vertex) |
                                          static_cast<uint32_t>(ShaderStage::Pixel) |
@@ -1643,7 +1613,7 @@ bool ReadGroups(InterfaceReader& reader, vector<ShaderBindingGroupInterfaceDesc>
         ShaderBindingGroupInterfaceDesc group;
         uint32_t bindingCount = 0;
         if (!reader.U32(group.GroupIndex) || !reader.U32(bindingCount) ||
-            bindingCount > InterfaceReader::kMaxElementCount) {
+            bindingCount > kMaxInterfaceElementCount) {
             return false;
         }
         group.Bindings.reserve(bindingCount);
@@ -1653,7 +1623,7 @@ bool ReadGroups(InterfaceReader& reader, vector<ShaderBindingGroupInterfaceDesc>
             uint8_t access = 0;
             uint32_t stages = 0;
             bool hasBuffer = false;
-            if (!reader.String(binding.Name) || !reader.U32(binding.BindingIndex) ||
+            if (!ReadInterfaceString(reader, binding.Name) || !reader.U32(binding.BindingIndex) ||
                 !reader.U8(kind) || kind > static_cast<uint8_t>(ShaderBindingKind::AccelerationStructure) ||
                 !reader.U8(access) || access > static_cast<uint8_t>(ShaderResourceAccess::ReadWrite) ||
                 !reader.U32(binding.Count) || !reader.U32(stages) || (stages & ~supportedStages) != 0 ||
@@ -1696,12 +1666,12 @@ bool ReadGroups(InterfaceReader& reader, vector<ShaderBindingGroupInterfaceDesc>
 
 bool ReadIo(InterfaceReader& reader, vector<ShaderStageIoDesc>& values) {
     uint32_t count = 0;
-    if (!reader.U32(count) || count > InterfaceReader::kMaxElementCount) return false;
+    if (!reader.U32(count) || count > kMaxInterfaceElementCount) return false;
     values.reserve(count);
     for (uint32_t i = 0; i < count; ++i) {
         ShaderStageIoDesc value;
         uint8_t builtin = 0;
-        if (!reader.String(value.SemanticName) || !reader.U32(value.SemanticIndex) ||
+        if (!ReadInterfaceString(reader, value.SemanticName) || !reader.U32(value.SemanticIndex) ||
             !reader.U32(value.Location) || !reader.U8(builtin) ||
             builtin > static_cast<uint8_t>(ShaderBuiltin::StencilRef) ||
             !ReadValueType(reader, value.Type)) {
@@ -1715,7 +1685,7 @@ bool ReadIo(InterfaceReader& reader, vector<ShaderStageIoDesc>& values) {
 
 bool ReadPushConstants(InterfaceReader& reader, vector<ShaderPushConstantRangeDesc>& ranges) {
     uint32_t count = 0;
-    if (!reader.U32(count) || count > InterfaceReader::kMaxElementCount) return false;
+    if (!reader.U32(count) || count > kMaxInterfaceElementCount) return false;
     ranges.reserve(count);
     constexpr uint32_t supportedStages = static_cast<uint32_t>(ShaderStage::Vertex) |
                                          static_cast<uint32_t>(ShaderStage::Pixel) |
@@ -1723,7 +1693,7 @@ bool ReadPushConstants(InterfaceReader& reader, vector<ShaderPushConstantRangeDe
     for (uint32_t i = 0; i < count; ++i) {
         ShaderPushConstantRangeDesc range;
         uint32_t stages = 0;
-        if (!reader.String(range.Name) || !reader.U32(range.Offset) || !reader.U32(range.Size) ||
+        if (!ReadInterfaceString(reader, range.Name) || !reader.U32(range.Offset) || !reader.U32(range.Size) ||
             !reader.U32(stages) || (stages & ~supportedStages) != 0 ||
             !ReadFields(reader, range.Fields)) {
             return false;
@@ -1757,88 +1727,77 @@ ShaderStageInterfaceBuildResult NormalizeHlslInterface(
     ShaderStage stage,
     const ShaderInterfaceNormalizationOptions& options) noexcept {
     ShaderStageInterfaceBuildResult result;
-    try {
-        if (!IsSupportedStage(stage)) {
-            AddDiagnostic(
-                result.Diagnostics,
-                options,
-                stage,
-                ShaderDiagnosticCode::UnsupportedStage,
-                fmt::format("unsupported HLSL shader stage {}", stage));
-            return result;
-        }
-        ShaderStageInterfaceDesc interface{.Stage = stage};
-        for (const HlslInputBindDesc& resource : reflection.BoundResources) {
-            if (!AddHlslBinding(reflection, resource, stage, options, result.Diagnostics, interface)) return result;
-        }
-        for (const HlslSignatureParameterDesc& input : reflection.InputParameters) {
-            if (input.ReadWriteMask == 0) continue;
-            ShaderStageIoDesc value = NormalizeHlslIo(input);
-            if (value.Type.Scalar == ShaderScalarType::Unknown) {
-                AddDiagnostic(
-                    result.Diagnostics,
-                    options,
-                    stage,
-                    ShaderDiagnosticCode::UnsupportedType,
-                    fmt::format("input semantic '{}' has unsupported component type", input.SemanticName));
-                return result;
-            }
-            interface.Inputs.emplace_back(std::move(value));
-        }
-        for (const HlslSignatureParameterDesc& output : reflection.OutputParameters) {
-            ShaderStageIoDesc value = NormalizeHlslIo(output);
-            if (value.Type.Scalar == ShaderScalarType::Unknown) {
-                AddDiagnostic(
-                    result.Diagnostics,
-                    options,
-                    stage,
-                    ShaderDiagnosticCode::UnsupportedType,
-                    fmt::format("output semantic '{}' has unsupported component type", output.SemanticName));
-                return result;
-            }
-            interface.Outputs.emplace_back(std::move(value));
-        }
-        if (stage == ShaderStage::Compute) {
-            if (reflection.GroupSizeX == 0 || reflection.GroupSizeY == 0 || reflection.GroupSizeZ == 0) {
-                AddDiagnostic(
-                    result.Diagnostics,
-                    options,
-                    stage,
-                    ShaderDiagnosticCode::InvalidComputeGroupSize,
-                    "compute shader has a zero thread-group dimension");
-                return result;
-            }
-            interface.Compute = ShaderComputeInterfaceDesc{
-                .GroupSizeX = reflection.GroupSizeX,
-                .GroupSizeY = reflection.GroupSizeY,
-                .GroupSizeZ = reflection.GroupSizeZ};
-        }
-        Canonicalize(interface);
-        if (!IsShaderStageInterfaceValid(interface)) {
-            AddDiagnostic(
-                result.Diagnostics,
-                options,
-                stage,
-                ShaderDiagnosticCode::InvalidReflection,
-                "normalized HLSL interface failed structural validation");
-            return result;
-        }
-        result.Interface = std::move(interface);
-    } catch (const std::exception& error) {
+    if (!IsSupportedStage(stage)) {
         AddDiagnostic(
             result.Diagnostics,
             options,
             stage,
-            ShaderDiagnosticCode::InvalidReflection,
-            fmt::format("failed to normalize HLSL reflection: {}", error.what()));
-    } catch (...) {
-        AddDiagnostic(
-            result.Diagnostics,
-            options,
-            stage,
-            ShaderDiagnosticCode::InvalidReflection,
-            "failed to normalize HLSL reflection");
+            ShaderDiagnosticCode::UnsupportedStage,
+            fmt::format("unsupported HLSL shader stage {}", stage));
+        return result;
     }
+    ShaderStageInterfaceDesc interface{
+        .Stage = stage,
+        .BindingGroups = {},
+        .PushConstants = {},
+        .Inputs = {},
+        .Outputs = {}};
+    for (const HlslInputBindDesc& resource : reflection.BoundResources) {
+        if (!AddHlslBinding(reflection, resource, stage, options, result.Diagnostics, interface)) return result;
+    }
+    for (const HlslSignatureParameterDesc& input : reflection.InputParameters) {
+        if (input.ReadWriteMask == 0) continue;
+        ShaderStageIoDesc value = NormalizeHlslIo(input);
+        if (value.Type.Scalar == ShaderScalarType::Unknown) {
+            AddDiagnostic(
+                result.Diagnostics,
+                options,
+                stage,
+                ShaderDiagnosticCode::UnsupportedType,
+                fmt::format("input semantic '{}' has unsupported component type", input.SemanticName));
+            return result;
+        }
+        interface.Inputs.emplace_back(std::move(value));
+    }
+    for (const HlslSignatureParameterDesc& output : reflection.OutputParameters) {
+        ShaderStageIoDesc value = NormalizeHlslIo(output);
+        if (value.Type.Scalar == ShaderScalarType::Unknown) {
+            AddDiagnostic(
+                result.Diagnostics,
+                options,
+                stage,
+                ShaderDiagnosticCode::UnsupportedType,
+                fmt::format("output semantic '{}' has unsupported component type", output.SemanticName));
+            return result;
+        }
+        interface.Outputs.emplace_back(std::move(value));
+    }
+    if (stage == ShaderStage::Compute) {
+        if (reflection.GroupSizeX == 0 || reflection.GroupSizeY == 0 || reflection.GroupSizeZ == 0) {
+            AddDiagnostic(
+                result.Diagnostics,
+                options,
+                stage,
+                ShaderDiagnosticCode::InvalidComputeGroupSize,
+                "compute shader has a zero thread-group dimension");
+            return result;
+        }
+        interface.Compute = ShaderComputeInterfaceDesc{
+            .GroupSizeX = reflection.GroupSizeX,
+            .GroupSizeY = reflection.GroupSizeY,
+            .GroupSizeZ = reflection.GroupSizeZ};
+    }
+    Canonicalize(interface);
+    if (!IsShaderStageInterfaceValid(interface)) {
+        AddDiagnostic(
+            result.Diagnostics,
+            options,
+            stage,
+            ShaderDiagnosticCode::InvalidReflection,
+            "normalized HLSL interface failed structural validation");
+        return result;
+    }
+    result.Interface = std::move(interface);
     return result;
 }
 
@@ -1847,98 +1806,87 @@ ShaderStageInterfaceBuildResult NormalizeSpirvInterface(
     ShaderStage stage,
     const ShaderInterfaceNormalizationOptions& options) noexcept {
     ShaderStageInterfaceBuildResult result;
-    try {
-        if (!IsSupportedStage(stage)) {
-            AddDiagnostic(
-                result.Diagnostics,
-                options,
-                stage,
-                ShaderDiagnosticCode::UnsupportedStage,
-                fmt::format("unsupported SPIR-V shader stage {}", stage));
-            return result;
-        }
-        ShaderStageInterfaceDesc interface{.Stage = stage};
-        for (const SpirvResourceBinding& resource : reflection.ResourceBindings) {
-            if (!AddSpirvBinding(reflection, resource, stage, options, result.Diagnostics, interface)) return result;
-        }
-        for (const SpirvPushConstantRange& range : reflection.ConstantRanges) {
-            ShaderBufferInterfaceDesc buffer;
-            if (!BuildSpirvBuffer(
-                    reflection,
-                    range.TypeIndex,
-                    range.Size,
-                    range.IsViewInHlsl,
-                    0,
-                    0,
-                    stage,
-                    options,
-                    result.Diagnostics,
-                    buffer)) {
-                return result;
-            }
-            interface.PushConstants.emplace_back(ShaderPushConstantRangeDesc{
-                .Name = range.Name,
-                .Offset = range.Offset,
-                .Size = range.Size,
-                .Stages = stage,
-                .Fields = std::move(buffer.Fields)});
-        }
-        if (stage != ShaderStage::Compute) {
-            for (const SpirvStageIo& input : reflection.StageInputs) {
-                auto value = NormalizeSpirvIo(reflection, input, stage, options, result.Diagnostics);
-                if (!value.has_value()) return result;
-                interface.Inputs.emplace_back(std::move(*value));
-            }
-            for (const SpirvStageIo& output : reflection.StageOutputs) {
-                auto value = NormalizeSpirvIo(reflection, output, stage, options, result.Diagnostics);
-                if (!value.has_value()) return result;
-                interface.Outputs.emplace_back(std::move(*value));
-            }
-        }
-        if (stage == ShaderStage::Compute) {
-            if (!reflection.ComputeInfo.has_value() ||
-                reflection.ComputeInfo->LocalSizeX == 0 ||
-                reflection.ComputeInfo->LocalSizeY == 0 ||
-                reflection.ComputeInfo->LocalSizeZ == 0) {
-                AddDiagnostic(
-                    result.Diagnostics,
-                    options,
-                    stage,
-                    ShaderDiagnosticCode::InvalidComputeGroupSize,
-                    "compute shader has no valid SPIR-V workgroup size");
-                return result;
-            }
-            interface.Compute = ShaderComputeInterfaceDesc{
-                .GroupSizeX = reflection.ComputeInfo->LocalSizeX,
-                .GroupSizeY = reflection.ComputeInfo->LocalSizeY,
-                .GroupSizeZ = reflection.ComputeInfo->LocalSizeZ};
-        }
-        Canonicalize(interface);
-        if (!IsShaderStageInterfaceValid(interface)) {
-            AddDiagnostic(
-                result.Diagnostics,
-                options,
-                stage,
-                ShaderDiagnosticCode::InvalidReflection,
-                "normalized SPIR-V interface failed structural validation");
-            return result;
-        }
-        result.Interface = std::move(interface);
-    } catch (const std::exception& error) {
+    if (!IsSupportedStage(stage)) {
         AddDiagnostic(
             result.Diagnostics,
             options,
             stage,
-            ShaderDiagnosticCode::InvalidReflection,
-            fmt::format("failed to normalize SPIR-V reflection: {}", error.what()));
-    } catch (...) {
-        AddDiagnostic(
-            result.Diagnostics,
-            options,
-            stage,
-            ShaderDiagnosticCode::InvalidReflection,
-            "failed to normalize SPIR-V reflection");
+            ShaderDiagnosticCode::UnsupportedStage,
+            fmt::format("unsupported SPIR-V shader stage {}", stage));
+        return result;
     }
+    ShaderStageInterfaceDesc interface{
+        .Stage = stage,
+        .BindingGroups = {},
+        .PushConstants = {},
+        .Inputs = {},
+        .Outputs = {}};
+    for (const SpirvResourceBinding& resource : reflection.ResourceBindings) {
+        if (!AddSpirvBinding(reflection, resource, stage, options, result.Diagnostics, interface)) return result;
+    }
+    for (const SpirvPushConstantRange& range : reflection.ConstantRanges) {
+        ShaderBufferInterfaceDesc buffer;
+        if (!BuildSpirvBuffer(
+                reflection,
+                range.TypeIndex,
+                range.Size,
+                range.IsViewInHlsl,
+                0,
+                0,
+                stage,
+                options,
+                result.Diagnostics,
+                buffer)) {
+            return result;
+        }
+        interface.PushConstants.emplace_back(ShaderPushConstantRangeDesc{
+            .Name = range.Name,
+            .Offset = range.Offset,
+            .Size = range.Size,
+            .Stages = stage,
+            .Fields = std::move(buffer.Fields)});
+    }
+    if (stage != ShaderStage::Compute) {
+        for (const SpirvStageIo& input : reflection.StageInputs) {
+            auto value = NormalizeSpirvIo(reflection, input, stage, options, result.Diagnostics);
+            if (!value.has_value()) return result;
+            interface.Inputs.emplace_back(std::move(*value));
+        }
+        for (const SpirvStageIo& output : reflection.StageOutputs) {
+            auto value = NormalizeSpirvIo(reflection, output, stage, options, result.Diagnostics);
+            if (!value.has_value()) return result;
+            interface.Outputs.emplace_back(std::move(*value));
+        }
+    }
+    if (stage == ShaderStage::Compute) {
+        if (!reflection.ComputeInfo.has_value() ||
+            reflection.ComputeInfo->LocalSizeX == 0 ||
+            reflection.ComputeInfo->LocalSizeY == 0 ||
+            reflection.ComputeInfo->LocalSizeZ == 0) {
+            AddDiagnostic(
+                result.Diagnostics,
+                options,
+                stage,
+                ShaderDiagnosticCode::InvalidComputeGroupSize,
+                "compute shader has no valid SPIR-V workgroup size");
+            return result;
+        }
+        interface.Compute = ShaderComputeInterfaceDesc{
+            .GroupSizeX = reflection.ComputeInfo->LocalSizeX,
+            .GroupSizeY = reflection.ComputeInfo->LocalSizeY,
+            .GroupSizeZ = reflection.ComputeInfo->LocalSizeZ};
+    }
+    Canonicalize(interface);
+    if (!IsShaderStageInterfaceValid(interface)) {
+        AddDiagnostic(
+            result.Diagnostics,
+            options,
+            stage,
+            ShaderDiagnosticCode::InvalidReflection,
+            "normalized SPIR-V interface failed structural validation");
+        return result;
+    }
+    result.Interface = std::move(interface);
     return result;
 }
 
@@ -1960,7 +1908,9 @@ ShaderInterfaceBuildResult MergeGraphicsStageInterfaces(
         .BindingGroups = vertex.BindingGroups,
         .PushConstants = vertex.PushConstants,
         .VertexInputs = vertex.Inputs,
-        .VertexOutputs = vertex.Outputs};
+        .VertexOutputs = vertex.Outputs,
+        .PixelInputs = {},
+        .PixelOutputs = {}};
     Canonicalize(interface);
     if (!IsShaderInterfaceValid(interface)) {
         AddMergeDiagnostic(
@@ -2063,6 +2013,10 @@ ShaderInterfaceBuildResult BuildComputeShaderInterface(
         .Kind = ShaderProgramKind::Compute,
         .BindingGroups = compute.BindingGroups,
         .PushConstants = compute.PushConstants,
+        .VertexInputs = {},
+        .VertexOutputs = {},
+        .PixelInputs = {},
+        .PixelOutputs = {},
         .Compute = compute.Compute};
     Canonicalize(interface);
     if (!IsShaderInterfaceValid(interface)) {
@@ -2079,144 +2033,120 @@ ShaderInterfaceBuildResult BuildComputeShaderInterface(
 }
 
 bool IsShaderStageInterfaceValid(const ShaderStageInterfaceDesc& interface) noexcept {
-    try {
-        if (!IsSupportedStage(interface.Stage) || !ValidateBindingGroups(interface.BindingGroups) ||
-            !ValidatePushConstants(interface.PushConstants) || !ValidateIo(interface.Inputs) ||
-            !ValidateIo(interface.Outputs) ||
-            !ValidateInterfaceStages(
-                interface.BindingGroups,
-                interface.PushConstants,
-                ShaderStages{interface.Stage})) {
-            return false;
-        }
-        if (interface.Stage == ShaderStage::Compute) {
-            return interface.Compute.has_value() && interface.Compute->GroupSizeX != 0 &&
-                   interface.Compute->GroupSizeY != 0 && interface.Compute->GroupSizeZ != 0 &&
-                   interface.Inputs.empty() && interface.Outputs.empty();
-        }
-        return !interface.Compute.has_value();
-    } catch (...) {
+    if (!IsSupportedStage(interface.Stage) || !ValidateBindingGroups(interface.BindingGroups) ||
+        !ValidatePushConstants(interface.PushConstants) || !ValidateIo(interface.Inputs) ||
+        !ValidateIo(interface.Outputs) ||
+        !ValidateInterfaceStages(
+            interface.BindingGroups,
+            interface.PushConstants,
+            ShaderStages{interface.Stage})) {
         return false;
     }
+    if (interface.Stage == ShaderStage::Compute) {
+        return interface.Compute.has_value() && interface.Compute->GroupSizeX != 0 &&
+               interface.Compute->GroupSizeY != 0 && interface.Compute->GroupSizeZ != 0 &&
+               interface.Inputs.empty() && interface.Outputs.empty();
+    }
+    return !interface.Compute.has_value();
 }
 
 bool IsShaderInterfaceValid(const ShaderInterfaceDesc& interface) noexcept {
-    try {
-        if (!IsEnumInRange(interface.Kind, ShaderProgramKind::Compute) ||
-            !ValidateBindingGroups(interface.BindingGroups) ||
-            !ValidatePushConstants(interface.PushConstants) ||
-            !ValidateIo(interface.VertexInputs) || !ValidateIo(interface.VertexOutputs) ||
-            !ValidateIo(interface.PixelInputs) || !ValidateIo(interface.PixelOutputs)) {
-            return false;
-        }
-        if (interface.Kind == ShaderProgramKind::Compute) {
-            return interface.Compute.has_value() && interface.Compute->GroupSizeX != 0 &&
-                   interface.Compute->GroupSizeY != 0 && interface.Compute->GroupSizeZ != 0 &&
-                   interface.VertexInputs.empty() && interface.VertexOutputs.empty() &&
-                   interface.PixelInputs.empty() && interface.PixelOutputs.empty() &&
-                   ValidateInterfaceStages(
-                       interface.BindingGroups,
-                       interface.PushConstants,
-                       ShaderStage::Compute);
-        }
-        return !interface.Compute.has_value() &&
+    if (!IsEnumInRange(interface.Kind, ShaderProgramKind::Compute) ||
+        !ValidateBindingGroups(interface.BindingGroups) ||
+        !ValidatePushConstants(interface.PushConstants) ||
+        !ValidateIo(interface.VertexInputs) || !ValidateIo(interface.VertexOutputs) ||
+        !ValidateIo(interface.PixelInputs) || !ValidateIo(interface.PixelOutputs)) {
+        return false;
+    }
+    if (interface.Kind == ShaderProgramKind::Compute) {
+        return interface.Compute.has_value() && interface.Compute->GroupSizeX != 0 &&
+               interface.Compute->GroupSizeY != 0 && interface.Compute->GroupSizeZ != 0 &&
+               interface.VertexInputs.empty() && interface.VertexOutputs.empty() &&
+               interface.PixelInputs.empty() && interface.PixelOutputs.empty() &&
                ValidateInterfaceStages(
                    interface.BindingGroups,
                    interface.PushConstants,
-                   ShaderStage::Vertex | ShaderStage::Pixel);
-    } catch (...) {
-        return false;
+                   ShaderStage::Compute);
     }
+    return !interface.Compute.has_value() &&
+           ValidateInterfaceStages(
+               interface.BindingGroups,
+               interface.PushConstants,
+               ShaderStage::Vertex | ShaderStage::Pixel);
 }
 
 std::optional<vector<byte>> SerializeShaderStageInterface(
     const ShaderStageInterfaceDesc& interface) noexcept {
-    try {
-        if (!IsShaderStageInterfaceValid(interface)) return std::nullopt;
-        ShaderStageInterfaceDesc normalized = interface;
-        Canonicalize(normalized);
-        InterfaceWriter writer;
-        writer.U32(static_cast<uint32_t>(normalized.Stage));
-        WriteGroups(writer, normalized.BindingGroups);
-        WritePushConstants(writer, normalized.PushConstants);
-        WriteIo(writer, normalized.Inputs);
-        WriteIo(writer, normalized.Outputs);
-        WriteCompute(writer, normalized.Compute);
-        return std::move(writer.Data);
-    } catch (...) {
-        return std::nullopt;
-    }
+    if (!IsShaderStageInterfaceValid(interface)) return std::nullopt;
+    ShaderStageInterfaceDesc normalized = interface;
+    Canonicalize(normalized);
+    InterfaceWriter writer;
+    writer.U32(static_cast<uint32_t>(normalized.Stage));
+    WriteGroups(writer, normalized.BindingGroups);
+    WritePushConstants(writer, normalized.PushConstants);
+    WriteIo(writer, normalized.Inputs);
+    WriteIo(writer, normalized.Outputs);
+    WriteCompute(writer, normalized.Compute);
+    return std::move(writer).TakeData();
 }
 
 std::optional<vector<byte>> SerializeShaderInterface(
     const ShaderInterfaceDesc& interface) noexcept {
-    try {
-        if (!IsShaderInterfaceValid(interface)) return std::nullopt;
-        ShaderInterfaceDesc normalized = interface;
-        Canonicalize(normalized);
-        InterfaceWriter writer;
-        writer.U8(static_cast<uint8_t>(normalized.Kind));
-        WriteGroups(writer, normalized.BindingGroups);
-        WritePushConstants(writer, normalized.PushConstants);
-        WriteIo(writer, normalized.VertexInputs);
-        WriteIo(writer, normalized.VertexOutputs);
-        WriteIo(writer, normalized.PixelInputs);
-        WriteIo(writer, normalized.PixelOutputs);
-        WriteCompute(writer, normalized.Compute);
-        return std::move(writer.Data);
-    } catch (...) {
-        return std::nullopt;
-    }
+    if (!IsShaderInterfaceValid(interface)) return std::nullopt;
+    ShaderInterfaceDesc normalized = interface;
+    Canonicalize(normalized);
+    InterfaceWriter writer;
+    writer.U8(static_cast<uint8_t>(normalized.Kind));
+    WriteGroups(writer, normalized.BindingGroups);
+    WritePushConstants(writer, normalized.PushConstants);
+    WriteIo(writer, normalized.VertexInputs);
+    WriteIo(writer, normalized.VertexOutputs);
+    WriteIo(writer, normalized.PixelInputs);
+    WriteIo(writer, normalized.PixelOutputs);
+    WriteCompute(writer, normalized.Compute);
+    return std::move(writer).TakeData();
 }
 
 std::optional<ShaderStageInterfaceDesc> DeserializeShaderStageInterface(
     std::span<const byte> data) noexcept {
-    try {
-        InterfaceReader reader{data};
-        ShaderStageInterfaceDesc result;
-        uint32_t stage = 0;
-        if (!reader.U32(stage) ||
-            (stage != static_cast<uint32_t>(ShaderStage::Vertex) &&
-             stage != static_cast<uint32_t>(ShaderStage::Pixel) &&
-             stage != static_cast<uint32_t>(ShaderStage::Compute)) ||
-            !ReadGroups(reader, result.BindingGroups) ||
-            !ReadPushConstants(reader, result.PushConstants) ||
-            !ReadIo(reader, result.Inputs) || !ReadIo(reader, result.Outputs) ||
-            !ReadCompute(reader, result.Compute) || !reader.AtEnd()) {
-            return std::nullopt;
-        }
-        result.Stage = static_cast<ShaderStage>(stage);
-        if (!IsShaderStageInterfaceValid(result)) return std::nullopt;
-        const auto canonical = SerializeShaderStageInterface(result);
-        if (!canonical.has_value() || !std::ranges::equal(*canonical, data)) return std::nullopt;
-        return result;
-    } catch (...) {
+    InterfaceReader reader{data};
+    ShaderStageInterfaceDesc result;
+    uint32_t stage = 0;
+    if (!reader.U32(stage) ||
+        (stage != static_cast<uint32_t>(ShaderStage::Vertex) &&
+         stage != static_cast<uint32_t>(ShaderStage::Pixel) &&
+         stage != static_cast<uint32_t>(ShaderStage::Compute)) ||
+        !ReadGroups(reader, result.BindingGroups) ||
+        !ReadPushConstants(reader, result.PushConstants) ||
+        !ReadIo(reader, result.Inputs) || !ReadIo(reader, result.Outputs) ||
+        !ReadCompute(reader, result.Compute) || !reader.AtEnd()) {
         return std::nullopt;
     }
+    result.Stage = static_cast<ShaderStage>(stage);
+    if (!IsShaderStageInterfaceValid(result)) return std::nullopt;
+    const auto canonical = SerializeShaderStageInterface(result);
+    if (!canonical.has_value() || !std::ranges::equal(*canonical, data)) return std::nullopt;
+    return result;
 }
 
 std::optional<ShaderInterfaceDesc> DeserializeShaderInterface(
     std::span<const byte> data) noexcept {
-    try {
-        InterfaceReader reader{data};
-        ShaderInterfaceDesc result;
-        uint8_t kind = 0;
-        if (!reader.U8(kind) || kind > static_cast<uint8_t>(ShaderProgramKind::Compute) ||
-            !ReadGroups(reader, result.BindingGroups) ||
-            !ReadPushConstants(reader, result.PushConstants) ||
-            !ReadIo(reader, result.VertexInputs) || !ReadIo(reader, result.VertexOutputs) ||
-            !ReadIo(reader, result.PixelInputs) || !ReadIo(reader, result.PixelOutputs) ||
-            !ReadCompute(reader, result.Compute) || !reader.AtEnd()) {
-            return std::nullopt;
-        }
-        result.Kind = static_cast<ShaderProgramKind>(kind);
-        if (!IsShaderInterfaceValid(result)) return std::nullopt;
-        const auto canonical = SerializeShaderInterface(result);
-        if (!canonical.has_value() || !std::ranges::equal(*canonical, data)) return std::nullopt;
-        return result;
-    } catch (...) {
+    InterfaceReader reader{data};
+    ShaderInterfaceDesc result;
+    uint8_t kind = 0;
+    if (!reader.U8(kind) || kind > static_cast<uint8_t>(ShaderProgramKind::Compute) ||
+        !ReadGroups(reader, result.BindingGroups) ||
+        !ReadPushConstants(reader, result.PushConstants) ||
+        !ReadIo(reader, result.VertexInputs) || !ReadIo(reader, result.VertexOutputs) ||
+        !ReadIo(reader, result.PixelInputs) || !ReadIo(reader, result.PixelOutputs) ||
+        !ReadCompute(reader, result.Compute) || !reader.AtEnd()) {
         return std::nullopt;
     }
+    result.Kind = static_cast<ShaderProgramKind>(kind);
+    if (!IsShaderInterfaceValid(result)) return std::nullopt;
+    const auto canonical = SerializeShaderInterface(result);
+    if (!canonical.has_value() || !std::ranges::equal(*canonical, data)) return std::nullopt;
+    return result;
 }
 
 ShaderHash HashShaderStageInterface(const ShaderStageInterfaceDesc& interface) noexcept {
@@ -2261,67 +2191,63 @@ bool AreShaderBindingsAbiCompatible(
 bool IsShaderBindingAbiProjectionOf(
     const ShaderBindingDesc& projection,
     const ShaderBindingDesc& complete) noexcept {
-    try {
-        if (AreShaderBindingsAbiCompatible(projection, complete)) return true;
-        if (projection.BindingIndex != complete.BindingIndex ||
-            projection.Kind != complete.Kind || projection.Access != complete.Access ||
-            projection.Count != complete.Count ||
-            projection.Buffer.has_value() != complete.Buffer.has_value() ||
-            projection.Texture.has_value() != complete.Texture.has_value() ||
-            projection.Kind != ShaderBindingKind::ConstantBuffer ||
-            !projection.Buffer.has_value() || !complete.Buffer.has_value() ||
-            projection.Buffer->ByteSize > complete.Buffer->ByteSize ||
-            projection.Buffer->ElementStride != complete.Buffer->ElementStride) {
-            return false;
-        }
-
-        struct FieldSignature {
-            uint32_t Offset{0};
-            uint32_t Size{0};
-            ShaderValueTypeDesc Type{};
-
-            bool operator==(const FieldSignature&) const = default;
-        };
-        const auto appendFields = [](const auto& self,
-                                     const vector<ShaderInterfaceFieldDesc>& fields,
-                                     vector<FieldSignature>& output,
-                                     uint64_t offsetDelta) -> bool {
-            for (const ShaderInterfaceFieldDesc& field : fields) {
-                if (field.Members.empty()) {
-                    const uint64_t offset = offsetDelta + field.Offset;
-                    if (offset > std::numeric_limits<uint32_t>::max()) return false;
-                    output.emplace_back(FieldSignature{
-                        .Offset = static_cast<uint32_t>(offset),
-                        .Size = field.Size,
-                        .Type = field.Type});
-                    continue;
-                }
-                const uint32_t count = field.Type.ArrayCount > 1 ? field.Type.ArrayCount : 1;
-                const uint32_t stride = field.Type.ArrayCount > 1 ? field.Type.ArrayStride : 0;
-                for (uint32_t index = 0; index < count; ++index) {
-                    const uint64_t elementDelta = offsetDelta +
-                                                  static_cast<uint64_t>(index) * stride;
-                    if (elementDelta > std::numeric_limits<uint32_t>::max() ||
-                        !self(self, field.Members, output, elementDelta)) {
-                        return false;
-                    }
-                }
-            }
-            return true;
-        };
-
-        vector<FieldSignature> projectionFields;
-        vector<FieldSignature> completeFields;
-        if (!appendFields(appendFields, projection.Buffer->Fields, projectionFields, 0) ||
-            !appendFields(appendFields, complete.Buffer->Fields, completeFields, 0)) {
-            return false;
-        }
-        return std::ranges::all_of(projectionFields, [&](const FieldSignature& field) {
-            return std::ranges::find(completeFields, field) != completeFields.end();
-        });
-    } catch (...) {
+    if (AreShaderBindingsAbiCompatible(projection, complete)) return true;
+    if (projection.BindingIndex != complete.BindingIndex ||
+        projection.Kind != complete.Kind || projection.Access != complete.Access ||
+        projection.Count != complete.Count ||
+        projection.Buffer.has_value() != complete.Buffer.has_value() ||
+        projection.Texture.has_value() != complete.Texture.has_value() ||
+        projection.Kind != ShaderBindingKind::ConstantBuffer ||
+        !projection.Buffer.has_value() || !complete.Buffer.has_value() ||
+        projection.Buffer->ByteSize > complete.Buffer->ByteSize ||
+        projection.Buffer->ElementStride != complete.Buffer->ElementStride) {
         return false;
     }
+
+    struct FieldSignature {
+        uint32_t Offset{0};
+        uint32_t Size{0};
+        ShaderValueTypeDesc Type{};
+
+        bool operator==(const FieldSignature&) const = default;
+    };
+    const auto appendFields = [](const auto& self,
+                                 const vector<ShaderInterfaceFieldDesc>& fields,
+                                 vector<FieldSignature>& output,
+                                 uint64_t offsetDelta) -> bool {
+        for (const ShaderInterfaceFieldDesc& field : fields) {
+            if (field.Members.empty()) {
+                const uint64_t offset = offsetDelta + field.Offset;
+                if (offset > std::numeric_limits<uint32_t>::max()) return false;
+                output.emplace_back(FieldSignature{
+                    .Offset = static_cast<uint32_t>(offset),
+                    .Size = field.Size,
+                    .Type = field.Type});
+                continue;
+            }
+            const uint32_t count = field.Type.ArrayCount > 1 ? field.Type.ArrayCount : 1;
+            const uint32_t stride = field.Type.ArrayCount > 1 ? field.Type.ArrayStride : 0;
+            for (uint32_t index = 0; index < count; ++index) {
+                const uint64_t elementDelta = offsetDelta +
+                                              static_cast<uint64_t>(index) * stride;
+                if (elementDelta > std::numeric_limits<uint32_t>::max() ||
+                    !self(self, field.Members, output, elementDelta)) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    };
+
+    vector<FieldSignature> projectionFields;
+    vector<FieldSignature> completeFields;
+    if (!appendFields(appendFields, projection.Buffer->Fields, projectionFields, 0) ||
+        !appendFields(appendFields, complete.Buffer->Fields, completeFields, 0)) {
+        return false;
+    }
+    return std::ranges::all_of(projectionFields, [&](const FieldSignature& field) {
+        return std::ranges::find(completeFields, field) != completeFields.end();
+    });
 }
 
 }  // namespace radray::shader

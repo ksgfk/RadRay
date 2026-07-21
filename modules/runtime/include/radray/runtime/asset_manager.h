@@ -29,10 +29,6 @@ enum class AssetState {
     Unloaded,  ///< slot 已回收或 AssetManager 已析构。
 };
 
-/// 运行时弱句柄。POD,可自由拷贝/比较。指向 AssetManager 的 slot。
-/// 带 generation 检测悬垂:slot 回收复用后旧句柄解析即失效。【不可序列化】。
-using AssetHandle = SparseSetHandle;
-
 struct AssetWaitRecord : ManualCoroutineRecord {
     AssetHandle Handle{AssetHandle::Invalid()};
 };
@@ -287,6 +283,7 @@ public:
     void Pump();
 
     uint32_t GetAssetCount() const noexcept { return _slots.Count(); }
+    bool IsHandleValid(AssetHandle handle) const noexcept { return _slots.IsAlive(handle); }
 
 private:
     friend class AssetWaitAwaitable;

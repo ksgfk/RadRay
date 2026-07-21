@@ -1,6 +1,5 @@
 #include <radray/runtime/shader_asset.h>
 
-#include <atomic>
 #include <limits>
 #include <utility>
 
@@ -8,12 +7,6 @@
 
 namespace radray {
 namespace {
-
-std::atomic<uint64_t> gNextShaderAssetInstanceId{1};
-
-uint64_t AllocateShaderAssetInstanceId() noexcept {
-    return gNextShaderAssetInstanceId.fetch_add(1, std::memory_order_relaxed);
-}
 
 AssetLoadTask LoadShaderAssetTask(AssetId expectedId, std::filesystem::path path) {
     std::optional<shader::ShaderBinary> binary = shader::ReadShaderBinary(path);
@@ -32,8 +25,7 @@ AssetLoadTask LoadShaderAssetTask(AssetId expectedId, std::filesystem::path path
 
 }  // namespace
 
-ShaderAsset::ShaderAsset() noexcept
-    : _instanceId(AllocateShaderAssetInstanceId()) {}
+ShaderAsset::ShaderAsset() noexcept = default;
 
 render::CompareFunction ToRenderCompareFunction(shader::CompareFunction value) noexcept {
     switch (value) {
@@ -139,14 +131,13 @@ render::StencilState ToRenderStencilState(const shader::StencilState& value) noe
         .WriteMask = value.WriteMask};
 }
 
-ShaderAsset::ShaderAsset(vector<ShaderPassDesc> passes) noexcept
-    : _instanceId(AllocateShaderAssetInstanceId()) {
+ShaderAsset::ShaderAsset(vector<ShaderPassDesc> passes) noexcept {
     _binary.Asset.Passes = std::move(passes);
     _valid = shader::IsShaderAssetDataValid(_binary.Asset, false);
 }
 
 ShaderAsset::ShaderAsset(shader::ShaderBinary binary) noexcept
-    : _binary(std::move(binary)), _instanceId(AllocateShaderAssetInstanceId()) {
+    : _binary(std::move(binary)) {
     _valid = _binary.IsValid();
 }
 

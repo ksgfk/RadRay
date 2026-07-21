@@ -188,14 +188,14 @@ stage cache 使用 stage-projected defines，因此不同 full variant 可以共
 
 source graph scanner 递归处理字面量 `#include "..."` / `#include <...>`，并保守包含条件分支中的 include。宏展开 include 当前会被拒绝，因为无法在编译前可靠计算传递内容身份。
 
-shader cooker 会为每个 Pass 计算并持久化 source identity。存在 baked program 的 Pass 必须携带这个 identity，JIT miss 才能证明实时源码与 baked artifact 来自同一快照。完全没有 baked program 的 JIT-only manifest 可以在第一次请求时为 `(ShaderAsset instance, pass index)` 惰性封存 identity：
+shader cooker 会为每个 Pass 计算并持久化 source identity。存在 baked program 的 Pass 必须携带这个 identity，JIT miss 才能证明实时源码与 baked artifact 来自同一快照。完全没有 baked program 的 JIT-only manifest 可以在第一次请求时为 `(AssetHandle, pass index)` 惰性封存 identity；这类 ShaderAsset 必须已经发布到 resolver 绑定的 `AssetManager`：
 
 - 源文件未变化时继续使用同一 cache identity；
 - 源文件变化后，旧 ShaderAsset 仍可返回已有 memory/disk artifact；
 - 旧对象不能为新的 miss 编译变化后的源码；
-- hot reload 必须创建新的不可变 ShaderAsset 实例，新实例获得新的 source identity。
+- hot reload 必须通过新的 AssetManager slot 发布不可变 ShaderAsset，新 generation handle 获得新的 source identity。
 
-已有 pass identity 时，resolver 会先按捕获值查询 memory/disk cache，再读取当前 source graph。因而旧资产的已有 artifact 不依赖源码继续存在；只有真正的 cache miss 才要求实时源码可用且仍与该不可变对象的捕获身份一致。不同 Pass 的源码身份互不覆盖。
+已有 pass identity 时，resolver 会先按捕获值查询 memory/disk cache，再读取当前 source graph。因而旧资产的已有 artifact 不依赖源码继续存在；只有真正的 cache miss 才要求实时源码可用且仍与该不可变对象的捕获身份一致。不同 Pass 的源码身份互不覆盖，resolver 在访问 source snapshot 表时会移除 AssetManager 已判定失效的 generation handle。
 
 每个 resolved program 还携带由 source identity、pass index、完整 defines、entry point、shader model 和编译选项计算出的稳定 program identity。Material 会重新计算并验证它，因此另一份不同源码或不同 Pass 配置的结果不能扩展当前 layout；内容完全等价的资产仍可共享 artifact cache。
 

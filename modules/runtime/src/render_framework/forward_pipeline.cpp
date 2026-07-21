@@ -1,5 +1,5 @@
 #include <radray/runtime/render_framework/forward_pipeline.h>
-#include <radray/runtime/shader_parameters.h>
+#include <radray/runtime/shader_binding_policy.h>
 
 namespace radray {
 namespace {
@@ -33,7 +33,8 @@ shader::ShaderInterfaceFieldDesc Float4Field(
             4,
             size,
             arrayCount,
-            arrayCount > 1 ? 16 : 0)};
+            arrayCount > 1 ? 16 : 0),
+        .Members = {}};
 }
 
 shader::ShaderInterfaceFieldDesc UInt4Field(string name, uint32_t offset) {
@@ -41,7 +42,8 @@ shader::ShaderInterfaceFieldDesc UInt4Field(string name, uint32_t offset) {
         .Name = std::move(name),
         .Offset = offset,
         .Size = 16,
-        .Type = VectorType(shader::ShaderScalarType::UInt32, 4, 16)};
+        .Type = VectorType(shader::ShaderScalarType::UInt32, 4, 16),
+        .Members = {}};
 }
 
 shader::ShaderInterfaceFieldDesc MatrixField(
@@ -60,7 +62,8 @@ shader::ShaderInterfaceFieldDesc MatrixField(
             .ArrayCount = arrayCount,
             .ArrayStride = arrayCount > 1 ? 64u : 0u,
             .MatrixStride = 16,
-            .ByteSize = size}};
+            .ByteSize = size},
+        .Members = {}};
 }
 
 shader::ShaderInterfaceFieldDesc StructField(

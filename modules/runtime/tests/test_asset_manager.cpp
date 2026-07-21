@@ -498,6 +498,9 @@ TEST(AssetManagerTest, ForceUnloadInvalidatesLiveReferences) {
     StreamingAssetRef<CpuAsset> b = a;  // 两个存活引用
     ASSERT_TRUE(a.IsReady());
     ASSERT_TRUE(b.IsReady());
+    const AssetHandle handle = a.GetHandle();
+    EXPECT_EQ(a->GetAssetHandle(), handle);
+    EXPECT_TRUE(mgr.IsHandleValid(handle));
 
     mgr.Unload(id);  // 无视 refcount 强制回收(DEBUG 下打 warning)
 
@@ -506,6 +509,7 @@ TEST(AssetManagerTest, ForceUnloadInvalidatesLiveReferences) {
     EXPECT_EQ(a.Get(), nullptr);
     EXPECT_EQ(b.Get(), nullptr);
     EXPECT_EQ(mgr.GetAssetCount(), 0u);
+    EXPECT_FALSE(mgr.IsHandleValid(handle));
 
     // 存活引用析构走 Release(旧 handle),因 generation 不匹配为 no-op,不崩溃。
 }

@@ -91,13 +91,21 @@ ShaderBinary MakeBinary() {
         MakeArtifact(ShaderTarget::SPIRV, {}, byte{0x03}, 1),
         MakeArtifact(ShaderTarget::SPIRV, {"USE_TEST=1"}, byte{0x04}, 1)};
     result.ProgramVariants = {
-        ShaderProgramVariantArtifact{.Target = ShaderTarget::DXIL, .StageArtifactIndices = {0}, .InterfaceIndex = 0},
+        ShaderProgramVariantArtifact{
+            .Target = ShaderTarget::DXIL,
+            .Defines = {},
+            .StageArtifactIndices = {0},
+            .InterfaceIndex = 0},
         ShaderProgramVariantArtifact{
             .Target = ShaderTarget::DXIL,
             .Defines = {"USE_TEST=1"},
             .StageArtifactIndices = {1},
             .InterfaceIndex = 0},
-        ShaderProgramVariantArtifact{.Target = ShaderTarget::SPIRV, .StageArtifactIndices = {2}, .InterfaceIndex = 0},
+        ShaderProgramVariantArtifact{
+            .Target = ShaderTarget::SPIRV,
+            .Defines = {},
+            .StageArtifactIndices = {2},
+            .InterfaceIndex = 0},
         ShaderProgramVariantArtifact{
             .Target = ShaderTarget::SPIRV,
             .Defines = {"USE_TEST=1"},

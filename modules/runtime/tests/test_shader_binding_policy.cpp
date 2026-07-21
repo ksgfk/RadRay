@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 
-#include <radray/runtime/shader_parameters.h>
+#include <radray/runtime/shader_binding_policy.h>
 
 namespace radray {
 namespace {
@@ -43,14 +43,20 @@ shader::ShaderInterfaceFieldDesc MakeFloat4(std::string_view name, uint32_t offs
             .Rows = 1,
             .Columns = 4,
             .ArrayCount = 1,
-            .ByteSize = 16}};
+            .ByteSize = 16},
+        .Members = {}};
 }
 
 shader::ShaderInterfaceDesc MakeInterface(
     vector<shader::ShaderBindingGroupInterfaceDesc> groups) {
     return shader::ShaderInterfaceDesc{
         .Kind = shader::ShaderProgramKind::Graphics,
-        .BindingGroups = std::move(groups)};
+        .BindingGroups = std::move(groups),
+        .PushConstants = {},
+        .VertexInputs = {},
+        .VertexOutputs = {},
+        .PixelInputs = {},
+        .PixelOutputs = {}};
 }
 
 shared_ptr<const IShaderBindingProvider> MakeProvider() {

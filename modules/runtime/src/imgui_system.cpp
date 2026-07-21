@@ -651,6 +651,7 @@ Nullable<unique_ptr<ImGuiRenderer>> ImGuiRenderer::Create(const ImGuiRendererDes
                 .Dim = shader::SpirvImageDim::Dim2D,
                 .SampledType = 0,
             },
+            .HlslType = {},
         });
         auto& samplerPS = reflPS.ResourceBindings.emplace_back();
         samplerPS.Name = "gSampler";

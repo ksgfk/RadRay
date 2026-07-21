@@ -7,6 +7,7 @@
 
 #include <fmt/format.h>
 
+#include <radray/binary_io.h>
 #include <radray/file.h>
 
 namespace radray::shader {
@@ -132,24 +133,6 @@ bool ParseIncludes(
         lineBegin = lineEnd + 1;
     }
     return true;
-}
-
-void AppendU32(vector<byte>& output, uint32_t value) {
-    for (uint32_t i = 0; i < 4; ++i) {
-        output.emplace_back(static_cast<byte>((value >> (i * 8)) & 0xffu));
-    }
-}
-
-void AppendU64(vector<byte>& output, uint64_t value) {
-    for (uint32_t i = 0; i < 8; ++i) {
-        output.emplace_back(static_cast<byte>((value >> (i * 8)) & 0xffu));
-    }
-}
-
-void AppendString(vector<byte>& output, std::string_view value) {
-    AppendU32(output, static_cast<uint32_t>(value.size()));
-    const auto bytes = std::as_bytes(std::span{value.data(), value.size()});
-    output.insert(output.end(), bytes.begin(), bytes.end());
 }
 
 bool IsUtf8Valid(std::string_view value) noexcept {
@@ -362,120 +345,110 @@ ShaderSourceIdentityResult ComputeShaderSourceIdentity(
     const std::filesystem::path& shaderRoot,
     const ShaderPassDesc& pass) noexcept {
     ShaderSourceIdentityResult result;
-    try {
-        std::error_code error;
-        const std::filesystem::path root = std::filesystem::weakly_canonical(shaderRoot, error);
-        if (error || !std::filesystem::is_directory(root)) {
-            result.Error = fmt::format("shader root '{}' is unavailable", shaderRoot.string());
-            return result;
-        }
-        vector<std::filesystem::path> includeRoots{root};
-        for (const string& includeDir : pass.IncludeDirs) {
-            const std::filesystem::path includeRoot = std::filesystem::weakly_canonical(
-                root / std::filesystem::path{
-                           std::u8string{includeDir.begin(), includeDir.end()}},
-                error);
-            if (error || !std::filesystem::is_directory(includeRoot) ||
-                !IsPathUnderRoot(root, includeRoot)) {
-                result.Error = fmt::format(
-                    "shader include directory '{}' is unavailable",
-                    includeDir);
-                return result;
-            }
-            includeRoots.emplace_back(includeRoot);
-        }
-
-        vector<SourceFile> files;
-        vector<std::filesystem::path> pending{
-            root / std::filesystem::path{
-                       std::u8string{pass.SourcePath.begin(), pass.SourcePath.end()}}};
-        while (!pending.empty()) {
-            const std::filesystem::path requested = std::move(pending.back());
-            pending.pop_back();
-            const std::filesystem::path path = std::filesystem::weakly_canonical(requested, error);
-            if (error || !std::filesystem::is_regular_file(path) ||
-                !IsPathUnderRoot(root, path)) {
-                result.Error = fmt::format(
-                    "shader source '{}' is missing or escapes the shader root",
-                    requested.string());
-                return result;
-            }
-            const string identityPath = path.lexically_relative(root).generic_string();
-            if (std::ranges::any_of(files, [&](const SourceFile& value) {
-                    return value.IdentityPath == identityPath;
-                })) {
-                continue;
-            }
-            auto bytes = ReadBinaryFile(path);
-            if (!bytes.has_value()) {
-                result.Error = fmt::format("failed to read shader source '{}'", path.string());
-                return result;
-            }
-            string text{
-                reinterpret_cast<const char*>(bytes->data()),
-                bytes->size()};
-            vector<string> includes;
-            if (!ParseIncludes(text, includes, result.Error)) {
-                result.Error = fmt::format("{} in '{}'", result.Error, identityPath);
-                return result;
-            }
-            files.emplace_back(SourceFile{
-                .IdentityPath = identityPath,
-                .Path = path,
-                .Bytes = std::move(*bytes)});
-            for (const string& include : includes) {
-                std::optional<std::filesystem::path> resolved;
-                vector<std::filesystem::path> searchRoots{path.parent_path()};
-                searchRoots.insert(
-                    searchRoots.end(),
-                    includeRoots.begin(),
-                    includeRoots.end());
-                for (const std::filesystem::path& searchRoot : searchRoots) {
-                    const std::filesystem::path candidate =
-                        searchRoot /
-                        std::filesystem::path{std::u8string{include.begin(), include.end()}};
-                    if (std::filesystem::is_regular_file(candidate)) {
-                        resolved = candidate;
-                        break;
-                    }
-                }
-                if (!resolved.has_value()) {
-                    result.Error = fmt::format(
-                        "include '{}' referenced by '{}' is unavailable",
-                        include,
-                        identityPath);
-                    return result;
-                }
-                pending.emplace_back(std::move(*resolved));
-            }
-        }
-
-        std::ranges::sort(files, {}, &SourceFile::IdentityPath);
-        vector<byte> identityBytes;
-        AppendString(identityBytes, "radray-source-graph-v1");
-        result.Identity.emplace();
-        for (const SourceFile& file : files) {
-            AppendString(identityBytes, file.IdentityPath);
-            AppendU64(identityBytes, static_cast<uint64_t>(file.Bytes.size()));
-            identityBytes.insert(identityBytes.end(), file.Bytes.begin(), file.Bytes.end());
-            result.Identity->Dependencies.emplace_back(file.IdentityPath);
-        }
-        if (files.empty()) {
-            result.Identity.reset();
-            result.Error = "shader source graph is empty";
-            return result;
-        }
-        result.Identity->Hash = HashShaderBytes(identityBytes);
-        return result;
-    } catch (const std::exception& error) {
-        result.Identity.reset();
-        result.Error = error.what();
-        return result;
-    } catch (...) {
-        result.Identity.reset();
-        result.Error = "failed to compute shader source identity";
+    std::error_code error;
+    const std::filesystem::path root = std::filesystem::weakly_canonical(shaderRoot, error);
+    if (error || !std::filesystem::is_directory(root, error) || error) {
+        result.Error = fmt::format("shader root '{}' is unavailable", shaderRoot.string());
         return result;
     }
+    vector<std::filesystem::path> includeRoots{root};
+    for (const string& includeDir : pass.IncludeDirs) {
+        const std::filesystem::path includeRoot = std::filesystem::weakly_canonical(
+            root / std::filesystem::path{
+                       std::u8string{includeDir.begin(), includeDir.end()}},
+            error);
+        if (error || !std::filesystem::is_directory(includeRoot, error) || error ||
+            !IsPathUnderRoot(root, includeRoot)) {
+            result.Error = fmt::format(
+                "shader include directory '{}' is unavailable",
+                includeDir);
+            return result;
+        }
+        includeRoots.emplace_back(includeRoot);
+    }
+
+    vector<SourceFile> files;
+    vector<std::filesystem::path> pending{
+        root / std::filesystem::path{
+                   std::u8string{pass.SourcePath.begin(), pass.SourcePath.end()}}};
+    while (!pending.empty()) {
+        const std::filesystem::path requested = std::move(pending.back());
+        pending.pop_back();
+        const std::filesystem::path path = std::filesystem::weakly_canonical(requested, error);
+        if (error || !std::filesystem::is_regular_file(path, error) || error ||
+            !IsPathUnderRoot(root, path)) {
+            result.Error = fmt::format(
+                "shader source '{}' is missing or escapes the shader root",
+                requested.string());
+            return result;
+        }
+        const string identityPath = path.lexically_relative(root).generic_string();
+        if (std::ranges::any_of(files, [&](const SourceFile& value) {
+                return value.IdentityPath == identityPath;
+            })) {
+            continue;
+        }
+        auto bytes = ReadBinaryFile(path);
+        if (!bytes.has_value()) {
+            result.Error = fmt::format("failed to read shader source '{}'", path.string());
+            return result;
+        }
+        string text{
+            reinterpret_cast<const char*>(bytes->data()),
+            bytes->size()};
+        vector<string> includes;
+        if (!ParseIncludes(text, includes, result.Error)) {
+            result.Error = fmt::format("{} in '{}'", result.Error, identityPath);
+            return result;
+        }
+        files.emplace_back(SourceFile{
+            .IdentityPath = identityPath,
+            .Path = path,
+            .Bytes = std::move(*bytes)});
+        for (const string& include : includes) {
+            std::optional<std::filesystem::path> resolved;
+            vector<std::filesystem::path> searchRoots{path.parent_path()};
+            searchRoots.insert(
+                searchRoots.end(),
+                includeRoots.begin(),
+                includeRoots.end());
+            for (const std::filesystem::path& searchRoot : searchRoots) {
+                const std::filesystem::path candidate =
+                    searchRoot /
+                    std::filesystem::path{std::u8string{include.begin(), include.end()}};
+                if (std::filesystem::is_regular_file(candidate, error) && !error) {
+                    resolved = candidate;
+                    break;
+                }
+            }
+            if (!resolved.has_value()) {
+                result.Error = fmt::format(
+                    "include '{}' referenced by '{}' is unavailable",
+                    include,
+                    identityPath);
+                return result;
+            }
+            pending.emplace_back(std::move(*resolved));
+        }
+    }
+
+    std::ranges::sort(files, {}, &SourceFile::IdentityPath);
+    BinaryWriter identityBytes;
+    identityBytes.String("radray-source-graph-v1");
+    result.Identity.emplace();
+    for (const SourceFile& file : files) {
+        identityBytes.String(file.IdentityPath);
+        identityBytes.U64(static_cast<uint64_t>(file.Bytes.size()));
+        identityBytes.Bytes(file.Bytes);
+        result.Identity->Dependencies.emplace_back(file.IdentityPath);
+    }
+    if (files.empty()) {
+        result.Identity.reset();
+        result.Error = "shader source graph is empty";
+        return result;
+    }
+    result.Identity->Hash = HashShaderBytes(identityBytes.GetData());
+    return result;
 }
 
 void NormalizeShaderDefines(vector<string>& defines) {
@@ -488,30 +461,26 @@ bool IsShaderAssetDataValid(const ShaderAssetData& asset, bool requireBakeSet) n
     if (asset.Passes.empty() || asset.Passes.size() > std::numeric_limits<uint32_t>::max()) {
         return false;
     }
-    try {
-        if (!std::ranges::all_of(asset.Passes, [requireBakeSet](const ShaderPassDesc& pass) {
-                return IsPassValid(pass, requireBakeSet);
-            })) {
-            return false;
-        }
-        unordered_map<string, ShaderKeywordScope> scopes;
-        for (const ShaderPassDesc& pass : asset.Passes) {
-            for (const ShaderKeywordGroupDesc& group : pass.VariantDomain.KeywordGroups) {
-                for (const string& alternative : group.Alternatives) {
-                    if (alternative.empty()) {
-                        continue;
-                    }
-                    const auto [it, inserted] = scopes.emplace(alternative, group.Scope);
-                    if (!inserted && it->second != group.Scope) {
-                        return false;
-                    }
+    if (!std::ranges::all_of(asset.Passes, [requireBakeSet](const ShaderPassDesc& pass) {
+            return IsPassValid(pass, requireBakeSet);
+        })) {
+        return false;
+    }
+    unordered_map<string, ShaderKeywordScope> scopes;
+    for (const ShaderPassDesc& pass : asset.Passes) {
+        for (const ShaderKeywordGroupDesc& group : pass.VariantDomain.KeywordGroups) {
+            for (const string& alternative : group.Alternatives) {
+                if (alternative.empty()) {
+                    continue;
+                }
+                const auto [it, inserted] = scopes.emplace(alternative, group.Scope);
+                if (!inserted && it->second != group.Scope) {
+                    return false;
                 }
             }
         }
-        return true;
-    } catch (...) {
-        return false;
     }
+    return true;
 }
 
 bool AreShaderDefinesValid(
@@ -579,25 +548,17 @@ vector<string> ProjectShaderDefines(
 }
 
 bool IsShaderVariantInDomain(const ShaderPassDesc& pass, const vector<string>& defines) noexcept {
-    try {
-        vector<string> normalized = defines;
-        NormalizeShaderDefines(normalized);
-        return AreShaderDefinesValid(pass, ShaderStage::UNKNOWN, normalized);
-    } catch (...) {
-        return false;
-    }
+    vector<string> normalized = defines;
+    NormalizeShaderDefines(normalized);
+    return AreShaderDefinesValid(pass, ShaderStage::UNKNOWN, normalized);
 }
 
 bool IsBakedShaderVariant(const ShaderPassDesc& pass, const vector<string>& defines) noexcept {
-    try {
-        vector<string> normalized = defines;
-        NormalizeShaderDefines(normalized);
-        return std::ranges::any_of(
-            pass.BakeSet.Variants,
-            [&normalized](const ShaderVariantKey& variant) noexcept { return variant.Defines == normalized; });
-    } catch (...) {
-        return false;
-    }
+    vector<string> normalized = defines;
+    NormalizeShaderDefines(normalized);
+    return std::ranges::any_of(
+        pass.BakeSet.Variants,
+        [&normalized](const ShaderVariantKey& variant) noexcept { return variant.Defines == normalized; });
 }
 
 std::optional<std::string_view> FindShaderEntryPoint(
