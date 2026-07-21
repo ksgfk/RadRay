@@ -200,14 +200,6 @@ public:
     void Destroy() noexcept override {}
     render::RenderBackend GetBackend() noexcept override { return Backend; }
     render::DeviceDetail GetDetail() const noexcept override { return {}; }
-    bool InitializeNativeGraphicsPipelineCache(std::span<const byte> initialData) noexcept override {
-        ++NativeCacheInitializeCount;
-        InitialNativeCacheData.assign(initialData.begin(), initialData.end());
-        return AllowNativeCacheInitialization;
-    }
-    std::optional<vector<byte>> SerializeNativeGraphicsPipelineCache() noexcept override {
-        return NativeCacheData;
-    }
 
     Nullable<render::CommandQueue*> GetCommandQueue(render::QueueType, uint32_t) noexcept override { return nullptr; }
     Nullable<unique_ptr<render::CommandBuffer>> CreateCommandBuffer(render::CommandQueue*) noexcept override { return nullptr; }

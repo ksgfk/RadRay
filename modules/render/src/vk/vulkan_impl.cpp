@@ -1287,90 +1287,6 @@ DeviceDetail DeviceVulkan::GetDetail() const noexcept {
     return _detail;
 }
 
-bool DeviceVulkan::InitializeNativeGraphicsPipelineCache(
-    std::span<const byte> initialData) noexcept {
-    if (_device == VK_NULL_HANDLE) {
-        return false;
-    }
-    if (_pipelineCache != VK_NULL_HANDLE) {
-        _ftb.vkDestroyPipelineCache(_device, _pipelineCache, GetAllocationCallbacks());
-        _pipelineCache = VK_NULL_HANDLE;
-    }
-
-    bool compatible = initialData.empty();
-    if (initialData.size() >= sizeof(VkPipelineCacheHeaderVersionOne)) {
-        VkPipelineCacheHeaderVersionOne header{};
-        std::memcpy(&header, initialData.data(), sizeof(header));
-        compatible = header.headerSize >= sizeof(VkPipelineCacheHeaderVersionOne) &&
-                     header.headerSize <= initialData.size() &&
-                     header.headerVersion == VK_PIPELINE_CACHE_HEADER_VERSION_ONE &&
-                     header.vendorID == _properties.vendorID &&
-                     header.deviceID == _properties.deviceID &&
-                     std::memcmp(
-                         header.pipelineCacheUUID,
-                         _properties.pipelineCacheUUID,
-                         VK_UUID_SIZE) == 0;
-    }
-    if (!compatible) {
-        RADRAY_WARN_LOG("Vulkan pipeline cache blob is incompatible; creating an empty cache");
-        initialData = {};
-    }
-
-    const auto createCache = [&](std::span<const byte> data) noexcept {
-        VkPipelineCacheCreateInfo createInfo{};
-        createInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
-        createInfo.initialDataSize = data.size();
-        createInfo.pInitialData = data.empty() ? nullptr : data.data();
-        return _ftb.vkCreatePipelineCache(
-            _device,
-            &createInfo,
-            GetAllocationCallbacks(),
-            &_pipelineCache);
-    };
-    VkResult result = createCache(initialData);
-    if (result != VK_SUCCESS && !initialData.empty()) {
-        RADRAY_WARN_LOG("vkCreatePipelineCache rejected cached data: {}; retrying empty", result);
-        _pipelineCache = VK_NULL_HANDLE;
-        result = createCache({});
-    }
-    if (result != VK_SUCCESS) {
-        RADRAY_WARN_LOG("vkCreatePipelineCache failed: {}", result);
-        _pipelineCache = VK_NULL_HANDLE;
-        return false;
-    }
-    return true;
-}
-
-std::optional<vector<byte>> DeviceVulkan::SerializeNativeGraphicsPipelineCache() noexcept {
-    if (_device == VK_NULL_HANDLE || _pipelineCache == VK_NULL_HANDLE) {
-        return vector<byte>{};
-    }
-    for (uint32_t attempt = 0; attempt < 3; ++attempt) {
-        size_t size = 0;
-        VkResult result = _ftb.vkGetPipelineCacheData(_device, _pipelineCache, &size, nullptr);
-        if (result != VK_SUCCESS) {
-            RADRAY_WARN_LOG("vkGetPipelineCacheData(size) failed: {}", result);
-            return std::nullopt;
-        }
-        vector<byte> data(size);
-        result = _ftb.vkGetPipelineCacheData(
-            _device,
-            _pipelineCache,
-            &size,
-            data.empty() ? nullptr : data.data());
-        if (result == VK_SUCCESS) {
-            data.resize(size);
-            return data;
-        }
-        if (result != VK_INCOMPLETE) {
-            RADRAY_WARN_LOG("vkGetPipelineCacheData failed: {}", result);
-            return std::nullopt;
-        }
-    }
-    RADRAY_WARN_LOG("vkGetPipelineCacheData remained incomplete after retries");
-    return std::nullopt;
-}
-
 Nullable<CommandQueue*> DeviceVulkan::GetCommandQueue(QueueType type, uint32_t slot) noexcept {
     auto index = static_cast<std::underlying_type_t<QueueType>>(type);
     if (index >= static_cast<std::underlying_type_t<QueueType>>(QueueType::MAX_COUNT)) {
@@ -2693,7 +2609,7 @@ Nullable<unique_ptr<GraphicsPipelineState>> DeviceVulkan::CreateGraphicsPipeline
     createInfo.basePipelineHandle = VK_NULL_HANDLE;
     createInfo.basePipelineIndex = 0;
     VkPipeline pipeline = VK_NULL_HANDLE;
-    if (auto vr = _ftb.vkCreateGraphicsPipelines(_device, _pipelineCache, 1, &createInfo, this->GetAllocationCallbacks(), &pipeline);
+    if (auto vr = _ftb.vkCreateGraphicsPipelines(_device, nullptr, 1, &createInfo, this->GetAllocationCallbacks(), &pipeline);
         vr != VK_SUCCESS) {
         RADRAY_ERR_LOG("vkCreateGraphicsPipelines failed: {}", vr);
         return nullptr;
@@ -3277,10 +3193,6 @@ void DeviceVulkan::DestroyImpl() noexcept {
     _vma.reset();
     for (auto&& i : _queues) {
         i.clear();
-    }
-    if (_device != VK_NULL_HANDLE && _pipelineCache != VK_NULL_HANDLE) {
-        _ftb.vkDestroyPipelineCache(_device, _pipelineCache, GetAllocationCallbacks());
-        _pipelineCache = VK_NULL_HANDLE;
     }
     if (_device != VK_NULL_HANDLE) {
         _ftb.vkDestroyDevice(_device, this->GetAllocationCallbacks());

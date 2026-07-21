@@ -1050,8 +1050,6 @@ void DeviceD3D12::DestroyImpl() noexcept {
     _drawIndirectSignature = nullptr;
     _drawIndexedIndirectSignature = nullptr;
     _dispatchIndirectSignature = nullptr;
-    _pipelineLibrary = nullptr;
-    _pipelineLibraryInitialData.clear();
     _mainAlloc = nullptr;
     _device = nullptr;
     _dxgiAdapter = nullptr;
@@ -1255,67 +1253,6 @@ Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc
 
 DeviceDetail DeviceD3D12::GetDetail() const noexcept {
     return _detail;
-}
-
-bool DeviceD3D12::InitializeNativeGraphicsPipelineCache(
-    std::span<const byte> initialData) noexcept {
-    _pipelineLibrary.Reset();
-    _pipelineLibraryInitialData.clear();
-    if (_device == nullptr) {
-        return false;
-    }
-    ComPtr<ID3D12Device1> device1;
-    if (HRESULT hr = _device.As(&device1); FAILED(hr)) {
-        RADRAY_WARN_LOG("ID3D12Device1 is unavailable; native pipeline cache disabled: {} {}", GetErrorName(hr), hr);
-        return false;
-    }
-
-    const auto createLibrary = [&](std::span<const byte> data) noexcept {
-        return device1->CreatePipelineLibrary(
-            data.empty() ? nullptr : data.data(),
-            data.size(),
-            IID_PPV_ARGS(_pipelineLibrary.ReleaseAndGetAddressOf()));
-    };
-    try {
-        _pipelineLibraryInitialData.assign(initialData.begin(), initialData.end());
-    } catch (...) {
-        RADRAY_WARN_LOG("failed to retain D3D12 pipeline library initialization data");
-        return false;
-    }
-    HRESULT hr = createLibrary(_pipelineLibraryInitialData);
-    if (FAILED(hr) && !initialData.empty()) {
-        RADRAY_WARN_LOG(
-            "D3D12 pipeline library blob is incompatible; creating an empty library: {} {}",
-            GetErrorName(hr),
-            hr);
-        _pipelineLibraryInitialData.clear();
-        hr = createLibrary({});
-    }
-    if (FAILED(hr)) {
-        RADRAY_WARN_LOG("ID3D12Device1::CreatePipelineLibrary failed: {} {}", GetErrorName(hr), hr);
-        _pipelineLibrary.Reset();
-        _pipelineLibraryInitialData.clear();
-        return false;
-    }
-    return true;
-}
-
-std::optional<vector<byte>> DeviceD3D12::SerializeNativeGraphicsPipelineCache() noexcept {
-    if (_pipelineLibrary == nullptr) {
-        return vector<byte>{};
-    }
-    const SIZE_T serializedSize = _pipelineLibrary->GetSerializedSize();
-    if (serializedSize > std::numeric_limits<size_t>::max()) {
-        return std::nullopt;
-    }
-    vector<byte> data(static_cast<size_t>(serializedSize));
-    if (serializedSize > 0) {
-        if (HRESULT hr = _pipelineLibrary->Serialize(data.data(), serializedSize); FAILED(hr)) {
-            RADRAY_WARN_LOG("ID3D12PipelineLibrary::Serialize failed: {} {}", GetErrorName(hr), hr);
-            return std::nullopt;
-        }
-    }
-    return data;
 }
 
 Nullable<CommandQueue*> DeviceD3D12::GetCommandQueue(QueueType type, uint32_t slot) noexcept {
@@ -2628,32 +2565,9 @@ Nullable<unique_ptr<GraphicsPipelineState>> DeviceD3D12::CreateGraphicsPipelineS
     rawPsoDesc.CachedPSO = D3D12_CACHED_PIPELINE_STATE{};
     rawPsoDesc.Flags = D3D12_PIPELINE_STATE_FLAG_NONE;
     ComPtr<ID3D12PipelineState> pso;
-    std::optional<wstring> nativeCacheKey;
-    if (_pipelineLibrary != nullptr && !desc.NativeCacheKey.empty()) {
-        nativeCacheKey = ToWideChar(desc.NativeCacheKey);
-        if (nativeCacheKey.has_value()) {
-            const HRESULT loadHr = _pipelineLibrary->LoadGraphicsPipeline(
-                nativeCacheKey->c_str(),
-                &rawPsoDesc,
-                IID_PPV_ARGS(pso.GetAddressOf()));
-            if (SUCCEEDED(loadHr)) {
-                return make_unique<GraphicsPsoD3D12>(this, std::move(pso), std::move(arrayStrides), topo);
-            }
-            RADRAY_DEBUG_LOG(
-                "ID3D12PipelineLibrary::LoadGraphicsPipeline miss/failure: {} {}",
-                GetErrorName(loadHr),
-                loadHr);
-            pso.Reset();
-        }
-    }
     if (HRESULT hr = _device->CreateGraphicsPipelineState(&rawPsoDesc, IID_PPV_ARGS(pso.GetAddressOf())); FAILED(hr)) {
         RADRAY_ERR_LOG("ID3D12Device::CreateGraphicsPipelineState failed: {} {}", GetErrorName(hr), hr);
         return nullptr;
-    }
-    if (_pipelineLibrary != nullptr && nativeCacheKey.has_value()) {
-        if (HRESULT hr = _pipelineLibrary->StorePipeline(nativeCacheKey->c_str(), pso.Get()); FAILED(hr)) {
-            RADRAY_WARN_LOG("ID3D12PipelineLibrary::StorePipeline failed: {} {}", GetErrorName(hr), hr);
-        }
     }
     return make_unique<GraphicsPsoD3D12>(this, std::move(pso), std::move(arrayStrides), topo);
 }
