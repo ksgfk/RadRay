@@ -17,7 +17,6 @@
 - `third_party/` and `SDKs/` are dependency trees populated by setup scripts (readonly — do not edit).
 
 ## Build
-- The MSVC preset requires a Visual Studio Developer environment to be initialized before configuring or building. If the MSVC environment is unavailable, locate `VsDevCmd.bat` with `rtk find VsDevCmd.bat 'C:\Program Files\Microsoft Visual Studio'`.
 - Config: `cmake --preset win-x64-debug` (MSVC) or `cmake --preset win-x64-debug-clangcl` (ClangCL)
 - Build: `cmake --build build_debug --parallel 24`
 - Built binaries land in `build_debug/_build/<Config>/`

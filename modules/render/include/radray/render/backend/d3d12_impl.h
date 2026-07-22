@@ -802,10 +802,13 @@ public:
     bool IsValid() const noexcept override;
     void Destroy() noexcept override;
     void SetDebugName(std::string_view name) noexcept override;
+    RenderPassDescriptor GetDesc() const noexcept override;
 
 public:
-    bool _valid{true};
+    vector<RenderPassColorAttachmentDescriptor> _colorAttachments;
+    std::optional<RenderPassDepthStencilAttachmentDescriptor> _depthStencilAttachment;
     string _name;
+    bool _valid{true};
 };
 
 class FramebufferD3D12 final : public Framebuffer {
@@ -816,10 +819,17 @@ public:
     bool IsValid() const noexcept override;
     void Destroy() noexcept override;
     void SetDebugName(std::string_view name) noexcept override;
+    FramebufferDescriptor GetDesc() const noexcept override;
 
 public:
-    bool _valid{true};
+    RenderPass* _pass{nullptr};
+    vector<TextureView*> _colorAttachments;
+    TextureView* _depthStencilAttachment{nullptr};
+    uint32_t _width{0};
+    uint32_t _height{0};
+    uint32_t _layers{1};
     string _name;
+    bool _valid{true};
 };
 
 class Dxil final : public Shader {

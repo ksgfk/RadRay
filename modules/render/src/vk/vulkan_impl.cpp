@@ -2581,9 +2581,8 @@ Nullable<unique_ptr<GraphicsPipelineState>> DeviceVulkan::CreateGraphicsPipeline
     dynStateInfo.flags = 0;
     dynStateInfo.dynamicStateCount = static_cast<uint32_t>(dynStates.size());
     dynStateInfo.pDynamicStates = dynStates.empty() ? nullptr : dynStates.data();
-    if (desc.CompatibleRenderPass == nullptr ||
-        !IsGraphicsPipelineCompatibleWithRenderPass(desc, *desc.CompatibleRenderPass)) {
-        RADRAY_ERR_LOG("vk graphics pipeline requires a compatible explicit render pass");
+    if (desc.CompatibleRenderPass == nullptr) {
+        RADRAY_ERR_LOG("vk graphics pipeline requires an explicit render pass");
         return nullptr;
     }
     auto* renderPass = CastVkObject(desc.CompatibleRenderPass);
@@ -5270,9 +5269,16 @@ RenderPassVulkan::RenderPassVulkan(
     DeviceVulkan* device,
     VkRenderPass renderPass,
     const RenderPassDescriptor& desc)
-    : RenderPass(desc),
-      _device(device),
-      _renderPass(renderPass) {}
+    : _device(device),
+      _renderPass(renderPass),
+      _colorAttachments(desc.ColorAttachments.begin(), desc.ColorAttachments.end()),
+      _depthStencilAttachment(desc.DepthStencilAttachment) {}
+
+RenderPassDescriptor RenderPassVulkan::GetDesc() const noexcept {
+    return RenderPassDescriptor{
+        .ColorAttachments = std::span<const RenderPassColorAttachmentDescriptor>{_colorAttachments},
+        .DepthStencilAttachment = _depthStencilAttachment};
+}
 
 RenderPassVulkan::~RenderPassVulkan() noexcept {
     this->DestroyImpl();
@@ -5301,9 +5307,24 @@ FrameBufferVulkan::FrameBufferVulkan(
     DeviceVulkan* device,
     VkFramebuffer framebuffer,
     const FramebufferDescriptor& desc)
-    : Framebuffer(desc),
-      _device(device),
-      _framebuffer(framebuffer) {}
+    : _device(device),
+      _framebuffer(framebuffer),
+      _pass(desc.Pass),
+      _colorAttachments(desc.ColorAttachments.begin(), desc.ColorAttachments.end()),
+      _depthStencilAttachment(desc.DepthStencilAttachment),
+      _width(desc.Width),
+      _height(desc.Height),
+      _layers(desc.Layers) {}
+
+FramebufferDescriptor FrameBufferVulkan::GetDesc() const noexcept {
+    return FramebufferDescriptor{
+        .Pass = _pass,
+        .ColorAttachments = std::span<TextureView* const>{_colorAttachments},
+        .DepthStencilAttachment = _depthStencilAttachment,
+        .Width = _width,
+        .Height = _height,
+        .Layers = _layers};
+}
 
 FrameBufferVulkan::~FrameBufferVulkan() noexcept {
     this->DestroyImpl();

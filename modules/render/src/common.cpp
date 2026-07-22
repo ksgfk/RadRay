@@ -35,34 +35,6 @@ std::size_t std::hash<radray::render::SamplerDescriptor>::operator()(
 
 namespace radray::render {
 
-RenderPass::RenderPass(const RenderPassDescriptor& desc)
-    : _colorAttachments(desc.ColorAttachments.begin(), desc.ColorAttachments.end()),
-      _depthStencilAttachment(desc.DepthStencilAttachment) {}
-
-RenderPassDescriptor RenderPass::GetDesc() const noexcept {
-    return RenderPassDescriptor{
-        .ColorAttachments = std::span<const RenderPassColorAttachmentDescriptor>{_colorAttachments},
-        .DepthStencilAttachment = _depthStencilAttachment};
-}
-
-Framebuffer::Framebuffer(const FramebufferDescriptor& desc)
-    : _pass(desc.Pass),
-      _colorAttachments(desc.ColorAttachments.begin(), desc.ColorAttachments.end()),
-      _depthStencilAttachment(desc.DepthStencilAttachment),
-      _width(desc.Width),
-      _height(desc.Height),
-      _layers(desc.Layers) {}
-
-FramebufferDescriptor Framebuffer::GetDesc() const noexcept {
-    return FramebufferDescriptor{
-        .Pass = _pass,
-        .ColorAttachments = std::span<TextureView* const>{_colorAttachments},
-        .DepthStencilAttachment = _depthStencilAttachment,
-        .Width = _width,
-        .Height = _height,
-        .Layers = _layers};
-}
-
 SwapChainFrame::SwapChainFrame(SwapChainFrame&& other) noexcept {
     swap(*this, other);
 }
@@ -170,30 +142,6 @@ bool IsDepthStencilFormat(TextureFormat format) noexcept {
         case TextureFormat::D32_FLOAT_S8_UINT: return true;
         default: return false;
     }
-}
-
-bool IsGraphicsPipelineCompatibleWithRenderPass(
-    const GraphicsPipelineStateDescriptor& pipeline,
-    const RenderPass& renderPass) noexcept {
-    const RenderPassDescriptor pass = renderPass.GetDesc();
-    if (pipeline.ColorTargets.size() != pass.ColorAttachments.size()) {
-        return false;
-    }
-    for (size_t i = 0; i < pipeline.ColorTargets.size(); ++i) {
-        if (pipeline.ColorTargets[i].Format != pass.ColorAttachments[i].Format ||
-            pipeline.MultiSample.Count != pass.ColorAttachments[i].SampleCount) {
-            return false;
-        }
-    }
-    if (pipeline.DepthStencil.has_value() != pass.DepthStencilAttachment.has_value()) {
-        return false;
-    }
-    if (pipeline.DepthStencil.has_value() &&
-        (pipeline.DepthStencil->Format != pass.DepthStencilAttachment->Format ||
-         pipeline.MultiSample.Count != pass.DepthStencilAttachment->SampleCount)) {
-        return false;
-    }
-    return true;
 }
 
 bool IsUintFormat(TextureFormat format) noexcept {

@@ -1243,8 +1243,6 @@ struct GraphicsPipelineStateDescriptor {
     MultiSampleState MultiSample{};
     std::span<const ColorTargetState> ColorTargets{};
     RenderPass* CompatibleRenderPass{nullptr};
-    /// Optional stable application key used only by backend-native pipeline caches.
-    std::string_view NativeCacheKey{};
 };
 
 struct ComputePipelineStateDescriptor {
@@ -1421,11 +1419,11 @@ static_assert(sizeof(DispatchIndirectArguments) == 12);
 
 struct DeviceDetail {
     string GpuName{};
-    uint32_t CBufferAlignment{0};
     uint64_t BufferCopyOffsetAlignment{1};
-    uint32_t TextureDataPitchAlignment{1};
     uint64_t TextureDataPlacementAlignment{1};
     uint64_t VramBudget{0};
+    uint32_t CBufferAlignment{0};
+    uint32_t TextureDataPitchAlignment{1};
     uint32_t MaxVertexInputBindings{0};
     uint32_t MaxRayRecursionDepth{0};
     uint32_t ShaderTableAlignment{0};
@@ -1739,14 +1737,7 @@ public:
 
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::RenderPass; }
 
-    RenderPassDescriptor GetDesc() const noexcept;
-
-protected:
-    explicit RenderPass(const RenderPassDescriptor& desc);
-
-private:
-    vector<RenderPassColorAttachmentDescriptor> _colorAttachments;
-    std::optional<RenderPassDepthStencilAttachmentDescriptor> _depthStencilAttachment;
+    virtual RenderPassDescriptor GetDesc() const noexcept = 0;
 };
 
 class Framebuffer : public RenderBase, public IDebugName {
@@ -1755,18 +1746,7 @@ public:
 
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::Framebuffer; }
 
-    FramebufferDescriptor GetDesc() const noexcept;
-
-protected:
-    explicit Framebuffer(const FramebufferDescriptor& desc);
-
-private:
-    RenderPass* _pass{nullptr};
-    vector<TextureView*> _colorAttachments;
-    TextureView* _depthStencilAttachment{nullptr};
-    uint32_t _width{0};
-    uint32_t _height{0};
-    uint32_t _layers{1};
+    virtual FramebufferDescriptor GetDesc() const noexcept = 0;
 };
 
 class Shader : public RenderBase {
@@ -1939,7 +1919,6 @@ uint32_t GetIndexFormatSizeInBytes(IndexFormat format) noexcept;
 IndexFormat SizeInBytesToIndexFormat(uint32_t size) noexcept;
 uint32_t GetTextureFormatBytesPerPixel(TextureFormat format) noexcept;
 ResourceBindType BufferViewUsageToResourceBindType(BufferViewUsage usage) noexcept;
-bool IsGraphicsPipelineCompatibleWithRenderPass(const GraphicsPipelineStateDescriptor& pipeline, const RenderPass& renderPass) noexcept;
 // -------------------------------------------------------------------------
 
 std::string_view format_as(RenderBackend v) noexcept;

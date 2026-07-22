@@ -182,15 +182,23 @@ private:
 class FakeRenderPass final : public render::RenderPass {
 public:
     explicit FakeRenderPass(const render::RenderPassDescriptor& desc)
-        : RenderPass(desc) {}
+        : _colorAttachments(desc.ColorAttachments.begin(), desc.ColorAttachments.end()),
+          _depthStencilAttachment(desc.DepthStencilAttachment) {}
 
     bool IsValid() const noexcept override { return _valid; }
     void Destroy() noexcept override { _valid = false; }
     void SetDebugName(std::string_view name) noexcept override { Name = name; }
+    render::RenderPassDescriptor GetDesc() const noexcept override {
+        return render::RenderPassDescriptor{
+            .ColorAttachments = std::span<const render::RenderPassColorAttachmentDescriptor>{_colorAttachments},
+            .DepthStencilAttachment = _depthStencilAttachment};
+    }
 
     string Name;
 
 private:
+    vector<render::RenderPassColorAttachmentDescriptor> _colorAttachments;
+    std::optional<render::RenderPassDepthStencilAttachmentDescriptor> _depthStencilAttachment;
     bool _valid{true};
 };
 

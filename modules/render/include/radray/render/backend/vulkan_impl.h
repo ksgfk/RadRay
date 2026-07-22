@@ -497,11 +497,15 @@ public:
 
     void SetDebugName(std::string_view name) noexcept override;
 
+    RenderPassDescriptor GetDesc() const noexcept override;
+
 public:
     void DestroyImpl() noexcept;
 
     DeviceVulkan* _device;
     VkRenderPass _renderPass;
+    vector<RenderPassColorAttachmentDescriptor> _colorAttachments;
+    std::optional<RenderPassDepthStencilAttachmentDescriptor> _depthStencilAttachment;
 };
 
 class FrameBufferVulkan final : public Framebuffer {
@@ -519,11 +523,19 @@ public:
 
     void SetDebugName(std::string_view name) noexcept override;
 
+    FramebufferDescriptor GetDesc() const noexcept override;
+
 public:
     void DestroyImpl() noexcept;
 
     DeviceVulkan* _device;
     VkFramebuffer _framebuffer;
+    RenderPass* _pass{nullptr};
+    vector<TextureView*> _colorAttachments;
+    TextureView* _depthStencilAttachment{nullptr};
+    uint32_t _width{0};
+    uint32_t _height{0};
+    uint32_t _layers{1};
 };
 
 class LegacyFenceVulkan final : public RenderBase {

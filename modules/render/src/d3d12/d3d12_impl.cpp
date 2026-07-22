@@ -2419,9 +2419,8 @@ Nullable<unique_ptr<GraphicsPipelineState>> DeviceD3D12::CreateGraphicsPipelineS
         RADRAY_ERR_LOG("GraphicsPipelineStateDescriptor.PipelineLayout is null");
         return nullptr;
     }
-    if (desc.CompatibleRenderPass == nullptr ||
-        !IsGraphicsPipelineCompatibleWithRenderPass(desc, *desc.CompatibleRenderPass)) {
-        RADRAY_ERR_LOG("d3d12 graphics pipeline requires a compatible explicit render pass");
+    if (desc.CompatibleRenderPass == nullptr) {
+        RADRAY_ERR_LOG("d3d12 graphics pipeline requires an explicit render pass");
         return nullptr;
     }
     if (desc.Primitive.StripIndexFormat.has_value() &&
@@ -4623,7 +4622,14 @@ void TextureViewD3D12::SetDebugName(std::string_view name) noexcept {
 }
 
 RenderPassD3D12::RenderPassD3D12(const RenderPassDescriptor& desc)
-    : RenderPass(desc) {}
+    : _colorAttachments(desc.ColorAttachments.begin(), desc.ColorAttachments.end()),
+      _depthStencilAttachment(desc.DepthStencilAttachment) {}
+
+RenderPassDescriptor RenderPassD3D12::GetDesc() const noexcept {
+    return RenderPassDescriptor{
+        .ColorAttachments = std::span<const RenderPassColorAttachmentDescriptor>{_colorAttachments},
+        .DepthStencilAttachment = _depthStencilAttachment};
+}
 
 bool RenderPassD3D12::IsValid() const noexcept {
     return _valid;
@@ -4638,7 +4644,22 @@ void RenderPassD3D12::SetDebugName(std::string_view name) noexcept {
 }
 
 FramebufferD3D12::FramebufferD3D12(const FramebufferDescriptor& desc)
-    : Framebuffer(desc) {}
+    : _pass(desc.Pass),
+      _colorAttachments(desc.ColorAttachments.begin(), desc.ColorAttachments.end()),
+      _depthStencilAttachment(desc.DepthStencilAttachment),
+      _width(desc.Width),
+      _height(desc.Height),
+      _layers(desc.Layers) {}
+
+FramebufferDescriptor FramebufferD3D12::GetDesc() const noexcept {
+    return FramebufferDescriptor{
+        .Pass = _pass,
+        .ColorAttachments = std::span<TextureView* const>{_colorAttachments},
+        .DepthStencilAttachment = _depthStencilAttachment,
+        .Width = _width,
+        .Height = _height,
+        .Layers = _layers};
+}
 
 bool FramebufferD3D12::IsValid() const noexcept {
     return _valid;
