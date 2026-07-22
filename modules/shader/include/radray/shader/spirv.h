@@ -3,6 +3,7 @@
 #include <optional>
 #include <string_view>
 
+#include <radray/json.h>
 #include <radray/types.h>
 
 namespace radray::shader {
@@ -146,3 +147,47 @@ std::optional<string> SerializeSpirvShaderDesc(const SpirvShaderDesc& desc) noex
 std::optional<SpirvShaderDesc> DeserializeSpirvShaderDesc(std::string_view json) noexcept;
 
 }  // namespace radray::shader
+
+namespace radray {
+
+template <>
+struct JsonSerializer<shader::SpirvTypeMember> {
+    static bool Write(JsonWriteContext& context, const shader::SpirvTypeMember& value) noexcept;
+};
+
+template <>
+struct JsonSerializer<shader::SpirvTypeInfo> {
+    static bool Write(JsonWriteContext& context, const shader::SpirvTypeInfo& value) noexcept;
+};
+
+template <>
+struct JsonSerializer<shader::SpirvImageInfo> {
+    static bool Write(JsonWriteContext& context, const shader::SpirvImageInfo& value) noexcept;
+};
+
+template <>
+struct JsonSerializer<shader::SpirvStageIo> {
+    static bool Write(JsonWriteContext& context, const shader::SpirvStageIo& value) noexcept;
+};
+
+template <>
+struct JsonSerializer<shader::SpirvResourceBinding> {
+    static bool Write(JsonWriteContext& context, const shader::SpirvResourceBinding& value) noexcept;
+};
+
+template <>
+struct JsonSerializer<shader::SpirvComputeInfo> {
+    static bool Write(JsonWriteContext& context, const shader::SpirvComputeInfo& value) noexcept;
+};
+
+template <>
+struct JsonSerializer<shader::SpirvPushConstantRange> {
+    static bool Write(JsonWriteContext& context, const shader::SpirvPushConstantRange& value) noexcept;
+};
+
+template <>
+struct JsonSerializer<shader::SpirvShaderDesc> {
+    static bool Write(JsonWriteContext& context, const shader::SpirvShaderDesc& value) noexcept;
+};
+
+}  // namespace radray

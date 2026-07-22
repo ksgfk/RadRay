@@ -1,7 +1,6 @@
 #pragma once
 
 #include <cstddef>
-#include <cstdint>
 #include <span>
 #include <string_view>
 
@@ -9,7 +8,7 @@
 
 namespace radray {
 
-// Fixed-width scalar values are encoded in little-endian byte order.
+// little-endian 字节编码
 class BinaryWriter {
 public:
     BinaryWriter() = default;
@@ -37,7 +36,6 @@ private:
     vector<byte> _data;
 };
 
-// Failed reads leave the cursor and destination value unchanged.
 class BinaryReader {
 public:
     explicit BinaryReader(std::span<const byte> data) noexcept;

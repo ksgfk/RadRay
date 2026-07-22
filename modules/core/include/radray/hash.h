@@ -20,7 +20,6 @@ inline constexpr uint32_t kPrime3_32 = 3266489917u;
 inline constexpr uint32_t kPrime4_32 = 668265263u;
 inline constexpr uint32_t kPrime5_32 = 374761393u;
 
-// xxHash64 常量与 HashData64 使用同一套宽度，供 size_t 在 64 位平台上使用。
 inline constexpr uint64_t kPrime1_64 = 11400714785074694791ull;
 inline constexpr uint64_t kPrime2_64 = 14029467366897019727ull;
 inline constexpr uint64_t kPrime3_64 = 1609587929392839161ull;
@@ -45,7 +44,6 @@ constexpr uint32_t MixState32(uint32_t v1, uint32_t v2, uint32_t v3, uint32_t v4
 }
 
 constexpr uint32_t Combine32(uint32_t lhs, uint32_t rhs) noexcept {
-    // 固定 seed=0；长度为两个 uint32_t，即 8 字节。
     uint32_t hash = kPrime5_32 + 8u;
     hash = QueueRound32(hash, lhs);
     hash = QueueRound32(hash, rhs);
@@ -85,7 +83,6 @@ constexpr uint64_t MixFinal64(uint64_t hash) noexcept {
 }
 
 constexpr uint64_t Combine64(uint64_t lhs, uint64_t rhs) noexcept {
-    // 固定 seed=0；长度为两个 uint64_t，即 16 字节。
     uint64_t hash = kPrime5_64 + 16u;
     hash = FinalizeRound64(hash, lhs);
     hash = FinalizeRound64(hash, rhs);
@@ -94,13 +91,6 @@ constexpr uint64_t Combine64(uint64_t lhs, uint64_t rhs) noexcept {
 
 }  // namespace detail
 
-/// 类似 .NET System.HashCode 的增量 hash 构造器。
-///
-/// Add(size_t) 接受一个已经得到的 hash word；整数类型会直接转换为 hash word，
-/// 其他类型通过 std::hash<T> 转换。默认 seed 为 0，因此对相同 hash word 序列结果
-/// 确定并支持 constexpr；泛型 Add 的稳定性仍由对应 std::hash<T> 决定。与 .NET
-/// 不同之处是这里不使用进程随机 seed。32 位平台使用 xxHash32，64 位平台使用
-/// xxHash64，ToHashCode 返回与 size_t 相同宽度的结果。
 class HashCode {
 public:
     constexpr HashCode() noexcept = default;
@@ -134,11 +124,6 @@ public:
         }
     }
 
-    /// 组合两个已经得到的无符号 hash word。
-    ///
-    /// 算法参考 .NET System.HashCode.Combine 的 xxHash 混合步骤，但去掉了 .NET
-    /// 的进程随机 seed，保证这里的 helper 可以 constexpr 且结果确定。多字段可按
-    /// 顺序重复调用；相等输入序列必须保持相同的调用顺序。
     template <typename T>
     requires std::is_integral_v<T> && std::is_unsigned_v<T> && (sizeof(T) == 4 || sizeof(T) == 8)
     static constexpr T Combine(T lhs, T rhs) noexcept {
@@ -298,9 +283,6 @@ struct StringEqual {
 size_t HashData(const void* data, size_t size) noexcept;
 uint64_t HashData64(const void* data, size_t size) noexcept;
 
-// POD 类型的通用 hash / 相等仿函数, 直接对对象内存做 byte-wise xxHash / memcmp.
-// 要求 T 是 trivially copyable, 且使用者保证 padding 已清零 (例如构造时 `T key{};` 后逐字段赋值),
-// 否则相同逻辑值可能因 padding 垃圾数据产生不同 hash 或不相等.
 template <class T>
 struct PodHasher {
     static_assert(std::is_trivially_copyable_v<T>, "PodHasher requires a trivially copyable type");

@@ -1,13 +1,30 @@
 #include <radray/json.h>
 
 #include <cstdlib>
-#include <cstring>
 
 #include <yyjson.h>
 
 #include <radray/file.h>
 
 namespace radray {
+namespace {
+
+const char* StringViewData(std::string_view value) noexcept {
+    return value.data() != nullptr ? value.data() : "";
+}
+
+yyjson_mut_val* MakeKey(yyjson_mut_doc* doc, std::string_view key) noexcept {
+    return yyjson_mut_strn(doc, StringViewData(key), key.size());
+}
+
+void AddMember(yyjson_mut_doc* doc,
+               yyjson_mut_val* object,
+               std::string_view key,
+               yyjson_mut_val* value) noexcept {
+    yyjson_mut_obj_add(object, MakeKey(doc, key), value);
+}
+
+}  // namespace
 
 // ------------------------------- JsonValue -------------------------------
 
@@ -16,13 +33,14 @@ bool JsonValue::IsArray() const noexcept { return yyjson_is_arr(_val); }
 bool JsonValue::IsString() const noexcept { return yyjson_is_str(_val); }
 bool JsonValue::IsNumber() const noexcept { return yyjson_is_num(_val); }
 bool JsonValue::IsBool() const noexcept { return yyjson_is_bool(_val); }
+bool JsonValue::IsNull() const noexcept { return yyjson_is_null(_val); }
 
-JsonValue JsonValue::operator[](const char* key) const noexcept {
-    return JsonValue{yyjson_obj_get(_val, key)};
+JsonValue JsonValue::operator[](std::string_view key) const noexcept {
+    return JsonValue{yyjson_obj_getn(_val, StringViewData(key), key.size())};
 }
 
-bool JsonValue::Has(const char* key) const noexcept {
-    return yyjson_obj_get(_val, key) != nullptr;
+bool JsonValue::Has(std::string_view key) const noexcept {
+    return yyjson_obj_getn(_val, StringViewData(key), key.size()) != nullptr;
 }
 
 size_t JsonValue::Size() const noexcept {
@@ -128,42 +146,41 @@ JsonValue JsonDocument::Root() const noexcept {
 
 // ------------------------------- JsonRef ---------------------------------
 
-void JsonRef::AddString(const char* key, std::string_view value) noexcept {
-    yyjson_mut_obj_add_strncpy(_doc, _val, key, value.data(), value.size());
+void JsonRef::AddString(std::string_view key, std::string_view value) noexcept {
+    yyjson_mut_val* val = yyjson_mut_strncpy(_doc, StringViewData(value), value.size());
+    AddMember(_doc, _val, key, val);
 }
 
-void JsonRef::AddUint(const char* key, uint64_t value) noexcept {
-    yyjson_mut_obj_add_uint(_doc, _val, key, value);
+void JsonRef::AddUint(std::string_view key, uint64_t value) noexcept {
+    AddMember(_doc, _val, key, yyjson_mut_uint(_doc, value));
 }
 
-void JsonRef::AddInt(const char* key, int64_t value) noexcept {
-    yyjson_mut_obj_add_sint(_doc, _val, key, value);
+void JsonRef::AddInt(std::string_view key, int64_t value) noexcept {
+    AddMember(_doc, _val, key, yyjson_mut_sint(_doc, value));
 }
 
-void JsonRef::AddBool(const char* key, bool value) noexcept {
-    yyjson_mut_obj_add_bool(_doc, _val, key, value);
+void JsonRef::AddBool(std::string_view key, bool value) noexcept {
+    AddMember(_doc, _val, key, yyjson_mut_bool(_doc, value));
 }
 
-void JsonRef::AddDouble(const char* key, double value) noexcept {
-    yyjson_mut_obj_add_real(_doc, _val, key, value);
+void JsonRef::AddDouble(std::string_view key, double value) noexcept {
+    AddMember(_doc, _val, key, yyjson_mut_real(_doc, value));
 }
 
-JsonRef JsonRef::AddObject(const char* key) noexcept {
+JsonRef JsonRef::AddObject(std::string_view key) noexcept {
     yyjson_mut_val* child = yyjson_mut_obj(_doc);
-    yyjson_mut_val* k = yyjson_mut_str(_doc, key);
-    yyjson_mut_obj_add(_val, k, child);
+    AddMember(_doc, _val, key, child);
     return JsonRef{_doc, child};
 }
 
-JsonRef JsonRef::AddArray(const char* key) noexcept {
+JsonRef JsonRef::AddArray(std::string_view key) noexcept {
     yyjson_mut_val* child = yyjson_mut_arr(_doc);
-    yyjson_mut_val* k = yyjson_mut_str(_doc, key);
-    yyjson_mut_obj_add(_val, k, child);
+    AddMember(_doc, _val, key, child);
     return JsonRef{_doc, child};
 }
 
 void JsonRef::AppendString(std::string_view value) noexcept {
-    yyjson_mut_arr_add_strncpy(_doc, _val, value.data(), value.size());
+    yyjson_mut_arr_add_strncpy(_doc, _val, StringViewData(value), value.size());
 }
 
 void JsonRef::AppendUint(uint64_t value) noexcept {
@@ -250,6 +267,98 @@ bool JsonWriter::WriteFile(const std::filesystem::path& path, bool pretty) const
         return false;
     }
     return WriteTextFile(path, text.value());
+}
+
+JsonWriteContext::JsonWriteContext(JsonWriter& writer) noexcept
+    : _doc(writer._doc) {}
+
+JsonWriteContext::JsonWriteContext(yyjson_mut_doc* doc,
+                                   yyjson_mut_val* parent,
+                                   std::string_view key,
+                                   Target target,
+                                   bool copyKey) noexcept
+    : _doc(doc),
+      _parent(parent),
+      _key(key),
+      _target(target),
+      _copyKey(copyKey) {}
+
+bool JsonWriteContext::Attach(yyjson_mut_val* value) noexcept {
+    if (_written || _doc == nullptr || value == nullptr) {
+        return false;
+    }
+
+    bool success = false;
+    switch (_target) {
+        case Target::Root:
+            if (yyjson_mut_doc_get_root(_doc) == nullptr) {
+                yyjson_mut_doc_set_root(_doc, value);
+                success = true;
+            }
+            break;
+        case Target::ObjectMember: {
+            yyjson_mut_val* key = _copyKey
+                                      ? yyjson_mut_strncpy(
+                                            _doc,
+                                            StringViewData(_key),
+                                            _key.size())
+                                      : yyjson_mut_strn(
+                                            _doc,
+                                            StringViewData(_key),
+                                            _key.size());
+            success = yyjson_mut_obj_add(_parent, key, value);
+            break;
+        }
+        case Target::ArrayElement:
+            success = yyjson_mut_arr_add_val(_parent, value);
+            break;
+    }
+
+    _written = success;
+    return success;
+}
+
+bool JsonWriteContext::Null() noexcept {
+    return Attach(yyjson_mut_null(_doc));
+}
+
+bool JsonWriteContext::String(std::string_view value) noexcept {
+    return Attach(yyjson_mut_strncpy(
+        _doc,
+        StringViewData(value),
+        value.size()));
+}
+
+bool JsonWriteContext::Uint(uint64_t value) noexcept {
+    return Attach(yyjson_mut_uint(_doc, value));
+}
+
+bool JsonWriteContext::Int(int64_t value) noexcept {
+    return Attach(yyjson_mut_sint(_doc, value));
+}
+
+bool JsonWriteContext::Bool(bool value) noexcept {
+    return Attach(yyjson_mut_bool(_doc, value));
+}
+
+bool JsonWriteContext::Double(double value) noexcept {
+    return std::isfinite(value) && Attach(yyjson_mut_real(_doc, value));
+}
+
+JsonObjectWriter JsonWriteContext::BeginObject() noexcept {
+    yyjson_mut_val* object = yyjson_mut_obj(_doc);
+    if (!Attach(object)) {
+        return {};
+    }
+    return JsonObjectWriter{_doc, object};
+}
+
+JsonArrayWriter JsonWriteContext::BeginArray() noexcept {
+    yyjson_mut_val* array = yyjson_mut_arr(_doc);
+    if (!Attach(array)) {
+        return {};
+    }
+    return JsonArrayWriter{_doc, array};
 }
 
 }  // namespace radray

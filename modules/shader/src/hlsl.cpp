@@ -6,6 +6,135 @@
 #include <radray/json.h>
 #include <radray/logger.h>
 
+namespace radray {
+
+bool JsonSerializer<shader::HlslShaderTypeId>::Write(
+    JsonWriteContext& context,
+    const shader::HlslShaderTypeId& value) noexcept {
+    return SerializeJsonValue(context, value.Value);
+}
+
+bool JsonSerializer<shader::HlslShaderTypeMember>::Write(
+    JsonWriteContext& context,
+    const shader::HlslShaderTypeMember& value) noexcept {
+    using value_type = shader::HlslShaderTypeMember;
+    return SerializeJsonObject(
+        context,
+        value,
+        JsonMember{"Name", &value_type::Name},
+        JsonMember{"Type", &value_type::Type},
+        JsonMember{"Offset", &value_type::Offset});
+}
+
+bool JsonSerializer<shader::HlslShaderTypeDesc>::Write(
+    JsonWriteContext& context,
+    const shader::HlslShaderTypeDesc& value) noexcept {
+    using value_type = shader::HlslShaderTypeDesc;
+    return SerializeJsonObject(
+        context,
+        value,
+        JsonMember{"Name", &value_type::Name},
+        JsonMember{"Class", &value_type::Class},
+        JsonMember{"Type", &value_type::Type},
+        JsonMember{"Rows", &value_type::Rows},
+        JsonMember{"Columns", &value_type::Columns},
+        JsonMember{"Elements", &value_type::Elements},
+        JsonMember{"Offset", &value_type::Offset},
+        JsonMember{"Members", &value_type::Members});
+}
+
+bool JsonSerializer<shader::HlslShaderVariableDesc>::Write(
+    JsonWriteContext& context,
+    const shader::HlslShaderVariableDesc& value) noexcept {
+    using value_type = shader::HlslShaderVariableDesc;
+    return SerializeJsonObject(
+        context,
+        value,
+        JsonMember{"Name", &value_type::Name},
+        JsonMember{"Type", &value_type::Type},
+        JsonMember{"StartOffset", &value_type::StartOffset},
+        JsonMember{"Size", &value_type::Size},
+        JsonMember{"uFlags", &value_type::uFlags},
+        JsonMember{"StartTexture", &value_type::StartTexture},
+        JsonMember{"TextureSize", &value_type::TextureSize},
+        JsonMember{"StartSampler", &value_type::StartSampler},
+        JsonMember{"SamplerSize", &value_type::SamplerSize});
+}
+
+bool JsonSerializer<shader::HlslShaderBufferDesc>::Write(
+    JsonWriteContext& context,
+    const shader::HlslShaderBufferDesc& value) noexcept {
+    using value_type = shader::HlslShaderBufferDesc;
+    return SerializeJsonObject(
+        context,
+        value,
+        JsonMember{"Name", &value_type::Name},
+        JsonMember{"Type", &value_type::Type},
+        JsonMember{"Size", &value_type::Size},
+        JsonMember{"Flags", &value_type::Flags},
+        JsonMember{"IsViewInHlsl", &value_type::IsViewInHlsl},
+        JsonMember{"Variables", &value_type::Variables});
+}
+
+bool JsonSerializer<shader::HlslInputBindDesc>::Write(
+    JsonWriteContext& context,
+    const shader::HlslInputBindDesc& value) noexcept {
+    JsonObjectWriter object = context.BeginObject();
+    return object.IsValid() &&
+           object.Member("Name", value.Name) &&
+           object.Member("Type", value.Type) &&
+           object.Member("BindPoint", value.BindPoint) &&
+           object.Member("BindCount", value.BindCount) &&
+           object.Member("ReturnType", value.ReturnType) &&
+           object.Member("Dimension", value.Dimension) &&
+           object.Member("NumSamples", value.NumSamples) &&
+           object.Member("Space", value.Space) &&
+           object.Member("Flags", value.Flags) &&
+           object.OptionalMember("VkBinding", value.VkBinding) &&
+           object.OptionalMember("VkSet", value.VkSet);
+}
+
+bool JsonSerializer<shader::HlslSignatureParameterDesc>::Write(
+    JsonWriteContext& context,
+    const shader::HlslSignatureParameterDesc& value) noexcept {
+    using value_type = shader::HlslSignatureParameterDesc;
+    return SerializeJsonObject(
+        context,
+        value,
+        JsonMember{"SemanticName", &value_type::SemanticName},
+        JsonMember{"SemanticIndex", &value_type::SemanticIndex},
+        JsonMember{"Register", &value_type::Register},
+        JsonMember{"SystemValueType", &value_type::SystemValueType},
+        JsonMember{"ComponentType", &value_type::ComponentType},
+        JsonMember{"Stream", &value_type::Stream},
+        JsonMember{"Mask", &value_type::Mask},
+        JsonMember{"ReadWriteMask", &value_type::ReadWriteMask});
+}
+
+bool JsonSerializer<shader::HlslShaderDesc>::Write(
+    JsonWriteContext& context,
+    const shader::HlslShaderDesc& value) noexcept {
+    JsonObjectWriter object = context.BeginObject();
+    return object.IsValid() &&
+           object.Member("FormatVersion", shader::kReflectionFormatVersion) &&
+           object.Member("Kind", "hlsl") &&
+           object.Member("Creator", value.Creator) &&
+           object.Member("Version", value.Version) &&
+           object.Member("Flags", value.Flags) &&
+           object.Member("MinFeatureLevel", value.MinFeatureLevel) &&
+           object.Member("GroupSizeX", value.GroupSizeX) &&
+           object.Member("GroupSizeY", value.GroupSizeY) &&
+           object.Member("GroupSizeZ", value.GroupSizeZ) &&
+           object.Member("ConstantBuffers", value.ConstantBuffers) &&
+           object.Member("BoundResources", value.BoundResources) &&
+           object.Member("InputParameters", value.InputParameters) &&
+           object.Member("OutputParameters", value.OutputParameters) &&
+           object.Member("Variables", value.Variables) &&
+           object.Member("Types", value.Types);
+}
+
+}  // namespace radray
+
 namespace radray::shader {
 
 bool HlslShaderTypeDesc::IsPrimitive() const noexcept {
@@ -60,85 +189,9 @@ bool IsBufferDimension(HlslSRVDimension dim) noexcept {
 
 namespace {
 
-// 枚举以底层整数值存储。反序列化时越界回落到默认 (通常 UNKNOWN=0)。
-template <typename E>
-uint64_t EnumToU(E v) noexcept {
-    return static_cast<uint64_t>(static_cast<std::underlying_type_t<E>>(v));
-}
-
 template <typename E>
 E UToEnum(uint64_t v) noexcept {
     return static_cast<E>(static_cast<std::underlying_type_t<E>>(v));
-}
-
-void WriteHlslType(JsonRef obj, const HlslShaderTypeDesc& t) {
-    obj.AddString("Name", t.Name);
-    obj.AddUint("Class", EnumToU(t.Class));
-    obj.AddUint("Type", EnumToU(t.Type));
-    obj.AddUint("Rows", t.Rows);
-    obj.AddUint("Columns", t.Columns);
-    obj.AddUint("Elements", t.Elements);
-    obj.AddUint("Offset", t.Offset);
-    JsonRef members = obj.AddArray("Members");
-    for (const HlslShaderTypeMember& m : t.Members) {
-        JsonRef mo = members.AppendObject();
-        mo.AddString("Name", m.Name);
-        mo.AddUint("Type", m.Type.Value);
-        mo.AddUint("Offset", m.Offset);
-    }
-}
-
-void WriteHlslVariable(JsonRef obj, const HlslShaderVariableDesc& v) {
-    obj.AddString("Name", v.Name);
-    obj.AddUint("Type", v.Type.Value);
-    obj.AddUint("StartOffset", v.StartOffset);
-    obj.AddUint("Size", v.Size);
-    obj.AddUint("uFlags", v.uFlags);
-    obj.AddUint("StartTexture", v.StartTexture);
-    obj.AddUint("TextureSize", v.TextureSize);
-    obj.AddUint("StartSampler", v.StartSampler);
-    obj.AddUint("SamplerSize", v.SamplerSize);
-}
-
-void WriteHlslCBuffer(JsonRef obj, const HlslShaderBufferDesc& b) {
-    obj.AddString("Name", b.Name);
-    obj.AddUint("Type", EnumToU(b.Type));
-    obj.AddUint("Size", b.Size);
-    obj.AddUint("Flags", b.Flags);
-    obj.AddBool("IsViewInHlsl", b.IsViewInHlsl);
-    JsonRef vars = obj.AddArray("Variables");
-    for (size_t idx : b.Variables) {
-        vars.AppendUint(idx);
-    }
-}
-
-void WriteHlslBind(JsonRef obj, const HlslInputBindDesc& r) {
-    obj.AddString("Name", r.Name);
-    obj.AddUint("Type", EnumToU(r.Type));
-    obj.AddUint("BindPoint", r.BindPoint);
-    obj.AddUint("BindCount", r.BindCount);
-    obj.AddUint("ReturnType", EnumToU(r.ReturnType));
-    obj.AddUint("Dimension", EnumToU(r.Dimension));
-    obj.AddUint("NumSamples", r.NumSamples);
-    obj.AddUint("Space", r.Space);
-    obj.AddUint("Flags", r.Flags);
-    if (r.VkBinding.has_value()) {
-        obj.AddUint("VkBinding", r.VkBinding.value());
-    }
-    if (r.VkSet.has_value()) {
-        obj.AddUint("VkSet", r.VkSet.value());
-    }
-}
-
-void WriteHlslSignature(JsonRef obj, const HlslSignatureParameterDesc& p) {
-    obj.AddString("SemanticName", p.SemanticName);
-    obj.AddUint("SemanticIndex", p.SemanticIndex);
-    obj.AddUint("Register", p.Register);
-    obj.AddUint("SystemValueType", EnumToU(p.SystemValueType));
-    obj.AddUint("ComponentType", EnumToU(p.ComponentType));
-    obj.AddUint("Stream", p.Stream);
-    obj.AddUint("Mask", p.Mask);
-    obj.AddUint("ReadWriteMask", p.ReadWriteMask);
 }
 
 void ReadHlslType(const JsonValue& obj, HlslShaderTypeDesc& t) {
@@ -220,46 +273,7 @@ void ReadHlslSignature(const JsonValue& obj, HlslSignatureParameterDesc& p) {
 }  // namespace
 
 std::optional<string> SerializeHlslShaderDesc(const HlslShaderDesc& desc) noexcept {
-    JsonWriter w{};
-    if (!w.IsValid()) {
-        return std::nullopt;
-    }
-    JsonRef root = w.RootObject();
-    root.AddUint("FormatVersion", kReflectionFormatVersion);
-    root.AddString("Kind", "hlsl");
-    root.AddString("Creator", desc.Creator);
-    root.AddUint("Version", desc.Version);
-    root.AddUint("Flags", desc.Flags);
-    root.AddUint("MinFeatureLevel", EnumToU(desc.MinFeatureLevel));
-    root.AddUint("GroupSizeX", desc.GroupSizeX);
-    root.AddUint("GroupSizeY", desc.GroupSizeY);
-    root.AddUint("GroupSizeZ", desc.GroupSizeZ);
-
-    JsonRef cbuffers = root.AddArray("ConstantBuffers");
-    for (const HlslShaderBufferDesc& b : desc.ConstantBuffers) {
-        WriteHlslCBuffer(cbuffers.AppendObject(), b);
-    }
-    JsonRef binds = root.AddArray("BoundResources");
-    for (const HlslInputBindDesc& r : desc.BoundResources) {
-        WriteHlslBind(binds.AppendObject(), r);
-    }
-    JsonRef inputs = root.AddArray("InputParameters");
-    for (const HlslSignatureParameterDesc& p : desc.InputParameters) {
-        WriteHlslSignature(inputs.AppendObject(), p);
-    }
-    JsonRef outputs = root.AddArray("OutputParameters");
-    for (const HlslSignatureParameterDesc& p : desc.OutputParameters) {
-        WriteHlslSignature(outputs.AppendObject(), p);
-    }
-    JsonRef vars = root.AddArray("Variables");
-    for (const HlslShaderVariableDesc& v : desc.Variables) {
-        WriteHlslVariable(vars.AppendObject(), v);
-    }
-    JsonRef types = root.AddArray("Types");
-    for (const HlslShaderTypeDesc& t : desc.Types) {
-        WriteHlslType(types.AppendObject(), t);
-    }
-    return w.Write(true);
+    return SerializeJson(desc, true);
 }
 
 std::optional<HlslShaderDesc> DeserializeHlslShaderDesc(std::string_view json) noexcept {

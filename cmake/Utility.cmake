@@ -154,7 +154,7 @@ function(radray_default_compile_flags target)
     endif()
     if (MSVC)
         target_compile_definitions(${target} PRIVATE _CRT_SECURE_NO_WARNINGS)
-        target_compile_options(${target} PRIVATE /permissive- /utf-8 /Zc:preprocessor /Zc:__cplusplus /W4 /wd4324)
+        target_compile_options(${target} PRIVATE /permissive- /utf-8 /Zc:preprocessor /Zc:__cplusplus /W4 /wd4324 /EHsc)
     endif()
     target_compile_definitions(${target} PRIVATE
         $<$<PLATFORM_ID:Windows>:RADRAY_PLATFORM_WINDOWS>

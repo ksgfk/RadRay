@@ -1,7 +1,6 @@
 #include <radray/camera_control.h>
 
 #include <cmath>
-#include <algorithm>
 #include <numbers>
 
 namespace radray {

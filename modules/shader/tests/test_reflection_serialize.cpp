@@ -8,6 +8,11 @@
 namespace radray::shader {
 namespace {
 
+static_assert(json_serializable<HlslShaderDesc>);
+static_assert(json_serializable<SpirvShaderDesc>);
+static_assert(json_serializable<vector<HlslShaderDesc>>);
+static_assert(json_serializable<vector<SpirvShaderDesc>>);
+
 // 构造一个字段丰富的 HlslShaderDesc, 覆盖各类嵌套结构与枚举。
 HlslShaderDesc MakeHlslSample() {
     HlslShaderDesc d{};
@@ -155,6 +160,9 @@ TEST(ReflectionSerializeTest, HlslRoundTrip) {
     HlslShaderDesc src = MakeHlslSample();
     auto json = SerializeHlslShaderDesc(src);
     ASSERT_TRUE(json.has_value());
+    auto genericJson = SerializeJson(src, true);
+    ASSERT_TRUE(genericJson.has_value());
+    EXPECT_EQ(genericJson.value(), json.value());
     auto back = DeserializeHlslShaderDesc(json.value());
     ASSERT_TRUE(back.has_value());
     const HlslShaderDesc& d = back.value();
@@ -211,6 +219,9 @@ TEST(ReflectionSerializeTest, SpirvRoundTrip) {
     SpirvShaderDesc src = MakeSpirvSample();
     auto json = SerializeSpirvShaderDesc(src);
     ASSERT_TRUE(json.has_value());
+    auto genericJson = SerializeJson(src, true);
+    ASSERT_TRUE(genericJson.has_value());
+    EXPECT_EQ(genericJson.value(), json.value());
     auto back = DeserializeSpirvShaderDesc(json.value());
     ASSERT_TRUE(back.has_value());
     const SpirvShaderDesc& d = back.value();

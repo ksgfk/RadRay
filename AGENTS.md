@@ -17,6 +17,7 @@
 - `third_party/` and `SDKs/` are dependency trees populated by setup scripts (readonly — do not edit).
 
 ## Build
+- The MSVC preset requires a Visual Studio Developer environment to be initialized before configuring or building. If the MSVC environment is unavailable, locate `VsDevCmd.bat` with `rtk find VsDevCmd.bat 'C:\Program Files\Microsoft Visual Studio'`.
 - Config: `cmake --preset win-x64-debug` (MSVC) or `cmake --preset win-x64-debug-clangcl` (ClangCL)
 - Build: `cmake --build build_debug --parallel 24`
 - Built binaries land in `build_debug/_build/<Config>/`
@@ -29,10 +30,6 @@
 - DEBUG mode uses macro `RADRAY_IS_DEBUG` (NOT `NDEBUG` or `_DEBUG`).
 - String formatting must use `fmt` library; check whether a type has `format_to` before using it.
 - Flag-style enums use `enum_flags.h` (`EnumFlags<T>`, `is_flags<T>`, `format_as`).
-
-## Runtime Header/Source Organization
-- In `modules/runtime/`, a header that declares a runtime-typed class (a class with a `RuntimeTypeTrait<T>` specialization) must remain centered on that class. It may contain only declarations that are part of, or exist solely to support, that class's responsibility. Independently usable policies, resolvers, services, and other concepts must have dedicated headers; for example, `ShaderArtifactResolver` and its resolver-specific API belong in `shader_artifact_resolver.h`, not `shader_asset.h`.
-- In `modules/runtime/`, every non-header-only component with out-of-line definitions must use a same-stem header/source pair, and those definitions must live in the matching `.cpp`. For example, `PipelineBindingPolicy` belongs in `shader_binding_policy.h` / `shader_binding_policy.cpp`, and `ShaderArtifactResolver` belongs in `shader_artifact_resolver.h` / `shader_artifact_resolver.cpp`. Do not separate declarations from a same-stem implementation file or split their implementation across differently named `.cpp` files without the user's explicit prior confirmation.
 
 ## Exception Policy
 - Never add `try`/`catch` merely to preserve a `noexcept` declaration. If an exception cannot be meaningfully handled, do not catch it; allow it to propagate, or allow `std::terminate` at a `noexcept` boundary.
@@ -50,13 +47,3 @@
 - CTest test preset uses ClangCL: `ctest --preset win-x64 -R {test name} --output-on-failure`
 - **Critical**: `-R` matches the **gtest suite name** (the C++ class), NOT the cmake target name.
 - Do NOT run build and test concurrently.
-
-## Non-obvious CMake Functions
-All defined in `cmake/Utility.cmake`:
-- `radray_add_test` / `radray_add_gtest_case` / `radray_add_radray_gtest_case`
-- `radray_add_example` / `radray_example_files`
-- `radray_default_compile_flags` / `radray_optimize_flags_binary` / `radray_optimize_flags_library`
-
-## Toolchain Quirks
-- `RADRAY_IS_DEBUG` is defined for all configs except Release (see `cmake/Utility.cmake:164`).
-- On Windows, `NOMINMAX`, `WIN32_LEAN_AND_MEAN`, `UNICODE`, `_UNICODE` are always defined.

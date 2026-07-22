@@ -4,6 +4,7 @@
 #include <optional>
 #include <string_view>
 
+#include <radray/json.h>
 #include <radray/types.h>
 #include <radray/nullable.h>
 
@@ -333,3 +334,47 @@ std::optional<string> SerializeHlslShaderDesc(const HlslShaderDesc& desc) noexce
 std::optional<HlslShaderDesc> DeserializeHlslShaderDesc(std::string_view json) noexcept;
 
 }  // namespace radray::shader
+
+namespace radray {
+
+template <>
+struct JsonSerializer<shader::HlslShaderTypeId> {
+    static bool Write(JsonWriteContext& context, const shader::HlslShaderTypeId& value) noexcept;
+};
+
+template <>
+struct JsonSerializer<shader::HlslShaderTypeMember> {
+    static bool Write(JsonWriteContext& context, const shader::HlslShaderTypeMember& value) noexcept;
+};
+
+template <>
+struct JsonSerializer<shader::HlslShaderTypeDesc> {
+    static bool Write(JsonWriteContext& context, const shader::HlslShaderTypeDesc& value) noexcept;
+};
+
+template <>
+struct JsonSerializer<shader::HlslShaderVariableDesc> {
+    static bool Write(JsonWriteContext& context, const shader::HlslShaderVariableDesc& value) noexcept;
+};
+
+template <>
+struct JsonSerializer<shader::HlslShaderBufferDesc> {
+    static bool Write(JsonWriteContext& context, const shader::HlslShaderBufferDesc& value) noexcept;
+};
+
+template <>
+struct JsonSerializer<shader::HlslInputBindDesc> {
+    static bool Write(JsonWriteContext& context, const shader::HlslInputBindDesc& value) noexcept;
+};
+
+template <>
+struct JsonSerializer<shader::HlslSignatureParameterDesc> {
+    static bool Write(JsonWriteContext& context, const shader::HlslSignatureParameterDesc& value) noexcept;
+};
+
+template <>
+struct JsonSerializer<shader::HlslShaderDesc> {
+    static bool Write(JsonWriteContext& context, const shader::HlslShaderDesc& value) noexcept;
+};
+
+}  // namespace radray

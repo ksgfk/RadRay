@@ -1,8 +1,6 @@
 #pragma once
 
-#include <bit>
 #include <optional>
-#include <type_traits>
 
 #include <radray/types.h>
 

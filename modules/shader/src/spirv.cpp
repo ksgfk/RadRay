@@ -4,6 +4,135 @@
 #include <radray/json.h>
 #include <radray/logger.h>
 
+namespace radray {
+
+bool JsonSerializer<shader::SpirvTypeMember>::Write(
+    JsonWriteContext& context,
+    const shader::SpirvTypeMember& value) noexcept {
+    using value_type = shader::SpirvTypeMember;
+    return SerializeJsonObject(
+        context,
+        value,
+        JsonMember{"Name", &value_type::Name},
+        JsonMember{"Offset", &value_type::Offset},
+        JsonMember{"Size", &value_type::Size},
+        JsonMember{"TypeIndex", &value_type::TypeIndex},
+        JsonMember{"ArraySize", &value_type::ArraySize},
+        JsonMember{"ArrayStride", &value_type::ArrayStride},
+        JsonMember{"MatrixStride", &value_type::MatrixStride},
+        JsonMember{"RowMajor", &value_type::RowMajor});
+}
+
+bool JsonSerializer<shader::SpirvTypeInfo>::Write(
+    JsonWriteContext& context,
+    const shader::SpirvTypeInfo& value) noexcept {
+    using value_type = shader::SpirvTypeInfo;
+    return SerializeJsonObject(
+        context,
+        value,
+        JsonMember{"Name", &value_type::Name},
+        JsonMember{"BaseType", &value_type::BaseType},
+        JsonMember{"VectorSize", &value_type::VectorSize},
+        JsonMember{"Columns", &value_type::Columns},
+        JsonMember{"ArraySize", &value_type::ArraySize},
+        JsonMember{"ArrayStride", &value_type::ArrayStride},
+        JsonMember{"MatrixStride", &value_type::MatrixStride},
+        JsonMember{"Size", &value_type::Size},
+        JsonMember{"RowMajor", &value_type::RowMajor},
+        JsonMember{"Members", &value_type::Members});
+}
+
+bool JsonSerializer<shader::SpirvImageInfo>::Write(
+    JsonWriteContext& context,
+    const shader::SpirvImageInfo& value) noexcept {
+    using value_type = shader::SpirvImageInfo;
+    return SerializeJsonObject(
+        context,
+        value,
+        JsonMember{"Dim", &value_type::Dim},
+        JsonMember{"Arrayed", &value_type::Arrayed},
+        JsonMember{"Multisampled", &value_type::Multisampled},
+        JsonMember{"Depth", &value_type::Depth},
+        JsonMember{"SampledType", &value_type::SampledType});
+}
+
+bool JsonSerializer<shader::SpirvStageIo>::Write(
+    JsonWriteContext& context,
+    const shader::SpirvStageIo& value) noexcept {
+    JsonObjectWriter object = context.BeginObject();
+    return object.IsValid() &&
+           object.Member("Name", value.Name) &&
+           object.Member("HlslSemantic", value.HlslSemantic) &&
+           object.Member("Location", value.Location) &&
+           object.Member("TypeIndex", value.TypeIndex) &&
+           object.OptionalMember("BuiltIn", value.BuiltIn);
+}
+
+bool JsonSerializer<shader::SpirvResourceBinding>::Write(
+    JsonWriteContext& context,
+    const shader::SpirvResourceBinding& value) noexcept {
+    JsonObjectWriter object = context.BeginObject();
+    return object.IsValid() &&
+           object.Member("Name", value.Name) &&
+           object.Member("Kind", value.Kind) &&
+           object.Member("Set", value.Set) &&
+           object.Member("Binding", value.Binding) &&
+           object.OptionalMember("HlslRegister", value.HlslRegister) &&
+           object.OptionalMember("HlslSpace", value.HlslSpace) &&
+           object.Member("ArraySize", value.ArraySize) &&
+           object.Member("TypeIndex", value.TypeIndex) &&
+           object.Member("UniformBufferSize", value.UniformBufferSize) &&
+           object.Member("ReadOnly", value.ReadOnly) &&
+           object.Member("WriteOnly", value.WriteOnly) &&
+           object.Member("IsViewInHlsl", value.IsViewInHlsl) &&
+           object.Member("HlslType", value.HlslType) &&
+           object.Member("IsUnboundedArray", value.IsUnboundedArray) &&
+           object.OptionalMember("ImageInfo", value.ImageInfo);
+}
+
+bool JsonSerializer<shader::SpirvComputeInfo>::Write(
+    JsonWriteContext& context,
+    const shader::SpirvComputeInfo& value) noexcept {
+    using value_type = shader::SpirvComputeInfo;
+    return SerializeJsonObject(
+        context,
+        value,
+        JsonMember{"LocalSizeX", &value_type::LocalSizeX},
+        JsonMember{"LocalSizeY", &value_type::LocalSizeY},
+        JsonMember{"LocalSizeZ", &value_type::LocalSizeZ});
+}
+
+bool JsonSerializer<shader::SpirvPushConstantRange>::Write(
+    JsonWriteContext& context,
+    const shader::SpirvPushConstantRange& value) noexcept {
+    using value_type = shader::SpirvPushConstantRange;
+    return SerializeJsonObject(
+        context,
+        value,
+        JsonMember{"Name", &value_type::Name},
+        JsonMember{"Offset", &value_type::Offset},
+        JsonMember{"Size", &value_type::Size},
+        JsonMember{"TypeIndex", &value_type::TypeIndex},
+        JsonMember{"IsViewInHlsl", &value_type::IsViewInHlsl});
+}
+
+bool JsonSerializer<shader::SpirvShaderDesc>::Write(
+    JsonWriteContext& context,
+    const shader::SpirvShaderDesc& value) noexcept {
+    JsonObjectWriter object = context.BeginObject();
+    return object.IsValid() &&
+           object.Member("FormatVersion", shader::kReflectionFormatVersion) &&
+           object.Member("Kind", "spirv") &&
+           object.Member("Types", value.Types) &&
+           object.Member("StageInputs", value.StageInputs) &&
+           object.Member("StageOutputs", value.StageOutputs) &&
+           object.Member("ResourceBindings", value.ResourceBindings) &&
+           object.Member("ConstantRanges", value.ConstantRanges) &&
+           object.OptionalMember("ComputeInfo", value.ComputeInfo);
+}
+
+}  // namespace radray
+
 namespace radray::shader {
 
 // ResourceBindType SpirvResourceBinding::MapResourceBindType() const noexcept {
@@ -31,69 +160,9 @@ namespace radray::shader {
 
 namespace {
 
-// 枚举以底层整数值存储。反序列化时越界回落到默认 (通常 UNKNOWN=0)。
-template <typename E>
-uint64_t EnumToU(E v) noexcept {
-    return static_cast<uint64_t>(static_cast<std::underlying_type_t<E>>(v));
-}
-
 template <typename E>
 E UToEnum(uint64_t v) noexcept {
     return static_cast<E>(static_cast<std::underlying_type_t<E>>(v));
-}
-
-void WriteSpirvType(JsonRef obj, const SpirvTypeInfo& t) {
-    obj.AddString("Name", t.Name);
-    obj.AddUint("BaseType", EnumToU(t.BaseType));
-    obj.AddUint("VectorSize", t.VectorSize);
-    obj.AddUint("Columns", t.Columns);
-    obj.AddUint("ArraySize", t.ArraySize);
-    obj.AddUint("ArrayStride", t.ArrayStride);
-    obj.AddUint("MatrixStride", t.MatrixStride);
-    obj.AddUint("Size", t.Size);
-    obj.AddBool("RowMajor", t.RowMajor);
-    JsonRef members = obj.AddArray("Members");
-    for (const SpirvTypeMember& m : t.Members) {
-        JsonRef mo = members.AppendObject();
-        mo.AddString("Name", m.Name);
-        mo.AddUint("Offset", m.Offset);
-        mo.AddUint("Size", m.Size);
-        mo.AddUint("TypeIndex", m.TypeIndex);
-        mo.AddUint("ArraySize", m.ArraySize);
-        mo.AddUint("ArrayStride", m.ArrayStride);
-        mo.AddUint("MatrixStride", m.MatrixStride);
-        mo.AddBool("RowMajor", m.RowMajor);
-    }
-}
-
-void WriteSpirvBinding(JsonRef obj, const SpirvResourceBinding& r) {
-    obj.AddString("Name", r.Name);
-    obj.AddUint("Kind", EnumToU(r.Kind));
-    obj.AddUint("Set", r.Set);
-    obj.AddUint("Binding", r.Binding);
-    if (r.HlslRegister.has_value()) {
-        obj.AddUint("HlslRegister", r.HlslRegister.value());
-    }
-    if (r.HlslSpace.has_value()) {
-        obj.AddUint("HlslSpace", r.HlslSpace.value());
-    }
-    obj.AddUint("ArraySize", r.ArraySize);
-    obj.AddUint("TypeIndex", r.TypeIndex);
-    obj.AddUint("UniformBufferSize", r.UniformBufferSize);
-    obj.AddBool("ReadOnly", r.ReadOnly);
-    obj.AddBool("WriteOnly", r.WriteOnly);
-    obj.AddBool("IsViewInHlsl", r.IsViewInHlsl);
-    obj.AddString("HlslType", r.HlslType);
-    obj.AddBool("IsUnboundedArray", r.IsUnboundedArray);
-    if (r.ImageInfo.has_value()) {
-        const SpirvImageInfo& img = r.ImageInfo.value();
-        JsonRef io = obj.AddObject("ImageInfo");
-        io.AddUint("Dim", EnumToU(img.Dim));
-        io.AddBool("Arrayed", img.Arrayed);
-        io.AddBool("Multisampled", img.Multisampled);
-        io.AddBool("Depth", img.Depth);
-        io.AddUint("SampledType", img.SampledType);
-    }
 }
 
 void ReadSpirvType(const JsonValue& obj, SpirvTypeInfo& t) {
@@ -155,16 +224,6 @@ void ReadSpirvBinding(const JsonValue& obj, SpirvResourceBinding& r) {
     }
 }
 
-void WriteSpirvStageIo(JsonRef obj, const SpirvStageIo& value) {
-    obj.AddString("Name", value.Name);
-    obj.AddString("HlslSemantic", value.HlslSemantic);
-    obj.AddUint("Location", value.Location);
-    obj.AddUint("TypeIndex", value.TypeIndex);
-    if (value.BuiltIn.has_value()) {
-        obj.AddUint("BuiltIn", *value.BuiltIn);
-    }
-}
-
 void ReadSpirvStageIo(const JsonValue& obj, SpirvStageIo& value) {
     value.Name = string{obj["Name"].AsString()};
     value.HlslSemantic = string{obj["HlslSemantic"].AsString()};
@@ -178,47 +237,7 @@ void ReadSpirvStageIo(const JsonValue& obj, SpirvStageIo& value) {
 }  // namespace
 
 std::optional<string> SerializeSpirvShaderDesc(const SpirvShaderDesc& desc) noexcept {
-    JsonWriter w{};
-    if (!w.IsValid()) {
-        return std::nullopt;
-    }
-    JsonRef root = w.RootObject();
-    root.AddUint("FormatVersion", kReflectionFormatVersion);
-    root.AddString("Kind", "spirv");
-
-    JsonRef types = root.AddArray("Types");
-    for (const SpirvTypeInfo& t : desc.Types) {
-        WriteSpirvType(types.AppendObject(), t);
-    }
-    JsonRef inputs = root.AddArray("StageInputs");
-    for (const SpirvStageIo& value : desc.StageInputs) {
-        WriteSpirvStageIo(inputs.AppendObject(), value);
-    }
-    JsonRef outputs = root.AddArray("StageOutputs");
-    for (const SpirvStageIo& value : desc.StageOutputs) {
-        WriteSpirvStageIo(outputs.AppendObject(), value);
-    }
-    JsonRef binds = root.AddArray("ResourceBindings");
-    for (const SpirvResourceBinding& r : desc.ResourceBindings) {
-        WriteSpirvBinding(binds.AppendObject(), r);
-    }
-    JsonRef ranges = root.AddArray("ConstantRanges");
-    for (const SpirvPushConstantRange& c : desc.ConstantRanges) {
-        JsonRef co = ranges.AppendObject();
-        co.AddString("Name", c.Name);
-        co.AddUint("Offset", c.Offset);
-        co.AddUint("Size", c.Size);
-        co.AddUint("TypeIndex", c.TypeIndex);
-        co.AddBool("IsViewInHlsl", c.IsViewInHlsl);
-    }
-    if (desc.ComputeInfo.has_value()) {
-        const SpirvComputeInfo& ci = desc.ComputeInfo.value();
-        JsonRef co = root.AddObject("ComputeInfo");
-        co.AddUint("LocalSizeX", ci.LocalSizeX);
-        co.AddUint("LocalSizeY", ci.LocalSizeY);
-        co.AddUint("LocalSizeZ", ci.LocalSizeZ);
-    }
-    return w.Write(true);
+    return SerializeJson(desc, true);
 }
 
 std::optional<SpirvShaderDesc> DeserializeSpirvShaderDesc(std::string_view json) noexcept {

@@ -1,6 +1,5 @@
 #pragma once
 
-#include <compare>
 #include <concepts>
 #include <limits>
 #include <span>
