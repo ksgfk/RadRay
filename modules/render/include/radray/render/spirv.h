@@ -6,7 +6,7 @@
 #include <radray/json.h>
 #include <radray/types.h>
 
-namespace radray::shader {
+namespace radray::render {
 
 enum class SpirvBaseType {
     UNKNOWN,
@@ -146,48 +146,48 @@ std::optional<string> SerializeSpirvShaderDesc(const SpirvShaderDesc& desc) noex
 /// 从 JSON 文本反序列化 SpirvShaderDesc。失败 (格式错误 / 版本不符) 返回 nullopt。
 std::optional<SpirvShaderDesc> DeserializeSpirvShaderDesc(std::string_view json) noexcept;
 
-}  // namespace radray::shader
+}  // namespace radray::render
 
 namespace radray {
 
 template <>
-struct JsonSerializer<shader::SpirvTypeMember> {
-    static bool Write(JsonWriteContext& context, const shader::SpirvTypeMember& value) noexcept;
+struct JsonSerializer<render::SpirvTypeMember> {
+    static bool Write(JsonWriteContext& context, const render::SpirvTypeMember& value) noexcept;
 };
 
 template <>
-struct JsonSerializer<shader::SpirvTypeInfo> {
-    static bool Write(JsonWriteContext& context, const shader::SpirvTypeInfo& value) noexcept;
+struct JsonSerializer<render::SpirvTypeInfo> {
+    static bool Write(JsonWriteContext& context, const render::SpirvTypeInfo& value) noexcept;
 };
 
 template <>
-struct JsonSerializer<shader::SpirvImageInfo> {
-    static bool Write(JsonWriteContext& context, const shader::SpirvImageInfo& value) noexcept;
+struct JsonSerializer<render::SpirvImageInfo> {
+    static bool Write(JsonWriteContext& context, const render::SpirvImageInfo& value) noexcept;
 };
 
 template <>
-struct JsonSerializer<shader::SpirvStageIo> {
-    static bool Write(JsonWriteContext& context, const shader::SpirvStageIo& value) noexcept;
+struct JsonSerializer<render::SpirvStageIo> {
+    static bool Write(JsonWriteContext& context, const render::SpirvStageIo& value) noexcept;
 };
 
 template <>
-struct JsonSerializer<shader::SpirvResourceBinding> {
-    static bool Write(JsonWriteContext& context, const shader::SpirvResourceBinding& value) noexcept;
+struct JsonSerializer<render::SpirvResourceBinding> {
+    static bool Write(JsonWriteContext& context, const render::SpirvResourceBinding& value) noexcept;
 };
 
 template <>
-struct JsonSerializer<shader::SpirvComputeInfo> {
-    static bool Write(JsonWriteContext& context, const shader::SpirvComputeInfo& value) noexcept;
+struct JsonSerializer<render::SpirvComputeInfo> {
+    static bool Write(JsonWriteContext& context, const render::SpirvComputeInfo& value) noexcept;
 };
 
 template <>
-struct JsonSerializer<shader::SpirvPushConstantRange> {
-    static bool Write(JsonWriteContext& context, const shader::SpirvPushConstantRange& value) noexcept;
+struct JsonSerializer<render::SpirvPushConstantRange> {
+    static bool Write(JsonWriteContext& context, const render::SpirvPushConstantRange& value) noexcept;
 };
 
 template <>
-struct JsonSerializer<shader::SpirvShaderDesc> {
-    static bool Write(JsonWriteContext& context, const shader::SpirvShaderDesc& value) noexcept;
+struct JsonSerializer<render::SpirvShaderDesc> {
+    static bool Write(JsonWriteContext& context, const render::SpirvShaderDesc& value) noexcept;
 };
 
 }  // namespace radray

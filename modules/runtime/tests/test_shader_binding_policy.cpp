@@ -5,41 +5,41 @@
 namespace radray {
 namespace {
 
-shader::ShaderBindingDesc MakeSampler(
+render::ShaderBindingDesc MakeSampler(
     uint32_t binding,
     std::string_view name = "Sampler",
     uint32_t count = 1) {
-    return shader::ShaderBindingDesc{
+    return render::ShaderBindingDesc{
         .Name = string{name},
         .BindingIndex = binding,
-        .Kind = shader::ShaderBindingKind::Sampler,
-        .Access = shader::ShaderResourceAccess::ReadOnly,
+        .Kind = render::ShaderBindingKind::Sampler,
+        .Access = render::ShaderResourceAccess::ReadOnly,
         .Count = count,
-        .Stages = shader::ShaderStage::Pixel};
+        .Stages = render::ShaderStage::Pixel};
 }
 
-shader::ShaderBindingDesc MakeConstants(
+render::ShaderBindingDesc MakeConstants(
     uint32_t byteSize,
-    vector<shader::ShaderInterfaceFieldDesc> fields) {
-    return shader::ShaderBindingDesc{
+    vector<render::ShaderInterfaceFieldDesc> fields) {
+    return render::ShaderBindingDesc{
         .Name = "Constants",
         .BindingIndex = 0,
-        .Kind = shader::ShaderBindingKind::ConstantBuffer,
-        .Access = shader::ShaderResourceAccess::ReadOnly,
+        .Kind = render::ShaderBindingKind::ConstantBuffer,
+        .Access = render::ShaderResourceAccess::ReadOnly,
         .Count = 1,
-        .Stages = shader::ShaderStage::Pixel,
-        .Buffer = shader::ShaderBufferInterfaceDesc{
+        .Stages = render::ShaderStage::Pixel,
+        .Buffer = render::ShaderBufferInterfaceDesc{
             .ByteSize = byteSize,
             .Fields = std::move(fields)}};
 }
 
-shader::ShaderInterfaceFieldDesc MakeFloat4(std::string_view name, uint32_t offset) {
-    return shader::ShaderInterfaceFieldDesc{
+render::ShaderInterfaceFieldDesc MakeFloat4(std::string_view name, uint32_t offset) {
+    return render::ShaderInterfaceFieldDesc{
         .Name = string{name},
         .Offset = offset,
         .Size = 16,
-        .Type = shader::ShaderValueTypeDesc{
-            .Scalar = shader::ShaderScalarType::Float32,
+        .Type = render::ShaderValueTypeDesc{
+            .Scalar = render::ShaderScalarType::Float32,
             .Rows = 1,
             .Columns = 4,
             .ArrayCount = 1,
@@ -47,10 +47,10 @@ shader::ShaderInterfaceFieldDesc MakeFloat4(std::string_view name, uint32_t offs
         .Members = {}};
 }
 
-shader::ShaderInterfaceDesc MakeInterface(
-    vector<shader::ShaderBindingGroupInterfaceDesc> groups) {
-    return shader::ShaderInterfaceDesc{
-        .Kind = shader::ShaderProgramKind::Graphics,
+render::ShaderInterfaceDesc MakeInterface(
+    vector<render::ShaderBindingGroupInterfaceDesc> groups) {
+    return render::ShaderInterfaceDesc{
+        .Kind = render::ShaderProgramKind::Graphics,
         .BindingGroups = std::move(groups),
         .PushConstants = {},
         .VertexInputs = {},
@@ -72,7 +72,7 @@ shared_ptr<const IShaderBindingProvider> MakeProvider() {
 
 TEST(ShaderBindingPolicyTest, MissingReservedGroupsAndCustomShadersAreValid) {
     PipelineBindingPolicy policy{{PipelineBindingReservation{.GroupIndex = 0, .Provider = MakeProvider()}}};
-    shader::ShaderInterfaceDesc custom = MakeInterface({shader::ShaderBindingGroupInterfaceDesc{.GroupIndex = 4, .Bindings = {MakeSampler(2, "UserSampler")}}});
+    render::ShaderInterfaceDesc custom = MakeInterface({render::ShaderBindingGroupInterfaceDesc{.GroupIndex = 4, .Bindings = {MakeSampler(2, "UserSampler")}}});
     auto result = ResolveShaderBindings(custom, policy);
     ASSERT_TRUE(result.Succeeded());
     ASSERT_EQ(result.Plan->ProviderGroups.size(), 0u);
@@ -87,8 +87,8 @@ TEST(ShaderBindingPolicyTest, MissingReservedGroupsAndCustomShadersAreValid) {
 
 TEST(ShaderBindingPolicyTest, ProviderOwnsCompatibleWholeGroup) {
     PipelineBindingPolicy policy{{PipelineBindingReservation{.GroupIndex = 1, .Provider = MakeProvider()}}};
-    shader::ShaderInterfaceDesc interface = MakeInterface({shader::ShaderBindingGroupInterfaceDesc{.GroupIndex = 1, .Bindings = {MakeSampler(0, "AnyName")}},
-                                                           shader::ShaderBindingGroupInterfaceDesc{.GroupIndex = 3, .Bindings = {MakeSampler(5, "MaterialSampler")}}});
+    render::ShaderInterfaceDesc interface = MakeInterface({render::ShaderBindingGroupInterfaceDesc{.GroupIndex = 1, .Bindings = {MakeSampler(0, "AnyName")}},
+                                                           render::ShaderBindingGroupInterfaceDesc{.GroupIndex = 3, .Bindings = {MakeSampler(5, "MaterialSampler")}}});
     auto result = ResolveShaderBindings(interface, policy);
     ASSERT_TRUE(result.Succeeded());
     ASSERT_EQ(result.Plan->ProviderGroups.size(), 1u);
@@ -99,8 +99,8 @@ TEST(ShaderBindingPolicyTest, ProviderOwnsCompatibleWholeGroup) {
 
 TEST(ShaderBindingPolicyTest, UnknownReservedBindingIsIncompatible) {
     PipelineBindingPolicy policy{{PipelineBindingReservation{.GroupIndex = 1, .Provider = MakeProvider()}}};
-    shader::ShaderInterfaceDesc interface = MakeInterface({shader::ShaderBindingGroupInterfaceDesc{.GroupIndex = 1, .Bindings = {MakeSampler(7, "Unknown")}}});
-    shader::ShaderDiagnosticContext context;
+    render::ShaderInterfaceDesc interface = MakeInterface({render::ShaderBindingGroupInterfaceDesc{.GroupIndex = 1, .Bindings = {MakeSampler(7, "Unknown")}}});
+    render::ShaderDiagnosticContext context;
     context.PassIndex = 2;
     auto result = ResolveShaderBindings(interface, policy, context);
     ASSERT_FALSE(result.Succeeded());
@@ -112,7 +112,7 @@ TEST(ShaderBindingPolicyTest, UnknownReservedBindingIsIncompatible) {
 }
 
 TEST(ShaderBindingPolicyTest, EmptyPolicyTreatsEveryGroupAsUserOwned) {
-    shader::ShaderInterfaceDesc interface = MakeInterface({shader::ShaderBindingGroupInterfaceDesc{.GroupIndex = 0, .Bindings = {MakeSampler(0)}}});
+    render::ShaderInterfaceDesc interface = MakeInterface({render::ShaderBindingGroupInterfaceDesc{.GroupIndex = 0, .Bindings = {MakeSampler(0)}}});
     auto result = ResolveShaderBindings(interface, PipelineBindingPolicy{});
     ASSERT_TRUE(result.Succeeded());
     EXPECT_TRUE(result.Plan->ProviderGroups.empty());
@@ -132,14 +132,14 @@ TEST(ShaderBindingPolicyTest, ProviderSchemaSupportsExplicitPhysicalAlternatives
         .Provider = std::move(provider)}}};
 
     auto compatible = ResolveShaderBindings(
-        MakeInterface({shader::ShaderBindingGroupInterfaceDesc{
+        MakeInterface({render::ShaderBindingGroupInterfaceDesc{
             .GroupIndex = 1,
             .Bindings = {MakeSampler(0, "UserName", 2)}}}),
         policy);
     ASSERT_TRUE(compatible.Succeeded());
 
     auto incompatible = ResolveShaderBindings(
-        MakeInterface({shader::ShaderBindingGroupInterfaceDesc{
+        MakeInterface({render::ShaderBindingGroupInterfaceDesc{
             .GroupIndex = 1,
             .Bindings = {MakeSampler(0, "UserName", 3)}}}),
         policy);
@@ -161,14 +161,14 @@ TEST(ShaderBindingPolicyTest, ProviderAcceptsConstantBufferFieldProjection) {
         .Provider = std::move(provider)}}};
 
     auto projected = ResolveShaderBindings(
-        MakeInterface({shader::ShaderBindingGroupInterfaceDesc{
+        MakeInterface({render::ShaderBindingGroupInterfaceDesc{
             .GroupIndex = 1,
             .Bindings = {MakeConstants(16, {MakeFloat4("Renamed", 0)})}}}),
         policy);
     ASSERT_TRUE(projected.Succeeded());
 
     auto incompatible = ResolveShaderBindings(
-        MakeInterface({shader::ShaderBindingGroupInterfaceDesc{
+        MakeInterface({render::ShaderBindingGroupInterfaceDesc{
             .GroupIndex = 1,
             .Bindings = {MakeConstants(32, {MakeFloat4("Wrong", 8)})}}}),
         policy);

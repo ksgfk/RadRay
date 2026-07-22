@@ -281,17 +281,6 @@ uint32_t GetTextureFormatBytesPerPixel(TextureFormat format) noexcept {
     Unreachable();
 }
 
-ResourceBindType BufferViewUsageToResourceBindType(BufferViewUsage usage) noexcept {
-    switch (usage) {
-        case BufferViewUsage::CBuffer: return ResourceBindType::CBuffer;
-        case BufferViewUsage::ReadOnlyStorage: return ResourceBindType::Buffer;
-        case BufferViewUsage::ReadWriteStorage: return ResourceBindType::RWBuffer;
-        case BufferViewUsage::TexelReadOnly: return ResourceBindType::TexelBuffer;
-        case BufferViewUsage::TexelReadWrite: return ResourceBindType::RWTexelBuffer;
-    }
-    return ResourceBindType::UNKNOWN;
-}
-
 std::string_view format_as(RenderBackend v) noexcept {
     switch (v) {
         case RenderBackend::D3D12: return "D3D12";
@@ -440,10 +429,6 @@ std::string_view format_as(BufferState v) noexcept {
         case BufferState::Indirect: return "Indirect";
         case BufferState::HostRead: return "HostRead";
         case BufferState::HostWrite: return "HostWrite";
-        case BufferState::AccelerationStructureBuildInput: return "AccelerationStructureBuildInput";
-        case BufferState::AccelerationStructureBuildScratch: return "AccelerationStructureBuildScratch";
-        case BufferState::AccelerationStructureRead: return "AccelerationStructureRead";
-        case BufferState::ShaderTable: return "ShaderTable";
     }
     Unreachable();
 }
@@ -479,60 +464,6 @@ std::string_view format_as(TextureViewUsage v) noexcept {
     Unreachable();
 }
 
-std::string_view format_as(BufferViewUsage v) noexcept {
-    switch (v) {
-        case BufferViewUsage::CBuffer: return "CBuffer";
-        case BufferViewUsage::ReadOnlyStorage: return "ReadOnlyStorage";
-        case BufferViewUsage::ReadWriteStorage: return "ReadWriteStorage";
-        case BufferViewUsage::TexelReadOnly: return "TexelReadOnly";
-        case BufferViewUsage::TexelReadWrite: return "TexelReadWrite";
-    }
-    Unreachable();
-}
-
-std::string_view format_as(ResourceBindType v) noexcept {
-    switch (v) {
-        case ResourceBindType::CBuffer: return "CBuffer";
-        case ResourceBindType::Buffer: return "Buffer";
-        case ResourceBindType::TexelBuffer: return "TexelBuffer";
-        case ResourceBindType::RWBuffer: return "RWBuffer";
-        case ResourceBindType::RWTexelBuffer: return "RWTexelBuffer";
-        case ResourceBindType::Texture: return "Texture";
-        case ResourceBindType::RWTexture: return "RWTexture";
-        case ResourceBindType::Sampler: return "Sampler";
-        case ResourceBindType::AccelerationStructure: return "AccelerationStructure";
-        case ResourceBindType::UNKNOWN: return "UNKNOWN";
-    }
-    Unreachable();
-}
-
-std::string_view format_as(AccelerationStructureType v) noexcept {
-    switch (v) {
-        case AccelerationStructureType::BottomLevel: return "BottomLevel";
-        case AccelerationStructureType::TopLevel: return "TopLevel";
-    }
-    Unreachable();
-}
-
-std::string_view format_as(AccelerationStructureBuildMode v) noexcept {
-    switch (v) {
-        case AccelerationStructureBuildMode::Build: return "Build";
-        case AccelerationStructureBuildMode::Update: return "Update";
-    }
-    Unreachable();
-}
-
-std::string_view format_as(AccelerationStructureBuildFlag v) noexcept {
-    switch (v) {
-        case AccelerationStructureBuildFlag::None: return "None";
-        case AccelerationStructureBuildFlag::PreferFastTrace: return "PreferFastTrace";
-        case AccelerationStructureBuildFlag::PreferFastBuild: return "PreferFastBuild";
-        case AccelerationStructureBuildFlag::AllowUpdate: return "AllowUpdate";
-        case AccelerationStructureBuildFlag::AllowCompaction: return "AllowCompaction";
-    }
-    Unreachable();
-}
-
 std::string_view format_as(RenderObjectTag v) noexcept {
     switch (v) {
         case RenderObjectTag::UNKNOWN: return "UNKNOWN";
@@ -542,29 +473,23 @@ std::string_view format_as(RenderObjectTag v) noexcept {
         case RenderObjectTag::CmdEncoder: return "CmdEncoder";
         case RenderObjectTag::GraphicsCmdEncoder: return "GraphicsCmdEncoder";
         case RenderObjectTag::ComputeCmdEncoder: return "ComputeCmdEncoder";
-        case RenderObjectTag::RayTracingCmdEncoder: return "RayTracingCmdEncoder";
         case RenderObjectTag::Fence: return "Fence";
         case RenderObjectTag::Shader: return "Shader";
         case RenderObjectTag::PipelineLayout: return "PipelineLayout";
         case RenderObjectTag::PipelineState: return "PipelineState";
         case RenderObjectTag::GraphicsPipelineState: return "GraphicsPipelineState";
         case RenderObjectTag::ComputePipelineState: return "ComputePipelineState";
-        case RenderObjectTag::RayTracingPipelineState: return "RayTracingPipelineState";
         case RenderObjectTag::SwapChain: return "SwapChain";
         case RenderObjectTag::Resource: return "Resource";
         case RenderObjectTag::Buffer: return "Buffer";
         case RenderObjectTag::Texture: return "Texture";
-        case RenderObjectTag::AccelerationStructure: return "AccelerationStructure";
-        case RenderObjectTag::ShaderBindingTable: return "ShaderBindingTable";
         case RenderObjectTag::RenderPass: return "RenderPass";
         case RenderObjectTag::Framebuffer: return "Framebuffer";
         case RenderObjectTag::ResourceView: return "ResourceView";
         case RenderObjectTag::TextureView: return "TextureView";
-        case RenderObjectTag::AccelerationStructureView: return "AccelerationStructureView";
         case RenderObjectTag::Sampler: return "Sampler";
         case RenderObjectTag::VkInstance: return "VkInstance";
         case RenderObjectTag::DXGIFactory: return "DXGIFactory";
-        case RenderObjectTag::BindlessArray: return "BindlessArray";
         default: return "UNKNOWN";
     }
 }
@@ -574,16 +499,6 @@ std::string_view format_as(PresentMode v) noexcept {
         case PresentMode::FIFO: return "FIFO";
         case PresentMode::Mailbox: return "Mailbox";
         case PresentMode::Immediate: return "Immediate";
-    }
-    Unreachable();
-}
-
-std::string_view format_as(BindlessSlotType v) noexcept {
-    switch (v) {
-        case BindlessSlotType::Multiple: return "Multiple";
-        case BindlessSlotType::BufferOnly: return "BufferOnly";
-        case BindlessSlotType::Texture2DOnly: return "Texture2DOnly";
-        case BindlessSlotType::Texture3DOnly: return "Texture3DOnly";
     }
     Unreachable();
 }

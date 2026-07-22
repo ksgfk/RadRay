@@ -9,8 +9,8 @@
 namespace radray {
 namespace {
 
-uint32_t ScalarSize(shader::ShaderScalarType type) noexcept {
-    using enum shader::ShaderScalarType;
+uint32_t ScalarSize(render::ShaderScalarType type) noexcept {
+    using enum render::ShaderScalarType;
     switch (type) {
         case Bool:
         case Int32:
@@ -34,12 +34,12 @@ std::string_view LeafName(std::string_view value) noexcept {
 }
 
 void AppendFields(
-    const vector<shader::ShaderInterfaceFieldDesc>& fields,
+    const vector<render::ShaderInterfaceFieldDesc>& fields,
     std::string_view bindingName,
     std::string_view prefix,
     vector<ShaderParameterFieldDesc>& output,
     uint32_t offsetDelta = 0) {
-    for (const shader::ShaderInterfaceFieldDesc& field : fields) {
+    for (const render::ShaderInterfaceFieldDesc& field : fields) {
         string path{prefix};
         if (!path.empty()) path.push_back('.');
         path.append(field.Name);
@@ -69,10 +69,10 @@ void AppendFields(
     }
 }
 
-shader::ShaderHash HashParameterGroups(
-    const vector<shader::ShaderBindingGroupInterfaceDesc>& groups,
-    shader::ShaderProgramKind kind) noexcept {
-    shader::ShaderInterfaceDesc identity{
+render::ShaderHash HashParameterGroups(
+    const vector<render::ShaderBindingGroupInterfaceDesc>& groups,
+    render::ShaderProgramKind kind) noexcept {
+    render::ShaderInterfaceDesc identity{
         .Kind = kind,
         .BindingGroups = groups,
         .PushConstants = {},
@@ -80,20 +80,20 @@ shader::ShaderHash HashParameterGroups(
         .VertexOutputs = {},
         .PixelInputs = {},
         .PixelOutputs = {}};
-    if (kind == shader::ShaderProgramKind::Compute) {
-        identity.Compute = shader::ShaderComputeInterfaceDesc{};
+    if (kind == render::ShaderProgramKind::Compute) {
+        identity.Compute = render::ShaderComputeInterfaceDesc{};
     }
-    return shader::HashShaderInterface(identity);
+    return render::HashShaderInterface(identity);
 }
 
-bool IsBufferKind(shader::ShaderBindingKind kind) noexcept {
-    return kind == shader::ShaderBindingKind::TypedBuffer ||
-           kind == shader::ShaderBindingKind::StructuredBuffer ||
-           kind == shader::ShaderBindingKind::RawBuffer;
+bool IsBufferKind(render::ShaderBindingKind kind) noexcept {
+    return kind == render::ShaderBindingKind::TypedBuffer ||
+           kind == render::ShaderBindingKind::StructuredBuffer ||
+           kind == render::ShaderBindingKind::RawBuffer;
 }
 
 bool IsBufferCompatible(
-    const shader::ShaderBindingDesc& binding,
+    const render::ShaderBindingDesc& binding,
     const render::Buffer& buffer,
     render::BufferRange range) noexcept {
     if (!buffer.IsValid()) return false;
@@ -108,12 +108,12 @@ bool IsBufferCompatible(
          size % binding.Buffer->ElementStride != 0)) {
         return false;
     }
-    return binding.Access == shader::ShaderResourceAccess::ReadOnly
+    return binding.Access == render::ShaderResourceAccess::ReadOnly
                ? desc.Usage.HasFlag(render::BufferUse::Resource)
                : desc.Usage.HasFlag(render::BufferUse::UnorderedAccess);
 }
 
-shader::ShaderSampleType GetTextureFormatClass(render::TextureFormat format) noexcept {
+render::ShaderSampleType GetTextureFormatClass(render::TextureFormat format) noexcept {
     using enum render::TextureFormat;
     switch (format) {
         case R8_SINT:
@@ -124,7 +124,7 @@ shader::ShaderSampleType GetTextureFormatClass(render::TextureFormat format) noe
         case RGBA8_SINT:
         case RG32_SINT:
         case RGBA16_SINT:
-        case RGBA32_SINT: return shader::ShaderSampleType::SInt;
+        case RGBA32_SINT: return render::ShaderSampleType::SInt;
         case R8_UINT:
         case R16_UINT:
         case RG8_UINT:
@@ -134,13 +134,13 @@ shader::ShaderSampleType GetTextureFormatClass(render::TextureFormat format) noe
         case RGB10A2_UINT:
         case RG32_UINT:
         case RGBA16_UINT:
-        case RGBA32_UINT: return shader::ShaderSampleType::UInt;
+        case RGBA32_UINT: return render::ShaderSampleType::UInt;
         case R8_SNORM:
         case R16_SNORM:
         case RG8_SNORM:
         case RG16_SNORM:
         case RGBA8_SNORM:
-        case RGBA16_SNORM: return shader::ShaderSampleType::SNorm;
+        case RGBA16_SNORM: return render::ShaderSampleType::SNorm;
         case R8_UNORM:
         case R16_UNORM:
         case RG8_UNORM:
@@ -150,52 +150,52 @@ shader::ShaderSampleType GetTextureFormatClass(render::TextureFormat format) noe
         case BGRA8_UNORM:
         case BGRA8_UNORM_SRGB:
         case RGB10A2_UNORM:
-        case RGBA16_UNORM: return shader::ShaderSampleType::UNorm;
+        case RGBA16_UNORM: return render::ShaderSampleType::UNorm;
         case R16_FLOAT:
         case R32_FLOAT:
         case RG16_FLOAT:
         case RG11B10_FLOAT:
         case RG32_FLOAT:
         case RGBA16_FLOAT:
-        case RGBA32_FLOAT: return shader::ShaderSampleType::Float;
+        case RGBA32_FLOAT: return render::ShaderSampleType::Float;
         case D16_UNORM:
         case D32_FLOAT:
         case D24_UNORM_S8_UINT:
-        case D32_FLOAT_S8_UINT: return shader::ShaderSampleType::Depth;
-        default: return shader::ShaderSampleType::Unknown;
+        case D32_FLOAT_S8_UINT: return render::ShaderSampleType::Depth;
+        default: return render::ShaderSampleType::Unknown;
     }
 }
 
 bool IsSampleTypeCompatible(
-    shader::ShaderSampleType shaderType,
-    shader::ShaderSampleType formatType) noexcept {
-    if (shaderType == shader::ShaderSampleType::Float) {
-        return formatType == shader::ShaderSampleType::Float ||
-               formatType == shader::ShaderSampleType::UNorm ||
-               formatType == shader::ShaderSampleType::SNorm;
+    render::ShaderSampleType shaderType,
+    render::ShaderSampleType formatType) noexcept {
+    if (shaderType == render::ShaderSampleType::Float) {
+        return formatType == render::ShaderSampleType::Float ||
+               formatType == render::ShaderSampleType::UNorm ||
+               formatType == render::ShaderSampleType::SNorm;
     }
     return shaderType == formatType;
 }
 
 bool IsTextureDimensionCompatible(
-    const shader::ShaderTextureInterfaceDesc& interface,
+    const render::ShaderTextureInterfaceDesc& interface,
     render::TextureDimension dimension) noexcept {
     using enum render::TextureDimension;
     switch (interface.Dimension) {
-        case shader::ShaderTextureDimension::Dim1D:
+        case render::ShaderTextureDimension::Dim1D:
             return interface.Arrayed ? dimension == Dim1DArray : dimension == Dim1D;
-        case shader::ShaderTextureDimension::Dim2D:
+        case render::ShaderTextureDimension::Dim2D:
             return interface.Arrayed ? dimension == Dim2DArray : dimension == Dim2D;
-        case shader::ShaderTextureDimension::Dim3D:
+        case render::ShaderTextureDimension::Dim3D:
             return !interface.Arrayed && dimension == Dim3D;
-        case shader::ShaderTextureDimension::Cube:
+        case render::ShaderTextureDimension::Cube:
             return interface.Arrayed ? dimension == CubeArray : dimension == Cube;
         default: return false;
     }
 }
 
 bool IsTextureCompatible(
-    const shader::ShaderBindingDesc& binding,
+    const render::ShaderBindingDesc& binding,
     const ShaderTextureParameterValue& value) noexcept {
     if (!binding.Texture.has_value() || !value.Texture.IsReady() ||
         value.Texture.Get() == nullptr || !value.Texture->IsValid()) {
@@ -211,7 +211,7 @@ bool IsTextureCompatible(
         !IsSampleTypeCompatible(binding.Texture->SampleType, GetTextureFormatClass(format))) {
         return false;
     }
-    return binding.Kind == shader::ShaderBindingKind::StorageTexture
+    return binding.Kind == render::ShaderBindingKind::StorageTexture
                ? desc.Usage.HasFlag(render::TextureUse::UnorderedAccess)
                : desc.Usage.HasFlag(render::TextureUse::Resource);
 }
@@ -219,19 +219,19 @@ bool IsTextureCompatible(
 struct UserBindingOrigin {
     ShaderParameterLocation Location{};
     string Name;
-    shader::ShaderDiagnosticContext Context{};
+    render::ShaderDiagnosticContext Context{};
 };
 
 struct UserFieldOrigin {
     ShaderParameterLocation Location{};
     string Field;
-    shader::ShaderDiagnosticContext Context{};
+    render::ShaderDiagnosticContext Context{};
 };
 
 struct UserGroupMergeResult {
     bool Compatible{true};
     std::optional<uint32_t> Binding{};
-    std::optional<shader::ShaderDiagnosticContext> RelatedContext{};
+    std::optional<render::ShaderDiagnosticContext> RelatedContext{};
     string Detail;
 };
 
@@ -266,16 +266,16 @@ bool RangesOverlap(
 }
 
 void AppendFlatConstantFields(
-    const vector<shader::ShaderInterfaceFieldDesc>& fields,
+    const vector<render::ShaderInterfaceFieldDesc>& fields,
     std::string_view prefix,
-    vector<shader::ShaderInterfaceFieldDesc>& output,
+    vector<render::ShaderInterfaceFieldDesc>& output,
     uint32_t offsetDelta = 0) {
-    for (const shader::ShaderInterfaceFieldDesc& field : fields) {
+    for (const render::ShaderInterfaceFieldDesc& field : fields) {
         string path{prefix};
         if (!path.empty()) path.push_back('.');
         path.append(field.Name);
         if (field.Members.empty()) {
-            shader::ShaderInterfaceFieldDesc flattened = field;
+            render::ShaderInterfaceFieldDesc flattened = field;
             flattened.Name = std::move(path);
             flattened.Offset += offsetDelta;
             output.emplace_back(std::move(flattened));
@@ -295,13 +295,13 @@ void AppendFlatConstantFields(
     }
 }
 
-void NormalizeUserGroup(shader::ShaderBindingGroupInterfaceDesc& group) {
-    for (shader::ShaderBindingDesc& binding : group.Bindings) {
-        if (binding.Kind != shader::ShaderBindingKind::ConstantBuffer ||
+void NormalizeUserGroup(render::ShaderBindingGroupInterfaceDesc& group) {
+    for (render::ShaderBindingDesc& binding : group.Bindings) {
+        if (binding.Kind != render::ShaderBindingKind::ConstantBuffer ||
             !binding.Buffer.has_value()) {
             continue;
         }
-        vector<shader::ShaderInterfaceFieldDesc> flattened;
+        vector<render::ShaderInterfaceFieldDesc> flattened;
         AppendFlatConstantFields(binding.Buffer->Fields, {}, flattened);
         std::ranges::sort(flattened, [](const auto& lhs, const auto& rhs) {
             return std::tie(lhs.Offset, lhs.Name) < std::tie(rhs.Offset, rhs.Name);
@@ -311,11 +311,11 @@ void NormalizeUserGroup(shader::ShaderBindingGroupInterfaceDesc& group) {
 }
 
 void AppendOrigins(
-    const shader::ShaderBindingGroupInterfaceDesc& group,
-    const shader::ShaderDiagnosticContext& context,
+    const render::ShaderBindingGroupInterfaceDesc& group,
+    const render::ShaderDiagnosticContext& context,
     vector<UserBindingOrigin>& origins,
     vector<UserFieldOrigin>& fieldOrigins) {
-    for (const shader::ShaderBindingDesc& binding : group.Bindings) {
+    for (const render::ShaderBindingDesc& binding : group.Bindings) {
         const ShaderParameterLocation location{
             .Group = group.GroupIndex,
             .Binding = binding.BindingIndex};
@@ -324,7 +324,7 @@ void AppendOrigins(
             .Name = binding.Name,
             .Context = context});
         if (!binding.Buffer.has_value()) continue;
-        for (const shader::ShaderInterfaceFieldDesc& field : binding.Buffer->Fields) {
+        for (const render::ShaderInterfaceFieldDesc& field : binding.Buffer->Fields) {
             fieldOrigins.emplace_back(UserFieldOrigin{
                 .Location = location,
                 .Field = field.Name,
@@ -334,14 +334,14 @@ void AppendOrigins(
 }
 
 UserGroupMergeResult MergeConstantBuffer(
-    shader::ShaderBindingDesc& destination,
-    const shader::ShaderBindingDesc& source,
+    render::ShaderBindingDesc& destination,
+    const render::ShaderBindingDesc& source,
     uint32_t groupIndex,
-    const shader::ShaderDiagnosticContext& context,
+    const render::ShaderDiagnosticContext& context,
     vector<UserFieldOrigin>& fieldOrigins) {
     if (destination.BindingIndex != source.BindingIndex ||
-        destination.Kind != shader::ShaderBindingKind::ConstantBuffer ||
-        source.Kind != shader::ShaderBindingKind::ConstantBuffer ||
+        destination.Kind != render::ShaderBindingKind::ConstantBuffer ||
+        source.Kind != render::ShaderBindingKind::ConstantBuffer ||
         destination.Access != source.Access || destination.Count != source.Count ||
         !destination.Buffer.has_value() || !source.Buffer.has_value() ||
         destination.Texture.has_value() || source.Texture.has_value() ||
@@ -355,11 +355,11 @@ UserGroupMergeResult MergeConstantBuffer(
     const ShaderParameterLocation location{
         .Group = groupIndex,
         .Binding = source.BindingIndex};
-    for (const shader::ShaderInterfaceFieldDesc& incoming : source.Buffer->Fields) {
+    for (const render::ShaderInterfaceFieldDesc& incoming : source.Buffer->Fields) {
         const auto sameName = std::ranges::find(
             destination.Buffer->Fields,
             incoming.Name,
-            &shader::ShaderInterfaceFieldDesc::Name);
+            &render::ShaderInterfaceFieldDesc::Name);
         if (sameName != destination.Buffer->Fields.end()) {
             if (sameName->Offset == incoming.Offset && sameName->Size == incoming.Size &&
                 sameName->Type == incoming.Type) {
@@ -373,7 +373,7 @@ UserGroupMergeResult MergeConstantBuffer(
                 .Compatible = false,
                 .Binding = source.BindingIndex,
                 .RelatedContext = origin != nullptr
-                                      ? std::optional<shader::ShaderDiagnosticContext>{origin->Context}
+                                      ? std::optional<render::ShaderDiagnosticContext>{origin->Context}
                                       : std::nullopt,
                 .Detail = fmt::format(
                     "constant field '{}' changed from byte range [{}..{}) to [{}..{}) or changed type",
@@ -386,7 +386,7 @@ UserGroupMergeResult MergeConstantBuffer(
 
         const auto overlap = std::ranges::find_if(
             destination.Buffer->Fields,
-            [&](const shader::ShaderInterfaceFieldDesc& existing) {
+            [&](const render::ShaderInterfaceFieldDesc& existing) {
                 return RangesOverlap(
                     existing.Offset,
                     existing.Size,
@@ -402,7 +402,7 @@ UserGroupMergeResult MergeConstantBuffer(
                 .Compatible = false,
                 .Binding = source.BindingIndex,
                 .RelatedContext = origin != nullptr
-                                      ? std::optional<shader::ShaderDiagnosticContext>{origin->Context}
+                                      ? std::optional<render::ShaderDiagnosticContext>{origin->Context}
                                       : std::nullopt,
                 .Detail = fmt::format(
                     "constant field '{}' byte range [{}..{}) overlaps field '{}' range [{}..{})",
@@ -431,23 +431,23 @@ UserGroupMergeResult MergeConstantBuffer(
 }
 
 UserGroupMergeResult MergeUserGroup(
-    shader::ShaderBindingGroupInterfaceDesc& destination,
-    const shader::ShaderBindingGroupInterfaceDesc& source,
-    const shader::ShaderDiagnosticContext& context,
+    render::ShaderBindingGroupInterfaceDesc& destination,
+    const render::ShaderBindingGroupInterfaceDesc& source,
+    const render::ShaderDiagnosticContext& context,
     vector<UserBindingOrigin>& origins,
     vector<UserFieldOrigin>& fieldOrigins) {
-    for (const shader::ShaderBindingDesc& incoming : source.Bindings) {
+    for (const render::ShaderBindingDesc& incoming : source.Bindings) {
         auto sameLocation = std::ranges::find(
             destination.Bindings,
             incoming.BindingIndex,
-            &shader::ShaderBindingDesc::BindingIndex);
+            &render::ShaderBindingDesc::BindingIndex);
         auto sameName = std::ranges::find(
             destination.Bindings,
             incoming.Name,
-            &shader::ShaderBindingDesc::Name);
+            &render::ShaderBindingDesc::Name);
         if (sameLocation == destination.Bindings.end() && sameName == destination.Bindings.end()) {
             destination.Bindings.emplace_back(incoming);
-            const shader::ShaderBindingGroupInterfaceDesc added{
+            const render::ShaderBindingGroupInterfaceDesc added{
                 .GroupIndex = source.GroupIndex,
                 .Bindings = {incoming}};
             AppendOrigins(added, context, origins, fieldOrigins);
@@ -455,7 +455,7 @@ UserGroupMergeResult MergeUserGroup(
         }
         if (sameLocation == destination.Bindings.end() || sameName == destination.Bindings.end() ||
             sameLocation != sameName) {
-            const shader::ShaderBindingDesc* conflicting =
+            const render::ShaderBindingDesc* conflicting =
                 sameLocation != destination.Bindings.end() ? &*sameLocation : &*sameName;
             const UserBindingOrigin* origin = FindOrigin(
                 origins,
@@ -465,12 +465,12 @@ UserGroupMergeResult MergeUserGroup(
                 .Compatible = false,
                 .Binding = incoming.BindingIndex,
                 .RelatedContext = origin != nullptr
-                                      ? std::optional<shader::ShaderDiagnosticContext>{origin->Context}
+                                      ? std::optional<render::ShaderDiagnosticContext>{origin->Context}
                                       : std::nullopt,
                 .Detail = "binding name and location do not identify the same user parameter"};
         }
-        if (incoming.Kind == shader::ShaderBindingKind::ConstantBuffer &&
-            sameLocation->Kind == shader::ShaderBindingKind::ConstantBuffer) {
+        if (incoming.Kind == render::ShaderBindingKind::ConstantBuffer &&
+            sameLocation->Kind == render::ShaderBindingKind::ConstantBuffer) {
             UserGroupMergeResult merge = MergeConstantBuffer(
                 *sameLocation,
                 incoming,
@@ -490,7 +490,7 @@ UserGroupMergeResult MergeUserGroup(
             }
             continue;
         }
-        if (!shader::AreShaderBindingsAbiCompatible(*sameLocation, incoming)) {
+        if (!render::AreShaderBindingsAbiCompatible(*sameLocation, incoming)) {
             const UserBindingOrigin* origin = FindOrigin(
                 origins,
                 source.GroupIndex,
@@ -499,31 +499,31 @@ UserGroupMergeResult MergeUserGroup(
                 .Compatible = false,
                 .Binding = incoming.BindingIndex,
                 .RelatedContext = origin != nullptr
-                                      ? std::optional<shader::ShaderDiagnosticContext>{origin->Context}
+                                      ? std::optional<render::ShaderDiagnosticContext>{origin->Context}
                                       : std::nullopt,
                 .Detail = "resource binding ABI is incompatible"};
         }
         sameLocation->Stages |= incoming.Stages;
     }
-    std::ranges::sort(destination.Bindings, {}, &shader::ShaderBindingDesc::BindingIndex);
+    std::ranges::sort(destination.Bindings, {}, &render::ShaderBindingDesc::BindingIndex);
     return {};
 }
 
 bool CanPreserveBindingValue(
-    const shader::ShaderBindingDesc& previous,
-    const shader::ShaderBindingDesc& next) noexcept {
+    const render::ShaderBindingDesc& previous,
+    const render::ShaderBindingDesc& next) noexcept {
     if (previous.Name != next.Name) return false;
-    if (previous.Kind != shader::ShaderBindingKind::ConstantBuffer ||
-        next.Kind != shader::ShaderBindingKind::ConstantBuffer) {
-        return shader::AreShaderBindingsAbiCompatible(previous, next);
+    if (previous.Kind != render::ShaderBindingKind::ConstantBuffer ||
+        next.Kind != render::ShaderBindingKind::ConstantBuffer) {
+        return render::AreShaderBindingsAbiCompatible(previous, next);
     }
-    if (!shader::IsShaderBindingAbiProjectionOf(previous, next) &&
-        !shader::IsShaderBindingAbiProjectionOf(next, previous)) {
+    if (!render::IsShaderBindingAbiProjectionOf(previous, next) &&
+        !render::IsShaderBindingAbiProjectionOf(next, previous)) {
         return false;
     }
     if (!previous.Buffer.has_value() || !next.Buffer.has_value()) return false;
-    for (const shader::ShaderInterfaceFieldDesc& oldField : previous.Buffer->Fields) {
-        for (const shader::ShaderInterfaceFieldDesc& newField : next.Buffer->Fields) {
+    for (const render::ShaderInterfaceFieldDesc& oldField : previous.Buffer->Fields) {
+        for (const render::ShaderInterfaceFieldDesc& newField : next.Buffer->Fields) {
             if (!RangesOverlap(
                     oldField.Offset,
                     oldField.Size,
@@ -544,7 +544,7 @@ bool CanPreserveBindingValue(
 
 bool ShaderParameterLayout::IsValid() const noexcept {
     size_t expectedBindingCount = 0;
-    for (const shader::ShaderBindingGroupInterfaceDesc& group : _groups) {
+    for (const render::ShaderBindingGroupInterfaceDesc& group : _groups) {
         expectedBindingCount += group.Bindings.size();
     }
     if (expectedBindingCount != _bindings.size()) return false;
@@ -558,8 +558,8 @@ bool ShaderParameterLayout::IsValid() const noexcept {
             return value.BindingIndex == binding.Location.Binding;
         });
         if (source == group->Bindings.end() || *source != binding.Interface ||
-            (source->Kind == shader::ShaderBindingKind::ConstantBuffer && source->Count != 1) ||
-            source->Kind == shader::ShaderBindingKind::AccelerationStructure) {
+            (source->Kind == render::ShaderBindingKind::ConstantBuffer && source->Count != 1) ||
+            source->Kind == render::ShaderBindingKind::AccelerationStructure) {
             return false;
         }
         for (size_t j = 0; j < i; ++j) {
@@ -581,7 +581,7 @@ bool ShaderParameterLayout::IsValid() const noexcept {
             }
         }
     }
-    return _hash != shader::ShaderHash{};
+    return _hash != render::ShaderHash{};
 }
 
 Nullable<const ShaderParameterBindingDesc*> ShaderParameterLayout::FindBinding(
@@ -632,7 +632,7 @@ Nullable<const ShaderParameterFieldDesc*> ShaderParameterLayout::FindField(
 ShaderParameterLayoutBuildResult BuildShaderParameterLayout(
     std::span<const ShaderProgramInterfaceRecord> interfaces,
     const PipelineBindingPolicy& policy,
-    shader::ShaderProgramKind kind) {
+    render::ShaderProgramKind kind) {
     ShaderParameterLayoutBuildResult result;
     if (interfaces.empty()) {
         result.Diagnostics.emplace_back(ShaderBindingDiagnostic{
@@ -647,7 +647,7 @@ ShaderParameterLayoutBuildResult BuildShaderParameterLayout(
     vector<UserFieldOrigin> fieldOrigins;
     bool foundProgram = false;
     for (const ShaderProgramInterfaceRecord& record : interfaces) {
-        const shader::ShaderInterfaceDesc& interface = record.Interface;
+        const render::ShaderInterfaceDesc& interface = record.Interface;
         if (interface.Kind != kind) continue;
         foundProgram = true;
         if (!interface.PushConstants.empty()) {
@@ -666,8 +666,8 @@ ShaderParameterLayoutBuildResult BuildShaderParameterLayout(
                 std::make_move_iterator(resolution.Diagnostics.end()));
             return result;
         }
-        for (const shader::ShaderBindingGroupInterfaceDesc& group : resolution.Plan->UserGroups) {
-            shader::ShaderBindingGroupInterfaceDesc normalizedGroup = group;
+        for (const render::ShaderBindingGroupInterfaceDesc& group : resolution.Plan->UserGroups) {
+            render::ShaderBindingGroupInterfaceDesc normalizedGroup = group;
             NormalizeUserGroup(normalizedGroup);
             const auto existing = std::ranges::find_if(layout._groups, [&](const auto& value) {
                 return value.GroupIndex == normalizedGroup.GroupIndex;
@@ -683,7 +683,7 @@ ShaderParameterLayoutBuildResult BuildShaderParameterLayout(
                     origins,
                     fieldOrigins);
                 if (merge.Compatible) continue;
-                shader::ShaderDiagnosticContext context = record.Context;
+                render::ShaderDiagnosticContext context = record.Context;
                 context.Group = normalizedGroup.GroupIndex;
                 context.Binding = merge.Binding;
                 result.Diagnostics.emplace_back(ShaderBindingDiagnostic{
@@ -707,11 +707,11 @@ ShaderParameterLayoutBuildResult BuildShaderParameterLayout(
         return result;
     }
 
-    std::ranges::sort(layout._groups, {}, &shader::ShaderBindingGroupInterfaceDesc::GroupIndex);
-    for (const shader::ShaderBindingGroupInterfaceDesc& group : layout._groups) {
-        for (const shader::ShaderBindingDesc& binding : group.Bindings) {
-            if ((binding.Kind == shader::ShaderBindingKind::ConstantBuffer && binding.Count != 1) ||
-                binding.Kind == shader::ShaderBindingKind::AccelerationStructure) {
+    std::ranges::sort(layout._groups, {}, &render::ShaderBindingGroupInterfaceDesc::GroupIndex);
+    for (const render::ShaderBindingGroupInterfaceDesc& group : layout._groups) {
+        for (const render::ShaderBindingDesc& binding : group.Bindings) {
+            if ((binding.Kind == render::ShaderBindingKind::ConstantBuffer && binding.Count != 1) ||
+                binding.Kind == render::ShaderBindingKind::AccelerationStructure) {
                 result.Diagnostics.emplace_back(ShaderBindingDiagnostic{
                     .Code = ShaderBindingDiagnosticCode::InvalidInterface,
                     .Message = fmt::format(
@@ -719,7 +719,7 @@ ShaderParameterLayoutBuildResult BuildShaderParameterLayout(
                         group.GroupIndex,
                         binding.BindingIndex),
                     .Context = [&] {
-                        shader::ShaderDiagnosticContext context;
+                        render::ShaderDiagnosticContext context;
                         if (const UserBindingOrigin* origin = FindOrigin(
                                 origins,
                                 group.GroupIndex,
@@ -756,21 +756,21 @@ ShaderParameterLayoutBuildResult BuildShaderParameterLayout(
 }
 
 ShaderParameterLayoutBuildResult BuildShaderParameterLayout(
-    std::span<const shader::ShaderInterfaceDesc> interfaces,
+    std::span<const render::ShaderInterfaceDesc> interfaces,
     const PipelineBindingPolicy& policy,
-    shader::ShaderProgramKind kind) {
+    render::ShaderProgramKind kind) {
     vector<ShaderProgramInterfaceRecord> records;
     records.reserve(interfaces.size());
-    for (const shader::ShaderInterfaceDesc& interface : interfaces) {
+    for (const render::ShaderInterfaceDesc& interface : interfaces) {
         records.emplace_back(ShaderProgramInterfaceRecord{.Interface = interface});
     }
     return BuildShaderParameterLayout(records, policy, kind);
 }
 
 ShaderParameterLayoutBuildResult BuildShaderParameterLayout(
-    const shader::ShaderBinary& binary,
+    const render::ShaderBinary& binary,
     const PipelineBindingPolicy& policy,
-    shader::ShaderProgramKind kind) {
+    render::ShaderProgramKind kind) {
     if (!binary.IsValid()) {
         ShaderParameterLayoutBuildResult result;
         result.Diagnostics.emplace_back(ShaderBindingDiagnostic{
@@ -781,7 +781,7 @@ ShaderParameterLayoutBuildResult BuildShaderParameterLayout(
     }
     vector<ShaderProgramInterfaceRecord> interfaces;
     vector<uint32_t> indices;
-    for (const shader::ShaderProgramVariantArtifact& program : binary.ProgramVariants) {
+    for (const render::ShaderProgramVariantArtifact& program : binary.ProgramVariants) {
         if (binary.ProgramInterfaces[program.InterfaceIndex].Kind != kind ||
             std::ranges::find(indices, program.InterfaceIndex) != indices.end()) {
             continue;
@@ -789,7 +789,7 @@ ShaderParameterLayoutBuildResult BuildShaderParameterLayout(
         indices.emplace_back(program.InterfaceIndex);
         interfaces.emplace_back(ShaderProgramInterfaceRecord{
             .Interface = binary.ProgramInterfaces[program.InterfaceIndex],
-            .Context = shader::ShaderDiagnosticContext{
+            .Context = render::ShaderDiagnosticContext{
                 .Target = program.Target,
                 .PassIndex = program.PassIndex,
                 .VariantDefines = program.Defines}});
@@ -809,11 +809,11 @@ bool ShaderParameterSet::Reset(
             .Kind = binding.Interface.Kind,
             .ConstantData = {},
             .Resources = {}};
-        if (binding.Interface.Kind == shader::ShaderBindingKind::ConstantBuffer) {
+        if (binding.Interface.Kind == render::ShaderBindingKind::ConstantBuffer) {
             value.ConstantData.resize(binding.Interface.Buffer->ByteSize, byte{0});
         } else if (binding.Interface.Count != 0) {
             value.Resources.resize(binding.Interface.Count);
-            if (binding.Interface.Kind == shader::ShaderBindingKind::Sampler) {
+            if (binding.Interface.Kind == render::ShaderBindingKind::Sampler) {
                 for (ShaderResourceParameterValue& resource : value.Resources) {
                     resource = render::SamplerDescriptor{};
                 }
@@ -832,7 +832,7 @@ bool ShaderParameterSet::Reset(
                     nextBinding.Interface)) {
                 continue;
             }
-            if (nextBinding.Interface.Kind == shader::ShaderBindingKind::ConstantBuffer) {
+            if (nextBinding.Interface.Kind == render::ShaderBindingKind::ConstantBuffer) {
                 const size_t copySize = std::min(
                     values[i].ConstantData.size(),
                     previousValue->ConstantData.size());
@@ -857,7 +857,7 @@ bool ShaderParameterSet::IsComplete() const noexcept {
         const ShaderParameterBindingDesc& binding = _layout.Bindings()[i];
         const ShaderParameterBindingValue& value = _values[i];
         if (value.Location != binding.Location || value.Kind != binding.Interface.Kind) return false;
-        if (binding.Interface.Kind == shader::ShaderBindingKind::ConstantBuffer) {
+        if (binding.Interface.Kind == render::ShaderBindingKind::ConstantBuffer) {
             if (!binding.Interface.Buffer.has_value() ||
                 value.ConstantData.size() != binding.Interface.Buffer->ByteSize) {
                 return false;
@@ -867,13 +867,13 @@ bool ShaderParameterSet::IsComplete() const noexcept {
         if (binding.Interface.Count != 0 && value.Resources.size() != binding.Interface.Count) return false;
         for (const ShaderResourceParameterValue& resource : value.Resources) {
             if (std::holds_alternative<std::monostate>(resource)) return false;
-            if (binding.Interface.Kind == shader::ShaderBindingKind::SampledTexture ||
-                binding.Interface.Kind == shader::ShaderBindingKind::StorageTexture) {
+            if (binding.Interface.Kind == render::ShaderBindingKind::SampledTexture ||
+                binding.Interface.Kind == render::ShaderBindingKind::StorageTexture) {
                 const auto* texture = std::get_if<ShaderTextureParameterValue>(&resource);
                 if (texture == nullptr || !IsTextureCompatible(binding.Interface, *texture)) {
                     return false;
                 }
-            } else if (binding.Interface.Kind == shader::ShaderBindingKind::Sampler) {
+            } else if (binding.Interface.Kind == render::ShaderBindingKind::Sampler) {
                 if (!std::holds_alternative<render::SamplerDescriptor>(resource)) return false;
             } else if (IsBufferKind(binding.Interface.Kind)) {
                 const auto* buffer = std::get_if<ShaderBufferParameterValue>(&resource);
@@ -892,8 +892,8 @@ bool ShaderParameterSet::IsComplete() const noexcept {
 bool ShaderParameterSet::IsCompleteFor(
     const ResolvedShaderBindingPlan& plan) const noexcept {
     if (!_layout.IsValid() || _values.size() != _layout.Bindings().size()) return false;
-    for (const shader::ShaderBindingGroupInterfaceDesc& group : plan.UserGroups) {
-        for (const shader::ShaderBindingDesc& actual : group.Bindings) {
+    for (const render::ShaderBindingGroupInterfaceDesc& group : plan.UserGroups) {
+        for (const render::ShaderBindingDesc& actual : group.Bindings) {
             const ShaderParameterLocation location{
                 .Group = group.GroupIndex,
                 .Binding = actual.BindingIndex};
@@ -901,13 +901,13 @@ bool ShaderParameterSet::IsCompleteFor(
             const ShaderParameterBindingValue* value = FindValue(location);
             if (!binding.HasValue() || value == nullptr ||
                 binding.Get()->Interface.Name != actual.Name ||
-                !shader::IsShaderBindingAbiProjectionOf(
+                !render::IsShaderBindingAbiProjectionOf(
                     actual,
                     binding.Get()->Interface)) {
                 return false;
             }
 
-            if (actual.Kind == shader::ShaderBindingKind::ConstantBuffer) {
+            if (actual.Kind == render::ShaderBindingKind::ConstantBuffer) {
                 if (!actual.Buffer.has_value() ||
                     !binding.Get()->Interface.Buffer.has_value() ||
                     value->ConstantData.size() !=
@@ -920,13 +920,13 @@ bool ShaderParameterSet::IsCompleteFor(
             if (actual.Count != 0 && value->Resources.size() != actual.Count) return false;
             for (const ShaderResourceParameterValue& resource : value->Resources) {
                 if (std::holds_alternative<std::monostate>(resource)) return false;
-                if (actual.Kind == shader::ShaderBindingKind::SampledTexture ||
-                    actual.Kind == shader::ShaderBindingKind::StorageTexture) {
+                if (actual.Kind == render::ShaderBindingKind::SampledTexture ||
+                    actual.Kind == render::ShaderBindingKind::StorageTexture) {
                     const auto* texture = std::get_if<ShaderTextureParameterValue>(&resource);
                     if (texture == nullptr || !IsTextureCompatible(actual, *texture)) {
                         return false;
                     }
-                } else if (actual.Kind == shader::ShaderBindingKind::Sampler) {
+                } else if (actual.Kind == render::ShaderBindingKind::Sampler) {
                     if (!std::holds_alternative<render::SamplerDescriptor>(resource)) return false;
                 } else if (IsBufferKind(actual.Kind)) {
                     const auto* buffer = std::get_if<ShaderBufferParameterValue>(&resource);
@@ -978,7 +978,7 @@ ShaderParameterSet::FieldTarget ShaderParameterSet::FindField(
 
 bool ShaderParameterSet::SetValue(
     std::string_view name,
-    shader::ShaderScalarType scalar,
+    render::ShaderScalarType scalar,
     uint32_t columns,
     std::span<const byte> data,
     uint32_t arrayIndex) noexcept {
@@ -988,7 +988,7 @@ bool ShaderParameterSet::SetValue(
 bool ShaderParameterSet::SetValue(
     ShaderParameterLocation location,
     std::string_view field,
-    shader::ShaderScalarType scalar,
+    render::ShaderScalarType scalar,
     uint32_t columns,
     std::span<const byte> data,
     uint32_t arrayIndex) noexcept {
@@ -997,13 +997,13 @@ bool ShaderParameterSet::SetValue(
 
 bool ShaderParameterSet::SetValue(
     FieldTarget target,
-    shader::ShaderScalarType scalar,
+    render::ShaderScalarType scalar,
     uint32_t columns,
     std::span<const byte> data,
     uint32_t arrayIndex) noexcept {
     const uint32_t scalarSize = ScalarSize(scalar);
     if (target.Value == nullptr || target.Field == nullptr || scalarSize == 0 || columns == 0 ||
-        target.Value->Kind != shader::ShaderBindingKind::ConstantBuffer ||
+        target.Value->Kind != render::ShaderBindingKind::ConstantBuffer ||
         target.Field->Type.Scalar != scalar || target.Field->Type.Rows != 1 ||
         target.Field->Type.Columns != columns || arrayIndex >= target.Field->Type.ArrayCount ||
         data.size() != static_cast<size_t>(scalarSize) * columns) {
@@ -1022,7 +1022,7 @@ bool ShaderParameterSet::SetValue(
 }
 
 bool ShaderParameterSet::SetFloat(std::string_view name, float value, uint32_t arrayIndex) noexcept {
-    return SetValue(name, shader::ShaderScalarType::Float32, 1, std::as_bytes(std::span{&value, 1}), arrayIndex);
+    return SetValue(name, render::ShaderScalarType::Float32, 1, std::as_bytes(std::span{&value, 1}), arrayIndex);
 }
 
 bool ShaderParameterSet::SetFloat(
@@ -1033,14 +1033,14 @@ bool ShaderParameterSet::SetFloat(
     return SetValue(
         location,
         field,
-        shader::ShaderScalarType::Float32,
+        render::ShaderScalarType::Float32,
         1,
         std::as_bytes(std::span{&value, 1}),
         arrayIndex);
 }
 
 bool ShaderParameterSet::SetInt(std::string_view name, int32_t value, uint32_t arrayIndex) noexcept {
-    return SetValue(name, shader::ShaderScalarType::Int32, 1, std::as_bytes(std::span{&value, 1}), arrayIndex);
+    return SetValue(name, render::ShaderScalarType::Int32, 1, std::as_bytes(std::span{&value, 1}), arrayIndex);
 }
 
 bool ShaderParameterSet::SetInt(
@@ -1051,14 +1051,14 @@ bool ShaderParameterSet::SetInt(
     return SetValue(
         location,
         field,
-        shader::ShaderScalarType::Int32,
+        render::ShaderScalarType::Int32,
         1,
         std::as_bytes(std::span{&value, 1}),
         arrayIndex);
 }
 
 bool ShaderParameterSet::SetUInt(std::string_view name, uint32_t value, uint32_t arrayIndex) noexcept {
-    return SetValue(name, shader::ShaderScalarType::UInt32, 1, std::as_bytes(std::span{&value, 1}), arrayIndex);
+    return SetValue(name, render::ShaderScalarType::UInt32, 1, std::as_bytes(std::span{&value, 1}), arrayIndex);
 }
 
 bool ShaderParameterSet::SetUInt(
@@ -1069,7 +1069,7 @@ bool ShaderParameterSet::SetUInt(
     return SetValue(
         location,
         field,
-        shader::ShaderScalarType::UInt32,
+        render::ShaderScalarType::UInt32,
         1,
         std::as_bytes(std::span{&value, 1}),
         arrayIndex);
@@ -1077,7 +1077,7 @@ bool ShaderParameterSet::SetUInt(
 
 bool ShaderParameterSet::SetBool(std::string_view name, bool value, uint32_t arrayIndex) noexcept {
     const uint32_t encoded = value ? 1u : 0u;
-    return SetValue(name, shader::ShaderScalarType::Bool, 1, std::as_bytes(std::span{&encoded, 1}), arrayIndex);
+    return SetValue(name, render::ShaderScalarType::Bool, 1, std::as_bytes(std::span{&encoded, 1}), arrayIndex);
 }
 
 bool ShaderParameterSet::SetBool(
@@ -1089,7 +1089,7 @@ bool ShaderParameterSet::SetBool(
     return SetValue(
         location,
         field,
-        shader::ShaderScalarType::Bool,
+        render::ShaderScalarType::Bool,
         1,
         std::as_bytes(std::span{&encoded, 1}),
         arrayIndex);
@@ -1101,7 +1101,7 @@ bool ShaderParameterSet::SetVector(
     uint32_t arrayIndex) noexcept {
     return SetValue(
         name,
-        shader::ShaderScalarType::Float32,
+        render::ShaderScalarType::Float32,
         4,
         std::as_bytes(std::span{value.data(), 4}),
         arrayIndex);
@@ -1115,7 +1115,7 @@ bool ShaderParameterSet::SetVector(
     return SetValue(
         location,
         field,
-        shader::ShaderScalarType::Float32,
+        render::ShaderScalarType::Float32,
         4,
         std::as_bytes(std::span{value.data(), 4}),
         arrayIndex);
@@ -1152,8 +1152,8 @@ bool ShaderParameterSet::SetMatrix(
     uint32_t columns,
     uint32_t arrayIndex) noexcept {
     if (target.Value == nullptr || target.Field == nullptr ||
-        target.Value->Kind != shader::ShaderBindingKind::ConstantBuffer ||
-        target.Field->Type.Scalar != shader::ShaderScalarType::Float32 ||
+        target.Value->Kind != render::ShaderBindingKind::ConstantBuffer ||
+        target.Field->Type.Scalar != render::ShaderScalarType::Float32 ||
         target.Field->Type.Rows != rows || target.Field->Type.Columns != columns ||
         rows <= 1 || columns <= 1 || target.Field->Type.MatrixStride == 0 ||
         arrayIndex >= target.Field->Type.ArrayCount || rowMajorValues.size() != rows * columns) {
@@ -1189,7 +1189,7 @@ bool ShaderParameterSet::SetConstantBuffer(
     auto binding = _layout.FindBinding(location);
     ShaderParameterBindingValue* value = FindValue(location);
     if (!binding.HasValue() || value == nullptr ||
-        binding.Get()->Interface.Kind != shader::ShaderBindingKind::ConstantBuffer ||
+        binding.Get()->Interface.Kind != render::ShaderBindingKind::ConstantBuffer ||
         data.size() != value->ConstantData.size()) {
         return false;
     }
@@ -1210,7 +1210,7 @@ bool ShaderParameterSet::SetResourceValue(
     ShaderResourceParameterValue value,
     uint32_t arrayIndex) noexcept {
     ShaderParameterBindingValue* target = FindValue(binding.Location);
-    if (target == nullptr || binding.Interface.Kind == shader::ShaderBindingKind::ConstantBuffer) return false;
+    if (target == nullptr || binding.Interface.Kind == render::ShaderBindingKind::ConstantBuffer) return false;
     if (binding.Interface.Count != 0 && arrayIndex >= binding.Interface.Count) return false;
     if (arrayIndex >= target->Resources.size()) {
         if (binding.Interface.Count != 0) return false;
@@ -1228,8 +1228,8 @@ bool ShaderParameterSet::SetTexture(
     uint32_t arrayIndex) noexcept {
     auto binding = _layout.FindBinding(location);
     if (!binding.HasValue() || !texture.IsValid() ||
-        (binding.Get()->Interface.Kind != shader::ShaderBindingKind::SampledTexture &&
-         binding.Get()->Interface.Kind != shader::ShaderBindingKind::StorageTexture)) {
+        (binding.Get()->Interface.Kind != render::ShaderBindingKind::SampledTexture &&
+         binding.Get()->Interface.Kind != render::ShaderBindingKind::StorageTexture)) {
         return false;
     }
     ShaderTextureParameterValue value{.Texture = std::move(texture), .View = view};
@@ -1253,7 +1253,7 @@ bool ShaderParameterSet::SetSampler(
     const render::SamplerDescriptor& sampler,
     uint32_t arrayIndex) noexcept {
     auto binding = _layout.FindBinding(location);
-    if (!binding.HasValue() || binding.Get()->Interface.Kind != shader::ShaderBindingKind::Sampler) return false;
+    if (!binding.HasValue() || binding.Get()->Interface.Kind != render::ShaderBindingKind::Sampler) return false;
     return SetResourceValue(*binding.Get(), sampler, arrayIndex);
 }
 
@@ -1295,7 +1295,7 @@ bool ShaderParameterSet::ClearResource(
     ShaderParameterLocation location,
     uint32_t arrayIndex) noexcept {
     auto binding = _layout.FindBinding(location);
-    if (!binding.HasValue() || binding.Get()->Interface.Kind == shader::ShaderBindingKind::ConstantBuffer) return false;
+    if (!binding.HasValue() || binding.Get()->Interface.Kind == render::ShaderBindingKind::ConstantBuffer) return false;
     return SetResourceValue(*binding.Get(), std::monostate{}, arrayIndex);
 }
 

@@ -129,20 +129,8 @@ struct VulkanObjectTrait<VkPipeline> {
     static constexpr VkObjectType type = VK_OBJECT_TYPE_PIPELINE;
 };
 template <>
-struct VulkanObjectTrait<VkDescriptorSetLayout> {
-    static constexpr VkObjectType type = VK_OBJECT_TYPE_DESCRIPTOR_SET_LAYOUT;
-};
-template <>
 struct VulkanObjectTrait<VkSampler> {
     static constexpr VkObjectType type = VK_OBJECT_TYPE_SAMPLER;
-};
-template <>
-struct VulkanObjectTrait<VkDescriptorPool> {
-    static constexpr VkObjectType type = VK_OBJECT_TYPE_DESCRIPTOR_POOL;
-};
-template <>
-struct VulkanObjectTrait<VkDescriptorSet> {
-    static constexpr VkObjectType type = VK_OBJECT_TYPE_DESCRIPTOR_SET;
 };
 template <>
 struct VulkanObjectTrait<VkFramebuffer> {
@@ -214,7 +202,6 @@ VkAttachmentLoadOp MapType(LoadAction v) noexcept;
 VkAttachmentStoreOp MapType(StoreAction v) noexcept;
 VmaMemoryUsage MapType(MemoryType v) noexcept;
 VkShaderStageFlags MapType(ShaderStages v) noexcept;
-VkDescriptorType MapType(ResourceBindType v) noexcept;
 VkVertexInputRate MapType(VertexStepMode v) noexcept;
 VkFormat MapType(VertexFormat v) noexcept;
 VkPrimitiveTopology MapType(PrimitiveTopology v) noexcept;

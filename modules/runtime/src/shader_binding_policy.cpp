@@ -37,11 +37,11 @@ const PipelineBindingReservation* PipelineBindingPolicy::Find(uint32_t groupInde
 }
 
 ShaderBindingResolutionResult ResolveShaderBindings(
-    const shader::ShaderInterfaceDesc& interface,
+    const render::ShaderInterfaceDesc& interface,
     const PipelineBindingPolicy& policy,
-    const shader::ShaderDiagnosticContext& context) {
+    const render::ShaderDiagnosticContext& context) {
     ShaderBindingResolutionResult result;
-    if (!shader::IsShaderInterfaceValid(interface)) {
+    if (!render::IsShaderInterfaceValid(interface)) {
         result.Diagnostics.emplace_back(ShaderBindingDiagnostic{
             .Code = ShaderBindingDiagnosticCode::InvalidInterface,
             .Message = "shader binding resolution requires a valid canonical interface",
@@ -59,8 +59,8 @@ ShaderBindingResolutionResult ResolveShaderBindings(
     }
 
     ResolvedShaderBindingPlan plan;
-    plan.InterfaceHash = shader::HashShaderInterface(interface);
-    for (const shader::ShaderBindingGroupInterfaceDesc& group : interface.BindingGroups) {
+    plan.InterfaceHash = render::HashShaderInterface(interface);
+    for (const render::ShaderBindingGroupInterfaceDesc& group : interface.BindingGroups) {
         const PipelineBindingReservation* reservation = policy.Find(group.GroupIndex);
         if (reservation == nullptr) {
             plan.UserGroups.emplace_back(group);
@@ -68,7 +68,7 @@ ShaderBindingResolutionResult ResolveShaderBindings(
         }
         ShaderBindingProviderMatchResult match = reservation->Provider->Match(group);
         if (!match.Compatible) {
-            shader::ShaderDiagnosticContext diagnosticContext = context;
+            render::ShaderDiagnosticContext diagnosticContext = context;
             diagnosticContext.Group = group.GroupIndex;
             diagnosticContext.Binding = match.Binding;
             result.Diagnostics.emplace_back(ShaderBindingDiagnostic{
@@ -110,9 +110,9 @@ ShaderBindingSchemaProvider::ShaderBindingSchemaProvider(
 }
 
 ShaderBindingProviderMatchResult ShaderBindingSchemaProvider::Match(
-    const shader::ShaderBindingGroupInterfaceDesc& group) const {
+    const render::ShaderBindingGroupInterfaceDesc& group) const {
     if (!_valid) return ShaderBindingProviderMatchResult::Failure("provider schema is invalid");
-    for (const shader::ShaderBindingDesc& binding : group.Bindings) {
+    for (const render::ShaderBindingDesc& binding : group.Bindings) {
         const auto expected = std::ranges::find_if(_entries, [&](const ShaderBindingProviderSchemaEntry& entry) {
             return GetSchemaBindingIndex(entry) == binding.BindingIndex;
         });
@@ -125,8 +125,8 @@ ShaderBindingProviderMatchResult ShaderBindingSchemaProvider::Match(
         }
         const bool compatible = std::ranges::any_of(
             expected->AcceptedBindings,
-            [&](const shader::ShaderBindingDesc& schema) {
-                return shader::IsShaderBindingAbiProjectionOf(binding, schema);
+            [&](const render::ShaderBindingDesc& schema) {
+                return render::IsShaderBindingAbiProjectionOf(binding, schema);
             });
         if (!compatible) {
             return ShaderBindingProviderMatchResult::Failure(fmt::format(
@@ -139,7 +139,7 @@ ShaderBindingProviderMatchResult ShaderBindingSchemaProvider::Match(
     for (const ShaderBindingProviderSchemaEntry& entry : _entries) {
         if (!entry.Required) continue;
         const uint32_t bindingIndex = GetSchemaBindingIndex(entry);
-        const bool present = std::ranges::any_of(group.Bindings, [&](const shader::ShaderBindingDesc& binding) {
+        const bool present = std::ranges::any_of(group.Bindings, [&](const render::ShaderBindingDesc& binding) {
             return binding.BindingIndex == bindingIndex;
         });
         if (!present) {

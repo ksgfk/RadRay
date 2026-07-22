@@ -1,4 +1,4 @@
-#include <radray/shader/hlsl.h>
+#include <radray/render/hlsl.h>
 
 #include <algorithm>
 
@@ -8,16 +8,16 @@
 
 namespace radray {
 
-bool JsonSerializer<shader::HlslShaderTypeId>::Write(
+bool JsonSerializer<render::HlslShaderTypeId>::Write(
     JsonWriteContext& context,
-    const shader::HlslShaderTypeId& value) noexcept {
+    const render::HlslShaderTypeId& value) noexcept {
     return SerializeJsonValue(context, value.Value);
 }
 
-bool JsonSerializer<shader::HlslShaderTypeMember>::Write(
+bool JsonSerializer<render::HlslShaderTypeMember>::Write(
     JsonWriteContext& context,
-    const shader::HlslShaderTypeMember& value) noexcept {
-    using value_type = shader::HlslShaderTypeMember;
+    const render::HlslShaderTypeMember& value) noexcept {
+    using value_type = render::HlslShaderTypeMember;
     return SerializeJsonObject(
         context,
         value,
@@ -26,10 +26,10 @@ bool JsonSerializer<shader::HlslShaderTypeMember>::Write(
         JsonMember{"Offset", &value_type::Offset});
 }
 
-bool JsonSerializer<shader::HlslShaderTypeDesc>::Write(
+bool JsonSerializer<render::HlslShaderTypeDesc>::Write(
     JsonWriteContext& context,
-    const shader::HlslShaderTypeDesc& value) noexcept {
-    using value_type = shader::HlslShaderTypeDesc;
+    const render::HlslShaderTypeDesc& value) noexcept {
+    using value_type = render::HlslShaderTypeDesc;
     return SerializeJsonObject(
         context,
         value,
@@ -43,10 +43,10 @@ bool JsonSerializer<shader::HlslShaderTypeDesc>::Write(
         JsonMember{"Members", &value_type::Members});
 }
 
-bool JsonSerializer<shader::HlslShaderVariableDesc>::Write(
+bool JsonSerializer<render::HlslShaderVariableDesc>::Write(
     JsonWriteContext& context,
-    const shader::HlslShaderVariableDesc& value) noexcept {
-    using value_type = shader::HlslShaderVariableDesc;
+    const render::HlslShaderVariableDesc& value) noexcept {
+    using value_type = render::HlslShaderVariableDesc;
     return SerializeJsonObject(
         context,
         value,
@@ -61,10 +61,10 @@ bool JsonSerializer<shader::HlslShaderVariableDesc>::Write(
         JsonMember{"SamplerSize", &value_type::SamplerSize});
 }
 
-bool JsonSerializer<shader::HlslShaderBufferDesc>::Write(
+bool JsonSerializer<render::HlslShaderBufferDesc>::Write(
     JsonWriteContext& context,
-    const shader::HlslShaderBufferDesc& value) noexcept {
-    using value_type = shader::HlslShaderBufferDesc;
+    const render::HlslShaderBufferDesc& value) noexcept {
+    using value_type = render::HlslShaderBufferDesc;
     return SerializeJsonObject(
         context,
         value,
@@ -76,9 +76,9 @@ bool JsonSerializer<shader::HlslShaderBufferDesc>::Write(
         JsonMember{"Variables", &value_type::Variables});
 }
 
-bool JsonSerializer<shader::HlslInputBindDesc>::Write(
+bool JsonSerializer<render::HlslInputBindDesc>::Write(
     JsonWriteContext& context,
-    const shader::HlslInputBindDesc& value) noexcept {
+    const render::HlslInputBindDesc& value) noexcept {
     JsonObjectWriter object = context.BeginObject();
     return object.IsValid() &&
            object.Member("Name", value.Name) &&
@@ -94,10 +94,10 @@ bool JsonSerializer<shader::HlslInputBindDesc>::Write(
            object.OptionalMember("VkSet", value.VkSet);
 }
 
-bool JsonSerializer<shader::HlslSignatureParameterDesc>::Write(
+bool JsonSerializer<render::HlslSignatureParameterDesc>::Write(
     JsonWriteContext& context,
-    const shader::HlslSignatureParameterDesc& value) noexcept {
-    using value_type = shader::HlslSignatureParameterDesc;
+    const render::HlslSignatureParameterDesc& value) noexcept {
+    using value_type = render::HlslSignatureParameterDesc;
     return SerializeJsonObject(
         context,
         value,
@@ -111,12 +111,12 @@ bool JsonSerializer<shader::HlslSignatureParameterDesc>::Write(
         JsonMember{"ReadWriteMask", &value_type::ReadWriteMask});
 }
 
-bool JsonSerializer<shader::HlslShaderDesc>::Write(
+bool JsonSerializer<render::HlslShaderDesc>::Write(
     JsonWriteContext& context,
-    const shader::HlslShaderDesc& value) noexcept {
+    const render::HlslShaderDesc& value) noexcept {
     JsonObjectWriter object = context.BeginObject();
     return object.IsValid() &&
-           object.Member("FormatVersion", shader::kReflectionFormatVersion) &&
+           object.Member("FormatVersion", render::kReflectionFormatVersion) &&
            object.Member("Kind", "hlsl") &&
            object.Member("Creator", value.Creator) &&
            object.Member("Version", value.Version) &&
@@ -135,7 +135,7 @@ bool JsonSerializer<shader::HlslShaderDesc>::Write(
 
 }  // namespace radray
 
-namespace radray::shader {
+namespace radray::render {
 
 bool HlslShaderTypeDesc::IsPrimitive() const noexcept {
     return Class == HlslShaderVariableClass::SCALAR ||
@@ -347,4 +347,4 @@ std::optional<HlslShaderDesc> DeserializeHlslShaderDesc(std::string_view json) n
     return desc;
 }
 
-}  // namespace radray::shader
+}  // namespace radray::render

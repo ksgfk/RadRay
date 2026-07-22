@@ -55,7 +55,7 @@ private:
     Application* _app{nullptr};
     unique_ptr<RenderPipeline> _pipeline;
     vector<unique_ptr<Scene>> _scenes;
-    shared_ptr<shader::Dxc> _dxc;
+    shared_ptr<render::Dxc> _dxc;
     unique_ptr<ShaderArtifactResolver> _shaderResolver;
     unique_ptr<SamplerCache> _samplerCache;
     string _shaderIncludeRoot;

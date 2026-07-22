@@ -39,8 +39,8 @@ public:
         std::span<const ShaderResolvedProgram> programs) noexcept;
     bool IsReady() const noexcept;
     bool HasCompleteParametersFor(
-        const shader::ShaderInterfaceDesc& interface,
-        const shader::ShaderDiagnosticContext& context = {}) const noexcept;
+        const render::ShaderInterfaceDesc& interface,
+        const render::ShaderDiagnosticContext& context = {}) const noexcept;
     const vector<ShaderBindingDiagnostic>& GetLayoutDiagnostics() const noexcept {
         return _layoutDiagnostics;
     }
@@ -89,14 +89,14 @@ public:
         uint32_t arrayIndex = 0) noexcept;
     bool SetValue(
         std::string_view name,
-        shader::ShaderScalarType scalar,
+        render::ShaderScalarType scalar,
         uint32_t columns,
         std::span<const byte> data,
         uint32_t arrayIndex = 0) noexcept;
     bool SetValue(
         ShaderParameterLocation location,
         std::string_view field,
-        shader::ShaderScalarType scalar,
+        render::ShaderScalarType scalar,
         uint32_t columns,
         std::span<const byte> data,
         uint32_t arrayIndex = 0) noexcept;
@@ -172,7 +172,7 @@ private:
     ShaderParameterSet _parameters;
     vector<ShaderBindingDiagnostic> _layoutDiagnostics;
     vector<ShaderProgramInterfaceRecord> _resolvedInterfaces;
-    unordered_map<uint32_t, shader::ShaderHash> _resolvedSourceIdentities;
+    unordered_map<uint32_t, render::ShaderHash> _resolvedSourceIdentities;
     vector<string> _localKeywords;
     const ShaderAsset* _layoutShader{nullptr};
     bool _layoutInitialized{false};

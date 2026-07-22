@@ -1,5 +1,4 @@
 add_subdirectory(core)
-add_subdirectory(shader)
 if (RADRAY_BUILD_WINDOW)
     add_subdirectory(window)
 endif()

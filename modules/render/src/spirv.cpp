@@ -1,15 +1,15 @@
-#include <radray/shader/spirv.h>
+#include <radray/render/spirv.h>
 
-#include <radray/shader/hlsl.h>
+#include <radray/render/hlsl.h>
 #include <radray/json.h>
 #include <radray/logger.h>
 
 namespace radray {
 
-bool JsonSerializer<shader::SpirvTypeMember>::Write(
+bool JsonSerializer<render::SpirvTypeMember>::Write(
     JsonWriteContext& context,
-    const shader::SpirvTypeMember& value) noexcept {
-    using value_type = shader::SpirvTypeMember;
+    const render::SpirvTypeMember& value) noexcept {
+    using value_type = render::SpirvTypeMember;
     return SerializeJsonObject(
         context,
         value,
@@ -23,10 +23,10 @@ bool JsonSerializer<shader::SpirvTypeMember>::Write(
         JsonMember{"RowMajor", &value_type::RowMajor});
 }
 
-bool JsonSerializer<shader::SpirvTypeInfo>::Write(
+bool JsonSerializer<render::SpirvTypeInfo>::Write(
     JsonWriteContext& context,
-    const shader::SpirvTypeInfo& value) noexcept {
-    using value_type = shader::SpirvTypeInfo;
+    const render::SpirvTypeInfo& value) noexcept {
+    using value_type = render::SpirvTypeInfo;
     return SerializeJsonObject(
         context,
         value,
@@ -42,10 +42,10 @@ bool JsonSerializer<shader::SpirvTypeInfo>::Write(
         JsonMember{"Members", &value_type::Members});
 }
 
-bool JsonSerializer<shader::SpirvImageInfo>::Write(
+bool JsonSerializer<render::SpirvImageInfo>::Write(
     JsonWriteContext& context,
-    const shader::SpirvImageInfo& value) noexcept {
-    using value_type = shader::SpirvImageInfo;
+    const render::SpirvImageInfo& value) noexcept {
+    using value_type = render::SpirvImageInfo;
     return SerializeJsonObject(
         context,
         value,
@@ -56,9 +56,9 @@ bool JsonSerializer<shader::SpirvImageInfo>::Write(
         JsonMember{"SampledType", &value_type::SampledType});
 }
 
-bool JsonSerializer<shader::SpirvStageIo>::Write(
+bool JsonSerializer<render::SpirvStageIo>::Write(
     JsonWriteContext& context,
-    const shader::SpirvStageIo& value) noexcept {
+    const render::SpirvStageIo& value) noexcept {
     JsonObjectWriter object = context.BeginObject();
     return object.IsValid() &&
            object.Member("Name", value.Name) &&
@@ -68,9 +68,9 @@ bool JsonSerializer<shader::SpirvStageIo>::Write(
            object.OptionalMember("BuiltIn", value.BuiltIn);
 }
 
-bool JsonSerializer<shader::SpirvResourceBinding>::Write(
+bool JsonSerializer<render::SpirvResourceBinding>::Write(
     JsonWriteContext& context,
-    const shader::SpirvResourceBinding& value) noexcept {
+    const render::SpirvResourceBinding& value) noexcept {
     JsonObjectWriter object = context.BeginObject();
     return object.IsValid() &&
            object.Member("Name", value.Name) &&
@@ -90,10 +90,10 @@ bool JsonSerializer<shader::SpirvResourceBinding>::Write(
            object.OptionalMember("ImageInfo", value.ImageInfo);
 }
 
-bool JsonSerializer<shader::SpirvComputeInfo>::Write(
+bool JsonSerializer<render::SpirvComputeInfo>::Write(
     JsonWriteContext& context,
-    const shader::SpirvComputeInfo& value) noexcept {
-    using value_type = shader::SpirvComputeInfo;
+    const render::SpirvComputeInfo& value) noexcept {
+    using value_type = render::SpirvComputeInfo;
     return SerializeJsonObject(
         context,
         value,
@@ -102,10 +102,10 @@ bool JsonSerializer<shader::SpirvComputeInfo>::Write(
         JsonMember{"LocalSizeZ", &value_type::LocalSizeZ});
 }
 
-bool JsonSerializer<shader::SpirvPushConstantRange>::Write(
+bool JsonSerializer<render::SpirvPushConstantRange>::Write(
     JsonWriteContext& context,
-    const shader::SpirvPushConstantRange& value) noexcept {
-    using value_type = shader::SpirvPushConstantRange;
+    const render::SpirvPushConstantRange& value) noexcept {
+    using value_type = render::SpirvPushConstantRange;
     return SerializeJsonObject(
         context,
         value,
@@ -116,12 +116,12 @@ bool JsonSerializer<shader::SpirvPushConstantRange>::Write(
         JsonMember{"IsViewInHlsl", &value_type::IsViewInHlsl});
 }
 
-bool JsonSerializer<shader::SpirvShaderDesc>::Write(
+bool JsonSerializer<render::SpirvShaderDesc>::Write(
     JsonWriteContext& context,
-    const shader::SpirvShaderDesc& value) noexcept {
+    const render::SpirvShaderDesc& value) noexcept {
     JsonObjectWriter object = context.BeginObject();
     return object.IsValid() &&
-           object.Member("FormatVersion", shader::kReflectionFormatVersion) &&
+           object.Member("FormatVersion", render::kReflectionFormatVersion) &&
            object.Member("Kind", "spirv") &&
            object.Member("Types", value.Types) &&
            object.Member("StageInputs", value.StageInputs) &&
@@ -133,7 +133,7 @@ bool JsonSerializer<shader::SpirvShaderDesc>::Write(
 
 }  // namespace radray
 
-namespace radray::shader {
+namespace radray::render {
 
 // ResourceBindType SpirvResourceBinding::MapResourceBindType() const noexcept {
 //     const bool isBufferImage = ImageInfo.has_value() && ImageInfo->Dim == SpirvImageDim::Buffer;
@@ -309,4 +309,4 @@ std::optional<SpirvShaderDesc> DeserializeSpirvShaderDesc(std::string_view json)
     return desc;
 }
 
-}  // namespace radray::shader
+}  // namespace radray::render

@@ -156,16 +156,16 @@ TEST(ForwardMaterialCookerTest, BuildsRuntimeLayoutAcrossBackendsAndVariants) {
     ASSERT_TRUE(WriteTextFile(input, MakeForwardShaderManifest()));
     ASSERT_EQ(RunCooker(input, output), 0);
 
-    auto binary = shader::ReadShaderBinary(output);
+    auto binary = render::ReadShaderBinary(output);
     ASSERT_TRUE(binary.has_value());
-    for (const shader::ShaderPassDesc& pass : binary->Asset.Passes) {
-        EXPECT_NE(pass.SourceIdentity, shader::ShaderHash{});
+    for (const render::ShaderPassDesc& pass : binary->Asset.Passes) {
+        EXPECT_NE(pass.SourceIdentity, render::ShaderHash{});
     }
     ForwardPipeline pipeline;
     auto layout = BuildShaderParameterLayout(
         *binary,
         pipeline.GetShaderBindingPolicy(),
-        shader::ShaderProgramKind::Graphics);
+        render::ShaderProgramKind::Graphics);
     ASSERT_TRUE(layout.Succeeded());
     ASSERT_TRUE(layout.Layout->IsValid());
     ASSERT_EQ(layout.Layout->Bindings().size(), 7u);
@@ -177,12 +177,12 @@ TEST(ForwardMaterialCookerTest, BuildsRuntimeLayoutAcrossBackendsAndVariants) {
     EXPECT_TRUE(layout.Layout->FindBinding("gEmissiveMap").HasValue());
     EXPECT_TRUE(layout.Layout->FindBinding("gSampler").HasValue());
 
-    const shader::ShaderInterfaceDesc& sourceInterface = binary->ProgramInterfaces.front();
-    shader::ShaderInterfaceDesc wrongObjectLayout = sourceInterface;
+    const render::ShaderInterfaceDesc& sourceInterface = binary->ProgramInterfaces.front();
+    render::ShaderInterfaceDesc wrongObjectLayout = sourceInterface;
     auto objectGroup = std::ranges::find(
         wrongObjectLayout.BindingGroups,
         ForwardPipeline::kObjectBindingGroup,
-        &shader::ShaderBindingGroupInterfaceDesc::GroupIndex);
+        &render::ShaderBindingGroupInterfaceDesc::GroupIndex);
     ASSERT_NE(objectGroup, wrongObjectLayout.BindingGroups.end());
     ASSERT_EQ(objectGroup->Bindings.size(), 1u);
     ASSERT_TRUE(objectGroup->Bindings.front().Buffer.has_value());
@@ -197,27 +197,27 @@ TEST(ForwardMaterialCookerTest, BuildsRuntimeLayoutAcrossBackendsAndVariants) {
     EXPECT_EQ(wrongObject.Diagnostics.front().Context.Group, ForwardPipeline::kObjectBindingGroup);
     EXPECT_EQ(wrongObject.Diagnostics.front().Context.Binding, 1u);
 
-    shader::ShaderInterfaceDesc shadowTextureInterface = sourceInterface;
+    render::ShaderInterfaceDesc shadowTextureInterface = sourceInterface;
     auto pipelineGroup = std::ranges::find(
         shadowTextureInterface.BindingGroups,
         ForwardPipeline::kPipelineBindingGroup,
-        &shader::ShaderBindingGroupInterfaceDesc::GroupIndex);
+        &render::ShaderBindingGroupInterfaceDesc::GroupIndex);
     ASSERT_NE(pipelineGroup, shadowTextureInterface.BindingGroups.end());
-    pipelineGroup->Bindings.emplace_back(shader::ShaderBindingDesc{
+    pipelineGroup->Bindings.emplace_back(render::ShaderBindingDesc{
         .Name = "CustomShadowCube",
         .BindingIndex = 1,
-        .Kind = shader::ShaderBindingKind::SampledTexture,
-        .Access = shader::ShaderResourceAccess::ReadOnly,
+        .Kind = render::ShaderBindingKind::SampledTexture,
+        .Access = render::ShaderResourceAccess::ReadOnly,
         .Count = 1,
-        .Stages = shader::ShaderStage::Pixel,
-        .Texture = shader::ShaderTextureInterfaceDesc{
-            .Dimension = shader::ShaderTextureDimension::Cube,
-            .SampleType = shader::ShaderSampleType::Float}});
+        .Stages = render::ShaderStage::Pixel,
+        .Texture = render::ShaderTextureInterfaceDesc{
+            .Dimension = render::ShaderTextureDimension::Cube,
+            .SampleType = render::ShaderSampleType::Float}});
     ASSERT_TRUE(ResolveShaderBindings(
                     shadowTextureInterface,
                     pipeline.GetShaderBindingPolicy())
                     .Succeeded());
-    pipelineGroup->Bindings.back().Texture->Dimension = shader::ShaderTextureDimension::Dim2D;
+    pipelineGroup->Bindings.back().Texture->Dimension = render::ShaderTextureDimension::Dim2D;
     auto wrongTexture = ResolveShaderBindings(
         shadowTextureInterface,
         pipeline.GetShaderBindingPolicy());
@@ -239,15 +239,15 @@ TEST(ForwardMaterialCookerTest, BuildsConstantFieldUnionAcrossRealVariantsAndTar
     ASSERT_TRUE(WriteTextFile(source, kProjectedConstantsShader));
     ASSERT_EQ(RunCooker(input, output, directory), 0);
 
-    auto binary = shader::ReadShaderBinary(output);
+    auto binary = render::ReadShaderBinary(output);
     ASSERT_TRUE(binary.has_value());
-    ASSERT_TRUE(binary->IsBakeComplete(shader::ShaderTarget::DXIL));
-    ASSERT_TRUE(binary->IsBakeComplete(shader::ShaderTarget::SPIRV));
-    ASSERT_NE(binary->Asset.Passes.front().SourceIdentity, shader::ShaderHash{});
+    ASSERT_TRUE(binary->IsBakeComplete(render::ShaderTarget::DXIL));
+    ASSERT_TRUE(binary->IsBakeComplete(render::ShaderTarget::SPIRV));
+    ASSERT_NE(binary->Asset.Passes.front().SourceIdentity, render::ShaderHash{});
     auto layout = BuildShaderParameterLayout(
         *binary,
         PipelineBindingPolicy{},
-        shader::ShaderProgramKind::Graphics);
+        render::ShaderProgramKind::Graphics);
     ASSERT_TRUE(layout.Succeeded());
     auto constants = layout.Layout->FindBinding({2, 0});
     ASSERT_TRUE(constants.HasValue());
@@ -258,7 +258,7 @@ TEST(ForwardMaterialCookerTest, BuildsConstantFieldUnionAcrossRealVariantsAndTar
 
     ShaderParameterSet parameters;
     ASSERT_TRUE(parameters.Reset(*layout.Layout));
-    for (const shader::ShaderProgramVariantArtifact& program : binary->ProgramVariants) {
+    for (const render::ShaderProgramVariantArtifact& program : binary->ProgramVariants) {
         auto plan = ResolveShaderBindings(
             binary->ProgramInterfaces[program.InterfaceIndex],
             PipelineBindingPolicy{});

@@ -6,28 +6,14 @@
 #include <variant>
 #include <optional>
 #include <span>
+#include <string_view>
 
 #include <radray/types.h>
 #include <radray/nullable.h>
 #include <radray/enum_flags.h>
 #include <radray/basic_math.h>
-#include <radray/shader/common.h>
-#include <radray/shader/hlsl.h>
-#include <radray/shader/spirv.h>
 
 namespace radray::render {
-
-using shader::HlslShaderDesc;
-using shader::HlslShaderModel;
-using shader::ShaderBlobCategory;
-using shader::ShaderStage;
-using shader::SpirvShaderDesc;
-using ShaderStages = radray::ShaderStages;
-
-inline constexpr uint32_t kMaxColorTargets = 8;
-inline constexpr uint32_t kMaxVertexBufferLayouts = 16;
-inline constexpr uint32_t kMaxVertexElementsPerLayout = 16;
-inline constexpr uint32_t kMaxSemanticLength = 32;
 
 enum class RenderBackend : int32_t {
     D3D12,
@@ -115,6 +101,28 @@ enum class QueueType : uint32_t {
     Copy,
 
     MAX_COUNT
+};
+
+enum class ShaderStage : uint32_t {
+    UNKNOWN = 0x0,
+    Vertex = 0x1,
+    Pixel = Vertex << 1,
+    Compute = Pixel << 1,
+    RayGen = Compute << 1,
+    Miss = RayGen << 1,
+    ClosestHit = Miss << 1,
+    AnyHit = ClosestHit << 1,
+    Intersection = AnyHit << 1,
+    Callable = Intersection << 1,
+    Graphics = Vertex | Pixel,
+    RayTracing = RayGen | Miss | ClosestHit | AnyHit | Intersection | Callable,
+};
+
+enum class ShaderBlobCategory : int32_t {
+    DXIL,
+    SPIRV,
+    MSL,
+    METALLIB,
 };
 
 enum class AddressMode : int32_t {
@@ -269,10 +277,7 @@ enum struct BufferUse : uint32_t {
     CBuffer = Vertex << 1,
     Resource = CBuffer << 1,
     UnorderedAccess = Resource << 1,
-    Indirect = UnorderedAccess << 1,
-    AccelerationStructure = Indirect << 1,
-    Scratch = AccelerationStructure << 1,
-    ShaderTable = Scratch << 1
+    Indirect = UnorderedAccess << 1
 };
 
 enum class TextureUse : uint32_t {
@@ -299,11 +304,7 @@ enum class BufferState : uint32_t {
     UnorderedAccess = ShaderRead << 1,
     Indirect = UnorderedAccess << 1,
     HostRead = Indirect << 1,
-    HostWrite = HostRead << 1,
-    AccelerationStructureBuildInput = HostWrite << 1,
-    AccelerationStructureBuildScratch = AccelerationStructureBuildInput << 1,
-    AccelerationStructureRead = AccelerationStructureBuildScratch << 1,
-    ShaderTable = AccelerationStructureRead << 1
+    HostWrite = HostRead << 1
 };
 
 enum class TextureState : uint32_t {
@@ -320,14 +321,6 @@ enum class TextureState : uint32_t {
     UnorderedAccess = DepthWrite << 1,
     ResolveSource = UnorderedAccess << 1,
     ResolveDestination = ResolveSource << 1
-};
-
-enum class BufferViewUsage : uint32_t {
-    CBuffer,
-    ReadOnlyStorage,
-    ReadWriteStorage,
-    TexelReadOnly,
-    TexelReadWrite
 };
 
 enum class TextureViewUsage : uint32_t {
@@ -363,63 +356,10 @@ enum class MemoryType : int32_t {
     ReadBack,
 };
 
-enum class ResourceBindType : int32_t {
-    UNKNOWN,
-    CBuffer,
-    Buffer,
-    TexelBuffer,
-    Texture,
-    Sampler,
-    RWBuffer,
-    RWTexelBuffer,
-    RWTexture,
-    AccelerationStructure
-};
-
 enum class PresentMode : int32_t {
     FIFO,
     Mailbox,
     Immediate
-};
-
-enum class BindlessSlotType : int32_t {
-    Multiple,
-    BufferOnly,
-    Texture2DOnly,
-    Texture3DOnly
-};
-
-enum class AccelerationStructureType : int32_t {
-    BottomLevel,
-    TopLevel
-};
-
-enum class AccelerationStructureBuildMode : int32_t {
-    Build,
-    Update
-};
-
-enum class AccelerationStructureBuildFlag : uint32_t {
-    None = 0x0,
-    PreferFastTrace = 0x1,
-    PreferFastBuild = PreferFastTrace << 1,
-    AllowUpdate = PreferFastBuild << 1,
-    AllowCompaction = AllowUpdate << 1
-};
-
-enum class ShaderBindingTableEntryType : uint8_t {
-    RayGen,
-    Miss,
-    HitGroup,
-    Callable
-};
-
-enum class ShaderParameterKind : int32_t {
-    UNKNOWN,
-    Resource,
-    Sampler,
-    Constant,
-    BindlessArray
 };
 
 enum class SwapChainStatus : int32_t {
@@ -437,8 +377,7 @@ enum class QueryPipelineStage : int32_t {
     Top,
     Bottom,
     Graphics,
-    Compute,
-    RayTracing
+    Compute
 };
 
 enum class PhysicalDeviceType : int32_t {
@@ -460,9 +399,7 @@ enum class RenderObjectTag : uint32_t {
     Fence = CmdEncoder << 3,
     Shader = Fence << 1,
     PipelineLayout = Shader << 1,
-    DescriptorPool = PipelineLayout << 1,
-    BindingGroup = DescriptorPool << 1,
-    PipelineState = BindingGroup << 1,
+    PipelineState = PipelineLayout << 1,
     GraphicsPipelineState = PipelineState | (PipelineState << 1),
     ComputePipelineState = PipelineState | (PipelineState << 2),
     SwapChain = PipelineState << 3,
@@ -471,15 +408,9 @@ enum class RenderObjectTag : uint32_t {
     Texture = Resource | (Resource << 2),
     ResourceView = Resource << 3,
     TextureView = ResourceView | (ResourceView << 1),
-    AccelerationStructureView = ResourceView | (ResourceView << 2),
-    Sampler = ResourceView << 3,
-    BindlessArray = Sampler << 1,
-    QueryPool = BindlessArray << 1,
-    RayTracingCmdEncoder = QueryPool << 1,
-    AccelerationStructure = RayTracingCmdEncoder << 1,
-    RayTracingPipelineState = AccelerationStructure << 1,
-    ShaderBindingTable = RayTracingPipelineState << 1,
-    RenderPass = ShaderBindingTable << 1,
+    Sampler = ResourceView << 2,
+    QueryPool = Sampler << 1,
+    RenderPass = QueryPool << 1,
     Framebuffer = RenderPass << 1,
     VkInstance = Framebuffer << 1,
     DXGIFactory = VkInstance << 1
@@ -488,6 +419,11 @@ enum class RenderObjectTag : uint32_t {
 }  // namespace radray::render
 
 namespace radray {
+
+template <>
+struct is_flags<render::ShaderStage> : public std::true_type {};
+template <>
+struct is_compound_enum_flags<render::ShaderStage> : public std::true_type {};
 
 template <>
 struct is_flags<render::ColorWrite> : public std::true_type {};
@@ -510,11 +446,10 @@ template <>
 struct is_flags<render::BufferState> : public std::true_type {};
 template <>
 struct is_flags<render::TextureState> : public std::true_type {};
-template <>
-struct is_flags<render::AccelerationStructureBuildFlag> : public std::true_type {};
 
 namespace render {
 
+using ShaderStages = EnumFlags<render::ShaderStage>;
 using ColorWrites = EnumFlags<render::ColorWrite>;
 using ResourceHints = EnumFlags<render::ResourceHint>;
 using RenderObjectTags = EnumFlags<render::RenderObjectTag>;
@@ -522,7 +457,6 @@ using BufferUses = EnumFlags<render::BufferUse>;
 using TextureUses = EnumFlags<render::TextureUse>;
 using BufferStates = EnumFlags<render::BufferState>;
 using TextureStates = EnumFlags<render::TextureState>;
-using AccelerationStructureBuildFlags = EnumFlags<render::AccelerationStructureBuildFlag>;
 
 }  // namespace render
 
@@ -536,7 +470,6 @@ class CommandBuffer;
 class CommandEncoder;
 class GraphicsCommandEncoder;
 class ComputeCommandEncoder;
-class RayTracingCommandEncoder;
 class Fence;
 class SwapChain;
 class SwapChainSyncObject;
@@ -546,21 +479,14 @@ class ResourceView;
 class Buffer;
 class Texture;
 class TextureView;
-class AccelerationStructureView;
 class Shader;
 class PipelineLayout;
-class DescriptorPool;
-class BindingGroup;
 class RenderPass;
 class Framebuffer;
 class PipelineState;
 class GraphicsPipelineState;
 class ComputePipelineState;
-class RayTracingPipelineState;
-class ShaderBindingTable;
-class AccelerationStructure;
 class Sampler;
-class BindlessArray;
 class QueryPool;
 class InstanceVulkan;
 class DXGIFactory;
@@ -663,7 +589,6 @@ class VulkanDeviceDescriptor {
 public:
     std::optional<uint32_t> PhysicalDeviceIndex{};
     std::span<const VulkanCommandQueueDescriptor> Queues{};
-    bool EnableRayTracing{true};
 };
 
 using DeviceDescriptor = std::variant<D3D12DeviceDescriptor, MetalDeviceDescriptor, VulkanDeviceDescriptor>;
@@ -845,15 +770,7 @@ struct BarrierTextureDescriptor {
     SubresourceRange Range{};
 };
 
-struct BarrierAccelerationStructureDescriptor {
-    AccelerationStructure* Target{nullptr};
-    BufferStates Before{BufferState::UNKNOWN};
-    BufferStates After{BufferState::UNKNOWN};
-    Nullable<CommandQueue*> OtherQueue{nullptr};
-    bool IsFromOrToOtherQueue{false};
-};
-
-using ResourceBarrierDescriptor = std::variant<BarrierBufferDescriptor, BarrierTextureDescriptor, BarrierAccelerationStructureDescriptor>;
+using ResourceBarrierDescriptor = std::variant<BarrierBufferDescriptor, BarrierTextureDescriptor>;
 
 struct RenderPassColorAttachmentDescriptor {
     TextureFormat Format{TextureFormat::UNKNOWN};
@@ -925,24 +842,6 @@ struct BufferDescriptor {
     ResourceHints Hints{};
 };
 
-struct BindlessArrayDescriptor {
-    uint32_t Size{0};
-    BindlessSlotType SlotType{BindlessSlotType::Multiple};
-};
-
-struct DescriptorPoolDescriptor {
-    uint32_t MaxBindingGroups{0};
-    uint32_t MaxSampledTextures{0};
-    uint32_t MaxStorageTextures{0};
-    uint32_t MaxUniformBuffers{0};
-    uint32_t MaxDynamicUniformBuffers{0};
-    uint32_t MaxStorageBuffers{0};
-    uint32_t MaxReadOnlyTexelBuffers{0};
-    uint32_t MaxReadWriteTexelBuffers{0};
-    uint32_t MaxSamplers{0};
-    uint32_t MaxAccelerationStructures{0};
-};
-
 struct BufferRange {
     uint64_t Offset{0};
     uint64_t Size{0};
@@ -961,109 +860,13 @@ struct MappedBufferRange {
     BufferRange Range{};
 };
 
-struct BufferBindingDescriptor {
-    Buffer* Target{nullptr};
-    BufferRange Range{};
-    uint32_t Stride{0};
-    TextureFormat Format{TextureFormat::UNKNOWN};
-    BufferViewUsage Usage{BufferViewUsage::ReadOnlyStorage};
-};
-
-struct AccelerationStructureViewDescriptor {
-    AccelerationStructure* Target{nullptr};
-};
-
-using ShaderReflectionDesc = std::variant<HlslShaderDesc, SpirvShaderDesc>;
-
 struct ShaderDescriptor {
     std::span<const byte> Source{};
     ShaderBlobCategory Category{};
     ShaderStages Stages{ShaderStage::UNKNOWN};
-    std::optional<ShaderReflectionDesc> Reflection{};
 };
 
-struct ShaderParameterInfo {
-    string Name{};
-    ShaderParameterKind Kind{ShaderParameterKind::UNKNOWN};
-    ShaderStages Stages{ShaderStage::UNKNOWN};
-    ResourceBindType Type{ResourceBindType::UNKNOWN};
-    uint32_t Count{1};
-    uint32_t ByteSize{0};
-    bool IsReadOnly{true};
-    bool IsBindless{false};
-
-    friend bool operator==(const ShaderParameterInfo&, const ShaderParameterInfo&) noexcept = default;
-};
-
-struct StaticSamplerDescriptor {
-    string Name{};
-    SamplerDescriptor Desc{};
-
-    friend bool operator==(const StaticSamplerDescriptor&, const StaticSamplerDescriptor&) noexcept = default;
-};
-
-struct ShaderBindingLocation {
-    uint32_t Group{0};
-    uint32_t Binding{0};
-
-    friend bool operator==(const ShaderBindingLocation&, const ShaderBindingLocation&) noexcept = default;
-};
-
-struct BindingGroupLayoutEntry {
-    ShaderParameterInfo Parameter{};
-    uint32_t Binding{0};
-    bool HasDynamicOffset{false};
-    bool IsStaticSampler{false};
-
-    friend bool operator==(const BindingGroupLayoutEntry&, const BindingGroupLayoutEntry&) noexcept = default;
-};
-
-struct BindingGroupLayout {
-    uint32_t GroupIndex{0};
-    vector<BindingGroupLayoutEntry> Entries{};
-
-    friend bool operator==(const BindingGroupLayout&, const BindingGroupLayout&) noexcept = default;
-};
-
-struct PushConstantRange {
-    string Name{};
-    uint32_t Group{0};
-    uint32_t Binding{0};
-    ShaderStages Stages{ShaderStage::UNKNOWN};
-    uint32_t Offset{0};
-    uint32_t Size{0};
-
-    friend bool operator==(const PushConstantRange&, const PushConstantRange&) noexcept = default;
-};
-
-struct DynamicBufferBinding {
-    uint32_t Group{0};
-    uint32_t Binding{0};
-
-    friend bool operator==(const DynamicBufferBinding&, const DynamicBufferBinding&) noexcept = default;
-};
-
-struct PushConstantBinding {
-    uint32_t Group{0};
-    uint32_t Binding{0};
-
-    friend bool operator==(const PushConstantBinding&, const PushConstantBinding&) noexcept = default;
-};
-
-struct BindingGroupLayoutReuse {
-    uint32_t Group{0};
-    PipelineLayout* Source{nullptr};
-    uint32_t SourceGroup{0};
-};
-
-struct PipelineLayoutDescriptor {
-    std::span<Shader*> Shaders{};
-    std::span<const StaticSamplerDescriptor> StaticSamplers{};
-    std::span<const BindingGroupLayout> BindingGroupLayouts{};
-    std::span<const BindingGroupLayoutReuse> BindingGroupLayoutReuses{};
-    std::span<const DynamicBufferBinding> DynamicBufferBindings{};
-    std::span<const PushConstantBinding> PushConstantBindings{};
-};
+struct PipelineLayoutDescriptor {};
 
 struct VertexElement {
     uint64_t Offset{0};
@@ -1250,136 +1053,6 @@ struct ComputePipelineStateDescriptor {
     ShaderEntry CS{};
 };
 
-struct RayTracingTrianglesDescriptor {
-    Buffer* VertexBuffer{nullptr};
-    uint64_t VertexOffset{0};
-    uint32_t VertexStride{0};
-    uint32_t VertexCount{0};
-    VertexFormat VertexFmt{VertexFormat::UNKNOWN};
-    Buffer* IndexBuffer{nullptr};
-    uint64_t IndexOffset{0};
-    uint32_t IndexCount{0};
-    IndexFormat IndexFmt{IndexFormat::UINT32};
-    Buffer* TransformBuffer{nullptr};
-    uint64_t TransformOffset{0};
-};
-
-struct RayTracingAABBsDescriptor {
-    Buffer* Target{nullptr};
-    uint64_t Offset{0};
-    uint32_t Count{0};
-    uint32_t Stride{0};
-};
-
-struct RayTracingGeometryDesc {
-    std::variant<RayTracingTrianglesDescriptor, RayTracingAABBsDescriptor> Geometry{};
-    bool Opaque{true};
-};
-
-struct RayTracingInstanceDescriptor {
-    Eigen::Matrix4f Transform{Eigen::Matrix4f::Identity()};
-    uint32_t InstanceID{0};
-    uint32_t InstanceMask{0xFF};
-    uint32_t InstanceContributionToHitGroupIndex{0};
-    AccelerationStructure* Blas{nullptr};
-    bool ForceOpaque{false};
-    bool ForceNoOpaque{false};
-};
-
-struct AccelerationStructureDescriptor {
-    AccelerationStructureType Type{AccelerationStructureType::BottomLevel};
-    uint32_t MaxGeometryCount{0};
-    uint32_t MaxInstanceCount{0};
-    AccelerationStructureBuildFlags Flags{AccelerationStructureBuildFlag::None};
-};
-
-struct BuildBottomLevelASDescriptor {
-    AccelerationStructure* Target{nullptr};
-    std::span<const RayTracingGeometryDesc> Geometries{};
-    Buffer* ScratchBuffer{nullptr};
-    uint64_t ScratchOffset{0};
-    uint64_t ScratchSize{0};
-    AccelerationStructureBuildMode Mode{AccelerationStructureBuildMode::Build};
-};
-
-struct BuildTopLevelASDescriptor {
-    AccelerationStructure* Target{nullptr};
-    std::span<const RayTracingInstanceDescriptor> Instances{};
-    Buffer* ScratchBuffer{nullptr};
-    uint64_t ScratchOffset{0};
-    uint64_t ScratchSize{0};
-    AccelerationStructureBuildMode Mode{AccelerationStructureBuildMode::Build};
-};
-
-struct RayTracingShaderEntry {
-    Shader* Target{nullptr};
-    std::string_view EntryPoint{};
-    ShaderStage Stage{ShaderStage::UNKNOWN};
-};
-
-struct RayTracingHitGroupDescriptor {
-    std::string_view Name{};
-    std::optional<RayTracingShaderEntry> ClosestHit{};
-    std::optional<RayTracingShaderEntry> AnyHit{};
-    std::optional<RayTracingShaderEntry> Intersection{};
-};
-
-struct RayTracingPipelineStateDescriptor {
-    PipelineLayout* PipelineLayout{nullptr};
-    std::span<const RayTracingShaderEntry> ShaderEntries{};
-    std::span<const RayTracingHitGroupDescriptor> HitGroups{};
-    uint32_t MaxRecursionDepth{1};
-    uint32_t MaxPayloadSize{0};
-    uint32_t MaxAttributeSize{0};
-};
-
-struct ShaderBindingTableRequirements {
-    uint32_t HandleSize{0};
-    uint32_t HandleAlignment{0};
-    uint32_t BaseAlignment{0};
-};
-
-struct ShaderBindingTableBuildEntry {
-    ShaderBindingTableEntryType Type{ShaderBindingTableEntryType::RayGen};
-    std::string_view ShaderName{};
-    std::span<const byte> LocalData{};
-    uint32_t RecordIndex{0};
-};
-
-struct ShaderBindingTableDescriptor {
-    RayTracingPipelineState* Pipeline{nullptr};
-    uint32_t RayGenCount{1};
-    uint32_t MissCount{0};
-    uint32_t HitGroupCount{0};
-    uint32_t CallableCount{0};
-    uint32_t MaxLocalDataSize{0};
-};
-
-struct ShaderBindingTableRegion {
-    Buffer* Target{nullptr};
-    uint64_t Offset{0};
-    uint64_t Size{0};
-    uint64_t Stride{0};
-};
-
-struct ShaderBindingTableRegions {
-    ShaderBindingTableRegion RayGen{};
-    ShaderBindingTableRegion Miss{};
-    ShaderBindingTableRegion HitGroup{};
-    std::optional<ShaderBindingTableRegion> Callable{};
-};
-
-struct TraceRaysDescriptor {
-    ShaderBindingTable* Sbt{nullptr};
-    ShaderBindingTableRegion RayGen{};
-    ShaderBindingTableRegion Miss{};
-    ShaderBindingTableRegion HitGroup{};
-    std::optional<ShaderBindingTableRegion> Callable{};
-    uint32_t Width{1};
-    uint32_t Height{1};
-    uint32_t Depth{1};
-};
-
 struct VertexBufferView {
     Buffer* Target{nullptr};
     uint64_t Offset{0};
@@ -1425,13 +1098,7 @@ struct DeviceDetail {
     uint32_t CBufferAlignment{0};
     uint32_t TextureDataPitchAlignment{1};
     uint32_t MaxVertexInputBindings{0};
-    uint32_t MaxRayRecursionDepth{0};
-    uint32_t ShaderTableAlignment{0};
-    uint32_t AccelerationStructureAlignment{0};
-    uint32_t AccelerationStructureScratchAlignment{0};
     bool IsUMA{false};
-    bool IsBindlessArraySupported{false};
-    bool IsRayTracingSupported{false};
     bool IsLayeredRenderingFromVertexShaderSupported{false};
 };
 
@@ -1471,25 +1138,11 @@ public:
 
     virtual Nullable<unique_ptr<PipelineLayout>> CreatePipelineLayout(const PipelineLayoutDescriptor& desc) noexcept = 0;
 
-    virtual Nullable<unique_ptr<DescriptorPool>> CreateDescriptorPool(const DescriptorPoolDescriptor& desc) noexcept = 0;
-
-    virtual Nullable<unique_ptr<BindingGroup>> CreateBindingGroup(DescriptorPool* pool, PipelineLayout* layout, uint32_t groupIndex) noexcept = 0;
-
     virtual Nullable<unique_ptr<GraphicsPipelineState>> CreateGraphicsPipelineState(const GraphicsPipelineStateDescriptor& desc) noexcept = 0;
 
     virtual Nullable<unique_ptr<ComputePipelineState>> CreateComputePipelineState(const ComputePipelineStateDescriptor& desc) noexcept = 0;
 
-    virtual Nullable<unique_ptr<AccelerationStructure>> CreateAccelerationStructure(const AccelerationStructureDescriptor& desc) noexcept = 0;
-
-    virtual Nullable<unique_ptr<AccelerationStructureView>> CreateAccelerationStructureView(const AccelerationStructureViewDescriptor& desc) noexcept = 0;
-
-    virtual Nullable<unique_ptr<RayTracingPipelineState>> CreateRayTracingPipelineState(const RayTracingPipelineStateDescriptor& desc) noexcept = 0;
-
-    virtual Nullable<unique_ptr<ShaderBindingTable>> CreateShaderBindingTable(const ShaderBindingTableDescriptor& desc) noexcept = 0;
-
     virtual Nullable<unique_ptr<Sampler>> CreateSampler(const SamplerDescriptor& desc) noexcept = 0;
-
-    virtual Nullable<unique_ptr<BindlessArray>> CreateBindlessArray(const BindlessArrayDescriptor& desc) noexcept = 0;
 
     static Nullable<shared_ptr<Device>> Create(const DeviceDescriptor& desc);
 };
@@ -1526,10 +1179,6 @@ public:
     virtual Nullable<unique_ptr<ComputeCommandEncoder>> BeginComputePass() noexcept = 0;
 
     virtual void EndComputePass(unique_ptr<ComputeCommandEncoder> encoder) noexcept = 0;
-
-    virtual Nullable<unique_ptr<RayTracingCommandEncoder>> BeginRayTracingPass() noexcept = 0;
-
-    virtual void EndRayTracingPass(unique_ptr<RayTracingCommandEncoder> encoder) noexcept = 0;
 
     virtual void CopyBufferToBuffer(Buffer* dst, uint64_t dstOffset, Buffer* src, uint64_t srcOffset, uint64_t size) noexcept = 0;
 
@@ -1568,10 +1217,6 @@ public:
     RenderObjectTags GetTag() const noexcept override { return RenderObjectTag::CmdEncoder; }
 
     virtual CommandBuffer* GetCommandBuffer() const noexcept = 0;
-
-    virtual void BindBindingGroup(uint32_t groupIndex, BindingGroup* group, std::span<const uint32_t> dynamicOffsets = {}) noexcept = 0;
-
-    virtual bool SetPushConstants(PipelineLayout* layout, uint32_t groupIndex, uint32_t binding, std::span<const byte> data) noexcept = 0;
 };
 
 class GraphicsCommandEncoder : public CommandEncoder {
@@ -1610,21 +1255,6 @@ public:
     virtual void Dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ) noexcept = 0;
 
     virtual void DispatchIndirect(Buffer* argumentBuffer, uint64_t argumentOffset) noexcept = 0;
-};
-
-class RayTracingCommandEncoder : public CommandEncoder {
-public:
-    virtual ~RayTracingCommandEncoder() noexcept = default;
-
-    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::RayTracingCmdEncoder; }
-
-    virtual void BuildBottomLevelAS(const BuildBottomLevelASDescriptor& desc) noexcept = 0;
-
-    virtual void BuildTopLevelAS(const BuildTopLevelASDescriptor& desc) noexcept = 0;
-
-    virtual void BindRayTracingPipelineState(RayTracingPipelineState* pso) noexcept = 0;
-
-    virtual void TraceRays(const TraceRaysDescriptor& desc) noexcept = 0;
 };
 
 class Fence : public RenderBase, public IDebugName {
@@ -1724,13 +1354,6 @@ public:
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::TextureView; }
 };
 
-class AccelerationStructureView : public ResourceView {
-public:
-    virtual ~AccelerationStructureView() noexcept = default;
-
-    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::AccelerationStructureView; }
-};
-
 class RenderPass : public RenderBase, public IDebugName {
 public:
     virtual ~RenderPass() noexcept = default;
@@ -1756,8 +1379,6 @@ public:
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::Shader; }
 
     virtual ShaderStages GetStages() const noexcept = 0;
-
-    virtual Nullable<const ShaderReflectionDesc*> GetReflection() const noexcept = 0;
 };
 
 class PipelineLayout : public RenderBase, public IDebugName {
@@ -1765,16 +1386,6 @@ public:
     virtual ~PipelineLayout() noexcept = default;
 
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::PipelineLayout; }
-
-    virtual vector<ShaderParameterInfo> GetParameters() const noexcept = 0;
-
-    virtual Nullable<const ShaderParameterInfo*> FindParameter(std::string_view name) const noexcept = 0;
-
-    virtual std::optional<ShaderBindingLocation> FindBindingLocation(std::string_view name) const noexcept = 0;
-
-    virtual vector<BindingGroupLayout> GetBindingGroupLayouts() const noexcept = 0;
-
-    virtual vector<PushConstantRange> GetPushConstantRanges() const noexcept = 0;
 };
 
 class PipelineState : public RenderBase, public IDebugName {
@@ -1798,89 +1409,11 @@ public:
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::ComputePipelineState; }
 };
 
-class RayTracingPipelineState : public PipelineState {
-public:
-    virtual ~RayTracingPipelineState() noexcept = default;
-
-    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::RayTracingPipelineState; }
-
-    virtual ShaderBindingTableRequirements GetShaderBindingTableRequirements() const noexcept = 0;
-
-    virtual std::optional<vector<byte>> GetShaderBindingTableHandle(std::string_view shaderName) const noexcept = 0;
-};
-
-class ShaderBindingTable : public RenderBase, public IDebugName {
-public:
-    virtual ~ShaderBindingTable() noexcept = default;
-
-    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::ShaderBindingTable; }
-
-    virtual bool Build(std::span<const ShaderBindingTableBuildEntry> entries) noexcept = 0;
-
-    virtual bool IsBuilt() const noexcept = 0;
-
-    virtual ShaderBindingTableRegions GetRegions() const noexcept = 0;
-};
-
-class AccelerationStructure : public Resource {
-public:
-    virtual ~AccelerationStructure() noexcept = default;
-
-    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::AccelerationStructure; }
-};
-
-class DescriptorPool : public RenderBase, public IDebugName {
-public:
-    virtual ~DescriptorPool() noexcept = default;
-
-    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::DescriptorPool; }
-
-    virtual bool Reset() noexcept = 0;
-
-    virtual DescriptorPoolDescriptor GetDesc() const noexcept = 0;
-
-    virtual uint32_t GetAllocatedBindingGroupCount() const noexcept = 0;
-};
-
-class BindingGroup : public RenderBase, public IDebugName {
-public:
-    virtual ~BindingGroup() noexcept = default;
-
-    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::BindingGroup; }
-
-    virtual void Reset() noexcept = 0;
-
-    virtual PipelineLayout* GetPipelineLayout() const noexcept = 0;
-
-    virtual uint32_t GetGroupIndex() const noexcept = 0;
-
-    virtual bool SetResource(uint32_t binding, ResourceView* view, uint32_t arrayIndex = 0) noexcept = 0;
-
-    virtual bool SetResource(uint32_t binding, const BufferBindingDescriptor& desc, uint32_t arrayIndex = 0) noexcept = 0;
-
-    virtual bool SetSampler(uint32_t binding, Sampler* sampler, uint32_t arrayIndex = 0) noexcept = 0;
-
-    virtual bool SetBindlessArray(uint32_t binding, BindlessArray* array) noexcept = 0;
-
-    virtual bool IsFullyWritten() const noexcept = 0;
-};
-
 class Sampler : public RenderBase, public IDebugName {
 public:
     virtual ~Sampler() noexcept = default;
 
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::Sampler; }
-};
-
-class BindlessArray : public RenderBase, public IDebugName {
-public:
-    virtual ~BindlessArray() noexcept = default;
-
-    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::BindlessArray; }
-
-    virtual void SetBuffer(uint32_t slot, const BufferBindingDescriptor& desc) noexcept = 0;
-
-    virtual void SetTexture(uint32_t slot, TextureView* texView, Sampler* sampler) noexcept = 0;
 };
 
 class InstanceVulkan : public RenderBase {
@@ -1918,10 +1451,11 @@ uint32_t GetVertexFormatSizeInBytes(VertexFormat format) noexcept;
 uint32_t GetIndexFormatSizeInBytes(IndexFormat format) noexcept;
 IndexFormat SizeInBytesToIndexFormat(uint32_t size) noexcept;
 uint32_t GetTextureFormatBytesPerPixel(TextureFormat format) noexcept;
-ResourceBindType BufferViewUsageToResourceBindType(BufferViewUsage usage) noexcept;
 // -------------------------------------------------------------------------
 
 std::string_view format_as(RenderBackend v) noexcept;
+std::string_view format_as(ShaderStage v) noexcept;
+std::string_view format_as(ShaderBlobCategory v) noexcept;
 std::string_view format_as(TextureFormat v) noexcept;
 std::string_view format_as(QueueType v) noexcept;
 std::string_view format_as(VertexFormat v) noexcept;
@@ -1930,14 +1464,8 @@ std::string_view format_as(TextureDimension v) noexcept;
 std::string_view format_as(BufferState v) noexcept;
 std::string_view format_as(TextureState v) noexcept;
 std::string_view format_as(TextureViewUsage v) noexcept;
-std::string_view format_as(BufferViewUsage v) noexcept;
-std::string_view format_as(ResourceBindType v) noexcept;
-std::string_view format_as(AccelerationStructureType v) noexcept;
-std::string_view format_as(AccelerationStructureBuildMode v) noexcept;
-std::string_view format_as(AccelerationStructureBuildFlag v) noexcept;
 std::string_view format_as(RenderObjectTag v) noexcept;
 std::string_view format_as(PresentMode v) noexcept;
-std::string_view format_as(BindlessSlotType v) noexcept;
 std::string_view format_as(SwapChainStatus v) noexcept;
 
 }  // namespace radray::render

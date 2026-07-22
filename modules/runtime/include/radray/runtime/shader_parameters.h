@@ -26,22 +26,22 @@ struct ShaderParameterFieldDesc {
     string QualifiedName;
     uint32_t Offset{0};
     uint32_t Size{0};
-    shader::ShaderValueTypeDesc Type{};
+    render::ShaderValueTypeDesc Type{};
 
     friend bool operator==(const ShaderParameterFieldDesc&, const ShaderParameterFieldDesc&) = default;
 };
 
 struct ShaderParameterBindingDesc {
     ShaderParameterLocation Location{};
-    shader::ShaderBindingDesc Interface;
+    render::ShaderBindingDesc Interface;
     vector<ShaderParameterFieldDesc> Fields;
 
     friend bool operator==(const ShaderParameterBindingDesc&, const ShaderParameterBindingDesc&) = default;
 };
 
 struct ShaderProgramInterfaceRecord {
-    shader::ShaderInterfaceDesc Interface;
-    shader::ShaderDiagnosticContext Context{};
+    render::ShaderInterfaceDesc Interface;
+    render::ShaderDiagnosticContext Context{};
 
     friend bool operator==(const ShaderProgramInterfaceRecord&, const ShaderProgramInterfaceRecord&) = default;
 };
@@ -50,9 +50,9 @@ class ShaderParameterLayout {
 public:
     bool IsValid() const noexcept;
     bool Empty() const noexcept { return _bindings.empty(); }
-    shader::ShaderHash GetHash() const noexcept { return _hash; }
+    render::ShaderHash GetHash() const noexcept { return _hash; }
 
-    std::span<const shader::ShaderBindingGroupInterfaceDesc> Groups() const noexcept { return _groups; }
+    std::span<const render::ShaderBindingGroupInterfaceDesc> Groups() const noexcept { return _groups; }
     std::span<const ShaderParameterBindingDesc> Bindings() const noexcept { return _bindings; }
     Nullable<const ShaderParameterBindingDesc*> FindBinding(ShaderParameterLocation location) const noexcept;
     Nullable<const ShaderParameterBindingDesc*> FindBinding(std::string_view name) const noexcept;
@@ -64,23 +64,23 @@ public:
     friend bool operator==(const ShaderParameterLayout&, const ShaderParameterLayout&) = default;
 
 private:
-    vector<shader::ShaderBindingGroupInterfaceDesc> _groups;
+    vector<render::ShaderBindingGroupInterfaceDesc> _groups;
     vector<ShaderParameterBindingDesc> _bindings;
-    shader::ShaderHash _hash{};
+    render::ShaderHash _hash{};
 
     friend struct ShaderParameterLayoutBuildResult;
     friend ShaderParameterLayoutBuildResult BuildShaderParameterLayout(
-        const shader::ShaderBinary&,
+        const render::ShaderBinary&,
         const PipelineBindingPolicy&,
-        shader::ShaderProgramKind);
+        render::ShaderProgramKind);
     friend ShaderParameterLayoutBuildResult BuildShaderParameterLayout(
-        std::span<const shader::ShaderInterfaceDesc>,
+        std::span<const render::ShaderInterfaceDesc>,
         const PipelineBindingPolicy&,
-        shader::ShaderProgramKind);
+        render::ShaderProgramKind);
     friend ShaderParameterLayoutBuildResult BuildShaderParameterLayout(
         std::span<const ShaderProgramInterfaceRecord>,
         const PipelineBindingPolicy&,
-        shader::ShaderProgramKind);
+        render::ShaderProgramKind);
 };
 
 struct ShaderParameterLayoutBuildResult {
@@ -91,17 +91,17 @@ struct ShaderParameterLayoutBuildResult {
 };
 
 ShaderParameterLayoutBuildResult BuildShaderParameterLayout(
-    const shader::ShaderBinary& binary,
+    const render::ShaderBinary& binary,
     const PipelineBindingPolicy& policy,
-    shader::ShaderProgramKind kind);
+    render::ShaderProgramKind kind);
 ShaderParameterLayoutBuildResult BuildShaderParameterLayout(
-    std::span<const shader::ShaderInterfaceDesc> interfaces,
+    std::span<const render::ShaderInterfaceDesc> interfaces,
     const PipelineBindingPolicy& policy,
-    shader::ShaderProgramKind kind);
+    render::ShaderProgramKind kind);
 ShaderParameterLayoutBuildResult BuildShaderParameterLayout(
     std::span<const ShaderProgramInterfaceRecord> interfaces,
     const PipelineBindingPolicy& policy,
-    shader::ShaderProgramKind kind);
+    render::ShaderProgramKind kind);
 
 struct ShaderTextureParameterValue {
     StreamingAssetRef<TextureAsset> Texture;
@@ -121,7 +121,7 @@ using ShaderResourceParameterValue = std::variant<
 
 struct ShaderParameterBindingValue {
     ShaderParameterLocation Location{};
-    shader::ShaderBindingKind Kind{shader::ShaderBindingKind::Unknown};
+    render::ShaderBindingKind Kind{render::ShaderBindingKind::Unknown};
     vector<byte> ConstantData;
     vector<ShaderResourceParameterValue> Resources;
 };
@@ -168,14 +168,14 @@ public:
         uint32_t arrayIndex = 0) noexcept;
     bool SetValue(
         std::string_view name,
-        shader::ShaderScalarType scalar,
+        render::ShaderScalarType scalar,
         uint32_t columns,
         std::span<const byte> data,
         uint32_t arrayIndex = 0) noexcept;
     bool SetValue(
         ShaderParameterLocation location,
         std::string_view field,
-        shader::ShaderScalarType scalar,
+        render::ShaderScalarType scalar,
         uint32_t columns,
         std::span<const byte> data,
         uint32_t arrayIndex = 0) noexcept;
@@ -240,7 +240,7 @@ private:
         std::string_view name) noexcept;
     bool SetValue(
         FieldTarget target,
-        shader::ShaderScalarType scalar,
+        render::ShaderScalarType scalar,
         uint32_t columns,
         std::span<const byte> data,
         uint32_t arrayIndex) noexcept;

@@ -13,7 +13,7 @@
 #include <radray/runtime/texture_asset.h>
 
 #if defined(RADRAY_ENABLE_SHADER_JIT)
-#include <radray/shader/dxc.h>
+#include <radray/render/dxc.h>
 #endif
 
 using namespace radray;

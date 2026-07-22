@@ -4,11 +4,11 @@
 #include <span>
 #include <string_view>
 
-#include <radray/shader/common.h>
-#include <radray/shader/msl.h>
-#include <radray/shader/spirv.h>
+#include <radray/render/common.h>
+#include <radray/render/msl.h>
+#include <radray/render/spirv.h>
 
-namespace radray::shader {
+namespace radray::render {
 
 struct SpirvBytecodeView {
     std::span<const byte> Data;
@@ -61,4 +61,4 @@ std::optional<MslShaderReflection> ReflectSpirvAsMsl(std::span<const SpirvAsMslR
 
 #endif
 
-}  // namespace radray::shader
+}  // namespace radray::render

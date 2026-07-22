@@ -1,8 +1,8 @@
-#include <radray/shader/msl.h>
+#include <radray/render/msl.h>
 
 #include <radray/utility.h>
 
-namespace radray::shader {
+namespace radray::render {
 
 std::string_view format_as(MslDataType v) noexcept {
     switch (v) {
@@ -121,4 +121,4 @@ std::string_view format_as(MslStage v) noexcept {
     radray::Unreachable();
 }
 
-}  // namespace radray::shader
+}  // namespace radray::render

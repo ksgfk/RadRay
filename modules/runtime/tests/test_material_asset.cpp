@@ -10,104 +10,104 @@
 namespace radray {
 namespace {
 
-shader::ShaderBindingDesc MakeSampler(
+render::ShaderBindingDesc MakeSampler(
     uint32_t group,
     uint32_t binding,
     std::string_view name) {
     (void)group;
-    return shader::ShaderBindingDesc{
+    return render::ShaderBindingDesc{
         .Name = string{name},
         .BindingIndex = binding,
-        .Kind = shader::ShaderBindingKind::Sampler,
-        .Access = shader::ShaderResourceAccess::ReadOnly,
+        .Kind = render::ShaderBindingKind::Sampler,
+        .Access = render::ShaderResourceAccess::ReadOnly,
         .Count = 1,
-        .Stages = shader::ShaderStage::Vertex};
+        .Stages = render::ShaderStage::Vertex};
 }
 
-shader::ShaderBindingDesc MakeTexture(
+render::ShaderBindingDesc MakeTexture(
     uint32_t binding,
     std::string_view name) {
-    return shader::ShaderBindingDesc{
+    return render::ShaderBindingDesc{
         .Name = string{name},
         .BindingIndex = binding,
-        .Kind = shader::ShaderBindingKind::SampledTexture,
-        .Access = shader::ShaderResourceAccess::ReadOnly,
+        .Kind = render::ShaderBindingKind::SampledTexture,
+        .Access = render::ShaderResourceAccess::ReadOnly,
         .Count = 1,
-        .Stages = shader::ShaderStage::Pixel,
-        .Texture = shader::ShaderTextureInterfaceDesc{
-            .Dimension = shader::ShaderTextureDimension::Dim2D,
-            .SampleType = shader::ShaderSampleType::Float}};
+        .Stages = render::ShaderStage::Pixel,
+        .Texture = render::ShaderTextureInterfaceDesc{
+            .Dimension = render::ShaderTextureDimension::Dim2D,
+            .SampleType = render::ShaderSampleType::Float}};
 }
 
-shader::HlslShaderDesc MakeReflection() {
-    shader::HlslShaderDesc result;
+render::HlslShaderDesc MakeReflection() {
+    render::HlslShaderDesc result;
     result.BoundResources = {
-        shader::HlslInputBindDesc{
+        render::HlslInputBindDesc{
             .Name = "PipelineSampler",
-            .Type = shader::HlslShaderInputType::SAMPLER,
+            .Type = render::HlslShaderInputType::SAMPLER,
             .BindPoint = 0,
             .BindCount = 1,
             .Space = 0},
-        shader::HlslInputBindDesc{
+        render::HlslInputBindDesc{
             .Name = "MaterialSampler",
-            .Type = shader::HlslShaderInputType::SAMPLER,
+            .Type = render::HlslShaderInputType::SAMPLER,
             .BindPoint = 2,
             .BindCount = 1,
             .Space = 2}};
     return result;
 }
 
-shader::ShaderBinary MakeShaderBinary() {
-    shader::ShaderBinary result;
+render::ShaderBinary MakeShaderBinary() {
+    render::ShaderBinary result;
     result.Asset.AssetId = Guid::NewGuid();
-    shader::ShaderPassDesc pass;
+    render::ShaderPassDesc pass;
     pass.Name = "Material";
     pass.SourcePath = "forward_pipeline/error_pass.hlsl";
     pass.VariantDomain.KeywordGroups = {
-        shader::ShaderKeywordGroupDesc{
+        render::ShaderKeywordGroupDesc{
             .Alternatives = {"", "_ALPHATEST_ON=1", "_ALPHABLEND_ON=1"},
-            .Scope = shader::ShaderKeywordScope::Local,
-            .Stages = shader::ShaderStage::Vertex},
-        shader::ShaderKeywordGroupDesc{
+            .Scope = render::ShaderKeywordScope::Local,
+            .Stages = render::ShaderStage::Vertex},
+        render::ShaderKeywordGroupDesc{
             .Alternatives = {"", "_POINT_SHADOWS=1"},
-            .Scope = shader::ShaderKeywordScope::Global,
-            .Stages = shader::ShaderStage::Vertex}};
+            .Scope = render::ShaderKeywordScope::Global,
+            .Stages = render::ShaderStage::Vertex}};
     pass.BakeSet.Variants = {
-        shader::ShaderVariantKey{},
-        shader::ShaderVariantKey{{"_ALPHATEST_ON=1"}}};
-    std::get<shader::ShaderGraphicsPassDesc>(pass.Program).VertexEntry = "VSMain";
+        render::ShaderVariantKey{},
+        render::ShaderVariantKey{{"_ALPHATEST_ON=1"}}};
+    std::get<render::ShaderGraphicsPassDesc>(pass.Program).VertexEntry = "VSMain";
     result.Asset.Passes.emplace_back(std::move(pass));
 
-    shader::HlslShaderDesc reflection = MakeReflection();
-    const auto payload = shader::SerializeHlslShaderDesc(reflection);
+    render::HlslShaderDesc reflection = MakeReflection();
+    const auto payload = render::SerializeHlslShaderDesc(reflection);
     EXPECT_TRUE(payload.has_value());
-    result.Reflections.emplace_back(shader::ShaderReflectionRecord{
-        .Target = shader::ShaderTarget::DXIL,
+    result.Reflections.emplace_back(render::ShaderReflectionRecord{
+        .Target = render::ShaderTarget::DXIL,
         .Reflection = reflection,
-        .Hash = shader::HashShaderBytes(std::as_bytes(std::span{payload->data(), payload->size()}))});
-    auto stageInterface = shader::NormalizeHlslInterface(reflection, shader::ShaderStage::Vertex);
+        .Hash = render::HashShaderBytes(std::as_bytes(std::span{payload->data(), payload->size()}))});
+    auto stageInterface = render::NormalizeHlslInterface(reflection, render::ShaderStage::Vertex);
     EXPECT_TRUE(stageInterface.Succeeded());
     result.StageInterfaces.emplace_back(std::move(*stageInterface.Interface));
-    auto programInterface = shader::MergeGraphicsStageInterfaces(result.StageInterfaces.front());
+    auto programInterface = render::MergeGraphicsStageInterfaces(result.StageInterfaces.front());
     EXPECT_TRUE(programInterface.Succeeded());
     result.ProgramInterfaces.emplace_back(std::move(*programInterface.Interface));
 
     const auto& variants = result.Asset.Passes.front().BakeSet.Variants;
     for (uint32_t i = 0; i < variants.size(); ++i) {
-        shader::ShaderStageArtifact artifact{
-            .Target = shader::ShaderTarget::DXIL,
-            .Category = shader::ShaderBlobCategory::DXIL,
+        render::ShaderStageArtifact artifact{
+            .Target = render::ShaderTarget::DXIL,
+            .Category = render::ShaderBlobCategory::DXIL,
             .PassIndex = 0,
-            .Stage = shader::ShaderStage::Vertex,
+            .Stage = render::ShaderStage::Vertex,
             .Defines = variants[i].Defines,
             .EntryPoint = "VSMain",
             .Bytecode = {static_cast<byte>(i + 1)},
             .ReflectionIndex = 0,
             .InterfaceIndex = 0};
-        artifact.BinaryHash = shader::HashShaderBytes(artifact.Bytecode);
+        artifact.BinaryHash = render::HashShaderBytes(artifact.Bytecode);
         result.StageArtifacts.emplace_back(std::move(artifact));
-        result.ProgramVariants.emplace_back(shader::ShaderProgramVariantArtifact{
-            .Target = shader::ShaderTarget::DXIL,
+        result.ProgramVariants.emplace_back(render::ShaderProgramVariantArtifact{
+            .Target = render::ShaderTarget::DXIL,
             .PassIndex = 0,
             .Defines = variants[i].Defines,
             .StageArtifactIndices = {i},
@@ -127,12 +127,12 @@ PipelineBindingPolicy MakePolicy() {
 
 ShaderResolvedProgram MakeResolvedProgram(
     const ShaderAsset& asset,
-    shader::ShaderInterfaceDesc interface,
+    render::ShaderInterfaceDesc interface,
     vector<string> defines,
-    shader::ShaderTarget target = shader::ShaderTarget::DXIL) {
-    shader::NormalizeShaderDefines(defines);
-    const shader::ShaderPassDesc& pass = asset.GetPasses().front();
-    const shader::ShaderHash programIdentity = ComputeShaderProgramIdentity(
+    render::ShaderTarget target = render::ShaderTarget::DXIL) {
+    render::NormalizeShaderDefines(defines);
+    const render::ShaderPassDesc& pass = asset.GetPasses().front();
+    const render::ShaderHash programIdentity = ComputeShaderProgramIdentity(
         pass,
         0,
         defines,
@@ -150,7 +150,7 @@ ShaderResolvedProgram MakeResolvedProgram(
 }  // namespace
 
 TEST(MaterialAssetTest, SeparatesLocalKeywordsAndProviderGroups) {
-    shader::ShaderBinary binary = MakeShaderBinary();
+    render::ShaderBinary binary = MakeShaderBinary();
     ASSERT_TRUE(binary.IsValid());
     AssetManager assets;
     StreamingAssetRef<ShaderAsset> shaderRef =
@@ -182,7 +182,7 @@ TEST(MaterialAssetTest, SeparatesLocalKeywordsAndProviderGroups) {
 }
 
 TEST(MaterialAssetTest, LayoutIsBuiltOncePerShaderAndPolicy) {
-    shader::ShaderBinary binary = MakeShaderBinary();
+    render::ShaderBinary binary = MakeShaderBinary();
     ASSERT_TRUE(binary.IsValid());
     AssetManager assets;
     StreamingAssetRef<ShaderAsset> shaderRef =
@@ -199,7 +199,7 @@ TEST(MaterialAssetTest, LayoutIsBuiltOncePerShaderAndPolicy) {
 }
 
 TEST(MaterialAssetTest, JitInterfacesExtendLayoutWithoutLosingValues) {
-    shader::ShaderBinary binary = MakeShaderBinary();
+    render::ShaderBinary binary = MakeShaderBinary();
     ASSERT_TRUE(binary.IsValid());
     AssetManager assets;
     StreamingAssetRef<ShaderAsset> shaderRef =
@@ -210,8 +210,8 @@ TEST(MaterialAssetTest, JitInterfacesExtendLayoutWithoutLosingValues) {
     sampler.LodMax = 9.0f;
     ASSERT_TRUE(material.SetSampler("MaterialSampler", sampler));
 
-    shader::ShaderInterfaceDesc extended = shaderRef->GetBinary().ProgramInterfaces.front();
-    extended.BindingGroups.emplace_back(shader::ShaderBindingGroupInterfaceDesc{
+    render::ShaderInterfaceDesc extended = shaderRef->GetBinary().ProgramInterfaces.front();
+    extended.BindingGroups.emplace_back(render::ShaderBindingGroupInterfaceDesc{
         .GroupIndex = 4,
         .Bindings = {MakeSampler(4, 0, "JitSampler")}});
     ShaderResolvedProgram extendedProgram = MakeResolvedProgram(
@@ -230,8 +230,8 @@ TEST(MaterialAssetTest, JitInterfacesExtendLayoutWithoutLosingValues) {
     ASSERT_TRUE(std::holds_alternative<render::SamplerDescriptor>(materialValue->Resources.front()));
     EXPECT_EQ(std::get<render::SamplerDescriptor>(materialValue->Resources.front()), sampler);
 
-    shader::ShaderInterfaceDesc second = shaderRef->GetBinary().ProgramInterfaces.front();
-    second.BindingGroups.emplace_back(shader::ShaderBindingGroupInterfaceDesc{
+    render::ShaderInterfaceDesc second = shaderRef->GetBinary().ProgramInterfaces.front();
+    second.BindingGroups.emplace_back(render::ShaderBindingGroupInterfaceDesc{
         .GroupIndex = 5,
         .Bindings = {MakeSampler(5, 0, "SecondJitSampler")}});
     ShaderResolvedProgram secondProgram = MakeResolvedProgram(
@@ -254,12 +254,12 @@ TEST(MaterialAssetTest, JitInterfacesExtendLayoutWithoutLosingValues) {
     ASSERT_NE(preservedValue, material.GetParameters().Values().end());
     EXPECT_EQ(std::get<render::SamplerDescriptor>(preservedValue->Resources.front()), sampler);
 
-    shader::ShaderInterfaceDesc conflicting = shaderRef->GetBinary().ProgramInterfaces.front();
-    shader::ShaderBindingDesc& conflict = conflicting.BindingGroups[1].Bindings[0];
-    conflict.Kind = shader::ShaderBindingKind::SampledTexture;
-    conflict.Texture = shader::ShaderTextureInterfaceDesc{
-        .Dimension = shader::ShaderTextureDimension::Dim2D,
-        .SampleType = shader::ShaderSampleType::Float};
+    render::ShaderInterfaceDesc conflicting = shaderRef->GetBinary().ProgramInterfaces.front();
+    render::ShaderBindingDesc& conflict = conflicting.BindingGroups[1].Bindings[0];
+    conflict.Kind = render::ShaderBindingKind::SampledTexture;
+    conflict.Texture = render::ShaderTextureInterfaceDesc{
+        .Dimension = render::ShaderTextureDimension::Dim2D,
+        .SampleType = render::ShaderSampleType::Float};
     ShaderResolvedProgram conflictingProgram = MakeResolvedProgram(
         *shaderRef.Get(),
         std::move(conflicting),
@@ -270,7 +270,7 @@ TEST(MaterialAssetTest, JitInterfacesExtendLayoutWithoutLosingValues) {
 }
 
 TEST(MaterialAssetTest, ReadinessIsStructuralAndCompletenessIsProgramSpecific) {
-    shader::ShaderBinary binary = MakeShaderBinary();
+    render::ShaderBinary binary = MakeShaderBinary();
     ASSERT_TRUE(binary.IsValid());
     AssetManager assets;
     StreamingAssetRef<ShaderAsset> shaderRef =
@@ -278,11 +278,11 @@ TEST(MaterialAssetTest, ReadinessIsStructuralAndCompletenessIsProgramSpecific) {
     MaterialAsset material{shaderRef, MakePolicy()};
     ASSERT_TRUE(material.IsReady());
 
-    const shader::ShaderInterfaceDesc baked = shaderRef->GetBinary().ProgramInterfaces.front();
+    const render::ShaderInterfaceDesc baked = shaderRef->GetBinary().ProgramInterfaces.front();
     EXPECT_TRUE(material.HasCompleteParametersFor(baked));
 
-    shader::ShaderInterfaceDesc textureVariant = baked;
-    textureVariant.BindingGroups.emplace_back(shader::ShaderBindingGroupInterfaceDesc{
+    render::ShaderInterfaceDesc textureVariant = baked;
+    textureVariant.BindingGroups.emplace_back(render::ShaderBindingGroupInterfaceDesc{
         .GroupIndex = 4,
         .Bindings = {MakeTexture(0, "VariantTexture")}});
     ShaderResolvedProgram textureProgram = MakeResolvedProgram(
@@ -298,7 +298,7 @@ TEST(MaterialAssetTest, ReadinessIsStructuralAndCompletenessIsProgramSpecific) {
 }
 
 TEST(MaterialAssetTest, RejectsContextualInterfaceThatDisagreesWithBakedProgram) {
-    shader::ShaderBinary binary = MakeShaderBinary();
+    render::ShaderBinary binary = MakeShaderBinary();
     ASSERT_TRUE(binary.IsValid());
     AssetManager assets;
     StreamingAssetRef<ShaderAsset> shaderRef =
@@ -306,15 +306,15 @@ TEST(MaterialAssetTest, RejectsContextualInterfaceThatDisagreesWithBakedProgram)
     MaterialAsset material{shaderRef, MakePolicy()};
     ASSERT_TRUE(material.IsReady());
 
-    shader::ShaderInterfaceDesc mismatched = shaderRef->GetBinary().ProgramInterfaces.front();
-    mismatched.BindingGroups.emplace_back(shader::ShaderBindingGroupInterfaceDesc{
+    render::ShaderInterfaceDesc mismatched = shaderRef->GetBinary().ProgramInterfaces.front();
+    mismatched.BindingGroups.emplace_back(render::ShaderBindingGroupInterfaceDesc{
         .GroupIndex = 4,
         .Bindings = {MakeSampler(4, 0, "Unexpected")}});
     ShaderResolvedProgram mismatchedProgram = MakeResolvedProgram(
         *shaderRef.Get(),
         std::move(mismatched),
         {"_ALPHATEST_ON=1"},
-        shader::ShaderTarget::SPIRV);
+        render::ShaderTarget::SPIRV);
     EXPECT_FALSE(material.ApplyResolvedPrograms(
         std::span<const ShaderResolvedProgram>{&mismatchedProgram, 1}));
     ASSERT_EQ(material.GetLayoutDiagnostics().size(), 1u);

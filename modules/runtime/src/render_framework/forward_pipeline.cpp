@@ -4,13 +4,13 @@
 namespace radray {
 namespace {
 
-shader::ShaderValueTypeDesc VectorType(
-    shader::ShaderScalarType scalar,
+render::ShaderValueTypeDesc VectorType(
+    render::ShaderScalarType scalar,
     uint32_t columns,
     uint32_t byteSize,
     uint32_t arrayCount = 1,
     uint32_t arrayStride = 0) {
-    return shader::ShaderValueTypeDesc{
+    return render::ShaderValueTypeDesc{
         .Scalar = scalar,
         .Rows = 1,
         .Columns = columns,
@@ -19,17 +19,17 @@ shader::ShaderValueTypeDesc VectorType(
         .ByteSize = byteSize};
 }
 
-shader::ShaderInterfaceFieldDesc Float4Field(
+render::ShaderInterfaceFieldDesc Float4Field(
     string name,
     uint32_t offset,
     uint32_t arrayCount = 1) {
     const uint32_t size = 16 * arrayCount;
-    return shader::ShaderInterfaceFieldDesc{
+    return render::ShaderInterfaceFieldDesc{
         .Name = std::move(name),
         .Offset = offset,
         .Size = size,
         .Type = VectorType(
-            shader::ShaderScalarType::Float32,
+            render::ShaderScalarType::Float32,
             4,
             size,
             arrayCount,
@@ -37,26 +37,26 @@ shader::ShaderInterfaceFieldDesc Float4Field(
         .Members = {}};
 }
 
-shader::ShaderInterfaceFieldDesc UInt4Field(string name, uint32_t offset) {
-    return shader::ShaderInterfaceFieldDesc{
+render::ShaderInterfaceFieldDesc UInt4Field(string name, uint32_t offset) {
+    return render::ShaderInterfaceFieldDesc{
         .Name = std::move(name),
         .Offset = offset,
         .Size = 16,
-        .Type = VectorType(shader::ShaderScalarType::UInt32, 4, 16),
+        .Type = VectorType(render::ShaderScalarType::UInt32, 4, 16),
         .Members = {}};
 }
 
-shader::ShaderInterfaceFieldDesc MatrixField(
+render::ShaderInterfaceFieldDesc MatrixField(
     string name,
     uint32_t offset,
     uint32_t arrayCount = 1) {
     const uint32_t size = 64 * arrayCount;
-    return shader::ShaderInterfaceFieldDesc{
+    return render::ShaderInterfaceFieldDesc{
         .Name = std::move(name),
         .Offset = offset,
         .Size = size,
-        .Type = shader::ShaderValueTypeDesc{
-            .Scalar = shader::ShaderScalarType::Float32,
+        .Type = render::ShaderValueTypeDesc{
+            .Scalar = render::ShaderScalarType::Float32,
             .Rows = 4,
             .Columns = 4,
             .ArrayCount = arrayCount,
@@ -66,18 +66,18 @@ shader::ShaderInterfaceFieldDesc MatrixField(
         .Members = {}};
 }
 
-shader::ShaderInterfaceFieldDesc StructField(
+render::ShaderInterfaceFieldDesc StructField(
     string name,
     uint32_t offset,
     uint32_t size,
-    vector<shader::ShaderInterfaceFieldDesc> members,
+    vector<render::ShaderInterfaceFieldDesc> members,
     uint32_t arrayCount = 1,
     uint32_t arrayStride = 0) {
-    return shader::ShaderInterfaceFieldDesc{
+    return render::ShaderInterfaceFieldDesc{
         .Name = std::move(name),
         .Offset = offset,
         .Size = size,
-        .Type = shader::ShaderValueTypeDesc{
+        .Type = render::ShaderValueTypeDesc{
             .Rows = 1,
             .Columns = 1,
             .ArrayCount = arrayCount,
@@ -86,26 +86,26 @@ shader::ShaderInterfaceFieldDesc StructField(
         .Members = std::move(members)};
 }
 
-shader::ShaderBindingDesc ConstantBinding(
+render::ShaderBindingDesc ConstantBinding(
     uint32_t bindingIndex,
     uint32_t byteSize,
-    vector<shader::ShaderInterfaceFieldDesc> fields) {
-    return shader::ShaderBindingDesc{
+    vector<render::ShaderInterfaceFieldDesc> fields) {
+    return render::ShaderBindingDesc{
         .Name = "ForwardConstants",
         .BindingIndex = bindingIndex,
-        .Kind = shader::ShaderBindingKind::ConstantBuffer,
-        .Access = shader::ShaderResourceAccess::ReadOnly,
+        .Kind = render::ShaderBindingKind::ConstantBuffer,
+        .Access = render::ShaderResourceAccess::ReadOnly,
         .Count = 1,
-        .Buffer = shader::ShaderBufferInterfaceDesc{
+        .Buffer = render::ShaderBufferInterfaceDesc{
             .ByteSize = byteSize,
             .Fields = std::move(fields)}};
 }
 
-shader::ShaderBindingDesc MakeObjectConstants() {
+render::ShaderBindingDesc MakeObjectConstants() {
     return ConstantBinding(1, 64, {MatrixField("ObjectToWorld", 0)});
 }
 
-shader::ShaderBindingDesc MakeForwardViewConstants() {
+render::ShaderBindingDesc MakeForwardViewConstants() {
     return ConstantBinding(
         0,
         1424,
@@ -149,32 +149,32 @@ shader::ShaderBindingDesc MakeForwardViewConstants() {
         });
 }
 
-shader::ShaderBindingDesc MakeShadowViewConstants() {
+render::ShaderBindingDesc MakeShadowViewConstants() {
     return ConstantBinding(0, 384, {MatrixField("ViewProj", 0, 6)});
 }
 
-shader::ShaderBindingDesc TextureBinding(
+render::ShaderBindingDesc TextureBinding(
     uint32_t bindingIndex,
-    shader::ShaderTextureDimension dimension,
+    render::ShaderTextureDimension dimension,
     bool arrayed) {
-    return shader::ShaderBindingDesc{
+    return render::ShaderBindingDesc{
         .Name = "ForwardShadowTexture",
         .BindingIndex = bindingIndex,
-        .Kind = shader::ShaderBindingKind::SampledTexture,
-        .Access = shader::ShaderResourceAccess::ReadOnly,
+        .Kind = render::ShaderBindingKind::SampledTexture,
+        .Access = render::ShaderResourceAccess::ReadOnly,
         .Count = 1,
-        .Texture = shader::ShaderTextureInterfaceDesc{
+        .Texture = render::ShaderTextureInterfaceDesc{
             .Dimension = dimension,
-            .SampleType = shader::ShaderSampleType::Float,
+            .SampleType = render::ShaderSampleType::Float,
             .Arrayed = arrayed}};
 }
 
-shader::ShaderBindingDesc SamplerBinding(uint32_t bindingIndex) {
-    return shader::ShaderBindingDesc{
+render::ShaderBindingDesc SamplerBinding(uint32_t bindingIndex) {
+    return render::ShaderBindingDesc{
         .Name = "ForwardShadowSampler",
         .BindingIndex = bindingIndex,
-        .Kind = shader::ShaderBindingKind::Sampler,
-        .Access = shader::ShaderResourceAccess::ReadOnly,
+        .Kind = render::ShaderBindingKind::Sampler,
+        .Access = render::ShaderResourceAccess::ReadOnly,
         .Count = 1};
 }
 
@@ -193,8 +193,8 @@ shared_ptr<const IShaderBindingProvider> MakePipelineProvider() {
                 .AcceptedBindings = {MakeForwardViewConstants(), MakeShadowViewConstants()}},
             ShaderBindingProviderSchemaEntry{
                 .AcceptedBindings = {
-                    TextureBinding(1, shader::ShaderTextureDimension::Cube, false)}},
-            ShaderBindingProviderSchemaEntry{.AcceptedBindings = {TextureBinding(2, shader::ShaderTextureDimension::Dim2D, true)}},
+                    TextureBinding(1, render::ShaderTextureDimension::Cube, false)}},
+            ShaderBindingProviderSchemaEntry{.AcceptedBindings = {TextureBinding(2, render::ShaderTextureDimension::Dim2D, true)}},
             ShaderBindingProviderSchemaEntry{.AcceptedBindings = {SamplerBinding(3)}},
         });
 }

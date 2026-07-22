@@ -20,8 +20,8 @@ enum class ShaderBindingDiagnosticCode : uint8_t {
 struct ShaderBindingDiagnostic {
     ShaderBindingDiagnosticCode Code{ShaderBindingDiagnosticCode::InvalidInterface};
     string Message;
-    shader::ShaderDiagnosticContext Context{};
-    std::optional<shader::ShaderDiagnosticContext> RelatedContext{};
+    render::ShaderDiagnosticContext Context{};
+    std::optional<render::ShaderDiagnosticContext> RelatedContext{};
     string ProviderName;
 
     friend bool operator==(const ShaderBindingDiagnostic&, const ShaderBindingDiagnostic&) = default;
@@ -49,7 +49,7 @@ public:
 
     virtual std::string_view GetName() const noexcept = 0;
     virtual ShaderBindingProviderMatchResult Match(
-        const shader::ShaderBindingGroupInterfaceDesc& group) const = 0;
+        const render::ShaderBindingGroupInterfaceDesc& group) const = 0;
 };
 
 struct PipelineBindingReservation {
@@ -77,13 +77,13 @@ private:
 struct ResolvedProviderBindingGroup {
     uint32_t GroupIndex{0};
     shared_ptr<const IShaderBindingProvider> Provider;
-    shader::ShaderBindingGroupInterfaceDesc Interface;
+    render::ShaderBindingGroupInterfaceDesc Interface;
 };
 
 struct ResolvedShaderBindingPlan {
-    shader::ShaderHash InterfaceHash{};
+    render::ShaderHash InterfaceHash{};
     vector<ResolvedProviderBindingGroup> ProviderGroups;
-    vector<shader::ShaderBindingGroupInterfaceDesc> UserGroups;
+    vector<render::ShaderBindingGroupInterfaceDesc> UserGroups;
 };
 
 struct ShaderBindingResolutionResult {
@@ -94,14 +94,14 @@ struct ShaderBindingResolutionResult {
 };
 
 ShaderBindingResolutionResult ResolveShaderBindings(
-    const shader::ShaderInterfaceDesc& interface,
+    const render::ShaderInterfaceDesc& interface,
     const PipelineBindingPolicy& policy,
-    const shader::ShaderDiagnosticContext& context = {});
+    const render::ShaderDiagnosticContext& context = {});
 
 struct ShaderBindingProviderSchemaEntry {
     // Alternatives share one binding index. This permits a provider to support
     // several physical projections at the same reserved location.
-    vector<shader::ShaderBindingDesc> AcceptedBindings;
+    vector<render::ShaderBindingDesc> AcceptedBindings;
     bool Required{false};
 };
 
@@ -115,7 +115,7 @@ public:
 
     std::string_view GetName() const noexcept override { return _name; }
     ShaderBindingProviderMatchResult Match(
-        const shader::ShaderBindingGroupInterfaceDesc& group) const override;
+        const render::ShaderBindingGroupInterfaceDesc& group) const override;
 
 private:
     string _name;

@@ -6,11 +6,11 @@
 #include <string_view>
 
 #include <radray/nullable.h>
-#include <radray/shader/common.h>
-#include <radray/shader/hlsl.h>
+#include <radray/render/common.h>
+#include <radray/render/hlsl.h>
 #include <radray/types.h>
 
-namespace radray::shader {
+namespace radray::render {
 
 class Dxc;
 
@@ -43,7 +43,6 @@ public:
 
     bool IsValid() const noexcept { return _impl != nullptr; }
     void Destroy() noexcept;
-    ShaderHash GetToolchainHash() const noexcept;
 
     std::optional<DxcOutput> CompileMemory(
         std::string_view code,
@@ -70,4 +69,4 @@ Nullable<shared_ptr<Dxc>> CreateDxc() noexcept;
 
 #endif
 
-}  // namespace radray::shader
+}  // namespace radray::render

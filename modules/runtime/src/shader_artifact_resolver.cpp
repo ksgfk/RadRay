@@ -4,7 +4,7 @@
 #include <radray/runtime/shader_asset.h>
 
 #if defined(RADRAY_ENABLE_SHADER_JIT)
-#include <radray/shader/dxc.h>
+#include <radray/render/dxc.h>
 #endif
 
 #include <algorithm>
@@ -18,7 +18,7 @@
 #include <radray/binary_io.h>
 #include <radray/hash.h>
 #if defined(RADRAY_ENABLE_SPIRV_CROSS)
-#include <radray/shader/spvc.h>
+#include <radray/render/spvc.h>
 #endif
 
 namespace radray {
@@ -28,14 +28,14 @@ using ShaderFuture = ShaderArtifactResolver::Future;
 using StageFuture = std::shared_future<ShaderJitStageCompileResult>;
 
 struct ProgramJob {
-    shader::ShaderPassDesc Pass;
+    render::ShaderPassDesc Pass;
     uint32_t PassIndex{0};
-    shader::ShaderTarget Target{shader::ShaderTarget::DXIL};
+    render::ShaderTarget Target{render::ShaderTarget::DXIL};
     vector<string> Defines;
     ShaderSourceIdentity Source;
-    std::optional<shader::ShaderInterfaceDesc> ExpectedInterface;
-    shader::ShaderHash ProgramIdentity{};
-    shader::ShaderHash ProgramKey{};
+    std::optional<render::ShaderInterfaceDesc> ExpectedInterface;
+    render::ShaderHash ProgramIdentity{};
+    render::ShaderHash ProgramKey{};
 };
 
 struct ShaderAssetPassKey {
@@ -58,54 +58,54 @@ struct ShaderAssetPassKeyHasher {
     }
 };
 
-bool IsKnownTarget(shader::ShaderTarget target) noexcept {
-    return target == shader::ShaderTarget::DXIL || target == shader::ShaderTarget::SPIRV;
+bool IsKnownTarget(render::ShaderTarget target) noexcept {
+    return target == render::ShaderTarget::DXIL || target == render::ShaderTarget::SPIRV;
 }
 
-vector<shader::ShaderStage> GetPassStages(const shader::ShaderPassDesc& pass) {
-    if (const auto* graphics = std::get_if<shader::ShaderGraphicsPassDesc>(&pass.Program)) {
-        vector<shader::ShaderStage> result{shader::ShaderStage::Vertex};
-        if (graphics->PixelEntry.has_value()) result.emplace_back(shader::ShaderStage::Pixel);
+vector<render::ShaderStage> GetPassStages(const render::ShaderPassDesc& pass) {
+    if (const auto* graphics = std::get_if<render::ShaderGraphicsPassDesc>(&pass.Program)) {
+        vector<render::ShaderStage> result{render::ShaderStage::Vertex};
+        if (graphics->PixelEntry.has_value()) result.emplace_back(render::ShaderStage::Pixel);
         return result;
     }
-    return {shader::ShaderStage::Compute};
+    return {render::ShaderStage::Compute};
 }
 
-void WriteHash(BinaryWriter& output, shader::ShaderHash value) {
+void WriteHash(BinaryWriter& output, render::ShaderHash value) {
     output.U64(value.Low);
     output.U64(value.High);
 }
 
-void WritePassCompileOptions(BinaryWriter& output, const shader::ShaderPassDesc& pass) {
+void WritePassCompileOptions(BinaryWriter& output, const render::ShaderPassDesc& pass) {
     output.U32(static_cast<uint32_t>(pass.SM));
     output.Bool(pass.IsOptimize);
     output.Bool(pass.EnableUnbounded);
-    if (const auto* graphics = std::get_if<shader::ShaderGraphicsPassDesc>(&pass.Program)) {
+    if (const auto* graphics = std::get_if<render::ShaderGraphicsPassDesc>(&pass.Program)) {
         output.U8(0);
         output.String(graphics->VertexEntry);
         output.String(graphics->PixelEntry.value_or(string{}));
     } else {
         output.U8(1);
-        output.String(std::get<shader::ShaderComputePassDesc>(pass.Program).EntryPoint);
+        output.String(std::get<render::ShaderComputePassDesc>(pass.Program).EntryPoint);
     }
 }
 
-shader::ShaderHash BuildProgramKey(
+render::ShaderHash BuildProgramKey(
     const ProgramJob& job,
-    shader::ShaderHash toolchain) {
+    render::ShaderHash toolchain) {
     BinaryWriter bytes;
     bytes.String("radray-jit-program-cache-v2");
     WriteHash(bytes, job.ProgramIdentity);
     WriteHash(bytes, toolchain);
     bytes.U8(static_cast<uint8_t>(job.Target));
-    return shader::HashShaderBytes(bytes.GetData());
+    return render::HashShaderBytes(bytes.GetData());
 }
 
-shader::ShaderHash BuildStageKey(
+render::ShaderHash BuildStageKey(
     const ProgramJob& job,
-    shader::ShaderStage stage,
+    render::ShaderStage stage,
     const vector<string>& projectedDefines,
-    shader::ShaderHash toolchain) {
+    render::ShaderHash toolchain) {
     BinaryWriter bytes;
     bytes.String("radray-jit-stage-v1");
     WriteHash(bytes, job.Source.Hash);
@@ -116,25 +116,25 @@ shader::ShaderHash BuildStageKey(
     WritePassCompileOptions(bytes, job.Pass);
     bytes.Size32(projectedDefines.size());
     for (const string& define : projectedDefines) bytes.String(define);
-    return shader::HashShaderBytes(bytes.GetData());
+    return render::HashShaderBytes(bytes.GetData());
 }
 
 std::filesystem::path GetDiskPath(
     const ShaderArtifactResolver::Config& config,
-    shader::ShaderHash key) {
+    render::ShaderHash key) {
     return config.DiskCacheDirectory /
            fmt::format("{:016x}{:016x}.rrjit", key.High, key.Low);
 }
 
-shader::ShaderDiagnostic MakeDiagnostic(
-    shader::ShaderDiagnosticCode code,
+render::ShaderDiagnostic MakeDiagnostic(
+    render::ShaderDiagnosticCode code,
     string message,
     const ProgramJob& job,
-    shader::ShaderStage stage = shader::ShaderStage::UNKNOWN) {
-    return shader::ShaderDiagnostic{
+    render::ShaderStage stage = render::ShaderStage::UNKNOWN) {
+    return render::ShaderDiagnostic{
         .Code = code,
         .Message = std::move(message),
-        .Context = shader::ShaderDiagnosticContext{
+        .Context = render::ShaderDiagnosticContext{
             .Target = job.Target,
             .PassIndex = job.PassIndex,
             .VariantDefines = job.Defines,
@@ -153,15 +153,15 @@ bool ValidateCompiledStage(
     ShaderJitStageCompileResult& result) {
     if (!result.Artifact.has_value()) return false;
     const ShaderResolvedStageArtifact& artifact = *result.Artifact;
-    const auto expectedEntry = shader::FindShaderEntryPoint(request.Pass, request.Stage);
-    const shader::ShaderDiagnosticContext context{
+    const auto expectedEntry = render::FindShaderEntryPoint(request.Pass, request.Stage);
+    const render::ShaderDiagnosticContext context{
         .Target = request.Target,
         .PassIndex = request.PassIndex,
         .VariantDefines = request.FullDefines,
         .Stage = request.Stage};
-    const auto fail = [&](shader::ShaderDiagnosticCode code, string message) {
+    const auto fail = [&](render::ShaderDiagnosticCode code, string message) {
         result.Artifact.reset();
-        result.Diagnostics.emplace_back(shader::ShaderDiagnostic{
+        result.Diagnostics.emplace_back(render::ShaderDiagnostic{
             .Code = code,
             .Message = std::move(message),
             .Context = context});
@@ -171,36 +171,36 @@ bool ValidateCompiledStage(
         artifact.PassIndex != request.PassIndex || artifact.Stage != request.Stage ||
         artifact.Defines != request.ProjectedDefines || artifact.EntryPoint != *expectedEntry) {
         return fail(
-            shader::ShaderDiagnosticCode::CompilationFailed,
+            render::ShaderDiagnosticCode::CompilationFailed,
             "JIT compiler returned stage metadata that does not match the request");
     }
-    if (artifact.Bytecode.empty() || artifact.BinaryHash == shader::ShaderHash{} ||
-        artifact.BinaryHash != shader::HashShaderBytes(artifact.Bytecode)) {
+    if (artifact.Bytecode.empty() || artifact.BinaryHash == render::ShaderHash{} ||
+        artifact.BinaryHash != render::HashShaderBytes(artifact.Bytecode)) {
         return fail(
-            shader::ShaderDiagnosticCode::CompilationFailed,
+            render::ShaderDiagnosticCode::CompilationFailed,
             "JIT compiler returned empty bytecode or an invalid bytecode hash");
     }
 
-    shader::ShaderInterfaceNormalizationOptions options{
+    render::ShaderInterfaceNormalizationOptions options{
         .Context = context,
         .PushConstantBindings = {}};
-    shader::ShaderStageInterfaceBuildResult normalized;
-    if (request.Target == shader::ShaderTarget::DXIL) {
-        const auto* reflection = std::get_if<shader::HlslShaderDesc>(&artifact.Reflection);
+    render::ShaderStageInterfaceBuildResult normalized;
+    if (request.Target == render::ShaderTarget::DXIL) {
+        const auto* reflection = std::get_if<render::HlslShaderDesc>(&artifact.Reflection);
         if (reflection == nullptr) {
             return fail(
-                shader::ShaderDiagnosticCode::InvalidReflection,
+                render::ShaderDiagnosticCode::InvalidReflection,
                 "DXIL JIT artifact did not contain HLSL reflection");
         }
-        normalized = shader::NormalizeHlslInterface(*reflection, request.Stage, options);
+        normalized = render::NormalizeHlslInterface(*reflection, request.Stage, options);
     } else {
-        const auto* reflection = std::get_if<shader::SpirvShaderDesc>(&artifact.Reflection);
+        const auto* reflection = std::get_if<render::SpirvShaderDesc>(&artifact.Reflection);
         if (reflection == nullptr) {
             return fail(
-                shader::ShaderDiagnosticCode::InvalidReflection,
+                render::ShaderDiagnosticCode::InvalidReflection,
                 "SPIR-V JIT artifact did not contain SPIR-V reflection");
         }
-        normalized = shader::NormalizeSpirvInterface(*reflection, request.Stage, options);
+        normalized = render::NormalizeSpirvInterface(*reflection, request.Stage, options);
     }
     if (!normalized.Succeeded()) {
         result.Artifact.reset();
@@ -212,22 +212,22 @@ bool ValidateCompiledStage(
     }
     if (*normalized.Interface != artifact.Interface) {
         return fail(
-            shader::ShaderDiagnosticCode::InterfaceMismatch,
+            render::ShaderDiagnosticCode::InterfaceMismatch,
             "JIT compiler reflection and canonical stage interface disagree");
     }
     return true;
 }
 
 ShaderArtifactResolutionResult ResolveBaked(
-    const shader::ShaderBinary& binary,
-    const shader::ShaderProgramVariantArtifact& program,
+    const render::ShaderBinary& binary,
+    const render::ShaderProgramVariantArtifact& program,
     uint32_t originalPassIndex) {
     auto resolved = make_shared<ShaderResolvedProgram>();
     resolved->Target = program.Target;
     resolved->PassIndex = originalPassIndex;
     resolved->Defines = program.Defines;
     resolved->Interface = binary.ProgramInterfaces[program.InterfaceIndex];
-    const shader::ShaderPassDesc& pass = binary.Asset.Passes[program.PassIndex];
+    const render::ShaderPassDesc& pass = binary.Asset.Passes[program.PassIndex];
     resolved->SourceIdentity = pass.SourceIdentity;
     resolved->ProgramIdentity = ComputeShaderProgramIdentity(
         pass,
@@ -235,7 +235,7 @@ ShaderArtifactResolutionResult ResolveBaked(
         program.Defines,
         pass.SourceIdentity);
     for (uint32_t artifactIndex : program.StageArtifactIndices) {
-        const shader::ShaderStageArtifact& artifact = binary.StageArtifacts[artifactIndex];
+        const render::ShaderStageArtifact& artifact = binary.StageArtifacts[artifactIndex];
         resolved->Stages.emplace_back(ShaderResolvedStageArtifact{
             .Target = artifact.Target,
             .PassIndex = originalPassIndex,
@@ -253,26 +253,26 @@ ShaderArtifactResolutionResult ResolveBaked(
         .Source = ShaderArtifactSource::Baked};
 }
 
-std::optional<string> SerializeReflection(const shader::ShaderReflectionDesc& reflection) {
-    if (const auto* hlsl = std::get_if<shader::HlslShaderDesc>(&reflection)) {
-        return shader::SerializeHlslShaderDesc(*hlsl);
+std::optional<string> SerializeReflection(const render::ShaderReflectionDesc& reflection) {
+    if (const auto* hlsl = std::get_if<render::HlslShaderDesc>(&reflection)) {
+        return render::SerializeHlslShaderDesc(*hlsl);
     }
-    return shader::SerializeSpirvShaderDesc(std::get<shader::SpirvShaderDesc>(reflection));
+    return render::SerializeSpirvShaderDesc(std::get<render::SpirvShaderDesc>(reflection));
 }
 
 uint32_t InternReflection(
-    shader::ShaderBinary& binary,
-    shader::ShaderTarget target,
-    const shader::ShaderReflectionDesc& reflection) {
+    render::ShaderBinary& binary,
+    render::ShaderTarget target,
+    const render::ShaderReflectionDesc& reflection) {
     const auto payload = SerializeReflection(reflection);
-    if (!payload.has_value()) return shader::kInvalidShaderTableIndex;
-    const shader::ShaderHash hash = shader::HashShaderBytes(
+    if (!payload.has_value()) return render::kInvalidShaderTableIndex;
+    const render::ShaderHash hash = render::HashShaderBytes(
         std::as_bytes(std::span{payload->data(), payload->size()}));
     for (uint32_t i = 0; i < binary.Reflections.size(); ++i) {
         const auto existing = SerializeReflection(binary.Reflections[i].Reflection);
         if (binary.Reflections[i].Target == target && existing.has_value() && *existing == *payload) return i;
     }
-    binary.Reflections.emplace_back(shader::ShaderReflectionRecord{
+    binary.Reflections.emplace_back(render::ShaderReflectionRecord{
         .Target = target,
         .Reflection = reflection,
         .Hash = hash});
@@ -287,7 +287,7 @@ uint32_t InternValue(vector<T>& values, const T& value) {
     return static_cast<uint32_t>(values.size() - 1);
 }
 
-Guid GuidFromHash(shader::ShaderHash hash) noexcept {
+Guid GuidFromHash(render::ShaderHash hash) noexcept {
     Guid::ByteArray bytes{};
     static_assert(sizeof(hash) == bytes.size());
     std::memcpy(bytes.data(), &hash, bytes.size());
@@ -295,24 +295,24 @@ Guid GuidFromHash(shader::ShaderHash hash) noexcept {
     return Guid{bytes};
 }
 
-shader::ShaderBinary BuildDiskBinary(
+render::ShaderBinary BuildDiskBinary(
     const ProgramJob& job,
     const ShaderResolvedProgram& program) {
-    shader::ShaderBinary binary;
+    render::ShaderBinary binary;
     binary.Asset.AssetId = GuidFromHash(job.ProgramKey);
-    shader::ShaderPassDesc pass = job.Pass;
+    render::ShaderPassDesc pass = job.Pass;
     pass.SourceIdentity = job.Source.Hash;
-    pass.BakeSet.Variants = {shader::ShaderVariantKey{.Defines = job.Defines}};
+    pass.BakeSet.Variants = {render::ShaderVariantKey{.Defines = job.Defines}};
     binary.Asset.Passes = {std::move(pass)};
     binary.ProgramInterfaces = {program.Interface};
     vector<uint32_t> stageIndices;
     for (const ShaderResolvedStageArtifact& stage : program.Stages) {
         const uint32_t reflectionIndex = InternReflection(binary, stage.Target, stage.Reflection);
-        if (reflectionIndex == shader::kInvalidShaderTableIndex) return {};
+        if (reflectionIndex == render::kInvalidShaderTableIndex) return {};
         const uint32_t interfaceIndex = InternValue(binary.StageInterfaces, stage.Interface);
-        binary.StageArtifacts.emplace_back(shader::ShaderStageArtifact{
+        binary.StageArtifacts.emplace_back(render::ShaderStageArtifact{
             .Target = stage.Target,
-            .Category = shader::GetShaderBlobCategory(stage.Target),
+            .Category = render::GetShaderBlobCategory(stage.Target),
             .PassIndex = 0,
             .Stage = stage.Stage,
             .Defines = stage.Defines,
@@ -323,7 +323,7 @@ shader::ShaderBinary BuildDiskBinary(
             .InterfaceIndex = interfaceIndex});
         stageIndices.emplace_back(static_cast<uint32_t>(binary.StageArtifacts.size() - 1));
     }
-    binary.ProgramVariants.emplace_back(shader::ShaderProgramVariantArtifact{
+    binary.ProgramVariants.emplace_back(render::ShaderProgramVariantArtifact{
         .Target = program.Target,
         .PassIndex = 0,
         .Defines = program.Defines,
@@ -336,10 +336,10 @@ std::optional<ShaderArtifactResolutionResult> ReadDiskResult(
     const ShaderArtifactResolver::Config& config,
     const ProgramJob& job) {
     if (!config.EnableDiskCache || config.DiskCacheDirectory.empty()) return std::nullopt;
-    auto binary = shader::ReadShaderBinary(GetDiskPath(config, job.ProgramKey));
-    shader::ShaderPassDesc expectedPass = job.Pass;
+    auto binary = render::ReadShaderBinary(GetDiskPath(config, job.ProgramKey));
+    render::ShaderPassDesc expectedPass = job.Pass;
     expectedPass.SourceIdentity = job.Source.Hash;
-    expectedPass.BakeSet.Variants = {shader::ShaderVariantKey{.Defines = job.Defines}};
+    expectedPass.BakeSet.Variants = {render::ShaderVariantKey{.Defines = job.Defines}};
     if (!binary.has_value() || binary->Asset.AssetId != GuidFromHash(job.ProgramKey) ||
         binary->Asset.Passes.size() != 1 || binary->Asset.Passes.front() != expectedPass) {
         return std::nullopt;
@@ -361,8 +361,8 @@ bool WriteDiskResult(
     const ProgramJob& job,
     const ShaderResolvedProgram& program) {
     if (!config.EnableDiskCache || config.DiskCacheDirectory.empty()) return true;
-    shader::ShaderBinary binary = BuildDiskBinary(job, program);
-    return binary.IsValid() && shader::WriteShaderBinary(GetDiskPath(config, job.ProgramKey), binary);
+    render::ShaderBinary binary = BuildDiskBinary(job, program);
+    return binary.IsValid() && render::WriteShaderBinary(GetDiskPath(config, job.ProgramKey), binary);
 }
 
 }  // namespace
@@ -377,10 +377,10 @@ struct ShaderArtifactResolver::State {
     mutable std::mutex CanonicalMutex;
     mutable std::mutex CompilerMutex;
     mutable std::mutex DiskMutex;
-    unordered_map<shader::ShaderHash, ShaderFuture, PodHasher<shader::ShaderHash>, PodEqual<shader::ShaderHash>> Programs;
-    unordered_map<shader::ShaderHash, StageFuture, PodHasher<shader::ShaderHash>, PodEqual<shader::ShaderHash>> Stages;
+    unordered_map<render::ShaderHash, ShaderFuture, PodHasher<render::ShaderHash>, PodEqual<render::ShaderHash>> Programs;
+    unordered_map<render::ShaderHash, StageFuture, PodHasher<render::ShaderHash>, PodEqual<render::ShaderHash>> Stages;
     unordered_map<ShaderAssetPassKey, ShaderSourceIdentity, ShaderAssetPassKeyHasher> AssetSources;
-    unordered_map<shader::ShaderHash, shader::ShaderInterfaceDesc, PodHasher<shader::ShaderHash>, PodEqual<shader::ShaderHash>> CanonicalPrograms;
+    unordered_map<render::ShaderHash, render::ShaderInterfaceDesc, PodHasher<render::ShaderHash>, PodEqual<render::ShaderHash>> CanonicalPrograms;
 };
 
 namespace {
@@ -396,11 +396,11 @@ void PruneInvalidAssetSourcesLocked(ShaderArtifactResolver::State& state) {
 bool ValidateCanonicalInterface(
     const shared_ptr<ShaderArtifactResolver::State>& state,
     const ProgramJob& job,
-    const shader::ShaderInterfaceDesc& interface,
-    vector<shader::ShaderDiagnostic>& diagnostics) {
+    const render::ShaderInterfaceDesc& interface,
+    vector<render::ShaderDiagnostic>& diagnostics) {
     if (job.ExpectedInterface.has_value() && *job.ExpectedInterface != interface) {
         diagnostics.emplace_back(MakeDiagnostic(
-            shader::ShaderDiagnosticCode::InterfaceMismatch,
+            render::ShaderDiagnosticCode::InterfaceMismatch,
             "JIT program interface is incompatible with the baked interface for another target",
             job));
         return false;
@@ -409,7 +409,7 @@ bool ValidateCanonicalInterface(
     const auto existing = state->CanonicalPrograms.find(job.ProgramIdentity);
     if (existing != state->CanonicalPrograms.end() && existing->second != interface) {
         diagnostics.emplace_back(MakeDiagnostic(
-            shader::ShaderDiagnosticCode::InterfaceMismatch,
+            render::ShaderDiagnosticCode::InterfaceMismatch,
             "JIT targets produced different canonical program interfaces",
             job));
         return false;
@@ -423,9 +423,9 @@ bool ValidateCanonicalInterface(
 StageFuture GetOrCompileStage(
     const shared_ptr<ShaderArtifactResolver::State>& state,
     const ProgramJob& job,
-    shader::ShaderStage stage,
+    render::ShaderStage stage,
     vector<string> projectedDefines,
-    shader::ShaderHash key) {
+    render::ShaderHash key) {
     std::scoped_lock lock{state->StageMutex};
     const auto existing = state->Stages.find(key);
     if (existing != state->Stages.end()) return existing->second;
@@ -449,10 +449,10 @@ StageFuture GetOrCompileStage(
                                  const auto identity = ComputeShaderSourceIdentity(request.ShaderRoot, request.Pass);
                                  if (!identity.Succeeded() || identity.Identity->Hash != request.SourceIdentity) {
                                      result.Artifact.reset();
-                                     result.Diagnostics.emplace_back(shader::ShaderDiagnostic{
-                                         .Code = shader::ShaderDiagnosticCode::SourceUnavailable,
+                                     result.Diagnostics.emplace_back(render::ShaderDiagnostic{
+                                         .Code = render::ShaderDiagnosticCode::SourceUnavailable,
                                          .Message = "shader source graph changed while JIT compilation was running",
-                                         .Context = shader::ShaderDiagnosticContext{
+                                         .Context = render::ShaderDiagnosticContext{
                                              .Target = request.Target,
                                              .PassIndex = request.PassIndex,
                                              .VariantDefines = request.FullDefines,
@@ -469,10 +469,10 @@ ShaderArtifactResolutionResult CompileProgram(
     const shared_ptr<ShaderArtifactResolver::State>& state,
     ProgramJob job) {
     vector<StageFuture> futures;
-    const shader::ShaderHash toolchain = state->Compiler->GetToolchainHash();
-    for (shader::ShaderStage stage : GetPassStages(job.Pass)) {
-        vector<string> projected = shader::ProjectShaderDefines(job.Pass, stage, job.Defines);
-        const shader::ShaderHash key = BuildStageKey(job, stage, projected, toolchain);
+    const render::ShaderHash toolchain = state->Compiler->GetToolchainHash();
+    for (render::ShaderStage stage : GetPassStages(job.Pass)) {
+        vector<string> projected = render::ProjectShaderDefines(job.Pass, stage, job.Defines);
+        const render::ShaderHash key = BuildStageKey(job, stage, projected, toolchain);
         futures.emplace_back(GetOrCompileStage(state, job, stage, std::move(projected), key));
     }
 
@@ -498,22 +498,22 @@ ShaderArtifactResolutionResult CompileProgram(
         program->Stages.emplace_back(std::move(*stage.Artifact));
     }
 
-    shader::ShaderInterfaceBuildResult interface;
-    const shader::ShaderDiagnosticContext programContext{
+    render::ShaderInterfaceBuildResult interface;
+    const render::ShaderDiagnosticContext programContext{
         .Target = job.Target,
         .PassIndex = job.PassIndex,
         .VariantDefines = job.Defines};
-    if (std::holds_alternative<shader::ShaderGraphicsPassDesc>(job.Pass.Program)) {
+    if (std::holds_alternative<render::ShaderGraphicsPassDesc>(job.Pass.Program)) {
         interface = program->Stages.size() == 1
-                        ? shader::MergeGraphicsStageInterfaces(
+                        ? render::MergeGraphicsStageInterfaces(
                               program->Stages[0].Interface,
                               programContext)
-                        : shader::MergeGraphicsStageInterfaces(
+                        : render::MergeGraphicsStageInterfaces(
                               program->Stages[0].Interface,
                               program->Stages[1].Interface,
                               programContext);
     } else {
-        interface = shader::BuildComputeShaderInterface(
+        interface = render::BuildComputeShaderInterface(
             program->Stages[0].Interface,
             programContext);
     }
@@ -533,14 +533,14 @@ ShaderArtifactResolutionResult CompileProgram(
 
 }  // namespace
 
-shader::ShaderHash ComputeShaderProgramIdentity(
-    const shader::ShaderPassDesc& pass,
+render::ShaderHash ComputeShaderProgramIdentity(
+    const render::ShaderPassDesc& pass,
     uint32_t passIndex,
     std::span<const string> fullDefines,
-    shader::ShaderHash sourceIdentity) noexcept {
+    render::ShaderHash sourceIdentity) noexcept {
     vector<string> normalized{fullDefines.begin(), fullDefines.end()};
-    shader::NormalizeShaderDefines(normalized);
-    if (!shader::IsShaderVariantInDomain(pass, normalized)) return {};
+    render::NormalizeShaderDefines(normalized);
+    if (!render::IsShaderVariantInDomain(pass, normalized)) return {};
     BinaryWriter bytes;
     bytes.String("radray-shader-program-v1");
     WriteHash(bytes, sourceIdentity);
@@ -548,7 +548,7 @@ shader::ShaderHash ComputeShaderProgramIdentity(
     WritePassCompileOptions(bytes, pass);
     bytes.Size32(normalized.size());
     for (const string& define : normalized) bytes.String(define);
-    return shader::HashShaderBytes(bytes.GetData());
+    return render::HashShaderBytes(bytes.GetData());
 }
 
 ShaderArtifactResolver::ShaderArtifactResolver(
@@ -565,13 +565,13 @@ ShaderArtifactResolver::~ShaderArtifactResolver() noexcept = default;
 
 ShaderArtifactResolver::Future ShaderArtifactResolver::ResolveAsync(
     const ShaderAsset& asset,
-    shader::ShaderTarget target,
+    render::ShaderTarget target,
     uint32_t passIndex,
     vector<string> fullDefines) {
-    shader::NormalizeShaderDefines(fullDefines);
-    const shader::ShaderBinary& binary = asset.GetBinary();
+    render::NormalizeShaderDefines(fullDefines);
+    const render::ShaderBinary& binary = asset.GetBinary();
     if (!asset.IsValid() || !IsKnownTarget(target) || passIndex >= binary.Asset.Passes.size() ||
-        !shader::IsShaderVariantInDomain(binary.Asset.Passes[passIndex], fullDefines)) {
+        !render::IsShaderVariantInDomain(binary.Asset.Passes[passIndex], fullDefines)) {
         ProgramJob invalidJob{
             .Pass = {},
             .PassIndex = passIndex,
@@ -581,7 +581,7 @@ ShaderArtifactResolver::Future ShaderArtifactResolver::ResolveAsync(
             .ExpectedInterface = {}};
         ShaderArtifactResolutionResult failure;
         failure.Diagnostics.emplace_back(MakeDiagnostic(
-            shader::ShaderDiagnosticCode::InvalidReflection,
+            render::ShaderDiagnosticCode::InvalidReflection,
             "shader artifact request is invalid or outside the variant domain",
             invalidJob));
         return MakeReadyFuture(std::move(failure));
@@ -589,7 +589,7 @@ ShaderArtifactResolver::Future ShaderArtifactResolver::ResolveAsync(
     if (auto baked = binary.FindProgramVariant(target, passIndex, fullDefines); baked.HasValue()) {
         return MakeReadyFuture(ResolveBaked(binary, *baked.Get(), passIndex));
     }
-    if (_state->Compiler == nullptr || _state->Compiler->GetToolchainHash() == shader::ShaderHash{}) {
+    if (_state->Compiler == nullptr || _state->Compiler->GetToolchainHash() == render::ShaderHash{}) {
         ProgramJob unavailableJob{
             .Pass = {},
             .PassIndex = passIndex,
@@ -599,13 +599,13 @@ ShaderArtifactResolver::Future ShaderArtifactResolver::ResolveAsync(
             .ExpectedInterface = {}};
         ShaderArtifactResolutionResult failure;
         failure.Diagnostics.emplace_back(MakeDiagnostic(
-            shader::ShaderDiagnosticCode::CompilationFailed,
+            render::ShaderDiagnosticCode::CompilationFailed,
             "runtime shader compiler is unavailable",
             unavailableJob));
         return MakeReadyFuture(std::move(failure));
     }
 
-    const shader::ShaderPassDesc& pass = binary.Asset.Passes[passIndex];
+    const render::ShaderPassDesc& pass = binary.Asset.Passes[passIndex];
     std::optional<ShaderSourceIdentity> captured;
     ShaderSourceIdentityResult current;
     bool computedCurrent = false;
@@ -613,7 +613,7 @@ ShaderArtifactResolver::Future ShaderArtifactResolver::ResolveAsync(
     const ShaderAssetPassKey sourceKey{
         .Handle = asset.GetAssetHandle(),
         .PassIndex = passIndex};
-    if (pass.SourceIdentity != shader::ShaderHash{}) {
+    if (pass.SourceIdentity != render::ShaderHash{}) {
         captured = ShaderSourceIdentity{
             .Hash = pass.SourceIdentity,
             .Dependencies = {}};
@@ -628,7 +628,7 @@ ShaderArtifactResolver::Future ShaderArtifactResolver::ResolveAsync(
                 .ExpectedInterface = {}};
             ShaderArtifactResolutionResult failure;
             failure.Diagnostics.emplace_back(MakeDiagnostic(
-                shader::ShaderDiagnosticCode::SourceUnavailable,
+                render::ShaderDiagnosticCode::SourceUnavailable,
                 "a JIT-only ShaderAsset must be registered with the resolver's AssetManager",
                 sourceJob));
             return MakeReadyFuture(std::move(failure));
@@ -641,7 +641,7 @@ ShaderArtifactResolver::Future ShaderArtifactResolver::ResolveAsync(
     if (!captured.has_value()) {
         const bool hasBakedProgram = std::ranges::any_of(
             binary.ProgramVariants,
-            [passIndex](const shader::ShaderProgramVariantArtifact& program) {
+            [passIndex](const render::ShaderProgramVariantArtifact& program) {
                 return program.PassIndex == passIndex;
             });
         if (hasBakedProgram) {
@@ -654,7 +654,7 @@ ShaderArtifactResolver::Future ShaderArtifactResolver::ResolveAsync(
                 .ExpectedInterface = {}};
             ShaderArtifactResolutionResult failure;
             failure.Diagnostics.emplace_back(MakeDiagnostic(
-                shader::ShaderDiagnosticCode::SourceUnavailable,
+                render::ShaderDiagnosticCode::SourceUnavailable,
                 "a partially baked pass requires a cooked source identity before JIT compilation",
                 sourceJob));
             return MakeReadyFuture(std::move(failure));
@@ -671,7 +671,7 @@ ShaderArtifactResolver::Future ShaderArtifactResolver::ResolveAsync(
                 .ExpectedInterface = {}};
             ShaderArtifactResolutionResult failure;
             failure.Diagnostics.emplace_back(MakeDiagnostic(
-                shader::ShaderDiagnosticCode::SourceUnavailable,
+                render::ShaderDiagnosticCode::SourceUnavailable,
                 std::move(current.Error),
                 sourceJob));
             return MakeReadyFuture(std::move(failure));
@@ -695,21 +695,21 @@ ShaderArtifactResolver::Future ShaderArtifactResolver::ResolveAsync(
         job.PassIndex,
         job.Defines,
         job.Source.Hash);
-    if (job.ProgramIdentity == shader::ShaderHash{}) {
+    if (job.ProgramIdentity == render::ShaderHash{}) {
         ShaderArtifactResolutionResult failure;
         failure.Diagnostics.emplace_back(MakeDiagnostic(
-            shader::ShaderDiagnosticCode::InvalidReflection,
+            render::ShaderDiagnosticCode::InvalidReflection,
             "failed to compute the immutable shader program identity",
             job));
         return MakeReadyFuture(std::move(failure));
     }
-    for (const shader::ShaderProgramVariantArtifact& candidate : binary.ProgramVariants) {
+    for (const render::ShaderProgramVariantArtifact& candidate : binary.ProgramVariants) {
         if (candidate.PassIndex == passIndex && candidate.Defines == job.Defines) {
             job.ExpectedInterface = binary.ProgramInterfaces[candidate.InterfaceIndex];
             break;
         }
     }
-    const shader::ShaderHash toolchain = _state->Compiler->GetToolchainHash();
+    const render::ShaderHash toolchain = _state->Compiler->GetToolchainHash();
     job.ProgramKey = BuildProgramKey(job, toolchain);
 
     {
@@ -737,7 +737,7 @@ ShaderArtifactResolver::Future ShaderArtifactResolver::ResolveAsync(
     if (!current.Succeeded()) {
         ShaderArtifactResolutionResult failure;
         failure.Diagnostics.emplace_back(MakeDiagnostic(
-            shader::ShaderDiagnosticCode::SourceUnavailable,
+            render::ShaderDiagnosticCode::SourceUnavailable,
             std::move(current.Error),
             job));
         ShaderFuture ready = MakeReadyFuture(std::move(failure));
@@ -749,7 +749,7 @@ ShaderArtifactResolver::Future ShaderArtifactResolver::ResolveAsync(
     if (sourceChanged) {
         ShaderArtifactResolutionResult failure;
         failure.Diagnostics.emplace_back(MakeDiagnostic(
-            shader::ShaderDiagnosticCode::SourceUnavailable,
+            render::ShaderDiagnosticCode::SourceUnavailable,
             "shader source changed; create a new immutable ShaderAsset before compiling new artifacts",
             job));
         ShaderFuture ready = MakeReadyFuture(std::move(failure));
@@ -761,7 +761,7 @@ ShaderArtifactResolver::Future ShaderArtifactResolver::ResolveAsync(
     std::scoped_lock programLock{_state->ProgramMutex};
     const auto existing = _state->Programs.find(job.ProgramKey);
     if (existing != _state->Programs.end()) return existing->second;
-    const shader::ShaderHash programKey = job.ProgramKey;
+    const render::ShaderHash programKey = job.ProgramKey;
     ShaderFuture future = std::async(std::launch::async, [state = _state, job = std::move(job)]() mutable {
                               return CompileProgram(state, std::move(job));
                           }).share();
@@ -804,36 +804,36 @@ namespace {
 
 class DxcShaderJitCompiler final : public IShaderJitCompiler {
 public:
-    explicit DxcShaderJitCompiler(shared_ptr<shader::Dxc> dxc) noexcept
+    explicit DxcShaderJitCompiler(shared_ptr<render::Dxc> dxc) noexcept
         : _dxc(std::move(dxc)) {}
 
-    shader::ShaderHash GetToolchainHash() const noexcept override {
+    render::ShaderHash GetToolchainHash() const noexcept override {
         if (_dxc == nullptr) return {};
         BinaryWriter identity;
         identity.String("radray-dxc-jit-v1");
         WriteHash(identity, _dxc->GetToolchainHash());
-        return shader::HashShaderBytes(identity.GetData());
+        return render::HashShaderBytes(identity.GetData());
     }
 
     ShaderJitStageCompileResult CompileStage(
         const ShaderJitStageCompileRequest& request) override {
         ShaderJitStageCompileResult result;
-        shader::ShaderDiagnosticContext context{
+        render::ShaderDiagnosticContext context{
             .Target = request.Target,
             .PassIndex = request.PassIndex,
             .VariantDefines = request.FullDefines,
             .Stage = request.Stage};
         if (_dxc == nullptr || !_dxc->IsValid()) {
-            result.Diagnostics.emplace_back(shader::ShaderDiagnostic{
-                .Code = shader::ShaderDiagnosticCode::CompilationFailed,
+            result.Diagnostics.emplace_back(render::ShaderDiagnostic{
+                .Code = render::ShaderDiagnosticCode::CompilationFailed,
                 .Message = "DXC is unavailable",
                 .Context = context});
             return result;
         }
-        const auto entry = shader::FindShaderEntryPoint(request.Pass, request.Stage);
+        const auto entry = render::FindShaderEntryPoint(request.Pass, request.Stage);
         if (!entry.has_value()) {
-            result.Diagnostics.emplace_back(shader::ShaderDiagnostic{
-                .Code = shader::ShaderDiagnosticCode::CompilationFailed,
+            result.Diagnostics.emplace_back(render::ShaderDiagnostic{
+                .Code = render::ShaderDiagnosticCode::CompilationFailed,
                 .Message = "requested shader stage has no entry point",
                 .Context = context});
             return result;
@@ -849,14 +849,14 @@ public:
         for (const string& include : includeStrings) includes.emplace_back(include);
         vector<std::string_view> defines;
         for (const string& define : request.ProjectedDefines) defines.emplace_back(define);
-        shader::DxcCompileOptions options{
+        render::DxcCompileOptions options{
             .EntryPoint = *entry,
             .Stage = request.Stage,
             .SM = request.Pass.SM,
             .Defines = defines,
             .Includes = includes,
             .IsOptimize = request.Pass.IsOptimize,
-            .IsSpirv = request.Target == shader::ShaderTarget::SPIRV,
+            .IsSpirv = request.Target == render::ShaderTarget::SPIRV,
             .EnableUnbounded = request.Pass.EnableUnbounded};
         auto compiled = _dxc->CompileFile(
             request.ShaderRoot /
@@ -864,19 +864,19 @@ public:
                     request.Pass.SourcePath.begin(), request.Pass.SourcePath.end()}},
             options);
         if (!compiled.has_value()) {
-            result.Diagnostics.emplace_back(shader::ShaderDiagnostic{
-                .Code = shader::ShaderDiagnosticCode::CompilationFailed,
+            result.Diagnostics.emplace_back(render::ShaderDiagnostic{
+                .Code = render::ShaderDiagnosticCode::CompilationFailed,
                 .Message = fmt::format("DXC failed to compile entry '{}'", *entry),
                 .Context = context});
             return result;
         }
 
-        shader::ShaderReflectionDesc reflection;
-        if (request.Target == shader::ShaderTarget::DXIL) {
+        render::ShaderReflectionDesc reflection;
+        if (request.Target == render::ShaderTarget::DXIL) {
             auto value = _dxc->GetShaderDescFromOutput(compiled->Refl);
             if (!value.has_value()) {
-                result.Diagnostics.emplace_back(shader::ShaderDiagnostic{
-                    .Code = shader::ShaderDiagnosticCode::CompilationFailed,
+                result.Diagnostics.emplace_back(render::ShaderDiagnostic{
+                    .Code = render::ShaderDiagnosticCode::CompilationFailed,
                     .Message = "DXIL reflection failed",
                     .Context = context});
                 return result;
@@ -884,35 +884,35 @@ public:
             reflection = std::move(*value);
         } else {
 #if defined(RADRAY_ENABLE_SPIRV_CROSS)
-            auto value = shader::ReflectSpirv(shader::SpirvBytecodeView{
+            auto value = render::ReflectSpirv(render::SpirvBytecodeView{
                 .Data = compiled->Data,
                 .EntryPointName = *entry,
                 .Stage = request.Stage});
             if (!value.has_value()) {
-                result.Diagnostics.emplace_back(shader::ShaderDiagnostic{
-                    .Code = shader::ShaderDiagnosticCode::CompilationFailed,
+                result.Diagnostics.emplace_back(render::ShaderDiagnostic{
+                    .Code = render::ShaderDiagnosticCode::CompilationFailed,
                     .Message = "SPIR-V reflection failed",
                     .Context = context});
                 return result;
             }
             reflection = std::move(*value);
 #else
-            result.Diagnostics.emplace_back(shader::ShaderDiagnostic{
-                .Code = shader::ShaderDiagnosticCode::CompilationFailed,
+            result.Diagnostics.emplace_back(render::ShaderDiagnostic{
+                .Code = render::ShaderDiagnosticCode::CompilationFailed,
                 .Message = "SPIR-V JIT requires SPIRV-Cross",
                 .Context = context});
             return result;
 #endif
         }
-        shader::ShaderInterfaceNormalizationOptions normalization{
+        render::ShaderInterfaceNormalizationOptions normalization{
             .Context = context,
             .PushConstantBindings = {}};
-        shader::ShaderStageInterfaceBuildResult interface;
-        if (const auto* hlsl = std::get_if<shader::HlslShaderDesc>(&reflection)) {
-            interface = shader::NormalizeHlslInterface(*hlsl, request.Stage, normalization);
+        render::ShaderStageInterfaceBuildResult interface;
+        if (const auto* hlsl = std::get_if<render::HlslShaderDesc>(&reflection)) {
+            interface = render::NormalizeHlslInterface(*hlsl, request.Stage, normalization);
         } else {
-            interface = shader::NormalizeSpirvInterface(
-                std::get<shader::SpirvShaderDesc>(reflection), request.Stage, normalization);
+            interface = render::NormalizeSpirvInterface(
+                std::get<render::SpirvShaderDesc>(reflection), request.Stage, normalization);
         }
         if (!interface.Succeeded()) {
             result.Diagnostics = std::move(interface.Diagnostics);
@@ -927,19 +927,19 @@ public:
             .Bytecode = std::move(compiled->Data),
             .Reflection = std::move(reflection),
             .Interface = std::move(*interface.Interface)};
-        artifact.BinaryHash = shader::HashShaderBytes(artifact.Bytecode);
+        artifact.BinaryHash = render::HashShaderBytes(artifact.Bytecode);
         result.Artifact = std::move(artifact);
         return result;
     }
 
 private:
-    shared_ptr<shader::Dxc> _dxc;
+    shared_ptr<render::Dxc> _dxc;
 };
 
 }  // namespace
 
 shared_ptr<IShaderJitCompiler> CreateDxcShaderJitCompiler(
-    shared_ptr<shader::Dxc> dxc) noexcept {
+    shared_ptr<render::Dxc> dxc) noexcept {
     if (dxc == nullptr || !dxc->IsValid()) return nullptr;
     return make_shared<DxcShaderJitCompiler>(std::move(dxc));
 }

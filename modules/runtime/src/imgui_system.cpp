@@ -571,17 +571,17 @@ Nullable<unique_ptr<ImGuiRenderer>> ImGuiRenderer::Create(const ImGuiRendererDes
     unique_ptr<render::Shader> shaderVS;
     unique_ptr<render::Shader> shaderPS;
     if (backendType == render::RenderBackend::D3D12) {
-        shader::HlslShaderDesc reflVS{};
-        reflVS.BoundResources.push_back(shader::HlslInputBindDesc{
+        render::HlslShaderDesc reflVS{};
+        reflVS.BoundResources.push_back(render::HlslInputBindDesc{
             .Name = "gPush",
-            .Type = shader::HlslShaderInputType::CBUFFER,
+            .Type = render::HlslShaderInputType::CBUFFER,
             .BindPoint = 0,
             .BindCount = 1,
             .Space = 0,
         });
         auto& cbufferVS = reflVS.ConstantBuffers.emplace_back();
         cbufferVS.Name = "gPush";
-        cbufferVS.Type = shader::HlslCBufferType::CBUFFER;
+        cbufferVS.Type = render::HlslCBufferType::CBUFFER;
         cbufferVS.Size = 16;
         cbufferVS.IsViewInHlsl = true;
         render::ShaderDescriptor descVS{
@@ -595,19 +595,19 @@ Nullable<unique_ptr<ImGuiRenderer>> ImGuiRenderer::Create(const ImGuiRendererDes
         }
         shaderVS = shaderVSOpt.Release();
 
-        shader::HlslShaderDesc reflPS{};
-        reflPS.BoundResources.push_back(shader::HlslInputBindDesc{
+        render::HlslShaderDesc reflPS{};
+        reflPS.BoundResources.push_back(render::HlslInputBindDesc{
             .Name = "gTexture",
-            .Type = shader::HlslShaderInputType::TEXTURE,
+            .Type = render::HlslShaderInputType::TEXTURE,
             .BindPoint = 0,
             .BindCount = 1,
-            .ReturnType = shader::HlslResourceReturnType::FLOAT,
-            .Dimension = shader::HlslSRVDimension::TEXTURE2D,
+            .ReturnType = render::HlslResourceReturnType::FLOAT,
+            .Dimension = render::HlslSRVDimension::TEXTURE2D,
             .Space = 1,
         });
-        reflPS.BoundResources.push_back(shader::HlslInputBindDesc{
+        reflPS.BoundResources.push_back(render::HlslInputBindDesc{
             .Name = "gSampler",
-            .Type = shader::HlslShaderInputType::SAMPLER,
+            .Type = render::HlslShaderInputType::SAMPLER,
             .BindPoint = 1,
             .BindCount = 1,
             .Space = 1,
@@ -623,8 +623,8 @@ Nullable<unique_ptr<ImGuiRenderer>> ImGuiRenderer::Create(const ImGuiRendererDes
         }
         shaderPS = shaderPSOpt.Release();
     } else if (backendType == render::RenderBackend::Vulkan) {
-        shader::SpirvShaderDesc reflVS{};
-        reflVS.ConstantRanges.push_back(shader::SpirvPushConstantRange{
+        render::SpirvShaderDesc reflVS{};
+        reflVS.ConstantRanges.push_back(render::SpirvPushConstantRange{
             .Name = "gPush",
             .Offset = 0,
             .Size = 16,
@@ -640,22 +640,22 @@ Nullable<unique_ptr<ImGuiRenderer>> ImGuiRenderer::Create(const ImGuiRendererDes
         }
         shaderVS = shaderVSOpt.Release();
 
-        shader::SpirvShaderDesc reflPS{};
-        reflPS.ResourceBindings.push_back(shader::SpirvResourceBinding{
+        render::SpirvShaderDesc reflPS{};
+        reflPS.ResourceBindings.push_back(render::SpirvResourceBinding{
             .Name = "gTexture",
-            .Kind = shader::SpirvResourceKind::SeparateImage,
+            .Kind = render::SpirvResourceKind::SeparateImage,
             .Set = 1,
             .Binding = 0,
             .ArraySize = 1,
-            .ImageInfo = shader::SpirvImageInfo{
-                .Dim = shader::SpirvImageDim::Dim2D,
+            .ImageInfo = render::SpirvImageInfo{
+                .Dim = render::SpirvImageDim::Dim2D,
                 .SampledType = 0,
             },
             .HlslType = {},
         });
         auto& samplerPS = reflPS.ResourceBindings.emplace_back();
         samplerPS.Name = "gSampler";
-        samplerPS.Kind = shader::SpirvResourceKind::SeparateSampler;
+        samplerPS.Kind = render::SpirvResourceKind::SeparateSampler;
         samplerPS.Set = 1;
         samplerPS.Binding = 1;
         samplerPS.ArraySize = 1;

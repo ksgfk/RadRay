@@ -10,7 +10,7 @@
 #include <radray/render/common.h>
 #include <radray/runtime/shader_artifact_resolver.h>
 #if defined(RADRAY_ENABLE_SHADER_JIT)
-#include <radray/shader/dxc.h>
+#include <radray/render/dxc.h>
 #endif
 #include <radray/runtime/application.h>
 #include <radray/runtime/gpu_system.h>
@@ -47,7 +47,7 @@ void RenderSystem::OnInitialize() {
     _samplerCache = make_unique<SamplerCache>(device);
 
 #if defined(RADRAY_ENABLE_SHADER_JIT)
-    auto dxcOpt = shader::CreateDxc();
+    auto dxcOpt = render::CreateDxc();
     if (!dxcOpt.HasValue()) {
         RADRAY_ERR_LOG("RenderSystem::OnInitialize: CreateDxc failed");
     } else {

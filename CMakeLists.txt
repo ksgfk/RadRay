@@ -58,7 +58,6 @@ cmake_dependent_option(RADRAY_ENABLE_METAL "Enable Metal backend" ON "RADRAY_BUI
 option(RADRAY_ENABLE_DXC "Enable DirectX Shader Compiler support" ON)
 option(RADRAY_ENABLE_SPIRV_CROSS "Enable SPIR-V Cross support" ON)
 cmake_dependent_option(RADRAY_ENABLE_SHADER_JIT "Enable runtime shader JIT compilation" ON "RADRAY_BUILD_RUNTIME AND RADRAY_ENABLE_DXC" OFF)
-cmake_dependent_option(RADRAY_BUILD_SHADER_COOKER "Build the shader cooker command-line tool" ON "RADRAY_ENABLE_DXC" OFF)
 option(RADRAY_ENABLE_MIMALLOC "Enable mimalloc as allocator" ON)
 option(RADRAY_ENABLE_ZLIB "Enable zlib support" ON)
 cmake_dependent_option(RADRAY_ENABLE_LIBPNG "Enable libpng support" ON "RADRAY_ENABLE_ZLIB" OFF)

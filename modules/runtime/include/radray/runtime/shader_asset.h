@@ -11,36 +11,36 @@
 
 namespace radray {
 
-using shader::ShaderColorTargetDesc;
-using shader::ShaderComputePassDesc;
-using shader::ShaderGraphicsPassDesc;
-using shader::ShaderKeywordGroupDesc;
-using shader::ShaderKeywordScope;
-using shader::ShaderPassDesc;
-using shader::ShaderPassProgramDesc;
-using shader::ShaderStencilTestDesc;
-using shader::ShaderTagDesc;
-using shader::ShaderVariantKey;
-using shader::ShaderVariantDesc;
-using shader::ShaderVariantDomain;
-using shader::ShaderBakeSet;
+using render::ShaderColorTargetDesc;
+using render::ShaderComputePassDesc;
+using render::ShaderGraphicsPassDesc;
+using render::ShaderKeywordGroupDesc;
+using render::ShaderKeywordScope;
+using render::ShaderPassDesc;
+using render::ShaderPassProgramDesc;
+using render::ShaderStencilTestDesc;
+using render::ShaderTagDesc;
+using render::ShaderVariantKey;
+using render::ShaderVariantDesc;
+using render::ShaderVariantDomain;
+using render::ShaderBakeSet;
 
-render::CompareFunction ToRenderCompareFunction(shader::CompareFunction value) noexcept;
-render::CullMode ToRenderCullMode(shader::CullMode value) noexcept;
-render::StencilOperation ToRenderStencilOperation(shader::StencilOperation value) noexcept;
-render::BlendFactor ToRenderBlendFactor(shader::BlendFactor value) noexcept;
-render::BlendOperation ToRenderBlendOperation(shader::BlendOperation value) noexcept;
-render::ColorWrites ToRenderColorWrites(shader::ColorWrites value) noexcept;
-render::BlendComponent ToRenderBlendComponent(const shader::BlendComponent& value) noexcept;
-render::BlendState ToRenderBlendState(const shader::BlendState& value) noexcept;
-render::StencilFaceState ToRenderStencilFaceState(const shader::StencilFaceState& value) noexcept;
-render::StencilState ToRenderStencilState(const shader::StencilState& value) noexcept;
+render::CompareFunction ToRenderCompareFunction(render::CompareFunction value) noexcept;
+render::CullMode ToRenderCullMode(render::CullMode value) noexcept;
+render::StencilOperation ToRenderStencilOperation(render::StencilOperation value) noexcept;
+render::BlendFactor ToRenderBlendFactor(render::BlendFactor value) noexcept;
+render::BlendOperation ToRenderBlendOperation(render::BlendOperation value) noexcept;
+render::ColorWrites ToRenderColorWrites(render::ColorWrites value) noexcept;
+render::BlendComponent ToRenderBlendComponent(const render::BlendComponent& value) noexcept;
+render::BlendState ToRenderBlendState(const render::BlendState& value) noexcept;
+render::StencilFaceState ToRenderStencilFaceState(const render::StencilFaceState& value) noexcept;
+render::StencilState ToRenderStencilState(const render::StencilState& value) noexcept;
 
 class ShaderAsset final : public Asset {
 public:
     ShaderAsset() noexcept;
     explicit ShaderAsset(vector<ShaderPassDesc> passes) noexcept;
-    explicit ShaderAsset(shader::ShaderBinary binary) noexcept;
+    explicit ShaderAsset(render::ShaderBinary binary) noexcept;
     ~ShaderAsset() noexcept override;
 
     void OnUnload(IRenderResourceRecycler& recycler) override;
@@ -48,15 +48,15 @@ public:
 
     bool IsValid() const noexcept;
     const vector<ShaderPassDesc>& GetPasses() const noexcept { return _binary.Asset.Passes; }
-    const shader::ShaderBinary& GetBinary() const noexcept { return _binary; }
+    const render::ShaderBinary& GetBinary() const noexcept { return _binary; }
 
-    Nullable<const shader::ShaderStageArtifact*> FindCompiledStage(
-        shader::ShaderTarget target,
+    Nullable<const render::ShaderStageArtifact*> FindCompiledStage(
+        render::ShaderTarget target,
         uint32_t passIndex,
-        shader::ShaderStage stage,
+        render::ShaderStage stage,
         const vector<string>& defines) const noexcept;
-    Nullable<const shader::ShaderProgramVariantArtifact*> FindProgramVariant(
-        shader::ShaderTarget target,
+    Nullable<const render::ShaderProgramVariantArtifact*> FindProgramVariant(
+        render::ShaderTarget target,
         uint32_t passIndex,
         const vector<string>& defines) const noexcept;
 
@@ -64,7 +64,7 @@ public:
     std::optional<uint32_t> FindPassByTag(std::string_view name, std::string_view value) const noexcept;
 
 private:
-    shader::ShaderBinary _binary;
+    render::ShaderBinary _binary;
     bool _valid{false};
 };
 

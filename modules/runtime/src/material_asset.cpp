@@ -8,31 +8,31 @@ namespace radray {
 namespace {
 
 bool GroupContainsDefine(
-    const shader::ShaderKeywordGroupDesc& group,
+    const render::ShaderKeywordGroupDesc& group,
     std::string_view define) noexcept {
     return std::ranges::find(group.Alternatives, define) != group.Alternatives.end();
 }
 
 bool ShaderDeclaresLocalDefine(const ShaderAsset& shaderAsset, std::string_view define) noexcept {
-    return std::ranges::any_of(shaderAsset.GetPasses(), [define](const shader::ShaderPassDesc& pass) {
+    return std::ranges::any_of(shaderAsset.GetPasses(), [define](const render::ShaderPassDesc& pass) {
         return std::ranges::any_of(
             pass.VariantDomain.KeywordGroups,
-            [define](const shader::ShaderKeywordGroupDesc& group) {
-                return group.Scope == shader::ShaderKeywordScope::Local && GroupContainsDefine(group, define);
+            [define](const render::ShaderKeywordGroupDesc& group) {
+                return group.Scope == render::ShaderKeywordScope::Local && GroupContainsDefine(group, define);
             });
     });
 }
 
 vector<ShaderProgramInterfaceRecord> CollectBakedInterfaces(
-    const shader::ShaderBinary& binary) {
+    const render::ShaderBinary& binary) {
     vector<ShaderProgramInterfaceRecord> records;
     vector<uint32_t> indices;
-    for (const shader::ShaderProgramVariantArtifact& program : binary.ProgramVariants) {
+    for (const render::ShaderProgramVariantArtifact& program : binary.ProgramVariants) {
         if (std::ranges::find(indices, program.InterfaceIndex) != indices.end()) continue;
         indices.emplace_back(program.InterfaceIndex);
         records.emplace_back(ShaderProgramInterfaceRecord{
             .Interface = binary.ProgramInterfaces[program.InterfaceIndex],
-            .Context = shader::ShaderDiagnosticContext{
+            .Context = render::ShaderDiagnosticContext{
                 .Target = program.Target,
                 .PassIndex = program.PassIndex,
                 .VariantDefines = program.Defines}});
@@ -64,7 +64,7 @@ ShaderParameterLayoutBuildResult BuildMaterialLayout(
     return BuildShaderParameterLayout(
         interfaces,
         policy,
-        shader::ShaderProgramKind::Graphics);
+        render::ShaderProgramKind::Graphics);
 }
 
 }  // namespace
@@ -149,10 +149,10 @@ bool MaterialAsset::ApplyResolvedInterfaces(
         _layoutShader == shaderAsset ? _resolvedInterfaces : vector<ShaderProgramInterfaceRecord>{};
     bool changed = _layoutShader != shaderAsset;
     for (ShaderProgramInterfaceRecord incoming : interfaces) {
-        shader::NormalizeShaderDefines(incoming.Context.VariantDefines);
-        incoming.Context.Stage = shader::ShaderStage::UNKNOWN;
-        if (incoming.Interface.Kind != shader::ShaderProgramKind::Graphics ||
-            !shader::IsShaderInterfaceValid(incoming.Interface)) {
+        render::NormalizeShaderDefines(incoming.Context.VariantDefines);
+        incoming.Context.Stage = render::ShaderStage::UNKNOWN;
+        if (incoming.Interface.Kind != render::ShaderProgramKind::Graphics ||
+            !render::IsShaderInterfaceValid(incoming.Interface)) {
             _layoutDiagnostics = {ShaderBindingDiagnostic{
                 .Code = ShaderBindingDiagnosticCode::InvalidInterface,
                 .Message = "MaterialAsset only accepts valid graphics program interfaces",
@@ -163,7 +163,7 @@ bool MaterialAsset::ApplyResolvedInterfaces(
         if (incoming.Context.PassIndex.has_value()) {
             const uint32_t passIndex = *incoming.Context.PassIndex;
             if (passIndex >= shaderAsset->GetPasses().size() ||
-                !shader::IsShaderVariantInDomain(
+                !render::IsShaderVariantInDomain(
                     shaderAsset->GetPasses()[passIndex],
                     incoming.Context.VariantDefines)) {
                 _layoutDiagnostics = {ShaderBindingDiagnostic{
@@ -173,20 +173,20 @@ bool MaterialAsset::ApplyResolvedInterfaces(
                     .ProviderName = {}}};
                 return false;
             }
-            for (const shader::ShaderProgramVariantArtifact& baked :
+            for (const render::ShaderProgramVariantArtifact& baked :
                  shaderAsset->GetBinary().ProgramVariants) {
                 if (baked.PassIndex != passIndex ||
                     baked.Defines != incoming.Context.VariantDefines) {
                     continue;
                 }
-                const shader::ShaderInterfaceDesc& bakedInterface =
+                const render::ShaderInterfaceDesc& bakedInterface =
                     shaderAsset->GetBinary().ProgramInterfaces[baked.InterfaceIndex];
                 if (bakedInterface != incoming.Interface) {
                     _layoutDiagnostics = {ShaderBindingDiagnostic{
                         .Code = ShaderBindingDiagnosticCode::InterfaceMismatch,
                         .Message = "resolved interface is incompatible with the baked interface for the same program",
                         .Context = std::move(incoming.Context),
-                        .RelatedContext = shader::ShaderDiagnosticContext{
+                        .RelatedContext = render::ShaderDiagnosticContext{
                             .Target = baked.Target,
                             .PassIndex = baked.PassIndex,
                             .VariantDefines = baked.Defines},
@@ -236,20 +236,20 @@ bool MaterialAsset::ApplyResolvedPrograms(
     std::span<const ShaderResolvedProgram> programs) noexcept {
     ShaderAsset* shaderAsset = _shader.Get();
     if (shaderAsset == nullptr || !shaderAsset->IsValid()) return false;
-    unordered_map<uint32_t, shader::ShaderHash> sourceIdentities =
+    unordered_map<uint32_t, render::ShaderHash> sourceIdentities =
         _layoutShader == shaderAsset
             ? _resolvedSourceIdentities
-            : unordered_map<uint32_t, shader::ShaderHash>{};
+            : unordered_map<uint32_t, render::ShaderHash>{};
     vector<ShaderProgramInterfaceRecord> interfaces;
     interfaces.reserve(programs.size());
     for (const ShaderResolvedProgram& program : programs) {
         vector<string> normalizedDefines = program.Defines;
-        shader::NormalizeShaderDefines(normalizedDefines);
-        const bool knownTarget = program.Target == shader::ShaderTarget::DXIL ||
-                                 program.Target == shader::ShaderTarget::SPIRV;
+        render::NormalizeShaderDefines(normalizedDefines);
+        const bool knownTarget = program.Target == render::ShaderTarget::DXIL ||
+                                 program.Target == render::ShaderTarget::SPIRV;
         if (!knownTarget || program.PassIndex >= shaderAsset->GetPasses().size() ||
             normalizedDefines != program.Defines ||
-            !shader::IsShaderVariantInDomain(
+            !render::IsShaderVariantInDomain(
                 shaderAsset->GetPasses()[program.PassIndex],
                 program.Defines) ||
             ComputeShaderProgramIdentity(
@@ -257,12 +257,12 @@ bool MaterialAsset::ApplyResolvedPrograms(
                 program.PassIndex,
                 program.Defines,
                 program.SourceIdentity) != program.ProgramIdentity ||
-            (shaderAsset->GetPasses()[program.PassIndex].SourceIdentity != shader::ShaderHash{} &&
+            (shaderAsset->GetPasses()[program.PassIndex].SourceIdentity != render::ShaderHash{} &&
              shaderAsset->GetPasses()[program.PassIndex].SourceIdentity != program.SourceIdentity)) {
             _layoutDiagnostics = {ShaderBindingDiagnostic{
                 .Code = ShaderBindingDiagnosticCode::InterfaceMismatch,
                 .Message = "resolved program provenance does not match this immutable ShaderAsset",
-                .Context = shader::ShaderDiagnosticContext{
+                .Context = render::ShaderDiagnosticContext{
                     .Target = program.Target,
                     .PassIndex = program.PassIndex,
                     .VariantDefines = program.Defines},
@@ -275,19 +275,19 @@ bool MaterialAsset::ApplyResolvedPrograms(
             _layoutDiagnostics = {ShaderBindingDiagnostic{
                 .Code = ShaderBindingDiagnosticCode::InterfaceMismatch,
                 .Message = "resolved programs come from different immutable shader source identities",
-                .Context = shader::ShaderDiagnosticContext{
+                .Context = render::ShaderDiagnosticContext{
                     .Target = program.Target,
                     .PassIndex = program.PassIndex,
                     .VariantDefines = program.Defines},
                 .ProviderName = {}}};
             return false;
         }
-        if (program.SourceIdentity != shader::ShaderHash{}) {
+        if (program.SourceIdentity != render::ShaderHash{}) {
             sourceIdentities.insert_or_assign(program.PassIndex, program.SourceIdentity);
         }
         interfaces.emplace_back(ShaderProgramInterfaceRecord{
             .Interface = program.Interface,
-            .Context = shader::ShaderDiagnosticContext{
+            .Context = render::ShaderDiagnosticContext{
                 .Target = program.Target,
                 .PassIndex = program.PassIndex,
                 .VariantDefines = program.Defines}});
@@ -304,8 +304,8 @@ bool MaterialAsset::IsReady() const noexcept {
 }
 
 bool MaterialAsset::HasCompleteParametersFor(
-    const shader::ShaderInterfaceDesc& interface,
-    const shader::ShaderDiagnosticContext& context) const noexcept {
+    const render::ShaderInterfaceDesc& interface,
+    const render::ShaderDiagnosticContext& context) const noexcept {
     if (!IsReady()) return false;
     ShaderBindingResolutionResult resolution = ResolveShaderBindings(interface, _policy, context);
     return resolution.Succeeded() && _parameters.IsCompleteFor(*resolution.Plan);
@@ -315,16 +315,16 @@ bool MaterialAsset::EnableLocalKeyword(std::string_view define) noexcept {
     ShaderAsset* shaderAsset = _shader.Get();
     if (define.empty() || shaderAsset == nullptr || !ShaderDeclaresLocalDefine(*shaderAsset, define)) return false;
     vector<string> next = _localKeywords;
-    for (const shader::ShaderPassDesc& pass : shaderAsset->GetPasses()) {
-        for (const shader::ShaderKeywordGroupDesc& group : pass.VariantDomain.KeywordGroups) {
-            if (group.Scope != shader::ShaderKeywordScope::Local || !GroupContainsDefine(group, define)) continue;
+    for (const render::ShaderPassDesc& pass : shaderAsset->GetPasses()) {
+        for (const render::ShaderKeywordGroupDesc& group : pass.VariantDomain.KeywordGroups) {
+            if (group.Scope != render::ShaderKeywordScope::Local || !GroupContainsDefine(group, define)) continue;
             std::erase_if(next, [&](const string& enabled) {
                 return enabled != define && GroupContainsDefine(group, enabled);
             });
         }
     }
     next.emplace_back(define);
-    shader::NormalizeShaderDefines(next);
+    render::NormalizeShaderDefines(next);
     if (next != _localKeywords) {
         _localKeywords = std::move(next);
         ++_revision;
@@ -348,29 +348,29 @@ std::optional<vector<string>> MaterialAsset::ResolveVariantDefines(
     std::span<const std::string_view> pipelineGlobalDefines) const noexcept {
     ShaderAsset* shaderAsset = _shader.Get();
     if (shaderAsset == nullptr || passIndex >= shaderAsset->GetPasses().size()) return std::nullopt;
-    const shader::ShaderPassDesc& pass = shaderAsset->GetPasses()[passIndex];
+    const render::ShaderPassDesc& pass = shaderAsset->GetPasses()[passIndex];
     vector<string> result;
     for (const string& define : _localKeywords) {
         const bool used = std::ranges::any_of(
             pass.VariantDomain.KeywordGroups,
             [&](const auto& group) {
-                return group.Scope == shader::ShaderKeywordScope::Local && GroupContainsDefine(group, define);
+                return group.Scope == render::ShaderKeywordScope::Local && GroupContainsDefine(group, define);
             });
         if (used) result.emplace_back(define);
     }
     for (const std::string_view define : pipelineGlobalDefines) {
         bool global = false;
         bool local = false;
-        for (const shader::ShaderKeywordGroupDesc& group : pass.VariantDomain.KeywordGroups) {
+        for (const render::ShaderKeywordGroupDesc& group : pass.VariantDomain.KeywordGroups) {
             if (!GroupContainsDefine(group, define)) continue;
-            global = global || group.Scope == shader::ShaderKeywordScope::Global;
-            local = local || group.Scope == shader::ShaderKeywordScope::Local;
+            global = global || group.Scope == render::ShaderKeywordScope::Global;
+            local = local || group.Scope == render::ShaderKeywordScope::Local;
         }
         if (local) return std::nullopt;
         if (global) result.emplace_back(define);
     }
-    shader::NormalizeShaderDefines(result);
-    return shader::IsShaderVariantInDomain(pass, result)
+    render::NormalizeShaderDefines(result);
+    return render::IsShaderVariantInDomain(pass, result)
                ? std::optional<vector<string>>{std::move(result)}
                : std::nullopt;
 }
@@ -460,7 +460,7 @@ bool MaterialAsset::SetVector(
 
 bool MaterialAsset::SetValue(
     std::string_view name,
-    shader::ShaderScalarType scalar,
+    render::ShaderScalarType scalar,
     uint32_t columns,
     std::span<const byte> data,
     uint32_t arrayIndex) noexcept {
@@ -472,7 +472,7 @@ bool MaterialAsset::SetValue(
 bool MaterialAsset::SetValue(
     ShaderParameterLocation location,
     std::string_view field,
-    shader::ShaderScalarType scalar,
+    render::ShaderScalarType scalar,
     uint32_t columns,
     std::span<const byte> data,
     uint32_t arrayIndex) noexcept {

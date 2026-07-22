@@ -8,7 +8,7 @@
 #include <radray/types.h>
 #include <radray/nullable.h>
 
-namespace radray::shader {
+namespace radray::render {
 
 enum class HlslShaderModel {
     SM60,
@@ -333,48 +333,48 @@ std::optional<string> SerializeHlslShaderDesc(const HlslShaderDesc& desc) noexce
 /// 从 JSON 文本反序列化 HlslShaderDesc。失败 (格式错误 / 版本不符) 返回 nullopt。
 std::optional<HlslShaderDesc> DeserializeHlslShaderDesc(std::string_view json) noexcept;
 
-}  // namespace radray::shader
+}  // namespace radray::render
 
 namespace radray {
 
 template <>
-struct JsonSerializer<shader::HlslShaderTypeId> {
-    static bool Write(JsonWriteContext& context, const shader::HlslShaderTypeId& value) noexcept;
+struct JsonSerializer<render::HlslShaderTypeId> {
+    static bool Write(JsonWriteContext& context, const render::HlslShaderTypeId& value) noexcept;
 };
 
 template <>
-struct JsonSerializer<shader::HlslShaderTypeMember> {
-    static bool Write(JsonWriteContext& context, const shader::HlslShaderTypeMember& value) noexcept;
+struct JsonSerializer<render::HlslShaderTypeMember> {
+    static bool Write(JsonWriteContext& context, const render::HlslShaderTypeMember& value) noexcept;
 };
 
 template <>
-struct JsonSerializer<shader::HlslShaderTypeDesc> {
-    static bool Write(JsonWriteContext& context, const shader::HlslShaderTypeDesc& value) noexcept;
+struct JsonSerializer<render::HlslShaderTypeDesc> {
+    static bool Write(JsonWriteContext& context, const render::HlslShaderTypeDesc& value) noexcept;
 };
 
 template <>
-struct JsonSerializer<shader::HlslShaderVariableDesc> {
-    static bool Write(JsonWriteContext& context, const shader::HlslShaderVariableDesc& value) noexcept;
+struct JsonSerializer<render::HlslShaderVariableDesc> {
+    static bool Write(JsonWriteContext& context, const render::HlslShaderVariableDesc& value) noexcept;
 };
 
 template <>
-struct JsonSerializer<shader::HlslShaderBufferDesc> {
-    static bool Write(JsonWriteContext& context, const shader::HlslShaderBufferDesc& value) noexcept;
+struct JsonSerializer<render::HlslShaderBufferDesc> {
+    static bool Write(JsonWriteContext& context, const render::HlslShaderBufferDesc& value) noexcept;
 };
 
 template <>
-struct JsonSerializer<shader::HlslInputBindDesc> {
-    static bool Write(JsonWriteContext& context, const shader::HlslInputBindDesc& value) noexcept;
+struct JsonSerializer<render::HlslInputBindDesc> {
+    static bool Write(JsonWriteContext& context, const render::HlslInputBindDesc& value) noexcept;
 };
 
 template <>
-struct JsonSerializer<shader::HlslSignatureParameterDesc> {
-    static bool Write(JsonWriteContext& context, const shader::HlslSignatureParameterDesc& value) noexcept;
+struct JsonSerializer<render::HlslSignatureParameterDesc> {
+    static bool Write(JsonWriteContext& context, const render::HlslSignatureParameterDesc& value) noexcept;
 };
 
 template <>
-struct JsonSerializer<shader::HlslShaderDesc> {
-    static bool Write(JsonWriteContext& context, const shader::HlslShaderDesc& value) noexcept;
+struct JsonSerializer<render::HlslShaderDesc> {
+    static bool Write(JsonWriteContext& context, const render::HlslShaderDesc& value) noexcept;
 };
 
 }  // namespace radray

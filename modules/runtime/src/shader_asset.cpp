@@ -9,7 +9,7 @@ namespace radray {
 namespace {
 
 AssetLoadTask LoadShaderAssetTask(AssetId expectedId, std::filesystem::path path) {
-    std::optional<shader::ShaderBinary> binary = shader::ReadShaderBinary(path);
+    std::optional<render::ShaderBinary> binary = render::ReadShaderBinary(path);
     if (!binary.has_value()) {
         co_return AssetLoadResult::Failure(fmt::format("failed to read shader binary '{}'", path.string()));
     }
@@ -27,95 +27,95 @@ AssetLoadTask LoadShaderAssetTask(AssetId expectedId, std::filesystem::path path
 
 ShaderAsset::ShaderAsset() noexcept = default;
 
-render::CompareFunction ToRenderCompareFunction(shader::CompareFunction value) noexcept {
+render::CompareFunction ToRenderCompareFunction(render::CompareFunction value) noexcept {
     switch (value) {
-        case shader::CompareFunction::Never: return render::CompareFunction::Never;
-        case shader::CompareFunction::Less: return render::CompareFunction::Less;
-        case shader::CompareFunction::Equal: return render::CompareFunction::Equal;
-        case shader::CompareFunction::LessEqual: return render::CompareFunction::LessEqual;
-        case shader::CompareFunction::Greater: return render::CompareFunction::Greater;
-        case shader::CompareFunction::NotEqual: return render::CompareFunction::NotEqual;
-        case shader::CompareFunction::GreaterEqual: return render::CompareFunction::GreaterEqual;
-        case shader::CompareFunction::Always: return render::CompareFunction::Always;
+        case render::CompareFunction::Never: return render::CompareFunction::Never;
+        case render::CompareFunction::Less: return render::CompareFunction::Less;
+        case render::CompareFunction::Equal: return render::CompareFunction::Equal;
+        case render::CompareFunction::LessEqual: return render::CompareFunction::LessEqual;
+        case render::CompareFunction::Greater: return render::CompareFunction::Greater;
+        case render::CompareFunction::NotEqual: return render::CompareFunction::NotEqual;
+        case render::CompareFunction::GreaterEqual: return render::CompareFunction::GreaterEqual;
+        case render::CompareFunction::Always: return render::CompareFunction::Always;
     }
     return render::CompareFunction::Always;
 }
 
-render::CullMode ToRenderCullMode(shader::CullMode value) noexcept {
+render::CullMode ToRenderCullMode(render::CullMode value) noexcept {
     switch (value) {
-        case shader::CullMode::Front: return render::CullMode::Front;
-        case shader::CullMode::Back: return render::CullMode::Back;
-        case shader::CullMode::None: return render::CullMode::None;
+        case render::CullMode::Front: return render::CullMode::Front;
+        case render::CullMode::Back: return render::CullMode::Back;
+        case render::CullMode::None: return render::CullMode::None;
     }
     return render::CullMode::Back;
 }
 
-render::StencilOperation ToRenderStencilOperation(shader::StencilOperation value) noexcept {
+render::StencilOperation ToRenderStencilOperation(render::StencilOperation value) noexcept {
     switch (value) {
-        case shader::StencilOperation::Keep: return render::StencilOperation::Keep;
-        case shader::StencilOperation::Zero: return render::StencilOperation::Zero;
-        case shader::StencilOperation::Replace: return render::StencilOperation::Replace;
-        case shader::StencilOperation::Invert: return render::StencilOperation::Invert;
-        case shader::StencilOperation::IncrementClamp: return render::StencilOperation::IncrementClamp;
-        case shader::StencilOperation::DecrementClamp: return render::StencilOperation::DecrementClamp;
-        case shader::StencilOperation::IncrementWrap: return render::StencilOperation::IncrementWrap;
-        case shader::StencilOperation::DecrementWrap: return render::StencilOperation::DecrementWrap;
+        case render::StencilOperation::Keep: return render::StencilOperation::Keep;
+        case render::StencilOperation::Zero: return render::StencilOperation::Zero;
+        case render::StencilOperation::Replace: return render::StencilOperation::Replace;
+        case render::StencilOperation::Invert: return render::StencilOperation::Invert;
+        case render::StencilOperation::IncrementClamp: return render::StencilOperation::IncrementClamp;
+        case render::StencilOperation::DecrementClamp: return render::StencilOperation::DecrementClamp;
+        case render::StencilOperation::IncrementWrap: return render::StencilOperation::IncrementWrap;
+        case render::StencilOperation::DecrementWrap: return render::StencilOperation::DecrementWrap;
     }
     return render::StencilOperation::Keep;
 }
 
-render::BlendFactor ToRenderBlendFactor(shader::BlendFactor value) noexcept {
+render::BlendFactor ToRenderBlendFactor(render::BlendFactor value) noexcept {
     switch (value) {
-        case shader::BlendFactor::Zero: return render::BlendFactor::Zero;
-        case shader::BlendFactor::One: return render::BlendFactor::One;
-        case shader::BlendFactor::Src: return render::BlendFactor::Src;
-        case shader::BlendFactor::OneMinusSrc: return render::BlendFactor::OneMinusSrc;
-        case shader::BlendFactor::SrcAlpha: return render::BlendFactor::SrcAlpha;
-        case shader::BlendFactor::OneMinusSrcAlpha: return render::BlendFactor::OneMinusSrcAlpha;
-        case shader::BlendFactor::Dst: return render::BlendFactor::Dst;
-        case shader::BlendFactor::OneMinusDst: return render::BlendFactor::OneMinusDst;
-        case shader::BlendFactor::DstAlpha: return render::BlendFactor::DstAlpha;
-        case shader::BlendFactor::OneMinusDstAlpha: return render::BlendFactor::OneMinusDstAlpha;
-        case shader::BlendFactor::SrcAlphaSaturated: return render::BlendFactor::SrcAlphaSaturated;
-        case shader::BlendFactor::Constant: return render::BlendFactor::Constant;
-        case shader::BlendFactor::OneMinusConstant: return render::BlendFactor::OneMinusConstant;
-        case shader::BlendFactor::Src1: return render::BlendFactor::Src1;
-        case shader::BlendFactor::OneMinusSrc1: return render::BlendFactor::OneMinusSrc1;
-        case shader::BlendFactor::Src1Alpha: return render::BlendFactor::Src1Alpha;
-        case shader::BlendFactor::OneMinusSrc1Alpha: return render::BlendFactor::OneMinusSrc1Alpha;
+        case render::BlendFactor::Zero: return render::BlendFactor::Zero;
+        case render::BlendFactor::One: return render::BlendFactor::One;
+        case render::BlendFactor::Src: return render::BlendFactor::Src;
+        case render::BlendFactor::OneMinusSrc: return render::BlendFactor::OneMinusSrc;
+        case render::BlendFactor::SrcAlpha: return render::BlendFactor::SrcAlpha;
+        case render::BlendFactor::OneMinusSrcAlpha: return render::BlendFactor::OneMinusSrcAlpha;
+        case render::BlendFactor::Dst: return render::BlendFactor::Dst;
+        case render::BlendFactor::OneMinusDst: return render::BlendFactor::OneMinusDst;
+        case render::BlendFactor::DstAlpha: return render::BlendFactor::DstAlpha;
+        case render::BlendFactor::OneMinusDstAlpha: return render::BlendFactor::OneMinusDstAlpha;
+        case render::BlendFactor::SrcAlphaSaturated: return render::BlendFactor::SrcAlphaSaturated;
+        case render::BlendFactor::Constant: return render::BlendFactor::Constant;
+        case render::BlendFactor::OneMinusConstant: return render::BlendFactor::OneMinusConstant;
+        case render::BlendFactor::Src1: return render::BlendFactor::Src1;
+        case render::BlendFactor::OneMinusSrc1: return render::BlendFactor::OneMinusSrc1;
+        case render::BlendFactor::Src1Alpha: return render::BlendFactor::Src1Alpha;
+        case render::BlendFactor::OneMinusSrc1Alpha: return render::BlendFactor::OneMinusSrc1Alpha;
     }
     return render::BlendFactor::One;
 }
 
-render::BlendOperation ToRenderBlendOperation(shader::BlendOperation value) noexcept {
+render::BlendOperation ToRenderBlendOperation(render::BlendOperation value) noexcept {
     switch (value) {
-        case shader::BlendOperation::Add: return render::BlendOperation::Add;
-        case shader::BlendOperation::Subtract: return render::BlendOperation::Subtract;
-        case shader::BlendOperation::ReverseSubtract: return render::BlendOperation::ReverseSubtract;
-        case shader::BlendOperation::Min: return render::BlendOperation::Min;
-        case shader::BlendOperation::Max: return render::BlendOperation::Max;
+        case render::BlendOperation::Add: return render::BlendOperation::Add;
+        case render::BlendOperation::Subtract: return render::BlendOperation::Subtract;
+        case render::BlendOperation::ReverseSubtract: return render::BlendOperation::ReverseSubtract;
+        case render::BlendOperation::Min: return render::BlendOperation::Min;
+        case render::BlendOperation::Max: return render::BlendOperation::Max;
     }
     return render::BlendOperation::Add;
 }
 
-render::ColorWrites ToRenderColorWrites(shader::ColorWrites value) noexcept {
+render::ColorWrites ToRenderColorWrites(render::ColorWrites value) noexcept {
     return render::ColorWrites{value.value()};
 }
 
-render::BlendComponent ToRenderBlendComponent(const shader::BlendComponent& value) noexcept {
+render::BlendComponent ToRenderBlendComponent(const render::BlendComponent& value) noexcept {
     return render::BlendComponent{
         .Src = ToRenderBlendFactor(value.Src),
         .Dst = ToRenderBlendFactor(value.Dst),
         .Op = ToRenderBlendOperation(value.Op)};
 }
 
-render::BlendState ToRenderBlendState(const shader::BlendState& value) noexcept {
+render::BlendState ToRenderBlendState(const render::BlendState& value) noexcept {
     return render::BlendState{
         .Color = ToRenderBlendComponent(value.Color),
         .Alpha = ToRenderBlendComponent(value.Alpha)};
 }
 
-render::StencilFaceState ToRenderStencilFaceState(const shader::StencilFaceState& value) noexcept {
+render::StencilFaceState ToRenderStencilFaceState(const render::StencilFaceState& value) noexcept {
     return render::StencilFaceState{
         .Compare = ToRenderCompareFunction(value.Compare),
         .FailOp = ToRenderStencilOperation(value.FailOp),
@@ -123,7 +123,7 @@ render::StencilFaceState ToRenderStencilFaceState(const shader::StencilFaceState
         .PassOp = ToRenderStencilOperation(value.PassOp)};
 }
 
-render::StencilState ToRenderStencilState(const shader::StencilState& value) noexcept {
+render::StencilState ToRenderStencilState(const render::StencilState& value) noexcept {
     return render::StencilState{
         .Front = ToRenderStencilFaceState(value.Front),
         .Back = ToRenderStencilFaceState(value.Back),
@@ -133,10 +133,10 @@ render::StencilState ToRenderStencilState(const shader::StencilState& value) noe
 
 ShaderAsset::ShaderAsset(vector<ShaderPassDesc> passes) noexcept {
     _binary.Asset.Passes = std::move(passes);
-    _valid = shader::IsShaderAssetDataValid(_binary.Asset, false);
+    _valid = render::IsShaderAssetDataValid(_binary.Asset, false);
 }
 
-ShaderAsset::ShaderAsset(shader::ShaderBinary binary) noexcept
+ShaderAsset::ShaderAsset(render::ShaderBinary binary) noexcept
     : _binary(std::move(binary)) {
     _valid = _binary.IsValid();
 }
@@ -156,16 +156,16 @@ bool ShaderAsset::IsValid() const noexcept {
     return _valid;
 }
 
-Nullable<const shader::ShaderStageArtifact*> ShaderAsset::FindCompiledStage(
-    shader::ShaderTarget target,
+Nullable<const render::ShaderStageArtifact*> ShaderAsset::FindCompiledStage(
+    render::ShaderTarget target,
     uint32_t passIndex,
-    shader::ShaderStage stage,
+    render::ShaderStage stage,
     const vector<string>& defines) const noexcept {
     return _binary.FindStageArtifact(target, passIndex, stage, defines);
 }
 
-Nullable<const shader::ShaderProgramVariantArtifact*> ShaderAsset::FindProgramVariant(
-    shader::ShaderTarget target,
+Nullable<const render::ShaderProgramVariantArtifact*> ShaderAsset::FindProgramVariant(
+    render::ShaderTarget target,
     uint32_t passIndex,
     const vector<string>& defines) const noexcept {
     return _binary.FindProgramVariant(target, passIndex, defines);

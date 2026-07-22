@@ -40,109 +40,6 @@ private:
     HANDLE _event{nullptr};
 };
 
-class VersionedRootSignatureDescContainer {
-public:
-    struct DescriptorRange {
-        D3D12_DESCRIPTOR_RANGE_TYPE RangeType{};
-        UINT NumDescriptors{};
-        UINT BaseShaderRegister{};
-        UINT RegisterSpace{};
-        UINT OffsetInDescriptorsFromTableStart{};
-        D3D12_DESCRIPTOR_RANGE_FLAGS Flags{D3D12_DESCRIPTOR_RANGE_FLAG_NONE};
-    };
-
-    struct RootDescriptor {
-        UINT ShaderRegister{};
-        UINT RegisterSpace{};
-        D3D12_ROOT_DESCRIPTOR_FLAGS Flags{D3D12_ROOT_DESCRIPTOR_FLAG_NONE};
-    };
-
-    struct RootConstants {
-        UINT ShaderRegister{};
-        UINT RegisterSpace{};
-        UINT Num32BitValues{};
-    };
-
-    struct RootParameter {
-        D3D12_ROOT_PARAMETER_TYPE Type{};
-        D3D12_SHADER_VISIBILITY ShaderVisibility{D3D12_SHADER_VISIBILITY_ALL};
-        RootConstants Constants{};
-        RootDescriptor Descriptor{};
-        vector<DescriptorRange> Ranges;
-    };
-
-    struct StaticSampler {
-        D3D12_FILTER Filter{};
-        D3D12_TEXTURE_ADDRESS_MODE AddressU{};
-        D3D12_TEXTURE_ADDRESS_MODE AddressV{};
-        D3D12_TEXTURE_ADDRESS_MODE AddressW{};
-        FLOAT MipLODBias{};
-        UINT MaxAnisotropy{};
-        D3D12_COMPARISON_FUNC ComparisonFunc{};
-        D3D12_STATIC_BORDER_COLOR BorderColor{};
-        FLOAT MinLOD{};
-        FLOAT MaxLOD{};
-        UINT ShaderRegister{};
-        UINT RegisterSpace{};
-        D3D12_SHADER_VISIBILITY ShaderVisibility{D3D12_SHADER_VISIBILITY_ALL};
-        D3D12_SAMPLER_FLAGS Flags{D3D12_SAMPLER_FLAG_NONE};
-    };
-
-    struct RootParamRef {
-        size_t Index;
-        const RootParameter& Param;
-    };
-
-    class View {
-    public:
-        View() noexcept = default;
-        View(const View&) = delete;
-        View& operator=(const View&) = delete;
-        View(View&&) = default;
-        View& operator=(View&&) = default;
-
-        const D3D12_VERSIONED_ROOT_SIGNATURE_DESC* Get() const noexcept { return &_desc; }
-
-    private:
-        D3D12_VERSIONED_ROOT_SIGNATURE_DESC _desc{};
-        vector<D3D12_ROOT_PARAMETER> _params0;
-        vector<D3D12_DESCRIPTOR_RANGE> _ranges0;
-        vector<D3D12_STATIC_SAMPLER_DESC> _samplers0;
-        vector<D3D12_ROOT_PARAMETER1> _params1;
-        vector<D3D12_DESCRIPTOR_RANGE1> _ranges1;
-        vector<D3D12_STATIC_SAMPLER_DESC1> _samplers1;
-
-        friend class VersionedRootSignatureDescContainer;
-    };
-
-    VersionedRootSignatureDescContainer() noexcept = default;
-    explicit VersionedRootSignatureDescContainer(const D3D12_VERSIONED_ROOT_SIGNATURE_DESC& desc) noexcept;
-
-    View MakeView(D3D_ROOT_SIGNATURE_VERSION version) const noexcept;
-    View MakeView() const noexcept { return MakeView(_sourceVersion); }
-
-    D3D_ROOT_SIGNATURE_VERSION GetSourceVersion() const noexcept { return _sourceVersion; }
-    D3D12_ROOT_SIGNATURE_FLAGS GetFlags() const noexcept { return _flags; }
-    std::span<const RootParameter> GetParameters() const noexcept { return _parameters; }
-    std::span<const StaticSampler> GetStaticSamplers() const noexcept { return _staticSamplers; }
-
-    RootParamRef GetTable(size_t index) const noexcept;
-    size_t GetTableCount() const noexcept { return _tableOffsets.size(); }
-    RootParamRef GetRootConstant(size_t index) const noexcept;
-    size_t GetRootConstantCount() const noexcept { return _rootConstantsOffsets.size(); }
-    RootParamRef GetRootDescriptor(size_t index) const noexcept;
-    size_t GetRootDescriptorCount() const noexcept { return _rootDescriptorsOffsets.size(); }
-
-private:
-    D3D_ROOT_SIGNATURE_VERSION _sourceVersion{D3D_ROOT_SIGNATURE_VERSION_1};
-    D3D12_ROOT_SIGNATURE_FLAGS _flags{D3D12_ROOT_SIGNATURE_FLAG_NONE};
-    vector<RootParameter> _parameters;
-    vector<StaticSampler> _staticSamplers;
-
-    vector<size_t> _tableOffsets;
-    vector<size_t> _rootConstantsOffsets;
-    vector<size_t> _rootDescriptorsOffsets;
-};
 
 std::string_view GetErrorName(HRESULT hr) noexcept;
 
@@ -183,8 +80,6 @@ D3D12_FILTER_TYPE MapType(FilterMode v) noexcept;
 D3D12_FILTER MapType(FilterMode mig, FilterMode mag, FilterMode mipmap, bool hasCompare, uint32_t aniso) noexcept;
 D3D12_TEXTURE_ADDRESS_MODE MapType(AddressMode v) noexcept;
 D3D12_RESOURCE_STATES MapMemoryTypeToResourceState(MemoryType v) noexcept;
-D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAGS MapBuildFlags(AccelerationStructureBuildFlags flags) noexcept;
-std::optional<D3D12_HIT_GROUP_TYPE> GetHitGroupType(const RayTracingHitGroupDescriptor& group) noexcept;
 
 }  // namespace radray::render::d3d12
 
@@ -196,7 +91,6 @@ std::string_view format_as(D3D12_DESCRIPTOR_HEAP_TYPE v) noexcept;
 std::string_view format_as(D3D_ROOT_SIGNATURE_VERSION v) noexcept;
 std::string_view format_as(D3D12_ROOT_PARAMETER_TYPE v) noexcept;
 std::string_view format_as(D3D12_COMMAND_LIST_TYPE v) noexcept;
-std::string_view format_as(D3D12_RAYTRACING_TIER v) noexcept;
 std::string_view format_as(D3D12_MESSAGE_SEVERITY v) noexcept;
 std::string_view format_as(D3D12_MESSAGE_CATEGORY v) noexcept;
 
