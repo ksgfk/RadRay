@@ -239,6 +239,44 @@ static_assert(is_allocator<CpuDescriptorAllocator, CpuDescriptorAllocator::Alloc
 
 using CpuDescriptorHeapViewRAII = DescriptorHeapViewRAII<CpuDescriptorAllocator, CpuDescriptorAllocator::Allocation>;
 
+class GpuDescriptorAllocator {
+public:
+    struct Allocation {
+        DescriptorHeap* Heap{nullptr};
+        UINT Start{0};
+        UINT Length{0};
+
+        FirstFitAllocator::Allocation ParentAllocation;
+
+        static constexpr Allocation Invalid() noexcept {
+            return {nullptr, 0, 0, FirstFitAllocator::Allocation::Invalid()};
+        }
+    };
+
+    static_assert(is_desc_heap_view_like<Allocation>, "GpuDescriptorAllocator::Allocation is not a desc heap view like");
+
+    GpuDescriptorAllocator(
+        ID3D12Device* device,
+        D3D12_DESCRIPTOR_HEAP_TYPE type,
+        UINT size) noexcept;
+
+    std::optional<GpuDescriptorAllocator::Allocation> Allocate(UINT count) noexcept;
+
+    void Destroy(GpuDescriptorAllocator::Allocation allocation) noexcept;
+
+    ID3D12DescriptorHeap* GetNative() const noexcept { return _heap->Get(); }
+    DescriptorHeap* GetHeap() const noexcept { return _heap.get(); }
+
+private:
+    ID3D12Device* _device;
+    unique_ptr<DescriptorHeap> _heap;
+    FirstFitAllocator _allocator;
+};
+
+static_assert(is_allocator<GpuDescriptorAllocator, GpuDescriptorAllocator::Allocation>, "GpuDescriptorAllocator is not an allocator");
+
+using GpuDescriptorHeapViewRAII = DescriptorHeapViewRAII<GpuDescriptorAllocator, GpuDescriptorAllocator::Allocation>;
+
 class DXGIFactoryImpl final : public DXGIFactory {
 public:
     DXGIFactoryImpl(
@@ -333,6 +371,8 @@ public:
     unique_ptr<CpuDescriptorAllocator> _cpuRtvAlloc;
     unique_ptr<CpuDescriptorAllocator> _cpuDsvAlloc;
     unique_ptr<CpuDescriptorAllocator> _cpuSamplerAlloc;
+    unique_ptr<GpuDescriptorAllocator> _gpuResHeap;
+    unique_ptr<GpuDescriptorAllocator> _gpuSamplerHeap;
     DeviceDetail _detail;
     CD3DX12FeatureSupport _features;
     bool _isAllowTearing = false;

@@ -471,6 +471,34 @@ void CpuDescriptorAllocator::TryReleaseFreePages() noexcept {
     }
 }
 
+GpuDescriptorAllocator::GpuDescriptorAllocator(
+    ID3D12Device* device,
+    D3D12_DESCRIPTOR_HEAP_TYPE type,
+    UINT size) noexcept
+    : _device(device),
+      _allocator(size) {
+    _heap = make_unique<DescriptorHeap>(
+        _device,
+        D3D12_DESCRIPTOR_HEAP_DESC{
+            type,
+            static_cast<UINT>(size),
+            D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,
+            0});
+}
+
+std::optional<GpuDescriptorAllocator::Allocation> GpuDescriptorAllocator::Allocate(UINT count) noexcept {
+    const auto allocation = _allocator.Allocate(count);
+    if (!allocation.has_value()) {
+        return std::nullopt;
+    }
+    const auto& v = allocation.value();
+    return std::make_optional(GpuDescriptorAllocator::Allocation{_heap.get(), static_cast<UINT>(v.Start), count, v});
+}
+
+void GpuDescriptorAllocator::Destroy(GpuDescriptorAllocator::Allocation allocation) noexcept {
+    _allocator.Destroy(allocation.ParentAllocation);
+}
+
 DXGIFactoryImpl::DXGIFactoryImpl(
     ComPtr<IDXGIFactory4> factory,
     const DXGIFactoryDescriptor& desc) noexcept
@@ -558,6 +586,8 @@ DeviceD3D12::DeviceD3D12(
     _cpuRtvAlloc = make_unique<CpuDescriptorAllocator>(_device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 128, 1);
     _cpuDsvAlloc = make_unique<CpuDescriptorAllocator>(_device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_DSV, 128, 1);
     _cpuSamplerAlloc = make_unique<CpuDescriptorAllocator>(_device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, 128, 1);
+    _gpuResHeap = make_unique<GpuDescriptorAllocator>(_device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 1 << 16);
+    _gpuSamplerHeap = make_unique<GpuDescriptorAllocator>(_device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, 1 << 8);
     _features.Init(_device.Get());
 }
 
@@ -1524,10 +1554,10 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateRootSignatureInternal(cons
             errorBlob.GetAddressOf());
         FAILED(hr)) {
         const auto error = errorBlob != nullptr
-                         ? std::string_view{
-                               static_cast<const char*>(errorBlob->GetBufferPointer()),
-                               errorBlob->GetBufferSize()}
-                         : std::string_view{};
+                               ? std::string_view{
+                                     static_cast<const char*>(errorBlob->GetBufferPointer()),
+                                     errorBlob->GetBufferSize()}
+                               : std::string_view{};
         RADRAY_ERR_LOG("D3D12SerializeRootSignature failed: {} {}\\n{}", GetErrorName(hr), hr, error);
         return nullptr;
     }
