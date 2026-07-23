@@ -7,7 +7,7 @@
 #include <radray/types.h>
 #include <radray/logger.h>
 #include <radray/utility.h>
-#include <radray/render/common.h>
+#include <radray/render/rhi.h>
 
 #include <radray/platform/win32_headers.h>
 #include <wrl.h>

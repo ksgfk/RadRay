@@ -24,7 +24,7 @@
             "Name": "fmt",
             "Type": "git",
             "Git": "https://github.com/fmtlib/fmt.git",
-            "Tag": "12.1.0"
+            "Tag": "12.2.0"
         },
         {
             "Name": "spdlog",
@@ -65,7 +65,7 @@
             "Name": "mimalloc",
             "Type": "git",
             "Git": "https://github.com/microsoft/mimalloc.git",
-            "Tag": "v3.3.2"
+            "Tag": "v3.4.3"
         },
         {
             "Name": "zlib",
@@ -83,7 +83,7 @@
             "Name": "libjpeg-turbo",
             "Type": "git",
             "Git": "https://github.com/libjpeg-turbo/libjpeg-turbo.git",
-            "Tag": "3.1.4.1"
+            "Tag": "3.2.0"
         },
         {
             "Name": "cgltf",

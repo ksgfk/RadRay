@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <bit>
 #include <cstring>
+#include <limits>
 #include <radray/scope_guard.h>
 #include <type_traits>
 
@@ -1079,31 +1080,396 @@ Nullable<unique_ptr<Shader>> DeviceVulkan::CreateShader(const ShaderDescriptor& 
     return make_unique<ShaderModuleVulkan>(this, shaderModule, desc.Stages);
 }
 
-Nullable<unique_ptr<PipelineLayoutVulkan>> DeviceVulkan::CreateRootSignatureInternal(const PipelineLayoutDescriptor&) noexcept {
-    VkPipelineLayoutCreateInfo createInfo{};
-    createInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    createInfo.pNext = nullptr;
-    createInfo.flags = 0;
-    createInfo.setLayoutCount = 0;
-    createInfo.pSetLayouts = nullptr;
-    createInfo.pushConstantRangeCount = 0;
+static std::optional<VkDescriptorType> MapPipelineLayoutDescriptorTypeVulkan(
+    ShaderParameterBindingType type) noexcept {
+    switch (type) {
+        case ShaderParameterBindingType::CBuffer:
+            return VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        case ShaderParameterBindingType::Buffer:
+        case ShaderParameterBindingType::RWBuffer:
+            return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        case ShaderParameterBindingType::TexelBuffer:
+            return VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER;
+        case ShaderParameterBindingType::RWTexelBuffer:
+            return VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER;
+        case ShaderParameterBindingType::Texture:
+            return VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+        case ShaderParameterBindingType::RWTexture:
+            return VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        case ShaderParameterBindingType::DynamicCBuffer:
+            return VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+        case ShaderParameterBindingType::DynamicBuffer:
+        case ShaderParameterBindingType::DynamicRWBuffer:
+            return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC;
+        case ShaderParameterBindingType::Sampler:
+            return VK_DESCRIPTOR_TYPE_SAMPLER;
+        case ShaderParameterBindingType::UNKNOWN:
+            return std::nullopt;
+    }
+    return std::nullopt;
+}
 
-    VkPipelineLayout layout = VK_NULL_HANDLE;
+static bool IsDynamicPipelineLayoutBindingVulkan(
+    ShaderParameterBindingType type) noexcept {
+    return type == ShaderParameterBindingType::DynamicCBuffer ||
+           type == ShaderParameterBindingType::DynamicBuffer ||
+           type == ShaderParameterBindingType::DynamicRWBuffer;
+}
+
+struct PipelineLayoutDescriptorCountsVulkan {
+    uint64_t Samplers{0};
+    uint64_t UniformBuffers{0};
+    uint64_t DynamicUniformBuffers{0};
+    uint64_t StorageBuffers{0};
+    uint64_t DynamicStorageBuffers{0};
+    uint64_t SampledImages{0};
+    uint64_t StorageImages{0};
+    uint64_t Resources{0};
+};
+
+static void AddPipelineLayoutDescriptorCountVulkan(
+    PipelineLayoutDescriptorCountsVulkan& counts,
+    VkDescriptorType type,
+    uint32_t count) noexcept {
+    switch (type) {
+        case VK_DESCRIPTOR_TYPE_SAMPLER:
+            counts.Samplers += count;
+            return;
+        case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:
+            counts.UniformBuffers += count;
+            counts.Resources += count;
+            return;
+        case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC:
+            counts.UniformBuffers += count;
+            counts.DynamicUniformBuffers += count;
+            counts.Resources += count;
+            return;
+        case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:
+            counts.StorageBuffers += count;
+            counts.Resources += count;
+            return;
+        case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC:
+            counts.StorageBuffers += count;
+            counts.DynamicStorageBuffers += count;
+            counts.Resources += count;
+            return;
+        case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE:
+        case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER:
+            counts.SampledImages += count;
+            counts.Resources += count;
+            return;
+        case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE:
+        case VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER:
+            counts.StorageImages += count;
+            counts.Resources += count;
+            return;
+        default:
+            Unreachable();
+    }
+}
+
+static bool ValidatePipelineLayoutTotalDescriptorCountsVulkan(
+    const PipelineLayoutDescriptorCountsVulkan& counts,
+    const VkPhysicalDeviceLimits& limits) noexcept {
+    auto validate = [](uint64_t actual, uint32_t limit, std::string_view name) noexcept {
+        if (actual <= limit) {
+            return true;
+        }
+        RADRAY_ERR_LOG(
+            "vk pipeline layout exceeds {}: {} > {}",
+            name,
+            actual,
+            limit);
+        return false;
+    };
+    return validate(counts.Samplers, limits.maxDescriptorSetSamplers, "maxDescriptorSetSamplers") &&
+           validate(counts.UniformBuffers, limits.maxDescriptorSetUniformBuffers, "maxDescriptorSetUniformBuffers") &&
+           validate(counts.DynamicUniformBuffers, limits.maxDescriptorSetUniformBuffersDynamic, "maxDescriptorSetUniformBuffersDynamic") &&
+           validate(counts.StorageBuffers, limits.maxDescriptorSetStorageBuffers, "maxDescriptorSetStorageBuffers") &&
+           validate(counts.DynamicStorageBuffers, limits.maxDescriptorSetStorageBuffersDynamic, "maxDescriptorSetStorageBuffersDynamic") &&
+           validate(counts.SampledImages, limits.maxDescriptorSetSampledImages, "maxDescriptorSetSampledImages") &&
+           validate(counts.StorageImages, limits.maxDescriptorSetStorageImages, "maxDescriptorSetStorageImages");
+}
+
+static bool ValidatePipelineLayoutStageDescriptorCountsVulkan(
+    const PipelineLayoutDescriptorCountsVulkan& counts,
+    const VkPhysicalDeviceLimits& limits,
+    ShaderStage stage) noexcept {
+    auto validate = [stage](uint64_t actual, uint32_t limit, std::string_view name) noexcept {
+        if (actual <= limit) {
+            return true;
+        }
+        RADRAY_ERR_LOG(
+            "vk pipeline layout exceeds {} for {} stage: {} > {}",
+            name,
+            stage,
+            actual,
+            limit);
+        return false;
+    };
+    return validate(counts.Samplers, limits.maxPerStageDescriptorSamplers, "maxPerStageDescriptorSamplers") &&
+           validate(counts.UniformBuffers, limits.maxPerStageDescriptorUniformBuffers, "maxPerStageDescriptorUniformBuffers") &&
+           validate(counts.StorageBuffers, limits.maxPerStageDescriptorStorageBuffers, "maxPerStageDescriptorStorageBuffers") &&
+           validate(counts.SampledImages, limits.maxPerStageDescriptorSampledImages, "maxPerStageDescriptorSampledImages") &&
+           validate(counts.StorageImages, limits.maxPerStageDescriptorStorageImages, "maxPerStageDescriptorStorageImages") &&
+           validate(counts.Resources, limits.maxPerStageResources, "maxPerStageResources");
+}
+
+Nullable<unique_ptr<PipelineLayoutVulkan>> DeviceVulkan::CreatePipelineLayoutInternal(
+    const PipelineLayoutDescriptor& desc) noexcept {
+    const VkPhysicalDeviceLimits& limits = _properties.limits;
+    uint32_t setLayoutCount = 0;
+    for (const ShaderParameterSetLayoutDescriptor& parameterSet : desc.ParameterSets) {
+        if (parameterSet.GroupIndex >= limits.maxBoundDescriptorSets) {
+            RADRAY_ERR_LOG(
+                "vk pipeline layout group index exceeds maxBoundDescriptorSets: {} >= {}",
+                parameterSet.GroupIndex,
+                limits.maxBoundDescriptorSets);
+            return nullptr;
+        }
+        setLayoutCount = std::max(setLayoutCount, parameterSet.GroupIndex + 1);
+    }
+
+    vector<vector<ShaderParameterSetLayoutEntryDescriptor>> groupEntries(setLayoutCount);
+    for (const ShaderParameterSetLayoutDescriptor& parameterSet : desc.ParameterSets) {
+        vector<ShaderParameterSetLayoutEntryDescriptor>& entries =
+            groupEntries[parameterSet.GroupIndex];
+        constexpr size_t maxBindingCount = std::numeric_limits<uint32_t>::max();
+        if (entries.size() > maxBindingCount ||
+            parameterSet.Entries.size() > maxBindingCount - entries.size()) {
+            RADRAY_ERR_LOG(
+                "vk pipeline layout has too many bindings in group {}",
+                parameterSet.GroupIndex);
+            return nullptr;
+        }
+        entries.insert(
+            entries.end(),
+            parameterSet.Entries.begin(),
+            parameterSet.Entries.end());
+    }
+
+    PipelineLayoutDescriptorCountsVulkan totalCounts{};
+    struct StageDescriptorCounts {
+        VkShaderStageFlagBits NativeStage;
+        ShaderStage Stage;
+        PipelineLayoutDescriptorCountsVulkan Counts;
+    };
+    std::array<StageDescriptorCounts, 3> stageCounts{{
+        {VK_SHADER_STAGE_VERTEX_BIT, ShaderStage::Vertex, {}},
+        {VK_SHADER_STAGE_FRAGMENT_BIT, ShaderStage::Pixel, {}},
+        {VK_SHADER_STAGE_COMPUTE_BIT, ShaderStage::Compute, {}},
+    }};
+    size_t immutableSamplerCount = 0;
+
+    for (uint32_t groupIndex = 0; groupIndex < setLayoutCount; ++groupIndex) {
+        vector<ShaderParameterSetLayoutEntryDescriptor>& entries = groupEntries[groupIndex];
+        std::sort(
+            entries.begin(),
+            entries.end(),
+            [](const ShaderParameterSetLayoutEntryDescriptor& lhs,
+               const ShaderParameterSetLayoutEntryDescriptor& rhs) noexcept {
+                return lhs.Binding < rhs.Binding;
+            });
+        for (size_t i = 1; i < entries.size(); ++i) {
+            if (entries[i - 1].Binding == entries[i].Binding) {
+                RADRAY_ERR_LOG(
+                    "vk pipeline layout contains duplicate binding {} in group {}",
+                    entries[i].Binding,
+                    groupIndex);
+                return nullptr;
+            }
+        }
+
+        for (const ShaderParameterSetLayoutEntryDescriptor& entry : entries) {
+            if (entry.Count == 0) {
+                RADRAY_ERR_LOG(
+                    "vk pipeline layout binding has zero count: group {} binding {}",
+                    groupIndex,
+                    entry.Binding);
+                return nullptr;
+            }
+            const auto descriptorType = MapPipelineLayoutDescriptorTypeVulkan(entry.Type);
+            if (!descriptorType.has_value()) {
+                RADRAY_ERR_LOG(
+                    "vk pipeline layout binding has unknown type: group {} binding {} type {}",
+                    groupIndex,
+                    entry.Binding,
+                    static_cast<int32_t>(entry.Type));
+                return nullptr;
+            }
+            const VkShaderStageFlags stages = MapType(entry.Stages);
+            if (stages == 0) {
+                RADRAY_ERR_LOG(
+                    "vk pipeline layout binding has no shader stages: group {} binding {}",
+                    groupIndex,
+                    entry.Binding);
+                return nullptr;
+            }
+            if (entry.ImmutableSampler.has_value() &&
+                (entry.Type != ShaderParameterBindingType::Sampler || entry.Count != 1)) {
+                RADRAY_ERR_LOG(
+                    "vk immutable sampler must have sampler type and count 1: group {} binding {}",
+                    groupIndex,
+                    entry.Binding);
+                return nullptr;
+            }
+            if (IsDynamicPipelineLayoutBindingVulkan(entry.Type) && entry.Count != 1) {
+                RADRAY_ERR_LOG(
+                    "vk dynamic binding must have count 1: group {} binding {} count {}",
+                    groupIndex,
+                    entry.Binding,
+                    entry.Count);
+                return nullptr;
+            }
+            if (entry.Count - 1 >
+                std::numeric_limits<uint32_t>::max() - entry.Binding) {
+                RADRAY_ERR_LOG(
+                    "vk pipeline layout binding range overflows: group {} binding {} count {}",
+                    groupIndex,
+                    entry.Binding,
+                    entry.Count);
+                return nullptr;
+            }
+
+            AddPipelineLayoutDescriptorCountVulkan(
+                totalCounts,
+                descriptorType.value(),
+                entry.Count);
+            for (StageDescriptorCounts& stageCount : stageCounts) {
+                if ((stages & stageCount.NativeStage) != 0) {
+                    AddPipelineLayoutDescriptorCountVulkan(
+                        stageCount.Counts,
+                        descriptorType.value(),
+                        entry.Count);
+                }
+            }
+            immutableSamplerCount += entry.ImmutableSampler.has_value() ? 1 : 0;
+        }
+    }
+
+    if (!ValidatePipelineLayoutTotalDescriptorCountsVulkan(totalCounts, limits)) {
+        return nullptr;
+    }
+    for (const StageDescriptorCounts& stageCount : stageCounts) {
+        if (!ValidatePipelineLayoutStageDescriptorCountsVulkan(
+                stageCount.Counts,
+                limits,
+                stageCount.Stage)) {
+            return nullptr;
+        }
+    }
+
+    VkPushConstantRange pushConstantRange{};
+    if (desc.PushConstant.has_value()) {
+        const PushConstantDescriptor& pushConstant = desc.PushConstant.value();
+        if (pushConstant.Size == 0 || pushConstant.Size % 4 != 0) {
+            RADRAY_ERR_LOG(
+                "vk pipeline layout push constant size must be non-zero and 4-byte aligned: {}",
+                pushConstant.Size);
+            return nullptr;
+        }
+        if (pushConstant.Size > limits.maxPushConstantsSize) {
+            RADRAY_ERR_LOG(
+                "vk pipeline layout push constant size exceeds maxPushConstantsSize: {} > {}",
+                pushConstant.Size,
+                limits.maxPushConstantsSize);
+            return nullptr;
+        }
+        pushConstantRange.stageFlags = MapType(pushConstant.Stages);
+        if (pushConstantRange.stageFlags == 0) {
+            RADRAY_ERR_LOG("vk pipeline layout push constant has no shader stages");
+            return nullptr;
+        }
+        pushConstantRange.offset = 0;
+        pushConstantRange.size = pushConstant.Size;
+    }
+
+    auto result = make_unique<PipelineLayoutVulkan>(this);
+    result->_setLayouts.reserve(setLayoutCount);
+    result->_setLayoutBindings.resize(setLayoutCount);
+    result->_immutableSamplerHandles.resize(setLayoutCount);
+    result->_immutableSamplers.reserve(immutableSamplerCount);
+    if (desc.PushConstant.has_value()) {
+        result->_pushConstantRange = pushConstantRange;
+    }
+    for (uint32_t groupIndex = 0; groupIndex < setLayoutCount; ++groupIndex) {
+        const vector<ShaderParameterSetLayoutEntryDescriptor>& entries =
+            groupEntries[groupIndex];
+        vector<VkSampler>& immutableSamplerHandles =
+            result->_immutableSamplerHandles[groupIndex];
+        immutableSamplerHandles.resize(entries.size(), VK_NULL_HANDLE);
+        vector<VkDescriptorSetLayoutBinding>& bindings =
+            result->_setLayoutBindings[groupIndex];
+        bindings.reserve(entries.size());
+
+        for (size_t i = 0; i < entries.size(); ++i) {
+            const ShaderParameterSetLayoutEntryDescriptor& entry = entries[i];
+            if (entry.ImmutableSampler.has_value()) {
+                auto sampler = CreateSamplerInternal(entry.ImmutableSampler.value());
+                if (!sampler.HasValue()) {
+                    RADRAY_ERR_LOG(
+                        "vk pipeline layout failed to create immutable sampler: group {} binding {}",
+                        groupIndex,
+                        entry.Binding);
+                    return nullptr;
+                }
+                immutableSamplerHandles[i] = sampler.Get()->_sampler;
+                result->_immutableSamplers.push_back(sampler.Release());
+            }
+
+            const auto descriptorType = MapPipelineLayoutDescriptorTypeVulkan(entry.Type);
+            RADRAY_ASSERT(descriptorType.has_value());
+            VkDescriptorSetLayoutBinding binding{};
+            binding.binding = entry.Binding;
+            binding.descriptorType = descriptorType.value();
+            binding.descriptorCount = entry.Count;
+            binding.stageFlags = MapType(entry.Stages);
+            binding.pImmutableSamplers = immutableSamplerHandles[i] != VK_NULL_HANDLE
+                                             ? &immutableSamplerHandles[i]
+                                             : nullptr;
+            bindings.push_back(binding);
+        }
+
+        VkDescriptorSetLayoutCreateInfo setLayoutCreateInfo{};
+        setLayoutCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        setLayoutCreateInfo.pNext = nullptr;
+        setLayoutCreateInfo.flags = 0;
+        setLayoutCreateInfo.bindingCount = static_cast<uint32_t>(bindings.size());
+        setLayoutCreateInfo.pBindings = bindings.empty() ? nullptr : bindings.data();
+
+        VkDescriptorSetLayout setLayout = VK_NULL_HANDLE;
+        if (auto vr = _ftb.vkCreateDescriptorSetLayout(
+                _device,
+                &setLayoutCreateInfo,
+                GetAllocationCallbacks(),
+                &setLayout);
+            vr != VK_SUCCESS) {
+            RADRAY_ERR_LOG(
+                "vkCreateDescriptorSetLayout failed for group {}: {}",
+                groupIndex,
+                vr);
+            return nullptr;
+        }
+        result->_setLayouts.push_back(setLayout);
+    }
+
+    result->RebindNativePointers();
+
     if (auto vr = _ftb.vkCreatePipelineLayout(
             _device,
-            &createInfo,
-            this->GetAllocationCallbacks(),
-            &layout);
+            &result->_desc,
+            GetAllocationCallbacks(),
+            &result->_layout);
         vr != VK_SUCCESS) {
         RADRAY_ERR_LOG("vkCreatePipelineLayout failed: {}", vr);
         return nullptr;
     }
-    return make_unique<PipelineLayoutVulkan>(this, layout);
+    return result;
 }
 
 Nullable<unique_ptr<PipelineLayout>> DeviceVulkan::CreatePipelineLayout(
     const PipelineLayoutDescriptor& desc) noexcept {
-    auto layout = CreateRootSignatureInternal(desc);
+    auto layout = CreatePipelineLayoutInternal(desc);
     if (!layout.HasValue()) {
         return nullptr;
     }
@@ -1366,7 +1732,8 @@ Nullable<unique_ptr<ComputePipelineState>> DeviceVulkan::CreateComputePipelineSt
 }
 
 
-Nullable<unique_ptr<Sampler>> DeviceVulkan::CreateSampler(const SamplerDescriptor& desc) noexcept {
+Nullable<unique_ptr<SamplerVulkan>> DeviceVulkan::CreateSamplerInternal(
+    const SamplerDescriptor& desc) noexcept {
     VkSamplerCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
     createInfo.pNext = nullptr;
@@ -1400,6 +1767,15 @@ Nullable<unique_ptr<Sampler>> DeviceVulkan::CreateSampler(const SamplerDescripto
     auto result = make_unique<SamplerVulkan>(this, sampler);
     result->_mdesc = desc;
     return result;
+}
+
+Nullable<unique_ptr<Sampler>> DeviceVulkan::CreateSampler(
+    const SamplerDescriptor& desc) noexcept {
+    auto sampler = CreateSamplerInternal(desc);
+    if (!sampler.HasValue()) {
+        return nullptr;
+    }
+    return unique_ptr<Sampler>{sampler.Release()};
 }
 
 Nullable<unique_ptr<LegacyFenceVulkan>> DeviceVulkan::CreateLegacyFence(VkFenceCreateFlags flags) noexcept {
@@ -3998,11 +4374,8 @@ void ImageViewVulkan::DestroyImpl() noexcept {
     }
 }
 
-PipelineLayoutVulkan::PipelineLayoutVulkan(
-    DeviceVulkan* device,
-    VkPipelineLayout layout) noexcept
-    : _device(device),
-      _layout(layout) {}
+PipelineLayoutVulkan::PipelineLayoutVulkan(DeviceVulkan* device) noexcept
+    : _device(device) {}
 
 PipelineLayoutVulkan::~PipelineLayoutVulkan() noexcept {
     DestroyImpl();
@@ -4022,14 +4395,56 @@ void PipelineLayoutVulkan::SetDebugName(std::string_view name) noexcept {
     }
 }
 
-void PipelineLayoutVulkan::DestroyImpl() noexcept {
-    if (_device != nullptr && _layout != VK_NULL_HANDLE) {
-        _device->_ftb.vkDestroyPipelineLayout(
-            _device->_device,
-            _layout,
-            _device->GetAllocationCallbacks());
+void PipelineLayoutVulkan::RebindNativePointers() noexcept {
+    RADRAY_ASSERT(_setLayoutBindings.size() == _immutableSamplerHandles.size());
+    for (size_t groupIndex = 0; groupIndex < _setLayoutBindings.size(); ++groupIndex) {
+        vector<VkDescriptorSetLayoutBinding>& bindings = _setLayoutBindings[groupIndex];
+        vector<VkSampler>& immutableSamplers = _immutableSamplerHandles[groupIndex];
+        RADRAY_ASSERT(bindings.size() == immutableSamplers.size());
+        for (size_t bindingIndex = 0; bindingIndex < bindings.size(); ++bindingIndex) {
+            bindings[bindingIndex].pImmutableSamplers =
+                immutableSamplers[bindingIndex] != VK_NULL_HANDLE
+                    ? &immutableSamplers[bindingIndex]
+                    : nullptr;
+        }
     }
+
+    _desc = {};
+    _desc.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    _desc.pNext = nullptr;
+    _desc.flags = 0;
+    _desc.setLayoutCount = static_cast<uint32_t>(_setLayouts.size());
+    _desc.pSetLayouts = _setLayouts.empty() ? nullptr : _setLayouts.data();
+    _desc.pushConstantRangeCount = _pushConstantRange.has_value() ? 1 : 0;
+    _desc.pPushConstantRanges = _pushConstantRange.has_value()
+                                    ? &_pushConstantRange.value()
+                                    : nullptr;
+}
+
+void PipelineLayoutVulkan::DestroyImpl() noexcept {
+    if (_device != nullptr) {
+        if (_layout != VK_NULL_HANDLE) {
+            _device->_ftb.vkDestroyPipelineLayout(
+                _device->_device,
+                _layout,
+                _device->GetAllocationCallbacks());
+        }
+        for (VkDescriptorSetLayout setLayout : _setLayouts) {
+            if (setLayout != VK_NULL_HANDLE) {
+                _device->_ftb.vkDestroyDescriptorSetLayout(
+                    _device->_device,
+                    setLayout,
+                    _device->GetAllocationCallbacks());
+            }
+        }
+    }
+    _desc = {};
     _layout = VK_NULL_HANDLE;
+    _setLayouts.clear();
+    _setLayoutBindings.clear();
+    _immutableSamplerHandles.clear();
+    _pushConstantRange.reset();
+    _immutableSamplers.clear();
     _device = nullptr;
 }
 bool GraphicsPipelineVulkan::IsValid() const noexcept {

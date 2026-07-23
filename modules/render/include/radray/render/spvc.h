@@ -4,7 +4,7 @@
 #include <span>
 #include <string_view>
 
-#include <radray/render/common.h>
+#include <radray/render/rhi.h>
 #include <radray/render/msl.h>
 #include <radray/render/spirv.h>
 

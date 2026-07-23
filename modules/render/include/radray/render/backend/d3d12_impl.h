@@ -9,7 +9,7 @@
 #include <radray/hash.h>
 
 #include <radray/render/backend/d3d12_helper.h>
-#include <radray/render/common.h>
+#include <radray/render/rhi.h>
 
 namespace radray::render::d3d12 {
 
@@ -773,8 +773,8 @@ public:
 
 class RootSigD3D12 final : public PipelineLayout {
 public:
-    explicit RootSigD3D12(ComPtr<ID3D12RootSignature> rootSig) noexcept;
-    ~RootSigD3D12() noexcept override = default;
+    RootSigD3D12() noexcept = default;
+    ~RootSigD3D12() noexcept override;
 
     bool IsValid() const noexcept override;
 
@@ -782,7 +782,13 @@ public:
 
     void SetDebugName(std::string_view name) noexcept override;
 
+    void RebindNativePointers() noexcept;
+
 public:
+    D3D12_VERSIONED_ROOT_SIGNATURE_DESC _desc{};
+    vector<D3D12_ROOT_PARAMETER1> _rootParameters;
+    vector<vector<D3D12_DESCRIPTOR_RANGE1>> _descriptorRanges;
+    vector<D3D12_STATIC_SAMPLER_DESC> _staticSamplers;
     ComPtr<ID3D12RootSignature> _rootSig;
 };
 

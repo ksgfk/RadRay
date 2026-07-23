@@ -1541,15 +1541,433 @@ Nullable<unique_ptr<Shader>> DeviceD3D12::CreateShader(const ShaderDescriptor& d
     return make_unique<Dxil>(desc.Source.begin(), desc.Source.end(), desc.Stages);
 }
 
-Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateRootSignatureInternal(const PipelineLayoutDescriptor&) noexcept {
-    D3D12_ROOT_SIGNATURE_DESC desc{};
-    desc.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+enum class PipelineLayoutRegisterType : uint8_t {
+    Cbv,
+    Srv,
+    Uav,
+    Sampler,
+};
+
+struct PipelineLayoutRegisterRange {
+    PipelineLayoutRegisterType Type;
+    uint32_t Space;
+    uint32_t Binding;
+    uint32_t Count;
+    uint32_t LastBinding;
+};
+
+struct PipelineLayoutGroup {
+    uint32_t Index;
+    vector<ShaderParameterSetLayoutEntryDescriptor> Entries;
+};
+
+static std::optional<PipelineLayoutRegisterType> MapPipelineLayoutRegisterType(
+    ShaderParameterBindingType type) noexcept {
+    switch (type) {
+        case ShaderParameterBindingType::CBuffer:
+        case ShaderParameterBindingType::DynamicCBuffer:
+            return PipelineLayoutRegisterType::Cbv;
+        case ShaderParameterBindingType::Buffer:
+        case ShaderParameterBindingType::TexelBuffer:
+        case ShaderParameterBindingType::Texture:
+        case ShaderParameterBindingType::DynamicBuffer:
+            return PipelineLayoutRegisterType::Srv;
+        case ShaderParameterBindingType::RWBuffer:
+        case ShaderParameterBindingType::RWTexelBuffer:
+        case ShaderParameterBindingType::RWTexture:
+        case ShaderParameterBindingType::DynamicRWBuffer:
+            return PipelineLayoutRegisterType::Uav;
+        case ShaderParameterBindingType::Sampler:
+            return PipelineLayoutRegisterType::Sampler;
+        case ShaderParameterBindingType::UNKNOWN:
+            return std::nullopt;
+    }
+    return std::nullopt;
+}
+
+static std::string_view GetPipelineLayoutRegisterTypeName(
+    PipelineLayoutRegisterType type) noexcept {
+    switch (type) {
+        case PipelineLayoutRegisterType::Cbv: return "CBV";
+        case PipelineLayoutRegisterType::Srv: return "SRV";
+        case PipelineLayoutRegisterType::Uav: return "UAV";
+        case PipelineLayoutRegisterType::Sampler: return "Sampler";
+    }
+    Unreachable();
+}
+
+static bool IsDynamicPipelineLayoutBinding(ShaderParameterBindingType type) noexcept {
+    return type == ShaderParameterBindingType::DynamicCBuffer ||
+           type == ShaderParameterBindingType::DynamicBuffer ||
+           type == ShaderParameterBindingType::DynamicRWBuffer;
+}
+
+static std::optional<D3D12_ROOT_PARAMETER_TYPE> MapDynamicRootParameterType(
+    ShaderParameterBindingType type) noexcept {
+    switch (type) {
+        case ShaderParameterBindingType::DynamicCBuffer:
+            return D3D12_ROOT_PARAMETER_TYPE_CBV;
+        case ShaderParameterBindingType::DynamicBuffer:
+            return D3D12_ROOT_PARAMETER_TYPE_SRV;
+        case ShaderParameterBindingType::DynamicRWBuffer:
+            return D3D12_ROOT_PARAMETER_TYPE_UAV;
+        default:
+            return std::nullopt;
+    }
+}
+
+static std::optional<D3D12_DESCRIPTOR_RANGE_TYPE> MapDescriptorRangeType(
+    ShaderParameterBindingType type) noexcept {
+    switch (type) {
+        case ShaderParameterBindingType::CBuffer:
+            return D3D12_DESCRIPTOR_RANGE_TYPE_CBV;
+        case ShaderParameterBindingType::Buffer:
+        case ShaderParameterBindingType::TexelBuffer:
+        case ShaderParameterBindingType::Texture:
+            return D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        case ShaderParameterBindingType::RWBuffer:
+        case ShaderParameterBindingType::RWTexelBuffer:
+        case ShaderParameterBindingType::RWTexture:
+            return D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+        case ShaderParameterBindingType::Sampler:
+            return D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
+        default:
+            return std::nullopt;
+    }
+}
+
+Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateRootSignatureInternal(
+    const PipelineLayoutDescriptor& desc) noexcept {
+    D3D12_FEATURE_DATA_ROOT_SIGNATURE rootSignatureFeature{};
+    rootSignatureFeature.HighestVersion = D3D_ROOT_SIGNATURE_VERSION_1_1;
+    if (HRESULT hr = _device->CheckFeatureSupport(
+            D3D12_FEATURE_ROOT_SIGNATURE,
+            &rootSignatureFeature,
+            sizeof(rootSignatureFeature));
+        FAILED(hr)) {
+        RADRAY_ERR_LOG(
+            "ID3D12Device::CheckFeatureSupport(D3D12_FEATURE_ROOT_SIGNATURE) failed: {} {}",
+            GetErrorName(hr),
+            hr);
+        return nullptr;
+    }
+    if (rootSignatureFeature.HighestVersion != D3D_ROOT_SIGNATURE_VERSION_1_1) {
+        RADRAY_ERR_LOG(
+            "d3d12 root signature 1.1 is not supported; highest supported version is {}",
+            static_cast<uint32_t>(rootSignatureFeature.HighestVersion));
+        return nullptr;
+    }
+
+    vector<PipelineLayoutGroup> groups;
+    groups.reserve(desc.ParameterSets.size());
+    for (const ShaderParameterSetLayoutDescriptor& parameterSet : desc.ParameterSets) {
+        auto group = std::find_if(
+            groups.begin(),
+            groups.end(),
+            [&](const PipelineLayoutGroup& value) noexcept {
+                return value.Index == parameterSet.GroupIndex;
+            });
+        if (group == groups.end()) {
+            groups.push_back(PipelineLayoutGroup{parameterSet.GroupIndex, {}});
+            group = groups.end() - 1;
+        }
+        group->Entries.insert(
+            group->Entries.end(),
+            parameterSet.Entries.begin(),
+            parameterSet.Entries.end());
+    }
+    std::sort(
+        groups.begin(),
+        groups.end(),
+        [](const PipelineLayoutGroup& lhs, const PipelineLayoutGroup& rhs) noexcept {
+            return lhs.Index < rhs.Index;
+        });
+
+    vector<PipelineLayoutRegisterRange> registerRanges;
+    uint32_t rootDwordCount = 0;
+    auto addRootDwords = [&](uint32_t count) noexcept {
+        if (count > 64 - rootDwordCount) {
+            return false;
+        }
+        rootDwordCount += count;
+        return true;
+    };
+
+    if (desc.PushConstant.has_value()) {
+        const PushConstantDescriptor& pushConstant = desc.PushConstant.value();
+        if (pushConstant.Size == 0 || pushConstant.Size % 4 != 0) {
+            RADRAY_ERR_LOG(
+                "d3d12 pipeline layout push constant size must be non-zero and 4-byte aligned: {}",
+                pushConstant.Size);
+            return nullptr;
+        }
+        if (!addRootDwords(pushConstant.Size / 4)) {
+            RADRAY_ERR_LOG("d3d12 pipeline layout exceeds the 64 DWORD root signature limit");
+            return nullptr;
+        }
+        registerRanges.push_back(PipelineLayoutRegisterRange{
+            PipelineLayoutRegisterType::Cbv,
+            pushConstant.Location.Group,
+            pushConstant.Location.Binding,
+            1,
+            pushConstant.Location.Binding});
+    }
+
+    for (PipelineLayoutGroup& group : groups) {
+        std::sort(
+            group.Entries.begin(),
+            group.Entries.end(),
+            [](const ShaderParameterSetLayoutEntryDescriptor& lhs,
+               const ShaderParameterSetLayoutEntryDescriptor& rhs) noexcept {
+                return lhs.Binding < rhs.Binding;
+            });
+        for (size_t i = 1; i < group.Entries.size(); ++i) {
+            if (group.Entries[i - 1].Binding == group.Entries[i].Binding) {
+                RADRAY_ERR_LOG(
+                    "d3d12 pipeline layout contains duplicate binding {} in group {}",
+                    group.Entries[i].Binding,
+                    group.Index);
+                return nullptr;
+            }
+        }
+
+        bool hasResourceTable = false;
+        bool hasSamplerTable = false;
+        for (const ShaderParameterSetLayoutEntryDescriptor& entry : group.Entries) {
+            if (entry.Count == 0) {
+                RADRAY_ERR_LOG(
+                    "d3d12 pipeline layout binding has zero count: group {} binding {}",
+                    group.Index,
+                    entry.Binding);
+                return nullptr;
+            }
+
+            const auto registerType = MapPipelineLayoutRegisterType(entry.Type);
+            if (!registerType.has_value()) {
+                RADRAY_ERR_LOG(
+                    "d3d12 pipeline layout binding has unknown type: group {} binding {} type {}",
+                    group.Index,
+                    entry.Binding,
+                    static_cast<int32_t>(entry.Type));
+                return nullptr;
+            }
+            if (entry.ImmutableSampler.has_value() &&
+                (entry.Type != ShaderParameterBindingType::Sampler || entry.Count != 1)) {
+                RADRAY_ERR_LOG(
+                    "d3d12 immutable sampler must have sampler type and count 1: group {} binding {}",
+                    group.Index,
+                    entry.Binding);
+                return nullptr;
+            }
+            const bool isDynamic = IsDynamicPipelineLayoutBinding(entry.Type);
+            if (isDynamic && entry.Count != 1) {
+                RADRAY_ERR_LOG(
+                    "d3d12 dynamic binding must have count 1: group {} binding {} count {}",
+                    group.Index,
+                    entry.Binding,
+                    entry.Count);
+                return nullptr;
+            }
+            if (entry.Count - 1 > std::numeric_limits<uint32_t>::max() - entry.Binding) {
+                RADRAY_ERR_LOG(
+                    "d3d12 pipeline layout register range overflows: group {} binding {} count {}",
+                    group.Index,
+                    entry.Binding,
+                    entry.Count);
+                return nullptr;
+            }
+
+            registerRanges.push_back(PipelineLayoutRegisterRange{
+                registerType.value(),
+                group.Index,
+                entry.Binding,
+                entry.Count,
+                entry.Binding + entry.Count - 1});
+
+            if (isDynamic) {
+                if (!addRootDwords(2)) {
+                    RADRAY_ERR_LOG("d3d12 pipeline layout exceeds the 64 DWORD root signature limit");
+                    return nullptr;
+                }
+            } else if (entry.Type == ShaderParameterBindingType::Sampler) {
+                hasSamplerTable |= !entry.ImmutableSampler.has_value();
+            } else {
+                hasResourceTable = true;
+            }
+        }
+        if (hasResourceTable && !addRootDwords(1)) {
+            RADRAY_ERR_LOG("d3d12 pipeline layout exceeds the 64 DWORD root signature limit");
+            return nullptr;
+        }
+        if (hasSamplerTable && !addRootDwords(1)) {
+            RADRAY_ERR_LOG("d3d12 pipeline layout exceeds the 64 DWORD root signature limit");
+            return nullptr;
+        }
+    }
+
+    std::sort(
+        registerRanges.begin(),
+        registerRanges.end(),
+        [](const PipelineLayoutRegisterRange& lhs,
+           const PipelineLayoutRegisterRange& rhs) noexcept {
+            if (lhs.Space != rhs.Space) {
+                return lhs.Space < rhs.Space;
+            }
+            if (lhs.Type != rhs.Type) {
+                return lhs.Type < rhs.Type;
+            }
+            if (lhs.Binding != rhs.Binding) {
+                return lhs.Binding < rhs.Binding;
+            }
+            return lhs.LastBinding < rhs.LastBinding;
+        });
+    for (size_t i = 1; i < registerRanges.size(); ++i) {
+        const PipelineLayoutRegisterRange& previous = registerRanges[i - 1];
+        const PipelineLayoutRegisterRange& current = registerRanges[i];
+        if (previous.Space == current.Space &&
+            previous.Type == current.Type &&
+            current.Binding <= previous.LastBinding) {
+            RADRAY_ERR_LOG(
+                "d3d12 pipeline layout {} register ranges overlap in space {}: binding {} count {} and binding {} count {}",
+                GetPipelineLayoutRegisterTypeName(current.Type),
+                current.Space,
+                previous.Binding,
+                previous.Count,
+                current.Binding,
+                current.Count);
+            return nullptr;
+        }
+    }
+
+    auto layout = make_unique<RootSigD3D12>();
+    if (desc.PushConstant.has_value()) {
+        const PushConstantDescriptor& pushConstant = desc.PushConstant.value();
+        D3D12_ROOT_PARAMETER1 rootParameter{};
+        rootParameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+        rootParameter.Constants.ShaderRegister = pushConstant.Location.Binding;
+        rootParameter.Constants.RegisterSpace = pushConstant.Location.Group;
+        rootParameter.Constants.Num32BitValues = pushConstant.Size / 4;
+        rootParameter.ShaderVisibility = MapShaderStages(pushConstant.Stages);
+        layout->_rootParameters.push_back(rootParameter);
+    }
+
+    auto appendDescriptorTable = [&](const PipelineLayoutGroup& group, bool samplerTable) noexcept {
+        layout->_descriptorRanges.emplace_back();
+        vector<D3D12_DESCRIPTOR_RANGE1>& ranges = layout->_descriptorRanges.back();
+        ShaderStages tableStages{ShaderStage::UNKNOWN};
+        uint32_t descriptorOffset = 0;
+        for (const ShaderParameterSetLayoutEntryDescriptor& entry : group.Entries) {
+            const bool isSampler = entry.Type == ShaderParameterBindingType::Sampler;
+            const bool belongsInTable = samplerTable
+                                            ? isSampler && !entry.ImmutableSampler.has_value()
+                                            : !isSampler && !IsDynamicPipelineLayoutBinding(entry.Type);
+            if (!belongsInTable) {
+                continue;
+            }
+            if (entry.Count > std::numeric_limits<uint32_t>::max() - descriptorOffset) {
+                RADRAY_ERR_LOG(
+                    "d3d12 pipeline layout descriptor table offset overflows in group {}",
+                    group.Index);
+                return false;
+            }
+            const auto rangeType = MapDescriptorRangeType(entry.Type);
+            RADRAY_ASSERT(rangeType.has_value());
+            D3D12_DESCRIPTOR_RANGE1 range{};
+            range.RangeType = rangeType.value();
+            range.NumDescriptors = entry.Count;
+            range.BaseShaderRegister = entry.Binding;
+            range.RegisterSpace = group.Index;
+            range.Flags = D3D12_DESCRIPTOR_RANGE_FLAG_NONE;
+            range.OffsetInDescriptorsFromTableStart = descriptorOffset;
+            ranges.push_back(range);
+            descriptorOffset += entry.Count;
+            tableStages |= entry.Stages;
+        }
+        RADRAY_ASSERT(!ranges.empty());
+        RADRAY_ASSERT(ranges.size() <= std::numeric_limits<uint32_t>::max());
+        D3D12_ROOT_PARAMETER1 rootParameter{};
+        rootParameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        rootParameter.DescriptorTable.NumDescriptorRanges = static_cast<uint32_t>(ranges.size());
+        rootParameter.DescriptorTable.pDescriptorRanges = nullptr;
+        rootParameter.ShaderVisibility = MapShaderStages(tableStages);
+        layout->_rootParameters.push_back(rootParameter);
+        return true;
+    };
+
+    for (const PipelineLayoutGroup& group : groups) {
+        for (const ShaderParameterSetLayoutEntryDescriptor& entry : group.Entries) {
+            if (!entry.ImmutableSampler.has_value()) {
+                continue;
+            }
+            const SamplerDescriptor& sampler = entry.ImmutableSampler.value();
+            D3D12_STATIC_SAMPLER_DESC staticSampler{};
+            staticSampler.Filter = MapType(
+                sampler.MinFilter,
+                sampler.MagFilter,
+                sampler.MipmapFilter,
+                sampler.Compare.has_value(),
+                sampler.AnisotropyClamp);
+            staticSampler.AddressU = MapType(sampler.AddressS);
+            staticSampler.AddressV = MapType(sampler.AddressT);
+            staticSampler.AddressW = MapType(sampler.AddressR);
+            staticSampler.MipLODBias = 0;
+            staticSampler.MaxAnisotropy = sampler.AnisotropyClamp;
+            staticSampler.ComparisonFunc = sampler.Compare.has_value()
+                                               ? MapType(sampler.Compare.value())
+                                               : D3D12_COMPARISON_FUNC_NEVER;
+            staticSampler.BorderColor = D3D12_STATIC_BORDER_COLOR_TRANSPARENT_BLACK;
+            staticSampler.MinLOD = sampler.LodMin;
+            staticSampler.MaxLOD = sampler.LodMax;
+            staticSampler.ShaderRegister = entry.Binding;
+            staticSampler.RegisterSpace = group.Index;
+            staticSampler.ShaderVisibility = MapShaderStages(entry.Stages);
+            layout->_staticSamplers.push_back(staticSampler);
+        }
+
+        for (const ShaderParameterSetLayoutEntryDescriptor& entry : group.Entries) {
+            const auto parameterType = MapDynamicRootParameterType(entry.Type);
+            if (!parameterType.has_value()) {
+                continue;
+            }
+            D3D12_ROOT_PARAMETER1 rootParameter{};
+            rootParameter.ParameterType = parameterType.value();
+            rootParameter.Descriptor.ShaderRegister = entry.Binding;
+            rootParameter.Descriptor.RegisterSpace = group.Index;
+            rootParameter.Descriptor.Flags = D3D12_ROOT_DESCRIPTOR_FLAG_NONE;
+            rootParameter.ShaderVisibility = MapShaderStages(entry.Stages);
+            layout->_rootParameters.push_back(rootParameter);
+        }
+
+        const bool hasResourceTable = std::any_of(
+            group.Entries.begin(),
+            group.Entries.end(),
+            [](const ShaderParameterSetLayoutEntryDescriptor& entry) noexcept {
+                return entry.Type != ShaderParameterBindingType::Sampler &&
+                       !IsDynamicPipelineLayoutBinding(entry.Type);
+            });
+        if (hasResourceTable && !appendDescriptorTable(group, false)) {
+            return nullptr;
+        }
+        const bool hasSamplerTable = std::any_of(
+            group.Entries.begin(),
+            group.Entries.end(),
+            [](const ShaderParameterSetLayoutEntryDescriptor& entry) noexcept {
+                return entry.Type == ShaderParameterBindingType::Sampler &&
+                       !entry.ImmutableSampler.has_value();
+            });
+        if (hasSamplerTable && !appendDescriptorTable(group, true)) {
+            return nullptr;
+        }
+    }
+
+    RADRAY_ASSERT(layout->_rootParameters.size() <= std::numeric_limits<uint32_t>::max());
+    RADRAY_ASSERT(layout->_staticSamplers.size() <= std::numeric_limits<uint32_t>::max());
+    layout->RebindNativePointers();
 
     ComPtr<ID3DBlob> rootSigBlob{};
     ComPtr<ID3DBlob> errorBlob{};
-    if (HRESULT hr = ::D3D12SerializeRootSignature(
-            &desc,
-            D3D_ROOT_SIGNATURE_VERSION_1,
+    if (HRESULT hr = ::D3D12SerializeVersionedRootSignature(
+            &layout->_desc,
             rootSigBlob.GetAddressOf(),
             errorBlob.GetAddressOf());
         FAILED(hr)) {
@@ -1558,7 +1976,7 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateRootSignatureInternal(cons
                                      static_cast<const char*>(errorBlob->GetBufferPointer()),
                                      errorBlob->GetBufferSize()}
                                : std::string_view{};
-        RADRAY_ERR_LOG("D3D12SerializeRootSignature failed: {} {}\\n{}", GetErrorName(hr), hr, error);
+        RADRAY_ERR_LOG("D3D12SerializeVersionedRootSignature failed: {} {}\\n{}", GetErrorName(hr), hr, error);
         return nullptr;
     }
 
@@ -1572,7 +1990,8 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateRootSignatureInternal(cons
         RADRAY_ERR_LOG("ID3D12Device::CreateRootSignature failed: {} {}", GetErrorName(hr), hr);
         return nullptr;
     }
-    return make_unique<RootSigD3D12>(std::move(rootSig));
+    layout->_rootSig = std::move(rootSig);
+    return layout;
 }
 
 Nullable<unique_ptr<PipelineLayout>> DeviceD3D12::CreatePipelineLayout(
@@ -3085,9 +3504,9 @@ D3D12_SHADER_BYTECODE Dxil::ToByteCode() const noexcept {
     return {_dxil.data(), _dxil.size()};
 }
 
-RootSigD3D12::RootSigD3D12(
-    ComPtr<ID3D12RootSignature> rootSig) noexcept
-    : _rootSig(std::move(rootSig)) {}
+RootSigD3D12::~RootSigD3D12() noexcept {
+    Destroy();
+}
 
 bool RootSigD3D12::IsValid() const noexcept {
     return _rootSig != nullptr;
@@ -3095,11 +3514,38 @@ bool RootSigD3D12::IsValid() const noexcept {
 
 void RootSigD3D12::Destroy() noexcept {
     _rootSig = nullptr;
+    _desc = {};
+    _descriptorRanges.clear();
+    _rootParameters.clear();
+    _staticSamplers.clear();
 }
 
 void RootSigD3D12::SetDebugName(std::string_view name) noexcept {
     SetObjectName(name, _rootSig.Get());
 }
+
+void RootSigD3D12::RebindNativePointers() noexcept {
+    _desc = {};
+    _desc.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
+    _desc.Desc_1_1.NumParameters = static_cast<uint32_t>(_rootParameters.size());
+    _desc.Desc_1_1.pParameters = _rootParameters.empty() ? nullptr : _rootParameters.data();
+    _desc.Desc_1_1.NumStaticSamplers = static_cast<uint32_t>(_staticSamplers.size());
+    _desc.Desc_1_1.pStaticSamplers = _staticSamplers.empty() ? nullptr : _staticSamplers.data();
+    _desc.Desc_1_1.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+
+    size_t descriptorTableIndex = 0;
+    for (D3D12_ROOT_PARAMETER1& parameter : _rootParameters) {
+        if (parameter.ParameterType != D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE) {
+            continue;
+        }
+        RADRAY_ASSERT(descriptorTableIndex < _descriptorRanges.size());
+        vector<D3D12_DESCRIPTOR_RANGE1>& ranges = _descriptorRanges[descriptorTableIndex++];
+        parameter.DescriptorTable.NumDescriptorRanges = static_cast<uint32_t>(ranges.size());
+        parameter.DescriptorTable.pDescriptorRanges = ranges.empty() ? nullptr : ranges.data();
+    }
+    RADRAY_ASSERT(descriptorTableIndex == _descriptorRanges.size());
+}
+
 bool GraphicsPsoD3D12::IsValid() const noexcept {
     return _pso != nullptr;
 }

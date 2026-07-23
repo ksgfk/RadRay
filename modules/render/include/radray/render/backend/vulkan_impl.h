@@ -6,7 +6,7 @@
 
 #include <radray/allocator.h>
 #include <radray/render/backend/vulkan_helper.h>
-#include <radray/render/common.h>
+#include <radray/render/rhi.h>
 
 namespace radray::render::vulkan {
 
@@ -163,7 +163,9 @@ public:
 
     Nullable<unique_ptr<BufferViewVulkan>> CreateBufferView(const VkBufferViewCreateInfo& info) noexcept;
 
-    Nullable<unique_ptr<PipelineLayoutVulkan>> CreateRootSignatureInternal(const PipelineLayoutDescriptor& desc) noexcept;
+    Nullable<unique_ptr<PipelineLayoutVulkan>> CreatePipelineLayoutInternal(const PipelineLayoutDescriptor& desc) noexcept;
+
+    Nullable<unique_ptr<SamplerVulkan>> CreateSamplerInternal(const SamplerDescriptor& desc) noexcept;
 
     const VkAllocationCallbacks* GetAllocationCallbacks() const noexcept;
 
@@ -811,7 +813,7 @@ public:
 
 class PipelineLayoutVulkan final : public PipelineLayout {
 public:
-    PipelineLayoutVulkan(DeviceVulkan* device, VkPipelineLayout layout) noexcept;
+    explicit PipelineLayoutVulkan(DeviceVulkan* device) noexcept;
 
     ~PipelineLayoutVulkan() noexcept override;
 
@@ -821,12 +823,19 @@ public:
 
     void SetDebugName(std::string_view name) noexcept override;
 
+    void RebindNativePointers() noexcept;
+
 public:
     void DestroyImpl() noexcept;
 
     DeviceVulkan* _device;
-    VkPipelineLayout _layout;
-
+    VkPipelineLayoutCreateInfo _desc{};
+    VkPipelineLayout _layout{VK_NULL_HANDLE};
+    vector<VkDescriptorSetLayout> _setLayouts;
+    vector<vector<VkDescriptorSetLayoutBinding>> _setLayoutBindings;
+    vector<vector<VkSampler>> _immutableSamplerHandles;
+    std::optional<VkPushConstantRange> _pushConstantRange;
+    vector<unique_ptr<SamplerVulkan>> _immutableSamplers;
 };
 
 class GraphicsPipelineVulkan final : public GraphicsPipelineState {

@@ -108,14 +108,7 @@ enum class ShaderStage : uint32_t {
     Vertex = 0x1,
     Pixel = Vertex << 1,
     Compute = Pixel << 1,
-    RayGen = Compute << 1,
-    Miss = RayGen << 1,
-    ClosestHit = Miss << 1,
-    AnyHit = ClosestHit << 1,
-    Intersection = AnyHit << 1,
-    Callable = Intersection << 1,
     Graphics = Vertex | Pixel,
-    RayTracing = RayGen | Miss | ClosestHit | AnyHit | Intersection | Callable,
 };
 
 enum class ShaderBlobCategory : int32_t {
@@ -388,16 +381,18 @@ enum class PhysicalDeviceType : int32_t {
     Cpu,
 };
 
-enum class ParameterBindingType : int32_t {
+enum class ShaderParameterBindingType : int32_t {
     UNKNOWN,
     CBuffer,
-    DynamicCBuffer,
     Buffer,
     RWBuffer,
     TexelBuffer,
     RWTexelBuffer,
     Texture,
     RWTexture,
+    DynamicCBuffer,
+    DynamicBuffer,
+    DynamicRWBuffer,
     Sampler,
 };
 
@@ -886,19 +881,19 @@ struct ShaderBindingLocation {
     friend bool operator==(const ShaderBindingLocation&, const ShaderBindingLocation&) noexcept = default;
 };
 
-struct ParameterSetLayoutEntryDescriptor {
+struct ShaderParameterSetLayoutEntryDescriptor {
     uint32_t Binding{0};
-    ParameterBindingType Type{ParameterBindingType::UNKNOWN};
+    ShaderParameterBindingType Type{ShaderParameterBindingType::UNKNOWN};
     uint32_t Count{0};
     ShaderStages Stages{ShaderStage::UNKNOWN};
     std::optional<SamplerDescriptor> ImmutableSampler{};
 
-    friend bool operator==(const ParameterSetLayoutEntryDescriptor&, const ParameterSetLayoutEntryDescriptor&) noexcept = default;
+    friend bool operator==(const ShaderParameterSetLayoutEntryDescriptor&, const ShaderParameterSetLayoutEntryDescriptor&) noexcept = default;
 };
 
-struct ParameterSetLayoutDescriptor {
+struct ShaderParameterSetLayoutDescriptor {
     uint32_t GroupIndex{0};
-    std::span<const ParameterSetLayoutEntryDescriptor> Entries{};
+    std::span<const ShaderParameterSetLayoutEntryDescriptor> Entries{};
 };
 
 struct PushConstantDescriptor {
@@ -910,7 +905,7 @@ struct PushConstantDescriptor {
 };
 
 struct PipelineLayoutDescriptor {
-    std::span<const ParameterSetLayoutDescriptor> ParameterSets{};
+    std::span<const ShaderParameterSetLayoutDescriptor> ParameterSets{};
     std::optional<PushConstantDescriptor> PushConstant{};
 };
 

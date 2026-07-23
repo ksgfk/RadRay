@@ -1,4 +1,4 @@
-#include <radray/render/common.h>
+#include <radray/render/rhi.h>
 
 #include <radray/hash.h>
 #include <radray/logger.h>

@@ -6,7 +6,7 @@
 #include <string_view>
 
 #include <radray/nullable.h>
-#include <radray/render/common.h>
+#include <radray/render/rhi.h>
 #include <radray/render/hlsl.h>
 #include <radray/types.h>
 

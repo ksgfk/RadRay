@@ -349,23 +349,13 @@ D3D12_RESOURCE_DIMENSION MapType(TextureDimension v) noexcept {
 }
 
 D3D12_SHADER_VISIBILITY MapShaderStages(ShaderStages v) noexcept {
-    if (v == ShaderStage::Compute) {
-        return D3D12_SHADER_VISIBILITY_ALL;
+    if (v == ShaderStage::Vertex) {
+        return D3D12_SHADER_VISIBILITY_VERTEX;
     }
-    if (v == ShaderStage::UNKNOWN) {
-        return D3D12_SHADER_VISIBILITY_ALL;
+    if (v == ShaderStage::Pixel) {
+        return D3D12_SHADER_VISIBILITY_PIXEL;
     }
-    D3D12_SHADER_VISIBILITY res = D3D12_SHADER_VISIBILITY_ALL;
-    uint32_t stageCount = 0;
-    if (v.HasFlag(ShaderStage::Vertex)) {
-        res = D3D12_SHADER_VISIBILITY_VERTEX;
-        ++stageCount;
-    }
-    if (v.HasFlag(ShaderStage::Pixel)) {
-        res = D3D12_SHADER_VISIBILITY_PIXEL;
-        ++stageCount;
-    }
-    return stageCount > 1 ? D3D12_SHADER_VISIBILITY_ALL : res;
+    return D3D12_SHADER_VISIBILITY_ALL;
 }
 
 MapPrimitiveTopologyResult MapType(PrimitiveTopology v) noexcept {

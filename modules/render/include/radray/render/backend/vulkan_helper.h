@@ -8,7 +8,7 @@
 #include <radray/logger.h>
 #include <radray/utility.h>
 #include <radray/basic_math.h>
-#include <radray/render/common.h>
+#include <radray/render/rhi.h>
 
 #ifdef RADRAY_PLATFORM_WINDOWS
 #include <radray/platform/win32_headers.h>
