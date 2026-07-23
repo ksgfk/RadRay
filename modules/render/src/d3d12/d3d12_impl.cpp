@@ -1596,12 +1596,6 @@ static std::string_view GetPipelineLayoutRegisterTypeName(
     Unreachable();
 }
 
-static bool IsDynamicPipelineLayoutBinding(ShaderParameterBindingType type) noexcept {
-    return type == ShaderParameterBindingType::DynamicCBuffer ||
-           type == ShaderParameterBindingType::DynamicBuffer ||
-           type == ShaderParameterBindingType::DynamicRWBuffer;
-}
-
 static std::optional<D3D12_ROOT_PARAMETER_TYPE> MapDynamicRootParameterType(
     ShaderParameterBindingType type) noexcept {
     switch (type) {
@@ -1751,7 +1745,7 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateRootSignatureInternal(
                     static_cast<int32_t>(entry.Type));
                 return nullptr;
             }
-            if (entry.ImmutableSampler.has_value() &&
+            if (entry.ImmutableSampler.HasValue() &&
                 (entry.Type != ShaderParameterBindingType::Sampler || entry.Count != 1)) {
                 RADRAY_ERR_LOG(
                     "d3d12 immutable sampler must have sampler type and count 1: group {} binding {}",
@@ -1759,7 +1753,7 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateRootSignatureInternal(
                     entry.Binding);
                 return nullptr;
             }
-            const bool isDynamic = IsDynamicPipelineLayoutBinding(entry.Type);
+            const bool isDynamic = IsDynamicShaderParameterBindingType(entry.Type);
             if (isDynamic && entry.Count != 1) {
                 RADRAY_ERR_LOG(
                     "d3d12 dynamic binding must have count 1: group {} binding {} count {}",
@@ -1790,7 +1784,7 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateRootSignatureInternal(
                     return nullptr;
                 }
             } else if (entry.Type == ShaderParameterBindingType::Sampler) {
-                hasSamplerTable |= !entry.ImmutableSampler.has_value();
+                hasSamplerTable |= !entry.ImmutableSampler.HasValue();
             } else {
                 hasResourceTable = true;
             }
@@ -1859,8 +1853,8 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateRootSignatureInternal(
         for (const ShaderParameterSetLayoutEntryDescriptor& entry : group.Entries) {
             const bool isSampler = entry.Type == ShaderParameterBindingType::Sampler;
             const bool belongsInTable = samplerTable
-                                            ? isSampler && !entry.ImmutableSampler.has_value()
-                                            : !isSampler && !IsDynamicPipelineLayoutBinding(entry.Type);
+                                            ? isSampler && !entry.ImmutableSampler.HasValue()
+                                            : !isSampler && !IsDynamicShaderParameterBindingType(entry.Type);
             if (!belongsInTable) {
                 continue;
             }
@@ -1896,28 +1890,21 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateRootSignatureInternal(
 
     for (const PipelineLayoutGroup& group : groups) {
         for (const ShaderParameterSetLayoutEntryDescriptor& entry : group.Entries) {
-            if (!entry.ImmutableSampler.has_value()) {
+            if (!entry.ImmutableSampler.HasValue()) {
                 continue;
             }
-            const SamplerDescriptor& sampler = entry.ImmutableSampler.value();
+            const D3D12_SAMPLER_DESC& sampler = CastD3D12Object(entry.ImmutableSampler.Get())->_desc;
             D3D12_STATIC_SAMPLER_DESC staticSampler{};
-            staticSampler.Filter = MapType(
-                sampler.MinFilter,
-                sampler.MagFilter,
-                sampler.MipmapFilter,
-                sampler.Compare.has_value(),
-                sampler.AnisotropyClamp);
-            staticSampler.AddressU = MapType(sampler.AddressS);
-            staticSampler.AddressV = MapType(sampler.AddressT);
-            staticSampler.AddressW = MapType(sampler.AddressR);
-            staticSampler.MipLODBias = 0;
-            staticSampler.MaxAnisotropy = sampler.AnisotropyClamp;
-            staticSampler.ComparisonFunc = sampler.Compare.has_value()
-                                               ? MapType(sampler.Compare.value())
-                                               : D3D12_COMPARISON_FUNC_NEVER;
+            staticSampler.Filter = sampler.Filter;
+            staticSampler.AddressU = sampler.AddressU;
+            staticSampler.AddressV = sampler.AddressV;
+            staticSampler.AddressW = sampler.AddressW;
+            staticSampler.MipLODBias = sampler.MipLODBias;
+            staticSampler.MaxAnisotropy = sampler.MaxAnisotropy;
+            staticSampler.ComparisonFunc = sampler.ComparisonFunc;
             staticSampler.BorderColor = D3D12_STATIC_BORDER_COLOR_TRANSPARENT_BLACK;
-            staticSampler.MinLOD = sampler.LodMin;
-            staticSampler.MaxLOD = sampler.LodMax;
+            staticSampler.MinLOD = sampler.MinLOD;
+            staticSampler.MaxLOD = sampler.MaxLOD;
             staticSampler.ShaderRegister = entry.Binding;
             staticSampler.RegisterSpace = group.Index;
             staticSampler.ShaderVisibility = MapShaderStages(entry.Stages);
@@ -1943,7 +1930,7 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateRootSignatureInternal(
             group.Entries.end(),
             [](const ShaderParameterSetLayoutEntryDescriptor& entry) noexcept {
                 return entry.Type != ShaderParameterBindingType::Sampler &&
-                       !IsDynamicPipelineLayoutBinding(entry.Type);
+                       !IsDynamicShaderParameterBindingType(entry.Type);
             });
         if (hasResourceTable && !appendDescriptorTable(group, false)) {
             return nullptr;
@@ -1953,7 +1940,7 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateRootSignatureInternal(
             group.Entries.end(),
             [](const ShaderParameterSetLayoutEntryDescriptor& entry) noexcept {
                 return entry.Type == ShaderParameterBindingType::Sampler &&
-                       !entry.ImmutableSampler.has_value();
+                       !entry.ImmutableSampler.HasValue();
             });
         if (hasSamplerTable && !appendDescriptorTable(group, true)) {
             return nullptr;
@@ -2205,8 +2192,7 @@ Nullable<unique_ptr<Sampler>> DeviceD3D12::CreateSampler(const SamplerDescriptor
         heapView = {alloc, opt.value()};
     }
     heapView.GetHeap()->Create(rawDesc, heapView.GetStart());
-    auto result = make_unique<SamplerD3D12>(this, std::move(heapView));
-    return result;
+    return make_unique<SamplerD3D12>(this, std::move(heapView), rawDesc);
 }
 
 Nullable<unique_ptr<FenceD3D12>> DeviceD3D12::CreateFenceD3D12(uint64_t initValue) noexcept {
@@ -3531,7 +3517,10 @@ void RootSigD3D12::RebindNativePointers() noexcept {
     _desc.Desc_1_1.pParameters = _rootParameters.empty() ? nullptr : _rootParameters.data();
     _desc.Desc_1_1.NumStaticSamplers = static_cast<uint32_t>(_staticSamplers.size());
     _desc.Desc_1_1.pStaticSamplers = _staticSamplers.empty() ? nullptr : _staticSamplers.data();
-    _desc.Desc_1_1.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
+    _desc.Desc_1_1.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT |
+                           D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS |
+                           D3D12_ROOT_SIGNATURE_FLAG_DENY_DOMAIN_SHADER_ROOT_ACCESS |
+                           D3D12_ROOT_SIGNATURE_FLAG_DENY_GEOMETRY_SHADER_ROOT_ACCESS;
 
     size_t descriptorTableIndex = 0;
     for (D3D12_ROOT_PARAMETER1& parameter : _rootParameters) {
@@ -3575,6 +3564,14 @@ void ComputePsoD3D12::Destroy() noexcept {
 void ComputePsoD3D12::SetDebugName(std::string_view name) noexcept {
     SetObjectName(name, _pso.Get());
 }
+
+SamplerD3D12::SamplerD3D12(
+    DeviceD3D12* device,
+    CpuDescriptorHeapViewRAII heapView,
+    const D3D12_SAMPLER_DESC& desc) noexcept
+    : _device(device),
+      _samplerView(std::move(heapView)),
+      _desc(desc) {}
 
 bool SamplerD3D12::IsValid() const noexcept {
     return _samplerView.IsValid();

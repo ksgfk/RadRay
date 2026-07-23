@@ -886,7 +886,8 @@ struct ShaderParameterSetLayoutEntryDescriptor {
     ShaderParameterBindingType Type{ShaderParameterBindingType::UNKNOWN};
     uint32_t Count{0};
     ShaderStages Stages{ShaderStage::UNKNOWN};
-    std::optional<SamplerDescriptor> ImmutableSampler{};
+    // 注意Sampler生命周期
+    Nullable<Sampler*> ImmutableSampler{};
 
     friend bool operator==(const ShaderParameterSetLayoutEntryDescriptor&, const ShaderParameterSetLayoutEntryDescriptor&) noexcept = default;
 };
@@ -1492,6 +1493,7 @@ uint32_t GetVertexFormatSizeInBytes(VertexFormat format) noexcept;
 uint32_t GetIndexFormatSizeInBytes(IndexFormat format) noexcept;
 IndexFormat SizeInBytesToIndexFormat(uint32_t size) noexcept;
 uint32_t GetTextureFormatBytesPerPixel(TextureFormat format) noexcept;
+bool IsDynamicShaderParameterBindingType(ShaderParameterBindingType type) noexcept;
 // -------------------------------------------------------------------------
 
 std::string_view format_as(RenderBackend v) noexcept;

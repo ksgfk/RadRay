@@ -281,6 +281,12 @@ uint32_t GetTextureFormatBytesPerPixel(TextureFormat format) noexcept {
     Unreachable();
 }
 
+bool IsDynamicShaderParameterBindingType(ShaderParameterBindingType type) noexcept {
+    return type == ShaderParameterBindingType::DynamicCBuffer ||
+           type == ShaderParameterBindingType::DynamicBuffer ||
+           type == ShaderParameterBindingType::DynamicRWBuffer;
+}
+
 std::string_view format_as(RenderBackend v) noexcept {
     switch (v) {
         case RenderBackend::D3D12: return "D3D12";

@@ -810,12 +810,12 @@ static string _FormatStageAndSm(ShaderStage stage, HlslShaderModel sm) {
             case ShaderStage::Vertex: return "vs";
             case ShaderStage::Pixel: return "ps";
             case ShaderStage::Compute: return "cs";
-            case ShaderStage::RayGen:
-            case ShaderStage::Miss:
-            case ShaderStage::ClosestHit:
-            case ShaderStage::AnyHit:
-            case ShaderStage::Intersection:
-            case ShaderStage::Callable: return "lib";
+            // case ShaderStage::RayGen:
+            // case ShaderStage::Miss:
+            // case ShaderStage::ClosestHit:
+            // case ShaderStage::AnyHit:
+            // case ShaderStage::Intersection:
+            // case ShaderStage::Callable: return "lib";
             default: return "??";
         }
     };
@@ -838,19 +838,15 @@ static vector<std::string_view> _BuildCompileArgs(const DxcCompileOptions& optio
     vector<std::string_view> args{};
     if (options.IsSpirv) {
         args.emplace_back("-spirv");
-        // 定义 VULKAN 宏, 使 common.hlsl 的 VK_PUSH_CONSTANT / VK_BINDING / VK_LOCATION
-        // 宏展开为对应的 [[vk::...]] 属性 (否则 push constant 会被降级为普通 uniform)。
-        args.emplace_back("-D");
-        args.emplace_back("VULKAN=1");
-        if (options.Stage == ShaderStage::RayGen ||
-            options.Stage == ShaderStage::Miss ||
-            options.Stage == ShaderStage::ClosestHit ||
-            options.Stage == ShaderStage::AnyHit ||
-            options.Stage == ShaderStage::Intersection ||
-            options.Stage == ShaderStage::Callable) {
-            args.emplace_back("-fspv-target-env=vulkan1.2");
-            args.emplace_back("-fspv-extension=SPV_KHR_ray_tracing");
-        }
+        // if (options.Stage == ShaderStage::RayGen ||
+        //     options.Stage == ShaderStage::Miss ||
+        //     options.Stage == ShaderStage::ClosestHit ||
+        //     options.Stage == ShaderStage::AnyHit ||
+        //     options.Stage == ShaderStage::Intersection ||
+        //     options.Stage == ShaderStage::Callable) {
+        //     args.emplace_back("-fspv-target-env=vulkan1.2");
+        //     args.emplace_back("-fspv-extension=SPV_KHR_ray_tracing");
+        // }
     }
     if (!options.EnableUnbounded) {
         args.emplace_back("-all_resources_bound");

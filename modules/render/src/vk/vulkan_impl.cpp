@@ -1109,13 +1109,6 @@ static std::optional<VkDescriptorType> MapPipelineLayoutDescriptorTypeVulkan(
     return std::nullopt;
 }
 
-static bool IsDynamicPipelineLayoutBindingVulkan(
-    ShaderParameterBindingType type) noexcept {
-    return type == ShaderParameterBindingType::DynamicCBuffer ||
-           type == ShaderParameterBindingType::DynamicBuffer ||
-           type == ShaderParameterBindingType::DynamicRWBuffer;
-}
-
 struct PipelineLayoutDescriptorCountsVulkan {
     uint64_t Samplers{0};
     uint64_t UniformBuffers{0};
@@ -1259,8 +1252,6 @@ Nullable<unique_ptr<PipelineLayoutVulkan>> DeviceVulkan::CreatePipelineLayoutInt
         {VK_SHADER_STAGE_FRAGMENT_BIT, ShaderStage::Pixel, {}},
         {VK_SHADER_STAGE_COMPUTE_BIT, ShaderStage::Compute, {}},
     }};
-    size_t immutableSamplerCount = 0;
-
     for (uint32_t groupIndex = 0; groupIndex < setLayoutCount; ++groupIndex) {
         vector<ShaderParameterSetLayoutEntryDescriptor>& entries = groupEntries[groupIndex];
         std::sort(
@@ -1305,7 +1296,7 @@ Nullable<unique_ptr<PipelineLayoutVulkan>> DeviceVulkan::CreatePipelineLayoutInt
                     entry.Binding);
                 return nullptr;
             }
-            if (entry.ImmutableSampler.has_value() &&
+            if (entry.ImmutableSampler.HasValue() &&
                 (entry.Type != ShaderParameterBindingType::Sampler || entry.Count != 1)) {
                 RADRAY_ERR_LOG(
                     "vk immutable sampler must have sampler type and count 1: group {} binding {}",
@@ -1313,7 +1304,7 @@ Nullable<unique_ptr<PipelineLayoutVulkan>> DeviceVulkan::CreatePipelineLayoutInt
                     entry.Binding);
                 return nullptr;
             }
-            if (IsDynamicPipelineLayoutBindingVulkan(entry.Type) && entry.Count != 1) {
+            if (IsDynamicShaderParameterBindingType(entry.Type) && entry.Count != 1) {
                 RADRAY_ERR_LOG(
                     "vk dynamic binding must have count 1: group {} binding {} count {}",
                     groupIndex,
@@ -1343,7 +1334,6 @@ Nullable<unique_ptr<PipelineLayoutVulkan>> DeviceVulkan::CreatePipelineLayoutInt
                         entry.Count);
                 }
             }
-            immutableSamplerCount += entry.ImmutableSampler.has_value() ? 1 : 0;
         }
     }
 
@@ -1387,36 +1377,18 @@ Nullable<unique_ptr<PipelineLayoutVulkan>> DeviceVulkan::CreatePipelineLayoutInt
     auto result = make_unique<PipelineLayoutVulkan>(this);
     result->_setLayouts.reserve(setLayoutCount);
     result->_setLayoutBindings.resize(setLayoutCount);
-    result->_immutableSamplerHandles.resize(setLayoutCount);
-    result->_immutableSamplers.reserve(immutableSamplerCount);
     if (desc.PushConstant.has_value()) {
         result->_pushConstantRange = pushConstantRange;
     }
     for (uint32_t groupIndex = 0; groupIndex < setLayoutCount; ++groupIndex) {
         const vector<ShaderParameterSetLayoutEntryDescriptor>& entries =
             groupEntries[groupIndex];
-        vector<VkSampler>& immutableSamplerHandles =
-            result->_immutableSamplerHandles[groupIndex];
-        immutableSamplerHandles.resize(entries.size(), VK_NULL_HANDLE);
         vector<VkDescriptorSetLayoutBinding>& bindings =
             result->_setLayoutBindings[groupIndex];
         bindings.reserve(entries.size());
 
         for (size_t i = 0; i < entries.size(); ++i) {
             const ShaderParameterSetLayoutEntryDescriptor& entry = entries[i];
-            if (entry.ImmutableSampler.has_value()) {
-                auto sampler = CreateSamplerInternal(entry.ImmutableSampler.value());
-                if (!sampler.HasValue()) {
-                    RADRAY_ERR_LOG(
-                        "vk pipeline layout failed to create immutable sampler: group {} binding {}",
-                        groupIndex,
-                        entry.Binding);
-                    return nullptr;
-                }
-                immutableSamplerHandles[i] = sampler.Get()->_sampler;
-                result->_immutableSamplers.push_back(sampler.Release());
-            }
-
             const auto descriptorType = MapPipelineLayoutDescriptorTypeVulkan(entry.Type);
             RADRAY_ASSERT(descriptorType.has_value());
             VkDescriptorSetLayoutBinding binding{};
@@ -1424,8 +1396,8 @@ Nullable<unique_ptr<PipelineLayoutVulkan>> DeviceVulkan::CreatePipelineLayoutInt
             binding.descriptorType = descriptorType.value();
             binding.descriptorCount = entry.Count;
             binding.stageFlags = MapType(entry.Stages);
-            binding.pImmutableSamplers = immutableSamplerHandles[i] != VK_NULL_HANDLE
-                                             ? &immutableSamplerHandles[i]
+            binding.pImmutableSamplers = entry.ImmutableSampler.HasValue()
+                                             ? &CastVkObject(entry.ImmutableSampler.Get())->_sampler
                                              : nullptr;
             bindings.push_back(binding);
         }
@@ -1730,7 +1702,6 @@ Nullable<unique_ptr<ComputePipelineState>> DeviceVulkan::CreateComputePipelineSt
     }
     return make_unique<ComputePipelineVulkan>(this, pipeline);
 }
-
 
 Nullable<unique_ptr<SamplerVulkan>> DeviceVulkan::CreateSamplerInternal(
     const SamplerDescriptor& desc) noexcept {
@@ -2989,7 +2960,6 @@ void CommandBufferVulkan::EndComputePass(unique_ptr<ComputeCommandEncoder> encod
     _endedEncoders.emplace_back(std::move(encoder));
 }
 
-
 void CommandBufferVulkan::CopyBufferToBuffer(Buffer* dst_, uint64_t dstOffset, Buffer* src_, uint64_t srcOffset, uint64_t size) noexcept {
     auto dst = CastVkObject(dst_);
     auto src = CastVkObject(src_);
@@ -3549,7 +3519,6 @@ void SimulateComputeEncoderVulkan::DispatchIndirect(Buffer* argumentBuffer, uint
         buffer.Get()->_buffer,
         argumentOffset);
 }
-
 
 bool RenderPassVulkan::IsValid() const noexcept {
     return _renderPass != VK_NULL_HANDLE;
@@ -4396,19 +4365,6 @@ void PipelineLayoutVulkan::SetDebugName(std::string_view name) noexcept {
 }
 
 void PipelineLayoutVulkan::RebindNativePointers() noexcept {
-    RADRAY_ASSERT(_setLayoutBindings.size() == _immutableSamplerHandles.size());
-    for (size_t groupIndex = 0; groupIndex < _setLayoutBindings.size(); ++groupIndex) {
-        vector<VkDescriptorSetLayoutBinding>& bindings = _setLayoutBindings[groupIndex];
-        vector<VkSampler>& immutableSamplers = _immutableSamplerHandles[groupIndex];
-        RADRAY_ASSERT(bindings.size() == immutableSamplers.size());
-        for (size_t bindingIndex = 0; bindingIndex < bindings.size(); ++bindingIndex) {
-            bindings[bindingIndex].pImmutableSamplers =
-                immutableSamplers[bindingIndex] != VK_NULL_HANDLE
-                    ? &immutableSamplers[bindingIndex]
-                    : nullptr;
-        }
-    }
-
     _desc = {};
     _desc.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     _desc.pNext = nullptr;
@@ -4442,9 +4398,7 @@ void PipelineLayoutVulkan::DestroyImpl() noexcept {
     _layout = VK_NULL_HANDLE;
     _setLayouts.clear();
     _setLayoutBindings.clear();
-    _immutableSamplerHandles.clear();
     _pushConstantRange.reset();
-    _immutableSamplers.clear();
     _device = nullptr;
 }
 bool GraphicsPipelineVulkan::IsValid() const noexcept {
@@ -4494,7 +4448,6 @@ void ComputePipelineVulkan::DestroyImpl() noexcept {
         _pipeline = VK_NULL_HANDLE;
     }
 }
-
 
 ShaderModuleVulkan::ShaderModuleVulkan(
     DeviceVulkan* device,

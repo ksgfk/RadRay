@@ -833,9 +833,7 @@ public:
     VkPipelineLayout _layout{VK_NULL_HANDLE};
     vector<VkDescriptorSetLayout> _setLayouts;
     vector<vector<VkDescriptorSetLayoutBinding>> _setLayoutBindings;
-    vector<vector<VkSampler>> _immutableSamplerHandles;
     std::optional<VkPushConstantRange> _pushConstantRange;
-    vector<unique_ptr<SamplerVulkan>> _immutableSamplers;
 };
 
 class GraphicsPipelineVulkan final : public GraphicsPipelineState {

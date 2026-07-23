@@ -836,7 +836,8 @@ class SamplerD3D12 final : public Sampler {
 public:
     SamplerD3D12(
         DeviceD3D12* device,
-        CpuDescriptorHeapViewRAII heapView) noexcept;
+        CpuDescriptorHeapViewRAII heapView,
+        const D3D12_SAMPLER_DESC& desc) noexcept;
     ~SamplerD3D12() noexcept override = default;
 
     bool IsValid() const noexcept override;
@@ -848,6 +849,7 @@ public:
 public:
     DeviceD3D12* _device;
     CpuDescriptorHeapViewRAII _samplerView;
+    D3D12_SAMPLER_DESC _desc;
     string _name;
 };
 
