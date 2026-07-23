@@ -388,6 +388,19 @@ enum class PhysicalDeviceType : int32_t {
     Cpu,
 };
 
+enum class ParameterBindingType : int32_t {
+    UNKNOWN,
+    CBuffer,
+    DynamicCBuffer,
+    Buffer,
+    RWBuffer,
+    TexelBuffer,
+    RWTexelBuffer,
+    Texture,
+    RWTexture,
+    Sampler,
+};
+
 enum class RenderObjectTag : uint32_t {
     UNKNOWN = 0x0,
     Device = 0x1,
@@ -866,7 +879,40 @@ struct ShaderDescriptor {
     ShaderStages Stages{ShaderStage::UNKNOWN};
 };
 
-struct PipelineLayoutDescriptor {};
+struct ShaderBindingLocation {
+    uint32_t Group{0};
+    uint32_t Binding{0};
+
+    friend bool operator==(const ShaderBindingLocation&, const ShaderBindingLocation&) noexcept = default;
+};
+
+struct ParameterSetLayoutEntryDescriptor {
+    uint32_t Binding{0};
+    ParameterBindingType Type{ParameterBindingType::UNKNOWN};
+    uint32_t Count{0};
+    ShaderStages Stages{ShaderStage::UNKNOWN};
+    std::optional<SamplerDescriptor> ImmutableSampler{};
+
+    friend bool operator==(const ParameterSetLayoutEntryDescriptor&, const ParameterSetLayoutEntryDescriptor&) noexcept = default;
+};
+
+struct ParameterSetLayoutDescriptor {
+    uint32_t GroupIndex{0};
+    std::span<const ParameterSetLayoutEntryDescriptor> Entries{};
+};
+
+struct PushConstantDescriptor {
+    ShaderBindingLocation Location{};
+    uint32_t Size{0};
+    ShaderStages Stages{ShaderStage::UNKNOWN};
+
+    friend bool operator==(const PushConstantDescriptor&, const PushConstantDescriptor&) noexcept = default;
+};
+
+struct PipelineLayoutDescriptor {
+    std::span<const ParameterSetLayoutDescriptor> ParameterSets{};
+    std::optional<PushConstantDescriptor> PushConstant{};
+};
 
 struct VertexElement {
     uint64_t Offset{0};
