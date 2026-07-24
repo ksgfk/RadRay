@@ -575,7 +575,8 @@ DeviceD3D12::DeviceD3D12(
     : _device(std::move(device)),
       _dxgiFactory(std::move(dxgiFactory)),
       _dxgiAdapter(std::move(dxgiAdapter)),
-      _mainAlloc(std::move(mainAlloc)) {
+      _mainAlloc(std::move(mainAlloc)),
+      _samplerCache(this) {
     _drawIndirectSignature = _CreateIndirectCommandSignature(
         _device.Get(), D3D12_INDIRECT_ARGUMENT_TYPE_DRAW, sizeof(DrawIndirectArguments));
     _drawIndexedIndirectSignature = _CreateIndirectCommandSignature(
@@ -616,6 +617,7 @@ void DeviceD3D12::DestroyImpl() noexcept {
     _logCallback = nullptr;
     _logUserData = nullptr;
 
+    _samplerCache.Clear();
     _cpuResAlloc = nullptr;
     _cpuRtvAlloc = nullptr;
     _cpuDsvAlloc = nullptr;
@@ -2193,6 +2195,11 @@ Nullable<unique_ptr<Sampler>> DeviceD3D12::CreateSampler(const SamplerDescriptor
     }
     heapView.GetHeap()->Create(rawDesc, heapView.GetStart());
     return make_unique<SamplerD3D12>(this, std::move(heapView), rawDesc);
+}
+
+Nullable<Sampler*> DeviceD3D12::GetOrCreateSampler(
+    const SamplerDescriptor& desc) noexcept {
+    return _samplerCache.GetOrCreate(desc);
 }
 
 Nullable<unique_ptr<FenceD3D12>> DeviceD3D12::CreateFenceD3D12(uint64_t initValue) noexcept {

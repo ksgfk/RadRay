@@ -886,7 +886,7 @@ struct ShaderParameterSetLayoutEntryDescriptor {
     ShaderParameterBindingType Type{ShaderParameterBindingType::UNKNOWN};
     uint32_t Count{0};
     ShaderStages Stages{ShaderStage::UNKNOWN};
-    // 注意Sampler生命周期
+    // When non-null, the sampler must remain valid until the Device is destroyed.
     Nullable<Sampler*> ImmutableSampler{};
 
     friend bool operator==(const ShaderParameterSetLayoutEntryDescriptor&, const ShaderParameterSetLayoutEntryDescriptor&) noexcept = default;
@@ -1185,6 +1185,9 @@ public:
     virtual Nullable<unique_ptr<ComputePipelineState>> CreateComputePipelineState(const ComputePipelineStateDescriptor& desc) noexcept = 0;
 
     virtual Nullable<unique_ptr<Sampler>> CreateSampler(const SamplerDescriptor& desc) noexcept = 0;
+
+    // Returns a Device-owned sampler. The pointer remains valid until the Device is destroyed.
+    virtual Nullable<Sampler*> GetOrCreateSampler(const SamplerDescriptor& desc) noexcept = 0;
 
     static Nullable<shared_ptr<Device>> Create(const DeviceDescriptor& desc);
 };
@@ -1521,3 +1524,28 @@ struct hash<radray::render::SamplerDescriptor> {
 };
 
 }  // namespace std
+
+namespace radray::render {
+
+// Non-thread-safe cache of samplers owned by a Device backend.
+class SamplerCache final {
+public:
+    explicit SamplerCache(Device* device) noexcept;
+
+    ~SamplerCache() noexcept;
+
+    SamplerCache(const SamplerCache&) = delete;
+    SamplerCache(SamplerCache&&) = delete;
+    SamplerCache& operator=(const SamplerCache&) = delete;
+    SamplerCache& operator=(SamplerCache&&) = delete;
+
+    Nullable<Sampler*> GetOrCreate(const SamplerDescriptor& desc) noexcept;
+
+    void Clear() noexcept;
+
+private:
+    Device* _device;
+    unordered_map<SamplerDescriptor, unique_ptr<Sampler>> _cache;
+};
+
+}  // namespace radray::render

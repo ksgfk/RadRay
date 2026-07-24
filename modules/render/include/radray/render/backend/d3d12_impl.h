@@ -350,6 +350,8 @@ public:
 
     Nullable<unique_ptr<Sampler>> CreateSampler(const SamplerDescriptor& desc) noexcept override;
 
+    Nullable<Sampler*> GetOrCreateSampler(const SamplerDescriptor& desc) noexcept override;
+
 public:
     void DestroyImpl() noexcept;
 
@@ -373,6 +375,7 @@ public:
     unique_ptr<CpuDescriptorAllocator> _cpuSamplerAlloc;
     unique_ptr<GpuDescriptorAllocator> _gpuResHeap;
     unique_ptr<GpuDescriptorAllocator> _gpuSamplerHeap;
+    SamplerCache _samplerCache;
     DeviceDetail _detail;
     CD3DX12FeatureSupport _features;
     bool _isAllowTearing = false;

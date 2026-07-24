@@ -8,12 +8,30 @@
 #include <bit>
 #include <cstring>
 #include <limits>
+#include <radray/hash.h>
 #include <radray/scope_guard.h>
 #include <type_traits>
 
 #if defined(_WIN32)
 #include <excpt.h>
 #endif
+
+std::size_t std::hash<radray::render::vulkan::DescriptorSetLayoutCacheKeyVulkan>::operator()(
+    const radray::render::vulkan::DescriptorSetLayoutCacheKeyVulkan& key) const noexcept {
+    radray::HashCode hash;
+    hash.Add(key.Bindings.size());
+    for (const auto& binding : key.Bindings) {
+        hash.Add(binding.Binding);
+        hash.Add(static_cast<uint32_t>(binding.Type));
+        hash.Add(binding.Count);
+        hash.Add(binding.Stages);
+        hash.Add(binding.ImmutableSamplers.size());
+        for (VkSampler sampler : binding.ImmutableSamplers) {
+            hash.Add(std::hash<VkSampler>{}(sampler));
+        }
+    }
+    return hash.ToHashCode();
+}
 
 #if defined(VK_USE_PLATFORM_METAL_EXT)
 namespace radray {
@@ -479,13 +497,88 @@ void VMA::DestroyImpl() noexcept {
     }
 }
 
+DescriptorSetLayoutCacheVulkan::DescriptorSetLayoutCacheVulkan(
+    DeviceVulkan* device) noexcept
+    : _device(device) {}
+
+DescriptorSetLayoutCacheVulkan::~DescriptorSetLayoutCacheVulkan() noexcept {
+    Destroy();
+}
+
+VkDescriptorSetLayout DescriptorSetLayoutCacheVulkan::GetOrCreate(
+    std::span<const VkDescriptorSetLayoutBinding> bindings) noexcept {
+    RADRAY_ASSERT(_device != nullptr);
+
+    Key key{};
+    key.Bindings.reserve(bindings.size());
+    for (const VkDescriptorSetLayoutBinding& binding : bindings) {
+        BindingKey bindingKey{
+            binding.binding,
+            binding.descriptorType,
+            binding.descriptorCount,
+            binding.stageFlags,
+            {}};
+        if (binding.pImmutableSamplers != nullptr) {
+            bindingKey.ImmutableSamplers.assign(
+                binding.pImmutableSamplers,
+                binding.pImmutableSamplers + binding.descriptorCount);
+        }
+        key.Bindings.push_back(std::move(bindingKey));
+    }
+    std::sort(
+        key.Bindings.begin(),
+        key.Bindings.end(),
+        [](const BindingKey& lhs, const BindingKey& rhs) noexcept {
+            return lhs.Binding < rhs.Binding;
+        });
+
+    if (const auto it = _layouts.find(key); it != _layouts.end()) {
+        return it->second;
+    }
+
+    VkDescriptorSetLayoutCreateInfo createInfo{};
+    createInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    createInfo.pNext = nullptr;
+    createInfo.flags = 0;
+    createInfo.bindingCount = static_cast<uint32_t>(bindings.size());
+    createInfo.pBindings = bindings.empty() ? nullptr : bindings.data();
+
+    VkDescriptorSetLayout layout = VK_NULL_HANDLE;
+    if (const VkResult vr = _device->_ftb.vkCreateDescriptorSetLayout(
+            _device->_device,
+            &createInfo,
+            _device->GetAllocationCallbacks(),
+            &layout);
+        vr != VK_SUCCESS) {
+        RADRAY_ERR_LOG("vkCreateDescriptorSetLayout failed: {}", vr);
+        return VK_NULL_HANDLE;
+    }
+    _layouts.emplace(std::move(key), layout);
+    return layout;
+}
+
+void DescriptorSetLayoutCacheVulkan::Destroy() noexcept {
+    if (_device != nullptr && _device->_device != VK_NULL_HANDLE) {
+        for (const auto& entry : _layouts) {
+            _device->_ftb.vkDestroyDescriptorSetLayout(
+                _device->_device,
+                entry.second,
+                _device->GetAllocationCallbacks());
+        }
+    }
+    _layouts.clear();
+    _device = nullptr;
+}
+
 DeviceVulkan::DeviceVulkan(
     InstanceVulkanImpl* instance,
     VkPhysicalDevice physicalDevice,
     VkDevice device) noexcept
     : _instance(instance),
       _physicalDevice(physicalDevice),
-      _device(device) {}
+      _device(device),
+      _descriptorSetLayoutCache(this),
+      _samplerCache(this) {}
 
 DeviceVulkan::~DeviceVulkan() noexcept {
     this->DestroyImpl();
@@ -1376,15 +1469,13 @@ Nullable<unique_ptr<PipelineLayoutVulkan>> DeviceVulkan::CreatePipelineLayoutInt
 
     auto result = make_unique<PipelineLayoutVulkan>(this);
     result->_setLayouts.reserve(setLayoutCount);
-    result->_setLayoutBindings.resize(setLayoutCount);
     if (desc.PushConstant.has_value()) {
         result->_pushConstantRange = pushConstantRange;
     }
     for (uint32_t groupIndex = 0; groupIndex < setLayoutCount; ++groupIndex) {
         const vector<ShaderParameterSetLayoutEntryDescriptor>& entries =
             groupEntries[groupIndex];
-        vector<VkDescriptorSetLayoutBinding>& bindings =
-            result->_setLayoutBindings[groupIndex];
+        vector<VkDescriptorSetLayoutBinding> bindings;
         bindings.reserve(entries.size());
 
         for (size_t i = 0; i < entries.size(); ++i) {
@@ -1402,24 +1493,12 @@ Nullable<unique_ptr<PipelineLayoutVulkan>> DeviceVulkan::CreatePipelineLayoutInt
             bindings.push_back(binding);
         }
 
-        VkDescriptorSetLayoutCreateInfo setLayoutCreateInfo{};
-        setLayoutCreateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-        setLayoutCreateInfo.pNext = nullptr;
-        setLayoutCreateInfo.flags = 0;
-        setLayoutCreateInfo.bindingCount = static_cast<uint32_t>(bindings.size());
-        setLayoutCreateInfo.pBindings = bindings.empty() ? nullptr : bindings.data();
-
-        VkDescriptorSetLayout setLayout = VK_NULL_HANDLE;
-        if (auto vr = _ftb.vkCreateDescriptorSetLayout(
-                _device,
-                &setLayoutCreateInfo,
-                GetAllocationCallbacks(),
-                &setLayout);
-            vr != VK_SUCCESS) {
+        const VkDescriptorSetLayout setLayout =
+            _descriptorSetLayoutCache.GetOrCreate(bindings);
+        if (setLayout == VK_NULL_HANDLE) {
             RADRAY_ERR_LOG(
-                "vkCreateDescriptorSetLayout failed for group {}: {}",
-                groupIndex,
-                vr);
+                "vk descriptor set layout cache failed for group {}",
+                groupIndex);
             return nullptr;
         }
         result->_setLayouts.push_back(setLayout);
@@ -1749,6 +1828,11 @@ Nullable<unique_ptr<Sampler>> DeviceVulkan::CreateSampler(
     return unique_ptr<Sampler>{sampler.Release()};
 }
 
+Nullable<Sampler*> DeviceVulkan::GetOrCreateSampler(
+    const SamplerDescriptor& desc) noexcept {
+    return _samplerCache.GetOrCreate(desc);
+}
+
 Nullable<unique_ptr<LegacyFenceVulkan>> DeviceVulkan::CreateLegacyFence(VkFenceCreateFlags flags) noexcept {
     VkFenceCreateInfo fenceInfo{};
     fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
@@ -1974,6 +2058,8 @@ void DeviceVulkan::SetObjectName(std::string_view name, VkObjectType type, void*
 }
 
 void DeviceVulkan::DestroyImpl() noexcept {
+    _descriptorSetLayoutCache.Destroy();
+    _samplerCache.Clear();
     _vma.reset();
     for (auto&& i : _queues) {
         i.clear();
@@ -4385,19 +4471,10 @@ void PipelineLayoutVulkan::DestroyImpl() noexcept {
                 _layout,
                 _device->GetAllocationCallbacks());
         }
-        for (VkDescriptorSetLayout setLayout : _setLayouts) {
-            if (setLayout != VK_NULL_HANDLE) {
-                _device->_ftb.vkDestroyDescriptorSetLayout(
-                    _device->_device,
-                    setLayout,
-                    _device->GetAllocationCallbacks());
-            }
-        }
     }
     _desc = {};
     _layout = VK_NULL_HANDLE;
     _setLayouts.clear();
-    _setLayoutBindings.clear();
     _pushConstantRange.reset();
     _device = nullptr;
 }

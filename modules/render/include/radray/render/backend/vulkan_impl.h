@@ -105,6 +105,58 @@ public:
     VmaAllocator _vma;
 };
 
+struct DescriptorSetLayoutCacheKeyVulkan {
+    struct BindingKey {
+        uint32_t Binding;
+        VkDescriptorType Type;
+        uint32_t Count;
+        VkShaderStageFlags Stages;
+        vector<VkSampler> ImmutableSamplers;
+
+        friend bool operator==(const BindingKey&, const BindingKey&) noexcept = default;
+    };
+
+    vector<BindingKey> Bindings;
+
+    friend bool operator==(
+        const DescriptorSetLayoutCacheKeyVulkan&,
+        const DescriptorSetLayoutCacheKeyVulkan&) noexcept = default;
+};
+
+}  // namespace radray::render::vulkan
+
+namespace std {
+
+template <>
+struct hash<radray::render::vulkan::DescriptorSetLayoutCacheKeyVulkan> {
+    size_t operator()(
+        const radray::render::vulkan::DescriptorSetLayoutCacheKeyVulkan& key) const noexcept;
+};
+
+}  // namespace std
+
+namespace radray::render::vulkan {
+
+// Device-lifetime cache for descriptor set layouts.
+class DescriptorSetLayoutCacheVulkan final {
+public:
+    explicit DescriptorSetLayoutCacheVulkan(DeviceVulkan* device) noexcept;
+
+    ~DescriptorSetLayoutCacheVulkan() noexcept;
+
+    VkDescriptorSetLayout GetOrCreate(
+        std::span<const VkDescriptorSetLayoutBinding> bindings) noexcept;
+
+    void Destroy() noexcept;
+
+private:
+    using Key = DescriptorSetLayoutCacheKeyVulkan;
+    using BindingKey = Key::BindingKey;
+
+    DeviceVulkan* _device;
+    unordered_map<Key, VkDescriptorSetLayout> _layouts;
+};
+
 class DeviceVulkan final : public Device {
 public:
     DeviceVulkan(
@@ -154,6 +206,8 @@ public:
 
     Nullable<unique_ptr<Sampler>> CreateSampler(const SamplerDescriptor& desc) noexcept override;
 
+    Nullable<Sampler*> GetOrCreateSampler(const SamplerDescriptor& desc) noexcept override;
+
 public:
     Nullable<unique_ptr<LegacyFenceVulkan>> CreateLegacyFence(VkFenceCreateFlags flags) noexcept;
 
@@ -183,6 +237,8 @@ public:
     std::unique_ptr<VMA> _vma;
     std::array<vector<unique_ptr<QueueVulkan>>, (size_t)QueueType::MAX_COUNT> _queues;
     DeviceFuncTable _ftb;
+    DescriptorSetLayoutCacheVulkan _descriptorSetLayoutCache;
+    SamplerCache _samplerCache;
     VkPhysicalDeviceFeatures _feature;
     ExtFeaturesVulkan _extFeatures;
     VkPhysicalDeviceProperties _properties;
@@ -832,7 +888,6 @@ public:
     VkPipelineLayoutCreateInfo _desc{};
     VkPipelineLayout _layout{VK_NULL_HANDLE};
     vector<VkDescriptorSetLayout> _setLayouts;
-    vector<vector<VkDescriptorSetLayoutBinding>> _setLayoutBindings;
     std::optional<VkPushConstantRange> _pushConstantRange;
 };
 

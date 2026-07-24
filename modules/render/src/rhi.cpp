@@ -35,6 +35,41 @@ std::size_t std::hash<radray::render::SamplerDescriptor>::operator()(
 
 namespace radray::render {
 
+SamplerCache::SamplerCache(Device* device) noexcept
+    : _device(device) {}
+
+SamplerCache::~SamplerCache() noexcept {
+    Clear();
+}
+
+Nullable<Sampler*> SamplerCache::GetOrCreate(
+    const SamplerDescriptor& desc) noexcept {
+    if (_device == nullptr) {
+        return nullptr;
+    }
+    if (const auto it = _cache.find(desc); it != _cache.end()) {
+        return it->second.get();
+    }
+    auto sampler = _device->CreateSampler(desc);
+    if (!sampler.HasValue()) {
+        return nullptr;
+    }
+    Sampler* result = sampler.Get();
+    _cache.emplace(desc, sampler.Release());
+    return result;
+}
+
+void SamplerCache::Clear() noexcept {
+    for (auto& [desc, sampler] : _cache) {
+        (void)desc;
+        if (sampler != nullptr) {
+            sampler->Destroy();
+        }
+    }
+    _cache.clear();
+    _device = nullptr;
+}
+
 SwapChainFrame::SwapChainFrame(SwapChainFrame&& other) noexcept {
     swap(*this, other);
 }
