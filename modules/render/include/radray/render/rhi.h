@@ -7,6 +7,7 @@
 #include <optional>
 #include <span>
 #include <string_view>
+#include <utility>
 
 #include <radray/types.h>
 #include <radray/nullable.h>
@@ -407,7 +408,8 @@ enum class RenderObjectTag : uint32_t {
     Fence = CmdEncoder << 3,
     Shader = Fence << 1,
     PipelineLayout = Shader << 1,
-    PipelineState = PipelineLayout << 1,
+    ShaderParameterSet = PipelineLayout << 1,
+    PipelineState = ShaderParameterSet << 1,
     GraphicsPipelineState = PipelineState | (PipelineState << 1),
     ComputePipelineState = PipelineState | (PipelineState << 2),
     SwapChain = PipelineState << 3,
@@ -489,6 +491,7 @@ class Texture;
 class TextureView;
 class Shader;
 class PipelineLayout;
+class ShaderParameterSet;
 class RenderPass;
 class Framebuffer;
 class PipelineState;
@@ -861,6 +864,8 @@ struct BufferRange {
     static constexpr BufferRange AllRange() noexcept {
         return BufferRange{0, BufferRange::All()};
     }
+
+    friend bool operator==(const BufferRange&, const BufferRange&) noexcept = default;
 };
 
 struct MappedBufferRange {
@@ -886,8 +891,7 @@ struct ShaderParameterSetLayoutEntryDescriptor {
     ShaderParameterBindingType Type{ShaderParameterBindingType::UNKNOWN};
     uint32_t Count{0};
     ShaderStages Stages{ShaderStage::UNKNOWN};
-    // When non-null, the sampler must remain valid until the Device is destroyed.
-    Nullable<Sampler*> ImmutableSampler{};
+    std::optional<SamplerDescriptor> ImmutableSampler{};
 
     friend bool operator==(const ShaderParameterSetLayoutEntryDescriptor&, const ShaderParameterSetLayoutEntryDescriptor&) noexcept = default;
 };
@@ -908,6 +912,36 @@ struct PushConstantDescriptor {
 struct PipelineLayoutDescriptor {
     std::span<const ShaderParameterSetLayoutDescriptor> ParameterSets{};
     std::optional<PushConstantDescriptor> PushConstant{};
+};
+
+struct ShaderBufferBinding {
+    Buffer* Target{nullptr};
+    BufferRange Range{BufferRange::AllRange()};
+    uint32_t StructureByteStride{0};
+
+    friend bool operator==(const ShaderBufferBinding&, const ShaderBufferBinding&) noexcept = default;
+};
+
+struct ShaderTexelBufferBinding {
+    Buffer* Target{nullptr};
+    BufferRange Range{BufferRange::AllRange()};
+    TextureFormat Format{TextureFormat::UNKNOWN};
+
+    friend bool operator==(const ShaderTexelBufferBinding&, const ShaderTexelBufferBinding&) noexcept = default;
+};
+
+using ShaderParameterValue = std::variant<ShaderBufferBinding, ShaderTexelBufferBinding, TextureView*, Sampler*>;
+
+struct ShaderParameterSetDescriptor {
+    PipelineLayout* Layout{nullptr};
+    uint32_t GroupIndex{0};
+};
+
+struct ShaderParameterDynamicOffset {
+    uint32_t Binding{0};
+    uint32_t Offset{0};
+
+    friend bool operator==(const ShaderParameterDynamicOffset&, const ShaderParameterDynamicOffset&) noexcept = default;
 };
 
 struct VertexElement {
@@ -1180,13 +1214,14 @@ public:
 
     virtual Nullable<unique_ptr<PipelineLayout>> CreatePipelineLayout(const PipelineLayoutDescriptor& desc) noexcept = 0;
 
+    virtual Nullable<unique_ptr<ShaderParameterSet>> CreateShaderParameterSet(const ShaderParameterSetDescriptor& desc) noexcept = 0;
+
     virtual Nullable<unique_ptr<GraphicsPipelineState>> CreateGraphicsPipelineState(const GraphicsPipelineStateDescriptor& desc) noexcept = 0;
 
     virtual Nullable<unique_ptr<ComputePipelineState>> CreateComputePipelineState(const ComputePipelineStateDescriptor& desc) noexcept = 0;
 
     virtual Nullable<unique_ptr<Sampler>> CreateSampler(const SamplerDescriptor& desc) noexcept = 0;
 
-    // Returns a Device-owned sampler. The pointer remains valid until the Device is destroyed.
     virtual Nullable<Sampler*> GetOrCreateSampler(const SamplerDescriptor& desc) noexcept = 0;
 
     static Nullable<shared_ptr<Device>> Create(const DeviceDescriptor& desc);
@@ -1262,6 +1297,8 @@ public:
     RenderObjectTags GetTag() const noexcept override { return RenderObjectTag::CmdEncoder; }
 
     virtual CommandBuffer* GetCommandBuffer() const noexcept = 0;
+
+    virtual void BindShaderParameterSet(uint32_t groupIndex, ShaderParameterSet* set, std::span<const ShaderParameterDynamicOffset> dynamicOffsets = {}) noexcept = 0;
 };
 
 class GraphicsCommandEncoder : public CommandEncoder {
@@ -1431,6 +1468,17 @@ public:
     virtual ~PipelineLayout() noexcept = default;
 
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::PipelineLayout; }
+};
+
+class ShaderParameterSet : public RenderBase {
+public:
+    virtual ~ShaderParameterSet() noexcept = default;
+
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::ShaderParameterSet; }
+
+    virtual bool Set(uint32_t binding, uint32_t arrayElement, ShaderParameterValue value) noexcept = 0;
+
+    virtual bool FlushWrites() noexcept = 0;
 };
 
 class PipelineState : public RenderBase, public IDebugName {

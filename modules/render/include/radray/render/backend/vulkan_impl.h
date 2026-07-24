@@ -33,6 +33,7 @@ class BufferViewVulkan;
 class ImageVulkan;
 class ImageViewVulkan;
 class PipelineLayoutVulkan;
+class ShaderParameterSetVulkan;
 class GraphicsPipelineVulkan;
 class ComputePipelineVulkan;
 class ShaderModuleVulkan;
@@ -157,6 +158,51 @@ private:
     unordered_map<Key, VkDescriptorSetLayout> _layouts;
 };
 
+class DescriptorSetAllocatorVulkan final {
+public:
+    struct Page;
+
+    struct Request {
+        VkDescriptorSetLayout Layout{VK_NULL_HANDLE};
+        std::span<const VkDescriptorPoolSize> DescriptorCounts;
+    };
+
+    struct Allocation {
+        Page* PagePtr{nullptr};
+        VkDescriptorPool Pool{VK_NULL_HANDLE};
+        VkDescriptorSet Set{VK_NULL_HANDLE};
+
+        static constexpr Allocation Invalid() noexcept { return {}; }
+
+        constexpr bool IsValid() const noexcept {
+            return PagePtr != nullptr &&
+                   Pool != VK_NULL_HANDLE &&
+                   Set != VK_NULL_HANDLE;
+        }
+    };
+
+    explicit DescriptorSetAllocatorVulkan(DeviceVulkan* device) noexcept;
+
+    ~DescriptorSetAllocatorVulkan() noexcept;
+
+    std::optional<Allocation> Allocate(Request request) noexcept;
+
+    void Destroy(Allocation allocation) noexcept;
+
+    void Clear() noexcept;
+
+private:
+    DeviceVulkan* _device;
+    vector<unique_ptr<Page>> _pages;
+};
+
+static_assert(
+    is_allocator<
+        DescriptorSetAllocatorVulkan,
+        DescriptorSetAllocatorVulkan::Allocation,
+        DescriptorSetAllocatorVulkan::Request>,
+    "DescriptorSetAllocatorVulkan is not an allocator");
+
 class DeviceVulkan final : public Device {
 public:
     DeviceVulkan(
@@ -200,6 +246,8 @@ public:
 
     Nullable<unique_ptr<PipelineLayout>> CreatePipelineLayout(const PipelineLayoutDescriptor& desc) noexcept override;
 
+    Nullable<unique_ptr<ShaderParameterSet>> CreateShaderParameterSet(const ShaderParameterSetDescriptor& desc) noexcept override;
+
     Nullable<unique_ptr<GraphicsPipelineState>> CreateGraphicsPipelineState(const GraphicsPipelineStateDescriptor& desc) noexcept override;
 
     Nullable<unique_ptr<ComputePipelineState>> CreateComputePipelineState(const ComputePipelineStateDescriptor& desc) noexcept override;
@@ -238,6 +286,7 @@ public:
     std::array<vector<unique_ptr<QueueVulkan>>, (size_t)QueueType::MAX_COUNT> _queues;
     DeviceFuncTable _ftb;
     DescriptorSetLayoutCacheVulkan _descriptorSetLayoutCache;
+    DescriptorSetAllocatorVulkan _descriptorSetAllocator;
     SamplerCache _samplerCache;
     VkPhysicalDeviceFeatures _feature;
     ExtFeaturesVulkan _extFeatures;
@@ -380,6 +429,11 @@ public:
 
     void BindGraphicsPipelineState(GraphicsPipelineState* pso) noexcept override;
 
+    void BindShaderParameterSet(
+        uint32_t groupIndex,
+        ShaderParameterSet* set,
+        std::span<const ShaderParameterDynamicOffset> dynamicOffsets) noexcept override;
+
     void Draw(uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance) noexcept override;
 
     void DrawIndexed(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance) noexcept override;
@@ -395,6 +449,7 @@ public:
     CommandBufferVulkan* _cmdBuffer;
     FrameBufferVulkan* _framebuffer{nullptr};
     GraphicsPipelineVulkan* _boundPso{nullptr};
+    PipelineLayoutVulkan* _boundLayout{nullptr};
 };
 
 class SimulateComputeEncoderVulkan final : public ComputeCommandEncoder {
@@ -413,6 +468,11 @@ public:
 
     void BindComputePipelineState(ComputePipelineState* pso) noexcept override;
 
+    void BindShaderParameterSet(
+        uint32_t groupIndex,
+        ShaderParameterSet* set,
+        std::span<const ShaderParameterDynamicOffset> dynamicOffsets) noexcept override;
+
     void Dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ) noexcept override;
 
     void DispatchIndirect(Buffer* argumentBuffer, uint64_t argumentOffset) noexcept override;
@@ -422,6 +482,8 @@ public:
 
     DeviceVulkan* _device;
     CommandBufferVulkan* _cmdBuffer;
+    ComputePipelineVulkan* _boundPso{nullptr};
+    PipelineLayoutVulkan* _boundLayout{nullptr};
 };
 
 class RenderPassVulkan final : public RenderPass {
@@ -888,13 +950,44 @@ public:
     VkPipelineLayoutCreateInfo _desc{};
     VkPipelineLayout _layout{VK_NULL_HANDLE};
     vector<VkDescriptorSetLayout> _setLayouts;
+    vector<vector<ShaderParameterSetLayoutEntryDescriptor>> _parameterSetLayouts;
     std::optional<VkPushConstantRange> _pushConstantRange;
+};
+
+class ShaderParameterSetVulkan final : public ShaderParameterSet {
+public:
+    ShaderParameterSetVulkan() noexcept = default;
+    ~ShaderParameterSetVulkan() noexcept override;
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+    bool Set(
+        uint32_t binding,
+        uint32_t arrayElement,
+        ShaderParameterValue value) noexcept override;
+
+    bool FlushWrites() noexcept override;
+
+public:
+    void DestroyImpl() noexcept;
+
+    DeviceVulkan* _device{nullptr};
+    PipelineLayoutVulkan* _layout{nullptr};
+    uint32_t _groupIndex{0};
+    DescriptorSetAllocatorVulkan::Allocation _allocation;
+    vector<size_t> _bindingValueOffsets;
+    vector<std::optional<ShaderParameterValue>> _values;
+    vector<uint8_t> _dirty;
+    vector<unique_ptr<BufferViewVulkan>> _texelBufferViews;
 };
 
 class GraphicsPipelineVulkan final : public GraphicsPipelineState {
 public:
     GraphicsPipelineVulkan(
         DeviceVulkan* device,
+        PipelineLayoutVulkan* layout,
         VkPipeline pipeline) noexcept;
 
     ~GraphicsPipelineVulkan() noexcept override;
@@ -909,6 +1002,7 @@ public:
     void DestroyImpl() noexcept;
 
     DeviceVulkan* _device;
+    PipelineLayoutVulkan* _layout;
     VkPipeline _pipeline;
 };
 
@@ -916,6 +1010,7 @@ class ComputePipelineVulkan final : public ComputePipelineState {
 public:
     ComputePipelineVulkan(
         DeviceVulkan* device,
+        PipelineLayoutVulkan* layout,
         VkPipeline pipeline) noexcept;
 
     ~ComputePipelineVulkan() noexcept override;
@@ -930,6 +1025,7 @@ public:
     void DestroyImpl() noexcept;
 
     DeviceVulkan* _device;
+    PipelineLayoutVulkan* _layout;
     VkPipeline _pipeline;
 };
 
@@ -995,6 +1091,7 @@ constexpr auto CastVkObject(Framebuffer* p) noexcept { return static_cast<FrameB
 constexpr auto CastVkObject(Sampler* p) noexcept { return static_cast<SamplerVulkan*>(p); }
 constexpr auto CastVkObject(Shader* p) noexcept { return static_cast<ShaderModuleVulkan*>(p); }
 constexpr auto CastVkObject(PipelineLayout* p) noexcept { return static_cast<PipelineLayoutVulkan*>(p); }
+constexpr auto CastVkObject(ShaderParameterSet* p) noexcept { return static_cast<ShaderParameterSetVulkan*>(p); }
 constexpr auto CastVkObject(GraphicsPipelineState* p) noexcept { return static_cast<GraphicsPipelineVulkan*>(p); }
 constexpr auto CastVkObject(ComputePipelineState* p) noexcept { return static_cast<ComputePipelineVulkan*>(p); }
 constexpr auto CastVkObject(SwapChainSyncObject* p) noexcept { return static_cast<SwapChainSyncObjectVulkan*>(p); }

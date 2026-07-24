@@ -6,9 +6,9 @@
 
 namespace radray {
 
-template <class TAllocator, class TAllocation>
-concept is_allocator = requires(TAllocator alloc, size_t size, TAllocation allocation) {
-    { alloc.Allocate(size) } -> std::same_as<std::optional<TAllocation>>;
+template <class TAllocator, class TAllocation, class TRequest = size_t>
+concept is_allocator = requires(TAllocator alloc, TRequest request, TAllocation allocation) {
+    { alloc.Allocate(request) } -> std::same_as<std::optional<TAllocation>>;
     { alloc.Destroy(allocation) } -> std::same_as<void>;
 };
 

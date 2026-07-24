@@ -30,6 +30,7 @@ class TextureViewD3D12;
 class RenderPassD3D12;
 class FramebufferD3D12;
 class RootSigD3D12;
+class ShaderParameterSetD3D12;
 class GraphicsPsoD3D12;
 class ComputePsoD3D12;
 class SamplerD3D12;
@@ -344,6 +345,8 @@ public:
 
     Nullable<unique_ptr<PipelineLayout>> CreatePipelineLayout(const PipelineLayoutDescriptor& desc) noexcept override;
 
+    Nullable<unique_ptr<ShaderParameterSet>> CreateShaderParameterSet(const ShaderParameterSetDescriptor& desc) noexcept override;
+
     Nullable<unique_ptr<GraphicsPipelineState>> CreateGraphicsPipelineState(const GraphicsPipelineStateDescriptor& desc) noexcept override;
 
     Nullable<unique_ptr<ComputePipelineState>> CreateComputePipelineState(const ComputePipelineStateDescriptor& desc) noexcept override;
@@ -516,6 +519,11 @@ public:
 
     void BindGraphicsPipelineState(GraphicsPipelineState* pso) noexcept override;
 
+    void BindShaderParameterSet(
+        uint32_t groupIndex,
+        ShaderParameterSet* set,
+        std::span<const ShaderParameterDynamicOffset> dynamicOffsets) noexcept override;
+
     void Draw(uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance) noexcept override;
 
     void DrawIndexed(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance) noexcept override;
@@ -527,6 +535,7 @@ public:
 public:
     CmdListD3D12* _cmdList;
     GraphicsPsoD3D12* _boundPso{nullptr};
+    RootSigD3D12* _boundRs{nullptr};
     vector<VertexBufferView> _boundVbvs;
 };
 
@@ -543,12 +552,19 @@ public:
 
     void BindComputePipelineState(ComputePipelineState* pso) noexcept override;
 
+    void BindShaderParameterSet(
+        uint32_t groupIndex,
+        ShaderParameterSet* set,
+        std::span<const ShaderParameterDynamicOffset> dynamicOffsets) noexcept override;
+
     void Dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ) noexcept override;
 
     void DispatchIndirect(Buffer* argumentBuffer, uint64_t argumentOffset) noexcept override;
 
 public:
     CmdListD3D12* _cmdList;
+    ComputePsoD3D12* _boundPso{nullptr};
+    RootSigD3D12* _boundRs{nullptr};
 };
 
 class SwapChainD3D12 final : public SwapChain {
@@ -774,6 +790,21 @@ public:
     ShaderStages _stages{ShaderStage::UNKNOWN};
 };
 
+struct ShaderParameterBindingLayoutD3D12 {
+    uint32_t DescriptorOffset{std::numeric_limits<uint32_t>::max()};
+    uint32_t RootParameterIndex{std::numeric_limits<uint32_t>::max()};
+};
+
+struct ShaderParameterGroupLayoutD3D12 {
+    uint32_t GroupIndex{0};
+    vector<ShaderParameterSetLayoutEntryDescriptor> Entries;
+    vector<ShaderParameterBindingLayoutD3D12> Bindings;
+    uint32_t ResourceDescriptorCount{0};
+    uint32_t SamplerDescriptorCount{0};
+    uint32_t ResourceTableRootParameter{std::numeric_limits<uint32_t>::max()};
+    uint32_t SamplerTableRootParameter{std::numeric_limits<uint32_t>::max()};
+};
+
 class RootSigD3D12 final : public PipelineLayout {
 public:
     RootSigD3D12() noexcept = default;
@@ -787,18 +818,51 @@ public:
 
     void RebindNativePointers() noexcept;
 
+    Nullable<const ShaderParameterGroupLayoutD3D12*> FindParameterGroup(
+        uint32_t groupIndex) const noexcept;
+
 public:
+    DeviceD3D12* _device{nullptr};
     D3D12_VERSIONED_ROOT_SIGNATURE_DESC _desc{};
     vector<D3D12_ROOT_PARAMETER1> _rootParameters;
     vector<vector<D3D12_DESCRIPTOR_RANGE1>> _descriptorRanges;
     vector<D3D12_STATIC_SAMPLER_DESC> _staticSamplers;
+    vector<ShaderParameterGroupLayoutD3D12> _parameterGroups;
     ComPtr<ID3D12RootSignature> _rootSig;
+};
+
+class ShaderParameterSetD3D12 final : public ShaderParameterSet {
+public:
+    ShaderParameterSetD3D12() noexcept = default;
+    ~ShaderParameterSetD3D12() noexcept override;
+
+    bool IsValid() const noexcept override;
+
+    void Destroy() noexcept override;
+
+    bool Set(
+        uint32_t binding,
+        uint32_t arrayElement,
+        ShaderParameterValue value) noexcept override;
+
+    bool FlushWrites() noexcept override;
+
+public:
+    DeviceD3D12* _device{nullptr};
+    RootSigD3D12* _layout{nullptr};
+    uint32_t _groupIndex{0};
+    vector<size_t> _bindingValueOffsets;
+    vector<std::optional<ShaderParameterValue>> _values;
+    vector<uint8_t> _dirty;
+    GpuDescriptorHeapViewRAII _resourceDescriptors;
+    GpuDescriptorHeapViewRAII _samplerDescriptors;
 };
 
 class GraphicsPsoD3D12 final : public GraphicsPipelineState {
 public:
     GraphicsPsoD3D12(
         DeviceD3D12* device,
+        RootSigD3D12* layout,
         ComPtr<ID3D12PipelineState> pso,
         vector<uint64_t> arrayStrides,
         D3D12_PRIMITIVE_TOPOLOGY topo) noexcept;
@@ -812,6 +876,7 @@ public:
 
 public:
     DeviceD3D12* _device;
+    RootSigD3D12* _layout;
     ComPtr<ID3D12PipelineState> _pso;
     vector<uint64_t> _arrayStrides;
     D3D12_PRIMITIVE_TOPOLOGY _topo;
@@ -821,6 +886,7 @@ class ComputePsoD3D12 final : public ComputePipelineState {
 public:
     ComputePsoD3D12(
         DeviceD3D12* device,
+        RootSigD3D12* layout,
         ComPtr<ID3D12PipelineState> pso) noexcept;
     ~ComputePsoD3D12() noexcept override = default;
 
@@ -832,6 +898,7 @@ public:
 
 public:
     DeviceD3D12* _device;
+    RootSigD3D12* _layout;
     ComPtr<ID3D12PipelineState> _pso;
 };
 
@@ -869,6 +936,7 @@ constexpr auto CastD3D12Object(Framebuffer* v) noexcept { return static_cast<Fra
 constexpr auto CastD3D12Object(Fence* v) noexcept { return static_cast<FenceD3D12*>(v); }
 constexpr auto CastD3D12Object(CommandBuffer* v) noexcept { return static_cast<CmdListD3D12*>(v); }
 constexpr auto CastD3D12Object(PipelineLayout* v) noexcept { return static_cast<RootSigD3D12*>(v); }
+constexpr auto CastD3D12Object(ShaderParameterSet* v) noexcept { return static_cast<ShaderParameterSetD3D12*>(v); }
 constexpr auto CastD3D12Object(Shader* v) noexcept { return static_cast<Dxil*>(v); }
 constexpr auto CastD3D12Object(Sampler* v) noexcept { return static_cast<SamplerD3D12*>(v); }
 constexpr auto CastD3D12Object(TextureView* v) noexcept { return static_cast<TextureViewD3D12*>(v); }
