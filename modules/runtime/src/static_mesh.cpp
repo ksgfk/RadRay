@@ -3,7 +3,7 @@
 #include <limits>
 #include <utility>
 
-#include <radray/render/common.h>
+#include <radray/render/rhi.h>
 #include <radray/runtime/gpu_system.h>
 
 namespace radray {

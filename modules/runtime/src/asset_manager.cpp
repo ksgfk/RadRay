@@ -3,7 +3,7 @@
 #include <exception>
 
 #include <radray/logger.h>
-#include <radray/render/common.h>
+#include <radray/render/rhi.h>
 #include <radray/runtime/render_resource_recycler.h>
 
 namespace radray {

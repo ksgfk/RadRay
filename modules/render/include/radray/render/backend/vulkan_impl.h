@@ -423,7 +423,7 @@ public:
 
     void SetScissor(Rect rect) noexcept override;
 
-    void BindVertexBuffer(std::span<const VertexBufferView> vbv) noexcept override;
+    void BindVertexBuffers(std::span<const VertexBufferBinding> bindings) noexcept override;
 
     void BindIndexBuffer(IndexBufferView ibv) noexcept override;
 
@@ -433,6 +433,11 @@ public:
         uint32_t groupIndex,
         ShaderParameterSet* set,
         std::span<const ShaderParameterDynamicOffset> dynamicOffsets) noexcept override;
+
+    bool SetPushConstants(
+        uint32_t groupIndex,
+        uint32_t binding,
+        std::span<const byte> data) noexcept override;
 
     void Draw(uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance) noexcept override;
 
@@ -472,6 +477,11 @@ public:
         uint32_t groupIndex,
         ShaderParameterSet* set,
         std::span<const ShaderParameterDynamicOffset> dynamicOffsets) noexcept override;
+
+    bool SetPushConstants(
+        uint32_t groupIndex,
+        uint32_t binding,
+        std::span<const byte> data) noexcept override;
 
     void Dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ) noexcept override;
 
@@ -952,6 +962,7 @@ public:
     vector<VkDescriptorSetLayout> _setLayouts;
     vector<vector<ShaderParameterSetLayoutEntryDescriptor>> _parameterSetLayouts;
     std::optional<VkPushConstantRange> _pushConstantRange;
+    std::optional<ShaderBindingLocation> _pushConstantLocation;
 };
 
 class ShaderParameterSetVulkan final : public ShaderParameterSet {

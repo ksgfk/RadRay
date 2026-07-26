@@ -944,18 +944,28 @@ struct ShaderParameterDynamicOffset {
     friend bool operator==(const ShaderParameterDynamicOffset&, const ShaderParameterDynamicOffset&) noexcept = default;
 };
 
-struct VertexElement {
-    uint64_t Offset{0};
+struct VertexAttribute {
+    uint32_t BufferBinding{0};
+    uint32_t Offset{0};
     std::string_view Semantic{};
     uint32_t SemanticIndex{0};
     VertexFormat Format{VertexFormat::UNKNOWN};
     uint32_t Location{0};
+
+    friend bool operator==(const VertexAttribute&, const VertexAttribute&) noexcept = default;
 };
 
 struct VertexBufferLayout {
-    uint64_t ArrayStride{0};
+    uint32_t Binding{0};
+    uint32_t ArrayStride{0};
     VertexStepMode StepMode{};
-    std::span<const VertexElement> Elements{};
+
+    friend bool operator==(const VertexBufferLayout&, const VertexBufferLayout&) noexcept = default;
+};
+
+struct VertexInputState {
+    std::span<const VertexBufferLayout> Buffers{};
+    std::span<const VertexAttribute> Attributes{};
 };
 
 struct PrimitiveState {
@@ -1116,7 +1126,7 @@ struct GraphicsPipelineStateDescriptor {
     PipelineLayout* PipelineLayout{nullptr};
     std::optional<ShaderEntry> VS{};
     std::optional<ShaderEntry> PS{};
-    std::span<const VertexBufferLayout> VertexLayouts{};
+    VertexInputState VertexInput{};
     PrimitiveState Primitive{};
     std::optional<DepthStencilState> DepthStencil{};
     MultiSampleState MultiSample{};
@@ -1133,6 +1143,11 @@ struct VertexBufferView {
     Buffer* Target{nullptr};
     uint64_t Offset{0};
     uint64_t Size{0};
+};
+
+struct VertexBufferBinding {
+    uint32_t Binding{0};
+    VertexBufferView View{};
 };
 
 struct IndexBufferView {
@@ -1299,6 +1314,8 @@ public:
     virtual CommandBuffer* GetCommandBuffer() const noexcept = 0;
 
     virtual void BindShaderParameterSet(uint32_t groupIndex, ShaderParameterSet* set, std::span<const ShaderParameterDynamicOffset> dynamicOffsets = {}) noexcept = 0;
+
+    virtual bool SetPushConstants(uint32_t groupIndex, uint32_t binding, std::span<const byte> data) noexcept = 0;
 };
 
 class GraphicsCommandEncoder : public CommandEncoder {
@@ -1311,7 +1328,7 @@ public:
 
     virtual void SetScissor(Rect rect) noexcept = 0;
 
-    virtual void BindVertexBuffer(std::span<const VertexBufferView> vbv) noexcept = 0;
+    virtual void BindVertexBuffers(std::span<const VertexBufferBinding> bindings) noexcept = 0;
 
     virtual void BindIndexBuffer(IndexBufferView ibv) noexcept = 0;
 

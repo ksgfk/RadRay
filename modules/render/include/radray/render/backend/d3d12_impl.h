@@ -513,7 +513,7 @@ public:
 
     void SetScissor(Rect rect) noexcept override;
 
-    void BindVertexBuffer(std::span<const VertexBufferView> vbv) noexcept override;
+    void BindVertexBuffers(std::span<const VertexBufferBinding> bindings) noexcept override;
 
     void BindIndexBuffer(IndexBufferView ibv) noexcept override;
 
@@ -524,6 +524,11 @@ public:
         ShaderParameterSet* set,
         std::span<const ShaderParameterDynamicOffset> dynamicOffsets) noexcept override;
 
+    bool SetPushConstants(
+        uint32_t groupIndex,
+        uint32_t binding,
+        std::span<const byte> data) noexcept override;
+
     void Draw(uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance) noexcept override;
 
     void DrawIndexed(uint32_t indexCount, uint32_t instanceCount, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance) noexcept override;
@@ -533,10 +538,14 @@ public:
     void DrawIndexedIndirect(Buffer* argumentBuffer, uint64_t argumentOffset, uint32_t drawCount) noexcept override;
 
 public:
+    // 把 [startSlot, startSlot + slotCount) 范围内的 _boundVbvs 一次性下发。
+    // 需要已绑定 pso, stride 从 pso 取。
+    void FlushVertexBuffers(uint32_t startSlot, uint32_t slotCount) noexcept;
+
     CmdListD3D12* _cmdList;
     GraphicsPsoD3D12* _boundPso{nullptr};
     RootSigD3D12* _boundRs{nullptr};
-    vector<VertexBufferView> _boundVbvs;
+    std::array<std::optional<VertexBufferView>, D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT> _boundVbvs{};
 };
 
 class CmdComputePassD3D12 final : public ComputeCommandEncoder {
@@ -556,6 +565,11 @@ public:
         uint32_t groupIndex,
         ShaderParameterSet* set,
         std::span<const ShaderParameterDynamicOffset> dynamicOffsets) noexcept override;
+
+    bool SetPushConstants(
+        uint32_t groupIndex,
+        uint32_t binding,
+        std::span<const byte> data) noexcept override;
 
     void Dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ) noexcept override;
 
@@ -828,6 +842,7 @@ public:
     vector<vector<D3D12_DESCRIPTOR_RANGE1>> _descriptorRanges;
     vector<D3D12_STATIC_SAMPLER_DESC> _staticSamplers;
     vector<ShaderParameterGroupLayoutD3D12> _parameterGroups;
+    std::optional<uint32_t> _pushConstantRootParameter;
     ComPtr<ID3D12RootSignature> _rootSig;
 };
 
@@ -864,7 +879,7 @@ public:
         DeviceD3D12* device,
         RootSigD3D12* layout,
         ComPtr<ID3D12PipelineState> pso,
-        vector<uint64_t> arrayStrides,
+        std::array<std::optional<uint32_t>, D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT> vertexStrides,
         D3D12_PRIMITIVE_TOPOLOGY topo) noexcept;
     ~GraphicsPsoD3D12() noexcept override = default;
 
@@ -878,7 +893,7 @@ public:
     DeviceD3D12* _device;
     RootSigD3D12* _layout;
     ComPtr<ID3D12PipelineState> _pso;
-    vector<uint64_t> _arrayStrides;
+    std::array<std::optional<uint32_t>, D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT> _vertexStrides{};
     D3D12_PRIMITIVE_TOPOLOGY _topo;
 };
 

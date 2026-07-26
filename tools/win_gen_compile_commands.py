@@ -441,7 +441,7 @@ def parse_args() -> argparse.Namespace:
         "-j",
         "--jobs",
         type=int,
-        default=min(16, os.cpu_count() or 1),
+        default=os.cpu_count(),
         help="Parallel project queries.",
     )
     parser.add_argument("-Solution", "-s", "--solution", type=Path, help="Solution path.")

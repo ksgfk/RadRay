@@ -4,7 +4,7 @@
 #include <radray/file.h>
 #include <radray/hash.h>
 #include <radray/logger.h>
-#include <radray/render/common.h>
+#include <radray/render/rhi.h>
 #include <radray/runtime/gpu_resource.h>
 #include <radray/vertex_data.h>
 #include <radray/runtime/application.h>

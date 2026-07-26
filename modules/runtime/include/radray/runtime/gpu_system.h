@@ -10,7 +10,7 @@
 #include <radray/types.h>
 #include <radray/coroutine.h>
 #include <radray/vertex_data.h>
-#include <radray/render/common.h>
+#include <radray/render/rhi.h>
 #include <radray/runtime/asset.h>
 #include <radray/runtime/gpu_resource.h>
 #include <radray/runtime/render_resource_recycler.h>

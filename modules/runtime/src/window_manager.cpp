@@ -4,7 +4,7 @@
 #include <limits>
 
 #include <radray/logger.h>
-#include <radray/render/common.h>
+#include <radray/render/rhi.h>
 #include <radray/runtime/application.h>
 #include <radray/runtime/gpu_system.h>
 

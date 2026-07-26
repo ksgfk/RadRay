@@ -1,7 +1,6 @@
 #include <radray/render/backend/d3d12_impl.h>
 
 #include <bit>
-#include <cstring>
 #include <algorithm>
 #include <limits>
 
@@ -1881,6 +1880,8 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateRootSignatureInternal(
     }
     if (desc.PushConstant.has_value()) {
         const PushConstantDescriptor& pushConstant = desc.PushConstant.value();
+        layout->_pushConstantRootParameter =
+            static_cast<uint32_t>(layout->_rootParameters.size());
         D3D12_ROOT_PARAMETER1 rootParameter{};
         rootParameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
         rootParameter.Constants.ShaderRegister = pushConstant.Location.Binding;
@@ -2058,15 +2059,7 @@ Nullable<unique_ptr<PipelineLayout>> DeviceD3D12::CreatePipelineLayout(
 
 Nullable<unique_ptr<ShaderParameterSet>> DeviceD3D12::CreateShaderParameterSet(
     const ShaderParameterSetDescriptor& desc) noexcept {
-    if (desc.Layout == nullptr) {
-        RADRAY_ERR_LOG("ShaderParameterSetDescriptor.Layout is null");
-        return nullptr;
-    }
     auto* layout = CastD3D12Object(desc.Layout);
-    if (!layout->IsValid() || layout->_device != this) {
-        RADRAY_ERR_LOG("d3d12 shader parameter set layout is invalid or belongs to another device");
-        return nullptr;
-    }
     const auto group = layout->FindParameterGroup(desc.GroupIndex);
     if (!group.HasValue()) {
         RADRAY_ERR_LOG(
@@ -2600,14 +2593,6 @@ bool ShaderParameterSetD3D12::FlushWrites() noexcept {
 }
 
 Nullable<unique_ptr<GraphicsPipelineState>> DeviceD3D12::CreateGraphicsPipelineState(const GraphicsPipelineStateDescriptor& desc) noexcept {
-    if (desc.PipelineLayout == nullptr) {
-        RADRAY_ERR_LOG("GraphicsPipelineStateDescriptor.PipelineLayout is null");
-        return nullptr;
-    }
-    if (desc.CompatibleRenderPass == nullptr) {
-        RADRAY_ERR_LOG("d3d12 graphics pipeline requires an explicit render pass");
-        return nullptr;
-    }
     if (desc.Primitive.StripIndexFormat.has_value() &&
         desc.Primitive.Topology != PrimitiveTopology::LineStrip &&
         desc.Primitive.Topology != PrimitiveTopology::TriangleStrip) {
@@ -2616,21 +2601,30 @@ Nullable<unique_ptr<GraphicsPipelineState>> DeviceD3D12::CreateGraphicsPipelineS
     }
     auto [topoClass, topo] = MapType(desc.Primitive.Topology);
     vector<D3D12_INPUT_ELEMENT_DESC> inputElements;
-    vector<uint64_t> arrayStrides(desc.VertexLayouts.size(), 0);
-    for (size_t index = 0; index < desc.VertexLayouts.size(); index++) {
-        const VertexBufferLayout& i = desc.VertexLayouts[index];
-        arrayStrides[index] = i.ArrayStride;
-        D3D12_INPUT_CLASSIFICATION inputClass = MapType(i.StepMode);
-        for (const VertexElement& j : i.Elements) {
-            auto& ied = inputElements.emplace_back(D3D12_INPUT_ELEMENT_DESC{});
-            ied.SemanticName = j.Semantic.data();
-            ied.SemanticIndex = j.SemanticIndex;
-            ied.Format = MapType(j.Format);
-            ied.InputSlot = (UINT)index;
-            ied.AlignedByteOffset = (UINT)j.Offset;
-            ied.InputSlotClass = inputClass;
-            ied.InstanceDataStepRate = inputClass == D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA ? 1 : 0;
-        }
+    inputElements.reserve(desc.VertexInput.Attributes.size());
+    // D3D12_INPUT_ELEMENT_DESC::SemanticName 需要 null 结尾的 string, string_view 不能保证是 \0 结尾
+    vector<string> semanticNames;
+    semanticNames.reserve(desc.VertexInput.Attributes.size());
+    std::array<std::optional<uint32_t>, D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT> vertexStrides{};
+    for (const VertexBufferLayout& buffer : desc.VertexInput.Buffers) {
+        vertexStrides[buffer.Binding] = buffer.ArrayStride;
+    }
+    for (const VertexAttribute& attribute : desc.VertexInput.Attributes) {
+        const auto buffer = std::ranges::find(
+            desc.VertexInput.Buffers,
+            attribute.BufferBinding,
+            &VertexBufferLayout::Binding);
+        RADRAY_ASSERT(buffer != desc.VertexInput.Buffers.end());
+        const D3D12_INPUT_CLASSIFICATION inputClass = MapType(buffer->StepMode);
+        const string& semanticName = semanticNames.emplace_back(attribute.Semantic);
+        auto& inputElement = inputElements.emplace_back(D3D12_INPUT_ELEMENT_DESC{});
+        inputElement.SemanticName = semanticName.c_str();
+        inputElement.SemanticIndex = attribute.SemanticIndex;
+        inputElement.Format = MapType(attribute.Format);
+        inputElement.InputSlot = attribute.BufferBinding;
+        inputElement.AlignedByteOffset = attribute.Offset;
+        inputElement.InputSlotClass = inputClass;
+        inputElement.InstanceDataStepRate = inputClass == D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA ? 1 : 0;
     }
     DepthBiasState depBias;
     if (desc.DepthStencil.has_value()) {
@@ -2643,7 +2637,7 @@ Nullable<unique_ptr<GraphicsPipelineState>> DeviceD3D12::CreateGraphicsPipelineS
         fillMode.has_value()) {
         rawRaster.FillMode = fillMode.value();
     } else {
-        RADRAY_ERR_LOG("invalid primitive polygon mode: {}", desc.Primitive.Poly);
+        RADRAY_ERR_LOG("d3d12 invalid primitive polygon mode: {}", desc.Primitive.Poly);
         return nullptr;
     }
     rawRaster.CullMode = MapType(desc.Primitive.Cull);
@@ -2677,7 +2671,7 @@ Nullable<unique_ptr<GraphicsPipelineState>> DeviceD3D12::CreateGraphicsPipelineS
                 writeMask.has_value()) {
                 rtb.RenderTargetWriteMask = (UINT8)writeMask.value();
             } else {
-                RADRAY_ERR_LOG("invalid color target write mask: {}", ct.WriteMask);
+                RADRAY_ERR_LOG("d3d12 invalid color target write mask: {}", ct.WriteMask);
                 return nullptr;
             }
         } else {
@@ -2757,15 +2751,11 @@ Nullable<unique_ptr<GraphicsPipelineState>> DeviceD3D12::CreateGraphicsPipelineS
         this,
         CastD3D12Object(desc.PipelineLayout),
         std::move(pso),
-        std::move(arrayStrides),
+        std::move(vertexStrides),
         topo);
 }
 
 Nullable<unique_ptr<ComputePipelineState>> DeviceD3D12::CreateComputePipelineState(const ComputePipelineStateDescriptor& desc) noexcept {
-    if (desc.PipelineLayout == nullptr) {
-        RADRAY_ERR_LOG("ComputePipelineStateDescriptor.PipelineLayout is null");
-        return nullptr;
-    }
     D3D12_COMPUTE_PIPELINE_STATE_DESC rawPsoDesc{};
     rawPsoDesc.pRootSignature = CastD3D12Object(desc.PipelineLayout)->_rootSig.Get();
     rawPsoDesc.CS = CastD3D12Object(desc.CS.Target)->ToByteCode();
@@ -3522,7 +3512,9 @@ bool CmdRenderPassD3D12::IsValid() const noexcept {
 }
 
 void CmdRenderPassD3D12::Destroy() noexcept {
-    _boundVbvs.clear();
+    for (std::optional<VertexBufferView>& view : _boundVbvs) {
+        view.reset();
+    }
     _boundRs = nullptr;
     _boundPso = nullptr;
     _cmdList = nullptr;
@@ -3552,24 +3544,100 @@ void CmdRenderPassD3D12::SetScissor(Rect scissor) noexcept {
     _cmdList->_cmdList->RSSetScissorRects(1, &rect);
 }
 
-void CmdRenderPassD3D12::BindVertexBuffer(std::span<const VertexBufferView> vbv) noexcept {
-    if (_boundPso == nullptr) {
-        _boundVbvs.clear();
-        _boundVbvs.insert(_boundVbvs.end(), vbv.begin(), vbv.end());
-    } else {
-        const auto& strides = _boundPso->_arrayStrides;
-        vector<D3D12_VERTEX_BUFFER_VIEW> rawVbvs;
-        rawVbvs.reserve(vbv.size());
-        for (size_t index = 0; index < std::min(vbv.size(), strides.size()); index++) {
-            const VertexBufferView& i = vbv[index];
-            D3D12_VERTEX_BUFFER_VIEW& raw = rawVbvs.emplace_back();
-            auto buf = CastD3D12Object(i.Target);
-            raw.BufferLocation = buf->_gpuAddr + i.Offset;
-            raw.SizeInBytes = (UINT)(buf->_rawDesc.Width - i.Offset);
-            raw.StrideInBytes = (UINT)strides[index];
-        }
-        _cmdList->_cmdList->IASetVertexBuffers(0, (UINT)rawVbvs.size(), rawVbvs.data());
+static bool ValidateVertexBufferBindingD3D12(const VertexBufferBinding& binding) noexcept {
+    if (binding.Binding >= D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT) {
+        RADRAY_ERR_LOG(
+            "d3d12 vertex buffer binding {} is out of range [0, {})",
+            binding.Binding,
+            D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT);
+        return false;
     }
+    if (binding.View.Target == nullptr) {
+        RADRAY_ERR_LOG("d3d12 vertex buffer binding {} has a null buffer", binding.Binding);
+        return false;
+    }
+    const BufferD3D12* buffer = CastD3D12Object(binding.View.Target);
+    if (binding.View.Offset > buffer->_rawDesc.Width ||
+        binding.View.Size > buffer->_rawDesc.Width - binding.View.Offset) {
+        RADRAY_ERR_LOG(
+            "d3d12 vertex buffer binding {} range with offset {} and size {} exceeds buffer size {}",
+            binding.Binding,
+            binding.View.Offset,
+            binding.View.Size,
+            buffer->_rawDesc.Width);
+        return false;
+    }
+    if (binding.View.Size > std::numeric_limits<UINT>::max()) {
+        RADRAY_ERR_LOG(
+            "d3d12 vertex buffer binding {} size {} exceeds the native limit",
+            binding.Binding,
+            binding.View.Size);
+        return false;
+    }
+    return true;
+}
+
+void CmdRenderPassD3D12::FlushVertexBuffers(uint32_t startSlot, uint32_t slotCount) noexcept {
+    RADRAY_ASSERT(_boundPso != nullptr);
+    RADRAY_ASSERT(slotCount > 0);
+    RADRAY_ASSERT(startSlot + slotCount <= _boundVbvs.size());
+    // 顶点缓冲的 stride 来自 pso, 所以 _boundVbvs 是唯一的状态源, 原生绑定由它派生。
+    // 未绑定或 pso 未声明的 slot 保持清零的 view, 这些 slot 不会被 pso 读取。
+    std::array<D3D12_VERTEX_BUFFER_VIEW, D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT> rawViews{};
+    for (uint32_t i = 0; i < slotCount; ++i) {
+        const uint32_t slot = startSlot + i;
+        const std::optional<VertexBufferView>& view = _boundVbvs[slot];
+        const std::optional<uint32_t>& stride = _boundPso->_vertexStrides[slot];
+        if (!view.has_value() || !stride.has_value()) {
+            continue;
+        }
+        const BufferD3D12* buffer = CastD3D12Object(view->Target);
+        rawViews[i] = D3D12_VERTEX_BUFFER_VIEW{
+            .BufferLocation = buffer->_gpuAddr + view->Offset,
+            .SizeInBytes = static_cast<UINT>(view->Size),
+            .StrideInBytes = stride.value()};
+    }
+    _cmdList->_cmdList->IASetVertexBuffers(startSlot, slotCount, rawViews.data());
+}
+
+void CmdRenderPassD3D12::BindVertexBuffers(std::span<const VertexBufferBinding> bindings) noexcept {
+    if (bindings.empty()) {
+        return;
+    }
+    uint32_t lowest = std::numeric_limits<uint32_t>::max();
+    uint32_t highest = 0;
+    for (size_t i = 0; i < bindings.size(); ++i) {
+        const VertexBufferBinding& binding = bindings[i];
+        if (!ValidateVertexBufferBindingD3D12(binding)) {
+            return;
+        }
+        for (size_t j = 0; j < i; ++j) {
+            if (bindings[j].Binding == binding.Binding) {
+                RADRAY_ERR_LOG("d3d12 duplicate vertex buffer binding {}", binding.Binding);
+                return;
+            }
+        }
+        lowest = std::min(lowest, binding.Binding);
+        highest = std::max(highest, binding.Binding);
+    }
+    const uint32_t slotCount = highest - lowest + 1;
+    if (slotCount != bindings.size()) {
+        RADRAY_ERR_LOG(
+            "d3d12 vertex buffer bindings must form a contiguous range, got {} bindings spanning [{}, {}]",
+            bindings.size(),
+            lowest,
+            highest);
+        return;
+    }
+
+    for (const VertexBufferBinding& binding : bindings) {
+        _boundVbvs[binding.Binding] = binding.View;
+    }
+    if (_boundPso == nullptr) {
+        // stride 未知, 等 pso 绑定时再一次性下发。
+        return;
+    }
+    FlushVertexBuffers(lowest, slotCount);
 }
 
 void CmdRenderPassD3D12::BindIndexBuffer(IndexBufferView ibv) noexcept {
@@ -3597,10 +3665,8 @@ void CmdRenderPassD3D12::BindGraphicsPipelineState(GraphicsPipelineState* pso) n
     _cmdList->_cmdList->SetPipelineState(ps->_pso.Get());
     _cmdList->_cmdList->IASetPrimitiveTopology(ps->_topo);
     _boundPso = ps;
-    if (!_boundVbvs.empty()) {
-        this->BindVertexBuffer(_boundVbvs);
-        _boundVbvs.clear();
-    }
+    // 新 pso 可能带来不同的 stride, 已绑定的 vertex buffer 需要重新下发。
+    FlushVertexBuffers(0, static_cast<uint32_t>(_boundVbvs.size()));
 }
 
 static bool BindShaderParameterSetD3D12(
@@ -3758,6 +3824,89 @@ void CmdRenderPassD3D12::BindShaderParameterSet(
         true);
 }
 
+static bool SetPushConstantsD3D12(
+    CmdListD3D12* commandBuffer,
+    RootSigD3D12* boundLayout,
+    uint32_t groupIndex,
+    uint32_t binding,
+    std::span<const byte> data,
+    bool graphics) noexcept {
+    if (boundLayout == nullptr) {
+        RADRAY_ERR_LOG("d3d12 push constants require a bound pipeline state");
+        return false;
+    }
+    if (!boundLayout->IsValid() ||
+        boundLayout->_device != commandBuffer->_device) {
+        RADRAY_ERR_LOG("d3d12 push constant pipeline layout is invalid or belongs to another device");
+        return false;
+    }
+    if (!boundLayout->_pushConstantRootParameter.has_value()) {
+        RADRAY_ERR_LOG(
+            "d3d12 push constant range at group {} binding {} is unavailable",
+            groupIndex,
+            binding);
+        return false;
+    }
+
+    const uint32_t rootParameterIndex =
+        boundLayout->_pushConstantRootParameter.value();
+    if (rootParameterIndex >= boundLayout->_rootParameters.size()) {
+        RADRAY_ERR_LOG("d3d12 push constant root parameter metadata is invalid");
+        return false;
+    }
+    const D3D12_ROOT_PARAMETER1& rootParameter =
+        boundLayout->_rootParameters[rootParameterIndex];
+    if (rootParameter.ParameterType != D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS ||
+        rootParameter.Constants.RegisterSpace != groupIndex ||
+        rootParameter.Constants.ShaderRegister != binding) {
+        RADRAY_ERR_LOG(
+            "d3d12 push constant range at group {} binding {} is unavailable",
+            groupIndex,
+            binding);
+        return false;
+    }
+
+    const size_t expectedSize =
+        static_cast<size_t>(rootParameter.Constants.Num32BitValues) * 4;
+    if (data.size() != expectedSize) {
+        RADRAY_ERR_LOG(
+            "d3d12 push constant size mismatch at group {} binding {}: expected {}, actual {}",
+            groupIndex,
+            binding,
+            expectedSize,
+            data.size());
+        return false;
+    }
+
+    if (graphics) {
+        commandBuffer->_cmdList->SetGraphicsRoot32BitConstants(
+            rootParameterIndex,
+            rootParameter.Constants.Num32BitValues,
+            data.data(),
+            0);
+    } else {
+        commandBuffer->_cmdList->SetComputeRoot32BitConstants(
+            rootParameterIndex,
+            rootParameter.Constants.Num32BitValues,
+            data.data(),
+            0);
+    }
+    return true;
+}
+
+bool CmdRenderPassD3D12::SetPushConstants(
+    uint32_t groupIndex,
+    uint32_t binding,
+    std::span<const byte> data) noexcept {
+    return SetPushConstantsD3D12(
+        _cmdList,
+        _boundRs,
+        groupIndex,
+        binding,
+        data,
+        true);
+}
+
 void CmdRenderPassD3D12::Draw(uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance) noexcept {
     _cmdList->_cmdList->DrawInstanced(vertexCount, instanceCount, firstVertex, firstInstance);
 }
@@ -3855,6 +4004,19 @@ void CmdComputePassD3D12::BindShaderParameterSet(
         groupIndex,
         CastD3D12Object(set),
         dynamicOffsets,
+        false);
+}
+
+bool CmdComputePassD3D12::SetPushConstants(
+    uint32_t groupIndex,
+    uint32_t binding,
+    std::span<const byte> data) noexcept {
+    return SetPushConstantsD3D12(
+        _cmdList,
+        _boundRs,
+        groupIndex,
+        binding,
+        data,
         false);
 }
 
@@ -4336,6 +4498,7 @@ void RootSigD3D12::Destroy() noexcept {
     _rootParameters.clear();
     _staticSamplers.clear();
     _parameterGroups.clear();
+    _pushConstantRootParameter.reset();
     _device = nullptr;
 }
 
@@ -4387,12 +4550,12 @@ GraphicsPsoD3D12::GraphicsPsoD3D12(
     DeviceD3D12* device,
     RootSigD3D12* layout,
     ComPtr<ID3D12PipelineState> pso,
-    vector<uint64_t> arrayStrides,
+    std::array<std::optional<uint32_t>, D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT> vertexStrides,
     D3D12_PRIMITIVE_TOPOLOGY topo) noexcept
     : _device(device),
       _layout(layout),
       _pso(std::move(pso)),
-      _arrayStrides(std::move(arrayStrides)),
+      _vertexStrides(std::move(vertexStrides)),
       _topo(topo) {}
 
 bool GraphicsPsoD3D12::IsValid() const noexcept {

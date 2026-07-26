@@ -6,11 +6,11 @@
 
 #include <algorithm>
 #include <bit>
-#include <cstring>
 #include <limits>
+#include <type_traits>
+
 #include <radray/hash.h>
 #include <radray/scope_guard.h>
-#include <type_traits>
 
 #if defined(_WIN32)
 #include <excpt.h>
@@ -1041,12 +1041,6 @@ void DeviceVulkan::FlushMappedRanges(std::span<const MappedBufferRange> mappedRa
     const uint64_t atomSize = std::max<uint64_t>(1, _properties.limits.nonCoherentAtomSize);
 
     for (const MappedBufferRange& mappedRange : mappedRanges) {
-        if (mappedRange.Target == nullptr) {
-            RADRAY_ABORT("Vulkan mapped flush range has a null target");
-        }
-        if (mappedRange.Target->GetDevice() != this) {
-            RADRAY_ABORT("cannot flush a Vulkan mapped range across devices");
-        }
         const BufferDescriptor desc = mappedRange.Target->GetDesc();
         if (!desc.Usage.HasFlag(BufferUse::MapWrite)) {
             RADRAY_ABORT("Vulkan mapped flush requires MapWrite usage");
@@ -1062,9 +1056,6 @@ void DeviceVulkan::FlushMappedRanges(std::span<const MappedBufferRange> mappedRa
             RADRAY_ABORT("Vulkan mapped flush range is outside the buffer");
         }
         auto* buffer = CastVkObject(mappedRange.Target);
-        if (!buffer->IsValid() || buffer->_allocation == VK_NULL_HANDLE) {
-            RADRAY_ABORT("cannot flush an invalid Vulkan buffer allocation");
-        }
         if (size == 0) {
             continue;
         }
@@ -1659,6 +1650,7 @@ Nullable<unique_ptr<PipelineLayoutVulkan>> DeviceVulkan::CreatePipelineLayoutInt
     result->_setLayouts.reserve(setLayoutCount);
     if (desc.PushConstant.has_value()) {
         result->_pushConstantRange = pushConstantRange;
+        result->_pushConstantLocation = desc.PushConstant->Location;
     }
     for (uint32_t groupIndex = 0; groupIndex < setLayoutCount; ++groupIndex) {
         const vector<ShaderParameterSetLayoutEntryDescriptor>& entries =
@@ -1727,18 +1719,7 @@ Nullable<unique_ptr<PipelineLayout>> DeviceVulkan::CreatePipelineLayout(
 
 Nullable<unique_ptr<ShaderParameterSet>> DeviceVulkan::CreateShaderParameterSet(
     const ShaderParameterSetDescriptor& desc) noexcept {
-    if (desc.Layout == nullptr) {
-        RADRAY_ERR_LOG("ShaderParameterSetDescriptor.Layout is null");
-        return nullptr;
-    }
     auto* layout = CastVkObject(desc.Layout);
-    if (!layout->IsValid() || layout->_device != this ||
-        desc.GroupIndex >= layout->_parameterSetLayouts.size()) {
-        RADRAY_ERR_LOG(
-            "vk shader parameter set layout or group {} is invalid",
-            desc.GroupIndex);
-        return nullptr;
-    }
 
     const vector<ShaderParameterSetLayoutEntryDescriptor>& entries =
         layout->_parameterSetLayouts[desc.GroupIndex];
@@ -2269,10 +2250,6 @@ bool ShaderParameterSetVulkan::FlushWrites() noexcept {
 }
 
 Nullable<unique_ptr<GraphicsPipelineState>> DeviceVulkan::CreateGraphicsPipelineState(const GraphicsPipelineStateDescriptor& desc) noexcept {
-    if (desc.PipelineLayout == nullptr) {
-        RADRAY_ERR_LOG("GraphicsPipelineStateDescriptor.PipelineLayout is null");
-        return nullptr;
-    }
     if (desc.Primitive.StripIndexFormat.has_value() &&
         desc.Primitive.Topology != PrimitiveTopology::LineStrip &&
         desc.Primitive.Topology != PrimitiveTopology::TriangleStrip) {
@@ -2321,20 +2298,20 @@ Nullable<unique_ptr<GraphicsPipelineState>> DeviceVulkan::CreateGraphicsPipeline
     vector<VkVertexInputBindingDescription> vertexInputBindings;
     vector<VkVertexInputAttributeDescription> vertexInputAttributes;
     {
-        vertexInputBindings.reserve(desc.VertexLayouts.size());
-        for (size_t i = 0; i < desc.VertexLayouts.size(); i++) {
-            const auto& vbl = desc.VertexLayouts[i];
+        vertexInputBindings.reserve(desc.VertexInput.Buffers.size());
+        for (const VertexBufferLayout& buffer : desc.VertexInput.Buffers) {
             auto& bindingDesc = vertexInputBindings.emplace_back();
-            bindingDesc.binding = static_cast<uint32_t>(i);
-            bindingDesc.stride = static_cast<uint32_t>(vbl.ArrayStride);
-            bindingDesc.inputRate = MapType(vbl.StepMode);
-            for (auto&& j : vbl.Elements) {
-                auto& attributeDesc = vertexInputAttributes.emplace_back();
-                attributeDesc.location = static_cast<uint32_t>(j.Location);
-                attributeDesc.binding = bindingDesc.binding;
-                attributeDesc.format = MapType(j.Format);
-                attributeDesc.offset = static_cast<uint32_t>(j.Offset);
-            }
+            bindingDesc.binding = buffer.Binding;
+            bindingDesc.stride = buffer.ArrayStride;
+            bindingDesc.inputRate = MapType(buffer.StepMode);
+        }
+        vertexInputAttributes.reserve(desc.VertexInput.Attributes.size());
+        for (const VertexAttribute& attribute : desc.VertexInput.Attributes) {
+            auto& attributeDesc = vertexInputAttributes.emplace_back();
+            attributeDesc.location = attribute.Location;
+            attributeDesc.binding = attribute.BufferBinding;
+            attributeDesc.format = MapType(attribute.Format);
+            attributeDesc.offset = attribute.Offset;
         }
     }
     VkPipelineVertexInputStateCreateInfo vertexInputInfo{};
@@ -2499,10 +2476,6 @@ Nullable<unique_ptr<GraphicsPipelineState>> DeviceVulkan::CreateGraphicsPipeline
 }
 
 Nullable<unique_ptr<ComputePipelineState>> DeviceVulkan::CreateComputePipelineState(const ComputePipelineStateDescriptor& desc) noexcept {
-    if (desc.PipelineLayout == nullptr) {
-        RADRAY_ERR_LOG("ComputePipelineStateDescriptor.PipelineLayout is null");
-        return nullptr;
-    }
     auto rs = CastVkObject(desc.PipelineLayout);
     auto cs = CastVkObject(desc.CS.Target);
     VkPipelineShaderStageCreateInfo stageInfo{};
@@ -3429,9 +3402,6 @@ void QueueVulkan::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
 
     for (auto* syncObj : desc.WaitToExecute) {
         auto* waitSync = CastVkObject(syncObj);
-        if (waitSync == nullptr || !waitSync->IsValid()) {
-            RADRAY_ABORT("invalid swapchain wait sync object");
-        }
         waitSemaphores.emplace_back(waitSync->_semaphore->_semaphore);
         VkPipelineStageFlags waitStageMask = 0;
         if ((_queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0) {
@@ -3458,9 +3428,6 @@ void QueueVulkan::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
 
     for (auto* syncObj : desc.ReadyToPresent) {
         auto* signalSync = CastVkObject(syncObj);
-        if (signalSync == nullptr || !signalSync->IsValid()) {
-            RADRAY_ABORT("invalid swapchain signal sync object");
-        }
         signalSemaphores.emplace_back(signalSync->_semaphore->_semaphore);
         signalValues.emplace_back(0);
     }
@@ -4203,15 +4170,59 @@ void SimulateCommandEncoderVulkan::SetScissor(Rect rect) noexcept {
     _device->_ftb.vkCmdSetScissor(_cmdBuffer->_cmdBuffer, 0, 1, &s);
 }
 
-void SimulateCommandEncoderVulkan::BindVertexBuffer(std::span<const VertexBufferView> vbv) noexcept {
-    vector<VkBuffer> buffers;
-    vector<VkDeviceSize> offsets;
-    for (const auto& view : vbv) {
-        auto buffer = CastVkObject(view.Target);
-        buffers.push_back(buffer->_buffer);
-        offsets.push_back(view.Offset);
+void SimulateCommandEncoderVulkan::BindVertexBuffers(std::span<const VertexBufferBinding> bindings) noexcept {
+    if (bindings.empty()) {
+        return;
     }
-    _device->_ftb.vkCmdBindVertexBuffers(_cmdBuffer->_cmdBuffer, 0, static_cast<uint32_t>(buffers.size()), buffers.data(), offsets.data());
+    uint32_t lowest = std::numeric_limits<uint32_t>::max();
+    uint32_t highest = 0;
+    for (size_t i = 0; i < bindings.size(); ++i) {
+        const VertexBufferBinding& binding = bindings[i];
+        if (binding.Binding >= _device->_properties.limits.maxVertexInputBindings) {
+            RADRAY_ERR_LOG(
+                "vk vertex buffer binding {} is out of range [0, {})",
+                binding.Binding,
+                _device->_properties.limits.maxVertexInputBindings);
+            return;
+        }
+        if (binding.View.Target == nullptr) {
+            RADRAY_ERR_LOG("vk vertex buffer binding {} has a null buffer", binding.Binding);
+            return;
+        }
+        for (size_t j = 0; j < i; ++j) {
+            if (bindings[j].Binding == binding.Binding) {
+                RADRAY_ERR_LOG("vk duplicate vertex buffer binding {}", binding.Binding);
+                return;
+            }
+        }
+        lowest = std::min(lowest, binding.Binding);
+        highest = std::max(highest, binding.Binding);
+    }
+    // vkCmdBindVertexBuffers 只接受连续的 firstBinding + bindingCount, 一次性下发要求
+    // 调用方给出的 binding 集合必须是连续区间。
+    const uint32_t bindingCount = highest - lowest + 1;
+    if (bindingCount != bindings.size()) {
+        RADRAY_ERR_LOG(
+            "vk vertex buffer bindings must form a contiguous range, got {} bindings spanning [{}, {}]",
+            bindings.size(),
+            lowest,
+            highest);
+        return;
+    }
+
+    vector<VkBuffer> buffers(bindingCount, VkBuffer{VK_NULL_HANDLE});
+    vector<VkDeviceSize> offsets(bindingCount, VkDeviceSize{0});
+    for (const VertexBufferBinding& binding : bindings) {
+        const uint32_t index = binding.Binding - lowest;
+        buffers[index] = CastVkObject(binding.View.Target)->_buffer;
+        offsets[index] = binding.View.Offset;
+    }
+    _device->_ftb.vkCmdBindVertexBuffers(
+        _cmdBuffer->_cmdBuffer,
+        lowest,
+        bindingCount,
+        buffers.data(),
+        offsets.data());
 }
 
 void SimulateCommandEncoderVulkan::BindIndexBuffer(IndexBufferView ibv) noexcept {
@@ -4304,6 +4315,67 @@ void SimulateCommandEncoderVulkan::BindShaderParameterSet(
         groupIndex,
         CastVkObject(set),
         dynamicOffsets);
+}
+
+static bool SetPushConstantsVulkan(
+    DeviceVulkan* device,
+    CommandBufferVulkan* commandBuffer,
+    PipelineLayoutVulkan* boundLayout,
+    uint32_t groupIndex,
+    uint32_t binding,
+    std::span<const byte> data) noexcept {
+    if (boundLayout == nullptr) {
+        RADRAY_ERR_LOG("vk push constants require a bound pipeline state");
+        return false;
+    }
+    if (!boundLayout->IsValid() || boundLayout->_device != device) {
+        RADRAY_ERR_LOG("vk push constant pipeline layout is invalid or belongs to another device");
+        return false;
+    }
+    if (!boundLayout->_pushConstantRange.has_value() ||
+        !boundLayout->_pushConstantLocation.has_value() ||
+        boundLayout->_pushConstantLocation->Group != groupIndex ||
+        boundLayout->_pushConstantLocation->Binding != binding) {
+        RADRAY_ERR_LOG(
+            "vk push constant range at group {} binding {} is unavailable",
+            groupIndex,
+            binding);
+        return false;
+    }
+
+    const VkPushConstantRange& range =
+        boundLayout->_pushConstantRange.value();
+    if (data.size() != range.size) {
+        RADRAY_ERR_LOG(
+            "vk push constant size mismatch at group {} binding {}: expected {}, actual {}",
+            groupIndex,
+            binding,
+            range.size,
+            data.size());
+        return false;
+    }
+
+    device->_ftb.vkCmdPushConstants(
+        commandBuffer->_cmdBuffer,
+        boundLayout->_layout,
+        range.stageFlags,
+        range.offset,
+        range.size,
+        data.data());
+    return true;
+}
+
+bool SimulateCommandEncoderVulkan::SetPushConstants(
+    uint32_t groupIndex,
+    uint32_t binding,
+    std::span<const byte> data) noexcept {
+    return SetPushConstantsVulkan(
+        _device,
+        _cmdBuffer,
+        _boundLayout,
+        groupIndex,
+        binding,
+        data);
 }
 
 void SimulateCommandEncoderVulkan::Draw(uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance) noexcept {
@@ -4426,6 +4498,19 @@ void SimulateComputeEncoderVulkan::BindShaderParameterSet(
         groupIndex,
         CastVkObject(set),
         dynamicOffsets);
+}
+
+bool SimulateComputeEncoderVulkan::SetPushConstants(
+    uint32_t groupIndex,
+    uint32_t binding,
+    std::span<const byte> data) noexcept {
+    return SetPushConstantsVulkan(
+        _device,
+        _cmdBuffer,
+        _boundLayout,
+        groupIndex,
+        binding,
+        data);
 }
 
 void SimulateComputeEncoderVulkan::Dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ) noexcept {
@@ -5315,6 +5400,7 @@ void PipelineLayoutVulkan::DestroyImpl() noexcept {
     _setLayouts.clear();
     _parameterSetLayouts.clear();
     _pushConstantRange.reset();
+    _pushConstantLocation.reset();
     _device = nullptr;
 }
 

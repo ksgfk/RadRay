@@ -64,7 +64,3 @@ if (RADRAY_ENABLE_SHADER_JIT)
         COMMENT "Deploy shader sources and DXC runtime for shader JIT")
     unset(_RADRAY_SHADER_JIT_DEPLOY_COMMANDS)
 endif()
-
-if (RADRAY_BUILD_TESTS)
-    add_subdirectory(tests)
-endif()

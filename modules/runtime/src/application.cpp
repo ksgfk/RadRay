@@ -10,7 +10,7 @@
 #include <thread>
 
 #include <radray/logger.h>
-#include <radray/render/common.h>
+#include <radray/render/rhi.h>
 #include <radray/runtime/gpu_system.h>
 #include <radray/runtime/window_manager.h>
 #include <radray/runtime/asset_manager.h>

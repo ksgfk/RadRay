@@ -5,7 +5,7 @@
 #include <span>
 
 #include <radray/nullable.h>
-#include <radray/render/common.h>
+#include <radray/render/rhi.h>
 #include <radray/types.h>
 
 namespace radray {

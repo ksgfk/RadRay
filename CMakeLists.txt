@@ -139,6 +139,7 @@ include(FetchContent)
 
 set(FETCHCONTENT_UPDATES_DISCONNECTED OFF CACHE BOOL "" FORCE)
 set(FMT_MASTER_PROJECT OFF CACHE BOOL "" FORCE)
+set(FMT_MODULE OFF CACHE BOOL "" FORCE)
 add_subdirectory(${RADRAY_THIRDPARTY_ROOT}/fmt)
 radray_optimize_flags_library(fmt)
 radray_set_build_path(fmt)
