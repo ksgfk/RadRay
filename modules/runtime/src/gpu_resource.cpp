@@ -957,24 +957,4 @@ void RenderPassRegistry::Clear() noexcept {
     _passes.clear();
 }
 
-SamplerCache::SamplerCache(render::Device* device) noexcept
-    : _device(device) {}
-
-Nullable<render::Sampler*> SamplerCache::GetOrCreate(const render::SamplerDescriptor& desc) noexcept {
-    if (_device == nullptr) {
-        return nullptr;
-    }
-    if (auto it = _cache.find(desc); it != _cache.end()) {
-        return it->second.get();
-    }
-    auto samplerOpt = _device->CreateSampler(desc);
-    if (!samplerOpt.HasValue()) {
-        RADRAY_ERR_LOG("SamplerCache::GetOrCreate: failed to create sampler");
-        return nullptr;
-    }
-    render::Sampler* raw = samplerOpt.Get();
-    _cache.emplace(desc, samplerOpt.Release());
-    return raw;
-}
-
 }  // namespace radray

@@ -358,29 +358,4 @@ private:
     uint64_t _framebufferMisses{0};
 };
 
-/// 采样器缓存
-///
-/// 设计要点:
-/// - 按 SamplerDescriptor 去重: 相同状态的 sampler 只创建一次。
-/// - unique_ptr 永生持有: 一经创建即缓存到 app 生命周期结束, 从不单独释放。
-///   因此 GetOrCreate 返回的裸指针在缓存存活期内【永不悬垂】, 材质快照可安全跨帧/跨线程持有。
-/// - sampler 是纯状态对象 (无数据), 组合数有限, 永生缓存无实际内存压力。
-class SamplerCache {
-public:
-    explicit SamplerCache(render::Device* device) noexcept;
-    SamplerCache(const SamplerCache&) = delete;
-    SamplerCache(SamplerCache&&) = delete;
-    SamplerCache& operator=(const SamplerCache&) = delete;
-    SamplerCache& operator=(SamplerCache&&) = delete;
-    ~SamplerCache() noexcept = default;
-
-    /// 按 descriptor 去重取 sampler。命中返回缓存指针; 未命中创建并永生缓存。
-    /// device 为空 / 创建失败返回 nullptr。返回的指针在本缓存存活期内稳定不悬垂。
-    Nullable<render::Sampler*> GetOrCreate(const render::SamplerDescriptor& desc) noexcept;
-
-private:
-    render::Device* _device{nullptr};
-    unordered_map<render::SamplerDescriptor, unique_ptr<render::Sampler>> _cache;
-};
-
 }  // namespace radray

@@ -424,6 +424,28 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL VKDebugUtilsMessengerCallback(
     return VK_FALSE;
 }
 
+InstanceVulkanImpl::InstanceVulkanImpl(
+    VkInstance instance,
+    std::optional<VkAllocationCallbacks> allocCb,
+    vector<string> exts,
+    vector<string> layers) noexcept
+    : _instance(instance),
+      _allocCb(std::move(allocCb)),
+      _exts(std::move(exts)),
+      _layers(std::move(layers)) {}
+
+InstanceVulkanImpl::~InstanceVulkanImpl() noexcept {
+    this->DestroyImpl();
+}
+
+bool InstanceVulkanImpl::IsValid() const noexcept {
+    return _instance != VK_NULL_HANDLE;
+}
+
+void InstanceVulkanImpl::Destroy() noexcept {
+    this->DestroyImpl();
+}
+
 vector<VulkanPhysicalDeviceInfo> InstanceVulkanImpl::GetPhysicalDevices() const noexcept {
     auto physicalDevices = _EnumeratePhysicalDeviceInfos(_instance, false);
     if (!physicalDevices.has_value()) {
@@ -4529,6 +4551,25 @@ void SimulateComputeEncoderVulkan::DispatchIndirect(Buffer* argumentBuffer, uint
         argumentOffset);
 }
 
+RenderPassVulkan::RenderPassVulkan(
+    DeviceVulkan* device,
+    VkRenderPass renderPass,
+    const RenderPassDescriptor& desc)
+    : _device(device),
+      _renderPass(renderPass),
+      _colorAttachments(desc.ColorAttachments.begin(), desc.ColorAttachments.end()),
+      _depthStencilAttachment(desc.DepthStencilAttachment) {}
+
+RenderPassVulkan::~RenderPassVulkan() noexcept {
+    this->DestroyImpl();
+}
+
+RenderPassDescriptor RenderPassVulkan::GetDesc() const noexcept {
+    return RenderPassDescriptor{
+        .ColorAttachments = std::span<const RenderPassColorAttachmentDescriptor>{_colorAttachments},
+        .DepthStencilAttachment = _depthStencilAttachment};
+}
+
 bool RenderPassVulkan::IsValid() const noexcept {
     return _renderPass != VK_NULL_HANDLE;
 }
@@ -5492,6 +5533,16 @@ void ShaderModuleVulkan::DestroyImpl() noexcept {
         _shaderModule = VK_NULL_HANDLE;
     }
     _stages = ShaderStage::UNKNOWN;
+}
+
+SamplerVulkan::SamplerVulkan(
+    DeviceVulkan* device,
+    VkSampler sampler) noexcept
+    : _device(device),
+      _sampler(sampler) {}
+
+SamplerVulkan::~SamplerVulkan() noexcept {
+    this->DestroyImpl();
 }
 
 bool SamplerVulkan::IsValid() const noexcept {

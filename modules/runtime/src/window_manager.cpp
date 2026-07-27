@@ -7,6 +7,7 @@
 #include <radray/render/rhi.h>
 #include <radray/runtime/application.h>
 #include <radray/runtime/gpu_system.h>
+#include <radray/runtime/render_system.h>
 
 namespace radray {
 
@@ -118,8 +119,10 @@ render::TextureView* AppWindow::GetOrCreateBackBufferView(const render::SwapChai
     if (view != nullptr && backBufferView.BackBuffer == backBuffer) {
         return view;
     }
-    if (view != nullptr && gpuSystem->GetRenderPassRegistry() != nullptr) {
-        gpuSystem->GetRenderPassRegistry()->RemoveFramebuffersUsing(view);
+    RenderSystem* renderSystem = _manager->GetRenderSystem();
+    RenderPassRegistry* registry = renderSystem != nullptr ? renderSystem->GetRenderPassRegistry() : nullptr;
+    if (view != nullptr && registry != nullptr) {
+        registry->RemoveFramebuffersUsing(view);
     }
     render::TextureDescriptor texDesc = backBuffer->GetDesc();
     render::TextureViewDescriptor viewDesc{
@@ -155,8 +158,7 @@ void AppWindow::SetBackBufferState(uint32_t backBufferIndex, render::TextureStat
     _backBufferViews[backBufferIndex].State = state;
 }
 
-WindowManager::WindowManager(Application* app, const WindowManagerDescriptor& desc)
-    : _app(app) {
+WindowManager::WindowManager(const WindowManagerDescriptor& desc) {
     NativeWindow::GlobalInit();
     _eventPump = NativeEventPump::Create(desc.Type).Unwrap();
 }
@@ -226,8 +228,8 @@ bool AppWindow::RecreateSwapChain(uint32_t width, uint32_t height, render::Prese
 }
 
 void AppWindow::ReleaseBackBufferViews() noexcept {
-    GpuSystem* gpuSystem = _manager != nullptr ? _manager->GetGpuSystem() : nullptr;
-    RenderPassRegistry* registry = gpuSystem != nullptr ? gpuSystem->GetRenderPassRegistry() : nullptr;
+    RenderSystem* renderSystem = _manager != nullptr ? _manager->GetRenderSystem() : nullptr;
+    RenderPassRegistry* registry = renderSystem != nullptr ? renderSystem->GetRenderPassRegistry() : nullptr;
     if (registry != nullptr) {
         for (const BackBufferView& backBuffer : _backBufferViews) {
             registry->RemoveFramebuffersUsing(backBuffer.View.get());
@@ -319,14 +321,7 @@ void WindowManager::CheckRecreateSwapChains() noexcept {
         const uint32_t height = static_cast<uint32_t>(windowSize.y());
 
         const render::PresentMode presentMode = _desiredPresentMode.value_or(desc.PresentMode);
-        if (!window->RecreateSwapChain(width, height, presentMode)) {
-            continue;
-        }
-
-        AppSwapChainRecreateContext ctx{
-            .Window = window.get(),
-            .SwapChain = window->GetSwapChain()};
-        _app->OnSwapChainRecreate(ctx);
+        window->RecreateSwapChain(width, height, presentMode);
     }
 }
 

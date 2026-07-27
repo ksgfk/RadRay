@@ -25,7 +25,8 @@ RenderSystem::RenderSystem(Application* app) noexcept
 RenderSystem::~RenderSystem() noexcept {
     ReleaseAllScenes();
     _pipeline.reset();
-    _samplerCache.reset();
+    // 缓存的 RenderPass / Framebuffer 必须先于 GpuSystem 持有的 device 销毁。
+    _renderPassRegistry.reset();
     _dxc.reset();
 }
 
@@ -38,13 +39,10 @@ void RenderSystem::OnInitialize() {
         return;
     }
 
-#if defined(RADRAY_ENABLE_SHADER_JIT)
-    _shaderIncludeRoot = (GetExecutableDirectory() / "shaderlib").string();
-#endif
-    // sampler 缓存: 按 descriptor 去重 + 永生持有, 使材质快照可安全持有稳定 sampler 指针。
-    _samplerCache = make_unique<SamplerCache>(device);
+    _renderPassRegistry = make_unique<RenderPassRegistry>(device);
 
 #if defined(RADRAY_ENABLE_SHADER_JIT)
+    _shaderIncludeRoot = (GetExecutableDirectory() / "shaderlib").string();
     auto dxcOpt = render::CreateDxc();
     if (!dxcOpt.HasValue()) {
         RADRAY_ERR_LOG("RenderSystem::OnInitialize: CreateDxc failed");
@@ -92,23 +90,6 @@ void RenderSystem::Render(AppFrameContext& ctx) {
         for (RenderPipelineTarget& target : targets) {
             EnsureRenderTargetState(ctx, target);
         }
-    }
-
-    vector<AppSubsystem*> subsystems = _app->GetSubsystems();
-    for (AppSubsystem* subsystem : subsystems) {
-        subsystem->OnRenderBegin(ctx);
-    }
-
-    for (RenderPipelineTarget& target : targets) {
-        bool subsystemDrawn = false;
-        for (AppSubsystem* subsystem : subsystems) {
-            subsystemDrawn = subsystem->OnRender(ctx, target.Target, target.ContentDrawn || subsystemDrawn) || subsystemDrawn;
-        }
-        target.ContentDrawn = target.ContentDrawn || subsystemDrawn;
-    }
-
-    for (AppSubsystem* subsystem : subsystems) {
-        subsystem->OnRenderEnd(ctx);
     }
 
     for (RenderPipelineTarget& target : targets) {

@@ -107,6 +107,9 @@ foreach(_INDEX RANGE ${RADRAY_MANIFEST_ARTIFACTS_LAST})
     string(JSON _ARTIFACT GET "${RADRAY_MANIFEST_CONTENT}" Artifacts ${_INDEX})
     string(JSON _NAME GET "${_ARTIFACT}" Name)
     string(JSON _VERSION GET "${_ARTIFACT}" Version)
+    # 版本先于 triplet 匹配落地: 它是 manifest 钉住的工程属性, 与本机是否有该 triplet
+    # 的二进制无关。shader toolchain hash 需要它在所有平台上都取到同一个值。
+    set(RADRAY_SDK_${_NAME}_VERSION "${_VERSION}")
     # 遍历 Triplets 查找匹配当前 platform+arch 的条目
     string(JSON _TRIPLETS_LENGTH LENGTH "${_ARTIFACT}" Triplets)
     set(_MATCHED FALSE)
@@ -127,7 +130,6 @@ foreach(_INDEX RANGE ${RADRAY_MANIFEST_ARTIFACTS_LAST})
         continue()
     endif()
     set(RADRAY_SDK_${_NAME} "${_ARTIFACT}")
-    set(RADRAY_SDK_${_NAME}_VERSION "${_VERSION}")
     message(STATUS "Loaded SDK artifact ${_NAME} version ${_VERSION}")
 endforeach()
 set(RADRAY_THIRDPARTY_ROOT "${CMAKE_SOURCE_DIR}/third_party")

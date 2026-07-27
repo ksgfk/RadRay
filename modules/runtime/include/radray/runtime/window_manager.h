@@ -11,8 +11,8 @@
 
 namespace radray {
 
-class Application;
 class GpuSystem;
+class RenderSystem;
 class WindowManager;
 struct AppRenderContext;
 
@@ -83,7 +83,7 @@ private:
 
 class WindowManager {
 public:
-    WindowManager(Application* app, const WindowManagerDescriptor& desc);
+    explicit WindowManager(const WindowManagerDescriptor& desc);
     WindowManager(const WindowManager&) = delete;
     WindowManager(WindowManager&&) = delete;
     WindowManager& operator=(const WindowManager&) = delete;
@@ -108,23 +108,27 @@ public:
     sigslot::signal<NativeWindow*>& EventModalLoopTick() noexcept;
     void SetGpuSystem(GpuSystem* gpuSystem) noexcept { _gpuSystem = gpuSystem; }
     GpuSystem* GetGpuSystem() const noexcept { return _gpuSystem; }
+    /// 注入渲染系统(非拥有)。窗口在 backbuffer view 失效时需要淘汰其上的 Framebuffer 缓存。
+    void SetRenderSystem(RenderSystem* renderSystem) noexcept { _renderSystem = renderSystem; }
+    RenderSystem* GetRenderSystem() const noexcept { return _renderSystem; }
     void DetachAllSwapChains() noexcept;
     NativeWindow* FindMainNativeWindow(NativeWindowType type) const noexcept;
     NativeWindow* FindFirstNativeWindow(NativeWindowType type) const noexcept;
 
 private:
-    Application* _app;
     GpuSystem* _gpuSystem{nullptr};
+    RenderSystem* _renderSystem{nullptr};
     unique_ptr<NativeEventPump> _eventPump;
     vector<unique_ptr<AppWindow>> _windows;
     AppWindow* _mainWindow{nullptr};
     std::optional<render::PresentMode> _desiredPresentMode;
 };
 
-/// 依赖声明(非侵入,类外特化):WindowManager 需要 GpuSystem,复用已有 public setter。
+/// 依赖声明(非侵入,类外特化):WindowManager 需要 GpuSystem 与 RenderSystem,
+/// 复用已有 public setter。
 template <>
 struct ServiceTraits<WindowManager> {
-    static constexpr auto Inject = std::tuple{&WindowManager::SetGpuSystem};
+    static constexpr auto Inject = std::tuple{&WindowManager::SetGpuSystem, &WindowManager::SetRenderSystem};
 };
 
 template <>

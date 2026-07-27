@@ -4,6 +4,7 @@
 
 #include <radray/runtime/application.h>
 #include <radray/runtime/gpu_system.h>
+#include <radray/runtime/render_system.h>
 #include <radray/runtime/window_manager.h>
 
 namespace radray {
@@ -119,8 +120,8 @@ void RenderPipeline::OnRender(RenderPipelineContext& ctx, const RenderCameraList
         OnRenderCamera(ctx, camera);
     }
 
-    // Leave the initial clear to a camera pass when possible, so a target that
-    // is about to be rendered does not need a separate clear-only render pass.
+    // 尽量把首次 clear 交给相机 pass 完成,这样即将被渲染的目标就不需要
+    // 一个单独的只做 clear 的 render pass。
     for (RenderPipelineTarget& target : ctx.Targets) {
         if (!target.ContentDrawn) {
             const std::string_view name =
@@ -216,8 +217,8 @@ void RenderPipeline::ClearTarget(RenderPipelineContext& ctx, RenderPipelineTarge
         return;
     }
 
-    GpuSystem* gpu = ctx.App != nullptr ? ctx.App->GetGpuSystem() : nullptr;
-    RenderPassRegistry* registry = gpu != nullptr ? gpu->GetRenderPassRegistry() : nullptr;
+    RenderSystem* renderSystem = ctx.App != nullptr ? ctx.App->GetRenderSystem() : nullptr;
+    RenderPassRegistry* registry = renderSystem != nullptr ? renderSystem->GetRenderPassRegistry() : nullptr;
     if (registry == nullptr || target.Target.BackBuffer == nullptr) {
         return;
     }

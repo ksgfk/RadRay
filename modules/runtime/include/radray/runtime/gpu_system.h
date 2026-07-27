@@ -301,6 +301,12 @@ private:
     bool _isInModalLoop;
 };
 
+/// runtime 侧的 GPU 设备与帧节奏所有者。职责边界:
+/// - 拥有 instance / factory / device / 主队列 / fence,以及 flight 槽位、上传器、
+///   帧 profiler 和延迟销毁队列。
+/// - 负责"何时画":BeginFrameRecord / EndFrameRecordAndSubmit 的录制与提交时序、
+///   flight 回收与 GPU 资源生命周期兜底。
+/// - 不关心"画什么":RenderPass / Framebuffer 缓存、pipeline、Scene 归 RenderSystem。
 class GpuSystem : public IRenderResourceRecycler {
 public:
     using FenceSignal = GpuFenceSignal;
@@ -339,7 +345,6 @@ public:
     void PumpFrameUploadScheduler();
 
     render::Device* GetDevice() const noexcept { return _device.get(); }
-    RenderPassRegistry* GetRenderPassRegistry() const noexcept { return _renderPassRegistry.get(); }
     render::CommandQueue* GetMainQueue() const noexcept { return _mainQueue; }
     WindowManager* GetWindowManager() const noexcept { return _windowManager; }
     /// 注入窗口系统(非拥有)。由装配阶段(ServiceRegistry / Application)调用。
@@ -376,7 +381,6 @@ private:
     unique_ptr<ResourceUploader> _uploader;
     unique_ptr<FrameUploadScheduler> _frameUploadScheduler;
     unique_ptr<GpuFrameProfiler> _frameProfiler;
-    unique_ptr<RenderPassRegistry> _renderPassRegistry;
     DeferredRenderDeleteQueue _deferredDeletes;
     uint64_t _nowFrameIndex{0};
     std::chrono::duration<float> _lastFrameLatency{};

@@ -37,7 +37,7 @@ ActorComponent* Actor::AddComponent(unique_ptr<ActorComponent> component) {
     component->_owner = this;
     ActorComponent* raw = component.get();
     _ownedComponents.push_back(std::move(component));
-    // If already in world, register immediately
+    // 若已在 World 中,立即注册
     if (_world) {
         raw->_registered = true;
         raw->OnRegister();
@@ -53,11 +53,11 @@ void Actor::RemoveComponent(ActorComponent* component) {
         component->OnUnregister();
         component->_registered = false;
     }
-    // If it's the root, clear it
+    // 若是根组件,清空
     if (_rootComponent.Get() == component) {
         _rootComponent = nullptr;
     }
-    // If it's a scene component, detach from hierarchy
+    // 若是 SceneComponent,从层级中摘除
     if (component->IsSceneComponent()) {
         static_cast<SceneComponent*>(component)->DetachFromParent();
     }
@@ -95,7 +95,7 @@ void Actor::RegisterAllComponents() {
 }
 
 void Actor::UnregisterAllComponents() {
-    // Unregister in reverse order
+    // 按逆序反注册
     for (auto it = _ownedComponents.rbegin(); it != _ownedComponents.rend(); ++it) {
         auto& comp = *it;
         if (comp->_registered) {

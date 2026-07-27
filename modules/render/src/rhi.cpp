@@ -332,6 +332,27 @@ std::string_view format_as(RenderBackend v) noexcept {
     Unreachable();
 }
 
+std::string_view format_as(ShaderStage v) noexcept {
+    switch (v) {
+        case ShaderStage::UNKNOWN: return "UNKNOWN";
+        case ShaderStage::Vertex: return "Vertex";
+        case ShaderStage::Pixel: return "Pixel";
+        case ShaderStage::Compute: return "Compute";
+        case ShaderStage::Graphics: return "Graphics";
+        default: return "UNKNOWN";
+    }
+}
+
+std::string_view format_as(ShaderBlobCategory v) noexcept {
+    switch (v) {
+        case ShaderBlobCategory::DXIL: return "DXIL";
+        case ShaderBlobCategory::SPIRV: return "SPIRV";
+        case ShaderBlobCategory::MSL: return "MSL";
+        case ShaderBlobCategory::METALLIB: return "METALLIB";
+    }
+    Unreachable();
+}
+
 std::string_view format_as(TextureFormat v) noexcept {
     switch (v) {
         case TextureFormat::UNKNOWN: return "UNKNOWN";

@@ -31,10 +31,10 @@ public:
     /// View 矩阵:世界变换的逆。相机看向自身 +Z(左手)。
     Eigen::Matrix4f ComputeViewMatrix() const noexcept;
 
-    /// Proj 矩阵:左手透视。aspect = width / height。
+    /// Proj 矩阵:左手透视。aspect = 宽 / 高。
     Eigen::Matrix4f ComputeProjMatrix(float aspect) const noexcept;
 
-    /// ViewProj = Proj * View。aspect = width / height。
+    /// ViewProj = Proj * View。aspect = 宽 / 高。
     Eigen::Matrix4f ComputeViewProjMatrix(float aspect) const noexcept;
 
     /// 相机世界位置 (等于 SceneComponent::GetWorldLocation)。

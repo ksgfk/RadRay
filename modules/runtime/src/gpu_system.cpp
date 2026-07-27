@@ -430,7 +430,6 @@ GpuSystem::GpuSystem(Application* app, const GpuSystemDescriptor& desc)
     _flights.resize(_flightDataCount);
     _uploader = make_unique<ResourceUploader>(_device.get(), _flightDataCount);
     _frameUploadScheduler = make_unique<FrameUploadScheduler>();
-    _renderPassRegistry = make_unique<RenderPassRegistry>(_device.get());
     if (desc.EnableFrameProfiler) {
         _frameProfiler = make_unique<GpuFrameProfiler>(_device.get(), _mainQueue, _flightDataCount);
     }
@@ -438,13 +437,10 @@ GpuSystem::GpuSystem(Application* app, const GpuSystemDescriptor& desc)
 
 GpuSystem::~GpuSystem() noexcept {
     FlushAllDeferredDeletes();
-    // Binding groups and command buffers must go away before their cached
-    // pipeline layouts and render-pass objects.
     _flights.clear();
     _frameUploadScheduler.reset();
     _frameProfiler.reset();
     _uploader.reset();
-    _renderPassRegistry.reset();
     _mainQueueTrack.Fence.reset();
     _mainQueueTrack.Queue = nullptr;
     _mainQueue = nullptr;

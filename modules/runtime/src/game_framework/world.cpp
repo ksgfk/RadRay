@@ -16,7 +16,7 @@ World::World(Application* app)
 }
 
 World::~World() noexcept {
-    // Destroy all actors (triggers UnregisterAllComponents for each)
+    // 销毁所有 Actor(每个都会触发 UnregisterAllComponents)
     while (!_actors.empty()) {
         DestroyActor(_actors.back().get());
     }

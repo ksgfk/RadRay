@@ -18,7 +18,7 @@ public:
     bool IsSceneComponent() const noexcept final { return true; }
     RuntimeTypeId GetTypeId() const noexcept override;
 
-    // ─── Transform ───
+    // ─── 变换 ───
 
     /// 相对于父组件的变换
     const Eigen::Vector3f& GetRelativeLocation() const noexcept { return _relativeLocation; }

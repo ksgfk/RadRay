@@ -109,68 +109,6 @@ void ApplicationScheduler::CancelAll() noexcept {
     _records.CancelAll();
 }
 
-AppSubsystem::AppSubsystem() noexcept = default;
-
-AppSubsystem::~AppSubsystem() noexcept = default;
-
-void AppSubsystem::OnInit(Application& app) {
-    (void)app;
-}
-
-void AppSubsystem::OnUpdate(Application& app, const AppUpdateContext& ctx) {
-    (void)app;
-    (void)ctx;
-}
-
-void AppSubsystem::OnRenderBegin(AppFrameContext& ctx) {
-    (void)ctx;
-}
-
-bool AppSubsystem::OnRender(AppFrameContext& ctx, const AppFrameTarget& target, bool contentDrawn) {
-    (void)ctx;
-    (void)target;
-    (void)contentDrawn;
-    return false;
-}
-
-void AppSubsystem::OnRenderEnd(AppFrameContext& ctx) {
-    (void)ctx;
-}
-
-void AppSubsystem::OnRenderComplete(Application& app, const AppRenderCompleteContext& ctx) {
-    (void)app;
-    (void)ctx;
-}
-
-void AppSubsystem::OnSwapChainRecreate(Application& app, const AppSwapChainRecreateContext& ctx) {
-    (void)app;
-    (void)ctx;
-}
-
-void AppSubsystem::OnShutdown(Application& app) {
-    (void)app;
-}
-
-bool AppSubsystem::IsInitialized() const noexcept {
-    return _initialized;
-}
-
-void AppSubsystem::Initialize(Application& app) {
-    if (_initialized) {
-        return;
-    }
-    OnInit(app);
-    _initialized = true;
-}
-
-void AppSubsystem::Teardown(Application& app) noexcept {
-    if (!_initialized) {
-        return;
-    }
-    OnShutdown(app);
-    _initialized = false;
-}
-
 Application::Application() noexcept = default;
 
 Application::~Application() noexcept = default;
@@ -816,61 +754,6 @@ public:
     std::thread _renderThread;
 };
 
-AppSubsystem* Application::RegisterSubsystem(unique_ptr<AppSubsystem> subsystem) {
-    if (_windowManager != nullptr || _gpuSystem != nullptr || _renderSystem != nullptr || _assetManager != nullptr || _world != nullptr) {
-        RADRAY_ERR_LOG("Application: subsystems must be registered before Run()");
-        return nullptr;
-    }
-    if (subsystem == nullptr) {
-        return nullptr;
-    }
-
-    const RuntimeTypeId type = subsystem->GetTypeId();
-    if (type.IsEmpty()) {
-        RADRAY_ERR_LOG("Application: subsystem type id must not be empty");
-        return nullptr;
-    }
-
-    for (const unique_ptr<AppSubsystem>& existing : _subsystems) {
-        if (existing != nullptr && existing->GetTypeId() == type) {
-            return existing.get();
-        }
-    }
-
-    AppSubsystem* raw = subsystem.get();
-    _subsystems.emplace_back(std::move(subsystem));
-    return raw;
-}
-
-AppSubsystem* Application::GetSubsystem(RuntimeTypeId type) noexcept {
-    for (const unique_ptr<AppSubsystem>& subsystem : _subsystems) {
-        if (subsystem != nullptr && subsystem->GetTypeId() == type) {
-            return subsystem.get();
-        }
-    }
-    return nullptr;
-}
-
-const AppSubsystem* Application::GetSubsystem(RuntimeTypeId type) const noexcept {
-    for (const unique_ptr<AppSubsystem>& subsystem : _subsystems) {
-        if (subsystem != nullptr && subsystem->GetTypeId() == type) {
-            return subsystem.get();
-        }
-    }
-    return nullptr;
-}
-
-vector<AppSubsystem*> Application::GetSubsystems() noexcept {
-    vector<AppSubsystem*> subsystems;
-    subsystems.reserve(_subsystems.size());
-    for (const unique_ptr<AppSubsystem>& subsystem : _subsystems) {
-        if (subsystem != nullptr) {
-            subsystems.push_back(subsystem.get());
-        }
-    }
-    return subsystems;
-}
-
 void Application::NotifyRenderComplete(const AppRenderCompleteContext& ctx) {
     OnRenderComplete(ctx);
 }
@@ -879,42 +762,18 @@ void Application::NotifyRenderComplete(const AppRenderCompleteContext& ctx) {
 //  固化的帧序 / 生命周期(框架驱动,非游戏 override 点)
 // ════════════════════════════════════════════════════════════════
 
-void Application::InitializeSubsystems() {
-    for (const unique_ptr<AppSubsystem>& subsystem : _subsystems) {
-        if (subsystem != nullptr) {
-            subsystem->Initialize(*this);
-        }
-    }
-}
-
-void Application::TeardownSubsystems() noexcept {
-    for (size_t i = _subsystems.size(); i > 0; --i) {
-        const size_t index = i - 1;
-        if (_subsystems[index] != nullptr) {
-            _subsystems[index]->Teardown(*this);
-        }
-    }
-    _subsystems.clear();
-}
-
 AppUpdateResult Application::Update(const AppUpdateContext& ctx) {
     // 1) 推进资产加载状态机(恢复本帧 GPU 上传已完成的协程 → 启动未启动协程 → reap 终态)。
     if (_assetManager != nullptr) {
         _assetManager->Pump();
     }
-    // Resume coroutines that need to continue on the application update thread.
+    // 恢复需要在应用 update 线程上继续执行的协程。
     _scheduler.Pump();
     // 2) 游戏逻辑。
     OnUpdate(ctx);
     // 3) World Tick(组件解析当帧就绪的资产、建代理)。
     if (_world != nullptr) {
         _world->Tick(ctx.DeltaTime.count());
-    }
-    // 4) 注册子系统帧更新。UI、调试层等可在这里推进自己的游戏线程状态。
-    for (const unique_ptr<AppSubsystem>& subsystem : _subsystems) {
-        if (subsystem != nullptr) {
-            subsystem->OnUpdate(*this, ctx);
-        }
     }
     return AppUpdateResult{ShouldExit()};
 }
@@ -935,20 +794,6 @@ bool Application::RenderViewContent(AppFrameContext& ctx, const AppFrameTarget& 
 
 void Application::OnRenderComplete(const AppRenderCompleteContext& ctx) {
     OnRenderFrameComplete(ctx);
-
-    for (const unique_ptr<AppSubsystem>& subsystem : _subsystems) {
-        if (subsystem != nullptr) {
-            subsystem->OnRenderComplete(*this, ctx);
-        }
-    }
-}
-
-void Application::OnSwapChainRecreate(const AppSwapChainRecreateContext& ctx) {
-    for (const unique_ptr<AppSubsystem>& subsystem : _subsystems) {
-        if (subsystem != nullptr) {
-            subsystem->OnSwapChainRecreate(*this, ctx);
-        }
-    }
 }
 
 int Application::Shutdown(const AppShutdownContext& ctx) {
@@ -958,12 +803,14 @@ int Application::Shutdown(const AppShutdownContext& ctx) {
     }
     // 游戏侧清理:释放自管 per-flight 资源、置空指向 World 的非 owning 指针。
     OnShutdown();
-    // 子系统可能持有窗口、renderer、GPU 临时资源；在 World / AssetManager 拆除前释放。
-    TeardownSubsystems();
     _scheduler.CancelAll();
     // 拆 World:销毁 Actor → 移除 SceneProxy → drop 其持有的 StreamingAssetRef。
     _world.reset();
-    // RenderSystem owns Scene objects and must outlive World teardown.
+    // RenderSystem 持有 Scene 对象,生命周期必须长于 World 的拆解。
+    // 其 RenderPassRegistry 随之销毁,故须先切断 WindowManager 的非 owning 引用。
+    if (_windowManager != nullptr) {
+        _windowManager->SetRenderSystem(nullptr);
+    }
     _renderSystem.reset();
     // AssetManager 析构会 force-unload 全部资产,释放 GPU buffer(须在 device 销毁前)。
     _assetManager.reset();
@@ -991,7 +838,7 @@ void Application::InitializeRuntime(const ApplicationRuntimeDescriptor& desc) {
 #ifdef RADRAY_PLATFORM_WINDOWS
     windowManagerDesc.Type = NativeWindowType::Win32HWND;
 #endif
-    _windowManager = make_unique<WindowManager>(this, windowManagerDesc);
+    _windowManager = make_unique<WindowManager>(windowManagerDesc);
 
     render::VulkanInstanceDescriptor instanceDesc{
         .AppName = desc.AppName,
@@ -1060,8 +907,6 @@ void Application::InitializeRuntime(const ApplicationRuntimeDescriptor& desc) {
     swapchainDesc.Format = desc.BackBufferFormat;
     swapchainDesc.PresentMode = desc.PresentMode;
     mainWindow->AttachSwapChain(swapchainDesc);
-
-    InitializeSubsystems();
 }
 
 int Application::Run(const ApplicationRuntimeDescriptor& desc) {

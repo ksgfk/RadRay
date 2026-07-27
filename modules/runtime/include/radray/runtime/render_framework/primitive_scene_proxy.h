@@ -8,7 +8,7 @@ namespace radray {
 
 /// 一次索引绘制的参数 (对应 UE5 的 FMeshBatchElement 的索引子集)。
 struct MeshDrawArgs {
-    const GpuMesh::DrawData* Geometry{nullptr};  // VB/IB view
+    const GpuMesh::DrawData* Geometry{nullptr};  // VB/IB 视图
     uint32_t FirstIndex{0};
     uint32_t IndexCount{0};
     int32_t VertexOffset{0};
