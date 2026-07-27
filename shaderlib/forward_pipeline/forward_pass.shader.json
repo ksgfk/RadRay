@@ -2,6 +2,7 @@
   "FormatVersion": 1,
   "Name": "ForwardPrincipled",
   "Source": "forward_pipeline/forward_pass.hlsl",
+  "_Comment": "KeywordGroups 由 #pragma radray_keyword_group 派生 (radray_shader_gen), 其余字段手工维护。",
   "KeywordGroups": [
     {
       "Name": "BaseColorMap",

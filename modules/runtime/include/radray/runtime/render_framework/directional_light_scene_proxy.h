@@ -37,7 +37,8 @@ public:
     /// 阴影 bias 倍率 (无量纲, URP 风格): 逐级联乘以 texel 世界尺寸得到实际偏移。
     float GetShadowDepthBias() const noexcept { return _shadowDepthBias; }
     float GetShadowNormalBias() const noexcept { return _shadowNormalBias; }
-    /// PCF 模式: 0 = 单 tap, 1 = 4-tap, 2 = 5x5 tent (与 shadow.hlsl softMode 对齐)。
+    /// PCF 模式: 0 = 单 tap, 1 = 4-tap, 2 = 5x5 tent
+    /// (与 shaderlib/shadow/filtering.hlsli 的 RADRAY_SHADOW_FILTER_* 对齐)。
     uint32_t GetShadowSoftMode() const noexcept { return _shadowSoftMode; }
 
 private:

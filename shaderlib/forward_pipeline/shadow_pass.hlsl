@@ -1,18 +1,20 @@
 // shadow_pass.hlsl —— 入口 shader (entry point)。
 //
 // 用途: 阴影深度生成 pass (shadow caster, depth-only)。
-// 入口: VSMain (Vertex), PSMain (Pixel, 空实现, 仅写深度)。
+// 入口: VSMain (Vertex), PSMain (Pixel, 空实现, 深度由硬件写入)。
 //
-// 点光源在支持 layered VS output 的设备上以 6 个 instance 一次写入 cube 六层；
-// 方向光与能力 fallback 使用 ViewProj[0] 按 slice 录制。
+// 点光源在支持 layered VS output 的设备上以 6 个 instance 一次写满 cube 六层;
+// 方向光与能力 fallback 走 ViewProj[0], 按 slice 分别录制。
 //
-// 绑定约定 (CPU 端靠 cbuffer 名字定位):
-//   - gShadowView (b0, space1, per-view):   每面/每级联写入一组 ViewProj。
-//   - gPerObject  (b1, space0, per-object): 每 draw 写入 ObjectToWorld (见 binding_abi.hlsl)。
-// 无 material 绑定, 无 color target。
+// 绑定 (编号定义见 forward_pipeline/bindings.hlsli):
+//   group 0: gPerObject (b1)   每 draw 的 ObjectToWorld
+//   group 1: gShadowView (b0)  每面/每级联一组 ViewProj
+// 无材质绑定, 无 color target。
 
-#include "common.hlsl"
-#include "forward_pipeline/binding_abi.hlsl"
+#pragma radray_keyword_group(PointShadowLayered, _POINT_SHADOW_LAYERED) stages(Vertex)
+
+#include <forward_pipeline/bindings.hlsli>
+#include <shadow/cube.hlsli>
 
 struct VertexInput {
     float3 Position : POSITION0;
@@ -27,23 +29,23 @@ struct VertexOutput {
 #endif
 };
 
-// per-view 常量统一保留 6 个矩阵，使 layered/base variant 共用相同 descriptor range。
+/// per-view 常量。始终保留 6 个矩阵, 使 layered 与非 layered 变体共用同一 descriptor range。
 struct ShadowViewConstants {
-    float4x4 ViewProj[6];
+    float4x4 ViewProj[RADRAY_CUBE_FACE_COUNT];
 };
 
-VK_BINDING(0, RADRAY_FORWARD_PIPELINE_BINDING_GROUP)
-ConstantBuffer<ShadowViewConstants> gShadowView : register(b0, RADRAY_FORWARD_PIPELINE_SPACE);
+RADRAY_FORWARD_VIEW_CBUFFER(ShadowViewConstants, gShadowView, 0, 0);
 
-VertexOutput VSMain(VertexInput input, uint instanceId : SV_InstanceID) {
+VertexOutput VSMain(VertexInput input, uint instance_id : SV_InstanceID) {
     VertexOutput output;
-    uint viewIndex = 0;
+    uint view_index = 0u;
 #ifdef _POINT_SHADOW_LAYERED
-    viewIndex = instanceId;
-    output.Layer = viewIndex;
+    // 一次 draw 6 instance: instance 序号即 cube 面序号, 也是目标层。
+    view_index = instance_id;
+    output.Layer = view_index;
 #endif
-    float4 worldPos = mul(gPerObject.ObjectToWorld, float4(input.Position, 1.0));
-    output.Position = mul(gShadowView.ViewProj[viewIndex], worldPos);
+    float4 position_world = mul(gPerObject.ObjectToWorld, float4(input.Position, 1.0f));
+    output.Position = mul(gShadowView.ViewProj[view_index], position_world);
     return output;
 }
 

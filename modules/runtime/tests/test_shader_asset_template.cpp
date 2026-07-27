@@ -368,7 +368,7 @@ ShaderTemplateSeed MakeImGuiSeed() {
 
     ShaderTemplateSeed seed{};
     seed.Name = "RadRayImGui";
-    seed.Source = "radray_imgui.hlsl";
+    seed.Source = "imgui/imgui_pass.hlsl";
     seed.Passes.push_back(std::move(pass));
     return seed;
 }
@@ -395,7 +395,7 @@ TEST(ShaderAssetTemplateTest, GeneratesBindingsFromReflection) {
 
     const ShaderAssetDesc& asset = generated->Asset;
     EXPECT_EQ(asset.Name, "RadRayImGui");
-    EXPECT_EQ(asset.Source, "radray_imgui.hlsl");
+    EXPECT_EQ(asset.Source, "imgui/imgui_pass.hlsl");
     ASSERT_EQ(asset.Passes.size(), 1u);
 
     const ShaderPassDesc& pass = asset.Passes.front();
@@ -644,7 +644,7 @@ TEST(ShaderAssetTemplateTest, ExplicitProbeDefinesReplaceAutoProbing) {
     EXPECT_EQ(CountBindings(probed.value()), 12u);
 }
 
-/// 阴影两组声明在 forward_interface.hlsl 里, 应经 include 被自动继承。
+/// 阴影两组声明在 forward_pipeline/view.hlsli 里, 应经 include 被自动继承。
 /// 这是"声明与它守护的 #ifdef 同文件"这一设计的直接验证。
 TEST(ShaderAssetTemplateTest, InheritsKeywordGroupsFromIncludedHeaders) {
     shared_ptr<render::Dxc> dxc = MakeDxc();
@@ -799,7 +799,7 @@ TEST(ShaderAssetTemplateTest, GeneratedTemplateParsesAndCooks) {
     // 这是生成器与校验器共用同一套反射折叠规则的直接后果。
     ScopedDirectory output;
     ASSERT_TRUE(output.IsValid());
-    const std::filesystem::path manifestPath = output.Path() / "radray_imgui.shader.json";
+    const std::filesystem::path manifestPath = output.Path() / "imgui_pass.shader.json";
     ASSERT_TRUE(WriteTextFile(manifestPath, json.value()));
 
     vector<render::ShaderBlobCategory> categories{render::ShaderBlobCategory::DXIL};
@@ -874,7 +874,7 @@ TEST(ShaderAssetTemplateTest, DefaultsAssetNameToTheSourceStem) {
     std::optional<ShaderAssetTemplate> generated =
         GenerateShaderAssetTemplate(*dxc, seed, MakeOptions(), diagnostic);
     ASSERT_TRUE(generated.has_value()) << diagnostic.ToString();
-    EXPECT_EQ(generated->Asset.Name, "radray_imgui");
+    EXPECT_EQ(generated->Asset.Name, "imgui_pass");
     EXPECT_EQ(generated->Asset.Passes.front().Name, "main");
 }
 

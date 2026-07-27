@@ -24,13 +24,13 @@ static_assert(json_deserializable<ShaderArtifactIndex>);
 static_assert(EnumContains(render::ShaderParameterBindingType::CBuffer));
 static_assert(EnumContains(render::ShaderStage::Vertex));
 
-// 与 shaderlib/radray_imgui.hlsl 对应的完整 manifest。
+// 与 shaderlib/imgui/imgui_pass.hlsl 对应的完整 manifest。
 // 该 shader 同时用到 push constant (gPush) 与可做 static sampler 的 gSampler,
 // 是最小但覆盖面最广的正例。
 constexpr std::string_view kImGuiManifest = R"JSON({
   "FormatVersion": 1,
   "Name": "RadRayImGui",
-  "Source": "radray_imgui.hlsl",
+  "Source": "imgui/imgui_pass.hlsl",
   "Passes": [
     {
       "Name": "Default",
@@ -190,7 +190,7 @@ std::string Mutate(std::string_view base, std::string_view from, std::string_vie
 TEST(ShaderAssetTest, ParsesImGuiManifest) {
     const ShaderAssetDesc desc = ParseOk(kImGuiManifest);
     EXPECT_EQ(desc.Name, "RadRayImGui");
-    EXPECT_EQ(desc.Source, "radray_imgui.hlsl");
+    EXPECT_EQ(desc.Source, "imgui/imgui_pass.hlsl");
     ASSERT_EQ(desc.Passes.size(), 1u);
 
     const ShaderPassDesc& pass = desc.Passes.front();

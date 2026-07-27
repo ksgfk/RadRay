@@ -130,7 +130,7 @@ struct ShaderBindingDesc {
 
 /// 一个 descriptor set / register space。
 /// Group 同时是 D3D12 的 RegisterSpace 与 Vulkan 的 set index —— 这是 RHI 后端已经
-/// 硬化的不变量 (见 shaderlib/forward_pipeline/binding_abi.hlsl), manifest 不做重映射。
+/// 硬化的不变量 (见 shaderlib/forward_pipeline/bindings.hlsli), manifest 不做重映射。
 struct ShaderBindingGroupDesc {
     uint32_t Group{0};
     vector<ShaderBindingDesc> Bindings;

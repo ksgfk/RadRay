@@ -66,8 +66,10 @@ if (RADRAY_BUILD_TESTS)
 endif()
 
 if (RADRAY_ENABLE_SHADER_JIT)
+    # 先删再拷: copy_directory 不会移除源码树里已删掉的文件, 残留的旧头文件会让
+    # 重命名后的 #include 悄悄解析到过期副本, 排查起来极其费时。
     set(_RADRAY_SHADER_JIT_DEPLOY_COMMANDS
-        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:radrayruntime>/shaderlib"
+        COMMAND ${CMAKE_COMMAND} -E rm -rf "$<TARGET_FILE_DIR:radrayruntime>/shaderlib"
         COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_SOURCE_DIR}/shaderlib" "$<TARGET_FILE_DIR:radrayruntime>/shaderlib")
     foreach(_dll IN LISTS RADRAY_DXC_RUNTIME_DLLS)
         list(APPEND _RADRAY_SHADER_JIT_DEPLOY_COMMANDS

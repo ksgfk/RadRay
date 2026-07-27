@@ -80,7 +80,7 @@
 //
 // 【默认采纳整条 include 链】: 预处理已把 include 展开, 于是提供某组绑定的那个头文件
 // 可以把对应的 keyword 声明放在自己身边 —— 声明与被它守护的 #ifdef 同文件, 是唯一
-// 不会失同步的位置。例如 forward_interface.hlsl 声明阴影绑定, 就由它自己声明
+// 不会失同步的位置。例如 forward_pipeline/view.hlsli 声明阴影绑定, 就由它自己声明
 // PointShadows / DirectionalShadows, 每个 include 它的入口文件自动继承。
 //
 // 代价是"include 了某个头文件"就意味着"继承它的全部变体维度", 即使本 shader 并不

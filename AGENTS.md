@@ -38,7 +38,19 @@
 - Before introducing any new `try`, `catch`, or `throw`, explicitly ask the user and receive confirmation. This approval is required even when the exception construct appears necessary.
 
 ## Shader Conventions
-- Treat `shaderlib/` as the HLSL include root. Include shared shader files as `#include "common.hlsl"` or `#include "bsdf.hlsl"`, not `#include "shaderlib/common.hlsl"`.
+- Treat `shaderlib/` as the HLSL include root. All includes must be **root-relative** and wrapped in angle brackets: `#include <core/math.hlsli>`, not `#include <shaderlib/core/math.hlsli>` and not file-relative `#include <math.hlsli>`. DXC accepts the file-relative form but the dependency scanner that computes shader source identity does not, so it would break cook/JIT.
+- Use `<>` for anything resolved through the include root (i.e. everything in `shaderlib/`). Reserve `""` for genuinely path-relative includes, which currently do not exist — a quoted include is a signal that something is resolving relative to the including file and should be reviewed.
+- File extensions carry meaning: `.hlsl` = entry point (has `VSMain`/`PSMain`/`CSMain`), `.hlsli` = library header (include-guarded, no entry points).
+- Include guards are `RADRAY_<PATH>_HLSLI`, derived from the path (e.g. `shadow/cascade.hlsli` → `RADRAY_SHADOW_CASCADE_HLSLI`).
+- Layer layout, lower layers must not include upper ones:
+  - `core/` — backend shims, math, shading frame, color. No lighting or material semantics.
+  - `bsdf/` — fresnel, microfacet distributions, principled BSDF. Evaluated in the local shading frame (n = +Z).
+  - `lighting/` — light GPU layouts and irradiance evaluation.
+  - `shadow/` — shared filtering primitives plus one file per technique.
+  - `forward_pipeline/`, `imgui/` — pipeline-specific bindings and entry points.
+- Naming: functions and locals `snake_case`; types and GPU struct fields `PascalCase`; macros `RADRAY_` prefixed uppercase.
+- Cross-backend binding declarations go through the `VK_*` macros in `core/platform.hlsli` and the `RADRAY_FORWARD_*` macros in `forward_pipeline/bindings.hlsli`. Never write bare `register(...)` / `[[vk::binding]]` literals in a pass.
+- Keyword groups are declared with `#pragma radray_keyword_group(Name, _KW...) stages(...)` in the file that owns the guarded bindings, outside any `#if`. Entry shaders inherit groups from their includes.
 - Reuse existing implementations in `shaderlib/` before adding shader-local helper functions.
 
 ## Test
