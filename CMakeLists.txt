@@ -146,6 +146,8 @@ add_subdirectory(${RADRAY_THIRDPARTY_ROOT}/fmt)
 radray_optimize_flags_library(fmt)
 radray_set_build_path(fmt)
 
+add_subdirectory(${RADRAY_THIRDPARTY_ROOT}/magic_enum)
+
 set(SPDLOG_MASTER_PROJECT OFF CACHE BOOL "" FORCE)
 set(SPDLOG_FMT_EXTERNAL ON CACHE BOOL "" FORCE)
 if (WIN32)

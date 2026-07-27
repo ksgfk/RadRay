@@ -10,6 +10,7 @@
 
 #include <radray/basic_math.h>
 #include <radray/binary_io.h>
+#include <radray/enum_flags.h>
 #include <radray/file.h>
 #include <radray/json.h>
 #include <radray/logger.h>
@@ -27,143 +28,10 @@ namespace radray {
 
 namespace {
 
-// ============================ 字符串 <-> 枚举 ============================
-//
-// 名称与 C++ 枚举标识符保持一致, 便于人写人读。
-// 刻意不复用 render::format_as: 那些是日志友好名 (例如 VertexFormat::UINT8X2 会打成
-// "byte2"), 不适合做稳定的序列化 key。
-
-template <class E>
-struct EnumEntry {
-    std::string_view Name;
-    E Value;
-};
-
-template <class E, size_t N>
-std::optional<E> LookupEnum(const std::array<EnumEntry<E>, N>& table, std::string_view name) noexcept {
-    for (const EnumEntry<E>& entry : table) {
-        if (entry.Name == name) {
-            return entry.Value;
-        }
-    }
-    return std::nullopt;
-}
-
-template <class E, size_t N>
-std::string_view NameOfEnum(const std::array<EnumEntry<E>, N>& table, E value) noexcept {
-    for (const EnumEntry<E>& entry : table) {
-        if (entry.Value == value) {
-            return entry.Name;
-        }
-    }
-    return {};
-}
-
-constexpr std::array kResidencyTable{
-    EnumEntry<ShaderBindingResidency>{"DescriptorTable", ShaderBindingResidency::DescriptorTable},
-    EnumEntry<ShaderBindingResidency>{"RootDescriptor", ShaderBindingResidency::RootDescriptor},
-};
-
-constexpr std::array kBindingTypeTable{
-    EnumEntry<render::ShaderParameterBindingType>{"CBuffer", render::ShaderParameterBindingType::CBuffer},
-    EnumEntry<render::ShaderParameterBindingType>{"Buffer", render::ShaderParameterBindingType::Buffer},
-    EnumEntry<render::ShaderParameterBindingType>{"RWBuffer", render::ShaderParameterBindingType::RWBuffer},
-    EnumEntry<render::ShaderParameterBindingType>{"TexelBuffer", render::ShaderParameterBindingType::TexelBuffer},
-    EnumEntry<render::ShaderParameterBindingType>{"RWTexelBuffer", render::ShaderParameterBindingType::RWTexelBuffer},
-    EnumEntry<render::ShaderParameterBindingType>{"Texture", render::ShaderParameterBindingType::Texture},
-    EnumEntry<render::ShaderParameterBindingType>{"RWTexture", render::ShaderParameterBindingType::RWTexture},
-    EnumEntry<render::ShaderParameterBindingType>{"Sampler", render::ShaderParameterBindingType::Sampler},
-};
-
-constexpr std::array kShaderStageTable{
-    EnumEntry<render::ShaderStage>{"Vertex", render::ShaderStage::Vertex},
-    EnumEntry<render::ShaderStage>{"Pixel", render::ShaderStage::Pixel},
-    EnumEntry<render::ShaderStage>{"Compute", render::ShaderStage::Compute},
-};
-
-/// artifact index.json 也是人可读可 diff 的产物清单, 与 manifest 共用同一套字符串表。
-constexpr std::array kBlobCategoryTable{
-    EnumEntry<render::ShaderBlobCategory>{"DXIL", render::ShaderBlobCategory::DXIL},
-    EnumEntry<render::ShaderBlobCategory>{"SPIRV", render::ShaderBlobCategory::SPIRV},
-    EnumEntry<render::ShaderBlobCategory>{"MSL", render::ShaderBlobCategory::MSL},
-    EnumEntry<render::ShaderBlobCategory>{"METALLIB", render::ShaderBlobCategory::METALLIB},
-};
-
 /// 诊断文本用的 stage 名。与序列化表同源, 保证 JSON 里的名字和报错里的名字一致。
 std::string_view StageName(render::ShaderStage stage) noexcept {
-    const std::string_view name = NameOfEnum(kShaderStageTable, stage);
-    return name.empty() ? std::string_view{"UNKNOWN"} : name;
+    return EnumNameOr(stage, "UNKNOWN");
 }
-
-constexpr std::array kShaderModelTable{
-    EnumEntry<render::HlslShaderModel>{"SM60", render::HlslShaderModel::SM60},
-    EnumEntry<render::HlslShaderModel>{"SM61", render::HlslShaderModel::SM61},
-    EnumEntry<render::HlslShaderModel>{"SM62", render::HlslShaderModel::SM62},
-    EnumEntry<render::HlslShaderModel>{"SM63", render::HlslShaderModel::SM63},
-    EnumEntry<render::HlslShaderModel>{"SM64", render::HlslShaderModel::SM64},
-    EnumEntry<render::HlslShaderModel>{"SM65", render::HlslShaderModel::SM65},
-    EnumEntry<render::HlslShaderModel>{"SM66", render::HlslShaderModel::SM66},
-};
-
-constexpr std::array kVertexStepModeTable{
-    EnumEntry<render::VertexStepMode>{"Vertex", render::VertexStepMode::Vertex},
-    EnumEntry<render::VertexStepMode>{"Instance", render::VertexStepMode::Instance},
-};
-
-constexpr std::array kVertexFormatTable{
-    EnumEntry<render::VertexFormat>{"UINT8X2", render::VertexFormat::UINT8X2},
-    EnumEntry<render::VertexFormat>{"UINT8X4", render::VertexFormat::UINT8X4},
-    EnumEntry<render::VertexFormat>{"SINT8X2", render::VertexFormat::SINT8X2},
-    EnumEntry<render::VertexFormat>{"SINT8X4", render::VertexFormat::SINT8X4},
-    EnumEntry<render::VertexFormat>{"UNORM8X2", render::VertexFormat::UNORM8X2},
-    EnumEntry<render::VertexFormat>{"UNORM8X4", render::VertexFormat::UNORM8X4},
-    EnumEntry<render::VertexFormat>{"SNORM8X2", render::VertexFormat::SNORM8X2},
-    EnumEntry<render::VertexFormat>{"SNORM8X4", render::VertexFormat::SNORM8X4},
-    EnumEntry<render::VertexFormat>{"UINT16X2", render::VertexFormat::UINT16X2},
-    EnumEntry<render::VertexFormat>{"UINT16X4", render::VertexFormat::UINT16X4},
-    EnumEntry<render::VertexFormat>{"SINT16X2", render::VertexFormat::SINT16X2},
-    EnumEntry<render::VertexFormat>{"SINT16X4", render::VertexFormat::SINT16X4},
-    EnumEntry<render::VertexFormat>{"UNORM16X2", render::VertexFormat::UNORM16X2},
-    EnumEntry<render::VertexFormat>{"UNORM16X4", render::VertexFormat::UNORM16X4},
-    EnumEntry<render::VertexFormat>{"SNORM16X2", render::VertexFormat::SNORM16X2},
-    EnumEntry<render::VertexFormat>{"SNORM16X4", render::VertexFormat::SNORM16X4},
-    EnumEntry<render::VertexFormat>{"FLOAT16X2", render::VertexFormat::FLOAT16X2},
-    EnumEntry<render::VertexFormat>{"FLOAT16X4", render::VertexFormat::FLOAT16X4},
-    EnumEntry<render::VertexFormat>{"UINT32", render::VertexFormat::UINT32},
-    EnumEntry<render::VertexFormat>{"UINT32X2", render::VertexFormat::UINT32X2},
-    EnumEntry<render::VertexFormat>{"UINT32X3", render::VertexFormat::UINT32X3},
-    EnumEntry<render::VertexFormat>{"UINT32X4", render::VertexFormat::UINT32X4},
-    EnumEntry<render::VertexFormat>{"SINT32", render::VertexFormat::SINT32},
-    EnumEntry<render::VertexFormat>{"SINT32X2", render::VertexFormat::SINT32X2},
-    EnumEntry<render::VertexFormat>{"SINT32X3", render::VertexFormat::SINT32X3},
-    EnumEntry<render::VertexFormat>{"SINT32X4", render::VertexFormat::SINT32X4},
-    EnumEntry<render::VertexFormat>{"FLOAT32", render::VertexFormat::FLOAT32},
-    EnumEntry<render::VertexFormat>{"FLOAT32X2", render::VertexFormat::FLOAT32X2},
-    EnumEntry<render::VertexFormat>{"FLOAT32X3", render::VertexFormat::FLOAT32X3},
-    EnumEntry<render::VertexFormat>{"FLOAT32X4", render::VertexFormat::FLOAT32X4},
-};
-
-constexpr std::array kAddressModeTable{
-    EnumEntry<render::AddressMode>{"ClampToEdge", render::AddressMode::ClampToEdge},
-    EnumEntry<render::AddressMode>{"Repeat", render::AddressMode::Repeat},
-    EnumEntry<render::AddressMode>{"Mirror", render::AddressMode::Mirror},
-};
-
-constexpr std::array kFilterModeTable{
-    EnumEntry<render::FilterMode>{"Nearest", render::FilterMode::Nearest},
-    EnumEntry<render::FilterMode>{"Linear", render::FilterMode::Linear},
-};
-
-constexpr std::array kCompareFunctionTable{
-    EnumEntry<render::CompareFunction>{"Never", render::CompareFunction::Never},
-    EnumEntry<render::CompareFunction>{"Less", render::CompareFunction::Less},
-    EnumEntry<render::CompareFunction>{"Equal", render::CompareFunction::Equal},
-    EnumEntry<render::CompareFunction>{"LessEqual", render::CompareFunction::LessEqual},
-    EnumEntry<render::CompareFunction>{"Greater", render::CompareFunction::Greater},
-    EnumEntry<render::CompareFunction>{"NotEqual", render::CompareFunction::NotEqual},
-    EnumEntry<render::CompareFunction>{"GreaterEqual", render::CompareFunction::GreaterEqual},
-    EnumEntry<render::CompareFunction>{"Always", render::CompareFunction::Always},
-};
 
 // ============================ 解析辅助 ============================
 
@@ -209,211 +77,6 @@ private:
     std::optional<render::ShaderStage> _stage{};
 };
 
-bool ReadRequiredString(const JsonValue& obj, std::string_view key, ParseScope& scope, string& out) noexcept {
-    JsonValue value = obj[key];
-    if (!value.IsString()) {
-        return scope.Fail(fmt::format("missing or non-string field '{}'", key));
-    }
-    out = string{value.AsString()};
-    if (out.empty()) {
-        return scope.Fail(fmt::format("field '{}' must not be empty", key));
-    }
-    return true;
-}
-
-bool ReadOptionalString(const JsonValue& obj, std::string_view key, ParseScope& scope, string& out) noexcept {
-    if (!obj.Has(key)) {
-        return true;
-    }
-    JsonValue value = obj[key];
-    if (!value.IsString()) {
-        return scope.Fail(fmt::format("field '{}' must be a string", key));
-    }
-    out = string{value.AsString()};
-    return true;
-}
-
-bool ReadRequiredUint32(const JsonValue& obj, std::string_view key, ParseScope& scope, uint32_t& out) noexcept {
-    JsonValue value = obj[key];
-    if (!value.IsNumber()) {
-        return scope.Fail(fmt::format("missing or non-numeric field '{}'", key));
-    }
-    const uint64_t raw = value.AsUint();
-    if (raw > std::numeric_limits<uint32_t>::max()) {
-        return scope.Fail(fmt::format("field '{}' exceeds uint32 range: {}", key, raw));
-    }
-    out = static_cast<uint32_t>(raw);
-    return true;
-}
-
-bool ReadOptionalUint32(const JsonValue& obj, std::string_view key, ParseScope& scope, uint32_t& out) noexcept {
-    if (!obj.Has(key)) {
-        return true;
-    }
-    return ReadRequiredUint32(obj, key, scope, out);
-}
-
-bool ReadOptionalBool(const JsonValue& obj, std::string_view key, ParseScope& scope, bool& out) noexcept {
-    if (!obj.Has(key)) {
-        return true;
-    }
-    JsonValue value = obj[key];
-    if (!value.IsBool()) {
-        return scope.Fail(fmt::format("field '{}' must be a bool", key));
-    }
-    out = value.AsBool();
-    return true;
-}
-
-bool ReadOptionalFloat(const JsonValue& obj, std::string_view key, ParseScope& scope, float& out) noexcept {
-    if (!obj.Has(key)) {
-        return true;
-    }
-    JsonValue value = obj[key];
-    if (!value.IsNumber()) {
-        return scope.Fail(fmt::format("field '{}' must be a number", key));
-    }
-    out = static_cast<float>(value.AsDouble());
-    return true;
-}
-
-template <class E, size_t N>
-bool ReadRequiredEnum(
-    const JsonValue& obj,
-    std::string_view key,
-    const std::array<EnumEntry<E>, N>& table,
-    ParseScope& scope,
-    E& out) noexcept {
-    JsonValue value = obj[key];
-    if (!value.IsString()) {
-        return scope.Fail(fmt::format("missing or non-string enum field '{}'", key));
-    }
-    const std::string_view name = value.AsString();
-    std::optional<E> parsed = LookupEnum(table, name);
-    if (!parsed.has_value()) {
-        return scope.Fail(fmt::format("field '{}' has unknown value '{}'", key, name));
-    }
-    out = parsed.value();
-    return true;
-}
-
-template <class E, size_t N>
-bool ReadOptionalEnum(
-    const JsonValue& obj,
-    std::string_view key,
-    const std::array<EnumEntry<E>, N>& table,
-    ParseScope& scope,
-    E& out) noexcept {
-    if (!obj.Has(key)) {
-        return true;
-    }
-    return ReadRequiredEnum(obj, key, table, scope, out);
-}
-
-/// ShaderStages 序列化为字符串数组, 与 EnumFlags 语义一致。
-bool ReadRequiredStages(
-    const JsonValue& obj,
-    std::string_view key,
-    ParseScope& scope,
-    render::ShaderStages& out) noexcept {
-    JsonValue value = obj[key];
-    if (!value.IsArray()) {
-        return scope.Fail(fmt::format("missing or non-array field '{}'", key));
-    }
-    const size_t count = value.Size();
-    if (count == 0) {
-        return scope.Fail(fmt::format("field '{}' must list at least one shader stage", key));
-    }
-    render::ShaderStages stages{render::ShaderStage::UNKNOWN};
-    for (size_t i = 0; i < count; ++i) {
-        JsonValue element = value.At(i);
-        if (!element.IsString()) {
-            return scope.Fail(fmt::format("field '{}'[{}] must be a string", key, i));
-        }
-        const std::string_view name = element.AsString();
-        std::optional<render::ShaderStage> stage = LookupEnum(kShaderStageTable, name);
-        if (!stage.has_value()) {
-            return scope.Fail(fmt::format("field '{}'[{}] has unknown shader stage '{}'", key, i, name));
-        }
-        stages |= stage.value();
-    }
-    out = stages;
-    return true;
-}
-
-bool ReadOptionalStages(
-    const JsonValue& obj,
-    std::string_view key,
-    ParseScope& scope,
-    render::ShaderStages& out) noexcept {
-    if (!obj.Has(key)) {
-        return true;
-    }
-    return ReadRequiredStages(obj, key, scope, out);
-}
-
-bool ReadStringArray(
-    const JsonValue& obj,
-    std::string_view key,
-    ParseScope& scope,
-    bool allowEmptyElements,
-    vector<string>& out) noexcept {
-    if (!obj.Has(key)) {
-        return true;
-    }
-    JsonValue value = obj[key];
-    if (!value.IsArray()) {
-        return scope.Fail(fmt::format("field '{}' must be an array", key));
-    }
-    const size_t count = value.Size();
-    out.reserve(count);
-    for (size_t i = 0; i < count; ++i) {
-        JsonValue element = value.At(i);
-        if (!element.IsString()) {
-            return scope.Fail(fmt::format("field '{}'[{}] must be a string", key, i));
-        }
-        string text{element.AsString()};
-        if (!allowEmptyElements && text.empty()) {
-            return scope.Fail(fmt::format("field '{}'[{}] must not be empty", key, i));
-        }
-        out.push_back(std::move(text));
-    }
-    return true;
-}
-
-bool ReadSampler(const JsonValue& obj, ParseScope& scope, render::SamplerDescriptor& out) noexcept {
-    if (!obj.IsObject()) {
-        return scope.Fail("ImmutableSampler must be an object");
-    }
-    render::SamplerDescriptor sampler{};
-    if (!ReadRequiredEnum(obj, "AddressS", kAddressModeTable, scope, sampler.AddressS) ||
-        !ReadRequiredEnum(obj, "AddressT", kAddressModeTable, scope, sampler.AddressT) ||
-        !ReadRequiredEnum(obj, "AddressR", kAddressModeTable, scope, sampler.AddressR) ||
-        !ReadRequiredEnum(obj, "MinFilter", kFilterModeTable, scope, sampler.MinFilter) ||
-        !ReadRequiredEnum(obj, "MagFilter", kFilterModeTable, scope, sampler.MagFilter) ||
-        !ReadRequiredEnum(obj, "MipmapFilter", kFilterModeTable, scope, sampler.MipmapFilter) ||
-        !ReadOptionalFloat(obj, "LodMin", scope, sampler.LodMin) ||
-        !ReadOptionalFloat(obj, "LodMax", scope, sampler.LodMax) ||
-        !ReadOptionalUint32(obj, "AnisotropyClamp", scope, sampler.AnisotropyClamp)) {
-        return false;
-    }
-    if (obj.Has("Compare")) {
-        render::CompareFunction compare{};
-        if (!ReadRequiredEnum(obj, "Compare", kCompareFunctionTable, scope, compare)) {
-            return false;
-        }
-        sampler.Compare = compare;
-    }
-    if (sampler.LodMax < sampler.LodMin) {
-        return scope.Fail(fmt::format(
-            "ImmutableSampler LodMax {} is less than LodMin {}",
-            sampler.LodMax,
-            sampler.LodMin));
-    }
-    out = sampler;
-    return true;
-}
-
 // ============================ 校验 ============================
 
 /// D3D12 root signature 的硬上限 (D3D12_MAX_ROOT_COST)。
@@ -453,8 +116,16 @@ bool ValidateBinding(const ShaderBindingDesc& binding, ParseScope& scope) noexce
     scope.SetBinding(binding.Name);
     scope.SetBindingIndex(binding.Binding);
 
+    if (binding.Name.empty()) {
+        return scope.Fail("binding Name must not be empty");
+    }
     if (binding.Type == render::ShaderParameterBindingType::UNKNOWN) {
         return scope.Fail("binding Type must be declared");
+    }
+    if (render::IsDynamicShaderParameterBindingType(binding.Type)) {
+        return scope.Fail(fmt::format(
+            "binding Type {} is internal; declare the base Type and use RootDescriptor Residency",
+            EnumNameOr(binding.Type, "UNKNOWN")));
     }
     // 两个后端都拒绝 Count == 0, unbounded 数组必须在 manifest 里给出实际容量。
     if (binding.Count == 0) {
@@ -473,18 +144,25 @@ bool ValidateBinding(const ShaderBindingDesc& binding, ParseScope& scope) noexce
         if (!IsRootDescriptorCapable(binding.Type)) {
             return scope.Fail(fmt::format(
                 "RootDescriptor residency requires CBuffer / Buffer / RWBuffer, got {}",
-                NameOfEnum(kBindingTypeTable, binding.Type)));
+                EnumNameOr(binding.Type, "UNKNOWN")));
         }
         if (binding.Count != 1) {
             return scope.Fail(fmt::format("RootDescriptor residency requires Count 1, got {}", binding.Count));
         }
     }
     if (binding.ImmutableSampler.has_value()) {
+        const render::SamplerDescriptor& sampler = binding.ImmutableSampler.value();
         if (binding.Type != render::ShaderParameterBindingType::Sampler) {
             return scope.Fail("ImmutableSampler requires Sampler type");
         }
         if (binding.Count != 1) {
             return scope.Fail(fmt::format("ImmutableSampler requires Count 1, got {}", binding.Count));
+        }
+        if (sampler.LodMax < sampler.LodMin) {
+            return scope.Fail(fmt::format(
+                "ImmutableSampler LodMax {} is less than LodMin {}",
+                sampler.LodMax,
+                sampler.LodMin));
         }
     }
     return true;
@@ -522,6 +200,10 @@ bool ValidatePass(const ShaderPassDesc& pass, ParseScope& scope) noexcept {
     for (const ShaderStageDesc& stage : pass.Stages) {
         if (stage.Stage == render::ShaderStage::UNKNOWN) {
             return scope.Fail("stage must declare a known Stage");
+        }
+        if (stage.EntryPoint.empty()) {
+            scope.SetStage(stage.Stage);
+            return scope.Fail("stage EntryPoint must not be empty");
         }
         if (seen.HasFlag(stage.Stage)) {
             return scope.Fail(fmt::format("stage {} declared more than once", StageName(stage.Stage)));
@@ -866,6 +548,9 @@ bool ValidatePassKeywords(
     // pass.Defines 里出现 keyword 意味着该 keyword 恒开, 变体维度是死的 ——
     // 这总是配置错误, 而非某种"强制开启"的表达方式。
     for (const string& define : pass.Defines) {
+        if (define.empty()) {
+            return scope.Fail("pass Defines must not contain an empty string");
+        }
         // 允许 FOO=1 形式, 故只比对 '=' 之前的名字。
         const std::string_view name = std::string_view{define}.substr(0, define.find('='));
         for (const ShaderKeywordGroupDesc& group : desc.KeywordGroups) {
@@ -913,6 +598,9 @@ bool ValidatePassKeywords(
 }
 
 bool ValidateAsset(const ShaderAssetDesc& desc, ParseScope& scope) noexcept {
+    if (desc.Name.empty()) {
+        return scope.Fail("asset Name must not be empty");
+    }
     if (desc.Passes.empty()) {
         return scope.Fail("asset must declare at least one pass");
     }
@@ -995,289 +683,6 @@ bool ValidateAsset(const ShaderAssetDesc& desc, ParseScope& scope) noexcept {
         }
     }
     scope.SetPass({});
-    return true;
-}
-
-// ============================ JSON -> 结构 ============================
-
-bool ReadBinding(const JsonValue& obj, ParseScope& scope, ShaderBindingDesc& out) noexcept {
-    if (!obj.IsObject()) {
-        return scope.Fail("binding must be an object");
-    }
-    if (!ReadRequiredString(obj, "Name", scope, out.Name)) {
-        return false;
-    }
-    scope.SetBinding(out.Name);
-    if (!ReadRequiredUint32(obj, "Binding", scope, out.Binding)) {
-        return false;
-    }
-    scope.SetBindingIndex(out.Binding);
-    if (!ReadRequiredEnum(obj, "Type", kBindingTypeTable, scope, out.Type) ||
-        !ReadOptionalUint32(obj, "Count", scope, out.Count) ||
-        !ReadRequiredStages(obj, "Stages", scope, out.Stages) ||
-        !ReadOptionalEnum(obj, "Residency", kResidencyTable, scope, out.Residency)) {
-        return false;
-    }
-    if (obj.Has("ImmutableSampler")) {
-        render::SamplerDescriptor sampler{};
-        if (!ReadSampler(obj["ImmutableSampler"], scope, sampler)) {
-            return false;
-        }
-        out.ImmutableSampler = sampler;
-    }
-    return true;
-}
-
-bool ReadBindingGroup(const JsonValue& obj, ParseScope& scope, ShaderBindingGroupDesc& out) noexcept {
-    if (!obj.IsObject()) {
-        return scope.Fail("BindingGroups element must be an object");
-    }
-    if (!ReadRequiredUint32(obj, "Group", scope, out.Group)) {
-        return false;
-    }
-    scope.SetGroup(out.Group);
-    JsonValue bindings = obj["Bindings"];
-    if (!bindings.IsArray()) {
-        return scope.Fail("binding group must have a 'Bindings' array");
-    }
-    const size_t count = bindings.Size();
-    out.Bindings.reserve(count);
-    for (size_t i = 0; i < count; ++i) {
-        ShaderBindingDesc binding{};
-        if (!ReadBinding(bindings.At(i), scope, binding)) {
-            return false;
-        }
-        out.Bindings.push_back(std::move(binding));
-    }
-    scope.ClearBinding();
-    return true;
-}
-
-bool ReadPushConstant(const JsonValue& obj, ParseScope& scope, ShaderPushConstantDesc& out) noexcept {
-    if (!obj.IsObject()) {
-        return scope.Fail("PushConstant must be an object");
-    }
-    if (!ReadRequiredString(obj, "Name", scope, out.Name)) {
-        return false;
-    }
-    scope.SetBinding(out.Name);
-    JsonValue location = obj["Location"];
-    if (!location.IsObject()) {
-        return scope.Fail("PushConstant must have a 'Location' object");
-    }
-    if (!ReadRequiredUint32(location, "Group", scope, out.Location.Group) ||
-        !ReadRequiredUint32(location, "Binding", scope, out.Location.Binding) ||
-        !ReadRequiredUint32(obj, "Size", scope, out.Size) ||
-        !ReadRequiredStages(obj, "Stages", scope, out.Stages)) {
-        return false;
-    }
-    scope.ClearBinding();
-    return true;
-}
-
-bool ReadVertexInput(const JsonValue& obj, ParseScope& scope, ShaderVertexInputDesc& out) noexcept {
-    if (!obj.IsObject()) {
-        return scope.Fail("VertexInput must be an object");
-    }
-    JsonValue buffers = obj["Buffers"];
-    if (!buffers.IsArray()) {
-        return scope.Fail("VertexInput must have a 'Buffers' array");
-    }
-    out.Buffers.reserve(buffers.Size());
-    for (size_t i = 0; i < buffers.Size(); ++i) {
-        JsonValue element = buffers.At(i);
-        if (!element.IsObject()) {
-            return scope.Fail(fmt::format("VertexInput Buffers[{}] must be an object", i));
-        }
-        ShaderVertexBufferDesc buffer{};
-        if (!ReadRequiredUint32(element, "Binding", scope, buffer.Binding) ||
-            !ReadRequiredUint32(element, "ArrayStride", scope, buffer.ArrayStride) ||
-            !ReadOptionalEnum(element, "StepMode", kVertexStepModeTable, scope, buffer.StepMode)) {
-            return false;
-        }
-        out.Buffers.push_back(buffer);
-    }
-    JsonValue attributes = obj["Attributes"];
-    if (!attributes.IsArray()) {
-        return scope.Fail("VertexInput must have an 'Attributes' array");
-    }
-    out.Attributes.reserve(attributes.Size());
-    for (size_t i = 0; i < attributes.Size(); ++i) {
-        JsonValue element = attributes.At(i);
-        if (!element.IsObject()) {
-            return scope.Fail(fmt::format("VertexInput Attributes[{}] must be an object", i));
-        }
-        ShaderVertexAttributeDesc attribute{};
-        if (!ReadRequiredString(element, "Semantic", scope, attribute.Semantic)) {
-            return false;
-        }
-        scope.SetBinding(attribute.Semantic);
-        if (!ReadOptionalUint32(element, "SemanticIndex", scope, attribute.SemanticIndex) ||
-            !ReadRequiredEnum(element, "Format", kVertexFormatTable, scope, attribute.Format) ||
-            !ReadOptionalUint32(element, "BufferBinding", scope, attribute.BufferBinding) ||
-            !ReadOptionalUint32(element, "Offset", scope, attribute.Offset)) {
-            return false;
-        }
-        if (element.Has("Location")) {
-            uint32_t location = 0;
-            if (!ReadRequiredUint32(element, "Location", scope, location)) {
-                return false;
-            }
-            attribute.Location = location;
-        }
-        out.Attributes.push_back(std::move(attribute));
-    }
-    scope.ClearBinding();
-    return true;
-}
-
-bool ReadBakeSet(const JsonValue& obj, ParseScope& scope, ShaderBakeSetDesc& out) noexcept;
-
-bool ReadPass(const JsonValue& obj, ParseScope& scope, ShaderPassDesc& out) noexcept {
-    if (!obj.IsObject()) {
-        return scope.Fail("Passes element must be an object");
-    }
-    if (!ReadRequiredString(obj, "Name", scope, out.Name)) {
-        return false;
-    }
-    scope.SetPass(out.Name);
-    if (!ReadOptionalString(obj, "Source", scope, out.Source)) {
-        return false;
-    }
-
-    JsonValue stages = obj["Stages"];
-    if (!stages.IsArray() || stages.Size() == 0) {
-        return scope.Fail("pass must have a non-empty 'Stages' array");
-    }
-    out.Stages.reserve(stages.Size());
-    for (size_t i = 0; i < stages.Size(); ++i) {
-        JsonValue element = stages.At(i);
-        if (!element.IsObject()) {
-            return scope.Fail(fmt::format("pass Stages[{}] must be an object", i));
-        }
-        ShaderStageDesc stage{};
-        if (!ReadRequiredEnum(element, "Stage", kShaderStageTable, scope, stage.Stage)) {
-            return false;
-        }
-        scope.SetStage(stage.Stage);
-        if (!ReadRequiredString(element, "EntryPoint", scope, stage.EntryPoint)) {
-            return false;
-        }
-        scope.SetStage(std::nullopt);
-        out.Stages.push_back(std::move(stage));
-    }
-
-    if (!ReadOptionalEnum(obj, "ShaderModel", kShaderModelTable, scope, out.ShaderModel) ||
-        !ReadStringArray(obj, "Defines", scope, false, out.Defines) ||
-        !ReadStringArray(obj, "KeywordGroups", scope, false, out.KeywordGroups) ||
-        !ReadOptionalBool(obj, "IsOptimize", scope, out.IsOptimize) ||
-        !ReadOptionalBool(obj, "EnableUnbounded", scope, out.EnableUnbounded)) {
-        return false;
-    }
-
-    if (obj.Has("BindingGroups")) {
-        JsonValue groups = obj["BindingGroups"];
-        if (!groups.IsArray()) {
-            return scope.Fail("'BindingGroups' must be an array");
-        }
-        out.BindingGroups.reserve(groups.Size());
-        for (size_t i = 0; i < groups.Size(); ++i) {
-            ShaderBindingGroupDesc group{};
-            if (!ReadBindingGroup(groups.At(i), scope, group)) {
-                return false;
-            }
-            out.BindingGroups.push_back(std::move(group));
-        }
-        scope.SetGroup(std::nullopt);
-    }
-
-    if (obj.Has("PushConstant")) {
-        ShaderPushConstantDesc pc{};
-        if (!ReadPushConstant(obj["PushConstant"], scope, pc)) {
-            return false;
-        }
-        out.PushConstant = std::move(pc);
-    }
-
-    if (obj.Has("VertexInput")) {
-        ShaderVertexInputDesc vi{};
-        if (!ReadVertexInput(obj["VertexInput"], scope, vi)) {
-            return false;
-        }
-        out.VertexInput = std::move(vi);
-    }
-
-    if (obj.Has("BakeVariants")) {
-        if (!ReadBakeSet(obj["BakeVariants"], scope, out.BakeVariants)) {
-            return false;
-        }
-    }
-    return true;
-}
-
-bool ReadBakeSet(const JsonValue& obj, ParseScope& scope, ShaderBakeSetDesc& out) noexcept {
-    if (!obj.IsObject()) {
-        return scope.Fail("'BakeVariants' must be an object");
-    }
-    if (obj.Has("Rules")) {
-        JsonValue rules = obj["Rules"];
-        if (!rules.IsArray()) {
-            return scope.Fail("BakeVariants 'Rules' must be an array");
-        }
-        out.Rules.reserve(rules.Size());
-        for (size_t i = 0; i < rules.Size(); ++i) {
-            JsonValue element = rules.At(i);
-            if (!element.IsObject()) {
-                return scope.Fail(fmt::format("BakeVariants Rules[{}] must be an object", i));
-            }
-            ShaderBakeRuleDesc rule{};
-            if (!ReadStringArray(element, "Expand", scope, false, rule.Expand) ||
-                !ReadStringArray(element, "Combination", scope, false, rule.Combination)) {
-                return false;
-            }
-            out.Rules.push_back(std::move(rule));
-        }
-    }
-    if (obj.Has("Skip")) {
-        JsonValue skip = obj["Skip"];
-        if (!skip.IsArray()) {
-            return scope.Fail("BakeVariants 'Skip' must be an array");
-        }
-        out.Skip.reserve(skip.Size());
-        for (size_t i = 0; i < skip.Size(); ++i) {
-            JsonValue element = skip.At(i);
-            if (!element.IsArray()) {
-                return scope.Fail(fmt::format("BakeVariants Skip[{}] must be an array of keywords", i));
-            }
-            vector<string> keywords;
-            keywords.reserve(element.Size());
-            for (size_t j = 0; j < element.Size(); ++j) {
-                JsonValue keyword = element.At(j);
-                if (!keyword.IsString()) {
-                    return scope.Fail(fmt::format("BakeVariants Skip[{}][{}] must be a string", i, j));
-                }
-                string text{keyword.AsString()};
-                if (text.empty()) {
-                    return scope.Fail(fmt::format("BakeVariants Skip[{}][{}] must not be empty", i, j));
-                }
-                keywords.push_back(std::move(text));
-            }
-            out.Skip.push_back(std::move(keywords));
-        }
-    }
-    return true;
-}
-
-bool ReadKeywordGroup(const JsonValue& obj, ParseScope& scope, ShaderKeywordGroupDesc& out) noexcept {
-    if (!obj.IsObject()) {
-        return scope.Fail("KeywordGroups element must be an object");
-    }
-    if (!ReadRequiredString(obj, "Name", scope, out.Name) ||
-        !ReadStringArray(obj, "Keywords", scope, true, out.Keywords) ||
-        !ReadOptionalBool(obj, "IsOptional", scope, out.IsOptional) ||
-        !ReadOptionalStages(obj, "Stages", scope, out.Stages)) {
-        return false;
-    }
     return true;
 }
 
@@ -1409,8 +814,8 @@ bool MatchReflectedBindings(
             return scope.Fail(fmt::format(
                 "binding type mismatch for '{}': manifest {} vs reflection {}",
                 declared.Name,
-                NameOfEnum(kBindingTypeTable, declared.Type),
-                NameOfEnum(kBindingTypeTable, item.Type)));
+                EnumNameOr(declared.Type, "UNKNOWN"),
+                EnumNameOr(item.Type, "UNKNOWN")));
         }
         // 反射 Count 为 0 表示 unbounded, manifest 的容量即为权威值。
         if (item.Count != 0 && item.Count != declared.Count) {
@@ -1474,163 +879,6 @@ bool IsSystemSemantic(std::string_view baseName) noexcept {
            (baseName[0] == 'S' || baseName[0] == 's') &&
            (baseName[1] == 'V' || baseName[1] == 'v') &&
            baseName[2] == '_';
-}
-
-// ============================ 结构 -> JSON ============================
-
-/// 把 ShaderStages 写成字符串数组。
-bool WriteStages(JsonRef parent, std::string_view key, render::ShaderStages stages) noexcept {
-    JsonRef array = parent.AddArray(key);
-    if (!array.IsValid()) {
-        return false;
-    }
-    for (const EnumEntry<render::ShaderStage>& entry : kShaderStageTable) {
-        if (stages.HasFlag(entry.Value)) {
-            array.AppendString(entry.Name);
-        }
-    }
-    return true;
-}
-
-void WriteSampler(JsonRef parent, const render::SamplerDescriptor& sampler) noexcept {
-    JsonRef obj = parent.AddObject("ImmutableSampler");
-    if (!obj.IsValid()) {
-        return;
-    }
-    obj.AddString("AddressS", NameOfEnum(kAddressModeTable, sampler.AddressS));
-    obj.AddString("AddressT", NameOfEnum(kAddressModeTable, sampler.AddressT));
-    obj.AddString("AddressR", NameOfEnum(kAddressModeTable, sampler.AddressR));
-    obj.AddString("MinFilter", NameOfEnum(kFilterModeTable, sampler.MinFilter));
-    obj.AddString("MagFilter", NameOfEnum(kFilterModeTable, sampler.MagFilter));
-    obj.AddString("MipmapFilter", NameOfEnum(kFilterModeTable, sampler.MipmapFilter));
-    obj.AddDouble("LodMin", sampler.LodMin);
-    obj.AddDouble("LodMax", sampler.LodMax);
-    if (sampler.Compare.has_value()) {
-        obj.AddString("Compare", NameOfEnum(kCompareFunctionTable, sampler.Compare.value()));
-    }
-    obj.AddUint("AnisotropyClamp", sampler.AnisotropyClamp);
-}
-
-void WriteBakeSet(JsonRef parent, const ShaderBakeSetDesc& bake) noexcept {
-    JsonRef obj = parent.AddObject("BakeVariants");
-    if (!obj.IsValid()) {
-        return;
-    }
-    if (!bake.Rules.empty()) {
-        JsonRef rules = obj.AddArray("Rules");
-        for (const ShaderBakeRuleDesc& rule : bake.Rules) {
-            JsonRef item = rules.AppendObject();
-            if (!rule.Expand.empty()) {
-                JsonRef expand = item.AddArray("Expand");
-                for (const string& name : rule.Expand) {
-                    expand.AppendString(name);
-                }
-            }
-            if (!rule.Combination.empty()) {
-                JsonRef combination = item.AddArray("Combination");
-                for (const string& keyword : rule.Combination) {
-                    combination.AppendString(keyword);
-                }
-            }
-        }
-    }
-    if (!bake.Skip.empty()) {
-        JsonRef skip = obj.AddArray("Skip");
-        for (const vector<string>& entry : bake.Skip) {
-            JsonRef item = skip.AppendArray();
-            for (const string& keyword : entry) {
-                item.AppendString(keyword);
-            }
-        }
-    }
-}
-
-void WritePass(JsonRef array, const ShaderPassDesc& pass) noexcept {
-    JsonRef obj = array.AppendObject();
-    if (!obj.IsValid()) {
-        return;
-    }
-    obj.AddString("Name", pass.Name);
-    if (!pass.Source.empty()) {
-        obj.AddString("Source", pass.Source);
-    }
-    JsonRef stages = obj.AddArray("Stages");
-    for (const ShaderStageDesc& stage : pass.Stages) {
-        JsonRef item = stages.AppendObject();
-        item.AddString("Stage", NameOfEnum(kShaderStageTable, stage.Stage));
-        item.AddString("EntryPoint", stage.EntryPoint);
-    }
-    obj.AddString("ShaderModel", NameOfEnum(kShaderModelTable, pass.ShaderModel));
-    obj.AddBool("IsOptimize", pass.IsOptimize);
-    obj.AddBool("EnableUnbounded", pass.EnableUnbounded);
-    if (!pass.Defines.empty()) {
-        JsonRef defines = obj.AddArray("Defines");
-        for (const string& define : pass.Defines) {
-            defines.AppendString(define);
-        }
-    }
-    if (!pass.KeywordGroups.empty()) {
-        JsonRef groups = obj.AddArray("KeywordGroups");
-        for (const string& name : pass.KeywordGroups) {
-            groups.AppendString(name);
-        }
-    }
-    if (!pass.BakeVariants.IsEmpty() || !pass.BakeVariants.Skip.empty()) {
-        WriteBakeSet(obj, pass.BakeVariants);
-    }
-    if (pass.PushConstant.has_value()) {
-        const ShaderPushConstantDesc& pc = pass.PushConstant.value();
-        JsonRef pcObj = obj.AddObject("PushConstant");
-        pcObj.AddString("Name", pc.Name);
-        JsonRef location = pcObj.AddObject("Location");
-        location.AddUint("Group", pc.Location.Group);
-        location.AddUint("Binding", pc.Location.Binding);
-        pcObj.AddUint("Size", pc.Size);
-        WriteStages(pcObj, "Stages", pc.Stages);
-    }
-    if (!pass.BindingGroups.empty()) {
-        JsonRef groups = obj.AddArray("BindingGroups");
-        for (const ShaderBindingGroupDesc& group : pass.BindingGroups) {
-            JsonRef groupObj = groups.AppendObject();
-            groupObj.AddUint("Group", group.Group);
-            JsonRef bindings = groupObj.AddArray("Bindings");
-            for (const ShaderBindingDesc& binding : group.Bindings) {
-                JsonRef bindingObj = bindings.AppendObject();
-                bindingObj.AddString("Name", binding.Name);
-                bindingObj.AddUint("Binding", binding.Binding);
-                bindingObj.AddString("Type", NameOfEnum(kBindingTypeTable, binding.Type));
-                bindingObj.AddUint("Count", binding.Count);
-                WriteStages(bindingObj, "Stages", binding.Stages);
-                bindingObj.AddString("Residency", NameOfEnum(kResidencyTable, binding.Residency));
-                if (binding.ImmutableSampler.has_value()) {
-                    WriteSampler(bindingObj, binding.ImmutableSampler.value());
-                }
-            }
-        }
-    }
-    if (pass.VertexInput.has_value()) {
-        const ShaderVertexInputDesc& vi = pass.VertexInput.value();
-        JsonRef viObj = obj.AddObject("VertexInput");
-        JsonRef buffers = viObj.AddArray("Buffers");
-        for (const ShaderVertexBufferDesc& buffer : vi.Buffers) {
-            JsonRef item = buffers.AppendObject();
-            item.AddUint("Binding", buffer.Binding);
-            item.AddUint("ArrayStride", buffer.ArrayStride);
-            item.AddString("StepMode", NameOfEnum(kVertexStepModeTable, buffer.StepMode));
-        }
-        JsonRef attributes = viObj.AddArray("Attributes");
-        for (const ShaderVertexAttributeDesc& attribute : vi.Attributes) {
-            JsonRef item = attributes.AppendObject();
-            item.AddString("Semantic", attribute.Semantic);
-            item.AddUint("SemanticIndex", attribute.SemanticIndex);
-            item.AddString("Format", NameOfEnum(kVertexFormatTable, attribute.Format));
-            item.AddUint("BufferBinding", attribute.BufferBinding);
-            item.AddUint("Offset", attribute.Offset);
-            if (attribute.Location.has_value()) {
-                item.AddUint("Location", attribute.Location.value());
-            }
-        }
-    }
 }
 
 // ============================ 哈希 ============================
@@ -1816,14 +1064,6 @@ bool IsPathUnderRoot(const std::filesystem::path& root, const std::filesystem::p
 
 // ============================ 产物读写辅助 ============================
 
-std::optional<ShaderHash> ReadHash(const JsonValue& obj, std::string_view key) noexcept {
-    JsonValue value = obj[key];
-    if (!value.IsString()) {
-        return std::nullopt;
-    }
-    return ShaderHash::FromHex(value.AsString());
-}
-
 /// 本次构建钉住的 DXC 版本。由 CMake 无条件注入 (与是否编入 JIT 无关) ——
 /// 关 JIT 的发布包必须与 cook 机算出同一个 toolchain hash, 否则产物全部判为过期。
 #if defined(RADRAY_DXC_VERSION)
@@ -1833,6 +1073,522 @@ constexpr std::string_view kDxcVersion = RADRAY_DXC_VERSION;
 #endif
 
 }  // namespace
+
+// ============================ JSON 定制点 ============================
+
+bool JsonSerializer<render::ShaderBindingLocation>::Write(
+    JsonWriteContext& context,
+    const render::ShaderBindingLocation& value) noexcept {
+    using value_type = render::ShaderBindingLocation;
+    return SerializeJsonObject(
+        context,
+        value,
+        JsonMember{"Group", &value_type::Group},
+        JsonMember{"Binding", &value_type::Binding});
+}
+
+bool JsonDeserializer<render::ShaderBindingLocation>::Read(
+    const JsonValue& json,
+    render::ShaderBindingLocation& value) noexcept {
+    using value_type = render::ShaderBindingLocation;
+    return DeserializeJsonObject(
+        json,
+        value,
+        JsonMember{"Group", &value_type::Group},
+        JsonMember{"Binding", &value_type::Binding});
+}
+
+bool JsonSerializer<render::SamplerDescriptor>::Write(
+    JsonWriteContext& context,
+    const render::SamplerDescriptor& value) noexcept {
+    JsonObjectWriter object = context.BeginObject();
+    return object.IsValid() &&
+           object.Member("AddressS", value.AddressS) &&
+           object.Member("AddressT", value.AddressT) &&
+           object.Member("AddressR", value.AddressR) &&
+           object.Member("MinFilter", value.MinFilter) &&
+           object.Member("MagFilter", value.MagFilter) &&
+           object.Member("MipmapFilter", value.MipmapFilter) &&
+           object.Member("LodMin", value.LodMin) &&
+           object.Member("LodMax", value.LodMax) &&
+           object.OptionalMember("Compare", value.Compare) &&
+           object.Member("AnisotropyClamp", value.AnisotropyClamp);
+}
+
+bool JsonDeserializer<render::SamplerDescriptor>::Read(
+    const JsonValue& json,
+    render::SamplerDescriptor& value) noexcept {
+    JsonObjectReader object{json};
+    render::SamplerDescriptor decoded{};
+    if (!object.IsValid() ||
+        !object.Member("AddressS", decoded.AddressS) ||
+        !object.Member("AddressT", decoded.AddressT) ||
+        !object.Member("AddressR", decoded.AddressR) ||
+        !object.Member("MinFilter", decoded.MinFilter) ||
+        !object.Member("MagFilter", decoded.MagFilter) ||
+        !object.Member("MipmapFilter", decoded.MipmapFilter) ||
+        !object.MemberIfPresent("LodMin", decoded.LodMin) ||
+        !object.MemberIfPresent("LodMax", decoded.LodMax) ||
+        !object.OptionalMember("Compare", decoded.Compare) ||
+        !object.MemberIfPresent("AnisotropyClamp", decoded.AnisotropyClamp)) {
+        return false;
+    }
+    value = decoded;
+    return true;
+}
+
+bool JsonSerializer<ShaderBindingDesc>::Write(
+    JsonWriteContext& context,
+    const ShaderBindingDesc& value) noexcept {
+    JsonObjectWriter object = context.BeginObject();
+    return object.IsValid() &&
+           object.Member("Name", value.Name) &&
+           object.Member("Binding", value.Binding) &&
+           object.Member("Type", value.Type) &&
+           object.Member("Count", value.Count) &&
+           object.Member("Stages", value.Stages) &&
+           object.Member("Residency", value.Residency) &&
+           object.OptionalMember("ImmutableSampler", value.ImmutableSampler);
+}
+
+bool JsonDeserializer<ShaderBindingDesc>::Read(
+    const JsonValue& json,
+    ShaderBindingDesc& value) noexcept {
+    JsonObjectReader object{json};
+    ShaderBindingDesc decoded{};
+    if (!object.IsValid() ||
+        !object.Member("Name", decoded.Name) ||
+        !object.Member("Binding", decoded.Binding) ||
+        !object.Member("Type", decoded.Type) ||
+        !object.MemberIfPresent("Count", decoded.Count) ||
+        !object.Member("Stages", decoded.Stages) ||
+        !object.MemberIfPresent("Residency", decoded.Residency) ||
+        !object.OptionalMember("ImmutableSampler", decoded.ImmutableSampler)) {
+        return false;
+    }
+    value = std::move(decoded);
+    return true;
+}
+
+bool JsonSerializer<ShaderBindingGroupDesc>::Write(
+    JsonWriteContext& context,
+    const ShaderBindingGroupDesc& value) noexcept {
+    using value_type = ShaderBindingGroupDesc;
+    return SerializeJsonObject(
+        context,
+        value,
+        JsonMember{"Group", &value_type::Group},
+        JsonMember{"Bindings", &value_type::Bindings});
+}
+
+bool JsonDeserializer<ShaderBindingGroupDesc>::Read(
+    const JsonValue& json,
+    ShaderBindingGroupDesc& value) noexcept {
+    using value_type = ShaderBindingGroupDesc;
+    return DeserializeJsonObject(
+        json,
+        value,
+        JsonMember{"Group", &value_type::Group},
+        JsonMember{"Bindings", &value_type::Bindings});
+}
+
+bool JsonSerializer<ShaderPushConstantDesc>::Write(
+    JsonWriteContext& context,
+    const ShaderPushConstantDesc& value) noexcept {
+    using value_type = ShaderPushConstantDesc;
+    return SerializeJsonObject(
+        context,
+        value,
+        JsonMember{"Name", &value_type::Name},
+        JsonMember{"Location", &value_type::Location},
+        JsonMember{"Size", &value_type::Size},
+        JsonMember{"Stages", &value_type::Stages});
+}
+
+bool JsonDeserializer<ShaderPushConstantDesc>::Read(
+    const JsonValue& json,
+    ShaderPushConstantDesc& value) noexcept {
+    using value_type = ShaderPushConstantDesc;
+    return DeserializeJsonObject(
+        json,
+        value,
+        JsonMember{"Name", &value_type::Name},
+        JsonMember{"Location", &value_type::Location},
+        JsonMember{"Size", &value_type::Size},
+        JsonMember{"Stages", &value_type::Stages});
+}
+
+bool JsonSerializer<ShaderVertexAttributeDesc>::Write(
+    JsonWriteContext& context,
+    const ShaderVertexAttributeDesc& value) noexcept {
+    JsonObjectWriter object = context.BeginObject();
+    return object.IsValid() &&
+           object.Member("Semantic", value.Semantic) &&
+           object.Member("SemanticIndex", value.SemanticIndex) &&
+           object.Member("Format", value.Format) &&
+           object.Member("BufferBinding", value.BufferBinding) &&
+           object.Member("Offset", value.Offset) &&
+           object.OptionalMember("Location", value.Location);
+}
+
+bool JsonDeserializer<ShaderVertexAttributeDesc>::Read(
+    const JsonValue& json,
+    ShaderVertexAttributeDesc& value) noexcept {
+    JsonObjectReader object{json};
+    ShaderVertexAttributeDesc decoded{};
+    if (!object.IsValid() ||
+        !object.Member("Semantic", decoded.Semantic) ||
+        !object.MemberIfPresent("SemanticIndex", decoded.SemanticIndex) ||
+        !object.Member("Format", decoded.Format) ||
+        !object.MemberIfPresent("BufferBinding", decoded.BufferBinding) ||
+        !object.MemberIfPresent("Offset", decoded.Offset) ||
+        !object.OptionalMember("Location", decoded.Location)) {
+        return false;
+    }
+    value = std::move(decoded);
+    return true;
+}
+
+bool JsonSerializer<ShaderVertexBufferDesc>::Write(
+    JsonWriteContext& context,
+    const ShaderVertexBufferDesc& value) noexcept {
+    using value_type = ShaderVertexBufferDesc;
+    return SerializeJsonObject(
+        context,
+        value,
+        JsonMember{"Binding", &value_type::Binding},
+        JsonMember{"ArrayStride", &value_type::ArrayStride},
+        JsonMember{"StepMode", &value_type::StepMode});
+}
+
+bool JsonDeserializer<ShaderVertexBufferDesc>::Read(
+    const JsonValue& json,
+    ShaderVertexBufferDesc& value) noexcept {
+    JsonObjectReader object{json};
+    ShaderVertexBufferDesc decoded{};
+    if (!object.IsValid() ||
+        !object.Member("Binding", decoded.Binding) ||
+        !object.Member("ArrayStride", decoded.ArrayStride) ||
+        !object.MemberIfPresent("StepMode", decoded.StepMode)) {
+        return false;
+    }
+    value = decoded;
+    return true;
+}
+
+bool JsonSerializer<ShaderVertexInputDesc>::Write(
+    JsonWriteContext& context,
+    const ShaderVertexInputDesc& value) noexcept {
+    using value_type = ShaderVertexInputDesc;
+    return SerializeJsonObject(
+        context,
+        value,
+        JsonMember{"Buffers", &value_type::Buffers},
+        JsonMember{"Attributes", &value_type::Attributes});
+}
+
+bool JsonDeserializer<ShaderVertexInputDesc>::Read(
+    const JsonValue& json,
+    ShaderVertexInputDesc& value) noexcept {
+    using value_type = ShaderVertexInputDesc;
+    return DeserializeJsonObject(
+        json,
+        value,
+        JsonMember{"Buffers", &value_type::Buffers},
+        JsonMember{"Attributes", &value_type::Attributes});
+}
+
+bool JsonSerializer<ShaderStageDesc>::Write(
+    JsonWriteContext& context,
+    const ShaderStageDesc& value) noexcept {
+    using value_type = ShaderStageDesc;
+    return SerializeJsonObject(
+        context,
+        value,
+        JsonMember{"Stage", &value_type::Stage},
+        JsonMember{"EntryPoint", &value_type::EntryPoint});
+}
+
+bool JsonDeserializer<ShaderStageDesc>::Read(
+    const JsonValue& json,
+    ShaderStageDesc& value) noexcept {
+    using value_type = ShaderStageDesc;
+    return DeserializeJsonObject(
+        json,
+        value,
+        JsonMember{"Stage", &value_type::Stage},
+        JsonMember{"EntryPoint", &value_type::EntryPoint});
+}
+
+bool JsonSerializer<ShaderKeywordGroupDesc>::Write(
+    JsonWriteContext& context,
+    const ShaderKeywordGroupDesc& value) noexcept {
+    using value_type = ShaderKeywordGroupDesc;
+    return SerializeJsonObject(
+        context,
+        value,
+        JsonMember{"Name", &value_type::Name},
+        JsonMember{"Keywords", &value_type::Keywords},
+        JsonMember{"IsOptional", &value_type::IsOptional},
+        JsonMember{"Stages", &value_type::Stages});
+}
+
+bool JsonDeserializer<ShaderKeywordGroupDesc>::Read(
+    const JsonValue& json,
+    ShaderKeywordGroupDesc& value) noexcept {
+    JsonObjectReader object{json};
+    ShaderKeywordGroupDesc decoded{};
+    if (!object.IsValid() ||
+        !object.Member("Name", decoded.Name) ||
+        !object.MemberIfPresent("Keywords", decoded.Keywords) ||
+        !object.MemberIfPresent("IsOptional", decoded.IsOptional) ||
+        !object.MemberIfPresent("Stages", decoded.Stages)) {
+        return false;
+    }
+    value = std::move(decoded);
+    return true;
+}
+
+bool JsonSerializer<ShaderBakeRuleDesc>::Write(
+    JsonWriteContext& context,
+    const ShaderBakeRuleDesc& value) noexcept {
+    JsonObjectWriter object = context.BeginObject();
+    return object.IsValid() &&
+           (value.Expand.empty() || object.Member("Expand", value.Expand)) &&
+           (value.Combination.empty() || object.Member("Combination", value.Combination));
+}
+
+bool JsonDeserializer<ShaderBakeRuleDesc>::Read(
+    const JsonValue& json,
+    ShaderBakeRuleDesc& value) noexcept {
+    JsonObjectReader object{json};
+    ShaderBakeRuleDesc decoded{};
+    if (!object.IsValid() ||
+        !object.MemberIfPresent("Expand", decoded.Expand) ||
+        !object.MemberIfPresent("Combination", decoded.Combination)) {
+        return false;
+    }
+    value = std::move(decoded);
+    return true;
+}
+
+bool JsonSerializer<ShaderBakeSetDesc>::Write(
+    JsonWriteContext& context,
+    const ShaderBakeSetDesc& value) noexcept {
+    JsonObjectWriter object = context.BeginObject();
+    return object.IsValid() &&
+           (value.Rules.empty() || object.Member("Rules", value.Rules)) &&
+           (value.Skip.empty() || object.Member("Skip", value.Skip));
+}
+
+bool JsonDeserializer<ShaderBakeSetDesc>::Read(
+    const JsonValue& json,
+    ShaderBakeSetDesc& value) noexcept {
+    JsonObjectReader object{json};
+    ShaderBakeSetDesc decoded{};
+    if (!object.IsValid() ||
+        !object.MemberIfPresent("Rules", decoded.Rules) ||
+        !object.MemberIfPresent("Skip", decoded.Skip)) {
+        return false;
+    }
+    value = std::move(decoded);
+    return true;
+}
+
+bool JsonSerializer<ShaderPassDesc>::Write(
+    JsonWriteContext& context,
+    const ShaderPassDesc& value) noexcept {
+    JsonObjectWriter object = context.BeginObject();
+    if (!object.IsValid() ||
+        !object.Member("Name", value.Name) ||
+        (!value.Source.empty() && !object.Member("Source", value.Source)) ||
+        !object.Member("Stages", value.Stages) ||
+        !object.Member("ShaderModel", value.ShaderModel) ||
+        !object.Member("IsOptimize", value.IsOptimize) ||
+        !object.Member("EnableUnbounded", value.EnableUnbounded) ||
+        (!value.Defines.empty() && !object.Member("Defines", value.Defines)) ||
+        (!value.KeywordGroups.empty() && !object.Member("KeywordGroups", value.KeywordGroups)) ||
+        ((!value.BakeVariants.IsEmpty() || !value.BakeVariants.Skip.empty()) &&
+         !object.Member("BakeVariants", value.BakeVariants)) ||
+        !object.OptionalMember("PushConstant", value.PushConstant) ||
+        (!value.BindingGroups.empty() && !object.Member("BindingGroups", value.BindingGroups)) ||
+        !object.OptionalMember("VertexInput", value.VertexInput)) {
+        return false;
+    }
+    return true;
+}
+
+bool JsonDeserializer<ShaderPassDesc>::Read(
+    const JsonValue& json,
+    ShaderPassDesc& value) noexcept {
+    JsonObjectReader object{json};
+    ShaderPassDesc decoded{};
+    if (!object.IsValid() ||
+        !object.Member("Name", decoded.Name) ||
+        !object.MemberIfPresent("Source", decoded.Source) ||
+        !object.Member("Stages", decoded.Stages) ||
+        !object.MemberIfPresent("ShaderModel", decoded.ShaderModel) ||
+        !object.MemberIfPresent("Defines", decoded.Defines) ||
+        !object.MemberIfPresent("KeywordGroups", decoded.KeywordGroups) ||
+        !object.MemberIfPresent("IsOptimize", decoded.IsOptimize) ||
+        !object.MemberIfPresent("EnableUnbounded", decoded.EnableUnbounded) ||
+        !object.MemberIfPresent("BakeVariants", decoded.BakeVariants) ||
+        !object.MemberIfPresent("BindingGroups", decoded.BindingGroups) ||
+        !object.OptionalMember("PushConstant", decoded.PushConstant) ||
+        !object.OptionalMember("VertexInput", decoded.VertexInput)) {
+        return false;
+    }
+    value = std::move(decoded);
+    return true;
+}
+
+bool JsonSerializer<ShaderAssetDesc>::Write(
+    JsonWriteContext& context,
+    const ShaderAssetDesc& value) noexcept {
+    JsonObjectWriter object = context.BeginObject();
+    if (!object.IsValid() ||
+        !object.Member("FormatVersion", kShaderAssetFormatVersion) ||
+        !object.Member("Name", value.Name) ||
+        (!value.Source.empty() && !object.Member("Source", value.Source)) ||
+        (!value.KeywordGroups.empty() && !object.Member("KeywordGroups", value.KeywordGroups)) ||
+        ((!value.BakeVariants.IsEmpty() || !value.BakeVariants.Skip.empty()) &&
+         !object.Member("BakeVariants", value.BakeVariants)) ||
+        !object.Member("Passes", value.Passes)) {
+        return false;
+    }
+    return true;
+}
+
+bool JsonDeserializer<ShaderAssetDesc>::Read(
+    const JsonValue& json,
+    ShaderAssetDesc& value) noexcept {
+    JsonObjectReader object{json};
+    uint32_t formatVersion = 0;
+    ShaderAssetDesc decoded{};
+    if (!object.IsValid() ||
+        !object.Member("FormatVersion", formatVersion) ||
+        formatVersion != kShaderAssetFormatVersion ||
+        !object.Member("Name", decoded.Name) ||
+        !object.MemberIfPresent("Source", decoded.Source) ||
+        !object.MemberIfPresent("KeywordGroups", decoded.KeywordGroups) ||
+        !object.MemberIfPresent("BakeVariants", decoded.BakeVariants) ||
+        !object.Member("Passes", decoded.Passes)) {
+        return false;
+    }
+    value = std::move(decoded);
+    return true;
+}
+
+bool JsonSerializer<ShaderHash>::Write(
+    JsonWriteContext& context,
+    const ShaderHash& value) noexcept {
+    return context.String(value.ToHex());
+}
+
+bool JsonDeserializer<ShaderHash>::Read(
+    const JsonValue& json,
+    ShaderHash& value) noexcept {
+    if (!json.IsString()) {
+        return false;
+    }
+    const std::optional<ShaderHash> decoded = ShaderHash::FromHex(json.AsString());
+    if (!decoded.has_value()) {
+        return false;
+    }
+    value = decoded.value();
+    return true;
+}
+
+bool JsonSerializer<ShaderArtifactEntry>::Write(
+    JsonWriteContext& context,
+    const ShaderArtifactEntry& value) noexcept {
+    JsonObjectWriter object = context.BeginObject();
+    return object.IsValid() &&
+           object.Member("Key", value.Key) &&
+           object.Member("PassName", value.PassName) &&
+           object.Member("Source", value.Source) &&
+           object.Member("Stage", value.Stage) &&
+           object.Member("EntryPoint", value.EntryPoint) &&
+           object.Member("Category", value.Category) &&
+           object.Member("BlobPath", value.BlobPath) &&
+           object.Member("BytecodeHash", value.BytecodeHash) &&
+           object.Member("BytecodeSize", value.BytecodeSize) &&
+           (value.Keywords.empty() || object.Member("Keywords", value.Keywords));
+}
+
+bool JsonDeserializer<ShaderArtifactEntry>::Read(
+    const JsonValue& json,
+    ShaderArtifactEntry& value) noexcept {
+    JsonObjectReader object{json};
+    ShaderArtifactEntry decoded{};
+    if (!object.IsValid() ||
+        !object.Member("Key", decoded.Key) ||
+        !object.Member("PassName", decoded.PassName) ||
+        !object.Member("Source", decoded.Source) ||
+        !object.Member("Stage", decoded.Stage) ||
+        !object.Member("EntryPoint", decoded.EntryPoint) ||
+        !object.Member("Category", decoded.Category) ||
+        !object.Member("BlobPath", decoded.BlobPath) ||
+        !object.Member("BytecodeHash", decoded.BytecodeHash) ||
+        !object.Member("BytecodeSize", decoded.BytecodeSize) ||
+        !object.MemberIfPresent("Keywords", decoded.Keywords)) {
+        return false;
+    }
+    value = std::move(decoded);
+    return true;
+}
+
+bool JsonSerializer<ShaderArtifactSource>::Write(
+    JsonWriteContext& context,
+    const ShaderArtifactSource& value) noexcept {
+    using value_type = ShaderArtifactSource;
+    return SerializeJsonObject(
+        context,
+        value,
+        JsonMember{"Path", &value_type::Path},
+        JsonMember{"Identity", &value_type::Identity});
+}
+
+bool JsonDeserializer<ShaderArtifactSource>::Read(
+    const JsonValue& json,
+    ShaderArtifactSource& value) noexcept {
+    using value_type = ShaderArtifactSource;
+    return DeserializeJsonObject(
+        json,
+        value,
+        JsonMember{"Path", &value_type::Path},
+        JsonMember{"Identity", &value_type::Identity});
+}
+
+bool JsonSerializer<ShaderArtifactIndex>::Write(
+    JsonWriteContext& context,
+    const ShaderArtifactIndex& value) noexcept {
+    JsonObjectWriter object = context.BeginObject();
+    return object.IsValid() &&
+           object.Member("FormatVersion", kShaderArtifactFormatVersion) &&
+           object.Member("AssetName", value.AssetName) &&
+           object.Member("ToolchainHash", value.ToolchainHash) &&
+           object.Member("Sources", value.Sources) &&
+           object.Member("Entries", value.Entries);
+}
+
+bool JsonDeserializer<ShaderArtifactIndex>::Read(
+    const JsonValue& json,
+    ShaderArtifactIndex& value) noexcept {
+    JsonObjectReader object{json};
+    ShaderArtifactIndex decoded{};
+    if (!object.IsValid() ||
+        !object.Member("FormatVersion", decoded.FormatVersion) ||
+        decoded.FormatVersion != kShaderArtifactFormatVersion ||
+        !object.Member("AssetName", decoded.AssetName) ||
+        !object.Member("ToolchainHash", decoded.ToolchainHash) ||
+        !object.Member("Sources", decoded.Sources) ||
+        !object.Member("Entries", decoded.Entries)) {
+        return false;
+    }
+    value = std::move(decoded);
+    return true;
+}
 
 // ============================ 数据类型成员 ============================
 
@@ -2674,59 +2430,68 @@ std::optional<ShaderAssetDesc> ParseShaderAssetDesc(
         scope.Fail("shader asset root must be an object");
         return std::nullopt;
     }
-    JsonValue version = root["FormatVersion"];
-    if (!version.IsNumber()) {
+    JsonValue versionJson = root["FormatVersion"];
+    uint32_t formatVersion = 0;
+    if (!versionJson.IsValid() || !DeserializeJsonValue(versionJson, formatVersion)) {
         scope.Fail("shader asset is missing 'FormatVersion'");
         return std::nullopt;
     }
-    if (version.AsUint() != kShaderAssetFormatVersion) {
+    if (formatVersion != kShaderAssetFormatVersion) {
         scope.Fail(fmt::format(
             "shader asset FormatVersion {} != expected {}",
-            version.AsUint(),
+            formatVersion,
             kShaderAssetFormatVersion));
         return std::nullopt;
     }
 
     ShaderAssetDesc desc{};
-    if (!ReadRequiredString(root, "Name", scope, desc.Name) ||
-        !ReadOptionalString(root, "Source", scope, desc.Source)) {
-        return std::nullopt;
-    }
-
-    if (root.Has("KeywordGroups")) {
-        JsonValue groups = root["KeywordGroups"];
-        if (!groups.IsArray()) {
-            scope.Fail("'KeywordGroups' must be an array");
-            return std::nullopt;
-        }
-        desc.KeywordGroups.reserve(groups.Size());
-        for (size_t i = 0; i < groups.Size(); ++i) {
-            ShaderKeywordGroupDesc group{};
-            if (!ReadKeywordGroup(groups.At(i), scope, group)) {
-                return std::nullopt;
+    if (!DeserializeJsonValue(root, desc)) {
+        // 保留最有用的一条旧诊断上下文：绑定枚举拼写错误应指出 pass / binding
+        // 与原始字符串。其余 schema 错误由统一的类型解码失败诊断覆盖。
+        const JsonValue passes = root["Passes"];
+        if (passes.IsArray()) {
+            for (size_t passIndex = 0; passIndex < passes.Size(); ++passIndex) {
+                const JsonValue pass = passes.At(passIndex);
+                scope.SetPass(pass["Name"].AsString());
+                const JsonValue groups = pass["BindingGroups"];
+                if (!groups.IsArray()) {
+                    continue;
+                }
+                for (size_t groupIndex = 0; groupIndex < groups.Size(); ++groupIndex) {
+                    const JsonValue group = groups.At(groupIndex);
+                    if (group["Group"].IsNumber()) {
+                        scope.SetGroup(static_cast<uint32_t>(group["Group"].AsUint()));
+                    }
+                    const JsonValue bindings = group["Bindings"];
+                    if (!bindings.IsArray()) {
+                        continue;
+                    }
+                    for (size_t bindingIndex = 0; bindingIndex < bindings.Size(); ++bindingIndex) {
+                        const JsonValue binding = bindings.At(bindingIndex);
+                        scope.SetBinding(binding["Name"].AsString());
+                        if (binding["Binding"].IsNumber()) {
+                            scope.SetBindingIndex(static_cast<uint32_t>(binding["Binding"].AsUint()));
+                        }
+                        const JsonValue type = binding["Type"];
+                        if (type.IsString() &&
+                            !EnumCast<render::ShaderParameterBindingType>(
+                                 type.AsString())
+                                 .has_value()) {
+                            scope.Fail(fmt::format(
+                                "field 'Type' has unknown value '{}'",
+                                type.AsString()));
+                            return std::nullopt;
+                        }
+                    }
+                }
             }
-            desc.KeywordGroups.push_back(std::move(group));
         }
-    }
-
-    if (root.Has("BakeVariants")) {
-        if (!ReadBakeSet(root["BakeVariants"], scope, desc.BakeVariants)) {
-            return std::nullopt;
-        }
-    }
-
-    JsonValue passes = root["Passes"];
-    if (!passes.IsArray()) {
-        scope.Fail("shader asset must have a 'Passes' array");
+        scope.SetPass({});
+        scope.SetGroup(std::nullopt);
+        scope.ClearBinding();
+        scope.SetStage(std::nullopt);
+        scope.Fail("shader asset JSON does not match the declared schema");
         return std::nullopt;
-    }
-    desc.Passes.reserve(passes.Size());
-    for (size_t i = 0; i < passes.Size(); ++i) {
-        ShaderPassDesc pass{};
-        if (!ReadPass(passes.At(i), scope, pass)) {
-            return std::nullopt;
-        }
-        desc.Passes.push_back(std::move(pass));
     }
 
     if (!ValidateAsset(desc, scope)) {
@@ -2775,43 +2540,7 @@ std::optional<ShaderAssetDesc> LoadShaderAssetDesc(
 }
 
 std::optional<string> SerializeShaderAssetDesc(const ShaderAssetDesc& desc, bool pretty) noexcept {
-    JsonWriter writer;
-    if (!writer.IsValid()) {
-        return std::nullopt;
-    }
-    JsonRef root = writer.RootObject();
-    if (!root.IsValid()) {
-        return std::nullopt;
-    }
-    root.AddUint("FormatVersion", kShaderAssetFormatVersion);
-    root.AddString("Name", desc.Name);
-    if (!desc.Source.empty()) {
-        root.AddString("Source", desc.Source);
-    }
-    if (!desc.KeywordGroups.empty()) {
-        JsonRef groups = root.AddArray("KeywordGroups");
-        for (const ShaderKeywordGroupDesc& group : desc.KeywordGroups) {
-            JsonRef obj = groups.AppendObject();
-            obj.AddString("Name", group.Name);
-            JsonRef keywords = obj.AddArray("Keywords");
-            for (const string& keyword : group.Keywords) {
-                keywords.AppendString(keyword);
-            }
-            obj.AddBool("IsOptional", group.IsOptional);
-            WriteStages(obj, "Stages", group.Stages);
-        }
-    }
-    if (!desc.BakeVariants.IsEmpty() || !desc.BakeVariants.Skip.empty()) {
-        WriteBakeSet(root, desc.BakeVariants);
-    }
-    JsonRef passes = root.AddArray("Passes");
-    if (!passes.IsValid()) {
-        return std::nullopt;
-    }
-    for (const ShaderPassDesc& pass : desc.Passes) {
-        WritePass(passes, pass);
-    }
-    return writer.Write(pretty);
+    return SerializeJson(desc, pretty);
 }
 
 // ============================ layout 构建 ============================
@@ -3238,10 +2967,7 @@ std::filesystem::path GetShaderArtifactDirectory(const std::filesystem::path& ma
 }
 
 string MakeShaderArtifactBlobPath(render::ShaderBlobCategory category, ShaderHash key) {
-    std::string_view dir = NameOfEnum(kBlobCategoryTable, category);
-    if (dir.empty()) {
-        dir = "unknown";
-    }
+    const std::string_view dir = EnumNameOr(category, "unknown");
     string lower{dir};
     std::ranges::transform(lower, lower.begin(), [](char c) {
         return static_cast<char>(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c);
@@ -3344,6 +3070,7 @@ std::optional<ShaderArtifactBlob> ReadShaderArtifactBlob(
 std::optional<ShaderArtifactIndex> ParseShaderArtifactIndex(
     std::string_view json,
     ShaderAssetDiagnostic& outDiag) noexcept {
+    outDiag = ShaderAssetDiagnostic{};
     auto doc = JsonDocument::Parse(json);
     if (!doc.has_value()) {
         outDiag.Message = "shader artifact index is not valid JSON";
@@ -3355,85 +3082,52 @@ std::optional<ShaderArtifactIndex> ParseShaderArtifactIndex(
         return std::nullopt;
     }
 
-    ShaderArtifactIndex index;
     JsonValue version = root["FormatVersion"];
-    if (!version.IsNumber()) {
+    uint32_t formatVersion = 0;
+    if (!version.IsValid() || !DeserializeJsonValue(version, formatVersion)) {
         outDiag.Message = "shader artifact index is missing 'FormatVersion'";
         return std::nullopt;
     }
-    index.FormatVersion = static_cast<uint32_t>(version.AsUint());
-    if (index.FormatVersion != kShaderArtifactFormatVersion) {
+    if (formatVersion != kShaderArtifactFormatVersion) {
         outDiag.Message = fmt::format(
             "shader artifact index FormatVersion {} != expected {}",
-            index.FormatVersion,
+            formatVersion,
             kShaderArtifactFormatVersion);
         return std::nullopt;
     }
-    index.AssetName = string{root["AssetName"].AsString()};
 
-    JsonValue sources = root["Sources"];
-    if (!sources.IsArray() || sources.Size() == 0) {
+    ShaderArtifactIndex index{};
+    if (!DeserializeJsonValue(root, index)) {
+        outDiag.Message =
+            "shader artifact index has malformed fields (Sources / Identity / "
+            "ToolchainHash / Entries / Stage / Category / Keywords)";
+        return std::nullopt;
+    }
+
+    if (index.Sources.empty()) {
         outDiag.Message = "shader artifact index 'Sources' must be a non-empty array";
         return std::nullopt;
     }
-    index.Sources.reserve(sources.Size());
-    for (size_t i = 0; i < sources.Size(); ++i) {
-        JsonValue element = sources.At(i);
-        if (!element.IsObject()) {
-            outDiag.Message = fmt::format("shader artifact Sources[{}] must be an object", i);
-            return std::nullopt;
-        }
-        ShaderArtifactSource source;
-        source.Path = string{element["Path"].AsString()};
-        auto identity = ReadHash(element, "Identity");
-        if (source.Path.empty() || !identity.has_value()) {
+    for (size_t i = 0; i < index.Sources.size(); ++i) {
+        const ShaderArtifactSource& source = index.Sources[i];
+        if (source.Path.empty()) {
             outDiag.Message = fmt::format(
-                "shader artifact Sources[{}] has a missing Path or malformed Identity",
+                "shader artifact Sources[{}] has a missing Path",
                 i);
             return std::nullopt;
         }
-        source.Identity = identity.value();
-        if (index.FindSourceIdentity(source.Path).has_value()) {
-            outDiag.Message = fmt::format(
-                "shader artifact index has a duplicate source '{}'",
-                source.Path);
-            return std::nullopt;
+        for (size_t j = 0; j < i; ++j) {
+            if (index.Sources[j].Path == source.Path) {
+                outDiag.Message = fmt::format(
+                    "shader artifact index has a duplicate source '{}'",
+                    source.Path);
+                return std::nullopt;
+            }
         }
-        index.Sources.push_back(std::move(source));
     }
 
-    auto toolchain = ReadHash(root, "ToolchainHash");
-    if (!toolchain.has_value()) {
-        outDiag.Message = "shader artifact index has a missing or malformed 'ToolchainHash'";
-        return std::nullopt;
-    }
-    index.ToolchainHash = toolchain.value();
-
-    JsonValue entries = root["Entries"];
-    if (!entries.IsArray()) {
-        outDiag.Message = "shader artifact index 'Entries' must be an array";
-        return std::nullopt;
-    }
-    index.Entries.reserve(entries.Size());
-    for (size_t i = 0; i < entries.Size(); ++i) {
-        JsonValue element = entries.At(i);
-        if (!element.IsObject()) {
-            outDiag.Message = fmt::format("shader artifact Entries[{}] must be an object", i);
-            return std::nullopt;
-        }
-        ShaderArtifactEntry entry;
-        auto key = ReadHash(element, "Key");
-        auto bytecodeHash = ReadHash(element, "BytecodeHash");
-        if (!key.has_value() || !bytecodeHash.has_value()) {
-            outDiag.Message = fmt::format("shader artifact Entries[{}] has a malformed hash", i);
-            return std::nullopt;
-        }
-        entry.Key = key.value();
-        entry.BytecodeHash = bytecodeHash.value();
-        entry.PassName = string{element["PassName"].AsString()};
-        entry.Source = string{element["Source"].AsString()};
-        entry.EntryPoint = string{element["EntryPoint"].AsString()};
-        entry.BlobPath = string{element["BlobPath"].AsString()};
+    for (size_t i = 0; i < index.Entries.size(); ++i) {
+        const ShaderArtifactEntry& entry = index.Entries[i];
         if (entry.PassName.empty() || entry.EntryPoint.empty() || entry.BlobPath.empty()) {
             outDiag.Message = fmt::format(
                 "shader artifact Entries[{}] is missing PassName / EntryPoint / BlobPath",
@@ -3448,52 +3142,18 @@ std::optional<ShaderArtifactIndex> ParseShaderArtifactIndex(
                 entry.Source);
             return std::nullopt;
         }
-        auto stage = LookupEnum(kShaderStageTable, element["Stage"].AsString());
-        auto category = LookupEnum(kBlobCategoryTable, element["Category"].AsString());
-        if (!stage.has_value() || !category.has_value()) {
-            outDiag.Message = fmt::format(
-                "shader artifact Entries[{}] has an unknown Stage or Category",
-                i);
-            return std::nullopt;
-        }
-        entry.Stage = stage.value();
-        entry.Category = category.value();
-        entry.BytecodeSize = static_cast<uint32_t>(element["BytecodeSize"].AsUint());
         if (entry.BytecodeSize == 0) {
             outDiag.Message = fmt::format("shader artifact Entries[{}] has zero BytecodeSize", i);
             return std::nullopt;
         }
-        // Keywords 是可选的可读身份, 不参与查找。缺失 (旧产物) 与空数组等价。
-        if (element.Has("Keywords")) {
-            JsonValue keywords = element["Keywords"];
-            if (!keywords.IsArray()) {
-                outDiag.Message = fmt::format(
-                    "shader artifact Entries[{}] 'Keywords' must be an array",
-                    i);
-                return std::nullopt;
-            }
-            entry.Keywords.reserve(keywords.Size());
-            for (size_t j = 0; j < keywords.Size(); ++j) {
-                JsonValue keyword = keywords.At(j);
-                if (!keyword.IsString()) {
-                    outDiag.Message = fmt::format(
-                        "shader artifact Entries[{}] Keywords[{}] must be a string",
-                        i,
-                        j);
-                    return std::nullopt;
-                }
-                entry.Keywords.push_back(string{keyword.AsString()});
-            }
-        }
-        for (const ShaderArtifactEntry& existing : index.Entries) {
-            if (existing.Key == entry.Key) {
+        for (size_t j = 0; j < i; ++j) {
+            if (index.Entries[j].Key == entry.Key) {
                 outDiag.Message = fmt::format(
                     "shader artifact index has a duplicate key {}",
                     entry.Key.ToHex());
                 return std::nullopt;
             }
         }
-        index.Entries.push_back(std::move(entry));
     }
     return index;
 }
@@ -3512,53 +3172,7 @@ std::optional<ShaderArtifactIndex> LoadShaderArtifactIndex(
 std::optional<string> SerializeShaderArtifactIndex(
     const ShaderArtifactIndex& index,
     bool pretty) noexcept {
-    JsonWriter writer;
-    if (!writer.IsValid()) {
-        return std::nullopt;
-    }
-    JsonRef root = writer.RootObject();
-    if (!root.IsValid()) {
-        return std::nullopt;
-    }
-    root.AddUint("FormatVersion", kShaderArtifactFormatVersion);
-    root.AddString("AssetName", index.AssetName);
-    const string toolchain = index.ToolchainHash.ToHex();
-    root.AddString("ToolchainHash", toolchain);
-
-    JsonRef sources = root.AddArray("Sources");
-    for (const ShaderArtifactSource& source : index.Sources) {
-        JsonRef obj = sources.AppendObject();
-        if (!obj.IsValid()) {
-            return std::nullopt;
-        }
-        obj.AddString("Path", source.Path);
-        obj.AddString("Identity", source.Identity.ToHex());
-    }
-
-    JsonRef entries = root.AddArray("Entries");
-    // ToHex 返回临时 string, 而 AddString 会复制 value, 故无需延长生命周期。
-    for (const ShaderArtifactEntry& entry : index.Entries) {
-        JsonRef obj = entries.AppendObject();
-        if (!obj.IsValid()) {
-            return std::nullopt;
-        }
-        obj.AddString("Key", entry.Key.ToHex());
-        obj.AddString("PassName", entry.PassName);
-        obj.AddString("Source", entry.Source);
-        obj.AddString("Stage", NameOfEnum(kShaderStageTable, entry.Stage));
-        obj.AddString("EntryPoint", entry.EntryPoint);
-        obj.AddString("Category", NameOfEnum(kBlobCategoryTable, entry.Category));
-        obj.AddString("BlobPath", entry.BlobPath);
-        obj.AddString("BytecodeHash", entry.BytecodeHash.ToHex());
-        obj.AddUint("BytecodeSize", entry.BytecodeSize);
-        if (!entry.Keywords.empty()) {
-            JsonRef keywords = obj.AddArray("Keywords");
-            for (const string& keyword : entry.Keywords) {
-                keywords.AppendString(keyword);
-            }
-        }
-    }
-    return writer.Write(pretty);
+    return SerializeJson(index, pretty);
 }
 
 // ============================ AOT 烘焙 ============================
@@ -3900,30 +3514,20 @@ ShaderCookResult CookShaderAssetFile(
     return CookShaderAsset(dxc, asset.value(), options);
 }
 
-
 #endif
 
 // ============================ 格式化 ============================
 
 std::string_view format_as(ShaderBindingResidency v) noexcept {
-    const std::string_view name = NameOfEnum(kResidencyTable, v);
-    return name.empty() ? std::string_view{"UNKNOWN"} : name;
+    return EnumNameOr(v, "UNKNOWN");
 }
 
 std::string_view format_as(ShaderBytecodeSource v) noexcept {
-    switch (v) {
-        case ShaderBytecodeSource::Artifact: return "Artifact";
-        case ShaderBytecodeSource::Jit: return "Jit";
-    }
-    return "UNKNOWN";
+    return EnumNameOr(v, "UNKNOWN");
 }
 
 std::string_view format_as(ShaderArtifactStaleness v) noexcept {
-    switch (v) {
-        case ShaderArtifactStaleness::Strict: return "Strict";
-        case ShaderArtifactStaleness::Lenient: return "Lenient";
-    }
-    return "UNKNOWN";
+    return EnumNameOr(v, "UNKNOWN");
 }
 
 }  // namespace radray

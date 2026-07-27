@@ -7,12 +7,22 @@
 #include <string>
 #include <string_view>
 
+#include <radray/environment.h>
 #include <radray/file.h>
 #include <radray/render/dxc.h>
 #include <radray/runtime/shader_asset.h>
 
 namespace radray {
 namespace {
+
+static_assert(json_serializable<ShaderAssetDesc>);
+static_assert(json_deserializable<ShaderAssetDesc>);
+static_assert(json_serializable<ShaderPassDesc>);
+static_assert(json_deserializable<ShaderPassDesc>);
+static_assert(json_serializable<ShaderArtifactIndex>);
+static_assert(json_deserializable<ShaderArtifactIndex>);
+static_assert(EnumContains(render::ShaderParameterBindingType::CBuffer));
+static_assert(EnumContains(render::ShaderStage::Vertex));
 
 // 与 shaderlib/radray_imgui.hlsl 对应的完整 manifest。
 // 该 shader 同时用到 push constant (gPush) 与可做 static sampler 的 gSampler,
@@ -255,6 +265,77 @@ TEST(ShaderAssetTest, RoundTripsImmutableSampler) {
     std::optional<ShaderAssetDesc> reparsed = ParseShaderAssetDesc(text.value(), diag);
     ASSERT_TRUE(reparsed.has_value()) << diag.ToString();
     EXPECT_EQ(original, reparsed.value());
+}
+
+TEST(ShaderAssetTest, JsonCustomizationPointsRoundTripDirectly) {
+    const std::optional<ShaderAssetDesc> decoded =
+        DeserializeJson<ShaderAssetDesc>(kImGuiManifest);
+    ASSERT_TRUE(decoded.has_value());
+
+    const std::optional<string> json = SerializeJson(decoded.value(), false);
+    ASSERT_TRUE(json.has_value());
+    const std::optional<ShaderAssetDesc> reparsed =
+        DeserializeJson<ShaderAssetDesc>(json.value());
+    ASSERT_TRUE(reparsed.has_value());
+    EXPECT_EQ(reparsed.value(), decoded.value());
+}
+
+TEST(ShaderAssetTest, ReflectionPayloadEnumsUseMemberNames) {
+    render::HlslShaderDesc hlsl{};
+    hlsl.MinFeatureLevel = render::HlslFeatureLevel::LEVEL12_1;
+    const std::optional<string> hlslJson = render::SerializeHlslShaderDesc(hlsl);
+    ASSERT_TRUE(hlslJson.has_value());
+    const std::optional<JsonDocument> hlslDocument = JsonDocument::Parse(hlslJson.value());
+    ASSERT_TRUE(hlslDocument.has_value());
+    EXPECT_EQ(hlslDocument->Root()["MinFeatureLevel"].AsString(), "LEVEL12_1");
+
+    const std::optional<render::HlslShaderDesc> decodedHlsl =
+        render::DeserializeHlslShaderDesc(hlslJson.value());
+    ASSERT_TRUE(decodedHlsl.has_value());
+    EXPECT_EQ(decodedHlsl->MinFeatureLevel, render::HlslFeatureLevel::LEVEL12_1);
+
+    render::SpirvShaderDesc spirv{};
+    spirv.Types.push_back(render::SpirvTypeInfo{
+        .Name = "float",
+        .BaseType = render::SpirvBaseType::Float32,
+    });
+    const std::optional<string> spirvJson = render::SerializeSpirvShaderDesc(spirv);
+    ASSERT_TRUE(spirvJson.has_value());
+    const std::optional<JsonDocument> spirvDocument = JsonDocument::Parse(spirvJson.value());
+    ASSERT_TRUE(spirvDocument.has_value());
+    const JsonValue spirvTypes = spirvDocument->Root()["Types"];
+    ASSERT_EQ(spirvTypes.Size(), 1u);
+    EXPECT_EQ(spirvTypes.At(0)["BaseType"].AsString(), "Float32");
+
+    const std::optional<render::SpirvShaderDesc> decodedSpirv =
+        render::DeserializeSpirvShaderDesc(spirvJson.value());
+    ASSERT_TRUE(decodedSpirv.has_value());
+    ASSERT_EQ(decodedSpirv->Types.size(), 1u);
+    EXPECT_EQ(decodedSpirv->Types.front().BaseType, render::SpirvBaseType::Float32);
+}
+
+TEST(ShaderAssetTest, EnumNamesAndStageFlagsUseMagicEnum) {
+    EXPECT_EQ(
+        EnumName(render::ShaderParameterBindingType::CBuffer),
+        std::string_view{"CBuffer"});
+    EXPECT_EQ(
+        EnumCast<render::ShaderParameterBindingType>("Texture"),
+        render::ShaderParameterBindingType::Texture);
+    EXPECT_EQ(
+        EnumCast<render::ShaderParameterBindingType>("DynamicCBuffer"),
+        render::ShaderParameterBindingType::DynamicCBuffer);
+
+    const render::ShaderStages graphics{render::ShaderStage::Graphics};
+    const std::optional<string> json = SerializeJson(graphics, false);
+    ASSERT_TRUE(json.has_value());
+    EXPECT_EQ(json.value(), R"(["Vertex","Pixel"])");
+
+    const std::optional<render::ShaderStages> decoded =
+        DeserializeJson<render::ShaderStages>(json.value());
+    ASSERT_TRUE(decoded.has_value());
+    EXPECT_EQ(decoded.value(), graphics);
+    EXPECT_FALSE(
+        DeserializeJson<render::ShaderStages>(R"(["Geometry"])").has_value());
 }
 
 // ==================== 正例: layout 构建 ====================
@@ -1738,7 +1819,6 @@ TEST(ShaderAssetTest, DiagnosticCarriesLocatableContext) {
     EXPECT_NE(text.find("group=2"), string::npos);
 }
 
-
 namespace {
 
 /// 每个测试独占一个临时目录, 析构时递归删除。
@@ -2505,9 +2585,8 @@ TEST(ShaderArtifactTest, EntryKeywordsRoundTrip) {
     EXPECT_TRUE(parsed->Entries[1].Keywords.empty());
 }
 
-TEST(ShaderArtifactTest, IndexWithoutKeywordsFieldStillParses) {
-    // Keywords 是后加的可选字段, 旧产物没有它。缺失必须与空数组等价, 否则升级
-    // 引擎会让已发布的产物全部失效。
+TEST(ShaderArtifactTest, IndexTreatsMissingKeywordsAsEmpty) {
+    // 空 Keywords 不写入 index; 解析时缺失字段必须与空数组等价。
     const ShaderArtifactIndex index = MakeIndex();
     auto json = SerializeShaderArtifactIndex(index);
     ASSERT_TRUE(json.has_value());
@@ -2573,7 +2652,6 @@ TEST(ShaderArtifactTest, RejectsNonArrayKeywords) {
     EXPECT_FALSE(ParseShaderArtifactIndex(json, diag).has_value());
     EXPECT_NE(diag.Message.find("Keywords"), string::npos);
 }
-
 
 namespace {
 
@@ -3739,6 +3817,221 @@ TEST(ShaderResolverTest, DefinesChangeTheResolvedArtifact) {
         diag);
     ASSERT_TRUE(bytecode.has_value()) << diag.Message;
     EXPECT_EQ(bytecode->Source, ShaderBytecodeSource::Jit);
+}
+
+#endif
+
+constexpr std::string_view kForwardSampleSource = "forward_pipeline/forward_pass.hlsl";
+
+std::filesystem::path GetProjectRoot() {
+    return std::filesystem::path{GetEnv("RADRAY_PROJECT_DIR")};
+}
+
+std::filesystem::path GetForwardSampleManifestPath() {
+    return GetProjectRoot() / "shaderlib" / "forward_pipeline" /
+           "forward_pass.shader.json";
+}
+
+class ScopedForwardSampleCookDirectory {
+public:
+    ScopedForwardSampleCookDirectory() {
+        static std::atomic<uint32_t> counter{0};
+        std::error_code error;
+        const std::filesystem::path tempRoot = std::filesystem::temp_directory_path(error);
+        if (error) {
+            return;
+        }
+        const auto timestamp = std::chrono::steady_clock::now().time_since_epoch().count();
+        _path = tempRoot /
+                ("radray_forward_shader_sample_" + std::to_string(timestamp) + "_" +
+                 std::to_string(counter.fetch_add(1)));
+        std::filesystem::create_directories(_path, error);
+        if (error) {
+            _path.clear();
+        }
+    }
+
+    ~ScopedForwardSampleCookDirectory() {
+        std::error_code error;
+        if (!_path.empty()) {
+            std::filesystem::remove_all(_path, error);
+        }
+    }
+
+    ScopedForwardSampleCookDirectory(const ScopedForwardSampleCookDirectory&) = delete;
+    ScopedForwardSampleCookDirectory& operator=(const ScopedForwardSampleCookDirectory&) = delete;
+
+    bool IsValid() const noexcept { return !_path.empty(); }
+    std::filesystem::path ManifestPath() const { return _path / "forward_pass.shader.json"; }
+
+private:
+    std::filesystem::path _path;
+};
+
+string JoinForwardSampleDiagnostics(const ShaderCookResult& result) {
+    string text;
+    for (const ShaderAssetDiagnostic& diagnostic : result.Diagnostics) {
+        if (!text.empty()) {
+            text += '\n';
+        }
+        text += diagnostic.ToString();
+    }
+    return text;
+}
+
+void ExpectForwardSampleBindingName(
+    const ShaderPassDesc& pass,
+    uint32_t group,
+    uint32_t bindingIndex,
+    std::string_view expectedName) {
+    Nullable<const ShaderBindingDesc*> binding = pass.FindBinding(group, bindingIndex);
+    ASSERT_TRUE(binding.HasValue()) << "missing binding " << group << ':' << bindingIndex;
+    EXPECT_EQ(binding.Unwrap()->Name, expectedName);
+}
+
+TEST(ShaderAssetSampleTest, ManifestMatchesForwardPassContract) {
+    const std::filesystem::path projectRoot = GetProjectRoot();
+    ASSERT_FALSE(projectRoot.empty()) << "RADRAY_PROJECT_DIR is not configured";
+
+    const std::filesystem::path shaderRoot = projectRoot / "shaderlib";
+    const std::filesystem::path manifestPath = GetForwardSampleManifestPath();
+    EXPECT_TRUE(std::filesystem::is_regular_file(shaderRoot / kForwardSampleSource));
+    ASSERT_TRUE(std::filesystem::is_regular_file(manifestPath));
+
+    ShaderAssetDiagnostic diagnostic;
+    std::optional<ShaderAssetDesc> asset = LoadShaderAssetDesc(manifestPath, diagnostic);
+    ASSERT_TRUE(asset.has_value()) << diagnostic.ToString();
+    EXPECT_EQ(asset->Name, "ForwardPrincipled");
+    EXPECT_EQ(asset->Source, kForwardSampleSource);
+    ASSERT_EQ(asset->KeywordGroups.size(), 9u);
+    ASSERT_EQ(asset->Passes.size(), 1u);
+
+    const ShaderPassDesc& pass = asset->Passes.front();
+    EXPECT_EQ(pass.Name, "Forward");
+    EXPECT_EQ(pass.GetStageMask(), render::ShaderStages{render::ShaderStage::Graphics});
+    EXPECT_EQ(pass.FindEntryPoint(render::ShaderStage::Vertex), "VSMain");
+    EXPECT_EQ(pass.FindEntryPoint(render::ShaderStage::Pixel), "PSMain");
+
+    Nullable<const ShaderBindingDesc*> perObject = pass.FindBinding(0, 1);
+    ASSERT_TRUE(perObject.HasValue());
+    EXPECT_EQ(perObject.Unwrap()->Name, "gPerObject");
+    EXPECT_EQ(perObject.Unwrap()->Residency, ShaderBindingResidency::RootDescriptor);
+    EXPECT_EQ(perObject.Unwrap()->Stages, render::ShaderStages{render::ShaderStage::Vertex});
+
+    Nullable<const ShaderBindingDesc*> view = pass.FindBinding(1, 0);
+    ASSERT_TRUE(view.HasValue());
+    EXPECT_EQ(view.Unwrap()->Name, "gView");
+    EXPECT_EQ(view.Unwrap()->Residency, ShaderBindingResidency::RootDescriptor);
+    EXPECT_EQ(view.Unwrap()->Stages, render::ShaderStages{render::ShaderStage::Graphics});
+
+    ExpectForwardSampleBindingName(pass, 1, 1, "gShadowCube");
+    ExpectForwardSampleBindingName(pass, 1, 2, "gShadowArray");
+    ExpectForwardSampleBindingName(pass, 1, 3, "gShadowSampler");
+    ExpectForwardSampleBindingName(pass, 2, 0, "gMaterial");
+    ExpectForwardSampleBindingName(pass, 2, 6, "gSampler");
+
+    ASSERT_TRUE(pass.VertexInput.has_value());
+    ASSERT_EQ(pass.VertexInput->Buffers.size(), 1u);
+    EXPECT_EQ(pass.VertexInput->Buffers.front().ArrayStride, 48u);
+    ASSERT_EQ(pass.VertexInput->Attributes.size(), 4u);
+    EXPECT_EQ(pass.VertexInput->Attributes[0].Semantic, "POSITION");
+    EXPECT_EQ(pass.VertexInput->Attributes[0].Offset, 0u);
+    EXPECT_EQ(pass.VertexInput->Attributes[1].Semantic, "NORMAL");
+    EXPECT_EQ(pass.VertexInput->Attributes[1].Offset, 12u);
+    EXPECT_EQ(pass.VertexInput->Attributes[2].Semantic, "TEXCOORD");
+    EXPECT_EQ(pass.VertexInput->Attributes[2].Offset, 24u);
+    EXPECT_EQ(pass.VertexInput->Attributes[3].Semantic, "TANGENT");
+    EXPECT_EQ(pass.VertexInput->Attributes[3].Offset, 32u);
+
+    std::optional<ShaderVariantDomain> domain =
+        ShaderVariantDomain::Build(asset.value(), pass, diagnostic);
+    ASSERT_TRUE(domain.has_value()) << diagnostic.ToString();
+    EXPECT_EQ(domain->GroupCount(), 9u);
+
+    std::optional<vector<ShaderVariantKey>> variants = ExpandShaderBakeSet(
+        domain.value(),
+        GetEffectiveBakeSet(asset.value(), pass),
+        true,
+        diagnostic);
+    ASSERT_TRUE(variants.has_value()) << diagnostic.ToString();
+    EXPECT_EQ(variants->size(), 3u);
+}
+
+#if defined(RADRAY_ENABLE_SHADER_JIT)
+
+TEST(ShaderAssetSampleTest, ManifestCooksRealForwardShader) {
+    auto dxcResult = render::CreateDxc();
+    if (!dxcResult.HasValue()) {
+        GTEST_SKIP() << "DXC is unavailable";
+    }
+    shared_ptr<render::Dxc> dxc = dxcResult.Release();
+
+    ScopedForwardSampleCookDirectory output;
+    ASSERT_TRUE(output.IsValid());
+
+    std::error_code error;
+    std::filesystem::copy_file(
+        GetForwardSampleManifestPath(),
+        output.ManifestPath(),
+        std::filesystem::copy_options::overwrite_existing,
+        error);
+    ASSERT_FALSE(error) << error.message();
+
+    vector<render::ShaderBlobCategory> categories{render::ShaderBlobCategory::DXIL};
+#if defined(RADRAY_ENABLE_SPIRV_CROSS)
+    categories.push_back(render::ShaderBlobCategory::SPIRV);
+#endif
+
+    const ShaderCookOptions options{
+        .ShaderRoot = GetProjectRoot() / "shaderlib",
+        .ManifestPath = output.ManifestPath(),
+        .Categories = categories,
+        .ValidateReflection = true,
+        .Incremental = false};
+    ShaderCookResult cook = CookShaderAssetFile(*dxc, options);
+    ASSERT_TRUE(cook.Succeeded()) << JoinForwardSampleDiagnostics(cook);
+
+    const size_t expectedEntries = categories.size() * 4u;
+    EXPECT_EQ(cook.Index.AssetName, "ForwardPrincipled");
+    EXPECT_EQ(cook.Index.Entries.size(), expectedEntries);
+    EXPECT_EQ(cook.Stats.Compiled, expectedEntries);
+    EXPECT_EQ(cook.Stats.Reused, 0u);
+    EXPECT_EQ(cook.Stats.Deduplicated, categories.size() * 2u);
+
+    const std::filesystem::path artifactDirectory =
+        GetShaderArtifactDirectory(options.ManifestPath);
+    ASSERT_TRUE(std::filesystem::is_regular_file(artifactDirectory / "index.json"));
+
+    for (render::ShaderBlobCategory category : categories) {
+        size_t vertexCount = 0;
+        size_t pixelCount = 0;
+        for (const ShaderArtifactEntry& entry : cook.Index.Entries) {
+            if (entry.Category != category) {
+                continue;
+            }
+            EXPECT_EQ(entry.PassName, "Forward");
+            EXPECT_EQ(entry.Source, kForwardSampleSource);
+            EXPECT_FALSE(entry.Key.IsZero());
+            EXPECT_FALSE(entry.BytecodeHash.IsZero());
+            EXPECT_GT(entry.BytecodeSize, 0u);
+            EXPECT_TRUE(std::filesystem::is_regular_file(
+                artifactDirectory / std::filesystem::path{entry.BlobPath}));
+            if (entry.Stage == render::ShaderStage::Vertex) {
+                ++vertexCount;
+                EXPECT_TRUE(entry.Keywords.empty());
+            } else if (entry.Stage == render::ShaderStage::Pixel) {
+                ++pixelCount;
+            }
+        }
+        EXPECT_EQ(vertexCount, 1u);
+        EXPECT_EQ(pixelCount, 3u);
+    }
+
+    ShaderAssetDiagnostic diagnostic;
+    std::optional<ShaderArtifactIndex> persisted =
+        LoadShaderArtifactIndex(artifactDirectory / "index.json", diagnostic);
+    ASSERT_TRUE(persisted.has_value()) << diagnostic.ToString();
+    EXPECT_EQ(persisted->Entries.size(), expectedEntries);
 }
 
 #endif

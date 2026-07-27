@@ -6,6 +6,7 @@
 #include <string_view>
 
 #include <radray/nullable.h>
+#include <radray/json.h>
 #include <radray/render/hlsl.h>
 #include <radray/render/rhi.h>
 #include <radray/render/spirv.h>
@@ -70,9 +71,8 @@ namespace radray {
 /// 当前 manifest 格式版本。不匹配直接拒绝解析。
 inline constexpr uint32_t kShaderAssetFormatVersion = 1;
 
-/// AOT 产物格式版本。参与 artifact key, 故版本变更会自然使旧产物全部未命中。
-/// v2: index 按源文件分别记录身份 (原先只记一份, 多源资产必然查不中)。
-inline constexpr uint32_t kShaderArtifactFormatVersion = 2;
+/// AOT 产物的初始格式版本。参与 source identity、artifact key 以及 blob/index 校验
+inline constexpr uint32_t kShaderArtifactFormatVersion = 1;
 
 /// 组内"全部关闭"。仅当该组 IsOptional 为 true 时是合法选择。
 /// 同时是单组 keyword 数量的排他上界 (该值被保留, 不可作为下标)。
@@ -512,7 +512,7 @@ struct ShaderArtifactEntry {
     ///
     /// 【不参与 Key, 也不用于查找】: 运行时按 (pass, stage, category, 投影后的
     /// defines, SourceIdentity, ToolchainHash) 纯函数算出 Key 再查, 故这里只是供
-    /// 人工核对与工具使用的可读身份。正因如此它是可选字段, 旧产物缺了它仍能命中。
+    /// 人工核对与工具使用的可读身份。空数组在序列化时可以省略, 缺失按空数组解析。
     vector<string> Keywords;
     /// 字节码内容哈希, 读取时校验完整性。
     ShaderHash BytecodeHash{};
@@ -866,5 +866,45 @@ ShaderCookResult CookShaderAssetFile(
 std::string_view format_as(ShaderBindingResidency v) noexcept;
 std::string_view format_as(ShaderBytecodeSource v) noexcept;
 std::string_view format_as(ShaderArtifactStaleness v) noexcept;
+
+}  // namespace radray
+
+namespace radray {
+
+// ============================ JSON 定制点 ============================
+//
+// 这些 codec 负责 JSON schema 与 FormatVersion，不执行跨字段语义校验；需要完整
+// shader asset / artifact 校验时应调用 ParseShaderAssetDesc / ParseShaderArtifactIndex。
+
+#define RADRAY_DECLARE_SHADER_JSON_CODEC(Type)                                    \
+    template <>                                                                   \
+    struct JsonSerializer<Type> {                                                 \
+        static bool Write(JsonWriteContext& context, const Type& value) noexcept; \
+    };                                                                            \
+    template <>                                                                   \
+    struct JsonDeserializer<Type> {                                               \
+        static bool Read(const JsonValue& json, Type& value) noexcept;            \
+    }
+
+RADRAY_DECLARE_SHADER_JSON_CODEC(render::ShaderBindingLocation);
+RADRAY_DECLARE_SHADER_JSON_CODEC(render::SamplerDescriptor);
+RADRAY_DECLARE_SHADER_JSON_CODEC(ShaderBindingDesc);
+RADRAY_DECLARE_SHADER_JSON_CODEC(ShaderBindingGroupDesc);
+RADRAY_DECLARE_SHADER_JSON_CODEC(ShaderPushConstantDesc);
+RADRAY_DECLARE_SHADER_JSON_CODEC(ShaderVertexAttributeDesc);
+RADRAY_DECLARE_SHADER_JSON_CODEC(ShaderVertexBufferDesc);
+RADRAY_DECLARE_SHADER_JSON_CODEC(ShaderVertexInputDesc);
+RADRAY_DECLARE_SHADER_JSON_CODEC(ShaderStageDesc);
+RADRAY_DECLARE_SHADER_JSON_CODEC(ShaderKeywordGroupDesc);
+RADRAY_DECLARE_SHADER_JSON_CODEC(ShaderBakeRuleDesc);
+RADRAY_DECLARE_SHADER_JSON_CODEC(ShaderBakeSetDesc);
+RADRAY_DECLARE_SHADER_JSON_CODEC(ShaderPassDesc);
+RADRAY_DECLARE_SHADER_JSON_CODEC(ShaderAssetDesc);
+RADRAY_DECLARE_SHADER_JSON_CODEC(ShaderHash);
+RADRAY_DECLARE_SHADER_JSON_CODEC(ShaderArtifactEntry);
+RADRAY_DECLARE_SHADER_JSON_CODEC(ShaderArtifactSource);
+RADRAY_DECLARE_SHADER_JSON_CODEC(ShaderArtifactIndex);
+
+#undef RADRAY_DECLARE_SHADER_JSON_CODEC
 
 }  // namespace radray

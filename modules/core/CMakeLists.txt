@@ -5,6 +5,7 @@ add_library(radraycore STATIC ${RADRAY_CORE_SRC} ${RADRAY_CORE_INC})
 target_include_directories(radraycore PUBLIC include)
 target_link_libraries(radraycore PUBLIC
     fmt::fmt
+    magic_enum::magic_enum
     Eigen3::Eigen
     Pal::Sigslot
     STDEXEC::stdexec

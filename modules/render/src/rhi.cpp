@@ -323,97 +323,31 @@ bool IsDynamicShaderParameterBindingType(ShaderParameterBindingType type) noexce
 }
 
 std::string_view format_as(RenderBackend v) noexcept {
-    switch (v) {
-        case RenderBackend::D3D12: return "D3D12";
-        case RenderBackend::Vulkan: return "Vulkan";
-        case RenderBackend::Metal: return "Metal";
-        case RenderBackend::MAX_COUNT: return "UNKNOWN";
+    // MAX_COUNT 是哨兵而非真实后端, 不暴露其成员名。
+    if (v == RenderBackend::MAX_COUNT) {
+        return "UNKNOWN";
     }
-    Unreachable();
+    return EnumNameOr(v);
 }
 
 std::string_view format_as(ShaderStage v) noexcept {
-    switch (v) {
-        case ShaderStage::UNKNOWN: return "UNKNOWN";
-        case ShaderStage::Vertex: return "Vertex";
-        case ShaderStage::Pixel: return "Pixel";
-        case ShaderStage::Compute: return "Compute";
-        case ShaderStage::Graphics: return "Graphics";
-        default: return "UNKNOWN";
-    }
+    return EnumNameOr(v);
 }
 
 std::string_view format_as(ShaderBlobCategory v) noexcept {
-    switch (v) {
-        case ShaderBlobCategory::DXIL: return "DXIL";
-        case ShaderBlobCategory::SPIRV: return "SPIRV";
-        case ShaderBlobCategory::MSL: return "MSL";
-        case ShaderBlobCategory::METALLIB: return "METALLIB";
-    }
-    Unreachable();
+    return EnumNameOr(v);
 }
 
 std::string_view format_as(TextureFormat v) noexcept {
-    switch (v) {
-        case TextureFormat::UNKNOWN: return "UNKNOWN";
-        case TextureFormat::R8_SINT: return "R8_SINT";
-        case TextureFormat::R8_UINT: return "R8_UINT";
-        case TextureFormat::R8_SNORM: return "R8_SNORM";
-        case TextureFormat::R8_UNORM: return "R8_UNORM";
-        case TextureFormat::R16_SINT: return "R16_SINT";
-        case TextureFormat::R16_UINT: return "R16_UINT";
-        case TextureFormat::R16_SNORM: return "R16_SNORM";
-        case TextureFormat::R16_UNORM: return "R16_UNORM";
-        case TextureFormat::R16_FLOAT: return "R16_FLOAT";
-        case TextureFormat::RG8_SINT: return "RG8_SINT";
-        case TextureFormat::RG8_UINT: return "RG8_UINT";
-        case TextureFormat::RG8_SNORM: return "RG8_SNORM";
-        case TextureFormat::RG8_UNORM: return "RG8_UNORM";
-        case TextureFormat::R32_SINT: return "R32_SINT";
-        case TextureFormat::R32_UINT: return "R32_UINT";
-        case TextureFormat::R32_FLOAT: return "R32_FLOAT";
-        case TextureFormat::RG16_SINT: return "RG16_SINT";
-        case TextureFormat::RG16_UINT: return "RG16_UINT";
-        case TextureFormat::RG16_SNORM: return "RG16_SNORM";
-        case TextureFormat::RG16_UNORM: return "RG16_UNORM";
-        case TextureFormat::RG16_FLOAT: return "RG16_FLOAT";
-        case TextureFormat::RGBA8_SINT: return "RGBA8_SINT";
-        case TextureFormat::RGBA8_UINT: return "RGBA8_UINT";
-        case TextureFormat::RGBA8_SNORM: return "RGBA8_SNORM";
-        case TextureFormat::RGBA8_UNORM: return "RGBA8_UNORM";
-        case TextureFormat::RGBA8_UNORM_SRGB: return "RGBA8_UNORM_SRGB";
-        case TextureFormat::BGRA8_UNORM: return "BGRA8_UNORM";
-        case TextureFormat::BGRA8_UNORM_SRGB: return "BGRA8_UNORM_SRGB";
-        case TextureFormat::RGB10A2_UINT: return "RGB10A2_UINT";
-        case TextureFormat::RGB10A2_UNORM: return "RGB10A2_UNORM";
-        case TextureFormat::RG11B10_FLOAT: return "RG11B10_FLOAT";
-        case TextureFormat::RG32_SINT: return "RG32_SINT";
-        case TextureFormat::RG32_UINT: return "RG32_UINT";
-        case TextureFormat::RG32_FLOAT: return "RG32_FLOAT";
-        case TextureFormat::RGBA16_SINT: return "RGBA16_SINT";
-        case TextureFormat::RGBA16_UINT: return "RGBA16_UINT";
-        case TextureFormat::RGBA16_SNORM: return "RGBA16_SNORM";
-        case TextureFormat::RGBA16_UNORM: return "RGBA16_UNORM";
-        case TextureFormat::RGBA16_FLOAT: return "RGBA16_FLOAT";
-        case TextureFormat::RGBA32_SINT: return "RGBA32_SINT";
-        case TextureFormat::RGBA32_UINT: return "RGBA32_UINT";
-        case TextureFormat::RGBA32_FLOAT: return "RGBA32_FLOAT";
-        case TextureFormat::D16_UNORM: return "D16_UNORM";
-        case TextureFormat::D32_FLOAT: return "D32_FLOAT";
-        case TextureFormat::D24_UNORM_S8_UINT: return "D24_UNORM_S8_UINT";
-        case TextureFormat::D32_FLOAT_S8_UINT: return "D32_FLOAT_S8_UINT";
-    }
-    Unreachable();
+    return EnumNameOr(v);
 }
 
 std::string_view format_as(QueueType v) noexcept {
-    switch (v) {
-        case radray::render::QueueType::Direct: return "Direct";
-        case radray::render::QueueType::Compute: return "Compute";
-        case radray::render::QueueType::Copy: return "Copy";
-        case QueueType::MAX_COUNT: return "UNKNOWN";
+    // MAX_COUNT 是哨兵而非真实队列类型, 不暴露其成员名。
+    if (v == QueueType::MAX_COUNT) {
+        return "UNKNOWN";
     }
-    Unreachable();
+    return EnumNameOr(v);
 }
 
 std::string_view format_as(VertexFormat v) noexcept {
@@ -477,53 +411,16 @@ std::string_view format_as(TextureDimension v) noexcept {
 }
 
 std::string_view format_as(BufferState v) noexcept {
-    switch (v) {
-        case BufferState::UNKNOWN: return "UNKNOWN";
-        case BufferState::Undefined: return "Undefined";
-        case BufferState::Common: return "Common";
-        case BufferState::CopySource: return "CopySource";
-        case BufferState::CopyDestination: return "CopyDestination";
-        case BufferState::Vertex: return "Vertex";
-        case BufferState::Index: return "Index";
-        case BufferState::CBuffer: return "CBuffer";
-        case BufferState::ShaderRead: return "ShaderRead";
-        case BufferState::UnorderedAccess: return "UnorderedAccess";
-        case BufferState::Indirect: return "Indirect";
-        case BufferState::HostRead: return "HostRead";
-        case BufferState::HostWrite: return "HostWrite";
-    }
-    Unreachable();
+    // 位标志枚举, 取值超出默认反射范围, 需按位反射。
+    return EnumFlagBitNameOr(v);
 }
 
 std::string_view format_as(TextureState v) noexcept {
-    switch (v) {
-        case TextureState::UNKNOWN: return "UNKNOWN";
-        case TextureState::Undefined: return "Undefined";
-        case TextureState::Common: return "Common";
-        case TextureState::Present: return "Present";
-        case TextureState::CopySource: return "CopySource";
-        case TextureState::CopyDestination: return "CopyDestination";
-        case TextureState::ShaderRead: return "ShaderRead";
-        case TextureState::RenderTarget: return "RenderTarget";
-        case TextureState::DepthRead: return "DepthRead";
-        case TextureState::DepthWrite: return "DepthWrite";
-        case TextureState::UnorderedAccess: return "UnorderedAccess";
-        case TextureState::ResolveSource: return "ResolveSource";
-        case TextureState::ResolveDestination: return "ResolveDestination";
-    }
-    Unreachable();
+    return EnumFlagBitNameOr(v);
 }
 
 std::string_view format_as(TextureViewUsage v) noexcept {
-    switch (v) {
-        case TextureViewUsage::UNKNOWN: return "UNKNOWN";
-        case TextureViewUsage::Resource: return "Resource";
-        case TextureViewUsage::RenderTarget: return "RenderTarget";
-        case TextureViewUsage::DepthRead: return "DepthRead";
-        case TextureViewUsage::DepthWrite: return "DepthWrite";
-        case TextureViewUsage::UnorderedAccess: return "UnorderedAccess";
-    }
-    Unreachable();
+    return EnumNameOr(v);
 }
 
 std::string_view format_as(RenderObjectTag v) noexcept {
@@ -557,22 +454,11 @@ std::string_view format_as(RenderObjectTag v) noexcept {
 }
 
 std::string_view format_as(PresentMode v) noexcept {
-    switch (v) {
-        case PresentMode::FIFO: return "FIFO";
-        case PresentMode::Mailbox: return "Mailbox";
-        case PresentMode::Immediate: return "Immediate";
-    }
-    Unreachable();
+    return EnumNameOr(v);
 }
 
 std::string_view format_as(SwapChainStatus v) noexcept {
-    switch (v) {
-        case SwapChainStatus::Error: return "Error";
-        case SwapChainStatus::Success: return "Success";
-        case SwapChainStatus::RetryLater: return "RetryLater";
-        case SwapChainStatus::RequireRecreate: return "RequireRecreate";
-    }
-    Unreachable();
+    return EnumNameOr(v);
 }
 
 }  // namespace radray::render

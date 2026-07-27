@@ -2,10 +2,12 @@
 
 #include <type_traits>
 #include <limits>
+#include <optional>
 #include <string>
-#include <iterator>
+#include <string_view>
 
 #include <fmt/format.h>
+#include <magic_enum/magic_enum_flags.hpp>
 
 #include <radray/types.h>
 
@@ -24,6 +26,78 @@ template <typename T>
 concept enum_has_adl_format_as = requires(T value) {
     { format_as(value) };
 };
+
+// ---------------------------------------------------------------------------
+// 枚举名字工具。这里是 magic_enum 的唯一出口, 其他地方只 include 本头文件,
+// 不要直接 include magic_enum, 以便底层库可替换。
+// ---------------------------------------------------------------------------
+
+// 枚举成员名。取不到名字 (值越界或无对应成员) 时返回空。
+// 反射范围默认是 [-128, 127], 超出该范围的位标志枚举请用 EnumFlagBitName。
+template <class T>
+requires std::is_enum_v<T>
+constexpr std::string_view EnumName(T value) noexcept {
+    return magic_enum::enum_name(value);
+}
+
+// 同 EnumName, 取不到名字时返回 fallback。
+template <class T>
+requires std::is_enum_v<T>
+constexpr std::string_view EnumNameOr(T value, std::string_view fallback = "UNKNOWN") noexcept {
+    const std::string_view name = magic_enum::enum_name(value);
+    return name.empty() ? fallback : name;
+}
+
+// 单个位标志的成员名。按 1, 2, 4, ... 逐位反射, 因此不受 [-128, 127] 限制,
+// 但只能匹配单 bit 成员: 0 与复合值 (多 bit) 都取不到名字。
+template <class T>
+requires std::is_enum_v<T>
+constexpr std::string_view EnumFlagBitName(T value) noexcept {
+    return magic_enum::enum_name<T, magic_enum::as_flags<>>(value);
+}
+
+// 同 EnumFlagBitName, 取不到名字时返回 fallback。
+template <class T>
+requires std::is_enum_v<T>
+constexpr std::string_view EnumFlagBitNameOr(T value, std::string_view fallback = "UNKNOWN") noexcept {
+    const std::string_view name = EnumFlagBitName(value);
+    return name.empty() ? fallback : name;
+}
+
+// 把置位的各个标志名用 sep 连接。存在无名的位时返回空。
+template <class T>
+requires std::is_enum_v<T>
+string EnumFlagsName(T value, char sep = '|') {
+    return magic_enum::enum_flags_name(value, sep);
+}
+
+// 该值是否是枚举里已声明的成员。
+template <class T>
+requires std::is_enum_v<T>
+constexpr bool EnumContains(T value) noexcept {
+    return magic_enum::enum_contains(value);
+}
+
+// 由名字反查枚举值。
+template <class T>
+requires std::is_enum_v<T>
+constexpr std::optional<T> EnumCast(std::string_view name) noexcept {
+    return magic_enum::enum_cast<T>(name);
+}
+
+// 由名字 (可含 sep 分隔的多个标志) 反查位标志枚举值。
+template <class T>
+requires std::is_enum_v<T>
+constexpr std::optional<T> EnumFlagsCast(std::string_view name, char sep = '|') noexcept {
+    return magic_enum::enum_flags_cast<T>(name, sep);
+}
+
+// 由整数反查位标志枚举值。含未定义的位时返回 nullopt。
+template <class T>
+requires std::is_enum_v<T>
+constexpr std::optional<T> EnumFlagsCast(std::underlying_type_t<T> value) noexcept {
+    return magic_enum::enum_flags_cast<T>(value);
+}
 
 template <class T>
 requires is_enum_flags<T>
@@ -147,39 +221,36 @@ public:
         return *this;
     }
 
-    string FormatByName()
-    requires enum_has_adl_format_as<T>
+    string FormatByName() const
+    requires(!is_compound_enum_flags<T>::value || enum_has_adl_format_as<T>)
     {
-        using underlying_t = std::underlying_type_t<T>;
-        using unsigned_t = std::make_unsigned_t<underlying_t>;
-        fmt::memory_buffer buffer;
-        fmt::format_to(std::back_inserter(buffer), "[");
-        auto remaining = static_cast<unsigned_t>(this->value());
-        bool first = true;
-        while (remaining != 0) {
-            if constexpr (is_compound_enum_flags<T>::value) {
-                auto name = format_as(static_cast<T>(remaining));
-                if (!first) {
-                    fmt::format_to(std::back_inserter(buffer), " | ");
-                }
-                fmt::format_to(std::back_inserter(buffer), "{}", name);
-                break;
-            } else {
-                auto bit = remaining & (~remaining + 1);
-                remaining &= ~bit;
-                auto bitName = format_as(static_cast<T>(bit));
-                if (!first) {
-                    fmt::format_to(std::back_inserter(buffer), " | ");
-                }
-                fmt::format_to(std::back_inserter(buffer), "{}", bitName);
-                first = false;
-            }
+        if (this->value() == 0) {
+            return "[]";
         }
-        fmt::format_to(std::back_inserter(buffer), "]");
-        return string{buffer.data(), buffer.size()};
+        if constexpr (is_compound_enum_flags<T>::value) {
+            return fmt::format("[{}]", format_as(_value));
+        } else {
+            const string names = EnumFlagsName(_value);
+            if (names.empty()) {
+                return FormatAsBits();
+            }
+
+            string result;
+            result.reserve(names.size() + 2);
+            result.push_back('[');
+            for (char ch : names) {
+                if (ch == '|') {
+                    result.append(" | ");
+                } else {
+                    result.push_back(ch);
+                }
+            }
+            result.push_back(']');
+            return result;
+        }
     }
 
-    string FormatAsBits() {
+    string FormatAsBits() const {
         using underlying_t = std::underlying_type_t<T>;
         using unsigned_t = std::make_unsigned_t<underlying_t>;
         constexpr auto bit_count = std::numeric_limits<unsigned_t>::digits;
@@ -203,10 +274,12 @@ requires is_enum_flags<T>
 string format_as(EnumFlags<T> flags) {
     using unsigned_t = std::make_unsigned_t<std::underlying_type_t<T>>;
     const auto value = static_cast<unsigned_t>(flags.value());
-    if constexpr (enum_has_adl_format_as<T>) {
-        if (value == 0) {
-            return "[]";
-        }
+    if (value == 0) {
+        return "[]";
+    }
+    if constexpr (
+        !is_compound_enum_flags<T>::value ||
+        enum_has_adl_format_as<T>) {
         return flags.FormatByName();
     } else {
         return flags.FormatAsBits();

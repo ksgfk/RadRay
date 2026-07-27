@@ -14,3 +14,4 @@ radray_add_test(test_runtime_type SOURCES test_runtime_type.cpp LINK_LIBS radray
 radray_add_test(test_binary_io SOURCES test_binary_io.cpp LINK_LIBS radraycore)
 radray_add_test(test_json SOURCES test_json.cpp LINK_LIBS radraycore)
 radray_add_test(test_json_serializer SOURCES test_json_serializer.cpp LINK_LIBS radraycore)
+radray_add_test(test_json_deserializer SOURCES test_json_deserializer.cpp LINK_LIBS radraycore)

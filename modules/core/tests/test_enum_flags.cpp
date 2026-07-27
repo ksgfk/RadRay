@@ -10,16 +10,6 @@ enum class TestFlags : uint32_t {
     D = 1 << 3,
 };
 
-std::string_view format_as(TestFlags v) noexcept {
-    switch (v) {
-        case TestFlags::A: return "A";
-        case TestFlags::B: return "B";
-        case TestFlags::C: return "C";
-        case TestFlags::D: return "D";
-        default: return "UNKNOWN";
-    }
-}
-
 namespace radray {
 template <>
 struct is_flags<TestFlags> : std::true_type {};
@@ -110,6 +100,7 @@ TEST(EnumFlagsTest, EqualityAndInequality) {
 }
 
 TEST(EnumFlagsTest, FormatByNameBitwise) {
+    EXPECT_EQ(radray::EnumFlags<TestFlags>{}.FormatByName(), "[]");
     EXPECT_EQ(fmt::format("{}", radray::EnumFlags<TestFlags>(TestFlags::A)), "[A]");
     EXPECT_EQ(fmt::format("{}", TestFlags::A | TestFlags::B), "[A | B]");
     EXPECT_EQ(fmt::format("{}", TestFlags::A | TestFlags::B | TestFlags::C), "[A | B | C]");

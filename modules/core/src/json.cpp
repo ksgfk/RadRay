@@ -1,6 +1,8 @@
 #include <radray/json.h>
 
+#include <cmath>
 #include <cstdlib>
+#include <limits>
 
 #include <yyjson.h>
 
@@ -98,6 +100,68 @@ bool JsonValue::AsBool(bool def) const noexcept {
         return yyjson_get_bool(_val);
     }
     return def;
+}
+
+bool JsonValue::TryGetString(std::string_view& value) const noexcept {
+    if (!yyjson_is_str(_val)) {
+        return false;
+    }
+    const char* stringValue = yyjson_get_str(_val);
+    if (stringValue == nullptr) {
+        return false;
+    }
+    value = std::string_view{stringValue, yyjson_get_len(_val)};
+    return true;
+}
+
+bool JsonValue::TryGetUint(uint64_t& value) const noexcept {
+    if (yyjson_is_uint(_val)) {
+        value = yyjson_get_uint(_val);
+        return true;
+    }
+    if (yyjson_is_sint(_val)) {
+        const int64_t signedValue = yyjson_get_sint(_val);
+        if (signedValue >= 0) {
+            value = static_cast<uint64_t>(signedValue);
+            return true;
+        }
+    }
+    return false;
+}
+
+bool JsonValue::TryGetInt(int64_t& value) const noexcept {
+    if (yyjson_is_sint(_val)) {
+        value = yyjson_get_sint(_val);
+        return true;
+    }
+    if (yyjson_is_uint(_val)) {
+        const uint64_t unsignedValue = yyjson_get_uint(_val);
+        if (unsignedValue <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+            value = static_cast<int64_t>(unsignedValue);
+            return true;
+        }
+    }
+    return false;
+}
+
+bool JsonValue::TryGetDouble(double& value) const noexcept {
+    if (!yyjson_is_num(_val)) {
+        return false;
+    }
+    const double decoded = yyjson_get_num(_val);
+    if (!std::isfinite(decoded)) {
+        return false;
+    }
+    value = decoded;
+    return true;
+}
+
+bool JsonValue::TryGetBool(bool& value) const noexcept {
+    if (!yyjson_is_bool(_val)) {
+        return false;
+    }
+    value = yyjson_get_bool(_val);
+    return true;
 }
 
 // ------------------------------ JsonDocument -----------------------------
@@ -275,13 +339,11 @@ JsonWriteContext::JsonWriteContext(JsonWriter& writer) noexcept
 JsonWriteContext::JsonWriteContext(yyjson_mut_doc* doc,
                                    yyjson_mut_val* parent,
                                    std::string_view key,
-                                   Target target,
-                                   bool copyKey) noexcept
+                                   Target target) noexcept
     : _doc(doc),
       _parent(parent),
       _key(key),
-      _target(target),
-      _copyKey(copyKey) {}
+      _target(target) {}
 
 bool JsonWriteContext::Attach(yyjson_mut_val* value) noexcept {
     if (_written || _doc == nullptr || value == nullptr) {
@@ -297,16 +359,11 @@ bool JsonWriteContext::Attach(yyjson_mut_val* value) noexcept {
             }
             break;
         case Target::ObjectMember: {
-            yyjson_mut_val* key = _copyKey
-                                      ? yyjson_mut_strncpy(
-                                            _doc,
-                                            StringViewData(_key),
-                                            _key.size())
-                                      : yyjson_mut_strn(
-                                            _doc,
-                                            StringViewData(_key),
-                                            _key.size());
-            success = yyjson_mut_obj_add(_parent, key, value);
+            yyjson_mut_val* key = yyjson_mut_strncpy(
+                _doc,
+                StringViewData(_key),
+                _key.size());
+            success = key != nullptr && yyjson_mut_obj_add(_parent, key, value);
             break;
         }
         case Target::ArrayElement:

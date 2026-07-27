@@ -1,5 +1,6 @@
 #include <radray/window/native_window.h>
 
+#include <radray/enum_flags.h>
 #include <radray/logger.h>
 #include <radray/utility.h>
 
@@ -73,12 +74,7 @@ Nullable<unique_ptr<NativeEventPump>> NativeEventPump::Create(NativeWindowType t
 }
 
 std::string_view format_as(NativeWindowType v) noexcept {
-    switch (v) {
-        case NativeWindowType::UNKNOWN: return "UNKNOWN";
-        case NativeWindowType::Win32HWND: return "Win32HWND";
-        case NativeWindowType::CocoaNSWindow: return "CocoaNSWindow";
-    }
-    Unreachable();
+    return EnumNameOr(v);
 }
 
 }  // namespace radray

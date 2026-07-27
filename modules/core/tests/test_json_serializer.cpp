@@ -16,6 +16,11 @@ enum class Mode : int16_t {
     Enabled = 2,
 };
 
+enum class NamedMode : uint8_t {
+    Disabled,
+    Enabled,
+};
+
 struct Child {
     string Name;
     Mode Value{Mode::Disabled};
@@ -95,8 +100,8 @@ TEST(JsonSerializerTest, RecursivelySerializesMembersAndContainers) {
     EXPECT_EQ(root["Name"].AsString(), "root");
     ASSERT_EQ(root["Children"].Size(), 2u);
     EXPECT_EQ(root["Children"].At(0)["Name"].AsString(), "first");
-    EXPECT_EQ(root["Children"].At(0)["Value"].AsInt(), 2);
-    EXPECT_EQ(root["Children"].At(1)["Value"].AsInt(), -1);
+    EXPECT_EQ(root["Children"].At(0)["Value"].AsString(), "Enabled");
+    EXPECT_EQ(root["Children"].At(1)["Value"].AsString(), "Disabled");
     EXPECT_FALSE(root.Has("Limit"));
     EXPECT_TRUE(root["ExplicitNull"].IsNull());
     EXPECT_EQ(root["Dynamic"].AsUint(), 9u);
@@ -132,9 +137,37 @@ TEST(JsonSerializerTest, SupportsAnyJsonRootValue) {
     EXPECT_EQ(boolVector.value(), "[true,false,true]");
 }
 
+TEST(JsonSerializerTest, EnumsUseTheirMemberNames) {
+    using json_serializer_test::NamedMode;
+
+    EXPECT_EQ(EnumName(NamedMode::Enabled), std::string_view{"Enabled"});
+    EXPECT_EQ(EnumCast<NamedMode>("Disabled"), NamedMode::Disabled);
+    EXPECT_FALSE(EnumCast<NamedMode>("enabled").has_value());
+
+    const std::optional<string> json = SerializeJson(NamedMode::Enabled, false);
+    ASSERT_TRUE(json.has_value());
+    EXPECT_EQ(json.value(), R"("Enabled")");
+    EXPECT_FALSE(SerializeJson(static_cast<NamedMode>(7), false).has_value());
+}
+
 TEST(JsonSerializerTest, RejectsNonFiniteNumbers) {
     EXPECT_FALSE(SerializeJson(std::numeric_limits<double>::infinity()).has_value());
     EXPECT_FALSE(SerializeJson(std::numeric_limits<double>::quiet_NaN()).has_value());
+}
+
+TEST(JsonSerializerTest, CopiesMemberNames) {
+    JsonWriter writer;
+    JsonWriteContext context{writer};
+    JsonObjectWriter object = context.BeginObject();
+    ASSERT_TRUE(object.IsValid());
+
+    std::array<char, 7> name{'D', 'y', 'n', 'a', 'm', 'i', 'c'};
+    ASSERT_TRUE(object.Member(std::string_view{name.data(), name.size()}, uint32_t{42}));
+    name.fill('x');
+
+    std::optional<string> json = writer.Write(false);
+    ASSERT_TRUE(json.has_value());
+    EXPECT_EQ(json.value(), R"({"Dynamic":42})");
 }
 
 }  // namespace

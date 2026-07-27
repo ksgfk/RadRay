@@ -2,19 +2,14 @@
     "Artifacts": [
         {
             "Name": "dxc",
-            "Version": "1.9.2602",
+            "Version": "1.9.2602.24",
             "Url": "https://github.com/ksgfk/dxc-autobuild/releases/download/v{Version}/dxc-{Platform}-{Arch}.zip",
             "EnforceHash": true,
             "Triplets": [
                 {
                     "Platform": "windows",
                     "Arch": "x64",
-                    "Hash": "dcc3a50f94d72cd1b55f403f05c4c38bc2724a4251a1e1cf142d51a79120a4e3"
-                },
-                {
-                    "Platform": "macos",
-                    "Arch": "arm64",
-                    "Hash": "814973cf2104175edbcad04fc03336e66088a1c8da134760797e6e38702c2697"
+                    "Hash": "cd3eb6c3fbdfe565a3c62c75a4b9b76b9c50fa7f6bcdccf9d0708460d8f8cb71"
                 }
             ]
         }
@@ -25,6 +20,12 @@
             "Type": "git",
             "Git": "https://github.com/fmtlib/fmt.git",
             "Tag": "12.2.0"
+        },
+        {
+            "Name": "magic_enum",
+            "Type": "git",
+            "Git": "https://github.com/Neargye/magic_enum.git",
+            "Tag": "v0.9.8"
         },
         {
             "Name": "spdlog",

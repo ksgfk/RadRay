@@ -1,0 +1,223 @@
+{
+  "FormatVersion": 1,
+  "Name": "ForwardPrincipled",
+  "Source": "forward_pipeline/forward_pass.hlsl",
+  "KeywordGroups": [
+    {
+      "Name": "BaseColorMap",
+      "Keywords": ["_BASECOLOR_MAP"],
+      "IsOptional": true,
+      "Stages": ["Pixel"]
+    },
+    {
+      "Name": "MetalRoughnessMap",
+      "Keywords": ["_METALROUGHNESS_MAP"],
+      "IsOptional": true,
+      "Stages": ["Pixel"]
+    },
+    {
+      "Name": "NormalMap",
+      "Keywords": ["_NORMAL_MAP"],
+      "IsOptional": true,
+      "Stages": ["Pixel"]
+    },
+    {
+      "Name": "OcclusionMap",
+      "Keywords": ["_OCCLUSION_MAP"],
+      "IsOptional": true,
+      "Stages": ["Pixel"]
+    },
+    {
+      "Name": "EmissiveMap",
+      "Keywords": ["_EMISSIVE_MAP"],
+      "IsOptional": true,
+      "Stages": ["Pixel"]
+    },
+    {
+      "Name": "AlphaMode",
+      "Keywords": ["_ALPHATEST_ON", "_ALPHABLEND_ON"],
+      "IsOptional": true,
+      "Stages": ["Pixel"]
+    },
+    {
+      "Name": "DoubleSided",
+      "Keywords": ["_DOUBLESIDED_ON"],
+      "IsOptional": true,
+      "Stages": ["Pixel"]
+    },
+    {
+      "Name": "PointShadows",
+      "Keywords": ["_POINT_SHADOWS"],
+      "IsOptional": true,
+      "Stages": ["Pixel"]
+    },
+    {
+      "Name": "DirectionalShadows",
+      "Keywords": ["_DIRECTIONAL_SHADOWS"],
+      "IsOptional": true,
+      "Stages": ["Pixel"]
+    }
+  ],
+  "BakeVariants": {
+    "Rules": [
+      {
+        "Combination": [
+          "_BASECOLOR_MAP",
+          "_METALROUGHNESS_MAP",
+          "_NORMAL_MAP",
+          "_OCCLUSION_MAP",
+          "_EMISSIVE_MAP",
+          "_ALPHATEST_ON",
+          "_DOUBLESIDED_ON",
+          "_POINT_SHADOWS",
+          "_DIRECTIONAL_SHADOWS"
+        ]
+      },
+      {
+        "Combination": ["_ALPHABLEND_ON"]
+      }
+    ]
+  },
+  "Passes": [
+    {
+      "Name": "Forward",
+      "Stages": [
+        { "Stage": "Vertex", "EntryPoint": "VSMain" },
+        { "Stage": "Pixel", "EntryPoint": "PSMain" }
+      ],
+      "ShaderModel": "SM62",
+      "IsOptimize": true,
+      "EnableUnbounded": true,
+      "BindingGroups": [
+        {
+          "Group": 0,
+          "Bindings": [
+            {
+              "Name": "gPerObject",
+              "Binding": 1,
+              "Type": "CBuffer",
+              "Residency": "RootDescriptor",
+              "Stages": ["Vertex"]
+            }
+          ]
+        },
+        {
+          "Group": 1,
+          "Bindings": [
+            {
+              "Name": "gView",
+              "Binding": 0,
+              "Type": "CBuffer",
+              "Residency": "RootDescriptor",
+              "Stages": ["Vertex", "Pixel"]
+            },
+            {
+              "Name": "gShadowCube",
+              "Binding": 1,
+              "Type": "Texture",
+              "Stages": ["Pixel"]
+            },
+            {
+              "Name": "gShadowArray",
+              "Binding": 2,
+              "Type": "Texture",
+              "Stages": ["Pixel"]
+            },
+            {
+              "Name": "gShadowSampler",
+              "Binding": 3,
+              "Type": "Sampler",
+              "Stages": ["Pixel"]
+            }
+          ]
+        },
+        {
+          "Group": 2,
+          "Bindings": [
+            {
+              "Name": "gMaterial",
+              "Binding": 0,
+              "Type": "CBuffer",
+              "Stages": ["Pixel"]
+            },
+            {
+              "Name": "gBaseColorMap",
+              "Binding": 1,
+              "Type": "Texture",
+              "Stages": ["Pixel"]
+            },
+            {
+              "Name": "gMetalRoughMap",
+              "Binding": 2,
+              "Type": "Texture",
+              "Stages": ["Pixel"]
+            },
+            {
+              "Name": "gNormalMap",
+              "Binding": 3,
+              "Type": "Texture",
+              "Stages": ["Pixel"]
+            },
+            {
+              "Name": "gOcclusionMap",
+              "Binding": 4,
+              "Type": "Texture",
+              "Stages": ["Pixel"]
+            },
+            {
+              "Name": "gEmissiveMap",
+              "Binding": 5,
+              "Type": "Texture",
+              "Stages": ["Pixel"]
+            },
+            {
+              "Name": "gSampler",
+              "Binding": 6,
+              "Type": "Sampler",
+              "Stages": ["Pixel"]
+            }
+          ]
+        }
+      ],
+      "VertexInput": {
+        "Buffers": [
+          {
+            "Binding": 0,
+            "ArrayStride": 48,
+            "StepMode": "Vertex"
+          }
+        ],
+        "Attributes": [
+          {
+            "Semantic": "POSITION",
+            "SemanticIndex": 0,
+            "Format": "FLOAT32X3",
+            "BufferBinding": 0,
+            "Offset": 0
+          },
+          {
+            "Semantic": "NORMAL",
+            "SemanticIndex": 0,
+            "Format": "FLOAT32X3",
+            "BufferBinding": 0,
+            "Offset": 12
+          },
+          {
+            "Semantic": "TEXCOORD",
+            "SemanticIndex": 0,
+            "Format": "FLOAT32X2",
+            "BufferBinding": 0,
+            "Offset": 24
+          },
+          {
+            "Semantic": "TANGENT",
+            "SemanticIndex": 0,
+            "Format": "FLOAT32X4",
+            "BufferBinding": 0,
+            "Offset": 32
+          }
+        ]
+      }
+    }
+  ]
+}

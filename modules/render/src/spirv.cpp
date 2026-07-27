@@ -131,6 +131,153 @@ bool JsonSerializer<render::SpirvShaderDesc>::Write(
            object.OptionalMember("ComputeInfo", value.ComputeInfo);
 }
 
+bool JsonDeserializer<render::SpirvTypeMember>::Read(
+    const JsonValue& json,
+    render::SpirvTypeMember& value) noexcept {
+    using value_type = render::SpirvTypeMember;
+    return DeserializeJsonObject(
+        json,
+        value,
+        JsonMember{"Name", &value_type::Name},
+        JsonMember{"Offset", &value_type::Offset},
+        JsonMember{"Size", &value_type::Size},
+        JsonMember{"TypeIndex", &value_type::TypeIndex},
+        JsonMember{"ArraySize", &value_type::ArraySize},
+        JsonMember{"ArrayStride", &value_type::ArrayStride},
+        JsonMember{"MatrixStride", &value_type::MatrixStride},
+        JsonMember{"RowMajor", &value_type::RowMajor});
+}
+
+bool JsonDeserializer<render::SpirvTypeInfo>::Read(
+    const JsonValue& json,
+    render::SpirvTypeInfo& value) noexcept {
+    using value_type = render::SpirvTypeInfo;
+    return DeserializeJsonObject(
+        json,
+        value,
+        JsonMember{"Name", &value_type::Name},
+        JsonMember{"BaseType", &value_type::BaseType},
+        JsonMember{"VectorSize", &value_type::VectorSize},
+        JsonMember{"Columns", &value_type::Columns},
+        JsonMember{"ArraySize", &value_type::ArraySize},
+        JsonMember{"ArrayStride", &value_type::ArrayStride},
+        JsonMember{"MatrixStride", &value_type::MatrixStride},
+        JsonMember{"Size", &value_type::Size},
+        JsonMember{"RowMajor", &value_type::RowMajor},
+        JsonMember{"Members", &value_type::Members});
+}
+
+bool JsonDeserializer<render::SpirvImageInfo>::Read(
+    const JsonValue& json,
+    render::SpirvImageInfo& value) noexcept {
+    using value_type = render::SpirvImageInfo;
+    return DeserializeJsonObject(
+        json,
+        value,
+        JsonMember{"Dim", &value_type::Dim},
+        JsonMember{"Arrayed", &value_type::Arrayed},
+        JsonMember{"Multisampled", &value_type::Multisampled},
+        JsonMember{"Depth", &value_type::Depth},
+        JsonMember{"SampledType", &value_type::SampledType});
+}
+
+bool JsonDeserializer<render::SpirvStageIo>::Read(
+    const JsonValue& json,
+    render::SpirvStageIo& value) noexcept {
+    JsonObjectReader object{json};
+    render::SpirvStageIo decoded{};
+    if (!object.IsValid() ||
+        !object.Member("Name", decoded.Name) ||
+        !object.Member("HlslSemantic", decoded.HlslSemantic) ||
+        !object.Member("Location", decoded.Location) ||
+        !object.Member("TypeIndex", decoded.TypeIndex) ||
+        !object.OptionalMember("BuiltIn", decoded.BuiltIn)) {
+        return false;
+    }
+    value = std::move(decoded);
+    return true;
+}
+
+bool JsonDeserializer<render::SpirvResourceBinding>::Read(
+    const JsonValue& json,
+    render::SpirvResourceBinding& value) noexcept {
+    JsonObjectReader object{json};
+    render::SpirvResourceBinding decoded{};
+    if (!object.IsValid() ||
+        !object.Member("Name", decoded.Name) ||
+        !object.Member("Kind", decoded.Kind) ||
+        !object.Member("Set", decoded.Set) ||
+        !object.Member("Binding", decoded.Binding) ||
+        !object.OptionalMember("HlslRegister", decoded.HlslRegister) ||
+        !object.OptionalMember("HlslSpace", decoded.HlslSpace) ||
+        !object.Member("ArraySize", decoded.ArraySize) ||
+        !object.Member("TypeIndex", decoded.TypeIndex) ||
+        !object.Member("UniformBufferSize", decoded.UniformBufferSize) ||
+        !object.Member("ReadOnly", decoded.ReadOnly) ||
+        !object.Member("WriteOnly", decoded.WriteOnly) ||
+        !object.Member("IsViewInHlsl", decoded.IsViewInHlsl) ||
+        !object.Member("HlslType", decoded.HlslType) ||
+        !object.Member("IsUnboundedArray", decoded.IsUnboundedArray) ||
+        !object.OptionalMember("ImageInfo", decoded.ImageInfo)) {
+        return false;
+    }
+    value = std::move(decoded);
+    return true;
+}
+
+bool JsonDeserializer<render::SpirvComputeInfo>::Read(
+    const JsonValue& json,
+    render::SpirvComputeInfo& value) noexcept {
+    using value_type = render::SpirvComputeInfo;
+    return DeserializeJsonObject(
+        json,
+        value,
+        JsonMember{"LocalSizeX", &value_type::LocalSizeX},
+        JsonMember{"LocalSizeY", &value_type::LocalSizeY},
+        JsonMember{"LocalSizeZ", &value_type::LocalSizeZ});
+}
+
+bool JsonDeserializer<render::SpirvPushConstantRange>::Read(
+    const JsonValue& json,
+    render::SpirvPushConstantRange& value) noexcept {
+    using value_type = render::SpirvPushConstantRange;
+    return DeserializeJsonObject(
+        json,
+        value,
+        JsonMember{"Name", &value_type::Name},
+        JsonMember{"Offset", &value_type::Offset},
+        JsonMember{"Size", &value_type::Size},
+        JsonMember{"TypeIndex", &value_type::TypeIndex},
+        JsonMember{"IsViewInHlsl", &value_type::IsViewInHlsl});
+}
+
+bool JsonDeserializer<render::SpirvShaderDesc>::Read(
+    const JsonValue& json,
+    render::SpirvShaderDesc& value) noexcept {
+    JsonObjectReader object{json};
+    uint32_t formatVersion = 0;
+    string kind;
+    if (!object.IsValid() ||
+        !object.Member("FormatVersion", formatVersion) ||
+        !object.Member("Kind", kind) ||
+        formatVersion != render::kReflectionFormatVersion ||
+        kind != "spirv") {
+        return false;
+    }
+
+    render::SpirvShaderDesc decoded{};
+    if (!object.Member("Types", decoded.Types) ||
+        !object.Member("StageInputs", decoded.StageInputs) ||
+        !object.Member("StageOutputs", decoded.StageOutputs) ||
+        !object.Member("ResourceBindings", decoded.ResourceBindings) ||
+        !object.Member("ConstantRanges", decoded.ConstantRanges) ||
+        !object.OptionalMember("ComputeInfo", decoded.ComputeInfo)) {
+        return false;
+    }
+    value = std::move(decoded);
+    return true;
+}
+
 }  // namespace radray
 
 namespace radray::render {
@@ -156,155 +303,14 @@ namespace radray::render {
 //     }
 // }
 
-// ====================== SpirvShaderDesc <-> JSON ======================
-
-namespace {
-
-template <typename E>
-E UToEnum(uint64_t v) noexcept {
-    return static_cast<E>(static_cast<std::underlying_type_t<E>>(v));
-}
-
-void ReadSpirvType(const JsonValue& obj, SpirvTypeInfo& t) {
-    t.Name = string{obj["Name"].AsString()};
-    t.BaseType = UToEnum<SpirvBaseType>(obj["BaseType"].AsUint());
-    t.VectorSize = static_cast<uint32_t>(obj["VectorSize"].AsUint(1));
-    t.Columns = static_cast<uint32_t>(obj["Columns"].AsUint(1));
-    t.ArraySize = static_cast<uint32_t>(obj["ArraySize"].AsUint());
-    t.ArrayStride = static_cast<uint32_t>(obj["ArrayStride"].AsUint());
-    t.MatrixStride = static_cast<uint32_t>(obj["MatrixStride"].AsUint());
-    t.Size = static_cast<uint32_t>(obj["Size"].AsUint());
-    t.RowMajor = obj["RowMajor"].AsBool();
-    JsonValue members = obj["Members"];
-    const size_t n = members.Size();
-    t.Members.reserve(n);
-    for (size_t i = 0; i < n; ++i) {
-        JsonValue mo = members.At(i);
-        SpirvTypeMember m{};
-        m.Name = string{mo["Name"].AsString()};
-        m.Offset = static_cast<uint32_t>(mo["Offset"].AsUint());
-        m.Size = static_cast<uint32_t>(mo["Size"].AsUint());
-        m.TypeIndex = static_cast<uint32_t>(mo["TypeIndex"].AsUint());
-        m.ArraySize = static_cast<uint32_t>(mo["ArraySize"].AsUint());
-        m.ArrayStride = static_cast<uint32_t>(mo["ArrayStride"].AsUint());
-        m.MatrixStride = static_cast<uint32_t>(mo["MatrixStride"].AsUint());
-        m.RowMajor = mo["RowMajor"].AsBool(false);
-        t.Members.push_back(std::move(m));
-    }
-}
-
-void ReadSpirvBinding(const JsonValue& obj, SpirvResourceBinding& r) {
-    r.Name = string{obj["Name"].AsString()};
-    r.Kind = UToEnum<SpirvResourceKind>(obj["Kind"].AsUint());
-    r.Set = static_cast<uint32_t>(obj["Set"].AsUint());
-    r.Binding = static_cast<uint32_t>(obj["Binding"].AsUint());
-    if (obj.Has("HlslRegister")) {
-        r.HlslRegister = static_cast<uint32_t>(obj["HlslRegister"].AsUint());
-    }
-    if (obj.Has("HlslSpace")) {
-        r.HlslSpace = static_cast<uint32_t>(obj["HlslSpace"].AsUint());
-    }
-    r.ArraySize = static_cast<uint32_t>(obj["ArraySize"].AsUint());
-    r.TypeIndex = static_cast<uint32_t>(obj["TypeIndex"].AsUint());
-    r.UniformBufferSize = static_cast<uint32_t>(obj["UniformBufferSize"].AsUint());
-    r.ReadOnly = obj["ReadOnly"].AsBool(true);
-    r.WriteOnly = obj["WriteOnly"].AsBool(false);
-    r.IsViewInHlsl = obj["IsViewInHlsl"].AsBool(false);
-    r.HlslType = string{obj["HlslType"].AsString()};
-    r.IsUnboundedArray = obj["IsUnboundedArray"].AsBool(false);
-    if (obj.Has("ImageInfo")) {
-        JsonValue io = obj["ImageInfo"];
-        SpirvImageInfo img{};
-        img.Dim = UToEnum<SpirvImageDim>(io["Dim"].AsUint());
-        img.Arrayed = io["Arrayed"].AsBool();
-        img.Multisampled = io["Multisampled"].AsBool();
-        img.Depth = io["Depth"].AsBool();
-        img.SampledType = static_cast<uint32_t>(io["SampledType"].AsUint());
-        r.ImageInfo = img;
-    }
-}
-
-void ReadSpirvStageIo(const JsonValue& obj, SpirvStageIo& value) {
-    value.Name = string{obj["Name"].AsString()};
-    value.HlslSemantic = string{obj["HlslSemantic"].AsString()};
-    value.Location = static_cast<uint32_t>(obj["Location"].AsUint());
-    value.TypeIndex = static_cast<uint32_t>(obj["TypeIndex"].AsUint());
-    if (obj.Has("BuiltIn")) {
-        value.BuiltIn = static_cast<uint32_t>(obj["BuiltIn"].AsUint());
-    }
-}
-
-}  // namespace
-
 std::optional<string> SerializeSpirvShaderDesc(const SpirvShaderDesc& desc) noexcept {
     return SerializeJson(desc, true);
 }
 
 std::optional<SpirvShaderDesc> DeserializeSpirvShaderDesc(std::string_view json) noexcept {
-    std::optional<JsonDocument> docOpt = JsonDocument::Parse(json);
-    if (!docOpt.has_value()) {
-        RADRAY_ERR_LOG("DeserializeSpirvShaderDesc: JSON parse failed");
-        return std::nullopt;
-    }
-    JsonValue root = docOpt->Root();
-    if (!root.IsObject()) {
-        RADRAY_ERR_LOG("DeserializeSpirvShaderDesc: root is not object");
-        return std::nullopt;
-    }
-    const uint32_t ver = static_cast<uint32_t>(root["FormatVersion"].AsUint());
-    if (ver != kReflectionFormatVersion) {
-        RADRAY_ERR_LOG("DeserializeSpirvShaderDesc: format version {} != expected {}", ver, kReflectionFormatVersion);
-        return std::nullopt;
-    }
-
-    SpirvShaderDesc desc{};
-    JsonValue types = root["Types"];
-    desc.Types.reserve(types.Size());
-    for (size_t i = 0; i < types.Size(); ++i) {
-        SpirvTypeInfo t{};
-        ReadSpirvType(types.At(i), t);
-        desc.Types.push_back(std::move(t));
-    }
-    JsonValue inputs = root["StageInputs"];
-    desc.StageInputs.reserve(inputs.Size());
-    for (size_t i = 0; i < inputs.Size(); ++i) {
-        SpirvStageIo value{};
-        ReadSpirvStageIo(inputs.At(i), value);
-        desc.StageInputs.push_back(std::move(value));
-    }
-    JsonValue outputs = root["StageOutputs"];
-    desc.StageOutputs.reserve(outputs.Size());
-    for (size_t i = 0; i < outputs.Size(); ++i) {
-        SpirvStageIo value{};
-        ReadSpirvStageIo(outputs.At(i), value);
-        desc.StageOutputs.push_back(std::move(value));
-    }
-    JsonValue binds = root["ResourceBindings"];
-    desc.ResourceBindings.reserve(binds.Size());
-    for (size_t i = 0; i < binds.Size(); ++i) {
-        SpirvResourceBinding r{};
-        ReadSpirvBinding(binds.At(i), r);
-        desc.ResourceBindings.push_back(std::move(r));
-    }
-    JsonValue ranges = root["ConstantRanges"];
-    desc.ConstantRanges.reserve(ranges.Size());
-    for (size_t i = 0; i < ranges.Size(); ++i) {
-        JsonValue co = ranges.At(i);
-        SpirvPushConstantRange c{};
-        c.Name = string{co["Name"].AsString()};
-        c.Offset = static_cast<uint32_t>(co["Offset"].AsUint());
-        c.Size = static_cast<uint32_t>(co["Size"].AsUint());
-        c.TypeIndex = static_cast<uint32_t>(co["TypeIndex"].AsUint());
-        c.IsViewInHlsl = co["IsViewInHlsl"].AsBool();
-        desc.ConstantRanges.push_back(std::move(c));
-    }
-    if (root.Has("ComputeInfo")) {
-        JsonValue co = root["ComputeInfo"];
-        SpirvComputeInfo ci{};
-        ci.LocalSizeX = static_cast<uint32_t>(co["LocalSizeX"].AsUint(1));
-        ci.LocalSizeY = static_cast<uint32_t>(co["LocalSizeY"].AsUint(1));
-        ci.LocalSizeZ = static_cast<uint32_t>(co["LocalSizeZ"].AsUint(1));
-        desc.ComputeInfo = ci;
+    std::optional<SpirvShaderDesc> desc = DeserializeJson<SpirvShaderDesc>(json);
+    if (!desc.has_value()) {
+        RADRAY_ERR_LOG("DeserializeSpirvShaderDesc: invalid JSON payload");
     }
     return desc;
 }

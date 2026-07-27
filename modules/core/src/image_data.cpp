@@ -17,6 +17,7 @@
 #include <jpeglib.h>
 #endif
 
+#include <radray/enum_flags.h>
 #include <radray/logger.h>
 #include <radray/utility.h>
 #include <radray/memory.h>
@@ -732,24 +733,7 @@ ImageData ImageData::ImageDiffRGBA8(const ImageData& actual, const ImageData& ex
 }
 
 std::string_view format_as(ImageFormat val) noexcept {
-    switch (val) {
-        case radray::ImageFormat::R8_BYTE: return "R8_BYTE";
-        case radray::ImageFormat::R16_USHORT: return "R16_USHORT";
-        case radray::ImageFormat::R16_HALF: return "R16_HALF";
-        case radray::ImageFormat::R32_FLOAT: return "R32_FLOAT";
-        case radray::ImageFormat::RG8_BYTE: return "RG8_BYTE";
-        case radray::ImageFormat::RG16_USHORT: return "RG16_USHORT";
-        case radray::ImageFormat::RG16_HALF: return "RG16_HALF";
-        case radray::ImageFormat::RG32_FLOAT: return "RG32_FLOAT";
-        case radray::ImageFormat::RGB32_FLOAT: return "RGB32_FLOAT";
-        case radray::ImageFormat::RGBA8_BYTE: return "RGBA8_BYTE";
-        case radray::ImageFormat::RGBA16_USHORT: return "RGBA16_USHORT";
-        case radray::ImageFormat::RGBA16_HALF: return "RGBA16_HALF";
-        case radray::ImageFormat::RGBA32_FLOAT: return "RGBA32_FLOAT";
-        case radray::ImageFormat::RGB8_BYTE: return "RGB8_BYTE";
-        case radray::ImageFormat::RGB16_USHORT: return "RGB16_USHORT";
-    }
-    Unreachable();
+    return EnumNameOr(val);
 }
 
 }  // namespace radray

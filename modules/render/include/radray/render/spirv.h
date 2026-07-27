@@ -137,7 +137,7 @@ public:
 
 // SpirvShaderDesc 的 JSON 序列化 (作为 ShaderBinary 内部的版本化反射载荷)。
 //
-// 枚举以底层整数值存储 (依赖枚举声明顺序稳定); 名字 / 绑定等以原始类型存储, 便于人读与 diff。
+// 枚举以稳定成员名存储；枚举成员不可重命名。名字 / 绑定等以原始类型存储，便于人读与 diff。
 // 不依赖 DXC / SPIRV-Cross, 因此 DXC 关闭时预编译缓存仍可反序列化。
 
 /// 序列化 SpirvShaderDesc 为 JSON 文本。失败返回 nullopt。
@@ -156,8 +156,18 @@ struct JsonSerializer<render::SpirvTypeMember> {
 };
 
 template <>
+struct JsonDeserializer<render::SpirvTypeMember> {
+    static bool Read(const JsonValue& json, render::SpirvTypeMember& value) noexcept;
+};
+
+template <>
 struct JsonSerializer<render::SpirvTypeInfo> {
     static bool Write(JsonWriteContext& context, const render::SpirvTypeInfo& value) noexcept;
+};
+
+template <>
+struct JsonDeserializer<render::SpirvTypeInfo> {
+    static bool Read(const JsonValue& json, render::SpirvTypeInfo& value) noexcept;
 };
 
 template <>
@@ -166,8 +176,18 @@ struct JsonSerializer<render::SpirvImageInfo> {
 };
 
 template <>
+struct JsonDeserializer<render::SpirvImageInfo> {
+    static bool Read(const JsonValue& json, render::SpirvImageInfo& value) noexcept;
+};
+
+template <>
 struct JsonSerializer<render::SpirvStageIo> {
     static bool Write(JsonWriteContext& context, const render::SpirvStageIo& value) noexcept;
+};
+
+template <>
+struct JsonDeserializer<render::SpirvStageIo> {
+    static bool Read(const JsonValue& json, render::SpirvStageIo& value) noexcept;
 };
 
 template <>
@@ -176,8 +196,18 @@ struct JsonSerializer<render::SpirvResourceBinding> {
 };
 
 template <>
+struct JsonDeserializer<render::SpirvResourceBinding> {
+    static bool Read(const JsonValue& json, render::SpirvResourceBinding& value) noexcept;
+};
+
+template <>
 struct JsonSerializer<render::SpirvComputeInfo> {
     static bool Write(JsonWriteContext& context, const render::SpirvComputeInfo& value) noexcept;
+};
+
+template <>
+struct JsonDeserializer<render::SpirvComputeInfo> {
+    static bool Read(const JsonValue& json, render::SpirvComputeInfo& value) noexcept;
 };
 
 template <>
@@ -186,8 +216,18 @@ struct JsonSerializer<render::SpirvPushConstantRange> {
 };
 
 template <>
+struct JsonDeserializer<render::SpirvPushConstantRange> {
+    static bool Read(const JsonValue& json, render::SpirvPushConstantRange& value) noexcept;
+};
+
+template <>
 struct JsonSerializer<render::SpirvShaderDesc> {
     static bool Write(JsonWriteContext& context, const render::SpirvShaderDesc& value) noexcept;
+};
+
+template <>
+struct JsonDeserializer<render::SpirvShaderDesc> {
+    static bool Read(const JsonValue& json, render::SpirvShaderDesc& value) noexcept;
 };
 
 }  // namespace radray

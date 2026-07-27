@@ -29,6 +29,7 @@
 - DEBUG mode uses macro `RADRAY_IS_DEBUG` (NOT `NDEBUG` or `_DEBUG`).
 - String formatting must use `fmt` library; check whether a type has `format_to` before using it.
 - Flag-style enums use `enum_flags.h` (`EnumFlags<T>`, `is_flags<T>`, `format_as`).
+- Enum member names are stable public identifiers used by `magic_enum` and serialized data. Never rename an existing enum member; add a new member and migrate data explicitly when a protocol name must change.
 
 ## Exception Policy
 - Never add `try`/`catch` merely to preserve a `noexcept` declaration. If an exception cannot be meaningfully handled, do not catch it; allow it to propagate, or allow `std::terminate` at a `noexcept` boundary.

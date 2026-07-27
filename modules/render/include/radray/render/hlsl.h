@@ -322,10 +322,10 @@ bool IsBufferDimension(HlslSRVDimension dim) noexcept;
 
 // HlslShaderDesc 的 JSON 序列化 (作为 ShaderBinary 内部的版本化反射载荷)。
 //
-// 枚举以底层整数值存储 (依赖枚举声明顺序稳定); 名字 / 绑定点等以原始类型存储, 便于人读与 diff。
+// 枚举以稳定成员名存储；枚举成员不可重命名。名字 / 绑定点等以原始类型存储，便于人读与 diff。
 // 不依赖 DXC, 因此 DXC 关闭时预编译缓存仍可反序列化。
 
-inline constexpr uint32_t kReflectionFormatVersion = 2;
+inline constexpr uint32_t kReflectionFormatVersion = 3;
 
 /// 序列化 HlslShaderDesc 为 JSON 文本。失败返回 nullopt。
 std::optional<string> SerializeHlslShaderDesc(const HlslShaderDesc& desc) noexcept;
@@ -343,8 +343,18 @@ struct JsonSerializer<render::HlslShaderTypeId> {
 };
 
 template <>
+struct JsonDeserializer<render::HlslShaderTypeId> {
+    static bool Read(const JsonValue& json, render::HlslShaderTypeId& value) noexcept;
+};
+
+template <>
 struct JsonSerializer<render::HlslShaderTypeMember> {
     static bool Write(JsonWriteContext& context, const render::HlslShaderTypeMember& value) noexcept;
+};
+
+template <>
+struct JsonDeserializer<render::HlslShaderTypeMember> {
+    static bool Read(const JsonValue& json, render::HlslShaderTypeMember& value) noexcept;
 };
 
 template <>
@@ -353,8 +363,18 @@ struct JsonSerializer<render::HlslShaderTypeDesc> {
 };
 
 template <>
+struct JsonDeserializer<render::HlslShaderTypeDesc> {
+    static bool Read(const JsonValue& json, render::HlslShaderTypeDesc& value) noexcept;
+};
+
+template <>
 struct JsonSerializer<render::HlslShaderVariableDesc> {
     static bool Write(JsonWriteContext& context, const render::HlslShaderVariableDesc& value) noexcept;
+};
+
+template <>
+struct JsonDeserializer<render::HlslShaderVariableDesc> {
+    static bool Read(const JsonValue& json, render::HlslShaderVariableDesc& value) noexcept;
 };
 
 template <>
@@ -363,8 +383,18 @@ struct JsonSerializer<render::HlslShaderBufferDesc> {
 };
 
 template <>
+struct JsonDeserializer<render::HlslShaderBufferDesc> {
+    static bool Read(const JsonValue& json, render::HlslShaderBufferDesc& value) noexcept;
+};
+
+template <>
 struct JsonSerializer<render::HlslInputBindDesc> {
     static bool Write(JsonWriteContext& context, const render::HlslInputBindDesc& value) noexcept;
+};
+
+template <>
+struct JsonDeserializer<render::HlslInputBindDesc> {
+    static bool Read(const JsonValue& json, render::HlslInputBindDesc& value) noexcept;
 };
 
 template <>
@@ -373,8 +403,18 @@ struct JsonSerializer<render::HlslSignatureParameterDesc> {
 };
 
 template <>
+struct JsonDeserializer<render::HlslSignatureParameterDesc> {
+    static bool Read(const JsonValue& json, render::HlslSignatureParameterDesc& value) noexcept;
+};
+
+template <>
 struct JsonSerializer<render::HlslShaderDesc> {
     static bool Write(JsonWriteContext& context, const render::HlslShaderDesc& value) noexcept;
+};
+
+template <>
+struct JsonDeserializer<render::HlslShaderDesc> {
+    static bool Read(const JsonValue& json, render::HlslShaderDesc& value) noexcept;
 };
 
 }  // namespace radray
