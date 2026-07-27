@@ -12,7 +12,7 @@
 - `modules/` contains core code split into `core`, `window`, `render`, and `runtime`.
 - Dependency chain: `core` ← `window`, `render` ← `runtime` (requires both window + render).
 - `examples/` holds runnable demos; `benchmarks/` holds performance targets (enabled in release builds).
-- `tools/` contains utility scripts (dependency fetching, compile_commands gen, shader codegen).
+- `tools/` contains utility scripts (dependency fetching, compile_commands gen, shader codegen) and the `shader_gen` CLI target.
 - `assets/` and `shaderlib/` store runtime assets and shader sources.
 - `third_party/` and `SDKs/` are dependency trees populated by setup scripts (readonly — do not edit).
 

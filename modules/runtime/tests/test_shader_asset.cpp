@@ -3823,8 +3823,18 @@ TEST(ShaderResolverTest, DefinesChangeTheResolvedArtifact) {
 
 constexpr std::string_view kForwardSampleSource = "forward_pipeline/forward_pass.hlsl";
 
+/// 仓库根。环境变量 (ctest 注入) 优先, 缺失时回退到配置期编进来的路径,
+/// 使这些用例在直接跑 exe (调试器、手动 --gtest_filter 复现) 时同样可用。
 std::filesystem::path GetProjectRoot() {
-    return std::filesystem::path{GetEnv("RADRAY_PROJECT_DIR")};
+    const string fromEnv = GetEnv("RADRAY_PROJECT_DIR");
+    if (!fromEnv.empty()) {
+        return std::filesystem::path{fromEnv};
+    }
+#if defined(RADRAY_PROJECT_DIR_DEFAULT)
+    return std::filesystem::path{RADRAY_PROJECT_DIR_DEFAULT};
+#else
+    return {};
+#endif
 }
 
 std::filesystem::path GetForwardSampleManifestPath() {
@@ -3891,7 +3901,7 @@ void ExpectForwardSampleBindingName(
 
 TEST(ShaderAssetSampleTest, ManifestMatchesForwardPassContract) {
     const std::filesystem::path projectRoot = GetProjectRoot();
-    ASSERT_FALSE(projectRoot.empty()) << "RADRAY_PROJECT_DIR is not configured";
+    ASSERT_FALSE(projectRoot.empty()) << "the project root is unknown";
 
     const std::filesystem::path shaderRoot = projectRoot / "shaderlib";
     const std::filesystem::path manifestPath = GetForwardSampleManifestPath();

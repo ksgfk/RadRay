@@ -9,9 +9,7 @@
 
 // Forward providers reserve object/pipeline groups. The material group is a
 // shader convention and remains user-owned because the policy does not reserve it.
-struct PerObject {
-    float4x4 ObjectToWorld;
-};
+// per-object 常量 (PerObject / gPerObject) 由 binding_abi.hlsl 提供。
 
 struct ViewConstants {
     float4x4 ViewProj;
@@ -19,16 +17,20 @@ struct ViewConstants {
     // x = point light count, y = shadow point-light index+1,
     // z = directional light count, w = directional-shadow light index+1.
     uint4 LightCounts;
-    PointLightGpu PointLights[RR_MAX_POINT_LIGHTS];
-    DirectionalLightGpu DirectionalLights[RR_MAX_DIRECTIONAL_LIGHTS];
+    PointLightGpu PointLights[RADRAY_MAX_POINT_LIGHTS];
+    DirectionalLightGpu DirectionalLights[RADRAY_MAX_DIRECTIONAL_LIGHTS];
     PointShadowData PointShadow;
-    ShadowParam DirectionalShadow;
+    CascadeShadowData DirectionalShadow;
 };
 
-VK_BINDING(1, RADRAY_FORWARD_OBJECT_BINDING_GROUP)
-ConstantBuffer<PerObject> gPerObject : register(b1, RADRAY_FORWARD_OBJECT_SPACE);
 VK_BINDING(0, RADRAY_FORWARD_PIPELINE_BINDING_GROUP)
 ConstantBuffer<ViewConstants> gView : register(b0, RADRAY_FORWARD_PIPELINE_SPACE);
+
+// 阴影绑定的 keyword 声明就放在它们守护的 #ifdef 旁边 —— 这是唯一不会失同步的位置。
+// tools/shader_gen 从预处理输出里读这两条, 故每个 include 本文件的入口 shader 自动
+// 继承这两个变体维度 (详见 runtime/shader_asset_template.h)。
+#pragma radray_keyword_group(PointShadows, _POINT_SHADOWS) stages(Pixel)
+#pragma radray_keyword_group(DirectionalShadows, _DIRECTIONAL_SHADOWS) stages(Pixel)
 
 #ifdef _POINT_SHADOWS
     VK_BINDING(1, RADRAY_FORWARD_PIPELINE_BINDING_GROUP)

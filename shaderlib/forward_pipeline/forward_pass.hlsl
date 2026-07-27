@@ -17,6 +17,23 @@
 // shader 变体 (keyword, 全 #ifdef 编译期分支, 不用 cbuffer 值做运行期 if):
 //   贴图存在性: _BASECOLOR_MAP / _METALROUGHNESS_MAP / _NORMAL_MAP / _OCCLUSION_MAP / _EMISSIVE_MAP
 //   alpha/双面: _ALPHATEST_ON (clip cutoff) / _ALPHABLEND_ON (输出 alpha) / _DOUBLESIDED_ON (背面法线翻转)
+//
+// 下面的 pragma 是 keyword 组的【唯一权威声明】, tools/shader_gen 据此生成 manifest
+// 的 KeywordGroups (详见 runtime/shader_asset_template.h)。DXC 忽略未知 pragma, 故这
+// 些行不影响编译。必须写在任何 #if / #ifdef 之外, 否则会形成"要先知道 keyword 才能
+// 发现 keyword"的循环。
+//
+// 这里只声明本文件自己的 keyword; 阴影两组 (_POINT_SHADOWS / _DIRECTIONAL_SHADOWS)
+// 由提供那些绑定的 forward_interface.hlsl 声明, 经 include 自动继承。
+#pragma radray_keyword_group(BaseColorMap, _BASECOLOR_MAP) stages(Pixel)
+#pragma radray_keyword_group(MetalRoughnessMap, _METALROUGHNESS_MAP) stages(Pixel)
+#pragma radray_keyword_group(NormalMap, _NORMAL_MAP) stages(Pixel)
+#pragma radray_keyword_group(OcclusionMap, _OCCLUSION_MAP) stages(Pixel)
+#pragma radray_keyword_group(EmissiveMap, _EMISSIVE_MAP) stages(Pixel)
+// 同组即互斥: alpha test 与 alpha blend 不可能同时开启。
+#pragma radray_keyword_group(AlphaMode, _ALPHATEST_ON, _ALPHABLEND_ON) stages(Pixel)
+#pragma radray_keyword_group(DoubleSided, _DOUBLESIDED_ON) stages(Pixel)
+
 #include "forward_pipeline/forward_interface.hlsl"
 #include "principled.hlsl"
 
@@ -53,7 +70,6 @@ RADRAY_FORWARD_MATERIAL_TEXTURE2D(gMetalRoughMap, 2, 2);
 RADRAY_FORWARD_MATERIAL_TEXTURE2D(gNormalMap, 3, 3);
 RADRAY_FORWARD_MATERIAL_TEXTURE2D(gOcclusionMap, 4, 4);
 RADRAY_FORWARD_MATERIAL_TEXTURE2D(gEmissiveMap, 5, 5);
-#define RR_HAS_ANY_TEXTURE 1
 RADRAY_FORWARD_MATERIAL_SAMPLER(gSampler, 6, 6);
 
 VertexOutput VSMain(VertexInput input) {
@@ -154,7 +170,7 @@ float4 PSMain(VertexOutput input, bool isFrontFace : SV_IsFrontFace) : SV_Target
     float3 Lo = float3(0.0f, 0.0f, 0.0f);
 
     // ── 方向光 (含级联阴影) ──
-    uint dirCount = min(gView.LightCounts.z, (uint)RR_MAX_DIRECTIONAL_LIGHTS);
+    uint dirCount = min(gView.LightCounts.z, (uint)RADRAY_MAX_DIRECTIONAL_LIGHTS);
 #ifdef _DIRECTIONAL_SHADOWS
     // 投影级联阴影的方向光序号 (0 = 无阴影, 否则实际序号 = dirShadowIndex1 - 1)。
     uint dirShadowIndex1 = gView.LightCounts.w;
@@ -186,7 +202,7 @@ float4 PSMain(VertexOutput input, bool isFrontFace : SV_IsFrontFace) : SV_Target
     }
 
     // ── 点光源 (含立方体阴影) ──
-    uint ptCount = min(gView.LightCounts.x, (uint)RR_MAX_POINT_LIGHTS);
+    uint ptCount = min(gView.LightCounts.x, (uint)RADRAY_MAX_POINT_LIGHTS);
 #ifdef _POINT_SHADOWS
     // 投影阴影的点光源序号 (0 = 无阴影, 否则实际序号 = shadowIndex1 - 1)。
     // 仅在 _POINT_SHADOWS 变体存在; 无阴影变体里整块阴影采样被剔除。

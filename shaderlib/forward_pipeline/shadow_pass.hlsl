@@ -1,12 +1,15 @@
-// shadow_pass.hlsl: 点光源立方体阴影的深度生成 pass (shadow caster, depth-only)。
+// shadow_pass.hlsl —— 入口 shader (entry point)。
+//
+// 用途: 阴影深度生成 pass (shadow caster, depth-only)。
+// 入口: VSMain (Vertex), PSMain (Pixel, 空实现, 仅写深度)。
 //
 // 点光源在支持 layered VS output 的设备上以 6 个 instance 一次写入 cube 六层；
 // 方向光与能力 fallback 使用 ViewProj[0] 按 slice 录制。
 //
-// 绑定约定与 forward_pass.hlsl / MeshPassExecutor 对齐 (靠 cbuffer 名字被 FindParameterId 命中):
-//   - gShadowView (per-view): 由 ForwardPipeline::SetViewConstants 每面写入。
-//   - gPerObject  (per-object): 由 MeshPassExecutor 每 draw 写入 ObjectToWorld。
-// depth-only, 无 material push constant, 无 color target。PSMain 为空 (仅写深度)。
+// 绑定约定 (CPU 端靠 cbuffer 名字定位):
+//   - gShadowView (b0, space1, per-view):   每面/每级联写入一组 ViewProj。
+//   - gPerObject  (b1, space0, per-object): 每 draw 写入 ObjectToWorld (见 binding_abi.hlsl)。
+// 无 material 绑定, 无 color target。
 
 #include "common.hlsl"
 #include "forward_pipeline/binding_abi.hlsl"
@@ -29,13 +32,6 @@ struct ShadowViewConstants {
     float4x4 ViewProj[6];
 };
 
-// per-object 常量: 执行器写入 ObjectToWorld。
-struct PerObject {
-    float4x4 ObjectToWorld;
-};
-
-VK_BINDING(1, RADRAY_FORWARD_OBJECT_BINDING_GROUP)
-ConstantBuffer<PerObject> gPerObject : register(b1, RADRAY_FORWARD_OBJECT_SPACE);
 VK_BINDING(0, RADRAY_FORWARD_PIPELINE_BINDING_GROUP)
 ConstantBuffer<ShadowViewConstants> gShadowView : register(b0, RADRAY_FORWARD_PIPELINE_SPACE);
 
@@ -52,6 +48,5 @@ VertexOutput VSMain(VertexInput input, uint instanceId : SV_InstanceID) {
 }
 
 // depth-only: 无颜色输出, 深度由硬件从 SV_Position 自动写入。
-void PSMain(VertexOutput input) {
-    (void)input;
+void PSMain() {
 }

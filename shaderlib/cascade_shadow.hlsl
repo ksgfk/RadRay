@@ -20,8 +20,8 @@
 
 #define RADRAY_MAX_CASCADES 4
 
-// 一盏投影级联阴影的方向光的完整阴影数据 (匹配 CPU 端 CascadeShadowGpu, 列主序)。
-struct ShadowParam {
+// 一盏投影级联阴影的方向光的完整阴影数据 (列主序, 需与 CPU 端逐字段对齐)。
+struct CascadeShadowData {
     float4x4 WorldToShadow[RADRAY_MAX_CASCADES];  // 逐级联 世界 -> 阴影裁剪
     float4 CascadeSphere[RADRAY_MAX_CASCADES];    // xyz=中心, w=半径^2 (供选级联)
     // 逐级联 world-space bias: xy = (depthBias, normalBias) 已按该级联的 texel 世界尺寸缩放,
@@ -35,7 +35,7 @@ struct ShadowParam {
 };
 
 // 选择着色点所落的级联 (取第一个包围球命中的级联)。未命中返回 count。
-uint compute_cascade_index(ShadowParam sp, float3 posW, uint count) {
+uint compute_cascade_index(CascadeShadowData sp, float3 posW, uint count) {
     uint index = count;
     [unroll]
     for (uint i = 0; i < RADRAY_MAX_CASCADES; ++i) {
@@ -63,7 +63,7 @@ uint compute_cascade_index(ShadowParam sp, float3 posW, uint count) {
 float sample_shadow_cascade(
     Texture2DArray<float> shadowMap,
     SamplerComparisonState cmp,
-    ShadowParam sp,
+    CascadeShadowData sp,
     float3 posW,
     float3 normalW,
     float3 dirToLight) {

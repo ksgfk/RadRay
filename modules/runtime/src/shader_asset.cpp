@@ -20,6 +20,9 @@
 #include <radray/render/spvc.h>
 #endif
 
+#include "shader_asset_json.h"
+#include "shader_reflection_map.h"
+
 namespace radray {
 
 // 文件组织: 先是全部内部实现细节 (单个匿名 namespace), 然后按
@@ -687,75 +690,10 @@ bool ValidateAsset(const ShaderAssetDesc& desc, ParseScope& scope) noexcept {
 }
 
 // ============================ 反射映射 ============================
-
-/// DXIL 的 D3D_SHADER_INPUT_TYPE -> RHI 绑定类型。
-/// 注意 D3D 不区分 Buffer / TexelBuffer 的采样语义, 只能给出反射侧可判定的部分,
-/// 因此 Texture 与 TexelBuffer、Buffer 与 RWBuffer 的细分交给 IsBufferDimension。
-std::optional<render::ShaderParameterBindingType> MapHlslBindingType(
-    const render::HlslInputBindDesc& bind) noexcept {
-    switch (bind.Type) {
-        case render::HlslShaderInputType::CBUFFER:
-            return render::ShaderParameterBindingType::CBuffer;
-        case render::HlslShaderInputType::TBUFFER:
-            return render::ShaderParameterBindingType::TexelBuffer;
-        case render::HlslShaderInputType::SAMPLER:
-            return render::ShaderParameterBindingType::Sampler;
-        case render::HlslShaderInputType::TEXTURE:
-            return render::IsBufferDimension(bind.Dimension)
-                       ? render::ShaderParameterBindingType::TexelBuffer
-                       : render::ShaderParameterBindingType::Texture;
-        case render::HlslShaderInputType::STRUCTURED:
-        case render::HlslShaderInputType::BYTEADDRESS:
-            return render::ShaderParameterBindingType::Buffer;
-        case render::HlslShaderInputType::UAV_RWSTRUCTURED:
-        case render::HlslShaderInputType::UAV_RWBYTEADDRESS:
-        case render::HlslShaderInputType::UAV_APPEND_STRUCTURED:
-        case render::HlslShaderInputType::UAV_CONSUME_STRUCTURED:
-        case render::HlslShaderInputType::UAV_RWSTRUCTURED_WITH_COUNTER:
-            return render::ShaderParameterBindingType::RWBuffer;
-        case render::HlslShaderInputType::UAV_RWTYPED:
-            return render::IsBufferDimension(bind.Dimension)
-                       ? render::ShaderParameterBindingType::RWTexelBuffer
-                       : render::ShaderParameterBindingType::RWTexture;
-        default:
-            return std::nullopt;
-    }
-}
-
-std::optional<render::ShaderParameterBindingType> MapSpirvBindingType(
-    const render::SpirvResourceBinding& bind) noexcept {
-    switch (bind.Kind) {
-        case render::SpirvResourceKind::UniformBuffer:
-            return render::ShaderParameterBindingType::CBuffer;
-        case render::SpirvResourceKind::StorageBuffer:
-            return bind.WriteOnly || !bind.ReadOnly
-                       ? render::ShaderParameterBindingType::RWBuffer
-                       : render::ShaderParameterBindingType::Buffer;
-        case render::SpirvResourceKind::SeparateSampler:
-            return render::ShaderParameterBindingType::Sampler;
-        case render::SpirvResourceKind::SeparateImage:
-        case render::SpirvResourceKind::SampledImage:
-            return bind.ImageInfo.has_value() && bind.ImageInfo->Dim == render::SpirvImageDim::Buffer
-                       ? render::ShaderParameterBindingType::TexelBuffer
-                       : render::ShaderParameterBindingType::Texture;
-        case render::SpirvResourceKind::StorageImage:
-            return bind.ImageInfo.has_value() && bind.ImageInfo->Dim == render::SpirvImageDim::Buffer
-                       ? render::ShaderParameterBindingType::RWTexelBuffer
-                       : render::ShaderParameterBindingType::RWTexture;
-        default:
-            return std::nullopt;
-    }
-}
-
-/// 反射侧的一条绑定, 归一化后与 manifest 比对。
-struct ReflectedBinding {
-    std::string_view Name;
-    uint32_t Group{0};
-    uint32_t Binding{0};
-    render::ShaderParameterBindingType Type{render::ShaderParameterBindingType::UNKNOWN};
-    /// 0 表示 unbounded。
-    uint32_t Count{1};
-};
+//
+// 反射 -> RHI 的类型映射与 semantic 归一化在 shader_reflection_map.h, 与
+// GenerateShaderAssetTemplate 共用: 生成器必须用与校验器完全相同的折叠规则,
+// 否则生成出的模板会当场通不过校验。
 
 /// 声明 ⊇ 反射: 逐条核对反射结果能在 manifest 里找到相容的声明。
 bool MatchReflectedBindings(
@@ -835,50 +773,6 @@ bool MatchReflectedBindings(
     scope.SetGroup(std::nullopt);
     scope.ClearBinding();
     return true;
-}
-
-/// 去掉 HLSL semantic 名尾部的数字, 得到基名与索引 (DXC 会把 POSITION0 拆成
-/// SemanticName="POSITION" + SemanticIndex=0, 但不同来源不一致, 统一归一化)。
-void SplitSemantic(std::string_view raw, std::string_view& baseName, uint32_t& index) noexcept {
-    size_t end = raw.size();
-    while (end > 0 && raw[end - 1] >= '0' && raw[end - 1] <= '9') {
-        --end;
-    }
-    baseName = raw.substr(0, end);
-    index = 0;
-    if (end < raw.size()) {
-        uint64_t parsed = 0;
-        for (size_t i = end; i < raw.size(); ++i) {
-            parsed = parsed * 10 + static_cast<uint64_t>(raw[i] - '0');
-            if (parsed > std::numeric_limits<uint32_t>::max()) {
-                parsed = std::numeric_limits<uint32_t>::max();
-                break;
-            }
-        }
-        index = static_cast<uint32_t>(parsed);
-    }
-}
-
-bool EqualsIgnoreCase(std::string_view a, std::string_view b) noexcept {
-    if (a.size() != b.size()) {
-        return false;
-    }
-    for (size_t i = 0; i < a.size(); ++i) {
-        const char ca = (a[i] >= 'a' && a[i] <= 'z') ? static_cast<char>(a[i] - 32) : a[i];
-        const char cb = (b[i] >= 'a' && b[i] <= 'z') ? static_cast<char>(b[i] - 32) : b[i];
-        if (ca != cb) {
-            return false;
-        }
-    }
-    return true;
-}
-
-/// 系统值语义不由 vertex buffer 提供, 不参与 VertexInput 比对。
-bool IsSystemSemantic(std::string_view baseName) noexcept {
-    return baseName.size() >= 3 &&
-           (baseName[0] == 'S' || baseName[0] == 's') &&
-           (baseName[1] == 'V' || baseName[1] == 'v') &&
-           baseName[2] == '_';
 }
 
 // ============================ 哈希 ============================
@@ -1442,21 +1336,24 @@ bool JsonDeserializer<ShaderPassDesc>::Read(
     return true;
 }
 
+// 字段列表在此唯一实现, 模板序列化器 (shader_asset_template.cpp) 借它往同一个
+// object 里额外插 "_TODO", 从而不会因为各写一份而漏字段。
+bool WriteShaderAssetMembers(JsonObjectWriter& object, const ShaderAssetDesc& value) noexcept {
+    return object.IsValid() &&
+           object.Member("FormatVersion", kShaderAssetFormatVersion) &&
+           object.Member("Name", value.Name) &&
+           (value.Source.empty() || object.Member("Source", value.Source)) &&
+           (value.KeywordGroups.empty() || object.Member("KeywordGroups", value.KeywordGroups)) &&
+           ((value.BakeVariants.IsEmpty() && value.BakeVariants.Skip.empty()) ||
+            object.Member("BakeVariants", value.BakeVariants)) &&
+           object.Member("Passes", value.Passes);
+}
+
 bool JsonSerializer<ShaderAssetDesc>::Write(
     JsonWriteContext& context,
     const ShaderAssetDesc& value) noexcept {
     JsonObjectWriter object = context.BeginObject();
-    if (!object.IsValid() ||
-        !object.Member("FormatVersion", kShaderAssetFormatVersion) ||
-        !object.Member("Name", value.Name) ||
-        (!value.Source.empty() && !object.Member("Source", value.Source)) ||
-        (!value.KeywordGroups.empty() && !object.Member("KeywordGroups", value.KeywordGroups)) ||
-        ((!value.BakeVariants.IsEmpty() || !value.BakeVariants.Skip.empty()) &&
-         !object.Member("BakeVariants", value.BakeVariants)) ||
-        !object.Member("Passes", value.Passes)) {
-        return false;
-    }
-    return true;
+    return WriteShaderAssetMembers(object, value);
 }
 
 bool JsonDeserializer<ShaderAssetDesc>::Read(
@@ -2627,8 +2524,8 @@ bool ValidateShaderReflection(
     vector<ReflectedBinding> reflected;
     reflected.reserve(reflection.BoundResources.size());
     for (const render::HlslInputBindDesc& bind : reflection.BoundResources) {
-        std::optional<render::ShaderParameterBindingType> type = MapHlslBindingType(bind);
-        if (!type.has_value()) {
+        std::optional<ReflectedBinding> item = MakeReflectedBinding(bind);
+        if (!item.has_value()) {
             scope.SetBinding(bind.Name);
             scope.SetGroup(bind.Space);
             scope.SetBindingIndex(bind.BindPoint);
@@ -2636,12 +2533,7 @@ bool ValidateShaderReflection(
                 "reflection reports resource '{}' with a type that has no RHI binding equivalent",
                 bind.Name));
         }
-        reflected.push_back(ReflectedBinding{
-            bind.Name,
-            bind.Space,
-            bind.BindPoint,
-            type.value(),
-            bind.IsUnboundArray() ? 0u : bind.BindCount});
+        reflected.push_back(item.value());
     }
     if (!MatchReflectedBindings(pass, stage, reflected, scope)) {
         return false;
@@ -2681,8 +2573,7 @@ bool ValidateShaderReflection(
             if (IsSystemSemantic(baseName)) {
                 continue;
             }
-            // DXC 通常已把索引拆到 SemanticIndex; 名字尾部还带数字时取名字里的。
-            const uint32_t index = nameIndex != 0 ? nameIndex : input.SemanticIndex;
+            const uint32_t index = EffectiveSemanticIndex(input.SemanticName, input.SemanticIndex);
             const bool found = std::any_of(
                 pass.VertexInput->Attributes.begin(),
                 pass.VertexInput->Attributes.end(),
@@ -2691,7 +2582,7 @@ bool ValidateShaderReflection(
                     uint32_t declaredIndex = 0;
                     SplitSemantic(attribute.Semantic, declaredBase, declaredIndex);
                     const uint32_t effective =
-                        declaredIndex != 0 ? declaredIndex : attribute.SemanticIndex;
+                        EffectiveSemanticIndex(attribute.Semantic, attribute.SemanticIndex);
                     return EqualsIgnoreCase(declaredBase, baseName) && effective == index;
                 });
             if (!found) {
@@ -2726,8 +2617,8 @@ bool ValidateShaderReflection(
         if (bind.Kind == render::SpirvResourceKind::PushConstant) {
             continue;  // push constant 单独核对。
         }
-        std::optional<render::ShaderParameterBindingType> type = MapSpirvBindingType(bind);
-        if (!type.has_value()) {
+        std::optional<ReflectedBinding> item = MakeReflectedBinding(bind);
+        if (!item.has_value()) {
             scope.SetBinding(bind.Name);
             scope.SetGroup(bind.Set);
             scope.SetBindingIndex(bind.Binding);
@@ -2735,12 +2626,7 @@ bool ValidateShaderReflection(
                 "reflection reports resource '{}' with a type that has no RHI binding equivalent",
                 bind.Name));
         }
-        reflected.push_back(ReflectedBinding{
-            bind.Name,
-            bind.Set,
-            bind.Binding,
-            type.value(),
-            bind.IsUnboundedArray ? 0u : (bind.ArraySize == 0 ? 1u : bind.ArraySize)});
+        reflected.push_back(item.value());
     }
     if (!MatchReflectedBindings(pass, stage, reflected, scope)) {
         return false;

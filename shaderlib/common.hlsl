@@ -1,6 +1,8 @@
 #ifndef COMMON_HLSLI
 #define COMMON_HLSLI
 
+// 跨后端绑定标注 shim: D3D 下展开为空, Vulkan/Metal 下展开为 vk 属性。
+// 成套提供 (location / binding / push_constant / image_format), 使 shader 只写一份绑定声明。
 #if defined(VULKAN) || defined(METAL)
 #define VK_LOCATION(l)   [[vk::location(l)]]
 #define VK_BINDING(b, s) [[vk::binding(b, s)]]
@@ -35,6 +37,7 @@ Frame3 make_frame(float3 n)
     return f;
 }
 
+// 世界 <-> 着色局部坐标系 (n = +Z) 的互逆变换。BSDF 全部在局部系求值。
 float3 to_local(Frame3 f, float3 v)
 {
     return float3(dot(v, f.s), dot(v, f.t), dot(v, f.n));

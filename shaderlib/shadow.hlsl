@@ -3,22 +3,12 @@
 
 // 通用阴影采样设施 (shared shadow sampling library)。
 //
-// 汇集各类阴影技术共用的采样原语: 世界->阴影 投影 (world_to_shadow_uv)、偏移 (bias)、
+// 只放各类阴影技术共用的采样原语: 世界->阴影 投影 (world_to_shadow_uv)、偏移 (bias)、
 // 比较采样 tap 与 PCF 核 (4-tap / 5x5 tent)。具体技术各自成文件并 #include 本文件:
 //   - cascade_shadow.hlsl: 方向光级联阴影 (Texture2DArray)
 //   - point_shadow.hlsl:   点光源立方体阴影 (TextureCube)
-//   - 本文件内: 附加光 (spot) 阴影图集 (Texture2DArray, 每光 1 slice)
 
 #include "common.hlsl"
-
-#define RADRAY_MAX_ADD_SHADOW_SLICES 16
-
-// Additional (spot) light shadow atlas. Each spot uses 1 slice.
-// (Point light cube shadows live in point_shadow.hlsl and use a TextureCube instead.)
-struct AdditionalShadowParam {
-    float4x4 WorldToShadow[RADRAY_MAX_ADD_SHADOW_SLICES];
-    float4 Params; // x enable, y atlas size(px), z slice count, w soft mode
-};
 
 float3 world_to_shadow_uv(float4x4 worldToShadow, float3 posW, out bool inside) {
     float4 c = mul(worldToShadow, float4(posW, 1.0f));
@@ -34,11 +24,6 @@ float3 apply_shadow_bias(float3 posW, float3 normalW, float3 dirToLight, float d
     posW = dirToLight * depthBias + posW;
     posW = normalW * scale + posW;
     return posW;
-}
-
-float4 apply_shadow_clamping(float4 posCS) {
-    posCS.z = max(posCS.z, 0.0f);
-    return posCS;
 }
 
 float SampleShadow_GetTriangleTexelArea(float triangleHeight) {
@@ -139,50 +124,6 @@ float sample_shadow_medium(Texture2DArray<float> shadowMap, SamplerComparisonSta
         attenuation += fetchesWeights[i] * sample_shadow_tap(shadowMap, cmp, fetchesUV[i], slice, depth);
     }
     return attenuation;
-}
-
-// Sample one slice of the additional-light shadow atlas with the configured PCF mode.
-float sample_additional_shadow_slice(
-    Texture2DArray<float> shadowMap,
-    SamplerComparisonState cmp,
-    AdditionalShadowParam sp,
-    uint slice,
-    float3 posW) {
-    if (sp.Params.x < 0.5f || slice >= (uint)sp.Params.z) {
-        return 1.0f;
-    }
-
-    bool inside;
-    float3 uvz = world_to_shadow_uv(sp.WorldToShadow[slice], posW, inside);
-    if (!inside) {
-        return 1.0f;
-    }
-
-    float size = max(sp.Params.y, 1.0f);
-    float4 shadowmapSize = float4(1.0f / size, 1.0f / size, size, size);
-    float sliceF = (float)slice;
-
-    uint softMode = (uint)sp.Params.w;
-    if (softMode == 1u) {
-        return sample_shadow_low(shadowMap, cmp, shadowmapSize, uvz.xy, sliceF, uvz.z);
-    }
-    if (softMode == 2u) {
-        return sample_shadow_medium(shadowMap, cmp, shadowmapSize, uvz.xy, sliceF, uvz.z);
-    }
-    return sample_shadow_tap(shadowMap, cmp, uvz.xy, sliceF, uvz.z);
-}
-
-// Spot light shadow: one perspective slice at firstSlice. firstSlice < 0 => no shadow (returns 1).
-float sample_spot_shadow(
-    Texture2DArray<float> shadowMap,
-    SamplerComparisonState cmp,
-    AdditionalShadowParam sp,
-    float firstSlice,
-    float3 posW) {
-    if (firstSlice < 0.0f) {
-        return 1.0f;
-    }
-    return sample_additional_shadow_slice(shadowMap, cmp, sp, (uint)firstSlice, posW);
 }
 
 #endif

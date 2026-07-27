@@ -1,3 +1,9 @@
+// error_pass.hlsl —— 入口 shader (entry point)。
+//
+// 用途: 材质/shader 解析失败时的兜底 pass, 用洋红纯色标出问题物体。
+// 入口: VSMain (Vertex), PSMain (Pixel)。
+// 绑定: 仅 gPerObject + gView (见 forward_interface.hlsl), 无材质绑定。
+
 #include "forward_pipeline/forward_interface.hlsl"
 
 struct VertexInput {

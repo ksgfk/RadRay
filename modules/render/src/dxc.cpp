@@ -553,38 +553,123 @@ public:
         return CompileBuffer(buffer, *wsourceName, entryPoint, targetProfile, args);
     }
 
-    std::optional<DxcOutput> CompileFile(
+    /// 预处理产物在 DXC_OUT_HLSL 而非 GetResult(), 故不能复用 CompileBuffer。
+    std::optional<string> PreprocessBuffer(
+        const DxcBuffer& buffer,
+        const wstring& sourceName,
+        std::string_view entryPoint,
+        std::string_view targetProfile,
+        std::span<const std::string_view> args) noexcept {
+        ComPtr<IDxcResult> compileResult;
+        {
+            auto compileResultOpt = CompileImpl(buffer, sourceName, entryPoint, targetProfile, args);
+            if (!compileResultOpt.HasValue()) {
+                return std::nullopt;
+            }
+            compileResult = compileResultOpt.Release();
+        }
+        auto [status, errMsg] = GetCompileState(compileResult.Get());
+        if (!errMsg.empty()) {
+            if (FAILED(status)) {
+                RADRAY_ERR_LOG("dxc preprocess message");
+                RADRAY_ERR_LOG("{}", errMsg);
+            } else {
+                RADRAY_WARN_LOG("dxc preprocess message");
+                RADRAY_WARN_LOG("{}", errMsg);
+            }
+        }
+        if (FAILED(status)) {
+            return std::nullopt;
+        }
+        if (!compileResult->HasOutput(DXC_OUT_HLSL)) {
+            RADRAY_ERR_LOG("dxc -P produced no preprocessed output");
+            return std::nullopt;
+        }
+        ComPtr<IDxcBlobUtf8> blob;
+        if (HRESULT hr = compileResult->GetOutput(DXC_OUT_HLSL, IID_PPV_ARGS(&blob), nullptr);
+            FAILED(hr)) {
+            RADRAY_ERR_LOG("IDxcResult::GetOutput(DXC_OUT_HLSL) failed: {}", hr);
+            return std::nullopt;
+        }
+        if (blob == nullptr || blob->GetStringPointer() == nullptr) {
+            RADRAY_ERR_LOG("dxc -P returned an empty blob");
+            return std::nullopt;
+        }
+        return string{blob->GetStringPointer(), blob->GetStringLength()};
+    }
+
+    std::optional<string> PreprocessMemory(
+        std::string_view code,
+        std::string_view sourceName,
+        std::string_view entryPoint,
+        std::string_view targetProfile,
+        std::span<const std::string_view> args) noexcept {
+        auto wsourceName = ToWideChar(sourceName);
+        if (!wsourceName.has_value()) {
+            RADRAY_ERR_LOG("DXC source name conversion failed: {}", sourceName);
+            return std::nullopt;
+        }
+        const DxcBuffer buffer{code.data(), code.size(), DXC_CP_UTF8};
+        return PreprocessBuffer(buffer, *wsourceName, entryPoint, targetProfile, args);
+    }
+
+    std::optional<string> PreprocessFile(
         const std::filesystem::path& path,
         std::string_view entryPoint,
         std::string_view targetProfile,
         std::span<const std::string_view> args) noexcept {
+        std::optional<wstring> wpath = ToNativeWidePath(path);
+        if (!wpath.has_value()) {
+            return std::nullopt;
+        }
+        UINT32 codePage = DXC_CP_UTF8;
+        ComPtr<IDxcBlobEncoding> source;
+        if (HRESULT hr = _utils->LoadFile(wpath->c_str(), &codePage, &source); FAILED(hr)) {
+            RADRAY_ERR_LOG("IDxcUtils::LoadFile failed for '{}': {}", path.string(), hr);
+            return std::nullopt;
+        }
+        const DxcBuffer buffer{source->GetBufferPointer(), source->GetBufferSize(), codePage};
+        return PreprocessBuffer(buffer, *wpath, entryPoint, targetProfile, args);
+    }
+
+    /// 文件路径 -> DXC 要的宽字符串。Windows 上 native() 已是宽串, 其它平台需转码。
+    std::optional<wstring> ToNativeWidePath(const std::filesystem::path& path) noexcept {
         if (path.empty()) {
             RADRAY_ERR_LOG("DXC source path is empty");
             return std::nullopt;
         }
-
-        wstring wpath;
 #ifdef RADRAY_PLATFORM_WINDOWS
         const auto& nativePath = path.native();
-        wpath.assign(nativePath.begin(), nativePath.end());
+        return wstring{nativePath.begin(), nativePath.end()};
 #else
         auto convertedPath = ToWideChar(path.generic_string());
         if (!convertedPath.has_value()) {
             RADRAY_ERR_LOG("DXC source path conversion failed: {}", path.string());
             return std::nullopt;
         }
-        wpath = std::move(*convertedPath);
+        return wstring{std::move(*convertedPath)};
 #endif
+    }
+
+    std::optional<DxcOutput> CompileFile(
+        const std::filesystem::path& path,
+        std::string_view entryPoint,
+        std::string_view targetProfile,
+        std::span<const std::string_view> args) noexcept {
+        std::optional<wstring> wpath = ToNativeWidePath(path);
+        if (!wpath.has_value()) {
+            return std::nullopt;
+        }
 
         UINT32 codePage = DXC_CP_UTF8;
         ComPtr<IDxcBlobEncoding> source;
-        if (HRESULT hr = _utils->LoadFile(wpath.c_str(), &codePage, &source); FAILED(hr)) {
+        if (HRESULT hr = _utils->LoadFile(wpath->c_str(), &codePage, &source); FAILED(hr)) {
             RADRAY_ERR_LOG("IDxcUtils::LoadFile failed for '{}': {}", path.string(), hr);
             return std::nullopt;
         }
 
         const DxcBuffer buffer{source->GetBufferPointer(), source->GetBufferSize(), codePage};
-        return CompileBuffer(buffer, wpath, entryPoint, targetProfile, args);
+        return CompileBuffer(buffer, *wpath, entryPoint, targetProfile, args);
     }
 
     std::optional<HlslShaderDesc> GetShaderDescFromOutput(std::span<const byte> refl) noexcept {
@@ -894,6 +979,42 @@ std::optional<DxcOutput> Dxc::CompileFile(
     const string targetProfile = _FormatStageAndSm(options.Stage, options.SM);
     const vector<std::string_view> args = _BuildCompileArgs(options);
     return _impl->CompileFile(
+        path,
+        options.EntryPoint,
+        targetProfile,
+        args);
+}
+
+/// 预处理的参数 = 编译参数 + "-P"。
+///
+/// 沿用 _BuildCompileArgs 而非另拼一套, 是为了让 -I / -D / -HV 与真实编译完全一致:
+/// 预处理结果若与编译时的宏环境不同, 由它推导出的信息就是错的。
+static vector<std::string_view> _BuildPreprocessArgs(const DxcCompileOptions& options) {
+    vector<std::string_view> args = _BuildCompileArgs(options);
+    args.emplace_back("-P");
+    return args;
+}
+
+std::optional<string> Dxc::PreprocessMemory(
+    std::string_view code,
+    std::string_view sourceName,
+    const DxcCompileOptions& options) noexcept {
+    const string targetProfile = _FormatStageAndSm(options.Stage, options.SM);
+    const vector<std::string_view> args = _BuildPreprocessArgs(options);
+    return _impl->PreprocessMemory(
+        code,
+        sourceName,
+        options.EntryPoint,
+        targetProfile,
+        args);
+}
+
+std::optional<string> Dxc::PreprocessFile(
+    const std::filesystem::path& path,
+    const DxcCompileOptions& options) noexcept {
+    const string targetProfile = _FormatStageAndSm(options.Stage, options.SM);
+    const vector<std::string_view> args = _BuildPreprocessArgs(options);
+    return _impl->PreprocessFile(
         path,
         options.EntryPoint,
         targetProfile,

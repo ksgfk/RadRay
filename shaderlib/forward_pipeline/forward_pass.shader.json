@@ -5,57 +5,94 @@
   "KeywordGroups": [
     {
       "Name": "BaseColorMap",
-      "Keywords": ["_BASECOLOR_MAP"],
+      "Keywords": [
+        "_BASECOLOR_MAP"
+      ],
       "IsOptional": true,
-      "Stages": ["Pixel"]
+      "Stages": [
+        "Pixel"
+      ]
     },
     {
       "Name": "MetalRoughnessMap",
-      "Keywords": ["_METALROUGHNESS_MAP"],
+      "Keywords": [
+        "_METALROUGHNESS_MAP"
+      ],
       "IsOptional": true,
-      "Stages": ["Pixel"]
+      "Stages": [
+        "Pixel"
+      ]
     },
     {
       "Name": "NormalMap",
-      "Keywords": ["_NORMAL_MAP"],
+      "Keywords": [
+        "_NORMAL_MAP"
+      ],
       "IsOptional": true,
-      "Stages": ["Pixel"]
+      "Stages": [
+        "Pixel"
+      ]
     },
     {
       "Name": "OcclusionMap",
-      "Keywords": ["_OCCLUSION_MAP"],
+      "Keywords": [
+        "_OCCLUSION_MAP"
+      ],
       "IsOptional": true,
-      "Stages": ["Pixel"]
+      "Stages": [
+        "Pixel"
+      ]
     },
     {
       "Name": "EmissiveMap",
-      "Keywords": ["_EMISSIVE_MAP"],
+      "Keywords": [
+        "_EMISSIVE_MAP"
+      ],
       "IsOptional": true,
-      "Stages": ["Pixel"]
+      "Stages": [
+        "Pixel"
+      ]
     },
     {
       "Name": "AlphaMode",
-      "Keywords": ["_ALPHATEST_ON", "_ALPHABLEND_ON"],
+      "Keywords": [
+        "_ALPHATEST_ON",
+        "_ALPHABLEND_ON"
+      ],
       "IsOptional": true,
-      "Stages": ["Pixel"]
+      "Stages": [
+        "Pixel"
+      ]
     },
     {
       "Name": "DoubleSided",
-      "Keywords": ["_DOUBLESIDED_ON"],
+      "Keywords": [
+        "_DOUBLESIDED_ON"
+      ],
       "IsOptional": true,
-      "Stages": ["Pixel"]
+      "Stages": [
+        "Pixel"
+      ]
     },
     {
       "Name": "PointShadows",
-      "Keywords": ["_POINT_SHADOWS"],
+      "Keywords": [
+        "_POINT_SHADOWS"
+      ],
       "IsOptional": true,
-      "Stages": ["Pixel"]
+      "Stages": [
+        "Pixel"
+      ]
     },
     {
       "Name": "DirectionalShadows",
-      "Keywords": ["_DIRECTIONAL_SHADOWS"],
+      "Keywords": [
+        "_DIRECTIONAL_SHADOWS"
+      ],
       "IsOptional": true,
-      "Stages": ["Pixel"]
+      "Stages": [
+        "Pixel"
+      ]
     }
   ],
   "BakeVariants": {
@@ -74,7 +111,9 @@
         ]
       },
       {
-        "Combination": ["_ALPHABLEND_ON"]
+        "Combination": [
+          "_ALPHABLEND_ON"
+        ]
       }
     ]
   },
@@ -82,8 +121,14 @@
     {
       "Name": "Forward",
       "Stages": [
-        { "Stage": "Vertex", "EntryPoint": "VSMain" },
-        { "Stage": "Pixel", "EntryPoint": "PSMain" }
+        {
+          "Stage": "Vertex",
+          "EntryPoint": "VSMain"
+        },
+        {
+          "Stage": "Pixel",
+          "EntryPoint": "PSMain"
+        }
       ],
       "ShaderModel": "SM62",
       "IsOptimize": true,
@@ -97,7 +142,9 @@
               "Binding": 1,
               "Type": "CBuffer",
               "Residency": "RootDescriptor",
-              "Stages": ["Vertex"]
+              "Stages": [
+                "Vertex"
+              ]
             }
           ]
         },
@@ -109,25 +156,34 @@
               "Binding": 0,
               "Type": "CBuffer",
               "Residency": "RootDescriptor",
-              "Stages": ["Vertex", "Pixel"]
+              "Stages": [
+                "Vertex",
+                "Pixel"
+              ]
             },
             {
               "Name": "gShadowCube",
               "Binding": 1,
               "Type": "Texture",
-              "Stages": ["Pixel"]
+              "Stages": [
+                "Pixel"
+              ]
             },
             {
               "Name": "gShadowArray",
               "Binding": 2,
               "Type": "Texture",
-              "Stages": ["Pixel"]
+              "Stages": [
+                "Pixel"
+              ]
             },
             {
               "Name": "gShadowSampler",
               "Binding": 3,
               "Type": "Sampler",
-              "Stages": ["Pixel"]
+              "Stages": [
+                "Pixel"
+              ]
             }
           ]
         },
@@ -138,43 +194,57 @@
               "Name": "gMaterial",
               "Binding": 0,
               "Type": "CBuffer",
-              "Stages": ["Pixel"]
+              "Stages": [
+                "Pixel"
+              ]
             },
             {
               "Name": "gBaseColorMap",
               "Binding": 1,
               "Type": "Texture",
-              "Stages": ["Pixel"]
+              "Stages": [
+                "Pixel"
+              ]
             },
             {
               "Name": "gMetalRoughMap",
               "Binding": 2,
               "Type": "Texture",
-              "Stages": ["Pixel"]
+              "Stages": [
+                "Pixel"
+              ]
             },
             {
               "Name": "gNormalMap",
               "Binding": 3,
               "Type": "Texture",
-              "Stages": ["Pixel"]
+              "Stages": [
+                "Pixel"
+              ]
             },
             {
               "Name": "gOcclusionMap",
               "Binding": 4,
               "Type": "Texture",
-              "Stages": ["Pixel"]
+              "Stages": [
+                "Pixel"
+              ]
             },
             {
               "Name": "gEmissiveMap",
               "Binding": 5,
               "Type": "Texture",
-              "Stages": ["Pixel"]
+              "Stages": [
+                "Pixel"
+              ]
             },
             {
               "Name": "gSampler",
               "Binding": 6,
               "Type": "Sampler",
-              "Stages": ["Pixel"]
+              "Stages": [
+                "Pixel"
+              ]
             }
           ]
         }
