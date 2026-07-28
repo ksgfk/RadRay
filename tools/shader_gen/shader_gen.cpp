@@ -23,8 +23,8 @@
 
 #include <radray/enum_flags.h>
 #include <radray/file.h>
-#include <radray/render/dxc.h>
-#include <radray/runtime/shader_asset_template.h>
+#include <radray/shader/dxc.h>
+#include <radray/shader/shader_asset_template.h>
 #include <radray/types.h>
 
 namespace {

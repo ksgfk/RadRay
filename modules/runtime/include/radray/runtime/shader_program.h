@@ -3,7 +3,11 @@
 #include <optional>
 #include <span>
 
-#include <radray/runtime/shader_manifest.h>
+// 【必须显式包含 rhi.h】本头持有活的 GPU 对象 (PipelineLayout), 属 render 层。
+// 以前它靠 shader_manifest.h 传递地拿到 rhi.h; 格式层迁入 radrayshader 后那条链断了,
+// 因为格式层现在只包含 shader_types.h (刻意不依赖任何 device 类型)。
+#include <radray/render/rhi.h>
+#include <radray/shader/shader_manifest.h>
 
 // pass 级 program (G4): 把 "keyword -> 字节码" 那条链收敛成一次调用。
 //
@@ -56,6 +60,59 @@ class PipelineLayout;
 }  // namespace render
 
 class IRenderResourceRecycler;
+
+/// 持有 render::PipelineLayoutDescriptor 所需的全部后备存储。
+/// PipelineLayoutDescriptor 内部是 span, 必须有稳定的拥有者。move-only。
+class ShaderPipelineLayoutStorage {
+public:
+    ShaderPipelineLayoutStorage() noexcept = default;
+    ShaderPipelineLayoutStorage(const ShaderPipelineLayoutStorage&) = delete;
+    ShaderPipelineLayoutStorage& operator=(const ShaderPipelineLayoutStorage&) = delete;
+    ShaderPipelineLayoutStorage(ShaderPipelineLayoutStorage&&) noexcept = default;
+    ShaderPipelineLayoutStorage& operator=(ShaderPipelineLayoutStorage&&) noexcept = default;
+
+    /// 返回的 descriptor 内 span 指向本对象, 本对象存活且未被移动期间有效。
+    render::PipelineLayoutDescriptor Get() const noexcept;
+
+    size_t GroupCount() const noexcept { return _sets.size(); }
+    bool HasPushConstant() const noexcept { return _pushConstant.has_value(); }
+
+private:
+    friend ShaderPipelineLayoutStorage BuildPipelineLayoutStorage(const ShaderPassDesc& pass);
+
+    /// 每组的 entry 列表。稳定地址由 unique_ptr 保证 (vector 扩容不移动内容)。
+    vector<unique_ptr<vector<render::ShaderParameterSetLayoutEntryDescriptor>>> _entries;
+    vector<render::ShaderParameterSetLayoutDescriptor> _sets;
+    std::optional<render::PushConstantDescriptor> _pushConstant;
+};
+
+/// 持有 render::VertexInputState 所需的后备存储。move-only。
+class ShaderVertexInputStorage {
+public:
+    ShaderVertexInputStorage() noexcept = default;
+    ShaderVertexInputStorage(const ShaderVertexInputStorage&) = delete;
+    ShaderVertexInputStorage& operator=(const ShaderVertexInputStorage&) = delete;
+    ShaderVertexInputStorage(ShaderVertexInputStorage&&) noexcept = default;
+    ShaderVertexInputStorage& operator=(ShaderVertexInputStorage&&) noexcept = default;
+
+    render::VertexInputState Get() const noexcept;
+
+private:
+    friend ShaderVertexInputStorage BuildVertexInputStorage(const ShaderVertexInputDesc& desc);
+
+    /// VertexAttribute::Semantic 是 string_view, 需要稳定的字符串后备存储。
+    vector<unique_ptr<string>> _semantics;
+    vector<render::VertexBufferLayout> _buffers;
+    vector<render::VertexAttribute> _attributes;
+};
+
+/// 从 manifest 构建 pipeline layout。结果对所有 target 与所有 keyword variant 都相同。
+ShaderPipelineLayoutStorage BuildPipelineLayoutStorage(const ShaderPassDesc& pass);
+
+ShaderVertexInputStorage BuildVertexInputStorage(const ShaderVertexInputDesc& desc);
+
+/// 直接构造 CreateShader 所需的 descriptor。
+render::ShaderDescriptor MakeShaderDescriptor(const ShaderBytecode& bytecode) noexcept;
 
 /// 一个 (pass, variant, category) 已解析好的全部 stage 字节码。
 ///

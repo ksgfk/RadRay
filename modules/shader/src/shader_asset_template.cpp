@@ -1,4 +1,4 @@
-#include <radray/runtime/shader_asset_template.h>
+#include <radray/shader/shader_asset_template.h>
 
 #include <algorithm>
 #include <array>
@@ -11,7 +11,7 @@
 #include <radray/json.h>
 
 #if defined(RADRAY_ENABLE_SPIRV_CROSS)
-#include <radray/render/spvc.h>
+#include <radray/shader/spvc.h>
 #endif
 
 #include "shader_manifest_json.h"

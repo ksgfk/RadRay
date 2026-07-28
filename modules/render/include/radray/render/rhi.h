@@ -13,9 +13,14 @@
 #include <radray/nullable.h>
 #include <radray/enum_flags.h>
 #include <radray/basic_math.h>
+#include <radray/shader/shader_types.h>
 
 namespace radray::render {
 
+/// 用哪个图形 API 跑。
+///
+/// 【属 render 而非 shader】这不是 manifest 的内容, shader 层也不需要它: 格式层与编译器
+/// 的接口一律直接收 ShaderBlobCategory, 由调用方决定要哪种字节码。
 enum class RenderBackend : int32_t {
     D3D12,
     Vulkan,
@@ -23,6 +28,9 @@ enum class RenderBackend : int32_t {
 
     MAX_COUNT
 };
+
+/// 目标后端默认的字节码类型。
+ShaderBlobCategory GetShaderBlobCategoryForBackend(RenderBackend backend) noexcept;
 
 enum class TextureFormat : int32_t {
     UNKNOWN,
@@ -102,83 +110,6 @@ enum class QueueType : uint32_t {
     Copy,
 
     MAX_COUNT
-};
-
-enum class ShaderStage : uint32_t {
-    UNKNOWN = 0x0,
-    Vertex = 0x1,
-    Pixel = Vertex << 1,
-    Compute = Pixel << 1,
-    Graphics = Vertex | Pixel,
-};
-
-enum class ShaderBlobCategory : int32_t {
-    DXIL,
-    SPIRV,
-    MSL,
-    METALLIB,
-};
-
-enum class AddressMode : int32_t {
-    ClampToEdge,
-    Repeat,
-    Mirror
-};
-
-enum class FilterMode : int32_t {
-    Nearest,
-    Linear
-};
-
-enum class CompareFunction : int32_t {
-    Never,
-    Less,
-    Equal,
-    LessEqual,
-    Greater,
-    NotEqual,
-    GreaterEqual,
-    Always
-};
-
-enum class VertexStepMode : int32_t {
-    Vertex,
-    Instance
-};
-
-enum class VertexFormat : int32_t {
-    UNKNOWN,
-
-    UINT8X2,
-    UINT8X4,
-    SINT8X2,
-    SINT8X4,
-    UNORM8X2,
-    UNORM8X4,
-    SNORM8X2,
-    SNORM8X4,
-    UINT16X2,
-    UINT16X4,
-    SINT16X2,
-    SINT16X4,
-    UNORM16X2,
-    UNORM16X4,
-    SNORM16X2,
-    SNORM16X4,
-    FLOAT16X2,
-    FLOAT16X4,
-    UINT32,
-    UINT32X2,
-    UINT32X3,
-    UINT32X4,
-    SINT32,
-    SINT32X2,
-    SINT32X3,
-    SINT32X4,
-    FLOAT32,
-    FLOAT32X2,
-    FLOAT32X3,
-    FLOAT32X4,
 };
 
 enum class PrimitiveTopology : int32_t {
@@ -382,21 +313,6 @@ enum class PhysicalDeviceType : int32_t {
     Cpu,
 };
 
-enum class ShaderParameterBindingType : int32_t {
-    UNKNOWN,
-    CBuffer,
-    Buffer,
-    RWBuffer,
-    TexelBuffer,
-    RWTexelBuffer,
-    Texture,
-    RWTexture,
-    DynamicCBuffer,
-    DynamicBuffer,
-    DynamicRWBuffer,
-    Sampler,
-};
-
 enum class RenderObjectTag : uint32_t {
     UNKNOWN = 0x0,
     Device = 0x1,
@@ -431,11 +347,6 @@ enum class RenderObjectTag : uint32_t {
 namespace radray {
 
 template <>
-struct is_flags<render::ShaderStage> : public std::true_type {};
-template <>
-struct is_compound_enum_flags<render::ShaderStage> : public std::true_type {};
-
-template <>
 struct is_flags<render::ColorWrite> : public std::true_type {};
 template <>
 struct is_compound_enum_flags<render::ColorWrite> : public std::true_type {};
@@ -459,7 +370,6 @@ struct is_flags<render::TextureState> : public std::true_type {};
 
 namespace render {
 
-using ShaderStages = EnumFlags<render::ShaderStage>;
 using ColorWrites = EnumFlags<render::ColorWrite>;
 using ResourceHints = EnumFlags<render::ResourceHint>;
 using RenderObjectTags = EnumFlags<render::RenderObjectTag>;
@@ -674,22 +584,6 @@ struct TimestampQueryCalibration {
     double TickPeriodNs{0.0};
 };
 
-struct SamplerDescriptor {
-    AddressMode AddressS{};
-    AddressMode AddressT{};
-    AddressMode AddressR{};
-    FilterMode MinFilter{};
-    FilterMode MagFilter{};
-    FilterMode MipmapFilter{};
-    float LodMin{0.0f};
-    float LodMax{0.0f};
-    std::optional<CompareFunction> Compare{};
-    uint32_t AnisotropyClamp{0};
-
-    friend bool operator==(const SamplerDescriptor& lhs, const SamplerDescriptor& rhs) noexcept = default;
-    friend bool operator!=(const SamplerDescriptor& lhs, const SamplerDescriptor& rhs) noexcept = default;
-};
-
 struct CommandQueueSubmitDescriptor {
     std::span<CommandBuffer*> CmdBuffers{};
     std::span<Fence*> SignalFences{};
@@ -873,17 +767,13 @@ struct MappedBufferRange {
     BufferRange Range{};
 };
 
+// 以下是喂给 RHI 的描述形状。它们不出现在 *.shader.json 里、没有 JSON codec,
+// shader 格式层也不消费它们 —— 由 shader_layout_binding.h 把 manifest 数据打包成它们。
+// 故属 render 层, 不下沉到 radrayshader。
 struct ShaderDescriptor {
     std::span<const byte> Source{};
     ShaderBlobCategory Category{};
     ShaderStages Stages{ShaderStage::UNKNOWN};
-};
-
-struct ShaderBindingLocation {
-    uint32_t Group{0};
-    uint32_t Binding{0};
-
-    friend bool operator==(const ShaderBindingLocation&, const ShaderBindingLocation&) noexcept = default;
 };
 
 struct ShaderParameterSetLayoutEntryDescriptor {
@@ -914,6 +804,30 @@ struct PipelineLayoutDescriptor {
     std::optional<PushConstantDescriptor> PushConstant{};
 };
 
+struct VertexAttribute {
+    uint32_t BufferBinding{0};
+    uint32_t Offset{0};
+    std::string_view Semantic{};
+    uint32_t SemanticIndex{0};
+    VertexFormat Format{VertexFormat::UNKNOWN};
+    uint32_t Location{0};
+
+    friend bool operator==(const VertexAttribute&, const VertexAttribute&) noexcept = default;
+};
+
+struct VertexBufferLayout {
+    uint32_t Binding{0};
+    uint32_t ArrayStride{0};
+    VertexStepMode StepMode{};
+
+    friend bool operator==(const VertexBufferLayout&, const VertexBufferLayout&) noexcept = default;
+};
+
+struct VertexInputState {
+    std::span<const VertexBufferLayout> Buffers{};
+    std::span<const VertexAttribute> Attributes{};
+};
+
 struct ShaderBufferBinding {
     Buffer* Target{nullptr};
     BufferRange Range{BufferRange::AllRange()};
@@ -942,30 +856,6 @@ struct ShaderParameterDynamicOffset {
     uint32_t Offset{0};
 
     friend bool operator==(const ShaderParameterDynamicOffset&, const ShaderParameterDynamicOffset&) noexcept = default;
-};
-
-struct VertexAttribute {
-    uint32_t BufferBinding{0};
-    uint32_t Offset{0};
-    std::string_view Semantic{};
-    uint32_t SemanticIndex{0};
-    VertexFormat Format{VertexFormat::UNKNOWN};
-    uint32_t Location{0};
-
-    friend bool operator==(const VertexAttribute&, const VertexAttribute&) noexcept = default;
-};
-
-struct VertexBufferLayout {
-    uint32_t Binding{0};
-    uint32_t ArrayStride{0};
-    VertexStepMode StepMode{};
-
-    friend bool operator==(const VertexBufferLayout&, const VertexBufferLayout&) noexcept = default;
-};
-
-struct VertexInputState {
-    std::span<const VertexBufferLayout> Buffers{};
-    std::span<const VertexAttribute> Attributes{};
 };
 
 struct PrimitiveState {
@@ -1557,19 +1447,14 @@ public:
 bool IsDepthStencilFormat(TextureFormat format) noexcept;
 bool IsUintFormat(TextureFormat format) noexcept;
 bool IsSintFormat(TextureFormat format) noexcept;
-uint32_t GetVertexFormatSizeInBytes(VertexFormat format) noexcept;
 uint32_t GetIndexFormatSizeInBytes(IndexFormat format) noexcept;
 IndexFormat SizeInBytesToIndexFormat(uint32_t size) noexcept;
 uint32_t GetTextureFormatBytesPerPixel(TextureFormat format) noexcept;
-bool IsDynamicShaderParameterBindingType(ShaderParameterBindingType type) noexcept;
 // -------------------------------------------------------------------------
 
 std::string_view format_as(RenderBackend v) noexcept;
-std::string_view format_as(ShaderStage v) noexcept;
-std::string_view format_as(ShaderBlobCategory v) noexcept;
 std::string_view format_as(TextureFormat v) noexcept;
 std::string_view format_as(QueueType v) noexcept;
-std::string_view format_as(VertexFormat v) noexcept;
 std::string_view format_as(PolygonMode v) noexcept;
 std::string_view format_as(TextureDimension v) noexcept;
 std::string_view format_as(BufferState v) noexcept;

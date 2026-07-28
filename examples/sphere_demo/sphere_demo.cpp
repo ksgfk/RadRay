@@ -10,7 +10,7 @@
 #include <radray/runtime/render_system.h>
 #include <radray/runtime/static_mesh.h>
 #include <radray/runtime/material_asset.h>
-#include <radray/runtime/shader_manifest.h>
+#include <radray/shader/shader_manifest.h>
 #include <radray/runtime/window_manager.h>
 #include <radray/runtime/game_framework/world.h>
 #include <radray/runtime/game_framework/actor.h>

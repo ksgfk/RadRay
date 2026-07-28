@@ -703,7 +703,11 @@ G1 / G2 / G4 的设计已裁决 (第 8 节), 实施中。
    裁决。切片已切到 `LoadShaderAsset` + `PipelineStateCache` (四个用例逐字通过),
    5.6 结论 3 的 PSO 缓存 key 在真实 device 上检验完毕。新增
    `test_pipeline_state_cache.cpp` 6 个用例, 全量 362/362 通过。
-3. **抽出 `radrayshader` 库** (见 8.4c)。刻意排在 PSO 库之后。
+3. ~~**重构为 `core ← shader ← render ← runtime`**~~ **已完成 (2026-07-28)**:
+   按 **8.15** 执行完毕 (8.13 的三库版已被其取代), 实施结果见 **8.16**。此步吸收并
+   **关闭了 G14 与 G15**, 以及原计划的"抽出 `radrayshader`" (8.4c/8.7/8.9)。
+   验收: 全量构建通过, ctest 360/360 且 exe 自报 ↔ ctest 双向集合完全一致,
+   `radray_shader_cook.exe` 零后端 obj、无 `d3d12.dll` 导入、体积 33 MB → 9.84 MB。
 4. **绕序契约归属**。切片用 `CullMode::None` 绕开了 D3D12/Vulkan 绕序相反的问题
    (见 5.6), material/mesh 层必须显式裁决 —— 目前无人负责。
 5. G8 vertex input 校验补强、G7 补齐其余 manifest (`shadow_pass`、`imgui_pass`)。
@@ -713,6 +717,22 @@ G1 / G2 / G4 的设计已裁决 (第 8 节), 实施中。
 执行层, 要求调用方给全状态, 于是缺口从"两处注释互相指"变成"一处明确未实现" —— 更好, 但
 仍是缺口。`MaterialRenderState` 至今零使用点, 且只覆盖 `Cull` / `DepthWrite` / `Blend`
 三项。这条要等 material 层。
+
+~~**G14**~~ **已关闭 (2026-07-28)**: `rhi.cpp` 曾把无状态纯函数 (格式尺寸查表等) 与
+设备工厂放在同一个 .cpp, 而 **obj 是链接粒度** —— 只想调
+`GetVertexFormatSizeInBytes` 的工具会被迫链入整个图形后端 (Windows 上表现为
+`radray_shader_cook.exe` 硬依赖 `d3d12.dll`, macOS 上会以 Metal + Cocoa 复发)。
+最终修法不是原计划的"拆出 `rhi_format.cpp`", 而是随 8.15 第 1 步把这些纯函数连同
+19 个类型一起迁入 `radrayshader/src/shader_types.cpp` —— 同样让它们脱离含设备工厂的
+obj, 且顺带完成了库边界。
+
+~~**G15**~~ **已关闭 (2026-07-28)**: `radrayrender` 内部"编译器 / 设备后端"两半缺少
+库边界 (G14 那条链的根因), 现已由 8.15 的 `radrayshader` 划出。最终布局不是本条原先
+设想的 `rhi_types` + `shadercompiler` + `radrayrender` 三个平级库, 而是用户裁决的
+四层直链 `radraycore ← radrayshader ← radrayrender ← radrayruntime` —— 改动更小,
+且依赖方向更贴合实测事实 (device 侧重度使用那批类型, 说明它们是 render 的下层)。
+原顾虑"需要跨平台构建才能验证"仍然成立: Windows 侧已实测闭合, macOS/Linux 的收益
+只能靠推理, 见 8.16 的遗留风险。
 
 ---
 
@@ -837,8 +857,8 @@ vertex layout、RT 格式), 同一份字节码会喂给多个 PSO, 去重必须�
 
 | 库 | 内容 |
 |---|---|
-| `radrayshader` (新) | `shader_manifest.*`、`shader_program.*`、`shader_asset_template.*`、`shader_reflection_map.*`、`shader_manifest_json.h` |
-| `radrayruntime` | `shader_asset.*` (`ShaderAsset` + `LoadShaderAsset`) 与 PSO 库 |
+| `radrayshader` (新) | `shader_manifest.*`、~~`shader_program.*`~~ (**已修正, 见 8.9: 留在 runtime**)、`shader_asset_template.*`、`shader_reflection_map.*`、`shader_manifest_json.h` |
+| `radrayruntime` | `shader_asset.*` (`ShaderAsset` + `LoadShaderAsset`)、`shader_program.*`、PSO 库 |
 
 **依据一, 依赖方向天然成立**: `shader_manifest.cpp` 的 include 只有 core
 (`json.h` / `file.h` / `binary_io.h` / `basic_math.h` / `logger.h` / `enum_flags.h`)
@@ -939,3 +959,1020 @@ PSO 库做完, `ShaderPassProgram` 的对外形状与 8.5 的钉住机制都稳�
 - 8.4 的"`Shader` 是瞬态局部量"结论首次兑现: 它现在只出现在
   `PipelineStateCache::GetOrCreateGraphics` 的函数体内, 全仓库无第二处 `CreateShader`
   调用。
+
+### 8.7 抽出 `radrayshader` 库的实施计划 (2026-07-28)
+
+8.4c 已裁决要抽库, 本节把它落成可执行步骤。核查过依赖与消费者后, 8.4c 的三条依据全部
+成立, 但有四处它没预见的细节。
+
+**依据复核 (数字已更新)**
+
+shader 相关 .cpp 现为 4715 行 (`shader_manifest.cpp` 3184 + `shader_asset_template.cpp`
+1065 + `shader_program.cpp` 164 + `shader_reflection_map.cpp` 129), 占 `radrayruntime`
+全部 8378 行的 56% —— 比 8.4c 记录的 51% 更高, 因为其间 `shader_manifest.cpp` 有过精简
+而其余部分在增长。单个 `shader_manifest.cpp` 仍比 `application.cpp` (798) +
+`gpu_resource.cpp` (874) + `gpu_system.cpp` (607) 之和多。
+
+**8.4c 未预见的四处细节**
+
+1. ~~`render_resource_recycler.h` 一并挪进 shader 库~~ **作废, 见 8.9。**
+   本条原打算"把 `render_resource_recycler.h` 跟着搬进 shader 库", 那是拿 include 关系
+   倒推库归属 —— 用错误的分界线去迁就一个 include, 而不是先问这个 include 为何存在。
+   正确结论: `shader_program.*` 本身就该留在 runtime, 于是这个 include 根本不需要动。
+
+2. **`RADRAY_ENABLE_SHADER_JIT` 的 option 条件必须改。**
+   `CMakeLists.txt:60` 现在写 `cmake_dependent_option(... "RADRAY_BUILD_RUNTIME AND
+   RADRAY_ENABLE_DXC")`。抽库后 JIT 是 shader 库的能力, 与 runtime 无关, 条件应改为
+   `RADRAY_BUILD_SHADER AND RADRAY_ENABLE_DXC`。**漏改的后果不是编译错误而是静默降级**:
+   关掉 `RADRAY_BUILD_RUNTIME` 只想构建 shader 库 + cook CLI 时, JIT 会被静默关成 OFF,
+   cook 出来的产物 toolchain hash 与开 JIT 的机器不同 —— 正是 8.4c 第 1 条要防的那类
+   静默失效, 只是换了触发路径。
+
+3. **`tools/shader_cook` 与 `tools/shader_gen` 的 `add_dependencies` 必须重指。**
+   两者现在都 `add_dependencies(... radrayruntime)`, 注释明确写"radrayruntime 的
+   POST_BUILD 已把它们放进同一输出目录"。POST_BUILD 跟着挪到 `radrayshader` 后,
+   这两处必须改成 `radrayshader`, 且 `target_link_libraries` 也从 `radrayruntime` 换成
+   `radrayshader` —— 这正是 8.4c 依据三要拿到的收益 (两个 CLI 不再链 imgui / freetype /
+   cgltf / window)。
+
+4. **shaderlib 部署的 POST_BUILD 挂在静态库上, 语义要重新确认。**
+   `$<TARGET_FILE_DIR:radrayruntime>` 对静态库指向的是 lib 输出目录。当前之所以能用,
+   是 `radray_set_build_path` 把所有产物 (含静态库与 exe) 收进同一个
+   `_build/<Config>/`。挪到 `radrayshader` 后这个前提不变, 故可直接搬。但**搬完必须实测
+   `$<TARGET_FILE_DIR:radrayshader>/shaderlib` 确实等于 exe 所在目录**, 而不是只看编译
+   通过 —— 若它落错目录, 症状是运行期找不到 shaderlib, 编译期毫无提示。
+
+**目录与命名**
+
+**注意**: 下面这张表的 `shader_program.*` 归属已被 8.9 推翻, 以 8.9 的表为准。
+
+| 位置 | 内容 |
+|---|---|
+| `modules/shader/include/radray/shader/` | `shader_manifest.h`、~~`shader_program.h`~~、`shader_asset_template.h`、~~`render_resource_recycler.h`~~ |
+| `modules/shader/src/` | 对应 .cpp + 私有 `shader_manifest_json.h`、`shader_reflection_map.h/.cpp` |
+| `modules/shader/tests/` | `test_shader_asset.cpp`、`test_shader_asset_template.cpp` |
+| `modules/runtime/` 保留 | `shader_asset.*`、`pipeline_state_cache.*`、**`shader_program.*`** (见 8.9), 测试保留 `test_shader_program.cpp`、`test_pipeline_state_cache.cpp`、`test_vertical_slice.cpp` |
+
+include 路径 `radray/runtime/...` → `radray/shader/...`, 库名与路径对齐 (8.4c 要求)。
+新增 `RADRAY_BUILD_SHADER` option, 依赖 `RADRAY_BUILD_RENDER`;
+`modules/CMakeLists.txt` 里 `add_subdirectory(shader)` 插在 render 与 runtime 之间。
+
+**`test_shader_program.cpp` 的归属**: 8.4c 说"涉及 `ShaderAsset` 的用例留在 runtime
+侧", 核查后该文件 10 个用例**全部**经 `shader_asset.h` 加载, 无一个只用 program 层。
+故整个文件留在 runtime, 不拆分。
+
+**执行顺序** (每步都要能独立编过, 便于二分定位):
+1. 建 `modules/shader/` 骨架 + CMakeLists + `RADRAY_BUILD_SHADER` option, 空库先编过。
+2. `git mv` 搬 2 组文件 + 2 个私有头 (8.9 修正: `shader_program.*` 不搬),
+   改 `#include` 与 include guard 路径。
+3. 搬 compile definitions (含 `FATAL_ERROR` 检查) 与 POST_BUILD; 改 `CMakeLists.txt:60`
+   的 option 条件。
+4. 改两个 CLI 的 link + `add_dependencies`; 改 `examples/sphere_demo` 的 include。
+5. 搬两个测试文件到 `modules/shader/tests/`, 连带 `RADRAY_PROJECT_DIR_DEFAULT` 那段。
+6. 全量构建 + 全量 ctest, 逐项核对第 (4) 条的运行期目录假设。
+
+**验收标准**: 用例总数不变 (当前 360, 且须做 8.8 要求的双向集合比较), 且两个 CLI 的
+链接闭包不含 imgui / freetype / cgltf / radraywindow。第二条要显式查, 因为它是抽库的
+**目的**, 而编译通过并不能证明它达成 —— 具体查法与 `d3d12.dll` 的例外见 8.10 第四点。
+
+### 8.8 抽库前置: ctest 注册污染 (2026-07-28, 已修)
+
+规划抽库时按 8.4c 的验收标准 (用例总数不变) 去建立基线, 发现基线本身是坏的 —— 这必须
+先修, 否则"总数不变"无从判断。
+
+把 21 个 exe 的 `--gtest_list_tests` 自报用例与 `ctest -N` 逐项做集合比较, 发现三处不一致:
+
+1. **`test_json` 的 ctest 注册指向了 `test_binary_io` 的用例。**
+   `build_debug/.../test_json_e3b0c442_tests.cmake` 里三个 `add_test` 全是
+   `BinaryIoTest.*`, 但 exe 路径是 `test_json.exe`。于是这三个 ctest 条目实际执行
+   `test_json.exe --gtest_filter=BinaryIoTest.*`, **匹配到 0 个用例, gtest 返回 0,
+   ctest 记为 Passed** —— 空跑伪装成通过。同时
+   `JsonTest.SupportsNonNullTerminatedStringViews` 从未被注册, 从来没跑过。
+   `BinaryIoTest` 的三个用例因 `test_binary_io` 自己的注册仍在真实运行, 故总数虚高 3。
+   成因是 `gtest_discover_tests` 的 POST_BUILD 发现结果串到了另一个目标的输出文件
+   (两者共用 `e3b0c442` 后缀, 且 `test_json.cpp` 在 `7fe92f1a` 重构中改过)。
+   删掉 exe 强制重新发现后自愈; 连做 6 轮并行重建未能复现, 故判定为一次性陈旧产物,
+   不是稳定竞态。
+2. **`test_shader_asset_sample.exe` 是无源僵尸。** 仓库里已无
+   `test_shader_asset_sample.cpp`, 任何 CMakeLists 也不再提它, 但产物与
+   `test_shader_asset_e3b0c442_*.cmake` 仍留在 build 树里, 又贡献 2 个用例
+   (`ShaderAssetSampleTest` 的 6 个用例现由 `test_shader_asset.cpp` 提供)。
+3. 修正后 ctest 与 exe 自报**双向完全一致**, 无重复项, 总数 **360**。
+
+**教训**: 上一轮把 "362 全绿" 当作回归通过的依据, 但其中 3 条是空跑, 1 个真实用例从未
+被执行。**`ctest -N` 的条数不足以作为覆盖面证据** —— 它只说明有多少条注册, 不说明注册
+指向的用例存在。此后凡以"用例总数"作为验收标准 (含 8.7), 都应同时做一次
+exe 自报 ↔ ctest 的集合比较, 而不是只比数字。
+
+**遗留**: `gtest_discover_tests` 的 hash 后缀在不同目标间可以相同 (`e3b0c442` 被
+`test_json` / `test_binary_io` / `test_shader_asset` 等共用), 这是串台的必要条件。
+本轮未深究其生成规则, 记为已知隐患: 若再次出现, 应考虑给 `radray_add_test` 传
+`DISCOVERY_EXTRA_ARGS` 或改用唯一的 `TEST_PREFIX`。
+
+### 8.9 修正 8.7: `shader_program.*` 留在 runtime, 分界线是 GPU 对象所有权 (2026-07-28)
+
+8.7 第 1 条的处理方式错了。它发现 `shader_program.cpp` include 了
+`render_resource_recycler.h`, 便决定把后者一起搬进 shader 库 —— 这是**拿 include 关系
+倒推库归属**: 为了保住"`shader_program.h` 属于 shader 库"这个预设, 去搬动一个碍事的
+依赖, 而没有先问这个 include 为什么存在。
+
+**它存在的原因恰恰说明 `shader_program.*` 不属于 shader 库。**
+
+`ShaderPassProgram` 持有 `unique_ptr<render::PipelineLayout>` (`shader_program.h:169`),
+并且有 `ReleaseRenderResources(IRenderResourceRecycler&)` (`:143`) 把它交出去延迟释放。
+它是**活的 GPU 对象所有者**, 有设备生命周期, 要参与帧回收 —— 这是运行时职责, 不是格式
+职责。那个 include 不是意外, 是这一事实的直接后果。
+
+**真正的分界线: 是否拥有活的 GPU 对象。**
+
+按此标准实测 (grep `render::Device` / `CreateShader` / `CreatePipelineLayout` /
+`RenderBase` / `Recycler` / `unique_ptr<render::`):
+
+| 文件 | 命中 | 归属 |
+|---|---|---|
+| `shader_manifest.h/.cpp` | 仅 3 处**注释**提及 `CreateShader` | shader 库 |
+| `shader_asset_template.h/.cpp` | 0 | shader 库 |
+| `shader_reflection_map.h/.cpp` | 0 | shader 库 |
+| `shader_program.h/.cpp` | 8 处**真实**使用 | **runtime** |
+
+格式层三组文件里 `render::Device` 一次都没出现过 —— 它们只产出**描述与字节**
+(`ShaderBytecode` 是纯数据, 注释说"可直接喂给 `CreateShader`", 但自己不调)。
+`shader_manifest.h` 里连 `Device` 这个名字都没有 (实测 grep `class Device|Device\*|
+Device&` 零命中)。这才是"格式层"名副其实的样子, 也是 cook / codegen CLI 真正需要的
+全部。
+
+**旁证一, 消费者从不越界**: `tools/shader_cook`、`tools/shader_gen`、`examples` 里
+`ShaderPassProgram` / `ShaderProgramVariant` / `IRenderResourceRecycler` **零引用**。
+8.4c 依据三说"两个 CLI 只需要格式层", 现在可以更精确: 它们需要的正是上表前三行, 一行
+不多。
+
+**旁证二, 待搬的测试也从不越界**: `test_shader_asset.cpp` (227 用例) 与
+`test_shader_asset_template.cpp` (40 用例) 对 `ShaderPassProgram` 零引用。program 层
+只被 `test_shader_program.cpp` / `test_pipeline_state_cache.cpp` /
+`test_vertical_slice.cpp` 用, 而这三个都因需要 device 而留在 runtime。**测试的分布本身
+就描出了这条分界线**, 与上表完全吻合。
+
+**旁证三, layout 的创建方本就在 runtime**: `CreatePipelineLayout` 的唯一调用点是
+`shader_asset.cpp:140`, 而 `BuildPipelineLayoutStorage` (`shader_manifest.cpp:2459`)
+只产出描述。"描述在 shader 库、创建在 runtime" 这条线早就存在, 8.7 差点把它跨过去。
+
+**修正后的归属**
+
+| 库 | 内容 |
+|---|---|
+| `radrayshader` | `shader_manifest.*`、`shader_asset_template.*` + 私有 `shader_manifest_json.h`、`shader_reflection_map.h/.cpp` |
+| `radrayruntime` | `shader_program.*` (活 GPU 对象)、`shader_asset.*`、`pipeline_state_cache.*` |
+
+`render_resource_recycler.h` **原地不动**, 留在 `radray/runtime/`。
+
+**连带收益**: 8.7 的执行步骤 2 从"搬 4 组文件"减为 3 组;
+`radray/runtime/shader_program.h` 的 include 路径无需改动, 而它是 `shader_asset.h` /
+`pipeline_state_cache.h` 的直接依赖 —— 少动一层就少一次全仓库 include 重写。
+被搬走的 .cpp 行数从 4715 降为 4378 (占 `radrayruntime` 的 52%), 依据二的体量论证不受
+影响。
+
+**8.4b/8.4c 的三层分界仍然成立**, 只是库边界落在**格式层与对象层之间**, 而不是 8.4c
+表格暗示的"格式层 + 对象层 vs 资产层"。8.4c 那张表把 `shader_program.*` 划进新库是错的,
+以本节为准。8.4b 说"program 层也停在 Asset 之下"依然对 —— 停在 Asset 之下不等于要
+离开 runtime, 这两件事被 8.4c 混为一谈了。
+
+### 8.10 两个 CLI 能脱离 runtime, 但脱不了 render (2026-07-28)
+
+抽库后 `shader_cook` / `shader_gen` 是否能彻底脱离 `radrayruntime`, 甚至 `radrayrender`?
+**结论: 脱 runtime 可以且是白拿的收益; 脱 render 不行, 且不该试。**
+
+**一, 脱 runtime: 成立。**
+
+两个 CLI 的 include 已经很干净 (各 4 个 radray 头):
+`enum_flags.h` / `file.h` / `types.h` / `render/dxc.h` + 一个 shader 头
+(`shader_manifest.h` 与 `shader_asset_template.h`)。**零个其他 runtime 头** —— 没有
+`asset.h`、没有 `asset_manager.h`、没有 `application.h`。所以 8.7 步骤 4 把
+`target_link_libraries` 从 `radrayruntime` 换成 `radrayshader` 后, 两个 CLI 与 runtime
+再无关系。这正是 8.4c 依据三预期的收益 (不再链 imgui / freetype / cgltf / window)。
+
+**二, 脱 render: 不成立, 因为格式层真的在用 render 的东西。**
+
+不是"include 了但没用"。实测格式层调用了三个 render 函数, 且都定义在 `rhi.cpp`:
+- `render::GetVertexFormatSizeInBytes` (`rhi.cpp:213`), 被 `shader_manifest.cpp:392` 与
+  `shader_asset_template.cpp:879` 调用;
+- `render::IsDynamicShaderParameterBindingType` (`rhi.cpp:319`), 被
+  `shader_manifest.cpp:128` 调用;
+- `render::Dxc` 整套 (`DxcCompileOptions` / `DxcOutput`), 这是 JIT 与 cook 的核心。
+
+更根本的是**类型**: `shader_manifest.h` 里出现 22 个 `render::` 名字
+(`ShaderDescriptor`、`VertexInputState`、`PipelineLayoutDescriptor`、`ShaderStage`、
+`ShaderBlobCategory`、`VertexFormat` ...)。manifest 的产出物就是"能直接喂给 RHI 的
+描述", 这些类型是它的**值域**, 不是实现细节。剥掉 render 就等于把这些类型在 shader 库
+里再定义一遍 + 写转换层 —— 那是 G12 式的第二套真相, 代价远大于收益。
+
+【唯一的例外确认过了】`render::Device` 在两个格式层头里**只出现在一句注释**里
+(`shader_manifest.h:608`), 实际代码零引用。也就是说格式层用的是 render 的**描述类型与
+纯函数**, 从不碰设备对象 —— 这与 8.9 的分界线完全一致, 也说明 render 这层依赖是"用
+数据契约", 而非"用运行时"。
+
+**三, 但当前有一个真实的、可修的代价: CLI 硬依赖 `d3d12.dll`。**
+
+实测 `radray_shader_cook.exe` 的导入表 (dumpbin /DEPENDENTS) 含 **`d3d12.dll` 与
+`dxgi.dll`**, 且 `/IMPORTS:d3d12.dll` 显示唯一被引用的符号是
+`D3D12SerializeVersionedRootSignature` —— 来自 `d3d12_impl.cpp:2023`, 一个 cook 永远
+走不到的代码路径。
+
+传导链 (已用 dumpbin /SYMBOLS 验证): 格式层调 `GetVertexFormatSizeInBytes` →
+该符号在 `rhi.cpp.obj` → 同一个 obj 里 `RhiCreateDevice` / `CreateDXGIFactory` 的
+`#ifdef RADRAY_ENABLE_D3D12` 分支对 `d3d12::CreateDevice` /
+`d3d12::CreateDXGIFactory` 有 **UNDEF 外部引用** → 链接器为解析它们必须拉入整个 d3d12
+后端 → 后端引入 `d3d12.dll` 导入项。
+
+**obj 是链接粒度**: 一个纯枚举尺寸查表函数与设备工厂放在同一个 .cpp 里, 于是"想知道
+`VertexFormat` 有几个字节"就得背上整个 D3D12 后端。这是 12.7MB exe 的主要来源。
+
+**裁决: 记为已知缺口, 本轮不修, 不阻塞抽库。** 修法是把 `rhi.cpp` 里的纯函数
+(格式尺寸查表、`IsXxxFormat`、`IsDynamicShaderParameterBindingType` 等, 均无状态、
+无后端分支) 拆到独立的 `rhi_format.cpp`, 让链接器能只取这一个 obj。这是 render 模块
+内部的整理, 与 shader 抽库正交 —— 混在一起做会让"抽库是纯搬运"这个前提失效
+(8.4c 刻意把抽库排在 PSO 库之后, 就是为了保住这个前提)。
+
+**四, 修正 8.7 的验收标准。**
+
+8.7 原写"查 `radrayshader` 链接闭包不含 imgui / freetype / cgltf / radraywindow"。
+按本节结论, 验收应改为可观测的二进制事实, 而非 CMake 声明:
+- 两个 CLI 的 `dumpbin /DEPENDENTS` **不应**出现 imgui / freetype 相关依赖;
+- `d3d12.dll` / `dxgi.dll` **仍会**出现 (本节第三点, 已知缺口), 不作为失败;
+- exe 体积应下降 (当前各 12.7 / 12.8MB), 作为参考指标而非硬门槛。
+
+【为何要看二进制而不是看 CMake】`target_link_libraries` 只说明声明的依赖, 说明不了
+链接器实际拉进了什么 —— 本节第三点正是"CMake 上只写了 radrayrender, 二进制里却多了
+一个 d3d12.dll"的例子。
+
+### 8.11 CLI 的跨平台性: render 依赖不是障碍, 但当前配置矩阵有一处真空 (2026-07-28)
+
+`radrayrender` 高度平台相关, 而 cook / gen 本身是平台无关的工具, 依赖它是否会让两个 exe
+难以跨平台? **结论: 不会 —— 平台相关的部分全部是 option 化的, 且在非 Windows 上自动
+关闭。但 8.10 第三点那条链在 macOS 上会换个后端重演, 且存在一个尚未被任何 preset 覆盖
+的配置。**
+
+**一, 8.10 里那个 `d3d12.lib` 并非 render 的固有属性。**
+
+追到了具体来源: 它不是任何 `#pragma comment(lib)` 也不是 render 自己写的, 而是
+`RADRAY_ENABLE_D3D12` 拉起的 `D3D12MemoryAllocator` 通过 PUBLIC 传递上来的
+(`build.ninja` 的 `LINK_LIBRARIES` 里 `D3D12MAd.lib` 紧跟着 `d3d12.lib dxgi.lib
+dxguid.lib`)。
+
+而 `RADRAY_ENABLE_D3D12` 是 `cmake_dependent_option(... "RADRAY_BUILD_RENDER AND
+WIN32")` (`CMakeLists.txt:55`) —— **在 Linux / macOS 上它必然为 OFF**, 于是
+`src/d3d12/*.cpp` 根本不参与编译 (`modules/render/CMakeLists.txt:20-22` 的 glob 在
+`if (RADRAY_ENABLE_D3D12)` 内), D3D12MA 也不会被 `add_subdirectory`
+(`CMakeLists.txt:369`)。同理 Metal 由 `APPLE` 门控, Vulkan 用 volk 的 headers-only
+形式 (`volk::volk_headers`), 实测两个 exe 的导入表里**没有 `vulkan-1.dll`** —— 它是
+运行期动态加载, 不产生链接期平台依赖。
+
+所以 render 的平台相关性是**编译期可裁剪**的, 不是"链接它就绑死一个平台"。cook / gen
+在 Linux 上会得到一个不含任何图形 API 导入的 exe。
+
+**二, 真正会跨平台复发的是 8.10 的 obj 粒度问题, 不是 render 本身。**
+
+在 macOS 上同一条链会换成 Metal / Cocoa 重演: 格式层调 `GetVertexFormatSizeInBytes` →
+`rhi.cpp.obj` → 其中 `RhiCreateDevice` 的 `#ifdef RADRAY_ENABLE_METAL` 分支引用
+`metal::CreateDevice` → 拉入 Metal 后端 → 而 `APPLE AND RADRAY_ENABLE_VULKAN` 那段
+(`modules/render/CMakeLists.txt:43-49`) 是 **PUBLIC** 链接 `Cocoa` 与 `QuartzCore`
+framework。于是一个 shader codegen CLI 会链上 Cocoa。
+
+这加强了 8.10 的结论: 该缺口不是"Windows 上多一个 dll"这种局部瑕疵, 而是**每个平台都
+会以本地形式复发**。修法不变 (把 `rhi.cpp` 的纯函数拆到 `rhi_format.cpp`), 但优先级
+应上调 —— 记为 G14。
+
+**三, 发现一处配置真空: 没有任何 preset 构建 `RADRAY_ENABLE_D3D12=OFF`。**
+
+`d3d12.lib` 混进 CLI 这件事在 Windows 上永远存在, 在非 Windows 上永远不存在, 于是
+"cook 不该依赖图形后端"这个性质**在本仓库的 CI 矩阵里从未被检验过** ——
+`CMakePresets.json` 全是 win-x64。这与 8.8 的教训同源: 一个性质若没有任何配置会让它
+失败, 它就不算被验证。
+
+建议 (不阻塞抽库): 加一个 `RADRAY_BUILD_RENDER=ON` + `RADRAY_ENABLE_D3D12=OFF` +
+`RADRAY_ENABLE_VULKAN=OFF` 的配置只构建 `radrayshader` + 两个 CLI, 作为"格式层不依赖
+任何后端"的守门配置。它同时能守住 8.7 第 2 条那个 `RADRAY_ENABLE_SHADER_JIT` 的
+option 条件 —— 那条改动的失败模式 (JIT 被静默关掉) 恰好只在"不构建 runtime"的配置下
+才暴露, 而目前没有这样的配置。
+
+**四, 对抽库计划的影响: 无。**
+
+抽库后 CLI 的依赖是 `radraycore + radrayrender + radrayshader`, 三者都是编译期可裁剪
+的。跨平台性不因抽库变好也不变坏 —— 变好的是"能构造出一个不含后端的配置"这件事从
+不可能 (CLI 必须链 runtime, runtime 必须链 window) 变成可能。这算抽库的一项额外收益,
+但要真正兑现需要 G14 与第三点的守门配置。
+
+### 8.12 更激进的拆库: 不应把 render 的内容拆进 runtime, 但确实该拆 render 自身 (2026-07-28)
+
+问题: 既然 8.11 暴露了"CLI 被迫链入图形后端", 是否该更激进 —— 把 `radrayrender` 的一部分
+内容拆进 `radrayruntime`?
+
+**结论: 方向反了, 不该这么拆。但问题问对了一半 —— render 确实该拆, 只是应沿"编译器 /
+设备"这条缝拆成两个平级库, 而不是把内容往 runtime 里搬。**
+
+**一, 为什么"拆进 runtime"不成立。**
+
+依赖方向是 `core ← render ← (shader) ← runtime`。把 render 的内容搬进 runtime 意味着让
+**下游**吸收上游的职责, 这会产生两个后果:
+
+- **加重而非减轻 8.10/8.11 的病症。** 那两节的根因是"工具为了拿一个纯函数, 被迫链入
+  它不需要的东西"。cook / gen 抽库后恰恰是**不依赖 runtime** 的 (8.10 第一点已核实:
+  两个 CLI 零个非 shader 的 runtime 头)。把 `rhi.h` 的类型往 runtime 搬, 等于把它们挪到
+  CLI 够不着的地方 —— 而 `shader_manifest.h` 用了 22 个这类 `render::` 名字, CLI 会被迫
+  重新依赖 runtime, 即 8.4c 依据三想消掉的那条依赖原地复活。
+- **runtime 会成为第二个巨物。** `radrayruntime.lib` 已是 231MB (render 37.8MB,
+  core 17MB), 是仓库里最大的静态库。它现在的问题是承担太多, 不是太少。
+
+**二, 但 render 内部确实有一条干净的缝, 且实测无环。**
+
+render 的 8378 行源码可清晰二分:
+
+| 组 | 文件 | 行数 | 依赖 device 层? |
+|---|---|---|---|
+| 编译器/反射 | `dxc.cpp`、`hlsl.cpp`、`spirv.cpp`、`spvc.cpp`、`msl.cpp` | 2646 | **零** |
+| 设备/后端 | `rhi.cpp` + `d3d12/*` + `vk/*` | 11588 | — |
+
+实测: 编译器那五个 .cpp 对 `Device` / `SwapChain` / `CommandQueue` / `backend/`
+**零引用** (`spvc.cpp` 的 14 处命中经查全是名为 `markDeviceStorage` 的局部 lambda,
+非 `render::Device`)。头文件侧, `dxc.h` 从 `rhi.h` 只取 **`ShaderStage` 与
+`ShaderBlobCategory`** 两个枚举, `spvc.h` 只取 `ShaderStage`。
+
+也就是说 shader 工具链需要的是 render 的**枚举与描述类型**, 加上一个不碰设备的编译器 —— 
+这与 8.9 的结论完全一致 (格式层用"数据契约", 不用"运行时"), 也解释了 8.10 那条链为何
+显得荒谬: 它跨过了一条本该存在的库边界。
+
+**三, 若要激进, 正确的形态是把 render 拆成两个平级库。**
+
+```
+core ← rhi_types (纯枚举/描述/纯函数)
+         ├── shadercompiler (dxc/hlsl/spirv/spvc/msl)  ← radrayshader ← runtime
+         └── radrayrender  (Device/后端, 平台相关)      ←──────────────── runtime
+```
+
+`rhi.h` 的结构已经支持这条线: 前 476 行是纯枚举与描述 struct, `class Device;` 等对象
+声明从 **477 行**才开始。拆点是现成的, 不需要重新设计类型。
+
+这样 cook / gen 的依赖变成 `core + rhi_types + shadercompiler + radrayshader`, **完全
+不含任何图形后端**, 8.11 第三点那个守门配置也就自然成立 (不需要靠关 option 来模拟)。
+
+**四, 裁决: 记为 G15, 不在本轮做, 且 G14 仍是更优的第一步。**
+
+【为何不现在做】三条理由:
+- **G14 用 1 个文件的代价拿到 80% 的收益。** 把 `rhi.cpp` 的纯函数拆到
+  `rhi_format.cpp` 就能断开 8.10 那条链 (格式层只需要 `GetVertexFormatSizeInBytes` /
+  `IsDynamicShaderParameterBindingType` 两个函数)。G15 要动 4 个库的边界与全部
+  `#include`, 收益是"依赖图更诚实", 而非"新解决了什么"。
+- **本轮的前提是"抽库是纯搬运"** (8.4c 刻意把抽库排在 PSO 库之后就为保住这个前提)。
+  同时重划 render 的边界会让这个前提失效, 一旦出错就无法二分定位是哪一半的问题。
+- **G15 的收益要等真实的跨平台构建才能验证。** 8.11 第三点已指出仓库目前只有 win-x64
+  preset; 在没有非 Windows CI 的情况下做 G15, 等于凭推理重划边界而无法证伪 ——
+  和 8.8 那个空跑测试同类的错误。
+
+**顺序**: 抽 `radrayshader` (第 7 节第 3 步) → G14 (拆 `rhi_format.cpp`) →
+补 8.11 第三点的守门配置 → 视需要再评估 G15。前三步都是局部且可独立验证的, G15 是唯一
+需要整体重构的一步, 应当最后并在有跨平台验证手段之后再做。
+
+**本节的排期建议已被用户裁决覆盖 (2026-07-28)**: 用户要求一次性完成整个结构重构, 并定名
+`radraygal` / `radrayshader` / `radraygpu`。执行方案见 **8.13**, 其中 G14 被并入第 1 步
+顺带完成, G15 即该方案本身。本节的技术分析 (依赖方向无环、缝在哪) 仍然有效, 只有"排到
+最后做"这条排期结论作废。
+
+### 8.13 ~~一次性重构为 gal / shader / gpu 三库~~ 已被 8.15 取代 (2026-07-28)
+
+**本节方案作废**, 以 **8.15** 为准 (用户提出改动更小的 `core ← shader ← render ←
+runtime` 布局, 实测更优)。本节保留作为决策记录: 其中"边界标准是是否持有 device 对象
+指针"的分析、命名空间裁决、以及第七节的风险清单在 8.15 中仍然沿用。以下为原文。
+
+---
+
+
+用户要求一次性完成整个工程结构重构, 并指定了库名与职责:
+
+| 库 | 职责 | 对应本文档此前的称法 |
+|---|---|---|
+| `radraygal` | GPU Abstract Layer: 纯枚举 / 描述 struct / 纯函数 | 8.12 的 `rhi_types` |
+| `radrayshader` | shader 与编译器相关 (manifest + 格式层 + dxc/hlsl/spirv/spvc/msl) | 8.12 的 `shadercompiler` + 8.9 的 `radrayshader` **合并** |
+| `radraygpu` | 设备 / 后端, 平台相关 | 8.12 的 `radrayrender` (原 `radrayrender` 更名) |
+| `radrayruntime` | 引用上述三库 | 不变 |
+
+依赖: `core ← gal ← {shader, gpu} ← runtime` (shader 与 gpu 平级, 互不依赖)。
+
+这**覆盖了 8.12 第四点"G15 排到最后"的建议**。8.12 的顾虑 (无跨平台 CI 无法证伪) 依然
+成立, 记录在下面的风险一节; 但用户已明确要一次做完, 故按此执行。合并 8.12 的
+`shadercompiler` 与 8.9 的 `radrayshader` 是用户的简化, 且是合理的 —— 二者的消费者完全
+重合 (cook / gen / 格式层), 分成两个库会多一层边界而无额外收益。
+
+**一, 可行性已实测: 三个方向都无环。**
+
+- **gpu 不依赖 shader**: `rhi.cpp` / `d3d12/*` / `vk/*` / `backend/*.h` 对
+  `dxc.h` / `hlsl.h` / `spirv.h` / `spvc.h` / `msl.h` **零 include**; 对
+  `HlslShaderDesc` / `SpirvShaderDesc` / `MslShaderDesc` / `HlslReflection` **零引用**。
+  后端消费的是**编译后的字节**, 不是反射结构。
+- **shader 不依赖 gpu**: 编译器五个 .cpp 对 `Device` / `SwapChain` / `CommandQueue` /
+  `backend/` 零引用 (8.12 已核实); 对 `rhi.cpp` 里的纯函数也几乎不用 —— 唯一命中是
+  `msl.cpp` 的 5 处 `format_as`, 而 `format_as` 全部作用于纯枚举, 归 gal。
+- **gal 谁都不依赖**: 只需 `core` (`types.h` / `nullable.h` / `enum_flags.h` /
+  `basic_math.h`, 即 `rhi.h` 现有的全部 include)。
+
+**二, 关键实测: gal 的边界不是一条"行号切割线"。**
+
+8.12 曾说"`rhi.h` 前 476 行是纯类型, 477 行起是 device 对象, 拆点现成"。**这句是错的,
+需要更正** —— 实际布局是描述 struct 与 device class 交错的:
+
+- `RenderBase` / `IDebugName` 在 **516/532**, 早于大量描述 struct;
+- shader 层需要的描述分布在 **677 (`SamplerDescriptor`)** 到
+  **969 (`VertexInputState`)**;
+- device class 主体在 1196 之后, 但 `SwapChainFrame` (703)、`Sampler` (1522)、
+  `SamplerCache` (1596) 散落其间。
+
+所以拆分标准必须是**语义**而非位置: **一个类型进 gal 的充要条件是它不含任何 device
+对象指针**。已按此标准全量扫描 `rhi.h` (正则匹配成员里的 `Device*` / `Buffer*` /
+`Texture*` / `Shader*` / `PipelineLayout*` / `RenderPass*` ... ), 结果:
+
+- **32 个**类型持有 device 对象指针 → 必须留在 gpu。含 `SwapChainDescriptor` (607,
+  持 `CommandQueue*`)、`TextureCopyDescriptor` (638, 持 `Texture*`)、
+  `FramebufferDescriptor` (811, 持 `RenderPass*`)、`ShaderEntry` (1120, 持 `Shader*`)、
+  `GraphicsPipelineStateDescriptor` (1125, 持 `PipelineLayout*`)、`SamplerCache` (1596)。
+  **注意**: "Descriptor"这个后缀不代表能进 gal, 有 13 个 Descriptor 持有 device 指针。
+- shader 层需要的 10 个类型 (`SamplerDescriptor`、`ShaderDescriptor`、
+  `ShaderBindingLocation`、`ShaderParameterSetLayoutEntryDescriptor`、
+  `ShaderParameterSetLayoutDescriptor`、`PushConstantDescriptor`、
+  `PipelineLayoutDescriptor`、`VertexAttribute`、`VertexBufferLayout`、
+  `VertexInputState`) **全部零 device 指针** → 全部可进 gal。这是本方案成立的关键前提,
+  已逐个验证。
+- PSO 固定功能状态 6 个 (`PrimitiveState`、`DepthStencilState`、`MultiSampleState`、
+  `ColorTargetState`、`BlendState`、`StencilFaceState`) **全部零 device 指针** → 进 gal。
+  于是 8.6 的 `GraphicsPipelineStateKey` 的固定功能段也只依赖 gal。
+- 35 个 `enum class` + 16 处 `is_flags`/`EnumFlags` 特化 + 14 个 `format_as` → 全部
+  进 gal (`format_as` 的实现即 `rhi.cpp:325-460`, 与设备无关)。
+
+**三, 头文件与目录布局**
+
+```
+modules/gal/include/radray/gal/
+    gal.h            ← rhi.h 的纯类型部分 (枚举/描述/is_flags/format_as 声明)
+modules/gal/src/
+    gal.cpp          ← rhi.cpp 的纯函数部分 (格式尺寸表/IsXxxFormat/format_as 定义)
+modules/shader/include/radray/shader/
+    dxc.h hlsl.h spirv.h spvc.h msl.h        ← 自 render 平移
+    shader_manifest.h shader_asset_template.h ← 自 runtime 平移 (8.9 裁决的两组)
+modules/shader/src/
+    dxc.cpp hlsl.cpp spirv.cpp spvc.cpp msl.cpp d3d12shader.h d3dcommon_adapter.h
+    shader_manifest.cpp shader_asset_template.cpp
+    shader_manifest_json.h shader_reflection_map.h/.cpp
+modules/gpu/include/radray/gpu/
+    gpu.h            ← rhi.h 的 device 部分 (RenderBase/IDebugName/32 个持指针类型/所有 class)
+    backend/*.h      ← 自 render 平移
+modules/gpu/src/
+    gpu.cpp d3d12/* vk/*
+```
+
+`radraygal` 天然是 header-heavy 但仍需 `gal.cpp` (纯函数的定义)。
+`gpu.h` 必须 `#include <radray/gal/gal.h>`。
+**`d3d12shader.h` / `d3dcommon_adapter.h` 跟 `dxc.cpp` 走 shader 库** —— 它们是 DXC
+反射的非 Windows 适配层, 与 D3D12 后端无关 (名字容易误导)。
+
+**四, 命名空间: 保持 `radray::render` 不变。**
+
+【为何不跟着库名改】三个库共同实现原 `render` 这一层, 拆库是**物理**边界而非概念重命名。
+改成 `radray::gal::` / `radray::gpu::` 会让 `ShaderStage` 这类横跨两库使用的类型出现
+"声明在 gal 命名空间、被 gpu 大量使用"的割裂, 且要改动全仓库每一处 `render::` 限定
+(实测 `shader_manifest.h` 一个文件就有 24 个)。库名表达构建单元, 命名空间表达概念层,
+二者不必一致 —— `radraycore` 的内容也在 `radray::` 而非 `radray::core::`。
+
+**五, 执行顺序** (每步独立编过, 保住二分定位能力)
+
+抽库总是"先加边界, 再搬内容, 最后收紧"。**关键: 前 4 步不删旧路径**, 靠 `gal.h` 被
+`gpu.h` include 维持全仓库现有 `#include <radray/render/rhi.h>` 可用, 于是每一步都能
+全量构建 + 全量 ctest。
+
+1. 建 `modules/gal/`, 从 `rhi.h`/`rhi.cpp` **切出**纯类型与纯函数到 `gal.h`/`gal.cpp`;
+   `rhi.h` 顶部 include `gal.h`。此时无任何其他文件改动, 全仓库应当照常编过 —— 这一步
+   同时**顺带修掉 G14** (纯函数已在独立 obj, 不再牵连设备工厂)。
+   **【8.14 实测: `.cpp` 必须跟着拆, 这是成败关键而非可选优化】** 只拆 `rhi.h` 而把
+   `rhi.cpp` 留在原处, `gal` 就仍带着对 `d3d12::CreateDevice` 等 **5 个后端工厂符号**
+   的引用, CLI 会照旧被迫链入 d3d12 + vulkan 后端 (约 23 MB), 全部收益归零。
+   必须迁入 `gal.cpp` 的最小集合已实测确认为 4 个符号:
+   `GetVertexFormatSizeInBytes`、`IsDynamicShaderParameterBindingType`、
+   `format_as(ShaderStage)`、`format_as(ShaderBlobCategory)` (连同其余纯函数与
+   `format_as` 一并迁移)。留在 `gpu.cpp` 的是 `Device::Create` / `DXGIFactory::Create` /
+   `InstanceVulkan::InitEnv` / `SamplerCache` / `SwapChainFrame` 这些。
+2. `radrayrender` 更名 `radraygpu`, `rhi.h`→`radray/gpu/gpu.h`, `backend/` 平移。
+   全仓库 `#include <radray/render/rhi.h>` → `<radray/gpu/gpu.h>`。
+3. 建 `modules/shader/`, 把编译器五组 + 两个私有头自 render 平移进来, 链 `radraygal`。
+   此时 shader 库尚不含 manifest, 但已可验证"编译器不需要 gpu"这一核心假设。
+4. 把 8.9 裁定的两组格式层文件 (`shader_manifest.*`、`shader_asset_template.*` +
+   `shader_manifest_json.h` + `shader_reflection_map.*`) 自 runtime 搬入 shader 库,
+   include 路径改 `radray/shader/...`。搬 `RADRAY_ENABLE_SHADER_JIT` /
+   `RADRAY_DXC_VERSION` 定义 (含 `FATAL_ERROR`) 与 shaderlib POST_BUILD (8.7 第 2/4 条)。
+5. 改两个 CLI: link `radrayshader`, `add_dependencies` 重指 (8.7 第 3 条);
+   改 `CMakeLists.txt:60` 的 JIT option 条件为 `RADRAY_BUILD_SHADER AND
+   RADRAY_ENABLE_DXC` (8.7 第 2 条); 改 `examples/sphere_demo` 的 include。
+6. 搬测试: `test_shader_asset.cpp` / `test_shader_asset_template.cpp` → 
+   `modules/shader/tests/` (含 `RADRAY_PROJECT_DIR_DEFAULT` 那段)。
+   **`shader_program.*` 与其测试留在 runtime** (8.9 裁决, 不受本节影响)。
+7. 收尾: 加 8.11 第三点的守门配置 (`RADRAY_ENABLE_D3D12=OFF` +
+   `RADRAY_ENABLE_VULKAN=OFF`, 只构建 gal + shader + CLI); 用 `dumpbin /DEPENDENTS`
+   验两个 CLI 不再含 `d3d12.dll` / `dxgi.dll`。
+
+**六, 验收标准**
+
+- 用例总数仍 **360**, 且按 8.8 要求做 exe 自报 ↔ ctest **双向集合比较** (不能只比数字)。
+- **主门槛 (须用链接 map, 见 8.14 第四点)**: 两个 CLI 的 `link /MAP` 产物里
+  **不含** `d3d12_*.obj` / `vulkan_*.obj` / `D3D12MemAlloc*.obj`。
+  【为何不用 `dumpbin /DEPENDENTS`】8.14 实测发现 Vulkan 后端被链入却**不产生 dll
+  导入项** (volk 动态加载), 用导入表验会得到假阴性。
+- 辅助门槛: `dumpbin /DEPENDENTS` 里 `d3d12.dll` / `dxgi.dll` 消失。
+- `radraygpu` 与 `radrayshader` **互不出现在对方的链接闭包**里。
+- exe 体积显著下降 (当前各 12.7 / 12.8MB), 参考指标。
+
+**七, 风险与已知代价 (须在开工前认可)**
+
+- **这不再是"纯搬运"。** 8.4c 刻意把抽库排在 PSO 库之后以保住"纯搬运"前提, 本方案
+  主动放弃该前提: 第 1 步要把 `rhi.h` (1280 行) 按语义**切开**, 那是判断而非搬运。
+  缓解手段是第 1 步不改任何调用方, 使其可被单独验证。
+- **`RenderBase` 的归属是唯一真正的判断题。** 它 (`rhi.h:516`) 是所有 GPU 对象的基类,
+  语义上属 gpu; 但 `IRenderResourceRecycler` (runtime) 与所有后端都引用它。裁决:
+  **进 gpu**, 因为它代表"有设备生命周期的对象", 与 gal 的"纯描述"定位互斥。
+  `render_resource_recycler.h` 仍留 runtime (8.9), 它前置声明 `RenderBase` 即可。
+- **无跨平台 CI, macOS/Linux 上的收益无法验证** (8.11/8.12 已指出)。本方案能在 Windows
+  上证明"CLI 不再链 d3d12", 但"macOS 上不再链 Cocoa"只能靠推理。这是接受用户"一次做完"
+  要求时明确承担的风险, 记录在此。
+- 第 2 步是全仓库范围的 `#include` 重写 (`rhi.h` 有 26 个 includer)。机械但量大,
+  应靠工具批量替换后全量构建验证, 不逐个手改。
+
+### 8.14 实测验证: 拆库后 CLI 的链接内容 (2026-07-28)
+
+问题: 8.13 的三库方案能否保证两个 CLI 只链接必要内容, 不引入多余的?
+**答案: 能, 但前提是 `rhi.cpp` 必须跟着 `rhi.h` 一起按语义拆开。**
+8.13 第 5 步已经这么写了 (第 1 步同时切 `.h` 与 `.cpp`), 本节用链接器实测证明该步骤是
+**必要**的 —— 只拆头文件不拆 .cpp 的话, 全部收益归零。
+
+以下全部结论来自真实链接产物 (`link /MAP` + `dumpbin`), 不是推理。
+
+**一, 当前实况: cook 链入了 8 个 render obj, 其中 4 个是纯浪费。**
+
+用 CMake 生成的完整链接命令重链 `radray_shader_cook` 并产出 map, 得到实际参与链接的
+109 个 obj。其中 render 侧 8 个:
+
+| obj | 体积 | 是否必要 |
+|---|---|---|
+| `dxc.cpp.obj` | 2.3 MB | 必要 (cook 的核心) |
+| `hlsl.cpp.obj` | 1.9 MB | 必要 (反射) |
+| `spvc.cpp.obj` | 4.8 MB | 必要 (SPIR-V 交叉编译) |
+| `rhi.cpp.obj` | 1.4 MB | **仅需其中 4 个纯函数** |
+| `d3d12_impl.cpp.obj` | 7.6 MB | **完全无用** |
+| `vulkan_impl.cpp.obj` | 11.7 MB | **完全无用** |
+| `d3d12_helper.cpp.obj` | 0.6 MB | **完全无用** |
+| `vulkan_helper.cpp.obj` | 2.3 MB | **完全无用** |
+
+外加 `D3D12MemAlloc.cpp.obj` (1.1 MB) 与 `d3d10guid.obj`, 以及导入项
+`d3d12.dll` / `dxgi.dll`。**约 23 MB 的后端 obj 被链进一个不碰 GPU 的 codegen 工具。**
+
+顺带修正 8.10: 那节只提到 D3D12, 实测 **Vulkan 后端也被链进来了** (`vulkan_impl` 11.7MB
+是其中最大的单个 obj)。之所以 8.10 没发现, 是因为 Vulkan 走 volk 动态加载, 不留 dll
+导入项 —— **导入表干净不代表没链进来**。这也说明 8.10/8.13 用 `dumpbin /DEPENDENTS`
+作验收标准是不够的, 见下面第四点。
+
+**二, 根因确认: 唯一的牵连点是 `rhi.cpp.obj` 的 5 个未解析符号。**
+
+`dumpbin /SYMBOLS rhi.cpp.obj` 显示它对后端有且仅有 5 个 UNDEF 引用:
+`d3d12::CreateDevice`、`d3d12::CreateDXGIFactory`、`vulkan::CreateDeviceVulkan`、
+`vulkan::InitVulkanEnvImpl`、`vulkan::ShutdownVulkanEnvImpl` —— 全部来自
+`Device::Create` / `DXGIFactory::Create` / `InstanceVulkan::InitEnv` 这三个工厂函数
+里的 `#ifdef` 分支。
+
+而格式层对 `rhi.cpp.obj` 的需求只有 4 个符号 (`dumpbin /SYMBOLS
+shader_manifest.cpp.obj` 的 UNDEF 列表): `GetVertexFormatSizeInBytes`、
+`IsDynamicShaderParameterBindingType`、`format_as(ShaderStage)`、
+`format_as(ShaderBlobCategory)`。**四个纯函数, 把 23 MB 后端拖了进来。**
+
+编译器三个 obj 则几乎不依赖 `rhi.cpp.obj`: `hlsl.cpp.obj` **0 个**未解析 render 符号,
+`spvc.cpp.obj` 只有 `format_as(ShaderStage)` 一个, `dxc.cpp.obj` 只有一个模板析构
+thunk。这印证了 8.12/8.13 "编译器不依赖设备层"的核实。
+
+**三, 决定性实验: 两次模拟链接。**
+
+*实验 A (只拆头、不拆 `rhi.cpp`)*: 用 `shader_cook.obj` + 编译器五个 obj +
+`rhi.cpp.obj` + 格式层两个 obj, 不给任何后端 lib 去链。
+**结果: 失败, 5 个 LNK2019, 全部是上面那 5 个后端工厂符号。**
+→ 证明只要 `rhi.cpp` 不拆, `gal` 库里就带着对后端的引用, CLI 必然被迫链入 d3d12 与
+vulkan 后端。**光把 `rhi.h` 拆成 `gal.h` + `gpu.h` 是不够的。**
+
+*实验 B (拆掉 `rhi.cpp`, 模拟纯函数已迁入 `gal.cpp`)*: 同上但移除 `rhi.cpp.obj`。
+**结果: 恰好 4 个 LNK2019, 且全部是第二点那 4 个纯函数, 零个后端符号。**
+→ 证明这 4 个符号一旦搬进 `gal.cpp`, 链接即闭合。**cook 与 gen 将不再引用任何后端
+符号**, `d3d12_impl` / `vulkan_impl` / `D3D12MemAlloc` 与 `d3d12.dll` / `dxgi.dll`
+全部消失。
+
+两个实验合起来是对 8.13 的一次证伪尝试: 方案通过了, 但暴露出第 1 步的切分粒度是
+**成败关键**, 而非可选优化。
+
+**四, 因此修正验收标准 (覆盖 8.10 第四点与 8.13 第六节)。**
+
+`dumpbin /DEPENDENTS` **不足以**作为验收 —— Vulkan 后端被链入却不产生 dll 导入项
+(第一点), 用它验会得到假阴性。验收必须用**链接 map**:
+
+- 用 `link /MAP` 或 `/VERBOSE:LIB` 产出 CLI 的实际 obj 清单;
+- 断言其中**不含** `d3d12_*.obj`、`vulkan_*.obj`、`D3D12MemAlloc*.obj`;
+- 断言不含 `png_*` / `jpeg_*` / `FT_*` / imgui / cgltf (实测当前已不含, 因为静态库按
+  obj 粒度取用, 这几项从未被 CLI 引用 —— 8.4c 依据三"CLI 被迫链接 imgui/freetype"
+  这句**不准确**, 声明上依赖但链接器并未取用; 真正被浪费的是后端那 23 MB);
+- 保留 `dumpbin /DEPENDENTS` 作为辅助 (`d3d12.dll` / `dxgi.dll` 应消失)。
+
+**五, 结论: 会"只链必要内容", 但有三项不可消除的固有成本。**
+
+拆库后 CLI 的 obj 构成应为: `shader_cook.obj` + shader 库 (dxc/hlsl/spvc/spirv/msl +
+manifest + reflection_map) + `gal.cpp.obj` + core 侧按需取用的 7 个 obj
+(`file` / `json` / `logger` / `binary_io` / `text_encoding` / `allocator` /
+`dynamic_library`) + 第三方 (spirv-cross 6 个 obj、fmt、spdlog、yyjson、mimalloc)。
+
+三项固有成本, 属正常而非缺陷:
+- **mimalloc 全部 15 个 obj**: 因 `/WHOLEARCHIVE:mimalloc-debug.lib` 而整库链入,
+  这是 allocator override 的必然要求。
+- **`radraycore` 是单一库**: 它内部不再细分, 但静态库按 obj 取用, 实测只取了 7 个 ——
+  PNG/JPEG/freetype/stdexec 均**未**进入 exe。core 不需要拆。
+- **spirv-cross**: cook 确实要做 SPIR-V → MSL 交叉编译, 必要。
+
+【一句话】拆库真正消除的是那 23 MB 后端 obj 与 `d3d12.dll`/`dxgi.dll` 导入, 其余部分
+现在就已经是"按需链接"的 —— 静态库的 obj 粒度天然提供了这一点, 8.4c 高估了当前的浪费
+(以为 imgui/freetype 也被链入), 同时低估了真正的浪费 (漏掉了 Vulkan 后端)。
+
+### 8.15 最终方案 (用户裁决, 覆盖 8.12/8.13): `core ← shader ← render ← runtime` (2026-07-28)
+
+用户提出改动更小且更优的布局, 并要求据此从头设计。**实测验证通过, 本节取代 8.12 与
+8.13 的三库方案。**
+
+```
+radraycore ← radrayshader ← radrayrender ← radrayruntime
+```
+
+- 不新建 `gal` / `gpu` 库, `radrayrender` 保留原名与原职责 (设备 + 后端)。
+- `radrayshader` 承载: 从 `rhi.h` 移入的**最小类型集** + 编译器 (`dxc`/`hlsl`/`spirv`/
+  `spvc`/`msl`) + shader 格式层 (`shader_manifest.*`/`shader_asset_template.*`)。
+- 命名空间**全部保持 `radray::render`** —— 与 8.13 第四节同理, 而且在本布局下更自然:
+  `radrayrender` 就在 `radrayshader` 之上, 同一命名空间跨两库是分层实现而非割裂。
+- 两个 CLI 只链 `radraycore + radrayshader`。
+
+**为何这个布局优于 8.13 的三库版**
+
+- **少一个库、少一层边界。** 8.13 要建 gal + shader + gpu 三个新构建单元并重命名
+  `radrayrender`; 本方案只新增一个库, `radrayrender` 连名字都不动 —— 全仓库现有
+  `#include <radray/render/rhi.h>` 与 `target_link_libraries(... radrayrender)` 保持有效。
+- **`rhi.h` 只需移出最少的类, 剩下的一行不动。** 8.13 要把 1280 行的 `rhi.h` 按语义
+  切成两半 (那是判断, 风险最高的一步); 本方案只从中摘走 19 个类型, 其余 114 个原地不动。
+- **依赖方向反而更诚实。** 8.13 让 shader 与 gpu 平级、都依赖 gal, 但实测 device 侧
+  重度使用这些类型 (`ShaderParameterBindingType` 153 处、`VertexFormat` 130 处),
+  说明它们本就是 render 的**下层**而非旁支。让 render 依赖 shader 更贴合事实。
+
+**一, 必须从 `rhi.h` 移入 `radrayshader` 的最小闭包 = 19 个类型 (已实测)。**
+
+方法: 以格式层与编译器实际用到的类型为种子, 在 `rhi.h` 内做传递闭包
+(枚举成员不算类型依赖 —— 这点很关键, 见下面的坑)。结果**恰好收敛于 19 个, 不含任何
+device class**:
+
+| 类别 | 成员 |
+|---|---|
+| 枚举 (9) | `RenderBackend`、`ShaderStage`、`ShaderBlobCategory`、`ShaderParameterBindingType`、`VertexFormat`、`VertexStepMode`、`AddressMode`、`FilterMode`、`CompareFunction` |
+| 描述 struct (10) | `SamplerDescriptor`、`ShaderDescriptor`、`ShaderBindingLocation`、`ShaderParameterSetLayoutEntryDescriptor`、`ShaderParameterSetLayoutDescriptor`、`PushConstantDescriptor`、`PipelineLayoutDescriptor`、`VertexAttribute`、`VertexBufferLayout`、`VertexInputState` |
+
+连带移入: `is_flags<ShaderStage>` 特化与 `using ShaderStages = EnumFlags<ShaderStage>`
+(`rhi.h:434/462`), 以及 4 个自由函数 —— `GetVertexFormatSizeInBytes`、
+`IsDynamicShaderParameterBindingType`、`format_as(ShaderStage)`、
+`format_as(ShaderBlobCategory)`; `format_as(VertexFormat)` / `format_as(RenderBackend)`
+一并带走 (同属这批枚举)。
+
+**留在 `rhi.h`**: 其余 26 个枚举、全部 device class、`RenderBase` / `IDebugName`、
+`SamplerCache`、`std::hash<SamplerDescriptor>` (它服务于 `SamplerCache`, 属 render)、
+以及全部持 device 指针的描述 (`ShaderEntry`、`GraphicsPipelineStateDescriptor`、
+`FramebufferDescriptor` ...)。**PSO 固定功能状态 (`PrimitiveState` /
+`DepthStencilState` / `MultiSampleState` / `ColorTargetState`) 也留在 `rhi.h`** ——
+8.13 曾把它们划进 gal, 但本布局下格式层不需要它们 (闭包里没有), 不动即最小改动。
+
+【坑: 闭包计算必须排除枚举成员】首次计算得到 110/133 个类型的"闭包", 险些据此判定
+方案不可行。原因是 `ShaderParameterBindingType` 的成员名叫 `Buffer` / `Texture` /
+`Sampler`, 与 device class 同名, 正则把枚举**成员**当成了对类型的引用, 于是
+`ShaderParameterBindingType → Buffer → Device → ...` 一路污染到全表。排除枚举体后
+闭包立刻收敛到 19。**这是本次设计中最容易出错的一步, 记录以防重犯。**
+
+**二, 三个方向的依赖已实测无环。**
+
+- **编译器不依赖 device**: `dxc.cpp`/`hlsl.cpp`/`spirv.cpp`/`spvc.cpp`/`msl.cpp` 对
+  `Device`/`SwapChain`/`CommandQueue`/`backend/` 零引用 (8.12 已核实)。头文件侧
+  `dxc.h` 仅需 `ShaderStage` + `ShaderBlobCategory`, `spvc.h` 仅需 `ShaderStage`,
+  `hlsl.h`/`spirv.h`/`msl.h` **完全不 include `rhi.h`**。
+  (`msl.h`/`spirv.h` 里出现的 `Texture`/`Sampler`/`Buffer` 是它们自己枚举的成员名,
+  与 RHI 同名但无关 —— 同上一条那个坑。)
+- **device 侧不依赖编译器**: `rhi.cpp` / `d3d12/*` / `vk/*` / `backend/*.h` 对五个
+  编译器头**零 include**。故 `radrayrender` 依赖 `radrayshader` 只用到那 19 个类型,
+  不会反向拖入 DXC。
+- **格式层不依赖 device**: 8.9 已核实 (`render::Device` 只出现在一句注释里)。
+
+**三, 决定性实测: CLI 链接闭合且不含任何后端。**
+
+用真实 obj 模拟最终布局链接 `radray_shader_cook`: 给 `shader_cook.obj` + 五个编译器
+obj + `shader_manifest.obj` + `shader_reflection_map.obj` + core/第三方 lib,
+**不给 `rhi.cpp.obj`、不给任何后端 lib**。
+
+结果: **恰好 4 个未解析符号, 全部是第一节那 4 个自由函数, 零个后端符号。**
+→ 这 4 个函数随 19 个类型迁入 `radrayshader` 后链接即闭合。
+→ 对照实验 (保留 `rhi.cpp.obj`) 会多出 5 个后端工厂符号
+(`d3d12::CreateDevice`、`vulkan::CreateDeviceVulkan` 等), 从而拖入约 23 MB 后端 obj。
+**这证明"把那 4 个函数的定义搬进 shader 库的 TU"是成败关键**, 与 8.14 的结论一致。
+
+**四, 目录布局 (改动量最小)**
+
+```
+modules/shader/include/radray/shader/
+    shader_types.h        ← 从 rhi.h 摘出的 19 个类型 + ShaderStages + 4 个函数声明
+    dxc.h hlsl.h spirv.h spvc.h msl.h          ← 自 modules/render 平移
+    shader_manifest.h shader_asset_template.h  ← 自 modules/runtime 平移
+modules/shader/src/
+    shader_types.cpp      ← 4 个自由函数 + format_as 的定义 (自 rhi.cpp 摘出)
+    dxc.cpp hlsl.cpp spirv.cpp spvc.cpp msl.cpp
+    d3d12shader.h d3dcommon_adapter.h          ← 跟 dxc.cpp 走 (DXC 反射的非 Win 适配层)
+    shader_manifest.cpp shader_asset_template.cpp
+    shader_manifest_json.h shader_reflection_map.h/.cpp
+modules/shader/tests/
+    test_shader_asset.cpp test_shader_asset_template.cpp
+```
+
+`rhi.h` 顶部加 `#include <radray/shader/shader_types.h>`。**于是全仓库现有的
+`#include <radray/render/rhi.h>` 与 `render::` 限定全部继续有效, 无需批量重写** ——
+这是本布局相对 8.13 最大的改动量优势 (8.13 第 2 步要改 26 个 includer)。
+
+`shader_program.*` / `shader_asset.*` / `pipeline_state_cache.*` **留在 runtime**
+(8.9 裁决, 不受影响 —— `ShaderPassProgram` 持有活的 `PipelineLayout`)。
+
+**五, 执行顺序** (每步独立可编、可全量 ctest)
+
+1. 建 `modules/shader/` + `RADRAY_BUILD_SHADER` option; 从 `rhi.h`/`rhi.cpp` 摘出 19 个
+   类型与 4 个函数到 `shader_types.h`/`.cpp`; `rhi.h` include 之; `radrayrender` 链
+   `radrayshader`。**此步不改任何调用方**, 全仓库应照常编过。
+   (此步即修掉 G14: 那 4 个函数已不在 `rhi.cpp.obj` 里。)
+2. 编译器五组 + 两个私有头自 `modules/render` 平移到 `modules/shader`;
+   include 路径 `radray/render/dxc.h` → `radray/shader/dxc.h` (7 个 includer, 已列表)。
+   把 DXC/spirv-cross 相关的 `target_link_libraries` 与
+   `RADRAY_ENABLE_DXC`/`RADRAY_ENABLE_SPIRV_CROSS` 定义从 render 移到 shader。
+3. 格式层四组自 `modules/runtime` 平移; include 改 `radray/shader/...`;
+   搬 `RADRAY_ENABLE_SHADER_JIT` + `RADRAY_DXC_VERSION` (含 `FATAL_ERROR`) 与
+   shaderlib POST_BUILD; 改 `CMakeLists.txt:60` 的 option 条件为
+   `RADRAY_BUILD_SHADER AND RADRAY_ENABLE_DXC`。
+4. 两个 CLI: `target_link_libraries` 改 `radrayshader`, `add_dependencies` 重指;
+   改 `examples/sphere_demo` 的 include。
+5. 搬两个格式层测试到 `modules/shader/tests/` (含 `RADRAY_PROJECT_DIR_DEFAULT` 那段)。
+6. 加 8.11 第三点的守门配置 (只构 core + shader + CLI, 不构 render/runtime)。
+
+**六, 验收标准**
+
+- 用例总数仍 **360**, 按 8.8 做 exe 自报 ↔ ctest **双向集合比较**。
+- **主门槛**: 两个 CLI 的 `link /MAP` 产物**不含** `d3d12_*.obj` / `vulkan_*.obj` /
+  `D3D12MemAlloc*.obj` / `rhi.cpp.obj`。(不用 `dumpbin /DEPENDENTS` 作主判据 ——
+  8.14 实测 Vulkan 后端被链入却不留 dll 导入项。)
+- 辅助: `dumpbin /DEPENDENTS` 里 `d3d12.dll` / `dxgi.dll` 消失; exe 体积从 12.7MB 下降。
+- `radrayshader` 的链接闭包**不含 `radrayrender`** (方向正确性)。
+
+**七, 保留的风险**
+
+- 无跨平台 CI, macOS/Linux 上的收益仍只能靠推理 (8.11/8.12 已记)。第 6 步的守门配置
+  能在 Windows 上部分替代。
+- 第 1 步仍是"判断"而非纯搬运 (要决定哪 19 个类型走), 但范围比 8.13 小一个数量级,
+  且已用闭包实测把判断变成可复算的结果。
+
+---
+
+### 8.16 实施结果: `core ← shader ← render ← runtime` 已落地 (2026-07-28)
+
+8.15 的六步已全部执行完毕。**全量构建通过, ctest 360/360, 双向集合比较无差异。**
+
+**一, 最终布局与实测收益**
+
+```
+radraycore ← radrayshader ← radrayrender ← radrayruntime
+```
+
+| 指标 | 重构前 | 重构后 |
+|---|---|---|
+| `radray_shader_cook.exe` | ~33 MB, 链入 8 个 render obj | **9.84 MB, 零 render obj** |
+| `dumpbin /DEPENDENTS` | 含 `d3d12.dll` | 仅 CRT (KERNEL32/ADVAPI32/MSVCP140D/...) |
+| cook 的 `link /MAP` obj 来源 | render + 后端 + core | `radrayshader` 6 个 + `radraycore` 6 个 |
+
+`link /MAP` 确认 cook 只取: `radrayshader:{dxc,hlsl,spvc,shader_manifest,shader_reflection_map,shader_types}.cpp.obj`
++ `radraycore:{binary_io,dynamic_library,file,json,logger,text_encoding}.cpp.obj`。
+**零 `d3d12_*` / `vulkan_*` / `D3D12MemAlloc` / `rhi.cpp.obj`** —— 8.15 第六节主门槛达成。
+
+**二, 转发包含: 零调用方改动的关键**
+
+`rhi.h` 顶部加一行 `#include <radray/shader/shader_types.h>` 后, 全仓库现有的
+`#include <radray/render/rhi.h>` 与 `render::` 限定**全部继续有效**, 包括后端里那
+153 处 `ShaderParameterBindingType` 与 130 处 `VertexFormat` —— 一处未改。命名空间
+保持 `radray::render` 是这一点成立的前提。
+
+**三, 唯一的意外: 传递包含断链**
+
+`shader_program.h` 原先靠 `shader_manifest.h` **传递地**拿到 `rhi.h`。格式层迁入
+`radrayshader` 后, 它按 8.4b 只包含 `shader_types.h` (刻意不依赖任何 device 类型),
+那条链就断了, 于是 `unique_ptr<PipelineLayout>` 与 `RenderPass` / `PrimitiveState` /
+`GraphicsPipelineState` 等一片报错 (`pipeline_state_cache.h` 经
+`shader_asset.h → shader_program.h` 连坐)。
+
+修法: `shader_program.h` 显式 `#include <radray/render/rhi.h>`。**一处修好即消解整条
+级联** —— 这反过来印证了 8.9 的分界线 (是否拥有活的 GPU 对象) 划得对: 真正需要
+`rhi.h` 的只有持 `PipelineLayout` 的那一个头。
+
+**教训**: 拆库会暴露所有隐式的传递包含。头文件本就该显式包含自己用到的东西, 靠下游
+头"顺带带进来"在边界移动时必然断裂。
+
+**四, 与 8.15 计划的偏离**
+
+- **第 6 步 (守门配置) 未做**, 转为遗留项。理由: 它是"防回归"而非"完成重构", 且当前
+  `RADRAY_BUILD_SHADER=ON / RADRAY_BUILD_RENDER=OFF` 这条组合从未构建过, 引入它需要
+  单独验证一轮。已记入下面的遗留风险。
+- `format_as(RenderBackend)` / `format_as(VertexFormat)` 一并迁走, 故实际迁移的是
+  **6 个函数**而非 8.15 第一节说的 4 个 (那 4 个是"未解析符号"的计数, 不是迁移清单)。
+- `RADRAY_ENABLE_SHADER_JIT` 定义与 shaderlib/DXC 部署都挂到了 `radrayshader`:
+  部署落点靠 `radray_set_build_path` 把静态库的 `TARGET_FILE_DIR` 收进
+  `_build/<Config>/`, **已实测** `shaderlib/` 20 个文件与 `dxcompiler.dll` 就在 exe 旁边。
+
+**五, 遗留风险**
+
+- **无跨平台 CI**, macOS/Linux 收益仍只能靠推理。`APPLE AND RADRAY_ENABLE_VULKAN` 那段
+  PUBLIC 链 Cocoa/QuartzCore 留在 `radrayrender`, 因为 CLI 已不链 render, 理论上不再
+  波及, 但无从实测。
+- **守门配置缺失** (8.11 第三点): 没有任何机制阻止后人给 `radrayshader` 加回
+  `radrayrender` 依赖, 或给 CLI 改回链 runtime。两个 CMakeLists 里已就地写明理由与
+  `link /MAP` 复验要求, 但注释不是约束。
+**六, 顺带定位并修掉了 8.8 的遗留隐患 (CMake 4.4 的 bug)**
+
+8.8 曾把"`gtest_discover_tests` 的 hash 后缀在不同目标间可重复 (`e3b0c442`)"记为遗留
+隐患, 并推测那次 ctest 注册污染是一次性陈旧产物。**本轮 `--clean-first` 全量重建时它
+稳定复现了**, 于是查到根因:
+
+- `GoogleTest.cmake` 生成 `gtest_discover_tests_impl(...)` 调用时**从不传 `TEST_TARGET`**
+  (实测生成出的 `*_discovery.cmake` 里只有 `TEST_EXECUTABLE` / `TEST_LIST` / `CTEST_FILE` 等)。
+- 而 `GoogleTestAddTests.cmake:203` 做 `string(SHA256 target_hash "${arg_TEST_TARGET}")`,
+  空串的 SHA-256 前缀恒为 **`e3b0c44298`** —— 这正是 `cmake_test_discovery_e3b0c44298.json`
+  的来源, 也解释了为何 13 个 core 测试目标共用同一个 `e3b0c442` 后缀。
+- CMake 自己在该处的注释写明: 这个 hash 存在的唯一目的就是避免同目录多个目标在
+  **POST_BUILD 并行**发现时争用同一个 json。**空输入把这个防护彻底废掉了。**
+
+表现: 随机的 `string sub-command JSON failed parsing json string` 构建失败 (此时 exe
+自身 `--gtest_list_tests` 完全正常, 所以极易误判为"陈旧产物"), 更坏的情况就是 8.8 遇到的
+**注册到错误用例集却仍报绿**。
+
+修法: `radray_add_test` 改用 `DISCOVERY_MODE PRE_TEST` (`cmake/Utility.cmake`)。CMake
+同一段注释确认 PRE_TEST 在 ctest 启动阶段串行执行, 无此竞争。验证: 删除整个 `build_debug`
+冷启动重建后, `*_tests.cmake` 与 `cmake_test_discovery_*.json` **均为 0 个** (机制已
+不再产生这些文件), ctest 仍 360/360 且双向集合一致。
+
+**七, 最终验收记录 (冷启动全量, 删除 `build_debug` 重建)**
+
+- 构建: 零 error / 零 FAILED。
+- ctest: **360/360**; 20 个 test exe 自报 360 ↔ ctest 注册 360, `Compare-Object` 双向无差异。
+- 两个 CLI 的链接命令行**不含** `radrayrender.lib` / `radrayruntime.lib`。
+- `radray_shader_cook` / `radray_shader_gen` / `test_shader_asset` /
+  `test_shader_asset_template` 四个二进制的 `dumpbin /DEPENDENTS` 均无
+  `d3d12.dll` / `dxgi.dll` / `vulkan` 导入。
+- cook 9.84 MB, gen 9.93 MB (重构前约 33 MB)。
+
+---
+
+### 8.17 分层纠正: 8 个 RHI 交接类型退回 render (2026-07-28)
+
+8.16 落地后复查 `shader_types.h`, 发现 19 个类型里有 8 个**在 shader 库内零消费**。
+本节把它们退回 `rhi.h`, 并修正了当初的判定标准。
+
+**一, 原判定标准太宽**
+
+8.15/8.16 用的标准是"不含任何 device 对象指针"。这个标准能挡住 device class, 但挡不住
+纯粹的 RHI 入参形状 —— `PipelineLayoutDescriptor` / `VertexInputState` /
+`ShaderDescriptor` 同样不含 device 指针, 却完全是 render 的词汇。按它筛选的结果是
+shader 库承载了 8 个自己从不使用的类型。
+
+**正确的问题是"这个类型是 manifest 的数据吗"** —— 它出现在 `*.shader.json` 里吗?
+有 JSON codec 吗? 格式层解析它吗?
+
+**二, 实测的两类划分**
+
+| 类别 | 成员 | 依据 |
+|---|---|---|
+| **manifest 数据词汇** (留 shader, 11 个) | `ShaderStage`、`ShaderBlobCategory`、`ShaderParameterBindingType`、`VertexFormat`、`VertexStepMode`、`ShaderBindingLocation`、`SamplerDescriptor`、`AddressMode`、`FilterMode`、`CompareFunction`、`RenderBackend` | 都能在 manifest 里找到对应字段或 codec |
+| **RHI 入参形状** (退回 render, 8 个) | `ShaderDescriptor`、`PipelineLayoutDescriptor`、`ShaderParameterSetLayoutDescriptor`、`ShaderParameterSetLayoutEntryDescriptor`、`PushConstantDescriptor`、`VertexInputState`、`VertexAttribute`、`VertexBufferLayout` | 不进 json、无 codec、shader 层零消费 |
+
+几个值得记的细节:
+
+- `AddressMode` / `CompareFunction` 在 shader 层**零直接引用**, 但它们是
+  `SamplerDescriptor` 的成员, 而 `SamplerDescriptor` 有 JSON codec
+  (`shader_manifest.cpp` 序列化 `AddressS`/`MinFilter`/`Compare` 字段)。
+  **零引用不等于非依赖** —— 间接被序列化也是真实依赖。
+- `RenderBackend` 是这批里唯一的"边界翻译入参": 它只服务
+  `GetShaderBlobCategoryForBackend` (D3D12→DXIL / Vulkan→SPIRV / Metal→MSL)。cook 必须
+  在没有任何 device 的前提下为目标平台选字节码类型, 所以它在这里的角色是**目标平台
+  标识**而非设备句柄。名字比实际语义重, 但另造一个一一对应的平行枚举是纯重复。
+- `ShaderBindingLocation` 留下, 因为它是 `ShaderPushConstantDesc::Location` 的字段且
+  有 codec; 而消费它的 `PushConstantDescriptor` 走了。两者不同层, 这是正常的。
+
+**三, 承接者: `modules/render/{include/radray/render,src}/shader_layout_binding.h/.cpp`**
+
+随 8 个类型一起搬走的是它们在 shader 层的唯一使用者:
+
+- `ShaderPipelineLayoutStorage` / `ShaderVertexInputStorage` (两个 Storage 类)
+- `BuildPipelineLayoutStorage` / `BuildVertexInputStorage`
+- `ResolveBindingType` (原 `shader_manifest.cpp` 匿名 namespace, 折叠
+  Type + Residency → `Dynamic*`)
+- `ShaderBytecode::MakeDescriptor()` → 自由函数 `MakeShaderDescriptor(const ShaderBytecode&)`
+
+`ShaderBytecode` 本身留在 shader 层并变回**纯数据**(不再有成员函数返回 RHI 描述)。
+新文件同时 include `rhi.h` 与 `shader_manifest.h` —— 这正是 render 依赖 shader 的正确
+用法: 上层看得见下层。
+
+**四, 测试 fixtures 抽成共享头 (避免静默漂移)**
+
+6 个用例 (5 个 layout 构建 + 1 个新增的 `MakeShaderDescriptor`) 迁到新建的
+`modules/render/tests/test_shader_layout_binding.cpp`, 只链 `radrayrender`, **不需要
+device**。
+
+它们与 `test_shader_asset.cpp` 共用同一批 manifest 正例, 于是把
+`kImGuiManifest` / `kForwardManifest` / `kMinimalManifest` 抽到
+`modules/shader/tests/shader_manifest_fixtures.h`。**刻意不复制**: 复制会让两边悄悄
+漂移 —— 改了一处 binding 声明另一处仍在断言旧值, 且不会有任何编译错误提示。
+
+原 `ShaderResolverTest.DescriptorIsReadyForCreateShader` 保留在 shader 层但改为断言
+`ShaderBytecode` 自身就绪 (它本就在验证 resolver); 打包成 descriptor 的部分由新用例
+`MakeShaderDescriptorForwardsBytecodeFields` 覆盖, 后者用手工构造的 `ShaderBytecode`,
+不必再跑一遍 DXC。
+
+**五, 验收 (删除 build_debug 冷启动)**
+
+- 构建零 error。ctest **361/361**; 21 个 exe 自报 361 ↔ ctest 361, 双向无差异。
+  (360 → 361: 迁出 5 个 + 新增 1 个 `MakeShaderDescriptor` 用例 + 原
+  `DescriptorIsReadyForCreateShader` 保留。)
+- **8 个类型在 `modules/shader/` 内引用数归零** (仅剩 2 处注释提及)。
+- 两个 CLI 仍不链 `radrayrender`/`radrayruntime`; cook / gen / test_shader_asset 三者
+  `dumpbin /DEPENDENTS` 均无 `d3d12.dll` / `dxgi.dll`。
+- cook 9.84 MB → **9.77 MB** (打包逻辑离开 shader 库的净效果)。
+
+**六, 教训**
+
+分层判据要用"这个类型属于谁的词汇", 而不是"这个类型碰不碰某个具体的实现细节"。
+后者是**必要条件而非充分条件**: 它能证明"不该在更下层", 却不能证明"应该在这一层"。
+
+**七, 承接位置的实际落点 (与上文四处描述不符, 以此处为准)**
+
+上文写的新建文件 `modules/render/include/radray/render/shader_layout_binding.h` 最终**没有
+单独建立**。8 个类型与 4 个函数实际落在 `modules/runtime/include/radray/runtime/shader_program.h`
+(声明) 与 `modules/runtime/src/shader_program.cpp` (定义), 对应测试在
+`modules/runtime/tests/test_shader_layout_binding.cpp`, 链 `radrayruntime`。
+
+这不影响 8.17 的核心结论 —— 这批类型离开了 `radrayshader`, cook / gen 依旧零后端。但它
+把交接层放在了 runtime 而非 render。**若日后 render 层自己需要 manifest → RHI 的打包**
+(目前只有 runtime 需要), 应把这批代码下移到 render 并补建 `modules/render/tests`。
+
+### 8.18 `RenderBackend` 退回 render (2026-07-28)
+
+**动机**: 8.17 之后 `shader_types.h` 仍留着 `RenderBackend`, 而它描述的是"用哪个图形 API
+跑", 显然不是 manifest 的内容 —— 按 8.17 确立的判据就不该在 shader 层。
+
+**它当初为何被带进来**: 只因为一个函数 `GetShaderBlobCategoryForBackend(RenderBackend)
+→ ShaderBlobCategory` 声明在 `shader_manifest.h`。
+
+**调查结论 (决定改法的关键)**: 该函数在**生产代码中零调用**, 唯一引用是
+`test_shader_asset.cpp` 的三行断言。生产代码里 backend → category 的实际做法是各调用点
+直接给出 `ShaderBlobCategory`:
+
+- `tools/shader_cook/shader_cook.cpp` 由命令行参数直接映射
+- `runtime/shader_program.h` 的 `Category` 默认 `DXIL`
+- `PipelineStateCache::GetOrCreateGraphics` / `ShaderProgram::GetOrCreateVariant` 都是
+  **收 `ShaderBlobCategory` 入参**, 一路由调用方传入
+
+也就是说 shader 层从设计上就只认 `ShaderBlobCategory`, 从不需要 `RenderBackend`。
+
+**改动**:
+
+| 内容 | 从 | 到 |
+| --- | --- | --- |
+| `enum class RenderBackend` | `shader/shader_types.h` | `render/rhi.h` |
+| `format_as(RenderBackend)` | `shader/shader_types.cpp` | `render/rhi.cpp` |
+| `GetShaderBlobCategoryForBackend` | `shader/shader_manifest.{h,cpp}` | `render/rhi.{h,cpp}` |
+| 3 行断言 | `shader/tests/test_shader_asset.cpp` | `render/tests/test_rhi_types.cpp` (新建) |
+
+函数**保留而非删除**: 它本身是正确的领域知识 (D3D12→DXIL / Vulkan→SPIRV / Metal→MSL),
+只是放错了层。放在 `rhi.h` 后, 两个参数类型都是 render 自己的词汇。
+
+顺带补建了 `modules/render/tests/CMakeLists.txt` —— 它此前是个 **0 字节空文件**
+(`modules/render/CMakeLists.txt:45` 已经在 `add_subdirectory(tests)`, 只是没有内容),
+所以 render 层长期没有任何测试。新增用例除映射表外, 还断言
+`format_as(MAX_COUNT) == "UNKNOWN"` (哨兵不该把成员名泄漏进日志)。
+
+**验收**:
+
+- `shader_types.h` 的 manifest 词汇 11 项 → **10 项**。
+- `modules/shader/` 与两个 CLI 内 `RenderBackend` 引用归零 (仅剩 2 处解释性注释)。
+- ctest **362/362** (361 − 1 迁出 + 2 新增); 22 个 exe 自报 362 ↔ ctest 362,
+  双向 `Compare-Object` 无差异。
+- `ninja -t commands` 显示 cook 链接行仍只有 `radrayshader.lib` + `radraycore.lib`,
+  **无 `radrayrender.lib`**。cook 9.77 MB / gen 9.86 MB 不变。
+  (用链接命令行而非 `dumpbin /DEPENDENTS` 判定 —— 后者对 volk 加载的 Vulkan 无效。)
+
+**教训**: 一个类型被放进下层, 有时不是因为下层需要它, 而是因为**某个便利函数**恰好写在了
+下层。判断依赖时要问"删掉这个函数后, 本层还需要这个类型吗"。这里的答案是不需要, 而且那个
+函数连生产代码都没用过。

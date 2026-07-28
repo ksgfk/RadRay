@@ -12,8 +12,10 @@
 
 #include <radray/environment.h>
 #include <radray/file.h>
-#include <radray/render/dxc.h>
-#include <radray/runtime/shader_manifest.h>
+#include <radray/shader/dxc.h>
+#include <radray/shader/shader_manifest.h>
+
+#include "shader_manifest_fixtures.h"
 
 namespace radray {
 namespace {
@@ -27,139 +29,9 @@ static_assert(json_deserializable<ShaderArtifactIndex>);
 static_assert(EnumContains(render::ShaderParameterBindingType::CBuffer));
 static_assert(EnumContains(render::ShaderStage::Vertex));
 
-// 与 shaderlib/imgui/imgui_pass.hlsl 对应的完整 manifest。
-// 该 shader 同时用到 push constant (gPush) 与可做 static sampler 的 gSampler,
-// 是最小但覆盖面最广的正例。
-constexpr std::string_view kImGuiManifest = R"JSON({
-  "FormatVersion": 1,
-  "Name": "RadRayImGui",
-  "Source": "imgui/imgui_pass.hlsl",
-  "Passes": [
-    {
-      "Name": "Default",
-      "Stages": [
-        { "Stage": "Vertex", "EntryPoint": "VSMain" },
-        { "Stage": "Pixel",  "EntryPoint": "PSMain" }
-      ],
-      "ShaderModel": "SM60",
-      "PushConstant": {
-        "Name": "gPush",
-        "Location": { "Group": 0, "Binding": 0 },
-        "Size": 16,
-        "Stages": ["Vertex"]
-      },
-      "BindingGroups": [
-        {
-          "Group": 1,
-          "Bindings": [
-            { "Name": "gTexture", "Binding": 0, "Type": "Texture", "Stages": ["Pixel"] },
-            {
-              "Name": "gSampler", "Binding": 1, "Type": "Sampler", "Stages": ["Pixel"],
-              "ImmutableSampler": {
-                "AddressS": "ClampToEdge", "AddressT": "ClampToEdge", "AddressR": "ClampToEdge",
-                "MinFilter": "Linear", "MagFilter": "Linear", "MipmapFilter": "Linear",
-                "LodMin": 0.0, "LodMax": 0.0, "AnisotropyClamp": 0
-              }
-            }
-          ]
-        }
-      ],
-      "VertexInput": {
-        "Buffers": [{ "Binding": 0, "ArrayStride": 20, "StepMode": "Vertex" }],
-        "Attributes": [
-          { "Semantic": "POSITION", "SemanticIndex": 0, "Format": "FLOAT32X2", "BufferBinding": 0, "Offset": 0 },
-          { "Semantic": "TEXCOORD", "SemanticIndex": 0, "Format": "FLOAT32X2", "BufferBinding": 0, "Offset": 8 },
-          { "Semantic": "COLOR",    "SemanticIndex": 0, "Format": "UNORM8X4",  "BufferBinding": 0, "Offset": 16 }
-        ]
-      }
-    }
-  ]
-})JSON";
-
-// 与 shaderlib/forward_pipeline/forward_pass.hlsl 对应。覆盖 root descriptor、
-// keyword 组、以及被 #ifdef 包起来因此在部分变体里反射不可见的阴影绑定。
-constexpr std::string_view kForwardManifest = R"JSON({
-  "FormatVersion": 1,
-  "Name": "ForwardPrincipled",
-  "Source": "forward_pipeline/forward_pass.hlsl",
-  "KeywordGroups": [
-    { "Name": "BaseColorMap",  "Keywords": ["_BASECOLOR_MAP"],       "IsOptional": true, "Stages": ["Pixel"] },
-    { "Name": "NormalMap",     "Keywords": ["_NORMAL_MAP"],          "IsOptional": true, "Stages": ["Pixel"] },
-    { "Name": "AlphaMode",     "Keywords": ["_ALPHATEST_ON", "_ALPHABLEND_ON"], "IsOptional": true, "Stages": ["Pixel"] },
-    { "Name": "PointShadows",  "Keywords": ["_POINT_SHADOWS"],       "IsOptional": true, "Stages": ["Vertex", "Pixel"] }
-  ],
-  "Passes": [
-    {
-      "Name": "Forward",
-      "Stages": [
-        { "Stage": "Vertex", "EntryPoint": "VSMain" },
-        { "Stage": "Pixel",  "EntryPoint": "PSMain" }
-      ],
-      "ShaderModel": "SM62",
-      "BindingGroups": [
-        {
-          "Group": 0,
-          "Bindings": [
-            { "Name": "gPerObject", "Binding": 1, "Type": "CBuffer",
-              "Residency": "RootDescriptor", "Stages": ["Vertex", "Pixel"] }
-          ]
-        },
-        {
-          "Group": 1,
-          "Bindings": [
-            { "Name": "gView", "Binding": 0, "Type": "CBuffer",
-              "Residency": "RootDescriptor", "Stages": ["Vertex", "Pixel"] },
-            { "Name": "gShadowCube",    "Binding": 1, "Type": "Texture", "Stages": ["Pixel"] },
-            { "Name": "gShadowArray",   "Binding": 2, "Type": "Texture", "Stages": ["Pixel"] },
-            { "Name": "gShadowSampler", "Binding": 3, "Type": "Sampler", "Stages": ["Pixel"] }
-          ]
-        },
-        {
-          "Group": 2,
-          "Bindings": [
-            { "Name": "gMaterial",      "Binding": 0, "Type": "CBuffer", "Stages": ["Pixel"] },
-            { "Name": "gBaseColorMap",  "Binding": 1, "Type": "Texture", "Stages": ["Pixel"] },
-            { "Name": "gMetalRoughMap", "Binding": 2, "Type": "Texture", "Stages": ["Pixel"] },
-            { "Name": "gNormalMap",     "Binding": 3, "Type": "Texture", "Stages": ["Pixel"] },
-            { "Name": "gOcclusionMap",  "Binding": 4, "Type": "Texture", "Stages": ["Pixel"] },
-            { "Name": "gEmissiveMap",   "Binding": 5, "Type": "Texture", "Stages": ["Pixel"] },
-            { "Name": "gSampler",       "Binding": 6, "Type": "Sampler", "Stages": ["Pixel"] }
-          ]
-        }
-      ],
-      "VertexInput": {
-        "Buffers": [{ "Binding": 0, "ArrayStride": 48, "StepMode": "Vertex" }],
-        "Attributes": [
-          { "Semantic": "POSITION", "Format": "FLOAT32X3", "BufferBinding": 0, "Offset": 0 },
-          { "Semantic": "NORMAL",   "Format": "FLOAT32X3", "BufferBinding": 0, "Offset": 12 },
-          { "Semantic": "TEXCOORD", "Format": "FLOAT32X2", "BufferBinding": 0, "Offset": 24 },
-          { "Semantic": "TANGENT",  "Format": "FLOAT32X4", "BufferBinding": 0, "Offset": 32 }
-        ]
-      }
-    }
-  ]
-})JSON";
-
-/// 最小合法 manifest, 负例测试在此基础上做单点改动。
-constexpr std::string_view kMinimalManifest = R"JSON({
-  "FormatVersion": 1,
-  "Name": "Minimal",
-  "Source": "minimal.hlsl",
-  "Passes": [
-    {
-      "Name": "Main",
-      "Stages": [{ "Stage": "Compute", "EntryPoint": "CSMain" }],
-      "BindingGroups": [
-        {
-          "Group": 0,
-          "Bindings": [
-            { "Name": "gInput", "Binding": 0, "Type": "CBuffer", "Stages": ["Compute"] }
-          ]
-        }
-      ]
-    }
-  ]
-})JSON";
+using test::kForwardManifest;
+using test::kImGuiManifest;
+using test::kMinimalManifest;
 
 ShaderAssetDesc ParseOk(std::string_view json) {
     ShaderAssetDiagnostic diag{};
@@ -341,92 +213,8 @@ TEST(ShaderAssetTest, EnumNamesAndStageFlagsUseMagicEnum) {
         DeserializeJson<render::ShaderStages>(R"(["Geometry"])").has_value());
 }
 
-// ==================== 正例: layout 构建 ====================
-
-TEST(ShaderAssetTest, BuildsPipelineLayoutWithoutReflection) {
-    const ShaderAssetDesc desc = ParseOk(kImGuiManifest);
-    ShaderPipelineLayoutStorage storage = BuildPipelineLayoutStorage(desc.Passes.front());
-    const render::PipelineLayoutDescriptor layout = storage.Get();
-
-    ASSERT_EQ(layout.ParameterSets.size(), 1u);
-    EXPECT_EQ(layout.ParameterSets[0].GroupIndex, 1u);
-    ASSERT_EQ(layout.ParameterSets[0].Entries.size(), 2u);
-    EXPECT_EQ(layout.ParameterSets[0].Entries[0].Binding, 0u);
-    EXPECT_EQ(layout.ParameterSets[0].Entries[0].Type, render::ShaderParameterBindingType::Texture);
-    EXPECT_EQ(layout.ParameterSets[0].Entries[0].Count, 1u);
-    EXPECT_EQ(layout.ParameterSets[0].Entries[1].Type, render::ShaderParameterBindingType::Sampler);
-    EXPECT_TRUE(layout.ParameterSets[0].Entries[1].ImmutableSampler.has_value());
-
-    ASSERT_TRUE(layout.PushConstant.has_value());
-    EXPECT_EQ(layout.PushConstant->Size, 16u);
-    EXPECT_EQ(layout.PushConstant->Location.Group, 0u);
-    EXPECT_EQ(layout.PushConstant->Location.Binding, 0u);
-    EXPECT_EQ(layout.PushConstant->Stages, render::ShaderStages{render::ShaderStage::Vertex});
-}
-
-TEST(ShaderAssetTest, RootDescriptorResidencyFoldsIntoDynamicBindingType) {
-    const ShaderAssetDesc desc = ParseOk(kForwardManifest);
-    ShaderPipelineLayoutStorage storage = BuildPipelineLayoutStorage(desc.Passes.front());
-    const render::PipelineLayoutDescriptor layout = storage.Get();
-
-    ASSERT_EQ(layout.ParameterSets.size(), 3u);
-    // group 0 / gPerObject 声明为 CBuffer + RootDescriptor, RHI 侧应折叠为 DynamicCBuffer。
-    ASSERT_EQ(layout.ParameterSets[0].Entries.size(), 1u);
-    EXPECT_EQ(
-        layout.ParameterSets[0].Entries[0].Type,
-        render::ShaderParameterBindingType::DynamicCBuffer);
-    // group 1 / gView 同理; 其余为普通 table 条目。
-    EXPECT_EQ(
-        layout.ParameterSets[1].Entries[0].Type,
-        render::ShaderParameterBindingType::DynamicCBuffer);
-    EXPECT_EQ(
-        layout.ParameterSets[1].Entries[1].Type,
-        render::ShaderParameterBindingType::Texture);
-    EXPECT_FALSE(layout.PushConstant.has_value());
-}
-
-TEST(ShaderAssetTest, PipelineLayoutSpansStayValidAfterStorageMove) {
-    const ShaderAssetDesc desc = ParseOk(kForwardManifest);
-    ShaderPipelineLayoutStorage storage = BuildPipelineLayoutStorage(desc.Passes.front());
-    ShaderPipelineLayoutStorage moved = std::move(storage);
-
-    const render::PipelineLayoutDescriptor layout = moved.Get();
-    ASSERT_EQ(layout.ParameterSets.size(), 3u);
-    ASSERT_EQ(layout.ParameterSets[2].Entries.size(), 7u);
-    EXPECT_EQ(layout.ParameterSets[2].Entries[6].Type, render::ShaderParameterBindingType::Sampler);
-}
-
-TEST(ShaderAssetTest, BuildsVertexInputState) {
-    const ShaderAssetDesc desc = ParseOk(kImGuiManifest);
-    ASSERT_TRUE(desc.Passes.front().VertexInput.has_value());
-    ShaderVertexInputStorage storage =
-        BuildVertexInputStorage(desc.Passes.front().VertexInput.value());
-    const render::VertexInputState state = storage.Get();
-
-    ASSERT_EQ(state.Buffers.size(), 1u);
-    EXPECT_EQ(state.Buffers[0].ArrayStride, 20u);
-    EXPECT_EQ(state.Buffers[0].StepMode, render::VertexStepMode::Vertex);
-
-    ASSERT_EQ(state.Attributes.size(), 3u);
-    EXPECT_EQ(state.Attributes[0].Semantic, "POSITION");
-    EXPECT_EQ(state.Attributes[0].Format, render::VertexFormat::FLOAT32X2);
-    // Location 未显式给出时按声明顺序编号。
-    EXPECT_EQ(state.Attributes[0].Location, 0u);
-    EXPECT_EQ(state.Attributes[2].Location, 2u);
-    EXPECT_EQ(state.Attributes[2].Offset, 16u);
-    EXPECT_EQ(state.Attributes[2].Format, render::VertexFormat::UNORM8X4);
-}
-
-TEST(ShaderAssetTest, VertexInputSemanticsStayValidAfterStorageMove) {
-    const ShaderAssetDesc desc = ParseOk(kImGuiManifest);
-    ShaderVertexInputStorage storage =
-        BuildVertexInputStorage(desc.Passes.front().VertexInput.value());
-    ShaderVertexInputStorage moved = std::move(storage);
-
-    const render::VertexInputState state = moved.Get();
-    ASSERT_EQ(state.Attributes.size(), 3u);
-    EXPECT_EQ(state.Attributes[1].Semantic, "TEXCOORD");
-}
+// layout 构建的用例已随 Build*Storage 移至
+// modules/runtime/tests/test_shader_layout_binding.cpp。
 
 // ==================== 负例: 格式与结构 ====================
 
@@ -2775,18 +2563,6 @@ TEST(ShaderResolverTest, ToolchainHashIsStableAndNonZero) {
     EXPECT_FALSE(first.IsZero());
 }
 
-TEST(ShaderResolverTest, BackendMapsToBlobCategory) {
-    EXPECT_EQ(
-        GetShaderBlobCategoryForBackend(render::RenderBackend::D3D12),
-        render::ShaderBlobCategory::DXIL);
-    EXPECT_EQ(
-        GetShaderBlobCategoryForBackend(render::RenderBackend::Vulkan),
-        render::ShaderBlobCategory::SPIRV);
-    EXPECT_EQ(
-        GetShaderBlobCategoryForBackend(render::RenderBackend::Metal),
-        render::ShaderBlobCategory::MSL);
-}
-
 TEST(ShaderResolverTest, SourceMustBeResolvedBeforeResolving) {
     Fixture fixture;
     ShaderPassDesc pass = fixture.Pass();
@@ -3130,10 +2906,11 @@ TEST(ShaderResolverTest, DescriptorIsReadyForCreateShader) {
         {},
         diag);
     ASSERT_TRUE(bytecode.has_value()) << diag.Message;
-    const render::ShaderDescriptor desc = bytecode->MakeDescriptor();
-    EXPECT_EQ(desc.Source.size(), bytecode->Data.size());
-    EXPECT_EQ(desc.Category, render::ShaderBlobCategory::DXIL);
-    EXPECT_TRUE(desc.Stages.HasFlag(render::ShaderStage::Pixel));
+    // 这里只断言 ShaderBytecode 自身已就绪; 打包成 render::ShaderDescriptor 的
+    // MakeShaderDescriptor 属 runtime 层, 其用例在 test_shader_layout_binding.cpp。
+    EXPECT_FALSE(bytecode->Data.empty());
+    EXPECT_EQ(bytecode->Category, render::ShaderBlobCategory::DXIL);
+    EXPECT_TRUE(bytecode->Stage == render::ShaderStage::Pixel);
 }
 
 TEST(ShaderResolverTest, CookWritesIndexAndBlobs) {

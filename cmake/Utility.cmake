@@ -193,10 +193,20 @@ function(radray_add_test target)
         target_compile_options(${target} PRIVATE ${RADRAY_TEST_COMPILE_OPTIONS})
     endif()
     if (NOT RADRAY_TEST_NO_DISCOVER)
+        # 【必须 PRE_TEST, 不能用默认的 POST_BUILD】CMake 4.4 的 GoogleTest.cmake 有 bug:
+        # 它生成 gtest_discover_tests_impl(...) 调用时**从不传 TEST_TARGET**, 于是
+        # GoogleTestAddTests.cmake:203 的 string(SHA256 target_hash "${arg_TEST_TARGET}")
+        # 恒等于空串的哈希 e3b0c44298 —— 那个哈希存在的唯一目的就是防止同目录多个目标
+        # 争用同一个 cmake_test_discovery_<hash>.json, 结果被空输入彻底废掉。
+        # POST_BUILD discovery 是并行跑的, 于是同目录下的 N 个测试目标 (modules/core/tests
+        # 有 13 个) 会同时读写同一个 json, 表现为随机的
+        # "string sub-command JSON failed parsing json string" 构建失败, 或更坏的情况:
+        # 注册到错误的用例集而 ctest 仍报绿 (见 8.8)。
+        # PRE_TEST 在 ctest 启动阶段串行执行, 无此竞争。
         if (RADRAY_TEST_DISCOVER_ARGS)
-            gtest_discover_tests(${target} ${RADRAY_TEST_DISCOVER_ARGS})
+            gtest_discover_tests(${target} DISCOVERY_MODE PRE_TEST ${RADRAY_TEST_DISCOVER_ARGS})
         else()
-            gtest_discover_tests(${target})
+            gtest_discover_tests(${target} DISCOVERY_MODE PRE_TEST)
         endif()
     endif()
     radray_default_compile_flags(${target})

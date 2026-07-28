@@ -27,8 +27,8 @@
 #include <fmt/format.h>
 
 #include <radray/enum_flags.h>
-#include <radray/render/dxc.h>
-#include <radray/runtime/shader_manifest.h>
+#include <radray/shader/dxc.h>
+#include <radray/shader/shader_manifest.h>
 #include <radray/types.h>
 
 namespace {

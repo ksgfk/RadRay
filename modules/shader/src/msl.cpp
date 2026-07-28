@@ -1,4 +1,4 @@
-#include <radray/render/msl.h>
+#include <radray/shader/msl.h>
 
 #include <radray/enum_flags.h>
 #include <radray/utility.h>

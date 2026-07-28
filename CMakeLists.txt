@@ -50,14 +50,20 @@ option(RADRAY_BUILD_BENCHMARKS "Build the RadRay benchmarks (enabled by default 
 unset(_radray_benchmarks_default)
 unset(_radray_release_cfg_index)
 option(RADRAY_BUILD_WINDOW "Build the RadRay window" ON)
-option(RADRAY_BUILD_RENDER "Build the RadRay render" ON)
+# radrayshader 是 radrayrender 的下层: 它持有 shader 工具链与 RHI 共享的描述类型,
+# 使得 shader cook 工具无需链入任何图形后端。因此 render 依赖 shader 而非反之。
+option(RADRAY_BUILD_SHADER "Build the RadRay shader" ON)
+cmake_dependent_option(RADRAY_BUILD_RENDER "Build the RadRay render" ON "RADRAY_BUILD_SHADER" OFF)
 cmake_dependent_option(RADRAY_BUILD_RUNTIME "Build the RadRay runtime" ON "RADRAY_BUILD_RENDER AND RADRAY_BUILD_WINDOW" OFF)
 cmake_dependent_option(RADRAY_ENABLE_D3D12 "Enable Direct3D 12 backend" ON "RADRAY_BUILD_RENDER AND WIN32" OFF)
 cmake_dependent_option(RADRAY_ENABLE_VULKAN "Enable Vulkan backend" ON "RADRAY_BUILD_RENDER" OFF)
 cmake_dependent_option(RADRAY_ENABLE_METAL "Enable Metal backend" ON "RADRAY_BUILD_RENDER AND APPLE" OFF)
 option(RADRAY_ENABLE_DXC "Enable DirectX Shader Compiler support" ON)
 option(RADRAY_ENABLE_SPIRV_CROSS "Enable SPIR-V Cross support" ON)
-cmake_dependent_option(RADRAY_ENABLE_SHADER_JIT "Enable runtime shader JIT compilation" ON "RADRAY_BUILD_RUNTIME AND RADRAY_ENABLE_DXC" OFF)
+# 依赖 RADRAY_BUILD_SHADER 而非 RADRAY_BUILD_RUNTIME: JIT 归属随格式层迁入 radrayshader。
+# 【漏改此处是静默降级】条件不满足时 cmake_dependent_option 会把值强制为 OFF 而不报错,
+# 于是 shader JIT 被无声地编掉, 只在运行期表现为"找不到 shader 变体"。
+cmake_dependent_option(RADRAY_ENABLE_SHADER_JIT "Enable runtime shader JIT compilation" ON "RADRAY_BUILD_SHADER AND RADRAY_ENABLE_DXC" OFF)
 option(RADRAY_ENABLE_MIMALLOC "Enable mimalloc as allocator" ON)
 option(RADRAY_ENABLE_ZLIB "Enable zlib support" ON)
 cmake_dependent_option(RADRAY_ENABLE_LIBPNG "Enable libpng support" ON "RADRAY_ENABLE_ZLIB" OFF)

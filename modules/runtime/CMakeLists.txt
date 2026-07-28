@@ -32,18 +32,8 @@ target_link_libraries(radrayruntime PUBLIC
     radrayrender
     radraywindow)
 target_link_libraries(radrayruntime PRIVATE cgltf::cgltf)
-target_compile_definitions(radrayruntime PUBLIC
-    $<$<BOOL:${RADRAY_ENABLE_SHADER_JIT}>:RADRAY_ENABLE_SHADER_JIT>)
-# DXC 版本进 toolchain hash: 换编译器必须让已有 AOT 产物与磁盘缓存全部失效。
-#
-# 【必须无条件注入】: 该版本号是 project_manifest.json 里钉住的 SDK 版本, 与本次构建
-# 是否编入 JIT 无关。若只在 RADRAY_ENABLE_SHADER_JIT 下注入, 则关 JIT 的发布包算出的
-# toolchain hash 与 cook 机 (开 JIT) 不同, "只带产物、不带 DXC" 的场景会 100% 加载失败。
-if (NOT DEFINED RADRAY_SDK_dxc_VERSION)
-    message(FATAL_ERROR "RADRAY_SDK_dxc_VERSION is required for the shader toolchain hash")
-endif()
-target_compile_definitions(radrayruntime PRIVATE
-    RADRAY_DXC_VERSION="${RADRAY_SDK_dxc_VERSION}")
+# RADRAY_ENABLE_SHADER_JIT / RADRAY_DXC_VERSION 与 shaderlib + DXC 运行时的部署已随
+# 格式层迁往 modules/shader; radrayruntime 经 radrayrender 传递地继承前者的 PUBLIC 定义。
 if (WIN32 AND (RADRAY_ENABLE_D3D12 OR RADRAY_ENABLE_VULKAN))
     target_link_libraries(radrayruntime PRIVATE dxgi)
 endif()
@@ -63,20 +53,4 @@ radray_set_build_path(radrayruntime)
 
 if (RADRAY_BUILD_TESTS)
     add_subdirectory(tests)
-endif()
-
-if (RADRAY_ENABLE_SHADER_JIT)
-    # 先删再拷: copy_directory 不会移除源码树里已删掉的文件, 残留的旧头文件会让
-    # 重命名后的 #include 悄悄解析到过期副本, 排查起来极其费时。
-    set(_RADRAY_SHADER_JIT_DEPLOY_COMMANDS
-        COMMAND ${CMAKE_COMMAND} -E rm -rf "$<TARGET_FILE_DIR:radrayruntime>/shaderlib"
-        COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_SOURCE_DIR}/shaderlib" "$<TARGET_FILE_DIR:radrayruntime>/shaderlib")
-    foreach(_dll IN LISTS RADRAY_DXC_RUNTIME_DLLS)
-        list(APPEND _RADRAY_SHADER_JIT_DEPLOY_COMMANDS
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${_dll}" "$<TARGET_FILE_DIR:radrayruntime>")
-    endforeach()
-    add_custom_command(TARGET radrayruntime POST_BUILD
-        ${_RADRAY_SHADER_JIT_DEPLOY_COMMANDS}
-        COMMENT "Deploy shader sources and DXC runtime for shader JIT")
-    unset(_RADRAY_SHADER_JIT_DEPLOY_COMMANDS)
 endif()

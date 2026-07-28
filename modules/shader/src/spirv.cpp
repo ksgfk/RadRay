@@ -1,6 +1,6 @@
-#include <radray/render/spirv.h>
+#include <radray/shader/spirv.h>
 
-#include <radray/render/hlsl.h>
+#include <radray/shader/hlsl.h>
 #include <radray/json.h>
 #include <radray/logger.h>
 

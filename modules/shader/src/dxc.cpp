@@ -1,4 +1,4 @@
-#include <radray/render/dxc.h>
+#include <radray/shader/dxc.h>
 
 // #define _RADRAY_ENABLE_DXC_ALLOCATOR 0 // ISSUE: dxc v1.9.2602 用户自定义 allocator, 内部释放时似乎没有正确调用户 free 导致爆炸, 先关闭 mimalloc 接管内存
 

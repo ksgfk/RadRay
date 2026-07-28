@@ -1,4 +1,4 @@
-#include <radray/render/spvc.h>
+#include <radray/shader/spvc.h>
 
 namespace radray::render {
 

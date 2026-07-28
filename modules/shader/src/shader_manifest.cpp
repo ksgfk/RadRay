@@ -1,4 +1,4 @@
-#include <radray/runtime/shader_manifest.h>
+#include <radray/shader/shader_manifest.h>
 
 #include <algorithm>
 #include <array>
@@ -14,10 +14,10 @@
 #include <radray/file.h>
 #include <radray/json.h>
 #include <radray/logger.h>
-#include <radray/render/dxc.h>
+#include <radray/shader/dxc.h>
 
 #if defined(RADRAY_ENABLE_SHADER_JIT) && defined(RADRAY_ENABLE_SPIRV_CROSS)
-#include <radray/render/spvc.h>
+#include <radray/shader/spvc.h>
 #endif
 
 #include "shader_manifest_json.h"
@@ -94,24 +94,6 @@ bool IsRootDescriptorCapable(render::ShaderParameterBindingType type) noexcept {
             return true;
         default:
             return false;
-    }
-}
-
-/// manifest 声明的 Type + Residency 折叠为 RHI 的 ShaderParameterBindingType。
-/// RHI 把"类型"与"驻留"合并进一个枚举 (Dynamic* 变体), manifest 保持两者正交。
-render::ShaderParameterBindingType ResolveBindingType(const ShaderBindingDesc& binding) noexcept {
-    if (binding.Residency != ShaderBindingResidency::RootDescriptor) {
-        return binding.Type;
-    }
-    switch (binding.Type) {
-        case render::ShaderParameterBindingType::CBuffer:
-            return render::ShaderParameterBindingType::DynamicCBuffer;
-        case render::ShaderParameterBindingType::Buffer:
-            return render::ShaderParameterBindingType::DynamicBuffer;
-        case render::ShaderParameterBindingType::RWBuffer:
-            return render::ShaderParameterBindingType::DynamicRWBuffer;
-        default:
-            return binding.Type;
     }
 }
 
@@ -1607,13 +1589,6 @@ std::optional<ShaderHash> ShaderArtifactIndex::FindSourceIdentity(std::string_vi
     return std::nullopt;
 }
 
-render::ShaderDescriptor ShaderBytecode::MakeDescriptor() const noexcept {
-    return render::ShaderDescriptor{
-        .Source = Data,
-        .Category = Category,
-        .Stages = Stage};
-}
-
 // ============================ 变体域 ============================
 
 std::optional<ShaderVariantDomain> ShaderVariantDomain::Build(
@@ -1972,20 +1947,6 @@ std::optional<vector<ShaderVariantKey>> ExpandShaderBakeSet(
 }
 
 // ============================ 功能类成员 ============================
-
-render::PipelineLayoutDescriptor ShaderPipelineLayoutStorage::Get() const noexcept {
-    render::PipelineLayoutDescriptor desc{};
-    desc.ParameterSets = _sets;
-    desc.PushConstant = _pushConstant;
-    return desc;
-}
-
-render::VertexInputState ShaderVertexInputStorage::Get() const noexcept {
-    render::VertexInputState state{};
-    state.Buffers = _buffers;
-    state.Attributes = _attributes;
-    return state;
-}
 
 ShaderResolver::ShaderResolver(
     ShaderResolveConfig config,
@@ -2454,71 +2415,6 @@ std::optional<string> SerializeShaderAssetDesc(const ShaderAssetDesc& desc, bool
     return SerializeJson(desc, pretty);
 }
 
-// ============================ layout 构建 ============================
-
-ShaderPipelineLayoutStorage BuildPipelineLayoutStorage(const ShaderPassDesc& pass) {
-    ShaderPipelineLayoutStorage storage;
-    storage._entries.reserve(pass.BindingGroups.size());
-    storage._sets.reserve(pass.BindingGroups.size());
-
-    for (const ShaderBindingGroupDesc& group : pass.BindingGroups) {
-        auto entries = make_unique<vector<render::ShaderParameterSetLayoutEntryDescriptor>>();
-        entries->reserve(group.Bindings.size());
-        for (const ShaderBindingDesc& binding : group.Bindings) {
-            render::ShaderParameterSetLayoutEntryDescriptor entry{};
-            entry.Binding = binding.Binding;
-            entry.Type = ResolveBindingType(binding);
-            entry.Count = binding.Count;
-            entry.Stages = binding.Stages;
-            entry.ImmutableSampler = binding.ImmutableSampler;
-            entries->push_back(entry);
-        }
-        render::ShaderParameterSetLayoutDescriptor set{};
-        set.GroupIndex = group.Group;
-        set.Entries = *entries;
-        storage._entries.push_back(std::move(entries));
-        storage._sets.push_back(set);
-    }
-
-    if (pass.PushConstant.has_value()) {
-        const ShaderPushConstantDesc& pc = pass.PushConstant.value();
-        render::PushConstantDescriptor descriptor{};
-        descriptor.Location = pc.Location;
-        descriptor.Size = pc.Size;
-        descriptor.Stages = pc.Stages;
-        storage._pushConstant = descriptor;
-    }
-    return storage;
-}
-
-ShaderVertexInputStorage BuildVertexInputStorage(const ShaderVertexInputDesc& desc) {
-    ShaderVertexInputStorage storage;
-    storage._buffers.reserve(desc.Buffers.size());
-    for (const ShaderVertexBufferDesc& buffer : desc.Buffers) {
-        render::VertexBufferLayout layout{};
-        layout.Binding = buffer.Binding;
-        layout.ArrayStride = buffer.ArrayStride;
-        layout.StepMode = buffer.StepMode;
-        storage._buffers.push_back(layout);
-    }
-    storage._semantics.reserve(desc.Attributes.size());
-    storage._attributes.reserve(desc.Attributes.size());
-    for (size_t i = 0; i < desc.Attributes.size(); ++i) {
-        const ShaderVertexAttributeDesc& source = desc.Attributes[i];
-        auto semantic = make_unique<string>(source.Semantic);
-        render::VertexAttribute attribute{};
-        attribute.BufferBinding = source.BufferBinding;
-        attribute.Offset = source.Offset;
-        attribute.Semantic = *semantic;
-        attribute.SemanticIndex = source.SemanticIndex;
-        attribute.Format = source.Format;
-        attribute.Location = source.Location.value_or(static_cast<uint32_t>(i));
-        storage._semantics.push_back(std::move(semantic));
-        storage._attributes.push_back(attribute);
-    }
-    return storage;
-}
-
 // ============================ 反射核对 ============================
 
 bool ValidateShaderReflection(
@@ -2873,15 +2769,6 @@ string MakeShaderArtifactBlobPath(render::ShaderBlobCategory category, ShaderHas
         return static_cast<char>(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c);
     });
     return fmt::format("{}/{}.bin", lower, key.ToHex());
-}
-
-render::ShaderBlobCategory GetShaderBlobCategoryForBackend(render::RenderBackend backend) noexcept {
-    switch (backend) {
-        case render::RenderBackend::D3D12: return render::ShaderBlobCategory::DXIL;
-        case render::RenderBackend::Vulkan: return render::ShaderBlobCategory::SPIRV;
-        case render::RenderBackend::Metal: return render::ShaderBlobCategory::MSL;
-        default: return render::ShaderBlobCategory::DXIL;
-    }
 }
 
 // ============================ 产物读写 ============================

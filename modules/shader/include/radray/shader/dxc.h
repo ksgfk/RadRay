@@ -6,8 +6,8 @@
 #include <string_view>
 
 #include <radray/nullable.h>
-#include <radray/render/rhi.h>
-#include <radray/render/hlsl.h>
+#include <radray/shader/shader_types.h>
+#include <radray/shader/hlsl.h>
 #include <radray/types.h>
 
 namespace radray::render {

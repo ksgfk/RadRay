@@ -4,7 +4,11 @@
 # 该守卫由 tools/CMakeLists.txt 施加。
 
 add_executable(radray_shader_cook shader_cook.cpp)
-target_link_libraries(radray_shader_cook PRIVATE radrayruntime)
+# 【只链 radrayshader, 不链 radrayruntime/radrayrender】cook 只做 "文本 manifest →
+# 字节码", 全程不创建 GPU 设备。链 runtime 会经 radrayrender 拖入 d3d12/vulkan 后端
+# 约 23 MB obj 与 d3d12.dll 硬依赖 —— 根因是 rhi.cpp.obj 对 5 个后端工厂符号有
+# UNDEF 引用, 而 obj 是链接粒度。改动此处前请重跑 link /MAP 验收。
+target_link_libraries(radray_shader_cook PRIVATE radrayshader)
 if (RADRAY_ENABLE_MIMALLOC)
     target_link_libraries(radray_shader_cook PRIVATE mimalloc-override)
 endif()
@@ -12,9 +16,9 @@ radray_default_compile_flags(radray_shader_cook)
 radray_optimize_flags_binary(radray_shader_cook)
 radray_set_build_path(radray_shader_cook)
 
-# DXC 运行库要在 exe 旁边才能加载。radrayruntime 的 POST_BUILD 已把它放进同一个输出
+# DXC 运行库要在 exe 旁边才能加载。radrayshader 的 POST_BUILD 已把它放进同一个输出
 # 目录, 故此处无需重复部署。
-add_dependencies(radray_shader_cook radrayruntime)
+add_dependencies(radray_shader_cook radrayshader)
 
 # 显式烘焙目标。【不进 ALL】—— 烘焙不是构建的一部分:
 # - 开发构建靠 JIT, 产物只会带来"改了 shader 却读到旧 blob"这类多余的失效面;

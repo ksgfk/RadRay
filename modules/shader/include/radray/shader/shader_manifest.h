@@ -7,9 +7,9 @@
 
 #include <radray/nullable.h>
 #include <radray/json.h>
-#include <radray/render/hlsl.h>
-#include <radray/render/rhi.h>
-#include <radray/render/spirv.h>
+#include <radray/shader/hlsl.h>
+#include <radray/shader/shader_types.h>
+#include <radray/shader/spirv.h>
 #include <radray/types.h>
 
 // shader 资产元数据 (*.shader.json) 与其 AOT 产物。
@@ -614,8 +614,8 @@ struct ShaderBytecode {
     ShaderBytecodeSource Source{ShaderBytecodeSource::Jit};
     ShaderHash Key{};
 
-    /// 直接构造 CreateShader 所需的 descriptor。
-    render::ShaderDescriptor MakeDescriptor() const noexcept;
+    // 构造 render::ShaderDescriptor 的 MakeShaderDescriptor(const ShaderBytecode&)
+    // 在 <radray/runtime/shader_program.h>。本结构保持为纯数据, 不引用 RHI 描述。
 };
 
 struct ShaderCookOptions {
@@ -650,50 +650,9 @@ struct ShaderCookResult {
 
 // ============================ 功能类 ============================
 
-/// 持有 render::PipelineLayoutDescriptor 所需的全部后备存储。
-/// PipelineLayoutDescriptor 内部是 span, 必须有稳定的拥有者。move-only。
-class ShaderPipelineLayoutStorage {
-public:
-    ShaderPipelineLayoutStorage() noexcept = default;
-    ShaderPipelineLayoutStorage(const ShaderPipelineLayoutStorage&) = delete;
-    ShaderPipelineLayoutStorage& operator=(const ShaderPipelineLayoutStorage&) = delete;
-    ShaderPipelineLayoutStorage(ShaderPipelineLayoutStorage&&) noexcept = default;
-    ShaderPipelineLayoutStorage& operator=(ShaderPipelineLayoutStorage&&) noexcept = default;
-
-    /// 返回的 descriptor 内 span 指向本对象, 本对象存活且未被移动期间有效。
-    render::PipelineLayoutDescriptor Get() const noexcept;
-
-    size_t GroupCount() const noexcept { return _sets.size(); }
-    bool HasPushConstant() const noexcept { return _pushConstant.has_value(); }
-
-private:
-    friend ShaderPipelineLayoutStorage BuildPipelineLayoutStorage(const ShaderPassDesc& pass);
-
-    /// 每组的 entry 列表。稳定地址由 unique_ptr 保证 (vector 扩容不移动内容)。
-    vector<unique_ptr<vector<render::ShaderParameterSetLayoutEntryDescriptor>>> _entries;
-    vector<render::ShaderParameterSetLayoutDescriptor> _sets;
-    std::optional<render::PushConstantDescriptor> _pushConstant;
-};
-
-/// 持有 render::VertexInputState 所需的后备存储。move-only。
-class ShaderVertexInputStorage {
-public:
-    ShaderVertexInputStorage() noexcept = default;
-    ShaderVertexInputStorage(const ShaderVertexInputStorage&) = delete;
-    ShaderVertexInputStorage& operator=(const ShaderVertexInputStorage&) = delete;
-    ShaderVertexInputStorage(ShaderVertexInputStorage&&) noexcept = default;
-    ShaderVertexInputStorage& operator=(ShaderVertexInputStorage&&) noexcept = default;
-
-    render::VertexInputState Get() const noexcept;
-
-private:
-    friend ShaderVertexInputStorage BuildVertexInputStorage(const ShaderVertexInputDesc& desc);
-
-    /// VertexAttribute::Semantic 是 string_view, 需要稳定的字符串后备存储。
-    vector<unique_ptr<string>> _semantics;
-    vector<render::VertexBufferLayout> _buffers;
-    vector<render::VertexAttribute> _attributes;
-};
+// ShaderPipelineLayoutStorage / ShaderVertexInputStorage 已移至
+// <radray/runtime/shader_program.h>: 它们产出的是"喂给 RHI 的形状", 不是
+// manifest 数据, 故属 render 层。详见该头文件的说明。
 
 /// stage 字节码解析器。按 AOT 产物优先、JIT 兜底的顺序取字节码。
 ///
@@ -789,14 +748,8 @@ std::optional<ShaderAssetDesc> LoadShaderAssetDesc(
 /// 序列化回 JSON 文本 (字符串枚举, pretty)。用于工具链与 round-trip 测试。
 std::optional<string> SerializeShaderAssetDesc(const ShaderAssetDesc& desc, bool pretty = true) noexcept;
 
-// ============================ layout 构建 ============================
-
-/// 从 manifest 构建 pipeline layout。【不需要】反射数据、字节码或 target 信息,
-/// 因此结果对所有 target 与所有 keyword variant 都相同。
-/// 输入必须来自 ParseShaderAssetDesc (已通过自校验)。
-ShaderPipelineLayoutStorage BuildPipelineLayoutStorage(const ShaderPassDesc& pass);
-
-ShaderVertexInputStorage BuildVertexInputStorage(const ShaderVertexInputDesc& desc);
+// BuildPipelineLayoutStorage / BuildVertexInputStorage 已移至
+// <radray/runtime/shader_program.h> (随对应的 Storage 类)。
 
 // ============================ 反射核对 ============================
 
@@ -855,8 +808,9 @@ std::filesystem::path GetShaderArtifactDirectory(const std::filesystem::path& ma
 /// artifact 目录内 blob 的相对路径: "<category>/<key hex>.bin"。
 string MakeShaderArtifactBlobPath(render::ShaderBlobCategory category, ShaderHash key);
 
-/// 目标后端默认的字节码类型。
-render::ShaderBlobCategory GetShaderBlobCategoryForBackend(render::RenderBackend backend) noexcept;
+// 「目标后端 -> 默认字节码类型」的映射在 <radray/render/rhi.h>
+// (GetShaderBlobCategoryForBackend)。那是 RenderBackend 的知识, 且 shader 层不需要它:
+// 本层所有接口都直接收 ShaderBlobCategory, 由调用方决定用哪种字节码。
 
 // ============================ 产物读写 ============================
 

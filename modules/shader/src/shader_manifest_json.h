@@ -1,7 +1,7 @@
 #pragma once
 
 #include <radray/json.h>
-#include <radray/runtime/shader_manifest.h>
+#include <radray/shader/shader_manifest.h>
 
 // manifest 字段写入的单一实现。
 //

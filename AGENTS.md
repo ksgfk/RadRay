@@ -9,8 +9,12 @@
   - Output goes to `.vscode/compile_commands.json` (clangd reads from there per `opencode.json`)
 
 ## Project Structure & Module Organization
-- `modules/` contains core code split into `core`, `window`, `render`, and `runtime`.
-- Dependency chain: `core` ← `window`, `render` ← `runtime` (requires both window + render).
+- `modules/` contains core code split into `core`, `window`, `shader`, `render`, and `runtime`.
+- Dependency chain: `core` ← `window`, `core` ← `shader` ← `render` ← `runtime` (runtime requires both window + render).
+- `shader` holds the shader toolchain (dxc/hlsl/spirv/spvc/msl compilers, manifest format layer) plus the manifest data vocabulary in `radray/shader/shader_types.h`. It never touches a GPU device, so shader CLIs link only `radraycore + radrayshader` and pull in zero graphics backend. All of it lives in namespace `radray::render`, same as `rhi.h`; `rhi.h` forward-includes `shader_types.h`, so existing `#include <radray/render/rhi.h>` users see those types unchanged.
+- The rule for placing a type in `shader_types.h` is "is it manifest data?" — does it appear in `*.shader.json` or have a JSON codec? Do NOT use "does it hold a device pointer?"; that is necessary but not sufficient, and applying it once put 8 pure RHI-parameter types into the shader library that it never used. Types that only exist to be fed to the RHI (`PipelineLayoutDescriptor`, `VertexInputState`, `ShaderDescriptor`, ...) belong in `rhi.h`, and `radray/runtime/shader_program.h` packs manifest data into them.
+- `RenderBackend` lives in `rhi.h`, not `shader_types.h`: shader-side APIs always take `ShaderBlobCategory` directly and the caller decides which bytecode it wants. The `RenderBackend → ShaderBlobCategory` mapping (`GetShaderBlobCategoryForBackend`) is in `rhi.h` too. When judging whether a lower layer needs a type, ask "if I delete this one convenience function, does the layer still need it?" — a type can end up too low simply because a helper was written there.
+- Do not add a `radrayrender` dependency to `radrayshader`, and do not link the shader CLIs against `radrayruntime`/`radrayrender` — that reintroduces ~23 MB of backend objects. Verify with `link /MAP` or `ninja -C build_debug -t commands`, not `dumpbin /DEPENDENTS` (Vulkan loads via volk and leaves no dll import).
 - `examples/` holds runnable demos; `benchmarks/` holds performance targets (enabled in release builds).
 - `tools/` contains utility scripts (dependency fetching, compile_commands gen, shader codegen) and the `shader_gen` CLI target.
 - `assets/` and `shaderlib/` store runtime assets and shader sources.
@@ -61,6 +65,8 @@
 ## Test
 - Test sources go in `modules/<module>/tests/`.
 - Tests are registered in CMake with `radray_add_test` (plain gtest) or `radray_add_radray_gtest_case` (for tests needing `RADRAY_PROJECT_DIR`, `RADRAY_TEST_ENV_DIR`, etc.).
+- `radray_add_test` pins `DISCOVERY_MODE PRE_TEST`. Do not drop it: CMake 4.4 never passes `TEST_TARGET` to `gtest_discover_tests_impl`, so its per-target anti-race hash degenerates to the empty-string hash `e3b0c44298` and every target in a directory shares one discovery json. With the default POST_BUILD mode that races, producing random `JSON failed parsing` build errors or tests silently registered against the wrong executable.
+- A `ctest -N` count is not evidence of coverage. Verify by comparing each exe's `--gtest_list_tests` output against the ctest registration list in both directions.
 - CTest test preset uses ClangCL: `ctest --preset win-x64 -R {test name} --output-on-failure`
 - **Critical**: `-R` matches the **gtest suite name** (the C++ class), NOT the cmake target name.
 - Do NOT run build and test concurrently.

@@ -5,10 +5,10 @@
 #include <span>
 #include <string_view>
 
-#include <radray/render/dxc.h>
-#include <radray/render/hlsl.h>
-#include <radray/render/rhi.h>
-#include <radray/runtime/shader_manifest.h>
+#include <radray/shader/dxc.h>
+#include <radray/shader/hlsl.h>
+#include <radray/shader/shader_types.h>
+#include <radray/shader/shader_manifest.h>
 #include <radray/types.h>
 
 // 从 HLSL 反射生成 *.shader.json 的【起始模板】。

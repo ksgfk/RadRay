@@ -9,7 +9,7 @@
 #include <radray/logger.h>
 #include <radray/render/rhi.h>
 #if defined(RADRAY_ENABLE_SHADER_JIT)
-#include <radray/render/dxc.h>
+#include <radray/shader/dxc.h>
 #endif
 #include <radray/runtime/application.h>
 #include <radray/runtime/gpu_system.h>

@@ -1,4 +1,4 @@
-#include <radray/render/hlsl.h>
+#include <radray/shader/hlsl.h>
 
 #include <algorithm>
 #include <array>

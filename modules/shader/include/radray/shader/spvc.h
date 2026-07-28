@@ -4,9 +4,9 @@
 #include <span>
 #include <string_view>
 
-#include <radray/render/rhi.h>
-#include <radray/render/msl.h>
-#include <radray/render/spirv.h>
+#include <radray/shader/shader_types.h>
+#include <radray/shader/msl.h>
+#include <radray/shader/spirv.h>
 
 namespace radray::render {
 

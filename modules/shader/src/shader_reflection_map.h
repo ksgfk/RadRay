@@ -3,9 +3,9 @@
 #include <optional>
 #include <string_view>
 
-#include <radray/render/hlsl.h>
-#include <radray/render/rhi.h>
-#include <radray/render/spirv.h>
+#include <radray/shader/hlsl.h>
+#include <radray/shader/shader_types.h>
+#include <radray/shader/spirv.h>
 
 // 反射 -> RHI 绑定类型的映射, 以及 HLSL semantic 的归一化。
 //

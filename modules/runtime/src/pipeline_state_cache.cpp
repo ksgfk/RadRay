@@ -102,7 +102,7 @@ Nullable<render::GraphicsPipelineState*> PipelineStateCache::GetOrCreateGraphics
         if (blob.Bytecode == nullptr) {
             continue;
         }
-        auto shaderResult = _device->CreateShader(blob.Bytecode->MakeDescriptor());
+        auto shaderResult = _device->CreateShader(MakeShaderDescriptor(*blob.Bytecode));
         if (!shaderResult.HasValue()) {
             outDiag.Message = "CreateShader failed";
             outDiag.PassName = key.Program->GetName();

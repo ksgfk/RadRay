@@ -15,7 +15,7 @@
 #include <radray/runtime/pipeline_state_cache.h>
 
 #include <radray/environment.h>
-#include <radray/render/dxc.h>
+#include <radray/shader/dxc.h>
 #include <radray/render/rhi.h>
 #include <radray/runtime/asset_manager.h>
 #include <radray/runtime/render_resource_recycler.h>
