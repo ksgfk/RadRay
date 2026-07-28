@@ -1948,72 +1948,196 @@ std::optional<vector<ShaderVariantKey>> ExpandShaderBakeSet(
 
 // ============================ 功能类成员 ============================
 
-ShaderResolver::ShaderResolver(
-    ShaderResolveConfig config,
+ShaderResolveContext::ShaderResolveContext(
+    ShaderResolveSettings settings,
     Nullable<render::Dxc*> dxc) noexcept
-    : _config(std::move(config)),
+    : _settings(std::move(settings)),
       _dxc(dxc),
       _toolchainHash(GetShaderToolchainHash()) {}
 
-bool ShaderResolver::CanJit() const noexcept {
+bool ShaderResolveContext::CanJit() const noexcept {
 #if defined(RADRAY_ENABLE_SHADER_JIT)
-    return _config.AllowJit && _dxc.HasValue() && _dxc.Get()->IsValid();
+    return _settings.AllowJit && _dxc.HasValue() && _dxc.Get()->IsValid();
 #else
     return false;
 #endif
 }
 
-std::optional<ShaderHash> ShaderResolver::GetSourceIdentity(
-    std::string_view sourcePath,
-    ShaderAssetDiagnostic& outDiag) noexcept {
-    // 缓存命中前先复核时间戳: 任一依赖变动就必须重算, 否则 Strict 的
-    // "改 shader 立刻生效" 在长命 resolver 上失效。
-    auto stampsAreCurrent = [this](const SourceIdentityCache& item) noexcept {
-        for (const auto& [relative, stamp] : item.Stamps) {
-            std::error_code error;
-            const auto now = std::filesystem::last_write_time(
-                _config.ShaderRoot / std::filesystem::path{relative},
-                error);
-            if (error || now != stamp) {
-                return false;
-            }
-        }
-        return true;
-    };
+void ShaderResolveContext::ClearSourceCache() noexcept {
+    _files.clear();
+    _closures.clear();
+}
 
-    for (size_t i = 0; i < _sourceIdentities.size(); ++i) {
-        if (_sourceIdentities[i].SourcePath != sourcePath) {
+Nullable<const ShaderResolveContext::FileEntry*> ShaderResolveContext::GetFile(
+    std::string_view relative,
+    ShaderAssetDiagnostic& outDiag) noexcept {
+    const std::filesystem::path absolute = _settings.ShaderRoot / std::filesystem::path{relative};
+    std::error_code error;
+    const auto stamp = std::filesystem::last_write_time(absolute, error);
+    if (error) {
+        outDiag.Message = fmt::format("shader source '{}' is missing", relative);
+        return nullptr;
+    }
+
+    for (size_t i = 0; i < _files.size(); ++i) {
+        if (_files[i]->Path != relative) {
             continue;
         }
-        if (stampsAreCurrent(_sourceIdentities[i])) {
-            return _sourceIdentities[i].Hash;
+        if (_files[i]->Stamp == stamp) {
+            return _files[i].get();
         }
-        _sourceIdentities.erase(_sourceIdentities.begin() + static_cast<ptrdiff_t>(i));
+        // 时间戳变了: 丢掉本条并连带丢掉全部闭包缓存 —— 无法知道哪些闭包含这个文件,
+        // 而闭包条目数量级只有 manifest 数量, 全清远比维护反向索引便宜。
+        _files.erase(_files.begin() + static_cast<ptrdiff_t>(i));
+        _closures.clear();
         break;
     }
 
-    auto identity = ComputeShaderSourceIdentity(_config.ShaderRoot, sourcePath, outDiag);
-    if (!identity.has_value()) {
+    auto bytes = ReadBinaryFile(absolute);
+    if (!bytes.has_value()) {
+        outDiag.Message = fmt::format("failed to read shader source '{}'", relative);
+        return nullptr;
+    }
+    ++_stats.FileReads;
+    const std::string_view text{
+        reinterpret_cast<const char*>(bytes->data()),
+        bytes->size()};
+    vector<string> includes;
+    string scanError;
+    if (!ScanIncludes(text, includes, scanError)) {
+        outDiag.Message = fmt::format("{} in '{}'", scanError, relative);
+        return nullptr;
+    }
+    ++_stats.IncludeScans;
+
+    auto entry = make_unique<FileEntry>();
+    entry->Path = string{relative};
+    entry->Stamp = stamp;
+    entry->Content = std::move(bytes.value());
+    entry->Includes = std::move(includes);
+    const FileEntry* result = entry.get();
+    _files.push_back(std::move(entry));
+    return result;
+}
+
+std::optional<ShaderHash> ShaderResolveContext::GetSourceIdentity(
+    std::string_view sourcePath,
+    ShaderAssetDiagnostic& outDiag) noexcept {
+    std::error_code error;
+    const std::filesystem::path root = std::filesystem::weakly_canonical(_settings.ShaderRoot, error);
+    if (error || !std::filesystem::is_directory(root, error) || error) {
+        outDiag.Message = fmt::format("shader root '{}' is unavailable", _settings.ShaderRoot.string());
         return std::nullopt;
     }
 
-    SourceIdentityCache cached;
-    cached.SourcePath = string{sourcePath};
-    cached.Hash = identity->Hash;
-    cached.Stamps.reserve(identity->Dependencies.size());
-    for (const string& dependency : identity->Dependencies) {
-        std::error_code error;
-        const auto stamp = std::filesystem::last_write_time(
-            _config.ShaderRoot / std::filesystem::path{dependency},
-            error);
-        if (error) {
-            // 拿不到时间戳就不缓存: 宁可每次重算, 也不能缓存一个无法失效的条目。
-            return identity->Hash;
+    // 闭包缓存命中的条件是【闭包内每个文件的缓存条目都还有效】。GetFile 自带 stat
+    // 复核并在失配时清空 _closures, 故只要走一遍闭包且期间没被清空, 就是命中。
+    {
+        // 【必须先把依赖表拷出来】: 下面的 GetFile 在检出内容变化时会清空 _closures,
+        // 那会让指向条目的引用与其 Dependencies 一并失效。
+        std::optional<ShaderHash> cachedHash;
+        vector<string> dependencies;
+        for (const ClosureEntry& closure : _closures) {
+            if (closure.SourcePath == sourcePath) {
+                cachedHash = closure.Hash;
+                dependencies = closure.Dependencies;
+                break;
+            }
         }
-        cached.Stamps.emplace_back(dependency, stamp);
+        if (cachedHash.has_value()) {
+            bool current = true;
+            for (const string& dependency : dependencies) {
+                ShaderAssetDiagnostic ignored;
+                if (GetFile(dependency, ignored) == nullptr || _closures.empty()) {
+                    // 文件消失, 或 GetFile 检出内容变化并清了闭包表。
+                    current = false;
+                    break;
+                }
+            }
+            if (current) {
+                return cachedHash.value();
+            }
+        }
     }
-    _sourceIdentities.push_back(std::move(cached));
-    return identity->Hash;
+
+    // 走闭包: 与 ComputeShaderSourceIdentity 同一套遍历与哈希顺序, 只是文件内容与
+    // include 列表来自缓存。
+    vector<const FileEntry*> files;
+    vector<string> pending;
+    pending.emplace_back(sourcePath);
+    while (!pending.empty()) {
+        const string requested = std::move(pending.back());
+        pending.pop_back();
+
+        const std::filesystem::path absolute = std::filesystem::weakly_canonical(
+            root / std::filesystem::path{requested},
+            error);
+        if (error || !std::filesystem::is_regular_file(absolute, error) || error) {
+            outDiag.Message = fmt::format("shader source '{}' is missing", requested);
+            return std::nullopt;
+        }
+        if (!IsPathUnderRoot(root, absolute)) {
+            outDiag.Message = fmt::format("shader source '{}' escapes the shader root", requested);
+            return std::nullopt;
+        }
+        const string identityPath = absolute.lexically_relative(root).generic_string();
+        if (std::ranges::any_of(files, [&](const FileEntry* item) noexcept {
+                return item->Path == identityPath;
+            })) {
+            continue;
+        }
+        Nullable<const FileEntry*> entry = GetFile(identityPath, outDiag);
+        if (entry == nullptr) {
+            return std::nullopt;
+        }
+        for (const string& include : entry.Get()->Includes) {
+            pending.emplace_back(include);
+        }
+        files.push_back(entry.Get());
+    }
+
+    // 按路径排序, 使哈希不受遍历顺序影响。
+    std::ranges::sort(files, [](const FileEntry* lhs, const FileEntry* rhs) noexcept {
+        return lhs->Path < rhs->Path;
+    });
+
+    HashAccum accum;
+    accum.U32(kShaderArtifactFormatVersion);
+    accum.U64(files.size());
+    ClosureEntry closure;
+    closure.SourcePath = string{sourcePath};
+    closure.Dependencies.reserve(files.size());
+    for (const FileEntry* file : files) {
+        accum.Text(file->Path);
+        accum.U64(file->Content.size());
+        accum.Bytes(file->Content);
+        closure.Dependencies.emplace_back(file->Path);
+    }
+    closure.Hash = accum.Finish();
+    ++_stats.IdentityComputes;
+
+    const ShaderHash hash = closure.Hash;
+    // 同一个 SourcePath 可能因内容变化走到这里, 旧条目已被 GetFile 连带清掉, 但
+    // 防御性去重仍有必要 (清空只发生在检出变化那一次)。
+    std::erase_if(_closures, [&](const ClosureEntry& item) noexcept {
+        return item.SourcePath == sourcePath;
+    });
+    _closures.push_back(std::move(closure));
+    return hash;
+}
+
+// ---------------------------------------------------------------------------
+
+ShaderResolver::ShaderResolver(
+    ShaderResolveContext& context,
+    std::filesystem::path manifestPath) noexcept
+    : _context(&context),
+      _manifestPath(std::move(manifestPath)) {}
+
+std::optional<ShaderHash> ShaderResolver::GetSourceIdentity(
+    std::string_view sourcePath,
+    ShaderAssetDiagnostic& outDiag) noexcept {
+    return _context->GetSourceIdentity(sourcePath, outDiag);
 }
 
 Nullable<const ShaderArtifactIndex*> ShaderResolver::GetIndex() noexcept {
@@ -2021,11 +2145,11 @@ Nullable<const ShaderArtifactIndex*> ShaderResolver::GetIndex() noexcept {
         return _index.has_value() ? &_index.value() : nullptr;
     }
     _indexLoaded = true;
-    if (_config.ManifestPath.empty()) {
+    if (_manifestPath.empty()) {
         return nullptr;
     }
     const std::filesystem::path indexPath =
-        GetShaderArtifactDirectory(_config.ManifestPath) / "index.json";
+        GetShaderArtifactDirectory(_manifestPath) / "index.json";
     std::error_code error;
     if (!std::filesystem::is_regular_file(indexPath, error) || error) {
         // 没有产物目录是正常状态 (纯 JIT 工作流), 不报错。
@@ -2056,7 +2180,7 @@ std::optional<ShaderBytecode> ShaderResolver::LoadFromArtifact(
     }
     const ShaderArtifactEntry& found = *entry.Get();
     const std::filesystem::path blobPath =
-        GetShaderArtifactDirectory(_config.ManifestPath) /
+        GetShaderArtifactDirectory(_manifestPath) /
         std::filesystem::path{found.BlobPath};
 
     ShaderAssetDiagnostic blobDiag;
@@ -2117,7 +2241,7 @@ std::optional<ShaderBytecode> ShaderResolver::CompileWithJit(
     for (const string& define : defines) {
         defineViews.emplace_back(define);
     }
-    const string rootString = _config.ShaderRoot.string();
+    const string rootString = _context->GetShaderRoot().string();
     const std::array<std::string_view, 1> includes{rootString};
 
     const render::DxcCompileOptions options{
@@ -2131,9 +2255,9 @@ std::optional<ShaderBytecode> ShaderResolver::CompileWithJit(
         .EnableUnbounded = pass.EnableUnbounded};
 
     const std::filesystem::path sourceFile =
-        _config.ShaderRoot / std::filesystem::path{sourcePath};
+        _context->GetShaderRoot() / std::filesystem::path{sourcePath};
     // CanJit() 已确认非空 (Resolve 在调用本函数前必查)。
-    auto output = _dxc.Get()->CompileFile(sourceFile, options);
+    auto output = _context->GetDxc().Get()->CompileFile(sourceFile, options);
     if (!output.has_value()) {
         outDiag.Message = fmt::format("failed to compile '{}'", sourcePath);
         return std::nullopt;
@@ -2187,6 +2311,9 @@ std::optional<ShaderBytecode> ShaderResolver::Resolve(
     // 源码身份两种模式下都尽力计算: Strict 用它判过期, Lenient 用它决定是否告警。
     // 发布包里源文件可能根本没有部署, 故 Lenient 下算不出来【不是】错误 —— 那时用
     // index 自称的身份作为 key 输入, 直接按逻辑 key 命中。
+    const ShaderArtifactStaleness staleness = _context->GetStaleness();
+    const ShaderHash toolchainHash = _context->GetToolchainHash();
+
     ShaderHash sourceIdentity{};
     bool haveSourceIdentity = false;
     {
@@ -2195,7 +2322,7 @@ std::optional<ShaderBytecode> ShaderResolver::Resolve(
         if (identity.has_value()) {
             sourceIdentity = identity.value();
             haveSourceIdentity = true;
-        } else if (_config.Staleness == ShaderArtifactStaleness::Strict && !CanJit()) {
+        } else if (staleness == ShaderArtifactStaleness::Strict && !CanJit()) {
             // Strict 且无法 JIT: 算不出身份就无从判断产物是否可用, 只能失败。
             outDiag.Message = identityDiag.Message;
             return std::nullopt;
@@ -2206,17 +2333,17 @@ std::optional<ShaderBytecode> ShaderResolver::Resolve(
     Nullable<const ShaderArtifactIndex*> index = GetIndex();
     if (index != nullptr) {
         const ShaderArtifactIndex& idx = *index.Get();
-        const bool toolchainMatches = idx.ToolchainHash == _toolchainHash;
+        const bool toolchainMatches = idx.ToolchainHash == toolchainHash;
         // 按【本 pass 的源文件】取 cook 时身份: 一个资产内各 pass 的 Source 可以不同,
         // 而 key 是按各自源文件算的。
         const std::optional<ShaderHash> cookedIdentity = idx.FindSourceIdentity(sourcePath);
         // Lenient 下用 index 自称的源码身份组 key, 从而绕过源码比对。
         const std::optional<ShaderHash> keyIdentity =
-            _config.Staleness == ShaderArtifactStaleness::Strict
+            staleness == ShaderArtifactStaleness::Strict
                 ? (haveSourceIdentity ? std::optional{sourceIdentity} : std::nullopt)
                 : cookedIdentity;
         const bool identityMatches =
-            _config.Staleness == ShaderArtifactStaleness::Lenient
+            staleness == ShaderArtifactStaleness::Lenient
                 ? cookedIdentity.has_value()
                 : (haveSourceIdentity && cookedIdentity == sourceIdentity);
 
@@ -2227,12 +2354,12 @@ std::optional<ShaderBytecode> ShaderResolver::Resolve(
                 category,
                 defines,
                 keyIdentity.value(),
-                _toolchainHash);
+                toolchainHash);
             if (key.has_value()) {
                 ShaderAssetDiagnostic artifactDiag;
                 auto bytecode = LoadFromArtifact(key.value(), stage, artifactDiag);
                 if (bytecode.has_value()) {
-                    if (_config.Staleness == ShaderArtifactStaleness::Lenient &&
+                    if (staleness == ShaderArtifactStaleness::Lenient &&
                         haveSourceIdentity && cookedIdentity != sourceIdentity) {
                         RADRAY_WARN_LOG(
                             "shader artifact for pass '{}' stage {} is stale but accepted (Lenient)",
@@ -2273,7 +2400,7 @@ std::optional<ShaderBytecode> ShaderResolver::Resolve(
         category,
         defines,
         sourceIdentity,
-        _toolchainHash);
+        toolchainHash);
     return CompileWithJit(
         pass,
         stage,

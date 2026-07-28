@@ -30,6 +30,8 @@ RenderSystem::~RenderSystem() noexcept {
     _pipelineStateCache.reset();
     // 缓存的 RenderPass / Framebuffer 必须先于 GpuSystem 持有的 device 销毁。
     _renderPassRegistry.reset();
+    // context 借用 Dxc*, 必须先于它销毁。
+    _shaderResolveContext.reset();
     _dxc.reset();
 }
 
@@ -45,8 +47,10 @@ void RenderSystem::OnInitialize() {
     _renderPassRegistry = make_unique<RenderPassRegistry>(device);
     _pipelineStateCache = make_unique<PipelineStateCache>(device);
 
-#if defined(RADRAY_ENABLE_SHADER_JIT)
+    // include 根无条件推导: 关掉 JIT 的发布包同样要用它做 AOT 的源码身份复核 (若源码
+    // 确实部署了), 且 ShaderResolveContext 需要一个确定的根而非"猜"。
     _shaderIncludeRoot = (GetExecutableDirectory() / "shaderlib").string();
+#if defined(RADRAY_ENABLE_SHADER_JIT)
     auto dxcOpt = render::CreateDxc();
     if (!dxcOpt.HasValue()) {
         RADRAY_ERR_LOG("RenderSystem::OnInitialize: CreateDxc failed");
@@ -54,6 +58,18 @@ void RenderSystem::OnInitialize() {
         _dxc = dxcOpt.Release();
     }
 #endif
+
+    // 【策略在此一次定死】: 有 DXC 即开发构建 (Strict + JIT, 改 shader 立刻生效);
+    // 没有即发布包 (Lenient + 无 JIT, 缺产物是显式错误, 且不要求源码部署)。
+    // 这个判断刻意不下放到每个加载点 —— 那会让同一进程内出现两套过期语义。
+    const bool developerBuild = _dxc != nullptr;
+    _shaderResolveContext = make_unique<ShaderResolveContext>(
+        ShaderResolveSettings{
+            .ShaderRoot = std::filesystem::path{_shaderIncludeRoot},
+            .Staleness = developerBuild ? ShaderArtifactStaleness::Strict
+                                       : ShaderArtifactStaleness::Lenient,
+            .AllowJit = developerBuild},
+        _dxc.get());
 }
 
 void RenderSystem::Render(AppFrameContext& ctx) {

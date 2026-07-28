@@ -5,6 +5,7 @@
 #include <radray/runtime/pipeline_state_cache.h>
 #include <radray/runtime/render_framework/render_pipeline.h>
 #include <radray/runtime/render_framework/scene.h>
+#include <radray/shader/shader_manifest.h>
 #include <radray/types.h>
 
 namespace radray {
@@ -53,6 +54,11 @@ public:
     const string& GetShaderIncludeRoot() const noexcept { return _shaderIncludeRoot; }
     /// JIT 编译器。关闭 JIT 或 DXC 创建失败时为空, 此时只能走 AOT 产物。
     const shared_ptr<render::Dxc>& GetDxc() const noexcept { return _dxc; }
+    /// 全进程唯一的 shader 解析上下文 (include 根 / 过期策略 / JIT 许可 / 源码缓存)。
+    /// 【唯一一份是刻意的】: 这四项回答的是同一个问题 —— "这是开发构建还是发布包"。
+    /// 而源码缓存按文件记忆化, 跨 manifest 共享才有意义 (error_pass 的 include 闭包是
+    /// forward_pass 的子集)。OnInitialize 之前为空。
+    ShaderResolveContext* GetShaderResolveContext() const noexcept { return _shaderResolveContext.get(); }
 
 private:
     void EnsureRenderTargetState(AppFrameContext& ctx, RenderPipelineTarget& target);
@@ -67,6 +73,8 @@ private:
     vector<unique_ptr<Scene>> _scenes;
     shared_ptr<render::Dxc> _dxc;
     string _shaderIncludeRoot;
+    /// 【必须声明在 _dxc 之后】: context 借用 Dxc* 裸指针, 析构逆序保证 context 先死。
+    unique_ptr<ShaderResolveContext> _shaderResolveContext;
 };
 
 template <>

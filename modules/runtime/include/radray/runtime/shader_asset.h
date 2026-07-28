@@ -23,7 +23,6 @@ namespace radray {
 
 namespace render {
 class Device;
-class Dxc;
 }  // namespace render
 
 /// 一份 shader manifest 的资产。
@@ -81,15 +80,16 @@ struct RuntimeTypeTrait<ShaderAsset> {
     using Bases = std::tuple<Asset>;
 };
 
+/// 【本结构刻意只有一个字段】: ShaderRoot / Staleness / AllowJit / Dxc 曾在这里各占
+/// 一项, 于是每个加载调用点都能自行决定"这是开发构建还是发布包"。那是一个进程级答案,
+/// 放在这里就成了第二套真相 —— 而且从未被兑现: AssetId 只哈希 manifest 路径
+/// (MakeShaderAssetId), AssetManager 按 id 去重后直接返回既有 handle, 第二次调用携带
+/// 的 options 连协程都没启动就被静默丢弃。现在这四项统一落在 ShaderResolveContext。
 struct ShaderAssetLoadOptions {
-    /// shader include 根目录 (通常 <exe>/shaderlib)。留空则取 manifest 所在目录的父目录。
-    std::filesystem::path ShaderRoot;
-    ShaderArtifactStaleness Staleness{ShaderArtifactStaleness::Strict};
-    /// 允许 AOT 未命中时 JIT。发布包应设 false, 使缺失产物成为显式错误。
-    bool AllowJit{true};
-    /// JIT 编译器。为空表示无 JIT 能力 (发布包), 此时 AllowJit 被强制视为 false。
+    /// 全进程共享的解析上下文 (ShaderRoot / Staleness / AllowJit / Dxc / 源码缓存)。
     /// 【不持有生命周期】: 必须在资产存活期间保持有效, 通常由 RenderSystem 持有。
-    Nullable<render::Dxc*> Dxc{nullptr};
+    /// 为空则加载失败 —— 不猜 include 根, 见 CreateShaderAsset。
+    Nullable<ShaderResolveContext*> Context{nullptr};
 };
 
 /// manifest 路径 -> AssetId。前缀 "shader:" 做命名空间隔离, 同一路径在不同资产类型下
@@ -102,6 +102,9 @@ AssetId MakeShaderAssetId(const std::filesystem::path& manifestPath);
 
 /// 同步创建 ShaderAsset。读 manifest、建每个 pass 的 PipelineLayout 与 vertex input。
 /// 不编译任何字节码。任一 pass 失败则整体失败 (返回 nullptr, 原因写入 outDiag)。
+///
+/// options.Context 为空即失败。旧版在 ShaderRoot 留空时按"父目录的父目录"猜 include 根,
+/// 那个兜底存在恰恰说明当时拿不到唯一真相 —— context 里有确切答案, 不必猜。
 Nullable<unique_ptr<ShaderAsset>> CreateShaderAsset(
     render::Device& device,
     const std::filesystem::path& manifestPath,
@@ -112,13 +115,13 @@ StreamingAssetRef<ShaderAsset> LoadShaderAsset(
     AssetManager& assetManager,
     render::Device& device,
     const std::filesystem::path& manifestPath,
-    const ShaderAssetLoadOptions& options = {});
+    const ShaderAssetLoadOptions& options);
 
 StreamingAssetRef<ShaderAsset> LoadShaderAsset(
     AssetManager& assetManager,
     const AssetId& assetId,
     render::Device& device,
     const std::filesystem::path& manifestPath,
-    const ShaderAssetLoadOptions& options = {});
+    const ShaderAssetLoadOptions& options);
 
 }  // namespace radray

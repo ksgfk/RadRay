@@ -2524,6 +2524,39 @@ string MakeManifest() {
         kShaderAssetFormatVersion);
 }
 
+/// context + resolver 的成对持有者。
+///
+/// 【为何测试要显式配对】: 策略与源码缓存归 ShaderResolveContext (全进程一份),
+/// manifest 身份归 ShaderResolver (一份 manifest 一个)。绝大多数用例只关心后者, 但
+/// context 必须活得比 resolver 久, 故用一个对象把这条不变量固定下来。
+class TestResolver {
+public:
+    TestResolver(
+        std::filesystem::path shaderRoot,
+        std::filesystem::path manifestPath,
+        ShaderArtifactStaleness staleness,
+        bool allowJit,
+        Nullable<render::Dxc*> dxc)
+        : _context(
+              ShaderResolveSettings{
+                  .ShaderRoot = std::move(shaderRoot),
+                  .Staleness = staleness,
+                  .AllowJit = allowJit},
+              dxc),
+          _resolver(_context, std::move(manifestPath)) {}
+
+    TestResolver(const TestResolver&) = delete;
+    TestResolver& operator=(const TestResolver&) = delete;
+
+    ShaderResolver* operator->() noexcept { return &_resolver; }
+    ShaderResolver& operator*() noexcept { return _resolver; }
+    ShaderResolveContext& Context() noexcept { return _context; }
+
+private:
+    ShaderResolveContext _context;
+    ShaderResolver _resolver;
+};
+
 /// 建好工作区并解析 manifest。
 struct Fixture {
     ShaderWorkspace Workspace;
@@ -2541,12 +2574,11 @@ struct Fixture {
         }
     }
 
-    ShaderResolveConfig Config(ShaderArtifactStaleness staleness, bool allowJit) const {
-        return ShaderResolveConfig{
-            .ShaderRoot = Workspace.Root(),
-            .ManifestPath = Workspace.ManifestPath(),
-            .Staleness = staleness,
-            .AllowJit = allowJit};
+    TestResolver Resolver(
+        ShaderArtifactStaleness staleness,
+        bool allowJit,
+        Nullable<render::Dxc*> dxc = nullptr) const {
+        return TestResolver{Workspace.Root(), Workspace.ManifestPath(), staleness, allowJit, dxc};
     }
 
     const ShaderPassDesc& Pass() const { return Asset.Passes.front(); }
@@ -2567,9 +2599,9 @@ TEST(ShaderResolverTest, SourceMustBeResolvedBeforeResolving) {
     Fixture fixture;
     ShaderPassDesc pass = fixture.Pass();
     pass.Source.clear();  // 资产级继承应由调用方先完成。
-    ShaderResolver resolver{fixture.Config(ShaderArtifactStaleness::Strict, false), nullptr};
+    TestResolver resolver = fixture.Resolver(ShaderArtifactStaleness::Strict, false);
     ShaderAssetDiagnostic diag;
-    auto bytecode = resolver.Resolve(
+    auto bytecode = resolver->Resolve(
         pass,
         render::ShaderStage::Vertex,
         render::ShaderBlobCategory::DXIL,
@@ -2581,9 +2613,9 @@ TEST(ShaderResolverTest, SourceMustBeResolvedBeforeResolving) {
 
 TEST(ShaderResolverTest, UndeclaredStageIsRejected) {
     Fixture fixture;
-    ShaderResolver resolver{fixture.Config(ShaderArtifactStaleness::Strict, false), nullptr};
+    TestResolver resolver = fixture.Resolver(ShaderArtifactStaleness::Strict, false);
     ShaderAssetDiagnostic diag;
-    auto bytecode = resolver.Resolve(
+    auto bytecode = resolver->Resolve(
         fixture.Pass(),
         render::ShaderStage::Compute,
         render::ShaderBlobCategory::DXIL,
@@ -2595,10 +2627,10 @@ TEST(ShaderResolverTest, UndeclaredStageIsRejected) {
 
 TEST(ShaderResolverTest, WithoutArtifactsOrJitResolveFails) {
     Fixture fixture;
-    ShaderResolver resolver{fixture.Config(ShaderArtifactStaleness::Strict, false), nullptr};
-    EXPECT_FALSE(resolver.CanJit());
+    TestResolver resolver = fixture.Resolver(ShaderArtifactStaleness::Strict, false);
+    EXPECT_FALSE(resolver->CanJit());
     ShaderAssetDiagnostic diag;
-    auto bytecode = resolver.Resolve(
+    auto bytecode = resolver->Resolve(
         fixture.Pass(),
         render::ShaderStage::Vertex,
         render::ShaderBlobCategory::DXIL,
@@ -2610,13 +2642,141 @@ TEST(ShaderResolverTest, WithoutArtifactsOrJitResolveFails) {
 
 TEST(ShaderResolverTest, SourceIdentityIsCached) {
     Fixture fixture;
-    ShaderResolver resolver{fixture.Config(ShaderArtifactStaleness::Strict, false), nullptr};
+    TestResolver resolver = fixture.Resolver(ShaderArtifactStaleness::Strict, false);
     ShaderAssetDiagnostic diag;
-    auto first = resolver.GetSourceIdentity("test.hlsl", diag);
-    auto second = resolver.GetSourceIdentity("test.hlsl", diag);
+    auto first = resolver->GetSourceIdentity("test.hlsl", diag);
+    auto second = resolver->GetSourceIdentity("test.hlsl", diag);
     ASSERT_TRUE(first.has_value()) << diag.Message;
     ASSERT_TRUE(second.has_value());
     EXPECT_EQ(first.value(), second.value());
+    // 第二次不该再读盘 / 再扫 include / 再算闭包哈希。断言"值相等"是不够的 ——
+    // 每次全量重算也会得到相等的值, 缓存有没有生效根本看不出来。
+    const ShaderSourceCacheStats& stats = resolver.Context().GetSourceCacheStats();
+    EXPECT_EQ(stats.FileReads, 1u);
+    EXPECT_EQ(stats.IncludeScans, 1u);
+    EXPECT_EQ(stats.IdentityComputes, 1u);
+}
+
+// ============================ 源码缓存的作用域 ============================
+
+namespace {
+
+/// 一个刻意重叠的 include 图: leaf 被两个中间头共享, 两个 entry 的闭包互为子集关系。
+///   shared.hlsli
+///   middle.hlsli -> shared.hlsli
+///   a.hlsl       -> middle.hlsli          (闭包 3 个)
+///   b.hlsl       -> shared.hlsli          (闭包 2 个, 是 a 的子集)
+void WriteOverlappingSources(const ShaderWorkspace& workspace) {
+    workspace.WriteSource("shared.hlsli", "// shared\n");
+    workspace.WriteSource("middle.hlsli", "#include <shared.hlsli>\n");
+    workspace.WriteSource("a.hlsl", "#include <middle.hlsli>\nfloat4 A() { return 0; }\n");
+    workspace.WriteSource("b.hlsl", "#include <shared.hlsli>\nfloat4 B() { return 0; }\n");
+}
+
+}  // namespace
+
+/// 缓存在【文件】层而非 entry 层, 故重叠的 include 闭包只读一次盘。
+///
+/// 这是把策略与缓存从 ShaderResolver 拆到 ShaderResolveContext 的实质收益: 真实
+/// shaderlib 里 error_pass 的 8 个文件是 forward_pass 那 15 个的子集, 按 entry 缓存
+/// 会把 filtering.hlsli (9.7 KB) 逐份 manifest 重读一遍。
+TEST(ShaderResolverTest, SourceCacheIsSharedAcrossManifests) {
+    ShaderWorkspace workspace;
+    WriteOverlappingSources(workspace);
+
+    ShaderResolveContext context{
+        ShaderResolveSettings{
+            .ShaderRoot = workspace.Root(),
+            .Staleness = ShaderArtifactStaleness::Strict,
+            .AllowJit = false},
+        nullptr};
+    // 两份 manifest, 各自一个 resolver, 共享同一个 context —— 这正是 ShaderAsset 的形状。
+    ShaderResolver first{context, workspace.Root() / "a.shader.json"};
+    ShaderResolver second{context, workspace.Root() / "b.shader.json"};
+
+    ShaderAssetDiagnostic diag;
+    ASSERT_TRUE(first.GetSourceIdentity("a.hlsl", diag).has_value()) << diag.Message;
+    EXPECT_EQ(context.GetSourceCacheStats().FileReads, 3u);
+
+    ASSERT_TRUE(second.GetSourceIdentity("b.hlsl", diag).has_value()) << diag.Message;
+    // b.hlsl 是新文件必须读; shared.hlsli 已在缓存里, 不该再读第二遍。
+    EXPECT_EQ(context.GetSourceCacheStats().FileReads, 4u);
+    EXPECT_EQ(context.GetSourceCacheStats().IncludeScans, 4u);
+    // 两个 entry 各算一次闭包哈希 —— 闭包哈希本身是 per-entry 的, 共享的是文件内容。
+    EXPECT_EQ(context.GetSourceCacheStats().IdentityComputes, 2u);
+}
+
+/// 改一个被共享的头, 必须同时让两个 entry 的闭包哈希变化。
+///
+/// 【这是文件级缓存唯一的风险点】: 缓存跨 entry 共享后, 失效也必须跨 entry 生效。
+/// 漏失效会让运行时加载到过期字节码, 那正是 Strict 承诺要挡住的。
+TEST(ShaderResolverTest, EditingASharedHeaderInvalidatesEveryEntry) {
+    ShaderWorkspace workspace;
+    WriteOverlappingSources(workspace);
+
+    ShaderResolveContext context{
+        ShaderResolveSettings{
+            .ShaderRoot = workspace.Root(),
+            .Staleness = ShaderArtifactStaleness::Strict,
+            .AllowJit = false},
+        nullptr};
+
+    ShaderAssetDiagnostic diag;
+    auto aBefore = context.GetSourceIdentity("a.hlsl", diag);
+    auto bBefore = context.GetSourceIdentity("b.hlsl", diag);
+    ASSERT_TRUE(aBefore.has_value() && bBefore.has_value()) << diag.Message;
+    EXPECT_NE(aBefore.value(), bBefore.value());
+
+    // 时间戳分辨率有限, 必须显式推进, 否则"改了但 stat 看不出"会让本用例假绿。
+    std::this_thread::sleep_for(std::chrono::milliseconds{20});
+    workspace.WriteSource("shared.hlsli", "// shared, edited\n");
+
+    auto aAfter = context.GetSourceIdentity("a.hlsl", diag);
+    auto bAfter = context.GetSourceIdentity("b.hlsl", diag);
+    ASSERT_TRUE(aAfter.has_value() && bAfter.has_value()) << diag.Message;
+    EXPECT_NE(aBefore.value(), aAfter.value()) << "a.hlsl includes shared.hlsli transitively";
+    EXPECT_NE(bBefore.value(), bAfter.value()) << "b.hlsl includes shared.hlsli directly";
+}
+
+/// 缓存路径与无缓存的 ComputeShaderSourceIdentity 必须给出【逐位相同】的哈希。
+///
+/// 【这条断言的作用是保护已有 AOT 产物】: 缓存只是把"读文件"与"扫 include"记忆化,
+/// 累加顺序 (排序后的 path + size + bytes) 一字未动。若两者分叉, 全部已烘产物会在
+/// Strict 下判为过期, 而 kShaderArtifactFormatVersion 并未改变 —— 那是静默失效。
+TEST(ShaderResolverTest, CachedIdentityMatchesTheUncachedFunction) {
+    ShaderWorkspace workspace;
+    WriteOverlappingSources(workspace);
+
+    ShaderResolveContext context{
+        ShaderResolveSettings{
+            .ShaderRoot = workspace.Root(),
+            .Staleness = ShaderArtifactStaleness::Strict,
+            .AllowJit = false},
+        nullptr};
+
+    for (const std::string_view entry : {"a.hlsl", "b.hlsl", "middle.hlsli", "shared.hlsli"}) {
+        ShaderAssetDiagnostic diag;
+        auto cached = context.GetSourceIdentity(entry, diag);
+        ASSERT_TRUE(cached.has_value()) << entry << ": " << diag.Message;
+        auto uncached = ComputeShaderSourceIdentity(workspace.Root(), entry, diag);
+        ASSERT_TRUE(uncached.has_value()) << entry << ": " << diag.Message;
+        EXPECT_EQ(cached.value(), uncached->Hash) << entry;
+    }
+}
+
+TEST(ShaderResolverTest, ClearSourceCacheForcesRecompute) {
+    Fixture fixture;
+    TestResolver resolver = fixture.Resolver(ShaderArtifactStaleness::Strict, false);
+    ShaderAssetDiagnostic diag;
+    const auto before = resolver->GetSourceIdentity("test.hlsl", diag);
+    ASSERT_TRUE(before.has_value()) << diag.Message;
+    ASSERT_EQ(resolver.Context().GetSourceCacheStats().FileReads, 1u);
+
+    resolver.Context().ClearSourceCache();
+    const auto after = resolver->GetSourceIdentity("test.hlsl", diag);
+    ASSERT_TRUE(after.has_value()) << diag.Message;
+    EXPECT_EQ(before.value(), after.value()) << "内容未变, 哈希必须不变";
+    EXPECT_EQ(resolver.Context().GetSourceCacheStats().FileReads, 2u);
 }
 
 TEST(ShaderResolverTest, ResolverDoesNotOwnTheCompiler) {
@@ -2626,8 +2786,8 @@ TEST(ShaderResolverTest, ResolverDoesNotOwnTheCompiler) {
     auto identity = ComputeShaderSourceIdentity(fixture.Workspace.Root(), "test.hlsl", diag);
     ASSERT_TRUE(identity.has_value()) << diag.Message;
     {
-        ShaderResolver resolver{fixture.Config(ShaderArtifactStaleness::Strict, false), nullptr};
-        EXPECT_FALSE(resolver.CanJit());
+        TestResolver resolver = fixture.Resolver(ShaderArtifactStaleness::Strict, false);
+        EXPECT_FALSE(resolver->CanJit());
     }
     // resolver 已析构; 源码身份计算仍可独立进行, 说明没有共享状态被带走。
     auto again = ComputeShaderSourceIdentity(fixture.Workspace.Root(), "test.hlsl", diag);
@@ -2853,11 +3013,11 @@ TEST(ShaderResolverTest, JitProducesDxil) {
         GTEST_SKIP() << "DXC is unavailable";
     }
     Fixture fixture;
-    ShaderResolver resolver{fixture.Config(ShaderArtifactStaleness::Strict, true), dxc.get()};
-    ASSERT_TRUE(resolver.CanJit());
+    TestResolver resolver = fixture.Resolver(ShaderArtifactStaleness::Strict, true, dxc.get());
+    ASSERT_TRUE(resolver->CanJit());
 
     ShaderAssetDiagnostic diag;
-    auto bytecode = resolver.Resolve(
+    auto bytecode = resolver->Resolve(
         fixture.Pass(),
         render::ShaderStage::Vertex,
         render::ShaderBlobCategory::DXIL,
@@ -2876,9 +3036,9 @@ TEST(ShaderResolverTest, JitProducesSpirvWithFourByteAlignment) {
         GTEST_SKIP() << "DXC is unavailable";
     }
     Fixture fixture;
-    ShaderResolver resolver{fixture.Config(ShaderArtifactStaleness::Strict, true), dxc.get()};
+    TestResolver resolver = fixture.Resolver(ShaderArtifactStaleness::Strict, true, dxc.get());
     ShaderAssetDiagnostic diag;
-    auto bytecode = resolver.Resolve(
+    auto bytecode = resolver->Resolve(
         fixture.Pass(),
         render::ShaderStage::Vertex,
         render::ShaderBlobCategory::SPIRV,
@@ -2897,9 +3057,9 @@ TEST(ShaderResolverTest, DescriptorIsReadyForCreateShader) {
         GTEST_SKIP() << "DXC is unavailable";
     }
     Fixture fixture;
-    ShaderResolver resolver{fixture.Config(ShaderArtifactStaleness::Strict, true), dxc.get()};
+    TestResolver resolver = fixture.Resolver(ShaderArtifactStaleness::Strict, true, dxc.get());
     ShaderAssetDiagnostic diag;
-    auto bytecode = resolver.Resolve(
+    auto bytecode = resolver->Resolve(
         fixture.Pass(),
         render::ShaderStage::Pixel,
         render::ShaderBlobCategory::DXIL,
@@ -2949,9 +3109,9 @@ TEST(ShaderResolverTest, CookedArtifactIsPreferredOverJit) {
     ASSERT_TRUE(cook.Succeeded())
         << (cook.Diagnostics.empty() ? string{} : cook.Diagnostics.front().ToString());
 
-    ShaderResolver resolver{fixture.Config(ShaderArtifactStaleness::Strict, true), dxc.get()};
+    TestResolver resolver = fixture.Resolver(ShaderArtifactStaleness::Strict, true, dxc.get());
     ShaderAssetDiagnostic diag;
-    auto bytecode = resolver.Resolve(
+    auto bytecode = resolver->Resolve(
         fixture.Pass(),
         render::ShaderStage::Vertex,
         render::ShaderBlobCategory::DXIL,
@@ -2968,9 +3128,9 @@ TEST(ShaderResolverTest, ArtifactBytecodeMatchesJitBytecode) {
     }
     Fixture fixture;
     // 先 JIT 拿一份基准。
-    ShaderResolver jitOnly{fixture.Config(ShaderArtifactStaleness::Strict, true), dxc.get()};
+    TestResolver jitOnly = fixture.Resolver(ShaderArtifactStaleness::Strict, true, dxc.get());
     ShaderAssetDiagnostic diag;
-    auto viaJit = jitOnly.Resolve(
+    auto viaJit = jitOnly->Resolve(
         fixture.Pass(),
         render::ShaderStage::Vertex,
         render::ShaderBlobCategory::DXIL,
@@ -2984,8 +3144,8 @@ TEST(ShaderResolverTest, ArtifactBytecodeMatchesJitBytecode) {
         CookOptions(fixture, {render::ShaderBlobCategory::DXIL}));
     ASSERT_TRUE(cook.Succeeded());
 
-    ShaderResolver withArtifacts{fixture.Config(ShaderArtifactStaleness::Strict, true), dxc.get()};
-    auto viaArtifact = withArtifacts.Resolve(
+    TestResolver withArtifacts = fixture.Resolver(ShaderArtifactStaleness::Strict, true, dxc.get());
+    auto viaArtifact = withArtifacts->Resolve(
         fixture.Pass(),
         render::ShaderStage::Vertex,
         render::ShaderBlobCategory::DXIL,
@@ -3015,9 +3175,9 @@ TEST(ShaderResolverTest, StrictModeFallsBackToJitAfterSourceEdit) {
         "test.hlsl",
         string{kSimpleHlsl} + "\nfloat4 Extra() { return 0; }\n");
 
-    ShaderResolver resolver{fixture.Config(ShaderArtifactStaleness::Strict, true), dxc.get()};
+    TestResolver resolver = fixture.Resolver(ShaderArtifactStaleness::Strict, true, dxc.get());
     ShaderAssetDiagnostic diag;
-    auto bytecode = resolver.Resolve(
+    auto bytecode = resolver->Resolve(
         fixture.Pass(),
         render::ShaderStage::Vertex,
         render::ShaderBlobCategory::DXIL,
@@ -3044,9 +3204,9 @@ TEST(ShaderResolverTest, LenientModeAcceptsStaleArtifact) {
         string{kSimpleHlsl} + "\nfloat4 Extra() { return 0; }\n");
 
     // Lenient: 发布包里没有 DXC 可回退, 源码微调不应让整包 shader 失效。
-    ShaderResolver resolver{fixture.Config(ShaderArtifactStaleness::Lenient, false), nullptr};
+    TestResolver resolver = fixture.Resolver(ShaderArtifactStaleness::Lenient, false);
     ShaderAssetDiagnostic diag;
-    auto bytecode = resolver.Resolve(
+    auto bytecode = resolver->Resolve(
         fixture.Pass(),
         render::ShaderStage::Vertex,
         render::ShaderBlobCategory::DXIL,
@@ -3072,9 +3232,9 @@ TEST(ShaderResolverTest, LenientModeWorksWithoutSourceFiles) {
     std::error_code error;
     std::filesystem::remove(fixture.Workspace.Root() / "test.hlsl", error);
 
-    ShaderResolver resolver{fixture.Config(ShaderArtifactStaleness::Lenient, false), nullptr};
+    TestResolver resolver = fixture.Resolver(ShaderArtifactStaleness::Lenient, false);
     ShaderAssetDiagnostic diag;
-    auto bytecode = resolver.Resolve(
+    auto bytecode = resolver->Resolve(
         fixture.Pass(),
         render::ShaderStage::Vertex,
         render::ShaderBlobCategory::DXIL,
@@ -3097,9 +3257,9 @@ TEST(ShaderResolverTest, ArtifactMissForOtherCategoryFallsBackToJit) {
         CookOptions(fixture, {render::ShaderBlobCategory::DXIL}));
     ASSERT_TRUE(cook.Succeeded());
 
-    ShaderResolver resolver{fixture.Config(ShaderArtifactStaleness::Strict, true), dxc.get()};
+    TestResolver resolver = fixture.Resolver(ShaderArtifactStaleness::Strict, true, dxc.get());
     ShaderAssetDiagnostic diag;
-    auto bytecode = resolver.Resolve(
+    auto bytecode = resolver->Resolve(
         fixture.Pass(),
         render::ShaderStage::Vertex,
         render::ShaderBlobCategory::SPIRV,
@@ -3126,11 +3286,11 @@ TEST(ShaderResolverTest, CookBothCategoriesProducesSeparateBlobs) {
     EXPECT_TRUE(std::filesystem::is_directory(fixture.Workspace.ArtifactDir() / "dxil"));
     EXPECT_TRUE(std::filesystem::is_directory(fixture.Workspace.ArtifactDir() / "spirv"));
 
-    ShaderResolver resolver{fixture.Config(ShaderArtifactStaleness::Strict, false), nullptr};
+    TestResolver resolver = fixture.Resolver(ShaderArtifactStaleness::Strict, false);
     ShaderAssetDiagnostic diag;
     for (render::ShaderBlobCategory category :
          {render::ShaderBlobCategory::DXIL, render::ShaderBlobCategory::SPIRV}) {
-        auto bytecode = resolver.Resolve(
+        auto bytecode = resolver->Resolve(
             fixture.Pass(),
             render::ShaderStage::Vertex,
             category,
@@ -3238,9 +3398,9 @@ TEST(ShaderResolverTest, CorruptedBlobFallsBackToJit) {
         std::filesystem::path{cook.Index.Entries.front().BlobPath};
     ASSERT_TRUE(WriteTextFile(blob, "garbage"));
 
-    ShaderResolver resolver{fixture.Config(ShaderArtifactStaleness::Strict, true), dxc.get()};
+    TestResolver resolver = fixture.Resolver(ShaderArtifactStaleness::Strict, true, dxc.get());
     ShaderAssetDiagnostic diag;
-    auto bytecode = resolver.Resolve(
+    auto bytecode = resolver->Resolve(
         fixture.Pass(),
         cook.Index.Entries.front().Stage,
         render::ShaderBlobCategory::DXIL,
@@ -3267,9 +3427,9 @@ TEST(ShaderResolverTest, CorruptedBlobWithoutJitFails) {
         std::filesystem::path{cook.Index.Entries.front().BlobPath};
     ASSERT_TRUE(WriteTextFile(blob, "garbage"));
 
-    ShaderResolver resolver{fixture.Config(ShaderArtifactStaleness::Strict, false), nullptr};
+    TestResolver resolver = fixture.Resolver(ShaderArtifactStaleness::Strict, false);
     ShaderAssetDiagnostic diag;
-    auto bytecode = resolver.Resolve(
+    auto bytecode = resolver->Resolve(
         fixture.Pass(),
         cook.Index.Entries.front().Stage,
         render::ShaderBlobCategory::DXIL,
@@ -3344,8 +3504,8 @@ TEST(ShaderResolverTest, ResolveHitsBakedVariant) {
     // 运行时路径: 变体 -> 投影 -> 宏 -> Resolve。
     const vector<string> defines =
         domain.CollectDefines(variant.value(), render::ShaderStage::Pixel);
-    ShaderResolver resolver{fixture.Config(ShaderArtifactStaleness::Strict, false), nullptr};
-    auto bytecode = resolver.Resolve(
+    TestResolver resolver = fixture.Resolver(ShaderArtifactStaleness::Strict, false);
+    auto bytecode = resolver->Resolve(
         fixture.Pass(),
         render::ShaderStage::Pixel,
         render::ShaderBlobCategory::DXIL,
@@ -3357,7 +3517,7 @@ TEST(ShaderResolverTest, ResolveHitsBakedVariant) {
     // 默认变体 (keyword 全关) 也已烘焙, 且与上面是不同的 blob。
     const vector<string> defaultDefines =
         domain.CollectDefines(domain.DefaultVariant(), render::ShaderStage::Pixel);
-    auto defaultBytecode = resolver.Resolve(
+    auto defaultBytecode = resolver->Resolve(
         fixture.Pass(),
         render::ShaderStage::Pixel,
         render::ShaderBlobCategory::DXIL,
@@ -3391,8 +3551,8 @@ TEST(ShaderResolverTest, ResolveJitsUnbakedVariant) {
         domain.CollectDefines(variant.value(), render::ShaderStage::Pixel);
 
     // 开发构建: 没烘到的变体由 JIT 兜底, 作者不必先跑一遍 cook。
-    ShaderResolver resolver{fixture.Config(ShaderArtifactStaleness::Strict, true), dxc.get()};
-    auto bytecode = resolver.Resolve(
+    TestResolver resolver = fixture.Resolver(ShaderArtifactStaleness::Strict, true, dxc.get());
+    auto bytecode = resolver->Resolve(
         fixture.Pass(),
         render::ShaderStage::Pixel,
         render::ShaderBlobCategory::DXIL,
@@ -3422,8 +3582,8 @@ TEST(ShaderResolverTest, ResolveFailsForUnbakedVariantWhenJitDisabled) {
         domain.CollectDefines(variant.value(), render::ShaderStage::Pixel);
 
     // 发布包: 请求未烘焙的变体必须显式失败, 不能静默降级成别的变体。
-    ShaderResolver resolver{fixture.Config(ShaderArtifactStaleness::Strict, false), nullptr};
-    auto bytecode = resolver.Resolve(
+    TestResolver resolver = fixture.Resolver(ShaderArtifactStaleness::Strict, false);
+    auto bytecode = resolver->Resolve(
         fixture.Pass(),
         render::ShaderStage::Pixel,
         render::ShaderBlobCategory::DXIL,
@@ -3450,10 +3610,10 @@ TEST(ShaderResolverTest, MultiSourceAssetResolvesEveryPassFromArtifacts) {
         cook.Index.FindSourceIdentity("shadow.hlsl").value());
 
     // 关 JIT: 两个 pass 都必须命中产物, 否则 Resolve 会失败。
-    ShaderResolver resolver{fixture.Config(ShaderArtifactStaleness::Strict, false), nullptr};
+    TestResolver resolver = fixture.Resolver(ShaderArtifactStaleness::Strict, false);
     for (const ShaderPassDesc& pass : fixture.Asset.Passes) {
         ShaderAssetDiagnostic diag;
-        auto bytecode = resolver.Resolve(
+        auto bytecode = resolver->Resolve(
             pass,
             render::ShaderStage::Vertex,
             render::ShaderBlobCategory::DXIL,
@@ -3478,10 +3638,10 @@ TEST(ShaderResolverTest, MultiSourceAssetResolvesInLenientMode) {
     std::filesystem::remove(fixture.Workspace.Root() / "test.hlsl", error);
     std::filesystem::remove(fixture.Workspace.Root() / "shadow.hlsl", error);
 
-    ShaderResolver resolver{fixture.Config(ShaderArtifactStaleness::Lenient, false), nullptr};
+    TestResolver resolver = fixture.Resolver(ShaderArtifactStaleness::Lenient, false);
     for (const ShaderPassDesc& pass : fixture.Asset.Passes) {
         ShaderAssetDiagnostic diag;
-        auto bytecode = resolver.Resolve(
+        auto bytecode = resolver->Resolve(
             pass,
             render::ShaderStage::Vertex,
             render::ShaderBlobCategory::DXIL,
@@ -3506,9 +3666,9 @@ TEST(ShaderResolverTest, MultiSourceEditInvalidatesOnlyTheEditedPass) {
         "shadow.hlsl",
         string{kShadowHlsl} + "\nfloat4 Extra() { return 0; }\n");
 
-    ShaderResolver resolver{fixture.Config(ShaderArtifactStaleness::Strict, true), dxc.get()};
+    TestResolver resolver = fixture.Resolver(ShaderArtifactStaleness::Strict, true, dxc.get());
     ShaderAssetDiagnostic diag;
-    auto main = resolver.Resolve(
+    auto main = resolver->Resolve(
         fixture.Asset.Passes[0],
         render::ShaderStage::Vertex,
         render::ShaderBlobCategory::DXIL,
@@ -3517,7 +3677,7 @@ TEST(ShaderResolverTest, MultiSourceEditInvalidatesOnlyTheEditedPass) {
     ASSERT_TRUE(main.has_value()) << diag.Message;
     EXPECT_EQ(main->Source, ShaderBytecodeSource::Artifact);
 
-    auto shadow = resolver.Resolve(
+    auto shadow = resolver->Resolve(
         fixture.Asset.Passes[1],
         render::ShaderStage::Vertex,
         render::ShaderBlobCategory::DXIL,
@@ -3541,9 +3701,9 @@ TEST(ShaderResolverTest, StrictModeSeesSourceEditsOnALiveResolver) {
 
     // 同一个 resolver 实例先命中产物, 再看到源码编辑。身份缓存必须按时间戳失效,
     // 否则 Strict 承诺的"改 shader 立刻生效"在长命 resolver (RenderSystem 持有) 上失效。
-    ShaderResolver resolver{fixture.Config(ShaderArtifactStaleness::Strict, true), dxc.get()};
+    TestResolver resolver = fixture.Resolver(ShaderArtifactStaleness::Strict, true, dxc.get());
     ShaderAssetDiagnostic diag;
-    auto before = resolver.Resolve(
+    auto before = resolver->Resolve(
         fixture.Pass(),
         render::ShaderStage::Vertex,
         render::ShaderBlobCategory::DXIL,
@@ -3563,7 +3723,7 @@ TEST(ShaderResolverTest, StrictModeSeesSourceEditsOnALiveResolver) {
         std::filesystem::last_write_time(source, error) + std::chrono::seconds{2},
         error);
 
-    auto after = resolver.Resolve(
+    auto after = resolver->Resolve(
         fixture.Pass(),
         render::ShaderStage::Vertex,
         render::ShaderBlobCategory::DXIL,
@@ -3585,11 +3745,11 @@ TEST(ShaderResolverTest, DefinesChangeTheResolvedArtifact) {
         CookOptions(fixture, {render::ShaderBlobCategory::DXIL}));
     ASSERT_TRUE(cook.Succeeded());
 
-    ShaderResolver resolver{fixture.Config(ShaderArtifactStaleness::Strict, true), dxc.get()};
+    TestResolver resolver = fixture.Resolver(ShaderArtifactStaleness::Strict, true, dxc.get());
     ShaderAssetDiagnostic diag;
     // 烘焙时没有这个宏, 故应未命中并回退 JIT。
     const vector<string> defines{"EXTRA_FEATURE=1"};
-    auto bytecode = resolver.Resolve(
+    auto bytecode = resolver->Resolve(
         fixture.Pass(),
         render::ShaderStage::Vertex,
         render::ShaderBlobCategory::DXIL,
@@ -3940,21 +4100,20 @@ TEST(ShaderAssetSampleTest, CookedErrorPassResolvesWithoutJit) {
 
     // dxc 传 nullptr 而不是 dxc.get(): 发布包里根本没有 DXC。给了指针再设
     // AllowJit = false 只测到"我们没去用它", 传 nullptr 才测到"用不了也能起来"。
-    ShaderResolver strict{
-        ShaderResolveConfig{
-            .ShaderRoot = shaderRoot,
-            .ManifestPath = output.ManifestPath(),
-            .Staleness = ShaderArtifactStaleness::Strict,
-            .AllowJit = false},
+    TestResolver strict{
+        shaderRoot,
+        output.ManifestPath(),
+        ShaderArtifactStaleness::Strict,
+        false,
         nullptr};
-    EXPECT_FALSE(strict.CanJit());
+    EXPECT_FALSE(strict->CanJit());
 
     for (const render::ShaderBlobCategory category : categories) {
         for (const render::ShaderStage stage :
              {render::ShaderStage::Vertex, render::ShaderStage::Pixel}) {
             const vector<string> defines = domain->CollectDefines(variant, stage);
             std::optional<ShaderBytecode> bytecode =
-                strict.Resolve(pass, stage, category, defines, diagnostic);
+                strict->Resolve(pass, stage, category, defines, diagnostic);
             ASSERT_TRUE(bytecode.has_value())
                 << fmt::format("category {} stage {}: ", category, stage)
                 << diagnostic.ToString();
@@ -3970,31 +4129,29 @@ TEST(ShaderAssetSampleTest, CookedErrorPassResolvesWithoutJit) {
 
     // Lenient 是发布包真正会用的策略: 源码可能根本没部署。这里删掉整个 shader root
     // 的可见性 (指向一个不存在的目录) 模拟该情形, index 自称的身份足以算出 key。
-    ShaderResolver lenient{
-        ShaderResolveConfig{
-            .ShaderRoot = shaderRoot / "does_not_exist",
-            .ManifestPath = output.ManifestPath(),
-            .Staleness = ShaderArtifactStaleness::Lenient,
-            .AllowJit = false},
+    TestResolver lenient{
+        shaderRoot / "does_not_exist",
+        output.ManifestPath(),
+        ShaderArtifactStaleness::Lenient,
+        false,
         nullptr};
     const vector<string> vsDefines =
         domain->CollectDefines(variant, render::ShaderStage::Vertex);
-    std::optional<ShaderBytecode> lenientVs = lenient.Resolve(
+    std::optional<ShaderBytecode> lenientVs = lenient->Resolve(
         pass, render::ShaderStage::Vertex, categories.front(), vsDefines, diagnostic);
     ASSERT_TRUE(lenientVs.has_value()) << diagnostic.ToString();
     EXPECT_EQ(lenientVs->Source, ShaderBytecodeSource::Artifact);
 
     // 同样的配置换 Strict 必须失败: 算不出源码身份且无 JIT 时不能猜。
-    ShaderResolver strictWithoutSources{
-        ShaderResolveConfig{
-            .ShaderRoot = shaderRoot / "does_not_exist",
-            .ManifestPath = output.ManifestPath(),
-            .Staleness = ShaderArtifactStaleness::Strict,
-            .AllowJit = false},
+    TestResolver strictWithoutSources{
+        shaderRoot / "does_not_exist",
+        output.ManifestPath(),
+        ShaderArtifactStaleness::Strict,
+        false,
         nullptr};
     EXPECT_FALSE(
         strictWithoutSources
-            .Resolve(pass, render::ShaderStage::Vertex, categories.front(), vsDefines, diagnostic)
+            ->Resolve(pass, render::ShaderStage::Vertex, categories.front(), vsDefines, diagnostic)
             .has_value());
 }
 
@@ -4046,27 +4203,25 @@ TEST(ShaderAssetSampleTest, UnbakedErrorPassVariantFailsWithoutJit) {
     const vector<string> defines =
         domain->CollectDefines(variant.value(), render::ShaderStage::Pixel);
 
-    ShaderResolver resolver{
-        ShaderResolveConfig{
-            .ShaderRoot = shaderRoot,
-            .ManifestPath = output.ManifestPath(),
-            .Staleness = ShaderArtifactStaleness::Strict,
-            .AllowJit = false},
+    TestResolver resolver{
+        shaderRoot,
+        output.ManifestPath(),
+        ShaderArtifactStaleness::Strict,
+        false,
         nullptr};
     EXPECT_FALSE(
-        resolver.Resolve(pass, render::ShaderStage::Pixel, categories.front(), defines, diagnostic)
+        resolver->Resolve(pass, render::ShaderStage::Pixel, categories.front(), defines, diagnostic)
             .has_value());
 
     // 同一份产物在开发配置下应当由 JIT 兜底 —— 上面的失败来自"没有 JIT", 不是
     // "这个变体本身非法"。
-    ShaderResolver developer{
-        ShaderResolveConfig{
-            .ShaderRoot = shaderRoot,
-            .ManifestPath = output.ManifestPath(),
-            .Staleness = ShaderArtifactStaleness::Strict,
-            .AllowJit = true},
+    TestResolver developer{
+        shaderRoot,
+        output.ManifestPath(),
+        ShaderArtifactStaleness::Strict,
+        true,
         dxc.get()};
-    std::optional<ShaderBytecode> jitted = developer.Resolve(
+    std::optional<ShaderBytecode> jitted = developer->Resolve(
         pass, render::ShaderStage::Pixel, categories.front(), defines, diagnostic);
     ASSERT_TRUE(jitted.has_value()) << diagnostic.ToString();
     EXPECT_EQ(jitted->Source, ShaderBytecodeSource::Jit);

@@ -243,7 +243,7 @@ struct ShaderBakeRuleDesc {
 ///
 /// 【留空 = 只烘默认变体】。这使未声明 BakeVariants 的旧 manifest 语义不变, 也让
 /// "什么都不烘除非作者说要烘"成为默认。未烘焙的组合在开发构建走 JIT, 在发布包
-/// (ShaderResolveConfig::AllowJit == false) 成为显式错误。
+/// (ShaderResolveSettings::AllowJit == false) 成为显式错误。
 struct ShaderBakeSetDesc {
     vector<ShaderBakeRuleDesc> Rules;
     /// 剔除规则: 任一条的【全部】keyword 同时出现的组合被丢弃。对应 Unity 的
@@ -595,14 +595,27 @@ struct ShaderArtifactBlob {
 
 // ============================ 解析与烘焙数据 ============================
 
-struct ShaderResolveConfig {
+/// 整个进程只有一份的 shader 解析策略。
+///
+/// 【为何不按资产给】: 这四项回答的是同一个问题 —— "这是开发构建还是发布包"。让每个
+/// 加载调用点各自决定, 就允许同一进程里 A 资产走 Strict + JIT 而 B 资产走 Lenient +
+/// 无 JIT, 且没有任何机制拦得住。那正是 G12 那类"一个决策两处真相"。
+struct ShaderResolveSettings {
     /// shader include 根目录 (通常 <exe>/shaderlib)。
     std::filesystem::path ShaderRoot;
-    /// manifest 所在路径, 用于定位同名 artifact 目录。
-    std::filesystem::path ManifestPath;
     ShaderArtifactStaleness Staleness{ShaderArtifactStaleness::Strict};
     /// 允许在 AOT 未命中时 JIT。发布包应设为 false, 使缺失产物成为显式错误。
     bool AllowJit{true};
+};
+
+/// 源码缓存的实际工作量, 仅用于验证共享确实生效。
+struct ShaderSourceCacheStats {
+    /// 真正读过盘的次数 (每个文件每次内容变化一次)。
+    uint32_t FileReads{0};
+    /// 真正扫过 #include 的次数。与 FileReads 同步增长。
+    uint32_t IncludeScans{0};
+    /// 真正做过闭包哈希的次数。命中且全部文件未变时不增长。
+    uint32_t IdentityComputes{0};
 };
 
 /// 解析结果。可直接喂给 render::Device::CreateShader。
@@ -654,21 +667,101 @@ struct ShaderCookResult {
 // <radray/runtime/shader_program.h>: 它们产出的是"喂给 RHI 的形状", 不是
 // manifest 数据, 故属 render 层。详见该头文件的说明。
 
-/// stage 字节码解析器。按 AOT 产物优先、JIT 兜底的顺序取字节码。
+/// 全进程共享的 shader 解析上下文: 策略 + 工具链 + 按【文件】记忆化的源码缓存。
 ///
-/// 【一个实例对应一份 manifest】: `ShaderResolveConfig::ManifestPath` 是构造参数,
-/// 内部的 index 缓存 (`_index`) 与 artifact 目录都由它推导。要解析另一份 manifest
-/// 就另建一个实例 —— 这与"index.json 每份 manifest 一个"的产物布局一致。
+/// 【为什么缓存必须在文件层而不在 entry 层】: `ComputeShaderSourceIdentity` 读取
+/// include 闭包里每个文件的全部字节。而闭包高度重叠 —— error_pass 的 8 个文件是
+/// forward_pass 那 15 个的子集, shadow_pass 的 6 个也几乎全部重叠。按 entry 缓存
+/// (每份 manifest 一份) 会把 `math.hlsli` 读 N 遍、`filtering.hlsli` (9.7 KB) 读
+/// N 遍, 并各自重扫一遍 `#include`。按文件缓存后, 每个文件在一次内容变化内只读一次、
+/// 只扫一次, 与有几份 manifest 无关。
 ///
-/// 非线程安全: 内部有惰性加载的 index 缓存与源码身份缓存。多线程编译应各持一个
-/// 实例, 或由调用方加锁。
+/// 【哈希公式一字未动】: 本类只把"读文件"与"扫 include"记忆化, 累加顺序 (排序后的
+/// path + size + bytes) 与原 `ComputeShaderSourceIdentity` 逐字一致, 故已有 AOT 产物
+/// 不失效, `kShaderArtifactFormatVersion` 无需改动。`ComputeShaderSourceIdentity`
+/// 保留为无缓存的自由函数, cook 与测试仍可直接用。
+///
+/// 非线程安全: 内部全是惰性缓存。多线程编译应各持一个实例, 或由调用方加锁。
+class ShaderResolveContext {
+public:
+    /// dxc 为空表示无 JIT 能力 (发布包), 此时 Settings.AllowJit 被强制视为 false。
+    /// 【不持有生命周期】: dxc 必须在本对象存活期间保持有效, 通常由 RenderSystem 持有。
+    ShaderResolveContext(
+        ShaderResolveSettings settings,
+        Nullable<render::Dxc*> dxc) noexcept;
+
+    const ShaderResolveSettings& GetSettings() const noexcept { return _settings; }
+    const std::filesystem::path& GetShaderRoot() const noexcept { return _settings.ShaderRoot; }
+    ShaderArtifactStaleness GetStaleness() const noexcept { return _settings.Staleness; }
+    Nullable<render::Dxc*> GetDxc() const noexcept { return _dxc; }
+
+    /// 工具链身份。DXC 版本 + artifact 格式版本, 全进程常量。
+    ShaderHash GetToolchainHash() const noexcept { return _toolchainHash; }
+
+    bool CanJit() const noexcept;
+
+    /// 源码身份 (惰性计算, 按【文件】记忆化并跨 manifest 共享)。
+    /// sourcePath 相对 ShaderRoot。失败原因写入 outDiag。
+    std::optional<ShaderHash> GetSourceIdentity(
+        std::string_view sourcePath,
+        ShaderAssetDiagnostic& outDiag) noexcept;
+
+    const ShaderSourceCacheStats& GetSourceCacheStats() const noexcept { return _stats; }
+
+    /// 丢弃全部源码缓存。改了 ShaderRoot 下的一批文件后想强制重扫时用。
+    void ClearSourceCache() noexcept;
+
+private:
+    /// 一个源文件的缓存条目。key 是相对 root 的 generic 路径。
+    ///
+    /// 【Stamp 与内容同时存】: 命中时先 stat 复核 —— 时间戳变了就重读。光存内容是
+    /// 不够的, Strict 承诺"改 shader 立刻生效", 而 context 会跨整个进程存活。
+    struct FileEntry {
+        string Path;
+        std::filesystem::file_time_type Stamp{};
+        vector<byte> Content;
+        /// 本文件扫出的 #include 目标, 原样保留 (相对 root 解析由调用方做)。
+        vector<string> Includes;
+    };
+
+    /// 一个 entry 的闭包哈希缓存。命中条件是闭包内每个文件的缓存条目仍然有效。
+    struct ClosureEntry {
+        string SourcePath;
+        ShaderHash Hash{};
+        /// 闭包内全部文件, 已排序去重, 与 Hash 的累加顺序一致。
+        vector<string> Dependencies;
+    };
+
+    /// 取一个文件的缓存条目, 必要时读盘 + 扫 include。失败返回 nullptr。
+    Nullable<const FileEntry*> GetFile(
+        std::string_view relative,
+        ShaderAssetDiagnostic& outDiag) noexcept;
+
+    ShaderResolveSettings _settings;
+    /// 借用而非拥有。见构造函数注释。
+    Nullable<render::Dxc*> _dxc;
+    ShaderHash _toolchainHash{};
+    /// unique_ptr 保证地址稳定 —— GetFile 返回裸指针, 后续 push_back 不得使其失效。
+    vector<unique_ptr<FileEntry>> _files;
+    vector<ClosureEntry> _closures;
+    ShaderSourceCacheStats _stats;
+};
+
+/// 一份 manifest 的 stage 字节码解析器。按 AOT 产物优先、JIT 兜底的顺序取字节码。
+///
+/// 【一个实例对应一份 manifest】: `ManifestPath` 是构造参数, 内部的 index 缓存与
+/// artifact 目录都由它推导 —— 这与"index.json 每份 manifest 一个"的产物布局一致。
+/// 剩下的状态 (策略 / 工具链 / 源码缓存) 全在 `ShaderResolveContext` 里, 由全部
+/// resolver 共享。
+///
+/// 【不持有 context 的生命周期】: context 必须活得比本对象久, 通常由 RenderSystem 持有。
+///
+/// 非线程安全 (惰性 index 缓存 + 共享 context 的缓存)。
 class ShaderResolver {
 public:
-    /// dxc 为空表示无 JIT 能力 (发布包), 此时 AllowJit 被强制视为 false。
-    /// 【不持有生命周期】: dxc 必须在本对象存活期间保持有效, 通常由 RenderSystem 持有。
     ShaderResolver(
-        ShaderResolveConfig config,
-        Nullable<render::Dxc*> dxc) noexcept;
+        ShaderResolveContext& context,
+        std::filesystem::path manifestPath) noexcept;
 
     /// 解析一个 stage 的字节码。defines 为已投影到该 stage 的完整宏集合。
     /// 失败原因写入 outDiag。
@@ -679,34 +772,17 @@ public:
         std::span<const string> defines,
         ShaderAssetDiagnostic& outDiag) noexcept;
 
-    /// 当前配置下源码身份 (惰性计算, 按源文件路径缓存)。
+    /// 转发给 context —— 缓存跨 manifest 共享。
     std::optional<ShaderHash> GetSourceIdentity(
         std::string_view sourcePath,
         ShaderAssetDiagnostic& outDiag) noexcept;
 
-    /// 工具链身份。DXC 版本 + artifact 格式版本。
-    ShaderHash GetToolchainHash() const noexcept { return _toolchainHash; }
-
-    bool CanJit() const noexcept;
+    ShaderHash GetToolchainHash() const noexcept { return _context->GetToolchainHash(); }
+    bool CanJit() const noexcept { return _context->CanJit(); }
+    ShaderResolveContext& GetContext() const noexcept { return *_context; }
+    const std::filesystem::path& GetManifestPath() const noexcept { return _manifestPath; }
 
 private:
-    /// 一次源码身份计算的缓存。
-    ///
-    /// 【key 是 entry 源文件路径, 不是被 include 的头】: 一条记录 = 一个入口文件
-    /// (如 forward_pipeline/forward_pass.hlsl) 及其整份 include 闭包算出的单个哈希。
-    /// 被多个入口共享的头 (如 view.hlsli) 只出现在各自的 Stamps 里用于复核, 不构成
-    /// 独立条目 —— 故两份 manifest 各自的条目互不复用, 共享同一个 resolver 实例
-    /// 并不能让它们省下彼此的计算。
-    ///
-    /// Stamps 记录整个 include 闭包的时间戳: 命中时逐个 stat 复核, 任一变化即重算。
-    /// 光缓存哈希是不够的 —— Strict 承诺"改 shader 立刻生效", 而 resolver 实例会跨越
-    /// 多次 Resolve 存活, 只增不失效会让过期产物被判命中。
-    struct SourceIdentityCache {
-        string SourcePath;
-        ShaderHash Hash{};
-        vector<std::pair<string, std::filesystem::file_time_type>> Stamps;
-    };
-
     /// 惰性加载 index.json。返回 nullptr 表示无产物目录 (正常情况, 非错误)。
     Nullable<const ShaderArtifactIndex*> GetIndex() noexcept;
 
@@ -724,13 +800,10 @@ private:
         ShaderHash key,
         ShaderAssetDiagnostic& outDiag) noexcept;
 
-    ShaderResolveConfig _config;
-    /// 借用而非拥有。见构造函数注释。
-    Nullable<render::Dxc*> _dxc;
-    ShaderHash _toolchainHash{};
+    ShaderResolveContext* _context{nullptr};
+    std::filesystem::path _manifestPath;
     std::optional<ShaderArtifactIndex> _index;
     bool _indexLoaded{false};
-    vector<SourceIdentityCache> _sourceIdentities;
 };
 
 // ============================ manifest 读写 ============================

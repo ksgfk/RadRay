@@ -70,17 +70,6 @@ uint64_t StableHash64(std::string_view text) noexcept {
     return hash;
 }
 
-/// 未显式给出 ShaderRoot 时的推导: manifest 惯例位于 <root>/<category>/x.shader.json,
-/// 故取其父目录的父目录。推不出来 (manifest 直接放在根下) 时退回父目录。
-std::filesystem::path DeriveShaderRoot(const std::filesystem::path& manifestPath) {
-    const std::filesystem::path dir = manifestPath.parent_path();
-    if (dir.empty()) {
-        return dir;
-    }
-    const std::filesystem::path parent = dir.parent_path();
-    return parent.empty() ? dir : parent;
-}
-
 }  // namespace
 
 AssetId MakeShaderAssetId(const std::filesystem::path& manifestPath) {
@@ -102,6 +91,10 @@ Nullable<unique_ptr<ShaderAsset>> CreateShaderAsset(
     const std::filesystem::path& manifestPath,
     const ShaderAssetLoadOptions& options,
     ShaderAssetDiagnostic& outDiag) noexcept {
+    if (!options.Context.HasValue()) {
+        outDiag.Message = "ShaderAssetLoadOptions::Context is null";
+        return nullptr;
+    }
     std::optional<ShaderAssetDesc> desc = LoadShaderAssetDesc(manifestPath, outDiag);
     if (!desc.has_value()) {
         return nullptr;
@@ -111,16 +104,7 @@ Nullable<unique_ptr<ShaderAsset>> CreateShaderAsset(
         return nullptr;
     }
 
-    const std::filesystem::path shaderRoot =
-        options.ShaderRoot.empty() ? DeriveShaderRoot(manifestPath) : options.ShaderRoot;
-
-    auto resolver = make_unique<ShaderResolver>(
-        ShaderResolveConfig{
-            .ShaderRoot = shaderRoot,
-            .ManifestPath = manifestPath,
-            .Staleness = options.Staleness,
-            .AllowJit = options.AllowJit},
-        options.Dxc);
+    auto resolver = make_unique<ShaderResolver>(*options.Context.Get(), manifestPath);
 
     vector<unique_ptr<ShaderPassProgram>> passes;
     passes.reserve(desc->Passes.size());
