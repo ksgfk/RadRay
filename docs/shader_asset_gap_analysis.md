@@ -25,7 +25,7 @@
 | `modules/runtime/src/shader_reflection_map.h` / `.cpp` | 59 / 140 | private, 反射→RHI 映射, validator 与 generator 共用 |
 | `modules/runtime/include/radray/runtime/shader_asset_template.h` | 249 | manifest 模板生成器 |
 | `modules/runtime/src/shader_asset_template.cpp` | 1155 | 同上 |
-| `modules/runtime/tests/test_shader_manifest.cpp` | 4050 | 223 个 TEST |
+| `modules/runtime/tests/test_shader_asset.cpp` | 4050 | 223 个 TEST |
 | `modules/runtime/tests/test_shader_asset_template.cpp` | 903 | |
 
 gtest suite: `ShaderAssetTest`(78) / `ShaderArtifactTest`(60) / `ShaderResolverTest`(35) /
@@ -53,7 +53,7 @@ SPIRV(`:2600-2691`)、`BuildPipelineLayoutStorage`(`:2445`)、
 - **内容寻址 blob + stage 投影去重**。`ProjectToStage`(`:1778`) 把无关组一律归
   `kShaderKeywordOff`, 于是「两个变体投影结果相同 ⟺ 共用同一份字节码」成立,
   pixel-only keyword 不污染 VS。测试 `VertexBlobSharedAcrossPixelOnlyVariants`
-  (`test_shader_manifest.cpp:3535`) 断言 `Deduplicated == 1`。
+  (`test_shader_asset.cpp:3535`) 断言 `Deduplicated == 1`。
 - **`ShaderVariantKey` 按组编码而非按 keyword 位图**, keyword 总数无上限;
   头文件明确标注「不要放进每帧路径」。
 - **Strict / Lenient 过期策略**。`SourceIdentityCache`(`shader_manifest.h:700-704`)
@@ -69,7 +69,7 @@ SPIRV(`:2600-2691`)、`BuildPipelineLayoutStorage`(`:2445`)、
 `ShaderVariantDomain::Build` + `ExpandShaderBakeSet`, 随后 `category × variant × stage`
 三重循环。`shaderlib/forward_pipeline/forward_pass.shader.json:99-120` 已在使用
 `BakeVariants`。测试 `ShaderResolverTest.CookBakesEveryDeclaredVariant`
-(`test_shader_manifest.cpp:3501`) 印证。
+(`test_shader_asset.cpp:3501`) 印证。
 
 ---
 
@@ -140,7 +140,7 @@ SPIRV(`:2600-2691`)、`BuildPipelineLayoutStorage`(`:2445`)、
 ### G3. 系统完全未接线 (阻塞验证)
 
 - `ShaderResolver` 在非测试代码里**零构造点**。
-- `BuildPipelineLayoutStorage` 调用点仅测试 (`test_shader_manifest.cpp:345/366/387`)。
+- `BuildPipelineLayoutStorage` 调用点仅测试 (`test_shader_asset.cpp:345/366/387`)。
 - `CreateShader` / `CreatePipelineLayout` / `CreateGraphicsPipelineState` 在
   `modules/runtime` 下**零调用**。RHI 侧实现存在
   (`rhi.h:1228`、`d3d12_impl.cpp:1539`、`vulkan_impl.cpp:1350`)。
@@ -175,7 +175,7 @@ ShaderVariantDomain::Build(asset, pass, diag)
 `GetToolchainHash` / `CanJit`(`shader_manifest.h:671-692`), **无任何**
 `ShaderVariantKey` / `ShaderVariantDomain` / keyword 参数。
 全仓库没有 `ShaderProgram` 之类类型。这条链**只在测试里出现过**
-(`test_shader_manifest.cpp:3558-3573`)。每个未来调用方都要重走一遍, 是会被抄错的地方。
+(`test_shader_asset.cpp:3558-3573`)。每个未来调用方都要重走一遍, 是会被抄错的地方。
 
 **形状已定 (2026-07-28)**: `ShaderPassProgram`, 归 `ShaderAsset` 所有, 见 8.3。
 G4 与 G1 实现上不可分 —— program 的生命周期出口就是 `ShaderAsset::OnUnload`。
@@ -193,7 +193,7 @@ JIT 编译是阻塞调用 (`shader_manifest.cpp:2161` `_dxc->CompileFile`)。
 
 原始问题:
 - `CookShaderAsset` / `CookShaderAssetFile` 唯一调用方是单元测试
-  (`test_shader_manifest.cpp` 约 20 处 + `test_shader_asset_template.cpp:772/815`)。
+  (`test_shader_asset.cpp` 约 20 处 + `test_shader_asset_template.cpp:772/815`)。
 - `tools/shader_gen` 是 manifest **生成器** 不是 cooker: 读反射 + 扫
   `#pragma radray_keyword_group` → `GenerateShaderAssetTemplate`(`shader_gen.cpp:290`)
   → 写 `*.shader.json`, 输出带 `"_TODO"` 数组列出需人工确认字段。不调用 cook。
@@ -290,7 +290,7 @@ cook 里那两处三元表达式已改为调用 `GetEffectiveSource`。
   吃掉了 emissive。`principled.hlsli:103-106` 的 `front_side` 检查已使这些像素的每个瓣
   返回 0, 故 early-out 是纯性能捷径, 直接删除, 自发光材质掠射角的黑边随之消失。
 - keyword 组 9 → 8, bake 变体 3 → 2 (半透明不再是独立变体, 与 opaque 共用字节码)。
-- 同步 `forward_pass.shader.json`、`test_shader_manifest.cpp`、`test_shader_asset_template.cpp`。
+- 同步 `forward_pass.shader.json`、`test_shader_asset.cpp`、`test_shader_asset_template.cpp`。
   后者新增一条断言, 防止 `DoubleSided` / `AlphaBlend` 重新变成 keyword。
 - 验证: 242/242 shader 相关测试通过, 其中 `ManifestCooksRealForwardShader` 真实调用 DXC
   编译并做反射校验。
@@ -329,6 +329,33 @@ ShaderAsset, opaque / transparent / 双面 等差异全部落在材质侧」。
     非 bytecode 状态。
 
 必须在设计 material / PSO 层之前裁决, 否则会硬化成两套真相。
+
+### G13. `MaterialRenderState` 的"pass 基线"不存在 (2026-07-28 发现)
+
+`MaterialRenderState`(`render_pipeline.h:60-67`) 的三态语义 (`:55-59`) 说各字段为
+`nullopt` / `OverrideBlend=false` 时"沿用 `ShaderPassDesc` 的 pass 基线"。**该基线不存在。**
+
+- 旧 `ShaderPassDesc` (`46acfd2b^` 的 `shader_asset.h:75-78`) 确实有
+  `Primitive` / `DepthStencil` / `MultiSample` / `ColorTargets` 四个字段, 注释写着
+  "本 pass 的固定渲染状态 (blend / depth / raster 等)", 还有一个
+  `AllowMaterialRenderStateOverrides` 开关。
+- `46acfd2b`「准备重写 Shader 与 Material 系统」删掉了整个文件。新
+  `ShaderAssetDesc` (`shader_manifest.h:300-302`) **刻意**不含这些, 并把责任指回
+  `MaterialRenderState`。
+- 于是两处注释互相引用, 形成空环: manifest 说"由材质覆盖", 材质说"沿用 manifest 基线"。
+
+`MaterialRenderState` 全仓库零使用点 (只有定义, 没有读写), 所以这个空环从未在运行时暴露。
+两份真实 manifest (`error_pass` / `forward_pass`) 也没有任何 `Cull` / `Blend` /
+`DepthWrite` 字段, 与 8.1 一致。
+
+更要紧的是覆盖面: `MaterialRenderState` 只能表达 `Cull` / `DepthWrite` / `Blend` 三项,
+而 `GraphicsPipelineStateDescriptor` (`rhi.h:1125-1135`) 需要 `Topology` / `FrontFace` /
+`PolygonMode` / `DepthCompare` / `DepthTestEnable` / 各 target 的 `Format` /
+`MultiSampleState` / `ColorTargetState[]`。这些**目前无人负责**。
+
+**裁决 (A 方案, 2026-07-28)**: 见 8.6。已实施 —— `render_pipeline.h` 与
+`shader_manifest.h` 的两处空环注释均已改为指向本节, `PipelineStateCache` 要求调用方给出
+完整固定功能状态。基线合成本身仍未实现, 留给 material 层。
 
 ### G11. 文档失真 —— 已修复 (2026-07-27)
 
@@ -379,7 +406,7 @@ category × variant × stage 编译并去重)。
 
 **风险**: 仓库内**没有任何测试创建过 render device** (`Device::Create` / `CreateDevice`
 在所有 tests / benchmarks / tools 下零命中), 这条路从零搭。device 创建失败必须
-`GTEST_SKIP` 兜底, 抄 `test_shader_manifest.cpp:3977` 的模式。
+`GTEST_SKIP` 兜底, 抄 `test_shader_asset.cpp:3977` 的模式。
 
 ### 5.2 选 error_pass.hlsl 作为切片 shader
 
@@ -634,7 +661,7 @@ AOT 分支先把 manifest 拷进临时目录 (`ScopedCookedManifest`, 产物落�
 `bytecode->Source == Artifact` —— 少了这条, AOT 用例若悄悄退回 JIT 照样画出洋红,
 整个参数化就白跑了。
 
-**两个新的设备无关用例** (`test_shader_manifest.cpp`, `ShaderAssetSampleTest`):
+**两个新的设备无关用例** (`test_shader_asset.cpp`, `ShaderAssetSampleTest`):
 - `CookedErrorPassResolvesWithoutJit`: 真实 manifest 烘出的产物在发布包配置下逐 stage
   逐 category 命中, 且 `cook.Index.Find(bytecode->Key)` 必须命中 —— 这是"运行时纯函数
   重算 key"这条设计唯一的真实检验点。附带两条反向断言: `ShaderRoot` 指向不存在的目录时
@@ -667,17 +694,25 @@ G1 / G2 / G4 的设计已裁决 (第 8 节), 实施中。
 
 接下来:
 
-1. **G1 + G2 + G4 实施** (设计见第 8 节)。顺序: `MakeShaderAssetId` + `ShaderAsset`
-   骨架 → `ShaderPassProgram` → `LoadShaderAsset` 工厂 → 切片改用 `ShaderAsset`。
-2. **PSO 库** (`RenderSystem` 侧), 条目持 `StreamingAssetRef<ShaderAsset>` 以防 8.5 的
-   layout 悬垂。瞬态 `Shader` 在此层内创建。连带检验 5.6 结论 3 的 PSO 缓存 key。
-3. **绕序契约归属**。切片用 `CullMode::None` 绕开了 D3D12/Vulkan 绕序相反的问题
+1. ~~**G1 + G2 + G4 实施**~~ **已完成 (2026-07-28)**: `MakeShaderAssetId` +
+   `ShaderAsset` + `ShaderPassProgram` + `LoadShaderAsset`, 头文件按 8.4b 分三层,
+   新增 `test_shader_program.cpp` 10 个用例。**切片尚未改用 `ShaderAsset`** —— 它仍自己
+   临时建 `Shader` 与 PSO, 留待第 2 步一并处理。
+2. ~~**PSO 库**~~ **已完成 (2026-07-28)**: `pipeline_state_cache.h/.cpp` 的
+   `PipelineStateCache` + `GraphicsPipelineStateKey`, 接进 `RenderSystem`, G13 按 8.6
+   裁决。切片已切到 `LoadShaderAsset` + `PipelineStateCache` (四个用例逐字通过),
+   5.6 结论 3 的 PSO 缓存 key 在真实 device 上检验完毕。新增
+   `test_pipeline_state_cache.cpp` 6 个用例, 全量 362/362 通过。
+3. **抽出 `radrayshader` 库** (见 8.4c)。刻意排在 PSO 库之后。
+4. **绕序契约归属**。切片用 `CullMode::None` 绕开了 D3D12/Vulkan 绕序相反的问题
    (见 5.6), material/mesh 层必须显式裁决 —— 目前无人负责。
-4. G8 vertex input 校验补强、G7 补齐其余 manifest (`shadow_pass`、`imgui_pass`)。
+5. G8 vertex input 校验补强、G7 补齐其余 manifest (`shadow_pass`、`imgui_pass`)。
    G5 线程模型已由 8.3 绕开 (加载路径不碰 DXC), 待 material 层触发大批量 JIT 时再看。
 
-**cook 之后新浮现的**: PSO 缓存 key (5.6 结论 3) 仍未检验 —— 切片现在两条路径都走通了,
-但都只解析一次, 没有缓存。这条要等 material 层。
+**PSO 库之后新浮现的**: 固定功能状态的"基线 + 覆盖"合成仍无归属 (G13)。本轮把 PSO 层定为
+执行层, 要求调用方给全状态, 于是缺口从"两处注释互相指"变成"一处明确未实现" —— 更好, 但
+仍是缺口。`MaterialRenderState` 至今零使用点, 且只覆盖 `Cull` / `DepthWrite` / `Blend`
+三项。这条要等 material 层。
 
 ---
 
@@ -795,6 +830,47 @@ vertex layout、RT 格式), 同一份字节码会喂给多个 PSO, 去重必须�
 【program 层也停在 Asset 之下】: program 的形状与资产系统无关, material 层若只想拿
 一个 pass 的 layout + 字节码, 不该被迫拖进 `AssetManager`。
 
+### 8.4c 已裁决: 抽出 `radrayshader` 库, 但排在 PSO 库之后 (2026-07-28)
+
+8.4b 的三层分界靠注释与 review 维持。**库级分界才是编译器强制的** —— 这是"彻底"与
+"约定"的差别, 故最终形态应把格式层与对象层抽成独立库:
+
+| 库 | 内容 |
+|---|---|
+| `radrayshader` (新) | `shader_manifest.*`、`shader_program.*`、`shader_asset_template.*`、`shader_reflection_map.*`、`shader_manifest_json.h` |
+| `radrayruntime` | `shader_asset.*` (`ShaderAsset` + `LoadShaderAsset`) 与 PSO 库 |
+
+**依据一, 依赖方向天然成立**: `shader_manifest.cpp` 的 include 只有 core
+(`json.h` / `file.h` / `binary_io.h` / `basic_math.h` / `logger.h` / `enum_flags.h`)
+与 render (`dxc.h` / `spvc.h` / `hlsl.h` / `spirv.h`), **零个 `runtime/` 头**。插在
+render 与 runtime 之间不产生环: `core ← render ← shader ← runtime`。
+
+**依据二, 体量已经不成比例**: shader 相关 .cpp 共 5122 行, 占 `radrayruntime` 全部
+10084 行的 51%。单个 `shader_manifest.cpp` (3433 行) 比 `application.cpp` (926) +
+`gpu_resource.cpp` (960) + `gpu_system.cpp` (689) 三者之和还多。
+
+**依据三, 现有消费者被迫过度链接**: `tools/shader_cook`、`tools/shader_gen`、
+`test_shader_asset` (227 用例)、`test_shader_asset_template` (40 用例) 都只需要格式层,
+却各自链接整个 `radrayruntime` —— 连带 imgui、freetype、cgltf、window、AssetManager。
+一个 codegen CLI 没有理由依赖 imgui。
+
+**资产层必须留在 runtime**: `ShaderAsset` 依赖 `Asset` / `AssetManager` /
+`IRenderResourceRecycler`, 挪进 shader 库会形成循环。分界线正是 8.4b 那条, 只是从
+文件级升到库级 —— `shader_program.h` 当初刻意不依赖 Asset, 就是为这一步留的口子。
+
+**【为何排在 PSO 库之后】**: 抽库要再动一遍全部 include 路径 (应改为
+`radray/shader/...`, 否则库名与路径对不上), 与 PSO 库的改动落在同一批文件上。先把
+PSO 库做完, `ShaderPassProgram` 的对外形状与 8.5 的钉住机制都稳定后, 抽库就是纯搬运
+\+ CMake, 风险最低。
+
+抽库时不可漏的三件事:
+1. `RADRAY_ENABLE_SHADER_JIT` 与 `RADRAY_DXC_VERSION` 两个 compile definition 要跟着
+   走 (含那个 `FATAL_ERROR` 检查) —— 漏了会让 toolchain hash 静默变化, AOT 产物全部失效。
+2. shaderlib 部署的 POST_BUILD 要跟着走, 且 `tools/shader_cook/CMakeLists.txt` 里
+   `add_dependencies` 那段注释明确依赖"DXC 已被放进同一输出目录", 需重新确认。
+3. 测试跟着挪到 `modules/shader/tests/`; `test_shader_program.cpp` 里涉及 `ShaderAsset`
+   的用例留在 runtime 侧。
+
 ### 8.5 新浮现: PSO 持 `PipelineLayout` 裸指针会悬垂
 
 两个后端的 PSO 都存了 `_layout` 裸指针 (`d3d12_impl.h:894`、`vulkan_impl.h:1016`), 而
@@ -802,9 +878,64 @@ vertex layout、RT 格式), 同一份字节码会喂给多个 PSO, 去重必须�
 还有引用其 layout 的 PSO, 即悬垂。
 
 解法: PSO 库条目持一个 `StreamingAssetRef<ShaderAsset>`。引用计数机制已存在, PSO 存活
-即钉住 asset, `OnUnload` 不可能在 PSO 之前跑。比在 `RenderSystem` 里做失效通知简单,
-也避免了 asset → RenderSystem 的反向依赖。
+即钉住 asset。比在 `RenderSystem` 里做失效通知简单, 也避免了 asset → RenderSystem 的
+反向依赖。
+
+**修正 (2026-07-28)**: 上一段原写"`OnUnload` 不可能在 PSO 之前跑", 这只对**一条**回收
+路径成立。`asset_manager.h:212` 说明资产回收有两条路径, 而 `Unload(id)`
+(`asset_manager.h:272-273`) 明确是"确需强制清空"的场景, **不看引用计数**。所以
+`StreamingAssetRef` 只挡住 `CollectUnreferenced`, 挡不住显式 `Unload`。
+
+因此 PSO 库仍需提供 `RemovePipelineStatesUsing(const ShaderAsset*)`, 由显式 `Unload`
+的调用方负责先调它。这一层的责任划分本轮不动 (`Unload` 目前无调用方), 记为已知缺口。
 
 **本轮 (G1) 不做 PSO 库** —— 只做到 `LoadShaderAsset` 工厂。切片仍自己临时建 `Shader`
 与 PSO (它现在就是这么干的), 改动面更小。PSO 库单列一步, 形状参照 `RenderPassRegistry`
 (`gpu_resource.h:306`)。
+
+### 8.6 PSO 库 (G13 裁决 + key 组成, 2026-07-28)
+
+**G13 裁决: A 方案 —— PSO 层收完整固定功能状态, 不替 material 层定基线。**
+
+`GraphicsPipelineStateKey` 与 `GraphicsPipelineStateDescriptor` (`rhi.h:1125-1135`) 的
+固定功能段一一对应, 调用方必须把每一项填满。`MaterialRenderState` 继续保持零使用,
+"基线 + 覆盖"的合成留给未来的 material 层。
+
+【为什么不在 PSO 层顺手补一个基线】G12 的教训正是"同一个作者决策在两处各写一遍, 且
+一致性无机制保证"。若 PSO 层自己定义一套 pass 默认状态, 它就成了第二套真相 —— manifest
+验证与反射验证都看不到固定功能状态, 谁都拦不住两边写歪。PSO 层是**执行**层, 它应当要求
+一个已经完整的状态, 而不是替上层猜缺失的部分。
+
+**key 组成**: `ShaderPassProgram*` (代表 `PipelineLayout` + vertex input, 二者都是 pass
+级、与 variant 无关) + 各 stage 的 `ShaderHash` + `render::RenderPass*` +
+`PrimitiveState` + `optional<DepthStencilState>` + `MultiSampleState` +
+`ColorTargetState[]`。
+
+- `RenderPass*` 直接做身份: `RenderPassRegistry` 已按 attachment 描述去重, 指针相同
+  即兼容类相同。
+- 【刻意不用 `ShaderVariantKey` 做 key】`shader_manifest.h:335-336` 已指出它是变长结构、
+  属作者期概念, 不该进每帧路径。运行时身份用解析后的 `ShaderHash` —— 两个不同 variant
+  若投影到同一份字节码 (`ShaderProgramVariant` 的共享机制), 本就该命中同一个 PSO。
+- 比较方式先用线性扫 + 值比较 (`operator==` 已在 `rhi.h:991/1062/1077/1117`), 照
+  `RenderPassRegistry` (`gpu_resource.cpp:853/882`) 的先例。成为热点再换哈希。
+
+**只做 graphics**: compute PSO 目前零消费者, 两份 manifest 里也没有 compute pass。
+
+**析构顺序**: PSO 存 `RenderPass*` 与 `PipelineLayout*` 裸指针, 故 PSO 库必须先于
+`_renderPassRegistry` 与所有 `ShaderAsset` 销毁。已在 `render_system.h` 里靠成员声明顺序
+(`_pipelineStateCache` 在 `_renderPassRegistry` 之前) 与 `render_system.cpp` 的显式
+`reset()` 顺序两处落实。
+
+**实施结果 (2026-07-28)**:
+- 条目除 `StreamingAssetRef` 外还存一个 `const ShaderAsset* Owner` 裸指针。【必须如此】
+  `RemovePipelineStatesUsing` 不能用 `Ref.Get()` 匹配 —— 资产被 `Unload` 后 ref 立刻失效
+  返回 `nullptr`, 而那正是最需要逐出的时刻。`Owner` 只作身份比较, 从不解引用。
+- 非法 key (program / render pass 为空) 在解析变体【之前】就被拒, 故连 miss 都不计。
+- 切片改造后净减约 25 行: 原先的 `LoadShaderAssetDesc` → `BuildPipelineLayoutStorage` →
+  `CreatePipelineLayout` → `ShaderVariantDomain::Build` → `ShaderResolver` → 逐 stage
+  `Resolve` + `CreateShader` → `BuildVertexInputStorage` → `CreateGraphicsPipelineState`
+  共八步, 压成 `LoadShaderAsset` + `GetOrCreateVariant` + `GetOrCreateGraphics` 三步。
+  这是分层形状的检验: 若比手写还长, 说明抽象切错了位置。
+- 8.4 的"`Shader` 是瞬态局部量"结论首次兑现: 它现在只出现在
+  `PipelineStateCache::GetOrCreateGraphics` 的函数体内, 全仓库无第二处 `CreateShader`
+  调用。

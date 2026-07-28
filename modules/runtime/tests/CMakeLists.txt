@@ -19,7 +19,11 @@ radray_add_test(test_vertical_slice SOURCES test_vertical_slice.cpp LINK_LIBS ra
 # 无设备时用例自行 GTEST_SKIP。
 radray_add_test(test_shader_program SOURCES test_shader_program.cpp LINK_LIBS radrayruntime DISCOVER_ARGS PROPERTIES ENVIRONMENT "RADRAY_PROJECT_DIR=${CMAKE_SOURCE_DIR}")
 
-foreach(_radray_shader_test IN ITEMS test_shader_asset test_shader_asset_template test_vertical_slice test_shader_program)
+# PipelineStateCache: 建真实 PSO 以验证缓存 key 的每一维, 故需要 device 与 DXC,
+# 二者缺一时用例自行 GTEST_SKIP。
+radray_add_test(test_pipeline_state_cache SOURCES test_pipeline_state_cache.cpp LINK_LIBS radrayruntime DISCOVER_ARGS PROPERTIES ENVIRONMENT "RADRAY_PROJECT_DIR=${CMAKE_SOURCE_DIR}")
+
+foreach(_radray_shader_test IN ITEMS test_shader_asset test_shader_asset_template test_vertical_slice test_shader_program test_pipeline_state_cache)
     target_compile_definitions(${_radray_shader_test} PRIVATE
         RADRAY_PROJECT_DIR_DEFAULT="${CMAKE_SOURCE_DIR}")
 endforeach()

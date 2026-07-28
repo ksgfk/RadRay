@@ -298,8 +298,10 @@ struct ShaderPassDesc {
 /// 一份 shader 资产的完整元数据, 对应一个 *.shader.json 文件。
 ///
 /// 刻意【不】包含: PrimitiveState / DepthStencilState / BlendState / ColorTargets /
-/// MultiSampleState。这些属 PSO 固定功能段, 不影响字节码, 由材质在建 PSO 时覆盖
-/// (见 runtime/render_framework/render_pipeline.h 的 MaterialRenderState)。
+/// MultiSampleState。这些属 PSO 固定功能段, 不影响字节码, 由建 PSO 的调用方给出
+/// (PipelineStateCache 要求一份完整状态, 见 pipeline_state_cache.h)。注意这意味着
+/// manifest 里没有"pass 基线"可供材质覆盖 —— 基线归属未裁决, 见
+/// docs/shader_asset_gap_analysis.md 的 G13。
 /// 也不包含 AssetId —— 身份不是 manifest 内容的一部分, 而是由 manifest 路径推导
 /// (见 shader_asset.h 的 MakeShaderAssetId)。故同一份内容放在两个路径下是两个资产。
 struct ShaderAssetDesc {

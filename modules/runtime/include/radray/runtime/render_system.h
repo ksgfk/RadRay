@@ -2,6 +2,7 @@
 
 #include <radray/runtime_type.h>
 #include <radray/runtime/gpu_resource.h>
+#include <radray/runtime/pipeline_state_cache.h>
 #include <radray/runtime/render_framework/render_pipeline.h>
 #include <radray/runtime/render_framework/scene.h>
 #include <radray/types.h>
@@ -46,6 +47,8 @@ public:
     RenderPipeline* GetPipeline() const noexcept { return _pipeline.get(); }
     /// RenderPass / Framebuffer 复用缓存。OnInitialize 之前或 device 缺失时为空。
     RenderPassRegistry* GetRenderPassRegistry() const noexcept { return _renderPassRegistry.get(); }
+    /// graphics PSO 复用缓存。OnInitialize 之前或 device 缺失时为空。
+    PipelineStateCache* GetPipelineStateCache() const noexcept { return _pipelineStateCache.get(); }
     /// JIT shader 编译根目录 (<exe>/shaderlib)；关闭 JIT 时为空。
     const string& GetShaderIncludeRoot() const noexcept { return _shaderIncludeRoot; }
     /// JIT 编译器。关闭 JIT 或 DXC 创建失败时为空, 此时只能走 AOT 产物。
@@ -56,6 +59,9 @@ private:
     void EnsurePresentState(AppFrameContext& ctx, RenderPipelineTarget& target);
 
     Application* _app{nullptr};
+    /// 【必须声明在 _renderPassRegistry 之前】: PSO 存了 RenderPass 裸指针, 析构逆序保证
+    /// PSO 先死。资产侧的 PipelineLayout 由条目内的 StreamingAssetRef 钉住。
+    unique_ptr<PipelineStateCache> _pipelineStateCache;
     unique_ptr<RenderPassRegistry> _renderPassRegistry;
     unique_ptr<RenderPipeline> _pipeline;
     vector<unique_ptr<Scene>> _scenes;

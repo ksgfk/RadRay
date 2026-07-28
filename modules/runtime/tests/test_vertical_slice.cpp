@@ -31,6 +31,10 @@
 #include <radray/logger.h>
 #include <radray/render/dxc.h>
 #include <radray/render/rhi.h>
+#include <radray/runtime/asset_manager.h>
+#include <radray/runtime/pipeline_state_cache.h>
+#include <radray/runtime/render_resource_recycler.h>
+#include <radray/runtime/shader_asset.h>
 #include <radray/runtime/shader_manifest.h>
 #include <radray/types.h>
 #include <radray/utility.h>
@@ -167,6 +171,13 @@ struct SliceContext {
         }
 #endif
     }
+};
+
+/// AssetManager 卸载时会把 GPU 对象交给 recycler。切片里没有 GpuSystem 的延迟销毁,
+/// 直接就地释放即可 —— 所有提交在读回像素前已经等过 fence。
+class SliceRecycler : public IRenderResourceRecycler {
+public:
+    void RecycleRenderResource(unique_ptr<render::RenderBase>) noexcept override {}
 };
 
 /// 创建设备。返回 false 表示该后端在当前机器上不可用 (无显卡、无驱动、CI 无 GPU),
@@ -387,83 +398,56 @@ TEST_P(VerticalSliceTest, ManifestToPixels) {
         ASSERT_EQ(cook.Index.Entries.size(), 2u);
     }
 
-    // ---- 阶段 3a: manifest -> PipelineLayout ----
-    // 先做这步而不是先建 RT, 是因为它完全不碰 GPU: manifest 是唯一 ABI 来源,
-    // 建 layout 不需要反射、不需要字节码、不需要变体。这条不变量正是 shader_asset
-    // 的核心设计, 这里顺带验证它。
-    ShaderAssetDiagnostic diag;
-    std::optional<ShaderAssetDesc> asset = LoadShaderAssetDesc(manifestPath, diag);
-    ASSERT_TRUE(asset.has_value()) << diag.ToString();
-    ASSERT_EQ(asset->Passes.size(), 1u);
-    const ShaderPassDesc& pass = asset->Passes.front();
-
-    // manifest 允许 pass.Source 留空表示沿用资产级 Source, 而 ShaderResolver 只收
-    // pass, 要求路径已展开。
-    const ShaderPassDesc resolvablePass = MakeResolvablePass(asset.value(), pass);
-
-    ShaderPipelineLayoutStorage layoutStorage = BuildPipelineLayoutStorage(pass);
-    ASSERT_EQ(layoutStorage.GroupCount(), 2u) << "gPerObject group 0 + gView group 1";
-    auto pipelineLayoutResult = device.CreatePipelineLayout(layoutStorage.Get());
-    ASSERT_TRUE(pipelineLayoutResult.HasValue()) << "CreatePipelineLayout failed";
-    unique_ptr<render::PipelineLayout> pipelineLayout = pipelineLayoutResult.Release();
-
-    // ---- 阶段 3b: 变体 -> 字节码 -> Shader 对象 ----
-    std::optional<ShaderVariantDomain> domain =
-        ShaderVariantDomain::Build(asset.value(), pass, diag);
-    ASSERT_TRUE(domain.has_value()) << diag.ToString();
-    const ShaderVariantKey variant = domain->DefaultVariant();
-
-    // JIT 模式: 无产物, resolver 现场编译 —— 验证 "AOT 未命中 -> JIT" 在真实 device
-    // 前可用。
+    // ---- 阶段 3a: manifest -> ShaderAsset ----
+    // 先做这步而不是先建 RT, 是因为加载期完全不编译字节码: manifest 是唯一 ABI 来源,
+    // 建 PipelineLayout 不需要反射、不需要字节码、不需要变体。这条不变量正是
+    // ShaderAsset "构造即完整" 的兑现方式, 这里顺带验证它。
+    //
+    // JIT 模式: 无产物, 后续 GetOrCreateVariant 现场编译 (开发构建)。
     // AOT 模式: dxc 传 nullptr 而非 dxc.get()。给了指针再设 AllowJit = false 只测到
     // "我们没去用它"; 传 nullptr 才测到"发布包里 DXC 根本不存在时也能起来"。
     const bool isAot = mode == SliceBytecodeMode::Aot;
-    ShaderResolver resolver{
-        ShaderResolveConfig{
+
+    AssetManager assetManager;
+    SliceRecycler recycler;
+    assetManager.SetRecycler(&recycler);
+
+    StreamingAssetRef<ShaderAsset> assetRef = LoadShaderAsset(
+        assetManager,
+        device,
+        manifestPath,
+        ShaderAssetLoadOptions{
             .ShaderRoot = shaderRoot,
-            .ManifestPath = manifestPath,
             .Staleness = isAot ? ShaderArtifactStaleness::Lenient
                                : ShaderArtifactStaleness::Strict,
-            .AllowJit = !isAot},
-        isAot ? nullptr : dxc.get()};
-    EXPECT_EQ(resolver.CanJit(), !isAot);
+            .AllowJit = !isAot,
+            .Dxc = isAot ? nullptr : dxc.get()});
+    assetManager.Pump();
+    ASSERT_TRUE(assetRef.IsReady()) << "the shader asset did not become ready after one pump";
+    ASSERT_EQ(assetRef->GetPassCount(), 1u);
 
+    Nullable<ShaderPassProgram*> program = assetRef->FindPass("Error");
+    ASSERT_TRUE(program.HasValue());
+    EXPECT_TRUE(program->GetPipelineLayout().HasValue())
+        << "the layout must be ready before any bytecode exists";
+
+    // ---- 阶段 3b: 变体 -> 字节码 ----
+    ShaderAssetDiagnostic diag;
+    const ShaderVariantKey variant = program->GetDomain().DefaultVariant();
+    Nullable<const ShaderProgramVariant*> resolved =
+        program->GetOrCreateVariant(variant, category, diag);
+    ASSERT_TRUE(resolved.HasValue()) << "variant resolve failed: " << diag.ToString();
+
+    // 断言来源: AOT 用例若因任何原因悄悄退回 JIT, 最终像素照样是洋红, 整个
+    // AOT 参数化就白跑了。
     const ShaderBytecodeSource expectedSource =
         isAot ? ShaderBytecodeSource::Artifact : ShaderBytecodeSource::Jit;
-
-    const std::array<render::ShaderStage, 2> stages{
-        render::ShaderStage::Vertex,
-        render::ShaderStage::Pixel};
-
-    // Shader 对象与字节码都要活到建完 PSO。
-    vector<unique_ptr<render::Shader>> shaders;
-    std::optional<render::ShaderEntry> vsEntry;
-    std::optional<render::ShaderEntry> psEntry;
-    for (render::ShaderStage stage : stages) {
-        const vector<string> defines = domain->CollectDefines(variant, stage);
-        std::optional<ShaderBytecode> bytecode =
-            resolver.Resolve(resolvablePass, stage, category, defines, diag);
-        ASSERT_TRUE(bytecode.has_value()) << "stage resolve failed: " << diag.ToString();
-        EXPECT_FALSE(bytecode->Data.empty());
-        // 断言来源: AOT 用例若因任何原因悄悄退回 JIT, 最终像素照样是洋红, 整个
-        // AOT 参数化就白跑了。
-        EXPECT_EQ(bytecode->Source, expectedSource);
-
-        auto shaderResult = device.CreateShader(bytecode->MakeDescriptor());
-        ASSERT_TRUE(shaderResult.HasValue()) << "CreateShader failed";
-        shaders.push_back(shaderResult.Release());
-
-        std::optional<std::string_view> entryPoint = pass.FindEntryPoint(stage);
-        ASSERT_TRUE(entryPoint.has_value());
-        render::ShaderEntry entry{shaders.back().get(), entryPoint.value()};
-        if (stage == render::ShaderStage::Vertex) {
-            vsEntry = entry;
-        } else {
-            psEntry = entry;
-        }
+    ASSERT_EQ(resolved->Stages().size(), 2u) << "1 VS + 1 PS";
+    for (const ShaderProgramVariant::StageBlob& blob : resolved->Stages()) {
+        ASSERT_NE(blob.Bytecode, nullptr);
+        EXPECT_FALSE(blob.Bytecode->Data.empty());
+        EXPECT_EQ(blob.Bytecode->Source, expectedSource);
     }
-    ASSERT_TRUE(vsEntry.has_value());
-    ASSERT_TRUE(psEntry.has_value());
 
     // ---- 阶段 2: 离屏 RT + RenderPass + Framebuffer ----
     // 必须在建 PSO 之前 —— Vulkan 要求 GraphicsPipelineStateDescriptor 显式给出
@@ -521,10 +505,6 @@ TEST_P(VerticalSliceTest, ManifestToPixels) {
     unique_ptr<render::Framebuffer> framebuffer = framebufferResult.Release();
 
     // ---- 阶段 4: PSO ----
-    ASSERT_TRUE(pass.VertexInput.has_value());
-    ShaderVertexInputStorage vertexInputStorage =
-        BuildVertexInputStorage(pass.VertexInput.value());
-
     const std::array<render::ColorTargetState, 1> colorTargets{
         render::ColorTargetState::Default(kTargetFormat)};
 
@@ -538,19 +518,30 @@ TEST_P(VerticalSliceTest, ManifestToPixels) {
     // 材质/网格层要解决的问题, 本切片验证的是 shader 链路, 不该被它绊住。
     primitive.Cull = render::CullMode::None;
 
-    render::GraphicsPipelineStateDescriptor psoDesc{
-        .PipelineLayout = pipelineLayout.get(),
-        .VS = vsEntry,
-        .PS = psEntry,
-        .VertexInput = vertexInputStorage.Get(),
+    // 固定功能状态由调用方给全 —— PipelineStateCache 不做基线合成 (见 G13 / 8.6)。
+    // vertex input 与 PipelineLayout 不在 key 里, 它们由 program 提供。
+    PipelineStateCache pipelineStates{&device};
+    const GraphicsPipelineStateKey psoKey{
+        .Program = program.Get(),
+        .CompatibleRenderPass = renderPass.get(),
         .Primitive = primitive,
         .DepthStencil = std::nullopt,
         .MultiSample = render::MultiSampleState::Default(),
-        .ColorTargets = colorTargets,
-        .CompatibleRenderPass = renderPass.get()};
-    auto psoResult = device.CreateGraphicsPipelineState(psoDesc);
-    ASSERT_TRUE(psoResult.HasValue()) << "CreateGraphicsPipelineState failed";
-    unique_ptr<render::GraphicsPipelineState> pso = psoResult.Release();
+        .ColorTargets = colorTargets};
+    Nullable<render::GraphicsPipelineState*> psoResult =
+        pipelineStates.GetOrCreateGraphics(assetRef, psoKey, variant, category, diag);
+    ASSERT_TRUE(psoResult.HasValue()) << "GetOrCreateGraphics failed: " << diag.ToString();
+    render::GraphicsPipelineState* pso = psoResult.Get();
+
+    // 同 key 再取一次必须命中同一个对象。这是 5.6 结论 3 里那条未检验的 PSO 缓存 key
+    // 在真实 device 上的第一次兑现。
+    Nullable<render::GraphicsPipelineState*> psoAgain =
+        pipelineStates.GetOrCreateGraphics(assetRef, psoKey, variant, category, diag);
+    ASSERT_TRUE(psoAgain.HasValue());
+    EXPECT_EQ(psoAgain.Get(), pso);
+    EXPECT_EQ(pipelineStates.GetGraphicsPipelineStateCount(), 1u);
+    EXPECT_EQ(pipelineStates.GetGraphicsHitCount(), 1u);
+    EXPECT_EQ(pipelineStates.GetGraphicsMissCount(), 1u);
 
     // ---- 阶段 5: 顶点/索引/常量缓冲 + 参数集 ----
     auto vertexBuffer = MakeUploadBuffer(
@@ -581,11 +572,13 @@ TEST_P(VerticalSliceTest, ManifestToPixels) {
     ASSERT_TRUE(viewBuffer.HasValue());
 
     // 每个 binding group 一个参数集。group 索引来自 manifest, 不是硬编码。
+    const ShaderPassDesc& pass = program->GetDesc();
+    ASSERT_EQ(pass.BindingGroups.size(), 2u) << "gPerObject group 0 + gView group 1";
     vector<unique_ptr<render::ShaderParameterSet>> parameterSets;
     vector<uint32_t> parameterGroups;
     for (const ShaderBindingGroupDesc& group : pass.BindingGroups) {
         render::ShaderParameterSetDescriptor setDesc{
-            .Layout = pipelineLayout.get(),
+            .Layout = program->GetPipelineLayout().Get(),
             .GroupIndex = group.Group};
         auto setResult = device.CreateShaderParameterSet(setDesc);
         ASSERT_TRUE(setResult.HasValue()) << "CreateShaderParameterSet failed for group "
@@ -675,7 +668,7 @@ TEST_P(VerticalSliceTest, ManifestToPixels) {
 
     // 必须先绑 PSO 再绑参数集 —— Vulkan 侧 BindShaderParameterSet 依赖 PSO 绑定时
     // 记下的 layout。
-    encoder->BindGraphicsPipelineState(pso.get());
+    encoder->BindGraphicsPipelineState(pso);
     for (size_t i = 0; i < parameterSets.size(); ++i) {
         encoder->BindShaderParameterSet(parameterGroups[i], parameterSets[i].get());
     }

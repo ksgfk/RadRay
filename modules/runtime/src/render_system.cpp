@@ -25,6 +25,9 @@ RenderSystem::RenderSystem(Application* app) noexcept
 RenderSystem::~RenderSystem() noexcept {
     ReleaseAllScenes();
     _pipeline.reset();
+    // PSO 存了 RenderPass 与 PipelineLayout 裸指针, 必须先于 registry 与 (透过条目里的
+    // StreamingAssetRef) 资产销毁。
+    _pipelineStateCache.reset();
     // 缓存的 RenderPass / Framebuffer 必须先于 GpuSystem 持有的 device 销毁。
     _renderPassRegistry.reset();
     _dxc.reset();
@@ -40,6 +43,7 @@ void RenderSystem::OnInitialize() {
     }
 
     _renderPassRegistry = make_unique<RenderPassRegistry>(device);
+    _pipelineStateCache = make_unique<PipelineStateCache>(device);
 
 #if defined(RADRAY_ENABLE_SHADER_JIT)
     _shaderIncludeRoot = (GetExecutableDirectory() / "shaderlib").string();
