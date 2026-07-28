@@ -183,8 +183,9 @@ JIT 编译是阻塞调用 (`shader_asset.cpp:2161` `_dxc->CompileFile`)。
 `AssetManager` 是单线程泵模型。若 shader 加载走 `AssetLoadTask`, JIT 会卡住泵线程。
 `texture_asset.cpp` 有 `FrameUploadScheduler` 处理异步上传, shader 侧无等价物。
 
-### G6. 无 cook 驱动入口, 发布路径从未真实运行
+### G6. 无 cook 驱动入口, 发布路径从未真实运行 —— 已修复 (2026-07-28)
 
+原始问题:
 - `CookShaderAsset` / `CookShaderAssetFile` 唯一调用方是单元测试
   (`test_shader_asset.cpp` 约 20 处 + `test_shader_asset_template.cpp:772/815`)。
 - `tools/shader_gen` 是 manifest **生成器** 不是 cooker: 读反射 + 扫
@@ -196,13 +197,18 @@ JIT 编译是阻塞调用 (`shader_asset.cpp:2161` `_dxc->CompileFile`)。
 - 结论: `Lenient` + `AllowJit == false` 这条发布路径只在临时目录的测试里跑过,
   从未在真实构建中运行。
 
-### G7. 资产覆盖率 1/4
+**修复**: 见第 7 节。
 
-仓库内唯一 manifest: `shaderlib/forward_pipeline/forward_pass.shader.json`
-(FormatVersion 1, Name `ForwardPrincipled`, 9 个 KeywordGroups 全为 `Stages:[Pixel]`,
-1 个 pass `Forward` = VSMain + PSMain, 2 条 `Combination` bake 规则)。
+### G7. 资产覆盖率 2/4
 
-无 manifest 的入口 shader: `error_pass.hlsl`、`shadow_pass.hlsl`、`imgui/imgui_pass.hlsl`。
+已有 manifest 两份:
+- `shaderlib/forward_pipeline/forward_pass.shader.json` (FormatVersion 1, Name
+  `ForwardPrincipled`, 8 个 KeywordGroups 全为 `Stages:[Pixel]`, 1 个 pass `Forward` =
+  VSMain + PSMain, 1 条 `Combination` bake 规则 → 2 变体)。
+- `shaderlib/forward_pipeline/error_pass.shader.json` (Name `ErrorPass`, 2 个从
+  `view.hlsli` 继承的 keyword 组, 无 bake 规则 → 只烘默认变体)。见 5.2。
+
+无 manifest 的入口 shader: `shadow_pass.hlsl`、`imgui/imgui_pass.hlsl`。
 
 ### G8. vertex input 反射校验只查存在性
 
@@ -224,11 +230,20 @@ size 上界 (`:2547-2563`, 声明值先 16 字节对齐再比); SPIRV 另加 ran
 `Residency` 与 `ImmutableSampler` 未被反射校验是**设计使然** (反射原理上给不出),
 其合法性在 manifest 解析期检查 (`ValidateBinding :146-170`)。
 
-### G9. `RADRAY_ENABLE_SPIRV_CROSS` 关闭时 SPIRV cook 无法完成
+### G9. `RADRAY_ENABLE_SPIRV_CROSS` 关闭时 SPIRV cook 无法完成 —— 已绕开 (2026-07-28)
 
-`shader_asset.cpp:3119-3142`: 未启用 spirv-cross 时 SPIRV 反射校验直接失败并报
+`shader_asset.cpp:3132-3156`: 未启用 spirv-cross 时 SPIRV 反射校验直接失败并报
 `"SPIR-V reflection validation requires spirv-cross"`。使 `ValidateReflection == true`
 的 SPIRV cook 在该配置下不可用。
+
+**cook 驱动入口的处理**: `radray_shader_cook` 的默认 category 集按本次构建编入的后端
+决定 (`DefaultCategories()`) —— 没编 Vulkan 就不烘 SPIRV。而根 `CMakeLists.txt:75-77`
+已钉住"Vulkan + JIT ⇒ 必须有 spirv-cross", 故"编了 Vulkan"即"能校验 SPIRV",
+这个组合在构建期不会出现。
+
+底层限制本身未变: 显式 `--category spirv` 且构建关掉了 spirv-cross 仍会失败。这是正确
+行为 (不能声称校验过一份没校验的 ABI), 但如果将来需要"不校验只烘"的配置, 应当走
+`--no-validate-reflection` 而不是放宽这条。
 
 ### G10. asset→pass `Source` 继承规则重复实现 —— 已修复 (2026-07-28)
 
@@ -324,9 +339,7 @@ category × variant × stage 编译并去重)。
 建议顺序反过来: 不要先写 `class ShaderAsset : public Asset`, 那样是在没有任何
 消费方的情况下猜 API 形状。
 
-优先级:
-
-已完成: G12 (裁决 + 修复)、G11 (注释)。
+优先级见第 7 节。
 
 ---
 
@@ -523,27 +536,138 @@ PSO。这是明确的 program 级抽象需求: 一个持有 N 个 stage 的 Shad
 
 ---
 
-## 6. 后续优先级
+## 6. cook 驱动入口 (G6, 已完成 2026-07-28)
 
-已完成: G3 垂直切片 (第 5 节)、G10、G11、G12。
+### 6.1 落点: 独立 CLI 工具 `tools/shader_cook`
+
+`tools/shader_cook/shader_cook.cpp` → 目标 `radray_shader_cook`, 只在
+`RADRAY_ENABLE_SHADER_JIT` 下构建 (守卫在 `tools/CMakeLists.txt`, 与 `shader_gen` 同一条)。
+
+**为何不并入 `radray_shader_gen`**: 两者方向相反。`shader_gen` 从反射**生成** manifest
+模板, 输出还带 `"_TODO"` 待人工收敛; cook **消费**已收敛的 manifest。共用一个 exe 会让
+"这个工具做什么"取决于参数。
+
+**为何是独立 exe 而不是塞进某个既有程序**: cook 要链 `radrayruntime` 与 DXC。塞进某个 app
+的启动路径会让"产出发布包"依赖"跑起某个 app"。
+
+**刻意不提供 `--output`**: 产物目录由 `GetShaderArtifactDirectory(manifestPath)` 推导,
+而运行时 `ShaderResolver` 用的是同一个函数从同一个 manifest 路径反推。一旦可以自定义
+输出位置, 布局约定就有了第二个真相, 且运行时那一侧看不到构建时传的参数。要换位置就换
+manifest 的位置。
+
+参数面:
+
+| 选项 | 作用 |
+|---|---|
+| `--shader-root <dir>` | 必需。include 根, 也是相对 manifest 路径的基准 |
+| `--manifest <path>`… | 显式指定, 可重复; 相对路径按 shader root 解析 |
+| `--discover` | 递归收集 root 下全部 `*.shader.json`, 结果排序使输出可复现 |
+| `--category <dxil\|spirv>`… | 默认按本次构建编入的后端推导 (见 G9) |
+| `--no-validate-reflection` | 关掉反射核对。默认开 |
+| `--no-incremental` | 关掉"已存在且自验通过的 blob 跳过编译" |
+| `--clean` | 先删整个产物目录再烘 |
+| `--quiet` | 只报错误 |
+
+两条刻意的行为决定:
+- **一份失败继续烘剩下的**, 退出码仍反映有失败。一次构建把所有 manifest 的问题报全,
+  比每次只暴露第一个省往返。
+- **`--discover` 一个都没找到是错误**, 不是静默成功。那几乎总是 `--shader-root` 指错或
+  部署步骤没跑, 而静默返回 0 会让构建"成功"却不产出任何 `index.json` —— 那正是这个工具
+  存在的唯一目的。
+
+`--clean` 存在的理由: 增量只跳过已存在的 blob, **从不删除**任何东西。删掉一条 bake 规则后
+上一轮的 blob 会留在目录里, 它不在新 `index.json` 内, 运行时查不到, 不影响正确性, 但会
+一直占着发布包。
+
+### 6.2 CMake 集成: 显式目标, **不进构建**
+
+`tools/shader_cook/CMakeLists.txt` 定义 `radray_cook_shaders` —— 一个不挂在 ALL 上的
+`add_custom_target`:
+
+```
+cmake --build build_debug --target radray_cook_shaders
+```
+
+**为何不做成构建期步骤** (POST_BUILD 或进 ALL):
+- 开发构建靠 JIT。产物存在只会多一层失效面 —— "改了 shader 却读到旧 blob" 这类问题在
+  Strict 下靠时间戳复核挡住, 但那是白付的复杂度, 因为开发根本不需要产物。
+- cook 要用 DXC 编译每个 (category × variant × stage)。挂进每次构建等于给所有人加一笔
+  与其当前工作无关的开销 (实测 forward_pass 全量约 0.5s, 会随变体数增长)。
+- AOT 是**发布/打包**的需求。该由打包流程按需触发, 而不是由"编了一次代码"触发。
+
+烘的是输出目录里那份 shaderlib 而非源码树: 运行时 resolver 拿到的 manifest 在
+`<exe>/shaderlib` 下 (`render_system.cpp:45` 的 `_shaderIncludeRoot`)。烘源码树等于把产物
+放到运行时不会去看的地方, 还会污染 git 工作区。定序靠
+`add_dependencies(radray_shader_cook radrayruntime)` —— `radrayruntime` 的 POST_BUILD 先把
+`shaderlib/` 部署到输出目录。
+
+实测输出 (Debug, D3D12 + Vulkan 都编入):
+
+```
+radray_shader_cook: cooking 2 manifest(s) for [DXIL, SPIRV] from '.../_build/Debug/shaderlib'
+radray_shader_cook: .../error_pass.shader.json   -> 4 entries (compiled 4, reused 0, deduplicated 0)
+radray_shader_cook: .../forward_pass.shader.json -> 6 entries (compiled 6, reused 0, deduplicated 2)
+```
+
+再跑一次全部转为 `reused`。产物落在
+`build_debug/_build/Debug/shaderlib/forward_pipeline/{error_pass,forward_pass}/`。
+
+**测试不依赖这个目标**: 两个新用例与切片的 AOT 分支都把 manifest 拷进各自的临时目录后
+自行调 `CookShaderAssetFile`, 故删掉输出目录里的产物后 ctest 依然全过 (已验证)。这是刻意的
+—— 测试不该依赖"某人先跑过某个 target"这种前置状态。
+
+### 6.3 测试
+
+**切片加 AOT 参数** (`test_vertical_slice.cpp`): 参数从 `RenderBackend` 改为
+`SliceParams{Backend, Mode}`, `Mode ∈ {Jit, Aot}`, 共 4 个用例, **全部通过**。
+
+AOT 分支先把 manifest 拷进临时目录 (`ScopedCookedManifest`, 产物落在副本旁边, 不碰源码
+树), 调 `CookShaderAssetFile`, 然后用 `Lenient` + `AllowJit = false` + **`dxc == nullptr`**
+解析。传 nullptr 而不是 `dxc.get()` 是关键: 给了指针再关 `AllowJit` 只测到"我们没去用它",
+传 nullptr 才测到"发布包里 DXC 根本不存在时也能起来"。每个 stage 都断言
+`bytecode->Source == Artifact` —— 少了这条, AOT 用例若悄悄退回 JIT 照样画出洋红,
+整个参数化就白跑了。
+
+**两个新的设备无关用例** (`test_shader_asset.cpp`, `ShaderAssetSampleTest`):
+- `CookedErrorPassResolvesWithoutJit`: 真实 manifest 烘出的产物在发布包配置下逐 stage
+  逐 category 命中, 且 `cook.Index.Find(bytecode->Key)` 必须命中 —— 这是"运行时纯函数
+  重算 key"这条设计唯一的真实检验点。附带两条反向断言: `ShaderRoot` 指向不存在的目录时
+  `Lenient` 仍命中 (发布包不部署源码), 同配置换 `Strict` 必须失败 (算不出身份且无 JIT
+  时不能猜)。
+- `UnbakedErrorPassVariantFailsWithoutJit`: 请求合法但未预编的组合 (`_POINT_SHADOWS`)
+  在 `AllowJit = false` 下必须显式失败, 而同一份产物在开发配置下由 JIT 兜底 —— 后半条
+  确保前半条的失败来自"没有 JIT", 不是"这个变体非法"。查 PS 而非 VS 是必要的:
+  该 keyword 组只作用于 Pixel, VS 的投影会把它归零从而命中默认变体的 blob。
+
+全量: `test_shader_asset` 227/227, `test_shader_asset_template` 40/40,
+`test_vertical_slice` 4/4。CLI 本身另手工验过 `--discover` / `--clean` / `--category` /
+错误路径的退出码。
+
+### 6.4 写这一层时撞到的两件事
+
+- **`INSTANTIATE_TEST_SUITE_P` 的参数列表里既不能写裸逗号也不能塞 `#if`**。
+  `SliceParams{a, b}` 的逗号被预处理器当成宏参数分隔符; 而把 `#if defined(...)` 放进
+  `testing::Values(...)` 在 MSVC 的 `/Zc:preprocessor` 下直接是语法错误。解法是把参数集
+  在宏外面用一个函数算好, 再 `testing::ValuesIn(...)`。
+- **gtest 的 `<<` 不认 `format_as`**。`EXPECT_*() << category` 编不过 (`ShaderBlobCategory`
+  只有 `format_as`, 没有 `operator<<`), 要先 `fmt::format` 成字符串。
+
+---
+
+## 7. 后续优先级
+
+已完成: G3 垂直切片 (第 5 节)、G6 (第 6 节)、G9 (构建期已绕开)、G10、G11、G12。
 
 接下来:
 
-1. **cook 驱动入口** (解 G6)。让 `index.json` 真的进构建输出, 然后给切片加一个
-   AOT 变体: 先 cook, 再用 `AllowJit = false` 解析, 断言
-   `bytecode->Source == ShaderBytecodeSource::Artifact` 且画出同样的洋红。
-
-   **为何排首位**: 不依赖任何未决的归属问题, 且补的正是切片没验证到的那一半 ——
-   切片走的是 JIT 兜底, `Resolve` 里 AOT 命中那一整段
-   (`shader_asset.cpp:2245-2297`: toolchain 比对、`Lenient` 用 index 自称身份绕过
-   源码比对、产物损坏时记日志再 JIT 兜底) 在真实 device 前一次都没跑过。
-   `AllowJit == false` 这条发布包路径目前是纯声明。
-   G9 (`RADRAY_ENABLE_SPIRV_CROSS` 关闭时 SPIRV cook) 也只能借此验证。
-2. **G1 `ShaderAsset` 粒度 + G2 AssetId 约定**, 连带裁决 `ShaderResolver` 归属
+1. **G1 `ShaderAsset` 粒度 + G2 AssetId 约定**, 连带裁决 `ShaderResolver` 归属
    (见 5.6 结论 1: 倾向每个 `ShaderAsset` 各持一个 resolver)。
-3. **program 级 API** (G4)。形状已由切片给出: 持有 N 个 stage 的 Shader 对象 +
+2. **program 级 API** (G4)。形状已由切片给出: 持有 N 个 stage 的 Shader 对象 +
    `ShaderEntry`, 生命周期绑一起 (见 5.6 结论 2)。依赖 G1 定下粒度。
-4. **绕序契约归属**。切片用 `CullMode::None` 绕开了 D3D12/Vulkan 绕序相反的问题
+3. **绕序契约归属**。切片用 `CullMode::None` 绕开了 D3D12/Vulkan 绕序相反的问题
    (见 5.6), material/mesh 层必须显式裁决 —— 目前无人负责。
-5. G5 线程模型、G8 vertex input 校验补强、G7 补齐其余 manifest (`shadow_pass`、
-   `imgui_pass`)、G9 构建配置。
+4. G5 线程模型、G8 vertex input 校验补强、G7 补齐其余 manifest (`shadow_pass`、
+   `imgui_pass`)。
+
+**cook 之后新浮现的**: PSO 缓存 key (5.6 结论 3) 仍未检验 —— 切片现在两条路径都走通了,
+但都只解析一次, 没有缓存。这条要等 material 层。

@@ -1,11 +1,14 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <filesystem>
 #include <string>
 #include <string_view>
+
+#include <fmt/format.h>
 
 #include <radray/environment.h>
 #include <radray/file.h>
@@ -4108,6 +4111,188 @@ TEST(ShaderAssetSampleTest, ManifestCooksRealErrorPassShader) {
         EXPECT_TRUE(std::filesystem::is_regular_file(
             artifactDirectory / std::filesystem::path{entry.BlobPath}));
     }
+}
+
+/// cook 出的产物能被"发布包配置" (AllowJit == false, 无 DXC) 解析。
+///
+/// 【为何单独一个用例】: 上面的 ManifestCooksRealErrorPassShader 只断言产物写出来了,
+/// 没有人读过它。而 ShaderResolver 里 AOT 命中那一整段 (toolchain 比对、按源文件取
+/// cook 时身份、算 key、读 blob 自验) 在真实 manifest 上从未跑过 —— 之前的覆盖全在
+/// 临时目录里手写的 test.hlsl 上。发布包路径与开发路径的差别恰恰在"没有 JIT 可兜底",
+/// 任何一步算错 key 都会从"慢一点"变成"起不来"。
+TEST(ShaderAssetSampleTest, CookedErrorPassResolvesWithoutJit) {
+    auto dxcResult = render::CreateDxc();
+    if (!dxcResult.HasValue()) {
+        GTEST_SKIP() << "DXC is unavailable";
+    }
+    shared_ptr<render::Dxc> dxc = dxcResult.Release();
+
+    ScopedForwardSampleCookDirectory output{"error_pass.shader.json"};
+    ASSERT_TRUE(output.IsValid());
+    std::error_code error;
+    std::filesystem::copy_file(
+        GetErrorPassManifestPath(),
+        output.ManifestPath(),
+        std::filesystem::copy_options::overwrite_existing,
+        error);
+    ASSERT_FALSE(error) << error.message();
+
+    const std::filesystem::path shaderRoot = GetProjectRoot() / "shaderlib";
+    vector<render::ShaderBlobCategory> categories{render::ShaderBlobCategory::DXIL};
+#if defined(RADRAY_ENABLE_SPIRV_CROSS)
+    categories.push_back(render::ShaderBlobCategory::SPIRV);
+#endif
+
+    const ShaderCookOptions cookOptions{
+        .ShaderRoot = shaderRoot,
+        .ManifestPath = output.ManifestPath(),
+        .Categories = categories,
+        .ValidateReflection = true,
+        .Incremental = false};
+    ShaderCookResult cook = CookShaderAssetFile(*dxc, cookOptions);
+    ASSERT_TRUE(cook.Succeeded()) << JoinForwardSampleDiagnostics(cook);
+
+    ShaderAssetDiagnostic diagnostic;
+    std::optional<ShaderAssetDesc> asset = LoadShaderAssetDesc(output.ManifestPath(), diagnostic);
+    ASSERT_TRUE(asset.has_value()) << diagnostic.ToString();
+    const ShaderPassDesc pass = MakeResolvablePass(asset.value(), asset->Passes.front());
+    std::optional<ShaderVariantDomain> domain =
+        ShaderVariantDomain::Build(asset.value(), asset->Passes.front(), diagnostic);
+    ASSERT_TRUE(domain.has_value()) << diagnostic.ToString();
+    const ShaderVariantKey variant = domain->DefaultVariant();
+
+    // dxc 传 nullptr 而不是 dxc.get(): 发布包里根本没有 DXC。给了指针再设
+    // AllowJit = false 只测到"我们没去用它", 传 nullptr 才测到"用不了也能起来"。
+    ShaderResolver strict{
+        ShaderResolveConfig{
+            .ShaderRoot = shaderRoot,
+            .ManifestPath = output.ManifestPath(),
+            .Staleness = ShaderArtifactStaleness::Strict,
+            .AllowJit = false},
+        nullptr};
+    EXPECT_FALSE(strict.CanJit());
+
+    for (const render::ShaderBlobCategory category : categories) {
+        for (const render::ShaderStage stage :
+             {render::ShaderStage::Vertex, render::ShaderStage::Pixel}) {
+            const vector<string> defines = domain->CollectDefines(variant, stage);
+            std::optional<ShaderBytecode> bytecode =
+                strict.Resolve(pass, stage, category, defines, diagnostic);
+            ASSERT_TRUE(bytecode.has_value())
+                << fmt::format("category {} stage {}: ", category, stage)
+                << diagnostic.ToString();
+            EXPECT_EQ(bytecode->Source, ShaderBytecodeSource::Artifact);
+            EXPECT_EQ(bytecode->Category, category);
+            EXPECT_EQ(bytecode->Stage, stage);
+            EXPECT_FALSE(bytecode->Data.empty());
+            // key 必须与 cook 时写下的那条对上 —— 这是"运行时纯函数算 key"这条设计
+            // 唯一的真实检验点。
+            EXPECT_TRUE(cook.Index.Find(bytecode->Key).HasValue());
+        }
+    }
+
+    // Lenient 是发布包真正会用的策略: 源码可能根本没部署。这里删掉整个 shader root
+    // 的可见性 (指向一个不存在的目录) 模拟该情形, index 自称的身份足以算出 key。
+    ShaderResolver lenient{
+        ShaderResolveConfig{
+            .ShaderRoot = shaderRoot / "does_not_exist",
+            .ManifestPath = output.ManifestPath(),
+            .Staleness = ShaderArtifactStaleness::Lenient,
+            .AllowJit = false},
+        nullptr};
+    const vector<string> vsDefines =
+        domain->CollectDefines(variant, render::ShaderStage::Vertex);
+    std::optional<ShaderBytecode> lenientVs = lenient.Resolve(
+        pass, render::ShaderStage::Vertex, categories.front(), vsDefines, diagnostic);
+    ASSERT_TRUE(lenientVs.has_value()) << diagnostic.ToString();
+    EXPECT_EQ(lenientVs->Source, ShaderBytecodeSource::Artifact);
+
+    // 同样的配置换 Strict 必须失败: 算不出源码身份且无 JIT 时不能猜。
+    ShaderResolver strictWithoutSources{
+        ShaderResolveConfig{
+            .ShaderRoot = shaderRoot / "does_not_exist",
+            .ManifestPath = output.ManifestPath(),
+            .Staleness = ShaderArtifactStaleness::Strict,
+            .AllowJit = false},
+        nullptr};
+    EXPECT_FALSE(
+        strictWithoutSources
+            .Resolve(pass, render::ShaderStage::Vertex, categories.front(), vsDefines, diagnostic)
+            .has_value());
+}
+
+/// 未烘焙的变体在发布包配置下必须显式失败。
+///
+/// error_pass 只烘默认变体 (两组阴影 keyword 全关), 故请求 `_POINT_SHADOWS` 是一个
+/// 合法但未预编的组合 —— 正是发布包里最容易踩到的那类错误。它必须报错, 而不是静默
+/// 退回默认变体: 后者会画出一张"看起来对"但缺特性的图, 无从发现。
+TEST(ShaderAssetSampleTest, UnbakedErrorPassVariantFailsWithoutJit) {
+    auto dxcResult = render::CreateDxc();
+    if (!dxcResult.HasValue()) {
+        GTEST_SKIP() << "DXC is unavailable";
+    }
+    shared_ptr<render::Dxc> dxc = dxcResult.Release();
+
+    ScopedForwardSampleCookDirectory output{"error_pass.shader.json"};
+    ASSERT_TRUE(output.IsValid());
+    std::error_code error;
+    std::filesystem::copy_file(
+        GetErrorPassManifestPath(),
+        output.ManifestPath(),
+        std::filesystem::copy_options::overwrite_existing,
+        error);
+    ASSERT_FALSE(error) << error.message();
+
+    const std::filesystem::path shaderRoot = GetProjectRoot() / "shaderlib";
+    const vector<render::ShaderBlobCategory> categories{render::ShaderBlobCategory::DXIL};
+    const ShaderCookOptions cookOptions{
+        .ShaderRoot = shaderRoot,
+        .ManifestPath = output.ManifestPath(),
+        .Categories = categories,
+        .ValidateReflection = true,
+        .Incremental = false};
+    ASSERT_TRUE(CookShaderAssetFile(*dxc, cookOptions).Succeeded());
+
+    ShaderAssetDiagnostic diagnostic;
+    std::optional<ShaderAssetDesc> asset = LoadShaderAssetDesc(output.ManifestPath(), diagnostic);
+    ASSERT_TRUE(asset.has_value()) << diagnostic.ToString();
+    const ShaderPassDesc pass = MakeResolvablePass(asset.value(), asset->Passes.front());
+    std::optional<ShaderVariantDomain> domain =
+        ShaderVariantDomain::Build(asset.value(), asset->Passes.front(), diagnostic);
+    ASSERT_TRUE(domain.has_value()) << diagnostic.ToString();
+
+    const std::array<std::string_view, 1> keywords{"_POINT_SHADOWS"};
+    std::optional<ShaderVariantKey> variant = domain->Resolve(keywords, diagnostic);
+    ASSERT_TRUE(variant.has_value()) << diagnostic.ToString();
+    // 该 keyword 组只作用于 Pixel, 故必须查 PS —— VS 的投影会把它归零, 于是 VS 反而
+    // 会命中默认变体的 blob。
+    const vector<string> defines =
+        domain->CollectDefines(variant.value(), render::ShaderStage::Pixel);
+
+    ShaderResolver resolver{
+        ShaderResolveConfig{
+            .ShaderRoot = shaderRoot,
+            .ManifestPath = output.ManifestPath(),
+            .Staleness = ShaderArtifactStaleness::Strict,
+            .AllowJit = false},
+        nullptr};
+    EXPECT_FALSE(
+        resolver.Resolve(pass, render::ShaderStage::Pixel, categories.front(), defines, diagnostic)
+            .has_value());
+
+    // 同一份产物在开发配置下应当由 JIT 兜底 —— 上面的失败来自"没有 JIT", 不是
+    // "这个变体本身非法"。
+    ShaderResolver developer{
+        ShaderResolveConfig{
+            .ShaderRoot = shaderRoot,
+            .ManifestPath = output.ManifestPath(),
+            .Staleness = ShaderArtifactStaleness::Strict,
+            .AllowJit = true},
+        dxc.get()};
+    std::optional<ShaderBytecode> jitted = developer.Resolve(
+        pass, render::ShaderStage::Pixel, categories.front(), defines, diagnostic);
+    ASSERT_TRUE(jitted.has_value()) << diagnostic.ToString();
+    EXPECT_EQ(jitted->Source, ShaderBytecodeSource::Jit);
 }
 
 TEST(ShaderAssetSampleTest, ManifestCooksRealForwardShader) {

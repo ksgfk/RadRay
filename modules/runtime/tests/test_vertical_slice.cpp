@@ -18,6 +18,13 @@
 // 【用 error_pass 而非 forward_pass】: error_pass 顶点只有 POSITION、PSMain 返回洋红常量、
 // 无材质绑定, 断言"像素是洋红"最干净。forward_pass 要填 ViewConstants 大结构 + 3 个
 // binding group + 48 字节顶点, 绝大部分工作与本切片要验证的东西无关。
+//
+// 【JIT / AOT 双参数化】: 同一条链路跑两遍, 唯一区别是字节码从哪来。
+// - Jit: 无产物, resolver 现场编译 (开发构建)。
+// - Aot: 先 CookShaderAssetFile, 再用 AllowJit == false + dxc == nullptr 解析 (发布包)。
+// 后者是 radray_shader_cook 在构建期做的事的等价物。分开两个参数而不是只测 AOT, 是因为
+// 两条路径在 ShaderResolver 里几乎不共享代码 —— AOT 那半段 (toolchain 比对、按源文件取
+// cook 时身份、算 key、读 blob 自验) 只在有产物时才会执行。
 
 #include <radray/basic_math.h>
 #include <radray/environment.h>
@@ -30,11 +37,16 @@
 
 #include <gtest/gtest.h>
 
+#include <fmt/format.h>
+
 #include <array>
+#include <atomic>
+#include <chrono>
 #include <cstring>
 #include <filesystem>
 #include <optional>
 #include <span>
+#include <system_error>
 
 namespace radray {
 namespace {
@@ -244,17 +256,94 @@ Nullable<unique_ptr<render::Buffer>> MakeUploadBuffer(
     return result;
 }
 
-class VerticalSliceTest : public testing::TestWithParam<render::RenderBackend> {};
+/// 字节码从哪来。
+enum class SliceBytecodeMode {
+    /// 开发构建: 没有产物, resolver 现场编译。
+    Jit,
+    /// 发布包: 先 cook, 再用 AllowJit == false + dxc == nullptr 解析。
+    Aot,
+};
+
+struct SliceParams {
+    render::RenderBackend Backend{render::RenderBackend::D3D12};
+    SliceBytecodeMode Mode{SliceBytecodeMode::Jit};
+};
+
+/// INSTANTIATE_TEST_SUITE_P 的参数列表里不能写 `SliceParams{a, b}` —— 那个逗号会被
+/// 预处理器当成宏参数分隔符。
+constexpr SliceParams MakeSliceParams(
+    render::RenderBackend backend,
+    SliceBytecodeMode mode) noexcept {
+    return SliceParams{backend, mode};
+}
+
+/// 一个临时目录, 内含 manifest 的副本。
+///
+/// 【为何要拷一份】: cook 把产物写到 manifest 旁边 (GetShaderArtifactDirectory), 直接烘
+/// 仓库里那份会往源码树塞产物目录。ShaderRoot 仍指向仓库的 shaderlib —— 源码要从那里
+/// 读, 只有产物需要落在别处, 而这两者本来就是分开的参数。
+class ScopedCookedManifest {
+public:
+    ScopedCookedManifest() {
+        static std::atomic<uint32_t> counter{0};
+        std::error_code error;
+        const std::filesystem::path tempRoot = std::filesystem::temp_directory_path(error);
+        if (error) {
+            return;
+        }
+        _dir = tempRoot / fmt::format(
+                              "radray_slice_cook_{}_{}",
+                              std::chrono::steady_clock::now().time_since_epoch().count(),
+                              counter.fetch_add(1));
+        std::filesystem::create_directories(_dir, error);
+        if (error) {
+            _dir.clear();
+        }
+    }
+    ~ScopedCookedManifest() {
+        std::error_code error;
+        if (!_dir.empty()) {
+            std::filesystem::remove_all(_dir, error);
+        }
+    }
+    ScopedCookedManifest(const ScopedCookedManifest&) = delete;
+    ScopedCookedManifest& operator=(const ScopedCookedManifest&) = delete;
+
+    bool IsValid() const noexcept { return !_dir.empty(); }
+    std::filesystem::path ManifestPath() const { return _dir / "error_pass.shader.json"; }
+
+    bool CopyFrom(const std::filesystem::path& source) const {
+        std::error_code error;
+        std::filesystem::copy_file(
+            source, ManifestPath(), std::filesystem::copy_options::overwrite_existing, error);
+        return !error;
+    }
+
+private:
+    std::filesystem::path _dir;
+};
+
+class VerticalSliceTest : public testing::TestWithParam<SliceParams> {};
 
 TEST_P(VerticalSliceTest, ManifestToPixels) {
-    const render::RenderBackend backend = GetParam();
+    const render::RenderBackend backend = GetParam().Backend;
+    const SliceBytecodeMode mode = GetParam().Mode;
 
     const std::filesystem::path projectRoot = GetProjectRoot();
     ASSERT_FALSE(projectRoot.empty()) << "the project root is unknown";
     const std::filesystem::path shaderRoot = projectRoot / "shaderlib";
-    const std::filesystem::path manifestPath =
+    const std::filesystem::path sourceManifestPath =
         shaderRoot / "forward_pipeline" / "error_pass.shader.json";
-    ASSERT_TRUE(std::filesystem::is_regular_file(manifestPath));
+    ASSERT_TRUE(std::filesystem::is_regular_file(sourceManifestPath));
+
+    // AOT 模式下解析的是临时目录里的副本, 产物落在它旁边。
+    ScopedCookedManifest cookWorkspace;
+    std::filesystem::path manifestPath = sourceManifestPath;
+    if (mode == SliceBytecodeMode::Aot) {
+        ASSERT_TRUE(cookWorkspace.IsValid());
+        ASSERT_TRUE(cookWorkspace.CopyFrom(sourceManifestPath));
+        manifestPath = cookWorkspace.ManifestPath();
+    }
 
     // ---- 阶段 1: 设备 ----
     SliceContext ctx;
@@ -274,6 +363,29 @@ TEST_P(VerticalSliceTest, ManifestToPixels) {
         backend == render::RenderBackend::D3D12
             ? render::ShaderBlobCategory::DXIL
             : render::ShaderBlobCategory::SPIRV;
+
+    // AOT: 先烘, 后面用"发布包配置"解析。这里就是构建期 radray_shader_cook 干的事,
+    // 只是范围收窄到本后端需要的那一种字节码。
+    if (mode == SliceBytecodeMode::Aot) {
+        const vector<render::ShaderBlobCategory> categories{category};
+        const ShaderCookOptions cookOptions{
+            .ShaderRoot = shaderRoot,
+            .ManifestPath = manifestPath,
+            .Categories = categories,
+            .ValidateReflection = true,
+            .Incremental = false};
+        const ShaderCookResult cook = CookShaderAssetFile(*dxc, cookOptions);
+        string cookErrors;
+        for (const ShaderAssetDiagnostic& diagnostic : cook.Diagnostics) {
+            if (!cookErrors.empty()) {
+                cookErrors += "\n";
+            }
+            cookErrors += diagnostic.ToString();
+        }
+        ASSERT_TRUE(cook.Succeeded()) << cookErrors;
+        // 只有默认变体, 故 1 VS + 1 PS。
+        ASSERT_EQ(cook.Index.Entries.size(), 2u);
+    }
 
     // ---- 阶段 3a: manifest -> PipelineLayout ----
     // 先做这步而不是先建 RT, 是因为它完全不碰 GPU: manifest 是唯一 ABI 来源,
@@ -301,15 +413,23 @@ TEST_P(VerticalSliceTest, ManifestToPixels) {
     ASSERT_TRUE(domain.has_value()) << diag.ToString();
     const ShaderVariantKey variant = domain->DefaultVariant();
 
-    // AllowJit: 切片不预先 cook, 直接让 resolver 走 JIT 兜底。这同时验证了
-    // "AOT 未命中 -> JIT" 这条路径在真实 device 前是可用的。
+    // JIT 模式: 无产物, resolver 现场编译 —— 验证 "AOT 未命中 -> JIT" 在真实 device
+    // 前可用。
+    // AOT 模式: dxc 传 nullptr 而非 dxc.get()。给了指针再设 AllowJit = false 只测到
+    // "我们没去用它"; 传 nullptr 才测到"发布包里 DXC 根本不存在时也能起来"。
+    const bool isAot = mode == SliceBytecodeMode::Aot;
     ShaderResolver resolver{
         ShaderResolveConfig{
             .ShaderRoot = shaderRoot,
             .ManifestPath = manifestPath,
-            .Staleness = ShaderArtifactStaleness::Strict,
-            .AllowJit = true},
-        dxc.get()};
+            .Staleness = isAot ? ShaderArtifactStaleness::Lenient
+                               : ShaderArtifactStaleness::Strict,
+            .AllowJit = !isAot},
+        isAot ? nullptr : dxc.get()};
+    EXPECT_EQ(resolver.CanJit(), !isAot);
+
+    const ShaderBytecodeSource expectedSource =
+        isAot ? ShaderBytecodeSource::Artifact : ShaderBytecodeSource::Jit;
 
     const std::array<render::ShaderStage, 2> stages{
         render::ShaderStage::Vertex,
@@ -325,6 +445,9 @@ TEST_P(VerticalSliceTest, ManifestToPixels) {
             resolver.Resolve(resolvablePass, stage, category, defines, diag);
         ASSERT_TRUE(bytecode.has_value()) << "stage resolve failed: " << diag.ToString();
         EXPECT_FALSE(bytecode->Data.empty());
+        // 断言来源: AOT 用例若因任何原因悄悄退回 JIT, 最终像素照样是洋红, 整个
+        // AOT 参数化就白跑了。
+        EXPECT_EQ(bytecode->Source, expectedSource);
 
         auto shaderResult = device.CreateShader(bytecode->MakeDescriptor());
         ASSERT_TRUE(shaderResult.HasValue()) << "CreateShader failed";
@@ -619,16 +742,34 @@ TEST_P(VerticalSliceTest, ManifestToPixels) {
     readback->Unmap();
 }
 
+/// 参数集在宏外面算好。宏参数列表里既不能出现裸逗号, 也不能塞 `#if`
+/// (MSVC 的 /Zc:preprocessor 会把它判成语法错误)。
+vector<SliceParams> MakeSliceParamList() {
+    vector<SliceParams> params;
+    const std::array<render::RenderBackend, 2> backends{
+        render::RenderBackend::D3D12,
+        render::RenderBackend::Vulkan};
+    for (const render::RenderBackend backend : backends) {
+#if !defined(RADRAY_ENABLE_D3D12)
+        if (backend == render::RenderBackend::D3D12) {
+            continue;
+        }
+#endif
+        params.push_back(MakeSliceParams(backend, SliceBytecodeMode::Jit));
+        params.push_back(MakeSliceParams(backend, SliceBytecodeMode::Aot));
+    }
+    return params;
+}
+
 INSTANTIATE_TEST_SUITE_P(
     Backends,
     VerticalSliceTest,
-    testing::Values(
-#if defined(RADRAY_ENABLE_D3D12)
-        render::RenderBackend::D3D12,
-#endif
-        render::RenderBackend::Vulkan),
-    [](const testing::TestParamInfo<render::RenderBackend>& info) {
-        return info.param == render::RenderBackend::D3D12 ? "D3D12" : "Vulkan";
+    testing::ValuesIn(MakeSliceParamList()),
+    [](const testing::TestParamInfo<SliceParams>& info) {
+        const char* backend =
+            info.param.Backend == render::RenderBackend::D3D12 ? "D3D12" : "Vulkan";
+        const char* mode = info.param.Mode == SliceBytecodeMode::Aot ? "Aot" : "Jit";
+        return string{backend} + "_" + mode;
     });
 
 }  // namespace
