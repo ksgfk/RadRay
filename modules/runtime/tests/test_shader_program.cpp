@@ -169,6 +169,41 @@ public:
     uint32_t Count{0};
 };
 
+/// 一个解析上下文 + (可选) 它借用的 DXC。
+///
+/// 【为何要把两者绑在一起】: context 只借用 Dxc* 裸指针, 必须比它先死。测试里最容易
+/// 犯的错是让 dxc 是局部变量而 context 是成员, 于是先析构 dxc —— 用一个对象把析构
+/// 顺序 (声明序 dxc 在前, 逆序析构 context 在前) 固定下来。
+class ScopedResolveContext {
+public:
+    ScopedResolveContext(ShaderArtifactStaleness staleness, bool withJit) {
+        if (withJit) {
+            auto dxcResult = render::CreateDxc();
+            if (dxcResult.HasValue()) {
+                _dxc = dxcResult.Release();
+            }
+        }
+        _context = make_unique<ShaderResolveContext>(
+            ShaderResolveSettings{
+                .ShaderRoot = GetShaderRoot(),
+                .Staleness = staleness,
+                .AllowJit = withJit},
+            _dxc.get());
+    }
+
+    /// withJit == true 但机器上没有 DXC 时为 false, 调用方应 GTEST_SKIP。
+    bool HasJit() const noexcept { return _dxc != nullptr; }
+    ShaderResolveContext* Get() noexcept { return _context.get(); }
+    ShaderAssetLoadOptions Options() noexcept {
+        return ShaderAssetLoadOptions{.Context = _context.get()};
+    }
+
+private:
+    shared_ptr<render::Dxc> _dxc;
+    /// 【必须声明在 _dxc 之后】: 借用 Dxc*, 析构逆序保证 context 先死。
+    unique_ptr<ShaderResolveContext> _context;
+};
+
 // ============================ AssetId ============================
 
 TEST(ShaderAssetIdTest, PathDerivedAndNamespaced) {
@@ -211,14 +246,11 @@ private:
 TEST_F(ShaderAssetLoadTest, ManifestBecomesAssetWithoutTouchingDxc) {
     // dxc 不给、JIT 不许, 资产仍应构造成功 —— 这就是发布包的加载形态。加载期若偷偷
     // 编译了任何字节码, 这个用例会失败。
-    const ShaderAssetLoadOptions options{
-        .ShaderRoot = GetShaderRoot(),
-        .Staleness = ShaderArtifactStaleness::Strict,
-        .AllowJit = false,
-        .Dxc = nullptr};
+    ScopedResolveContext context{ShaderArtifactStaleness::Strict, false};
 
     ShaderAssetDiagnostic diagnostic;
-    auto asset = CreateShaderAsset(Device(), GetErrorPassManifestPath(), options, diagnostic);
+    auto asset =
+        CreateShaderAsset(Device(), GetErrorPassManifestPath(), context.Options(), diagnostic);
     ASSERT_TRUE(asset.HasValue()) << diagnostic.ToString();
 
     EXPECT_EQ(asset->GetName(), "ErrorPass");
@@ -242,27 +274,38 @@ TEST_F(ShaderAssetLoadTest, ManifestBecomesAssetWithoutTouchingDxc) {
 }
 
 TEST_F(ShaderAssetLoadTest, MissingManifestFails) {
+    ScopedResolveContext context{ShaderArtifactStaleness::Strict, false};
     ShaderAssetDiagnostic diagnostic;
     auto asset = CreateShaderAsset(
         Device(),
         GetShaderRoot() / "forward_pipeline" / "no_such_pass.shader.json",
-        ShaderAssetLoadOptions{.ShaderRoot = GetShaderRoot()},
+        context.Options(),
         diagnostic);
     EXPECT_FALSE(asset.HasValue());
     EXPECT_FALSE(diagnostic.Message.empty());
 }
 
-TEST_F(ShaderAssetLoadTest, VariantResolveFailsWithoutJitOrArtifact) {
-    // 无产物 + 无 DXC: 加载成功但变体解析必须失败, 且失败不写缓存。
+/// 没有 context 就没有 include 根、没有过期策略、没有 JIT 许可。旧版在 ShaderRoot
+/// 留空时按"父目录的父目录"猜 include 根, 那个兜底恰恰说明当时拿不到唯一真相。
+TEST_F(ShaderAssetLoadTest, MissingResolveContextFails) {
     ShaderAssetDiagnostic diagnostic;
     auto asset = CreateShaderAsset(
         Device(),
         GetErrorPassManifestPath(),
-        ShaderAssetLoadOptions{
-            .ShaderRoot = GetShaderRoot(),
-            .Staleness = ShaderArtifactStaleness::Strict,
-            .AllowJit = false,
-            .Dxc = nullptr},
+        ShaderAssetLoadOptions{},
+        diagnostic);
+    EXPECT_FALSE(asset.HasValue());
+    EXPECT_NE(diagnostic.Message.find("Context"), string::npos) << diagnostic.ToString();
+}
+
+TEST_F(ShaderAssetLoadTest, VariantResolveFailsWithoutJitOrArtifact) {
+    // 无产物 + 无 DXC: 加载成功但变体解析必须失败, 且失败不写缓存。
+    ScopedResolveContext context{ShaderArtifactStaleness::Strict, false};
+    ShaderAssetDiagnostic diagnostic;
+    auto asset = CreateShaderAsset(
+        Device(),
+        GetErrorPassManifestPath(),
+        context.Options(),
         diagnostic);
     ASSERT_TRUE(asset.HasValue()) << diagnostic.ToString();
 
@@ -276,21 +319,16 @@ TEST_F(ShaderAssetLoadTest, VariantResolveFailsWithoutJitOrArtifact) {
 }
 
 TEST_F(ShaderAssetLoadTest, JitVariantIsCachedAndStable) {
-    auto dxcResult = render::CreateDxc();
-    if (!dxcResult.HasValue()) {
+    ScopedResolveContext context{ShaderArtifactStaleness::Strict, true};
+    if (!context.HasJit()) {
         GTEST_SKIP() << "DXC is unavailable";
     }
-    shared_ptr<render::Dxc> dxc = dxcResult.Release();
 
     ShaderAssetDiagnostic diagnostic;
     auto asset = CreateShaderAsset(
         Device(),
         GetErrorPassManifestPath(),
-        ShaderAssetLoadOptions{
-            .ShaderRoot = GetShaderRoot(),
-            .Staleness = ShaderArtifactStaleness::Strict,
-            .AllowJit = true,
-            .Dxc = dxc.get()},
+        context.Options(),
         diagnostic);
     ASSERT_TRUE(asset.HasValue()) << diagnostic.ToString();
 
@@ -332,21 +370,16 @@ TEST_F(ShaderAssetLoadTest, JitVariantIsCachedAndStable) {
 }
 
 TEST_F(ShaderAssetLoadTest, StageBytecodeIsSharedAcrossVariantsThatProjectTheSame) {
-    auto dxcResult = render::CreateDxc();
-    if (!dxcResult.HasValue()) {
+    ScopedResolveContext context{ShaderArtifactStaleness::Strict, true};
+    if (!context.HasJit()) {
         GTEST_SKIP() << "DXC is unavailable";
     }
-    shared_ptr<render::Dxc> dxc = dxcResult.Release();
 
     ShaderAssetDiagnostic diagnostic;
     auto asset = CreateShaderAsset(
         Device(),
         GetErrorPassManifestPath(),
-        ShaderAssetLoadOptions{
-            .ShaderRoot = GetShaderRoot(),
-            .Staleness = ShaderArtifactStaleness::Strict,
-            .AllowJit = true,
-            .Dxc = dxc.get()},
+        context.Options(),
         diagnostic);
     ASSERT_TRUE(asset.HasValue()) << diagnostic.ToString();
 
@@ -409,16 +442,14 @@ TEST_F(ShaderAssetLoadTest, CookedArtifactResolvesWithoutDxc) {
     }
     ASSERT_TRUE(cook.Succeeded()) << cookErrors;
 
-    // dxc 传 nullptr: 发布包里 DXC 根本不存在。
+    // context 不给 dxc: 发布包里 DXC 根本不存在。给了指针再关 AllowJit 只测到
+    // "我们没去用它"。
+    ScopedResolveContext context{ShaderArtifactStaleness::Lenient, false};
     ShaderAssetDiagnostic diagnostic;
     auto asset = CreateShaderAsset(
         Device(),
         workspace.ManifestPath(),
-        ShaderAssetLoadOptions{
-            .ShaderRoot = GetShaderRoot(),
-            .Staleness = ShaderArtifactStaleness::Lenient,
-            .AllowJit = false,
-            .Dxc = nullptr},
+        context.Options(),
         diagnostic);
     ASSERT_TRUE(asset.HasValue()) << diagnostic.ToString();
 
@@ -439,14 +470,12 @@ TEST_F(ShaderAssetLoadTest, CookedArtifactResolvesWithoutDxc) {
 }
 
 TEST_F(ShaderAssetLoadTest, OnUnloadHandsPipelineLayoutToRecycler) {
+    ScopedResolveContext context{ShaderArtifactStaleness::Strict, false};
     ShaderAssetDiagnostic diagnostic;
     auto asset = CreateShaderAsset(
         Device(),
         GetErrorPassManifestPath(),
-        ShaderAssetLoadOptions{
-            .ShaderRoot = GetShaderRoot(),
-            .AllowJit = false,
-            .Dxc = nullptr},
+        context.Options(),
         diagnostic);
     ASSERT_TRUE(asset.HasValue()) << diagnostic.ToString();
 
@@ -459,6 +488,7 @@ TEST_F(ShaderAssetLoadTest, OnUnloadHandsPipelineLayoutToRecycler) {
 }
 
 TEST_F(ShaderAssetLoadTest, LoadsThroughAssetManager) {
+    ScopedResolveContext context{ShaderArtifactStaleness::Strict, false};
     AssetManager assetManager;
     CountingRecycler recycler;
     assetManager.SetRecycler(&recycler);
@@ -468,10 +498,7 @@ TEST_F(ShaderAssetLoadTest, LoadsThroughAssetManager) {
         assetManager,
         Device(),
         manifestPath,
-        ShaderAssetLoadOptions{
-            .ShaderRoot = GetShaderRoot(),
-            .AllowJit = false,
-            .Dxc = nullptr});
+        context.Options());
 
     // 加载协程无挂起点, 一次 Pump 即达终态 —— 这就是"加载期不碰 DXC"的可观测证据:
     // 若它同步跑了 JIT, 这里同样会 Ready, 但泵线程会被卡住数百毫秒。
@@ -489,7 +516,7 @@ TEST_F(ShaderAssetLoadTest, LoadsThroughAssetManager) {
         assetManager,
         Device(),
         manifestPath,
-        ShaderAssetLoadOptions{.ShaderRoot = GetShaderRoot(), .AllowJit = false});
+        context.Options());
     EXPECT_EQ(again.GetHandle(), ref.GetHandle());
     EXPECT_EQ(assetManager.GetAssetCount(), 1u);
 
@@ -499,15 +526,62 @@ TEST_F(ShaderAssetLoadTest, LoadsThroughAssetManager) {
 }
 
 TEST_F(ShaderAssetLoadTest, AssetManagerReportsFailureForMissingManifest) {
+    ScopedResolveContext context{ShaderArtifactStaleness::Strict, false};
     AssetManager assetManager;
     StreamingAssetRef<ShaderAsset> ref = LoadShaderAsset(
         assetManager,
         Device(),
         GetShaderRoot() / "forward_pipeline" / "no_such_pass.shader.json",
-        ShaderAssetLoadOptions{.ShaderRoot = GetShaderRoot()});
+        context.Options());
     assetManager.Pump();
     EXPECT_TRUE(ref.IsFaulted());
     EXPECT_EQ(ref.Get(), nullptr);
+}
+
+/// 两份不同的 manifest 共享一个 context, 于是共享源码缓存。
+///
+/// 【这是拆出 ShaderResolveContext 的实质收益, 必须有用例守住】: error_pass 与
+/// forward_pass 的 include 闭包高度重叠 (前者是后者的子集)。若缓存仍留在
+/// ShaderResolver 上 (一份 manifest 一个), 重叠的头文件会被逐份重读。这里断言第二份
+/// 资产的解析【没有】把文件读次数翻倍。
+TEST_F(ShaderAssetLoadTest, TwoAssetsShareOneSourceCache) {
+    const std::filesystem::path forwardManifest =
+        GetShaderRoot() / "forward_pipeline" / "forward_pass.shader.json";
+    if (!std::filesystem::is_regular_file(forwardManifest)) {
+        GTEST_SKIP() << "the forward_pass manifest is missing";
+    }
+
+    ScopedResolveContext context{ShaderArtifactStaleness::Strict, false};
+    ShaderAssetDiagnostic diag;
+
+    // 先算 forward_pass (较大的闭包), 再算 error_pass (它的子集)。
+    const std::optional<ShaderHash> forwardIdentity =
+        context.Get()->GetSourceIdentity("forward_pipeline/forward_pass.hlsl", diag);
+    ASSERT_TRUE(forwardIdentity.has_value()) << diag.ToString();
+    const uint32_t readsAfterForward = context.Get()->GetSourceCacheStats().FileReads;
+    ASSERT_GT(readsAfterForward, 1u) << "forward_pass has a multi-file include closure";
+
+    const std::optional<ShaderHash> errorIdentity =
+        context.Get()->GetSourceIdentity("forward_pipeline/error_pass.hlsl", diag);
+    ASSERT_TRUE(errorIdentity.has_value()) << diag.ToString();
+    EXPECT_NE(forwardIdentity.value(), errorIdentity.value());
+
+    // error_pass 自己的入口文件是新的, 但它 include 的头已在缓存里。故增量必须远小于
+    // 它的闭包规模 —— 若缓存没生效, 增量会等于整个闭包。
+    const uint32_t readsAfterError = context.Get()->GetSourceCacheStats().FileReads;
+    EXPECT_LT(readsAfterError - readsAfterForward, readsAfterForward)
+        << "the shared headers must not be re-read for the second manifest";
+
+    // 两份资产各持一个 resolver, 但共享这一个 context。
+    auto forwardAsset = CreateShaderAsset(Device(), forwardManifest, context.Options(), diag);
+    ASSERT_TRUE(forwardAsset.HasValue()) << diag.ToString();
+    auto errorAsset =
+        CreateShaderAsset(Device(), GetErrorPassManifestPath(), context.Options(), diag);
+    ASSERT_TRUE(errorAsset.HasValue()) << diag.ToString();
+
+    CountingRecycler recycler;
+    forwardAsset->OnUnload(recycler);
+    errorAsset->OnUnload(recycler);
 }
 
 }  // namespace

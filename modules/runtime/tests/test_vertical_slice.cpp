@@ -408,6 +408,17 @@ TEST_P(VerticalSliceTest, ManifestToPixels) {
     // "我们没去用它"; 传 nullptr 才测到"发布包里 DXC 根本不存在时也能起来"。
     const bool isAot = mode == SliceBytecodeMode::Aot;
 
+    // 策略与 DXC 现在都归 ShaderResolveContext (全进程一份, 真实系统里由 RenderSystem
+    // 持有)。AOT 分支给 nullptr 而非 dxc.get() —— 见上面的注释。
+    // 【必须声明在 assetManager 之前】: 资产借用 context, 析构逆序保证资产先死。
+    ShaderResolveContext resolveContext{
+        ShaderResolveSettings{
+            .ShaderRoot = shaderRoot,
+            .Staleness = isAot ? ShaderArtifactStaleness::Lenient
+                               : ShaderArtifactStaleness::Strict,
+            .AllowJit = !isAot},
+        isAot ? nullptr : dxc.get()};
+
     AssetManager assetManager;
     SliceRecycler recycler;
     assetManager.SetRecycler(&recycler);
@@ -416,12 +427,7 @@ TEST_P(VerticalSliceTest, ManifestToPixels) {
         assetManager,
         device,
         manifestPath,
-        ShaderAssetLoadOptions{
-            .ShaderRoot = shaderRoot,
-            .Staleness = isAot ? ShaderArtifactStaleness::Lenient
-                               : ShaderArtifactStaleness::Strict,
-            .AllowJit = !isAot,
-            .Dxc = isAot ? nullptr : dxc.get()});
+        ShaderAssetLoadOptions{.Context = &resolveContext});
     assetManager.Pump();
     ASSERT_TRUE(assetRef.IsReady()) << "the shader asset did not become ready after one pump";
     ASSERT_EQ(assetRef->GetPassCount(), 1u);

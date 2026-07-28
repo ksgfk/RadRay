@@ -2764,6 +2764,158 @@ TEST(ShaderResolverTest, CachedIdentityMatchesTheUncachedFunction) {
     }
 }
 
+/// 菱形与环形 include 在缓存路径下同样必须收敛, 且与无缓存函数逐位一致。
+///
+/// 【为何单列】: 缓存路径是【第二套】闭包遍历实现 (`ShaderResolveContext::GetSourceIdentity`),
+/// 它的去重靠 `files` 列表按路径查重、终止靠同一条。无缓存函数的这几个用例
+/// (`SourceIdentityHandlesDiamondIncludes` / `ToleratesCyclicIncludes`) 一条也管不到它。
+TEST(ShaderResolverTest, CachedIdentityHandlesDiamondAndCyclicIncludes) {
+    ShaderWorkspace workspace;
+    workspace.WriteSource("common.hlsli", "// common\n");
+    workspace.WriteSource("left.hlsli", "#include <common.hlsli>\n");
+    workspace.WriteSource("right.hlsli", "#include <common.hlsli>\n");
+    workspace.WriteSource("diamond.hlsl", "#include <left.hlsli>\n#include <right.hlsli>\n");
+    // 环: cycle_a <-> cycle_b。不去重就会无限展开。
+    workspace.WriteSource("cycle_a.hlsl", "#include <cycle_b.hlsli>\n");
+    workspace.WriteSource("cycle_b.hlsli", "#include <cycle_a.hlsl>\n");
+
+    ShaderResolveContext context{
+        ShaderResolveSettings{
+            .ShaderRoot = workspace.Root(),
+            .Staleness = ShaderArtifactStaleness::Strict,
+            .AllowJit = false},
+        nullptr};
+
+    ShaderAssetDiagnostic diag;
+    for (const std::string_view entry : {"diamond.hlsl", "cycle_a.hlsl"}) {
+        auto cached = context.GetSourceIdentity(entry, diag);
+        ASSERT_TRUE(cached.has_value()) << entry << ": " << diag.Message;
+        auto uncached = ComputeShaderSourceIdentity(workspace.Root(), entry, diag);
+        ASSERT_TRUE(uncached.has_value()) << entry << ": " << diag.Message;
+        EXPECT_EQ(cached.value(), uncached->Hash) << entry;
+    }
+    // diamond 闭包 4 个文件, common.hlsli 只读一次; cycle 两个。共 6 次读盘。
+    EXPECT_EQ(context.GetSourceCacheStats().FileReads, 6u);
+}
+
+/// 删掉闭包里的一个头必须让缓存失效, 且失效表现为【失败】而不是返回旧哈希。
+///
+/// 【与"改内容"是两条不同的代码路径】: 改内容走的是 GetFile 的时间戳失配分支;
+/// 删除走的是 GetFile 返回 nullptr。后者若被当成"缓存仍有效", Strict 会拿一个描述
+/// 已不存在的源码的身份去命中产物。
+TEST(ShaderResolverTest, DeletingAHeaderInvalidatesTheCachedClosure) {
+    ShaderWorkspace workspace;
+    WriteOverlappingSources(workspace);
+
+    ShaderResolveContext context{
+        ShaderResolveSettings{
+            .ShaderRoot = workspace.Root(),
+            .Staleness = ShaderArtifactStaleness::Strict,
+            .AllowJit = false},
+        nullptr};
+
+    ShaderAssetDiagnostic diag;
+    ASSERT_TRUE(context.GetSourceIdentity("a.hlsl", diag).has_value()) << diag.Message;
+
+    std::error_code error;
+    ASSERT_TRUE(std::filesystem::remove(workspace.Root() / "shared.hlsli", error));
+
+    ShaderAssetDiagnostic afterDiag;
+    EXPECT_FALSE(context.GetSourceIdentity("a.hlsl", afterDiag).has_value())
+        << "a stale closure must not survive a deleted dependency";
+    EXPECT_NE(afterDiag.Message.find("missing"), string::npos) << afterDiag.Message;
+}
+
+/// 缓存路径的三条拒绝理由必须与无缓存函数一致 —— 它们是两套独立实现。
+TEST(ShaderResolverTest, CachedIdentityRejectsTheSameInputsAsTheUncachedFunction) {
+    ShaderWorkspace workspace;
+    std::error_code error;
+    std::filesystem::create_directories(workspace.Root() / "inner", error);
+    workspace.WriteSource("inner/entry.hlsl", "// body\n");
+    workspace.WriteSource("outside.hlsli", "// outside\n");
+    workspace.WriteSource("macro.hlsl", "#define P <x.hlsli>\n#include P\n");
+    workspace.WriteSource("dangling.hlsl", "#include <absent.hlsli>\n");
+
+    ShaderResolveContext context{
+        ShaderResolveSettings{
+            .ShaderRoot = workspace.Root(),
+            .Staleness = ShaderArtifactStaleness::Strict,
+            .AllowJit = false},
+        nullptr};
+
+    ShaderAssetDiagnostic missingDiag;
+    EXPECT_FALSE(context.GetSourceIdentity("no_such.hlsl", missingDiag).has_value());
+    EXPECT_NE(missingDiag.Message.find("missing"), string::npos) << missingDiag.Message;
+
+    ShaderAssetDiagnostic includeDiag;
+    EXPECT_FALSE(context.GetSourceIdentity("dangling.hlsl", includeDiag).has_value());
+    EXPECT_NE(includeDiag.Message.find("missing"), string::npos) << includeDiag.Message;
+
+    ShaderAssetDiagnostic macroDiag;
+    EXPECT_FALSE(context.GetSourceIdentity("macro.hlsl", macroDiag).has_value());
+    EXPECT_NE(macroDiag.Message.find("macro-based"), string::npos) << macroDiag.Message;
+
+    // 逃出 root: root 收窄到 inner 后, ../outside.hlsli 必须被拒。
+    ShaderResolveContext innerContext{
+        ShaderResolveSettings{
+            .ShaderRoot = workspace.Root() / "inner",
+            .Staleness = ShaderArtifactStaleness::Strict,
+            .AllowJit = false},
+        nullptr};
+    ShaderAssetDiagnostic escapeDiag;
+    EXPECT_FALSE(innerContext.GetSourceIdentity("../outside.hlsli", escapeDiag).has_value());
+    EXPECT_NE(escapeDiag.Message.find("escapes"), string::npos) << escapeDiag.Message;
+}
+
+/// ShaderRoot 指向不存在的目录: 缓存路径必须报 root 不可用, 而不是逐个文件报缺失。
+TEST(ShaderResolverTest, CachedIdentityRejectsMissingShaderRoot) {
+    ShaderResolveContext context{
+        ShaderResolveSettings{
+            .ShaderRoot = "Z:/definitely/not/here",
+            .Staleness = ShaderArtifactStaleness::Strict,
+            .AllowJit = false},
+        nullptr};
+    ShaderAssetDiagnostic diag;
+    EXPECT_FALSE(context.GetSourceIdentity("main.hlsl", diag).has_value());
+    EXPECT_NE(diag.Message.find("unavailable"), string::npos) << diag.Message;
+    // 失败不该留下任何缓存条目, 否则 root 后来被创建出来时会读到空结果。
+    EXPECT_EQ(context.GetSourceCacheStats().FileReads, 0u);
+}
+
+/// context 里的策略是【唯一】真相, resolver 只转发。
+TEST(ShaderResolverTest, ResolverForwardsContextPolicyAndKeepsItsOwnManifestPath) {
+    ShaderWorkspace workspace;
+    WriteOverlappingSources(workspace);
+
+    ShaderResolveContext context{
+        ShaderResolveSettings{
+            .ShaderRoot = workspace.Root(),
+            .Staleness = ShaderArtifactStaleness::Lenient,
+            .AllowJit = false},
+        nullptr};
+
+    const std::filesystem::path manifestA = workspace.Root() / "a.shader.json";
+    const std::filesystem::path manifestB = workspace.Root() / "b.shader.json";
+    ShaderResolver first{context, manifestA};
+    ShaderResolver second{context, manifestB};
+
+    // 策略与工具链身份全部来自同一个 context。
+    EXPECT_EQ(&first.GetContext(), &context);
+    EXPECT_EQ(&second.GetContext(), &context);
+    EXPECT_EQ(first.GetToolchainHash(), second.GetToolchainHash());
+    EXPECT_EQ(first.GetToolchainHash(), context.GetToolchainHash());
+    EXPECT_EQ(first.CanJit(), context.CanJit());
+    EXPECT_FALSE(first.CanJit()) << "the context has neither DXC nor AllowJit";
+    EXPECT_EQ(context.GetStaleness(), ShaderArtifactStaleness::Lenient);
+    EXPECT_EQ(context.GetShaderRoot(), workspace.Root());
+    EXPECT_EQ(context.GetSettings().AllowJit, false);
+    EXPECT_FALSE(context.GetDxc().HasValue());
+
+    // 但 manifest 身份是各自的 —— artifact 目录与 index 缓存都由它推导。
+    EXPECT_EQ(first.GetManifestPath(), manifestA);
+    EXPECT_EQ(second.GetManifestPath(), manifestB);
+}
+
 TEST(ShaderResolverTest, ClearSourceCacheForcesRecompute) {
     Fixture fixture;
     TestResolver resolver = fixture.Resolver(ShaderArtifactStaleness::Strict, false);
@@ -2940,12 +3092,11 @@ struct MultiSourceFixture {
         }
     }
 
-    ShaderResolveConfig Config(ShaderArtifactStaleness staleness, bool allowJit) const {
-        return ShaderResolveConfig{
-            .ShaderRoot = Workspace.Root(),
-            .ManifestPath = Workspace.ManifestPath(),
-            .Staleness = staleness,
-            .AllowJit = allowJit};
+    TestResolver Resolver(
+        ShaderArtifactStaleness staleness,
+        bool allowJit,
+        Nullable<render::Dxc*> dxc = nullptr) const {
+        return TestResolver{Workspace.Root(), Workspace.ManifestPath(), staleness, allowJit, dxc};
     }
 
     ShaderCookOptions Cook() const {
@@ -2975,12 +3126,11 @@ struct VariantFixture {
         }
     }
 
-    ShaderResolveConfig Config(ShaderArtifactStaleness staleness, bool allowJit) const {
-        return ShaderResolveConfig{
-            .ShaderRoot = Workspace.Root(),
-            .ManifestPath = Workspace.ManifestPath(),
-            .Staleness = staleness,
-            .AllowJit = allowJit};
+    TestResolver Resolver(
+        ShaderArtifactStaleness staleness,
+        bool allowJit,
+        Nullable<render::Dxc*> dxc = nullptr) const {
+        return TestResolver{Workspace.Root(), Workspace.ManifestPath(), staleness, allowJit, dxc};
     }
 
     const ShaderPassDesc& Pass() const { return Asset.Passes.front(); }

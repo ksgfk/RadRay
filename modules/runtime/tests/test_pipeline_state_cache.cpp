@@ -163,24 +163,50 @@ protected:
 
     /// 建一个能 JIT 的资产。DXC 不可用时返回空 ref。
     StreamingAssetRef<ShaderAsset> LoadJitAsset() {
-        if (_dxc == nullptr) {
-            auto dxcResult = render::CreateDxc();
-            if (!dxcResult.HasValue()) {
-                return nullptr;
-            }
-            _dxc = dxcResult.Release();
+        if (JitContext() == nullptr) {
+            return nullptr;
         }
         StreamingAssetRef<ShaderAsset> ref = LoadShaderAsset(
             *_assets,
             *_ctx.Device,
             GetErrorPassManifestPath(),
-            ShaderAssetLoadOptions{
-                .ShaderRoot = GetShaderRoot(),
-                .Staleness = ShaderArtifactStaleness::Strict,
-                .AllowJit = true,
-                .Dxc = _dxc.get()});
+            ShaderAssetLoadOptions{.Context = JitContext()});
         _assets->Pump();
         return ref;
+    }
+
+    /// 惰性建立"开发构建"上下文 (Strict + JIT)。DXC 不可用时返回 nullptr。
+    /// 一个 fixture 一个 context —— 这就是真实系统里 RenderSystem 持有的那一份。
+    ShaderResolveContext* JitContext() {
+        if (_jitContext == nullptr) {
+            if (_dxc == nullptr) {
+                auto dxcResult = render::CreateDxc();
+                if (!dxcResult.HasValue()) {
+                    return nullptr;
+                }
+                _dxc = dxcResult.Release();
+            }
+            _jitContext = make_unique<ShaderResolveContext>(
+                ShaderResolveSettings{
+                    .ShaderRoot = GetShaderRoot(),
+                    .Staleness = ShaderArtifactStaleness::Strict,
+                    .AllowJit = true},
+                _dxc.get());
+        }
+        return _jitContext.get();
+    }
+
+    /// "发布包"上下文: 无 DXC、无产物, 故任何解析都会失败。
+    ShaderResolveContext& NoJitContext() {
+        if (_noJitContext == nullptr) {
+            _noJitContext = make_unique<ShaderResolveContext>(
+                ShaderResolveSettings{
+                    .ShaderRoot = GetShaderRoot(),
+                    .Staleness = ShaderArtifactStaleness::Strict,
+                    .AllowJit = false},
+                nullptr);
+        }
+        return *_noJitContext;
     }
 
     PipelineStateCache& Cache() {
@@ -220,6 +246,9 @@ private:
     unique_ptr<render::RenderPass> _renderPass;
     unique_ptr<PipelineStateCache> _cache;
     shared_ptr<render::Dxc> _dxc;
+    /// 【必须声明在 _dxc 之后】: 借用 Dxc*, 析构逆序保证 context 先死。
+    unique_ptr<ShaderResolveContext> _jitContext;
+    unique_ptr<ShaderResolveContext> _noJitContext;
 };
 
 TEST_F(PipelineStateCacheTest, SameKeyHitsTheSamePipelineState) {
@@ -341,10 +370,7 @@ TEST_F(PipelineStateCacheTest, DifferentProgramSplitsEntries) {
     auto secondAsset = CreateShaderAsset(
         Device(),
         GetErrorPassManifestPath(),
-        ShaderAssetLoadOptions{
-            .ShaderRoot = GetShaderRoot(),
-            .AllowJit = false,
-            .Dxc = nullptr},
+        ShaderAssetLoadOptions{.Context = &NoJitContext()},
         diag);
     ASSERT_TRUE(secondAsset.HasValue()) << diag.ToString();
 

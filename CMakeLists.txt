@@ -23,6 +23,13 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+# 本项目不使用 C++20 modules, 关闭模块依赖扫描.
+# 必须在任何 add_subdirectory 之前设置, 否则 third_party 目标会继承 ON.
+# 原因: CMP0155 在 cmake_minimum_required(VERSION 3.25) 下为 OLD, 但 CMake 4.4 的
+# Visual Studio 生成器仍会对声明 C++20 的目标写出 ScanSourceForModuleDependencies=true,
+# 而 ClangCL 工具链不认识 MSBuild 传入的 /scanDependencies, 导致 .obj 根本不生成,
+# 随后 llvm-lib 以 MSB6006 失败. 增量构建会因残留的 .lib 掩盖该错误, 只有干净构建才暴露.
+set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 if (MSVC)
     add_compile_options(/MP)
 endif()

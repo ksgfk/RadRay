@@ -17,30 +17,42 @@
 
 ### 1.1 代码规模
 
+> 本节数字随 8.16 拆库 (`core ← shader ← render ← runtime`) 与 8.19 已更新至
+> 2026-07-28。文件已从 `modules/runtime/` 迁至 `modules/shader/`。
+
 | 路径 | 行数 | 性质 |
 |---|---|---|
-| `modules/runtime/include/radray/runtime/shader_manifest.h` | 910 | 公开接口 |
-| `modules/runtime/src/shader_manifest.cpp` | 3419 | 全部实现 (未拆分) |
-| `modules/runtime/src/shader_asset_json.h` | 20 | private, JSON 字段表唯一实现点 |
-| `modules/runtime/src/shader_reflection_map.h` / `.cpp` | 59 / 140 | private, 反射→RHI 映射, validator 与 generator 共用 |
-| `modules/runtime/include/radray/runtime/shader_asset_template.h` | 249 | manifest 模板生成器 |
-| `modules/runtime/src/shader_asset_template.cpp` | 1155 | 同上 |
-| `modules/runtime/tests/test_shader_asset.cpp` | 4050 | 223 个 TEST |
-| `modules/runtime/tests/test_shader_asset_template.cpp` | 903 | |
+| `modules/shader/include/radray/shader/shader_manifest.h` | 983 | 公开接口 |
+| `modules/shader/include/radray/shader/shader_types.h` | 196 | manifest 数据词汇 (10 项, 见 8.17/8.18) |
+| `modules/shader/src/shader_manifest.cpp` | 3447 | 全部实现 (未拆分) |
+| `modules/shader/src/shader_asset_json.h` | 20 | private, JSON 字段表唯一实现点 |
+| `modules/shader/src/shader_reflection_map.h` / `.cpp` | 59 / 140 | private, 反射→RHI 映射, validator 与 generator 共用 |
+| `modules/shader/include/radray/shader/shader_asset_template.h` | 249 | manifest 模板生成器 |
+| `modules/shader/src/shader_asset_template.cpp` | 1155 | 同上 |
+| `modules/shader/tests/test_shader_asset.cpp` | 4460 | |
+| `modules/shader/tests/test_shader_asset_template.cpp` | 911 | |
+| `modules/runtime/include/radray/runtime/shader_asset.h` / `src/` | 127 / 190 | `ShaderAsset`, 持 GPU 对象 (见 8.9) |
+| `modules/runtime/include/radray/runtime/shader_program.h` / `src/` | 235 / 293 | manifest 数据 → RHI 参数打包 |
 
-gtest suite: `ShaderAssetTest`(78) / `ShaderArtifactTest`(60) / `ShaderResolverTest`(35) /
-`ShaderBakeSetTest`(26) / `ShaderVariantTest`(22) / `ShaderAssetSampleTest`(2)。
+shader 相关 gtest suite: `ShaderAssetTest`(73) / `ShaderArtifactTest`(60) /
+`ShaderResolverTest`(43) / `ShaderBakeSetTest`(26) / `ShaderVariantTest`(22) /
+`ShaderKeywordPragmaTest`(21) / `ShaderAssetTemplateTest`(19) / `ShaderAssetLoadTest`(11) /
+`ShaderAssetSampleTest`(6) / `ShaderLayoutBindingTest`(6) / `ShaderAssetIdTest`(1)。
+全仓 **373** 个用例 / 30 个 suite / 22 个 exe (数字的取得方式见 8.8 与 8.20: 必须
+双向集合比较 + 干净构建)。
 
 ### 1.2 声明与实现完整性
 
 头文件声明的**每个符号都有实现**, 实现文件里**零 TODO / FIXME / XXX**。
 
-已逐项核对: `ShaderVariantDomain` 全部方法 (`shader_manifest.cpp:1619-1833`)、
-`GetEffectiveBakeSet`(`:1836`)、`ExpandShaderBakeSet`(`:1842-1958`)、
-`ShaderResolver` 全部成员 (`:1976-2310`)、`CookShaderAsset`(`:3276`)、
-`CookShaderAssetFile`(`:3390`)、`ValidateShaderReflection` DXIL(`:2510-2598`) 与
-SPIRV(`:2600-2691`)、`BuildPipelineLayoutStorage`(`:2445`)、
-`BuildVertexInputStorage`(`:2480`)、`ComputeShaderSourceIdentity`(`:2702-2783`)。
+已逐项核对 (行号对应 2026-07-28 的 `modules/shader/src/shader_manifest.cpp`):
+`ShaderVariantDomain` 全部方法 (`:1594-1808`)、`GetEffectiveBakeSet`(`:1811`)、
+`ExpandShaderBakeSet`(`:1831`)、`ShaderResolveContext` 全部成员 (`:1951-2130`, 见 8.19)、
+`ShaderResolver` 全部成员 (`:2131-2412`)、`ValidateShaderReflection` DXIL(`:2547`) 与
+SPIRV(`:2637`)、`ComputeShaderSourceIdentity`(`:2739`)、`CookShaderAsset`(`:3304`)、
+`CookShaderAssetFile`(`:3418`)。
+`BuildPipelineLayoutStorage` / `BuildVertexInputStorage` 已按 8.9 迁至
+`modules/runtime/src/shader_program.cpp:42` / `:77`。
 18 个 JSON codec 宏声明各有 `Write` + `Read` 定义 (共 36 个)。
 
 ### 1.3 已硬化的设计决策
@@ -1976,3 +1988,87 @@ device**。
 **教训**: 一个类型被放进下层, 有时不是因为下层需要它, 而是因为**某个便利函数**恰好写在了
 下层。判断依赖时要问"删掉这个函数后, 本层还需要这个类型吗"。这里的答案是不需要, 而且那个
 函数连生产代码都没用过。
+
+### 8.19 `ShaderResolveContext` 拆分: 策略唯一真相 + 文件级源码缓存 (2026-07-28)
+
+**动机**: 原 `ShaderResolveConfig` 把三件不同生命周期的东西塞在一起 —— 进程级策略
+(`ShaderRoot` / `Staleness` / `AllowJit`)、每 manifest 一份的 `ManifestPath`、以及借用的
+`Dxc*`。后果是每个 `ShaderAsset` 各自复制一份策略 (多处真相), 且**源码读取与 include 闭包
+扫描无法跨 manifest 复用** —— 两个 manifest 引用同一个 `.hlsli`, 就要各扫一遍。
+
+**改动形状**:
+
+| 类型 | 职责 | 生命周期 |
+| --- | --- | --- |
+| `ShaderResolveSettings` | 纯数据: `ShaderRoot` / `Staleness` / `AllowJit` | 值语义 |
+| `ShaderResolveContext` | 持策略 + 借用 `Dxc*` + **文件级源码缓存** | 全进程一份 |
+| `ShaderResolver` | `(context&, manifestPath)`, 只管自己那份 manifest | 每 manifest |
+
+`ManifestPath` 从策略里移出, 成为 resolver 的构造参数 —— 它本来就不是策略。
+`ShaderAssetLoadOptions` 随之从 4 个字段收窄为只剩 `.Context`。
+
+**缓存与失效**: `GetFile` 每次检出文件时间戳, 变化则删该条并 `_closures.clear()`
+(闭包是跨文件的传递结果, 无法精确失效单条, 全清是唯一正确解); 文件消失则返回 nullptr。
+`ShaderSourceCacheStats{FileReads, IncludeScans, IdentityComputes}` 用于在测试里断言
+"第二个 asset 复用了第一个的读取"。
+
+**生命周期不变量** (靠声明顺序固定, 不靠注释): `RenderSystem` 内
+`_shaderResolveContext` 声明在 `_dxc` **之后**, 逆序析构保证 dxc 后死; context 必须比
+resolver / `ShaderAsset` 活得久。
+
+**新增测试 7 个** (`test_shader_asset.cpp` 5 + `test_shader_program.cpp` 2), 全部针对
+缓存路径 —— 因为缓存是**第二套闭包遍历实现**, 与 `ComputeShaderSourceIdentity` 的无缓存
+路径并存, 两者必须逐输入等价:
+
+- `CachedIdentityMatchesTheUncachedFunction` / `CachedIdentityRejectsTheSameInputsAsTheUncachedFunction`
+  —— 正反两侧都比对 (相同输入同结果, 相同坏输入同拒绝: missing / dangling include /
+  macro-based include / 逃出 root)
+- `CachedIdentityHandlesDiamondAndCyclicIncludes` —— 菱形不重复读, 环不死循环
+- `DeletingAHeaderInvalidatesTheCachedClosure` —— 失效路径
+- `TwoAssetsShareOneSourceCache` —— 跨 manifest 复用 (拆分的正当性本身)
+- `MissingResolveContextFails` —— `ShaderAssetLoadOptions{}` 缺 context 时报错含 `"Context"`
+
+**验收**: 干净构建 0 error; ctest **373/373** (362 + 4 提交内 + 7 本轮);
+22 个 exe 自报 373 ↔ ctest 373, 双向 `Compare-Object` 无差异。
+
+### 8.20 修正 8.x 的一处误判: fmt `/scanDependencies` 不是无害噪音 (2026-07-28)
+
+前几轮把构建输出里的
+`clang-cl : error : no such file or directory: '/scanDependencies' [fmt.vcxproj]`
+记为"既存无害噪音, 非本次改动引入"。**这个判断是错的**, 干净构建时它是硬失败。
+
+**真实机制** (逐环节已验证):
+
+1. `third_party/fmt/CMakeLists.txt:1` 是 `cmake_minimum_required(VERSION 3.8...3.28)`,
+   上界 3.28 使 **CMP0155 在该子目录取 OLD**。
+2. CMake 4.4 的 Visual Studio 生成器据此对声明了 C++20 的目标写出
+   `<ScanSourceForModuleDependencies>true</ScanSourceForModuleDependencies>`
+   (实测: `fmt.vcxproj` 有, `radraycore.vcxproj` 是 false)。
+3. MSBuild 于是给 **ClangCL** 传 `/scanDependencies`, 而 clang-cl 不认识该开关。
+4. 结果 `format.obj` **根本不生成**, 紧接着 `llvm-lib` 以 `MSB6006` 失败。
+
+**为什么被误判为无害**: 长期存活的 `build_debug` 里已有旧工具链产出的 `fmt.lib`,
+增量构建跳过归档步骤, 错误只在日志里刷屏却不阻断。删掉 build 目录后立刻变成硬失败 ——
+潜伏破坏被增量状态掩盖了。受影响的不止 fmt: `fmt-c` / `freetype` / `png_static` /
+`yyjson` / `zlibstatic` 共 6 个 vcxproj 都带该标志。
+
+**修法** (根 `CMakeLists.txt`, 不动 `third_party/`):
+在任何 `add_subdirectory` **之前**设 `set(CMAKE_CXX_SCAN_FOR_MODULES OFF)`。位置是关键 ——
+放晚了子目录已经继承了 ON。本项目 `FMT_MODULE` 强制 OFF 且全仓无 `CXX_MODULES` file set,
+不使用 C++20 modules, 扫描纯属开销。
+
+**验收**: 重新 configure 后**无任何** vcxproj 带 `ScanSourceForModuleDependencies=true`;
+ClangCL 干净构建 0 error, ctest 373/373; 另在临时目录用**纯 MSVC 工具集**
+(`Visual Studio 18 2026` + `-A x64`) configure + 构建 `fmt`/`fmt-c`/`radraycore`/
+`radrayshader` 同样 0 error, 确认不是把问题从一个工具链挪到另一个。
+(注意两个 preset 共用 `binaryDir: build_debug`, 验证 MSVC 必须另指目录, 否则会冲掉
+ClangCL 构建树。)
+
+顺带复现了 8.8 的僵尸产物问题: `build_debug/_build/Debug/test_shader_resolver.exe`
+(7-26 产出, 拆库前的目标, 已无源文件也无 CMakeLists 引用) 仍被 exe 扫描算作一个用例集,
+使 exe 自报 374 ↔ ctest 373。干净构建后消失。**这印证 8.8 的教训应升级**: 凡以用例集合
+做验收, 除双向比较外还要留意 build 树里的陈旧 exe —— 双向比较能发现它, 但只有干净构建
+能消除它。
+
+**教训**: "既存的、一直在刷的错误"不等于"无害的"。增量构建会把硬失败伪装成噪音,
+判定构建健康度必须至少做一次干净构建 —— 这也是本轮唯一一次真正暴露该问题的操作。
