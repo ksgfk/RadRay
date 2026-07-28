@@ -57,18 +57,7 @@
     {
       "Name": "AlphaMode",
       "Keywords": [
-        "_ALPHATEST_ON",
-        "_ALPHABLEND_ON"
-      ],
-      "IsOptional": true,
-      "Stages": [
-        "Pixel"
-      ]
-    },
-    {
-      "Name": "DoubleSided",
-      "Keywords": [
-        "_DOUBLESIDED_ON"
+        "_ALPHATEST_ON"
       ],
       "IsOptional": true,
       "Stages": [
@@ -96,6 +85,7 @@
       ]
     }
   ],
+  "_BakeComment": "默认变体总在结果里, 无需声明。半透明不再是独立变体 —— 混合是固定功能状态, 与 opaque 共用同一份字节码。",
   "BakeVariants": {
     "Rules": [
       {
@@ -106,14 +96,8 @@
           "_OCCLUSION_MAP",
           "_EMISSIVE_MAP",
           "_ALPHATEST_ON",
-          "_DOUBLESIDED_ON",
           "_POINT_SHADOWS",
           "_DIRECTIONAL_SHADOWS"
-        ]
-      },
-      {
-        "Combination": [
-          "_ALPHABLEND_ON"
         ]
       }
     ]

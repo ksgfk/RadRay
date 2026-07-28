@@ -12,7 +12,10 @@
 //
 // 依赖调用方 (入口 shader) 声明这些 keyword 组:
 //   _BASECOLOR_MAP / _METALROUGHNESS_MAP / _NORMAL_MAP / _OCCLUSION_MAP / _EMISSIVE_MAP
-//   _ALPHATEST_ON / _ALPHABLEND_ON / _DOUBLESIDED_ON
+//
+// 混合与双面【不是】keyword: 它们由 MaterialRenderState 的 Blend / Cull 表达。本文件
+// 无条件写出 Alpha 并按 SV_IsFrontFace 翻转法线; 混合关闭时 Alpha 被 blend state 忽略,
+// CullMode::Back 下背面不进 PS 使翻转成为死代码 —— 两者都无需 keyword 守护。
 
 /// per-material 常量。数值参数走持久 cbuffer, 分支走 keyword。
 /// 字段按 float4 打包, 顺序须与 CPU 端材质写入逐字段对齐。
@@ -37,8 +40,9 @@ RADRAY_FORWARD_MATERIAL_SAMPLER(gSampler, 6, 6);
 /// 采样后的表面属性。所有贴图与常量都已合并, 值域已 clamp。
 struct SurfaceSample {
     float3 Albedo;     // 线性空间基础色
-    float Alpha;       // 输出到 target 的不透明度 (仅 _ALPHABLEND_ON 下非 1)
-    float Coverage;    // 用于 alpha test 的覆盖率, 与输出 alpha 无关
+    /// 不透明度。同时是 alpha test 的比较值与写入 target 的 alpha ——
+    /// 混合关闭时后者被 blend state 丢弃, 故无需拆成两个字段。
+    float Alpha;
     float3 Normal;     // 世界空间着色法线 (归一化, 已处理双面翻转与法线贴图)
     float Metallic;
     float Roughness;
@@ -64,13 +68,9 @@ SurfaceSample sample_standard_material(
     base_color *= gBaseColorMap.Sample(gSampler, texcoord);
 #endif
     surface.Albedo = saturate(base_color.rgb);
-    surface.Coverage = saturate(base_color.a);
-    // 不混合时输出 alpha 恒为 1: 让 blend state 与 shader 输出一致, 免得写出会被忽略的值。
-    // alpha test 是二值裁剪, 通过测试的像素同样输出 1。
-    surface.Alpha = 1.0f;
-#ifdef _ALPHABLEND_ON
-    surface.Alpha = surface.Coverage;
-#endif
+    // 无条件写出 Alpha。不混合时这个值会被 blend state 丢弃, 故不需要 keyword 把它
+    // 归一 —— 是否混合是纯固定功能决策, 由 MaterialRenderState::Blend 单独表达。
+    surface.Alpha = saturate(base_color.a);
 
     // ── metallic / roughness ──
     surface.Metallic = saturate(gMaterial.Pbr.x);
@@ -86,13 +86,14 @@ SurfaceSample sample_standard_material(
 
     // ── 法线 ──
     float3 n = safe_normalize(normal_world, float3(0.0f, 0.0f, 1.0f));
-#ifdef _DOUBLESIDED_ON
-    // 双面着色: 背面把插值法线翻向相机一侧, 使内壁也能正常受光。
-    // (背面能否被光栅化取决于 PSO CullMode = None, 由 pass 固定状态保证。)
+    // 背面把插值法线翻向相机一侧, 使内壁也能正常受光。
+    //
+    // 无条件执行: 是否双面是纯固定功能决策 (MaterialRenderState::Cull)。CullMode::Back
+    // 下背面根本不进 PS, is_front_face 恒为 true, 这个分支是死代码; CullMode::None 下
+    // 它才生效。用 keyword 守护它不会改变任何一条路径的 bytecode 语义。
     if (!is_front_face) {
         n = -n;
     }
-#endif
 #ifdef _NORMAL_MAP
     {
         Frame3 tbn = make_frame_tangent(n, tangent_world.xyz, tangent_world.w);

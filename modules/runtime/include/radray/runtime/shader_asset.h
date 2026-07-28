@@ -431,6 +431,27 @@ const ShaderBakeSetDesc& GetEffectiveBakeSet(
     const ShaderAssetDesc& asset,
     const ShaderPassDesc& pass) noexcept;
 
+/// 取该 pass 生效的源文件路径: pass 自己的, 或继承资产级的。
+///
+/// manifest 允许 pass.Source 留空表示"沿用资产级 Source", 而 ShaderResolver::Resolve
+/// 只收 pass, 无从自己完成继承 —— 它要求传入的 pass.Source 已经是最终路径。
+/// 每个调用方各写一遍 `pass.Source.empty() ? asset.Source : pass.Source` 就会散落成
+/// 多份规则, 故收敛到这里。
+///
+/// 对经 ParseShaderAssetDesc 产出的 desc, 返回值非空 —— 该校验拒绝 pass 与资产级
+/// Source 同时为空的 manifest (shader_asset.cpp:677-680)。手工构造的 desc 不在此保证内。
+std::string_view GetEffectiveSource(
+    const ShaderAssetDesc& asset,
+    const ShaderPassDesc& pass) noexcept;
+
+/// 返回一个 Source 已展开为最终路径的 pass 副本, 可直接交给 ShaderResolver::Resolve。
+///
+/// 【为何返回副本而不是就地改】: ShaderAssetDesc 是解析结果, 保持它与 manifest 逐字
+/// 对应 (pass.Source 空就是空) 使往返序列化不失真; 展开是消费侧的需要。
+ShaderPassDesc MakeResolvablePass(
+    const ShaderAssetDesc& asset,
+    const ShaderPassDesc& pass);
+
 /// 展开烘焙声明为具体变体列表。规则求并集, 应用 Skip, 排序去重。
 ///
 /// 结果【总是】含默认变体: 一份 shader 至少要能在不开任何 keyword 时工作, 且这
@@ -662,6 +683,10 @@ private:
 
 /// stage 字节码解析器。按 AOT 产物优先、JIT 兜底的顺序取字节码。
 ///
+/// 【一个实例对应一份 manifest】: `ShaderResolveConfig::ManifestPath` 是构造参数,
+/// 内部的 index 缓存 (`_index`) 与 artifact 目录都由它推导。要解析另一份 manifest
+/// 就另建一个实例 —— 这与"index.json 每份 manifest 一个"的产物布局一致。
+///
 /// 非线程安全: 内部有惰性加载的 index 缓存与源码身份缓存。多线程编译应各持一个
 /// 实例, 或由调用方加锁。
 class ShaderResolver {
@@ -694,9 +719,15 @@ public:
 private:
     /// 一次源码身份计算的缓存。
     ///
-    /// 记录整个 include 闭包的时间戳: 命中时逐个 stat 复核, 任一变化即重算。
-    /// 光缓存哈希是不够的 —— Strict 承诺"改 shader 立刻生效", 而 resolver 实例常常
-    /// 跨越多次 Resolve 存活 (RenderSystem 持有), 只增不失效会让过期产物被判命中。
+    /// 【key 是 entry 源文件路径, 不是被 include 的头】: 一条记录 = 一个入口文件
+    /// (如 forward_pipeline/forward_pass.hlsl) 及其整份 include 闭包算出的单个哈希。
+    /// 被多个入口共享的头 (如 view.hlsli) 只出现在各自的 Stamps 里用于复核, 不构成
+    /// 独立条目 —— 故两份 manifest 各自的条目互不复用, 共享同一个 resolver 实例
+    /// 并不能让它们省下彼此的计算。
+    ///
+    /// Stamps 记录整个 include 闭包的时间戳: 命中时逐个 stat 复核, 任一变化即重算。
+    /// 光缓存哈希是不够的 —— Strict 承诺"改 shader 立刻生效", 而 resolver 实例会跨越
+    /// 多次 Resolve 存活, 只增不失效会让过期产物被判命中。
     struct SourceIdentityCache {
         string SourcePath;
         ShaderHash Hash{};
@@ -845,8 +876,9 @@ std::optional<string> SerializeShaderArtifactIndex(
 
 #if defined(RADRAY_ENABLE_SHADER_JIT)
 
-/// 烘焙一份 shader 资产。本轮只烘焙"全部 keyword 关闭"的默认组合
-/// (manifest 的 KeywordGroups 仅声明合法组合域, bake set 属未来工作)。
+/// 烘焙一份 shader 资产。烘焙范围由每个 pass 生效的 ShaderBakeSetDesc 决定
+/// (见 GetEffectiveBakeSet / ExpandShaderBakeSet), 对 category × variant × stage
+/// 逐个编译; 投影到同一份字节码的 stage 自然共享一条 blob。
 ///
 /// 成功时产物目录内容为: index.json + <category>/<key>.bin。
 ShaderCookResult CookShaderAsset(

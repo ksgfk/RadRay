@@ -3842,9 +3842,20 @@ std::filesystem::path GetForwardSampleManifestPath() {
            "forward_pass.shader.json";
 }
 
+constexpr std::string_view kErrorPassSource = "forward_pipeline/error_pass.hlsl";
+
+std::filesystem::path GetErrorPassManifestPath() {
+    return GetProjectRoot() / "shaderlib" / "forward_pipeline" /
+           "error_pass.shader.json";
+}
+
 class ScopedForwardSampleCookDirectory {
 public:
-    ScopedForwardSampleCookDirectory() {
+    /// manifestFileName: 拷进临时目录后的文件名。cook 会把产物写到 manifest 旁边,
+    /// 故每个用例都需要独立目录, 且文件名要与它拷进来的那份 manifest 对应。
+    explicit ScopedForwardSampleCookDirectory(
+        std::string_view manifestFileName = "forward_pass.shader.json")
+        : _manifestFileName(manifestFileName) {
         static std::atomic<uint32_t> counter{0};
         std::error_code error;
         const std::filesystem::path tempRoot = std::filesystem::temp_directory_path(error);
@@ -3872,10 +3883,11 @@ public:
     ScopedForwardSampleCookDirectory& operator=(const ScopedForwardSampleCookDirectory&) = delete;
 
     bool IsValid() const noexcept { return !_path.empty(); }
-    std::filesystem::path ManifestPath() const { return _path / "forward_pass.shader.json"; }
+    std::filesystem::path ManifestPath() const { return _path / _manifestFileName; }
 
 private:
     std::filesystem::path _path;
+    string _manifestFileName;
 };
 
 string JoinForwardSampleDiagnostics(const ShaderCookResult& result) {
@@ -3913,7 +3925,9 @@ TEST(ShaderAssetSampleTest, ManifestMatchesForwardPassContract) {
     ASSERT_TRUE(asset.has_value()) << diagnostic.ToString();
     EXPECT_EQ(asset->Name, "ForwardPrincipled");
     EXPECT_EQ(asset->Source, kForwardSampleSource);
-    ASSERT_EQ(asset->KeywordGroups.size(), 9u);
+    // 8 组: 5 张贴图 + AlphaMode + 两组阴影。混合与双面不在其中 —— 它们是固定功能
+    // 状态 (MaterialRenderState), 不是变体维度。
+    ASSERT_EQ(asset->KeywordGroups.size(), 8u);
     ASSERT_EQ(asset->Passes.size(), 1u);
 
     const ShaderPassDesc& pass = asset->Passes.front();
@@ -3956,7 +3970,7 @@ TEST(ShaderAssetSampleTest, ManifestMatchesForwardPassContract) {
     std::optional<ShaderVariantDomain> domain =
         ShaderVariantDomain::Build(asset.value(), pass, diagnostic);
     ASSERT_TRUE(domain.has_value()) << diagnostic.ToString();
-    EXPECT_EQ(domain->GroupCount(), 9u);
+    EXPECT_EQ(domain->GroupCount(), 8u);
 
     std::optional<vector<ShaderVariantKey>> variants = ExpandShaderBakeSet(
         domain.value(),
@@ -3964,10 +3978,137 @@ TEST(ShaderAssetSampleTest, ManifestMatchesForwardPassContract) {
         true,
         diagnostic);
     ASSERT_TRUE(variants.has_value()) << diagnostic.ToString();
-    EXPECT_EQ(variants->size(), 3u);
+    // 默认变体 (全关) + 声明的 full-feature 组合。
+    EXPECT_EQ(variants->size(), 2u);
+}
+
+// error_pass 是垂直切片 (端到端 draw 测试) 用的 shader: 顶点只有 POSITION,
+// PSMain 返回洋红常量, 无材质绑定。本用例锁住它的 manifest 契约, 使切片测试里的
+// buffer 布局与绑定编号有据可依。
+TEST(ShaderAssetSampleTest, ManifestMatchesErrorPassContract) {
+    const std::filesystem::path projectRoot = GetProjectRoot();
+    ASSERT_FALSE(projectRoot.empty()) << "the project root is unknown";
+
+    const std::filesystem::path shaderRoot = projectRoot / "shaderlib";
+    const std::filesystem::path manifestPath = GetErrorPassManifestPath();
+    EXPECT_TRUE(std::filesystem::is_regular_file(shaderRoot / kErrorPassSource));
+    ASSERT_TRUE(std::filesystem::is_regular_file(manifestPath));
+
+    ShaderAssetDiagnostic diagnostic;
+    std::optional<ShaderAssetDesc> asset = LoadShaderAssetDesc(manifestPath, diagnostic);
+    ASSERT_TRUE(asset.has_value()) << diagnostic.ToString();
+    EXPECT_EQ(asset->Name, "ErrorPass");
+    EXPECT_EQ(asset->Source, kErrorPassSource);
+
+    // 两组都从 <forward_pipeline/view.hlsli> 继承而来, error_pass 自己没有 pragma。
+    // 入口 shader 继承 include 的 keyword 组, 这里正是该规则的最小见证。
+    ASSERT_EQ(asset->KeywordGroups.size(), 2u);
+    EXPECT_EQ(asset->KeywordGroups[0].Name, "PointShadows");
+    EXPECT_EQ(asset->KeywordGroups[1].Name, "DirectionalShadows");
+
+    ASSERT_EQ(asset->Passes.size(), 1u);
+    const ShaderPassDesc& pass = asset->Passes.front();
+    EXPECT_EQ(pass.Name, "Error");
+    EXPECT_EQ(pass.GetStageMask(), render::ShaderStages{render::ShaderStage::Graphics});
+    EXPECT_EQ(pass.FindEntryPoint(render::ShaderStage::Vertex), "VSMain");
+    EXPECT_EQ(pass.FindEntryPoint(render::ShaderStage::Pixel), "PSMain");
+
+    Nullable<const ShaderBindingDesc*> perObject = pass.FindBinding(0, 1);
+    ASSERT_TRUE(perObject.HasValue());
+    EXPECT_EQ(perObject.Unwrap()->Name, "gPerObject");
+    EXPECT_EQ(perObject.Unwrap()->Stages, render::ShaderStages{render::ShaderStage::Vertex});
+
+    // gView 只标 Vertex: PSMain 返回常量, 从不读它。
+    Nullable<const ShaderBindingDesc*> view = pass.FindBinding(1, 0);
+    ASSERT_TRUE(view.HasValue());
+    EXPECT_EQ(view.Unwrap()->Name, "gView");
+    EXPECT_EQ(view.Unwrap()->Stages, render::ShaderStages{render::ShaderStage::Vertex});
+
+    // 阴影绑定虽被 keyword 守护着存在于 view.hlsli, 但 error_pass 从不采样,
+    // 故不出现在任何变体的反射里, manifest 也不该声明。
+    EXPECT_FALSE(pass.FindBinding(1, 1).HasValue()) << "gShadowCube must not be declared";
+    EXPECT_FALSE(pass.FindBinding(1, 2).HasValue()) << "gShadowArray must not be declared";
+    EXPECT_FALSE(pass.FindBinding(1, 3).HasValue()) << "gShadowSampler must not be declared";
+    // 材质组整个不存在 —— 兜底 pass 不能依赖正在失败的那一环。
+    EXPECT_FALSE(pass.FindBinding(2, 0).HasValue()) << "the fallback pass has no material group";
+
+    ASSERT_TRUE(pass.VertexInput.has_value());
+    ASSERT_EQ(pass.VertexInput->Buffers.size(), 1u);
+    EXPECT_EQ(pass.VertexInput->Buffers.front().ArrayStride, 12u);
+    ASSERT_EQ(pass.VertexInput->Attributes.size(), 1u);
+    EXPECT_EQ(pass.VertexInput->Attributes[0].Semantic, "POSITION");
+    EXPECT_EQ(pass.VertexInput->Attributes[0].SemanticIndex, 0u);
+    EXPECT_EQ(pass.VertexInput->Attributes[0].Offset, 0u);
+
+    std::optional<ShaderVariantDomain> domain =
+        ShaderVariantDomain::Build(asset.value(), pass, diagnostic);
+    ASSERT_TRUE(domain.has_value()) << diagnostic.ToString();
+    EXPECT_EQ(domain->GroupCount(), 2u);
+
+    // 未声明 BakeVariants 规则 => 只有默认变体。
+    std::optional<vector<ShaderVariantKey>> variants = ExpandShaderBakeSet(
+        domain.value(),
+        GetEffectiveBakeSet(asset.value(), pass),
+        true,
+        diagnostic);
+    ASSERT_TRUE(variants.has_value()) << diagnostic.ToString();
+    EXPECT_EQ(variants->size(), 1u);
 }
 
 #if defined(RADRAY_ENABLE_SHADER_JIT)
+
+TEST(ShaderAssetSampleTest, ManifestCooksRealErrorPassShader) {
+    auto dxcResult = render::CreateDxc();
+    if (!dxcResult.HasValue()) {
+        GTEST_SKIP() << "DXC is unavailable";
+    }
+    shared_ptr<render::Dxc> dxc = dxcResult.Release();
+
+    ScopedForwardSampleCookDirectory output{"error_pass.shader.json"};
+    ASSERT_TRUE(output.IsValid());
+
+    std::error_code error;
+    std::filesystem::copy_file(
+        GetErrorPassManifestPath(),
+        output.ManifestPath(),
+        std::filesystem::copy_options::overwrite_existing,
+        error);
+    ASSERT_FALSE(error) << error.message();
+
+    vector<render::ShaderBlobCategory> categories{render::ShaderBlobCategory::DXIL};
+#if defined(RADRAY_ENABLE_SPIRV_CROSS)
+    categories.push_back(render::ShaderBlobCategory::SPIRV);
+#endif
+
+    // ValidateReflection: 真正的断言在这里 —— manifest 声明的 ABI 必须与 DXC
+    // 反射出来的一致, 否则 cook 失败。
+    const ShaderCookOptions options{
+        .ShaderRoot = GetProjectRoot() / "shaderlib",
+        .ManifestPath = output.ManifestPath(),
+        .Categories = categories,
+        .ValidateReflection = true,
+        .Incremental = false};
+    ShaderCookResult cook = CookShaderAssetFile(*dxc, options);
+    ASSERT_TRUE(cook.Succeeded()) << JoinForwardSampleDiagnostics(cook);
+
+    // 只有默认变体, 每个 category 落地 1 VS + 1 PS。
+    const size_t expectedEntries = categories.size() * 2u;
+    EXPECT_EQ(cook.Index.AssetName, "ErrorPass");
+    EXPECT_EQ(cook.Index.Entries.size(), expectedEntries);
+    EXPECT_EQ(cook.Stats.Compiled, expectedEntries);
+
+    const std::filesystem::path artifactDirectory =
+        GetShaderArtifactDirectory(options.ManifestPath);
+    ASSERT_TRUE(std::filesystem::is_regular_file(artifactDirectory / "index.json"));
+    for (const ShaderArtifactEntry& entry : cook.Index.Entries) {
+        EXPECT_EQ(entry.PassName, "Error");
+        EXPECT_EQ(entry.Source, kErrorPassSource);
+        EXPECT_TRUE(entry.Keywords.empty()) << "the default variant enables nothing";
+        EXPECT_GT(entry.BytecodeSize, 0u);
+        EXPECT_TRUE(std::filesystem::is_regular_file(
+            artifactDirectory / std::filesystem::path{entry.BlobPath}));
+    }
+}
 
 TEST(ShaderAssetSampleTest, ManifestCooksRealForwardShader) {
     auto dxcResult = render::CreateDxc();
@@ -4001,12 +4142,14 @@ TEST(ShaderAssetSampleTest, ManifestCooksRealForwardShader) {
     ShaderCookResult cook = CookShaderAssetFile(*dxc, options);
     ASSERT_TRUE(cook.Succeeded()) << JoinForwardSampleDiagnostics(cook);
 
-    const size_t expectedEntries = categories.size() * 4u;
+    // 每个 category: 2 变体 × 2 stage = 4 次请求, 但所有 keyword 组都是 pixel-only,
+    // 故两个变体投影到同一份 VS, 落地 1 VS + 2 PS = 3 条 entry, 去重 1 次。
+    const size_t expectedEntries = categories.size() * 3u;
     EXPECT_EQ(cook.Index.AssetName, "ForwardPrincipled");
     EXPECT_EQ(cook.Index.Entries.size(), expectedEntries);
     EXPECT_EQ(cook.Stats.Compiled, expectedEntries);
     EXPECT_EQ(cook.Stats.Reused, 0u);
-    EXPECT_EQ(cook.Stats.Deduplicated, categories.size() * 2u);
+    EXPECT_EQ(cook.Stats.Deduplicated, categories.size());
 
     const std::filesystem::path artifactDirectory =
         GetShaderArtifactDirectory(options.ManifestPath);
@@ -4034,7 +4177,7 @@ TEST(ShaderAssetSampleTest, ManifestCooksRealForwardShader) {
             }
         }
         EXPECT_EQ(vertexCount, 1u);
-        EXPECT_EQ(pixelCount, 3u);
+        EXPECT_EQ(pixelCount, 2u);
     }
 
     ShaderAssetDiagnostic diagnostic;

@@ -10,7 +10,12 @@ radray_add_test(test_shader_asset_template SOURCES test_shader_asset_template.cp
 # 让这些用例只能经 ctest 运行。仓库根是配置期已知的常量, 编进去即可。
 #
 # 环境变量优先: 它使产物可以被搬到别处、指向另一份源码树运行。
-foreach(_radray_shader_test IN ITEMS test_shader_asset test_shader_asset_template)
+# 垂直切片: shader manifest -> PSO -> 真实 GPU 绘制 -> 像素读回。
+# 需要 shaderlib 与 error_pass.shader.json, 故同样依赖 RADRAY_PROJECT_DIR。
+# 无设备/无 DXC 时用例自行 GTEST_SKIP, 不会让无 GPU 的 CI 变红。
+radray_add_test(test_vertical_slice SOURCES test_vertical_slice.cpp LINK_LIBS radrayruntime DISCOVER_ARGS PROPERTIES ENVIRONMENT "RADRAY_PROJECT_DIR=${CMAKE_SOURCE_DIR}")
+
+foreach(_radray_shader_test IN ITEMS test_shader_asset test_shader_asset_template test_vertical_slice)
     target_compile_definitions(${_radray_shader_test} PRIVATE
         RADRAY_PROJECT_DIR_DEFAULT="${CMAKE_SOURCE_DIR}")
 endforeach()

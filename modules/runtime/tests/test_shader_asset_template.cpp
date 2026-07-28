@@ -622,7 +622,7 @@ TEST(ShaderAssetTemplateTest, DisablingAutoProbeNarrowsTheBindingSet) {
         << "without probing, the #ifdef-guarded shadow cube must stay invisible";
     EXPECT_LT(CountBindings(narrowed.value()), 12u);
     // KeywordGroups 仍然来自 pragma —— 它与探测是两件独立的事。
-    EXPECT_EQ(narrowed->Asset.KeywordGroups.size(), 9u);
+    EXPECT_EQ(narrowed->Asset.KeywordGroups.size(), 8u);
 }
 
 /// 显式 ProbeDefineSets 取代自动推导, 用于"两个宏同时开启才出现"的绑定。
@@ -664,16 +664,16 @@ TEST(ShaderAssetTemplateTest, InheritsKeywordGroupsFromIncludedHeaders) {
     };
     EXPECT_TRUE(hasGroup(inherited.value(), "PointShadows"));
     EXPECT_TRUE(hasGroup(inherited.value(), "DirectionalShadows"));
-    EXPECT_EQ(inherited->Asset.KeywordGroups.size(), 9u);
+    EXPECT_EQ(inherited->Asset.KeywordGroups.size(), 8u);
 
-    // 切到 EntryFileOnly 则只剩 forward_pass.hlsl 自己声明的 7 组; 随之丢掉阴影
-    // 绑定 —— 探测不到的维度就探测不出对应的槽位。
+    // 切到 EntryFileOnly 则只剩 forward_pass.hlsl 自己声明的 6 组 (5 张贴图 +
+    // AlphaMode); 随之丢掉阴影绑定 —— 探测不到的维度就探测不出对应的槽位。
     ShaderTemplateOptions entryOnly = MakeOptions();
     entryOnly.KeywordPragmaScope = ShaderKeywordPragmaScope::EntryFileOnly;
     const std::optional<ShaderAssetTemplate> narrowed =
         GenerateShaderAssetTemplate(*dxc, MakeForwardSeed(), entryOnly, diagnostic);
     ASSERT_TRUE(narrowed.has_value()) << diagnostic.ToString();
-    EXPECT_EQ(narrowed->Asset.KeywordGroups.size(), 7u);
+    EXPECT_EQ(narrowed->Asset.KeywordGroups.size(), 6u);
     EXPECT_FALSE(hasGroup(narrowed.value(), "PointShadows"));
     EXPECT_FALSE(FindBinding(narrowed->Asset.Passes.front(), 1, 1).HasValue())
         << "without the shadow keywords there is nothing to probe with";
@@ -692,7 +692,7 @@ TEST(ShaderAssetTemplateTest, KeywordGroupsComeFromSourcePragmas) {
     ASSERT_TRUE(generated.has_value()) << diagnostic.ToString();
 
     const vector<ShaderKeywordGroupDesc>& groups = generated->Asset.KeywordGroups;
-    ASSERT_EQ(groups.size(), 9u);
+    ASSERT_EQ(groups.size(), 8u);
     // 声明顺序即 pragma 出现顺序。
     EXPECT_EQ(groups[0].Name, "BaseColorMap");
     ASSERT_EQ(groups[0].Keywords.size(), 1u);
@@ -700,14 +700,22 @@ TEST(ShaderAssetTemplateTest, KeywordGroupsComeFromSourcePragmas) {
     EXPECT_TRUE(groups[0].IsOptional);
     EXPECT_EQ(groups[0].Stages, render::ShaderStages{render::ShaderStage::Pixel});
 
-    // AlphaMode 是唯一的多取值组: 同组即互斥。
+    // AlphaMode 只剩 alpha test: clip() 无固定功能等价物, 故必须是 keyword。
+    // 混合与双面已从 keyword 移除 —— 它们由 MaterialRenderState 的 Blend / Cull 表达,
+    // 让同一个作者决策只有一个真相源 (判据见 AGENTS.md)。
     const auto alphaMode = std::ranges::find_if(groups, [](const ShaderKeywordGroupDesc& group) {
         return group.Name == "AlphaMode";
     });
     ASSERT_NE(alphaMode, groups.end());
-    ASSERT_EQ(alphaMode->Keywords.size(), 2u);
+    ASSERT_EQ(alphaMode->Keywords.size(), 1u);
     EXPECT_EQ(alphaMode->Keywords[0], "_ALPHATEST_ON");
-    EXPECT_EQ(alphaMode->Keywords[1], "_ALPHABLEND_ON");
+
+    const bool hasFixedFunctionKeyword =
+        std::ranges::any_of(groups, [](const ShaderKeywordGroupDesc& group) {
+            return group.Name == "DoubleSided" || group.Name == "AlphaBlend";
+        });
+    EXPECT_FALSE(hasFixedFunctionKeyword)
+        << "fixed-function state must not also be a keyword";
 
     // 已能自动生成, 故不再作为待办点名。
     EXPECT_FALSE(HasTodoContaining(generated.value(), "KeywordGroups"));
@@ -751,7 +759,7 @@ TEST(ShaderAssetTemplateTest, GeneratedForwardTemplateParsesAndCooks) {
 
     const std::optional<ShaderAssetDesc> reparsed = ParseShaderAssetDesc(json.value(), diagnostic);
     ASSERT_TRUE(reparsed.has_value()) << diagnostic.ToString();
-    EXPECT_EQ(reparsed->KeywordGroups.size(), 9u);
+    EXPECT_EQ(reparsed->KeywordGroups.size(), 8u);
     EXPECT_EQ(reparsed.value(), generated->Asset);
 
     ScopedDirectory output;

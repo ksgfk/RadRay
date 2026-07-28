@@ -1839,6 +1839,20 @@ const ShaderBakeSetDesc& GetEffectiveBakeSet(
     return pass.BakeVariants.IsEmpty() ? asset.BakeVariants : pass.BakeVariants;
 }
 
+std::string_view GetEffectiveSource(
+    const ShaderAssetDesc& asset,
+    const ShaderPassDesc& pass) noexcept {
+    return pass.Source.empty() ? std::string_view{asset.Source} : std::string_view{pass.Source};
+}
+
+ShaderPassDesc MakeResolvablePass(
+    const ShaderAssetDesc& asset,
+    const ShaderPassDesc& pass) {
+    ShaderPassDesc result = pass;
+    result.Source = string{GetEffectiveSource(asset, pass)};
+    return result;
+}
+
 std::optional<vector<ShaderVariantKey>> ExpandShaderBakeSet(
     const ShaderVariantDomain& domain,
     const ShaderBakeSetDesc& bake,
@@ -3292,7 +3306,7 @@ ShaderCookResult CookShaderAsset(
     // 源文件回查 —— 合并成一个哈希会让多源资产在运行时永远查不中。
     vector<string> sourcePaths;
     for (const ShaderPassDesc& pass : asset.Passes) {
-        const string source = pass.Source.empty() ? asset.Source : pass.Source;
+        const string source{GetEffectiveSource(asset, pass)};
         if (std::ranges::find(sourcePaths, source) == sourcePaths.end()) {
             sourcePaths.push_back(source);
         }
@@ -3311,7 +3325,7 @@ ShaderCookResult CookShaderAsset(
     const std::array<std::string_view, 1> includes{rootString};
 
     for (const ShaderPassDesc& pass : asset.Passes) {
-        const string source = pass.Source.empty() ? asset.Source : pass.Source;
+        const string source{GetEffectiveSource(asset, pass)};
         const std::optional<ShaderHash> cookedIdentity = result.Index.FindSourceIdentity(source);
         if (!cookedIdentity.has_value()) {
             result.Diagnostics.push_back(

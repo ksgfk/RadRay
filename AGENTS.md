@@ -51,6 +51,11 @@
 - Naming: functions and locals `snake_case`; types and GPU struct fields `PascalCase`; macros `RADRAY_` prefixed uppercase.
 - Cross-backend binding declarations go through the `VK_*` macros in `core/platform.hlsli` and the `RADRAY_FORWARD_*` macros in `forward_pipeline/bindings.hlsli`. Never write bare `register(...)` / `[[vk::binding]]` literals in a pass.
 - Keyword groups are declared with `#pragma radray_keyword_group(Name, _KW...) stages(...)` in the file that owns the guarded bindings, outside any `#if`. Entry shaders inherit groups from their includes.
+- A keyword must earn its variant dimension. Before adding one, check all three:
+  - **Not expressible as fixed-function state.** Anything `MaterialRenderState` can express (blend, depth write, cull) must live there alone. A keyword must never coexist with, or imply, a fixed-function state that expresses the same authoring decision — that creates two sources of truth with nothing to keep them in sync (manifest validation and reflection validation both see only one side).
+  - **Genuinely changes bytecode.** A branch that is dead whenever its own keyword is off does not qualify. Example: a back-face normal flip guarded by `SV_IsFrontFace` is already unreachable under `CullMode::Back`, so guarding it with a keyword buys nothing.
+  - **Scope is explicit.** Either pipeline-level (one value for the whole frame, e.g. `_POINT_SHADOWS` guarding shadow-map bindings) or material-level (per-draw, e.g. `_BASECOLOR_MAP`). A per-draw decision cannot be a pipeline-level keyword; the pipeline has no single value to pick.
+  Legitimate keywords typically guard descriptor bindings or code with no fixed-function equivalent (`_ALPHATEST_ON` needs `clip()`; `_POINT_SHADOWS` needs a `TextureCube` binding).
 - Reuse existing implementations in `shaderlib/` before adding shader-local helper functions.
 
 ## Test

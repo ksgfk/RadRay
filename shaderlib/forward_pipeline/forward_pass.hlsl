@@ -7,6 +7,10 @@
 // 支持方向光 (级联阴影) 与点光源 (立方体阴影)。贴图/自发光/AO 全走 keyword 编译期分支,
 // 无贴图时 (如程序化几何) 退化为纯常量材质。
 //
+// 混合 (blend) 与双面 (cull) 不是本 pass 的 keyword —— 它们是纯固定功能状态, 由材质侧的
+// MaterialRenderState 表达。shader 无条件写出 Alpha 并按 SV_IsFrontFace 翻转法线, 两者在
+// 对应的 BlendState / CullMode 下自然失效。判据见 AGENTS.md 的 keyword 三条准则。
+//
 // 绑定 (编号定义见 forward_pipeline/bindings.hlsli):
 //   group 0: gPerObject (b1)  每 draw
 //   group 1: gView (b0) + 阴影资源 (t1/t2/s3)  每视图, 由 forward 管线提供
@@ -23,9 +27,9 @@
 #pragma radray_keyword_group(NormalMap, _NORMAL_MAP) stages(Pixel)
 #pragma radray_keyword_group(OcclusionMap, _OCCLUSION_MAP) stages(Pixel)
 #pragma radray_keyword_group(EmissiveMap, _EMISSIVE_MAP) stages(Pixel)
-// 同组即互斥: alpha test 与 alpha blend 不可能同时开启。
-#pragma radray_keyword_group(AlphaMode, _ALPHATEST_ON, _ALPHABLEND_ON) stages(Pixel)
-#pragma radray_keyword_group(DoubleSided, _DOUBLESIDED_ON) stages(Pixel)
+// alpha test 需要 clip(), 固定功能状态表达不了, 故必须是 keyword。
+// 混合与双面【不是】keyword: 它们由 MaterialRenderState 的 Blend / Cull 表达 (见 AGENTS.md)。
+#pragma radray_keyword_group(AlphaMode, _ALPHATEST_ON) stages(Pixel)
 
 #include <bsdf/principled.hlsli>
 #include <core/color.hlsli>
@@ -68,7 +72,7 @@ float4 PSMain(VertexOutput input, bool is_front_face : SV_IsFrontFace) : SV_Targ
 
 #ifdef _ALPHATEST_ON
     // alpha cutoff: "是否裁剪"由 keyword 决定, 阈值 (数值) 走 cbuffer。
-    clip(surface.Coverage - saturate(gMaterial.Pbr.z));
+    clip(surface.Alpha - saturate(gMaterial.Pbr.z));
 #endif
 
     PrincipledMaterial material = make_standard_principled_material(surface);
@@ -78,13 +82,8 @@ float4 PSMain(VertexOutput input, bool is_front_face : SV_IsFrontFace) : SV_Targ
     float3 view_dir_world = safe_normalize(
         gView.CameraPosition.xyz - input.PositionWorld, surface.Normal);
     float3 wi = frame_to_local(frame, view_dir_world);
-#ifndef _DOUBLESIDED_ON
-    // 单面: 掠射/背向相机的像素归零 (封闭不透明体的可见半球法线始终朝相机)。
-    // 双面时法线已翻向相机, 不做此 early-out, 否则内壁会被误剔。
-    if (wi.z <= 0.0f) {
-        return float4(0.0f, 0.0f, 0.0f, surface.Alpha);
-    }
-#endif
+    // wi.z <= 0 (掠射/背向相机) 不在此 early-out: eval_principled_reflection 的
+    // front_side 检查已使这些像素的每个瓣都返回 0。提前返回反而会连 emissive 一起吃掉。
 
     float3 radiance = (float3)0.0f;
 
