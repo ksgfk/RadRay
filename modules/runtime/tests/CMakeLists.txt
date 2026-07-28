@@ -15,7 +15,11 @@ radray_add_test(test_shader_asset_template SOURCES test_shader_asset_template.cp
 # 无设备/无 DXC 时用例自行 GTEST_SKIP, 不会让无 GPU 的 CI 变红。
 radray_add_test(test_vertical_slice SOURCES test_vertical_slice.cpp LINK_LIBS radrayruntime DISCOVER_ARGS PROPERTIES ENVIRONMENT "RADRAY_PROJECT_DIR=${CMAKE_SOURCE_DIR}")
 
-foreach(_radray_shader_test IN ITEMS test_shader_asset test_shader_asset_template test_vertical_slice)
+# ShaderAsset / ShaderPassProgram: 加载期要建真实 PipelineLayout, 故需要 device,
+# 无设备时用例自行 GTEST_SKIP。
+radray_add_test(test_shader_program SOURCES test_shader_program.cpp LINK_LIBS radrayruntime DISCOVER_ARGS PROPERTIES ENVIRONMENT "RADRAY_PROJECT_DIR=${CMAKE_SOURCE_DIR}")
+
+foreach(_radray_shader_test IN ITEMS test_shader_asset test_shader_asset_template test_vertical_slice test_shader_program)
     target_compile_definitions(${_radray_shader_test} PRIVATE
         RADRAY_PROJECT_DIR_DEFAULT="${CMAKE_SOURCE_DIR}")
 endforeach()

@@ -14,7 +14,7 @@
 #include <radray/render/spvc.h>
 #endif
 
-#include "shader_asset_json.h"
+#include "shader_manifest_json.h"
 #include "shader_reflection_map.h"
 
 namespace radray {
@@ -432,7 +432,7 @@ struct MergedAttribute {
 struct MergedPass {
     vector<MergedBinding> Bindings;
     vector<MergedAttribute> Attributes;
-    /// SPIRV 反射认出的 push constant。DXIL 认不出来 (见 shader_asset.h 头注释)。
+    /// SPIRV 反射认出的 push constant。DXIL 认不出来 (见 shader_manifest.h 头注释)。
     bool HasPushConstant{false};
     string PushConstantName;
     uint32_t PushConstantSize{0};
@@ -1120,7 +1120,7 @@ std::optional<ShaderAssetTemplate> GenerateShaderAssetTemplate(
 
 // ============================ 序列化 ============================
 
-/// ShaderTemplateTodo 不属于 manifest schema, 故不在 shader_asset.h 的 codec 声明表
+/// ShaderTemplateTodo 不属于 manifest schema, 故不在 shader_manifest.h 的 codec 声明表
 /// 里 —— 它只在本 TU 被序列化, 且刻意没有 Deserializer: "_TODO" 是给人看的单向附注,
 /// 回读时应当被忽略而非解析。
 template <>

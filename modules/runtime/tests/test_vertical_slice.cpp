@@ -31,7 +31,7 @@
 #include <radray/logger.h>
 #include <radray/render/dxc.h>
 #include <radray/render/rhi.h>
-#include <radray/runtime/shader_asset.h>
+#include <radray/runtime/shader_manifest.h>
 #include <radray/types.h>
 #include <radray/utility.h>
 

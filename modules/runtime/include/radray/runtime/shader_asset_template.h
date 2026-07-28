@@ -8,14 +8,14 @@
 #include <radray/render/dxc.h>
 #include <radray/render/hlsl.h>
 #include <radray/render/rhi.h>
-#include <radray/runtime/shader_asset.h>
+#include <radray/runtime/shader_manifest.h>
 #include <radray/types.h>
 
 // 从 HLSL 反射生成 *.shader.json 的【起始模板】。
 //
 // == 存在理由 ==
 //
-// shader_asset.h 开头列出了 manifest 相对反射的七项增量, 结论是"反射不足以构建 PSO"。
+// shader_manifest.h 开头列出了 manifest 相对反射的七项增量, 结论是"反射不足以构建 PSO"。
 // 但反过来说, manifest 里【大部分体力活】其实都是反射能给的: 每个绑定的名字、
 // (space, register)、类型、数组容量, 以及顶点输入的 semantic 列表。手抄这些既枯燥又
 // 容易在 HLSL 改动后忘记同步 —— 而这类不同步只会在 cook 期的反射核对里才暴露。

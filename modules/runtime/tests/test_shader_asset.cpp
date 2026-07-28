@@ -13,7 +13,7 @@
 #include <radray/environment.h>
 #include <radray/file.h>
 #include <radray/render/dxc.h>
-#include <radray/runtime/shader_asset.h>
+#include <radray/runtime/shader_manifest.h>
 
 namespace radray {
 namespace {
