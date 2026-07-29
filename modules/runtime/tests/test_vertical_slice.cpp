@@ -524,7 +524,7 @@ TEST_P(VerticalSliceTest, ManifestToPixels) {
     // 材质/网格层要解决的问题, 本切片验证的是 shader 链路, 不该被它绊住。
     primitive.Cull = render::CullMode::None;
 
-    // 固定功能状态由调用方给全 —— PipelineStateCache 不做基线合成 (见 G13 / 8.6)。
+    // 固定功能状态由调用方给全 —— PipelineStateCache 不做基线合成。
     // vertex input 与 PipelineLayout 不在 key 里, 它们由 program 提供。
     PipelineStateCache pipelineStates{&device};
     const GraphicsPipelineStateKey psoKey{

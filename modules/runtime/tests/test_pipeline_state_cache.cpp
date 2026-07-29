@@ -293,8 +293,8 @@ TEST_F(PipelineStateCacheTest, FixedFunctionStateDifferencesSplitEntries) {
         Cache().GetOrCreateGraphics(asset, base, variant, Category(), diag);
     ASSERT_TRUE(noCull.HasValue()) << diag.ToString();
 
-    // primitive 差异。这是 MaterialRenderState 想覆盖的三项之一, 也是 G13 里"无人提供
-    // 基线"的那三项之一 —— 本层要求调用方给全, 于是它天然成为 key 的一部分。
+    // primitive 差异。这是 MaterialRenderState 想覆盖、却又无人提供基线的那三项之一 ——
+    // 本层要求调用方给全, 于是它天然成为 key 的一部分。
     GraphicsPipelineStateKey culled = base;
     culled.Primitive.Cull = render::CullMode::Back;
     Nullable<render::GraphicsPipelineState*> backCull =

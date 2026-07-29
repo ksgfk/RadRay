@@ -61,7 +61,7 @@ enum class RenderPassEvent : int32_t {
 /// 【基线由谁提供尚未裁决】旧 ShaderPassDesc 曾持有 pass 级固定渲染状态, 已在重写中删除;
 /// 新 ShaderAssetDesc 刻意不含 (shader_manifest.h:300-302)。故本结构当前没有基线来源, 也
 /// 没有任何使用点。PipelineStateCache 要求调用方给出**完整**固定功能状态, 不做基线合成
-/// (见 docs/shader_asset_gap_analysis.md 的 G13 / 8.6)。此外本结构只覆盖 Cull / DepthWrite /
+/// (见 pipeline_state_cache.h 文件头)。此外本结构只覆盖 Cull / DepthWrite /
 /// Blend 三项, Topology / FrontFace / DepthCompare / 各 target Format 等仍无人负责。
 struct MaterialRenderState {
     std::optional<render::CullMode> Cull{};

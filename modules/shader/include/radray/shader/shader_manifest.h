@@ -66,10 +66,6 @@
 //                      ShaderResolver、cook、layout 构建。
 //   shader_program.h   对象层。ShaderPassProgram: PipelineLayout + 字节码缓存。
 //   shader_asset.h     资产层。ShaderAsset: 一份 manifest 一个 Asset。
-//
-// 【本文件不得 include asset.h / asset_manager.h】: tools/shader_cook 只需要这一层,
-// 让它传递性依赖 AssetManager 就等于为一个 CLI 吃下 stdexec 的编译开销。这条分界
-// 照 image_data.h (数据格式) 与 image_asset.h (Asset) 的既有先例。
 
 namespace radray::render {
 class Dxc;
@@ -300,8 +296,8 @@ struct ShaderPassDesc {
 /// 刻意【不】包含: PrimitiveState / DepthStencilState / BlendState / ColorTargets /
 /// MultiSampleState。这些属 PSO 固定功能段, 不影响字节码, 由建 PSO 的调用方给出
 /// (PipelineStateCache 要求一份完整状态, 见 pipeline_state_cache.h)。注意这意味着
-/// manifest 里没有"pass 基线"可供材质覆盖 —— 基线归属未裁决, 见
-/// docs/shader_asset_gap_analysis.md 的 G13。
+/// manifest 里没有"pass 基线"可供材质覆盖 —— 基线由谁提供尚未裁决
+/// (见 render_framework/render_pipeline.h 的 MaterialRenderState)。
 /// 也不包含 AssetId —— 身份不是 manifest 内容的一部分, 而是由 manifest 路径推导
 /// (见 shader_asset.h 的 MakeShaderAssetId)。故同一份内容放在两个路径下是两个资产。
 struct ShaderAssetDesc {
@@ -599,7 +595,7 @@ struct ShaderArtifactBlob {
 ///
 /// 【为何不按资产给】: 这四项回答的是同一个问题 —— "这是开发构建还是发布包"。让每个
 /// 加载调用点各自决定, 就允许同一进程里 A 资产走 Strict + JIT 而 B 资产走 Lenient +
-/// 无 JIT, 且没有任何机制拦得住。那正是 G12 那类"一个决策两处真相"。
+/// 无 JIT, 且没有任何机制拦得住 —— 一个决策落在两处, 谁都拦不住两边写歪。
 struct ShaderResolveSettings {
     /// shader include 根目录 (通常 <exe>/shaderlib)。
     std::filesystem::path ShaderRoot;
@@ -662,10 +658,6 @@ struct ShaderCookResult {
 };
 
 // ============================ 功能类 ============================
-
-// ShaderPipelineLayoutStorage / ShaderVertexInputStorage 已移至
-// <radray/runtime/shader_program.h>: 它们产出的是"喂给 RHI 的形状", 不是
-// manifest 数据, 故属 render 层。详见该头文件的说明。
 
 /// 全进程共享的 shader 解析上下文: 策略 + 工具链 + 按【文件】记忆化的源码缓存。
 ///

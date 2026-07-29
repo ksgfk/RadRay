@@ -57,8 +57,6 @@ option(RADRAY_BUILD_BENCHMARKS "Build the RadRay benchmarks (enabled by default 
 unset(_radray_benchmarks_default)
 unset(_radray_release_cfg_index)
 option(RADRAY_BUILD_WINDOW "Build the RadRay window" ON)
-# radrayshader 是 radrayrender 的下层: 它持有 shader 工具链与 RHI 共享的描述类型,
-# 使得 shader cook 工具无需链入任何图形后端。因此 render 依赖 shader 而非反之。
 option(RADRAY_BUILD_SHADER "Build the RadRay shader" ON)
 cmake_dependent_option(RADRAY_BUILD_RENDER "Build the RadRay render" ON "RADRAY_BUILD_SHADER" OFF)
 cmake_dependent_option(RADRAY_BUILD_RUNTIME "Build the RadRay runtime" ON "RADRAY_BUILD_RENDER AND RADRAY_BUILD_WINDOW" OFF)
@@ -67,9 +65,6 @@ cmake_dependent_option(RADRAY_ENABLE_VULKAN "Enable Vulkan backend" ON "RADRAY_B
 cmake_dependent_option(RADRAY_ENABLE_METAL "Enable Metal backend" ON "RADRAY_BUILD_RENDER AND APPLE" OFF)
 option(RADRAY_ENABLE_DXC "Enable DirectX Shader Compiler support" ON)
 option(RADRAY_ENABLE_SPIRV_CROSS "Enable SPIR-V Cross support" ON)
-# 依赖 RADRAY_BUILD_SHADER 而非 RADRAY_BUILD_RUNTIME: JIT 归属随格式层迁入 radrayshader。
-# 【漏改此处是静默降级】条件不满足时 cmake_dependent_option 会把值强制为 OFF 而不报错,
-# 于是 shader JIT 被无声地编掉, 只在运行期表现为"找不到 shader 变体"。
 cmake_dependent_option(RADRAY_ENABLE_SHADER_JIT "Enable runtime shader JIT compilation" ON "RADRAY_BUILD_SHADER AND RADRAY_ENABLE_DXC" OFF)
 option(RADRAY_ENABLE_MIMALLOC "Enable mimalloc as allocator" ON)
 option(RADRAY_ENABLE_ZLIB "Enable zlib support" ON)
@@ -169,15 +164,7 @@ endif()
 set(SPDLOG_NO_EXCEPTIONS ON CACHE BOOL "" FORCE)
 set(SPDLOG_NO_THREAD_ID ON CACHE BOOL "" FORCE)
 set(SPDLOG_DISABLE_DEFAULT_LOGGER ON CACHE BOOL "" FORCE)
-set(_radray_cxx_flags_before_spdlog "${CMAKE_CXX_FLAGS}")
-if (MSVC AND SPDLOG_NO_EXCEPTIONS)
-    # spdlog adds /EHs-c- in no-exception mode; remove the default /EHsc for this subdirectory.
-    string(REGEX REPLACE "(^| )[/-]EHsc( |$)" " " CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
-endif()
 add_subdirectory(${RADRAY_THIRDPARTY_ROOT}/spdlog)
-set(CMAKE_CXX_FLAGS "${_radray_cxx_flags_before_spdlog}")
-unset(_radray_cxx_flags_before_spdlog)
-radray_optimize_flags_library(spdlog)
 radray_set_build_path(spdlog)
 
 set(PROJECT_IS_TOP_LEVEL OFF CACHE BOOL "" FORCE)
@@ -201,15 +188,12 @@ radray_set_build_path(yyjson)
 
 add_subdirectory(${RADRAY_THIRDPARTY_ROOT}/sigslot)
 
-# cgltf is a single-header C library; consumers provide CGLTF_IMPLEMENTATION
-# in exactly one translation unit.
+# cgltf 纯头文件库
 add_library(cgltf INTERFACE)
 add_library(cgltf::cgltf ALIAS cgltf)
 target_include_directories(cgltf SYSTEM INTERFACE "${RADRAY_THIRDPARTY_ROOT}/cgltf")
 
-# stdexec is header-only. Its own CMakeLists fetches rapids-cmake over the network at
-# configure time, so we wire a manual INTERFACE target instead. C++20 coroutines + senders
-# are consumed through radray/coroutine.h (radray::task), never exec::/stdexec:: directly.
+# stdexec 纯头文件库
 add_library(stdexec INTERFACE)
 add_library(STDEXEC::stdexec ALIAS stdexec)
 target_include_directories(stdexec SYSTEM INTERFACE "${RADRAY_THIRDPARTY_ROOT}/stdexec/include")

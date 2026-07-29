@@ -1,4 +1,4 @@
-// ShaderAsset / ShaderPassProgram (G1 + G4): manifest -> Asset -> 变体字节码。
+// ShaderAsset / ShaderPassProgram: manifest -> Asset -> 变体字节码。
 //
 // 【为何不并入 test_shader_asset.cpp】: 那个文件全程不碰 GPU (manifest 解析、变体域、
 // artifact 索引、cook 都是纯 CPU)。本文件必须建真实 device —— ShaderAsset 的加载期

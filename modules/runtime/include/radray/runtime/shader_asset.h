@@ -6,7 +6,7 @@
 #include <radray/runtime/asset_manager.h>
 #include <radray/runtime/shader_program.h>
 
-// shader 资产层 (G1): 一份 manifest = 一个 Asset。
+// shader 资产层: 一份 manifest = 一个 Asset。
 //
 // == 三层的分工 ==
 //

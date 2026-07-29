@@ -2,7 +2,6 @@
 
 #include <filesystem>
 #include <optional>
-#include <span>
 #include <string_view>
 
 #include <radray/shader/dxc.h>

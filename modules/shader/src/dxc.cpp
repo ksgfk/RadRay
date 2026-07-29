@@ -2,6 +2,12 @@
 
 // #define _RADRAY_ENABLE_DXC_ALLOCATOR 0 // ISSUE: dxc v1.9.2602 用户自定义 allocator, 内部释放时似乎没有正确调用户 free 导致爆炸, 先关闭 mimalloc 接管内存
 
+namespace radray::render {
+
+}  // namespace radray::render
+
+#ifdef RADRAY_ENABLE_DXC
+
 #include <limits>
 #include <utility>
 
@@ -11,12 +17,6 @@
 #ifdef RADRAY_ENABLE_MIMALLOC
 #include <mimalloc.h>
 #endif
-
-namespace radray::render {
-
-}  // namespace radray::render
-
-#ifdef RADRAY_ENABLE_DXC
 
 #ifdef RADRAY_PLATFORM_WINDOWS
 #include <radray/platform/win32_headers.h>

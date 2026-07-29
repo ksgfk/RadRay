@@ -21,16 +21,6 @@
 //   AddressMode / FilterMode /             SamplerDescriptor 的成员, 随其被序列化
 //     CompareFunction                      (故自身无直接引用, 但是真实依赖)
 //
-// 【勿用"不含 device 指针"作为判据】那个标准太宽: 纯 RHI 入参形状
-// (PipelineLayoutDescriptor、VertexInputState、ShaderDescriptor ...) 同样不含 device
-// 指针, 却属 render 的词汇。曾按它把 19 个类型都放进本文件, 结果让 shader 库承载了
-// 8 个自己从不使用的类型。正确的问题是"这个类型是 manifest 的数据吗"。
-//
-// 【RenderBackend 不在此处】它描述的是"用哪个图形 API 跑", 不是 manifest 内容。曾因
-// GetShaderBlobCategoryForBackend 一个函数把它放进来, 但本层所有接口都直接收
-// ShaderBlobCategory —— 由调用方决定字节码类型, shader 层无需知道后端是谁。该映射函数
-// 已随之移入 rhi.h。
-//
 // == 为什么这些类型在 shader 库而不在 render 库 ==
 //
 // 依赖链是 core <- shader <- render <- runtime。shader 编译器 (dxc/hlsl/spirv/spvc)

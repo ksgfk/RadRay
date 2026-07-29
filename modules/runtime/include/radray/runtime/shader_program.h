@@ -9,7 +9,7 @@
 #include <radray/render/rhi.h>
 #include <radray/shader/shader_manifest.h>
 
-// pass 级 program (G4): 把 "keyword -> 字节码" 那条链收敛成一次调用。
+// pass 级 program: 把 "keyword -> 字节码" 那条链收敛成一次调用。
 //
 // == 三层的分工 ==
 //
