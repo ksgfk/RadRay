@@ -176,7 +176,7 @@ public:
 /// 顺序 (声明序 dxc 在前, 逆序析构 context 在前) 固定下来。
 class ScopedResolveContext {
 public:
-    ScopedResolveContext(ShaderArtifactStaleness staleness, bool withJit) {
+    ScopedResolveContext(render::Device& device, ShaderArtifactStaleness staleness, bool withJit) {
         if (withJit) {
             auto dxcResult = render::CreateDxc();
             if (dxcResult.HasValue()) {
@@ -189,19 +189,24 @@ public:
                 .Staleness = staleness,
                 .AllowJit = withJit},
             _dxc.get());
+        _layouts = make_unique<PipelineLayoutCache>(&device);
     }
 
     /// withJit == true 但机器上没有 DXC 时为 false, 调用方应 GTEST_SKIP。
     bool HasJit() const noexcept { return _dxc != nullptr; }
     ShaderResolveContext* Get() noexcept { return _context.get(); }
+    PipelineLayoutCache& Layouts() noexcept { return *_layouts; }
     ShaderAssetLoadOptions Options() noexcept {
-        return ShaderAssetLoadOptions{.Context = _context.get()};
+        return ShaderAssetLoadOptions{.Context = _context.get(), .LayoutCache = _layouts.get()};
     }
 
 private:
     shared_ptr<render::Dxc> _dxc;
     /// 【必须声明在 _dxc 之后】: 借用 Dxc*, 析构逆序保证 context 先死。
     unique_ptr<ShaderResolveContext> _context;
+    /// 【刻意允许它先于资产死】: 缓存只是非拥有索引, 残留 layout 由 program 的引用计数
+    /// 保命 —— 照 RenderSystem 先于 AssetManager 关停的顺序。
+    unique_ptr<PipelineLayoutCache> _layouts;
 };
 
 // ============================ AssetId ============================
@@ -246,7 +251,7 @@ private:
 TEST_F(ShaderAssetLoadTest, ManifestBecomesAssetWithoutTouchingDxc) {
     // dxc 不给、JIT 不许, 资产仍应构造成功 —— 这就是发布包的加载形态。加载期若偷偷
     // 编译了任何字节码, 这个用例会失败。
-    ScopedResolveContext context{ShaderArtifactStaleness::Strict, false};
+    ScopedResolveContext context{Device(), ShaderArtifactStaleness::Strict, false};
 
     ShaderAssetDiagnostic diagnostic;
     auto asset =
@@ -274,7 +279,7 @@ TEST_F(ShaderAssetLoadTest, ManifestBecomesAssetWithoutTouchingDxc) {
 }
 
 TEST_F(ShaderAssetLoadTest, MissingManifestFails) {
-    ScopedResolveContext context{ShaderArtifactStaleness::Strict, false};
+    ScopedResolveContext context{Device(), ShaderArtifactStaleness::Strict, false};
     ShaderAssetDiagnostic diagnostic;
     auto asset = CreateShaderAsset(
         Device(),
@@ -298,9 +303,22 @@ TEST_F(ShaderAssetLoadTest, MissingResolveContextFails) {
     EXPECT_NE(diagnostic.Message.find("Context"), string::npos) << diagnostic.ToString();
 }
 
+/// 不提供"绕过缓存直接建 layout"的回退 —— 那会让 layout 的所有权有两条路径。
+TEST_F(ShaderAssetLoadTest, MissingLayoutCacheFails) {
+    ScopedResolveContext context{Device(), ShaderArtifactStaleness::Strict, false};
+    ShaderAssetDiagnostic diagnostic;
+    auto asset = CreateShaderAsset(
+        Device(),
+        GetErrorPassManifestPath(),
+        ShaderAssetLoadOptions{.Context = context.Get()},
+        diagnostic);
+    EXPECT_FALSE(asset.HasValue());
+    EXPECT_NE(diagnostic.Message.find("LayoutCache"), string::npos) << diagnostic.ToString();
+}
+
 TEST_F(ShaderAssetLoadTest, VariantResolveFailsWithoutJitOrArtifact) {
     // 无产物 + 无 DXC: 加载成功但变体解析必须失败, 且失败不写缓存。
-    ScopedResolveContext context{ShaderArtifactStaleness::Strict, false};
+    ScopedResolveContext context{Device(), ShaderArtifactStaleness::Strict, false};
     ShaderAssetDiagnostic diagnostic;
     auto asset = CreateShaderAsset(
         Device(),
@@ -319,7 +337,7 @@ TEST_F(ShaderAssetLoadTest, VariantResolveFailsWithoutJitOrArtifact) {
 }
 
 TEST_F(ShaderAssetLoadTest, JitVariantIsCachedAndStable) {
-    ScopedResolveContext context{ShaderArtifactStaleness::Strict, true};
+    ScopedResolveContext context{Device(), ShaderArtifactStaleness::Strict, true};
     if (!context.HasJit()) {
         GTEST_SKIP() << "DXC is unavailable";
     }
@@ -370,7 +388,7 @@ TEST_F(ShaderAssetLoadTest, JitVariantIsCachedAndStable) {
 }
 
 TEST_F(ShaderAssetLoadTest, StageBytecodeIsSharedAcrossVariantsThatProjectTheSame) {
-    ScopedResolveContext context{ShaderArtifactStaleness::Strict, true};
+    ScopedResolveContext context{Device(), ShaderArtifactStaleness::Strict, true};
     if (!context.HasJit()) {
         GTEST_SKIP() << "DXC is unavailable";
     }
@@ -444,7 +462,7 @@ TEST_F(ShaderAssetLoadTest, CookedArtifactResolvesWithoutDxc) {
 
     // context 不给 dxc: 发布包里 DXC 根本不存在。给了指针再关 AllowJit 只测到
     // "我们没去用它"。
-    ScopedResolveContext context{ShaderArtifactStaleness::Lenient, false};
+    ScopedResolveContext context{Device(), ShaderArtifactStaleness::Lenient, false};
     ShaderAssetDiagnostic diagnostic;
     auto asset = CreateShaderAsset(
         Device(),
@@ -469,8 +487,11 @@ TEST_F(ShaderAssetLoadTest, CookedArtifactResolvesWithoutDxc) {
 #endif
 }
 
-TEST_F(ShaderAssetLoadTest, OnUnloadHandsPipelineLayoutToRecycler) {
-    ScopedResolveContext context{ShaderArtifactStaleness::Strict, false};
+/// 【layout 不走 recycler】: 它是引用计数的共享对象, 归零即从 PipelineLayoutCache 摘除
+/// 并销毁 (见 pipeline_layout_cache.h)。这里守住的是"OnUnload 确实放开了那份引用",
+/// 观测点是缓存里的条目数, 不是 recycler 计数。
+TEST_F(ShaderAssetLoadTest, OnUnloadReleasesSharedPipelineLayout) {
+    ScopedResolveContext context{Device(), ShaderArtifactStaleness::Strict, false};
     ShaderAssetDiagnostic diagnostic;
     auto asset = CreateShaderAsset(
         Device(),
@@ -478,17 +499,19 @@ TEST_F(ShaderAssetLoadTest, OnUnloadHandsPipelineLayoutToRecycler) {
         context.Options(),
         diagnostic);
     ASSERT_TRUE(asset.HasValue()) << diagnostic.ToString();
+    ASSERT_EQ(context.Layouts().GetLayoutCount(), 1u) << "one pass -> one layout";
 
     CountingRecycler recycler;
     asset->OnUnload(recycler);
-    // 一个 pass -> 一个 PipelineLayout。
-    EXPECT_EQ(recycler.Count, 1u);
+    EXPECT_EQ(context.Layouts().GetLayoutCount(), 0u)
+        << "the layout must self-destruct once the last program drops its reference";
+    EXPECT_EQ(recycler.Count, 0u) << "the shared layout must not go through the recycler";
     EXPECT_FALSE(asset->IsValid());
     EXPECT_FALSE(asset->FindPass("Error").HasValue());
 }
 
 TEST_F(ShaderAssetLoadTest, LoadsThroughAssetManager) {
-    ScopedResolveContext context{ShaderArtifactStaleness::Strict, false};
+    ScopedResolveContext context{Device(), ShaderArtifactStaleness::Strict, false};
     AssetManager assetManager;
     CountingRecycler recycler;
     assetManager.SetRecycler(&recycler);
@@ -521,12 +544,13 @@ TEST_F(ShaderAssetLoadTest, LoadsThroughAssetManager) {
     EXPECT_EQ(assetManager.GetAssetCount(), 1u);
 
     assetManager.Unload(asset->GetAssetId());
-    EXPECT_EQ(recycler.Count, 1u) << "OnUnload must route the layout through the recycler";
+    EXPECT_EQ(context.Layouts().GetLayoutCount(), 0u)
+        << "unloading the asset must release the shared layout";
     EXPECT_EQ(ref.Get(), nullptr);
 }
 
 TEST_F(ShaderAssetLoadTest, AssetManagerReportsFailureForMissingManifest) {
-    ScopedResolveContext context{ShaderArtifactStaleness::Strict, false};
+    ScopedResolveContext context{Device(), ShaderArtifactStaleness::Strict, false};
     AssetManager assetManager;
     StreamingAssetRef<ShaderAsset> ref = LoadShaderAsset(
         assetManager,
@@ -551,7 +575,7 @@ TEST_F(ShaderAssetLoadTest, TwoAssetsShareOneSourceCache) {
         GTEST_SKIP() << "the forward_pass manifest is missing";
     }
 
-    ScopedResolveContext context{ShaderArtifactStaleness::Strict, false};
+    ScopedResolveContext context{Device(), ShaderArtifactStaleness::Strict, false};
     ShaderAssetDiagnostic diag;
 
     // 先算 forward_pass (较大的闭包), 再算 error_pass (它的子集)。

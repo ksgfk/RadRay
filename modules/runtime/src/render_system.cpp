@@ -30,6 +30,10 @@ RenderSystem::~RenderSystem() noexcept {
     _pipelineStateCache.reset();
     // 缓存的 RenderPass / Framebuffer 必须先于 GpuSystem 持有的 device 销毁。
     _renderPassRegistry.reset();
+    // 【刻意允许仍有资产引用着 layout】: 本缓存只是非拥有索引, 析构时切断残留条目的
+    // 反向指针, 那些 layout 由 ShaderPassProgram 的引用计数保命, 待 AssetManager 析构
+    // (在本对象之后, 见 Application::Shutdown) 时自毁。
+    _pipelineLayoutCache.reset();
     // context 借用 Dxc*, 必须先于它销毁。
     _shaderResolveContext.reset();
     _dxc.reset();
@@ -46,6 +50,7 @@ void RenderSystem::OnInitialize() {
 
     _renderPassRegistry = make_unique<RenderPassRegistry>(device);
     _pipelineStateCache = make_unique<PipelineStateCache>(device);
+    _pipelineLayoutCache = make_unique<PipelineLayoutCache>(device);
 
     // include 根无条件推导: 关掉 JIT 的发布包同样要用它做 AOT 的源码身份复核 (若源码
     // 确实部署了), 且 ShaderResolveContext 需要一个确定的根而非"猜"。

@@ -170,7 +170,7 @@ protected:
             *_assets,
             *_ctx.Device,
             GetErrorPassManifestPath(),
-            ShaderAssetLoadOptions{.Context = JitContext()});
+            ShaderAssetLoadOptions{.Context = JitContext(), .LayoutCache = &Layouts()});
         _assets->Pump();
         return ref;
     }
@@ -216,6 +216,14 @@ protected:
         return *_cache;
     }
 
+    /// 一个 fixture 一个 layout 缓存 —— 真实系统里 RenderSystem 持有的那一份。
+    PipelineLayoutCache& Layouts() {
+        if (_layouts == nullptr) {
+            _layouts = make_unique<PipelineLayoutCache>(_ctx.Device.get());
+        }
+        return *_layouts;
+    }
+
     /// 一份完整的固定功能状态。PipelineStateCache 不做基线合成, 调用方必须给全。
     GraphicsPipelineStateKey MakeKey(ShaderPassProgram* program) const {
         render::PrimitiveState primitive = render::PrimitiveState::Default();
@@ -245,6 +253,9 @@ private:
     std::array<render::RenderPassColorAttachmentDescriptor, 1> _colorAttachments{};
     unique_ptr<render::RenderPass> _renderPass;
     unique_ptr<PipelineStateCache> _cache;
+    /// 【刻意不要求它后于 _assets 死】: 缓存只是非拥有索引, 残留 layout 由 program 的
+    /// 引用计数保命 —— 照 RenderSystem 先于 AssetManager 关停的顺序。
+    unique_ptr<PipelineLayoutCache> _layouts;
     shared_ptr<render::Dxc> _dxc;
     /// 【必须声明在 _dxc 之后】: 借用 Dxc*, 析构逆序保证 context 先死。
     unique_ptr<ShaderResolveContext> _jitContext;
@@ -370,7 +381,7 @@ TEST_F(PipelineStateCacheTest, DifferentProgramSplitsEntries) {
     auto secondAsset = CreateShaderAsset(
         Device(),
         GetErrorPassManifestPath(),
-        ShaderAssetLoadOptions{.Context = &NoJitContext()},
+        ShaderAssetLoadOptions{.Context = &NoJitContext(), .LayoutCache = &Layouts()},
         diag);
     ASSERT_TRUE(secondAsset.HasValue()) << diag.ToString();
 
@@ -379,6 +390,11 @@ TEST_F(PipelineStateCacheTest, DifferentProgramSplitsEntries) {
     ASSERT_TRUE(firstProgram.HasValue());
     ASSERT_TRUE(secondProgram.HasValue());
     ASSERT_NE(firstProgram.Get(), secondProgram.Get());
+    // 两份资产是同一 manifest, 布局逐字节相同, 故【共享同一个 layout】。这正是
+    // "program 相同则 layout 相同, 反之不成立"那条单向关系: layout 相同不足以合并 PSO
+    // 条目, program 指针仍须分条。
+    EXPECT_EQ(firstProgram->GetPipelineLayout().Get(), secondProgram->GetPipelineLayout().Get());
+    EXPECT_EQ(Layouts().GetLayoutCount(), 1u);
 
     const ShaderVariantKey variant = firstProgram->GetDomain().DefaultVariant();
     Nullable<render::GraphicsPipelineState*> firstPso =

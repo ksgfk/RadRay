@@ -95,6 +95,16 @@ Nullable<unique_ptr<ShaderAsset>> CreateShaderAsset(
         outDiag.Message = "ShaderAssetLoadOptions::Context is null";
         return nullptr;
     }
+    if (!options.LayoutCache.HasValue()) {
+        outDiag.Message = "ShaderAssetLoadOptions::LayoutCache is null";
+        return nullptr;
+    }
+    // 缓存的 layout 会被本资产的 PSO 消费, 两者必须来自同一 device。不同 device 的
+    // root signature / VkPipelineLayout 不可互换, 而错配只会在建 PSO 时才暴露。
+    if (options.LayoutCache.Get()->GetDevice().Get() != &device) {
+        outDiag.Message = "ShaderAssetLoadOptions::LayoutCache belongs to another device";
+        return nullptr;
+    }
     std::optional<ShaderAssetDesc> desc = LoadShaderAssetDesc(manifestPath, outDiag);
     if (!desc.has_value()) {
         return nullptr;
@@ -120,9 +130,11 @@ Nullable<unique_ptr<ShaderAsset>> CreateShaderAsset(
         // Source 展开成最终路径后交给 program —— resolver 只收 pass, 不做继承。
         ShaderPassDesc resolvablePass = MakeResolvablePass(desc.value(), pass);
 
-        ShaderPipelineLayoutStorage layoutStorage = BuildPipelineLayoutStorage(pass);
-        auto layoutResult = device.CreatePipelineLayout(layoutStorage.Get());
-        if (!layoutResult.HasValue()) {
+        // storage 是瞬态的 —— 缓存把内容拷进自己的 key, 之后 storage 即可丢弃。
+        const ShaderPipelineLayoutStorage layoutStorage = BuildPipelineLayoutStorage(pass);
+        SharedPipelineLayoutRef layout =
+            options.LayoutCache.Get()->GetOrCreate(layoutStorage.Get());
+        if (!layout.HasValue()) {
             outDiag.Message = "CreatePipelineLayout failed";
             return nullptr;
         }
@@ -136,8 +148,7 @@ Nullable<unique_ptr<ShaderAsset>> CreateShaderAsset(
             make_unique<ShaderPassProgram>(
                 std::move(resolvablePass),
                 std::move(domain.value()),
-                std::move(layoutStorage),
-                layoutResult.Release(),
+                std::move(layout),
                 std::move(vertexInput),
                 resolver.get()));
     }

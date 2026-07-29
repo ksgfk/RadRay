@@ -64,7 +64,7 @@
 //
 //   shader_manifest.h  格式层 (本文件)。manifest desc、变体域、产物索引、
 //                      ShaderResolver、cook、layout 构建。
-//   shader_program.h   对象层。ShaderPassProgram: PipelineLayout + 字节码缓存。
+//   shader_program.h   对象层。ShaderPassProgram: 共享 PipelineLayout 引用 + 字节码缓存。
 //   shader_asset.h     资产层。ShaderAsset: 一份 manifest 一个 Asset。
 
 namespace radray::render {

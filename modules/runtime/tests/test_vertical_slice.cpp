@@ -419,6 +419,10 @@ TEST_P(VerticalSliceTest, ManifestToPixels) {
             .AllowJit = !isAot},
         isAot ? nullptr : dxc.get()};
 
+    // 【刻意声明在 assetManager 之前】: 缓存只是非拥有索引, 允许它先于资产死 —— 这就是
+    // 真实系统里 RenderSystem 先于 AssetManager 关停的那个顺序。
+    PipelineLayoutCache layoutCache{&device};
+
     AssetManager assetManager;
     SliceRecycler recycler;
     assetManager.SetRecycler(&recycler);
@@ -427,7 +431,7 @@ TEST_P(VerticalSliceTest, ManifestToPixels) {
         assetManager,
         device,
         manifestPath,
-        ShaderAssetLoadOptions{.Context = &resolveContext});
+        ShaderAssetLoadOptions{.Context = &resolveContext, .LayoutCache = &layoutCache});
     assetManager.Pump();
     ASSERT_TRUE(assetRef.IsReady()) << "the shader asset did not become ready after one pump";
     ASSERT_EQ(assetRef->GetPassCount(), 1u);

@@ -10,10 +10,11 @@
 //
 // == 在分层里的位置 ==
 //
-//   shader_manifest.h      格式层。manifest / resolver / cook。
-//   shader_program.h       对象层。PipelineLayout + 字节码缓存。
-//   shader_asset.h         资产层。一份 manifest 一个 Asset。
-//   pipeline_state_cache.h 管线状态层 (本文件)。唯一创建 render::Shader 与 PSO 的地方。
+//   shader_manifest.h        格式层。manifest / resolver / cook。
+//   pipeline_layout_cache.h  布局层。PipelineLayout 按内容去重, 引用计数共享。
+//   shader_program.h         对象层。一份 layout 引用 + 字节码缓存。
+//   shader_asset.h           资产层。一份 manifest 一个 Asset。
+//   pipeline_state_cache.h   管线状态层 (本文件)。唯一创建 render::Shader 与 PSO 的地方。
 //
 // 【为什么 render::Shader 只在这里出现】: 它是瞬态参数, 不是资源。两个后端都只在建 PSO
 // 时消费它, PSO 建成后无任何回指 —— D3D12 在 CreateGraphicsPipelineState 内把字节码拷进
@@ -21,6 +22,10 @@
 // 的 string_view 同理只需活到调用返回。所以 Shader 是 GetOrCreateGraphics 内的局部量,
 // 出作用域即销毁; 常驻缓存它只能省下一次 CreateShader (输入是上层已缓存的字节码, 不读盘
 // 不 JIT), 代价却是永久驻留全部 VkShaderModule。
+//
+// 【PipelineLayout 也不在这里创建】: 它归 pipeline_layout_cache.h 按 binding 布局内容
+// 去重, 因为 layout 与 variant / target 无关而 PSO 的 key 比它宽得多 —— 同一份 layout
+// 会喂给大量 PSO。本层只消费 program 交出的那个共享指针。
 //
 // 【固定功能状态必须由调用方给全】: 本层不做 "基线 + 覆盖" 合成。manifest 刻意不含固定
 // 功能段 (shader_manifest.h 的 ShaderAssetDesc), 而 MaterialRenderState 的注释又说沿用
@@ -42,7 +47,9 @@ namespace radray {
 /// (ShaderProgramVariant 的共享机制), 本就该命中同一个 PSO。
 ///
 /// 【Program 指针即代表 PipelineLayout 与 vertex input】: 二者都是 pass 级、与 variant
-/// 无关, 且由 program 拥有, 故指针相同即这两项相同。
+/// 无关, 且由 program 决定, 故指针相同即这两项相同。注意 layout 是【共享】的 (布局相同
+/// 的多个 program 持同一个对象, 见 pipeline_layout_cache.h), 所以这里只是单向的函数
+/// 关系 —— program 相同则 layout 相同, 反之不成立。做 key 只需要前者。
 struct GraphicsPipelineStateKey {
     /// 非 const: miss 路径要调 GetOrCreateVariant。必须非空。
     ShaderPassProgram* Program{nullptr};
@@ -71,8 +78,14 @@ public:
 
     /// 取或建一个 graphics PSO。
     ///
-    /// asset 必须是 key.Program 所属的资产 —— 条目持它的一份引用把资产钉住, 因为两个后端
-    /// 的 PSO 都存了 PipelineLayout 裸指针而 layout 归 ShaderPassProgram 所有。
+    /// asset 必须是 key.Program 所属的资产 —— 条目持它的一份引用把资产钉住。key.Program
+    /// 是裸指针且归资产所有, 而条目在 miss 路径上要拿它解析变体, 命中路径上也要拿它做
+    /// 比较, 故资产必须活得比条目久。
+    ///
+    /// 【PipelineLayout 不再需要这份引用来保命】: 两个后端的 PSO 确实都存了 layout 裸指针,
+    /// 但 layout 现在是引用计数的共享对象 (pipeline_layout_cache.h), 由 program 持一份
+    /// 引用。资产被钉住 → program 活着 → layout 活着, 这条链仍然成立, 只是 layout 那一环
+    /// 已经自保, 不依赖本层。
     ///
     /// 【失败不写缓存】: 任一步失败返回 nullptr, 原因写入 outDiag。字节码仍会留在 program
     /// 的缓存里 (它本身有效), 但不产生 PSO 条目。
@@ -112,7 +125,7 @@ private:
         /// Ref.Get() —— 资产被 Unload 后 Ref 立刻失效返回 nullptr, 那时正是最需要逐出的
         /// 时刻。
         const ShaderAsset* Owner{nullptr};
-        /// 钉住资产, 防 PipelineLayout 悬垂。
+        /// 钉住资产, 防 Program 裸指针悬垂 (见 GetOrCreateGraphics)。
         StreamingAssetRef<ShaderAsset> Ref;
         unique_ptr<render::GraphicsPipelineState> Object;
     };

@@ -13,7 +13,7 @@
 //   shader_manifest.h  格式层。manifest desc、变体域、产物索引、ShaderResolver、cook。
 //                      不含 Asset —— tools/shader_cook 只需要这一层, 不该为此吃下
 //                      AssetManager 传递带来的 stdexec 编译开销。
-//   shader_program.h   对象层。ShaderPassProgram: PipelineLayout + 字节码缓存。
+//   shader_program.h   对象层。ShaderPassProgram: 共享 PipelineLayout 引用 + 字节码缓存。
 //                      不含 Asset, 故 material 层可以单独用它。
 //   shader_asset.h     资产层 (本文件)。ShaderAsset 把上面两层接进 AssetManager。
 //
@@ -80,16 +80,26 @@ struct RuntimeTypeTrait<ShaderAsset> {
     using Bases = std::tuple<Asset>;
 };
 
-/// 【本结构刻意只有一个字段】: ShaderRoot / Staleness / AllowJit / Dxc 曾在这里各占
-/// 一项, 于是每个加载调用点都能自行决定"这是开发构建还是发布包"。那是一个进程级答案,
-/// 放在这里就成了第二套真相 —— 而且从未被兑现: AssetId 只哈希 manifest 路径
-/// (MakeShaderAssetId), AssetManager 按 id 去重后直接返回既有 handle, 第二次调用携带
-/// 的 options 连协程都没启动就被静默丢弃。现在这四项统一落在 ShaderResolveContext。
+/// 【本结构只放"进程级共享设施的指针", 不放 per-load 决策】: ShaderRoot / Staleness /
+/// AllowJit / Dxc 曾在这里各占一项, 于是每个加载调用点都能自行决定"这是开发构建还是
+/// 发布包"。那是一个进程级答案, 放在这里就成了第二套真相 —— 而且从未被兑现: AssetId
+/// 只哈希 manifest 路径 (MakeShaderAssetId), AssetManager 按 id 去重后直接返回既有
+/// handle, 第二次调用携带的 options 连协程都没启动就被静默丢弃。那四项现已统一落在
+/// ShaderResolveContext。
+///
+/// 下面两个字段都是【指向唯一一份共享设施的指针】, 不是决策 —— 所有调用点必须传同一个,
+/// 传错不会产生"两套策略", 只会产生一个错误的依赖注入。这与上面被删掉的四项性质不同。
 struct ShaderAssetLoadOptions {
     /// 全进程共享的解析上下文 (ShaderRoot / Staleness / AllowJit / Dxc / 源码缓存)。
     /// 【不持有生命周期】: 必须在资产存活期间保持有效, 通常由 RenderSystem 持有。
     /// 为空则加载失败 —— 不猜 include 根, 见 CreateShaderAsset。
     Nullable<ShaderResolveContext*> Context{nullptr};
+    /// PipelineLayout 的内容去重缓存, 由 RenderSystem 持有。
+    /// 【不持有生命周期】: 但允许它先于资产销毁 —— layout 按引用计数自保, 见
+    /// pipeline_layout_cache.h。
+    /// 【为空即加载失败】: 不提供"绕过缓存直接建 layout"的回退, 那会让 layout 的所有权
+    /// 有两条路径。调用方给一个缓存即可, 不必是 RenderSystem 那一个。
+    Nullable<PipelineLayoutCache*> LayoutCache{nullptr};
 };
 
 /// manifest 路径 -> AssetId。前缀 "shader:" 做命名空间隔离, 同一路径在不同资产类型下

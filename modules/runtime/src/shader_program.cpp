@@ -142,13 +142,11 @@ render::ShaderStages ShaderProgramVariant::GetStageMask() const noexcept {
 ShaderPassProgram::ShaderPassProgram(
     ShaderPassDesc pass,
     ShaderVariantDomain domain,
-    ShaderPipelineLayoutStorage layoutStorage,
-    unique_ptr<render::PipelineLayout> pipelineLayout,
+    SharedPipelineLayoutRef pipelineLayout,
     std::optional<ShaderVertexInputStorage> vertexInput,
     ShaderResolver* resolver) noexcept
     : _pass(std::move(pass)),
       _domain(std::move(domain)),
-      _layoutStorage(std::move(layoutStorage)),
       _pipelineLayout(std::move(pipelineLayout)),
       _vertexInput(std::move(vertexInput)),
       _resolver(resolver) {
@@ -281,13 +279,14 @@ Nullable<const ShaderProgramVariant*> ShaderPassProgram::GetOrCreateDefaultVaria
 }
 
 void ShaderPassProgram::ReleaseRenderResources(IRenderResourceRecycler& recycler) noexcept {
+    (void)recycler;
     // 变体与字节码先清: 它们只是 CPU 数据, 但清掉能让"资产已卸载"在调用方那里立刻
     // 表现为 miss 而不是拿到陈旧结果。
     _variants.clear();
     _bytecodes.clear();
-    if (_pipelineLayout != nullptr) {
-        recycler.RecycleRenderResource(std::move(_pipelineLayout));
-    }
+    // 放开对共享 layout 的引用。归零时它自己从 PipelineLayoutCache 摘除并销毁 —— 不走
+    // recycler, 理由见 pipeline_layout_cache.h。
+    _pipelineLayout.Reset();
 }
 
 }  // namespace radray
