@@ -2,8 +2,6 @@
 
 #include <radray/runtime_type.h>
 #include <radray/runtime/gpu_resource.h>
-#include <radray/runtime/pipeline_layout_cache.h>
-#include <radray/runtime/pipeline_state_cache.h>
 #include <radray/runtime/render_framework/render_pipeline.h>
 #include <radray/runtime/render_framework/scene.h>
 #include <radray/shader/shader_manifest.h>

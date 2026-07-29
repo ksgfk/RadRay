@@ -32,7 +32,7 @@
 #include <radray/shader/dxc.h>
 #include <radray/render/rhi.h>
 #include <radray/runtime/asset_manager.h>
-#include <radray/runtime/pipeline_state_cache.h>
+#include <radray/runtime/gpu_resource.h>
 #include <radray/runtime/render_resource_recycler.h>
 #include <radray/runtime/shader_asset.h>
 #include <radray/shader/shader_manifest.h>

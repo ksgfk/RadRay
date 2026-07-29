@@ -12,7 +12,8 @@
 // 不参数化后端: PSO key 的行为与后端无关 (两个后端都只在建 PSO 时消费字节码), 跨后端
 // 差异由 test_vertical_slice 覆盖。这里取任一可用后端即可。
 
-#include <radray/runtime/pipeline_state_cache.h>
+#include <radray/runtime/gpu_resource.h>
+#include <radray/runtime/shader_asset.h>
 
 #include <radray/environment.h>
 #include <radray/shader/dxc.h>

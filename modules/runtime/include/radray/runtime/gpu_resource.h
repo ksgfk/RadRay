@@ -4,8 +4,11 @@
 #include <optional>
 #include <span>
 
+#include <radray/intrusive_ptr.h>
 #include <radray/nullable.h>
 #include <radray/render/rhi.h>
+#include <radray/runtime/asset_manager.h>
+#include <radray/shader/shader_manifest.h>
 #include <radray/types.h>
 
 namespace radray {
@@ -356,6 +359,147 @@ private:
     uint64_t _renderPassMisses{0};
     uint64_t _framebufferHits{0};
     uint64_t _framebufferMisses{0};
+};
+
+}  // namespace radray
+
+namespace radray {
+
+struct PipelineLayoutCacheKey {
+    struct Group {
+        uint32_t GroupIndex{0};
+        vector<render::ShaderParameterSetLayoutEntryDescriptor> Entries;
+
+        friend bool operator==(const Group&, const Group&) noexcept = default;
+    };
+
+    vector<Group> Groups;
+    std::optional<render::PushConstantDescriptor> PushConstant{};
+
+    static PipelineLayoutCacheKey Build(const render::PipelineLayoutDescriptor& desc);
+    render::PipelineLayoutDescriptor Get() const;
+
+    friend bool operator==(const PipelineLayoutCacheKey& lhs, const PipelineLayoutCacheKey& rhs) noexcept {
+        return lhs.Groups == rhs.Groups && lhs.PushConstant == rhs.PushConstant;
+    }
+
+private:
+    mutable vector<render::ShaderParameterSetLayoutDescriptor> _setsView;
+};
+
+class PipelineLayoutCache;
+
+class SharedPipelineLayout {
+public:
+    SharedPipelineLayout(
+        PipelineLayoutCache* cache,
+        PipelineLayoutCacheKey key,
+        unique_ptr<render::PipelineLayout> object) noexcept;
+    SharedPipelineLayout(const SharedPipelineLayout&) = delete;
+    SharedPipelineLayout& operator=(const SharedPipelineLayout&) = delete;
+    ~SharedPipelineLayout() noexcept;
+
+    render::PipelineLayout* Get() const noexcept { return _object.get(); }
+    const PipelineLayoutCacheKey& GetKey() const noexcept { return _key; }
+    uint32_t GetRefCount() const noexcept { return _refCount; }
+
+private:
+    friend class PipelineLayoutCache;
+    friend void IntrusivePtrAddRef(const SharedPipelineLayout* obj) noexcept;
+    friend void IntrusivePtrRelease(const SharedPipelineLayout* obj) noexcept;
+
+    PipelineLayoutCache* _cache{nullptr};
+    PipelineLayoutCacheKey _key;
+    unique_ptr<render::PipelineLayout> _object;
+    mutable uint32_t _refCount{1};
+};
+
+void IntrusivePtrAddRef(const SharedPipelineLayout* obj) noexcept;
+void IntrusivePtrRelease(const SharedPipelineLayout* obj) noexcept;
+
+using SharedPipelineLayoutRef = IntrusivePtr<SharedPipelineLayout>;
+
+class PipelineLayoutCache {
+public:
+    explicit PipelineLayoutCache(render::Device* device) noexcept;
+    ~PipelineLayoutCache() noexcept;
+    PipelineLayoutCache(const PipelineLayoutCache&) = delete;
+    PipelineLayoutCache& operator=(const PipelineLayoutCache&) = delete;
+
+    SharedPipelineLayoutRef GetOrCreate(const render::PipelineLayoutDescriptor& desc) noexcept;
+    SharedPipelineLayoutRef GetOrCreate(PipelineLayoutCacheKey key) noexcept;
+    Nullable<render::Device*> GetDevice() const noexcept { return _device; }
+    uint32_t GetLayoutCount() const noexcept { return static_cast<uint32_t>(_entries.size()); }
+    uint64_t GetHitCount() const noexcept { return _hits; }
+    uint64_t GetMissCount() const noexcept { return _misses; }
+
+private:
+    friend void IntrusivePtrRelease(const SharedPipelineLayout* obj) noexcept;
+    void Detach(SharedPipelineLayout* layout) noexcept;
+
+    render::Device* _device{nullptr};
+    vector<SharedPipelineLayout*> _entries;
+    uint64_t _hits{0};
+    uint64_t _misses{0};
+};
+
+}  // namespace radray
+
+namespace radray {
+
+class ShaderAsset;
+class ShaderPassProgram;
+struct ShaderAssetDiagnostic;
+
+struct GraphicsPipelineStateKey {
+    ShaderPassProgram* Program{nullptr};
+    render::RenderPass* CompatibleRenderPass{nullptr};
+    render::PrimitiveState Primitive{render::PrimitiveState::Default()};
+    std::optional<render::DepthStencilState> DepthStencil{};
+    render::MultiSampleState MultiSample{};
+    std::span<const render::ColorTargetState> ColorTargets{};
+};
+
+class PipelineStateCache {
+public:
+    explicit PipelineStateCache(render::Device* device) noexcept;
+    ~PipelineStateCache() noexcept;
+    PipelineStateCache(const PipelineStateCache&) = delete;
+    PipelineStateCache& operator=(const PipelineStateCache&) = delete;
+
+    Nullable<render::GraphicsPipelineState*> GetOrCreateGraphics(
+        const StreamingAssetRefAny& asset,
+        const GraphicsPipelineStateKey& key,
+        const ShaderVariantKey& variant,
+        render::ShaderBlobCategory category,
+        ShaderAssetDiagnostic& outDiag) noexcept;
+    uint32_t RemovePipelineStatesUsing(const ShaderAsset* asset) noexcept;
+    void Clear() noexcept;
+
+    uint32_t GetGraphicsPipelineStateCount() const noexcept {
+        return static_cast<uint32_t>(_graphics.size());
+    }
+    uint64_t GetGraphicsHitCount() const noexcept { return _graphicsHits; }
+    uint64_t GetGraphicsMissCount() const noexcept { return _graphicsMisses; }
+
+private:
+    struct GraphicsEntry {
+        ShaderPassProgram* Program{nullptr};
+        render::RenderPass* CompatibleRenderPass{nullptr};
+        vector<std::pair<render::ShaderStage, ShaderHash>> StageKeys;
+        render::PrimitiveState Primitive{};
+        std::optional<render::DepthStencilState> DepthStencil{};
+        render::MultiSampleState MultiSample{};
+        vector<render::ColorTargetState> ColorTargets;
+        const ShaderAsset* Owner{nullptr};
+        StreamingAssetRefAny Ref;
+        unique_ptr<render::GraphicsPipelineState> Object;
+    };
+
+    render::Device* _device{nullptr};
+    vector<GraphicsEntry> _graphics;
+    uint64_t _graphicsHits{0};
+    uint64_t _graphicsMisses{0};
 };
 
 }  // namespace radray

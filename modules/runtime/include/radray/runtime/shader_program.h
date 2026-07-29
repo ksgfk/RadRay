@@ -7,7 +7,7 @@
 // 以前它靠 shader_manifest.h 传递地拿到 rhi.h; 格式层迁入 radrayshader 后那条链断了,
 // 因为格式层现在只包含 shader_types.h (刻意不依赖任何 device 类型)。
 #include <radray/render/rhi.h>
-#include <radray/runtime/pipeline_layout_cache.h>
+#include <radray/runtime/gpu_resource.h>
 #include <radray/shader/shader_manifest.h>
 
 // pass 级 program: 把 "keyword -> 字节码" 那条链收敛成一次调用。

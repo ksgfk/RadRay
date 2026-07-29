@@ -951,8 +951,6 @@ namespace radray {
         static bool Read(const JsonValue& json, Type& value) noexcept;            \
     }
 
-RADRAY_DECLARE_SHADER_JSON_CODEC(render::ShaderBindingLocation);
-RADRAY_DECLARE_SHADER_JSON_CODEC(render::SamplerDescriptor);
 RADRAY_DECLARE_SHADER_JSON_CODEC(ShaderBindingDesc);
 RADRAY_DECLARE_SHADER_JSON_CODEC(ShaderBindingGroupDesc);
 RADRAY_DECLARE_SHADER_JSON_CODEC(ShaderPushConstantDesc);

@@ -9,7 +9,7 @@
 // 需要真实 device: layout 是 GPU 对象 (D3D12 的 ID3D12RootSignature / Vulkan 的
 // VkPipelineLayout), 没有可替换的假实现。无设备时 GTEST_SKIP。
 
-#include <radray/runtime/pipeline_layout_cache.h>
+#include <radray/runtime/gpu_resource.h>
 
 #include <radray/render/rhi.h>
 #include <radray/types.h>

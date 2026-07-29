@@ -4,6 +4,7 @@
 #include <string_view>
 
 #include <radray/enum_flags.h>
+#include <radray/json.h>
 #include <radray/types.h>
 
 // radrayshader 的类型基座: manifest 的数据词汇。
@@ -184,3 +185,27 @@ std::string_view format_as(ShaderBlobCategory v) noexcept;
 std::string_view format_as(VertexFormat v) noexcept;
 
 }  // namespace radray::render
+
+namespace radray {
+
+template <>
+struct JsonSerializer<render::ShaderBindingLocation> {
+    static bool Write(JsonWriteContext& context, const render::ShaderBindingLocation& value) noexcept;
+};
+
+template <>
+struct JsonDeserializer<render::ShaderBindingLocation> {
+    static bool Read(const JsonValue& json, render::ShaderBindingLocation& value) noexcept;
+};
+
+template <>
+struct JsonSerializer<render::SamplerDescriptor> {
+    static bool Write(JsonWriteContext& context, const render::SamplerDescriptor& value) noexcept;
+};
+
+template <>
+struct JsonDeserializer<render::SamplerDescriptor> {
+    static bool Read(const JsonValue& json, render::SamplerDescriptor& value) noexcept;
+};
+
+}  // namespace radray

@@ -952,67 +952,6 @@ constexpr std::string_view kDxcVersion = RADRAY_DXC_VERSION;
 
 // ============================ JSON 定制点 ============================
 
-bool JsonSerializer<render::ShaderBindingLocation>::Write(
-    JsonWriteContext& context,
-    const render::ShaderBindingLocation& value) noexcept {
-    using value_type = render::ShaderBindingLocation;
-    return SerializeJsonObject(
-        context,
-        value,
-        JsonMember{"Group", &value_type::Group},
-        JsonMember{"Binding", &value_type::Binding});
-}
-
-bool JsonDeserializer<render::ShaderBindingLocation>::Read(
-    const JsonValue& json,
-    render::ShaderBindingLocation& value) noexcept {
-    using value_type = render::ShaderBindingLocation;
-    return DeserializeJsonObject(
-        json,
-        value,
-        JsonMember{"Group", &value_type::Group},
-        JsonMember{"Binding", &value_type::Binding});
-}
-
-bool JsonSerializer<render::SamplerDescriptor>::Write(
-    JsonWriteContext& context,
-    const render::SamplerDescriptor& value) noexcept {
-    JsonObjectWriter object = context.BeginObject();
-    return object.IsValid() &&
-           object.Member("AddressS", value.AddressS) &&
-           object.Member("AddressT", value.AddressT) &&
-           object.Member("AddressR", value.AddressR) &&
-           object.Member("MinFilter", value.MinFilter) &&
-           object.Member("MagFilter", value.MagFilter) &&
-           object.Member("MipmapFilter", value.MipmapFilter) &&
-           object.Member("LodMin", value.LodMin) &&
-           object.Member("LodMax", value.LodMax) &&
-           object.OptionalMember("Compare", value.Compare) &&
-           object.Member("AnisotropyClamp", value.AnisotropyClamp);
-}
-
-bool JsonDeserializer<render::SamplerDescriptor>::Read(
-    const JsonValue& json,
-    render::SamplerDescriptor& value) noexcept {
-    JsonObjectReader object{json};
-    render::SamplerDescriptor decoded{};
-    if (!object.IsValid() ||
-        !object.Member("AddressS", decoded.AddressS) ||
-        !object.Member("AddressT", decoded.AddressT) ||
-        !object.Member("AddressR", decoded.AddressR) ||
-        !object.Member("MinFilter", decoded.MinFilter) ||
-        !object.Member("MagFilter", decoded.MagFilter) ||
-        !object.Member("MipmapFilter", decoded.MipmapFilter) ||
-        !object.MemberIfPresent("LodMin", decoded.LodMin) ||
-        !object.MemberIfPresent("LodMax", decoded.LodMax) ||
-        !object.OptionalMember("Compare", decoded.Compare) ||
-        !object.MemberIfPresent("AnisotropyClamp", decoded.AnisotropyClamp)) {
-        return false;
-    }
-    value = decoded;
-    return true;
-}
-
 bool JsonSerializer<ShaderBindingDesc>::Write(
     JsonWriteContext& context,
     const ShaderBindingDesc& value) noexcept {
