@@ -42,27 +42,8 @@ ImageData ResolveImageLoadFailure(const ImageAssetLoadOptions& options) {
     return {};
 }
 
-uint64_t StableHash64(std::string_view text) noexcept {
-    uint64_t hash = 1469598103934665603ull;
-    for (unsigned char ch : text) {
-        hash ^= static_cast<uint64_t>(ch);
-        hash *= 1099511628211ull;
-    }
-    return hash;
-}
-
 AssetId MakeImageAssetId(const std::filesystem::path& path) {
-    const string key = fmt::format("image:{}", std::filesystem::absolute(path).generic_string());
-    std::array<uint8_t, Guid::Size> bytes{};
-    uint64_t h0 = StableHash64(key);
-    uint64_t h1 = StableHash64(fmt::format("{}:salt", key));
-    for (size_t i = 0; i < 8; ++i) {
-        bytes[i] = static_cast<uint8_t>((h0 >> ((7 - i) * 8)) & 0xffu);
-        bytes[i + 8] = static_cast<uint8_t>((h1 >> ((7 - i) * 8)) & 0xffu);
-    }
-    bytes[6] = static_cast<uint8_t>((bytes[6] & 0x0fu) | 0x40u);
-    bytes[8] = static_cast<uint8_t>((bytes[8] & 0x3fu) | 0x80u);
-    return AssetId{bytes};
+    return MakeAssetIdFromPath("image", path);
 }
 
 AssetLoadTask LoadImageAssetTask(std::filesystem::path path, ImageAssetLoadOptions options) {

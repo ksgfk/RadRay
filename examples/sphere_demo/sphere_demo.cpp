@@ -50,13 +50,30 @@ void ComputeBounds(const TriangleMesh& mesh, Eigen::Vector3f& outMin, Eigen::Vec
     }
 }
 
-// 自定义 StaticMesh 加载协程: 上传 GPU 数据后补全 section + bounds。
-AssetLoadTask LoadDemoMesh(FrameUploadScheduler& frameUploads, MeshResource meshResource, Eigen::Vector3f boundsMin, Eigen::Vector3f boundsMax) {
+// 自定义 StaticMesh 加载协程: section 与 bounds 在建内容【之前】算好。
+// 内容不可变, 故不再有从前那种"先构造再 SetSections / SetBounds"的二段式回填。
+AssetLoadTask LoadDemoMesh(
+    AssetManager& assetManager,
+    FrameUploadScheduler& frameUploads,
+    MeshResource meshResource,
+    Eigen::Vector3f boundsMin,
+    Eigen::Vector3f boundsMax) {
     if (meshResource.Primitives.empty()) {
         co_return AssetLoadResult::Failure("demo mesh resource has no primitive");
     }
     const uint32_t indexCount = meshResource.Primitives[0].IndexBuffer.IndexCount;
     const uint32_t vertexCount = meshResource.Primitives[0].VertexCount;
+
+    vector<StaticMeshSection> sections;
+    sections.push_back(StaticMeshSection{
+        /*primitiveIndex*/ 0,
+        /*firstIndex*/ 0,
+        /*indexCount*/ indexCount,
+        /*minVertexIndex*/ 0,
+        /*maxVertexIndex*/ vertexCount > 0 ? vertexCount - 1 : 0});
+    if (!IsStaticMeshDataValid(meshResource, sections)) {
+        co_return AssetLoadResult::Failure("demo mesh resource is invalid");
+    }
 
     FrameUploadScope frame = co_await frameUploads.BeginUpload();
     std::optional<GpuMesh> renderMesh =
@@ -66,19 +83,13 @@ AssetLoadTask LoadDemoMesh(FrameUploadScheduler& frameUploads, MeshResource mesh
     }
     co_await frame.WaitGpu();
 
-    auto mesh = make_unique<StaticMesh>(
+    StaticMeshContentRef content = assetManager.MakeContent<StaticMeshContent>(
         std::move(meshResource),
-        make_shared<GpuMesh>(std::move(renderMesh.value())));
-    vector<StaticMeshSection> sections;
-    sections.push_back(StaticMeshSection{
-        /*primitiveIndex*/ 0,
-        /*firstIndex*/ 0,
-        /*indexCount*/ indexCount,
-        /*minVertexIndex*/ 0,
-        /*maxVertexIndex*/ vertexCount > 0 ? vertexCount - 1 : 0});
-    mesh->SetSections(std::move(sections));
-    mesh->SetBounds(boundsMin, boundsMax);
-    co_return AssetLoadResult::Success(std::move(mesh));
+        std::move(sections),
+        boundsMin,
+        boundsMax,
+        std::move(renderMesh.value()));
+    co_return AssetLoadResult::Success(make_unique<StaticMesh>(std::move(content)));
 }
 
 }  // namespace
@@ -203,7 +214,7 @@ private:
         FrameUploadScheduler& uploads = GetGpuSystem()->GetFrameUploadScheduler();
         StreamingAssetRef<StaticMesh> meshRef = assets->Load<StaticMesh>(AssetLoadRequest{
             .Id = Guid::NewGuid(),
-            .Task = LoadDemoMesh(uploads, std::move(meshResource), boundsMin, boundsMax),
+            .Task = LoadDemoMesh(*assets, uploads, std::move(meshResource), boundsMin, boundsMax),
             .DebugName = debugName});
 
         Actor* actor = GetWorld()->SpawnActor<Actor>();
@@ -252,7 +263,7 @@ private:
         FrameUploadScheduler& uploads = GetGpuSystem()->GetFrameUploadScheduler();
         StreamingAssetRef<StaticMesh> meshRef = assets->Load<StaticMesh>(AssetLoadRequest{
             .Id = Guid::NewGuid(),
-            .Task = LoadDemoMesh(uploads, std::move(meshResource), boundsMin, boundsMax),
+            .Task = LoadDemoMesh(*assets, uploads, std::move(meshResource), boundsMin, boundsMax),
             .DebugName = "Ground"});
 
         StreamingAssetRef<MaterialAsset> mat = CreateMaterial(

@@ -406,7 +406,7 @@ public:
 private:
     friend class PipelineLayoutCache;
     friend void IntrusivePtrAddRef(const SharedPipelineLayout* obj) noexcept;
-    friend void IntrusivePtrRelease(const SharedPipelineLayout* obj) noexcept;
+    friend void IntrusivePtrRelease(SharedPipelineLayout* obj) noexcept;
 
     PipelineLayoutCache* _cache{nullptr};
     PipelineLayoutCacheKey _key;
@@ -415,7 +415,7 @@ private:
 };
 
 void IntrusivePtrAddRef(const SharedPipelineLayout* obj) noexcept;
-void IntrusivePtrRelease(const SharedPipelineLayout* obj) noexcept;
+void IntrusivePtrRelease(SharedPipelineLayout* obj) noexcept;
 
 using SharedPipelineLayoutRef = IntrusivePtr<SharedPipelineLayout>;
 
@@ -434,7 +434,7 @@ public:
     uint64_t GetMissCount() const noexcept { return _misses; }
 
 private:
-    friend void IntrusivePtrRelease(const SharedPipelineLayout* obj) noexcept;
+    friend void IntrusivePtrRelease(SharedPipelineLayout* obj) noexcept;
     void Detach(SharedPipelineLayout* layout) noexcept;
 
     render::Device* _device{nullptr};
@@ -493,6 +493,26 @@ private:
         vector<render::ColorTargetState> ColorTargets;
         const ShaderAsset* Owner{nullptr};
         StreamingAssetRefAny Ref;
+        /// 【保住 Program 指针的那一份引用】: Program 指向 ShaderContent 内部的
+        /// ShaderPassProgram, 而 Ref 只保住资产【槽位】—— Unload 会销毁槽位并放开它那份
+        /// 内容引用。持有内容才使 Program 在槽位消失后仍然有效。
+        ///
+        /// 【为何是类型擦除的 AssetContentAnyRef】: 本条目只需要"别让它死", 不访问内容成员;
+        /// 而 AssetContentRef<ShaderContent> 会在此处对前向声明的 ShaderContent 求值
+        /// derived_from 并把 false 缓存下来。
+        ///
+        /// 【声明顺序有意义】: 在 Object 之前, 析构逆序保证 PSO 先死。
+        AssetContentAnyRef Content;
+        /// 【必须持有, 不能只靠 Ref】: 后端 PSO 存的是 PipelineLayout 裸指针 (D3D12 的
+        /// GraphicsPsoD3D12 存 RootSigD3D12* 并在每次 bind 时解引用), 而 layout 由
+        /// SharedPipelineLayout 的引用计数管生死。Ref 只保住资产【槽位】——
+        /// AssetManager::Unload 无视引用计数销毁槽位, ShaderPassProgram 随之析构并放开
+        /// 它那份 layout 引用; 若本条目没有独立的一份, 计数就此归零、layout 被销毁,
+        /// 而 Object 仍在被录制使用。
+        ///
+        /// 【声明顺序有意义】: 必须在 Object 之前, 析构逆序保证 PSO 先死, 之后才放开
+        /// layout 引用。
+        SharedPipelineLayoutRef Layout;
         unique_ptr<render::GraphicsPipelineState> Object;
     };
 

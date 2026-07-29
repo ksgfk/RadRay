@@ -125,111 +125,87 @@ StaticMeshSection::StaticMeshSection(
       VertexOffset(vertexOffset) {
 }
 
-StaticMesh::StaticMesh() noexcept
-    : _boundsMin(Eigen::Vector3f::Zero()),
-      _boundsMax(Eigen::Vector3f::Zero()) {
+bool IsStaticMeshDataValid(
+    const MeshResource& meshResource,
+    std::span<const StaticMeshSection> sections) noexcept {
+    if (meshResource.Primitives.empty()) {
+        return false;
+    }
+    for (const MeshPrimitive& primitive : meshResource.Primitives) {
+        if (!IsPrimitiveValid(primitive, meshResource)) {
+            return false;
+        }
+    }
+    for (const StaticMeshSection& section : sections) {
+        if (!IsSectionValid(section, meshResource)) {
+            return false;
+        }
+    }
+    return true;
 }
 
-StaticMesh::StaticMesh(MeshResource meshResource, shared_ptr<GpuMesh> renderMesh) noexcept
-    : _meshResource(std::move(meshResource)),
-      _boundsMin(Eigen::Vector3f::Zero()),
-      _boundsMax(Eigen::Vector3f::Zero()),
+StaticMeshContent::StaticMeshContent(
+    AssetContentKey key,
+    IRenderResourceRecycler& recycler,
+    MeshResource meshResource,
+    vector<StaticMeshSection> sections,
+    const Eigen::Vector3f& boundsMin,
+    const Eigen::Vector3f& boundsMax,
+    GpuMesh renderMesh) noexcept
+    : AssetContent(key, recycler),
+      _meshResource(std::move(meshResource)),
+      _sections(std::move(sections)),
+      _boundsMin(boundsMin),
+      _boundsMax(boundsMax),
       _renderMesh(std::move(renderMesh)) {
+}
+
+StaticMeshContent::~StaticMeshContent() noexcept = default;
+
+bool StaticMeshContent::IsValid() const noexcept {
+    return IsStaticMeshDataValid(_meshResource, _sections);
+}
+
+void StaticMeshContent::ReleaseRenderResources(IRenderResourceRecycler& recycler) noexcept {
+    // 【无条件走 recycler】: 分离前这里有一句 use_count() == 1, 于是"别人还持有"时 buffer
+    // 会绕过 recycler 直接析构 —— 不等 fence。归零由基类接管后, 到这里必然是唯一所有者。
+    for (auto& buffer : _renderMesh.Buffers) {
+        recycler.RecycleRenderResource(std::move(buffer));
+    }
+    _renderMesh = GpuMesh{};
+    _meshResource = MeshResource{};
+    _sections.clear();
+}
+
+StaticMesh::StaticMesh(StaticMeshContentRef content) noexcept
+    : _content(std::move(content)) {
 }
 
 StaticMesh::~StaticMesh() noexcept = default;
 
 void StaticMesh::OnUnload(IRenderResourceRecycler& recycler) {
-    if (_renderMesh != nullptr && _renderMesh.use_count() == 1) {
-        for (auto& buffer : _renderMesh->Buffers) {
-            recycler.RecycleRenderResource(std::move(buffer));
-        }
-    }
-    ClearRenderData();
-    ClearCPUData();
+    // 【只放开槽位那份引用】: GPU buffer 的回收归内容归零时做, 此刻可能还有 SceneProxy
+    // 在用它录制。
+    (void)recycler;
+    _content.Reset();
 }
 
 AssetTypeId StaticMesh::GetTypeId() const noexcept {
     return runtime_type_id_v<StaticMesh>;
 }
 
-MeshResource& StaticMesh::GetMeshResource() noexcept {
-    return _meshResource;
-}
-
-const MeshResource& StaticMesh::GetMeshResource() const noexcept {
-    return _meshResource;
-}
-
-void StaticMesh::SetMeshResource(MeshResource meshResource) {
-    _meshResource = std::move(meshResource);
-}
-
-vector<StaticMeshSection>& StaticMesh::GetSections() noexcept {
-    return _sections;
-}
-
-const vector<StaticMeshSection>& StaticMesh::GetSections() const noexcept {
-    return _sections;
-}
-
-void StaticMesh::SetSections(vector<StaticMeshSection> sections) {
-    _sections = std::move(sections);
-}
-
-const Eigen::Vector3f& StaticMesh::GetBoundsMin() const noexcept {
-    return _boundsMin;
-}
-
-const Eigen::Vector3f& StaticMesh::GetBoundsMax() const noexcept {
-    return _boundsMax;
-}
-
-void StaticMesh::SetBounds(const Eigen::Vector3f& boundsMin, const Eigen::Vector3f& boundsMax) noexcept {
-    _boundsMin = boundsMin;
-    _boundsMax = boundsMax;
-}
-
-bool StaticMesh::IsValid() const noexcept {
-    if (_meshResource.Primitives.empty()) {
-        return false;
-    }
-
-    for (const MeshPrimitive& primitive : _meshResource.Primitives) {
-        if (!IsPrimitiveValid(primitive, _meshResource)) {
-            return false;
-        }
-    }
-
-    for (const StaticMeshSection& section : _sections) {
-        if (!IsSectionValid(section, _meshResource)) {
-            return false;
-        }
-    }
-
-    return true;
-}
-
-void StaticMesh::ClearCPUData() noexcept {
-    _meshResource = MeshResource{};
-    _sections.clear();
-    _boundsMin = Eigen::Vector3f::Zero();
-    _boundsMax = Eigen::Vector3f::Zero();
-}
-
-AssetLoadTask LoadStaticMesh(FrameUploadScheduler& frameUploads, MeshResource meshResource) {
+AssetLoadTask LoadStaticMesh(
+    AssetManager& assetManager,
+    FrameUploadScheduler& frameUploads,
+    MeshResource meshResource) {
     // 阶段(均为协程内部事务):
     //  1) CPU 校验网格数据。
     //  2) 两阶段 GPU 上传:co_await FrameUploadScheduler::BeginUpload 挂起至帧顶拿 cmd/uploader,
     //     inline 录制 copy 进当前帧 cmdbuffer,再 co_await WaitGpu 跨帧等 fence。
-    //  3) 一次性构造 StaticMesh。
-    // CPU 校验:借一个临时 StaticMesh 复用现有校验逻辑。
-    {
-        StaticMesh probe;
-        probe.SetMeshResource(meshResource);
-        if (!probe.IsValid()) {
-            co_return AssetLoadResult::Failure("static mesh resource is invalid");
-        }
+    //  3) 一次性构造内容与资产。
+    // 【校验先于上传】: 无效数据不该占用 upload 带宽, 也不该建出半成品内容。
+    if (!IsStaticMeshDataValid(meshResource, {})) {
+        co_return AssetLoadResult::Failure("static mesh resource is invalid");
     }
 
     // GPU 上传:两阶段 await(无 callback)。BeginUpload 挂起至帧顶拿到 cmd/uploader,
@@ -242,10 +218,14 @@ AssetLoadTask LoadStaticMesh(FrameUploadScheduler& frameUploads, MeshResource me
     }
     co_await frame.WaitGpu();
 
-    co_return AssetLoadResult::Success(
-        make_unique<StaticMesh>(
-            std::move(meshResource),
-            make_shared<GpuMesh>(std::move(renderMesh.value()))));
+    // 内容必须经 AssetManager 创建 —— recycler 由那里注入, 见 AssetContentKey。
+    StaticMeshContentRef content = assetManager.MakeContent<StaticMeshContent>(
+        std::move(meshResource),
+        vector<StaticMeshSection>{},
+        Eigen::Vector3f::Zero(),
+        Eigen::Vector3f::Zero(),
+        std::move(renderMesh.value()));
+    co_return AssetLoadResult::Success(make_unique<StaticMesh>(std::move(content)));
 }
 
 }  // namespace radray

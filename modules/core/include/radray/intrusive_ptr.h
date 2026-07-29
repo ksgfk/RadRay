@@ -7,6 +7,8 @@
 #include <type_traits>
 #include <utility>
 
+#include <radray/types.h>
+
 // 侵入式引用计数指针。
 //
 // == 为何不用 shared_ptr + weak_ptr ==
@@ -29,9 +31,24 @@
 //
 // == 接入方式 ==
 //
-// 通过 ADL 找 IntrusivePtrAddRef(T*) / IntrusivePtrRelease(T*) 这两个自由函数, 而不是
-// 硬绑一个基类。因为"归零做什么"是类型自己的事 (上面第 1 条), core 不该替它决定。
+// 通过 ADL 找 IntrusivePtrAddRef(const T*) / IntrusivePtrRelease(T*) 这两个自由函数, 而
+// 不是硬绑一个基类。因为"归零做什么"是类型自己的事 (上面第 1 条), core 不该替它决定。
 // 只需要普通计数的类型可以直接继承 IntrusiveRefCounted<Derived>, 它提供默认实现。
+//
+// == 两个钩子的 const 性刻意不对称 ==
+//
+// AddRef 收 const T*, Release 收 T*。这【不是】疏漏, 不要以"一致性"为名改齐:
+//
+// - AddRef 只递增计数, 对象的逻辑状态不变, 故收 const 让只有 const 视图的持有者也能
+//   retain。计数成员用 mutable 表达"计数不属于逻辑状态"。
+// - Release 在归零的那一刻是【唯一所有者】, 它要从缓存索引摘除自己、把 GPU 对象交给
+//   延迟销毁队列、最后销毁对象 —— 全部是 mutation。把它声明成 const T* 是一个假断言:
+//   每个自定义 Release 的类型都必须写 const_cast 把 const 去掉才能干活 (曾经
+//   SharedPipelineLayout 与测试里的 OwnerTracked 都这么做)。那不是 const 正确性,
+//   是把一个谎言分摊到每一个接入点。
+//
+// IntrusivePtr 内部本来就持 T* (非 const), const 是过去在 Reset 里白送给 Release 的,
+// 没有任何调用方要求它 —— 全仓库没有 IntrusivePtr<const T> 的实例化。
 //
 // == 不提供裸指针隐式构造 ==
 //
@@ -83,8 +100,9 @@ private:
 /// 侵入式计数基类。新建对象的计数从 1 开始 —— 配 AdoptRef 使用, 免去"创建后立刻 +1"
 /// 那一步以及中途返回时的漏减。
 ///
-/// 归零时 delete static_cast<Derived*>(this)。需要在归零时做别的事 (如从缓存索引摘除)
-/// 的类型不要继承本类, 自行提供 IntrusivePtrAddRef / IntrusivePtrRelease。
+/// 归零时 delete static_cast<Derived*>(this)。需要在归零时做别的事 (如从缓存索引摘除、
+/// 把 GPU 对象交给延迟销毁队列) 的类型不要继承本类, 自行提供 IntrusivePtrAddRef /
+/// IntrusivePtrRelease —— 那两个钩子的 const 性约定见文件头。
 template <class Derived, class CounterPolicy = IntrusiveSingleThreadCounter>
 class IntrusiveRefCounted {
 public:
@@ -104,7 +122,7 @@ private:
     template <class D, class C>
     friend void IntrusivePtrAddRef(const IntrusiveRefCounted<D, C>* obj) noexcept;
     template <class D, class C>
-    friend void IntrusivePtrRelease(const IntrusiveRefCounted<D, C>* obj) noexcept;
+    friend void IntrusivePtrRelease(IntrusiveRefCounted<D, C>* obj) noexcept;
 
     CounterPolicy _counter;
 };
@@ -115,9 +133,9 @@ void IntrusivePtrAddRef(const IntrusiveRefCounted<D, C>* obj) noexcept {
 }
 
 template <class D, class C>
-void IntrusivePtrRelease(const IntrusiveRefCounted<D, C>* obj) noexcept {
+void IntrusivePtrRelease(IntrusiveRefCounted<D, C>* obj) noexcept {
     if (obj->_counter.Decrement() == 0) {
-        delete static_cast<const D*>(obj);
+        delete static_cast<D*>(obj);
     }
 }
 
@@ -234,10 +252,28 @@ private:
 };
 
 /// 接管一个新建对象 —— 计数已是 1, 不再 +1。
+///
+/// 【接管即承诺】: 调用方保证自己类型的 IntrusivePtrRelease 用与本对象【分配方式匹配】的
+/// 路径销毁它。core 看不到分配现场, 无从校验:
+///   - 堆对象 (MakeIntrusive / make_unique 的产物) -> Release 里销毁 (收进 unique_ptr)。
+///   - 容器内嵌对象 (如 DescriptorSetLayoutVulkan 按值存在 unordered_map 里, 经
+///     AdoptRef(&node) 接管) -> Release 里【不得】销毁, 由容器负责。
 template <class T>
 requires IntrusiveRefCountable<T>
 [[nodiscard]] IntrusivePtr<T> AdoptRef(T* ptr) noexcept {
     return IntrusivePtr<T>(ptr, detail::IntrusiveAdoptTag{});
+}
+
+/// 从 unique_ptr 接管 —— 计数已是 1, 不再 +1。
+///
+/// 【为何需要本重载】: 归零时要做额外动作 (摘除缓存、把 GPU 对象交给延迟销毁队列) 的类型
+/// 不能继承 IntrusiveRefCounted, 于是也用不上 MakeIntrusive (它内部 new 后直接 Adopt)。
+/// 这类类型的创建路径是 make_unique 再移交; 没有本重载, 每个调用点都要写 .release(),
+/// 而项目要求所有权移交显式经 RAII 容器表达, 不出现裸 new/delete 与裸指针交接。
+template <class T>
+requires IntrusiveRefCountable<T>
+[[nodiscard]] IntrusivePtr<T> AdoptRef(unique_ptr<T> ptr) noexcept {
+    return IntrusivePtr<T>(ptr.release(), detail::IntrusiveAdoptTag{});
 }
 
 /// 共享一个已存在对象 —— +1。

@@ -266,9 +266,15 @@ public:
         Cancel(ref.AsAny());
     }
 
-    /// 应用层显式强制回收资产。命中在飞 slot 则先取消、延迟到终态再回收。
-    /// 【无视引用计数】:仍存活的 StreamingAssetRef 会静默失效(generation 保护不崩溃,
-    /// 但 Get() 返回 nullptr)。DEBUG 下若回收时仍有引用会打 warning。
+    /// 应用层显式强制回收资产【槽位】。命中在飞 slot 则先取消、延迟到终态再回收。
+    ///
+    /// 【销毁的是槽位, 不是内容】:仍存活的 StreamingAssetRef 会报 Unloaded、Get() 返回
+    /// nullptr(generation 保护不崩溃),但已被他人持有的 AssetContent 仍然存活到最后一个
+    /// 持有者放手为止(见 asset.h)。所以正在录制的那一帧不会因为本次 Unload 而崩。
+    ///
+    /// 回收时仍有引用会打 error log(不限 DEBUG):那通常意味着某处缓存漏清。它不是 abort,
+    /// 因为内容有引用计数保命,状况可恢复 —— 详见实现处注释。
+    ///
     /// 关卡切换 / 热重载 / 编辑器手动删除等确需强制清空的场景使用;否则优先 CollectUnreferenced。
     void Unload(const AssetId& id) noexcept;
 
@@ -276,8 +282,27 @@ public:
     /// 返回实际回收(或标记延迟回收)的 slot 数量。
     uint32_t CollectUnreferenced() noexcept;
 
-    /// 注入渲染资源回收器(非拥有)。未设置时 GPU 资源退回立即析构,保持无 GpuSystem 测试场景的旧行为。
+    /// 注入渲染资源回收器(非拥有)。【必须装配】,见 ServiceTraits<AssetManager>。
+    ///
+    /// 【无兜底】:未装配时任何资产卸载都会 abort,而不是退化成立即析构 —— 后者会绕过
+    /// fence 等待释放 GPU 仍在读的资源,且只在漏装配时才发作。理由详见 GetRecycler 实现。
+    ///
+    /// 【生命周期】:非拥有指针,调用方保证 recycler 活得比本 AssetManager 及其创建的
+    /// 全部 AssetContent 更久 (见 Application::Shutdown 的关停顺序:GpuSystem 最后销毁)。
     void SetRecycler(IRenderResourceRecycler* recycler) noexcept { _recycler = recycler; }
+
+    /// 资产内容的【唯一】创建入口。recycler 由此注入,调用方无从传错。
+    ///
+    /// 【为何唯一】:AssetContent 的构造函数要一张只有本类能造的 AssetContentKey,
+    /// 故"绕过 AssetManager 创建内容"编译不过。这不是便捷封装,是约束 —— 详见
+    /// AssetContentKey 与 SetRecycler 的说明。
+    ///
+    /// recycler 未装配时 abort(见 GetRecycler)。
+    template <class T, class... Args>
+    requires std::derived_from<T, AssetContent>
+    AssetContentRef<T> MakeContent(Args&&... args) {
+        return AdoptRef(make_unique<T>(AssetContentKey{}, GetRecycler(), std::forward<Args>(args)...));
+    }
 
     /// 提交加载协程写入的 pending result。
     void Pump();

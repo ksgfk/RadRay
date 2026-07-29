@@ -429,14 +429,15 @@ TEST_P(VerticalSliceTest, ManifestToPixels) {
 
     StreamingAssetRef<ShaderAsset> assetRef = LoadShaderAsset(
         assetManager,
-        device,
         manifestPath,
         ShaderAssetLoadOptions{.Context = &resolveContext, .LayoutCache = &layoutCache});
     assetManager.Pump();
     ASSERT_TRUE(assetRef.IsReady()) << "the shader asset did not become ready after one pump";
-    ASSERT_EQ(assetRef->GetPassCount(), 1u);
+    ShaderContentRef content = assetRef->AcquireContent();
+    ASSERT_TRUE(content.HasValue());
+    ASSERT_EQ(content->GetPassCount(), 1u);
 
-    Nullable<ShaderPassProgram*> program = assetRef->FindPass("Error");
+    Nullable<ShaderPassProgram*> program = content->FindPass("Error");
     ASSERT_TRUE(program.HasValue());
     EXPECT_TRUE(program->GetPipelineLayout().HasValue())
         << "the layout must be ready before any bytecode exists";

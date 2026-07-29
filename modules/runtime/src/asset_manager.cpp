@@ -8,17 +8,6 @@
 
 namespace radray {
 
-namespace {
-
-class ImmediateRenderResourceRecycler final : public IRenderResourceRecycler {
-public:
-    void RecycleRenderResource(unique_ptr<render::RenderBase> obj) noexcept override {
-        obj.reset();
-    }
-};
-
-}  // namespace
-
 class AssetWaitAwaitable {
 public:
     AssetWaitAwaitable(AssetManager* manager, StreamingAssetRefAny ref, stop_token stop) noexcept
@@ -332,18 +321,23 @@ void AssetManager::Unload(const AssetId& id) noexcept {
     if (!handle.IsValid()) {
         return;
     }
-#ifdef RADRAY_IS_DEBUG
+    // 【为何不限 DEBUG】: 这条诊断过去在 #ifdef RADRAY_IS_DEBUG 里, 于是 release 构建
+    // 完全静默 —— 而 release 恰恰是"关卡切换漏清一个缓存"最会伤人的地方。
+    //
+    // 【为何是 error 而非 abort】: 有引用时强制卸载是运行期时序问题, 且有合法降级 ——
+    // 资产【内容】由 AssetContent 的引用计数保命 (见 asset.h), 使用者不会拿到悬垂指针,
+    // 只是槽位标识失效。abort 会把一个可恢复状况升级成崩溃。对比 GetRecycler 的漏装配:
+    // 那是装配期程序错误且无合法降级, 故 abort。
     unique_ptr<AssetSlot>* slotPtr = _slots.TryGet(handle);
     if (slotPtr != nullptr && *slotPtr != nullptr) {
         uint32_t refs = slotPtr->get()->Control->RefCount.load(std::memory_order_relaxed);
         if (refs > 0) {
-            RADRAY_WARN_LOG(
-                "AssetManager: force Unload asset {} with {} live reference(s); existing StreamingAssetRef will silently become invalid",
+            RADRAY_ERR_LOG(
+                "AssetManager: force Unload asset {} with {} live reference(s); those StreamingAssetRef will report Unloaded",
                 id,
                 refs);
         }
     }
-#endif
     UnloadSlot(handle);
 }
 
@@ -490,11 +484,18 @@ AssetWaitRecord* AssetManager::RegisterWait(
 }
 
 IRenderResourceRecycler& AssetManager::GetRecycler() noexcept {
-    if (_recycler != nullptr) {
-        return *_recycler;
+    // 【为何这里 abort 而非退化】: 曾有一个 static ImmediateRenderResourceRecycler 兜底,
+    // 在 recycler 未装配时把 GPU 对象【立即析构】而不等 fence。那是个只在漏装配时才发作
+    // 的隐性错误 —— 表面一切正常, 直到某次 GPU 还在读的资源被提前释放。
+    //
+    // 漏装配是【装配期的程序错误】: 它必然在第一次卸载资产时立刻暴露, 且没有任何合法的
+    // 降级行为可选 (立即析构不安全, 什么都不做则泄漏)。故用 abort。
+    // 对比 Unload 遇到残留引用: 那是运行期时序问题, 有合法降级 (内容靠引用计数保命),
+    // 故只记 error log。两者的处置不同源于错误性质不同, 不要改齐。
+    if (_recycler == nullptr) {
+        RADRAY_ABORT("AssetManager: recycler not wired; call SetRecycler (see ServiceTraits<AssetManager>) before loading assets");
     }
-    static ImmediateRenderResourceRecycler immediate;
-    return immediate;
+    return *_recycler;
 }
 
 void AssetManager::Pump() {

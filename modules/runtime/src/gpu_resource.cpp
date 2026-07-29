@@ -1015,15 +1015,16 @@ void IntrusivePtrAddRef(const SharedPipelineLayout* obj) noexcept {
     ++obj->_refCount;
 }
 
-void IntrusivePtrRelease(const SharedPipelineLayout* obj) noexcept {
+void IntrusivePtrRelease(SharedPipelineLayout* obj) noexcept {
     if (--obj->_refCount != 0) {
         return;
     }
-    auto* layout = const_cast<SharedPipelineLayout*>(obj);
-    if (layout->_cache != nullptr) {
-        layout->_cache->Detach(layout);
+    // 归零后本函数是唯一所有者。收进 unique_ptr 让销毁由 RAII 完成, 摘除步骤即便将来
+    // 增加早退分支也不会漏放。
+    unique_ptr<SharedPipelineLayout> owner{obj};
+    if (owner->_cache != nullptr) {
+        owner->_cache->Detach(owner.get());
     }
-    delete layout;
 }
 
 PipelineLayoutCache::PipelineLayoutCache(render::Device* device) noexcept
@@ -1137,7 +1138,17 @@ Nullable<render::GraphicsPipelineState*> PipelineStateCache::GetOrCreateGraphics
         return nullptr;
     }
 
-    render::PipelineLayout* layout = key.Program->GetPipelineLayout().Get();
+    // 内容的强引用: 保住 key.Program 指向的那块存储, 见 GraphicsEntry::Content。
+    // 资产为空 (调用方传了无效 ref) 时留空 —— 那时 Program 的存活由调用方负责。
+    ShaderContentRef contentRef;
+    if (const ShaderAsset* owner = static_cast<const ShaderAsset*>(asset.Get()); owner != nullptr) {
+        contentRef = owner->AcquireContent();
+    }
+
+    // 取【共享引用】而非裸指针: 本条目要独立持有一份, 使 layout 的存活不依赖资产槽位。
+    // 理由见 GraphicsEntry::Layout。
+    SharedPipelineLayoutRef layoutRef = key.Program->GetSharedPipelineLayout();
+    render::PipelineLayout* layout = layoutRef.HasValue() ? layoutRef->Get() : nullptr;
     if (layout == nullptr) {
         outDiag.Message = "pass has no pipeline layout";
         outDiag.PassName = key.Program->GetName();
@@ -1211,6 +1222,8 @@ Nullable<render::GraphicsPipelineState*> PipelineStateCache::GetOrCreateGraphics
         .ColorTargets = vector<render::ColorTargetState>{key.ColorTargets.begin(), key.ColorTargets.end()},
         .Owner = static_cast<ShaderAsset*>(asset.Get()),
         .Ref = asset,
+        .Content = std::move(contentRef),
+        .Layout = std::move(layoutRef),
         .Object = std::move(pso)});
     return result;
 }

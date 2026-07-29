@@ -89,6 +89,7 @@ std::optional<UploadedTexture> RecordTextureUpload(
 }
 
 AssetLoadTask LoadTextureFromImageTask(
+    AssetManager& assetManager,
     FrameUploadScheduler& frameUploads,
     string name,
     ImageData image,
@@ -112,14 +113,17 @@ AssetLoadTask LoadTextureFromImageTask(
     render::Device* device = frame.GetUploader().GetDevice();
     co_await frame.WaitGpu();
 
-    co_return AssetLoadResult::Success(make_unique<TextureAsset>(
+    // 内容必须经 AssetManager 创建 —— recycler 由那里注入, 见 AssetContentKey。
+    TextureContentRef content = assetManager.MakeContent<TextureContent>(
         device,
         std::move(name),
         std::move(uploaded->Texture),
-        std::move(uploaded->Srv)));
+        std::move(uploaded->Srv));
+    co_return AssetLoadResult::Success(make_unique<TextureAsset>(std::move(content)));
 }
 
 AssetLoadTask LoadTextureFromMemoryTask(
+    AssetManager& assetManager,
     FrameUploadScheduler& frameUploads,
     string name,
     vector<byte> encodedBytes,
@@ -134,36 +138,58 @@ AssetLoadTask LoadTextureFromMemoryTask(
         co_return AssetLoadResult::Failure(fmt::format("texture '{}' decode failed", name));
     }
     // 复用 image 路径(其内部再做 RGBA8 归一与上传)。
-    co_return co_await LoadTextureFromImageTask(frameUploads, std::move(name), std::move(image), std::move(options));
+    co_return co_await LoadTextureFromImageTask(
+        assetManager, frameUploads, std::move(name), std::move(image), std::move(options));
 }
 
 }  // namespace
 
-TextureAsset::TextureAsset(
+TextureContent::TextureContent(
+    AssetContentKey key,
+    IRenderResourceRecycler& recycler,
     render::Device* device,
     string name,
     unique_ptr<render::Texture> texture,
     unique_ptr<render::TextureView> srv) noexcept
-    : _device(device), _name(std::move(name)), _texture(std::move(texture)), _srv(std::move(srv)) {
+    : AssetContent(key, recycler),
+      _device(device),
+      _name(std::move(name)),
+      _texture(std::move(texture)),
+      _srv(std::move(srv)) {
 }
 
-TextureAsset::~TextureAsset() noexcept = default;
+TextureContent::~TextureContent() noexcept = default;
 
-void TextureAsset::OnUnload(IRenderResourceRecycler& recycler) {
-    _name.clear();
+void TextureContent::ReleaseRenderResources(IRenderResourceRecycler& recycler) noexcept {
+    // 【view 必须先于 texture 交出】: view 引用 texture, 而 recycler 是个 FIFO 延迟队列,
+    // 交出顺序即销毁顺序。
     for (auto& [key, view] : _viewCache) {
         recycler.RecycleRenderResource(std::move(view));
     }
     _viewCache.clear();
     recycler.RecycleRenderResource(std::move(_srv));
     recycler.RecycleRenderResource(std::move(_texture));
+    _name.clear();
+}
+
+TextureAsset::TextureAsset(TextureContentRef content) noexcept
+    : _content(std::move(content)) {
+}
+
+TextureAsset::~TextureAsset() noexcept = default;
+
+void TextureAsset::OnUnload(IRenderResourceRecycler& recycler) {
+    // 【只放开槽位那份引用】: GPU 资源的释放归内容归零时做 (见 ReleaseRenderResources),
+    // 故这里刻意不碰 recycler —— 此刻可能还有人在用这些 view。
+    (void)recycler;
+    _content.Reset();
 }
 
 AssetTypeId TextureAsset::GetTypeId() const noexcept {
     return runtime_type_id_v<TextureAsset>;
 }
 
-render::TextureView* TextureAsset::GetOrCreateSrv(const TextureSubViewDesc& sub) noexcept {
+render::TextureView* TextureContent::GetOrCreateSrv(const TextureSubViewDesc& sub) noexcept {
     if (sub.IsDefault()) {
         return _srv.get();
     }
@@ -184,7 +210,7 @@ render::TextureView* TextureAsset::GetOrCreateSrv(const TextureSubViewDesc& sub)
         .Usage = render::TextureViewUsage::Resource};
     auto viewOpt = _device->CreateTextureView(viewDesc);
     if (!viewOpt.HasValue()) {
-        RADRAY_ERR_LOG("TextureAsset::GetOrCreateSrv: CreateTextureView failed for '{}'", _name);
+        RADRAY_ERR_LOG("TextureContent::GetOrCreateSrv: CreateTextureView failed for '{}'", _name);
         return nullptr;
     }
     auto view = viewOpt.Release();
@@ -203,7 +229,7 @@ StreamingAssetRef<TextureAsset> LoadTextureAssetFromImage(
     const TextureAssetLoadOptions& options) {
     return assetManager.Load<TextureAsset>(AssetLoadRequest{
         .Id = assetId,
-        .Task = LoadTextureFromImageTask(frameUploads, name, std::move(image), options),
+        .Task = LoadTextureFromImageTask(assetManager, frameUploads, name, std::move(image), options),
         .DebugName = std::move(name)});
 }
 
@@ -216,7 +242,7 @@ StreamingAssetRef<TextureAsset> LoadTextureAssetFromMemory(
     const TextureAssetLoadOptions& options) {
     return assetManager.Load<TextureAsset>(AssetLoadRequest{
         .Id = assetId,
-        .Task = LoadTextureFromMemoryTask(frameUploads, name, std::move(encodedBytes), options),
+        .Task = LoadTextureFromMemoryTask(assetManager, frameUploads, name, std::move(encodedBytes), options),
         .DebugName = std::move(name)});
 }
 

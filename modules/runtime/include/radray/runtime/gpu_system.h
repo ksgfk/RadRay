@@ -27,7 +27,6 @@ class Application;
 class AppWindow;
 class WindowManager;
 class AppFrameContext;
-class StaticMesh;
 class FrameUploadScheduler;
 class BeginFrameUploadAwaitable;
 class FrameUploadScope;

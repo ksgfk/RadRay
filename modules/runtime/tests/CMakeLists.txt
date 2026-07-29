@@ -15,6 +15,10 @@ radray_add_test(test_pipeline_state_cache SOURCES test_pipeline_state_cache.cpp 
 # manifest —— descriptor 就地拼)。无设备时用例自行 GTEST_SKIP。
 radray_add_test(test_pipeline_layout_cache SOURCES test_pipeline_layout_cache.cpp LINK_LIBS radrayruntime)
 
+# TextureContent / StaticMeshContent 的生命周期。同样需要 device (Texture / Buffer 无假
+# 实现可替), 但不需要 DXC 与 manifest。无设备时用例自行 GTEST_SKIP。
+radray_add_test(test_asset_content SOURCES test_asset_content.cpp LINK_LIBS radrayruntime)
+
 # 把仓库根编进二进制, 作为环境变量缺失时的兜底。
 #
 # 【为何需要】: 上面的 ENVIRONMENT 只在 ctest 启动时注入, 直接跑 exe (调试器、

@@ -1,5 +1,6 @@
 #include <radray/intrusive_ptr.h>
 
+#include <memory>
 #include <unordered_set>
 #include <vector>
 
@@ -73,7 +74,7 @@ public:
 
 private:
     friend void IntrusivePtrAddRef(const OwnerTracked* obj) noexcept;
-    friend void IntrusivePtrRelease(const OwnerTracked* obj) noexcept;
+    friend void IntrusivePtrRelease(OwnerTracked* obj) noexcept;
 
     Owner* _owner{nullptr};
     int* _destroyCount{nullptr};
@@ -84,13 +85,16 @@ void IntrusivePtrAddRef(const OwnerTracked* obj) noexcept {
     ++obj->_refCount;
 }
 
-void IntrusivePtrRelease(const OwnerTracked* obj) noexcept {
-    if (--obj->_refCount == 0) {
-        auto* mutableObj = const_cast<OwnerTracked*>(obj);
-        if (mutableObj->_owner != nullptr) {
-            mutableObj->_owner->Detach(mutableObj);
-        }
-        delete mutableObj;
+/// 【本类型的存在意义】: 它是"归零时要做额外动作"的参考实现 —— 摘除缓存反向指针,
+/// 然后销毁。Release 收非 const 故无需 const_cast; 若签名回退成 const T*, 这里会立刻
+/// 需要一个 cast, 那就是签名错了的信号。
+void IntrusivePtrRelease(OwnerTracked* obj) noexcept {
+    if (--obj->_refCount != 0) {
+        return;
+    }
+    std::unique_ptr<OwnerTracked> owner{obj};
+    if (owner->_owner != nullptr) {
+        owner->_owner->Detach(owner.get());
     }
 }
 
