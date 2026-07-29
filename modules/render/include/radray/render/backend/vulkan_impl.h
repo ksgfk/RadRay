@@ -993,15 +993,11 @@ public:
 
     void SetDebugName(std::string_view name) noexcept override;
 
-    void RebindNativePointers() noexcept;
-
 public:
     void DestroyImpl() noexcept;
 
     DeviceVulkan* _device;
-    VkPipelineLayoutCreateInfo _desc{};
     VkPipelineLayout _layout{VK_NULL_HANDLE};
-    vector<VkDescriptorSetLayout> _setLayouts;
     vector<IntrusivePtr<DescriptorSetLayoutVulkan>> _setLayoutRefs;
     vector<vector<ShaderParameterSetLayoutEntryDescriptor>> _parameterSetLayouts;
     std::optional<VkPushConstantRange> _pushConstantRange;

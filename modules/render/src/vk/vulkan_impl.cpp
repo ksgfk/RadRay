@@ -1726,7 +1726,6 @@ Nullable<unique_ptr<PipelineLayoutVulkan>> DeviceVulkan::CreatePipelineLayoutInt
     }
 
     auto result = make_unique<PipelineLayoutVulkan>(this);
-    result->_setLayouts.reserve(setLayoutCount);
     result->_setLayoutRefs.reserve(setLayoutCount);
     if (desc.PushConstant.has_value()) {
         result->_pushConstantRange = pushConstantRange;
@@ -1769,16 +1768,28 @@ Nullable<unique_ptr<PipelineLayoutVulkan>> DeviceVulkan::CreatePipelineLayoutInt
                 groupIndex);
             return nullptr;
         }
-        result->_setLayouts.push_back(setLayout->Get());
         result->_setLayoutRefs.push_back(std::move(setLayout));
     }
     result->_parameterSetLayouts = std::move(groupEntries);
 
-    result->RebindNativePointers();
+    vector<VkDescriptorSetLayout> setLayouts;
+    setLayouts.reserve(result->_setLayoutRefs.size());
+    for (const IntrusivePtr<DescriptorSetLayoutVulkan>& setLayout : result->_setLayoutRefs) {
+        setLayouts.push_back(setLayout->Get());
+    }
+
+    VkPipelineLayoutCreateInfo nativeDesc{};
+    nativeDesc.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    nativeDesc.setLayoutCount = static_cast<uint32_t>(setLayouts.size());
+    nativeDesc.pSetLayouts = setLayouts.empty() ? nullptr : setLayouts.data();
+    nativeDesc.pushConstantRangeCount = result->_pushConstantRange.has_value() ? 1 : 0;
+    nativeDesc.pPushConstantRanges = result->_pushConstantRange.has_value()
+                                         ? &result->_pushConstantRange.value()
+                                         : nullptr;
 
     if (auto vr = _ftb.vkCreatePipelineLayout(
             _device,
-            &result->_desc,
+            &nativeDesc,
             GetAllocationCallbacks(),
             &result->_layout);
         vr != VK_SUCCESS) {
@@ -1843,7 +1854,7 @@ Nullable<unique_ptr<ShaderParameterSet>> DeviceVulkan::CreateShaderParameterSet(
     result->_dirty.resize(valueCount, 0);
     result->_texelBufferViews.resize(valueCount);
 
-    const VkDescriptorSetLayout setLayout = layout->_setLayouts[desc.GroupIndex];
+    const VkDescriptorSetLayout setLayout = layout->_setLayoutRefs[desc.GroupIndex]->Get();
     const auto allocation = _descriptorSetAllocator.Allocate(
         DescriptorSetAllocatorVulkan::Request{setLayout, poolSizes});
     if (!allocation.has_value()) {
@@ -5472,19 +5483,6 @@ void PipelineLayoutVulkan::SetDebugName(std::string_view name) noexcept {
     }
 }
 
-void PipelineLayoutVulkan::RebindNativePointers() noexcept {
-    _desc = {};
-    _desc.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    _desc.pNext = nullptr;
-    _desc.flags = 0;
-    _desc.setLayoutCount = static_cast<uint32_t>(_setLayouts.size());
-    _desc.pSetLayouts = _setLayouts.empty() ? nullptr : _setLayouts.data();
-    _desc.pushConstantRangeCount = _pushConstantRange.has_value() ? 1 : 0;
-    _desc.pPushConstantRanges = _pushConstantRange.has_value()
-                                    ? &_pushConstantRange.value()
-                                    : nullptr;
-}
-
 void PipelineLayoutVulkan::DestroyImpl() noexcept {
     if (_device != nullptr) {
         if (_layout != VK_NULL_HANDLE) {
@@ -5494,9 +5492,7 @@ void PipelineLayoutVulkan::DestroyImpl() noexcept {
                 _device->GetAllocationCallbacks());
         }
     }
-    _desc = {};
     _layout = VK_NULL_HANDLE;
-    _setLayouts.clear();
     _setLayoutRefs.clear();
     _parameterSetLayouts.clear();
     _pushConstantRange.reset();
