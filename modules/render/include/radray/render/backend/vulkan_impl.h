@@ -5,6 +5,7 @@
 #include <array>
 
 #include <radray/allocator.h>
+#include <radray/intrusive_ptr.h>
 #include <radray/render/backend/vulkan_helper.h>
 #include <radray/render/rhi.h>
 
@@ -138,24 +139,65 @@ struct hash<radray::render::vulkan::DescriptorSetLayoutCacheKeyVulkan> {
 
 namespace radray::render::vulkan {
 
-// Device-lifetime cache for descriptor set layouts.
+class DescriptorSetLayoutCacheVulkan;
+
+class DescriptorSetLayoutVulkan final {
+public:
+    DescriptorSetLayoutVulkan(
+        DescriptorSetLayoutCacheVulkan* cache,
+        DeviceVulkan* device,
+        VkDescriptorSetLayout layout) noexcept;
+    DescriptorSetLayoutVulkan(const DescriptorSetLayoutVulkan&) = delete;
+    DescriptorSetLayoutVulkan& operator=(const DescriptorSetLayoutVulkan&) = delete;
+    DescriptorSetLayoutVulkan(DescriptorSetLayoutVulkan&&) = delete;
+    DescriptorSetLayoutVulkan& operator=(DescriptorSetLayoutVulkan&&) = delete;
+
+    ~DescriptorSetLayoutVulkan() noexcept;
+
+    VkDescriptorSetLayout Get() const noexcept { return _layout; }
+    uint32_t GetRefCount() const noexcept { return _refCount; }
+
+private:
+    friend class DescriptorSetLayoutCacheVulkan;
+    friend void IntrusivePtrAddRef(DescriptorSetLayoutVulkan* obj) noexcept;
+    friend void IntrusivePtrRelease(DescriptorSetLayoutVulkan* obj) noexcept;
+
+    void DestroyImpl() noexcept;
+
+    DescriptorSetLayoutCacheVulkan* _cache;
+    DeviceVulkan* _device;
+    VkDescriptorSetLayout _layout;
+    uint32_t _refCount{1};
+};
+
+void IntrusivePtrAddRef(DescriptorSetLayoutVulkan* obj) noexcept;
+void IntrusivePtrRelease(DescriptorSetLayoutVulkan* obj) noexcept;
+
 class DescriptorSetLayoutCacheVulkan final {
 public:
     explicit DescriptorSetLayoutCacheVulkan(DeviceVulkan* device) noexcept;
 
     ~DescriptorSetLayoutCacheVulkan() noexcept;
 
-    VkDescriptorSetLayout GetOrCreate(
+    IntrusivePtr<DescriptorSetLayoutVulkan> GetOrCreate(
         std::span<const VkDescriptorSetLayoutBinding> bindings) noexcept;
 
     void Destroy() noexcept;
 
+    uint32_t GetLayoutCount() const noexcept {
+        return static_cast<uint32_t>(_layouts.size());
+    }
+
 private:
+    friend void IntrusivePtrRelease(DescriptorSetLayoutVulkan* obj) noexcept;
+
     using Key = DescriptorSetLayoutCacheKeyVulkan;
     using BindingKey = Key::BindingKey;
 
+    void Detach(DescriptorSetLayoutVulkan* layout) noexcept;
+
     DeviceVulkan* _device;
-    unordered_map<Key, VkDescriptorSetLayout> _layouts;
+    unordered_map<Key, DescriptorSetLayoutVulkan> _layouts;
 };
 
 class DescriptorSetAllocatorVulkan final {
@@ -960,6 +1002,7 @@ public:
     VkPipelineLayoutCreateInfo _desc{};
     VkPipelineLayout _layout{VK_NULL_HANDLE};
     vector<VkDescriptorSetLayout> _setLayouts;
+    vector<IntrusivePtr<DescriptorSetLayoutVulkan>> _setLayoutRefs;
     vector<vector<ShaderParameterSetLayoutEntryDescriptor>> _parameterSetLayouts;
     std::optional<VkPushConstantRange> _pushConstantRange;
     std::optional<ShaderBindingLocation> _pushConstantLocation;
