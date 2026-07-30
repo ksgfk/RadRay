@@ -433,8 +433,8 @@ TEST_P(VerticalSliceTest, ManifestToPixels) {
         ShaderAssetLoadOptions{.Context = &resolveContext, .LayoutCache = &layoutCache});
     assetManager.Pump();
     ASSERT_TRUE(assetRef.IsReady()) << "the shader asset did not become ready after one pump";
-    ShaderContentRef content = assetRef->AcquireContent();
-    ASSERT_TRUE(content.HasValue());
+    shared_ptr<ShaderContent> content = assetRef->AcquireContent();
+    ASSERT_TRUE(content != nullptr);
     ASSERT_EQ(content->GetPassCount(), 1u);
 
     Nullable<ShaderPassProgram*> program = content->FindPass("Error");

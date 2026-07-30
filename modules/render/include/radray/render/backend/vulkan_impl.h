@@ -165,9 +165,10 @@ private:
     void DestroyImpl() noexcept;
 
     DescriptorSetLayoutCacheVulkan* _cache;
+    const DescriptorSetLayoutCacheKeyVulkan* _key{nullptr};
     DeviceVulkan* _device;
     VkDescriptorSetLayout _layout;
-    uint32_t _refCount{1};
+    uint32_t _refCount{0};
 };
 
 void IntrusivePtrAddRef(DescriptorSetLayoutVulkan* obj) noexcept;
@@ -194,10 +195,10 @@ private:
     using Key = DescriptorSetLayoutCacheKeyVulkan;
     using BindingKey = Key::BindingKey;
 
-    void Detach(DescriptorSetLayoutVulkan* layout) noexcept;
+    void Evict(DescriptorSetLayoutVulkan* layout) noexcept;
 
     DeviceVulkan* _device;
-    unordered_map<Key, DescriptorSetLayoutVulkan> _layouts;
+    unordered_map<Key, unique_ptr<DescriptorSetLayoutVulkan>> _layouts;
 };
 
 class DescriptorSetAllocatorVulkan final {

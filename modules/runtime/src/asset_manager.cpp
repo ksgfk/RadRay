@@ -325,7 +325,7 @@ void AssetManager::Unload(const AssetId& id) noexcept {
     // 完全静默 —— 而 release 恰恰是"关卡切换漏清一个缓存"最会伤人的地方。
     //
     // 【为何是 error 而非 abort】: 有引用时强制卸载是运行期时序问题, 且有合法降级 ——
-    // 资产【内容】由 AssetContent 的引用计数保命 (见 asset.h), 使用者不会拿到悬垂指针,
+    // 资产【内容】由它自己的 shared_ptr 计数保命 (见 asset.h), 使用者不会拿到悬垂指针,
     // 只是槽位标识失效。abort 会把一个可恢复状况升级成崩溃。对比 GetRecycler 的漏装配:
     // 那是装配期程序错误且无合法降级, 故 abort。
     unique_ptr<AssetSlot>* slotPtr = _slots.TryGet(handle);

@@ -38,28 +38,35 @@ namespace radray {
 /// 【这也让加载路径不碰 DXC】: 加载协程里只有同步文件 IO 与同步 GPU 调用, 两者都短,
 /// 所以 AssetManager 的单线程泵不会被 JIT 阻塞。JIT 发生在后续 GetOrCreateVariant,
 /// 那是调用方主动触发的。
-/// 一份 shader manifest 的【内容】。生命周期独立于资产槽位, 见 AssetContent。
+/// 一份 shader manifest 的【内容】。生命周期独立于资产槽位, 见 asset.h。
 ///
 /// 【为何 shader 是最需要分离的一类】: ShaderPassProgram* 会被 PipelineStateCache 的条目
 /// 长期缓存 (那是派生数据 —— PSO 从 program 的字节码与 layout 建出), 而
-/// AssetManager::Unload 可以随时销毁槽位。分离后 PSO 缓存只要持有一份 ContentRef,
+/// AssetManager::Unload 可以随时销毁槽位。分离后 PSO 缓存只要持有一份内容引用,
 /// program 就不会在它脚下消失。
-class ShaderContent : public AssetContent {
+class ShaderContent {
 public:
+    /// 【recycler 只收不存】: 归零时的释放由 AssetContentDeleter 完成, 它自己持有 recycler
+    /// (见 asset.h)。这里保留形参是因为 MakeContent 统一把 GetRecycler() 作第二实参转发,
+    /// 内容类型自身不再需要它。
     ShaderContent(
         AssetContentKey key,
         IRenderResourceRecycler& recycler,
         ShaderAssetDesc desc,
         unique_ptr<ShaderResolver> resolver,
         vector<unique_ptr<ShaderPassProgram>> passes) noexcept;
-    ~ShaderContent() noexcept override;
+    ShaderContent(const ShaderContent&) = delete;
+    ShaderContent(ShaderContent&&) = delete;
+    ShaderContent& operator=(const ShaderContent&) = delete;
+    ShaderContent& operator=(ShaderContent&&) = delete;
+    ~ShaderContent() noexcept;
 
     bool IsValid() const noexcept { return !_passes.empty(); }
 
     const string& GetName() const noexcept { return _desc.Name; }
     const ShaderAssetDesc& GetDesc() const noexcept { return _desc; }
 
-    /// 返回的指针在【本内容】存活期内稳定 (unique_ptr 后备存储)。持有一份 ContentRef 即
+    /// 返回的指针在【本内容】存活期内稳定 (unique_ptr 后备存储)。持有一份 shared_ptr 即
     /// 保证它不悬垂 —— 这正是分离要买到的东西。
     Nullable<ShaderPassProgram*> FindPass(std::string_view name) noexcept;
     Nullable<const ShaderPassProgram*> FindPass(std::string_view name) const noexcept;
@@ -67,8 +74,9 @@ public:
     size_t GetPassCount() const noexcept { return _passes.size(); }
     Nullable<ShaderPassProgram*> GetPass(size_t index) noexcept;
 
-protected:
-    void ReleaseRenderResources(IRenderResourceRecycler& recycler) noexcept override;
+    /// 【只由 AssetContentDeleter 在引用归零时调用, 普通代码不得调用】: 它跑在析构【之前】,
+    /// 故此刻成员仍然完整; 提前调用会留下一个成员已被搬空的内容对象。见 asset.h。
+    void ReleaseRenderResources(IRenderResourceRecycler& recycler) noexcept;
 
 private:
     ShaderAssetDesc _desc;
@@ -78,12 +86,10 @@ private:
     vector<unique_ptr<ShaderPassProgram>> _passes;
 };
 
-using ShaderContentRef = AssetContentRef<ShaderContent>;
-
 class ShaderAsset : public Asset {
 public:
     ShaderAsset(
-        ShaderContentRef content,
+        shared_ptr<ShaderContent> content,
         ShaderResolveContext* context,
         PipelineLayoutCache* layoutCache) noexcept;
     ~ShaderAsset() noexcept override;
@@ -94,12 +100,12 @@ public:
     /// 取内容的强引用。持有它期间内容保证存活, 即使本资产的槽位已被 Unload。
     ///
     /// 【刻意不提供 FindPass / GetDesc 等转发】: 那会让"哪个是真相"重新含糊, 而分离正是
-    /// 为了消除这种含糊 (见 Asset 的说明)。热路径上请把 ContentRef 提出来存住, 而不是
+    /// 为了消除这种含糊 (见 Asset 的说明)。热路径上请把内容引用提出来存住, 而不是
     /// 每次穿两层 —— 双重间接的代价由调用方一次性付掉。
-    ShaderContentRef AcquireContent() const noexcept { return _content; }
+    shared_ptr<ShaderContent> AcquireContent() const noexcept { return _content; }
 
     /// 内容是否仍挂在本槽位上。OnUnload 之后为 false。
-    bool HasContent() const noexcept { return _content.HasValue(); }
+    bool HasContent() const noexcept { return _content != nullptr; }
 
     /// 建本资产时用的共享设施。
     ///
@@ -110,7 +116,7 @@ public:
     ///
     /// 【为何留在 Asset 而不下沉到 ShaderContent】: 它们不是内容数据, 而是"这个 id 是用
     /// 哪些设施建起来的"这一条槽位级记录, 供 dedup 时比较。放在这里也免去"为了比两个指针
-    /// 而先取一份 ContentRef"。
+    /// 而先取一份内容引用"。
     ///
     /// 【只用于比较, 不解引用】: LayoutCache 允许先于资产销毁 (见 render_system.h 的
     /// 关停顺序说明), 故 OnUnload 后这两个指针可能已悬垂。它们不参与任何 GPU 调用。
@@ -118,7 +124,7 @@ public:
     Nullable<PipelineLayoutCache*> GetLayoutCache() const noexcept { return _layoutCache; }
 
 private:
-    ShaderContentRef _content;
+    shared_ptr<ShaderContent> _content;
     /// 【只记不用】: 供 dedup 命中时核对, 见 GetResolveContext。不解引用, 故允许悬垂。
     ShaderResolveContext* _context{nullptr};
     PipelineLayoutCache* _layoutCache{nullptr};

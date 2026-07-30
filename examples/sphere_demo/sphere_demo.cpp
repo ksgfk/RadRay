@@ -83,7 +83,7 @@ AssetLoadTask LoadDemoMesh(
     }
     co_await frame.WaitGpu();
 
-    StaticMeshContentRef content = assetManager.MakeContent<StaticMeshContent>(
+    shared_ptr<StaticMeshContent> content = assetManager.MakeContent<StaticMeshContent>(
         std::move(meshResource),
         std::move(sections),
         boundsMin,

@@ -142,7 +142,7 @@ render::ShaderStages ShaderProgramVariant::GetStageMask() const noexcept {
 ShaderPassProgram::ShaderPassProgram(
     ShaderPassDesc pass,
     ShaderVariantDomain domain,
-    SharedPipelineLayoutRef pipelineLayout,
+    IntrusivePtr<SharedPipelineLayout> pipelineLayout,
     std::optional<ShaderVertexInputStorage> vertexInput,
     ShaderResolver* resolver) noexcept
     : _pass(std::move(pass)),

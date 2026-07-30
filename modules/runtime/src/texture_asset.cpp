@@ -114,7 +114,7 @@ AssetLoadTask LoadTextureFromImageTask(
     co_await frame.WaitGpu();
 
     // 内容必须经 AssetManager 创建 —— recycler 由那里注入, 见 AssetContentKey。
-    TextureContentRef content = assetManager.MakeContent<TextureContent>(
+    shared_ptr<TextureContent> content = assetManager.MakeContent<TextureContent>(
         device,
         std::move(name),
         std::move(uploaded->Texture),
@@ -151,11 +151,13 @@ TextureContent::TextureContent(
     string name,
     unique_ptr<render::Texture> texture,
     unique_ptr<render::TextureView> srv) noexcept
-    : AssetContent(key, recycler),
-      _device(device),
+    : _device(device),
       _name(std::move(name)),
       _texture(std::move(texture)),
       _srv(std::move(srv)) {
+    // key 只是创建许可证, recycler 归 AssetContentDeleter 持有, 两者在此都不需要落成员。
+    (void)key;
+    (void)recycler;
 }
 
 TextureContent::~TextureContent() noexcept = default;
@@ -172,7 +174,7 @@ void TextureContent::ReleaseRenderResources(IRenderResourceRecycler& recycler) n
     _name.clear();
 }
 
-TextureAsset::TextureAsset(TextureContentRef content) noexcept
+TextureAsset::TextureAsset(shared_ptr<TextureContent> content) noexcept
     : _content(std::move(content)) {
 }
 
@@ -182,7 +184,7 @@ void TextureAsset::OnUnload(IRenderResourceRecycler& recycler) {
     // 【只放开槽位那份引用】: GPU 资源的释放归内容归零时做 (见 ReleaseRenderResources),
     // 故这里刻意不碰 recycler —— 此刻可能还有人在用这些 view。
     (void)recycler;
-    _content.Reset();
+    _content.reset();
 }
 
 AssetTypeId TextureAsset::GetTypeId() const noexcept {

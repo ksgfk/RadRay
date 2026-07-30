@@ -152,12 +152,14 @@ StaticMeshContent::StaticMeshContent(
     const Eigen::Vector3f& boundsMin,
     const Eigen::Vector3f& boundsMax,
     GpuMesh renderMesh) noexcept
-    : AssetContent(key, recycler),
-      _meshResource(std::move(meshResource)),
+    : _meshResource(std::move(meshResource)),
       _sections(std::move(sections)),
       _boundsMin(boundsMin),
       _boundsMax(boundsMax),
       _renderMesh(std::move(renderMesh)) {
+    // key 只是创建许可证, recycler 归 AssetContentDeleter 持有, 两者在此都不需要落成员。
+    (void)key;
+    (void)recycler;
 }
 
 StaticMeshContent::~StaticMeshContent() noexcept = default;
@@ -168,7 +170,8 @@ bool StaticMeshContent::IsValid() const noexcept {
 
 void StaticMeshContent::ReleaseRenderResources(IRenderResourceRecycler& recycler) noexcept {
     // 【无条件走 recycler】: 分离前这里有一句 use_count() == 1, 于是"别人还持有"时 buffer
-    // 会绕过 recycler 直接析构 —— 不等 fence。归零由基类接管后, 到这里必然是唯一所有者。
+    // 会绕过 recycler 直接析构 —— 不等 fence。归零由 AssetContentDeleter 接管后, 到这里
+    // 必然是唯一所有者。
     for (auto& buffer : _renderMesh.Buffers) {
         recycler.RecycleRenderResource(std::move(buffer));
     }
@@ -177,7 +180,7 @@ void StaticMeshContent::ReleaseRenderResources(IRenderResourceRecycler& recycler
     _sections.clear();
 }
 
-StaticMesh::StaticMesh(StaticMeshContentRef content) noexcept
+StaticMesh::StaticMesh(shared_ptr<StaticMeshContent> content) noexcept
     : _content(std::move(content)) {
 }
 
@@ -187,7 +190,7 @@ void StaticMesh::OnUnload(IRenderResourceRecycler& recycler) {
     // 【只放开槽位那份引用】: GPU buffer 的回收归内容归零时做, 此刻可能还有 SceneProxy
     // 在用它录制。
     (void)recycler;
-    _content.Reset();
+    _content.reset();
 }
 
 AssetTypeId StaticMesh::GetTypeId() const noexcept {
@@ -219,7 +222,7 @@ AssetLoadTask LoadStaticMesh(
     co_await frame.WaitGpu();
 
     // 内容必须经 AssetManager 创建 —— recycler 由那里注入, 见 AssetContentKey。
-    StaticMeshContentRef content = assetManager.MakeContent<StaticMeshContent>(
+    shared_ptr<StaticMeshContent> content = assetManager.MakeContent<StaticMeshContent>(
         std::move(meshResource),
         vector<StaticMeshSection>{},
         Eigen::Vector3f::Zero(),

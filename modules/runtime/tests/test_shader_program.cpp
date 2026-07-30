@@ -306,8 +306,8 @@ TEST_F(ShaderAssetLoadTest, ManifestBecomesAssetWithoutTouchingDxc) {
     ASSERT_TRUE(asset.HasValue()) << diagnostic.ToString();
 
     // 内容访问全部经 AcquireContent —— 资产本身刻意不转发, 见 ShaderAsset::AcquireContent。
-    ShaderContentRef content = asset->AcquireContent();
-    ASSERT_TRUE(content.HasValue());
+    shared_ptr<ShaderContent> content = asset->AcquireContent();
+    ASSERT_TRUE(content != nullptr);
     EXPECT_EQ(content->GetName(), "ErrorPass");
     EXPECT_TRUE(content->IsValid());
     ASSERT_EQ(content->GetPassCount(), 1u);
@@ -377,8 +377,8 @@ TEST_F(ShaderAssetLoadTest, VariantResolveFailsWithoutJitOrArtifact) {
         diagnostic);
     ASSERT_TRUE(asset.HasValue()) << diagnostic.ToString();
 
-    ShaderContentRef content = asset->AcquireContent();
-    ASSERT_TRUE(content.HasValue());
+    shared_ptr<ShaderContent> content = asset->AcquireContent();
+    ASSERT_TRUE(content != nullptr);
     Nullable<ShaderPassProgram*> pass = content->FindPass("Error");
     ASSERT_TRUE(pass.HasValue());
 
@@ -402,8 +402,8 @@ TEST_F(ShaderAssetLoadTest, JitVariantIsCachedAndStable) {
         diagnostic);
     ASSERT_TRUE(asset.HasValue()) << diagnostic.ToString();
 
-    ShaderContentRef content = asset->AcquireContent();
-    ASSERT_TRUE(content.HasValue());
+    shared_ptr<ShaderContent> content = asset->AcquireContent();
+    ASSERT_TRUE(content != nullptr);
     Nullable<ShaderPassProgram*> pass = content->FindPass("Error");
     ASSERT_TRUE(pass.HasValue());
 
@@ -455,8 +455,8 @@ TEST_F(ShaderAssetLoadTest, StageBytecodeIsSharedAcrossVariantsThatProjectTheSam
         diagnostic);
     ASSERT_TRUE(asset.HasValue()) << diagnostic.ToString();
 
-    ShaderContentRef content = asset->AcquireContent();
-    ASSERT_TRUE(content.HasValue());
+    shared_ptr<ShaderContent> content = asset->AcquireContent();
+    ASSERT_TRUE(content != nullptr);
     Nullable<ShaderPassProgram*> pass = content->FindPass("Error");
     ASSERT_TRUE(pass.HasValue());
 
@@ -527,8 +527,8 @@ TEST_F(ShaderAssetLoadTest, CookedArtifactResolvesWithoutDxc) {
         diagnostic);
     ASSERT_TRUE(asset.HasValue()) << diagnostic.ToString();
 
-    ShaderContentRef content = asset->AcquireContent();
-    ASSERT_TRUE(content.HasValue());
+    shared_ptr<ShaderContent> content = asset->AcquireContent();
+    ASSERT_TRUE(content != nullptr);
     Nullable<ShaderPassProgram*> pass = content->FindPass("Error");
     ASSERT_TRUE(pass.HasValue());
 
@@ -566,7 +566,7 @@ TEST_F(ShaderAssetLoadTest, OnUnloadReleasesSharedPipelineLayout) {
         << "the layout must self-destruct once the last program drops its reference";
     EXPECT_EQ(recycler.Count, 0u) << "the shared layout must not go through the recycler";
     EXPECT_FALSE(asset->HasContent());
-    EXPECT_FALSE(asset->AcquireContent().HasValue());
+    EXPECT_TRUE(asset->AcquireContent() == nullptr);
 }
 
 /// 【守的不变量】: 有人持有内容时, OnUnload 不得释放 GPU 资源。
@@ -584,16 +584,16 @@ TEST_F(ShaderAssetLoadTest, ContentOutlivesTheSlotWhileSomeoneHoldsIt) {
     ASSERT_TRUE(asset.HasValue()) << diagnostic.ToString();
     ASSERT_EQ(context.Layouts().GetLayoutCount(), 1u);
 
-    ShaderContentRef held = asset->AcquireContent();
-    ASSERT_TRUE(held.HasValue());
-    EXPECT_EQ(held->GetRefCount(), 2u) << "asset's one + this local one";
+    shared_ptr<ShaderContent> held = asset->AcquireContent();
+    ASSERT_TRUE(held != nullptr);
+    EXPECT_EQ(held.use_count(), 2) << "asset's one + this local one";
 
     CountingRecycler recycler;
     asset->OnUnload(recycler);
     EXPECT_FALSE(asset->HasContent()) << "the slot dropped its reference";
 
     // 内容仍活着, 里面的 program 与 layout 都还能安全使用。
-    EXPECT_EQ(held->GetRefCount(), 1u);
+    EXPECT_EQ(held.use_count(), 1);
     EXPECT_TRUE(held->IsValid());
     Nullable<ShaderPassProgram*> pass = held->FindPass("Error");
     ASSERT_TRUE(pass.HasValue());
@@ -602,19 +602,19 @@ TEST_F(ShaderAssetLoadTest, ContentOutlivesTheSlotWhileSomeoneHoldsIt) {
         << "the layout must still be alive while the content is held";
 
     // 放开最后一份引用, 此刻才真正释放。
-    held.Reset();
+    held.reset();
     EXPECT_EQ(context.Layouts().GetLayoutCount(), 0u);
 }
 
 /// 【守的不变量】: 内容可以比创建它的 AssetManager 活得久。
 ///
-/// 这是 AssetContent 自持 recycler 指针的全部理由 (见 asset.h)。若归零时回头向
+/// 这是 AssetContentDeleter 自持 recycler 指针的全部理由 (见 asset.h)。若归零时回头向
 /// AssetManager 索取 recycler, 本用例就会在 manager 已析构的情况下解引用悬垂指针 ——
 /// 分离也就白做了: 内容重新依赖 AssetManager 存活。
 TEST_F(ShaderAssetLoadTest, ContentOutlivesTheAssetManagerItself) {
     ScopedResolveContext context{Device(), ShaderArtifactStaleness::Strict, false};
     CountingRecycler recycler;
-    ShaderContentRef held;
+    shared_ptr<ShaderContent> held;
     {
         // 【局部 manager, 刻意先于 recycler 与 held 析构】: 这正是 app 的关停顺序 ——
         // GpuSystem (recycler) 最后销毁, 见 Application::Shutdown。
@@ -624,16 +624,16 @@ TEST_F(ShaderAssetLoadTest, ContentOutlivesTheAssetManagerItself) {
         auto asset = CreateShaderAsset(assets, GetErrorPassManifestPath(), context.Options(), diagnostic);
         ASSERT_TRUE(asset.HasValue()) << diagnostic.ToString();
         held = asset->AcquireContent();
-        ASSERT_TRUE(held.HasValue());
+        ASSERT_TRUE(held != nullptr);
     }
     // manager 与资产都没了, 内容仍是完好的。
-    ASSERT_EQ(held->GetRefCount(), 1u);
+    ASSERT_EQ(held.use_count(), 1);
     EXPECT_TRUE(held->IsValid());
     EXPECT_TRUE(held->FindPass("Error").HasValue());
     EXPECT_EQ(context.Layouts().GetLayoutCount(), 1u);
 
-    // 归零走的是内容自己记下的那份 recycler, 而不是任何还需要 manager 的路径。
-    held.Reset();
+    // 归零走的是 deleter 自己记下的那份 recycler, 而不是任何还需要 manager 的路径。
+    held.reset();
     EXPECT_EQ(context.Layouts().GetLayoutCount(), 0u);
 }
 
@@ -656,8 +656,8 @@ TEST_F(ShaderAssetLoadTest, LoadsThroughAssetManager) {
 
     ShaderAsset* asset = ref.Get();
     ASSERT_NE(asset, nullptr);
-    ShaderContentRef content = asset->AcquireContent();
-    ASSERT_TRUE(content.HasValue());
+    shared_ptr<ShaderContent> content = asset->AcquireContent();
+    ASSERT_TRUE(content != nullptr);
     EXPECT_EQ(content->GetName(), "ErrorPass");
     EXPECT_TRUE(content->FindPass("Error").HasValue());
     EXPECT_EQ(asset->GetAssetId(), MakeShaderAssetId(manifestPath));
@@ -678,7 +678,7 @@ TEST_F(ShaderAssetLoadTest, LoadsThroughAssetManager) {
     EXPECT_EQ(context.Layouts().GetLayoutCount(), 1u)
         << "the content is still held, so its layout must stay alive";
 
-    content.Reset();
+    content.reset();
     EXPECT_EQ(context.Layouts().GetLayoutCount(), 0u)
         << "dropping the last content reference must release the shared layout";
 }

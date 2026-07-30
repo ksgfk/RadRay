@@ -14,10 +14,12 @@ ShaderContent::ShaderContent(
     ShaderAssetDesc desc,
     unique_ptr<ShaderResolver> resolver,
     vector<unique_ptr<ShaderPassProgram>> passes) noexcept
-    : AssetContent(key, recycler),
-      _desc(std::move(desc)),
+    : _desc(std::move(desc)),
       _resolver(std::move(resolver)),
       _passes(std::move(passes)) {
+    // key 只是创建许可证, recycler 归 AssetContentDeleter 持有, 两者在此都不需要落成员。
+    (void)key;
+    (void)recycler;
 }
 
 ShaderContent::~ShaderContent() noexcept = default;
@@ -60,7 +62,7 @@ Nullable<ShaderPassProgram*> ShaderContent::GetPass(size_t index) noexcept {
 // ============================ ShaderAsset ============================
 
 ShaderAsset::ShaderAsset(
-    ShaderContentRef content,
+    shared_ptr<ShaderContent> content,
     ShaderResolveContext* context,
     PipelineLayoutCache* layoutCache) noexcept
     : _content(std::move(content)),
@@ -72,12 +74,12 @@ ShaderAsset::~ShaderAsset() noexcept = default;
 
 void ShaderAsset::OnUnload(IRenderResourceRecycler& recycler) {
     // 【只放开本槽位那一份引用, 不直接释放 GPU 资源】: 内容可能仍被 PSO 缓存等持有, 那时
-    // 它必须继续存活。真正的释放发生在最后一份引用归零时, 由 AssetContent 统一交给
-    // recycler (见 asset.cpp 的 IntrusivePtrRelease)。
+    // 它必须继续存活。真正的释放发生在最后一份引用归零时, 由 AssetContentDeleter 统一交给
+    // recycler (见 asset.h)。
     //
     // 故本函数【不使用】recycler 形参 —— 它不再是"资产自己释放 GPU 资源"的时机。
     (void)recycler;
-    _content.Reset();
+    _content.reset();
 }
 
 AssetTypeId ShaderAsset::GetTypeId() const noexcept {
@@ -151,7 +153,7 @@ Nullable<unique_ptr<ShaderAsset>> CreateShaderAsset(
 
         // storage 是瞬态的 —— 缓存把内容拷进自己的 key, 之后 storage 即可丢弃。
         const ShaderPipelineLayoutStorage layoutStorage = BuildPipelineLayoutStorage(pass);
-        SharedPipelineLayoutRef layout =
+        IntrusivePtr<SharedPipelineLayout> layout =
             options.LayoutCache.Get()->GetOrCreate(layoutStorage.Get());
         if (!layout.HasValue()) {
             outDiag.Message = "CreatePipelineLayout failed";
@@ -174,7 +176,7 @@ Nullable<unique_ptr<ShaderAsset>> CreateShaderAsset(
 
     outDiag = ShaderAssetDiagnostic{};
     // 内容必须经 AssetManager 创建 —— recycler 由那里注入, 见 AssetContentKey。
-    ShaderContentRef content = assetManager.MakeContent<ShaderContent>(
+    shared_ptr<ShaderContent> content = assetManager.MakeContent<ShaderContent>(
         std::move(desc.value()),
         std::move(resolver),
         std::move(passes));

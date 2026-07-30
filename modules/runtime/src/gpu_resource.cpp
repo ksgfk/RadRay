@@ -1040,12 +1040,12 @@ PipelineLayoutCache::~PipelineLayoutCache() noexcept {
     _device = nullptr;
 }
 
-SharedPipelineLayoutRef PipelineLayoutCache::GetOrCreate(
+IntrusivePtr<SharedPipelineLayout> PipelineLayoutCache::GetOrCreate(
     const render::PipelineLayoutDescriptor& desc) noexcept {
     return GetOrCreate(PipelineLayoutCacheKey::Build(desc));
 }
 
-SharedPipelineLayoutRef PipelineLayoutCache::GetOrCreate(PipelineLayoutCacheKey key) noexcept {
+IntrusivePtr<SharedPipelineLayout> PipelineLayoutCache::GetOrCreate(PipelineLayoutCacheKey key) noexcept {
     if (_device == nullptr) {
         return nullptr;
     }
@@ -1061,7 +1061,9 @@ SharedPipelineLayoutRef PipelineLayoutCache::GetOrCreate(PipelineLayoutCacheKey 
         return nullptr;
     }
     ++_misses;
-    auto layout = MakeIntrusive<SharedPipelineLayout>(this, std::move(key), object.Release());
+    // 【自行分配 + AdoptRef】: 计数从 1 起 (见 SharedPipelineLayout::_refCount), 故接管时
+    // 不再 +1。经 make_unique 而非裸 new —— 若 push_back 抛出, 对象由 unique_ptr 释放。
+    auto layout = AdoptRef(make_unique<SharedPipelineLayout>(this, std::move(key), object.Release()));
     _entries.push_back(layout.Get());
     return layout;
 }
@@ -1140,14 +1142,14 @@ Nullable<render::GraphicsPipelineState*> PipelineStateCache::GetOrCreateGraphics
 
     // 内容的强引用: 保住 key.Program 指向的那块存储, 见 GraphicsEntry::Content。
     // 资产为空 (调用方传了无效 ref) 时留空 —— 那时 Program 的存活由调用方负责。
-    ShaderContentRef contentRef;
+    shared_ptr<ShaderContent> contentRef;
     if (const ShaderAsset* owner = static_cast<const ShaderAsset*>(asset.Get()); owner != nullptr) {
         contentRef = owner->AcquireContent();
     }
 
     // 取【共享引用】而非裸指针: 本条目要独立持有一份, 使 layout 的存活不依赖资产槽位。
     // 理由见 GraphicsEntry::Layout。
-    SharedPipelineLayoutRef layoutRef = key.Program->GetSharedPipelineLayout();
+    IntrusivePtr<SharedPipelineLayout> layoutRef = key.Program->GetSharedPipelineLayout();
     render::PipelineLayout* layout = layoutRef.HasValue() ? layoutRef->Get() : nullptr;
     if (layout == nullptr) {
         outDiag.Message = "pass has no pipeline layout";

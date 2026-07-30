@@ -58,7 +58,7 @@
 //
 // layout 只由 binding 布局决定, 与 variant / target 无关, 且规模化后大量 pass 的布局
 // 逐字节相同 (见 pipeline_layout_cache.h)。故它归 PipelineLayoutCache 按内容去重,
-// 本层持 SharedPipelineLayoutRef 一份引用, 归零时对象自毁。
+// 本层持 IntrusivePtr<SharedPipelineLayout> 一份引用, 归零时对象自毁。
 //
 // 因此 ShaderPipelineLayoutStorage 降级为【瞬态】: 它只在加载期把 manifest 打包成一份
 // descriptor 喂给缓存, 缓存把内容拷进自己的 key, 之后 storage 即可丢弃。program 不再
@@ -173,7 +173,7 @@ public:
     ShaderPassProgram(
         ShaderPassDesc pass,
         ShaderVariantDomain domain,
-        SharedPipelineLayoutRef pipelineLayout,
+        IntrusivePtr<SharedPipelineLayout> pipelineLayout,
         std::optional<ShaderVertexInputStorage> vertexInput,
         ShaderResolver* resolver) noexcept;
     ShaderPassProgram(const ShaderPassProgram&) = delete;
@@ -190,7 +190,7 @@ public:
         return _pipelineLayout.HasValue() ? _pipelineLayout->Get() : nullptr;
     }
     /// 供测试与诊断核对共享是否生效。
-    const SharedPipelineLayoutRef& GetSharedPipelineLayout() const noexcept { return _pipelineLayout; }
+    const IntrusivePtr<SharedPipelineLayout>& GetSharedPipelineLayout() const noexcept { return _pipelineLayout; }
 
     /// 仅 graphics pass 有值。返回的 VertexInputState 内含 span, 指向本对象。
     std::optional<render::VertexInputState> GetVertexInputState() const noexcept;
@@ -244,7 +244,7 @@ private:
     ShaderVariantDomain _domain;
     /// 【共享, 非独占】一份引用。布局相同的其他 program 持同一个对象, 归零时对象自毁。
     /// descriptor 的后备存储在 SharedPipelineLayout 的 key 里, 故本层无需另存。
-    SharedPipelineLayoutRef _pipelineLayout;
+    IntrusivePtr<SharedPipelineLayout> _pipelineLayout;
     std::optional<ShaderVertexInputStorage> _vertexInput;
     /// 借用而非拥有。持有者 (通常是 ShaderAsset) 必须保证 resolver 活得比本对象久 ——
     /// 见 shader_asset.h 里 ShaderAsset 的成员声明顺序说明。

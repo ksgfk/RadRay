@@ -267,8 +267,8 @@ TEST_F(PipelineStateCacheTest, SameKeyHitsTheSamePipelineState) {
     if (!asset.IsReady()) {
         GTEST_SKIP() << "DXC is unavailable";
     }
-    ShaderContentRef content_program = asset->AcquireContent();
-    ASSERT_TRUE(content_program.HasValue());
+    shared_ptr<ShaderContent> content_program = asset->AcquireContent();
+    ASSERT_TRUE(content_program != nullptr);
     Nullable<ShaderPassProgram*> program = content_program->FindPass("Error");
     ASSERT_TRUE(program.HasValue());
 
@@ -295,8 +295,8 @@ TEST_F(PipelineStateCacheTest, FixedFunctionStateDifferencesSplitEntries) {
     if (!asset.IsReady()) {
         GTEST_SKIP() << "DXC is unavailable";
     }
-    ShaderContentRef content_program = asset->AcquireContent();
-    ASSERT_TRUE(content_program.HasValue());
+    shared_ptr<ShaderContent> content_program = asset->AcquireContent();
+    ASSERT_TRUE(content_program != nullptr);
     Nullable<ShaderPassProgram*> program = content_program->FindPass("Error");
     ASSERT_TRUE(program.HasValue());
 
@@ -348,8 +348,8 @@ TEST_F(PipelineStateCacheTest, DifferentVariantSplitsEntriesThroughBytecodeHash)
     if (!asset.IsReady()) {
         GTEST_SKIP() << "DXC is unavailable";
     }
-    ShaderContentRef content_program = asset->AcquireContent();
-    ASSERT_TRUE(content_program.HasValue());
+    shared_ptr<ShaderContent> content_program = asset->AcquireContent();
+    ASSERT_TRUE(content_program != nullptr);
     Nullable<ShaderPassProgram*> program = content_program->FindPass("Error");
     ASSERT_TRUE(program.HasValue());
 
@@ -393,12 +393,12 @@ TEST_F(PipelineStateCacheTest, DifferentProgramSplitsEntries) {
         diag);
     ASSERT_TRUE(secondAsset.HasValue()) << diag.ToString();
 
-    ShaderContentRef content_firstProgram = first->AcquireContent();
-    ASSERT_TRUE(content_firstProgram.HasValue());
+    shared_ptr<ShaderContent> content_firstProgram = first->AcquireContent();
+    ASSERT_TRUE(content_firstProgram != nullptr);
 
     Nullable<ShaderPassProgram*> firstProgram = content_firstProgram->FindPass("Error");
-    ShaderContentRef content_secondProgram = secondAsset->AcquireContent();
-    ASSERT_TRUE(content_secondProgram.HasValue());
+    shared_ptr<ShaderContent> content_secondProgram = secondAsset->AcquireContent();
+    ASSERT_TRUE(content_secondProgram != nullptr);
     Nullable<ShaderPassProgram*> secondProgram = content_secondProgram->FindPass("Error");
     ASSERT_TRUE(firstProgram.HasValue());
     ASSERT_TRUE(secondProgram.HasValue());
@@ -433,8 +433,8 @@ TEST_F(PipelineStateCacheTest, RemovePipelineStatesUsingEvictsByAsset) {
     if (!asset.IsReady()) {
         GTEST_SKIP() << "DXC is unavailable";
     }
-    ShaderContentRef content_program = asset->AcquireContent();
-    ASSERT_TRUE(content_program.HasValue());
+    shared_ptr<ShaderContent> content_program = asset->AcquireContent();
+    ASSERT_TRUE(content_program != nullptr);
     Nullable<ShaderPassProgram*> program = content_program->FindPass("Error");
     ASSERT_TRUE(program.HasValue());
 
@@ -472,12 +472,12 @@ TEST_F(PipelineStateCacheTest, PipelineStateKeepsItsLayoutAliveAcrossForcedUnloa
     if (!asset.IsReady()) {
         GTEST_SKIP() << "DXC is unavailable";
     }
-    ShaderContentRef content_program = asset->AcquireContent();
-    ASSERT_TRUE(content_program.HasValue());
+    shared_ptr<ShaderContent> content_program = asset->AcquireContent();
+    ASSERT_TRUE(content_program != nullptr);
     Nullable<ShaderPassProgram*> program = content_program->FindPass("Error");
     ASSERT_TRUE(program.HasValue());
 
-    const SharedPipelineLayoutRef sharedLayout = program->GetSharedPipelineLayout();
+    const IntrusivePtr<SharedPipelineLayout> sharedLayout = program->GetSharedPipelineLayout();
     ASSERT_TRUE(sharedLayout.HasValue());
     render::PipelineLayout* layoutObject = sharedLayout->Get();
     ASSERT_NE(layoutObject, nullptr);
@@ -505,7 +505,7 @@ TEST_F(PipelineStateCacheTest, PipelineStateKeepsItsLayoutAliveAcrossForcedUnloa
     // (GraphicsEntry::Content), 故 ShaderContent 连同它的 ShaderPassProgram 都还活着,
     // program 那份 layout 引用也就没放开。这正是条目该有的样子 —— 它的 Program 是指向
     // 内容内部的裸指针, 不保内容就会悬垂。
-    content_program.Reset();
+    content_program.reset();
     EXPECT_EQ(sharedLayout->GetRefCount(), 3u) << "缓存条目独立保住了内容";
     EXPECT_EQ(sharedLayout->Get(), layoutObject);
     EXPECT_EQ(Cache().GetGraphicsPipelineStateCount(), 1u);
@@ -522,8 +522,8 @@ TEST_F(PipelineStateCacheTest, InvalidKeyIsRejectedWithoutTouchingTheDevice) {
     if (!asset.IsReady()) {
         GTEST_SKIP() << "DXC is unavailable";
     }
-    ShaderContentRef content_program = asset->AcquireContent();
-    ASSERT_TRUE(content_program.HasValue());
+    shared_ptr<ShaderContent> content_program = asset->AcquireContent();
+    ASSERT_TRUE(content_program != nullptr);
     Nullable<ShaderPassProgram*> program = content_program->FindPass("Error");
     ASSERT_TRUE(program.HasValue());
 

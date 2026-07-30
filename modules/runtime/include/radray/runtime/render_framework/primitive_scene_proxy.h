@@ -10,7 +10,7 @@ namespace radray {
 ///
 /// 【Geometry 的保命责任在 proxy】: 它指进 StaticMeshContent 持有的 GpuMesh, 而
 /// AssetManager::Unload 随时可销毁槽位。覆写 GetDrawArgs 的 proxy 必须自己存一份
-/// StaticMeshContentRef —— 只存 StreamingAssetRef 不够, 那只保住槽位。见 asset.h。
+/// shared_ptr<StaticMeshContent> —— 只存 StreamingAssetRef 不够, 那只保住槽位。见 asset.h。
 struct MeshDrawArgs {
     const GpuMesh::DrawData* Geometry{nullptr};  // VB/IB 视图
     uint32_t FirstIndex{0};

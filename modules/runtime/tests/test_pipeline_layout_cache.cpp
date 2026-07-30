@@ -235,7 +235,7 @@ TEST(PipelineLayoutCacheKeyTest, DescriptorViewSurvivesCopyAndMove) {
 
 TEST_F(PipelineLayoutCacheTest, SameContentSharesOneLayout) {
     const DescriptorBuilder builder = MakeTwoGroupDescriptor();
-    SharedPipelineLayoutRef first = Cache().GetOrCreate(builder.Get());
+    IntrusivePtr<SharedPipelineLayout> first = Cache().GetOrCreate(builder.Get());
     ASSERT_TRUE(first.HasValue());
     EXPECT_EQ(Cache().GetLayoutCount(), 1u);
     EXPECT_EQ(Cache().GetMissCount(), 1u);
@@ -243,7 +243,7 @@ TEST_F(PipelineLayoutCacheTest, SameContentSharesOneLayout) {
 
     // 另一份独立拼出的 descriptor —— 内容相同, 但没有任何指针关系。
     const DescriptorBuilder identical = MakeTwoGroupDescriptor();
-    SharedPipelineLayoutRef second = Cache().GetOrCreate(identical.Get());
+    IntrusivePtr<SharedPipelineLayout> second = Cache().GetOrCreate(identical.Get());
     ASSERT_TRUE(second.HasValue());
     EXPECT_EQ(second.Get(), first.Get()) << "identical content must share one layout object";
     EXPECT_EQ(second->Get(), first->Get());
@@ -266,23 +266,23 @@ TEST_F(PipelineLayoutCacheTest, WritingOrderDoesNotSplitLayouts) {
         {MakeEntry(1, render::ShaderParameterBindingType::CBuffer, render::ShaderStage::Pixel),
          MakeEntry(0, render::ShaderParameterBindingType::CBuffer, render::ShaderStage::Vertex)});
 
-    SharedPipelineLayoutRef first = Cache().GetOrCreate(ordered.Get());
+    IntrusivePtr<SharedPipelineLayout> first = Cache().GetOrCreate(ordered.Get());
     ASSERT_TRUE(first.HasValue());
-    SharedPipelineLayoutRef second = Cache().GetOrCreate(shuffled.Get());
+    IntrusivePtr<SharedPipelineLayout> second = Cache().GetOrCreate(shuffled.Get());
     ASSERT_TRUE(second.HasValue());
     EXPECT_EQ(second.Get(), first.Get());
     EXPECT_EQ(Cache().GetLayoutCount(), 1u);
 }
 
 TEST_F(PipelineLayoutCacheTest, DifferentContentSplitsLayouts) {
-    SharedPipelineLayoutRef first = Cache().GetOrCreate(MakeTwoGroupDescriptor().Get());
+    IntrusivePtr<SharedPipelineLayout> first = Cache().GetOrCreate(MakeTwoGroupDescriptor().Get());
     ASSERT_TRUE(first.HasValue());
 
     DescriptorBuilder other;
     other.AddGroup(
         0,
         {MakeEntry(0, render::ShaderParameterBindingType::CBuffer, render::ShaderStage::Vertex)});
-    SharedPipelineLayoutRef second = Cache().GetOrCreate(other.Get());
+    IntrusivePtr<SharedPipelineLayout> second = Cache().GetOrCreate(other.Get());
     ASSERT_TRUE(second.HasValue());
 
     EXPECT_NE(second.Get(), first.Get());
@@ -294,10 +294,10 @@ TEST_F(PipelineLayoutCacheTest, DifferentContentSplitsLayouts) {
 
 TEST_F(PipelineLayoutCacheTest, LastReleaseDetachesFromCache) {
     {
-        SharedPipelineLayoutRef first = Cache().GetOrCreate(MakeTwoGroupDescriptor().Get());
+        IntrusivePtr<SharedPipelineLayout> first = Cache().GetOrCreate(MakeTwoGroupDescriptor().Get());
         ASSERT_TRUE(first.HasValue());
         {
-            SharedPipelineLayoutRef second = Cache().GetOrCreate(MakeTwoGroupDescriptor().Get());
+            IntrusivePtr<SharedPipelineLayout> second = Cache().GetOrCreate(MakeTwoGroupDescriptor().Get());
             ASSERT_EQ(second.Get(), first.Get());
             EXPECT_EQ(first->GetRefCount(), 2u);
             EXPECT_EQ(Cache().GetLayoutCount(), 1u);
@@ -314,12 +314,12 @@ TEST_F(PipelineLayoutCacheTest, LastReleaseDetachesFromCache) {
 /// 留了个墓碑等着被 lock() 发现。
 TEST_F(PipelineLayoutCacheTest, RecreatesAfterFullRelease) {
     {
-        SharedPipelineLayoutRef first = Cache().GetOrCreate(MakeTwoGroupDescriptor().Get());
+        IntrusivePtr<SharedPipelineLayout> first = Cache().GetOrCreate(MakeTwoGroupDescriptor().Get());
         ASSERT_TRUE(first.HasValue());
     }
     ASSERT_EQ(Cache().GetLayoutCount(), 0u);
 
-    SharedPipelineLayoutRef again = Cache().GetOrCreate(MakeTwoGroupDescriptor().Get());
+    IntrusivePtr<SharedPipelineLayout> again = Cache().GetOrCreate(MakeTwoGroupDescriptor().Get());
     ASSERT_TRUE(again.HasValue());
     EXPECT_EQ(Cache().GetLayoutCount(), 1u);
     EXPECT_EQ(Cache().GetMissCount(), 2u);
@@ -328,13 +328,13 @@ TEST_F(PipelineLayoutCacheTest, RecreatesAfterFullRelease) {
 
 /// 热更新的形状: 布局没变时 reload 必须命中同一个 GPU 对象, 不重建 root signature。
 TEST_F(PipelineLayoutCacheTest, ReloadWithUnchangedLayoutDoesNotRecreate) {
-    SharedPipelineLayoutRef oldRef = Cache().GetOrCreate(MakeTwoGroupDescriptor().Get());
+    IntrusivePtr<SharedPipelineLayout> oldRef = Cache().GetOrCreate(MakeTwoGroupDescriptor().Get());
     ASSERT_TRUE(oldRef.HasValue());
     render::PipelineLayout* nativeBefore = oldRef->Get();
     const uint64_t missesBefore = Cache().GetMissCount();
 
     // 新 program 先取引用, 旧的再放开 —— reload 的真实顺序。
-    SharedPipelineLayoutRef newRef = Cache().GetOrCreate(MakeTwoGroupDescriptor().Get());
+    IntrusivePtr<SharedPipelineLayout> newRef = Cache().GetOrCreate(MakeTwoGroupDescriptor().Get());
     ASSERT_TRUE(newRef.HasValue());
     oldRef.Reset();
 
@@ -347,7 +347,7 @@ TEST_F(PipelineLayoutCacheTest, ReloadWithUnchangedLayoutDoesNotRecreate) {
 TEST_F(PipelineLayoutCacheTest, AcceptsEmptyDescriptor) {
     // 无组无 push constant 的 layout 在两个后端都是合法的 (空 root signature)。
     const DescriptorBuilder empty;
-    SharedPipelineLayoutRef ref = Cache().GetOrCreate(empty.Get());
+    IntrusivePtr<SharedPipelineLayout> ref = Cache().GetOrCreate(empty.Get());
     ASSERT_TRUE(ref.HasValue()) << "an empty layout is legal in both backends";
     EXPECT_EQ(Cache().GetLayoutCount(), 1u);
 }
@@ -362,7 +362,7 @@ TEST(PipelineLayoutCacheShutdownTest, CacheMayDieBeforeItsHolders) {
         GTEST_SKIP() << "no render backend is available on this machine";
     }
 
-    SharedPipelineLayoutRef survivor;
+    IntrusivePtr<SharedPipelineLayout> survivor;
     {
         PipelineLayoutCache cache{ctx.Device.get()};
         survivor = cache.GetOrCreate(MakeTwoGroupDescriptor().Get());

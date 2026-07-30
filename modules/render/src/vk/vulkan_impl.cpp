@@ -549,12 +549,11 @@ void IntrusivePtrAddRef(DescriptorSetLayoutVulkan* obj) noexcept {
 }
 
 void IntrusivePtrRelease(DescriptorSetLayoutVulkan* obj) noexcept {
+    RADRAY_ASSERT(obj->_refCount > 0);
     if (--obj->_refCount != 0) {
         return;
     }
-    if (obj->_cache != nullptr) {
-        obj->_cache->Detach(obj);
-    }
+    obj->_cache->Evict(obj);
 }
 
 DescriptorSetLayoutCacheVulkan::DescriptorSetLayoutCacheVulkan(
@@ -563,7 +562,6 @@ DescriptorSetLayoutCacheVulkan::DescriptorSetLayoutCacheVulkan(
 
 DescriptorSetLayoutCacheVulkan::~DescriptorSetLayoutCacheVulkan() noexcept {
     Destroy();
-    RADRAY_ASSERT(_layouts.empty());
 }
 
 IntrusivePtr<DescriptorSetLayoutVulkan> DescriptorSetLayoutCacheVulkan::GetOrCreate(
@@ -596,7 +594,7 @@ IntrusivePtr<DescriptorSetLayoutVulkan> DescriptorSetLayoutCacheVulkan::GetOrCre
         });
 
     if (const auto it = _layouts.find(key); it != _layouts.end()) {
-        return RetainRef(&it->second);
+        return RetainRef(it->second.get());
     }
 
     VkDescriptorSetLayoutCreateInfo createInfo{};
@@ -616,37 +614,33 @@ IntrusivePtr<DescriptorSetLayoutVulkan> DescriptorSetLayoutCacheVulkan::GetOrCre
         RADRAY_ERR_LOG("vkCreateDescriptorSetLayout failed: {}", vr);
         return nullptr;
     }
-    const auto [it, inserted] =
-        _layouts.try_emplace(std::move(key), this, _device, layout);
-    if (!inserted) {
-        _device->_ftb.vkDestroyDescriptorSetLayout(
-            _device->_device,
-            layout,
-            _device->GetAllocationCallbacks());
-        return RetainRef(&it->second);
+    const auto [it, inserted] = _layouts.try_emplace(
+        std::move(key),
+        make_unique<DescriptorSetLayoutVulkan>(this, _device, layout));
+    if (inserted) {
+        it->second->_key = &it->first;
+    } else {
+        RADRAY_ABORT("DescriptorSetLayoutCacheVulkan::GetOrCreate failed");
+        return nullptr;
     }
-    return AdoptRef(&it->second);
+    return RetainRef(it->second.get());
 }
 
-void DescriptorSetLayoutCacheVulkan::Destroy() noexcept {
-    for (auto& entry : _layouts) {
-        entry.second.DestroyImpl();
-    }
-    _device = nullptr;
-}
-
-void DescriptorSetLayoutCacheVulkan::Detach(
-    DescriptorSetLayoutVulkan* layout) noexcept {
-    const auto it = std::find_if(
-        _layouts.begin(),
-        _layouts.end(),
-        [layout](const auto& entry) noexcept {
-            return &entry.second == layout;
-        });
-    RADRAY_ASSERT(it != _layouts.end());
+void DescriptorSetLayoutCacheVulkan::Evict(DescriptorSetLayoutVulkan* layout) noexcept {
+    const auto it = _layouts.find(*layout->_key);
+    RADRAY_ASSERT(it != _layouts.end() && it->second.get() == layout);
     if (it != _layouts.end()) {
         _layouts.erase(it);
     }
+}
+
+void DescriptorSetLayoutCacheVulkan::Destroy() noexcept {
+    for (const auto& [key, layout] : _layouts) {
+        (void)key;
+        RADRAY_ASSERT(layout->GetRefCount() == 0);
+    }
+    _layouts.clear();
+    _device = nullptr;
 }
 
 struct DescriptorSetAllocatorVulkan::Page {

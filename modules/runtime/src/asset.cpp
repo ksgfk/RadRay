@@ -9,23 +9,6 @@
 
 namespace radray {
 
-void IntrusivePtrAddRef(const AssetContent* obj) noexcept {
-    obj->_counter.Increment();
-}
-
-void IntrusivePtrRelease(AssetContent* obj) noexcept {
-    if (obj->_counter.Decrement() != 0) {
-        return;
-    }
-    // 归零后本函数是唯一所有者。收进 unique_ptr 让销毁由 RAII 完成 —— 项目不允许显式
-    // delete, 且这样即便后续步骤将来增加早退分支也不会漏放。
-    //
-    // ReleaseRenderResources 在析构【之前】跑, 故派生类成员此刻仍然完整可用; 若把它放到
-    // 派生类析构里做, 基类就已经拿不到 recycler 了。
-    unique_ptr<AssetContent> owner{obj};
-    owner->ReleaseRenderResources(*owner->_recycler);
-}
-
 namespace {
 
 /// FNV-1a 64。跨平台跨编译器结果一致 —— AssetId 会进 index、进日志, 换机器不该换值。

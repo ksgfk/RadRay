@@ -417,8 +417,6 @@ private:
 void IntrusivePtrAddRef(const SharedPipelineLayout* obj) noexcept;
 void IntrusivePtrRelease(SharedPipelineLayout* obj) noexcept;
 
-using SharedPipelineLayoutRef = IntrusivePtr<SharedPipelineLayout>;
-
 class PipelineLayoutCache {
 public:
     explicit PipelineLayoutCache(render::Device* device) noexcept;
@@ -426,8 +424,8 @@ public:
     PipelineLayoutCache(const PipelineLayoutCache&) = delete;
     PipelineLayoutCache& operator=(const PipelineLayoutCache&) = delete;
 
-    SharedPipelineLayoutRef GetOrCreate(const render::PipelineLayoutDescriptor& desc) noexcept;
-    SharedPipelineLayoutRef GetOrCreate(PipelineLayoutCacheKey key) noexcept;
+    IntrusivePtr<SharedPipelineLayout> GetOrCreate(const render::PipelineLayoutDescriptor& desc) noexcept;
+    IntrusivePtr<SharedPipelineLayout> GetOrCreate(PipelineLayoutCacheKey key) noexcept;
     Nullable<render::Device*> GetDevice() const noexcept { return _device; }
     uint32_t GetLayoutCount() const noexcept { return static_cast<uint32_t>(_entries.size()); }
     uint64_t GetHitCount() const noexcept { return _hits; }
@@ -497,12 +495,13 @@ private:
         /// ShaderPassProgram, 而 Ref 只保住资产【槽位】—— Unload 会销毁槽位并放开它那份
         /// 内容引用。持有内容才使 Program 在槽位消失后仍然有效。
         ///
-        /// 【为何是类型擦除的 AssetContentAnyRef】: 本条目只需要"别让它死", 不访问内容成员;
-        /// 而 AssetContentRef<ShaderContent> 会在此处对前向声明的 ShaderContent 求值
-        /// derived_from 并把 false 缓存下来。
+        /// 【为何是类型擦除的 shared_ptr<void>】: 本条目只需要"别让它死", 不访问内容成员;
+        /// 而 shared_ptr<ShaderContent> 会要求 ShaderContent 的完整定义, 此处它只是前向
+        /// 声明。shared_ptr<void> 保留了原本的 deleter, 故归零时仍然走对的释放路径
+        /// (交给 recycler, 见 asset.h 的 AssetContentDeleter)。
         ///
         /// 【声明顺序有意义】: 在 Object 之前, 析构逆序保证 PSO 先死。
-        AssetContentAnyRef Content;
+        shared_ptr<void> Content;
         /// 【必须持有, 不能只靠 Ref】: 后端 PSO 存的是 PipelineLayout 裸指针 (D3D12 的
         /// GraphicsPsoD3D12 存 RootSigD3D12* 并在每次 bind 时解引用), 而 layout 由
         /// SharedPipelineLayout 的引用计数管生死。Ref 只保住资产【槽位】——
@@ -512,7 +511,7 @@ private:
         ///
         /// 【声明顺序有意义】: 必须在 Object 之前, 析构逆序保证 PSO 先死, 之后才放开
         /// layout 引用。
-        SharedPipelineLayoutRef Layout;
+        IntrusivePtr<SharedPipelineLayout> Layout;
         unique_ptr<render::GraphicsPipelineState> Object;
     };
 

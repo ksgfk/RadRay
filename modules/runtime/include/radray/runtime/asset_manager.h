@@ -269,7 +269,7 @@ public:
     /// 应用层显式强制回收资产【槽位】。命中在飞 slot 则先取消、延迟到终态再回收。
     ///
     /// 【销毁的是槽位, 不是内容】:仍存活的 StreamingAssetRef 会报 Unloaded、Get() 返回
-    /// nullptr(generation 保护不崩溃),但已被他人持有的 AssetContent 仍然存活到最后一个
+    /// nullptr(generation 保护不崩溃),但已被他人持有的【内容】仍然存活到最后一个
     /// 持有者放手为止(见 asset.h)。所以正在录制的那一帧不会因为本次 Unload 而崩。
     ///
     /// 回收时仍有引用会打 error log(不限 DEBUG):那通常意味着某处缓存漏清。它不是 abort,
@@ -288,20 +288,35 @@ public:
     /// fence 等待释放 GPU 仍在读的资源,且只在漏装配时才发作。理由详见 GetRecycler 实现。
     ///
     /// 【生命周期】:非拥有指针,调用方保证 recycler 活得比本 AssetManager 及其创建的
-    /// 全部 AssetContent 更久 (见 Application::Shutdown 的关停顺序:GpuSystem 最后销毁)。
+    /// 全部内容更久 (见 Application::Shutdown 的关停顺序:GpuSystem 最后销毁)。
     void SetRecycler(IRenderResourceRecycler* recycler) noexcept { _recycler = recycler; }
 
     /// 资产内容的【唯一】创建入口。recycler 由此注入,调用方无从传错。
     ///
-    /// 【为何唯一】:AssetContent 的构造函数要一张只有本类能造的 AssetContentKey,
+    /// 【为何唯一】:内容类的构造函数要一张只有本类能造的 AssetContentKey,
     /// 故"绕过 AssetManager 创建内容"编译不过。这不是便捷封装,是约束 —— 详见
     /// AssetContentKey 与 SetRecycler 的说明。
     ///
+    /// 【为何在这里绑 deleter】:内容归零时必须把 GPU 对象交给【对】的 recycler,而这里是
+    /// 唯一知道该用哪个的地方。绑在创建点使"内容存在"与"它知道怎么释放自己"成为同一件事,
+    /// 不存在"造好了但还没装 deleter"的中间态。deleter 的语义见 AssetContentDeleter。
+    ///
+    /// 【返回 shared_ptr 而非 unique_ptr】:内容天生要被多方共享 (槽位一份、PSO 缓存一份、
+    /// SceneProxy 一份),这正是分离的目的。
+    ///
     /// recycler 未装配时 abort(见 GetRecycler)。
     template <class T, class... Args>
-    requires std::derived_from<T, AssetContent>
-    AssetContentRef<T> MakeContent(Args&&... args) {
-        return AdoptRef(make_unique<T>(AssetContentKey{}, GetRecycler(), std::forward<Args>(args)...));
+    shared_ptr<T> MakeContent(Args&&... args) {
+        IRenderResourceRecycler& recycler = GetRecycler();
+        // 【不用 make_shared】:它把控制块与对象合在一次分配里,但那要求 deleter 是默认的。
+        // 这里必须带自定义 deleter,故走 shared_ptr(ptr, deleter) 这条路 —— 多一次分配,
+        // 换到"归零即走 recycler"这条不可绕过的路径。
+        //
+        // 【裸 new 在此是安全的】:标准要求这个构造函数在控制块分配失败时调用 d(p),故对象
+        // 不会泄漏, 且仍然走 recycler。这是少数不需要先包一层 unique_ptr 的场合。
+        return shared_ptr<T>{
+            new T(AssetContentKey{}, recycler, std::forward<Args>(args)...),
+            AssetContentDeleter<T>{recycler}};
     }
 
     /// 提交加载协程写入的 pending result。

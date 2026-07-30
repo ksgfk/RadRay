@@ -6,7 +6,7 @@
 
 #include <radray/sparse_set.h>
 #include <radray/runtime_type.h>
-#include <radray/intrusive_ptr.h>
+#include <radray/types.h>
 
 namespace radray {
 
@@ -27,17 +27,24 @@ using AssetTypeId = RuntimeTypeId;
 
 /// 内容构造许可证。只有 AssetManager 能造出它。
 ///
-/// 【为何要它】: AssetContent 必须在构造期拿到 recycler, 而"拿对 recycler"不能靠纪律。
-/// 若内容的构造函数是公开可达的, 就存在第二条创建路径能塞进一个错的 (或空的) recycler,
+/// 【为何要它】: 内容的销毁必须经过【对】的 recycler, 而"拿对 recycler"不能靠纪律。若内容的
+/// 构造函数是公开可达的, 就存在第二条创建路径能造出一份不带 recycler (或带错的) 的内容,
 /// 而删掉 AssetManager 里那个 static 兜底 recycler 正是为了消灭这类静默错配。有了本许可证,
 /// "绕过 AssetManager 创建内容"直接编译不过。
+///
+/// 【注意本许可证与引用计数无关】: 它约束的是"谁能创建", 不是"谁负责销毁"。销毁由
+/// AssetContentDeleter 统一接管, 见其说明。
 class AssetContentKey {
 private:
     friend class AssetManager;
     AssetContentKey() noexcept = default;
 };
 
-/// 资产的【不可变内容】。生命周期独立于资产槽位, 由引用计数管理。
+/// == 资产的【不可变内容】: 生命周期独立于资产槽位, 由 shared_ptr 管理 ==
+///
+/// 这里没有 AssetContent 基类 —— "内容"是一条约定而非一个类型: 凡是 ShaderContent /
+/// StaticMeshContent / TextureContent 这样的类, 都经 AssetManager::MakeContent 创建,
+/// 交出 shared_ptr<T>, 归零时由 AssetContentDeleter 统一送进 recycler。
 ///
 /// == 为何内容要与槽位分离 ==
 ///
@@ -56,62 +63,61 @@ private:
 /// 数据的地方在同一瞬间陈旧, 而我们无法枚举它们。改为"建新内容、旧内容按引用计数自然消亡"
 /// 后, 缓存失效退化为天然 miss, 不需要任何 invalidate 通知。
 ///
-/// == 为何延迟销毁在基类 ==
+/// == 为何用 shared_ptr 而不是侵入式计数 ==
 ///
-/// StaticMesh 曾用 shared_ptr<GpuMesh> 自行做了一半内容分离, 结果 OnUnload 里那句
-/// use_count() == 1 判断使"别人还持有"这条分支【绕过了 recycler】—— 而那恰恰是唯一有 GPU
-/// 危险的分支, GPU 对象会在最后一个持有者归零时立即析构, 不等 fence。归零动作因此必须由
-/// 基类统一接管, 而不能留给每个资产各写一遍。
+/// 侵入式计数在这里唯一买到的是省下控制块与一次原子操作, 而它要求一个共同基类 (以便
+/// PipelineStateCache 那种"只保命不访问"的持有者能类型擦除) 和一个虚函数 (以便归零点知道
+/// 该释放什么)。shared_ptr 用 deleter 表达"归零做什么", 用 shared_ptr<void> 表达类型擦除,
+/// 两样都不需要, 于是基类与虚函数一并消失。这一层全在主线程, 原子计数的代价无关紧要。
 ///
-/// == 为何自持 recycler 指针 ==
+/// weak_ptr 在这里【用不上】, 不是选它的理由: PipelineStateCache 必须持强引用才能保住
+/// Program* (见 gpu_resource.h), 弱引用解决不了它的问题。
+///
+/// == 为何延迟销毁必须由 deleter 统一接管 ==
+///
+/// StaticMesh 曾用 shared_ptr<GpuMesh> 自行做了一半内容分离, 但释放动作挂在 OnUnload 上,
+/// 于是那里只能靠 use_count() == 1 去猜自己是不是最后一个 —— 猜不中 (别人还持有) 那条分支
+/// 【绕过了 recycler】, 而那恰恰是唯一有 GPU 危险的分支: buffer 在最后一个持有者归零时
+/// 立即析构, 不等 fence。
+///
+/// 注意那个 bug 与指针类型无关, 换成侵入式计数一样会发生 —— 病根是"释放动作挂在槽位死亡
+/// 事件上, 而资源寿命由计数决定"。修复的关键是让释放跑在【最后一个引用归零的那一刻】,
+/// 也就是 deleter 里。故内容类型一律【不得】自行 delete, 也不得在自己的析构里碰 recycler。
+///
+/// == 为何 deleter 自持 recycler 指针 ==
 ///
 /// 内容可以合法地比 AssetManager 活得久 —— 这正是分离要的效果。若归零时回头向 AssetManager
-/// 索取 recycler, 内容就重新依赖 AssetManager 存活, 分离白做。同 SharedPipelineLayout
-/// 自持 _cache 指针。app 保证 recycler (GpuSystem) 比所有内容活得久, 见 Application::Shutdown。
-class AssetContent {
+/// 索取 recycler, 内容就重新依赖 AssetManager 存活, 分离白做。app 保证 recycler (GpuSystem)
+/// 比所有内容活得久, 见 Application::Shutdown 的关停顺序 (GpuSystem 最后销毁)。
+///
+/// 【T 的要求】: 提供 `void ReleaseRenderResources(IRenderResourceRecycler&) noexcept`。
+/// 它在【析构之前】执行, 故此刻成员仍然完整可用 —— 若把释放放进析构, 就拿不到 recycler 了。
+/// 不需要虚函数: deleter 按 T 实例化, 直接静态派发。
+template <class T>
+class AssetContentDeleter {
 public:
-    /// 只能经 AssetManager::MakeContent 创建, 见 AssetContentKey。
-    AssetContent(AssetContentKey, IRenderResourceRecycler& recycler) noexcept
+    /// 【恒非空】: 只由 AssetManager::MakeContent 构造并立刻装进 shared_ptr, 无默认构造,
+    /// 故不存在"未装配 recycler"的中间状态。
+    explicit AssetContentDeleter(IRenderResourceRecycler& recycler) noexcept
         : _recycler(&recycler) {}
-    AssetContent(const AssetContent&) = delete;
-    AssetContent(AssetContent&&) = delete;
-    AssetContent& operator=(const AssetContent&) = delete;
-    AssetContent& operator=(AssetContent&&) = delete;
-    virtual ~AssetContent() noexcept = default;
 
-    /// 仅用于诊断与测试。业务代码不该按计数分支。
-    uint32_t GetRefCount() const noexcept { return _counter.Load(); }
-
-protected:
-    /// 引用计数归零时调用一次, 把 GPU 对象交给 recycler。
-    /// 【在析构之前执行】, 故派生类成员此刻仍然完整可用。
-    virtual void ReleaseRenderResources(IRenderResourceRecycler& recycler) noexcept = 0;
+    void operator()(T* obj) const noexcept {
+        if (obj == nullptr) {
+            return;
+        }
+        // 【先交出 GPU 对象, 再析构】: 顺序反过来的话成员已经没了。收进 unique_ptr 让销毁
+        // 由 RAII 完成, 即便将来这里增加早退分支也不会漏放。
+        unique_ptr<T> owner{obj};
+        owner->ReleaseRenderResources(*_recycler);
+    }
 
 private:
-    friend void IntrusivePtrAddRef(const AssetContent* obj) noexcept;
-    friend void IntrusivePtrRelease(AssetContent* obj) noexcept;
-
-    /// 【恒非空】: 构造期注入且无 setter, 故不存在"未装配"状态。
-    IRenderResourceRecycler* _recycler{nullptr};
-    /// 非原子: 资产操作全部在主线程。渲染线程只解引用主线程取好的 AssetContentRef,
-    /// 不得自行 acquire/release。(该约束的运行期校验待统一加。)
-    IntrusiveSingleThreadCounter _counter;
+    IRenderResourceRecycler* _recycler;
 };
 
-void IntrusivePtrAddRef(const AssetContent* obj) noexcept;
-void IntrusivePtrRelease(AssetContent* obj) noexcept;
-
-/// 内容的强引用。持有它即保证内容存活。
-///
-/// 【T 必须是完整类型】: 约束求值会实例化 derived_from, 对前向声明的 T 会得到 false 并被
-/// 缓存, 之后即使 T 补全也仍报错。只想"保住某份内容别死"而不访问其成员的地方 (如
-/// PipelineStateCache 的条目) 请用 AssetContentAnyRef, 它不需要具体类型完整。
-template <class T>
-requires std::derived_from<T, AssetContent>
-using AssetContentRef = IntrusivePtr<T>;
-
-/// 类型擦除的内容强引用。仅用于"保命", 不提供内容访问。
-using AssetContentAnyRef = IntrusivePtr<AssetContent>;
+/// 只想"保住某份内容别死"而不访问其成员的地方 (如 PipelineStateCache 的条目) 直接写
+/// shared_ptr<void>: 它保留原本的 deleter, 故归零时仍然走对的释放路径, 且不要求内容类型
+/// 是完整类型 —— 那些地方 ShaderContent 往往只是前向声明。
 
 /// 所有资产的多态基类。对应 UE5 的 UObject 资产(如 UStaticMesh)在本项目中的最小化等价物。
 ///
@@ -124,9 +130,9 @@ using AssetContentAnyRef = IntrusivePtr<AssetContent>;
 ///   StreamingAssetRef/StreamingAssetRefAny 参与计数,引用归零的 slot 可由 CollectUnreferenced 回收。
 ///   应用层仍可显式 Unload 强制回收;此时尚存引用会通过 generation 检查安全失效。
 ///
-/// 【Asset 与 AssetContent 的分工】(见 AssetContent):
+/// 【Asset 与内容的分工】(见 AssetContentDeleter 上方的说明):
 /// - Asset = 标识 + 加载状态 + 重载支点。回答"这个 id 现在指向哪份内容"。
-/// - AssetContent = 内容 + 派生数据 + GPU 资源。回答"实际的数据是什么"。
+/// - 内容 (ShaderContent / ...) = 内容 + 派生数据 + GPU 资源。回答"实际的数据是什么"。
 /// 需要分离的资产类型在 Asset 上只暴露 AcquireContent(),【不得】添加任何转发到内容的
 /// 访问函数 —— 那会让"哪个是真相"重新变得含糊, 而分离正是为了消除这种含糊。
 ///
@@ -136,9 +142,10 @@ using AssetContentAnyRef = IntrusivePtr<AssetContent>;
 /// 那才是引用计数唯一能解决的问题。
 ///
 /// 【系统里因此有两套计数, 各管一件事, 不是冗余】:
-/// - AssetRefControl (shared_ptr 控制块) 管"槽位还在吗" —— weak 语义, 必须能在 slot 死后
-///   继续存活并报告 Unloaded, 故刻意不迁到侵入式计数 (见 intrusive_ptr.h 的说明)。
-/// - AssetContent 的侵入式计数管"内容还在用吗" —— strong 语义。
+/// - AssetRefControl 管"槽位还在吗" —— weak 语义, 必须能在 slot 死后继续存活并报告
+///   Unloaded。
+/// - 内容的 shared_ptr 计数管"内容还在用吗" —— strong 语义。
+/// 两者都用 shared_ptr, 但保护的对象不同: 前者是槽位标识, 后者是数据与 GPU 资源。
 class Asset {
 public:
     Asset() noexcept = default;
