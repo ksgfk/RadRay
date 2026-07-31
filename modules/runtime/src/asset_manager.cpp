@@ -1,7 +1,5 @@
 #include <radray/runtime/asset_manager.h>
 
-#include <exception>
-
 #include <radray/logger.h>
 #include <radray/runtime/wait_frame.h>
 
@@ -25,42 +23,33 @@ struct AssetSlot {
 
 using Slot = AssetSlot;
 
-class AssetWaitAwaitable {
-public:
-    AssetWaitAwaitable(AssetManager* manager, StreamingAssetRefAny ref, stop_token stop) noexcept
-        : _manager(manager), _ref(std::move(ref)), _stop(stop) {}
-
-    bool await_ready() const noexcept {
-        return _manager == nullptr || _stop.stop_requested() || !_ref.IsValid() || _ref.IsCompleted();
+bool AssetWaitAwaitable::Suspend(std::coroutine_handle<> continuation, stop_token stop) {
+    AssetManager* manager = _ref._manager;
+    if (manager == nullptr || _ref._slot == nullptr || _ref.IsCompleted()) {
+        return false;
     }
-
-    bool await_suspend(std::coroutine_handle<> continuation) {
-        if (_manager == nullptr || _stop.stop_requested() || !_ref.IsValid() || _ref.IsCompleted()) {
-            return false;
-        }
-        _record = _manager->RegisterWait(_ref._slot, _stop, continuation);
-        return _record != nullptr;
+    if (stop.stop_requested()) {
+        // 【已被取消则不挂起】: 挂上去也只会等到下一次泵才被摘除, 而结论此刻就已确定。
+        // 记下来供 await_resume 区分 "没挂起因为已是终态" 与 "没挂起因为已被取消"。
+        _canceledBeforeSuspend = true;
+        return false;
     }
+    _record = manager->RegisterWait(_ref._slot, stop, continuation);
+    return _record != nullptr;
+}
 
-    bool await_resume() const noexcept {
-        if (_record == nullptr) {
-            return !_stop.stop_requested();
-        }
-
-        const bool completed = !_record->Canceled && !_record->Stop.stop_requested();
-        if (_manager != nullptr) {
-            _manager->_waiters.Erase(_record);
-        }
-        _record = nullptr;
-        return completed;
+bool AssetWaitAwaitable::await_resume() noexcept {
+    if (_record == nullptr) {
+        // 没挂起过: await_ready 为真 (空引用或已是终态) 或 Suspend 拒绝。
+        return !_canceledBeforeSuspend;
     }
-
-private:
-    AssetManager* _manager;
-    StreamingAssetRefAny _ref;
-    stop_token _stop;
-    mutable AssetWaitRecord* _record{nullptr};
-};
+    const bool completed = !_record->Canceled && !_record->Stop.stop_requested();
+    if (AssetManager* manager = _ref._manager; manager != nullptr) {
+        manager->_waiters.Erase(_record);
+    }
+    _record = nullptr;
+    return completed;
+}
 
 // ════════════════════════════════════════════════════════════
 //  StreamingAssetRefAny
@@ -177,7 +166,7 @@ RuntimeTypeId StreamingAssetRefAny::GetTypeId() const noexcept {
 AssetManager::AssetManager() noexcept = default;
 
 AssetManager::~AssetManager() noexcept {
-    // 1. 停掉在飞加载并等协程退出。_activeLoads 各自持一份引用, 到这里才放开。
+    // 1. 停掉在飞加载并等协程退出。
     for (auto& [id, slot] : _slots) {
         if (slot && slot->State == AssetState::Loading) {
             slot->Stop.request_stop();
@@ -185,28 +174,44 @@ AssetManager::~AssetManager() noexcept {
     }
     _loadScope.RequestStop();
     _loadScope.WaitUntilEmpty();
-    _activeLoads.clear();
 
-    // 2. 提交残留结果并回收已归零的资产 (上一步刚放开的那些)。
+    // 2. 提交残留结果, 再放开 _activeLoads 里那些引用, 然后回收已归零的资产。
+    //
+    //    【顺序不能反】: PumpLoadResults 遍历的正是 _activeLoads —— 先 clear 会让它变成
+    //    空转, 于是"协程已写好结果但还没 Pump"的那些资产留在 PendingResult 里随 optional
+    //    析构, 永远不走 OnUnload, 它们持有的 GPU 对象就此活过 device。
+    //
     //    【不调 Pump】: 它的第三步会把 payload 交给一个新协程去等帧边界, 而 _loadScope
     //    刚 request_stop 过, 那个协程只会立刻被取消 —— 绕一圈回到同一结果, 却让关停路径
     //    依赖 "spawn 后被取消" 这种间接行为。这里直接同步走完。
     PumpLoadResults();
+    _activeLoads.clear();
     CollectZeroRefSlots();
 
-    // 3. 此刻不该再有任何存活引用。有的话说明关停顺序错了 —— 见头文件析构说明。
-    uint32_t leaked = 0;
+    // 3. 【无条件对残留槽位走一遍 OnUnload + 析构, 即便仍被引用】。
+    //
+    //    此刻还有引用就是关停顺序的使用错误 (参照 Application::Shutdown 的顺序:
+    //    World → RenderSystem → AssetManager → GpuSystem)。但错误已经发生, 这里只能在
+    //    两种坏结果里挑: 放着不管则 GPU 资源活过 device 而泄漏, 销毁则那些引用变悬垂。
+    //    选销毁 —— GPU 资源【必须】在 device 之前交出, 泄漏比悬垂更难查; 而悬垂引用要等
+    //    到有人真去访问才出问题, 那时手上有一条指名道姓的 error log 可查。
+    //
+    //    【为何不 abort】: 关停期 abort 会把栈停在 AssetManager 上, 掩盖真正的首因
+    //    (通常是某个 system 忘了 reset, 或某个缓存条目还攥着 ref)。log 指明是哪个资产、
+    //    还剩几份引用, 比一个终止点更有用。
     for (auto& [id, slot] : _slots) {
         if (slot && slot->RefCount > 0) {
-            RADRAY_ERR_LOG("AssetManager: asset {} still has {} live reference(s) at shutdown", id, slot->RefCount);
-            ++leaked;
+            RADRAY_ERR_LOG(
+                "AssetManager: asset {} still has {} live reference(s) at shutdown; unloading anyway (those references are now dangling) — release all StreamingAssetRef before destroying AssetManager, see shutdown order in Application::Shutdown",
+                id,
+                slot->RefCount);
+        }
+        if (slot && slot->Object) {
+            slot->Object->OnUnload(*this);
+            slot->Object.reset();
         }
     }
-    if (leaked > 0) {
-        RADRAY_ABORT(
-            "AssetManager: destroyed while {} asset(s) still referenced; release all StreamingAssetRef before destroying AssetManager (see shutdown order in Application::Shutdown)",
-            leaked);
-    }
+    _slots.clear();
 
     // 4. 刚才 OnUnload 交出的 payload 已无从等待帧边界 (_loadScope 已停)。就地销毁。
     //    【为何安全】: 关停路径在此之前已经 device wait-idle 过 (Application::Shutdown 先
@@ -264,8 +269,7 @@ StreamingAssetRefAny AssetManager::Load(AssetLoadRequest request) {
 }
 
 task<void> AssetManager::Wait(StreamingAssetRefAny ref) {
-    stop_token stop = co_await CurrentStopToken();
-    bool completed = co_await AssetWaitAwaitable{this, std::move(ref), stop};
+    const bool completed = co_await ref;
     if (!completed) {
         co_await StopCurrentTask();
     }
@@ -291,19 +295,16 @@ task<void> AssetManager::RunLoad(StreamingAssetRefAny ref, task<AssetLoadResult>
     if (slot == nullptr) {
         co_return;
     }
-    try {
-        stop_token stop = slot->Stop.get_token();
-        std::optional<AssetLoadResult> result = co_await AwaitWithStopToken(std::move(loadTask), stop);
-        if (!result.has_value()) {
-            StoreLoadCanceled(slot);
-            co_return;
-        }
-        StoreLoadResult(slot, std::move(result.value()));
-    } catch (const std::exception& e) {
-        StoreLoadResult(slot, AssetLoadResult::Failure(e.what()));
-    } catch (...) {
-        StoreLoadResult(slot, AssetLoadResult::Failure("unknown asset load exception"));
+    // 【不捕获异常】: loader 抛出的异常一律传播。从 loader 里逃出来的异常不是"加载失败"
+    // 这类预期结果 (那条路由 AssetLoadResult::Failure 表达), 而是分配失败或不变量被破坏,
+    // 把它转成 Faulted 只会掩盖首因。见 AGENTS.md 的异常策略。
+    stop_token stop = slot->Stop.get_token();
+    std::optional<AssetLoadResult> result = co_await AwaitWithStopToken(std::move(loadTask), stop);
+    if (!result.has_value()) {
+        StoreLoadCanceled(slot);
+        co_return;
     }
+    StoreLoadResult(slot, std::move(result.value()));
 }
 
 void AssetManager::StoreLoadResult(Slot* slot, AssetLoadResult result) noexcept {

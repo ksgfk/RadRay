@@ -7,6 +7,10 @@ radray_add_test(test_shader_program SOURCES test_shader_program.cpp LINK_LIBS ra
 # manifest -> RHI 描述的打包测试, 不需要 device。
 radray_add_test(test_shader_layout_binding SOURCES test_shader_layout_binding.cpp LINK_LIBS radrayruntime)
 
+# AssetManager 的槽位生命周期 (引用计数、Pump 对齐的销毁、co_await 引用、关停)。
+# 用假资产代替真资产, 不需要 device 也不需要 shaderlib。
+radray_add_test(test_asset_slot SOURCES test_asset_slot.cpp LINK_LIBS radrayruntime)
+
 # PipelineStateCache: 建真实 PSO 以验证缓存 key 的每一维, 故需要 device 与 DXC,
 # 二者缺一时用例自行 GTEST_SKIP。
 radray_add_test(test_pipeline_state_cache SOURCES test_pipeline_state_cache.cpp LINK_LIBS radrayruntime DISCOVER_ARGS PROPERTIES ENVIRONMENT "RADRAY_PROJECT_DIR=${CMAKE_SOURCE_DIR}")

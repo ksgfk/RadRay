@@ -99,7 +99,7 @@ struct AssetLoadRequest {
 /// 各系统怎么跨线程使用不属资产系统管辖, 但引用本身不跨线程。
 ///
 /// 【必须全部死在 AssetManager 之前】: slot 随 manager 一同释放, 之后 _slot 悬垂。
-/// manager 析构时若仍有存活引用会 abort, 见 AssetManager 的析构说明。
+/// manager 析构时若仍有存活引用会记 error log 并照样卸载, 见 AssetManager 的析构说明。
 class StreamingAssetRefAny {
 public:
     StreamingAssetRefAny() noexcept = default;
@@ -128,6 +128,10 @@ public:
 
     const AssetId& GetAssetId() const noexcept;
     RuntimeTypeId GetTypeId() const noexcept;
+
+    /// 等待本引用离开 Loading 态。`co_await ref` 得到 bool: true = 已到终态,
+    /// false = 等待者自己被取消 (不是资产加载失败)。
+    AssetWaitAwaitable operator co_await() const noexcept;
 
     /// 【指向同一个槽位】。这是 id 去重的可观测形式: Load 命中既有 slot 时返回的引用与
     /// 原引用相等。刻意【不】比较 AssetId —— 两个无效引用的 id 都是空, 那样会相等。
@@ -196,6 +200,9 @@ public:
     const AssetId& GetAssetId() const noexcept { return _ref.GetAssetId(); }
     RuntimeTypeId GetTypeId() const noexcept { return _ref.GetTypeId(); }
 
+    /// 见 StreamingAssetRefAny::operator co_await。
+    AssetWaitAwaitable operator co_await() const noexcept;
+
     /// 见 StreamingAssetRefAny::operator==。
     bool operator==(const StreamingAssetRef& other) const noexcept { return _ref == other._ref; }
     bool operator==(const StreamingAssetRefAny& other) const noexcept { return _ref == other; }
@@ -214,6 +221,45 @@ private:
 
     StreamingAssetRefAny _ref;
 };
+
+/// co_await 一份 streaming 引用的 awaitable。恢复点在 AssetManager::Pump 把加载结果提交、
+/// 槽位进入终态之后。await_resume 返回 false 表示【等待者自己】被取消, 而非资产加载失败。
+///
+/// 【持有 ref 的副本, 这是必须的】: 等待期间它是槽位的一个引用持有者, 于是槽位不会因
+/// "外部都放手了"而在 Pump 里被回收 —— 那会让等待记录指向一个已销毁的 slot。
+class AssetWaitAwaitable {
+public:
+    explicit AssetWaitAwaitable(StreamingAssetRefAny ref) noexcept : _ref(std::move(ref)) {}
+
+    bool await_ready() const noexcept { return !_ref.IsValid() || _ref.IsCompleted(); }
+
+    /// 【模板化以拿到 promise】: 取消所需的 stop token 只能从 promise 的 env 里取, 而
+    /// coroutine_handle<> 已经把它擦除了。见 GetCoroutineStopToken。
+    template <class Promise>
+    bool await_suspend(std::coroutine_handle<Promise> continuation) {
+        return Suspend(continuation, GetCoroutineStopToken(continuation));
+    }
+
+    bool await_resume() noexcept;
+
+private:
+    bool Suspend(std::coroutine_handle<> continuation, stop_token stop);
+
+    StreamingAssetRefAny _ref;
+    AssetWaitRecord* _record{nullptr};
+    /// 挂起前就已被取消。此时没有记录, 但结论是"没等到"而非"已到终态"。
+    bool _canceledBeforeSuspend{false};
+};
+
+inline AssetWaitAwaitable StreamingAssetRefAny::operator co_await() const noexcept {
+    return AssetWaitAwaitable{*this};
+}
+
+template <class T>
+requires std::derived_from<T, Asset>
+AssetWaitAwaitable StreamingAssetRef<T>::operator co_await() const noexcept {
+    return AssetWaitAwaitable{AsAny()};
+}
 
 /// 资产仓库。按 AssetId 去重的单表 + 引用计数。
 ///
@@ -238,11 +284,12 @@ public:
     AssetManager& operator=(AssetManager&&) = delete;
 
     /// 【存活引用必须先于本对象消失】: slot 存储随本对象释放, 之后任何 StreamingAssetRef
-    /// 的 _slot 都是悬垂指针 —— 连 IsValid() 都答不出来。
+    /// 的 _slot 都是悬垂指针 —— 连 IsValid() 都答不出来。参照 Application::Shutdown 的
+    /// 顺序: World → RenderSystem → AssetManager → GpuSystem。
     ///
-    /// 故析构时若发现仍有 RefCount > 0 的 slot 会 abort。那是关停顺序的【程序错误】,
-    /// 必然在第一次跑到时暴露, 且没有合法降级可选 (放任是 UB, 泄漏也不对)。参照
-    /// Application::Shutdown 的顺序: World → RenderSystem → AssetManager → GpuSystem。
+    /// 违反时【记 error log 并照样卸载】, 不 abort。理由是此刻两种结果都坏, 而 GPU 资源
+    /// 必须在 device 之前交出 —— 泄漏比悬垂更难查, 且关停期 abort 会掩盖真正的首因
+    /// (通常是某个 system 忘了 reset)。详见析构实现处。
     ~AssetManager() noexcept;
 
     /// 异步发起加载。按 id 去重:命中在飞或已就绪 slot 直接复用。
@@ -254,6 +301,9 @@ public:
     StreamingAssetRef<T> Load(AssetLoadRequest request);
 
     /// 等待 streaming 引用离开 Loading 状态。等待者取消不会取消底层资产加载。
+    ///
+    /// 【薄转发】: 真正的实现是 StreamingAssetRefAny::operator co_await, 直接 `co_await ref`
+    /// 等价。本函数保留是因为它额外把"等待者被取消"转成对当前 task 的 stop 传播。
     task<void> Wait(StreamingAssetRefAny ref);
 
     template <class T>

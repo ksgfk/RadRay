@@ -9,6 +9,7 @@
 #include <concepts>
 #include <coroutine>
 #include <optional>
+#include <type_traits>
 #include <utility>
 
 #include <exec/async_scope.hpp>
@@ -201,6 +202,27 @@ private:
 
 inline task<stop_token> CurrentStopToken() {
     co_return co_await stdexec::get_stop_token();
+}
+
+/// 从协程 promise 的 env 里取 stop token。
+///
+/// 【为何需要它】: `co_await CurrentStopToken()` 只能在协程体里用, 而手写 awaitable 的
+/// await_suspend 拿到的只是一个 coroutine_handle —— 那里正是最需要 stop token 的地方
+/// (要把它记进等待记录, 以便取消时能恢复协程)。
+///
+/// promise 不提供 stop token (含类型擦除的 coroutine_handle<>) 时返回默认构造的 token,
+/// 其 stop_requested() 恒为 false —— 即"不可取消", 这是对"没有取消源"唯一安全的解释。
+template <class Promise>
+stop_token GetCoroutineStopToken(std::coroutine_handle<Promise> handle) noexcept {
+    if constexpr (std::is_void_v<Promise>) {
+        (void)handle;
+        return stop_token{};
+    } else if constexpr (requires { stdexec::get_stop_token(stdexec::get_env(handle.promise())); }) {
+        return stdexec::get_stop_token(stdexec::get_env(handle.promise()));
+    } else {
+        (void)handle;
+        return stop_token{};
+    }
 }
 
 inline task<void> StopCurrentTask() {
