@@ -1,12 +1,10 @@
 #pragma once
 
-#include <atomic>
-#include <optional>
-#include <span>
+#include <concepts>
+#include <utility>
 
 #include <radray/types.h>
 #include <radray/nullable.h>
-#include <radray/sparse_set.h>
 #include <radray/coroutine.h>
 #include <radray/runtime/asset.h>
 #include <radray/runtime/service_registry.h>
@@ -15,22 +13,41 @@ namespace radray {
 
 class AssetManager;
 class AssetWaitAwaitable;
+class IWaitFrameProcessor;
 class StreamingAssetRefAny;
 template <class T>
 requires std::derived_from<T, Asset>
 class StreamingAssetRef;
 
+/// 一个资产的槽位。定义在 asset_manager.cpp —— 本头文件只需要它的地址。
+///
+/// 【为何在命名空间作用域而不是嵌套进 StreamingAssetRefAny】: 槽位归 AssetManager 所有
+/// (_slots 那张表持有它们), 引用只是指向它。嵌进引用类型会把所有权关系说反, 而且会让
+/// 任何非友元 (如 AssetWaitRecord) 都无法命名它 —— 嵌套类无法从外部前向声明, 于是
+/// 只能退化成 void*。
+///
+/// 【刻意保持不完整】: 外部能拿到这个名字但做不了任何事; 唯一的构造入口
+/// (StreamingAssetRefAny 的私有构造) 也不对外开放。
+struct AssetSlot;
+
 /// 资产 slot 的生命周期状态。
+///
+/// 【没有 Unloaded】: 引用计数是资产生命周期的唯一权威 (见 asset.h), 故只要还有一个
+/// StreamingAssetRef 指向 slot, slot 就一定存在 —— "已卸载"这个状态没有观察者。
+/// 从前它存在是因为 Unload 能无视引用计数销毁槽位。
 enum class AssetState {
     Loading,   ///< 空位已占,加载协程在飞,Object 尚未就绪。
-    Ready,     ///< 资产已构造,可 Resolve。
+    Ready,     ///< 资产已构造,可访问。
     Faulted,   ///< 加载失败。
     Canceled,  ///< 加载被取消。
-    Unloaded,  ///< slot 已回收或 AssetManager 已析构。
 };
 
 struct AssetWaitRecord : ManualCoroutineRecord {
-    AssetHandle Handle{AssetHandle::Invalid()};
+    /// 等待目标。slot 由本记录的等待者所持有的 ref 保住, 故这个指针在记录存活期内有效。
+    ///
+    /// 【只用于比较, 不解引用】: AssetSlot 在此是不完整类型, 本记录也无需知道它的内容 ——
+    /// ResumeWaiters 拿它与目标 slot 做相等判断即可。
+    const AssetSlot* Slot{nullptr};
 };
 
 struct AssetLoadResult {
@@ -63,42 +80,26 @@ struct AssetLoadResult {
     bool IsSuccess() const noexcept { return Succeeded && Object != nullptr && TypeInfo != nullptr; }
 };
 
-using AssetLoadTask = task<AssetLoadResult>;
-
-/// 引用控制块。由 slot 与所有 StreamingAssetRef(Any) 共享(shared_ptr)。
-/// 生命周期独立于 slot,用于跨线程引用计数和只读状态查询。TypeInfo 在最终实例构造完成后写入,
-/// 再由 Ready 状态的 release/acquire 发布;其中 Id 始终是最终实例的精确类型 id。
-struct AssetRefControl {
-    std::atomic<uint32_t> RefCount{0};
-    std::atomic<AssetState> State{AssetState::Loading};
-    const RuntimeTypeInfo* TypeInfo{nullptr};
-
-    AssetState LoadState() const noexcept {
-        return State.load(std::memory_order_acquire);
-    }
-
-    void PublishState(AssetState state) noexcept {
-        State.store(state, std::memory_order_release);
-    }
-};
-
-/// AssetManager 的加载请求。具体 loader 的参数形状完全由调用方决定；
+/// AssetManager 的加载请求。具体 loader 的参数形状完全由调用方决定;
 /// AssetManager 只消费统一的 task<AssetLoadResult> 结果。
 struct AssetLoadRequest {
     AssetId Id;
-    AssetLoadTask Task;
+    task<AssetLoadResult> Task;
     string DebugName{};
 };
 
 /// 【类型擦除的 streaming 引用】。同时表达加载状态与 ready 后的资产访问。
-/// Get() 仅在 Ready 且对象仍存活时返回基类 Asset*;Loading/Faulted/Canceled/Unload 均返回 nullptr。
-/// 构造/拷贝会对目标 slot 增加引用计数,析构/移动出/Reset 则减少;引用计数归零的资产
-/// 可由 AssetManager::CollectUnreferenced 统一回收。
 ///
-/// 【线程安全】不同引用实例可在任意线程拷贝/移动/析构/Reset,也可查询状态与类型
-/// (IsValid/IsCompleted/IsReady/IsFaulted/IsCanceled/GetTypeId/Is/CastTo)。
-/// 同一个引用实例不能与 Reset/赋值并发使用。资产访问 Get/Cancel/Wait 以及 AssetManager 的 slot 表操作
-/// 仍只能在拥有 AssetManager 的线程(主/泵线程)进行。
+/// 表示是 manager + slot 裸指针: slot 是 unordered_map 里的 unique_ptr 元素, 地址稳定,
+/// 而 RefCount > 0 保证它不被销毁 —— 故不需要 generation 校验, 也不需要每次访问都按 id
+/// 查一次哈希表 (Get() 在渲染热路径上: PSO 缓存、SceneProxy)。
+///
+/// 【单线程】: 拷贝 / 移动 / 析构 / 状态查询 / 资产访问全部只能在拥有 AssetManager 的线程
+/// (主线程) 进行 —— RefCount 是普通整数, 且增减要触碰 manager 的表。资产【内部数据】被
+/// 各系统怎么跨线程使用不属资产系统管辖, 但引用本身不跨线程。
+///
+/// 【必须全部死在 AssetManager 之前】: slot 随 manager 一同释放, 之后 _slot 悬垂。
+/// manager 析构时若仍有存活引用会 abort, 见 AssetManager 的析构说明。
 class StreamingAssetRefAny {
 public:
     StreamingAssetRefAny() noexcept = default;
@@ -113,7 +114,7 @@ public:
     Asset* operator->() const noexcept { return Get(); }
     Asset& operator*() const noexcept { return *Get(); }
 
-    /// slot 仍然存在。Loading/Faulted/Canceled 都是 valid；Unload 后 invalid。
+    /// 引用非空。Loading / Ready / Faulted / Canceled 都是 valid; 默认构造与 Reset 后 invalid。
     bool IsValid() const noexcept;
     /// 终态:Ready / Faulted / Canceled 任一。
     bool IsCompleted() const noexcept;
@@ -125,9 +126,14 @@ public:
 
     void Cancel() const noexcept;
 
-    AssetHandle GetHandle() const noexcept { return _handle; }
-    const AssetId& GetAssetId() const noexcept { return _id; }
-    AssetTypeId GetTypeId() const noexcept;
+    const AssetId& GetAssetId() const noexcept;
+    RuntimeTypeId GetTypeId() const noexcept;
+
+    /// 【指向同一个槽位】。这是 id 去重的可观测形式: Load 命中既有 slot 时返回的引用与
+    /// 原引用相等。刻意【不】比较 AssetId —— 两个无效引用的 id 都是空, 那样会相等。
+    bool operator==(const StreamingAssetRefAny& other) const noexcept {
+        return _manager == other._manager && _slot == other._slot;
+    }
 
     template <class T>
     requires std::derived_from<T, Asset>
@@ -141,22 +147,25 @@ public:
 
 private:
     friend class AssetManager;
+    friend class AssetWaitAwaitable;
     template <class U>
     requires std::derived_from<U, Asset>
     friend class StreamingAssetRef;
 
-    StreamingAssetRefAny(AssetManager* manager, AssetHandle handle, AssetId id, shared_ptr<AssetRefControl> control) noexcept;
+    StreamingAssetRefAny(AssetManager* manager, AssetSlot* slot) noexcept;
+
+    /// Ready 之后最终实例的类型描述符, 否则 nullptr。Is<T>/CastTo<T> 是模板, 而 AssetSlot
+    /// 在本头文件里是不完整类型, 故类型判定要经这个非模板出口取到描述符。
+    const RuntimeTypeInfo* GetTypeInfo() const noexcept;
 
     AssetManager* _manager{nullptr};
-    AssetHandle _handle{AssetHandle::Invalid()};
-    AssetId _id{};
-    shared_ptr<AssetRefControl> _control{};
+    AssetSlot* _slot{nullptr};
 };
 
-/// 类型安全 streaming 引用。本质是 manager + handle + 类型视图:
+/// 类型安全 streaming 引用。本质是 StreamingAssetRefAny + 类型视图:
 /// - Loading 时可查询状态,但 Get()/operator bool 仍为空。
 /// - Ready 且最终实例 is-a T 时可直接访问资产。
-/// - 参与引用计数(透过底层 StreamingAssetRefAny);显式 Unload 或引用归零回收后自动失效。
+/// - 参与引用计数;最后一份引用消失后资产在下一次 AssetManager::Pump 被销毁。
 template <class T>
 requires std::derived_from<T, Asset>
 class StreamingAssetRef {
@@ -184,9 +193,12 @@ public:
 
     void Cancel() const noexcept { _ref.Cancel(); }
 
-    AssetHandle GetHandle() const noexcept { return _ref.GetHandle(); }
     const AssetId& GetAssetId() const noexcept { return _ref.GetAssetId(); }
-    AssetTypeId GetTypeId() const noexcept { return _ref.GetTypeId(); }
+    RuntimeTypeId GetTypeId() const noexcept { return _ref.GetTypeId(); }
+
+    /// 见 StreamingAssetRefAny::operator==。
+    bool operator==(const StreamingAssetRef& other) const noexcept { return _ref == other._ref; }
+    bool operator==(const StreamingAssetRefAny& other) const noexcept { return _ref == other; }
 
     const StreamingAssetRefAny& AsAny() const& noexcept { return _ref; }
     operator StreamingAssetRefAny() const& noexcept { return _ref; }
@@ -203,20 +215,34 @@ private:
     StreamingAssetRefAny _ref;
 };
 
-/// 资产仓库。用内部协程承接异步加载结果,单表空位模型,带引用计数。
+/// 资产仓库。按 AssetId 去重的单表 + 引用计数。
 ///
-/// - 单线程使用,不加锁(协程推进、表操作、run 钩子全在主/泵线程)。
-/// - Load 只接受已经创建好的 AssetLoadTask,再包装为内部 task<void> 提交给 TaskScope。
-/// - slot 自己维护 per-load stop_source 与 pending result；TaskScope 只负责结构化生命周期。
-/// - 每个 slot 维护引用计数:StreamingAssetRef(Any) 构造/拷贝 +1,析构/Reset -1。
-/// - 资产回收有两条路径:应用层显式 Unload,或 CollectUnreferenced 统一回收所有引用归零的 slot。
+/// - 单线程使用,不加锁(协程推进、表操作、引用增减全在主线程)。
+/// - Load 只接受已经创建好的 task<AssetLoadResult>,再包装为内部 task<void> 提交给 TaskScope。
+/// - slot 自己维护 per-load stop_source 与 pending result;TaskScope 只负责结构化生命周期。
+/// - 【引用计数是唯一的回收权威】: 没有 Unload, 没有 CollectUnreferenced, 也没有闲置缓存。
+///   最后一份引用消失后, 资产在下一次 Pump 里 OnUnload + 析构 + 摘除 slot。
+///
+/// == 为何销毁对齐到 Pump 而不是就地发生在引用归零处 ==
+///
+/// 就地销毁会让 ~StreamingAssetRefAny (一条 noexcept 路径) 跑任意代码: 资产析构会放开它
+/// 自己持有的 StreamingAssetRef 成员, 从而递归销毁别的 slot; 而遍历资产表时放开一个引用
+/// 会当场令迭代器失效。对齐到 Pump 后两个问题一并消失, 且"资产销毁只在一个确定时刻发生"
+/// 本身便于推理。这仍然是"归零即销毁", 不是保留策略 —— 只是动作对齐到帧内一个固定点。
 class AssetManager {
 public:
-    AssetManager() noexcept = default;
+    AssetManager() noexcept;
     AssetManager(const AssetManager&) = delete;
     AssetManager(AssetManager&&) = delete;
     AssetManager& operator=(const AssetManager&) = delete;
     AssetManager& operator=(AssetManager&&) = delete;
+
+    /// 【存活引用必须先于本对象消失】: slot 存储随本对象释放, 之后任何 StreamingAssetRef
+    /// 的 _slot 都是悬垂指针 —— 连 IsValid() 都答不出来。
+    ///
+    /// 故析构时若发现仍有 RefCount > 0 的 slot 会 abort。那是关停顺序的【程序错误】,
+    /// 必然在第一次跑到时暴露, 且没有合法降级可选 (放任是 UB, 泄漏也不对)。参照
+    /// Application::Shutdown 的顺序: World → RenderSystem → AssetManager → GpuSystem。
     ~AssetManager() noexcept;
 
     /// 异步发起加载。按 id 去重:命中在飞或已就绪 slot 直接复用。
@@ -238,7 +264,7 @@ public:
     requires std::derived_from<T, Asset>
     task<StreamingAssetRef<T>> LoadAndWait(AssetLoadRequest request);
 
-    /// 不启动 task，仅按 id 去重并登记一个 ready object。主要给测试/工具使用。
+    /// 不启动 task,仅按 id 去重并登记一个 ready object。主要给测试/工具使用。
     StreamingAssetRefAny AddReady(const AssetId& id, unique_ptr<Asset> object, const RuntimeTypeInfo& typeInfo);
 
     template <class T>
@@ -266,144 +292,91 @@ public:
         Cancel(ref.AsAny());
     }
 
-    /// 应用层显式强制回收资产【槽位】。命中在飞 slot 则先取消、延迟到终态再回收。
-    ///
-    /// 【销毁的是槽位, 不是内容】:仍存活的 StreamingAssetRef 会报 Unloaded、Get() 返回
-    /// nullptr(generation 保护不崩溃),但已被他人持有的【内容】仍然存活到最后一个
-    /// 持有者放手为止(见 asset.h)。所以正在录制的那一帧不会因为本次 Unload 而崩。
-    ///
-    /// 回收时仍有引用会打 error log(不限 DEBUG):那通常意味着某处缓存漏清。它不是 abort,
-    /// 因为内容有引用计数保命,状况可恢复 —— 详见实现处注释。
-    ///
-    /// 关卡切换 / 热重载 / 编辑器手动删除等确需强制清空的场景使用;否则优先 CollectUnreferenced。
-    void Unload(const AssetId& id) noexcept;
-
-    /// 回收所有引用计数归零的资产 slot。命中在飞 slot 则先取消、延迟到终态再回收。
-    /// 返回实际回收(或标记延迟回收)的 slot 数量。
-    uint32_t CollectUnreferenced() noexcept;
-
-    /// 注入渲染资源回收器(非拥有)。【必须装配】,见 ServiceTraits<AssetManager>。
-    ///
-    /// 【无兜底】:未装配时任何资产卸载都会 abort,而不是退化成立即析构 —— 后者会绕过
-    /// fence 等待释放 GPU 仍在读的资源,且只在漏装配时才发作。理由详见 GetRecycler 实现。
-    ///
-    /// 【生命周期】:非拥有指针,调用方保证 recycler 活得比本 AssetManager 及其创建的
-    /// 全部内容更久 (见 Application::Shutdown 的关停顺序:GpuSystem 最后销毁)。
-    void SetRecycler(IRenderResourceRecycler* recycler) noexcept { _recycler = recycler; }
-
-    /// 资产内容的【唯一】创建入口。recycler 由此注入,调用方无从传错。
-    ///
-    /// 【为何唯一】:内容类的构造函数要一张只有本类能造的 AssetContentKey,
-    /// 故"绕过 AssetManager 创建内容"编译不过。这不是便捷封装,是约束 —— 详见
-    /// AssetContentKey 与 SetRecycler 的说明。
-    ///
-    /// 【为何在这里绑 deleter】:内容归零时必须把 GPU 对象交给【对】的 recycler,而这里是
-    /// 唯一知道该用哪个的地方。绑在创建点使"内容存在"与"它知道怎么释放自己"成为同一件事,
-    /// 不存在"造好了但还没装 deleter"的中间态。deleter 的语义见 AssetContentDeleter。
-    ///
-    /// 【返回 shared_ptr 而非 unique_ptr】:内容天生要被多方共享 (槽位一份、PSO 缓存一份、
-    /// SceneProxy 一份),这正是分离的目的。
-    ///
-    /// recycler 未装配时 abort(见 GetRecycler)。
-    template <class T, class... Args>
-    shared_ptr<T> MakeContent(Args&&... args) {
-        IRenderResourceRecycler& recycler = GetRecycler();
-        // 【不用 make_shared】:它把控制块与对象合在一次分配里,但那要求 deleter 是默认的。
-        // 这里必须带自定义 deleter,故走 shared_ptr(ptr, deleter) 这条路 —— 多一次分配,
-        // 换到"归零即走 recycler"这条不可绕过的路径。
-        //
-        // 【裸 new 在此是安全的】:标准要求这个构造函数在控制块分配失败时调用 d(p),故对象
-        // 不会泄漏, 且仍然走 recycler。这是少数不需要先包一层 unique_ptr 的场合。
-        return shared_ptr<T>{
-            new T(AssetContentKey{}, recycler, std::forward<Args>(args)...),
-            AssetContentDeleter<T>{recycler}};
-    }
-
-    /// 提交加载协程写入的 pending result。
+    /// 提交加载协程写入的 pending result, 并销毁引用已归零的资产。
     void Pump();
 
-    uint32_t GetAssetCount() const noexcept { return _slots.Count(); }
-    bool IsHandleValid(AssetHandle handle) const noexcept { return _slots.IsAlive(handle); }
+    /// 资产内部数据的延迟销毁入口。由 Asset::OnUnload 调用。
+    ///
+    /// 【整包交出, 不逐个交】: payload 是一个可移动的可调用对象 (通常是捕获了整组 GPU
+    /// 对象的 lambda)。它在一个帧边界之后被销毁, 销毁顺序由 payload 内部的捕获/成员声明
+    /// 顺序显式表达 —— 例如 TextureAsset 必须让 view 先于 texture 死, 那是 lambda 里
+    /// 两个 unique_ptr 的声明顺序问题, 而不是"交出去的先后能不能被队列保持"的问题。
+    ///
+    /// 【为何不是"交出对象"而是"包住对象"】: 逐对象交出的接口 (从前的
+    /// IRenderResourceRecycler::RecycleRenderResource) 把销毁顺序寄托在队列语义上, 那是
+    /// 一条无法在类型上表达、也无法在 review 中看见的隐式契约。
+    ///
+    /// 【一帧一个协程帧】: 同一次 Pump 内的全部 payload 攒成一批, 共用一个等待帧边界的
+    /// 协程。故大量资产同时归零不会产生大量协程。
+    ///
+    /// wait processor 未装配时【立即销毁 payload】并记 error log —— 见实现处说明。
+    template <class F>
+    void DeferDestroy(F&& payload) {
+        EnqueueDeferred(make_unique<DeferredPayloadImpl<std::decay_t<F>>>(std::forward<F>(payload)));
+    }
+
+    /// 注入帧边界等待器(非拥有)。【必须装配】,见 ServiceTraits<AssetManager>。
+    ///
+    /// 【生命周期】:调用方保证它活得比本 AssetManager 更久 (见 Application::Shutdown 的
+    /// 关停顺序: AssetManager 先于 GpuSystem 销毁)。
+    void SetWaitFrameProcessor(IWaitFrameProcessor* processor) noexcept { _waitFrame = processor; }
+
+    uint32_t GetAssetCount() const noexcept;
 
 private:
     friend class AssetWaitAwaitable;
     friend class StreamingAssetRefAny;
 
-    struct AssetSlot {
-        AssetId Id;
-        AssetState State{AssetState::Loading};
-        unique_ptr<Asset> Object;
-        stop_source Stop;
-        std::optional<AssetLoadResult> PendingResult;
-        shared_ptr<AssetRefControl> Control{make_shared<AssetRefControl>()};
-        bool PendingCanceled{false};
-        bool PendingUnload{false};
+    using Slot = AssetSlot;
 
-        void SetState(AssetState state) noexcept {
-            State = state;
-            Control->PublishState(state);
-        }
+    /// 延迟销毁 payload 的类型擦除包装。析构即销毁被捕获的数据。
+    struct DeferredPayload {
+        virtual ~DeferredPayload() noexcept = default;
     };
 
-    AssetHandle FindHandle(const AssetId& id) const noexcept;
-    AssetHandle EmplaceLoadingSlot(const AssetId& id);
-    task<void> RunLoad(AssetHandle handle, AssetLoadTask loadTask);
-    void StoreLoadResult(AssetHandle handle, AssetLoadResult result) noexcept;
-    void StoreLoadCanceled(AssetHandle handle) noexcept;
-    void OnLoadComplete(AssetHandle handle, AssetLoadResult result) noexcept;
-    void OnLoadStopped(AssetHandle handle) noexcept;
-    vector<AssetWaitRecord*> TakeWaiters(AssetHandle handle) noexcept;
-    void ResumeWaiters(std::span<AssetWaitRecord* const> waiters) noexcept;
-    void FinalizeTerminalSlot(AssetHandle handle);
-    void DestroySlot(AssetHandle handle) noexcept;
-    void UnloadSlot(AssetHandle handle) noexcept;
-    StreamingAssetRefAny MakeRef(AssetHandle handle, const AssetId& id) noexcept;
-    IRenderResourceRecycler& GetRecycler() noexcept;
+    template <class F>
+    struct DeferredPayloadImpl final : DeferredPayload {
+        explicit DeferredPayloadImpl(F&& f) noexcept(std::is_nothrow_move_constructible_v<F>)
+            : Value(std::move(f)) {}
+        explicit DeferredPayloadImpl(const F& f) : Value(f) {}
+        F Value;
+    };
 
-    AssetWaitRecord* RegisterWait(AssetHandle handle, stop_token stop, std::coroutine_handle<> continuation);
+    Slot* FindSlot(const AssetId& id) const noexcept;
+    Slot* EmplaceLoadingSlot(const AssetId& id);
+    StreamingAssetRefAny MakeRef(Slot* slot) noexcept;
 
-    Nullable<Asset*> ResolveAsset(AssetHandle handle) const noexcept;
+    void PumpLoadResults();
+    void FlushDeferredBatch();
 
-    IRenderResourceRecycler* _recycler{nullptr};
+    task<void> RunLoad(StreamingAssetRefAny ref, task<AssetLoadResult> loadTask);
+    void StoreLoadResult(Slot* slot, AssetLoadResult result) noexcept;
+    void StoreLoadCanceled(Slot* slot) noexcept;
+    void CommitLoadResult(Slot* slot, AssetLoadResult result) noexcept;
+    void ResumeWaiters(Slot* slot) noexcept;
+    void CollectZeroRefSlots();
+    void DestroySlot(Slot* slot) noexcept;
+
+    AssetWaitRecord* RegisterWait(Slot* slot, stop_token stop, std::coroutine_handle<> continuation);
+
+    void EnqueueDeferred(unique_ptr<DeferredPayload> payload);
+    task<void> RunDeferredDestroy(vector<unique_ptr<DeferredPayload>> batch);
+
+    static void AddRef(Slot* slot) noexcept;
+    static void Release(Slot* slot) noexcept;
+
+    IWaitFrameProcessor* _waitFrame{nullptr};
     TaskScope _loadScope;
     ManualCoroutineScheduler<AssetWaitRecord> _waiters;
-    SparseSet<unique_ptr<AssetSlot>> _slots;
-    unordered_map<AssetId, AssetHandle> _idIndex;
-    vector<AssetHandle> _activeLoads;
+    unordered_map<AssetId, unique_ptr<Slot>> _slots;
+    /// 在飞加载的 slot。manager 自持一份引用 —— 加载期间外部引用可能全部消失, 但槽位要
+    /// 活到协程跑完 (见 Load 的说明)。
+    vector<StreamingAssetRefAny> _activeLoads;
+    /// 本帧待延迟销毁的 payload。Pump 时整批交给一个协程。
+    vector<unique_ptr<DeferredPayload>> _pendingDeferred;
+    /// 递归保护: CollectZeroRefSlots 里销毁资产会放开它持有的引用, 从而令更多 slot 归零。
+    bool _collecting{false};
 };
-
-template <class T>
-requires std::derived_from<T, Asset>
-bool StreamingAssetRefAny::Is() const noexcept {
-    if (_control == nullptr) {
-        return false;
-    }
-    const AssetState state = _control->LoadState();
-    if (state != AssetState::Ready) {
-        return false;
-    }
-    const RuntimeTypeInfo* typeInfo = _control->TypeInfo;
-    return typeInfo != nullptr && typeInfo->IsA(runtime_type_id_v<T>);
-}
-
-template <class T>
-requires std::derived_from<T, Asset>
-StreamingAssetRef<T> StreamingAssetRefAny::CastTo() const noexcept {
-    if (_control == nullptr) {
-        return StreamingAssetRef<T>{};
-    }
-    const AssetState state = _control->LoadState();
-    if (state == AssetState::Unloaded) {
-        return StreamingAssetRef<T>{};
-    }
-    if (state == AssetState::Ready) {
-        const RuntimeTypeInfo* typeInfo = _control->TypeInfo;
-        if (typeInfo == nullptr || !typeInfo->IsA(runtime_type_id_v<T>)) {
-            return StreamingAssetRef<T>{};
-        }
-    }
-    return StreamingAssetRef<T>{*this};
-}
 
 template <class T>
 requires std::derived_from<T, Asset>
@@ -444,11 +417,32 @@ StreamingAssetRef<T> AssetManager::Get(const AssetId& id) noexcept {
     return Find<T>(id);
 }
 
-/// 依赖声明(非侵入,类外特化):AssetManager 只需要 IRenderResourceRecycler 接口,
+template <class T>
+requires std::derived_from<T, Asset>
+bool StreamingAssetRefAny::Is() const noexcept {
+    const RuntimeTypeInfo* typeInfo = GetTypeInfo();
+    return typeInfo != nullptr && typeInfo->IsA(runtime_type_id_v<T>);
+}
+
+template <class T>
+requires std::derived_from<T, Asset>
+StreamingAssetRef<T> StreamingAssetRefAny::CastTo() const noexcept {
+    if (_slot == nullptr) {
+        return StreamingAssetRef<T>{};
+    }
+    // Ready 之前最终类型未知, 故不能拒绝 —— 那正是 streaming 引用要表达的"还没到"。
+    // Ready 之后类型不符则返回空引用: 调用方要的视图与实际实例无关。
+    if (IsReady() && !Is<T>()) {
+        return StreamingAssetRef<T>{};
+    }
+    return StreamingAssetRef<T>{*this};
+}
+
+/// 依赖声明(非侵入,类外特化):AssetManager 只需要 IWaitFrameProcessor 接口,
 /// 由 ServiceRegistry 通过 RuntimeTypeTrait 的 Bases 别名解析到具体实现(如 GpuSystem)。
 template <>
 struct ServiceTraits<AssetManager> {
-    static constexpr auto Inject = std::tuple{&AssetManager::SetRecycler};
+    static constexpr auto Inject = std::tuple{&AssetManager::SetWaitFrameProcessor};
 };
 
 template <>

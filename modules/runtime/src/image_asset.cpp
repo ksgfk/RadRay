@@ -46,7 +46,7 @@ AssetId MakeImageAssetId(const std::filesystem::path& path) {
     return MakeAssetIdFromPath("image", path);
 }
 
-AssetLoadTask LoadImageAssetTask(std::filesystem::path path, ImageAssetLoadOptions options) {
+task<AssetLoadResult> LoadImageAssetTask(std::filesystem::path path, ImageAssetLoadOptions options) {
     std::ifstream stream{path, std::ios::binary};
     if (!stream.is_open()) {
         ImageData fallback = ResolveImageLoadFailure(options);
@@ -69,7 +69,7 @@ AssetLoadTask LoadImageAssetTask(std::filesystem::path path, ImageAssetLoadOptio
         make_unique<ImageAsset>(path.string(), ApplyImageLoadOptions(std::move(image.value()), options)));
 }
 
-AssetLoadTask LoadImageAssetFromMemoryTask(string name, vector<byte> encodedBytes, ImageAssetLoadOptions options) {
+task<AssetLoadResult> LoadImageAssetFromMemoryTask(string name, vector<byte> encodedBytes, ImageAssetLoadOptions options) {
     string storage;
     storage.resize(encodedBytes.size());
     if (!encodedBytes.empty()) {
@@ -98,13 +98,14 @@ ImageAsset::ImageAsset(string name, ImageData image) noexcept
 
 ImageAsset::~ImageAsset() noexcept = default;
 
-void ImageAsset::OnUnload(IRenderResourceRecycler& recycler) {
-    (void)recycler;
-    _name.clear();
-    _image = ImageData{};
+void ImageAsset::OnUnload(AssetManager& manager) {
+    // 【纯 CPU 资产, 无事可做】: 析构函数会释放 _name / _image, 且那才是唯一正确的地方
+    // (见 Asset::OnUnload)。这里刻意留空而不是搬空成员 —— 提前清理只会制造一个
+    // "已析构但还没死" 的中间态。
+    (void)manager;
 }
 
-AssetTypeId ImageAsset::GetTypeId() const noexcept {
+RuntimeTypeId ImageAsset::GetTypeId() const noexcept {
     return runtime_type_id_v<ImageAsset>;
 }
 

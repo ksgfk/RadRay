@@ -11,13 +11,10 @@ radray_add_test(test_shader_layout_binding SOURCES test_shader_layout_binding.cp
 # 二者缺一时用例自行 GTEST_SKIP。
 radray_add_test(test_pipeline_state_cache SOURCES test_pipeline_state_cache.cpp LINK_LIBS radrayruntime DISCOVER_ARGS PROPERTIES ENVIRONMENT "RADRAY_PROJECT_DIR=${CMAKE_SOURCE_DIR}")
 
-# PipelineLayoutCache: layout 是 GPU 对象, 无假实现可替, 故需要 device (不需要 DXC 与
-# manifest —— descriptor 就地拼)。无设备时用例自行 GTEST_SKIP。
+# PipelineLayoutCache: PipelineLayoutKey 是纯 CPU 数据, 那部分无条件运行; 缓存本体要建
+# layout (GPU 对象, 无假实现可替) 故需要 device, 无设备时那些用例自行 GTEST_SKIP。
+# 两者都不需要 DXC 与 manifest —— descriptor 就地拼。
 radray_add_test(test_pipeline_layout_cache SOURCES test_pipeline_layout_cache.cpp LINK_LIBS radrayruntime)
-
-# TextureContent / StaticMeshContent 的生命周期。同样需要 device (Texture / Buffer 无假
-# 实现可替), 但不需要 DXC 与 manifest。无设备时用例自行 GTEST_SKIP。
-radray_add_test(test_asset_content SOURCES test_asset_content.cpp LINK_LIBS radrayruntime)
 
 # 把仓库根编进二进制, 作为环境变量缺失时的兜底。
 #

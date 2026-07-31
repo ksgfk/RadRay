@@ -50,10 +50,9 @@ void ComputeBounds(const TriangleMesh& mesh, Eigen::Vector3f& outMin, Eigen::Vec
     }
 }
 
-// 自定义 StaticMesh 加载协程: section 与 bounds 在建内容【之前】算好。
-// 内容不可变, 故不再有从前那种"先构造再 SetSections / SetBounds"的二段式回填。
-AssetLoadTask LoadDemoMesh(
-    AssetManager& assetManager,
+// 自定义 StaticMesh 加载协程: section 与 bounds 在构造资产【之前】算好。
+// 资产不可变, 故不再有从前那种"先构造再 SetSections / SetBounds"的二段式回填。
+task<AssetLoadResult> LoadDemoMesh(
     FrameUploadScheduler& frameUploads,
     MeshResource meshResource,
     Eigen::Vector3f boundsMin,
@@ -83,13 +82,12 @@ AssetLoadTask LoadDemoMesh(
     }
     co_await frame.WaitGpu();
 
-    shared_ptr<StaticMeshContent> content = assetManager.MakeContent<StaticMeshContent>(
+    co_return AssetLoadResult::Success(make_unique<StaticMesh>(
         std::move(meshResource),
         std::move(sections),
         boundsMin,
         boundsMax,
-        std::move(renderMesh.value()));
-    co_return AssetLoadResult::Success(make_unique<StaticMesh>(std::move(content)));
+        std::move(renderMesh.value())));
 }
 
 }  // namespace
@@ -214,7 +212,7 @@ private:
         FrameUploadScheduler& uploads = GetGpuSystem()->GetFrameUploadScheduler();
         StreamingAssetRef<StaticMesh> meshRef = assets->Load<StaticMesh>(AssetLoadRequest{
             .Id = Guid::NewGuid(),
-            .Task = LoadDemoMesh(*assets, uploads, std::move(meshResource), boundsMin, boundsMax),
+            .Task = LoadDemoMesh(uploads, std::move(meshResource), boundsMin, boundsMax),
             .DebugName = debugName});
 
         Actor* actor = GetWorld()->SpawnActor<Actor>();
@@ -263,7 +261,7 @@ private:
         FrameUploadScheduler& uploads = GetGpuSystem()->GetFrameUploadScheduler();
         StreamingAssetRef<StaticMesh> meshRef = assets->Load<StaticMesh>(AssetLoadRequest{
             .Id = Guid::NewGuid(),
-            .Task = LoadDemoMesh(*assets, uploads, std::move(meshResource), boundsMin, boundsMax),
+            .Task = LoadDemoMesh(uploads, std::move(meshResource), boundsMin, boundsMax),
             .DebugName = "Ground"});
 
         StreamingAssetRef<MaterialAsset> mat = CreateMaterial(

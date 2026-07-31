@@ -120,7 +120,7 @@ render::TextureView* AppWindow::GetOrCreateBackBufferView(const render::SwapChai
         return view;
     }
     RenderSystem* renderSystem = _manager->GetRenderSystem();
-    RenderPassRegistry* registry = renderSystem != nullptr ? renderSystem->GetRenderPassRegistry() : nullptr;
+    render::RenderPassRegistry* registry = renderSystem != nullptr ? renderSystem->GetRenderPassRegistry() : nullptr;
     if (view != nullptr && registry != nullptr) {
         registry->RemoveFramebuffersUsing(view);
     }
@@ -229,7 +229,7 @@ bool AppWindow::RecreateSwapChain(uint32_t width, uint32_t height, render::Prese
 
 void AppWindow::ReleaseBackBufferViews() noexcept {
     RenderSystem* renderSystem = _manager != nullptr ? _manager->GetRenderSystem() : nullptr;
-    RenderPassRegistry* registry = renderSystem != nullptr ? renderSystem->GetRenderPassRegistry() : nullptr;
+    render::RenderPassRegistry* registry = renderSystem != nullptr ? renderSystem->GetRenderPassRegistry() : nullptr;
     if (registry != nullptr) {
         for (const BackBufferView& backBuffer : _backBufferViews) {
             registry->RemoveFramebuffersUsing(backBuffer.View.get());

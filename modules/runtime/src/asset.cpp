@@ -5,8 +5,6 @@
 
 #include <fmt/format.h>
 
-#include <radray/runtime/render_resource_recycler.h>
-
 namespace radray {
 
 namespace {

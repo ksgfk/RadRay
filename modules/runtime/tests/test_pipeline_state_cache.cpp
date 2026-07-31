@@ -19,7 +19,7 @@
 #include <radray/shader/dxc.h>
 #include <radray/render/rhi.h>
 #include <radray/runtime/asset_manager.h>
-#include <radray/runtime/render_resource_recycler.h>
+#include <radray/runtime/wait_frame.h>
 #include <radray/types.h>
 
 #include <gtest/gtest.h>
@@ -116,10 +116,10 @@ bool TryCreateAnyDevice(DeviceContext& ctx, render::ShaderBlobCategory& outCateg
     return false;
 }
 
-/// 卸载时 GPU 对象走这里。本文件不做延迟销毁, 就地释放即可。
-class NoopRecycler : public IRenderResourceRecycler {
+/// 立即恢复的帧边界等待器。本文件不提交任何 GPU work, 故"等到已录制的 work 完成"平凡成立。
+class ImmediateWaitFrameProcessor : public IWaitFrameProcessor {
 public:
-    void RecycleRenderResource(unique_ptr<render::RenderBase>) noexcept override {}
+    task<void> Wait() override { co_return; }
 };
 
 class PipelineStateCacheTest : public testing::Test {
@@ -136,7 +136,7 @@ protected:
         }
 
         _assets = make_unique<AssetManager>();
-        _assets->SetRecycler(&_recycler);
+        _assets->SetWaitFrameProcessor(&_waitFrame);
 
         // 单色 RT 的 render pass。PSO 只需要一个兼容类, 不需要 framebuffer。
         _colorAttachments[0] = render::RenderPassColorAttachmentDescriptor{
@@ -248,7 +248,7 @@ protected:
 private:
     DeviceContext _ctx;
     render::ShaderBlobCategory _category{render::ShaderBlobCategory::DXIL};
-    NoopRecycler _recycler;
+    ImmediateWaitFrameProcessor _waitFrame;
     unique_ptr<AssetManager> _assets;
     std::array<render::RenderPassColorAttachmentDescriptor, 1> _colorAttachments{};
     unique_ptr<render::RenderPass> _renderPass;
@@ -267,9 +267,7 @@ TEST_F(PipelineStateCacheTest, SameKeyHitsTheSamePipelineState) {
     if (!asset.IsReady()) {
         GTEST_SKIP() << "DXC is unavailable";
     }
-    shared_ptr<ShaderContent> content_program = asset->AcquireContent();
-    ASSERT_TRUE(content_program != nullptr);
-    Nullable<ShaderPassProgram*> program = content_program->FindPass("Error");
+    Nullable<ShaderPassProgram*> program = asset->FindPass("Error");
     ASSERT_TRUE(program.HasValue());
 
     const GraphicsPipelineStateKey key = MakeKey(program.Get());
@@ -295,9 +293,7 @@ TEST_F(PipelineStateCacheTest, FixedFunctionStateDifferencesSplitEntries) {
     if (!asset.IsReady()) {
         GTEST_SKIP() << "DXC is unavailable";
     }
-    shared_ptr<ShaderContent> content_program = asset->AcquireContent();
-    ASSERT_TRUE(content_program != nullptr);
-    Nullable<ShaderPassProgram*> program = content_program->FindPass("Error");
+    Nullable<ShaderPassProgram*> program = asset->FindPass("Error");
     ASSERT_TRUE(program.HasValue());
 
     const ShaderVariantKey variant = program->GetDomain().DefaultVariant();
@@ -348,9 +344,7 @@ TEST_F(PipelineStateCacheTest, DifferentVariantSplitsEntriesThroughBytecodeHash)
     if (!asset.IsReady()) {
         GTEST_SKIP() << "DXC is unavailable";
     }
-    shared_ptr<ShaderContent> content_program = asset->AcquireContent();
-    ASSERT_TRUE(content_program != nullptr);
-    Nullable<ShaderPassProgram*> program = content_program->FindPass("Error");
+    Nullable<ShaderPassProgram*> program = asset->FindPass("Error");
     ASSERT_TRUE(program.HasValue());
 
     const GraphicsPipelineStateKey key = MakeKey(program.Get());
@@ -383,23 +377,15 @@ TEST_F(PipelineStateCacheTest, DifferentProgramSplitsEntries) {
     }
     // 同一 manifest 再建一份【独立】资产 (直建, 不经 AssetManager::Load 故不按 id 去重),
     // 得到另一个 program 指针。program 指针代表 PipelineLayout + vertex input, 故必须分条。
-    // 注意仍要传 AssetManager —— 内容只能由它创建 (见 AssetContentKey), 去重发生在 Load,
-    // 与 MakeContent 无关。
     ShaderAssetDiagnostic diag;
     auto secondAsset = CreateShaderAsset(
-        Assets(),
         GetErrorPassManifestPath(),
         ShaderAssetLoadOptions{.Context = &NoJitContext(), .LayoutCache = &Layouts()},
         diag);
     ASSERT_TRUE(secondAsset.HasValue()) << diag.ToString();
 
-    shared_ptr<ShaderContent> content_firstProgram = first->AcquireContent();
-    ASSERT_TRUE(content_firstProgram != nullptr);
-
-    Nullable<ShaderPassProgram*> firstProgram = content_firstProgram->FindPass("Error");
-    shared_ptr<ShaderContent> content_secondProgram = secondAsset->AcquireContent();
-    ASSERT_TRUE(content_secondProgram != nullptr);
-    Nullable<ShaderPassProgram*> secondProgram = content_secondProgram->FindPass("Error");
+    Nullable<ShaderPassProgram*> firstProgram = first->FindPass("Error");
+    Nullable<ShaderPassProgram*> secondProgram = secondAsset->FindPass("Error");
     ASSERT_TRUE(firstProgram.HasValue());
     ASSERT_TRUE(secondProgram.HasValue());
     ASSERT_NE(firstProgram.Get(), secondProgram.Get());
@@ -423,9 +409,8 @@ TEST_F(PipelineStateCacheTest, DifferentProgramSplitsEntries) {
     EXPECT_EQ(Cache().GetGraphicsPipelineStateCount(), 1u)
         << "a failed resolve must not add an entry";
 
-    // OnUnload 前手动收尾, 避免 layout 泄漏到 device 之后。
-    NoopRecycler recycler;
-    secondAsset->OnUnload(recycler);
+    // 手动收尾: 直建的资产不在 manager 里, 无人替它放开 layout 引用。
+    secondAsset->OnUnload(Assets());
 }
 
 TEST_F(PipelineStateCacheTest, RemovePipelineStatesUsingEvictsByAsset) {
@@ -433,9 +418,7 @@ TEST_F(PipelineStateCacheTest, RemovePipelineStatesUsingEvictsByAsset) {
     if (!asset.IsReady()) {
         GTEST_SKIP() << "DXC is unavailable";
     }
-    shared_ptr<ShaderContent> content_program = asset->AcquireContent();
-    ASSERT_TRUE(content_program != nullptr);
-    Nullable<ShaderPassProgram*> program = content_program->FindPass("Error");
+    Nullable<ShaderPassProgram*> program = asset->FindPass("Error");
     ASSERT_TRUE(program.HasValue());
 
     const ShaderVariantKey variant = program->GetDomain().DefaultVariant();
@@ -456,25 +439,25 @@ TEST_F(PipelineStateCacheTest, RemovePipelineStatesUsingEvictsByAsset) {
     EXPECT_EQ(Cache().RemovePipelineStatesUsing(raw), 2u);
     EXPECT_EQ(Cache().GetGraphicsPipelineStateCount(), 0u);
 
-    // 逐出后资产不再被 PSO 钉住, 显式 Unload 可以安全回收 layout。
-    Assets().Unload(raw->GetAssetId());
-    EXPECT_EQ(asset.Get(), nullptr);
+    // 逐出后资产不再被 PSO 条目钉住: 放开本地这份引用即归零, 下一次 Pump 销毁。
+    asset.Reset();
+    Assets().Pump();
+    EXPECT_EQ(Assets().GetAssetCount(), 0u);
 }
 
-/// 【守的不变量】: 强制 Unload 销毁资产槽位后, 缓存里的 PSO 仍能安全使用 —— 它引用的
-/// PipelineLayout 由本条目独立持有的一份引用保命。
+/// 【守的不变量】: 缓存里的 PSO 条目自己就能钉住它所依赖的 PipelineLayout —— 即使所有
+/// 外部引用都消失了。
 ///
-/// 【为何 Ref 不够】: Unload 无视引用计数销毁槽位, ShaderPassProgram 随之析构并放开它那
-/// 份 layout 引用。若条目只有 StreamingAssetRefAny, 计数就此归零、layout 被 Destroy,
-/// 而后端 PSO 里的裸指针 (D3D12 的 RootSigD3D12*) 仍会在下次 bind 时被解引用。
-TEST_F(PipelineStateCacheTest, PipelineStateKeepsItsLayoutAliveAcrossForcedUnload) {
+/// 【为何 Ref 就够】: 后端 PSO 存的是 PipelineLayout 裸指针 (D3D12 的 RootSigD3D12*),
+/// 该 layout 由 ShaderPassProgram 持有的那份引用保命, 而 program 又是资产内部的成员。
+/// 引用计数成为生命周期唯一权威后, 条目的 Ref 使资产不可能被销毁, 于是这条链整体成立。
+/// 从前这里需要条目再独立持有 content + layout 两份引用, 只因 Unload 能无视计数销毁槽位。
+TEST_F(PipelineStateCacheTest, PipelineStateKeepsItsLayoutAliveOnItsOwn) {
     StreamingAssetRef<ShaderAsset> asset = LoadJitAsset();
     if (!asset.IsReady()) {
         GTEST_SKIP() << "DXC is unavailable";
     }
-    shared_ptr<ShaderContent> content_program = asset->AcquireContent();
-    ASSERT_TRUE(content_program != nullptr);
-    Nullable<ShaderPassProgram*> program = content_program->FindPass("Error");
+    Nullable<ShaderPassProgram*> program = asset->FindPass("Error");
     ASSERT_TRUE(program.HasValue());
 
     const IntrusivePtr<SharedPipelineLayout> sharedLayout = program->GetSharedPipelineLayout();
@@ -489,30 +472,23 @@ TEST_F(PipelineStateCacheTest, PipelineStateKeepsItsLayoutAliveAcrossForcedUnloa
         Cache().GetOrCreateGraphics(asset, key, variant, Category(), diag).Get();
     ASSERT_NE(pso, nullptr) << diag.ToString();
 
-    // 本地这份 + program 那份 + 缓存条目那份。缓存条目【确实】独立持有一份, 这是本用例
-    // 的核心断言 —— 若不持有, 计数只会是 2。
-    EXPECT_EQ(sharedLayout->GetRefCount(), 3u);
+    // 本地这份 + program 那份。条目不再独立持有 layout 引用 —— 它持有的是资产引用。
+    EXPECT_EQ(sharedLayout->GetRefCount(), 2u);
 
-    const AssetId id = asset->GetAssetId();
-    Assets().Unload(id);
-    ASSERT_EQ(asset.Get(), nullptr) << "Unload 应当销毁槽位";
-
-    // Unload 只销毁槽位, 不销毁内容: 本地还握着 content_program, 故 program 及它那份
-    // layout 引用都还在, 计数不变。
-    EXPECT_EQ(sharedLayout->GetRefCount(), 3u) << "内容仍被持有, program 不该析构";
-
-    // 放开本地这份内容引用。计数【仍是 3】: 缓存条目自己也持有一份内容引用
-    // (GraphicsEntry::Content), 故 ShaderContent 连同它的 ShaderPassProgram 都还活着,
-    // program 那份 layout 引用也就没放开。这正是条目该有的样子 —— 它的 Program 是指向
-    // 内容内部的裸指针, 不保内容就会悬垂。
-    content_program.reset();
-    EXPECT_EQ(sharedLayout->GetRefCount(), 3u) << "缓存条目独立保住了内容";
+    // 放开全部外部资产引用。条目的 Ref 仍在, 故资产【不会】被销毁, program 与它那份
+    // layout 引用都还在。这是本用例的核心断言。
+    asset.Reset();
+    Assets().Pump();
+    EXPECT_EQ(Assets().GetAssetCount(), 1u) << "the cache entry still references the asset";
+    EXPECT_EQ(sharedLayout->GetRefCount(), 2u);
     EXPECT_EQ(sharedLayout->Get(), layoutObject);
     EXPECT_EQ(Cache().GetGraphicsPipelineStateCount(), 1u);
 
-    // 条目消失后才轮到最后一份: 只剩本地这个 sharedLayout, 且 layout 对象【自始至终
-    // 没被销毁过】(地址不变) —— 强制 Unload 期间后端 PSO 里的裸指针一直有效。
+    // 条目消失后才轮到资产: 只剩本地这个 sharedLayout, 且 layout 对象【自始至终没被
+    // 销毁过】(地址不变) —— 后端 PSO 里的裸指针全程有效。
     Cache().Clear();
+    Assets().Pump();
+    EXPECT_EQ(Assets().GetAssetCount(), 0u);
     EXPECT_EQ(sharedLayout->GetRefCount(), 1u);
     EXPECT_EQ(sharedLayout->Get(), layoutObject);
 }
@@ -522,9 +498,7 @@ TEST_F(PipelineStateCacheTest, InvalidKeyIsRejectedWithoutTouchingTheDevice) {
     if (!asset.IsReady()) {
         GTEST_SKIP() << "DXC is unavailable";
     }
-    shared_ptr<ShaderContent> content_program = asset->AcquireContent();
-    ASSERT_TRUE(content_program != nullptr);
-    Nullable<ShaderPassProgram*> program = content_program->FindPass("Error");
+    Nullable<ShaderPassProgram*> program = asset->FindPass("Error");
     ASSERT_TRUE(program.HasValue());
 
     const ShaderVariantKey variant = program->GetDomain().DefaultVariant();

@@ -874,7 +874,8 @@ void Application::InitializeRuntime(const ApplicationRuntimeDescriptor& desc) {
 
     // ════════════════════════════════════════════════════════════════
     //  phase 2:按 ServiceTraits 装配交叉引用。此刻全部实例已在,
-    //  WindowManager <-> GpuSystem 的环天然可解;AssetManager 拿到 GpuSystem 作回收器。
+    //  WindowManager <-> GpuSystem 的环天然可解;
+    //  AssetManager 拿到 GpuSystem 作 IWaitFrameProcessor(资产延迟销毁的帧边界)。
     // ════════════════════════════════════════════════════════════════
     ServiceRegistry registry;
     registry.Add(_windowManager.get());

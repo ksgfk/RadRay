@@ -1,7 +1,5 @@
 #include <radray/runtime/shader_program.h>
 
-#include <radray/runtime/render_resource_recycler.h>
-
 namespace radray {
 
 namespace {
@@ -278,14 +276,13 @@ Nullable<const ShaderProgramVariant*> ShaderPassProgram::GetOrCreateDefaultVaria
     return GetOrCreateVariant(_domain.DefaultVariant(), category, outDiag);
 }
 
-void ShaderPassProgram::ReleaseRenderResources(IRenderResourceRecycler& recycler) noexcept {
-    (void)recycler;
+void ShaderPassProgram::ReleaseRenderResources() noexcept {
     // 变体与字节码先清: 它们只是 CPU 数据, 但清掉能让"资产已卸载"在调用方那里立刻
     // 表现为 miss 而不是拿到陈旧结果。
     _variants.clear();
     _bytecodes.clear();
-    // 放开对共享 layout 的引用。归零时它自己从 PipelineLayoutCache 摘除并销毁 —— 不走
-    // recycler, 理由见 pipeline_layout_cache.h。
+    // 放开对共享 layout 的引用。归零时它自己从 PipelineLayoutCache 摘除并销毁,
+    // 理由见 pipeline_layout_cache.h。
     _pipelineLayout.Reset();
 }
 

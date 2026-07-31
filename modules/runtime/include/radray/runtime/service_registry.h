@@ -24,7 +24,7 @@ namespace radray {
 //          static constexpr auto Inject = std::tuple{&GpuSystem::SetWindowManager};
 //      };
 //      template <> struct ServiceTraits<AssetManager> {
-//          static constexpr auto Inject = std::tuple{&AssetManager::SetRecycler};
+//          static constexpr auto Inject = std::tuple{&AssetManager::SetWaitFrameProcessor};
 //      };
 //      // setter 形参是基类时,只要来源类型用 RuntimeTypeTrait<T>::Bases 声明了该基类,
 //      // Add 会自动登记基类别名,Resolve<Base> 即命中(指针偏移已在 typed 上下文修正)。

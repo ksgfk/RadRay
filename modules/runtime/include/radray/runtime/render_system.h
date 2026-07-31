@@ -2,6 +2,8 @@
 
 #include <radray/runtime_type.h>
 #include <radray/runtime/gpu_resource.h>
+#include <radray/runtime/pipeline_layout_cache.h>
+#include <radray/render/render_pass_registry.h>
 #include <radray/runtime/render_framework/render_pipeline.h>
 #include <radray/runtime/render_framework/scene.h>
 #include <radray/shader/shader_manifest.h>
@@ -46,7 +48,7 @@ public:
     Application* GetApplication() const noexcept { return _app; }
     RenderPipeline* GetPipeline() const noexcept { return _pipeline.get(); }
     /// RenderPass / Framebuffer 复用缓存。OnInitialize 之前或 device 缺失时为空。
-    RenderPassRegistry* GetRenderPassRegistry() const noexcept { return _renderPassRegistry.get(); }
+    render::RenderPassRegistry* GetRenderPassRegistry() const noexcept { return _renderPassRegistry.get(); }
     /// graphics PSO 复用缓存。OnInitialize 之前或 device 缺失时为空。
     PipelineStateCache* GetPipelineStateCache() const noexcept { return _pipelineStateCache.get(); }
     /// PipelineLayout 的内容去重缓存。OnInitialize 之前或 device 缺失时为空。
@@ -71,10 +73,11 @@ private:
     /// PSO 先死。PSO 也存了 PipelineLayout 裸指针, 那一侧由条目内的 StreamingAssetRef
     /// 钉住资产、资产再钉住共享 layout。
     unique_ptr<PipelineStateCache> _pipelineStateCache;
-    unique_ptr<RenderPassRegistry> _renderPassRegistry;
-    /// 【本缓存可以先于资产死】: 它只是非拥有索引, 残留 layout 由持有者的引用计数保命
-    /// (见 pipeline_layout_cache.h)。这是必需的 —— Application 的关停顺序是 RenderSystem
-    /// 先于 AssetManager, 而资产要到 AssetManager 析构时才放开最后一份引用。
+    unique_ptr<render::RenderPassRegistry> _renderPassRegistry;
+    /// 【本缓存可以先于资产死】: 析构时它把残留条目的所有权交还给条目自己, 那些 layout
+    /// 由持有者的引用计数保命 (见 pipeline_layout_cache.h)。这是必需的 —— Application 的
+    /// 关停顺序是 RenderSystem 先于 AssetManager, 而资产要到 AssetManager 析构时才放开
+    /// 最后一份引用。
     unique_ptr<PipelineLayoutCache> _pipelineLayoutCache;
     unique_ptr<RenderPipeline> _pipeline;
     vector<unique_ptr<Scene>> _scenes;

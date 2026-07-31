@@ -2,88 +2,68 @@
 
 #include <radray/logger.h>
 #include <radray/render/rhi.h>
-#include <radray/runtime/render_resource_recycler.h>
 
 namespace radray {
-
-// ============================ ShaderContent ============================
-
-ShaderContent::ShaderContent(
-    AssetContentKey key,
-    IRenderResourceRecycler& recycler,
-    ShaderAssetDesc desc,
-    unique_ptr<ShaderResolver> resolver,
-    vector<unique_ptr<ShaderPassProgram>> passes) noexcept
-    : _desc(std::move(desc)),
-      _resolver(std::move(resolver)),
-      _passes(std::move(passes)) {
-    // key 只是创建许可证, recycler 归 AssetContentDeleter 持有, 两者在此都不需要落成员。
-    (void)key;
-    (void)recycler;
-}
-
-ShaderContent::~ShaderContent() noexcept = default;
-
-void ShaderContent::ReleaseRenderResources(IRenderResourceRecycler& recycler) noexcept {
-    for (const unique_ptr<ShaderPassProgram>& pass : _passes) {
-        pass->ReleaseRenderResources(recycler);
-    }
-    // program 借用 resolver, 故必须先清 program 再清 resolver。
-    _passes.clear();
-    _resolver.reset();
-    _desc = ShaderAssetDesc{};
-}
-
-Nullable<ShaderPassProgram*> ShaderContent::FindPass(std::string_view name) noexcept {
-    for (const unique_ptr<ShaderPassProgram>& pass : _passes) {
-        if (pass->GetName() == name) {
-            return pass.get();
-        }
-    }
-    return nullptr;
-}
-
-Nullable<const ShaderPassProgram*> ShaderContent::FindPass(std::string_view name) const noexcept {
-    for (const unique_ptr<ShaderPassProgram>& pass : _passes) {
-        if (pass->GetName() == name) {
-            return pass.get();
-        }
-    }
-    return nullptr;
-}
-
-Nullable<ShaderPassProgram*> ShaderContent::GetPass(size_t index) noexcept {
-    if (index >= _passes.size()) {
-        return nullptr;
-    }
-    return _passes[index].get();
-}
 
 // ============================ ShaderAsset ============================
 
 ShaderAsset::ShaderAsset(
-    shared_ptr<ShaderContent> content,
+    ShaderAssetDesc desc,
+    unique_ptr<ShaderResolver> resolver,
+    vector<unique_ptr<ShaderPassProgram>> passes,
     ShaderResolveContext* context,
     PipelineLayoutCache* layoutCache) noexcept
-    : _content(std::move(content)),
+    : _desc(std::move(desc)),
+      _resolver(std::move(resolver)),
+      _passes(std::move(passes)),
       _context(context),
       _layoutCache(layoutCache) {
 }
 
 ShaderAsset::~ShaderAsset() noexcept = default;
 
-void ShaderAsset::OnUnload(IRenderResourceRecycler& recycler) {
-    // 【只放开本槽位那一份引用, 不直接释放 GPU 资源】: 内容可能仍被 PSO 缓存等持有, 那时
-    // 它必须继续存活。真正的释放发生在最后一份引用归零时, 由 AssetContentDeleter 统一交给
-    // recycler (见 asset.h)。
+void ShaderAsset::OnUnload(AssetManager& manager) {
+    // 【本资产的 GPU 对象只有共享的 PipelineLayout, 它不需要延迟销毁】: layout 按
+    // SharedPipelineLayout 的引用计数归零即毁, 而仍在录制中的 PSO 各自持有一份引用
+    // (见 PipelineStateCache::GraphicsEntry), 故这里放开自己那份不会拉掉正在用的 layout。
+    // 理由详见 pipeline_layout_cache.h。
     //
-    // 故本函数【不使用】recycler 形参 —— 它不再是"资产自己释放 GPU 资源"的时机。
-    (void)recycler;
-    _content.reset();
+    // 【那为何还要 OnUnload】: 析构顺序。program 借用 resolver 裸指针, 而
+    // ShaderPassProgram::ReleaseRenderResources 要在 resolver 还活着时跑完。成员声明顺序
+    // 已经保证了这一点, 但显式做一次让"清理发生在哪"不必靠读声明顺序推断。
+    (void)manager;
+    for (const unique_ptr<ShaderPassProgram>& pass : _passes) {
+        pass->ReleaseRenderResources();
+    }
 }
 
-AssetTypeId ShaderAsset::GetTypeId() const noexcept {
+RuntimeTypeId ShaderAsset::GetTypeId() const noexcept {
     return runtime_type_id_v<ShaderAsset>;
+}
+
+Nullable<ShaderPassProgram*> ShaderAsset::FindPass(std::string_view name) noexcept {
+    for (const unique_ptr<ShaderPassProgram>& pass : _passes) {
+        if (pass->GetName() == name) {
+            return pass.get();
+        }
+    }
+    return nullptr;
+}
+
+Nullable<const ShaderPassProgram*> ShaderAsset::FindPass(std::string_view name) const noexcept {
+    for (const unique_ptr<ShaderPassProgram>& pass : _passes) {
+        if (pass->GetName() == name) {
+            return pass.get();
+        }
+    }
+    return nullptr;
+}
+
+Nullable<ShaderPassProgram*> ShaderAsset::GetPass(size_t index) noexcept {
+    if (index >= _passes.size()) {
+        return nullptr;
+    }
+    return _passes[index].get();
 }
 
 // ============================ 加载 ============================
@@ -107,19 +87,14 @@ bool ValidateShaderAssetLoadOptions(
         outDiag.Message = "ShaderAssetLoadOptions::LayoutCache is null";
         return false;
     }
-    // layout 缓存必须已绑定 device —— 没有 device 的缓存 GetOrCreate 永远返回 nullptr,
-    // 那会让失败推迟到"CreatePipelineLayout failed"那条模糊的诊断上。
-    if (!options.LayoutCache.Get()->GetDevice().HasValue()) {
-        outDiag.Message = "ShaderAssetLoadOptions::LayoutCache has no device";
-        return false;
-    }
+    // 【无需再查缓存的 device】: PipelineLayoutCache 构造即要求非空 device 且不会失效,
+    // 故"缓存非空"已蕴含"能建 layout"。
     return true;
 }
 
 }  // namespace
 
 Nullable<unique_ptr<ShaderAsset>> CreateShaderAsset(
-    AssetManager& assetManager,
     const std::filesystem::path& manifestPath,
     const ShaderAssetLoadOptions& options,
     ShaderAssetDiagnostic& outDiag) noexcept {
@@ -175,28 +150,24 @@ Nullable<unique_ptr<ShaderAsset>> CreateShaderAsset(
     }
 
     outDiag = ShaderAssetDiagnostic{};
-    // 内容必须经 AssetManager 创建 —— recycler 由那里注入, 见 AssetContentKey。
-    shared_ptr<ShaderContent> content = assetManager.MakeContent<ShaderContent>(
+    return make_unique<ShaderAsset>(
         std::move(desc.value()),
         std::move(resolver),
-        std::move(passes));
-    return make_unique<ShaderAsset>(
-        std::move(content),
+        std::move(passes),
         options.Context.Get(),
         options.LayoutCache.Get());
 }
 
 namespace {
 
-AssetLoadTask LoadShaderAssetTask(
-    AssetManager& assetManager,
+task<AssetLoadResult> LoadShaderAssetTask(
     std::filesystem::path manifestPath,
     ShaderAssetLoadOptions options) {
     // 【全程同步, 无挂起点】: 只有短促的文件 IO 与建 layout 的 GPU 调用, 不碰 DXC,
     // 故不会阻塞 AssetManager 的单线程泵。字节码留给 GetOrCreateVariant 惰性解析。
     ShaderAssetDiagnostic diag;
     Nullable<unique_ptr<ShaderAsset>> asset =
-        CreateShaderAsset(assetManager, manifestPath, options, diag);
+        CreateShaderAsset(manifestPath, options, diag);
     if (asset == nullptr) {
         co_return AssetLoadResult::Failure(
             fmt::format("failed to load shader asset '{}': {}", manifestPath.string(), diag.ToString()));
@@ -253,7 +224,7 @@ StreamingAssetRef<ShaderAsset> LoadShaderAsset(
     return assetManager.Load<ShaderAsset>(
         AssetLoadRequest{
             .Id = assetId,
-            .Task = LoadShaderAssetTask(assetManager, manifestPath, options),
+            .Task = LoadShaderAssetTask(manifestPath, options),
             .DebugName = manifestPath.generic_string()});
 }
 

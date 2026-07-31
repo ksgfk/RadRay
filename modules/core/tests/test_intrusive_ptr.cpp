@@ -214,7 +214,7 @@ TEST(IntrusivePtr, DefaultIsEmpty) {
 
 TEST(IntrusivePtr, AdoptRefDoesNotAddRef) {
     int destroyed = 0;
-    auto ptr = radray::AdoptRef(std::make_unique<Simple>(7, &destroyed));
+    auto ptr = radray::AdoptRef(std::make_unique<Simple>(7, &destroyed).release());
     ASSERT_TRUE(ptr.HasValue());
     EXPECT_EQ(ptr->Value, 7);
     EXPECT_EQ(ptr->GetRefCount(), 1u);
@@ -224,7 +224,7 @@ TEST(IntrusivePtr, AdoptRefDoesNotAddRef) {
 TEST(IntrusivePtr, DestroysOnLastRelease) {
     int destroyed = 0;
     {
-        auto ptr = radray::AdoptRef(std::make_unique<Simple>(1, &destroyed));
+        auto ptr = radray::AdoptRef(std::make_unique<Simple>(1, &destroyed).release());
         EXPECT_EQ(destroyed, 0);
     }
     EXPECT_EQ(destroyed, 1);
@@ -232,7 +232,7 @@ TEST(IntrusivePtr, DestroysOnLastRelease) {
 
 TEST(IntrusivePtr, CopyAddsRef) {
     int destroyed = 0;
-    auto first = radray::AdoptRef(std::make_unique<Simple>(1, &destroyed));
+    auto first = radray::AdoptRef(std::make_unique<Simple>(1, &destroyed).release());
     {
         auto second = first;
         EXPECT_EQ(first->GetRefCount(), 2u);
@@ -244,7 +244,7 @@ TEST(IntrusivePtr, CopyAddsRef) {
 
 TEST(IntrusivePtr, MoveTransfersWithoutAddRef) {
     int destroyed = 0;
-    auto first = radray::AdoptRef(std::make_unique<Simple>(1, &destroyed));
+    auto first = radray::AdoptRef(std::make_unique<Simple>(1, &destroyed).release());
     Simple* raw = first.Get();
     auto second = std::move(first);
     EXPECT_FALSE(first.HasValue());
@@ -255,7 +255,7 @@ TEST(IntrusivePtr, MoveTransfersWithoutAddRef) {
 
 TEST(IntrusivePtr, SelfAssignmentIsSafe) {
     int destroyed = 0;
-    auto ptr = radray::AdoptRef(std::make_unique<Simple>(1, &destroyed));
+    auto ptr = radray::AdoptRef(std::make_unique<Simple>(1, &destroyed).release());
     const radray::IntrusivePtr<Simple>& alias = ptr;
     ptr = alias;
     ASSERT_TRUE(ptr.HasValue());
@@ -265,13 +265,13 @@ TEST(IntrusivePtr, SelfAssignmentIsSafe) {
 
 TEST(IntrusivePtr, ResetAndAssignNullptr) {
     int destroyed = 0;
-    auto ptr = radray::AdoptRef(std::make_unique<Simple>(1, &destroyed));
+    auto ptr = radray::AdoptRef(std::make_unique<Simple>(1, &destroyed).release());
     ptr.Reset();
     EXPECT_FALSE(ptr.HasValue());
     EXPECT_EQ(destroyed, 1);
 
     destroyed = 0;
-    auto other = radray::AdoptRef(std::make_unique<Simple>(2, &destroyed));
+    auto other = radray::AdoptRef(std::make_unique<Simple>(2, &destroyed).release());
     other = nullptr;
     EXPECT_FALSE(other.HasValue());
     EXPECT_EQ(destroyed, 1);
@@ -279,7 +279,7 @@ TEST(IntrusivePtr, ResetAndAssignNullptr) {
 
 TEST(IntrusivePtr, ResetTwiceReleasesOnce) {
     int destroyed = 0;
-    auto ptr = radray::AdoptRef(std::make_unique<Simple>(1, &destroyed));
+    auto ptr = radray::AdoptRef(std::make_unique<Simple>(1, &destroyed).release());
     ptr.Reset();
     ptr.Reset();
     EXPECT_EQ(destroyed, 1);
@@ -287,7 +287,7 @@ TEST(IntrusivePtr, ResetTwiceReleasesOnce) {
 
 TEST(IntrusivePtr, RetainRefAddsRefAdoptRefDoesNot) {
     int destroyed = 0;
-    auto owned = radray::AdoptRef(std::make_unique<Simple>(1, &destroyed));
+    auto owned = radray::AdoptRef(std::make_unique<Simple>(1, &destroyed).release());
     {
         auto retained = radray::RetainRef(owned.Get());
         EXPECT_EQ(owned->GetRefCount(), 2u);
@@ -296,7 +296,7 @@ TEST(IntrusivePtr, RetainRefAddsRefAdoptRefDoesNot) {
     EXPECT_EQ(destroyed, 0);
 
     {
-        auto adopted = radray::AdoptRef(std::make_unique<Simple>(2, &destroyed));
+        auto adopted = radray::AdoptRef(std::make_unique<Simple>(2, &destroyed).release());
         EXPECT_EQ(adopted->GetRefCount(), 1u);
     }
     EXPECT_EQ(destroyed, 1);
@@ -306,7 +306,7 @@ TEST(IntrusivePtr, ReleaseHandsOffTheCount) {
     int destroyed = 0;
     Simple* raw = nullptr;
     {
-        auto ptr = radray::AdoptRef(std::make_unique<Simple>(1, &destroyed));
+        auto ptr = radray::AdoptRef(std::make_unique<Simple>(1, &destroyed).release());
         raw = ptr.Release();
         EXPECT_FALSE(ptr.HasValue());
     }
@@ -317,7 +317,7 @@ TEST(IntrusivePtr, ReleaseHandsOffTheCount) {
 
 TEST(IntrusivePtr, ConvertsToBase) {
     int destroyed = 0;
-    auto derived = radray::AdoptRef(std::make_unique<Derived>(&destroyed));
+    auto derived = radray::AdoptRef(std::make_unique<Derived>(&destroyed).release());
     {
         radray::IntrusivePtr<Base> base = derived;
         EXPECT_EQ(base.Get(), derived.Get());
@@ -329,7 +329,7 @@ TEST(IntrusivePtr, ConvertsToBase) {
 
 TEST(IntrusivePtr, MoveConvertsToBaseWithoutAddRef) {
     int destroyed = 0;
-    auto derived = radray::AdoptRef(std::make_unique<Derived>(&destroyed));
+    auto derived = radray::AdoptRef(std::make_unique<Derived>(&destroyed).release());
     Base* raw = derived.Get();
     radray::IntrusivePtr<Base> base = std::move(derived);
     EXPECT_FALSE(derived.HasValue());
@@ -342,7 +342,7 @@ TEST(IntrusivePtr, BaseRefKeepsDerivedAlive) {
     int destroyed = 0;
     radray::IntrusivePtr<Base> base;
     {
-        auto derived = radray::AdoptRef(std::make_unique<Derived>(&destroyed));
+        auto derived = radray::AdoptRef(std::make_unique<Derived>(&destroyed).release());
         base = derived;
     }
     // 派生指针已放手, 但基类引用仍在 —— 计数在基类里, 故仍是同一份。
@@ -354,9 +354,9 @@ TEST(IntrusivePtr, BaseRefKeepsDerivedAlive) {
 
 TEST(IntrusivePtr, ComparisonAndHash) {
     int destroyed = 0;
-    auto first = radray::AdoptRef(std::make_unique<Simple>(1, &destroyed));
+    auto first = radray::AdoptRef(std::make_unique<Simple>(1, &destroyed).release());
     auto alias = first;
-    auto second = radray::AdoptRef(std::make_unique<Simple>(2, &destroyed));
+    auto second = radray::AdoptRef(std::make_unique<Simple>(2, &destroyed).release());
 
     EXPECT_TRUE(first == alias);
     EXPECT_FALSE(first == second);
@@ -371,8 +371,8 @@ TEST(IntrusivePtr, ComparisonAndHash) {
 
 TEST(IntrusivePtr, SwapExchangesOwnership) {
     int destroyed = 0;
-    auto first = radray::AdoptRef(std::make_unique<Simple>(1, &destroyed));
-    auto second = radray::AdoptRef(std::make_unique<Simple>(2, &destroyed));
+    auto first = radray::AdoptRef(std::make_unique<Simple>(1, &destroyed).release());
+    auto second = radray::AdoptRef(std::make_unique<Simple>(2, &destroyed).release());
     swap(first, second);
     EXPECT_EQ(first->Value, 2);
     EXPECT_EQ(second->Value, 1);
@@ -383,7 +383,7 @@ TEST(IntrusivePtr, WorksInVector) {
     int destroyed = 0;
     {
         std::vector<radray::IntrusivePtr<Simple>> items;
-        auto shared = radray::AdoptRef(std::make_unique<Simple>(1, &destroyed));
+        auto shared = radray::AdoptRef(std::make_unique<Simple>(1, &destroyed).release());
         for (int i = 0; i < 4; ++i) {
             items.push_back(shared);
         }

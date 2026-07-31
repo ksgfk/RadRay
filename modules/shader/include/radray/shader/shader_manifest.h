@@ -873,9 +873,10 @@ std::filesystem::path GetShaderArtifactDirectory(const std::filesystem::path& ma
 /// artifact 目录内 blob 的相对路径: "<category>/<key hex>.bin"。
 string MakeShaderArtifactBlobPath(render::ShaderBlobCategory category, ShaderHash key);
 
-// 「目标后端 -> 默认字节码类型」的映射在 <radray/render/rhi.h>
-// (GetShaderBlobCategoryForBackend)。那是 RenderBackend 的知识, 且 shader 层不需要它:
-// 本层所有接口都直接收 ShaderBlobCategory, 由调用方决定用哪种字节码。
+// 【没有「目标后端 -> 默认字节码类型」的映射, 任何一层都没有】: 本层所有接口都直接收
+// ShaderBlobCategory, 由调用方决定用哪种字节码。曾有一个 GetShaderBlobCategoryForBackend,
+// 而它是 RenderBackend 看起来属于 shader 层的唯一理由 —— 一个便利函数把一个类型拽低了
+// 一层。删掉它, RenderBackend 就干净地留在 rhi.h。
 
 // ============================ 产物读写 ============================
 

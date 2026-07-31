@@ -16,7 +16,7 @@
 #include <radray/environment.h>
 #include <radray/shader/dxc.h>
 #include <radray/render/rhi.h>
-#include <radray/runtime/render_resource_recycler.h>
+#include <radray/runtime/wait_frame.h>
 #include <radray/types.h>
 
 #include <gtest/gtest.h>
@@ -157,13 +157,15 @@ private:
     std::filesystem::path _manifest;
 };
 
-/// 记录被回收的 GPU 对象数, 并真的释放它们。
-class CountingRecycler : public IRenderResourceRecycler {
+/// 立即销毁的帧边界等待器, 并记录被等待过的次数。
+///
+/// 【为何可以立即恢复】: 测试里没有 GPU 在跑 —— 没有已录制的命令列表, 故"等到已录制的
+/// work 完成"这个条件平凡成立。真实实现必须等 fence, 见 GpuSystem::Wait。
+class ImmediateWaitFrameProcessor : public IWaitFrameProcessor {
 public:
-    void RecycleRenderResource(unique_ptr<render::RenderBase> obj) noexcept override {
-        if (obj != nullptr) {
-            ++Count;
-        }
+    task<void> Wait() override {
+        ++Count;
+        co_return;
     }
 
     uint32_t Count{0};
@@ -274,23 +276,20 @@ protected:
         if (!TryCreateAnyDevice(_ctx, _category)) {
             GTEST_SKIP() << "no render backend is available on this machine";
         }
-        _assets.SetRecycler(&_recycler);
+        _assets.SetWaitFrameProcessor(&_waitFrame);
     }
 
     render::Device& Device() { return *_ctx.Device; }
     render::ShaderBlobCategory Category() const noexcept { return _category; }
 
-    /// 【为何 CreateShaderAsset 需要它】: ShaderContent 只能经 AssetManager::MakeContent
-    /// 创建 (recycler 由那里注入), 见 AssetContentKey。这个 manager 不参与 id 去重 ——
-    /// CreateShaderAsset 是直建路径, 不走 Load。
     AssetManager& Assets() { return _assets; }
-    CountingRecycler& Recycler() { return _recycler; }
+    ImmediateWaitFrameProcessor& WaitFrame() { return _waitFrame; }
 
 private:
     DeviceContext _ctx;
     render::ShaderBlobCategory _category{render::ShaderBlobCategory::DXIL};
-    CountingRecycler _recycler;
-    /// 【必须声明在 _recycler 之后】: 内容归零时把 GPU 对象交给 recycler, 析构逆序保证
+    ImmediateWaitFrameProcessor _waitFrame;
+    /// 【必须声明在 _waitFrame 之后】: 资产 OnUnload 把数据交给它延迟销毁, 析构逆序保证
     /// manager (及其持有的资产) 先死。
     AssetManager _assets;
 };
@@ -301,18 +300,14 @@ TEST_F(ShaderAssetLoadTest, ManifestBecomesAssetWithoutTouchingDxc) {
     ScopedResolveContext context{Device(), ShaderArtifactStaleness::Strict, false};
 
     ShaderAssetDiagnostic diagnostic;
-    auto asset =
-        CreateShaderAsset(Assets(), GetErrorPassManifestPath(), context.Options(), diagnostic);
+    auto asset = CreateShaderAsset(GetErrorPassManifestPath(), context.Options(), diagnostic);
     ASSERT_TRUE(asset.HasValue()) << diagnostic.ToString();
 
-    // 内容访问全部经 AcquireContent —— 资产本身刻意不转发, 见 ShaderAsset::AcquireContent。
-    shared_ptr<ShaderContent> content = asset->AcquireContent();
-    ASSERT_TRUE(content != nullptr);
-    EXPECT_EQ(content->GetName(), "ErrorPass");
-    EXPECT_TRUE(content->IsValid());
-    ASSERT_EQ(content->GetPassCount(), 1u);
+    EXPECT_EQ(asset->GetName(), "ErrorPass");
+    EXPECT_TRUE(asset->IsValid());
+    ASSERT_EQ(asset->GetPassCount(), 1u);
 
-    Nullable<ShaderPassProgram*> pass = content->FindPass("Error");
+    Nullable<ShaderPassProgram*> pass = asset->FindPass("Error");
     ASSERT_TRUE(pass.HasValue());
     EXPECT_EQ(pass->GetName(), "Error");
     EXPECT_TRUE(pass->GetPipelineLayout().HasValue()) << "the layout is built at load time";
@@ -322,7 +317,7 @@ TEST_F(ShaderAssetLoadTest, ManifestBecomesAssetWithoutTouchingDxc) {
     EXPECT_EQ(pass->GetCachedVariantCount(), 0u);
     EXPECT_EQ(pass->GetCachedBytecodeCount(), 0u);
 
-    EXPECT_FALSE(content->FindPass("NoSuchPass").HasValue());
+    EXPECT_FALSE(asset->FindPass("NoSuchPass").HasValue());
 
     // Source 已展开为最终路径 (manifest 里 pass.Source 是空的, 继承资产级)。
     EXPECT_EQ(pass->GetDesc().Source, "forward_pipeline/error_pass.hlsl");
@@ -332,7 +327,6 @@ TEST_F(ShaderAssetLoadTest, MissingManifestFails) {
     ScopedResolveContext context{Device(), ShaderArtifactStaleness::Strict, false};
     ShaderAssetDiagnostic diagnostic;
     auto asset = CreateShaderAsset(
-        Assets(),
         GetShaderRoot() / "forward_pipeline" / "no_such_pass.shader.json",
         context.Options(),
         diagnostic);
@@ -345,7 +339,6 @@ TEST_F(ShaderAssetLoadTest, MissingManifestFails) {
 TEST_F(ShaderAssetLoadTest, MissingResolveContextFails) {
     ShaderAssetDiagnostic diagnostic;
     auto asset = CreateShaderAsset(
-        Assets(),
         GetErrorPassManifestPath(),
         ShaderAssetLoadOptions{},
         diagnostic);
@@ -358,7 +351,6 @@ TEST_F(ShaderAssetLoadTest, MissingLayoutCacheFails) {
     ScopedResolveContext context{Device(), ShaderArtifactStaleness::Strict, false};
     ShaderAssetDiagnostic diagnostic;
     auto asset = CreateShaderAsset(
-        Assets(),
         GetErrorPassManifestPath(),
         ShaderAssetLoadOptions{.Context = context.Get()},
         diagnostic);
@@ -370,16 +362,10 @@ TEST_F(ShaderAssetLoadTest, VariantResolveFailsWithoutJitOrArtifact) {
     // 无产物 + 无 DXC: 加载成功但变体解析必须失败, 且失败不写缓存。
     ScopedResolveContext context{Device(), ShaderArtifactStaleness::Strict, false};
     ShaderAssetDiagnostic diagnostic;
-    auto asset = CreateShaderAsset(
-        Assets(),
-        GetErrorPassManifestPath(),
-        context.Options(),
-        diagnostic);
+    auto asset = CreateShaderAsset(GetErrorPassManifestPath(), context.Options(), diagnostic);
     ASSERT_TRUE(asset.HasValue()) << diagnostic.ToString();
 
-    shared_ptr<ShaderContent> content = asset->AcquireContent();
-    ASSERT_TRUE(content != nullptr);
-    Nullable<ShaderPassProgram*> pass = content->FindPass("Error");
+    Nullable<ShaderPassProgram*> pass = asset->FindPass("Error");
     ASSERT_TRUE(pass.HasValue());
 
     ShaderAssetDiagnostic resolveDiag;
@@ -395,16 +381,10 @@ TEST_F(ShaderAssetLoadTest, JitVariantIsCachedAndStable) {
     }
 
     ShaderAssetDiagnostic diagnostic;
-    auto asset = CreateShaderAsset(
-        Assets(),
-        GetErrorPassManifestPath(),
-        context.Options(),
-        diagnostic);
+    auto asset = CreateShaderAsset(GetErrorPassManifestPath(), context.Options(), diagnostic);
     ASSERT_TRUE(asset.HasValue()) << diagnostic.ToString();
 
-    shared_ptr<ShaderContent> content = asset->AcquireContent();
-    ASSERT_TRUE(content != nullptr);
-    Nullable<ShaderPassProgram*> pass = content->FindPass("Error");
+    Nullable<ShaderPassProgram*> pass = asset->FindPass("Error");
     ASSERT_TRUE(pass.HasValue());
 
     ShaderAssetDiagnostic resolveDiag;
@@ -448,16 +428,10 @@ TEST_F(ShaderAssetLoadTest, StageBytecodeIsSharedAcrossVariantsThatProjectTheSam
     }
 
     ShaderAssetDiagnostic diagnostic;
-    auto asset = CreateShaderAsset(
-        Assets(),
-        GetErrorPassManifestPath(),
-        context.Options(),
-        diagnostic);
+    auto asset = CreateShaderAsset(GetErrorPassManifestPath(), context.Options(), diagnostic);
     ASSERT_TRUE(asset.HasValue()) << diagnostic.ToString();
 
-    shared_ptr<ShaderContent> content = asset->AcquireContent();
-    ASSERT_TRUE(content != nullptr);
-    Nullable<ShaderPassProgram*> pass = content->FindPass("Error");
+    Nullable<ShaderPassProgram*> pass = asset->FindPass("Error");
     ASSERT_TRUE(pass.HasValue());
 
     // error_pass 的两组 keyword 都只作用于 Pixel, 故开启 _POINT_SHADOWS 后 Vertex
@@ -520,16 +494,10 @@ TEST_F(ShaderAssetLoadTest, CookedArtifactResolvesWithoutDxc) {
     // "我们没去用它"。
     ScopedResolveContext context{Device(), ShaderArtifactStaleness::Lenient, false};
     ShaderAssetDiagnostic diagnostic;
-    auto asset = CreateShaderAsset(
-        Assets(),
-        workspace.ManifestPath(),
-        context.Options(),
-        diagnostic);
+    auto asset = CreateShaderAsset(workspace.ManifestPath(), context.Options(), diagnostic);
     ASSERT_TRUE(asset.HasValue()) << diagnostic.ToString();
 
-    shared_ptr<ShaderContent> content = asset->AcquireContent();
-    ASSERT_TRUE(content != nullptr);
-    Nullable<ShaderPassProgram*> pass = content->FindPass("Error");
+    Nullable<ShaderPassProgram*> pass = asset->FindPass("Error");
     ASSERT_TRUE(pass.HasValue());
 
     ShaderAssetDiagnostic resolveDiag;
@@ -545,103 +513,74 @@ TEST_F(ShaderAssetLoadTest, CookedArtifactResolvesWithoutDxc) {
 #endif
 }
 
-/// 【layout 不走 recycler】: 它是引用计数的共享对象, 归零即从 PipelineLayoutCache 摘除
+/// 【layout 不经延迟销毁】: 它是引用计数的共享对象, 归零即从 PipelineLayoutCache 摘除
 /// 并销毁 (见 pipeline_layout_cache.h)。这里守住的是"OnUnload 确实放开了那份引用",
-/// 观测点是缓存里的条目数, 不是 recycler 计数。
+/// 观测点是缓存里的条目数。
+///
+/// 【为何 layout 可以立即销毁而 texture/buffer 不行】: 后端 PSO 存的是 PipelineLayout
+/// 裸指针, 而能引用 layout 的 PSO 条目自己持有一份 StreamingAssetRef (见
+/// PipelineStateCache::GraphicsEntry::Ref), 故走到这里说明没有 PSO 还指着它。
 TEST_F(ShaderAssetLoadTest, OnUnloadReleasesSharedPipelineLayout) {
     ScopedResolveContext context{Device(), ShaderArtifactStaleness::Strict, false};
     ShaderAssetDiagnostic diagnostic;
-    auto asset = CreateShaderAsset(
-        Assets(),
-        GetErrorPassManifestPath(),
-        context.Options(),
-        diagnostic);
+    auto asset = CreateShaderAsset(GetErrorPassManifestPath(), context.Options(), diagnostic);
     ASSERT_TRUE(asset.HasValue()) << diagnostic.ToString();
     ASSERT_EQ(context.Layouts().GetLayoutCount(), 1u) << "one pass -> one layout";
 
-    // OnUnload 只放开槽位那份内容引用。此处无人持有内容, 故它随即归零并释放 layout。
-    CountingRecycler recycler;
-    asset->OnUnload(recycler);
+    asset->OnUnload(Assets());
     EXPECT_EQ(context.Layouts().GetLayoutCount(), 0u)
         << "the layout must self-destruct once the last program drops its reference";
-    EXPECT_EQ(recycler.Count, 0u) << "the shared layout must not go through the recycler";
-    EXPECT_FALSE(asset->HasContent());
-    EXPECT_TRUE(asset->AcquireContent() == nullptr);
+    EXPECT_EQ(WaitFrame().Count, 0u)
+        << "the shared layout must not go through the deferred destroy path";
 }
 
-/// 【守的不变量】: 有人持有内容时, OnUnload 不得释放 GPU 资源。
+/// 【守的不变量】: 只要还有一份引用, 资产及其内部指针就保持有效。
 ///
-/// 这是内容/槽位分离要买到的核心性质 —— 分离前 OnUnload 会无条件 clear passes,
-/// 于是任何缓存了 ShaderPassProgram* 的地方 (PSO 缓存条目) 立刻悬垂。
-TEST_F(ShaderAssetLoadTest, ContentOutlivesTheSlotWhileSomeoneHoldsIt) {
+/// 这是取消强制卸载所买到的核心性质 —— 从前 AssetManager::Unload 能无视引用计数销毁
+/// 槽位并 clear passes, 于是任何缓存了 ShaderPassProgram* 的地方 (PSO 缓存条目) 立刻悬垂,
+/// 那才是"内容/槽位分离"那一层存在的全部理由。
+TEST_F(ShaderAssetLoadTest, AssetStaysAliveWhileAnyReferenceIsHeld) {
     ScopedResolveContext context{Device(), ShaderArtifactStaleness::Strict, false};
-    ShaderAssetDiagnostic diagnostic;
-    auto asset = CreateShaderAsset(
-        Assets(),
-        GetErrorPassManifestPath(),
-        context.Options(),
-        diagnostic);
-    ASSERT_TRUE(asset.HasValue()) << diagnostic.ToString();
+    AssetManager& assetManager = Assets();
+
+    StreamingAssetRef<ShaderAsset> held =
+        LoadShaderAsset(assetManager, GetErrorPassManifestPath(), context.Options());
+    assetManager.Pump();
+    ASSERT_TRUE(held.IsReady());
     ASSERT_EQ(context.Layouts().GetLayoutCount(), 1u);
 
-    shared_ptr<ShaderContent> held = asset->AcquireContent();
-    ASSERT_TRUE(held != nullptr);
-    EXPECT_EQ(held.use_count(), 2) << "asset's one + this local one";
+    // 拿一份第二引用再丢掉它: 计数未归零, 资产必须毫发无损。
+    {
+        StreamingAssetRef<ShaderAsset> second =
+            LoadShaderAsset(assetManager, GetErrorPassManifestPath(), context.Options());
+        EXPECT_EQ(second, held) << "the same id must resolve to the same slot";
+        EXPECT_EQ(assetManager.GetAssetCount(), 1u);
+    }
+    assetManager.Pump();
 
-    CountingRecycler recycler;
-    asset->OnUnload(recycler);
-    EXPECT_FALSE(asset->HasContent()) << "the slot dropped its reference";
-
-    // 内容仍活着, 里面的 program 与 layout 都还能安全使用。
-    EXPECT_EQ(held.use_count(), 1);
-    EXPECT_TRUE(held->IsValid());
-    Nullable<ShaderPassProgram*> pass = held->FindPass("Error");
+    ASSERT_EQ(assetManager.GetAssetCount(), 1u) << "one reference remains";
+    ShaderAsset* asset = held.Get();
+    ASSERT_NE(asset, nullptr);
+    Nullable<ShaderPassProgram*> pass = asset->FindPass("Error");
     ASSERT_TRUE(pass.HasValue());
     EXPECT_TRUE(pass->GetPipelineLayout().HasValue());
     EXPECT_EQ(context.Layouts().GetLayoutCount(), 1u)
-        << "the layout must still be alive while the content is held";
+        << "the layout must still be alive while the asset is referenced";
 
-    // 放开最后一份引用, 此刻才真正释放。
-    held.reset();
-    EXPECT_EQ(context.Layouts().GetLayoutCount(), 0u);
-}
-
-/// 【守的不变量】: 内容可以比创建它的 AssetManager 活得久。
-///
-/// 这是 AssetContentDeleter 自持 recycler 指针的全部理由 (见 asset.h)。若归零时回头向
-/// AssetManager 索取 recycler, 本用例就会在 manager 已析构的情况下解引用悬垂指针 ——
-/// 分离也就白做了: 内容重新依赖 AssetManager 存活。
-TEST_F(ShaderAssetLoadTest, ContentOutlivesTheAssetManagerItself) {
-    ScopedResolveContext context{Device(), ShaderArtifactStaleness::Strict, false};
-    CountingRecycler recycler;
-    shared_ptr<ShaderContent> held;
-    {
-        // 【局部 manager, 刻意先于 recycler 与 held 析构】: 这正是 app 的关停顺序 ——
-        // GpuSystem (recycler) 最后销毁, 见 Application::Shutdown。
-        AssetManager assets;
-        assets.SetRecycler(&recycler);
-        ShaderAssetDiagnostic diagnostic;
-        auto asset = CreateShaderAsset(assets, GetErrorPassManifestPath(), context.Options(), diagnostic);
-        ASSERT_TRUE(asset.HasValue()) << diagnostic.ToString();
-        held = asset->AcquireContent();
-        ASSERT_TRUE(held != nullptr);
-    }
-    // manager 与资产都没了, 内容仍是完好的。
-    ASSERT_EQ(held.use_count(), 1);
-    EXPECT_TRUE(held->IsValid());
-    EXPECT_TRUE(held->FindPass("Error").HasValue());
+    // 放开最后一份引用: 销毁发生在【下一次 Pump】, 不是就地。
+    held.Reset();
+    EXPECT_EQ(assetManager.GetAssetCount(), 1u)
+        << "dropping the last reference must not destroy in place";
     EXPECT_EQ(context.Layouts().GetLayoutCount(), 1u);
 
-    // 归零走的是 deleter 自己记下的那份 recycler, 而不是任何还需要 manager 的路径。
-    held.reset();
+    assetManager.Pump();
+    EXPECT_EQ(assetManager.GetAssetCount(), 0u);
     EXPECT_EQ(context.Layouts().GetLayoutCount(), 0u);
 }
 
 TEST_F(ShaderAssetLoadTest, LoadsThroughAssetManager) {
     ScopedResolveContext context{Device(), ShaderArtifactStaleness::Strict, false};
-    AssetManager assetManager;
-    CountingRecycler recycler;
-    assetManager.SetRecycler(&recycler);
+    AssetManager& assetManager = Assets();
 
     const std::filesystem::path manifestPath = GetErrorPassManifestPath();
     StreamingAssetRef<ShaderAsset> ref = LoadShaderAsset(
@@ -656,10 +595,8 @@ TEST_F(ShaderAssetLoadTest, LoadsThroughAssetManager) {
 
     ShaderAsset* asset = ref.Get();
     ASSERT_NE(asset, nullptr);
-    shared_ptr<ShaderContent> content = asset->AcquireContent();
-    ASSERT_TRUE(content != nullptr);
-    EXPECT_EQ(content->GetName(), "ErrorPass");
-    EXPECT_TRUE(content->FindPass("Error").HasValue());
+    EXPECT_EQ(asset->GetName(), "ErrorPass");
+    EXPECT_TRUE(asset->FindPass("Error").HasValue());
     EXPECT_EQ(asset->GetAssetId(), MakeShaderAssetId(manifestPath));
 
     // 按 id 去重: 同一路径再加载应命中同一 slot。
@@ -667,20 +604,8 @@ TEST_F(ShaderAssetLoadTest, LoadsThroughAssetManager) {
         assetManager,
         manifestPath,
         context.Options());
-    EXPECT_EQ(again.GetHandle(), ref.GetHandle());
+    EXPECT_EQ(again, ref);
     EXPECT_EQ(assetManager.GetAssetCount(), 1u);
-
-    assetManager.Unload(asset->GetAssetId());
-    EXPECT_EQ(ref.Get(), nullptr) << "the slot is gone";
-    // 【本地仍持有 content, 故 layout 必须还活着】: Unload 销毁的是槽位, 不是内容。
-    // 分离之前这里是 0 —— 那时 OnUnload 无条件清掉 passes, 于是任何缓存了
-    // ShaderPassProgram* 的地方立刻悬垂。
-    EXPECT_EQ(context.Layouts().GetLayoutCount(), 1u)
-        << "the content is still held, so its layout must stay alive";
-
-    content.reset();
-    EXPECT_EQ(context.Layouts().GetLayoutCount(), 0u)
-        << "dropping the last content reference must release the shared layout";
 }
 
 /// options 必须在【发起加载之前】被校验。
@@ -689,9 +614,6 @@ TEST_F(ShaderAssetLoadTest, LoadsThroughAssetManager) {
 /// 协程一次都不 resume, 那些校验根本不执行。故本用例的重点是"空 options 连 slot 都不该
 /// 占", 而不是"加载会失败"。
 TEST_F(ShaderAssetLoadTest, InvalidOptionsAreRejectedBeforeOccupyingASlot) {
-    // 用 fixture 的 manager: 它已装配 recycler。裸 AssetManager 现在会在建内容时 abort
-    // (无兜底, 见 AssetManager::GetRecycler), 而每个 fixture 实例本就是全新的 manager,
-    // 故"不占 id"这条断言不受影响。
     AssetManager& assetManager = Assets();
     const std::filesystem::path manifestPath = GetErrorPassManifestPath();
 
@@ -716,22 +638,19 @@ TEST_F(ShaderAssetLoadTest, InvalidOptionsAreRejectedBeforeOccupyingASlot) {
     assetManager.Pump();
     ASSERT_TRUE(good.IsReady());
     EXPECT_EQ(assetManager.GetAssetCount(), 1u);
-
-    assetManager.Unload(good.GetAssetId());
 }
 
 /// 资产记下自己是用哪一份共享设施建的, 使 dedup 命中可核对。
 TEST_F(ShaderAssetLoadTest, AssetRecordsTheSharedFacilitiesItWasBuiltWith) {
     ScopedResolveContext context{Device(), ShaderArtifactStaleness::Strict, false};
     ShaderAssetDiagnostic diagnostic;
-    auto asset = CreateShaderAsset(Assets(), GetErrorPassManifestPath(), context.Options(), diagnostic);
+    auto asset = CreateShaderAsset(GetErrorPassManifestPath(), context.Options(), diagnostic);
     ASSERT_TRUE(asset.HasValue()) << diagnostic.ToString();
 
     EXPECT_EQ(asset->GetResolveContext().Get(), context.Get());
     EXPECT_EQ(asset->GetLayoutCache().Get(), &context.Layouts());
 
-    CountingRecycler recycler;
-    asset->OnUnload(recycler);
+    asset->OnUnload(Assets());
 }
 
 TEST_F(ShaderAssetLoadTest, AssetManagerReportsFailureForMissingManifest) {
@@ -781,15 +700,13 @@ TEST_F(ShaderAssetLoadTest, TwoAssetsShareOneSourceCache) {
         << "the shared headers must not be re-read for the second manifest";
 
     // 两份资产各持一个 resolver, 但共享这一个 context。
-    auto forwardAsset = CreateShaderAsset(Assets(), forwardManifest, context.Options(), diag);
+    auto forwardAsset = CreateShaderAsset(forwardManifest, context.Options(), diag);
     ASSERT_TRUE(forwardAsset.HasValue()) << diag.ToString();
-    auto errorAsset =
-        CreateShaderAsset(Assets(), GetErrorPassManifestPath(), context.Options(), diag);
+    auto errorAsset = CreateShaderAsset(GetErrorPassManifestPath(), context.Options(), diag);
     ASSERT_TRUE(errorAsset.HasValue()) << diag.ToString();
 
-    CountingRecycler recycler;
-    forwardAsset->OnUnload(recycler);
-    errorAsset->OnUnload(recycler);
+    forwardAsset->OnUnload(Assets());
+    errorAsset->OnUnload(Assets());
 }
 
 }  // namespace

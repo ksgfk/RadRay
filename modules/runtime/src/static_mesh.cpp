@@ -144,9 +144,7 @@ bool IsStaticMeshDataValid(
     return true;
 }
 
-StaticMeshContent::StaticMeshContent(
-    AssetContentKey key,
-    IRenderResourceRecycler& recycler,
+StaticMesh::StaticMesh(
     MeshResource meshResource,
     vector<StaticMeshSection> sections,
     const Eigen::Vector3f& boundsMin,
@@ -157,48 +155,29 @@ StaticMeshContent::StaticMeshContent(
       _boundsMin(boundsMin),
       _boundsMax(boundsMax),
       _renderMesh(std::move(renderMesh)) {
-    // key 只是创建许可证, recycler 归 AssetContentDeleter 持有, 两者在此都不需要落成员。
-    (void)key;
-    (void)recycler;
-}
-
-StaticMeshContent::~StaticMeshContent() noexcept = default;
-
-bool StaticMeshContent::IsValid() const noexcept {
-    return IsStaticMeshDataValid(_meshResource, _sections);
-}
-
-void StaticMeshContent::ReleaseRenderResources(IRenderResourceRecycler& recycler) noexcept {
-    // 【无条件走 recycler】: 分离前这里有一句 use_count() == 1, 于是"别人还持有"时 buffer
-    // 会绕过 recycler 直接析构 —— 不等 fence。归零由 AssetContentDeleter 接管后, 到这里
-    // 必然是唯一所有者。
-    for (auto& buffer : _renderMesh.Buffers) {
-        recycler.RecycleRenderResource(std::move(buffer));
-    }
-    _renderMesh = GpuMesh{};
-    _meshResource = MeshResource{};
-    _sections.clear();
-}
-
-StaticMesh::StaticMesh(shared_ptr<StaticMeshContent> content) noexcept
-    : _content(std::move(content)) {
 }
 
 StaticMesh::~StaticMesh() noexcept = default;
 
-void StaticMesh::OnUnload(IRenderResourceRecycler& recycler) {
-    // 【只放开槽位那份引用】: GPU buffer 的回收归内容归零时做, 此刻可能还有 SceneProxy
-    // 在用它录制。
-    (void)recycler;
-    _content.reset();
+bool StaticMesh::IsValid() const noexcept {
+    return IsStaticMeshDataValid(_meshResource, _sections);
 }
 
-AssetTypeId StaticMesh::GetTypeId() const noexcept {
+void StaticMesh::OnUnload(AssetManager& manager) {
+    // 【必须延迟】: SceneProxy 缓存 GpuMesh::DrawData* 并录进命令列表 (见
+    // primitive_scene_proxy.h), 那些 buffer 要活到 fence 之后。
+    //
+    // 【整包交出】: buffer 之间无相互依赖, 但整包交出的形状让"销毁顺序在哪里表达"这件事
+    // 在所有资产上一致, 而不是每种资产各自决定。见 AssetManager::DeferDestroy。
+    manager.DeferDestroy([mesh = std::move(_renderMesh)]() noexcept {});
+    _renderMesh = GpuMesh{};
+}
+
+RuntimeTypeId StaticMesh::GetTypeId() const noexcept {
     return runtime_type_id_v<StaticMesh>;
 }
 
-AssetLoadTask LoadStaticMesh(
-    AssetManager& assetManager,
+task<AssetLoadResult> LoadStaticMesh(
     FrameUploadScheduler& frameUploads,
     MeshResource meshResource) {
     // 阶段(均为协程内部事务):
@@ -221,14 +200,12 @@ AssetLoadTask LoadStaticMesh(
     }
     co_await frame.WaitGpu();
 
-    // 内容必须经 AssetManager 创建 —— recycler 由那里注入, 见 AssetContentKey。
-    shared_ptr<StaticMeshContent> content = assetManager.MakeContent<StaticMeshContent>(
+    co_return AssetLoadResult::Success(make_unique<StaticMesh>(
         std::move(meshResource),
         vector<StaticMeshSection>{},
         Eigen::Vector3f::Zero(),
         Eigen::Vector3f::Zero(),
-        std::move(renderMesh.value()));
-    co_return AssetLoadResult::Success(make_unique<StaticMesh>(std::move(content)));
+        std::move(renderMesh.value())));
 }
 
 }  // namespace radray

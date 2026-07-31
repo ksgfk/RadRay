@@ -17,10 +17,6 @@
 
 namespace radray::render {
 
-/// 用哪个图形 API 跑。
-///
-/// 【属 render 而非 shader】这不是 manifest 的内容, shader 层也不需要它: 格式层与编译器
-/// 的接口一律直接收 ShaderBlobCategory, 由调用方决定要哪种字节码。
 enum class RenderBackend : int32_t {
     D3D12,
     Vulkan,
@@ -28,9 +24,6 @@ enum class RenderBackend : int32_t {
 
     MAX_COUNT
 };
-
-/// 目标后端默认的字节码类型。
-ShaderBlobCategory GetShaderBlobCategoryForBackend(RenderBackend backend) noexcept;
 
 enum class TextureFormat : int32_t {
     UNKNOWN,
@@ -1477,7 +1470,6 @@ struct hash<radray::render::SamplerDescriptor> {
 
 namespace radray::render {
 
-// Non-thread-safe cache of samplers owned by a Device backend.
 class SamplerCache final {
 public:
     explicit SamplerCache(Device* device) noexcept;

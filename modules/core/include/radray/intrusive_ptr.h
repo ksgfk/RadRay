@@ -125,12 +125,6 @@ requires IntrusiveRefCountable<T>
 
 template <class T>
 requires IntrusiveRefCountable<T>
-[[nodiscard]] IntrusivePtr<T> AdoptRef(unique_ptr<T> ptr) noexcept {
-    return IntrusivePtr<T>(ptr.release(), detail::IntrusiveAdoptTag{});
-}
-
-template <class T>
-requires IntrusiveRefCountable<T>
 [[nodiscard]] IntrusivePtr<T> RetainRef(T* ptr) noexcept {
     return IntrusivePtr<T>(ptr, detail::IntrusiveRetainTag{});
 }

@@ -3,7 +3,6 @@
 #include <atomic>
 #include <chrono>
 #include <limits>
-#include <mutex>
 #include <optional>
 #include <span>
 
@@ -13,12 +12,11 @@
 #include <radray/render/rhi.h>
 #include <radray/runtime/asset.h>
 #include <radray/runtime/gpu_resource.h>
-#include <radray/runtime/render_resource_recycler.h>
+#include <radray/runtime/wait_frame.h>
 #include <radray/runtime/service_registry.h>
 
 namespace radray::render {
 class CommandBuffer;
-class Dxc;
 }  // namespace radray::render
 
 namespace radray {
@@ -31,7 +29,9 @@ class FrameUploadScheduler;
 class BeginFrameUploadAwaitable;
 class FrameUploadScope;
 class WaitFrameUploadGpuAwaitable;
+class WaitFrameAwaitable;
 struct FrameUploadRecord;
+struct WaitFrameRecord;
 class GpuSystem;
 
 enum class FrameUploadStage {
@@ -57,6 +57,14 @@ struct FrameUploadRecord : ManualCoroutineRecord {
     ResourceUploader* Uploader{nullptr};
     uint32_t FlightIndex{std::numeric_limits<uint32_t>::max()};
     FrameUploadStage CurrentStage{FrameUploadStage::AwaitingFrame};
+};
+
+/// 一条等待帧边界的协程记录(IWaitFrameProcessor::Wait 的挂起点)。挂在某个 flight 上,
+/// 该 flight 的 fence 完成后被标记 ready,再由主线程的 PumpWaitFrame 恢复。
+struct WaitFrameRecord : ManualCoroutineRecord {
+    /// 记录所属的 flight。记录存在期内不变 —— 摘除时要靠它定位所在的表。
+    uint32_t FlightIndex{std::numeric_limits<uint32_t>::max()};
+    bool FlightComplete{false};
 };
 
 /// AcquireWindow 成功返回的轻量视图。重量级的 SwapChainFrame / sync object
@@ -93,7 +101,7 @@ struct GpuFlightAcquiredTarget {
 /// 按所有权/阶段分三组，跨阶段的访问时序由 runner 的信号量 + retire 锁保证：
 ///  - 录制态：渲染线程（单线程模式即主线程）在 BeginFrameRecord→Render→
 ///    EndFrameRecordAndSubmit 期间独占；
-///  - 计时态：游戏线程在帧开头写 FrameStartTime / 清 WaitForDestroy；
+///  - 计时态：游戏线程在帧开头写 FrameStartTime；
 ///  - 提交态:Signal 由 EndFrameRecordAndSubmit 写、retire/CompleteFlight 读后清。
 struct GpuFlightSlot {
     using AcquiredTarget = GpuFlightAcquiredTarget;
@@ -108,7 +116,16 @@ struct GpuFlightSlot {
 
     // —— 计时态（游戏线程写）。
     std::chrono::steady_clock::time_point FrameStartTime{};
-    vector<unique_ptr<render::RenderBase>> WaitForDestroy;
+
+    /// 等在本 flight 帧边界上的协程 (IWaitFrameProcessor::Wait 的挂起点)。
+    ///
+    /// 【挂在这里而不是一张全局表】: "等到已录制的 work 完成" 天然是 per-flight 的问题 ——
+    /// flight 的 fence 就是那个完成条件, 记在槽位上便无需另存 fence 值再逐个比较。
+    ///
+    /// 【两段式】: CompleteFlight 只把记录标记 FlightComplete (它可能跑在渲染线程),
+    /// 真正的 resume 由主线程的 GpuSystem::PumpWaitFrame 做。理由见 IWaitFrameProcessor
+    /// 的恢复线程约定。
+    ManualCoroutineScheduler<WaitFrameRecord> WaitFrame;
 
     // —— 提交态（渲染线程写，retire 经 _retireMutex 读后清）。
     GpuFenceSignal Signal;
@@ -180,6 +197,22 @@ private:
     ManualCoroutineScheduler<FrameUploadRecord> _uploads;
 };
 
+/// co_await GpuSystem::Wait() 的 awaitable。恢复点在 GpuSystem::PumpWaitFrame(主线程)。
+class WaitFrameAwaitable {
+public:
+    WaitFrameAwaitable(GpuSystem* gpuSystem, stop_token stop) noexcept
+        : _gpuSystem(gpuSystem), _stop(stop) {}
+
+    bool await_ready() const noexcept;
+    bool await_suspend(std::coroutine_handle<> h);
+    void await_resume() noexcept;
+
+private:
+    GpuSystem* _gpuSystem;
+    stop_token _stop;
+    WaitFrameRecord* _record{nullptr};
+};
+
 /// co_await FrameUploadScheduler::BeginUpload() 的 awaitable。恢复点在 GpuSystem 帧顶 upload phase。
 class BeginFrameUploadAwaitable {
 public:
@@ -230,23 +263,6 @@ private:
     bool _readbackNeedsBarrier{false};
     vector<FrameTiming> _frames;
     float _lastGpuTimeMs{0.0f};
-};
-
-struct DeferredRenderDeleteEntry {
-    uint64_t TargetFenceValue{0};
-    unique_ptr<render::RenderBase> Object;
-};
-
-class DeferredRenderDeleteQueue {
-public:
-    void Push(uint64_t targetFenceValue, unique_ptr<render::RenderBase> obj) noexcept;
-    void Process(uint64_t completedFenceValue) noexcept;
-    void Flush() noexcept;
-    uint32_t Count() const noexcept;
-
-private:
-    mutable std::mutex _mutex;
-    vector<DeferredRenderDeleteEntry> _entries;
 };
 
 /// Render 回调的唯一入参，封装一帧录制 API。
@@ -302,11 +318,11 @@ private:
 
 /// runtime 侧的 GPU 设备与帧节奏所有者。职责边界:
 /// - 拥有 instance / factory / device / 主队列 / fence,以及 flight 槽位、上传器、
-///   帧 profiler 和延迟销毁队列。
+///   帧 profiler 和帧边界等待表。
 /// - 负责"何时画":BeginFrameRecord / EndFrameRecordAndSubmit 的录制与提交时序、
 ///   flight 回收与 GPU 资源生命周期兜底。
 /// - 不关心"画什么":RenderPass / Framebuffer 缓存、pipeline、Scene 归 RenderSystem。
-class GpuSystem : public IRenderResourceRecycler {
+class GpuSystem : public IWaitFrameProcessor {
 public:
     using FenceSignal = GpuFenceSignal;
     using QueueFrameTrack = GpuQueueFrameTrack;
@@ -319,9 +335,22 @@ public:
     GpuSystem& operator=(GpuSystem&&) = delete;
     ~GpuSystem() noexcept;
 
-    void RecycleRenderResource(unique_ptr<render::RenderBase> obj) noexcept override;
-    void ProcessDeferredDeletes() noexcept;
-    void FlushAllDeferredDeletes() noexcept;
+    /// IWaitFrameProcessor。挂进【当前】flight 的等待表。
+    ///
+    /// 【为何是当前 flight 而不是"上一次提交的 fence 值"】: 调用点在帧顶 Update 期间, 此刻
+    /// 当前 flight 还没开始录制, 故"已录制的 work"全都属于更早的 flight —— 等当前 flight
+    /// 的 fence 必然晚于它们完成。这样就不必记录并比较 fence 值, 代价是最多多等一轮。
+    /// 口径本就允许多等 (见 IWaitFrameProcessor::Wait)。
+    task<void> Wait() override;
+
+    /// 恢复指定 flight 上已就绪的等待者。
+    ///
+    /// 【只泵一个 flight, 且必须是调用线程当前独占的那个】: 多线程模式下渲染线程会在
+    /// CompleteFlight 里标记别的 flight 的记录, 若在此扫全表就与之竞争。调用点固定在
+    /// BeginUpdateForFlight —— 那一刻 runner 刚拿到该 flight 的可写槽位, 该 flight 上一轮
+    /// 的 fence 必然已完成、记录必然已被标记, 且此后到下一次 BeginUpdateForFlight 之间
+    /// 只有本线程访问它。
+    void PumpWaitFrame(uint32_t flightIndex);
 
     bool CompleteFlight(uint32_t flightIndex);
     void WaitAndCleanupCompletedFlights();
@@ -364,8 +393,15 @@ public:
 private:
     friend class AppFrameContext;
     friend class Application;
+    friend class WaitFrameAwaitable;
 
     void SubmitFrame(uint32_t flightIndex, const AppFrameSubmitDescriptor& desc);
+
+    WaitFrameRecord* RegisterWaitFrame(stop_token stop, std::coroutine_handle<> continuation);
+    void EraseWaitFrame(WaitFrameRecord* record) noexcept;
+    /// 取消全部 flight 上的等待者。关停用:挂在未提交 flight 上的记录永远等不到 fence,
+    /// 不取消就是协程帧连同它捕获的 GPU 对象一起泄漏。
+    void CancelAllWaitFrames() noexcept;
 
     Application* _app;
     WindowManager* _windowManager{nullptr};
@@ -376,11 +412,14 @@ private:
     const uint32_t _backBufferCount;
     const uint32_t _flightDataCount;
     QueueFrameTrack _mainQueueTrack;
-    vector<FlightSlot> _flights;
+    /// 【逐个 unique_ptr 而非 vector<FlightSlot>】: FlightSlot 内含
+    /// ManualCoroutineScheduler, 它不可拷贝也不可移动 —— 挂起的协程记录里存着回指调度器
+    /// 的指针 (stop callback), 搬动槽位会让那些指针指向旧地址。数量在构造时定下且此后不变,
+    /// 故间接一层不带来任何代价。
+    vector<unique_ptr<FlightSlot>> _flights;
     unique_ptr<ResourceUploader> _uploader;
     unique_ptr<FrameUploadScheduler> _frameUploadScheduler;
     unique_ptr<GpuFrameProfiler> _frameProfiler;
-    DeferredRenderDeleteQueue _deferredDeletes;
     uint64_t _nowFrameIndex{0};
     std::chrono::duration<float> _lastFrameLatency{};
 };
@@ -393,7 +432,7 @@ struct ServiceTraits<GpuSystem> {
 template <>
 struct RuntimeTypeTrait<GpuSystem> {
     static constexpr RuntimeTypeId value{0xe7c701b1, 0xcab6, 0x4be7, 0x94, 0xec, 0xfd, 0x8c, 0x6f, 0xd4, 0xf4, 0x68};
-    using Bases = std::tuple<IRenderResourceRecycler>;
+    using Bases = std::tuple<IWaitFrameProcessor>;
 };
 
 }  // namespace radray

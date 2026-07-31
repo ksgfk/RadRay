@@ -8,6 +8,7 @@
 // 因为格式层现在只包含 shader_types.h (刻意不依赖任何 device 类型)。
 #include <radray/render/rhi.h>
 #include <radray/runtime/gpu_resource.h>
+#include <radray/runtime/pipeline_layout_cache.h>
 #include <radray/shader/shader_manifest.h>
 
 // pass 级 program: 把 "keyword -> 字节码" 那条链收敛成一次调用。
@@ -61,8 +62,8 @@
 // 本层持 IntrusivePtr<SharedPipelineLayout> 一份引用, 归零时对象自毁。
 //
 // 因此 ShaderPipelineLayoutStorage 降级为【瞬态】: 它只在加载期把 manifest 打包成一份
-// descriptor 喂给缓存, 缓存把内容拷进自己的 key, 之后 storage 即可丢弃。program 不再
-// 存它 —— descriptor 的常驻后备存储是缓存 key, 由 SharedPipelineLayout 持有。
+// descriptor 喂给缓存, 缓存把内容归一化进自己的 key, 之后 storage 即可丢弃。program 与
+// 缓存都不再存它 —— key 只用于查表, 不需要能还原成 descriptor。
 
 namespace radray {
 
@@ -70,13 +71,11 @@ namespace render {
 class PipelineLayout;
 }  // namespace render
 
-class IRenderResourceRecycler;
-
 /// 持有 render::PipelineLayoutDescriptor 所需的全部后备存储。
 /// PipelineLayoutDescriptor 内部是 span, 必须有稳定的拥有者。move-only。
 ///
 /// 【瞬态】: 只用于把 manifest 打包成一份 descriptor 喂给 PipelineLayoutCache, 之后即可
-/// 丢弃。常驻后备存储是缓存 key (见 pipeline_layout_cache.h)。
+/// 丢弃 —— 缓存把内容归一化进自己的 key, 不引用本对象 (见 pipeline_layout_cache.h)。
 class ShaderPipelineLayoutStorage {
 public:
     ShaderPipelineLayoutStorage() noexcept = default;
@@ -214,12 +213,12 @@ public:
     size_t GetCachedVariantCount() const noexcept { return _variants.size(); }
     size_t GetCachedBytecodeCount() const noexcept { return _bytecodes.size(); }
 
-    /// 交出 GPU 资源。由 ShaderAsset::OnUnload 调用。
+    /// 放开 GPU 资源。由 ShaderAsset::OnUnload 调用。
     ///
-    /// 【recycler 当前未被用到】: 本层唯一的 GPU 对象是共享的 PipelineLayout, 它按引用
-    /// 计数归零即销毁, 不走延迟释放 (理由见 pipeline_layout_cache.h)。参数保留是因为
-    /// 签名由 Asset::OnUnload 的契约决定, 且本层将来可能持有独占的 GPU 对象。
-    void ReleaseRenderResources(IRenderResourceRecycler& recycler) noexcept;
+    /// 【不需要延迟销毁的出口】: 本层唯一的 GPU 对象是共享的 PipelineLayout, 它按引用计数
+    /// 归零即销毁, 而仍在录制中的 PSO 各自持有一份引用 (见 PipelineStateCache::
+    /// GraphicsEntry), 故放开自己那份是安全的。理由见 pipeline_layout_cache.h。
+    void ReleaseRenderResources() noexcept;
 
 private:
     struct VariantEntry {
@@ -243,7 +242,7 @@ private:
     ShaderPassDesc _pass;
     ShaderVariantDomain _domain;
     /// 【共享, 非独占】一份引用。布局相同的其他 program 持同一个对象, 归零时对象自毁。
-    /// descriptor 的后备存储在 SharedPipelineLayout 的 key 里, 故本层无需另存。
+    /// 只在建 PSO 时被解引用, 见 pipeline_layout_cache.h 里的生命周期说明。
     IntrusivePtr<SharedPipelineLayout> _pipelineLayout;
     std::optional<ShaderVertexInputStorage> _vertexInput;
     /// 借用而非拥有。持有者 (通常是 ShaderAsset) 必须保证 resolver 活得比本对象久 ——

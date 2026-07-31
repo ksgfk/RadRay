@@ -88,8 +88,7 @@ std::optional<UploadedTexture> RecordTextureUpload(
     return UploadedTexture{std::move(texture), std::move(srv)};
 }
 
-AssetLoadTask LoadTextureFromImageTask(
-    AssetManager& assetManager,
+task<AssetLoadResult> LoadTextureFromImageTask(
     FrameUploadScheduler& frameUploads,
     string name,
     ImageData image,
@@ -113,17 +112,15 @@ AssetLoadTask LoadTextureFromImageTask(
     render::Device* device = frame.GetUploader().GetDevice();
     co_await frame.WaitGpu();
 
-    // 内容必须经 AssetManager 创建 —— recycler 由那里注入, 见 AssetContentKey。
-    shared_ptr<TextureContent> content = assetManager.MakeContent<TextureContent>(
-        device,
-        std::move(name),
-        std::move(uploaded->Texture),
-        std::move(uploaded->Srv));
-    co_return AssetLoadResult::Success(make_unique<TextureAsset>(std::move(content)));
+    co_return AssetLoadResult::Success(
+        make_unique<TextureAsset>(
+            device,
+            std::move(name),
+            std::move(uploaded->Texture),
+            std::move(uploaded->Srv)));
 }
 
-AssetLoadTask LoadTextureFromMemoryTask(
-    AssetManager& assetManager,
+task<AssetLoadResult> LoadTextureFromMemoryTask(
     FrameUploadScheduler& frameUploads,
     string name,
     vector<byte> encodedBytes,
@@ -139,14 +136,12 @@ AssetLoadTask LoadTextureFromMemoryTask(
     }
     // 复用 image 路径(其内部再做 RGBA8 归一与上传)。
     co_return co_await LoadTextureFromImageTask(
-        assetManager, frameUploads, std::move(name), std::move(image), std::move(options));
+        frameUploads, std::move(name), std::move(image), std::move(options));
 }
 
 }  // namespace
 
-TextureContent::TextureContent(
-    AssetContentKey key,
-    IRenderResourceRecycler& recycler,
+TextureAsset::TextureAsset(
     render::Device* device,
     string name,
     unique_ptr<render::Texture> texture,
@@ -155,43 +150,30 @@ TextureContent::TextureContent(
       _name(std::move(name)),
       _texture(std::move(texture)),
       _srv(std::move(srv)) {
-    // key 只是创建许可证, recycler 归 AssetContentDeleter 持有, 两者在此都不需要落成员。
-    (void)key;
-    (void)recycler;
-}
-
-TextureContent::~TextureContent() noexcept = default;
-
-void TextureContent::ReleaseRenderResources(IRenderResourceRecycler& recycler) noexcept {
-    // 【view 必须先于 texture 交出】: view 引用 texture, 而 recycler 是个 FIFO 延迟队列,
-    // 交出顺序即销毁顺序。
-    for (auto& [key, view] : _viewCache) {
-        recycler.RecycleRenderResource(std::move(view));
-    }
-    _viewCache.clear();
-    recycler.RecycleRenderResource(std::move(_srv));
-    recycler.RecycleRenderResource(std::move(_texture));
-    _name.clear();
-}
-
-TextureAsset::TextureAsset(shared_ptr<TextureContent> content) noexcept
-    : _content(std::move(content)) {
 }
 
 TextureAsset::~TextureAsset() noexcept = default;
 
-void TextureAsset::OnUnload(IRenderResourceRecycler& recycler) {
-    // 【只放开槽位那份引用】: GPU 资源的释放归内容归零时做 (见 ReleaseRenderResources),
-    // 故这里刻意不碰 recycler —— 此刻可能还有人在用这些 view。
-    (void)recycler;
-    _content.reset();
+void TextureAsset::OnUnload(AssetManager& manager) {
+    // 【整包交出, 销毁顺序由 lambda 的成员声明顺序表达】: view 引用 texture, 故 view 必须
+    // 先死。捕获列表里 views / srv 声明在 texture 之前, 而 lambda 的捕获成员按声明顺序
+    // 构造、逆序析构 —— 这就是全部保证, 不依赖任何队列语义。
+    //
+    // 【为何要延迟】: 写进描述符堆的 view 会被 GPU 用到 fence 之后, 而本函数发生在引用
+    // 归零的那一帧。见 asset.h 与 AssetManager::DeferDestroy。
+    manager.DeferDestroy(
+        [views = std::move(_viewCache),
+         srv = std::move(_srv),
+         texture = std::move(_texture)]() noexcept {});
+    _viewCache.clear();
+    _name.clear();
 }
 
-AssetTypeId TextureAsset::GetTypeId() const noexcept {
+RuntimeTypeId TextureAsset::GetTypeId() const noexcept {
     return runtime_type_id_v<TextureAsset>;
 }
 
-render::TextureView* TextureContent::GetOrCreateSrv(const TextureSubViewDesc& sub) noexcept {
+render::TextureView* TextureAsset::GetOrCreateSrv(const TextureSubViewDesc& sub) noexcept {
     if (sub.IsDefault()) {
         return _srv.get();
     }
@@ -212,7 +194,7 @@ render::TextureView* TextureContent::GetOrCreateSrv(const TextureSubViewDesc& su
         .Usage = render::TextureViewUsage::Resource};
     auto viewOpt = _device->CreateTextureView(viewDesc);
     if (!viewOpt.HasValue()) {
-        RADRAY_ERR_LOG("TextureContent::GetOrCreateSrv: CreateTextureView failed for '{}'", _name);
+        RADRAY_ERR_LOG("TextureAsset::GetOrCreateSrv: CreateTextureView failed for '{}'", _name);
         return nullptr;
     }
     auto view = viewOpt.Release();
@@ -231,7 +213,7 @@ StreamingAssetRef<TextureAsset> LoadTextureAssetFromImage(
     const TextureAssetLoadOptions& options) {
     return assetManager.Load<TextureAsset>(AssetLoadRequest{
         .Id = assetId,
-        .Task = LoadTextureFromImageTask(assetManager, frameUploads, name, std::move(image), options),
+        .Task = LoadTextureFromImageTask(frameUploads, name, std::move(image), options),
         .DebugName = std::move(name)});
 }
 
@@ -244,7 +226,7 @@ StreamingAssetRef<TextureAsset> LoadTextureAssetFromMemory(
     const TextureAssetLoadOptions& options) {
     return assetManager.Load<TextureAsset>(AssetLoadRequest{
         .Id = assetId,
-        .Task = LoadTextureFromMemoryTask(assetManager, frameUploads, name, std::move(encodedBytes), options),
+        .Task = LoadTextureFromMemoryTask(frameUploads, name, std::move(encodedBytes), options),
         .DebugName = std::move(name)});
 }
 

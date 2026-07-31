@@ -8,9 +8,10 @@ namespace radray {
 
 /// 一次索引绘制的参数 (对应 UE5 的 FMeshBatchElement 的索引子集)。
 ///
-/// 【Geometry 的保命责任在 proxy】: 它指进 StaticMeshContent 持有的 GpuMesh, 而
-/// AssetManager::Unload 随时可销毁槽位。覆写 GetDrawArgs 的 proxy 必须自己存一份
-/// shared_ptr<StaticMeshContent> —— 只存 StreamingAssetRef 不够, 那只保住槽位。见 asset.h。
+/// 【Geometry 的保命责任在 proxy】: 它指进 StaticMesh 持有的 GpuMesh。覆写 GetDrawArgs 的
+/// proxy 必须自己存一份 StreamingAssetRef<StaticMesh> —— 引用计数是资产生命周期的唯一
+/// 权威, 持有它即保证这块 GpuMesh 不被销毁 (且归零后的 GPU buffer 还要过一次帧边界才真死,
+/// 见 StaticMesh::OnUnload)。见 asset.h。
 struct MeshDrawArgs {
     const GpuMesh::DrawData* Geometry{nullptr};  // VB/IB 视图
     uint32_t FirstIndex{0};

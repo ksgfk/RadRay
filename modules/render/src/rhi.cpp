@@ -279,15 +279,6 @@ uint32_t GetTextureFormatBytesPerPixel(TextureFormat format) noexcept {
     Unreachable();
 }
 
-ShaderBlobCategory GetShaderBlobCategoryForBackend(RenderBackend backend) noexcept {
-    switch (backend) {
-        case RenderBackend::D3D12: return ShaderBlobCategory::DXIL;
-        case RenderBackend::Vulkan: return ShaderBlobCategory::SPIRV;
-        case RenderBackend::Metal: return ShaderBlobCategory::MSL;
-        default: return ShaderBlobCategory::DXIL;
-    }
-}
-
 std::string_view format_as(RenderBackend v) noexcept {
     // MAX_COUNT 是哨兵而非真实后端, 不暴露其成员名。
     if (v == RenderBackend::MAX_COUNT) {

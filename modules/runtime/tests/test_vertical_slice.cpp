@@ -33,8 +33,8 @@
 #include <radray/render/rhi.h>
 #include <radray/runtime/asset_manager.h>
 #include <radray/runtime/gpu_resource.h>
-#include <radray/runtime/render_resource_recycler.h>
 #include <radray/runtime/shader_asset.h>
+#include <radray/runtime/wait_frame.h>
 #include <radray/shader/shader_manifest.h>
 #include <radray/types.h>
 #include <radray/utility.h>
@@ -173,11 +173,11 @@ struct SliceContext {
     }
 };
 
-/// AssetManager 卸载时会把 GPU 对象交给 recycler。切片里没有 GpuSystem 的延迟销毁,
-/// 直接就地释放即可 —— 所有提交在读回像素前已经等过 fence。
-class SliceRecycler : public IRenderResourceRecycler {
+/// 资产延迟销毁走这里。切片里没有 GpuSystem 的帧循环, 立即恢复即可 —— 所有提交在读回
+/// 像素前已经等过 fence, 故"已录制的 work 全部完成"在切片末尾平凡成立。
+class SliceWaitFrameProcessor : public IWaitFrameProcessor {
 public:
-    void RecycleRenderResource(unique_ptr<render::RenderBase>) noexcept override {}
+    task<void> Wait() override { co_return; }
 };
 
 /// 创建设备。返回 false 表示该后端在当前机器上不可用 (无显卡、无驱动、CI 无 GPU),
@@ -423,9 +423,9 @@ TEST_P(VerticalSliceTest, ManifestToPixels) {
     // 真实系统里 RenderSystem 先于 AssetManager 关停的那个顺序。
     PipelineLayoutCache layoutCache{&device};
 
+    SliceWaitFrameProcessor waitFrame;
     AssetManager assetManager;
-    SliceRecycler recycler;
-    assetManager.SetRecycler(&recycler);
+    assetManager.SetWaitFrameProcessor(&waitFrame);
 
     StreamingAssetRef<ShaderAsset> assetRef = LoadShaderAsset(
         assetManager,
@@ -433,11 +433,9 @@ TEST_P(VerticalSliceTest, ManifestToPixels) {
         ShaderAssetLoadOptions{.Context = &resolveContext, .LayoutCache = &layoutCache});
     assetManager.Pump();
     ASSERT_TRUE(assetRef.IsReady()) << "the shader asset did not become ready after one pump";
-    shared_ptr<ShaderContent> content = assetRef->AcquireContent();
-    ASSERT_TRUE(content != nullptr);
-    ASSERT_EQ(content->GetPassCount(), 1u);
+    ASSERT_EQ(assetRef->GetPassCount(), 1u);
 
-    Nullable<ShaderPassProgram*> program = content->FindPass("Error");
+    Nullable<ShaderPassProgram*> program = assetRef->FindPass("Error");
     ASSERT_TRUE(program.HasValue());
     EXPECT_TRUE(program->GetPipelineLayout().HasValue())
         << "the layout must be ready before any bytecode exists";

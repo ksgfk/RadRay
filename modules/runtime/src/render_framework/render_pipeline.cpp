@@ -218,7 +218,7 @@ void RenderPipeline::ClearTarget(RenderPipelineContext& ctx, RenderPipelineTarge
     }
 
     RenderSystem* renderSystem = ctx.App != nullptr ? ctx.App->GetRenderSystem() : nullptr;
-    RenderPassRegistry* registry = renderSystem != nullptr ? renderSystem->GetRenderPassRegistry() : nullptr;
+    render::RenderPassRegistry* registry = renderSystem != nullptr ? renderSystem->GetRenderPassRegistry() : nullptr;
     if (registry == nullptr || target.Target.BackBuffer == nullptr) {
         return;
     }
@@ -232,11 +232,16 @@ void RenderPipeline::ClearTarget(RenderPipelineContext& ctx, RenderPipelineTarge
         .ColorAttachments = std::span{&colorAttachment, 1}};
     auto passOpt = registry->GetOrCreateRenderPass(renderPassDesc);
     render::TextureView* colorView = target.Target.BackBufferView;
-    auto framebufferOpt = passOpt.HasValue()
-                              ? registry->GetOrCreateFramebuffer(
-                                    passOpt.Get(), std::span<render::TextureView* const>{&colorView, 1},
-                                    nullptr, texture.Width, texture.Height)
-                              : Nullable<render::Framebuffer*>{};
+    auto framebufferOpt = Nullable<render::Framebuffer*>{};
+    if (passOpt.HasValue()) {
+        const render::FramebufferDescriptor framebufferDesc{
+            .Pass = passOpt.Get(),
+            .ColorAttachments = std::span<render::TextureView* const>{&colorView, 1},
+            .DepthStencilAttachment = nullptr,
+            .Width = texture.Width,
+            .Height = texture.Height};
+        framebufferOpt = registry->GetOrCreateFramebuffer(framebufferDesc);
+    }
     if (!passOpt.HasValue() || !framebufferOpt.HasValue()) {
         return;
     }

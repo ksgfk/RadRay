@@ -305,142 +305,6 @@ private:
     uint64_t _highWatermark{};
 };
 
-/// 根据创建参数缓存渲染通道和帧缓冲区。
-class RenderPassRegistry {
-public:
-    explicit RenderPassRegistry(render::Device* device) noexcept;
-    ~RenderPassRegistry() noexcept;
-    RenderPassRegistry(const RenderPassRegistry&) = delete;
-    RenderPassRegistry& operator=(const RenderPassRegistry&) = delete;
-
-    Nullable<render::RenderPass*> GetOrCreateRenderPass(
-        const render::RenderPassDescriptor& desc) noexcept;
-
-    Nullable<render::Framebuffer*> GetOrCreateFramebuffer(
-        render::RenderPass* pass,
-        std::span<render::TextureView* const> colorAttachments,
-        render::TextureView* depthStencilAttachment,
-        uint32_t width,
-        uint32_t height,
-        uint32_t layers = 1) noexcept;
-
-    void RemoveFramebuffersUsing(render::TextureView* attachment) noexcept;
-    void ClearFramebuffers() noexcept;
-    void Clear() noexcept;
-
-    uint32_t GetRenderPassCount() const noexcept { return static_cast<uint32_t>(_passes.size()); }
-    uint32_t GetFramebufferCount() const noexcept { return static_cast<uint32_t>(_framebuffers.size()); }
-    uint64_t GetRenderPassHitCount() const noexcept { return _renderPassHits; }
-    uint64_t GetRenderPassMissCount() const noexcept { return _renderPassMisses; }
-    uint64_t GetFramebufferHitCount() const noexcept { return _framebufferHits; }
-    uint64_t GetFramebufferMissCount() const noexcept { return _framebufferMisses; }
-
-private:
-    struct PassEntry {
-        vector<render::RenderPassColorAttachmentDescriptor> ColorAttachments;
-        std::optional<render::RenderPassDepthStencilAttachmentDescriptor> DepthStencilAttachment;
-        unique_ptr<render::RenderPass> Object;
-    };
-
-    struct FramebufferEntry {
-        render::RenderPass* Pass{nullptr};
-        vector<render::TextureView*> ColorAttachments;
-        render::TextureView* DepthStencilAttachment{nullptr};
-        uint32_t Width{0};
-        uint32_t Height{0};
-        uint32_t Layers{1};
-        unique_ptr<render::Framebuffer> Object;
-    };
-
-    render::Device* _device{nullptr};
-    vector<PassEntry> _passes;
-    vector<FramebufferEntry> _framebuffers;
-    uint64_t _renderPassHits{0};
-    uint64_t _renderPassMisses{0};
-    uint64_t _framebufferHits{0};
-    uint64_t _framebufferMisses{0};
-};
-
-}  // namespace radray
-
-namespace radray {
-
-struct PipelineLayoutCacheKey {
-    struct Group {
-        uint32_t GroupIndex{0};
-        vector<render::ShaderParameterSetLayoutEntryDescriptor> Entries;
-
-        friend bool operator==(const Group&, const Group&) noexcept = default;
-    };
-
-    vector<Group> Groups;
-    std::optional<render::PushConstantDescriptor> PushConstant{};
-
-    static PipelineLayoutCacheKey Build(const render::PipelineLayoutDescriptor& desc);
-    render::PipelineLayoutDescriptor Get() const;
-
-    friend bool operator==(const PipelineLayoutCacheKey& lhs, const PipelineLayoutCacheKey& rhs) noexcept {
-        return lhs.Groups == rhs.Groups && lhs.PushConstant == rhs.PushConstant;
-    }
-
-private:
-    mutable vector<render::ShaderParameterSetLayoutDescriptor> _setsView;
-};
-
-class PipelineLayoutCache;
-
-class SharedPipelineLayout {
-public:
-    SharedPipelineLayout(
-        PipelineLayoutCache* cache,
-        PipelineLayoutCacheKey key,
-        unique_ptr<render::PipelineLayout> object) noexcept;
-    SharedPipelineLayout(const SharedPipelineLayout&) = delete;
-    SharedPipelineLayout& operator=(const SharedPipelineLayout&) = delete;
-    ~SharedPipelineLayout() noexcept;
-
-    render::PipelineLayout* Get() const noexcept { return _object.get(); }
-    const PipelineLayoutCacheKey& GetKey() const noexcept { return _key; }
-    uint32_t GetRefCount() const noexcept { return _refCount; }
-
-private:
-    friend class PipelineLayoutCache;
-    friend void IntrusivePtrAddRef(const SharedPipelineLayout* obj) noexcept;
-    friend void IntrusivePtrRelease(SharedPipelineLayout* obj) noexcept;
-
-    PipelineLayoutCache* _cache{nullptr};
-    PipelineLayoutCacheKey _key;
-    unique_ptr<render::PipelineLayout> _object;
-    mutable uint32_t _refCount{1};
-};
-
-void IntrusivePtrAddRef(const SharedPipelineLayout* obj) noexcept;
-void IntrusivePtrRelease(SharedPipelineLayout* obj) noexcept;
-
-class PipelineLayoutCache {
-public:
-    explicit PipelineLayoutCache(render::Device* device) noexcept;
-    ~PipelineLayoutCache() noexcept;
-    PipelineLayoutCache(const PipelineLayoutCache&) = delete;
-    PipelineLayoutCache& operator=(const PipelineLayoutCache&) = delete;
-
-    IntrusivePtr<SharedPipelineLayout> GetOrCreate(const render::PipelineLayoutDescriptor& desc) noexcept;
-    IntrusivePtr<SharedPipelineLayout> GetOrCreate(PipelineLayoutCacheKey key) noexcept;
-    Nullable<render::Device*> GetDevice() const noexcept { return _device; }
-    uint32_t GetLayoutCount() const noexcept { return static_cast<uint32_t>(_entries.size()); }
-    uint64_t GetHitCount() const noexcept { return _hits; }
-    uint64_t GetMissCount() const noexcept { return _misses; }
-
-private:
-    friend void IntrusivePtrRelease(SharedPipelineLayout* obj) noexcept;
-    void Detach(SharedPipelineLayout* layout) noexcept;
-
-    render::Device* _device{nullptr};
-    vector<SharedPipelineLayout*> _entries;
-    uint64_t _hits{0};
-    uint64_t _misses{0};
-};
-
 }  // namespace radray
 
 namespace radray {
@@ -490,28 +354,19 @@ private:
         render::MultiSampleState MultiSample{};
         vector<render::ColorTargetState> ColorTargets;
         const ShaderAsset* Owner{nullptr};
-        StreamingAssetRefAny Ref;
-        /// 【保住 Program 指针的那一份引用】: Program 指向 ShaderContent 内部的
-        /// ShaderPassProgram, 而 Ref 只保住资产【槽位】—— Unload 会销毁槽位并放开它那份
-        /// 内容引用。持有内容才使 Program 在槽位消失后仍然有效。
+        /// 【保住 Program 与 layout 的唯一一份引用】: Program 指向 ShaderAsset 内部的
+        /// ShaderPassProgram, 而后端 PSO 又存着 PipelineLayout 裸指针 (D3D12 的
+        /// GraphicsPsoD3D12 存 RootSigD3D12* 并在每次 bind 时解引用), layout 的生死由
+        /// ShaderPassProgram 持有的 SharedPipelineLayout 引用计数决定。
         ///
-        /// 【为何是类型擦除的 shared_ptr<void>】: 本条目只需要"别让它死", 不访问内容成员;
-        /// 而 shared_ptr<ShaderContent> 会要求 ShaderContent 的完整定义, 此处它只是前向
-        /// 声明。shared_ptr<void> 保留了原本的 deleter, 故归零时仍然走对的释放路径
-        /// (交给 recycler, 见 asset.h 的 AssetContentDeleter)。
-        ///
-        /// 【声明顺序有意义】: 在 Object 之前, 析构逆序保证 PSO 先死。
-        shared_ptr<void> Content;
-        /// 【必须持有, 不能只靠 Ref】: 后端 PSO 存的是 PipelineLayout 裸指针 (D3D12 的
-        /// GraphicsPsoD3D12 存 RootSigD3D12* 并在每次 bind 时解引用), 而 layout 由
-        /// SharedPipelineLayout 的引用计数管生死。Ref 只保住资产【槽位】——
-        /// AssetManager::Unload 无视引用计数销毁槽位, ShaderPassProgram 随之析构并放开
-        /// 它那份 layout 引用; 若本条目没有独立的一份, 计数就此归零、layout 被销毁,
-        /// 而 Object 仍在被录制使用。
+        /// 【为何一份就够了】: 引用计数是资产生命周期的唯一权威 —— 没有任何入口能在
+        /// 计数非零时销毁槽位。故本条目持有 Ref 即同时保住了资产、Program 和 layout,
+        /// 从前那两个独立成员 (shared_ptr<void> Content / IntrusivePtr<SharedPipelineLayout>
+        /// Layout) 都是为了防御"无视计数的强制卸载"而存在, 那条路已经不存在了。
         ///
         /// 【声明顺序有意义】: 必须在 Object 之前, 析构逆序保证 PSO 先死, 之后才放开
-        /// layout 引用。
-        IntrusivePtr<SharedPipelineLayout> Layout;
+        /// 资产引用。
+        StreamingAssetRefAny Ref;
         unique_ptr<render::GraphicsPipelineState> Object;
     };
 
