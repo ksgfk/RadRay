@@ -8,7 +8,6 @@
 namespace radray {
 
 static constexpr size_t LeftChild(size_t index) noexcept { return index * 2 + 1; }
-// static constexpr size_t RightChild(size_t index) noexcept { return index * 2 + 2; }
 static constexpr size_t Parent(size_t index) noexcept { return (index - 1) / 2; }
 
 static constexpr size_t NodeLevel(size_t index) noexcept {

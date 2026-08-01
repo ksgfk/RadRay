@@ -9,35 +9,10 @@
 
 // radrayshader 的类型基座: manifest 的数据词汇。
 //
-// == 判定标准: 是不是 manifest 的内容 ==
-//
-// 本文件只收 **出现在 *.shader.json 里、由 shader 格式层解析或序列化** 的类型。
-// 每一个都能在 shader_manifest 中找到对应的字段或 JSON codec:
-//
-//   ShaderStage / ShaderBlobCategory       编译阶段与字节码类型, 贯穿整个工具链
-//   ShaderParameterBindingType             ShaderBindingDesc::Type
-//   VertexFormat / VertexStepMode          ShaderVertex{Attribute,Buffer}Desc 的字段
-//   ShaderBindingLocation                  ShaderPushConstantDesc::Location (有 codec)
-//   SamplerDescriptor                      ShaderBindingDesc::ImmutableSampler (有 codec)
-//   AddressMode / FilterMode /             SamplerDescriptor 的成员, 随其被序列化
-//     CompareFunction                      (故自身无直接引用, 但是真实依赖)
-//
-// == 为什么这些类型在 shader 库而不在 render 库 ==
-//
-// 依赖链是 core <- shader <- render <- runtime。shader 编译器 (dxc/hlsl/spirv/spvc)
-// 与格式层 (shader_manifest) 都不碰 GPU 设备。若这批 manifest 词汇放在 render,
-// 只想 cook shader 的工具就会被迫链入整个图形后端 (实测约 23 MB 的 d3d12/vulkan obj)。
-//
-// 【计算依赖闭包时必须排除枚举成员】ShaderParameterBindingType 的成员名叫 Buffer /
-// Texture / Sampler, 与 device class 同名。若把枚举成员当成类型引用, 闭包会经
-// ShaderParameterBindingType -> Buffer -> Device 污染到几乎整个 rhi.h (实测 110/133),
-// 从而误判拆库不可行。枚举成员是值, 不是类型依赖。
-//
-// == 命名空间 ==
-//
-// 刻意保持 radray::render, 与 rhi.h 一致。两个库共同实现 render 这一概念层, 拆库是
-// 物理构建边界而非概念重命名; 改名会让 ShaderStage 这类跨库使用的类型出现割裂, 且要
-// 改动全仓库每一处 render:: 限定。
+// 收录标准是"是不是 manifest 的内容" —— 只放出现在 *.shader.json 里或有 JSON codec 的
+// 类型。只为喂给 RHI 而存在的类型留在 rhi.h。命名空间刻意保持 radray::render。
+// 完整判据、放弃过的判据、以及算依赖闭包时的枚举成员陷阱:
+// docs/adr/0006-shader-types-layer-boundary.md
 
 namespace radray::render {
 

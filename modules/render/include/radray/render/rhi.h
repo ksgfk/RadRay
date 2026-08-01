@@ -15,7 +15,29 @@
 #include <radray/basic_math.h>
 #include <radray/shader/shader_types.h>
 
+// 后端无关的 RHI 接口面。所有权模型、后端选择、绑定模型、barrier 与同步的设计说明见
+// docs/architecture/render-rhi.md
+//
+// 章节索引。跳转: Grep "^// ==" 本文件
+//
+//   == 枚举与位标志 ==
+//   == 对象基类 ==
+//   == device / instance 描述符 ==
+//   == 提交与 swapchain 帧 ==
+//   == barrier 描述符 ==
+//   == 资源与 render pass 描述符 ==
+//   == 布局与参数集描述符 ==
+//   == PSO 描述符 ==
+//   == 接口: Device 与 queue ==
+//   == 接口: 命令录制与编码器 ==
+//   == 接口: 同步与 swapchain ==
+//   == 接口: 资源与 view ==
+//   == 接口: pass / shader / layout / PSO ==
+//   == 工具函数与 SamplerCache ==
+
 namespace radray::render {
+
+// == 枚举与位标志 ==
 
 enum class RenderBackend : int32_t {
     D3D12,
@@ -416,6 +438,8 @@ struct DepthStencilClearValue {
 
 using ClearValue = std::variant<ColorClearValue, DepthStencilClearValue>;
 
+// == 对象基类 ==
+
 class RenderBase {
 public:
     RenderBase() noexcept = default;
@@ -438,6 +462,8 @@ public:
 
     virtual void SetDebugName(std::string_view name) noexcept = 0;
 };
+
+// == device / instance 描述符 ==
 
 using RenderLogCallback = void (*)(LogLevel level, std::string_view message, void* userData);
 
@@ -577,6 +603,8 @@ struct TimestampQueryCalibration {
     double TickPeriodNs{0.0};
 };
 
+// == 提交与 swapchain 帧 ==
+
 struct CommandQueueSubmitDescriptor {
     std::span<CommandBuffer*> CmdBuffers{};
     std::span<Fence*> SignalFences{};
@@ -635,6 +663,8 @@ struct SwapChainPresentResult {
     SwapChainStatus Status{SwapChainStatus::Error};
 };
 
+// == barrier 描述符 ==
+
 struct BarrierBufferDescriptor {
     Buffer* Target{nullptr};
     BufferStates Before{BufferState::UNKNOWN};
@@ -669,6 +699,8 @@ struct BarrierTextureDescriptor {
 };
 
 using ResourceBarrierDescriptor = std::variant<BarrierBufferDescriptor, BarrierTextureDescriptor>;
+
+// == 资源与 render pass 描述符 ==
 
 struct RenderPassColorAttachmentDescriptor {
     TextureFormat Format{TextureFormat::UNKNOWN};
@@ -760,6 +792,8 @@ struct MappedBufferRange {
     BufferRange Range{};
 };
 
+// == 布局与参数集描述符 ==
+
 // 以下是喂给 RHI 的描述形状。它们不出现在 *.shader.json 里、没有 JSON codec,
 // shader 格式层也不消费它们 —— 由 shader_layout_binding.h 把 manifest 数据打包成它们。
 // 故属 render 层, 不下沉到 radrayshader。
@@ -850,6 +884,8 @@ struct ShaderParameterDynamicOffset {
 
     friend bool operator==(const ShaderParameterDynamicOffset&, const ShaderParameterDynamicOffset&) noexcept = default;
 };
+
+// == PSO 描述符 ==
 
 struct PrimitiveState {
     PrimitiveTopology Topology{};
@@ -1076,6 +1112,8 @@ struct DeviceDetail {
     bool IsLayeredRenderingFromVertexShaderSupported{false};
 };
 
+// == 接口: Device 与 queue ==
+
 class Device : public enable_shared_from_this<Device>, public RenderBase {
 public:
     virtual ~Device() noexcept = default;
@@ -1137,6 +1175,8 @@ public:
 
     virtual QueueType GetQueueType() const noexcept = 0;
 };
+
+// == 接口: 命令录制与编码器 ==
 
 class CommandBuffer : public RenderBase, public IDebugName {
 public:
@@ -1239,6 +1279,8 @@ public:
     virtual void DispatchIndirect(Buffer* argumentBuffer, uint64_t argumentOffset) noexcept = 0;
 };
 
+// == 接口: 同步与 swapchain ==
+
 class Fence : public RenderBase, public IDebugName {
 public:
     virtual ~Fence() noexcept = default;
@@ -1291,6 +1333,8 @@ protected:
     static void InvalidateFrame(SwapChainFrame& frame) noexcept;
 };
 
+// == 接口: 资源与 view ==
+
 class Resource : public RenderBase, public IDebugName {
 public:
     virtual ~Resource() noexcept = default;
@@ -1335,6 +1379,8 @@ public:
 
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::TextureView; }
 };
+
+// == 接口: pass / shader / layout / PSO ==
 
 class RenderPass : public RenderBase, public IDebugName {
 public:
@@ -1436,7 +1482,8 @@ public:
     static Nullable<unique_ptr<DXGIFactory>> Create(const DXGIFactoryDescriptor& desc);
 };
 
-// --------------------------- Utility Functions ---------------------------
+// == 工具函数与 SamplerCache ==
+
 bool IsDepthStencilFormat(TextureFormat format) noexcept;
 bool IsUintFormat(TextureFormat format) noexcept;
 bool IsSintFormat(TextureFormat format) noexcept;

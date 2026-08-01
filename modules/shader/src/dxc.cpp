@@ -745,20 +745,9 @@ public:
             ibDesc.Space = bindDesc.Space;
         }
 
-        /**
-         * 识别 HLSL 中的模板常量缓冲视图 ConstantBuffer<T>。
-         *
-         * 由于标准 DXC 反射并未直接提供标识 ConstantBuffer<T> 的独立字段，这里利用了一项业界通用的特征约定：
-         * 当在 HLSL 中声明 `ConstantBuffer<T> myCB;` 时，DXC 会在反射返回的数据中：
-         * 1. 建立一个名为 "myCB" 的 CBuffer
-         * 2. 该 CBuffer 内部只包含唯一一个变量 (Variable)
-         * 3. 这个变量的名称 (或其包含的类型名称) 必定也等于该 CBuffer 的名称 "myCB"
-         *
-         * 通过比对这个排他性的结构特征，我们可以完全剥离自定义 DXC 拓展，
-         * 直接利用标准 DXC 反射推断其是否为模板视图 (IsViewInHlsl)。
-         *
-         * `cbuffer myCB { T myCB; };` 确实也会产生与上述完全一致的特征，因此 hlsl 内需要极力避免这种写法
-         */
+        // 按结构特征识别 ConstantBuffer<T>: DXC 反射没有独立标志位, 但 `ConstantBuffer<T> myCB;`
+        // 恒产生"CBuffer 名为 myCB, 内部只有一个变量, 且该变量名也是 myCB"这一排他特征。
+        // 注意 `cbuffer myCB { T myCB; };` 会产生完全相同的特征, HLSL 内须避免这种写法。
         auto inferCBufferIsViewInHlsl = [&](const HlslShaderBufferDesc& cb) noexcept {
             if (cb.Variables.size() != 1) {
                 return false;
@@ -923,15 +912,6 @@ static vector<std::string_view> _BuildCompileArgs(const DxcCompileOptions& optio
     vector<std::string_view> args{};
     if (options.IsSpirv) {
         args.emplace_back("-spirv");
-        // if (options.Stage == ShaderStage::RayGen ||
-        //     options.Stage == ShaderStage::Miss ||
-        //     options.Stage == ShaderStage::ClosestHit ||
-        //     options.Stage == ShaderStage::AnyHit ||
-        //     options.Stage == ShaderStage::Intersection ||
-        //     options.Stage == ShaderStage::Callable) {
-        //     args.emplace_back("-fspv-target-env=vulkan1.2");
-        //     args.emplace_back("-fspv-extension=SPV_KHR_ray_tracing");
-        // }
     }
     if (!options.EnableUnbounded) {
         args.emplace_back("-all_resources_bound");

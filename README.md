@@ -1,112 +1,33 @@
 # RadRay
 
-TODO
+C++20 实时渲染器。D3D12 + Vulkan 后端，Windows 为主平台，macOS 走 Vulkan-on-Metal。
 
-## TodoList
-* [P2] SwapChain 支持 HDR
+## 文档
 
-## compile
+| 我要做什么 | 读哪里 |
+|---|---|
+| 了解仓库结构、定位子系统 | [docs/architecture/overview.md](docs/architecture/overview.md) |
+| 配置、构建、跑测试、拉依赖 | [docs/guide/build-test.md](docs/guide/build-test.md) |
+| 配置 IDE / clangd / 调试器 | [docs/guide/dev-env.md](docs/guide/dev-env.md) |
+| 某个设计为什么这样 | [docs/adr/](docs/adr/README.md) |
 
-* cmake config
-  * cmake --preset win-x64-debug
-  * cmake --preset win-x64-release
+`AGENTS.md` 是给编码 agent 的入口约束，人类读者可以跳过。
 
-* generate compile_commands.json on win
-  * python .\tools\win_gen_compile_commands.py --build-dir .\build_debug --configuration Debug
-  * python .\tools\win_gen_compile_commands.py --build-dir .\build_release --configuration Release
-  * The script evaluates MSBuild projects in parallel; it does not compile or link targets.
+## 快速开始
 
-## dev env
-
-### vscode 
-
-install extensions: C/C++ Extension Pack, clangd
-
-### settings.json
-
-```json
-{
-    "xmake.additionalConfigArguments": [],
-    "xmake.compileCommandsDirectory": ".vscode",
-    "C_Cpp.codeAnalysis.runAutomatically": true,
-    "C_Cpp.intelliSenseEngine": "disabled",
-    "C_Cpp.formatting": "disabled",
-    "C_Cpp.autoAddFileAssociations": false,
-    "C_Cpp.autocompleteAddParentheses": false,
-    "C_Cpp.autocomplete": "disabled",
-    "C_Cpp.errorSquiggles": "disabled",
-    "C_Cpp.codeFolding": "disabled",
-    "C_Cpp.configurationWarnings": "disabled",
-    "C_Cpp.default.enableConfigurationSquiggles": false,
-    "C_Cpp.codeAnalysis.clangTidy.enabled": true,
-    "C_Cpp.codeAnalysis.clangTidy.args": [
-        "--config-file=${workspaceFolder}/.clang-tidy",
-        "-p",
-        "${workspaceFolder}/.vscode"
-    ],
-    "clangd.enable": true,
-    "clangd.arguments": [
-        "--compile-commands-dir=${workspaceFolder}/.vscode",
-        "--log=error",
-        "--completion-style=bundled",
-        "--background-index",
-        "--background-index-priority=normal",
-        "--header-insertion=never",
-        "--pch-storage=memory"
-    ],
-    "VSCodeCounter.exclude": [
-        "**/.github/**",
-        "**/.vscode/**",
-        "**/build**/**",
-        "**/assets/**",
-        "**/third_party/**",
-        "**/SDKs/**",
-        "**/dear_imgui_shader_spirv.cpp",
-        "**/dear_imgui_shader_dxil.cpp",
-        "**/dear_imgui_shader_metallib.cpp",
-        "**/imgui.ini"
-    ],
-    "files.readonlyInclude": {
-        "**/build**/**": true,
-        "**/third_party/**": true,
-        "**/SDKs/**": true
-    },
-    "cmake.buildArgs": [
-        "--parallel",
-        "24"
-    ]
-}
+```powershell
+python tools/fetch_third_party.py restore
+python tools/fetch_sdks.py restore
+cmake --preset win-x64-debug
+cmake --build build_debug --parallel 24
 ```
 
-### launch.json
+二进制在 `build_debug/_build/<Config>/`。
 
-```json
-{
-    "version": "0.2.0",
-    "configurations": [
-        {
-            "name": "(msvc) Launch",
-            "type": "cppvsdbg",
-            "request": "launch",
-            "program": "${command:cmake.launchTargetPath}",
-            "args": [
-                "--backend",
-                // "vulkan",
-                "d3d12",
-                // "metal",
-                "--multithread",
-                "--valid-layer"
-            ],
-            "stopAtEntry": false,
-            "cwd": "${workspaceFolder}",
-            "environment": [
-                {
-                    "name": "PATH",
-                    "value": "${command:cmake.getLaunchTargetDirectory}:${env:PATH}"
-                }
-            ],
-            "console": "integratedTerminal"
-        }
-    ]
-}
-```
+## TODO
+
+- [P2] SwapChain 支持 HDR
+
+## License
+
+见 [LICENSE](LICENSE)。

@@ -1,19 +1,8 @@
 // radray_shader_cook —— 把 *.shader.json 烘成 AOT 产物 (index.json + <category>/<key>.bin)。
+// 构建期步骤, 消费已人工收敛的 manifest (生成模板的是 radray_shader_gen, 方向相反)。
 //
-// 用法:
-//   radray_shader_cook --shader-root <dir> [--manifest <path>]... [--discover]
-//                      [--category <dxil|spirv>]... [--no-validate-reflection]
-//                      [--no-incremental] [--clean] [--quiet]
-//
-// 【与 radray_shader_gen 的分工】: shader_gen 从反射【生成】manifest 模板 (作者期,
-// 一次性, 输出需人工收敛); 本工具【消费】已收敛的 manifest, 是构建期步骤。两者都要
-// DXC, 但方向相反, 故不合并成一个工具。
-//
-// 【产物落在 manifest 旁边】: 目录由 GetShaderArtifactDirectory(manifest) 推导, 本工具
-// 不提供 --output。这不是省事, 而是运行时 ShaderResolver 也用同一函数从 manifest 路径
-// 反推产物目录 —— 一旦可以自定义输出位置, 布局约定就有了第二个真相, 而运行时那一侧
-// 看不到构建时传的参数。要换位置就换 manifest 的位置 (构建里 cook 的是部署到输出目录
-// 的那份 shaderlib, 不是源码树)。
+// 用法与排查见 docs/guide/shader-authoring.md;
+// 为何刻意不提供 --output 见 docs/adr/0004-content-addressed-shader-artifacts.md。
 
 #include <algorithm>
 #include <cctype>
@@ -57,11 +46,8 @@ struct Arguments {
     bool Discover{false};
     bool ValidateReflection{true};
     bool Incremental{true};
-    /// 先删掉整个产物目录再烘。
-    ///
-    /// 【为何需要】: 增量只会跳过已存在且自验通过的 blob, 从不删除任何东西。删掉一个
-    /// bake 规则后, 上一轮的 blob 会留在目录里 —— 它不在新 index.json 内, 运行时查不到,
-    /// 不影响正确性, 但会一直占着发布包。
+    /// 先删掉整个产物目录再烘。增量从不删除任何东西, 故删过 bake 规则后需要它来清掉
+    /// 上一轮遗留的 blob (不影响正确性, 但会一直占着发布包)。
     bool Clean{false};
     bool Quiet{false};
 };

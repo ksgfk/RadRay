@@ -354,18 +354,9 @@ private:
         render::MultiSampleState MultiSample{};
         vector<render::ColorTargetState> ColorTargets;
         const ShaderAsset* Owner{nullptr};
-        /// 【保住 Program 与 layout 的唯一一份引用】: Program 指向 ShaderAsset 内部的
-        /// ShaderPassProgram, 而后端 PSO 又存着 PipelineLayout 裸指针 (D3D12 的
-        /// GraphicsPsoD3D12 存 RootSigD3D12* 并在每次 bind 时解引用), layout 的生死由
-        /// ShaderPassProgram 持有的 SharedPipelineLayout 引用计数决定。
-        ///
-        /// 【为何一份就够了】: 引用计数是资产生命周期的唯一权威 —— 没有任何入口能在
-        /// 计数非零时销毁槽位。故本条目持有 Ref 即同时保住了资产、Program 和 layout,
-        /// 从前那两个独立成员 (shared_ptr<void> Content / IntrusivePtr<SharedPipelineLayout>
-        /// Layout) 都是为了防御"无视计数的强制卸载"而存在, 那条路已经不存在了。
-        ///
-        /// 【声明顺序有意义】: 必须在 Object 之前, 析构逆序保证 PSO 先死, 之后才放开
-        /// 资产引用。
+        /// 【一份引用同时保住资产、Program 和 layout】引用计数是资产生命周期的唯一权威,
+        /// 没有任何入口能在计数非零时销毁槽位。
+        /// 【声明顺序有意义】必须在 Object 之前, 析构逆序保证 PSO 先死。
         StreamingAssetRefAny Ref;
         unique_ptr<render::GraphicsPipelineState> Object;
     };

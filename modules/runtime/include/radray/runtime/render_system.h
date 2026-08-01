@@ -19,13 +19,9 @@ namespace render {
 class Dxc;
 }  // namespace render
 
-/// runtime 侧的渲染协调器。职责边界:
-/// - 拥有"怎么画"的一切:RenderPipeline、Scene 列表、shader JIT 工具链(DXC / include root)
-///   以及按描述符复用的 RenderPass / Framebuffer 缓存(RenderPassRegistry)。
-/// - 每帧把 GpuSystem 交出的 AppFrameContext 翻成一组 RenderPipelineTarget,
-///   驱动 pipeline 录制,并负责 backbuffer 的 RenderTarget/Present 状态收尾。
-/// - 不拥有 device / queue / flight / uploader / 延迟销毁 —— 那些属于 GpuSystem;
-///   本类只通过 Application 借用它们,所有 GPU 对象的生命周期仍由 GpuSystem 兜底。
+/// runtime 侧的渲染协调器。【拥有"怎么画", 不拥有帧时序】—— device / queue / flight /
+/// uploader / 延迟销毁都属 GpuSystem, 本类只借用。
+/// 职责划分见 docs/architecture/render-framework.md。
 class RenderSystem {
 public:
     explicit RenderSystem(Application* app) noexcept;
@@ -60,6 +56,8 @@ public:
     const shared_ptr<render::Dxc>& GetDxc() const noexcept { return _dxc; }
     /// 全进程唯一的 shader 解析上下文 (include 根 / 过期策略 / JIT 许可 / 源码缓存)。
     /// 【唯一一份是刻意的】: 这四项回答的是同一个问题 —— "这是开发构建还是发布包"。
+    /// 曾经它们在 ShaderAssetLoadOptions 里各占一项, 那让每个加载调用点都能自行决定,
+    /// 形成第二套真相 (且从未被兑现 —— dedup 命中时第二次的 options 直接被丢弃)。
     /// 而源码缓存按文件记忆化, 跨 manifest 共享才有意义 (error_pass 的 include 闭包是
     /// forward_pass 的子集)。OnInitialize 之前为空。
     ShaderResolveContext* GetShaderResolveContext() const noexcept { return _shaderResolveContext.get(); }

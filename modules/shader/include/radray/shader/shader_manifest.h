@@ -12,60 +12,9 @@
 #include <radray/shader/spirv.h>
 #include <radray/types.h>
 
-// shader 资产元数据 (*.shader.json) 与其 AOT 产物。
+// shader 格式层: 资产元数据 (*.shader.json) 与其 AOT 产物。
 //
-// == manifest 的存在理由 ==
-//
-// HLSL 源码 + 后端反射【不足以】构建 PSO。反射能告诉我们"有哪些资源、在哪个
-// register/space", 但拿不到以下信息, 它们必须由作者声明:
-//
-//   1. push constant 身份。DXIL 反射把 [[vk::push_constant]] 的 cbuffer 当普通
-//      cbuffer, 完全不知道它特殊; SPIRV 反射知道 size 但没有 D3D 的 register/space。
-//      两个后端都缺, 不是"只有 vk 侧标记"。
-//   2. 绑定驻留方式。同一个 cbuffer 既可放进 descriptor table, 也可做 root
-//      descriptor (D3D12 root CBV / Vulkan UNIFORM_BUFFER_DYNAMIC)。这是作者的
-//      性能决策, 不是 shader 的属性。
-//   3. immutable / static sampler。纯 pipeline-layout 期概念, 不在字节码里。
-//   4. unbounded 数组的实际容量。反射只说"unbounded", 两个后端都拒绝 Count == 0。
-//   5. 被 DCE 或 keyword #ifdef 消掉的绑定。反射看不到, 但 layout 必须保留槽位,
-//      否则同一 shader 的不同变体无法共用一个 PipelineLayout。
-//   6. 顶点属性的 VertexFormat / buffer slot / offset / stride。反射只给 semantic
-//      与 component type + mask, 推不出归一化与位宽。
-//   7. entry point 名与 keyword 组合域 —— 这些本来就是编译输入。
-//
-// 数据流方向: manifest 声明 ABI, 反射只做一致性核对。因此
-// BuildPipelineLayoutStorage 不需要任何反射数据 / 字节码 / target 信息, 可以在
-// 编译任何 shader 之前建好 PipelineLayout, 且结果对 target 与 variant 都不变。
-//
-// 与 render 层反射 JSON (hlsl.h / spirv.h) 的区别: 那份是机器生成的, 枚举存整数;
-// 这份是人写人 diff 的, 枚举存字符串。两者性质不同, 刻意不共用约定。
-//
-// == AOT 产物 ==
-//
-// 目录约定: manifest `foo.shader.json` 的产物放在同目录的同名文件夹 `foo/`:
-//
-//   forward_pass.shader.json
-//   forward_pass/
-//       index.json                  变体表: key -> blob 相对路径 + cook 元信息
-//       dxil/a3f29c1b40e8d715....bin
-//       spirv/8c01ae52f7d3b064....bin
-//
-// blob 采用【内容寻址】: 文件名即 stage artifact key 的 hex。由此当多个 program
-// variant 投影到同一份 stage 字节码时 (见 ShaderKeywordGroupDesc::Stages) 自然去重。
-// 按 target 分子目录, 使"只发布 DXIL"退化为删除一个目录。
-//
-// 反射数据【不】落盘: manifest 已经是唯一 ABI 来源, PipelineLayout 不需要反射即可
-// 构建。反射仅在 cook 期用于核对声明 ⊇ 反射。
-//
-// manifest 与产物放在同一处的理由: manifest 描述 ABI 契约, 产物描述该契约在某个
-// target 上的编译结果, 两者由同一套 key 绑定。
-//
-// == 本文件在三层里的位置 ==
-//
-//   shader_manifest.h  格式层 (本文件)。manifest desc、变体域、产物索引、
-//                      ShaderResolver、cook、layout 构建。
-//   shader_program.h   对象层。ShaderPassProgram: 共享 PipelineLayout 引用 + 字节码缓存。
-//   shader_asset.h     资产层。ShaderAsset: 一份 manifest 一个 Asset。
+// 三层分工、manifest 为何是 ABI 权威、产物布局与变体系统: docs/architecture/shader-pipeline.md
 
 namespace radray::render {
 class Dxc;
@@ -107,11 +56,9 @@ enum class ShaderBytecodeSource : uint8_t {
 
 /// 源码身份与产物记录不匹配时的处置策略。
 enum class ShaderArtifactStaleness : uint8_t {
-    /// 开发用: 源码哈希与产物不符即视为未命中, 回退 JIT。改 shader 立刻生效
-    /// (含 resolver 实例存活期间的编辑 —— 身份缓存按依赖时间戳失效)。
+    /// 开发用: 哈希不符即视为未命中, 回退 JIT。改 shader 立刻生效。
     Strict,
-    /// 发布用: 只按逻辑 key 命中。源码可读且哈希不符时仅告警, 源码缺失时静默接受。
-    /// 存在理由: 发布包内没有 DXC 可回退, 源码若被改动一个字节也不该让整包 shader 失效。
+    /// 发布用: 只按逻辑 key 命中。哈希不符仅告警, 源码缺失静默接受。
     Lenient,
 };
 
@@ -136,8 +83,8 @@ struct ShaderBindingDesc {
 };
 
 /// 一个 descriptor set / register space。
-/// Group 同时是 D3D12 的 RegisterSpace 与 Vulkan 的 set index —— 这是 RHI 后端已经
-/// 硬化的不变量 (见 shaderlib/forward_pipeline/bindings.hlsli), manifest 不做重映射。
+/// Group 同时是 D3D12 的 RegisterSpace 与 Vulkan 的 set index (后端已硬化的不变量,
+/// 见 shaderlib/forward_pipeline/bindings.hlsli), manifest 不做重映射。
 struct ShaderBindingGroupDesc {
     uint32_t Group{0};
     vector<ShaderBindingDesc> Bindings;
@@ -147,12 +94,10 @@ struct ShaderBindingGroupDesc {
 
 /// push constant。不占 descriptor set 槽位, 故独立于 ShaderBindingGroupDesc,
 /// 且"整个 layout 至多一个"由类型系统保证而非计数校验。
-///
-/// Location 取 HLSL 的 (space, register): D3D12 用它填 32BIT_CONSTANTS 的
-/// RegisterSpace / ShaderRegister; Vulkan 只用它做 SetPushConstants 的匹配键
-/// (VkPushConstantRange 本身不需要位置)。因此一个字段同时服务两个后端。
 struct ShaderPushConstantDesc {
     string Name;
+    /// HLSL 的 (space, register)。D3D12 用它填 32BIT_CONSTANTS 的
+    /// RegisterSpace/ShaderRegister; Vulkan 只用它做 SetPushConstants 的匹配键。
     render::ShaderBindingLocation Location{};
     /// 字节数, 必须非零且 4 字节对齐。
     uint32_t Size{0};
@@ -202,9 +147,7 @@ struct ShaderStageDesc {
 
 /// keyword 组。组内 keyword 互斥。
 ///
-/// 只声明【合法组合域】(哪些组合可以被请求), 不描述离线预编译覆盖范围 ——
-/// 后者由 ShaderBakeSetDesc 单独声明。域大而烘焙集小是正常状态: 未烘焙的组合
-/// 在开发构建走 JIT, 在发布包 (AllowJit == false) 成为显式错误。
+/// 只声明【合法组合域】, 不描述离线预编译覆盖范围 (那是 ShaderBakeSetDesc)。
 struct ShaderKeywordGroupDesc {
     string Name;
     /// 互斥取值, 均为真实宏名。不可含空串 —— "关闭"由 IsOptional 表达, 不是取值之一。
@@ -220,31 +163,20 @@ struct ShaderKeywordGroupDesc {
 };
 
 /// 一条烘焙声明。Expand 与 Combination 恰好一个非空。
-///
-/// 存在理由: KeywordGroups 声明的合法域通常远大于值得预编译的范围, 而"烘哪些"是
-/// 作者的发布决策, 不能由域自动推导。两种写法各有不可替代的场景:
-///   - Expand: 一组正交轴的全组合, 对应 Unity 的 multi_compile;
-///   - Combination: 单个精确组合, 表达 Expand 表达不出的稀疏点。
 struct ShaderBakeRuleDesc {
     /// 参与笛卡尔积的组名。未列出的组取默认值 (可选组全关, 必选组取首个 keyword)。
     vector<string> Expand;
-    /// 一个显式组合的 keyword 列表。空数组不合法 (要烘默认变体请用空 Expand 之外
-    /// 的方式: 默认变体总在 Expand 的积里, 或干脆不声明 BakeVariants)。
+    /// 一个显式组合的 keyword 列表。空数组不合法。
     vector<string> Combination;
 
     friend bool operator==(const ShaderBakeRuleDesc&, const ShaderBakeRuleDesc&) noexcept = default;
 };
 
-/// 一个 pass 的离线烘焙范围。
-///
-/// 【留空 = 只烘默认变体】。这使未声明 BakeVariants 的旧 manifest 语义不变, 也让
-/// "什么都不烘除非作者说要烘"成为默认。未烘焙的组合在开发构建走 JIT, 在发布包
-/// (ShaderResolveSettings::AllowJit == false) 成为显式错误。
+/// 一个 pass 的离线烘焙范围。【留空 = 只烘默认变体】。
 struct ShaderBakeSetDesc {
     vector<ShaderBakeRuleDesc> Rules;
-    /// 剔除规则: 任一条的【全部】keyword 同时出现的组合被丢弃。对应 Unity 的
-    /// skip_variants。只作用于 Expand 的积 —— 显式 Combination 是作者点名要的,
-    /// 不该被泛化规则悄悄拿掉。
+    /// 剔除规则: 任一条的【全部】keyword 同时出现的组合被丢弃。
+    /// 只作用于 Expand 的积, 不影响显式 Combination。
     vector<vector<string>> Skip;
 
     bool IsEmpty() const noexcept { return Rules.empty(); }
@@ -263,15 +195,12 @@ struct ShaderPassDesc {
     /// 无条件生效的宏。与 keyword 的区别: 这些不产生变体。
     vector<string> Defines;
 
-    /// 以下两项直接改变字节码 (-O3/-Od, -all_resources_bound), 因此必须进 manifest:
-    /// 它们是 artifact 身份的一部分, 否则 AOT 与 JIT 会编出不同结果却共用同一个 key。
+    /// 以下两项直接改变字节码 (-O3/-Od, -all_resources_bound), 故是 artifact 身份的一部分。
     bool IsOptimize{true};
     /// 允许 unbounded 描述符数组。false 时 DXC 会加 -all_resources_bound。
     bool EnableUnbounded{true};
 
-    /// 本 pass 参与变体的 keyword 组名, 引用 ShaderAssetDesc::KeywordGroups。
-    /// 留空 = 全部组。存在理由: 同一资产的 forward pass 与 shadow pass 用的
-    /// keyword 集合本就不同, 不该让前者的组给后者生成无意义的变体维度。
+    /// 本 pass 参与变体的 keyword 组名, 引用 ShaderAssetDesc::KeywordGroups。留空 = 全部组。
     vector<string> KeywordGroups;
     /// 本 pass 的烘焙范围。留空则沿用 ShaderAssetDesc::BakeVariants。
     ShaderBakeSetDesc BakeVariants;
@@ -293,23 +222,14 @@ struct ShaderPassDesc {
 
 /// 一份 shader 资产的完整元数据, 对应一个 *.shader.json 文件。
 ///
-/// 刻意【不】包含: PrimitiveState / DepthStencilState / BlendState / ColorTargets /
-/// MultiSampleState。这些属 PSO 固定功能段, 不影响字节码, 由建 PSO 的调用方给出
-/// (PipelineStateCache 要求一份完整状态, 见 pipeline_state_cache.h)。注意这意味着
-/// manifest 里没有"pass 基线"可供材质覆盖 —— 基线由谁提供尚未裁决
-/// (见 render_framework/render_pipeline.h 的 MaterialRenderState)。
-/// 也不包含 AssetId —— 身份不是 manifest 内容的一部分, 而是由 manifest 路径推导
-/// (见 shader_asset.h 的 MakeShaderAssetId)。故同一份内容放在两个路径下是两个资产。
+/// 【刻意不含】PSO 固定功能段与 AssetId。
 struct ShaderAssetDesc {
     string Name;
     /// 资产级默认源文件, 相对 shader include root。
     string Source;
     vector<ShaderKeywordGroupDesc> KeywordGroups;
     /// 资产级默认烘焙范围, 供未声明 BakeVariants 的 pass 继承。
-    ///
-    /// 继承是【不对称】的, 这是刻意的: pass 显式写的规则引用了本 pass 没有的组会
-    /// 报错 (显式声明必须被严格核对), 而继承下来的规则遇到本 pass 没有的组会静默
-    /// 投影掉 (共享默认值必须能被裁剪, 否则每个 pass 都得复写一遍)。
+    /// 继承是【不对称】的 (显式引用不存在的组报错, 继承时静默投影掉), 见上述文档。
     ShaderBakeSetDesc BakeVariants;
     vector<ShaderPassDesc> Passes;
 
@@ -333,17 +253,12 @@ struct ShaderAssetDiagnostic {
 
 // ============================ 变体身份 ============================
 
-/// 一个 program 变体。
+/// 一个 program 变体。编码: 长度 == domain 的组数, 槽位序 == 组的声明顺序,
+/// 值 == 组内 keyword 下标或 kShaderKeywordOff。
 ///
-/// 编码: 长度 == domain 的组数, 槽位序 == 组的声明顺序, 值 == 组内 keyword 下标
-/// 或 kShaderKeywordOff。按【组】而非按 keyword 编码, 因为组内互斥已由 manifest
-/// 校验保证, 于是"每组选了什么"就是完整身份, 且 keyword 总数不受任何上限约束。
-///
-/// 【仅在同一个 domain 内可比】: 槽位语义由 domain 的组声明顺序定义, 跨
-/// (asset, pass) 比较无意义。比较运算符只用于域内去重与排序。
-///
-/// 【不要放进每帧路径】: 这是变长结构, 属作者期 / cook 期概念。运行时 PSO 缓存应
-/// 改用 ComputeShaderArtifactKey 得到的 ShaderHash —— 那是 POD, 无分配。
+/// 【仅在同一个 domain 内可比】槽位语义由该 domain 的组声明顺序定义。
+/// 【不要放进每帧路径】变长结构, 属作者期/cook 期概念。运行时用 ComputeShaderArtifactKey
+/// 得到的 ShaderHash (POD, 无分配)。
 struct ShaderVariantKey {
     vector<uint16_t> Selection;
 
@@ -390,13 +305,9 @@ public:
         std::string_view keyword,
         bool enabled) const noexcept;
 
-    /// 把与该 stage 无关的组槽位归一化为 kShaderKeywordOff。
+    /// 把与该 stage 无关的组槽位归一化为 kShaderKeywordOff, 【无论 IsOptional】。
     ///
-    /// 【无论 IsOptional 一律归 Off】: 被投影掉的组在该 stage 不产生任何宏, 故
-    /// 规范形式必须是 Off; 若必选组保留其默认选择, 两个本应共用同一份 VS 的变体
-    /// 会算出不同的 artifact key, 去重失效。
-    ///
-    /// 由此: 两个变体投影结果相同 <=> 该 stage 共用同一份字节码。
+    /// 由此得到字节码去重的核心不变量: 两个变体投影结果相同 <=> 该 stage 共用同一份字节码。
     ShaderVariantKey ProjectToStage(
         const ShaderVariantKey& key,
         render::ShaderStage stage) const noexcept;
@@ -422,9 +333,8 @@ public:
     std::optional<std::pair<uint32_t, uint16_t>> FindKeyword(std::string_view keyword) const noexcept;
 
 private:
-    /// 按 keyword 名排序的查找表, 二分命中。asset 内 keyword 名全局唯一
-    /// (ValidateAsset 已强制), 故一张平表足够。数量级在几十, 排序数组比哈希表
-    /// 更省内存且局部性更好。
+    /// 按 keyword 名排序的查找表, 二分命中。asset 内 keyword 名全局唯一 (ValidateAsset
+    /// 已强制), 故一张平表足够; 数量级在几十, 排序数组优于哈希表。
     struct LookupEntry {
         string Keyword;
         uint32_t GroupIndex{0};
@@ -442,36 +352,24 @@ const ShaderBakeSetDesc& GetEffectiveBakeSet(
     const ShaderPassDesc& pass) noexcept;
 
 /// 取该 pass 生效的源文件路径: pass 自己的, 或继承资产级的。
+/// 不要在调用点自己写 `pass.Source.empty() ? asset.Source : pass.Source`。
 ///
-/// manifest 允许 pass.Source 留空表示"沿用资产级 Source", 而 ShaderResolver::Resolve
-/// 只收 pass, 无从自己完成继承 —— 它要求传入的 pass.Source 已经是最终路径。
-/// 每个调用方各写一遍 `pass.Source.empty() ? asset.Source : pass.Source` 就会散落成
-/// 多份规则, 故收敛到这里。
-///
-/// 对经 ParseShaderAssetDesc 产出的 desc, 返回值非空 —— 该校验拒绝 pass 与资产级
-/// Source 同时为空的 manifest (shader_manifest.cpp:677-680)。手工构造的 desc 不在此保证内。
+/// 对经 ParseShaderAssetDesc 产出的 desc 返回值非空 (该校验拒绝两者同时为空)。
+/// 手工构造的 desc 不在此保证内。
 std::string_view GetEffectiveSource(
     const ShaderAssetDesc& asset,
     const ShaderPassDesc& pass) noexcept;
 
 /// 返回一个 Source 已展开为最终路径的 pass 副本, 可直接交给 ShaderResolver::Resolve。
-///
-/// 【为何返回副本而不是就地改】: ShaderAssetDesc 是解析结果, 保持它与 manifest 逐字
-/// 对应 (pass.Source 空就是空) 使往返序列化不失真; 展开是消费侧的需要。
+/// 返回副本而非就地改, 以保持 ShaderAssetDesc 与 manifest 逐字对应 (往返序列化不失真)。
 ShaderPassDesc MakeResolvablePass(
     const ShaderAssetDesc& asset,
     const ShaderPassDesc& pass);
 
 /// 展开烘焙声明为具体变体列表。规则求并集, 应用 Skip, 排序去重。
 ///
-/// 结果【总是】含默认变体: 一份 shader 至少要能在不开任何 keyword 时工作, 且这
-/// 使空 BakeVariants 与"只烘默认"是同一件事。
-///
-/// 不设数量上限 —— 烘多少由作者的声明决定, 这里不做二次政策。
-///
-/// isInherited 为 true 时, Expand 里本域不存在的组名被静默投影掉 (见
-/// ShaderAssetDesc::BakeVariants 的继承不对称说明); 为 false 时视为错误。
-/// Combination 的未知 keyword 与组内多选【始终】是错误, 与继承无关。
+/// 结果【总是】含默认变体, 且不设数量上限。isInherited 控制"Expand 引用了本域不存在的
+/// 组名"是静默投影还是报错 (继承不对称); Combination 的未知 keyword 与组内多选始终是错误。
 std::optional<vector<ShaderVariantKey>> ExpandShaderBakeSet(
     const ShaderVariantDomain& domain,
     const ShaderBakeSetDesc& bake,
@@ -496,10 +394,7 @@ struct ShaderHash {
 };
 
 /// 源码身份: 源文件及其 #include 闭包的内容哈希。
-///
-/// 之所以要自己扫 #include: DXC 只暴露默认 include handler, 编译后拿不到依赖列表,
-/// 因此无法事后得知该重编什么。扫描【不】求解 #if, 对被条件排除的 include 也一并
-/// 计入 —— 这是安全的方向 (过度失效优于漏失效)。
+/// 扫描【不】求解 #if, 被条件排除的 include 也计入 (过度失效优于漏失效)。
 struct ShaderSourceIdentity {
     ShaderHash Hash{};
     /// 参与哈希的所有文件, 相对 shader root 的 generic 路径, 已排序去重。
@@ -530,9 +425,7 @@ struct ShaderArtifactEntry {
     ShaderHash Key{};
     string PassName;
     /// 编出本条产物的源文件, 相对 shader root 的 generic 路径。
-    ///
-    /// 一个资产内不同 pass 可以有不同的 Source (见 ShaderPassDesc::Source), 而 key
-    /// 是按【该 pass 自己源文件】的身份算的, 故查找时必须能按源文件取到对应身份。
+    /// key 按【该 pass 自己源文件】的身份算, 故查找时必须能按源文件取到对应身份。
     string Source;
     render::ShaderStage Stage{render::ShaderStage::UNKNOWN};
     string EntryPoint;
@@ -540,10 +433,8 @@ struct ShaderArtifactEntry {
     /// 相对 artifact 目录的 blob 路径, 如 "dxil/a3f2....bin"。
     string BlobPath;
     /// 该 stage 投影后选中的 keyword, 已排序。空表示全关。
-    ///
-    /// 【不参与 Key, 也不用于查找】: 运行时按 (pass, stage, category, 投影后的
-    /// defines, SourceIdentity, ToolchainHash) 纯函数算出 Key 再查, 故这里只是供
-    /// 人工核对与工具使用的可读身份。空数组在序列化时可以省略, 缺失按空数组解析。
+    /// 【不参与 Key, 也不用于查找】只是可读身份, 供人工核对与工具使用。
+    /// 序列化时可省略, 缺失按空数组解析。
     vector<string> Keywords;
     /// 字节码内容哈希, 读取时校验完整性。
     ShaderHash BytecodeHash{};
@@ -568,9 +459,7 @@ struct ShaderArtifactIndex {
     /// cook 时 manifest 的 Name, 用于人工核对。
     string AssetName;
     /// cook 时每个源文件各自的身份。运行时用它判断产物是否已过期。
-    ///
-    /// 【按源文件分别记录】: key 是按 pass 自己源文件的身份算的, 若这里只存一份合并
-    /// 哈希, 多源资产在 Strict 下永远判为过期、在 Lenient 下永远算错 key。
+    /// 【必须按源文件分别记录】只存一份合并哈希会让多源资产的 key 永远算错。
     vector<ShaderArtifactSource> Sources;
     ShaderHash ToolchainHash{};
     vector<ShaderArtifactEntry> Entries;
@@ -591,11 +480,8 @@ struct ShaderArtifactBlob {
 
 // ============================ 解析与烘焙数据 ============================
 
-/// 整个进程只有一份的 shader 解析策略。
-///
-/// 【为何不按资产给】: 这四项回答的是同一个问题 —— "这是开发构建还是发布包"。让每个
-/// 加载调用点各自决定, 就允许同一进程里 A 资产走 Strict + JIT 而 B 资产走 Lenient +
-/// 无 JIT, 且没有任何机制拦得住 —— 一个决策落在两处, 谁都拦不住两边写歪。
+/// 整个进程只有一份的 shader 解析策略。这几项回答的是同一个问题 ——
+/// "这是开发构建还是发布包", 故【刻意不按资产给】。
 struct ShaderResolveSettings {
     /// shader include 根目录 (通常 <exe>/shaderlib)。
     std::filesystem::path ShaderRoot;
@@ -634,8 +520,8 @@ struct ShaderCookOptions {
     std::filesystem::path ManifestPath;
     /// 要烘焙的字节码类型。通常是 {DXIL, SPIRV}。
     vector<render::ShaderBlobCategory> Categories;
-    /// 用反射核对 manifest 声明。默认开启 —— cook 期是发现 manifest 与 HLSL
-    /// 不一致的最后时机, 关掉会把错误推迟到运行时建 PSO 失败。
+    /// 用反射核对 manifest 声明。cook 期是发现两者不一致的最后时机, 关掉会把错误
+    /// 推迟到运行时建 PSO 失败。
     bool ValidateReflection{true};
     /// 已存在且 key 相同的 blob 不重写。
     bool Incremental{true};
@@ -661,17 +547,8 @@ struct ShaderCookResult {
 
 /// 全进程共享的 shader 解析上下文: 策略 + 工具链 + 按【文件】记忆化的源码缓存。
 ///
-/// 【为什么缓存必须在文件层而不在 entry 层】: `ComputeShaderSourceIdentity` 读取
-/// include 闭包里每个文件的全部字节。而闭包高度重叠 —— error_pass 的 8 个文件是
-/// forward_pass 那 15 个的子集, shadow_pass 的 6 个也几乎全部重叠。按 entry 缓存
-/// (每份 manifest 一份) 会把 `math.hlsli` 读 N 遍、`filtering.hlsli` (9.7 KB) 读
-/// N 遍, 并各自重扫一遍 `#include`。按文件缓存后, 每个文件在一次内容变化内只读一次、
-/// 只扫一次, 与有几份 manifest 无关。
-///
-/// 【哈希公式一字未动】: 本类只把"读文件"与"扫 include"记忆化, 累加顺序 (排序后的
-/// path + size + bytes) 与原 `ComputeShaderSourceIdentity` 逐字一致, 故已有 AOT 产物
-/// 不失效, `kShaderArtifactFormatVersion` 无需改动。`ComputeShaderSourceIdentity`
-/// 保留为无缓存的自由函数, cook 与测试仍可直接用。
+/// 【哈希公式不可改】累加顺序与无缓存的 ComputeShaderSourceIdentity 逐字一致,
+/// 改动会让全部已有 AOT 产物失效。
 ///
 /// 非线程安全: 内部全是惰性缓存。多线程编译应各持一个实例, 或由调用方加锁。
 class ShaderResolveContext {
@@ -705,9 +582,8 @@ public:
 
 private:
     /// 一个源文件的缓存条目。key 是相对 root 的 generic 路径。
-    ///
-    /// 【Stamp 与内容同时存】: 命中时先 stat 复核 —— 时间戳变了就重读。光存内容是
-    /// 不够的, Strict 承诺"改 shader 立刻生效", 而 context 会跨整个进程存活。
+    /// 【Stamp 与内容同时存】命中时先 stat 复核, 否则 Strict 承诺的"改 shader 立刻生效"
+    /// 在跨进程存活的 context 上不成立。
     struct FileEntry {
         string Path;
         std::filesystem::file_time_type Stamp{};
@@ -741,12 +617,9 @@ private:
 
 /// 一份 manifest 的 stage 字节码解析器。按 AOT 产物优先、JIT 兜底的顺序取字节码。
 ///
-/// 【一个实例对应一份 manifest】: `ManifestPath` 是构造参数, 内部的 index 缓存与
-/// artifact 目录都由它推导 —— 这与"index.json 每份 manifest 一个"的产物布局一致。
-/// 剩下的状态 (策略 / 工具链 / 源码缓存) 全在 `ShaderResolveContext` 里, 由全部
-/// resolver 共享。
-///
-/// 【不持有 context 的生命周期】: context 必须活得比本对象久, 通常由 RenderSystem 持有。
+/// 【一个实例对应一份 manifest】index 缓存与 artifact 目录都由 manifestPath 推导, 与
+/// "index.json 每份 manifest 一个"的产物布局一致。其余状态在 ShaderResolveContext 里共享。
+/// 【不持有 context 的生命周期】context 必须活得比本对象久, 通常由 RenderSystem 持有。
 ///
 /// 非线程安全 (惰性 index 缓存 + 共享 context 的缓存)。
 class ShaderResolver {
@@ -836,8 +709,8 @@ bool ValidateShaderReflection(
 
 // ============================ 哈希与身份 ============================
 
-/// 稳定的字节内容哈希。跨平台跨编译器结果一致 —— cook 机器与运行机器可能不同,
-/// 故刻意不用 radray::HashCode (它按 size_t 宽度分派, 32/64 位结果不同)。
+/// 稳定的字节内容哈希。跨平台跨编译器结果一致 —— 刻意不用 radray::HashCode
+/// (它按 size_t 宽度分派, 32/64 位结果不同, 而 cook 机器与运行机器可能不同)。
 ShaderHash HashShaderBytes(std::span<const byte> data) noexcept;
 
 /// 计算源码身份。sourcePath 相对 shaderRoot。
@@ -873,15 +746,13 @@ std::filesystem::path GetShaderArtifactDirectory(const std::filesystem::path& ma
 /// artifact 目录内 blob 的相对路径: "<category>/<key hex>.bin"。
 string MakeShaderArtifactBlobPath(render::ShaderBlobCategory category, ShaderHash key);
 
-// 【没有「目标后端 -> 默认字节码类型」的映射, 任何一层都没有】: 本层所有接口都直接收
-// ShaderBlobCategory, 由调用方决定用哪种字节码。曾有一个 GetShaderBlobCategoryForBackend,
-// 而它是 RenderBackend 看起来属于 shader 层的唯一理由 —— 一个便利函数把一个类型拽低了
-// 一层。删掉它, RenderBackend 就干净地留在 rhi.h。
+// 【刻意没有】「目标后端 -> 字节码类型」的映射, 任何一层都没有。
+// 改前先读 docs/adr/0006-shader-types-layer-boundary.md。
 
 // ============================ 产物读写 ============================
 
 /// blob 容器的读写。容器带头部 (magic + 版本 + stage/category + 内容哈希),
-/// 使单个 blob 文件可独立自验, 不依赖 index.json 的正确性。
+/// 使单个 blob 文件可独立自验。
 bool WriteShaderArtifactBlob(
     const std::filesystem::path& path,
     const ShaderArtifactEntry& entry,
@@ -910,10 +781,8 @@ std::optional<string> SerializeShaderArtifactIndex(
 
 #if defined(RADRAY_ENABLE_SHADER_JIT)
 
-/// 烘焙一份 shader 资产。烘焙范围由每个 pass 生效的 ShaderBakeSetDesc 决定
-/// (见 GetEffectiveBakeSet / ExpandShaderBakeSet), 对 category × variant × stage
-/// 逐个编译; 投影到同一份字节码的 stage 自然共享一条 blob。
-///
+/// 烘焙一份 shader 资产。范围由每个 pass 生效的 ShaderBakeSetDesc 决定, 对
+/// category × variant × stage 逐个编译; 投影到同一份字节码的 stage 自然共享一条 blob。
 /// 成功时产物目录内容为: index.json + <category>/<key>.bin。
 ShaderCookResult CookShaderAsset(
     render::Dxc& dxc,

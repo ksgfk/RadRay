@@ -1,30 +1,12 @@
 // 垂直切片: 从 shader manifest 一路走到真实 GPU 绘制, 再把像素读回来断言。
+// 这是"manifest → PSO"那几个接口唯一的端到端覆盖。
 //
-// 【为什么存在】: shader_asset 的底层 (manifest 解析、变体域、artifact 索引、cook) 有大量
-// 单元测试, 但 CreateShader / CreatePipelineLayout / CreateShaderParameterSet /
-// CreateGraphicsPipelineState 这几个"把 manifest 变成 PSO"的接口, 在本文件之前于
-// modules/runtime 下没有任何调用方 —— 整条链从未被端到端跑过一次。本文件就是那第一次。
-//
-// 【为什么不做成 example】: examples/ 的两个 demo 依赖已被删除的 material 层, 要跑起来
-// 得先把那层补出来; 而那层的 API 形状恰恰是这条切片应当用来推导的东西。先补再验证等于
-// 用猜出来的形状验证自己。headless 还额外换来自动回归。
-//
-// 【刻意不碰的东西】: swapchain / present / Scene → SceneProxy → 绘制提交。前者是另一个
-// 已在运行的子系统; 后者目前不可能产出任何 proxy —— PrimitiveComponent::CreateSceneProxy
-// 基类返回 nullptr (src/components/primitive_component.cpp:42-44), Scene::AddPrimitive
-// 拿到 nullptr 即返回 (src/render_framework/scene.cpp:19-22)。补齐它需要先决定
-// material/mesh 层的形状, 那是切片之后的事。
-//
-// 【用 error_pass 而非 forward_pass】: error_pass 顶点只有 POSITION、PSMain 返回洋红常量、
-// 无材质绑定, 断言"像素是洋红"最干净。forward_pass 要填 ViewConstants 大结构 + 3 个
-// binding group + 48 字节顶点, 绝大部分工作与本切片要验证的东西无关。
-//
-// 【JIT / AOT 双参数化】: 同一条链路跑两遍, 唯一区别是字节码从哪来。
-// - Jit: 无产物, resolver 现场编译 (开发构建)。
-// - Aot: 先 CookShaderAssetFile, 再用 AllowJit == false + dxc == nullptr 解析 (发布包)。
-// 后者是 radray_shader_cook 在构建期做的事的等价物。分开两个参数而不是只测 AOT, 是因为
-// 两条路径在 ShaderResolver 里几乎不共享代码 —— AOT 那半段 (toolchain 比对、按源文件取
-// cook 时身份、算 key、读 blob 自验) 只在有产物时才会执行。
+// 【刻意不碰】swapchain / present / Scene → SceneProxy → 绘制提交 —— 后者目前不可能产出
+// 任何 proxy (PrimitiveComponent::CreateSceneProxy 基类返回 nullptr)。
+// 【用 error_pass 而非 forward_pass】它顶点只有 POSITION、PSMain 返回洋红常量、无材质绑定,
+// 断言"像素是洋红"最干净。
+// 【JIT / AOT 双参数化】两条路径在 ShaderResolver 里几乎不共享代码, AOT 那半段 (toolchain
+// 比对、按源文件取 cook 时身份、算 key、读 blob 自验) 只在有产物时才执行。
 
 #include <radray/basic_math.h>
 #include <radray/environment.h>
@@ -79,13 +61,9 @@ struct ObjectConstantsCpu {
     std::array<float, 16> ObjectToWorld{};
 };
 
-// gView 的 CPU 侧镜像。error_pass 的 VS 只读 ViewProj, 但 cbuffer 必须按完整结构
-// 分配 —— 尺寸不足时 D3D12 会在建 CBV 时越界。
-//
-// 【为何镜像整个结构而不是直接写个够大的数字】: 这些上限来自 shaderlib 的宏, 改了
-// 之后一个手写的字节数不会有任何提示。镜像结构至少让 ViewProj 必须在偏移 0 这条
-// 前提是显式的; 若哪天 shaderlib 往 ViewConstants 前面插了字段, 下面的
-// static_assert 不会响, 但绘制会立刻变黑, 比静默读到垃圾数据好。
+// gView 的 CPU 侧镜像。VS 只读 ViewProj, 但 cbuffer 必须按完整结构分配 —— 尺寸不足时
+// D3D12 会在建 CBV 时越界。
+// 【镜像整个结构而不是写个够大的数字】上限来自 shaderlib 的宏, 手写字节数改了不会有提示。
 constexpr uint32_t kMaxPointLights = 8;        // lighting/lights.hlsli:12
 constexpr uint32_t kMaxDirectionalLights = 8;  // lighting/lights.hlsli:11
 constexpr uint32_t kCubeFaceCount = 6;         // shadow/cube.hlsli:16

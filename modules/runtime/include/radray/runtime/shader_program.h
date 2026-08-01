@@ -4,66 +4,16 @@
 #include <span>
 
 // 【必须显式包含 rhi.h】本头持有活的 GPU 对象 (PipelineLayout), 属 render 层。
-// 以前它靠 shader_manifest.h 传递地拿到 rhi.h; 格式层迁入 radrayshader 后那条链断了,
-// 因为格式层现在只包含 shader_types.h (刻意不依赖任何 device 类型)。
+// 格式层迁入 radrayshader 后不再传递地带来 rhi.h (它只包含 shader_types.h)。
 #include <radray/render/rhi.h>
 #include <radray/runtime/gpu_resource.h>
 #include <radray/runtime/pipeline_layout_cache.h>
 #include <radray/shader/shader_manifest.h>
 
-// pass 级 program: 把 "keyword -> 字节码" 那条链收敛成一次调用。
+// shader 对象层: pass 级 program, 把 "keyword -> 字节码" 那条链收敛成一次调用。
 //
-// == 三层的分工 ==
-//
-//   shader_manifest.h  格式层。manifest desc、变体域、产物索引、ShaderResolver、cook。
-//                      不含 Asset —— tools/shader_cook 只需要这一层。
-//   shader_program.h   对象层。ShaderPassProgram: 共享 PipelineLayout 引用 + 字节码缓存。
-//                      【不含 Asset】, 故不依赖 AssetManager / stdexec。
-//   shader_asset.h     资产层。ShaderAsset: 一份 manifest 一个 Asset, 持 resolver
-//                      与 N 个 ShaderPassProgram。
-//
-// 本文件刻意停在 Asset 之下: program 的形状与资产系统无关, material 层若只想拿一个
-// pass 的 layout + 字节码, 不该被迫拖进 AssetManager。
-//
-// == 归属关系 ==
-//
-//   ShaderAsset (见 shader_asset.h)
-//     ├─ ShaderAssetDesc      manifest 解析结果
-//     ├─ ShaderResolver       一资产一份, 与 "index.json 每 manifest 一个" 对齐
-//     └─ ShaderPassProgram[]  每 pass 一个 (本文件)
-//          ├─ ShaderPassDesc      Source 已展开的副本
-//          ├─ SharedPipelineLayout 【共享, 非独占】variant / target 无关, 加载期取得。
-//          │                       按 binding 布局内容跨 pass / 跨资产去重, 见
-//          │                       pipeline_layout_cache.h。
-//          ├─ ShaderVertexInputStorage  仅 graphics pass
-//          ├─ ShaderVariantDomain
-//          └─ 字节码缓存 (两级, 见 ShaderPassProgram)
-//
-// == 刻意不包含 render::Shader 与 PSO ==
-//
-// `render::Shader` 是【瞬态参数, 不是资源】: 两个后端都只在建 PSO 时消费它, PSO
-// 建成后无任何回指 —— D3D12 的 GraphicsPsoD3D12 成员只有 device/layout/pso/
-// vertexStrides/topo (字节码在 CreateGraphicsPipelineState 内被拷进 PSO),
-// Vulkan 的 GraphicsPipelineVulkan 成员只有 device/layout/pipeline (规范也明确允许
-// pipeline 建成后立即销毁 shader module)。`ShaderEntry::EntryPoint` 那个 string_view
-// 同理只需活到调用返回。
-//
-// 所以 Shader 应在建 PSO 的函数里当局部量创建, 出作用域即销毁。常驻缓存它只能省下
-// 一次 CreateShader (输入就是本层缓存的字节码, 不读盘不 JIT), 代价却是永久驻留全部
-// VkShaderModule / 字节码副本。
-//
-// PSO 则相反, 必须常驻缓存, 但归 RenderSystem —— PSO 的 key 比字节码宽 (含
-// MaterialRenderState、vertex layout、RT 格式), 同一份字节码会喂给多个 PSO。
-//
-// == PipelineLayout 是共享的, 本层只持一份引用 ==
-//
-// layout 只由 binding 布局决定, 与 variant / target 无关, 且规模化后大量 pass 的布局
-// 逐字节相同 (见 pipeline_layout_cache.h)。故它归 PipelineLayoutCache 按内容去重,
-// 本层持 IntrusivePtr<SharedPipelineLayout> 一份引用, 归零时对象自毁。
-//
-// 因此 ShaderPipelineLayoutStorage 降级为【瞬态】: 它只在加载期把 manifest 打包成一份
-// descriptor 喂给缓存, 缓存把内容归一化进自己的 key, 之后 storage 即可丢弃。program 与
-// 缓存都不再存它 —— key 只用于查表, 不需要能还原成 descriptor。
+// 三层分工与归属关系、为何刻意不缓存 render::Shader、PipelineLayout 为何共享:
+// docs/architecture/shader-pipeline.md
 
 namespace radray {
 
@@ -74,8 +24,8 @@ class PipelineLayout;
 /// 持有 render::PipelineLayoutDescriptor 所需的全部后备存储。
 /// PipelineLayoutDescriptor 内部是 span, 必须有稳定的拥有者。move-only。
 ///
-/// 【瞬态】: 只用于把 manifest 打包成一份 descriptor 喂给 PipelineLayoutCache, 之后即可
-/// 丢弃 —— 缓存把内容归一化进自己的 key, 不引用本对象 (见 pipeline_layout_cache.h)。
+/// 【瞬态】只用于把 manifest 打包成一份 descriptor 喂给 PipelineLayoutCache, 之后即可
+/// 丢弃 —— 缓存把内容归一化进自己的 key, 不引用本对象。
 class ShaderPipelineLayoutStorage {
 public:
     ShaderPipelineLayoutStorage() noexcept = default;
@@ -156,15 +106,9 @@ private:
 
 /// 一个 pass 的运行时 program。把 "keyword -> 字节码" 那条四步链收敛到一次调用。
 ///
-/// 【为何必须在这层缓存字节码】: ShaderResolver::Resolve 不缓存字节码, 每次调用都会
-/// 重新读 blob 或重新 JIT (它缓存的只有 index 与源码身份)。若本层不缓存, 每次 PSO
-/// cache miss 都要重新读盘 / 重编。
-///
-/// 缓存是两级的:
-///   1. ShaderHash -> ShaderBytecode   拥有字节码, 按 artifact key 去重;
-///   2. (variant, category) -> 各 stage 的 ShaderHash。
-/// 两级是必要的, 因为 ProjectToStage 保证 "两个变体投影相同 <=> 该 stage 共用同一份
-/// 字节码" (实测 forward_pass 的 Deduplicated == 1)。只按变体缓存会存多份副本。
+/// 【字节码缓存必须在这层】ShaderResolver::Resolve 不缓存字节码, 每次调用都重新读 blob
+/// 或重新 JIT。缓存是两级的 (按 artifact key 去重 + 按 variant 索引), 因为 stage 投影
+/// 使多个变体共用同一份字节码。
 ///
 /// 非线程安全: 内部惰性缓存, 且底层 ShaderResolver 本就非线程安全。
 class ShaderPassProgram {
@@ -195,10 +139,8 @@ public:
     std::optional<render::VertexInputState> GetVertexInputState() const noexcept;
 
     /// 解析一个变体的全部 stage。命中缓存直接返回, 未命中则逐 stage 解析。
-    ///
-    /// 【失败不写缓存】: 中途任一 stage 失败即整体返回 nullptr, 已解析的 stage 字节码
-    /// 仍留在一级缓存 (它们本身是有效的, 且按 key 去重), 但不产生半个变体条目 ——
-    /// 否则下次命中会拿到一个缺 stage 的变体。
+    /// 【失败不写变体条目】任一 stage 失败即整体返回 nullptr, 已解析的字节码留在一级
+    /// 缓存但不产生半个变体 —— 否则下次命中会拿到一个缺 stage 的变体。
     Nullable<const ShaderProgramVariant*> GetOrCreateVariant(
         const ShaderVariantKey& variant,
         render::ShaderBlobCategory category,
@@ -214,10 +156,8 @@ public:
     size_t GetCachedBytecodeCount() const noexcept { return _bytecodes.size(); }
 
     /// 放开 GPU 资源。由 ShaderAsset::OnUnload 调用。
-    ///
-    /// 【不需要延迟销毁的出口】: 本层唯一的 GPU 对象是共享的 PipelineLayout, 它按引用计数
-    /// 归零即销毁, 而仍在录制中的 PSO 各自持有一份引用 (见 PipelineStateCache::
-    /// GraphicsEntry), 故放开自己那份是安全的。理由见 pipeline_layout_cache.h。
+    /// 【不需要延迟销毁】本层唯一的 GPU 对象是共享 PipelineLayout, 仍在录制中的 PSO
+    /// 各自持有一份引用, 故放开自己那份是安全的。见 pipeline_layout_cache.h。
     void ReleaseRenderResources() noexcept;
 
 private:
@@ -241,12 +181,10 @@ private:
 
     ShaderPassDesc _pass;
     ShaderVariantDomain _domain;
-    /// 【共享, 非独占】一份引用。布局相同的其他 program 持同一个对象, 归零时对象自毁。
-    /// 只在建 PSO 时被解引用, 见 pipeline_layout_cache.h 里的生命周期说明。
+    /// 【共享, 非独占】布局相同的其他 program 持同一个对象, 归零时对象自毁。
     IntrusivePtr<SharedPipelineLayout> _pipelineLayout;
     std::optional<ShaderVertexInputStorage> _vertexInput;
-    /// 借用而非拥有。持有者 (通常是 ShaderAsset) 必须保证 resolver 活得比本对象久 ——
-    /// 见 shader_asset.h 里 ShaderAsset 的成员声明顺序说明。
+    /// 借用而非拥有。持有者 (通常是 ShaderAsset) 必须保证 resolver 活得比本对象久。
     ShaderResolver* _resolver{nullptr};
     vector<unique_ptr<VariantEntry>> _variants;
     vector<unique_ptr<BytecodeEntry>> _bytecodes;

@@ -45,24 +45,14 @@ enum class RenderPassEvent : int32_t {
     AfterRendering = 1000,
 };
 
-/// 材质对 PSO 固定功能状态 (blend / zwrite / cull) 的覆盖 (对应 Unity ShaderLab 的
-/// [_SrcBlend] [_DstBlend] / ZWrite [_ZWrite] / Cull [_Cull])。
+/// 材质对 PSO 固定功能状态的三态覆盖 (对应 Unity ShaderLab 的 ZWrite / Cull / Blend)。
+/// 这些状态不影响 shader 字节码, 故不烘进 manifest, 由材质在建 PSO 时覆盖。
 ///
-/// 语义: 这些状态属 PSO 固定功能段, 不影响 shader 编译产物 (bytecode), 因此不该烘进
-/// ShaderPassDesc / 变体, 而应由材质在 PSO 构建时覆盖。这样同一份 shader + 同一 keyword 表
-/// 只需一个 ShaderAsset, opaque / transparent / 双面 等差异全部落在材质侧。
+/// Blend 用 (OverrideBlend + optional<BlendState>) 表达三态: false = 不覆盖;
+/// true + 有值 = 覆盖为开启; true + nullopt = 覆盖为【强制关闭】。
 ///
-/// 三态覆盖: 各字段为 nullopt / OverrideBlend=false 时不覆盖, 沿用材质层给出的基线,
-/// 否则用给定值覆盖。Blend 用 (OverrideBlend + optional<BlendState>) 表达三态:
-/// - OverrideBlend=false: 不覆盖, 沿用基线;
-/// - OverrideBlend=true 且 Blend 有值: 覆盖为开启, 用给定 BlendState;
-/// - OverrideBlend=true 且 Blend 为 nullopt: 覆盖为【强制关闭】混合 (opaque 显式关基线里的 blend)。
-///
-/// 【基线由谁提供尚未裁决】旧 ShaderPassDesc 曾持有 pass 级固定渲染状态, 已在重写中删除;
-/// 新 ShaderAssetDesc 刻意不含 (shader_manifest.h:300-302)。故本结构当前没有基线来源, 也
-/// 没有任何使用点。PipelineStateCache 要求调用方给出**完整**固定功能状态, 不做基线合成
-/// (见 pipeline_state_cache.h 文件头)。此外本结构只覆盖 Cull / DepthWrite /
-/// Blend 三项, Topology / FrontFace / DepthCompare / 各 target Format 等仍无人负责。
+/// 【基线由谁提供尚未裁决, 本结构当前无使用点】只覆盖 Cull / DepthWrite / Blend 三项,
+/// Topology / FrontFace / DepthCompare / target Format 仍无人负责。
 struct MaterialRenderState {
     std::optional<render::CullMode> Cull{};
     std::optional<bool> DepthWrite{};

@@ -23,14 +23,10 @@ ShaderAsset::ShaderAsset(
 ShaderAsset::~ShaderAsset() noexcept = default;
 
 void ShaderAsset::OnUnload(AssetManager& manager) {
-    // 【本资产的 GPU 对象只有共享的 PipelineLayout, 它不需要延迟销毁】: layout 按
-    // SharedPipelineLayout 的引用计数归零即毁, 而仍在录制中的 PSO 各自持有一份引用
-    // (见 PipelineStateCache::GraphicsEntry), 故这里放开自己那份不会拉掉正在用的 layout。
-    // 理由详见 pipeline_layout_cache.h。
-    //
-    // 【那为何还要 OnUnload】: 析构顺序。program 借用 resolver 裸指针, 而
-    // ShaderPassProgram::ReleaseRenderResources 要在 resolver 还活着时跑完。成员声明顺序
-    // 已经保证了这一点, 但显式做一次让"清理发生在哪"不必靠读声明顺序推断。
+    // 本资产的 GPU 对象只有共享 PipelineLayout, 它不需要延迟销毁 —— 仍在录制中的 PSO 各自
+    // 持有一份引用。这里存在的理由是【析构顺序】: program 借用 resolver 裸指针, 而
+    // ReleaseRenderResources 要在 resolver 还活着时跑完。成员声明顺序已保证这点, 显式做一次
+    // 是为了让"清理发生在哪"不必靠读声明顺序推断。
     (void)manager;
     for (const unique_ptr<ShaderPassProgram>& pass : _passes) {
         pass->ReleaseRenderResources();

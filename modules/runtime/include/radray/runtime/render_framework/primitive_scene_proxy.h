@@ -4,14 +4,14 @@
 #include <radray/runtime/gpu_resource.h>
 #include <radray/types.h>
 
+// 基本体侧代理。场景数据如何从 Actor/Component 流到渲染侧:
+// docs/architecture/render-framework.md
+
 namespace radray {
 
 /// 一次索引绘制的参数 (对应 UE5 的 FMeshBatchElement 的索引子集)。
-///
-/// 【Geometry 的保命责任在 proxy】: 它指进 StaticMesh 持有的 GpuMesh。覆写 GetDrawArgs 的
-/// proxy 必须自己存一份 StreamingAssetRef<StaticMesh> —— 引用计数是资产生命周期的唯一
-/// 权威, 持有它即保证这块 GpuMesh 不被销毁 (且归零后的 GPU buffer 还要过一次帧边界才真死,
-/// 见 StaticMesh::OnUnload)。见 asset.h。
+/// 【Geometry 的保命责任在 proxy】它指进 StaticMesh 持有的 GpuMesh, 所以覆写 GetDrawArgs 的
+/// proxy 必须自己存一份 StreamingAssetRef<StaticMesh>。
 struct MeshDrawArgs {
     const GpuMesh::DrawData* Geometry{nullptr};  // VB/IB 视图
     uint32_t FirstIndex{0};

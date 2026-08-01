@@ -15,6 +15,8 @@
 #include <radray/runtime/wait_frame.h>
 #include <radray/runtime/service_registry.h>
 
+// device / queue / flight / 上传 / 帧边界等待。帧序与关停顺序: docs/architecture/frame-and-gpu.md
+
 namespace radray::render {
 class CommandBuffer;
 }  // namespace radray::render
@@ -118,13 +120,9 @@ struct GpuFlightSlot {
     std::chrono::steady_clock::time_point FrameStartTime{};
 
     /// 等在本 flight 帧边界上的协程 (IWaitFrameProcessor::Wait 的挂起点)。
-    ///
-    /// 【挂在这里而不是一张全局表】: "等到已录制的 work 完成" 天然是 per-flight 的问题 ——
-    /// flight 的 fence 就是那个完成条件, 记在槽位上便无需另存 fence 值再逐个比较。
-    ///
-    /// 【两段式】: CompleteFlight 只把记录标记 FlightComplete (它可能跑在渲染线程),
-    /// 真正的 resume 由主线程的 GpuSystem::PumpWaitFrame 做。理由见 IWaitFrameProcessor
-    /// 的恢复线程约定。
+    /// 【挂在这里而不是全局表】flight 的 fence 就是完成条件, 无需另存 fence 值再比较。
+    /// 【两段式】CompleteFlight 只标记 FlightComplete (可能在渲染线程), resume 由主线程的
+    /// PumpWaitFrame 做。
     ManualCoroutineScheduler<WaitFrameRecord> WaitFrame;
 
     // —— 提交态（渲染线程写，retire 经 _retireMutex 读后清）。
@@ -335,21 +333,14 @@ public:
     GpuSystem& operator=(GpuSystem&&) = delete;
     ~GpuSystem() noexcept;
 
-    /// IWaitFrameProcessor。挂进【当前】flight 的等待表。
-    ///
-    /// 【为何是当前 flight 而不是"上一次提交的 fence 值"】: 调用点在帧顶 Update 期间, 此刻
-    /// 当前 flight 还没开始录制, 故"已录制的 work"全都属于更早的 flight —— 等当前 flight
-    /// 的 fence 必然晚于它们完成。这样就不必记录并比较 fence 值, 代价是最多多等一轮。
-    /// 口径本就允许多等 (见 IWaitFrameProcessor::Wait)。
+    /// IWaitFrameProcessor。挂进【当前】flight 的等待表 —— 调用点在帧顶 Update 期间,
+    /// 此刻"已录制的 work"全属于更早的 flight, 故等当前 flight 的 fence 必然够。
+    /// 代价是最多多等一轮, 而口径本就允许多等。
     task<void> Wait() override;
 
     /// 恢复指定 flight 上已就绪的等待者。
-    ///
-    /// 【只泵一个 flight, 且必须是调用线程当前独占的那个】: 多线程模式下渲染线程会在
-    /// CompleteFlight 里标记别的 flight 的记录, 若在此扫全表就与之竞争。调用点固定在
-    /// BeginUpdateForFlight —— 那一刻 runner 刚拿到该 flight 的可写槽位, 该 flight 上一轮
-    /// 的 fence 必然已完成、记录必然已被标记, 且此后到下一次 BeginUpdateForFlight 之间
-    /// 只有本线程访问它。
+    /// 【只泵一个 flight, 且必须是调用线程当前独占的那个】否则与渲染线程的 CompleteFlight
+    /// 竞争。调用点固定在 BeginUpdateForFlight。
     void PumpWaitFrame(uint32_t flightIndex);
 
     bool CompleteFlight(uint32_t flightIndex);
@@ -412,10 +403,9 @@ private:
     const uint32_t _backBufferCount;
     const uint32_t _flightDataCount;
     QueueFrameTrack _mainQueueTrack;
-    /// 【逐个 unique_ptr 而非 vector<FlightSlot>】: FlightSlot 内含
-    /// ManualCoroutineScheduler, 它不可拷贝也不可移动 —— 挂起的协程记录里存着回指调度器
-    /// 的指针 (stop callback), 搬动槽位会让那些指针指向旧地址。数量在构造时定下且此后不变,
-    /// 故间接一层不带来任何代价。
+    /// 【必须逐个 unique_ptr, 不能是 vector<FlightSlot>】FlightSlot 内含
+    /// ManualCoroutineScheduler, 挂起的协程记录里存着回指调度器的指针 (stop callback),
+    /// 搬动槽位会让那些指针指向旧地址。数量构造时定下, 故间接一层无代价。
     vector<unique_ptr<FlightSlot>> _flights;
     unique_ptr<ResourceUploader> _uploader;
     unique_ptr<FrameUploadScheduler> _frameUploadScheduler;

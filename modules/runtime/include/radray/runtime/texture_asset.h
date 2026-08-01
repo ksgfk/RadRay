@@ -50,18 +50,12 @@ struct hash<radray::TextureSubViewDesc> {
 namespace radray {
 
 /// GPU 贴图资产。对应 UE5 的 UTexture2D (最小化)。持有已上传的 device-local
-/// render::Texture + 一个默认全量 SRV (render::TextureView), 并内建一个 view 缓存承载
-/// "同一贴图的非默认子 view" (对应 UE5 挂在 texture 上的 FRHITextureViewCache)。
+/// render::Texture + 默认全量 SRV, 并内建一个按 TextureSubViewDesc 去重的子 view 缓存
+/// (对应 UE5 挂在 texture 上的 FRHITextureViewCache)。
 ///
-/// 设计:
-/// - 构造即完整: CPU 解码 + GPU 上传由加载协程在构造前完成, 资产一出生即可被采样绑定。
-/// - 与 ImageAsset (纯 CPU) 解耦: ImageAsset 持像素, 本资产持 GPU 资源。
-/// - view 所有权归本资产: 默认 SRV 存 _srv; 非默认子 view 经 GetOrCreateSrv 按 descriptor
-///   去重, unique_ptr 永生缓存至资产销毁。因此绑定点拿到的 view 指针在【持有一份
-///   StreamingAssetRef 期间】永不悬垂, 材质快照只需存 "ref + 描述值", 零裸指针。
-///
-/// 【view 缓存与"资产不可变"不矛盾】: 缓存是纯派生数据 —— 同一个 TextureSubViewDesc 永远
-/// 得到同一个 view, 填充顺序不改变任何观察结果。同 ShaderPassProgram 惰性编译字节码。
+/// 构造即完整 (CPU 解码 + GPU 上传由加载协程在构造前完成), 与纯 CPU 的 ImageAsset 解耦。
+/// view 所有权归本资产且永生至资产销毁, 故绑定点拿到的 view 指针在持有一份
+/// StreamingAssetRef 期间永不悬垂 —— 材质快照只需存 "ref + 描述值", 零裸指针。
 class TextureAsset : public Asset {
 public:
     TextureAsset(

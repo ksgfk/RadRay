@@ -9,6 +9,8 @@
 #include <radray/runtime/asset.h>
 #include <radray/runtime/service_registry.h>
 
+// 资产槽位、引用类型与加载调度。引用语义、销毁时机与关停顺序: docs/architecture/asset-system.md
+
 namespace radray {
 
 class AssetManager;
@@ -21,20 +23,12 @@ class StreamingAssetRef;
 
 /// 一个资产的槽位。定义在 asset_manager.cpp —— 本头文件只需要它的地址。
 ///
-/// 【为何在命名空间作用域而不是嵌套进 StreamingAssetRefAny】: 槽位归 AssetManager 所有
-/// (_slots 那张表持有它们), 引用只是指向它。嵌进引用类型会把所有权关系说反, 而且会让
-/// 任何非友元 (如 AssetWaitRecord) 都无法命名它 —— 嵌套类无法从外部前向声明, 于是
-/// 只能退化成 void*。
-///
-/// 【刻意保持不完整】: 外部能拿到这个名字但做不了任何事; 唯一的构造入口
-/// (StreamingAssetRefAny 的私有构造) 也不对外开放。
+/// 【刻意保持不完整, 且在命名空间作用域】槽位归 AssetManager 所有, 引用只是指向它;
+/// 嵌进引用类型会把所有权说反, 也会让非友元 (如 AssetWaitRecord) 无法命名它。
 struct AssetSlot;
 
 /// 资产 slot 的生命周期状态。
-///
-/// 【没有 Unloaded】: 引用计数是资产生命周期的唯一权威 (见 asset.h), 故只要还有一个
-/// StreamingAssetRef 指向 slot, slot 就一定存在 —— "已卸载"这个状态没有观察者。
-/// 从前它存在是因为 Unload 能无视引用计数销毁槽位。
+/// 【没有 Unloaded】只要还有一个引用指向 slot, slot 就一定存在, 故"已卸载"没有观察者。
 enum class AssetState {
     Loading,   ///< 空位已占,加载协程在飞,Object 尚未就绪。
     Ready,     ///< 资产已构造,可访问。
@@ -43,10 +37,8 @@ enum class AssetState {
 };
 
 struct AssetWaitRecord : ManualCoroutineRecord {
-    /// 等待目标。slot 由本记录的等待者所持有的 ref 保住, 故这个指针在记录存活期内有效。
-    ///
-    /// 【只用于比较, 不解引用】: AssetSlot 在此是不完整类型, 本记录也无需知道它的内容 ——
-    /// ResumeWaiters 拿它与目标 slot 做相等判断即可。
+    /// 等待目标。由等待者持有的 ref 保住, 故在记录存活期内有效。
+    /// 【只用于比较, 不解引用】AssetSlot 在此是不完整类型。
     const AssetSlot* Slot{nullptr};
 };
 
@@ -88,18 +80,14 @@ struct AssetLoadRequest {
     string DebugName{};
 };
 
-/// 【类型擦除的 streaming 引用】。同时表达加载状态与 ready 后的资产访问。
+/// 【类型擦除的 streaming 引用】同时表达加载状态与 ready 后的资产访问。
 ///
-/// 表示是 manager + slot 裸指针: slot 是 unordered_map 里的 unique_ptr 元素, 地址稳定,
-/// 而 RefCount > 0 保证它不被销毁 —— 故不需要 generation 校验, 也不需要每次访问都按 id
-/// 查一次哈希表 (Get() 在渲染热路径上: PSO 缓存、SceneProxy)。
+/// 表示是 manager + slot 裸指针 (地址稳定 + RefCount > 0 保活), 故 Get() 无需查表 ——
+/// 它在渲染热路径上 (PSO 缓存、SceneProxy)。
 ///
-/// 【单线程】: 拷贝 / 移动 / 析构 / 状态查询 / 资产访问全部只能在拥有 AssetManager 的线程
-/// (主线程) 进行 —— RefCount 是普通整数, 且增减要触碰 manager 的表。资产【内部数据】被
-/// 各系统怎么跨线程使用不属资产系统管辖, 但引用本身不跨线程。
-///
-/// 【必须全部死在 AssetManager 之前】: slot 随 manager 一同释放, 之后 _slot 悬垂。
-/// manager 析构时若仍有存活引用会记 error log 并照样卸载, 见 AssetManager 的析构说明。
+/// 【单线程】拷贝/移动/析构/状态查询/资产访问都只能在拥有 AssetManager 的线程进行。
+/// 资产内部数据被各系统怎么跨线程使用不属资产系统管辖, 但引用本身不跨线程。
+/// 【必须全部死在 AssetManager 之前】slot 随 manager 释放, 之后连 IsValid() 都答不出来。
 class StreamingAssetRefAny {
 public:
     StreamingAssetRefAny() noexcept = default;
@@ -133,8 +121,8 @@ public:
     /// false = 等待者自己被取消 (不是资产加载失败)。
     AssetWaitAwaitable operator co_await() const noexcept;
 
-    /// 【指向同一个槽位】。这是 id 去重的可观测形式: Load 命中既有 slot 时返回的引用与
-    /// 原引用相等。刻意【不】比较 AssetId —— 两个无效引用的 id 都是空, 那样会相等。
+    /// 【比较是否指向同一个槽位】这是 id 去重的可观测形式。刻意不比较 AssetId ——
+    /// 两个无效引用的 id 都是空, 那样会相等。
     bool operator==(const StreamingAssetRefAny& other) const noexcept {
         return _manager == other._manager && _slot == other._slot;
     }
@@ -225,16 +213,16 @@ private:
 /// co_await 一份 streaming 引用的 awaitable。恢复点在 AssetManager::Pump 把加载结果提交、
 /// 槽位进入终态之后。await_resume 返回 false 表示【等待者自己】被取消, 而非资产加载失败。
 ///
-/// 【持有 ref 的副本, 这是必须的】: 等待期间它是槽位的一个引用持有者, 于是槽位不会因
-/// "外部都放手了"而在 Pump 里被回收 —— 那会让等待记录指向一个已销毁的 slot。
+/// 【必须持有 ref 的副本】等待期间它是槽位的一个引用持有者, 否则槽位会因"外部都放手了"
+/// 而在 Pump 里被回收, 令等待记录指向已销毁的 slot。
 class AssetWaitAwaitable {
 public:
     explicit AssetWaitAwaitable(StreamingAssetRefAny ref) noexcept : _ref(std::move(ref)) {}
 
     bool await_ready() const noexcept { return !_ref.IsValid() || _ref.IsCompleted(); }
 
-    /// 【模板化以拿到 promise】: 取消所需的 stop token 只能从 promise 的 env 里取, 而
-    /// coroutine_handle<> 已经把它擦除了。见 GetCoroutineStopToken。
+    /// 【模板化以拿到 promise】取消所需的 stop token 只能从 promise 的 env 里取, 而
+    /// coroutine_handle<> 已把它擦除。见 GetCoroutineStopToken。
     template <class Promise>
     bool await_suspend(std::coroutine_handle<Promise> continuation) {
         return Suspend(continuation, GetCoroutineStopToken(continuation));
@@ -263,18 +251,12 @@ AssetWaitAwaitable StreamingAssetRef<T>::operator co_await() const noexcept {
 
 /// 资产仓库。按 AssetId 去重的单表 + 引用计数。
 ///
-/// - 单线程使用,不加锁(协程推进、表操作、引用增减全在主线程)。
-/// - Load 只接受已经创建好的 task<AssetLoadResult>,再包装为内部 task<void> 提交给 TaskScope。
-/// - slot 自己维护 per-load stop_source 与 pending result;TaskScope 只负责结构化生命周期。
-/// - 【引用计数是唯一的回收权威】: 没有 Unload, 没有 CollectUnreferenced, 也没有闲置缓存。
-///   最后一份引用消失后, 资产在下一次 Pump 里 OnUnload + 析构 + 摘除 slot。
+/// - 单线程使用, 不加锁 (协程推进、表操作、引用增减全在主线程)。
+/// - Load 只接受已创建好的 task<AssetLoadResult>, 再包装为内部 task<void> 提交给 TaskScope。
+/// - slot 自己维护 per-load stop_source 与 pending result; TaskScope 只负责结构化生命周期。
+/// - 【引用计数是唯一的回收权威】没有 Unload / CollectUnreferenced / 闲置缓存。最后一份
+///   引用消失后, 资产在下一次 Pump 里 OnUnload + 析构 + 摘除 slot。
 ///
-/// == 为何销毁对齐到 Pump 而不是就地发生在引用归零处 ==
-///
-/// 就地销毁会让 ~StreamingAssetRefAny (一条 noexcept 路径) 跑任意代码: 资产析构会放开它
-/// 自己持有的 StreamingAssetRef 成员, 从而递归销毁别的 slot; 而遍历资产表时放开一个引用
-/// 会当场令迭代器失效。对齐到 Pump 后两个问题一并消失, 且"资产销毁只在一个确定时刻发生"
-/// 本身便于推理。这仍然是"归零即销毁", 不是保留策略 —— 只是动作对齐到帧内一个固定点。
 class AssetManager {
 public:
     AssetManager() noexcept;
@@ -283,13 +265,8 @@ public:
     AssetManager& operator=(const AssetManager&) = delete;
     AssetManager& operator=(AssetManager&&) = delete;
 
-    /// 【存活引用必须先于本对象消失】: slot 存储随本对象释放, 之后任何 StreamingAssetRef
-    /// 的 _slot 都是悬垂指针 —— 连 IsValid() 都答不出来。参照 Application::Shutdown 的
-    /// 顺序: World → RenderSystem → AssetManager → GpuSystem。
-    ///
-    /// 违反时【记 error log 并照样卸载】, 不 abort。理由是此刻两种结果都坏, 而 GPU 资源
-    /// 必须在 device 之前交出 —— 泄漏比悬垂更难查, 且关停期 abort 会掩盖真正的首因
-    /// (通常是某个 system 忘了 reset)。详见析构实现处。
+    /// 【存活引用必须先于本对象消失】关停顺序是 World → RenderSystem → AssetManager →
+    /// GpuSystem。违反时记 error log 并照样卸载, 不 abort (关停期 abort 会掩盖真正的首因)。
     ~AssetManager() noexcept;
 
     /// 异步发起加载。按 id 去重:命中在飞或已就绪 slot 直接复用。
@@ -301,9 +278,8 @@ public:
     StreamingAssetRef<T> Load(AssetLoadRequest request);
 
     /// 等待 streaming 引用离开 Loading 状态。等待者取消不会取消底层资产加载。
-    ///
-    /// 【薄转发】: 真正的实现是 StreamingAssetRefAny::operator co_await, 直接 `co_await ref`
-    /// 等价。本函数保留是因为它额外把"等待者被取消"转成对当前 task 的 stop 传播。
+    /// 【薄转发】直接 `co_await ref` 等价; 本函数额外把"等待者被取消"转成对当前 task
+    /// 的 stop 传播。
     task<void> Wait(StreamingAssetRefAny ref);
 
     template <class T>
@@ -347,28 +323,20 @@ public:
 
     /// 资产内部数据的延迟销毁入口。由 Asset::OnUnload 调用。
     ///
-    /// 【整包交出, 不逐个交】: payload 是一个可移动的可调用对象 (通常是捕获了整组 GPU
-    /// 对象的 lambda)。它在一个帧边界之后被销毁, 销毁顺序由 payload 内部的捕获/成员声明
-    /// 顺序显式表达 —— 例如 TextureAsset 必须让 view 先于 texture 死, 那是 lambda 里
-    /// 两个 unique_ptr 的声明顺序问题, 而不是"交出去的先后能不能被队列保持"的问题。
+    /// 【整包交出, 不逐个交】payload 是一个可移动的可调用对象 (通常是捕获了整组 GPU 对象
+    /// 的 lambda), 在一个帧边界之后被销毁。销毁顺序由 payload 内部的捕获/成员声明顺序
+    /// 显式表达, 不要依赖多次调用的先后。理由见
+    /// docs/adr/0009-deferred-destroy-hands-over-suspension.md。
     ///
-    /// 【为何不是"交出对象"而是"包住对象"】: 逐对象交出的接口 (从前的
-    /// IRenderResourceRecycler::RecycleRenderResource) 把销毁顺序寄托在队列语义上, 那是
-    /// 一条无法在类型上表达、也无法在 review 中看见的隐式契约。
-    ///
-    /// 【一帧一个协程帧】: 同一次 Pump 内的全部 payload 攒成一批, 共用一个等待帧边界的
-    /// 协程。故大量资产同时归零不会产生大量协程。
-    ///
-    /// wait processor 未装配时【立即销毁 payload】并记 error log —— 见实现处说明。
+    /// 同一次 Pump 内的全部 payload 攒成一批共用一个协程帧。
+    /// wait processor 未装配时立即销毁 payload 并记 error log。
     template <class F>
     void DeferDestroy(F&& payload) {
         EnqueueDeferred(make_unique<DeferredPayloadImpl<std::decay_t<F>>>(std::forward<F>(payload)));
     }
 
-    /// 注入帧边界等待器(非拥有)。【必须装配】,见 ServiceTraits<AssetManager>。
-    ///
-    /// 【生命周期】:调用方保证它活得比本 AssetManager 更久 (见 Application::Shutdown 的
-    /// 关停顺序: AssetManager 先于 GpuSystem 销毁)。
+    /// 注入帧边界等待器 (非拥有)。【必须装配】见 ServiceTraits<AssetManager>。
+    /// 调用方保证它活得比本 AssetManager 更久 (关停顺序里 AssetManager 先于 GpuSystem 死)。
     void SetWaitFrameProcessor(IWaitFrameProcessor* processor) noexcept { _waitFrame = processor; }
 
     uint32_t GetAssetCount() const noexcept;
@@ -420,7 +388,7 @@ private:
     ManualCoroutineScheduler<AssetWaitRecord> _waiters;
     unordered_map<AssetId, unique_ptr<Slot>> _slots;
     /// 在飞加载的 slot。manager 自持一份引用 —— 加载期间外部引用可能全部消失, 但槽位要
-    /// 活到协程跑完 (见 Load 的说明)。
+    /// 活到协程跑完。
     vector<StreamingAssetRefAny> _activeLoads;
     /// 本帧待延迟销毁的 payload。Pump 时整批交给一个协程。
     vector<unique_ptr<DeferredPayload>> _pendingDeferred;

@@ -162,10 +162,8 @@ public:
     int StartLoop();
 
 protected:
-    // ════════════════════════════════════════════════════════════════
-    //  游戏 override 点(窄接口)。底层负责"何时 tick、怎么 acquire/render/present";
-    //  游戏只负责"这个应用要画什么 / 做什么"。
-    // ════════════════════════════════════════════════════════════════
+    // 游戏 override 点 (窄接口)。底层负责"何时 tick、怎么 acquire/render/present",
+    // 游戏只负责"这个应用要画什么"。
 
     /// 运行时全部内部系统就绪后(device/window/gpu/render/asset/world 全部建好)的一次性初始化。
     /// 典型用途:加载资产、Spawn Actor、建相机。

@@ -1,18 +1,8 @@
-// radray_shader_gen —— 从 HLSL 反射生成 *.shader.json 的起始模板。
+// radray_shader_gen —— 从 HLSL 反射生成 *.shader.json 的起始模板。作者期一次性工具,
+// 输出需人工收敛 (烘焙已收敛 manifest 的是 radray_shader_cook)。
 //
-// 用法:
-//   radray_shader_gen --shader-root <dir> --source <rel.hlsl>
-//                     --stage <vertex|pixel|compute>=<EntryPoint> [...]
-//                     [--name <AssetName>] [--pass <PassName>]
-//                     [--sm <SM60..SM66>] [--define <MACRO[=V]>]...
-//                     [--probe <MACRO,MACRO,...>]... [--no-spirv]
-//                     [--no-vertex-input] [-o <out.shader.json>] [--stdout] [--force]
-//
-// 生成的文件【可以直接被 ParseShaderAssetDesc 解析并 cook】; 其中的 "_TODO" 数组
-// 列出反射原理上给不出、需要作者确认的字段 (见 shader_asset_template.h 的说明)。
-//
-// KeywordGroups 由源码里的 `#pragma radray_keyword_group` 自动生成, 并据此自动探测
-// 被 #ifdef 包住的绑定 —— 通常无需手写 --probe。
+// 生成的文件可以直接被 ParseShaderAssetDesc 解析并 cook; "_TODO" 数组列出反射原理上
+// 给不出、需要作者确认的字段。用法与逐项填法见 docs/guide/shader-authoring.md。
 
 #include <cstdio>
 #include <filesystem>
@@ -65,10 +55,8 @@ struct Arguments {
     /// 只认入口文件里的 keyword 声明, 不继承 include 链带来的组。
     bool KeywordEntryFileOnly{false};
     bool AutoProbe{true};
-    /// 允许覆盖已存在的输出文件。
-    ///
-    /// 【为何默认拒绝】: 目标通常是一份已经人工补齐过 Residency / BakeVariants 的
-    /// manifest, 而生成结果只是模板 —— 直接覆盖会静默丢掉那些手工决策。
+    /// 允许覆盖已存在的输出文件。默认拒绝: 目标通常已被人工补齐过 Residency /
+    /// BakeVariants, 而生成结果只是模板, 覆盖会静默丢掉那些决策。
     bool Force{false};
 };
 

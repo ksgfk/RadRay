@@ -177,28 +177,18 @@ AssetManager::~AssetManager() noexcept {
 
     // 2. 提交残留结果, 再放开 _activeLoads 里那些引用, 然后回收已归零的资产。
     //
-    //    【顺序不能反】: PumpLoadResults 遍历的正是 _activeLoads —— 先 clear 会让它变成
-    //    空转, 于是"协程已写好结果但还没 Pump"的那些资产留在 PendingResult 里随 optional
-    //    析构, 永远不走 OnUnload, 它们持有的 GPU 对象就此活过 device。
-    //
-    //    【不调 Pump】: 它的第三步会把 payload 交给一个新协程去等帧边界, 而 _loadScope
-    //    刚 request_stop 过, 那个协程只会立刻被取消 —— 绕一圈回到同一结果, 却让关停路径
-    //    依赖 "spawn 后被取消" 这种间接行为。这里直接同步走完。
+    //    【顺序不能反】PumpLoadResults 遍历的正是 _activeLoads —— 先 clear 会让"协程已写好
+    //    结果但还没 Pump"的资产随 optional 析构而永不走 OnUnload, GPU 对象活过 device。
+    //    【刻意不调 Pump】它会 spawn 一个立刻被取消的协程去等帧边界; 这里直接同步走完。
     PumpLoadResults();
     _activeLoads.clear();
     CollectZeroRefSlots();
 
-    // 3. 【无条件对残留槽位走一遍 OnUnload + 析构, 即便仍被引用】。
+    // 3. 无条件对残留槽位走一遍 OnUnload + 析构, 即便仍被引用。
     //
-    //    此刻还有引用就是关停顺序的使用错误 (参照 Application::Shutdown 的顺序:
-    //    World → RenderSystem → AssetManager → GpuSystem)。但错误已经发生, 这里只能在
-    //    两种坏结果里挑: 放着不管则 GPU 资源活过 device 而泄漏, 销毁则那些引用变悬垂。
-    //    选销毁 —— GPU 资源【必须】在 device 之前交出, 泄漏比悬垂更难查; 而悬垂引用要等
-    //    到有人真去访问才出问题, 那时手上有一条指名道姓的 error log 可查。
-    //
-    //    【为何不 abort】: 关停期 abort 会把栈停在 AssetManager 上, 掩盖真正的首因
-    //    (通常是某个 system 忘了 reset, 或某个缓存条目还攥着 ref)。log 指明是哪个资产、
-    //    还剩几份引用, 比一个终止点更有用。
+    //    此刻还有引用是关停顺序的使用错误。
+    //    两种坏结果里选销毁: GPU 资源必须在 device 之前交出, 泄漏比悬垂更难查。
+    //    不 abort 是因为关停期 abort 会掩盖真正的首因。
     for (auto& [id, slot] : _slots) {
         if (slot && slot->RefCount > 0) {
             RADRAY_ERR_LOG(

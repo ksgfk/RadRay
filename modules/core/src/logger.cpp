@@ -39,7 +39,6 @@ static spdlog::logger g_logger = []() {
     auto formatter = make_unique<spdlog::pattern_formatter>();
     formatter->add_flag<maybe_print_source_loc_formatter>('q').set_pattern("%^[%Y-%m-%d %T.%e][%l] %q%$%v");
     l.flush_on(spdlog::level::err);
-    // l.set_pattern("%^[%Y-%m-%d %T.%e][%l] %@%$ %v");
     l.set_formatter(std::move(formatter));
 #if defined(RADRAY_IS_DEBUG)
     spdlog::level::level_enum level = spdlog::level::debug;

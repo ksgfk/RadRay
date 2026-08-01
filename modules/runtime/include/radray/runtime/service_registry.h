@@ -9,32 +9,20 @@
 
 namespace radray {
 
-// ════════════════════════════════════════════════════════════════
-//  非侵入式、无单例、trait 驱动的分阶段服务装配。
+// 非侵入式、无单例、trait 驱动的分阶段服务装配。设计与当前装配关系见
+// docs/architecture/render-framework.md
 //
-//  - 不入侵类内:依赖声明放在类外的 ServiceTraits<T> 特化里,业务类零改动,
-//    仅复用其已有的 public setter。
-//  - 无单例:ServiceRegistry 是调用方持有的局部对象,显式传递,无 thread_local。
-//  - 解环:三阶段(实例化 → 装配 → 初始化)。装配发生时全部实例已存在,
-//    互相持有引用(如 WindowManager <-> GpuSystem)天然可解。
+//     template <> struct ServiceTraits<GpuSystem> {
+//         static constexpr auto Inject = std::tuple{&GpuSystem::SetWindowManager};
+//     };
 //
-//  典型用法:
-//      // 类外声明"我要谁"(用类已有的 public setter):
-//      template <> struct ServiceTraits<GpuSystem> {
-//          static constexpr auto Inject = std::tuple{&GpuSystem::SetWindowManager};
-//      };
-//      template <> struct ServiceTraits<AssetManager> {
-//          static constexpr auto Inject = std::tuple{&AssetManager::SetWaitFrameProcessor};
-//      };
-//      // setter 形参是基类时,只要来源类型用 RuntimeTypeTrait<T>::Bases 声明了该基类,
-//      // Add 会自动登记基类别名,Resolve<Base> 即命中(指针偏移已在 typed 上下文修正)。
-//      // 若不想动 Bases,也可用 As<Source> 显式指定 resolve 的来源具体类型。
+//     ServiceRegistry reg;                        // 局部对象, 无单例
+//     reg.Add(wm); reg.Add(gpu); reg.Add(asset);  // phase 1 登记
+//     reg.Wire();                                 // phase 2 装配交叉引用
+//     reg.Initialize();                           // phase 3 可选 OnInitialize 钩子
 //
-//      ServiceRegistry reg;          // 局部对象,无单例
-//      reg.Add(wm); reg.Add(gpu); reg.Add(asset);  // phase 1 实例已建,登记
-//      reg.Wire();                                  // phase 2 装配交叉引用
-//      reg.Initialize();                            // phase 3 初始化数据(可选 OnInitialize 钩子)
-// ════════════════════════════════════════════════════════════════
+// setter 形参是基类时, 只要来源类型用 RuntimeTypeTrait<T>::Bases 声明了该基类, Add 会自动
+// 登记基类别名 (指针偏移已在 typed 上下文修正)。不想动 Bases 就用 As<Source> 显式指定。
 
 /// 类外特化点。默认无依赖。使用方按 `template <> struct ServiceTraits<T> { ... }` 声明。
 template <class T>

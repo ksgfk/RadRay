@@ -43,6 +43,29 @@ namespace radray::render::vulkan {
 
 static Nullable<unique_ptr<InstanceVulkanImpl>> g_vkInstance = nullptr;
 
+// 章节索引。跳转: Grep "^// ==" 本文件。设计说明见 docs/architecture/render-rhi.md
+//
+//   == swapchain 创建辅助 ==
+//   == instance / 物理设备 / device 创建辅助 ==
+//   == 验证消息回调与 InstanceVulkan ==
+//   == 描述符集 layout 缓存与分配器 ==
+//   == Device: queue / cmdbuffer / fence / query / swapchain ==
+//   == Device: buffer / texture / texture view ==
+//   == Device: shader 与布局映射校验 ==
+//   == Device: pipeline layout 与 parameter set ==
+//   == ShaderParameterSet 写入 ==
+//   == Device: PSO / sampler / 同步原语 ==
+//   == Device: render pass / framebuffer / 杂项 ==
+//   == 环境初始化与 CreateDeviceVulkan ==
+//   == Queue / CommandPool / CommandBuffer 与 barrier ==
+//   == 编码器 / RenderPass / Framebuffer ==
+//   == 同步原语与 Surface ==
+//   == SwapChain 与 QueryPool ==
+//   == Buffer / Image 与其 view ==
+//   == PipelineLayout / Pipeline / ShaderModule / Sampler ==
+
+// == swapchain 创建辅助 ==
+
 static VkSwapchainKHR _CreateVkSwapChain(
     DeviceVulkan* device,
     SurfaceVulkan* surface,
@@ -191,6 +214,8 @@ static bool _RefreshSwapChainImages(SwapChainVulkan* swapChain, VkExtent2D swapc
     swapChain->_frames = std::move(frames);
     return true;
 }
+
+// == instance / 物理设备 / device 创建辅助 ==
 
 static bool _TryCreateVkInstance(
     const VkInstanceCreateInfo* createInfo,
@@ -384,6 +409,8 @@ static bool _TryCreateVkDevice(
 #endif
 }
 
+// == 验证消息回调与 InstanceVulkan ==
+
 static VKAPI_ATTR VkBool32 VKAPI_CALL VKDebugUtilsMessengerCallback(
     VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
     VkDebugUtilsMessageTypeFlagsEXT messageType,
@@ -518,6 +545,8 @@ void VMA::DestroyImpl() noexcept {
         _vma = VK_NULL_HANDLE;
     }
 }
+
+// == 描述符集 layout 缓存与分配器 ==
 
 DescriptorSetLayoutVulkan::DescriptorSetLayoutVulkan(
     DescriptorSetLayoutCacheVulkan* cache,
@@ -845,6 +874,8 @@ DeviceVulkan::~DeviceVulkan() noexcept {
     this->DestroyImpl();
 }
 
+// == Device: queue / cmdbuffer / fence / query / swapchain ==
+
 bool DeviceVulkan::IsValid() const noexcept {
     return _device != VK_NULL_HANDLE && _vma != nullptr;
 }
@@ -1001,6 +1032,8 @@ Nullable<unique_ptr<SwapChain>> DeviceVulkan::CreateSwapChain(const SwapChainDes
     }
     return result;
 }
+
+// == Device: buffer / texture / texture view ==
 
 Nullable<unique_ptr<Buffer>> DeviceVulkan::CreateBuffer(const BufferDescriptor& desc) noexcept {
     const bool wantsMapRead = desc.Usage.HasFlag(BufferUse::MapRead);
@@ -1398,6 +1431,8 @@ Nullable<unique_ptr<TextureView>> DeviceVulkan::CreateTextureView(const TextureV
     return result;
 }
 
+// == Device: shader 与布局映射校验 ==
+
 Nullable<unique_ptr<Shader>> DeviceVulkan::CreateShader(const ShaderDescriptor& desc) noexcept {
     static_assert(sizeof(uint32_t) == (sizeof(byte) * 4), "byte size mismatch");
     if (desc.Category != ShaderBlobCategory::SPIRV) {
@@ -1552,6 +1587,8 @@ static bool ValidatePipelineLayoutStageDescriptorCountsVulkan(
            validate(counts.StorageImages, limits.maxPerStageDescriptorStorageImages, "maxPerStageDescriptorStorageImages") &&
            validate(counts.Resources, limits.maxPerStageResources, "maxPerStageResources");
 }
+
+// == Device: pipeline layout 与 parameter set ==
 
 Nullable<unique_ptr<PipelineLayoutVulkan>> DeviceVulkan::CreatePipelineLayoutInternal(
     const PipelineLayoutDescriptor& desc) noexcept {
@@ -2024,6 +2061,8 @@ ShaderParameterSetVulkan::~ShaderParameterSetVulkan() noexcept {
     DestroyImpl();
 }
 
+// == ShaderParameterSet 写入 ==
+
 bool ShaderParameterSetVulkan::IsValid() const noexcept {
     return _device != nullptr && _layout != nullptr &&
            _allocation.IsValid();
@@ -2333,6 +2372,8 @@ bool ShaderParameterSetVulkan::FlushWrites() noexcept {
     std::fill(_dirty.begin(), _dirty.end(), uint8_t{0});
     return true;
 }
+
+// == Device: PSO / sampler / 同步原语 ==
 
 Nullable<unique_ptr<GraphicsPipelineState>> DeviceVulkan::CreateGraphicsPipelineState(const GraphicsPipelineStateDescriptor& desc) noexcept {
     if (desc.Primitive.StripIndexFormat.has_value() &&
@@ -2696,6 +2737,8 @@ Nullable<unique_ptr<BufferViewVulkan>> DeviceVulkan::CreateBufferView(const VkBu
     return result;
 }
 
+// == Device: render pass / framebuffer / 杂项 ==
+
 Nullable<unique_ptr<RenderPass>> DeviceVulkan::CreateRenderPass(const RenderPassDescriptor& desc) noexcept {
     if (desc.ColorAttachments.empty() && !desc.DepthStencilAttachment.has_value()) {
         RADRAY_ERR_LOG("vk render pass must have at least one attachment");
@@ -2856,6 +2899,8 @@ void DeviceVulkan::SetObjectName(std::string_view name, VkObjectType type, void*
     info.pObjectName = cpyName.c_str();
     vkSetDebugUtilsObjectNameEXT(_device, &info);
 }
+
+// == 环境初始化与 CreateDeviceVulkan ==
 
 void DeviceVulkan::DestroyImpl() noexcept {
     _descriptorSetAllocator.Clear();
@@ -3444,6 +3489,8 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
     return deviceR;
 }
 
+// == Queue / CommandPool / CommandBuffer 与 barrier ==
+
 QueueVulkan::QueueVulkan(
     DeviceVulkan* device,
     VkQueue queue,
@@ -3770,6 +3817,8 @@ void CommandBufferVulkan::ResourceBarrier(std::span<const ResourceBarrierDescrip
             static_cast<uint32_t>(imageBarriers.size()), imageBarriers.size() == 0 ? nullptr : imageBarriers.data());
     }
 }
+
+// == 编码器 / RenderPass / Framebuffer ==
 
 Nullable<unique_ptr<GraphicsCommandEncoder>> CommandBufferVulkan::BeginRenderPass(const RenderPassBeginDescriptor& desc) noexcept {
     if (desc.Pass == nullptr || desc.Target == nullptr) {
@@ -4698,6 +4747,8 @@ void FrameBufferVulkan::DestroyImpl() noexcept {
     }
 }
 
+// == 同步原语与 Surface ==
+
 LegacyFenceVulkan::LegacyFenceVulkan(
     DeviceVulkan* device,
     VkFence fence) noexcept
@@ -4916,6 +4967,8 @@ void SwapChainSyncObjectVulkan::WaitPendingQueueUse() noexcept {
         this->ClearPendingQueueUse();
     }
 }
+
+// == SwapChain 与 QueryPool ==
 
 SwapChainVulkan::SwapChainVulkan(
     DeviceVulkan* device,
@@ -5221,6 +5274,8 @@ TimestampQueryCalibration QueryPoolVulkan::GetTimestampCalibration(CommandQueue*
         .TickPeriodNs = periodNs};
 }
 
+// == Buffer / Image 与其 view ==
+
 BufferVulkan::BufferVulkan(
     DeviceVulkan* device,
     VkBuffer buffer,
@@ -5455,6 +5510,8 @@ void ImageViewVulkan::DestroyImpl() noexcept {
         _imageView = VK_NULL_HANDLE;
     }
 }
+
+// == PipelineLayout / Pipeline / ShaderModule / Sampler ==
 
 PipelineLayoutVulkan::PipelineLayoutVulkan(DeviceVulkan* device) noexcept
     : _device(device) {}

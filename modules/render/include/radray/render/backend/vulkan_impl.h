@@ -735,23 +735,10 @@ public:
     uint64_t _pendingQueueValue{0};
 };
 
-/**
- * Vulkan swapchain semaphore ownership follows the Khronos recommended split:
- *
- * - acquire semaphore ("waitToDraw") is indexed by the in-flight frame. It is
- *   passed to vkAcquireNextImageKHR and then consumed by a queue submit wait.
- *   Before reusing it for another acquire, the consuming submit must be proven
- *   complete. This implementation records the submit timeline fence/value in
- *   SwapChainSyncObjectVulkan and waits or skips the object in the recycle pool
- *   until that token is complete, satisfying
- *   VUID-vkAcquireNextImageKHR-semaphore-01779.
- *
- * - present wait semaphore ("readyToPresent") is indexed by swapchain image.
- *   vkQueuePresentKHR gives no fence in core Vulkan, so a submit fence does not
- *   prove presentation has stopped using this semaphore. Reacquiring the same
- *   image proves the previous presentation for that image is complete, so the
- *   semaphore lives in Frame::readyToPresent.
- */
+/// 两个信号量的索引维度【刻意不同】: acquire 按 in-flight 帧索引 (受
+/// VUID-vkAcquireNextImageKHR-semaphore-01779 约束), present 按 swapchain image 索引
+/// (核心 Vulkan 的 vkQueuePresentKHR 不给 fence, 只有重新 acquire 到同一 image 能证明
+/// 上一次呈现已停止使用它)。
 class SwapChainVulkan final : public SwapChain {
 public:
     SwapChainVulkan(

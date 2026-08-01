@@ -54,20 +54,14 @@ public:
         const DxcCompileOptions& options) noexcept;
 
     /// 仅运行预处理器 (dxc -P), 返回展开 include 与条件编译后的 HLSL 文本。
+    /// 供工具在编译之前读源码的结构化信息 (如 keyword pragma), 见
+    /// shader_asset_template.h 与 docs/adr/0005-keyword-groups-declared-in-hlsl.md。
     ///
-    /// 【为何需要】: 有些工具要在编译【之前】读到源码的结构化信息 (例如
-    /// runtime/shader_asset_template.h 的 keyword pragma)。直接扫原始文件等于自己写
-    /// 一个 HLSL 词法器 —— 要正确处理块注释、续行符、#if 0、include 展开。交给 DXC
-    /// 做则天然准确, 且 include 只解析一次。
+    /// 输出保留 `#line N "file"` 指令, 可据此判定每行的归属文件。未知 pragma 原样保留,
+    /// 注释掉或被 #if 0 排除的不会出现。会 respect options.Defines。
     ///
-    /// 输出保留 `#line N "file"` 指令, 调用方可据此判定每一行的归属文件。未知 pragma
-    /// (如自定义的 radray_* ) 会被原样保留, 而注释掉或被 #if 0 排除的不会出现。
-    ///
-    /// 【会 respect options.Defines】: 被 #ifdef 包住的内容是否出现取决于宏, 与真实
-    /// 编译一致。
-    ///
-    /// options 里 EntryPoint / Stage / SM 对预处理无实际作用, 但 DXC 的参数构建要求
-    /// 它们存在, 故仍需给出合法值。
+    /// options 里 EntryPoint / Stage / SM 对预处理无作用, 但 DXC 的参数构建要求它们
+    /// 存在, 故仍需给出合法值。
     std::optional<string> PreprocessMemory(
         std::string_view code,
         std::string_view sourceName,

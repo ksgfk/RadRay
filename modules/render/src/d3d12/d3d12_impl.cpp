@@ -7,7 +7,29 @@
 #include <radray/scope_guard.h>
 #include <radray/text_encoding.h>
 
+// 章节索引。跳转: Grep "^// ==" 本文件。设计说明见 docs/architecture/render-rhi.md
+//
+//   == 命令签名与验证消息 ==
+//   == 适配器枚举与选择 ==
+//   == 描述符堆 ==
+//   == 描述符分配器 ==
+//   == DXGIFactory 与 DeviceD3D12 生命周期 ==
+//   == CreateDevice ==
+//   == Device: queue / cmdbuffer / fence / query / swapchain / buffer ==
+//   == Device: texture 与 texture view ==
+//   == Device: render pass / framebuffer / shader ==
+//   == 根签名映射与构建 ==
+//   == Device: pipeline layout 与 parameter set ==
+//   == parameter 值校验与写入 ==
+//   == Device: PSO / sampler / fence ==
+//   == CmdQueue / Fence / CmdList 与 barrier ==
+//   == CmdList: 拷贝与 query ==
+//   == 编码器与 SwapChain ==
+//   == 各对象类实现 ==
+
 namespace radray::render::d3d12 {
+
+// == 命令签名与验证消息 ==
 
 static ComPtr<ID3D12CommandSignature> _CreateIndirectCommandSignature(
     ID3D12Device* device,
@@ -83,6 +105,8 @@ static void WINAPI _D3D12ValidationMessageCallback(
     }
     _LogD3D12ValidationMessage(device, category, severity, id, pDescription);
 }
+
+// == 适配器枚举与选择 ==
 
 struct AdapterInfoD3D12 {
     ComPtr<IDXGIAdapter1> adapter;
@@ -232,6 +256,8 @@ static std::optional<uint32_t> _SelectHighPerformanceAdapterIndex(IDXGIFactory4*
     return std::nullopt;
 }
 
+// == 描述符堆 ==
+
 DescriptorHeap::DescriptorHeap(
     ID3D12Device* device,
     D3D12_DESCRIPTOR_HEAP_DESC desc) noexcept
@@ -320,6 +346,8 @@ D3D12_CPU_DESCRIPTOR_HANDLE DescriptorHeapView::HandleCpu() const noexcept {
 bool DescriptorHeapView::IsValid() const noexcept {
     return Heap != nullptr;
 }
+
+// == 描述符分配器 ==
 
 CpuDescriptorAllocator::CpuDescriptorAllocator(
     ID3D12Device* device,
@@ -498,6 +526,8 @@ void GpuDescriptorAllocator::Destroy(GpuDescriptorAllocator::Allocation allocati
     _allocator.Destroy(allocation.ParentAllocation);
 }
 
+// == DXGIFactory 与 DeviceD3D12 生命周期 ==
+
 DXGIFactoryImpl::DXGIFactoryImpl(
     ComPtr<IDXGIFactory4> factory,
     const DXGIFactoryDescriptor& desc) noexcept
@@ -631,6 +661,8 @@ void DeviceD3D12::DestroyImpl() noexcept {
     _dxgiAdapter = nullptr;
     _dxgiFactory = nullptr;
 }
+
+// == CreateDevice ==
 
 Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc) {
     if (desc.Factory == nullptr || !desc.Factory->IsValid()) {
@@ -805,6 +837,8 @@ Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc
     RADRAY_INFO_LOG("=============================");
     return result;
 }
+
+// == Device: queue / cmdbuffer / fence / query / swapchain / buffer ==
 
 DeviceDetail DeviceD3D12::GetDetail() const noexcept {
     return _detail;
@@ -1075,6 +1109,8 @@ Nullable<unique_ptr<Buffer>> DeviceD3D12::CreateBuffer(const BufferDescriptor& d
 
 void DeviceD3D12::FlushMappedRanges(std::span<const MappedBufferRange>) noexcept {}
 
+// == Device: texture 与 texture view ==
+
 Nullable<unique_ptr<Texture>> DeviceD3D12::CreateTexture(const TextureDescriptor& desc_) noexcept {
     TextureDescriptor desc = desc_;
     DXGI_FORMAT rawFormat = MapType(desc.Format);
@@ -1108,21 +1144,8 @@ Nullable<unique_ptr<Texture>> DeviceD3D12::CreateTexture(const TextureDescriptor
         resDesc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
     }
     D3D12_RESOURCE_STATES startState = D3D12_RESOURCE_STATE_COMMON;
-    // D3D12_CLEAR_VALUE clear{};
-    // clear.Format = rawFormat;
-    // if (auto ccv = std::get_if<ColorClearValue>(&clearValue)) {
-    //     clear.Color[0] = ccv->Value[0];
-    //     clear.Color[1] = ccv->Value[1];
-    //     clear.Color[2] = ccv->Value[2];
-    //     clear.Color[3] = ccv->Value[3];
-    // } else if (auto dcv = std::get_if<DepthStencilClearValue>(&clearValue)) {
-    //     clear.DepthStencil.Depth = dcv->Depth;
-    //     clear.DepthStencil.Stencil = (UINT8)dcv->Stencil;
-    // }
+    // 优化 clear value 尚未接线: TextureDescriptor 不带 clear value, 故恒传 nullptr。
     const D3D12_CLEAR_VALUE* clearPtr = nullptr;
-    // if ((resDesc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) || (resDesc.Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL)) {
-    //     clearPtr = &clear;
-    // }
     D3D12MA::ALLOCATION_DESC allocDesc{};
     allocDesc.HeapType = MapType(desc.Memory);
     if (desc.Hints.HasFlag(ResourceHint::Dedicated)) {
@@ -1477,6 +1500,8 @@ Nullable<unique_ptr<TextureView>> DeviceD3D12::CreateTextureView(const TextureVi
     return result;
 }
 
+// == Device: render pass / framebuffer / shader ==
+
 Nullable<unique_ptr<RenderPass>> DeviceD3D12::CreateRenderPass(const RenderPassDescriptor& desc) noexcept {
     if (desc.ColorAttachments.empty() && !desc.DepthStencilAttachment.has_value()) {
         RADRAY_ERR_LOG("d3d12 render pass must have at least one attachment");
@@ -1543,6 +1568,8 @@ Nullable<unique_ptr<Shader>> DeviceD3D12::CreateShader(const ShaderDescriptor& d
     }
     return make_unique<Dxil>(desc.Source.begin(), desc.Source.end(), desc.Stages);
 }
+
+// == 根签名映射与构建 ==
 
 enum class PipelineLayoutRegisterType : uint8_t {
     Cbv,
@@ -2048,6 +2075,8 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateRootSignatureInternal(
     return layout;
 }
 
+// == Device: pipeline layout 与 parameter set ==
+
 Nullable<unique_ptr<PipelineLayout>> DeviceD3D12::CreatePipelineLayout(
     const PipelineLayoutDescriptor& desc) noexcept {
     auto layout = CreateRootSignatureInternal(desc);
@@ -2109,6 +2138,8 @@ Nullable<unique_ptr<ShaderParameterSet>> DeviceD3D12::CreateShaderParameterSet(
     }
     return result;
 }
+
+// == parameter 值校验与写入 ==
 
 struct ResolvedShaderBufferBindingD3D12 {
     BufferD3D12* Buffer{nullptr};
@@ -2592,6 +2623,8 @@ bool ShaderParameterSetD3D12::FlushWrites() noexcept {
     return true;
 }
 
+// == Device: PSO / sampler / fence ==
+
 Nullable<unique_ptr<GraphicsPipelineState>> DeviceD3D12::CreateGraphicsPipelineState(const GraphicsPipelineStateDescriptor& desc) noexcept {
     if (desc.Primitive.StripIndexFormat.has_value() &&
         desc.Primitive.Topology != PrimitiveTopology::LineStrip &&
@@ -2850,6 +2883,8 @@ void DeviceD3D12::TryDrainValidationMessages() {
         infoQueue->ClearStoredMessages();
     }
 }
+
+// == CmdQueue / Fence / CmdList 与 barrier ==
 
 CmdQueueD3D12::CmdQueueD3D12(
     DeviceD3D12* device,
@@ -3178,6 +3213,8 @@ void CmdListD3D12::EndComputePass(unique_ptr<ComputeCommandEncoder> encoder) noe
     encoder->Destroy();
 }
 
+// == CmdList: 拷贝与 query ==
+
 void CmdListD3D12::CopyBufferToBuffer(Buffer* dst_, uint64_t dstOffset, Buffer* src_, uint64_t srcOffset, uint64_t size) noexcept {
     auto src = CastD3D12Object(src_);
     auto dst = CastD3D12Object(dst_);
@@ -3503,6 +3540,8 @@ void CmdListD3D12::ResolveQueryData(const QueryResolveDescriptor& desc) noexcept
         dst->_buf.Get(),
         desc.DestinationOffset);
 }
+
+// == 编码器与 SwapChain ==
 
 CmdRenderPassD3D12::CmdRenderPassD3D12(CmdListD3D12* cmdList) noexcept
     : _cmdList(cmdList) {}
@@ -4237,6 +4276,8 @@ SwapChainDescriptor SwapChainD3D12::GetDesc() const noexcept {
     result.PresentMode = _mode;
     return result;
 }
+
+// == 各对象类实现 ==
 
 BufferD3D12::BufferD3D12(
     DeviceD3D12* device,

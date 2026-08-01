@@ -28,6 +28,13 @@ namespace radray {
 // 文件组织: 先是全部内部实现细节 (单个匿名 namespace), 然后按
 // 数据类型成员 -> 功能类成员 -> 自由函数 的顺序给出公开定义,
 // 与 shader_manifest.h 的声明顺序一致。
+//
+// 章节索引。跳转: Grep "^// ==" 本文件。设计说明见 docs/architecture/shader-pipeline.md
+//
+//   匿名 namespace: 解析辅助 / 校验 / 反射映射 / 哈希 / 源码身份扫描 / 产物读写辅助
+//   JSON 定制点 -> 数据类型成员 -> 变体域 -> 烘焙集展开 -> 功能类成员
+//   -> manifest 读写 -> 反射核对 -> 哈希与身份 -> 产物路径 -> 产物读写
+//   -> AOT 烘焙 -> 格式化
 
 namespace {
 

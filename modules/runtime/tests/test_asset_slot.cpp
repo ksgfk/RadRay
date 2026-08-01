@@ -1,13 +1,9 @@
-// AssetManager 的槽位生命周期。这一层的规则全部围绕【引用计数是生命周期的唯一权威】:
+// AssetManager 的槽位生命周期。四条规则: (1) 引用归零才卸载; (2) 销毁对齐到 Pump;
+// (3) OnUnload 先于析构, 在那里经 DeferDestroy 交出数据; (4) AssetManager 先死时仍无条件走
+// 一遍 OnUnload。
 //
-//   1. 引用归零才卸载 —— 没有 Unload / CollectUnreferenced 之类能无视引用的入口;
-//   2. 销毁对齐到 Pump 这一确定时刻, 不就地发生在引用归零处;
-//   3. OnUnload 先于析构, 且在那里能经 DeferDestroy 交出需延迟销毁的数据;
-//   4. AssetManager 先死时仍无条件走一遍 OnUnload —— 泄漏 GPU 资源比悬垂更难查。
-//
-// 【为何不需要 device】: 以上全是槽位与引用的行为, 与 GPU 无关。本文件用一个假资产
-// (计数它自己的 OnUnload / 析构) 代替真资产, 于是可在无显卡的机器上跑。真资产把 GPU
-// 对象交给延迟队列的路径由 test_shader_program 覆盖。
+// 【不需要 device】用假资产 (自己计数 OnUnload / 析构) 代替真资产, 无显卡也能跑。
+// 真资产交出 GPU 对象的路径由 test_shader_program 覆盖。
 
 #include <radray/runtime/asset_manager.h>
 

@@ -1,16 +1,9 @@
-// PipelineLayoutCache: 按 binding 布局内容去重 PipelineLayout, 引用计数共享。
+// PipelineLayoutCache。覆盖四件事: (1) 去重按内容而非指针, 含书写顺序不同与同组被拆开的
+// 情形; (2) key 满足 unordered_map 契约, 含被移动走的源; (3) 引用计数两端; (4) 缓存先死于
+// 持有者不崩 (那是关停常规路径)。
 //
-// 【覆盖重点】是四件事:
-//   1. 去重真的按【内容】而非指针 —— 含 manifest 书写顺序不同、同组被拆成多个
-//      parameter set 但语义相同的情形, 都必须命中;
-//   2. key 满足 unordered_map 的契约 —— 内容相等必然散列相等, 含被移动走的源;
-//   3. 引用计数的两端 —— 多个持有者共享一个对象, 归零时对象自己从表里摘除;
-//   4. 缓存先死于持有者不崩 —— 这是 Application 关停的常规路径 (RenderSystem 先于
-//      AssetManager 销毁), 不是异常路径。
-//
-// 1 与 2 是纯 CPU 数据 (PipelineLayoutKey), 无条件运行。3 与 4 需要真实 device: layout
-// 是 GPU 对象 (D3D12 的 ID3D12RootSignature / Vulkan 的 VkPipelineLayout), 没有可替换的
-// 假实现, 无设备时 GTEST_SKIP。
+// 1、2 是纯 CPU 数据, 无条件运行。3、4 需要真实 device (layout 是 GPU 对象, 无假实现),
+// 无设备时 GTEST_SKIP。
 
 #include <radray/runtime/pipeline_layout_cache.h>
 

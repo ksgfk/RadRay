@@ -7,13 +7,11 @@ namespace radray {
 
 class CameraComponent;
 
-/// 相机组件。独立的 SceneComponent,从自身世界变换反算 View 矩阵,
-/// 结合投影参数产出渲染所需的 SceneView。对应 UE5 的 UCameraComponent。
+/// 相机组件 (对应 UE5 的 UCameraComponent)。View = 自身世界变换的逆, Proj = 左手透视,
+/// aspect 由视口在填充时给出, 故相机不感知具体窗口。
 ///
-/// 设计(最小化):
-/// - View 矩阵 = 世界变换的逆(由 GetWorldRotation/GetWorldLocation 直接构造)。
-/// - Proj 矩阵 = 左手透视,aspect 由视口尺寸在填充时给出(相机不感知具体窗口)。
-/// - 不处理后端视口差异(如 Vulkan 的 Y-flip):那是录制处的视口设置,SceneView 保持后端无关。
+/// 【刻意不处理后端视口差异】RHI 的 SetViewport 在两个后端都原样透传, 不做 Y 翻转。
+/// Vulkan 的 NDC Y 轴朝下, 那由录制处的视口设置或投影矩阵负责, SceneView 保持后端无关。
 class CameraComponent : public SceneComponent {
 public:
     CameraComponent() noexcept = default;

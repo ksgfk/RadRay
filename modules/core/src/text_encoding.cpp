@@ -20,7 +20,7 @@ static void LogWinCharCvtErr() {
             default: return "UNKNOWN";
         }
     })();
-    RADRAY_ERR_LOG("cannot convert char to wchar: {} (code={})", err, strErr, err);
+    RADRAY_ERR_LOG("cannot convert char to wchar: {} (code={})", strErr, err);
 }
 #endif
 // TODO: use lib to support utf8 on other platforms
