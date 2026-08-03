@@ -2,14 +2,14 @@
     "Artifacts": [
         {
             "Name": "dxc",
-            "Version": "1.9.2602.24",
+            "Version": "1.9.2607",
             "Url": "https://github.com/ksgfk/dxc-autobuild/releases/download/v{Version}/dxc-{Platform}-{Arch}.zip",
             "EnforceHash": true,
             "Triplets": [
                 {
                     "Platform": "windows",
                     "Arch": "x64",
-                    "Hash": "cd3eb6c3fbdfe565a3c62c75a4b9b76b9c50fa7f6bcdccf9d0708460d8f8cb71"
+                    "Hash": "6602b90940f08e9a0cba363b7698c30f67b22375ede94fd2aa2a6fcb5438770a"
                 }
             ]
         }
@@ -66,7 +66,7 @@
             "Name": "mimalloc",
             "Type": "git",
             "Git": "https://github.com/microsoft/mimalloc.git",
-            "Tag": "v3.4.3"
+            "Tag": "v3.4.4"
         },
         {
             "Name": "zlib",
@@ -126,7 +126,7 @@
             "Name": "DirectX-Headers",
             "Type": "git",
             "Git": "https://github.com/microsoft/DirectX-Headers.git",
-            "Tag": "v1.619.1"
+            "Tag": "v1.619.5"
         },
         {
             "Name": "D3D12MemoryAllocator",
@@ -138,7 +138,7 @@
             "Name": "imgui",
             "Type": "git",
             "Git": "https://github.com/ocornut/imgui.git",
-            "Tag": "v1.92.8-docking"
+            "Tag": "v1.92.9b-docking"
         },
         {
             "Name": "googletest",
