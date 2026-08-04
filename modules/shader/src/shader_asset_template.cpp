@@ -754,8 +754,8 @@ bool ProbeOnce(
             stage));
         return true;
     }
-    // ReflectSpirv 不是 noexcept。按仓库异常政策不在此捕获: 反射失败属于工具链或
-    // 输入的不变量破坏, 应在 noexcept 边界终止而非降级为 false。
+    // SPIRV-Cross 的可恢复 CompilerError 已在适配层转为 nullopt;
+    // 其他异常不在调用点捕获。
     std::optional<render::SpirvShaderDesc> spirvDesc = render::ReflectSpirv(render::SpirvBytecodeView{
         .Data = spirv->Data,
         .EntryPointName = stageDesc.EntryPoint,

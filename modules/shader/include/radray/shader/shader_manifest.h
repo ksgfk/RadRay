@@ -378,6 +378,33 @@ std::optional<vector<ShaderVariantKey>> ExpandShaderBakeSet(
 
 // ============================ 产物数据 ============================
 
+enum class ShaderVertexScalarType : uint8_t {
+    Unknown,
+    Float,
+    SInt,
+    UInt,
+};
+
+struct ShaderVertexParameter {
+    /// 规范化的 ASCII 大写 base semantic，不含尾部数字。
+    string Semantic;
+    uint32_t SemanticIndex{0};
+    /// DXIL 保存 signature Register，SPIR-V 保存 Location；二者不可跨 category 比较。
+    uint32_t BackendLocation{0};
+    ShaderVertexScalarType ScalarType{ShaderVertexScalarType::Unknown};
+    /// 后端实际反射出的物理位宽，仅用于诊断。
+    uint8_t BitWidth{0};
+    uint8_t ComponentCount{0};
+
+    friend bool operator==(const ShaderVertexParameter&, const ShaderVertexParameter&) noexcept = default;
+};
+
+struct ShaderVertexInterface {
+    vector<ShaderVertexParameter> Parameters;
+
+    friend bool operator==(const ShaderVertexInterface&, const ShaderVertexInterface&) noexcept = default;
+};
+
 /// 128 位内容哈希。用于源码身份、artifact key 与 blob 文件名。
 struct ShaderHash {
     uint64_t Low{0};
@@ -474,6 +501,8 @@ struct ShaderArtifactBlob {
     ShaderHash Key{};
     render::ShaderStage Stage{render::ShaderStage::UNKNOWN};
     render::ShaderBlobCategory Category{render::ShaderBlobCategory::DXIL};
+    ShaderHash ContentHash{};
+    std::optional<ShaderVertexInterface> VertexInterface{};
     /// 独立拥有的字节码。std::allocator 保证的对齐满足 SPIR-V 的 4 字节要求。
     vector<byte> Bytecode;
 };
@@ -501,13 +530,15 @@ struct ShaderSourceCacheStats {
 };
 
 /// 解析结果。可直接喂给 render::Device::CreateShader。
-/// 反射不在其中 —— manifest 是唯一 ABI 来源, PipelineLayout 无需反射即可构建。
+/// 资源绑定完整反射不在其中；VertexInterface 只是连接 primitive 所需的最小投影。
 struct ShaderBytecode {
     vector<byte> Data;
     render::ShaderBlobCategory Category{render::ShaderBlobCategory::DXIL};
     render::ShaderStage Stage{render::ShaderStage::UNKNOWN};
     ShaderBytecodeSource Source{ShaderBytecodeSource::Jit};
     ShaderHash Key{};
+    /// Vertex stage 必须有值（参数可为空），其他 stage 必须为空。
+    std::optional<ShaderVertexInterface> VertexInterface{};
 
     // 构造 render::ShaderDescriptor 的 MakeShaderDescriptor(const ShaderBytecode&)
     // 在 <radray/runtime/shader_program.h>。本结构保持为纯数据, 不引用 RHI 描述。
@@ -654,6 +685,7 @@ private:
     std::optional<ShaderBytecode> LoadFromArtifact(
         ShaderHash key,
         render::ShaderStage stage,
+        render::ShaderBlobCategory category,
         ShaderAssetDiagnostic& outDiag) noexcept;
 
     std::optional<ShaderBytecode> CompileWithJit(
@@ -690,6 +722,16 @@ std::optional<string> SerializeShaderAssetDesc(const ShaderAssetDesc& desc, bool
 // <radray/runtime/shader_program.h> (随对应的 Storage 类)。
 
 // ============================ 反射核对 ============================
+
+/// 从 DXIL 反射提取规范排序后的 vertex 输入接口。
+std::optional<ShaderVertexInterface> ExtractVertexInterface(
+    const render::HlslShaderDesc& reflection,
+    ShaderAssetDiagnostic& outDiag) noexcept;
+
+/// 从 SPIR-V 反射提取规范排序后的 vertex 输入接口。
+std::optional<ShaderVertexInterface> ExtractVertexInterface(
+    const render::SpirvShaderDesc& reflection,
+    ShaderAssetDiagnostic& outDiag) noexcept;
 
 /// DXIL 反射一致性校验。方向为【声明 ⊇ 反射】:
 /// - 反射出现但 manifest 未声明 -> 失败 (改了 HLSL 忘了改 manifest);
@@ -756,6 +798,7 @@ string MakeShaderArtifactBlobPath(render::ShaderBlobCategory category, ShaderHas
 bool WriteShaderArtifactBlob(
     const std::filesystem::path& path,
     const ShaderArtifactEntry& entry,
+    const std::optional<ShaderVertexInterface>& vertexInterface,
     std::span<const byte> bytecode) noexcept;
 
 /// 读取并校验 blob (magic / 版本 / 内容哈希)。任一不符返回 nullopt。

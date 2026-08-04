@@ -684,6 +684,211 @@ bool ValidateAsset(const ShaderAssetDesc& desc, ParseScope& scope) noexcept {
 // GenerateShaderAssetTemplate 共用: 生成器必须用与校验器完全相同的折叠规则,
 // 否则生成出的模板会当场通不过校验。
 
+constexpr size_t kMaxVertexParameters = 32;
+
+bool VertexParameterLess(
+    const ShaderVertexParameter& lhs,
+    const ShaderVertexParameter& rhs) noexcept {
+    if (lhs.Semantic != rhs.Semantic) {
+        return lhs.Semantic < rhs.Semantic;
+    }
+    if (lhs.SemanticIndex != rhs.SemanticIndex) {
+        return lhs.SemanticIndex < rhs.SemanticIndex;
+    }
+    if (lhs.ScalarType != rhs.ScalarType) {
+        return lhs.ScalarType < rhs.ScalarType;
+    }
+    return lhs.ComponentCount < rhs.ComponentCount;
+}
+
+bool IsCanonicalSemantic(std::string_view semantic) noexcept {
+    return std::ranges::none_of(semantic, [](char c) noexcept {
+        return c >= 'a' && c <= 'z';
+    });
+}
+
+bool IsValidVertexScalarType(ShaderVertexScalarType type) noexcept {
+    switch (type) {
+        case ShaderVertexScalarType::Float:
+        case ShaderVertexScalarType::SInt:
+        case ShaderVertexScalarType::UInt:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool ValidateVertexInterfaceShape(
+    const ShaderVertexInterface& vertexInterface,
+    render::ShaderBlobCategory category,
+    std::string_view& outError) noexcept {
+    if (vertexInterface.Parameters.size() > kMaxVertexParameters) {
+        outError = "vertex interface has more than 32 parameters";
+        return false;
+    }
+    for (size_t i = 0; i < vertexInterface.Parameters.size(); ++i) {
+        const ShaderVertexParameter& parameter = vertexInterface.Parameters[i];
+        if (parameter.Semantic.empty()) {
+            outError = "vertex interface semantic must not be empty";
+            return false;
+        }
+        if (parameter.Semantic.size() > std::numeric_limits<uint32_t>::max()) {
+            outError = "vertex interface semantic is too long";
+            return false;
+        }
+        if (!IsCanonicalSemantic(parameter.Semantic)) {
+            outError = "vertex interface semantic is not normalized to ASCII uppercase";
+            return false;
+        }
+        std::string_view baseSemantic;
+        uint32_t suffixIndex = 0;
+        SplitSemantic(parameter.Semantic, baseSemantic, suffixIndex);
+        if (baseSemantic.size() != parameter.Semantic.size()) {
+            outError = "vertex interface semantic must not contain a numeric suffix";
+            return false;
+        }
+        if (IsSystemSemantic(parameter.Semantic)) {
+            outError = "vertex interface must not contain an SV_ system semantic";
+            return false;
+        }
+        if (!IsValidVertexScalarType(parameter.ScalarType)) {
+            outError = "vertex interface scalar type is invalid";
+            return false;
+        }
+        if (parameter.BitWidth != 16 && parameter.BitWidth != 32 && parameter.BitWidth != 64) {
+            outError = "vertex interface bit width must be 16, 32, or 64";
+            return false;
+        }
+        if (parameter.ComponentCount < 1 || parameter.ComponentCount > 4) {
+            outError = "vertex interface component count must be between 1 and 4";
+            return false;
+        }
+        if (i > 0) {
+            const ShaderVertexParameter& previous = vertexInterface.Parameters[i - 1];
+            if (previous.Semantic == parameter.Semantic &&
+                previous.SemanticIndex == parameter.SemanticIndex) {
+                outError = "vertex interface has a duplicate semantic and index";
+                return false;
+            }
+            if (VertexParameterLess(parameter, previous)) {
+                outError = "vertex interface parameters are not canonically sorted";
+                return false;
+            }
+        }
+        if (category == render::ShaderBlobCategory::SPIRV) {
+            for (size_t j = 0; j < i; ++j) {
+                if (vertexInterface.Parameters[j].BackendLocation == parameter.BackendLocation) {
+                    outError = "SPIR-V vertex interface has a duplicate backend location";
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+bool MapHlslVertexType(
+    render::HlslRegisterComponentType type,
+    ShaderVertexScalarType& outScalarType,
+    uint8_t& outBitWidth) noexcept {
+    switch (type) {
+        case render::HlslRegisterComponentType::FLOAT16:
+            outScalarType = ShaderVertexScalarType::Float;
+            outBitWidth = 16;
+            return true;
+        case render::HlslRegisterComponentType::FLOAT32:
+            outScalarType = ShaderVertexScalarType::Float;
+            outBitWidth = 32;
+            return true;
+        case render::HlslRegisterComponentType::FLOAT64:
+            outScalarType = ShaderVertexScalarType::Float;
+            outBitWidth = 64;
+            return true;
+        case render::HlslRegisterComponentType::SINT16:
+            outScalarType = ShaderVertexScalarType::SInt;
+            outBitWidth = 16;
+            return true;
+        case render::HlslRegisterComponentType::SINT32:
+            outScalarType = ShaderVertexScalarType::SInt;
+            outBitWidth = 32;
+            return true;
+        case render::HlslRegisterComponentType::SINT64:
+            outScalarType = ShaderVertexScalarType::SInt;
+            outBitWidth = 64;
+            return true;
+        case render::HlslRegisterComponentType::UINT16:
+            outScalarType = ShaderVertexScalarType::UInt;
+            outBitWidth = 16;
+            return true;
+        case render::HlslRegisterComponentType::UINT32:
+            outScalarType = ShaderVertexScalarType::UInt;
+            outBitWidth = 32;
+            return true;
+        case render::HlslRegisterComponentType::UINT64:
+            outScalarType = ShaderVertexScalarType::UInt;
+            outBitWidth = 64;
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool MapSpirvVertexType(
+    render::SpirvBaseType type,
+    ShaderVertexScalarType& outScalarType,
+    uint8_t& outBitWidth) noexcept {
+    switch (type) {
+        case render::SpirvBaseType::Float16:
+            outScalarType = ShaderVertexScalarType::Float;
+            outBitWidth = 16;
+            return true;
+        case render::SpirvBaseType::Float32:
+            outScalarType = ShaderVertexScalarType::Float;
+            outBitWidth = 32;
+            return true;
+        case render::SpirvBaseType::Float64:
+            outScalarType = ShaderVertexScalarType::Float;
+            outBitWidth = 64;
+            return true;
+        case render::SpirvBaseType::Int16:
+            outScalarType = ShaderVertexScalarType::SInt;
+            outBitWidth = 16;
+            return true;
+        case render::SpirvBaseType::Int32:
+            outScalarType = ShaderVertexScalarType::SInt;
+            outBitWidth = 32;
+            return true;
+        case render::SpirvBaseType::Int64:
+            outScalarType = ShaderVertexScalarType::SInt;
+            outBitWidth = 64;
+            return true;
+        case render::SpirvBaseType::UInt16:
+            outScalarType = ShaderVertexScalarType::UInt;
+            outBitWidth = 16;
+            return true;
+        case render::SpirvBaseType::UInt32:
+            outScalarType = ShaderVertexScalarType::UInt;
+            outBitWidth = 32;
+            return true;
+        case render::SpirvBaseType::UInt64:
+            outScalarType = ShaderVertexScalarType::UInt;
+            outBitWidth = 64;
+            return true;
+        default:
+            return false;
+    }
+}
+
+uint8_t HlslComponentCount(uint8_t mask) noexcept {
+    switch (mask) {
+        case 0b0001: return 1;
+        case 0b0011: return 2;
+        case 0b0111: return 3;
+        case 0b1111: return 4;
+        default: return 0;
+    }
+}
+
 /// 声明 ⊇ 反射: 逐条核对反射结果能在 manifest 里找到相容的声明。
 bool MatchReflectedBindings(
     const ShaderPassDesc& pass,
@@ -813,6 +1018,32 @@ struct HashAccum {
 
     ShaderHash Finish() const noexcept { return ShaderHash{Low, High}; }
 };
+
+ShaderHash HashBlobContent(
+    ShaderHash key,
+    render::ShaderStage stage,
+    render::ShaderBlobCategory category,
+    std::span<const byte> payload) noexcept {
+    HashAccum accum;
+    accum.Hash(key);
+    accum.U32(static_cast<uint32_t>(stage));
+    accum.U32(static_cast<uint32_t>(category));
+    // payload 在 blob 中是 SizedBytes，长度前缀也属于受保护的容器内容。
+    accum.U64(payload.size());
+    accum.Bytes(payload);
+    return accum.Finish();
+}
+
+bool IsArtifactStage(render::ShaderStage stage) noexcept {
+    return stage == render::ShaderStage::Vertex ||
+           stage == render::ShaderStage::Pixel ||
+           stage == render::ShaderStage::Compute;
+}
+
+bool IsArtifactCategory(render::ShaderBlobCategory category) noexcept {
+    return category == render::ShaderBlobCategory::DXIL ||
+           category == render::ShaderBlobCategory::SPIRV;
+}
 
 /// blob 容器头部的 magic。
 constexpr std::array<char, 8> kBlobMagic{'R', 'A', 'D', 'S', 'B', 'L', 'B', '1'};
@@ -2115,6 +2346,7 @@ Nullable<const ShaderArtifactIndex*> ShaderResolver::GetIndex() noexcept {
 std::optional<ShaderBytecode> ShaderResolver::LoadFromArtifact(
     ShaderHash key,
     render::ShaderStage stage,
+    render::ShaderBlobCategory category,
     ShaderAssetDiagnostic& outDiag) noexcept {
     Nullable<const ShaderArtifactIndex*> index = GetIndex();
     if (index == nullptr) {
@@ -2125,6 +2357,13 @@ std::optional<ShaderBytecode> ShaderResolver::LoadFromArtifact(
         return std::nullopt;
     }
     const ShaderArtifactEntry& found = *entry.Get();
+    if (found.Category != category) {
+        outDiag.Message = fmt::format(
+            "shader artifact category {} does not match the requested category {}",
+            found.Category,
+            category);
+        return std::nullopt;
+    }
     const std::filesystem::path blobPath =
         GetShaderArtifactDirectory(_manifestPath) /
         std::filesystem::path{found.BlobPath};
@@ -2152,6 +2391,14 @@ std::optional<ShaderBytecode> ShaderResolver::LoadFromArtifact(
             stage);
         return std::nullopt;
     }
+    if (blob->Category != found.Category) {
+        outDiag.Message = fmt::format(
+            "shader blob '{}' category {} does not match the index category {}",
+            found.BlobPath,
+            blob->Category,
+            found.Category);
+        return std::nullopt;
+    }
 
     ShaderBytecode result;
     result.Data = std::move(blob->Bytecode);
@@ -2159,6 +2406,7 @@ std::optional<ShaderBytecode> ShaderResolver::LoadFromArtifact(
     result.Stage = blob->Stage;
     result.Source = ShaderBytecodeSource::Artifact;
     result.Key = key;
+    result.VertexInterface = std::move(blob->VertexInterface);
     return result;
 }
 
@@ -2181,6 +2429,12 @@ std::optional<ShaderBytecode> ShaderResolver::CompileWithJit(
         outDiag.Message = fmt::format("shader JIT cannot produce category {}", category);
         return std::nullopt;
     }
+#if !defined(RADRAY_ENABLE_SPIRV_CROSS)
+    if (category == render::ShaderBlobCategory::SPIRV) {
+        outDiag.Message = "SPIR-V JIT requires spirv-cross";
+        return std::nullopt;
+    }
+#endif
 
     vector<std::string_view> defineViews;
     defineViews.reserve(defines.size());
@@ -2220,6 +2474,42 @@ std::optional<ShaderBytecode> ShaderResolver::CompileWithJit(
             category);
         return std::nullopt;
     }
+    std::optional<ShaderVertexInterface> vertexInterface;
+    if (stage == render::ShaderStage::Vertex) {
+        ShaderAssetDiagnostic reflectionDiag;
+        if (category == render::ShaderBlobCategory::DXIL) {
+            if (output->Refl.empty()) {
+                outDiag.Message = "DXIL vertex output has no reflection blob";
+                return std::nullopt;
+            }
+            auto reflection = _context->GetDxc().Get()->GetShaderDescFromOutput(output->Refl);
+            if (!reflection.has_value()) {
+                outDiag.Message = "failed to parse the DXIL vertex reflection blob";
+                return std::nullopt;
+            }
+            vertexInterface = ExtractVertexInterface(reflection.value(), reflectionDiag);
+        } else {
+#if defined(RADRAY_ENABLE_SPIRV_CROSS)
+            // 可恢复的 CompilerError 已在适配层转成 nullopt；其他异常不在调用点捕获。
+            auto reflection = render::ReflectSpirv(render::SpirvBytecodeView{
+                .Data = output->Data,
+                .EntryPointName = entry.value(),
+                .Stage = stage});
+            if (!reflection.has_value()) {
+                outDiag.Message = "failed to reflect the SPIR-V vertex module";
+                return std::nullopt;
+            }
+            vertexInterface = ExtractVertexInterface(reflection.value(), reflectionDiag);
+#else
+            outDiag.Message = "SPIR-V JIT requires spirv-cross to extract the vertex interface";
+            return std::nullopt;
+#endif
+        }
+        if (!vertexInterface.has_value()) {
+            outDiag.Message = reflectionDiag.Message;
+            return std::nullopt;
+        }
+    }
 
     ShaderBytecode result;
     result.Data = std::move(output->Data);
@@ -2227,6 +2517,7 @@ std::optional<ShaderBytecode> ShaderResolver::CompileWithJit(
     result.Stage = stage;
     result.Source = ShaderBytecodeSource::Jit;
     result.Key = key;
+    result.VertexInterface = std::move(vertexInterface);
     return result;
 #else
     outDiag.Message = "shader JIT is not available in this build";
@@ -2303,7 +2594,7 @@ std::optional<ShaderBytecode> ShaderResolver::Resolve(
                 toolchainHash);
             if (key.has_value()) {
                 ShaderAssetDiagnostic artifactDiag;
-                auto bytecode = LoadFromArtifact(key.value(), stage, artifactDiag);
+                auto bytecode = LoadFromArtifact(key.value(), stage, category, artifactDiag);
                 if (bytecode.has_value()) {
                     if (staleness == ShaderArtifactStaleness::Lenient &&
                         haveSourceIdentity && cookedIdentity != sourceIdentity) {
@@ -2489,6 +2780,161 @@ std::optional<string> SerializeShaderAssetDesc(const ShaderAssetDesc& desc, bool
 }
 
 // ============================ 反射核对 ============================
+
+std::optional<ShaderVertexInterface> ExtractVertexInterface(
+    const render::HlslShaderDesc& reflection,
+    ShaderAssetDiagnostic& outDiag) noexcept {
+    outDiag = ShaderAssetDiagnostic{};
+    ShaderVertexInterface result;
+    result.Parameters.reserve(std::min(reflection.InputParameters.size(), kMaxVertexParameters));
+
+    for (const render::HlslSignatureParameterDesc& input : reflection.InputParameters) {
+        std::string_view baseSemantic;
+        uint32_t suffixIndex = 0;
+        SplitSemantic(input.SemanticName, baseSemantic, suffixIndex);
+        if (IsSystemSemantic(baseSemantic)) {
+            continue;
+        }
+        if (baseSemantic.empty()) {
+            outDiag.Message = "DXIL vertex input has an empty semantic";
+            return std::nullopt;
+        }
+
+        ShaderVertexParameter parameter;
+        parameter.Semantic = UppercaseAscii(baseSemantic);
+        parameter.SemanticIndex = suffixIndex != 0 ? suffixIndex : input.SemanticIndex;
+        parameter.BackendLocation = input.Register;
+        if (!MapHlslVertexType(input.ComponentType, parameter.ScalarType, parameter.BitWidth)) {
+            outDiag.Message = fmt::format(
+                "DXIL vertex input '{}{}' has an unsupported component type",
+                parameter.Semantic,
+                parameter.SemanticIndex);
+            return std::nullopt;
+        }
+        parameter.ComponentCount = HlslComponentCount(input.Mask);
+        if (parameter.ComponentCount == 0) {
+            outDiag.Message = fmt::format(
+                "DXIL vertex input '{}{}' has invalid component mask 0x{:02x}",
+                parameter.Semantic,
+                parameter.SemanticIndex,
+                input.Mask);
+            return std::nullopt;
+        }
+        result.Parameters.push_back(std::move(parameter));
+        if (result.Parameters.size() > kMaxVertexParameters) {
+            outDiag.Message = "DXIL vertex interface has more than 32 parameters";
+            return std::nullopt;
+        }
+    }
+
+    std::ranges::sort(result.Parameters, VertexParameterLess);
+    std::string_view validationError;
+    if (!ValidateVertexInterfaceShape(
+            result,
+            render::ShaderBlobCategory::DXIL,
+            validationError)) {
+        outDiag.Message = string{validationError};
+        return std::nullopt;
+    }
+    return result;
+}
+
+std::optional<ShaderVertexInterface> ExtractVertexInterface(
+    const render::SpirvShaderDesc& reflection,
+    ShaderAssetDiagnostic& outDiag) noexcept {
+    outDiag = ShaderAssetDiagnostic{};
+    ShaderVertexInterface result;
+    result.Parameters.reserve(std::min(reflection.StageInputs.size(), kMaxVertexParameters));
+
+    for (const render::SpirvStageIo& input : reflection.StageInputs) {
+        if (input.BuiltIn.has_value()) {
+            continue;
+        }
+
+        std::string_view rawSemantic;
+        if (!input.HlslSemantic.empty()) {
+            rawSemantic = input.HlslSemantic;
+        } else if (input.Name.starts_with("in.var.")) {
+            rawSemantic = std::string_view{input.Name}.substr(sizeof("in.var.") - 1);
+        } else {
+            outDiag.Message = fmt::format(
+                "SPIR-V vertex input at location {} has no HLSL semantic",
+                input.Location);
+            return std::nullopt;
+        }
+
+        std::string_view baseSemantic;
+        uint32_t semanticIndex = 0;
+        SplitSemantic(rawSemantic, baseSemantic, semanticIndex);
+        if (baseSemantic.empty()) {
+            outDiag.Message = fmt::format(
+                "SPIR-V vertex input at location {} has an empty semantic",
+                input.Location);
+            return std::nullopt;
+        }
+        if (input.TypeIndex >= reflection.Types.size()) {
+            outDiag.Message = fmt::format(
+                "SPIR-V vertex input '{}{}' has invalid type index {}",
+                baseSemantic,
+                semanticIndex,
+                input.TypeIndex);
+            return std::nullopt;
+        }
+
+        const render::SpirvTypeInfo& type = reflection.Types[input.TypeIndex];
+        if (type.Columns != 1) {
+            outDiag.Message = fmt::format(
+                "SPIR-V vertex input '{}{}' is a matrix",
+                baseSemantic,
+                semanticIndex);
+            return std::nullopt;
+        }
+        if (type.ArraySize != 0) {
+            outDiag.Message = fmt::format(
+                "SPIR-V vertex input '{}{}' is an array",
+                baseSemantic,
+                semanticIndex);
+            return std::nullopt;
+        }
+        if (type.VectorSize < 1 || type.VectorSize > 4) {
+            outDiag.Message = fmt::format(
+                "SPIR-V vertex input '{}{}' has invalid vector size {}",
+                baseSemantic,
+                semanticIndex,
+                type.VectorSize);
+            return std::nullopt;
+        }
+
+        ShaderVertexParameter parameter;
+        parameter.Semantic = UppercaseAscii(baseSemantic);
+        parameter.SemanticIndex = semanticIndex;
+        parameter.BackendLocation = input.Location;
+        parameter.ComponentCount = static_cast<uint8_t>(type.VectorSize);
+        if (!MapSpirvVertexType(type.BaseType, parameter.ScalarType, parameter.BitWidth)) {
+            outDiag.Message = fmt::format(
+                "SPIR-V vertex input '{}{}' has an unsupported scalar type",
+                parameter.Semantic,
+                parameter.SemanticIndex);
+            return std::nullopt;
+        }
+        result.Parameters.push_back(std::move(parameter));
+        if (result.Parameters.size() > kMaxVertexParameters) {
+            outDiag.Message = "SPIR-V vertex interface has more than 32 parameters";
+            return std::nullopt;
+        }
+    }
+
+    std::ranges::sort(result.Parameters, VertexParameterLess);
+    std::string_view validationError;
+    if (!ValidateVertexInterfaceShape(
+            result,
+            render::ShaderBlobCategory::SPIRV,
+            validationError)) {
+        outDiag.Message = string{validationError};
+        return std::nullopt;
+    }
+    return result;
+}
 
 bool ValidateShaderReflection(
     const ShaderPassDesc& pass,
@@ -2849,11 +3295,47 @@ string MakeShaderArtifactBlobPath(render::ShaderBlobCategory category, ShaderHas
 bool WriteShaderArtifactBlob(
     const std::filesystem::path& path,
     const ShaderArtifactEntry& entry,
+    const std::optional<ShaderVertexInterface>& vertexInterface,
     std::span<const byte> bytecode) noexcept {
-    if (bytecode.empty()) {
+    if (!IsArtifactStage(entry.Stage) || !IsArtifactCategory(entry.Category) || bytecode.empty()) {
         return false;
     }
-    BinaryWriter writer{bytecode.size() + 64};
+    const bool isVertex = entry.Stage == render::ShaderStage::Vertex;
+    if (isVertex != vertexInterface.has_value()) {
+        return false;
+    }
+    if (entry.Category == render::ShaderBlobCategory::SPIRV && bytecode.size() % 4 != 0) {
+        return false;
+    }
+    if (vertexInterface.has_value()) {
+        std::string_view validationError;
+        if (!ValidateVertexInterfaceShape(vertexInterface.value(), entry.Category, validationError)) {
+            return false;
+        }
+    }
+
+    BinaryWriter payloadWriter;
+    if (isVertex) {
+        const vector<ShaderVertexParameter>& parameters = vertexInterface->Parameters;
+        payloadWriter.U32(static_cast<uint32_t>(parameters.size()));
+        for (const ShaderVertexParameter& parameter : parameters) {
+            payloadWriter.String(parameter.Semantic);
+            payloadWriter.U32(parameter.SemanticIndex);
+            payloadWriter.U32(parameter.BackendLocation);
+            payloadWriter.U8(static_cast<uint8_t>(parameter.ScalarType));
+            payloadWriter.U8(parameter.BitWidth);
+            payloadWriter.U8(parameter.ComponentCount);
+        }
+    }
+    payloadWriter.SizedBytes(bytecode);
+
+    const ShaderHash contentHash = HashBlobContent(
+        entry.Key,
+        entry.Stage,
+        entry.Category,
+        payloadWriter.GetData());
+
+    BinaryWriter writer;
     for (char c : kBlobMagic) {
         writer.U8(static_cast<uint8_t>(c));
     }
@@ -2862,16 +3344,16 @@ bool WriteShaderArtifactBlob(
     writer.U64(entry.Key.High);
     writer.U32(static_cast<uint32_t>(entry.Stage));
     writer.I32(static_cast<int32_t>(entry.Category));
-    const ShaderHash contentHash = HashShaderBytes(bytecode);
     writer.U64(contentHash.Low);
     writer.U64(contentHash.High);
-    writer.SizedBytes(bytecode);
+    writer.SizedBytes(payloadWriter.GetData());
     return WriteBinaryFile(path, writer.GetData());
 }
 
 std::optional<ShaderArtifactBlob> ReadShaderArtifactBlob(
     const std::filesystem::path& path,
     ShaderAssetDiagnostic& outDiag) noexcept {
+    outDiag = ShaderAssetDiagnostic{};
     auto bytes = ReadBinaryFile(path);
     if (!bytes.has_value()) {
         outDiag.Message = fmt::format("failed to read shader blob '{}'", path.string());
@@ -2911,19 +3393,90 @@ std::optional<ShaderArtifactBlob> ReadShaderArtifactBlob(
         outDiag.Message = fmt::format("shader blob '{}' is truncated", path.string());
         return std::nullopt;
     }
-    if (payload.empty()) {
-        outDiag.Message = fmt::format("shader blob '{}' has empty bytecode", path.string());
-        return std::nullopt;
-    }
-    if (HashShaderBytes(payload) != storedHash) {
-        outDiag.Message = fmt::format("shader blob '{}' failed its content hash check", path.string());
+    if (!reader.AtEnd()) {
+        outDiag.Message = fmt::format("shader blob '{}' has trailing data", path.string());
         return std::nullopt;
     }
     blob.Stage = static_cast<render::ShaderStage>(stage);
     blob.Category = static_cast<render::ShaderBlobCategory>(category);
+    if (!IsArtifactStage(blob.Stage)) {
+        outDiag.Message = fmt::format("shader blob '{}' has an invalid stage", path.string());
+        return std::nullopt;
+    }
+    if (!IsArtifactCategory(blob.Category)) {
+        outDiag.Message = fmt::format("shader blob '{}' has an invalid category", path.string());
+        return std::nullopt;
+    }
+    if (HashBlobContent(blob.Key, blob.Stage, blob.Category, payload) != storedHash) {
+        outDiag.Message = fmt::format("shader blob '{}' failed its content hash check", path.string());
+        return std::nullopt;
+    }
+    blob.ContentHash = storedHash;
+
+    BinaryReader payloadReader{payload};
+    if (blob.Stage == render::ShaderStage::Vertex) {
+        uint32_t parameterCount = 0;
+        if (!payloadReader.U32(parameterCount)) {
+            outDiag.Message = fmt::format("shader blob '{}' has a truncated vertex interface", path.string());
+            return std::nullopt;
+        }
+        if (parameterCount > kMaxVertexParameters) {
+            outDiag.Message = fmt::format("shader blob '{}' has too many vertex parameters", path.string());
+            return std::nullopt;
+        }
+        // 最小参数编码随字段同步维护：4(len) + 1(semantic) + 4 + 4 + 1 + 1 + 1 = 16。
+        constexpr size_t kMinVertexParameterBytes = 16;
+        if (parameterCount > payloadReader.Remaining() / kMinVertexParameterBytes) {
+            outDiag.Message = fmt::format("shader blob '{}' has an impossible vertex parameter count", path.string());
+            return std::nullopt;
+        }
+
+        ShaderVertexInterface vertexInterface;
+        vertexInterface.Parameters.reserve(parameterCount);
+        for (uint32_t i = 0; i < parameterCount; ++i) {
+            std::string_view semantic;
+            ShaderVertexParameter parameter;
+            uint8_t scalarType = 0;
+            if (!payloadReader.String(semantic) ||
+                !payloadReader.U32(parameter.SemanticIndex) ||
+                !payloadReader.U32(parameter.BackendLocation) ||
+                !payloadReader.U8(scalarType) ||
+                !payloadReader.U8(parameter.BitWidth) ||
+                !payloadReader.U8(parameter.ComponentCount)) {
+                outDiag.Message = fmt::format("shader blob '{}' has a truncated vertex parameter", path.string());
+                return std::nullopt;
+            }
+            parameter.Semantic = string{semantic};
+            parameter.ScalarType = static_cast<ShaderVertexScalarType>(scalarType);
+            vertexInterface.Parameters.push_back(std::move(parameter));
+        }
+        std::string_view validationError;
+        if (!ValidateVertexInterfaceShape(vertexInterface, blob.Category, validationError)) {
+            outDiag.Message = fmt::format(
+                "shader blob '{}' has an invalid vertex interface: {}",
+                path.string(),
+                validationError);
+            return std::nullopt;
+        }
+        blob.VertexInterface = std::move(vertexInterface);
+    }
+
+    std::span<const byte> bytecode;
+    if (!payloadReader.SizedBytes(bytecode) || bytecode.empty()) {
+        outDiag.Message = fmt::format("shader blob '{}' has empty or truncated bytecode", path.string());
+        return std::nullopt;
+    }
+    if (blob.Category == render::ShaderBlobCategory::SPIRV && bytecode.size() % 4 != 0) {
+        outDiag.Message = fmt::format("shader blob '{}' has misaligned SPIR-V bytecode size", path.string());
+        return std::nullopt;
+    }
+    if (!payloadReader.AtEnd()) {
+        outDiag.Message = fmt::format("shader blob '{}' payload has trailing data", path.string());
+        return std::nullopt;
+    }
     // 复制到独立 vector: std::allocator 的对齐满足 Vulkan 对 SPIR-V 的 4 字节要求
     // (vkCreateShaderModule 侧会把指针 bit_cast 成 const uint32_t*)。
-    blob.Bytecode.assign(payload.begin(), payload.end());
+    blob.Bytecode.assign(bytecode.begin(), bytecode.end());
     return blob;
 }
 
@@ -3069,59 +3622,6 @@ struct CookStageInput {
     std::span<const std::string_view> Includes{};
 };
 
-/// 用反射核对 manifest。方向为声明 ⊇ 反射。
-bool ValidateCompiled(
-    render::Dxc& dxc,
-    const ShaderPassDesc& pass,
-    render::ShaderStage stage,
-    render::ShaderBlobCategory category,
-    const render::DxcOutput& output,
-    ShaderAssetDiagnostic& outDiag) {
-    if (category == render::ShaderBlobCategory::DXIL) {
-        if (output.Refl.empty()) {
-            outDiag = MakeDiag("DXIL output has no reflection blob", pass.Name, stage);
-            return false;
-        }
-        auto reflection = dxc.GetShaderDescFromOutput(output.Refl);
-        if (!reflection.has_value()) {
-            outDiag = MakeDiag("failed to parse the DXIL reflection blob", pass.Name, stage);
-            return false;
-        }
-        return ValidateShaderReflection(pass, stage, reflection.value(), outDiag);
-    }
-    if (category == render::ShaderBlobCategory::SPIRV) {
-#if defined(RADRAY_ENABLE_SPIRV_CROSS)
-        std::optional<std::string_view> entry = pass.FindEntryPoint(stage);
-        if (!entry.has_value()) {
-            outDiag = MakeDiag("pass does not declare an entry point", pass.Name, stage);
-            return false;
-        }
-        // ReflectSpirv 不是 noexcept。按仓库异常政策不在此捕获: 反射失败属于
-        // 工具链或输入的不变量破坏, 应当在 noexcept 边界终止而非降级为 false。
-        auto reflection = render::ReflectSpirv(render::SpirvBytecodeView{
-            .Data = output.Data,
-            .EntryPointName = entry.value(),
-            .Stage = stage});
-        if (!reflection.has_value()) {
-            outDiag = MakeDiag("failed to reflect the SPIR-V module", pass.Name, stage);
-            return false;
-        }
-        return ValidateShaderReflection(pass, stage, reflection.value(), outDiag);
-#else
-        outDiag = MakeDiag(
-            "SPIR-V reflection validation requires spirv-cross",
-            pass.Name,
-            stage);
-        return false;
-#endif
-    }
-    outDiag = MakeDiag(
-        fmt::format("cannot validate reflection for category {}", category),
-        pass.Name,
-        stage);
-    return false;
-}
-
 /// 烘焙一个 (变体, stage)。成功或"跳过"都返回 true; 只有硬错误返回 false,
 /// 此时诊断已入 result。
 bool CookStage(
@@ -3174,7 +3674,10 @@ bool CookStage(
     if (options.Incremental) {
         ShaderAssetDiagnostic probeDiag;
         auto existing = ReadShaderArtifactBlob(absoluteBlob, probeDiag);
-        if (existing.has_value() && existing->Key == key.value()) {
+        if (existing.has_value() &&
+            existing->Key == key.value() &&
+            existing->Stage == stage &&
+            existing->Category == input.Category) {
             entry.BytecodeHash = HashShaderBytes(existing->Bytecode);
             entry.BytecodeSize = static_cast<uint32_t>(existing->Bytecode.size());
             result.Index.Entries.push_back(std::move(entry));
@@ -3223,17 +3726,77 @@ bool CookStage(
         return false;
     }
 
-    if (options.ValidateReflection) {
-        ShaderAssetDiagnostic reflectionDiag;
-        if (!ValidateCompiled(dxc, pass, stage, input.Category, output.value(), reflectionDiag)) {
-            result.Diagnostics.push_back(std::move(reflectionDiag));
+    std::optional<ShaderVertexInterface> vertexInterface;
+    const bool needsReflection =
+        stage == render::ShaderStage::Vertex || options.ValidateReflection;
+    if (needsReflection && input.Category == render::ShaderBlobCategory::DXIL) {
+        if (output->Refl.empty()) {
+            result.Diagnostics.push_back(
+                MakeDiag("DXIL output has no reflection blob", pass.Name, stage));
             return false;
         }
+        auto reflection = dxc.GetShaderDescFromOutput(output->Refl);
+        if (!reflection.has_value()) {
+            result.Diagnostics.push_back(
+                MakeDiag("failed to parse the DXIL reflection blob", pass.Name, stage));
+            return false;
+        }
+        if (stage == render::ShaderStage::Vertex) {
+            ShaderAssetDiagnostic reflectionDiag;
+            vertexInterface = ExtractVertexInterface(reflection.value(), reflectionDiag);
+            if (!vertexInterface.has_value()) {
+                reflectionDiag.PassName = pass.Name;
+                reflectionDiag.Stage = stage;
+                result.Diagnostics.push_back(std::move(reflectionDiag));
+                return false;
+            }
+        }
+        if (options.ValidateReflection) {
+            ShaderAssetDiagnostic reflectionDiag;
+            if (!ValidateShaderReflection(pass, stage, reflection.value(), reflectionDiag)) {
+                result.Diagnostics.push_back(std::move(reflectionDiag));
+                return false;
+            }
+        }
+    } else if (needsReflection && input.Category == render::ShaderBlobCategory::SPIRV) {
+#if defined(RADRAY_ENABLE_SPIRV_CROSS)
+        // 可恢复的 CompilerError 已在适配层转成 nullopt；其他异常不在调用点捕获。
+        auto reflection = render::ReflectSpirv(render::SpirvBytecodeView{
+            .Data = output->Data,
+            .EntryPointName = input.StageDesc.EntryPoint,
+            .Stage = stage});
+        if (!reflection.has_value()) {
+            result.Diagnostics.push_back(
+                MakeDiag("failed to reflect the SPIR-V module", pass.Name, stage));
+            return false;
+        }
+        if (stage == render::ShaderStage::Vertex) {
+            ShaderAssetDiagnostic reflectionDiag;
+            vertexInterface = ExtractVertexInterface(reflection.value(), reflectionDiag);
+            if (!vertexInterface.has_value()) {
+                reflectionDiag.PassName = pass.Name;
+                reflectionDiag.Stage = stage;
+                result.Diagnostics.push_back(std::move(reflectionDiag));
+                return false;
+            }
+        }
+        if (options.ValidateReflection) {
+            ShaderAssetDiagnostic reflectionDiag;
+            if (!ValidateShaderReflection(pass, stage, reflection.value(), reflectionDiag)) {
+                result.Diagnostics.push_back(std::move(reflectionDiag));
+                return false;
+            }
+        }
+#else
+        result.Diagnostics.push_back(
+            MakeDiag("SPIR-V cooking requires spirv-cross", pass.Name, stage));
+        return false;
+#endif
     }
 
     entry.BytecodeHash = HashShaderBytes(output->Data);
     entry.BytecodeSize = static_cast<uint32_t>(output->Data.size());
-    if (!WriteShaderArtifactBlob(absoluteBlob, entry, output->Data)) {
+    if (!WriteShaderArtifactBlob(absoluteBlob, entry, vertexInterface, output->Data)) {
         result.Diagnostics.push_back(MakeDiag(
             fmt::format("failed to write '{}'", blobPath),
             pass.Name,
@@ -3258,6 +3821,24 @@ ShaderCookResult CookShaderAsset(
     if (options.Categories.empty()) {
         result.Diagnostics.push_back(MakeDiag("no target categories requested", {}, std::nullopt));
         return result;
+    }
+    for (render::ShaderBlobCategory category : options.Categories) {
+        if (!IsArtifactCategory(category)) {
+            result.Diagnostics.push_back(MakeDiag(
+                fmt::format("shader cooking cannot produce category {}", category),
+                {},
+                std::nullopt));
+            return result;
+        }
+#if !defined(RADRAY_ENABLE_SPIRV_CROSS)
+        if (category == render::ShaderBlobCategory::SPIRV) {
+            result.Diagnostics.push_back(MakeDiag(
+                "SPIR-V cooking requires spirv-cross",
+                {},
+                std::nullopt));
+            return result;
+        }
+#endif
     }
 
     const std::filesystem::path artifactDir = GetShaderArtifactDirectory(options.ManifestPath);
@@ -3317,15 +3898,6 @@ ShaderCookResult CookShaderAsset(
         }
 
         for (render::ShaderBlobCategory category : options.Categories) {
-            if (category != render::ShaderBlobCategory::DXIL &&
-                category != render::ShaderBlobCategory::SPIRV) {
-                result.Diagnostics.push_back(MakeDiag(
-                    fmt::format("shader cooking cannot produce category {}", category),
-                    pass.Name,
-                    std::nullopt));
-                return result;
-            }
-
             for (const ShaderVariantKey& variant : variants.value()) {
                 for (const ShaderStageDesc& stageDesc : pass.Stages) {
                     const CookStageInput input{

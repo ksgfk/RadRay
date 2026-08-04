@@ -10,10 +10,14 @@
 
 #include <fmt/format.h>
 
+#include <radray/binary_io.h>
 #include <radray/environment.h>
 #include <radray/file.h>
 #include <radray/shader/dxc.h>
 #include <radray/shader/shader_manifest.h>
+#if defined(RADRAY_ENABLE_SPIRV_CROSS)
+#include <radray/shader/spvc.h>
+#endif
 
 #include "shader_manifest_fixtures.h"
 
@@ -1298,6 +1302,199 @@ render::SpirvResourceBinding MakeSpirvBind(
     return bind;
 }
 
+render::HlslSignatureParameterDesc MakeHlslVertexParameter(
+    std::string_view semantic,
+    render::HlslRegisterComponentType type,
+    uint8_t mask,
+    uint32_t semanticIndex = 0,
+    uint32_t registerIndex = 0,
+    uint8_t readWriteMask = 0xff) {
+    render::HlslSignatureParameterDesc parameter;
+    parameter.SemanticName = string{semantic};
+    parameter.SemanticIndex = semanticIndex;
+    parameter.Register = registerIndex;
+    parameter.ComponentType = type;
+    parameter.Mask = mask;
+    parameter.ReadWriteMask = readWriteMask;
+    return parameter;
+}
+
+render::SpirvTypeInfo MakeSpirvVertexType(
+    render::SpirvBaseType baseType,
+    uint32_t vectorSize,
+    uint32_t columns = 1,
+    uint32_t arraySize = 0) {
+    render::SpirvTypeInfo type;
+    type.BaseType = baseType;
+    type.VectorSize = vectorSize;
+    type.Columns = columns;
+    type.ArraySize = arraySize;
+    return type;
+}
+
+render::SpirvStageIo MakeSpirvVertexInput(
+    std::string_view name,
+    std::string_view hlslSemantic,
+    uint32_t location,
+    uint32_t typeIndex,
+    std::optional<uint32_t> builtIn = std::nullopt) {
+    render::SpirvStageIo input;
+    input.Name = string{name};
+    input.HlslSemantic = string{hlslSemantic};
+    input.Location = location;
+    input.TypeIndex = typeIndex;
+    input.BuiltIn = builtIn;
+    return input;
+}
+
+TEST(ShaderArtifactTest, ExtractsAndSortsDxilVertexInterface) {
+    render::HlslShaderDesc reflection;
+    reflection.InputParameters = {
+        MakeHlslVertexParameter("texCoord7", render::HlslRegisterComponentType::FLOAT16, 0b0011, 3, 9, 0),
+        MakeHlslVertexParameter("position", render::HlslRegisterComponentType::FLOAT64, 0b1111, 0, 4),
+        MakeHlslVertexParameter("normal", render::HlslRegisterComponentType::SINT32, 0b0111, 4, 2),
+        MakeHlslVertexParameter("blend", render::HlslRegisterComponentType::UINT64, 0b0001, 0, 6),
+        // 系统输入在类型和 mask 校验前被过滤。
+        MakeHlslVertexParameter("sV_VertexID", render::HlslRegisterComponentType::UNKNOWN, 0, 0, 8),
+    };
+
+    ShaderAssetDiagnostic diag;
+    std::optional<ShaderVertexInterface> extracted = ExtractVertexInterface(reflection, diag);
+    ASSERT_TRUE(extracted.has_value()) << diag.ToString();
+    const ShaderVertexInterface expected{.Parameters = {
+                                             ShaderVertexParameter{"BLEND", 0, 6, ShaderVertexScalarType::UInt, 64, 1},
+                                             ShaderVertexParameter{"NORMAL", 4, 2, ShaderVertexScalarType::SInt, 32, 3},
+                                             ShaderVertexParameter{"POSITION", 0, 4, ShaderVertexScalarType::Float, 64, 4},
+                                             ShaderVertexParameter{"TEXCOORD", 7, 9, ShaderVertexScalarType::Float, 16, 2},
+                                         }};
+    EXPECT_EQ(extracted.value(), expected);
+    // ReadWriteMask 描述实际使用情况，不改变声明接口。
+    EXPECT_EQ(extracted->Parameters.back().Semantic, "TEXCOORD");
+
+    std::ranges::reverse(reflection.InputParameters);
+    std::optional<ShaderVertexInterface> reversed = ExtractVertexInterface(reflection, diag);
+    ASSERT_TRUE(reversed.has_value()) << diag.ToString();
+    EXPECT_EQ(reversed.value(), expected);
+}
+
+TEST(ShaderArtifactTest, RejectsInvalidDxilVertexTypesAndMasks) {
+    ShaderAssetDiagnostic diag;
+    render::HlslShaderDesc reflection;
+    reflection.InputParameters.push_back(
+        MakeHlslVertexParameter("POSITION", render::HlslRegisterComponentType::FLOAT32, 0b1010));
+    EXPECT_FALSE(ExtractVertexInterface(reflection, diag).has_value());
+
+    reflection.InputParameters.front() =
+        MakeHlslVertexParameter("POSITION", render::HlslRegisterComponentType::UNKNOWN, 0b0001);
+    EXPECT_FALSE(ExtractVertexInterface(reflection, diag).has_value());
+}
+
+TEST(ShaderArtifactTest, RejectsDuplicateAndOversizedDxilVertexInterfaces) {
+    ShaderAssetDiagnostic diag;
+    render::HlslShaderDesc duplicate;
+    duplicate.InputParameters = {
+        MakeHlslVertexParameter("texcoord0", render::HlslRegisterComponentType::FLOAT32, 0b0011),
+        MakeHlslVertexParameter("TEXCOORD", render::HlslRegisterComponentType::FLOAT32, 0b0011),
+    };
+    EXPECT_FALSE(ExtractVertexInterface(duplicate, diag).has_value());
+
+    render::HlslShaderDesc oversized;
+    for (uint32_t i = 0; i < 33; ++i) {
+        oversized.InputParameters.push_back(MakeHlslVertexParameter(
+            fmt::format("ATTR{}", i),
+            render::HlslRegisterComponentType::FLOAT32,
+            0b0001));
+    }
+    EXPECT_FALSE(ExtractVertexInterface(oversized, diag).has_value());
+}
+
+TEST(ShaderArtifactTest, ExtractsAndSortsSpirvVertexInterface) {
+    render::SpirvShaderDesc reflection;
+    reflection.Types = {
+        MakeSpirvVertexType(render::SpirvBaseType::Float32, 3),
+        MakeSpirvVertexType(render::SpirvBaseType::UInt16, 2),
+        MakeSpirvVertexType(render::SpirvBaseType::Int64, 1),
+    };
+    reflection.StageInputs = {
+        // HlslSemantic 优先于 Name，故 WRONG9 不得进入结果。
+        MakeSpirvVertexInput("in.var.WRONG9", "texCoord2", 3, 1),
+        MakeSpirvVertexInput("in.var.position", "", 0, 0),
+        MakeSpirvVertexInput("in.var.normal0", "", 1, 0),
+        MakeSpirvVertexInput("in.var.weight", "", 7, 2),
+        // BuiltIn 在 semantic 来源和 TypeIndex 校验前被过滤。
+        MakeSpirvVertexInput("", "", 99, 999, 42),
+    };
+
+    ShaderAssetDiagnostic diag;
+    std::optional<ShaderVertexInterface> extracted = ExtractVertexInterface(reflection, diag);
+    ASSERT_TRUE(extracted.has_value()) << diag.ToString();
+    const ShaderVertexInterface expected{.Parameters = {
+                                             ShaderVertexParameter{"NORMAL", 0, 1, ShaderVertexScalarType::Float, 32, 3},
+                                             ShaderVertexParameter{"POSITION", 0, 0, ShaderVertexScalarType::Float, 32, 3},
+                                             ShaderVertexParameter{"TEXCOORD", 2, 3, ShaderVertexScalarType::UInt, 16, 2},
+                                             ShaderVertexParameter{"WEIGHT", 0, 7, ShaderVertexScalarType::SInt, 64, 1},
+                                         }};
+    EXPECT_EQ(extracted.value(), expected);
+
+    std::ranges::reverse(reflection.StageInputs);
+    std::optional<ShaderVertexInterface> reversed = ExtractVertexInterface(reflection, diag);
+    ASSERT_TRUE(reversed.has_value()) << diag.ToString();
+    EXPECT_EQ(reversed.value(), expected);
+}
+
+TEST(ShaderArtifactTest, RejectsSpirvVertexInputsWithoutSemanticOrType) {
+    render::SpirvShaderDesc reflection;
+    reflection.Types.push_back(MakeSpirvVertexType(render::SpirvBaseType::Float32, 3));
+    reflection.StageInputs.push_back(MakeSpirvVertexInput("position", "", 0, 0));
+
+    ShaderAssetDiagnostic diag;
+    EXPECT_FALSE(ExtractVertexInterface(reflection, diag).has_value());
+
+    reflection.StageInputs.front() = MakeSpirvVertexInput("in.var.POSITION", "", 0, 1);
+    EXPECT_FALSE(ExtractVertexInterface(reflection, diag).has_value());
+}
+
+TEST(ShaderArtifactTest, RejectsSpirvMatrixAndArrayVertexInputs) {
+    render::SpirvShaderDesc reflection;
+    reflection.Types.push_back(MakeSpirvVertexType(render::SpirvBaseType::Float32, 4, 3));
+    reflection.StageInputs.push_back(MakeSpirvVertexInput("", "TRANSFORM", 0, 0));
+
+    ShaderAssetDiagnostic diag;
+    EXPECT_FALSE(ExtractVertexInterface(reflection, diag).has_value());
+    EXPECT_NE(diag.Message.find("matrix"), string::npos);
+
+    reflection.Types.front() = MakeSpirvVertexType(render::SpirvBaseType::Float32, 4, 1, 2);
+    EXPECT_FALSE(ExtractVertexInterface(reflection, diag).has_value());
+    EXPECT_NE(diag.Message.find("array"), string::npos);
+}
+
+TEST(ShaderArtifactTest, RejectsDuplicateAndOversizedSpirvVertexInterfaces) {
+    ShaderAssetDiagnostic diag;
+    render::SpirvShaderDesc reflection;
+    reflection.Types.push_back(MakeSpirvVertexType(render::SpirvBaseType::Float32, 3));
+    reflection.StageInputs = {
+        MakeSpirvVertexInput("", "position0", 0, 0),
+        MakeSpirvVertexInput("", "POSITION", 1, 0),
+    };
+    EXPECT_FALSE(ExtractVertexInterface(reflection, diag).has_value());
+
+    reflection.StageInputs = {
+        MakeSpirvVertexInput("", "POSITION", 3, 0),
+        MakeSpirvVertexInput("", "NORMAL", 3, 0),
+    };
+    EXPECT_FALSE(ExtractVertexInterface(reflection, diag).has_value());
+
+    reflection.StageInputs.clear();
+    for (uint32_t i = 0; i < 33; ++i) {
+        reflection.StageInputs.push_back(MakeSpirvVertexInput(
+            "",
+            fmt::format("ATTR{}", i),
+            i,
+            0));
+    }
+    EXPECT_FALSE(ExtractVertexInterface(reflection, diag).has_value());
+}
+
 /// 与 kImGuiManifest 相符的 DXIL PS 反射。
 /// 注意 push constant 在 DXIL 里就是一个普通 cbuffer (b0, space0)。
 render::HlslShaderDesc MakeImGuiPixelHlslReflection() {
@@ -2017,36 +2214,192 @@ TEST(ShaderArtifactTest, BlobPathIsCategoryScopedAndContentAddressed) {
 
 namespace {
 
-ShaderArtifactEntry MakeEntry(std::span<const byte> bytecode, ShaderHash key) {
+constexpr size_t kBlobKeyOffset = 12;
+constexpr size_t kBlobStageOffset = 28;
+constexpr size_t kBlobCategoryOffset = 32;
+constexpr size_t kBlobContentHashOffset = 36;
+constexpr size_t kBlobPayloadSizeOffset = 52;
+constexpr size_t kBlobPayloadOffset = 60;
+
+uint32_t ReadLe32(std::span<const byte> data, size_t offset) {
+    uint32_t result = 0;
+    for (size_t i = 0; i < sizeof(result); ++i) {
+        result |= static_cast<uint32_t>(static_cast<uint8_t>(data[offset + i])) << (i * 8);
+    }
+    return result;
+}
+
+uint64_t ReadLe64(std::span<const byte> data, size_t offset) {
+    uint64_t result = 0;
+    for (size_t i = 0; i < sizeof(result); ++i) {
+        result |= static_cast<uint64_t>(static_cast<uint8_t>(data[offset + i])) << (i * 8);
+    }
+    return result;
+}
+
+void WriteLe64(vector<byte>& data, size_t offset, uint64_t value) {
+    for (size_t i = 0; i < sizeof(value); ++i) {
+        data[offset + i] = static_cast<byte>((value >> (i * 8)) & 0xffu);
+    }
+}
+
+ShaderHash ComputeTestBlobContentHash(std::span<const byte> blob) {
+    constexpr uint64_t kFnvOffset64 = 14695981039346656037ull;
+    constexpr uint64_t kFnvPrime64 = 1099511628211ull;
+    uint64_t low = kFnvOffset64;
+    uint64_t high = kFnvOffset64 ^ 0x9e3779b97f4a7c15ull;
+    auto addByte = [&](uint8_t value) {
+        low = (low ^ value) * kFnvPrime64;
+        high = (high ^ (value + 0x9eu)) * kFnvPrime64;
+    };
+    const auto addU64 = [&](uint64_t value) {
+        for (int i = 0; i < 8; ++i) {
+            addByte(static_cast<uint8_t>((value >> (i * 8)) & 0xffu));
+        }
+    };
+
+    addU64(ReadLe64(blob, kBlobKeyOffset));
+    addU64(ReadLe64(blob, kBlobKeyOffset + sizeof(uint64_t)));
+    // HashAccum::U32 intentionally uses its stable eight-byte hash encoding.
+    addU64(ReadLe32(blob, kBlobStageOffset));
+    addU64(ReadLe32(blob, kBlobCategoryOffset));
+    const uint64_t payloadSize = ReadLe64(blob, kBlobPayloadSizeOffset);
+    addU64(payloadSize);
+    for (byte value : blob.subspan(kBlobPayloadOffset, static_cast<size_t>(payloadSize))) {
+        addByte(static_cast<uint8_t>(value));
+    }
+    return ShaderHash{low, high};
+}
+
+void RewriteBlobContentHash(vector<byte>& blob) {
+    const ShaderHash hash = ComputeTestBlobContentHash(blob);
+    WriteLe64(blob, kBlobContentHashOffset, hash.Low);
+    WriteLe64(blob, kBlobContentHashOffset + sizeof(uint64_t), hash.High);
+}
+
+ShaderArtifactEntry MakeEntry(
+    std::span<const byte> bytecode,
+    ShaderHash key,
+    render::ShaderStage stage = render::ShaderStage::Vertex,
+    render::ShaderBlobCategory category = render::ShaderBlobCategory::DXIL) {
     ShaderArtifactEntry entry;
     entry.Key = key;
     entry.PassName = "forward";
-    entry.Stage = render::ShaderStage::Vertex;
-    entry.EntryPoint = "VSMain";
-    entry.Category = render::ShaderBlobCategory::DXIL;
+    entry.Stage = stage;
+    entry.EntryPoint = stage == render::ShaderStage::Vertex
+                           ? "VSMain"
+                           : (stage == render::ShaderStage::Pixel ? "PSMain" : "CSMain");
+    entry.Category = category;
     entry.BlobPath = MakeShaderArtifactBlobPath(entry.Category, key);
     entry.BytecodeHash = HashShaderBytes(bytecode);
     entry.BytecodeSize = static_cast<uint32_t>(bytecode.size());
     return entry;
 }
 
+ShaderVertexInterface MakeVertexInterface() {
+    return ShaderVertexInterface{.Parameters = {
+                                     ShaderVertexParameter{"COLOR", 0, 1, ShaderVertexScalarType::UInt, 16, 4},
+                                     ShaderVertexParameter{"POSITION", 0, 0, ShaderVertexScalarType::Float, 32, 3},
+                                 }};
+}
+
+std::optional<size_t> FindAsciiOffset(
+    std::span<const byte> data,
+    std::string_view text) noexcept {
+    if (text.size() > data.size()) {
+        return std::nullopt;
+    }
+    for (size_t i = 0; i <= data.size() - text.size(); ++i) {
+        bool equal = true;
+        for (size_t j = 0; j < text.size(); ++j) {
+            if (static_cast<uint8_t>(data[i + j]) != static_cast<uint8_t>(text[j])) {
+                equal = false;
+                break;
+            }
+        }
+        if (equal) {
+            return i;
+        }
+    }
+    return std::nullopt;
+}
+
+vector<byte> MakeLegacyFlatBlob(
+    const ShaderArtifactEntry& entry,
+    std::span<const byte> bytecode) {
+    BinaryWriter writer;
+    for (char c : std::string_view{"RADSBLB1"}) {
+        writer.U8(static_cast<uint8_t>(c));
+    }
+    writer.U32(kShaderArtifactFormatVersion);
+    writer.U64(entry.Key.Low);
+    writer.U64(entry.Key.High);
+    writer.U32(static_cast<uint32_t>(entry.Stage));
+    writer.I32(static_cast<int32_t>(entry.Category));
+    const ShaderHash oldPayloadHash = HashShaderBytes(bytecode);
+    writer.U64(oldPayloadHash.Low);
+    writer.U64(oldPayloadHash.High);
+    writer.SizedBytes(bytecode);
+    return std::move(writer).TakeData();
+}
+
 }  // namespace
 
-TEST(ShaderArtifactTest, BlobRoundTrip) {
+TEST(ShaderArtifactTest, VertexBlobRoundTripsInterfaceAndHashDomains) {
     TempDir dir;
     const vector<byte> bytecode = MakeBytes("DXBCfake-bytecode-payload");
     const ShaderHash key{0x1234, 0x5678};
     const ShaderArtifactEntry entry = MakeEntry(bytecode, key);
+    const ShaderVertexInterface vertexInterface = MakeVertexInterface();
     const std::filesystem::path path = dir / entry.BlobPath;
 
-    ASSERT_TRUE(WriteShaderArtifactBlob(path, entry, bytecode));
+    ASSERT_TRUE(WriteShaderArtifactBlob(path, entry, vertexInterface, bytecode));
     ShaderAssetDiagnostic diag;
     auto blob = ReadShaderArtifactBlob(path, diag);
     ASSERT_TRUE(blob.has_value()) << diag.Message;
     EXPECT_EQ(blob->Key, key);
     EXPECT_EQ(blob->Stage, render::ShaderStage::Vertex);
     EXPECT_EQ(blob->Category, render::ShaderBlobCategory::DXIL);
+    EXPECT_EQ(blob->VertexInterface, vertexInterface);
     EXPECT_EQ(blob->Bytecode, bytecode);
+    EXPECT_FALSE(blob->ContentHash.IsZero());
+    EXPECT_EQ(entry.BytecodeHash, HashShaderBytes(bytecode));
+    EXPECT_NE(blob->ContentHash, entry.BytecodeHash);
+}
+
+TEST(ShaderArtifactTest, VertexBlobRoundTripsEmptyInterface) {
+    TempDir dir;
+    const vector<byte> bytecode = MakeBytes("DXBCempty-interface");
+    const ShaderArtifactEntry entry = MakeEntry(bytecode, ShaderHash{9, 10});
+    const ShaderVertexInterface emptyInterface;
+
+    ASSERT_TRUE(WriteShaderArtifactBlob(
+        dir / entry.BlobPath,
+        entry,
+        emptyInterface,
+        bytecode));
+    ShaderAssetDiagnostic diag;
+    std::optional<ShaderArtifactBlob> blob =
+        ReadShaderArtifactBlob(dir / entry.BlobPath, diag);
+    ASSERT_TRUE(blob.has_value()) << diag.Message;
+    ASSERT_TRUE(blob->VertexInterface.has_value());
+    EXPECT_TRUE(blob->VertexInterface->Parameters.empty());
+}
+
+TEST(ShaderArtifactTest, NonVertexBlobsRoundTripWithoutInterface) {
+    TempDir dir;
+    const vector<byte> bytecode = MakeBytes("non-vertex-bytecode");
+    for (render::ShaderStage stage :
+         {render::ShaderStage::Pixel, render::ShaderStage::Compute}) {
+        const ShaderArtifactEntry entry = MakeEntry(bytecode, ShaderHash{11, static_cast<uint64_t>(stage)}, stage);
+        ASSERT_TRUE(WriteShaderArtifactBlob(dir / entry.BlobPath, entry, std::nullopt, bytecode));
+        ShaderAssetDiagnostic diag;
+        std::optional<ShaderArtifactBlob> blob =
+            ReadShaderArtifactBlob(dir / entry.BlobPath, diag);
+        ASSERT_TRUE(blob.has_value()) << diag.Message;
+        EXPECT_EQ(blob->Stage, stage);
+        EXPECT_FALSE(blob->VertexInterface.has_value());
+    }
 }
 
 TEST(ShaderArtifactTest, BlobWriteCreatesParentDirectories) {
@@ -2054,7 +2407,11 @@ TEST(ShaderArtifactTest, BlobWriteCreatesParentDirectories) {
     const vector<byte> bytecode = MakeBytes("payload");
     const ShaderArtifactEntry entry = MakeEntry(bytecode, ShaderHash{1, 2});
     // "dxil/" 子目录不存在, 应由写入自动创建。
-    ASSERT_TRUE(WriteShaderArtifactBlob(dir / entry.BlobPath, entry, bytecode));
+    ASSERT_TRUE(WriteShaderArtifactBlob(
+        dir / entry.BlobPath,
+        entry,
+        ShaderVertexInterface{},
+        bytecode));
     EXPECT_TRUE(std::filesystem::exists(dir / entry.BlobPath));
 }
 
@@ -2062,8 +2419,16 @@ TEST(ShaderArtifactTest, BlobBytecodeIsFourByteAligned) {
     // Vulkan 侧会把字节码指针 bit_cast 成 const uint32_t*, 故要求 4 字节对齐。
     TempDir dir;
     const vector<byte> bytecode = MakeBytes("0123456789abcdef0123");
-    const ShaderArtifactEntry entry = MakeEntry(bytecode, ShaderHash{7, 8});
-    ASSERT_TRUE(WriteShaderArtifactBlob(dir / entry.BlobPath, entry, bytecode));
+    const ShaderArtifactEntry entry = MakeEntry(
+        bytecode,
+        ShaderHash{7, 8},
+        render::ShaderStage::Vertex,
+        render::ShaderBlobCategory::SPIRV);
+    ASSERT_TRUE(WriteShaderArtifactBlob(
+        dir / entry.BlobPath,
+        entry,
+        MakeVertexInterface(),
+        bytecode));
     ShaderAssetDiagnostic diag;
     auto blob = ReadShaderArtifactBlob(dir / entry.BlobPath, diag);
     ASSERT_TRUE(blob.has_value()) << diag.Message;
@@ -2073,7 +2438,112 @@ TEST(ShaderArtifactTest, BlobBytecodeIsFourByteAligned) {
 TEST(ShaderArtifactTest, BlobRejectsEmptyBytecode) {
     TempDir dir;
     const ShaderArtifactEntry entry = MakeEntry({}, ShaderHash{1, 1});
-    EXPECT_FALSE(WriteShaderArtifactBlob(dir / "dxil/x.bin", entry, {}));
+    EXPECT_FALSE(WriteShaderArtifactBlob(
+        dir / "dxil/x.bin",
+        entry,
+        ShaderVertexInterface{},
+        {}));
+}
+
+TEST(ShaderArtifactTest, BlobWriterEnforcesInterfacePresence) {
+    TempDir dir;
+    const vector<byte> bytecode = MakeBytes("bytecode");
+    const ShaderArtifactEntry vertex = MakeEntry(bytecode, ShaderHash{12, 1});
+    EXPECT_FALSE(WriteShaderArtifactBlob(dir / "missing.bin", vertex, std::nullopt, bytecode));
+
+    const ShaderArtifactEntry pixel = MakeEntry(
+        bytecode,
+        ShaderHash{12, 2},
+        render::ShaderStage::Pixel);
+    EXPECT_FALSE(WriteShaderArtifactBlob(
+        dir / "unexpected.bin",
+        pixel,
+        ShaderVertexInterface{},
+        bytecode));
+}
+
+TEST(ShaderArtifactTest, BlobWriterRejectsInvalidVertexInterfaceFields) {
+    TempDir dir;
+    const vector<byte> bytecode = MakeBytes("DXBCwriter-validation");
+    const ShaderArtifactEntry entry = MakeEntry(bytecode, ShaderHash{13, 1});
+    const auto rejected = [&](const ShaderVertexInterface& vertexInterface) {
+        EXPECT_FALSE(WriteShaderArtifactBlob(
+            dir / "invalid.bin",
+            entry,
+            vertexInterface,
+            bytecode));
+    };
+
+    ShaderVertexInterface invalid = MakeVertexInterface();
+    invalid.Parameters.front().Semantic.clear();
+    rejected(invalid);
+    invalid = MakeVertexInterface();
+    invalid.Parameters.front().Semantic = "color";
+    rejected(invalid);
+    invalid = MakeVertexInterface();
+    invalid.Parameters.front().Semantic = "COLOR0";
+    rejected(invalid);
+    invalid = MakeVertexInterface();
+    invalid.Parameters.front().Semantic = "SV_POSITION";
+    rejected(invalid);
+    invalid = MakeVertexInterface();
+    invalid.Parameters.front().ScalarType = ShaderVertexScalarType::Unknown;
+    rejected(invalid);
+    invalid = MakeVertexInterface();
+    invalid.Parameters.front().BitWidth = 8;
+    rejected(invalid);
+    invalid = MakeVertexInterface();
+    invalid.Parameters.front().ComponentCount = 0;
+    rejected(invalid);
+    invalid = MakeVertexInterface();
+    invalid.Parameters.front().ComponentCount = 5;
+    rejected(invalid);
+    invalid = MakeVertexInterface();
+    invalid.Parameters[1].Semantic = invalid.Parameters[0].Semantic;
+    invalid.Parameters[1].SemanticIndex = invalid.Parameters[0].SemanticIndex;
+    rejected(invalid);
+    invalid = MakeVertexInterface();
+    std::ranges::reverse(invalid.Parameters);
+    rejected(invalid);
+}
+
+TEST(ShaderArtifactTest, BlobWriterRejectsInvalidCountsAndSpirvShape) {
+    TempDir dir;
+    const vector<byte> dxil = MakeBytes("DXBCwriter-validation");
+    const ShaderArtifactEntry dxilEntry = MakeEntry(dxil, ShaderHash{14, 1});
+    ShaderVertexInterface oversized;
+    for (uint32_t i = 0; i < 33; ++i) {
+        oversized.Parameters.push_back(
+            ShaderVertexParameter{"ATTR", i, i, ShaderVertexScalarType::Float, 32, 1});
+    }
+    EXPECT_FALSE(WriteShaderArtifactBlob(dir / "oversized.bin", dxilEntry, oversized, dxil));
+
+    const vector<byte> spirv = MakeBytes("12345678");
+    const ShaderArtifactEntry spirvEntry = MakeEntry(
+        spirv,
+        ShaderHash{14, 2},
+        render::ShaderStage::Vertex,
+        render::ShaderBlobCategory::SPIRV);
+    ShaderVertexInterface duplicateLocation = MakeVertexInterface();
+    duplicateLocation.Parameters[1].BackendLocation =
+        duplicateLocation.Parameters[0].BackendLocation;
+    EXPECT_FALSE(WriteShaderArtifactBlob(
+        dir / "duplicate-location.bin",
+        spirvEntry,
+        duplicateLocation,
+        spirv));
+
+    const vector<byte> misalignedSpirv = MakeBytes("12345");
+    const ShaderArtifactEntry misalignedEntry = MakeEntry(
+        misalignedSpirv,
+        ShaderHash{14, 3},
+        render::ShaderStage::Vertex,
+        render::ShaderBlobCategory::SPIRV);
+    EXPECT_FALSE(WriteShaderArtifactBlob(
+        dir / "misaligned.bin",
+        misalignedEntry,
+        MakeVertexInterface(),
+        misalignedSpirv));
 }
 
 TEST(ShaderArtifactTest, BlobRejectsMissingFile) {
@@ -2097,7 +2567,7 @@ TEST(ShaderArtifactTest, BlobRejectsTruncatedFile) {
     const vector<byte> bytecode = MakeBytes("some-bytecode");
     const ShaderArtifactEntry entry = MakeEntry(bytecode, ShaderHash{3, 4});
     const std::filesystem::path path = dir / entry.BlobPath;
-    ASSERT_TRUE(WriteShaderArtifactBlob(path, entry, bytecode));
+    ASSERT_TRUE(WriteShaderArtifactBlob(path, entry, ShaderVertexInterface{}, bytecode));
 
     auto full = ReadBinaryFile(path);
     ASSERT_TRUE(full.has_value());
@@ -2113,7 +2583,7 @@ TEST(ShaderArtifactTest, BlobDetectsCorruptedBytecode) {
     const vector<byte> bytecode = MakeBytes("payload-to-be-corrupted");
     const ShaderArtifactEntry entry = MakeEntry(bytecode, ShaderHash{5, 6});
     const std::filesystem::path path = dir / entry.BlobPath;
-    ASSERT_TRUE(WriteShaderArtifactBlob(path, entry, bytecode));
+    ASSERT_TRUE(WriteShaderArtifactBlob(path, entry, MakeVertexInterface(), bytecode));
 
     auto full = ReadBinaryFile(path);
     ASSERT_TRUE(full.has_value());
@@ -2124,6 +2594,238 @@ TEST(ShaderArtifactTest, BlobDetectsCorruptedBytecode) {
     ShaderAssetDiagnostic diag;
     EXPECT_FALSE(ReadShaderArtifactBlob(path, diag).has_value());
     EXPECT_NE(diag.Message.find("content hash"), string::npos);
+}
+
+TEST(ShaderArtifactTest, BlobDetectsCorruptedInterfaceMetadata) {
+    TempDir dir;
+    const vector<byte> bytecode = MakeBytes("DXBCmetadata-hash");
+    const ShaderArtifactEntry entry = MakeEntry(bytecode, ShaderHash{15, 1});
+    const std::filesystem::path path = dir / entry.BlobPath;
+    ASSERT_TRUE(WriteShaderArtifactBlob(path, entry, MakeVertexInterface(), bytecode));
+
+    std::optional<vector<byte>> full = ReadBinaryFile(path);
+    ASSERT_TRUE(full.has_value());
+    const std::optional<size_t> semanticOffset = FindAsciiOffset(full.value(), "POSITION");
+    ASSERT_TRUE(semanticOffset.has_value());
+    (*full)[semanticOffset.value()] = static_cast<byte>('Q');
+    ASSERT_TRUE(WriteBinaryFile(path, full.value()));
+
+    ShaderAssetDiagnostic diag;
+    EXPECT_FALSE(ReadShaderArtifactBlob(path, diag).has_value());
+    EXPECT_NE(diag.Message.find("content hash"), string::npos);
+}
+
+TEST(ShaderArtifactTest, BlobContentHashCoversKeyStageAndCategory) {
+    TempDir dir;
+    const vector<byte> bytecode = MakeBytes("DXBCheader-hash");
+    const ShaderArtifactEntry entry = MakeEntry(bytecode, ShaderHash{16, 1});
+    const std::filesystem::path path = dir / "tampered.bin";
+    ASSERT_TRUE(WriteShaderArtifactBlob(path, entry, MakeVertexInterface(), bytecode));
+    const std::optional<vector<byte>> original = ReadBinaryFile(path);
+    ASSERT_TRUE(original.has_value());
+
+    for (size_t offset : {kBlobKeyOffset, kBlobStageOffset, kBlobCategoryOffset}) {
+        vector<byte> tampered = original.value();
+        if (offset == kBlobStageOffset) {
+            tampered[offset] = static_cast<byte>(static_cast<uint8_t>(render::ShaderStage::Pixel));
+        } else if (offset == kBlobCategoryOffset) {
+            tampered[offset] = static_cast<byte>(static_cast<uint8_t>(render::ShaderBlobCategory::SPIRV));
+        } else {
+            tampered[offset] = static_cast<byte>(static_cast<uint8_t>(tampered[offset]) ^ 1u);
+        }
+        ASSERT_TRUE(WriteBinaryFile(path, tampered));
+        ShaderAssetDiagnostic diag;
+        EXPECT_FALSE(ReadShaderArtifactBlob(path, diag).has_value()) << offset;
+        EXPECT_NE(diag.Message.find("content hash"), string::npos) << offset << ": " << diag.Message;
+    }
+}
+
+TEST(ShaderArtifactTest, BlobRejectsInvalidHeaderEnumsAndOuterTrailingData) {
+    TempDir dir;
+    const vector<byte> bytecode = MakeBytes("DXBCouter-structure");
+    const ShaderArtifactEntry entry = MakeEntry(bytecode, ShaderHash{17, 1});
+    const std::filesystem::path path = dir / "tampered.bin";
+    ASSERT_TRUE(WriteShaderArtifactBlob(path, entry, MakeVertexInterface(), bytecode));
+    const std::optional<vector<byte>> original = ReadBinaryFile(path);
+    ASSERT_TRUE(original.has_value());
+
+    vector<byte> invalidStage = original.value();
+    invalidStage[kBlobStageOffset] =
+        static_cast<byte>(static_cast<uint8_t>(render::ShaderStage::Graphics));
+    ASSERT_TRUE(WriteBinaryFile(path, invalidStage));
+    ShaderAssetDiagnostic diag;
+    EXPECT_FALSE(ReadShaderArtifactBlob(path, diag).has_value());
+    EXPECT_NE(diag.Message.find("invalid stage"), string::npos);
+
+    vector<byte> invalidCategory = original.value();
+    invalidCategory[kBlobCategoryOffset] =
+        static_cast<byte>(static_cast<uint8_t>(render::ShaderBlobCategory::MSL));
+    ASSERT_TRUE(WriteBinaryFile(path, invalidCategory));
+    EXPECT_FALSE(ReadShaderArtifactBlob(path, diag).has_value());
+    EXPECT_NE(diag.Message.find("invalid category"), string::npos);
+
+    vector<byte> trailing = original.value();
+    trailing.push_back(static_cast<byte>(0xcc));
+    ASSERT_TRUE(WriteBinaryFile(path, trailing));
+    EXPECT_FALSE(ReadShaderArtifactBlob(path, diag).has_value());
+    EXPECT_NE(diag.Message.find("trailing data"), string::npos);
+}
+
+TEST(ShaderArtifactTest, BlobRejectsTamperedCountAndNestedBytecodeLength) {
+    TempDir dir;
+    const vector<byte> bytecode = MakeBytes("DXBCnested-length");
+    const ShaderArtifactEntry entry = MakeEntry(bytecode, ShaderHash{18, 1});
+    const std::filesystem::path path = dir / "tampered.bin";
+    ASSERT_TRUE(WriteShaderArtifactBlob(path, entry, MakeVertexInterface(), bytecode));
+    const std::optional<vector<byte>> original = ReadBinaryFile(path);
+    ASSERT_TRUE(original.has_value());
+    ASSERT_GT(original->size(), kBlobPayloadOffset + sizeof(uint32_t));
+
+    vector<byte> hugeCount = original.value();
+    std::fill_n(hugeCount.begin() + kBlobPayloadOffset, sizeof(uint32_t), static_cast<byte>(0xff));
+    RewriteBlobContentHash(hugeCount);
+    ASSERT_TRUE(WriteBinaryFile(path, hugeCount));
+    ShaderAssetDiagnostic diag;
+    EXPECT_FALSE(ReadShaderArtifactBlob(path, diag).has_value());
+    EXPECT_NE(diag.Message.find("too many vertex parameters"), string::npos) << diag.Message;
+
+    vector<byte> payloadTrailing = original.value();
+    const std::optional<size_t> bytecodeOffset = FindAsciiOffset(payloadTrailing, "DXBCnested-length");
+    ASSERT_TRUE(bytecodeOffset.has_value());
+    ASSERT_GE(bytecodeOffset.value(), sizeof(uint64_t));
+    const size_t nestedSizeOffset = bytecodeOffset.value() - sizeof(uint64_t);
+    payloadTrailing[nestedSizeOffset] =
+        static_cast<byte>(static_cast<uint8_t>(payloadTrailing[nestedSizeOffset]) - 1u);
+    RewriteBlobContentHash(payloadTrailing);
+    ASSERT_TRUE(WriteBinaryFile(path, payloadTrailing));
+    EXPECT_FALSE(ReadShaderArtifactBlob(path, diag).has_value());
+    EXPECT_NE(diag.Message.find("payload has trailing data"), string::npos) << diag.Message;
+}
+
+TEST(ShaderArtifactTest, BlobReaderRejectsInvalidMetadataAfterHashValidation) {
+    TempDir dir;
+    const vector<byte> bytecode = MakeBytes("DXBCreader-validation");
+    const ShaderArtifactEntry entry = MakeEntry(bytecode, ShaderHash{18, 2});
+    const std::filesystem::path path = dir / "invalid-metadata.bin";
+    ASSERT_TRUE(WriteShaderArtifactBlob(path, entry, MakeVertexInterface(), bytecode));
+    const std::optional<vector<byte>> original = ReadBinaryFile(path);
+    ASSERT_TRUE(original.has_value());
+
+    const std::optional<size_t> colorOffset = FindAsciiOffset(original.value(), "COLOR");
+    ASSERT_TRUE(colorOffset.has_value());
+    constexpr size_t kScalarOffsetAfterFiveByteSemantic = 13;
+    constexpr size_t kBitWidthOffsetAfterFiveByteSemantic = 14;
+    constexpr size_t kComponentCountOffsetAfterFiveByteSemantic = 15;
+
+    const auto rejected = [&](vector<byte> malformed, std::string_view expected) {
+        RewriteBlobContentHash(malformed);
+        ASSERT_TRUE(WriteBinaryFile(path, malformed));
+        ShaderAssetDiagnostic diag;
+        EXPECT_FALSE(ReadShaderArtifactBlob(path, diag).has_value());
+        EXPECT_NE(diag.Message.find(expected), string::npos) << diag.Message;
+    };
+
+    vector<byte> malformed = original.value();
+    malformed[colorOffset.value()] = static_cast<byte>('c');
+    rejected(std::move(malformed), "ASCII uppercase");
+
+    malformed = original.value();
+    const std::string_view systemSemantic = "SV_XY";
+    for (size_t i = 0; i < systemSemantic.size(); ++i) {
+        malformed[colorOffset.value() + i] = static_cast<byte>(systemSemantic[i]);
+    }
+    rejected(std::move(malformed), "SV_ system semantic");
+
+    malformed = original.value();
+    malformed[colorOffset.value() + 4] = static_cast<byte>('0');
+    rejected(std::move(malformed), "numeric suffix");
+
+    malformed = original.value();
+    malformed[colorOffset.value() + kScalarOffsetAfterFiveByteSemantic] =
+        static_cast<byte>(static_cast<uint8_t>(ShaderVertexScalarType::Unknown));
+    rejected(std::move(malformed), "scalar type");
+
+    malformed = original.value();
+    malformed[colorOffset.value() + kBitWidthOffsetAfterFiveByteSemantic] = static_cast<byte>(8);
+    rejected(std::move(malformed), "bit width");
+
+    malformed = original.value();
+    malformed[colorOffset.value() + kComponentCountOffsetAfterFiveByteSemantic] = static_cast<byte>(0);
+    rejected(std::move(malformed), "component count");
+}
+
+TEST(ShaderArtifactTest, BlobReaderRejectsMisalignedSpirvAfterHashValidation) {
+    TempDir dir;
+    const vector<byte> bytecode = MakeBytes("12345678");
+    const ShaderArtifactEntry entry = MakeEntry(
+        bytecode,
+        ShaderHash{18, 3},
+        render::ShaderStage::Vertex,
+        render::ShaderBlobCategory::SPIRV);
+    const std::filesystem::path path = dir / "misaligned-reader.bin";
+    ASSERT_TRUE(WriteShaderArtifactBlob(path, entry, MakeVertexInterface(), bytecode));
+
+    std::optional<vector<byte>> malformed = ReadBinaryFile(path);
+    ASSERT_TRUE(malformed.has_value());
+    const std::optional<size_t> bytecodeOffset = FindAsciiOffset(malformed.value(), "12345678");
+    ASSERT_TRUE(bytecodeOffset.has_value());
+    ASSERT_GE(bytecodeOffset.value(), sizeof(uint64_t));
+    const size_t nestedSizeOffset = bytecodeOffset.value() - sizeof(uint64_t);
+    (*malformed)[nestedSizeOffset] = static_cast<byte>(7);
+    RewriteBlobContentHash(malformed.value());
+    ASSERT_TRUE(WriteBinaryFile(path, malformed.value()));
+
+    ShaderAssetDiagnostic diag;
+    EXPECT_FALSE(ReadShaderArtifactBlob(path, diag).has_value());
+    EXPECT_NE(diag.Message.find("misaligned SPIR-V"), string::npos) << diag.Message;
+}
+
+TEST(ShaderArtifactTest, BlobRejectsLegacyFlatVersionOneDxilAndSpirv) {
+    TempDir dir;
+#if defined(RADRAY_ENABLE_SHADER_JIT)
+    Nullable<shared_ptr<render::Dxc>> dxcResult = render::CreateDxc();
+    if (!dxcResult.HasValue()) {
+        GTEST_SKIP() << "DXC is unavailable";
+    }
+    shared_ptr<render::Dxc> dxc = dxcResult.Release();
+    constexpr std::string_view source = R"(
+float4 VSMain(float3 position : POSITION) : SV_POSITION {
+    return float4(position, 1.0);
+}
+)";
+    render::DxcCompileOptions options{
+        .EntryPoint = "VSMain",
+        .Stage = render::ShaderStage::Vertex,
+        .SM = render::HlslShaderModel::SM60};
+    for (bool isSpirv : {false, true}) {
+        options.IsSpirv = isSpirv;
+        std::optional<render::DxcOutput> output =
+            dxc->CompileMemory(source, "legacy_blob_probe.hlsl", options);
+        ASSERT_TRUE(output.has_value());
+        ASSERT_FALSE(output->Data.empty());
+        const render::ShaderBlobCategory category = isSpirv
+                                                        ? render::ShaderBlobCategory::SPIRV
+                                                        : render::ShaderBlobCategory::DXIL;
+        const ShaderArtifactEntry entry = MakeEntry(
+            output->Data,
+            ShaderHash{19, static_cast<uint64_t>(category)},
+            render::ShaderStage::Vertex,
+            category);
+        const std::filesystem::path path = dir / entry.BlobPath;
+        const vector<byte> legacy = MakeLegacyFlatBlob(entry, output->Data);
+        ASSERT_TRUE(WriteBinaryFile(path, legacy));
+        ShaderAssetDiagnostic diag;
+        EXPECT_FALSE(ReadShaderArtifactBlob(path, diag).has_value());
+    }
+#else
+    const vector<byte> legacyBytecode = MakeBytes("DXBClegacy-bytecode");
+    const ShaderArtifactEntry entry = MakeEntry(legacyBytecode, ShaderHash{19, 0});
+    const std::filesystem::path path = dir / entry.BlobPath;
+    const vector<byte> legacy = MakeLegacyFlatBlob(entry, legacyBytecode);
+    ASSERT_TRUE(WriteBinaryFile(path, legacy));
+    ShaderAssetDiagnostic diag;
+    EXPECT_FALSE(ReadShaderArtifactBlob(path, diag).has_value());
+#endif
 }
 
 // ============================ index.json ============================
@@ -2962,6 +3664,146 @@ shared_ptr<render::Dxc> MakeDxc() {
     return dxc.Release();
 }
 
+#if defined(RADRAY_ENABLE_SPIRV_CROSS)
+
+struct CompiledVertexReflections {
+    render::HlslShaderDesc Dxil;
+    render::SpirvShaderDesc Spirv;
+};
+
+std::optional<CompiledVertexReflections> CompileVertexReflections(
+    render::Dxc& dxc,
+    std::string_view source,
+    bool isOptimize) {
+    render::DxcCompileOptions options{
+        .EntryPoint = "VSMain",
+        .Stage = render::ShaderStage::Vertex,
+        .SM = render::HlslShaderModel::SM60,
+        .IsOptimize = isOptimize,
+        .IsSpirv = false,
+        .EnableUnbounded = true};
+    std::optional<render::DxcOutput> dxil =
+        dxc.CompileMemory(source, "vertex_interface_probe.hlsl", options);
+    if (!dxil.has_value() || dxil->Refl.empty()) {
+        return std::nullopt;
+    }
+    std::optional<render::HlslShaderDesc> hlsl =
+        dxc.GetShaderDescFromOutput(dxil->Refl);
+    if (!hlsl.has_value()) {
+        return std::nullopt;
+    }
+
+    options.IsSpirv = true;
+    std::optional<render::DxcOutput> spirv =
+        dxc.CompileMemory(source, "vertex_interface_probe.hlsl", options);
+    if (!spirv.has_value() || spirv->Data.empty()) {
+        return std::nullopt;
+    }
+    std::optional<render::SpirvShaderDesc> spirvReflection =
+        render::ReflectSpirv(render::SpirvBytecodeView{
+            .Data = spirv->Data,
+            .EntryPointName = "VSMain",
+            .Stage = render::ShaderStage::Vertex});
+    if (!spirvReflection.has_value()) {
+        return std::nullopt;
+    }
+    return CompiledVertexReflections{
+        .Dxil = std::move(hlsl.value()),
+        .Spirv = std::move(spirvReflection.value())};
+}
+
+bool SameVertexProjection(
+    const ShaderVertexParameter& lhs,
+    const ShaderVertexParameter& rhs) noexcept {
+    return lhs.Semantic == rhs.Semantic &&
+           lhs.SemanticIndex == rhs.SemanticIndex &&
+           lhs.ScalarType == rhs.ScalarType &&
+           lhs.ComponentCount == rhs.ComponentCount;
+}
+
+bool IsVertexProjectionSubset(
+    const ShaderVertexInterface& subset,
+    const ShaderVertexInterface& superset) noexcept {
+    return std::ranges::all_of(subset.Parameters, [&](const ShaderVertexParameter& parameter) {
+        return std::ranges::any_of(superset.Parameters, [&](const ShaderVertexParameter& candidate) {
+            return SameVertexProjection(parameter, candidate);
+        });
+    });
+}
+
+Nullable<const ShaderVertexParameter*> FindVertexParameter(
+    const ShaderVertexInterface& vertexInterface,
+    std::string_view semantic,
+    uint32_t semanticIndex = 0) noexcept {
+    for (const ShaderVertexParameter& parameter : vertexInterface.Parameters) {
+        if (parameter.Semantic == semantic && parameter.SemanticIndex == semanticIndex) {
+            return &parameter;
+        }
+    }
+    return nullptr;
+}
+
+Nullable<const render::HlslSignatureParameterDesc*> FindHlslInput(
+    const render::HlslShaderDesc& reflection,
+    std::string_view semantic,
+    uint32_t semanticIndex = 0) noexcept {
+    for (const render::HlslSignatureParameterDesc& input : reflection.InputParameters) {
+        if (input.SemanticName == semantic && input.SemanticIndex == semanticIndex) {
+            return &input;
+        }
+    }
+    return nullptr;
+}
+
+std::string_view ReflectedSpirvSemantic(const render::SpirvStageIo& input) noexcept {
+    if (!input.HlslSemantic.empty()) {
+        return input.HlslSemantic;
+    }
+    if (input.Name.starts_with("in.var.")) {
+        return std::string_view{input.Name}.substr(sizeof("in.var.") - 1);
+    }
+    return input.Name;
+}
+
+Nullable<const render::SpirvStageIo*> FindSpirvInput(
+    const render::SpirvShaderDesc& reflection,
+    std::string_view semanticFragment) noexcept {
+    for (const render::SpirvStageIo& input : reflection.StageInputs) {
+        if (!input.BuiltIn.has_value() &&
+            ReflectedSpirvSemantic(input).find(semanticFragment) != std::string_view::npos) {
+            return &input;
+        }
+    }
+    return nullptr;
+}
+
+constexpr std::string_view kVertexShapeProbeHlsl = R"(
+struct VertexInput {
+    float4 UV[2] : TEXCOORD0;
+    float3x4 Xform : TRANSFORM0;
+    float3 Position : POSITION0;
+    float3 Unused : NORMAL0;
+};
+
+float4 VSMain(VertexInput input) : SV_POSITION {
+    return mul(input.Position, input.Xform) + input.UV[0] * 0.01 + input.UV[1] * 0.02;
+}
+)";
+
+constexpr std::string_view kVertexSubsetProbeHlsl = R"(
+struct VertexInput {
+    float3 Position : POSITION0;
+    float3 Unused : NORMAL0;
+    min16float2 UV : TEXCOORD5;
+};
+
+float4 VSMain(VertexInput input) : SV_POSITION {
+    return float4(input.Position.xy + input.UV, input.Position.z, 1.0);
+}
+)";
+
+#endif
+
 ShaderCookOptions CookOptions(const Fixture& fixture, vector<render::ShaderBlobCategory> categories) {
     return ShaderCookOptions{
         .ShaderRoot = fixture.Workspace.Root(),
@@ -3157,6 +3999,97 @@ struct VariantFixture {
 
 }  // namespace
 
+#if defined(RADRAY_ENABLE_SPIRV_CROSS)
+
+TEST(ShaderResolverTest, DxcReflectionExposesUnusedMatrixAndArrayShapes) {
+    shared_ptr<render::Dxc> dxc = MakeDxc();
+    if (dxc == nullptr) {
+        GTEST_SKIP() << "DXC is unavailable";
+    }
+    std::optional<CompiledVertexReflections> reflections =
+        CompileVertexReflections(*dxc, kVertexShapeProbeHlsl, true);
+    ASSERT_TRUE(reflections.has_value());
+
+    vector<uint32_t> texcoordIndices;
+    vector<uint32_t> transformIndices;
+    for (const render::HlslSignatureParameterDesc& input : reflections->Dxil.InputParameters) {
+        if (input.SemanticName == "TEXCOORD") {
+            texcoordIndices.push_back(input.SemanticIndex);
+        } else if (input.SemanticName == "TRANSFORM") {
+            transformIndices.push_back(input.SemanticIndex);
+        }
+    }
+    EXPECT_EQ(texcoordIndices, (vector<uint32_t>{0, 1}));
+    EXPECT_EQ(transformIndices, (vector<uint32_t>{0, 1, 2, 3}));
+    Nullable<const render::HlslSignatureParameterDesc*> unused =
+        FindHlslInput(reflections->Dxil, "NORMAL");
+    ASSERT_TRUE(unused.HasValue());
+    EXPECT_EQ(unused.Get()->ReadWriteMask, 0u);
+
+    Nullable<const render::SpirvStageIo*> arrayInput =
+        FindSpirvInput(reflections->Spirv, "TEXCOORD");
+    Nullable<const render::SpirvStageIo*> matrixInput =
+        FindSpirvInput(reflections->Spirv, "TRANSFORM");
+    ASSERT_TRUE(arrayInput.HasValue());
+    ASSERT_TRUE(matrixInput.HasValue());
+    ASSERT_LT(arrayInput.Get()->TypeIndex, reflections->Spirv.Types.size());
+    ASSERT_LT(matrixInput.Get()->TypeIndex, reflections->Spirv.Types.size());
+    EXPECT_EQ(reflections->Spirv.Types[arrayInput.Get()->TypeIndex].ArraySize, 2u);
+    EXPECT_GT(reflections->Spirv.Types[matrixInput.Get()->TypeIndex].Columns, 1u);
+    EXPECT_FALSE(FindSpirvInput(reflections->Spirv, "NORMAL").HasValue());
+}
+
+TEST(ShaderResolverTest, DxilAndSpirvVertexProjectionsMatchWithinEachOptimizationMode) {
+    shared_ptr<render::Dxc> dxc = MakeDxc();
+    if (dxc == nullptr) {
+        GTEST_SKIP() << "DXC is unavailable";
+    }
+
+    for (bool isOptimize : {false, true}) {
+        SCOPED_TRACE(fmt::format("IsOptimize={}", isOptimize));
+        std::optional<CompiledVertexReflections> reflections =
+            CompileVertexReflections(*dxc, kVertexSubsetProbeHlsl, isOptimize);
+        ASSERT_TRUE(reflections.has_value());
+
+        ShaderAssetDiagnostic diag;
+        std::optional<ShaderVertexInterface> dxil =
+            ExtractVertexInterface(reflections->Dxil, diag);
+        ASSERT_TRUE(dxil.has_value()) << diag.ToString();
+        std::optional<ShaderVertexInterface> spirv =
+            ExtractVertexInterface(reflections->Spirv, diag);
+        ASSERT_TRUE(spirv.has_value()) << diag.ToString();
+
+        render::HlslShaderDesc activeDxil = reflections->Dxil;
+        std::erase_if(
+            activeDxil.InputParameters,
+            [](const render::HlslSignatureParameterDesc& input) noexcept {
+                return input.ReadWriteMask == 0;
+            });
+        std::optional<ShaderVertexInterface> active =
+            ExtractVertexInterface(activeDxil, diag);
+        ASSERT_TRUE(active.has_value()) << diag.ToString();
+
+        EXPECT_TRUE(IsVertexProjectionSubset(spirv.value(), dxil.value()));
+        EXPECT_TRUE(IsVertexProjectionSubset(active.value(), spirv.value()));
+        EXPECT_LE(spirv->Parameters.size(), dxil->Parameters.size());
+
+        Nullable<const ShaderVertexParameter*> dxilUv =
+            FindVertexParameter(dxil.value(), "TEXCOORD", 5);
+        Nullable<const ShaderVertexParameter*> spirvUv =
+            FindVertexParameter(spirv.value(), "TEXCOORD", 5);
+        ASSERT_TRUE(dxilUv.HasValue());
+        ASSERT_TRUE(spirvUv.HasValue());
+        EXPECT_TRUE(SameVertexProjection(*dxilUv.Get(), *spirvUv.Get()));
+
+        ShaderVertexParameter diagnosticFieldsDiffer = *spirvUv.Get();
+        diagnosticFieldsDiffer.BitWidth = diagnosticFieldsDiffer.BitWidth == 16 ? 64 : 16;
+        diagnosticFieldsDiffer.BackendLocation += 100;
+        EXPECT_TRUE(SameVertexProjection(diagnosticFieldsDiffer, *dxilUv.Get()));
+    }
+}
+
+#endif
+
 TEST(ShaderResolverTest, JitProducesDxil) {
     auto dxc = MakeDxc();
     if (dxc == nullptr) {
@@ -3178,7 +4111,11 @@ TEST(ShaderResolverTest, JitProducesDxil) {
     EXPECT_EQ(bytecode->Category, render::ShaderBlobCategory::DXIL);
     EXPECT_EQ(bytecode->Stage, render::ShaderStage::Vertex);
     EXPECT_FALSE(bytecode->Data.empty());
+    ASSERT_TRUE(bytecode->VertexInterface.has_value());
+    EXPECT_FALSE(bytecode->VertexInterface->Parameters.empty());
 }
+
+#if defined(RADRAY_ENABLE_SPIRV_CROSS)
 
 TEST(ShaderResolverTest, JitProducesSpirvWithFourByteAlignment) {
     auto dxc = MakeDxc();
@@ -3196,10 +4133,38 @@ TEST(ShaderResolverTest, JitProducesSpirvWithFourByteAlignment) {
         diag);
     ASSERT_TRUE(bytecode.has_value()) << diag.Message;
     EXPECT_EQ(bytecode->Category, render::ShaderBlobCategory::SPIRV);
+    ASSERT_TRUE(bytecode->VertexInterface.has_value());
+    EXPECT_FALSE(bytecode->VertexInterface->Parameters.empty());
     // vkCreateShaderModule 会把指针 bit_cast 成 const uint32_t*。
     EXPECT_EQ(bytecode->Data.size() % 4u, 0u);
     EXPECT_EQ(reinterpret_cast<uintptr_t>(bytecode->Data.data()) % 4u, 0u);
 }
+
+#else
+
+TEST(ShaderResolverTest, JitRejectsSpirvWithoutSpirvCross) {
+    auto dxc = MakeDxc();
+    if (dxc == nullptr) {
+        GTEST_SKIP() << "DXC is unavailable";
+    }
+    Fixture fixture;
+    TestResolver resolver = fixture.Resolver(ShaderArtifactStaleness::Strict, true, dxc.get());
+    for (render::ShaderStage stage :
+         {render::ShaderStage::Vertex, render::ShaderStage::Pixel}) {
+        ShaderAssetDiagnostic diag;
+        EXPECT_FALSE(resolver
+                         ->Resolve(
+                             fixture.Pass(),
+                             stage,
+                             render::ShaderBlobCategory::SPIRV,
+                             {},
+                             diag)
+                         .has_value());
+        EXPECT_NE(diag.Message.find("spirv-cross"), string::npos) << diag.Message;
+    }
+}
+
+#endif
 
 TEST(ShaderResolverTest, DescriptorIsReadyForCreateShader) {
     auto dxc = MakeDxc();
@@ -3221,6 +4186,7 @@ TEST(ShaderResolverTest, DescriptorIsReadyForCreateShader) {
     EXPECT_FALSE(bytecode->Data.empty());
     EXPECT_EQ(bytecode->Category, render::ShaderBlobCategory::DXIL);
     EXPECT_TRUE(bytecode->Stage == render::ShaderStage::Pixel);
+    EXPECT_FALSE(bytecode->VertexInterface.has_value());
 }
 
 TEST(ShaderResolverTest, CookWritesIndexAndBlobs) {
@@ -3241,8 +4207,46 @@ TEST(ShaderResolverTest, CookWritesIndexAndBlobs) {
     EXPECT_EQ(cook.Index.Entries.size(), 2u);
     EXPECT_TRUE(std::filesystem::exists(fixture.Workspace.ArtifactDir() / "index.json"));
     for (const ShaderArtifactEntry& entry : cook.Index.Entries) {
-        EXPECT_TRUE(std::filesystem::exists(
-            fixture.Workspace.ArtifactDir() / std::filesystem::path{entry.BlobPath}));
+        const std::filesystem::path path =
+            fixture.Workspace.ArtifactDir() / std::filesystem::path{entry.BlobPath};
+        EXPECT_TRUE(std::filesystem::exists(path));
+        ShaderAssetDiagnostic diag;
+        std::optional<ShaderArtifactBlob> blob = ReadShaderArtifactBlob(path, diag);
+        ASSERT_TRUE(blob.has_value()) << diag.ToString();
+        EXPECT_EQ(blob->VertexInterface.has_value(), entry.Stage == render::ShaderStage::Vertex);
+        EXPECT_EQ(entry.BytecodeHash, HashShaderBytes(blob->Bytecode));
+    }
+}
+
+TEST(ShaderResolverTest, CookExtractsVertexInterfaceWhenReflectionValidationIsDisabled) {
+    auto dxc = MakeDxc();
+    if (dxc == nullptr) {
+        GTEST_SKIP() << "DXC is unavailable";
+    }
+    Fixture fixture;
+    vector<render::ShaderBlobCategory> categories{render::ShaderBlobCategory::DXIL};
+#if defined(RADRAY_ENABLE_SPIRV_CROSS)
+    categories.push_back(render::ShaderBlobCategory::SPIRV);
+#endif
+    ShaderCookOptions options = CookOptions(fixture, categories);
+    options.ValidateReflection = false;
+    options.Incremental = false;
+    ShaderCookResult cook = CookShaderAsset(*dxc, fixture.Asset, options);
+    ASSERT_TRUE(cook.Succeeded())
+        << (cook.Diagnostics.empty() ? string{} : cook.Diagnostics.front().ToString());
+
+    for (const ShaderArtifactEntry& entry : cook.Index.Entries) {
+        ShaderAssetDiagnostic diag;
+        std::optional<ShaderArtifactBlob> blob = ReadShaderArtifactBlob(
+            fixture.Workspace.ArtifactDir() / std::filesystem::path{entry.BlobPath},
+            diag);
+        ASSERT_TRUE(blob.has_value()) << diag.ToString();
+        if (entry.Stage == render::ShaderStage::Vertex) {
+            ASSERT_TRUE(blob->VertexInterface.has_value());
+            EXPECT_FALSE(blob->VertexInterface->Parameters.empty());
+        } else {
+            EXPECT_FALSE(blob->VertexInterface.has_value());
+        }
     }
 }
 
@@ -3269,6 +4273,7 @@ TEST(ShaderResolverTest, CookedArtifactIsPreferredOverJit) {
         diag);
     ASSERT_TRUE(bytecode.has_value()) << diag.Message;
     EXPECT_EQ(bytecode->Source, ShaderBytecodeSource::Artifact);
+    EXPECT_TRUE(bytecode->VertexInterface.has_value());
 }
 
 TEST(ShaderResolverTest, ArtifactBytecodeMatchesJitBytecode) {
@@ -3306,7 +4311,49 @@ TEST(ShaderResolverTest, ArtifactBytecodeMatchesJitBytecode) {
     // AOT 与 JIT 必须编出完全相同的字节码, 否则 key 的语义就是错的。
     EXPECT_EQ(viaArtifact->Data, viaJit->Data);
     EXPECT_EQ(viaArtifact->Key, viaJit->Key);
+    ASSERT_TRUE(viaJit->VertexInterface.has_value());
+    ASSERT_TRUE(viaArtifact->VertexInterface.has_value());
+    EXPECT_EQ(viaArtifact->VertexInterface, viaJit->VertexInterface);
 }
+
+#if defined(RADRAY_ENABLE_SPIRV_CROSS)
+
+TEST(ShaderResolverTest, SpirvArtifactAndJitVertexInterfacesMatch) {
+    auto dxc = MakeDxc();
+    if (dxc == nullptr) {
+        GTEST_SKIP() << "DXC is unavailable";
+    }
+    Fixture fixture;
+    ShaderAssetDiagnostic diag;
+    TestResolver jitOnly = fixture.Resolver(ShaderArtifactStaleness::Strict, true, dxc.get());
+    std::optional<ShaderBytecode> viaJit = jitOnly->Resolve(
+        fixture.Pass(),
+        render::ShaderStage::Vertex,
+        render::ShaderBlobCategory::SPIRV,
+        {},
+        diag);
+    ASSERT_TRUE(viaJit.has_value()) << diag.ToString();
+    ASSERT_TRUE(viaJit->VertexInterface.has_value());
+
+    ShaderCookResult cook = CookShaderAsset(
+        *dxc,
+        fixture.Asset,
+        CookOptions(fixture, {render::ShaderBlobCategory::SPIRV}));
+    ASSERT_TRUE(cook.Succeeded())
+        << (cook.Diagnostics.empty() ? string{} : cook.Diagnostics.front().ToString());
+    TestResolver withArtifacts = fixture.Resolver(ShaderArtifactStaleness::Strict, false);
+    std::optional<ShaderBytecode> viaArtifact = withArtifacts->Resolve(
+        fixture.Pass(),
+        render::ShaderStage::Vertex,
+        render::ShaderBlobCategory::SPIRV,
+        {},
+        diag);
+    ASSERT_TRUE(viaArtifact.has_value()) << diag.ToString();
+    ASSERT_TRUE(viaArtifact->VertexInterface.has_value());
+    EXPECT_EQ(viaArtifact->VertexInterface, viaJit->VertexInterface);
+}
+
+#endif
 
 TEST(ShaderResolverTest, StrictModeFallsBackToJitAfterSourceEdit) {
     auto dxc = MakeDxc();
@@ -3394,6 +4441,8 @@ TEST(ShaderResolverTest, LenientModeWorksWithoutSourceFiles) {
     EXPECT_EQ(bytecode->Source, ShaderBytecodeSource::Artifact);
 }
 
+#if defined(RADRAY_ENABLE_SPIRV_CROSS)
+
 TEST(ShaderResolverTest, ArtifactMissForOtherCategoryFallsBackToJit) {
     auto dxc = MakeDxc();
     if (dxc == nullptr) {
@@ -3449,8 +4498,28 @@ TEST(ShaderResolverTest, CookBothCategoriesProducesSeparateBlobs) {
         ASSERT_TRUE(bytecode.has_value()) << diag.Message;
         EXPECT_EQ(bytecode->Source, ShaderBytecodeSource::Artifact);
         EXPECT_EQ(bytecode->Category, category);
+        EXPECT_TRUE(bytecode->VertexInterface.has_value());
     }
 }
+
+#else
+
+TEST(ShaderResolverTest, CookRejectsSpirvWithoutSpirvCross) {
+    auto dxc = MakeDxc();
+    if (dxc == nullptr) {
+        GTEST_SKIP() << "DXC is unavailable";
+    }
+    Fixture fixture;
+    ShaderCookResult cook = CookShaderAsset(
+        *dxc,
+        fixture.Asset,
+        CookOptions(fixture, {render::ShaderBlobCategory::SPIRV}));
+    EXPECT_FALSE(cook.Succeeded());
+    ASSERT_FALSE(cook.Diagnostics.empty());
+    EXPECT_NE(cook.Diagnostics.front().Message.find("spirv-cross"), string::npos);
+}
+
+#endif
 
 TEST(ShaderResolverTest, IncrementalCookReusesExistingBlobs) {
     auto dxc = MakeDxc();
@@ -3469,6 +4538,19 @@ TEST(ShaderResolverTest, IncrementalCookReusesExistingBlobs) {
     EXPECT_EQ(second.Stats.Compiled, 0u);
     EXPECT_EQ(second.Stats.Reused, 2u);
     EXPECT_EQ(second.Index.Entries.size(), 2u);
+
+    TestResolver resolver = fixture.Resolver(ShaderArtifactStaleness::Strict, false);
+    ShaderAssetDiagnostic diag;
+    std::optional<ShaderBytecode> restored = resolver->Resolve(
+        fixture.Pass(),
+        render::ShaderStage::Vertex,
+        render::ShaderBlobCategory::DXIL,
+        {},
+        diag);
+    ASSERT_TRUE(restored.has_value()) << diag.ToString();
+    EXPECT_EQ(restored->Source, ShaderBytecodeSource::Artifact);
+    ASSERT_TRUE(restored->VertexInterface.has_value());
+    EXPECT_FALSE(restored->VertexInterface->Parameters.empty());
 }
 
 TEST(ShaderResolverTest, CookFailsWhenManifestContradictsReflection) {
@@ -3513,6 +4595,23 @@ TEST(ShaderResolverTest, CookRejectsEmptyCategoryList) {
     Fixture fixture;
     ShaderCookResult cook = CookShaderAsset(*dxc, fixture.Asset, CookOptions(fixture, {}));
     EXPECT_FALSE(cook.Succeeded());
+}
+
+TEST(ShaderResolverTest, CookRejectsUnsupportedArtifactCategories) {
+    auto dxc = MakeDxc();
+    if (dxc == nullptr) {
+        GTEST_SKIP() << "DXC is unavailable";
+    }
+    Fixture fixture;
+    for (render::ShaderBlobCategory category :
+         {render::ShaderBlobCategory::MSL, render::ShaderBlobCategory::METALLIB}) {
+        SCOPED_TRACE(static_cast<int32_t>(category));
+        ShaderCookResult cook =
+            CookShaderAsset(*dxc, fixture.Asset, CookOptions(fixture, {category}));
+        EXPECT_FALSE(cook.Succeeded());
+        ASSERT_FALSE(cook.Diagnostics.empty());
+        EXPECT_NE(cook.Diagnostics.front().Message.find("cannot produce"), string::npos);
+    }
 }
 
 TEST(ShaderResolverTest, CookFromManifestFileMatchesInMemory) {

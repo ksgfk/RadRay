@@ -14,6 +14,7 @@
 #include <radray/runtime/shader_asset.h>
 
 #include <radray/environment.h>
+#include <radray/file.h>
 #include <radray/shader/dxc.h>
 #include <radray/render/rhi.h>
 #include <radray/runtime/wait_frame.h>
@@ -421,7 +422,7 @@ TEST_F(ShaderAssetLoadTest, JitVariantIsCachedAndStable) {
     EXPECT_EQ(pass->GetCachedBytecodeCount(), 2u);
 }
 
-TEST_F(ShaderAssetLoadTest, StageBytecodeIsSharedAcrossVariantsThatProjectTheSame) {
+TEST_F(ShaderAssetLoadTest, VertexInterfaceRemainsStableAcrossVariantCacheGrowth) {
     ScopedResolveContext context{Device(), ShaderArtifactStaleness::Strict, true};
     if (!context.HasJit()) {
         GTEST_SKIP() << "DXC is unavailable";
@@ -443,26 +444,114 @@ TEST_F(ShaderAssetLoadTest, StageBytecodeIsSharedAcrossVariantsThatProjectTheSam
     ASSERT_TRUE(base.HasValue()) << resolveDiag.ToString();
     const ShaderBytecode* baseVs = base->FindBytecode(render::ShaderStage::Vertex).Get();
     ASSERT_NE(baseVs, nullptr);
+    Nullable<const ShaderVertexInterface*> baseInterface = base->FindVertexInterface();
+    ASSERT_TRUE(baseInterface.HasValue());
+    ASSERT_EQ(baseInterface->Parameters.size(), 1u);
+    EXPECT_EQ(baseInterface->Parameters.front().Semantic, "POSITION");
+    const ShaderVertexInterface* interfacePointer = baseInterface.Get();
 
-    const std::optional<ShaderVariantKey> shadowed =
+    const std::optional<ShaderVariantKey> pointShadows =
         pass->GetDomain().WithKeyword(
             pass->GetDomain().DefaultVariant(), "_POINT_SHADOWS", true);
-    ASSERT_TRUE(shadowed.has_value());
+    const std::optional<ShaderVariantKey> directionalShadows =
+        pass->GetDomain().WithKeyword(
+            pass->GetDomain().DefaultVariant(), "_DIRECTIONAL_SHADOWS", true);
+    ASSERT_TRUE(pointShadows.has_value());
+    ASSERT_TRUE(directionalShadows.has_value());
+    const std::optional<ShaderVariantKey> bothShadows =
+        pass->GetDomain().WithKeyword(
+            pointShadows.value(), "_DIRECTIONAL_SHADOWS", true);
+    ASSERT_TRUE(bothShadows.has_value());
 
-    Nullable<const ShaderProgramVariant*> variant =
-        pass->GetOrCreateVariant(shadowed.value(), Category(), resolveDiag);
-    ASSERT_TRUE(variant.HasValue()) << resolveDiag.ToString();
-    EXPECT_NE(base.Get(), variant.Get()) << "two variants are two entries";
+    // 先取出旧指针, 再新增三个 VariantEntry 和三份不同的 Pixel 字节码, 使两级拥有 vector
+    // 都在旧指针存活时继续扩容。
+    const std::array<ShaderVariantKey, 3> additionalVariants{
+        pointShadows.value(),
+        directionalShadows.value(),
+        bothShadows.value()};
+    for (const ShaderVariantKey& key : additionalVariants) {
+        Nullable<const ShaderProgramVariant*> variant =
+            pass->GetOrCreateVariant(key, Category(), resolveDiag);
+        ASSERT_TRUE(variant.HasValue()) << resolveDiag.ToString();
+        EXPECT_NE(base.Get(), variant.Get());
+        EXPECT_EQ(variant->FindBytecode(render::ShaderStage::Vertex).Get(), baseVs)
+            << "the vertex stage projects identically, so the bytecode must be shared";
+        EXPECT_EQ(variant->FindVertexInterface().Get(), interfacePointer);
+    }
 
-    EXPECT_EQ(variant->FindBytecode(render::ShaderStage::Vertex).Get(), baseVs)
-        << "the vertex stage projects identically, so the bytecode must be shared";
+    EXPECT_EQ(pass->GetCachedVariantCount(), 4u);
+    // VS 共用一条, 四个 PS 变体各一条。
+    EXPECT_EQ(pass->GetCachedBytecodeCount(), 5u);
+    EXPECT_EQ(base->FindVertexInterface().Get(), interfacePointer);
+    ASSERT_EQ(interfacePointer->Parameters.size(), 1u);
+    EXPECT_EQ(interfacePointer->Parameters.front().Semantic, "POSITION");
 
-    EXPECT_EQ(pass->GetCachedVariantCount(), 2u);
-    // VS 共用一条, PS 两条。
-    EXPECT_EQ(pass->GetCachedBytecodeCount(), 3u);
+    pass->ReleaseRenderResources();
+    EXPECT_EQ(pass->GetCachedVariantCount(), 0u);
+    EXPECT_EQ(pass->GetCachedBytecodeCount(), 0u);
+    // release 后 base/baseVs/interfacePointer 均已失效, 此后不得再使用。
 }
 
-TEST_F(ShaderAssetLoadTest, CookedArtifactResolvesWithoutDxc) {
+TEST_F(ShaderAssetLoadTest, ComputeOnlyVariantHasNoVertexInterface) {
+#if !defined(RADRAY_ENABLE_SHADER_JIT)
+    GTEST_SKIP() << "shader JIT support is disabled";
+#else
+    Nullable<shared_ptr<render::Dxc> > dxcResult = render::CreateDxc();
+    if (!dxcResult.HasValue()) {
+        GTEST_SKIP() << "DXC is unavailable";
+    }
+    shared_ptr<render::Dxc> dxc = dxcResult.Release();
+
+    ScopedManifestCopy workspace{GetErrorPassManifestPath()};
+    ASSERT_TRUE(workspace.IsValid());
+    const std::filesystem::path sourcePath =
+        workspace.ManifestPath().parent_path() / "compute_only.hlsl";
+    ASSERT_TRUE(WriteTextFile(
+        sourcePath,
+        "[numthreads(1, 1, 1)]\n"
+        "void CSMain() {}\n"));
+
+    ShaderResolveContext resolveContext{
+        ShaderResolveSettings{
+            .ShaderRoot = sourcePath.parent_path(),
+            .Staleness = ShaderArtifactStaleness::Strict,
+            .AllowJit = true},
+        dxc.get()};
+    ShaderResolver resolver{resolveContext, workspace.ManifestPath()};
+
+    ShaderPassDesc computePass;
+    computePass.Name = "ComputeOnly";
+    computePass.Source = sourcePath.filename().generic_string();
+    computePass.Stages.push_back(
+        ShaderStageDesc{
+            .Stage = render::ShaderStage::Compute,
+            .EntryPoint = "CSMain"});
+
+    ShaderAssetDesc desc;
+    desc.Name = "ComputeOnly";
+    desc.Passes.push_back(computePass);
+    ShaderAssetDiagnostic diagnostic;
+    std::optional<ShaderVariantDomain> domain =
+        ShaderVariantDomain::Build(desc, desc.Passes.front(), diagnostic);
+    ASSERT_TRUE(domain.has_value()) << diagnostic.ToString();
+
+    ShaderPassProgram program{
+        std::move(computePass),
+        std::move(domain.value()),
+        IntrusivePtr<SharedPipelineLayout>{},
+        std::optional<ShaderVertexInputStorage>{},
+        &resolver};
+    Nullable<const ShaderProgramVariant*> variant =
+        program.GetOrCreateDefaultVariant(Category(), diagnostic);
+    ASSERT_TRUE(variant.HasValue()) << diagnostic.ToString();
+    ASSERT_EQ(variant->Stages().size(), 1u);
+    EXPECT_EQ(variant->Stages().front().Stage, render::ShaderStage::Compute);
+    EXPECT_TRUE(variant->FindBytecode(render::ShaderStage::Compute).HasValue());
+    EXPECT_FALSE(variant->FindVertexInterface().HasValue());
+#endif
+}
+
+TEST_F(ShaderAssetLoadTest, CookedArtifactMatchesJitAndResolvesWithoutDxc) {
 #if !defined(RADRAY_ENABLE_SHADER_JIT)
     GTEST_SKIP() << "cook requires shader JIT support";
 #else
@@ -474,6 +563,30 @@ TEST_F(ShaderAssetLoadTest, CookedArtifactResolvesWithoutDxc) {
 
     ScopedManifestCopy workspace{GetErrorPassManifestPath()};
     ASSERT_TRUE(workspace.IsValid());
+
+    ShaderAssetDiagnostic jitDiag;
+    std::optional<ShaderAssetDesc> jitDesc =
+        LoadShaderAssetDesc(workspace.ManifestPath(), jitDiag);
+    ASSERT_TRUE(jitDesc.has_value()) << jitDiag.ToString();
+    ASSERT_EQ(jitDesc->Passes.size(), 1u);
+    const ShaderPassDesc jitPass =
+        MakeResolvablePass(jitDesc.value(), jitDesc->Passes.front());
+    ShaderResolveContext jitContext{
+        ShaderResolveSettings{
+            .ShaderRoot = GetShaderRoot(),
+            .Staleness = ShaderArtifactStaleness::Strict,
+            .AllowJit = true},
+        dxc.get()};
+    ShaderResolver jitResolver{jitContext, workspace.ManifestPath()};
+    const std::optional<ShaderBytecode> jitted = jitResolver.Resolve(
+        jitPass,
+        render::ShaderStage::Vertex,
+        Category(),
+        std::span<const string>{},
+        jitDiag);
+    ASSERT_TRUE(jitted.has_value()) << jitDiag.ToString();
+    ASSERT_TRUE(jitted->VertexInterface.has_value());
+    const ShaderVertexInterface jittedInterface = jitted->VertexInterface.value();
 
     const vector<render::ShaderBlobCategory> categories{Category()};
     const ShaderCookResult cook = CookShaderAssetFile(
@@ -504,6 +617,11 @@ TEST_F(ShaderAssetLoadTest, CookedArtifactResolvesWithoutDxc) {
     Nullable<const ShaderProgramVariant*> variant =
         pass->GetOrCreateDefaultVariant(Category(), resolveDiag);
     ASSERT_TRUE(variant.HasValue()) << resolveDiag.ToString();
+    Nullable<const ShaderVertexInterface*> vertexInterface = variant->FindVertexInterface();
+    ASSERT_TRUE(vertexInterface.HasValue());
+    ASSERT_EQ(vertexInterface->Parameters.size(), 1u);
+    EXPECT_EQ(vertexInterface->Parameters.front().Semantic, "POSITION");
+    EXPECT_EQ(*vertexInterface, jittedInterface);
     for (const ShaderProgramVariant::StageBlob& blob : variant->Stages()) {
         ASSERT_NE(blob.Bytecode, nullptr);
         EXPECT_EQ(blob.Bytecode->Source, ShaderBytecodeSource::Artifact)

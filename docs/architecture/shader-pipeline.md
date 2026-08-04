@@ -33,6 +33,9 @@ ShaderAsset                      一份 manifest（shader_asset.h）
        ├─ ShaderVertexInputStorage   仅 graphics pass
        ├─ ShaderVariantDomain
        └─ 字节码缓存（两级）
+            └─ BytecodeEntry[]
+                 └─ ShaderBytecode
+                      └─ optional ShaderVertexInterface（仅 vertex stage 有值）
 ```
 
 `ShaderAsset` 内 `_resolver` **必须声明在 `_passes` 之前**：program 借用 resolver 裸指针，
@@ -44,16 +47,36 @@ ShaderAsset                      一份 manifest（shader_asset.h）
 在哪个 register/space"，但拿不到 7 项必须由作者声明的信息。完整清单与推导见
 [ADR-0003](../adr/0003-manifest-is-abi-authority.md)。
 
-数据流方向由此确定：**manifest 声明 ABI，反射只做一致性核对**。三个直接后果：
+资源绑定的数据流方向由此确定：**manifest 声明 ABI，资源绑定反射只做一致性核对**。
+三个直接后果：
 
 - `BuildPipelineLayoutStorage` 不需要任何反射数据 / 字节码 / target 信息。可以在编译任何
   shader 之前建好 `PipelineLayout`，且结果对 target 与 variant 都不变。
-- 反射数据**不落盘**。cook 期用它核对"声明 ⊇ 反射"，之后丢弃。
+- 用于资源绑定 ABI 核对的完整反射不落盘。cook 期用它核对"声明 ⊇ 反射"，之后丢弃；
+  唯一收窄是 vertex-stage 的精确 artifact 在自身 `.bin` 中保留最小输入接口投影，
+  `index.json` 仍不保存反射数据。
 - 校验方向是单向的：反射出现但 manifest 未声明 → 失败（改了 HLSL 忘改 manifest）；
   manifest 声明但反射没有 → 通过（DCE / keyword `#ifdef` 的正常结果）。
 
 与 `hlsl.h` / `spirv.h` 里的反射 JSON 是两种不同性质的文件：那份机器生成、枚举存整数；
 manifest 人写人 diff、枚举存字符串。刻意不共用约定。
+
+### vertex-stage 最小输入接口投影
+
+每份 vertex-stage DXIL/SPIR-V artifact 都携带自己的 `ShaderVertexInterface`；pixel/compute stage
+保持 `nullopt`。vertex stage 即使没有用户输入也保持 engaged，`Parameters` 可以为空。
+投影只保留连接 primitive 所需的 semantic、semantic index、按 category 分派含义的 backend
+location、scalar type、bit width 与 component count，不保存资源绑定完整反射。
+
+接口是**精确 stage artifact 的属性**，由 category、`IsOptimize`、vertex-stage variant 投影、
+source/entry point、shader model、pass defines 与 toolchain 等完整编译身份共同决定，不是 pass
+级固定数据。AOT 从 blob 恢复，JIT 在编译后提取，二者都落进 `ShaderBytecode`；
+`ShaderProgramVariant` 只读暴露它。跨 category 的提取与比较约束见
+[ADR-0013](../adr/0013-vertex-stage-interface-projection.md)。
+
+当前渲染路径没有消费这份投影：PSO 仍走 manifest `VertexInput` →
+`ShaderVertexInputStorage` → graphics pipeline。把 `ShaderVertexInterface` 与 primitive vertex layout
+连接起来属于后续阶段。
 
 ### 不在 manifest 里的东西
 
@@ -150,8 +173,32 @@ forward_pass/
 blob 采用**内容寻址**：文件名即 stage artifact key 的 hex。由此当多个 program variant
 投影到同一份 stage 字节码时自然去重。按 target 分子目录，使"只发布 DXIL"退化为删除一个目录。
 
-blob 容器带头部（magic + 版本 + stage/category + 内容哈希），使单个 blob 文件可**独立自验**，
-不依赖 index.json 的正确性。
+blob v1 是一个带嵌套 payload 的自验容器：
+
+```
+header:
+    magic + formatVersion
+    key.Low + key.High
+    stage + category
+    ContentHash.Low + ContentHash.High
+    payload                  SizedBytes
+
+payload:
+    if stage == Vertex:
+        parameterCount       u32
+        parameters[]         semantic + semanticIndex + backendLocation
+                             + scalarType + bitWidth + componentCount
+    bytecode                 SizedBytes
+```
+
+接口存在性直接由 `stage` 决定，不另存 `hasVertexInterface` bool：vertex stage 总是有
+`parameterCount`（允许为 0），其他 stage 没有接口段。接口只在对应 blob 中，`index.json`
+不重复保存。
+
+`ContentHash` 覆盖 header 中的 `key` / `stage` / `category` 以及完整 payload 序列化字节，
+所以接口 metadata、嵌套 bytecode 和关键 header 被篡改都能由单个 blob **独立自验**。
+`ShaderArtifactEntry::BytecodeHash` 仍只覆盖原始 bytecode；两者不合并，也不改变 blob 文件名
+由 artifact key 内容寻址的规则。
 
 产物与 manifest 同处一地的完整理由（以及为什么 `radray_shader_cook` 刻意不提供 `--output`）
 见 [ADR-0004](../adr/0004-content-addressed-shader-artifacts.md)。

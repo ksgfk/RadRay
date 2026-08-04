@@ -1,5 +1,6 @@
 > - 适用: 实施「vertex-stage artifact 保留最小输入接口投影」这一轮改动
-> - 状态: 待实施。本文是修正后的定稿计划，取代评审前的原始版本
+> - 权威: 本文保留实施清单；长期设计约束以 ADR-0013 与 shader pipeline 架构文档为准
+> - 状态: 已实施（2026-08）。公共 projection 的后续方向已由 `backend-specialized-shader-lanes.md` 取代
 > - 锚点: `modules/shader/include/radray/shader/shader_manifest.h`, `modules/shader/src/shader_manifest.cpp`,
 >   `modules/shader/src/shader_reflection_map.h`, `modules/shader/src/spvc.cpp`,
 >   `modules/runtime/include/radray/runtime/shader_program.h`, `modules/shader/src/dxc.cpp`
@@ -27,21 +28,24 @@ DXC 编译
 ### 0.1 `-fspv-reflect` 需要 Vulkan 侧配套改动（**必须先解决**）
 
 已裁决给 SPIR-V 加 `-fspv-reflect`，让 `SpirvStageIo::HlslSemantic` 有权威来源。
-实测该 flag 会往模块里加一行：
+实测该 flag 会往模块里加两行：
 
 ```
 OpExtension "SPV_GOOGLE_hlsl_functionality1"
+OpExtension "SPV_GOOGLE_user_type"
 ```
 
-而 `vulkan_impl.cpp:3272` 起的 device extension 列表**没有** `VK_GOOGLE_hlsl_functionality1`。
-本机 `vulkaninfo` 确认 RTX 3060 / Vulkan 1.4.325 驱动支持该扩展（`VK_GOOGLE_hlsl_functionality1`
+而 `vulkan_impl.cpp:3272` 起的 device extension 列表原先没有对应的
+`VK_GOOGLE_hlsl_functionality1` / `VK_GOOGLE_user_type`。
+本机 `vulkaninfo` 确认 RTX 3060 / Vulkan 1.4.325 驱动支持这两个扩展（`VK_GOOGLE_hlsl_functionality1`
 与 `VK_GOOGLE_user_type` 都在列），但"驱动支持"不等于"未声明也合法"：
 `vkCreateShaderModule` 要求模块用到的每个 `OpExtension` 都由已启用的 device extension 覆盖，
 否则是 validation error（部分驱动会放过，validation layer 会报）。本仓库启用了
 `VK_LAYER_KHRONOS_validation`（`vulkan_impl.cpp:2976`），所以会被抓到。
 
-**必须先做**：在 `vulkan_impl.cpp` 的 device extension 探测里按现有 `IsValidateExtensions`
-模式加上 `VK_GOOGLE_HLSL_FUNCTIONALITY_1_EXTENSION_NAME`（可选启用，不支持则不加）。
+**必须先做**：在 `vulkan_impl.cpp` 的 device extension 列表加上
+`VK_GOOGLE_HLSL_FUNCTIONALITY_1_EXTENSION_NAME` 与 `VK_GOOGLE_USER_TYPE_EXTENSION_NAME`。
+两者都是所有仓库 SPIR-V 的硬依赖，缺少任一扩展时拒绝创建 Vulkan device。
 
 **然后**才能在 `_BuildCompileArgs`（`dxc.cpp:911`）里加 `-fspv-reflect`。
 
@@ -362,10 +366,10 @@ Struct/Image/...  -> 拒绝
 `BaseType` 映射：
 
 ```
-Float16/32/64  -> Float
-Int8/16/32/64  -> SInt
-UInt8/16/32/64 -> UInt
-Bool/Void/其他 -> 失败
+Float16/32/64 -> Float
+Int16/32/64   -> SInt
+UInt16/32/64  -> UInt
+Int8/UInt8/Bool/Void/其他 -> 失败
 ```
 
 `BitWidth` 从 `BaseType` 推（Float16→16, Float32→32, ...）。
@@ -948,11 +952,8 @@ SPIR-V：
 
 ### ADR README
 
-在 `docs/adr/README.md` 的表格（第 53-68 行）末尾加一行：
-
-```markdown
-| [0013](0013-vertex-stage-interface-projection.md) | vertex-stage artifact 保留最小输入接口投影 | 生效 |
-```
+在 `docs/adr/README.md` 的表格末尾加入
+[ADR-0013](../adr/0013-vertex-stage-interface-projection.md) 条目。
 
 `docs/architecture/overview.md` 的索引不枚举单条 ADR（只列 `adr/` 目录），无需改。
 
@@ -979,7 +980,7 @@ primitive 连接属于后续阶段。
 
 | 文件 | 改动 |
 |---|---|
-| `modules/render/src/vk/vulkan_impl.cpp` | 加 `VK_GOOGLE_hlsl_functionality1` 可选扩展（见 0.1） |
+| `modules/render/src/vk/vulkan_impl.cpp` | 加两个 `VK_GOOGLE_*` 必需扩展（见 0.1） |
 | `modules/shader/src/dxc.cpp` | `_BuildCompileArgs` 加 `-fspv-reflect`（见 0.1） |
 | `modules/shader/include/radray/shader/shader_manifest.h` | 新类型、`ExtractVertexInterface` 声明、blob 结构、writer 签名 |
 | `modules/shader/src/shader_manifest.cpp` | 提取实现、blob writer/reader、`CookStage` 拆分、JIT/AOT 接入 |
@@ -988,6 +989,7 @@ primitive 连接属于后续阶段。
 | `modules/runtime/src/shader_program.cpp` | `FindVertexInterface` 实现 |
 | `modules/shader/src/spvc.cpp` | 删三处广义 catch |
 | `modules/shader/src/shader_asset_template.cpp` | 异常注释 |
+| `tools/shader_cook/CMakeLists.txt` | 把已启用后端投影为 CLI 默认 category 宏，不新增 render 链接 |
 | `tools/shader_cook/shader_cook.cpp` | 异常/行为注释（原计划遗漏） |
 | `modules/shader/tests/test_shader_asset.cpp` | 提取 / blob / cook 测试 |
 | `modules/runtime/tests/test_shader_program.cpp` | resolver / variant 测试 |
@@ -1036,12 +1038,9 @@ primitive 连接属于后续阶段。
 - 没有 `VertexFactory` 或 primitive 连接代码
 - 没有新的 `noexcept` / `catch` / `throw`
 
-## 22. 下一阶段（本轮不做）
+## 22. 后续方向已取代
 
-```
-ShaderVertexInterface + PrimitiveVertexLayout
-  -> ResolvedVertexInput
-  -> PSO key
-```
-
-并在该阶段原子删除 manifest `VertexInput` 与 `ShaderVertexInputStorage`。
+不再直接把公共 `ShaderVertexInterface` 接到 primitive。下一轮先按
+[`backend-specialized-shader-lanes.md`](backend-specialized-shader-lanes.md) 拆成 DXIL semantic
+signature 与 SPIR-V location/type interface，删除 Vulkan semantic 和 `-fspv-reflect` 扩展链；
+primitive 连接在两条 backend lane 稳定后分别实施。

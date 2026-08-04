@@ -64,3 +64,19 @@ forward_pass/
 - `ReadShaderArtifactBlob` 校验 magic、版本、内容哈希，任一不符返回 nullopt。
 - `ShaderArtifactIndex::Sources` 是列表而不是单个哈希。
 - 改动 blob 容器格式或 index schema 时递增 `kShaderArtifactFormatVersion`。
+
+## 后续裁决：首次部署前重定义 v1（2026-08）
+
+[ADR-0013](0013-vertex-stage-interface-projection.md) 要求 vertex-stage blob 保存最小输入接口投影。
+作出该决定时，blob v1 从未实际部署或被发布运行时消费，因此本次作为**唯一的首次部署前例外**，
+原地重定义 v1 grammar：header 使用覆盖 `key` / `stage` / `category` 与完整嵌套 payload 的
+`ContentHash`，vertex payload 先写接口再写 bytecode，非 vertex payload 只写 bytecode；
+`formatVersion` 本次仍为 1。
+
+不提供旧 v1 兼容分支。已有本地旧产物必须重新 cook，新 reader 只需拒绝它们，不承诺具体拒绝
+发生在 hash 还是结构校验阶段。本次例外不建立“已部署格式也可原地改写”的先例。
+
+从这份 v1 基线开始，上文最后一条约束扩展为：改动 blob 容器格式、`index.json` schema，
+**或任何写入 blob 的派生数据之提取逻辑**，都必须递增 `kShaderArtifactFormatVersion`。
+版本同时进入 artifact key 与 toolchain hash，递增会强制重新 cook；否则增量 cook 可能命中旧 key，
+直接复用按旧逻辑提取的 vertex interface，静默吞掉提取修复。

@@ -6,6 +6,7 @@
 #include <radray/shader/hlsl.h>
 #include <radray/shader/shader_types.h>
 #include <radray/shader/spirv.h>
+#include <radray/types.h>
 
 // 反射 -> RHI 绑定类型的映射, 以及 HLSL semantic 的归一化。
 //
@@ -55,5 +56,8 @@ bool IsSystemSemantic(std::string_view baseName) noexcept;
 
 /// semantic 的有效索引: 名字尾部带非零数字时取它, 否则取反射给的 SemanticIndex。
 uint32_t EffectiveSemanticIndex(std::string_view rawName, uint32_t semanticIndex) noexcept;
+
+/// 只规范 ASCII 小写字母；semantic 的其他字节原样保留。
+string UppercaseAscii(std::string_view value);
 
 }  // namespace radray

@@ -9,6 +9,9 @@ add_executable(radray_shader_cook shader_cook.cpp)
 # 约 23 MB obj 与 d3d12.dll 硬依赖 —— 根因是 rhi.cpp.obj 对 5 个后端工厂符号有
 # UNDEF 引用, 而 obj 是链接粒度。改动此处前请重跑 link /MAP 验收。
 target_link_libraries(radray_shader_cook PRIVATE radrayshader)
+target_compile_definitions(radray_shader_cook PRIVATE
+    $<$<BOOL:${RADRAY_ENABLE_D3D12}>:RADRAY_ENABLE_D3D12>
+    $<$<BOOL:${RADRAY_ENABLE_VULKAN}>:RADRAY_ENABLE_VULKAN>)
 if (RADRAY_ENABLE_MIMALLOC)
     target_link_libraries(radray_shader_cook PRIVATE mimalloc-override)
 endif()

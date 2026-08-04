@@ -1,5 +1,6 @@
 #include "shader_reflection_map.h"
 
+#include <algorithm>
 #include <limits>
 
 namespace radray {
@@ -135,6 +136,14 @@ uint32_t EffectiveSemanticIndex(std::string_view rawName, uint32_t semanticIndex
     SplitSemantic(rawName, baseName, nameIndex);
     // DXC 通常已把索引拆到 SemanticIndex; 名字尾部还带数字时取名字里的。
     return nameIndex != 0 ? nameIndex : semanticIndex;
+}
+
+string UppercaseAscii(std::string_view value) {
+    string result{value};
+    std::ranges::transform(result, result.begin(), [](char c) {
+        return static_cast<char>(c >= 'a' && c <= 'z' ? c - 'a' + 'A' : c);
+    });
+    return result;
 }
 
 }  // namespace radray

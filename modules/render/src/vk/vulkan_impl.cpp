@@ -3282,6 +3282,9 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
     if (IsValidateExtensions(VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME, deviceExtsAvailable)) {
         needExts.emplace(VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME);
     }
+    // DXC -fspv-reflect emits both corresponding OpExtension declarations.
+    needExts.emplace(VK_GOOGLE_HLSL_FUNCTIONALITY_1_EXTENSION_NAME);
+    needExts.emplace(VK_GOOGLE_USER_TYPE_EXTENSION_NAME);
     VkPhysicalDeviceProperties2 deviceProperties2{};
     deviceProperties2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
     deviceProperties2.pNext = nullptr;

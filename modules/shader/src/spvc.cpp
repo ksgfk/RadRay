@@ -550,12 +550,6 @@ std::optional<SpirvShaderDesc> ReflectSpirv(SpirvBytecodeView bytecode) {
     } catch (const spirv_cross::CompilerError& e) {
         RADRAY_ERR_LOG("SPIRV-Cross Compiler Error: {}", e.what());
         return std::nullopt;
-    } catch (const std::exception& e) {
-        RADRAY_ERR_LOG("SPIRV-Cross error: {}", e.what());
-        return std::nullopt;
-    } catch (...) {
-        RADRAY_ERR_LOG("SPIRV-Cross error: {}", "unknown error");
-        return std::nullopt;
     }
     return desc;
 }
@@ -695,12 +689,6 @@ std::optional<SpirvToMslOutput> ConvertSpirvToMsl(
         return output;
     } catch (const spirv_cross::CompilerError& e) {
         RADRAY_ERR_LOG("SPIRV-Cross MSL Compiler Error: {}", e.what());
-        return std::nullopt;
-    } catch (const std::exception& e) {
-        RADRAY_ERR_LOG("SPIRV-Cross MSL error: {}", e.what());
-        return std::nullopt;
-    } catch (...) {
-        RADRAY_ERR_LOG("SPIRV-Cross MSL error: unknown error");
         return std::nullopt;
     }
 }
@@ -1088,12 +1076,6 @@ std::optional<MslShaderReflection> ReflectSpirvAsMsl(std::span<const SpirvAsMslR
             }
         } catch (const spirv_cross::CompilerError& e) {
             RADRAY_ERR_LOG("SPIRV-Cross MSL Reflect Error: {}", e.what());
-            return std::nullopt;
-        } catch (const std::exception& e) {
-            RADRAY_ERR_LOG("SPIRV-Cross MSL Reflect error: {}", e.what());
-            return std::nullopt;
-        } catch (...) {
-            RADRAY_ERR_LOG("SPIRV-Cross MSL Reflect error: unknown error");
             return std::nullopt;
         }
     }

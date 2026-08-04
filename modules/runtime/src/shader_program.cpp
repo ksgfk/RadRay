@@ -1,5 +1,7 @@
 #include <radray/runtime/shader_program.h>
 
+#include <radray/logger.h>
+
 namespace radray {
 
 namespace {
@@ -114,6 +116,19 @@ Nullable<const ShaderBytecode*> ShaderProgramVariant::FindBytecode(render::Shade
         if (blob.Stage == stage) {
             return blob.Bytecode;
         }
+    }
+    return nullptr;
+}
+
+Nullable<const ShaderVertexInterface*> ShaderProgramVariant::FindVertexInterface() const noexcept {
+    for (const StageBlob& blob : _stages) {
+        if (blob.Stage != render::ShaderStage::Vertex) {
+            continue;
+        }
+        if (blob.Bytecode == nullptr || !blob.Bytecode->VertexInterface.has_value()) {
+            RADRAY_ABORT("vertex stage blob has no vertex interface metadata");
+        }
+        return &*blob.Bytecode->VertexInterface;
     }
     return nullptr;
 }

@@ -74,3 +74,19 @@
 - `radray_shader_gen` 生成的文件能被 `ParseShaderAssetDesc` 直接解析（`_TODO` 键被忽略）。
 - 生成器与校验器共用 `modules/shader/src/shader_reflection_map.h` 的折叠规则——两处各写一份
   会让生成出的模板通不过自己的校验。
+
+## 后续收窄：ADR-0013（2026-08）
+
+[ADR-0013](0013-vertex-stage-interface-projection.md) 对本记录作局部 supersede（收窄），
+不改变“manifest 是资源绑定 ABI 权威”这一主体决策。上文三处关于反射落盘的绝对表述按以下
+范围理解，历史正文保留原样：
+
+- “反射数据不落盘”特指用于资源绑定 ABI 核对的完整反射。vertex-stage 的每份精确 artifact
+  可以在自身 `.bin` 中保留连接 primitive 所需的最小输入接口投影。
+- “反射结果落盘，运行时读反射代替 manifest”仍是放弃的方案。最小投影既不是完整反射，
+  也不参与 `PipelineLayout` 构建，更不取代 manifest `VertexInput`。
+- `index.json` 仍不得保存任何反射数据；`.bin` 只允许上述 vertex-stage 最小投影，
+  不得保存资源绑定完整反射。
+
+当前 PSO 继续消费 manifest `VertexInput`。最小投影本轮只随 artifact 生成、恢复并只读暴露，
+尚未连接 primitive。

@@ -912,6 +912,7 @@ static vector<std::string_view> _BuildCompileArgs(const DxcCompileOptions& optio
     vector<std::string_view> args{};
     if (options.IsSpirv) {
         args.emplace_back("-spirv");
+        args.emplace_back("-fspv-reflect");
     }
     if (!options.EnableUnbounded) {
         args.emplace_back("-all_resources_bound");

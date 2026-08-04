@@ -87,9 +87,9 @@ std::optional<render::ShaderBlobCategory> ParseCategory(std::string_view text) {
 
 /// 本次构建编入了哪些后端就烘哪些字节码。
 ///
-/// 【为何不无条件烘全部】: SPIRV 的反射校验要 spirv-cross (见 shader_asset.cpp 里
-/// ValidateCompiled 的 #else 分支), 没有它 ValidateReflection 必然失败。而 Vulkan 后端
-/// 与 spirv-cross 的依赖关系已由根 CMakeLists 钉住, 故"编了 Vulkan"即"能校验 SPIRV"。
+/// 【为何不无条件烘全部】: SPIRV cook 需要 spirv-cross, 没有它必然失败。
+/// SPIRV-Cross 的可恢复 CompilerError 已在适配层转为 nullopt; 其他异常不在调用点捕获。
+/// Vulkan 后端与 spirv-cross 的依赖关系已由根 CMakeLists 钉住, 故"编了 Vulkan"即"能 cook SPIRV"。
 vector<render::ShaderBlobCategory> DefaultCategories() {
     vector<render::ShaderBlobCategory> result;
 #if defined(RADRAY_ENABLE_D3D12)
@@ -192,8 +192,9 @@ std::optional<Arguments> ParseArguments(int argc, char** argv) {
     if (args.Categories.empty()) {
         args.Categories = DefaultCategories();
         if (args.Categories.empty()) {
-            PrintError("this build has no render backend, so there is nothing to cook for; "
-                       "pass --category explicitly");
+            PrintError(
+                "this build has no render backend, so there is nothing to cook for; "
+                "pass --category explicitly");
             return std::nullopt;
         }
     }

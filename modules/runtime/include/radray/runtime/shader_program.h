@@ -79,10 +79,12 @@ render::ShaderDescriptor MakeShaderDescriptor(const ShaderBytecode& bytecode) no
 
 /// 一个 (pass, variant, category) 已解析好的全部 stage 字节码。
 ///
-/// 由 ShaderPassProgram 拥有, 地址在 program 存活期内稳定 —— 调用方可以存指针。
+/// 由 ShaderPassProgram 的稳定后备存储拥有。返回的 variant 及其内部 bytecode/interface
+/// 指针仅在 program 存活且未调用 ReleaseRenderResources 期间有效。
 class ShaderProgramVariant {
 public:
-    /// 一个 stage 的解析结果。Bytecode 与 EntryPoint 都指向 program 内的稳定存储。
+    /// 一个 stage 的解析结果。EntryPoint 与 Bytecode 都借用 program 内部存储；所有
+    /// StageBlob/Bytecode/interface 指针在 ReleaseRenderResources 后失效。
     struct StageBlob {
         render::ShaderStage Stage{render::ShaderStage::UNKNOWN};
         /// 指向 program 持有的 ShaderPassDesc 副本, 可直接填 render::ShaderEntry。
@@ -93,6 +95,8 @@ public:
     std::span<const StageBlob> Stages() const noexcept { return _stages; }
 
     Nullable<const ShaderBytecode*> FindBytecode(render::ShaderStage stage) const noexcept;
+    /// 没有 Vertex stage 返回空；有 Vertex stage 却缺少字节码或接口 metadata 时中止。
+    Nullable<const ShaderVertexInterface*> FindVertexInterface() const noexcept;
     std::optional<std::string_view> FindEntryPoint(render::ShaderStage stage) const noexcept;
 
     /// 本变体覆盖的 stage 并集。
@@ -167,7 +171,8 @@ private:
         ShaderProgramVariant Variant;
     };
 
-    /// 按 artifact key 去重的字节码。unique_ptr 保证地址稳定 —— StageBlob 存的是裸指针。
+    /// 按 artifact key 去重的字节码。unique_ptr 保证 vector 扩容不移动条目；
+    /// StageBlob/接口指针在 ReleaseRenderResources 清空缓存后失效。
     struct BytecodeEntry {
         ShaderHash Key{};
         ShaderBytecode Bytecode;
