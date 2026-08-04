@@ -1,6 +1,6 @@
 # ADR-0005 keyword 组在 HLSL 里用 #pragma 声明
 
-状态: 生效
+状态: 已被 ADR-0015 取代
 日期: 2026-07
 影响: `shaderlib/**/*.hlsl(i)` 里的 `#pragma radray_keyword_group`；`ParseShaderKeywordPragmas`；`radray_shader_gen`
 

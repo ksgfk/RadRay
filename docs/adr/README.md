@@ -56,9 +56,9 @@ docs/adr/*.md
 |---|---|---|
 | [0001](0001-gtest-discovery-pre-test.md) | gtest 测试发现钉死 PRE_TEST | 生效 |
 | [0002](0002-shader-three-layer-split.md) | shader 系统拆成格式层 / 对象层 / 资产层 | 生效 |
-| [0003](0003-manifest-is-abi-authority.md) | manifest 是 ABI 权威，反射只做核对 | 生效 |
+| [0003](0003-manifest-is-abi-authority.md) | manifest 是 ABI 权威，反射只做核对 | 已被 ADR-0014 取代 |
 | [0004](0004-content-addressed-shader-artifacts.md) | AOT 产物内容寻址，且与 manifest 同处一地 | 生效 |
-| [0005](0005-keyword-groups-declared-in-hlsl.md) | keyword 组在 HLSL 里用 #pragma 声明 | 生效 |
+| [0005](0005-keyword-groups-declared-in-hlsl.md) | keyword 组在 HLSL 里用 #pragma 声明 | 已被 ADR-0015 取代 |
 | [0006](0006-shader-types-layer-boundary.md) | shader_types.h 的收录标准是"是不是 manifest 数据" | 生效 |
 | [0007](0007-asset-lifetime-refcount-only.md) | 资产生命周期只由引用计数决定 | 生效 |
 | [0008](0008-asset-id-path-normalization.md) | AssetId 由归一化路径派生 | 生效 |
@@ -66,4 +66,6 @@ docs/adr/*.md
 | [0010](0010-rhi-ownership-model.md) | RHI 里 Device 共享，其余对象独占 | 生效 |
 | [0011](0011-backend-selection-by-descriptor.md) | 后端由 descriptor variant 选定，不做运行期回退 | 生效 |
 | [0012](0012-explicit-resource-state-transitions.md) | 资源状态转换全部显式，RHI 不跟踪状态 | 生效 |
-| [0013](0013-vertex-stage-interface-projection.md) | vertex-stage artifact 保留最小输入接口投影 | 生效 |
+| [0013](0013-vertex-stage-interface-projection.md) | vertex-stage artifact 保留最小输入接口投影 | 生效（待随 ADR-0014 重审） |
+| [0014](0014-cpp-trace-is-shader-source-of-truth.md) | shader 源真相是 C++ trace，绑定由 trace 产出 | 提议 |
+| [0015](0015-variants-are-cpp-parameters.md) | 变体是 C++ 函数参数，烘焙集合也写在 C++ 里 | 提议 |
