@@ -3,11 +3,13 @@
 
 Checks:
   1. Every ``docs/<name>.md`` path mentioned in source files, AGENTS.md or README.md exists.
-  2. Every path listed on a doc's ``> - 锚点:`` line exists (glob patterns must match
-     at least one file).
+  2. Every repository-local path listed on a doc's ``> - 锚点:`` line exists (glob
+     patterns must match at least one file). Absolute anchors in ``docs/research/``
+     identify external source checkouts and are not portable, so they are not checked.
   3. Every relative markdown link inside ``docs/`` resolves.
-  4. Every doc outside ``docs/adr/`` carries the three-line header block; every ADR
-     carries the 状态/日期/影响 block.
+  4. Every durable doc outside ``docs/adr/`` carries the three-line header block; every
+     ADR carries the 状态/日期/影响 block. ``docs/handoff/`` contains transient session
+     snapshots and is exempt from durable-document headers.
   5. Link direction: docs reference code, not the reverse. A ``.h``/``.cpp`` file may point
      at ``docs/architecture`` or ``docs/guide`` at most once -- the banner naming its owning
      subsystem. A second one means rationale is leaking back into comments; state the
@@ -23,10 +25,12 @@ from __future__ import annotations
 
 import re
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DOCS_ROOT = REPO_ROOT / "docs"
+HANDOFF_ROOT = DOCS_ROOT / "handoff"
+RESEARCH_ROOT = DOCS_ROOT / "research"
 
 SKIP_DIRS = {
     ".git",
@@ -104,6 +108,14 @@ def anchor_exists(token: str) -> bool:
     return (REPO_ROOT / token).exists()
 
 
+def is_absolute_anchor(token: str) -> bool:
+    return (
+        Path(token).is_absolute()
+        or PurePosixPath(token).is_absolute()
+        or PureWindowsPath(token).is_absolute()
+    )
+
+
 def check_anchors_and_headers(errors: list[str]) -> tuple[int, int]:
     docs = sorted(DOCS_ROOT.rglob("*.md"))
     anchor_count = 0
@@ -112,9 +124,12 @@ def check_anchors_and_headers(errors: list[str]) -> tuple[int, int]:
         rel = doc.relative_to(REPO_ROOT)
         head = "\n".join(text.splitlines()[:8])
         is_adr_entry = doc.parent.name == "adr" and doc.name != "README.md"
-        for key in ADR_KEYS if is_adr_entry else HEADER_KEYS:
-            if key not in head:
-                errors.append(f"{rel}: header block is missing '{key}'")
+        is_handoff = HANDOFF_ROOT in doc.parents
+        is_research = RESEARCH_ROOT in doc.parents
+        if not is_handoff:
+            for key in ADR_KEYS if is_adr_entry else HEADER_KEYS:
+                if key not in head:
+                    errors.append(f"{rel}: header block is missing '{key}'")
         for anchors in ANCHOR_LINE_RE.findall(text):
             if anchors.strip() in NO_ANCHOR_TOKENS or anchors.startswith("无"):
                 continue
@@ -123,6 +138,8 @@ def check_anchors_and_headers(errors: list[str]) -> tuple[int, int]:
                     if not token:
                         continue
                     anchor_count += 1
+                    if is_research and is_absolute_anchor(token):
+                        continue
                     if not anchor_exists(token):
                         errors.append(f"{rel}: anchor path does not exist: '{token}'")
     return len(docs), anchor_count

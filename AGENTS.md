@@ -23,8 +23,27 @@ do **not** preload the whole tree.
 | Render pipeline, scene proxies, Application | `docs/architecture/render-framework.md` |
 | What core provides (containers, coroutines, ...) | `docs/architecture/core-facilities.md` |
 | Why is a design the way it is | Glob `docs/adr/*.md`, then read the match |
+| Research an external API, engine, spec, or design question | Invoke `research`; keep one primary-source report under `docs/research/` |
+| Resume a handed-off session | Read the handoff path supplied by the user/session, then the durable artifacts it names |
 
 `docs/architecture/overview.md` always holds the current index.
+
+**Handoff and grilling**: a handoff is session state, not repository authority. Read one only
+when the user/session points to it, verify stale claims against its referenced artifacts and the
+current worktree, and invoke its suggested skills by their OpenCode names. Use `grill-me` to
+continue a grilling interview: resolve one decision at a time and do not implement until the user
+confirms shared understanding.
+
+When asked to transfer work to another session, invoke `handoff`; it writes a redacted summary to
+the OS temporary directory. Do not create or refresh `docs/handoff/` for that purpose. Existing
+files there are historical session snapshots, not durable knowledge, and therefore do not carry
+the normal `适用` / `权威` / `锚点` header.
+
+**Research**: reports under `docs/research/` are point-in-time evidence, not the current RadRay
+contract. Keep the normal three-line header, record the source version/commit and investigation
+scope, and cite primary sources for claims. Use repository-relative `锚点` paths for RadRay files;
+absolute paths are allowed only for external source checkouts and are not portability-checked.
+Use Markdown links for web sources.
 
 **Maintenance duty**: when you change behavior a doc describes, update that doc in the same commit.
 Code comments carry API contracts only; design rationale belongs in `docs/`.

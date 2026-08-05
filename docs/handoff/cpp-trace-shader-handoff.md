@@ -25,6 +25,7 @@ Slang 被用户明确否决（"它很烂"）。DXC 保留但降为 codegen 背�
 | `docs/todo/cpp-trace-shader-frontend.md` | 新增 | **主实施清单**。第一期范围、引入方式、薄 DSL 层、光栅硬约束、删除清单、6 项风险、测试与文档影响 |
 | `docs/adr/0014-cpp-trace-is-shader-source-of-truth.md` | 新增（提议） | 取代 ADR-0003。含 ADR-0003 那 7 项理由逐条失效的对照表、放弃 Slang/整体引入 LC 的理由 |
 | `docs/adr/0015-variants-are-cpp-parameters.md` | 新增（提议） | 取代 ADR-0005。变体是 C++ 函数参数；离线编译推迟 |
+| `docs/research/ue5-material-resource-layout.md` | 新增 | **UE5 源码研究**。Static Switch 的 active resource 集合、Material UB、D3D12 root signature、Vulkan descriptor layout 与 bindless 差异 |
 | `CONTEXT.md` | 新增 | 领域词汇表。含 Trace / Binding layout / Binding group / Residency / Artifact 等术语与 `_Avoid_` |
 | `docs/adr/0003`, `0005` | 已改状态 | 标记「已被 ADR-0014/0015 取代」（按 ADR-README 规则，改状态是唯一允许的修订） |
 | `docs/adr/README.md` | 已改 | 索引加 0014/0015；0013 标「待随 ADR-0014 重审」 |
@@ -32,6 +33,10 @@ Slang 被用户明确否决（"它很烂"）。DXC 保留但降为 codegen 背�
 
 `docs/todo/cpp-trace-shader-frontend.md` 已经包含全部技术细节（11 个 attribute 键表、
 LC 需改的两处、删除规模、风险清单）。**不要在新会话里重新调 subagent 研究这些。**
+
+**ADR-0015 的高层方向仍成立，但接口结论已重新打开。** “变体是普通 C++ 参数”只回答了
+trace-time 分支，没有回答请求身份、active binding、stage 投影和结构变体；在这些问题闭合前，
+不得把 ADR-0015 当成可直接实施的完整设计。
 
 ---
 
@@ -42,7 +47,7 @@ LC 需改的两处、删除规模、风险清单）。**不要在新会话里重
 3. 引 LC 的 **`ast` + `hlsl-codegen`** 两个库（需改 LC 两处，见 todo 文档第 2 节）
 4. **Tier A**：不引 `dsl/`，自写薄 DSL 层。理由：顶点属性只有 `Type::structure(align, members, attributes)` 能表达，`LUISA_STRUCT` 无 attribute 通道
 5. **删掉 manifest**，绑定全由 trace 产出 → ADR-0003 被取代
-6. 变体全面 C++ 化 → ADR-0005 被取代
+6. 变体全面 C++ 化 → ADR-0005 被取代。**只闭合了方向，具体接口已在续会话重新打开，见第 5 节**
 7. shader 层全部重写；**`modules/render` 的 RHI 契约不动**（16,829 行，本来就不消费反射）
 8. 薄 DSL 层**从 LC 的 `dsl/` 剪裁拷贝**（Apache-2.0），只剔除 runtime 耦合
 
@@ -52,7 +57,7 @@ LC 需改的两处、删除规模、风险清单）。**不要在新会话里重
 
 ---
 
-## 4. 中断点：唯一未决的问题
+## 4. 先前中断点：codegen 失败
 
 **问题**：codegen 失败的处理方式。
 
@@ -88,29 +93,112 @@ codegen 用它很随意：无效 attribute 键、缺 attribute、成员非标量
 
 ---
 
-## 5. 下一步
+## 5. 续会话新增：C++ DSL 如何表达 Variant
+
+用户指出这是方案的 **go/no-go 问题**：如果 C++ DSL 不能表达真实 shader 变体，就不能采用
+整个 C++ trace 方案。经 RadRay、LuisaCompute 与 UE5 源码调查，现有 ADR-0015 过于乐观。
+
+### 5.1 已核实的表达机制
+
+LuisaCompute 的 `RasterStageKernel` 构造会经 `FunctionBuilder::_define` **立即执行 lambda**。
+因此有两种本质不同的分支：
+
+- 捕获的宿主 `bool` / enum 配普通 C++ `if`：在 trace 时执行，只有选中路径进入 AST，形成变体
+- `Expr<bool>` 配 DSL `if_` / `$if`：进入 AST，成为 GPU 运行期分支，不形成编译变体
+
+但“普通参数”不能消灭变体身份：
+
+- 每个 Pass 的 typed `Variant` 值是**请求身份**，回答“材质/管线要哪个变体”
+- 生成 HLSL 的内容哈希是**编译产物身份**，回答“这份字节码是否已经存在”
+- 后者必须先 trace/codegen 才能得到，不能取代前者。能删除的是旧的字符串/槽位式
+  `ShaderVariantKey`，不是请求 key 这个概念
+
+### 5.2 三档复杂度
+
+1. **只改变函数体：简单。** 例如 alpha test、选择不同算法，宿主 `if` 即可
+2. **改变 active binding：中等。** RGB 与纹理分支若要求前者根本没有 texture slot，就必须有
+   RadRay 自己的 trace-time `BindingBuilder`、symbolic resource handle 和 variant-level layout；
+   只剪裁 LC 的 `Var` / `Expr` 不够
+3. **改变 stage 类型/接口：困难但可表达。** 当前 `_POINT_SHADOW_LAYERED` 会改变 vertex 返回结构，
+   运行期 `bool` 无法改变 C++ 返回类型；需要模板实例化 + 运行期分派 + type-erased trace 结果，
+   或拆成两个 Pass
+
+当前真实变体正好覆盖后两档：
+
+- `forward_pass` 的 8 个维度都只影响 Pixel；若追求 exact active resources，5 个贴图开关和两种
+  阴影资源开关会改变 binding 集合
+- `shadow_pass` 的 `PointShadowLayered` 只影响 Vertex，但会改变 v2p 结构
+
+### 5.3 LC 光栅 codegen 对 stage 去重的限制
+
+`RasterCodegen(vertex, pixel)` 一次生成一份同时包含 VS/PS 的 HLSL，以 `#ifdef VS` /
+`#elif defined(PS)` 分支，再由 DXC 用 `/DVS`、`/DPS` 编译两次。若直接按**整份生成 HLSL**哈希，
+Pixel-only 变体也会改变 VS 的源 key，旧系统的 stage 投影去重不会自然保留。
+
+这不影响功能正确性，但影响 trace/编译放大。后续设计必须明确：第一期接受整对重编，还是增加
+stage-specific trace/config 与 codegen/cache 机制。当前未裁决。
+
+### 5.4 UE5 源码研究结论
+
+完整证据在 `docs/research/ue5-material-resource-layout.md`。后续会话只读该报告，不要重新扫描 UE5。
+
+- Static Switch 决定**实际参与编译的 active resource 集合**。Legacy 路径只编译选中输入；
+  MaterialIR 为报错检查会 Build 两侧，但 active analysis/link/HLSL 只保留选中依赖
+- 图级 `ReferencedTextures` 可能含未选分支纹理，但它不是 shader binding 集合
+- 纯 RGB / `VectorParameter` 不产生 texture uniform/SRV contract；active `TextureSample` 才产生
+- active texture 参数值为空时，UE 使用同类型 fallback texture；只替换资源对象，不改变 layout
+- 两个 permutation 的资源数量、类型和 stage 使用相同时，Material/native layout 通常可共享
+- RGB 与纹理导致资源形状不同时，Vulkan bindful layout 通常精确变化；D3D12 会量化资源计数，
+  不同原始集合仍可能复用同一 root signature；bindless 路径进一步归一到全局 layout
+- 所以“Unity 选择相同 binding layout，UE5 选择不同 binding layout”是过度概括。准确说法是：
+  **UE5 专门化 active resource 集合，再由 RHI 缓存/归一化 native layout**
+
+### 5.5 当前推荐，尚未裁决
+
+推荐规则：`BindingLayout` 由当前 Variant 的 active trace 自然产出，不预先要求所有 Variant
+相同或不同；内容相同就由 `PipelineLayoutCache` 共享，active resource 形状不同时才产生不同
+logical layout。
+
+推荐把最小验证从无变体的 `error_pass` 提高为同时证明：
+
+1. RGB 变体没有 texture binding，纹理变体有 texture binding，且相同 layout 能内容去重
+2. 一个改变 stage 输出类型的模板变体能经 type-erased trace 结果进入统一编译/PSO 链
+3. D3D12 + Vulkan 都能完成 trace → codegen → DXC → PSO → 像素读回
+
+**用户尚未接受上述规则与验证门槛，不得写入 ADR/todo 为既定决策。**
+
+---
+
+## 6. 下一步
 
 按顺序：
 
-1. **重新提出第 4 节那个问题**，拿到裁决后写进 `docs/todo/cpp-trace-shader-frontend.md` 第 7 节风险 #2（该处已注明「动手前须就此单独裁决」）
-2. 继续 grilling 尚未触及的分支（每次只问一个，等回答）：
+1. **先继续第 5 节的 Variant grilling**，每次只裁决一个问题：
+   - 是否接受“active trace 产出 layout，相同内容由 cache 共享”的规则
+   - 接受后，再裁决新的 go/no-go 原型门槛
+   - 再裁决第一期是否接受 VS/PS 整对重编，还是必须先保住 stage 投影去重
+2. Variant 模型闭合后，更新 ADR-0015、`docs/todo/cpp-trace-shader-frontend.md` 与必要的领域术语；
+   在此之前它们保持提议/待实施状态
+3. **重新提出第 4 节的 codegen 失败问题**，拿到裁决后写进 todo 第 7 节风险 #2
+4. 继续 grilling 尚未触及的分支（每次只问一个，等回答）：
    - 薄 DSL 层放哪个模块？（新建 `modules/shaderdsl`？还是重建 `modules/shader`？依赖链 `core ← shader ← render ← runtime` 是否保持）
    - LC 怎么进 `third_party/`？（`AGENTS.md` 硬规则：`third_party/` 与 `SDKs/` 是脚本填充的只读树，不得编辑 —— 但决策 3 要求改 LC 两处 CMake/头文件。这是**真冲突，必须裁决**：patch 文件？fork？还是例外）
    - `LUISA_COMPUTE_USE_SYSTEM_STL` 定 ON 还是 OFF？（决定 `luisa::string` 是不是 `std::string`）
    - `glslang` 无条件引入怎么处理？（`src/ext/CMakeLists.txt` 无 guard，会随 `luisa-compute-ext` PUBLIC 传染）
-   - 第一期先做哪个 pass？（`error_pass` 最简：常量输出 + 1 个 cbuffer + POSITION）
+   - 第一期先做哪个 pass（原建议 `error_pass` 已被第 5.5 节的新验证门槛挑战）
    - `ADR-0002/0004/0006/0013` 的重审结论
-3. 用户确认共识后才动代码。**上一轮明确要求：在他确认前不要行动。**
+5. 用户确认共识后才动代码。**上一轮明确要求：在他确认前不要行动。**
 
 ---
 
-## 6. 硬约束与陷阱（易踩，务必先读）
+## 7. 硬约束与陷阱（易踩，务必先读）
 
 - **`AGENTS.md` 与 `docs/adr/README.md` 是权威**。ADR 只追加不修订，改状态是唯一例外
 - **`third_party/` 与 `SDKs/` 是只读树** —— 与「改 LC 两处」直接冲突，见上
 - **禁异常**：不得新增 `try`/`catch`/`throw`，动手前须问用户
 - **容器必须用 `radray::types` 别名**；协程用 `radray::task`；`RADRAY_IS_DEBUG` 而非 `NDEBUG`
-- **`python tools/check_docs.py` 有 4 个既有失败**（`AGENTS.md`/`README.md` 引用不存在的 `docs/guide/build-test.md`）。这是基线，不是你引入的。改文档后跑它确认仍是 4 个
+- **后续会话的研究型任务全部起子代理**，避免外部大型代码库与资料污染主上下文；主会话只消费研究报告和结论。实现、编辑与普通仓库定位不受此条限制
+- 当前运行 `python tools/check_docs.py` 返回 `ok`。`tools/check_docs.py` 本身另有非本会话修改，后续不能把这个结果误当未修改检查器的基线，仍应按实际工作树复跑
 - **`check_docs.py` 只扫文档头 8 行**找 `适用:`/`权威:`/`锚点:`。头块写超 8 行会误报（我已踩过一次）
 - **不要并发跑构建和测试**（`AGENTS.md`）
 - **`ctest -R` 匹配 gtest suite 名，不是 cmake target 名**
@@ -118,7 +206,7 @@ codegen 用它很随意：无效 attribute 键、缺 attribute、成员非标量
 
 ---
 
-## 7. 关键事实（已核实，可直接引用，无需重查）
+## 8. 关键事实（已核实，可直接引用，无需重查）
 
 - `modules/shader` = 18,431 行（11,748 非测试 + 6,619 测试），服务 1,472 行 HLSL，比 12.5:1
 - 归属拆分：约 4,600 行是 DXC 反射本身的成本；约 10,700 行是 manifest/变体/artifact 层（即握手成本）
@@ -130,20 +218,25 @@ codegen 用它很随意：无效 attribute 键、缺 attribute、成员非标量
 - 仓库自带无 Device 的 codegen 测试为证：`src/tests/unit/ext/test_hlsl_validation_codegen.cpp`
 - **未编译验证过的两处**（最小验证首要目标）：手工构造参数时的 cbuffer 打包与 register 分配；生成的 HLSL 能否端到端过 DXC
 - `test_vertical_slice.cpp` 现为 D3D12/Vulkan × Aot/Jit 四参数；第一期无 AOT，退化为按后端两参数
+- LC 的宿主 C++ 分支确实能形成 AST 变体，但 LC 没有提供 RadRay 所需的 typed Variant 请求、
+  active binding layout、结构变体 type erasure 与 stage 投影缓存；这些是薄 DSL 的新增职责
+- `Variant` 请求身份与生成 HLSL 的产物身份是两个 key，不能合并
 
 ---
 
-## 8. 建议调用的 skills
+## 9. 建议调用的 skills
 
-- **`grilling`** — 继续第 5 节第 2 步的分支。规则：一次一个问题，等回答；每个问题给出推荐答案；事实自己查不要问；用户确认前不得行动
+- **`grilling`** — 从第 6 节第 1 步继续 Variant 分支。规则：一次一个问题，等回答；每个问题给出推荐答案；事实自己查不要问；用户确认前不得行动
 - **`domain-modeling`** — 与 grilling 配合。新术语定下就立刻更新 `CONTEXT.md`（它是纯词汇表，不放实现细节）；ADR 只在「难逆转 + 无上下文会困惑 + 真有取舍」三条全中时才提议。格式见 `C:\Users\xiaoxs\.config\opencode\skills\domain-modeling\{CONTEXT-FORMAT,ADR-FORMAT}.md`，但**仓库自己的 ADR 格式**（`docs/adr/README.md` 的固定小节：背景/决策/放弃的方案及代价/必须保持为真）优先
+- **`research`** — 后续任何研究型任务必须通过背景子代理完成，并把可复用结论落到 `docs/research/`；主会话不要亲自扫描外部大型源码树
 - **`handoff`** — 下一轮结束时再压缩一次
 
 ---
 
-## 9. 环境
+## 10. 环境
 
 - `rtk` 包装 git/rg（例：`rtk git status --short`、`rtk rg -n "pattern" path`）
 - 构建：`cmake --preset win-x64-debug` → `cmake --build build_debug --parallel 24`
 - 测试：`ctest --preset win-x64 -R <SuiteName> --output-on-failure`
-- 未提交改动（8 个文件，全是文档）：见第 2 节表格。用户**未要求提交**
+- 当前工作树另有 `AGENTS.md`、`tools/check_docs.py` 修改，来源不是本轮 Variant 研究；不得覆盖或回退
+- 本轮新增 `docs/research/ue5-material-resource-layout.md`，并更新本 handoff。用户**未要求提交**
