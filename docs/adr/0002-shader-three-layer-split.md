@@ -1,6 +1,6 @@
 # ADR-0002 shader 系统拆成格式层 / 对象层 / 资产层
 
-状态: 生效
+状态: 已被 ADR-0016 取代
 日期: 2026-07
 影响: `modules/shader` 整体；`modules/runtime/include/radray/runtime/shader_program.h`、`shader_asset.h`；`tools/shader_gen`、`tools/shader_cook` 的链接边界
 

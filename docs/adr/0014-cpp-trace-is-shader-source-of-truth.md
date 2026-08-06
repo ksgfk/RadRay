@@ -1,6 +1,6 @@
 # ADR-0014 shader 源真相是 C++ trace，绑定由 trace 产出
 
-状态: 提议
+状态: 已被 ADR-0016 取代
 日期: 2026-08
 影响: 整个 `modules/shader`；`shaderlib/**`；`tools/shader_gen`、`tools/shader_cook`；
 全部 `*.shader.json`。取代 [ADR-0003](0003-manifest-is-abi-authority.md)

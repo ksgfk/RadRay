@@ -1,6 +1,6 @@
 # ADR-0015 变体是 C++ 函数参数，烘焙集合也写在 C++ 里
 
-状态: 提议
+状态: 已被 ADR-0016 取代
 日期: 2026-08
 影响: `modules/shader` 的变体机制；`tools/shader_cook`。
 取代 [ADR-0005](0005-keyword-groups-declared-in-hlsl.md)

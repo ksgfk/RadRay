@@ -1,6 +1,6 @@
-> - 适用: 实施 ADR-0014/0015 的第一期，把 shader 层从「手写 HLSL + 反射核对」换成「C++ trace」
-> - 权威: 本文是待实施清单与范围边界；长期约束由 ADR-0014/0015 与架构文档接管
-> - 状态: 待实施（2026-08）。共识已达成，尚未动代码
+> - 适用: 历史方案快照；不再作为实施清单
+> - 权威: 无。当前方案以 ADR-0016 与 `hlsl-radray-dxc-shader-pipeline.md` 为准
+> - 状态: 已废弃（2026-08）。被 HLSL + forked RadRay DXC 路线取代
 > - 锚点: `docs/adr/0014-cpp-trace-is-shader-source-of-truth.md`, `docs/adr/0015-variants-are-cpp-parameters.md`
 > - 锚点: `modules/shader`, `shaderlib`, `tools/shader_gen`, `tools/shader_cook`
 > - 锚点: `modules/runtime/tests/test_vertical_slice.cpp`, `modules/runtime/include/radray/runtime/gpu_resource.h`

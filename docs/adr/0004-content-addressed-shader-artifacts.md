@@ -1,6 +1,6 @@
 # ADR-0004 AOT 产物内容寻址，且与 manifest 同处一地
 
-状态: 生效
+状态: 已被 ADR-0016 取代
 日期: 2026-07
 影响: `GetShaderArtifactDirectory`、`MakeShaderArtifactBlobPath`、`ShaderArtifactIndex`；`tools/shader_cook`
 

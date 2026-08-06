@@ -1,6 +1,6 @@
 # ADR-0003 manifest 是 ABI 权威，反射只做核对
 
-状态: 已被 ADR-0014 取代
+状态: 已被 ADR-0016 取代
 日期: 2026-07
 影响: `modules/shader/include/radray/shader/shader_manifest.h`、`shader_asset_template.h`；全部 `*.shader.json`
 

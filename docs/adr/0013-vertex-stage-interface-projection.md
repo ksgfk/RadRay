@@ -1,6 +1,6 @@
 # ADR-0013 vertex-stage artifact 保留最小输入接口投影
 
-状态: 生效
+状态: 已被 ADR-0016 取代
 日期: 2026-08
 影响: `ShaderVertexInterface`、shader artifact blob、DXIL/SPIR-V 反射、Vulkan device extension、`ShaderProgramVariant`
 

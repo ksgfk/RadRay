@@ -1,6 +1,6 @@
 # ADR-0006 shader_types.h 的收录标准是"是不是 manifest 数据"
 
-状态: 生效
+状态: 已被 ADR-0016 取代
 日期: 2026-07
 影响: `modules/shader/include/radray/shader/shader_types.h`、`modules/render/include/radray/render/rhi.h` 的类型归属
 
