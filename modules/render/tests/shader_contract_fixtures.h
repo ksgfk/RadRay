@@ -1,0 +1,135 @@
+#pragma once
+
+#include <cstdint>
+#include <span>
+#include <string_view>
+
+#include <radray/shader/shader_compiler_contract.h>
+
+namespace radray::render::test {
+
+enum class FixtureResourceKind : uint8_t {
+    Texture,
+    Sampler,
+    CBuffer,
+    RootConstant,
+    StorageBuffer,
+};
+
+struct FixtureEntryFact {
+    std::string_view Name;
+    shader::ShaderStage Stage{shader::ShaderStage::Vertex};
+};
+
+struct FixtureBindingFact {
+    std::string_view Name;
+    FixtureResourceKind Kind{FixtureResourceKind::Texture};
+    uint32_t D3D12Group{0};
+    uint32_t D3D12Binding{0};
+    uint32_t VulkanSet{0};
+    uint32_t VulkanBinding{0};
+    uint32_t StageMask{0};
+};
+
+struct ShaderContractFixture {
+    std::string_view Name;
+    std::string_view SourcePath;
+    shader::ShaderKind Kind{shader::ShaderKind::Graphics};
+    std::span<const FixtureEntryFact> Entries;
+    std::span<const FixtureBindingFact> Bindings;
+    uint32_t TypeRecordCount{0};
+    bool HasMultipleRootConstants{false};
+    bool HasSingleSpirvPushBlock{false};
+    uint32_t SpirvTypeRecordCount{0};
+};
+
+inline constexpr FixtureEntryFact kNoResourceEntries[] = {
+    {"VSMain", shader::ShaderStage::Vertex},
+    {"PSMain", shader::ShaderStage::Pixel},
+};
+inline constexpr FixtureEntryFact kVertexOnlyEntries[] = {
+    {"VSMain", shader::ShaderStage::Vertex},
+};
+inline constexpr FixtureEntryFact kDepthOnlyEntries[] = {
+    {"VSMain", shader::ShaderStage::Vertex},
+};
+inline constexpr FixtureEntryFact kComputeEntries[] = {
+    {"CSMain", shader::ShaderStage::Compute},
+};
+
+inline constexpr FixtureBindingFact kTextureSamplerBindings[] = {
+    {"AlbedoTexture", FixtureResourceKind::Texture, 0, 0, 1, 7, 0x2},
+    {"LinearSampler", FixtureResourceKind::Sampler, 0, 0, 1, 8, 0x2},
+};
+inline constexpr FixtureBindingFact kShadowStaticSamplerBindings[] = {
+    {"ShadowTexture", FixtureResourceKind::Texture, 0, 0, 4, 1, 0x2},
+    {"ShadowSampler", FixtureResourceKind::Sampler, 0, 0, 4, 2, 0x2},
+};
+inline constexpr FixtureBindingFact kRootConstantBindings[] = {
+    {"ObjectConstants", FixtureResourceKind::RootConstant, 0, 0, 0, 0, 0x3},
+    {"MaterialConstants", FixtureResourceKind::RootConstant, 0, 1, 0, 0, 0x3},
+};
+inline constexpr FixtureBindingFact kPushConstantBindings[] = {
+    {"PushData", FixtureResourceKind::RootConstant, 0, 0, 0, 0, 0x3},
+};
+inline constexpr FixtureBindingFact kTargetSpecificBindings[] = {
+    {"TargetTexture", FixtureResourceKind::Texture, 0, 0, 5, 2, 0x2},
+    {"TargetSampler", FixtureResourceKind::Sampler, 0, 0, 5, 3, 0x2},
+};
+inline constexpr FixtureBindingFact kNestedTypeBindings[] = {
+    {"Constants", FixtureResourceKind::CBuffer, 0, 0, 0, 0, 0x3},
+};
+inline constexpr FixtureBindingFact kComputeBindings[] = {
+    {"Output", FixtureResourceKind::StorageBuffer, 0, 2, 0, 6, 0x4},
+};
+
+inline constexpr ShaderContractFixture kShaderContractFixtures[] = {
+    {"no_resource_graphics", "fixtures/no_resource_graphics.hlsl", shader::ShaderKind::Graphics, kNoResourceEntries, {}, 0, false, false},
+    {"vertex_only", "fixtures/vertex_only.hlsl", shader::ShaderKind::Graphics, kVertexOnlyEntries, {}, 0, false, false},
+    {"depth_only", "fixtures/depth_only.hlsl", shader::ShaderKind::Graphics, kDepthOnlyEntries, {}, 0, false, false},
+    {"texture_sampler", "fixtures/texture_sampler.hlsl", shader::ShaderKind::Graphics, kNoResourceEntries, kTextureSamplerBindings, 0, false, false},
+    {"shadow_static_sampler", "fixtures/shadow_static_sampler.hlsl", shader::ShaderKind::Graphics, kNoResourceEntries, kShadowStaticSamplerBindings, 0, false, false},
+    {"multiple_root_constants", "fixtures/multiple_root_constants.hlsl", shader::ShaderKind::Graphics, kNoResourceEntries, kRootConstantBindings, 0, true, false},
+    {"spirv_push_constant", "fixtures/spirv_push_constant.hlsl", shader::ShaderKind::Graphics, kNoResourceEntries, kPushConstantBindings, 0, false, true, 2},
+    {"target_specific_bindings", "fixtures/target_specific_bindings.hlsl", shader::ShaderKind::Graphics, kNoResourceEntries, kTargetSpecificBindings, 0, false, false},
+    {"nested_types", "fixtures/nested_types.hlsl", shader::ShaderKind::Graphics, kNoResourceEntries, kNestedTypeBindings, 8, false, false},
+    {"compute", "fixtures/compute.hlsl", shader::ShaderKind::Compute, kComputeEntries, kComputeBindings, 0, false, false},
+    {"unused_resource", "fixtures/unused_resource.hlsl", shader::ShaderKind::Graphics, kNoResourceEntries, {}, 0, false, false},
+};
+
+inline constexpr shader::Hash128 kExpectedGpuArtifacts[11][2] = {
+    {{{0x7f, 0xdd, 0x5a, 0x3c, 0x90, 0x01, 0x1e, 0xc9, 0xff, 0x18, 0x47, 0xbf, 0xfe, 0x1e, 0x70, 0xf9}},
+     {{0xee, 0x66, 0xaa, 0xd1, 0x40, 0x15, 0x03, 0xe8, 0xe0, 0xca, 0x63, 0x1c, 0x97, 0xa0, 0xfc, 0x13}}},
+    {{{0x3a, 0x35, 0xd3, 0xc5, 0xa0, 0x1e, 0xb7, 0xc2, 0xfe, 0x3f, 0x02, 0x68, 0x43, 0x74, 0xff, 0xa6}},
+     {{0xc0, 0x3e, 0xb1, 0x2f, 0x00, 0xe9, 0xc1, 0x46, 0x9c, 0x89, 0x38, 0xb5, 0x5b, 0xdd, 0x4b, 0x94}}},
+    {{{0x3a, 0x35, 0xd3, 0xc5, 0xa0, 0x1e, 0xb7, 0xc2, 0xfe, 0x3f, 0x02, 0x68, 0x43, 0x74, 0xff, 0xa6}},
+     {{0xc0, 0x3e, 0xb1, 0x2f, 0x00, 0xe9, 0xc1, 0x46, 0x9c, 0x89, 0x38, 0xb5, 0x5b, 0xdd, 0x4b, 0x94}}},
+    {{{0x6e, 0x67, 0x14, 0x10, 0xe6, 0x6e, 0xe8, 0x73, 0x8a, 0x64, 0xd7, 0xe4, 0xe2, 0x88, 0x32, 0xa8}},
+     {{0x50, 0x08, 0xbb, 0x39, 0x7b, 0xc8, 0x8e, 0x1f, 0xf0, 0x59, 0x31, 0xf8, 0x14, 0xeb, 0x3f, 0x28}}},
+    {{{0xc3, 0x15, 0xcc, 0xba, 0x10, 0x99, 0xf3, 0xb5, 0x8d, 0x50, 0xbe, 0x47, 0x24, 0x45, 0xb0, 0xea}},
+     {{0xa7, 0x6d, 0x80, 0xb0, 0x75, 0xb8, 0x09, 0x3b, 0x4d, 0x4b, 0x0e, 0x73, 0x45, 0xf6, 0xba, 0x2e}}},
+    {{{0x09, 0xf3, 0x2c, 0x16, 0xfc, 0x3d, 0xfe, 0xa3, 0x85, 0x5f, 0x05, 0x96, 0x3d, 0x13, 0x7e, 0x6f}},
+     {{0x32, 0xd2, 0xe5, 0xfd, 0x9e, 0xce, 0xd7, 0xd6, 0x44, 0x12, 0xdb, 0x31, 0xb2, 0xbc, 0xaf, 0xc4}}},
+    {{{0xeb, 0x4c, 0x0e, 0xc4, 0x60, 0x80, 0xc1, 0x1e, 0x37, 0x0d, 0xe9, 0xee, 0x0b, 0x34, 0x12, 0x88}},
+     {{0xd1, 0x6f, 0x37, 0x19, 0xe4, 0x83, 0x51, 0xa9, 0x9d, 0x7e, 0x94, 0x78, 0xfb, 0x5f, 0x7b, 0xe1}}},
+    {{{0xc3, 0x98, 0xb8, 0xf7, 0x60, 0x66, 0x7a, 0x48, 0x75, 0x1f, 0x77, 0x36, 0xef, 0xb7, 0xd1, 0x20}},
+     {{0x97, 0xae, 0x56, 0x76, 0x86, 0x30, 0x4c, 0xb4, 0x31, 0xdc, 0x2d, 0x73, 0x4a, 0x7f, 0xcd, 0x42}}},
+    {{{0x1a, 0xc5, 0x38, 0x4e, 0x01, 0xbc, 0x49, 0x09, 0x56, 0xaa, 0xa9, 0x87, 0x41, 0x5d, 0x79, 0xdb}},
+     {{0x39, 0x2d, 0x22, 0x3b, 0x26, 0xef, 0x25, 0x88, 0x67, 0x47, 0x82, 0x74, 0x23, 0x40, 0xaf, 0xa3}}},
+    {{{0x76, 0x9d, 0x77, 0x15, 0x5d, 0x86, 0xd4, 0x85, 0x34, 0x25, 0x69, 0xfa, 0xdc, 0x09, 0x56, 0x29}},
+     {{0xc7, 0x37, 0x44, 0x81, 0x99, 0x25, 0xb0, 0x11, 0x73, 0xcb, 0x36, 0x7d, 0xf7, 0x98, 0xee, 0xb0}}},
+    {{{0x78, 0xda, 0x3d, 0x04, 0x7f, 0x23, 0x97, 0x79, 0x92, 0x87, 0xe4, 0xc7, 0x40, 0xf8, 0xec, 0xa0}},
+     {{0xce, 0x56, 0x91, 0x19, 0x1d, 0x94, 0x40, 0x0a, 0x10, 0x75, 0xa4, 0xbd, 0xb4, 0x5e, 0x27, 0xdd}}},
+};
+
+inline constexpr shader::GpuArtifactHash ExpectedGpuArtifact(
+    size_t fixtureIndex,
+    shader::ShaderTarget target) noexcept {
+    return kExpectedGpuArtifacts[fixtureIndex][static_cast<uint8_t>(target)];
+}
+
+inline constexpr std::span<const ShaderContractFixture> GetShaderContractFixtures() noexcept {
+    return kShaderContractFixtures;
+}
+
+}  // namespace radray::render::test

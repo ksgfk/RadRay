@@ -56,10 +56,6 @@
         "**/assets/**",
         "**/third_party/**",
         "**/SDKs/**",
-        "**/dear_imgui_shader_spirv.cpp",
-        "**/dear_imgui_shader_dxil.cpp",
-        "**/dear_imgui_shader_metallib.cpp",
-        "**/imgui.ini"
     ]
 }
 ```
@@ -93,7 +89,7 @@
 }
 ```
 
-`--backend` 可选 `d3d12` / `vulkan` / `metal`（metal 无实现）。
+`--backend` 可选 `d3d12` / `vulkan`。
 `PATH` 必须带上目标输出目录，否则 DXC 运行库加载不到。
 
 ## 格式化

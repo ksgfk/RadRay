@@ -5,6 +5,7 @@
 
 #include <utility>
 
+#include <array>
 #include <vector>
 #include <deque>
 #include <queue>
@@ -21,6 +22,7 @@
 namespace radray {
 
 using std::byte;
+using std::array;
 using std::int8_t;
 using std::int16_t;
 using std::int32_t;

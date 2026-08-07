@@ -9,7 +9,9 @@
 #include <radray/hash.h>
 
 #include <radray/render/backend/d3d12_helper.h>
+#include <radray/render/backend/pipeline_layout_types.h>
 #include <radray/render/rhi.h>
+#include <radray/render/sampler_cache.h>
 
 namespace radray::render::d3d12 {
 
@@ -343,7 +345,7 @@ public:
 
     Nullable<unique_ptr<Shader>> CreateShader(const ShaderDescriptor& desc) noexcept override;
 
-    Nullable<unique_ptr<PipelineLayout>> CreatePipelineLayout(const PipelineLayoutDescriptor& desc) noexcept override;
+    Nullable<unique_ptr<PipelineLayout>> CreatePipelineLayout(const shader::DxilShaderArtifactView& artifact) noexcept;
 
     Nullable<unique_ptr<ShaderParameterSet>> CreateShaderParameterSet(const ShaderParameterSetDescriptor& desc) noexcept override;
 
@@ -360,7 +362,7 @@ public:
 
     Nullable<unique_ptr<FenceD3D12>> CreateFenceD3D12(uint64_t initValue) noexcept;
 
-    Nullable<unique_ptr<RootSigD3D12>> CreateRootSignatureInternal(const PipelineLayoutDescriptor& desc) noexcept;
+    Nullable<unique_ptr<RootSigD3D12>> CreateRootSignatureInternal(const BackendPipelineLayoutInput& input) noexcept;
 
     void TryDrainValidationMessages();
 
@@ -526,7 +528,7 @@ public:
 
     bool SetPushConstants(
         uint32_t groupIndex,
-        uint32_t binding,
+        BindingHandle binding,
         std::span<const byte> data) noexcept override;
 
     void Draw(uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance) noexcept override;
@@ -568,7 +570,7 @@ public:
 
     bool SetPushConstants(
         uint32_t groupIndex,
-        uint32_t binding,
+        BindingHandle binding,
         std::span<const byte> data) noexcept override;
 
     void Dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ) noexcept override;
@@ -819,6 +821,11 @@ struct ShaderParameterGroupLayoutD3D12 {
     uint32_t SamplerTableRootParameter{std::numeric_limits<uint32_t>::max()};
 };
 
+struct PushConstantBindingD3D12 {
+    ShaderBindingLocation Location{};
+    uint32_t RootParameterIndex{std::numeric_limits<uint32_t>::max()};
+};
+
 class RootSigD3D12 final : public PipelineLayout {
 public:
     RootSigD3D12() noexcept = default;
@@ -835,6 +842,8 @@ public:
     Nullable<const ShaderParameterGroupLayoutD3D12*> FindParameterGroup(
         uint32_t groupIndex) const noexcept;
 
+    BindingHandle FindBinding(std::string_view name) const noexcept;
+
 public:
     DeviceD3D12* _device{nullptr};
     D3D12_VERSIONED_ROOT_SIGNATURE_DESC _desc{};
@@ -842,7 +851,9 @@ public:
     vector<vector<D3D12_DESCRIPTOR_RANGE1>> _descriptorRanges;
     vector<D3D12_STATIC_SAMPLER_DESC> _staticSamplers;
     vector<ShaderParameterGroupLayoutD3D12> _parameterGroups;
-    std::optional<uint32_t> _pushConstantRootParameter;
+    vector<BackendBindingName> _bindingNames;
+    uint32_t _bindingGeneration{0};
+    vector<PushConstantBindingD3D12> _pushConstantBindings;
     ComPtr<ID3D12RootSignature> _rootSig;
 };
 
@@ -856,7 +867,7 @@ public:
     void Destroy() noexcept override;
 
     bool Set(
-        uint32_t binding,
+        BindingHandle binding,
         uint32_t arrayElement,
         ShaderParameterValue value) noexcept override;
 

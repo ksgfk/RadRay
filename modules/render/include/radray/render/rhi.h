@@ -1,7 +1,6 @@
 #pragma once
 
 #include <array>
-#include <functional>
 #include <limits>
 #include <variant>
 #include <optional>
@@ -13,7 +12,6 @@
 #include <radray/nullable.h>
 #include <radray/enum_flags.h>
 #include <radray/basic_math.h>
-#include <radray/shader/shader_types.h>
 
 // 后端无关的 RHI 接口面。所有权模型、后端选择、绑定模型、barrier 与同步的设计说明见
 // docs/architecture/render-rhi.md
@@ -33,16 +31,105 @@
 //   == 接口: 同步与 swapchain ==
 //   == 接口: 资源与 view ==
 //   == 接口: pass / shader / layout / PSO ==
-//   == 工具函数与 SamplerCache ==
+//   == 工具函数 ==
 
 namespace radray::render {
 
 // == 枚举与位标志 ==
 
+enum class ShaderStage : uint32_t {
+    UNKNOWN = 0x0,
+    Vertex = 0x1,
+    Pixel = Vertex << 1,
+    Compute = Pixel << 1,
+    Graphics = Vertex | Pixel,
+};
+
+enum class ShaderBlobCategory : int32_t {
+    DXIL,
+    SPIRV,
+};
+
+enum class AddressMode : int32_t {
+    ClampToEdge,
+    Repeat,
+    Mirror
+};
+
+enum class FilterMode : int32_t {
+    Nearest,
+    Linear
+};
+
+enum class CompareFunction : int32_t {
+    Never,
+    Less,
+    Equal,
+    LessEqual,
+    Greater,
+    NotEqual,
+    GreaterEqual,
+    Always
+};
+
+enum class VertexStepMode : int32_t {
+    Vertex,
+    Instance
+};
+
+enum class VertexFormat : int32_t {
+    UNKNOWN,
+
+    UINT8X2,
+    UINT8X4,
+    SINT8X2,
+    SINT8X4,
+    UNORM8X2,
+    UNORM8X4,
+    SNORM8X2,
+    SNORM8X4,
+    UINT16X2,
+    UINT16X4,
+    SINT16X2,
+    SINT16X4,
+    UNORM16X2,
+    UNORM16X4,
+    SNORM16X2,
+    SNORM16X4,
+    FLOAT16X2,
+    FLOAT16X4,
+    UINT32,
+    UINT32X2,
+    UINT32X3,
+    UINT32X4,
+    SINT32,
+    SINT32X2,
+    SINT32X3,
+    SINT32X4,
+    FLOAT32,
+    FLOAT32X2,
+    FLOAT32X3,
+    FLOAT32X4,
+};
+
+enum class ShaderParameterBindingType : int32_t {
+    UNKNOWN,
+    CBuffer,
+    Buffer,
+    RWBuffer,
+    TexelBuffer,
+    RWTexelBuffer,
+    Texture,
+    RWTexture,
+    DynamicCBuffer,
+    DynamicBuffer,
+    DynamicRWBuffer,
+    Sampler,
+};
+
 enum class RenderBackend : int32_t {
     D3D12,
     Vulkan,
-    Metal,
 
     MAX_COUNT
 };
@@ -383,6 +470,11 @@ struct is_flags<render::BufferState> : public std::true_type {};
 template <>
 struct is_flags<render::TextureState> : public std::true_type {};
 
+template <>
+struct is_flags<render::ShaderStage> : public std::true_type {};
+template <>
+struct is_compound_enum_flags<render::ShaderStage> : public std::true_type {};
+
 namespace render {
 
 using ColorWrites = EnumFlags<render::ColorWrite>;
@@ -392,6 +484,7 @@ using BufferUses = EnumFlags<render::BufferUse>;
 using TextureUses = EnumFlags<render::TextureUse>;
 using BufferStates = EnumFlags<render::BufferState>;
 using TextureStates = EnumFlags<render::TextureState>;
+using ShaderStages = EnumFlags<ShaderStage>;
 
 }  // namespace render
 
@@ -516,10 +609,6 @@ struct D3D12DeviceDescriptor {
     std::optional<uint32_t> AdapterIndex{};
 };
 
-struct MetalDeviceDescriptor {
-    std::optional<uint32_t> DeviceIndex{};
-};
-
 struct VulkanCommandQueueDescriptor {
     QueueType Type{QueueType::Direct};
     uint32_t Count{0};
@@ -531,7 +620,7 @@ public:
     std::span<const VulkanCommandQueueDescriptor> Queues{};
 };
 
-using DeviceDescriptor = std::variant<D3D12DeviceDescriptor, MetalDeviceDescriptor, VulkanDeviceDescriptor>;
+using DeviceDescriptor = std::variant<D3D12DeviceDescriptor, VulkanDeviceDescriptor>;
 
 class SwapChainDescriptor {
 public:
@@ -794,41 +883,26 @@ struct MappedBufferRange {
 
 // == 布局与参数集描述符 ==
 
-// 以下是喂给 RHI 的描述形状。它们不出现在 *.shader.json 里、没有 JSON codec,
-// shader 格式层也不消费它们 —— 由 shader_layout_binding.h 把 manifest 数据打包成它们。
-// 故属 render 层, 不下沉到 radrayshader。
+struct SamplerDescriptor {
+    AddressMode AddressS{};
+    AddressMode AddressT{};
+    AddressMode AddressR{};
+    FilterMode MinFilter{};
+    FilterMode MagFilter{};
+    FilterMode MipmapFilter{};
+    float LodMin{0.0f};
+    float LodMax{0.0f};
+    std::optional<CompareFunction> Compare{};
+    uint32_t AnisotropyClamp{0};
+
+    friend bool operator==(const SamplerDescriptor& lhs, const SamplerDescriptor& rhs) noexcept = default;
+    friend bool operator!=(const SamplerDescriptor& lhs, const SamplerDescriptor& rhs) noexcept = default;
+};
+
 struct ShaderDescriptor {
     std::span<const byte> Source{};
     ShaderBlobCategory Category{};
     ShaderStages Stages{ShaderStage::UNKNOWN};
-};
-
-struct ShaderParameterSetLayoutEntryDescriptor {
-    uint32_t Binding{0};
-    ShaderParameterBindingType Type{ShaderParameterBindingType::UNKNOWN};
-    uint32_t Count{0};
-    ShaderStages Stages{ShaderStage::UNKNOWN};
-    std::optional<SamplerDescriptor> ImmutableSampler{};
-
-    friend bool operator==(const ShaderParameterSetLayoutEntryDescriptor&, const ShaderParameterSetLayoutEntryDescriptor&) noexcept = default;
-};
-
-struct ShaderParameterSetLayoutDescriptor {
-    uint32_t GroupIndex{0};
-    std::span<const ShaderParameterSetLayoutEntryDescriptor> Entries{};
-};
-
-struct PushConstantDescriptor {
-    ShaderBindingLocation Location{};
-    uint32_t Size{0};
-    ShaderStages Stages{ShaderStage::UNKNOWN};
-
-    friend bool operator==(const PushConstantDescriptor&, const PushConstantDescriptor&) noexcept = default;
-};
-
-struct PipelineLayoutDescriptor {
-    std::span<const ShaderParameterSetLayoutDescriptor> ParameterSets{};
-    std::optional<PushConstantDescriptor> PushConstant{};
 };
 
 struct VertexAttribute {
@@ -855,6 +929,8 @@ struct VertexInputState {
     std::span<const VertexAttribute> Attributes{};
 };
 
+bool ValidateVertexInputState(const VertexInputState& state) noexcept;
+
 struct ShaderBufferBinding {
     Buffer* Target{nullptr};
     BufferRange Range{BufferRange::AllRange()};
@@ -876,6 +952,50 @@ using ShaderParameterValue = std::variant<ShaderBufferBinding, ShaderTexelBuffer
 struct ShaderParameterSetDescriptor {
     PipelineLayout* Layout{nullptr};
     uint32_t GroupIndex{0};
+};
+
+class BindingHandle {
+public:
+    constexpr BindingHandle() noexcept = default;
+
+    static constexpr BindingHandle FromBinding(
+        uint32_t binding,
+        uint32_t generation,
+        uint32_t bindingNamespace = 0) noexcept {
+        return BindingHandle{
+            (static_cast<uint64_t>(generation) << 32) |
+            (static_cast<uint64_t>(bindingNamespace & 0xffu) << kNamespaceShift) |
+            (static_cast<uint64_t>(binding) + 1)};
+    }
+
+    constexpr bool IsValid() const noexcept {
+        return _value != 0 &&
+               (static_cast<uint32_t>(_value) & kBindingMask) != 0 &&
+               GetBinding() != std::numeric_limits<uint32_t>::max();
+    }
+
+    constexpr uint32_t GetBinding() const noexcept {
+        return (static_cast<uint32_t>(_value) & kBindingMask) - 1;
+    }
+
+    constexpr uint32_t GetGeneration() const noexcept {
+        return static_cast<uint32_t>(_value >> 32);
+    }
+
+    constexpr uint32_t GetNamespace() const noexcept {
+        return (static_cast<uint32_t>(_value) >> kNamespaceShift) & 0xffu;
+    }
+
+    friend bool operator==(const BindingHandle&, const BindingHandle&) noexcept = default;
+
+private:
+    static constexpr uint32_t kNamespaceShift = 24;
+    static constexpr uint32_t kBindingMask = (1u << kNamespaceShift) - 1;
+
+    explicit constexpr BindingHandle(uint64_t value) noexcept
+        : _value(value) {}
+
+    uint64_t _value{0};
 };
 
 struct ShaderParameterDynamicOffset {
@@ -1148,8 +1268,6 @@ public:
 
     virtual Nullable<unique_ptr<Shader>> CreateShader(const ShaderDescriptor& desc) noexcept = 0;
 
-    virtual Nullable<unique_ptr<PipelineLayout>> CreatePipelineLayout(const PipelineLayoutDescriptor& desc) noexcept = 0;
-
     virtual Nullable<unique_ptr<ShaderParameterSet>> CreateShaderParameterSet(const ShaderParameterSetDescriptor& desc) noexcept = 0;
 
     virtual Nullable<unique_ptr<GraphicsPipelineState>> CreateGraphicsPipelineState(const GraphicsPipelineStateDescriptor& desc) noexcept = 0;
@@ -1238,7 +1356,7 @@ public:
 
     virtual void BindShaderParameterSet(uint32_t groupIndex, ShaderParameterSet* set, std::span<const ShaderParameterDynamicOffset> dynamicOffsets = {}) noexcept = 0;
 
-    virtual bool SetPushConstants(uint32_t groupIndex, uint32_t binding, std::span<const byte> data) noexcept = 0;
+    virtual bool SetPushConstants(uint32_t groupIndex, BindingHandle binding, std::span<const byte> data) noexcept = 0;
 };
 
 class GraphicsCommandEncoder : public CommandEncoder {
@@ -1422,7 +1540,7 @@ public:
 
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::ShaderParameterSet; }
 
-    virtual bool Set(uint32_t binding, uint32_t arrayElement, ShaderParameterValue value) noexcept = 0;
+    virtual bool Set(BindingHandle binding, uint32_t arrayElement, ShaderParameterValue value) noexcept = 0;
 
     virtual bool FlushWrites() noexcept = 0;
 };
@@ -1482,7 +1600,8 @@ public:
     static Nullable<unique_ptr<DXGIFactory>> Create(const DXGIFactoryDescriptor& desc);
 };
 
-// == 工具函数与 SamplerCache ==
+// == 工具函数 ==
+// SamplerCache 在 sampler_cache.h
 
 bool IsDepthStencilFormat(TextureFormat format) noexcept;
 bool IsUintFormat(TextureFormat format) noexcept;
@@ -1490,6 +1609,8 @@ bool IsSintFormat(TextureFormat format) noexcept;
 uint32_t GetIndexFormatSizeInBytes(IndexFormat format) noexcept;
 IndexFormat SizeInBytesToIndexFormat(uint32_t size) noexcept;
 uint32_t GetTextureFormatBytesPerPixel(TextureFormat format) noexcept;
+uint32_t GetVertexFormatSizeInBytes(VertexFormat format) noexcept;
+bool IsDynamicShaderParameterBindingType(ShaderParameterBindingType type) noexcept;
 // -------------------------------------------------------------------------
 
 std::string_view format_as(RenderBackend v) noexcept;
@@ -1503,38 +1624,9 @@ std::string_view format_as(TextureViewUsage v) noexcept;
 std::string_view format_as(RenderObjectTag v) noexcept;
 std::string_view format_as(PresentMode v) noexcept;
 std::string_view format_as(SwapChainStatus v) noexcept;
+std::string_view format_as(ShaderStage v) noexcept;
+std::string_view format_as(ShaderBlobCategory v) noexcept;
+std::string_view format_as(VertexFormat v) noexcept;
 
 }  // namespace radray::render
 
-namespace std {
-
-template <>
-struct hash<radray::render::SamplerDescriptor> {
-    size_t operator()(const radray::render::SamplerDescriptor& desc) const noexcept;
-};
-
-}  // namespace std
-
-namespace radray::render {
-
-class SamplerCache final {
-public:
-    explicit SamplerCache(Device* device) noexcept;
-
-    ~SamplerCache() noexcept;
-
-    SamplerCache(const SamplerCache&) = delete;
-    SamplerCache(SamplerCache&&) = delete;
-    SamplerCache& operator=(const SamplerCache&) = delete;
-    SamplerCache& operator=(SamplerCache&&) = delete;
-
-    Nullable<Sampler*> GetOrCreate(const SamplerDescriptor& desc) noexcept;
-
-    void Clear() noexcept;
-
-private:
-    Device* _device;
-    unordered_map<SamplerDescriptor, unique_ptr<Sampler>> _cache;
-};
-
-}  // namespace radray::render

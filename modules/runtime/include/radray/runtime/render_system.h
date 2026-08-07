@@ -2,11 +2,9 @@
 
 #include <radray/runtime_type.h>
 #include <radray/runtime/gpu_resource.h>
-#include <radray/runtime/pipeline_layout_cache.h>
 #include <radray/render/render_pass_registry.h>
 #include <radray/runtime/render_framework/render_pipeline.h>
 #include <radray/runtime/render_framework/scene.h>
-#include <radray/shader/shader_manifest.h>
 #include <radray/types.h>
 
 namespace radray {
@@ -14,10 +12,6 @@ namespace radray {
 class Application;
 class AppFrameContext;
 struct AppFrameTarget;
-
-namespace render {
-class Dxc;
-}  // namespace render
 
 /// runtime 侧的渲染协调器。【拥有"怎么画", 不拥有帧时序】—— device / queue / flight /
 /// uploader / 延迟销毁都属 GpuSystem, 本类只借用。
@@ -31,9 +25,10 @@ public:
     RenderSystem& operator=(RenderSystem&&) = delete;
     ~RenderSystem() noexcept;
 
-    /// 装配阶段调用。创建 RenderPassRegistry 与 runtime shader/PSO libraries；
-    /// 启用 JIT 时同时创建 DXC。
+    /// 装配阶段调用并创建 RenderPassRegistry。
     void OnInitialize();
+
+    void SetPipeline(unique_ptr<RenderPipeline> pipeline) noexcept;
 
     void Render(AppFrameContext& ctx);
 
@@ -45,44 +40,15 @@ public:
     RenderPipeline* GetPipeline() const noexcept { return _pipeline.get(); }
     /// RenderPass / Framebuffer 复用缓存。OnInitialize 之前或 device 缺失时为空。
     render::RenderPassRegistry* GetRenderPassRegistry() const noexcept { return _renderPassRegistry.get(); }
-    /// graphics PSO 复用缓存。OnInitialize 之前或 device 缺失时为空。
-    PipelineStateCache* GetPipelineStateCache() const noexcept { return _pipelineStateCache.get(); }
-    /// PipelineLayout 的内容去重缓存。OnInitialize 之前或 device 缺失时为空。
-    /// 加载 shader 资产时必须传给 ShaderAssetLoadOptions::LayoutCache。
-    PipelineLayoutCache* GetPipelineLayoutCache() const noexcept { return _pipelineLayoutCache.get(); }
-    /// JIT shader 编译根目录 (<exe>/shaderlib)；关闭 JIT 时为空。
-    const string& GetShaderIncludeRoot() const noexcept { return _shaderIncludeRoot; }
-    /// JIT 编译器。关闭 JIT 或 DXC 创建失败时为空, 此时只能走 AOT 产物。
-    const shared_ptr<render::Dxc>& GetDxc() const noexcept { return _dxc; }
-    /// 全进程唯一的 shader 解析上下文 (include 根 / 过期策略 / JIT 许可 / 源码缓存)。
-    /// 【唯一一份是刻意的】: 这四项回答的是同一个问题 —— "这是开发构建还是发布包"。
-    /// 曾经它们在 ShaderAssetLoadOptions 里各占一项, 那让每个加载调用点都能自行决定,
-    /// 形成第二套真相 (且从未被兑现 —— dedup 命中时第二次的 options 直接被丢弃)。
-    /// 而源码缓存按文件记忆化, 跨 manifest 共享才有意义 (error_pass 的 include 闭包是
-    /// forward_pass 的子集)。OnInitialize 之前为空。
-    ShaderResolveContext* GetShaderResolveContext() const noexcept { return _shaderResolveContext.get(); }
 
 private:
     void EnsureRenderTargetState(AppFrameContext& ctx, RenderPipelineTarget& target);
     void EnsurePresentState(AppFrameContext& ctx, RenderPipelineTarget& target);
 
     Application* _app{nullptr};
-    /// 【必须声明在 _renderPassRegistry 之前】: PSO 存了 RenderPass 裸指针, 析构逆序保证
-    /// PSO 先死。PSO 也存了 PipelineLayout 裸指针, 那一侧由条目内的 StreamingAssetRef
-    /// 钉住资产、资产再钉住共享 layout。
-    unique_ptr<PipelineStateCache> _pipelineStateCache;
     unique_ptr<render::RenderPassRegistry> _renderPassRegistry;
-    /// 【本缓存可以先于资产死】: 析构时它把残留条目的所有权交还给条目自己, 那些 layout
-    /// 由持有者的引用计数保命 (见 pipeline_layout_cache.h)。这是必需的 —— Application 的
-    /// 关停顺序是 RenderSystem 先于 AssetManager, 而资产要到 AssetManager 析构时才放开
-    /// 最后一份引用。
-    unique_ptr<PipelineLayoutCache> _pipelineLayoutCache;
     unique_ptr<RenderPipeline> _pipeline;
     vector<unique_ptr<Scene>> _scenes;
-    shared_ptr<render::Dxc> _dxc;
-    string _shaderIncludeRoot;
-    /// 【必须声明在 _dxc 之后】: context 借用 Dxc* 裸指针, 析构逆序保证 context 先死。
-    unique_ptr<ShaderResolveContext> _shaderResolveContext;
 };
 
 template <>

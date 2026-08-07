@@ -8,7 +8,6 @@
 #include <radray/nullable.h>
 #include <radray/render/rhi.h>
 #include <radray/runtime/asset_manager.h>
-#include <radray/shader/shader_manifest.h>
 #include <radray/types.h>
 
 namespace radray {
@@ -303,68 +302,6 @@ private:
     uint64_t _minBlockSize{};
     uint64_t _allocatedThisFrame{};
     uint64_t _highWatermark{};
-};
-
-}  // namespace radray
-
-namespace radray {
-
-class ShaderAsset;
-class ShaderPassProgram;
-struct ShaderAssetDiagnostic;
-
-struct GraphicsPipelineStateKey {
-    ShaderPassProgram* Program{nullptr};
-    render::RenderPass* CompatibleRenderPass{nullptr};
-    render::PrimitiveState Primitive{render::PrimitiveState::Default()};
-    std::optional<render::DepthStencilState> DepthStencil{};
-    render::MultiSampleState MultiSample{};
-    std::span<const render::ColorTargetState> ColorTargets{};
-};
-
-class PipelineStateCache {
-public:
-    explicit PipelineStateCache(render::Device* device) noexcept;
-    ~PipelineStateCache() noexcept;
-    PipelineStateCache(const PipelineStateCache&) = delete;
-    PipelineStateCache& operator=(const PipelineStateCache&) = delete;
-
-    Nullable<render::GraphicsPipelineState*> GetOrCreateGraphics(
-        const StreamingAssetRefAny& asset,
-        const GraphicsPipelineStateKey& key,
-        const ShaderVariantKey& variant,
-        render::ShaderBlobCategory category,
-        ShaderAssetDiagnostic& outDiag) noexcept;
-    uint32_t RemovePipelineStatesUsing(const ShaderAsset* asset) noexcept;
-    void Clear() noexcept;
-
-    uint32_t GetGraphicsPipelineStateCount() const noexcept {
-        return static_cast<uint32_t>(_graphics.size());
-    }
-    uint64_t GetGraphicsHitCount() const noexcept { return _graphicsHits; }
-    uint64_t GetGraphicsMissCount() const noexcept { return _graphicsMisses; }
-
-private:
-    struct GraphicsEntry {
-        ShaderPassProgram* Program{nullptr};
-        render::RenderPass* CompatibleRenderPass{nullptr};
-        vector<std::pair<render::ShaderStage, ShaderHash>> StageKeys;
-        render::PrimitiveState Primitive{};
-        std::optional<render::DepthStencilState> DepthStencil{};
-        render::MultiSampleState MultiSample{};
-        vector<render::ColorTargetState> ColorTargets;
-        const ShaderAsset* Owner{nullptr};
-        /// 【一份引用同时保住资产、Program 和 layout】引用计数是资产生命周期的唯一权威,
-        /// 没有任何入口能在计数非零时销毁槽位。
-        /// 【声明顺序有意义】必须在 Object 之前, 析构逆序保证 PSO 先死。
-        StreamingAssetRefAny Ref;
-        unique_ptr<render::GraphicsPipelineState> Object;
-    };
-
-    render::Device* _device{nullptr};
-    vector<GraphicsEntry> _graphics;
-    uint64_t _graphicsHits{0};
-    uint64_t _graphicsMisses{0};
 };
 
 }  // namespace radray

@@ -106,8 +106,8 @@ struct ApplicationRuntimeDescriptor {
     bool Multithreaded{false};
     std::string_view AppName{"RadRay Application"};
     std::string_view EngineName{"RadRay"};
-    /// 显式指定的可写目录,用于持久化图形管线缓存。
-    /// Shader 字节码从已烘焙的 ShaderAsset 二进制中加载。
+    /// 显式指定的可写目录，用于持久化图形管线缓存。
+    /// shader artifact 的加载策略由 runtime/render 边界负责。
     std::filesystem::path RenderCachePath{};
 
     // —— 主窗口 ——

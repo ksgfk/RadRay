@@ -47,57 +47,17 @@ function(radray_set_build_path TARGET)
         PDB_OUTPUT_DIRECTORY "${RADRAY_BUILD_PATH}/$<CONFIG>")
 endfunction()
 
-function(radray_example_files TARGET_NAME)
-    if (ARGC LESS 2)
-        message(FATAL_ERROR "radray_example_files: 需要 <TARGET_NAME> 和至少一个 <SRC>")
+# 消费 target 只需与集中式部署 target 建立构建依赖, 不再各自 POST_BUILD 拷贝
+# (见 CMakeLists.txt 的 radray_dxc_runtime_deploy)。DLL 与所有 radray 二进制同处
+# ${RADRAY_BUILD_PATH}/$<CONFIG>, 裸名动态加载即可命中。
+function(radray_deploy_dxc_runtime TARGET)
+    if (NOT RADRAY_BUILD_SHADER_COMPILER)
+        return()
     endif()
-    if (NOT TARGET ${TARGET_NAME})
-        message(FATAL_ERROR "radray_example_files: 目标 ${TARGET_NAME} 未定义")
+    if (NOT TARGET radray_dxc_runtime_deploy)
+        message(FATAL_ERROR "radray_deploy_dxc_runtime: radray_dxc_runtime_deploy target is missing")
     endif()
-
-    set(_target_name "${ARGV0}")
-    list(REMOVE_AT ARGV 0)
-    set(_sources ${ARGV})
-    set(_dest_root "${CMAKE_SOURCE_DIR}/assets/${_target_name}")
-
-    set(_POST_BUILD_CMDS
-        COMMAND ${CMAKE_COMMAND} -E make_directory "${_dest_root}"
-    )
-    foreach(_src IN LISTS _sources)
-        if (NOT IS_ABSOLUTE "${_src}")
-            set(_abs_src "${CMAKE_CURRENT_SOURCE_DIR}/${_src}")
-        else()
-            set(_abs_src "${_src}")
-        endif()
-        if (NOT EXISTS "${_abs_src}")
-            message(FATAL_ERROR "radray_example_files: 源不存在: ${_abs_src}")
-        endif()
-
-        if (IS_DIRECTORY "${_abs_src}")
-            file(RELATIVE_PATH _rel_dir "${CMAKE_CURRENT_SOURCE_DIR}" "${_abs_src}")
-            if (_rel_dir STREQUAL "")
-                set(_rel_dir ".")
-            endif()
-            list(APPEND _POST_BUILD_CMDS
-                COMMAND ${CMAKE_COMMAND} -E make_directory "${_dest_root}/${_rel_dir}"
-                COMMAND ${CMAKE_COMMAND} -E copy_directory "${_abs_src}" "${_dest_root}/${_rel_dir}"
-            )
-        else()
-            file(RELATIVE_PATH _rel_file "${CMAKE_CURRENT_SOURCE_DIR}" "${_abs_src}")
-            get_filename_component(_rel_dir "${_rel_file}" DIRECTORY)
-            if (_rel_dir STREQUAL "")
-                set(_rel_dir ".")
-            endif()
-            list(APPEND _POST_BUILD_CMDS
-                COMMAND ${CMAKE_COMMAND} -E make_directory "${_dest_root}/${_rel_dir}"
-                COMMAND ${CMAKE_COMMAND} -E copy_if_different "${_abs_src}" "${_dest_root}/${_rel_dir}"
-            )
-        endif()
-    endforeach()
-
-    add_custom_command(TARGET ${_target_name} POST_BUILD
-        ${_POST_BUILD_CMDS}
-        COMMENT "Copy example files to ${_dest_root}")
+    add_dependencies(${TARGET} radray_dxc_runtime_deploy)
 endfunction()
 
 # radray_compile_flag_auto_simd(<target>)
@@ -208,27 +168,6 @@ function(radray_add_test target)
         else()
             gtest_discover_tests(${target} DISCOVERY_MODE PRE_TEST)
         endif()
-    endif()
-    radray_default_compile_flags(${target})
-    radray_optimize_flags_binary(${target})
-    radray_set_build_path(${target})
-endfunction()
-
-# radray_add_example(<target> SOURCES <src...> [LINK_LIBS <libs...>] [COMPILE_OPTIONS <opts...>])
-function(radray_add_example target)
-    set(_options)
-    set(_one_value_args)
-    set(_multi_value_args SOURCES LINK_LIBS COMPILE_OPTIONS)
-    cmake_parse_arguments(RADRAY_EXAMPLE "${_options}" "${_one_value_args}" "${_multi_value_args}" ${ARGN})
-
-    if (NOT RADRAY_EXAMPLE_SOURCES)
-        message(FATAL_ERROR "radray_add_example: SOURCES is required for target ${target}")
-    endif()
-
-    add_executable(${target} ${RADRAY_EXAMPLE_SOURCES})
-    target_link_libraries(${target} PRIVATE ${RADRAY_EXAMPLE_LINK_LIBS})
-    if (RADRAY_EXAMPLE_COMPILE_OPTIONS)
-        target_compile_options(${target} PRIVATE ${RADRAY_EXAMPLE_COMPILE_OPTIONS})
     endif()
     radray_default_compile_flags(${target})
     radray_optimize_flags_binary(${target})

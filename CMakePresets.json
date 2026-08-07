@@ -122,13 +122,5 @@
             "configuration": "Release"
         }
     ],
-    "testPresets": [
-        {
-            "name": "win-x64",
-            "description": "",
-            "displayName": "",
-            "configurePreset": "win-x64-debug-clangcl",
-            "configuration": "Debug"
-        }
-    ]
+    "testPresets": []
 }

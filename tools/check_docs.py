@@ -27,6 +27,8 @@ import re
 import sys
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
+sys.dont_write_bytecode = True
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DOCS_ROOT = REPO_ROOT / "docs"
 HANDOFF_ROOT = DOCS_ROOT / "handoff"

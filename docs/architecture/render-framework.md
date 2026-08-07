@@ -1,13 +1,14 @@
 > - 适用: 改渲染管线、场景表示、Application 生命周期或服务装配
 > - 权威: 本文是 runtime 层「除资产系统与 GPU 帧管理之外」部分的唯一说明。那两块见 `architecture/asset-system.md` 与 `architecture/frame-and-gpu.md`
-> - 锚点: `modules/runtime/include/radray/runtime/render_framework/render_pipeline.h`, `modules/runtime/include/radray/runtime/service_registry.h`, `modules/runtime/src/application.cpp`, `modules/runtime/src/render_system.cpp`
+> - 锚点: `modules/runtime/include/radray/runtime/render_framework/render_pipeline.h`, `modules/runtime/include/radray/runtime/service_registry.h`, `modules/runtime/src/application.cpp`, `modules/runtime/src/render_system.cpp`, `examples/example_lambert_sphere/example_lambert_sphere.cpp`
 
 # 渲染框架与 game framework
 
-**先读这条**：`RenderPipeline` 框架已经建好，但**还没有任何具体管线接上去**。
-`RenderSystem::_pipeline` 恒为 null，仓库里没有任何 `RenderPipelinePass` 子类，
-`PrimitiveComponent::CreateSceneProxy` 基类返回 nullptr。所以"场景 → proxy → draw call"
-这条路目前跑不通。本文描述的是**框架的形状与约定**，不是一条可运行的渲染路径。
+**先读这条**：`RenderPipeline` 框架已经建好，但 runtime 不提供默认的具体管线。
+`RenderSystem::_pipeline` 初始为 null，由应用在 `OnInit` 中通过
+`RenderSystem::SetPipeline(unique_ptr<RenderPipeline>)` 注入并转移所有权。
+`examples/example_lambert_sphere` 是当前用于验证 runtime shader JIT 的最小具体管线；它不代表
+scene/primitive proxy 路径已经完成。本文描述的是框架的形状、注入边界与约定。
 
 ## 分层
 
@@ -15,7 +16,7 @@
 Application            进程生命周期、runner 选择、帧循环
   ├─ WindowManager     窗口与 swapchain
   ├─ GpuSystem         device、queue、flight、上传        → frame-and-gpu.md
-  ├─ RenderSystem      "怎么画"：RenderPassRegistry、PSO 缓存、DXC、RenderPipeline
+  ├─ RenderSystem      "怎么画"：RenderPassRegistry 与 RenderPipeline
   ├─ AssetManager      资产生命周期                       → asset-system.md
   └─ World             Actor / Component / Scene
 ```
@@ -41,6 +42,11 @@ OnSetupCamera → OnSetupCulling → OnSetupLights → OnAddRenderPasses
 最后对 `ContentDrawn == false` 的目标调 `ClearTarget` 兜底清屏——这样不必为"什么都没画"
 单独安排一个 clear pass。
 
+`SetPipeline` 是应用侧装配入口：`RenderSystem` 只拥有当前 pipeline，不拥有其依赖的
+`Scene`/component。样例 pipeline 因而可以借用 runtime 已创建的 `Scene` 与
+`CameraComponent`，把 shader JIT、artifact 解码、target-native layout 和公共 RHI 录制集中在
+example 内，不改变 runtime 的帧时序。
+
 **pass 注册与排序**：`OnAddRenderPasses` 里用 `EnqueuePass` 把 pass 压进 `_activePasses`；
 `OnExecutePasses` 用 `std::stable_sort` 按 `RenderPassEvent` 的整数值升序排，
 然后逐个 `Setup → Execute → Cleanup`。`stable_sort` 是刻意的：同一 event 上的 pass
@@ -51,24 +57,12 @@ OnSetupCamera → OnSetupCulling → OnSetupLights → OnAddRenderPasses
 **它当前没有基线来源也没有使用点**——Topology / FrontFace / DepthCompare / target Format
 由谁提供基线还没裁决。
 
-### 与 shaderlib 的绑定对应
+### shader artifact 边界
 
-绑定编号的唯一定义处是 `shaderlib/forward_pipeline/bindings.hlsli`：
-`RADRAY_FORWARD_OBJECT_GROUP 0` / `VIEW_GROUP 1` / `MATERIAL_GROUP 2`，
-以及展开成 `VK_BINDING(...) register(...)` 的 `RADRAY_FORWARD_*` 宏。
-
-CPU 侧**不引用这些宏**。链条是：
-
-```
-HLSL 宏 → DXC 反射 + tools/shader_gen → *.shader.json 的 BindingGroups → CPU 只读 manifest
-```
-
-manifest 是 ABI 权威（[ADR-0003](../adr/0003-manifest-is-abi-authority.md)），
-所以 group / binding 索引从 `ShaderPassProgram::GetDesc()` 取，
-**不要在 C++ 里硬编码 0/1/2**。`test_vertical_slice.cpp` 对此有专门断言。
-
-CPU 侧的常量缓冲镜像结构用 `static_assert(sizeof(...))` + `offsetof` 钉住布局，
-和 `view.hlsli` 保持一致。改 HLSL 里的 struct 就要同时改镜像与断言。
+当前渲染框架不负责发现源码、编译 shader 或生成 metadata。RHI 只消费 render 层已经
+验证过的 shader、layout 和 PSO 描述；compiler client 不成为 runtime 框架的隐式默认依赖。
+`example_lambert_sphere` 作为显式 JIT consumer，按实际 backend 选择 DXIL/SPIR-V、解码
+artifact 并调用 backend-specific layout builder；这是测试入口，不改变上述框架边界。
 
 ## 场景表示
 
@@ -113,7 +107,7 @@ struct MeshDrawArgs {
 1. 创建 5 个服务（`WindowManager`、`GpuSystem`、`RenderSystem`、`AssetManager`、`World`）。
    顺序任意——交叉引用推迟到 phase 2。
 2. `Add` 全部服务后 `Wire()`。
-3. `Initialize()`，触发 `RenderSystem::OnInitialize`（建 `RenderPassRegistry`、PSO 缓存、DXC）。
+    3. `Initialize()`，触发 `RenderSystem::OnInitialize`（建 `RenderPassRegistry`）。
 
 之后建主窗口并挂 swapchain。
 
@@ -192,13 +186,10 @@ template <> struct ServiceTraits<AssetManager> {
 
 ## 现状陷阱
 
-- **`RenderPipeline` 未接线**：`RenderSystem::_pipeline` 恒 null，无任何 `RenderPipelinePass`
-  子类。`ForwardPipeline` 只存在于 shaderlib 与注释里。
+- **默认 pipeline 为空**：`RenderSystem::_pipeline` 只有在应用调用 `SetPipeline` 后才接线；
+  `example_lambert_sphere` 的 pipeline 注入是一个显式样例路径。
 - **`MaterialRenderState` 零使用点**，基线来源未裁决。
 - **`RenderQueue` 枚举在 runtime 内无消费者**（只有 `examples/sphere_demo` 用）。
 - **无任何具体 primitive proxy**：`PrimitiveComponent::CreateSceneProxy` 基类返回 nullptr，
   所以 `MeshDrawArgs` / `GetDrawArgs` 目前没有消费方。缺的是 material 层与 mesh component。
-- **`examples/` 引用了已删除的头文件**（`material_asset.h`、`static_mesh_component.h`、
-  `static_mesh_scene_proxy.h`、`standard_material_factory.h` 等）。加上
-  `examples/CMakeLists.txt` 里两个 `add_subdirectory` 都被注释掉，所以它们不编译也修不了。
 - **`radray_add_radray_gtest_case` 已定义但无人使用。**

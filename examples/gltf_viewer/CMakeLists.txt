@@ -1,1 +1,0 @@
-radray_add_example(gltf_viewer SOURCES gltf_viewer.cpp LINK_LIBS radraycore radrayrender radrayruntime radraywindow)

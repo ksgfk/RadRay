@@ -144,7 +144,7 @@ Program(ShaderPassProgram*) + CompatibleRenderPass + Primitive + DepthStencil
 
 加上 program 内解析出的各 stage `ShaderHash`。key 比字节码宽——同一份字节码会喂给多个 PSO
 （不同 blend/cull/RT 格式）。这是 PSO 归 `RenderSystem` 而字节码归 `ShaderPassProgram`
-的原因，见 `architecture/shader-pipeline.md`。
+的原因，见 `docs/todo/hlsl-radray-dxc-shader-pipeline.md` 的 runtime 边界说明。
 
 条目只持一个 `StreamingAssetRefAny`，同时保住资产 + program + layout。`Ref` 必须声明在
 `Object` 之前（析构逆序保证 PSO 先死）。理由见 `architecture/asset-system.md`。

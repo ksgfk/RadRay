@@ -1661,7 +1661,8 @@ static std::optional<D3D12_DESCRIPTOR_RANGE_TYPE> MapDescriptorRangeType(
 }
 
 Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateRootSignatureInternal(
-    const PipelineLayoutDescriptor& desc) noexcept {
+    const BackendPipelineLayoutInput& input) noexcept {
+    const PipelineLayoutDescriptor& desc = input.Descriptor;
     D3D12_FEATURE_DATA_ROOT_SIGNATURE rootSignatureFeature{};
     rootSignatureFeature.HighestVersion = D3D_ROOT_SIGNATURE_VERSION_1_1;
     if (HRESULT hr = _device->CheckFeatureSupport(
@@ -1717,8 +1718,7 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateRootSignatureInternal(
         return true;
     };
 
-    if (desc.PushConstant.has_value()) {
-        const PushConstantDescriptor& pushConstant = desc.PushConstant.value();
+    for (const PushConstantDescriptor& pushConstant : desc.PushConstants) {
         if (pushConstant.Size == 0 || pushConstant.Size % 4 != 0) {
             RADRAY_ERR_LOG(
                 "d3d12 pipeline layout push constant size must be non-zero and 4-byte aligned: {}",
@@ -1746,7 +1746,9 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateRootSignatureInternal(
                 return lhs.Binding < rhs.Binding;
             });
         for (size_t i = 1; i < group.Entries.size(); ++i) {
-            if (group.Entries[i - 1].Binding == group.Entries[i].Binding) {
+            if (group.Entries[i - 1].Binding == group.Entries[i].Binding &&
+                GetShaderBindingNamespace(group.Entries[i - 1].Type) ==
+                    GetShaderBindingNamespace(group.Entries[i].Type)) {
                 RADRAY_ERR_LOG(
                     "d3d12 pipeline layout contains duplicate binding {} in group {}",
                     group.Entries[i].Binding,
@@ -1865,6 +1867,8 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateRootSignatureInternal(
 
     auto layout = make_unique<RootSigD3D12>();
     layout->_device = this;
+    layout->_bindingNames = input.BindingNames;
+    layout->_bindingGeneration = input.BindingGeneration;
     layout->_parameterGroups.reserve(groups.size());
     for (const PipelineLayoutGroup& group : groups) {
         ShaderParameterGroupLayoutD3D12& parameterGroup =
@@ -1905,9 +1909,8 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateRootSignatureInternal(
         parameterGroup.ResourceDescriptorCount = resourceDescriptorOffset;
         parameterGroup.SamplerDescriptorCount = samplerDescriptorOffset;
     }
-    if (desc.PushConstant.has_value()) {
-        const PushConstantDescriptor& pushConstant = desc.PushConstant.value();
-        layout->_pushConstantRootParameter =
+    for (const PushConstantDescriptor& pushConstant : desc.PushConstants) {
+        const uint32_t rootParameterIndex =
             static_cast<uint32_t>(layout->_rootParameters.size());
         D3D12_ROOT_PARAMETER1 rootParameter{};
         rootParameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
@@ -1916,6 +1919,9 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateRootSignatureInternal(
         rootParameter.Constants.Num32BitValues = pushConstant.Size / 4;
         rootParameter.ShaderVisibility = MapShaderStages(pushConstant.Stages);
         layout->_rootParameters.push_back(rootParameter);
+        layout->_pushConstantBindings.push_back({
+            .Location = pushConstant.Location,
+            .RootParameterIndex = rootParameterIndex});
     }
 
     auto appendDescriptorTable = [&](const PipelineLayoutGroup& group, bool samplerTable) noexcept {
@@ -2078,8 +2084,12 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateRootSignatureInternal(
 // == Device: pipeline layout 与 parameter set ==
 
 Nullable<unique_ptr<PipelineLayout>> DeviceD3D12::CreatePipelineLayout(
-    const PipelineLayoutDescriptor& desc) noexcept {
-    auto layout = CreateRootSignatureInternal(desc);
+    const shader::DxilShaderArtifactView& artifact) noexcept {
+    const auto input = MakeBackendPipelineLayoutInput(artifact);
+    if (!input.has_value()) {
+        return nullptr;
+    }
+    auto layout = CreateRootSignatureInternal(input.value());
     if (!layout.HasValue()) {
         return nullptr;
     }
@@ -2479,13 +2489,25 @@ void ShaderParameterSetD3D12::Destroy() noexcept {
 }
 
 bool ShaderParameterSetD3D12::Set(
-    uint32_t binding,
+    BindingHandle binding,
     uint32_t arrayElement,
     ShaderParameterValue value) noexcept {
+    if (!binding.IsValid()) {
+        RADRAY_ERR_LOG("d3d12 shader parameter set write has an invalid binding handle");
+        return false;
+    }
+    if (binding.GetGeneration() != _layout->_bindingGeneration) {
+#ifdef RADRAY_IS_DEBUG
+        RADRAY_ASSERT(binding.GetGeneration() == _layout->_bindingGeneration);
+#endif
+        RADRAY_ERR_LOG("d3d12 shader parameter set write has an invalid binding handle");
+        return false;
+    }
+    const uint32_t bindingNumber = binding.GetBinding();
     if (!IsValid()) {
         RADRAY_ERR_LOG(
             "d3d12 shader parameter set write is invalid: binding {} element {}",
-            binding,
+            bindingNumber,
             arrayElement);
         return false;
     }
@@ -2493,20 +2515,19 @@ bool ShaderParameterSetD3D12::Set(
     const auto group = _layout->FindParameterGroup(_groupIndex);
     RADRAY_ASSERT(group.HasValue());
     const auto& entries = group.Get()->Entries;
-    const auto entry = std::lower_bound(
+    const auto entry = std::find_if(
         entries.begin(),
         entries.end(),
-        binding,
-        [](const ShaderParameterSetLayoutEntryDescriptor& lhs, uint32_t rhs) noexcept {
-            return lhs.Binding < rhs;
+        [&](const ShaderParameterSetLayoutEntryDescriptor& value) noexcept {
+            return value.Binding == bindingNumber &&
+                   GetShaderBindingNamespace(value.Type) == binding.GetNamespace();
         });
     if (entry == entries.end() ||
-        entry->Binding != binding ||
         arrayElement >= entry->Count ||
         entry->ImmutableSampler.has_value()) {
         RADRAY_ERR_LOG(
             "d3d12 shader parameter set write is invalid: binding {} element {}",
-            binding,
+            bindingNumber,
             arrayElement);
         return false;
     }
@@ -2546,14 +2567,14 @@ bool ShaderParameterSetD3D12::Set(
     if (!valueCompatible) {
         RADRAY_ERR_LOG(
             "d3d12 shader parameter set write is invalid: binding {} element {}",
-            binding,
+            bindingNumber,
             arrayElement);
         return false;
     }
 
-    const size_t bindingIndex = static_cast<size_t>(entry - entries.begin());
-    RADRAY_ASSERT(bindingIndex < _bindingValueOffsets.size());
-    const size_t valueIndex = _bindingValueOffsets[bindingIndex] + arrayElement;
+    const size_t entryIndex = static_cast<size_t>(entry - entries.begin());
+    RADRAY_ASSERT(entryIndex < _bindingValueOffsets.size());
+    const size_t valueIndex = _bindingValueOffsets[entryIndex] + arrayElement;
     RADRAY_ASSERT(valueIndex < _values.size());
     RADRAY_ASSERT(valueIndex < _dirty.size());
     if (_values[valueIndex].has_value() && _values[valueIndex].value() == value) {
@@ -2626,6 +2647,10 @@ bool ShaderParameterSetD3D12::FlushWrites() noexcept {
 // == Device: PSO / sampler / fence ==
 
 Nullable<unique_ptr<GraphicsPipelineState>> DeviceD3D12::CreateGraphicsPipelineState(const GraphicsPipelineStateDescriptor& desc) noexcept {
+    if (!ValidateVertexInputState(desc.VertexInput)) {
+        RADRAY_ERR_LOG("d3d12 vertex input state is invalid");
+        return nullptr;
+    }
     if (desc.Primitive.StripIndexFormat.has_value() &&
         desc.Primitive.Topology != PrimitiveTopology::LineStrip &&
         desc.Primitive.Topology != PrimitiveTopology::TriangleStrip) {
@@ -2640,6 +2665,10 @@ Nullable<unique_ptr<GraphicsPipelineState>> DeviceD3D12::CreateGraphicsPipelineS
     semanticNames.reserve(desc.VertexInput.Attributes.size());
     std::array<std::optional<uint32_t>, D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT> vertexStrides{};
     for (const VertexBufferLayout& buffer : desc.VertexInput.Buffers) {
+        if (buffer.Binding >= vertexStrides.size()) {
+            RADRAY_ERR_LOG("d3d12 vertex buffer binding is out of range: {}", buffer.Binding);
+            return nullptr;
+        }
         vertexStrides[buffer.Binding] = buffer.ArrayStride;
     }
     for (const VertexAttribute& attribute : desc.VertexInput.Attributes) {
@@ -3867,7 +3896,7 @@ static bool SetPushConstantsD3D12(
     CmdListD3D12* commandBuffer,
     RootSigD3D12* boundLayout,
     uint32_t groupIndex,
-    uint32_t binding,
+    BindingHandle binding,
     std::span<const byte> data,
     bool graphics) noexcept {
     if (boundLayout == nullptr) {
@@ -3879,29 +3908,44 @@ static bool SetPushConstantsD3D12(
         RADRAY_ERR_LOG("d3d12 push constant pipeline layout is invalid or belongs to another device");
         return false;
     }
-    if (!boundLayout->_pushConstantRootParameter.has_value()) {
+    if (!binding.IsValid()) {
+        RADRAY_ERR_LOG("d3d12 push constant binding handle is invalid for the bound layout");
+        return false;
+    }
+    if (binding.GetGeneration() != boundLayout->_bindingGeneration) {
+#ifdef RADRAY_IS_DEBUG
+        RADRAY_ASSERT(binding.GetGeneration() == boundLayout->_bindingGeneration);
+#endif
+        RADRAY_ERR_LOG("d3d12 push constant binding handle is invalid for the bound layout");
+        return false;
+    }
+    const uint32_t bindingNumber = binding.GetBinding();
+    const auto pushConstant = std::find_if(
+        boundLayout->_pushConstantBindings.begin(),
+        boundLayout->_pushConstantBindings.end(),
+        [&](const PushConstantBindingD3D12& value) noexcept {
+            return value.Location.Group == groupIndex && value.Location.Binding == bindingNumber;
+        });
+    if (pushConstant == boundLayout->_pushConstantBindings.end()) {
         RADRAY_ERR_LOG(
             "d3d12 push constant range at group {} binding {} is unavailable",
             groupIndex,
-            binding);
+            bindingNumber);
         return false;
     }
 
-    const uint32_t rootParameterIndex =
-        boundLayout->_pushConstantRootParameter.value();
+    const uint32_t rootParameterIndex = pushConstant->RootParameterIndex;
     if (rootParameterIndex >= boundLayout->_rootParameters.size()) {
         RADRAY_ERR_LOG("d3d12 push constant root parameter metadata is invalid");
         return false;
     }
     const D3D12_ROOT_PARAMETER1& rootParameter =
         boundLayout->_rootParameters[rootParameterIndex];
-    if (rootParameter.ParameterType != D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS ||
-        rootParameter.Constants.RegisterSpace != groupIndex ||
-        rootParameter.Constants.ShaderRegister != binding) {
+    if (rootParameter.ParameterType != D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS) {
         RADRAY_ERR_LOG(
             "d3d12 push constant range at group {} binding {} is unavailable",
             groupIndex,
-            binding);
+            bindingNumber);
         return false;
     }
 
@@ -3911,7 +3955,7 @@ static bool SetPushConstantsD3D12(
         RADRAY_ERR_LOG(
             "d3d12 push constant size mismatch at group {} binding {}: expected {}, actual {}",
             groupIndex,
-            binding,
+            bindingNumber,
             expectedSize,
             data.size());
         return false;
@@ -3935,7 +3979,7 @@ static bool SetPushConstantsD3D12(
 
 bool CmdRenderPassD3D12::SetPushConstants(
     uint32_t groupIndex,
-    uint32_t binding,
+    BindingHandle binding,
     std::span<const byte> data) noexcept {
     return SetPushConstantsD3D12(
         _cmdList,
@@ -4048,7 +4092,7 @@ void CmdComputePassD3D12::BindShaderParameterSet(
 
 bool CmdComputePassD3D12::SetPushConstants(
     uint32_t groupIndex,
-    uint32_t binding,
+    BindingHandle binding,
     std::span<const byte> data) noexcept {
     return SetPushConstantsD3D12(
         _cmdList,
@@ -4539,7 +4583,9 @@ void RootSigD3D12::Destroy() noexcept {
     _rootParameters.clear();
     _staticSamplers.clear();
     _parameterGroups.clear();
-    _pushConstantRootParameter.reset();
+    _bindingNames.clear();
+    _bindingGeneration = 0;
+    _pushConstantBindings.clear();
     _device = nullptr;
 }
 
@@ -4585,6 +4631,23 @@ Nullable<const ShaderParameterGroupLayoutD3D12*> RootSigD3D12::FindParameterGrou
         return nullptr;
     }
     return &*group;
+}
+
+BindingHandle RootSigD3D12::FindBinding(std::string_view name) const noexcept {
+    if (_bindingGeneration == 0) {
+        return {};
+    }
+    const auto binding = std::find_if(
+        _bindingNames.begin(),
+        _bindingNames.end(),
+        [&](const BackendBindingName& value) noexcept { return value.Name == name; });
+    if (binding == _bindingNames.end()) {
+        return {};
+    }
+    return BindingHandle::FromBinding(
+        binding->Location.Binding,
+        _bindingGeneration,
+        binding->Namespace);
 }
 
 GraphicsPsoD3D12::GraphicsPsoD3D12(

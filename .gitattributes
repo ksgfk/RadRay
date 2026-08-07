@@ -2,5 +2,6 @@
 * text=auto
 
 cmake/MsBuildCompileCommandsJson/* linguist-generated
-modules/render/src/d3d12shader.h linguist-generated
-modules/render/src/d3dcommon_adapter.h linguist-generated
+
+# Metadata and bytecode golden fixtures are wire bytes, even when a particular sample is printable.
+modules/render/tests/data/shader_artifacts/** -text

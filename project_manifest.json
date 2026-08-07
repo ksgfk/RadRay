@@ -1,15 +1,15 @@
 {
     "Artifacts": [
         {
-            "Name": "dxc",
-            "Version": "1.9.2607",
+            "Name": "radray_dxc",
+            "Version": "1.9.2607.radray.3",
             "Url": "https://github.com/ksgfk/dxc-autobuild/releases/download/v{Version}/dxc-{Platform}-{Arch}.zip",
             "EnforceHash": true,
             "Triplets": [
                 {
                     "Platform": "windows",
                     "Arch": "x64",
-                    "Hash": "6602b90940f08e9a0cba363b7698c30f67b22375ede94fd2aa2a6fcb5438770a"
+                    "Hash": "012ebc0217ede49efa4374606f73056fcbf35047a504ed54d81cc71ab5630764"
                 }
             ]
         }
@@ -93,12 +93,6 @@
             "Tag": "v1.15"
         },
         {
-            "Name": "freetype",
-            "Type": "git",
-            "Git": "https://github.com/freetype/freetype.git",
-            "Tag": "VER-2-14-3"
-        },
-        {
             "Name": "Vulkan-Headers",
             "Type": "git",
             "Git": "https://github.com/KhronosGroup/Vulkan-Headers.git",
@@ -117,12 +111,6 @@
             "Tag": "v3.4.0"
         },
         {
-            "Name": "SPIRV-Cross",
-            "Type": "git",
-            "Git": "https://github.com/KhronosGroup/SPIRV-Cross.git",
-            "Tag": "vulkan-sdk-1.4.350.0"
-        },
-        {
             "Name": "DirectX-Headers",
             "Type": "git",
             "Git": "https://github.com/microsoft/DirectX-Headers.git",
@@ -133,12 +121,6 @@
             "Type": "git",
             "Git": "https://github.com/GPUOpen-LibrariesAndSDKs/D3D12MemoryAllocator.git",
             "Tag": "v3.2.0"
-        },
-        {
-            "Name": "imgui",
-            "Type": "git",
-            "Git": "https://github.com/ocornut/imgui.git",
-            "Tag": "v1.92.9b-docking"
         },
         {
             "Name": "googletest",

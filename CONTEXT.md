@@ -5,6 +5,13 @@ C++20 实时渲染器，D3D12 + Vulkan 双后端，纯光栅。
 本文件是**领域词汇表**：定义术语「是什么」。不描述实现、不记录决策、不当规格书用。
 实现现状见 `docs/architecture/`，决策见 `docs/adr/`。
 
+当前实施边界：`radrayshadercompiler` 已有 source discovery、typed variant、双 target wire、
+RadRay DXC fork extension client 与 extension probe；client 只用 fork extension ABI，无 stock
+adapter，stock extension probe 会 fail closed。RadRay DXC fork package 已通过
+`project_manifest.json` 的 `radray_dxc` 本地包接入并验证正向 ABI result；正式 artifact
+publisher/index 和 install/export 层仍未实现。当前 source/metadata scanner 的退役迁移尚未实施，
+目标边界由 ADR-0034 与 `docs/todo/radray-dxc-frontend-semantic-migration.md` 定义。
+
 ## Shader 管线
 
 **Pass**:
@@ -18,10 +25,21 @@ _Avoid_: program, effect, technique
 attribute，也不依赖 entry function 命名。CompileVariantRequest 不再携带作者维护的 stage/entry
 列表。
 
+**Root source**:
+一个 Pass source unit 在一次编译操作中提交的根 `.hlsl` 原始源码；它与物理文件路径、预处理后的
+源码以及 transitive include 内容是不同概念。共享 `.hlsli` 不属于 root source。
+_Avoid_: expanded source, include closure
+
+**Logical source name**:
+caller 为内存 root source 提供的非绝对、逻辑 HLSL 名称；compiler 将它作为 DXC virtual main-file
+name 用于诊断和预处理上下文，不据此从 filesystem 重新读取 root。项目 authoring 的 angle include
+仍由 caller 提供的 `-I` path list 解析。
+
 **Pass asset identity**:
 `PassName` 与 `AssetId` 属于 caller/资产系统，不属于 shader compiler contract。RadRay DXC
 extension request/result、compiler metadata 与 artifact identity 均不包含 `PassName`；compiler
-只接收用于 include、诊断与 source identity 的 `SourceName`。cook/资产层在自己生成的索引中把
+只接收 shaderlib-root-relative 的逻辑 `SourceName`，用于诊断与 virtual source context；该
+逻辑身份不等于物理仓库/部署路径，且 shaderlib include 内容不属于稳定 source identity。cook/资产层在自己生成的索引中把
 外部 asset/pass identity 映射到内容寻址的 compiler artifact，多个资产 Pass 可以复用同一产物。
 
 **Pass entry cardinality**:
@@ -35,6 +53,14 @@ graphics Pass 恰好包含一个 `[shader("vertex")]` entry，并可包含至多
 不变；带 `[shader("...")]` 的声明不得受 Variant 条件编译控制。keyword 可以改变函数体、资源
 使用、类型字段和 stage interface，但 compiler 必须对每个具体 Variant 校验 stage interface。
 pixel entry 可以永久缺省，不能只在部分 Variant 中存在。
+
+**Shader contract discovery**:
+compiler 对 root source 执行的不产出 target bytecode 的 syntax-only frontend operation，按普通
+filesystem include search 读取共享 include，并由 Clang/DXC preprocessor 与 AST/Sema 输出 canonical
+keyword domain、entry topology 和 `ContractHash`。它与 concrete compile 使用同一份 `Defines`、
+frontend policy、ordered include paths 和 DXC default include handler 规则。include 缺失、parse 或
+Sema 失败直接成为该次 discovery 的 compiler diagnostics。raw source/include 内容和路径本身不属于
+contract identity；只有它们改变的 canonical contract facts 进入 hash。
 
 **Stage**:
 Pass 中的一个可编程管线阶段（vertex / pixel / compute）。
@@ -62,6 +88,54 @@ compiler-level request 携带一个确定的 keyword assignment 与 target mask�
 和 validation。AOT cook 通常请求双 target，runtime JIT 只请求当前 target。请求按 target
 原子成功：任一被请求 lane 失败，整个 batch result 的 status 为 failed，所有 target lane 都不可访问，
 不产生 publication/persisted blob；diagnostics 可以保留各 lane 的失败信息，但成功 lane 也不得单独交付。
+为生成 SPIR-V lane 所需的 immutable sampler metadata，compiler 可以在内部额外执行不产出
+DXIL result 的 DXIL-mode RootSignature/static-sampler analysis；该辅助 lane 不改变 result 的
+requested target lane 集合。
+
+**Filesystem-backed compilation**:
+一次 discovery/compile 在调用时由 DXC 的默认 filesystem include handler 从当前文件系统读取共享
+HLSL 源码；include search 使用由调用方在本次调用提供的普通有序 include directories。RadRay
+authoring 仍以唯一逻辑 `shaderlib` 根组织 include，但其物理目录由调用方传入。include 内容是
+本次编译观察到的依赖，不属于 Pass 或 Variant 的稳定 identity；每个实际 compiler invocation 使用
+自己的 default handler，编译器不负责决定外部产物何时失效。
+_Avoid_: content-closed request, caller-owned include closure
+
+**Shaderlib include root**:
+authoring 使用的唯一逻辑 HLSL include 根；每次编译由 caller 将对应物理 directory 作为普通 `-I`
+搜索路径提供给 DXC。compiler 不内置其名称或物理位置；它不是 shader request 的 shader 内容，
+也不是 shader source identity。
+
+**JIT include paths**:
+`ShaderJit` 构造时接收并在生命周期内固定的有序物理 include directory 数组；discovery 与
+compile 都按相同顺序使用它。需要切换 shader 工程或 include 根时创建新的 `ShaderJit`，不在运行
+中修改现有实例。JIT 原样保存并传给 DXC，不做绝对化、canonicalize 或存在性检查；相对路径在
+实际 compiler invocation 时按当时的进程 CWD 解析。数组顺序就是 DXC `-I` 顺序；同名 include
+由首个命中的目录提供。它在 extension ABI 中作为独立的 borrowed per-call path-list view 传递，
+不属于 shader request 或 shader identity。数组可以为空；此时不提供 `-I`，include 缺失只在
+实际需要读取时由 DXC 报告。ABI view 的每项是显式长度的 UTF-8 path bytes，不要求 NUL 结尾；
+空列表可用 `Count == 0` 与空指针表示，非空列表中的空 path 或嵌入 NUL 直接作为 invalid request
+拒绝。
+
+`radray_shader_compile` 作为 filesystem-backed 编译的命令行 caller，保留 `--shader-root` 用于
+定位 root source，并将其作为第一个 include directory；可重复的 `--include-path` 按命令行顺序
+追加到路径数组。工具不递归读取、预展开或验证 include closure。
+
+**JIT diagnostics surface**:
+compiler client 的 discovery/compile result 保留完整的 status 与 diagnostics；runtime `ShaderJit`
+只向上提供无状态的 optional convenience result，不保存 `LastDiagnostics` 或其他可变错误状态。
+
+**Explicit JIT include configuration**:
+`ShaderJit` 构造函数必须显式接收 include path list；无 include 的实例显式传空数组。不存在隐含
+默认路径或 compiler 内建路径。
+
+**Immutable JIT include ownership**:
+JIT 按值接收并持有 include path list；construction 完成后没有 setter，const discovery/compile 可以
+并发读取同一份列表。每次 ABI 调用只借用临时 view，不把 caller 内存交给异步 compiler 保存。
+
+**Include tree stability window**:
+一次 discovery、concrete compile 或 multi-target batch 的 filesystem 读取期间，caller/build system
+负责保持 include tree 不变。RadRay/DXC 不建立跨 invocation 的 snapshot、锁或 include cache；文件变更
+后的行为由实际读取时序决定。
 
 **RadRay DXC extension ABI**:
 fork extension 只在独立的 `dxcapi_radrayext.h` 中声明，使用 RadRay-owned
@@ -71,24 +145,33 @@ vtable 与 DLL exports 保持不变；stock DXC 对扩展 CLSID 返回不支持�
 extension interface 直接继承 `IUnknown`，不继承或扩展 `IDxcCompiler3`。
 
 **RadRay DXC SDK distribution**:
-RadRay 主 CMake 工程只消费独立流水线产出的、版本与内容 hash 固定的预编译 RadRay DXC SDK；
-不通过 `add_subdirectory`、`FetchContent` 或 `ExternalProject` 构建 DXC 源码。SDK 必须自带
+目标形态是 RadRay 主 CMake 工程只消费独立流水线产出的、版本与内容 hash 固定的预编译
+RadRay DXC SDK；不通过 `add_subdirectory`、`FetchContent` 或 `ExternalProject` 构建 DXC 源码。
+当前工作树通过 `project_manifest.json` 的 `radray_dxc` 本地包消费真实 fork package：它由 fork
+仓库 `utils/package_radray_sdk.py` 打包为 relocatable archive，包含
 CMake config package 与 imported targets，集中表达 headers、compiler/validator binaries、
-import libraries 和可部署 runtime files；RadRay 不再根据 `SDKs/dxc/v...` 目录结构手工拼接路径。
-SDK package 必须支持按组件消费和部署裁剪，为未来不携带 shader compiler 的纯运行时发布构建
-铺路。`dxcompiler` 属于 compiler component；external `dxil` validator 是可选 component，不构成
-DXIL compile path 的无条件依赖。每个 SDK build 通过 DXIL loadability gate 证明默认产物可用。
+import libraries 和可部署 runtime files；RadRay 只按 `Name` 使用固定 SDK prefix，不手工解析包内
+部文件布局，也不设任何
+env/cache override。SDK package 必须支持按组件消费和部署裁剪，为未来不携带 shader compiler
+的纯运行时发布构建铺路。`dxcompiler` 属于 compiler component；external `dxil` validator 是
+可选 component，不构成 DXIL compile path 的无条件依赖。每个 SDK build 通过 DXIL loadability
+gate 证明默认产物可用。打包产物含完整 dxc 发行集：`bin/dxc.exe`、`bin/dxcompiler.dll`、
+`bin/dxil.dll`、`lib/dxcompiler.lib`、`lib/dxil.lib`、`include/dxc/*` 与
+`lib/cmake/RadRayDXC/*`。
 package identity 固定为 `RadRayDXC`，不冒充 stock `dxc`；CMake namespace 为 `RadRayDXC::`。
 它提供独立的 `Headers`、`Compiler`、`Validator` 与 `CLI` imported targets：`Compiler` 依赖
 `Headers`，`Validator` 依赖 `Headers`，`CLI` 依赖 `Compiler`，不提供隐式引入全部组件的 umbrella。
-正式构建只从 `project_manifest.json` 固定版本、triplet 与 archive hash 的 SDK prefix 发现 package，
-禁止隐式回退到系统或 package manager 中的其他 DXC。fork 开发可以显式设置
-`RADRAY_DXC_SDK_ROOT` 使用未发布 package，但 CI、release 与正式 cook 禁止 override；严格纯运行时
-配置完全不发现 `RadRayDXC`。
-SDK canonical identity 使用完整 upstream version 加 `+radray.<release>` suffix，例如
-`1.9.2607+radray.1`。RadRay 的 `find_package(RadRayDXC CONFIG REQUIRED ...)` 不指定 version，
-也不依赖 CMake 的 numeric ConfigVersion comparison；config package 导出完整 identity，正式的
-manifest prefix 由 RadRay 直接做字符串相等检查，开发 override 则由显式 override policy 放行。
+`tools/fetch_sdks.py` 按 `project_manifest.json` 固定版本、triplet 与 archive hash 准备
+`SDKs/radray_dxc` extracted prefix；RadRay `CMakeLists.txt` 使用固定的
+`Name` 路径发现 package，配置阶段不再解析
+`.radray-sdk.json` 或 archive hash。禁止隐式回退到系统或 package manager 中的其他 DXC，
+也不提供 `RADRAY_DXC_SDK_ROOT`/`RADRAY_DXC_FORK_PACKAGE_ROOT` 之类的开发 override。严格
+纯运行时配置完全不发现 `RadRayDXC`。
+SDK canonical identity 使用完整 upstream version 加 `.radray.<release>` suffix，例如
+`1.9.2607.radray.1`。RadRay 的 `find_package(RadRayDXC CONFIG REQUIRED ...)` 不指定 version，
+也不依赖 CMake 的 numeric ConfigVersion comparison；config package 导出完整 identity。fork
+重新打包后用新的 archive hash 更新 manifest，其余机器由 `fetch_sdks.py restore` 按本地包复制
+和校验；CMake 只消费按 `Name` 派生出的 package prefix。
 
 **Pure shader runtime distribution**:
 严格 compiler-free 的 AOT-only 构建与发布形态。配置阶段不发现或导入 RadRay DXC SDK；构建图
@@ -103,11 +186,11 @@ components 兑现，不能只靠部署阶段漏拷 DLL。
 可选的 compiler-facing adapter，只负责把 RadRay 的 source contract discovery 与 Variant compile
 请求映射到 RadRay DXC extension ABI，并把 compiler-owned result 原样交还调用方。它不拥有 shader
 runtime representation、RHI layout、资产身份、Variant coverage、artifact 发布或 AOT/JIT 策略。
-它动态加载 `RadRayDXC::Compiler` 指向的 binary，只把 `RadRayDXC::Headers` 作为 C++ compile
-dependency，不通过 import library 建立进程启动时的 loader dependency。
-client 不接收或固定 compiler path，而是使用 canonical platform library name 并服从平台动态库
-搜索顺序；加载到 stock 或不兼容 fork 时，由 extension CLSID、ABI 与 toolchain identity 检查
-fail closed，不允许回退到 upstream compile API。
+目标 client 动态加载 `RadRayDXC::Compiler` 指向的 binary，只把 `RadRayDXC::Headers` 作为 C++
+compile dependency，不通过 import library 建立进程启动时的 loader dependency。client 只用
+RadRay DXC extension ABI（`dxcapi_radrayext.h`），无 upstream `IDxcCompiler3` fallback；
+`RADRAY_SHADER_COMPILER_FORK` 在 compiler 构建中恒定义，stock 编译路径已删除。stock DXC 的
+extension CLSID 探测仍 fail closed，不能把任何 stock 产物当作 fork ABI。
 compiler capability 开启时，CMake 自动把 `RadRayDXC::Compiler` runtime artifact 放入 RadRay 公共
 build output，并通过 `install(IMPORTED_RUNTIME_ARTIFACTS ...)` 安装到 `ShaderCompiler` component；
 不要求每个 executable 单独声明部署。compiler capability 关闭时不存在对应 build/install rule。
@@ -272,25 +355,28 @@ resolved policy 纳入 result/artifact identity。任意 DXC flag 实验只能�
 **Keyword domain declaration**:
 Pass 的合法 keyword groups 使用 HLSL `#pragma radray_keyword_group` 声明，并且必须位于所有
 Variant 条件之外。forked DXC 在 preprocessor 内正式解析、校验并输出 canonical domain；
-cook/runtime 不解析 pragma，RadRay 不再保留外部预处理文本扫描器。重复 group、keyword 跨组
-重复、非法 assignment 或 pragma 语法错误都是 compiler hard error。pragma 不接受作者声明的
-`stages(...)`；stage dependency、resource visibility 与 stage projection 都由 compiler 生成。
-只有 Pass 根 `.hlsl` 可以声明 group；`.hlsli` 只能消费 keyword 宏，不能隐式扩张 include 它的
-Pass domain。
+compiler-owned `PragmaHandler` 按 compiler token 规则读取 active directive，并用 `SourceManager`
+验证 main-file spelling location 与 conditional depth；cook/runtime 不解析 pragma。重复 group、keyword
+跨组重复、非法 assignment 或 pragma 语法错误都是 compiler hard error。pragma 不接受作者声明的
+`stages(...)`；stage dependency、resource visibility 与 stage projection 都由 compiler 生成。只有
+Pass 根 `.hlsl` 可以声明 group；`.hlsli` 只能消费 keyword 宏，不能隐式扩张 include 它的 Pass
+domain。
 
 **Source contract discovery**:
-RadRay DXC extension 提供独立的 compiler-owned `DiscoverSourceContract` 操作，根据 source、
-include closure、普通 `Defines` 与相关 policy 输出 canonical keyword domain、entry topology 和
-`ContractHash`，但不生成 target bytecode。cook/editor 不自行解析 pragma；它们基于 discovery
-result 规划具体 assignments。`CompileVariant` 接收 `ExpectedContractHash` 并在 compiler 内重新
-发现、校验 contract 与 assignment，拒绝 discovery 后发生的 source/contract 漂移。AOT runtime
-直接消费 cook 产出的 contract/index，不需要 compiler。
+RadRay DXC extension 提供独立的 compiler-owned `DiscoverSourceContract` 操作，根据 typed request
+中的 root source、普通 `Defines`、requested targets、`CompilePolicy` 和独立的 caller-provided
+filesystem include search 输出 canonical keyword domain、entry topology 和 `ContractHash`，但不生成
+target bytecode。cook/editor 不自行解析 pragma；它们基于 discovery result 规划具体 assignments。
+`CompileVariant` 接收 `ExpectedContractHash` 并用同一 frontend collector 重新发现、校验 concrete
+contract 与 assignment，拒绝 discovery 后发生的 source/contract 漂移。AOT runtime 直接消费 cook
+产出的 contract/index，不需要 compiler。
 
 **Cross-target source contract invariant**:
 对同一组 source/include/Defines，DXIL lane（不定义 `__spirv__`）与 SPIR-V lane（由 DXC 内建定义
 `__spirv__`）必须输出相同的 keyword domain、entry names/stages、graphics/compute kind 与
-cardinality。`DiscoverSourceContract` 在两个 target mode 中各做一次轻量 frontend discovery，比较
-canonical contract 并在不一致时 hard error；只返回一份公共 `ContractHash`。`__spirv__` 可以改变
+cardinality。`DiscoverSourceContract` 请求两个 target 时各做一次轻量 frontend discovery，比较
+canonical contract 并在不一致时 hard error；只返回一份公共 `ContractHash`。只请求一个 target 的
+结果不能证明 cross-target invariant，cook 与跨后端发布 gate 必须请求两者。`__spirv__` 可以改变
 函数体、资源/binding、RootSignature projection、类型布局和 stage interface，但不能改变上述
 Variant contract。普通 `Defines` 是 discovery 输入，所以不同 Defines 集合可以形成不同 contract。
 
@@ -301,18 +387,22 @@ build input，不属于 shader metadata。HLSL 只声明合法 keyword domain；
 
 **Artifact trust**:
 运行时只接受 schema/version、工具链身份与 wire 安全解析通过的 Variant artifact，并把其中的
-compiler-generated binding metadata 视为事实；不通过 runtime reflection、第二份 schema 或 hash
-交叉核对它。type tree 的语义错配属于 compiler/ODR 系统缺陷；wire 越界、非法 record 或无法安全
-构造 CPU 数据时仍必须 fail closed。
+compiler-generated binding metadata 视为事实；不通过 runtime reflection 或第二份 schema 交叉核对
+它。decoder 可以把 metadata 中的 compiler-produced `GpuArtifactHash` 与 caller 提供的独立可信
+expected hash 做相等比较，但不在 RadRay 侧重算 hash，也不把该比较扩张为完整 artifact integrity
+校验。type tree 的语义错配属于 compiler/ODR 系统缺陷；wire 越界、非法 record、identity mismatch
+或无法安全构造 CPU 数据时仍必须 fail closed。
 
 **Shader identity hashes**:
-`ContractHash` 覆盖 canonical keyword domain、entry topology 及影响 discovery 的 Defines/policy，
-用于绑定 assignment planning。每个 target lane 的 `CompileInputHash` 覆盖 `SourceName`、root bytes、
-该 lane/Variant 实际打开的规范化 include path/content、canonical assignment/Defines、target、
-resolved policy、fork/ABI/schema/validator/toolchain identity；它不额外读取 compiler 输出的 runtime type
-tree（改变 source/include bytes 仍会按 CompileInputHash 的正常规则改变该 hash）。
-`GpuArtifactHash` 只覆盖 bytecode 与 GPU layout metadata，用于 GPU artifact/layout identity；第一期
-不定义 `ArtifactContentHash`、content-address publisher 或 `CpuSchemaHash`。compiler 输出的 type tree
+`ContractHash` 覆盖 compiler 产出的 canonical keyword domain、entry topology 和 shader kind，用于
+绑定 assignment planning。Defines、policy、root/include bytes、source name 与 include paths 不按原始
+输入进入 hash；它们只有在改变 canonical contract facts 时才间接改变 hash。include 是
+filesystem-backed compilation 在调用时读取的外部源码依赖。每个 target lane 的 `BytecodeHash` 覆盖完整 target bytecode，
+`PipelineLayoutHash` 覆盖 canonical target-native GPU layout records，`GpuArtifactHash` 覆盖 bytecode
+与 GPU layout metadata；这些是 compiler output identity，不是输入或缓存失效标识。
+三者使用统一的 128 位固定字节序表示；`PipelineLayoutHash` 只作为 artifact metadata 中的可比较
+身份，runtime 不重算也不以它建立共享缓存。第一期不定义 `ArtifactContentHash`、content-address
+publisher 或 `CpuSchemaHash`。compiler 输出的 type tree
 不作为独立 hash 输入，也不独立缓存、寻址或兼容性校验。`AssetId` / `PassName` 不进入任何 compiler hash。
 
 **Runtime CPU type schema**:

@@ -41,6 +41,10 @@ radray_default_compile_flags(radrayrender)
 radray_optimize_flags_library(radrayrender)
 radray_set_build_path(radrayrender)
 
+if (RADRAY_BUILD_SHADER_COMPILER)
+    radray_deploy_dxc_runtime(radrayrender)
+endif()
+
 if (RADRAY_BUILD_TESTS)
     add_subdirectory(tests)
 endif()

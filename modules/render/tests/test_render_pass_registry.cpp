@@ -14,15 +14,10 @@
 
 #include <radray/render/render_pass_registry.h>
 
+#include "gpu_test_fixture.h"
+
 #include <radray/render/rhi.h>
 #include <radray/types.h>
-
-#if defined(RADRAY_ENABLE_D3D12)
-#include <radray/render/backend/d3d12_impl.h>
-#endif
-#if defined(RADRAY_ENABLE_VULKAN)
-#include <radray/render/backend/vulkan_impl.h>
-#endif
 
 #include <gtest/gtest.h>
 
@@ -31,62 +26,6 @@
 
 namespace radray::render {
 namespace {
-
-/// 一个 device。本文件只建 texture / view / pass / framebuffer, 不提交命令, 故不要队列。
-struct DeviceContext {
-    bool VulkanEnvInitialized{false};
-    unique_ptr<DXGIFactory> Factory;
-    shared_ptr<Device> Device;
-
-    ~DeviceContext() {
-        Device.reset();
-        Factory.reset();
-#if defined(RADRAY_ENABLE_VULKAN)
-        if (VulkanEnvInitialized) {
-            InstanceVulkan::ShutdownEnv();
-        }
-#endif
-    }
-};
-
-bool TryCreateAnyDevice(DeviceContext& ctx) {
-#if defined(RADRAY_ENABLE_D3D12)
-    {
-        DXGIFactoryDescriptor factoryDesc{};
-        factoryDesc.IsEnableDebugLayer = false;
-        auto factory = DXGIFactory::Create(factoryDesc);
-        if (factory.HasValue()) {
-            ctx.Factory = factory.Release();
-            D3D12DeviceDescriptor d3d12Desc{};
-            d3d12Desc.Factory = ctx.Factory.get();
-            auto device = Device::Create(DeviceDescriptor{d3d12Desc});
-            if (device.HasValue()) {
-                ctx.Device = device.Release();
-                return true;
-            }
-            ctx.Factory.reset();
-        }
-    }
-#endif
-#if defined(RADRAY_ENABLE_VULKAN)
-    {
-        VulkanInstanceDescriptor instanceDesc{};
-        instanceDesc.AppName = "radray_render_pass_registry_test";
-        instanceDesc.EngineName = "radray";
-        instanceDesc.IsEnableDebugLayer = false;
-        if (InstanceVulkan::InitEnv(instanceDesc)) {
-            ctx.VulkanEnvInitialized = true;
-            VulkanDeviceDescriptor vkDesc{};
-            auto device = Device::Create(DeviceDescriptor{vkDesc});
-            if (device.HasValue()) {
-                ctx.Device = device.Release();
-                return true;
-            }
-        }
-    }
-#endif
-    return false;
-}
 
 constexpr uint32_t kWidth = 64;
 constexpr uint32_t kHeight = 32;
@@ -125,52 +64,10 @@ void ExpectDifferentKey(const Key& lhs, const Key& rhs) {
     EXPECT_FALSE(lhs == rhs);
 }
 
-/// 一张可当渲染目标的纹理 + 它的 RTV。framebuffer 需要真 view。
-struct RenderTarget {
-    unique_ptr<Texture> Tex;
-    unique_ptr<TextureView> View;
-};
-
-std::optional<RenderTarget> MakeRenderTarget(Device* device, TextureFormat format) {
-    TextureDescriptor texDesc{};
-    texDesc.Dim = TextureDimension::Dim2D;
-    texDesc.Width = kWidth;
-    texDesc.Height = kHeight;
-    texDesc.DepthOrArraySize = 1;
-    texDesc.MipLevels = 1;
-    texDesc.SampleCount = 1;
-    texDesc.Format = format;
-    texDesc.Memory = MemoryType::Device;
-    texDesc.Usage = TextureUse::RenderTarget;
-    auto tex = device->CreateTexture(texDesc);
-    if (!tex.HasValue()) {
-        return std::nullopt;
-    }
-    RenderTarget target{};
-    target.Tex = tex.Release();
-
-    TextureViewDescriptor viewDesc{};
-    viewDesc.Target = target.Tex.get();
-    viewDesc.Dim = TextureDimension::Dim2D;
-    viewDesc.Format = format;
-    viewDesc.Range = SubresourceRange{
-        .BaseArrayLayer = 0,
-        .ArrayLayerCount = 1,
-        .BaseMipLevel = 0,
-        .MipLevelCount = 1};
-    viewDesc.Usage = TextureViewUsage::RenderTarget;
-    auto view = device->CreateTextureView(viewDesc);
-    if (!view.HasValue()) {
-        return std::nullopt;
-    }
-    target.View = view.Release();
-    return target;
-}
-
 class RenderPassRegistryTest : public testing::Test {
 protected:
     void SetUp() override {
-        if (!TryCreateAnyDevice(_ctx)) {
+        if (!test::TryCreateAnyDevice(_ctx)) {
             GTEST_SKIP() << "no render backend is available on this machine";
         }
         _registry = make_unique<RenderPassRegistry>(_ctx.Device.get());
@@ -199,7 +96,7 @@ protected:
     }
 
 private:
-    DeviceContext _ctx;
+    test::DeviceContext _ctx;
     unique_ptr<RenderPassRegistry> _registry;
 };
 
@@ -460,7 +357,7 @@ TEST_F(RenderPassRegistryTest, SameDescriptorReusesFramebuffer) {
     if (!pass.HasValue()) {
         GTEST_SKIP() << "backend cannot create a simple color render pass";
     }
-    auto target = MakeRenderTarget(GetDevice(), TextureFormat::RGBA8_UNORM);
+    auto target = test::MakeRenderTarget(GetDevice(), TextureFormat::RGBA8_UNORM, kWidth, kHeight);
     if (!target.has_value()) {
         GTEST_SKIP() << "backend cannot create a render target texture/view";
     }
@@ -485,8 +382,8 @@ TEST_F(RenderPassRegistryTest, RemoveFramebuffersUsingKeepsRenderPasses) {
     if (!pass.HasValue()) {
         GTEST_SKIP() << "backend cannot create a simple color render pass";
     }
-    auto kept = MakeRenderTarget(GetDevice(), TextureFormat::RGBA8_UNORM);
-    auto dropped = MakeRenderTarget(GetDevice(), TextureFormat::RGBA8_UNORM);
+    auto kept = test::MakeRenderTarget(GetDevice(), TextureFormat::RGBA8_UNORM, kWidth, kHeight);
+    auto dropped = test::MakeRenderTarget(GetDevice(), TextureFormat::RGBA8_UNORM, kWidth, kHeight);
     if (!kept.has_value() || !dropped.has_value()) {
         GTEST_SKIP() << "backend cannot create a render target texture/view";
     }
@@ -515,7 +412,7 @@ TEST_F(RenderPassRegistryTest, RemoveFramebuffersUsingUnknownViewRemovesNothing)
     if (!pass.HasValue()) {
         GTEST_SKIP() << "backend cannot create a simple color render pass";
     }
-    auto target = MakeRenderTarget(GetDevice(), TextureFormat::RGBA8_UNORM);
+    auto target = test::MakeRenderTarget(GetDevice(), TextureFormat::RGBA8_UNORM, kWidth, kHeight);
     if (!target.has_value()) {
         GTEST_SKIP() << "backend cannot create a render target texture/view";
     }
@@ -524,7 +421,7 @@ TEST_F(RenderPassRegistryTest, RemoveFramebuffersUsingUnknownViewRemovesNothing)
         GTEST_SKIP() << "backend cannot create a framebuffer";
     }
 
-    auto unrelated = MakeRenderTarget(GetDevice(), TextureFormat::RGBA8_UNORM);
+    auto unrelated = test::MakeRenderTarget(GetDevice(), TextureFormat::RGBA8_UNORM, kWidth, kHeight);
     ASSERT_TRUE(unrelated.has_value());
     EXPECT_EQ(Registry().RemoveFramebuffersUsing(unrelated->View.get()), 0u);
     EXPECT_EQ(Registry().RemoveFramebuffersUsing(nullptr), 0u);
@@ -536,7 +433,7 @@ TEST_F(RenderPassRegistryTest, ClearFramebuffersKeepsRenderPasses) {
     if (!pass.HasValue()) {
         GTEST_SKIP() << "backend cannot create a simple color render pass";
     }
-    auto target = MakeRenderTarget(GetDevice(), TextureFormat::RGBA8_UNORM);
+    auto target = test::MakeRenderTarget(GetDevice(), TextureFormat::RGBA8_UNORM, kWidth, kHeight);
     if (!target.has_value()) {
         GTEST_SKIP() << "backend cannot create a render target texture/view";
     }

@@ -133,8 +133,7 @@ if (!device) {
 |---|---|---|
 | `ManualGate` | `runtime/tests/test_asset_slot.cpp` | 手工协程闸门。`async_scope::spawn` 会同步跑完只有 `co_return` 的 task，所以要挂住协程必须有它。写 `co_await gate.Wait()`，直接 `co_await gate` 会拷贝它 |
 | `ProbeAsset` + `DestroyGuard` | 同上 | 不碰 GPU 的假资产，计数 `OnUnload` 与析构 |
-| `SliceWaitFrameProcessor` | `runtime/tests/test_vertical_slice.cpp` | 立即完成的 `IWaitFrameProcessor` 替身 |
-| `Scoped*`（`ScopedDirectory` 等） | 各测试文件 | 临时目录 / 临时 manifest |
+| `Scoped*`（`ScopedDirectory` 等） | 各测试文件 | 临时目录 / 临时输入 |
 
 需要仓库根路径的测试从 `RADRAY_PROJECT_DIR` 环境变量取，编译期有
 `RADRAY_PROJECT_DIR_DEFAULT` 兜底。两者都要，因为 ctest 注册的用例走环境变量，

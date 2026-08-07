@@ -7,7 +7,9 @@
 #include <radray/allocator.h>
 #include <radray/intrusive_ptr.h>
 #include <radray/render/backend/vulkan_helper.h>
+#include <radray/render/backend/pipeline_layout_types.h>
 #include <radray/render/rhi.h>
+#include <radray/render/sampler_cache.h>
 
 namespace radray::render::vulkan {
 
@@ -287,7 +289,7 @@ public:
 
     Nullable<unique_ptr<Shader>> CreateShader(const ShaderDescriptor& desc) noexcept override;
 
-    Nullable<unique_ptr<PipelineLayout>> CreatePipelineLayout(const PipelineLayoutDescriptor& desc) noexcept override;
+    Nullable<unique_ptr<PipelineLayout>> CreatePipelineLayout(const shader::SpirvShaderArtifactView& artifact) noexcept;
 
     Nullable<unique_ptr<ShaderParameterSet>> CreateShaderParameterSet(const ShaderParameterSetDescriptor& desc) noexcept override;
 
@@ -308,7 +310,7 @@ public:
 
     Nullable<unique_ptr<BufferViewVulkan>> CreateBufferView(const VkBufferViewCreateInfo& info) noexcept;
 
-    Nullable<unique_ptr<PipelineLayoutVulkan>> CreatePipelineLayoutInternal(const PipelineLayoutDescriptor& desc) noexcept;
+    Nullable<unique_ptr<PipelineLayoutVulkan>> CreatePipelineLayoutInternal(const BackendPipelineLayoutInput& input) noexcept;
 
     Nullable<unique_ptr<SamplerVulkan>> CreateSamplerInternal(const SamplerDescriptor& desc) noexcept;
 
@@ -479,7 +481,7 @@ public:
 
     bool SetPushConstants(
         uint32_t groupIndex,
-        uint32_t binding,
+        BindingHandle binding,
         std::span<const byte> data) noexcept override;
 
     void Draw(uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance) noexcept override;
@@ -523,7 +525,7 @@ public:
 
     bool SetPushConstants(
         uint32_t groupIndex,
-        uint32_t binding,
+        BindingHandle binding,
         std::span<const byte> data) noexcept override;
 
     void Dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ) noexcept override;
@@ -981,6 +983,8 @@ public:
 
     void SetDebugName(std::string_view name) noexcept override;
 
+    BindingHandle FindBinding(std::string_view name) const noexcept;
+
 public:
     void DestroyImpl() noexcept;
 
@@ -988,6 +992,8 @@ public:
     VkPipelineLayout _layout{VK_NULL_HANDLE};
     vector<IntrusivePtr<DescriptorSetLayoutVulkan>> _setLayoutRefs;
     vector<vector<ShaderParameterSetLayoutEntryDescriptor>> _parameterSetLayouts;
+    vector<BackendBindingName> _bindingNames;
+    uint32_t _bindingGeneration{0};
     std::optional<VkPushConstantRange> _pushConstantRange;
     std::optional<ShaderBindingLocation> _pushConstantLocation;
 };
@@ -1002,7 +1008,7 @@ public:
     void Destroy() noexcept override;
 
     bool Set(
-        uint32_t binding,
+        BindingHandle binding,
         uint32_t arrayElement,
         ShaderParameterValue value) noexcept override;
 

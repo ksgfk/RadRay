@@ -399,7 +399,26 @@ def print_git_tag_note(repo_url: str, tag: GitRemoteTag) -> None:
         print(f"  tag url: https://github.com/{repo.slug}/releases/tag/{tag.name}")
 
 
-def hash_url(url: str) -> str:
+def is_local_url(url: str) -> bool:
+    """True when the artifact URL points at a local file rather than a remote download."""
+    return url.startswith("file://") or "://" not in url
+
+
+def local_path_from_url(repo_root: Path, url: str) -> Path:
+    if url.startswith("file://"):
+        url = url[len("file://") :]
+    path = Path(url)
+    if not path.is_absolute():
+        path = repo_root / path
+    return path
+
+
+def hash_url(url: str, repo_root: Path | None = None) -> str:
+    if is_local_url(url):
+        path = local_path_from_url(repo_root or Path.cwd(), url)
+        if not path.is_file():
+            raise FetchError(f"local SDK archive not found: {path}")
+        return hash_file(path)
     digest = hashlib.sha256()
     request = urllib.request.Request(url, headers={"User-Agent": "radray-fetch"})
     try:
@@ -1404,7 +1423,7 @@ class SdkArtifactFetcher:
             if not url:
                 raise FetchError(f"{name}: missing Url")
             note(f"{name}: hashing {triplet.get('Platform', '')}-{triplet.get('Arch', '')} asset")
-            triplet["Hash"] = hash_url(url)
+            triplet["Hash"] = hash_url(url, self.repo_root)
 
     def match_artifact(
         self,
@@ -1440,38 +1459,40 @@ class SdkArtifactFetcher:
         if info.get("EnforceHash") and not expected_hash:
             raise FetchError(f"{name}: EnforceHash is true but Hash is missing")
 
-        version_root = self.sdk_root / name / f"v{version}"
-        archive_path = version_root / archive_name
-        extract_dir = version_root / "extracted"
-        stamp_file = version_root / ".done"
+        artifact_root = self.sdk_root / name
+        archive_path = artifact_root / archive_name
+        extract_dir = artifact_root / "extracted"
+        stamp_file = artifact_root / ".done"
 
         note(f"{name}: resolving v{version}")
         if not self.force and stamp_file.exists() and extract_dir.exists():
             if archive_path.exists() and expected_hash:
                 self.verify_hash(archive_path, expected_hash)
             self.validate_files(extract_dir, info)
-            self.write_state(version_root, info, archive_name, url)
+            self.write_state(artifact_root, info, archive_name, url)
+            self.prune_legacy_version_roots(artifact_root)
             note(f"{name}: already installed at requested version")
             return
 
-        version_root.mkdir(parents=True, exist_ok=True)
+        artifact_root.mkdir(parents=True, exist_ok=True)
         if archive_path.exists():
             if expected_hash:
                 self.verify_hash(archive_path, expected_hash)
             note(f"{name}: archive already downloaded")
         else:
             note(f"{name}: downloading {url}")
-            download_file(url, archive_path)
+            download_file(url, archive_path, self.repo_root)
             if expected_hash:
                 self.verify_hash(archive_path, expected_hash)
 
         if extract_dir.exists():
-            safe_rmtree(extract_dir, version_root)
+            safe_rmtree(extract_dir, artifact_root)
         extract_dir.mkdir(parents=True, exist_ok=True)
         extract_archive(archive_path, extract_dir)
         self.validate_files(extract_dir, info)
         stamp_file.touch()
-        self.write_state(version_root, info, archive_name, url)
+        self.write_state(artifact_root, info, archive_name, url)
+        self.prune_legacy_version_roots(artifact_root)
         note(f"{name}: installed v{version}")
 
     def status_one(self, info: dict[str, Any]) -> tuple[str, str, bool]:
@@ -1488,10 +1509,10 @@ class SdkArtifactFetcher:
         if info.get("EnforceHash") and not expected_hash:
             raise FetchError(f"{name}: EnforceHash is true but Hash is missing")
 
-        version_root = self.sdk_root / name / f"v{version}"
-        archive_path = version_root / archive_name
-        extract_dir = version_root / "extracted"
-        stamp_file = version_root / ".done"
+        artifact_root = self.sdk_root / name
+        archive_path = artifact_root / archive_name
+        extract_dir = artifact_root / "extracted"
+        stamp_file = artifact_root / ".done"
 
         detail = f"v{version}"
         if not stamp_file.exists() or not extract_dir.exists():
@@ -1524,7 +1545,7 @@ class SdkArtifactFetcher:
             if not path.exists():
                 raise FetchError(f"{info['Name']}: extracted package is missing {value}")
 
-    def write_state(self, version_root: Path, info: dict[str, Any], archive_name: str, url: str) -> None:
+    def write_state(self, artifact_root: Path, info: dict[str, Any], archive_name: str, url: str) -> None:
         state = {
             "schema_version": 1,
             "manager": "radray-fetch",
@@ -1536,7 +1557,13 @@ class SdkArtifactFetcher:
             "archive_name": archive_name,
             "hash": str(info.get("Hash") or "").lower(),
         }
-        write_json_if_changed(version_root / ".radray-sdk.json", state)
+        write_json_if_changed(artifact_root / ".radray-sdk.json", state)
+
+    def prune_legacy_version_roots(self, artifact_root: Path) -> None:
+        for child in artifact_root.iterdir():
+            if child.is_dir() and child.name.startswith("v"):
+                safe_rmtree(child, self.sdk_root)
+                note(f"{artifact_root.name}: removed legacy directory {child.name}")
 
 
 def current_triplet() -> tuple[str, str]:
@@ -1577,8 +1604,14 @@ def archive_name_from_url(url: str) -> str:
     return name
 
 
-def download_file(url: str, output: Path) -> None:
+def download_file(url: str, output: Path, repo_root: Path | None = None) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
+    if is_local_url(url):
+        source = local_path_from_url(repo_root or Path.cwd(), url)
+        if not source.is_file():
+            raise FetchError(f"local SDK archive not found: {source}")
+        shutil.copyfile(source, output)
+        return
     with urllib.request.urlopen(url) as response:
         with output.open("wb") as file:
             shutil.copyfileobj(response, file)

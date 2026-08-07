@@ -70,3 +70,21 @@ docs/adr/*.md
 | [0014](0014-cpp-trace-is-shader-source-of-truth.md) | shader 源真相是 C++ trace，绑定由 trace 产出 | 已被 ADR-0016 取代 |
 | [0015](0015-variants-are-cpp-parameters.md) | 变体是 C++ 函数参数，烘焙集合也写在 C++ 里 | 已被 ADR-0016 取代 |
 | [0016](0016-hlsl-and-radray-dxc-are-shader-authority.md) | HLSL 与 forked RadRay DXC 是 shader 权威 | 生效 |
+| [0017](0017-runtime-lambert-sphere-example.md) | runtime Lambert sphere example 的接入边界 | 生效 |
+| [0018](0018-filesystem-backed-shader-compilation.md) | filesystem-backed shader compilation 与 ABI/schema 断代 | 部分被 ADR-0019 取代 |
+| [0019](0019-dxc-default-filesystem-include-search.md) | 使用 DXC 默认 filesystem include search | 已被 ADR-0020 取代 |
+| [0020](0020-caller-supplied-filesystem-include-paths.md) | caller-supplied filesystem include paths | 部分被 ADR-0021 取代 |
+| [0021](0021-jit-owns-immutable-include-path.md) | ShaderJit owning immutable include path | 已被 ADR-0022 取代 |
+| [0022](0022-jit-owns-immutable-include-path-list.md) | ShaderJit owning immutable include path list | 生效 |
+| [0023](0023-ordered-include-paths-follow-dxc-shadowing.md) | ordered include paths follow DXC shadowing | 生效 |
+| [0024](0024-include-path-list-is-separate-borrowed-abi-input.md) | include path list is a separate borrowed ABI input | 生效 |
+| [0025](0025-jit-keeps-convenience-error-surface.md) | JIT keeps a stateless convenience error surface | 生效 |
+| [0026](0026-empty-include-path-list-is-valid.md) | empty include path list is valid | 生效 |
+| [0027](0027-jit-include-path-list-is-explicit-construction-input.md) | JIT include path list is an explicit construction input | 生效 |
+| [0028](0028-jit-owns-include-path-list-by-value.md) | JIT owns include path list by value | 生效 |
+| [0029](0029-caller-stabilizes-include-tree-during-compile.md) | caller stabilizes include tree during compile | 生效 |
+| [0030](0030-root-source-remains-memory-backed.md) | root source remains memory-backed | 生效 |
+| [0031](0031-default-include-handler-per-invocation.md) | default include handler per invocation | 生效 |
+| [0032](0032-discovery-include-validation-before-contract-scan.md) | discovery 先由 DXC 验证 include，再进行 root-only contract scan | 已被 ADR-0034 取代 |
+| [0033](0033-include-path-abi-view-validation.md) | include path ABI view 的编码与输入校验 | 生效 |
+| [0034](0034-clang-dxc-compiler-pipeline-is-the-only-shader-semantic-authority.md) | Clang/DXC compiler pipeline 是唯一 shader 语义权威 | 生效 |

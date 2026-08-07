@@ -1,1 +1,0 @@
-radray_add_example(sphere_demo SOURCES sphere_demo.cpp LINK_LIBS radraycore radrayrender radrayruntime radraywindow)

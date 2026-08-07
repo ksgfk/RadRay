@@ -1,6 +1,6 @@
 > - 适用: 加 RHI 接口或改后端；排查 barrier / 描述符 / 同步问题；找某个后端实现在哪一段
 > - 权威: 本文是 RHI 抽象形状与两个后端映射关系的唯一说明。上层怎么用它见 `architecture/frame-and-gpu.md`
-> - 锚点: `modules/render/include/radray/render/rhi.h`, `modules/render/include/radray/render/render_pass_registry.h`, `modules/render/src/rhi.cpp`, `modules/render/src/d3d12/d3d12_impl.cpp`, `modules/render/src/vk/vulkan_impl.cpp`
+> - 锚点: `modules/render/include/radray/render/rhi.h`, `modules/render/include/radray/render/render_pass_registry.h`, `modules/render/include/radray/render/sampler_cache.h`, `modules/render/src/rhi.cpp`, `modules/render/src/sampler_cache.cpp`, `modules/render/src/d3d12/d3d12_impl.cpp`, `modules/render/src/vk/vulkan_impl.cpp`
 
 # RHI 与后端
 
@@ -20,8 +20,7 @@
 
 `Device` 之所以是 `shared_ptr`：后端实现对象需要回指 device 拿分配器、描述符堆和函数表，
 而 device 的生命周期由上层（`GpuSystem`）决定。其余对象一律独占，不存在共享所有权——
-需要共享的是上层的事（`SharedPipelineLayout` 在 runtime 层做引用计数，见
-`architecture/asset-system.md`）。
+需要共享的是上层的事；当前 runtime 不再持有 layout cache。
 
 **两段式析构**：每个实现类都有幂等的 `Destroy()` 和内部的 `DestroyImpl()`，析构函数兜底调
 后者。所以 `Destroy()` 可以安全重复调用，缓存要"先显式销毁再 erase"时就用它。
@@ -35,41 +34,32 @@
 选后端**不是**运行期能力探测，而是"你传了哪个 descriptor"：
 
 ```cpp
-using DeviceDescriptor = std::variant<D3D12DeviceDescriptor, MetalDeviceDescriptor, VulkanDeviceDescriptor>;
+using DeviceDescriptor = std::variant<D3D12DeviceDescriptor, VulkanDeviceDescriptor>;
 ```
 
 `Device::Create` 对它 `std::visit`，分派到 `d3d12::CreateDevice` / `vulkan::CreateDeviceVulkan`。
 这是全仓库唯一的后端分派点。对应后端未编译时打日志返回 `nullptr`。
 
-编译期开关在顶层 `CMakeLists.txt`：`RADRAY_ENABLE_D3D12`（需 WIN32）、`RADRAY_ENABLE_VULKAN`、
-`RADRAY_ENABLE_METAL`（需 APPLE）。`modules/render/CMakeLists.txt` 据此追加 `src/d3d12/` 或
+编译期开关在顶层 `CMakeLists.txt`：`RADRAY_ENABLE_D3D12`（需 WIN32）、`RADRAY_ENABLE_VULKAN`。
+`modules/render/CMakeLists.txt` 据此追加 `src/d3d12/` 或
 `src/vk/` 的源文件并定义同名宏。**源文件 glob 非递归**，新增 `.cpp` 要重新 configure。
 
 运行期探测的是**选哪块 GPU**：D3D12 走 DXGI 1.6 的 `EnumAdapterByGpuPreference(HIGH_PERFORMANCE)`
 并回退到枚举评分，Vulkan 按 `VkPhysicalDeviceType` 打分。
-
-**Metal 后端只有声明没有实现。** `RenderBackend::Metal`、`MetalDeviceDescriptor` 和
-`rhi.cpp` 里的 `#ifdef` 分支都在，但它 include 的 `backend/metal_impl_cpp.h` 在仓库里不存在。
-`RADRAY_ENABLE_METAL` 默认 ON，所以在 Apple 平台打开它会直接编译失败。macOS 的正确路径是
-Vulkan-on-Metal：surface 由 `src/vk/vulkan_macos_surface.mm` 用 `CAMetalLayer` +
-`vkCreateMetalSurfaceEXT` 提供。
 
 Vulkan 还有一个进程级全局：`VkInstance` 存在 `g_vkInstance`，经 `InstanceVulkan::InitEnv` /
 `ShutdownEnv` 管理，独立于 `Device`。D3D12 的对应物是 `DXGIFactory::Create`。
 
 ## 绑定模型
 
-统一接口是两层：`PipelineLayout` 描述形状，`ShaderParameterSet` 携带值。
-
-```
-PipelineLayoutDescriptor
-  └─ N × ShaderParameterSetLayoutDescriptor { GroupIndex, entries[] }
-  └─ optional PushConstantDescriptor
-```
+统一操作仍是两层：`PipelineLayout` 持有 backend-native layout，`ShaderParameterSet` 携带值。
+公共 `rhi.h` 不再暴露 pipeline layout descriptor；DXIL artifact 只能交给 D3D12 overload，
+SPIR-V artifact 只能交给 Vulkan overload。backend-only 的 layout input 由 artifact decoder
+从 compiler-owned records 临时组装，不允许 caller 另写一份 layout schema。
 
 `ShaderParameterValue` 是 `variant<ShaderBufferBinding, ShaderTexelBufferBinding, TextureView*, Sampler*>`。
 
-两个后端各自把这套形状编译成原生布局：
+两个后端各自把 target-native records 编译成原生布局：
 
 | | D3D12 | Vulkan |
 |---|---|---|
@@ -81,8 +71,18 @@ PipelineLayoutDescriptor
 **`Set` 只记脏值，`FlushWrites()` 才写描述符。** D3D12 把值写进预分配的 GPU 堆区间；
 Vulkan 构造 `VkWriteDescriptorSet` 数组，并按需惰性建 `VkBufferView` 承载 texel buffer。
 
-`ShaderDescriptor` 这类"喂给 RHI 的描述形状"属 render 层而非 `radrayshader`——判定规则见
-`architecture/shader-pipeline.md`。
+`ShaderDescriptor` 这类喂给 RHI 的资源描述仍属于 render 层。compiler-owned metadata 由 render
+decoder 转换成 backend-only 过渡 input，不能让 RHI 反向依赖 compiler client。
+
+### Binding handle 与 vertex input
+
+binding name 只在当前 artifact layout 上解析为不透明 `BindingHandle`。handle 带 layout generation，
+DXIL 还保留 `b/t/u/s` register namespace；unknown、inactive 或其他 layout 的 handle 写入直接
+失败，Debug 下跨 layout 使用会断言。`BindShaderParameterSet` 的 group index 仍保留，因为它
+同时对应 D3D12 register space 与 Vulkan descriptor set。
+
+graphics PSO 创建前会做共享 CPU 校验：semantic、format、location、slot、offset/stride 以及
+重复 binding/attribute 必须有效；校验失败时不调用 D3D12/Vulkan native PSO API。
 
 ### 描述符分配
 
@@ -160,13 +160,18 @@ Vulkan 的 NDC Y 轴朝下，要得到与 D3D12 一致的画面，处理它是**
 front-face winding 的影响不同。相机侧因此保持后端无关（见
 `architecture/render-framework.md`）。
 
+当 Vulkan 物理设备 API 版本低于 1.1 时，负 `Height` 依赖
+`VK_KHR_maintenance1`；runtime 会在现有 device-extension 集合中只补这个扩展。API 版本为
+1.1 或更高时使用核心能力，不再请求已提升进核心的扩展，也不加入 AMD fallback。runtime 不
+新增一套 capability 检测或用户提示；扩展缺失时沿用现有 device-extension 校验和设备创建
+结果。
+
 ## RenderPassRegistry：一个刻意不归一化的缓存
 
 按 descriptor 内容去重 `RenderPass` 与 `Framebuffer`。属 render 层是因为它只依赖 `rhi.h`，
 同层已有 `SamplerCache` 做同一件事。
 
-**这里不做归一化，与 `PipelineLayoutCache` 相反。** 那边把组和 binding 排序，因为后端建
-layout 时自己也排，顺序不携带语义。这边 `ColorAttachments` 的下标**就是**渲染目标槽位
+**这里不做归一化。** `ColorAttachments` 的下标**就是**渲染目标槽位
 （D3D12 的 RTV 序号 / Vulkan 的 `pAttachments` 下标），交换两个附件得到的是一个不同的
 render pass。所以 key 保持原序，哈希也按顺序喂入。这是最容易被后来者"顺手排个序"改坏的
 地方，`RenderPassRegistryTest` 专门盯它。
@@ -203,7 +208,6 @@ barrier → 编码器 → swapchain → 各对象类的收尾实现。
 
 ## 现状陷阱
 
-- **Metal**：见上文，Apple 平台开 `RADRAY_ENABLE_METAL` 会编译失败。
 - **D3D12 的 swapchain 同步槽未接线**：`Submit` 忽略 `WaitToExecute` / `ReadyToPresent`。
 - **D3D12 纹理不带优化 clear value**：`CreateTexture` 里那段 `D3D12_CLEAR_VALUE` 逻辑被整段
   注释掉，`clearPtr` 恒为 `nullptr`。

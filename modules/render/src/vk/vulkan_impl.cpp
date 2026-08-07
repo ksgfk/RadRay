@@ -1591,7 +1591,8 @@ static bool ValidatePipelineLayoutStageDescriptorCountsVulkan(
 // == Device: pipeline layout 与 parameter set ==
 
 Nullable<unique_ptr<PipelineLayoutVulkan>> DeviceVulkan::CreatePipelineLayoutInternal(
-    const PipelineLayoutDescriptor& desc) noexcept {
+    const BackendPipelineLayoutInput& input) noexcept {
+    const PipelineLayoutDescriptor& desc = input.Descriptor;
     const VkPhysicalDeviceLimits& limits = _properties.limits;
     uint32_t setLayoutCount = 0;
     for (const ShaderParameterSetLayoutDescriptor& parameterSet : desc.ParameterSets) {
@@ -1732,8 +1733,12 @@ Nullable<unique_ptr<PipelineLayoutVulkan>> DeviceVulkan::CreatePipelineLayoutInt
     }
 
     VkPushConstantRange pushConstantRange{};
-    if (desc.PushConstant.has_value()) {
-        const PushConstantDescriptor& pushConstant = desc.PushConstant.value();
+    if (desc.PushConstants.size() > 1) {
+        RADRAY_ERR_LOG("vk pipeline layout accepts one SPIR-V push constant block");
+        return nullptr;
+    }
+    if (!desc.PushConstants.empty()) {
+        const PushConstantDescriptor& pushConstant = desc.PushConstants.front();
         if (pushConstant.Size == 0 || pushConstant.Size % 4 != 0) {
             RADRAY_ERR_LOG(
                 "vk pipeline layout push constant size must be non-zero and 4-byte aligned: {}",
@@ -1757,10 +1762,12 @@ Nullable<unique_ptr<PipelineLayoutVulkan>> DeviceVulkan::CreatePipelineLayoutInt
     }
 
     auto result = make_unique<PipelineLayoutVulkan>(this);
+    result->_bindingNames = input.BindingNames;
+    result->_bindingGeneration = input.BindingGeneration;
     result->_setLayoutRefs.reserve(setLayoutCount);
-    if (desc.PushConstant.has_value()) {
+    if (!desc.PushConstants.empty()) {
         result->_pushConstantRange = pushConstantRange;
-        result->_pushConstantLocation = desc.PushConstant->Location;
+        result->_pushConstantLocation = desc.PushConstants.front().Location;
     }
     for (uint32_t groupIndex = 0; groupIndex < setLayoutCount; ++groupIndex) {
         const vector<ShaderParameterSetLayoutEntryDescriptor>& entries =
@@ -1831,8 +1838,12 @@ Nullable<unique_ptr<PipelineLayoutVulkan>> DeviceVulkan::CreatePipelineLayoutInt
 }
 
 Nullable<unique_ptr<PipelineLayout>> DeviceVulkan::CreatePipelineLayout(
-    const PipelineLayoutDescriptor& desc) noexcept {
-    auto layout = CreatePipelineLayoutInternal(desc);
+    const shader::SpirvShaderArtifactView& artifact) noexcept {
+    const auto input = MakeBackendPipelineLayoutInput(artifact);
+    if (!input.has_value()) {
+        return nullptr;
+    }
+    auto layout = CreatePipelineLayoutInternal(input.value());
     if (!layout.HasValue()) {
         return nullptr;
     }
@@ -2087,32 +2098,43 @@ void ShaderParameterSetVulkan::DestroyImpl() noexcept {
 }
 
 bool ShaderParameterSetVulkan::Set(
-    uint32_t binding,
+    BindingHandle binding,
     uint32_t arrayElement,
     ShaderParameterValue value) noexcept {
+    if (!binding.IsValid()) {
+        RADRAY_ERR_LOG("vk shader parameter set write has an invalid binding handle");
+        return false;
+    }
+    if (binding.GetGeneration() != _layout->_bindingGeneration) {
+#ifdef RADRAY_IS_DEBUG
+        RADRAY_ASSERT(binding.GetGeneration() == _layout->_bindingGeneration);
+#endif
+        RADRAY_ERR_LOG("vk shader parameter set write has an invalid binding handle");
+        return false;
+    }
+    const uint32_t bindingNumber = binding.GetBinding();
     if (!IsValid()) {
         RADRAY_ERR_LOG(
             "vk shader parameter set write is invalid: binding {} element {}",
-            binding,
+            bindingNumber,
             arrayElement);
         return false;
     }
 
     const auto& entries = _layout->_parameterSetLayouts[_groupIndex];
-    const auto entry = std::lower_bound(
+    const auto entry = std::find_if(
         entries.begin(),
         entries.end(),
-        binding,
-        [](const ShaderParameterSetLayoutEntryDescriptor& lhs, uint32_t rhs) noexcept {
-            return lhs.Binding < rhs;
+        [&](const ShaderParameterSetLayoutEntryDescriptor& value) noexcept {
+            return value.Binding == bindingNumber &&
+                   GetShaderBindingNamespace(value.Type) == binding.GetNamespace();
         });
     if (entry == entries.end() ||
-        entry->Binding != binding ||
         arrayElement >= entry->Count ||
         entry->ImmutableSampler.has_value()) {
         RADRAY_ERR_LOG(
             "vk shader parameter set write is invalid: binding {} element {}",
-            binding,
+            bindingNumber,
             arrayElement);
         return false;
     }
@@ -2152,14 +2174,14 @@ bool ShaderParameterSetVulkan::Set(
     if (!valueCompatible) {
         RADRAY_ERR_LOG(
             "vk shader parameter set write is invalid: binding {} element {}",
-            binding,
+            bindingNumber,
             arrayElement);
         return false;
     }
 
-    const size_t bindingIndex = static_cast<size_t>(entry - entries.begin());
-    RADRAY_ASSERT(bindingIndex < _bindingValueOffsets.size());
-    const size_t valueIndex = _bindingValueOffsets[bindingIndex] + arrayElement;
+    const size_t entryIndex = static_cast<size_t>(entry - entries.begin());
+    RADRAY_ASSERT(entryIndex < _bindingValueOffsets.size());
+    const size_t valueIndex = _bindingValueOffsets[entryIndex] + arrayElement;
     RADRAY_ASSERT(valueIndex < _values.size());
     RADRAY_ASSERT(valueIndex < _dirty.size());
     if (_values[valueIndex].has_value() && _values[valueIndex].value() == value) {
@@ -2376,6 +2398,10 @@ bool ShaderParameterSetVulkan::FlushWrites() noexcept {
 // == Device: PSO / sampler / 同步原语 ==
 
 Nullable<unique_ptr<GraphicsPipelineState>> DeviceVulkan::CreateGraphicsPipelineState(const GraphicsPipelineStateDescriptor& desc) noexcept {
+    if (!ValidateVertexInputState(desc.VertexInput)) {
+        RADRAY_ERR_LOG("vk vertex input state is invalid");
+        return nullptr;
+    }
     if (desc.Primitive.StripIndexFormat.has_value() &&
         desc.Primitive.Topology != PrimitiveTopology::LineStrip &&
         desc.Primitive.Topology != PrimitiveTopology::TriangleStrip) {
@@ -2426,6 +2452,10 @@ Nullable<unique_ptr<GraphicsPipelineState>> DeviceVulkan::CreateGraphicsPipeline
     {
         vertexInputBindings.reserve(desc.VertexInput.Buffers.size());
         for (const VertexBufferLayout& buffer : desc.VertexInput.Buffers) {
+            if (buffer.Binding >= _properties.limits.maxVertexInputBindings) {
+                RADRAY_ERR_LOG("vk vertex buffer binding is out of range: {}", buffer.Binding);
+                return nullptr;
+            }
             auto& bindingDesc = vertexInputBindings.emplace_back();
             bindingDesc.binding = buffer.Binding;
             bindingDesc.stride = buffer.ArrayStride;
@@ -3281,6 +3311,9 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
     }
     if (IsValidateExtensions(VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME, deviceExtsAvailable)) {
         needExts.emplace(VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME);
+    }
+    if (selectPhyDevice.properties.apiVersion < VK_API_VERSION_1_1) {
+        needExts.emplace(VK_KHR_MAINTENANCE1_EXTENSION_NAME);
     }
     // DXC -fspv-reflect emits both corresponding OpExtension declarations.
     needExts.emplace(VK_GOOGLE_HLSL_FUNCTIONALITY_1_EXTENSION_NAME);
@@ -4459,7 +4492,7 @@ static bool SetPushConstantsVulkan(
     CommandBufferVulkan* commandBuffer,
     PipelineLayoutVulkan* boundLayout,
     uint32_t groupIndex,
-    uint32_t binding,
+    BindingHandle binding,
     std::span<const byte> data) noexcept {
     if (boundLayout == nullptr) {
         RADRAY_ERR_LOG("vk push constants require a bound pipeline state");
@@ -4469,14 +4502,26 @@ static bool SetPushConstantsVulkan(
         RADRAY_ERR_LOG("vk push constant pipeline layout is invalid or belongs to another device");
         return false;
     }
+    if (!binding.IsValid()) {
+        RADRAY_ERR_LOG("vk push constant binding handle is invalid for the bound layout");
+        return false;
+    }
+    if (binding.GetGeneration() != boundLayout->_bindingGeneration) {
+#ifdef RADRAY_IS_DEBUG
+        RADRAY_ASSERT(binding.GetGeneration() == boundLayout->_bindingGeneration);
+#endif
+        RADRAY_ERR_LOG("vk push constant binding handle is invalid for the bound layout");
+        return false;
+    }
+    const uint32_t bindingNumber = binding.GetBinding();
     if (!boundLayout->_pushConstantRange.has_value() ||
         !boundLayout->_pushConstantLocation.has_value() ||
         boundLayout->_pushConstantLocation->Group != groupIndex ||
-        boundLayout->_pushConstantLocation->Binding != binding) {
+        boundLayout->_pushConstantLocation->Binding != bindingNumber) {
         RADRAY_ERR_LOG(
             "vk push constant range at group {} binding {} is unavailable",
             groupIndex,
-            binding);
+            bindingNumber);
         return false;
     }
 
@@ -4486,7 +4531,7 @@ static bool SetPushConstantsVulkan(
         RADRAY_ERR_LOG(
             "vk push constant size mismatch at group {} binding {}: expected {}, actual {}",
             groupIndex,
-            binding,
+            bindingNumber,
             range.size,
             data.size());
         return false;
@@ -4504,7 +4549,7 @@ static bool SetPushConstantsVulkan(
 
 bool SimulateCommandEncoderVulkan::SetPushConstants(
     uint32_t groupIndex,
-    uint32_t binding,
+    BindingHandle binding,
     std::span<const byte> data) noexcept {
     return SetPushConstantsVulkan(
         _device,
@@ -4639,7 +4684,7 @@ void SimulateComputeEncoderVulkan::BindShaderParameterSet(
 
 bool SimulateComputeEncoderVulkan::SetPushConstants(
     uint32_t groupIndex,
-    uint32_t binding,
+    BindingHandle binding,
     std::span<const byte> data) noexcept {
     return SetPushConstantsVulkan(
         _device,
@@ -5537,6 +5582,23 @@ void PipelineLayoutVulkan::SetDebugName(std::string_view name) noexcept {
     }
 }
 
+BindingHandle PipelineLayoutVulkan::FindBinding(std::string_view name) const noexcept {
+    if (_bindingGeneration == 0) {
+        return {};
+    }
+    const auto binding = std::find_if(
+        _bindingNames.begin(),
+        _bindingNames.end(),
+        [&](const BackendBindingName& value) noexcept { return value.Name == name; });
+    if (binding == _bindingNames.end()) {
+        return {};
+    }
+    return BindingHandle::FromBinding(
+        binding->Location.Binding,
+        _bindingGeneration,
+        binding->Namespace);
+}
+
 void PipelineLayoutVulkan::DestroyImpl() noexcept {
     if (_device != nullptr) {
         if (_layout != VK_NULL_HANDLE) {
@@ -5549,6 +5611,8 @@ void PipelineLayoutVulkan::DestroyImpl() noexcept {
     _layout = VK_NULL_HANDLE;
     _setLayoutRefs.clear();
     _parameterSetLayouts.clear();
+    _bindingNames.clear();
+    _bindingGeneration = 0;
     _pushConstantRange.reset();
     _pushConstantLocation.reset();
     _device = nullptr;

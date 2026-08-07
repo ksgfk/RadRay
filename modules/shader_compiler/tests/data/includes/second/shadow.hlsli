@@ -1,0 +1,1 @@
+#define SHADOW_VALUE 2.0

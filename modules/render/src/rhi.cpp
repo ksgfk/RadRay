@@ -1,6 +1,5 @@
 #include <radray/render/rhi.h>
 
-#include <radray/hash.h>
 #include <radray/logger.h>
 #include <radray/utility.h>
 
@@ -8,67 +7,147 @@
 #include <radray/render/backend/d3d12_impl.h>
 #endif
 
-#ifdef RADRAY_ENABLE_METAL
-#include <radray/render/backend/metal_impl_cpp.h>
-#endif
-
 #ifdef RADRAY_ENABLE_VULKAN
 #include <radray/render/backend/vulkan_impl.h>
 #endif
 
-std::size_t std::hash<radray::render::SamplerDescriptor>::operator()(
-    const radray::render::SamplerDescriptor& desc) const noexcept {
-    radray::HashCode hash;
-    hash.Add(static_cast<radray::int32_t>(desc.AddressS));
-    hash.Add(static_cast<radray::int32_t>(desc.AddressT));
-    hash.Add(static_cast<radray::int32_t>(desc.AddressR));
-    hash.Add(static_cast<radray::int32_t>(desc.MinFilter));
-    hash.Add(static_cast<radray::int32_t>(desc.MagFilter));
-    hash.Add(static_cast<radray::int32_t>(desc.MipmapFilter));
-    hash.Add(desc.LodMin);
-    hash.Add(desc.LodMax);
-    hash.Add(desc.Compare.has_value());
-    hash.Add(desc.Compare.has_value() ? static_cast<radray::int32_t>(*desc.Compare) : 0);
-    hash.Add(desc.AnisotropyClamp);
-    return hash.ToHashCode();
-}
-
 namespace radray::render {
 
-SamplerCache::SamplerCache(Device* device) noexcept
-    : _device(device) {}
-
-SamplerCache::~SamplerCache() noexcept {
-    Clear();
+uint32_t GetVertexFormatSizeInBytes(VertexFormat format) noexcept {
+    switch (format) {
+        case VertexFormat::UINT8X2:
+        case VertexFormat::SINT8X2:
+        case VertexFormat::UNORM8X2:
+        case VertexFormat::SNORM8X2: return 2;
+        case VertexFormat::UINT8X4:
+        case VertexFormat::SINT8X4:
+        case VertexFormat::UNORM8X4:
+        case VertexFormat::SNORM8X4:
+        case VertexFormat::UINT16X2:
+        case VertexFormat::SINT16X2:
+        case VertexFormat::UNORM16X2:
+        case VertexFormat::SNORM16X2:
+        case VertexFormat::FLOAT16X2:
+        case VertexFormat::UINT32:
+        case VertexFormat::SINT32:
+        case VertexFormat::FLOAT32: return 4;
+        case VertexFormat::UINT16X4:
+        case VertexFormat::SINT16X4:
+        case VertexFormat::UNORM16X4:
+        case VertexFormat::SNORM16X4:
+        case VertexFormat::FLOAT16X4:
+        case VertexFormat::UINT32X2:
+        case VertexFormat::SINT32X2:
+        case VertexFormat::FLOAT32X2: return 8;
+        case VertexFormat::UINT32X3:
+        case VertexFormat::SINT32X3:
+        case VertexFormat::FLOAT32X3: return 12;
+        case VertexFormat::UINT32X4:
+        case VertexFormat::SINT32X4:
+        case VertexFormat::FLOAT32X4: return 16;
+        case VertexFormat::UNKNOWN: return 0;
+    }
+    Unreachable();
 }
 
-Nullable<Sampler*> SamplerCache::GetOrCreate(
-    const SamplerDescriptor& desc) noexcept {
-    if (_device == nullptr) {
-        return nullptr;
-    }
-    if (const auto it = _cache.find(desc); it != _cache.end()) {
-        return it->second.get();
-    }
-    auto sampler = _device->CreateSampler(desc);
-    if (!sampler.HasValue()) {
-        return nullptr;
-    }
-    Sampler* result = sampler.Get();
-    _cache.emplace(desc, sampler.Release());
-    return result;
-}
-
-void SamplerCache::Clear() noexcept {
-    for (auto& [desc, sampler] : _cache) {
-        (void)desc;
-        if (sampler != nullptr) {
-            sampler->Destroy();
+bool ValidateVertexInputState(const VertexInputState& state) noexcept {
+    for (size_t index = 0; index < state.Buffers.size(); ++index) {
+        const VertexBufferLayout& buffer = state.Buffers[index];
+        if (buffer.ArrayStride == 0) {
+            return false;
+        }
+        for (size_t previous = 0; previous < index; ++previous) {
+            if (state.Buffers[previous].Binding == buffer.Binding) {
+                return false;
+            }
         }
     }
-    _cache.clear();
-    _device = nullptr;
+
+    for (size_t index = 0; index < state.Attributes.size(); ++index) {
+        const VertexAttribute& attribute = state.Attributes[index];
+        if (attribute.Semantic.empty()) {
+            return false;
+        }
+        const uint32_t formatSize = GetVertexFormatSizeInBytes(attribute.Format);
+        if (formatSize == 0) {
+            return false;
+        }
+        const auto buffer = std::find_if(
+            state.Buffers.begin(),
+            state.Buffers.end(),
+            [&](const VertexBufferLayout& value) noexcept {
+                return value.Binding == attribute.BufferBinding;
+            });
+        if (buffer == state.Buffers.end() ||
+            attribute.Offset > buffer->ArrayStride ||
+            formatSize > buffer->ArrayStride - attribute.Offset) {
+            return false;
+        }
+        for (size_t previous = 0; previous < index; ++previous) {
+            const VertexAttribute& old = state.Attributes[previous];
+            if (old.Location == attribute.Location ||
+                (old.Semantic == attribute.Semantic && old.SemanticIndex == attribute.SemanticIndex)) {
+                return false;
+            }
+        }
+    }
+    return true;
 }
+
+bool IsDynamicShaderParameterBindingType(ShaderParameterBindingType type) noexcept {
+    return type == ShaderParameterBindingType::DynamicCBuffer ||
+           type == ShaderParameterBindingType::DynamicBuffer ||
+           type == ShaderParameterBindingType::DynamicRWBuffer;
+}
+
+std::string_view format_as(ShaderStage v) noexcept {
+    return EnumNameOr(v);
+}
+
+std::string_view format_as(ShaderBlobCategory v) noexcept {
+    return EnumNameOr(v);
+}
+
+std::string_view format_as(VertexFormat v) noexcept {
+    switch (v) {
+        case VertexFormat::UNKNOWN: return "UNKNOWN";
+        case VertexFormat::UINT8X2: return "byte2";
+        case VertexFormat::UINT8X4: return "byte4";
+        case VertexFormat::SINT8X2: return "char2";
+        case VertexFormat::SINT8X4: return "char4";
+        case VertexFormat::UNORM8X2: return "unorm8x2";
+        case VertexFormat::UNORM8X4: return "unorm8x4";
+        case VertexFormat::SNORM8X2: return "snorm8x2";
+        case VertexFormat::SNORM8X4: return "snorm8x4";
+        case VertexFormat::UINT16X2: return "ushort2";
+        case VertexFormat::UINT16X4: return "ushort4";
+        case VertexFormat::SINT16X2: return "short2";
+        case VertexFormat::SINT16X4: return "short4";
+        case VertexFormat::UNORM16X2: return "unorm16x2";
+        case VertexFormat::UNORM16X4: return "unorm16x4";
+        case VertexFormat::SNORM16X2: return "snorm16x2";
+        case VertexFormat::SNORM16X4: return "snorm16x4";
+        case VertexFormat::FLOAT16X2: return "half2";
+        case VertexFormat::FLOAT16X4: return "half4";
+        case VertexFormat::UINT32: return "uint";
+        case VertexFormat::UINT32X2: return "uint2";
+        case VertexFormat::UINT32X3: return "uint3";
+        case VertexFormat::UINT32X4: return "uint4";
+        case VertexFormat::SINT32: return "int";
+        case VertexFormat::SINT32X2: return "int2";
+        case VertexFormat::SINT32X3: return "int3";
+        case VertexFormat::SINT32X4: return "int4";
+        case VertexFormat::FLOAT32: return "float";
+        case VertexFormat::FLOAT32X2: return "float2";
+        case VertexFormat::FLOAT32X3: return "float3";
+        case VertexFormat::FLOAT32X4: return "float4";
+    }
+    Unreachable();
+}
+
+}  // namespace radray::render
+
+namespace radray::render {
 
 SwapChainFrame::SwapChainFrame(SwapChainFrame&& other) noexcept {
     swap(*this, other);
@@ -120,13 +199,6 @@ Nullable<shared_ptr<Device>> Device::Create(const DeviceDescriptor& desc) {
                 return d3d12::CreateDevice(arg);
 #else
                 RADRAY_ERR_LOG("D3D12 disable");
-                return nullptr;
-#endif
-            } else if constexpr (std::is_same_v<T, MetalDeviceDescriptor>) {
-#ifdef RADRAY_ENABLE_METAL
-                return metal::CreateDevice(arg);
-#else
-                RADRAY_ERR_LOG("metal disable");
                 return nullptr;
 #endif
             } else if constexpr (std::is_same_v<T, VulkanDeviceDescriptor>) {

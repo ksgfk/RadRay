@@ -54,9 +54,11 @@ DXIL Root Signature 中的 static sampler 通过 HLSL declaration identity 关�
 
 扩展 API 只在 `dxcapi_radrayext.h` 中声明 RadRay-owned CLSID/interfaces/result；不改变 upstream
 `dxcapi.h`、已有 IID/vtable、exports 或 `IDxcResult` contract。`IRadRayDxcResult` 一次返回各请求
-target lane 的 bytecode、独立 canonical metadata、diagnostics 和 identity/hash。任一 requested lane
-失败，整个 batch status 为 failed，所有 target lane 都不可访问，不产生 publication 或 persisted blob；
-diagnostics 可以保留各 lane 的失败信息，但成功 lane 也不得单独交付。
+target lane 的 bytecode、独立 canonical metadata、diagnostics 和 identity/hash。为生成 SPIR-V lane
+所需的 immutable sampler metadata，compiler 可以在内部额外执行不产出 DXIL result 的 DXIL-mode
+RootSignature/static-sampler analysis；该辅助 lane 不改变 result 的 requested target lane 集合。
+任一 requested lane 失败，整个 batch status 为 failed，所有 target lane 都不可访问，不产生
+publication 或 persisted blob；diagnostics 可以保留各 lane 的失败信息，但成功 lane 也不得单独交付。
 
 metadata 不嵌入 DXIL/SPIR-V，也不由运行时或 cook 二次序列化。DXIL 与 SPIR-V 共享薄 envelope，
 payload 分别使用 target-specific、versioned、fixed-width records；标准 serialized Root Signature
@@ -66,8 +68,13 @@ metadata 必须包含运行时构造 CPU buffer 所需的完整 target-native cb
 但 compiler 输出的 type-tree record 不作为 `ContractHash`、`CompileInputHash`、`GpuArtifactHash` 或
 任何 `CpuSchemaHash` 的独立输入；source/include bytes 仍按 `CompileInputHash` 的正常规则参与。
 第一期不定义 `ArtifactContentHash`、content-address publisher 或完整 artifact integrity hash。
-`GpuArtifactHash` 只覆盖 bytecode 与 GPU layout metadata；runtime 只对 type tree 做 wire bounds、
-record kind、offset/size、stride 和 CPU 构造安全检查，不做第二份 schema 或 reflection 交叉校验。
+compiler 同时产生覆盖完整 target bytecode 的 `BytecodeHash`，以及覆盖 canonical target-native
+GPU layout records 的 `PipelineLayoutHash`；二者与 `GpuArtifactHash` 使用统一的 128 位固定字节序
+表示。`GpuArtifactHash` 只覆盖 bytecode 与 GPU layout metadata；runtime 不重算这些 hash，也不在
+第一期以 `PipelineLayoutHash` 建立共享缓存。decoder 可以把 metadata 中的 `GpuArtifactHash`
+与 caller 提供的独立可信 expected hash 做相等比较，但不把该比较扩张为完整 artifact integrity
+校验。runtime 只对 type tree 做 wire bounds、record kind、offset/size、stride 和 CPU 构造安全检查，
+不做第二份 schema 或 reflection 交叉校验。
 PassName/AssetId 不进入 compiler hash。
 
 ### 4. Runtime ownership 与 trust boundary

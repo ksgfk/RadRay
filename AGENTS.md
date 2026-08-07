@@ -1,6 +1,7 @@
 # RadRay
 
-C++20 real-time renderer. 5 static libs under `modules/`, D3D12 + Vulkan backends.
+C++20 real-time renderer. Five static libs under `modules/` (plus an optional shader-compiler
+client), D3D12 + Vulkan backends.
 
 ## Docs first
 
@@ -13,9 +14,9 @@ do **not** preload the whole tree.
 | Configure, build, run tests, fetch deps | `docs/guide/build-test.md` |
 | Naming, interface style, test conventions | `docs/guide/cpp-conventions.md` |
 | IDE / clangd / debugger setup | `docs/guide/dev-env.md` |
-| Writing HLSL, keywords, manifests, cook | `docs/guide/shader-authoring.md` |
-| Adding a binding to a pass, HLSL through C++ | `docs/guide/shader-authoring.md` (end-to-end walkthrough) |
-| Shader toolchain, variants, AOT artifacts | `docs/architecture/shader-pipeline.md` |
+| Writing HLSL or changing shader contract | `docs/guide/shader-authoring.md`, `docs/architecture/shaderlib.md`, `docs/architecture/shader-pipeline.md` |
+| Adding a binding to a pass | `docs/guide/shader-authoring.md` and `docs/architecture/shader-pipeline.md` |
+| Shader toolchain, variants, AOT artifacts | `docs/architecture/shader-pipeline.md`, `docs/todo/hlsl-radray-dxc-shader-pipeline.md`, and `docs/todo/filesystem-backed-shader-include-correction.md` |
 | HLSL library layout and binding ABI | `docs/architecture/shaderlib.md` |
 | Asset lifetime, refcounts, deferred destroy | `docs/architecture/asset-system.md` |
 | Frame pacing, flights, uploads, shutdown | `docs/architecture/frame-and-gpu.md` |
@@ -78,11 +79,14 @@ Violating these is a defect, not a style preference.
 - **Ask the user before introducing any new `try`, `catch`, or `throw`** — even when it looks necessary.
 
 ### Layering
-- Dependency chain: `core` ← `window`, `core` ← `shader` ← `render` ← `runtime`.
-- Never add a `radrayrender` dependency to `radrayshader`, and never link the shader CLIs
-  (`tools/shader_gen`, `tools/shader_cook`) against `radrayruntime` / `radrayrender` —
-  that pulls ~23 MB of backend objects back in. Verify with `link /MAP` or
-  `ninja -C build_debug -t commands`, not `dumpbin /DEPENDENTS` (Vulkan loads via volk).
+- Dependency chain: `core` ← `shader` ← `window`, `core` ← `shader` ← `shadercompiler`,
+  `core` ← `shader` ← `render` ← `runtime`.
+- `radrayshader` holds the compiler/render shared shader wire contract and artifact decoder;
+  it must not depend on DXC headers/binaries or on `radrayrender`/`radrayruntime`.
+- The `radrayshadercompiler` client is optional and sits beside render/runtime; it must
+  not make `radrayrender` or `radrayruntime` depend on compiler SDK headers or binaries.
+  Verify target edges with `link /MAP` or `ninja -C build_debug -t commands`, not
+  `dumpbin /DEPENDENTS` (Vulkan loads via volk).
 - `third_party/` and `SDKs/` are script-populated read-only trees. Do not edit them.
 
 ### Shaders
@@ -91,9 +95,10 @@ Violating these is a defect, not a style preference.
   DXC accepts file-relative form but the source-identity scanner does not, so it breaks cook/JIT.
   Reserve `""` for genuinely path-relative includes, which currently do not exist.
 - `.hlsl` = entry point (`VSMain`/`PSMain`/`CSMain`); `.hlsli` = include-guarded library header.
-- Never write bare `register(...)` / `[[vk::binding]]` literals in a pass. Go through the
-  `VK_*` macros in `core/platform.hlsli` and the `RADRAY_FORWARD_*` macros in
-  `forward_pipeline/bindings.hlsli`.
+- `shaderlib/core/platform.hlsli` is the only target-gate shim. New passes must follow the
+  compiler-owned contract defined by the TODO plan, use shaderlib-root-relative includes such as
+  `#include <core/math.hlsli>`, and pass binding numbers directly through `VK_BINDING(binding, set)`;
+  do not add a parallel metadata format or numbered binding wrapper.
 
 ### Tests
 - Test sources go in `modules/<module>/tests/`, registered via `radray_add_test` or
@@ -108,7 +113,7 @@ python tools/fetch_third_party.py restore
 python tools/fetch_sdks.py restore
 cmake --preset win-x64-debug
 cmake --build build_debug --parallel 24
-ctest --preset win-x64 -R <SuiteName> --output-on-failure
+ctest --test-dir build_debug -C Debug -R <SuiteName> --output-on-failure
 python tools/win_gen_compile_commands.py --build-dir build_debug --configuration Debug
 ```
 
