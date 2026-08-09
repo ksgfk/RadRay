@@ -6,7 +6,7 @@ VK_BINDING(2, 4)
 SamplerComparisonState ShadowSampler;
 
 #if !defined(__spirv__)
-[RootSignature("StaticSampler(s0, filter=FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT)")]
+[RootSignature("DescriptorTable(SRV(t0)), StaticSampler(s0, filter=FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT)")]
 #endif
 [shader("vertex")]
 float4 VSMain(float3 position : POSITION) : SV_Position {

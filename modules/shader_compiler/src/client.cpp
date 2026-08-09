@@ -193,6 +193,8 @@ bool PopulateForkStages(
         envelope.EntryRecords.Size != contract.EntryPoints.size() * sizeof(shader::WireEntryRecord) ||
         !envelope.EntryRecords.IsWithin(static_cast<uint32_t>(lane.Metadata.size())) ||
         !envelope.VertexInputRecords.IsWithin(static_cast<uint32_t>(lane.Metadata.size())) ||
+        !envelope.RootSignature.IsWithin(static_cast<uint32_t>(lane.Metadata.size())) ||
+        (lane.Target == shader::ShaderTarget::SPIRV && envelope.RootSignature.Size != 0) ||
         !envelope.Bytecode.IsWithin(static_cast<uint32_t>(lane.Metadata.size())) ||
         envelope.Bytecode.Size != lane.Bytecode.size()) {
         AddForkError(diagnostics, 2008, "RadRay metadata entry or bytecode range is invalid");

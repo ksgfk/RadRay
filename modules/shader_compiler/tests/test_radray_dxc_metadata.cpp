@@ -119,15 +119,18 @@ float4 PSMain() : SV_Target0 {
 )hlsl";
 
 constexpr std::string_view kMissingStaticSamplerSource = R"hlsl(
-[RootSignature("StaticSampler(s0, filter=FILTER_MIN_MAG_LINEAR_MIP_POINT)")]
+Texture2D<float4> ActiveTexture : register(t0);
+SamplerState MissingSampler : register(s0);
+
+[RootSignature("DescriptorTable(SRV(t0)), StaticSampler(s1, filter=FILTER_MIN_MAG_LINEAR_MIP_POINT)")]
 [shader("vertex")]
 float4 VSMain(float3 position : POSITION) : SV_Position {
-    return float4(position, 1.0);
+    return ActiveTexture.Load(int3(0, 0, 0)) + float4(position, 1.0);
 }
 
 [shader("pixel")]
 float4 PSMain() : SV_Target0 {
-    return float4(1.0, 1.0, 1.0, 1.0);
+    return ActiveTexture.SampleLevel(MissingSampler, float2(0.0, 0.0), 0.0);
 }
 )hlsl";
 
@@ -193,6 +196,26 @@ float4 VSMain(float3 position : POSITION) : SV_Position {
 }
 )hlsl";
 
+constexpr std::string_view kRootSignatureExactResourceSource = R"hlsl(
+Texture2D<float4> ActiveTexture : register(t0);
+
+[RootSignature("DescriptorTable(SRV(t0))")]
+[shader("vertex")]
+float4 VSMain(float3 position : POSITION) : SV_Position {
+    return ActiveTexture.Load(int3(0, 0, 0)) + float4(position, 1.0);
+}
+)hlsl";
+
+constexpr std::string_view kRootSignatureMissingResourceSource = R"hlsl(
+Texture2D<float4> ActiveTexture : register(t0);
+
+[RootSignature("DescriptorTable(SRV(t1))")]
+[shader("vertex")]
+float4 VSMain(float3 position : POSITION) : SV_Position {
+    return ActiveTexture.Load(int3(0, 0, 0)) + float4(position, 1.0);
+}
+)hlsl";
+
 constexpr std::string_view kStaticSamplerSuccessSource = R"hlsl(
 #include <core/platform.hlsli>
 
@@ -202,7 +225,7 @@ VK_BINDING(2, 4)
 SamplerState ColorSampler;
 
 #if !defined(__spirv__)
-[RootSignature("StaticSampler(s0, filter=FILTER_MIN_MAG_LINEAR_MIP_POINT)")]
+[RootSignature("DescriptorTable(SRV(t0)), StaticSampler(s0, filter=FILTER_MIN_MAG_LINEAR_MIP_POINT)")]
 #endif
 [shader("vertex")]
 float4 VSMain(float3 position : POSITION) : SV_Position {
@@ -258,6 +281,7 @@ TEST(RadRayDxcMetadata, ConcreteVariantReturnsAtomicTargetLanes) {
         EXPECT_NE(envelope.BytecodeDigest, shader::BytecodeHash{});
         EXPECT_NE(envelope.PipelineLayoutDigest, shader::PipelineLayoutHash{});
         EXPECT_EQ(envelope.BindingRecords.Size, 2u * sizeof(shader::WireBindingRecord));
+        EXPECT_EQ(envelope.RootSignature.Size, 0u);
     }
     for (size_t index = 0; index < result.Lanes.size(); ++index) {
         EXPECT_EQ(result.Lanes[index].Target, repeat.Lanes[index].Target);
@@ -422,6 +446,7 @@ TEST(RadRayDxcMetadata, RootAndPushConstantMetadataFacts) {
     ASSERT_EQ(rootResult.Lanes.size(), 1u);
     shader::WireMetadataEnvelope rootEnvelope{};
     std::memcpy(&rootEnvelope, rootResult.Lanes[0].Metadata.data(), sizeof(rootEnvelope));
+    EXPECT_GT(rootEnvelope.RootSignature.Size, 0u);
     ASSERT_EQ(rootEnvelope.RootConstantRecords.Size, 2u * sizeof(shader::WireRootConstantRecord));
     vector<shader::WireRootConstantRecord> roots(2);
     std::memcpy(
@@ -446,6 +471,7 @@ TEST(RadRayDxcMetadata, RootAndPushConstantMetadataFacts) {
     ASSERT_EQ(pushResult.Lanes.size(), 1u);
     shader::WireMetadataEnvelope pushEnvelope{};
     std::memcpy(&pushEnvelope, pushResult.Lanes[0].Metadata.data(), sizeof(pushEnvelope));
+    EXPECT_EQ(pushEnvelope.RootSignature.Size, 0u);
     ASSERT_EQ(pushEnvelope.RootConstantRecords.Size, sizeof(shader::WireRootConstantRecord));
     shader::WireRootConstantRecord push{};
     std::memcpy(
@@ -475,6 +501,7 @@ TEST(RadRayDxcMetadata, RootAndPushConstantMetadataFacts) {
     ASSERT_EQ(computeResult.Lanes.size(), 1u);
     shader::WireMetadataEnvelope computeEnvelope{};
     std::memcpy(&computeEnvelope, computeResult.Lanes[0].Metadata.data(), sizeof(computeEnvelope));
+    EXPECT_GT(computeEnvelope.RootSignature.Size, 0u);
     ASSERT_EQ(computeEnvelope.RootConstantRecords.Size, sizeof(shader::WireRootConstantRecord));
     shader::WireRootConstantRecord computeRoot{};
     std::memcpy(
@@ -524,7 +551,7 @@ TEST(RadRayDxcMetadata, StaticSamplerPolicyFailsClosed) {
     expectDiscoveryFailure("fixtures/conflicting_static_sampler.hlsl", kConflictingStaticSamplerSource);
 }
 
-TEST(RadRayDxcMetadata, ExplicitRootSignatureMustMatchActiveResourceUnion) {
+TEST(RadRayDxcMetadata, ExplicitRootSignatureAllowsStableSuperset) {
     Client client;
     ASSERT_TRUE(client.IsAvailable());
     const auto includePaths = ShaderIncludePaths();
@@ -542,6 +569,64 @@ TEST(RadRayDxcMetadata, ExplicitRootSignatureMustMatchActiveResourceUnion) {
         .Targets = shader::ShaderTargetMask::DXIL,
         .ExpectedContract = discovery.Contract.Hash},
         includePaths);
+    ASSERT_EQ(result.Status, shader::CompileStatus::Success)
+        << (result.Diagnostics.empty() ? "" : result.Diagnostics.back().Message);
+    ASSERT_EQ(result.Lanes.size(), 1u);
+    shader::WireMetadataEnvelope envelope{};
+    std::memcpy(&envelope, result.Lanes[0].Metadata.data(), sizeof(envelope));
+    EXPECT_GT(envelope.RootSignature.Size, 0u);
+    const byte rts0[] = {
+        static_cast<byte>('R'), static_cast<byte>('T'),
+        static_cast<byte>('S'), static_cast<byte>('0')};
+    EXPECT_EQ(
+        std::search(
+            result.Lanes[0].Bytecode.begin(),
+            result.Lanes[0].Bytecode.end(),
+            rts0,
+            rts0 + 4),
+        result.Lanes[0].Bytecode.end());
+
+    const auto exactDiscovery = client.DiscoverSourceContract(
+        "fixtures/root_signature_exact_resource.hlsl",
+        CopyBytes(kRootSignatureExactResourceSource),
+        shader::ShaderTarget::DXIL,
+        includePaths);
+    ASSERT_TRUE(exactDiscovery.Succeeded());
+    const auto exactResult = client.CompileVariant(shader::CompileVariantRequest{
+        .SourceName = "fixtures/root_signature_exact_resource.hlsl",
+        .RootSource = CopyBytes(kRootSignatureExactResourceSource),
+        .Defines = {},
+        .Assignments = {},
+        .Targets = shader::ShaderTargetMask::DXIL,
+        .ExpectedContract = exactDiscovery.Contract.Hash},
+        includePaths);
+    ASSERT_EQ(exactResult.Status, shader::CompileStatus::Success)
+        << (exactResult.Diagnostics.empty() ? "" : exactResult.Diagnostics.back().Message);
+    ASSERT_EQ(exactResult.Lanes.size(), 1u);
+    shader::WireMetadataEnvelope exactEnvelope{};
+    std::memcpy(&exactEnvelope, exactResult.Lanes[0].Metadata.data(), sizeof(exactEnvelope));
+    EXPECT_NE(exactEnvelope.PipelineLayoutDigest, envelope.PipelineLayoutDigest);
+    EXPECT_NE(exactEnvelope.GpuArtifact, envelope.GpuArtifact);
+}
+
+TEST(RadRayDxcMetadata, ExplicitRootSignatureMustCoverActiveResource) {
+    Client client;
+    ASSERT_TRUE(client.IsAvailable());
+    const auto includePaths = ShaderIncludePaths();
+    const auto discovery = client.DiscoverSourceContract(
+        "fixtures/root_signature_missing_resource.hlsl",
+        CopyBytes(kRootSignatureMissingResourceSource),
+        shader::ShaderTarget::DXIL,
+        includePaths);
+    ASSERT_TRUE(discovery.Succeeded());
+    const auto result = client.CompileVariant(shader::CompileVariantRequest{
+        .SourceName = "fixtures/root_signature_missing_resource.hlsl",
+        .RootSource = CopyBytes(kRootSignatureMissingResourceSource),
+        .Defines = {},
+        .Assignments = {},
+        .Targets = shader::ShaderTargetMask::DXIL,
+        .ExpectedContract = discovery.Contract.Hash},
+        includePaths);
     EXPECT_EQ(result.Status, shader::CompileStatus::TargetFailure);
     EXPECT_TRUE(result.Lanes.empty());
     const bool hasRootDiagnostic = std::any_of(
@@ -550,11 +635,6 @@ TEST(RadRayDxcMetadata, ExplicitRootSignatureMustMatchActiveResourceUnion) {
         [](const shader::CompileDiagnostic& diagnostic) noexcept {
             return diagnostic.Code == 2106;
         });
-    if (!hasRootDiagnostic) {
-        for (const shader::CompileDiagnostic& diagnostic : result.Diagnostics) {
-            ADD_FAILURE() << diagnostic.Code << ": " << diagnostic.Message;
-        }
-    }
     EXPECT_TRUE(hasRootDiagnostic);
 }
 
@@ -586,6 +666,11 @@ TEST(RadRayDxcMetadata, StaticSamplerIsTargetSpecificButImmutable) {
         shader::WireMetadataEnvelope envelope{};
         ASSERT_GE(lane.Metadata.size(), sizeof(envelope));
         std::memcpy(&envelope, lane.Metadata.data(), sizeof(envelope));
+        if (lane.Target == shader::ShaderTarget::DXIL) {
+            EXPECT_GT(envelope.RootSignature.Size, 0u);
+        } else {
+            EXPECT_EQ(envelope.RootSignature.Size, 0u);
+        }
         vector<shader::WireBindingRecord> bindings(
             envelope.BindingRecords.Size / sizeof(shader::WireBindingRecord));
         std::memcpy(
@@ -610,7 +695,8 @@ TEST(RadRayDxcMetadata, StaticSamplerIsTargetSpecificButImmutable) {
             }
             if (name == "ColorSampler") {
                 foundSampler = true;
-                EXPECT_NE(binding.Flags & 1u, 0u);
+                EXPECT_NE(binding.Flags & 1u, 0u)
+                    << "target=" << static_cast<uint32_t>(lane.Target);
             }
         }
         EXPECT_TRUE(foundTexture);

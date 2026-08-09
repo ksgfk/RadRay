@@ -14,6 +14,9 @@ std::optional<BackendPipelineLayoutInput> MakeBackendPipelineLayoutInputForTarge
     if (artifact.Envelope().Target != static_cast<uint8_t>(target)) {
         return std::nullopt;
     }
+    if (target == shader::ShaderTarget::SPIRV && !artifact.SerializedRootSignature().empty()) {
+        return std::nullopt;
+    }
     BackendPipelineLayoutInput result;
     static std::atomic<uint32_t> nextBindingGeneration{1};
     result.BindingGeneration = nextBindingGeneration.fetch_add(1, std::memory_order_relaxed);
@@ -75,6 +78,9 @@ std::optional<BackendPipelineLayoutInput> MakeBackendPipelineLayoutInputForTarge
     result.Descriptor = PipelineLayoutDescriptor{
         .ParameterSets = result.ParameterSets,
         .PushConstants = result.PushConstants};
+    const std::span<const byte> serializedRootSignature = artifact.SerializedRootSignature();
+    result.SerializedRootSignature.assign(
+        serializedRootSignature.begin(), serializedRootSignature.end());
     return result;
 }
 

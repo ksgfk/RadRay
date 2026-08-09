@@ -23,19 +23,72 @@ bool ValidateWireMetadataEnvelope(
     std::span<const byte> blob,
     ShaderTarget expectedTarget,
     const GpuArtifactHash& expectedGpuArtifact) noexcept {
+    struct LegacyWireMetadataEnvelope {
+        uint32_t Magic;
+        uint16_t SchemaVersion;
+        uint16_t HeaderSize;
+        uint32_t TotalSize;
+        uint8_t Target;
+        uint8_t StageMask;
+        uint16_t Flags;
+        WireBlobRange EntryRecords;
+        WireBlobRange BindingRecords;
+        WireBlobRange TypeRecords;
+        WireBlobRange RootConstantRecords;
+        WireBlobRange VertexInputRecords;
+        WireBlobRange Bytecode;
+        uint64_t ToolchainIdentity;
+        ContractHash Contract;
+        BytecodeHash BytecodeDigest;
+        PipelineLayoutHash PipelineLayoutDigest;
+        GpuArtifactHash GpuArtifact;
+    };
+    static_assert(sizeof(LegacyWireMetadataEnvelope) == 136);
+
+    if (blob.size() < sizeof(LegacyWireMetadataEnvelope)) {
+        return false;
+    }
+
+    uint32_t magic = 0;
+    uint16_t schema = 0;
+    std::memcpy(&magic, blob.data(), sizeof(magic));
+    std::memcpy(&schema, blob.data() + sizeof(magic), sizeof(schema));
+    if (magic != kShaderWireMagic ||
+        (schema != kShaderMetadataSchemaVersion &&
+         schema != kShaderLegacyMetadataSchemaVersion)) {
+        return false;
+    }
+    if (schema == kShaderLegacyMetadataSchemaVersion) {
+        LegacyWireMetadataEnvelope envelope{};
+        std::memcpy(&envelope, blob.data(), sizeof(envelope));
+        if (envelope.HeaderSize < sizeof(LegacyWireMetadataEnvelope) ||
+            envelope.TotalSize != blob.size() ||
+            envelope.Target != static_cast<uint8_t>(expectedTarget) ||
+            envelope.GpuArtifact != expectedGpuArtifact ||
+            envelope.HeaderSize > envelope.TotalSize ||
+            envelope.TotalSize > blob.size()) {
+            return false;
+        }
+        return envelope.EntryRecords.IsWithin(envelope.TotalSize) &&
+               envelope.BindingRecords.IsWithin(envelope.TotalSize) &&
+               envelope.TypeRecords.IsWithin(envelope.TotalSize) &&
+               envelope.RootConstantRecords.IsWithin(envelope.TotalSize) &&
+               envelope.VertexInputRecords.IsWithin(envelope.TotalSize) &&
+               envelope.Bytecode.IsWithin(envelope.TotalSize) && envelope.Bytecode.Size > 0;
+    }
+
     if (blob.size() < sizeof(WireMetadataEnvelope)) {
         return false;
     }
 
     WireMetadataEnvelope envelope{};
     std::memcpy(&envelope, blob.data(), sizeof(envelope));
-    if (envelope.Magic != kShaderWireMagic || envelope.SchemaVersion != kShaderMetadataSchemaVersion ||
-        envelope.HeaderSize < sizeof(WireMetadataEnvelope) || envelope.TotalSize != blob.size() ||
+    if (envelope.HeaderSize < sizeof(WireMetadataEnvelope) ||
+        envelope.TotalSize != blob.size() ||
         envelope.Target != static_cast<uint8_t>(expectedTarget) ||
-        envelope.GpuArtifact != expectedGpuArtifact) {
-        return false;
-    }
-    if (envelope.HeaderSize > envelope.TotalSize || envelope.TotalSize > blob.size()) {
+        envelope.GpuArtifact != expectedGpuArtifact ||
+        envelope.HeaderSize > envelope.TotalSize || envelope.TotalSize > blob.size() ||
+        (expectedTarget == ShaderTarget::SPIRV && envelope.RootSignature.Size != 0)) {
         return false;
     }
     return envelope.EntryRecords.IsWithin(envelope.TotalSize) &&
@@ -43,6 +96,7 @@ bool ValidateWireMetadataEnvelope(
            envelope.TypeRecords.IsWithin(envelope.TotalSize) &&
            envelope.RootConstantRecords.IsWithin(envelope.TotalSize) &&
            envelope.VertexInputRecords.IsWithin(envelope.TotalSize) &&
+           envelope.RootSignature.IsWithin(envelope.TotalSize) &&
            envelope.Bytecode.IsWithin(envelope.TotalSize) && envelope.Bytecode.Size > 0;
 }
 

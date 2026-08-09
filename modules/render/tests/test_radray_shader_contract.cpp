@@ -146,6 +146,13 @@ TEST(RadRayShaderContract, MetadataEnvelopeFailsClosed) {
         blob,
         shader::ShaderTarget::SPIRV,
         envelope.GpuArtifact));
+
+    auto truncatedCurrent = blob;
+    truncatedCurrent.resize(sizeof(shader::WireMetadataEnvelope) - 1);
+    EXPECT_FALSE(shader::ValidateWireMetadataEnvelope(
+        truncatedCurrent,
+        shader::ShaderTarget::DXIL,
+        envelope.GpuArtifact));
 }
 
 TEST(RadRayShaderContract, RawGoldenArtifactsAreVersionedAndTargetSpecific) {

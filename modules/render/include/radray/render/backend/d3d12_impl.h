@@ -363,6 +363,7 @@ public:
     Nullable<unique_ptr<FenceD3D12>> CreateFenceD3D12(uint64_t initValue) noexcept;
 
     Nullable<unique_ptr<RootSigD3D12>> CreateRootSignatureInternal(const BackendPipelineLayoutInput& input) noexcept;
+    Nullable<unique_ptr<RootSigD3D12>> CreateExplicitRootSignatureInternal(const BackendPipelineLayoutInput& input) noexcept;
 
     void TryDrainValidationMessages();
 
@@ -809,6 +810,29 @@ public:
 struct ShaderParameterBindingLayoutD3D12 {
     uint32_t DescriptorOffset{std::numeric_limits<uint32_t>::max()};
     uint32_t RootParameterIndex{std::numeric_limits<uint32_t>::max()};
+    struct DescriptorDestination {
+        uint32_t RootParameterIndex{std::numeric_limits<uint32_t>::max()};
+        uint32_t DescriptorOffset{std::numeric_limits<uint32_t>::max()};
+        uint32_t ArrayElement{std::numeric_limits<uint32_t>::max()};
+        uint32_t Reserved{0};
+
+        friend bool operator==(const DescriptorDestination&, const DescriptorDestination&) noexcept = default;
+    };
+    struct RootDescriptorDestination {
+        uint32_t RootParameterIndex{std::numeric_limits<uint32_t>::max()};
+        D3D12_ROOT_PARAMETER_TYPE Type{D3D12_ROOT_PARAMETER_TYPE_CBV};
+
+        friend bool operator==(const RootDescriptorDestination&, const RootDescriptorDestination&) noexcept = default;
+    };
+    vector<DescriptorDestination> DescriptorDestinations;
+    vector<RootDescriptorDestination> RootDescriptorDestinations;
+    vector<uint8_t> CoveredElements;
+};
+
+struct DescriptorTableBindingD3D12 {
+    uint32_t RootParameterIndex{std::numeric_limits<uint32_t>::max()};
+    uint32_t DescriptorOffset{0};
+    uint32_t DescriptorCount{0};
 };
 
 struct ShaderParameterGroupLayoutD3D12 {
@@ -819,11 +843,14 @@ struct ShaderParameterGroupLayoutD3D12 {
     uint32_t SamplerDescriptorCount{0};
     uint32_t ResourceTableRootParameter{std::numeric_limits<uint32_t>::max()};
     uint32_t SamplerTableRootParameter{std::numeric_limits<uint32_t>::max()};
+    vector<DescriptorTableBindingD3D12> ResourceTables;
+    vector<DescriptorTableBindingD3D12> SamplerTables;
 };
 
 struct PushConstantBindingD3D12 {
     ShaderBindingLocation Location{};
     uint32_t RootParameterIndex{std::numeric_limits<uint32_t>::max()};
+    vector<uint32_t> RootParameterIndices;
 };
 
 class RootSigD3D12 final : public PipelineLayout {
@@ -855,6 +882,11 @@ public:
     uint32_t _bindingGeneration{0};
     vector<PushConstantBindingD3D12> _pushConstantBindings;
     ComPtr<ID3D12RootSignature> _rootSig;
+    D3D12_ROOT_SIGNATURE_FLAGS _rootFlags{
+        D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT |
+        D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS |
+        D3D12_ROOT_SIGNATURE_FLAG_DENY_DOMAIN_SHADER_ROOT_ACCESS |
+        D3D12_ROOT_SIGNATURE_FLAG_DENY_GEOMETRY_SHADER_ROOT_ACCESS};
 };
 
 class ShaderParameterSetD3D12 final : public ShaderParameterSet {

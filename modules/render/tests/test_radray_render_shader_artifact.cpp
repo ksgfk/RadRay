@@ -578,6 +578,7 @@ TEST(RadRayRenderShaderArtifact, FailsClosedForIdentityAndWireCorruption) {
     envelope.Bytecode.Offset = envelope.TotalSize - 1;
     std::memcpy(badRange.data(), &envelope, sizeof(envelope));
     EXPECT_FALSE(decode(badRange).has_value());
+
 }
 
 TEST(RadRayRenderShaderArtifact, RejectsDuplicateAndMalformedRecords) {
@@ -592,6 +593,22 @@ TEST(RadRayRenderShaderArtifact, RejectsDuplicateAndMalformedRecords) {
     };
 
     shader::WireMetadataEnvelope envelope{};
+    std::memcpy(&envelope, original.data(), sizeof(envelope));
+    auto spirvRootSignature = original;
+    envelope.Target = static_cast<uint8_t>(shader::ShaderTarget::SPIRV);
+    envelope.GpuArtifact = ExpectedArtifact(0, shader::ShaderTarget::SPIRV);
+    envelope.RootSignature = envelope.Bytecode;
+    std::memcpy(spirvRootSignature.data(), &envelope, sizeof(envelope));
+    ShaderArtifactDecodeError rootError = ShaderArtifactDecodeError::None;
+    EXPECT_FALSE(DecodeShaderArtifact(
+                     spirvRootSignature,
+                     ShaderArtifactDecodeOptions{
+                         .Target = shader::ShaderTarget::SPIRV,
+                         .ExpectedGpuArtifact = ExpectedArtifact(0, shader::ShaderTarget::SPIRV)},
+                     &rootError)
+                     .has_value());
+    EXPECT_EQ(rootError, ShaderArtifactDecodeError::InvalidRootSignature);
+
     std::memcpy(&envelope, original.data(), sizeof(envelope));
     vector<shader::WireEntryRecord> entries(2);
     std::memcpy(

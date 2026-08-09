@@ -88,3 +88,4 @@ docs/adr/*.md
 | [0032](0032-discovery-include-validation-before-contract-scan.md) | discovery 先由 DXC 验证 include，再进行 root-only contract scan | 已被 ADR-0034 取代 |
 | [0033](0033-include-path-abi-view-validation.md) | include path ABI view 的编码与输入校验 | 生效 |
 | [0034](0034-clang-dxc-compiler-pipeline-is-the-only-shader-semantic-authority.md) | Clang/DXC compiler pipeline 是唯一 shader 语义权威 | 生效 |
+| [0035](0035-optional-explicit-dxil-root-signature-and-rhi-fallback.md) | Optional Explicit DXIL Root Signature 与 D3D12 RHI fallback | 生效 |

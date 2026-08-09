@@ -36,6 +36,13 @@ entry。entry 不能被条件编译包围，也不能让 graphics 与 compute �
 每个 keyword group 的 concrete compile request 必须选择一个合法值。普通 `Defines` 只用于
 不属于 keyword domain 的编译输入；不要用普通 define 覆盖 keyword group。
 
+`[RootSignature(...)]` 是可选的 DXIL-only policy。作者不写时，artifact 不携带 serialized Root
+Signature，D3D12 RHI 根据 active bindings 自动生成 layout；DXC 不在这条路径生成默认 RS。作者
+一旦在任一相关 entry 写了 `[RootSignature]`，graphics stages 必须使用逐字节一致且覆盖全部
+active resources 的合法 RS；额外的稳定 superset ranges/parameters/static samplers 可以保留。
+错误、跨 stage 冲突或未覆盖 active resource 会使编译失败；当前 D3D12 backend 不支持的 RS
+形状会使 explicit layout 创建失败；两者都不会回退到自动生成。
+
 ## Binding 与 target gate
 
 新 pass 的 binding 只通过 `core/platform.hlsli` 的 gate 宏书写：

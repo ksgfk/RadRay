@@ -24,6 +24,7 @@ enum class ShaderArtifactDecodeError : uint32_t {
     InvalidTypeRecord,
     InvalidRootConstant,
     InvalidVertexInput,
+    InvalidRootSignature,
 };
 
 struct ShaderArtifactDecodeOptions {
@@ -51,6 +52,7 @@ public:
     std::span<const WireVertexInputRecord> VertexInputs() const noexcept {
         return _vertexInputs;
     }
+    std::span<const byte> SerializedRootSignature() const noexcept;
     std::span<const byte> Bytecode() const noexcept;
 
     std::optional<std::string_view> GetName(WireBlobRange range) const noexcept;

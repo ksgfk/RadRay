@@ -160,7 +160,39 @@ bool ValidateVertexInputRecords(const ShaderArtifactView& artifact) noexcept {
     return true;
 }
 
+struct LegacyWireMetadataEnvelope {
+    uint32_t Magic;
+    uint16_t SchemaVersion;
+    uint16_t HeaderSize;
+    uint32_t TotalSize;
+    uint8_t Target;
+    uint8_t StageMask;
+    uint16_t Flags;
+    WireBlobRange EntryRecords;
+    WireBlobRange BindingRecords;
+    WireBlobRange TypeRecords;
+    WireBlobRange RootConstantRecords;
+    WireBlobRange VertexInputRecords;
+    WireBlobRange Bytecode;
+    uint64_t ToolchainIdentity;
+    ContractHash Contract;
+    BytecodeHash BytecodeDigest;
+    PipelineLayoutHash PipelineLayoutDigest;
+    GpuArtifactHash GpuArtifact;
+};
+
+static_assert(sizeof(LegacyWireMetadataEnvelope) == 136);
+
 }  // namespace
+
+std::span<const byte> ShaderArtifactView::SerializedRootSignature() const noexcept {
+    if (_envelope.RootSignature.Size == 0) {
+        return {};
+    }
+    return std::span<const byte>{_blob}.subspan(
+        _envelope.RootSignature.Offset,
+        _envelope.RootSignature.Size);
+}
 
 std::span<const byte> ShaderArtifactView::Bytecode() const noexcept {
     return std::span<const byte>{_blob}.subspan(_envelope.Bytecode.Offset, _envelope.Bytecode.Size);
@@ -190,20 +222,55 @@ std::optional<ShaderArtifactView> DecodeShaderArtifact(
     const ShaderArtifactDecodeOptions& options,
     ShaderArtifactDecodeError* error) noexcept {
     SetError(error, ShaderArtifactDecodeError::None);
-    if (blob.size() < sizeof(WireMetadataEnvelope)) {
+    if (blob.size() < sizeof(LegacyWireMetadataEnvelope)) {
         SetError(error, ShaderArtifactDecodeError::TruncatedEnvelope);
         return std::nullopt;
     }
 
     ShaderArtifactView result;
-    std::memcpy(&result._envelope, blob.data(), sizeof(result._envelope));
-    const WireMetadataEnvelope& envelope = result._envelope;
-    if (!ValidateWireMetadataEnvelope(blob, options.Target, options.ExpectedGpuArtifact)) {
-        SetError(error, ShaderArtifactDecodeError::InvalidEnvelope);
-        return std::nullopt;
+    uint16_t schema = 0;
+    std::memcpy(&schema, blob.data() + sizeof(uint32_t), sizeof(schema));
+    if (schema == kShaderLegacyMetadataSchemaVersion) {
+        LegacyWireMetadataEnvelope legacy{};
+        std::memcpy(&legacy, blob.data(), sizeof(legacy));
+        result._envelope = {};
+        result._envelope.Magic = legacy.Magic;
+        result._envelope.SchemaVersion = legacy.SchemaVersion;
+        result._envelope.HeaderSize = legacy.HeaderSize;
+        result._envelope.TotalSize = legacy.TotalSize;
+        result._envelope.Target = legacy.Target;
+        result._envelope.StageMask = legacy.StageMask;
+        result._envelope.Flags = legacy.Flags;
+        result._envelope.EntryRecords = legacy.EntryRecords;
+        result._envelope.BindingRecords = legacy.BindingRecords;
+        result._envelope.TypeRecords = legacy.TypeRecords;
+        result._envelope.RootConstantRecords = legacy.RootConstantRecords;
+        result._envelope.VertexInputRecords = legacy.VertexInputRecords;
+        result._envelope.Bytecode = legacy.Bytecode;
+        result._envelope.ToolchainIdentity = legacy.ToolchainIdentity;
+        result._envelope.Contract = legacy.Contract;
+        result._envelope.BytecodeDigest = legacy.BytecodeDigest;
+        result._envelope.PipelineLayoutDigest = legacy.PipelineLayoutDigest;
+        result._envelope.GpuArtifact = legacy.GpuArtifact;
+    } else {
+        if (blob.size() < sizeof(WireMetadataEnvelope)) {
+            SetError(error, ShaderArtifactDecodeError::TruncatedEnvelope);
+            return std::nullopt;
+        }
+        std::memcpy(&result._envelope, blob.data(), sizeof(result._envelope));
     }
+    const WireMetadataEnvelope& envelope = result._envelope;
     if (envelope.Target > static_cast<uint8_t>(ShaderTarget::SPIRV)) {
         SetError(error, ShaderArtifactDecodeError::InvalidTarget);
+        return std::nullopt;
+    }
+    if (envelope.Target == static_cast<uint8_t>(ShaderTarget::SPIRV) &&
+        envelope.RootSignature.Size != 0) {
+        SetError(error, ShaderArtifactDecodeError::InvalidRootSignature);
+        return std::nullopt;
+    }
+    if (!ValidateWireMetadataEnvelope(blob, options.Target, options.ExpectedGpuArtifact)) {
+        SetError(error, ShaderArtifactDecodeError::InvalidEnvelope);
         return std::nullopt;
     }
     if (options.ExpectedToolchainIdentity != 0 &&
@@ -211,33 +278,49 @@ std::optional<ShaderArtifactView> DecodeShaderArtifact(
         SetError(error, ShaderArtifactDecodeError::ToolchainMismatch);
         return std::nullopt;
     }
-    if (envelope.HeaderSize != sizeof(WireMetadataEnvelope) ||
+    result._blob.assign(blob.begin(), blob.end());
+    const uint32_t expectedHeaderSize = schema == kShaderLegacyMetadataSchemaVersion
+                                            ? sizeof(LegacyWireMetadataEnvelope)
+                                            : sizeof(WireMetadataEnvelope);
+    if (envelope.HeaderSize != expectedHeaderSize ||
         !IsRangeAfterHeader(envelope.EntryRecords, envelope.HeaderSize) ||
         !IsRangeAfterHeader(envelope.BindingRecords, envelope.HeaderSize) ||
         !IsRangeAfterHeader(envelope.TypeRecords, envelope.HeaderSize) ||
         !IsRangeAfterHeader(envelope.RootConstantRecords, envelope.HeaderSize) ||
         !IsRangeAfterHeader(envelope.VertexInputRecords, envelope.HeaderSize) ||
+        !IsRangeAfterHeader(envelope.RootSignature, envelope.HeaderSize) ||
         !IsRangeAfterHeader(envelope.Bytecode, envelope.HeaderSize) ||
         RangesOverlap(envelope.EntryRecords, envelope.BindingRecords) ||
         RangesOverlap(envelope.EntryRecords, envelope.TypeRecords) ||
         RangesOverlap(envelope.EntryRecords, envelope.RootConstantRecords) ||
         RangesOverlap(envelope.EntryRecords, envelope.VertexInputRecords) ||
+        RangesOverlap(envelope.EntryRecords, envelope.RootSignature) ||
         RangesOverlap(envelope.EntryRecords, envelope.Bytecode) ||
         RangesOverlap(envelope.BindingRecords, envelope.TypeRecords) ||
         RangesOverlap(envelope.BindingRecords, envelope.RootConstantRecords) ||
         RangesOverlap(envelope.BindingRecords, envelope.VertexInputRecords) ||
+        RangesOverlap(envelope.BindingRecords, envelope.RootSignature) ||
         RangesOverlap(envelope.BindingRecords, envelope.Bytecode) ||
         RangesOverlap(envelope.TypeRecords, envelope.RootConstantRecords) ||
         RangesOverlap(envelope.TypeRecords, envelope.VertexInputRecords) ||
+        RangesOverlap(envelope.TypeRecords, envelope.RootSignature) ||
         RangesOverlap(envelope.TypeRecords, envelope.Bytecode) ||
         RangesOverlap(envelope.RootConstantRecords, envelope.VertexInputRecords) ||
+        RangesOverlap(envelope.RootConstantRecords, envelope.RootSignature) ||
         RangesOverlap(envelope.RootConstantRecords, envelope.Bytecode) ||
-        RangesOverlap(envelope.VertexInputRecords, envelope.Bytecode)) {
+        RangesOverlap(envelope.VertexInputRecords, envelope.RootSignature) ||
+        RangesOverlap(envelope.VertexInputRecords, envelope.Bytecode) ||
+        RangesOverlap(envelope.RootSignature, envelope.Bytecode)) {
         SetError(error, ShaderArtifactDecodeError::InvalidRecordRange);
         return std::nullopt;
     }
+    if (envelope.RootSignature.Size != 0 &&
+        (!envelope.RootSignature.IsWithin(static_cast<uint32_t>(blob.size())) ||
+         envelope.RootSignature.Offset < envelope.HeaderSize)) {
+        SetError(error, ShaderArtifactDecodeError::InvalidRootSignature);
+        return std::nullopt;
+    }
 
-    result._blob.assign(blob.begin(), blob.end());
     if (!CopyRecords(blob, envelope.EntryRecords, result._entries) ||
         !CopyRecords(blob, envelope.BindingRecords, result._bindings) ||
         !CopyRecords(blob, envelope.TypeRecords, result._types) ||

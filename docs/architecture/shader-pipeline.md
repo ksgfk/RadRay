@@ -43,11 +43,23 @@ DXIL 与 SPIR-V 的 binding 数字不要求相等。DXIL 使用 `register`/`spac
 namespace；decoder 的 duplicate policy 与 backend lookup 都保留这个 namespace。`VK_LOCATION`
 与 `VK_PUSH_CONSTANT` 遵守相同规则。
 
+HLSL `[RootSignature(...)]` 是可选的 DXIL-only authoring policy。相关 entry 全部未声明时，DXIL
+artifact 的 `RootSignature` range 为空，D3D12 根据 active binding metadata 走自己的 implicit
+layout generator；DXC 不生成这条 fallback。任一相关 entry 声明后，DXC 必须输出有效的 serialized
+Root Signature；graphics 的非空 stage outputs 必须逐字节相同，且 explicit signature 覆盖所有
+active resources，允许保留当前 variant 未使用的合法 superset parameters/ranges/static samplers。
+Malformed、跨 stage 不一致或未覆盖 active resource 都是 compile failure，不会悄悄回退到
+implicit；D3D12 backend 不支持的合法 RS 形状则在 explicit layout 创建时 fail closed，同样不
+回退到 implicit。
+
 ## Artifact wire
 
 每个 lane 返回独立 bytecode 与 compiler-owned metadata blob。metadata envelope 固定 magic、
 schema、target、toolchain identity、contract、bytecode/layout/gpu artifact hashes 和各 payload range；payload 记录
-entry、active binding、type tree、root/push constants 与 bytecode range。
+entry、active binding、type tree、root/push constants、可选 DXIL serialized Root Signature 与
+bytecode range。Explicit range 原样保存 DXC 的 `DXC_OUT_ROOT_SIGNATURE` carrier；最终 DXIL
+object 通过 `-Qstrip_rootsignature` 去掉嵌入的 `RTS0`，artifact 只保留这一份 lane-level carrier。
+SPIR-V 的 Root Signature range 始终为空。
 
 `radrayshader` 只做 wire safety 检查和 target-specific decode；它不链接 DXC，也不依赖
 `radrayrender`。调用方提供独立可信的 `ExpectedGpuArtifact`，decoder 与 envelope 比较但不在

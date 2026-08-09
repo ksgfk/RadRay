@@ -17,8 +17,9 @@ inline constexpr uint32_t kShaderDiscoveryWireMagic = 0x44524452u;  // "RDRD" in
 inline constexpr uint16_t kShaderDiscoveryWireSchemaVersion = 3;
 inline constexpr uint32_t kShaderContractWireMagic = 0x54434452u;  // "RDCT" in little-endian bytes.
 inline constexpr uint16_t kShaderContractWireSchemaVersion = 1;
-inline constexpr uint16_t kShaderCompilerAbiVersion = 2;
-inline constexpr uint16_t kShaderMetadataSchemaVersion = 4;
+inline constexpr uint16_t kShaderCompilerAbiVersion = 3;
+inline constexpr uint16_t kShaderLegacyMetadataSchemaVersion = 4;
+inline constexpr uint16_t kShaderMetadataSchemaVersion = 5;
 inline constexpr uint32_t kShaderNoType = 0xffffffffu;
 
 enum class ShaderTarget : uint8_t {
@@ -124,8 +125,8 @@ inline constexpr uint32_t GetWireBindingNamespace(uint32_t type) noexcept {
 struct WireMetadataEnvelope {
     uint32_t Magic{kShaderWireMagic};
     uint16_t SchemaVersion{kShaderMetadataSchemaVersion};
-    uint16_t HeaderSize{136};
-    uint32_t TotalSize{136};
+    uint16_t HeaderSize{144};
+    uint32_t TotalSize{144};
     uint8_t Target{static_cast<uint8_t>(ShaderTarget::DXIL)};
     uint8_t StageMask{0};
     uint16_t Flags{0};
@@ -134,6 +135,7 @@ struct WireMetadataEnvelope {
     WireBlobRange TypeRecords{};
     WireBlobRange RootConstantRecords{};
     WireBlobRange VertexInputRecords{};
+    WireBlobRange RootSignature{};
     WireBlobRange Bytecode{};
     uint64_t ToolchainIdentity{0};
     ContractHash Contract{};
@@ -199,7 +201,7 @@ struct WireVertexInputRecord {
 };
 
 static_assert(sizeof(WireBlobRange) == 8);
-static_assert(sizeof(WireMetadataEnvelope) == 136);
+static_assert(sizeof(WireMetadataEnvelope) == 144);
 static_assert(sizeof(WireEntryRecord) == 24);
 static_assert(sizeof(WireBindingRecord) == 32);
 static_assert(sizeof(WireTypeRecord) == 40);

@@ -80,6 +80,7 @@ struct BackendPipelineLayoutInput {
     vector<ShaderParameterSetLayoutDescriptor> ParameterSets;
     vector<BackendBindingName> BindingNames;
     vector<PushConstantDescriptor> PushConstants;
+    vector<byte> SerializedRootSignature;
     uint32_t BindingGeneration{0};
     PipelineLayoutDescriptor Descriptor{};
 };

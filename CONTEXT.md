@@ -265,12 +265,32 @@ SPIR-V 以 `[[vk::binding(...)]]` / `[[vk::push_constant]]` 为真相。RadRay �
 attribute，也不要求两套数字相等。同一资源在同一 target 的不同 Variant 中保持 binding
 稳定，只会处于 active 或 inactive；compiler 负责验证并输出当前 artifact 的 active subset。
 
-**DXIL Root Signature contract**:
-DXIL 直接复用 HLSL `[RootSignature(...)]` 作为 descriptor table、root descriptor、root
-constant、static sampler 与 visibility 的声明真相。forked DXC 在 compiler 内按当前 Variant
-所有 active stage 的资源并集投影出精确 Root Signature，移除 inactive parameter/range；不新增
-RadRay residency attribute。graphics Pass 的 stage entries 必须解析为同一份 Root Signature，
-否则编译失败。
+**Explicit DXIL Root Signature**:
+HLSL 作者通过 `[RootSignature(...)]` 声明的 DXIL binding policy，包括 descriptor table、root
+descriptor、root constants、static sampler、parameter order、visibility 与 flags。forked DXC
+校验并把它的 serialized form 作为 optional DXIL artifact range 发布；D3D12 RHI 直接消费该 blob，
+不得根据 binding metadata 重建或改写作者 policy。只要任一相关 entry 声明了 Explicit DXIL Root
+Signature，malformed、跨 stage 冲突或与 active resources 不兼容都必须编译失败，不能改走
+Implicit fallback。Explicit RS 可以是跨 Variant 稳定的 declared superset：必须覆盖当前 Variant
+全部 active resources，但允许保留当前 Variant 未使用的合法 parameters、ranges 与 static samplers；
+compiler 和 backend 都不得为了 exact active subset 裁剪或重写作者 serialized blob。
+_Avoid_: authored layout, manual Root Signature
+
+**Implicit D3D12 Root Signature**:
+DXIL Variant 未选择 Explicit DXIL Root Signature 时，由 D3D12 RHI 按 backend fallback policy 从
+artifact 的 active binding metadata 生成的 Root Signature。此时 DXIL artifact 的 serialized Root
+Signature range 为空；forked DXC 不实现或发布默认 Root Signature。当前 fallback 使用 descriptor
+tables，不推断 root descriptor、RootConstants 或 static sampler。
+_Avoid_: Generated DXIL Root Signature, compiler-generated Root Signature
+
+**Root Signature source**:
+一个 DXIL Variant 在 D3D12 创建 pipeline layout 时采用的互斥来源。`Explicit` 表示 artifact 带有
+作者声明的非空 serialized Root Signature range；该 range 原样保存完整
+`DXC_OUT_ROOT_SIGNATURE` 独立 container，不抽取或重新包装 `RTS0`。`Implicit` 表示该 range
+为空，由 D3D12 RHI 根据 active binding metadata 生成 Root Signature。wire 不另存重复的 source
+enum；range presence 唯一决定 source。source 不改变 binding facts 的 compiler authority，但明确
+区分作者 policy 与 backend fallback policy。
+_Avoid_: Root Signature provenance, Canonical DXIL Root Signature
 
 **Target-specific inline constants**:
 SPIR-V target 遵守 DXC/Vulkan 规则，每个 shader source 最多一个 active
@@ -283,8 +303,10 @@ declaration 关联。两 target 的数量、位置、名称与 byte layout 不�
 **RootSignature target scope**:
 HLSL `[RootSignature(...)]` 只属于 DXIL lane；可以在 `__spirv__` 条件下排除。SPIR-V layout
 完全由标准 `vk::binding` / `vk::push_constant` 与 SPIR-V compiler output 决定，不要求存在等价
-RootSignature 字符串或跨 target 的 descriptor/push-constant projection。DXIL graphics entries
-仍必须解析为同一份 variant-projected RootSignature，compute entry 单独解析自己的版本。
+RootSignature 字符串或跨 target 的 descriptor/push-constant projection。DXIL graphics Variant 中
+任一 entry 携带 Explicit DXIL Root Signature 即选择 explicit mode，其他 entry 可以省略 attribute；
+多个非空 stage payload 必须一致。全部 entries 都没有显式 RS 时选择 Implicit source，artifact 的
+serialized RS range 为空并由 D3D12 RHI 生成 Root Signature；compute entry 独立选择自己的 source。
 
 **Static sampler bridge**:
 compiler 从 DXIL Root Signature 解析 static sampler，与同一 HLSL `SamplerState` declaration
@@ -399,11 +421,38 @@ expected hash 做相等比较，但不在 RadRay 侧重算 hash，也不把该�
 输入进入 hash；它们只有在改变 canonical contract facts 时才间接改变 hash。include 是
 filesystem-backed compilation 在调用时读取的外部源码依赖。每个 target lane 的 `BytecodeHash` 覆盖完整 target bytecode，
 `PipelineLayoutHash` 覆盖 canonical target-native GPU layout records，`GpuArtifactHash` 覆盖 bytecode
-与 GPU layout metadata；这些是 compiler output identity，不是输入或缓存失效标识。
+与 GPU layout metadata。Explicit DXIL Root Signature 使用 DXC 已从 serialized `RTS0` payload 计算的
+`RootSignatureHash` 作为一项 layout record进入 `PipelineLayoutHash`；完整
+`DXC_OUT_ROOT_SIGNATURE` carrier container不直接进入 compiler hash。Implicit source没有
+compiler-produced RS semantics，其 layout hash只覆盖 active binding metadata并使用独立 domain。
+这些是 compiler output identity，不是输入或缓存失效标识。
 三者使用统一的 128 位固定字节序表示；`PipelineLayoutHash` 只作为 artifact metadata 中的可比较
 身份，runtime 不重算也不以它建立共享缓存。第一期不定义 `ArtifactContentHash`、content-address
 publisher 或 `CpuSchemaHash`。compiler 输出的 type tree
 不作为独立 hash 输入，也不独立缓存、寻址或兼容性校验。`AssetId` / `PassName` 不进入任何 compiler hash。
+
+**Root Signature artifact coalescing**:
+一次 DXIL lane最多发布一份 optional Explicit Root Signature range。graphics各 stage 的非空
+`DXC_OUT_ROOT_SIGNATURE` outputs必须逐字节相同，lane merge只保留其中一份；compute最多有一份。
+最终 artifact对Explicit stage DXIL启用 `-Qstrip_rootsignature`，不再在各 bytecode中重复内嵌
+`RTS0`；实施中允许先保留 embedded RS完成direct-consumption GPU parity gate，再原子切换并断代
+bytecode/artifact goldens。
+本契约不定义跨 artifact/package 的 RS content table，也不定义 runtime `PipelineLayout` 或
+`ID3D12RootSignature` cache；这些上层共享策略不属于 compiler artifact cutover。
+_Avoid_: Root Signature cache（本术语只描述 artifact内合并）
+
+**Root binding fan-out**:
+一个 active DXIL declaration在 Explicit global Root Signature 中按互不重叠的 shader visibility映射到
+多个合法 root locations。artifact-local `BindingHandle` 仍表示一个 shader declaration；D3D12 CPU
+binding plan把一次 value write展开到全部 destinations，例如同时写 vertex-visible和pixel-visible的
+两个 root CBV parameters。visibility重叠的 register overlap仍由 DXC validation拒绝。
+_Avoid_: duplicate binding（合法 fan-out不是重复声明错误）
+
+**Unsupported Root Signature architecture**:
+当前 ordinary graphics/compute contract不接受 DXR `LOCAL_ROOT_SIGNATURE`，也不接受 SM 6.6
+`CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED` / `SAMPLER_HEAP_DIRECTLY_INDEXED`。前者依赖 DXR state object、
+shader record与SBT，后者依赖独立的跨后端 bindless heap/index生命周期模型；它们不是普通 Explicit
+global Root Signature direct-consumption 的附带能力。
 
 **Runtime CPU type schema**:
 compiler 为每个 target result 输出 runtime 构造 CPU buffer data 所需的完整 target-native
@@ -421,8 +470,9 @@ tree。runtime 只检查 type tree 的 wire bounds、record kind、offset/size�
 _Avoid_: descriptor set, register space, space, table
 
 **Residency**:
-一个绑定是经 descriptor table 访问，还是作为 root descriptor 直接绑定。属于性能决策，
-不是 shader 的属性。
+一个 DXIL binding 经 descriptor table 访问，还是作为 root descriptor 直接绑定的 layout policy。
+Explicit DXIL Root Signature 可由作者选择；Implicit D3D12 Root Signature 的当前 fallback 统一使用
+descriptor table。
 _Avoid_: binding mode, access path
 
 **Artifact**:

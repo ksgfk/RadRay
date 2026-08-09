@@ -697,6 +697,48 @@ TEST(RadRayRuntimeShaderJit, D3D12) {
 #endif
 }
 
+TEST(RadRayRuntimeShaderJit, ExplicitRootSignatureD3D12) {
+#if defined(RADRAY_ENABLE_D3D12)
+    render::test::DeviceContext context;
+    if (!render::test::TryCreateDevice(render::RenderBackend::D3D12, context)) {
+        GTEST_SKIP() << "D3D12 is unavailable on this machine";
+    }
+
+    ShaderJit jit{ShaderIncludePaths()};
+    ASSERT_TRUE(jit.IsAvailable());
+    const string sourceName = "fixtures/shadow_static_sampler.hlsl";
+    const vector<byte> source = ReadBytes(
+        std::filesystem::path{RADRAY_PROJECT_DIR} /
+        "modules/render/tests/data/shader_sources/shadow_static_sampler.hlsl");
+    ASSERT_FALSE(source.empty());
+    const auto contract = jit.DiscoverContractHash(sourceName, source, shader::ShaderTarget::DXIL);
+    ASSERT_TRUE(contract.has_value());
+    const auto artifact = jit.Compile(
+        shader::CompileVariantRequest{
+            .SourceName = sourceName,
+            .RootSource = source,
+            .Defines = {},
+            .Assignments = {},
+            .Targets = shader::ShaderTargetMask::DXIL,
+            .ExpectedContract = contract.value()},
+        shader::ShaderTarget::DXIL);
+    ASSERT_TRUE(artifact.has_value());
+    shader::ShaderArtifactDecodeError error = shader::ShaderArtifactDecodeError::None;
+    const auto typed = shader::DecodeDxilShaderArtifact(
+        artifact->Metadata,
+        shader::ShaderArtifactDecodeOptions{
+            .Target = shader::ShaderTarget::DXIL,
+            .ExpectedGpuArtifact = artifact->ExpectedGpuArtifact},
+        &error);
+    ASSERT_TRUE(typed.has_value()) << static_cast<uint32_t>(error);
+    EXPECT_FALSE(typed->Generic().SerializedRootSignature().empty());
+    auto layout = CreateD3DLayout(*context.Device, typed.value());
+    ASSERT_TRUE(layout.HasValue());
+#else
+    GTEST_SKIP() << "D3D12 is disabled";
+#endif
+}
+
 TEST(RadRayRuntimeShaderJit, Vulkan) {
 #if defined(RADRAY_ENABLE_VULKAN)
     render::test::DeviceContext context;

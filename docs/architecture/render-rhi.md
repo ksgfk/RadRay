@@ -63,10 +63,19 @@ SPIR-V artifact 只能交给 Vulkan overload。backend-only 的 layout input 由
 
 | | D3D12 | Vulkan |
 |---|---|---|
-| 每个 Group | 两个描述符表 root parameter（resource 表 + sampler 表） | 一个 `VkDescriptorSetLayout` |
+| Implicit 每个 Group | 两个描述符表 root parameter（resource 表 + sampler 表） | 一个 `VkDescriptorSetLayout` |
+| Explicit DXIL | 原样消费 artifact serialized Root Signature；CPU plan 按 parameter/range 映射 binding | 不消费 DXIL Root Signature |
 | `Dynamic*` 类型 | root CBV/SRV/UAV，bind 时按 `dynamicOffsets` 设 | 动态 uniform/storage buffer |
 | push constant | `32BIT_CONSTANTS` root parameter | `VkPushConstantRange` |
 | 上限校验 | 无 | 有（`maxDescriptorSet*` / `maxPerStage*`） |
+
+DXIL artifact 的 serialized Root Signature range 非空时，D3D12 直接把同一 carrier 传给
+`ID3D12Device::CreateRootSignature`，并用 `D3D12CreateVersionedRootSignatureDeserializer`
+建立 descriptor table、root descriptor、RootConstants 与 static sampler 的 CPU binding plan。
+此路径不根据 active metadata 重建作者 RS；当前 contract 拒绝 local root signature、directly-indexed
+heaps、无法覆盖 active binding 或 visibility 不足的形状。range 为空时才使用上表的 implicit
+generator。每个 artifact 内重复的 stage RS 已在 compiler lane merge 时合并；runtime 不新增
+跨 artifact Root Signature cache。
 
 **`Set` 只记脏值，`FlushWrites()` 才写描述符。** D3D12 把值写进预分配的 GPU 堆区间；
 Vulkan 构造 `VkWriteDescriptorSet` 数组，并按需惰性建 `VkBufferView` 承载 texel buffer。
