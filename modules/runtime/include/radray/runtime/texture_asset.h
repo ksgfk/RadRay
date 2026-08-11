@@ -96,6 +96,16 @@ struct TextureAssetLoadOptions {
     ImageData FallbackImage{};
 };
 
+/// 不提交 slot 的 payload task，供 Bundle loader 复用。FrameUploadScheduler 由 AssetManager
+/// 通过 GpuSystem 服务装配。
+task<AssetLoadResult> LoadTextureAssetPayloadFromMemory(
+    FrameUploadScheduler& frameUploads,
+    string name,
+    vector<byte> encodedBytes,
+    const TextureAssetLoadOptions& options = {});
+
+task<AssetLoadResult> LoadTextureAssetBundle(AssetManager& manager, BundleAssetLoadData data);
+
 /// 从已解码的 CPU 像素(ImageData)创建 GPU 贴图。协程内部 co_await 帧顶 upload phase
 /// 录制上传,再等 GPU fence,完成后一次性构造 TextureAsset。
 StreamingAssetRef<TextureAsset> LoadTextureAssetFromImage(

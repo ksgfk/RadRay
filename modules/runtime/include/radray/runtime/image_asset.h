@@ -40,16 +40,14 @@ ImageData ConvertToRGBA8(const ImageData& src);
 /// 供不走 ImageAsset 的调用方(如 glTF 加载协程直接解码后上传 GPU)复用。
 std::optional<ImageData> DecodeImageBytes(std::span<const byte> encoded);
 
-StreamingAssetRef<ImageAsset> LoadImageAsset(
-    AssetManager& assetManager,
-    const std::filesystem::path& path,
+/// 仅负责读取/解码一个 payload，不提交 AssetManager slot。Bundle loader 通过它创建自有
+/// task；持久身份只能来自 Catalog 的显式 AssetId。
+task<AssetLoadResult> LoadImageAssetPayload(
+    std::filesystem::path path,
     const ImageAssetLoadOptions& options = {});
 
-StreamingAssetRef<ImageAsset> LoadImageAsset(
-    AssetManager& assetManager,
-    const AssetId& assetId,
-    const std::filesystem::path& path,
-    const ImageAssetLoadOptions& options = {});
+/// Bundle 安全快照 loader。它不保存 Catalog entry 或 BundleRef。
+task<AssetLoadResult> LoadImageAssetBundle(AssetManager& manager, BundleAssetLoadData data);
 
 StreamingAssetRef<ImageAsset> LoadImageAssetFromMemory(
     AssetManager& assetManager,

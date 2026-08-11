@@ -2,6 +2,8 @@
 
 #include <fmt/format.h>
 
+#include <radray/file.h>
+#include <radray/runtime/asset_bundle_descriptors.h>
 #include <radray/logger.h>
 #include <radray/runtime/gpu_system.h>
 #include <radray/runtime/image_asset.h>
@@ -140,6 +142,42 @@ task<AssetLoadResult> LoadTextureFromMemoryTask(
 }
 
 }  // namespace
+
+task<AssetLoadResult> LoadTextureAssetPayloadFromMemory(
+    FrameUploadScheduler& frameUploads,
+    string name,
+    vector<byte> encodedBytes,
+    const TextureAssetLoadOptions& options) {
+    co_return co_await LoadTextureFromMemoryTask(
+        frameUploads, std::move(name), std::move(encodedBytes), options);
+}
+
+task<AssetLoadResult> LoadTextureAssetBundle(AssetManager& manager, BundleAssetLoadData data) {
+    const auto* descriptor = dynamic_cast<const TextureAssetDescriptor*>(data.Entry.Descriptor.get());
+    if (descriptor == nullptr || !data.Entry.Locator.has_value()) {
+        co_return AssetLoadResult::Failure(
+            AssetLoadErrorCode::InvalidDescriptor,
+            "TextureAsset Bundle descriptor is missing its locator");
+    }
+    const string name = data.Entry.Locator->GetValue();
+    const std::filesystem::path path = data.Root / std::filesystem::path{name};
+    std::optional<vector<byte>> encoded = ReadBinaryFile(path);
+    if (!encoded.has_value()) {
+        co_return AssetLoadResult::Failure(
+            AssetLoadErrorCode::PayloadFailure,
+            "TextureAsset payload file could not be read");
+    }
+    Nullable<FrameUploadScheduler*> frameUploads = manager.GetFrameUploadScheduler();
+    if (!frameUploads) {
+        co_return AssetLoadResult::Failure(
+            AssetLoadErrorCode::CapabilityUnavailable,
+            "TextureAsset requires a wired FrameUploadScheduler");
+    }
+    TextureAssetLoadOptions options;
+    options.Srgb = descriptor->Srgb;
+    co_return co_await LoadTextureAssetPayloadFromMemory(
+        *frameUploads, name, std::move(*encoded), options);
+}
 
 TextureAsset::TextureAsset(
     render::Device* device,

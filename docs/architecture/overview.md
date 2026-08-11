@@ -39,7 +39,7 @@ RadRay 是 C++20 实时渲染器，当前支持 Windows 下的 D3D12 与 Vulkan 
 | `radraywindow` | 窗口、输入和平台事件 | `guide/dev-env.md` |
 | `radrayshadercompiler` | 可选 source-contract discovery 与 DXC boundary client；依赖 shader 与 core，不拥有 render/runtime | `docs/todo/hlsl-radray-dxc-shader-pipeline.md`, `docs/todo/filesystem-backed-shader-include-correction.md`, `docs/todo/radray-dxc-frontend-semantic-migration.md` |
 | `radrayrender` | RHI、D3D12/Vulkan 后端、资源、命令和 PSO | `architecture/render-rhi.md` |
-| `radrayruntime` | 资产生命周期、帧节奏、渲染框架和 Application | `architecture/asset-system.md`, `architecture/frame-and-gpu.md`, `architecture/render-framework.md` |
+| `radrayruntime` | 资产生命周期、帧节奏、渲染框架和 Application | `architecture/asset-system.md`, `architecture/frame-and-gpu.md`, `architecture/render-framework.md`, `docs/todo/runtime-asset-bundle-catalog.md` |
 
 `radrayshadercompiler` 只在 `RADRAY_BUILD_SHADER_COMPILER=ON` 时进入构建图；它依赖
 `radraycore` 与 `radrayshader`，不反向依赖 render/runtime。当前 target 已提供 source-contract
@@ -73,6 +73,13 @@ metadata blob，不生成 artifact index、cook 或 publisher；client 只用 fo
 无 stock adapter（测试内的 stock DXC 仅作为 Pso smoke 的 bytecode 来源）。正式 cook/artifact
 发布链和 RadRay 自身安装导出层仍不在当前工作树。
 
+资产持久化现在统一使用 Bundle Catalog 中的显式 `AssetId`；Image/Texture/StaticMesh/ShaderAsset
+均有 typed descriptor 与内置 loader。ADR-0036 的第一阶段已落地严格 XML V1 source、显式
+BundleId/AssetId 冲突检查、`BundleRef` 生命周期、值快照 dispatch 和结构化 Fault；ShaderAsset
+的 JIT/AOT 表示边界已接通，AOT 在当前 runtime 报告 capability unavailable；Texture/StaticMesh
+也有真实 GPU 上传到 Ready 的集成覆盖。第一阶段检查站已完成；真实 cook/publisher 与 AOT artifact
+仍按约定延期，详见 `docs/todo/runtime-asset-bundle-catalog.md`。
+
 ## 文档索引
 
 ```text
@@ -92,7 +99,9 @@ docs/
     render-rhi.md       RHI、后端、barrier 和同步
     render-framework.md 渲染框架、SceneProxy、Application、ServiceRegistry
   adr/                  设计决策记录，只追加不修改
-  todo/                 有范围和检查站的实施计划
+  todo/
+    runtime-asset-bundle-catalog.md  Bundle Catalog 与显式资产身份迁移计划
+    ...                  其他有范围和检查站的实施计划
 ```
 
 `guide/` 与 `architecture/` 描述当前状态；`adr/` 记录为什么采用某个设计；`research/`

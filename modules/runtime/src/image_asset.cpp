@@ -1,5 +1,7 @@
 #include <radray/runtime/image_asset.h>
 
+#include <radray/runtime/asset_bundle_descriptors.h>
+
 #include <array>
 #include <cstring>
 #include <optional>
@@ -40,10 +42,6 @@ ImageData ResolveImageLoadFailure(const ImageAssetLoadOptions& options) {
         return options.FallbackImage;
     }
     return {};
-}
-
-AssetId MakeImageAssetId(const std::filesystem::path& path) {
-    return MakeAssetIdFromPath("image", path);
 }
 
 task<AssetLoadResult> LoadImageAssetTask(std::filesystem::path path, ImageAssetLoadOptions options) {
@@ -159,22 +157,24 @@ ImageData ConvertToRGBA8(const ImageData& src) {
     return MakeSolidImage(255, 255, 255, 255);
 }
 
-StreamingAssetRef<ImageAsset> LoadImageAsset(
-    AssetManager& assetManager,
-    const std::filesystem::path& path,
+task<AssetLoadResult> LoadImageAssetPayload(
+    std::filesystem::path path,
     const ImageAssetLoadOptions& options) {
-    return LoadImageAsset(assetManager, MakeImageAssetId(path), path, options);
+    co_return co_await LoadImageAssetTask(std::move(path), options);
 }
 
-StreamingAssetRef<ImageAsset> LoadImageAsset(
-    AssetManager& assetManager,
-    const AssetId& assetId,
-    const std::filesystem::path& path,
-    const ImageAssetLoadOptions& options) {
-    return assetManager.Load<ImageAsset>(AssetLoadRequest{
-        .Id = assetId,
-        .Task = LoadImageAssetTask(path, options),
-        .DebugName = path.string()});
+task<AssetLoadResult> LoadImageAssetBundle(AssetManager& manager, BundleAssetLoadData data) {
+    (void)manager;
+    const auto* descriptor = dynamic_cast<const ImageAssetDescriptor*>(data.Entry.Descriptor.get());
+    if (descriptor == nullptr || !data.Entry.Locator.has_value()) {
+        co_return AssetLoadResult::Failure(
+            AssetLoadErrorCode::InvalidDescriptor,
+            "ImageAsset Bundle descriptor is missing its locator");
+    }
+    ImageAssetLoadOptions options;
+    options.ConvertToRgba8 = descriptor->ConvertToRgba8;
+    const std::filesystem::path path = data.Root / std::filesystem::path{data.Entry.Locator->GetValue()};
+    co_return co_await LoadImageAssetPayload(path, options);
 }
 
 StreamingAssetRef<ImageAsset> LoadImageAssetFromMemory(

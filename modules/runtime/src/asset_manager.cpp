@@ -1,6 +1,11 @@
 #include <radray/runtime/asset_manager.h>
 
 #include <radray/logger.h>
+#include <radray/runtime/gpu_system.h>
+#include <radray/runtime/image_asset.h>
+#include <radray/runtime/shader_asset.h>
+#include <radray/runtime/static_mesh.h>
+#include <radray/runtime/texture_asset.h>
 #include <radray/runtime/wait_frame.h>
 
 namespace radray {
@@ -13,6 +18,8 @@ struct AssetSlot {
     unique_ptr<Asset> Object;
     /// 最终实例的类型描述符。Ready 时非空, 静态生命周期。
     const RuntimeTypeInfo* TypeInfo{nullptr};
+    AssetLoadErrorCode ErrorCode{AssetLoadErrorCode::None};
+    string ErrorMessage;
     stop_source Stop;
     /// 加载协程写入、Pump 提交。协程与 Pump 都在主线程, 故无需同步。
     std::optional<AssetLoadResult> PendingResult;
@@ -20,6 +27,117 @@ struct AssetSlot {
     /// 【普通整数, 非原子】: 引用只在主线程增减 (见 StreamingAssetRefAny 的线程说明)。
     uint32_t RefCount{0};
 };
+
+/// BundleSlot 只拥有 Catalog 元数据。BundleRef 的地址稳定来自 unordered_map 中的 unique_ptr。
+struct BundleSlot {
+    BundleId Id;
+    std::filesystem::path Root;
+    unique_ptr<BundleCatalog> Catalog;
+    uint32_t RefCount{0};
+};
+
+/// AssetManager 的 Bundle/Catalog 内部管理器。它只拥有元数据索引，不拥有 payload storage。
+struct AssetBundleStore {
+    struct LoaderRecord {
+        BundleAssetLoader Legacy{nullptr};
+        BundleAssetLoaderSafe Safe{nullptr};
+    };
+
+    unordered_map<BundleId, unique_ptr<BundleSlot>> Bundles;
+    unordered_map<AssetId, BundleSlot*> CatalogOwners;
+    unordered_map<RuntimeTypeId, LoaderRecord> Loaders;
+    bool LoaderRegistryFrozen{false};
+};
+
+std::optional<BundleAssetLoadData> MakeBundleAssetLoadData(
+    const BundleAssetEntry& entry,
+    const std::filesystem::path& root) {
+    BundleAssetLoadData data;
+    data.Entry.Asset = entry.Asset;
+    data.Entry.TypeId = entry.TypeId;
+    data.Entry.TypeName = entry.TypeName;
+    data.Entry.Locator = entry.Locator;
+    data.Entry.State = entry.State;
+    data.Entry.Diagnostics = entry.Diagnostics;
+    if (entry.Descriptor != nullptr) {
+        data.Entry.Descriptor = entry.Descriptor->Clone();
+        if (data.Entry.Descriptor == nullptr) {
+            return std::nullopt;
+        }
+    }
+    data.Root = root;
+    return data;
+}
+
+bool IsCatalogTypeCompatible(RuntimeTypeId actual, RuntimeTypeId requested) noexcept {
+    if (requested.IsEmpty() || actual == requested || requested == runtime_type_id_v<Asset>) {
+        return true;
+    }
+    // RuntimeTypeInfo 没有全局注册表；内置持久类型的共同基类目前只有 Asset。
+    return false;
+}
+
+BundleRef::BundleRef(AssetManager* manager, BundleSlot* slot) noexcept
+    : _manager(manager), _slot(slot) {
+    AssetManager::AddBundleRef(_slot);
+}
+
+BundleRef::BundleRef(const BundleRef& other) noexcept
+    : _manager(other._manager), _slot(other._slot) {
+    AssetManager::AddBundleRef(_slot);
+}
+
+BundleRef::BundleRef(BundleRef&& other) noexcept
+    : _manager(other._manager), _slot(other._slot) {
+    other._manager = nullptr;
+    other._slot = nullptr;
+}
+
+BundleRef& BundleRef::operator=(const BundleRef& other) noexcept {
+    if (this == &other) {
+        return *this;
+    }
+    AssetManager::AddBundleRef(other._slot);
+    AssetManager::ReleaseBundle(_slot);
+    _manager = other._manager;
+    _slot = other._slot;
+    return *this;
+}
+
+BundleRef& BundleRef::operator=(BundleRef&& other) noexcept {
+    if (this == &other) {
+        return *this;
+    }
+    AssetManager::ReleaseBundle(_slot);
+    _manager = other._manager;
+    _slot = other._slot;
+    other._manager = nullptr;
+    other._slot = nullptr;
+    return *this;
+}
+
+BundleRef::~BundleRef() noexcept {
+    AssetManager::ReleaseBundle(_slot);
+}
+
+const BundleId& BundleRef::GetBundleId() const noexcept {
+    static const BundleId empty{};
+    return _slot != nullptr ? _slot->Id : empty;
+}
+
+Nullable<const std::filesystem::path*> BundleRef::GetRoot() const noexcept {
+    return _slot != nullptr ? Nullable<const std::filesystem::path*>{&_slot->Root} : nullptr;
+}
+
+Nullable<const BundleCatalog*> BundleRef::GetCatalog() const noexcept {
+    return _slot != nullptr ? Nullable<const BundleCatalog*>{_slot->Catalog.get()} : nullptr;
+}
+
+void BundleRef::Reset() noexcept {
+    AssetManager::ReleaseBundle(_slot);
+    _manager = nullptr;
+    _slot = nullptr;
+}
 
 using Slot = AssetSlot;
 
@@ -159,11 +277,30 @@ RuntimeTypeId StreamingAssetRefAny::GetTypeId() const noexcept {
     return typeInfo != nullptr ? typeInfo->Id : Guid::Empty();
 }
 
+AssetLoadErrorCode StreamingAssetRefAny::GetErrorCode() const noexcept {
+    return _slot != nullptr ? _slot->ErrorCode : AssetLoadErrorCode::None;
+}
+
+const string& StreamingAssetRefAny::GetErrorMessage() const noexcept {
+    static const string empty;
+    return _slot != nullptr ? _slot->ErrorMessage : empty;
+}
+
 // ════════════════════════════════════════════════════════════
 //  AssetManager
 // ════════════════════════════════════════════════════════════
 
-AssetManager::AssetManager() noexcept = default;
+AssetManager::AssetManager() noexcept : _bundleStore(make_unique<AssetBundleStore>()) {
+    // 内置 typed descriptor/loader 在首次 mount 前就装配好；外部仍可注册自定义类型。
+    RegisterBundleLoaderSafe(runtime_type_id_v<ImageAsset>, &LoadImageAssetBundle);
+    RegisterBundleLoaderSafe(runtime_type_id_v<ShaderAsset>, &LoadShaderAssetBundle);
+    RegisterBundleLoaderSafe(runtime_type_id_v<TextureAsset>, &LoadTextureAssetBundle);
+    RegisterBundleLoaderSafe(runtime_type_id_v<StaticMesh>, &LoadStaticMeshBundle);
+}
+
+void AssetManager::SetGpuSystem(GpuSystem* gpuSystem) noexcept {
+    _frameUploads = gpuSystem != nullptr ? &gpuSystem->GetFrameUploadScheduler() : nullptr;
+}
 
 AssetManager::~AssetManager() noexcept {
     // 1. 停掉在飞加载并等协程退出。
@@ -202,6 +339,17 @@ AssetManager::~AssetManager() noexcept {
         }
     }
     _slots.clear();
+
+    for (auto& [id, bundle] : _bundleStore->Bundles) {
+        if (bundle && bundle->RefCount > 0) {
+            RADRAY_ERR_LOG(
+                "AssetManager: bundle {} still has {} live reference(s) at shutdown; releasing Catalog anyway",
+                id,
+                bundle->RefCount);
+        }
+    }
+    _bundleStore->CatalogOwners.clear();
+    _bundleStore->Bundles.clear();
 
     // 4. 刚才 OnUnload 交出的 payload 已无从等待帧边界 (_loadScope 已停)。就地销毁。
     //    【为何安全】: 关停路径在此之前已经 device wait-idle 过 (Application::Shutdown 先
@@ -242,7 +390,286 @@ void AssetManager::Release(Slot* slot) noexcept {
     // 实际销毁由 Pump -> CollectZeroRefSlots 完成。
 }
 
+BundleSlot* AssetManager::FindBundleSlot(const BundleId& id) const noexcept {
+    auto it = _bundleStore->Bundles.find(id);
+    return it == _bundleStore->Bundles.end() ? nullptr : it->second.get();
+}
+
+BundleRef AssetManager::MakeBundleRef(BundleSlot* slot) noexcept {
+    return BundleRef{this, slot};
+}
+
+Nullable<const BundleAssetEntry*> AssetManager::FindCatalogEntry(const AssetId& id) const noexcept {
+    auto owner = _bundleStore->CatalogOwners.find(id);
+    if (owner == _bundleStore->CatalogOwners.end() || owner->second == nullptr || owner->second->Catalog == nullptr) {
+        return nullptr;
+    }
+    for (const BundleAssetEntry& entry : owner->second->Catalog->Entries) {
+        if (entry.Asset == id) {
+            return Nullable<const BundleAssetEntry*>{&entry};
+        }
+    }
+    return nullptr;
+}
+
+void AssetManager::AddBundleRef(BundleSlot* slot) noexcept {
+    if (slot != nullptr) {
+        ++slot->RefCount;
+    }
+}
+
+void AssetManager::ReleaseBundle(BundleSlot* slot) noexcept {
+    if (slot != nullptr) {
+        --slot->RefCount;
+    }
+}
+
+bool AssetManager::RegisterBundleLoader(RuntimeTypeId typeId, BundleAssetLoader loader) {
+    if (typeId.IsEmpty() || loader == nullptr || _bundleStore->LoaderRegistryFrozen) {
+        return false;
+    }
+    return _bundleStore->Loaders.emplace(
+        typeId,
+        AssetBundleStore::LoaderRecord{.Legacy = loader, .Safe = nullptr})
+        .second;
+}
+
+bool AssetManager::RegisterBundleLoaderSafe(RuntimeTypeId typeId, BundleAssetLoaderSafe loader) {
+    if (typeId.IsEmpty() || loader == nullptr || _bundleStore->LoaderRegistryFrozen) {
+        return false;
+    }
+    return _bundleStore->Loaders.emplace(
+        typeId,
+        AssetBundleStore::LoaderRecord{.Legacy = nullptr, .Safe = loader})
+        .second;
+}
+
+BundleMountResult AssetManager::MountBundle(
+    const std::filesystem::path& root,
+    unique_ptr<BundleCatalogSource> source) {
+    BundleMountResult result;
+    _bundleStore->LoaderRegistryFrozen = true;
+    if (source == nullptr) {
+        result.Diagnostics.push_back(BundleDiagnostic{
+            .Code = BundleDiagnosticCode::InvalidSource,
+            .Message = "Bundle mount requires an explicit Catalog source",
+            .Asset = std::nullopt,
+        });
+        return result;
+    }
+    if (root.empty()) {
+        result.Diagnostics.push_back(BundleDiagnostic{
+            .Code = BundleDiagnosticCode::InvalidRoot,
+            .Message = "Bundle root must not be empty",
+            .Asset = std::nullopt,
+        });
+        return result;
+    }
+
+    std::error_code rootError;
+    const std::filesystem::path absoluteRoot = std::filesystem::absolute(root, rootError).lexically_normal();
+    if (rootError) {
+        result.Diagnostics.push_back(BundleDiagnostic{
+            .Code = BundleDiagnosticCode::InvalidRoot,
+            .Message = "Bundle root could not be made absolute",
+            .Asset = std::nullopt,
+        });
+        return result;
+    }
+
+    BundleCatalogSourceResult sourceResult = source->Read();
+    result.Diagnostics = std::move(sourceResult.Diagnostics);
+    if (!sourceResult.Catalog.has_value()) {
+        if (result.Diagnostics.empty()) {
+            result.Diagnostics.push_back(BundleDiagnostic{
+                .Code = BundleDiagnosticCode::InvalidCatalog,
+                .Message = "Catalog source did not produce a Catalog",
+                .Asset = std::nullopt,
+            });
+        }
+        return result;
+    }
+
+    BundleCatalog catalog = std::move(sourceResult.Catalog.value());
+    if (catalog.Id.IsEmpty()) {
+        result.Diagnostics.push_back(BundleDiagnostic{
+            .Code = BundleDiagnosticCode::MissingBundleId,
+            .Message = "Catalog BundleId must be a non-empty GUID",
+            .Asset = std::nullopt,
+        });
+        return result;
+    }
+    if (FindBundleSlot(catalog.Id) != nullptr) {
+        result.Diagnostics.push_back(BundleDiagnostic{
+            .Code = BundleDiagnosticCode::DuplicateBundleId,
+            .Message = "BundleId is already mounted",
+            .Asset = std::nullopt,
+        });
+        return result;
+    }
+
+    unordered_set<AssetId> catalogIds;
+    catalogIds.reserve(catalog.Entries.size());
+    for (const BundleAssetEntry& entry : catalog.Entries) {
+        if (entry.Asset.IsEmpty()) {
+            result.Diagnostics.push_back(BundleDiagnostic{
+                .Code = BundleDiagnosticCode::MissingAssetId,
+                .Message = "Catalog entry AssetId must be a non-empty GUID",
+                .Asset = std::nullopt,
+            });
+            return result;
+        }
+        if (!catalogIds.emplace(entry.Asset).second) {
+            result.Diagnostics.push_back(BundleDiagnostic{
+                .Code = BundleDiagnosticCode::DuplicateAssetId,
+                .Message = "Catalog contains duplicate AssetId",
+                .Asset = entry.Asset,
+            });
+            return result;
+        }
+        if (_bundleStore->CatalogOwners.contains(entry.Asset) || _slots.contains(entry.Asset)) {
+            result.Diagnostics.push_back(BundleDiagnostic{
+                .Code = BundleDiagnosticCode::AssetIdAlreadyInUse,
+                .Message = "AssetId is already owned by a mounted Catalog or Asset slot",
+                .Asset = entry.Asset,
+            });
+            return result;
+        }
+    }
+
+    auto bundle = make_unique<BundleSlot>();
+    bundle->Id = catalog.Id;
+    bundle->Root = absoluteRoot;
+    bundle->Catalog = make_unique<BundleCatalog>(std::move(catalog));
+    BundleSlot* raw = bundle.get();
+    _bundleStore->Bundles.emplace(raw->Id, std::move(bundle));
+    for (const BundleAssetEntry& entry : raw->Catalog->Entries) {
+        _bundleStore->CatalogOwners.emplace(entry.Asset, raw);
+    }
+    result.Reference = BundleRef{this, raw};
+    return result;
+}
+
+BundleRef AssetManager::FindBundle(const BundleId& id) noexcept {
+    BundleSlot* slot = FindBundleSlot(id);
+    if (slot == nullptr) {
+        return BundleRef{};
+    }
+    return MakeBundleRef(slot);
+}
+
+AssetRequestResult AssetManager::LoadCatalog(
+    const AssetId& id,
+    RuntimeTypeId requestedType,
+    string debugName) {
+    AssetRequestResult result;
+    if (Slot* existing = FindSlot(id); existing != nullptr) {
+        if (requestedType != Guid::Empty() && existing->State == AssetState::Ready &&
+            (existing->TypeInfo == nullptr || !existing->TypeInfo->IsA(requestedType))) {
+            result.Error = AssetRequestError{
+                .Code = AssetLoadErrorCode::RequestTypeMismatch,
+                .Message = "existing Asset slot has an incompatible runtime type",
+            };
+            return result;
+        }
+        result.Reference = MakeRef(existing);
+        return result;
+    }
+
+    Nullable<const BundleAssetEntry*> entry = FindCatalogEntry(id);
+    if (!entry) {
+        result.Error = AssetRequestError{
+            .Code = AssetLoadErrorCode::NotFound,
+            .Message = "AssetId is not present in a mounted Catalog",
+        };
+        return result;
+    }
+    if (!IsCatalogTypeCompatible(entry->TypeId, requestedType)) {
+        result.Error = AssetRequestError{
+            .Code = AssetLoadErrorCode::RequestTypeMismatch,
+            .Message = "requested runtime type does not match the Catalog TypeId",
+        };
+        return result;
+    }
+
+    auto owner = _bundleStore->CatalogOwners.find(id);
+    if (owner == _bundleStore->CatalogOwners.end() || owner->second == nullptr || owner->second->Catalog == nullptr) {
+        result.Error = AssetRequestError{
+            .Code = AssetLoadErrorCode::NotFound,
+            .Message = "Catalog entry owner disappeared before load submission",
+        };
+        return result;
+    }
+    BundleSlot* bundle = owner->second;
+    const bool hasValidCommonFields = !entry->TypeId.IsEmpty() && entry->Locator.has_value();
+    const AssetLoadErrorCode entryError = entry->State == BundleEntryState::Unknown
+                                               ? AssetLoadErrorCode::UnknownType
+                                               : AssetLoadErrorCode::InvalidDescriptor;
+    if (entry->State != BundleEntryState::Valid || !hasValidCommonFields) {
+        Slot* slot = EmplaceLoadingSlot(id);
+        StreamingAssetRefAny ref = MakeRef(slot);
+        const string message = entry->Diagnostics.empty()
+                                   ? (entry->State == BundleEntryState::Unknown
+                                          ? string{"Catalog entry type is not registered"}
+                                          : string{"Catalog entry descriptor is invalid"})
+                                   : entry->Diagnostics.front().Message;
+        CommitLoadResult(slot, AssetLoadResult::Failure(entryError, message));
+        result.Reference = std::move(ref);
+        return result;
+    }
+
+    auto loader = _bundleStore->Loaders.find(entry->TypeId);
+    if (loader == _bundleStore->Loaders.end() ||
+        (loader->second.Legacy == nullptr && loader->second.Safe == nullptr)) {
+        Slot* slot = EmplaceLoadingSlot(id);
+        StreamingAssetRefAny ref = MakeRef(slot);
+        CommitLoadResult(
+            slot,
+            AssetLoadResult::Failure(
+                AssetLoadErrorCode::UnknownType,
+                "no loader is registered for the Catalog TypeId"));
+        result.Reference = std::move(ref);
+        return result;
+    }
+
+    std::optional<task<AssetLoadResult>> loadTask;
+    if (loader->second.Safe != nullptr) {
+        std::optional<BundleAssetLoadData> data = MakeBundleAssetLoadData(*entry, bundle->Root);
+        if (!data.has_value()) {
+            Slot* slot = EmplaceLoadingSlot(id);
+            StreamingAssetRefAny ref = MakeRef(slot);
+            CommitLoadResult(
+                slot,
+                AssetLoadResult::Failure(
+                    AssetLoadErrorCode::InvalidDescriptor,
+                    "Catalog descriptor cannot be copied for asynchronous loading"));
+            result.Reference = std::move(ref);
+            return result;
+        }
+        loadTask.emplace(loader->second.Safe(*this, std::move(data.value())));
+    } else {
+        // Legacy callback 保持 ABI 兼容，但新内置 loader 不走这条路径；调用方若使用它，
+        // 必须在函数返回前同步复制 entry/root 所需数据。
+        loadTask.emplace(loader->second.Legacy(*this, *entry, bundle->Root));
+    }
+    AssetLoadRequest request{
+        .Id = id,
+        .Task = std::move(loadTask.value()),
+        .DebugName = std::move(debugName),
+    };
+    result.Reference = SubmitLoad(std::move(request));
+    return result;
+}
+
 StreamingAssetRefAny AssetManager::Load(AssetLoadRequest request) {
+    if (FindSlot(request.Id) == nullptr && _bundleStore->CatalogOwners.contains(request.Id)) {
+        AssetRequestResult catalogResult = LoadCatalog(request.Id, Guid::Empty(), std::move(request.DebugName));
+        return catalogResult.Reference.has_value() ? std::move(catalogResult.Reference.value()) : StreamingAssetRefAny{};
+    }
+    return SubmitLoad(std::move(request));
+}
+
+StreamingAssetRefAny AssetManager::SubmitLoad(AssetLoadRequest request) {
     if (Slot* existing = FindSlot(request.Id); existing != nullptr) {
         return MakeRef(existing);
     }
@@ -271,6 +698,10 @@ StreamingAssetRefAny AssetManager::AddReady(
     const RuntimeTypeInfo& typeInfo) {
     if (Slot* existing = FindSlot(id); existing != nullptr) {
         return MakeRef(existing);
+    }
+    if (_bundleStore->CatalogOwners.contains(id)) {
+        RADRAY_ERR_LOG("AssetManager: cannot AddReady for AssetId owned by a mounted Catalog: {}", id);
+        return StreamingAssetRefAny{};
     }
     Slot* slot = EmplaceLoadingSlot(id);
     // 先建引用再提交结果: CommitLoadResult 不会销毁槽位, 但保持"槽位一旦存在就有人持有"
@@ -325,6 +756,8 @@ void AssetManager::CommitLoadResult(Slot* slot, AssetLoadResult result) noexcept
         if (!result.Error.empty()) {
             RADRAY_ERR_LOG("AssetManager: asset load failed: {}", result.Error);
         }
+        slot->ErrorCode = result.ErrorCode;
+        slot->ErrorMessage = std::move(result.Error);
         slot->State = AssetState::Faulted;
         return;
     }
@@ -332,12 +765,16 @@ void AssetManager::CommitLoadResult(Slot* slot, AssetLoadResult result) noexcept
     const RuntimeTypeInfo* typeInfo = result.TypeInfo;
     if (object->GetTypeId() != typeInfo->Id || !typeInfo->IsA(runtime_type_id_v<Asset>)) {
         RADRAY_ERR_LOG("AssetManager: loaded asset runtime type metadata does not match the final instance");
+        slot->ErrorCode = AssetLoadErrorCode::PayloadFailure;
+        slot->ErrorMessage = "loaded asset runtime type metadata does not match the final instance";
         slot->State = AssetState::Faulted;
         return;
     }
     object->_id = slot->Id;
     slot->Object = std::move(object);
     slot->TypeInfo = typeInfo;
+    slot->ErrorCode = AssetLoadErrorCode::None;
+    slot->ErrorMessage.clear();
     slot->State = AssetState::Ready;
 }
 
@@ -376,6 +813,35 @@ void AssetManager::DestroySlot(Slot* slot) noexcept {
     // erase 内部、此时 slot 指针已不可用。
     slot->Object.reset();
     _slots.erase(slot->Id);
+}
+
+void AssetManager::DestroyBundle(BundleSlot* slot) noexcept {
+    if (slot == nullptr) {
+        return;
+    }
+    if (slot->Catalog != nullptr) {
+        for (const BundleAssetEntry& entry : slot->Catalog->Entries) {
+            auto owner = _bundleStore->CatalogOwners.find(entry.Asset);
+            if (owner != _bundleStore->CatalogOwners.end() && owner->second == slot) {
+                _bundleStore->CatalogOwners.erase(owner);
+            }
+        }
+    }
+    _bundleStore->Bundles.erase(slot->Id);
+}
+
+void AssetManager::CollectZeroRefBundles() {
+    vector<BundleSlot*> zeroRef;
+    for (auto& [id, bundle] : _bundleStore->Bundles) {
+        if (bundle && bundle->RefCount == 0) {
+            zeroRef.push_back(bundle.get());
+        }
+    }
+    for (BundleSlot* bundle : zeroRef) {
+        if (bundle->RefCount == 0) {
+            DestroyBundle(bundle);
+        }
+    }
 }
 
 void AssetManager::CollectZeroRefSlots() {
@@ -475,11 +941,16 @@ void AssetManager::FlushDeferredBatch() {
 void AssetManager::Pump() {
     PumpLoadResults();
     CollectZeroRefSlots();
+    CollectZeroRefBundles();
     FlushDeferredBatch();
 }
 
 uint32_t AssetManager::GetAssetCount() const noexcept {
     return static_cast<uint32_t>(_slots.size());
+}
+
+uint32_t AssetManager::GetBundleCount() const noexcept {
+    return static_cast<uint32_t>(_bundleStore->Bundles.size());
 }
 
 }  // namespace radray

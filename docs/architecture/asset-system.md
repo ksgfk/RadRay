@@ -1,6 +1,6 @@
 > - 适用: 资产生命周期、引用计数、加载去重或延迟 GPU 销毁
 > - 权威: 本文是 runtime 资产系统的唯一说明；帧边界与上传见 `architecture/frame-and-gpu.md`
-> - 锚点: `modules/runtime/include/radray/runtime/asset_manager.h`, `modules/runtime/src/asset_manager.cpp`, `modules/runtime/include/radray/runtime/asset.h`, `modules/runtime/include/radray/runtime/texture_asset.h`
+> - 锚点: `modules/runtime/include/radray/runtime/asset_manager.h`, `modules/runtime/src/asset_manager.cpp`, `modules/runtime/include/radray/runtime/asset_bundle.h`, `modules/runtime/include/radray/runtime/asset_bundle_descriptors.h`, `modules/runtime/include/radray/runtime/shader_asset.h`, `modules/runtime/src/asset_bundle.cpp`, `modules/runtime/src/shader_asset.cpp`, `modules/runtime/include/radray/runtime/asset.h`, `modules/runtime/include/radray/runtime/texture_asset.h`
 
 # 资产系统
 
@@ -25,13 +25,45 @@ Load request → AssetSlot::Loading → AssetManager::Pump → Loaded
 
 ## AssetId
 
-```cpp
-AssetId MakeAssetIdFromPath(std::string_view namespacePrefix, const std::filesystem::path& path);
-```
+`AssetId` 是 Manifest/Catalog 中的显式 `Guid`。Runtime 不从路径、内容或 BundleId 派生持久身份；
+移动 locator、移动所属 Bundle 或切换 ShaderAsset 的 JIT/AOT 表示都不改变 ID。程序生成、测试和
+外部系统已经构造好的资产仍可通过显式 ID 调用 `AddReady`，但不能重新引入路径 hash。
 
-namespace prefix 隔离资产类型；同一路径在不同资产类型下必须产生不同 ID。路径归一化
-使用 `weakly_canonical`，失败时依次退到 `absolute + lexically_normal` 和纯词法归一化，
-再以 `generic_string` 作为哈希输入；Windows 下转小写，POSIX 下保留大小写。
+ADR-0036 的 Bundle/Catalog value model、严格 XML V1 source、同步挂载、`BundleRef`、typed
+descriptor/loader dispatch 和结构化 Fault 已实现。Image、Texture、StaticMesh 与 ShaderAsset
+均有 XML typed descriptor；Image/Texture 使用编码图片 payload，StaticMesh 使用受限的 `RRMESH01`
+payload，ShaderAsset 的 AOT descriptor 在当前 runtime 返回 `CapabilityUnavailable`。
+
+### Bundle Catalog（第一阶段）
+
+`AssetManager::MountBundle(root, source)` 接收调用方选择的同步 `BundleCatalogSource`，将 root
+绝对化并纯词法规范化，然后在所有 BundleId/AssetId 冲突检查通过后一次性发布 Catalog。Bundle
+不拥有 payload storage；`BundleRef` 只保活 Catalog 和 root context，Catalog view 只在引用存活
+期间有效。引用归零后由下一次 `AssetManager::Pump` 摘除 BundleId/AssetId 索引，不影响已有
+Asset slot。
+
+`MemoryBundleCatalogSource` 用于 synthetic source；`XmlBundleCatalogSource` 是当前 XML V1
+实现。XML reader 是严格、有大小/条目/属性长度上限的无 DOM 子集：只接受 `bundle/schemaVersion=1`
+和 `assets` 直接子元素，拒绝 DTD、外部实体、XInclude、其他 processing instruction 以及不支持
+的实体。未知类型只保留 entry 公共字段并标为 `Unknown`；路径、TypeId 或 typed descriptor 错误
+标为 `Invalid`，BundleId/AssetId 缺失、非法或重复则不发布 Catalog。该 reader 不是通用 XML API，
+Catalog 仍不携带 XML DOM。
+
+`RegisterBundleLoader`/`RegisterBundleLoaderSafe` 必须在首次 mount 前完成，按 entry `TypeId` 选择
+loader；首次 mount 后注册表冻结。内置类型在 `AssetManager` 构造时注册。`LoadCatalog` 先查已有
+slot，再查 Catalog。NotFound 和 RequestTypeMismatch 不创建 slot；Unknown、Invalid 和没有 loader
+的 entry 创建 Faulted slot，并通过 `StreamingAssetRefAny::GetErrorCode/GetErrorMessage` 保留可查询
+错误。内置 loader 走 `BundleAssetLoadData` 值快照，复制 locator、root 和 descriptor 后才创建 task，
+不会把 Catalog entry 或 BundleRef 保存到异步任务中。
+
+内置 descriptor/loader 目前覆盖 `ImageAsset`、`TextureAsset`、`StaticMesh` 和 `ShaderAsset`。Image
+与 Texture 的 locator 指向 PNG/JPEG 编码字节；Texture/StaticMesh 需要 `GpuSystem` 装配的
+`FrameUploadScheduler`。StaticMesh 的最小 Bundle payload 是小端 `RRMESH01`：8 字节 magic、
+`version=1`、bin/primitive 数量、UTF-8 name、每个 bin 的 `uint64` 字节数与内容，随后是 primitive
+及其 vertex/index 描述；loader 对总字节、数量、字符串和每个 buffer range 做上限与自洽性检查，
+再复用既有 GPU 上传路径。ShaderAsset 的 `jit-source` 读取 locator 指向的 HLSL，JIT 服务由调用方
+传入预配置的特殊 `shaderlib` include path；`aot-artifact` 只解码元数据表示并返回
+`CapabilityUnavailable`，不做 JIT fallback。
 
 ## 延迟销毁
 

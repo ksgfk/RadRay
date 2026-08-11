@@ -61,7 +61,7 @@ docs/adr/*.md
 | [0005](0005-keyword-groups-declared-in-hlsl.md) | keyword 组在 HLSL 里用 #pragma 声明 | 已被 ADR-0016 取代 |
 | [0006](0006-shader-types-layer-boundary.md) | shader_types.h 的收录标准是"是不是 manifest 数据" | 已被 ADR-0016 取代 |
 | [0007](0007-asset-lifetime-refcount-only.md) | 资产生命周期只由引用计数决定 | 生效 |
-| [0008](0008-asset-id-path-normalization.md) | AssetId 由归一化路径派生 | 生效 |
+| [0008](0008-asset-id-path-normalization.md) | AssetId 由归一化路径派生 | 已被 ADR-0036 取代 |
 | [0009](0009-deferred-destroy-hands-over-suspension.md) | 延迟销毁交出挂起点，不交对象 | 生效 |
 | [0010](0010-rhi-ownership-model.md) | RHI 里 Device 共享，其余对象独占 | 生效 |
 | [0011](0011-backend-selection-by-descriptor.md) | 后端由 descriptor variant 选定，不做运行期回退 | 生效 |
@@ -89,3 +89,4 @@ docs/adr/*.md
 | [0033](0033-include-path-abi-view-validation.md) | include path ABI view 的编码与输入校验 | 生效 |
 | [0034](0034-clang-dxc-compiler-pipeline-is-the-only-shader-semantic-authority.md) | Clang/DXC compiler pipeline 是唯一 shader 语义权威 | 生效 |
 | [0035](0035-optional-explicit-dxil-root-signature-and-rhi-fallback.md) | Optional Explicit DXIL Root Signature 与 D3D12 RHI fallback | 生效 |
+| [0036](0036-runtime-bundle-catalog-is-persistent-asset-authority.md) | Runtime Bundle Catalog 是持久资产权威 | 生效 |

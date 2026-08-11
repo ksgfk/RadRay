@@ -1,4 +1,7 @@
 radray_add_test(test_asset_slot SOURCES test_asset_slot.cpp LINK_LIBS radrayruntime)
+radray_add_test(test_asset_bundle SOURCES test_asset_bundle.cpp LINK_LIBS radrayruntime)
+target_include_directories(test_asset_bundle PRIVATE
+    "${CMAKE_SOURCE_DIR}/modules/render/tests")
 
 if (RADRAY_ENABLE_SHADER_JIT)
     radray_add_test(test_runtime_shader_jit SOURCES test_runtime_shader_jit.cpp LINK_LIBS radrayruntime)

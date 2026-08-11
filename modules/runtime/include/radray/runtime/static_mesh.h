@@ -84,6 +84,14 @@ task<AssetLoadResult> LoadStaticMesh(
     FrameUploadScheduler& frameUploads,
     MeshResource meshResource);
 
+/// Bundle payload 的最小二进制网格格式（RRMESH01，见实现中的边界校验）。解析只产生
+/// 自有 MeshResource，再复用现有 GPU 上传 task。
+task<AssetLoadResult> LoadStaticMeshAssetPayload(
+    FrameUploadScheduler& frameUploads,
+    vector<byte> encodedBytes);
+
+task<AssetLoadResult> LoadStaticMeshBundle(AssetManager& manager, BundleAssetLoadData data);
+
 template <>
 struct RuntimeTypeTrait<StaticMesh> {
     static constexpr RuntimeTypeId value{0x9226f085, 0xb0b1, 0x476f, 0xb7, 0x29, 0x69, 0xec, 0xee, 0x38, 0x99, 0x8c};

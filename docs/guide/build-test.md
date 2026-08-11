@@ -95,6 +95,7 @@ ctest --test-dir build_debug -C Debug -R AssetSlotTest --output-on-failure
 | target | suite |
 |---|---|
 | `test_asset_slot` | `AssetSlotTest` |
+| `test_asset_bundle` | `AssetBundleValueTest`, `AssetBundleMountTest`, `AssetBundleLoadTest`, `XmlAssetBundleSourceTest` |
 | `test_render_pass_registry` | `RenderPassCacheKeyTest`, `FramebufferCacheKeyTest`, `RenderPassRegistryTest` |
 | `test_radray_render_pso_smoke` | `RadRayRenderPsoSmoke` |
 | `test_radray_shader_compiler_client` | `RadRayShaderCompilerClient` |
