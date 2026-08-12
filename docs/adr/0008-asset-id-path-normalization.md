@@ -1,6 +1,6 @@
 # ADR-0008 AssetId 由归一化路径派生
 
-状态: 已被 ADR-0036 取代
+状态: 生效
 日期: 2026-07
 影响: `MakeAssetIdFromPath`（`modules/runtime/src/asset.cpp`）；全部 `MakeXxxAssetId`
 

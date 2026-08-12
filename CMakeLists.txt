@@ -135,7 +135,6 @@ if (RADRAY_ENABLE_MIMALLOC)
     set(MI_XMALLOC ON CACHE BOOL "" FORCE)
     set(MI_OPT_ARCH ON CACHE BOOL "" FORCE)
     add_subdirectory(${RADRAY_THIRDPARTY_ROOT}/mimalloc)
-    radray_optimize_flags_library(mimalloc-static)
     radray_set_build_path(mimalloc-static)
     # INTERFACE 库强制 whole-archive 链接, 保证符号重载都在最终产物内
     add_library(mimalloc-override INTERFACE)
@@ -287,7 +286,6 @@ if (RADRAY_ENABLE_D3D12)
         $<$<AND:$<CXX_COMPILER_ID:Clang>,$<BOOL:${MSVC}>>:-Wno-switch>
         $<$<AND:$<CXX_COMPILER_ID:Clang>,$<BOOL:${MSVC}>>:-Wno-unused-const-variable>
         $<$<AND:$<CXX_COMPILER_ID:Clang>,$<BOOL:${MSVC}>>:-Wno-unused-function>)
-    radray_optimize_flags_library(D3D12MemoryAllocator)
     radray_set_build_path(D3D12MemoryAllocator)
 endif()
 

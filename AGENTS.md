@@ -19,7 +19,6 @@ do **not** preload the whole tree.
 | Shader toolchain, variants, AOT artifacts | `docs/architecture/shader-pipeline.md`, `docs/todo/hlsl-radray-dxc-shader-pipeline.md`, and `docs/todo/filesystem-backed-shader-include-correction.md` |
 | HLSL library layout and binding ABI | `docs/architecture/shaderlib.md` |
 | Asset lifetime, refcounts, deferred destroy | `docs/architecture/asset-system.md` |
-| Asset Bundle, Manifest/Catalog, persistent IDs | `docs/todo/runtime-asset-bundle-catalog.md`, `docs/adr/0036-runtime-bundle-catalog-is-persistent-asset-authority.md`, and `docs/architecture/asset-system.md` |
 | Frame pacing, flights, uploads, shutdown | `docs/architecture/frame-and-gpu.md` |
 | RHI, backends, barriers, synchronization | `docs/architecture/render-rhi.md` |
 | Render pipeline, scene proxies, Application | `docs/architecture/render-framework.md` |

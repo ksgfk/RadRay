@@ -1,5 +1,8 @@
 #pragma once
 
+#include <filesystem>
+#include <string_view>
+
 #include <radray/runtime_type.h>
 #include <radray/types.h>
 
@@ -49,5 +52,13 @@ struct RuntimeTypeTrait<Asset> {
     static constexpr RuntimeTypeId value{0x8b445298, 0x4242, 0x4524, 0xb3, 0x7f, 0x37, 0x24, 0xc3, 0x5b, 0x3c, 0x94};
     using Bases = std::tuple<>;
 };
+
+/// 文件路径派生的 AssetId。同一份文件必须得到同一个 id, 不同文件必须得到不同 id。
+///
+/// namespacePrefix 做资产类型的命名空间隔离 ("shader" / "image" / ...), 各资产类型必须
+/// 用独占前缀。路径先归一化再哈希, 这是【正确性要求而非优化】。
+///
+/// 归一化口径与改动它之前必须读的取舍: docs/adr/0008-asset-id-path-normalization.md
+AssetId MakeAssetIdFromPath(std::string_view namespacePrefix, const std::filesystem::path& path);
 
 }  // namespace radray

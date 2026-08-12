@@ -1,17 +1,10 @@
 #include <radray/runtime/static_mesh.h>
 
-#include <array>
-#include <cstddef>
 #include <limits>
-#include <span>
-#include <string_view>
-
-#include <radray/file.h>
-#include <radray/runtime/asset_bundle_descriptors.h>
-#include <radray/runtime/gpu_system.h>
 #include <utility>
 
 #include <radray/render/rhi.h>
+#include <radray/runtime/gpu_system.h>
 
 namespace radray {
 namespace {
@@ -184,155 +177,6 @@ RuntimeTypeId StaticMesh::GetTypeId() const noexcept {
     return runtime_type_id_v<StaticMesh>;
 }
 
-namespace {
-
-class MeshPayloadReader {
-public:
-    explicit MeshPayloadReader(std::span<const byte> bytes) noexcept : _bytes(bytes) {}
-
-    bool ReadU16(uint16_t& value) noexcept {
-        if (_position + 2 > _bytes.size()) {
-            return false;
-        }
-        value = static_cast<uint16_t>(std::to_integer<uint8_t>(_bytes[_position])) |
-                (static_cast<uint16_t>(std::to_integer<uint8_t>(_bytes[_position + 1])) << 8u);
-        _position += 2;
-        return true;
-    }
-
-    bool ReadU32(uint32_t& value) noexcept {
-        if (_position + 4 > _bytes.size()) {
-            return false;
-        }
-        value = 0;
-        for (uint32_t i = 0; i < 4; ++i) {
-            value |= static_cast<uint32_t>(std::to_integer<uint8_t>(_bytes[_position + i])) << (8u * i);
-        }
-        _position += 4;
-        return true;
-    }
-
-    bool ReadU64(uint64_t& value) noexcept {
-        if (_position + 8 > _bytes.size()) {
-            return false;
-        }
-        value = 0;
-        for (uint32_t i = 0; i < 8; ++i) {
-            value |= static_cast<uint64_t>(std::to_integer<uint8_t>(_bytes[_position + i])) << (8u * i);
-        }
-        _position += 8;
-        return true;
-    }
-
-    bool ReadBytes(size_t size, std::span<const byte>& value) noexcept {
-        if (size > _bytes.size() - _position) {
-            return false;
-        }
-        value = _bytes.subspan(_position, size);
-        _position += size;
-        return true;
-    }
-
-    bool ReadString(string& value, size_t maximum) {
-        uint32_t size = 0;
-        if (!ReadU32(size) || size > maximum) {
-            return false;
-        }
-        std::span<const byte> bytes;
-        if (!ReadBytes(size, bytes)) {
-            return false;
-        }
-        value.resize(size);
-        for (size_t i = 0; i < size; ++i) {
-            value[i] = static_cast<char>(std::to_integer<uint8_t>(bytes[i]));
-        }
-        return true;
-    }
-
-    size_t Remaining() const noexcept { return _bytes.size() - _position; }
-
-private:
-    std::span<const byte> _bytes;
-    size_t _position{0};
-};
-
-bool ParseStaticMeshPayload(std::span<const byte> bytes, MeshResource& mesh) {
-    constexpr std::array<uint8_t, 8> kMagic{'R', 'R', 'M', 'E', 'S', 'H', '0', '1'};
-    constexpr size_t kMaxBins = 4096;
-    constexpr size_t kMaxPrimitives = 4096;
-    constexpr size_t kMaxAttributesPerPrimitive = 64;
-    constexpr size_t kMaxStringBytes = 4096;
-    constexpr uint64_t kMaxPayloadBytes = 256ull * 1024ull * 1024ull;
-
-    if (bytes.size() > kMaxPayloadBytes || bytes.size() < kMagic.size()) {
-        return false;
-    }
-    for (size_t i = 0; i < kMagic.size(); ++i) {
-        if (std::to_integer<uint8_t>(bytes[i]) != kMagic[i]) {
-            return false;
-        }
-    }
-
-    MeshPayloadReader reader{bytes.subspan(kMagic.size())};
-    uint32_t version = 0;
-    uint32_t binCount = 0;
-    uint32_t primitiveCount = 0;
-    if (!reader.ReadU32(version) || version != 1 || !reader.ReadU32(binCount) ||
-        !reader.ReadU32(primitiveCount) || binCount == 0 || primitiveCount == 0 ||
-        binCount > kMaxBins || primitiveCount > kMaxPrimitives || !reader.ReadString(mesh.Name, kMaxStringBytes)) {
-        return false;
-    }
-
-    mesh.Bins.reserve(binCount);
-    uint64_t totalBinBytes = 0;
-    for (uint32_t i = 0; i < binCount; ++i) {
-        uint64_t size = 0;
-        if (!reader.ReadU64(size) || size == 0 || size > kMaxPayloadBytes ||
-            totalBinBytes > kMaxPayloadBytes - size) {
-            return false;
-        }
-        std::span<const byte> bin;
-        if (size > static_cast<uint64_t>(std::numeric_limits<size_t>::max()) ||
-            !reader.ReadBytes(static_cast<size_t>(size), bin)) {
-            return false;
-        }
-        mesh.Bins.emplace_back(bin);
-        totalBinBytes += size;
-    }
-
-    mesh.Primitives.reserve(primitiveCount);
-    for (uint32_t i = 0; i < primitiveCount; ++i) {
-        MeshPrimitive primitive;
-        uint32_t attributeCount = 0;
-        uint16_t componentCount = 0;
-        if (!reader.ReadU32(primitive.VertexCount) || !reader.ReadU32(primitive.IndexBuffer.BufferIndex) ||
-            !reader.ReadU32(primitive.IndexBuffer.IndexCount) || !reader.ReadU32(primitive.IndexBuffer.Offset) ||
-            !reader.ReadU32(primitive.IndexBuffer.Stride) || !reader.ReadU32(attributeCount) ||
-            attributeCount == 0 || attributeCount > kMaxAttributesPerPrimitive) {
-            return false;
-        }
-        primitive.VertexBuffers.reserve(attributeCount);
-        for (uint32_t j = 0; j < attributeCount; ++j) {
-            VertexBufferEntry attribute;
-            uint16_t encodedType = 0;
-            if (!reader.ReadString(attribute.Semantic, kMaxStringBytes) ||
-                !reader.ReadU32(attribute.SemanticIndex) || !reader.ReadU32(attribute.BufferIndex) ||
-                !reader.ReadU16(encodedType) || !reader.ReadU16(componentCount) ||
-                !reader.ReadU32(attribute.Offset) || !reader.ReadU32(attribute.Stride) ||
-                encodedType > static_cast<uint16_t>(VertexDataType::SINT)) {
-                return false;
-            }
-            attribute.Type = static_cast<VertexDataType>(encodedType);
-            attribute.ComponentCount = componentCount;
-            primitive.VertexBuffers.push_back(std::move(attribute));
-        }
-        mesh.Primitives.push_back(std::move(primitive));
-    }
-    return reader.Remaining() == 0 && IsStaticMeshDataValid(mesh, {});
-}
-
-}  // namespace
-
 task<AssetLoadResult> LoadStaticMesh(
     FrameUploadScheduler& frameUploads,
     MeshResource meshResource) {
@@ -362,42 +206,6 @@ task<AssetLoadResult> LoadStaticMesh(
         Eigen::Vector3f::Zero(),
         Eigen::Vector3f::Zero(),
         std::move(renderMesh.value())));
-}
-
-task<AssetLoadResult> LoadStaticMeshAssetPayload(
-    FrameUploadScheduler& frameUploads,
-    vector<byte> encodedBytes) {
-    MeshResource mesh;
-    if (!ParseStaticMeshPayload(encodedBytes, mesh)) {
-        co_return AssetLoadResult::Failure(
-            AssetLoadErrorCode::PayloadFailure,
-            "static mesh payload has an invalid RRMESH01 encoding");
-    }
-    co_return co_await LoadStaticMesh(frameUploads, std::move(mesh));
-}
-
-task<AssetLoadResult> LoadStaticMeshBundle(AssetManager& manager, BundleAssetLoadData data) {
-    const auto* descriptor = dynamic_cast<const StaticMeshAssetDescriptor*>(data.Entry.Descriptor.get());
-    if (descriptor == nullptr || !data.Entry.Locator.has_value()) {
-        co_return AssetLoadResult::Failure(
-            AssetLoadErrorCode::InvalidDescriptor,
-            "StaticMesh Bundle descriptor is missing its locator");
-    }
-    (void)descriptor;
-    const std::filesystem::path path = data.Root / std::filesystem::path{data.Entry.Locator->GetValue()};
-    std::optional<vector<byte>> encoded = ReadBinaryFile(path);
-    if (!encoded.has_value()) {
-        co_return AssetLoadResult::Failure(
-            AssetLoadErrorCode::PayloadFailure,
-            "StaticMesh payload file could not be read");
-    }
-    Nullable<FrameUploadScheduler*> frameUploads = manager.GetFrameUploadScheduler();
-    if (!frameUploads) {
-        co_return AssetLoadResult::Failure(
-            AssetLoadErrorCode::CapabilityUnavailable,
-            "StaticMesh requires a wired FrameUploadScheduler");
-    }
-    co_return co_await LoadStaticMeshAssetPayload(*frameUploads, std::move(*encoded));
 }
 
 }  // namespace radray

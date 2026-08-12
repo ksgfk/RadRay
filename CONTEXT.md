@@ -12,14 +12,6 @@ adapter，stock extension probe 会 fail closed。RadRay DXC fork package 已通
 publisher/index 和 install/export 层仍未实现。当前 source/metadata scanner 的退役迁移尚未实施，
 目标边界由 ADR-0034 与 `docs/todo/radray-dxc-frontend-semantic-migration.md` 定义。
 
-资产持久化的目标边界已由 ADR-0036 确认：持久资产使用显式 `AssetId`，由 Runtime 直接挂载的
-Bundle Catalog 提供加载描述。当前代码已具备 Bundle/Catalog value model、严格 XML V1 source、
-挂载冲突检查、`BundleRef` 生命周期、typed descriptor/loader dispatch、值快照和结构化 Fault；
-Image/Texture/StaticMesh/ShaderAsset 的 descriptor 与 loader 已接入，旧路径派生身份入口已删除；
-Texture/StaticMesh 的 XML → GPU Ready 集成 fixture 也已覆盖。真实 cook/publisher 与 AOT artifact
-仍是后续范围。实施范围由
-`docs/todo/runtime-asset-bundle-catalog.md` 定义。
-
 ## Shader 管线
 
 **Pass**:
@@ -496,58 +488,9 @@ _Avoid_: blob（指承载 artifact 的单个文件）, cache（cache 可弃，ar
 ## 资产
 
 **Asset**:
-由稳定 `AssetId` 标识、引用计数管理生命周期的可加载逻辑资源。路径、所属 Bundle 与具体表示
-可以改变而不改变身份。
+由路径标识、引用计数管理生命周期的可加载资源。
 _Avoid_: resource（resource 指 GPU 侧对象）
 
 **AssetId**:
-资产的显式持久身份；不从路径、Bundle 或 payload 内容派生。移动资产保留身份，复制资产产生
-新身份。
+由归一化路径派生的资产标识。
 _Avoid_: asset key, path hash
-
-**Bundle**:
-Runtime 直接挂载的持久资产元数据单元；它拥有 Catalog 生命周期，但不拥有 locator 指向的
-payload storage。
-_Avoid_: package, storage container
-
-**BundleId**:
-Bundle 的显式持久身份；目录、Manifest 来源和 JIT/AOT 发布表示改变时保持不变。它不表达内容
-版本或构建顺序。
-
-**Bundle Manifest**:
-Bundle Catalog 的持久编码。XML 是第一种来源，其他二进制或内存编码可以表达同一 Catalog。
-_Avoid_: Catalog（Catalog 是解析后的模型）
-
-**Bundle Catalog source**:
-把某种 Bundle Manifest 解码为统一 Bundle Catalog 的同步来源。来源不拥有资产 payload，也不参与
-资产加载。
-
-**Bundle Catalog**:
-Bundle Manifest 解析后得到的不可变、编码无关资产目录。它记录 Bundle 身份、条目与诊断，不读取
-或验证 payload。
-_Avoid_: Manifest（Manifest 是持久编码）
-
-**Bundle entry**:
-Bundle Catalog 中一个由 `AssetId`、类型身份、唯一 primary locator 和可选 typed descriptor 描述的
-资产声明。多个条目可以共享同一个 locator。
-
-**Bundle locator**:
-相对于 mount-time Bundle root 的平台无关逻辑路径。它只定位 payload，不表达资产身份、文件种类
-或 storage 所有权。
-_Avoid_: asset path（容易把 locator 误当成身份）
-
-**Asset descriptor**:
-已知资产类型在 Catalog 中的不可变、强类型加载元数据。它不包含所有类型共享的动态 key/value
-字典，也不承担 payload 加载。
-
-**Valid / Unknown / Invalid entry**:
-`Valid` 条目拥有合法 typed descriptor；`Unknown` 条目的类型未注册，只保留公共字段；`Invalid`
-条目拥有可识别 `AssetId` 但描述非法。三者都占用自己的全局 AssetId。
-
-**Bundle reference**:
-保持已挂载 Bundle Catalog 可查询的引用计数句柄。资产加载提交后脱离 Catalog，因此 Asset slot
-不延长 Bundle reference 生命周期。
-
-**Shader asset representation**:
-一个 Shader Asset 对应一个 Pass source unit，并且只采用 `jit-source` 或 `aot-artifact` 中的一种
-表示；表示切换不改变 AssetId。特殊 `shaderlib` JIT 根不属于 Bundle 或资产系统。

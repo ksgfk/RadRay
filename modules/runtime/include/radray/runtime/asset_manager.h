@@ -1,15 +1,12 @@
 #pragma once
 
 #include <concepts>
-#include <filesystem>
-#include <optional>
 #include <utility>
 
 #include <radray/types.h>
 #include <radray/nullable.h>
 #include <radray/coroutine.h>
 #include <radray/runtime/asset.h>
-#include <radray/runtime/asset_bundle.h>
 #include <radray/runtime/service_registry.h>
 
 // 资产槽位、引用类型与加载调度。引用语义、销毁时机与关停顺序: docs/architecture/asset-system.md
@@ -20,9 +17,6 @@ class AssetManager;
 class AssetWaitAwaitable;
 class IWaitFrameProcessor;
 class StreamingAssetRefAny;
-class ShaderJit;
-class GpuSystem;
-class FrameUploadScheduler;
 template <class T>
 requires std::derived_from<T, Asset>
 class StreamingAssetRef;
@@ -32,7 +26,6 @@ class StreamingAssetRef;
 /// 【刻意保持不完整, 且在命名空间作用域】槽位归 AssetManager 所有, 引用只是指向它;
 /// 嵌进引用类型会把所有权说反, 也会让非友元 (如 AssetWaitRecord) 无法命名它。
 struct AssetSlot;
-struct AssetBundleStore;
 
 /// 资产 slot 的生命周期状态。
 /// 【没有 Unloaded】只要还有一个引用指向 slot, slot 就一定存在, 故"已卸载"没有观察者。
@@ -41,18 +34,6 @@ enum class AssetState {
     Ready,     ///< 资产已构造,可访问。
     Faulted,   ///< 加载失败。
     Canceled,  ///< 加载被取消。
-};
-
-/// 结构化资产加载错误。NotFound/RequestTypeMismatch 只用于提交前请求错误；其余错误会保留在
-/// Faulted slot 上，直到 slot 被回收。
-enum class AssetLoadErrorCode {
-    None,
-    NotFound,
-    RequestTypeMismatch,
-    UnknownType,
-    InvalidDescriptor,
-    PayloadFailure,
-    CapabilityUnavailable,
 };
 
 struct AssetWaitRecord : ManualCoroutineRecord {
@@ -64,7 +45,6 @@ struct AssetWaitRecord : ManualCoroutineRecord {
 struct AssetLoadResult {
     unique_ptr<Asset> Object;
     const RuntimeTypeInfo* TypeInfo{nullptr};
-    AssetLoadErrorCode ErrorCode{AssetLoadErrorCode::PayloadFailure};
     string Error;
     bool Succeeded{false};
 
@@ -85,14 +65,6 @@ struct AssetLoadResult {
 
     static AssetLoadResult Failure(string error = {}) noexcept {
         AssetLoadResult result;
-        result.ErrorCode = AssetLoadErrorCode::PayloadFailure;
-        result.Error = std::move(error);
-        return result;
-    }
-
-    static AssetLoadResult Failure(AssetLoadErrorCode code, string error = {}) noexcept {
-        AssetLoadResult result;
-        result.ErrorCode = code;
         result.Error = std::move(error);
         return result;
     }
@@ -107,16 +79,6 @@ struct AssetLoadRequest {
     task<AssetLoadResult> Task;
     string DebugName{};
 };
-
-using BundleAssetLoader = task<AssetLoadResult> (*)(
-    AssetManager& manager,
-    const BundleAssetEntry& entry,
-    const std::filesystem::path& root);
-
-/// 安全 loader 入口。参数按值拥有完整快照，协程不得也无需访问 Catalog/BundleRef。
-using BundleAssetLoaderSafe = task<AssetLoadResult> (*)(
-    AssetManager& manager,
-    BundleAssetLoadData data);
 
 /// 【类型擦除的 streaming 引用】同时表达加载状态与 ready 后的资产访问。
 ///
@@ -154,8 +116,6 @@ public:
 
     const AssetId& GetAssetId() const noexcept;
     RuntimeTypeId GetTypeId() const noexcept;
-    AssetLoadErrorCode GetErrorCode() const noexcept;
-    const string& GetErrorMessage() const noexcept;
 
     /// 等待本引用离开 Loading 态。`co_await ref` 得到 bool: true = 已到终态,
     /// false = 等待者自己被取消 (不是资产加载失败)。
@@ -227,8 +187,6 @@ public:
 
     const AssetId& GetAssetId() const noexcept { return _ref.GetAssetId(); }
     RuntimeTypeId GetTypeId() const noexcept { return _ref.GetTypeId(); }
-    AssetLoadErrorCode GetErrorCode() const noexcept { return _ref.GetErrorCode(); }
-    const string& GetErrorMessage() const noexcept { return _ref.GetErrorMessage(); }
 
     /// 见 StreamingAssetRefAny::operator co_await。
     AssetWaitAwaitable operator co_await() const noexcept;
@@ -291,19 +249,6 @@ AssetWaitAwaitable StreamingAssetRef<T>::operator co_await() const noexcept {
     return AssetWaitAwaitable{AsAny()};
 }
 
-struct AssetRequestError {
-    AssetLoadErrorCode Code{AssetLoadErrorCode::None};
-    string Message;
-};
-
-struct AssetRequestResult {
-    std::optional<StreamingAssetRefAny> Reference;
-    std::optional<AssetRequestError> Error;
-
-    bool IsSubmitted() const noexcept { return Reference.has_value(); }
-    bool HasError() const noexcept { return Error.has_value(); }
-};
-
 /// 资产仓库。按 AssetId 去重的单表 + 引用计数。
 ///
 /// - 单线程使用, 不加锁 (协程推进、表操作、引用增减全在主线程)。
@@ -355,32 +300,6 @@ public:
     /// 不发起加载,按 id 查现有 slot(在飞或就绪)。未命中返回无效引用。
     StreamingAssetRefAny Find(const AssetId& id) noexcept;
 
-    /// 同步、原子挂载一个 Catalog source。Bundle 不拥有 payload storage。
-    BundleMountResult MountBundle(const std::filesystem::path& root, unique_ptr<BundleCatalogSource> source);
-
-    /// 按 BundleId 查找已挂载 Catalog，并取得一份保活引用。
-    BundleRef FindBundle(const BundleId& id) noexcept;
-
-    /// 在首次挂载前注册按 Catalog TypeId 选择的 loader。注册表冻结后返回 false。
-    bool RegisterBundleLoader(RuntimeTypeId typeId, BundleAssetLoader loader);
-    bool RegisterBundleLoaderSafe(RuntimeTypeId typeId, BundleAssetLoaderSafe loader);
-
-    /// 装配 ShaderAsset 的 JIT 服务。ShaderJit 对象及其特殊 shaderlib include path 由调用方
-    /// 持有；AssetManager 只保存非拥有指针，且异步 task 会在调用时复制所需 source/descriptor。
-    void SetShaderJit(Nullable<ShaderJit*> jit) noexcept { _shaderJit = jit; }
-    Nullable<ShaderJit*> GetShaderJit() const noexcept { return _shaderJit; }
-
-    /// 由 GpuSystem 服务装配上传调度器，供 Texture/StaticMesh Bundle loader 使用。
-    void SetGpuSystem(GpuSystem* gpuSystem) noexcept;
-    Nullable<FrameUploadScheduler*> GetFrameUploadScheduler() const noexcept { return _frameUploads; }
-
-    /// 按显式 AssetId 从 Catalog 发起加载。提交前错误不创建 slot；Unknown/Invalid/无 loader
-    /// 会创建带结构化错误的 Faulted slot。
-    AssetRequestResult LoadCatalog(
-        const AssetId& id,
-        RuntimeTypeId requestedType = Guid::Empty(),
-        string debugName = {});
-
     template <class T>
     requires std::derived_from<T, Asset>
     StreamingAssetRef<T> Find(const AssetId& id) noexcept;
@@ -421,12 +340,10 @@ public:
     void SetWaitFrameProcessor(IWaitFrameProcessor* processor) noexcept { _waitFrame = processor; }
 
     uint32_t GetAssetCount() const noexcept;
-    uint32_t GetBundleCount() const noexcept;
 
 private:
     friend class AssetWaitAwaitable;
     friend class StreamingAssetRefAny;
-    friend class BundleRef;
 
     using Slot = AssetSlot;
 
@@ -446,10 +363,6 @@ private:
     Slot* FindSlot(const AssetId& id) const noexcept;
     Slot* EmplaceLoadingSlot(const AssetId& id);
     StreamingAssetRefAny MakeRef(Slot* slot) noexcept;
-    StreamingAssetRefAny SubmitLoad(AssetLoadRequest request);
-    BundleSlot* FindBundleSlot(const BundleId& id) const noexcept;
-    BundleRef MakeBundleRef(BundleSlot* slot) noexcept;
-    Nullable<const BundleAssetEntry*> FindCatalogEntry(const AssetId& id) const noexcept;
 
     void PumpLoadResults();
     void FlushDeferredBatch();
@@ -461,8 +374,6 @@ private:
     void ResumeWaiters(Slot* slot) noexcept;
     void CollectZeroRefSlots();
     void DestroySlot(Slot* slot) noexcept;
-    void CollectZeroRefBundles();
-    void DestroyBundle(BundleSlot* slot) noexcept;
 
     AssetWaitRecord* RegisterWait(Slot* slot, stop_token stop, std::coroutine_handle<> continuation);
 
@@ -471,13 +382,10 @@ private:
 
     static void AddRef(Slot* slot) noexcept;
     static void Release(Slot* slot) noexcept;
-    static void AddBundleRef(BundleSlot* slot) noexcept;
-    static void ReleaseBundle(BundleSlot* slot) noexcept;
 
     IWaitFrameProcessor* _waitFrame{nullptr};
     TaskScope _loadScope;
     ManualCoroutineScheduler<AssetWaitRecord> _waiters;
-    unique_ptr<AssetBundleStore> _bundleStore;
     unordered_map<AssetId, unique_ptr<Slot>> _slots;
     /// 在飞加载的 slot。manager 自持一份引用 —— 加载期间外部引用可能全部消失, 但槽位要
     /// 活到协程跑完。
@@ -486,20 +394,11 @@ private:
     vector<unique_ptr<DeferredPayload>> _pendingDeferred;
     /// 递归保护: CollectZeroRefSlots 里销毁资产会放开它持有的引用, 从而令更多 slot 归零。
     bool _collecting{false};
-    Nullable<ShaderJit*> _shaderJit{nullptr};
-    Nullable<FrameUploadScheduler*> _frameUploads{nullptr};
 };
 
 template <class T>
 requires std::derived_from<T, Asset>
 StreamingAssetRef<T> AssetManager::Load(AssetLoadRequest request) {
-    if (FindCatalogEntry(request.Id)) {
-        AssetRequestResult catalogResult = LoadCatalog(request.Id, runtime_type_id_v<T>, std::move(request.DebugName));
-        if (!catalogResult.IsSubmitted()) {
-            return StreamingAssetRef<T>{};
-        }
-        return catalogResult.Reference->template CastTo<T>();
-    }
     return Load(std::move(request)).template CastTo<T>();
 }
 
@@ -561,7 +460,7 @@ StreamingAssetRef<T> StreamingAssetRefAny::CastTo() const noexcept {
 /// 由 ServiceRegistry 通过 RuntimeTypeTrait 的 Bases 别名解析到具体实现(如 GpuSystem)。
 template <>
 struct ServiceTraits<AssetManager> {
-    static constexpr auto Inject = std::tuple{&AssetManager::SetWaitFrameProcessor, &AssetManager::SetGpuSystem};
+    static constexpr auto Inject = std::tuple{&AssetManager::SetWaitFrameProcessor};
 };
 
 template <>
