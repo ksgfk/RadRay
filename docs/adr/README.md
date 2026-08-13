@@ -89,3 +89,5 @@ docs/adr/*.md
 | [0033](0033-include-path-abi-view-validation.md) | include path ABI view 的编码与输入校验 | 生效 |
 | [0034](0034-clang-dxc-compiler-pipeline-is-the-only-shader-semantic-authority.md) | Clang/DXC compiler pipeline 是唯一 shader 语义权威 | 生效 |
 | [0035](0035-optional-explicit-dxil-root-signature-and-rhi-fallback.md) | Optional Explicit DXIL Root Signature 与 D3D12 RHI fallback | 生效 |
+| [0036](0036-per-bundle-manifest-is-asset-identity-authority.md) | per-bundle 单清单是资产身份权威 | 生效 |
+| [0037](0037-manifest-dom-is-backing-store.md) | 清单 DOM 常驻作为后备存储 | 生效 |

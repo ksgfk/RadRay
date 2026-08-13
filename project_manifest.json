@@ -69,6 +69,12 @@
             "Tag": "v3.4.5"
         },
         {
+            "Name": "pugixml",
+            "Type": "git",
+            "Git": "https://github.com/zeux/pugixml.git",
+            "Tag": "v1.16"
+        },
+        {
             "Name": "zlib",
             "Type": "git",
             "Git": "https://github.com/madler/zlib.git",

@@ -1,5 +1,5 @@
 > - 适用: 资产生命周期、引用计数、加载去重或延迟 GPU 销毁
-> - 权威: 本文是 runtime 资产系统的唯一说明；帧边界与上传见 `architecture/frame-and-gpu.md`
+> - 权威: 本文是 runtime 资产系统的唯一说明；帧边界与上传见 `architecture/frame-and-gpu.md`，开发时身份持久化（bundle 清单、AssetDatabase）见 `architecture/asset-database.md`
 > - 锚点: `modules/runtime/include/radray/runtime/asset_manager.h`, `modules/runtime/src/asset_manager.cpp`, `modules/runtime/include/radray/runtime/asset.h`, `modules/runtime/include/radray/runtime/texture_asset.h`
 
 # 资产系统
@@ -32,6 +32,10 @@ AssetId MakeAssetIdFromPath(std::string_view namespacePrefix, const std::filesys
 namespace prefix 隔离资产类型；同一路径在不同资产类型下必须产生不同 ID。路径归一化
 使用 `weakly_canonical`，失败时依次退到 `absolute + lexically_normal` 和纯词法归一化，
 再以 `generic_string` 作为哈希输入；Windows 下转小写，POSIX 下保留大小写。
+
+AssetId 双轨并存（`architecture/asset-database.md`）：入库资产以 bundle 清单登记的 GUID
+为身份（`AddEntry` 一次分配、永不改变），散文件继续走这里的路径哈希；两轨共用
+`AssetManager` 的单 slot 表，互不迁移。
 
 ## 延迟销毁
 
