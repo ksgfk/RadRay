@@ -6,6 +6,7 @@
 
 #include <radray/coroutine.h>
 #include <radray/types.h>
+#include <radray/xml.h>
 
 #include <radray/runtime/asset.h>
 #include <radray/runtime/asset_bundle_manifest.h>
@@ -46,7 +47,7 @@ public:
         /// 【DOM 访问只允许发生在构造 AssetLoadRequest 的主线程时刻】loader 协程一旦挂起
         /// 去做异步 IO 就不得再碰 DOM (AddEntry 可能并发修改它), 所需参数必须在构造 task
         /// 前拷出。见 docs/architecture/asset-database.md。
-        pugi::xml_node Node;
+        XmlElement Node;
     };
 
     /// 按 GUID 解析条目。未命中返回 nullopt。纯查表, 不碰磁盘。
@@ -79,7 +80,7 @@ private:
 
     struct EntryRef {
         size_t BundleIndex{};
-        pugi::xml_node Node;
+        XmlElement Node;
     };
 
     size_t FindBundleIndex(std::string_view name) const noexcept;

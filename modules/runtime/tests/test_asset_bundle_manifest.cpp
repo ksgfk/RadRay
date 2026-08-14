@@ -182,9 +182,9 @@ TEST_F(AssetBundleManifestTest, GuidTolerantReadVerbatimPreserve) {
     string error;
     ASSERT_TRUE(manifest.LoadFromFile(ManifestPath(), error)) << error;
 
-    std::optional<pugi::xml_node> image = manifest.FindByGuid(ParseGuid(kImageGuid));
+    std::optional<XmlElement> image = manifest.FindByGuid(ParseGuid(kImageGuid));
     ASSERT_TRUE(image.has_value());
-    EXPECT_EQ(std::string_view(image->name()), "image");
+    EXPECT_EQ(image->Name(), "image");
     EXPECT_TRUE(manifest.FindByGuid(ParseGuid(kMeshGuid)).has_value());
 
     ASSERT_TRUE(manifest.Save(error)) << error;
@@ -237,13 +237,13 @@ TEST_F(AssetBundleManifestTest, FindByGuidAndPathCaseInsensitive) {
     string error;
     ASSERT_TRUE(manifest.LoadFromFile(ManifestPath(), error)) << error;
 
-    std::optional<pugi::xml_node> node = manifest.FindByGuid(ParseGuid(kMeshGuid));
+    std::optional<XmlElement> node = manifest.FindByGuid(ParseGuid(kMeshGuid));
     ASSERT_TRUE(node.has_value());
-    EXPECT_EQ(std::string_view(node->name()), "mesh");
+    EXPECT_EQ(node->Name(), "mesh");
 
     node = manifest.FindByPath("skybox.png");
     ASSERT_TRUE(node.has_value());
-    EXPECT_EQ(std::string_view(node->name()), "image");
+    EXPECT_EQ(node->Name(), "image");
 
     node = manifest.FindByPath("SKYBOX.PNG");
     ASSERT_TRUE(node.has_value());
@@ -258,13 +258,13 @@ TEST_F(AssetBundleManifestTest, LeafHelperRoundTrip) {
     string error;
     ASSERT_TRUE(manifest.LoadFromFile(ManifestPath(), error)) << error;
 
-    std::optional<pugi::xml_node> image = manifest.FindByGuid(ParseGuid(kImageGuid));
+    std::optional<XmlElement> image = manifest.FindByGuid(ParseGuid(kImageGuid));
     ASSERT_TRUE(image.has_value());
-    pugi::xml_node node = *image;
+    XmlElement node = *image;
 
     // 读既有叶子与非叶子内嵌叶子。
     EXPECT_EQ(ReadBool(node, "srgb"), std::optional<bool>(true));
-    EXPECT_EQ(ReadInt(node.child("setting"), "lodBias"), std::optional<int64_t>(1));
+    EXPECT_EQ(ReadInt(node.Child("setting"), "lodBias"), std::optional<int64_t>(1));
     EXPECT_FALSE(ReadBool(node, "missing").has_value());
 
     // 写: 追加后原位改写, 不产生重复元素。
@@ -273,8 +273,8 @@ TEST_F(AssetBundleManifestTest, LeafHelperRoundTrip) {
     WriteInt(node, "foo", 7);
     EXPECT_EQ(ReadInt(node, "foo"), std::optional<int64_t>(7));
     int count = 0;
-    for (pugi::xml_node child : node.children("int")) {
-        if (std::string_view(child.attribute("name").value()) == "foo") {
+    for (const XmlElement& child : node.Children("int")) {
+        if (child.GetAttributeNode("name").Value() == "foo") {
             ++count;
         }
     }
@@ -300,7 +300,7 @@ TEST_F(AssetBundleManifestTest, LeafHelperRoundTrip) {
 
     AssetBundleManifest reloaded;
     ASSERT_TRUE(reloaded.LoadFromFile(ManifestPath(), error)) << error;
-    std::optional<pugi::xml_node> reloadedNode = reloaded.FindByGuid(ParseGuid(kImageGuid));
+    std::optional<XmlElement> reloadedNode = reloaded.FindByGuid(ParseGuid(kImageGuid));
     ASSERT_TRUE(reloadedNode.has_value());
     EXPECT_EQ(ReadInt(*reloadedNode, "foo"), std::optional<int64_t>(7));
     EXPECT_EQ(ReadFloat(*reloadedNode, "lod"), std::optional<float>(0.1f));
@@ -317,7 +317,7 @@ TEST_F(AssetBundleManifestTest, GuidValueTolerantRead) {
     string error;
     ASSERT_TRUE(manifest.LoadFromFile(ManifestPath(), error)) << error;
 
-    std::optional<pugi::xml_node> node = manifest.FindByGuid(ParseGuid(kImageGuid));
+    std::optional<XmlElement> node = manifest.FindByGuid(ParseGuid(kImageGuid));
     ASSERT_TRUE(node.has_value());
     EXPECT_EQ(ReadGuid(*node, "ref"), std::optional<Guid>(ParseGuid(kImageGuid)));
     EXPECT_EQ(ReadGuid(*node, "refN"), std::optional<Guid>(ParseGuid(kImageGuid)));
@@ -335,7 +335,7 @@ TEST_F(AssetBundleManifestTest, MalformedLeafValuesDoNotRejectManifest) {
     string error;
     ASSERT_TRUE(manifest.LoadFromFile(ManifestPath(), error)) << error;
 
-    std::optional<pugi::xml_node> node = manifest.FindByGuid(ParseGuid(kImageGuid));
+    std::optional<XmlElement> node = manifest.FindByGuid(ParseGuid(kImageGuid));
     ASSERT_TRUE(node.has_value());
     EXPECT_FALSE(ReadInt(*node, "bad").has_value());
     EXPECT_FALSE(ReadBool(*node, "bad2").has_value());
@@ -353,7 +353,7 @@ TEST_F(AssetBundleManifestTest, ListReadsAllSameNameLeaves) {
     string error;
     ASSERT_TRUE(manifest.LoadFromFile(ManifestPath(), error)) << error;
 
-    std::optional<pugi::xml_node> node = manifest.FindByGuid(ParseGuid(kImageGuid));
+    std::optional<XmlElement> node = manifest.FindByGuid(ParseGuid(kImageGuid));
     ASSERT_TRUE(node.has_value());
     // 同名全部收进列表, 坏值跳过, 异名不串。
     const vector<int64_t> items = ReadIntList(*node, "items");

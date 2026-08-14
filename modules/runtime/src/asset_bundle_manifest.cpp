@@ -40,14 +40,14 @@ string FoldPathKey(std::string_view value) {
 
 /// 在 node 的直接子节点里找叶子: 元素名 = typeName、name 属性 = name。命中但缺 value
 /// 属性视为坏值, 与未命中同样返回 nullopt。
-std::optional<pugi::xml_attribute> FindLeafValue(const pugi::xml_node& node, const char* typeName, std::string_view name) {
-    for (pugi::xml_node child : node.children(typeName)) {
-        const pugi::xml_attribute nameAttr = child.attribute("name");
-        if (!nameAttr || std::string_view(nameAttr.value()) != name) {
+std::optional<XmlAttribute> FindLeafValue(const XmlElement& node, const char* typeName, std::string_view name) {
+    for (const XmlElement& child : node.Children(typeName)) {
+        const XmlAttribute nameAttr = child.GetAttributeNode("name");
+        if (!nameAttr.IsValid() || nameAttr.Value() != name) {
             continue;
         }
-        const pugi::xml_attribute valueAttr = child.attribute("value");
-        if (!valueAttr) {
+        const XmlAttribute valueAttr = child.GetAttributeNode("value");
+        if (!valueAttr.IsValid()) {
             return std::nullopt;
         }
         return valueAttr;
@@ -56,27 +56,27 @@ std::optional<pugi::xml_attribute> FindLeafValue(const pugi::xml_node& node, con
 }
 
 template <class T, class Parse>
-std::optional<T> ReadLeafValue(const pugi::xml_node& node, const char* typeName, std::string_view name, Parse parse) {
-    std::optional<pugi::xml_attribute> value = FindLeafValue(node, typeName, name);
+std::optional<T> ReadLeafValue(const XmlElement& node, const char* typeName, std::string_view name, Parse parse) {
+    std::optional<XmlAttribute> value = FindLeafValue(node, typeName, name);
     if (!value.has_value()) {
         return std::nullopt;
     }
-    return parse(value->value());
+    return parse(value->Value());
 }
 
 template <class T, class Parse>
-vector<T> ReadLeafValueList(const pugi::xml_node& node, const char* typeName, std::string_view name, Parse parse) {
+vector<T> ReadLeafValueList(const XmlElement& node, const char* typeName, std::string_view name, Parse parse) {
     vector<T> out;
-    for (pugi::xml_node child : node.children(typeName)) {
-        const pugi::xml_attribute nameAttr = child.attribute("name");
-        if (!nameAttr || std::string_view(nameAttr.value()) != name) {
+    for (const XmlElement& child : node.Children(typeName)) {
+        const XmlAttribute nameAttr = child.GetAttributeNode("name");
+        if (!nameAttr.IsValid() || nameAttr.Value() != name) {
             continue;
         }
-        const pugi::xml_attribute valueAttr = child.attribute("value");
-        if (!valueAttr) {
+        const XmlAttribute valueAttr = child.GetAttributeNode("value");
+        if (!valueAttr.IsValid()) {
             continue;
         }
-        std::optional<T> parsed = parse(valueAttr.value());
+        std::optional<T> parsed = parse(valueAttr.Value());
         if (parsed.has_value()) {
             out.push_back(std::move(*parsed));
         }
@@ -84,23 +84,19 @@ vector<T> ReadLeafValueList(const pugi::xml_node& node, const char* typeName, st
     return out;
 }
 
-void WriteLeafValue(pugi::xml_node& node, const char* typeName, std::string_view name, std::string_view value) {
-    for (pugi::xml_node child : node.children(typeName)) {
-        const pugi::xml_attribute nameAttr = child.attribute("name");
-        if (!nameAttr || std::string_view(nameAttr.value()) != name) {
+void WriteLeafValue(XmlElement& node, const char* typeName, std::string_view name, std::string_view value) {
+    for (XmlElement& child : node.Children(typeName)) {
+        const XmlAttribute nameAttr = child.GetAttributeNode("name");
+        if (!nameAttr.IsValid() || nameAttr.Value() != name) {
             continue;
         }
-        pugi::xml_attribute valueAttr = child.attribute("value");
-        if (!valueAttr) {
-            valueAttr = child.append_attribute("value");
-        }
-        valueAttr.set_value(string(value).c_str());
+        child.SetAttribute("value", value);
         return;
     }
 
-    pugi::xml_node child = node.append_child(typeName);
-    child.append_attribute("name").set_value(string(name).c_str());
-    child.append_attribute("value").set_value(string(value).c_str());
+    XmlElement child = node.AppendChild(typeName);
+    child.SetAttribute("name", name);
+    child.SetAttribute("value", value);
 }
 
 }  // namespace
@@ -172,25 +168,22 @@ bool AssetBundleManifest::LoadFromFile(const std::filesystem::path& path, string
     Reset();
     _path = path;
 
-    // path.c_str() 在 Windows 上是 wchar_t*, 命中 pugixml 的宽字符重载 (内部转 UTF-8
-    // 打开), 避免窄字符重载的 ANSI 代码页路径丢失; POSIX 上命中 char 重载。
-    const pugi::xml_parse_result result = _document.load_file(path.c_str(),
-        pugi::parse_default | pugi::parse_comments | pugi::parse_ws_pcdata, pugi::encoding_auto);
-    if (!result) {
-        outError = fmt::format("{}: XML parse failed at offset {}: {}", path.string(), result.offset, result.description());
+    // 解析标志: 保留注释 (merge 友好动机) 与纯空白文本节点 (pugixml 默认丢)。
+    // Load 失败时 outError 已含 offset/description。
+    if (!_document.Load(path, XmlParseFlag::Comments | XmlParseFlag::WhitespaceText, &outError)) {
         Reset();
         return false;
     }
 
-    const pugi::xml_node root = _document.document_element();
-    if (!root || std::string_view(root.name()) != kManifestRootName) {
+    const XmlElement root = _document.DocumentElement();
+    if (!root.IsValid() || root.Name() != kManifestRootName) {
         outError = fmt::format("{}: root element must be <bundle>", path.string());
         Reset();
         return false;
     }
 
-    const pugi::xml_attribute version = root.attribute("version");
-    if (!version || std::string_view(version.value()) != kSupportedVersion) {
+    const XmlAttribute version = root.GetAttributeNode("version");
+    if (!version.IsValid() || version.Value() != kSupportedVersion) {
         outError = fmt::format("{}: <bundle> version must be \"1\"", path.string());
         Reset();
         return false;
@@ -198,33 +191,34 @@ bool AssetBundleManifest::LoadFromFile(const std::filesystem::path& path, string
 
     // 身份契约: 只校验条目的元素名、guid、path 三样, 其余属性与子节点原样保留。
     unordered_set<AssetId> seenGuids;
-    for (pugi::xml_node entry : root.children()) {
-        if (entry.type() != pugi::node_element) {
+    for (const XmlNode& child : root.ChildNodes()) {
+        if (child.NodeType() != XmlNodeType::Element) {
             continue;
         }
+        const XmlElement entry{child};
 
-        const std::string_view type = entry.name();
-        const pugi::xml_attribute guidAttr = entry.attribute("guid");
-        if (!guidAttr) {
+        const std::string_view type = entry.Name();
+        const XmlAttribute guidAttr = entry.GetAttributeNode("guid");
+        if (!guidAttr.IsValid()) {
             outError = fmt::format("{}: entry <{}>: missing 'guid' attribute", path.string(), type);
             Reset();
             return false;
         }
-        const pugi::xml_attribute pathAttr = entry.attribute("path");
-        if (!pathAttr) {
+        const XmlAttribute pathAttr = entry.GetAttributeNode("path");
+        if (!pathAttr.IsValid()) {
             outError = fmt::format("{}: entry <{}>: missing 'path' attribute", path.string(), type);
             Reset();
             return false;
         }
 
         AssetId guid;
-        if (!Guid::TryParse(guidAttr.value(), guid)) {
-            outError = fmt::format("{}: entry <{}>: invalid guid '{}'", path.string(), type, guidAttr.value());
+        if (!Guid::TryParse(guidAttr.Value(), guid)) {
+            outError = fmt::format("{}: entry <{}>: invalid guid '{}'", path.string(), type, guidAttr.Value());
             Reset();
             return false;
         }
 
-        const std::string_view relPath = pathAttr.value();
+        const std::string_view relPath = pathAttr.Value();
         if (!IsValidStoredPath(relPath)) {
             outError = fmt::format("{}: entry <{}>: invalid path '{}' (must be a '/'-separated bundle-relative path)",
                 path.string(), type, relPath);
@@ -265,18 +259,18 @@ bool AssetBundleManifest::Save(string& outError) const {
     // (docs/adr/0037-manifest-dom-is-backing-store.md)。format_no_declaration: 原文件无
     // XML 声明时不凭空补一份 (已有声明节点按原样写出)。根元素之后的尾随空白不在 DOM 内,
     // 写回不保留。
-    if (!_document.save_file(_path.c_str(), "  ", pugi::format_raw | pugi::format_no_declaration, pugi::encoding_auto)) {
+    if (!_document.Save(_path, XmlFormatFlag::Raw | XmlFormatFlag::NoDeclaration)) {
         outError = fmt::format("{}: failed to save bundle manifest", _path.string());
         return false;
     }
     return true;
 }
 
-pugi::xml_node AssetBundleManifest::Root() const noexcept {
-    return _document.document_element();
+XmlElement AssetBundleManifest::Root() const noexcept {
+    return _document.DocumentElement();
 }
 
-std::optional<pugi::xml_node> AssetBundleManifest::FindByGuid(const AssetId& id) const noexcept {
+std::optional<XmlElement> AssetBundleManifest::FindByGuid(const AssetId& id) const noexcept {
     auto it = _byGuid.find(id);
     if (it == _byGuid.end()) {
         return std::nullopt;
@@ -284,7 +278,7 @@ std::optional<pugi::xml_node> AssetBundleManifest::FindByGuid(const AssetId& id)
     return it->second;
 }
 
-std::optional<pugi::xml_node> AssetBundleManifest::FindByPath(std::string_view relPath) const noexcept {
+std::optional<XmlElement> AssetBundleManifest::FindByPath(std::string_view relPath) const noexcept {
     auto it = _byPath.find(FoldPathKey(relPath));
     if (it == _byPath.end()) {
         return std::nullopt;
@@ -292,7 +286,7 @@ std::optional<pugi::xml_node> AssetBundleManifest::FindByPath(std::string_view r
     return it->second;
 }
 
-pugi::xml_node AssetBundleManifest::AppendEntry(std::string_view type, const AssetId& guid, std::string_view relPath) {
+XmlElement AssetBundleManifest::AppendEntry(std::string_view type, const AssetId& guid, std::string_view relPath) {
     if (!_loaded) {
         RADRAY_ABORT("AssetBundleManifest::AppendEntry: manifest is not loaded");
     }
@@ -308,14 +302,13 @@ pugi::xml_node AssetBundleManifest::AppendEntry(std::string_view type, const Ass
 
     // 恒定追加到 <bundle> 末尾, 不做排序插入 —— 对既有节点零扰动, 两个分支同时追加时的
     // merge 冲突是"两侧都保留"的平凡形态。
-    const string typeName(type);
     const string guidText = guid.ToString();
     const string pathText(relPath);
 
-    pugi::xml_node entry = _document.document_element().append_child(pugi::node_element);
-    entry.set_name(typeName.c_str());
-    entry.append_attribute("guid").set_value(guidText.c_str());
-    entry.append_attribute("path").set_value(pathText.c_str());
+    XmlElement entry = _document.CreateElement(type);
+    entry.SetAttribute("guid", guidText);
+    entry.SetAttribute("path", pathText);
+    _document.DocumentElement().AppendChild(entry);
 
     _byGuid.emplace(guid, entry);
     _byPath.emplace(FoldPathKey(relPath), entry);
@@ -323,19 +316,19 @@ pugi::xml_node AssetBundleManifest::AppendEntry(std::string_view type, const Ass
 }
 
 void AssetBundleManifest::Reset() noexcept {
-    _document.reset();
+    _document.Reset();
     _path.clear();
     _byGuid.clear();
     _byPath.clear();
     _loaded = false;
 }
 
-std::optional<string> ReadString(const pugi::xml_node& node, std::string_view name) {
-    return ReadLeafValue<string>(node, kLeafTypeString.data(), name, [](const char* value) { return std::optional<string>{value}; });
+std::optional<string> ReadString(const XmlElement& node, std::string_view name) {
+    return ReadLeafValue<string>(node, kLeafTypeString.data(), name, [](std::string_view value) { return std::optional<string>{value}; });
 }
 
-std::optional<int64_t> ReadInt(const pugi::xml_node& node, std::string_view name) {
-    return ReadLeafValue<int64_t>(node, kLeafTypeInt.data(), name, [](const char* value) {
+std::optional<int64_t> ReadInt(const XmlElement& node, std::string_view name) {
+    return ReadLeafValue<int64_t>(node, kLeafTypeInt.data(), name, [](std::string_view value) {
         const std::string_view text = TrimAscii(value);
         int64_t out = 0;
         const auto [ptr, ec] = std::from_chars(text.data(), text.data() + text.size(), out, 10);
@@ -346,8 +339,8 @@ std::optional<int64_t> ReadInt(const pugi::xml_node& node, std::string_view name
     });
 }
 
-std::optional<float> ReadFloat(const pugi::xml_node& node, std::string_view name) {
-    return ReadLeafValue<float>(node, kLeafTypeFloat.data(), name, [](const char* value) {
+std::optional<float> ReadFloat(const XmlElement& node, std::string_view name) {
+    return ReadLeafValue<float>(node, kLeafTypeFloat.data(), name, [](std::string_view value) {
         const std::string_view text = TrimAscii(value);
         float out = 0.0f;
         const auto [ptr, ec] = std::from_chars(text.data(), text.data() + text.size(), out, std::chars_format::general);
@@ -358,8 +351,8 @@ std::optional<float> ReadFloat(const pugi::xml_node& node, std::string_view name
     });
 }
 
-std::optional<bool> ReadBool(const pugi::xml_node& node, std::string_view name) {
-    return ReadLeafValue<bool>(node, kLeafTypeBool.data(), name, [](const char* value) {
+std::optional<bool> ReadBool(const XmlElement& node, std::string_view name) {
+    return ReadLeafValue<bool>(node, kLeafTypeBool.data(), name, [](std::string_view value) {
         const std::string_view text = TrimAscii(value);
         if (text == "true") {
             return std::optional<bool>{true};
@@ -371,8 +364,8 @@ std::optional<bool> ReadBool(const pugi::xml_node& node, std::string_view name) 
     });
 }
 
-std::optional<Guid> ReadGuid(const pugi::xml_node& node, std::string_view name) {
-    return ReadLeafValue<Guid>(node, kLeafTypeGuid.data(), name, [](const char* value) {
+std::optional<Guid> ReadGuid(const XmlElement& node, std::string_view name) {
+    return ReadLeafValue<Guid>(node, kLeafTypeGuid.data(), name, [](std::string_view value) {
         Guid out;
         if (!Guid::TryParse(value, out)) {
             return std::optional<Guid>{};
@@ -381,12 +374,12 @@ std::optional<Guid> ReadGuid(const pugi::xml_node& node, std::string_view name) 
     });
 }
 
-vector<string> ReadStringList(const pugi::xml_node& node, std::string_view name) {
-    return ReadLeafValueList<string>(node, kLeafTypeString.data(), name, [](const char* value) { return std::optional<string>{value}; });
+vector<string> ReadStringList(const XmlElement& node, std::string_view name) {
+    return ReadLeafValueList<string>(node, kLeafTypeString.data(), name, [](std::string_view value) { return std::optional<string>{value}; });
 }
 
-vector<int64_t> ReadIntList(const pugi::xml_node& node, std::string_view name) {
-    return ReadLeafValueList<int64_t>(node, kLeafTypeInt.data(), name, [](const char* value) {
+vector<int64_t> ReadIntList(const XmlElement& node, std::string_view name) {
+    return ReadLeafValueList<int64_t>(node, kLeafTypeInt.data(), name, [](std::string_view value) {
         const std::string_view text = TrimAscii(value);
         int64_t out = 0;
         const auto [ptr, ec] = std::from_chars(text.data(), text.data() + text.size(), out, 10);
@@ -397,8 +390,8 @@ vector<int64_t> ReadIntList(const pugi::xml_node& node, std::string_view name) {
     });
 }
 
-vector<float> ReadFloatList(const pugi::xml_node& node, std::string_view name) {
-    return ReadLeafValueList<float>(node, kLeafTypeFloat.data(), name, [](const char* value) {
+vector<float> ReadFloatList(const XmlElement& node, std::string_view name) {
+    return ReadLeafValueList<float>(node, kLeafTypeFloat.data(), name, [](std::string_view value) {
         const std::string_view text = TrimAscii(value);
         float out = 0.0f;
         const auto [ptr, ec] = std::from_chars(text.data(), text.data() + text.size(), out, std::chars_format::general);
@@ -409,8 +402,8 @@ vector<float> ReadFloatList(const pugi::xml_node& node, std::string_view name) {
     });
 }
 
-vector<bool> ReadBoolList(const pugi::xml_node& node, std::string_view name) {
-    return ReadLeafValueList<bool>(node, kLeafTypeBool.data(), name, [](const char* value) {
+vector<bool> ReadBoolList(const XmlElement& node, std::string_view name) {
+    return ReadLeafValueList<bool>(node, kLeafTypeBool.data(), name, [](std::string_view value) {
         const std::string_view text = TrimAscii(value);
         if (text == "true") {
             return std::optional<bool>{true};
@@ -422,8 +415,8 @@ vector<bool> ReadBoolList(const pugi::xml_node& node, std::string_view name) {
     });
 }
 
-vector<Guid> ReadGuidList(const pugi::xml_node& node, std::string_view name) {
-    return ReadLeafValueList<Guid>(node, kLeafTypeGuid.data(), name, [](const char* value) {
+vector<Guid> ReadGuidList(const XmlElement& node, std::string_view name) {
+    return ReadLeafValueList<Guid>(node, kLeafTypeGuid.data(), name, [](std::string_view value) {
         Guid out;
         if (!Guid::TryParse(value, out)) {
             return std::optional<Guid>{};
@@ -432,23 +425,23 @@ vector<Guid> ReadGuidList(const pugi::xml_node& node, std::string_view name) {
     });
 }
 
-void WriteString(pugi::xml_node& node, std::string_view name, std::string_view value) {
+void WriteString(XmlElement& node, std::string_view name, std::string_view value) {
     WriteLeafValue(node, kLeafTypeString.data(), name, value);
 }
 
-void WriteInt(pugi::xml_node& node, std::string_view name, int64_t value) {
+void WriteInt(XmlElement& node, std::string_view name, int64_t value) {
     WriteLeafValue(node, kLeafTypeInt.data(), name, fmt::format("{}", value));
 }
 
-void WriteFloat(pugi::xml_node& node, std::string_view name, float value) {
+void WriteFloat(XmlElement& node, std::string_view name, float value) {
     WriteLeafValue(node, kLeafTypeFloat.data(), name, fmt::format("{}", value));
 }
 
-void WriteBool(pugi::xml_node& node, std::string_view name, bool value) {
+void WriteBool(XmlElement& node, std::string_view name, bool value) {
     WriteLeafValue(node, kLeafTypeBool.data(), name, value ? "true" : "false");
 }
 
-void WriteGuid(pugi::xml_node& node, std::string_view name, const Guid& value) {
+void WriteGuid(XmlElement& node, std::string_view name, const Guid& value) {
     WriteLeafValue(node, kLeafTypeGuid.data(), name, value.ToString());
 }
 

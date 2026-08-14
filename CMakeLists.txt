@@ -115,8 +115,6 @@ add_subdirectory(${RADRAY_THIRDPARTY_ROOT}/yyjson)
 radray_optimize_flags_library(yyjson)
 radray_set_build_path(yyjson)
 
-# pugixml: bundle.xml 清单的 DOM 后备存储 (docs/architecture/asset-database.md)。
-# 关闭 XPath 与异常对齐仓库异常规则; 上游经 PUGIXML_PUBLIC_DEFINITIONS 把宏传进 PUBLIC 定义。
 set(PUGIXML_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(PUGIXML_INSTALL OFF CACHE BOOL "" FORCE)
 set(PUGIXML_NO_XPATH ON CACHE BOOL "" FORCE)

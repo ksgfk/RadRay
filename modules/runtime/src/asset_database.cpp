@@ -132,26 +132,27 @@ bool AssetDatabase::Mount(const std::filesystem::path& assetRoot, string& outErr
     // 这里补跨 bundle 的 GUID 唯一 (身份权威)。
     for (size_t i = 0; i < _bundles.size(); ++i) {
         const Bundle& bundle = _bundles[i];
-        for (pugi::xml_node entry : bundle.Manifest.Root().children()) {
-            if (entry.type() != pugi::node_element) {
+        for (const XmlNode& child : bundle.Manifest.Root().ChildNodes()) {
+            if (child.NodeType() != XmlNodeType::Element) {
                 continue;
             }
+            const XmlElement entry{child};
 
             AssetId guid;
-            if (!Guid::TryParse(entry.attribute("guid").value(), guid)) {
+            if (!Guid::TryParse(entry.GetAttributeNode("guid").Value(), guid)) {
                 // LoadFromFile 已校验, 理论不可达; 保底防身份污染。
-                outError = fmt::format("bundle '{}': entry <{}> lost its guid after load", bundle.Name, entry.name());
+                outError = fmt::format("bundle '{}': entry <{}> lost its guid after load", bundle.Name, entry.Name());
                 Clear();
                 return false;
             }
             if (_byId.contains(guid)) {
-                outError = fmt::format("duplicate guid {} across bundles (bundle '{}', entry <{}>)", guid, bundle.Name, entry.name());
+                outError = fmt::format("duplicate guid {} across bundles (bundle '{}', entry <{}>)", guid, bundle.Name, entry.Name());
                 Clear();
                 return false;
             }
 
-            const std::string_view relPath = entry.attribute("path").value();
-            const string type(entry.name());
+            const std::string_view relPath = entry.GetAttributeNode("path").Value();
+            const string type(entry.Name());
             const string pathKey = FoldPathKey(bundle.Name) + "/" + FoldPathKey(relPath);
 
             if (!_loaders.contains(type)) {
@@ -179,8 +180,8 @@ std::optional<AssetDatabase::ResolvedAsset> AssetDatabase::Resolve(const AssetId
     const Bundle& bundle = _bundles[ref.BundleIndex];
 
     ResolvedAsset resolved;
-    resolved.AbsolutePath = bundle.Dir / ref.Node.attribute("path").value();
-    resolved.Type = ref.Node.name();
+    resolved.AbsolutePath = bundle.Dir / std::filesystem::path(string(ref.Node.GetAttributeNode("path").Value()));
+    resolved.Type = ref.Node.Name();
     resolved.Node = ref.Node;
     return resolved;
 }
@@ -217,7 +218,7 @@ std::optional<AssetId> AssetDatabase::AddEntry(std::string_view bundleName, std:
     // 入库资产的 GUID 由 NewGuid 一次分配、永不改变; 移动/重命名 = 人改清单 path, 不存在
     // 自动改 GUID 的代码路径 (ADR-0036)。
     const AssetId guid = Guid::NewGuid();
-    const pugi::xml_node node = bundle.Manifest.AppendEntry(type, guid, *normalized);
+    const XmlElement node = bundle.Manifest.AppendEntry(type, guid, *normalized);
 
     _byId.emplace(guid, EntryRef{index, node});
     _byPath.emplace(pathKey, guid);

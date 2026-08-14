@@ -122,8 +122,8 @@ TEST_F(AssetDatabaseTest, MountBuildsIndexResolveAndFind) {
     ASSERT_TRUE(resolved.has_value());
     EXPECT_EQ(resolved->AbsolutePath, _dir->Path / "env" / "skybox.png");
     EXPECT_EQ(resolved->Type, "image");
-    EXPECT_EQ(std::string_view(resolved->Node.name()), "image");
-    EXPECT_EQ(std::string_view(resolved->Node.attribute("guid").value()), kEnvImageGuid);
+    EXPECT_EQ(resolved->Node.Name(), "image");
+    EXPECT_EQ(resolved->Node.GetAttributeNode("guid").Value(), kEnvImageGuid);
 
     EXPECT_EQ(db.FindByPath("env", "skybox.png"), std::optional<AssetId>(image));
     // 大小写不敏感查表。

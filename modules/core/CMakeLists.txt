@@ -9,12 +9,12 @@ target_link_libraries(radraycore PUBLIC
     Eigen3::Eigen
     Pal::Sigslot
     STDEXEC::stdexec
-    pugixml-static
     $<$<BOOL:${RADRAY_ENABLE_MIMALLOC}>:mimalloc-override>)
 target_link_libraries(radraycore PRIVATE
     spdlog::spdlog
     xxHash::xxhash
     yyjson
+    pugixml-static
     $<$<PLATFORM_ID:Windows>:ole32>
     $<$<BOOL:${RADRAY_ENABLE_LIBPNG}>:png_static>
     $<$<BOOL:${RADRAY_ENABLE_LIBJPEG}>:jpeg-static>)

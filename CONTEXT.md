@@ -492,5 +492,14 @@ _Avoid_: blob（指承载 artifact 的单个文件）, cache（cache 可弃，ar
 _Avoid_: resource（resource 指 GPU 侧对象）
 
 **AssetId**:
-由归一化路径派生的资产标识。
+资产的持久标识，也是元数据存储的 key。入库资产由 GUID 标识（登记时分配一次、永不改变），
+散文件由归一化路径派生。
 _Avoid_: asset key, path hash
+
+**Asset metadata**:
+资产的持久化描述：类型、相对工程路径与参数数据。
+_Avoid_: asset record
+
+**Asset path**:
+资产相对工程的全局唯一路径。
+_Avoid_: bundle-relative path

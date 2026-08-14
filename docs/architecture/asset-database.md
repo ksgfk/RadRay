@@ -128,10 +128,12 @@ DOM 节点访问（包括 loader 解析自定义子节点）**只允许发生在
 主线程时刻**。loader 协程一旦挂起去做异步 IO，就不得再碰 DOM——`AddEntry` 可能并发修改
 它；所需参数必须在构造 task 前拷出。这条与 `AssetManager` 既有的单线程契约同级。
 
-## pugixml 依赖
+## XML 依赖
 
 pugixml v1.16 由 `project_manifest.json` 声明、`tools/fetch_third_party.py` 拉取，根
 `CMakeLists.txt` 照 yyjson 的方式接入（`PUGIXML_NO_XPATH` / `PUGIXML_NO_EXCEPTIONS` 均开启，
-对齐仓库异常规则）。`pugi::xml_node` 出现在 `AssetBundleManifest` / `ResolvedAsset` 的
-公开签名里，因此 `radraycore` PUBLIC 链接 `pugixml-static`——include 路径与宏口径随 core
-传给全部下游模块（与 fmt / sigslot 同级），消费 runtime 公开头的调用方无需自行链接 pugixml。
+对齐仓库异常规则）。pugixml 的 include 与链接被收进 `radraycore` 的 PRIVATE 依赖，下游不再
+直接接触 `<pugixml.hpp>`；core 用 `radray/xml.h` 的 `XmlDocument` / `XmlElement` /
+`XmlAttribute` / `XmlNode` 封装了 DOM（公开头只前置声明 pugixml 类型）。runtime 的
+`AssetBundleManifest` / `ResolvedAsset` 公开签名改用它——清单常驻存储是 `XmlDocument`，
+条目节点是 `XmlElement`，loader 经 `XmlElement` 与 D10 读写 helper 访问子节点。
