@@ -15,6 +15,7 @@ target_link_libraries(radraycore PRIVATE
     xxHash::xxhash
     yyjson
     pugixml-static
+    lmdb
     $<$<PLATFORM_ID:Windows>:ole32>
     $<$<BOOL:${RADRAY_ENABLE_LIBPNG}>:png_static>
     $<$<BOOL:${RADRAY_ENABLE_LIBJPEG}>:jpeg-static>)

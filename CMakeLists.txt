@@ -123,6 +123,18 @@ add_subdirectory(${RADRAY_THIRDPARTY_ROOT}/pugixml)
 radray_optimize_flags_library(pugixml-static)
 radray_set_build_path(pugixml-static)
 
+# LMDB 上游只随附 Makefile (无 CMake), 直接编译其纯 C 源 mdb.c + midl.c + module.c。
+add_library(lmdb STATIC
+    ${RADRAY_THIRDPARTY_ROOT}/lmdb/libraries/liblmdb/mdb.c
+    ${RADRAY_THIRDPARTY_ROOT}/lmdb/libraries/liblmdb/midl.c
+    ${RADRAY_THIRDPARTY_ROOT}/lmdb/libraries/liblmdb/module.c)
+target_include_directories(lmdb PUBLIC ${RADRAY_THIRDPARTY_ROOT}/lmdb/libraries/liblmdb)
+if (MSVC)
+    target_compile_definitions(lmdb PRIVATE _CRT_SECURE_NO_WARNINGS)
+endif()
+radray_optimize_flags_library(lmdb)
+radray_set_build_path(lmdb)
+
 add_subdirectory(${RADRAY_THIRDPARTY_ROOT}/sigslot)
 
 # cgltf 纯头文件库

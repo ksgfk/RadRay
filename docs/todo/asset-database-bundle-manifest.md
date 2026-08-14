@@ -1,7 +1,10 @@
 > - 适用: 开发时资产持久化——per-bundle XML 清单（`bundle.xml`）、`AssetDatabase` 门面与 `AssetManager` 桥接的专项实施计划
 > - 权威: 本文是 grilling 对齐后的专项实施计划；决策 rationale 冻结在 ADR-0036/0037，实现完成后的现状描述以 `docs/architecture/` 为准
-> - 状态: 已完成（2026-08-13；M0–M3 全部落地并全量构建/测试通过）。实现后的现状契约以
->   `docs/architecture/asset-database.md` 为准；下文是冻结的实施计划与对齐记录。
+> - 状态: 已作废（2026-08-14）。ADR-0038 以 LMDB 替换了 DOM 常驻后备存储，ADR-0039 正式放弃
+>   per-bundle 组织——本文所述的 bundle 系统（bundle 目录、`bundle.xml`、嵌套检测、per-bundle
+>   清单权威）整体不再实施。本文保留为历史快照；LMDB 迁移的实施计划见
+>   `docs/todo/asset-metadata-lmdb-store.md`，当前方向见
+>   `docs/adr/0039-abandon-bundle-organization-stabilize-asset-system.md`。
 > - 锚点: `docs/adr/0036-per-bundle-manifest-is-asset-identity-authority.md`, `docs/adr/0037-manifest-dom-is-backing-store.md`, `docs/architecture/asset-system.md`, `modules/runtime/include/radray/runtime/asset_manager.h`, `modules/runtime/include/radray/runtime/asset.h`, `modules/core/include/radray/guid.h`, `project_manifest.json`, `CMakeLists.txt`
 
 # 开发时资产持久化（bundle 清单与 AssetDatabase）计划

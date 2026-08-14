@@ -22,7 +22,7 @@
 | `utility.h` | `StaticCastUniquePtr`、`Unreachable`、`RADRAY_UNUSED` |
 | `scope_guard.h` | `ScopeGuard` / `MakeScopeGuard` |
 
-专用的：`json.h`（yyjson）、`binary_io.h`（小端读写）、`file.h`、`environment.h`、
+专用的：`json.h`（yyjson）、`lmdb.h`（LMDB）、`binary_io.h`（小端读写）、`file.h`、`environment.h`、
 `dynamic_library.h`、`guid.h`、`stopwatch.h`、`text_encoding.h`、`runtime_type.h`、
 `allocator.h`（GPU 子分配器，与堆无关）、`memory.h`、`sparse_set.h`、`channel.h`、
 `intrusive_ptr.h`、`structured_buffer.h`、`image_data.h`、`vertex_data.h`、
@@ -217,6 +217,11 @@ template <> struct JsonDeserializer<T> {
 ## 其他
 
 - **`scope_guard.h`** — `ScopeGuard` / `MakeScopeGuard`，`Dismiss()` 取消。移动后源自动 dismiss。
+- **`lmdb.h`** — LMDB（`third_party/lmdb`，OLDAP-2.8 许可）的薄封装，与 `json.h` /
+  `xml.h` 同模式（公开头只前置声明 `MDB_*`，PRIVATE 链接）。`LmdbEnvironment` /
+  `LmdbTransaction` / `LmdbCursor` 暴露 byte[] → byte[] 的 Get/Put/Delete/遍历，
+  错误收敛为 `LmdbResult`（Ok / NotFound / Failure）。**单写者、单线程**，读事务须在
+  写事务 begin 前结束。asset 元数据的运行时存储用它（ADR-0038）。
 - **`allocator.h`** — `BuddyAllocator` / `FirstFitAllocator`，都是**偏移量式子分配器**
   （返回 `Allocation{Offset, ...}`），给描述符堆和 GPU 内存用。**不是堆分配器**，那是 `memory.h`。
 - **`runtime_type.h`** — 无 RTTI 的类型标识。特化 `RuntimeTypeTrait<T>` 给一个 Guid，
@@ -257,3 +262,4 @@ template <> struct JsonDeserializer<T> {
 | `test_json.cpp` | `JsonTest` |
 | `test_json_serializer.cpp` | `JsonSerializerTest` |
 | `test_json_deserializer.cpp` | `JsonDeserializerTest` |
+| `test_lmdb.cpp` | `LmdbTest` |

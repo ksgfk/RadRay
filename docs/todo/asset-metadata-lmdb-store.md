@@ -2,8 +2,9 @@
 >   `AssetBundleManifest` / `AssetDatabase` 迁移、XML 降级为落盘序列化
 > - 权威: 本文是 grilling 对齐后的专项实施计划；决策 rationale 冻结在 ADR-0038（取代 ADR-0037
 >   的 DOM 常驻），实现完成后的现状描述以 `docs/architecture/` 为准
-> - 状态: 设计中（2026-08-14；ADR-0038 已冻结，实现未开始，尚有未决问题待 grill）
-> - 锚点: `docs/adr/0038-asset-metadata-in-lmdb.md`, `docs/adr/0036-per-bundle-manifest-is-asset-identity-authority.md`, `docs/adr/0037-manifest-dom-is-backing-store.md`, `docs/architecture/asset-database.md`, `modules/runtime/include/radray/runtime/asset_database.h`, `modules/runtime/include/radray/runtime/asset_bundle_manifest.h`, `modules/runtime/src/asset_database.cpp`, `modules/runtime/src/asset_bundle_manifest.cpp`, `modules/core/include/radray/xml.h`, `project_manifest.json`, `CMakeLists.txt`
+> - 状态: 已完成（2026-08-14；M0–M3 全部落地并全量构建/测试通过）。实现后的现状契约以
+>   `docs/architecture/asset-database.md` 为准；下文是冻结的实施计划与对齐记录。
+> - 锚点: `docs/adr/0038-asset-metadata-in-lmdb.md`, `docs/adr/0039-abandon-bundle-organization-stabilize-asset-system.md`, `docs/adr/0036-per-bundle-manifest-is-asset-identity-authority.md`, `docs/adr/0037-manifest-dom-is-backing-store.md`, `docs/architecture/asset-database.md`, `modules/runtime/include/radray/runtime/asset_database.h`, `modules/runtime/src/asset_database.cpp`, `modules/core/include/radray/lmdb.h`, `modules/core/include/radray/xml.h`, `project_manifest.json`, `CMakeLists.txt`
 
 # asset 元数据改用 LMDB 存储（实施计划）
 
@@ -219,3 +220,54 @@ data 段 := dataLen 字节 opaque bytes
 - **2026-08-14 / C8**：pugixml 与 `radray/xml.h` 保留（承担 XML 序列化），`XmlElement` 不再
   出现在资产消费方公开签名。
 - **2026-08-14 / C9**：旧 DOM 常驻实现、D10 helper、`XmlElement` 公开签名整体替换。
+
+## 落地记录（2026-08-14）
+
+- **未决问题收敛**（grilling 时用户拍板）：① LMDB KV 封装落 `radraycore`（`radray/lmdb.h`，
+  明确标注为 LMDB 封装）；② XML 落盘形态「先不管」——本轮保留 per-bundle `bundle.xml` 与
+  bundle 语义不动，只做内存侧的 DOM 常驻 → LMDB 迁移。
+- **M0**：`project_manifest.json` 加 lmdb（Git `LMDB_1.0.1`，OLDAP-2.8）；根 CMake 自建
+  `lmdb` 目标编译 `mdb.c`+`midl.c`+`module.c`（上游无 CMake，只随附 Makefile）。
+- **M1**：`modules/core` 新增 `lmdb.h`/`lmdb.cpp`——`LmdbEnvironment`/`LmdbTransaction`/
+  `LmdbCursor`，byte[]→byte[] 存取，错误收敛为 `LmdbResult`（Ok/NotFound/Failure），
+  PRIVATE 链接；`mdb_env_set_maxdbs(16)` 放开命名库。测试 `test_lmdb.cpp`（7 用例）。
+  `core-facilities.md` 增补 `lmdb.h` 条目。
+- **M2**：`AssetBundleManifest` 类改为 `BundleManifestEntry` + `LoadBundleManifest`/
+  `SaveBundleManifest` 自由函数；`AssetDatabase` 迁到 LMDB——`assets` 表 guid→value
+  （header `type`/`path` + data 段 = 条目 XML 快照），`Resolve` 读 LMDB（故去 const），
+  `ResolvedAsset` 去 `XmlElement::Node` 改拥有式 `Type`/`Data`，`FindByPath`/`AddEntry`/
+  `SaveBundle` 语义不变。临时工作库落系统 temp、`Clear`/析构删除。测试矩阵重写为
+  语义级（保序相关用例删除）。
+- **M3**：`architecture/asset-database.md` 重写为 LMDB 现状契约；`overview.md` 索引行更新。
+- 与 ADR-0038 的两处实现取舍：data 段本轮 = 条目元素自身的 XML 序列化（含未知属性与子
+  节点，round-trip 无损；「xml 先不管」），编码仍可被后续系统替换；header 的 `path` 本轮
+  保持 bundle 内相对路径（bundle 组织留待后续，届时再改 ADR-0036）。
+- 未新增任何 `try`/`catch`/`throw`；LMDB 错误经 `LmdbResult` + `string& outError` 走。
+
+## 后续轮次（2026-08-14）
+
+用户指令「把 runtime bundle 相关先删除」，一并落地：
+
+- 删除 `asset_bundle_manifest.h/.cpp`（`BundleManifestEntry` / `LoadBundleManifest` /
+  `SaveBundleManifest` / D10 读写 helper）及其测试，移除 CMake 注册。
+- `AssetDatabase` 去掉 bundle 概念与 XML 落盘：删 `Bundle` / `_bundles` / 嵌套检测 /
+  `FindByPath(bundleName,..)` / `SaveBundle` / `AddEntry(bundleName,..)`；`path` 改为
+  工程相对全局唯一，`AddEntry(relPath, type)` / `FindByPath(relPath)`；`Mount` 只开 LMDB
+  工作库，`AddEntry` 登记 data 段为空。`ResolvedAsset` 保留 `Type` / `Data`（data 本轮恒空）。
+- 因此本轮无 XML 持久快照，工作库是纯临时态（重 `Mount` 从空库开始）；ADR-0038 里
+  「XML 落盘快照」的描述相应暂不成立，待后续轮次决定持久化形态。
+- `NormalizeEntryPath` 从被删的 manifest 头迁入 `asset_database.cpp` 匿名命名空间。
+- 随后又删掉 `AssetDatabase` 的 loader 系列（`LoaderFn` / `RegisterLoader` / `FindLoader` /
+  `_loaders`）与 `LoadFromDatabase` 桥接：`AssetDatabase` 不再接触 `AssetManager`，
+  头不再包含 `asset_manager.h` / `coroutine.h`，加载桥接待后续轮次重建。
+- 再删 `_byPath` 与 `FindByPath`：`AssetDatabase` 退化为纯 GUID 键序库（`Mount` / `Resolve` /
+  `AddEntry`），path 只是 value header 元数据，本轮不校验唯一性、无 path→guid 反查。
+- 再改构造语义：`Mount` 改为构造函数 `AssetDatabase(assetRoot, storePath)`，失败抛
+  `std::runtime_error`（不再走 `bool + outError`）；`storePath` 由调用方传入、析构不删，
+  数据持久到下次打开（`ResolvedAsset::Data` 也改为 `vector<byte>`）。
+- **放弃 bundle、先稳定 asset 系统（ADR-0039，2026-08-14）**：正式冻结 per-bundle 组织
+  （bundle 目录、`bundle.xml`、bundle 名权威、嵌套检测、per-bundle 清单权威）为「放弃」，
+  asset 身份登记定格为纯 GUID 键序 LMDB 库。当前阶段目标是稳定 asset 系统——`AssetManager`
+  的生命周期/加载去重/延迟销毁与 `AssetDatabase` 的 LMDB 存取先做到可靠可测；XML 落盘快照、
+  加载桥接、bundle 组织留待有真实消费方后再设计（ADR-0036 标记「部分被 ADR-0039 取代」，
+  GUID 永久身份与双轨并存等身份规则保留）。
