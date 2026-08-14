@@ -1,5 +1,4 @@
 radray_add_test(test_asset_slot SOURCES test_asset_slot.cpp LINK_LIBS radrayruntime)
-radray_add_test(test_asset_bundle_manifest SOURCES test_asset_bundle_manifest.cpp LINK_LIBS radrayruntime)
 radray_add_test(test_asset_database SOURCES test_asset_database.cpp LINK_LIBS radrayruntime)
 
 if (RADRAY_ENABLE_SHADER_JIT)

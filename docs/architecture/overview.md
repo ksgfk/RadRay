@@ -88,7 +88,7 @@ docs/
     shaderlib.md        当前 HLSL 共享库边界
     shader-pipeline.md  source contract、双 target wire、decoder 与 JIT 边界
     asset-system.md     资产引用计数与延迟销毁
-    asset-database.md   bundle 清单、AssetDatabase 与加载桥接
+    asset-database.md   asset 元数据 LMDB 存储与 AssetDatabase 身份登记
     frame-and-gpu.md    帧序、flight、上传和关停
     render-rhi.md       RHI、后端、barrier 和同步
     render-framework.md 渲染框架、SceneProxy、Application、ServiceRegistry

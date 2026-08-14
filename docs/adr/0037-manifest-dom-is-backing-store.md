@@ -1,6 +1,6 @@
 # ADR-0037 清单 DOM 常驻作为后备存储
 
-状态: 生效
+状态: 已被 ADR-0038 取代
 日期: 2026-08
 影响: `modules/runtime` 的 `AssetBundleManifest` / `AssetDatabase`、`bundle.xml` 写回策略、loader 自定义子节点的消费方式、pugixml 依赖
 

@@ -115,8 +115,6 @@ add_subdirectory(${RADRAY_THIRDPARTY_ROOT}/yyjson)
 radray_optimize_flags_library(yyjson)
 radray_set_build_path(yyjson)
 
-# pugixml: bundle.xml 清单的 DOM 后备存储 (docs/architecture/asset-database.md)。
-# 关闭 XPath 与异常对齐仓库异常规则; 上游经 PUGIXML_PUBLIC_DEFINITIONS 把宏传进 PUBLIC 定义。
 set(PUGIXML_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(PUGIXML_INSTALL OFF CACHE BOOL "" FORCE)
 set(PUGIXML_NO_XPATH ON CACHE BOOL "" FORCE)
@@ -124,6 +122,18 @@ set(PUGIXML_NO_EXCEPTIONS ON CACHE BOOL "" FORCE)
 add_subdirectory(${RADRAY_THIRDPARTY_ROOT}/pugixml)
 radray_optimize_flags_library(pugixml-static)
 radray_set_build_path(pugixml-static)
+
+# LMDB 上游只随附 Makefile (无 CMake), 直接编译其纯 C 源 mdb.c + midl.c + module.c。
+add_library(lmdb STATIC
+    ${RADRAY_THIRDPARTY_ROOT}/lmdb/libraries/liblmdb/mdb.c
+    ${RADRAY_THIRDPARTY_ROOT}/lmdb/libraries/liblmdb/midl.c
+    ${RADRAY_THIRDPARTY_ROOT}/lmdb/libraries/liblmdb/module.c)
+target_include_directories(lmdb PUBLIC ${RADRAY_THIRDPARTY_ROOT}/lmdb/libraries/liblmdb)
+if (MSVC)
+    target_compile_definitions(lmdb PRIVATE _CRT_SECURE_NO_WARNINGS)
+endif()
+radray_optimize_flags_library(lmdb)
+radray_set_build_path(lmdb)
 
 add_subdirectory(${RADRAY_THIRDPARTY_ROOT}/sigslot)
 

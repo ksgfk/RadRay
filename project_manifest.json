@@ -75,6 +75,12 @@
             "Tag": "v1.16"
         },
         {
+            "Name": "lmdb",
+            "Type": "git",
+            "Git": "https://github.com/LMDB/lmdb.git",
+            "Tag": "LMDB_1.0.1"
+        },
+        {
             "Name": "zlib",
             "Type": "git",
             "Git": "https://github.com/madler/zlib.git",

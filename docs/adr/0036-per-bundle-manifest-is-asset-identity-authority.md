@@ -1,6 +1,6 @@
 # ADR-0036 per-bundle 单清单是资产身份权威
 
-状态: 生效
+状态: 部分被 ADR-0039 取代
 日期: 2026-08
 影响: `modules/runtime` 资产持久化（`AssetBundleManifest` / `AssetDatabase`）、`bundle.xml` schema、AssetId 生成规则、`docs/architecture/asset-system.md`
 
