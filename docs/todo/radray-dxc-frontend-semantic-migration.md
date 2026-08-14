@@ -1,6 +1,6 @@
 > - 适用: 把 RadRay DXC extension 的 source contract 与 metadata 从手写扫描迁移到 Clang/DXC compiler pipeline
 > - 权威: 本文是 ADR-0034 的实施与验收计划；shader 总体契约以 ADR-0016、include 边界以 ADR-0022 至 ADR-0031 和 ADR-0033 为准
-> - 状态: 已实施，待 Windows TAEF gate（2026-08-09；frontend、最终 target metadata、typed discovery、client 与消费者测试已落地；当前环境未提供 DXC ClangHLSLTests 所需 TAEF 二进制）
+> - 状态: 核心实现已落地，尚未完成全部验收（2026-08-14；Windows consumer、JIT-disabled 与 compiler-free gate 已通过；待 `.radray.4` 发布/manifest hash、fork 原生 compiler/SPIR-V/TAEF、非 Windows和 docs gate）
 > - 锚点: `modules/shader/include/radray/shader/shader_compiler_contract.h`, `modules/shader/src/shader_compiler_contract.cpp`, `modules/shader_compiler`, `modules/render/tests`, `docs/architecture/shader-pipeline.md`, `tools/fetch_sdks.py`
 
 # RadRay DXC frontend 语义迁移计划
@@ -55,7 +55,8 @@ typed request + ordered include paths
 `WrapperFrontendAction`/`MultiplexConsumer` 接入 DXC；DXIL/SPIR-V metadata 来自各自最终模型，
 SPIR-V selected entry 的 active resource 集合由 Sema AST 的 declaration/call graph 选择，binding/type
 事实仍从 legalization 后的最终 module 读取；push constant 作为接口事实保留。SPIR-V immutable
-sampler 在需要时使用不发布 DXIL lane 的辅助分析 invocation。当前实现仍可保留在
+sampler 在需要时使用不发布 DXIL lane 的辅助分析 invocation，并用作者显式 `register()` 与合并后的
+DXIL static-sampler register policy 关联。当前实现仍可保留在
 一个 fork-private translation unit 中，observer seam 与 owning facts 已按职责隔离；物理拆分不属于
 外部契约或验收条件。
 
@@ -86,7 +87,9 @@ contract facts 后只返回一份 contract。cook、跨后端 shader suite 和�
   则不升 schema。内部事实来源变化由 extension ABI/toolchain identity 表达。
 - 提升 toolchain identity、SDK package version/manifest hash，重新生成所有依赖 compiler output 的
   goldens。不得提供旧 discovery encoder、旧 IID 或 scanner fallback adapter；当前 package 为
-  `1.9.2607.radray.3`，ABI 为 2，discovery wire 为 3，metadata wire 为 4。
+  `1.9.2607.radray.4`，ABI 为 3，discovery wire 为 3，metadata wire 为 5。该 fork package
+  发布并取得 zip hash 前，`project_manifest.json` 继续固定到最后一个可下载的 `.radray.3`；不得
+  预先改 manifest version 而留下 404 或 hash mismatch。
 
 ### 3. Identity
 
@@ -158,8 +161,8 @@ symbol identity，不能使用 pointer 或物理 include path；冲突或无法�
   storage class、push constant、decorations、type tree、vertex locations 和 target-native offsets/strides。
 - graphics 的 VS/PS facts 在 lane 内合并，按 declaration key 合并同一 binding 并累计 visibility；类型、
   count、binding 或 immutable-sampler association 冲突即失败。compute 不走 graphics merge。
-- SPIR-V immutable sampler 继续按 HLSL declaration identity 关联 DXIL RootSignature static sampler；只
-  请求 SPIR-V 时允许执行不发布 DXIL bytecode 的辅助 analysis invocation。
+- SPIR-V immutable sampler 按作者显式 DXIL register 关联合并后的 RootSignature static sampler policy；
+  只请求 SPIR-V 时允许执行不发布 DXIL bytecode 的辅助 analysis invocation。
 - metadata encoder 只接受已经完成校验的 `LaneMetadata`。先完成所有 requested lanes，再一次性填充
   result；中途不得把成功 lane 暴露给 caller。
 
@@ -275,7 +278,7 @@ final-module test，真实 D3D12 harness 使用 extension bytecode 成功执行�
 检查站：active fork source 中不存在 scanner symbol；标准 `IDxcCompiler3` behavior 未变；
 `check-clang`、unit tests、SPIR-V tests 和 Windows TAEF gate 全部通过。
 
-### M5：RadRay client、SDK 与全量验收（consumer gate 已完成）
+### M5：RadRay client、SDK 与全量验收（Windows consumer/可选构建 gate 已完成）
 
 1. package 新 fork SDK，更新 manifest/hash；迁移 RadRay encoder/client 到 typed discovery request。
 2. 删除 RadRay 本地 discoverer 和平台 fallback，整理 consumer tests 与 goldens。
@@ -283,7 +286,18 @@ final-module test，真实 D3D12 harness 使用 extension bytecode 成功执行�
    compiler-free、D3D12、Vulkan 和跨平台 gates。
 
 检查站：旧 package/IID/wire 全部 fail closed；RadRay client/metadata/include/consumer gates 已通过；
-DXC 的 Windows TAEF gate 需在提供 TAEF binaries 的环境补跑；runtime/render 不新增 DXC SDK 依赖。
+2026-08-14 的 compiler-enabled、JIT-disabled 与 compiler-free 全量 CTest 分别为 219/219、209/209、
+179/179，compiler-free build tree 不含 DXC 文件或 cache 项。`.radray.4` SDK 已在临时目录成功打包；
+发布 archive/hash 尚未写入 manifest。DXC 的 Windows TAEF gate 需在提供 TAEF 开发头与库的环境补跑；
+当前机器只有 TAEF runtime。runtime/render 不新增 DXC SDK 依赖。
+
+**测试所用 DLL 的必要前置**：`radray_dxc_runtime_deploy` 从 `SDKs/radray_dxc/extracted` 拷贝 DLL，
+而 manifest 仍固定已发布的 `.radray.3`。因此任何 `cmake --build` 都会把手工部署到
+`build_debug/_build/<Config>/` 的工作树 fork DLL 覆盖回 `.radray.3`。要验证未发布的 fork 改动，
+必须在 build 之后、ctest 之前重新拷贝 fork 的 `dxcompiler.dll`，否则测得的是旧编译器。
+`.radray.3` 上 `MergeTypeFacts` 按下标逐项比较 per-stage type 数组，两个 stage 使用不同 cbuffer
+集合即误报 2107；工作里的 name-keyed union 已修复该缺陷。同一源在两个 DLL 下产出的 22 个
+`shader_artifacts/*.bin` golden 内容全部不同，因此 fixture 必须由 fork DLL 生成。
 
 ## 验证门槛
 
@@ -311,12 +325,25 @@ build 与 test 不并行。另做非 Windows compiler-client/semantic suite、JI
   compiler-private identity。
 - 新 ABI/package 跨平台可用，旧版本 fail closed；无 fallback、partial lane publication 或隐藏路径。
 - 三个 fork standalone targets/files 和 RadRay 的本地 scanner/独立 ABI probe 已删除，测试职责落在
-  DXC 自有 harness 与 RadRay consumer suites 的正确边界；当前环境仅缺 DXC Windows TAEF 运行依赖。
+  DXC 自有 harness 与 RadRay consumer suites 的正确边界；当前环境缺 DXC Windows TAEF 开发头与库，
+  非 Windows gate 也不能在本机执行。
 - 全量 compiler、client、JIT、D3D12/Vulkan、compiler-free 与 docs gates 通过后，才能把本计划标记完成。
+
+### 未修复缺陷
+
+- `CollectContractWithFrontend` 把 discovery profile 硬编码为 `lib_6_1`，忽略了请求里的
+  `Policy.ShaderModel`。SM 6.2+ 才有的语言特性会在 discovery 阶段就报错，例如 SM 6.6 的
+  `ResourceDescriptorHeap` 得到 `use of undeclared identifier`。concrete compile 已按
+  `ProfileForStage` 使用请求的 shader model，所以只有 discovery 这一条路径落后。
+  `SupportedNonDefaultCompilePolicyCompiles` 用 `ShaderModel = 65` 但源码只有 SM 6.0 特性，
+  因此测不到。修复方案是让 discovery 也从请求的 shader model 推导 `lib_6_x`。
+- `kMaxEntryCount` 在 `dxcradray.cpp` 中声明后从未使用，entry 数量实际由 contract 的
+  stage 唯一性规则约束。要么用它给 `EntryPoints` 设上界，要么删除。
 
 ## 非目标
 
-- 不扩展 vertex/pixel/compute 之外的新 shader stage，也不改变 shaderlib authoring/binding ABI。
+- 不扩展 vertex/pixel/compute 之外的新 shader stage；本轮只收紧既有 binding ABI，要求 live 资源同时
+  显式写 `VK_BINDING` 与 `register()`，不新增 numbered binding wrapper 或 sidecar metadata。
 - 不实现 include dependency graph、compiler cache invalidation、hermetic source bundle、cook publisher 或
   content-addressed artifact storage。
 - 不公开 AST/reflection API，不跨 call 缓存 AST，不把 include bytes/path 加入 shader identity。

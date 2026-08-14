@@ -1,7 +1,7 @@
 > - 适用: 将显式 HLSL Root Signature 的 DXC serialized blob 纳入 DXIL artifact，并保留缺省 `[RootSignature]` 时由 D3D12 RHI 自动生成 Root Signature 的 fallback
 > - 权威: 本文是设计对齐中的专项实施计划；“已确认”条目是当前会话输入，“待确认”条目不是仓库契约，全部决策关闭前禁止开始实现
 > - 状态: implementation-in-progress（2026-08-09；核心代码、回归测试与本地 SDK 包已完成；远端发布/manifest 更新和干净环境验证仍待完成）
-> - 锚点: `CONTEXT.md`, `docs/adr/0016-hlsl-and-radray-dxc-are-shader-authority.md`, `docs/architecture/shader-pipeline.md`, `docs/architecture/render-rhi.md`, `docs/research/dxc-serialized-root-signature-artifact.md`, `modules/shader/include/radray/shader/shader_compiler_contract.h`, `modules/shader/include/radray/shader/shader_artifact.h`, `modules/render/src/shader_artifact.cpp`, `modules/render/src/d3d12/d3d12_impl.cpp`, `F:\cpp\DirectXShaderCompiler\include\dxc\dxcapi_radrayext.h`, `F:\cpp\DirectXShaderCompiler\tools\clang\tools\dxcompiler\dxcradray.cpp`
+> - 锚点: `CONTEXT.md`, `docs/adr/0016-hlsl-and-radray-dxc-are-shader-authority.md`, `docs/architecture/shader-pipeline.md`, `docs/architecture/render-rhi.md`, `docs/research/dxc-serialized-root-signature-artifact.md`, `modules/shader/include/radray/shader/shader_compiler_contract.h`, `modules/shader/include/radray/shader/shader_artifact.h`, `modules/render/src/shader_artifact.cpp`, `modules/render/src/d3d12/d3d12_impl.cpp`
 
 # DXIL optional serialized Root Signature 与 D3D12 RHI fallback 计划
 

@@ -1,9 +1,9 @@
 #include <core/platform.hlsli>
 
 VK_BINDING(7, 1)
-Texture2D<float4> AlbedoTexture;
+Texture2D<float4> AlbedoTexture : register(t0);
 VK_BINDING(8, 1)
-SamplerState LinearSampler;
+SamplerState LinearSampler : register(s0);
 
 [shader("vertex")]
 float4 VSMain(float3 position : POSITION) : SV_Position {

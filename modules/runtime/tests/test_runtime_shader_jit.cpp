@@ -56,7 +56,7 @@ void CSMain(uint3 dispatchId : SV_DispatchThreadID) {
 constexpr std::string_view kComputeSource = R"hlsl(
 #include <core/platform.hlsli>
 VK_BINDING(0, 0)
-RWStructuredBuffer<uint> Output;
+RWStructuredBuffer<uint> Output : register(u0);
 
 [shader("compute")]
 [numthreads(1, 1, 1)]
@@ -635,7 +635,7 @@ TEST(RadRayRuntimeShaderJit, FixtureCaseReportCoversTargetNativeJitFacts) {
             shader::ShaderArtifactDecodeOptions options{
                 .Target = target,
                 .ExpectedGpuArtifact = artifact->ExpectedGpuArtifact,
-                .ExpectedToolchainIdentity = 0x0000000001090209ull};
+                .ExpectedToolchainIdentity = 0x0000000001090210ull};
             shader::ShaderArtifactDecodeError error = shader::ShaderArtifactDecodeError::None;
             std::optional<shader::ShaderArtifactView> generic;
             std::optional<render::BackendPipelineLayoutInput> layoutInput;

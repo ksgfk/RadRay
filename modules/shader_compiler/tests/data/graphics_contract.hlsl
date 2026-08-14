@@ -2,8 +2,8 @@
 
 #pragma radray_keyword_group QUALITY "low" "high"
 
-VK_BINDING(7, 1) Texture2D<float4> AlbedoTexture;
-SamplerState AlbedoSampler;
+VK_BINDING(7, 1) Texture2D<float4> AlbedoTexture : register(t0);
+VK_BINDING(8, 1) SamplerState AlbedoSampler : register(s0);
 
 [shader("vertex")]
 float4 VSMain(float3 position : POSITION) : SV_Position {

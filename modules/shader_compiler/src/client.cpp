@@ -270,12 +270,18 @@ DiscoveryResult Client::DiscoverSourceContract(
     std::span<const byte> source,
     shader::ShaderTarget target,
     std::span<const std::filesystem::path> includePaths) const {
-    DiscoveryResult result;
     shader::SourceContractRequest discoveryRequest;
     discoveryRequest.SourceName = string{sourceName};
     discoveryRequest.RootSource.assign(source.begin(), source.end());
     discoveryRequest.Targets = static_cast<shader::ShaderTargetMask>(shader::ToTargetMask(target));
-    const auto encoded = shader::EncodeSourceContractRequest(discoveryRequest);
+    return DiscoverSourceContract(discoveryRequest, includePaths);
+}
+
+DiscoveryResult Client::DiscoverSourceContract(
+    const shader::SourceContractRequest& request,
+    std::span<const std::filesystem::path> includePaths) const {
+    DiscoveryResult result;
+    const auto encoded = shader::EncodeSourceContractRequest(request);
     if (!encoded.has_value()) {
         result.Diagnostics.push_back({2000, "discovery request is invalid"});
         return result;
@@ -401,10 +407,17 @@ DiscoveryResult Client::DiscoverSourceContract(
     std::string_view sourceName,
     std::span<const byte> source,
     shader::ShaderTarget target,
+    std::span<const std::filesystem::path> includePaths) const {
+    shader::SourceContractRequest request;
+    request.SourceName = string{sourceName};
+    request.RootSource.assign(source.begin(), source.end());
+    request.Targets = static_cast<shader::ShaderTargetMask>(shader::ToTargetMask(target));
+    return DiscoverSourceContract(request, includePaths);
+}
+DiscoveryResult Client::DiscoverSourceContract(
+    const shader::SourceContractRequest& request,
     std::span<const std::filesystem::path>) const {
-    (void)sourceName;
-    (void)source;
-    (void)target;
+    (void)request;
     DiscoveryResult result;
     result.Status = shader::CompileStatus::InvalidRequest;
     result.Diagnostics.push_back({2001, "RadRay DXC fork is unavailable on this platform"});

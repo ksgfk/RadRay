@@ -9,10 +9,10 @@ struct FrameData {
 };
 
 VK_BINDING(0, 0)
-ConstantBuffer<FrameData> Frame;
+ConstantBuffer<FrameData> Frame : register(b0);
 
 VK_BINDING(1, 0)
-ConstantBuffer<DirectionalLight> Light;
+ConstantBuffer<DirectionalLight> Light : register(b1);
 
 struct VSInput {
     float3 Position : POSITION;

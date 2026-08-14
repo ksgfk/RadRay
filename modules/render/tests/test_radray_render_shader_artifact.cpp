@@ -77,7 +77,7 @@ ShaderArtifactDecodeOptions FixtureDecodeOptions(
     return ShaderArtifactDecodeOptions{
         .Target = target,
         .ExpectedGpuArtifact = test::ExpectedGpuArtifact(fixtureIndex.value_or(0), target),
-        .ExpectedToolchainIdentity = 0x0000000001090209ull};
+        .ExpectedToolchainIdentity = 0x0000000001090210ull};
 }
 
 std::optional<ShaderArtifactView> DecodeFixtureArtifact(
@@ -193,7 +193,7 @@ TEST(RadRayRenderShaderArtifact, DecodesEveryRawGoldenLaneWithoutCompiler) {
                 ShaderArtifactDecodeOptions{
                     .Target = target,
                     .ExpectedGpuArtifact = test::ExpectedGpuArtifact(index, target),
-                    .ExpectedToolchainIdentity = 0x0000000001090209ull},
+                    .ExpectedToolchainIdentity = 0x0000000001090210ull},
                 &error);
             ASSERT_TRUE(artifact.has_value()) << static_cast<uint32_t>(error);
             EXPECT_FALSE(artifact->Bytecode().empty());
@@ -205,7 +205,7 @@ TEST(RadRayRenderShaderArtifact, DecodesEveryRawGoldenLaneWithoutCompiler) {
                     ShaderArtifactDecodeOptions{
                         .Target = target,
                         .ExpectedGpuArtifact = test::ExpectedGpuArtifact(index, target),
-                        .ExpectedToolchainIdentity = 0x0000000001090209ull},
+                        .ExpectedToolchainIdentity = 0x0000000001090210ull},
                     &error);
                 ASSERT_TRUE(typed.has_value()) << static_cast<uint32_t>(error);
                 layoutInput = MakeBackendPipelineLayoutInput(*typed);
@@ -215,7 +215,7 @@ TEST(RadRayRenderShaderArtifact, DecodesEveryRawGoldenLaneWithoutCompiler) {
                     ShaderArtifactDecodeOptions{
                         .Target = target,
                         .ExpectedGpuArtifact = test::ExpectedGpuArtifact(index, target),
-                        .ExpectedToolchainIdentity = 0x0000000001090209ull},
+                        .ExpectedToolchainIdentity = 0x0000000001090210ull},
                     &error);
                 ASSERT_TRUE(typed.has_value()) << static_cast<uint32_t>(error);
                 layoutInput = MakeBackendPipelineLayoutInput(*typed);
@@ -542,7 +542,7 @@ TEST(RadRayRenderShaderArtifact, TypeTreeMutationDoesNotChangeGpuArtifactIdentit
         ShaderArtifactDecodeOptions{
             .Target = shader::ShaderTarget::DXIL,
             .ExpectedGpuArtifact = test::ExpectedGpuArtifact(8, shader::ShaderTarget::DXIL),
-            .ExpectedToolchainIdentity = 0x0000000001090209ull},
+            .ExpectedToolchainIdentity = 0x0000000001090210ull},
         &error);
     ASSERT_TRUE(artifact.has_value()) << static_cast<uint32_t>(error);
     EXPECT_EQ(artifact->Generic().Envelope().GpuArtifact, test::ExpectedGpuArtifact(8, shader::ShaderTarget::DXIL));
@@ -552,19 +552,24 @@ TEST(RadRayRenderShaderArtifact, FailsClosedForIdentityAndWireCorruption) {
     const std::filesystem::path path = std::filesystem::path{RADRAY_PROJECT_DIR} /
                                        "modules/render/tests/data/shader_artifacts/no_resource_graphics.dxil.bin";
     const shader::ShaderTarget target = shader::ShaderTarget::DXIL;
-    const shader::GpuArtifactHash expected = ExpectedArtifact(0, target);
+    const shader::GpuArtifactHash expected = test::ExpectedGpuArtifact(0, target);
     const vector<byte> original = ReadBinary(path);
     ASSERT_FALSE(original.empty());
 
-    auto decode = [&](const vector<byte>& blob, uint64_t toolchain = 0) {
+    auto decode = [&](const vector<byte>& blob,
+                      uint64_t toolchain = 0,
+                      ShaderArtifactDecodeError* error = nullptr) {
         return DecodeShaderArtifact(
             blob,
             ShaderArtifactDecodeOptions{
                 .Target = target,
                 .ExpectedGpuArtifact = expected,
-                .ExpectedToolchainIdentity = toolchain});
+                .ExpectedToolchainIdentity = toolchain},
+            error);
     };
-    EXPECT_FALSE(decode(original, 0xdeadbeefull).has_value());
+    ShaderArtifactDecodeError error = ShaderArtifactDecodeError::None;
+    EXPECT_FALSE(decode(original, 0xdeadbeefull, &error).has_value());
+    EXPECT_EQ(error, ShaderArtifactDecodeError::ToolchainMismatch);
     EXPECT_FALSE(decode(vector<byte>{original.begin(), original.begin() + sizeof(shader::WireMetadataEnvelope) - 1}).has_value());
 
     auto badMagic = original;
@@ -708,7 +713,7 @@ TEST(RadRayRenderShaderArtifact, RejectsDuplicateAndMalformedRecords) {
             ShaderArtifactDecodeOptions{
                 .Target = shader::ShaderTarget::DXIL,
                 .ExpectedGpuArtifact = test::ExpectedGpuArtifact(8, shader::ShaderTarget::DXIL),
-                .ExpectedToolchainIdentity = 0x0000000001090209ull});
+                .ExpectedToolchainIdentity = 0x0000000001090210ull});
         EXPECT_FALSE(artifact.has_value());
     };
     expectInvalidNestedType([](vector<shader::WireTypeRecord>& types) { types[7].Offset = 80; });
@@ -735,7 +740,7 @@ TEST(RadRayRenderShaderArtifact, RejectsDuplicateAndMalformedRecords) {
             ShaderArtifactDecodeOptions{
                 .Target = shader::ShaderTarget::DXIL,
                 .ExpectedGpuArtifact = test::ExpectedGpuArtifact(8, shader::ShaderTarget::DXIL),
-            .ExpectedToolchainIdentity = 0x0000000001090209ull},
+            .ExpectedToolchainIdentity = 0x0000000001090210ull},
             &error)
             .has_value());
     EXPECT_EQ(error, ShaderArtifactDecodeError::InvalidVertexInput);

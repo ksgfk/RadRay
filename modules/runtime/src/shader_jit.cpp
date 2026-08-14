@@ -3,6 +3,7 @@
 #if defined(RADRAY_ENABLE_SHADER_JIT)
 
 #include <radray/shader_compiler/client.h>
+#include <radray/logger.h>
 
 #include <cstring>
 
@@ -56,6 +57,10 @@ std::optional<ShaderJitArtifact> ShaderJit::Compile(
     const shader::CompileVariantResult result =
         _client->Client.CompileVariant(concreteRequest, _client->IncludePaths);
     if (result.Status != shader::CompileStatus::Success || result.Lanes.size() != 1) {
+        RADRAY_ERR_LOG("ShaderJit error:");
+        for (const auto& i : result.Diagnostics) {
+            RADRAY_ERR_LOG("  {}, {}", i.Code, i.Message);
+        }
         return std::nullopt;
     }
     const shader::CompileTargetLane& lane = result.Lanes.front();

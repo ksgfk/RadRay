@@ -20,11 +20,14 @@ from dependency_fetcher import (
 COMMANDS = {
     "restore": "Restore SDKs/ to match the manifest.",
     "list": "Show whether installed SDK artifacts match the manifest.",
-    "upgrade": "Show available upgrades; use --apply to update and install.",
+    "upgrade": "Show tag-based release updates; rolling assets are pinned in the manifest.",
     "install": "Compatibility alias for restore.",
-    "check-updates": "Compatibility alias for upgrade.",
-    "update": "Compatibility alias for upgrade --apply.",
+    "check-updates": "Compatibility alias for upgrade (tag-based artifacts only).",
+    "update": "Compatibility alias for upgrade --apply (tag-based artifacts only).",
 }
+
+
+ROLLING_RELEASE_PATH = "/releases/download/latest/"
 
 
 def command_help() -> str:
@@ -33,6 +36,22 @@ def command_help() -> str:
     for command, description in COMMANDS.items():
         lines.append(f"  {command:<{width}}  {description}")
     return "\n".join(lines)
+
+
+def rolling_release_artifact_names(manifest: dict, only: set[str]) -> list[str]:
+    """Return selected artifacts hosted in a fixed rolling GitHub Release."""
+    artifacts = manifest.get("Artifacts") or []
+    if not isinstance(artifacts, list):
+        return []
+
+    names: list[str] = []
+    for artifact in artifacts:
+        if not isinstance(artifact, dict):
+            continue
+        name = str(artifact.get("Name", "")).strip()
+        if name and (not only or name in only) and ROLLING_RELEASE_PATH in str(artifact.get("Url", "")):
+            names.append(name)
+    return names
 
 
 def main() -> int:
@@ -52,7 +71,7 @@ def main() -> int:
     parser.add_argument(
         "tag",
         nargs="?",
-        help="Release tag for upgrade --apply or update. When omitted, update uses the latest GitHub release.",
+        help="Release tag for upgrade --apply or update. Not used by assets in a fixed rolling release.",
     )
     parser.add_argument(
         "--manifest",
@@ -93,10 +112,18 @@ def main() -> int:
 
     try:
         manifest = load_manifest(args.manifest)
+        selected_sdks = split_names(args.only)
+        rolling_assets = rolling_release_artifact_names(manifest, selected_sdks)
+        if rolling_assets and args.command in {"check-updates", "upgrade", "update"}:
+            names = ", ".join(rolling_assets)
+            raise FetchError(
+                f"{names}: automatic update checks are unavailable for rolling release assets; "
+                "update Version and Hash in project_manifest.json, then run restore"
+            )
         fetcher = SdkArtifactFetcher(
             repo_root=repo_root,
             sdk_root=args.sdk_dir,
-            only=split_names(args.only),
+            only=selected_sdks,
             force=args.force,
         )
         if args.command in {"restore", "install"}:

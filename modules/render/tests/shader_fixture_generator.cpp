@@ -86,9 +86,12 @@ int main() {
 
         const string sourceName = "fixtures/" + fileName;
         const auto discovery = client.DiscoverSourceContract(
-            sourceName,
-            source,
-            ShaderTarget::DXIL,
+            radray::shader::SourceContractRequest{
+                .SourceName = sourceName,
+                .RootSource = source,
+                .Defines = {},
+                .Targets = ShaderTargetMask::All,
+                .Policy = {}},
             includePaths);
         if (!discovery.Succeeded()) {
             std::cerr << "discovery failed for " << fileName << '\n';

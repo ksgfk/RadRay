@@ -4,9 +4,9 @@
 #pragma radray_keyword_group QUALITY "low" "high"
 
 VK_BINDING(6, 2)
-Texture2D<float4> AlbedoTexture;
+Texture2D<float4> AlbedoTexture : register(t0);
 VK_BINDING(7, 2)
-SamplerState LinearSampler;
+SamplerState LinearSampler : register(s0);
 
 struct ForwardVertexInput {
     float3 Position : POSITION;

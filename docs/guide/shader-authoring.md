@@ -45,20 +45,27 @@ active resources 的合法 RS；额外的稳定 superset ranges/parameters/stati
 
 ## Binding 与 target gate
 
-新 pass 的 binding 只通过 `core/platform.hlsli` 的 gate 宏书写：
+每个资源声明都必须同时写明两侧的 binding：SPIR-V 侧用 `core/platform.hlsli` 的 `VK_BINDING`
+gate 宏，DXIL 侧用 `register()`。
 
 ```hlsl
-VK_BINDING(6, 2) Texture2D<float4> AlbedoTexture;
-VK_BINDING(7, 2) SamplerState LinearSampler;
+VK_BINDING(6, 2) Texture2D<float4> AlbedoTexture : register(t0);
+VK_BINDING(7, 2) SamplerState LinearSampler : register(s0);
 ```
 
 SPIR-V lane 会把宏展开为标准 `vk::binding` 属性，DXIL lane 会展开为空；两套 target 的实际
 binding 数字可以不同，不能假设 set 等于 space 或 binding 数字相等。位置和 push constants
-使用 `VK_LOCATION` 与 `VK_PUSH_CONSTANT`。
+使用 `VK_LOCATION` 与 `VK_PUSH_CONSTANT`；`VK_PUSH_CONSTANT` 声明豁免上述规则。
 
-不要在 pass 中手写 backend attribute、添加 `register` 声明、创建 numbered binding wrapper，
-或维护 sidecar metadata。HLSL declaration name 是 runtime lookup identity；render layout 会
-为当前 artifact 生成不透明 `BindingHandle`。
+两侧都必须显式，因为缺任何一侧时 DXC 都会自行分配槽位，而分配结果在最终 artifact 里与作者
+写定的槽位无法区分：DXIL 侧会顺序分配寄存器，SPIR-V 侧会按 `-fvk-*-shift` 策略从 DXIL 寄存器
+换算 Vulkan 槽位。两种情况下 wire metadata 里的 binding 号都会变成工具链默认值的函数，改一个
+选项就会静默漂移。编译器对此 fail closed：DXIL lane 缺 `register()` 报 2111，SPIR-V lane 缺
+`vk::binding` 报 2113。检查发生在死资源剥除之后，未被使用的资源不受约束。
+
+不要在 pass 中手写 backend attribute、创建 numbered binding wrapper，或维护 sidecar metadata。
+HLSL declaration name 是 runtime lookup identity；render layout 会为当前 artifact 生成不透明
+`BindingHandle`。
 
 ## 现有最小 pass
 

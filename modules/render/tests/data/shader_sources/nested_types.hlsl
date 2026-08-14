@@ -1,3 +1,5 @@
+#include <core/platform.hlsli>
+
 struct NestedLeaf {
     float3 Direction;
     float Weight;
@@ -12,7 +14,8 @@ struct NestedRoot {
     NestedArray Data;
 };
 
-ConstantBuffer<NestedRoot> Constants;
+VK_BINDING(0, 0)
+ConstantBuffer<NestedRoot> Constants : register(b0);
 
 [shader("vertex")]
 float4 VSMain(float3 position : POSITION) : SV_Position {

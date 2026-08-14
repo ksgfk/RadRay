@@ -9,8 +9,9 @@ C++20 实时渲染器，D3D12 + Vulkan 双后端，纯光栅。
 RadRay DXC fork extension client 与 extension probe；client 只用 fork extension ABI，无 stock
 adapter，stock extension probe 会 fail closed。RadRay DXC fork package 已通过
 `project_manifest.json` 的 `radray_dxc` 本地包接入并验证正向 ABI result；正式 artifact
-publisher/index 和 install/export 层仍未实现。当前 source/metadata scanner 的退役迁移尚未实施，
-目标边界由 ADR-0034 与 `docs/todo/radray-dxc-frontend-semantic-migration.md` 定义。
+publisher/index 和 install/export 层仍未实现。source/metadata scanner 已退役，contract 与 metadata
+统一来自 Clang/DXC frontend 和最终 target model；剩余发布与跨平台验收边界由 ADR-0034 与
+`docs/todo/radray-dxc-frontend-semantic-migration.md` 定义。
 
 ## Shader 管线
 

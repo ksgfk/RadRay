@@ -24,6 +24,10 @@ public:
         shader::ShaderTarget target,
         std::span<const std::filesystem::path> includePaths) const;
 
+    DiscoveryResult DiscoverSourceContract(
+        const shader::SourceContractRequest& request,
+        std::span<const std::filesystem::path> includePaths) const;
+
     shader::CompileVariantResult CompileVariant(
         const shader::CompileVariantRequest& request,
         std::span<const std::filesystem::path> includePaths) const;

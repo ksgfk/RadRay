@@ -1,9 +1,9 @@
 #include <core/platform.hlsli>
 
 VK_BINDING(1, 4)
-Texture2D<float> ShadowTexture;
+Texture2D<float> ShadowTexture : register(t0);
 VK_BINDING(2, 4)
-SamplerComparisonState ShadowSampler;
+SamplerComparisonState ShadowSampler : register(s0);
 
 #if !defined(__spirv__)
 [RootSignature("DescriptorTable(SRV(t0)), StaticSampler(s0, filter=FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT)")]

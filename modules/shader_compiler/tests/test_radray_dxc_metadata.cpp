@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstring>
 #include <filesystem>
+#include <iterator>
 #include <optional>
 
 namespace radray::shader_compiler {
@@ -27,7 +28,9 @@ constexpr std::string_view kGraphicsSource = R"hlsl(
 #include <extra.hlsli>
 #endif
 
+VK_BINDING(0, 1)
 Texture2D<float4> AlbedoTexture : register(t0, space1);
+VK_BINDING(1, 1)
 SamplerState LinearSampler : register(s0, space1);
 
 [shader("vertex")]
@@ -165,13 +168,17 @@ float4 PSMain() : SV_Target0 {
 )hlsl";
 
 constexpr std::string_view kMismatchedGraphicsRootSignaturesSource = R"hlsl(
+#if !defined(__spirv__)
 [RootSignature("CBV(b0)")]
+#endif
 [shader("vertex")]
 float4 VSMain(float3 position : POSITION) : SV_Position {
     return float4(position, 1.0);
 }
 
+#if !defined(__spirv__)
 [RootSignature("CBV(b1)")]
+#endif
 [shader("pixel")]
 float4 PSMain() : SV_Target0 {
     return float4(1.0, 1.0, 1.0, 1.0);
@@ -220,9 +227,9 @@ constexpr std::string_view kStaticSamplerSuccessSource = R"hlsl(
 #include <core/platform.hlsli>
 
 VK_BINDING(1, 4)
-Texture2D<float4> ColorTexture;
+Texture2D<float4> ColorTexture : register(t0);
 VK_BINDING(2, 4)
-SamplerState ColorSampler;
+SamplerState ColorSampler : register(s0);
 
 #if !defined(__spirv__)
 [RootSignature("DescriptorTable(SRV(t0)), StaticSampler(s0, filter=FILTER_MIN_MAG_LINEAR_MIP_POINT)")]
@@ -294,6 +301,55 @@ TEST(RadRayDxcMetadata, ConcreteVariantReturnsAtomicTargetLanes) {
                 repeat.Lanes[index].Stages[stageIndex].Bytecode);
         }
     }
+}
+
+TEST(RadRayDxcMetadata, CrossTargetDiscoveryComparesFrontendContracts) {
+    Client client;
+    ASSERT_TRUE(client.IsAvailable());
+    const auto includePaths = ShaderIncludePaths();
+
+    shader::SourceContractRequest matchingRequest{
+        .SourceName = "fixtures/cross_target_matching.hlsl",
+        .RootSource = CopyBytes(kGraphicsSource),
+        .Defines = {},
+        .Targets = shader::ShaderTargetMask::All,
+        .Policy = {}};
+    const auto matching = client.DiscoverSourceContract(matchingRequest, includePaths);
+    ASSERT_TRUE(matching.Succeeded())
+        << (matching.Diagnostics.empty() ? "" : matching.Diagnostics.back().Message);
+
+    constexpr std::string_view divergentSource = R"hlsl(
+#if defined(__spirv__)
+#define PIXEL_ENTRY PSMainSpirv
+#else
+#define PIXEL_ENTRY PSMainDxil
+#endif
+
+[shader("vertex")]
+float4 VSMain(float3 position : POSITION) : SV_Position {
+    return float4(position, 1.0);
+}
+
+[shader("pixel")]
+float4 PIXEL_ENTRY() : SV_Target0 {
+    return float4(1.0, 1.0, 1.0, 1.0);
+}
+)hlsl";
+    shader::SourceContractRequest divergentRequest{
+        .SourceName = "fixtures/cross_target_divergent.hlsl",
+        .RootSource = CopyBytes(divergentSource),
+        .Defines = {},
+        .Targets = shader::ShaderTargetMask::All,
+        .Policy = {}};
+    const auto divergent = client.DiscoverSourceContract(divergentRequest, includePaths);
+    EXPECT_EQ(divergent.Status, shader::CompileStatus::InvalidRequest);
+    const bool hasCrossTargetDiagnostic = std::any_of(
+        divergent.Diagnostics.begin(),
+        divergent.Diagnostics.end(),
+        [](const shader::CompileDiagnostic& diagnostic) noexcept {
+            return diagnostic.Code == 2011;
+        });
+    EXPECT_TRUE(hasCrossTargetDiagnostic);
 }
 
 TEST(RadRayDxcMetadata, FilesystemIncludesAreResolvedByDxc) {
@@ -715,17 +771,29 @@ TEST(RadRayDxcMetadata, MismatchedGraphicsRootSignaturesFailClosed) {
         shader::ShaderTarget::DXIL,
         includePaths);
     ASSERT_TRUE(discovery.Succeeded());
-    const auto result = client.CompileVariant(shader::CompileVariantRequest{
-        .SourceName = "fixtures/mismatched_graphics_root_signatures.hlsl",
-        .RootSource = CopyBytes(kMismatchedGraphicsRootSignaturesSource),
-        .Defines = {},
-        .Assignments = {},
-        .Targets = shader::ShaderTargetMask::DXIL,
-        .ExpectedContract = discovery.Contract.Hash},
-        includePaths);
-    EXPECT_EQ(result.Status, shader::CompileStatus::TargetFailure);
-    EXPECT_TRUE(result.Lanes.empty());
-    EXPECT_FALSE(result.Diagnostics.empty());
+    for (const shader::ShaderTarget target :
+         {shader::ShaderTarget::DXIL, shader::ShaderTarget::SPIRV}) {
+        const auto result = client.CompileVariant(shader::CompileVariantRequest{
+            .SourceName = "fixtures/mismatched_graphics_root_signatures.hlsl",
+            .RootSource = CopyBytes(kMismatchedGraphicsRootSignaturesSource),
+            .Defines = {},
+            .Assignments = {},
+            .Targets = static_cast<shader::ShaderTargetMask>(shader::ToTargetMask(target)),
+            .ExpectedContract = discovery.Contract.Hash},
+            includePaths);
+        EXPECT_EQ(result.Status, shader::CompileStatus::TargetFailure)
+            << "target=" << static_cast<uint32_t>(target);
+        EXPECT_TRUE(result.Lanes.empty())
+            << "target=" << static_cast<uint32_t>(target);
+        const bool hasRootDiagnostic = std::any_of(
+            result.Diagnostics.begin(),
+            result.Diagnostics.end(),
+            [](const shader::CompileDiagnostic& diagnostic) noexcept {
+                return diagnostic.Code == 2105;
+            });
+        EXPECT_TRUE(hasRootDiagnostic)
+            << "target=" << static_cast<uint32_t>(target);
+    }
 }
 
 TEST(RadRayDxcMetadata, ContractDriftFailsClosed) {
@@ -742,6 +810,827 @@ TEST(RadRayDxcMetadata, ContractDriftFailsClosed) {
     const shader::CompileVariantResult result = client.CompileVariant(request, ShaderIncludePaths());
     EXPECT_EQ(result.Status, shader::CompileStatus::ContractMismatch);
     EXPECT_TRUE(result.Lanes.empty());
+}
+
+TEST(RadRayDxcMetadata, AssignmentInducedTopologyDriftIsContractMismatch) {
+    constexpr std::string_view source = R"hlsl(
+#pragma radray_keyword_group PIXEL_ENTRY "PSLow" "PSHigh"
+
+[shader("vertex")]
+float4 VSMain(float3 position : POSITION) : SV_Position {
+    return float4(position, 1.0);
+}
+
+[shader("pixel")]
+float4 PIXEL_ENTRY() : SV_Target0 {
+    return float4(1.0, 1.0, 1.0, 1.0);
+}
+)hlsl";
+
+    Client client;
+    ASSERT_TRUE(client.IsAvailable());
+    const auto includePaths = ShaderIncludePaths();
+    const auto discovery = client.DiscoverSourceContract(
+        "fixtures/assignment_topology_drift.hlsl",
+        CopyBytes(source),
+        shader::ShaderTarget::DXIL,
+        includePaths);
+    ASSERT_TRUE(discovery.Succeeded())
+        << (discovery.Diagnostics.empty() ? "" : discovery.Diagnostics.back().Message);
+
+    const auto result = client.CompileVariant(
+        shader::CompileVariantRequest{
+            .SourceName = "fixtures/assignment_topology_drift.hlsl",
+            .RootSource = CopyBytes(source),
+            .Defines = {},
+            .Assignments = {{string{"PIXEL_ENTRY"}, string{"PSLow"}}},
+            .Targets = shader::ShaderTargetMask::DXIL,
+            .ExpectedContract = discovery.Contract.Hash},
+        includePaths);
+    EXPECT_EQ(result.Status, shader::CompileStatus::ContractMismatch);
+    EXPECT_TRUE(result.Lanes.empty());
+    const bool hasTopologyDiagnostic = std::any_of(
+        result.Diagnostics.begin(),
+        result.Diagnostics.end(),
+        [](const shader::CompileDiagnostic& diagnostic) noexcept {
+            return diagnostic.Code == 2007;
+        });
+    EXPECT_TRUE(hasTopologyDiagnostic);
+}
+
+// Regression: the frontend collects per stage, and each stage only keeps the
+// resources it actually uses. A merge that demanded identical resource sets
+// across stages reported 2107 for every shader shaped like this one.
+constexpr std::string_view kStageDisjointResourceSource = R"hlsl(
+#include <core/platform.hlsli>
+
+struct VertexData {
+    float4x4 Transform;
+};
+struct PixelData {
+    float4 Tint;
+};
+
+VK_BINDING(0, 0)
+ConstantBuffer<VertexData> VertexConstants : register(b0);
+VK_BINDING(1, 0)
+ConstantBuffer<PixelData> PixelConstants : register(b1);
+
+[shader("vertex")]
+float4 VSMain(float3 position : POSITION) : SV_Position {
+    return mul(VertexConstants.Transform, float4(position, 1.0));
+}
+
+[shader("pixel")]
+float4 PSMain() : SV_Target0 {
+    return PixelConstants.Tint;
+}
+)hlsl";
+
+TEST(RadRayDxcMetadata, StagesMayUseDisjointResourceSets) {
+    Client client;
+    ASSERT_TRUE(client.IsAvailable());
+    const auto includePaths = ShaderIncludePaths();
+    const auto discovery = client.DiscoverSourceContract(
+        "fixtures/stage_disjoint_resources.hlsl",
+        CopyBytes(kStageDisjointResourceSource),
+        shader::ShaderTarget::DXIL,
+        includePaths);
+    ASSERT_TRUE(discovery.Succeeded())
+        << (discovery.Diagnostics.empty() ? "" : discovery.Diagnostics.back().Message);
+    const auto result = client.CompileVariant(
+        shader::CompileVariantRequest{
+            .SourceName = "fixtures/stage_disjoint_resources.hlsl",
+            .RootSource = CopyBytes(kStageDisjointResourceSource),
+            .Defines = {},
+            .Assignments = {},
+            .Targets = shader::ShaderTargetMask::All,
+            .ExpectedContract = discovery.Contract.Hash},
+        includePaths);
+    ASSERT_EQ(result.Status, shader::CompileStatus::Success)
+        << (result.Diagnostics.empty() ? "" : result.Diagnostics.back().Message);
+    ASSERT_EQ(result.Lanes.size(), 2u);
+
+    // Both lanes must carry the union of the two stages' resources, each tagged
+    // with only the stage that uses it.
+    for (const shader::CompileTargetLane& lane : result.Lanes) {
+        shader::WireMetadataEnvelope envelope{};
+        ASSERT_GE(lane.Metadata.size(), sizeof(envelope));
+        std::memcpy(&envelope, lane.Metadata.data(), sizeof(envelope));
+        vector<shader::WireBindingRecord> bindings(
+            envelope.BindingRecords.Size / sizeof(shader::WireBindingRecord));
+        ASSERT_EQ(bindings.size(), 2u)
+            << "target=" << static_cast<uint32_t>(lane.Target);
+        std::memcpy(
+            bindings.data(),
+            lane.Metadata.data() + envelope.BindingRecords.Offset,
+            envelope.BindingRecords.Size);
+        for (const shader::WireBindingRecord& binding : bindings) {
+            const std::string_view name{
+                reinterpret_cast<const char*>(lane.Metadata.data() + binding.Name.Offset),
+                binding.Name.Size};
+            const uint32_t expectedStage =
+                1u << static_cast<uint8_t>(
+                    name == "VertexConstants" ? shader::ShaderStage::Vertex
+                                              : shader::ShaderStage::Pixel);
+            EXPECT_EQ(binding.StageMask, expectedStage) << name;
+        }
+    }
+}
+
+// Regression: vertex input locations must come from the emitted SPIR-V module.
+// An AST-order counter silently disagreed with the DXIL input signature once a
+// struct parameter was involved, which surfaced as 2108 on merge.
+constexpr std::string_view kStructVertexInputSource = R"hlsl(
+struct VertexInput {
+    float3 Position : POSITION;
+    float3 Normal : NORMAL;
+    float2 UV : TEXCOORD0;
+};
+
+[shader("vertex")]
+float4 VSMain(VertexInput input) : SV_Position {
+    return float4(input.Position + input.Normal, input.UV.x);
+}
+
+[shader("pixel")]
+float4 PSMain() : SV_Target0 {
+    return float4(1.0, 1.0, 1.0, 1.0);
+}
+)hlsl";
+
+TEST(RadRayDxcMetadata, StructVertexInputsAgreeAcrossTargets) {
+    Client client;
+    ASSERT_TRUE(client.IsAvailable());
+    const auto includePaths = ShaderIncludePaths();
+    const auto discovery = client.DiscoverSourceContract(
+        "fixtures/struct_vertex_input.hlsl",
+        CopyBytes(kStructVertexInputSource),
+        shader::ShaderTarget::DXIL,
+        includePaths);
+    ASSERT_TRUE(discovery.Succeeded())
+        << (discovery.Diagnostics.empty() ? "" : discovery.Diagnostics.back().Message);
+    const auto result = client.CompileVariant(
+        shader::CompileVariantRequest{
+            .SourceName = "fixtures/struct_vertex_input.hlsl",
+            .RootSource = CopyBytes(kStructVertexInputSource),
+            .Defines = {},
+            .Assignments = {},
+            .Targets = shader::ShaderTargetMask::All,
+            .ExpectedContract = discovery.Contract.Hash},
+        includePaths);
+    ASSERT_EQ(result.Status, shader::CompileStatus::Success)
+        << (result.Diagnostics.empty() ? "" : result.Diagnostics.back().Message);
+    ASSERT_EQ(result.Lanes.size(), 2u);
+
+    struct ExpectedInput {
+        std::string_view Semantic;
+        uint32_t Location;
+        uint32_t ComponentCount;
+    };
+    constexpr ExpectedInput expected[] = {
+        {"POSITION", 0, 3},
+        {"NORMAL", 1, 3},
+        {"TEXCOORD", 2, 2}};
+
+    for (const shader::CompileTargetLane& lane : result.Lanes) {
+        shader::WireMetadataEnvelope envelope{};
+        ASSERT_GE(lane.Metadata.size(), sizeof(envelope));
+        std::memcpy(&envelope, lane.Metadata.data(), sizeof(envelope));
+        vector<shader::WireVertexInputRecord> inputs(
+            envelope.VertexInputRecords.Size / sizeof(shader::WireVertexInputRecord));
+        ASSERT_EQ(inputs.size(), std::size(expected))
+            << "target=" << static_cast<uint32_t>(lane.Target);
+        std::memcpy(
+            inputs.data(),
+            lane.Metadata.data() + envelope.VertexInputRecords.Offset,
+            envelope.VertexInputRecords.Size);
+        for (const ExpectedInput& want : expected) {
+            const auto found = std::find_if(
+                inputs.begin(),
+                inputs.end(),
+                [&](const shader::WireVertexInputRecord& record) noexcept {
+                    const std::string_view name{
+                        reinterpret_cast<const char*>(
+                            lane.Metadata.data() + record.Semantic.Offset),
+                        record.Semantic.Size};
+                    return name == want.Semantic;
+                });
+            ASSERT_NE(found, inputs.end())
+                << want.Semantic << " target=" << static_cast<uint32_t>(lane.Target);
+            EXPECT_EQ(found->Location, want.Location) << want.Semantic;
+            EXPECT_EQ(found->ComponentCount, want.ComponentCount) << want.Semantic;
+        }
+    }
+}
+
+TEST(RadRayDxcMetadata, MatrixVertexInputExpandsToLocationRows) {
+    constexpr std::string_view source = R"hlsl(
+struct VertexInput {
+    float3 Position : POSITION;
+    float3x3 Basis : TEXCOORD0;
+};
+
+[shader("vertex")]
+float4 VSMain(VertexInput input) : SV_Position {
+    return float4(mul(input.Position, input.Basis), 1.0);
+}
+)hlsl";
+
+    Client client;
+    ASSERT_TRUE(client.IsAvailable());
+    const auto includePaths = ShaderIncludePaths();
+    const auto discovery = client.DiscoverSourceContract(
+        "fixtures/matrix_vertex_input.hlsl",
+        CopyBytes(source),
+        shader::ShaderTarget::DXIL,
+        includePaths);
+    ASSERT_TRUE(discovery.Succeeded())
+        << (discovery.Diagnostics.empty() ? "" : discovery.Diagnostics.back().Message);
+    const auto result = client.CompileVariant(
+        shader::CompileVariantRequest{
+            .SourceName = "fixtures/matrix_vertex_input.hlsl",
+            .RootSource = CopyBytes(source),
+            .Defines = {},
+            .Assignments = {},
+            .Targets = shader::ShaderTargetMask::All,
+            .ExpectedContract = discovery.Contract.Hash},
+        includePaths);
+    ASSERT_EQ(result.Status, shader::CompileStatus::Success)
+        << (result.Diagnostics.empty() ? "" : result.Diagnostics.back().Message);
+    ASSERT_EQ(result.Lanes.size(), 2u);
+
+    struct ExpectedInput {
+        std::string_view Semantic;
+        uint32_t SemanticIndex;
+        uint32_t Location;
+    };
+    constexpr ExpectedInput expected[] = {
+        {"POSITION", 0, 0},
+        {"TEXCOORD", 0, 1},
+        {"TEXCOORD", 1, 2},
+        {"TEXCOORD", 2, 3}};
+
+    for (const shader::CompileTargetLane& lane : result.Lanes) {
+        shader::WireMetadataEnvelope envelope{};
+        std::memcpy(&envelope, lane.Metadata.data(), sizeof(envelope));
+        vector<shader::WireVertexInputRecord> inputs(
+            envelope.VertexInputRecords.Size / sizeof(shader::WireVertexInputRecord));
+        ASSERT_EQ(inputs.size(), std::size(expected))
+            << "target=" << static_cast<uint32_t>(lane.Target);
+        std::memcpy(
+            inputs.data(),
+            lane.Metadata.data() + envelope.VertexInputRecords.Offset,
+            envelope.VertexInputRecords.Size);
+        for (const ExpectedInput& want : expected) {
+            const auto found = std::find_if(
+                inputs.begin(),
+                inputs.end(),
+                [&](const shader::WireVertexInputRecord& record) noexcept {
+                    const std::string_view name{
+                        reinterpret_cast<const char*>(
+                            lane.Metadata.data() + record.Semantic.Offset),
+                        record.Semantic.Size};
+                    return name == want.Semantic &&
+                           record.SemanticIndex == want.SemanticIndex;
+                });
+            ASSERT_NE(found, inputs.end())
+                << want.Semantic << want.SemanticIndex
+                << " target=" << static_cast<uint32_t>(lane.Target);
+            EXPECT_EQ(found->Location, want.Location);
+            EXPECT_EQ(found->ComponentCount, 3u);
+        }
+    }
+}
+
+TEST(RadRayDxcMetadata, SpirvMergeRejectsCrossStageDxilRegisterDrift) {
+    constexpr std::string_view source = R"hlsl(
+#include <core/platform.hlsli>
+
+#if __SHADER_TARGET_STAGE == __SHADER_STAGE_VERTEX
+#define SHARED_REGISTER t0
+#else
+#define SHARED_REGISTER t1
+#endif
+
+VK_BINDING(0, 0)
+Texture2D<float4> SharedTexture : register(SHARED_REGISTER);
+
+[shader("vertex")]
+float4 VSMain(float3 position : POSITION) : SV_Position {
+    return SharedTexture.Load(int3(0, 0, 0)) + float4(position, 1.0);
+}
+
+[shader("pixel")]
+float4 PSMain() : SV_Target0 {
+    return SharedTexture.Load(int3(0, 0, 0));
+}
+)hlsl";
+
+    Client client;
+    ASSERT_TRUE(client.IsAvailable());
+    const auto includePaths = ShaderIncludePaths();
+    const auto discovery = client.DiscoverSourceContract(
+        "fixtures/cross_stage_register_drift.hlsl",
+        CopyBytes(source),
+        shader::ShaderTarget::DXIL,
+        includePaths);
+    ASSERT_TRUE(discovery.Succeeded())
+        << (discovery.Diagnostics.empty() ? "" : discovery.Diagnostics.back().Message);
+    const auto result = client.CompileVariant(
+        shader::CompileVariantRequest{
+            .SourceName = "fixtures/cross_stage_register_drift.hlsl",
+            .RootSource = CopyBytes(source),
+            .Defines = {},
+            .Assignments = {},
+            .Targets = shader::ShaderTargetMask::SPIRV,
+            .ExpectedContract = discovery.Contract.Hash},
+        includePaths);
+    EXPECT_EQ(result.Status, shader::CompileStatus::TargetFailure);
+    EXPECT_TRUE(result.Lanes.empty());
+    const bool hasBindingDiagnostic = std::any_of(
+        result.Diagnostics.begin(),
+        result.Diagnostics.end(),
+        [](const shader::CompileDiagnostic& diagnostic) noexcept {
+            return diagnostic.Code == 2109;
+        });
+    EXPECT_TRUE(hasBindingDiagnostic);
+}
+
+TEST(RadRayDxcMetadata, ResourceArrayPreservesCountAcrossTargets) {
+    constexpr std::string_view source = R"hlsl(
+#include <core/platform.hlsli>
+
+VK_BINDING(4, 1)
+Texture2D<float4> Textures[2] : register(t3, space2);
+
+[shader("vertex")]
+float4 VSMain(float3 position : POSITION) : SV_Position {
+    return Textures[0].Load(int3(0, 0, 0)) + float4(position, 1.0);
+}
+
+[shader("pixel")]
+float4 PSMain() : SV_Target0 {
+    return Textures[1].Load(int3(0, 0, 0));
+}
+)hlsl";
+
+    Client client;
+    ASSERT_TRUE(client.IsAvailable());
+    const auto includePaths = ShaderIncludePaths();
+    const auto discovery = client.DiscoverSourceContract(
+        "fixtures/resource_array.hlsl",
+        CopyBytes(source),
+        shader::ShaderTarget::DXIL,
+        includePaths);
+    ASSERT_TRUE(discovery.Succeeded())
+        << (discovery.Diagnostics.empty() ? "" : discovery.Diagnostics.back().Message);
+    const auto result = client.CompileVariant(
+        shader::CompileVariantRequest{
+            .SourceName = "fixtures/resource_array.hlsl",
+            .RootSource = CopyBytes(source),
+            .Defines = {},
+            .Assignments = {},
+            .Targets = shader::ShaderTargetMask::All,
+            .ExpectedContract = discovery.Contract.Hash},
+        includePaths);
+    ASSERT_EQ(result.Status, shader::CompileStatus::Success)
+        << (result.Diagnostics.empty() ? "" : result.Diagnostics.back().Message);
+    ASSERT_EQ(result.Lanes.size(), 2u);
+    for (const shader::CompileTargetLane& lane : result.Lanes) {
+        shader::WireMetadataEnvelope envelope{};
+        std::memcpy(&envelope, lane.Metadata.data(), sizeof(envelope));
+        ASSERT_EQ(envelope.BindingRecords.Size, sizeof(shader::WireBindingRecord));
+        shader::WireBindingRecord binding{};
+        std::memcpy(
+            &binding,
+            lane.Metadata.data() + envelope.BindingRecords.Offset,
+            sizeof(binding));
+        EXPECT_EQ(binding.Count, 2u)
+            << "target=" << static_cast<uint32_t>(lane.Target);
+        EXPECT_EQ(binding.StageMask, 0x3u)
+            << "target=" << static_cast<uint32_t>(lane.Target);
+    }
+}
+
+// An implicit binding is invisible in the emitted artifact: DXC assigns a slot
+// either way. Each lane must reject its own missing annotation at compile time.
+TEST(RadRayDxcMetadata, ImplicitBindingIsRejectedPerLane) {
+    Client client;
+    ASSERT_TRUE(client.IsAvailable());
+    const auto includePaths = ShaderIncludePaths();
+    const auto expectLaneFailure = [&](std::string_view name,
+                                       std::string_view source,
+                                       shader::ShaderTarget target,
+                                       uint32_t expectedCode) {
+        const auto discovery = client.DiscoverSourceContract(
+            name,
+            CopyBytes(source),
+            target,
+            includePaths);
+        ASSERT_TRUE(discovery.Succeeded()) << name;
+        const auto result = client.CompileVariant(
+            shader::CompileVariantRequest{
+                .SourceName = string{name},
+                .RootSource = CopyBytes(source),
+                .Defines = {},
+                .Assignments = {},
+                .Targets = static_cast<shader::ShaderTargetMask>(
+                    shader::ToTargetMask(target)),
+                .ExpectedContract = discovery.Contract.Hash},
+            includePaths);
+        EXPECT_EQ(result.Status, shader::CompileStatus::TargetFailure) << name;
+        EXPECT_TRUE(result.Lanes.empty()) << name;
+        const bool hasExpectedCode = std::any_of(
+            result.Diagnostics.begin(),
+            result.Diagnostics.end(),
+            [&](const shader::CompileDiagnostic& diagnostic) noexcept {
+                return diagnostic.Code == expectedCode;
+            });
+        EXPECT_TRUE(hasExpectedCode)
+            << name << " expected diagnostic " << expectedCode;
+    };
+
+    // Carries [[vk::binding]] but no register(): the DXIL lane must refuse it.
+    constexpr std::string_view missingRegisterSource = R"hlsl(
+#include <core/platform.hlsli>
+
+VK_BINDING(3, 0)
+Texture2D<float4> ImplicitInDxil;
+
+[shader("vertex")]
+float4 VSMain(float3 position : POSITION) : SV_Position {
+    return ImplicitInDxil.Load(int3(0, 0, 0)) + float4(position, 1.0);
+}
+)hlsl";
+    expectLaneFailure(
+        "fixtures/missing_register.hlsl",
+        missingRegisterSource,
+        shader::ShaderTarget::DXIL,
+        2111);
+
+    // Array wrappers must not hide the resource type from the AST-side check.
+    constexpr std::string_view missingArrayRegisterSource = R"hlsl(
+#include <core/platform.hlsli>
+
+VK_BINDING(3, 0)
+Texture2D<float4> ImplicitArrayInDxil[2];
+
+[shader("vertex")]
+float4 VSMain(float3 position : POSITION) : SV_Position {
+    return ImplicitArrayInDxil[1].Load(int3(0, 0, 0)) + float4(position, 1.0);
+}
+)hlsl";
+    expectLaneFailure(
+        "fixtures/missing_array_register.hlsl",
+        missingArrayRegisterSource,
+        shader::ShaderTarget::DXIL,
+        2111);
+
+    // Carries register() but no [[vk::binding]]: the SPIR-V lane must refuse it.
+    constexpr std::string_view missingVkBindingSource = R"hlsl(
+Texture2D<float4> ImplicitInSpirv : register(t4);
+
+[shader("vertex")]
+float4 VSMain(float3 position : POSITION) : SV_Position {
+    return ImplicitInSpirv.Load(int3(0, 0, 0)) + float4(position, 1.0);
+}
+)hlsl";
+    expectLaneFailure(
+        "fixtures/missing_vk_binding.hlsl",
+        missingVkBindingSource,
+        shader::ShaderTarget::SPIRV,
+        2113);
+
+    // Binding enforcement happens after dead-resource removal. An entirely
+    // unused declaration is not part of either lane's artifact contract.
+    constexpr std::string_view deadImplicitResourceSource = R"hlsl(
+Texture2D<float4> DeadTexture;
+
+[shader("vertex")]
+float4 VSMain(float3 position : POSITION) : SV_Position {
+    return float4(position, 1.0);
+}
+)hlsl";
+    const auto discovery = client.DiscoverSourceContract(
+        "fixtures/dead_implicit_resource.hlsl",
+        CopyBytes(deadImplicitResourceSource),
+        shader::ShaderTarget::DXIL,
+        includePaths);
+    ASSERT_TRUE(discovery.Succeeded());
+    const auto deadResult = client.CompileVariant(
+        shader::CompileVariantRequest{
+            .SourceName = "fixtures/dead_implicit_resource.hlsl",
+            .RootSource = CopyBytes(deadImplicitResourceSource),
+            .Defines = {},
+            .Assignments = {},
+            .Targets = shader::ShaderTargetMask::All,
+            .ExpectedContract = discovery.Contract.Hash},
+        includePaths);
+    ASSERT_EQ(deadResult.Status, shader::CompileStatus::Success)
+        << (deadResult.Diagnostics.empty() ? "" : deadResult.Diagnostics.back().Message);
+    ASSERT_EQ(deadResult.Lanes.size(), 2u);
+    for (const shader::CompileTargetLane& lane : deadResult.Lanes) {
+        shader::WireMetadataEnvelope envelope{};
+        std::memcpy(&envelope, lane.Metadata.data(), sizeof(envelope));
+        EXPECT_EQ(envelope.BindingRecords.Size, 0u);
+    }
+}
+
+// Regression: RootConstants inherited an all-stage mask regardless of the
+// author's ShaderVisibility, so a vertex-only constant claimed the pixel stage.
+constexpr std::string_view kVisibilityScopedRootConstantSource = R"hlsl(
+[RootSignature("RootConstants(num32BitConstants=4, b0, space=0, visibility=SHADER_VISIBILITY_VERTEX)")]
+[shader("vertex")]
+float4 VSMain(float3 position : POSITION) : SV_Position {
+    return float4(position, 1.0);
+}
+
+[shader("pixel")]
+float4 PSMain() : SV_Target0 {
+    return float4(1.0, 1.0, 1.0, 1.0);
+}
+)hlsl";
+
+TEST(RadRayDxcMetadata, RootConstantStageMaskFollowsAuthoredVisibility) {
+    Client client;
+    ASSERT_TRUE(client.IsAvailable());
+    const auto includePaths = ShaderIncludePaths();
+    const auto discovery = client.DiscoverSourceContract(
+        "fixtures/visibility_scoped_root_constant.hlsl",
+        CopyBytes(kVisibilityScopedRootConstantSource),
+        shader::ShaderTarget::DXIL,
+        includePaths);
+    ASSERT_TRUE(discovery.Succeeded())
+        << (discovery.Diagnostics.empty() ? "" : discovery.Diagnostics.back().Message);
+    const auto result = client.CompileVariant(
+        shader::CompileVariantRequest{
+            .SourceName = "fixtures/visibility_scoped_root_constant.hlsl",
+            .RootSource = CopyBytes(kVisibilityScopedRootConstantSource),
+            .Defines = {},
+            .Assignments = {},
+            .Targets = shader::ShaderTargetMask::DXIL,
+            .ExpectedContract = discovery.Contract.Hash},
+        includePaths);
+    ASSERT_EQ(result.Status, shader::CompileStatus::Success)
+        << (result.Diagnostics.empty() ? "" : result.Diagnostics.back().Message);
+    ASSERT_EQ(result.Lanes.size(), 1u);
+    shader::WireMetadataEnvelope envelope{};
+    std::memcpy(&envelope, result.Lanes[0].Metadata.data(), sizeof(envelope));
+    ASSERT_EQ(envelope.RootConstantRecords.Size, sizeof(shader::WireRootConstantRecord));
+    shader::WireRootConstantRecord root{};
+    std::memcpy(
+        &root,
+        result.Lanes[0].Metadata.data() + envelope.RootConstantRecords.Offset,
+        sizeof(root));
+    EXPECT_EQ(root.StageMask, 1u << static_cast<uint8_t>(shader::ShaderStage::Vertex));
+}
+
+TEST(RadRayDxcMetadata, SupportedNonDefaultCompilePolicyCompiles) {
+    constexpr std::string_view source = R"hlsl(
+[shader("vertex")]
+float4 VSMain(float3 position : POSITION) : SV_Position {
+    return float4(position, 1.0);
+}
+)hlsl";
+
+    Client client;
+    ASSERT_TRUE(client.IsAvailable());
+    const auto includePaths = ShaderIncludePaths();
+    const auto discovery = client.DiscoverSourceContract(
+        "fixtures/non_default_policy.hlsl",
+        CopyBytes(source),
+        shader::ShaderTarget::DXIL,
+        includePaths);
+    ASSERT_TRUE(discovery.Succeeded());
+
+    shader::CompilePolicy policy{};
+    policy.ShaderModel = 65;
+    policy.Optimize = 0;
+    policy.DebugInfo = 1;
+    policy.AllResourcesBound = 1;
+    policy.Warnings = shader::WarningPolicy::WarningsAsErrors;
+    policy.HlslVersion = 2018;
+    const auto result = client.CompileVariant(
+        shader::CompileVariantRequest{
+            .SourceName = "fixtures/non_default_policy.hlsl",
+            .RootSource = CopyBytes(source),
+            .Defines = {},
+            .Assignments = {},
+            .Targets = shader::ShaderTargetMask::All,
+            .Policy = policy,
+            .ExpectedContract = discovery.Contract.Hash},
+        includePaths);
+    ASSERT_EQ(result.Status, shader::CompileStatus::Success)
+        << (result.Diagnostics.empty() ? "" : result.Diagnostics.back().Message);
+    EXPECT_EQ(result.Lanes.size(), 2u);
+
+    for (const uint32_t hlslVersion : {2016u, 2017u, 2018u, 2021u}) {
+        policy = {};
+        policy.HlslVersion = hlslVersion;
+        const auto versionResult = client.CompileVariant(
+            shader::CompileVariantRequest{
+                .SourceName = "fixtures/non_default_policy.hlsl",
+                .RootSource = CopyBytes(source),
+                .Defines = {},
+                .Assignments = {},
+                .Targets = shader::ShaderTargetMask::All,
+                .Policy = policy,
+                .ExpectedContract = discovery.Contract.Hash},
+            includePaths);
+        EXPECT_EQ(versionResult.Status, shader::CompileStatus::Success)
+            << "HLSL " << hlslVersion << ": "
+            << (versionResult.Diagnostics.empty()
+                    ? ""
+                    : versionResult.Diagnostics.back().Message);
+        EXPECT_EQ(versionResult.Lanes.size(), 2u) << "HLSL " << hlslVersion;
+    }
+}
+
+// Regression: discovery parses the whole translation unit with one library
+// profile. While that profile was hardcoded to lib_6_1, any language feature
+// gated on a later shader model was rejected during discovery even though the
+// concrete stage compile would have accepted it. ResourceDescriptorHeap needs
+// SM 6.6, so this source only parses when the requested model reaches DXC.
+constexpr std::string_view kShaderModel66Source = R"hlsl(
+struct Payload {
+    uint Value;
+};
+
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void CSMain(uint3 tid : SV_DispatchThreadID) {
+    RWStructuredBuffer<Payload> destination = ResourceDescriptorHeap[0];
+    destination[tid.x].Value = tid.x;
+}
+)hlsl";
+
+TEST(RadRayDxcMetadata, DiscoveryHonorsRequestedShaderModel) {
+    Client client;
+    ASSERT_TRUE(client.IsAvailable());
+    const auto includePaths = ShaderIncludePaths();
+
+    shader::CompilePolicy policy{};
+    policy.ShaderModel = 66;
+    shader::SourceContractRequest request{};
+    request.SourceName = "fixtures/shader_model_66.hlsl";
+    request.RootSource = CopyBytes(kShaderModel66Source);
+    request.Targets = shader::ShaderTargetMask::DXIL;
+    request.Policy = policy;
+    const auto discovery = client.DiscoverSourceContract(request, includePaths);
+    ASSERT_TRUE(discovery.Succeeded())
+        << (discovery.Diagnostics.empty() ? "" : discovery.Diagnostics.back().Message);
+    ASSERT_EQ(discovery.Contract.EntryPoints.size(), 1u);
+    EXPECT_EQ(discovery.Contract.EntryPoints[0].Stage, shader::ShaderStage::Compute);
+
+    const auto result = client.CompileVariant(
+        shader::CompileVariantRequest{
+            .SourceName = "fixtures/shader_model_66.hlsl",
+            .RootSource = CopyBytes(kShaderModel66Source),
+            .Defines = {},
+            .Assignments = {},
+            .Targets = shader::ShaderTargetMask::DXIL,
+            .Policy = policy,
+            .ExpectedContract = discovery.Contract.Hash},
+        includePaths);
+    ASSERT_EQ(result.Status, shader::CompileStatus::Success)
+        << (result.Diagnostics.empty() ? "" : result.Diagnostics.back().Message);
+    EXPECT_EQ(result.Lanes.size(), 1u);
+
+    // The same source must still fail closed below its required shader model,
+    // proving the profile tracks the request instead of always widening.
+    policy.ShaderModel = 60;
+    request.Policy = policy;
+    const auto tooOld = client.DiscoverSourceContract(request, includePaths);
+    EXPECT_FALSE(tooOld.Succeeded());
+    EXPECT_FALSE(tooOld.Diagnostics.empty());
+}
+
+// Regression: every supported shader model must produce a library profile DXC
+// actually recognizes. lib_6_0 does not exist, and the highest released library
+// profile is lib_6_9, so both ends of the policy range are boundary cases.
+TEST(RadRayDxcMetadata, EverySupportedShaderModelDiscovers) {
+    constexpr std::string_view source = R"hlsl(
+[shader("vertex")]
+float4 VSMain(float3 position : POSITION) : SV_Position {
+    return float4(position, 1.0);
+}
+)hlsl";
+
+    Client client;
+    ASSERT_TRUE(client.IsAvailable());
+    const auto includePaths = ShaderIncludePaths();
+    for (uint32_t shaderModel = 60; shaderModel <= 69; ++shaderModel) {
+        shader::CompilePolicy policy{};
+        policy.ShaderModel = shaderModel;
+        shader::SourceContractRequest request{};
+        request.SourceName = "fixtures/shader_model_sweep.hlsl";
+        request.RootSource = CopyBytes(source);
+        request.Targets = shader::ShaderTargetMask::All;
+        request.Policy = policy;
+        const auto discovery = client.DiscoverSourceContract(request, includePaths);
+        EXPECT_TRUE(discovery.Succeeded())
+            << "SM " << shaderModel << ": "
+            << (discovery.Diagnostics.empty() ? "" : discovery.Diagnostics.back().Message);
+    }
+}
+
+// Guard: the build deploys the DLL from SDKs/radray_dxc, so a locally built but
+// unpublished compiler is silently overwritten on the next build. Asserting the
+// toolchain identity of the loaded compiler turns "tested the wrong DLL" from a
+// silent pass into a failure.
+TEST(RadRayDxcMetadata, LoadedCompilerReportsExpectedToolchainIdentity) {
+    constexpr uint64_t kExpectedToolchainIdentity = 0x0000000001090210ull;
+    constexpr std::string_view source = R"hlsl(
+[shader("vertex")]
+float4 VSMain(float3 position : POSITION) : SV_Position {
+    return float4(position, 1.0);
+}
+)hlsl";
+
+    Client client;
+    ASSERT_TRUE(client.IsAvailable());
+    const auto includePaths = ShaderIncludePaths();
+    const auto discovery = client.DiscoverSourceContract(
+        "fixtures/toolchain_identity.hlsl",
+        CopyBytes(source),
+        shader::ShaderTarget::DXIL,
+        includePaths);
+    ASSERT_TRUE(discovery.Succeeded())
+        << (discovery.Diagnostics.empty() ? "" : discovery.Diagnostics.back().Message);
+    const auto result = client.CompileVariant(
+        shader::CompileVariantRequest{
+            .SourceName = "fixtures/toolchain_identity.hlsl",
+            .RootSource = CopyBytes(source),
+            .Defines = {},
+            .Assignments = {},
+            .Targets = shader::ShaderTargetMask::DXIL,
+            .ExpectedContract = discovery.Contract.Hash},
+        includePaths);
+    ASSERT_EQ(result.Status, shader::CompileStatus::Success)
+        << (result.Diagnostics.empty() ? "" : result.Diagnostics.back().Message);
+    ASSERT_EQ(result.Lanes.size(), 1u);
+    shader::WireMetadataEnvelope envelope{};
+    ASSERT_GE(result.Lanes[0].Metadata.size(), sizeof(envelope));
+    std::memcpy(&envelope, result.Lanes[0].Metadata.data(), sizeof(envelope));
+    EXPECT_EQ(envelope.ToolchainIdentity, kExpectedToolchainIdentity);
+    EXPECT_EQ(envelope.SchemaVersion, shader::kShaderMetadataSchemaVersion);
+}
+
+TEST(RadRayDxcMetadata, UnsupportedCompilePolicyFailsClosed) {
+    Client client;
+    ASSERT_TRUE(client.IsAvailable());
+    const auto includePaths = ShaderIncludePaths();
+    const auto discovery = client.DiscoverSourceContract(
+        "fixtures/policy_validation.hlsl",
+        CopyBytes(kMultipleRootConstantsSource),
+        shader::ShaderTarget::DXIL,
+        includePaths);
+    ASSERT_TRUE(discovery.Succeeded())
+        << (discovery.Diagnostics.empty() ? "" : discovery.Diagnostics.back().Message);
+
+    vector<shader::CompilePolicy> invalidPolicies;
+    shader::CompilePolicy policy{};
+    policy.ShaderModel = 59;
+    invalidPolicies.push_back(policy);
+    policy = {};
+    policy.Optimize = 2;
+    invalidPolicies.push_back(policy);
+    policy = {};
+    policy.DebugInfo = 2;
+    invalidPolicies.push_back(policy);
+    policy = {};
+    policy.AllResourcesBound = 2;
+    invalidPolicies.push_back(policy);
+    policy = {};
+    policy.Warnings = static_cast<shader::WarningPolicy>(2);
+    invalidPolicies.push_back(policy);
+    policy = {};
+    policy.SpirvTargetEnv = static_cast<shader::SpirvTargetEnvironment>(1);
+    invalidPolicies.push_back(policy);
+    policy = {};
+    policy.HlslVersion = 2020;
+    invalidPolicies.push_back(policy);
+    policy = {};
+    policy.Reserved = 1;
+    invalidPolicies.push_back(policy);
+
+    for (size_t index = 0; index < invalidPolicies.size(); ++index) {
+        const auto result = client.CompileVariant(
+            shader::CompileVariantRequest{
+                .SourceName = "fixtures/policy_validation.hlsl",
+                .RootSource = CopyBytes(kMultipleRootConstantsSource),
+                .Defines = {},
+                .Assignments = {},
+                .Targets = shader::ShaderTargetMask::DXIL,
+                .Policy = invalidPolicies[index],
+                .ExpectedContract = discovery.Contract.Hash},
+            includePaths);
+        EXPECT_EQ(result.Status, shader::CompileStatus::InvalidRequest)
+            << "policy case " << index;
+        EXPECT_TRUE(result.Lanes.empty()) << "policy case " << index;
+        EXPECT_FALSE(result.Diagnostics.empty()) << "policy case " << index;
+    }
 }
 
 TEST(RadRayDxcMetadata, FailedLaneDoesNotPublishPartialBatch) {

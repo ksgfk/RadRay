@@ -3,7 +3,7 @@
 #pragma radray_keyword_group COMPUTE_MODE "clear" "stamp"
 
 VK_BINDING(6, 2)
-RWStructuredBuffer<uint> Output;
+RWStructuredBuffer<uint> Output : register(u0);
 
 [shader("compute")]
 [numthreads(1, 1, 1)]

@@ -2231,7 +2231,7 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateExplicitRootSignatureInter
             [&](const PushConstantBindingD3D12& value) noexcept {
                 return value.Location == constant.Location;
             });
-        const auto coversStage = [&](ShaderStage stage) noexcept {
+        const auto psCoversStage = [&](ShaderStage stage) noexcept {
             if (!constant.Stages.HasFlag(stage)) {
                 return true;
             }
@@ -2251,9 +2251,9 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateExplicitRootSignatureInter
         if (found == layout->_pushConstantBindings.end() ||
             found->RootParameterIndices.empty() ||
             constant.Stages == ShaderStage::UNKNOWN ||
-            !coversStage(ShaderStage::Vertex) ||
-            !coversStage(ShaderStage::Pixel) ||
-            !coversStage(ShaderStage::Compute)) {
+            !psCoversStage(ShaderStage::Vertex) ||
+            !psCoversStage(ShaderStage::Pixel) ||
+            !psCoversStage(ShaderStage::Compute)) {
             RADRAY_ERR_LOG("d3d12 explicit root signature does not cover active root constants");
             return nullptr;
         }

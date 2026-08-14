@@ -55,9 +55,12 @@ TEST(RadRayShaderLibPass, ProductPassesCompileAsAtomicTwoTargetVariants) {
         const vector<byte> source = ReadBytes(ShaderlibRoot() / pass.RelativePath);
         ASSERT_FALSE(source.empty()) << pass.SourceName;
         const DiscoveryResult discovery = client.DiscoverSourceContract(
-            pass.SourceName,
-            source,
-            shader::ShaderTarget::DXIL,
+            shader::SourceContractRequest{
+                .SourceName = string{pass.SourceName},
+                .RootSource = source,
+                .Defines = {},
+                .Targets = shader::ShaderTargetMask::All,
+                .Policy = {}},
             includePaths);
         ASSERT_TRUE(discovery.Succeeded())
             << (discovery.Diagnostics.empty() ? "" : discovery.Diagnostics.back().Message);
@@ -111,17 +114,32 @@ TEST(RadRayShaderLibPass, ProductPassesCompileAsAtomicTwoTargetVariants) {
     }
 }
 
-TEST(RadRayShaderLibPass, ProductPassesUseTargetGateInsteadOfLegacyBindingMacros) {
+TEST(RadRayShaderLibPass, ProductPassesDeclareBothTargetBindingsExplicitly) {
+    struct BindingCase {
+        std::string_view Name;
+        bool HasResources;
+    };
+    constexpr BindingCase cases[] = {
+        {"forward.hlsl", true},
+        {"depth.hlsl", false},
+        {"compute.hlsl", true}};
+
     const std::filesystem::path root = ShaderlibRoot() / "passes";
-    for (const std::string_view name : {"forward.hlsl", "depth.hlsl", "compute.hlsl"}) {
-        const vector<byte> source = ReadBytes(root / name);
-        ASSERT_FALSE(source.empty()) << name;
+    for (const BindingCase& pass : cases) {
+        const vector<byte> source = ReadBytes(root / pass.Name);
+        ASSERT_FALSE(source.empty()) << pass.Name;
         const string text{
             reinterpret_cast<const char*>(source.data()),
             source.size()};
-        EXPECT_EQ(text.find("register("), string::npos) << name;
-        EXPECT_EQ(text.find("RADRAY_FORWARD_"), string::npos) << name;
-        EXPECT_NE(text.find("#include <core/platform.hlsli>"), string::npos) << name;
+        if (pass.HasResources) {
+            EXPECT_NE(text.find("register("), string::npos) << pass.Name;
+            EXPECT_NE(text.find("VK_BINDING("), string::npos) << pass.Name;
+        } else {
+            EXPECT_EQ(text.find("register("), string::npos) << pass.Name;
+            EXPECT_EQ(text.find("VK_BINDING("), string::npos) << pass.Name;
+        }
+        EXPECT_EQ(text.find("RADRAY_FORWARD_"), string::npos) << pass.Name;
+        EXPECT_NE(text.find("#include <core/platform.hlsli>"), string::npos) << pass.Name;
     }
 }
 
