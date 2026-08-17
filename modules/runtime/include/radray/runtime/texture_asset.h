@@ -1,14 +1,35 @@
 #pragma once
 
+#include <filesystem>
+
 #include <radray/hash.h>
 #include <radray/image_data.h>
 #include <radray/render/rhi.h>
 #include <radray/runtime/asset.h>
+#include <radray/runtime/asset_database.h>
 #include <radray/runtime/asset_manager.h>
 
 namespace radray {
 
 class FrameUploadScheduler;
+
+class TextureImportSettings;
+
+template <>
+struct RuntimeTypeTrait<TextureImportSettings> {
+    static constexpr RuntimeTypeId value{0xbb83ae65, 0x95ec, 0x4737, 0xb9, 0x02, 0x64, 0x64, 0x72, 0xec, 0x6d, 0x9c};
+    using Bases = std::tuple<>;
+};
+
+class TextureImportSettings final : public AssetImportSettings {
+public:
+    const RuntimeTypeInfo& GetTypeInfo() const noexcept override;
+    bool Deserialize(const JsonValue& json) override;
+    bool Serialize(JsonWriteContext& context) const noexcept override;
+
+    bool Srgb{true};
+    bool GenerateMips{true};
+};
 
 /// 一个【非默认 SRV】的差异描述值 (对应 UE5 的 FRHITextureSRVCreateInfo)。
 ///
@@ -92,8 +113,39 @@ struct TextureAssetLoadOptions {
     /// true 时按 sRGB 解释纹理(GPU 采样时做 sRGB→linear)。base color / emissive 用 true;
     /// normal / metallic-roughness / occlusion 用 false。
     bool Srgb{false};
+    /// true 时在 CPU 侧生成完整 RGBA8 mip 链并逐级上传。
+    bool GenerateMips{false};
     /// 解码失败时的回退像素(CPU)。为空时加载失败。
     ImageData FallbackImage{};
+};
+
+/// importer 级构造任务：只产出 AssetLoadResult，不创建 AssetManager slot。
+task<AssetLoadResult> CreateTextureAssetFromImage(
+    FrameUploadScheduler& frameUploads,
+    string name,
+    ImageData image,
+    TextureAssetLoadOptions options = {});
+
+task<AssetLoadResult> CreateTextureAssetFromMemory(
+    FrameUploadScheduler& frameUploads,
+    string name,
+    vector<byte> encodedBytes,
+    TextureAssetLoadOptions options = {});
+
+class TextureImporter final : public TypedAssetImporter<TextureImportSettings> {
+public:
+    explicit TextureImporter(FrameUploadScheduler& frameUploads) noexcept;
+
+    std::string_view GetTypeName() const noexcept override;
+    std::span<const std::string_view> GetFileExtensions() const noexcept override;
+
+protected:
+    task<AssetLoadResult> LoadTyped(
+        std::filesystem::path path,
+        TextureImportSettings settings) override;
+
+private:
+    FrameUploadScheduler& _frameUploads;
 };
 
 /// 从已解码的 CPU 像素(ImageData)创建 GPU 贴图。协程内部 co_await 帧顶 upload phase

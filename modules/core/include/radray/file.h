@@ -8,6 +8,10 @@
 
 namespace radray {
 
+/// 读取整个文件为字符串。文件不存在或读取失败时返回 nullopt。
+/// 【按二进制读，不做换行转换】返回内容与磁盘逐字一致，CRLF 保持原样。要逐字写回所读内容的
+/// 调用方依赖这一点（如 asset manifest 的 settings 原文保真），文本模式会把 `\r\n` 折成 `\n`
+/// 从而静默改写它们。
 std::optional<string> ReadTextFile(const std::filesystem::path& filepath) noexcept;
 
 /// 以二进制方式读取整个文件。文件不存在或读取失败时返回 nullopt。

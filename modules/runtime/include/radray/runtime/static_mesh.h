@@ -1,9 +1,11 @@
 #pragma once
 
+#include <filesystem>
 #include <span>
 
 #include <radray/vertex_data.h>
 #include <radray/runtime/asset.h>
+#include <radray/runtime/asset_database.h>
 #include <radray/runtime/asset_manager.h>
 #include <radray/runtime/gpu_resource.h>
 
@@ -83,6 +85,22 @@ private:
 task<AssetLoadResult> LoadStaticMesh(
     FrameUploadScheduler& frameUploads,
     MeshResource meshResource);
+
+class MeshImporter final : public AssetImporter {
+public:
+    explicit MeshImporter(FrameUploadScheduler& frameUploads) noexcept;
+
+    std::string_view GetTypeName() const noexcept override;
+    std::span<const std::string_view> GetFileExtensions() const noexcept override;
+    task<AssetLoadResult> Load(const AssetLoadContext& ctx) override;
+
+private:
+    static task<AssetLoadResult> LoadMesh(
+        FrameUploadScheduler* frameUploads,
+        std::filesystem::path path);
+
+    FrameUploadScheduler& _frameUploads;
+};
 
 template <>
 struct RuntimeTypeTrait<StaticMesh> {

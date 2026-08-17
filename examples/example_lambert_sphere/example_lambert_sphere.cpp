@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <numbers>
@@ -14,6 +15,7 @@
 #include <radray/logger.h>
 #include <radray/render/rhi.h>
 #include <radray/runtime/application.h>
+#include <radray/runtime/asset_manager.h>
 #include <radray/runtime/components/camera_component.h>
 #include <radray/runtime/game_framework/actor.h>
 #include <radray/runtime/game_framework/world.h>
@@ -23,6 +25,7 @@
 #include <radray/runtime/render_framework/scene.h>
 #include <radray/runtime/render_system.h>
 #include <radray/runtime/shader_jit.h>
+#include <radray/runtime/texture_asset.h>
 #include <radray/runtime/window_manager.h>
 #include <radray/shader/shader_artifact.h>
 #include <radray/shader/shader_compiler_contract.h>
@@ -104,6 +107,14 @@ std::optional<std::filesystem::path> FindProjectRoot() {
     return current;
 }
 
+std::filesystem::path FindAssetsRoot() {
+    if (const char* environment = std::getenv("RADRAY_ASSETS_DIR");
+        environment != nullptr && environment[0] != '\0') {
+        return std::filesystem::path{environment};
+    }
+    return std::filesystem::path{RADRAY_ASSETS_DIR_DEFAULT};
+}
+
 #ifdef RADRAY_ENABLE_SHADER_JIT
 struct ExampleOptions {
     render::RenderBackend Backend{render::RenderBackend::D3D12};
@@ -173,7 +184,7 @@ protected:
 
     void OnAddRenderPasses(RenderPipelineContext& ctx, const RenderCamera& camera) override {
         (void)ctx;
-        if (_ready && camera.ViewCamera != nullptr && camera.Target) {
+        if (_ready && _albedoTexture.IsReady() && camera.ViewCamera != nullptr && camera.Target) {
             EnqueuePass(_pass.get());
         }
     }
@@ -210,6 +221,9 @@ private:
     unique_ptr<render::GraphicsPipelineState> _pipelineState;
     render::BindingHandle _frameBinding;
     render::BindingHandle _lightBinding;
+    render::BindingHandle _albedoBinding;
+    render::BindingHandle _samplerBinding;
+    Nullable<render::Sampler*> _sampler{nullptr};
     vector<render::VertexAttribute> _vertexAttributes;
     vector<FlightResources> _flights;
 
@@ -220,6 +234,7 @@ private:
     render::TextureStates _depthState{render::TextureState::Undefined};
 
     std::optional<GpuMesh> _mesh;
+    StreamingAssetRef<TextureAsset> _albedoTexture;
     uint32_t _indexCount{0};
     float _phase{0.0f};
     bool _ready{false};
@@ -246,6 +261,29 @@ bool LambertPipeline::Initialize() {
                     : nullptr;
     if (_device == nullptr || _registry == nullptr) {
         RADRAY_ERR_LOG("example_lambert_sphere: device or render pass registry is missing");
+        return false;
+    }
+    AssetManager* assetManager = _app->GetAssetManager();
+    if (assetManager == nullptr) {
+        RADRAY_ERR_LOG("example_lambert_sphere: asset manager is missing");
+        return false;
+    }
+    _albedoTexture = assetManager->Load<TextureAsset>("wall.png");
+    if (!_albedoTexture.IsValid()) {
+        RADRAY_ERR_LOG("example_lambert_sphere: wall.png is not registered in the asset database");
+        return false;
+    }
+    _sampler = _device->GetOrCreateSampler(render::SamplerDescriptor{
+        .AddressS = render::AddressMode::Repeat,
+        .AddressT = render::AddressMode::Repeat,
+        .AddressR = render::AddressMode::Repeat,
+        .MinFilter = render::FilterMode::Linear,
+        .MagFilter = render::FilterMode::Linear,
+        .MipmapFilter = render::FilterMode::Linear,
+        .LodMin = 0.0f,
+        .LodMax = 1000.0f});
+    if (!_sampler.HasValue()) {
+        RADRAY_ERR_LOG("example_lambert_sphere: texture sampler creation failed");
         return false;
     }
 
@@ -317,6 +355,8 @@ bool LambertPipeline::Initialize() {
         _layout = layout.Release();
         _frameBinding = static_cast<render::d3d12::RootSigD3D12*>(_layout.get())->FindBinding("Frame");
         _lightBinding = static_cast<render::d3d12::RootSigD3D12*>(_layout.get())->FindBinding("Light");
+        _albedoBinding = static_cast<render::d3d12::RootSigD3D12*>(_layout.get())->FindBinding("AlbedoTexture");
+        _samplerBinding = static_cast<render::d3d12::RootSigD3D12*>(_layout.get())->FindBinding("LinearSampler");
         return BuildPipeline(
             artifact->Generic(),
             vertex.value(),
@@ -351,6 +391,8 @@ bool LambertPipeline::Initialize() {
     _layout = layout.Release();
     _frameBinding = static_cast<render::vulkan::PipelineLayoutVulkan*>(_layout.get())->FindBinding("Frame");
     _lightBinding = static_cast<render::vulkan::PipelineLayoutVulkan*>(_layout.get())->FindBinding("Light");
+    _albedoBinding = static_cast<render::vulkan::PipelineLayoutVulkan*>(_layout.get())->FindBinding("AlbedoTexture");
+    _samplerBinding = static_cast<render::vulkan::PipelineLayoutVulkan*>(_layout.get())->FindBinding("LinearSampler");
     return BuildPipeline(
         artifact->Generic(),
         vertex.value(),
@@ -367,8 +409,9 @@ bool LambertPipeline::BuildPipeline(
     std::span<const radray::byte> vertexBytecode,
     std::span<const radray::byte> pixelBytecode,
     render::ShaderBlobCategory category) {
-    if (!_frameBinding.IsValid() || !_lightBinding.IsValid()) {
-        RADRAY_ERR_LOG("example_lambert_sphere: frame or light binding is missing from shader layout");
+    if (!_frameBinding.IsValid() || !_lightBinding.IsValid() ||
+        !_albedoBinding.IsValid() || !_samplerBinding.IsValid()) {
+        RADRAY_ERR_LOG("example_lambert_sphere: required shader binding is missing from the layout");
         return false;
     }
 
@@ -387,6 +430,8 @@ bool LambertPipeline::BuildPipeline(
             offset = 0;
         } else if (semantic.value() == VertexSemantics::NORMAL && input.ComponentCount == 3) {
             offset = sizeof(Eigen::Vector3f);
+        } else if (semantic.value() == VertexSemantics::TEXCOORD && input.ComponentCount == 2) {
+            offset = sizeof(Eigen::Vector3f) * 2;
         } else {
             RADRAY_ERR_LOG("example_lambert_sphere: unexpected vertex semantic: {}", semantic.value());
             return false;
@@ -399,8 +444,8 @@ bool LambertPipeline::BuildPipeline(
             .Format = format.value(),
             .Location = input.Location});
     }
-    if (_vertexAttributes.size() != 2) {
-        RADRAY_ERR_LOG("example_lambert_sphere: expected position and normal shader inputs");
+    if (_vertexAttributes.size() != 3) {
+        RADRAY_ERR_LOG("example_lambert_sphere: expected position, normal, and UV shader inputs");
         return false;
     }
 
@@ -444,7 +489,7 @@ bool LambertPipeline::BuildPipeline(
 
     const render::VertexBufferLayout vertexBuffer{
         .Binding = 0,
-        .ArrayStride = sizeof(Eigen::Vector3f) * 2,
+        .ArrayStride = sizeof(Eigen::Vector3f) * 2 + sizeof(Eigen::Vector2f),
         .StepMode = render::VertexStepMode::Vertex};
     const render::VertexInputState vertexInput{
         .Buffers = std::span{&vertexBuffer, 1},
@@ -483,7 +528,6 @@ bool LambertPipeline::EnsureMesh(AppFrameContext& frame) {
 
     TriangleMesh sphere;
     sphere.InitAsUVSphere(1.0f, 64);
-    sphere.UV0.clear();
     sphere.Tangents.clear();
     sphere.Color0.clear();
 
@@ -592,7 +636,8 @@ void LambertPipeline::ExecuteLambertPass(RenderPipelineContext& ctx, const Rende
         backBuffer.Width == 0 || backBuffer.Height == 0 ||
         !EnsureDepth(backBuffer.Width, backBuffer.Height) ||
         !EnsureMesh(ctx.Frame) ||
-        !EnsureFlightResources(ctx.Frame, ctx.Frame.FlightIndex())) {
+        !EnsureFlightResources(ctx.Frame, ctx.Frame.FlightIndex()) ||
+        !_albedoTexture.IsReady() || _albedoTexture->GetSrv() == nullptr || !_sampler.HasValue()) {
         return;
     }
 
@@ -601,7 +646,7 @@ void LambertPipeline::ExecuteLambertPass(RenderPipelineContext& ctx, const Rende
         .ViewProj = camera.ViewCamera->ComputeViewProjMatrix(
             static_cast<float>(backBuffer.Width) / static_cast<float>(backBuffer.Height)),
         .Model = Eigen::Matrix4f::Identity(),
-        .Albedo = Eigen::Vector4f{0.72f, 0.36f, 0.12f, 1.0f}};
+        .Albedo = Eigen::Vector4f::Ones()};
     LambertDirectionalLightCpu lightData{
         .Direction = Eigen::Vector4f{
             0.8f * std::cos(std::numbers::pi_v<float> * 2.0f * _phase / kLightPathPeriodSeconds),
@@ -619,13 +664,7 @@ void LambertPipeline::ExecuteLambertPass(RenderPipelineContext& ctx, const Rende
     std::memcpy(lightReservation.Data(), &lightData, sizeof(lightData));
     const DynamicCBufferArena::Allocation frameAllocation = frameReservation.Commit(sizeof(frameData));
     const DynamicCBufferArena::Allocation lightAllocation = lightReservation.Commit(sizeof(lightData));
-    if (!frameAllocation.IsValid() || !lightAllocation.IsValid() || !resources.Parameters->Set(
-            _frameBinding,
-            0,
-            render::ShaderBufferBinding{
-                .Target = frameAllocation.Target,
-                .Range = render::BufferRange{frameAllocation.Offset, frameAllocation.Size},
-                .StructureByteStride = 0}) ||
+    if (!frameAllocation.IsValid() || !lightAllocation.IsValid() || !resources.Parameters->Set(_frameBinding, 0, render::ShaderBufferBinding{.Target = frameAllocation.Target, .Range = render::BufferRange{frameAllocation.Offset, frameAllocation.Size}, .StructureByteStride = 0}) ||
         !resources.Parameters->Set(
             _lightBinding,
             0,
@@ -633,6 +672,8 @@ void LambertPipeline::ExecuteLambertPass(RenderPipelineContext& ctx, const Rende
                 .Target = lightAllocation.Target,
                 .Range = render::BufferRange{lightAllocation.Offset, lightAllocation.Size},
                 .StructureByteStride = 0}) ||
+        !resources.Parameters->Set(_albedoBinding, 0, _albedoTexture->GetSrv()) ||
+        !resources.Parameters->Set(_samplerBinding, 0, _sampler.Get()) ||
         !resources.Parameters->FlushWrites()) {
         RADRAY_ERR_LOG("example_lambert_sphere: frame parameter upload failed");
         return;
@@ -730,7 +771,6 @@ protected:
         }
         GetRenderSystem()->SetPipeline(std::move(pipeline));
     }
-
 };
 
 }  // namespace
@@ -766,6 +806,7 @@ int main(int argc, char** argv) {
         .AppName = "example_lambert_sphere",
         .EngineName = "RadRay",
         .RenderCachePath = {},
+        .AssetRoot = FindAssetsRoot(),
         .WindowTitle = "example_lambert_sphere",
         .WindowWidth = 1280,
         .WindowHeight = 720,

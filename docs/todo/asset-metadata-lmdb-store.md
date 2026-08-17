@@ -2,9 +2,10 @@
 >   `AssetBundleManifest` / `AssetDatabase` 迁移、XML 降级为落盘序列化
 > - 权威: 本文是 grilling 对齐后的专项实施计划；决策 rationale 冻结在 ADR-0038（取代 ADR-0037
 >   的 DOM 常驻），实现完成后的现状描述以 `docs/architecture/` 为准
-> - 状态: 已完成（2026-08-14；M0–M3 全部落地并全量构建/测试通过）。实现后的现状契约以
->   `docs/architecture/asset-database.md` 为准；下文是冻结的实施计划与对齐记录。
-> - 锚点: `docs/adr/0038-asset-metadata-in-lmdb.md`, `docs/adr/0039-abandon-bundle-organization-stabilize-asset-system.md`, `docs/adr/0036-per-bundle-manifest-is-asset-identity-authority.md`, `docs/adr/0037-manifest-dom-is-backing-store.md`, `docs/architecture/asset-database.md`, `modules/runtime/include/radray/runtime/asset_database.h`, `modules/runtime/src/asset_database.cpp`, `modules/core/include/radray/lmdb.h`, `modules/core/include/radray/xml.h`, `project_manifest.json`, `CMakeLists.txt`
+> - 状态: 已作废（2026-08-17）。曾于 2026-08-14 落地，但 ADR-0040 以进版本控制的单份 JSON
+>   清单取代 LMDB，相关实现（`radray/lmdb.h`、`AssetDatabase` 的 LMDB 存取、lmdb 依赖）已
+>   移除。本文是历史快照；当前计划见 `docs/todo/asset-database-json-manifest.md`。
+> - 锚点: `docs/adr/0038-asset-metadata-in-lmdb.md`, `docs/adr/0039-abandon-bundle-organization-stabilize-asset-system.md`, `docs/adr/0040-single-text-manifest-is-asset-identity-authority.md`, `docs/architecture/asset-database.md`, `modules/runtime/include/radray/runtime/asset_database.h`, `modules/runtime/src/asset_database.cpp`, `modules/core/include/radray/xml.h`, `project_manifest.json`, `CMakeLists.txt`
 
 # asset 元数据改用 LMDB 存储（实施计划）
 

@@ -15,14 +15,24 @@
 namespace radray {
 
 std::optional<string> ReadTextFile(const std::filesystem::path& filepath) noexcept {
-    if (!std::filesystem::exists(filepath)) {
+    std::error_code ec{};
+    if (!std::filesystem::exists(filepath, ec) || ec) {
         return std::nullopt;
     }
-    std::ifstream t{filepath};
-    string str(
-        std::istreambuf_iterator<char>{t},
-        std::istreambuf_iterator<char>{});
-    return str;
+    std::ifstream file{filepath, std::ios::binary | std::ios::ate};
+    if (!file) {
+        return std::nullopt;
+    }
+    const std::streamsize size = file.tellg();
+    if (size < 0) {
+        return std::nullopt;
+    }
+    file.seekg(0, std::ios::beg);
+    string text(static_cast<size_t>(size), '\0');
+    if (size > 0 && !file.read(text.data(), size)) {
+        return std::nullopt;
+    }
+    return text;
 }
 
 std::optional<vector<byte>> ReadBinaryFile(const std::filesystem::path& filepath) noexcept {

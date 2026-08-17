@@ -11,9 +11,12 @@
 
 #include <radray/logger.h>
 #include <radray/render/rhi.h>
+#include <radray/runtime/asset_database.h>
 #include <radray/runtime/gpu_system.h>
 #include <radray/runtime/window_manager.h>
 #include <radray/runtime/asset_manager.h>
+#include <radray/runtime/static_mesh.h>
+#include <radray/runtime/texture_asset.h>
 #include <radray/runtime/render_system.h>
 #include <radray/runtime/service_registry.h>
 #include <radray/runtime/game_framework/world.h>
@@ -33,6 +36,18 @@
 #endif
 
 namespace radray {
+
+namespace {
+
+vector<unique_ptr<AssetImporter>> MakeDefaultAssetImporters(
+    FrameUploadScheduler& frameUploads) {
+    vector<unique_ptr<AssetImporter>> importers;
+    importers.push_back(make_unique<TextureImporter>(frameUploads));
+    importers.push_back(make_unique<MeshImporter>(frameUploads));
+    return importers;
+}
+
+}  // namespace
 
 bool SwitchToApplicationSchedulerAwaitable::await_ready() const noexcept {
     return _scheduler == nullptr || _stop.stop_requested();
@@ -111,7 +126,13 @@ void ApplicationScheduler::CancelAll() noexcept {
 
 Application::Application() noexcept = default;
 
-Application::~Application() noexcept = default;
+Application::~Application() noexcept {
+    if (_gpuSystem != nullptr) {
+        _gpuSystem->WaitAndCleanupCompletedFlights();
+    }
+    _scheduler.CancelAll();
+    DestroyRuntime();
+}
 
 render::Device* Application::GetDevice() noexcept {
     return _gpuSystem != nullptr ? _gpuSystem->GetDevice() : nullptr;
@@ -804,6 +825,11 @@ int Application::Shutdown(const AppShutdownContext& ctx) {
     // 游戏侧清理:释放自管 per-flight 资源、置空指向 World 的非 owning 指针。
     OnShutdown();
     _scheduler.CancelAll();
+    DestroyRuntime();
+    return 0;
+}
+
+void Application::DestroyRuntime() noexcept {
     // 拆 World:销毁 Actor → 移除 SceneProxy → drop 其持有的 StreamingAssetRef。
     _world.reset();
     // RenderSystem 持有 Scene 对象,生命周期必须长于 World 的拆解。
@@ -814,6 +840,8 @@ int Application::Shutdown(const AppShutdownContext& ctx) {
     _renderSystem.reset();
     // AssetManager 析构会 force-unload 全部资产,释放 GPU buffer(须在 device 销毁前)。
     _assetManager.reset();
+    // importer 与 settings 必须活到全部在飞加载协程被 AssetManager 收束之后。
+    _assetDatabase.reset();
     if (_windowManager != nullptr) {
         _windowManager->DetachAllSwapChains();
         _windowManager->SetGpuSystem(nullptr);
@@ -823,7 +851,6 @@ int Application::Shutdown(const AppShutdownContext& ctx) {
     }
     _gpuSystem.reset();
     _windowManager.reset();
-    return 0;
 }
 
 void Application::InitializeRuntime(const ApplicationRuntimeDescriptor& desc) {
@@ -870,6 +897,16 @@ void Application::InitializeRuntime(const ApplicationRuntimeDescriptor& desc) {
     _gpuSystem = make_unique<GpuSystem>(this, gpuSysDesc);
     _renderSystem = make_unique<RenderSystem>(this);
     _assetManager = make_unique<AssetManager>();
+    if (!desc.AssetRoot.empty()) {
+        string error;
+        _assetDatabase = AssetDatabase::Open(
+            desc.AssetRoot,
+            MakeDefaultAssetImporters(_gpuSystem->GetFrameUploadScheduler()),
+            error);
+        if (_assetDatabase == nullptr) {
+            RADRAY_ERR_LOG("open asset database failed: {}", error);
+        }
+    }
     _world = make_unique<World>(this);
 
     // ════════════════════════════════════════════════════════════════
@@ -884,6 +921,10 @@ void Application::InitializeRuntime(const ApplicationRuntimeDescriptor& desc) {
     registry.Add(_assetManager.get());
     registry.Add(_world.get());
     registry.Wire();
+    // AssetDatabase 是可选服务，不能进入 ServiceTraits 的必需依赖装配。
+    if (_assetDatabase != nullptr) {
+        _assetManager->SetAssetSource(_assetDatabase.get());
+    }
 
     // ════════════════════════════════════════════════════════════════
     //  phase 3:初始化数据。先跑各服务可选的 OnInitialize 钩子,

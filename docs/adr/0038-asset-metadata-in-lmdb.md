@@ -1,6 +1,6 @@
 # ADR-0038 asset 元数据改用 LMDB 存储
 
-状态: 生效
+状态: 已被 ADR-0040 取代
 日期: 2026-08
 影响: `modules/runtime` 的 `AssetBundleManifest` / `AssetDatabase`、asset 元数据运行时存储与
 `bundle.xml` 落盘、`third_party/` 依赖（LMDB）与 `project_manifest.json`

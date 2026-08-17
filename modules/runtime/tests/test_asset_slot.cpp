@@ -171,6 +171,37 @@ private:
     std::coroutine_handle<> _handle{};
 };
 
+class ProbeAssetSource final : public IAssetSource {
+public:
+    ProbeAssetSource(AssetId id, string path, shared_ptr<Counters> counters) noexcept
+        : _id(id), _path(std::move(path)), _counters(std::move(counters)) {}
+
+    std::optional<task<AssetLoadResult>> CreateLoadTask(const AssetId& id) override {
+        if (id != _id) {
+            return std::nullopt;
+        }
+        ++CreateCount;
+        return LoadProbe(_counters);
+    }
+
+    std::optional<AssetId> ResolveId(std::string_view relPath) const override {
+        ++ResolveCount;
+        return relPath == _path ? std::optional<AssetId>{_id} : std::nullopt;
+    }
+
+    uint32_t CreateCount{0};
+    mutable uint32_t ResolveCount{0};
+
+private:
+    static task<AssetLoadResult> LoadProbe(shared_ptr<Counters> counters) {
+        co_return AssetLoadResult::Success(make_unique<ProbeAsset>(std::move(counters), false));
+    }
+
+    AssetId _id;
+    string _path;
+    shared_ptr<Counters> _counters;
+};
+
 /// 【声明序即析构序的反面】: _waitFrame 必须比 _assets 活得久 —— 资产在 OnUnload 里经
 /// manager 用它, 而那发生在 manager 析构期间。故 _waitFrame 声明在前 (逆序析构时后死)。
 class AssetSlotTest : public ::testing::Test {
@@ -618,6 +649,62 @@ TEST_F(AssetSlotTest, UnreferencedFaultedSlotIsCollectedSoTheIdIsFree) {
     StreamingAssetRef<ProbeAsset> retried =
         Assets().AddReady<ProbeAsset>(id, make_unique<ProbeAsset>(counters, false));
     EXPECT_TRUE(retried.IsReady()) << "the id must be free after the faulted slot is collected";
+}
+
+// ════════════════════════════════════════════════════════════
+//  IAssetSource 桥接
+// ════════════════════════════════════════════════════════════
+
+TEST_F(AssetSlotTest, SourceLoadUsesTheExistingSlotTableAndDeduplicates) {
+    shared_ptr<Counters> counters = MakeCounters();
+    const AssetId id = MakeId(27);
+    ProbeAssetSource source{id, "probe.asset", counters};
+    Assets().SetAssetSource(&source);
+
+    StreamingAssetRef<ProbeAsset> first = Assets().Load<ProbeAsset>(id);
+    StreamingAssetRef<ProbeAsset> second = Assets().Load<ProbeAsset>(id);
+    EXPECT_TRUE(first.IsValid());
+    EXPECT_TRUE(first == second);
+    EXPECT_EQ(source.CreateCount, 1u) << "the source must not create a discarded duplicate task";
+    EXPECT_EQ(Assets().GetAssetCount(), 1u);
+
+    Assets().Pump();
+    ASSERT_TRUE(first.IsReady());
+    ASSERT_TRUE(second.IsReady());
+    EXPECT_EQ(first.Get(), second.Get());
+    Assets().SetAssetSource(nullptr);
+}
+
+TEST_F(AssetSlotTest, MissingOrUnresolvedSourceReturnsAnInvalidReference) {
+    const AssetId id = MakeId(28);
+    EXPECT_FALSE(Assets().Load<ProbeAsset>(id).IsValid());
+
+    ProbeAssetSource source{id, "known.asset", MakeCounters()};
+    Assets().SetAssetSource(&source);
+    EXPECT_FALSE(Assets().Load<ProbeAsset>(MakeId(29)).IsValid());
+    EXPECT_EQ(source.CreateCount, 0u);
+    EXPECT_FALSE(Assets().Load<ProbeAsset>("missing.asset").IsValid());
+    EXPECT_EQ(source.ResolveCount, 1u);
+    Assets().SetAssetSource(nullptr);
+}
+
+TEST_F(AssetSlotTest, SourcePathResolvesToThePersistentId) {
+    shared_ptr<Counters> counters = MakeCounters();
+    const AssetId id = MakeId(30);
+    ProbeAssetSource source{id, "folder/probe.asset", counters};
+    Assets().SetAssetSource(&source);
+
+    StreamingAssetRef<ProbeAsset> byPath = Assets().Load<ProbeAsset>("folder/probe.asset");
+    StreamingAssetRef<ProbeAsset> byId = Assets().Load<ProbeAsset>(id);
+    EXPECT_TRUE(byPath.IsValid());
+    EXPECT_TRUE(byPath == byId);
+    EXPECT_EQ(byPath.GetAssetId(), id);
+    EXPECT_EQ(source.ResolveCount, 1u);
+    EXPECT_EQ(source.CreateCount, 1u);
+
+    Assets().Pump();
+    EXPECT_TRUE(byPath.IsReady());
+    Assets().SetAssetSource(nullptr);
 }
 
 // ════════════════════════════════════════════════════════════

@@ -182,6 +182,7 @@ _world.reset();                    // Actor → SceneProxy → drop StreamingAss
 _windowManager->SetRenderSystem(nullptr);  // RenderPassRegistry 即将销毁，先断引用
 _renderSystem.reset();             // 持有 Scene，须长于 World 的拆解
 _assetManager.reset();             // 放开全部资产，GPU buffer 须在 device 前释放
+_assetDatabase.reset();            // importer/settings 活过 manager 的在飞 task
 _windowManager->DetachAllSwapChains();
 _windowManager->SetGpuSystem(nullptr);
 _gpuSystem->SetWindowManager(nullptr);
@@ -189,9 +190,13 @@ _gpuSystem.reset();                // device 最后死
 _windowManager.reset();
 ```
 
-关键约束：**`AssetManager` 必须在 `GpuSystem` 之前销毁**（GPU 资源必须在 device 之前交出），
+关键约束：**`AssetManager` 必须在 `AssetDatabase` 之前销毁**（在飞 task 可能持有 importer），
+且两者都必须在 `GpuSystem` 之前销毁（GPU 资源必须在 device 之前交出）。
 而 `PipelineLayoutCache`（宿主 `RenderSystem`）会因此先于它的持有者销毁——那是常规路径，
 缓存的析构会把残留条目的所有权交还给它们自己。
+
+`Application` 析构也复用幂等的内部 teardown，作为正常 `Shutdown` 被异常绕过时的保底；该路径
+不调用派生类的 `OnShutdown`，但仍会 wait GPU、取消 scheduler、断开窗口引用并保持同一销毁顺序。
 
 ## 服务装配
 

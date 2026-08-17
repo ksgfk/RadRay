@@ -91,5 +91,8 @@ docs/adr/*.md
 | [0035](0035-optional-explicit-dxil-root-signature-and-rhi-fallback.md) | Optional Explicit DXIL Root Signature 与 D3D12 RHI fallback | 生效 |
 | [0036](0036-per-bundle-manifest-is-asset-identity-authority.md) | per-bundle 单清单是资产身份权威 | 部分被 ADR-0039 取代 |
 | [0037](0037-manifest-dom-is-backing-store.md) | 清单 DOM 常驻作为后备存储 | 已被 ADR-0038 取代 |
-| [0038](0038-asset-metadata-in-lmdb.md) | asset 元数据改用 LMDB 存储 | 生效 |
-| [0039](0039-abandon-bundle-organization-stabilize-asset-system.md) | 放弃 per-bundle 组织，先稳定 asset 系统 | 生效 |
+| [0038](0038-asset-metadata-in-lmdb.md) | asset 元数据改用 LMDB 存储 | 已被 ADR-0040 取代 |
+| [0039](0039-abandon-bundle-organization-stabilize-asset-system.md) | 放弃 per-bundle 组织，先稳定 asset 系统 | 部分被 ADR-0041 取代 |
+| [0040](0040-single-text-manifest-is-asset-identity-authority.md) | 单文本 JSON 清单是资产身份权威 | 生效 |
+| [0041](0041-load-bridging-belongs-to-asset-manager.md) | 加载桥接归 AssetManager，资产来源经 IAssetSource 反转 | 生效 |
+| [0042](0042-importers-are-interfaces-with-typed-settings.md) | 导入器是虚接口，导入设置强类型化 | 生效 |

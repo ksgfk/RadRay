@@ -16,6 +16,7 @@ struct ApplicationSchedulerRecord;
 class GpuSystem;
 class WindowManager;
 class AppFrameContext;
+class AssetDatabase;
 class AssetManager;
 class RenderSystem;
 class World;
@@ -109,6 +110,8 @@ struct ApplicationRuntimeDescriptor {
     /// 显式指定的可写目录，用于持久化图形管线缓存。
     /// shader artifact 的加载策略由 runtime/render 边界负责。
     std::filesystem::path RenderCachePath{};
+    /// 开发时资产根；清单固定为 `<AssetRoot>/assets.json`。空路径不启用 AssetDatabase。
+    std::filesystem::path AssetRoot{};
 
     // —— 主窗口 ——
     std::string_view WindowTitle{"RadRay Application"};
@@ -188,11 +191,13 @@ protected:
 
 private:
     void InitializeRuntime(const ApplicationRuntimeDescriptor& desc);
+    void DestroyRuntime() noexcept;
 
     unique_ptr<WindowManager> _windowManager;
     unique_ptr<GpuSystem> _gpuSystem;
-    unique_ptr<RenderSystem> _renderSystem;
+    unique_ptr<AssetDatabase> _assetDatabase;
     unique_ptr<AssetManager> _assetManager;
+    unique_ptr<RenderSystem> _renderSystem;
     unique_ptr<World> _world;
     ApplicationScheduler _scheduler;
     std::filesystem::path _renderCachePath;

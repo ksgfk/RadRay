@@ -7,8 +7,8 @@
 **先读这条**：`RenderPipeline` 框架已经建好，但 runtime 不提供默认的具体管线。
 `RenderSystem::_pipeline` 初始为 null，由应用在 `OnInit` 中通过
 `RenderSystem::SetPipeline(unique_ptr<RenderPipeline>)` 注入并转移所有权。
-`examples/example_lambert_sphere` 是当前用于验证 runtime shader JIT 的最小具体管线；它不代表
-scene/primitive proxy 路径已经完成。本文描述的是框架的形状、注入边界与约定。
+`examples/example_lambert_sphere` 是当前用于验证 runtime shader JIT 与数据库贴图加载的最小
+具体管线；它不代表 scene/primitive proxy 路径已经完成。本文描述的是框架的形状、注入边界与约定。
 
 ## 分层
 
@@ -17,6 +17,7 @@ Application            进程生命周期、runner 选择、帧循环
   ├─ WindowManager     窗口与 swapchain
   ├─ GpuSystem         device、queue、flight、上传        → frame-and-gpu.md
   ├─ RenderSystem      "怎么画"：RenderPassRegistry 与 RenderPipeline
+  ├─ AssetDatabase     可选 JSON 身份库与 importer              → asset-database.md
   ├─ AssetManager      资产生命周期                       → asset-system.md
   └─ World             Actor / Component / Scene
 ```
@@ -104,12 +105,16 @@ struct MeshDrawArgs {
 
 `InitializeRuntime` 走 `ServiceRegistry` 的三阶段：
 
-1. 创建 5 个服务（`WindowManager`、`GpuSystem`、`RenderSystem`、`AssetManager`、`World`）。
-   顺序任意——交叉引用推迟到 phase 2。
+1. 创建 5 个核心服务（`WindowManager`、`GpuSystem`、`RenderSystem`、`AssetManager`、`World`）；
+   `desc.AssetRoot` 非空时另开可选 `AssetDatabase`。交叉引用推迟到 phase 2。
 2. `Add` 全部服务后 `Wire()`。
-    3. `Initialize()`，触发 `RenderSystem::OnInitialize`（建 `RenderPassRegistry`）。
+   数据库不进 registry；`Wire()` 后手工调用 `AssetManager::SetAssetSource`。
+3. `Initialize()`，触发 `RenderSystem::OnInitialize`（建 `RenderPassRegistry`）。
 
 之后建主窗口并挂 swapchain。
+
+正常 runner 走 `Shutdown`；若初始化或游戏钩子的异常绕过正常路径，`Application` 析构仍调用同一
+幂等内部 teardown（不再调用游戏侧虚钩子），先断开窗口的非 owning 引用，再按下述服务顺序回收。
 
 **关停顺序是固定的**，理由见 `architecture/asset-system.md`：
 
@@ -118,6 +123,7 @@ WaitAndCleanupCompletedFlights → OnShutdown → scheduler.CancelAll
   → World（先拆 proxy 与 AssetRef）
   → WindowManager::SetRenderSystem(nullptr) → RenderSystem
   → AssetManager（force-unload）
+  → AssetDatabase
   → DetachAllSwapChains / SetGpuSystem(nullptr) → GpuSystem → WindowManager
 ```
 
@@ -183,6 +189,9 @@ template <> struct ServiceTraits<AssetManager> {
 | `AssetManager` | `SetWaitFrameProcessor`（经 `Bases = IWaitFrameProcessor` 解析到 `GpuSystem`） | — |
 | `RenderSystem` | — | 有（建 registry / PSO 缓存 / DXC） |
 | `World` | — | — |
+
+`AssetDatabase` 是可选依赖：`ServiceRegistry::Wire` 对缺失依赖会 abort，所以它不登记为服务，
+也不出现在 `ServiceTraits<AssetManager>::Inject`。只有 `AssetRoot` 非空且 `Open` 成功时才手工注入。
 
 ## 现状陷阱
 

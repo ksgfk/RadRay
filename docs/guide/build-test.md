@@ -49,8 +49,9 @@ cmake --build build_debug --config Debug --parallel 24
 
 `example_lambert_sphere` 是普通 executable，不注册 CTest。它默认按 D3D12 构建，运行时把
 工程根目录作为当前工作目录，把 `shaderlib/` 物理目录作为 root-relative HLSL include path；
-shaderlib 不会复制到输出目录。`RADRAY_ENABLE_SHADER_JIT=OFF` 时目标仍可构建，但应用会在创建窗口前
-记录错误并返回非零码。
+shaderlib 不会复制到输出目录。资产根优先读 `RADRAY_ASSETS_DIR`，否则使用构建时注入的
+`${CMAKE_SOURCE_DIR}/assets`；sample 通过 `assets/assets.json` 加载 `wall.png`。`RADRAY_ENABLE_SHADER_JIT=OFF`
+时目标仍可构建，但应用会在创建窗口前记录错误并返回非零码。
 
 ```powershell
 cmake --build build_debug --config Debug --target example_lambert_sphere --parallel 24
@@ -95,6 +96,7 @@ ctest --test-dir build_debug -C Debug -R AssetSlotTest --output-on-failure
 | target | suite |
 |---|---|
 | `test_asset_slot` | `AssetSlotTest` |
+| `test_asset_database` | `AssetDatabaseTest` |
 | `test_render_pass_registry` | `RenderPassCacheKeyTest`, `FramebufferCacheKeyTest`, `RenderPassRegistryTest` |
 | `test_radray_render_pso_smoke` | `RadRayRenderPsoSmoke` |
 | `test_radray_shader_compiler_client` | `RadRayShaderCompilerClient` |

@@ -75,12 +75,6 @@
             "Tag": "v1.16"
         },
         {
-            "Name": "lmdb",
-            "Type": "git",
-            "Git": "https://github.com/LMDB/lmdb.git",
-            "Tag": "LMDB_1.0.1"
-        },
-        {
             "Name": "zlib",
             "Type": "git",
             "Git": "https://github.com/madler/zlib.git",
@@ -108,13 +102,13 @@
             "Name": "Vulkan-Headers",
             "Type": "git",
             "Git": "https://github.com/KhronosGroup/Vulkan-Headers.git",
-            "Tag": "vulkan-sdk-1.4.350.0"
+            "Tag": "vulkan-sdk-1.4.357.0"
         },
         {
             "Name": "volk",
             "Type": "git",
             "Git": "https://github.com/zeux/volk.git",
-            "Tag": "1.4.350"
+            "Tag": "vulkan-sdk-1.4.357.0"
         },
         {
             "Name": "VulkanMemoryAllocator",

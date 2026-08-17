@@ -1,6 +1,7 @@
 # ADR-0039 放弃 per-bundle 组织，先稳定 asset 系统
 
-状态: 生效
+状态: 部分被 ADR-0041 取代（"不改 AssetManager" / "加载桥接留待后续" 两条已被推翻；
+放弃 per-bundle 组织与身份规则继续生效）
 日期: 2026-08
 影响: `modules/runtime` 的 `AssetDatabase` / `AssetManager`、asset 身份登记形态、`docs/architecture/asset-database.md`、`docs/architecture/asset-system.md`
 

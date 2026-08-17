@@ -3,8 +3,13 @@
 #include <limits>
 #include <utility>
 
+#include <array>
+#include <fmt/format.h>
+
+#include <radray/triangle_mesh.h>
 #include <radray/render/rhi.h>
 #include <radray/runtime/gpu_system.h>
+#include <radray/wavefront_obj.h>
 
 namespace radray {
 namespace {
@@ -97,6 +102,41 @@ bool IsSectionValid(const StaticMeshSection& section, const MeshResource& meshRe
         return false;
     }
     return section.MaxVertexIndex < primitive.VertexCount;
+}
+
+bool IsObjIndexValid(int32_t index, size_t count, bool optional) noexcept {
+    if (index == 0) {
+        return optional;
+    }
+    if (index > 0) {
+        return static_cast<size_t>(index) <= count;
+    }
+    const int64_t magnitude = -static_cast<int64_t>(index);
+    return magnitude <= static_cast<int64_t>(count);
+}
+
+bool AreObjFaceIndicesValid(const WavefrontObjReader& reader) noexcept {
+    for (const WavefrontObjFace& face : reader.Faces()) {
+        const int32_t positions[]{face.V1, face.V2, face.V3};
+        const int32_t normals[]{face.Vn1, face.Vn2, face.Vn3};
+        const int32_t uvs[]{face.Vt1, face.Vt2, face.Vt3};
+        for (int32_t index : positions) {
+            if (!IsObjIndexValid(index, reader.Positions().size(), false)) {
+                return false;
+            }
+        }
+        for (int32_t index : normals) {
+            if (!IsObjIndexValid(index, reader.Normals().size(), true)) {
+                return false;
+            }
+        }
+        for (int32_t index : uvs) {
+            if (!IsObjIndexValid(index, reader.UVs().size(), true)) {
+                return false;
+            }
+        }
+    }
+    return true;
 }
 
 }  // namespace
@@ -206,6 +246,53 @@ task<AssetLoadResult> LoadStaticMesh(
         Eigen::Vector3f::Zero(),
         Eigen::Vector3f::Zero(),
         std::move(renderMesh.value())));
+}
+
+MeshImporter::MeshImporter(FrameUploadScheduler& frameUploads) noexcept
+    : _frameUploads(frameUploads) {
+}
+
+std::string_view MeshImporter::GetTypeName() const noexcept {
+    return "mesh";
+}
+
+std::span<const std::string_view> MeshImporter::GetFileExtensions() const noexcept {
+    static constexpr std::array<std::string_view, 1> extensions{".obj"};
+    return extensions;
+}
+
+task<AssetLoadResult> MeshImporter::Load(const AssetLoadContext& ctx) {
+    return LoadMesh(&_frameUploads, ctx.AbsolutePath);
+}
+
+task<AssetLoadResult> MeshImporter::LoadMesh(
+    FrameUploadScheduler* frameUploads,
+    std::filesystem::path path) {
+    WavefrontObjReader reader{path};
+    reader.Read();
+    if (reader.HasError()) {
+        co_return AssetLoadResult::Failure(fmt::format(
+            "cannot parse mesh source '{}': {}",
+            path.string(),
+            reader.Error()));
+    }
+    if (reader.Faces().empty() || !AreObjFaceIndicesValid(reader)) {
+        co_return AssetLoadResult::Failure(fmt::format(
+            "mesh source '{}' has no valid triangle faces",
+            path.string()));
+    }
+
+    TriangleMesh triangleMesh;
+    reader.ToTriangleMesh(&triangleMesh);
+    if (!triangleMesh.IsValid()) {
+        co_return AssetLoadResult::Failure(fmt::format(
+            "mesh source '{}' produced inconsistent vertex attributes",
+            path.string()));
+    }
+
+    MeshResource meshResource;
+    triangleMesh.ToSimpleMeshResource(&meshResource);
+    co_return co_await LoadStaticMesh(*frameUploads, std::move(meshResource));
 }
 
 }  // namespace radray

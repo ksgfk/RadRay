@@ -10,7 +10,7 @@
 ## 生命周期
 
 ```text
-Load request → AssetSlot::Loading → AssetManager::Pump → Loaded
+Load request / source task → AssetSlot::Loading → AssetManager::Pump → Loaded
                                                ↓
                               最后一份 StreamingAssetRef 归零
                                                ↓
@@ -19,6 +19,11 @@ Load request → AssetSlot::Loading → AssetManager::Pump → Loaded
 
 加载去重按 `AssetId` 进行。dedup 命中时不会重新执行 loader，因此带 options 的 loader
 必须在发起请求前检查参数；不能把一次请求的共享设施指针寄希望于第二次命中时更新。
+
+加载有两种入口，共用同一张 slot 表：显式 `Load(AssetLoadRequest)` 直接提交 task；
+`Load(AssetId)` / `Load<T>(path)` 经可选 `IAssetSource` 取得 task。source 未装配或未命中时返回
+无效引用，不创建 faulted slot。`AssetDatabase` 是当前 source 实现，细节见
+`architecture/asset-database.md`。
 
 `StreamingAssetRef<T>` 是类型安全的视图，内部仍由 `StreamingAssetRefAny` 参与计数。
 引用必须在 `AssetManager` 之前销毁；slot 随 manager 释放，之后不能再查询引用状态。
@@ -33,9 +38,10 @@ namespace prefix 隔离资产类型；同一路径在不同资产类型下必须
 使用 `weakly_canonical`，失败时依次退到 `absolute + lexically_normal` 和纯词法归一化，
 再以 `generic_string` 作为哈希输入；Windows 下转小写，POSIX 下保留大小写。
 
-AssetId 双轨并存（`architecture/asset-database.md`）：入库资产以 `AssetDatabase::AddEntry`
-登记的 GUID 为身份（一次分配、永不改变），散文件继续走这里的路径哈希；两轨共用
-`AssetManager` 的单 slot 表，互不迁移。
+AssetId 双轨并存（`architecture/asset-database.md`）：入库资产以 `AssetDatabase` 登记的
+GUID 为身份（一次分配、永不改变），散文件继续走这里的路径哈希；两轨共用 `AssetManager`
+的单 slot 表，互不迁移。`assets/assets.json` 与 `example_lambert_sphere` 已实际消费 GUID 轨；
+shaderlib 与显式测试资源继续使用路径哈希轨。
 
 ## 延迟销毁
 
@@ -64,18 +70,18 @@ void MyAsset::OnUnload(AssetManager& manager) override {
 ## 关停顺序
 
 ```text
-World → RenderSystem → AssetManager → GpuSystem
+World → RenderSystem → AssetManager → AssetDatabase → GpuSystem
 ```
 
 World 先拆除 proxy 与 asset ref，RenderSystem 释放 render-side 对象，AssetManager 再处理
-剩余 slot 和延迟 payload，最后 GpuSystem 销毁 device。关停时仍有存活引用会记录错误并继续
-卸载，避免把后续 GPU 资源释放变成悬垂访问。
+剩余 slot 和延迟 payload；AssetDatabase 必须活过在飞 task，最后 GpuSystem 销毁 device。
+关停时仍有存活引用会记录错误并继续卸载，避免把后续 GPU 资源释放变成悬垂访问。
 
 ## 新增资产类型
 
 1. 继承 `Asset`，实现 `OnUnload` 与 `GetTypeId`。
 2. 为 `RuntimeTypeTrait<T>` 生成全新的 GUID，并声明 `Asset` 基类。
-3. 写独占 namespace 的 `Make...AssetId` 和同步/异步 loader。
+3. 散文件写独占 namespace 的 `Make...AssetId`；入库类型实现 `AssetImporter` 并使用 manifest GUID。
 4. GPU 对象在 `OnUnload` 中整包交给 `DeferDestroy`；纯 CPU 数据留给析构。
 5. 在 `modules/runtime/tests/` 增加生命周期测试，能不用 GPU 就不要创建 GPU。
 
@@ -83,4 +89,5 @@ World 先拆除 proxy 与 asset ref，RenderSystem 释放 render-side 对象，A
 
 `AssetSlotTest` 覆盖引用计数唯一权威下的 slot 状态转换、加载去重和延迟回收边界。
 `test_asset_slot.cpp` 的 `ManualGate` 用于让异步 task 停在明确的恢复点；必须等待 gate，
-不能直接拷贝 awaiter。
+不能直接拷贝 awaiter。它也覆盖 `IAssetSource` 的 ID/path 桥接；manifest 与 importer settings
+由 `AssetDatabaseTest` 覆盖。

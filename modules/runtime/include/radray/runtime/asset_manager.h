@@ -7,6 +7,7 @@
 #include <radray/nullable.h>
 #include <radray/coroutine.h>
 #include <radray/runtime/asset.h>
+#include <radray/runtime/asset_source.h>
 #include <radray/runtime/service_registry.h>
 
 // 资产槽位、引用类型与加载调度。引用语义、销毁时机与关停顺序: docs/architecture/asset-system.md
@@ -40,36 +41,6 @@ struct AssetWaitRecord : ManualCoroutineRecord {
     /// 等待目标。由等待者持有的 ref 保住, 故在记录存活期内有效。
     /// 【只用于比较, 不解引用】AssetSlot 在此是不完整类型。
     const AssetSlot* Slot{nullptr};
-};
-
-struct AssetLoadResult {
-    unique_ptr<Asset> Object;
-    const RuntimeTypeInfo* TypeInfo{nullptr};
-    string Error;
-    bool Succeeded{false};
-
-    static AssetLoadResult Success(unique_ptr<Asset> object, const RuntimeTypeInfo& typeInfo) noexcept {
-        AssetLoadResult result;
-        result.Object = std::move(object);
-        result.TypeInfo = &typeInfo;
-        result.Succeeded = true;
-        return result;
-    }
-
-    template <class T>
-    requires std::derived_from<T, Asset> && (!std::same_as<T, Asset>)
-    static AssetLoadResult Success(unique_ptr<T> object) noexcept {
-        unique_ptr<Asset> asset = std::move(object);
-        return Success(std::move(asset), runtime_type_info_v<T>);
-    }
-
-    static AssetLoadResult Failure(string error = {}) noexcept {
-        AssetLoadResult result;
-        result.Error = std::move(error);
-        return result;
-    }
-
-    bool IsSuccess() const noexcept { return Succeeded && Object != nullptr && TypeInfo != nullptr; }
 };
 
 /// AssetManager 的加载请求。具体 loader 的参数形状完全由调用方决定;
@@ -272,10 +243,22 @@ public:
     /// 异步发起加载。按 id 去重:命中在飞或已就绪 slot 直接复用。
     StreamingAssetRefAny Load(AssetLoadRequest request);
 
+    /// 经可选 IAssetSource 按持久 id 发起加载。来源未装配或 id 未登记时记错误并返回空引用。
+    StreamingAssetRefAny Load(const AssetId& id);
+
     /// 类型化加载入口。T 只是返回引用的类型视图,最终实例类型由 loader 的结果决定。
     template <class T>
     requires std::derived_from<T, Asset>
     StreamingAssetRef<T> Load(AssetLoadRequest request);
+
+    template <class T>
+    requires std::derived_from<T, Asset>
+    StreamingAssetRef<T> Load(const AssetId& id);
+
+    /// 人类可读路径入口。路径由 IAssetSource 解析为持久 id，再进入同一 slot 表。
+    template <class T>
+    requires std::derived_from<T, Asset>
+    StreamingAssetRef<T> Load(std::string_view relPath);
 
     /// 等待 streaming 引用离开 Loading 状态。等待者取消不会取消底层资产加载。
     /// 【薄转发】直接 `co_await ref` 等价; 本函数额外把"等待者被取消"转成对当前 task
@@ -339,6 +322,9 @@ public:
     /// 调用方保证它活得比本 AssetManager 更久 (关停顺序里 AssetManager 先于 GpuSystem 死)。
     void SetWaitFrameProcessor(IWaitFrameProcessor* processor) noexcept { _waitFrame = processor; }
 
+    /// 注入可选资产来源（非拥有）。来源必须活过本对象及其全部在飞加载。
+    void SetAssetSource(Nullable<IAssetSource*> source) noexcept { _assetSource = source; }
+
     uint32_t GetAssetCount() const noexcept;
 
 private:
@@ -363,6 +349,7 @@ private:
     Slot* FindSlot(const AssetId& id) const noexcept;
     Slot* EmplaceLoadingSlot(const AssetId& id);
     StreamingAssetRefAny MakeRef(Slot* slot) noexcept;
+    StreamingAssetRefAny LoadSourcePath(std::string_view relPath);
 
     void PumpLoadResults();
     void FlushDeferredBatch();
@@ -384,6 +371,7 @@ private:
     static void Release(Slot* slot) noexcept;
 
     IWaitFrameProcessor* _waitFrame{nullptr};
+    Nullable<IAssetSource*> _assetSource{nullptr};
     TaskScope _loadScope;
     ManualCoroutineScheduler<AssetWaitRecord> _waiters;
     unordered_map<AssetId, unique_ptr<Slot>> _slots;
@@ -400,6 +388,18 @@ template <class T>
 requires std::derived_from<T, Asset>
 StreamingAssetRef<T> AssetManager::Load(AssetLoadRequest request) {
     return Load(std::move(request)).template CastTo<T>();
+}
+
+template <class T>
+requires std::derived_from<T, Asset>
+StreamingAssetRef<T> AssetManager::Load(const AssetId& id) {
+    return Load(id).template CastTo<T>();
+}
+
+template <class T>
+requires std::derived_from<T, Asset>
+StreamingAssetRef<T> AssetManager::Load(std::string_view relPath) {
+    return LoadSourcePath(relPath).template CastTo<T>();
 }
 
 template <class T>

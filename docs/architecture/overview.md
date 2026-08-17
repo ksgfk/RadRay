@@ -14,7 +14,7 @@ RadRay 是 C++20 实时渲染器，当前支持 Windows 下的 D3D12 与 Vulkan 
 | `modules/` | core、shader、window、render、runtime，以及可选 shader compiler client | 是 |
 | `shaderlib/` | HLSL 数学、光照共享库与最小产品 pass，目录本身是 include 根 | 是 |
 | `tools/` | 依赖恢复、文档检查、编译数据库脚本，以及可选的 raw shader compile CLI | 是 |
-| `assets/` | 本地运行时资产 | 是 |
+| `assets/` | 版本化样例 manifest/资产；其余本地大资产默认忽略 | 是 |
 | `cmake/` | 构建辅助函数 | 是 |
 | `docs/` | 当前架构、指南、ADR 和研究记录 | 是 |
 | `third_party/`, `SDKs/` | 由恢复脚本填充的依赖树 | **否** |
@@ -39,7 +39,7 @@ RadRay 是 C++20 实时渲染器，当前支持 Windows 下的 D3D12 与 Vulkan 
 | `radraywindow` | 窗口、输入和平台事件 | `guide/dev-env.md` |
 | `radrayshadercompiler` | 可选 source-contract discovery 与 DXC boundary client；依赖 shader 与 core，不拥有 render/runtime | `docs/todo/hlsl-radray-dxc-shader-pipeline.md`, `docs/todo/filesystem-backed-shader-include-correction.md`, `docs/todo/radray-dxc-frontend-semantic-migration.md` |
 | `radrayrender` | RHI、D3D12/Vulkan 后端、资源、命令和 PSO | `architecture/render-rhi.md` |
-| `radrayruntime` | 资产生命周期、帧节奏、渲染框架和 Application | `architecture/asset-system.md`, `architecture/frame-and-gpu.md`, `architecture/render-framework.md` |
+| `radrayruntime` | 资产生命周期与 JSON 身份库、帧节奏、渲染框架和 Application | `architecture/asset-system.md`, `architecture/asset-database.md`, `architecture/frame-and-gpu.md`, `architecture/render-framework.md` |
 
 `radrayshadercompiler` 只在 `RADRAY_BUILD_SHADER_COMPILER=ON` 时进入构建图；它依赖
 `radraycore` 与 `radrayshader`，不反向依赖 render/runtime。当前 target 已提供 source-contract
@@ -59,6 +59,7 @@ compiler-produced metadata 不依赖 `radrayshadercompiler`；`radrayruntime` �
 | 创建 GPU 设备 | `Device::Create` | `modules/render/src/rhi.cpp` |
 | 帧节奏、flight、提交 | `GpuSystem::BeginFrameRecord` / `EndFrameRecordAndSubmit` | `modules/runtime/src/gpu_system.cpp` |
 | 资产加载与回收 | `AssetManager::Load` / `Pump` | `modules/runtime/src/asset_manager.cpp` |
+| 开发时资产身份与 path 反查 | `AssetDatabase::Open` / `Refresh` / `Save` | `modules/runtime/src/asset_database.cpp` |
 | render pass / framebuffer 去重 | `RenderPassRegistry` | `modules/render/include/radray/render/render_pass_registry.h` |
 | 场景 tick | `World::Tick` | `modules/runtime/src/game_framework/world.cpp` |
 
@@ -88,7 +89,7 @@ docs/
     shaderlib.md        当前 HLSL 共享库边界
     shader-pipeline.md  source contract、双 target wire、decoder 与 JIT 边界
     asset-system.md     资产引用计数与延迟销毁
-    asset-database.md   asset 元数据 LMDB 存储与 AssetDatabase 身份登记
+    asset-database.md   JSON manifest、importer/settings 与加载桥接
     frame-and-gpu.md    帧序、flight、上传和关停
     render-rhi.md       RHI、后端、barrier 和同步
     render-framework.md 渲染框架、SceneProxy、Application、ServiceRegistry

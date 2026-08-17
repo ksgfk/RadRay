@@ -258,6 +258,39 @@ StreamingAssetRefAny AssetManager::Load(AssetLoadRequest request) {
     return ref;
 }
 
+StreamingAssetRefAny AssetManager::Load(const AssetId& id) {
+    if (Slot* existing = FindSlot(id); existing != nullptr) {
+        return MakeRef(existing);
+    }
+    if (!_assetSource.HasValue()) {
+        RADRAY_ERR_LOG("AssetManager: no asset source is installed for asset {}", id);
+        return {};
+    }
+
+    std::optional<task<AssetLoadResult>> loadTask = _assetSource->CreateLoadTask(id);
+    if (!loadTask.has_value()) {
+        RADRAY_ERR_LOG("AssetManager: asset source cannot load asset {}", id);
+        return {};
+    }
+    return Load(AssetLoadRequest{
+        .Id = id,
+        .Task = std::move(loadTask.value()),
+        .DebugName = id.ToString()});
+}
+
+StreamingAssetRefAny AssetManager::LoadSourcePath(std::string_view relPath) {
+    if (!_assetSource.HasValue()) {
+        RADRAY_ERR_LOG("AssetManager: no asset source is installed for path '{}'", relPath);
+        return {};
+    }
+    const std::optional<AssetId> id = _assetSource->ResolveId(relPath);
+    if (!id.has_value()) {
+        RADRAY_ERR_LOG("AssetManager: asset source cannot resolve path '{}'", relPath);
+        return {};
+    }
+    return Load(id.value());
+}
+
 task<void> AssetManager::Wait(StreamingAssetRefAny ref) {
     const bool completed = co_await ref;
     if (!completed) {
