@@ -10,12 +10,34 @@ namespace {
 
 std::optional<BackendPipelineLayoutInput> MakeBackendPipelineLayoutInputForTarget(
     const shader::ShaderArtifactView& artifact,
-    shader::ShaderTarget target) noexcept {
+    shader::ShaderTarget target,
+    const ShaderLayoutPolicy& policy) noexcept {
     if (artifact.Envelope().Target != static_cast<uint8_t>(target)) {
         return std::nullopt;
     }
     if (target == shader::ShaderTarget::SPIRV && !artifact.SerializedRootSignature().empty()) {
         return std::nullopt;
+    }
+    if (!policy.Empty() && !artifact.SerializedRootSignature().empty()) {
+        return std::nullopt;
+    }
+    for (size_t index = 0; index < policy.DynamicBufferGroups.size(); ++index) {
+        const uint32_t group = policy.DynamicBufferGroups[index];
+        if (std::find(
+                policy.DynamicBufferGroups.begin(),
+                policy.DynamicBufferGroups.begin() + index,
+                group) != policy.DynamicBufferGroups.begin() + index) {
+            return std::nullopt;
+        }
+        const bool exists = std::any_of(
+            artifact.Bindings().begin(),
+            artifact.Bindings().end(),
+            [group](const shader::WireBindingRecord& binding) noexcept {
+                return binding.Group == group;
+            });
+        if (!exists) {
+            return std::nullopt;
+        }
     }
     BackendPipelineLayoutInput result;
     static std::atomic<uint32_t> nextBindingGeneration{1};
@@ -38,7 +60,14 @@ std::optional<BackendPipelineLayoutInput> MakeBackendPipelineLayoutInputForTarge
     for (const shader::WireBindingRecord& binding : artifact.Bindings()) {
         ShaderParameterBindingType type = ShaderParameterBindingType::UNKNOWN;
         switch (binding.Type) {
-            case 1: type = ShaderParameterBindingType::CBuffer; break;
+            case 1:
+                type = std::find(
+                           policy.DynamicBufferGroups.begin(),
+                           policy.DynamicBufferGroups.end(),
+                           binding.Group) != policy.DynamicBufferGroups.end()
+                           ? ShaderParameterBindingType::DynamicCBuffer
+                           : ShaderParameterBindingType::CBuffer;
+                break;
             case 2: type = ShaderParameterBindingType::Buffer; break;
             case 3: type = ShaderParameterBindingType::RWBuffer; break;
             case 4: type = ShaderParameterBindingType::Texture; break;
@@ -50,10 +79,9 @@ std::optional<BackendPipelineLayoutInput> MakeBackendPipelineLayoutInputForTarge
         if (!bindingName.has_value()) {
             return std::nullopt;
         }
-        result.BindingNames.push_back({
-            .Name = string{bindingName.value()},
-            .Location = {binding.Group, binding.Binding},
-            .Namespace = shader::GetWireBindingNamespace(binding.Type)});
+        result.BindingNames.push_back({.Name = string{bindingName.value()},
+                                       .Location = {binding.Group, binding.Binding},
+                                       .Namespace = shader::GetWireBindingNamespace(binding.Type)});
         ShaderParameterSetLayoutEntryDescriptor entry{
             .Binding = binding.Binding,
             .Type = type,
@@ -163,13 +191,15 @@ bool GetVertexFormatShape(
 }  // namespace
 
 std::optional<BackendPipelineLayoutInput> MakeBackendPipelineLayoutInput(
-    const shader::DxilShaderArtifactView& artifact) noexcept {
-    return MakeBackendPipelineLayoutInputForTarget(artifact.Generic(), shader::ShaderTarget::DXIL);
+    const shader::DxilShaderArtifactView& artifact,
+    const ShaderLayoutPolicy& policy) noexcept {
+    return MakeBackendPipelineLayoutInputForTarget(artifact.Generic(), shader::ShaderTarget::DXIL, policy);
 }
 
 std::optional<BackendPipelineLayoutInput> MakeBackendPipelineLayoutInput(
-    const shader::SpirvShaderArtifactView& artifact) noexcept {
-    return MakeBackendPipelineLayoutInputForTarget(artifact.Generic(), shader::ShaderTarget::SPIRV);
+    const shader::SpirvShaderArtifactView& artifact,
+    const ShaderLayoutPolicy& policy) noexcept {
+    return MakeBackendPipelineLayoutInputForTarget(artifact.Generic(), shader::ShaderTarget::SPIRV, policy);
 }
 
 bool ValidateVertexInputStateAgainstArtifact(

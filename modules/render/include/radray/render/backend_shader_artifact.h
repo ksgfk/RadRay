@@ -4,6 +4,7 @@
 #include <span>
 #include <variant>
 
+#include <radray/render/backend/pipeline_layout_types.h>
 #include <radray/render/rhi.h>
 #include <radray/shader/shader_artifact.h>
 
@@ -52,6 +53,7 @@ private:
         Device&,
         std::span<const byte>,
         const shader::ShaderArtifactDecodeOptions&,
+        const ShaderLayoutPolicy&,
         BackendShaderArtifactError*) noexcept;
 };
 
@@ -65,6 +67,15 @@ std::optional<BackendShaderArtifact> CreateBackendShaderArtifact(
     Device& device,
     std::span<const byte> blob,
     const shader::ShaderArtifactDecodeOptions& options,
+    const ShaderLayoutPolicy& policy,
     BackendShaderArtifactError* error = nullptr) noexcept;
+
+inline std::optional<BackendShaderArtifact> CreateBackendShaderArtifact(
+    Device& device,
+    std::span<const byte> blob,
+    const shader::ShaderArtifactDecodeOptions& options,
+    BackendShaderArtifactError* error = nullptr) noexcept {
+    return CreateBackendShaderArtifact(device, blob, options, ShaderLayoutPolicy{}, error);
+}
 
 }  // namespace radray::render

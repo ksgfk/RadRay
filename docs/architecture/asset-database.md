@@ -28,7 +28,7 @@ lowercase canonical path → AssetId
   "assets": [
     {
       "guid": "d21480ee-f0c8-4fb1-9a9d-cf9147b10842",
-      "path": "wall.png",
+      "path": "textures/example.png",
       "type": "texture",
       "settings": {"srgb": true, "generateMips": true}
     }
@@ -79,7 +79,7 @@ LF，跨行 settings 因此被改写并以 LF 存回，在 CRLF 工作树里表�
 - `type` 没有注册 importer；
 - settings 无法按该 importer 的强类型形状解码。
 
-这使“先提交清单、后补文件”和新旧工具版本交错仍可工作，同时不放过任何身份歧义。
+这使“先交付清单、后补文件”和新旧工具版本交错仍可工作，同时不放过任何身份歧义。
 
 ## Importer 与 Settings
 
@@ -134,13 +134,13 @@ World → RenderSystem → AssetManager → AssetDatabase → GpuSystem
 ```
 
 数据库持有 importer 与 settings，必须活过 manager 对在飞加载 task 的取消和收束；GPU 上传依赖
-又要求 `GpuSystem` 最后销毁。`example_lambert_sphere` 以 `assets/` 为资产根，通过
-`Load<TextureAsset>("wall.png")` 持有贴图引用并绑定到 Lambert 球面；只有调用方提供包含该条目的
-manifest 与源贴图时这条端到端路径才可运行，clean clone 当前会在该加载点失败退出。
+又要求 `GpuSystem` 最后销毁。`example_lambert_sphere` 使用装配方提供的资产根，通过 typed path
+load 持有 mesh 与贴图引用；只有外部资产包同时提供匹配的 manifest 与源资产时，这条端到端路径
+才可运行。
 
 ## 测试
 
 `AssetDatabaseTest` 覆盖 schema/path 硬失败、GUID 格式、双索引、强类型与原始 settings、排序
 保存、重开一致性和 `Refresh` GUID 稳定性。`AssetSlotTest` 覆盖 `IAssetSource` 的 ID/path 加载、
 source 缺失和 slot 去重；两组均不需要 GPU。example 的 D3D12/Vulkan 运行用于验证真实上传与绑定。
-该手工运行目前要求外部准备未跟踪的 `assets/assets.json` 与 `wall.png`。
+该手工运行要求外部准备与当前示例版本匹配、且不受源码仓库跟踪的资产包。

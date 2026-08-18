@@ -1,6 +1,6 @@
 # ADR-0040 单文本 JSON 清单是资产身份权威
 
-状态: 生效
+状态: 部分被 ADR-0050 取代
 日期: 2026-08
 影响: `modules/runtime` 的 `AssetDatabase`、asset 身份与元数据的持久形态、`third_party/`
 依赖（移除 LMDB）与 `project_manifest.json`；取代 ADR-0038

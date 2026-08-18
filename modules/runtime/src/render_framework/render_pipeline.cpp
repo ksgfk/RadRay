@@ -172,9 +172,18 @@ void RenderPipeline::OnExecutePasses(RenderPipelineContext& ctx, const RenderCam
     });
 
     for (RenderPipelinePass* pass : _activePasses) {
+        pass->_contentDrawn = false;
         pass->Setup(ctx, camera);
         pass->Execute(ctx, camera);
         pass->Cleanup(ctx, camera);
+        if (pass->_contentDrawn && camera.Target.HasValue()) {
+            for (RenderPipelineTarget& target : ctx.Targets) {
+                if (&target.Target == camera.Target.Get()) {
+                    target.ContentDrawn = true;
+                    break;
+                }
+            }
+        }
     }
 }
 

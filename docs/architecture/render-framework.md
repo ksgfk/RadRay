@@ -1,14 +1,14 @@
 > - 适用: 改渲染管线、场景表示、Application 生命周期或服务装配
 > - 权威: 本文是 runtime 层「除资产系统与 GPU 帧管理之外」部分的唯一说明。那两块见 `architecture/asset-system.md` 与 `architecture/frame-and-gpu.md`
-> - 锚点: `modules/runtime/include/radray/runtime/render_framework/render_pipeline.h`, `modules/runtime/include/radray/runtime/service_registry.h`, `modules/runtime/src/application.cpp`, `modules/runtime/src/render_system.cpp`, `examples/example_lambert_sphere/example_lambert_sphere.cpp`
+> - 锚点: `modules/runtime/include/radray/runtime/render_framework/render_pipeline.h`, `modules/runtime/include/radray/runtime/forward_pipeline/forward_pipeline.h`, `modules/runtime/include/radray/runtime/material.h`, `modules/runtime/include/radray/runtime/shader_program.h`, `modules/runtime/include/radray/runtime/render_framework/mesh_draw.h`, `modules/runtime/include/radray/runtime/components/static_mesh_component.h`, `modules/runtime/src/render_system.cpp`, `examples/example_lambert_sphere/example_lambert_sphere.cpp`
 
 # 渲染框架与 game framework
 
-**先读这条**：`RenderPipeline` 框架已经建好，但 runtime 不提供默认的具体管线。
+**先读这条**：runtime 提供内置 `ForwardPipeline`，但不会把它设成隐式默认值。
 `RenderSystem::_pipeline` 初始为 null，由应用在 `OnInit` 中通过
-`RenderSystem::SetPipeline(unique_ptr<RenderPipeline>)` 注入并转移所有权。
-`examples/example_lambert_sphere` 是当前用于验证 runtime shader JIT 与数据库贴图加载的最小
-具体管线；它不代表 scene/primitive proxy 路径已经完成。本文描述的是框架的形状、注入边界与约定。
+`RenderSystem::SetPipeline(unique_ptr<RenderPipeline>)` 显式注入并转移所有权。
+`examples/example_lambert_sphere` 用 `AssetManager`、`StaticMeshComponent`、`Material` 和内置
+forward pipeline 验证完整的 scene → proxy → draw 路径。
 
 ## 分层
 
@@ -43,10 +43,9 @@ OnSetupCamera → OnSetupCulling → OnSetupLights → OnAddRenderPasses
 最后对 `ContentDrawn == false` 的目标调 `ClearTarget` 兜底清屏——这样不必为"什么都没画"
 单独安排一个 clear pass。
 
-`SetPipeline` 是应用侧装配入口：`RenderSystem` 只拥有当前 pipeline，不拥有其依赖的
-`Scene`/component。样例 pipeline 因而可以借用 runtime 已创建的 `Scene` 与
-`CameraComponent`，把 shader JIT、render 动态 artifact 桥和公共 RHI 录制集中在 example 内，
-不改变 runtime 的帧时序。
+`SetPipeline` 是应用侧装配入口：`RenderSystem` 只拥有当前 pipeline，不拥有其借用的
+`Scene`/component。`ForwardPipeline` 构造时借用 `Application`、`Scene` 与
+`CameraComponent`；example 只做对象装配，不再拥有命令录制实现。
 
 **pass 注册与排序**：`OnAddRenderPasses` 里用 `EnqueuePass` 把 pass 压进 `_activePasses`；
 `OnExecutePasses` 用 `std::stable_sort` 按 `RenderPassEvent` 的整数值升序排，
@@ -54,16 +53,22 @@ OnSetupCamera → OnSetupCulling → OnSetupLights → OnAddRenderPasses
 保持入队顺序。`OnFinishCamera` 与 `OnEndFrame` 都会 `ClearPasses()`，
 所以 pass 队列是**每相机重建**的，不是持久配置。
 
-`MaterialRenderState` 是材质对 PSO 状态的三态覆盖（`optional` 字段 = 不覆盖）。
-**它当前没有基线来源也没有使用点**——Topology / FrontFace / DepthCompare / target Format
-由谁提供基线还没裁决。
+pass 在成功录制内容后调用受保护的 `MarkContentDrawn()`；框架根据当前 `RenderCamera::Target`
+回写对应的 `RenderPipelineTarget::ContentDrawn`。具体 pass 不遍历 `ctx.Targets`，也不直接改目标标志。
+
+`Material` 持有一个 concrete Variant 的 `ShaderProgram*`、type-tree 打包后的数值参数、纹理引用、
+sampler 描述、完整固定功能状态基线和 `RenderQueue`。topology 与 `PrimitiveVertexLayout` 来自 geometry；
+color/depth format、sample count 与 compatible render pass 来自 pass。`ShaderProgram` 拥有 decoded
+artifact、layout、stage shader、扁平参数索引和自己的 PSO map；PSO key 正好组合这三方事实。
+`BindingGroupPlan` 则由具体 pipeline 指定 view/material/object group，material 与通用执行器不写
+group 数字字面量。
 
 ### shader artifact 边界
 
-当前渲染框架不负责发现源码、编译 shader 或生成 metadata。RHI 只消费 render 层已经
-验证过的 shader、layout 和 PSO 描述；compiler client 不成为 runtime 框架的隐式默认依赖。
-`example_lambert_sphere` 作为显式 JIT consumer，按实际 backend 选择 DXIL/SPIR-V、解码
-artifact 并调用 backend-specific layout builder；这是测试入口，不改变上述框架边界。
+RHI 只消费 render 层已经验证过的 shader、layout 和 PSO 描述，仍不依赖 compiler client。
+开发期源码入口在 `RenderSystem::GetOrCreateShaderProgram`：它按逻辑 `SourceName` 和规范化 keyword
+assignment 缓存 program，按实际 backend 只编译一个 target，并缓存失败结果以避免逐帧重试。
+`RADRAY_ENABLE_SHADER_JIT=OFF` 时 `RenderSystem` 与 pipeline 仍可构造，program 请求明确返回空。
 
 ## 场景表示
 
@@ -87,7 +92,7 @@ LightComponent      → CreateRenderState → Scene::AddLight(CreateSceneProxy()
 
 ```cpp
 struct MeshDrawArgs {
-    GpuMesh::DrawData* Geometry;  // VB/IB 视图
+    const GpuMesh::DrawData* Geometry;  // VB/IB、vertex layout、topology
     uint32_t FirstIndex, IndexCount, VertexOffset;
 };
 ```
@@ -96,8 +101,23 @@ struct MeshDrawArgs {
 `Geometry` 是指向资产内部的裸指针，保命责任在 proxy 自己
 （见 `architecture/asset-system.md` 的引用计数不变量）。
 
-现有 proxy 类型：`PrimitiveSceneProxy`（基类）、`LightSceneProxy` → `PointLightSceneProxy` /
-`DirectionalLightSceneProxy`（带 CSM 级联配置）。**没有任何具体的 primitive proxy 子类。**
+`StaticMeshComponent` 按 section 保存 material，`StaticMeshSceneProxy` 自持 mesh ref、material 快照与
+local-to-world，并把 `StaticMeshSection` 的 `FirstIndex` / `IndexCount` / `VertexOffset` 投影成 draw。
+`MeshDrawList` 每相机主动遍历 `Scene::Primitives()`；queue 小于 2500 的 item 先按 program/material
+聚簇，queue 大于等于 2500 的 item 按 view depth 从远到近排序，同 key 保持收集顺序。
+
+### 内置 ForwardPipeline
+
+`ForwardPipeline::GetBindingGroupPlan()` 固定返回 view/material/object = `0/1/2`。每个 flight 持有
+一个 `DynamicCBufferArena`；view/object parameter set 按 program 与 arena backing buffer 常驻，
+material 的纹理/sampler set 按 flight 常驻。每帧只把数值 bytes 写进 arena，draw loop 只绑定 set、
+下发 dynamic offset、绑定 VB/IB 并调用 `DrawIndexed`，不创建 descriptor。
+
+forward pipeline 为每个窗口维护 D32 depth texture/view，尺寸或 sample count 改变时先从
+`RenderPassRegistry` 清除引用旧 view 的 framebuffer，再重建 attachment。viewport 始终由
+`MakeViewport` 产生；只有该 helper 在 Vulkan 下使用负 height。光照从 `Scene::Lights()` 读取完整
+`LightRenderParameters`，在 pipeline 内投影到 forward view buffer；超过 shader 上限时点光按距相机
+由近到远截断，并且只记录一次 warning。
 
 ## Application 与 runner
 
@@ -197,8 +217,11 @@ template <> struct ServiceTraits<AssetManager> {
 
 - **默认 pipeline 为空**：`RenderSystem::_pipeline` 只有在应用调用 `SetPipeline` 后才接线；
   `example_lambert_sphere` 的 pipeline 注入是一个显式样例路径。
-- **`MaterialRenderState` 零使用点**，基线来源未裁决。
-- **`RenderQueue` 枚举在 runtime 内无消费者**（只有 `examples/sphere_demo` 用）。
-- **无任何具体 primitive proxy**：`PrimitiveComponent::CreateSceneProxy` 基类返回 nullptr，
-  所以 `MeshDrawArgs` / `GetDrawArgs` 目前没有消费方。缺的是 material 层与 mesh component。
+- **第一期 forward 没有视锥剔除、instancing、shadow、post process 或 RT pool**；draw list 每相机
+  每帧重建，depth attachment 是 pipeline 自有的最小子集。
+- **binding group plan 属于具体 pipeline**：只有 `ForwardPipeline` 可以假定 0/1/2；通用 material、
+  collector 和执行器都必须消费 plan。
+- **`PrimitiveComponent` 基类仍返回空 proxy**：可绘制路径由 `StaticMeshComponent` 的派生实现提供。
+- **JIT 不是 runtime 的可用性前提**：关闭 JIT 后 program 源码请求失败；未来 AOT consumer 仍可
+  直接构造 `ShaderProgram`。
 - **`radray_add_radray_gtest_case` 已定义但无人使用。**

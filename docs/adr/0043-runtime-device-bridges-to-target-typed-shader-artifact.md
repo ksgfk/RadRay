@@ -1,6 +1,6 @@
 # ADR-0043 运行时 Device 通过单一动态桥消费 target-typed shader artifact
 
-状态: 生效
+状态: 部分被 ADR-0049 取代
 日期: 2026-08
 影响: `radrayshader` artifact view、`radrayrender` pipeline layout 构造、runtime JIT smoke、
 `example_lambert_sphere`

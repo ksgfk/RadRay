@@ -1,6 +1,8 @@
 #include <radray/runtime/static_mesh.h>
 
+#include <algorithm>
 #include <limits>
+#include <cstring>
 #include <utility>
 
 #include <array>
@@ -139,6 +141,60 @@ bool AreObjFaceIndicesValid(const WavefrontObjReader& reader) noexcept {
     return true;
 }
 
+bool BuildDefaultSectionsAndBounds(
+    const MeshResource& meshResource,
+    vector<StaticMeshSection>& sections,
+    Eigen::Vector3f& boundsMin,
+    Eigen::Vector3f& boundsMax) noexcept {
+    sections.clear();
+    boundsMin = Eigen::Vector3f::Constant(std::numeric_limits<float>::max());
+    boundsMax = Eigen::Vector3f::Constant(std::numeric_limits<float>::lowest());
+    bool hasPosition = false;
+    for (uint32_t primitiveIndex = 0;
+         primitiveIndex < meshResource.Primitives.size();
+         ++primitiveIndex) {
+        const MeshPrimitive& primitive = meshResource.Primitives[primitiveIndex];
+        sections.emplace_back(
+            primitiveIndex,
+            0,
+            primitive.IndexBuffer.IndexCount,
+            0,
+            primitive.VertexCount - 1);
+        const auto position = std::find_if(
+            primitive.VertexBuffers.begin(),
+            primitive.VertexBuffers.end(),
+            [](const VertexBufferEntry& entry) noexcept {
+                return entry.Semantic == VertexSemantics::POSITION &&
+                       entry.SemanticIndex == 0 &&
+                       entry.Type == VertexDataType::FLOAT &&
+                       entry.ComponentCount >= 3;
+            });
+        if (position == primitive.VertexBuffers.end() ||
+            position->BufferIndex >= meshResource.Bins.size()) {
+            return false;
+        }
+        const std::span<const byte> data =
+            meshResource.Bins[position->BufferIndex].GetData();
+        for (uint32_t vertexIndex = 0;
+             vertexIndex < primitive.VertexCount;
+             ++vertexIndex) {
+            const uint64_t offset = static_cast<uint64_t>(position->Offset) +
+                                    static_cast<uint64_t>(vertexIndex) *
+                                        position->Stride;
+            if (offset > data.size() || sizeof(float) * 3 > data.size() - offset) {
+                return false;
+            }
+            float values[3];
+            std::memcpy(values, data.data() + offset, sizeof(values));
+            const Eigen::Vector3f point{values[0], values[1], values[2]};
+            boundsMin = boundsMin.cwiseMin(point);
+            boundsMax = boundsMax.cwiseMax(point);
+            hasPosition = true;
+        }
+    }
+    return hasPosition && IsStaticMeshDataValid(meshResource, sections);
+}
+
 }  // namespace
 
 StaticMeshSection::StaticMeshSection() noexcept
@@ -229,6 +285,16 @@ task<AssetLoadResult> LoadStaticMesh(
     if (!IsStaticMeshDataValid(meshResource, {})) {
         co_return AssetLoadResult::Failure("static mesh resource is invalid");
     }
+    vector<StaticMeshSection> sections;
+    Eigen::Vector3f boundsMin;
+    Eigen::Vector3f boundsMax;
+    if (!BuildDefaultSectionsAndBounds(
+            meshResource,
+            sections,
+            boundsMin,
+            boundsMax)) {
+        co_return AssetLoadResult::Failure("static mesh sections or bounds are invalid");
+    }
 
     // GPU 上传:两阶段 await(无 callback)。BeginUpload 挂起至帧顶拿到 cmd/uploader,
     // 在本协程里 inline 录制 copy,再 co_await WaitGpu 等该 flight 的 fence。
@@ -242,9 +308,9 @@ task<AssetLoadResult> LoadStaticMesh(
 
     co_return AssetLoadResult::Success(make_unique<StaticMesh>(
         std::move(meshResource),
-        vector<StaticMeshSection>{},
-        Eigen::Vector3f::Zero(),
-        Eigen::Vector3f::Zero(),
+        std::move(sections),
+        boundsMin,
+        boundsMax,
         std::move(renderMesh.value())));
 }
 

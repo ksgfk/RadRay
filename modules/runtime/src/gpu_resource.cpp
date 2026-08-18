@@ -615,7 +615,36 @@ std::optional<GpuMesh> ResourceUploader::UploadMeshResource(
     render::CommandBuffer* cmdBuffer,
     const MeshResource& meshResource) {
     if (meshResource.Primitives.empty()) {
+        RADRAY_ERR_LOG("cannot upload a mesh without primitives");
         return std::nullopt;
+    }
+
+    vector<PrimitiveVertexLayout> vertexLayouts;
+    vertexLayouts.reserve(meshResource.Primitives.size());
+    for (size_t primitiveIndex = 0; primitiveIndex < meshResource.Primitives.size(); ++primitiveIndex) {
+        const MeshPrimitive& primitive = meshResource.Primitives[primitiveIndex];
+        if (primitive.VertexBuffers.empty()) {
+            RADRAY_ERR_LOG("mesh primitive {} has no vertex attributes", primitiveIndex);
+            return std::nullopt;
+        }
+        const uint32_t sourceBuffer = primitive.VertexBuffers.front().BufferIndex;
+        const bool hasMultipleStreams = std::any_of(
+            primitive.VertexBuffers.begin(),
+            primitive.VertexBuffers.end(),
+            [sourceBuffer](const VertexBufferEntry& entry) noexcept {
+                return entry.BufferIndex != sourceBuffer;
+            });
+        if (hasMultipleStreams) {
+            RADRAY_ERR_LOG("mesh primitive {} uses multiple vertex streams, which are not supported", primitiveIndex);
+            return std::nullopt;
+        }
+        std::optional<PrimitiveVertexLayout> layout =
+            PrimitiveVertexLayout::FromMeshPrimitive(primitive);
+        if (!layout.has_value()) {
+            RADRAY_ERR_LOG("mesh primitive {} has an invalid vertex layout", primitiveIndex);
+            return std::nullopt;
+        }
+        vertexLayouts.push_back(std::move(layout.value()));
     }
 
     GpuMesh result;
@@ -652,13 +681,15 @@ std::optional<GpuMesh> ResourceUploader::UploadMeshResource(
     for (size_t primIdx = 0; primIdx < meshResource.Primitives.size(); ++primIdx) {
         const MeshPrimitive& prim = meshResource.Primitives[primIdx];
         GpuMesh::DrawData drawData{};
+        drawData.VertexLayout = std::move(vertexLayouts[primIdx]);
+        drawData.Topology = prim.Topology;
         if (!prim.VertexBuffers.empty()) {
             const VertexBufferEntry& vbEntry = prim.VertexBuffers[0];
             if (vbEntry.BufferIndex < bufferByBin.size() && bufferByBin[vbEntry.BufferIndex].HasValue()) {
                 const uint64_t vbSize = static_cast<uint64_t>(prim.VertexCount) * vbEntry.Stride;
                 drawData.Vbv = render::VertexBufferView{
                     .Target = bufferByBin[vbEntry.BufferIndex].Get(),
-                    .Offset = vbEntry.Offset,
+                    .Offset = 0,
                     .Size = vbSize};
             }
         }

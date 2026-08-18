@@ -462,9 +462,9 @@ TEST(RadRayRuntimeShaderJit, ShaderlibPassMetadataCorruptionFailsClosed) {
     ASSERT_TRUE(jit.IsAvailable());
 
     const std::filesystem::path shaderlibRoot = std::filesystem::path{RADRAY_PROJECT_DIR} / "shaderlib";
-    const vector<byte> source = ReadBytes(shaderlibRoot / "passes/forward.hlsl");
+    const vector<byte> source = ReadBytes(shaderlibRoot / "pipelines/forward/forward.hlsl");
     ASSERT_FALSE(source.empty());
-    constexpr std::string_view sourceName = "passes/forward.hlsl";
+    constexpr std::string_view sourceName = "pipelines/forward/forward.hlsl";
     const auto contract = jit.DiscoverContractHash(sourceName, source, shader::ShaderTarget::DXIL);
     ASSERT_TRUE(contract.has_value());
 
@@ -506,7 +506,7 @@ TEST(RadRayRuntimeShaderJit, FixtureCaseReportCoversTargetNativeJitFacts) {
         {"compute", shader::ShaderTargetMask::All},
     };
     const std::filesystem::path sourceRoot = std::filesystem::path{RADRAY_PROJECT_DIR} /
-                                              "modules/render/tests/data/shader_sources";
+                                             "modules/render/tests/data/shader_sources";
 
     for (const FixtureCase& fixtureCase : cases) {
         const auto fixture = std::find_if(
@@ -583,8 +583,9 @@ TEST(RadRayRuntimeShaderJit, FixtureCaseReportCoversTargetNativeJitFacts) {
             EXPECT_EQ(generic->Bindings().size(), expectedBindingCount);
             EXPECT_EQ(layoutInput->BindingNames.size(), expectedBindingCount);
             const size_t expectedRootCount = fixture->HasSingleSpirvPushBlock
-                                                  ? target == shader::ShaderTarget::SPIRV ? 1u : 0u
-                                                  : target == shader::ShaderTarget::DXIL ? rootFactCount : 0u;
+                                                 ? target == shader::ShaderTarget::SPIRV ? 1u : 0u
+                                             : target == shader::ShaderTarget::DXIL ? rootFactCount
+                                                                                    : 0u;
             EXPECT_EQ(generic->RootConstants().size(), expectedRootCount);
             EXPECT_EQ(layoutInput->PushConstants.size(), expectedRootCount);
             for (const render::test::FixtureBindingFact& expected : fixture->Bindings) {

@@ -82,7 +82,7 @@ TEST(RadRayShaderContract, CanonicalRequestIsStable) {
 
 TEST(RadRayShaderContract, FixtureTablePinsTopologyAndTargetFacts) {
     const auto fixtures = test::GetShaderContractFixtures();
-    ASSERT_EQ(fixtures.size(), 11u);
+    ASSERT_EQ(fixtures.size(), 12u);
 
     std::error_code error;
     for (const test::ShaderContractFixture& fixture : fixtures) {

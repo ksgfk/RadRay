@@ -112,6 +112,10 @@ struct ApplicationRuntimeDescriptor {
     std::filesystem::path RenderCachePath{};
     /// 开发时资产根；清单固定为 `<AssetRoot>/assets.json`。空路径不启用 AssetDatabase。
     std::filesystem::path AssetRoot{};
+    /// 开发时 shader 逻辑源名的文件系统根。空路径会让 program 请求明确失败。
+    std::filesystem::path ShaderSourceRoot{};
+    /// 传给 shader compiler 的 HLSL include roots。
+    vector<std::filesystem::path> ShaderIncludePaths{};
 
     // —— 主窗口 ——
     std::string_view WindowTitle{"RadRay Application"};
@@ -153,6 +157,10 @@ public:
     render::Device* GetDevice() noexcept;
     const render::Device* GetDevice() const noexcept;
     const std::filesystem::path& GetRenderCachePath() const noexcept { return _renderCachePath; }
+    const std::filesystem::path& GetShaderSourceRoot() const noexcept { return _shaderSourceRoot; }
+    const vector<std::filesystem::path>& GetShaderIncludePaths() const noexcept {
+        return _shaderIncludePaths;
+    }
 
     // —— runner / 运行时内部系统调用的框架方法(已固化帧序,非游戏 override 点)——
     AppUpdateResult Update(const AppUpdateContext& ctx);
@@ -201,6 +209,8 @@ private:
     unique_ptr<World> _world;
     ApplicationScheduler _scheduler;
     std::filesystem::path _renderCachePath;
+    std::filesystem::path _shaderSourceRoot;
+    vector<std::filesystem::path> _shaderIncludePaths;
     bool _multithreaded{false};
 };
 

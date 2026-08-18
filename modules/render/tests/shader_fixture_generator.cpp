@@ -30,6 +30,7 @@ constexpr FixtureDescription kFixtures[] = {
     {"spirv_push_constant"},
     {"target_specific_bindings"},
     {"nested_types"},
+    {"multiple_cbuffers"},
     {"compute"},
     {"unused_resource"},
 };

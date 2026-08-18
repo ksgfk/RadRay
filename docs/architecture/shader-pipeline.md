@@ -1,6 +1,6 @@
 > - 适用: 维护 shader compiler client、metadata wire、artifact decoder 或 runtime JIT
 > - 权威: 本文描述当前 RadRay shader pipeline 的实现边界；第一阶段检查站见实施计划
-> - 锚点: `modules/shader/include/radray/shader/shader_compiler_contract.h`, `modules/shader/include/radray/shader/shader_artifact.h`, `modules/render/include/radray/render/backend_shader_artifact.h`, `modules/render/src/backend_shader_artifact.cpp`, `modules/shader_compiler/include/radray/shader_compiler/client.h`, `modules/shader_compiler/src/client.cpp`, `modules/runtime/include/radray/runtime/shader_jit.h`, `CMakePresets.json`
+> - 锚点: `modules/shader/include/radray/shader/shader_compiler_contract.h`, `modules/shader/include/radray/shader/shader_artifact.h`, `modules/render/include/radray/render/backend_shader_artifact.h`, `modules/render/src/backend_shader_artifact.cpp`, `modules/shader_compiler/include/radray/shader_compiler/client.h`, `modules/runtime/include/radray/runtime/shader_jit.h`, `modules/runtime/include/radray/runtime/shader_program.h`, `modules/runtime/include/radray/runtime/shader_parameters.h`, `CMakePresets.json`
 
 # Shader pipeline
 
@@ -76,6 +76,22 @@ type tree 属于所属 artifact 的 CPU upload schema。当前 v3 record 保留 
 kind，并为 struct/struct-array member 携带 compiler-owned underlying `TypeIndex`；decoder 检查
 range、已知 record kind、element count、offset/size/stride、type reference、父结构范围、同级
 名称和父链环路的 wire 安全性。它没有独立 schema hash，也不参与 GPU artifact identity。
+runtime 的 `ShaderParameterLayout` 是第一个生产消费者：它把各 cbuffer 根结构展开为扁平的
+`参数名 → binding/offset/kind/size/stride/count` 索引，struct `Member` 与 struct array 通过
+`TypeIndex` 递归展开。program 内重名、未知复合类型或不安全 offset 使创建失败；
+`ShaderParameterStorage` 的 typed setter 在 kind/size/element 不匹配时不修改目标 bytes。
+
+非 struct 元素的数组（`float4 Foo[4]`）是 type tree 的表达上限：`TypeIndex` 只能指向根 struct，
+所以这类 record 只带 stride 与 count，元素 kind 与元素尺寸都不在 wire 里。layout 把它记为
+`ShaderParameterKind::Raw`——每槽范围已知、类型未知，只接受 `SetRaw` 的原始字节，所有 typed
+setter 拒绝它，而 typed 参数同样拒绝 `SetRaw`。cbuffer binding 与 cbuffer 根类型按**发射位置**
+配对（`WireBindingRecord` 不带 `TypeIndex`，binding 名是变量名而根类型名是结构名，无法按名配），
+依赖 compiler 按声明顺序发射两个序列；`multiple_cbuffers` fixture 双 target 钉住这条顺序。
+
+`CreateBackendShaderArtifact` 还接收 pipeline 提供的 `ShaderLayoutPolicy`。policy 中列出的 group
+把 wire cbuffer 映射为 `DynamicCBuffer`：D3D12 implicit layout 使用 root CBV，Vulkan 使用
+`VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC`。policy 引用不存在的 group，或与作者 serialized
+Root Signature 同时出现时 fail closed；空 policy 仍生成普通 `CBuffer`。
 
 ## Runtime JIT
 
@@ -94,11 +110,19 @@ readback、fixture case report 和 metadata corruption negative path；case repo
 no-resource、texture/sampler、static sampler、多个 DXIL root constants、SPIR-V push block、
 target-specific binding 和 compute 七类场景。
 
+`RenderSystem` 从 `ApplicationRuntimeDescriptor::ShaderSourceRoot/ShaderIncludePaths` 构造 JIT，
+并按 `(逻辑 SourceName, 规范化 keyword assignments)` 缓存 `ShaderProgram`。一个 program 拥有
+一个 concrete Variant 的 artifact/layout、stage shader、参数索引与 PSO map；失败结果也留在缓存中，
+所以重复请求不会重新编译或刷日志。JIT 关闭时这条源码请求明确返回空，不影响 runtime 构造。
+
 ## Native PSO boundary
 
 PSO builder 在调用 D3D12/Vulkan native pipeline API 前校验 `VertexInputState`：semantic、format、
 buffer slot、attribute location、offset/stride 和重复声明必须自洽。失败不会把坏输入交给 native
-PSO，也不会通过 compiler client 或 runtime reflection 补齐 vertex schema。
+PSO，也不会通过 compiler client 或 runtime reflection 补齐 vertex schema。runtime 的
+`PrimitiveVertexLayout` 提供 geometry-owned stride/slot/format/offset，`ShaderProgram` 再与当前
+artifact 的 `VertexInputs()` 合并；PSO key 由 material 状态、geometry layout/topology 和 pass
+attachment facts 组成，不含 program 自己的 layout、bytecode 或指针。
 
 ## Build boundary
 

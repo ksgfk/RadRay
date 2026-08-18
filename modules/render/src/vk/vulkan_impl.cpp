@@ -1838,8 +1838,9 @@ Nullable<unique_ptr<PipelineLayoutVulkan>> DeviceVulkan::CreatePipelineLayoutInt
 }
 
 Nullable<unique_ptr<PipelineLayout>> DeviceVulkan::CreatePipelineLayout(
-    const shader::SpirvShaderArtifactView& artifact) noexcept {
-    const auto input = MakeBackendPipelineLayoutInput(artifact);
+    const shader::SpirvShaderArtifactView& artifact,
+    const ShaderLayoutPolicy& policy) noexcept {
+    const auto input = MakeBackendPipelineLayoutInput(artifact, policy);
     if (!input.has_value()) {
         return nullptr;
     }

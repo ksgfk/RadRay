@@ -345,7 +345,9 @@ public:
 
     Nullable<unique_ptr<Shader>> CreateShader(const ShaderDescriptor& desc) noexcept override;
 
-    Nullable<unique_ptr<PipelineLayout>> CreatePipelineLayout(const shader::DxilShaderArtifactView& artifact) noexcept;
+    Nullable<unique_ptr<PipelineLayout>> CreatePipelineLayout(
+        const shader::DxilShaderArtifactView& artifact,
+        const ShaderLayoutPolicy& policy = {}) noexcept;
 
     Nullable<unique_ptr<ShaderParameterSet>> CreateShaderParameterSet(const ShaderParameterSetDescriptor& desc) noexcept override;
 

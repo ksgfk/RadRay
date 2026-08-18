@@ -15,6 +15,14 @@ enum class VertexDataType : uint16_t {
     SINT
 };
 
+enum class PrimitiveTopology : int32_t {
+    PointList,
+    LineList,
+    LineStrip,
+    TriangleList,
+    TriangleStrip
+};
+
 class VertexSemantics {
 public:
     static constexpr const std::string_view POSITION = "POSITION";
@@ -71,6 +79,7 @@ public:
     vector<VertexBufferEntry> VertexBuffers;
     IndexBufferEntry IndexBuffer{};
     uint32_t VertexCount{0};
+    PrimitiveTopology Topology{PrimitiveTopology::TriangleList};
 };
 
 class MeshResource {

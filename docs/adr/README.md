@@ -70,7 +70,7 @@ docs/adr/*.md
 | [0014](0014-cpp-trace-is-shader-source-of-truth.md) | shader 源真相是 C++ trace，绑定由 trace 产出 | 已被 ADR-0016 取代 |
 | [0015](0015-variants-are-cpp-parameters.md) | 变体是 C++ 函数参数，烘焙集合也写在 C++ 里 | 已被 ADR-0016 取代 |
 | [0016](0016-hlsl-and-radray-dxc-are-shader-authority.md) | HLSL 与 forked RadRay DXC 是 shader 权威 | 生效 |
-| [0017](0017-runtime-lambert-sphere-example.md) | runtime Lambert sphere example 的接入边界 | 部分被 ADR-0043 取代 |
+| [0017](0017-runtime-lambert-sphere-example.md) | runtime Lambert sphere example 的接入边界 | 部分被 ADR-0043、ADR-0047、ADR-0048 取代 |
 | [0018](0018-filesystem-backed-shader-compilation.md) | filesystem-backed shader compilation 与 ABI/schema 断代 | 部分被 ADR-0019 取代 |
 | [0019](0019-dxc-default-filesystem-include-search.md) | 使用 DXC 默认 filesystem include search | 已被 ADR-0020 取代 |
 | [0020](0020-caller-supplied-filesystem-include-paths.md) | caller-supplied filesystem include paths | 部分被 ADR-0021 取代 |
@@ -93,7 +93,14 @@ docs/adr/*.md
 | [0037](0037-manifest-dom-is-backing-store.md) | 清单 DOM 常驻作为后备存储 | 已被 ADR-0038 取代 |
 | [0038](0038-asset-metadata-in-lmdb.md) | asset 元数据改用 LMDB 存储 | 已被 ADR-0040 取代 |
 | [0039](0039-abandon-bundle-organization-stabilize-asset-system.md) | 放弃 per-bundle 组织，先稳定 asset 系统 | 部分被 ADR-0041 取代 |
-| [0040](0040-single-text-manifest-is-asset-identity-authority.md) | 单文本 JSON 清单是资产身份权威 | 生效 |
+| [0040](0040-single-text-manifest-is-asset-identity-authority.md) | 单文本 JSON 清单是资产身份权威 | 部分被 ADR-0050 取代 |
 | [0041](0041-load-bridging-belongs-to-asset-manager.md) | 加载桥接归 AssetManager，资产来源经 IAssetSource 反转 | 生效 |
 | [0042](0042-importers-are-interfaces-with-typed-settings.md) | 导入器是虚接口，导入设置强类型化 | 生效 |
-| [0043](0043-runtime-device-bridges-to-target-typed-shader-artifact.md) | 运行时 Device 通过单一动态桥消费 target-typed shader artifact | 生效 |
+| [0043](0043-runtime-device-bridges-to-target-typed-shader-artifact.md) | 运行时 Device 通过单一动态桥消费 target-typed shader artifact | 部分被 ADR-0049 取代 |
+| [0044](0044-material-owns-full-render-state-baseline.md) | Material 拥有完整固定功能状态基线，attachment 格式由 pass 注入 | 生效 |
+| [0045](0045-shader-parameter-packing-driven-by-type-tree.md) | CPU 参数值由 compiler type tree 驱动打包，不写 CPU mirror struct | 生效 |
+| [0046](0046-pso-cache-belongs-to-shader-program.md) | PSO 缓存归 ShaderProgram 所有，不建全局缓存 | 生效 |
+| [0047](0047-binding-groups-belong-to-the-concrete-pipeline.md) | binding group 分配属于具体 pipeline，runtime 提供内置 forward pipeline | 生效 |
+| [0048](0048-vulkan-y-flip-belongs-to-a-runtime-helper.md) | Vulkan Y 翻转由 runtime 公共 helper 统一，RHI 仍原样透传 | 生效 |
+| [0049](0049-dynamic-residency-policy-comes-from-the-pipeline.md) | dynamic buffer residency 由 pipeline 策略提供，per-object 数据不用 StructuredBuffer | 生效 |
+| [0050](0050-sample-assets-ship-outside-the-source-repository.md) | 样例与测试资产在源码仓库之外分发 | 生效 |

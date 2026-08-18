@@ -1855,13 +1855,12 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateExplicitRootSignatureInter
                      ++rangeIndex) {
                     const D3D12_DESCRIPTOR_RANGE& sourceRange =
                         sourceParameter.DescriptorTable.pDescriptorRanges[rangeIndex];
-                    ranges.push_back({
-                        sourceRange.RangeType,
-                        sourceRange.NumDescriptors,
-                        sourceRange.BaseShaderRegister,
-                        sourceRange.RegisterSpace,
-                        D3D12_DESCRIPTOR_RANGE_FLAG_NONE,
-                        sourceRange.OffsetInDescriptorsFromTableStart});
+                    ranges.push_back({sourceRange.RangeType,
+                                      sourceRange.NumDescriptors,
+                                      sourceRange.BaseShaderRegister,
+                                      sourceRange.RegisterSpace,
+                                      D3D12_DESCRIPTOR_RANGE_FLAG_NONE,
+                                      sourceRange.OffsetInDescriptorsFromTableStart});
                 }
             } else if (parameter.ParameterType == D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS) {
                 parameter.Constants = {
@@ -2165,11 +2164,11 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateExplicitRootSignatureInter
                 return true;
             }
             return arrayElement == 0 && std::any_of(
-                binding.RootDescriptorDestinations.begin(),
-                binding.RootDescriptorDestinations.end(),
-                [&](const ShaderParameterBindingLayoutD3D12::RootDescriptorDestination& destination) noexcept {
-                    return rootParameterCoversStage(destination.RootParameterIndex, stage);
-                });
+                                            binding.RootDescriptorDestinations.begin(),
+                                            binding.RootDescriptorDestinations.end(),
+                                            [&](const ShaderParameterBindingLayoutD3D12::RootDescriptorDestination& destination) noexcept {
+                                                return rootParameterCoversStage(destination.RootParameterIndex, stage);
+                                            });
         };
         const auto hasAllDestinations = [&](ShaderStage stage) noexcept {
             if (!entry.Stages.HasFlag(stage)) {
@@ -2215,7 +2214,7 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateExplicitRootSignatureInter
                 return nullptr;
             }
             if (!entry.ImmutableSampler.has_value() && !entryStagesCovered(
-                    entry, binding, group.GroupIndex)) {
+                                                           entry, binding, group.GroupIndex)) {
                 RADRAY_ERR_LOG(
                     "d3d12 explicit root signature visibility does not cover active binding {} in group {}",
                     entry.Binding,
@@ -2280,16 +2279,14 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateExplicitRootSignatureInter
             return nullptr;
         }
         if (table.Sampler) {
-            group->SamplerTables.push_back({
-                table.RootParameterIndex,
-                table.AllocationOffset,
-                table.Size});
+            group->SamplerTables.push_back({table.RootParameterIndex,
+                                            table.AllocationOffset,
+                                            table.Size});
             group->SamplerDescriptorCount += table.Size;
         } else {
-            group->ResourceTables.push_back({
-                table.RootParameterIndex,
-                table.AllocationOffset,
-                table.Size});
+            group->ResourceTables.push_back({table.RootParameterIndex,
+                                             table.AllocationOffset,
+                                             table.Size});
             group->ResourceDescriptorCount += table.Size;
         }
         for (ShaderParameterBindingLayoutD3D12& binding : group->Bindings) {
@@ -2701,19 +2698,17 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateRootSignatureInternal(
         if (hasResourceTable) {
             parameterGroup.ResourceTableRootParameter =
                 static_cast<uint32_t>(layout->_rootParameters.size() - 1);
-            parameterGroup.ResourceTables.push_back({
-                parameterGroup.ResourceTableRootParameter,
-                0,
-                parameterGroup.ResourceDescriptorCount});
+            parameterGroup.ResourceTables.push_back({parameterGroup.ResourceTableRootParameter,
+                                                     0,
+                                                     parameterGroup.ResourceDescriptorCount});
             for (size_t entryIndex = 0; entryIndex < group.Entries.size(); ++entryIndex) {
                 const ShaderParameterSetLayoutEntryDescriptor& entry = group.Entries[entryIndex];
                 if (entry.Type == ShaderParameterBindingType::Sampler ||
                     IsDynamicShaderParameterBindingType(entry.Type)) {
                     continue;
                 }
-                parameterGroup.Bindings[entryIndex].DescriptorDestinations.push_back({
-                    parameterGroup.ResourceTableRootParameter,
-                    parameterGroup.Bindings[entryIndex].DescriptorOffset});
+                parameterGroup.Bindings[entryIndex].DescriptorDestinations.push_back({parameterGroup.ResourceTableRootParameter,
+                                                                                      parameterGroup.Bindings[entryIndex].DescriptorOffset});
             }
         }
         const bool hasSamplerTable = std::any_of(
@@ -2729,19 +2724,17 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateRootSignatureInternal(
         if (hasSamplerTable) {
             parameterGroup.SamplerTableRootParameter =
                 static_cast<uint32_t>(layout->_rootParameters.size() - 1);
-            parameterGroup.SamplerTables.push_back({
-                parameterGroup.SamplerTableRootParameter,
-                0,
-                parameterGroup.SamplerDescriptorCount});
+            parameterGroup.SamplerTables.push_back({parameterGroup.SamplerTableRootParameter,
+                                                    0,
+                                                    parameterGroup.SamplerDescriptorCount});
             for (size_t entryIndex = 0; entryIndex < group.Entries.size(); ++entryIndex) {
                 const ShaderParameterSetLayoutEntryDescriptor& entry = group.Entries[entryIndex];
                 if (entry.Type != ShaderParameterBindingType::Sampler ||
                     entry.ImmutableSampler.has_value()) {
                     continue;
                 }
-                parameterGroup.Bindings[entryIndex].DescriptorDestinations.push_back({
-                    parameterGroup.SamplerTableRootParameter,
-                    parameterGroup.Bindings[entryIndex].DescriptorOffset});
+                parameterGroup.Bindings[entryIndex].DescriptorDestinations.push_back({parameterGroup.SamplerTableRootParameter,
+                                                                                      parameterGroup.Bindings[entryIndex].DescriptorOffset});
             }
         }
     }
@@ -2783,8 +2776,9 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateRootSignatureInternal(
 // == Device: pipeline layout 与 parameter set ==
 
 Nullable<unique_ptr<PipelineLayout>> DeviceD3D12::CreatePipelineLayout(
-    const shader::DxilShaderArtifactView& artifact) noexcept {
-    const auto input = MakeBackendPipelineLayoutInput(artifact);
+    const shader::DxilShaderArtifactView& artifact,
+    const ShaderLayoutPolicy& policy) noexcept {
+    const auto input = MakeBackendPipelineLayoutInput(artifact, policy);
     if (!input.has_value()) {
         return nullptr;
     }
@@ -4504,10 +4498,9 @@ static bool BindShaderParameterSetD3D12(
         }
     } else if (destinationGroup.Get()->ResourceTableRootParameter != invalidRootParameter) {
         if (!bindTables(
-                vector<DescriptorTableBindingD3D12>{{
-                    destinationGroup.Get()->ResourceTableRootParameter,
-                    0,
-                    destinationGroup.Get()->ResourceDescriptorCount}},
+                vector<DescriptorTableBindingD3D12>{{destinationGroup.Get()->ResourceTableRootParameter,
+                                                     0,
+                                                     destinationGroup.Get()->ResourceDescriptorCount}},
                 set->_resourceDescriptors,
                 graphics)) {
             return false;
@@ -4519,10 +4512,9 @@ static bool BindShaderParameterSetD3D12(
         }
     } else if (destinationGroup.Get()->SamplerTableRootParameter != invalidRootParameter) {
         if (!bindTables(
-                vector<DescriptorTableBindingD3D12>{{
-                    destinationGroup.Get()->SamplerTableRootParameter,
-                    0,
-                    destinationGroup.Get()->SamplerDescriptorCount}},
+                vector<DescriptorTableBindingD3D12>{{destinationGroup.Get()->SamplerTableRootParameter,
+                                                     0,
+                                                     destinationGroup.Get()->SamplerDescriptorCount}},
                 set->_samplerDescriptors,
                 graphics)) {
             return false;
@@ -4539,9 +4531,9 @@ static bool BindShaderParameterSetD3D12(
         }
         const BufferUse use = entry.Type == ShaderParameterBindingType::CBuffer
                                   ? BufferUse::CBuffer
-                                  : entry.Type == ShaderParameterBindingType::RWBuffer
-                                        ? BufferUse::UnorderedAccess
-                                        : BufferUse::Resource;
+                              : entry.Type == ShaderParameterBindingType::RWBuffer
+                                  ? BufferUse::UnorderedAccess
+                                  : BufferUse::Resource;
         const auto resolved = ResolveShaderBufferBindingD3D12(
             set->_device, *bufferBinding, use);
         if (!resolved.has_value()) {

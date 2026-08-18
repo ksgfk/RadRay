@@ -29,8 +29,8 @@
 - 身份权威是 `<AssetRoot>/assets.json`（ADR-0040）；资产根由装配方传入，代码不硬编码。
 - 加载桥接归 `AssetManager`，`AssetDatabase` 实现 `IAssetSource`（ADR-0041）。
 - 导入器是虚接口，导入设置强类型（ADR-0042）。
-- **终点验收是 example 真的渲染出来**：`GetAssetManager()->Load<TextureAsset>("wall.png")`
-  拿到贴图并出现在画面上。每一条功能都要被这条路径压着，否则不进本轮。
+- **终点验收是 example 真的渲染出来**：贴图必须经 `AssetManager` 的 typed path load
+  拿到并出现在画面上。每一条功能都要被这条路径压着，否则不进本轮。
 
 前两轮（bundle 清单、LMDB）失败的共同原因是没有消费方，功能建好即废。本轮范围由消费方倒推。
 
@@ -38,7 +38,7 @@
 
 - **资产根（AssetRoot）**：装配方指定的资产目录。本仓库是**引擎根**而非游戏项目根，
   `assets/` 只是引擎自带的样例与测试资产；游戏项目传自己的资产根。
-- **清单（manifest）**：`<AssetRoot>/assets.json`，进版本控制，身份与元数据的唯一权威。
+- **清单（manifest）**：`<AssetRoot>/assets.json`，随资产包版本化和分发，身份与元数据的唯一权威。
 - **条目（entry）**：清单 `assets` 数组的一个元素，对应内存里一个 `AssetEntry`。
 - **导入器（importer）**：一个 `AssetImporter` 实例，拥有一个资产类型的 type 名、扫盘扩展名、
   settings 形状与加载方式。
@@ -48,7 +48,7 @@
 ## 已确认需求
 
 1. 消费方驱动：终点是 example 经数据库加载 `assets/` 下资产并渲染；范围由此倒推。
-2. 身份权威是单份工程级 JSON 文本清单，进版本控制；不引入 LMDB 或任何本地数据库。
+2. 身份权威是单份工程级 JSON 文本清单，随资产包版本化；不引入 LMDB 或任何本地数据库。
 3. 清单位置 `<AssetRoot>/assets.json`；资产根由 `ApplicationRuntimeDescriptor` 传入，
    代码里不出现硬编码资产路径。
 4. 加载桥接归 `AssetManager`；`AssetDatabase` 实现 `IAssetSource`，由 `Application` 拥有
@@ -71,13 +71,13 @@
   "assets": [
     {
       "guid": "8f3c1a2b-4d5e-4f60-9a7b-0c1d2e3f4a5b",
-      "path": "wall.png",
+      "path": "textures/example.png",
       "type": "texture",
       "settings": { "srgb": true, "generateMips": true }
     },
     {
       "guid": "a12b3c4d-5e6f-4a70-8b9c-0d1e2f3a4b5c",
-      "path": "box.obj",
+      "path": "meshes/example.obj",
       "type": "mesh"
     }
   ]
@@ -88,7 +88,7 @@
 - `guid` / `path` / `type` 必需；`settings` 可选（该 type 无设置时省略）。
 - GUID 文本：写出固定 `Guid::ToString()` 的 D 格式小写；读取走 `Guid::TryParse`
   （宽容 N/D/B/P）。**禁用会抛异常的 `Guid::Parse`**。
-- `type` 是进版本控制的公开标识符，一旦发布不得重命名。
+- `type` 是随资产包发布的公开标识符，一旦发布不得重命名。
 
 ### D2：path 口径
 
@@ -334,8 +334,8 @@ example 传的资产根是引擎样例资产目录，口径与测试一致（`mo
 1. `TextureImporter` / `MeshImporter`（D9）。
 2. `Refresh()`：扫盘登记 + 缺失文件 warning 保留 GUID。
 3. `ApplicationRuntimeDescriptor::AssetRoot`、phase 1/2 装配、关停顺序（D8）。
-4. example 接入（D10）：`Load<TextureAsset>("wall.png")` 渲染出来；
-   `assets/assets.json` 首次生成并提交。
+4. example 接入（D10）：贴图经 `AssetManager` 加载并渲染出来；
+   `<AssetRoot>/assets.json` 首次生成并随外部资产包交付。
 
 检查站：**example 真的跑起来且画面上有那张贴图**（本轮的唯一终点验收）；
 `Refresh` 两次运行 GUID 不变。
@@ -396,10 +396,11 @@ example 传的资产根是引擎样例资产目录，口径与测试一致（`mo
 ### 已确认
 - **2026-08-17 / C1**：消费方驱动——终点是 example 经数据库加载 `assets/` 并渲染，
   范围由此倒推。前两轮（bundle 清单、LMDB）失败的共同原因是零消费方。
-- **2026-08-17 / C2**：身份权威是单份工程级 JSON 文本清单，进版本控制；不引入 LMDB。
+- **2026-08-17 / C2**：身份权威是单份工程级 JSON 文本清单，随资产包版本化；不引入 LMDB。
   用户明确接受"同文件冲突"的代价，实施以"按 path 排序 + 全量重写"把它压到平凡形态。
 - **2026-08-17 / C3**：清单落 `<AssetRoot>/assets.json`。用户同时指出**本仓库是引擎根而非
-  游戏项目根**，故资产根必须由装配方传入、代码不硬编码；`assets/` 只是引擎样例资产。
+  游戏项目根**，故资产根必须由装配方传入、代码不硬编码；引擎样例资产通过源码仓库之外的
+  渠道分发。
 - **2026-08-17 / C4**：不做导入产物缓存（DDC），loader 直接读源文件。
 - **2026-08-17 / C5（用户提出）**：加载桥接不属于 `AssetDatabase`，是 `AssetManager` 的职责。
   落实为 `IAssetSource` 接口反转（ADR-0041），并因此推翻 ADR-0039 的"不改 AssetManager"。

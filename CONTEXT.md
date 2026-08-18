@@ -332,6 +332,24 @@ vertex buffer 的 binding、stride、step mode、attribute storage format 或 by
 attributes，旧 manifest `VertexInput` 删除。semantic/location、shape/format、slot/offset/stride/step
 mode 不兼容时，PSO builder 必须在创建任何 native PSO 前 fail closed。
 
+**PrimitiveVertexLayout**:
+一个 mesh primitive 的 geometry-owned 物理顶点布局：buffer binding、stride、step mode、semantic/
+index、storage format 与 byte offset。它不含 shader location；location 只在与 concrete Variant 的
+target-native vertex reflection 合并时确定。
+_Avoid_: vertex declaration（易与 shader interface 混淆）, input layout（后端对象名）
+
+**Material**:
+一次 surface draw 对 concrete `ShaderProgram` 的选择，加上命名参数值、纹理/sampler 引用、完整固定
+功能状态基线与 render queue。Material 不拥有 geometry topology，也不拥有 pass attachment format、
+sample count 或 compatible render pass。
+_Avoid_: material instance（当前没有两级继承）, effect
+
+**MeshDrawItem**:
+collector 为单个 camera/frame 从一个 primitive section 展平出的绘制事实：geometry、material、
+local-to-world、index range、section identity、view depth 与稳定顺序。它是临时排序输入，不是持久
+GPU command 或资产所有者。
+_Avoid_: draw command, mesh batch cache
+
 **Target-native vertex reflection**:
 DXIL 与 SPIR-V target result 各自保留 native vertex interface facts，不构造跨 target 的统一
 register/location schema，也不要求两边 DCE 后的 parameter 集合相同。D3D12 consumer 按
@@ -470,11 +488,22 @@ tree。runtime 只检查 type tree 的 wire bounds、record kind、offset/size�
 这是后端已硬化的不变量，任何一层都不做重映射。
 _Avoid_: descriptor set, register space, space, table
 
+**Binding group plan**:
+一条 concrete render pipeline 对 binding group 更新频率/角色的值映射，例如 view、material、object。
+group 数字仍由 HLSL author 声明；plan 只把这些数字传给 material 与执行器，不是全引擎编号表。
+_Avoid_: global binding convention, group remap
+
 **Residency**:
-一个 DXIL binding 经 descriptor table 访问，还是作为 root descriptor 直接绑定的 layout policy。
-Explicit DXIL Root Signature 可由作者选择；Implicit D3D12 Root Signature 的当前 fallback 统一使用
-descriptor table。
+一个 buffer binding 使用常规 descriptor，还是使用可在 bind 时附加 byte offset 的 dynamic
+descriptor/root descriptor。Explicit DXIL Root Signature 由作者决定；implicit layout 可由 concrete
+pipeline 为指定 group 选择 dynamic residency。Vulkan 对应普通 descriptor 与 `*_BUFFER_DYNAMIC`。
 _Avoid_: binding mode, access path
+
+**Residency policy**:
+pipeline 在从 artifact 创建 backend layout 时提供的 dynamic buffer group 集合。它只改变 active
+buffer binding 的 residency，不改变 compiler-owned group/binding identity；引用缺失 group，或尝试
+覆盖 Explicit DXIL Root Signature 时必须失败。
+_Avoid_: layout override, dynamic group convention
 
 **Artifact**:
 离线编译产出的、可在无编译器环境下加载的 shader 产物。内容寻址。

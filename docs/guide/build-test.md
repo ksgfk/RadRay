@@ -50,11 +50,9 @@ cmake --build build_debug --config Debug --parallel 24
 `example_lambert_sphere` 是普通 executable，不注册 CTest。它默认按 D3D12 构建，运行时把
 工程根目录作为当前工作目录，把 `shaderlib/` 物理目录作为 root-relative HLSL include path；
 shaderlib 不会复制到输出目录。资产根优先读 `RADRAY_ASSETS_DIR`，否则使用构建时注入的
-`${CMAKE_SOURCE_DIR}/assets`；sample 通过 `assets/assets.json` 加载 `wall.png`。`RADRAY_ENABLE_SHADER_JIT=OFF`
-时目标仍可构建，但应用会在创建窗口前记录错误并返回非零码。
-
-`assets/` 当前整体被 `.gitignore` 忽略，clean clone 不含 manifest 或 `wall.png`。运行样例前必须
-在资产根提供登记 `wall.png` 的 `assets.json` 与对应源文件；否则样例会在初始化纹理时失败退出。
+`${CMAKE_SOURCE_DIR}/assets`。该目录不进入版本控制；运行样例前需通过项目约定的外部分发渠道
+准备对应资产包，或用环境变量指向已准备的资产根。构建不复制或校验运行资产。
+`RADRAY_ENABLE_SHADER_JIT=OFF` 时目标仍可构建，但应用会在创建窗口前记录错误并返回非零码。
 
 ```powershell
 cmake --build build_debug --config Debug --target example_lambert_sphere --parallel 24
@@ -106,6 +104,9 @@ ctest --test-dir build_debug -C Debug -R AssetSlotTest --output-on-failure
 | `test_radray_dxc_metadata` | `RadRayDxcMetadata` |
 | `test_shaderlib_passes` | `RadRayShaderLibPass` |
 | `test_runtime_shader_jit` | `RadRayRuntimeShaderJit`（graphics/compute readback、fixture case report、metadata negative） |
+| `test_material` | `RadRayRuntimeMaterial`（vertex layout 解析、type tree 打包、多 cbuffer 配对、residency policy） |
+| `test_mesh_draw` | `RadRayRuntimeMeshDraw`（排序、双后端 dynamic offset/indexed draw、material 资源按 flight 轮转） |
+| `test_forward_pipeline` | `RadRayRuntimeForwardPipeline`（双后端跑真实窗口帧循环，程序化 quad 走完 ForwardPipeline 编排） |
 | `test_radray_render_shader_artifact` | `RadRayRenderShaderArtifact` |
 | `test_radray_shader_contract` | `RadRayShaderContract` |
 | 其余 core target | 对应源码中的 suite 名 |

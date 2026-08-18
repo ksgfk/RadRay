@@ -14,7 +14,7 @@ RadRay 是 C++20 实时渲染器，当前支持 Windows 下的 D3D12 与 Vulkan 
 | `modules/` | core、shader、window、render、runtime，以及可选 shader compiler client | 是 |
 | `shaderlib/` | HLSL 数学、光照共享库与最小产品 pass，目录本身是 include 根 | 是 |
 | `tools/` | 依赖恢复、文档检查、编译数据库脚本，以及可选的 raw shader compile CLI | 是 |
-| `assets/` | 版本化样例 manifest/资产；其余本地大资产默认忽略 | 是 |
+| `assets/` | 被忽略的本地资产根；测试与样例资产通过源码仓库之外的渠道分发 | 本地数据 |
 | `cmake/` | 构建辅助函数 | 是 |
 | `docs/` | 当前架构、指南、ADR 和研究记录 | 是 |
 | `third_party/`, `SDKs/` | 由恢复脚本填充的依赖树 | **否** |
@@ -61,12 +61,15 @@ compiler-produced metadata 不依赖 `radrayshadercompiler`；`radrayruntime` �
 | 资产加载与回收 | `AssetManager::Load` / `Pump` | `modules/runtime/src/asset_manager.cpp` |
 | 开发时资产身份与 path 反查 | `AssetDatabase::Open` / `Refresh` / `Save` | `modules/runtime/src/asset_database.cpp` |
 | render pass / framebuffer 去重 | `RenderPassRegistry` | `modules/render/include/radray/render/render_pass_registry.h` |
+| material、program 与 mesh draw | `Material` / `ShaderProgram` / `MeshDrawList` | `modules/runtime/include/radray/runtime/` |
+| 内置前向管线 | `ForwardPipeline` | `modules/runtime/include/radray/runtime/forward_pipeline/forward_pipeline.h` |
 | 场景 tick | `World::Tick` | `modules/runtime/src/game_framework/world.cpp` |
 
 ## 当前边界
 
 M-1 已移除旧的 shader 资产、手写 metadata、旧的命令行 shader 工具和未接线的 UI 路线。
-当前 `shaderlib/` 由共享数学层、target gate 和三条最小产品 pass 组成；compiler-owned
+当前 `shaderlib/` 由共享数学层、target gate、内置 forward 产品 pass 与 depth/compute 最小 pass
+组成；compiler-owned
 metadata、target-native artifact decoder/layout 与 runtime JIT 已接通。RHI 的 layout 构造入口
 按 DXIL/SPIR-V view 分开；运行时已选定 device 的调用方经 render 的单一动态桥核对
 device/request/envelope target 后进入对应 typed 入口。公共 `PipelineLayout::FindBinding` 只按

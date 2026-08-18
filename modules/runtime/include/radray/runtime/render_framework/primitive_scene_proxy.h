@@ -1,6 +1,7 @@
 #pragma once
 
 #include <radray/basic_math.h>
+#include <radray/nullable.h>
 #include <radray/runtime/gpu_resource.h>
 #include <radray/types.h>
 
@@ -8,6 +9,8 @@
 // docs/architecture/render-framework.md
 
 namespace radray {
+
+class Material;
 
 /// 一次索引绘制的参数 (对应 UE5 的 FMeshBatchElement 的索引子集)。
 /// 【Geometry 的保命责任在 proxy】它指进 StaticMesh 持有的 GpuMesh, 所以覆写 GetDrawArgs 的
@@ -39,6 +42,8 @@ public:
     /// 取指定 section 的绘制参数 (几何 + 索引范围)。执行器据此绑定 VB/IB 并 DrawIndexed。
     /// 基类默认无几何 (Geometry=nullptr); 具体 proxy 覆写。
     virtual MeshDrawArgs GetDrawArgs(uint32_t /*sectionIndex*/) const noexcept { return MeshDrawArgs{}; }
+    virtual uint32_t GetSectionCount() const noexcept { return 0; }
+    virtual Nullable<Material*> GetMaterial(uint32_t /*sectionIndex*/) const noexcept { return nullptr; }
 
 private:
     uint64_t _generation{0};

@@ -69,6 +69,7 @@ std::optional<BackendShaderArtifact> CreateBackendShaderArtifact(
     Device& device,
     std::span<const byte> blob,
     const shader::ShaderArtifactDecodeOptions& options,
+    const ShaderLayoutPolicy& policy,
     BackendShaderArtifactError* error) noexcept {
     SetError(error, BackendShaderArtifactFailure::None);
     const std::optional<shader::ShaderTarget> backendTarget =
@@ -93,7 +94,7 @@ std::optional<BackendShaderArtifact> CreateBackendShaderArtifact(
                 return std::nullopt;
             }
             Nullable<unique_ptr<PipelineLayout>> layout =
-                static_cast<d3d12::DeviceD3D12&>(device).CreatePipelineLayout(artifact.value());
+                static_cast<d3d12::DeviceD3D12&>(device).CreatePipelineLayout(artifact.value(), policy);
             if (!layout.HasValue()) {
                 SetError(error, BackendShaderArtifactFailure::PipelineLayoutCreationFailed);
                 return std::nullopt;
@@ -113,7 +114,7 @@ std::optional<BackendShaderArtifact> CreateBackendShaderArtifact(
                 return std::nullopt;
             }
             Nullable<unique_ptr<PipelineLayout>> layout =
-                static_cast<vulkan::DeviceVulkan&>(device).CreatePipelineLayout(artifact.value());
+                static_cast<vulkan::DeviceVulkan&>(device).CreatePipelineLayout(artifact.value(), policy);
             if (!layout.HasValue()) {
                 SetError(error, BackendShaderArtifactFailure::PipelineLayoutCreationFailed);
                 return std::nullopt;

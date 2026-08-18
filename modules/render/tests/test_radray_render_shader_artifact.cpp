@@ -186,24 +186,16 @@ TEST(RadRayRenderShaderArtifact, BackendMappingsRejectUnknownValues) {
 }
 
 TEST(RadRayRenderShaderArtifact, DecodesEveryRawGoldenLaneWithoutCompiler) {
-    constexpr std::string_view names[] = {
-        "no_resource_graphics",
-        "vertex_only",
-        "depth_only",
-        "texture_sampler",
-        "shadow_static_sampler",
-        "multiple_root_constants",
-        "spirv_push_constant",
-        "target_specific_bindings",
-        "nested_types",
-        "compute",
-        "unused_resource"};
+    // Driven off the fixture table so the golden hash indices cannot drift from it.
+    const std::span<const test::ShaderContractFixture> fixtures =
+        test::GetShaderContractFixtures();
     const std::filesystem::path root = std::filesystem::path{RADRAY_PROJECT_DIR} /
                                        "modules/render/tests/data/shader_artifacts";
-    for (uint8_t index = 0; index < std::size(names); ++index) {
+    for (uint8_t index = 0; index < fixtures.size(); ++index) {
+        const std::string_view fixtureName = fixtures[index].Name;
         for (const shader::ShaderTarget target : {shader::ShaderTarget::DXIL, shader::ShaderTarget::SPIRV}) {
             const string suffix = target == shader::ShaderTarget::DXIL ? ".dxil.bin" : ".spirv.bin";
-            const vector<byte> blob = ReadBinary(root / (string{names[index]} + suffix));
+            const vector<byte> blob = ReadBinary(root / (string{fixtureName} + suffix));
             ASSERT_FALSE(blob.empty());
             ShaderArtifactDecodeError error = ShaderArtifactDecodeError::None;
             const auto artifact = DecodeShaderArtifact(

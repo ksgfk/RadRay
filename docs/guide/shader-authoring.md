@@ -1,6 +1,6 @@
 > - 适用: 新增或修改 shaderlib 根 `.hlsl` pass、keyword domain、binding 或 target gate
 > - 权威: 本文是当前 HLSL authoring 约定；wire 与 runtime 边界见 shader pipeline 架构文档
-> - 锚点: `shaderlib/core/platform.hlsli`, `shaderlib/passes/forward.hlsl`, `shaderlib/passes/depth.hlsl`, `shaderlib/passes/compute.hlsl`, `modules/shader_compiler/tests/test_shaderlib_passes.cpp`
+> - 锚点: `shaderlib/core/platform.hlsli`, `shaderlib/pipelines/forward/bindings.hlsli`, `shaderlib/pipelines/forward/forward.hlsl`, `shaderlib/passes/depth.hlsl`, `shaderlib/passes/compute.hlsl`, `modules/shader_compiler/tests/test_shaderlib_passes.cpp`
 
 # HLSL authoring
 
@@ -15,7 +15,7 @@ header；include 必须使用 root-relative、尖括号路径：
 ```
 
 不要把 `shaderlib/` 重复写进 include path，也不要用物理文件系统路径作为 `SourceName`。caller
-传入的逻辑路径应类似 `passes/forward.hlsl`，它会进入诊断和 compile input identity。
+传入的逻辑路径应类似 `pipelines/forward/forward.hlsl`，它会进入诊断和 compile input identity。
 
 ## Entry 与 keyword
 
@@ -67,11 +67,24 @@ binding 数字可以不同，不能假设 set 等于 space 或 binding 数字相
 HLSL declaration name 是 runtime lookup identity；render layout 会为当前 artifact 生成不透明
 `BindingHandle`。
 
+group 的语义属于具体 pipeline，不是 shaderlib 全局规则。内置 forward 的 plan 是：
+
+| Group | 更新频率 | 当前 binding |
+|---|---|---|
+| 0 | per-view | `ForwardView`：view-projection、eye 与光照数组 |
+| 1 | per-material | `ForwardMaterial`、`AlbedoTexture`、`LinearSampler` |
+| 2 | per-object | `ForwardObject`：local-to-world |
+
+新增或修改 forward binding 时，同时更新 `pipelines/forward/bindings.hlsli` 与
+`ForwardPipeline::GetBindingGroupPlan()` 的消费者校验；material 和执行器不能重新写 0/1/2。
+view/material/object 数值 buffer 使用具名 struct 加 `ConstantBuffer<T>`，让 artifact type tree
+为 CPU 按名打包保留完整根结构与成员 offset；CPU 不声明 mirror struct。
+
 ## 现有最小 pass
 
 | Pass | 用途 | contract facts |
 |---|---|---|
-| `passes/forward.hlsl` | vertex + pixel | texture、sampler、颜色转换、`QUALITY` |
+| `pipelines/forward/forward.hlsl` | 内置 forward vertex + pixel | view/material/object、纹理、sampler、Lambert 光照、`QUALITY` |
 | `passes/depth.hlsl` | vertex-only | depth topology、`DEPTH_MODE` |
 | `passes/compute.hlsl` | compute dispatch | storage buffer、`COMPUTE_MODE` |
 

@@ -1,6 +1,6 @@
 > - 适用: 资产生命周期、引用计数、加载去重或延迟 GPU 销毁
 > - 权威: 本文是 runtime 资产系统的唯一说明；帧边界与上传见 `architecture/frame-and-gpu.md`，开发时身份登记与 AssetDatabase 见 `architecture/asset-database.md`
-> - 锚点: `modules/runtime/include/radray/runtime/asset_manager.h`, `modules/runtime/src/asset_manager.cpp`, `modules/runtime/include/radray/runtime/asset.h`, `modules/runtime/include/radray/runtime/texture_asset.h`
+> - 锚点: `modules/runtime/include/radray/runtime/asset_manager.h`, `modules/runtime/src/asset_manager.cpp`, `modules/runtime/include/radray/runtime/asset.h`, `modules/runtime/include/radray/runtime/texture_asset.h`, `modules/runtime/include/radray/runtime/static_mesh.h`, `modules/runtime/src/static_mesh.cpp`, `modules/runtime/include/radray/runtime/render_framework/static_mesh_scene_proxy.h`
 
 # 资产系统
 
@@ -40,9 +40,8 @@ namespace prefix 隔离资产类型；同一路径在不同资产类型下必须
 
 AssetId 双轨并存（`architecture/asset-database.md`）：入库资产以 `AssetDatabase` 登记的
 GUID 为身份（一次分配、永不改变），散文件继续走这里的路径哈希；两轨共用 `AssetManager`
-的单 slot 表，互不迁移。`example_lambert_sphere` 在提供本地 `assets/assets.json` 时通过
-`Load<TextureAsset>("wall.png")` 消费 GUID 轨；但 `assets/` 当前整体被 `.gitignore` 忽略，仓库
-没有跟踪 manifest 或贴图，clean clone 不具备这条运行输入。shaderlib 与显式测试资源继续使用
+的单 slot 表，互不迁移。`example_lambert_sphere` 通过 `AssetManager` 消费 GUID 轨，但其运行资产
+属于被忽略的顶层 `assets/`，由源码仓库之外的渠道分发。shaderlib 与显式测试资源继续使用
 路径哈希轨。
 
 ## 延迟销毁
@@ -68,6 +67,11 @@ void MyAsset::OnUnload(AssetManager& manager) override {
 
 返回资产内部裸指针的 API 必须在文档和调用方中同时说明持有 `StreamingAssetRef` 的要求。
 例如 SceneProxy 自己保存 mesh ref，材质快照保存 texture ref 加描述值，不能只保存裸 view。
+
+OBJ `MeshImporter` 在 GPU 上传前为每个 `MeshPrimitive` 建一个覆盖完整 index range 的默认 section，
+并从 `POSITION0` 计算 local bounds；任一步不自洽都使加载失败。`StaticMeshSceneProxy` 自持一份
+`StreamingAssetRef<StaticMesh>`，所以它暴露的 section `MeshDrawArgs::Geometry` 在 proxy 生命周期内
+稳定，组件重建 render state 时旧 proxy 与其引用一起释放。
 
 ## 关停顺序
 

@@ -8,6 +8,12 @@
 
 namespace radray::render {
 
+struct ShaderLayoutPolicy {
+    std::span<const uint32_t> DynamicBufferGroups{};
+
+    bool Empty() const noexcept { return DynamicBufferGroups.empty(); }
+};
+
 // 由 compiler-owned artifact records 组装的后端专用输入。这些类型刻意放在 rhi.h 之外，
 // 让调用方无法自造第二种 layout 描述。
 struct ShaderBindingLocation {
@@ -86,10 +92,12 @@ struct BackendPipelineLayoutInput {
 };
 
 std::optional<BackendPipelineLayoutInput> MakeBackendPipelineLayoutInput(
-    const shader::DxilShaderArtifactView& artifact) noexcept;
+    const shader::DxilShaderArtifactView& artifact,
+    const ShaderLayoutPolicy& policy = {}) noexcept;
 
 std::optional<BackendPipelineLayoutInput> MakeBackendPipelineLayoutInput(
-    const shader::SpirvShaderArtifactView& artifact) noexcept;
+    const shader::SpirvShaderArtifactView& artifact,
+    const ShaderLayoutPolicy& policy = {}) noexcept;
 
 bool ValidateVertexInputStateAgainstArtifact(
     const VertexInputState& state,

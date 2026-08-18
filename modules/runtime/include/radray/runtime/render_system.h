@@ -1,16 +1,24 @@
 #pragma once
 
+#include <span>
+#include <string_view>
+
+#include <radray/nullable.h>
+#include <radray/render/backend/pipeline_layout_types.h>
 #include <radray/runtime_type.h>
 #include <radray/runtime/gpu_resource.h>
 #include <radray/render/render_pass_registry.h>
 #include <radray/runtime/render_framework/render_pipeline.h>
 #include <radray/runtime/render_framework/scene.h>
+#include <radray/shader/shader_compiler_contract.h>
 #include <radray/types.h>
 
 namespace radray {
 
 class Application;
 class AppFrameContext;
+class ShaderJit;
+class ShaderProgram;
 struct AppFrameTarget;
 
 /// runtime 侧的渲染协调器。【拥有"怎么画", 不拥有帧时序】—— device / queue / flight /
@@ -41,12 +49,39 @@ public:
     /// RenderPass / Framebuffer 复用缓存。OnInitialize 之前或 device 缺失时为空。
     render::RenderPassRegistry* GetRenderPassRegistry() const noexcept { return _renderPassRegistry.get(); }
 
+    Nullable<ShaderProgram*> GetOrCreateShaderProgram(
+        std::string_view sourceName,
+        std::span<const shader::KeywordAssignment> assignments = {},
+        const render::ShaderLayoutPolicy& layoutPolicy = {},
+        const shader::CompilePolicy& compilePolicy = {});
+    size_t GetShaderProgramCacheSize() const noexcept { return _shaderPrograms.size(); }
+
 private:
+    struct ProgramAssignment {
+        string Name;
+        string Value;
+
+        friend bool operator==(const ProgramAssignment&, const ProgramAssignment&) = default;
+    };
+
+    struct ProgramKey {
+        string SourceName;
+        vector<ProgramAssignment> Assignments;
+
+        friend bool operator==(const ProgramKey&, const ProgramKey&) = default;
+    };
+
+    struct ProgramKeyHash {
+        size_t operator()(const ProgramKey& value) const noexcept;
+    };
+
     void EnsureRenderTargetState(AppFrameContext& ctx, RenderPipelineTarget& target);
     void EnsurePresentState(AppFrameContext& ctx, RenderPipelineTarget& target);
 
     Application* _app{nullptr};
     unique_ptr<render::RenderPassRegistry> _renderPassRegistry;
+    unique_ptr<ShaderJit> _shaderJit;
+    unordered_map<ProgramKey, unique_ptr<ShaderProgram>, ProgramKeyHash> _shaderPrograms;
     unique_ptr<RenderPipeline> _pipeline;
     vector<unique_ptr<Scene>> _scenes;
 };

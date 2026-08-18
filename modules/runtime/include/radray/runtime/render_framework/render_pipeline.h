@@ -8,6 +8,7 @@
 #include <radray/nullable.h>
 #include <radray/render/rhi.h>
 #include <radray/runtime/gpu_system.h>
+#include <radray/runtime/render_framework/render_types.h>
 #include <radray/types.h>
 
 namespace radray {
@@ -16,17 +17,6 @@ class Application;
 class AppFrameContext;
 class CameraComponent;
 class Scene;
-
-/// 渲染队列排序值 (对应 Unity 的 Material.renderQueue)。
-/// 数值越小越先绘制; >= Transparent 的走 back-to-front 半透明排序。
-enum class RenderQueue : int32_t {
-    Background = 1000,
-    Geometry = 2000,
-    AlphaTest = 2450,
-    GeometryLast = 2500,  // 不透明与半透明的分界
-    Transparent = 3000,
-    Overlay = 4000,
-};
 
 enum class RenderPassEvent : int32_t {
     BeforeRendering = 0,
@@ -43,23 +33,6 @@ enum class RenderPassEvent : int32_t {
     BeforeRenderingPostProcessing = 550,
     AfterRenderingPostProcessing = 600,
     AfterRendering = 1000,
-};
-
-/// 材质对 PSO 固定功能状态的三态覆盖 (对应 Unity ShaderLab 的 ZWrite / Cull / Blend)。
-/// 这些状态不影响 shader 字节码, 故不烘进 manifest, 由材质在建 PSO 时覆盖。
-///
-/// Blend 用 (OverrideBlend + optional<BlendState>) 表达三态: false = 不覆盖;
-/// true + 有值 = 覆盖为开启; true + nullopt = 覆盖为【强制关闭】。
-///
-/// 【基线由谁提供尚未裁决, 本结构当前无使用点】只覆盖 Cull / DepthWrite / Blend 三项,
-/// Topology / FrontFace / DepthCompare / target Format 仍无人负责。
-struct MaterialRenderState {
-    std::optional<render::CullMode> Cull{};
-    std::optional<bool> DepthWrite{};
-    bool OverrideBlend{false};
-    std::optional<render::BlendState> Blend{};
-
-    friend bool operator==(const MaterialRenderState&, const MaterialRenderState&) = default;
 };
 
 struct RenderPipelineTarget {
@@ -116,8 +89,14 @@ public:
     virtual void Execute(RenderPipelineContext& ctx, const RenderCamera& camera);
     virtual void Cleanup(RenderPipelineContext& ctx, const RenderCamera& camera);
 
+protected:
+    void MarkContentDrawn() noexcept { _contentDrawn = true; }
+
 private:
+    friend class RenderPipeline;
+
     RenderPassEvent _event{RenderPassEvent::AfterRendering};
+    bool _contentDrawn{false};
 };
 
 class RenderPipeline {

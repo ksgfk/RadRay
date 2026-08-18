@@ -8,6 +8,7 @@
 #include <radray/nullable.h>
 #include <radray/render/rhi.h>
 #include <radray/runtime/asset_manager.h>
+#include <radray/runtime/render_framework/primitive_vertex_layout.h>
 #include <radray/types.h>
 
 namespace radray {
@@ -20,6 +21,8 @@ public:
     struct DrawData {
         render::VertexBufferView Vbv;
         render::IndexBufferView Ibv;
+        PrimitiveVertexLayout VertexLayout;
+        PrimitiveTopology Topology{PrimitiveTopology::TriangleList};
     };
 
     vector<unique_ptr<render::Buffer>> Buffers;
@@ -288,6 +291,7 @@ public:
     void Clear() noexcept;
     bool Contains(const render::Buffer* buffer) const noexcept;
     uint64_t GetHighWatermark() const noexcept { return _highWatermark; }
+    uint64_t GetMaxResetSize() const noexcept { return _desc.MaxResetSize; }
 
     friend void swap(DynamicCBufferArena& a, DynamicCBufferArena& b) noexcept;
 
