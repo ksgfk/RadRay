@@ -53,6 +53,9 @@ shaderlib 不会复制到输出目录。资产根优先读 `RADRAY_ASSETS_DIR`�
 `${CMAKE_SOURCE_DIR}/assets`；sample 通过 `assets/assets.json` 加载 `wall.png`。`RADRAY_ENABLE_SHADER_JIT=OFF`
 时目标仍可构建，但应用会在创建窗口前记录错误并返回非零码。
 
+`assets/` 当前整体被 `.gitignore` 忽略，clean clone 不含 manifest 或 `wall.png`。运行样例前必须
+在资产根提供登记 `wall.png` 的 `assets.json` 与对应源文件；否则样例会在初始化纹理时失败退出。
+
 ```powershell
 cmake --build build_debug --config Debug --target example_lambert_sphere --parallel 24
 Set-Location F:\cpp\RadRay

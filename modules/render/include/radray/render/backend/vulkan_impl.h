@@ -983,7 +983,7 @@ public:
 
     void SetDebugName(std::string_view name) noexcept override;
 
-    BindingHandle FindBinding(std::string_view name) const noexcept;
+    BindingHandle FindBinding(std::string_view name) const noexcept override;
 
 public:
     void DestroyImpl() noexcept;

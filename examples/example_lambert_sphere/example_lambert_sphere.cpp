@@ -14,6 +14,7 @@
 #include <radray/file.h>
 #include <radray/logger.h>
 #include <radray/render/rhi.h>
+#include <radray/render/backend_shader_artifact.h>
 #include <radray/runtime/application.h>
 #include <radray/runtime/asset_manager.h>
 #include <radray/runtime/components/camera_component.h>
@@ -30,14 +31,6 @@
 #include <radray/shader/shader_artifact.h>
 #include <radray/shader/shader_compiler_contract.h>
 #include <radray/triangle_mesh.h>
-
-#if defined(RADRAY_ENABLE_D3D12)
-#include <radray/render/backend/d3d12_impl.h>
-#endif
-
-#if defined(RADRAY_ENABLE_VULKAN)
-#include <radray/render/backend/vulkan_impl.h>
-#endif
 
 namespace {
 
@@ -64,18 +57,6 @@ static_assert(sizeof(Eigen::Matrix4f) == 64);
 static_assert(offsetof(LambertDirectionalLightCpu, Irradiance) == 16);
 static_assert(sizeof(LambertDirectionalLightCpu) == 32);
 static_assert(sizeof(LambertFrameData) == 144);
-
-std::optional<std::span<const radray::byte>> FindStageBytecode(
-    const shader::ShaderArtifactView& artifact,
-    shader::ShaderStage stage) {
-    for (const shader::WireEntryRecord& entry : artifact.Entries()) {
-        if (entry.Stage != static_cast<uint8_t>(stage)) {
-            continue;
-        }
-        return artifact.Bytecode().subspan(entry.InterfaceOffset, entry.InterfaceSize);
-    }
-    return std::nullopt;
-}
 
 std::optional<render::VertexFormat> MakeVertexFormat(
     uint32_t componentType,
@@ -299,9 +280,12 @@ bool LambertPipeline::Initialize() {
         return false;
     }
 
-    const shader::ShaderTarget target = _device->GetBackend() == render::RenderBackend::Vulkan
-                                            ? shader::ShaderTarget::SPIRV
-                                            : shader::ShaderTarget::DXIL;
+    const std::optional<shader::ShaderTarget> target =
+        render::GetShaderTargetForBackend(_device->GetBackend());
+    if (!target.has_value()) {
+        RADRAY_ERR_LOG("example_lambert_sphere: device backend has no shader target");
+        return false;
+    }
     ShaderJit jit{vector<std::filesystem::path>{projectRoot.value() / "shaderlib"}};
     if (!jit.IsAvailable()) {
         RADRAY_ERR_LOG("example_lambert_sphere: runtime shader JIT is unavailable");
@@ -309,7 +293,7 @@ bool LambertPipeline::Initialize() {
     }
     const std::span<const radray::byte> sourceSpan = source.value();
     const std::optional<shader::ContractHash> contract =
-        jit.DiscoverContractHash(kSourceName, sourceSpan, target);
+        jit.DiscoverContractHash(kSourceName, sourceSpan, target.value());
     if (!contract.has_value()) {
         RADRAY_ERR_LOG("example_lambert_sphere: shader contract discovery failed");
         return false;
@@ -319,89 +303,50 @@ bool LambertPipeline::Initialize() {
         .RootSource = source.value(),
         .Defines = {},
         .Assignments = {},
-        .Targets = static_cast<shader::ShaderTargetMask>(shader::ToTargetMask(target)),
+        .Targets = static_cast<shader::ShaderTargetMask>(shader::ToTargetMask(target.value())),
         .ExpectedContract = contract.value()};
-    const std::optional<ShaderJitArtifact> compiled = jit.Compile(request, target);
+    const std::optional<ShaderJitArtifact> compiled = jit.Compile(request, target.value());
     if (!compiled.has_value()) {
         RADRAY_ERR_LOG("example_lambert_sphere: shader JIT compilation failed");
         return false;
     }
+    if (compiled->Target != target.value()) {
+        RADRAY_ERR_LOG("example_lambert_sphere: shader JIT returned the wrong target");
+        return false;
+    }
 
     const shader::ShaderArtifactDecodeOptions decodeOptions{
-        .Target = target,
+        .Target = compiled->Target,
         .ExpectedGpuArtifact = compiled->ExpectedGpuArtifact};
-    shader::ShaderArtifactDecodeError decodeError = shader::ShaderArtifactDecodeError::None;
-    if (target == shader::ShaderTarget::DXIL) {
-#if defined(RADRAY_ENABLE_D3D12)
-        const std::optional<shader::DxilShaderArtifactView> artifact =
-            shader::DecodeDxilShaderArtifact(compiled->Metadata, decodeOptions, &decodeError);
-        if (!artifact.has_value()) {
-            RADRAY_ERR_LOG("example_lambert_sphere: DXIL artifact decode failed: {}", static_cast<uint32_t>(decodeError));
-            return false;
-        }
-        const std::optional<std::span<const radray::byte>> vertex =
-            FindStageBytecode(artifact->Generic(), shader::ShaderStage::Vertex);
-        const std::optional<std::span<const radray::byte>> pixel =
-            FindStageBytecode(artifact->Generic(), shader::ShaderStage::Pixel);
-        if (!vertex.has_value() || !pixel.has_value()) {
-            RADRAY_ERR_LOG("example_lambert_sphere: DXIL artifact has no graphics stages");
-            return false;
-        }
-        auto layout = static_cast<render::d3d12::DeviceD3D12*>(_device)->CreatePipelineLayout(*artifact);
-        if (!layout.HasValue()) {
-            RADRAY_ERR_LOG("example_lambert_sphere: D3D12 pipeline layout creation failed");
-            return false;
-        }
-        _layout = layout.Release();
-        _frameBinding = static_cast<render::d3d12::RootSigD3D12*>(_layout.get())->FindBinding("Frame");
-        _lightBinding = static_cast<render::d3d12::RootSigD3D12*>(_layout.get())->FindBinding("Light");
-        _albedoBinding = static_cast<render::d3d12::RootSigD3D12*>(_layout.get())->FindBinding("AlbedoTexture");
-        _samplerBinding = static_cast<render::d3d12::RootSigD3D12*>(_layout.get())->FindBinding("LinearSampler");
-        return BuildPipeline(
-            artifact->Generic(),
-            vertex.value(),
-            pixel.value(),
-            render::ShaderBlobCategory::DXIL);
-#else
-        RADRAY_ERR_LOG("example_lambert_sphere: D3D12 support is disabled");
-        return false;
-#endif
-    }
-
-#if defined(RADRAY_ENABLE_VULKAN)
-    const std::optional<shader::SpirvShaderArtifactView> artifact =
-        shader::DecodeSpirvShaderArtifact(compiled->Metadata, decodeOptions, &decodeError);
+    render::BackendShaderArtifactError artifactError;
+    std::optional<render::BackendShaderArtifact> artifact =
+        render::CreateBackendShaderArtifact(*_device, compiled->Metadata, decodeOptions, &artifactError);
     if (!artifact.has_value()) {
-        RADRAY_ERR_LOG("example_lambert_sphere: SPIR-V artifact decode failed: {}", static_cast<uint32_t>(decodeError));
+        RADRAY_ERR_LOG(
+            "example_lambert_sphere: backend shader artifact creation failed: failure={}, decode={}",
+            static_cast<uint32_t>(artifactError.Failure),
+            static_cast<uint32_t>(artifactError.DecodeFailure));
         return false;
     }
+    const shader::ShaderArtifactView& genericArtifact = artifact->Generic();
     const std::optional<std::span<const radray::byte>> vertex =
-        FindStageBytecode(artifact->Generic(), shader::ShaderStage::Vertex);
+        genericArtifact.FindStageBytecode(shader::ShaderStage::Vertex);
     const std::optional<std::span<const radray::byte>> pixel =
-        FindStageBytecode(artifact->Generic(), shader::ShaderStage::Pixel);
+        genericArtifact.FindStageBytecode(shader::ShaderStage::Pixel);
     if (!vertex.has_value() || !pixel.has_value()) {
-        RADRAY_ERR_LOG("example_lambert_sphere: SPIR-V artifact has no graphics stages");
+        RADRAY_ERR_LOG("example_lambert_sphere: shader artifact has no graphics stages");
         return false;
     }
-    auto layout = static_cast<render::vulkan::DeviceVulkan*>(_device)->CreatePipelineLayout(*artifact);
-    if (!layout.HasValue()) {
-        RADRAY_ERR_LOG("example_lambert_sphere: Vulkan pipeline layout creation failed");
-        return false;
-    }
-    _layout = layout.Release();
-    _frameBinding = static_cast<render::vulkan::PipelineLayoutVulkan*>(_layout.get())->FindBinding("Frame");
-    _lightBinding = static_cast<render::vulkan::PipelineLayoutVulkan*>(_layout.get())->FindBinding("Light");
-    _albedoBinding = static_cast<render::vulkan::PipelineLayoutVulkan*>(_layout.get())->FindBinding("AlbedoTexture");
-    _samplerBinding = static_cast<render::vulkan::PipelineLayoutVulkan*>(_layout.get())->FindBinding("LinearSampler");
+    _layout = std::move(artifact->Layout);
+    _frameBinding = _layout->FindBinding("Frame");
+    _lightBinding = _layout->FindBinding("Light");
+    _albedoBinding = _layout->FindBinding("AlbedoTexture");
+    _samplerBinding = _layout->FindBinding("LinearSampler");
     return BuildPipeline(
-        artifact->Generic(),
+        genericArtifact,
         vertex.value(),
         pixel.value(),
-        render::ShaderBlobCategory::SPIRV);
-#else
-    RADRAY_ERR_LOG("example_lambert_sphere: Vulkan support is disabled");
-    return false;
-#endif
+        artifact->Category);
 }
 
 bool LambertPipeline::BuildPipeline(

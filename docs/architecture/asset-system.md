@@ -40,8 +40,10 @@ namespace prefix 隔离资产类型；同一路径在不同资产类型下必须
 
 AssetId 双轨并存（`architecture/asset-database.md`）：入库资产以 `AssetDatabase` 登记的
 GUID 为身份（一次分配、永不改变），散文件继续走这里的路径哈希；两轨共用 `AssetManager`
-的单 slot 表，互不迁移。`assets/assets.json` 与 `example_lambert_sphere` 已实际消费 GUID 轨；
-shaderlib 与显式测试资源继续使用路径哈希轨。
+的单 slot 表，互不迁移。`example_lambert_sphere` 在提供本地 `assets/assets.json` 时通过
+`Load<TextureAsset>("wall.png")` 消费 GUID 轨；但 `assets/` 当前整体被 `.gitignore` 忽略，仓库
+没有跟踪 manifest 或贴图，clean clone 不具备这条运行输入。shaderlib 与显式测试资源继续使用
+路径哈希轨。
 
 ## 延迟销毁
 

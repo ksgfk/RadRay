@@ -64,13 +64,13 @@ docs/adr/*.md
 | [0008](0008-asset-id-path-normalization.md) | AssetId 由归一化路径派生 | 生效 |
 | [0009](0009-deferred-destroy-hands-over-suspension.md) | 延迟销毁交出挂起点，不交对象 | 生效 |
 | [0010](0010-rhi-ownership-model.md) | RHI 里 Device 共享，其余对象独占 | 生效 |
-| [0011](0011-backend-selection-by-descriptor.md) | 后端由 descriptor variant 选定，不做运行期回退 | 生效 |
+| [0011](0011-backend-selection-by-descriptor.md) | 后端由 descriptor variant 选定，不做运行期回退 | 部分被 ADR-0043 取代 |
 | [0012](0012-explicit-resource-state-transitions.md) | 资源状态转换全部显式，RHI 不跟踪状态 | 生效 |
 | [0013](0013-vertex-stage-interface-projection.md) | vertex-stage artifact 保留最小输入接口投影 | 已被 ADR-0016 取代 |
 | [0014](0014-cpp-trace-is-shader-source-of-truth.md) | shader 源真相是 C++ trace，绑定由 trace 产出 | 已被 ADR-0016 取代 |
 | [0015](0015-variants-are-cpp-parameters.md) | 变体是 C++ 函数参数，烘焙集合也写在 C++ 里 | 已被 ADR-0016 取代 |
 | [0016](0016-hlsl-and-radray-dxc-are-shader-authority.md) | HLSL 与 forked RadRay DXC 是 shader 权威 | 生效 |
-| [0017](0017-runtime-lambert-sphere-example.md) | runtime Lambert sphere example 的接入边界 | 生效 |
+| [0017](0017-runtime-lambert-sphere-example.md) | runtime Lambert sphere example 的接入边界 | 部分被 ADR-0043 取代 |
 | [0018](0018-filesystem-backed-shader-compilation.md) | filesystem-backed shader compilation 与 ABI/schema 断代 | 部分被 ADR-0019 取代 |
 | [0019](0019-dxc-default-filesystem-include-search.md) | 使用 DXC 默认 filesystem include search | 已被 ADR-0020 取代 |
 | [0020](0020-caller-supplied-filesystem-include-paths.md) | caller-supplied filesystem include paths | 部分被 ADR-0021 取代 |
@@ -96,3 +96,4 @@ docs/adr/*.md
 | [0040](0040-single-text-manifest-is-asset-identity-authority.md) | 单文本 JSON 清单是资产身份权威 | 生效 |
 | [0041](0041-load-bridging-belongs-to-asset-manager.md) | 加载桥接归 AssetManager，资产来源经 IAssetSource 反转 | 生效 |
 | [0042](0042-importers-are-interfaces-with-typed-settings.md) | 导入器是虚接口，导入设置强类型化 | 生效 |
+| [0043](0043-runtime-device-bridges-to-target-typed-shader-artifact.md) | 运行时 Device 通过单一动态桥消费 target-typed shader artifact | 生效 |

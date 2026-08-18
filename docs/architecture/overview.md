@@ -68,7 +68,9 @@ compiler-produced metadata 不依赖 `radrayshadercompiler`；`radrayruntime` �
 M-1 已移除旧的 shader 资产、手写 metadata、旧的命令行 shader 工具和未接线的 UI 路线。
 当前 `shaderlib/` 由共享数学层、target gate 和三条最小产品 pass 组成；compiler-owned
 metadata、target-native artifact decoder/layout 与 runtime JIT 已接通。RHI 的 layout 构造入口
-按 DXIL/SPIR-V view 分开，公共绑定提交使用当前 artifact 颁发的不透明 `BindingHandle`。
+按 DXIL/SPIR-V view 分开；运行时已选定 device 的调用方经 render 的单一动态桥核对
+device/request/envelope target 后进入对应 typed 入口。公共 `PipelineLayout::FindBinding` 只按
+declaration name 颁发不透明 `BindingHandle`，绑定提交不暴露 layout 数字。
 `radray_shader_compile`（`RADRAY_BUILD_SHADER_TOOLS` 默认 ON）只输出 raw DXIL/SPIR-V
 metadata blob，不生成 artifact index、cook 或 publisher；client 只用 fork extension ABI，
 无 stock adapter（测试内的 stock DXC 仅作为 Pso smoke 的 bytecode 来源）。正式 cook/artifact

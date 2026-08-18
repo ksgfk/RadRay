@@ -74,30 +74,6 @@ XmlNodeType FromPugiNodeType(pugi::xml_node_type type) noexcept {
     return XmlNodeType::None;
 }
 
-pugi::xml_node_type ToPugiNodeType(XmlNodeType type) noexcept {
-    switch (type) {
-        case XmlNodeType::Element:
-            return pugi::node_element;
-        case XmlNodeType::Text:
-            return pugi::node_pcdata;
-        case XmlNodeType::CDATA:
-            return pugi::node_cdata;
-        case XmlNodeType::Comment:
-            return pugi::node_comment;
-        case XmlNodeType::ProcessingInstruction:
-            return pugi::node_pi;
-        case XmlNodeType::Document:
-            return pugi::node_document;
-        case XmlNodeType::DocumentType:
-            return pugi::node_doctype;
-        case XmlNodeType::Declaration:
-            return pugi::node_declaration;
-        case XmlNodeType::None:
-            break;
-    }
-    return pugi::node_null;
-}
-
 /// 序列化到 string 的 writer (pugixml::xml_writer 回调)。
 class StringWriter final : public pugi::xml_writer {
 public:

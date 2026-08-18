@@ -1,6 +1,6 @@
 # ADR-0011 后端选择走 descriptor variant，不做运行期能力探测
 
-状态: 生效
+状态: 部分被 ADR-0043 取代
 日期: 2026-07
 影响: `Device::Create`（`rhi.cpp`）、`DeviceDescriptor`、`RADRAY_ENABLE_*` CMake 选项
 

@@ -499,7 +499,8 @@ M6-C04 的当前实现已在 D3D12/Vulkan 资源写入与 push-constant 路径�
   `ShaderParameterSetLayoutDescriptor`、`ShaderParameterSetLayoutEntryDescriptor` 四个结构与
   `Device::CreatePipelineLayout`。改为 backend-specific 入口：D3D12 从 DXIL metadata view 构造，
   Vulkan 从 SPIR-V metadata view 构造，各自直接吃对应 target 的 payload。公共 `PipelineLayout`
-  保持现有纯虚基类形态（只有 `GetTag()`，无数据），`RootSigD3D12`/`PipelineLayoutVulkan`
+  保持无 layout 描述数据的纯虚基类形态，只增加 declaration name 到 opaque `BindingHandle` 的
+  `FindBinding`；`RootSigD3D12`/`PipelineLayoutVulkan`
   继续实现它。这让"DXIL 与 SPIR-V 不可互换"由类型系统承担，而非靠测试覆盖去追；
   "多个 RootConstants"的表达问题也随之消失 —— 它只存在于 DXIL payload 里。
 - **提交路径只使用不透明 `BindingHandle`**。`rhi.h` 提供 `BindingHandle`（32/64 位不透明值），
@@ -520,12 +521,12 @@ M6-C04 的当前实现已在 D3D12/Vulkan 资源写入与 push-constant 路径�
 **检查站**：
 
 - [x] **M5-C01**：`RadRayRenderShaderArtifact` decoder golden tests 覆盖两个 target 的全部 11 个 fixture（含 compute），并逐 lane 调用 `MakeBackendPipelineLayoutInput`；运行时不调用 DXIL/SPIR-V reflection API。
-- [x] **M5-C02**：DXIL register/space 与 SPIR-V set/binding 不一致的 fixture 同时成功；typed artifact overload 与反向入口的 `static_assert` 编译边界、target-native layout input 和双 backend PSO smoke 均通过。
+- [x] **M5-C02**：DXIL register/space 与 SPIR-V set/binding 不一致的 fixture 同时成功；typed artifact overload 与反向入口的 `static_assert` 编译边界、target-native layout input 和双 backend PSO smoke 均通过。运行时所选 device 经单一动态桥核对 device/request/envelope target 后进入 typed 入口，错配 fail closed。
 - [x] **M5-C03**：artifact suite 覆盖 static sampler immutable 标记、multiple DXIL RootConstants、single SPIR-V push block、两 target nested type layout 与 target-specific vertex interface；schema v3 为 composite member 提供 `TypeIndex`，render decoder 在 layout/CPU schema 消费前校验其范围和根类型，正式 fork golden 已锁定该 payload。
 - [x] **M5-C04**：`RadRayRenderShaderArtifact.RejectsDuplicateAndMalformedRecords` 对 synthetic compiler-free artifact 覆盖 duplicate entry/binding、type parent 越界和 root-constant size 非法；同 suite 另覆盖截断、range、GPU hash 与 toolchain mismatch，均在 layout 创建前 fail closed。
 - [x] **M5-C05**：共享 `ValidateVertexInputState` 在 D3D12/Vulkan native PSO 前拒绝空 semantic、duplicate location、UNKNOWN format、未声明 slot 和 offset/stride 不兼容；双 backend 各有正/负 PSO smoke。
 - [x] **M5-C06**：`radrayshadercompiler` target 只链接 `radraycore`、`radrayshader` 与 DXC headers；`radrayrender` library target 未链接 compiler/runtime，且 shader compiler vcxproj 没有 render/runtime/backend project reference；Pso smoke 的 SDK 依赖仅在 test target。
-- [x] **M5-C07**：`rhi.h` 已删除旧 layout descriptor 与 `Device::CreatePipelineLayout`；parameter set 写入使用 `BindingHandle`，`BindShaderParameterSet` 仍接收 group index；证据为头文件扫描与 target-native backend API。
+- [x] **M5-C07**：`rhi.h` 已删除旧 layout descriptor 与 `Device::CreatePipelineLayout`；公共 `PipelineLayout::FindBinding` 颁发 opaque handle，parameter set 写入使用 `BindingHandle`，`BindShaderParameterSet` 仍接收 group index；证据为头文件扫描与 target-native backend API。
 
 ## M6：`radrayruntime` JIT orchestration 与双后端垂直切片
 

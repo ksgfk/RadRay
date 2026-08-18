@@ -45,8 +45,8 @@ OnSetupCamera → OnSetupCulling → OnSetupLights → OnAddRenderPasses
 
 `SetPipeline` 是应用侧装配入口：`RenderSystem` 只拥有当前 pipeline，不拥有其依赖的
 `Scene`/component。样例 pipeline 因而可以借用 runtime 已创建的 `Scene` 与
-`CameraComponent`，把 shader JIT、artifact 解码、target-native layout 和公共 RHI 录制集中在
-example 内，不改变 runtime 的帧时序。
+`CameraComponent`，把 shader JIT、render 动态 artifact 桥和公共 RHI 录制集中在 example 内，
+不改变 runtime 的帧时序。
 
 **pass 注册与排序**：`OnAddRenderPasses` 里用 `EnqueuePass` 把 pass 压进 `_activePasses`；
 `OnExecutePasses` 用 `std::stable_sort` 按 `RenderPassEvent` 的整数值升序排，
@@ -187,7 +187,7 @@ template <> struct ServiceTraits<AssetManager> {
 | `WindowManager` | `SetGpuSystem`, `SetRenderSystem` | — |
 | `GpuSystem` | `SetWindowManager` | — |
 | `AssetManager` | `SetWaitFrameProcessor`（经 `Bases = IWaitFrameProcessor` 解析到 `GpuSystem`） | — |
-| `RenderSystem` | — | 有（建 registry / PSO 缓存 / DXC） |
+| `RenderSystem` | — | 有（建 `RenderPassRegistry`） |
 | `World` | — | — |
 
 `AssetDatabase` 是可选依赖：`ServiceRegistry::Wire` 对缺失依赖会 abort，所以它不登记为服务，

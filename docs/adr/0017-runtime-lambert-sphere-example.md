@@ -1,6 +1,6 @@
 # ADR-0017 runtime Lambert sphere example
 
-状态: accepted
+状态: 部分被 ADR-0043 取代
 日期: 2026-08
 影响: `examples/example_lambert_sphere`、`modules/runtime` 的 pipeline 注入入口、shader JIT、
 `docs/guide/build-test.md`

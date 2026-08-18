@@ -1532,6 +1532,8 @@ public:
     virtual ~PipelineLayout() noexcept = default;
 
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::PipelineLayout; }
+
+    virtual BindingHandle FindBinding(std::string_view name) const noexcept = 0;
 };
 
 class ShaderParameterSet : public RenderBase {

@@ -2,7 +2,7 @@
 #include "shader_contract_fixtures.h"
 
 #include <radray/render/backend/pipeline_layout_types.h>
-#include <radray/shader/shader_artifact.h>
+#include <radray/render/backend_shader_artifact.h>
 #include <radray/runtime/shader_jit.h>
 
 #include <gtest/gtest.h>
@@ -114,105 +114,48 @@ shader::CompileVariantRequest MakeComputeRequest(
         .ExpectedContract = contract};
 }
 
-std::optional<std::span<const byte>> FindStageBytecode(
-    const shader::ShaderArtifactView& artifact,
-    shader::ShaderStage stage) {
-    for (const shader::WireEntryRecord& entry : artifact.Entries()) {
-        if (entry.Stage == static_cast<uint8_t>(stage)) {
-            return artifact.Bytecode().subspan(entry.InterfaceOffset, entry.InterfaceSize);
-        }
-    }
-    return std::nullopt;
-}
-
-#if defined(RADRAY_ENABLE_D3D12)
-Nullable<unique_ptr<render::PipelineLayout>> CreateD3DLayout(
-    render::Device& device,
-    const shader::DxilShaderArtifactView& artifact) {
-    return static_cast<render::d3d12::DeviceD3D12&>(device).CreatePipelineLayout(artifact);
-}
-#endif
-
-#if defined(RADRAY_ENABLE_VULKAN)
-Nullable<unique_ptr<render::PipelineLayout>> CreateVulkanLayout(
-    render::Device& device,
-    const shader::SpirvShaderArtifactView& artifact) {
-    return static_cast<render::vulkan::DeviceVulkan&>(device).CreatePipelineLayout(artifact);
-}
-#endif
-
 void RunGraphicsJitSmoke(
     render::test::DeviceContext& context,
     render::RenderBackend backend) {
     ShaderJit jit{ShaderIncludePaths()};
     ASSERT_TRUE(jit.IsAvailable());
-    const shader::ShaderTarget target = backend == render::RenderBackend::Vulkan
-                                            ? shader::ShaderTarget::SPIRV
-                                            : shader::ShaderTarget::DXIL;
+    const std::optional<shader::ShaderTarget> target =
+        render::GetShaderTargetForBackend(backend);
+    ASSERT_TRUE(target.has_value());
     const auto contract = jit.DiscoverContractHash(
         kSourceName,
         std::as_bytes(std::span{kGraphicsSource.data(), kGraphicsSource.size()}),
-        target);
+        target.value());
     ASSERT_TRUE(contract.has_value());
-    const auto request = MakeRequest(contract.value(), target);
-    const auto jitArtifact = jit.Compile(request, target);
+    const auto request = MakeRequest(contract.value(), target.value());
+    const auto jitArtifact = jit.Compile(request, target.value());
     ASSERT_TRUE(jitArtifact.has_value());
+    ASSERT_EQ(jitArtifact->Target, target.value());
 
     shader::ShaderArtifactDecodeOptions options{
-        .Target = target,
+        .Target = jitArtifact->Target,
         .ExpectedGpuArtifact = jitArtifact->ExpectedGpuArtifact};
-    shader::ShaderArtifactDecodeError error = shader::ShaderArtifactDecodeError::None;
     render::Device& device = *context.Device;
-
-    unique_ptr<render::PipelineLayout> layout;
-    std::optional<shader::DxilShaderArtifactView> dxilArtifact;
-    std::optional<shader::SpirvShaderArtifactView> spirvArtifact;
-    std::span<const byte> vertexBytecode;
-    std::span<const byte> pixelBytecode;
-    if (target == shader::ShaderTarget::DXIL) {
-#if defined(RADRAY_ENABLE_D3D12)
-        dxilArtifact = shader::DecodeDxilShaderArtifact(jitArtifact->Metadata, options, &error);
-        ASSERT_TRUE(dxilArtifact.has_value()) << static_cast<uint32_t>(error);
-        const auto vertex = FindStageBytecode(dxilArtifact->Generic(), shader::ShaderStage::Vertex);
-        const auto pixel = FindStageBytecode(dxilArtifact->Generic(), shader::ShaderStage::Pixel);
-        ASSERT_TRUE(vertex.has_value());
-        ASSERT_TRUE(pixel.has_value());
-        vertexBytecode = vertex.value();
-        pixelBytecode = pixel.value();
-        auto layoutResult = CreateD3DLayout(device, dxilArtifact.value());
-        ASSERT_TRUE(layoutResult.HasValue());
-        layout = layoutResult.Release();
-#else
-        GTEST_SKIP() << "D3D12 is disabled";
-#endif
-    } else {
-#if defined(RADRAY_ENABLE_VULKAN)
-        spirvArtifact = shader::DecodeSpirvShaderArtifact(jitArtifact->Metadata, options, &error);
-        ASSERT_TRUE(spirvArtifact.has_value()) << static_cast<uint32_t>(error);
-        const auto vertex = FindStageBytecode(spirvArtifact->Generic(), shader::ShaderStage::Vertex);
-        const auto pixel = FindStageBytecode(spirvArtifact->Generic(), shader::ShaderStage::Pixel);
-        ASSERT_TRUE(vertex.has_value());
-        ASSERT_TRUE(pixel.has_value());
-        vertexBytecode = vertex.value();
-        pixelBytecode = pixel.value();
-        auto layoutResult = CreateVulkanLayout(device, spirvArtifact.value());
-        ASSERT_TRUE(layoutResult.HasValue());
-        layout = layoutResult.Release();
-#else
-        GTEST_SKIP() << "Vulkan is disabled";
-#endif
-    }
-
-    const render::ShaderBlobCategory category = target == shader::ShaderTarget::SPIRV
-                                                    ? render::ShaderBlobCategory::SPIRV
-                                                    : render::ShaderBlobCategory::DXIL;
+    render::BackendShaderArtifactError artifactError;
+    std::optional<render::BackendShaderArtifact> backendArtifact =
+        render::CreateBackendShaderArtifact(device, jitArtifact->Metadata, options, &artifactError);
+    ASSERT_TRUE(backendArtifact.has_value())
+        << static_cast<uint32_t>(artifactError.Failure) << ":"
+        << static_cast<uint32_t>(artifactError.DecodeFailure);
+    const auto vertexBytecode =
+        backendArtifact->Generic().FindStageBytecode(shader::ShaderStage::Vertex);
+    const auto pixelBytecode =
+        backendArtifact->Generic().FindStageBytecode(shader::ShaderStage::Pixel);
+    ASSERT_TRUE(vertexBytecode.has_value());
+    ASSERT_TRUE(pixelBytecode.has_value());
+    unique_ptr<render::PipelineLayout> layout = std::move(backendArtifact->Layout);
     auto vertexResult = device.CreateShader(render::ShaderDescriptor{
-        .Source = vertexBytecode,
-        .Category = category,
+        .Source = vertexBytecode.value(),
+        .Category = backendArtifact->Category,
         .Stages = render::ShaderStage::Vertex});
     auto pixelResult = device.CreateShader(render::ShaderDescriptor{
-        .Source = pixelBytecode,
-        .Category = category,
+        .Source = pixelBytecode.value(),
+        .Category = backendArtifact->Category,
         .Stages = render::ShaderStage::Pixel});
     ASSERT_TRUE(vertexResult.HasValue());
     ASSERT_TRUE(pixelResult.HasValue());
@@ -346,62 +289,38 @@ void RunComputeJitSmoke(
     render::RenderBackend backend) {
     ShaderJit jit{ShaderIncludePaths()};
     ASSERT_TRUE(jit.IsAvailable());
-    const shader::ShaderTarget target = backend == render::RenderBackend::Vulkan
-                                            ? shader::ShaderTarget::SPIRV
-                                            : shader::ShaderTarget::DXIL;
+    const std::optional<shader::ShaderTarget> target =
+        render::GetShaderTargetForBackend(backend);
+    ASSERT_TRUE(target.has_value());
     const auto source = std::as_bytes(std::span{kComputeSource.data(), kComputeSource.size()});
-    const auto contract = jit.DiscoverContractHash(kComputeSourceName, source, target);
+    const auto contract = jit.DiscoverContractHash(kComputeSourceName, source, target.value());
     ASSERT_TRUE(contract.has_value());
-    const auto artifact = jit.Compile(MakeComputeRequest(contract.value(), target), target);
+    const auto artifact = jit.Compile(
+        MakeComputeRequest(contract.value(), target.value()),
+        target.value());
     ASSERT_TRUE(artifact.has_value());
+    ASSERT_EQ(artifact->Target, target.value());
 
     const shader::ShaderArtifactDecodeOptions options{
-        .Target = target,
+        .Target = artifact->Target,
         .ExpectedGpuArtifact = artifact->ExpectedGpuArtifact};
-    shader::ShaderArtifactDecodeError error = shader::ShaderArtifactDecodeError::None;
     render::Device& device = *context.Device;
-    unique_ptr<render::PipelineLayout> layout;
-    render::BindingHandle outputBinding;
-    std::optional<shader::DxilShaderArtifactView> dxilArtifact;
-    std::optional<shader::SpirvShaderArtifactView> spirvArtifact;
-    std::span<const byte> computeBytecode;
-    if (target == shader::ShaderTarget::DXIL) {
-#if defined(RADRAY_ENABLE_D3D12)
-        dxilArtifact = shader::DecodeDxilShaderArtifact(artifact->Metadata, options, &error);
-        ASSERT_TRUE(dxilArtifact.has_value()) << static_cast<uint32_t>(error);
-        const auto compute = FindStageBytecode(dxilArtifact->Generic(), shader::ShaderStage::Compute);
-        ASSERT_TRUE(compute.has_value());
-        computeBytecode = compute.value();
-        auto layoutResult = CreateD3DLayout(device, dxilArtifact.value());
-        ASSERT_TRUE(layoutResult.HasValue());
-        layout = layoutResult.Release();
-        outputBinding = static_cast<render::d3d12::RootSigD3D12*>(layout.get())->FindBinding("Output");
-#else
-        GTEST_SKIP() << "D3D12 is disabled";
-#endif
-    } else {
-#if defined(RADRAY_ENABLE_VULKAN)
-        spirvArtifact = shader::DecodeSpirvShaderArtifact(artifact->Metadata, options, &error);
-        ASSERT_TRUE(spirvArtifact.has_value()) << static_cast<uint32_t>(error);
-        const auto compute = FindStageBytecode(spirvArtifact->Generic(), shader::ShaderStage::Compute);
-        ASSERT_TRUE(compute.has_value());
-        computeBytecode = compute.value();
-        auto layoutResult = CreateVulkanLayout(device, spirvArtifact.value());
-        ASSERT_TRUE(layoutResult.HasValue());
-        layout = layoutResult.Release();
-        outputBinding = static_cast<render::vulkan::PipelineLayoutVulkan*>(layout.get())->FindBinding("Output");
-#else
-        GTEST_SKIP() << "Vulkan is disabled";
-#endif
-    }
+    render::BackendShaderArtifactError artifactError;
+    std::optional<render::BackendShaderArtifact> backendArtifact =
+        render::CreateBackendShaderArtifact(device, artifact->Metadata, options, &artifactError);
+    ASSERT_TRUE(backendArtifact.has_value())
+        << static_cast<uint32_t>(artifactError.Failure) << ":"
+        << static_cast<uint32_t>(artifactError.DecodeFailure);
+    const auto computeBytecode =
+        backendArtifact->Generic().FindStageBytecode(shader::ShaderStage::Compute);
+    ASSERT_TRUE(computeBytecode.has_value());
+    unique_ptr<render::PipelineLayout> layout = std::move(backendArtifact->Layout);
+    const render::BindingHandle outputBinding = layout->FindBinding("Output");
     ASSERT_TRUE(outputBinding.IsValid());
 
-    const render::ShaderBlobCategory category = target == shader::ShaderTarget::SPIRV
-                                                    ? render::ShaderBlobCategory::SPIRV
-                                                    : render::ShaderBlobCategory::DXIL;
     auto shaderResult = device.CreateShader(render::ShaderDescriptor{
-        .Source = computeBytecode,
-        .Category = category,
+        .Source = computeBytecode.value(),
+        .Category = backendArtifact->Category,
         .Stages = render::ShaderStage::Compute});
     ASSERT_TRUE(shaderResult.HasValue());
     unique_ptr<render::Shader> computeShader = shaderResult.Release();
@@ -723,17 +642,25 @@ TEST(RadRayRuntimeShaderJit, ExplicitRootSignatureD3D12) {
             .ExpectedContract = contract.value()},
         shader::ShaderTarget::DXIL);
     ASSERT_TRUE(artifact.has_value());
+    const shader::ShaderArtifactDecodeOptions options{
+        .Target = shader::ShaderTarget::DXIL,
+        .ExpectedGpuArtifact = artifact->ExpectedGpuArtifact};
     shader::ShaderArtifactDecodeError error = shader::ShaderArtifactDecodeError::None;
     const auto typed = shader::DecodeDxilShaderArtifact(
         artifact->Metadata,
-        shader::ShaderArtifactDecodeOptions{
-            .Target = shader::ShaderTarget::DXIL,
-            .ExpectedGpuArtifact = artifact->ExpectedGpuArtifact},
+        options,
         &error);
     ASSERT_TRUE(typed.has_value()) << static_cast<uint32_t>(error);
     EXPECT_FALSE(typed->Generic().SerializedRootSignature().empty());
-    auto layout = CreateD3DLayout(*context.Device, typed.value());
-    ASSERT_TRUE(layout.HasValue());
+    render::BackendShaderArtifactError artifactError;
+    const auto backendArtifact = render::CreateBackendShaderArtifact(
+        *context.Device,
+        artifact->Metadata,
+        options,
+        &artifactError);
+    ASSERT_TRUE(backendArtifact.has_value())
+        << static_cast<uint32_t>(artifactError.Failure) << ":"
+        << static_cast<uint32_t>(artifactError.DecodeFailure);
 #else
     GTEST_SKIP() << "D3D12 is disabled";
 #endif

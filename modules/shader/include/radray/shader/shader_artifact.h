@@ -56,6 +56,7 @@ public:
     std::span<const byte> Bytecode() const noexcept;
 
     std::optional<std::string_view> GetName(WireBlobRange range) const noexcept;
+    std::optional<std::span<const byte>> FindStageBytecode(ShaderStage stage) const noexcept;
     std::optional<ShaderArtifactBindingView> FindBinding(std::string_view name) const noexcept;
 
 private:

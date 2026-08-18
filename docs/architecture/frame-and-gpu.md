@@ -1,6 +1,6 @@
 > - 适用: 改帧节奏、提交时序、GPU 上传；排查"GPU 对象被提前销毁"或帧同步问题
 > - 权威: 本文是帧节奏与 GPU 资源上传的唯一说明。资产侧的延迟销毁契约见 `architecture/asset-system.md`；RHI 本身见 `architecture/render-rhi.md`
-> - 锚点: `modules/runtime/include/radray/runtime/gpu_system.h`, `modules/runtime/include/radray/runtime/gpu_resource.h`, `modules/runtime/include/radray/runtime/wait_frame.h`, `modules/runtime/src/gpu_system.cpp`
+> - 锚点: `modules/runtime/include/radray/runtime/gpu_system.h`, `modules/runtime/include/radray/runtime/gpu_resource.h`, `modules/runtime/include/radray/runtime/wait_frame.h`, `modules/runtime/include/radray/runtime/render_system.h`, `modules/runtime/src/gpu_system.cpp`
 
 # 帧节奏与 GPU 上传
 
@@ -9,7 +9,7 @@
 | 系统 | 负责 | 不负责 |
 |---|---|---|
 | `GpuSystem` | **何时画**。instance/factory/device/主队列/fence、flight 槽位、上传器、帧 profiler、帧边界等待表 | 画什么 |
-| `RenderSystem` | **画什么**。RenderPass/Framebuffer 缓存、PSO 缓存、PipelineLayout 缓存、Scene 列表、DXC | 帧时序 |
+| `RenderSystem` | **画什么**。当前 `RenderPipeline`、RenderPass/Framebuffer registry、Scene 列表 | 帧时序、shader compiler、PSO/layout 缓存 |
 | `WindowManager` | 窗口创建/销毁、swapchain acquire/present/recreate、事件分发 | — |
 | `Application` | 固化帧序与关停顺序；游戏侧的窄扩展点 | — |
 
@@ -133,21 +133,12 @@ co_await scope->WaitGpu();                          // 恢复点在该 flight fe
 `TextureAsset` 与 `StaticMesh` 的 loader 就走这条路。这样"构造即完整"得以兑现：
 资产一出生即可被采样绑定。
 
-## PSO 缓存
+## 当前无 PSO/layout 缓存
 
-`PipelineStateCache` 的 key 是 `GraphicsPipelineStateKey`：
-
-```
-Program(ShaderPassProgram*) + CompatibleRenderPass + Primitive + DepthStencil
-+ MultiSample + ColorTargets
-```
-
-加上 program 内解析出的各 stage `ShaderHash`。key 比字节码宽——同一份字节码会喂给多个 PSO
-（不同 blend/cull/RT 格式）。这是 PSO 归 `RenderSystem` 而字节码归 `ShaderPassProgram`
-的原因，见 `docs/todo/hlsl-radray-dxc-shader-pipeline.md` 的 runtime 边界说明。
-
-条目只持一个 `StreamingAssetRefAny`，同时保住资产 + program + layout。`Ref` 必须声明在
-`Object` 之前（析构逆序保证 PSO 先死）。理由见 `architecture/asset-system.md`。
+M-1 已删除旧 `PipelineStateCache`、`GraphicsPipelineStateKey`、`ShaderPassProgram` 与
+`PipelineLayoutCache`。当前 `RenderSystem` 只持有 render-pass registry、当前 pipeline 与 scenes；
+样例自行持有 artifact layout、shader 和 PSO。以 per-Variant artifact 为 key 重建 PSO cache 仍是
+`docs/todo/hlsl-radray-dxc-shader-pipeline.md` 的 M6 遗留项，尚无已裁决的资产所有权或关停形态。
 
 ## 帧 profiler
 
@@ -192,8 +183,6 @@ _windowManager.reset();
 
 关键约束：**`AssetManager` 必须在 `AssetDatabase` 之前销毁**（在飞 task 可能持有 importer），
 且两者都必须在 `GpuSystem` 之前销毁（GPU 资源必须在 device 之前交出）。
-而 `PipelineLayoutCache`（宿主 `RenderSystem`）会因此先于它的持有者销毁——那是常规路径，
-缓存的析构会把残留条目的所有权交还给它们自己。
 
 `Application` 析构也复用幂等的内部 teardown，作为正常 `Shutdown` 被异常绕过时的保底；该路径
 不调用派生类的 `OnShutdown`，但仍会 wait GPU、取消 scheduler、断开窗口引用并保持同一销毁顺序。

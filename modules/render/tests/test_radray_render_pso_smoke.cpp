@@ -1,7 +1,7 @@
 #include "gpu_test_fixture.h"
 
 #include <radray/dynamic_library.h>
-#include <radray/shader/shader_artifact.h>
+#include <radray/render/backend_shader_artifact.h>
 #include <radray/utility.h>
 
 #include <gtest/gtest.h>
@@ -14,17 +14,13 @@
 #include <optional>
 #include <span>
 #include <type_traits>
-#include <variant>
 
 namespace radray::render {
 namespace {
 
 using Microsoft::WRL::ComPtr;
 
-using shader::DecodeDxilShaderArtifact;
-using shader::DecodeSpirvShaderArtifact;
 using shader::DxilShaderArtifactView;
-using shader::ShaderArtifactDecodeError;
 using shader::ShaderArtifactDecodeOptions;
 using shader::SpirvShaderArtifactView;
 
@@ -163,49 +159,15 @@ static_assert(!CanCreatePipelineLayout<d3d12::DeviceD3D12, SpirvShaderArtifactVi
 static_assert(!CanCreatePipelineLayout<vulkan::DeviceVulkan, DxilShaderArtifactView>);
 #endif
 
-Nullable<unique_ptr<PipelineLayout>> CreateBackendPipelineLayout(
-    Device& device,
-    const DxilShaderArtifactView& artifact) {
-    if (device.GetBackend() != RenderBackend::D3D12) {
-        return nullptr;
-    }
-#if defined(RADRAY_ENABLE_D3D12)
-    return static_cast<d3d12::DeviceD3D12&>(device).CreatePipelineLayout(artifact);
-#else
-    return nullptr;
-#endif
-}
-
-Nullable<unique_ptr<PipelineLayout>> CreateBackendPipelineLayout(
-    Device& device,
-    const SpirvShaderArtifactView& artifact) {
-    if (device.GetBackend() != RenderBackend::Vulkan) {
-        return nullptr;
-    }
-#if defined(RADRAY_ENABLE_VULKAN)
-    return static_cast<vulkan::DeviceVulkan&>(device).CreatePipelineLayout(artifact);
-#else
-    return nullptr;
-#endif
-}
-
-Nullable<unique_ptr<PipelineLayout>> CreateBackendPipelineLayout(
-    Device& device,
-    const std::variant<DxilShaderArtifactView, SpirvShaderArtifactView>& artifact) {
-    return std::visit(
-        [&](const auto& typedArtifact) {
-            return CreateBackendPipelineLayout(device, typedArtifact);
-        },
-        artifact);
-}
-
 void RunPsoSmoke(test::DeviceContext& context, RenderBackend backend) {
     Device& device = *context.Device;
     DynamicLibrary compilerLibrary{"dxcompiler"};
     ASSERT_TRUE(compilerLibrary.IsValid())
         << "RADRAY_BUILD_SHADER_COMPILER is enabled but dxcompiler is missing from the test output directory";
 
-    const bool spirv = backend == RenderBackend::Vulkan;
+    const std::optional<shader::ShaderTarget> target = GetShaderTargetForBackend(backend);
+    ASSERT_TRUE(target.has_value());
+    const bool spirv = target.value() == shader::ShaderTarget::SPIRV;
     const auto vertexBytecode = CompileWithStockDxc(compilerLibrary, "VSMain", "vs_6_0", spirv);
     const auto pixelBytecode = CompileWithStockDxc(compilerLibrary, "PSMain", "ps_6_0", spirv);
     ASSERT_TRUE(vertexBytecode.has_value()) << "stock DXC failed to compile the vertex shader";
@@ -213,64 +175,60 @@ void RunPsoSmoke(test::DeviceContext& context, RenderBackend backend) {
 
     const auto layoutBlob = MakeLayoutArtifact(
         *vertexBytecode,
-        spirv ? shader::ShaderTarget::SPIRV : shader::ShaderTarget::DXIL);
+        target.value());
     shader::GpuArtifactHash expectedGpuArtifact{};
     ShaderArtifactDecodeOptions decodeOptions{
-        .Target = spirv ? shader::ShaderTarget::SPIRV : shader::ShaderTarget::DXIL,
+        .Target = target.value(),
         .ExpectedGpuArtifact = expectedGpuArtifact};
-    ShaderArtifactDecodeError decodeError = ShaderArtifactDecodeError::None;
-    std::optional<std::variant<DxilShaderArtifactView, SpirvShaderArtifactView>> artifact;
-    if (spirv) {
-        auto decoded = DecodeSpirvShaderArtifact(layoutBlob, decodeOptions, &decodeError);
-        ASSERT_TRUE(decoded.has_value())
-            << "DecodeSpirvShaderArtifact failed: " << static_cast<uint32_t>(decodeError);
-        artifact.emplace(std::move(decoded.value()));
-    } else {
-        auto decoded = DecodeDxilShaderArtifact(layoutBlob, decodeOptions, &decodeError);
-        ASSERT_TRUE(decoded.has_value())
-            << "DecodeDxilShaderArtifact failed: " << static_cast<uint32_t>(decodeError);
-        artifact.emplace(std::move(decoded.value()));
-    }
+    ShaderArtifactDecodeOptions wrongTargetOptions = decodeOptions;
+    wrongTargetOptions.Target = spirv
+                                    ? shader::ShaderTarget::DXIL
+                                    : shader::ShaderTarget::SPIRV;
+    BackendShaderArtifactError mismatchError;
+    EXPECT_FALSE(
+        CreateBackendShaderArtifact(device, layoutBlob, wrongTargetOptions, &mismatchError)
+            .has_value());
+    EXPECT_EQ(mismatchError.Failure, BackendShaderArtifactFailure::TargetMismatch);
+    EXPECT_EQ(mismatchError.DecodeFailure, shader::ShaderArtifactDecodeError::None);
 
-    auto layoutResult = CreateBackendPipelineLayout(device, artifact.value());
-    ASSERT_TRUE(layoutResult.HasValue()) << "backend CreatePipelineLayout failed";
-    unique_ptr<PipelineLayout> layout = layoutResult.Release();
+    const vector<byte> wrongEnvelopeBlob = MakeLayoutArtifact(
+        *vertexBytecode,
+        wrongTargetOptions.Target);
+    BackendShaderArtifactError envelopeError;
+    EXPECT_FALSE(
+        CreateBackendShaderArtifact(device, wrongEnvelopeBlob, decodeOptions, &envelopeError)
+            .has_value());
+    EXPECT_EQ(envelopeError.Failure, BackendShaderArtifactFailure::DecodeFailed);
+    EXPECT_NE(envelopeError.DecodeFailure, shader::ShaderArtifactDecodeError::None);
 
-    auto secondLayoutResult = CreateBackendPipelineLayout(device, artifact.value());
-    ASSERT_TRUE(secondLayoutResult.HasValue()) << "second backend layout creation failed";
-    unique_ptr<PipelineLayout> secondLayout = secondLayoutResult.Release();
+    BackendShaderArtifactError artifactError;
+    std::optional<BackendShaderArtifact> artifact =
+        CreateBackendShaderArtifact(device, layoutBlob, decodeOptions, &artifactError);
+    ASSERT_TRUE(artifact.has_value())
+        << static_cast<uint32_t>(artifactError.Failure) << ":"
+        << static_cast<uint32_t>(artifactError.DecodeFailure);
+    std::optional<BackendShaderArtifact> secondArtifact =
+        CreateBackendShaderArtifact(device, layoutBlob, decodeOptions, &artifactError);
+    ASSERT_TRUE(secondArtifact.has_value())
+        << static_cast<uint32_t>(artifactError.Failure) << ":"
+        << static_cast<uint32_t>(artifactError.DecodeFailure);
+    unique_ptr<PipelineLayout> layout = std::move(artifact->Layout);
+    unique_ptr<PipelineLayout> secondLayout = std::move(secondArtifact->Layout);
 
-    BindingHandle bindingHandle{};
-    BindingHandle secondBindingHandle{};
-    if (spirv) {
-#if defined(RADRAY_ENABLE_VULKAN)
-        auto* first = static_cast<vulkan::PipelineLayoutVulkan*>(layout.get());
-        auto* second = static_cast<vulkan::PipelineLayoutVulkan*>(secondLayout.get());
-        bindingHandle = first->FindBinding("ColorTexture");
-        secondBindingHandle = second->FindBinding("ColorTexture");
-        EXPECT_FALSE(first->FindBinding("Missing").IsValid());
-#endif
-    } else {
-#if defined(RADRAY_ENABLE_D3D12)
-        auto* first = static_cast<d3d12::RootSigD3D12*>(layout.get());
-        auto* second = static_cast<d3d12::RootSigD3D12*>(secondLayout.get());
-        bindingHandle = first->FindBinding("ColorTexture");
-        secondBindingHandle = second->FindBinding("ColorTexture");
-        EXPECT_FALSE(first->FindBinding("Missing").IsValid());
-#endif
-    }
+    const BindingHandle bindingHandle = layout->FindBinding("ColorTexture");
+    const BindingHandle secondBindingHandle = secondLayout->FindBinding("ColorTexture");
+    EXPECT_FALSE(layout->FindBinding("Missing").IsValid());
     EXPECT_TRUE(bindingHandle.IsValid());
     EXPECT_TRUE(secondBindingHandle.IsValid());
     EXPECT_NE(bindingHandle, secondBindingHandle);
 
-    const ShaderBlobCategory category = spirv ? ShaderBlobCategory::SPIRV : ShaderBlobCategory::DXIL;
     const ShaderDescriptor vertexDesc{
         .Source = *vertexBytecode,
-        .Category = category,
+        .Category = artifact->Category,
         .Stages = ShaderStage::Vertex};
     const ShaderDescriptor pixelDesc{
         .Source = *pixelBytecode,
-        .Category = category,
+        .Category = artifact->Category,
         .Stages = ShaderStage::Pixel};
     auto vertexResult = device.CreateShader(vertexDesc);
     auto pixelResult = device.CreateShader(pixelDesc);

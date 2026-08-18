@@ -1,6 +1,6 @@
 > - 适用: 维护 shader compiler client、metadata wire、artifact decoder 或 runtime JIT
 > - 权威: 本文描述当前 RadRay shader pipeline 的实现边界；第一阶段检查站见实施计划
-> - 锚点: `modules/shader/include/radray/shader/shader_compiler_contract.h`, `modules/shader/include/radray/shader/shader_artifact.h`, `modules/shader_compiler/include/radray/shader_compiler/client.h`, `modules/shader_compiler/src/client.cpp`, `modules/runtime/include/radray/runtime/shader_jit.h`, `CMakePresets.json`
+> - 锚点: `modules/shader/include/radray/shader/shader_compiler_contract.h`, `modules/shader/include/radray/shader/shader_artifact.h`, `modules/render/include/radray/render/backend_shader_artifact.h`, `modules/render/src/backend_shader_artifact.cpp`, `modules/shader_compiler/include/radray/shader_compiler/client.h`, `modules/shader_compiler/src/client.cpp`, `modules/runtime/include/radray/runtime/shader_jit.h`, `CMakePresets.json`
 
 # Shader pipeline
 
@@ -65,7 +65,10 @@ SPIR-V 的 Root Signature range 始终为空。
 `radrayrender`。调用方提供独立可信的 `ExpectedGpuArtifact`，decoder 与 envelope 比较但不在
 render/runtime 侧重算 hash。DXIL view 只能送入 D3D12 layout 入口，SPIR-V view 只能送入
 Vulkan layout 入口；两入口先把 compiler-owned records 组装成 backend-specific layout input，
-再创建原生 layout。`BindingHandle` 由当前 artifact layout 生成，内含 generation 与 DXIL
+再创建原生 layout。运行时已选定 device 的 caller 使用 `CreateBackendShaderArtifact`：显式 target
+必须与 device backend 一致，typed decoder 还会核对 envelope target；失败不切换 lane。该桥持有
+decoded artifact bytes 与原生 layout，stage bytecode 通过 `ShaderArtifactView::FindStageBytecode`
+取得。`BindingHandle` 由公共 `PipelineLayout::FindBinding` 在当前 artifact layout 上生成，内含 generation 与 DXIL
 register namespace，不能跨 target、Variant 或 recompile 复用；unknown/inactive name 与跨
 layout handle 写入都 fail closed，Debug 下跨 layout 使用还会触发断言。
 
@@ -79,7 +82,8 @@ range、已知 record kind、element count、offset/size/stride、type reference
 `radrayruntime` 在 `RADRAY_ENABLE_SHADER_JIT=ON`（默认开，依赖 compiler capability）时 PUBLIC
 链接 `radrayshadercompiler`，`ShaderJit` 构造时接收并按值固定 ordered filesystem include path
 数组，动态加载 canonical `dxcompiler` 名称，提交一个具体 target request，把返回 metadata 原样
-交给 render decoder 和 backend layout builder。compiler
+交给 render 的动态 artifact 桥；桥核对 device/request/envelope target 后才进入 backend typed layout
+builder。compiler
 关闭时 `RADRAY_ENABLE_SHADER_JIT` 被 `cmake_dependent_option` 强制 OFF，`ShaderJit` 退化为
 `IsAvailable()==false` 的桩。
 

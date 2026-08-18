@@ -1,5 +1,5 @@
-#include <radray/shader/shader_artifact.h>
 #include <radray/render/backend/pipeline_layout_types.h>
+#include <radray/render/backend_shader_artifact.h>
 
 #include "shader_contract_fixtures.h"
 
@@ -167,6 +167,24 @@ vector<byte> MakeSyntheticArtifact() {
     return blob;
 }
 
+TEST(RadRayRenderShaderArtifact, BackendMappingsRejectUnknownValues) {
+    const auto d3d12Target = GetShaderTargetForBackend(RenderBackend::D3D12);
+    ASSERT_TRUE(d3d12Target.has_value());
+    EXPECT_EQ(d3d12Target.value(), shader::ShaderTarget::DXIL);
+    const auto vulkanTarget = GetShaderTargetForBackend(RenderBackend::Vulkan);
+    ASSERT_TRUE(vulkanTarget.has_value());
+    EXPECT_EQ(vulkanTarget.value(), shader::ShaderTarget::SPIRV);
+    EXPECT_FALSE(GetShaderTargetForBackend(RenderBackend::MAX_COUNT).has_value());
+
+    const auto dxilCategory = GetShaderBlobCategory(shader::ShaderTarget::DXIL);
+    ASSERT_TRUE(dxilCategory.has_value());
+    EXPECT_EQ(dxilCategory.value(), ShaderBlobCategory::DXIL);
+    const auto spirvCategory = GetShaderBlobCategory(shader::ShaderTarget::SPIRV);
+    ASSERT_TRUE(spirvCategory.has_value());
+    EXPECT_EQ(spirvCategory.value(), ShaderBlobCategory::SPIRV);
+    EXPECT_FALSE(GetShaderBlobCategory(static_cast<shader::ShaderTarget>(0xffu)).has_value());
+}
+
 TEST(RadRayRenderShaderArtifact, DecodesEveryRawGoldenLaneWithoutCompiler) {
     constexpr std::string_view names[] = {
         "no_resource_graphics",
@@ -197,6 +215,15 @@ TEST(RadRayRenderShaderArtifact, DecodesEveryRawGoldenLaneWithoutCompiler) {
                 &error);
             ASSERT_TRUE(artifact.has_value()) << static_cast<uint32_t>(error);
             EXPECT_FALSE(artifact->Bytecode().empty());
+            for (const shader::WireEntryRecord& entry : artifact->Entries()) {
+                const auto stageBytecode = artifact->FindStageBytecode(
+                    static_cast<shader::ShaderStage>(entry.Stage));
+                ASSERT_TRUE(stageBytecode.has_value());
+                EXPECT_EQ(stageBytecode->size(), entry.InterfaceSize);
+                EXPECT_EQ(
+                    stageBytecode->data(),
+                    artifact->Bytecode().data() + entry.InterfaceOffset);
+            }
 
             std::optional<BackendPipelineLayoutInput> layoutInput;
             if (target == shader::ShaderTarget::DXIL) {

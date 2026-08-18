@@ -1,6 +1,6 @@
 > - 适用: 加 RHI 接口或改后端；排查 barrier / 描述符 / 同步问题；找某个后端实现在哪一段
 > - 权威: 本文是 RHI 抽象形状与两个后端映射关系的唯一说明。上层怎么用它见 `architecture/frame-and-gpu.md`
-> - 锚点: `modules/render/include/radray/render/rhi.h`, `modules/render/include/radray/render/render_pass_registry.h`, `modules/render/include/radray/render/sampler_cache.h`, `modules/render/src/rhi.cpp`, `modules/render/src/sampler_cache.cpp`, `modules/render/src/d3d12/d3d12_impl.cpp`, `modules/render/src/vk/vulkan_impl.cpp`
+> - 锚点: `modules/render/include/radray/render/rhi.h`, `modules/render/include/radray/render/backend_shader_artifact.h`, `modules/render/include/radray/render/render_pass_registry.h`, `modules/render/include/radray/render/sampler_cache.h`, `modules/render/src/rhi.cpp`, `modules/render/src/backend_shader_artifact.cpp`, `modules/render/src/sampler_cache.cpp`, `modules/render/src/d3d12/d3d12_impl.cpp`, `modules/render/src/vk/vulkan_impl.cpp`
 
 # RHI 与后端
 
@@ -29,7 +29,7 @@
 `RenderObjectTag` 是位标志形式的类型标签，子类位或合成父类位
 （`GraphicsCmdEncoder = CmdEncoder | (CmdEncoder<<1)`），目前只被日志的 `format_as` 消费。
 
-## 后端选择：编译期开关 + 单点 visit
+## 后端选择：descriptor visit + artifact 动态桥
 
 选后端**不是**运行期能力探测，而是"你传了哪个 descriptor"：
 
@@ -38,7 +38,14 @@ using DeviceDescriptor = std::variant<D3D12DeviceDescriptor, VulkanDeviceDescrip
 ```
 
 `Device::Create` 对它 `std::visit`，分派到 `d3d12::CreateDevice` / `vulkan::CreateDeviceVulkan`。
-这是全仓库唯一的后端分派点。对应后端未编译时打日志返回 `nullptr`。
+这是全仓库唯一决定**创建哪个后端**的分派点。对应后端未编译时打日志返回 `nullptr`，不尝试
+另一个后端。
+
+另有一处不选择后端的受限分派：`CreateBackendShaderArtifact` 接收已经创建的 `Device`、metadata
+blob 与显式 `ShaderArtifactDecodeOptions`，先要求 device backend 与 options target 一致，再调用
+对应 typed decoder 和 backend typed layout 入口。artifact envelope target 仍由 decoder 核对；
+任一步失败都不尝试另一 target。运行时 caller 因而不包含 backend impl 头，typed concrete 入口与
+反向组合的编译失败边界仍保留。
 
 编译期开关在顶层 `CMakeLists.txt`：`RADRAY_ENABLE_D3D12`（需 WIN32）、`RADRAY_ENABLE_VULKAN`。
 `modules/render/CMakeLists.txt` 据此追加 `src/d3d12/` 或
@@ -55,7 +62,8 @@ Vulkan 还有一个进程级全局：`VkInstance` 存在 `g_vkInstance`，经 `I
 统一操作仍是两层：`PipelineLayout` 持有 backend-native layout，`ShaderParameterSet` 携带值。
 公共 `rhi.h` 不再暴露 pipeline layout descriptor；DXIL artifact 只能交给 D3D12 overload，
 SPIR-V artifact 只能交给 Vulkan overload。backend-only 的 layout input 由 artifact decoder
-从 compiler-owned records 临时组装，不允许 caller 另写一份 layout schema。
+从 compiler-owned records 临时组装，不允许 caller 另写一份 layout schema。运行时动态桥只在
+内部形成匹配的 typed view，不增加 target-erased layout descriptor。
 
 `ShaderParameterValue` 是 `variant<ShaderBufferBinding, ShaderTexelBufferBinding, TextureView*, Sampler*>`。
 
@@ -85,7 +93,8 @@ decoder 转换成 backend-only 过渡 input，不能让 RHI 反向依赖 compile
 
 ### Binding handle 与 vertex input
 
-binding name 只在当前 artifact layout 上解析为不透明 `BindingHandle`。handle 带 layout generation，
+binding name 通过公共 `PipelineLayout::FindBinding`，只在当前 artifact layout 上解析为不透明
+`BindingHandle`。handle 带 layout generation，
 DXIL 还保留 `b/t/u/s` register namespace；unknown、inactive 或其他 layout 的 handle 写入直接
 失败，Debug 下跨 layout 使用会断言。`BindShaderParameterSet` 的 group index 仍保留，因为它
 同时对应 D3D12 register space 与 Vulkan descriptor set。

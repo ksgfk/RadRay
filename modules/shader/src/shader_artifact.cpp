@@ -206,6 +206,16 @@ std::optional<std::string_view> ShaderArtifactView::GetName(WireBlobRange range)
     return std::string_view{data, range.Size};
 }
 
+std::optional<std::span<const byte>> ShaderArtifactView::FindStageBytecode(
+    ShaderStage stage) const noexcept {
+    for (const WireEntryRecord& entry : _entries) {
+        if (entry.Stage == static_cast<uint8_t>(stage)) {
+            return Bytecode().subspan(entry.InterfaceOffset, entry.InterfaceSize);
+        }
+    }
+    return std::nullopt;
+}
+
 std::optional<ShaderArtifactBindingView> ShaderArtifactView::FindBinding(
     std::string_view name) const noexcept {
     for (const WireBindingRecord& binding : _bindings) {

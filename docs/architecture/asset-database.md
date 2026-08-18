@@ -1,6 +1,6 @@
 > - 适用: 开发时资产身份登记、`assets.json` schema、importer/settings、按路径加载或 `Refresh`
 > - 权威: 本文是当前 JSON `AssetDatabase` 的唯一现状说明；资产 slot 与引用生命周期见 `architecture/asset-system.md`
-> - 锚点: `modules/runtime/include/radray/runtime/asset_database.h`, `modules/runtime/include/radray/runtime/asset_source.h`, `modules/runtime/include/radray/runtime/texture_asset.h`, `modules/runtime/include/radray/runtime/static_mesh.h`, `modules/runtime/src/asset_database.cpp`, `modules/runtime/src/texture_asset.cpp`, `modules/runtime/src/static_mesh.cpp`, `modules/runtime/src/application.cpp`, `assets/assets.json`, `examples/example_lambert_sphere/example_lambert_sphere.cpp`
+> - 锚点: `modules/runtime/include/radray/runtime/asset_database.h`, `modules/runtime/include/radray/runtime/asset_source.h`, `modules/runtime/include/radray/runtime/texture_asset.h`, `modules/runtime/include/radray/runtime/static_mesh.h`, `modules/runtime/src/asset_database.cpp`, `modules/runtime/src/texture_asset.cpp`, `modules/runtime/src/static_mesh.cpp`, `modules/runtime/src/application.cpp`, `examples/example_lambert_sphere/example_lambert_sphere.cpp`
 
 # 开发时资产数据库
 
@@ -11,8 +11,10 @@ AssetId (manifest GUID) → AssetEntry
 lowercase canonical path → AssetId
 ```
 
-这份 JSON 是入库资产身份与导入元数据的唯一权威，进版本控制；没有 LMDB、本地数据库或导入
-产物缓存。`AssetRoot` 由装配方通过 `ApplicationRuntimeDescriptor` 传入，空路径表示不启用数据库。
+这份 JSON 是一个资产根内的身份与导入元数据权威；没有 LMDB、本地数据库或导入产物缓存。
+仓库当前把整个 `assets/` 目录列入 `.gitignore`，没有跟踪项目级 manifest 或资产文件；调用方若要
+消费 GUID 轨，必须另行提供资产根。`AssetRoot` 由装配方通过 `ApplicationRuntimeDescriptor`
+传入，空路径表示不启用数据库。
 清单不存在时 `Open` 返回空库，之后可以 `AddEntry` + `Save` 建立；不存在的资产根也可由首次
 `Save` 创建，但 `Refresh` 要求根目录已经存在。
 
@@ -133,10 +135,12 @@ World → RenderSystem → AssetManager → AssetDatabase → GpuSystem
 
 数据库持有 importer 与 settings，必须活过 manager 对在飞加载 task 的取消和收束；GPU 上传依赖
 又要求 `GpuSystem` 最后销毁。`example_lambert_sphere` 以 `assets/` 为资产根，通过
-`Load<TextureAsset>("wall.png")` 持有贴图引用并实际绑定到 Lambert 球面，构成当前端到端消费方。
+`Load<TextureAsset>("wall.png")` 持有贴图引用并绑定到 Lambert 球面；只有调用方提供包含该条目的
+manifest 与源贴图时这条端到端路径才可运行，clean clone 当前会在该加载点失败退出。
 
 ## 测试
 
 `AssetDatabaseTest` 覆盖 schema/path 硬失败、GUID 格式、双索引、强类型与原始 settings、排序
 保存、重开一致性和 `Refresh` GUID 稳定性。`AssetSlotTest` 覆盖 `IAssetSource` 的 ID/path 加载、
 source 缺失和 slot 去重；两组均不需要 GPU。example 的 D3D12/Vulkan 运行用于验证真实上传与绑定。
+该手工运行目前要求外部准备未跟踪的 `assets/assets.json` 与 `wall.png`。

@@ -869,7 +869,7 @@ public:
     Nullable<const ShaderParameterGroupLayoutD3D12*> FindParameterGroup(
         uint32_t groupIndex) const noexcept;
 
-    BindingHandle FindBinding(std::string_view name) const noexcept;
+    BindingHandle FindBinding(std::string_view name) const noexcept override;
 
 public:
     DeviceD3D12* _device{nullptr};
