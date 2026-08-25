@@ -104,7 +104,7 @@ ctest --test-dir build_debug -C Debug -R AssetSlotTest --output-on-failure
 | `test_radray_dxc_metadata` | `RadRayDxcMetadata` |
 | `test_shaderlib_passes` | `RadRayShaderLibPass` |
 | `test_runtime_shader_jit` | `RadRayRuntimeShaderJit`（graphics/compute readback、fixture case report、metadata negative） |
-| `test_material` | `RadRayRuntimeMaterial`（vertex layout 解析、type tree 打包、多 cbuffer 配对、residency policy） |
+| `test_material` | `RadRayRuntimeMaterial`（vertex layout 解析、type tree 打包、多 cbuffer 配对、schema 5 group layout policy；schema 6 modifier 迁移见 shader layout correction 计划） |
 | `test_mesh_draw` | `RadRayRuntimeMeshDraw`（排序、双后端 dynamic offset/indexed draw、material 资源按 flight 轮转） |
 | `test_forward_pipeline` | `RadRayRuntimeForwardPipeline`（双后端跑真实窗口帧循环，程序化 quad 走完 ForwardPipeline 编排） |
 | `test_radray_render_shader_artifact` | `RadRayRenderShaderArtifact` |

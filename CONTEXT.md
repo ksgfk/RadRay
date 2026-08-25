@@ -216,7 +216,7 @@ _Avoid_: shader compilation, RHI layout construction
 **RadRay DXC structured result**:
 `IRadRayDxcResult` 是独立于 `IDxcResult`、`DXC_OUT_KIND` 和 `IDxcExtraOutputs` 的结构化 result
 ABI。它表达 batch status、common diagnostics/Variant identity，以及各 target lane 的 metadata、
-projected Root Signature 和各 stage bytecode/debug outputs。upstream COM blob 类型可以作为叶子
+optional DXIL serialized Root Signature 和各 stage bytecode/debug outputs。upstream COM blob 类型可以作为叶子
 数据载体，但 upstream result API 不构成 RadRay extension 的公开协议。
 
 **Compiler-owned metadata wire**:
@@ -242,17 +242,19 @@ compiler/cook 为查找 compiled Variant artifacts 生成的索引。它可以�
 格式，但不能由作者编辑，也不能成为 shader contract 的第二份真相。
 
 **Binding layout**:
-一个 Compiled Variant artifact 需要哪些资源、各自落在哪个 target-native group 与 slot 上的
-完整描述。由编译器生成并随产物交付，是该 target binding ABI 的唯一权威；不使用的资源不占
-active layout 槽位。对于 graphics Variant，layout 是所有 active stage binding 的并集；每个
-entry 记录自己的 stage visibility。stage-specific projection 只服务编译与缓存，不产生独立的
-RHI ABI layout。
+一个 Compiled Variant artifact 需要哪些 logical resources、各自落在哪个 target-native group 与
+slot 上，以及可选 RootSignature policy lowering 得到的 base placement。由编译器生成并随产物
+交付，是该 target base binding ABI 的唯一权威；不使用的资源不占 active Vulkan layout 槽位。
+对于 graphics Variant，layout 是所有 active stage binding 的并集；每个 entry 记录自己的实际
+stage visibility。pipeline 的 Target layout modifier 不属于 Binding layout，它只参与后续
+Resolved target layout。
 _Avoid_: pipeline layout, root signature, descriptor set layout（这三个是后端说法）；
 Property（这是 codegen 内部的表示）；binding ABI（指同一事物的契约面，不指数据本身）
 
 **Layout identity**:
-描述 binding layout 形状的身份。它区分资源集合、类型、槽位与 stage 可见性；不同 Variant
-只有在 layout identity 相同的时候才能共享 layout。
+描述 layout 语义的身份。compiler 的 Base layout identity 区分资源集合、logical kind、槽位、
+stage 可见性与 RootSignature policy lowering；render 的 Resolved layout identity 再加入当前
+backend 的 canonical modifier 结果。只有对应层 identity 相同的对象才能共享。
 _Avoid_: shader hash（shader 产物身份，不等于 layout 身份）
 
 **Declared contract**:
@@ -267,14 +269,12 @@ attribute，也不要求两套数字相等。同一资源在同一 target 的不
 稳定，只会处于 active 或 inactive；compiler 负责验证并输出当前 artifact 的 active subset。
 
 **Explicit DXIL Root Signature**:
-HLSL 作者通过 `[RootSignature(...)]` 声明的 DXIL binding policy，包括 descriptor table、root
-descriptor、root constants、static sampler、parameter order、visibility 与 flags。forked DXC
-校验并把它的 serialized form 作为 optional DXIL artifact range 发布；D3D12 RHI 直接消费该 blob，
-不得根据 binding metadata 重建或改写作者 policy。只要任一相关 entry 声明了 Explicit DXIL Root
-Signature，malformed、跨 stage 冲突或与 active resources 不兼容都必须编译失败，不能改走
-Implicit fallback。Explicit RS 可以是跨 Variant 稳定的 declared superset：必须覆盖当前 Variant
-全部 active resources，但允许保留当前 Variant 未使用的合法 parameters、ranges 与 static samplers；
-compiler 和 backend 都不得为了 exact active subset 裁剪或重写作者 serialized blob。
+RootSignature policy 在 DXIL lane 的 serialized carrier。它包括 descriptor table、root descriptor、
+root constants、static sampler、parameter order、visibility 与 flags；forked DXC 校验并把标准
+serialized form 作为 optional DXIL artifact range 发布，D3D12 RHI 直接消费该 blob，不根据 binding
+metadata 重建或改写。只要任一相关 entry 声明了 RootSignature policy，malformed、跨 stage 冲突或
+与 active resources 不兼容都必须编译失败，不能改走 Implicit fallback。carrier 可以是跨 Variant
+稳定的 declared superset；这不要求 Vulkan 实例化 inactive declarations。
 _Avoid_: authored layout, manual Root Signature
 
 **Implicit D3D12 Root Signature**:
@@ -298,21 +298,30 @@ SPIR-V target 遵守 DXC/Vulkan 规则，每个 shader source 最多一个 activ
 `[[vk::push_constant]]` block；多个 `VkPushConstantRange` 只是同一 address space 的 offset/stage
 ranges，不代表多个独立 blocks。DXIL target 不套用这个限制，允许最终 Root Signature 包含多个
 active `RootConstants` parameters，并逐个与相应 `register(b#, space#)` 上的 active HLSL constant
-declaration 关联。两 target 的数量、位置、名称与 byte layout 不要求一致。旧 RHI 的单一
-`optional<PushConstantDescriptor>` 必须迁移，不能反向限制 compiler output。
+declaration 关联。RootSignature policy 中覆盖 SPIR-V active push declaration 的 `RootConstants`
+lower 为该 `VK_PUSH_CONSTANT` block；push declaration 同时写 DX register 与 `VK_PUSH_CONSTANT`，
+不得再写 `VK_BINDING`。D3-only declarations仍可形成多个RootConstants，但一个Vulkan Variant不能
+形成多个active logical push blocks。
 
-**RootSignature target scope**:
-HLSL `[RootSignature(...)]` 只属于 DXIL lane；可以在 `__spirv__` 条件下排除。SPIR-V layout
-完全由标准 `vk::binding` / `vk::push_constant` 与 SPIR-V compiler output 决定，不要求存在等价
-RootSignature 字符串或跨 target 的 descriptor/push-constant projection。DXIL graphics Variant 中
-任一 entry 携带 Explicit DXIL Root Signature 即选择 explicit mode，其他 entry 可以省略 attribute；
-多个非空 stage payload 必须一致。全部 entries 都没有显式 RS 时选择 Implicit source，artifact 的
-serialized RS range 为空并由 D3D12 RHI 生成 Root Signature；compute entry 独立选择自己的 source。
+**RootSignature policy**:
+HLSL `[RootSignature(...)]` 声明的跨 target base layout policy。每个 concrete Variant 先由
+compiler-owned、与输出 target无关的frontend按相同source/include、Defines、assignments和完整
+CompilePolicy解析，再分别lower：DXIL得到standard serialized carrier；SPIR-V得到Vulkan-specific
+fixed-width records。普通declaration的DX register/space与`VK_BINDING`数字可以不同，compiler只按
+canonical HLSL declaration identity关联。能关联policy parameter的active declaration中，
+DescriptorTable lower为普通Vulkan descriptor；root
+CBV为dynamic uniform buffer；root SRV/UAV buffer为dynamic storage buffer；RootConstants为作者写的
+`VK_PUSH_CONSTANT`；StaticSampler为full-state immutable sampler。D3-only topology/flags不强造
+Vulkan语义；target-only declaration保持标准Vulkan attribute语义，Vulkan stage flags取实际active
+stages。没有attribute时不合成公共policy：D3走Implicit Root Signature，Vulkan走普通descriptors。
+_Avoid_: DXIL-only RootSignature policy, Vulkan RootSignature blob, runtime RootSignature link
 
 **Static sampler bridge**:
 compiler 从 DXIL Root Signature 解析 static sampler，与同一 HLSL `SamplerState` declaration
 关联，再读取该 declaration 的 SPIR-V `vk::binding` 生成 Vulkan immutable sampler metadata。
-两套 binding 数字不要求相等；无法唯一关联或 sampler schema 无法无损表达时编译失败。
+metadata 是 Vulkan-specific fixed-width full-state record，覆盖filter/address/LOD/bias/anisotropy/
+compare/border/reduction，不只是immutable bit。两套 binding数字不要求相等；无法唯一关联或无法
+无损表达时编译失败。D3仍直接消费serialized RS中的native static sampler state。
 
 **SPIR-V target gate**:
 shaderlib 使用 DXC 内置的 `__spirv__`（以及版本宏）判断 SPIR-V lane，不再依赖手工
@@ -356,18 +365,20 @@ register/location schema，也不要求两边 DCE 后的 parameter 集合相同�
 semantic/index/signature facts 解析，Vulkan consumer 按 final location/type/decorations 解析；
 runtime 不重新调用 reflection API。
 
-**Target-native runtime layout**:
-compiler metadata decode 后，D3D12 与 Vulkan 的 pipeline layout 继续保持各自的 target-native
-表示并直接交给对应 backend；RHI 只保留薄的公共操作层，不以统一 `PipelineLayoutDescriptor`
-重新表达 compiler output。runtime binding handles 必须在当前 target artifact 上解析，不能假设
-DXIL register/space、SPIR-V set/binding、RootConstants 或 push-constant ranges 可以互换。
+**Resolved target layout**:
+target artifact decode后，把base records与当前backend的Target layout modifiers canonical resolve
+得到的owning、可比较、可hash value。D3D12与Vulkan分别使用`ResolvedD3D12Layout`和
+`ResolvedVulkanLayout`，它们是native layout creation的唯一输入；不以统一
+`PipelineLayoutDescriptor`重新表达。resolved value拥有descriptor/push/sampler/dynamic-order与
+name table facts，不借用artifact span，也不包含native handles。
+_Avoid_: Target-native runtime layout, common resolved layout descriptor
 
 **Binding lookup identity**:
-active resource 的 canonical HLSL declaration name 是 caller 唯一的加载期 lookup key；不再由
-manifest/caller 提供 binding alias。runtime 在当前 target/Variant artifact 上把名称解析成
-artifact-local `BindingHandle`，提交路径只使用 handle。handle 不跨 target、Variant 或重编译保持
-数值稳定，layout 改变后必须重解析；inactive declaration 的查找明确失败。DXIL register/space 与
-SPIR-V set/binding 只属于 handle 背后的 target payload，不构成公共身份。
+active descriptor或push declaration的canonical HLSL name是caller唯一的加载期lookup key；不再由
+manifest/caller提供alias。resolved layout把名称解析成artifact-local `BindingHandle`，提交路径只用
+handle。公共handle只暴露validity/equality，factory、generation、namespace、table index和native
+destinations均为layout内部。handle不跨target、Variant或重编译稳定，layout改变后必须重解析；
+inactive declaration查找失败。DX register/space与SPIR-V set/binding不构成公共身份。
 
 **Variant-level compiler metadata**:
 graphics Variant 的各 stage 必须在同一个 compiler-level request 中完成 metadata 合并，直接
@@ -439,14 +450,15 @@ expected hash 做相等比较，但不在 RadRay 侧重算 hash，也不把该�
 绑定 assignment planning。Defines、policy、root/include bytes、source name 与 include paths 不按原始
 输入进入 hash；它们只有在改变 canonical contract facts 时才间接改变 hash。include 是
 filesystem-backed compilation 在调用时读取的外部源码依赖。每个 target lane 的 `BytecodeHash` 覆盖完整 target bytecode，
-`PipelineLayoutHash` 覆盖 canonical target-native GPU layout records，`GpuArtifactHash` 覆盖 bytecode
+`BasePipelineLayoutHash` 覆盖 canonical target-native base GPU layout records，`GpuArtifactHash` 覆盖 bytecode
 与 GPU layout metadata。Explicit DXIL Root Signature 使用 DXC 已从 serialized `RTS0` payload 计算的
-`RootSignatureHash` 作为一项 layout record进入 `PipelineLayoutHash`；完整
+`RootSignatureHash` 作为一项 layout record进入 `BasePipelineLayoutHash`；完整
 `DXC_OUT_ROOT_SIGNATURE` carrier container不直接进入 compiler hash。Implicit source没有
 compiler-produced RS semantics，其 layout hash只覆盖 active binding metadata并使用独立 domain。
 这些是 compiler output identity，不是输入或缓存失效标识。
-三者使用统一的 128 位固定字节序表示；`PipelineLayoutHash` 只作为 artifact metadata 中的可比较
-身份，runtime 不重算也不以它建立共享缓存。第一期不定义 `ArtifactContentHash`、content-address
+三者使用统一的 128 位固定字节序表示；render resolver另算`ResolvedLayoutHash`，覆盖current
+backend canonical resolved semantics，不覆盖modifier原始顺序或native handles。第一期不定义
+`ArtifactContentHash`、content-address
 publisher 或 `CpuSchemaHash`。compiler 输出的 type tree
 不作为独立 hash 输入，也不独立缓存、寻址或兼容性校验。`AssetId` / `PassName` 不进入任何 compiler hash。
 
@@ -479,7 +491,7 @@ cbuffer/struct type tree，包括 nested members、names、offset/size、array/m
 vector/matrix shape。runtime 不从 C++ declaration、其他 artifact 或 reflection API 获取第二份
 schema，也不做交叉校验。type tree 遵守 ODR-style invariant：不设置独立 `CpuSchemaHash`，不独立
 缓存、寻址或跨 Variant 复用，必须与所属 target result 原子交付和存活。GPU layout 使用
-`PipelineLayoutHash`；`GpuArtifactHash` 覆盖 bytecode 与 GPU layout metadata，不覆盖 CPU type
+`BasePipelineLayoutHash`；`GpuArtifactHash` 覆盖 bytecode 与 GPU layout metadata，不覆盖 CPU type
 tree。runtime 只检查 type tree 的 wire bounds、record kind、offset/size、stride 和 CPU 构造安全性；
 语义错配被视为系统缺陷，而不是 runtime validation case。
 
@@ -493,17 +505,42 @@ _Avoid_: descriptor set, register space, space, table
 group 数字仍由 HLSL author 声明；plan 只把这些数字传给 material 与执行器，不是全引擎编号表。
 _Avoid_: global binding convention, group remap
 
-**Residency**:
-一个 buffer binding 使用常规 descriptor，还是使用可在 bind 时附加 byte offset 的 dynamic
-descriptor/root descriptor。Explicit DXIL Root Signature 由作者决定；implicit layout 可由 concrete
-pipeline 为指定 group 选择 dynamic residency。Vulkan 对应普通 descriptor 与 `*_BUFFER_DYNAMIC`。
-_Avoid_: binding mode, access path
+**Logical shader resource kind**:
+HLSL declaration在artifact中的资源类别，例如CBuffer、typed/structured/raw read/write buffer、
+texture/storage texture和sampler。它决定可接受的value与descriptor class，但不编码D3
+Table/RootDescriptor或Vulkan Regular/Dynamic placement。typed、structured与raw buffer必须保持可区分。
+_Avoid_: binding type（容易把logical kind与native placement混在一起）
 
-**Residency policy**:
-pipeline 在从 artifact 创建 backend layout 时提供的 dynamic buffer group 集合。它只改变 active
-buffer binding 的 residency，不改变 compiler-owned group/binding identity；引用缺失 group，或尝试
-覆盖 Explicit DXIL Root Signature 时必须失败。
-_Avoid_: layout override, dynamic group convention
+**Native binding placement**:
+同一logical declaration在某backend resolved layout中的访问位置。D3D12为descriptor table或合法
+buffer root descriptor；Vulkan为ordinary/dynamic descriptor或immutable sampler。placement不是
+compiler-independent资源类型，也不通过`ShaderParameterBindingType::Dynamic*`反向修改logical kind。
+_Avoid_: Residency, binding mode, access path
+
+**Target layout modifier**:
+pipeline在layout creation时对一个target artifact的精确placement override。selector由canonical HLSL
+declaration name + expected logical kind组成；D3D12 Implicit只允许合法single-buffer Table<->
+RootDescriptor，Vulkan只允许uniform/storage Regular<->Dynamic或为sampler指定/整体替换full immutable
+sampler state。
+它不改变compiler artifact、resource kind/count/visibility/push range；D3D12 Explicit carrier不接受
+重写。missing/inactive selector、kind mismatch和duplicate target都是framework invariant，不是恢复分支。
+_Avoid_: ShaderLayoutPolicy, Residency policy, group-wide dynamic policy, layout override
+
+**Shader program layout recipe**:
+program request中并列持有的`D3D12TargetLayoutOptions`和`VulkanTargetLayoutOptions`。两字段不强行
+同构；只有current backend字段参与resolve和program cache identity，任一字段都不进入compiler
+artifact identity。
+
+**Resolved layout hash**:
+render resolver对Resolved target layout canonical semantics计算的identity。modifier输入顺序、
+显式默认值、borrowed地址与native handles不进入hash。program/layout key由artifact identity加current
+backend的Resolved layout hash组成；本术语不承诺global native layout cache。
+
+**Shader program request**:
+runtime向`GetOrCreateShaderProgram`提交的完整值，显式包含source compile input（logical source与
+structured Defines）、keyword assignments、完整CompilePolicy与Shader program layout recipe。
+discovery与compile必须从同一request取得完整compile inputs；compiler artifact cache区分source/
+Defines/assignments/policy/target/toolchain，不能只按source name与assignments命中。
 
 **Artifact**:
 离线编译产出的、可在无编译器环境下加载的 shader 产物。内容寻址。

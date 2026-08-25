@@ -1,6 +1,6 @@
 # ADR-0035 Optional Explicit DXIL Root Signature 与 D3D12 RHI fallback
 
-状态: 生效
+状态: 部分被 ADR-0051 取代
 日期: 2026-08
 影响: RadRay DXC fork、shader artifact wire 与 identity、`radrayshader` decoder、D3D12 pipeline layout、SPIR-V policy bridge、shader authoring 与测试
 

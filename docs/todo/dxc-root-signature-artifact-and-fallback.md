@@ -1,9 +1,15 @@
 > - 适用: 将显式 HLSL Root Signature 的 DXC serialized blob 纳入 DXIL artifact，并保留缺省 `[RootSignature]` 时由 D3D12 RHI 自动生成 Root Signature 的 fallback
-> - 权威: 本文是设计对齐中的专项实施计划；“已确认”条目是当前会话输入，“待确认”条目不是仓库契约，全部决策关闭前禁止开始实现
-> - 状态: implementation-in-progress（2026-08-09；核心代码、回归测试与本地 SDK 包已完成；远端发布/manifest 更新和干净环境验证仍待完成）
+> - 权威: 本文保留 schema 5 optional DXIL carrier/D3 fallback 的历史实施基线；Vulkan policy lowering 与后续 schema cutover 以 ADR-0051 和 `shader-layout-contract-correction.md` 为准
+> - 状态: 部分被 ADR-0051 取代（2026-08-25；D3 Explicit/Implicit carrier 路径继续生效；不要再单独发布 `.radray.4`，后续原子升级 schema 6 / `.radray.5`）
 > - 锚点: `CONTEXT.md`, `docs/adr/0016-hlsl-and-radray-dxc-are-shader-authority.md`, `docs/architecture/shader-pipeline.md`, `docs/architecture/render-rhi.md`, `docs/research/dxc-serialized-root-signature-artifact.md`, `modules/shader/include/radray/shader/shader_compiler_contract.h`, `modules/shader/include/radray/shader/shader_artifact.h`, `modules/render/src/shader_artifact.cpp`, `modules/render/src/d3d12/d3d12_impl.cpp`
 
 # DXIL optional serialized Root Signature 与 D3D12 RHI fallback 计划
+
+> 后续修正：ADR-0051 取代本文“`[RootSignature]` 只影响 DXIL、Vulkan 只做 static-sampler bridge”
+> 的边界，也取代任何把 placement 称为 residency 的表述。serialized carrier 仍只由 D3D12 消费，
+> 但 compiler 必须把同一 RootSignature policy lower 为 Vulkan-specific records；新实施项、wire shape、
+> cache/handle contract 与测试矩阵统一见 `shader-layout-contract-correction.md`。本文其余 D3 carrier、
+> direct-consumption、Implicit fallback 和 artifact-local coalescing 记录保持为历史基线。
 
 ## 目标
 

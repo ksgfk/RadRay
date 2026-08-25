@@ -1,5 +1,6 @@
 > - 适用: 在 `shaderlib/` 里找现成实现；增加 HLSL 数学、光照、阴影或最小产品 pass
-> - 权威: 本文是当前 HLSL 共享库边界与 target gate 约定的唯一说明；完整编译契约见 shader pipeline 架构文档
+> - 权威: 本文是 schema 6 目标 HLSL 共享库边界与 target gate 契约；完整编译契约见 shader pipeline 架构文档
+> - 状态: ADR-0051 契约已接受，implementation tracked by `docs/todo/shader-layout-contract-correction.md`
 > - 锚点: `shaderlib/core/math.hlsli`, `shaderlib/core/color.hlsli`, `shaderlib/core/frame.hlsli`, `shaderlib/core/platform.hlsli`, `shaderlib/bsdf/principled.hlsli`, `shaderlib/lighting/lights.hlsli`, `shaderlib/shadow/filtering.hlsli`, `shaderlib/pipelines/forward/bindings.hlsli`, `shaderlib/pipelines/forward/forward.hlsl`, `shaderlib/passes/depth.hlsl`, `shaderlib/passes/compute.hlsl`
 
 # shaderlib
@@ -57,8 +58,18 @@
 
 `core/platform.hlsli` 只提供 DXIL/SPIR-V target gate：`VK_LOCATION`、`VK_BINDING` 和
 `VK_PUSH_CONSTANT` 在 SPIR-V lane 展开为属性，在 DXIL lane 展开为空。它不分配编号，
-也不提供把 group/slot 打包成单一宏的 numbered wrapper。新 pass 的 keyword pragma 必须写在
-根 `.hlsl`；每个 concrete compile request 为每个 group 提供一个合法 assignment。`RadRayShaderLibPass`
-验证 forward、depth 与 compute 三条 source 的双 target compile、active binding 和 stage visibility。DXIL 的 `tN`、`sN`
-数字可以相同，但资源与 sampler namespace 不能混淆；static sampler 必须能关联 active
-`SamplerState` declaration，缺失或冲突时 compiler fail closed。
+也不提供把 group/slot 打包成单一宏的 numbered wrapper。ordinary resource同时写`register()`与
+`VK_BINDING`；push declaration同时写`register()`与`VK_PUSH_CONSTANT`，不得再写`VK_BINDING`。
+两target数字不要求相等，compiler按canonical declaration identity关联。
+
+`[RootSignature]`不是`platform.hlsli`的另一套numbering gate，而是compiler-owned跨target base policy：
+DXIL保留serialized carrier，SPIR-V把table/root descriptor/RootConstants/StaticSampler lower成对应
+Vulkan records。没有attribute时D3与Vulkan各用普通默认layout；pipeline的精确Target layout modifier
+不进入shaderlib。RootSignature中的static sampler必须唯一关联active `SamplerState` declaration，
+SPIR-V metadata保留完整filter/address/LOD/bias/anisotropy/compare/border/reduction state，不能只记
+immutable bit。
+
+新pass的keyword pragma必须写在根`.hlsl`；每个concrete compile request为每个group提供一个合法
+assignment。`RadRayShaderLibPass`验证forward、depth与compute三条source的双target compile、active
+binding和actual stage visibility。DXIL的`tN`、`sN`数字可以相同，但资源与sampler namespace不能
+混淆。

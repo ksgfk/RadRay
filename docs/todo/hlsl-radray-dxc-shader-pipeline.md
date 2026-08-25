@@ -7,6 +7,10 @@
 > ABI fixture 与源码扫描路径已由 ADR-0034 和 `docs/todo/radray-dxc-frontend-semantic-migration.md`
 > 取代；当前测试入口以 Clang/LLVM harness 与 `RadRayShaderCompilerClient` consumer suite 为准。
 
+> Layout 后续修正：ADR-0051 与 `docs/todo/shader-layout-contract-correction.md` 取代本文将
+> RootSignature 作为 DXIL-only/exact-active projection、Vulkan 只接 immutable-sampler 标志的边界。
+> 本文 M3 仍是第一阶段完成记录，不作为 schema 6 layout contract。
+
 # HLSL + forked RadRay DXC shader pipeline：第一阶段
 
 ## 完成定义

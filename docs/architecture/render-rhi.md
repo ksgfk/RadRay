@@ -1,11 +1,16 @@
 > - 适用: 加 RHI 接口或改后端；排查 barrier / 描述符 / 同步问题；找某个后端实现在哪一段
-> - 权威: 本文是 RHI 抽象形状与两个后端映射关系的唯一说明。上层怎么用它见 `architecture/frame-and-gpu.md`
+> - 权威: 本文是 ADR-0051/schema 6 目标 RHI layout 契约及两个后端映射关系的唯一说明。上层怎么用它见 `architecture/frame-and-gpu.md`
+> - 状态: layout 契约已接受、实现待 `docs/todo/shader-layout-contract-correction.md` 迁移；非 layout 章节仍描述当前实现
 > - 锚点: `modules/render/include/radray/render/rhi.h`, `modules/render/include/radray/render/backend_shader_artifact.h`, `modules/render/include/radray/render/render_pass_registry.h`, `modules/render/include/radray/render/sampler_cache.h`, `modules/render/src/rhi.cpp`, `modules/render/src/backend_shader_artifact.cpp`, `modules/render/src/sampler_cache.cpp`, `modules/render/src/d3d12/d3d12_impl.cpp`, `modules/render/src/vk/vulkan_impl.cpp`
 
 # RHI 与后端
 
 `radrayrender` = 一层后端无关的 RHI（`rhi.h`，1.5k 行纯接口与描述符）+ D3D12 与 Vulkan
 两份实现。它不知道资产、场景、帧节奏，只知道 GPU 对象。
+
+layout 章节以下以 schema 6 目标 contract 为准。当前 schema 5 的 group-wide
+`ShaderLayoutPolicy`、公开 handle 编码、裸 binding dynamic offset 与 default Vulkan immutable
+sampler 是已记录的迁移起点，不是继续扩张的接口。
 
 ## 所有权：一个 shared，其余全 unique
 
@@ -59,31 +64,71 @@ Vulkan 还有一个进程级全局：`VkInstance` 存在 `g_vkInstance`，经 `I
 
 ## 绑定模型
 
-统一操作仍是两层：`PipelineLayout` 持有 backend-native layout，`ShaderParameterSet` 携带值。
-公共 `rhi.h` 不再暴露 pipeline layout descriptor；DXIL artifact 只能交给 D3D12 overload，
-SPIR-V artifact 只能交给 Vulkan overload。backend-only 的 layout input 由 artifact decoder
-从 compiler-owned records 临时组装，不允许 caller 另写一份 layout schema。运行时动态桥只在
-内部形成匹配的 typed view，不增加 target-erased layout descriptor。
+统一 command 操作仍是两层：`PipelineLayout` 持有 backend-native layout 与内部 binding metadata，
+`ShaderParameterSet` 携带值。layout 构造则明确拆成三段：
+
+```text
+target artifact decode
+  -> backend-specific target-typed resolve
+  -> native layout creation
+```
+
+DXIL artifact 只能 resolve 成 owning/hashable `ResolvedD3D12Layout`，SPIR-V artifact 只能 resolve 成
+`ResolvedVulkanLayout`；两者是对应 `Device::CreatePipelineLayout` 路径的唯一数据输入。公共层不增加
+target-erased `PipelineLayoutDescriptor`，caller 不能绕过 artifact 自造第二份 schema。resolved value
+拥有 strings、records、sampler recipes 与 dynamic order，不借用 artifact spans，也不包含 native
+handles。
+
+pipeline 通过 `ShaderProgramLayoutRecipe` 并列提供 D3D12/Vulkan typed options。current backend
+只消费自己的字段；每个 Target layout modifier 用 canonical declaration name + expected logical kind
+精确选择一项。selector 不存在/inactive、kind mismatch、duplicate target 或 D3 Explicit 出现 D3
+modifier 都是 framework invariant（Debug assert），不形成生产 recovery API。
 
 `ShaderParameterValue` 是 `variant<ShaderBufferBinding, ShaderTexelBufferBinding, TextureView*, Sampler*>`。
 
-两个后端各自把 target-native records 编译成原生布局：
+logical resource kind 与 native placement 分开保存。CBuffer、typed/structured/raw buffers、texture/
+storage texture 与 sampler 决定 value/descriptor class；D3 Table/RootDescriptor 和 Vulkan
+Regular/Dynamic 只存在于 resolved records。既有 `ShaderParameterBindingType::DynamicCBuffer`、
+`DynamicBuffer`、`DynamicRWBuffer` identifiers 保留但 schema 6 artifact path 不再生产它们表达
+logical kind。
+
+两个后端的 base policy 与合法 modifier 如下：
 
 | | D3D12 | Vulkan |
 |---|---|---|
-| Implicit 每个 Group | 两个描述符表 root parameter（resource 表 + sampler 表） | 一个 `VkDescriptorSetLayout` |
-| Explicit DXIL | 原样消费 artifact serialized Root Signature；CPU plan 按 parameter/range 映射 binding | 不消费 DXIL Root Signature |
-| `Dynamic*` 类型 | root CBV/SRV/UAV，bind 时按 `dynamicOffsets` 设 | 动态 uniform/storage buffer |
-| push constant | `32BIT_CONSTANTS` root parameter | `VkPushConstantRange` |
-| 上限校验 | 无 | 有（`maxDescriptorSet*` / `maxPerStage*`） |
+| 无 RootSignature policy | Implicit descriptor tables | ordinary descriptors |
+| descriptor table policy | serialized table 原样消费 | ordinary descriptors |
+| root CBV policy | root CBV | dynamic uniform buffer |
+| root SRV/UAV buffer policy | root SRV/UAV | dynamic storage buffer |
+| RootConstants policy | `32BIT_CONSTANTS` root destinations | authored push declaration的 `VkPushConstantRange` |
+| StaticSampler policy | full native static sampler state | full-state immutable `VkSampler` |
+| Target modifier | 仅 Implicit 合法 count=1 buffer Table<->RootDescriptor | uniform/storage Regular<->Dynamic；full immutable sampler install/replacement |
 
 DXIL artifact 的 serialized Root Signature range 非空时，D3D12 直接把同一 carrier 传给
 `ID3D12Device::CreateRootSignature`，并用 `D3D12CreateVersionedRootSignatureDeserializer`
-建立 descriptor table、root descriptor、RootConstants 与 static sampler 的 CPU binding plan。
-此路径不根据 active metadata 重建作者 RS；当前 contract 拒绝 local root signature、directly-indexed
-heaps、无法覆盖 active binding 或 visibility 不足的形状。range 为空时才使用上表的 implicit
-generator。每个 artifact 内重复的 stage RS 已在 compiler lane merge 时合并；runtime 不新增
-跨 artifact Root Signature cache。
+建立 descriptor table、root descriptor、RootConstants 与 static sampler destinations。此路径
+不根据 active metadata 重建作者 RS，也不接受 D3 modifier；D3 static sampler 现有 direct-consumption
+路径本身正确。range 为空时，resolver 按 active facts 生成 Implicit canonical topology，再把精确
+合法 buffer modifiers应用为root descriptors。ordinary global RS 1.0/1.1是范围；Local RS与
+directly-indexed heaps不支持。runtime不新增跨artifact/native Root Signature cache。
+
+`ResolvedVulkanLayout` 是创建 `VkPipelineLayout` 所用数据的完整权威，至少持有：
+
+- set 0 到 max active set 的有序 set recipes；slot 空洞由有效 empty set-layout recipe 占位；
+- 每个 active descriptor 的 logical kind、set/binding/count、Regular/Dynamic placement 与 actual
+  stage flags；
+- full-state immutable sampler recipes及descriptor引用；
+- 最多一个 active logical push block 的range/stages；
+- Vulkan规定的dynamic offset packing order（set、binding、array element）；
+- canonical `ResolvedLayoutHash`与name->metadata table映射。
+
+native创建顺序为immutable sampler objects -> descriptor set layouts -> `VkPipelineLayout`；backend
+layout保持sampler/set-layout引用至少覆盖pipeline layout和parameter sets的使用期。descriptor limits、
+dynamic-buffer limits、push size/alignment、sampler feature/extension与native create结果在此边界产生
+diagnostic/failure。unsupported sampler state不得用default state静默替换；pipeline可提供明确的
+Vulkan sampler replacement modifier。hash只覆盖sampler semantics，不覆盖`VkSampler` handles。
+full state 使用 Vulkan target-typed fixed-width recipe；公共 `SamplerDescriptor` 不扩张成
+D3/Vulkan static-sampler policy 的统一副本。
 
 **`Set` 只记脏值，`FlushWrites()` 才写描述符。** D3D12 把值写进预分配的 GPU 堆区间；
 Vulkan 构造 `VkWriteDescriptorSet` 数组，并按需惰性建 `VkBufferView` 承载 texel buffer。
@@ -91,13 +136,32 @@ Vulkan 构造 `VkWriteDescriptorSet` 数组，并按需惰性建 `VkBufferView` 
 `ShaderDescriptor` 这类喂给 RHI 的资源描述仍属于 render 层。compiler-owned metadata 由 render
 decoder 转换成 backend-only 过渡 input，不能让 RHI 反向依赖 compiler client。
 
-### Binding handle 与 vertex input
+### Binding handle、dynamic offset 与 push
 
-binding name 通过公共 `PipelineLayout::FindBinding`，只在当前 artifact layout 上解析为不透明
-`BindingHandle`。handle 带 layout generation，
-DXIL 还保留 `b/t/u/s` register namespace；unknown、inactive 或其他 layout 的 handle 写入直接
-失败，Debug 下跨 layout 使用会断言。`BindShaderParameterSet` 的 group index 仍保留，因为它
-同时对应 D3D12 register space 与 Vulkan descriptor set。
+descriptor与push declaration的canonical HLSL name都通过`PipelineLayout::FindBinding`解析为
+`BindingHandle`。handle公共面只有default-invalid、validity和equality；caller不能构造或读取group、
+slot、namespace、generation、table index。内部token的位布局不是ABI，且不能跨target、Variant、
+recompile或layout复用。
+
+`PipelineLayout`内部metadata table record分两类：
+
+- Descriptor：logical kind、group/binding、array facts和一个或多个backend native destinations；
+- Push：resolved size/stages、D3 root destinations和/或Vulkan ranges。
+
+一个D3 declaration按visibility-disjoint参数fan-out时仍只有一个handle，一次write/offset提交到全部
+destinations。`BindShaderParameterSet`的group index保留，因为它仍选择D3 register space/Vulkan set；
+这不要求handle公开group。
+
+`ShaderParameterDynamicOffset`使用`BindingHandle + Offset`，不再携带裸binding number。D3 root
+descriptor从parameter set取base GPU VA并加offset；Vulkan忽略caller输入顺序，按resolved dynamic
+order完整打包`pDynamicOffsets`。错误layout/group/handle、duplicate/missing offset与未对齐offset是
+framework invariant。
+
+push提交为`SetPushConstants(BindingHandle, bytes)`，不再传group。每次写`[0,size)`prefix，要求
+`0 < size <= resolved block size`且4-byte aligned；未覆盖remainder不变，不支持destination offset。
+一个Vulkan Variant最多一个active logical push block，D3仍可有多个RootConstants declarations。
+
+### Vertex input
 
 graphics PSO 创建前会做共享 CPU 校验：semantic、format、location、slot、offset/stride 以及
 重复 binding/attribute 必须有效；校验失败时不调用 D3D12/Vulkan native PSO API。

@@ -88,7 +88,7 @@ docs/adr/*.md
 | [0032](0032-discovery-include-validation-before-contract-scan.md) | discovery 先由 DXC 验证 include，再进行 root-only contract scan | 已被 ADR-0034 取代 |
 | [0033](0033-include-path-abi-view-validation.md) | include path ABI view 的编码与输入校验 | 生效 |
 | [0034](0034-clang-dxc-compiler-pipeline-is-the-only-shader-semantic-authority.md) | Clang/DXC compiler pipeline 是唯一 shader 语义权威 | 生效 |
-| [0035](0035-optional-explicit-dxil-root-signature-and-rhi-fallback.md) | Optional Explicit DXIL Root Signature 与 D3D12 RHI fallback | 生效 |
+| [0035](0035-optional-explicit-dxil-root-signature-and-rhi-fallback.md) | Optional Explicit DXIL Root Signature 与 D3D12 RHI fallback | 部分被 ADR-0051 取代 |
 | [0036](0036-per-bundle-manifest-is-asset-identity-authority.md) | per-bundle 单清单是资产身份权威 | 部分被 ADR-0039 取代 |
 | [0037](0037-manifest-dom-is-backing-store.md) | 清单 DOM 常驻作为后备存储 | 已被 ADR-0038 取代 |
 | [0038](0038-asset-metadata-in-lmdb.md) | asset 元数据改用 LMDB 存储 | 已被 ADR-0040 取代 |
@@ -102,5 +102,6 @@ docs/adr/*.md
 | [0046](0046-pso-cache-belongs-to-shader-program.md) | PSO 缓存归 ShaderProgram 所有，不建全局缓存 | 生效 |
 | [0047](0047-binding-groups-belong-to-the-concrete-pipeline.md) | binding group 分配属于具体 pipeline，runtime 提供内置 forward pipeline | 生效 |
 | [0048](0048-vulkan-y-flip-belongs-to-a-runtime-helper.md) | Vulkan Y 翻转由 runtime 公共 helper 统一，RHI 仍原样透传 | 生效 |
-| [0049](0049-dynamic-residency-policy-comes-from-the-pipeline.md) | dynamic buffer residency 由 pipeline 策略提供，per-object 数据不用 StructuredBuffer | 生效 |
+| [0049](0049-dynamic-residency-policy-comes-from-the-pipeline.md) | dynamic buffer residency 由 pipeline 策略提供，per-object 数据不用 StructuredBuffer | 部分被 ADR-0051 取代 |
 | [0050](0050-sample-assets-ship-outside-the-source-repository.md) | 样例与测试资产在源码仓库之外分发 | 生效 |
+| [0051](0051-root-signature-policy-and-target-layout-resolution.md) | RootSignature policy 经 target layout resolution 映射到 D3D12 与 Vulkan | 生效 |

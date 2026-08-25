@@ -1,5 +1,6 @@
 > - 适用: 新增或修改 shaderlib 根 `.hlsl` pass、keyword domain、binding 或 target gate
-> - 权威: 本文是当前 HLSL authoring 约定；wire 与 runtime 边界见 shader pipeline 架构文档
+> - 权威: 本文是 schema 6 目标 HLSL authoring 契约；wire 与 runtime 边界见 shader pipeline 架构文档
+> - 状态: ADR-0051 已接受，compiler/runtime 实现尚待 `docs/todo/shader-layout-contract-correction.md` 落地；迁移完成前不要假设 schema 5 artifact 已具备本文的 Vulkan policy lowering
 > - 锚点: `shaderlib/core/platform.hlsli`, `shaderlib/pipelines/forward/bindings.hlsli`, `shaderlib/pipelines/forward/forward.hlsl`, `shaderlib/passes/depth.hlsl`, `shaderlib/passes/compute.hlsl`, `modules/shader_compiler/tests/test_shaderlib_passes.cpp`
 
 # HLSL authoring
@@ -36,17 +37,40 @@ entry。entry 不能被条件编译包围，也不能让 graphics 与 compute �
 每个 keyword group 的 concrete compile request 必须选择一个合法值。普通 `Defines` 只用于
 不属于 keyword domain 的编译输入；不要用普通 define 覆盖 keyword group。
 
-`[RootSignature(...)]` 是可选的 DXIL-only policy。作者不写时，artifact 不携带 serialized Root
-Signature，D3D12 RHI 根据 active bindings 自动生成 layout；DXC 不在这条路径生成默认 RS。作者
-一旦在任一相关 entry 写了 `[RootSignature]`，graphics stages 必须使用逐字节一致且覆盖全部
-active resources 的合法 RS；额外的稳定 superset ranges/parameters/static samplers 可以保留。
-错误、跨 stage 冲突或未覆盖 active resource 会使编译失败；当前 D3D12 backend 不支持的 RS
-形状会使 explicit layout 创建失败；两者都不会回退到自动生成。
+`[RootSignature(...)]` 是可选的跨 target **RootSignature policy**。作者一旦在任一相关 entry
+写了它，graphics stages 必须解析为一致且覆盖全部 active resources 的合法 policy；额外的 D3
+stable-superset ranges/parameters/static samplers 可以保留。compiler 在 target lanes 之前解析一次
+policy：DXIL lane 发布 standard serialized Root Signature，SPIR-V lane 按同一 HLSL declaration
+identity 发布 Vulkan layout records。runtime 不解析 DXIL blob 来重建 Vulkan layout。
+
+可移植的 policy 子集按下表 lower：
+
+| RootSignature 项 | D3D12 | Vulkan |
+|---|---|---|
+| descriptor table range | descriptor table | 普通 descriptor |
+| root CBV | root CBV | dynamic uniform buffer |
+| root SRV/UAV buffer | root SRV/UAV | dynamic storage buffer |
+| `RootConstants` | root constants | 对应 declaration 的 `VK_PUSH_CONSTANT` block |
+| `StaticSampler` | full native static sampler | full-state immutable sampler |
+
+parameter/range 顺序、table offset、Root Signature/range/root flags、IA/deny flags 等没有 Vulkan
+对应语义的项只约束 D3。对能按同一 declaration identity 关联到 policy parameter 的 Vulkan
+declaration，RootSignature visibility 必须覆盖其 active stages；Vulkan stage flags 仍取当前 Variant
+的实际 active stages。只在某个 target 存在的 declaration 保留该 target 的标准 ordinary/push
+attribute 语义，不需要伪造另一 target 的槽位。ordinary graphics/compute global Root Signature
+1.0/1.1 是当前范围；
+Local Root Signature、directly-indexed heaps 与多个 active Vulkan push blocks 不支持。
+
+作者不写 `[RootSignature]` 时，compiler 不猜一份公共 policy：DXIL artifact 不携带 serialized RS，
+D3D12 RHI 按 active bindings 生成 implicit descriptor-table layout；Vulkan 使用普通 descriptors。
+这不会禁止 dynamic cbuffer；具体 pipeline 仍可在 layout resolve 时对精确 declaration 选择合法的
+backend-specific placement。malformed policy、跨 stage 冲突、未覆盖 D3 active resource，或一个
+已被 policy 指向的 active Vulkan declaration 无法关联/表示时会使编译失败，不回退到缺省路径。
 
 ## Binding 与 target gate
 
-每个资源声明都必须同时写明两侧的 binding：SPIR-V 侧用 `core/platform.hlsli` 的 `VK_BINDING`
-gate 宏，DXIL 侧用 `register()`。
+每个普通资源声明都必须同时写明两侧的 binding：SPIR-V 侧用 `core/platform.hlsli` 的
+`VK_BINDING` gate 宏，DXIL 侧用 `register()`。
 
 ```hlsl
 VK_BINDING(6, 2) Texture2D<float4> AlbedoTexture : register(t0);
@@ -54,8 +78,23 @@ VK_BINDING(7, 2) SamplerState LinearSampler : register(s0);
 ```
 
 SPIR-V lane 会把宏展开为标准 `vk::binding` 属性，DXIL lane 会展开为空；两套 target 的实际
-binding 数字可以不同，不能假设 set 等于 space 或 binding 数字相等。位置和 push constants
-使用 `VK_LOCATION` 与 `VK_PUSH_CONSTANT`；`VK_PUSH_CONSTANT` 声明豁免上述规则。
+binding 数字可以不同，不能假设 set 等于 space 或 binding 数字相等。compiler按canonical HLSL
+declaration identity关联RootSignature policy与两套槽位，caller不维护pairing table。
+
+vertex位置使用`VK_LOCATION`。push declaration是唯一例外：它同时写DX `register()`与
+`VK_PUSH_CONSTANT`，但**不得**再写`VK_BINDING`，因为`vk::push_constant`与`vk::binding`不能
+同时装饰同一declaration：
+
+```hlsl
+struct DrawPushData {
+    uint DrawIndex;
+};
+
+VK_PUSH_CONSTANT ConstantBuffer<DrawPushData> DrawPush : register(b3, space2);
+```
+
+如果RootSignature policy用`RootConstants`覆盖这条declaration，compiler把它lower到Vulkan的同一
+push block。一个SPIR-V Variant最多一条active logical push declaration。
 
 两侧都必须显式，因为缺任何一侧时 DXC 都会自行分配槽位，而分配结果在最终 artifact 里与作者
 写定的槽位无法区分：DXIL 侧会顺序分配寄存器，SPIR-V 侧会按 `-fvk-*-shift` 策略从 DXIL 寄存器
@@ -65,7 +104,23 @@ binding 数字可以不同，不能假设 set 等于 space 或 binding 数字相
 
 不要在 pass 中手写 backend attribute、创建 numbered binding wrapper，或维护 sidecar metadata。
 HLSL declaration name 是 runtime lookup identity；render layout 会为当前 artifact 生成不透明
-`BindingHandle`。
+`BindingHandle`。descriptor与push declaration都通过`FindBinding(name)`取得handle；handle的group、
+binding、namespace或内部index都不是authoring ABI。
+
+## Target layout modifier 不是 HLSL metadata
+
+concrete pipeline可以在program request中提供side-by-side D3D12/Vulkan layout recipe，但它不是第二套
+shader metadata。每个modifier只用“canonical declaration name + expected logical resource kind”选择
+一项：
+
+- D3D12 Implicit：合法、count=1的buffer在descriptor table与root descriptor之间切换；Explicit
+  serialized RS不接受改写。
+- Vulkan：uniform/storage buffer在regular与dynamic descriptor之间切换；sampler可以指定完整
+  immutable sampler state，base已有immutable state时整体替换。
+
+不要通过group index、binding number、更新频率或命名约定推断placement。modifier不能改变资源
+kind/count、visibility、slot或push range；texture、typed texel buffer、storage image和push没有
+placement modifier。无`[RootSignature]`时使用modifier是正常路径，不是fallback漏洞。
 
 group 的语义属于具体 pipeline，不是 shaderlib 全局规则。内置 forward 的 plan 是：
 

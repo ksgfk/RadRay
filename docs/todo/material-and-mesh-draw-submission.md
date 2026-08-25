@@ -1,9 +1,14 @@
 > - 适用: 实现 material 层与 mesh draw 提交路径，让 runtime 第一次能把 `Scene` 的内容画出来
-> - 权威: 本文是该工作的实施与验收计划；设计裁决以 ADR-0044 至 ADR-0049 为准，本文不重新裁决
+> - 权威: 本文是已完成 draw path 的历史实施与验收记录；layout producer 的当前裁决以 ADR-0051 为准，本文不重新裁决
 > - 状态: 实现完成并通过验收（2026-08）
 > - 锚点: `docs/adr/0044-material-owns-full-render-state-baseline.md`, `docs/adr/0045-shader-parameter-packing-driven-by-type-tree.md`, `docs/adr/0046-pso-cache-belongs-to-shader-program.md`, `docs/adr/0047-binding-groups-belong-to-the-concrete-pipeline.md`, `docs/adr/0048-vulkan-y-flip-belongs-to-a-runtime-helper.md`, `docs/adr/0049-dynamic-residency-policy-comes-from-the-pipeline.md`, `modules/runtime/include/radray/runtime/render_framework/render_pipeline.h`, `modules/runtime/include/radray/runtime/render_framework/scene.h`, `modules/runtime/include/radray/runtime/render_framework/primitive_scene_proxy.h`, `modules/runtime/include/radray/runtime/static_mesh.h`, `modules/runtime/include/radray/runtime/gpu_resource.h`, `modules/render/include/radray/render/backend_shader_artifact.h`, `modules/render/src/shader_artifact.cpp`, `modules/core/include/radray/vertex_data.h`, `shaderlib/lighting/lights.hlsli`, `examples/example_lambert_sphere/example_lambert_sphere.cpp`
 
 # Material 与 mesh draw 提交路径
+
+> Layout 后续修正：本文完成时使用的 group-wide residency policy 已被 ADR-0051 部分取代；
+> per-object/per-view `DynamicCBufferArena`、每 `(layout, flight)` 一个 set、per-draw 只提交 offset 的
+> 数据路径继续有效。其 layout producer 将迁移为精确 Target layout modifier、resolved native
+> destination 与 `BindingHandle + Offset`，见 `shader-layout-contract-correction.md`。
 
 ## 目标
 

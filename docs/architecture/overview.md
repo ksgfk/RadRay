@@ -37,7 +37,7 @@ RadRay 是 C++20 实时渲染器，当前支持 Windows 下的 D3D12 与 Vulkan 
 | `radraycore` | 容器别名、分配器、数学、JSON、日志、协程、哈希和 IO | `architecture/core-facilities.md` |
 | `radrayshader` | compiler/render 共享的 shader wire contract、artifact decoder 与双 target view；只依赖 core，不依赖 DXC | `architecture/shader-pipeline.md` |
 | `radraywindow` | 窗口、输入和平台事件 | `guide/dev-env.md` |
-| `radrayshadercompiler` | 可选 source-contract discovery 与 DXC boundary client；依赖 shader 与 core，不拥有 render/runtime | `docs/todo/hlsl-radray-dxc-shader-pipeline.md`, `docs/todo/filesystem-backed-shader-include-correction.md`, `docs/todo/radray-dxc-frontend-semantic-migration.md` |
+| `radrayshadercompiler` | 可选 source-contract discovery 与 DXC boundary client；依赖 shader 与 core，不拥有 render/runtime | `architecture/shader-pipeline.md`, `docs/todo/shader-layout-contract-correction.md`, `docs/todo/filesystem-backed-shader-include-correction.md` |
 | `radrayrender` | RHI、D3D12/Vulkan 后端、资源、命令和 PSO | `architecture/render-rhi.md` |
 | `radrayruntime` | 资产生命周期与 JSON 身份库、帧节奏、渲染框架和 Application | `architecture/asset-system.md`, `architecture/asset-database.md`, `architecture/frame-and-gpu.md`, `architecture/render-framework.md` |
 
@@ -74,6 +74,13 @@ metadata、target-native artifact decoder/layout 与 runtime JIT 已接通。RHI
 按 DXIL/SPIR-V view 分开；运行时已选定 device 的调用方经 render 的单一动态桥核对
 device/request/envelope target 后进入对应 typed 入口。公共 `PipelineLayout::FindBinding` 只按
 declaration name 颁发不透明 `BindingHandle`，绑定提交不暴露 layout 数字。
+
+ADR-0051 已接受 schema 6 的下一条 layout contract：compiler-owned RootSignature policy frontend、
+target artifact decode -> typed resolve -> native creation、精确 Target layout modifiers 与
+`ResolvedD3D12Layout`/`ResolvedVulkanLayout`。当前代码仍是 schema 5 / SDK `.radray.4`；迁移边界、
+检查站与已确认问题统一见 `todo/shader-layout-contract-correction.md`，不要继续扩张现有 group-wide
+`ShaderLayoutPolicy`。
+
 `radray_shader_compile`（`RADRAY_BUILD_SHADER_TOOLS` 默认 ON）只输出 raw DXIL/SPIR-V
 metadata blob，不生成 artifact index、cook 或 publisher；client 只用 fork extension ABI，
 无 stock adapter（测试内的 stock DXC 仅作为 Pso smoke 的 bytecode 来源）。正式 cook/artifact
