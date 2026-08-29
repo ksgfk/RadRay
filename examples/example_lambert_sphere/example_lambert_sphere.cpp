@@ -81,19 +81,12 @@ protected:
         }
 
         const BindingGroupPlan groups = ForwardPipeline::GetBindingGroupPlan();
-        const uint32_t dynamicGroups[]{
-            groups.ViewGroup,
-            groups.MaterialGroup,
-            groups.ObjectGroup};
-        const shader::KeywordAssignment assignment{
-            .Name = "QUALITY",
-            .Value = "high"};
+        ShaderProgramRequest request{
+            .SourceName = "pipelines/forward/forward.hlsl",
+            .LayoutRecipe = ForwardPipeline::GetLayoutRecipe()};
+        request.Assignments.push_back(shader::KeywordAssignment{.Name = "QUALITY", .Value = "high"});
         const Nullable<ShaderProgram*> program =
-            GetRenderSystem()->GetOrCreateShaderProgram(
-                "pipelines/forward/forward.hlsl",
-                std::span{&assignment, 1},
-                render::ShaderLayoutPolicy{
-                    .DynamicBufferGroups = dynamicGroups});
+            GetRenderSystem()->GetOrCreateShaderProgram(request);
         if (!program.HasValue()) {
             RADRAY_ERR_LOG("example_lambert_sphere: forward shader program creation failed");
             return;

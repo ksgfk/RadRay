@@ -554,16 +554,25 @@ TEST(RadRayRuntimeShaderJit, FixtureCaseReportCoversTargetNativeJitFacts) {
             shader::ShaderArtifactDecodeOptions options{
                 .Target = target,
                 .ExpectedGpuArtifact = artifact->ExpectedGpuArtifact,
-                .ExpectedToolchainIdentity = 0x0000000001090210ull};
+                .ExpectedToolchainIdentity = 0x0000000001090211ull};
             shader::ShaderArtifactDecodeError error = shader::ShaderArtifactDecodeError::None;
             std::optional<shader::ShaderArtifactView> generic;
-            std::optional<render::BackendPipelineLayoutInput> layoutInput;
+            // Counted off the resolved layout of whichever target this lane is: the two resolved
+            // types are separate by design, so the test compares the counts rather than trying to
+            // hold one common layout value.
+            std::optional<size_t> resolvedBindingCount;
+            std::optional<size_t> resolvedPushCount;
             if (target == shader::ShaderTarget::DXIL) {
 #if defined(RADRAY_ENABLE_D3D12)
                 const auto typed = shader::DecodeDxilShaderArtifact(artifact->Metadata, options, &error);
                 ASSERT_TRUE(typed.has_value()) << static_cast<uint32_t>(error);
                 generic = typed->Generic();
-                layoutInput = render::MakeBackendPipelineLayoutInput(*typed);
+                // Native layout creation consumes the resolved layout, so the test resolves first;
+                // no modifiers, because this asserts what the compiler published.
+                const auto resolved = render::ResolveD3D12Layout(typed.value());
+                ASSERT_TRUE(resolved.has_value());
+                resolvedBindingCount = resolved->Bindings.size();
+                resolvedPushCount = resolved->PushConstants.size();
 #else
                 GTEST_SKIP() << "D3D12 is disabled";
 #endif
@@ -572,22 +581,26 @@ TEST(RadRayRuntimeShaderJit, FixtureCaseReportCoversTargetNativeJitFacts) {
                 const auto typed = shader::DecodeSpirvShaderArtifact(artifact->Metadata, options, &error);
                 ASSERT_TRUE(typed.has_value()) << static_cast<uint32_t>(error);
                 generic = typed->Generic();
-                layoutInput = render::MakeBackendPipelineLayoutInput(*typed);
+                const auto resolved = render::ResolveVulkanLayout(typed.value());
+                ASSERT_TRUE(resolved.has_value());
+                resolvedBindingCount = resolved->Bindings.size();
+                resolvedPushCount = resolved->PushBlock.has_value() ? 1u : 0u;
 #else
                 GTEST_SKIP() << "Vulkan is disabled";
 #endif
             }
             ASSERT_TRUE(generic.has_value());
-            ASSERT_TRUE(layoutInput.has_value());
+            ASSERT_TRUE(resolvedBindingCount.has_value());
+            ASSERT_TRUE(resolvedPushCount.has_value());
             EXPECT_EQ(generic->Entries().size(), fixture->Entries.size());
             EXPECT_EQ(generic->Bindings().size(), expectedBindingCount);
-            EXPECT_EQ(layoutInput->BindingNames.size(), expectedBindingCount);
+            EXPECT_EQ(resolvedBindingCount.value(), expectedBindingCount);
             const size_t expectedRootCount = fixture->HasSingleSpirvPushBlock
                                                  ? target == shader::ShaderTarget::SPIRV ? 1u : 0u
                                              : target == shader::ShaderTarget::DXIL ? rootFactCount
                                                                                     : 0u;
             EXPECT_EQ(generic->RootConstants().size(), expectedRootCount);
-            EXPECT_EQ(layoutInput->PushConstants.size(), expectedRootCount);
+            EXPECT_EQ(resolvedPushCount.value(), expectedRootCount);
             for (const render::test::FixtureBindingFact& expected : fixture->Bindings) {
                 if (expected.Kind == render::test::FixtureResourceKind::RootConstant) {
                     continue;

@@ -1,5 +1,7 @@
 #include "shader_contract_fixtures.h"
 
+#include <radray/shader/shader_artifact.h>
+
 #include <gtest/gtest.h>
 
 #include <cstring>
@@ -153,6 +155,73 @@ TEST(RadRayShaderContract, MetadataEnvelopeFailsClosed) {
         truncatedCurrent,
         shader::ShaderTarget::DXIL,
         envelope.GpuArtifact));
+}
+
+TEST(RadRayShaderContract, RetiredMetadataSchemasAreRejectedRatherThanTranslated) {
+    // Schema 6 replaced 4 and 5 atomically. Their records cannot describe policy placement at all,
+    // so an older artifact is rejected here instead of being reinterpreted with default placements.
+    static_assert(shader::kShaderMetadataSchemaVersion == 6);
+    static_assert(shader::kShaderRetiredMetadataSchemaVersion4 == 4);
+    static_assert(shader::kShaderRetiredMetadataSchemaVersion5 == 5);
+
+    shader::WireMetadataEnvelope envelope{};
+    envelope.Target = static_cast<uint8_t>(shader::ShaderTarget::DXIL);
+    envelope.TotalSize = sizeof(shader::WireMetadataEnvelope) + 4;
+    envelope.Bytecode = {sizeof(shader::WireMetadataEnvelope), 4};
+    envelope.GpuArtifact.Bytes[0] = 0x17;
+
+    vector<byte> blob(envelope.TotalSize, static_cast<byte>(0));
+    std::memcpy(blob.data(), &envelope, sizeof(envelope));
+    ASSERT_TRUE(shader::ValidateWireMetadataEnvelope(
+        blob,
+        shader::ShaderTarget::DXIL,
+        envelope.GpuArtifact));
+
+    for (const uint16_t retired : {shader::kShaderRetiredMetadataSchemaVersion4,
+                                   shader::kShaderRetiredMetadataSchemaVersion5,
+                                   static_cast<uint16_t>(shader::kShaderMetadataSchemaVersion + 1)}) {
+        auto older = blob;
+        auto* patched = reinterpret_cast<shader::WireMetadataEnvelope*>(older.data());
+        patched->SchemaVersion = retired;
+        EXPECT_FALSE(shader::ValidateWireMetadataEnvelope(
+            older,
+            shader::ShaderTarget::DXIL,
+            envelope.GpuArtifact))
+            << retired;
+
+        shader::ShaderArtifactDecodeError error = shader::ShaderArtifactDecodeError::None;
+        EXPECT_FALSE(shader::DecodeShaderArtifact(
+                         older,
+                         shader::ShaderArtifactDecodeOptions{
+                             .Target = shader::ShaderTarget::DXIL,
+                             .ExpectedGpuArtifact = envelope.GpuArtifact},
+                         &error)
+                         .has_value())
+            << retired;
+        EXPECT_EQ(error, shader::ShaderArtifactDecodeError::UnsupportedSchemaVersion) << retired;
+    }
+}
+
+TEST(RadRayShaderContract, TargetOnlySectionsAreRejectedOnTheWrongLane) {
+    // A serialized Root Signature is the DXIL lane's authority and sampler records are the SPIR-V
+    // lane's; an envelope that carries the other lane's section is malformed, not merely unusual.
+    for (const shader::ShaderTarget target : {shader::ShaderTarget::DXIL, shader::ShaderTarget::SPIRV}) {
+        shader::WireMetadataEnvelope envelope{};
+        envelope.Target = static_cast<uint8_t>(target);
+        envelope.TotalSize = sizeof(shader::WireMetadataEnvelope) + 4;
+        envelope.Bytecode = {sizeof(shader::WireMetadataEnvelope), 4};
+        envelope.GpuArtifact.Bytes[0] = 0x29;
+        if (target == shader::ShaderTarget::DXIL) {
+            envelope.SamplerRecords = {sizeof(shader::WireMetadataEnvelope), 4};
+        } else {
+            envelope.RootSignature = {sizeof(shader::WireMetadataEnvelope), 4};
+        }
+
+        vector<byte> blob(envelope.TotalSize, static_cast<byte>(0));
+        std::memcpy(blob.data(), &envelope, sizeof(envelope));
+        EXPECT_FALSE(shader::ValidateWireMetadataEnvelope(blob, target, envelope.GpuArtifact))
+            << static_cast<uint32_t>(target);
+    }
 }
 
 TEST(RadRayShaderContract, RawGoldenArtifactsAreVersionedAndTargetSpecific) {

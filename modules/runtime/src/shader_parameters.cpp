@@ -184,7 +184,7 @@ std::optional<ShaderParameterLayout> ShaderParameterLayout::Create(
     vector<const shader::WireBindingRecord*> cbufferBindings;
     cbufferBindings.reserve(view.Bindings().size());
     for (const shader::WireBindingRecord& binding : view.Bindings()) {
-        if (binding.Type == 1) {
+        if (binding.Type == static_cast<uint32_t>(shader::ShaderBindingKind::CBuffer)) {
             cbufferBindings.push_back(&binding);
         }
     }
@@ -261,9 +261,16 @@ std::optional<ShaderParameterLayout> ShaderParameterLayout::Create(
 
     for (const shader::WireBindingRecord& binding : view.Bindings()) {
         ShaderParameterKind kind{};
-        if (binding.Type == 4) {
+        const auto logicalKind = static_cast<shader::ShaderBindingKind>(binding.Type);
+        if (logicalKind == shader::ShaderBindingKind::Texture) {
             kind = ShaderParameterKind::Texture;
-        } else if (binding.Type == 6 && (binding.Flags & 1u) == 0) {
+        } else if (logicalKind == shader::ShaderBindingKind::Sampler &&
+                   binding.Placement !=
+                       static_cast<uint32_t>(shader::ShaderBindingPlacement::StaticSampler) &&
+                   binding.SamplerIndex == shader::kShaderNoSampler) {
+            // A sampler the policy already fixed is not a material parameter: on D3D12 it lives in
+            // the serialized carrier and on Vulkan its state comes from a published record, so
+            // neither one can be set by a caller.
             kind = ShaderParameterKind::Sampler;
         } else {
             continue;

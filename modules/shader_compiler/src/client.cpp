@@ -265,6 +265,21 @@ bool Client::IsAvailable() const noexcept {
     return _compilerLibrary.IsValid() && AcquireForkCompiler(_compilerLibrary, compiler);
 }
 
+std::optional<shader::Hash128> Client::GetToolchainIdentity() const noexcept {
+    ComPtr<shader::IRadRayDxcCompiler> compiler;
+    if (!_compilerLibrary.IsValid() || !AcquireForkCompiler(_compilerLibrary, compiler)) {
+        return std::nullopt;
+    }
+    shader::RadRayDxcAbiInfo info{};
+    if (FAILED(compiler->GetAbiInfo(&info))) {
+        return std::nullopt;
+    }
+    shader::Hash128 identity{};
+    static_assert(sizeof(info.ToolchainIdentity) == sizeof(identity.Bytes));
+    std::memcpy(identity.Bytes.data(), &info.ToolchainIdentity, sizeof(identity.Bytes));
+    return identity;
+}
+
 DiscoveryResult Client::DiscoverSourceContract(
     std::string_view sourceName,
     std::span<const byte> source,
@@ -403,6 +418,7 @@ namespace radray::shader_compiler {
 
 Client::Client(std::string_view) noexcept : _compilerLibrary{} {}
 bool Client::IsAvailable() const noexcept { return false; }
+std::optional<shader::Hash128> Client::GetToolchainIdentity() const noexcept { return std::nullopt; }
 DiscoveryResult Client::DiscoverSourceContract(
     std::string_view sourceName,
     std::span<const byte> source,

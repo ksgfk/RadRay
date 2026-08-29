@@ -1588,31 +1588,25 @@ struct PipelineLayoutRegisterRange {
 
 struct PipelineLayoutGroup {
     uint32_t Index;
-    vector<ShaderParameterSetLayoutEntryDescriptor> Entries;
+    vector<ShaderParameterSetLayoutEntryD3D12> Entries;
 };
 
+// The bound only keeps a corrupt artifact from making the layout materialize an absurd number of
+// empty parameter groups; every shader this engine compiles stays far below it.
+constexpr uint32_t kMaxGroupIndexD3D12 = 64;
+
+// Register class of a binding, derived from the logical kind alone. The resolved placement decides
+// whether the binding lands in a table or in a root parameter, never which register class it
+// occupies, so the two axes are read separately everywhere below.
 static std::optional<PipelineLayoutRegisterType> MapPipelineLayoutRegisterType(
-    ShaderParameterBindingType type) noexcept {
-    switch (type) {
-        case ShaderParameterBindingType::CBuffer:
-        case ShaderParameterBindingType::DynamicCBuffer:
-            return PipelineLayoutRegisterType::Cbv;
-        case ShaderParameterBindingType::Buffer:
-        case ShaderParameterBindingType::TexelBuffer:
-        case ShaderParameterBindingType::Texture:
-        case ShaderParameterBindingType::DynamicBuffer:
-            return PipelineLayoutRegisterType::Srv;
-        case ShaderParameterBindingType::RWBuffer:
-        case ShaderParameterBindingType::RWTexelBuffer:
-        case ShaderParameterBindingType::RWTexture:
-        case ShaderParameterBindingType::DynamicRWBuffer:
-            return PipelineLayoutRegisterType::Uav;
-        case ShaderParameterBindingType::Sampler:
-            return PipelineLayoutRegisterType::Sampler;
-        case ShaderParameterBindingType::UNKNOWN:
-            return std::nullopt;
+    shader::ShaderBindingKind kind) noexcept {
+    switch (shader::GetWireBindingNamespace(static_cast<uint32_t>(kind))) {
+        case 0: return PipelineLayoutRegisterType::Cbv;
+        case 1: return PipelineLayoutRegisterType::Srv;
+        case 2: return PipelineLayoutRegisterType::Uav;
+        case 3: return PipelineLayoutRegisterType::Sampler;
+        default: return std::nullopt;
     }
-    return std::nullopt;
 }
 
 static std::string_view GetPipelineLayoutRegisterTypeName(
@@ -1626,14 +1620,22 @@ static std::string_view GetPipelineLayoutRegisterTypeName(
     Unreachable();
 }
 
-static std::optional<D3D12_ROOT_PARAMETER_TYPE> MapDynamicRootParameterType(
-    ShaderParameterBindingType type) noexcept {
-    switch (type) {
-        case ShaderParameterBindingType::DynamicCBuffer:
+// Root CBV/SRV/UAV parameter type for a root-descriptor binding. Only the buffer kinds the contract
+// admits as root descriptors map to anything, so an illegal root placement fails native creation
+// instead of being quietly reclassified onto a nearby parameter type.
+static std::optional<D3D12_ROOT_PARAMETER_TYPE> MapRootDescriptorParameterType(
+    shader::ShaderBindingKind kind) noexcept {
+    if (!shader::CanBeRootDescriptor(kind)) {
+        return std::nullopt;
+    }
+    switch (kind) {
+        case shader::ShaderBindingKind::CBuffer:
             return D3D12_ROOT_PARAMETER_TYPE_CBV;
-        case ShaderParameterBindingType::DynamicBuffer:
+        case shader::ShaderBindingKind::StructuredBuffer:
+        case shader::ShaderBindingKind::RawBuffer:
             return D3D12_ROOT_PARAMETER_TYPE_SRV;
-        case ShaderParameterBindingType::DynamicRWBuffer:
+        case shader::ShaderBindingKind::RWStructuredBuffer:
+        case shader::ShaderBindingKind::RWRawBuffer:
             return D3D12_ROOT_PARAMETER_TYPE_UAV;
         default:
             return std::nullopt;
@@ -1641,23 +1643,23 @@ static std::optional<D3D12_ROOT_PARAMETER_TYPE> MapDynamicRootParameterType(
 }
 
 static std::optional<D3D12_DESCRIPTOR_RANGE_TYPE> MapDescriptorRangeType(
-    ShaderParameterBindingType type) noexcept {
-    switch (type) {
-        case ShaderParameterBindingType::CBuffer:
-            return D3D12_DESCRIPTOR_RANGE_TYPE_CBV;
-        case ShaderParameterBindingType::Buffer:
-        case ShaderParameterBindingType::TexelBuffer:
-        case ShaderParameterBindingType::Texture:
-            return D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-        case ShaderParameterBindingType::RWBuffer:
-        case ShaderParameterBindingType::RWTexelBuffer:
-        case ShaderParameterBindingType::RWTexture:
-            return D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-        case ShaderParameterBindingType::Sampler:
-            return D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
-        default:
-            return std::nullopt;
+    shader::ShaderBindingKind kind) noexcept {
+    switch (shader::GetWireBindingNamespace(static_cast<uint32_t>(kind))) {
+        case 0: return D3D12_DESCRIPTOR_RANGE_TYPE_CBV;
+        case 1: return D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
+        case 2: return D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+        case 3: return D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;
+        default: return std::nullopt;
     }
+}
+
+// Required buffer usage of a binding, derived from the logical kind. The placement deliberately has
+// no say: a root CBV and a table CBV bind the same resource class.
+static BufferUse MapShaderBindingBufferUseD3D12(shader::ShaderBindingKind kind) noexcept {
+    if (shader::IsUniformBufferKind(kind)) {
+        return BufferUse::CBuffer;
+    }
+    return shader::IsWritableKind(kind) ? BufferUse::UnorderedAccess : BufferUse::Resource;
 }
 
 static std::optional<uint32_t> MapDescriptorRangeNamespace(
@@ -1681,9 +1683,105 @@ static std::optional<uint32_t> MapRootDescriptorNamespace(
     }
 }
 
+// Materializes the parameter groups from the resolved layout. Groups below the highest active one
+// may legitimately carry no binding at all; they still get an empty group, because dropping them
+// would make a caller's group index stop meaning the register space the shader was compiled
+// against. Resolution already sorted the bindings by (group, namespace, binding) and rejected
+// duplicates, so this only confirms the invariant instead of re-sorting behind the resolver's back.
+static bool BuildParameterGroupsD3D12(
+    const ResolvedD3D12Layout& layout,
+    vector<PipelineLayoutGroup>& groups) noexcept {
+    uint32_t groupCount = 0;
+    for (const ResolvedD3D12Binding& binding : layout.Bindings) {
+        if (binding.Group > kMaxGroupIndexD3D12) {
+            RADRAY_ERR_LOG(
+                "d3d12 pipeline layout register space is out of range: {}",
+                binding.Group);
+            return false;
+        }
+        groupCount = std::max(groupCount, binding.Group + 1);
+    }
+    groups.resize(groupCount);
+    for (uint32_t index = 0; index < groupCount; ++index) {
+        groups[index].Index = index;
+    }
+    for (const ResolvedD3D12Binding& binding : layout.Bindings) {
+        const uint32_t nameSpace =
+            shader::GetWireBindingNamespace(static_cast<uint32_t>(binding.LogicalKind));
+        if (nameSpace > 3) {
+            RADRAY_ERR_LOG(
+                "d3d12 pipeline layout binding has an unknown logical kind: group {} binding {}",
+                binding.Group,
+                binding.Binding);
+            return false;
+        }
+        if (binding.Count == 0 ||
+            binding.Count - 1 > std::numeric_limits<uint32_t>::max() - binding.Binding) {
+            RADRAY_ERR_LOG(
+                "d3d12 pipeline layout register range is empty or overflows: group {} binding {} count {}",
+                binding.Group,
+                binding.Binding,
+                binding.Count);
+            return false;
+        }
+        if (binding.Placement == shader::ShaderBindingPlacement::StaticSampler &&
+            (binding.LogicalKind != shader::ShaderBindingKind::Sampler || binding.Count != 1)) {
+            RADRAY_ERR_LOG(
+                "d3d12 static sampler must be a single sampler: group {} binding {}",
+                binding.Group,
+                binding.Binding);
+            return false;
+        }
+        if (binding.Placement == shader::ShaderBindingPlacement::RootDescriptor &&
+            (binding.Count != 1 || !MapRootDescriptorParameterType(binding.LogicalKind).has_value())) {
+            RADRAY_ERR_LOG(
+                "d3d12 root descriptor placement is illegal for this binding: group {} binding {}",
+                binding.Group,
+                binding.Binding);
+            return false;
+        }
+        vector<ShaderParameterSetLayoutEntryD3D12>& entries = groups[binding.Group].Entries;
+        if (!entries.empty()) {
+            const ShaderParameterSetLayoutEntryD3D12& previous = entries.back();
+            const bool ordered = previous.Namespace < nameSpace ||
+                                 (previous.Namespace == nameSpace && previous.Binding < binding.Binding);
+            if (!ordered) {
+                RADRAY_ERR_LOG(
+                    "d3d12 pipeline layout bindings are unordered or duplicated: group {} binding {}",
+                    binding.Group,
+                    binding.Binding);
+                return false;
+            }
+        }
+        entries.push_back(ShaderParameterSetLayoutEntryD3D12{
+            binding.Binding,
+            binding.LogicalKind,
+            binding.Placement,
+            binding.Count,
+            binding.Stages,
+            nameSpace});
+    }
+    return true;
+}
+
+// Locates the entry a (binding number, register class) pair names inside a group. Every lookup goes
+// through here so the register class is always part of the key: a group may legitimately hold b0,
+// t0 and u0 at once, and matching on the bare binding number would pick whichever came first.
+static Nullable<const ShaderParameterSetLayoutEntryD3D12*> FindGroupEntryD3D12(
+    const vector<ShaderParameterSetLayoutEntryD3D12>& entries,
+    uint32_t bindingNumber,
+    uint32_t nameSpace) noexcept {
+    for (const ShaderParameterSetLayoutEntryD3D12& entry : entries) {
+        if (entry.Namespace == nameSpace && entry.Binding == bindingNumber) {
+            return &entry;
+        }
+    }
+    return nullptr;
+}
+
 Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateExplicitRootSignatureInternal(
-    const BackendPipelineLayoutInput& input) noexcept {
-    const std::span<const byte> serialized = input.SerializedRootSignature;
+    const ResolvedD3D12Layout& layout_) noexcept {
+    const std::span<const byte> serialized = layout_.SerializedRootSignature;
     if (serialized.empty() || serialized.size() > std::numeric_limits<UINT>::max()) {
         RADRAY_ERR_LOG("d3d12 explicit root signature blob is invalid");
         return nullptr;
@@ -1721,76 +1819,46 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateExplicitRootSignatureInter
         return nullptr;
     }
 
+    vector<PipelineLayoutGroup> groups;
+    if (!BuildParameterGroupsD3D12(layout_, groups)) {
+        return nullptr;
+    }
+
     auto layout = make_unique<RootSigD3D12>();
     layout->_device = this;
-    layout->_bindingNames = input.BindingNames;
-    layout->_bindingGeneration = input.BindingGeneration;
+    layout->_bindingGeneration = NextBackendBindingGeneration();
     layout->_rootFlags = sourceFlags;
-
-    vector<PipelineLayoutGroup> groups;
-    groups.reserve(input.ParameterSets.size());
-    for (const ShaderParameterSetLayoutDescriptor& parameterSet : input.ParameterSets) {
-        auto group = std::find_if(
-            groups.begin(), groups.end(),
-            [&](const PipelineLayoutGroup& value) noexcept {
-                return value.Index == parameterSet.GroupIndex;
-            });
-        if (group == groups.end()) {
-            groups.push_back(PipelineLayoutGroup{parameterSet.GroupIndex, {}});
-            group = groups.end() - 1;
-        }
-        group->Entries.insert(
-            group->Entries.end(),
-            parameterSet.Entries.begin(),
-            parameterSet.Entries.end());
+    layout->_bindingNames.reserve(layout_.Bindings.size() + layout_.PushConstants.size());
+    for (const ResolvedD3D12Binding& binding : layout_.Bindings) {
+        layout->_bindingNames.push_back(BackendBindingName{
+            binding.Name,
+            ShaderBindingLocation{binding.Group, binding.Binding},
+            shader::GetWireBindingNamespace(static_cast<uint32_t>(binding.LogicalKind))});
     }
-    std::sort(
-        groups.begin(), groups.end(),
-        [](const PipelineLayoutGroup& lhs, const PipelineLayoutGroup& rhs) noexcept {
-            return lhs.Index < rhs.Index;
-        });
+    // Push blocks share the handle table with the descriptor bindings, so a caller reaches root
+    // constants by the same declaration name it uses for everything else. The record kind is what
+    // keeps them apart: a push handle names a root constant block, not a descriptor slot.
+    for (const ResolvedPushConstantBlock& pushConstant : layout_.PushConstants) {
+        layout->_bindingNames.push_back(BackendBindingName{
+            pushConstant.Name,
+            ShaderBindingLocation{pushConstant.RegisterSpace, pushConstant.Register},
+            0,
+            BackendBindingRecordKind::Push});
+    }
+
     layout->_parameterGroups.reserve(groups.size());
-    for (const PipelineLayoutGroup& group : groups) {
-        PipelineLayoutGroup sortedGroup = group;
-        std::sort(
-            sortedGroup.Entries.begin(), sortedGroup.Entries.end(),
-            [](const ShaderParameterSetLayoutEntryDescriptor& lhs,
-               const ShaderParameterSetLayoutEntryDescriptor& rhs) noexcept {
-                if (lhs.Binding != rhs.Binding) {
-                    return lhs.Binding < rhs.Binding;
-                }
-                return GetShaderBindingNamespace(lhs.Type) <
-                       GetShaderBindingNamespace(rhs.Type);
-            });
-        for (size_t index = 1; index < sortedGroup.Entries.size(); ++index) {
-            if (sortedGroup.Entries[index - 1].Binding == sortedGroup.Entries[index].Binding &&
-                GetShaderBindingNamespace(sortedGroup.Entries[index - 1].Type) ==
-                    GetShaderBindingNamespace(sortedGroup.Entries[index].Type)) {
-                RADRAY_ERR_LOG(
-                    "d3d12 explicit root signature has duplicate active binding {} in group {}",
-                    sortedGroup.Entries[index].Binding,
-                    sortedGroup.Index);
-                return nullptr;
-            }
-        }
+    for (PipelineLayoutGroup& group : groups) {
         ShaderParameterGroupLayoutD3D12& parameterGroup =
             layout->_parameterGroups.emplace_back();
-        parameterGroup.GroupIndex = sortedGroup.Index;
-        parameterGroup.Entries = std::move(sortedGroup.Entries);
+        parameterGroup.GroupIndex = group.Index;
+        parameterGroup.Entries = std::move(group.Entries);
         parameterGroup.Bindings.resize(parameterGroup.Entries.size());
         for (size_t entryIndex = 0; entryIndex < parameterGroup.Entries.size(); ++entryIndex) {
-            const ShaderParameterSetLayoutEntryDescriptor& entry =
-                parameterGroup.Entries[entryIndex];
-            if (entry.Count == 0 ||
-                entry.Count - 1 > std::numeric_limits<uint32_t>::max() - entry.Binding ||
-                (entry.ImmutableSampler.has_value() &&
-                 (entry.Type != ShaderParameterBindingType::Sampler || entry.Count != 1))) {
-                RADRAY_ERR_LOG(
-                    "d3d12 explicit root signature has an invalid active binding in group {}",
-                    parameterGroup.GroupIndex);
-                return nullptr;
-            }
+            const ShaderParameterSetLayoutEntryD3D12& entry = parameterGroup.Entries[entryIndex];
             parameterGroup.Bindings[entryIndex].CoveredElements.resize(entry.Count, 0);
+            if (entry.IsRootDescriptor()) {
+                parameterGroup.RootDescriptorOrder.push_back(static_cast<uint32_t>(entryIndex));
+            }
         }
     }
 
@@ -1890,7 +1958,7 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateExplicitRootSignatureInter
     struct ActiveBinding {
         ShaderParameterGroupLayoutD3D12* Group{nullptr};
         ShaderParameterBindingLayoutD3D12* Binding{nullptr};
-        ShaderParameterSetLayoutEntryDescriptor* Entry{nullptr};
+        ShaderParameterSetLayoutEntryD3D12* Entry{nullptr};
         uint32_t ArrayElement{0};
     };
     const auto findActiveBinding = [&](uint32_t groupIndex,
@@ -1904,7 +1972,7 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateExplicitRootSignatureInter
             for (size_t index = 0; index < group.Entries.size(); ++index) {
                 if (binding >= group.Entries[index].Binding &&
                     binding - group.Entries[index].Binding < group.Entries[index].Count &&
-                    GetShaderBindingNamespace(group.Entries[index].Type) == nameSpace) {
+                    group.Entries[index].Namespace == nameSpace) {
                     result.Group = &group;
                     result.Binding = &group.Bindings[index];
                     result.Entry = &group.Entries[index];
@@ -1982,8 +2050,10 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateExplicitRootSignatureInter
                         RADRAY_ERR_LOG("d3d12 explicit descriptor table spans multiple active parameter groups");
                         return nullptr;
                     }
-                    if (active.Entry->ImmutableSampler.has_value() ||
-                        IsDynamicShaderParameterBindingType(active.Entry->Type) ||
+                    // A static sampler is declared by the carrier itself and a root descriptor
+                    // lives in a root parameter, so neither may also be claimed by a descriptor
+                    // range: that would give one declaration two contradictory homes.
+                    if (active.Entry->IsStaticSampler() || active.Entry->IsRootDescriptor() ||
                         active.ArrayElement >= active.Entry->Count) {
                         RADRAY_ERR_LOG("d3d12 explicit descriptor range is incompatible with an active binding");
                         return nullptr;
@@ -2020,26 +2090,27 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateExplicitRootSignatureInter
                 return nullptr;
             }
             const auto constant = std::find_if(
-                input.PushConstants.begin(), input.PushConstants.end(),
-                [&](const PushConstantDescriptor& value) noexcept {
-                    return value.Location.Group == parameter.Constants.RegisterSpace &&
-                           value.Location.Binding == parameter.Constants.ShaderRegister;
+                layout_.PushConstants.begin(), layout_.PushConstants.end(),
+                [&](const ResolvedPushConstantBlock& value) noexcept {
+                    return value.RegisterSpace == parameter.Constants.RegisterSpace &&
+                           value.Register == parameter.Constants.ShaderRegister;
                 });
-            if (constant != input.PushConstants.end()) {
+            if (constant != layout_.PushConstants.end()) {
                 const uint32_t size = parameter.Constants.Num32BitValues * 4;
                 if (constant->Size != size) {
                     RADRAY_ERR_LOG("d3d12 explicit root constants size does not match artifact metadata");
                     return nullptr;
                 }
+                const ShaderBindingLocation location{constant->RegisterSpace, constant->Register};
                 auto existing = std::find_if(
                     layout->_pushConstantBindings.begin(),
                     layout->_pushConstantBindings.end(),
                     [&](const PushConstantBindingD3D12& value) noexcept {
-                        return value.Location == constant->Location;
+                        return value.Location == location;
                     });
                 if (existing == layout->_pushConstantBindings.end()) {
                     PushConstantBindingD3D12 binding;
-                    binding.Location = constant->Location;
+                    binding.Location = location;
                     binding.RootParameterIndex = rootParameterIndex;
                     binding.RootParameterIndices.push_back(rootParameterIndex);
                     layout->_pushConstantBindings.push_back(std::move(binding));
@@ -2064,16 +2135,15 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateExplicitRootSignatureInter
         if (active.Group == nullptr) {
             continue;
         }
-        const bool rootDescriptorTypeMatches =
-            (parameter.ParameterType == D3D12_ROOT_PARAMETER_TYPE_CBV &&
-             active.Entry->Type == ShaderParameterBindingType::CBuffer) ||
-            (parameter.ParameterType == D3D12_ROOT_PARAMETER_TYPE_SRV &&
-             active.Entry->Type == ShaderParameterBindingType::Buffer) ||
-            (parameter.ParameterType == D3D12_ROOT_PARAMETER_TYPE_UAV &&
-             active.Entry->Type == ShaderParameterBindingType::RWBuffer);
-        if (active.Entry->Count != 1 || active.Entry->ImmutableSampler.has_value() ||
-            IsDynamicShaderParameterBindingType(active.Entry->Type) ||
-            !rootDescriptorTypeMatches) {
+        // The authored parameter type must agree with what the logical kind admits, and the
+        // resolved placement must already say root descriptor: the carrier is the authority on the
+        // topology, so a disagreement between the two is a contract violation rather than something
+        // to reconcile here.
+        const std::optional<D3D12_ROOT_PARAMETER_TYPE> expectedParameterType =
+            MapRootDescriptorParameterType(active.Entry->LogicalKind);
+        if (active.Entry->Count != 1 || !active.Entry->IsRootDescriptor() ||
+            !expectedParameterType.has_value() ||
+            expectedParameterType.value() != parameter.ParameterType) {
             RADRAY_ERR_LOG("d3d12 explicit root descriptor is incompatible with an active binding");
             return nullptr;
         }
@@ -2138,7 +2208,7 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateExplicitRootSignatureInter
                    layout->_rootParameters[rootParameterIndex].ShaderVisibility,
                    stage);
     };
-    const auto staticSamplerCoversStage = [&](const ShaderParameterSetLayoutEntryDescriptor& entry,
+    const auto staticSamplerCoversStage = [&](const ShaderParameterSetLayoutEntryD3D12& entry,
                                               uint32_t groupIndex,
                                               ShaderStage stage) noexcept {
         return std::any_of(
@@ -2149,7 +2219,7 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateExplicitRootSignatureInter
                        coversStage(sampler.ShaderVisibility, stage);
             });
     };
-    const auto entryStagesCovered = [&](const ShaderParameterSetLayoutEntryDescriptor& entry,
+    const auto entryStagesCovered = [&](const ShaderParameterSetLayoutEntryD3D12& entry,
                                         const ShaderParameterBindingLayoutD3D12& binding,
                                         uint32_t groupIndex) noexcept {
         const auto hasDestination = [&](uint32_t arrayElement, ShaderStage stage) noexcept {
@@ -2188,9 +2258,11 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateExplicitRootSignatureInter
     };
     for (ShaderParameterGroupLayoutD3D12& group : layout->_parameterGroups) {
         for (size_t entryIndex = 0; entryIndex < group.Entries.size(); ++entryIndex) {
-            const ShaderParameterSetLayoutEntryDescriptor& entry = group.Entries[entryIndex];
+            const ShaderParameterSetLayoutEntryD3D12& entry = group.Entries[entryIndex];
             ShaderParameterBindingLayoutD3D12& binding = group.Bindings[entryIndex];
-            if (entry.ImmutableSampler.has_value()) {
+            // A static sampler owns no descriptor slot, so its coverage comes from the carrier's
+            // static sampler array rather than from a table or root destination.
+            if (entry.IsStaticSampler()) {
                 const bool found =
                     (!entry.Stages.HasFlag(ShaderStage::Vertex) ||
                      staticSamplerCoversStage(entry, group.GroupIndex, ShaderStage::Vertex)) &&
@@ -2213,8 +2285,8 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateExplicitRootSignatureInter
                     group.GroupIndex);
                 return nullptr;
             }
-            if (!entry.ImmutableSampler.has_value() && !entryStagesCovered(
-                                                           entry, binding, group.GroupIndex)) {
+            if (!entry.IsStaticSampler() &&
+                !entryStagesCovered(entry, binding, group.GroupIndex)) {
                 RADRAY_ERR_LOG(
                     "d3d12 explicit root signature visibility does not cover active binding {} in group {}",
                     entry.Binding,
@@ -2223,12 +2295,13 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateExplicitRootSignatureInter
             }
         }
     }
-    for (const PushConstantDescriptor& constant : input.PushConstants) {
+    for (const ResolvedPushConstantBlock& constant : layout_.PushConstants) {
+        const ShaderBindingLocation location{constant.RegisterSpace, constant.Register};
         const auto found = std::find_if(
             layout->_pushConstantBindings.begin(),
             layout->_pushConstantBindings.end(),
             [&](const PushConstantBindingD3D12& value) noexcept {
-                return value.Location == constant.Location;
+                return value.Location == location;
             });
         const auto psCoversStage = [&](ShaderStage stage) noexcept {
             if (!constant.Stages.HasFlag(stage)) {
@@ -2325,11 +2398,10 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateExplicitRootSignatureInter
 }
 
 Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateRootSignatureInternal(
-    const BackendPipelineLayoutInput& input) noexcept {
-    if (!input.SerializedRootSignature.empty()) {
-        return CreateExplicitRootSignatureInternal(input);
+    const ResolvedD3D12Layout& layout_) noexcept {
+    if (layout_.HasExplicitCarrier()) {
+        return CreateExplicitRootSignatureInternal(layout_);
     }
-    const PipelineLayoutDescriptor& desc = input.Descriptor;
     D3D12_FEATURE_DATA_ROOT_SIGNATURE rootSignatureFeature{};
     rootSignatureFeature.HighestVersion = D3D_ROOT_SIGNATURE_VERSION_1_1;
     if (HRESULT hr = _device->CheckFeatureSupport(
@@ -2351,29 +2423,23 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateRootSignatureInternal(
     }
 
     vector<PipelineLayoutGroup> groups;
-    groups.reserve(desc.ParameterSets.size());
-    for (const ShaderParameterSetLayoutDescriptor& parameterSet : desc.ParameterSets) {
-        auto group = std::find_if(
-            groups.begin(),
-            groups.end(),
-            [&](const PipelineLayoutGroup& value) noexcept {
-                return value.Index == parameterSet.GroupIndex;
-            });
-        if (group == groups.end()) {
-            groups.push_back(PipelineLayoutGroup{parameterSet.GroupIndex, {}});
-            group = groups.end() - 1;
-        }
-        group->Entries.insert(
-            group->Entries.end(),
-            parameterSet.Entries.begin(),
-            parameterSet.Entries.end());
+    if (!BuildParameterGroupsD3D12(layout_, groups)) {
+        return nullptr;
     }
-    std::sort(
-        groups.begin(),
-        groups.end(),
-        [](const PipelineLayoutGroup& lhs, const PipelineLayoutGroup& rhs) noexcept {
-            return lhs.Index < rhs.Index;
-        });
+    // A static sampler is authored by a root signature carrier, and this builder only runs when
+    // there is no carrier. Reaching here with one means the resolved layout and its own carrier flag
+    // disagree, which is a contract violation rather than something to silently drop.
+    for (const PipelineLayoutGroup& group : groups) {
+        for (const ShaderParameterSetLayoutEntryD3D12& entry : group.Entries) {
+            if (entry.IsStaticSampler()) {
+                RADRAY_ERR_LOG(
+                    "d3d12 static sampler requires a root signature carrier: group {} binding {}",
+                    group.Index,
+                    entry.Binding);
+                return nullptr;
+            }
+        }
+    }
 
     vector<PipelineLayoutRegisterRange> registerRanges;
     uint32_t rootDwordCount = 0;
@@ -2385,7 +2451,7 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateRootSignatureInternal(
         return true;
     };
 
-    for (const PushConstantDescriptor& pushConstant : desc.PushConstants) {
+    for (const ResolvedPushConstantBlock& pushConstant : layout_.PushConstants) {
         if (pushConstant.Size == 0 || pushConstant.Size % 4 != 0) {
             RADRAY_ERR_LOG(
                 "d3d12 pipeline layout push constant size must be non-zero and 4-byte aligned: {}",
@@ -2398,75 +2464,23 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateRootSignatureInternal(
         }
         registerRanges.push_back(PipelineLayoutRegisterRange{
             PipelineLayoutRegisterType::Cbv,
-            pushConstant.Location.Group,
-            pushConstant.Location.Binding,
+            pushConstant.RegisterSpace,
+            pushConstant.Register,
             1,
-            pushConstant.Location.Binding});
+            pushConstant.Register});
     }
 
     for (PipelineLayoutGroup& group : groups) {
-        std::sort(
-            group.Entries.begin(),
-            group.Entries.end(),
-            [](const ShaderParameterSetLayoutEntryDescriptor& lhs,
-               const ShaderParameterSetLayoutEntryDescriptor& rhs) noexcept {
-                return lhs.Binding < rhs.Binding;
-            });
-        for (size_t i = 1; i < group.Entries.size(); ++i) {
-            if (group.Entries[i - 1].Binding == group.Entries[i].Binding &&
-                GetShaderBindingNamespace(group.Entries[i - 1].Type) ==
-                    GetShaderBindingNamespace(group.Entries[i].Type)) {
-                RADRAY_ERR_LOG(
-                    "d3d12 pipeline layout contains duplicate binding {} in group {}",
-                    group.Entries[i].Binding,
-                    group.Index);
-                return nullptr;
-            }
-        }
-
         bool hasResourceTable = false;
         bool hasSamplerTable = false;
-        for (const ShaderParameterSetLayoutEntryDescriptor& entry : group.Entries) {
-            if (entry.Count == 0) {
-                RADRAY_ERR_LOG(
-                    "d3d12 pipeline layout binding has zero count: group {} binding {}",
-                    group.Index,
-                    entry.Binding);
-                return nullptr;
-            }
-
-            const auto registerType = MapPipelineLayoutRegisterType(entry.Type);
+        for (const ShaderParameterSetLayoutEntryD3D12& entry : group.Entries) {
+            const auto registerType = MapPipelineLayoutRegisterType(entry.LogicalKind);
             if (!registerType.has_value()) {
                 RADRAY_ERR_LOG(
-                    "d3d12 pipeline layout binding has unknown type: group {} binding {} type {}",
+                    "d3d12 pipeline layout binding has unknown logical kind: group {} binding {} kind {}",
                     group.Index,
                     entry.Binding,
-                    static_cast<int32_t>(entry.Type));
-                return nullptr;
-            }
-            if (entry.ImmutableSampler.has_value() &&
-                (entry.Type != ShaderParameterBindingType::Sampler || entry.Count != 1)) {
-                RADRAY_ERR_LOG(
-                    "d3d12 immutable sampler must have sampler type and count 1: group {} binding {}",
-                    group.Index,
-                    entry.Binding);
-                return nullptr;
-            }
-            const bool isDynamic = IsDynamicShaderParameterBindingType(entry.Type);
-            if (isDynamic && entry.Count != 1) {
-                RADRAY_ERR_LOG(
-                    "d3d12 dynamic binding must have count 1: group {} binding {} count {}",
-                    group.Index,
-                    entry.Binding,
-                    entry.Count);
-                return nullptr;
-            }
-            if (entry.Count - 1 > std::numeric_limits<uint32_t>::max() - entry.Binding) {
-                RADRAY_ERR_LOG(
-                    "d3d12 pipeline layout register range overflows: group {} binding {} count {}",
-                    group.Index,
-                    entry.Binding,
-                    entry.Count);
+                    static_cast<uint32_t>(entry.LogicalKind));
                 return nullptr;
             }
 
@@ -2477,13 +2491,13 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateRootSignatureInternal(
                 entry.Count,
                 entry.Binding + entry.Count - 1});
 
-            if (isDynamic) {
+            if (entry.IsRootDescriptor()) {
                 if (!addRootDwords(2)) {
                     RADRAY_ERR_LOG("d3d12 pipeline layout exceeds the 64 DWORD root signature limit");
                     return nullptr;
                 }
-            } else if (entry.Type == ShaderParameterBindingType::Sampler) {
-                hasSamplerTable |= !entry.ImmutableSampler.has_value();
+            } else if (entry.IsSampler()) {
+                hasSamplerTable = true;
             } else {
                 hasResourceTable = true;
             }
@@ -2534,8 +2548,24 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateRootSignatureInternal(
 
     auto layout = make_unique<RootSigD3D12>();
     layout->_device = this;
-    layout->_bindingNames = input.BindingNames;
-    layout->_bindingGeneration = input.BindingGeneration;
+    layout->_bindingGeneration = NextBackendBindingGeneration();
+    layout->_bindingNames.reserve(layout_.Bindings.size() + layout_.PushConstants.size());
+    for (const ResolvedD3D12Binding& binding : layout_.Bindings) {
+        layout->_bindingNames.push_back(BackendBindingName{
+            binding.Name,
+            ShaderBindingLocation{binding.Group, binding.Binding},
+            shader::GetWireBindingNamespace(static_cast<uint32_t>(binding.LogicalKind))});
+    }
+    // Push blocks share the handle table with the descriptor bindings, so a caller reaches root
+    // constants by the same declaration name it uses for everything else. The record kind is what
+    // keeps them apart: a push handle names a root constant block, not a descriptor slot.
+    for (const ResolvedPushConstantBlock& pushConstant : layout_.PushConstants) {
+        layout->_bindingNames.push_back(BackendBindingName{
+            pushConstant.Name,
+            ShaderBindingLocation{pushConstant.RegisterSpace, pushConstant.Register},
+            0,
+            BackendBindingRecordKind::Push});
+    }
     layout->_parameterGroups.reserve(groups.size());
     for (const PipelineLayoutGroup& group : groups) {
         ShaderParameterGroupLayoutD3D12& parameterGroup =
@@ -2547,13 +2577,13 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateRootSignatureInternal(
         uint32_t resourceDescriptorOffset = 0;
         uint32_t samplerDescriptorOffset = 0;
         for (size_t entryIndex = 0; entryIndex < group.Entries.size(); ++entryIndex) {
-            const ShaderParameterSetLayoutEntryDescriptor& entry = group.Entries[entryIndex];
+            const ShaderParameterSetLayoutEntryD3D12& entry = group.Entries[entryIndex];
             ShaderParameterBindingLayoutD3D12& binding = parameterGroup.Bindings[entryIndex];
-            if (IsDynamicShaderParameterBindingType(entry.Type) ||
-                entry.ImmutableSampler.has_value()) {
+            if (entry.IsRootDescriptor()) {
+                parameterGroup.RootDescriptorOrder.push_back(static_cast<uint32_t>(entryIndex));
                 continue;
             }
-            if (entry.Type == ShaderParameterBindingType::Sampler) {
+            if (entry.IsSampler()) {
                 if (entry.Count > std::numeric_limits<uint32_t>::max() - samplerDescriptorOffset) {
                     RADRAY_ERR_LOG(
                         "d3d12 sampler descriptor count overflows in group {}",
@@ -2576,19 +2606,20 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateRootSignatureInternal(
         parameterGroup.ResourceDescriptorCount = resourceDescriptorOffset;
         parameterGroup.SamplerDescriptorCount = samplerDescriptorOffset;
     }
-    for (const PushConstantDescriptor& pushConstant : desc.PushConstants) {
+    for (const ResolvedPushConstantBlock& pushConstant : layout_.PushConstants) {
         const uint32_t rootParameterIndex =
             static_cast<uint32_t>(layout->_rootParameters.size());
         D3D12_ROOT_PARAMETER1 rootParameter{};
         rootParameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-        rootParameter.Constants.ShaderRegister = pushConstant.Location.Binding;
-        rootParameter.Constants.RegisterSpace = pushConstant.Location.Group;
+        rootParameter.Constants.ShaderRegister = pushConstant.Register;
+        rootParameter.Constants.RegisterSpace = pushConstant.RegisterSpace;
         rootParameter.Constants.Num32BitValues = pushConstant.Size / 4;
         rootParameter.ShaderVisibility = MapShaderStages(pushConstant.Stages);
         layout->_rootParameters.push_back(rootParameter);
         PushConstantBindingD3D12 binding{};
-        binding.Location = pushConstant.Location;
+        binding.Location = ShaderBindingLocation{pushConstant.RegisterSpace, pushConstant.Register};
         binding.RootParameterIndex = rootParameterIndex;
+        binding.RootParameterIndices.push_back(rootParameterIndex);
         layout->_pushConstantBindings.push_back(std::move(binding));
     }
 
@@ -2597,11 +2628,10 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateRootSignatureInternal(
         vector<D3D12_DESCRIPTOR_RANGE1>& ranges = layout->_descriptorRanges.back();
         ShaderStages tableStages{ShaderStage::UNKNOWN};
         uint32_t descriptorOffset = 0;
-        for (const ShaderParameterSetLayoutEntryDescriptor& entry : group.Entries) {
-            const bool isSampler = entry.Type == ShaderParameterBindingType::Sampler;
+        for (const ShaderParameterSetLayoutEntryD3D12& entry : group.Entries) {
             const bool belongsInTable = samplerTable
-                                            ? isSampler && !entry.ImmutableSampler.has_value()
-                                            : !isSampler && !IsDynamicShaderParameterBindingType(entry.Type);
+                                            ? entry.IsSampler()
+                                            : !entry.IsSampler() && !entry.IsRootDescriptor();
             if (!belongsInTable) {
                 continue;
             }
@@ -2611,7 +2641,7 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateRootSignatureInternal(
                     group.Index);
                 return false;
             }
-            const auto rangeType = MapDescriptorRangeType(entry.Type);
+            const auto rangeType = MapDescriptorRangeType(entry.LogicalKind);
             RADRAY_ASSERT(rangeType.has_value());
             D3D12_DESCRIPTOR_RANGE1 range{};
             range.RangeType = rangeType.value();
@@ -2639,43 +2669,29 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateRootSignatureInternal(
         const PipelineLayoutGroup& group = groups[groupIndex];
         ShaderParameterGroupLayoutD3D12& parameterGroup =
             layout->_parameterGroups[groupIndex];
-        for (const ShaderParameterSetLayoutEntryDescriptor& entry : group.Entries) {
-            if (!entry.ImmutableSampler.has_value()) {
-                continue;
-            }
-            const SamplerDescriptor& sampler = entry.ImmutableSampler.value();
-            D3D12_STATIC_SAMPLER_DESC staticSampler{};
-            staticSampler.Filter = MapType(
-                sampler.MinFilter,
-                sampler.MagFilter,
-                sampler.MipmapFilter,
-                sampler.Compare.has_value(),
-                sampler.AnisotropyClamp);
-            staticSampler.AddressU = MapType(sampler.AddressS);
-            staticSampler.AddressV = MapType(sampler.AddressT);
-            staticSampler.AddressW = MapType(sampler.AddressR);
-            staticSampler.MipLODBias = 0;
-            staticSampler.MaxAnisotropy = sampler.AnisotropyClamp;
-            staticSampler.ComparisonFunc = sampler.Compare.has_value()
-                                               ? MapType(sampler.Compare.value())
-                                               : D3D12_COMPARISON_FUNC_NEVER;
-            staticSampler.BorderColor = D3D12_STATIC_BORDER_COLOR_TRANSPARENT_BLACK;
-            staticSampler.MinLOD = sampler.LodMin;
-            staticSampler.MaxLOD = sampler.LodMax;
-            staticSampler.ShaderRegister = entry.Binding;
-            staticSampler.RegisterSpace = group.Index;
-            staticSampler.ShaderVisibility = MapShaderStages(entry.Stages);
-            layout->_staticSamplers.push_back(staticSampler);
-        }
+        // D3D12 static samplers only ever arrive inside a serialized root signature carrier, and
+        // that path never reaches this implicit builder, so there is nothing to emit here.
 
         for (size_t entryIndex = 0; entryIndex < group.Entries.size(); ++entryIndex) {
-            const ShaderParameterSetLayoutEntryDescriptor& entry = group.Entries[entryIndex];
-            const auto parameterType = MapDynamicRootParameterType(entry.Type);
-            if (!parameterType.has_value()) {
+            const ShaderParameterSetLayoutEntryD3D12& entry = group.Entries[entryIndex];
+            if (!entry.IsRootDescriptor()) {
                 continue;
             }
-            parameterGroup.Bindings[entryIndex].RootParameterIndex =
-                static_cast<uint32_t>(layout->_rootParameters.size());
+            const auto parameterType = MapRootDescriptorParameterType(entry.LogicalKind);
+            if (!parameterType.has_value()) {
+                RADRAY_ERR_LOG(
+                    "d3d12 root descriptor placement is illegal for this binding: group {} binding {}",
+                    group.Index,
+                    entry.Binding);
+                return nullptr;
+            }
+            // Recorded as a destination, exactly like an authored root CBV in the explicit path, so
+            // command time has one way to reach a root descriptor and the fan-out case needs no
+            // second code path.
+            parameterGroup.Bindings[entryIndex].RootDescriptorDestinations.push_back(
+                ShaderParameterBindingLayoutD3D12::RootDescriptorDestination{
+                    static_cast<uint32_t>(layout->_rootParameters.size()),
+                    parameterType.value()});
             D3D12_ROOT_PARAMETER1 rootParameter{};
             rootParameter.ParameterType = parameterType.value();
             rootParameter.Descriptor.ShaderRegister = entry.Binding;
@@ -2688,9 +2704,8 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateRootSignatureInternal(
         const bool hasResourceTable = std::any_of(
             group.Entries.begin(),
             group.Entries.end(),
-            [](const ShaderParameterSetLayoutEntryDescriptor& entry) noexcept {
-                return entry.Type != ShaderParameterBindingType::Sampler &&
-                       !IsDynamicShaderParameterBindingType(entry.Type);
+            [](const ShaderParameterSetLayoutEntryD3D12& entry) noexcept {
+                return !entry.IsSampler() && !entry.IsRootDescriptor();
             });
         if (hasResourceTable && !appendDescriptorTable(group, false)) {
             return nullptr;
@@ -2702,9 +2717,8 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateRootSignatureInternal(
                                                      0,
                                                      parameterGroup.ResourceDescriptorCount});
             for (size_t entryIndex = 0; entryIndex < group.Entries.size(); ++entryIndex) {
-                const ShaderParameterSetLayoutEntryDescriptor& entry = group.Entries[entryIndex];
-                if (entry.Type == ShaderParameterBindingType::Sampler ||
-                    IsDynamicShaderParameterBindingType(entry.Type)) {
+                const ShaderParameterSetLayoutEntryD3D12& entry = group.Entries[entryIndex];
+                if (entry.IsSampler() || entry.IsRootDescriptor()) {
                     continue;
                 }
                 parameterGroup.Bindings[entryIndex].DescriptorDestinations.push_back({parameterGroup.ResourceTableRootParameter,
@@ -2714,9 +2728,8 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateRootSignatureInternal(
         const bool hasSamplerTable = std::any_of(
             group.Entries.begin(),
             group.Entries.end(),
-            [](const ShaderParameterSetLayoutEntryDescriptor& entry) noexcept {
-                return entry.Type == ShaderParameterBindingType::Sampler &&
-                       !entry.ImmutableSampler.has_value();
+            [](const ShaderParameterSetLayoutEntryD3D12& entry) noexcept {
+                return entry.IsSampler();
             });
         if (hasSamplerTable && !appendDescriptorTable(group, true)) {
             return nullptr;
@@ -2728,9 +2741,8 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateRootSignatureInternal(
                                                     0,
                                                     parameterGroup.SamplerDescriptorCount});
             for (size_t entryIndex = 0; entryIndex < group.Entries.size(); ++entryIndex) {
-                const ShaderParameterSetLayoutEntryDescriptor& entry = group.Entries[entryIndex];
-                if (entry.Type != ShaderParameterBindingType::Sampler ||
-                    entry.ImmutableSampler.has_value()) {
+                const ShaderParameterSetLayoutEntryD3D12& entry = group.Entries[entryIndex];
+                if (!entry.IsSampler()) {
                     continue;
                 }
                 parameterGroup.Bindings[entryIndex].DescriptorDestinations.push_back({parameterGroup.SamplerTableRootParameter,
@@ -2777,16 +2789,21 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateRootSignatureInternal(
 
 Nullable<unique_ptr<PipelineLayout>> DeviceD3D12::CreatePipelineLayout(
     const shader::DxilShaderArtifactView& artifact,
-    const ShaderLayoutPolicy& policy) noexcept {
-    const auto input = MakeBackendPipelineLayoutInput(artifact, policy);
-    if (!input.has_value()) {
+    const D3D12TargetLayoutOptions& options) noexcept {
+    const std::optional<ResolvedD3D12Layout> resolved = ResolveD3D12Layout(artifact, options);
+    if (!resolved.has_value()) {
         return nullptr;
     }
-    auto layout = CreateRootSignatureInternal(input.value());
-    if (!layout.HasValue()) {
+    return CreatePipelineLayout(resolved.value());
+}
+
+Nullable<unique_ptr<PipelineLayout>> DeviceD3D12::CreatePipelineLayout(
+    const ResolvedD3D12Layout& layout) noexcept {
+    auto rootSignature = CreateRootSignatureInternal(layout);
+    if (!rootSignature.HasValue()) {
         return nullptr;
     }
-    return unique_ptr<PipelineLayout>{layout.Release()};
+    return unique_ptr<PipelineLayout>{rootSignature.Release()};
 }
 
 Nullable<unique_ptr<ShaderParameterSet>> DeviceD3D12::CreateShaderParameterSet(
@@ -2806,7 +2823,7 @@ Nullable<unique_ptr<ShaderParameterSet>> DeviceD3D12::CreateShaderParameterSet(
     result->_groupIndex = desc.GroupIndex;
     result->_bindingValueOffsets.reserve(group.Get()->Entries.size());
     size_t valueCount = 0;
-    for (const ShaderParameterSetLayoutEntryDescriptor& entry : group.Get()->Entries) {
+    for (const ShaderParameterSetLayoutEntryD3D12& entry : group.Get()->Entries) {
         if (entry.Count > std::numeric_limits<size_t>::max() - valueCount) {
             RADRAY_ERR_LOG("d3d12 shader parameter cache is too large");
             return nullptr;
@@ -2904,13 +2921,18 @@ static bool ValidateRawOrStructuredBufferRangeD3D12(
     return true;
 }
 
+// Value compatibility is decided from the logical resource kind, not from a fused backend enum: the
+// required buffer usage, the alignment rules and the view usage all follow from the kind. The
+// resolved placement only decides whether the value ends up in a descriptor or in a root parameter,
+// so the one place it is consulted is the constant-buffer *view* size limit, which a root CBV does
+// not have.
 static bool ValidateShaderParameterValueD3D12(
     DeviceD3D12* device,
-    ShaderParameterBindingType type,
+    shader::ShaderBindingKind kind,
+    shader::ShaderBindingPlacement placement,
     const ShaderParameterValue& value) noexcept {
-    switch (type) {
-        case ShaderParameterBindingType::CBuffer:
-        case ShaderParameterBindingType::DynamicCBuffer: {
+    switch (kind) {
+        case shader::ShaderBindingKind::CBuffer: {
             const auto* binding = std::get_if<ShaderBufferBinding>(&value);
             if (binding == nullptr || binding->StructureByteStride != 0) {
                 RADRAY_ERR_LOG("d3d12 constant buffer binding has an incompatible value");
@@ -2923,7 +2945,7 @@ static bool ValidateShaderParameterValueD3D12(
                 RADRAY_ERR_LOG("d3d12 constant buffer offset must be 256-byte aligned");
                 return false;
             }
-            if (type == ShaderParameterBindingType::CBuffer) {
+            if (placement == shader::ShaderBindingPlacement::Table) {
                 if (resolved->Size >
                     std::numeric_limits<uint64_t>::max() -
                         (D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT - 1)) {
@@ -2942,27 +2964,24 @@ static bool ValidateShaderParameterValueD3D12(
             }
             return true;
         }
-        case ShaderParameterBindingType::Buffer:
-        case ShaderParameterBindingType::DynamicBuffer:
-        case ShaderParameterBindingType::RWBuffer:
-        case ShaderParameterBindingType::DynamicRWBuffer: {
+        case shader::ShaderBindingKind::StructuredBuffer:
+        case shader::ShaderBindingKind::RWStructuredBuffer:
+        case shader::ShaderBindingKind::RawBuffer:
+        case shader::ShaderBindingKind::RWRawBuffer: {
             const auto* binding = std::get_if<ShaderBufferBinding>(&value);
             if (binding == nullptr) {
                 return false;
             }
-            const bool writable =
-                type == ShaderParameterBindingType::RWBuffer ||
-                type == ShaderParameterBindingType::DynamicRWBuffer;
             const auto resolved = ResolveShaderBufferBindingD3D12(
                 device,
                 *binding,
-                writable ? BufferUse::UnorderedAccess : BufferUse::Resource);
+                MapShaderBindingBufferUseD3D12(kind));
             return resolved.has_value() &&
                    ValidateRawOrStructuredBufferRangeD3D12(
                        resolved.value(), binding->StructureByteStride);
         }
-        case ShaderParameterBindingType::TexelBuffer:
-        case ShaderParameterBindingType::RWTexelBuffer: {
+        case shader::ShaderBindingKind::TypedBuffer:
+        case shader::ShaderBindingKind::RWTypedBuffer: {
             const auto* binding = std::get_if<ShaderTexelBufferBinding>(&value);
             if (binding == nullptr || binding->Target == nullptr ||
                 binding->Target->GetDevice() != device) {
@@ -2975,9 +2994,7 @@ static bool ValidateShaderParameterValueD3D12(
             const auto resolved = ResolveShaderBufferBindingD3D12(
                 device,
                 untypedBinding,
-                type == ShaderParameterBindingType::RWTexelBuffer
-                    ? BufferUse::UnorderedAccess
-                    : BufferUse::Resource);
+                MapShaderBindingBufferUseD3D12(kind));
             const uint32_t elementSize = GetTextureFormatBytesPerPixel(binding->Format);
             const DXGI_FORMAT format = MapType(binding->Format);
             if (!resolved.has_value() || elementSize == 0 ||
@@ -2990,15 +3007,15 @@ static bool ValidateShaderParameterValueD3D12(
             }
             return true;
         }
-        case ShaderParameterBindingType::Texture:
-        case ShaderParameterBindingType::RWTexture: {
+        case shader::ShaderBindingKind::Texture:
+        case shader::ShaderBindingKind::RWTexture: {
             const auto* viewValue = std::get_if<TextureView*>(&value);
             if (viewValue == nullptr || *viewValue == nullptr) {
                 return false;
             }
             auto* view = CastD3D12Object(*viewValue);
             const TextureViewUsage requiredUsage =
-                type == ShaderParameterBindingType::RWTexture
+                shader::IsWritableKind(kind)
                     ? TextureViewUsage::UnorderedAccess
                     : TextureViewUsage::Resource;
             if (!view->IsValid() || view->_device != device ||
@@ -3008,7 +3025,7 @@ static bool ValidateShaderParameterValueD3D12(
             }
             return true;
         }
-        case ShaderParameterBindingType::Sampler: {
+        case shader::ShaderBindingKind::Sampler: {
             const auto* samplerValue = std::get_if<Sampler*>(&value);
             if (samplerValue == nullptr || *samplerValue == nullptr) {
                 return false;
@@ -3020,19 +3037,19 @@ static bool ValidateShaderParameterValueD3D12(
             }
             return true;
         }
-        case ShaderParameterBindingType::UNKNOWN:
-            return false;
     }
     return false;
 }
 
+// Only ever called for table bindings: a root descriptor carries no descriptor, it takes a GPU
+// virtual address at command time.
 static void WriteShaderParameterValueD3D12(
     ShaderParameterSetD3D12* set,
-    ShaderParameterBindingType type,
+    shader::ShaderBindingKind kind,
     uint32_t descriptorIndex,
     const ShaderParameterValue& value) noexcept {
-    switch (type) {
-        case ShaderParameterBindingType::CBuffer: {
+    switch (kind) {
+        case shader::ShaderBindingKind::CBuffer: {
             const ShaderBufferBinding& binding = std::get<ShaderBufferBinding>(value);
             const auto resolved = ResolveShaderBufferBindingD3D12(
                 set->_device, binding, BufferUse::CBuffer);
@@ -3047,19 +3064,19 @@ static void WriteShaderParameterValueD3D12(
                 set->_resourceDescriptors.GetStart() + descriptorIndex);
             return;
         }
-        case ShaderParameterBindingType::Buffer:
-        case ShaderParameterBindingType::RWBuffer: {
+        case shader::ShaderBindingKind::StructuredBuffer:
+        case shader::ShaderBindingKind::RWStructuredBuffer:
+        case shader::ShaderBindingKind::RawBuffer:
+        case shader::ShaderBindingKind::RWRawBuffer: {
             const ShaderBufferBinding& binding = std::get<ShaderBufferBinding>(value);
             const auto resolved = ResolveShaderBufferBindingD3D12(
                 set->_device,
                 binding,
-                type == ShaderParameterBindingType::RWBuffer
-                    ? BufferUse::UnorderedAccess
-                    : BufferUse::Resource);
+                MapShaderBindingBufferUseD3D12(kind));
             RADRAY_ASSERT(resolved.has_value());
             const uint64_t elementSize =
                 binding.StructureByteStride == 0 ? 4 : binding.StructureByteStride;
-            if (type == ShaderParameterBindingType::Buffer) {
+            if (!shader::IsWritableKind(kind)) {
                 D3D12_SHADER_RESOURCE_VIEW_DESC desc{};
                 desc.Format = binding.StructureByteStride == 0
                                   ? DXGI_FORMAT_R32_TYPELESS
@@ -3096,20 +3113,18 @@ static void WriteShaderParameterValueD3D12(
             }
             return;
         }
-        case ShaderParameterBindingType::TexelBuffer:
-        case ShaderParameterBindingType::RWTexelBuffer: {
+        case shader::ShaderBindingKind::TypedBuffer:
+        case shader::ShaderBindingKind::RWTypedBuffer: {
             const ShaderTexelBufferBinding& binding =
                 std::get<ShaderTexelBufferBinding>(value);
             ShaderBufferBinding bufferBinding{binding.Target, binding.Range, 0};
             const auto resolved = ResolveShaderBufferBindingD3D12(
                 set->_device,
                 bufferBinding,
-                type == ShaderParameterBindingType::RWTexelBuffer
-                    ? BufferUse::UnorderedAccess
-                    : BufferUse::Resource);
+                MapShaderBindingBufferUseD3D12(kind));
             RADRAY_ASSERT(resolved.has_value());
             const uint32_t elementSize = GetTextureFormatBytesPerPixel(binding.Format);
-            if (type == ShaderParameterBindingType::TexelBuffer) {
+            if (!shader::IsWritableKind(kind)) {
                 D3D12_SHADER_RESOURCE_VIEW_DESC desc{};
                 desc.Format = MapType(binding.Format);
                 desc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
@@ -3135,26 +3150,17 @@ static void WriteShaderParameterValueD3D12(
             }
             return;
         }
-        case ShaderParameterBindingType::Texture: {
+        case shader::ShaderBindingKind::Texture:
+        case shader::ShaderBindingKind::RWTexture: {
             auto* view = CastD3D12Object(std::get<TextureView*>(value));
             view->_heapView.CopyTo(0, 1, set->_resourceDescriptors, descriptorIndex);
             return;
         }
-        case ShaderParameterBindingType::RWTexture: {
-            auto* view = CastD3D12Object(std::get<TextureView*>(value));
-            view->_heapView.CopyTo(0, 1, set->_resourceDescriptors, descriptorIndex);
-            return;
-        }
-        case ShaderParameterBindingType::Sampler: {
+        case shader::ShaderBindingKind::Sampler: {
             auto* sampler = CastD3D12Object(std::get<Sampler*>(value));
             sampler->_samplerView.CopyTo(0, 1, set->_samplerDescriptors, descriptorIndex);
             return;
         }
-        case ShaderParameterBindingType::DynamicCBuffer:
-        case ShaderParameterBindingType::DynamicBuffer:
-        case ShaderParameterBindingType::DynamicRWBuffer:
-        case ShaderParameterBindingType::UNKNOWN:
-            return;
     }
 }
 
@@ -3189,14 +3195,27 @@ bool ShaderParameterSetD3D12::Set(
         RADRAY_ERR_LOG("d3d12 shader parameter set write has an invalid binding handle");
         return false;
     }
-    if (binding.GetGeneration() != _layout->_bindingGeneration) {
-#ifdef RADRAY_IS_DEBUG
-        RADRAY_ASSERT(binding.GetGeneration() == _layout->_bindingGeneration);
-#endif
+    const auto record = FindBackendBindingRecord(
+        _layout->_bindingNames,
+        _layout->_bindingGeneration,
+        binding);
+    // A handle minted by another layout carries a foreign generation, and a push handle names a root
+    // constant block that owns no descriptor slot; neither may be written through a parameter set.
+    if (!record.HasValue() ||
+        record.Get()->Kind != BackendBindingRecordKind::Descriptor) {
         RADRAY_ERR_LOG("d3d12 shader parameter set write has an invalid binding handle");
         return false;
     }
-    const uint32_t bindingNumber = binding.GetBinding();
+    // The record names the group the declaration lives in, so a handle for another group is rejected
+    // instead of resolving against whatever binding happens to share its register number here.
+    if (record.Get()->Location.Group != _groupIndex) {
+        RADRAY_ERR_LOG(
+            "d3d12 shader parameter set write names group {} but this set is group {}",
+            record.Get()->Location.Group,
+            _groupIndex);
+        return false;
+    }
+    const uint32_t bindingNumber = record.Get()->Location.Binding;
     if (!IsValid()) {
         RADRAY_ERR_LOG(
             "d3d12 shader parameter set write is invalid: binding {} element {}",
@@ -3208,54 +3227,46 @@ bool ShaderParameterSetD3D12::Set(
     const auto group = _layout->FindParameterGroup(_groupIndex);
     RADRAY_ASSERT(group.HasValue());
     const auto& entries = group.Get()->Entries;
-    const auto entry = std::find_if(
-        entries.begin(),
-        entries.end(),
-        [&](const ShaderParameterSetLayoutEntryDescriptor& value) noexcept {
-            return value.Binding == bindingNumber &&
-                   GetShaderBindingNamespace(value.Type) == binding.GetNamespace();
-        });
-    if (entry == entries.end() ||
-        arrayElement >= entry->Count ||
-        entry->ImmutableSampler.has_value()) {
+    const auto found = FindGroupEntryD3D12(entries, bindingNumber, record.Get()->Namespace);
+    // A static sampler is fixed by the root signature carrier, so there is nothing here for a caller
+    // to write; accepting the value would silently drop it.
+    if (!found.HasValue() || arrayElement >= found.Get()->Count || found.Get()->IsStaticSampler()) {
         RADRAY_ERR_LOG(
             "d3d12 shader parameter set write is invalid: binding {} element {}",
             bindingNumber,
             arrayElement);
         return false;
     }
+    const ShaderParameterSetLayoutEntryD3D12* entry = found.Get();
 
     bool valueCompatible = false;
-    switch (entry->Type) {
-        case ShaderParameterBindingType::CBuffer:
-        case ShaderParameterBindingType::Buffer:
-        case ShaderParameterBindingType::RWBuffer:
-        case ShaderParameterBindingType::DynamicCBuffer:
-        case ShaderParameterBindingType::DynamicBuffer:
-        case ShaderParameterBindingType::DynamicRWBuffer: {
+    switch (entry->LogicalKind) {
+        case shader::ShaderBindingKind::CBuffer:
+        case shader::ShaderBindingKind::StructuredBuffer:
+        case shader::ShaderBindingKind::RWStructuredBuffer:
+        case shader::ShaderBindingKind::RawBuffer:
+        case shader::ShaderBindingKind::RWRawBuffer: {
             const auto* buffer = std::get_if<ShaderBufferBinding>(&value);
             valueCompatible = buffer != nullptr && buffer->Target != nullptr;
             break;
         }
-        case ShaderParameterBindingType::TexelBuffer:
-        case ShaderParameterBindingType::RWTexelBuffer: {
+        case shader::ShaderBindingKind::TypedBuffer:
+        case shader::ShaderBindingKind::RWTypedBuffer: {
             const auto* buffer = std::get_if<ShaderTexelBufferBinding>(&value);
             valueCompatible = buffer != nullptr && buffer->Target != nullptr;
             break;
         }
-        case ShaderParameterBindingType::Texture:
-        case ShaderParameterBindingType::RWTexture: {
+        case shader::ShaderBindingKind::Texture:
+        case shader::ShaderBindingKind::RWTexture: {
             const auto* view = std::get_if<TextureView*>(&value);
             valueCompatible = view != nullptr && *view != nullptr;
             break;
         }
-        case ShaderParameterBindingType::Sampler: {
+        case shader::ShaderBindingKind::Sampler: {
             const auto* sampler = std::get_if<Sampler*>(&value);
             valueCompatible = sampler != nullptr && *sampler != nullptr;
             break;
         }
-        case ShaderParameterBindingType::UNKNOWN:
-            break;
     }
     if (!valueCompatible) {
         RADRAY_ERR_LOG(
@@ -3265,7 +3276,7 @@ bool ShaderParameterSetD3D12::Set(
         return false;
     }
 
-    const size_t entryIndex = static_cast<size_t>(entry - entries.begin());
+    const size_t entryIndex = static_cast<size_t>(entry - entries.data());
     RADRAY_ASSERT(entryIndex < _bindingValueOffsets.size());
     const size_t valueIndex = _bindingValueOffsets[entryIndex] + arrayElement;
     RADRAY_ASSERT(valueIndex < _values.size());
@@ -3295,7 +3306,7 @@ bool ShaderParameterSetD3D12::FlushWrites() noexcept {
     RADRAY_ASSERT(entries.size() == group.Get()->Bindings.size());
 
     for (size_t bindingIndex = 0; bindingIndex < entries.size(); ++bindingIndex) {
-        const ShaderParameterSetLayoutEntryDescriptor& entry = entries[bindingIndex];
+        const ShaderParameterSetLayoutEntryD3D12& entry = entries[bindingIndex];
         for (uint32_t arrayElement = 0; arrayElement < entry.Count; ++arrayElement) {
             const size_t valueIndex = _bindingValueOffsets[bindingIndex] + arrayElement;
             if (_dirty[valueIndex] == 0) {
@@ -3304,7 +3315,8 @@ bool ShaderParameterSetD3D12::FlushWrites() noexcept {
             if (!_values[valueIndex].has_value() ||
                 !ValidateShaderParameterValueD3D12(
                     _device,
-                    entry.Type,
+                    entry.LogicalKind,
+                    entry.Placement,
                     _values[valueIndex].value())) {
                 RADRAY_ERR_LOG(
                     "d3d12 shader parameter flush failed at binding {} element {}",
@@ -3316,7 +3328,7 @@ bool ShaderParameterSetD3D12::FlushWrites() noexcept {
     }
 
     for (size_t bindingIndex = 0; bindingIndex < entries.size(); ++bindingIndex) {
-        const ShaderParameterSetLayoutEntryDescriptor& entry = entries[bindingIndex];
+        const ShaderParameterSetLayoutEntryD3D12& entry = entries[bindingIndex];
         const ShaderParameterBindingLayoutD3D12& nativeBinding =
             group.Get()->Bindings[bindingIndex];
         for (uint32_t arrayElement = 0; arrayElement < entry.Count; ++arrayElement) {
@@ -3324,7 +3336,7 @@ bool ShaderParameterSetD3D12::FlushWrites() noexcept {
             if (_dirty[valueIndex] == 0) {
                 continue;
             }
-            if (!IsDynamicShaderParameterBindingType(entry.Type)) {
+            if (!entry.IsRootDescriptor()) {
                 if (!nativeBinding.DescriptorDestinations.empty()) {
                     for (const auto& destination : nativeBinding.DescriptorDestinations) {
                         if (destination.ArrayElement != std::numeric_limits<uint32_t>::max() &&
@@ -3333,7 +3345,7 @@ bool ShaderParameterSetD3D12::FlushWrites() noexcept {
                         }
                         WriteShaderParameterValueD3D12(
                             this,
-                            entry.Type,
+                            entry.LogicalKind,
                             destination.DescriptorOffset +
                                 (destination.ArrayElement == std::numeric_limits<uint32_t>::max()
                                      ? arrayElement
@@ -3344,7 +3356,7 @@ bool ShaderParameterSetD3D12::FlushWrites() noexcept {
                            std::numeric_limits<uint32_t>::max()) {
                     WriteShaderParameterValueD3D12(
                         this,
-                        entry.Type,
+                        entry.LogicalKind,
                         nativeBinding.DescriptorOffset + arrayElement,
                         _values[valueIndex].value());
                 }
@@ -4521,26 +4533,49 @@ static bool BindShaderParameterSetD3D12(
         }
     }
 
-    const auto bindRootDescriptor = [&](const ShaderParameterSetLayoutEntryDescriptor& entry,
+    // A root descriptor takes a GPU virtual address at command time, so the caller's dynamic offset
+    // is folded into the address here. The implicit builder and an authored root CBV both record
+    // their root parameters as destinations, so they share this one path: that is what makes the
+    // same dynamic-cbuffer arena offset land on the same bytes on either topology.
+    const auto bindRootDescriptor = [&](const ShaderParameterSetLayoutEntryD3D12& entry,
                                         const ShaderParameterBindingLayoutD3D12::RootDescriptorDestination& destination,
-                                        const ShaderParameterValue& value) noexcept {
+                                        const ShaderParameterValue& value,
+                                        uint32_t dynamicOffset) noexcept {
         const auto* bufferBinding = std::get_if<ShaderBufferBinding>(&value);
         if (bufferBinding == nullptr || bufferBinding->Target == nullptr) {
-            RADRAY_ERR_LOG("d3d12 explicit root descriptor value is not a buffer binding");
+            RADRAY_ERR_LOG("d3d12 root descriptor value is not a buffer binding");
             return false;
         }
-        const BufferUse use = entry.Type == ShaderParameterBindingType::CBuffer
-                                  ? BufferUse::CBuffer
-                              : entry.Type == ShaderParameterBindingType::RWBuffer
-                                  ? BufferUse::UnorderedAccess
-                                  : BufferUse::Resource;
         const auto resolved = ResolveShaderBufferBindingD3D12(
-            set->_device, *bufferBinding, use);
+            set->_device,
+            *bufferBinding,
+            MapShaderBindingBufferUseD3D12(entry.LogicalKind));
         if (!resolved.has_value()) {
             return false;
         }
+        // The offset slides the bound window inside the buffer, exactly like a Vulkan dynamic
+        // descriptor: the range stays the size of one slice and the offset selects which slice. So
+        // the whole shifted window has to stay inside the resource, and a root CBV address still has
+        // to be 256-byte aligned after the shift.
+        const uint64_t slack =
+            resolved->Buffer->_reqSize - resolved->Offset - resolved->Size;
+        if (dynamicOffset > slack) {
+            RADRAY_ERR_LOG(
+                "d3d12 dynamic offset {} pushes binding {} past the end of its buffer",
+                dynamicOffset,
+                entry.Binding);
+            return false;
+        }
+        if (shader::IsUniformBufferKind(entry.LogicalKind) &&
+            dynamicOffset % D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT != 0) {
+            RADRAY_ERR_LOG(
+                "d3d12 dynamic offset {} for constant buffer binding {} must be 256-byte aligned",
+                dynamicOffset,
+                entry.Binding);
+            return false;
+        }
         const D3D12_GPU_VIRTUAL_ADDRESS address =
-            resolved->Buffer->_gpuAddr + resolved->Offset;
+            resolved->Buffer->_gpuAddr + resolved->Offset + dynamicOffset;
         if (graphics) {
             switch (destination.Type) {
                 case D3D12_ROOT_PARAMETER_TYPE_CBV:
@@ -4571,140 +4606,113 @@ static bool BindShaderParameterSetD3D12(
         }
     };
 
-    for (size_t destinationBindingIndex = 0;
-         destinationBindingIndex < destinationGroup.Get()->Entries.size();
-         ++destinationBindingIndex) {
-        const ShaderParameterSetLayoutEntryDescriptor& destinationEntry =
+    // Each offset names a declaration in the layout being bound, so the group and the register class
+    // come from the handle instead of from a bare register number. A handle from another layout or
+    // for another group is rejected here rather than shifting the wrong root descriptor.
+    struct ResolvedDynamicOffsetD3D12 {
+        const BackendBindingName* Record{nullptr};
+        uint32_t Offset{0};
+    };
+    vector<ResolvedDynamicOffsetD3D12> resolvedDynamicOffsets;
+    resolvedDynamicOffsets.reserve(dynamicOffsets.size());
+    for (const ShaderParameterDynamicOffset& dynamicOffset : dynamicOffsets) {
+        const auto offsetRecord = FindBackendBindingRecord(
+            destinationLayout->_bindingNames,
+            destinationLayout->_bindingGeneration,
+            dynamicOffset.Binding);
+        if (!offsetRecord.HasValue() ||
+            offsetRecord.Get()->Kind != BackendBindingRecordKind::Descriptor) {
+            RADRAY_ERR_LOG("d3d12 dynamic offset has an invalid binding handle");
+            return false;
+        }
+        if (offsetRecord.Get()->Location.Group != groupIndex) {
+            RADRAY_ERR_LOG(
+                "d3d12 dynamic offset names group {} but group {} is being bound",
+                offsetRecord.Get()->Location.Group,
+                groupIndex);
+            return false;
+        }
+        resolvedDynamicOffsets.push_back(
+            ResolvedDynamicOffsetD3D12{offsetRecord.Get(), dynamicOffset.Offset});
+    }
+
+    // One offset per root-descriptor binding in the group, in the layout's own order, each looked up
+    // by the declaration the caller named. A missing, duplicated or extra offset is a reported
+    // failure instead of a silent shift that would hand a later root descriptor somebody else's
+    // offset. Vulkan applies the same rule to its dynamic descriptors, so a portable caller supplies
+    // exactly the same offsets to either backend.
+    const auto& rootDescriptorOrder = destinationGroup.Get()->RootDescriptorOrder;
+    size_t consumedDynamicOffsets = 0;
+    for (const uint32_t destinationBindingIndex : rootDescriptorOrder) {
+        const ShaderParameterSetLayoutEntryD3D12& destinationEntry =
             destinationGroup.Get()->Entries[destinationBindingIndex];
         const auto& destinations =
             destinationGroup.Get()->Bindings[destinationBindingIndex].RootDescriptorDestinations;
         if (destinations.empty()) {
-            continue;
-        }
-        const auto sourceBinding = std::find_if(
-            sourceEntries.begin(), sourceEntries.end(),
-            [&](const ShaderParameterSetLayoutEntryDescriptor& value) noexcept {
-                return value.Binding == destinationEntry.Binding &&
-                       GetShaderBindingNamespace(value.Type) ==
-                           GetShaderBindingNamespace(destinationEntry.Type);
-            });
-        if (sourceBinding == sourceEntries.end() || sourceBinding->Count != 1) {
-            RADRAY_ERR_LOG("d3d12 explicit root descriptor source binding is unavailable");
+            RADRAY_ERR_LOG(
+                "d3d12 root descriptor binding {} has no root parameter",
+                destinationEntry.Binding);
             return false;
         }
-        const size_t sourceBindingIndex = static_cast<size_t>(sourceBinding - sourceEntries.begin());
+        const ResolvedDynamicOffsetD3D12* foundOffset = nullptr;
+        for (const ResolvedDynamicOffsetD3D12& dynamicOffset : resolvedDynamicOffsets) {
+            if (dynamicOffset.Record->Location.Binding != destinationEntry.Binding ||
+                dynamicOffset.Record->Namespace != destinationEntry.Namespace) {
+                continue;
+            }
+            if (foundOffset != nullptr) {
+                RADRAY_ERR_LOG(
+                    "d3d12 dynamic offset for binding {} is given twice",
+                    destinationEntry.Binding);
+                return false;
+            }
+            foundOffset = &dynamicOffset;
+        }
+        if (foundOffset == nullptr) {
+            RADRAY_ERR_LOG(
+                "d3d12 dynamic offset for root descriptor binding {} is missing",
+                destinationEntry.Binding);
+            return false;
+        }
+        ++consumedDynamicOffsets;
+
+        const auto sourceBinding = FindGroupEntryD3D12(
+            sourceEntries, destinationEntry.Binding, destinationEntry.Namespace);
+        if (!sourceBinding.HasValue() || sourceBinding.Get()->Count != 1) {
+            RADRAY_ERR_LOG(
+                "d3d12 root descriptor source binding {} is unavailable",
+                destinationEntry.Binding);
+            return false;
+        }
+        const size_t sourceBindingIndex =
+            static_cast<size_t>(sourceBinding.Get() - sourceEntries.data());
         if (sourceBindingIndex >= set->_bindingValueOffsets.size()) {
             return false;
         }
         const size_t valueIndex = set->_bindingValueOffsets[sourceBindingIndex];
         if (valueIndex >= set->_values.size() || !set->_values[valueIndex].has_value()) {
-            RADRAY_ERR_LOG("d3d12 explicit root descriptor value is unset");
+            RADRAY_ERR_LOG(
+                "d3d12 root descriptor value for binding {} is unset",
+                destinationEntry.Binding);
             return false;
         }
         for (const auto& destination : destinations) {
-            if (!bindRootDescriptor(destinationEntry, destination, set->_values[valueIndex].value())) {
-                RADRAY_ERR_LOG("d3d12 explicit root descriptor write failed");
+            if (!bindRootDescriptor(
+                    destinationEntry,
+                    destination,
+                    set->_values[valueIndex].value(),
+                    foundOffset->Offset)) {
+                RADRAY_ERR_LOG("d3d12 root descriptor write failed");
                 return false;
             }
         }
     }
-    for (const ShaderParameterDynamicOffset& dynamicOffset : dynamicOffsets) {
-        const auto sourceBinding = std::lower_bound(
-            sourceEntries.begin(),
-            sourceEntries.end(),
-            dynamicOffset.Binding,
-            [](const ShaderParameterSetLayoutEntryDescriptor& lhs, uint32_t rhs) noexcept {
-                return lhs.Binding < rhs;
-            });
-        const auto destinationEntry = std::lower_bound(
-            destinationGroup.Get()->Entries.begin(),
-            destinationGroup.Get()->Entries.end(),
-            dynamicOffset.Binding,
-            [](const ShaderParameterSetLayoutEntryDescriptor& lhs, uint32_t rhs) noexcept {
-                return lhs.Binding < rhs;
-            });
-        if (sourceBinding == sourceEntries.end() ||
-            sourceBinding->Binding != dynamicOffset.Binding) {
-            RADRAY_ERR_LOG(
-                "d3d12 shader parameter source binding is out of bounds: {}",
-                dynamicOffset.Binding);
-            continue;
-        }
-        if (destinationEntry == destinationGroup.Get()->Entries.end() ||
-            destinationEntry->Binding != dynamicOffset.Binding) {
-            RADRAY_ERR_LOG(
-                "d3d12 shader parameter destination binding is out of bounds: {}",
-                dynamicOffset.Binding);
-            continue;
-        }
-        const size_t sourceBindingIndex = static_cast<size_t>(
-            sourceBinding - sourceEntries.begin());
-        if (sourceBindingIndex >= set->_bindingValueOffsets.size()) {
-            RADRAY_ERR_LOG(
-                "d3d12 shader parameter source binding metadata index is out of bounds: {} >= {}",
-                sourceBindingIndex,
-                set->_bindingValueOffsets.size());
-            continue;
-        }
-        const size_t valueIndex = set->_bindingValueOffsets[sourceBindingIndex];
-        if (valueIndex >= set->_values.size()) {
-            RADRAY_ERR_LOG(
-                "d3d12 shader parameter value index is out of bounds: {} >= {}",
-                valueIndex,
-                set->_values.size());
-            continue;
-        }
-        const size_t destinationBindingIndex = static_cast<size_t>(
-            destinationEntry - destinationGroup.Get()->Entries.begin());
-        if (destinationBindingIndex >= destinationGroup.Get()->Bindings.size()) {
-            RADRAY_ERR_LOG(
-                "d3d12 shader parameter binding metadata index is out of bounds: {} >= {}",
-                destinationBindingIndex,
-                destinationGroup.Get()->Bindings.size());
-            continue;
-        }
-        const ShaderBufferBinding& bufferBinding =
-            std::get<ShaderBufferBinding>(set->_values[valueIndex].value());
-        const uint32_t rootParameterIndex =
-            destinationGroup.Get()->Bindings[destinationBindingIndex].RootParameterIndex;
-        auto* buffer = CastD3D12Object(bufferBinding.Target);
-        const D3D12_GPU_VIRTUAL_ADDRESS address =
-            buffer->_gpuAddr + bufferBinding.Range.Offset + dynamicOffset.Offset;
-        if (graphics) {
-            switch (destinationEntry->Type) {
-                case ShaderParameterBindingType::DynamicCBuffer:
-                    cmdList->SetGraphicsRootConstantBufferView(
-                        rootParameterIndex, address);
-                    break;
-                case ShaderParameterBindingType::DynamicBuffer:
-                    cmdList->SetGraphicsRootShaderResourceView(
-                        rootParameterIndex, address);
-                    break;
-                case ShaderParameterBindingType::DynamicRWBuffer:
-                    cmdList->SetGraphicsRootUnorderedAccessView(
-                        rootParameterIndex, address);
-                    break;
-                default:
-                    break;
-            }
-        } else {
-            switch (destinationEntry->Type) {
-                case ShaderParameterBindingType::DynamicCBuffer:
-                    cmdList->SetComputeRootConstantBufferView(
-                        rootParameterIndex, address);
-                    break;
-                case ShaderParameterBindingType::DynamicBuffer:
-                    cmdList->SetComputeRootShaderResourceView(
-                        rootParameterIndex, address);
-                    break;
-                case ShaderParameterBindingType::DynamicRWBuffer:
-                    cmdList->SetComputeRootUnorderedAccessView(
-                        rootParameterIndex, address);
-                    break;
-                default:
-                    break;
-            }
-        }
+    if (consumedDynamicOffsets != dynamicOffsets.size()) {
+        RADRAY_ERR_LOG(
+            "d3d12 got {} dynamic offsets but the group has {} root descriptors",
+            dynamicOffsets.size(),
+            rootDescriptorOrder.size());
+        return false;
     }
     return true;
 }
@@ -4725,7 +4733,6 @@ void CmdRenderPassD3D12::BindShaderParameterSet(
 static bool SetPushConstantsD3D12(
     CmdListD3D12* commandBuffer,
     RootSigD3D12* boundLayout,
-    uint32_t groupIndex,
     BindingHandle binding,
     std::span<const byte> data,
     bool graphics) noexcept {
@@ -4742,25 +4749,30 @@ static bool SetPushConstantsD3D12(
         RADRAY_ERR_LOG("d3d12 push constant binding handle is invalid for the bound layout");
         return false;
     }
-    if (binding.GetGeneration() != boundLayout->_bindingGeneration) {
-#ifdef RADRAY_IS_DEBUG
-        RADRAY_ASSERT(binding.GetGeneration() == boundLayout->_bindingGeneration);
-#endif
+    const auto record = FindBackendBindingRecord(
+        boundLayout->_bindingNames,
+        boundLayout->_bindingGeneration,
+        binding);
+    // Only a push record may be written here: a descriptor handle names a slot that goes through a
+    // parameter set instead, and a handle from another layout carries a foreign generation.
+    if (!record.HasValue() || record.Get()->Kind != BackendBindingRecordKind::Push) {
         RADRAY_ERR_LOG("d3d12 push constant binding handle is invalid for the bound layout");
         return false;
     }
-    const uint32_t bindingNumber = binding.GetBinding();
+    // The record carries the authored register space as well as the register, so two RootConstants
+    // declarations that share a register number in different spaces stay distinguishable.
+    const ShaderBindingLocation location = record.Get()->Location;
     const auto pushConstant = std::find_if(
         boundLayout->_pushConstantBindings.begin(),
         boundLayout->_pushConstantBindings.end(),
         [&](const PushConstantBindingD3D12& value) noexcept {
-            return value.Location.Group == groupIndex && value.Location.Binding == bindingNumber;
+            return value.Location == location;
         });
     if (pushConstant == boundLayout->_pushConstantBindings.end()) {
         RADRAY_ERR_LOG(
-            "d3d12 push constant range at group {} binding {} is unavailable",
-            groupIndex,
-            bindingNumber);
+            "d3d12 push constant range at space {} register {} is unavailable",
+            location.Group,
+            location.Binding);
         return false;
     }
 
@@ -4773,9 +4785,9 @@ static bool SetPushConstantsD3D12(
             boundLayout->_rootParameters[rootParameterIndex];
         if (rootParameter.ParameterType != D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS) {
             RADRAY_ERR_LOG(
-                "d3d12 push constant range at group {} binding {} is unavailable",
-                groupIndex,
-                bindingNumber);
+                "d3d12 push constant range at space {} register {} is unavailable",
+                location.Group,
+                location.Binding);
             return false;
         }
 
@@ -4783,9 +4795,9 @@ static bool SetPushConstantsD3D12(
             static_cast<size_t>(rootParameter.Constants.Num32BitValues) * 4;
         if (data.size() != expectedSize) {
             RADRAY_ERR_LOG(
-                "d3d12 push constant size mismatch at group {} binding {}: expected {}, actual {}",
-                groupIndex,
-                bindingNumber,
+                "d3d12 push constant size mismatch at space {} register {}: expected {}, actual {}",
+                location.Group,
+                location.Binding,
                 expectedSize,
                 data.size());
             return false;
@@ -4818,13 +4830,11 @@ static bool SetPushConstantsD3D12(
 }
 
 bool CmdRenderPassD3D12::SetPushConstants(
-    uint32_t groupIndex,
     BindingHandle binding,
     std::span<const byte> data) noexcept {
     return SetPushConstantsD3D12(
         _cmdList,
         _boundRs,
-        groupIndex,
         binding,
         data,
         true);
@@ -4931,13 +4941,11 @@ void CmdComputePassD3D12::BindShaderParameterSet(
 }
 
 bool CmdComputePassD3D12::SetPushConstants(
-    uint32_t groupIndex,
     BindingHandle binding,
     std::span<const byte> data) noexcept {
     return SetPushConstantsD3D12(
         _cmdList,
         _boundRs,
-        groupIndex,
         binding,
         data,
         false);
@@ -5485,10 +5493,9 @@ BindingHandle RootSigD3D12::FindBinding(std::string_view name) const noexcept {
     if (binding == _bindingNames.end()) {
         return {};
     }
-    return BindingHandle::FromBinding(
-        binding->Location.Binding,
-        _bindingGeneration,
-        binding->Namespace);
+    return BindingHandleAccess::Make(
+        static_cast<uint32_t>(std::distance(_bindingNames.begin(), binding)),
+        _bindingGeneration);
 }
 
 GraphicsPsoD3D12::GraphicsPsoD3D12(

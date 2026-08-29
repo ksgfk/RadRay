@@ -4,7 +4,7 @@ struct PushData {
 
 #include <core/platform.hlsli>
 #if defined(__spirv__)
-VK_PUSH_CONSTANT ConstantBuffer<PushData> PushConstants;
+VK_PUSH_CONSTANT ConstantBuffer<PushData> PushConstants : register(b0);
 #endif
 
 [shader("vertex")]

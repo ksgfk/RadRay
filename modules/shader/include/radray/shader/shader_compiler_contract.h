@@ -18,9 +18,13 @@ inline constexpr uint16_t kShaderDiscoveryWireSchemaVersion = 3;
 inline constexpr uint32_t kShaderContractWireMagic = 0x54434452u;  // "RDCT" in little-endian bytes.
 inline constexpr uint16_t kShaderContractWireSchemaVersion = 1;
 inline constexpr uint16_t kShaderCompilerAbiVersion = 3;
-inline constexpr uint16_t kShaderLegacyMetadataSchemaVersion = 4;
-inline constexpr uint16_t kShaderMetadataSchemaVersion = 5;
+// Retired metadata schemas. schema 6 replaced them atomically, so the decoder rejects both;
+// these values exist only so negative fixtures can name what they are feeding it.
+inline constexpr uint16_t kShaderRetiredMetadataSchemaVersion4 = 4;
+inline constexpr uint16_t kShaderRetiredMetadataSchemaVersion5 = 5;
+inline constexpr uint16_t kShaderMetadataSchemaVersion = 6;
 inline constexpr uint32_t kShaderNoType = 0xffffffffu;
+inline constexpr uint32_t kShaderNoSampler = 0xffffffffu;
 
 enum class ShaderTarget : uint8_t {
     DXIL = 0,
@@ -53,6 +57,30 @@ enum class ShaderKind : uint8_t {
     Compute = 1,
 };
 
+// Persisted values used by WireBindingRecord::Type. These are the logical resource kinds the
+// compiler's declaration table saw; each target decides on its own how a kind lands.
+enum class ShaderBindingKind : uint32_t {
+    CBuffer = 1,
+    TypedBuffer = 2,
+    RWTypedBuffer = 3,
+    StructuredBuffer = 4,
+    RWStructuredBuffer = 5,
+    RawBuffer = 6,
+    RWRawBuffer = 7,
+    Texture = 8,
+    RWTexture = 9,
+    Sampler = 10,
+};
+
+// Persisted values used by WireBindingRecord::Placement: where the [RootSignature] policy put
+// the binding. StaticSampler owns no descriptor table slot; on Vulkan the same policy slot
+// arrives as Table plus a SamplerIndex.
+enum class ShaderBindingPlacement : uint32_t {
+    Table = 0,
+    RootDescriptor = 1,
+    StaticSampler = 2,
+};
+
 // Persisted values used by WireTypeRecord::Kind.
 enum class ShaderTypeKind : uint32_t {
     Scalar = 1,
@@ -83,7 +111,9 @@ struct Hash128 {
 
 using ContractHash = Hash128;
 using BytecodeHash = Hash128;
-using PipelineLayoutHash = Hash128;
+// Digest of the target-independent layout the compiler published. The resolved, target-typed
+// layout is derived from it and digested separately, so this is not a program identity on its own.
+using BasePipelineLayoutHash = Hash128;
 using GpuArtifactHash = Hash128;
 
 static_assert(sizeof(Hash128) == 16);
@@ -103,21 +133,82 @@ struct WireBlobRange {
 // Maps a wire binding Type code (WireBindingRecord::Type) to its binding namespace. This is
 // part of the persisted wire contract so both the decoder and backend layout conversion agree.
 inline constexpr uint32_t GetWireBindingNamespace(uint32_t type) noexcept {
-    switch (type) {
-        case 1:
+    switch (static_cast<ShaderBindingKind>(type)) {
+        case ShaderBindingKind::CBuffer:
             return 0;
-        case 2:
-        case 4:
+        case ShaderBindingKind::TypedBuffer:
+        case ShaderBindingKind::StructuredBuffer:
+        case ShaderBindingKind::RawBuffer:
+        case ShaderBindingKind::Texture:
             return 1;
-        case 3:
-        case 5:
+        case ShaderBindingKind::RWTypedBuffer:
+        case ShaderBindingKind::RWStructuredBuffer:
+        case ShaderBindingKind::RWRawBuffer:
+        case ShaderBindingKind::RWTexture:
             return 2;
-        case 6:
+        case ShaderBindingKind::Sampler:
             return 3;
+    }
+    return 0xffffffffu;
+}
+
+// A root descriptor is bound by GPU address, so only single-declaration buffers can take that
+// placement. Textures and typed buffers need a descriptor either way.
+constexpr bool CanBeRootDescriptor(ShaderBindingKind kind) noexcept {
+    switch (kind) {
+        case ShaderBindingKind::CBuffer:
+        case ShaderBindingKind::StructuredBuffer:
+        case ShaderBindingKind::RWStructuredBuffer:
+        case ShaderBindingKind::RawBuffer:
+        case ShaderBindingKind::RWRawBuffer:
+            return true;
         default:
-            return 0xffffffffu;
+            return false;
     }
 }
+
+// Logical resource kind classification. These are properties of the wire kind itself, so they are
+// named once here instead of being re-derived by every backend that has to pick a native descriptor
+// type or a required buffer usage.
+constexpr bool IsUniformBufferKind(ShaderBindingKind kind) noexcept {
+    return kind == ShaderBindingKind::CBuffer;
+}
+
+constexpr bool IsTexelBufferKind(ShaderBindingKind kind) noexcept {
+    return kind == ShaderBindingKind::TypedBuffer || kind == ShaderBindingKind::RWTypedBuffer;
+}
+
+constexpr bool IsImageKind(ShaderBindingKind kind) noexcept {
+    return kind == ShaderBindingKind::Texture || kind == ShaderBindingKind::RWTexture;
+}
+
+constexpr bool IsWritableKind(ShaderBindingKind kind) noexcept {
+    switch (kind) {
+        case ShaderBindingKind::RWTypedBuffer:
+        case ShaderBindingKind::RWStructuredBuffer:
+        case ShaderBindingKind::RWRawBuffer:
+        case ShaderBindingKind::RWTexture:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// Vulkan enumerant ranges the wire is allowed to carry, plus the one flag bit and the "no clamp"
+// LOD value. radrayshader cannot include volk, so the bounds are named here: the decoder validates
+// against them and radrayrender static_asserts them against the real Vulkan enums, which is what
+// keeps the two definitions from drifting apart.
+inline constexpr uint32_t kShaderSamplerMaxFilter = 1;            // NEAREST, LINEAR
+inline constexpr uint32_t kShaderSamplerMaxMipmapMode = 1;        // NEAREST, LINEAR
+inline constexpr uint32_t kShaderSamplerMaxAddressMode = 4;       // REPEAT .. MIRROR_CLAMP_TO_EDGE
+inline constexpr uint32_t kShaderSamplerMaxCompareOp = 7;         // NEVER .. ALWAYS
+inline constexpr uint32_t kShaderSamplerMaxBorderColor = 5;       // FLOAT_TRANSPARENT_BLACK .. INT_OPAQUE_WHITE
+inline constexpr uint32_t kShaderSamplerMaxReductionMode = 2;     // WEIGHTED_AVERAGE, MIN, MAX
+inline constexpr uint32_t kShaderSamplerAddressModeMirrorClampToEdge = 4;
+inline constexpr uint32_t kShaderSamplerReductionModeWeightedAverage = 0;
+inline constexpr uint32_t kShaderSamplerFlagUnnormalizedCoordinates = 0x1u;
+inline constexpr uint32_t kShaderSamplerFlagMask = kShaderSamplerFlagUnnormalizedCoordinates;
+inline constexpr float kShaderSamplerLodClampNone = 1000.0f;
 
 // Wire records 依赖定宽成员的自然布局：每个字段都是自对齐的整数类型，或由这类整数组成的
 // `WireBlobRange`/`Hash128`，因此不会插入 padding，标准 ABI 布局与持久化的字节格式完全一致。
@@ -125,8 +216,8 @@ inline constexpr uint32_t GetWireBindingNamespace(uint32_t type) noexcept {
 struct WireMetadataEnvelope {
     uint32_t Magic{kShaderWireMagic};
     uint16_t SchemaVersion{kShaderMetadataSchemaVersion};
-    uint16_t HeaderSize{144};
-    uint32_t TotalSize{144};
+    uint16_t HeaderSize{152};
+    uint32_t TotalSize{152};
     uint8_t Target{static_cast<uint8_t>(ShaderTarget::DXIL)};
     uint8_t StageMask{0};
     uint16_t Flags{0};
@@ -135,12 +226,17 @@ struct WireMetadataEnvelope {
     WireBlobRange TypeRecords{};
     WireBlobRange RootConstantRecords{};
     WireBlobRange VertexInputRecords{};
+    // Immutable sampler states in policy slot order, referenced by
+    // WireBindingRecord::SamplerIndex. Published on the SPIR-V lane only.
+    WireBlobRange SamplerRecords{};
+    // Serialized root signature carrier. Published on the DXIL lane only, where it stays the
+    // sole authority for explicit topology.
     WireBlobRange RootSignature{};
     WireBlobRange Bytecode{};
     uint64_t ToolchainIdentity{0};
     ContractHash Contract{};
     BytecodeHash BytecodeDigest{};
-    PipelineLayoutHash PipelineLayoutDigest{};
+    BasePipelineLayoutHash BasePipelineLayoutDigest{};
     GpuArtifactHash GpuArtifact{};
 };
 
@@ -161,6 +257,8 @@ struct WireBindingRecord {
     uint32_t Type{0};
     uint32_t Count{0};
     uint32_t StageMask{0};
+    uint32_t Placement{static_cast<uint32_t>(ShaderBindingPlacement::Table)};
+    uint32_t SamplerIndex{kShaderNoSampler};
     uint32_t Flags{0};
 };
 
@@ -177,12 +275,39 @@ struct WireTypeRecord {
 };
 
 struct WireRootConstantRecord {
+    // Declaration name of the push block. The push handle table is keyed on it.
+    WireBlobRange Name{};
     uint32_t RegisterSpace{0};
     uint32_t Register{0};
     uint32_t Offset{0};
     uint32_t Size{0};
     uint32_t StageMask{0};
     uint32_t Flags{0};
+};
+
+// A static sampler state in Vulkan terms: every field holds the official Vulkan enumerant value
+// so the backend consumes it without a second mapping table. The shader module deliberately does
+// not include volk; radrayrender static_asserts these against the real enums.
+struct WireSamplerRecord {
+    uint32_t MagFilter{0};
+    uint32_t MinFilter{0};
+    uint32_t MipmapMode{0};
+    uint32_t AddressModeU{0};
+    uint32_t AddressModeV{0};
+    uint32_t AddressModeW{0};
+    float MipLodBias{0.0f};
+    uint32_t AnisotropyEnable{0};
+    float MaxAnisotropy{1.0f};
+    uint32_t CompareEnable{0};
+    uint32_t CompareOp{0};
+    float MinLod{0.0f};
+    float MaxLod{0.0f};
+    uint32_t BorderColor{0};
+    uint32_t ReductionMode{0};
+    // bit 0: unnormalized coordinates.
+    uint32_t Flags{0};
+
+    friend bool operator==(const WireSamplerRecord&, const WireSamplerRecord&) noexcept = default;
 };
 
 enum class ShaderVertexComponentType : uint32_t {
@@ -201,17 +326,19 @@ struct WireVertexInputRecord {
 };
 
 static_assert(sizeof(WireBlobRange) == 8);
-static_assert(sizeof(WireMetadataEnvelope) == 144);
+static_assert(sizeof(WireMetadataEnvelope) == 152);
 static_assert(sizeof(WireEntryRecord) == 24);
-static_assert(sizeof(WireBindingRecord) == 32);
+static_assert(sizeof(WireBindingRecord) == 40);
 static_assert(sizeof(WireTypeRecord) == 40);
-static_assert(sizeof(WireRootConstantRecord) == 24);
+static_assert(sizeof(WireRootConstantRecord) == 32);
+static_assert(sizeof(WireSamplerRecord) == 64);
 static_assert(sizeof(WireVertexInputRecord) == 28);
 static_assert(std::is_trivially_copyable_v<WireMetadataEnvelope>);
 static_assert(std::is_trivially_copyable_v<WireEntryRecord>);
 static_assert(std::is_trivially_copyable_v<WireBindingRecord>);
 static_assert(std::is_trivially_copyable_v<WireTypeRecord>);
 static_assert(std::is_trivially_copyable_v<WireRootConstantRecord>);
+static_assert(std::is_trivially_copyable_v<WireSamplerRecord>);
 
 bool ValidateWireMetadataEnvelope(
     std::span<const byte> blob,

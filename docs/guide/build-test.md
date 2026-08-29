@@ -104,10 +104,13 @@ ctest --test-dir build_debug -C Debug -R AssetSlotTest --output-on-failure
 | `test_radray_dxc_metadata` | `RadRayDxcMetadata` |
 | `test_shaderlib_passes` | `RadRayShaderLibPass` |
 | `test_runtime_shader_jit` | `RadRayRuntimeShaderJit`（graphics/compute readback、fixture case report、metadata negative） |
-| `test_material` | `RadRayRuntimeMaterial`（vertex layout 解析、type tree 打包、多 cbuffer 配对、schema 5 group layout policy；schema 6 modifier 迁移见 shader layout correction 计划） |
+| `test_material` | `RadRayRuntimeMaterial`（vertex layout 解析、type tree 打包、多 cbuffer 配对、declaration modifier 在两个 target 上生效、recipe 矛盾与 explicit policy 拒绝 modifier 时 fail closed） |
 | `test_mesh_draw` | `RadRayRuntimeMeshDraw`（排序、双后端 dynamic offset/indexed draw、material 资源按 flight 轮转） |
 | `test_forward_pipeline` | `RadRayRuntimeForwardPipeline`（双后端跑真实窗口帧循环，程序化 quad 走完 ForwardPipeline 编排） |
 | `test_radray_render_shader_artifact` | `RadRayRenderShaderArtifact` |
+| `test_radray_render_shader_layout` | `RadRayRenderShaderLayout`（schema 6 decode 与 target-typed resolve） |
+| `test_radray_render_d3d12_layout` | `D3D12DeviceFixture`（真实 D3D12：placement 决定 table/root descriptor、carrier static sampler、root constant 全量进 push 表、非法 placement 拒绝、offset 双拓扑一致、push handle 端到端与误用拒绝） |
+| `test_radray_render_vulkan_layout` | `VulkanDeviceFixture`（真实 Vulkan：logical kind 决定 descriptor type、非法 dynamic placement 拒绝、immutable sampler 与 empty set hole、push handle 端到端与误用拒绝） |
 | `test_radray_shader_contract` | `RadRayShaderContract` |
 | 其余 core target | 对应源码中的 suite 名 |
 

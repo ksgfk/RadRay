@@ -75,11 +75,11 @@ metadata、target-native artifact decoder/layout 与 runtime JIT 已接通。RHI
 device/request/envelope target 后进入对应 typed 入口。公共 `PipelineLayout::FindBinding` 只按
 declaration name 颁发不透明 `BindingHandle`，绑定提交不暴露 layout 数字。
 
-ADR-0051 已接受 schema 6 的下一条 layout contract：compiler-owned RootSignature policy frontend、
-target artifact decode -> typed resolve -> native creation、精确 Target layout modifiers 与
-`ResolvedD3D12Layout`/`ResolvedVulkanLayout`。当前代码仍是 schema 5 / SDK `.radray.4`；迁移边界、
-检查站与已确认问题统一见 `todo/shader-layout-contract-correction.md`，不要继续扩张现有 group-wide
-`ShaderLayoutPolicy`。
+ADR-0051 的 layout contract 已经落地：compiler-owned RootSignature policy frontend、target
+artifact decode -> typed resolve -> native creation、精确 target layout modifiers 与
+`ResolvedD3D12Layout`/`ResolvedVulkanLayout`。两个后端直接消费 resolved layout，runtime 走
+`ShaderProgramRequest` 与 artifact/program 两层 cache，group-wide `ShaderLayoutPolicy` 已删除。
+实施记录与检查站见 `todo/shader-layout-contract-correction.md`。
 
 `radray_shader_compile`（`RADRAY_BUILD_SHADER_TOOLS` 默认 ON）只输出 raw DXIL/SPIR-V
 metadata blob，不生成 artifact index、cook 或 publisher；client 只用 fork extension ABI，

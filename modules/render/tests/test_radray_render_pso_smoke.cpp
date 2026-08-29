@@ -133,9 +133,13 @@ vector<byte> MakeLayoutArtifact(
     binding.Name = {nameOffset + static_cast<uint32_t>(entryName.size()), static_cast<uint32_t>(bindingName.size())};
     binding.Group = 0;
     binding.Binding = 3;
-    binding.Type = 4;
+    binding.Type = static_cast<uint32_t>(shader::ShaderBindingKind::Texture);
     binding.Count = 1;
     binding.StageMask = envelope.StageMask;
+    // No policy produced this artifact, so the binding is an ordinary table entry with no sampler
+    // state attached; the defaults already say that, and spelling it out keeps the intent readable.
+    binding.Placement = static_cast<uint32_t>(shader::ShaderBindingPlacement::Table);
+    binding.SamplerIndex = shader::kShaderNoSampler;
 
     vector<byte> result(envelope.TotalSize);
     std::memcpy(result.data(), &envelope, sizeof(envelope));
@@ -251,13 +255,11 @@ void RunPsoSmoke(test::DeviceContext& context, RenderBackend backend) {
     ASSERT_TRUE(parameterSetResult.HasValue()) << "CreateShaderParameterSet failed";
     unique_ptr<ShaderParameterSet> parameterSet = parameterSetResult.Release();
     EXPECT_TRUE(parameterSet->Set(bindingHandle, 0, renderTarget->View.get()));
-#ifdef RADRAY_IS_DEBUG
-    EXPECT_DEATH(
-        parameterSet->Set(secondBindingHandle, 0, renderTarget->View.get()),
-        ".*");
-#else
+    // The two layouts describe the same shader, so the handles look interchangeable, but each carries
+    // the generation of the layout that minted it. Using the foreign one is reported through the
+    // return value in every configuration: aborting in Debug would make the fail-closed path
+    // untestable in the only configuration these tests run in.
     EXPECT_FALSE(parameterSet->Set(secondBindingHandle, 0, renderTarget->View.get()));
-#endif
 
     const RenderPassColorAttachmentDescriptor colorAttachment{
         .Format = kFormat,

@@ -291,7 +291,9 @@ public:
 
     Nullable<unique_ptr<PipelineLayout>> CreatePipelineLayout(
         const shader::SpirvShaderArtifactView& artifact,
-        const ShaderLayoutPolicy& policy = {}) noexcept;
+        const VulkanTargetLayoutOptions& options = {}) noexcept;
+    Nullable<unique_ptr<PipelineLayout>> CreatePipelineLayout(
+        const ResolvedVulkanLayout& layout) noexcept;
 
     Nullable<unique_ptr<ShaderParameterSet>> CreateShaderParameterSet(const ShaderParameterSetDescriptor& desc) noexcept override;
 
@@ -312,7 +314,7 @@ public:
 
     Nullable<unique_ptr<BufferViewVulkan>> CreateBufferView(const VkBufferViewCreateInfo& info) noexcept;
 
-    Nullable<unique_ptr<PipelineLayoutVulkan>> CreatePipelineLayoutInternal(const BackendPipelineLayoutInput& input) noexcept;
+    Nullable<unique_ptr<PipelineLayoutVulkan>> CreatePipelineLayoutInternal(const ResolvedVulkanLayout& layout) noexcept;
 
     Nullable<unique_ptr<SamplerVulkan>> CreateSamplerInternal(const SamplerDescriptor& desc) noexcept;
 
@@ -482,7 +484,6 @@ public:
         std::span<const ShaderParameterDynamicOffset> dynamicOffsets) noexcept override;
 
     bool SetPushConstants(
-        uint32_t groupIndex,
         BindingHandle binding,
         std::span<const byte> data) noexcept override;
 
@@ -526,7 +527,6 @@ public:
         std::span<const ShaderParameterDynamicOffset> dynamicOffsets) noexcept override;
 
     bool SetPushConstants(
-        uint32_t groupIndex,
         BindingHandle binding,
         std::span<const byte> data) noexcept override;
 
@@ -973,6 +973,29 @@ public:
     VkFormat _rawFormat{VK_FORMAT_UNDEFINED};
 };
 
+// Per-set layout entry in Vulkan terms, built only from `ResolvedVulkanLayout`. The logical kind is
+// kept as the authority instead of being fused into a single backend enum: the native descriptor
+// type, the required buffer usage and the value-compatibility rules are all derived from it, and the
+// dynamic placement stays a separate axis so it cannot silently change the resource class.
+struct ShaderParameterSetLayoutEntryVulkan {
+    uint32_t Binding{0};
+    shader::ShaderBindingKind LogicalKind{shader::ShaderBindingKind::CBuffer};
+    VulkanBufferDescriptorPlacement Placement{VulkanBufferDescriptorPlacement::Regular};
+    uint32_t Count{0};
+    ShaderStages Stages{ShaderStage::UNKNOWN};
+    VkDescriptorType DescriptorType{VK_DESCRIPTOR_TYPE_MAX_ENUM};
+    // Index into `PipelineLayoutVulkan::_immutableSamplers`, or `shader::kShaderNoSampler`.
+    uint32_t ImmutableSamplerIndex{shader::kShaderNoSampler};
+
+    bool IsDynamic() const noexcept {
+        return Placement == VulkanBufferDescriptorPlacement::Dynamic;
+    }
+
+    bool HasImmutableSampler() const noexcept {
+        return ImmutableSamplerIndex != shader::kShaderNoSampler;
+    }
+};
+
 class PipelineLayoutVulkan final : public PipelineLayout {
 public:
     explicit PipelineLayoutVulkan(DeviceVulkan* device) noexcept;
@@ -993,8 +1016,15 @@ public:
     DeviceVulkan* _device;
     VkPipelineLayout _layout{VK_NULL_HANDLE};
     vector<IntrusivePtr<DescriptorSetLayoutVulkan>> _setLayoutRefs;
-    vector<vector<ShaderParameterSetLayoutEntryDescriptor>> _parameterSetLayouts;
+    vector<vector<ShaderParameterSetLayoutEntryVulkan>> _parameterSetLayouts;
+    // Dynamic descriptor order per set, as indices into `_parameterSetLayouts[set]`. Copied from
+    // `ResolvedVulkanLayout::DynamicOffsetOrder` rather than recomputed, so the order
+    // `vkCmdBindDescriptorSets` expects is the resolved order by construction.
+    vector<vector<uint32_t>> _dynamicEntryOrder;
     vector<BackendBindingName> _bindingNames;
+    // Immutable samplers are owned by the layout: VkDescriptorSetLayout only borrows the handles,
+    // so they must outlive every set layout and parameter set created from this layout.
+    vector<VkSampler> _immutableSamplers;
     uint32_t _bindingGeneration{0};
     std::optional<VkPushConstantRange> _pushConstantRange;
     std::optional<ShaderBindingLocation> _pushConstantLocation;

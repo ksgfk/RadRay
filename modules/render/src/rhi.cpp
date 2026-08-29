@@ -94,12 +94,6 @@ bool ValidateVertexInputState(const VertexInputState& state) noexcept {
     return true;
 }
 
-bool IsDynamicShaderParameterBindingType(ShaderParameterBindingType type) noexcept {
-    return type == ShaderParameterBindingType::DynamicCBuffer ||
-           type == ShaderParameterBindingType::DynamicBuffer ||
-           type == ShaderParameterBindingType::DynamicRWBuffer;
-}
-
 std::string_view format_as(ShaderStage v) noexcept {
     return EnumNameOr(v);
 }

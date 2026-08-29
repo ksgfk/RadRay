@@ -1,6 +1,6 @@
 > - 适用: 新增或修改 shaderlib 根 `.hlsl` pass、keyword domain、binding 或 target gate
 > - 权威: 本文是 schema 6 目标 HLSL authoring 契约；wire 与 runtime 边界见 shader pipeline 架构文档
-> - 状态: ADR-0051 已接受，compiler/runtime 实现尚待 `docs/todo/shader-layout-contract-correction.md` 落地；迁移完成前不要假设 schema 5 artifact 已具备本文的 Vulkan policy lowering
+> - 状态: ADR-0051 已落地。本文描述的 policy frontend、schema 6 wire、target-typed resolve 与两个后端 native chain 都是当前实现；实施记录见 `docs/todo/shader-layout-contract-correction.md`
 > - 锚点: `shaderlib/core/platform.hlsli`, `shaderlib/pipelines/forward/bindings.hlsli`, `shaderlib/pipelines/forward/forward.hlsl`, `shaderlib/passes/depth.hlsl`, `shaderlib/passes/compute.hlsl`, `modules/shader_compiler/tests/test_shaderlib_passes.cpp`
 
 # HLSL authoring
@@ -43,6 +43,11 @@ stable-superset ranges/parameters/static samplers 可以保留。compiler 在 ta
 policy：DXIL lane 发布 standard serialized Root Signature，SPIR-V lane 按同一 HLSL declaration
 identity 发布 Vulkan layout records。runtime 不解析 DXIL blob 来重建 Vulkan layout。
 
+policy 一旦出现，就必须写在该 source 的**每个** entry 上，且各处文本逐字一致（惯用写法是
+`#define RS "..."` 后各 entry 写 `[RootSignature(RS)]`）。只写在部分 entry 上会让缺少 attribute
+的 stage 编译出不含 serialized Root Signature 的 DXIL，与 frontend 观察到的 policy 不一致，
+编译以 2106 失败，而不是把另一个 entry 的 policy 静默套用到该 stage 上。
+
 可移植的 policy 子集按下表 lower：
 
 | RootSignature 项 | D3D12 | Vulkan |
@@ -66,6 +71,22 @@ D3D12 RHI 按 active bindings 生成 implicit descriptor-table layout；Vulkan �
 这不会禁止 dynamic cbuffer；具体 pipeline 仍可在 layout resolve 时对精确 declaration 选择合法的
 backend-specific placement。malformed policy、跨 stage 冲突、未覆盖 D3 active resource，或一个
 已被 policy 指向的 active Vulkan declaration 无法关联/表示时会使编译失败，不回退到缺省路径。
+
+policy 相关的编译诊断：
+
+| Code | 触发条件 |
+|---|---|
+| 2105 | 同一 translation unit 声明了多份不同的 `[RootSignature]`；policy 是 translation-unit fact，多个 entry 必须写同一份 |
+| 2117 | `[RootSignature]` 无法解析或序列化，或含当前不支持的 parameter |
+| 2118 | active declaration 的类型不在 contract 内（`TextureBuffer`、acceleration structure、feedback texture 等）；dead declaration 不受约束 |
+| 2119 | declaration 记录的 logical kind 与 lane 实际 lower 出的 kind 不一致 |
+| 2120 | push declaration 缺 `register()`，无法按 D3 register 关联到 policy parameter |
+| 2121 | DXIL lane 的 active resource 未被 policy 覆盖；SPIR-V lane 视为 target-only declaration，保留为 table |
+| 2122 | placement 对该 kind/count 非法：只有 count=1 的 `CBuffer`/structured/raw buffer 能做 root descriptor，`StaticSampler` 只能落在 sampler 上 |
+| 2123 | policy visibility 不覆盖使用该资源的 active stage |
+| 2124 | push/`RootConstants` 不一致：policy 写了 `RootConstants` 但 declaration 缺 `VK_PUSH_CONSTANT`、push block 未被 policy 授权、超出 `num32BitConstants`，或跨 stage 不一致 |
+
+2111/2113 见下一节。这些检查都发生在死资源剥除之后。
 
 ## Binding 与 target gate
 

@@ -1,22 +1,21 @@
 > - 适用: 维护 shader compiler client、metadata wire、artifact decoder 或 runtime JIT
 > - 权威: 本文描述 ADR-0051/schema 6 的目标 shader pipeline 契约；实施检查站见 `docs/todo/shader-layout-contract-correction.md`
-> - 状态: 契约已接受、实现待迁移；当前 worktree 仍是 schema 5 / SDK `.radray.4`，不得据此声称 schema 6 已落地
+> - 状态: 已落地。schema 6 wire、decoder、target-typed resolver、两个后端 native chain、runtime request/cache 与 `1.9.2607.radray.5` package 发布全部完成（M1-M6）；实施记录见 `docs/todo/shader-layout-contract-correction.md`
 > - 锚点: `modules/shader/include/radray/shader/shader_compiler_contract.h`, `modules/shader/include/radray/shader/shader_artifact.h`, `modules/render/include/radray/render/backend_shader_artifact.h`, `modules/render/src/backend_shader_artifact.cpp`, `modules/shader_compiler/include/radray/shader_compiler/client.h`, `modules/runtime/include/radray/runtime/shader_jit.h`, `modules/runtime/include/radray/runtime/shader_program.h`, `modules/runtime/include/radray/runtime/shader_parameters.h`, `CMakePresets.json`
 
 # Shader pipeline
 
 ## 迁移状态
 
-HLSL 是 pass source 的唯一 authoring 输入。当前仓库已具备 source contract discovery、typed
-`CompileVariant`、DXIL/SPIR-V 双 lane、compiler-free artifact decoder、target-native layout
-入口和 runtime JIT 垂直切片，但 layout 链仍有已确认的 schema 5 缺口：program cache 未覆盖
-完整 CompilePolicy/layout identity；RootSignature 只桥接 Vulkan static-sampler 标志；sampler state
-丢失；typed/structured/raw buffer 被折叠；group-wide `ShaderLayoutPolicy` 把 native placement 写回
-logical kind；push handle 与 D3 explicit root-descriptor dynamic offset 链不完整。
+HLSL 是 pass source 的唯一 authoring 输入。schema 5 记录过的 layout 缺口都已经关闭：program
+cache 现在按完整 compile identity 与当前 backend 的 resolved layout 分两层；`[RootSignature]` 由
+compiler policy frontend 同时下降到两个 target；sampler state 以完整 record 上线；typed/structured/raw
+buffer 分开；placement 与 logical kind 是两个独立维度；push declaration 与 D3D12 root-descriptor
+dynamic offset 都走同一条 handle 链。
 
-以下章节是已经接受、实现必须收敛到的 schema 6 契约。迁移为原子 cutover：schema 6 decoder
-拒绝 4/5，RadRay DXC package 升级到 `1.9.2607.radray.5`，extension ABI 因 interface shape 不变
-仍为 3。完成前现有 schema 5 behavior 只算迁移起点，不是新的架构权威。
+以下章节既是接受的 schema 6 契约，也是当前实现。cutover 是原子的：schema 6 decoder 拒绝 4/5，
+RadRay DXC package 升级到 `1.9.2607.radray.5`，extension ABI 因 interface shape 不变仍为 3。
+package 已发布，`project_manifest.json` 按 `EnforceHash` 固定已发布归档的 hash。
 
 正式 SDK 是独立构建并安装的 RadRay DXC fork package。`radrayshadercompiler` 只通过
 `RadRayDXC::Headers` 编译、以 canonical library name 加载 `RadRayDXC::Compiler` 的 runtime，
@@ -92,9 +91,9 @@ DXC 的 `DXC_OUT_ROOT_SIGNATURE` carrier；最终 DXIL object 通过 `-Qstrip_ro
 
 logical declaration record 区分 CBuffer、typed `Buffer<T>/RWBuffer<T>`、structured/read-write、
 raw/read-write、sampled/storage texture 与 sampler。D3 Table/RootDescriptor 和 Vulkan
-Regular/Dynamic 是 base/resolved placement，不是 logical kind；新 path 不生产
-`ShaderParameterBindingType::Dynamic*` 来表达 artifact 资源类别。既有 enum identifiers 保留且
-不重命名。
+Regular/Dynamic 是 base/resolved placement，不是 logical kind。公共层不再有把 kind 与 placement 融
+在一起的 binding type 枚举：原 `ShaderParameterBindingType` 随 D3D12 adapter 层一起删除，两个后端
+各自的 entry 类型把 logical kind 与 placement 分成两个字段。
 
 SPIR-V immutable sampler 引用 Vulkan-specific fixed-width full-state record，覆盖 filter、address、
 mipmap/LOD、bias、anisotropy、compare、border 和 reduction；wire 不持久化 `VkSamplerCreateInfo` 或
@@ -119,8 +118,9 @@ canonical resolved semantics 计算，不包含 modifier 输入顺序、显式�
 `PipelineLayout::FindBinding` 按 canonical HLSL name 为 descriptor 与 push declaration 生成
 `BindingHandle`。公共 handle 只暴露 validity/equality；generation、namespace、table index 及一个
 或多个 native destinations 由 layout 内部 metadata table 解释。unknown/inactive selector、wrong
-kind、duplicate modifier、wrong/cross-layout handle 等是 framework invariant（Debug assert），
-不新增恢复 API。
+kind、duplicate modifier 等是 framework 构造错误。wrong/cross-layout handle 由持有 layout 的一侧按
+返回值报告并 fail closed（不 Debug abort，否则这条路径在唯一会跑测试的配置里无法验证），但不为此
+新增恢复 API。
 
 type tree 属于所属 artifact 的 CPU upload schema。当前 v3 record 保留 scalar/vector/matrix 的
 kind，并为 struct/struct-array member 携带 compiler-owned underlying `TypeIndex`；decoder 检查

@@ -63,13 +63,30 @@ float4 PSMain() : SV_Target0 {
 )hlsl";
 
 constexpr std::string_view kMultipleRootConstantsSource = R"hlsl(
-[RootSignature("RootConstants(num32BitConstants=16, b0, space=0), RootConstants(num32BitConstants=4, b1, space=0)")]
+#define RS \
+    "RootConstants(num32BitConstants=16, b0, space=0)," \
+    "RootConstants(num32BitConstants=4, b1, space=0)"
+
+struct ObjectData {
+    float4x4 Transform;
+};
+struct MaterialData {
+    float4 Tint;
+};
+
+#if !defined(__spirv__)
+ConstantBuffer<ObjectData> ObjectConstants : register(b0, space0);
+ConstantBuffer<MaterialData> MaterialConstants : register(b1, space0);
+#endif
+
 [shader("vertex")]
+[RootSignature(RS)]
 float4 VSMain(float3 position : POSITION) : SV_Position {
     return float4(position, 1.0);
 }
 
 [shader("pixel")]
+[RootSignature(RS)]
 float4 PSMain() : SV_Target0 {
     return float4(1.0, 1.0, 1.0, 1.0);
 }
@@ -82,7 +99,7 @@ struct PushData {
 
 #include <core/platform.hlsli>
 #if defined(__spirv__)
-VK_PUSH_CONSTANT ConstantBuffer<PushData> PushConstants;
+VK_PUSH_CONSTANT ConstantBuffer<PushData> PushConstants : register(b0);
 #endif
 
 [shader("vertex")]
@@ -106,8 +123,8 @@ struct SecondData {
 
 #include <core/platform.hlsli>
 #if defined(__spirv__)
-VK_PUSH_CONSTANT ConstantBuffer<FirstData> First;
-VK_PUSH_CONSTANT ConstantBuffer<SecondData> Second;
+VK_PUSH_CONSTANT ConstantBuffer<FirstData> First : register(b0);
+VK_PUSH_CONSTANT ConstantBuffer<SecondData> Second : register(b1);
 #endif
 
 [shader("vertex")]
@@ -125,60 +142,47 @@ constexpr std::string_view kMissingStaticSamplerSource = R"hlsl(
 Texture2D<float4> ActiveTexture : register(t0);
 SamplerState MissingSampler : register(s0);
 
-[RootSignature("DescriptorTable(SRV(t0)), StaticSampler(s1, filter=FILTER_MIN_MAG_LINEAR_MIP_POINT)")]
+#define RS "DescriptorTable(SRV(t0)), StaticSampler(s1, filter=FILTER_MIN_MAG_LINEAR_MIP_POINT)"
+
 [shader("vertex")]
+[RootSignature(RS)]
 float4 VSMain(float3 position : POSITION) : SV_Position {
     return ActiveTexture.Load(int3(0, 0, 0)) + float4(position, 1.0);
 }
 
 [shader("pixel")]
+[RootSignature(RS)]
 float4 PSMain() : SV_Target0 {
     return ActiveTexture.SampleLevel(MissingSampler, float2(0.0, 0.0), 0.0);
 }
 )hlsl";
 
 constexpr std::string_view kDuplicateStaticSamplerSource = R"hlsl(
-[RootSignature("StaticSampler(s0, filter=FILTER_MIN_MAG_LINEAR_MIP_POINT), StaticSampler(s0, filter=FILTER_MIN_MAG_LINEAR_MIP_POINT)")]
-SamplerState LinearSampler;
+#define RS \
+    "StaticSampler(s0, filter=FILTER_MIN_MAG_LINEAR_MIP_POINT)," \
+    "StaticSampler(s0, filter=FILTER_MIN_MAG_LINEAR_MIP_POINT)"
 
 [shader("vertex")]
+[RootSignature(RS)]
 float4 VSMain(float3 position : POSITION) : SV_Position {
     return float4(position, 1.0);
 }
 
 [shader("pixel")]
-float4 PSMain() : SV_Target0 {
-    return LinearSampler.SampleLevel(Texture2D<float4>(0), float2(0.0, 0.0), 0.0);
-}
-)hlsl";
-
-constexpr std::string_view kConflictingStaticSamplerSource = R"hlsl(
-[RootSignature("StaticSampler(s0, filter=FILTER_MIN_MAG_LINEAR_MIP_POINT), StaticSampler(s1, filter=FILTER_MIN_MAG_LINEAR_MIP_POINT)")]
-SamplerState LinearSampler;
-
-[shader("vertex")]
-float4 VSMain(float3 position : POSITION) : SV_Position {
-    return float4(position, 1.0);
-}
-
-[shader("pixel")]
+[RootSignature(RS)]
 float4 PSMain() : SV_Target0 {
     return float4(1.0, 1.0, 1.0, 1.0);
 }
 )hlsl";
 
 constexpr std::string_view kMismatchedGraphicsRootSignaturesSource = R"hlsl(
-#if !defined(__spirv__)
 [RootSignature("CBV(b0)")]
-#endif
 [shader("vertex")]
 float4 VSMain(float3 position : POSITION) : SV_Position {
     return float4(position, 1.0);
 }
 
-#if !defined(__spirv__)
 [RootSignature("CBV(b1)")]
-#endif
 [shader("pixel")]
 float4 PSMain() : SV_Target0 {
     return float4(1.0, 1.0, 1.0, 1.0);
@@ -186,6 +190,11 @@ float4 PSMain() : SV_Target0 {
 )hlsl";
 
 constexpr std::string_view kComputeRootSignatureSource = R"hlsl(
+struct DispatchData {
+    float4 Value;
+};
+ConstantBuffer<DispatchData> DispatchConstants : register(b0, space0);
+
 [RootSignature("RootConstants(num32BitConstants=4, b0, space=0)")]
 [shader("compute")]
 [numthreads(1, 1, 1)]
@@ -231,15 +240,16 @@ Texture2D<float4> ColorTexture : register(t0);
 VK_BINDING(2, 4)
 SamplerState ColorSampler : register(s0);
 
-#if !defined(__spirv__)
-[RootSignature("DescriptorTable(SRV(t0)), StaticSampler(s0, filter=FILTER_MIN_MAG_LINEAR_MIP_POINT)")]
-#endif
+#define RS "DescriptorTable(SRV(t0)), StaticSampler(s0, filter=FILTER_MIN_MAG_LINEAR_MIP_POINT)"
+
 [shader("vertex")]
+[RootSignature(RS)]
 float4 VSMain(float3 position : POSITION) : SV_Position {
     return float4(position, 1.0);
 }
 
 [shader("pixel")]
+[RootSignature(RS)]
 float4 PSMain(float2 uv : TEXCOORD0) : SV_Target0 {
     return ColorTexture.SampleLevel(ColorSampler, uv, 0.0);
 }
@@ -286,7 +296,7 @@ TEST(RadRayDxcMetadata, ConcreteVariantReturnsAtomicTargetLanes) {
             envelope.GpuArtifact));
         EXPECT_EQ(envelope.Contract, request.ExpectedContract);
         EXPECT_NE(envelope.BytecodeDigest, shader::BytecodeHash{});
-        EXPECT_NE(envelope.PipelineLayoutDigest, shader::PipelineLayoutHash{});
+        EXPECT_NE(envelope.BasePipelineLayoutDigest, shader::BasePipelineLayoutHash{});
         EXPECT_EQ(envelope.BindingRecords.Size, 2u * sizeof(shader::WireBindingRecord));
         EXPECT_EQ(envelope.RootSignature.Size, 0u);
     }
@@ -573,7 +583,7 @@ TEST(RadRayDxcMetadata, StaticSamplerPolicyFailsClosed) {
     Client client;
     ASSERT_TRUE(client.IsAvailable());
     const auto includePaths = ShaderIncludePaths();
-    const auto expectTargetFailure = [&](std::string_view name, std::string_view source) {
+    const auto expectTargetFailure = [&](std::string_view name, std::string_view source, uint32_t code) {
         const auto discovery = client.DiscoverSourceContract(
             name,
             CopyBytes(source),
@@ -590,9 +600,17 @@ TEST(RadRayDxcMetadata, StaticSamplerPolicyFailsClosed) {
             includePaths);
         EXPECT_EQ(result.Status, shader::CompileStatus::TargetFailure) << name;
         EXPECT_TRUE(result.Lanes.empty()) << name;
-        EXPECT_FALSE(result.Diagnostics.empty()) << name;
+        EXPECT_TRUE(std::any_of(
+            result.Diagnostics.begin(),
+            result.Diagnostics.end(),
+            [code](const shader::CompileDiagnostic& diagnostic) noexcept {
+                return diagnostic.Code == code;
+            }))
+            << name << " expected diagnostic " << code;
     };
-    const auto expectDiscoveryFailure = [&](std::string_view name, std::string_view source) {
+    const auto expectDiscoveryFailure = [&](std::string_view name,
+                                            std::string_view source,
+                                            uint32_t code) {
         const auto discovery = client.DiscoverSourceContract(
             name,
             CopyBytes(source),
@@ -600,11 +618,21 @@ TEST(RadRayDxcMetadata, StaticSamplerPolicyFailsClosed) {
             includePaths);
         EXPECT_FALSE(discovery.Succeeded()) << name;
         EXPECT_EQ(discovery.Status, shader::CompileStatus::InvalidRequest) << name;
-        EXPECT_FALSE(discovery.Diagnostics.empty()) << name;
+        EXPECT_TRUE(std::any_of(
+            discovery.Diagnostics.begin(),
+            discovery.Diagnostics.end(),
+            [code](const shader::CompileDiagnostic& diagnostic) noexcept {
+                return diagnostic.Code == code;
+            }))
+            << name << " expected diagnostic " << code;
     };
-    expectTargetFailure("fixtures/missing_static_sampler.hlsl", kMissingStaticSamplerSource);
-    expectDiscoveryFailure("fixtures/duplicate_static_sampler.hlsl", kDuplicateStaticSamplerSource);
-    expectDiscoveryFailure("fixtures/conflicting_static_sampler.hlsl", kConflictingStaticSamplerSource);
+    // A sampler the shader actually samples with, that the policy does not address, is an uncovered
+    // active resource rather than something the backend may fill in.
+    expectTargetFailure("fixtures/missing_static_sampler.hlsl", kMissingStaticSamplerSource, 2121);
+    // Two static samplers at one register is a policy the RootSignature compiler cannot serialize,
+    // and the policy is parsed at discovery time.
+    expectDiscoveryFailure(
+        "fixtures/duplicate_static_sampler.hlsl", kDuplicateStaticSamplerSource, 2117);
 }
 
 TEST(RadRayDxcMetadata, ExplicitRootSignatureAllowsStableSuperset) {
@@ -661,7 +689,7 @@ TEST(RadRayDxcMetadata, ExplicitRootSignatureAllowsStableSuperset) {
     ASSERT_EQ(exactResult.Lanes.size(), 1u);
     shader::WireMetadataEnvelope exactEnvelope{};
     std::memcpy(&exactEnvelope, exactResult.Lanes[0].Metadata.data(), sizeof(exactEnvelope));
-    EXPECT_NE(exactEnvelope.PipelineLayoutDigest, envelope.PipelineLayoutDigest);
+    EXPECT_NE(exactEnvelope.BasePipelineLayoutDigest, envelope.BasePipelineLayoutDigest);
     EXPECT_NE(exactEnvelope.GpuArtifact, envelope.GpuArtifact);
 }
 
@@ -689,7 +717,7 @@ TEST(RadRayDxcMetadata, ExplicitRootSignatureMustCoverActiveResource) {
         result.Diagnostics.begin(),
         result.Diagnostics.end(),
         [](const shader::CompileDiagnostic& diagnostic) noexcept {
-            return diagnostic.Code == 2106;
+            return diagnostic.Code == 2121;
         });
     EXPECT_TRUE(hasRootDiagnostic);
 }
@@ -751,8 +779,21 @@ TEST(RadRayDxcMetadata, StaticSamplerIsTargetSpecificButImmutable) {
             }
             if (name == "ColorSampler") {
                 foundSampler = true;
-                EXPECT_NE(binding.Flags & 1u, 0u)
-                    << "target=" << static_cast<uint32_t>(lane.Target);
+                // The policy's static sampler owns no table slot on D3D12 and is a table entry
+                // carrying a published state on Vulkan.
+                if (lane.Target == shader::ShaderTarget::DXIL) {
+                    EXPECT_EQ(
+                        binding.Placement,
+                        static_cast<uint32_t>(shader::ShaderBindingPlacement::StaticSampler));
+                    EXPECT_EQ(binding.SamplerIndex, shader::kShaderNoSampler);
+                    EXPECT_EQ(envelope.SamplerRecords.Size, 0u);
+                } else {
+                    EXPECT_EQ(
+                        binding.Placement,
+                        static_cast<uint32_t>(shader::ShaderBindingPlacement::Table));
+                    EXPECT_EQ(binding.SamplerIndex, 0u);
+                    EXPECT_EQ(envelope.SamplerRecords.Size, sizeof(shader::WireSamplerRecord));
+                }
             }
         }
         EXPECT_TRUE(foundTexture);
@@ -765,33 +806,25 @@ TEST(RadRayDxcMetadata, MismatchedGraphicsRootSignaturesFailClosed) {
     Client client;
     ASSERT_TRUE(client.IsAvailable());
     const auto includePaths = ShaderIncludePaths();
-    const auto discovery = client.DiscoverSourceContract(
-        "fixtures/mismatched_graphics_root_signatures.hlsl",
-        CopyBytes(kMismatchedGraphicsRootSignaturesSource),
-        shader::ShaderTarget::DXIL,
-        includePaths);
-    ASSERT_TRUE(discovery.Succeeded());
+    // The policy is a translation-unit fact, so two entries declaring different ones is rejected
+    // while the contract is being discovered: there is no per-stage policy to compile against, and
+    // the failure does not depend on which target is requested.
     for (const shader::ShaderTarget target :
          {shader::ShaderTarget::DXIL, shader::ShaderTarget::SPIRV}) {
-        const auto result = client.CompileVariant(shader::CompileVariantRequest{
-            .SourceName = "fixtures/mismatched_graphics_root_signatures.hlsl",
-            .RootSource = CopyBytes(kMismatchedGraphicsRootSignaturesSource),
-            .Defines = {},
-            .Assignments = {},
-            .Targets = static_cast<shader::ShaderTargetMask>(shader::ToTargetMask(target)),
-            .ExpectedContract = discovery.Contract.Hash},
+        const auto discovery = client.DiscoverSourceContract(
+            "fixtures/mismatched_graphics_root_signatures.hlsl",
+            CopyBytes(kMismatchedGraphicsRootSignaturesSource),
+            target,
             includePaths);
-        EXPECT_EQ(result.Status, shader::CompileStatus::TargetFailure)
+        EXPECT_FALSE(discovery.Succeeded()) << "target=" << static_cast<uint32_t>(target);
+        EXPECT_EQ(discovery.Status, shader::CompileStatus::InvalidRequest)
             << "target=" << static_cast<uint32_t>(target);
-        EXPECT_TRUE(result.Lanes.empty())
-            << "target=" << static_cast<uint32_t>(target);
-        const bool hasRootDiagnostic = std::any_of(
-            result.Diagnostics.begin(),
-            result.Diagnostics.end(),
+        EXPECT_TRUE(std::any_of(
+            discovery.Diagnostics.begin(),
+            discovery.Diagnostics.end(),
             [](const shader::CompileDiagnostic& diagnostic) noexcept {
                 return diagnostic.Code == 2105;
-            });
-        EXPECT_TRUE(hasRootDiagnostic)
+            }))
             << "target=" << static_cast<uint32_t>(target);
     }
 }
@@ -1340,13 +1373,21 @@ float4 VSMain(float3 position : POSITION) : SV_Position {
 // Regression: RootConstants inherited an all-stage mask regardless of the
 // author's ShaderVisibility, so a vertex-only constant claimed the pixel stage.
 constexpr std::string_view kVisibilityScopedRootConstantSource = R"hlsl(
-[RootSignature("RootConstants(num32BitConstants=4, b0, space=0, visibility=SHADER_VISIBILITY_VERTEX)")]
+#define RS "RootConstants(num32BitConstants=4, b0, space=0, visibility=SHADER_VISIBILITY_VERTEX)"
+
+struct VertexData {
+    float4 Offset;
+};
+ConstantBuffer<VertexData> VertexConstants : register(b0, space0);
+
 [shader("vertex")]
+[RootSignature(RS)]
 float4 VSMain(float3 position : POSITION) : SV_Position {
     return float4(position, 1.0);
 }
 
 [shader("pixel")]
+[RootSignature(RS)]
 float4 PSMain() : SV_Target0 {
     return float4(1.0, 1.0, 1.0, 1.0);
 }
@@ -1540,7 +1581,7 @@ float4 VSMain(float3 position : POSITION) : SV_Position {
 // toolchain identity of the loaded compiler turns "tested the wrong DLL" from a
 // silent pass into a failure.
 TEST(RadRayDxcMetadata, LoadedCompilerReportsExpectedToolchainIdentity) {
-    constexpr uint64_t kExpectedToolchainIdentity = 0x0000000001090210ull;
+    constexpr uint64_t kExpectedToolchainIdentity = 0x0000000001090211ull;
     constexpr std::string_view source = R"hlsl(
 [shader("vertex")]
 float4 VSMain(float3 position : POSITION) : SV_Position {

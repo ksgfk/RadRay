@@ -113,21 +113,6 @@ enum class VertexFormat : int32_t {
     FLOAT32X4,
 };
 
-enum class ShaderParameterBindingType : int32_t {
-    UNKNOWN,
-    CBuffer,
-    Buffer,
-    RWBuffer,
-    TexelBuffer,
-    RWTexelBuffer,
-    Texture,
-    RWTexture,
-    DynamicCBuffer,
-    DynamicBuffer,
-    DynamicRWBuffer,
-    Sampler,
-};
-
 enum class RenderBackend : int32_t {
     D3D12,
     Vulkan,
@@ -949,43 +934,23 @@ struct ShaderParameterSetDescriptor {
     uint32_t GroupIndex{0};
 };
 
+struct BindingHandleAccess;
+
+// Names one binding record in one pipeline layout's metadata table. The public surface is
+// deliberately only default-invalid, validity and equality: a caller takes a handle from
+// PipelineLayout::FindBinding and hands it back, so nothing outside the backends needs the group,
+// the register number or the register class. The internal token pairs the layout's generation with
+// a record index, and its bit layout is not ABI.
 class BindingHandle {
 public:
     constexpr BindingHandle() noexcept = default;
 
-    static constexpr BindingHandle FromBinding(
-        uint32_t binding,
-        uint32_t generation,
-        uint32_t bindingNamespace = 0) noexcept {
-        return BindingHandle{
-            (static_cast<uint64_t>(generation) << 32) |
-            (static_cast<uint64_t>(bindingNamespace & 0xffu) << kNamespaceShift) |
-            (static_cast<uint64_t>(binding) + 1)};
-    }
-
-    constexpr bool IsValid() const noexcept {
-        return _value != 0 &&
-               (static_cast<uint32_t>(_value) & kBindingMask) != 0 &&
-               GetBinding() != std::numeric_limits<uint32_t>::max();
-    }
-
-    constexpr uint32_t GetBinding() const noexcept {
-        return (static_cast<uint32_t>(_value) & kBindingMask) - 1;
-    }
-
-    constexpr uint32_t GetGeneration() const noexcept {
-        return static_cast<uint32_t>(_value >> 32);
-    }
-
-    constexpr uint32_t GetNamespace() const noexcept {
-        return (static_cast<uint32_t>(_value) >> kNamespaceShift) & 0xffu;
-    }
+    constexpr bool IsValid() const noexcept { return _value != 0; }
 
     friend bool operator==(const BindingHandle&, const BindingHandle&) noexcept = default;
 
 private:
-    static constexpr uint32_t kNamespaceShift = 24;
-    static constexpr uint32_t kBindingMask = (1u << kNamespaceShift) - 1;
+    friend struct BindingHandleAccess;
 
     explicit constexpr BindingHandle(uint64_t value) noexcept
         : _value(value) {}
@@ -993,8 +958,11 @@ private:
     uint64_t _value{0};
 };
 
+// The offset applies to the dynamic (Vulkan) or root (D3D12) buffer descriptor the handle names,
+// inside the group being bound. Because the handle names a record rather than a bare register
+// number, two root descriptors in one group can no longer be taken for one another.
 struct ShaderParameterDynamicOffset {
-    uint32_t Binding{0};
+    BindingHandle Binding{};
     uint32_t Offset{0};
 
     friend bool operator==(const ShaderParameterDynamicOffset&, const ShaderParameterDynamicOffset&) noexcept = default;
@@ -1351,7 +1319,10 @@ public:
 
     virtual void BindShaderParameterSet(uint32_t groupIndex, ShaderParameterSet* set, std::span<const ShaderParameterDynamicOffset> dynamicOffsets = {}) noexcept = 0;
 
-    virtual bool SetPushConstants(uint32_t groupIndex, BindingHandle binding, std::span<const byte> data) noexcept = 0;
+    // The handle already names one push declaration in the bound layout, so there is no group
+    // parameter: a D3D12 declaration may fan out to several RootConstants destinations and a Vulkan
+    // variant has at most one active push block.
+    virtual bool SetPushConstants(BindingHandle binding, std::span<const byte> data) noexcept = 0;
 };
 
 class GraphicsCommandEncoder : public CommandEncoder {
@@ -1599,7 +1570,6 @@ public:
 
 // == 工具函数 ==
 // SamplerCache 在 sampler_cache.h
-
 bool IsDepthStencilFormat(TextureFormat format) noexcept;
 bool IsUintFormat(TextureFormat format) noexcept;
 bool IsSintFormat(TextureFormat format) noexcept;
@@ -1607,7 +1577,7 @@ uint32_t GetIndexFormatSizeInBytes(IndexFormat format) noexcept;
 IndexFormat SizeInBytesToIndexFormat(uint32_t size) noexcept;
 uint32_t GetTextureFormatBytesPerPixel(TextureFormat format) noexcept;
 uint32_t GetVertexFormatSizeInBytes(VertexFormat format) noexcept;
-bool IsDynamicShaderParameterBindingType(ShaderParameterBindingType type) noexcept;
+
 // -------------------------------------------------------------------------
 
 std::string_view format_as(RenderBackend v) noexcept;

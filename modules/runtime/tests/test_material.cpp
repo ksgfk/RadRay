@@ -56,7 +56,7 @@ shader::ShaderArtifactDecodeOptions DecodeOptions(
     return shader::ShaderArtifactDecodeOptions{
         .Target = target,
         .ExpectedGpuArtifact = render::test::ExpectedGpuArtifact(index.value_or(0), target),
-        .ExpectedToolchainIdentity = 0x0000000001090210ull};
+        .ExpectedToolchainIdentity = 0x0000000001090211ull};
 }
 
 std::optional<shader::ShaderArtifactView> DecodeGeneric(
@@ -315,52 +315,137 @@ TEST(RadRayRuntimeMaterial, DuplicateFlatParameterNameRejectsLayout) {
     EXPECT_FALSE(ShaderParameterLayout::Create(artifact.value()).has_value());
 }
 
-template <typename TArtifact>
-void CheckResidencyPolicy(const TArtifact& artifact) {
-    const auto regular = render::MakeBackendPipelineLayoutInput(artifact);
-    ASSERT_TRUE(regular.has_value());
-    ASSERT_EQ(regular->GroupEntries.size(), 1u);
-    ASSERT_EQ(regular->GroupEntries[0].size(), 1u);
-    EXPECT_EQ(
-        regular->GroupEntries[0][0].Type,
-        render::ShaderParameterBindingType::CBuffer);
-
-    const uint32_t dynamicGroup = 0;
-    const render::ShaderLayoutPolicy dynamicPolicy{
-        .DynamicBufferGroups = std::span{&dynamicGroup, 1}};
-    const auto dynamic = render::MakeBackendPipelineLayoutInput(artifact, dynamicPolicy);
-    ASSERT_TRUE(dynamic.has_value());
-    EXPECT_EQ(
-        dynamic->GroupEntries[0][0].Type,
-        render::ShaderParameterBindingType::DynamicCBuffer);
-
-    const uint32_t missingGroup = 9;
-    const render::ShaderLayoutPolicy missingPolicy{
-        .DynamicBufferGroups = std::span{&missingGroup, 1}};
-    EXPECT_FALSE(render::MakeBackendPipelineLayoutInput(artifact, missingPolicy).has_value());
+// nested_types declares exactly one constant buffer, so it is the smallest artifact that can show
+// the difference between "the compiler published a table entry" and "the pipeline asked for a
+// bind-time offset on this declaration".
+render::ShaderLayoutSelector ConstantsSelector(
+    shader::ShaderBindingKind kind = shader::ShaderBindingKind::CBuffer) {
+    return render::ShaderLayoutSelector{
+        .DeclarationName = "Constants",
+        .ExpectedLogicalResourceKind = kind};
 }
 
-TEST(RadRayRuntimeMaterial, ResidencyPolicyMapsCBufferForBothTargets) {
-    for (const shader::ShaderTarget target : {
-             shader::ShaderTarget::DXIL,
-             shader::ShaderTarget::SPIRV}) {
-        const vector<byte> blob = ReadFixture("nested_types", target);
-        ASSERT_FALSE(blob.empty());
-        if (target == shader::ShaderTarget::DXIL) {
-            const auto artifact = shader::DecodeDxilShaderArtifact(
-                blob, DecodeOptions("nested_types", target));
-            ASSERT_TRUE(artifact.has_value());
-            CheckResidencyPolicy(artifact.value());
-        } else {
-            const auto artifact = shader::DecodeSpirvShaderArtifact(
-                blob, DecodeOptions("nested_types", target));
-            ASSERT_TRUE(artifact.has_value());
-            CheckResidencyPolicy(artifact.value());
-        }
-    }
+TEST(RadRayRuntimeMaterial, DeclarationModifierMakesOneCBufferDynamicOnBothTargets) {
+    const vector<byte> dxilBlob = ReadFixture("nested_types", shader::ShaderTarget::DXIL);
+    ASSERT_FALSE(dxilBlob.empty());
+    const auto dxil = shader::DecodeDxilShaderArtifact(
+        dxilBlob, DecodeOptions("nested_types", shader::ShaderTarget::DXIL));
+    ASSERT_TRUE(dxil.has_value());
+
+    const auto plainD3D12 = render::ResolveD3D12Layout(dxil.value());
+    ASSERT_TRUE(plainD3D12.has_value());
+    ASSERT_EQ(plainD3D12->Bindings.size(), 1u);
+    EXPECT_EQ(
+        plainD3D12->Bindings[0].Placement,
+        shader::ShaderBindingPlacement::Table);
+    EXPECT_EQ(plainD3D12->Bindings[0].LogicalKind, shader::ShaderBindingKind::CBuffer);
+
+    render::D3D12TargetLayoutOptions rootDescriptor;
+    rootDescriptor.BufferPlacements.push_back(
+        {.Selector = ConstantsSelector(),
+         .Placement = render::D3D12BufferPlacement::RootDescriptor});
+    const auto dynamicD3D12 = render::ResolveD3D12Layout(dxil.value(), rootDescriptor);
+    ASSERT_TRUE(dynamicD3D12.has_value());
+    EXPECT_EQ(
+        dynamicD3D12->Bindings[0].Placement,
+        shader::ShaderBindingPlacement::RootDescriptor);
+    // The logical kind stays a cbuffer: only the placement moved, which is what keeps the resolved
+    // layout from re-classifying the resource behind the caller's back.
+    EXPECT_EQ(dynamicD3D12->Bindings[0].LogicalKind, shader::ShaderBindingKind::CBuffer);
+    // The placement is part of the resolved semantics, so it has to move the identity.
+    EXPECT_NE(plainD3D12->Hash, dynamicD3D12->Hash);
+
+    const vector<byte> spirvBlob = ReadFixture("nested_types", shader::ShaderTarget::SPIRV);
+    ASSERT_FALSE(spirvBlob.empty());
+    const auto spirv = shader::DecodeSpirvShaderArtifact(
+        spirvBlob, DecodeOptions("nested_types", shader::ShaderTarget::SPIRV));
+    ASSERT_TRUE(spirv.has_value());
+
+    const auto plainVulkan = render::ResolveVulkanLayout(spirv.value());
+    ASSERT_TRUE(plainVulkan.has_value());
+    ASSERT_EQ(plainVulkan->Bindings.size(), 1u);
+    EXPECT_EQ(
+        plainVulkan->Bindings[0].Placement,
+        render::VulkanBufferDescriptorPlacement::Regular);
+    EXPECT_TRUE(plainVulkan->DynamicOffsetOrder.empty());
+
+    render::VulkanTargetLayoutOptions dynamicBuffer;
+    dynamicBuffer.BufferDescriptors.push_back(
+        {.Selector = ConstantsSelector(),
+         .Placement = render::VulkanBufferDescriptorPlacement::Dynamic});
+    const auto dynamicVulkan = render::ResolveVulkanLayout(spirv.value(), dynamicBuffer);
+    ASSERT_TRUE(dynamicVulkan.has_value());
+    EXPECT_EQ(
+        dynamicVulkan->Bindings[0].Placement,
+        render::VulkanBufferDescriptorPlacement::Dynamic);
+    ASSERT_EQ(dynamicVulkan->DynamicOffsetOrder.size(), 1u);
+    EXPECT_EQ(dynamicVulkan->DynamicOffsetOrder[0], 0u);
+    // The logical kind stays a cbuffer: only the placement moved, which is what keeps the resolved
+    // layout from re-classifying the resource behind the caller's back.
+    EXPECT_EQ(dynamicVulkan->Bindings[0].LogicalKind, shader::ShaderBindingKind::CBuffer);
+    EXPECT_NE(plainVulkan->Hash, dynamicVulkan->Hash);
+
+    // The two targets resolve the same intent, but they are separate layouts with separate
+    // numbering, so their identities must not be interchangeable.
+    EXPECT_NE(plainD3D12->Hash, plainVulkan->Hash);
 }
 
-TEST(RadRayRuntimeMaterial, ExplicitRootSignatureRejectsResidencyPolicy) {
+TEST(RadRayRuntimeMaterial, LayoutResolveFailsClosedOnRecipeContradictions) {
+    const vector<byte> blob = ReadFixture("nested_types", shader::ShaderTarget::DXIL);
+    ASSERT_FALSE(blob.empty());
+    const auto artifact = shader::DecodeDxilShaderArtifact(
+        blob, DecodeOptions("nested_types", shader::ShaderTarget::DXIL));
+    ASSERT_TRUE(artifact.has_value());
+
+    const auto resolveWith = [&](const render::D3D12TargetLayoutOptions& options,
+                                 render::ShaderLayoutResolveError expected) {
+        render::ShaderLayoutResolveError error = render::ShaderLayoutResolveError::None;
+        EXPECT_FALSE(render::ResolveD3D12Layout(artifact.value(), options, &error).has_value());
+        EXPECT_EQ(error, expected);
+    };
+
+    // A name the shader does not declare means the recipe was written against a different shader.
+    render::D3D12TargetLayoutOptions missing;
+    missing.BufferPlacements.push_back(
+        {.Selector = {.DeclarationName = "NotDeclared",
+                      .ExpectedLogicalResourceKind = shader::ShaderBindingKind::CBuffer},
+         .Placement = render::D3D12BufferPlacement::RootDescriptor});
+    resolveWith(missing, render::ShaderLayoutResolveError::SelectorNotFound);
+
+    // The expected kind is checked, not assumed: the same name with the wrong kind is a mismatch.
+    render::D3D12TargetLayoutOptions wrongKind;
+    wrongKind.BufferPlacements.push_back(
+        {.Selector = ConstantsSelector(shader::ShaderBindingKind::StructuredBuffer),
+         .Placement = render::D3D12BufferPlacement::RootDescriptor});
+    resolveWith(wrongKind, render::ShaderLayoutResolveError::SelectorNotFound);
+
+    // Two modifiers for one declaration is ambiguous, so it is rejected rather than resolved by
+    // input order.
+    render::D3D12TargetLayoutOptions duplicate;
+    duplicate.BufferPlacements.push_back(
+        {.Selector = ConstantsSelector(),
+         .Placement = render::D3D12BufferPlacement::RootDescriptor});
+    duplicate.BufferPlacements.push_back(
+        {.Selector = ConstantsSelector(),
+         .Placement = render::D3D12BufferPlacement::Table});
+    resolveWith(duplicate, render::ShaderLayoutResolveError::DuplicateSelector);
+
+    // A resolved layout belongs to one target: the other target's artifact cannot produce it.
+    const vector<byte> spirvBlob = ReadFixture("nested_types", shader::ShaderTarget::SPIRV);
+    ASSERT_FALSE(spirvBlob.empty());
+    const auto spirv = shader::DecodeSpirvShaderArtifact(
+        spirvBlob, DecodeOptions("nested_types", shader::ShaderTarget::SPIRV));
+    ASSERT_TRUE(spirv.has_value());
+    render::VulkanTargetLayoutOptions samplerOnCBuffer;
+    samplerOnCBuffer.ImmutableSamplers.push_back(
+        {.Selector = ConstantsSelector(), .State = {}});
+    render::ShaderLayoutResolveError samplerError = render::ShaderLayoutResolveError::None;
+    EXPECT_FALSE(
+        render::ResolveVulkanLayout(spirv.value(), samplerOnCBuffer, &samplerError).has_value());
+    EXPECT_EQ(samplerError, render::ShaderLayoutResolveError::IllegalPlacement);
+}
+
+TEST(RadRayRuntimeMaterial, ExplicitPolicyRefusesPlacementModifiers) {
     const vector<byte> blob = ReadFixture(
         "multiple_root_constants", shader::ShaderTarget::DXIL);
     ASSERT_FALSE(blob.empty());
@@ -369,10 +454,24 @@ TEST(RadRayRuntimeMaterial, ExplicitRootSignatureRejectsResidencyPolicy) {
         DecodeOptions("multiple_root_constants", shader::ShaderTarget::DXIL));
     ASSERT_TRUE(artifact.has_value());
     ASSERT_FALSE(artifact->Generic().SerializedRootSignature().empty());
-    const uint32_t group = 0;
-    const render::ShaderLayoutPolicy policy{
-        .DynamicBufferGroups = std::span{&group, 1}};
-    EXPECT_FALSE(render::MakeBackendPipelineLayoutInput(artifact.value(), policy).has_value());
+
+    // Resolving without modifiers keeps the carrier verbatim: it is what CreateRootSignature gets.
+    const auto resolved = render::ResolveD3D12Layout(artifact.value());
+    ASSERT_TRUE(resolved.has_value());
+    EXPECT_TRUE(resolved->HasExplicitCarrier());
+    EXPECT_EQ(
+        resolved->SerializedRootSignature.size(),
+        artifact->Generic().SerializedRootSignature().size());
+
+    // Rewriting a destination would make the resolved layout disagree with the blob it ships.
+    render::D3D12TargetLayoutOptions options;
+    options.BufferPlacements.push_back(
+        {.Selector = {.DeclarationName = "ObjectConstants",
+                      .ExpectedLogicalResourceKind = shader::ShaderBindingKind::CBuffer},
+         .Placement = render::D3D12BufferPlacement::RootDescriptor});
+    render::ShaderLayoutResolveError error = render::ShaderLayoutResolveError::None;
+    EXPECT_FALSE(render::ResolveD3D12Layout(artifact.value(), options, &error).has_value());
+    EXPECT_EQ(error, render::ShaderLayoutResolveError::ExplicitPolicyNotModifiable);
 }
 
 }  // namespace

@@ -1,6 +1,6 @@
 > - 适用: 把 `[RootSignature]` 变成可 lower 到 D3D12/Vulkan 的 base policy，移除 group-wide `ShaderLayoutPolicy`，修正 resolved layout、cache、sampler、handle 与 dynamic offset 全链路
 > - 权威: 本文是 ADR-0051 的 implementation-ready 实施与验收计划；目标语义以 ADR-0051、`CONTEXT.md` 和本文的接口/wire 检查站为准
-> - 状态: implementation-ready（2026-08-25；契约已关闭，尚未开始 compiler、wire、RHI 或 runtime 实现）
+> - 状态: 已完成（2026-08-25 契约关闭；M1 compiler policy frontend 与 schema 6 wire 在 fork 侧完成并由 `utils/radray_probe_matrix.py` 验证 15/15；M2 decoder 与 target-typed resolver、M3 Vulkan native chain、M4 D3D12 native chain、M5 runtime request 与两层 cache、M6 原子发布全部落地；`1.9.2607.radray.5` 已发布，`project_manifest.json` 按 `EnforceHash` 固定已发布归档 hash，干净 restore 后 RadRay 全量 `ctest` 240/240 通过）
 > - 锚点: `docs/adr/0051-root-signature-policy-and-target-layout-resolution.md`, `CONTEXT.md`, `modules/shader/include/radray/shader/shader_compiler_contract.h`, `modules/shader/include/radray/shader/shader_artifact.h`, `modules/render/include/radray/render/backend/pipeline_layout_types.h`, `modules/render/include/radray/render/rhi.h`, `modules/render/src/shader_artifact.cpp`, `modules/render/src/d3d12/d3d12_impl.cpp`, `modules/render/src/vk/vulkan_impl.cpp`, `modules/runtime/include/radray/runtime/render_system.h`, `modules/runtime/src/render_system.cpp`, `modules/runtime/src/shader_jit.cpp`, `project_manifest.json`
 
 # Shader layout contract correction
@@ -146,6 +146,27 @@ full sampler record 与 replacement option 使用 Vulkan-semantic target type；
 所有 record继续使用offset/index和固定宽度值，不持久化STL/native structs/pointers。compiler-owned
 hash命名从“最终 layout”窄化为base layout；modifier与native capability不进入它。
 
+M1 落地时补齐的契约细节（已由 probe 矩阵验证）：
+
+- `Placement` 是一个独立字段（0 `Table`、1 `RootDescriptor`、2 `StaticSampler`），取代旧的 immutable
+  bit。D3D12 的 static sampler 记为 `StaticSampler` 且不占 table slot；Vulkan 的 immutable sampler 记为
+  `Table` 加 `SamplerIndex`，两者是同一份 policy 在两个 target 的不同落法。`SamplerIndex` 无值时为
+  `0xffffffff`。
+- root constants 由 policy 推导，不由 liveness 推导。policy 中每个对该 stage 可见、且能匹配到 CBuffer
+  declaration 的 `RootConstants` parameter，在两条 lane 上发布完全相同的记录（`Size` =
+  `num32BitConstants * 4`），避免一侧死代码剥除导致两 lane 记录不一致。root constants declaration 在两条
+  lane 都不产生 binding record：`Bindings` 只放 descriptor，push handle 走 root constant record 加 name。
+- sampler record 只在 SPIR-V lane 发布，按 RS static sampler 槽位顺序排列（与 stage 无关，可直接跨 stage
+  比对），且不论 liveness 全量发布以保证确定性。serialized RS carrier 只在 DXIL lane 发布。
+- `RootSignatureHash` 在两条 lane 都取 frontend 原始 serialized bytes 的摘要，因此它标识 policy 本身而不是
+  某个 target 的 carrier 形态，可用于跨 lane 一致性检查。
+- DXIL carrier 的忠实性不变量：`DXC_OUT_ROOT_SIGNATURE` 是包裹 raw serialized RS 的 DXBC container。
+  编译器解开 container 的 `RTS0` part 与 frontend bytes 逐字节比对，只有一致才把 **container** 存为 wire
+  carrier（保持历史上 D3D12 `CreateRootSignature` 消费的形态）。
+- `BasePipelineLayoutDigest` 的 salt 含 target，所以它是 per-target 的确定性摘要，不是跨 lane 相等性检查。
+- descriptor/push 的 `StageMask` 始终是实际 active stage；policy visibility 只用来校验覆盖（不覆盖报
+  2123），不会把 stable superset 原样传播到 wire。
+
 ### 3. public target options 与 selector
 
 目标 public shape：
@@ -254,6 +275,9 @@ assignments、完整 `CompilePolicy` 与layout recipe。runtime discovery和comp
 
 ### M1：compiler policy frontend 与 schema 6
 
+状态：已完成（fork 侧）。fork 工作区为外部 checkout `F:\cpp\DirectXShaderCompiler`（非本仓库跟踪，
+不受本仓库可移植性检查约束）。
+
 1. 在fork中建立target-independent RootSignature policy frontend，复用现有AST/RS parser与Variant
    merge，不新增runtime link。
 2. 增加declaration identity关联和RootSignature->Vulkan lowering；保留DX carrier输出。
@@ -265,16 +289,69 @@ assignments、完整 `CompilePolicy` 与layout recipe。runtime discovery和comp
 检查站：同一concrete inputs的policy frontend和各lane事实一致；Root CBV/SRV/UAV、RootConstants、
 StaticSampler逐项生成预期Vulkan records；无RS请求没有隐藏DX lane或公共policy。
 
+fork 原先没有 RadRay 自有测试（只有 `dxcradray.cpp` 与 ext header），M1 因此在 fork 内补了一套
+编译器侧回归载体，不依赖 RadRay checkout：
+
+- `utils/radray_wire_probe.cpp`：直接驱动 `DiscoverSourceContract` + `CompileVariant` 的独立 probe，
+  解码并打印两条 lane 的 schema 6 wire。第三个参数是 target mask（1 DXIL、2 SPIR-V、3 both），
+  用于隔离只在单 target 出现的诊断。
+- `utils/radray_probe_tests/*.hlsl`：正负 fixture。
+- `utils/radray_probe_matrix.py`：用 vcvars + `cl` 构建 probe 并跑完整 fixture 矩阵，逐条断言
+  placement、logical kind、count、stage mask、sampler state 与 diagnostic code；payload 尺寸在比对前
+  归一化掉，所以无关 codegen 变化不会误报。fixture 没有对应期望时直接失败。
+
+M1 验证结果：`dxcompiler` 构建干净，probe 矩阵 15/15 通过，覆盖完整 placement 矩阵、无 policy 的
+implicit topology（含 `RawBuffer`/`RWTypedBuffer` 分类）、D3D→Vulkan sampler 翻译（含
+`COMPARISON_ANISOTROPIC` 与 `MINIMUM` reduction）、compute stage 折叠，以及 2105/2111/2117/2118/
+2120/2121/2122/2123/2124。2119 是 declaration kind 与 lane lowering 的防御性交叉校验，合法 HLSL 无法
+触发，不造 fixture。
+
+RadRay 侧的 M1 验收与 M2 decoder 同批生效：schema/ABI handshake 两边必须一致，schema 6 的 DLL 会被
+现有 schema 5 client 直接拒绝。本仓库的 M2-M5 不等待官方包，`modules/render/tests` 已经在测试内手造
+`WireMetadataEnvelope` 字节，schema 6 fixture 同样手造；需要真实编译器的 `modules/shader_compiler/tests`
+靠本地 staging 包（本地构建产物 + 临时 `project_manifest.json` hash）推进，正式 URL/hash 在 M6 一次性
+固定，不得把 staging hash 提交到主线 manifest。
+
 ### M2：decoder 与 target-typed resolver
 
 1. schema 6 decoder拒绝4/5，分别暴露DXIL/SPIR-V typed views。
 2. 删除decode阶段group-wide dynamic rewrite；logical kind原样保存。
 3. 定义public owning resolved layout与target-specific options/selector。
 4. 实现modifier canonicalization、resolved hash和layout-local metadata table。
-5. selector/handle/recipe矛盾使用debug invariant；wire安全仍fail closed。
+5. selector/handle/recipe矛盾报告并fail closed；wire安全同样fail closed。
 
 检查站：相同resolved semantics由不同modifier顺序得到相同hash；非当前backend recipe字段不影响
 program identity；artifact bytes/lifetime结束后owning resolved value仍不悬空。
+
+M2 落地时补齐的实施细节：
+
+1. resolve 失败只 log + 返回 `std::nullopt`，不 `RADRAY_ASSERT(false)`。同一条路径也校验 decode
+   后的 wire 数据，abort 会把被篡改的 artifact 变成进程终止；且 fail-closed 行为必须在实际跑测试
+   的 Debug 配置里可观察。
+2. `BackendPipelineLayoutInput` 作为显式 adapter 保留一个 milestone：它把 logical kind 与 resolved
+   placement 融合回 `ShaderParameterBindingType::Dynamic*`，让两个 backend 在 M3/M4 重接之前保持
+   可用。融合是 adapter 自身的属性，resolved layout 里两者仍分开。
+3. Vulkan immutable sampler 的 native 创建从 M3 提前到 M2：把完整 wire state 降级成公共
+   `SamplerDescriptor` 是被禁止的静默降级，而让 layout 创建失败等于留洞。`VkSampler` 由
+   `PipelineLayoutVulkan` 拥有，vector 在 group loop 之前 reserve，因为
+   `VkDescriptorSetLayoutBinding::pImmutableSamplers` 借用其中的指针。
+4. `ShaderProgram::IsBufferGroupDynamic(group)` 变为 `IsBufferDynamic(declarationName)`；forward
+   pipeline 的三个 group 变成 `ForwardPipeline::GetLayoutRecipe()` 里三个具名 declaration modifier。
+5. `modules/runtime/src/shader_parameters.cpp` 原先按裸 wire 数值 1/4/6 和已废弃的 immutable bit
+   判定 parameter kind，M2 改为按 `ShaderBindingKind` 判定，并把 policy 已固定的 sampler
+   （DXIL `StaticSampler` placement 或 SPIR-V 已带 `SamplerIndex`）排除在 material parameter 之外。
+6. fixture/test 消费顺序按 C11：本地 staging package（`package_radray_sdk.py --manifest`）驱动
+   `radray_shader_fixture_generator` 重新生成 `shader_artifacts/*.bin` golden 与
+   `kExpectedGpuArtifacts`；staging hash 不进入正式 manifest，正式 URL/hash 在 M6 一次性写入。
+7. policy 必须写在每个 entry 上（见 `docs/guide/shader-authoring.md`）。只写在部分 entry 上时，缺少
+   attribute 的 stage 编出不含 serialized RS 的 DXIL，与 frontend 观察到的 policy 不一致，以 2106
+   失败。M2 按此修正了 `modules/render/tests/data/shader_sources/` 与
+   `test_radray_dxc_metadata.cpp` 中的相关 fixture。
+8. `RootConstants` policy parameter 只有在能关联到一条真实 declaration 时才发布 push handle，因此
+   只写 policy、不写对应 `ConstantBuffer` 声明的 fixture 会得到 0 条 root constant record。
+9. cross-stage DXIL register drift 重新纳入检查：fork 的 `MetadataBindingFact` 恢复记录 declaration
+   的 D3 register（不上 wire），两个 lane 都记录，merge 时比较，漂移报 2109。否则 SPIR-V-only 编译
+   会静默接受一个 register 随 stage 变化的 declaration。
 
 ### M3：Vulkan native chain
 
@@ -288,6 +365,34 @@ program identity；artifact bytes/lifetime结束后owning resolved value仍不�
 value逐项一致；regular/dynamic切换、sparse groups、typed/structured/raw buffers和sampler state均通过真实
 Vulkan创建及dispatch/draw/readback。
 
+M3 落地时补齐的实施细节：
+
+1. `DeviceVulkan::CreatePipelineLayoutInternal` 改为直接接受 `ResolvedVulkanLayout`，Vulkan 侧的
+   `MakeBackendPipelineLayoutInput` overload 一并删除，因此 Vulkan layout 只剩一种描述方式。D3D12
+   仍走过渡 adapter，M4 一并去掉。
+2. backend 内部 entry 换成 `ShaderParameterSetLayoutEntryVulkan`：保留 logical kind 与 placement 两个
+   独立轴，`VkDescriptorType` 由二者推导。融合成单一枚举会让 uniform/storage、texel/image 的区分靠
+   命名巧合成立，而一个非法 dynamic placement 会被静默改判成邻近的 descriptor type。
+3. value 兼容性、required buffer usage、alignment limit 与 view usage 全部由 logical kind 推导
+   （`IsUniformBufferKind`/`IsWritableKind`/`IsTexelBufferKind`/`IsImageKind` 落在 contract header 里，
+   因为它们是 wire kind 自身的性质）。
+4. resolved bindings 已按 (set, binding) 排序且去重，backend 只确认该 invariant，不再自己重排，否则
+   backend 会在 resolver 背后改变顺序。
+5. immutable sampler 按 resolved 数组下标一次性创建并与之对齐，`_immutableSamplers` 先 reserve 再填，
+   因为 `VkDescriptorSetLayoutBinding::pImmutableSamplers` 只借用其中的指针。设备能力
+   （`samplerAnisotropy`、`maxSamplerAnisotropy`、`maxSamplerLodBias`、`samplerFilterMinmax`、
+   `samplerMirrorClampToEdge`）在这里检查，因为 resolved layout 与设备无关。
+6. `PipelineLayoutVulkan::_dynamicEntryOrder` 由 `ResolvedVulkanLayout::DynamicOffsetOrder` 投影到每个
+   set 得到，不再重新推导；`vkCmdBindDescriptorSets` 按该顺序为每个 slot 反查 caller 值，缺失或重复
+   一律失败。旧实现遍历 entries 挑 dynamic 项并忽略缺失值，会静默移位。
+7. wire sampler enum 边界改为 contract header 里的具名常量，radrayrender 用 `static_assert` 把它们和
+   volk 的真实枚举值绑在一起；wire stage bit 与 `ShaderStage` 的对应也同样 static_assert。
+8. 新增 `modules/render/tests/test_radray_render_vulkan_layout.cpp`（真 Vulkan device，3 个测试）：
+   descriptor type 按 logical kind 区分 + set hole 保号 + dynamic order 投影 + name table；非法 dynamic
+   placement 与不一致的 dynamic order 一律 fail closed；`shadow_static_sampler` 的 policy sampler 在
+   set 4 落成 immutable sampler，set 0..3 是空洞，且该 slot 不能被 caller 写入。已用 mutation 验证
+   dynamic order 相关断言非空泛。
+
 ### M4：D3D12 resolved layout 与 offset path
 
 1. Explicit carrier原样进入resolved value/native create，CPU plan只生成destinations不重写blob。
@@ -298,6 +403,46 @@ Vulkan创建及dispatch/draw/readback。
 检查站：Explicit/Implicit table、root descriptors、fan-out、多个RootConstants/static sampler均通过真实
 D3 PSO/draw/dispatch；同一dynamic-CB arena offset在Implicit modifier和Explicit authored root CBV上
 得到相同数据结果。
+
+M4 落地时补齐的实施细节：
+
+1. `DeviceD3D12::CreateRootSignatureInternal` / `CreateExplicitRootSignatureInternal` 改为直接接受
+   `ResolvedD3D12Layout`，两条路径共用同一份 group 构建；`MakeBackendPipelineLayoutInput`、
+   `BackendPipelineLayoutInput`、`PipelineLayoutDescriptor`、`ShaderParameterSetLayoutDescriptor`、
+   `ShaderParameterSetLayoutEntryDescriptor`、`PushConstantDescriptor` 与
+   `GetShaderBindingNamespace(ShaderParameterBindingType)` 一并删除，公共面上的
+   `ShaderParameterBindingType` 与 `IsDynamicShaderParameterBindingType` 也随之删除。
+2. backend 内部 entry 换成 `ShaderParameterSetLayoutEntryD3D12`：logical kind、placement 与 register
+   class（namespace）分开存放，descriptor range type、root parameter type、required buffer usage 与
+   value 兼容性全部由 logical kind 推导，placement 只决定它落在 table 还是 root parameter。唯一读
+   placement 的校验是 table CBV 的 view size 上限，root CBV 没有这个限制。
+3. group 0..max 全部物化，空 group 保留，否则 caller 的 group index 不再等于 shader 编译时的
+   register space。resolved bindings 已按 (group, namespace, binding) 排序去重，backend 只确认该
+   invariant；每个查找都以 register class 为 key，旧的按裸 binding number 做 `lower_bound` 在一个
+   group 同时有 b0/t0/u0 时会取错项。
+4. static sampler 现在保留在 `Entries` 里（旧 adapter 会丢掉它们），所以 explicit carrier 的
+   coverage 检查是可达的：覆盖来自 carrier 的 static sampler 数组而非 table/root destination，
+   parameter set 也不能写它。Implicit builder 直接拒绝 static sampler，因为它只能来自 carrier。
+5. root descriptor 统一：`ShaderParameterBindingLayoutD3D12::RootParameterIndex` 删除，Implicit
+   builder 与 authored carrier 都记 `RootDescriptorDestinations`，command 期只有一个循环按
+   `RootDescriptorOrder` 绑定。地址 = buffer GPU VA + bound range offset + dynamic offset，两种
+   topology 一致；旧实现里 explicit 路径完全忽略 dynamic offset，Implicit 路径走另一条没有 fan-out
+   的单 index 路径。
+6. dynamic offset 与 Vulkan 同样严格：一个 group 里每个 root descriptor 恰好一个 offset，缺失、
+   重复或多余都报告失败；另外校验位移后的窗口仍在资源内，constant buffer 还要求 256-byte 对齐。
+7. push handle table 补齐：push block 的 declaration name 进入两个后端的 name 表，
+   `FindBinding("ObjectConstants")` 现在能拿到可用于 `SetPushConstants` 的 handle——这在两个后端上
+   之前都不成立。
+8. 新增 `modules/render/tests/test_radray_render_d3d12_layout.cpp`（真 D3D12 device，debug layer，
+   5 个测试）：table 与 root descriptor 由 placement modifier 决定；policy static sampler 来自
+   carrier 且不可写；authored root constants 全部进入 push handle table（并有 carrier 未覆盖时
+   fail closed 的反例）；非法 placement 与乱序 binding 一律 fail closed；同一个 256 字节 arena
+   offset 在 Implicit modifier 与测试用 `D3D12SerializeVersionedRootSignature` 现场 author 的
+   root UAV carrier 上 dispatch 后读回相同数据，且 offset 0 处未被写。已用 mutation 验证非空泛。
+
+已知限制（M5 处理）：`BindShaderParameterSet` 返回 void，因此 dynamic offset 的 arity 失败在公共
+API 上不可观测（Vulkan 自 M3 起同样如此）；`ShaderParameterDynamicOffset` 仍是裸 binding number，
+同一 group 里两个不同 register class 的 root descriptor 撞号时无法区分。
 
 ### M5：runtime request、program cache 与调用迁移
 
@@ -310,6 +455,47 @@ D3 PSO/draw/dispatch；同一dynamic-CB arena offset在Implicit modifier和Expli
 检查站：只改变policy、target、toolchain或active-backend modifier会按规则命中/分离cache；改变非当前
 backend recipe不重复编译/建program；per-draw不新增descriptor write或set allocation。
 
+M5 落地时补齐的实施细节：
+
+1. `RenderSystem::GetOrCreateShaderProgram(const ShaderProgramRequest&)` 是唯一入口，request 拥有
+   source name、结构化 defines、keyword assignments、完整 `CompilePolicy` 与 side-by-side layout
+   recipe；旧的 (sourceName, assignments, recipe, policy) 重载删除，`test_forward_pipeline` 与
+   `example_lambert_sphere` 一起迁移。
+2. 缓存分两层。artifact key = source + canonical defines + canonical assignments + 完整 policy +
+   target + toolchain identity（不含 layout recipe）；program key = artifact identity + 当前 backend
+   的 `ResolvedLayoutHash`。defines/assignments 排序后入 key，所以 caller 顺序不是身份；重名直接
+   报错。policy 按原始字节参与 hash，后续加字段不会被漏掉。
+3. 失败改成显式失败记录，按同一完整 key 隔离。旧实现在编译前先插入一个空 program 且失败时不删，
+   既分不清"还没编译"和"编译失败"，也让一次失败永久污染这个 key。
+4. toolchain identity 从 `IRadRayDxcCompiler::GetAbiInfo` 读出，经 `Client::GetToolchainIdentity`
+   与 `ShaderJit::GetToolchainIdentity` 暴露，因此它在任何编译之前就可以进入 key。
+5. discovery 与 compile 现在共享同一份 source/defines/policy：新增
+   `ShaderJit::DiscoverContractHash(const shader::SourceContractRequest&)`，旧的三参重载保留为
+   default-policy 便利入口。此前 discovery 固定用 default policy 且丢掉 defines。
+6. 新增 `render::ResolveBackendLayoutHash(backend, blob, options, recipe, error)`：只 decode + resolve，
+   不创建任何 native 对象，这样 program key 可以在 pipeline layout 存在之前算出来，而不是为了读
+   hash 每次多建一个 native layout。
+7. `BindingHandle` 公共面收缩为 default-invalid/validity/equality；内部 token 变成 layout generation
+   加该 layout metadata table 的 record index（原来是 generation + namespace + 裸 binding number），
+   只有后端通过 `BindingHandleAccess` 拆开。record 带 `Descriptor`/`Push` kind，因此 push handle 不能
+   写 parameter set、descriptor handle 不能写 push，错 group 的 handle 也会被拒绝。
+8. `ShaderParameterDynamicOffset` 变成 `{BindingHandle, Offset}`，两个后端都先把 caller 的 offset 经
+   destination layout 的 record 表解析（拒绝 foreign generation 与错 group），再按 resolved order 反查。
+   `SetPushConstants(BindingHandle, bytes)` 去掉 group；D3D12 用完整 `ShaderBindingLocation` 匹配
+   `_pushConstantBindings`，所以不同 register space 的同号 RootConstants 仍可区分。
+9. handle 校验分支里的 `RADRAY_ASSERT` 删除（与 M2 `Reject()` 同一理由）：Debug abort 会让 fail-closed
+   路径在唯一会跑测试的配置里无法验证，返回值加日志才是可观测契约。`test_radray_render_pso_smoke`
+   里原本的 `EXPECT_DEATH` 改为 `EXPECT_FALSE`。
+10. `ShaderProgram::Create` 去掉未使用的 `layoutRecipe` 参数——artifact 已经带着 resolved layout。
+
+检查站结果：`RadRayRuntimeForwardPipeline.{D3D12,Vulkan}` 内新增 cache 规则检查并通过：同一 request
+命中；modifier 顺序颠倒仍命中；改非当前 backend recipe 仍命中且 artifact/program 数都还是 1；改当前
+backend recipe 复用 artifact 但新建 program（1 artifact / 2 programs）；`ShaderModel` 61 分离 artifact；
+不存在的 source 连续两次失败只留一条失败记录且不影响好的 key；重复 assignment 报错且不入缓存。
+两次 mutation 验证非空泛：program key 去掉 layout hash、artifact key 去掉 policy 各自让对应断言变红。
+新增 `D3D12DeviceFixture.PushHandleWritesRootConstantsAndRejectsMisuse` 用真实 dispatch 跑通
+name -> handle -> root parameter，并钉住五种误用拒绝；去掉 generation 比较会让它变红。
+
 ### M6：原子发布与回归
 
 1. fork package发布为`1.9.2607.radray.5`，更新`project_manifest.json` URL/hash并restore。
@@ -320,6 +506,32 @@ backend recipe不重复编译/建program；per-draw不新增descriptor write或s
 
 检查站：干净restore环境只使用manifest固定SDK即可通过全部build/test；runtime-only进程不加载compiler；
 旧schema不会被误读，新artifact在两个backend均按resolved contract执行。
+
+M6 落地时补齐的实施细节：
+
+1. fork 侧先落一次提交（`276ef523`：跨 stage register drift 诊断恢复、`RADRAY_DXC_PACKAGE_VERSION`
+   提升到 `.5`、probe matrix 覆盖新用例、删除 `.build_probe.bat`），再由 `ksgfk/dxc-autobuild` 的
+   `build_win_x64.yaml` 以 `dxc_ref=codex/radray-dxc-1.9.2607`、`package_version=1.9.2607.radray.5`
+   构建并发布到 rolling `latest` release。sidecar manifest 记录的 `dxc_commit` 就是这次提交。
+2. `project_manifest.json` 的 hash 换成已发布归档的
+   `c2d023fc4103451fe5b5beb84ab999012f6dbef7652c9596418f52f8459b5009`，之前用于本地验证的 staging
+   hash 没有进入任何提交。清掉 `SDKs/radray_dxc` 的 `.done`、`extracted` 与本地 staged zip 之后
+   `python tools/fetch_sdks.py restore` 真的从 manifest URL 下载并在 `EnforceHash` 下校验通过。
+3. goldens 在装上 CI package 之后重新生成：12 个 DXIL blob 全部改变、12 个 SPIR-V blob 逐字节不变
+   （DXIL 容器随 compiler 二进制变化，SPIR-V 不随），`kExpectedGpuArtifacts` 整块重写；toolchain
+   identity 仍是 `0x0000000001090211`，说明它绑的是版本而不是构建。
+4. 4/5 拒绝、ABI 3 handshake 与 raw compile CLI 都已经有覆盖，不需要新增：
+   `test_radray_shader_contract` 把 retired 4、retired 5 与 schema+1 都断言成
+   `UnsupportedSchemaVersion`；`client.cpp` 的 `IsValidForkAbi` 同时校验 ABI 3、schema 6、toolchain
+   1.9 与非零 identity，`test_radray_shader_compiler_client` 通过真实 DLL 断言同一组事实；
+   `radray_shader_compile` 对 `pipelines/forward/forward.hlsl` 双 lane 输出正常。
+5. 补上 Vulkan push 端到端测试 `VulkanDeviceFixture.PushHandleWritesPushConstantsAndRejectsMisuse`，
+   在 `compute` fixture 上加一个 push block，再加一个 set 0 binding 0 的未使用 descriptor——它和 push
+   的 (space 0, register 0) 撞位，因此拒绝只能来自 record kind 而不是 location 不匹配。mutation 验证：
+   去掉 `Kind != Push` 判断后这条断言变红。
+
+检查站结果：干净 restore 只用 manifest 固定的 SDK，全量 Debug build rc 0 且无 `error` 行，
+`ctest` 240/240 通过（含真实 D3D12 与 Vulkan 设备测试，validation/debug layer 打开）。
 
 ## 测试矩阵
 
@@ -349,7 +561,11 @@ diagnostics、device capability与native create failures必须保留可定位的
 - 不为RootSignature的D3-only parameter order/range offsets/flags制造虚假的Vulkan modifier。
 - 不增加全局native layout/cache，也不把layout recipe加入compiler artifact identity。
 - 不增加backend恢复校验、selector忽略或sampler silent downgrade。
-- 不删除或改写既有`ShaderParameterBindingType::Dynamic*`枚举标识符。
+- 不改写既有`ShaderParameterBindingType::Dynamic*`枚举标识符。**落地偏离**：M4 删掉整个
+  `ShaderParameterBindingType` 枚举而不是只停止生产它。它把 logical kind 和 placement 融在一个
+  值里，而 M4 的整个 D3D12 adapter 层（`BackendPipelineLayoutInput` 家族）连同它一起消失，留下一个
+  没有任何生产者也没有任何消费者的公共枚举，只会让 caller 以为还存在第二条 binding 描述路径。
+  没有成员被重命名，因此 AGENTS.md 的"不重命名枚举成员"约束没有被破坏。
 - 不改用per-object StructuredBuffer；dynamic constant-buffer arena/data path继续保留。
 
 ## 对齐记录
@@ -366,5 +582,17 @@ diagnostics、device capability与native create failures必须保留可定位的
 - **2026-08-25 / C6**：确认修复program cache/policy identity、buffer kind、push handle和D3 explicit
   root-descriptor offset；`WireRootConstantRecord::Offset == 0`不是缺陷。
 - **2026-08-25 / C7**：schema6拒绝4/5，SDK package升级`.radray.5`，extension ABI保持3。
+- **2026-08-25 / C8**：dynamic/root placement 的 declaration count 恒为 1。public
+  `ShaderParameterDynamicOffset{BindingHandle, Offset}` 没有 array-element 维度，所以 count>1 落到
+  dynamic/root 目标是 framework invariant violation，不为此新增 `ArrayElement` 字段。
+- **2026-08-25 / C9**：buffer kind 只增成员、不改名。typed 复用 `TexelBuffer`/`RWTexelBuffer`，structured
+  复用 `Buffer`/`RWBuffer`（语义收窄），raw 新增 `RawBuffer`/`RWRawBuffer`。enum 成员名是
+  magic_enum/序列化的 public identity，改名等于破坏兼容。D3D12 的 raw-vs-structured view 形态本来由 caller
+  的 `StructureByteStride` 决定，logical kind 只驱动 Debug 校验与 root descriptor 合法性。
+- **2026-08-25 / C10**：artifact cache 是新增工作，不是修 bug。runtime 现在只有 program map 与 PSO map，
+  需要新增 artifact 层，并把 sticky negative cache（编译前插 null、失败不 erase）换成显式 failure record。
+- **2026-08-25 / C11**：消费顺序。M2-M5 用手造 schema 6 wire fixture 推进；需要真实编译器的测试用
+  `package_radray_sdk.py --manifest` 产生的本地 staging 包，正式 URL/hash 在 M6 一次性固定，staging hash
+  不进主线 manifest。
 
-上述边界已构成共享理解，可以按M1开始实现；本文建立本身不授权开始代码改动。
+上述边界已构成共享理解；M1（fork 侧）已按此实现并验证，见「实施阶段与检查站」。

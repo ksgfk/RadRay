@@ -347,7 +347,9 @@ public:
 
     Nullable<unique_ptr<PipelineLayout>> CreatePipelineLayout(
         const shader::DxilShaderArtifactView& artifact,
-        const ShaderLayoutPolicy& policy = {}) noexcept;
+        const D3D12TargetLayoutOptions& options = {}) noexcept;
+    Nullable<unique_ptr<PipelineLayout>> CreatePipelineLayout(
+        const ResolvedD3D12Layout& layout) noexcept;
 
     Nullable<unique_ptr<ShaderParameterSet>> CreateShaderParameterSet(const ShaderParameterSetDescriptor& desc) noexcept override;
 
@@ -364,8 +366,8 @@ public:
 
     Nullable<unique_ptr<FenceD3D12>> CreateFenceD3D12(uint64_t initValue) noexcept;
 
-    Nullable<unique_ptr<RootSigD3D12>> CreateRootSignatureInternal(const BackendPipelineLayoutInput& input) noexcept;
-    Nullable<unique_ptr<RootSigD3D12>> CreateExplicitRootSignatureInternal(const BackendPipelineLayoutInput& input) noexcept;
+    Nullable<unique_ptr<RootSigD3D12>> CreateRootSignatureInternal(const ResolvedD3D12Layout& layout) noexcept;
+    Nullable<unique_ptr<RootSigD3D12>> CreateExplicitRootSignatureInternal(const ResolvedD3D12Layout& layout) noexcept;
 
     void TryDrainValidationMessages();
 
@@ -530,7 +532,6 @@ public:
         std::span<const ShaderParameterDynamicOffset> dynamicOffsets) noexcept override;
 
     bool SetPushConstants(
-        uint32_t groupIndex,
         BindingHandle binding,
         std::span<const byte> data) noexcept override;
 
@@ -572,7 +573,6 @@ public:
         std::span<const ShaderParameterDynamicOffset> dynamicOffsets) noexcept override;
 
     bool SetPushConstants(
-        uint32_t groupIndex,
         BindingHandle binding,
         std::span<const byte> data) noexcept override;
 
@@ -809,9 +809,38 @@ public:
     ShaderStages _stages{ShaderStage::UNKNOWN};
 };
 
+// Per-binding layout entry in D3D12 terms, built only from `ResolvedD3D12Layout`. The logical kind
+// stays the authority instead of being fused into a single backend enum: the descriptor range type,
+// the root parameter type, the required buffer usage and the value-compatibility rules are all
+// derived from it, and the resolved placement stays a separate axis so a root descriptor cannot
+// silently change the resource class.
+struct ShaderParameterSetLayoutEntryD3D12 {
+    uint32_t Binding{0};
+    shader::ShaderBindingKind LogicalKind{shader::ShaderBindingKind::CBuffer};
+    shader::ShaderBindingPlacement Placement{shader::ShaderBindingPlacement::Table};
+    uint32_t Count{0};
+    ShaderStages Stages{ShaderStage::UNKNOWN};
+    // GetWireBindingNamespace(LogicalKind): 0 CBV, 1 SRV, 2 UAV, 3 sampler. Cached because both the
+    // canonical ordering and every BindingHandle lookup key on it.
+    uint32_t Namespace{0};
+
+    bool IsRootDescriptor() const noexcept {
+        return Placement == shader::ShaderBindingPlacement::RootDescriptor;
+    }
+    // A static sampler is declared by the root signature carrier itself, so it owns no descriptor
+    // slot and cannot be written through a parameter set.
+    bool IsStaticSampler() const noexcept {
+        return Placement == shader::ShaderBindingPlacement::StaticSampler;
+    }
+    bool IsSampler() const noexcept {
+        return LogicalKind == shader::ShaderBindingKind::Sampler;
+    }
+
+    friend bool operator==(const ShaderParameterSetLayoutEntryD3D12&, const ShaderParameterSetLayoutEntryD3D12&) noexcept = default;
+};
+
 struct ShaderParameterBindingLayoutD3D12 {
     uint32_t DescriptorOffset{std::numeric_limits<uint32_t>::max()};
-    uint32_t RootParameterIndex{std::numeric_limits<uint32_t>::max()};
     struct DescriptorDestination {
         uint32_t RootParameterIndex{std::numeric_limits<uint32_t>::max()};
         uint32_t DescriptorOffset{std::numeric_limits<uint32_t>::max()};
@@ -839,8 +868,12 @@ struct DescriptorTableBindingD3D12 {
 
 struct ShaderParameterGroupLayoutD3D12 {
     uint32_t GroupIndex{0};
-    vector<ShaderParameterSetLayoutEntryDescriptor> Entries;
+    vector<ShaderParameterSetLayoutEntryD3D12> Entries;
     vector<ShaderParameterBindingLayoutD3D12> Bindings;
+    // Indices into `Entries` of the root-descriptor bindings, in entry order. Command-time dynamic
+    // offsets are matched against exactly this list so a missing or duplicated offset is a reported
+    // failure instead of a silent shift onto another binding's root parameter.
+    vector<uint32_t> RootDescriptorOrder;
     uint32_t ResourceDescriptorCount{0};
     uint32_t SamplerDescriptorCount{0};
     uint32_t ResourceTableRootParameter{std::numeric_limits<uint32_t>::max()};

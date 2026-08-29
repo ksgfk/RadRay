@@ -31,15 +31,31 @@ bool ShaderJit::IsAvailable() const noexcept {
     return _client != nullptr && _client->Client.IsAvailable();
 }
 
+std::optional<shader::Hash128> ShaderJit::GetToolchainIdentity() const {
+    if (!IsAvailable()) {
+        return std::nullopt;
+    }
+    return _client->Client.GetToolchainIdentity();
+}
+
 std::optional<shader::ContractHash> ShaderJit::DiscoverContractHash(
     std::string_view sourceName,
     std::span<const byte> source,
     shader::ShaderTarget target) const {
+    shader::SourceContractRequest request;
+    request.SourceName = string{sourceName};
+    request.RootSource.assign(source.begin(), source.end());
+    request.Targets = static_cast<shader::ShaderTargetMask>(shader::ToTargetMask(target));
+    return DiscoverContractHash(request);
+}
+
+std::optional<shader::ContractHash> ShaderJit::DiscoverContractHash(
+    const shader::SourceContractRequest& request) const {
     if (!IsAvailable()) {
         return std::nullopt;
     }
     const shader_compiler::DiscoveryResult result =
-        _client->Client.DiscoverSourceContract(sourceName, source, target, _client->IncludePaths);
+        _client->Client.DiscoverSourceContract(request, _client->IncludePaths);
     if (!result.Succeeded()) {
         return std::nullopt;
     }
@@ -94,10 +110,19 @@ bool ShaderJit::IsAvailable() const noexcept {
     return false;
 }
 
+std::optional<shader::Hash128> ShaderJit::GetToolchainIdentity() const {
+    return std::nullopt;
+}
+
 std::optional<shader::ContractHash> ShaderJit::DiscoverContractHash(
     std::string_view,
     std::span<const byte>,
     shader::ShaderTarget) const {
+    return std::nullopt;
+}
+
+std::optional<shader::ContractHash> ShaderJit::DiscoverContractHash(
+    const shader::SourceContractRequest&) const {
     return std::nullopt;
 }
 

@@ -1,6 +1,7 @@
 #include <radray/shader/shader_artifact.h>
 
 #include <cstring>
+#include <iterator>
 
 namespace radray::shader {
 namespace {
@@ -160,28 +161,65 @@ bool ValidateVertexInputRecords(const ShaderArtifactView& artifact) noexcept {
     return true;
 }
 
-struct LegacyWireMetadataEnvelope {
-    uint32_t Magic;
-    uint16_t SchemaVersion;
-    uint16_t HeaderSize;
-    uint32_t TotalSize;
-    uint8_t Target;
-    uint8_t StageMask;
-    uint16_t Flags;
-    WireBlobRange EntryRecords;
-    WireBlobRange BindingRecords;
-    WireBlobRange TypeRecords;
-    WireBlobRange RootConstantRecords;
-    WireBlobRange VertexInputRecords;
-    WireBlobRange Bytecode;
-    uint64_t ToolchainIdentity;
-    ContractHash Contract;
-    BytecodeHash BytecodeDigest;
-    PipelineLayoutHash PipelineLayoutDigest;
-    GpuArtifactHash GpuArtifact;
-};
+// Placement legality mirrors the compiler's 2122 check, so a hand-built or tampered artifact
+// cannot ask a backend to do something the policy frontend would have rejected.
+bool IsValidPlacement(
+    const WireBindingRecord& binding,
+    ShaderTarget target,
+    size_t samplerCount) noexcept {
+    const auto kind = static_cast<ShaderBindingKind>(binding.Type);
+    switch (static_cast<ShaderBindingPlacement>(binding.Placement)) {
+        case ShaderBindingPlacement::Table:
+            break;
+        case ShaderBindingPlacement::RootDescriptor:
+            // A root descriptor carries one GPU address, and the public dynamic-offset shape has
+            // no array element, so count > 1 has nowhere to land.
+            if (!CanBeRootDescriptor(kind) || binding.Count != 1) {
+                return false;
+            }
+            break;
+        case ShaderBindingPlacement::StaticSampler:
+            // D3D-only shape: the slot lives in the serialized carrier and owns no table entry.
+            if (kind != ShaderBindingKind::Sampler || target != ShaderTarget::DXIL) {
+                return false;
+            }
+            break;
+        default:
+            return false;
+    }
+    if (binding.SamplerIndex == kShaderNoSampler) {
+        return true;
+    }
+    // A sampler reference is the Vulkan landing of a static sampler: still a table entry, but its
+    // state comes from the record array instead of from a caller-provided sampler.
+    return kind == ShaderBindingKind::Sampler &&
+           static_cast<ShaderBindingPlacement>(binding.Placement) ==
+               ShaderBindingPlacement::Table &&
+           binding.SamplerIndex < samplerCount;
+}
 
-static_assert(sizeof(LegacyWireMetadataEnvelope) == 136);
+bool ValidateSamplerRecords(const ShaderArtifactView& artifact) noexcept {
+    for (const WireSamplerRecord& sampler : artifact.Samplers()) {
+        if (sampler.MagFilter > kShaderSamplerMaxFilter ||
+            sampler.MinFilter > kShaderSamplerMaxFilter ||
+            sampler.MipmapMode > kShaderSamplerMaxMipmapMode ||
+            sampler.AddressModeU > kShaderSamplerMaxAddressMode ||
+            sampler.AddressModeV > kShaderSamplerMaxAddressMode ||
+            sampler.AddressModeW > kShaderSamplerMaxAddressMode ||
+            sampler.AnisotropyEnable > 1 || sampler.CompareEnable > 1 ||
+            sampler.CompareOp > kShaderSamplerMaxCompareOp ||
+            sampler.BorderColor > kShaderSamplerMaxBorderColor ||
+            sampler.ReductionMode > kShaderSamplerMaxReductionMode ||
+            (sampler.Flags & ~kShaderSamplerFlagMask) != 0) {
+            return false;
+        }
+        if (!(sampler.MaxAnisotropy >= 1.0f) || !(sampler.MipLodBias == sampler.MipLodBias) ||
+            !(sampler.MinLod >= 0.0f) || !(sampler.MaxLod >= sampler.MinLod)) {
+            return false;
+        }
+    }
+    return true;
+}
 
 }  // namespace
 
@@ -232,7 +270,7 @@ std::optional<ShaderArtifactView> DecodeShaderArtifact(
     const ShaderArtifactDecodeOptions& options,
     ShaderArtifactDecodeError* error) noexcept {
     SetError(error, ShaderArtifactDecodeError::None);
-    if (blob.size() < sizeof(LegacyWireMetadataEnvelope)) {
+    if (blob.size() < sizeof(WireMetadataEnvelope)) {
         SetError(error, ShaderArtifactDecodeError::TruncatedEnvelope);
         return std::nullopt;
     }
@@ -240,43 +278,26 @@ std::optional<ShaderArtifactView> DecodeShaderArtifact(
     ShaderArtifactView result;
     uint16_t schema = 0;
     std::memcpy(&schema, blob.data() + sizeof(uint32_t), sizeof(schema));
-    if (schema == kShaderLegacyMetadataSchemaVersion) {
-        LegacyWireMetadataEnvelope legacy{};
-        std::memcpy(&legacy, blob.data(), sizeof(legacy));
-        result._envelope = {};
-        result._envelope.Magic = legacy.Magic;
-        result._envelope.SchemaVersion = legacy.SchemaVersion;
-        result._envelope.HeaderSize = legacy.HeaderSize;
-        result._envelope.TotalSize = legacy.TotalSize;
-        result._envelope.Target = legacy.Target;
-        result._envelope.StageMask = legacy.StageMask;
-        result._envelope.Flags = legacy.Flags;
-        result._envelope.EntryRecords = legacy.EntryRecords;
-        result._envelope.BindingRecords = legacy.BindingRecords;
-        result._envelope.TypeRecords = legacy.TypeRecords;
-        result._envelope.RootConstantRecords = legacy.RootConstantRecords;
-        result._envelope.VertexInputRecords = legacy.VertexInputRecords;
-        result._envelope.Bytecode = legacy.Bytecode;
-        result._envelope.ToolchainIdentity = legacy.ToolchainIdentity;
-        result._envelope.Contract = legacy.Contract;
-        result._envelope.BytecodeDigest = legacy.BytecodeDigest;
-        result._envelope.PipelineLayoutDigest = legacy.PipelineLayoutDigest;
-        result._envelope.GpuArtifact = legacy.GpuArtifact;
-    } else {
-        if (blob.size() < sizeof(WireMetadataEnvelope)) {
-            SetError(error, ShaderArtifactDecodeError::TruncatedEnvelope);
-            return std::nullopt;
-        }
-        std::memcpy(&result._envelope, blob.data(), sizeof(result._envelope));
+    if (schema != kShaderMetadataSchemaVersion) {
+        SetError(error, ShaderArtifactDecodeError::UnsupportedSchemaVersion);
+        return std::nullopt;
     }
+    std::memcpy(&result._envelope, blob.data(), sizeof(result._envelope));
     const WireMetadataEnvelope& envelope = result._envelope;
     if (envelope.Target > static_cast<uint8_t>(ShaderTarget::SPIRV)) {
         SetError(error, ShaderArtifactDecodeError::InvalidTarget);
         return std::nullopt;
     }
+    // The carrier belongs to DXIL and the sampler records belong to SPIR-V. Neither lane may
+    // publish the other's form of the same policy.
     if (envelope.Target == static_cast<uint8_t>(ShaderTarget::SPIRV) &&
         envelope.RootSignature.Size != 0) {
         SetError(error, ShaderArtifactDecodeError::InvalidRootSignature);
+        return std::nullopt;
+    }
+    if (envelope.Target == static_cast<uint8_t>(ShaderTarget::DXIL) &&
+        envelope.SamplerRecords.Size != 0) {
+        SetError(error, ShaderArtifactDecodeError::InvalidSamplerRecord);
         return std::nullopt;
     }
     if (!ValidateWireMetadataEnvelope(blob, options.Target, options.ExpectedGpuArtifact)) {
@@ -289,40 +310,32 @@ std::optional<ShaderArtifactView> DecodeShaderArtifact(
         return std::nullopt;
     }
     result._blob.assign(blob.begin(), blob.end());
-    const uint32_t expectedHeaderSize = schema == kShaderLegacyMetadataSchemaVersion
-                                            ? sizeof(LegacyWireMetadataEnvelope)
-                                            : sizeof(WireMetadataEnvelope);
-    if (envelope.HeaderSize != expectedHeaderSize ||
-        !IsRangeAfterHeader(envelope.EntryRecords, envelope.HeaderSize) ||
-        !IsRangeAfterHeader(envelope.BindingRecords, envelope.HeaderSize) ||
-        !IsRangeAfterHeader(envelope.TypeRecords, envelope.HeaderSize) ||
-        !IsRangeAfterHeader(envelope.RootConstantRecords, envelope.HeaderSize) ||
-        !IsRangeAfterHeader(envelope.VertexInputRecords, envelope.HeaderSize) ||
-        !IsRangeAfterHeader(envelope.RootSignature, envelope.HeaderSize) ||
-        !IsRangeAfterHeader(envelope.Bytecode, envelope.HeaderSize) ||
-        RangesOverlap(envelope.EntryRecords, envelope.BindingRecords) ||
-        RangesOverlap(envelope.EntryRecords, envelope.TypeRecords) ||
-        RangesOverlap(envelope.EntryRecords, envelope.RootConstantRecords) ||
-        RangesOverlap(envelope.EntryRecords, envelope.VertexInputRecords) ||
-        RangesOverlap(envelope.EntryRecords, envelope.RootSignature) ||
-        RangesOverlap(envelope.EntryRecords, envelope.Bytecode) ||
-        RangesOverlap(envelope.BindingRecords, envelope.TypeRecords) ||
-        RangesOverlap(envelope.BindingRecords, envelope.RootConstantRecords) ||
-        RangesOverlap(envelope.BindingRecords, envelope.VertexInputRecords) ||
-        RangesOverlap(envelope.BindingRecords, envelope.RootSignature) ||
-        RangesOverlap(envelope.BindingRecords, envelope.Bytecode) ||
-        RangesOverlap(envelope.TypeRecords, envelope.RootConstantRecords) ||
-        RangesOverlap(envelope.TypeRecords, envelope.VertexInputRecords) ||
-        RangesOverlap(envelope.TypeRecords, envelope.RootSignature) ||
-        RangesOverlap(envelope.TypeRecords, envelope.Bytecode) ||
-        RangesOverlap(envelope.RootConstantRecords, envelope.VertexInputRecords) ||
-        RangesOverlap(envelope.RootConstantRecords, envelope.RootSignature) ||
-        RangesOverlap(envelope.RootConstantRecords, envelope.Bytecode) ||
-        RangesOverlap(envelope.VertexInputRecords, envelope.RootSignature) ||
-        RangesOverlap(envelope.VertexInputRecords, envelope.Bytecode) ||
-        RangesOverlap(envelope.RootSignature, envelope.Bytecode)) {
+    // Every section must sit past the header and no two may overlap: sections are copied out by
+    // offset, so an overlap would let one record array reinterpret another's bytes.
+    const WireBlobRange sections[]{
+        envelope.EntryRecords,
+        envelope.BindingRecords,
+        envelope.TypeRecords,
+        envelope.RootConstantRecords,
+        envelope.VertexInputRecords,
+        envelope.SamplerRecords,
+        envelope.RootSignature,
+        envelope.Bytecode};
+    if (envelope.HeaderSize != sizeof(WireMetadataEnvelope)) {
         SetError(error, ShaderArtifactDecodeError::InvalidRecordRange);
         return std::nullopt;
+    }
+    for (size_t index = 0; index < std::size(sections); ++index) {
+        if (!IsRangeAfterHeader(sections[index], envelope.HeaderSize)) {
+            SetError(error, ShaderArtifactDecodeError::InvalidRecordRange);
+            return std::nullopt;
+        }
+        for (size_t previous = 0; previous < index; ++previous) {
+            if (RangesOverlap(sections[previous], sections[index])) {
+                SetError(error, ShaderArtifactDecodeError::InvalidRecordRange);
+                return std::nullopt;
+            }
+        }
     }
     if (envelope.RootSignature.Size != 0 &&
         (!envelope.RootSignature.IsWithin(static_cast<uint32_t>(blob.size())) ||
@@ -335,7 +348,8 @@ std::optional<ShaderArtifactView> DecodeShaderArtifact(
         !CopyRecords(blob, envelope.BindingRecords, result._bindings) ||
         !CopyRecords(blob, envelope.TypeRecords, result._types) ||
         !CopyRecords(blob, envelope.RootConstantRecords, result._rootConstants) ||
-        !CopyRecords(blob, envelope.VertexInputRecords, result._vertexInputs)) {
+        !CopyRecords(blob, envelope.VertexInputRecords, result._vertexInputs) ||
+        !CopyRecords(blob, envelope.SamplerRecords, result._samplers)) {
         SetError(error, ShaderArtifactDecodeError::InvalidRecordRange);
         return std::nullopt;
     }
@@ -365,9 +379,14 @@ std::optional<ShaderArtifactView> DecodeShaderArtifact(
         const std::optional<std::string_view> bindingName = result.GetName(binding.Name);
         if (!IsValidName(result, binding.Name, envelope.Bytecode.Offset) ||
             !bindingName.has_value() || binding.Group > 0xffffu || binding.Count == 0 ||
-            binding.StageMask == 0 || (binding.StageMask & ~kStageMask) != 0 || binding.Type == 0 ||
-            binding.Type > 6) {
+            binding.StageMask == 0 || (binding.StageMask & ~kStageMask) != 0 ||
+            GetWireBindingNamespace(binding.Type) == 0xffffffffu) {
             SetError(error, ShaderArtifactDecodeError::InvalidBinding);
+            return std::nullopt;
+        }
+        if (!IsValidPlacement(binding, static_cast<ShaderTarget>(envelope.Target),
+                              result._samplers.size())) {
+            SetError(error, ShaderArtifactDecodeError::InvalidPlacement);
             return std::nullopt;
         }
         for (size_t previous = 0; previous < index; ++previous) {
@@ -390,12 +409,31 @@ std::optional<ShaderArtifactView> DecodeShaderArtifact(
         return std::nullopt;
     }
 
-    for (const WireRootConstantRecord& constant : result._rootConstants) {
+    for (size_t index = 0; index < result._rootConstants.size(); ++index) {
+        const WireRootConstantRecord& constant = result._rootConstants[index];
+        const std::optional<std::string_view> name = result.GetName(constant.Name);
         if (constant.Size == 0 || (constant.Size % 4) != 0 || constant.StageMask == 0 ||
-            (constant.StageMask & ~kStageMask) != 0) {
+            (constant.StageMask & ~kStageMask) != 0 ||
+            !IsValidName(result, constant.Name, envelope.Bytecode.Offset) || !name.has_value()) {
             SetError(error, ShaderArtifactDecodeError::InvalidRootConstant);
             return std::nullopt;
         }
+        // The push handle table is keyed on the declaration name, and a push block never doubles
+        // as a descriptor, so the name has to be unique across both record arrays.
+        for (size_t previous = 0; previous < index; ++previous) {
+            if (result.GetName(result._rootConstants[previous].Name) == name) {
+                SetError(error, ShaderArtifactDecodeError::InvalidRootConstant);
+                return std::nullopt;
+            }
+        }
+        if (result.FindBinding(name.value()).has_value()) {
+            SetError(error, ShaderArtifactDecodeError::InvalidRootConstant);
+            return std::nullopt;
+        }
+    }
+    if (!ValidateSamplerRecords(result)) {
+        SetError(error, ShaderArtifactDecodeError::InvalidSamplerRecord);
+        return std::nullopt;
     }
     if (!ValidateVertexInputRecords(result)) {
         SetError(error, ShaderArtifactDecodeError::InvalidVertexInput);

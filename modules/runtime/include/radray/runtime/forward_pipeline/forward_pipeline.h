@@ -1,5 +1,6 @@
 #pragma once
 
+#include <radray/render/shader_layout.h>
 #include <radray/runtime/render_framework/render_pipeline.h>
 #include <radray/types.h>
 
@@ -21,6 +22,11 @@ public:
     static constexpr BindingGroupPlan GetBindingGroupPlan() noexcept {
         return BindingGroupPlan{0, 1, 2};
     }
+
+    // The pipeline uploads its view, material, and object constant buffers out of a per-frame
+    // arena, so each of those declarations has to take its offset at bind time: a root descriptor
+    // on D3D12 and a dynamic uniform buffer descriptor on Vulkan.
+    static render::ShaderProgramLayoutRecipe GetLayoutRecipe() noexcept;
 
 protected:
     void OnBeginFrame(RenderPipelineContext& ctx) override;

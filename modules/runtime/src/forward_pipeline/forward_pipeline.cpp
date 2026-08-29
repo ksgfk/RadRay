@@ -266,14 +266,14 @@ struct ForwardPipeline::Impl {
             BindingGroups.MaterialGroup,
             BindingGroups.ObjectGroup};
         for (const uint32_t group : groups) {
-            const bool exists = std::any_of(
-                program->GetArtifact().Generic().Bindings().begin(),
-                program->GetArtifact().Generic().Bindings().end(),
-                [group](const shader::WireBindingRecord& binding) noexcept {
-                    return binding.Group == group;
-                });
-            if (!exists || !program->IsBufferGroupDynamic(group) ||
-                !FindSingleBuffer(program->GetParameterLayout(), group).has_value()) {
+            // The pipeline uploads each of these buffers from a per-frame arena, so the
+            // declaration has to be the group's only buffer and has to take its offset at bind
+            // time.
+            const std::optional<uint32_t> buffer =
+                FindSingleBuffer(program->GetParameterLayout(), group);
+            if (!buffer.has_value() ||
+                !program->IsBufferDynamic(
+                    program->GetParameterLayout().Buffers()[buffer.value()].Name)) {
                 InvalidPrograms.push_back(program);
                 RADRAY_ERR_LOG("forward pipeline rejected an incompatible shader program");
                 return false;
@@ -574,9 +574,9 @@ struct ForwardPipeline::Impl {
                 PreparedDraw& draw = Prepared[drawIndices[localIndex]];
                 draw.ViewSet = sets.Get()->ViewSet.get();
                 draw.ObjectSet = sets.Get()->ObjectSet.get();
-                draw.ViewOffsets = {{.Binding = viewBuffer.BindingNumber,
+                draw.ViewOffsets = {{.Binding = viewBuffer.Binding,
                                      .Offset = static_cast<uint32_t>(viewAllocation->Offset)}};
-                draw.ObjectOffsets = {{.Binding = objectBuffer.BindingNumber,
+                draw.ObjectOffsets = {{.Binding = objectBuffer.Binding,
                                        .Offset = static_cast<uint32_t>(
                                            objectAllocation.Offset + objectStride * localIndex)}};
             }
@@ -620,7 +620,7 @@ struct ForwardPipeline::Impl {
                         .Target = allocation->Target,
                         .Range = render::BufferRange{0, buffer.Size}}});
                 offsets.push_back(render::ShaderParameterDynamicOffset{
-                    .Binding = buffer.BindingNumber,
+                    .Binding = buffer.Binding,
                     .Offset = static_cast<uint32_t>(allocation->Offset)});
             }
             const Nullable<render::ShaderParameterSet*> set =
@@ -823,6 +823,28 @@ bool ForwardPipeline::ExecutePreparedPass(
     const RenderCamera& camera,
     bool transparent) {
     return _impl->Execute(ctx, camera, transparent);
+}
+
+render::ShaderProgramLayoutRecipe ForwardPipeline::GetLayoutRecipe() noexcept {
+    // Names must match shaderlib/pipelines/forward/bindings.hlsli; a mismatch fails layout
+    // resolution instead of silently binding the wrong way.
+    static constexpr std::string_view kDynamicBuffers[]{
+        "ForwardView",
+        "ForwardMaterial",
+        "ForwardObject"};
+    render::ShaderProgramLayoutRecipe recipe;
+    for (const std::string_view name : kDynamicBuffers) {
+        const render::ShaderLayoutSelector selector{
+            .DeclarationName = string{name},
+            .ExpectedLogicalResourceKind = shader::ShaderBindingKind::CBuffer};
+        recipe.D3D12.BufferPlacements.push_back(
+            {.Selector = selector,
+             .Placement = render::D3D12BufferPlacement::RootDescriptor});
+        recipe.Vulkan.BufferDescriptors.push_back(
+            {.Selector = selector,
+             .Placement = render::VulkanBufferDescriptorPlacement::Dynamic});
+    }
+    return recipe;
 }
 
 }  // namespace radray

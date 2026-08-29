@@ -282,6 +282,9 @@ struct StringEqual {
 
 size_t HashData(const void* data, size_t size) noexcept;
 uint64_t HashData64(const void* data, size_t size) noexcept;
+// Wide digest for identities that are compared across processes or persisted, where a 64-bit
+// value's collision odds are not good enough. Byte order of the result is stable.
+array<uint8_t, 16> HashData128(const void* data, size_t size) noexcept;
 
 template <class T>
 struct PodHasher {

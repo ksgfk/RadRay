@@ -66,8 +66,12 @@ group 数字字面量。
 ### shader artifact 边界
 
 RHI 只消费 render 层已经验证过的 shader、layout 和 PSO 描述，仍不依赖 compiler client。
-开发期源码入口在 `RenderSystem::GetOrCreateShaderProgram`：它按逻辑 `SourceName` 和规范化 keyword
-assignment 缓存 program，按实际 backend 只编译一个 target，并缓存失败结果以避免逐帧重试。
+开发期源码入口在 `RenderSystem::GetOrCreateShaderProgram(const ShaderProgramRequest&)`：request 显式
+拥有逻辑 `SourceName`、结构化 defines、keyword assignments、完整 `CompilePolicy` 与按 target 分开的
+layout recipe，discovery 与 compile 由同一个 request 驱动。缓存分两层：compiler artifact 按
+source/defines/assignments/policy/target/toolchain 缓存（不含 layout recipe），program 按 artifact 身份
+加当前 backend 的 canonical resolved layout hash 缓存。按实际 backend 只编译一个 target；失败按完整
+key 记成显式失败记录以避免逐帧重试，同时不会污染其他 key。
 `RADRAY_ENABLE_SHADER_JIT=OFF` 时 `RenderSystem` 与 pipeline 仍可构造，program 请求明确返回空。
 
 ## 场景表示

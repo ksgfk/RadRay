@@ -24,6 +24,15 @@ public:
 
     bool IsAvailable() const noexcept;
 
+    // Identity of the loaded compiler toolchain. Empty when no compiler is available.
+    std::optional<shader::Hash128> GetToolchainIdentity() const;
+
+    // Discovery has to see the same source, defines and policy the compile will use: a contract
+    // discovered under a different policy can describe a different set of entry points.
+    std::optional<shader::ContractHash> DiscoverContractHash(
+        const shader::SourceContractRequest& request) const;
+
+    // Convenience for callers with nothing but a source: default policy, no defines.
     std::optional<shader::ContractHash> DiscoverContractHash(
         std::string_view sourceName,
         std::span<const byte> source,

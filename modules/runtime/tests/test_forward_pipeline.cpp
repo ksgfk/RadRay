@@ -2,6 +2,7 @@
 // view/object constant packing, material set preparation and the recorded draw. Every
 // other test in the runtime drives the pieces directly, so this is the only place where
 // PrepareCamera and the draw pass actually run against a live swapchain.
+#include <algorithm>
 #include <radray/runtime/forward_pipeline/forward_pipeline.h>
 
 #include <radray/logger.h>
@@ -141,6 +142,24 @@ struct ForwardPipelineRunResult {
     uint32_t FramesRun{0};
     size_t PipelineStateCount{0};
     bool MaterialSetResident{false};
+    // Two-layer cache facts, filled once the first program exists.
+    size_t ArtifactsAfterFirst{0};
+    size_t ProgramsAfterFirst{0};
+    bool SameRequestHits{false};
+    bool ReorderedRecipeHits{false};
+    bool InactiveRecipeHits{false};
+    size_t ArtifactsAfterHits{0};
+    size_t ProgramsAfterHits{0};
+    bool ActiveRecipeSplitsProgram{false};
+    size_t ArtifactsAfterActiveSplit{0};
+    size_t ProgramsAfterActiveSplit{0};
+    bool PolicySplitsArtifact{false};
+    size_t ArtifactsAfterPolicySplit{0};
+    bool MissingSourceFailsTwice{false};
+    size_t ArtifactsAfterFailure{0};
+    bool GoodRequestStillHits{false};
+    bool DuplicateAssignmentFails{false};
+    size_t ArtifactsAfterDuplicate{0};
     bool SawError{false};
     string FirstError;
 };
@@ -177,21 +196,20 @@ protected:
         }
 
         const BindingGroupPlan groups = ForwardPipeline::GetBindingGroupPlan();
-        const uint32_t dynamicGroups[]{
-            groups.ViewGroup,
-            groups.MaterialGroup,
-            groups.ObjectGroup};
-        const shader::KeywordAssignment assignment{.Name = "QUALITY", .Value = "high"};
+        // The pipeline owns its layout recipe: it names the declarations it uploads from a per-frame
+        // arena, so this test asks for the same layout the pipeline itself would.
+        ShaderProgramRequest request{
+            .SourceName = "pipelines/forward/forward.hlsl",
+            .LayoutRecipe = ForwardPipeline::GetLayoutRecipe()};
+        request.Assignments.push_back(shader::KeywordAssignment{.Name = "QUALITY", .Value = "high"});
         const Nullable<ShaderProgram*> program =
-            GetRenderSystem()->GetOrCreateShaderProgram(
-                "pipelines/forward/forward.hlsl",
-                std::span{&assignment, 1},
-                render::ShaderLayoutPolicy{.DynamicBufferGroups = dynamicGroups});
+            GetRenderSystem()->GetOrCreateShaderProgram(request);
         if (!program.HasValue()) {
             Fail("forward shader program creation failed");
             return;
         }
         _program = program.Get();
+        CheckCacheRules(request, _program);
 
         Nullable<unique_ptr<Material>> material = Material::Create(
             _program,
@@ -296,6 +314,84 @@ protected:
     }
 
 private:
+    // The cache rules from ADR-0051: the compiled artifact is identified by source, defines,
+    // assignments, the full policy, the target and the toolchain, and a program by that artifact plus
+    // the resolved layout hash of the active backend only. Nothing else may split or merge an entry.
+    void CheckCacheRules(const ShaderProgramRequest& base, ShaderProgram* program) {
+        RenderSystem* system = GetRenderSystem();
+        const bool d3d12 = GetDevice()->GetBackend() == render::RenderBackend::D3D12;
+        ForwardPipelineRunResult& out = *_result;
+        out.ArtifactsAfterFirst = system->GetShaderArtifactCacheSize();
+        out.ProgramsAfterFirst = system->GetShaderProgramCacheSize();
+
+        out.SameRequestHits = system->GetOrCreateShaderProgram(base).Get() == program;
+
+        // Modifier order is not identity: resolution canonicalizes it before hashing.
+        ShaderProgramRequest reordered = base;
+        std::reverse(
+            reordered.LayoutRecipe.D3D12.BufferPlacements.begin(),
+            reordered.LayoutRecipe.D3D12.BufferPlacements.end());
+        std::reverse(
+            reordered.LayoutRecipe.Vulkan.BufferDescriptors.begin(),
+            reordered.LayoutRecipe.Vulkan.BufferDescriptors.end());
+        out.ReorderedRecipeHits = system->GetOrCreateShaderProgram(reordered).Get() == program;
+
+        // A recipe change the active backend cannot see changes no identity at all: no recompile and no
+        // second program.
+        ShaderProgramRequest inactive = base;
+        if (d3d12) {
+            inactive.LayoutRecipe.Vulkan.BufferDescriptors.clear();
+        } else {
+            inactive.LayoutRecipe.D3D12.BufferPlacements.clear();
+        }
+        out.InactiveRecipeHits = system->GetOrCreateShaderProgram(inactive).Get() == program;
+        out.ArtifactsAfterHits = system->GetShaderArtifactCacheSize();
+        out.ProgramsAfterHits = system->GetShaderProgramCacheSize();
+
+        // The active backend's own recipe decides the layout, so it splits the program while reusing the
+        // compiled artifact.
+        ShaderProgramRequest activeRecipe = base;
+        if (d3d12) {
+            activeRecipe.LayoutRecipe.D3D12.BufferPlacements.clear();
+        } else {
+            activeRecipe.LayoutRecipe.Vulkan.BufferDescriptors.clear();
+        }
+        const Nullable<ShaderProgram*> tableProgram =
+            system->GetOrCreateShaderProgram(activeRecipe);
+        out.ActiveRecipeSplitsProgram =
+            tableProgram.HasValue() && tableProgram.Get() != program;
+        out.ArtifactsAfterActiveSplit = system->GetShaderArtifactCacheSize();
+        out.ProgramsAfterActiveSplit = system->GetShaderProgramCacheSize();
+
+        // The compile policy is part of the artifact identity, so another shader model is another
+        // artifact and therefore another program.
+        ShaderProgramRequest otherPolicy = base;
+        otherPolicy.Policy.ShaderModel = 61;
+        const Nullable<ShaderProgram*> recompiled =
+            system->GetOrCreateShaderProgram(otherPolicy);
+        out.PolicySplitsArtifact = recompiled.HasValue() && recompiled.Get() != program;
+        out.ArtifactsAfterPolicySplit = system->GetShaderArtifactCacheSize();
+
+        // A failure is remembered under its own key: asking twice fails twice without adding a second
+        // entry, and it leaves every other key alone.
+        ShaderProgramRequest missing = base;
+        missing.SourceName = "pipelines/forward/does_not_exist.hlsl";
+        const bool firstMiss = !system->GetOrCreateShaderProgram(missing).HasValue();
+        const bool secondMiss = !system->GetOrCreateShaderProgram(missing).HasValue();
+        out.MissingSourceFailsTwice = firstMiss && secondMiss;
+        out.ArtifactsAfterFailure = system->GetShaderArtifactCacheSize();
+        out.GoodRequestStillHits = system->GetOrCreateShaderProgram(base).Get() == program;
+
+        // A duplicate assignment is a malformed request rather than a property of a shader, so it is
+        // reported and never remembered.
+        ShaderProgramRequest duplicate = base;
+        duplicate.Assignments.push_back(duplicate.Assignments.front());
+        out.DuplicateAssignmentFails =
+            !system->GetOrCreateShaderProgram(duplicate).HasValue();
+        out.ArtifactsAfterDuplicate = system->GetShaderArtifactCacheSize();
+    }
+
+
     void Fail(std::string_view message) {
         if (!_result->SawError) {
             _result->SawError = true;
@@ -365,6 +461,27 @@ void RunForwardPipeline(render::RenderBackend backend) {
     // GetOrCreateGraphicsPipelineState. One key per (material, geometry, pass).
     EXPECT_EQ(result.PipelineStateCount, 1u);
     EXPECT_TRUE(result.MaterialSetResident);
+
+    // Two layers, two identities: one compiled artifact serves every recipe, and only the active
+    // backend's resolved layout adds a program.
+    EXPECT_EQ(result.ArtifactsAfterFirst, 1u);
+    EXPECT_EQ(result.ProgramsAfterFirst, 1u);
+    EXPECT_TRUE(result.SameRequestHits);
+    EXPECT_TRUE(result.ReorderedRecipeHits);
+    EXPECT_TRUE(result.InactiveRecipeHits);
+    EXPECT_EQ(result.ArtifactsAfterHits, 1u);
+    EXPECT_EQ(result.ProgramsAfterHits, 1u);
+    EXPECT_TRUE(result.ActiveRecipeSplitsProgram);
+    EXPECT_EQ(result.ArtifactsAfterActiveSplit, 1u);
+    EXPECT_EQ(result.ProgramsAfterActiveSplit, 2u);
+    EXPECT_TRUE(result.PolicySplitsArtifact);
+    EXPECT_EQ(result.ArtifactsAfterPolicySplit, 2u);
+    EXPECT_TRUE(result.MissingSourceFailsTwice);
+    EXPECT_EQ(result.ArtifactsAfterFailure, 3u);
+    EXPECT_TRUE(result.GoodRequestStillHits);
+    EXPECT_TRUE(result.DuplicateAssignmentFails);
+    EXPECT_EQ(result.ArtifactsAfterDuplicate, 3u);
+
 }
 
 }  // namespace

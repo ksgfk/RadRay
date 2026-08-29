@@ -22,6 +22,10 @@ using shader::ShaderArtifactDecodeOptions;
 using shader::ShaderArtifactView;
 using shader::SpirvShaderArtifactView;
 
+// The identity moves with the wire schema, so every fixture decode names the same constant instead
+// of repeating the literal and drifting apart from it.
+constexpr uint64_t kFixtureToolchainIdentity = 0x0000000001090211ull;
+
 vector<byte> ReadBinary(const std::filesystem::path& path) {
     std::ifstream file(path, std::ios::binary);
     if (!file) {
@@ -77,7 +81,7 @@ ShaderArtifactDecodeOptions FixtureDecodeOptions(
     return ShaderArtifactDecodeOptions{
         .Target = target,
         .ExpectedGpuArtifact = test::ExpectedGpuArtifact(fixtureIndex.value_or(0), target),
-        .ExpectedToolchainIdentity = 0x0000000001090210ull};
+        .ExpectedToolchainIdentity = kFixtureToolchainIdentity};
 }
 
 std::optional<ShaderArtifactView> DecodeFixtureArtifact(
@@ -91,21 +95,38 @@ std::optional<ShaderArtifactView> DecodeFixtureArtifact(
     return DecodeShaderArtifact(blob, FixtureDecodeOptions(name, target), error);
 }
 
-std::optional<BackendPipelineLayoutInput> MakeFixtureLayout(
+// Neither backend has an adapter step any more: the resolved layout is what native creation
+// consumes, so that is what these assertions read. Modifiers stay empty here: these fixtures pin
+// what the compiler published, not what a pipeline asks for on top of it.
+std::optional<ResolvedD3D12Layout> ResolveFixtureD3D12Layout(
     std::string_view name,
-    shader::ShaderTarget target,
     ShaderArtifactDecodeError* error) {
-    const vector<byte> blob = ReadFixtureArtifact(name, target);
+    const vector<byte> blob = ReadFixtureArtifact(name, shader::ShaderTarget::DXIL);
     if (blob.empty()) {
         return std::nullopt;
     }
-    const ShaderArtifactDecodeOptions options = FixtureDecodeOptions(name, target);
-    if (target == shader::ShaderTarget::DXIL) {
-        const auto artifact = DecodeDxilShaderArtifact(blob, options, error);
-        return artifact.has_value() ? MakeBackendPipelineLayoutInput(*artifact) : std::nullopt;
+    const auto artifact = DecodeDxilShaderArtifact(
+        blob,
+        FixtureDecodeOptions(name, shader::ShaderTarget::DXIL),
+        error);
+    return artifact.has_value() ? ResolveD3D12Layout(artifact.value()) : std::nullopt;
+}
+
+std::optional<ResolvedVulkanLayout> ResolveFixtureVulkanLayout(
+    std::string_view name,
+    ShaderArtifactDecodeError* error) {
+    const vector<byte> blob = ReadFixtureArtifact(name, shader::ShaderTarget::SPIRV);
+    if (blob.empty()) {
+        return std::nullopt;
     }
-    const auto artifact = DecodeSpirvShaderArtifact(blob, options, error);
-    return artifact.has_value() ? MakeBackendPipelineLayoutInput(*artifact) : std::nullopt;
+    const auto artifact = DecodeSpirvShaderArtifact(
+        blob,
+        FixtureDecodeOptions(name, shader::ShaderTarget::SPIRV),
+        error);
+    if (!artifact.has_value()) {
+        return std::nullopt;
+    }
+    return ResolveVulkanLayout(artifact.value());
 }
 
 vector<byte> MakeSyntheticArtifact() {
@@ -113,8 +134,9 @@ vector<byte> MakeSyntheticArtifact() {
     constexpr uint32_t bindingCount = 2;
     constexpr uint32_t typeCount = 1;
     constexpr uint32_t rootConstantCount = 1;
-    constexpr std::string_view names[] = {"VSMain", "PSMain", "Color", "Linear", "Constants"};
-    constexpr uint32_t nameBytes = 6 + 6 + 5 + 6 + 9;
+    constexpr std::string_view names[] = {
+        "VSMain", "PSMain", "Color", "Linear", "Constants", "PushBlock"};
+    constexpr uint32_t nameBytes = 6 + 6 + 5 + 6 + 9 + 9;
     const uint32_t entryOffset = sizeof(shader::WireMetadataEnvelope);
     const uint32_t bindingOffset = entryOffset + entryCount * sizeof(shader::WireEntryRecord);
     const uint32_t typeOffset = bindingOffset + bindingCount * sizeof(shader::WireBindingRecord);
@@ -149,13 +171,26 @@ vector<byte> MakeSyntheticArtifact() {
     vector<shader::WireEntryRecord> entries{
         {nextName(names[0]), static_cast<uint8_t>(shader::ShaderStage::Vertex), 0, 0, 0, 4, 0},
         {nextName(names[1]), static_cast<uint8_t>(shader::ShaderStage::Pixel), 0, 0, 0, 4, 0}};
+    constexpr uint32_t pixelStage = 1u << static_cast<uint8_t>(shader::ShaderStage::Pixel);
     vector<shader::WireBindingRecord> bindings{
-        {nextName(names[2]), 0, 0, 4, 1, 1u << static_cast<uint8_t>(shader::ShaderStage::Pixel), 0},
-        {nextName(names[3]), 0, 1, 6, 1, 1u << static_cast<uint8_t>(shader::ShaderStage::Pixel), 0}};
+        {.Name = nextName(names[2]),
+         .Group = 0,
+         .Binding = 0,
+         .Type = static_cast<uint32_t>(shader::ShaderBindingKind::Texture),
+         .Count = 1,
+         .StageMask = pixelStage},
+        {.Name = nextName(names[3]),
+         .Group = 0,
+         .Binding = 1,
+         .Type = static_cast<uint32_t>(shader::ShaderBindingKind::Sampler),
+         .Count = 1,
+         .StageMask = pixelStage}};
     vector<shader::WireTypeRecord> types{
         {nextName(names[4]), 0xffffffffu, 4, 1, 0, 16, 16, 0}};
+    // A push block is keyed on its declaration name now, so the record carries one.
     vector<shader::WireRootConstantRecord> rootConstants{
-        {0, 0, 0, 16, 1u << static_cast<uint8_t>(shader::ShaderStage::Pixel), 0}};
+        {.Name = nextName(names[5]), .RegisterSpace = 0, .Register = 0, .Offset = 0, .Size = 16,
+         .StageMask = pixelStage}};
     std::memcpy(blob.data() + entryOffset, entries.data(), envelope.EntryRecords.Size);
     std::memcpy(blob.data() + bindingOffset, bindings.data(), envelope.BindingRecords.Size);
     std::memcpy(blob.data() + typeOffset, types.data(), envelope.TypeRecords.Size);
@@ -203,7 +238,7 @@ TEST(RadRayRenderShaderArtifact, DecodesEveryRawGoldenLaneWithoutCompiler) {
                 ShaderArtifactDecodeOptions{
                     .Target = target,
                     .ExpectedGpuArtifact = test::ExpectedGpuArtifact(index, target),
-                    .ExpectedToolchainIdentity = 0x0000000001090210ull},
+                    .ExpectedToolchainIdentity = kFixtureToolchainIdentity},
                 &error);
             ASSERT_TRUE(artifact.has_value()) << static_cast<uint32_t>(error);
             EXPECT_FALSE(artifact->Bytecode().empty());
@@ -217,29 +252,39 @@ TEST(RadRayRenderShaderArtifact, DecodesEveryRawGoldenLaneWithoutCompiler) {
                     artifact->Bytecode().data() + entry.InterfaceOffset);
             }
 
-            std::optional<BackendPipelineLayoutInput> layoutInput;
+            // Each target resolves into its own layout type, so the shared assertions compare
+            // counts taken from whichever lane is under test.
+            std::optional<size_t> resolvedBindingCount;
+            std::optional<size_t> resolvedPushCount;
             if (target == shader::ShaderTarget::DXIL) {
                 const auto typed = DecodeDxilShaderArtifact(
                     blob,
                     ShaderArtifactDecodeOptions{
                         .Target = target,
                         .ExpectedGpuArtifact = test::ExpectedGpuArtifact(index, target),
-                        .ExpectedToolchainIdentity = 0x0000000001090210ull},
+                        .ExpectedToolchainIdentity = kFixtureToolchainIdentity},
                     &error);
                 ASSERT_TRUE(typed.has_value()) << static_cast<uint32_t>(error);
-                layoutInput = MakeBackendPipelineLayoutInput(*typed);
+                const auto resolved = ResolveD3D12Layout(typed.value());
+                ASSERT_TRUE(resolved.has_value());
+                resolvedBindingCount = resolved->Bindings.size();
+                resolvedPushCount = resolved->PushConstants.size();
             } else {
                 const auto typed = DecodeSpirvShaderArtifact(
                     blob,
                     ShaderArtifactDecodeOptions{
                         .Target = target,
                         .ExpectedGpuArtifact = test::ExpectedGpuArtifact(index, target),
-                        .ExpectedToolchainIdentity = 0x0000000001090210ull},
+                        .ExpectedToolchainIdentity = kFixtureToolchainIdentity},
                     &error);
                 ASSERT_TRUE(typed.has_value()) << static_cast<uint32_t>(error);
-                layoutInput = MakeBackendPipelineLayoutInput(*typed);
+                const auto resolved = ResolveVulkanLayout(typed.value());
+                ASSERT_TRUE(resolved.has_value());
+                resolvedBindingCount = resolved->Bindings.size();
+                resolvedPushCount = resolved->PushBlock.has_value() ? 1u : 0u;
             }
-            ASSERT_TRUE(layoutInput.has_value());
+            ASSERT_TRUE(resolvedBindingCount.has_value());
+            ASSERT_TRUE(resolvedPushCount.has_value());
 
             const test::ShaderContractFixture& fixture = test::GetShaderContractFixtures()[index];
             ASSERT_EQ(artifact->Entries().size(), fixture.Entries.size());
@@ -262,7 +307,15 @@ TEST(RadRayRenderShaderArtifact, DecodesEveryRawGoldenLaneWithoutCompiler) {
                     return value.Kind != test::FixtureResourceKind::RootConstant;
                 }));
             ASSERT_EQ(artifact->Bindings().size(), expectedBindingCount);
-            EXPECT_EQ(layoutInput->BindingNames.size(), expectedBindingCount);
+            EXPECT_EQ(resolvedBindingCount.value(), expectedBindingCount);
+            // Only the DXIL lane carries the serialized policy, and it carries it exactly when the
+            // source declared one.
+            const bool hasPolicy = fixture.Name == std::string_view{"shadow_static_sampler"} ||
+                                   fixture.Name == std::string_view{"multiple_root_constants"};
+            EXPECT_EQ(
+                !artifact->SerializedRootSignature().empty(),
+                hasPolicy && target == shader::ShaderTarget::DXIL)
+                << fixture.Name;
             for (const test::FixtureBindingFact& expected : fixture.Bindings) {
                 if (expected.Kind == test::FixtureResourceKind::RootConstant) {
                     continue;
@@ -278,17 +331,24 @@ TEST(RadRayRenderShaderArtifact, DecodesEveryRawGoldenLaneWithoutCompiler) {
                 EXPECT_EQ(binding->Record.Group, expectedGroup) << expected.Name;
                 EXPECT_EQ(binding->Record.Binding, expectedBinding) << expected.Name;
                 EXPECT_EQ(binding->Record.StageMask, expected.StageMask) << expected.Name;
-                const uint32_t expectedType = expected.Kind == test::FixtureResourceKind::Texture
-                                                  ? 4u
-                                                  : expected.Kind == test::FixtureResourceKind::Sampler
-                                                        ? 6u
-                                                        : expected.Kind == test::FixtureResourceKind::StorageBuffer
-                                                              ? 3u
-                                                              : 1u;
-                EXPECT_EQ(binding->Record.Type, expectedType) << expected.Name;
-                if (fixture.Name == std::string_view{"shadow_static_sampler"} &&
-                    expected.Kind == test::FixtureResourceKind::Sampler) {
-                    EXPECT_NE(binding->Record.Flags & 1u, 0u);
+                EXPECT_EQ(
+                    binding->Record.Type,
+                    static_cast<uint32_t>(test::ExpectedWireKind(expected.Kind)))
+                    << expected.Name;
+                // Placement is where the two targets legitimately disagree: the same policy slot is
+                // a D3D12 static sampler with no table entry, and a Vulkan table entry whose state
+                // comes from a published sampler record.
+                const uint32_t expectedPlacement = static_cast<uint32_t>(
+                    expected.PolicyStaticSampler && target == shader::ShaderTarget::DXIL
+                        ? shader::ShaderBindingPlacement::StaticSampler
+                        : shader::ShaderBindingPlacement::Table);
+                EXPECT_EQ(binding->Record.Placement, expectedPlacement) << expected.Name;
+                if (expected.PolicyStaticSampler && target == shader::ShaderTarget::SPIRV) {
+                    ASSERT_LT(binding->Record.SamplerIndex, artifact->Samplers().size())
+                        << expected.Name;
+                } else {
+                    EXPECT_EQ(binding->Record.SamplerIndex, shader::kShaderNoSampler)
+                        << expected.Name;
                 }
             }
 
@@ -356,7 +416,7 @@ TEST(RadRayRenderShaderArtifact, DecodesEveryRawGoldenLaneWithoutCompiler) {
                                                  ? target == shader::ShaderTarget::SPIRV ? 1u : 0u
                                                  : target == shader::ShaderTarget::DXIL ? rootFactCount : 0u;
             ASSERT_EQ(artifact->RootConstants().size(), expectedRootCount);
-            EXPECT_EQ(layoutInput->PushConstants.size(), expectedRootCount);
+            EXPECT_EQ(resolvedPushCount.value(), expectedRootCount);
             if (expectedRootCount != 0) {
                 for (size_t rootIndex = 0; rootIndex < expectedRootCount; ++rootIndex) {
                     const test::FixtureBindingFact& expected = fixture.Bindings[
@@ -381,34 +441,78 @@ TEST(RadRayRenderShaderArtifact, DecodesEveryRawGoldenLaneWithoutCompiler) {
     }
 }
 
-TEST(RadRayRenderShaderArtifact, StaticSamplerMetadataBuildsImmutableSamplerForBothTargets) {
-    for (const shader::ShaderTarget target : {shader::ShaderTarget::DXIL, shader::ShaderTarget::SPIRV}) {
-        ShaderArtifactDecodeError error = ShaderArtifactDecodeError::None;
-        const auto artifact = DecodeFixtureArtifact("shadow_static_sampler", target, &error);
-        ASSERT_TRUE(artifact.has_value()) << static_cast<uint32_t>(error);
-        const auto sampler = artifact->FindBinding("ShadowSampler");
-        ASSERT_TRUE(sampler.has_value());
-        EXPECT_NE(sampler->Record.Flags & 1u, 0u);
+TEST(RadRayRenderShaderArtifact, PolicyStaticSamplerLandsPerTargetWithoutLosingState) {
+    ShaderArtifactDecodeError error = ShaderArtifactDecodeError::None;
+    const vector<byte> dxilBlob = ReadFixtureArtifact("shadow_static_sampler", shader::ShaderTarget::DXIL);
+    ASSERT_FALSE(dxilBlob.empty());
+    const auto dxil = DecodeDxilShaderArtifact(
+        dxilBlob,
+        FixtureDecodeOptions("shadow_static_sampler", shader::ShaderTarget::DXIL),
+        &error);
+    ASSERT_TRUE(dxil.has_value()) << static_cast<uint32_t>(error);
 
-        const auto layout = MakeFixtureLayout("shadow_static_sampler", target, &error);
-        ASSERT_TRUE(layout.has_value()) << static_cast<uint32_t>(error);
-        const auto bindingName = std::find_if(
-            layout->BindingNames.begin(),
-            layout->BindingNames.end(),
-            [](const BackendBindingName& value) noexcept { return value.Name == "ShadowSampler"; });
-        ASSERT_NE(bindingName, layout->BindingNames.end());
-        ASSERT_LT(bindingName->Location.Group, layout->GroupEntries.size());
-        const auto& entries = layout->GroupEntries[bindingName->Location.Group];
-        const auto binding = std::find_if(
-            entries.begin(),
-            entries.end(),
-            [&](const ShaderParameterSetLayoutEntryDescriptor& value) noexcept {
-                return value.Binding == bindingName->Location.Binding &&
-                       value.Type == ShaderParameterBindingType::Sampler;
-            });
-        ASSERT_NE(binding, entries.end());
-        EXPECT_TRUE(binding->ImmutableSampler.has_value());
+    // On D3D12 the static sampler exists only inside the serialized carrier: it owns no descriptor
+    // table slot, so the layout must not reserve one, and no sampler state is published separately.
+    const auto dxilSampler = dxil->Generic().FindBinding("ShadowSampler");
+    ASSERT_TRUE(dxilSampler.has_value());
+    EXPECT_EQ(
+        dxilSampler->Record.Placement,
+        static_cast<uint32_t>(shader::ShaderBindingPlacement::StaticSampler));
+    EXPECT_EQ(dxilSampler->Record.SamplerIndex, shader::kShaderNoSampler);
+    EXPECT_TRUE(dxil->Generic().Samplers().empty());
+    EXPECT_FALSE(dxil->Generic().SerializedRootSignature().empty());
+
+    const auto dxilLayout = ResolveD3D12Layout(dxil.value());
+    ASSERT_TRUE(dxilLayout.has_value());
+    EXPECT_TRUE(dxilLayout->HasExplicitCarrier());
+    // Every sampler this fixture declares is a policy static sampler, so the resolved layout must
+    // keep that placement: an entry that came back as a table sampler would mean the layout had
+    // silently reserved a descriptor slot the carrier does not describe.
+    for (const ResolvedD3D12Binding& resolvedBinding : dxilLayout->Bindings) {
+        if (resolvedBinding.LogicalKind != shader::ShaderBindingKind::Sampler) {
+            continue;
+        }
+        EXPECT_EQ(resolvedBinding.Placement, shader::ShaderBindingPlacement::StaticSampler);
     }
+
+    const vector<byte> spirvBlob = ReadFixtureArtifact("shadow_static_sampler", shader::ShaderTarget::SPIRV);
+    ASSERT_FALSE(spirvBlob.empty());
+    const auto spirv = DecodeSpirvShaderArtifact(
+        spirvBlob,
+        FixtureDecodeOptions("shadow_static_sampler", shader::ShaderTarget::SPIRV),
+        &error);
+    ASSERT_TRUE(spirv.has_value()) << static_cast<uint32_t>(error);
+
+    // On Vulkan the same policy slot is a table entry plus a full immutable sampler state. The
+    // comparison filter the policy asked for has to survive as compare-enabled state, because a
+    // downgrade here would silently change filtering.
+    const auto spirvSampler = spirv->Generic().FindBinding("ShadowSampler");
+    ASSERT_TRUE(spirvSampler.has_value());
+    EXPECT_EQ(
+        spirvSampler->Record.Placement,
+        static_cast<uint32_t>(shader::ShaderBindingPlacement::Table));
+    ASSERT_LT(spirvSampler->Record.SamplerIndex, spirv->Generic().Samplers().size());
+    EXPECT_TRUE(spirv->Generic().SerializedRootSignature().empty());
+    const shader::WireSamplerRecord& state =
+        spirv->Generic().Samplers()[spirvSampler->Record.SamplerIndex];
+    EXPECT_EQ(state.CompareEnable, 1u);
+    EXPECT_EQ(state.MagFilter, 1u);
+    EXPECT_EQ(state.MinFilter, 1u);
+    EXPECT_EQ(state.MipmapMode, 0u);
+
+    // Vulkan native layout creation consumes the resolved layout directly, so the state has to
+    // survive resolution as well: the published record is what becomes the VkSampler.
+    const auto spirvLayout = ResolveVulkanLayout(spirv.value());
+    ASSERT_TRUE(spirvLayout.has_value());
+    const auto resolvedSampler = std::find_if(
+        spirvLayout->Bindings.begin(),
+        spirvLayout->Bindings.end(),
+        [](const ResolvedVulkanBinding& value) noexcept { return value.Name == "ShadowSampler"; });
+    ASSERT_NE(resolvedSampler, spirvLayout->Bindings.end());
+    EXPECT_EQ(resolvedSampler->LogicalKind, shader::ShaderBindingKind::Sampler);
+    EXPECT_EQ(resolvedSampler->Placement, VulkanBufferDescriptorPlacement::Regular);
+    ASSERT_LT(resolvedSampler->ImmutableSamplerIndex, spirvLayout->ImmutableSamplers.size());
+    EXPECT_EQ(spirvLayout->ImmutableSamplers[resolvedSampler->ImmutableSamplerIndex], state);
 }
 
 TEST(RadRayRenderShaderArtifact, VertexInterfaceMatchesExternalLayoutForBothTargets) {
@@ -473,15 +577,12 @@ TEST(RadRayRenderShaderArtifact, MultipleDxilRootConstantsRemainIndependent) {
     EXPECT_EQ(artifact->RootConstants()[1].Register, 1u);
     EXPECT_EQ(artifact->RootConstants()[1].Size, 16u);
 
-    const auto layout = MakeFixtureLayout(
-        "multiple_root_constants",
-        shader::ShaderTarget::DXIL,
-        &error);
+    const auto layout = ResolveFixtureD3D12Layout("multiple_root_constants", &error);
     ASSERT_TRUE(layout.has_value()) << static_cast<uint32_t>(error);
     ASSERT_EQ(layout->PushConstants.size(), 2u);
-    EXPECT_EQ(layout->PushConstants[0].Location.Binding, 0u);
+    EXPECT_EQ(layout->PushConstants[0].Register, 0u);
     EXPECT_EQ(layout->PushConstants[0].Size, 64u);
-    EXPECT_EQ(layout->PushConstants[1].Location.Binding, 1u);
+    EXPECT_EQ(layout->PushConstants[1].Register, 1u);
     EXPECT_EQ(layout->PushConstants[1].Size, 16u);
 }
 
@@ -499,10 +600,10 @@ TEST(RadRayRenderShaderArtifact, SingleSpirvPushBlockDoesNotBecomeMultipleConsta
     EXPECT_EQ(spirv->RootConstants()[0].Size, 16u);
     EXPECT_EQ(spirv->RootConstants()[0].Flags & 1u, 1u);
 
-    const auto layout = MakeFixtureLayout("spirv_push_constant", shader::ShaderTarget::SPIRV, &error);
+    const auto layout = ResolveFixtureVulkanLayout("spirv_push_constant", &error);
     ASSERT_TRUE(layout.has_value()) << static_cast<uint32_t>(error);
-    ASSERT_EQ(layout->PushConstants.size(), 1u);
-    EXPECT_EQ(layout->PushConstants[0].Size, 16u);
+    ASSERT_TRUE(layout->PushBlock.has_value());
+    EXPECT_EQ(layout->PushBlock->Size, 16u);
 }
 
 TEST(RadRayRenderShaderArtifact, NestedTypeTreeLayoutFactsRemainTargetStable) {
@@ -561,7 +662,7 @@ TEST(RadRayRenderShaderArtifact, TypeTreeMutationDoesNotChangeGpuArtifactIdentit
         ShaderArtifactDecodeOptions{
             .Target = shader::ShaderTarget::DXIL,
             .ExpectedGpuArtifact = test::ExpectedGpuArtifact(8, shader::ShaderTarget::DXIL),
-            .ExpectedToolchainIdentity = 0x0000000001090210ull},
+            .ExpectedToolchainIdentity = kFixtureToolchainIdentity},
         &error);
     ASSERT_TRUE(artifact.has_value()) << static_cast<uint32_t>(error);
     EXPECT_EQ(artifact->Generic().Envelope().GpuArtifact, test::ExpectedGpuArtifact(8, shader::ShaderTarget::DXIL));
@@ -732,7 +833,7 @@ TEST(RadRayRenderShaderArtifact, RejectsDuplicateAndMalformedRecords) {
             ShaderArtifactDecodeOptions{
                 .Target = shader::ShaderTarget::DXIL,
                 .ExpectedGpuArtifact = test::ExpectedGpuArtifact(8, shader::ShaderTarget::DXIL),
-                .ExpectedToolchainIdentity = 0x0000000001090210ull});
+                .ExpectedToolchainIdentity = kFixtureToolchainIdentity});
         EXPECT_FALSE(artifact.has_value());
     };
     expectInvalidNestedType([](vector<shader::WireTypeRecord>& types) { types[7].Offset = 80; });
@@ -759,7 +860,7 @@ TEST(RadRayRenderShaderArtifact, RejectsDuplicateAndMalformedRecords) {
             ShaderArtifactDecodeOptions{
                 .Target = shader::ShaderTarget::DXIL,
                 .ExpectedGpuArtifact = test::ExpectedGpuArtifact(8, shader::ShaderTarget::DXIL),
-            .ExpectedToolchainIdentity = 0x0000000001090210ull},
+            .ExpectedToolchainIdentity = kFixtureToolchainIdentity},
             &error)
             .has_value());
     EXPECT_EQ(error, ShaderArtifactDecodeError::InvalidVertexInput);

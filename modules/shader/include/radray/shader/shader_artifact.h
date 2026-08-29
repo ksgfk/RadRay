@@ -25,6 +25,9 @@ enum class ShaderArtifactDecodeError : uint32_t {
     InvalidRootConstant,
     InvalidVertexInput,
     InvalidRootSignature,
+    UnsupportedSchemaVersion,
+    InvalidSamplerRecord,
+    InvalidPlacement,
 };
 
 struct ShaderArtifactDecodeOptions {
@@ -52,6 +55,7 @@ public:
     std::span<const WireVertexInputRecord> VertexInputs() const noexcept {
         return _vertexInputs;
     }
+    std::span<const WireSamplerRecord> Samplers() const noexcept { return _samplers; }
     std::span<const byte> SerializedRootSignature() const noexcept;
     std::span<const byte> Bytecode() const noexcept;
 
@@ -67,6 +71,7 @@ private:
     vector<WireTypeRecord> _types;
     vector<WireRootConstantRecord> _rootConstants;
     vector<WireVertexInputRecord> _vertexInputs;
+    vector<WireSamplerRecord> _samplers;
 
     friend std::optional<ShaderArtifactView> DecodeShaderArtifact(
         std::span<const byte>,

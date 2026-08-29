@@ -31,10 +31,11 @@ struct GraphicsPassState {
 
 class ShaderProgram {
 public:
+    // The artifact already carries the layout the recipe produced, so the recipe itself is not an
+    // input here: the resolved layout is what everything downstream reads.
     static Nullable<unique_ptr<ShaderProgram>> Create(
         render::Device* device,
-        render::BackendShaderArtifact artifact,
-        const render::ShaderLayoutPolicy& layoutPolicy = {}) noexcept;
+        render::BackendShaderArtifact artifact) noexcept;
 
     ShaderProgram(const ShaderProgram&) = delete;
     ShaderProgram(ShaderProgram&&) = delete;
@@ -51,7 +52,9 @@ public:
     const render::BackendShaderArtifact& GetArtifact() const noexcept { return _artifact; }
     render::PipelineLayout* GetPipelineLayout() const noexcept { return _artifact.Layout.get(); }
     render::Device* GetDevice() const noexcept { return _device; }
-    bool IsBufferGroupDynamic(uint32_t group) const noexcept;
+    // True when the named buffer declaration takes its offset at bind time. Dynamic-ness is a
+    // property of one declaration, not of a whole descriptor group.
+    bool IsBufferDynamic(std::string_view declarationName) const noexcept;
     const ShaderParameterLayout& GetParameterLayout() const noexcept { return _parameterLayout; }
     size_t GetGraphicsPipelineStateCount() const noexcept { return _graphicsPipelineStates.size(); }
 
@@ -98,8 +101,7 @@ private:
         unique_ptr<render::Shader> pixelShader,
         string pixelEntry,
         unique_ptr<render::Shader> computeShader,
-        string computeEntry,
-        vector<uint32_t> dynamicBufferGroups) noexcept;
+        string computeEntry) noexcept;
 
     render::Device* _device;
     render::BackendShaderArtifact _artifact;
@@ -110,7 +112,6 @@ private:
     unique_ptr<render::Shader> _computeShader;
     string _computeEntry;
     ShaderParameterLayout _parameterLayout;
-    vector<uint32_t> _dynamicBufferGroups;
     unordered_map<PsoKey, unique_ptr<render::GraphicsPipelineState>, PsoKeyHash, PsoKeyEqual>
         _graphicsPipelineStates;
 };

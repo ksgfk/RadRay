@@ -67,7 +67,7 @@ Nullable<unique_ptr<ShaderProgram>> CreateFixtureProgram(
     render::RenderBackend backend,
     std::string_view fixtureName,
     size_t fixtureIndex,
-    const render::ShaderLayoutPolicy& policy) {
+    const render::ShaderProgramLayoutRecipe& layoutRecipe) {
     const std::optional<shader::ShaderTarget> target =
         render::GetShaderTargetForBackend(backend);
     if (!target.has_value()) {
@@ -92,28 +92,35 @@ Nullable<unique_ptr<ShaderProgram>> CreateFixtureProgram(
                 .ExpectedGpuArtifact = render::test::ExpectedGpuArtifact(
                     fixtureIndex,
                     target.value()),
-                .ExpectedToolchainIdentity = 0x0000000001090210ull},
-            policy);
+                .ExpectedToolchainIdentity = 0x0000000001090211ull},
+            layoutRecipe);
     if (!artifact.has_value()) {
         return nullptr;
     }
-    return ShaderProgram::Create(device.GetBackend() == backend ? &device : nullptr,
-                                 std::move(artifact.value()),
-                                 policy);
+    return ShaderProgram::Create(
+        device.GetBackend() == backend ? &device : nullptr,
+        std::move(artifact.value()));
 }
 
 Nullable<unique_ptr<ShaderProgram>> CreateNestedTypesProgram(
     render::Device& device,
     render::RenderBackend backend) {
-    const uint32_t dynamicGroup = 0;
-    const render::ShaderLayoutPolicy policy{
-        .DynamicBufferGroups = std::span{&dynamicGroup, 1}};
+    // nested_types declares a single constant buffer named Constants; the draw path uploads it from
+      // a per-frame arena, so that one declaration takes its offset at bind time on both targets.
+    const render::ShaderLayoutSelector selector{
+        .DeclarationName = "Constants",
+        .ExpectedLogicalResourceKind = shader::ShaderBindingKind::CBuffer};
+    render::ShaderProgramLayoutRecipe recipe;
+    recipe.D3D12.BufferPlacements.push_back(
+        {.Selector = selector, .Placement = render::D3D12BufferPlacement::RootDescriptor});
+    recipe.Vulkan.BufferDescriptors.push_back(
+        {.Selector = selector, .Placement = render::VulkanBufferDescriptorPlacement::Dynamic});
     return CreateFixtureProgram(
         device,
         backend,
         "nested_types",
         kNestedTypesFixtureIndex,
-        policy);
+        recipe);
 }
 
 class ImmediateWaitFrame final : public IWaitFrameProcessor {
@@ -210,13 +217,14 @@ void RunMaterialResourceResidency(
     render::test::DeviceContext& context,
     render::RenderBackend backend) {
     render::Device& device = *context.Device;
-    const render::ShaderLayoutPolicy policy;
+    // texture_sampler needs no placement modifier: the compiler's table entries are exactly what
+    // this path binds.
     Nullable<unique_ptr<ShaderProgram>> programResult = CreateFixtureProgram(
         device,
         backend,
         "texture_sampler",
         kTextureSamplerFixtureIndex,
-        policy);
+        render::ShaderProgramLayoutRecipe{});
     ASSERT_TRUE(programResult.HasValue());
     unique_ptr<ShaderProgram> program = programResult.Release();
 
@@ -293,7 +301,9 @@ void RunMeshDraw(
         CreateNestedTypesProgram(device, backend);
     ASSERT_TRUE(programResult.HasValue());
     unique_ptr<ShaderProgram> program = programResult.Release();
-    ASSERT_TRUE(program->IsBufferGroupDynamic(0));
+    ASSERT_TRUE(program->IsBufferDynamic("Constants"));
+    // Dynamic-ness is a property of one declaration, so an unrelated name is not dynamic.
+    EXPECT_FALSE(program->IsBufferDynamic("NotDeclared"));
     ASSERT_EQ(program->GetParameterLayout().Buffers().size(), 1u);
     const ShaderParameterBufferLayout& parameterBufferLayout =
         program->GetParameterLayout().Buffers().front();
@@ -515,7 +525,7 @@ void RunMeshDraw(
         .Offset = 0,
         .Stride = sizeof(uint16_t)});
     render::ShaderParameterDynamicOffset dynamicOffset{
-        .Binding = parameterBufferLayout.BindingNumber,
+        .Binding = parameterBufferLayout.Binding,
         .Offset = 0};
     encoder->BindShaderParameterSet(
         0,

@@ -8,110 +8,6 @@
 namespace radray::render {
 namespace {
 
-std::optional<BackendPipelineLayoutInput> MakeBackendPipelineLayoutInputForTarget(
-    const shader::ShaderArtifactView& artifact,
-    shader::ShaderTarget target,
-    const ShaderLayoutPolicy& policy) noexcept {
-    if (artifact.Envelope().Target != static_cast<uint8_t>(target)) {
-        return std::nullopt;
-    }
-    if (target == shader::ShaderTarget::SPIRV && !artifact.SerializedRootSignature().empty()) {
-        return std::nullopt;
-    }
-    if (!policy.Empty() && !artifact.SerializedRootSignature().empty()) {
-        return std::nullopt;
-    }
-    for (size_t index = 0; index < policy.DynamicBufferGroups.size(); ++index) {
-        const uint32_t group = policy.DynamicBufferGroups[index];
-        if (std::find(
-                policy.DynamicBufferGroups.begin(),
-                policy.DynamicBufferGroups.begin() + index,
-                group) != policy.DynamicBufferGroups.begin() + index) {
-            return std::nullopt;
-        }
-        const bool exists = std::any_of(
-            artifact.Bindings().begin(),
-            artifact.Bindings().end(),
-            [group](const shader::WireBindingRecord& binding) noexcept {
-                return binding.Group == group;
-            });
-        if (!exists) {
-            return std::nullopt;
-        }
-    }
-    BackendPipelineLayoutInput result;
-    static std::atomic<uint32_t> nextBindingGeneration{1};
-    result.BindingGeneration = nextBindingGeneration.fetch_add(1, std::memory_order_relaxed);
-    if (result.BindingGeneration == 0) {
-        result.BindingGeneration = nextBindingGeneration.fetch_add(1, std::memory_order_relaxed);
-    }
-    uint32_t maxGroup = 0;
-    bool hasBindings = false;
-    for (const shader::WireBindingRecord& binding : artifact.Bindings()) {
-        maxGroup = std::max(maxGroup, binding.Group);
-        hasBindings = true;
-    }
-    if (hasBindings) {
-        if (maxGroup > 64) {
-            return std::nullopt;
-        }
-        result.GroupEntries.resize(maxGroup + 1);
-    }
-    for (const shader::WireBindingRecord& binding : artifact.Bindings()) {
-        ShaderParameterBindingType type = ShaderParameterBindingType::UNKNOWN;
-        switch (binding.Type) {
-            case 1:
-                type = std::find(
-                           policy.DynamicBufferGroups.begin(),
-                           policy.DynamicBufferGroups.end(),
-                           binding.Group) != policy.DynamicBufferGroups.end()
-                           ? ShaderParameterBindingType::DynamicCBuffer
-                           : ShaderParameterBindingType::CBuffer;
-                break;
-            case 2: type = ShaderParameterBindingType::Buffer; break;
-            case 3: type = ShaderParameterBindingType::RWBuffer; break;
-            case 4: type = ShaderParameterBindingType::Texture; break;
-            case 5: type = ShaderParameterBindingType::RWTexture; break;
-            case 6: type = ShaderParameterBindingType::Sampler; break;
-            default: return std::nullopt;
-        }
-        const std::optional<std::string_view> bindingName = artifact.GetName(binding.Name);
-        if (!bindingName.has_value()) {
-            return std::nullopt;
-        }
-        result.BindingNames.push_back({.Name = string{bindingName.value()},
-                                       .Location = {binding.Group, binding.Binding},
-                                       .Namespace = shader::GetWireBindingNamespace(binding.Type)});
-        ShaderParameterSetLayoutEntryDescriptor entry{
-            .Binding = binding.Binding,
-            .Type = type,
-            .Count = binding.Count,
-            .Stages = ShaderStages{static_cast<ShaderStage>(binding.StageMask)},
-            .ImmutableSampler = (binding.Flags & 1u) != 0 ? std::optional<SamplerDescriptor>{SamplerDescriptor{}} : std::nullopt};
-        result.GroupEntries[binding.Group].push_back(entry);
-    }
-    for (uint32_t group = 0; group < result.GroupEntries.size(); ++group) {
-        result.ParameterSets.push_back({group, result.GroupEntries[group]});
-    }
-    if (target == shader::ShaderTarget::SPIRV && artifact.RootConstants().size() > 1) {
-        return std::nullopt;
-    }
-    result.PushConstants.reserve(artifact.RootConstants().size());
-    for (const shader::WireRootConstantRecord& constant : artifact.RootConstants()) {
-        result.PushConstants.push_back(PushConstantDescriptor{
-            .Location = {constant.RegisterSpace, constant.Register},
-            .Size = constant.Size,
-            .Stages = ShaderStages{static_cast<ShaderStage>(constant.StageMask)}});
-    }
-    result.Descriptor = PipelineLayoutDescriptor{
-        .ParameterSets = result.ParameterSets,
-        .PushConstants = result.PushConstants};
-    const std::span<const byte> serializedRootSignature = artifact.SerializedRootSignature();
-    result.SerializedRootSignature.assign(
-        serializedRootSignature.begin(), serializedRootSignature.end());
-    return result;
-}
-
 bool GetVertexFormatShape(
     VertexFormat format,
     uint32_t& componentType,
@@ -190,16 +86,28 @@ bool GetVertexFormatShape(
 
 }  // namespace
 
-std::optional<BackendPipelineLayoutInput> MakeBackendPipelineLayoutInput(
-    const shader::DxilShaderArtifactView& artifact,
-    const ShaderLayoutPolicy& policy) noexcept {
-    return MakeBackendPipelineLayoutInputForTarget(artifact.Generic(), shader::ShaderTarget::DXIL, policy);
+Nullable<const BackendBindingName*> FindBackendBindingRecord(
+    std::span<const BackendBindingName> records,
+    uint32_t generation,
+    BindingHandle handle) noexcept {
+    if (generation == 0 || !handle.IsValid() ||
+        BindingHandleAccess::Generation(handle) != generation) {
+        return nullptr;
+    }
+    const uint32_t index = BindingHandleAccess::RecordIndex(handle);
+    if (index >= records.size()) {
+        return nullptr;
+    }
+    return &records[index];
 }
 
-std::optional<BackendPipelineLayoutInput> MakeBackendPipelineLayoutInput(
-    const shader::SpirvShaderArtifactView& artifact,
-    const ShaderLayoutPolicy& policy) noexcept {
-    return MakeBackendPipelineLayoutInputForTarget(artifact.Generic(), shader::ShaderTarget::SPIRV, policy);
+uint32_t NextBackendBindingGeneration() noexcept {
+    static std::atomic<uint32_t> nextBindingGeneration{1};
+    uint32_t generation = nextBindingGeneration.fetch_add(1, std::memory_order_relaxed);
+    if (generation == 0) {
+        generation = nextBindingGeneration.fetch_add(1, std::memory_order_relaxed);
+    }
+    return generation;
 }
 
 bool ValidateVertexInputStateAgainstArtifact(

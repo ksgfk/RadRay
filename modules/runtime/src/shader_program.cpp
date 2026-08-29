@@ -100,8 +100,7 @@ bool GraphicsPassState::IsValid() const noexcept {
 
 Nullable<unique_ptr<ShaderProgram>> ShaderProgram::Create(
     render::Device* device,
-    render::BackendShaderArtifact artifact,
-    const render::ShaderLayoutPolicy& layoutPolicy) noexcept {
+    render::BackendShaderArtifact artifact) noexcept {
     if (device == nullptr || artifact.Layout == nullptr) {
         RADRAY_ERR_LOG("ShaderProgram::Create requires a device and pipeline layout");
         return nullptr;
@@ -163,10 +162,7 @@ Nullable<unique_ptr<ShaderProgram>> ShaderProgram::Create(
         std::move(pixelShader),
         pixel.has_value() ? std::move(pixel->first) : string{},
         std::move(computeShader),
-        compute.has_value() ? std::move(compute->first) : string{},
-        vector<uint32_t>{
-            layoutPolicy.DynamicBufferGroups.begin(),
-            layoutPolicy.DynamicBufferGroups.end()})};
+        compute.has_value() ? std::move(compute->first) : string{})};
 }
 
 ShaderProgram::ShaderProgram(
@@ -178,8 +174,7 @@ ShaderProgram::ShaderProgram(
     unique_ptr<render::Shader> pixelShader,
     string pixelEntry,
     unique_ptr<render::Shader> computeShader,
-    string computeEntry,
-    vector<uint32_t> dynamicBufferGroups) noexcept
+    string computeEntry) noexcept
     : _device(device),
       _artifact(std::move(artifact)),
       _vertexShader(std::move(vertexShader)),
@@ -188,16 +183,12 @@ ShaderProgram::ShaderProgram(
       _pixelEntry(std::move(pixelEntry)),
       _computeShader(std::move(computeShader)),
       _computeEntry(std::move(computeEntry)),
-      _parameterLayout(std::move(parameterLayout)),
-      _dynamicBufferGroups(std::move(dynamicBufferGroups)) {}
+      _parameterLayout(std::move(parameterLayout)) {}
 
 ShaderProgram::~ShaderProgram() noexcept = default;
 
-bool ShaderProgram::IsBufferGroupDynamic(uint32_t group) const noexcept {
-    return std::find(
-               _dynamicBufferGroups.begin(),
-               _dynamicBufferGroups.end(),
-               group) != _dynamicBufferGroups.end();
+bool ShaderProgram::IsBufferDynamic(std::string_view declarationName) const noexcept {
+    return _artifact.IsBindingDynamic(declarationName);
 }
 
 namespace {

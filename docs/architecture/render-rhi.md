@@ -1,6 +1,6 @@
 > - 适用: 加 RHI 接口或改后端；排查 barrier / 描述符 / 同步问题；找某个后端实现在哪一段
 > - 权威: 本文是 ADR-0051/schema 6 目标 RHI layout 契约及两个后端映射关系的唯一说明。上层怎么用它见 `architecture/frame-and-gpu.md`
-> - 状态: layout 契约已接受、实现待 `docs/todo/shader-layout-contract-correction.md` 迁移；非 layout 章节仍描述当前实现
+> - 状态: 已落地。两个后端的 native chain、binding handle、dynamic offset 与 push 提交都按本文实现（M1-M6，含 `1.9.2607.radray.5` package 发布），实施记录见 `docs/todo/shader-layout-contract-correction.md`；非 layout 章节同样描述当前实现
 > - 锚点: `modules/render/include/radray/render/rhi.h`, `modules/render/include/radray/render/backend_shader_artifact.h`, `modules/render/include/radray/render/render_pass_registry.h`, `modules/render/include/radray/render/sampler_cache.h`, `modules/render/src/rhi.cpp`, `modules/render/src/backend_shader_artifact.cpp`, `modules/render/src/sampler_cache.cpp`, `modules/render/src/d3d12/d3d12_impl.cpp`, `modules/render/src/vk/vulkan_impl.cpp`
 
 # RHI 与后端
@@ -8,9 +8,10 @@
 `radrayrender` = 一层后端无关的 RHI（`rhi.h`，1.5k 行纯接口与描述符）+ D3D12 与 Vulkan
 两份实现。它不知道资产、场景、帧节奏，只知道 GPU 对象。
 
-layout 章节以下以 schema 6 目标 contract 为准。当前 schema 5 的 group-wide
-`ShaderLayoutPolicy`、公开 handle 编码、裸 binding dynamic offset 与 default Vulkan immutable
-sampler 是已记录的迁移起点，不是继续扩张的接口。
+layout 章节以下以 schema 6 contract 为准，并且已经是实现形态：group-wide `ShaderLayoutPolicy`、
+公开 handle 编码、裸 binding dynamic offset 与 default Vulkan immutable sampler 都已删除。
+`BindingHandle` 的内部 token 是 layout generation 加该 layout metadata table 的 record index，
+位布局不是 ABI，只有两个后端可以拆开它。
 
 ## 所有权：一个 shared，其余全 unique
 
@@ -81,16 +82,18 @@ handles。
 
 pipeline 通过 `ShaderProgramLayoutRecipe` 并列提供 D3D12/Vulkan typed options。current backend
 只消费自己的字段；每个 Target layout modifier 用 canonical declaration name + expected logical kind
-精确选择一项。selector 不存在/inactive、kind mismatch、duplicate target 或 D3 Explicit 出现 D3
-modifier 都是 framework invariant（Debug assert），不形成生产 recovery API。
+精确选择一项。selector 不存在/inactive、kind mismatch、duplicate target 或 D3D12 explicit carrier 上
+出现 D3D12 modifier，都由 resolve 按 `ShaderLayoutResolveError` 返回并 fail closed：resolve 不做
+Debug abort，否则这些拒绝路径在唯一会跑测试的配置里无法验证。这不是可恢复 API——caller 唯一的
+正确反应是修 recipe 或 shader。
 
 `ShaderParameterValue` 是 `variant<ShaderBufferBinding, ShaderTexelBufferBinding, TextureView*, Sampler*>`。
 
 logical resource kind 与 native placement 分开保存。CBuffer、typed/structured/raw buffers、texture/
 storage texture 与 sampler 决定 value/descriptor class；D3 Table/RootDescriptor 和 Vulkan
-Regular/Dynamic 只存在于 resolved records。既有 `ShaderParameterBindingType::DynamicCBuffer`、
-`DynamicBuffer`、`DynamicRWBuffer` identifiers 保留但 schema 6 artifact path 不再生产它们表达
-logical kind。
+Regular/Dynamic 只存在于 resolved records。logical kind 与 placement 是两个独立轴，两个后端的内部
+entry 都同时保留它们并由二者推导 native descriptor/root parameter type；把它们融合成单一枚举会让
+uniform/storage、texel/image 的区分靠命名巧合成立，因此公共面不再有这样的枚举。
 
 两个后端的 base policy 与合法 modifier 如下：
 
@@ -133,8 +136,12 @@ D3/Vulkan static-sampler policy 的统一副本。
 **`Set` 只记脏值，`FlushWrites()` 才写描述符。** D3D12 把值写进预分配的 GPU 堆区间；
 Vulkan 构造 `VkWriteDescriptorSet` 数组，并按需惰性建 `VkBufferView` 承载 texel buffer。
 
-`ShaderDescriptor` 这类喂给 RHI 的资源描述仍属于 render 层。compiler-owned metadata 由 render
-decoder 转换成 backend-only 过渡 input，不能让 RHI 反向依赖 compiler client。
+`ShaderDescriptor` 这类喂给 RHI 的资源描述仍属于 render 层。compiler-owned metadata 不能让 RHI 反向
+依赖 compiler client。Vulkan 已经不经过任何过渡 input：set entries、empty set holes、dynamic order、
+push range 与 name table 全部直接由 `ResolvedVulkanLayout` 建立，因此 Vulkan layout 只有一种描述方式。
+D3D12 同样如此：`DeviceD3D12::CreateRootSignatureInternal` 直接接受 `ResolvedD3D12Layout`，
+explicit carrier 与 Implicit 两条路径共用同一份 parameter group 构建，因此整个 render 层不再存在
+第二种 layout 描述。
 
 ### Binding handle、dynamic offset 与 push
 
@@ -148,14 +155,27 @@ recompile或layout复用。
 - Descriptor：logical kind、group/binding、array facts和一个或多个backend native destinations；
 - Push：resolved size/stages、D3 root destinations和/或Vulkan ranges。
 
+两类 record 共用同一个 name 表，因此 push declaration 与 descriptor declaration 用同样的方式取
+handle；handle 命名的是 record 而不是 register，record kind 决定它只能走 parameter set write 还是
+只能走 push 提交，写错一侧会被拒绝。handle 还携带发放它的 layout 的 generation，跨 layout 使用
+同样被拒绝。
+
 一个D3 declaration按visibility-disjoint参数fan-out时仍只有一个handle，一次write/offset提交到全部
 destinations。`BindShaderParameterSet`的group index保留，因为它仍选择D3 register space/Vulkan set；
 这不要求handle公开group。
 
-`ShaderParameterDynamicOffset`使用`BindingHandle + Offset`，不再携带裸binding number。D3 root
-descriptor从parameter set取base GPU VA并加offset；Vulkan忽略caller输入顺序，按resolved dynamic
-order完整打包`pDynamicOffsets`。错误layout/group/handle、duplicate/missing offset与未对齐offset是
-framework invariant。
+`ShaderParameterDynamicOffset`使用`BindingHandle + Offset`，不再携带裸binding number。两个后端都
+按 resolved order 为每个 slot 反查 caller 值：D3 走 group 的 root descriptor order，Vulkan 走
+`DynamicOffsetOrder`。错误layout/group/handle、duplicate/missing offset与未对齐offset会被
+报告并失败；缺一个或给重复的都不能变成一次静默移位，否则后面每个 dynamic buffer 都会拿到别人的
+offset。因此一个 group 里每个 root descriptor / dynamic descriptor 都要恰好一个 offset，两个后端
+接受同一组输入。
+
+D3 root descriptor 的地址是 buffer GPU VA + bound range offset + dynamic offset，authored root CBV
+与 Implicit modifier 生成的 root descriptor 走同一条路径并记同一种 destination，所以同一个
+dynamic-cbuffer arena offset 在两种 topology 上落在同一段字节；offset 位移后的窗口必须仍在资源内，
+constant buffer 还要求位移后地址保持 256-byte 对齐。visibility-disjoint fan-out 时一次提交写到全部
+destinations。
 
 push提交为`SetPushConstants(BindingHandle, bytes)`，不再传group。每次写`[0,size)`prefix，要求
 `0 < size <= resolved block size`且4-byte aligned；未覆盖remainder不变，不支持destination offset。

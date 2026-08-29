@@ -1,6 +1,7 @@
 #pragma once
 
 #include <filesystem>
+#include <optional>
 #include <span>
 #include <string_view>
 
@@ -17,6 +18,10 @@ public:
     Client& operator=(const Client&) = delete;
 
     bool IsAvailable() const noexcept;
+
+    // Identity of the loaded compiler toolchain, read from the fork's ABI info. A cache keys compiled
+    // artifacts on it, so it has to be observable before anything is compiled.
+    std::optional<shader::Hash128> GetToolchainIdentity() const noexcept;
 
     DiscoveryResult DiscoverSourceContract(
         std::string_view sourceName,
