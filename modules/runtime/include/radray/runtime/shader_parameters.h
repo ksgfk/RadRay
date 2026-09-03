@@ -66,12 +66,13 @@ public:
     size_t ParameterCount() const noexcept { return _parameters.size(); }
 
     // Construction hook used by the artifact type-tree walker. Callers should use Create().
-    bool AddParameter(string name, ShaderParameterInfo info);
+    bool AddParameter(string canonicalPath, std::string_view leafName, ShaderParameterInfo info);
 
 private:
     vector<ShaderParameterBufferLayout> _buffers;
     vector<ShaderParameterRecord> _parameters;
     unordered_map<string, size_t, StringHash, StringEqual> _parameterIndices;
+    unordered_map<string, size_t, StringHash, StringEqual> _shortParameterIndices;
 };
 
 class ShaderParameterStorage {

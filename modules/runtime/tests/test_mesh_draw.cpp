@@ -43,8 +43,14 @@ constexpr size_t FixtureIndex(std::string_view name) noexcept {
 
 constexpr size_t kTextureSamplerFixtureIndex = FixtureIndex("texture_sampler");
 constexpr size_t kNestedTypesFixtureIndex = FixtureIndex("nested_types");
+constexpr size_t kSharedCBufferTypeFixtureIndex = FixtureIndex("shared_cbuffer_type");
+constexpr size_t kNestedCBufferRootsFixtureIndex = FixtureIndex("nested_cbuffer_roots");
+constexpr size_t kSpirvPushConstantFixtureIndex = FixtureIndex("spirv_push_constant");
 static_assert(kTextureSamplerFixtureIndex != std::numeric_limits<size_t>::max());
 static_assert(kNestedTypesFixtureIndex != std::numeric_limits<size_t>::max());
+static_assert(kSharedCBufferTypeFixtureIndex != std::numeric_limits<size_t>::max());
+static_assert(kNestedCBufferRootsFixtureIndex != std::numeric_limits<size_t>::max());
+static_assert(kSpirvPushConstantFixtureIndex != std::numeric_limits<size_t>::max());
 
 vector<byte> ReadBinary(const std::filesystem::path& path) {
     std::ifstream file(path, std::ios::binary);
@@ -92,7 +98,7 @@ Nullable<unique_ptr<ShaderProgram>> CreateFixtureProgram(
                 .ExpectedGpuArtifact = render::test::ExpectedGpuArtifact(
                     fixtureIndex,
                     target.value()),
-                .ExpectedToolchainIdentity = 0x0000000001090211ull},
+                .ExpectedToolchainIdentity = 0x0000000001090212ull},
             layoutRecipe);
     if (!artifact.has_value()) {
         return nullptr;
@@ -106,7 +112,7 @@ Nullable<unique_ptr<ShaderProgram>> CreateNestedTypesProgram(
     render::Device& device,
     render::RenderBackend backend) {
     // nested_types declares a single constant buffer named Constants; the draw path uploads it from
-      // a per-frame arena, so that one declaration takes its offset at bind time on both targets.
+    // a per-frame arena, so that one declaration takes its offset at bind time on both targets.
     const render::ShaderLayoutSelector selector{
         .DeclarationName = "Constants",
         .ExpectedLogicalResourceKind = shader::ShaderBindingKind::CBuffer};
@@ -121,6 +127,76 @@ Nullable<unique_ptr<ShaderProgram>> CreateNestedTypesProgram(
         "nested_types",
         kNestedTypesFixtureIndex,
         recipe);
+}
+void RunDeclarationOwnerProgramCreation(
+    render::test::DeviceContext& context,
+    render::RenderBackend backend) {
+    render::Device& device = *context.Device;
+    Nullable<unique_ptr<ShaderProgram>> sharedResult = CreateFixtureProgram(
+        device,
+        backend,
+        "shared_cbuffer_type",
+        kSharedCBufferTypeFixtureIndex,
+        {});
+    ASSERT_TRUE(sharedResult.HasValue());
+    unique_ptr<ShaderProgram> shared = sharedResult.Release();
+    const shader::ShaderArtifactView& sharedArtifact = shared->GetArtifact().Generic();
+    const auto firstBinding = sharedArtifact.FindBinding("First");
+    const auto secondBinding = sharedArtifact.FindBinding("Second");
+    ASSERT_TRUE(firstBinding.has_value());
+    ASSERT_TRUE(secondBinding.has_value());
+    EXPECT_EQ(firstBinding->Record.TypeIndex, secondBinding->Record.TypeIndex);
+    ASSERT_EQ(shared->GetParameterLayout().Buffers().size(), 2u);
+    ASSERT_NE(shared->GetParameterLayout().Find("First.Value"), nullptr);
+    ASSERT_NE(shared->GetParameterLayout().Find("Second.Value"), nullptr);
+    EXPECT_EQ(shared->GetParameterLayout().Find("Value"), nullptr);
+
+    Nullable<unique_ptr<ShaderProgram>> nestedResult = CreateFixtureProgram(
+        device,
+        backend,
+        "nested_cbuffer_roots",
+        kNestedCBufferRootsFixtureIndex,
+        {});
+    ASSERT_TRUE(nestedResult.HasValue());
+    unique_ptr<ShaderProgram> nested = nestedResult.Release();
+    const shader::ShaderArtifactView& nestedArtifact = nested->GetArtifact().Generic();
+    const auto innerBinding = nestedArtifact.FindBinding("Inner");
+    const auto outerBinding = nestedArtifact.FindBinding("Outer");
+    ASSERT_TRUE(innerBinding.has_value());
+    ASSERT_TRUE(outerBinding.has_value());
+    const auto nestedMember = std::find_if(
+        nestedArtifact.Types().begin(),
+        nestedArtifact.Types().end(),
+        [&](const shader::WireTypeRecord& type) {
+            return type.ParentIndex == outerBinding->Record.TypeIndex &&
+                   nestedArtifact.GetName(type.Name) ==
+                       std::optional<std::string_view>{"Nested"};
+        });
+    ASSERT_NE(nestedMember, nestedArtifact.Types().end());
+    EXPECT_EQ(nestedMember->TypeIndex, innerBinding->Record.TypeIndex);
+    ASSERT_NE(nested->GetParameterLayout().Find("Inner.InnerValue"), nullptr);
+    ASSERT_NE(nested->GetParameterLayout().Find("Outer.Nested.InnerValue"), nullptr);
+
+    if (backend != render::RenderBackend::Vulkan) {
+        return;
+    }
+    Nullable<unique_ptr<ShaderProgram>> pushResult = CreateFixtureProgram(
+        device,
+        backend,
+        "spirv_push_constant",
+        kSpirvPushConstantFixtureIndex,
+        {});
+    ASSERT_TRUE(pushResult.HasValue());
+    unique_ptr<ShaderProgram> push = pushResult.Release();
+    EXPECT_TRUE(push->GetParameterLayout().Buffers().empty());
+    EXPECT_EQ(push->GetParameterLayout().ParameterCount(), 0u);
+    const shader::ShaderArtifactView& pushArtifact = push->GetArtifact().Generic();
+    ASSERT_EQ(pushArtifact.RootConstants().size(), 1u);
+    const shader::WireRootConstantRecord& root = pushArtifact.RootConstants().front();
+    ASSERT_LT(root.TypeIndex, pushArtifact.Types().size());
+    EXPECT_EQ(
+        pushArtifact.GetName(pushArtifact.Types()[root.TypeIndex].Name),
+        std::optional<std::string_view>{"PushData"});
 }
 
 class ImmediateWaitFrame final : public IWaitFrameProcessor {
@@ -756,6 +832,18 @@ TEST(RadRayRuntimeMeshDraw, D3D12DynamicOffsetsAndIndexedDraw) {
 #endif
 }
 
+TEST(RadRayRuntimeMeshDraw, D3D12DeclarationOwnerProgramsCreate) {
+#if defined(RADRAY_ENABLE_D3D12)
+    render::test::DeviceContext context;
+    if (!render::test::TryCreateDevice(render::RenderBackend::D3D12, context)) {
+        GTEST_SKIP() << "D3D12 is unavailable";
+    }
+    RunDeclarationOwnerProgramCreation(context, render::RenderBackend::D3D12);
+#else
+    GTEST_SKIP() << "D3D12 is disabled";
+#endif
+}
+
 TEST(RadRayRuntimeMeshDraw, D3D12MaterialResourceResidencyRotatesByFlight) {
 #if defined(RADRAY_ENABLE_D3D12)
     render::test::DeviceContext context;
@@ -778,6 +866,21 @@ TEST(RadRayRuntimeMeshDraw, VulkanDynamicOffsetsAndIndexedDraw) {
         GTEST_SKIP() << "Vulkan is unavailable";
     }
     RunMeshDraw(context, render::RenderBackend::Vulkan);
+#else
+    GTEST_SKIP() << "Vulkan is disabled";
+#endif
+}
+
+TEST(RadRayRuntimeMeshDraw, VulkanDeclarationOwnerProgramsCreate) {
+#if defined(RADRAY_ENABLE_VULKAN)
+    render::test::DeviceContext context;
+    if (!render::test::TryCreateDevice(
+            render::RenderBackend::Vulkan,
+            context,
+            true)) {
+        GTEST_SKIP() << "Vulkan is unavailable";
+    }
+    RunDeclarationOwnerProgramCreation(context, render::RenderBackend::Vulkan);
 #else
     GTEST_SKIP() << "Vulkan is disabled";
 #endif

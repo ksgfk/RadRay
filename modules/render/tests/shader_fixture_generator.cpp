@@ -33,6 +33,8 @@ constexpr FixtureDescription kFixtures[] = {
     {"multiple_cbuffers"},
     {"compute"},
     {"unused_resource"},
+    {"shared_cbuffer_type"},
+    {"nested_cbuffer_roots"},
 };
 
 bool ReadFile(const std::filesystem::path& path, vector<byte>& output) {

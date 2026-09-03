@@ -1,6 +1,6 @@
 # ADR-0045 CPU 参数值由 compiler type tree 驱动打包，不写 CPU mirror struct
 
-状态: 生效
+状态: 部分被 ADR-0052 取代
 日期: 2026-08
 影响: 新增 runtime 参数打包组件、material 与 view/object 参数写入路径、
 `examples/example_lambert_sphere`；消费 `modules/shader/include/radray/shader/shader_artifact.h`

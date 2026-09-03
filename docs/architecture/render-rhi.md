@@ -1,6 +1,6 @@
 > - 适用: 加 RHI 接口或改后端；排查 barrier / 描述符 / 同步问题；找某个后端实现在哪一段
-> - 权威: 本文是 ADR-0051/schema 6 目标 RHI layout 契约及两个后端映射关系的唯一说明。上层怎么用它见 `architecture/frame-and-gpu.md`
-> - 状态: 已落地。两个后端的 native chain、binding handle、dynamic offset 与 push 提交都按本文实现（M1-M6，含 `1.9.2607.radray.5` package 发布），实施记录见 `docs/todo/shader-layout-contract-correction.md`；非 layout 章节同样描述当前实现
+> - 权威: 本文是 ADR-0051/schema 7 当前 RHI layout 契约及两个后端映射关系的唯一说明。上层怎么用它见 `architecture/frame-and-gpu.md`
+> - 状态: 已落地。两个后端的 native chain、binding handle、dynamic offset 与 push 提交都按本文实现（含 `1.9.2607.radray.6` package），实施记录见 `docs/todo/shader-layout-contract-correction.md`；非 layout 章节同样描述当前实现
 > - 锚点: `modules/render/include/radray/render/rhi.h`, `modules/render/include/radray/render/backend_shader_artifact.h`, `modules/render/include/radray/render/render_pass_registry.h`, `modules/render/include/radray/render/sampler_cache.h`, `modules/render/src/rhi.cpp`, `modules/render/src/backend_shader_artifact.cpp`, `modules/render/src/sampler_cache.cpp`, `modules/render/src/d3d12/d3d12_impl.cpp`, `modules/render/src/vk/vulkan_impl.cpp`
 
 # RHI 与后端
@@ -8,7 +8,7 @@
 `radrayrender` = 一层后端无关的 RHI（`rhi.h`，1.5k 行纯接口与描述符）+ D3D12 与 Vulkan
 两份实现。它不知道资产、场景、帧节奏，只知道 GPU 对象。
 
-layout 章节以下以 schema 6 contract 为准，并且已经是实现形态：group-wide `ShaderLayoutPolicy`、
+layout 章节以下以 schema 7 contract 为准，并且已经是实现形态：group-wide `ShaderLayoutPolicy`、
 公开 handle 编码、裸 binding dynamic offset 与 default Vulkan immutable sampler 都已删除。
 `BindingHandle` 的内部 token 是 layout generation 加该 layout metadata table 的 record index，
 位布局不是 ABI，只有两个后端可以拆开它。
@@ -137,11 +137,12 @@ D3/Vulkan static-sampler policy 的统一副本。
 Vulkan 构造 `VkWriteDescriptorSet` 数组，并按需惰性建 `VkBufferView` 承载 texel buffer。
 
 `ShaderDescriptor` 这类喂给 RHI 的资源描述仍属于 render 层。compiler-owned metadata 不能让 RHI 反向
-依赖 compiler client。Vulkan 已经不经过任何过渡 input：set entries、empty set holes、dynamic order、
-push range 与 name table 全部直接由 `ResolvedVulkanLayout` 建立，因此 Vulkan layout 只有一种描述方式。
-D3D12 同样如此：`DeviceD3D12::CreateRootSignatureInternal` 直接接受 `ResolvedD3D12Layout`，
-explicit carrier 与 Implicit 两条路径共用同一份 parameter group 构建，因此整个 render 层不再存在
-第二种 layout 描述。
+依赖 compiler client。schema 7 declaration `TypeIndex` 只连接 CPU payload schema，不进入 resolved
+layout records、native layout 创建或 `ResolvedLayoutHash`。Vulkan 已经不经过任何过渡 input：set
+entries、empty set holes、dynamic order、push range 与 name table 全部直接由
+`ResolvedVulkanLayout` 建立，因此 Vulkan layout 只有一种描述方式。D3D12 同样如此：
+`DeviceD3D12::CreateRootSignatureInternal` 直接接受 `ResolvedD3D12Layout`，explicit carrier 与
+Implicit 两条路径共用同一份 parameter group 构建，因此整个 render 层不再存在第二种 layout 描述。
 
 ### Binding handle、dynamic offset 与 push
 

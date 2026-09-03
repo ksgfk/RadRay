@@ -504,6 +504,8 @@ TEST(RadRayRuntimeShaderJit, FixtureCaseReportCoversTargetNativeJitFacts) {
         {"spirv_push_constant", shader::ShaderTargetMask::SPIRV},
         {"target_specific_bindings", shader::ShaderTargetMask::All},
         {"compute", shader::ShaderTargetMask::All},
+        {"shared_cbuffer_type", shader::ShaderTargetMask::All},
+        {"nested_cbuffer_roots", shader::ShaderTargetMask::All},
     };
     const std::filesystem::path sourceRoot = std::filesystem::path{RADRAY_PROJECT_DIR} /
                                              "modules/render/tests/data/shader_sources";
@@ -554,7 +556,7 @@ TEST(RadRayRuntimeShaderJit, FixtureCaseReportCoversTargetNativeJitFacts) {
             shader::ShaderArtifactDecodeOptions options{
                 .Target = target,
                 .ExpectedGpuArtifact = artifact->ExpectedGpuArtifact,
-                .ExpectedToolchainIdentity = 0x0000000001090211ull};
+                .ExpectedToolchainIdentity = 0x0000000001090212ull};
             shader::ShaderArtifactDecodeError error = shader::ShaderArtifactDecodeError::None;
             std::optional<shader::ShaderArtifactView> generic;
             // Counted off the resolved layout of whichever target this lane is: the two resolved
@@ -613,6 +615,38 @@ TEST(RadRayRuntimeShaderJit, FixtureCaseReportCoversTargetNativeJitFacts) {
                 EXPECT_EQ(
                     binding->Record.Binding,
                     target == shader::ShaderTarget::DXIL ? expected.D3D12Binding : expected.VulkanBinding);
+                if (expected.PayloadType.empty()) {
+                    EXPECT_EQ(binding->Record.TypeIndex, shader::kShaderNoType);
+                } else {
+                    ASSERT_LT(binding->Record.TypeIndex, generic->Types().size());
+                    const shader::WireTypeRecord& payload =
+                        generic->Types()[binding->Record.TypeIndex];
+                    EXPECT_EQ(
+                        generic->GetName(payload.Name).value_or(std::string_view{}),
+                        expected.PayloadType);
+                }
+            }
+            for (const render::test::FixtureBindingFact& expected : fixture->Bindings) {
+                if (expected.Kind != render::test::FixtureResourceKind::RootConstant) {
+                    continue;
+                }
+                const auto root = std::find_if(
+                    generic->RootConstants().begin(),
+                    generic->RootConstants().end(),
+                    [&](const shader::WireRootConstantRecord& value) {
+                        return generic->GetName(value.Name).value_or(std::string_view{}) ==
+                               expected.Name;
+                    });
+                ASSERT_NE(root, generic->RootConstants().end());
+                if (expected.PayloadType.empty()) {
+                    EXPECT_EQ(root->TypeIndex, shader::kShaderNoType);
+                } else {
+                    ASSERT_LT(root->TypeIndex, generic->Types().size());
+                    EXPECT_EQ(
+                        generic->GetName(generic->Types()[root->TypeIndex].Name)
+                            .value_or(std::string_view{}),
+                        expected.PayloadType);
+                }
             }
         }
     }

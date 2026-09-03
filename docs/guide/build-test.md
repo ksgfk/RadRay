@@ -103,15 +103,15 @@ ctest --test-dir build_debug -C Debug -R AssetSlotTest --output-on-failure
 | `test_radray_shader_compiler_client` | `RadRayShaderCompilerClient` |
 | `test_radray_dxc_metadata` | `RadRayDxcMetadata` |
 | `test_shaderlib_passes` | `RadRayShaderLibPass` |
-| `test_runtime_shader_jit` | `RadRayRuntimeShaderJit`（graphics/compute readback、fixture case report、metadata negative） |
-| `test_material` | `RadRayRuntimeMaterial`（vertex layout 解析、type tree 打包、多 cbuffer 配对、declaration modifier 在两个 target 上生效、recipe 矛盾与 explicit policy 拒绝 modifier 时 fail closed） |
-| `test_mesh_draw` | `RadRayRuntimeMeshDraw`（排序、双后端 dynamic offset/indexed draw、material 资源按 flight 轮转） |
+| `test_runtime_shader_jit` | `RadRayRuntimeShaderJit`（graphics/compute readback、14-fixture report、declaration owner、metadata negative） |
+| `test_material` | `RadRayRuntimeMaterial`（schema 7 owner 驱动 type tree 打包、qualified/unique-short parameter path、多 cbuffer、declaration modifier 与 fail-closed recipe） |
+| `test_mesh_draw` | `RadRayRuntimeMeshDraw`（排序、双后端 dynamic offset/indexed draw、shared/nested owner 与 push-only program、material 资源按 flight 轮转） |
 | `test_forward_pipeline` | `RadRayRuntimeForwardPipeline`（双后端跑真实窗口帧循环，程序化 quad 走完 ForwardPipeline 编排） |
-| `test_radray_render_shader_artifact` | `RadRayRenderShaderArtifact` |
-| `test_radray_render_shader_layout` | `RadRayRenderShaderLayout`（schema 6 decode 与 target-typed resolve） |
+| `test_radray_render_shader_artifact` | `RadRayRenderShaderArtifact`（schema 7 raw golden、owner/type wire validation） |
+| `test_radray_render_shader_layout` | `RadRayRenderShaderLayout`（schema 7 decode 与 target-typed resolve） |
 | `test_radray_render_d3d12_layout` | `D3D12DeviceFixture`（真实 D3D12：placement 决定 table/root descriptor、carrier static sampler、root constant 全量进 push 表、非法 placement 拒绝、offset 双拓扑一致、push handle 端到端与误用拒绝） |
 | `test_radray_render_vulkan_layout` | `VulkanDeviceFixture`（真实 Vulkan：logical kind 决定 descriptor type、非法 dynamic placement 拒绝、immutable sampler 与 empty set hole、push handle 端到端与误用拒绝） |
-| `test_radray_shader_contract` | `RadRayShaderContract` |
+| `test_radray_shader_contract` | `RadRayShaderContract`（ABI 4/schema 7 layout 与旧 schema 拒绝） |
 | 其余 core target | 对应源码中的 suite 名 |
 
 无可用后端设备的 GPU 测试应 `SKIP`；已创建设备后出现资源、PSO、提交或读回错误必须

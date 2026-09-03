@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <iterator>
 #include <optional>
 
@@ -14,6 +15,21 @@ namespace {
 vector<byte> CopyBytes(std::string_view source) {
     const auto* data = reinterpret_cast<const byte*>(source.data());
     return {data, data + source.size()};
+}
+vector<byte> ReadBytes(const std::filesystem::path& path) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) {
+        return {};
+    }
+    file.seekg(0, std::ios::end);
+    const std::streamoff size = file.tellg();
+    if (size <= 0) {
+        return {};
+    }
+    file.seekg(0, std::ios::beg);
+    vector<byte> result(static_cast<size_t>(size));
+    file.read(reinterpret_cast<char*>(result.data()), size);
+    return file.good() || file.eof() ? result : vector<byte>{};
 }
 
 vector<std::filesystem::path> ShaderIncludePaths() {
@@ -298,6 +314,15 @@ TEST(RadRayDxcMetadata, ConcreteVariantReturnsAtomicTargetLanes) {
         EXPECT_NE(envelope.BytecodeDigest, shader::BytecodeHash{});
         EXPECT_NE(envelope.BasePipelineLayoutDigest, shader::BasePipelineLayoutHash{});
         EXPECT_EQ(envelope.BindingRecords.Size, 2u * sizeof(shader::WireBindingRecord));
+        vector<shader::WireBindingRecord> bindings(
+            envelope.BindingRecords.Size / sizeof(shader::WireBindingRecord));
+        std::memcpy(
+            bindings.data(),
+            lane.Metadata.data() + envelope.BindingRecords.Offset,
+            envelope.BindingRecords.Size);
+        for (const shader::WireBindingRecord& binding : bindings) {
+            EXPECT_EQ(binding.TypeIndex, shader::kShaderNoType);
+        }
         EXPECT_EQ(envelope.RootSignature.Size, 0u);
     }
     for (size_t index = 0; index < result.Lanes.size(); ++index) {
@@ -494,13 +519,13 @@ TEST(RadRayDxcMetadata, RootAndPushConstantMetadataFacts) {
             return shader::CompileVariantResult{};
         }
         return client.CompileVariant(shader::CompileVariantRequest{
-            .SourceName = string{sourceName},
-            .RootSource = CopyBytes(source),
-            .Defines = {},
-            .Assignments = {},
-            .Targets = static_cast<shader::ShaderTargetMask>(shader::ToTargetMask(target)),
-            .ExpectedContract = discovery.Contract.Hash},
-            includePaths);
+                                         .SourceName = string{sourceName},
+                                         .RootSource = CopyBytes(source),
+                                         .Defines = {},
+                                         .Assignments = {},
+                                         .Targets = static_cast<shader::ShaderTargetMask>(shader::ToTargetMask(target)),
+                                         .ExpectedContract = discovery.Contract.Hash},
+                                     includePaths);
     };
 
     const auto rootResult = compile(
@@ -527,6 +552,8 @@ TEST(RadRayDxcMetadata, RootAndPushConstantMetadataFacts) {
     EXPECT_EQ(roots[1].Register, 1u);
     EXPECT_EQ(roots[1].Size, 16u);
     EXPECT_EQ(roots[1].StageMask, 0x3u);
+    EXPECT_EQ(roots[0].TypeIndex, shader::kShaderNoType);
+    EXPECT_EQ(roots[1].TypeIndex, shader::kShaderNoType);
 
     const auto pushResult = compile(
         "fixtures/single_push_constant.hlsl",
@@ -549,6 +576,26 @@ TEST(RadRayDxcMetadata, RootAndPushConstantMetadataFacts) {
     EXPECT_EQ(push.Size, 16u);
     EXPECT_EQ(push.StageMask, 0x3u);
     EXPECT_EQ(push.Flags, 1u);
+    ASSERT_NE(push.TypeIndex, shader::kShaderNoType);
+    ASSERT_LT(
+        push.TypeIndex,
+        pushEnvelope.TypeRecords.Size / sizeof(shader::WireTypeRecord));
+    vector<shader::WireTypeRecord> pushTypes(
+        pushEnvelope.TypeRecords.Size / sizeof(shader::WireTypeRecord));
+    std::memcpy(
+        pushTypes.data(),
+        pushResult.Lanes[0].Metadata.data() + pushEnvelope.TypeRecords.Offset,
+        pushEnvelope.TypeRecords.Size);
+    const shader::WireTypeRecord& pushPayload = pushTypes[push.TypeIndex];
+    EXPECT_EQ(
+        pushPayload.Kind,
+        static_cast<uint32_t>(shader::ShaderTypeKind::Struct));
+    EXPECT_EQ(pushPayload.ParentIndex, shader::kShaderNoType);
+    const std::string_view pushPayloadName{
+        reinterpret_cast<const char*>(
+            pushResult.Lanes[0].Metadata.data() + pushPayload.Name.Offset),
+        pushPayload.Name.Size};
+    EXPECT_EQ(pushPayloadName, "PushData");
 
     const auto multiplePushResult = compile(
         "fixtures/multiple_push_constant.hlsl",
@@ -577,6 +624,109 @@ TEST(RadRayDxcMetadata, RootAndPushConstantMetadataFacts) {
     EXPECT_EQ(computeRoot.Register, 0u);
     EXPECT_EQ(computeRoot.Size, 16u);
     EXPECT_EQ(computeRoot.StageMask, 0x4u);
+    EXPECT_EQ(computeRoot.TypeIndex, shader::kShaderNoType);
+}
+
+TEST(RadRayDxcMetadata, DeclarationPayloadOwnersSurviveCrossStageMerge) {
+    Client client;
+    ASSERT_TRUE(client.IsAvailable());
+    const vector<std::filesystem::path> includePaths = ShaderIncludePaths();
+    const std::filesystem::path sourceRoot =
+        std::filesystem::path{RADRAY_PROJECT_DIR} /
+        "modules/render/tests/data/shader_sources";
+    for (const std::string_view fixtureName :
+         {"shared_cbuffer_type", "nested_cbuffer_roots"}) {
+        const string fileName = string{fixtureName} + ".hlsl";
+        const vector<byte> source = ReadBytes(sourceRoot / fileName);
+        ASSERT_FALSE(source.empty()) << fixtureName;
+        const string sourceName = "fixtures/" + fileName;
+        const DiscoveryResult discovery = client.DiscoverSourceContract(
+            shader::SourceContractRequest{
+                .SourceName = sourceName,
+                .RootSource = source,
+                .Defines = {},
+                .Targets = shader::ShaderTargetMask::All,
+                .Policy = {}},
+            includePaths);
+        ASSERT_TRUE(discovery.Succeeded())
+            << (discovery.Diagnostics.empty() ? "" : discovery.Diagnostics.back().Message);
+        const shader::CompileVariantResult result = client.CompileVariant(
+            shader::CompileVariantRequest{
+                .SourceName = sourceName,
+                .RootSource = source,
+                .Defines = {},
+                .Assignments = {},
+                .Targets = shader::ShaderTargetMask::All,
+                .ExpectedContract = discovery.Contract.Hash},
+            includePaths);
+        ASSERT_EQ(result.Status, shader::CompileStatus::Success)
+            << (result.Diagnostics.empty() ? "" : result.Diagnostics.back().Message);
+        ASSERT_EQ(result.Lanes.size(), 2u);
+
+        for (const shader::CompileTargetLane& lane : result.Lanes) {
+            shader::WireMetadataEnvelope envelope{};
+            std::memcpy(&envelope, lane.Metadata.data(), sizeof(envelope));
+            vector<shader::WireBindingRecord> bindings(
+                envelope.BindingRecords.Size / sizeof(shader::WireBindingRecord));
+            vector<shader::WireTypeRecord> types(
+                envelope.TypeRecords.Size / sizeof(shader::WireTypeRecord));
+            std::memcpy(
+                bindings.data(),
+                lane.Metadata.data() + envelope.BindingRecords.Offset,
+                envelope.BindingRecords.Size);
+            std::memcpy(
+                types.data(),
+                lane.Metadata.data() + envelope.TypeRecords.Offset,
+                envelope.TypeRecords.Size);
+            const auto nameOf = [&](shader::WireBlobRange range) {
+                return std::string_view{
+                    reinterpret_cast<const char*>(lane.Metadata.data() + range.Offset),
+                    range.Size};
+            };
+            const auto findBinding = [&](std::string_view name) {
+                return std::find_if(
+                    bindings.begin(),
+                    bindings.end(),
+                    [&](const shader::WireBindingRecord& binding) {
+                        return nameOf(binding.Name) == name;
+                    });
+            };
+            const auto firstName =
+                fixtureName == "shared_cbuffer_type" ? "First" : "Inner";
+            const auto secondName =
+                fixtureName == "shared_cbuffer_type" ? "Second" : "Outer";
+            const auto first = findBinding(firstName);
+            const auto second = findBinding(secondName);
+            ASSERT_NE(first, bindings.end()) << fixtureName;
+            ASSERT_NE(second, bindings.end()) << fixtureName;
+            ASSERT_LT(first->TypeIndex, types.size());
+            ASSERT_LT(second->TypeIndex, types.size());
+            EXPECT_EQ(
+                types[first->TypeIndex].Kind,
+                static_cast<uint32_t>(shader::ShaderTypeKind::Struct));
+            EXPECT_EQ(
+                types[second->TypeIndex].Kind,
+                static_cast<uint32_t>(shader::ShaderTypeKind::Struct));
+
+            if (fixtureName == "shared_cbuffer_type") {
+                EXPECT_EQ(first->TypeIndex, second->TypeIndex);
+                EXPECT_EQ(nameOf(types[first->TypeIndex].Name), "SharedRoot");
+            } else {
+                EXPECT_NE(first->TypeIndex, second->TypeIndex);
+                EXPECT_EQ(nameOf(types[first->TypeIndex].Name), "InnerRoot");
+                EXPECT_EQ(nameOf(types[second->TypeIndex].Name), "OuterRoot");
+                const auto nested = std::find_if(
+                    types.begin(),
+                    types.end(),
+                    [&](const shader::WireTypeRecord& type) {
+                        return type.ParentIndex == second->TypeIndex &&
+                               nameOf(type.Name) == "Nested";
+                    });
+                ASSERT_NE(nested, types.end());
+                EXPECT_EQ(nested->TypeIndex, first->TypeIndex);
+            }
+        }
+    }
 }
 
 TEST(RadRayDxcMetadata, StaticSamplerPolicyFailsClosed) {
@@ -591,13 +741,13 @@ TEST(RadRayDxcMetadata, StaticSamplerPolicyFailsClosed) {
             includePaths);
         ASSERT_TRUE(discovery.Succeeded());
         const auto result = client.CompileVariant(shader::CompileVariantRequest{
-            .SourceName = string{name},
-            .RootSource = CopyBytes(source),
-            .Defines = {},
-            .Assignments = {},
-            .Targets = shader::ShaderTargetMask::DXIL,
-            .ExpectedContract = discovery.Contract.Hash},
-            includePaths);
+                                                      .SourceName = string{name},
+                                                      .RootSource = CopyBytes(source),
+                                                      .Defines = {},
+                                                      .Assignments = {},
+                                                      .Targets = shader::ShaderTargetMask::DXIL,
+                                                      .ExpectedContract = discovery.Contract.Hash},
+                                                  includePaths);
         EXPECT_EQ(result.Status, shader::CompileStatus::TargetFailure) << name;
         EXPECT_TRUE(result.Lanes.empty()) << name;
         EXPECT_TRUE(std::any_of(
@@ -646,13 +796,13 @@ TEST(RadRayDxcMetadata, ExplicitRootSignatureAllowsStableSuperset) {
         includePaths);
     ASSERT_TRUE(discovery.Succeeded());
     const auto result = client.CompileVariant(shader::CompileVariantRequest{
-        .SourceName = "fixtures/root_signature_resource_mismatch.hlsl",
-        .RootSource = CopyBytes(kRootSignatureResourceMismatchSource),
-        .Defines = {},
-        .Assignments = {},
-        .Targets = shader::ShaderTargetMask::DXIL,
-        .ExpectedContract = discovery.Contract.Hash},
-        includePaths);
+                                                  .SourceName = "fixtures/root_signature_resource_mismatch.hlsl",
+                                                  .RootSource = CopyBytes(kRootSignatureResourceMismatchSource),
+                                                  .Defines = {},
+                                                  .Assignments = {},
+                                                  .Targets = shader::ShaderTargetMask::DXIL,
+                                                  .ExpectedContract = discovery.Contract.Hash},
+                                              includePaths);
     ASSERT_EQ(result.Status, shader::CompileStatus::Success)
         << (result.Diagnostics.empty() ? "" : result.Diagnostics.back().Message);
     ASSERT_EQ(result.Lanes.size(), 1u);
@@ -677,13 +827,13 @@ TEST(RadRayDxcMetadata, ExplicitRootSignatureAllowsStableSuperset) {
         includePaths);
     ASSERT_TRUE(exactDiscovery.Succeeded());
     const auto exactResult = client.CompileVariant(shader::CompileVariantRequest{
-        .SourceName = "fixtures/root_signature_exact_resource.hlsl",
-        .RootSource = CopyBytes(kRootSignatureExactResourceSource),
-        .Defines = {},
-        .Assignments = {},
-        .Targets = shader::ShaderTargetMask::DXIL,
-        .ExpectedContract = exactDiscovery.Contract.Hash},
-        includePaths);
+                                                       .SourceName = "fixtures/root_signature_exact_resource.hlsl",
+                                                       .RootSource = CopyBytes(kRootSignatureExactResourceSource),
+                                                       .Defines = {},
+                                                       .Assignments = {},
+                                                       .Targets = shader::ShaderTargetMask::DXIL,
+                                                       .ExpectedContract = exactDiscovery.Contract.Hash},
+                                                   includePaths);
     ASSERT_EQ(exactResult.Status, shader::CompileStatus::Success)
         << (exactResult.Diagnostics.empty() ? "" : exactResult.Diagnostics.back().Message);
     ASSERT_EQ(exactResult.Lanes.size(), 1u);
@@ -704,13 +854,13 @@ TEST(RadRayDxcMetadata, ExplicitRootSignatureMustCoverActiveResource) {
         includePaths);
     ASSERT_TRUE(discovery.Succeeded());
     const auto result = client.CompileVariant(shader::CompileVariantRequest{
-        .SourceName = "fixtures/root_signature_missing_resource.hlsl",
-        .RootSource = CopyBytes(kRootSignatureMissingResourceSource),
-        .Defines = {},
-        .Assignments = {},
-        .Targets = shader::ShaderTargetMask::DXIL,
-        .ExpectedContract = discovery.Contract.Hash},
-        includePaths);
+                                                  .SourceName = "fixtures/root_signature_missing_resource.hlsl",
+                                                  .RootSource = CopyBytes(kRootSignatureMissingResourceSource),
+                                                  .Defines = {},
+                                                  .Assignments = {},
+                                                  .Targets = shader::ShaderTargetMask::DXIL,
+                                                  .ExpectedContract = discovery.Contract.Hash},
+                                              includePaths);
     EXPECT_EQ(result.Status, shader::CompileStatus::TargetFailure);
     EXPECT_TRUE(result.Lanes.empty());
     const bool hasRootDiagnostic = std::any_of(
@@ -733,13 +883,13 @@ TEST(RadRayDxcMetadata, StaticSamplerIsTargetSpecificButImmutable) {
         includePaths);
     ASSERT_TRUE(discovery.Succeeded());
     const auto result = client.CompileVariant(shader::CompileVariantRequest{
-        .SourceName = "fixtures/static_sampler_success.hlsl",
-        .RootSource = CopyBytes(kStaticSamplerSuccessSource),
-        .Defines = {},
-        .Assignments = {},
-        .Targets = shader::ShaderTargetMask::All,
-        .ExpectedContract = discovery.Contract.Hash},
-        includePaths);
+                                                  .SourceName = "fixtures/static_sampler_success.hlsl",
+                                                  .RootSource = CopyBytes(kStaticSamplerSuccessSource),
+                                                  .Defines = {},
+                                                  .Assignments = {},
+                                                  .Targets = shader::ShaderTargetMask::All,
+                                                  .ExpectedContract = discovery.Contract.Hash},
+                                              includePaths);
     ASSERT_EQ(result.Status, shader::CompileStatus::Success)
         << (result.Diagnostics.empty() ? "" : result.Diagnostics.back().Message);
     ASSERT_EQ(result.Lanes.size(), 2u);
@@ -1581,7 +1731,7 @@ float4 VSMain(float3 position : POSITION) : SV_Position {
 // toolchain identity of the loaded compiler turns "tested the wrong DLL" from a
 // silent pass into a failure.
 TEST(RadRayDxcMetadata, LoadedCompilerReportsExpectedToolchainIdentity) {
-    constexpr uint64_t kExpectedToolchainIdentity = 0x0000000001090211ull;
+    constexpr uint64_t kExpectedToolchainIdentity = 0x0000000001090212ull;
     constexpr std::string_view source = R"hlsl(
 [shader("vertex")]
 float4 VSMain(float3 position : POSITION) : SV_Position {

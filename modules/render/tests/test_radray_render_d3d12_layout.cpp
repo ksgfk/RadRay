@@ -22,7 +22,7 @@ using d3d12::DeviceD3D12;
 using d3d12::RootSigD3D12;
 using d3d12::ShaderParameterSetLayoutEntryD3D12;
 
-constexpr uint64_t kFixtureToolchainIdentity = 0x0000000001090211ull;
+constexpr uint64_t kFixtureToolchainIdentity = 0x0000000001090212ull;
 constexpr uint32_t kComputeWrittenValue = 0x12345678u;
 
 vector<byte> ReadBinary(const std::filesystem::path& path) {

@@ -84,7 +84,7 @@ TEST(RadRayShaderContract, CanonicalRequestIsStable) {
 
 TEST(RadRayShaderContract, FixtureTablePinsTopologyAndTargetFacts) {
     const auto fixtures = test::GetShaderContractFixtures();
-    ASSERT_EQ(fixtures.size(), 12u);
+    ASSERT_EQ(fixtures.size(), 14u);
 
     std::error_code error;
     for (const test::ShaderContractFixture& fixture : fixtures) {
@@ -158,11 +158,14 @@ TEST(RadRayShaderContract, MetadataEnvelopeFailsClosed) {
 }
 
 TEST(RadRayShaderContract, RetiredMetadataSchemasAreRejectedRatherThanTranslated) {
-    // Schema 6 replaced 4 and 5 atomically. Their records cannot describe policy placement at all,
-    // so an older artifact is rejected here instead of being reinterpreted with default placements.
-    static_assert(shader::kShaderMetadataSchemaVersion == 6);
-    static_assert(shader::kShaderRetiredMetadataSchemaVersion4 == 4);
-    static_assert(shader::kShaderRetiredMetadataSchemaVersion5 == 5);
+    // Schema 7 replaces 4, 5, and 6 atomically. Older records cannot express declaration owners,
+    // so an artifact is rejected instead of being reinterpreted with inferred payload roots.
+    static_assert(shader::kShaderMetadataSchemaVersion == 7);
+    constexpr uint16_t retiredSchemas[]{
+        4,
+        5,
+        6,
+        static_cast<uint16_t>(shader::kShaderMetadataSchemaVersion + 1)};
 
     shader::WireMetadataEnvelope envelope{};
     envelope.Target = static_cast<uint8_t>(shader::ShaderTarget::DXIL);
@@ -177,9 +180,7 @@ TEST(RadRayShaderContract, RetiredMetadataSchemasAreRejectedRatherThanTranslated
         shader::ShaderTarget::DXIL,
         envelope.GpuArtifact));
 
-    for (const uint16_t retired : {shader::kShaderRetiredMetadataSchemaVersion4,
-                                   shader::kShaderRetiredMetadataSchemaVersion5,
-                                   static_cast<uint16_t>(shader::kShaderMetadataSchemaVersion + 1)}) {
+    for (const uint16_t retired : retiredSchemas) {
         auto older = blob;
         auto* patched = reinterpret_cast<shader::WireMetadataEnvelope*>(older.data());
         patched->SchemaVersion = retired;

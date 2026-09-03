@@ -21,7 +21,7 @@ using vulkan::CastVkObject;
 using vulkan::DeviceVulkan;
 using vulkan::ShaderParameterSetLayoutEntryVulkan;
 
-constexpr uint64_t kFixtureToolchainIdentity = 0x0000000001090211ull;
+constexpr uint64_t kFixtureToolchainIdentity = 0x0000000001090212ull;
 
 vector<byte> ReadBinary(const std::filesystem::path& path) {
     std::ifstream file(path, std::ios::binary);

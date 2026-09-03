@@ -1,6 +1,6 @@
 > - 适用: 在 `shaderlib/` 里找现成实现；增加 HLSL 数学、光照、阴影或最小产品 pass
-> - 权威: 本文是 schema 6 目标 HLSL 共享库边界与 target gate 契约；完整编译契约见 shader pipeline 架构文档
-> - 状态: ADR-0051 契约已接受，implementation tracked by `docs/todo/shader-layout-contract-correction.md`
+> - 权威: 本文是 schema 7 当前 HLSL 共享库边界与 target gate 契约；完整编译契约见 shader pipeline 架构文档
+> - 状态: ADR-0051、ADR-0052 与 declaration owner 契约已落地；实施记录见 `docs/todo/shader-layout-contract-correction.md`
 > - 锚点: `shaderlib/core/math.hlsli`, `shaderlib/core/color.hlsli`, `shaderlib/core/frame.hlsli`, `shaderlib/core/platform.hlsli`, `shaderlib/bsdf/principled.hlsli`, `shaderlib/lighting/lights.hlsli`, `shaderlib/shadow/filtering.hlsli`, `shaderlib/pipelines/forward/bindings.hlsli`, `shaderlib/pipelines/forward/forward.hlsl`, `shaderlib/passes/depth.hlsl`, `shaderlib/passes/compute.hlsl`
 
 # shaderlib
@@ -52,8 +52,9 @@
 #include <bsdf/principled.hlsli>
 ```
 
-共享结构的字段顺序、对齐和矩阵约定是 shader ABI；runtime 根据 compiler type tree 按成员名
-逐字段打包，不写 CPU mirror struct 或 `offsetof` 断言。`shadow/filtering.hlsli` 中的序列化枚举值
+共享结构的字段顺序、对齐和矩阵约定是 shader ABI；compiler 为每个 active CBuffer declaration
+发布指向当前 target-lane payload root 的 owner，runtime 从该 root 按成员名逐字段打包，不按 type
+发射顺序猜测，也不写 CPU mirror struct 或 `offsetof` 断言。`shadow/filtering.hlsli` 中的序列化枚举值
 和 `lights.hlsli` 中的上限属于 ABI，不能因为重命名或排版而改变。
 
 `core/platform.hlsli` 只提供 DXIL/SPIR-V target gate：`VK_LOCATION`、`VK_BINDING` 和

@@ -39,6 +39,7 @@ TEST(RadRayShaderLibPass, ProductPassesCompileAsAtomicTwoTargetVariants) {
         uint32_t SpirvGroup;
         uint32_t SpirvBinding;
         uint32_t StageMask;
+        std::string_view PayloadType{};
     };
     struct PassCase {
         std::string_view SourceName;
@@ -50,11 +51,11 @@ TEST(RadRayShaderLibPass, ProductPassesCompileAsAtomicTwoTargetVariants) {
         std::string_view AssignmentValue;
     };
     constexpr BindingFact forwardBindings[] = {
-        {"ForwardView", 0, 0, 0, 0, 3},
-        {"ForwardMaterial", 1, 0, 1, 0, 2},
+        {"ForwardView", 0, 0, 0, 0, 3, "ForwardViewData"},
+        {"ForwardMaterial", 1, 0, 1, 0, 2, "ForwardMaterialData"},
         {"AlbedoTexture", 1, 0, 1, 1, 2},
         {"LinearSampler", 1, 0, 1, 2, 2},
-        {"ForwardObject", 2, 0, 2, 0, 1}};
+        {"ForwardObject", 2, 0, 2, 0, 1, "ForwardObjectData"}};
     constexpr BindingFact computeBindings[] = {
         {"Output", 0, 0, 2, 6, 4}};
     const PassCase cases[] = {
@@ -106,6 +107,14 @@ TEST(RadRayShaderLibPass, ProductPassesCompileAsAtomicTwoTargetVariants) {
                     lane.Metadata.data() + envelope.BindingRecords.Offset,
                     envelope.BindingRecords.Size);
             }
+            vector<shader::WireTypeRecord> types(
+                envelope.TypeRecords.Size / sizeof(shader::WireTypeRecord));
+            if (!types.empty()) {
+                std::memcpy(
+                    types.data(),
+                    lane.Metadata.data() + envelope.TypeRecords.Offset,
+                    envelope.TypeRecords.Size);
+            }
             for (const BindingFact& expected : pass.Bindings) {
                 const auto found = std::find_if(
                     bindings.begin(),
@@ -127,6 +136,21 @@ TEST(RadRayShaderLibPass, ProductPassesCompileAsAtomicTwoTargetVariants) {
                         ? expected.SpirvBinding
                         : expected.DxilBinding);
                 EXPECT_EQ(found->StageMask, expected.StageMask);
+                if (expected.PayloadType.empty()) {
+                    EXPECT_EQ(found->TypeIndex, shader::kShaderNoType);
+                } else {
+                    ASSERT_LT(found->TypeIndex, types.size());
+                    const shader::WireTypeRecord& payload = types[found->TypeIndex];
+                    EXPECT_EQ(
+                        payload.Kind,
+                        static_cast<uint32_t>(shader::ShaderTypeKind::Struct));
+                    EXPECT_EQ(payload.ParentIndex, shader::kShaderNoType);
+                    const std::string_view payloadName{
+                        reinterpret_cast<const char*>(
+                            lane.Metadata.data() + payload.Name.Offset),
+                        payload.Name.Size};
+                    EXPECT_EQ(payloadName, expected.PayloadType);
+                }
             }
             EXPECT_TRUE(shader::ValidateWireMetadataEnvelope(
                 lane.Metadata,

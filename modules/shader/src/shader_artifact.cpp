@@ -133,6 +133,14 @@ bool ValidateTypeRecords(const ShaderArtifactView& artifact) noexcept {
     }
     return true;
 }
+bool IsRootStruct(
+    const ShaderArtifactView& artifact,
+    uint32_t typeIndex) noexcept {
+    const std::span<const WireTypeRecord> types = artifact.Types();
+    return typeIndex < types.size() &&
+           types[typeIndex].ParentIndex == kShaderNoType &&
+           types[typeIndex].Kind == static_cast<uint32_t>(ShaderTypeKind::Struct);
+}
 
 bool ValidateVertexInputRecords(const ShaderArtifactView& artifact) noexcept {
     const std::span<const WireVertexInputRecord> inputs = artifact.VertexInputs();
@@ -408,6 +416,15 @@ std::optional<ShaderArtifactView> DecodeShaderArtifact(
         SetError(error, ShaderArtifactDecodeError::InvalidTypeRecord);
         return std::nullopt;
     }
+    for (const WireBindingRecord& binding : result._bindings) {
+        const bool cbuffer =
+            binding.Type == static_cast<uint32_t>(ShaderBindingKind::CBuffer);
+        if ((cbuffer && !IsRootStruct(result, binding.TypeIndex)) ||
+            (!cbuffer && binding.TypeIndex != kShaderNoType)) {
+            SetError(error, ShaderArtifactDecodeError::InvalidBinding);
+            return std::nullopt;
+        }
+    }
 
     for (size_t index = 0; index < result._rootConstants.size(); ++index) {
         const WireRootConstantRecord& constant = result._rootConstants[index];
@@ -415,6 +432,12 @@ std::optional<ShaderArtifactView> DecodeShaderArtifact(
         if (constant.Size == 0 || (constant.Size % 4) != 0 || constant.StageMask == 0 ||
             (constant.StageMask & ~kStageMask) != 0 ||
             !IsValidName(result, constant.Name, envelope.Bytecode.Offset) || !name.has_value()) {
+            SetError(error, ShaderArtifactDecodeError::InvalidRootConstant);
+            return std::nullopt;
+        }
+        if (constant.TypeIndex != kShaderNoType &&
+            (!IsRootStruct(result, constant.TypeIndex) ||
+             result._types[constant.TypeIndex].Size > constant.Size)) {
             SetError(error, ShaderArtifactDecodeError::InvalidRootConstant);
             return std::nullopt;
         }

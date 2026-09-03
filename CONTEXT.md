@@ -488,12 +488,21 @@ global Root Signature direct-consumption 的附带能力。
 **Runtime CPU type schema**:
 compiler 为每个 target result 输出 runtime 构造 CPU buffer data 所需的完整 target-native
 cbuffer/struct type tree，包括 nested members、names、offset/size、array/matrix stride 与 scalar/
-vector/matrix shape。runtime 不从 C++ declaration、其他 artifact 或 reflection API 获取第二份
-schema，也不做交叉校验。type tree 遵守 ODR-style invariant：不设置独立 `CpuSchemaHash`，不独立
-缓存、寻址或跨 Variant 复用，必须与所属 target result 原子交付和存活。GPU layout 使用
-`BasePipelineLayoutHash`；`GpuArtifactHash` 覆盖 bytecode 与 GPU layout metadata，不覆盖 CPU type
-tree。runtime 只检查 type tree 的 wire bounds、record kind、offset/size、stride 和 CPU 构造安全性；
-语义错配被视为系统缺陷，而不是 runtime validation case。
+vector/matrix shape。每个 CBuffer declaration 还显式拥有一个 lane-local payload root；多个 declaration
+可以共享 root，一个 owned root 也可以被另一 root 引用。runtime 不从 type 发射顺序、C++ declaration、
+其他 artifact 或 reflection API 推断这条关系，也不做交叉校验。type tree 遵守 ODR-style invariant：
+不设置独立 `CpuSchemaHash`，不独立缓存、寻址或跨 Variant 复用，必须与所属 target result 原子交付和
+存活。GPU layout 使用 `BasePipelineLayoutHash`；`GpuArtifactHash` 覆盖 bytecode 与 GPU layout
+metadata，不覆盖 CPU type tree 或 declaration owner。runtime 只检查 owner、type tree 的 wire bounds、
+record kind、offset/size、stride 和 CPU 构造安全性；语义错配被视为系统缺陷。
+
+**Shader parameter path**:
+CPU 参数在一个 program 内的身份是从 HLSL CBuffer declaration 开始的完整成员路径，例如
+`ForwardMaterial.BaseColor`。全 program 唯一的 leaf name 可以作为同一参数的简写；重复 leaf
+只令简写 ambiguous，不构成身份，也不使 program 创建失败。struct array element 由 setter 的
+element 参数选择，不编码进 path。Texture/Sampler declaration name 是 exact top-level identity，
+优先于同名 leaf 简写。
+_Avoid_: flat parameter name（叶名只可能是简写）, binding/type emission order
 
 **Binding group**:
 一组资源绑定的集合。同时是 D3D12 的 register space 与 Vulkan 的 descriptor set index ——

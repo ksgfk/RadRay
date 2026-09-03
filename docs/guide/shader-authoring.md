@@ -1,6 +1,6 @@
 > - 适用: 新增或修改 shaderlib 根 `.hlsl` pass、keyword domain、binding 或 target gate
-> - 权威: 本文是 schema 6 目标 HLSL authoring 契约；wire 与 runtime 边界见 shader pipeline 架构文档
-> - 状态: ADR-0051 已落地。本文描述的 policy frontend、schema 6 wire、target-typed resolve 与两个后端 native chain 都是当前实现；实施记录见 `docs/todo/shader-layout-contract-correction.md`
+> - 权威: 本文是 schema 7 当前 HLSL authoring 契约；wire 与 runtime 边界见 shader pipeline 架构文档
+> - 状态: ADR-0051、ADR-0052 已落地。本文描述的 policy frontend、declaration owner、target-typed resolve 与两个后端 native chain 都是当前实现；实施记录见 `docs/todo/shader-layout-contract-correction.md`
 > - 锚点: `shaderlib/core/platform.hlsli`, `shaderlib/pipelines/forward/bindings.hlsli`, `shaderlib/pipelines/forward/forward.hlsl`, `shaderlib/passes/depth.hlsl`, `shaderlib/passes/compute.hlsl`, `modules/shader_compiler/tests/test_shaderlib_passes.cpp`
 
 # HLSL authoring
@@ -155,6 +155,12 @@ group 的语义属于具体 pipeline，不是 shaderlib 全局规则。内置 fo
 `ForwardPipeline::GetBindingGroupPlan()` 的消费者校验；material 和执行器不能重新写 0/1/2。
 view/material/object 数值 buffer 使用具名 struct 加 `ConstantBuffer<T>`，让 artifact type tree
 为 CPU 按名打包保留完整根结构与成员 offset；CPU 不声明 mirror struct。
+
+CPU 参数的 canonical 名称从 CBuffer declaration 开始并包含完整成员路径，例如
+`ForwardMaterial.BaseColor` 或 `ForwardView.Lights.Direction`。全 program 唯一的叶名仍可作为简写；
+两个路径以同名叶子结尾时，仅该简写不可用，必须写 qualified path，program 不会因此拒绝创建。
+struct array 的下标不写进名称，由 setter 的 `element` 参数选择。Texture/Sampler declaration 保持
+顶层 exact name；若它与 CBuffer 叶名相同，资源 exact name 优先，字段仍可用 qualified path 访问。
 
 ## 现有最小 pass
 

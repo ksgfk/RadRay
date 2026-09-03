@@ -596,3 +596,29 @@ diagnostics、device capability与native create failures必须保留可定位的
   不进主线 manifest。
 
 上述边界已构成共享理解；M1（fork 侧）已按此实现并验证，见「实施阶段与检查站」。
+
+## 2026-09-03：schema 7 declaration owner 后续
+
+schema 6 的 GPU layout 修正完成记录保持不变；本次后续只修 CPU payload 所有权和参数寻址：
+
+1. RadRay DXC fork 提交 `8a5cf97cab3728ab2c5272d36e272e130a1c0543` 把 extension ABI 升为 4、
+   metadata schema 升为 7、toolchain identity 升为 `0x0000000001090212`。44-byte
+   `WireBindingRecord` 与 36-byte `WireRootConstantRecord` 追加 lane-local payload `TypeIndex`；
+   declaration owner 不进入 GPU layout/artifact hash。fork Release build 与 17/17 probe matrix 通过。
+2. 按发布要求直接把本地验证过的 package 上传到 `ksgfk/dxc-autobuild` rolling release；不使用远端
+   CI 重新打包，已取消 run `33770586624`。正式 asset 为
+   `dxc-windows-x64-1.9.2607.radray.6.zip`，SHA-256 为
+   `92db0ac511a124d019697ce72284f69b192dfa9c79dbff2c6cf315e6f1e8c613`；相邻 provenance manifest
+   固定上述 fork commit。`project_manifest.json` 使用同一 version/hash，clean forced restore 成功。
+3. decoder 在 type tree 校验之后 fail closed 校验 owner：CBuffer 必须指向顶层 `Struct`，非
+   CBuffer 必须为 sentinel；concrete root-constant owner 还受 payload size 约束。runtime 删除
+   unreferenced-root/发射位置配对，只跟随 binding owner。canonical CPU 参数名改为
+   `Binding.Member.Path`；唯一 leaf 可作简写，重复 leaf 只令简写 ambiguous，exact resource name
+   优先。push-only artifact 保持合法空 CPU parameter layout。
+4. 正式 package 重新生成 14 个 fixture 的 DXIL/SPIR-V 两条 lane，共 28 个 raw artifact；
+   shared payload 与 direct+nested root fixture 钉住多 declaration 共用 root、owned root 同时被
+   嵌套引用和双 target program creation。Debug 全量 build 通过；changed-contract suites 93/93、
+   compiler-free runtime suites 36/36、全量 CTest 246/246 通过。runtime-only build tree 不含
+   compiler target/binary，CMake cache 不含 RadRay DXC package 路径。
+   D3D12 与启用 validation layer 的 Vulkan declaration-owner program creation 均在 NVIDIA
+   GeForce RTX 4080 上实际执行并通过，没有走 device-unavailable skip。
