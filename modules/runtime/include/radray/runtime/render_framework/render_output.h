@@ -23,7 +23,7 @@ enum class RenderOutputKind : uint8_t { Presentation,
 struct RenderOutputInfo {
     RenderOutputId Id;
     RenderOutputKind Kind{RenderOutputKind::Presentation};
-    string Name;
+    string Name{};
     uint32_t Width{0}, Height{0};
     render::TextureFormat Format{render::TextureFormat::UNKNOWN};
     uint32_t SampleCount{1};

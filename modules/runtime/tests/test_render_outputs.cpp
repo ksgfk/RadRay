@@ -46,7 +46,7 @@ public:
             if (Scenario == OutputScenario::Multiple && family.FrameLocalIndex == 1) continue;
             const auto color = ctx.ImportOutput(graph, family.OutputId);
             EXPECT_EQ(ctx.ImportOutput(graph, family.OutputId), color);
-            graph.AddRasterPass<Data>("output", [=](Data&, RenderGraphRasterBuilder& builder) {
+            graph.AddRasterPass<Data>("output", [=, this](Data&, RenderGraphRasterBuilder& builder) {
                 const auto load = Scenario == OutputScenario::Failure ? render::LoadAction::Load : render::LoadAction::Clear;
                 const float red = family.FrameLocalIndex == 0 ? .75f : .25f;
                 builder.SetColorAttachment(0, color, {.Load = load, .Clear = {{red, .5f, .25f, 1}}}); }, +[](const Data&, RenderGraphRasterContext&) {});

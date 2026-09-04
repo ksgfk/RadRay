@@ -49,7 +49,7 @@ struct RenderViewFamilyDesc {
     string Name;
     RenderOutputId Output;
     float RenderScale{1};
-    vector<RenderViewDesc> Views;
+    vector<RenderViewDesc> Views{};
 };
 
 struct ResolvedRenderView {
@@ -69,10 +69,10 @@ struct ResolvedRenderViewFamily {
     uint32_t FrameLocalIndex{0};
     std::string_view Name;
     RenderOutputId OutputId;
-    RenderExtent OutputSize, RenderSize;
+    RenderExtent OutputSize{}, RenderSize{};
     render::TextureFormat OutputFormat{render::TextureFormat::UNKNOWN};
     uint32_t SampleCount{1};
-    vector<ResolvedRenderView> Views;
+    vector<ResolvedRenderView> Views{};
     bool OutputAvailable{false};
 };
 

@@ -913,10 +913,12 @@ TextureSupport DeviceVulkan::QueryTextureSupport(const TextureSupportQuery& quer
     info.usage = _TextureUsageFlags(query.Usage);
     info.flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
     if (query.Dimension == TextureDimension::Cube || query.Dimension == TextureDimension::CubeArray) info.flags |= VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
-    VkImageFormatProperties2 properties{VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2};
+    VkImageFormatProperties2 properties{};
+    properties.sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2;
     const VkResult status = vkGetPhysicalDeviceImageFormatProperties2(_physicalDevice, &info, &properties);
     if (status != VK_SUCCESS) return {};
-    VkFormatProperties2 format{VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2};
+    VkFormatProperties2 format{};
+    format.sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2;
     vkGetPhysicalDeviceFormatProperties2(_physicalDevice, info.format, &format);
     const auto flags = format.formatProperties.optimalTilingFeatures;
     const auto& limits = properties.imageFormatProperties;
@@ -3178,12 +3180,14 @@ Nullable<InstanceVulkanImpl*> InitVulkanEnvImpl(const VulkanInstanceDescriptor& 
         RADRAY_ERR_LOG("vkEnumerateInstanceLayerProperties failed");
         return nullptr;
     }
+#if defined(RADRAY_IS_DEBUG)
     for (auto& i : extProps) {
         RADRAY_DEBUG_LOG("vk instance extension: {} version: {}", i.extensionName, i.specVersion);
     }
     for (auto& i : layerProps) {
         RADRAY_DEBUG_LOG("vk instance layer: {} version: {}", i.layerName, i.specVersion);
     }
+#endif
 
     unordered_set<string> needExts;
     unordered_set<string> needLayers;
@@ -4085,7 +4089,7 @@ void CommandBufferVulkan::ResourceBarrier(std::span<const ResourceBarrierDescrip
             }
             srcStageMask |= srcStage;
             dstStageMask |= dstStage;
-        } else if (const auto* uav = std::get_if<BarrierUavDescriptor>(&v)) {
+        } else if (const auto* uav = std::get_if<BarrierUavDescriptor>(&v); uav != nullptr) {
             RADRAY_ASSERT(uav->Target->GetTag() == RenderObjectTag::Buffer || uav->Target->GetTag() == RenderObjectTag::Texture);
             uavMemoryBarrier = true;
             srcStageMask |= VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;

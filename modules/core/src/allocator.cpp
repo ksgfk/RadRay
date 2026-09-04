@@ -95,6 +95,7 @@ void BuddyAllocator::Destroy(Allocation allocation) noexcept {
     RADRAY_ASSERT(NodeOffset(_virtualCapacity, index) == allocation.Offset);
     RADRAY_ASSERT(ActualCapacity(_capacity, _virtualCapacity, index) != 0);
     RADRAY_ASSERT(_nodes[index].Longest == 0);
+#if defined(RADRAY_IS_DEBUG)
     const size_t left = LeftChild(index);
     if (left < _nodes.size()) {
         const size_t right = left + 1;
@@ -103,6 +104,7 @@ void BuddyAllocator::Destroy(Allocation allocation) noexcept {
         RADRAY_ASSERT(_nodes[left].Longest == leftCap);
         RADRAY_ASSERT(_nodes[right].Longest == rightCap);
     }
+#endif
     _nodes[index].Longest = ActualCapacity(_capacity, _virtualCapacity, index);
     UpdateAncestors(index);
 }
@@ -167,6 +169,7 @@ void FirstFitAllocator::Destroy(Allocation allocation) noexcept {
             return range.Start < start;
         });
 
+#if defined(RADRAY_IS_DEBUG)
     if (it != _freeRanges.begin()) {
         const auto prev = it - 1;
         RADRAY_ASSERT(prev->Start <= _capacity);
@@ -176,6 +179,7 @@ void FirstFitAllocator::Destroy(Allocation allocation) noexcept {
     if (it != _freeRanges.end()) {
         RADRAY_ASSERT(allocation.Start + allocation.Length <= it->Start);
     }
+#endif
 
     size_t mergedStart = allocation.Start;
     size_t mergedLength = allocation.Length;

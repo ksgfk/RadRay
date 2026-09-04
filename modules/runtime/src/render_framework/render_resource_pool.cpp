@@ -39,8 +39,10 @@ RenderResourcePool::RenderResourcePool(render::Device& device, render::RenderPas
 RenderResourcePool::~RenderResourcePool() { Clear(); }
 
 void RenderResourcePool::BeginFlight(uint64_t frameSerial) {
+#if defined(RADRAY_IS_DEBUG)
     for (const auto& texture : _textures) RADRAY_ASSERT(!texture->InUse);
     for (const auto& buffer : _buffers) RADRAY_ASSERT(!buffer->InUse);
+#endif
     for (const auto& view : _externalViews) _registry.RemoveFramebuffersUsing(view.get());
     _externalViews.clear();
     ++_cycle;

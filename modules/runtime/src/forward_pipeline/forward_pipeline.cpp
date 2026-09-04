@@ -176,9 +176,9 @@ struct ForwardPipeline::Impl {
         Nullable<render::ShaderParameterSet*> ViewSet{nullptr};
         Nullable<render::ShaderParameterSet*> MaterialSet{nullptr};
         Nullable<render::ShaderParameterSet*> ObjectSet{nullptr};
-        vector<render::ShaderParameterDynamicOffset> ViewOffsets;
-        vector<render::ShaderParameterDynamicOffset> MaterialOffsets;
-        vector<render::ShaderParameterDynamicOffset> ObjectOffsets;
+        vector<render::ShaderParameterDynamicOffset> ViewOffsets{};
+        vector<render::ShaderParameterDynamicOffset> MaterialOffsets{};
+        vector<render::ShaderParameterDynamicOffset> ObjectOffsets{};
         bool Valid{false};
     };
 

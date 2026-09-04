@@ -33,7 +33,12 @@ Nullable<unique_ptr<ShaderProgram>> CompileProgram(render::Device& device, const
         return nullptr;
     }
     shader::CompileVariantRequest request{
-        .SourceName = "forward_data.hlsl", .RootSource = std::move(*source), .Targets = static_cast<shader::ShaderTargetMask>(shader::ToTargetMask(*target)), .ExpectedContract = *contract};
+        .SourceName = "forward_data.hlsl",
+        .RootSource = std::move(*source),
+        .Defines = {},
+        .Assignments = {},
+        .Targets = static_cast<shader::ShaderTargetMask>(shader::ToTargetMask(*target)),
+        .ExpectedContract = *contract};
     if (production) {
         request.Assignments.push_back({.Name = "QUALITY", .Value = "high"});
     }

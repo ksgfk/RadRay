@@ -63,9 +63,8 @@ private:
 
 class ClearPipeline final : public RenderPipeline {
 public:
-    ClearPipeline(HostResult* result, render::RenderPassRegistry* registry,
-                  StreamingAssetRef<FlightProbeAsset> asset)
-        : _result(result), _registry(registry), _asset(std::move(asset)) {}
+    ClearPipeline(HostResult* result, StreamingAssetRef<FlightProbeAsset> asset)
+        : _result(result), _asset(std::move(asset)) {}
 
     void PrepareFrame(RenderPrepareContext& prepare) override {
         const auto& ctx = prepare.App;
@@ -98,7 +97,6 @@ public:
 
 private:
     HostResult* _result;
-    render::RenderPassRegistry* _registry;
     StreamingAssetRef<FlightProbeAsset> _asset;
     array<int, 2> _values{};
 };
@@ -121,7 +119,7 @@ protected:
                 asset = GetAssetManager()->AddReady<FlightProbeAsset>(id, make_unique<FlightProbeAsset>(_result));
             }
             GetRenderSystem()->SetPipeline(make_unique<ClearPipeline>(
-                _result, GetRenderSystem()->GetRenderPassRegistry(), std::move(asset)));
+                _result, std::move(asset)));
         }
     }
 

@@ -55,13 +55,13 @@ struct RgTextureViewDesc {
     render::SubresourceRange Range{0, render::SubresourceRange::All, 0, render::SubresourceRange::All};
 };
 struct RgColorAttachmentDesc {
-    RgTextureViewDesc View;
+    RgTextureViewDesc View{};
     render::LoadAction Load{render::LoadAction::Clear};
     render::StoreAction Store{render::StoreAction::Store};
     render::ColorClearValue Clear{};
 };
 struct RgDepthAttachmentDesc {
-    RgTextureViewDesc View;
+    RgTextureViewDesc View{};
     render::LoadAction Load{render::LoadAction::Clear};
     render::StoreAction Store{render::StoreAction::Store};
     render::DepthStencilClearValue Clear{1.0f, 0};
@@ -76,8 +76,8 @@ struct RenderGraphPassReport {
     uint32_t Line{0};
     RgPassType Type;
     bool Live{false}, Executed{false};
-    vector<uint32_t> DataDependencies, HazardDependencies;
-    string LivenessReason;
+    vector<uint32_t> DataDependencies{}, HazardDependencies{};
+    string LivenessReason{};
 };
 struct RenderGraphResourceReport {
     string Name, Descriptor;

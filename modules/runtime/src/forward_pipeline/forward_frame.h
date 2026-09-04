@@ -24,7 +24,7 @@ struct ForwardFrameDraw {
 
 struct ForwardFrameLight {
     LightType Type{LightType::Directional};
-    LightRenderParameters Parameters;
+    LightRenderParameters Parameters{};
     float Radius{0.0f};
 };
 

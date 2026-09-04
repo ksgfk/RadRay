@@ -27,9 +27,9 @@ struct AssetEntry {
     AssetId Guid;
     string Path;
     string Type;
-    unique_ptr<AssetImportSettings> Settings;
+    unique_ptr<AssetImportSettings> Settings{};
     /// 仅在 type 未注册、type 无 settings 形状或 settings 解码失败时保存原始 JSON 值。
-    string RawSettings;
+    string RawSettings{};
 };
 
 template <class T>

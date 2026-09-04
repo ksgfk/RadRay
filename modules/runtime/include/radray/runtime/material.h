@@ -32,10 +32,10 @@ struct MaterialRenderData {
     Nullable<ShaderProgram*> Program{nullptr};
     uint32_t ParameterGroup{0};
     ShaderParameterStorage Parameters{};
-    MaterialPipelineState PipelineState;
+    MaterialPipelineState PipelineState{};
     RenderQueue Queue{RenderQueue::Geometry};
-    vector<MaterialTextureFrameData> Textures;
-    vector<MaterialSamplerFrameData> Samplers;
+    vector<MaterialTextureFrameData> Textures{};
+    vector<MaterialSamplerFrameData> Samplers{};
 };
 
 class Material {

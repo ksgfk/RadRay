@@ -27,12 +27,12 @@ struct AppFrameTarget;
 /// 请求驱动, 因此两者不会在不同 policy 下看到不同的 contract。
 struct ShaderProgramRequest {
     string SourceName;
-    vector<shader::Define> Defines;
-    vector<shader::KeywordAssignment> Assignments;
+    vector<shader::Define> Defines{};
+    vector<shader::KeywordAssignment> Assignments{};
     shader::CompilePolicy Policy{};
     /// 只影响 program/layout 身份, 不参与 compiler artifact 身份: 换掉非当前 backend 的 recipe 既不会
     /// 重新编译, 也不会新建 program。
-    render::ShaderProgramLayoutRecipe LayoutRecipe;
+    render::ShaderProgramLayoutRecipe LayoutRecipe{};
 };
 
 /// runtime 侧的渲染协调器。【拥有"怎么画", 不拥有帧时序】—— device / queue / flight /
@@ -89,8 +89,8 @@ private:
     /// toolchain。layout recipe 不在其中, 因为它不改变编译产物。
     struct ArtifactKey {
         string SourceName;
-        vector<ProgramText> Defines;
-        vector<ProgramText> Assignments;
+        vector<ProgramText> Defines{};
+        vector<ProgramText> Assignments{};
         shader::CompilePolicy Policy{};
         shader::ShaderTarget Target{shader::ShaderTarget::DXIL};
         shader::Hash128 Toolchain{};
@@ -107,7 +107,7 @@ private:
     struct ArtifactRecord {
         bool Failed{false};
         uint64_t Identity{0};
-        ShaderJitArtifact Artifact;
+        ShaderJitArtifact Artifact{};
     };
 
     /// program/layout 身份: artifact 身份 + 当前 backend 的 canonical resolved layout hash。
@@ -124,7 +124,7 @@ private:
 
     struct ProgramRecord {
         bool Failed{false};
-        unique_ptr<ShaderProgram> Program;
+        unique_ptr<ShaderProgram> Program{};
     };
 
     Nullable<const ArtifactRecord*> GetOrCompileArtifact(

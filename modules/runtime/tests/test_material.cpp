@@ -10,6 +10,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <type_traits>
 
 namespace radray {
 namespace {
@@ -71,10 +72,19 @@ std::optional<shader::ShaderArtifactView> DecodeGeneric(
 
 template <typename T>
 T ReadValue(std::span<const byte> data, size_t offset) {
-    EXPECT_LE(offset + sizeof(T), data.size());
     T value{};
-    if (offset + sizeof(T) <= data.size()) {
-        std::memcpy(&value, data.data() + offset, sizeof(T));
+    if constexpr (std::is_trivially_copyable_v<T>) {
+        EXPECT_LE(offset + sizeof(T), data.size());
+        if (offset + sizeof(T) <= data.size()) {
+            std::memcpy(&value, data.data() + offset, sizeof(T));
+        }
+    } else {
+        static_assert(T::SizeAtCompileTime != Eigen::Dynamic);
+        constexpr size_t byteSize = sizeof(typename T::Scalar) * T::SizeAtCompileTime;
+        EXPECT_LE(offset + byteSize, data.size());
+        if (offset + byteSize <= data.size()) {
+            std::memcpy(value.data(), data.data() + offset, byteSize);
+        }
     }
     return value;
 }

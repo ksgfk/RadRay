@@ -5,7 +5,7 @@
 
 #include <radray/nullable.h>
 #include <radray/types.h>
-#include <radray/render/rhi.h>
+// #include <radray/render/rhi.h>
 #include <radray/window/native_window.h>
 #include <radray/runtime/service_registry.h>
 #include <radray/runtime/render_framework/render_output.h>
