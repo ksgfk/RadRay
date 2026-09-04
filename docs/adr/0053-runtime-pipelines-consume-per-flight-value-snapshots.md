@@ -1,6 +1,6 @@
 # ADR-0053 Runtime pipeline 通过 per-flight 值快照跨越线程边界
 
-状态: 生效；部分取代 ADR-0047 的 BindingGroupPlan 机制与 ADR-0049 的 Material 常驻 set 机制
+状态: 部分被 ADR-0054 的 workload/graph context 取代；资产保活与值快照继续生效；部分取代 ADR-0047 的 BindingGroupPlan 机制与 ADR-0049 的 Material 常驻 set 机制
 日期: 2026-09
 影响: `RenderPipeline`、`RenderSystem`、`Application::Update`、`ForwardPipeline`、`Material`、`PrimitiveSceneProxy` 与 runtime 测试
 

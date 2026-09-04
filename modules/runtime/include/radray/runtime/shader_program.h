@@ -12,7 +12,14 @@
 
 namespace radray {
 
-struct GraphicsPassState {
+struct GraphicsPassCompatibilityKey {
+    vector<render::TextureFormat> ColorFormats;
+    std::optional<render::TextureFormat> DepthStencilFormat;
+    uint32_t SampleCount;
+    friend bool operator==(const GraphicsPassCompatibilityKey&, const GraphicsPassCompatibilityKey&) = default;
+};
+
+struct GraphicsPassState : GraphicsPassCompatibilityKey {
     GraphicsPassState(
         vector<render::TextureFormat> colorFormats,
         std::optional<render::TextureFormat> depthStencilFormat,
@@ -21,9 +28,6 @@ struct GraphicsPassState {
 
     bool IsValid() const noexcept;
 
-    vector<render::TextureFormat> ColorFormats;
-    std::optional<render::TextureFormat> DepthStencilFormat;
-    uint32_t SampleCount;
     render::RenderPass* CompatibleRenderPass;
 
     friend bool operator==(const GraphicsPassState&, const GraphicsPassState&) = default;
@@ -63,7 +67,7 @@ private:
         MaterialPipelineState MaterialState;
         PrimitiveVertexLayout VertexLayout;
         PrimitiveTopology Topology{PrimitiveTopology::TriangleList};
-        GraphicsPassState PassState;
+        GraphicsPassCompatibilityKey PassState;
 
         friend bool operator==(const PsoKey&, const PsoKey&) = default;
     };
@@ -76,7 +80,7 @@ private:
         const MaterialPipelineState* MaterialState;
         const PrimitiveVertexLayout* VertexLayout;
         PrimitiveTopology Topology;
-        const GraphicsPassState* PassState;
+        const GraphicsPassCompatibilityKey* PassState;
     };
 
     struct PsoKeyHash {

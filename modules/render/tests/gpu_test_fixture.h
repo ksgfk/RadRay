@@ -2,8 +2,10 @@
 
 #include <cstring>
 #include <optional>
+#include <atomic>
 
 #include <radray/render/rhi.h>
+#include <radray/logger.h>
 
 #if defined(RADRAY_ENABLE_D3D12)
 #include <radray/render/backend/d3d12_impl.h>
@@ -15,6 +17,7 @@
 namespace radray::render::test {
 
 struct DeviceContext {
+    std::atomic<uint32_t> ValidationErrors{0};
     bool VulkanEnvInitialized{false};
     unique_ptr<DXGIFactory> Factory;
     shared_ptr<Device> Device;
@@ -31,6 +34,13 @@ struct DeviceContext {
     }
 };
 
+inline void CaptureValidationMessage(LogLevel level, std::string_view message, void* userData) {
+    if (level == LogLevel::Err || level == LogLevel::Critical) {
+        static_cast<DeviceContext*>(userData)->ValidationErrors.fetch_add(1, std::memory_order_relaxed);
+        RADRAY_ERR_LOG("GPU validation: {}", message);
+    }
+}
+
 inline bool TryCreateDevice(
     RenderBackend backend,
     DeviceContext& context,
@@ -39,6 +49,8 @@ inline bool TryCreateDevice(
 #if defined(RADRAY_ENABLE_D3D12)
         DXGIFactoryDescriptor factoryDesc{};
         factoryDesc.IsEnableDebugLayer = enableValidation;
+        factoryDesc.LogCallback = CaptureValidationMessage;
+        factoryDesc.LogUserData = &context;
         auto factory = DXGIFactory::Create(factoryDesc);
         if (!factory.HasValue()) {
             return false;
@@ -62,6 +74,8 @@ inline bool TryCreateDevice(
         instanceDesc.AppName = "radray_render_test";
         instanceDesc.EngineName = "radray";
         instanceDesc.IsEnableDebugLayer = enableValidation;
+        instanceDesc.LogCallback = CaptureValidationMessage;
+        instanceDesc.LogUserData = &context;
         if (!InstanceVulkan::InitEnv(instanceDesc)) {
             return false;
         }

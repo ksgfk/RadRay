@@ -218,7 +218,7 @@ Vulkan 每个 `CommandBufferVulkan` 独占一个 `CommandPoolVulkan`，`Begin()`
 
 ## 资源状态：显式 barrier，无自动推导
 
-`ResourceBarrierDescriptor` 是 `variant<BarrierBufferDescriptor, BarrierTextureDescriptor>`，
+`ResourceBarrierDescriptor` 是 `variant<BarrierBufferDescriptor, BarrierTextureDescriptor, BarrierUavDescriptor>`，
 调用方给出 before/after 状态。render 层**不做** per-resource 状态跟踪，初始状态在创建时固化
 （buffer 按 memory type 推，texture 一律 `COMMON`）。跨队列经 `OtherQueue` +
 `IsFromOrToOtherQueue` 表达。
@@ -226,6 +226,39 @@ Vulkan 每个 `CommandBufferVulkan` 独占一个 `CommandPoolVulkan`，`Begin()`
 后端各自把状态对翻译成原生形式：D3D12 把 UAV→UAV 变成 UAV barrier，把无变化和
 PRESENT↔COMMON 这类等价转换直接跳过；Vulkan 生成 buffer/image memory barrier，
 access mask 与 layout 由 helper 映射，swapchain image 从 Undefined 转换时补 src stage。
+
+`BarrierUavDescriptor` 显式表达 UAV 写入后的 shader read/write memory ordering，`Target` 必须是
+非空 texture 或 buffer。D3D12 使用 resource UAV barrier；Vulkan 使用 shader write → shader
+read/write 的全局 memory dependency，不改变 layout，因此不会假设 texture 的所有 mip 都处于
+GENERAL。D3D12 的 subresource transition 展开完整 mip/layer range 与 depth/stencil planes；
+`NormalizeSubresourceRange` 统一展开 All，拒绝零 count、越界和加法溢出。
+
+`PushDebugGroup` / `PopDebugGroup` 必须平衡，分别映射 D3D12 command-list Unicode event 与
+Vulkan debug-utils label；Vulkan 未启用 debug-utils 时不录标签。
+
+## 设备能力与纹理支持
+
+`Device::GetCapabilities()` 返回创建后不可变的 `RenderDeviceCapabilities`，包括原
+`DeviceDetail`、limits、features 与实际创建的 queue 数量。名称避免 Windows 的
+`DeviceCapabilities` 宏冲突；旧 `GetDetail()` 从同一份 Detail 返回兼容值。
+
+D3D12 通过 `D3D12DeviceDescriptor::QueueCounts` 在 device 创建阶段建 queue，默认仅一条
+Direct queue；`GetCommandQueue` 只查询已创建的 slot，不再隐式增加 queue。Vulkan 仍使用
+`VulkanDeviceDescriptor::Queues`，Dedicated 仅对确实来自专用 family 的 queue 为真。
+D3D12 无法报告专用物理引擎，Dedicated 为 false。buffer size 报告 backend 的资源大小上限，
+不保证当前预算下的 allocation 一定成功。
+
+`QueryTextureSupport` 的 key 为 dimension + format + usage，返回 sample mask、filter/blend
+事实及该组合的 extent/layer/mip/resource-size 上限。常见 2D 组合在 device 创建时缓存；其余
+查询直接读取 native device/physical-device 能力，不修改缓存。D3D12 查询 format support 与
+MSAA quality；Vulkan 查询相同 image flags/usage 的 image format properties。`Resource` 只映射
+sampled usage，RHI 没有 input attachment 使用接口。
+
+`ValidateTextureDescriptor` 共享 CPU 规则与 backend support facts；两个 `CreateTexture` 都先
+校验再分配。非法 dimension/format/usage、零尺寸、超 mip/extent、MSAA+mips、MSAA+UAV、
+非 Device texture memory 或不支持的 allocation hint 返回包含字段的 reason。
+validation 不替换 format，也不降低 sample count。资源不足/native create 失败仍返回空。
+Stage A 的 graph view 限制同 format；RHI 原有的格式 view 能力没有新增隐式 reinterpret 策略。
 
 ## 同步
 

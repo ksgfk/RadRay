@@ -1,4 +1,5 @@
 #include <radray/render/backend/d3d12_impl.h>
+#include "../texture_support_cache.h"
 
 #include <bit>
 #include <algorithm>
@@ -749,7 +750,7 @@ Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc
             RADRAY_WARN_LOG("ID3D12Device::As<ID3D12InfoQueue1> failed: {} {} {}", GetErrorName(hr), hr, "pump validation messages at fixed points");
         }
     }
-    DeviceDetail& detail = result->_detail;
+    DeviceDetail& detail = result->_capabilities.Detail;
     detail.CBufferAlignment = D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT;
     detail.BufferCopyOffsetAlignment = 1;
     detail.TextureDataPitchAlignment = D3D12_TEXTURE_DATA_PITCH_ALIGNMENT;
@@ -834,6 +835,26 @@ Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc
                 hr);
         }
     }
+    auto& caps = result->_capabilities;
+    caps.Limits = {
+        .MaxColorAttachments = D3D12_SIMULTANEOUS_RENDER_TARGET_COUNT,
+        .MaxTexture1DDimension = D3D12_REQ_TEXTURE1D_U_DIMENSION,
+        .MaxTexture2DDimension = D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION,
+        .MaxTexture3DDimension = D3D12_REQ_TEXTURE3D_U_V_OR_W_DIMENSION,
+        .MaxTextureArrayLayers = D3D12_REQ_TEXTURE2D_ARRAY_AXIS_DIMENSION,
+        .MaxBufferSize = D3D12_REQ_RESOURCE_SIZE_IN_MEGABYTES_EXPRESSION_A_TERM * uint64_t{1024 * 1024},
+        .MaxUniformBufferRange = D3D12_REQ_CONSTANT_BUFFER_ELEMENT_COUNT * uint64_t{16},
+        .MaxPushConstantBytes = D3D12_MAX_ROOT_COST * 4,
+        .CBufferOffsetAlignment = detail.CBufferAlignment};
+    caps.Features = {true, true, true, true, true};
+    DXGI_ADAPTER_DESC1 memoryDesc{};
+    if (SUCCEEDED(adapter->GetDesc1(&memoryDesc))) {
+        const uint64_t memory = memoryDesc.DedicatedVideoMemory != 0 ? memoryDesc.DedicatedVideoMemory : memoryDesc.SharedSystemMemory;
+        caps.Limits.MaxBufferSize = std::max(caps.Limits.MaxBufferSize,
+                                             std::min(uint64_t{D3D12_REQ_RESOURCE_SIZE_IN_MEGABYTES_EXPRESSION_C_TERM} * 1024 * 1024, memory / 4));
+    }
+    if (!result->CreateQueues(desc.QueueCounts)) return nullptr;
+    result->_textureSupportCache = detail::CacheCommonTextureSupport(*result);
     RADRAY_INFO_LOG("=============================");
     return result;
 }
@@ -841,40 +862,92 @@ Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc
 // == Device: queue / cmdbuffer / fence / query / swapchain / buffer ==
 
 DeviceDetail DeviceD3D12::GetDetail() const noexcept {
-    return _detail;
+    return _capabilities.Detail;
 }
 
 Nullable<CommandQueue*> DeviceD3D12::GetCommandQueue(QueueType type, uint32_t slot) noexcept {
-    uint32_t index = static_cast<size_t>(type);
-    RADRAY_ASSERT(index >= 0 && index < 3);
-    auto& queues = _queues[index];
-    if (queues.size() <= slot) {
-        queues.reserve(slot + 1);
-        for (size_t i = queues.size(); i <= slot; i++) {
-            queues.emplace_back(unique_ptr<CmdQueueD3D12>{nullptr});
+    const size_t index = static_cast<size_t>(type);
+    if (index >= _queues.size() || slot >= _queues[index].size()) return nullptr;
+    return _queues[index][slot].get();
+}
+
+bool DeviceD3D12::CreateQueues(const array<uint32_t, static_cast<size_t>(QueueType::MAX_COUNT)>& counts) noexcept {
+    for (size_t index = 0; index < counts.size(); ++index) {
+        for (uint32_t slot = 0; slot < counts[index]; ++slot) {
+            auto fence = CreateFenceD3D12(0);
+            if (!fence) return false;
+            ComPtr<ID3D12CommandQueue> queue;
+            D3D12_COMMAND_QUEUE_DESC desc{};
+            desc.Type = MapType(static_cast<QueueType>(index));
+            if (const HRESULT hr = _device->CreateCommandQueue(&desc, IID_PPV_ARGS(queue.GetAddressOf())); FAILED(hr)) {
+                RADRAY_ERR_LOG("ID3D12Device::CreateCommandQueue failed: {} {}", GetErrorName(hr), hr);
+                return false;
+            }
+            auto instance = make_unique<CmdQueueD3D12>(this, std::move(queue), desc.Type, fence.Release());
+            SetObjectName(fmt::format("Queue-{}-{}", static_cast<QueueType>(index), slot), instance->_queue.Get());
+            _queues[index].push_back(std::move(instance));
+        }
+        _capabilities.Queues[index] = {counts[index], false};
+    }
+    return true;
+}
+
+TextureSupport DeviceD3D12::QueryTextureSupport(const TextureSupportQuery& query) const noexcept {
+    for (const auto& [cachedQuery, cachedSupport] : _textureSupportCache) {
+        if (cachedQuery == query) return cachedSupport;
+    }
+    if (!IsValidTextureSupportQuery(query)) return {};
+    const DXGI_FORMAT format = MapType(query.Format);
+    D3D12_FEATURE_DATA_FORMAT_SUPPORT support{format, {}, {}};
+    if (FAILED(_device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &support, sizeof(support)))) return {};
+    D3D12_FORMAT_SUPPORT1 dimension{};
+    switch (query.Dimension) {
+        case TextureDimension::Dim1D:
+        case TextureDimension::Dim1DArray: dimension = D3D12_FORMAT_SUPPORT1_TEXTURE1D; break;
+        case TextureDimension::Dim2D:
+        case TextureDimension::Dim2DArray: dimension = D3D12_FORMAT_SUPPORT1_TEXTURE2D; break;
+        case TextureDimension::Cube:
+        case TextureDimension::CubeArray: dimension = D3D12_FORMAT_SUPPORT1_TEXTURECUBE; break;
+        case TextureDimension::Dim3D: dimension = D3D12_FORMAT_SUPPORT1_TEXTURE3D; break;
+        default: return {};
+    }
+    if ((support.Support1 & dimension) == 0) return {};
+    if (query.Usage.HasFlag(TextureUse::RenderTarget) && (support.Support1 & D3D12_FORMAT_SUPPORT1_RENDER_TARGET) == 0) return {};
+    if ((query.Usage & (TextureUse::DepthStencilRead | TextureUse::DepthStencilWrite)) &&
+        (support.Support1 & D3D12_FORMAT_SUPPORT1_DEPTH_STENCIL) == 0) return {};
+    if (query.Usage.HasFlag(TextureUse::UnorderedAccess) &&
+        ((support.Support1 & D3D12_FORMAT_SUPPORT1_TYPED_UNORDERED_ACCESS_VIEW) == 0 ||
+         (support.Support2 & D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE) == 0 ||
+         (support.Support2 & D3D12_FORMAT_SUPPORT2_UAV_TYPED_LOAD) == 0)) return {};
+    D3D12_FEATURE_DATA_FORMAT_SUPPORT sampledSupport{MapShaderResourceType(query.Format), {}, {}};
+    if (FAILED(_device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &sampledSupport, sizeof(sampledSupport)))) return {};
+    if (query.Usage.HasFlag(TextureUse::Resource) &&
+        (sampledSupport.Support1 & (D3D12_FORMAT_SUPPORT1_SHADER_LOAD | D3D12_FORMAT_SUPPORT1_SHADER_SAMPLE)) == 0) return {};
+    TextureSupport result{};
+    result.LinearFiltering = (sampledSupport.Support1 & D3D12_FORMAT_SUPPORT1_SHADER_SAMPLE) != 0;
+    result.Blending = (support.Support1 & D3D12_FORMAT_SUPPORT1_BLENDABLE) != 0;
+    const bool is1D = query.Dimension == TextureDimension::Dim1D || query.Dimension == TextureDimension::Dim1DArray;
+    const bool is3D = query.Dimension == TextureDimension::Dim3D;
+    const auto& limits = _capabilities.Limits;
+    result.MaxWidth = is1D ? limits.MaxTexture1DDimension : is3D ? limits.MaxTexture3DDimension
+                                                                 : limits.MaxTexture2DDimension;
+    result.MaxHeight = is1D ? 1 : result.MaxWidth;
+    result.MaxDepth = is3D ? limits.MaxTexture3DDimension : 1;
+    result.MaxArrayLayers = is3D ? 1 : limits.MaxTextureArrayLayers;
+    result.MaxMipLevels = D3D12_REQ_MIP_LEVELS;
+    result.MaxResourceSize = limits.MaxBufferSize;
+    for (uint32_t samples = 1; samples <= 16; samples *= 2) {
+        if (samples > 1 && (query.Usage.HasFlag(TextureUse::UnorderedAccess) ||
+                            (query.Dimension != TextureDimension::Dim2D && query.Dimension != TextureDimension::Dim2DArray))) break;
+        if (samples > 1 && query.Usage.HasFlag(TextureUse::Resource) &&
+            (sampledSupport.Support1 & D3D12_FORMAT_SUPPORT1_MULTISAMPLE_LOAD) == 0) continue;
+        D3D12_FEATURE_DATA_MULTISAMPLE_QUALITY_LEVELS quality{format, samples, D3D12_MULTISAMPLE_QUALITY_LEVELS_FLAG_NONE, 0};
+        if (SUCCEEDED(_device->CheckFeatureSupport(D3D12_FEATURE_MULTISAMPLE_QUALITY_LEVELS, &quality, sizeof(quality))) && quality.NumQualityLevels > 0) {
+            result.SampleCounts |= static_cast<SampleCount>(samples);
         }
     }
-    unique_ptr<CmdQueueD3D12>& q = queues[slot];
-    if (q == nullptr) {
-        auto fenceOpt = CreateFenceD3D12(0);
-        if (fenceOpt == nullptr) {
-            return nullptr;
-        }
-        ComPtr<ID3D12CommandQueue> queue;
-        D3D12_COMMAND_QUEUE_DESC desc{};
-        desc.Type = MapType(type);
-        if (HRESULT hr = _device->CreateCommandQueue(&desc, IID_PPV_ARGS(queue.GetAddressOf()));
-            SUCCEEDED(hr)) {
-            auto f = fenceOpt.Release();
-            auto ins = make_unique<CmdQueueD3D12>(this, std::move(queue), desc.Type, std::move(f));
-            string debugName = fmt::format("Queue-{}-{}", type, slot);
-            SetObjectName(debugName, ins->_queue.Get());
-            q = std::move(ins);
-        } else {
-            RADRAY_ERR_LOG("ID3D12Device::CreateCommandQueue failed: {} {}", GetErrorName(hr), hr);
-        }
-    }
-    return q->IsValid() ? q.get() : nullptr;
+    result.Supported = bool(result.SampleCounts);
+    return result;
 }
 
 Nullable<unique_ptr<CommandBuffer>> DeviceD3D12::CreateCommandBuffer(CommandQueue* queue_) noexcept {
@@ -1112,6 +1185,10 @@ void DeviceD3D12::FlushMappedRanges(std::span<const MappedBufferRange>) noexcept
 // == Device: texture 与 texture view ==
 
 Nullable<unique_ptr<Texture>> DeviceD3D12::CreateTexture(const TextureDescriptor& desc_) noexcept {
+    if (const auto validation = ValidateTextureDescriptor(desc_, *this); !validation.Supported) {
+        RADRAY_ERR_LOG("D3D12 texture descriptor rejected: {}", validation.Reason);
+        return nullptr;
+    }
     TextureDescriptor desc = desc_;
     DXGI_FORMAT rawFormat = MapType(desc.Format);
     D3D12_RESOURCE_DESC resDesc{};
@@ -3845,16 +3922,7 @@ void CmdListD3D12::ResourceBarrier(std::span<const ResourceBarrierDescriptor> ba
                 raw.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
                 raw.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
                 raw.Transition.pResource = tex->_tex.Get();
-                if (tb->IsSubresourceBarrier) {
-                    raw.Transition.Subresource = D3D12CalcSubresource(
-                        tb->Range.BaseMipLevel,
-                        tb->Range.BaseArrayLayer,
-                        0,
-                        tex->_rawDesc.MipLevels,
-                        tex->_rawDesc.DepthOrArraySize);
-                } else {
-                    raw.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-                }
+                raw.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
                 raw.Transition.StateBefore = MapType(tb->Before);
                 raw.Transition.StateAfter = MapType(tb->After);
                 // D3D12 COMMON 和 PRESENT flag 完全一致
@@ -3866,6 +3934,32 @@ void CmdListD3D12::ResourceBarrier(std::span<const ResourceBarrierDescriptor> ba
                 if (raw.Transition.StateBefore == raw.Transition.StateAfter) {
                     continue;
                 }
+                if (tb->IsSubresourceBarrier) {
+                    const auto range = NormalizeSubresourceRange(tex->GetDesc(), tb->Range);
+                    if (!range) RADRAY_ABORT("D3D12 texture barrier subresource range is invalid");
+                    const uint32_t planes = D3D12GetFormatPlaneCount(_device->_device.Get(), tex->_rawDesc.Format);
+                    const uint32_t layers = tex->_dimension == TextureDimension::Dim3D ? 1 : tex->_rawDesc.DepthOrArraySize;
+                    for (uint32_t plane = 0; plane < planes; ++plane) {
+                        for (uint32_t layer = range->BaseArrayLayer; layer < range->BaseArrayLayer + range->ArrayLayerCount; ++layer) {
+                            for (uint32_t mip = range->BaseMipLevel; mip < range->BaseMipLevel + range->MipLevelCount; ++mip) {
+                                raw.Transition.Subresource = D3D12CalcSubresource(mip, layer, plane, tex->_rawDesc.MipLevels, layers);
+                                rawBarriers.push_back(raw);
+                            }
+                        }
+                    }
+                    continue;
+                }
+            }
+            rawBarriers.push_back(raw);
+        } else if (const auto* uav = std::get_if<BarrierUavDescriptor>(&v)) {
+            D3D12_RESOURCE_BARRIER raw{};
+            raw.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+            if (uav->Target->GetTag() == RenderObjectTag::Buffer) {
+                raw.UAV.pResource = CastD3D12Object(static_cast<Buffer*>(uav->Target))->_buf.Get();
+            } else if (uav->Target->GetTag() == RenderObjectTag::Texture) {
+                raw.UAV.pResource = CastD3D12Object(static_cast<Texture*>(uav->Target))->_tex.Get();
+            } else {
+                RADRAY_ABORT("D3D12 UAV barrier requires a buffer or texture");
             }
             rawBarriers.push_back(raw);
         }
@@ -3873,6 +3967,15 @@ void CmdListD3D12::ResourceBarrier(std::span<const ResourceBarrierDescriptor> ba
     if (!rawBarriers.empty()) {
         _cmdList->ResourceBarrier(static_cast<UINT>(rawBarriers.size()), rawBarriers.data());
     }
+}
+
+void CmdListD3D12::PushDebugGroup(std::string_view name) noexcept {
+    const auto wide = ToWideChar(name).value_or(L"RenderGraph");
+    _cmdList->BeginEvent(0, wide.c_str(), static_cast<UINT>((wide.size() + 1) * sizeof(wchar_t)));
+}
+
+void CmdListD3D12::PopDebugGroup() noexcept {
+    _cmdList->EndEvent();
 }
 
 Nullable<unique_ptr<GraphicsCommandEncoder>> CmdListD3D12::BeginRenderPass(const RenderPassBeginDescriptor& desc) noexcept {

@@ -1,5 +1,5 @@
 > - 适用: 改渲染管线、场景表示、Application 生命周期或服务装配
-> - 权威: 本文是 runtime 层「除资产系统与 GPU 帧管理之外」部分的唯一说明。那两块见 `architecture/asset-system.md` 与 `architecture/frame-and-gpu.md`
+> - 权威: 本文描述场景、Forward 与 Application 装配；workload/graph/history 契约见 `renderer-foundation.md`，资产与 GPU 帧管理见 `asset-system.md`、`frame-and-gpu.md`
 > - 锚点: `modules/runtime/include/radray/runtime/render_framework/render_pipeline.h`, `modules/runtime/include/radray/runtime/forward_pipeline/forward_pipeline.h`, `modules/runtime/include/radray/runtime/material.h`, `modules/runtime/include/radray/runtime/shader_program.h`, `modules/runtime/include/radray/runtime/render_framework/mesh_draw.h`, `modules/runtime/include/radray/runtime/components/static_mesh_component.h`, `modules/runtime/src/render_system.cpp`, `examples/example_lambert_sphere/example_lambert_sphere.cpp`
 
 # 渲染框架与 game framework
@@ -16,7 +16,7 @@ forward pipeline 验证完整的 scene → proxy → draw 路径。
 Application            进程生命周期、runner 选择、帧循环
   ├─ WindowManager     窗口与 swapchain
   ├─ GpuSystem         device、queue、flight、上传        → frame-and-gpu.md
-  ├─ RenderSystem      "怎么画"：RenderPassRegistry 与 RenderPipeline
+  ├─ RenderSystem      workload/output、graph pools/history、registry 与 pipeline
   ├─ AssetDatabase     可选 JSON 身份库与 importer              → asset-database.md
   ├─ AssetManager      资产生命周期                       → asset-system.md
   └─ World             Actor / Component / Scene
@@ -29,20 +29,22 @@ Application            进程生命周期、runner 选择、帧循环
 ```text
 Game thread:   flight 可写 → 清上一帧 retained refs → AssetManager::Pump
                → ApplicationScheduler::Pump → OnUpdate → World::Tick → PrepareFrame
-Render thread: acquire targets → initial state → RenderTarget → pipeline.Render
-               → 对未写目标 fallback clear → Present
+Render thread: pool/history safe Begin → resolve requested outputs/views → pipeline.Render
+               → compile/realize/execute graph → 未写目标 fallback clear → required final states
 ```
 
 `RenderPipeline` 只提供 `PrepareFrame` 与 `Render` 两个入口。前者在 game thread 写当前 flight 的
 pipeline 私有输入，后者在 render thread 消费该输入。runner 既有的 slot semaphore / fence 保证
 flight 复用互斥，不增加 packet、sequence 或另一套同步协议。
-`RenderPipelineContext` 只有 `AppFrameContext& Frame` 与 target span；不携带 Application、Scene、
-Camera 或其他渲染模型。普通函数安排具体管线内部步骤，不提供通用 camera/pass/event 阶段链。
+`RenderPrepareContext` 提供 output 值目录和 workload builder；pipeline 向当前 flight 的 frame plan
+写入 view families。`RenderPipelineContext` 提供 resolved families、graph/output/history 操作，
+不公开 AppFrameContext、窗口或 command buffer。具体接口与验证见
+[Renderer foundation](renderer-foundation.md)。
 
-`RenderSystem` 取得窗口目标后统一转换到 `RenderTarget`，调用 pipeline，并清除仍未写入的目标，
-最后转换到 `Present`。pipeline 必须在 RenderTarget 状态使用 backbuffer，并在成功录制后设置
-`ContentDrawn`。没有 pipeline 时也走 fallback clear；没有取得 presentation target 时不执行
-pipeline。Application 不再提供独立的 view 内容录制钩子，自定义绘制由注入的 pipeline 完成。
+`RenderSystem` 只取得 plan 请求的目标，graph 按真实初始状态导入；成功写入标记由 executor 产生。
+host 对未写 output clear 后转换到各自 required final state。没有 pipeline 时默认请求 active
+presentation outputs 并 fallback clear；没有 presentation target 时仍执行自定义 pipeline。
+Application 不提供独立的 view 内容录制钩子。
 
 `SetPipeline` 是应用装配入口，应在 runner 启动前或 GPU idle 后调用；当前没有运行时替换协议。
 `ForwardPipeline` 在构造时借用 Scene 与 Camera，只在 `PrepareFrame` 访问它们，因此这些 source
@@ -58,7 +60,8 @@ pipeline。Application 不再提供独立的 view 内容录制钩子，自定义
 retained vector；这个过程不创建 RHI set / SRV，也不维护 flight 或 descriptor 版本。
 
 `ShaderProgram` 继续拥有 artifact、layout、shader、参数索引与 PSO map。PSO key 由 material state、
-geometry vertex layout/topology、pass attachment facts 组成。ShaderJit、artifact/program cache 和
+geometry vertex layout/topology、pass attachment formats/sample count 组成；不包含 render pass 指针、
+Load/Store 或 framebuffer 尺寸。ShaderJit、artifact/program cache 和
 失败 cache 继续由 RenderSystem 拥有，所有 program 活到 GPU idle 后的 shutdown。
 
 ### shader artifact 边界
@@ -110,8 +113,9 @@ local-to-world，并把 `StaticMeshSection` 的 `FirstIndex` / `IndexCount` / `V
 
 ### 内置 ForwardPipeline
 
-每个 flight 的 `ForwardFrameInput` 保存相机 view/eye/透视参数、材质值快照、逐 section geometry/
-index range/transform/material index，以及光源类型/参数/radius。它不含 Scene、proxy、CameraComponent、
+每个 flight 的 `ForwardFrameInput` 保存材质值快照、逐 section geometry/index range/transform/material
+index，以及光源类型/参数/radius。相机事实位于同 flight 的 frame plan view descriptors，resolve 后
+按实际输出尺寸生成 projection。input 不含 Scene、proxy、CameraComponent、
 Material、AssetManager 或 StreamingAssetRef。Geometry/TextureAsset 由 RenderSystem 的 per-flight
 refs 保活；该 vector 仅在 game thread 清理和追加，flight 复用时清理后由既有 Pump 零引用回收。
 
@@ -123,11 +127,13 @@ SPIR-V sets 可以不同；CPU 不硬编码 0/1/2，也不建立 remap table。
 每个 flight 自持 DynamicCBufferArena 和 frame-local parameter sets。开始复用时先销毁旧 sets，
 再 Reset arena。view/object set 按 program + backing buffer 复用；material set 按当前 snapshot
 index + backing bindings 复用。不同 backing target 创建不同 set，已发布的 set 在本帧内不再写。
-PSO、数值上传和资源 binding 都在绘制前准备；draw loop 只 bind PSO/set/VB/IB 和 DrawIndexed。
+数值上传和资源 binding 在 graph 执行前为每个 family 独立准备；callback 取得实际兼容 pass state 后
+查询 ShaderProgram PSO cache，再 bind PSO/set/VB/IB 和 DrawIndexed。不同 view 的 offsets 保留至执行完毕。
 
-每个窗口的 D32 depth attachment 由 Forward 维护；尺寸/sample count 改变时先清除引用旧 view 的
-framebuffer，再重建。viewport 使用 MakeViewport；只有它在 Vulkan 下使用负 height。光照从帧
-快照投影到 view bytes，点光按距已复制相机位置由近到远截断，超过上限只记录一次 warning。
+Forward 每个可用 family 声明 graph transient depth，按 D32/D24S8/D16 的支持顺序选择；由 per-flight
+pool 管理复用和 resize 后安全回收。opaque Clear 与必要的 transparent Load 在一张 graph 中执行。
+viewport 使用 MakeViewport；只有它在 Vulkan 下使用负 height。光照从帧快照按当前 resolved view
+投影到 view bytes，点光按距该 view 位置由近到远截断，超过上限只记录一次 warning。
 
 ## Application 与 runner
 

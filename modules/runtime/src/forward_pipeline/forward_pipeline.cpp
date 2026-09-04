@@ -18,13 +18,13 @@
 #include <radray/runtime/render_framework/viewport.h>
 #include <radray/runtime/render_system.h>
 #include <radray/runtime/shader_program.h>
-#include <radray/runtime/window_manager.h>
+#include <radray/runtime/components/camera_component.h>
 
 namespace radray {
 using namespace forward_detail;
 namespace {
 
-constexpr render::TextureFormat kForwardDepthFormat = render::TextureFormat::D32_FLOAT;
+constexpr render::TextureFormat kForwardDepthCandidates[]{render::TextureFormat::D32_FLOAT, render::TextureFormat::D24_UNORM_S8_UINT, render::TextureFormat::D16_UNORM};
 constexpr uint32_t kMaxDirectionalLights = 8;
 constexpr uint32_t kMaxPointLights = 8;
 
@@ -56,7 +56,7 @@ std::optional<DynamicCBufferArena::Allocation> UploadBytes(
 bool forward_detail::FillViewParameters(
     ShaderParameterStorage& storage,
     const ForwardFrameInput& input,
-    float aspect,
+    const ResolvedRenderView& view,
     bool& lightOverflowWarned) {
     struct SelectedLight {
         LightRenderParameters Parameters;
@@ -65,10 +65,10 @@ bool forward_detail::FillViewParameters(
     };
     if (!storage.SetMatrix4x4(
             "ViewProj",
-            PerspectiveLH<float>(input.Camera.FovY, aspect, input.Camera.NearZ, input.Camera.FarZ) * input.Camera.View)) {
+            view.ViewProjection)) {
         return false;
     }
-    const Eigen::Vector3f eye = input.Camera.EyePosition;
+    const Eigen::Vector3f eye = view.WorldPosition;
     if (!storage.SetFloat4(
             "EyePosition",
             Eigen::Vector4f{eye.x(), eye.y(), eye.z(), 1.0f})) {
@@ -161,15 +161,6 @@ bool forward_detail::FillViewParameters(
 }
 
 struct ForwardPipeline::Impl {
-    struct DepthTarget {
-        unique_ptr<render::Texture> Texture;
-        unique_ptr<render::TextureView> View;
-        uint32_t Width{0};
-        uint32_t Height{0};
-        uint32_t SampleCount{0};
-        render::TextureStates State{render::TextureState::Undefined};
-    };
-
     struct ResidentProgramSets {
         ShaderProgram* Program;
         render::Buffer* ViewTarget;
@@ -196,7 +187,7 @@ struct ForwardPipeline::Impl {
         unique_ptr<DynamicCBufferArena> Arena;
         vector<ResidentProgramSets> ProgramSets;
         ForwardMaterialSets MaterialSets;
-        vector<PreparedDraw> Prepared;
+        vector<vector<PreparedDraw>> Prepared;
     };
 
     Impl(
@@ -205,8 +196,7 @@ struct ForwardPipeline::Impl {
         CameraComponent* viewCamera)
         : RenderScene(renderScene),
           ViewCamera(viewCamera),
-          Device(application->GetDevice()),
-          Registry(application->GetRenderSystem()->GetRenderPassRegistry()) {
+          Device(application->GetDevice()) {
         const GpuSystem* gpu = application->GetGpuSystem();
         if (gpu != nullptr) {
             Flights.resize(gpu->GetFlightDataCount());
@@ -216,22 +206,13 @@ struct ForwardPipeline::Impl {
     Scene* RenderScene;
     CameraComponent* ViewCamera;
     render::Device* Device;
-    render::RenderPassRegistry* Registry;
+
     ForwardBindingCache Bindings;
     vector<FlightResources> Flights;
-    unordered_map<AppWindow*, DepthTarget> DepthTargets;
+    unordered_map<RenderOutputId, ViewStateId, RenderOutputIdHash> ViewIds;
     bool LightOverflowWarned{false};
 
-    ~Impl() noexcept {
-        if (Registry != nullptr) {
-            for (auto& [window, depth] : DepthTargets) {
-                (void)window;
-                Registry->RemoveFramebuffersUsing(depth.View.get());
-            }
-        }
-    }
-
-    bool BeginFrame(AppFrameContext& frame) {
+    bool BeginFrame(RenderPipelineContext& frame) {
         const uint32_t flightIndex = frame.FlightIndex();
         if (Device == nullptr || flightIndex >= Flights.size()) {
             return false;
@@ -245,67 +226,15 @@ struct ForwardPipeline::Impl {
             descriptor.NamePrefix = "ForwardPipeline";
             flight.Arena = make_unique<DynamicCBufferArena>(
                 Device,
-                &frame.GetHostWrites(),
+                &frame.HostWrites(),
                 descriptor);
         }
         flight.Prepared.clear();
+        flight.Prepared.resize(frame.ViewFamilies().size());
         flight.ProgramSets.clear();
         flight.MaterialSets.Clear();
         flight.Arena->Reset();
         return flight.Arena->IsValid();
-    }
-
-    bool EnsureDepth(
-        AppWindow* window,
-        uint32_t width,
-        uint32_t height,
-        uint32_t sampleCount) {
-        DepthTarget& depth = DepthTargets[window];
-        if (depth.Texture != nullptr && depth.View != nullptr &&
-            depth.Width == width && depth.Height == height &&
-            depth.SampleCount == sampleCount) {
-            return true;
-        }
-        if (Registry != nullptr && depth.View != nullptr) {
-            Registry->RemoveFramebuffersUsing(depth.View.get());
-        }
-        depth.View.reset();
-        depth.Texture.reset();
-        depth.Width = width;
-        depth.Height = height;
-        depth.SampleCount = sampleCount;
-        depth.State = render::TextureState::Undefined;
-
-        Nullable<unique_ptr<render::Texture>> texture = Device->CreateTexture(
-            render::TextureDescriptor{
-                .Dim = render::TextureDimension::Dim2D,
-                .Width = width,
-                .Height = height,
-                .DepthOrArraySize = 1,
-                .MipLevels = 1,
-                .SampleCount = sampleCount,
-                .Format = kForwardDepthFormat,
-                .Memory = render::MemoryType::Device,
-                .Usage = render::TextureUse::DepthStencilRead |
-                         render::TextureUse::DepthStencilWrite,
-                .Hints = render::ResourceHint::None});
-        if (!texture.HasValue()) {
-            return false;
-        }
-        depth.Texture = texture.Release();
-        Nullable<unique_ptr<render::TextureView>> view = Device->CreateTextureView(
-            render::TextureViewDescriptor{
-                .Target = depth.Texture.get(),
-                .Dim = render::TextureDimension::Dim2D,
-                .Format = kForwardDepthFormat,
-                .Range = render::SubresourceRange{0, 1, 0, 1},
-                .Usage = render::TextureViewUsage::DepthWrite});
-        if (!view.HasValue()) {
-            depth.Texture.reset();
-            return false;
-        }
-        depth.View = view.Release();
-        return true;
     }
 
     Nullable<ResidentProgramSets*> GetOrCreateProgramSets(
@@ -360,29 +289,23 @@ struct ForwardPipeline::Impl {
         return &flight.ProgramSets.back();
     }
 
-    bool PrepareTarget(RenderPipelineContext& ctx, const AppFrameTarget& target) {
-        FlightResources& flight = Flights[ctx.Frame.FlightIndex()];
+    bool PrepareTarget(RenderPipelineContext& ctx, const ResolvedRenderViewFamily& family) {
+        FlightResources& flight = Flights[ctx.FlightIndex()];
         const ForwardFrameInput& input = flight.Input;
-        vector<PreparedDraw>& Prepared = flight.Prepared;
+        const auto& view = family.Views.front();
+        vector<PreparedDraw>& Prepared = flight.Prepared[family.FrameLocalIndex];
         Prepared.clear();
-        if (target.Window == nullptr || target.BackBuffer == nullptr) {
-            return false;
-        }
-        const render::TextureDescriptor targetDesc =
-            target.BackBuffer->GetDesc();
-        if (targetDesc.Width == 0 || targetDesc.Height == 0 ||
-            !EnsureDepth(
-                target.Window,
-                targetDesc.Width,
-                targetDesc.Height,
-                targetDesc.SampleCount)) {
-            return false;
-        }
-
         Prepared.reserve(input.Draws.size());
         for (const ForwardFrameDraw& item : input.Draws) {
             Prepared.push_back(PreparedDraw{.Item = item});
         }
+        std::stable_sort(Prepared.begin(), Prepared.end(), [&](const PreparedDraw& a, const PreparedDraw& b) {
+            const auto& lhs = input.Materials[a.Item.MaterialIndex];
+            const auto& rhs = input.Materials[b.Item.MaterialIndex];
+            if (lhs.Queue != rhs.Queue) return static_cast<int32_t>(lhs.Queue) < static_cast<int32_t>(rhs.Queue);
+            if (IsTransparent(lhs)) return (view.View * a.Item.LocalToWorld.col(3)).z() > (view.View * b.Item.LocalToWorld.col(3)).z();
+            return false;
+        });
 
         if (flight.Arena == nullptr || !flight.Arena->IsValid()) {
             return false;
@@ -415,8 +338,7 @@ struct ForwardPipeline::Impl {
             if (!FillViewParameters(
                     viewValues,
                     input,
-                    static_cast<float>(targetDesc.Width) /
-                        static_cast<float>(targetDesc.Height),
+                    view,
                     LightOverflowWarned)) {
                 continue;
             }
@@ -549,132 +471,29 @@ struct ForwardPipeline::Impl {
         return true;
     }
 
-    bool Execute(RenderPipelineContext& ctx, AppFrameTarget& frameTarget, bool transparent) {
-        if (frameTarget.Window == nullptr || frameTarget.BackBuffer == nullptr ||
-            frameTarget.BackBufferView == nullptr || Registry == nullptr) {
-            return false;
+    void Execute(uint32_t flightIndex, uint32_t familyIndex, const ResolvedRenderView& view, bool transparent, RenderGraphRasterContext& ctx) {
+        FlightResources& flight = Flights[flightIndex];
+        const auto& input = flight.Input;
+        auto& prepared = flight.Prepared[familyIndex];
+        auto& graphics = ctx.Encoder();
+        graphics.SetViewport(MakeViewport(Device->GetBackend(), static_cast<float>(view.ViewRect.X), static_cast<float>(view.ViewRect.Y),
+                                          static_cast<float>(view.ViewRect.Width), static_cast<float>(view.ViewRect.Height)));
+        graphics.SetScissor(view.ScissorRect);
+        for (auto& draw : prepared) {
+            const auto& material = input.Materials[draw.Item.MaterialIndex];
+            if (!draw.Valid || IsTransparent(material) != transparent) continue;
+            draw.PipelineState = material.Program->GetOrCreateGraphicsPipelineState(material.PipelineState,
+                                                                                    draw.Item.Geometry->VertexLayout, draw.Item.Geometry->Topology, ctx.PassState());
+            if (!draw.PipelineState) continue;
+            graphics.BindGraphicsPipelineState(draw.PipelineState.Get());
+            graphics.BindShaderParameterSet(draw.Bindings.ViewGroup, draw.ViewSet.Get(), draw.ViewOffsets);
+            graphics.BindShaderParameterSet(draw.Bindings.MaterialGroup, draw.MaterialSet.Get(), draw.MaterialOffsets);
+            graphics.BindShaderParameterSet(draw.Bindings.ObjectGroup, draw.ObjectSet.Get(), draw.ObjectOffsets);
+            const render::VertexBufferBinding vertex{draw.Item.Geometry->VertexLayout.Buffers.front().Binding, draw.Item.Geometry->Vbv};
+            graphics.BindVertexBuffers(std::span{&vertex, 1});
+            graphics.BindIndexBuffer(draw.Item.Geometry->Ibv);
+            graphics.DrawIndexed(draw.Item.IndexCount, 1, draw.Item.FirstIndex, draw.Item.VertexOffset, 0);
         }
-        FlightResources& flight = Flights[ctx.Frame.FlightIndex()];
-        const ForwardFrameInput& input = flight.Input;
-        vector<PreparedDraw>& Prepared = flight.Prepared;
-        AppFrameTarget* target = &frameTarget;
-        const render::TextureDescriptor targetDesc = target->BackBuffer->GetDesc();
-        auto depthIt = DepthTargets.find(target->Window);
-        if (depthIt == DepthTargets.end() || depthIt->second.View == nullptr) {
-            return false;
-        }
-        DepthTarget& depth = depthIt->second;
-        if (depth.State != render::TextureState::DepthWrite) {
-            const render::ResourceBarrierDescriptor barrier =
-                render::BarrierTextureDescriptor{
-                    .Target = depth.Texture.get(),
-                    .Before = depth.State,
-                    .After = render::TextureState::DepthWrite};
-            ctx.Frame.GetCommandBuffer()->ResourceBarrier(
-                std::span{&barrier, 1});
-            depth.State = render::TextureState::DepthWrite;
-        }
-
-        const render::LoadAction load = transparent
-                                            ? render::LoadAction::Load
-                                            : render::LoadAction::Clear;
-        const render::RenderPassColorAttachmentDescriptor colorAttachment{
-            .Format = targetDesc.Format,
-            .SampleCount = targetDesc.SampleCount,
-            .Load = load,
-            .Store = render::StoreAction::Store};
-        const render::RenderPassDepthStencilAttachmentDescriptor depthAttachment{
-            .Format = kForwardDepthFormat,
-            .SampleCount = targetDesc.SampleCount,
-            .DepthLoad = load,
-            .DepthStore = render::StoreAction::Store,
-            .StencilLoad = render::LoadAction::DontCare,
-            .StencilStore = render::StoreAction::Discard};
-        const Nullable<render::RenderPass*> pass =
-            Registry->GetOrCreateRenderPass(render::RenderPassDescriptor{
-                .ColorAttachments = std::span{&colorAttachment, 1},
-                .DepthStencilAttachment = depthAttachment});
-        render::TextureView* colorView = target->BackBufferView;
-        const Nullable<render::Framebuffer*> framebuffer =
-            pass.HasValue()
-                ? Registry->GetOrCreateFramebuffer(render::FramebufferDescriptor{
-                      .Pass = pass.Get(),
-                      .ColorAttachments =
-                          std::span<render::TextureView* const>{&colorView, 1},
-                      .DepthStencilAttachment = depth.View.get(),
-                      .Width = targetDesc.Width,
-                      .Height = targetDesc.Height,
-                      .Layers = 1})
-                : nullptr;
-        if (!pass.HasValue() || !framebuffer.HasValue()) {
-            return false;
-        }
-
-        const GraphicsPassState passState{
-            vector<render::TextureFormat>{targetDesc.Format}, kForwardDepthFormat, targetDesc.SampleCount, pass.Get()};
-        for (PreparedDraw& draw : Prepared) {
-            const MaterialRenderData& material = input.Materials[draw.Item.MaterialIndex];
-            if (draw.Valid && IsTransparent(material) == transparent) {
-                draw.PipelineState = material.Program.Get()->GetOrCreateGraphicsPipelineState(
-                    material.PipelineState, draw.Item.Geometry->VertexLayout, draw.Item.Geometry->Topology, passState);
-            }
-        }
-
-        const render::ColorClearValue colorClear{{0.025f, 0.030f, 0.040f, 1.0f}};
-        const render::DepthStencilClearValue depthClear{1.0f, 0};
-        Nullable<unique_ptr<render::GraphicsCommandEncoder>> encoder =
-            ctx.Frame.GetCommandBuffer()->BeginRenderPass(
-                render::RenderPassBeginDescriptor{
-                    .Pass = pass.Get(),
-                    .Target = framebuffer.Get(),
-                    .ColorClearValues = transparent
-                                            ? std::span<const render::ColorClearValue>{}
-                                            : std::span{&colorClear, 1},
-                    .DepthStencilClearValue = transparent
-                                                  ? std::nullopt
-                                                  : std::optional{
-                                                        depthClear},
-                    .Name = transparent ? "Forward Transparent" : "Forward Opaque"});
-        if (!encoder.HasValue()) {
-            return false;
-        }
-        unique_ptr<render::GraphicsCommandEncoder> graphics = encoder.Release();
-        graphics->SetViewport(MakeViewport(
-            Device->GetBackend(), targetDesc.Width, targetDesc.Height));
-        graphics->SetScissor(Rect{
-            0, 0, targetDesc.Width, targetDesc.Height});
-
-        for (const PreparedDraw& draw : Prepared) {
-            if (!draw.Valid || !draw.PipelineState.HasValue() || IsTransparent(input.Materials[draw.Item.MaterialIndex]) != transparent) {
-                continue;
-            }
-            graphics->BindGraphicsPipelineState(draw.PipelineState.Get());
-            graphics->BindShaderParameterSet(
-                draw.Bindings.ViewGroup,
-                draw.ViewSet.Get(),
-                draw.ViewOffsets);
-            graphics->BindShaderParameterSet(
-                draw.Bindings.MaterialGroup,
-                draw.MaterialSet.Get(),
-                draw.MaterialOffsets);
-            graphics->BindShaderParameterSet(
-                draw.Bindings.ObjectGroup,
-                draw.ObjectSet.Get(),
-                draw.ObjectOffsets);
-            const render::VertexBufferBinding vertexBinding{
-                .Binding = draw.Item.Geometry->VertexLayout.Buffers.front().Binding,
-                .View = draw.Item.Geometry->Vbv};
-            graphics->BindVertexBuffers(std::span{&vertexBinding, 1});
-            graphics->BindIndexBuffer(draw.Item.Geometry->Ibv);
-            graphics->DrawIndexed(
-                draw.Item.IndexCount,
-                1,
-                draw.Item.FirstIndex,
-                draw.Item.VertexOffset,
-                0);
-        }
-        ctx.Frame.GetCommandBuffer()->EndRenderPass(std::move(graphics));
-        return true;
     }
 };
 
@@ -686,34 +505,60 @@ ForwardPipeline::ForwardPipeline(
 
 ForwardPipeline::~ForwardPipeline() noexcept = default;
 
-void ForwardPipeline::PrepareFrame(const AppUpdateContext& ctx, vector<StreamingAssetRefAny>& retainedAssets) {
-    RADRAY_ASSERT(ctx.FlightIndex < _impl->Flights.size());
-    CollectFrameInput(_impl->RenderScene, _impl->ViewCamera, _impl->Flights[ctx.FlightIndex].Input, retainedAssets);
+void ForwardPipeline::PrepareFrame(RenderPrepareContext& ctx) {
+    const uint32_t flight = ctx.App.FlightIndex;
+    RADRAY_ASSERT(flight < _impl->Flights.size());
+    CollectFrameInput(_impl->RenderScene, _impl->ViewCamera, _impl->Flights[flight].Input, ctx.RetainedAssets);
+    for (const auto& output : ctx.Outputs) {
+        if (!output.Active || output.Kind != RenderOutputKind::Presentation) continue;
+        auto& id = _impl->ViewIds[output.Id];
+        if (!id.IsValid()) id = AllocateViewStateId();
+        RenderViewDesc view = CollectRenderView(*_impl->ViewCamera);
+        view.StateId = id;
+        ctx.Workloads.AddViewFamily({"Forward " + output.Name, output.Id, 1, {std::move(view)}});
+    }
 }
 
 void ForwardPipeline::Render(RenderPipelineContext& ctx) {
-    if (!_impl->BeginFrame(ctx.Frame)) {
-        return;
+    if (!_impl->BeginFrame(ctx)) return;
+    auto graph = ctx.CreateRenderGraph("Forward");
+    struct PassData {
+        Impl* Pipeline;
+        uint32_t Flight, Family;
+        ResolvedRenderView View;
+        bool Transparent;
+    };
+    vector<ViewStateId> rendered;
+    for (const auto& family : ctx.ViewFamilies()) {
+        if (!family.OutputAvailable || family.Views.size() != 1 || family.RenderSize != family.OutputSize) continue;
+        const auto format = SelectFirstSupportedFormat(*_impl->Device, kForwardDepthCandidates, render::TextureDimension::Dim2D,
+                                                       render::TextureUse::DepthStencilWrite, family.SampleCount);
+        if (!format || !_impl->PrepareTarget(ctx, family)) continue;
+        const auto color = ctx.ImportOutput(graph, family.OutputId);
+        RuntimeTextureDesc depthDesc;
+        depthDesc.Extent.Mode = RenderExtentMode::RelativeToFamilyRenderExtent;
+        depthDesc.Format = *format;
+        depthDesc.Usage = render::TextureUse::DepthStencilWrite;
+        depthDesc.SampleCount = family.SampleCount;
+        string reason;
+        const auto desc = ResolveRuntimeTextureDesc(depthDesc, family, *_impl->Device, reason);
+        if (!desc) continue;
+        const auto depth = graph.CreateTexture(*desc, fmt::format("Forward.Depth.{}", family.FrameLocalIndex));
+        const auto& flight = _impl->Flights[ctx.FlightIndex()];
+        const bool transparent = std::any_of(flight.Prepared[family.FrameLocalIndex].begin(), flight.Prepared[family.FrameLocalIndex].end(),
+                                             [&](const Impl::PreparedDraw& draw) { return draw.Valid && IsTransparent(flight.Input.Materials[draw.Item.MaterialIndex]); });
+        for (uint32_t pass = 0; pass < (transparent ? 2u : 1u); ++pass) {
+            graph.AddRasterPass<PassData>(fmt::format("Forward.{}.{}", pass ? "Transparent" : "Opaque", family.FrameLocalIndex), [&](PassData& data, RenderGraphRasterBuilder& builder) {
+                    data = {_impl.get(), ctx.FlightIndex(), family.FrameLocalIndex, family.Views.front(), pass != 0};
+                    const auto load = pass ? render::LoadAction::Load : render::LoadAction::Clear;
+                    builder.SetColorAttachment(0, color, {.Load = load, .Clear = {{.025f, .030f, .040f, 1}}});
+                    builder.SetDepthAttachment(depth, {.Load = load}); }, +[](const PassData& data, RenderGraphRasterContext& context) { data.Pipeline->Execute(data.Flight, data.Family, data.View, data.Transparent, context); });
+        }
+        rendered.push_back(family.Views.front().StateId);
     }
-    for (RenderPipelineTarget& target : ctx.Targets) {
-        if (!_impl->PrepareTarget(ctx, target.Target)) {
-            continue;
-        }
-        if (!_impl->Execute(ctx, target.Target, false)) {
-            continue;
-        }
-        target.ContentDrawn = true;
-        const auto& flight = _impl->Flights[ctx.Frame.FlightIndex()];
-        const bool hasTransparent = std::any_of(flight.Prepared.begin(), flight.Prepared.end(),
-                                                [&](const Impl::PreparedDraw& draw) {
-                                                    return draw.Valid && IsTransparent(flight.Input.Materials[draw.Item.MaterialIndex]);
-                                                });
-        if (hasTransparent) {
-            _impl->Execute(ctx, target.Target, true);
-        }
-    }
+    if (ctx.ExecuteGraph(graph).Success)
+        for (const auto view : rendered) ctx.CommitView(view);
 }
-
 const forward_detail::ForwardFrameInput& ForwardPipeline::GetFrameInput(uint32_t flightIndex) const noexcept {
     return _impl->Flights[flightIndex].Input;
 }

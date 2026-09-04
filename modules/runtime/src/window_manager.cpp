@@ -49,6 +49,12 @@ render::SwapChain* AppWindow::AttachSwapChain(const render::SwapChainDescriptor&
     swapChainDesc.BackBufferCount = gpuSystem->GetBackBufferCount();
     DetachSwapChain();
     _swapchain = gpuSystem->GetDevice()->CreateSwapChain(swapChainDesc).Unwrap();
+    if (auto* renderSystem = _manager->GetRenderSystem()) {
+        const auto actual = _swapchain->GetDesc();
+        _outputId = renderSystem->GetOutputs().RegisterPresentation(_isMain ? "Main Window" : "Window",
+                                                                    {render::TextureDimension::Dim2D, actual.Width, actual.Height, 1, 1, 1, actual.Format,
+                                                                     render::MemoryType::Device, render::TextureUse::RenderTarget, render::ResourceHint::External});
+    }
     const uint32_t backBufferCount = _swapchain->GetBackBufferCount();
     _backBufferViews.resize(backBufferCount);
     _requestRecreateSwapChain.store(false, std::memory_order_release);
@@ -56,12 +62,16 @@ render::SwapChain* AppWindow::AttachSwapChain(const render::SwapChainDescriptor&
 }
 
 unique_ptr<render::SwapChain> AppWindow::ReleaseSwapChain() noexcept {
+    if (auto* system = _manager->GetRenderSystem(); system && _outputId.IsValid()) system->GetOutputs().Unregister(_outputId);
+    _outputId = {};
     ReleaseBackBufferViews();
     _requestRecreateSwapChain.store(false, std::memory_order_release);
     return _swapchain.Release();
 }
 
 void AppWindow::DetachSwapChain() noexcept {
+    if (auto* system = _manager->GetRenderSystem(); system && _outputId.IsValid()) system->GetOutputs().Unregister(_outputId);
+    _outputId = {};
     if (_swapchain && _manager->GetGpuSystem() != nullptr) {
         auto* gpuSystem = _manager->GetGpuSystem();
         gpuSystem->WaitAndCleanupCompletedFlights();
@@ -216,6 +226,7 @@ bool AppWindow::RecreateSwapChain(uint32_t width, uint32_t height, render::Prese
     ReleaseBackBufferViews();
     const render::SwapChainDescriptor desc = _swapchain->GetDesc();
     const bool recreated = _swapchain->Recreate(width, height, desc.Format, presentMode);
+    if (auto* system = _manager->GetRenderSystem()) system->GetOutputs().UpdatePresentation(_outputId, width, height, recreated);
     const uint32_t backBufferCount = _swapchain->GetBackBufferCount();
     _backBufferViews.resize(backBufferCount);
 

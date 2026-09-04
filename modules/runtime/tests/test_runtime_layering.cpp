@@ -6,6 +6,7 @@
 
 #include <radray/file.h>
 #include "forward_pipeline/forward_frame.h"
+#include <radray/runtime/render_framework/render_pipeline.h>
 
 namespace radray {
 namespace {
@@ -26,7 +27,7 @@ TEST(RuntimeLayering, LegacyPipelineScaffoldingRemoved) {
             }
             const string source = ReadSource(entry.path());
             for (const auto symbol : {"BindingGroupPlan", "RenderPassEvent", "RenderPipelinePass", "RenderCameraList",
-                                      "PrepareParameterSet", "GetResidentParameterSet", "OnRenderView", "RenderViewContent"}) {
+                                      "PrepareParameterSet", "GetResidentParameterSet", "OnRenderView", "RenderViewContent", "RenderPipelineTarget"}) {
                 EXPECT_EQ(source.find(symbol), string::npos) << entry.path().string() << ": " << symbol;
             }
         }
@@ -63,13 +64,29 @@ TEST(RuntimeLayering, ForwardSpecificDrawPolicyDoesNotLeakFurther) {
     }
     const auto recording = ReadSource("modules/runtime/src/forward_pipeline/forward_pipeline.cpp");
     for (const auto symbol : {"->Primitives(", "->Lights(", "->GetMaterial(", "->GetParameterStorage(",
-                              "->ComputeViewMatrix(", "->GetEyePosition(", ".AsAny(", "AssetManager"}) {
+                              "->ComputeViewMatrix(", "->GetEyePosition(", ".AsAny(", "AssetManager", "DepthTargets", "ResourceBarrier(", "GetCommandBuffer(", "AppWindow"}) {
         EXPECT_EQ(recording.find(symbol), string::npos) << symbol;
     }
     const auto material = ReadSource("modules/runtime/src/material.cpp");
     for (const auto symbol : {"ShaderParameterSet", "GetOrCreateSrv", "FlightIndex", "flightCount"}) {
         EXPECT_EQ(material.find(symbol), string::npos) << symbol;
     }
+}
+
+template <class T>
+concept ExposesCommandBuffer = requires(T& value) { value.GetCommandBuffer(); };
+template <class T>
+concept ExposesFrame = requires(T& value) { value.Frame; };
+template <class T>
+concept ExposesCommands = requires(T& value) { value.Commands(); };
+
+TEST(RuntimeLayering, PipelineAndPassContextsHaveNoRawCommandEscape) {
+    static_assert(!ExposesFrame<RenderPipelineContext>);
+    static_assert(!ExposesCommands<RenderPipelineContext>);
+    static_assert(!ExposesCommandBuffer<RenderGraphGraphicsCommands>);
+    static_assert(!ExposesCommandBuffer<RenderGraphComputeCommands>);
+    static_assert(!std::is_convertible_v<RenderGraphGraphicsCommands&, render::GraphicsCommandEncoder&>);
+    static_assert(!std::is_convertible_v<RenderGraphComputeCommands&, render::ComputeCommandEncoder&>);
 }
 
 string StructBody(const string& source, std::string_view name) {
@@ -99,7 +116,7 @@ TEST(RadRayRuntimeForwardPipeline, FrameInputContainsNoGameObjects) {
     const auto frame = ReadSource("modules/runtime/src/forward_pipeline/forward_frame.h");
     const auto material = ReadSource("modules/runtime/include/radray/runtime/material.h");
     string bodies;
-    for (const auto name : {"CameraFrameData", "ForwardFrameDraw", "ForwardFrameLight", "ForwardFrameInput"}) {
+    for (const auto name : {"ForwardFrameDraw", "ForwardFrameLight", "ForwardFrameInput"}) {
         bodies += StructBody(frame, name);
     }
     for (const auto name : {"MaterialRenderData", "MaterialTextureFrameData", "MaterialSamplerFrameData"}) {

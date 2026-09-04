@@ -514,7 +514,7 @@ Material 负责编辑的一组参数，由一个 cbuffer declaration anchor 标�
 _Avoid_: binding group plan, global binding convention
 
 **Forward frame input**:
-Forward 对一帧场景事实的完整值快照，包含相机、材质、几何绘制范围与光照；准备完成后不随游戏对象变化。
+Forward 对一帧场景事实的值快照，包含材质、几何绘制范围与光照；准备完成后不随游戏对象变化。相机事实属于本帧的 view 描述。
 _Avoid_: render world, scene database, generic frame packet
 
 **Logical shader resource kind**:
@@ -563,6 +563,34 @@ _Avoid_: blob（指承载 artifact 的单个文件）, cache（cache 可弃，ar
 第一期不做离线编译，"cook" 与 "bake" 两个词一并搁置 —— 旧代码里它们的边界要靠注释解释
 （`shader_manifest.h:150`），属于需要重新命名的遗留。等第一期跑通、真要做离线产物时再定名。
 在此之前不要在新代码里引入这两个词。
+
+## 渲染工作负载
+
+**Render output**:
+一帧最终可观察的颜色输出，可以用于呈现，也可以是应用持有的离屏图像。身份独立于窗口和尺寸。
+_Avoid_: window target（窗口只是 output 的一种来源）
+
+**View**:
+观察场景的一组值，包含视角、投影、区域和采样偏移。它不等同于可编辑的相机游戏对象。
+
+**View family**:
+共享一个 primary output 和渲染尺寸策略的一组 views。多个 family 可以在同一帧产生不同输出。
+
+**Frame plan**:
+当前帧明确请求的 view families。它表达要渲染哪些输出和视角，不包含 GPU 命令。
+
+**Graph pass**:
+一项声明资源读写的 raster、compute 或 copy 工作，只有结果被消费或存在显式副作用时才需要执行。
+_Avoid_: shader Pass（后者是 shader family 的源单元，身份和生命周期不同）
+
+**Content version**:
+一次写入产生的资源内容。读取或保留式写入消费之前的版本，完整覆盖式写入不消费旧版本。
+
+**Transient resource**:
+逻辑内容仅属于当前 graph 的 GPU 资源，即使底层对象可跨帧复用也不自动保留先前内容。
+
+**View history**:
+稳定 view 身份下最后成功提交的跨帧内容。跳过、失败和仅申请写入空间均不会推进历史。
 
 ## 资产
 

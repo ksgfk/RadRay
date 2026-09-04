@@ -265,6 +265,10 @@ public:
 
     DeviceDetail GetDetail() const noexcept override;
 
+    const RenderDeviceCapabilities& GetCapabilities() const noexcept override { return _capabilities; }
+
+    TextureSupport QueryTextureSupport(const TextureSupportQuery& query) const noexcept override;
+
     Nullable<CommandQueue*> GetCommandQueue(QueueType type, uint32_t slot) noexcept override;
 
     Nullable<unique_ptr<CommandBuffer>> CreateCommandBuffer(CommandQueue* queue) noexcept override;
@@ -341,7 +345,8 @@ public:
     ExtFeaturesVulkan _extFeatures;
     VkPhysicalDeviceProperties _properties;
     ExtPropertiesVulkan _extProperties;
-    DeviceDetail _detail;
+    RenderDeviceCapabilities _capabilities;
+    vector<std::pair<TextureSupportQuery, TextureSupport>> _textureSupportCache;
 };
 
 class QueueVulkan final : public CommandQueue {
@@ -419,6 +424,10 @@ public:
     void End() noexcept override;
 
     void ResourceBarrier(std::span<const ResourceBarrierDescriptor> barriers) noexcept override;
+
+    void PushDebugGroup(std::string_view name) noexcept override;
+
+    void PopDebugGroup() noexcept override;
 
     Nullable<unique_ptr<GraphicsCommandEncoder>> BeginRenderPass(const RenderPassBeginDescriptor& desc) noexcept override;
 
@@ -962,6 +971,8 @@ public:
     void Destroy() noexcept override;
 
     void SetDebugName(std::string_view name) noexcept override;
+
+    TextureViewDescriptor GetDesc() const noexcept override { return _mdesc; }
 
 public:
     void DestroyImpl() noexcept;

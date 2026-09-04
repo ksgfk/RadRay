@@ -67,7 +67,10 @@ public:
                   StreamingAssetRef<FlightProbeAsset> asset)
         : _result(result), _registry(registry), _asset(std::move(asset)) {}
 
-    void PrepareFrame(const AppUpdateContext& ctx, vector<StreamingAssetRefAny>& retained) override {
+    void PrepareFrame(RenderPrepareContext& prepare) override {
+        const auto& ctx = prepare.App;
+        auto& retained = prepare.RetainedAssets;
+        prepare.Workloads.AddPresentationOutputs();
         EXPECT_EQ(std::this_thread::get_id(), _result->GameThread);
         EXPECT_EQ(_result->Value, _result->UpdatedValue + 1);
         _values[ctx.FlightIndex] = _result->Value;
@@ -80,24 +83,16 @@ public:
 
     void Render(RenderPipelineContext& ctx) override {
         _result->RenderThread = std::this_thread::get_id();
-        EXPECT_GT(_values[ctx.Frame.FlightIndex()], 0);
-        ASSERT_FALSE(ctx.Targets.empty());
-        for (auto& target : ctx.Targets) {
-            EXPECT_EQ(target.State, render::TextureState::RenderTarget);
-            const auto desc = target.Target.BackBuffer->GetDesc();
-            const render::RenderPassColorAttachmentDescriptor attachment{
-                .Format = desc.Format, .SampleCount = desc.SampleCount, .Load = render::LoadAction::Clear, .Store = render::StoreAction::Store};
-            const auto pass = _registry->GetOrCreateRenderPass({.ColorAttachments = std::span{&attachment, 1}});
-            ASSERT_TRUE(pass.HasValue());
-            render::TextureView* view = target.Target.BackBufferView;
-            const auto framebuffer = _registry->GetOrCreateFramebuffer({.Pass = pass.Get(), .ColorAttachments = std::span<render::TextureView* const>{&view, 1}, .Width = desc.Width, .Height = desc.Height});
-            ASSERT_TRUE(framebuffer.HasValue());
-            const render::ColorClearValue clear{{0.3f, 0.5f, 0.7f, 1.0f}};
-            auto encoder = ctx.Frame.GetCommandBuffer()->BeginRenderPass({.Pass = pass.Get(), .Target = framebuffer.Get(), .ColorClearValues = std::span{&clear, 1}, .Name = "Non-camera pipeline"});
-            ASSERT_TRUE(encoder.HasValue());
-            ctx.Frame.GetCommandBuffer()->EndRenderPass(encoder.Release());
-            target.ContentDrawn = true;
+        EXPECT_GT(_values[ctx.FlightIndex()], 0);
+        ASSERT_FALSE(ctx.ViewFamilies().empty());
+        auto graph = ctx.CreateRenderGraph("Non-camera pipeline");
+        struct Data {};
+        for (const auto& family : ctx.ViewFamilies()) {
+            if (!family.OutputAvailable) continue;
+            const auto color = ctx.ImportOutput(graph, family.OutputId);
+            graph.AddRasterPass<Data>("clear", [=](Data&, RenderGraphRasterBuilder& builder) { builder.SetColorAttachment(0, color, {.Clear = {{.3f, .5f, .7f, 1}}}); }, +[](const Data&, RenderGraphRasterContext&) {});
         }
+        EXPECT_TRUE(ctx.ExecuteGraph(graph).Success);
         ++_result->Rendered;
     }
 

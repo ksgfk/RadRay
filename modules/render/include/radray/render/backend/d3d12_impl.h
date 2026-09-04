@@ -321,6 +321,10 @@ public:
 
     DeviceDetail GetDetail() const noexcept override;
 
+    const RenderDeviceCapabilities& GetCapabilities() const noexcept override { return _capabilities; }
+
+    TextureSupport QueryTextureSupport(const TextureSupportQuery& query) const noexcept override;
+
     Nullable<CommandQueue*> GetCommandQueue(QueueType type, uint32_t slot) noexcept override;
 
     Nullable<unique_ptr<CommandBuffer>> CreateCommandBuffer(CommandQueue* queue) noexcept override;
@@ -366,6 +370,8 @@ public:
 
     Nullable<unique_ptr<FenceD3D12>> CreateFenceD3D12(uint64_t initValue) noexcept;
 
+    bool CreateQueues(const array<uint32_t, static_cast<size_t>(QueueType::MAX_COUNT)>& counts) noexcept;
+
     Nullable<unique_ptr<RootSigD3D12>> CreateRootSignatureInternal(const ResolvedD3D12Layout& layout) noexcept;
     Nullable<unique_ptr<RootSigD3D12>> CreateExplicitRootSignatureInternal(const ResolvedD3D12Layout& layout) noexcept;
 
@@ -386,7 +392,8 @@ public:
     unique_ptr<GpuDescriptorAllocator> _gpuResHeap;
     unique_ptr<GpuDescriptorAllocator> _gpuSamplerHeap;
     SamplerCache _samplerCache;
-    DeviceDetail _detail;
+    RenderDeviceCapabilities _capabilities;
+    vector<std::pair<TextureSupportQuery, TextureSupport>> _textureSupportCache;
     CD3DX12FeatureSupport _features;
     bool _isAllowTearing = false;
     bool _isDebugLayerEnabled = false;
@@ -472,6 +479,10 @@ public:
     void End() noexcept override;
 
     void ResourceBarrier(std::span<const ResourceBarrierDescriptor> barriers) noexcept override;
+
+    void PushDebugGroup(std::string_view name) noexcept override;
+
+    void PopDebugGroup() noexcept override;
 
     Nullable<unique_ptr<GraphicsCommandEncoder>> BeginRenderPass(const RenderPassBeginDescriptor& desc) noexcept override;
 
@@ -736,6 +747,8 @@ public:
     void Destroy() noexcept override;
 
     void SetDebugName(std::string_view name) noexcept override;
+
+    TextureViewDescriptor GetDesc() const noexcept override { return _desc; }
 
 public:
     DeviceD3D12* _device;

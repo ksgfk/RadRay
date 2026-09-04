@@ -200,6 +200,14 @@ enum class QueueType : uint32_t {
     MAX_COUNT
 };
 
+enum class SampleCount : uint32_t {
+    X1 = 1,
+    X2 = 2,
+    X4 = 4,
+    X8 = 8,
+    X16 = 16,
+};
+
 using PrimitiveTopology = radray::PrimitiveTopology;
 
 enum class IndexFormat : int32_t {
@@ -446,6 +454,8 @@ struct is_flags<render::BufferUse> : public std::true_type {};
 template <>
 struct is_flags<render::TextureUse> : public std::true_type {};
 template <>
+struct is_flags<render::SampleCount> : public std::true_type {};
+template <>
 struct is_flags<render::BufferState> : public std::true_type {};
 template <>
 struct is_flags<render::TextureState> : public std::true_type {};
@@ -462,6 +472,7 @@ using ResourceHints = EnumFlags<render::ResourceHint>;
 using RenderObjectTags = EnumFlags<render::RenderObjectTag>;
 using BufferUses = EnumFlags<render::BufferUse>;
 using TextureUses = EnumFlags<render::TextureUse>;
+using SampleCountMask = EnumFlags<render::SampleCount>;
 using BufferStates = EnumFlags<render::BufferState>;
 using TextureStates = EnumFlags<render::TextureState>;
 using ShaderStages = EnumFlags<ShaderStage>;
@@ -587,6 +598,7 @@ struct DXGIAdapterInfo {
 struct D3D12DeviceDescriptor {
     DXGIFactory* Factory{nullptr};
     std::optional<uint32_t> AdapterIndex{};
+    array<uint32_t, static_cast<size_t>(QueueType::MAX_COUNT)> QueueCounts{1, 0, 0};
 };
 
 struct VulkanCommandQueueDescriptor {
@@ -767,7 +779,11 @@ struct BarrierTextureDescriptor {
     SubresourceRange Range{};
 };
 
-using ResourceBarrierDescriptor = std::variant<BarrierBufferDescriptor, BarrierTextureDescriptor>;
+struct BarrierUavDescriptor {
+    Resource* Target;
+};
+
+using ResourceBarrierDescriptor = std::variant<BarrierBufferDescriptor, BarrierTextureDescriptor, BarrierUavDescriptor>;
 
 // == 资源与 render pass 描述符 ==
 
@@ -1195,6 +1211,60 @@ struct DeviceDetail {
     bool IsLayeredRenderingFromVertexShaderSupported{false};
 };
 
+struct QueueCapabilities {
+    uint32_t CreatedCount{0};
+    bool Dedicated{false};
+};
+
+struct DeviceLimits {
+    uint32_t MaxColorAttachments{0};
+    uint32_t MaxTexture1DDimension{0};
+    uint32_t MaxTexture2DDimension{0};
+    uint32_t MaxTexture3DDimension{0};
+    uint32_t MaxTextureArrayLayers{0};
+    uint64_t MaxBufferSize{0};
+    uint64_t MaxUniformBufferRange{0};
+    uint32_t MaxPushConstantBytes{0};
+    uint64_t CBufferOffsetAlignment{1};
+};
+
+struct DeviceFeatures {
+    bool TimestampQueries{false};
+    bool IndirectDraw{false};
+    bool IndirectDispatch{false};
+    bool SubresourceBarriers{false};
+    bool UavMemoryBarrier{false};
+};
+
+struct RenderDeviceCapabilities {
+    DeviceDetail Detail;
+    DeviceLimits Limits;
+    DeviceFeatures Features;
+    array<QueueCapabilities, static_cast<size_t>(QueueType::MAX_COUNT)> Queues{};
+};
+
+struct TextureSupportQuery {
+    TextureDimension Dimension{TextureDimension::UNKNOWN};
+    TextureFormat Format{TextureFormat::UNKNOWN};
+    TextureUses Usage{TextureUse::UNKNOWN};
+
+    friend bool operator==(const TextureSupportQuery&, const TextureSupportQuery&) noexcept = default;
+};
+
+struct TextureSupport {
+    bool Supported{false};
+    SampleCountMask SampleCounts{};
+    bool LinearFiltering{false};
+    bool Blending{false};
+    uint32_t MaxWidth{0}, MaxHeight{0}, MaxDepth{0}, MaxArrayLayers{0}, MaxMipLevels{0};
+    uint64_t MaxResourceSize{0};
+};
+
+struct TextureDescriptorValidationResult {
+    bool Supported{false};
+    string Reason;
+};
+
 // == 接口: Device 与 queue ==
 
 class Device : public enable_shared_from_this<Device>, public RenderBase {
@@ -1206,6 +1276,10 @@ public:
     virtual RenderBackend GetBackend() noexcept = 0;
 
     virtual DeviceDetail GetDetail() const noexcept = 0;
+
+    virtual const RenderDeviceCapabilities& GetCapabilities() const noexcept = 0;
+
+    virtual TextureSupport QueryTextureSupport(const TextureSupportQuery& query) const noexcept = 0;
 
     virtual Nullable<CommandQueue*> GetCommandQueue(QueueType type, uint32_t slot = 0) noexcept = 0;
 
@@ -1268,6 +1342,10 @@ public:
     virtual void Begin() noexcept = 0;
 
     virtual void End() noexcept = 0;
+
+    virtual void PushDebugGroup(std::string_view name) noexcept = 0;
+
+    virtual void PopDebugGroup() noexcept = 0;
 
     virtual void ResourceBarrier(std::span<const ResourceBarrierDescriptor> barriers) noexcept = 0;
 
@@ -1462,6 +1540,8 @@ public:
     virtual ~TextureView() noexcept = default;
 
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::TextureView; }
+
+    virtual TextureViewDescriptor GetDesc() const noexcept = 0;
 };
 
 // == 接口: pass / shader / layout / PSO ==
@@ -1571,6 +1651,15 @@ public:
 // == 工具函数 ==
 // SamplerCache 在 sampler_cache.h
 bool IsDepthStencilFormat(TextureFormat format) noexcept;
+
+bool IsValidTextureSupportQuery(const TextureSupportQuery& query) noexcept;
+
+TextureDescriptorValidationResult ValidateTextureDescriptor(const TextureDescriptor& desc, const Device& device);
+
+TextureDescriptorValidationResult ValidateTextureDescriptor(
+    const TextureDescriptor& desc, const RenderDeviceCapabilities& capabilities, const TextureSupport& support);
+
+std::optional<SubresourceRange> NormalizeSubresourceRange(const TextureDescriptor& desc, SubresourceRange range) noexcept;
 bool IsUintFormat(TextureFormat format) noexcept;
 bool IsSintFormat(TextureFormat format) noexcept;
 uint32_t GetIndexFormatSizeInBytes(IndexFormat format) noexcept;
@@ -1583,6 +1672,8 @@ uint32_t GetVertexFormatSizeInBytes(VertexFormat format) noexcept;
 std::string_view format_as(RenderBackend v) noexcept;
 std::string_view format_as(TextureFormat v) noexcept;
 std::string_view format_as(QueueType v) noexcept;
+
+std::string_view format_as(SampleCount v) noexcept;
 std::string_view format_as(PolygonMode v) noexcept;
 std::string_view format_as(TextureDimension v) noexcept;
 std::string_view format_as(BufferState v) noexcept;

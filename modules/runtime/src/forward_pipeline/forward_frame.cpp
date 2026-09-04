@@ -8,23 +8,26 @@
 
 namespace radray::forward_detail {
 
+RenderViewDesc CollectRenderView(const CameraComponent& camera) {
+    RenderViewDesc view;
+    view.Name = "Forward Camera";
+    view.WorldToView = camera.ComputeViewMatrix();
+    view.WorldPosition = camera.GetEyePosition();
+    view.Projection = PerspectiveProjectionDesc{camera.GetFovY(), camera.GetNearZ(), camera.GetFarZ()};
+    return view;
+}
+
 void CollectFrameInput(
     const Scene* scene,
     const CameraComponent* camera,
     ForwardFrameInput& input,
     vector<StreamingAssetRefAny>& retainedAssets) {
-    input.Camera = CameraFrameData{
-        .View = camera->ComputeViewMatrix(),
-        .EyePosition = camera->GetEyePosition(),
-        .FovY = camera->GetFovY(),
-        .NearZ = camera->GetNearZ(),
-        .FarZ = camera->GetFarZ()};
     input.Materials.clear();
     input.Draws.clear();
     input.Lights.clear();
 
     MeshDrawList collected;
-    collected.Collect(scene, input.Camera.View);
+    collected.Collect(scene, camera->ComputeViewMatrix());
     collected.Sort();
     for (const auto& proxy : scene->Primitives()) {
         if (proxy != nullptr) {

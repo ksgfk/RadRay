@@ -39,7 +39,7 @@ RadRay 是 C++20 实时渲染器，当前支持 Windows 下的 D3D12 与 Vulkan 
 | `radraywindow` | 窗口、输入和平台事件 | `guide/dev-env.md` |
 | `radrayshadercompiler` | 可选 source-contract discovery 与 DXC boundary client；依赖 shader 与 core，不拥有 render/runtime | `architecture/shader-pipeline.md`, `docs/todo/shader-layout-contract-correction.md`, `docs/todo/filesystem-backed-shader-include-correction.md` |
 | `radrayrender` | RHI、D3D12/Vulkan 后端、资源、命令和 PSO | `architecture/render-rhi.md` |
-| `radrayruntime` | 资产生命周期与 JSON 身份库、帧节奏、渲染框架和 Application | `architecture/asset-system.md`, `architecture/asset-database.md`, `architecture/frame-and-gpu.md`, `architecture/render-framework.md` |
+| `radrayruntime` | 资产生命周期与 JSON 身份库、帧节奏、workload/graph/history、渲染框架和 Application | `architecture/asset-system.md`, `architecture/asset-database.md`, `architecture/frame-and-gpu.md`, `architecture/render-framework.md`, `architecture/renderer-foundation.md` |
 
 `radrayshadercompiler` 只在 `RADRAY_BUILD_SHADER_COMPILER=ON` 时进入构建图；它依赖
 `radraycore` 与 `radrayshader`，不反向依赖 render/runtime。当前 target 已提供 source-contract
@@ -63,15 +63,19 @@ compiler-produced metadata 不依赖 `radrayshadercompiler`；`radrayruntime` �
 | render pass / framebuffer 去重 | `RenderPassRegistry` | `modules/render/include/radray/render/render_pass_registry.h` |
 | material、program 与 mesh draw | `Material` / `ShaderProgram` / `MeshDrawList` | `modules/runtime/include/radray/runtime/` |
 | 内置前向管线 | `ForwardPipeline` | `modules/runtime/include/radray/runtime/forward_pipeline/forward_pipeline.h` |
+| Output、view families、RenderGraph、pool/history | `RenderPipelineContext` / `RenderGraph` / `ViewStateRegistry` | `modules/runtime/include/radray/runtime/render_framework/` |
 | 场景 tick | `World::Tick` | `modules/runtime/src/game_framework/world.cpp` |
 
 ## 当前边界
 
 Runtime pipeline 已收敛为 game-thread PrepareFrame 与 render-thread Render；Forward 消费每 flight
-值快照，RenderSystem 按 flight 保活资产，Material 仅保存 CPU authoring 状态。当前边界见
-`architecture/render-framework.md`，flight 生命周期见 `architecture/frame-and-gpu.md`。
-架构取舍见 [ADR-0053](../adr/0053-runtime-pipelines-consume-per-flight-value-snapshots.md)，
-实施与验收记录见 [最小 flight snapshots](../todo/runtime-minimal-flight-snapshots.md)。
+值快照，RenderSystem 按 flight 保活资产，Material 仅保存 CPU authoring 状态。Stage A 增加显式
+output/view workload、设备能力事实、串行 RenderGraph、per-flight pool 和成功提交的 history；
+pipeline context 不公开窗口和 raw command buffer。当前接口见 [Renderer foundation](renderer-foundation.md)，
+集成边界见 `architecture/render-framework.md`，flight 生命周期见 `architecture/frame-and-gpu.md`。
+取舍见 [ADR-0053](../adr/0053-runtime-pipelines-consume-per-flight-value-snapshots.md) 与
+[ADR-0054](../adr/0054-explicit-workloads-and-single-queue-render-graph.md)，验收见
+[Stage A](../todo/renderer-foundation-stage-a.md)。
 
 M-1 已移除旧的 shader 资产、手写 metadata、旧的命令行 shader 工具和未接线的 UI 路线。
 当前 `shaderlib/` 由共享数学层、target gate、内置 forward 产品 pass 与 depth/compute 最小 pass
@@ -111,6 +115,7 @@ docs/
     frame-and-gpu.md    帧序、flight、上传和关停
     render-rhi.md       RHI、后端、barrier 和同步
     render-framework.md 渲染框架、SceneProxy、Application、ServiceRegistry
+    renderer-foundation.md output/view/workload、RenderGraph、pool/history 与状态收口
   adr/                  设计决策记录，只追加不修改
   todo/                 有范围和检查站的实施计划
 ```

@@ -23,7 +23,7 @@ public:
         CameraComponent* camera);
     ~ForwardPipeline() noexcept override;
 
-    void PrepareFrame(const AppUpdateContext& ctx, vector<StreamingAssetRefAny>& retainedAssets) override;
+    void PrepareFrame(RenderPrepareContext& ctx) override;
     void Render(RenderPipelineContext& ctx) override;
 
     // The pipeline uploads its view, material, and object constant buffers out of a per-frame

@@ -3,6 +3,7 @@
 #include <radray/runtime/gpu_resource.h>
 #include <radray/runtime/material.h>
 #include <radray/runtime/render_framework/light_scene_proxy.h>
+#include <radray/runtime/render_framework/render_view.h>
 
 namespace radray {
 
@@ -10,14 +11,6 @@ class CameraComponent;
 class Scene;
 
 namespace forward_detail {
-
-struct CameraFrameData {
-    Eigen::Matrix4f View{Eigen::Matrix4f::Identity()};
-    Eigen::Vector3f EyePosition{Eigen::Vector3f::Zero()};
-    float FovY{0.0f};
-    float NearZ{0.0f};
-    float FarZ{0.0f};
-};
 
 struct ForwardFrameDraw {
     const GpuMesh::DrawData* Geometry;
@@ -36,14 +29,14 @@ struct ForwardFrameLight {
 };
 
 struct ForwardFrameInput {
-    CameraFrameData Camera;
     vector<MaterialRenderData> Materials;
     vector<ForwardFrameDraw> Draws;
     vector<ForwardFrameLight> Lights;
 };
 
 bool FillViewParameters(ShaderParameterStorage& storage, const ForwardFrameInput& input,
-                        float aspect, bool& lightOverflowWarned);
+                        const ResolvedRenderView& view, bool& lightOverflowWarned);
+RenderViewDesc CollectRenderView(const CameraComponent& camera);
 
 // Game thread only. No game objects or asset references escape into the input.
 void CollectFrameInput(

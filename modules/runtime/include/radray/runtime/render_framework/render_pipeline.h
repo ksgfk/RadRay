@@ -4,22 +4,53 @@
 
 #include <radray/runtime/asset_manager.h>
 #include <radray/runtime/gpu_system.h>
+#include <radray/runtime/render_framework/render_workload.h>
+#include <radray/runtime/render_framework/view_state.h>
 #include <radray/types.h>
 
 namespace radray {
 
 struct AppUpdateContext;
 
-struct RenderPipelineTarget {
-    AppFrameTarget Target;
-    render::TextureStates State{render::TextureState::Undefined};
-    bool ContentDrawn{false};
+struct RenderPrepareContext {
+    const AppUpdateContext& App;
+    std::span<const RenderOutputInfo> Outputs;
+    RenderWorkloadBuilder& Workloads;
+    vector<StreamingAssetRefAny>& RetainedAssets;
 };
 
-struct RenderPipelineContext {
-    AppFrameContext& Frame;
-    // The host provides targets in RenderTarget state and transitions them to Present afterwards.
-    std::span<RenderPipelineTarget> Targets;
+class RenderPipelineContext {
+public:
+    RenderPipelineContext(AppFrameContext& frame, RenderResourcePool& pool, render::RenderPassRegistry& registry,
+                          ViewStateRegistry& views, uint64_t serial, std::span<const ResolvedRenderViewFamily> families,
+                          std::span<RenderSurfaceFrame> surfaces, RenderGraphExecutionReport& report);
+    ~RenderPipelineContext();
+    uint32_t FlightIndex() const noexcept;
+    uint64_t FrameSerial() const noexcept { return _serial; }
+    const render::RenderDeviceCapabilities& Capabilities() const noexcept;
+    HostWriteBatch& HostWrites() const noexcept;
+    std::span<const ResolvedRenderViewFamily> ViewFamilies() const noexcept { return _families; }
+    RenderGraph CreateRenderGraph(std::string_view name);
+    RgTextureHandle ImportOutput(RenderGraph& graph, RenderOutputId output);
+    RenderGraphExecutionResult ExecuteGraph(RenderGraph& graph);
+    bool CommitView(ViewStateId view);
+    HistoryTexturePair AcquireHistoryTexture(const ResolvedRenderView& view, const ResolvedRenderViewFamily& family,
+                                             const HistoryTextureRequest& request, string& reason);
+
+private:
+    struct ImportedOutput;
+    AppFrameContext& _frame;
+    RenderResourcePool& _pool;
+    render::RenderPassRegistry& _registry;
+    ViewStateRegistry& _views;
+    uint64_t _serial;
+    std::span<const ResolvedRenderViewFamily> _families;
+    std::span<RenderSurfaceFrame> _surfaces;
+    RenderGraphExecutionReport& _report;
+    vector<unique_ptr<ImportedOutput>> _imports;
+    vector<HistoryTexturePair> _histories;
+    uint64_t _graphGeneration{0};
+    bool _executed{false}, _success{false};
 };
 
 class RenderPipeline {
@@ -33,9 +64,9 @@ public:
 
     /// Game thread, after World::Tick and after this flight's previous GPU work has completed.
     /// Write only this flight's private input; append references needed until flight reuse.
-    virtual void PrepareFrame(const AppUpdateContext& ctx, vector<StreamingAssetRefAny>& retainedAssets);
+    virtual void PrepareFrame(RenderPrepareContext& ctx);
 
-    /// Render thread. Consume only the immutable input prepared for ctx.Frame.FlightIndex().
+    /// Render thread. Consume only this flight's immutable input and resolved families.
     virtual void Render(RenderPipelineContext& ctx) = 0;
 };
 

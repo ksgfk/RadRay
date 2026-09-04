@@ -45,6 +45,10 @@ cmake --build build_debug --config Debug --parallel 24
 
 二进制落在 `build_debug/_build/<Config>/`。
 
+Ninja + MSVC 构建应在 Visual Studio Developer PowerShell 中执行；普通 PowerShell 可先载入
+本机 Visual Studio 安装目录下的 `Common7/Tools/Launch-VsDevShell.ps1 -Arch amd64 -HostArch amd64
+-SkipAutomaticLocation`。仅找到 cl.exe 而未配置 INCLUDE/LIB 时，会报标准库头文件缺失。
+
 ## 运行 shader JIT 样例
 
 `example_lambert_sphere` 是普通 executable，不注册 CTest。它默认按 D3D12 构建，运行时把
@@ -99,6 +103,13 @@ ctest --test-dir build_debug -C Debug -R AssetSlotTest --output-on-failure
 | `test_asset_slot` | `AssetSlotTest` |
 | `test_asset_database` | `AssetDatabaseTest` |
 | `test_render_pass_registry` | `RenderPassCacheKeyTest`, `FramebufferCacheKeyTest`, `RenderPassRegistryTest` |
+| `test_device_capabilities` | `TextureDescriptorValidation`, `DeviceCapabilitiesTest`（双 backend 支持查询与 attachment/MSAA 创建、mip/layer barrier 读回、debug labels） |
+| `test_foundation_compute` | `FoundationComputeTest`（双 backend buffer/texture 显式 UAV ordering，依赖 JIT） |
+| `test_render_foundation` | `RenderWorkloadTest`, `RenderFoundationTest`（output ID/mutation gate、view resolve、relative extent、双 backend pool/trim） |
+| `test_render_graph_compile` | `RenderGraphCompileTest`（纯 CPU capabilities stub、handle/access/content version/culling、100/1000 pass benchmark 与确定性 dump；不依赖 GPU 或 JIT） |
+| `test_render_graph` | `RenderGraphTest`（双 backend raster/compute/copy、UAV、102 帧 mip 读回及复用、encoder 失败恢复、兼容 PSO；依赖 JIT） |
+| `test_view_state` | `ViewStateTest`（previous matrix、history 提交/失效/retire 与双 backend 跨帧读回） |
+| `test_render_outputs` | `RenderOutputTest`（双 backend 零 presentation、多离屏 output、未写/失败 fallback、实际 final state） |
 | `test_radray_render_pso_smoke` | `RadRayRenderPsoSmoke` |
 | `test_radray_shader_compiler_client` | `RadRayShaderCompilerClient` |
 | `test_radray_dxc_metadata` | `RadRayDxcMetadata` |
@@ -106,7 +117,7 @@ ctest --test-dir build_debug -C Debug -R AssetSlotTest --output-on-failure
 | `test_runtime_shader_jit` | `RadRayRuntimeShaderJit`（graphics/compute readback、14-fixture report、declaration owner、metadata negative） |
 | `test_material` | `RadRayRuntimeMaterial`（schema 7 owner 驱动 type tree 打包、qualified/unique-short parameter path、多 cbuffer、declaration modifier 与 fail-closed recipe） |
 | `test_mesh_draw` | `RadRayRuntimeMeshDraw`, `RadRayRuntimeForwardSets`（排序、双后端 dynamic offset/indexed draw、shared/nested owner 与 push-only program、frame-local set 不改写旧 backing、material 资源快照按 flight 轮转） |
-| `test_forward_pipeline` | `RadRayRuntimeForwardPipeline`, `RadRayRuntimeMaterial`, `RadRayRuntimeForwardBindings`（双后端窗口帧、多线程 64 帧、准备后对象销毁/值变更、非标准 group、resolver 负缓存、Material snapshot 与 section collection） |
+| `test_forward_pipeline` | `RadRayRuntimeForwardPipeline`, `RadRayRuntimeMaterial`, `RadRayRuntimeForwardBindings`（双后端窗口帧、220 帧多线程 mutation/resize、多视图离屏像素、准备后对象销毁/值变更、非标准 group、resolver 负缓存、Material snapshot 与 section collection） |
 | `test_render_pipeline` | `RadRayRuntimeRenderPipeline`, `RadRayRuntimeRenderSystem`, `RuntimeLayering`, `RadRayRuntimeForwardPipeline`（tick 顺序、非相机宿主、fallback clear、flight 资产回收与静态边界） |
 | `test_radray_render_shader_artifact` | `RadRayRenderShaderArtifact`（schema 7 raw golden、owner/type wire validation） |
 | `test_radray_render_shader_layout` | `RadRayRenderShaderLayout`（schema 7 decode 与 target-typed resolve） |
@@ -120,6 +131,27 @@ ctest --test-dir build_debug -C Debug -R AssetSlotTest --output-on-failure
 
 新增测试放在 `modules/<module>/tests/`，通过同目录 `CMakeLists.txt` 的 `radray_add_test`
 注册。新增源文件后重新 configure；测试命令不会替你构建。
+
+Stage A regression 与 CPU benchmark（先完成 build，再执行）：
+
+```powershell
+ctest --test-dir build_debug -C Debug -R 'RenderGraph|RenderWorkloadTest|RenderFoundationTest|RenderOutputTest|ViewStateTest|DeviceCapabilitiesTest|FoundationComputeTest|RuntimeLayering|RadRayRuntimeForwardPipeline' --output-on-failure
+.\build_debug\_build\Debug\test_render_graph_compile.exe --gtest_filter='*DumpAndLargeGraph*' --gtest_output=xml:stage-a-benchmark.xml
+```
+
+benchmark XML 包含 100 次重复的平均 Compile 时间、setup/compile/dump 总时间与 native create 次数。
+用 Release 同目标取得性能基线；具体机器、配置和验证范围记录在
+[Stage A 验收](../todo/renderer-foundation-stage-a.md)。不要把 Debug 数值与 Release 混合比较。
+
+Windows/MSVC 的 Stage A AddressSanitizer 配置使用单独输出目录，关闭 mimalloc，并在 Developer
+PowerShell 中依次执行（该 shell 的 PATH 同时提供 ASAN runtime DLL）：
+
+```powershell
+cmake --preset win-x64-debug -B build_stage_a_asan -DRADRAY_ENABLE_MIMALLOC=OFF -DRADRAY_BUILD_EXAMPLES=OFF -DRADRAY_BUILD_BENCHMARKS=OFF '-DCMAKE_CXX_FLAGS_DEBUG=/Od /Z7 /fsanitize=address' '-DCMAKE_C_FLAGS_DEBUG=/Od /Z7 /fsanitize=address' '-DCMAKE_EXE_LINKER_FLAGS_DEBUG=/INCREMENTAL:NO'
+cmake --build build_stage_a_asan --target test_render_graph_compile test_render_graph test_view_state test_forward_pipeline test_render_outputs --parallel 24
+$env:ASAN_OPTIONS = 'alloc_dealloc_mismatch=1'
+ctest --test-dir build_stage_a_asan -C Debug -R 'RenderGraph|ViewStateTest|RenderOutputTest|OffscreenViews|MultithreadedDrawsWhileGameStateChanges' --output-on-failure
+```
 
 ## 隔离边界
 

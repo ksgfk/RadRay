@@ -79,9 +79,7 @@ GraphicsPassState::GraphicsPassState(
     std::optional<render::TextureFormat> depthStencilFormat,
     uint32_t sampleCount,
     render::RenderPass* compatibleRenderPass) noexcept
-    : ColorFormats(std::move(colorFormats)),
-      DepthStencilFormat(depthStencilFormat),
-      SampleCount(sampleCount),
+    : GraphicsPassCompatibilityKey{std::move(colorFormats), depthStencilFormat, sampleCount},
       CompatibleRenderPass(compatibleRenderPass) {}
 
 bool GraphicsPassState::IsValid() const noexcept {
@@ -197,7 +195,7 @@ size_t HashPsoKeyParts(
     const MaterialPipelineState& materialState,
     const PrimitiveVertexLayout& vertexLayout,
     PrimitiveTopology topology,
-    const GraphicsPassState& passState) noexcept;
+    const GraphicsPassCompatibilityKey& passState) noexcept;
 
 }  // namespace
 
@@ -241,7 +239,7 @@ size_t HashPsoKeyParts(
     const MaterialPipelineState& materialState,
     const PrimitiveVertexLayout& vertexLayout,
     PrimitiveTopology topology,
-    const GraphicsPassState& passState) noexcept {
+    const GraphicsPassCompatibilityKey& passState) noexcept {
     HashCode hash;
     AddEnum(hash, materialState.Primitive.FaceClockwise);
     AddEnum(hash, materialState.Primitive.Cull);
@@ -290,7 +288,6 @@ size_t HashPsoKeyParts(
         AddEnum(hash, passState.DepthStencilFormat.value());
     }
     hash.Add(passState.SampleCount);
-    hash.Add(reinterpret_cast<uintptr_t>(passState.CompatibleRenderPass));
     return hash.ToHashCode();
 }
 

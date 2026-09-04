@@ -1,4 +1,5 @@
 #include <radray/render/backend/vulkan_impl.h>
+#include "../texture_support_cache.h"
 
 #if RADRAY_ENABLE_MIMALLOC
 #include <mimalloc.h>
@@ -885,7 +886,56 @@ void DeviceVulkan::Destroy() noexcept {
 }
 
 DeviceDetail DeviceVulkan::GetDetail() const noexcept {
-    return _detail;
+    return _capabilities.Detail;
+}
+
+static VkImageUsageFlags _TextureUsageFlags(TextureUses usage) noexcept {
+    VkImageUsageFlags result = 0;
+    if (usage.HasFlag(TextureUse::CopySource)) result |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    if (usage.HasFlag(TextureUse::CopyDestination)) result |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    if (usage.HasFlag(TextureUse::Resource)) result |= VK_IMAGE_USAGE_SAMPLED_BIT;
+    if (usage.HasFlag(TextureUse::RenderTarget)) result |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    if (usage & (TextureUse::DepthStencilRead | TextureUse::DepthStencilWrite)) result |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    if (usage.HasFlag(TextureUse::UnorderedAccess)) result |= VK_IMAGE_USAGE_STORAGE_BIT;
+    return result;
+}
+
+TextureSupport DeviceVulkan::QueryTextureSupport(const TextureSupportQuery& query) const noexcept {
+    for (const auto& [cachedQuery, cachedSupport] : _textureSupportCache) {
+        if (cachedQuery == query) return cachedSupport;
+    }
+    if (!IsValidTextureSupportQuery(query)) return {};
+    VkPhysicalDeviceImageFormatInfo2 info{};
+    info.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2;
+    info.format = MapType(query.Format);
+    info.type = MapType(query.Dimension);
+    info.tiling = VK_IMAGE_TILING_OPTIMAL;
+    info.usage = _TextureUsageFlags(query.Usage);
+    info.flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+    if (query.Dimension == TextureDimension::Cube || query.Dimension == TextureDimension::CubeArray) info.flags |= VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
+    VkImageFormatProperties2 properties{VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2};
+    const VkResult status = vkGetPhysicalDeviceImageFormatProperties2(_physicalDevice, &info, &properties);
+    if (status != VK_SUCCESS) return {};
+    VkFormatProperties2 format{VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2};
+    vkGetPhysicalDeviceFormatProperties2(_physicalDevice, info.format, &format);
+    const auto flags = format.formatProperties.optimalTilingFeatures;
+    const auto& limits = properties.imageFormatProperties;
+    TextureSupport result{};
+    result.SampleCounts = SampleCountMask{limits.sampleCounts & uint32_t{31}};
+    if (query.Usage.HasFlag(TextureUse::UnorderedAccess) ||
+        (query.Dimension != TextureDimension::Dim2D && query.Dimension != TextureDimension::Dim2DArray)) {
+        result.SampleCounts &= SampleCount::X1;
+    }
+    result.Supported = bool(result.SampleCounts);
+    result.LinearFiltering = (flags & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) != 0;
+    result.Blending = (flags & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT) != 0;
+    result.MaxWidth = limits.maxExtent.width;
+    result.MaxHeight = limits.maxExtent.height;
+    result.MaxDepth = limits.maxExtent.depth;
+    result.MaxArrayLayers = limits.maxArrayLayers;
+    result.MaxMipLevels = limits.maxMipLevels;
+    result.MaxResourceSize = limits.maxResourceSize;
+    return result;
 }
 
 Nullable<CommandQueue*> DeviceVulkan::GetCommandQueue(QueueType type, uint32_t slot) noexcept {
@@ -1062,7 +1112,7 @@ Nullable<unique_ptr<Buffer>> DeviceVulkan::CreateBuffer(const BufferDescriptor& 
     bufInfo.flags = 0;
     uint64_t allocSize = desc.Size;
     if (desc.Usage.HasFlag(BufferUse::CBuffer)) {
-        const uint64_t align = std::max<uint64_t>(1, _detail.CBufferAlignment);
+        const uint64_t align = std::max<uint64_t>(1, _capabilities.Detail.CBufferAlignment);
         allocSize = Align(allocSize, align);
     }
     bufInfo.size = allocSize;
@@ -1228,6 +1278,10 @@ void DeviceVulkan::FlushMappedRanges(std::span<const MappedBufferRange> mappedRa
 }
 
 Nullable<unique_ptr<Texture>> DeviceVulkan::CreateTexture(const TextureDescriptor& desc) noexcept {
+    if (const auto validation = ValidateTextureDescriptor(desc, *this); !validation.Supported) {
+        RADRAY_ERR_LOG("Vulkan texture descriptor rejected: {}", validation.Reason);
+        return nullptr;
+    }
     VkImageCreateInfo imgInfo{};
     imgInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     imgInfo.pNext = nullptr;
@@ -1251,31 +1305,13 @@ Nullable<unique_ptr<Texture>> DeviceVulkan::CreateTexture(const TextureDescripto
     }
     imgInfo.samples = MapSampleCount(desc.SampleCount);
     imgInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-    imgInfo.usage = 0;
+    imgInfo.usage = _TextureUsageFlags(desc.Usage);
     imgInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     imgInfo.queueFamilyIndexCount = 0;
     imgInfo.pQueueFamilyIndices = nullptr;
     imgInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     if (desc.Dim == TextureDimension::Cube || desc.Dim == TextureDimension::CubeArray) {
         imgInfo.flags |= VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
-    }
-    if (desc.Usage.HasFlag(TextureUse::CopySource)) {
-        imgInfo.usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
-    }
-    if (desc.Usage.HasFlag(TextureUse::CopyDestination)) {
-        imgInfo.usage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-    }
-    if (desc.Usage.HasFlag(TextureUse::Resource)) {
-        imgInfo.usage |= VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-    }
-    if (desc.Usage.HasFlag(TextureUse::RenderTarget)) {
-        imgInfo.usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
-    }
-    if (desc.Usage.HasFlag(TextureUse::DepthStencilRead) || desc.Usage.HasFlag(TextureUse::DepthStencilWrite)) {
-        imgInfo.usage |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
-    }
-    if (desc.Usage.HasFlag(TextureUse::UnorderedAccess)) {
-        imgInfo.usage |= VK_IMAGE_USAGE_STORAGE_BIT;
     }
     VmaAllocationCreateInfo vmaInfo{};
     vmaInfo.flags = 0;
@@ -3628,7 +3664,45 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
     deviceR->_properties = selectPhyDevice.properties;
     deviceR->_extProperties = *extProperties;
     {
-        DeviceDetail& detail = deviceR->_detail;
+        auto& caps = deviceR->_capabilities;
+        const auto& limits = deviceR->_properties.limits;
+        VkPhysicalDeviceMaintenance3Properties allocationLimits{};
+        allocationLimits.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_3_PROPERTIES;
+        VkPhysicalDeviceMaintenance4Properties bufferLimits{};
+        bufferLimits.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_4_PROPERTIES;
+        VkPhysicalDeviceProperties2 properties{};
+        properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+        properties.pNext = &allocationLimits;
+        if (deviceR->_properties.apiVersion >= VK_API_VERSION_1_3) allocationLimits.pNext = &bufferLimits;
+        vkGetPhysicalDeviceProperties2(deviceR->_physicalDevice, &properties);
+        caps.Limits = {
+            .MaxColorAttachments = limits.maxColorAttachments,
+            .MaxTexture1DDimension = limits.maxImageDimension1D,
+            .MaxTexture2DDimension = limits.maxImageDimension2D,
+            .MaxTexture3DDimension = limits.maxImageDimension3D,
+            .MaxTextureArrayLayers = limits.maxImageArrayLayers,
+            .MaxBufferSize = bufferLimits.maxBufferSize != 0 ? bufferLimits.maxBufferSize : allocationLimits.maxMemoryAllocationSize,
+            .MaxUniformBufferRange = limits.maxUniformBufferRange,
+            .MaxPushConstantBytes = limits.maxPushConstantsSize,
+            .CBufferOffsetAlignment = limits.minUniformBufferOffsetAlignment};
+        caps.Features = {false, true, true, true, true};
+        for (size_t index = 0; index < deviceR->_queues.size(); ++index) {
+            const auto& queues = deviceR->_queues[index];
+            auto& queueCaps = caps.Queues[index];
+            queueCaps.CreatedCount = static_cast<uint32_t>(queues.size());
+            queueCaps.Dedicated = !queues.empty() && index != static_cast<size_t>(QueueType::Direct);
+            for (const auto& queue : queues) {
+                const auto& family = queueFamilyProps[queue->_family.Family];
+                const VkQueueFlags unwanted = index == static_cast<size_t>(QueueType::Copy)
+                                                  ? uint32_t{VK_QUEUE_GRAPHICS_BIT} | uint32_t{VK_QUEUE_COMPUTE_BIT}
+                                                  : uint32_t{VK_QUEUE_GRAPHICS_BIT};
+                queueCaps.Dedicated &= (family.queueFlags & unwanted) == 0;
+                if (index == static_cast<size_t>(QueueType::Direct) && family.timestampValidBits > 0) caps.Features.TimestampQueries = true;
+            }
+        }
+    }
+    {
+        DeviceDetail& detail = deviceR->_capabilities.Detail;
         const auto& props = selectPhyDevice.properties;
         detail.GpuName = props.deviceName;
         detail.CBufferAlignment = (uint32_t)deviceR->_properties.limits.minUniformBufferOffsetAlignment;
@@ -3676,6 +3750,7 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
         }
         RADRAY_INFO_LOG("Driver Version: {}", verStr);
     }
+    deviceR->_textureSupportCache = detail::CacheCommonTextureSupport(*deviceR);
     RADRAY_INFO_LOG("Physical Device Type: {}", selectPhyDevice.properties.deviceType);
     RADRAY_INFO_LOG("Queue:");
     for (size_t i = 0; i < deviceR->_queues.size(); ++i) {
@@ -3689,7 +3764,7 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
     RADRAY_INFO_LOG("Conservative Rasterization: {}", deviceR->_extProperties.conservativeRasterization.has_value() ? true : false);
     RADRAY_INFO_LOG(
         "Layered Rendering From Vertex Shader: {}",
-        deviceR->_detail.IsLayeredRenderingFromVertexShaderSupported);
+        deviceR->_capabilities.Detail.IsLayeredRenderingFromVertexShaderSupported);
     RADRAY_INFO_LOG("=============================");
     return deviceR;
 }
@@ -3935,6 +4010,7 @@ void CommandBufferVulkan::ResourceBarrier(std::span<const ResourceBarrierDescrip
     VkPipelineStageFlags dstStageMask = 0;
     vector<VkBufferMemoryBarrier> bufferBarriers;
     vector<VkImageMemoryBarrier> imageBarriers;
+    bool uavMemoryBarrier = false;
     bufferBarriers.reserve(barriers.size());
     imageBarriers.reserve(barriers.size());
     for (const auto& v : barriers) {
@@ -4009,18 +4085,41 @@ void CommandBufferVulkan::ResourceBarrier(std::span<const ResourceBarrierDescrip
             }
             srcStageMask |= srcStage;
             dstStageMask |= dstStage;
+        } else if (const auto* uav = std::get_if<BarrierUavDescriptor>(&v)) {
+            RADRAY_ASSERT(uav->Target->GetTag() == RenderObjectTag::Buffer || uav->Target->GetTag() == RenderObjectTag::Texture);
+            uavMemoryBarrier = true;
+            srcStageMask |= VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+            dstStageMask |= VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
         }
     }
-    if (bufferBarriers.size() > 0 || imageBarriers.size() > 0) {
+    if (!bufferBarriers.empty() || !imageBarriers.empty() || uavMemoryBarrier) {
+        const VkMemoryBarrier memory{VK_STRUCTURE_TYPE_MEMORY_BARRIER, nullptr,
+                                     VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT};
         _device->_ftb.vkCmdPipelineBarrier(
             _cmdBuffer,
             srcStageMask,
             dstStageMask,
             0,
-            0, nullptr,
+            uavMemoryBarrier ? 1u : 0u, uavMemoryBarrier ? &memory : nullptr,
             static_cast<uint32_t>(bufferBarriers.size()), bufferBarriers.size() == 0 ? nullptr : bufferBarriers.data(),
             static_cast<uint32_t>(imageBarriers.size()), imageBarriers.size() == 0 ? nullptr : imageBarriers.data());
     }
+}
+
+void CommandBufferVulkan::PushDebugGroup(std::string_view name) noexcept {
+    const auto& extensions = _device->_instance->_exts;
+    if (!vkCmdBeginDebugUtilsLabelEXT ||
+        std::find(extensions.begin(), extensions.end(), VK_EXT_DEBUG_UTILS_EXTENSION_NAME) == extensions.end()) return;
+    const string ownedName{name};
+    const VkDebugUtilsLabelEXT label{VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT, nullptr, ownedName.c_str(), {0.2f, 0.5f, 0.8f, 1.0f}};
+    vkCmdBeginDebugUtilsLabelEXT(_cmdBuffer, &label);
+}
+
+void CommandBufferVulkan::PopDebugGroup() noexcept {
+    const auto& extensions = _device->_instance->_exts;
+    if (!vkCmdEndDebugUtilsLabelEXT ||
+        std::find(extensions.begin(), extensions.end(), VK_EXT_DEBUG_UTILS_EXTENSION_NAME) == extensions.end()) return;
+    vkCmdEndDebugUtilsLabelEXT(_cmdBuffer);
 }
 
 // == 编码器 / RenderPass / Framebuffer ==
@@ -4137,7 +4236,7 @@ void CommandBufferVulkan::CopyBufferToTexture(Texture* dst_, SubresourceRange ds
                        dstRange.BaseArrayLayer, layerCount, arraySize);
         return;
     }
-    const uint64_t rowPitchAlignment = std::max<uint64_t>(1, _device->_detail.TextureDataPitchAlignment);
+    const uint64_t rowPitchAlignment = std::max<uint64_t>(1, _device->_capabilities.Detail.TextureDataPitchAlignment);
     VkImageAspectFlags aspectMask = ImageFormatToAspectFlags(dst->_rawFormat);
     uint64_t bufferOffset = srcOffset;
     for (uint32_t mip = 0; mip < mipLevels; mip++) {
@@ -4204,7 +4303,7 @@ void CommandBufferVulkan::CopyTextureToBuffer(Buffer* dst_, uint64_t dstOffset, 
                        srcRange.BaseArrayLayer, layerCount, arraySize);
         return;
     }
-    const uint64_t rowPitchAlignment = std::max<uint64_t>(1, _device->_detail.TextureDataPitchAlignment);
+    const uint64_t rowPitchAlignment = std::max<uint64_t>(1, _device->_capabilities.Detail.TextureDataPitchAlignment);
     VkImageAspectFlags aspectMask = ImageFormatToAspectFlags(src->_rawFormat);
     uint64_t bufferOffset = dstOffset;
     for (uint32_t mip = 0; mip < mipLevels; mip++) {

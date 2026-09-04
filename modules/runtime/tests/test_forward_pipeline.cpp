@@ -47,6 +47,7 @@ namespace {
 constexpr uint32_t kFrameCount = 4;
 enum class Scenario { Baseline,
                       ThreadedStress,
+                      OffscreenViews,
                       DestroyPrepared,
                       SnapshotValues,
                       NonCanonical,
@@ -70,7 +71,7 @@ MeshResource MakeQuadMeshResource() {
         QuadVertex{{1.0f, -1.0f, 0.0f}, {0.0f, 0.0f, -1.0f}, {1.0f, 1.0f}},
         QuadVertex{{1.0f, 1.0f, 0.0f}, {0.0f, 0.0f, -1.0f}, {1.0f, 0.0f}},
         QuadVertex{{-1.0f, 1.0f, 0.0f}, {0.0f, 0.0f, -1.0f}, {0.0f, 0.0f}}};
-    constexpr array<uint32_t, 6> indices{0, 1, 2, 0, 2, 3};
+    constexpr array<uint32_t, 6> indices{0, 2, 1, 0, 3, 2};
 
     MeshResource resource;
     resource.Name = "forward-pipeline-test-quad";
@@ -210,19 +211,22 @@ class ObservedForwardPipeline final : public RenderPipeline {
 public:
     ObservedForwardPipeline(unique_ptr<ForwardPipeline> forward,
                             std::function<bool(ForwardPipeline&, const AppUpdateContext&)> prepare,
-                            std::function<void(const ForwardPipeline&, uint32_t)> render)
-        : _forward(std::move(forward)), _prepare(std::move(prepare)), _render(std::move(render)) {}
-    void PrepareFrame(const AppUpdateContext& ctx, vector<StreamingAssetRefAny>& refs) override {
+                            std::function<void(const ForwardPipeline&, uint32_t)> render,
+                            std::function<void(RenderPrepareContext&)> extra = {})
+        : _forward(std::move(forward)), _prepare(std::move(prepare)), _render(std::move(render)), _extra(std::move(extra)) {}
+    void PrepareFrame(RenderPrepareContext& prepare) override {
+        const auto& ctx = prepare.App;
         _enabled[ctx.FlightIndex] = !_stopped;
         if (!_stopped) {
-            _forward->PrepareFrame(ctx, refs);
+            _forward->PrepareFrame(prepare);
+            if (_extra) _extra(prepare);
             _stopped = _prepare(*_forward, ctx);
         }
     }
     void Render(RenderPipelineContext& ctx) override {
-        if (_enabled[ctx.Frame.FlightIndex()]) {
+        if (_enabled[ctx.FlightIndex()]) {
             _forward->Render(ctx);
-            _render(*_forward, ctx.Frame.FlightIndex());
+            _render(*_forward, ctx.FlightIndex());
         }
     }
 
@@ -230,6 +234,7 @@ private:
     unique_ptr<ForwardPipeline> _forward;
     std::function<bool(ForwardPipeline&, const AppUpdateContext&)> _prepare;
     std::function<void(const ForwardPipeline&, uint32_t)> _render;
+    std::function<void(RenderPrepareContext&)> _extra;
     array<bool, 2> _enabled{};
     bool _stopped{false};
 };
@@ -355,10 +360,34 @@ protected:
             EXPECT_EQ(bindings->MaterialGroup, d3d12 ? 7u : 5u);
             EXPECT_EQ(bindings->ObjectGroup, d3d12 ? 9u : 8u);
         }
+        if (_scenario == Scenario::OffscreenViews) {
+            for (uint32_t i = 0; i < 2; ++i) {
+                auto target = render::test::MakeRenderTarget(GetDevice(), render::TextureFormat::RGBA8_UNORM, i ? 64 : 96, i ? 96 : 64,
+                                                             render::TextureUse::RenderTarget | render::TextureUse::Resource | render::TextureUse::CopySource);
+                ASSERT_TRUE(target);
+                _offscreenIds.push_back(GetRenderSystem()->GetOutputs().RegisterExternal({fmt::format("Forward Offscreen {}", i), target->Tex.get(), target->View.get()}));
+                ASSERT_TRUE(_offscreenIds.back().IsValid());
+                _offscreenViews.push_back(AllocateViewStateId());
+                _offscreenTargets.push_back(std::move(*target));
+            }
+        }
         GetRenderSystem()->SetPipeline(make_unique<ObservedForwardPipeline>(
             make_unique<ForwardPipeline>(this, GetWorld()->GetScene(), camera),
             [this](ForwardPipeline& pipeline, const AppUpdateContext& ctx) { return AfterPrepare(pipeline, ctx); },
-            [this](const ForwardPipeline& pipeline, uint32_t flight) { AfterRender(pipeline, flight); }));
+            [this](const ForwardPipeline& pipeline, uint32_t flight) { AfterRender(pipeline, flight); },
+            [this](RenderPrepareContext& prepare) {
+                if (_offscreenIds.empty()) return;
+                const RenderViewDesc source = GetRenderSystem()->GetFramePlan(prepare.App.FlightIndex).ViewFamilies.front().Views.front();
+                for (uint32_t i = 0; i < _offscreenIds.size(); ++i) {
+                    auto view = source;
+                    view.StateId = _offscreenViews[i];
+                    if (i == 1) {
+                        view.WorldToView(0, 3) -= 100;
+                        view.WorldPosition.x() += 100;
+                    }
+                    EXPECT_TRUE(prepare.Workloads.AddViewFamily({fmt::format("Offscreen {}", i), _offscreenIds[i], 1, {view}}));
+                }
+            }));
         _result->InitSucceeded = true;
     }
 
@@ -371,6 +400,10 @@ protected:
         }
 
         if (_scenario == Scenario::ThreadedStress && _result->MeshAssigned) {
+            if (_result->FramesRun != 0 && _result->FramesRun % 20 == 0) {
+                const bool large = (_result->FramesRun / 20) % 2 != 0;
+                GetWindowManager()->GetMainWindow()->GetNativeWindow()->SetSize(large ? 400 : 320, large ? 300 : 240);
+            }
             if (_result->FramesRun % 8 == 0) {
                 GetWorld()->DestroyActor(_meshActor.Get());
                 _meshActor = GetWorld()->SpawnActor<Actor>();
@@ -393,7 +426,7 @@ protected:
         if (_result->MeshAssigned) {
             ++_result->FramesRun;
         }
-        const uint32_t requiredFrames = _scenario == Scenario::ThreadedStress ? 64 : kFrameCount;
+        const uint32_t requiredFrames = _scenario == Scenario::ThreadedStress ? 220 : kFrameCount;
         if ((_result->FramesRun >= requiredFrames &&
              (_scenario != Scenario::DestroyPrepared || _result->ReleasedAfterDestruction)) ||
             _result->SawError) {
@@ -402,6 +435,54 @@ protected:
     }
 
     void OnShutdown() override {
+        if (_scenario == Scenario::ThreadedStress) {
+            for (uint32_t flight = 0; flight < 2; ++flight) {
+                const auto& stats = GetRenderSystem()->GetPoolStats(flight);
+                EXPECT_LE(stats.TextureCount, 2u);
+                EXPECT_GT(stats.Hits, 90u);
+            }
+        }
+        for (size_t i = 0; i < _offscreenTargets.size(); ++i) {
+            auto& target = _offscreenTargets[i];
+            const auto desc = target.Tex->GetDesc();
+            auto surface = GetRenderSystem()->GetOutputs().ResolveExternal(_offscreenIds[i]);
+            ASSERT_TRUE(surface);
+            EXPECT_EQ(surface->CurrentState, render::TextureState::ShaderRead);
+            const uint64_t row = Align(uint64_t{desc.Width} * 4, GetDevice()->GetDetail().TextureDataPitchAlignment);
+            auto readback = GetDevice()->CreateBuffer({row * desc.Height, render::MemoryType::ReadBack, render::BufferUse::CopyDestination | render::BufferUse::MapRead, {}});
+            auto queue = GetDevice()->GetCommandQueue(render::QueueType::Direct);
+            ASSERT_TRUE(readback);
+            ASSERT_TRUE(queue);
+            auto command = GetDevice()->CreateCommandBuffer(queue.Get());
+            ASSERT_TRUE(command);
+            command->Begin();
+            const render::ResourceBarrierDescriptor toCopy = render::BarrierTextureDescriptor{.Target = target.Tex.get(), .Before = surface->CurrentState, .After = render::TextureState::CopySource};
+            command->ResourceBarrier(std::span{&toCopy, 1});
+            command->CopyTextureToBuffer(readback.Get(), 0, target.Tex.get(), {0, 1, 0, 1});
+            const render::ResourceBarrierDescriptor host = render::BarrierBufferDescriptor{.Target = readback.Get(), .Before = render::BufferState::CopyDestination, .After = render::BufferState::HostRead};
+            command->ResourceBarrier(std::span{&host, 1});
+            command->End();
+            auto* raw = command.Get();
+            queue->Submit({.CmdBuffers = std::span{&raw, 1}});
+            queue->Wait();
+            auto* mapped = static_cast<const uint8_t*>(readback->Map(0, row * desc.Height));
+            ASSERT_NE(mapped, nullptr);
+            readback->InvalidateMappedRange({0, row * desc.Height});
+            const auto* pixel = mapped + row * (desc.Height / 2) + (desc.Width / 2) * 4;
+            if (i == 0) {
+                EXPECT_GT(pixel[0], pixel[1] * 2 + 10);
+                EXPECT_LT(pixel[1], 4);
+                EXPECT_LT(pixel[2], 4);
+            } else {
+                EXPECT_NEAR(pixel[0], .025f * 255, 1);
+                EXPECT_NEAR(pixel[1], .030f * 255, 1);
+                EXPECT_NEAR(pixel[2], .040f * 255, 1);
+            }
+            readback->Unmap();
+            EXPECT_TRUE(GetRenderSystem()->GetOutputs().Unregister(_offscreenIds[i]));
+            GetRenderSystem()->GetRenderPassRegistry()->RemoveFramebuffersUsing(target.View.get());
+        }
+        _offscreenTargets.clear();
         if (_program != nullptr) {
             _result->PipelineStateCount = _program->GetGraphicsPipelineStateCount();
         }
@@ -441,12 +522,18 @@ private:
         _expectedMaterial[ctx.FlightIndex] = {bytes.begin(), bytes.end()};
         ShaderParameterStorage values{&material.Program.Get()->GetParameterLayout()};
         bool warned = false;
-        EXPECT_TRUE(forward_detail::FillViewParameters(values, input, 320.0f / 240.0f, warned));
+        const auto& family = GetRenderSystem()->GetFramePlan(ctx.FlightIndex).ViewFamilies.front();
+        auto output = GetRenderSystem()->GetOutputs().Find(family.Output);
+        if (!output) return false;
+        string reason;
+        auto resolved = ResolveRenderViewFamily(family, *output, 0, GetDevice()->GetCapabilities().Limits.MaxTexture2DDimension, reason);
+        if (!resolved) return false;
+        EXPECT_TRUE(forward_detail::FillViewParameters(values, input, resolved->Views.front(), warned));
         const auto view = values.GetBufferData(bindings->ViewBufferIndex);
         _expectedView[ctx.FlightIndex] = {view.begin(), view.end()};
         if (_scenario == Scenario::SnapshotValues) {
             if (_mutated) {
-                EXPECT_TRUE(input.Camera.EyePosition.isApprox(Eigen::Vector3f{1, 0, -4}));
+                EXPECT_TRUE(resolved->Views.front().WorldPosition.isApprox(Eigen::Vector3f{1, 0, -4}));
                 const auto* color = material.Program.Get()->GetParameterLayout().Find("BaseColor");
                 Eigen::Vector4f packed;
                 std::memcpy(packed.data(), bytes.data() + color->ByteOffset, sizeof(float) * 4);
@@ -491,7 +578,13 @@ private:
         EXPECT_EQ((vector<byte>{bytes.begin(), bytes.end()}), _expectedMaterial[flight]);
         ShaderParameterStorage values{&material.Program.Get()->GetParameterLayout()};
         bool warned = false;
-        EXPECT_TRUE(forward_detail::FillViewParameters(values, input, 320.0f / 240.0f, warned));
+        const auto& family = GetRenderSystem()->GetFramePlan(flight).ViewFamilies.front();
+        auto output = GetRenderSystem()->GetOutputs().Find(family.Output);
+        if (!output) return;
+        string reason;
+        auto resolved = ResolveRenderViewFamily(family, *output, 0, GetDevice()->GetCapabilities().Limits.MaxTexture2DDimension, reason);
+        if (!resolved) return;
+        EXPECT_TRUE(forward_detail::FillViewParameters(values, input, resolved->Views.front(), warned));
         const auto view = values.GetBufferData(bindings->ViewBufferIndex);
         EXPECT_EQ((vector<byte>{view.begin(), view.end()}), _expectedView[flight]);
         EXPECT_NE(input.Draws.front().Geometry->Vbv.Target, nullptr);
@@ -607,6 +700,9 @@ private:
 
     ForwardPipelineRunResult* _result;
     Scenario _scenario;
+    vector<render::test::RenderTarget> _offscreenTargets;
+    vector<RenderOutputId> _offscreenIds;
+    vector<ViewStateId> _offscreenViews;
     Nullable<CameraComponent*> _camera{nullptr};
     StreamingAssetRef<TextureAsset> _secondTexture;
     array<vector<byte>, 2> _expectedMaterial;
@@ -666,7 +762,8 @@ void RunForwardPipeline(render::RenderBackend backend, Scenario scenario = Scena
     // constants packed, the material set prepared and the draw loop reached
     // GetOrCreateGraphicsPipelineState. One key per (material, geometry, pass).
     const bool invalid = scenario == Scenario::MissingObject || scenario == Scenario::NonDynamic;
-    EXPECT_EQ(result.PipelineStateCount, invalid ? 0u : 1u);
+    EXPECT_EQ(result.PipelineStateCount, invalid ? 0u : scenario == Scenario::OffscreenViews ? 2u
+                                                                                             : 1u);
     EXPECT_TRUE(logs.Errors().empty()) << logs.Errors();
     EXPECT_EQ(logs.DescriptorRewrites.load(), 0u);
     EXPECT_EQ(logs.IncompatiblePrograms.load(), invalid ? 1u : 0u);
@@ -674,7 +771,7 @@ void RunForwardPipeline(render::RenderBackend backend, Scenario scenario = Scena
         EXPECT_TRUE(result.SnapshotRendered.load());
     }
     if (scenario == Scenario::ThreadedStress) {
-        EXPECT_GE(result.FramesRun, 64u);
+        EXPECT_GE(result.FramesRun, 220u);
     }
     if (scenario == Scenario::DestroyPrepared) {
         EXPECT_TRUE(result.RetainedAfterDestruction);
@@ -724,6 +821,8 @@ TEST(RadRayRuntimeForwardPipeline, VulkanDrawsCollectedMeshThroughForwardPipelin
 #endif
 
 TEST(RadRayRuntimeForwardPipeline, D3D12MultithreadedDrawsWhileGameStateChanges) { RunForwardPipeline(render::RenderBackend::D3D12, Scenario::ThreadedStress); }
+TEST(RadRayRuntimeForwardPipeline, D3D12OffscreenViewsHaveIndependentPreparedDraws) { RunForwardPipeline(render::RenderBackend::D3D12, Scenario::OffscreenViews); }
+TEST(RadRayRuntimeForwardPipeline, VulkanOffscreenViewsHaveIndependentPreparedDraws) { RunForwardPipeline(render::RenderBackend::Vulkan, Scenario::OffscreenViews); }
 TEST(RadRayRuntimeForwardPipeline, VulkanMultithreadedDrawsWhileGameStateChanges) { RunForwardPipeline(render::RenderBackend::Vulkan, Scenario::ThreadedStress); }
 TEST(RadRayRuntimeForwardPipeline, PreparedFrameSurvivesActorAndMaterialDestruction) { RunForwardPipeline(render::RenderBackend::D3D12, Scenario::DestroyPrepared); }
 TEST(RadRayRuntimeForwardPipeline, VulkanPreparedFrameSurvivesActorAndMaterialDestruction) { RunForwardPipeline(render::RenderBackend::Vulkan, Scenario::DestroyPrepared); }

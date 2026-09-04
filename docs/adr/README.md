@@ -106,4 +106,5 @@ docs/adr/*.md
 | [0050](0050-sample-assets-ship-outside-the-source-repository.md) | 样例与测试资产在源码仓库之外分发 | 生效 |
 | [0051](0051-root-signature-policy-and-target-layout-resolution.md) | RootSignature policy 经 target layout resolution 映射到 D3D12 与 Vulkan | 生效 |
 | [0052](0052-qualified-shader-parameter-paths-on-ambiguity.md) | Shader 参数以声明限定路径消歧，唯一叶名保留为简写 | 生效 |
-| [0053](0053-runtime-pipelines-consume-per-flight-value-snapshots.md) | Runtime pipeline 通过 per-flight 值快照跨越线程边界 | 生效 |
+| [0053](0053-runtime-pipelines-consume-per-flight-value-snapshots.md) | Runtime pipeline 通过 per-flight 值快照跨越线程边界 | 部分被 ADR-0054 取代 |
+| [0054](0054-explicit-workloads-and-single-queue-render-graph.md) | 显式 workload 与单队列 RenderGraph | 生效 |

@@ -9,7 +9,7 @@
 | 系统 | 负责 | 不负责 |
 |---|---|---|
 | `GpuSystem` | **何时画**。instance/factory/device/主队列/fence、flight 槽位、上传器、帧 profiler、帧边界等待表 | 画什么 |
-| `RenderSystem` | **画什么**。当前 pipeline、program/artifact cache、RenderPass/Framebuffer registry、game-thread Scene 与 per-flight asset refs | GPU 提交时序 |
+| `RenderSystem` | **画什么**。pipeline、workload/output、graph pools/history、program/artifact cache、RenderPass/Framebuffer registry、game-thread Scene 与 per-flight asset refs | GPU 提交时序 |
 | `WindowManager` | 窗口创建/销毁、swapchain acquire/present/recreate、事件分发 | — |
 | `Application` | 固化帧序与关停顺序；游戏侧的窄扩展点 | — |
 
@@ -18,15 +18,15 @@
 ```
 Application::StartLoop
   ├─ BeginUpdateForFlight(flight)     取得该 flight 的可写槽位；PumpWaitFrame
-  ├─ RenderSystem::BeginUpdateForFlight 清除该 flight 上一帧的 retained asset refs
+  ├─ RenderSystem::BeginUpdateForFlight 清除该 flight 上一帧的 retained asset refs 和 frame plan
   ├─ AssetManager::Pump               提交加载结果；销毁零引用资产
   ├─ Application::OnUpdate            游戏逻辑
   ├─ World::Tick
-  ├─ RenderSystem::PrepareFrame        game thread 复制当前 flight 的 pipeline input
+  ├─ RenderSystem::PrepareFrame        game thread 复制 pipeline input 并构造 view families
   ├─ GpuSystem::BeginFrameRecord      取/建 CommandBuffer 并 Begin()；清上帧 targets
   │    ├─ upload phase                FrameUploadScheduler 恢复等待帧顶的协程
   │    └─ GpuFrameProfiler::BeginFrame
-  ├─ Application::Render              → RenderSystem::Render → RenderPipeline::Render
+  ├─ Application::Render              → pool/history BeginFlight → output/view resolve → pipeline graph → host finalize
   └─ GpuSystem::EndFrameRecordAndSubmit
        uploader.EndFlight → CmdBuffer.End → 聚合 sync object → Submit
        → 写 flight.Signal → Present 全部 target
@@ -145,6 +145,15 @@ RenderSystem 的每个 flight 保存一张 StreamingAssetRefAny vector。game th
 render thread 不操作引用计数，只读取 pipeline 私有值快照和被保活的 immutable asset payload。
 Forward 的 frame-local sets 在下次录制复用时先销毁，再重置或裁减 arena；不会改写旧 backing set。
 
+`RenderGraphRuntime` 的每个 flight 独立持有 texture/buffer/view pool。`RenderSystem::Render` 开始时，
+该 flight 的 fence 已完成，才调用 pool `BeginFlight` trim/复用。`EndGraph` 不提前释放 GPU 对象。
+物理 resource states 保存至下次使用，transient 逻辑内容仍从无效开始。
+
+`ViewStateRegistry` 在 render thread 跟踪稳定 view 身份和 history generations。替换/长期闲置的
+generation 进入当前 flight retire bin，到同 flight 下次安全 Begin 才销毁。view 销毁前先调用
+`RemoveFramebuffersUsing`。这依赖既有单 Direct queue 提交顺序，不新增 fence 或同步协议。
+精确 key、内容提交和失败恢复规则见 [Renderer foundation](renderer-foundation.md)。
+
 ## 帧 profiler
 
 `GpuFrameProfiler` 对应 UE5 的 `FGPUTiming`（最小化）：per-flight timestamp pool + readback。
@@ -159,7 +168,9 @@ Forward 的 frame-local sets 在下次录制复用时先销毁，再重置或裁
 成功时把 `SwapChainFrame` 收进本帧 `FlightSlot`，返回 `AppFrameTarget`
 （backbuffer + view + index）。
 
-**`AcquireWindow` 不录任何 barrier。** backbuffer 的初始翻转与 →Present 收尾由 RenderSystem 宿主统一显式录。`AppFrameTarget` 也**不暴露同步对象**——sync object 是提交细节，由 runtime 独占。
+**`AcquireWindow` 不录任何 barrier。** 只有 workload 请求的 output 会被 acquire。graph 使用 backbuffer
+真实初态；RenderSystem 对未写目标 fallback clear，并从实际末态收口到 Present。`AppFrameTarget`
+只在 host 内部流动，也不暴露同步对象。离屏 external output 不参与 acquire/present，末态写回 output registry。
 
 交换链尺寸变化时后备缓冲 view 会重建，此时必须调
 `RenderPassRegistry::RemoveFramebuffersUsing(oldView)`：framebuffer 存的是 `TextureView`
@@ -175,7 +186,7 @@ OnShutdown();                                  // 游戏侧释放自管 per-flig
 _scheduler.CancelAll();
 _world.reset();                    // Actor → SceneProxy → drop StreamingAssetRef
 _windowManager->SetRenderSystem(nullptr);  // RenderPassRegistry 即将销毁，先断引用
-_renderSystem.reset();             // 拆 pipeline/retained refs/program，须长于 World 的拆解
+_renderSystem.reset();             // pipeline → graph pools → view states → refs/program → registry
 _assetManager.reset();             // 放开全部资产，GPU buffer 须在 device 前释放
 _assetDatabase.reset();            // importer/settings 活过 manager 的在飞 task
 _windowManager->DetachAllSwapChains();

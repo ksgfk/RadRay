@@ -514,8 +514,10 @@ public:
             deltaTime,
             gpuSystem->GetLastFrameLatency(),
             isInModalLoop);
+        _app->GetRenderSystem()->GetOutputs().SetRenderIdle(false);
         _app->Render(frameCtx);
         gpuSystem->EndFrameRecordAndSubmit(flightIndex);
+        _app->GetRenderSystem()->GetOutputs().SetRenderIdle(true);
         gpuSystem->AdvanceFrameIndex();
     }
 
@@ -603,6 +605,8 @@ public:
             _renderThread.join();
         }
 
+        _app->GetRenderSystem()->GetOutputs().SetRenderIdle(true);
+
         _modalLoopTickConnection.disconnect();
 
         AppShutdownContext ctx{};
@@ -683,6 +687,7 @@ public:
 
         const uint64_t frameIndex = gpuSystem->GetFrameIndex();
         const uint32_t flightIndex = static_cast<uint32_t>(frameIndex % gpuSystem->GetFlightDataCount());
+        _app->GetRenderSystem()->GetOutputs().SetRenderIdle(true);
         gpuSystem->BeginUpdateForFlight(flightIndex);
 
         const auto now = std::chrono::steady_clock::now();
@@ -704,6 +709,7 @@ public:
         CheckRecreateSwapChains();
 
         gpuSystem->AdvanceFrameIndex();
+        _app->GetRenderSystem()->GetOutputs().SetRenderIdle(false);
         _readySlotsSemaphore.release();
         return frameIndex + 1;
     }
@@ -724,6 +730,7 @@ public:
     void WaitRenderThreadIdle() {
         WaitRenderFrameComplete(_app->GetGpuSystem()->GetFrameIndex());
         RetireRenderedFrames(true, false);
+        _app->GetRenderSystem()->GetOutputs().SetRenderIdle(true);
     }
 
     void RetireRenderedFrames(bool waitForPendingFrames, bool waitWhenFrameSlotsFull) {
@@ -818,6 +825,7 @@ int Application::Shutdown(const AppShutdownContext& ctx) {
     if (_gpuSystem != nullptr) {
         _gpuSystem->WaitAndCleanupCompletedFlights();
     }
+    if (_renderSystem != nullptr) _renderSystem->GetOutputs().SetRenderIdle(true);
     // 游戏侧清理:释放自管 per-flight 资源、置空指向 World 的非 owning 指针。
     OnShutdown();
     _scheduler.CancelAll();

@@ -28,6 +28,8 @@ RenderSystem::RenderSystem(Application* app) noexcept
 RenderSystem::~RenderSystem() noexcept {
     ReleaseAllScenes();
     _pipeline.reset();
+    _graphRuntime.reset();
+    _viewStates.reset();
     _retainedAssets.clear();
     _shaderPrograms.clear();
     _shaderJit.reset();
@@ -44,7 +46,11 @@ void RenderSystem::OnInitialize() {
     }
 
     _retainedAssets.resize(gpu->GetFlightDataCount());
+    _framePlans.resize(gpu->GetFlightDataCount());
+    _graphReports.resize(gpu->GetFlightDataCount());
     _renderPassRegistry = make_unique<render::RenderPassRegistry>(device);
+    _graphRuntime = make_unique<RenderGraphRuntime>(*device, *_renderPassRegistry, gpu->GetFlightDataCount());
+    _viewStates = make_unique<ViewStateRegistry>(*device, *_renderPassRegistry, gpu->GetFlightDataCount());
     _shaderJit = make_unique<ShaderJit>(_app->GetShaderIncludePaths());
 }
 
@@ -308,133 +314,120 @@ void RenderSystem::SetPipeline(unique_ptr<RenderPipeline> pipeline) noexcept {
 void RenderSystem::BeginUpdateForFlight(uint32_t flightIndex) {
     RADRAY_ASSERT(flightIndex < _retainedAssets.size());
     _retainedAssets[flightIndex].clear();
+    _framePlans[flightIndex].Reset();
 }
 
 void RenderSystem::PrepareFrame(const AppUpdateContext& ctx) {
     RADRAY_ASSERT(ctx.FlightIndex < _retainedAssets.size());
-    if (_pipeline != nullptr) {
-        _pipeline->PrepareFrame(ctx, _retainedAssets[ctx.FlightIndex]);
-    }
+    auto outputs = _outputs.GetGameThreadInfos();
+    auto* windows = _app->GetWindowManager();
+    for (auto& output : outputs)
+        if (output.Kind == RenderOutputKind::Presentation) {
+            for (size_t i = 0; i < windows->GetWindowCount(); ++i) {
+                auto* window = windows->GetWindow(i);
+                if (window->GetRenderOutputId() == output.Id) output.Active = output.Active && !window->IsMinimized();
+            }
+        }
+    RenderWorkloadBuilder workloads(_framePlans[ctx.FlightIndex], outputs);
+    RenderPrepareContext prepare{ctx, outputs, workloads, _retainedAssets[ctx.FlightIndex]};
+    if (_pipeline)
+        _pipeline->PrepareFrame(prepare);
+    else
+        workloads.AddPresentationOutputs();
+    for (const auto& diagnostic : _framePlans[ctx.FlightIndex].Diagnostics) RADRAY_ERR_LOG("Render workload: {}", diagnostic);
 }
 
 void RenderSystem::Render(AppFrameContext& ctx) {
-    if (_app == nullptr || _app->GetWindowManager() == nullptr) {
-        return;
-    }
-
-    vector<RenderPipelineTarget> targets;
-    WindowManager* windowManager = _app->GetWindowManager();
-    targets.reserve(windowManager->GetWindowCount());
-    const size_t windowCount = windowManager->GetWindowCount();
-    for (size_t i = 0; i < windowCount; ++i) {
-        AppWindow* window = windowManager->GetWindow(i);
-        if (window == nullptr || window->GetSwapChain() == nullptr || window->IsMinimized()) {
+    if (!_graphRuntime || !_viewStates) return;
+    const uint32_t flight = ctx.FlightIndex();
+    const uint64_t serial = ++_frameSerial;
+    auto& pool = _graphRuntime->BeginFlight(flight, serial);
+    _viewStates->BeginFlight(flight, serial);
+    auto& report = _graphReports[flight];
+    report = {};
+    vector<RenderSurfaceFrame> surfaces;
+    struct Presentation {
+        uint32_t Surface;
+        AppFrameTarget Target;
+    };
+    vector<Presentation> presentations;
+    vector<ResolvedRenderViewFamily> families;
+    auto* windows = _app->GetWindowManager();
+    for (uint32_t index = 0; index < _framePlans[flight].ViewFamilies.size(); ++index) {
+        const auto& requested = _framePlans[flight].ViewFamilies[index];
+        const auto known = _outputs.Find(requested.Output);
+        RenderOutputInfo info = known ? *known : RenderOutputInfo{.Id = requested.Output};
+        info.Active = false;
+        if (known && known->Active) {
+            if (known->Kind == RenderOutputKind::ExternalColorTexture) {
+                auto surface = _outputs.ResolveExternal(requested.Output);
+                if (surface) {
+                    surfaces.push_back(*surface);
+                    info.Active = true;
+                }
+            } else {
+                for (size_t w = 0; w < windows->GetWindowCount(); ++w) {
+                    auto* window = windows->GetWindow(w);
+                    if (window->GetRenderOutputId() != requested.Output || window->IsMinimized() || !window->GetSwapChain()) continue;
+                    auto target = ctx.AcquireWindow(window);
+                    if (!target) break;
+                    const auto desc = target->BackBuffer->GetDesc();
+                    presentations.push_back({static_cast<uint32_t>(surfaces.size()), *target});
+                    surfaces.push_back({requested.Output, target->BackBuffer, target->BackBufferView, desc,
+                                        window->GetBackBufferState(target->BackBufferIndex), render::TextureState::Present, false, false});
+                    info.Width = desc.Width;
+                    info.Height = desc.Height;
+                    info.Format = desc.Format;
+                    info.SampleCount = desc.SampleCount;
+                    info.Active = true;
+                    break;
+                }
+            }
+        }
+        string reason;
+        auto family = ResolveRenderViewFamily(requested, info, index, ctx.GetDevice()->GetCapabilities().Limits.MaxTexture2DDimension, reason);
+        if (!family) {
+            RADRAY_ERR_LOG("View family '{}': {}", requested.Name, reason);
+            families.push_back({.FrameLocalIndex = index, .Name = requested.Name, .OutputId = requested.Output});
             continue;
         }
-        std::optional<AppFrameTarget> target = ctx.AcquireWindow(window);
-        if (!target.has_value()) {
-            continue;
-        }
-        targets.emplace_back(RenderPipelineTarget{
-            .Target = target.value(),
-            .State = window->GetBackBufferState(target->BackBufferIndex),
-            .ContentDrawn = false});
+        for (auto& view : family->Views) _viewStates->Resolve(view, *family);
+        families.push_back(std::move(*family));
     }
-    if (targets.empty()) {
-        return;
+    RenderPipelineContext pipelineContext(ctx, pool, *_renderPassRegistry, *_viewStates, serial, families, surfaces, report);
+    if (_pipeline) _pipeline->Render(pipelineContext);
+    for (auto& surface : surfaces) {
+        if (!surface.Written) ClearTarget(ctx, surface);
+        TransitionSurface(ctx, surface, surface.RequiredFinalState);
+        _outputs.CommitExternalState(surface);
     }
-
-    for (RenderPipelineTarget& target : targets) {
-        EnsureRenderTargetState(ctx, target);
-    }
-    if (_pipeline != nullptr) {
-        RenderPipelineContext pipelineCtx{ctx, targets};
-        _pipeline->Render(pipelineCtx);
-    }
-    for (RenderPipelineTarget& target : targets) {
-        if (!target.ContentDrawn) {
-            ClearTarget(ctx, target);
-        }
-        EnsurePresentState(ctx, target);
+    for (const auto& presentation : presentations) {
+        presentation.Target.Window->SetBackBufferState(presentation.Target.BackBufferIndex, surfaces[presentation.Surface].CurrentState);
     }
 }
 
-void RenderSystem::ClearTarget(AppFrameContext& ctx, RenderPipelineTarget& target) {
-    if (target.Target.BackBufferView == nullptr) {
-        return;
-    }
-
-    render::RenderPassRegistry* registry = _renderPassRegistry.get();
-    if (registry == nullptr || target.Target.BackBuffer == nullptr) {
-        return;
-    }
-    const render::TextureDescriptor texture = target.Target.BackBuffer->GetDesc();
-    render::RenderPassColorAttachmentDescriptor colorAttachment{
-        .Format = texture.Format,
-        .SampleCount = texture.SampleCount,
-        .Load = render::LoadAction::Clear,
-        .Store = render::StoreAction::Store};
-    render::RenderPassDescriptor renderPassDesc{
-        .ColorAttachments = std::span{&colorAttachment, 1}};
-    auto passOpt = registry->GetOrCreateRenderPass(renderPassDesc);
-    render::TextureView* colorView = target.Target.BackBufferView;
-    auto framebufferOpt = Nullable<render::Framebuffer*>{};
-    if (passOpt.HasValue()) {
-        const render::FramebufferDescriptor framebufferDesc{
-            .Pass = passOpt.Get(),
-            .ColorAttachments = std::span<render::TextureView* const>{&colorView, 1},
-            .DepthStencilAttachment = nullptr,
-            .Width = texture.Width,
-            .Height = texture.Height};
-        framebufferOpt = registry->GetOrCreateFramebuffer(framebufferDesc);
-    }
-    if (!passOpt.HasValue() || !framebufferOpt.HasValue()) {
-        return;
-    }
-    const render::ColorClearValue clearValue{{0.08f, 0.10f, 0.14f, 1.0f}};
-    render::RenderPassBeginDescriptor beginDesc{
-        .Pass = passOpt.Get(),
-        .Target = framebufferOpt.Get(),
-        .ColorClearValues = std::span{&clearValue, 1},
-        .Name = "Fallback Clear"};
-    auto encoderOpt = ctx.GetCommandBuffer()->BeginRenderPass(beginDesc);
-    if (encoderOpt.HasValue()) {
-        auto encoder = encoderOpt.Release();
-        ctx.GetCommandBuffer()->EndRenderPass(std::move(encoder));
-        target.ContentDrawn = true;
+void RenderSystem::ClearTarget(AppFrameContext& ctx, RenderSurfaceFrame& target) {
+    const render::RenderPassColorAttachmentDescriptor attachment{target.Desc.Format, target.Desc.SampleCount, render::LoadAction::Clear, render::StoreAction::Store};
+    auto pass = _renderPassRegistry->GetOrCreateRenderPass({std::span{&attachment, 1}, {}});
+    if (!pass) return;
+    auto* view = target.ColorAttachmentView;
+    auto framebuffer = _renderPassRegistry->GetOrCreateFramebuffer({pass.Get(), std::span{&view, 1}, nullptr, target.Desc.Width, target.Desc.Height, 1});
+    if (!framebuffer) return;
+    TransitionSurface(ctx, target, render::TextureState::RenderTarget);
+    const render::ColorClearValue clear{{.08f, .10f, .14f, 1}};
+    auto encoder = ctx.GetCommandBuffer()->BeginRenderPass({pass.Get(), framebuffer.Get(), std::span{&clear, 1}, {}, "Fallback Clear"});
+    if (encoder) {
+        ctx.GetCommandBuffer()->EndRenderPass(encoder.Release());
+        target.Written = true;
     }
 }
 
-void RenderSystem::EnsureRenderTargetState(AppFrameContext& ctx, RenderPipelineTarget& target) {
-    if (target.Target.BackBuffer == nullptr || target.State == render::TextureState::RenderTarget) {
-        return;
-    }
-
-    render::ResourceBarrierDescriptor toRenderTarget = render::BarrierTextureDescriptor{
-        .Target = target.Target.BackBuffer,
-        .Before = target.State,
-        .After = render::TextureState::RenderTarget};
-    ctx.GetCommandBuffer()->ResourceBarrier(std::span{&toRenderTarget, 1});
-    target.State = render::TextureState::RenderTarget;
+void RenderSystem::TransitionSurface(AppFrameContext& ctx, RenderSurfaceFrame& target, render::TextureStates state) {
+    if (target.CurrentState == state) return;
+    const render::ResourceBarrierDescriptor barrier = render::BarrierTextureDescriptor{.Target = target.Texture, .Before = target.CurrentState, .After = state};
+    ctx.GetCommandBuffer()->ResourceBarrier(std::span{&barrier, 1});
+    target.CurrentState = state;
 }
-
-void RenderSystem::EnsurePresentState(AppFrameContext& ctx, RenderPipelineTarget& target) {
-    AppWindow* window = target.Target.Window;
-    if (window == nullptr || target.Target.BackBuffer == nullptr) {
-        return;
-    }
-
-    if (target.State != render::TextureState::Present) {
-        render::ResourceBarrierDescriptor toPresent = render::BarrierTextureDescriptor{
-            .Target = target.Target.BackBuffer,
-            .Before = target.State,
-            .After = render::TextureState::Present};
-        ctx.GetCommandBuffer()->ResourceBarrier(std::span{&toPresent, 1});
-        target.State = render::TextureState::Present;
-    }
-    window->SetBackBufferState(target.Target.BackBufferIndex, render::TextureState::Present);
-}
-
 Scene* RenderSystem::AllocateScene() {
     auto scene = make_unique<Scene>();
     Scene* ptr = scene.get();

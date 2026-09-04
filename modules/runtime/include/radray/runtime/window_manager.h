@@ -8,6 +8,7 @@
 #include <radray/render/rhi.h>
 #include <radray/window/native_window.h>
 #include <radray/runtime/service_registry.h>
+#include <radray/runtime/render_framework/render_output.h>
 
 namespace radray {
 
@@ -56,6 +57,7 @@ public:
     NativeWindow* GetNativeWindow() const noexcept;
     render::SwapChain* GetSwapChain() const noexcept;
     bool IsMainWindow() const noexcept;
+    RenderOutputId GetRenderOutputId() const noexcept { return _outputId; }
     render::TextureView* GetOrCreateBackBufferView(const render::SwapChainFrame& frame) noexcept;
     /// 读 / 写指定 backbuffer 索引的遗留状态(供起始/收尾 barrier 使用)。
     render::TextureStates GetBackBufferState(uint32_t backBufferIndex) const noexcept;
@@ -79,6 +81,7 @@ private:
     vector<BackBufferView> _backBufferViews;
     std::atomic_bool _requestRecreateSwapChain{false};
     bool _isMain{false};
+    RenderOutputId _outputId;
 };
 
 class WindowManager {

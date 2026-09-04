@@ -9,6 +9,7 @@
 #include <radray/runtime/gpu_resource.h>
 #include <radray/render/render_pass_registry.h>
 #include <radray/runtime/render_framework/render_pipeline.h>
+#include <radray/runtime/render_framework/render_graph_runtime.h>
 #include <radray/runtime/render_framework/scene.h>
 #include <radray/runtime/shader_jit.h>
 #include <radray/shader/shader_compiler_contract.h>
@@ -64,6 +65,10 @@ public:
     RenderPipeline* GetPipeline() const noexcept { return _pipeline.get(); }
     /// RenderPass / Framebuffer 复用缓存。OnInitialize 之前或 device 缺失时为空。
     render::RenderPassRegistry* GetRenderPassRegistry() const noexcept { return _renderPassRegistry.get(); }
+    RenderOutputRegistry& GetOutputs() noexcept { return _outputs; }
+    const RenderGraphExecutionReport& GetGraphReport(uint32_t flight) const { return _graphReports[flight]; }
+    const RenderFramePlan& GetFramePlan(uint32_t flight) const { return _framePlans[flight]; }
+    const RenderResourcePoolStats& GetPoolStats(uint32_t flight) const { return _graphRuntime->GetPoolStats(flight); }
 
     Nullable<ShaderProgram*> GetOrCreateShaderProgram(const ShaderProgramRequest& request);
 
@@ -126,12 +131,17 @@ private:
         const ShaderProgramRequest& request,
         ArtifactKey key);
 
-    void EnsureRenderTargetState(AppFrameContext& ctx, RenderPipelineTarget& target);
-    void ClearTarget(AppFrameContext& ctx, RenderPipelineTarget& target);
-    void EnsurePresentState(AppFrameContext& ctx, RenderPipelineTarget& target);
+    void TransitionSurface(AppFrameContext& ctx, RenderSurfaceFrame& target, render::TextureStates state);
+    void ClearTarget(AppFrameContext& ctx, RenderSurfaceFrame& target);
 
     Application* _app{nullptr};
     unique_ptr<render::RenderPassRegistry> _renderPassRegistry;
+    RenderOutputRegistry _outputs;
+    vector<RenderFramePlan> _framePlans;
+    vector<RenderGraphExecutionReport> _graphReports;
+    unique_ptr<RenderGraphRuntime> _graphRuntime;
+    unique_ptr<ViewStateRegistry> _viewStates;
+    uint64_t _frameSerial{0};
     unique_ptr<ShaderJit> _shaderJit;
     unordered_map<ArtifactKey, ArtifactRecord, ArtifactKeyHash> _shaderArtifacts;
     unordered_map<ProgramKey, ProgramRecord, ProgramKeyHash> _shaderPrograms;
