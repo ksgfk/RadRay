@@ -6,9 +6,13 @@
 
 namespace radray {
 
+namespace forward_detail {
+struct ForwardFrameInput;
+struct ForwardPipelineTestAccess;
+}  // namespace forward_detail
+
 class Application;
 class CameraComponent;
-class ForwardDrawPass;
 class Scene;
 
 class ForwardPipeline final : public RenderPipeline {
@@ -19,33 +23,19 @@ public:
         CameraComponent* camera);
     ~ForwardPipeline() noexcept override;
 
-    static constexpr BindingGroupPlan GetBindingGroupPlan() noexcept {
-        return BindingGroupPlan{0, 1, 2};
-    }
+    void PrepareFrame(const AppUpdateContext& ctx, vector<StreamingAssetRefAny>& retainedAssets) override;
+    void Render(RenderPipelineContext& ctx) override;
 
     // The pipeline uploads its view, material, and object constant buffers out of a per-frame
     // arena, so each of those declarations has to take its offset at bind time: a root descriptor
     // on D3D12 and a dynamic uniform buffer descriptor on Vulkan.
     static render::ShaderProgramLayoutRecipe GetLayoutRecipe() noexcept;
 
-protected:
-    void OnBeginFrame(RenderPipelineContext& ctx) override;
-    void OnBuildCameraList(
-        RenderPipelineContext& ctx,
-        RenderCameraList& cameras) override;
-    void OnAddRenderPasses(
-        RenderPipelineContext& ctx,
-        const RenderCamera& camera) override;
-
 private:
-    friend class ForwardDrawPass;
+    friend struct forward_detail::ForwardPipelineTestAccess;
+    const forward_detail::ForwardFrameInput& GetFrameInput(uint32_t flightIndex) const noexcept;
 
     struct Impl;
-
-    bool ExecutePreparedPass(
-        RenderPipelineContext& ctx,
-        const RenderCamera& camera,
-        bool transparent);
 
     unique_ptr<Impl> _impl;
 };

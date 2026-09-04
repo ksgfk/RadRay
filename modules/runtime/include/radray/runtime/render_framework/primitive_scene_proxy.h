@@ -11,6 +11,7 @@
 namespace radray {
 
 class Material;
+class StreamingAssetRefAny;
 
 /// 一次索引绘制的参数 (对应 UE5 的 FMeshBatchElement 的索引子集)。
 /// 【Geometry 的保命责任在 proxy】它指进 StaticMesh 持有的 GpuMesh, 所以覆写 GetDrawArgs 的
@@ -32,6 +33,9 @@ public:
     PrimitiveSceneProxy& operator=(const PrimitiveSceneProxy&) = delete;
     PrimitiveSceneProxy& operator=(PrimitiveSceneProxy&&) = delete;
     virtual ~PrimitiveSceneProxy() noexcept;
+
+    /// Game thread: retain every asset owning geometry exposed by this proxy.
+    virtual void CollectAssetReferences(vector<StreamingAssetRefAny>& out) const;
 
     uint64_t GetGeneration() const noexcept { return _generation; }
 

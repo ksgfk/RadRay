@@ -51,6 +51,9 @@ public:
 
     void SetPipeline(unique_ptr<RenderPipeline> pipeline) noexcept;
 
+    /// Game thread; the runner has made this flight writable after GPU completion.
+    void BeginUpdateForFlight(uint32_t flightIndex);
+    void PrepareFrame(const AppUpdateContext& ctx);
     void Render(AppFrameContext& ctx);
 
     Scene* AllocateScene();
@@ -124,6 +127,7 @@ private:
         ArtifactKey key);
 
     void EnsureRenderTargetState(AppFrameContext& ctx, RenderPipelineTarget& target);
+    void ClearTarget(AppFrameContext& ctx, RenderPipelineTarget& target);
     void EnsurePresentState(AppFrameContext& ctx, RenderPipelineTarget& target);
 
     Application* _app{nullptr};
@@ -134,6 +138,8 @@ private:
     uint64_t _nextArtifactIdentity{1};
     unique_ptr<RenderPipeline> _pipeline;
     vector<unique_ptr<Scene>> _scenes;
+    // Only the game thread touches these refs; shutdown releases them after GPU idle.
+    vector<vector<StreamingAssetRefAny>> _retainedAssets;
 };
 
 template <>

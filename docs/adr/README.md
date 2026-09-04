@@ -100,9 +100,10 @@ docs/adr/*.md
 | [0044](0044-material-owns-full-render-state-baseline.md) | Material 拥有完整固定功能状态基线，attachment 格式由 pass 注入 | 生效 |
 | [0045](0045-shader-parameter-packing-driven-by-type-tree.md) | CPU 参数值由 compiler type tree 驱动打包，不写 CPU mirror struct | 部分被 ADR-0052 取代 |
 | [0046](0046-pso-cache-belongs-to-shader-program.md) | PSO 缓存归 ShaderProgram 所有，不建全局缓存 | 生效 |
-| [0047](0047-binding-groups-belong-to-the-concrete-pipeline.md) | binding group 分配属于具体 pipeline，runtime 提供内置 forward pipeline | 生效 |
+| [0047](0047-binding-groups-belong-to-the-concrete-pipeline.md) | binding group 分配属于具体 pipeline，runtime 提供内置 forward pipeline | 部分被 ADR-0053 取代 |
 | [0048](0048-vulkan-y-flip-belongs-to-a-runtime-helper.md) | Vulkan Y 翻转由 runtime 公共 helper 统一，RHI 仍原样透传 | 生效 |
-| [0049](0049-dynamic-residency-policy-comes-from-the-pipeline.md) | dynamic buffer residency 由 pipeline 策略提供，per-object 数据不用 StructuredBuffer | 部分被 ADR-0051 取代 |
+| [0049](0049-dynamic-residency-policy-comes-from-the-pipeline.md) | dynamic buffer residency 由 pipeline 策略提供，per-object 数据不用 StructuredBuffer | 部分被 ADR-0051、ADR-0053 取代 |
 | [0050](0050-sample-assets-ship-outside-the-source-repository.md) | 样例与测试资产在源码仓库之外分发 | 生效 |
 | [0051](0051-root-signature-policy-and-target-layout-resolution.md) | RootSignature policy 经 target layout resolution 映射到 D3D12 与 Vulkan | 生效 |
 | [0052](0052-qualified-shader-parameter-paths-on-ambiguity.md) | Shader 参数以声明限定路径消歧，唯一叶名保留为简写 | 生效 |
+| [0053](0053-runtime-pipelines-consume-per-flight-value-snapshots.md) | Runtime pipeline 通过 per-flight 值快照跨越线程边界 | 生效 |

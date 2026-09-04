@@ -3,6 +3,12 @@
 // other test in the runtime drives the pieces directly, so this is the only place where
 // PrepareCamera and the draw pass actually run against a live swapchain.
 #include <algorithm>
+#include <atomic>
+#include <functional>
+#include "runtime_test_support.h"
+#include "gpu_test_fixture.h"
+#include "forward_test_access.h"
+#include "forward_pipeline/forward_bindings.h"
 #include <radray/runtime/forward_pipeline/forward_pipeline.h>
 
 #include <radray/logger.h>
@@ -29,7 +35,9 @@
 #include <span>
 
 #if defined(RADRAY_PLATFORM_WINDOWS) || defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
 #include <windows.h>
 #endif
 
@@ -37,6 +45,13 @@ namespace radray {
 namespace {
 
 constexpr uint32_t kFrameCount = 4;
+enum class Scenario { Baseline,
+                      ThreadedStress,
+                      DestroyPrepared,
+                      SnapshotValues,
+                      NonCanonical,
+                      MissingObject,
+                      NonDynamic };
 constexpr AssetId kMeshId{
     0x11111111, 0x2222, 0x3333, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb};
 constexpr AssetId kTextureId{
@@ -50,12 +65,12 @@ struct QuadVertex {
 
 // A unit quad facing -Z so the camera at -Z looks at its front face.
 MeshResource MakeQuadMeshResource() {
-    constexpr std::array<QuadVertex, 4> vertices{
+    constexpr array<QuadVertex, 4> vertices{
         QuadVertex{{-1.0f, -1.0f, 0.0f}, {0.0f, 0.0f, -1.0f}, {0.0f, 1.0f}},
         QuadVertex{{1.0f, -1.0f, 0.0f}, {0.0f, 0.0f, -1.0f}, {1.0f, 1.0f}},
         QuadVertex{{1.0f, 1.0f, 0.0f}, {0.0f, 0.0f, -1.0f}, {1.0f, 0.0f}},
         QuadVertex{{-1.0f, 1.0f, 0.0f}, {0.0f, 0.0f, -1.0f}, {0.0f, 0.0f}}};
-    constexpr std::array<uint32_t, 6> indices{0, 1, 2, 0, 2, 3};
+    constexpr array<uint32_t, 6> indices{0, 1, 2, 0, 2, 3};
 
     MeshResource resource;
     resource.Name = "forward-pipeline-test-quad";
@@ -112,7 +127,7 @@ Nullable<unique_ptr<TextureAsset>> MakeWhiteTexture(render::Device& device) {
             .SampleCount = 1,
             .Format = format,
             .Memory = render::MemoryType::Device,
-            .Usage = render::TextureUse::Resource,
+            .Usage = render::TextureUse::Resource | render::TextureUse::CopyDestination,
             .Hints = render::ResourceHint::None});
     if (!texture.HasValue()) {
         return nullptr;
@@ -128,6 +143,29 @@ Nullable<unique_ptr<TextureAsset>> MakeWhiteTexture(render::Device& device) {
     if (!view.HasValue()) {
         return nullptr;
     }
+    const uint64_t pitch = std::max<uint64_t>(device.GetDetail().TextureDataPitchAlignment, 4);
+    vector<byte> pixels(static_cast<size_t>(pitch), byte{0xff});
+    auto upload = render::test::MakeUploadBuffer(device, pixels, render::BufferUse::CopySource);
+    auto queue = device.GetCommandQueue(render::QueueType::Direct);
+    if (!upload.HasValue() || !queue.HasValue()) {
+        return nullptr;
+    }
+    auto command = device.CreateCommandBuffer(queue.Get());
+    if (!command.HasValue()) {
+        return nullptr;
+    }
+    command->Begin();
+    render::ResourceBarrierDescriptor barrier = render::BarrierTextureDescriptor{
+        .Target = textureObject.get(), .Before = render::TextureState::Undefined, .After = render::TextureState::CopyDestination};
+    command->ResourceBarrier(std::span{&barrier, 1});
+    command->CopyBufferToTexture(textureObject.get(), {0, 1, 0, 1}, upload.Get(), 0);
+    barrier = render::BarrierTextureDescriptor{
+        .Target = textureObject.get(), .Before = render::TextureState::CopyDestination, .After = render::TextureState::ShaderRead};
+    command->ResourceBarrier(std::span{&barrier, 1});
+    command->End();
+    render::CommandBuffer* commands[]{command.Get()};
+    queue->Submit({.CmdBuffers = commands});
+    queue->Wait();
     return make_unique<TextureAsset>(
         &device,
         "forward-pipeline-test-texture",
@@ -138,10 +176,14 @@ Nullable<unique_ptr<TextureAsset>> MakeWhiteTexture(render::Device& device) {
 /// Result the test asserts on after the app loop returns.
 struct ForwardPipelineRunResult {
     bool InitSucceeded{false};
+    bool RetainedAfterDestruction{false};
+    bool ReleasedAfterDestruction{false};
+    bool NextSnapshotUsesNewValues{false};
+    std::atomic<bool> SnapshotRendered{false};
+    std::atomic<bool> DestroyedFrameRendered{false};
     bool MeshAssigned{false};
     uint32_t FramesRun{0};
     size_t PipelineStateCount{0};
-    bool MaterialSetResident{false};
     // Two-layer cache facts, filled once the first program exists.
     size_t ArtifactsAfterFirst{0};
     size_t ProgramsAfterFirst{0};
@@ -164,10 +206,38 @@ struct ForwardPipelineRunResult {
     string FirstError;
 };
 
+class ObservedForwardPipeline final : public RenderPipeline {
+public:
+    ObservedForwardPipeline(unique_ptr<ForwardPipeline> forward,
+                            std::function<bool(ForwardPipeline&, const AppUpdateContext&)> prepare,
+                            std::function<void(const ForwardPipeline&, uint32_t)> render)
+        : _forward(std::move(forward)), _prepare(std::move(prepare)), _render(std::move(render)) {}
+    void PrepareFrame(const AppUpdateContext& ctx, vector<StreamingAssetRefAny>& refs) override {
+        _enabled[ctx.FlightIndex] = !_stopped;
+        if (!_stopped) {
+            _forward->PrepareFrame(ctx, refs);
+            _stopped = _prepare(*_forward, ctx);
+        }
+    }
+    void Render(RenderPipelineContext& ctx) override {
+        if (_enabled[ctx.Frame.FlightIndex()]) {
+            _forward->Render(ctx);
+            _render(*_forward, ctx.Frame.FlightIndex());
+        }
+    }
+
+private:
+    unique_ptr<ForwardPipeline> _forward;
+    std::function<bool(ForwardPipeline&, const AppUpdateContext&)> _prepare;
+    std::function<void(const ForwardPipeline&, uint32_t)> _render;
+    array<bool, 2> _enabled{};
+    bool _stopped{false};
+};
+
 class ForwardPipelineTestApp final : public Application {
 public:
-    explicit ForwardPipelineTestApp(ForwardPipelineRunResult* result) noexcept
-        : _result(result) {}
+    explicit ForwardPipelineTestApp(ForwardPipelineRunResult* result, Scenario scenario) noexcept
+        : _result(result), _scenario(scenario) {}
 
 protected:
     void OnInit() override {
@@ -195,13 +265,25 @@ protected:
             return;
         }
 
-        const BindingGroupPlan groups = ForwardPipeline::GetBindingGroupPlan();
         // The pipeline owns its layout recipe: it names the declarations it uploads from a per-frame
         // arena, so this test asks for the same layout the pipeline itself would.
         ShaderProgramRequest request{
             .SourceName = "pipelines/forward/forward.hlsl",
             .LayoutRecipe = ForwardPipeline::GetLayoutRecipe()};
-        request.Assignments.push_back(shader::KeywordAssignment{.Name = "QUALITY", .Value = "high"});
+        if (_scenario == Scenario::NonCanonical || _scenario == Scenario::MissingObject) {
+            request.SourceName = "forward_groups.hlsl";
+            if (_scenario == Scenario::MissingObject) {
+                request.Defines.push_back({.Name = "MISSING_FORWARD_OBJECT", .Value = "1"});
+                request.LayoutRecipe.D3D12.BufferPlacements.back().Selector.DeclarationName = "ObjectData";
+                request.LayoutRecipe.Vulkan.BufferDescriptors.back().Selector.DeclarationName = "ObjectData";
+            }
+        } else {
+            request.Assignments.push_back(shader::KeywordAssignment{.Name = "QUALITY", .Value = "high"});
+        }
+        if (_scenario == Scenario::NonDynamic) {
+            request.LayoutRecipe.D3D12.BufferPlacements.pop_back();
+            request.LayoutRecipe.Vulkan.BufferDescriptors.pop_back();
+        }
         const Nullable<ShaderProgram*> program =
             GetRenderSystem()->GetOrCreateShaderProgram(request);
         if (!program.HasValue()) {
@@ -209,12 +291,13 @@ protected:
             return;
         }
         _program = program.Get();
-        CheckCacheRules(request, _program);
+        if (_scenario == Scenario::Baseline) {
+            CheckCacheRules(request, _program);
+        }
 
         Nullable<unique_ptr<Material>> material = Material::Create(
             _program,
-            groups,
-            GetGpuSystem()->GetFlightDataCount());
+            "ForwardMaterial");
         if (!material.HasValue()) {
             Fail("material creation failed");
             return;
@@ -223,7 +306,7 @@ protected:
         const render::SamplerDescriptor sampler{
             .MinFilter = render::FilterMode::Linear,
             .MagFilter = render::FilterMode::Linear};
-        if (!_material->SetFloat4("BaseColor", Eigen::Vector4f::Ones()) ||
+        if (!_material->SetFloat4("BaseColor", Eigen::Vector4f{1, 0, 0, 1}) ||
             !_material->SetTexture("AlbedoTexture", _texture) ||
             !_material->SetSampler("LinearSampler", sampler)) {
             Fail("material parameter setup failed");
@@ -233,6 +316,7 @@ protected:
         _cameraActor = GetWorld()->SpawnActor<Actor>();
         CameraComponent* camera = _cameraActor.Get()->AddComponent<CameraComponent>();
         _cameraActor.Get()->SetRootComponent(camera);
+        _camera = camera;
         camera->SetWorldLocation(Eigen::Vector3f{0.0f, 0.0f, -3.0f});
         camera->SetPerspective(Radian(55.0f), 0.1f, 100.0f);
 
@@ -256,12 +340,29 @@ protected:
         pointLight->SetWorldLocation(Eigen::Vector3f{1.0f, 1.0f, -2.0f});
         pointLight->SetIntensity(2.0f);
 
-        GetRenderSystem()->SetPipeline(
-            make_unique<ForwardPipeline>(this, GetWorld()->GetScene(), camera));
+        if (_scenario == Scenario::ThreadedStress) {
+            auto second = MakeWhiteTexture(*GetDevice());
+            ASSERT_TRUE(second.HasValue());
+            AssetId secondId = kTextureId;
+            secondId = AssetId{0x33333333, 0x3333, 0x4444, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xdd};
+            _secondTexture = GetAssetManager()->AddReady<TextureAsset>(secondId, second.Release());
+        }
+        if (_scenario == Scenario::NonCanonical) {
+            const auto bindings = forward_detail::ResolveProgramBindings(*_program);
+            ASSERT_TRUE(bindings.has_value());
+            const bool d3d12 = GetDevice()->GetBackend() == render::RenderBackend::D3D12;
+            EXPECT_EQ(bindings->ViewGroup, d3d12 ? 4u : 2u);
+            EXPECT_EQ(bindings->MaterialGroup, d3d12 ? 7u : 5u);
+            EXPECT_EQ(bindings->ObjectGroup, d3d12 ? 9u : 8u);
+        }
+        GetRenderSystem()->SetPipeline(make_unique<ObservedForwardPipeline>(
+            make_unique<ForwardPipeline>(this, GetWorld()->GetScene(), camera),
+            [this](ForwardPipeline& pipeline, const AppUpdateContext& ctx) { return AfterPrepare(pipeline, ctx); },
+            [this](const ForwardPipeline& pipeline, uint32_t flight) { AfterRender(pipeline, flight); }));
         _result->InitSucceeded = true;
     }
 
-    void OnUpdate(const AppUpdateContext&) override {
+    void OnUpdate(const AppUpdateContext& ctx) override {
         if (!_result->MeshAssigned && _mesh.IsReady() && _meshComponent.HasValue()) {
             _meshComponent.Get()->SetStaticMesh(_mesh);
             _result->MeshAssigned = true;
@@ -269,12 +370,33 @@ protected:
             Fail("mesh loading failed");
         }
 
+        if (_scenario == Scenario::ThreadedStress && _result->MeshAssigned) {
+            if (_result->FramesRun % 8 == 0) {
+                GetWorld()->DestroyActor(_meshActor.Get());
+                _meshActor = GetWorld()->SpawnActor<Actor>();
+                _meshComponent = _meshActor.Get()->AddComponent<StaticMeshComponent>();
+                _meshActor.Get()->SetRootComponent(_meshComponent.Get());
+                _meshComponent.Get()->SetStaticMesh(_mesh);
+                _meshComponent.Get()->SetMaterial(0, _material.get());
+            }
+            const bool alternate = (_result->FramesRun % 2) != 0;
+            _meshComponent.Get()->SetWorldLocation({alternate ? 0.2f : -0.2f, 0.0f, 0.0f});
+            EXPECT_TRUE(_material->SetFloat4("BaseColor", alternate ? Eigen::Vector4f{1, 0, 0, 1} : Eigen::Vector4f{0, 1, 0, 1}));
+            EXPECT_TRUE(_material->SetTexture("AlbedoTexture", alternate ? _texture : _secondTexture));
+            _dirLightActor.Get()->FindComponent<DirectionalLightComponent>()->SetIntensity(alternate ? 2.0f : 3.0f);
+        }
+        if (_destroyed && ctx.FlightIndex == _destroyedFlight) {
+            _result->ReleasedAfterDestruction = GetAssetManager()->GetAssetCount() == 0;
+        }
         // Count only frames where the draw actually had geometry, then ask the window
         // to close. There is no headless mode, so this is how the loop terminates.
         if (_result->MeshAssigned) {
             ++_result->FramesRun;
         }
-        if (_result->FramesRun >= kFrameCount || _result->SawError) {
+        const uint32_t requiredFrames = _scenario == Scenario::ThreadedStress ? 64 : kFrameCount;
+        if ((_result->FramesRun >= requiredFrames &&
+             (_scenario != Scenario::DestroyPrepared || _result->ReleasedAfterDestruction)) ||
+            _result->SawError) {
             RequestClose();
         }
     }
@@ -282,16 +404,6 @@ protected:
     void OnShutdown() override {
         if (_program != nullptr) {
             _result->PipelineStateCount = _program->GetGraphicsPipelineStateCount();
-        }
-        if (_material != nullptr) {
-            for (uint32_t flight = 0;
-                 flight < GetGpuSystem()->GetFlightDataCount();
-                 ++flight) {
-                if (_material->GetResidentParameterSet(flight).HasValue()) {
-                    _result->MaterialSetResident = true;
-                    break;
-                }
-            }
         }
         World* world = GetWorld();
         if (world != nullptr) {
@@ -310,10 +422,87 @@ protected:
         _program = nullptr;
         _material.reset();
         _texture.Reset();
+        _secondTexture.Reset();
         _mesh.Reset();
     }
 
 private:
+    bool AfterPrepare(ForwardPipeline& pipeline, const AppUpdateContext& ctx) {
+        const auto& input = forward_detail::ForwardPipelineTestAccess::Input(pipeline, ctx.FlightIndex);
+        if (input.Draws.empty()) {
+            return false;
+        }
+        const auto& material = input.Materials[input.Draws.front().MaterialIndex];
+        const auto bindings = forward_detail::ResolveProgramBindings(*material.Program.Get());
+        if (!bindings) {
+            return false;
+        }
+        const auto bytes = material.Parameters.GetBufferData(bindings->MaterialBufferIndex);
+        _expectedMaterial[ctx.FlightIndex] = {bytes.begin(), bytes.end()};
+        ShaderParameterStorage values{&material.Program.Get()->GetParameterLayout()};
+        bool warned = false;
+        EXPECT_TRUE(forward_detail::FillViewParameters(values, input, 320.0f / 240.0f, warned));
+        const auto view = values.GetBufferData(bindings->ViewBufferIndex);
+        _expectedView[ctx.FlightIndex] = {view.begin(), view.end()};
+        if (_scenario == Scenario::SnapshotValues) {
+            if (_mutated) {
+                EXPECT_TRUE(input.Camera.EyePosition.isApprox(Eigen::Vector3f{1, 0, -4}));
+                const auto* color = material.Program.Get()->GetParameterLayout().Find("BaseColor");
+                Eigen::Vector4f packed;
+                std::memcpy(packed.data(), bytes.data() + color->ByteOffset, sizeof(float) * 4);
+                _result->NextSnapshotUsesNewValues = packed.isApprox(Eigen::Vector4f{0, 1, 0, 1});
+            } else {
+                _camera.Get()->SetWorldLocation({1, 0, -4});
+                EXPECT_TRUE(_material->SetFloat4("BaseColor", Eigen::Vector4f{0, 1, 0, 1}));
+                _mutated = true;
+            }
+        }
+        if (_scenario != Scenario::DestroyPrepared) {
+            return false;
+        }
+        _destroyed = true;
+        _destroyedFlight = ctx.FlightIndex;
+        _destroyedInputs[ctx.FlightIndex] = true;
+        for (Nullable<Actor*>* actor : {&_meshActor, &_pointLightActor, &_dirLightActor, &_cameraActor}) {
+            GetWorld()->DestroyActor(actor->Get());
+            *actor = nullptr;
+        }
+        _camera = nullptr;
+        _meshComponent = nullptr;
+        _material.reset();
+        _mesh.Reset();
+        _texture.Reset();
+        GetAssetManager()->Pump();
+        _result->RetainedAfterDestruction = GetAssetManager()->GetAssetCount() == 2;
+        return true;
+    }
+
+    void AfterRender(const ForwardPipeline& pipeline, uint32_t flight) {
+        const auto& input = forward_detail::ForwardPipelineTestAccess::Input(pipeline, flight);
+        if (input.Draws.empty()) {
+            return;
+        }
+        const auto& material = input.Materials[input.Draws.front().MaterialIndex];
+        const auto bindings = forward_detail::ResolveProgramBindings(*material.Program.Get());
+        if (!bindings) {
+            return;
+        }
+        const auto bytes = material.Parameters.GetBufferData(bindings->MaterialBufferIndex);
+        EXPECT_EQ((vector<byte>{bytes.begin(), bytes.end()}), _expectedMaterial[flight]);
+        ShaderParameterStorage values{&material.Program.Get()->GetParameterLayout()};
+        bool warned = false;
+        EXPECT_TRUE(forward_detail::FillViewParameters(values, input, 320.0f / 240.0f, warned));
+        const auto view = values.GetBufferData(bindings->ViewBufferIndex);
+        EXPECT_EQ((vector<byte>{view.begin(), view.end()}), _expectedView[flight]);
+        EXPECT_NE(input.Draws.front().Geometry->Vbv.Target, nullptr);
+        ASSERT_FALSE(material.Textures.empty());
+        EXPECT_TRUE(material.Textures.front().Texture->IsValid());
+        _result->SnapshotRendered = true;
+        if (_destroyedInputs[flight]) {
+            _result->DestroyedFrameRendered = true;
+        }
+    }
+
     // The cache rules from ADR-0051: the compiled artifact is identified by source, defines,
     // assignments, the full policy, the target and the toolchain, and a program by that artifact plus
     // the resolved layout hash of the active backend only. Nothing else may split or merge an entry.
@@ -391,7 +580,6 @@ private:
         out.ArtifactsAfterDuplicate = system->GetShaderArtifactCacheSize();
     }
 
-
     void Fail(std::string_view message) {
         if (!_result->SawError) {
             _result->SawError = true;
@@ -418,6 +606,15 @@ private:
     }
 
     ForwardPipelineRunResult* _result;
+    Scenario _scenario;
+    Nullable<CameraComponent*> _camera{nullptr};
+    StreamingAssetRef<TextureAsset> _secondTexture;
+    array<vector<byte>, 2> _expectedMaterial;
+    array<vector<byte>, 2> _expectedView;
+    array<bool, 2> _destroyedInputs{};
+    bool _mutated{false};
+    bool _destroyed{false};
+    uint32_t _destroyedFlight{0};
     StreamingAssetRef<StaticMesh> _mesh;
     StreamingAssetRef<TextureAsset> _texture;
     unique_ptr<Material> _material;
@@ -429,19 +626,28 @@ private:
     Nullable<StaticMeshComponent*> _meshComponent{nullptr};
 };
 
-void RunForwardPipeline(render::RenderBackend backend) {
+void RunForwardPipeline(render::RenderBackend backend, Scenario scenario = Scenario::Baseline) {
+    {
+        render::test::DeviceContext device;
+        if (!render::test::TryCreateDevice(backend, device)) {
+            GTEST_SKIP() << "Backend unavailable";
+        }
+    }
+    test::RuntimeLogCapture logs;
     const std::filesystem::path projectRoot{RADRAY_PROJECT_DIR};
     ForwardPipelineRunResult result;
-    ForwardPipelineTestApp app{&result};
+    ForwardPipelineTestApp app{&result, scenario};
     const ApplicationRuntimeDescriptor descriptor{
         .Backend = backend,
-        .EnableValidation = false,
-        .Multithreaded = false,
+        .EnableValidation = true,
+        .Multithreaded = scenario != Scenario::Baseline,
         .AppName = "test_forward_pipeline",
         .EngineName = "RadRay",
         .RenderCachePath = {},
         .AssetRoot = {},
-        .ShaderSourceRoot = projectRoot / "shaderlib",
+        .ShaderSourceRoot = (scenario == Scenario::NonCanonical || scenario == Scenario::MissingObject)
+                                ? projectRoot / "modules/runtime/tests/data"
+                                : projectRoot / "shaderlib",
         .ShaderIncludePaths = {projectRoot / "shaderlib"},
         .WindowTitle = "test_forward_pipeline",
         .WindowWidth = 320,
@@ -459,8 +665,28 @@ void RunForwardPipeline(render::RenderBackend backend) {
     // A PSO only exists if ValidateProgram accepted the program, the view and object
     // constants packed, the material set prepared and the draw loop reached
     // GetOrCreateGraphicsPipelineState. One key per (material, geometry, pass).
-    EXPECT_EQ(result.PipelineStateCount, 1u);
-    EXPECT_TRUE(result.MaterialSetResident);
+    const bool invalid = scenario == Scenario::MissingObject || scenario == Scenario::NonDynamic;
+    EXPECT_EQ(result.PipelineStateCount, invalid ? 0u : 1u);
+    EXPECT_TRUE(logs.Errors().empty()) << logs.Errors();
+    EXPECT_EQ(logs.DescriptorRewrites.load(), 0u);
+    EXPECT_EQ(logs.IncompatiblePrograms.load(), invalid ? 1u : 0u);
+    if (!invalid) {
+        EXPECT_TRUE(result.SnapshotRendered.load());
+    }
+    if (scenario == Scenario::ThreadedStress) {
+        EXPECT_GE(result.FramesRun, 64u);
+    }
+    if (scenario == Scenario::DestroyPrepared) {
+        EXPECT_TRUE(result.RetainedAfterDestruction);
+        EXPECT_TRUE(result.ReleasedAfterDestruction);
+        EXPECT_TRUE(result.DestroyedFrameRendered.load());
+    }
+    if (scenario == Scenario::SnapshotValues) {
+        EXPECT_TRUE(result.NextSnapshotUsesNewValues);
+    }
+    if (scenario != Scenario::Baseline) {
+        return;
+    }
 
     // Two layers, two identities: one compiled artifact serves every recipe, and only the active
     // backend's resolved layout adds a program.
@@ -481,7 +707,6 @@ void RunForwardPipeline(render::RenderBackend backend) {
     EXPECT_TRUE(result.GoodRequestStillHits);
     EXPECT_TRUE(result.DuplicateAssignmentFails);
     EXPECT_EQ(result.ArtifactsAfterDuplicate, 3u);
-
 }
 
 }  // namespace
@@ -497,5 +722,15 @@ TEST(RadRayRuntimeForwardPipeline, VulkanDrawsCollectedMeshThroughForwardPipelin
     RunForwardPipeline(render::RenderBackend::Vulkan);
 }
 #endif
+
+TEST(RadRayRuntimeForwardPipeline, D3D12MultithreadedDrawsWhileGameStateChanges) { RunForwardPipeline(render::RenderBackend::D3D12, Scenario::ThreadedStress); }
+TEST(RadRayRuntimeForwardPipeline, VulkanMultithreadedDrawsWhileGameStateChanges) { RunForwardPipeline(render::RenderBackend::Vulkan, Scenario::ThreadedStress); }
+TEST(RadRayRuntimeForwardPipeline, PreparedFrameSurvivesActorAndMaterialDestruction) { RunForwardPipeline(render::RenderBackend::D3D12, Scenario::DestroyPrepared); }
+TEST(RadRayRuntimeForwardPipeline, VulkanPreparedFrameSurvivesActorAndMaterialDestruction) { RunForwardPipeline(render::RenderBackend::Vulkan, Scenario::DestroyPrepared); }
+TEST(RadRayRuntimeForwardPipeline, PreparedFrameUsesOldCameraAndMaterialValues) { RunForwardPipeline(render::RenderBackend::D3D12, Scenario::SnapshotValues); }
+TEST(RadRayRuntimeForwardBindings, D3D12NonCanonicalGroupsAreUsedVerbatim) { RunForwardPipeline(render::RenderBackend::D3D12, Scenario::NonCanonical); }
+TEST(RadRayRuntimeForwardBindings, VulkanNonCanonicalGroupsAreUsedVerbatim) { RunForwardPipeline(render::RenderBackend::Vulkan, Scenario::NonCanonical); }
+TEST(RadRayRuntimeForwardBindings, MissingRequiredDeclarationFailsClosed) { RunForwardPipeline(render::RenderBackend::D3D12, Scenario::MissingObject); }
+TEST(RadRayRuntimeForwardBindings, NonDynamicRequiredBufferFailsClosed) { RunForwardPipeline(render::RenderBackend::Vulkan, Scenario::NonDynamic); }
 
 }  // namespace radray

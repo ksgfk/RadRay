@@ -149,12 +149,6 @@ void Application::OnUpdate(const AppUpdateContext& ctx) {
     (void)ctx;
 }
 
-bool Application::OnRenderView(AppFrameContext& ctx, const AppFrameTarget& target) {
-    (void)ctx;
-    (void)target;
-    return false;
-}
-
 void Application::OnShutdown() {
 }
 
@@ -784,6 +778,9 @@ void Application::NotifyRenderComplete(const AppRenderCompleteContext& ctx) {
 // ════════════════════════════════════════════════════════════════
 
 AppUpdateResult Application::Update(const AppUpdateContext& ctx) {
+    if (_renderSystem != nullptr) {
+        _renderSystem->BeginUpdateForFlight(ctx.FlightIndex);
+    }
     // 1) 推进资产加载状态机(恢复本帧 GPU 上传已完成的协程 → 启动未启动协程 → reap 终态)。
     if (_assetManager != nullptr) {
         _assetManager->Pump();
@@ -796,6 +793,9 @@ AppUpdateResult Application::Update(const AppUpdateContext& ctx) {
     if (_world != nullptr) {
         _world->Tick(ctx.DeltaTime.count());
     }
+    if (_renderSystem != nullptr) {
+        _renderSystem->PrepareFrame(ctx);
+    }
     return AppUpdateResult{ShouldExit()};
 }
 
@@ -807,10 +807,6 @@ void Application::Render(AppFrameContext& ctx) {
     if (_renderSystem != nullptr) {
         _renderSystem->Render(ctx);
     }
-}
-
-bool Application::RenderViewContent(AppFrameContext& ctx, const AppFrameTarget& target) {
-    return OnRenderView(ctx, target);
 }
 
 void Application::OnRenderComplete(const AppRenderCompleteContext& ctx) {

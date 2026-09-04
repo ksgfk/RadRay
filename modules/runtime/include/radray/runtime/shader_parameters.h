@@ -77,7 +77,9 @@ private:
 
 class ShaderParameterStorage {
 public:
-    explicit ShaderParameterStorage(const ShaderParameterLayout* layout = nullptr);
+    explicit ShaderParameterStorage(
+        const ShaderParameterLayout* layout = nullptr,
+        std::optional<uint32_t> parameterGroup = std::nullopt);
 
     void Reset() noexcept;
     const ShaderParameterLayout* GetLayout() const noexcept { return _layout; }

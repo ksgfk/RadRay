@@ -14,25 +14,4 @@ enum class RenderQueue : int32_t {
     Overlay = 4000,
 };
 
-struct BindingGroupPlan {
-    constexpr BindingGroupPlan(
-        uint32_t viewGroup,
-        uint32_t materialGroup,
-        uint32_t objectGroup) noexcept
-        : ViewGroup(viewGroup),
-          MaterialGroup(materialGroup),
-          ObjectGroup(objectGroup) {}
-
-    constexpr bool IsValid() const noexcept {
-        return ViewGroup != MaterialGroup && ViewGroup != ObjectGroup &&
-               MaterialGroup != ObjectGroup;
-    }
-
-    uint32_t ViewGroup;
-    uint32_t MaterialGroup;
-    uint32_t ObjectGroup;
-
-    friend bool operator==(const BindingGroupPlan&, const BindingGroupPlan&) = default;
-};
-
 }  // namespace radray

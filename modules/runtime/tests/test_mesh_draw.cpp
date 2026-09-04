@@ -1,4 +1,5 @@
 #include "gpu_test_fixture.h"
+#include "forward_pipeline/forward_bindings.h"
 #include "shader_contract_fixtures.h"
 
 #include <radray/render/backend_shader_artifact.h>
@@ -304,18 +305,6 @@ void RunMaterialResourceResidency(
     ASSERT_TRUE(programResult.HasValue());
     unique_ptr<ShaderProgram> program = programResult.Release();
 
-    const uint32_t materialGroup =
-        backend == render::RenderBackend::D3D12 ? 0u : 1u;
-    Nullable<unique_ptr<Material>> materialResult = Material::Create(
-        program.get(),
-        BindingGroupPlan{
-            materialGroup == 0 ? 1u : 0u,
-            materialGroup,
-            2u},
-        2);
-    ASSERT_TRUE(materialResult.HasValue());
-    unique_ptr<Material> material = materialResult.Release();
-
     ImmediateWaitFrame waitFrame;
     AssetManager assets;
     assets.SetWaitFrameProcessor(&waitFrame);
@@ -326,43 +315,30 @@ void RunMaterialResourceResidency(
     ASSERT_TRUE(textureA.IsReady());
     ASSERT_TRUE(textureB.IsReady());
 
-    render::SamplerDescriptor sampler;
-    ASSERT_TRUE(material->SetTexture("AlbedoTexture", textureA));
-    ASSERT_TRUE(material->SetSampler("LinearSampler", sampler));
-    const uint64_t initialVersion = material->GetResourceVersion();
-    const Nullable<render::ShaderParameterSet*> flight0 =
-        material->PrepareParameterSet(0, {});
-    const Nullable<render::ShaderParameterSet*> flight1 =
-        material->PrepareParameterSet(1, {});
-    ASSERT_TRUE(flight0.HasValue());
-    ASSERT_TRUE(flight1.HasValue());
-    EXPECT_NE(flight0.Get(), flight1.Get());
-    EXPECT_EQ(material->GetResidentResourceVersion(0), initialVersion);
-    EXPECT_EQ(material->GetResidentResourceVersion(1), initialVersion);
-
-    ASSERT_TRUE(material->SetTexture("AlbedoTexture", textureB));
-    const uint64_t changedVersion = material->GetResourceVersion();
-    ASSERT_GT(changedVersion, initialVersion);
-    EXPECT_EQ(material->GetResidentParameterSet(0).Get(), flight0.Get());
-    EXPECT_EQ(material->GetResidentParameterSet(1).Get(), flight1.Get());
-    EXPECT_EQ(material->GetResidentResourceVersion(0), initialVersion);
-    EXPECT_EQ(material->GetResidentResourceVersion(1), initialVersion);
-
-    const Nullable<render::ShaderParameterSet*> rebuiltFlight0 =
-        material->PrepareParameterSet(0, {});
-    ASSERT_TRUE(rebuiltFlight0.HasValue());
-    EXPECT_NE(rebuiltFlight0.Get(), flight0.Get());
-    EXPECT_EQ(material->GetResidentResourceVersion(0), changedVersion);
-    EXPECT_EQ(material->GetResidentParameterSet(1).Get(), flight1.Get());
-    EXPECT_EQ(material->GetResidentResourceVersion(1), initialVersion);
-
-    const Nullable<render::ShaderParameterSet*> rebuiltFlight1 =
-        material->PrepareParameterSet(1, {});
-    ASSERT_TRUE(rebuiltFlight1.HasValue());
-    EXPECT_NE(rebuiltFlight1.Get(), flight1.Get());
-    EXPECT_EQ(material->GetResidentResourceVersion(1), changedVersion);
-
-    material.reset();
+    const auto* textureParameter = program->GetParameterLayout().Find("AlbedoTexture");
+    const auto* samplerParameter = program->GetParameterLayout().Find("LinearSampler");
+    ASSERT_NE(textureParameter, nullptr);
+    ASSERT_NE(samplerParameter, nullptr);
+    MaterialRenderData snapshotA{
+        .Program = program.get(),
+        .ParameterGroup = textureParameter->Group,
+        .Textures = {{*textureParameter, textureA.Get(), TextureSubViewDesc::Default(), 0}},
+        .Samplers = {{*samplerParameter, render::SamplerDescriptor{}, 0}}};
+    MaterialRenderData snapshotB = snapshotA;
+    snapshotB.Textures[0].Texture = textureB.Get();
+    forward_detail::ForwardMaterialSets flights[2];
+    const auto set0 = flights[0].GetOrCreate(0, snapshotA, {});
+    const auto set1 = flights[1].GetOrCreate(0, snapshotA, {});
+    ASSERT_TRUE(set0.HasValue());
+    ASSERT_TRUE(set1.HasValue());
+    EXPECT_NE(set0.Get(), set1.Get());
+    flights[0].Clear();
+    ASSERT_TRUE(flights[0].GetOrCreate(0, snapshotB, {}).HasValue());
+    EXPECT_EQ(flights[1].GetOrCreate(0, snapshotA, {}).Get(), set1.Get());
+    flights[1].Clear();
+    ASSERT_TRUE(flights[1].GetOrCreate(0, snapshotB, {}).HasValue());
+    flights[0].Clear();
+    flights[1].Clear();
     textureB.Reset();
     textureA.Reset();
     assets.Pump();
@@ -417,8 +393,7 @@ void RunMeshDraw(
     const PrimitiveVertexLayout vertexLayout = MakePositionLayout();
     Nullable<unique_ptr<Material>> materialResult = Material::Create(
         program.get(),
-        BindingGroupPlan{1, 0, 2},
-        2);
+        "Constants");
     ASSERT_TRUE(materialResult.HasValue());
     unique_ptr<Material> material = materialResult.Release();
     material->GetPipelineState().Primitive.Cull = render::CullMode::None;
@@ -533,25 +508,47 @@ void RunMeshDraw(
             parameterBytes,
             render::BufferUse::CBuffer);
     ASSERT_TRUE(parameterBuffer.HasValue());
-    const MaterialBufferBinding materialBuffer{
+    const forward_detail::ForwardBufferBinding materialBuffer{
         .BufferIndex = 0,
         .Value = render::ShaderBufferBinding{
             .Target = parameterBuffer.Get(),
             .Range = render::BufferRange{0, parameterBufferLayout.Size}}};
-    const Nullable<render::ShaderParameterSet*> flightZeroSet =
-        material->PrepareParameterSet(0, std::span{&materialBuffer, 1});
-    const Nullable<render::ShaderParameterSet*> flightOneSet =
-        material->PrepareParameterSet(1, std::span{&materialBuffer, 1});
+    MaterialRenderData snapshot;
+    vector<StreamingAssetRefAny> retained;
+    ASSERT_TRUE(material->BuildRenderData(snapshot, retained));
+    Nullable<unique_ptr<render::Buffer>> otherBuffer;
+    forward_detail::ForwardMaterialSets flights[2];
+    const auto flightZeroSet = flights[0].GetOrCreate(0, snapshot, std::span{&materialBuffer, 1});
+    const auto flightOneSet = flights[1].GetOrCreate(0, snapshot, std::span{&materialBuffer, 1});
     ASSERT_TRUE(flightZeroSet.HasValue());
     ASSERT_TRUE(flightOneSet.HasValue());
     EXPECT_NE(flightZeroSet.Get(), flightOneSet.Get());
-    EXPECT_EQ(material->GetResidentResourceVersion(0), material->GetResourceVersion());
-    EXPECT_EQ(material->GetResidentResourceVersion(1), material->GetResourceVersion());
-    ASSERT_TRUE(material->SetMatrix4x4("Transform", Eigen::Matrix4f::Identity()));
-    const Nullable<render::ShaderParameterSet*> repeatedFlightZeroSet =
-        material->PrepareParameterSet(0, std::span{&materialBuffer, 1});
-    ASSERT_TRUE(repeatedFlightZeroSet.HasValue());
-    EXPECT_EQ(repeatedFlightZeroSet.Get(), flightZeroSet.Get());
+    EXPECT_EQ(flights[0].GetOrCreate(0, snapshot, std::span{&materialBuffer, 1}).Get(), flightZeroSet.Get());
+
+    // A spill to another arena target must not rewrite the set used by the first draw.
+    otherBuffer = render::test::MakeUploadBuffer(device, parameterBytes, render::BufferUse::CBuffer);
+    ASSERT_TRUE(otherBuffer.HasValue());
+    const forward_detail::ForwardBufferBinding otherBinding{
+        .BufferIndex = 0,
+        .Value = {.Target = otherBuffer.Get(), .Range = {0, parameterBufferLayout.Size}}};
+    const auto otherSet = flights[0].GetOrCreate(0, snapshot, std::span{&otherBinding, 1});
+    ASSERT_TRUE(otherSet.HasValue());
+    EXPECT_NE(otherSet.Get(), flightZeroSet.Get());
+    const auto assertOriginalTarget = [&](const auto* native) {
+        ASSERT_EQ(native->_values.size(), 1u);
+        ASSERT_TRUE(native->_values[0].has_value());
+        EXPECT_EQ(std::get<render::ShaderBufferBinding>(*native->_values[0]).Target, parameterBuffer.Get());
+    };
+#if defined(RADRAY_ENABLE_D3D12)
+    if (backend == render::RenderBackend::D3D12) {
+        assertOriginalTarget(static_cast<render::d3d12::ShaderParameterSetD3D12*>(flightZeroSet.Get()));
+    }
+#endif
+#if defined(RADRAY_ENABLE_VULKAN)
+    if (backend == render::RenderBackend::Vulkan) {
+        assertOriginalTarget(static_cast<render::vulkan::ShaderParameterSetVulkan*>(flightZeroSet.Get()));
+    }
+#endif
 
     const uint32_t bytesPerPixel = render::GetTextureFormatBytesPerPixel(kFormat);
     const uint64_t rowPitch = Align(
@@ -707,15 +704,14 @@ void RunDrawListSort(render::test::DeviceContext& context) {
     ASSERT_TRUE(secondProgramResult.HasValue());
     unique_ptr<ShaderProgram> firstProgram = firstProgramResult.Release();
     unique_ptr<ShaderProgram> secondProgram = secondProgramResult.Release();
-    const BindingGroupPlan groups{1, 0, 2};
     Nullable<unique_ptr<Material>> materialAResult =
-        Material::Create(firstProgram.get(), groups, 1);
+        Material::Create(firstProgram.get(), "Constants");
     Nullable<unique_ptr<Material>> materialA2Result =
-        Material::Create(firstProgram.get(), groups, 1);
+        Material::Create(firstProgram.get(), "Constants");
     Nullable<unique_ptr<Material>> materialBResult =
-        Material::Create(secondProgram.get(), groups, 1);
+        Material::Create(secondProgram.get(), "Constants");
     Nullable<unique_ptr<Material>> transparentResult =
-        Material::Create(firstProgram.get(), groups, 1);
+        Material::Create(firstProgram.get(), "Constants");
     ASSERT_TRUE(materialAResult.HasValue());
     ASSERT_TRUE(materialA2Result.HasValue());
     ASSERT_TRUE(materialBResult.HasValue());
@@ -844,7 +840,7 @@ TEST(RadRayRuntimeMeshDraw, D3D12DeclarationOwnerProgramsCreate) {
 #endif
 }
 
-TEST(RadRayRuntimeMeshDraw, D3D12MaterialResourceResidencyRotatesByFlight) {
+TEST(RadRayRuntimeForwardSets, D3D12MaterialSnapshotsRotateByFlight) {
 #if defined(RADRAY_ENABLE_D3D12)
     render::test::DeviceContext context;
     if (!render::test::TryCreateDevice(render::RenderBackend::D3D12, context)) {
@@ -886,7 +882,7 @@ TEST(RadRayRuntimeMeshDraw, VulkanDeclarationOwnerProgramsCreate) {
 #endif
 }
 
-TEST(RadRayRuntimeMeshDraw, VulkanMaterialResourceResidencyRotatesByFlight) {
+TEST(RadRayRuntimeForwardSets, VulkanMaterialSnapshotsRotateByFlight) {
 #if defined(RADRAY_ENABLE_VULKAN)
     render::test::DeviceContext context;
     if (!render::test::TryCreateDevice(

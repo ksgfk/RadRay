@@ -296,6 +296,38 @@ TEST(RadRayRuntimeMaterial, SharedPayloadOwnerKeepsQualifiedLeavesDistinct) {
     }
 }
 
+TEST(RadRayRuntimeMaterial, ScopedStoragePreservesQualifiedParameterIdentity) {
+    for (const shader::ShaderTarget target :
+         {shader::ShaderTarget::DXIL, shader::ShaderTarget::SPIRV}) {
+        const auto artifact = DecodeGeneric("shared_cbuffer_type", target);
+        ASSERT_TRUE(artifact.has_value());
+        const auto layout = ShaderParameterLayout::Create(artifact.value());
+        ASSERT_TRUE(layout.has_value());
+        const ShaderParameterInfo* first = layout->Find("First.Value");
+        const ShaderParameterInfo* second = layout->Find("Second.Value");
+        ASSERT_NE(first, nullptr);
+        ASSERT_NE(second, nullptr);
+        ASSERT_NE(first->Group, second->Group);
+
+        ShaderParameterStorage values{&layout.value(), first->Group};
+        const Eigen::Vector4f selectedValue{1.0f, 2.0f, 3.0f, 4.0f};
+        const Eigen::Vector4f rejectedValue{5.0f, 6.0f, 7.0f, 8.0f};
+        ASSERT_TRUE(values.SetFloat4("First.Value", selectedValue));
+        EXPECT_FALSE(values.SetFloat4("Second.Value", rejectedValue));
+        EXPECT_FALSE(values.SetFloat4("Value", rejectedValue));
+        EXPECT_TRUE(values.GetBufferData(second->BufferIndex).empty());
+        EXPECT_TRUE(
+            ReadValue<Eigen::Vector4f>(values.GetBufferData(first->BufferIndex), 0)
+                .isApprox(selectedValue));
+
+        values.Reset();
+        EXPECT_TRUE(values.GetBufferData(second->BufferIndex).empty());
+        EXPECT_TRUE(
+            ReadValue<Eigen::Vector4f>(values.GetBufferData(first->BufferIndex), 0)
+                .isZero());
+    }
+}
+
 TEST(RadRayRuntimeMaterial, ExactResourceNamePrecedesSameNamedLeafShorthand) {
     for (const shader::ShaderTarget target :
          {shader::ShaderTarget::DXIL, shader::ShaderTarget::SPIRV}) {

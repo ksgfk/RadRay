@@ -143,7 +143,7 @@ shader metadata。每个modifier只用“canonical declaration name + expected l
 kind/count、visibility、slot或push range；texture、typed texel buffer、storage image和push没有
 placement modifier。无`[RootSignature]`时使用modifier是正常路径，不是fallback漏洞。
 
-group 的语义属于具体 pipeline，不是 shaderlib 全局规则。内置 forward 的 plan 是：
+group 的语义属于具体 pipeline，不是 shaderlib 全局规则。当前 forward HLSL 声明为：
 
 | Group | 更新频率 | 当前 binding |
 |---|---|---|
@@ -151,8 +151,10 @@ group 的语义属于具体 pipeline，不是 shaderlib 全局规则。内置 fo
 | 1 | per-material | `ForwardMaterial`、`AlbedoTexture`、`LinearSampler` |
 | 2 | per-object | `ForwardObject`：local-to-world |
 
-新增或修改 forward binding 时，同时更新 `pipelines/forward/bindings.hlsli` 与
-`ForwardPipeline::GetBindingGroupPlan()` 的消费者校验；material 和执行器不能重新写 0/1/2。
+Forward 按 `ForwardView` / `ForwardMaterial` / `ForwardObject` declaration name 从当前 artifact
+读取 group；上表只是产品 shader 的当前数字，不是 CPU ABI。两 target 的组号可各自变化。
+新增或修改 binding 时核对 Forward 私有 resolver 的 declaration/dynamic/同组资源检查；material
+通过 `Material::Create(program, "ForwardMaterial")` 选组，消费者不再传 group plan 或写 0/1/2。
 view/material/object 数值 buffer 使用具名 struct 加 `ConstantBuffer<T>`，让 artifact type tree
 为 CPU 按名打包保留完整根结构与成员 offset；CPU 不声明 mirror struct。
 

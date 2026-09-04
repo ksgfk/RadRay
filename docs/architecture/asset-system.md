@@ -26,6 +26,7 @@ Load request / source task → AssetSlot::Loading → AssetManager::Pump → Loa
 `architecture/asset-database.md`。
 
 `StreamingAssetRef<T>` 是类型安全的视图，内部仍由 `StreamingAssetRefAny` 参与计数。
+引用的复制、查询、移动和析构都只在 AssetManager 所在的 game thread 进行，计数不是原子的。
 引用必须在 `AssetManager` 之前销毁；slot 随 manager 释放，之后不能再查询引用状态。
 
 ## AssetId
@@ -66,7 +67,12 @@ void MyAsset::OnUnload(AssetManager& manager) override {
 | `StaticMesh` | CPU mesh、sections、bounds 和 GPU mesh | `GpuMesh::DrawData*` |
 
 返回资产内部裸指针的 API 必须在文档和调用方中同时说明持有 `StreamingAssetRef` 的要求。
-例如 SceneProxy 自己保存 mesh ref，材质快照保存 texture ref 加描述值，不能只保存裸 view。
+SceneProxy 保存 mesh ref，Material authoring 保存 texture ref 加描述值。PrepareFrame 通过
+proxy `CollectAssetReferences` 和 Material `BuildRenderData` 把 owners 追加到 RenderSystem 的
+当前 flight retained vector；pipeline input 只保存 geometry/texture raw pointers 和复制值。
+render thread 不访问 refs，TextureAsset 的 GetOrCreateSrv/view cache 由 render thread 串行访问。
+当前 flight GPU 完成且 game thread 取得该 flight 后清理 retained refs，随后 Pump 按原有零引用
+规则回收资产；不引入显式 Unload、release message 或另一套引用计数。
 
 OBJ `MeshImporter` 在 GPU 上传前为每个 `MeshPrimitive` 建一个覆盖完整 index range 的默认 section，
 并从 `POSITION0` 计算 local bounds；任一步不自洽都使加载失败。`StaticMeshSceneProxy` 自持一份

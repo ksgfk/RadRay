@@ -509,10 +509,13 @@ _Avoid_: flat parameter name（叶名只可能是简写）, binding/type emissio
 这是后端已硬化的不变量，任何一层都不做重映射。
 _Avoid_: descriptor set, register space, space, table
 
-**Binding group plan**:
-一条 concrete render pipeline 对 binding group 更新频率/角色的值映射，例如 view、material、object。
-group 数字仍由 HLSL author 声明；plan 只把这些数字传给 material 与执行器，不是全引擎编号表。
-_Avoid_: global binding convention, group remap
+**Material parameter group**:
+Material 负责编辑的一组参数，由一个 cbuffer declaration anchor 标识；实际组号属于当前 target artifact。
+_Avoid_: binding group plan, global binding convention
+
+**Forward frame input**:
+Forward 对一帧场景事实的完整值快照，包含相机、材质、几何绘制范围与光照；准备完成后不随游戏对象变化。
+_Avoid_: render world, scene database, generic frame packet
 
 **Logical shader resource kind**:
 HLSL declaration在artifact中的资源类别，例如CBuffer、typed/structured/raw read/write buffer、

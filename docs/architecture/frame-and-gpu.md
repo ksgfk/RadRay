@@ -9,7 +9,7 @@
 | 系统 | 负责 | 不负责 |
 |---|---|---|
 | `GpuSystem` | **何时画**。instance/factory/device/主队列/fence、flight 槽位、上传器、帧 profiler、帧边界等待表 | 画什么 |
-| `RenderSystem` | **画什么**。当前 `RenderPipeline`、RenderPass/Framebuffer registry、Scene 列表 | 帧时序、shader compiler、PSO/layout 缓存 |
+| `RenderSystem` | **画什么**。当前 pipeline、program/artifact cache、RenderPass/Framebuffer registry、game-thread Scene 与 per-flight asset refs | GPU 提交时序 |
 | `WindowManager` | 窗口创建/销毁、swapchain acquire/present/recreate、事件分发 | — |
 | `Application` | 固化帧序与关停顺序；游戏侧的窄扩展点 | — |
 
@@ -18,9 +18,11 @@
 ```
 Application::StartLoop
   ├─ BeginUpdateForFlight(flight)     取得该 flight 的可写槽位；PumpWaitFrame
+  ├─ RenderSystem::BeginUpdateForFlight 清除该 flight 上一帧的 retained asset refs
   ├─ AssetManager::Pump               提交加载结果；销毁零引用资产
   ├─ Application::OnUpdate            游戏逻辑
   ├─ World::Tick
+  ├─ RenderSystem::PrepareFrame        game thread 复制当前 flight 的 pipeline input
   ├─ GpuSystem::BeginFrameRecord      取/建 CommandBuffer 并 Begin()；清上帧 targets
   │    ├─ upload phase                FrameUploadScheduler 恢复等待帧顶的协程
   │    └─ GpuFrameProfiler::BeginFrame
@@ -133,12 +135,15 @@ co_await scope->WaitGpu();                          // 恢复点在该 flight fe
 `TextureAsset` 与 `StaticMesh` 的 loader 就走这条路。这样"构造即完整"得以兑现：
 资产一出生即可被采样绑定。
 
-## 当前无 PSO/layout 缓存
+## 渲染资源的帧寿命
 
-M-1 已删除旧 `PipelineStateCache`、`GraphicsPipelineStateKey`、`ShaderPassProgram` 与
-`PipelineLayoutCache`。当前 `RenderSystem` 只持有 render-pass registry、当前 pipeline 与 scenes；
-样例自行持有 artifact layout、shader 和 PSO。以 per-Variant artifact 为 key 重建 PSO cache 仍是
-`docs/todo/hlsl-radray-dxc-shader-pipeline.md` 的 M6 遗留项，尚无已裁决的资产所有权或关停形态。
+RenderSystem 继续拥有 ShaderJit、artifact/program cache；ShaderProgram 自持 PSO map。program 的
+layout/参数 metadata 活过所有 flight，关停 GPU idle 后才销毁。
+
+RenderSystem 的每个 flight 保存一张 StreamingAssetRefAny vector。game thread 取得可写 flight 后
+清上一帧引用，再 Pump 资产；World tick 后 pipeline PrepareFrame 把本帧几何/纹理 owner 追加回来。
+render thread 不操作引用计数，只读取 pipeline 私有值快照和被保活的 immutable asset payload。
+Forward 的 frame-local sets 在下次录制复用时先销毁，再重置或裁减 arena；不会改写旧 backing set。
 
 ## 帧 profiler
 
@@ -154,8 +159,7 @@ M-1 已删除旧 `PipelineStateCache`、`GraphicsPipelineStateKey`、`ShaderPass
 成功时把 `SwapChainFrame` 收进本帧 `FlightSlot`，返回 `AppFrameTarget`
 （backbuffer + view + index）。
 
-**`AcquireWindow` 不录任何 barrier。** backbuffer 的初始翻转与 →Present 收尾全部由应用
-显式录。`AppFrameTarget` 也**不暴露同步对象**——sync object 是提交细节，由 runtime 独占。
+**`AcquireWindow` 不录任何 barrier。** backbuffer 的初始翻转与 →Present 收尾由 RenderSystem 宿主统一显式录。`AppFrameTarget` 也**不暴露同步对象**——sync object 是提交细节，由 runtime 独占。
 
 交换链尺寸变化时后备缓冲 view 会重建，此时必须调
 `RenderPassRegistry::RemoveFramebuffersUsing(oldView)`：framebuffer 存的是 `TextureView`
@@ -171,7 +175,7 @@ OnShutdown();                                  // 游戏侧释放自管 per-flig
 _scheduler.CancelAll();
 _world.reset();                    // Actor → SceneProxy → drop StreamingAssetRef
 _windowManager->SetRenderSystem(nullptr);  // RenderPassRegistry 即将销毁，先断引用
-_renderSystem.reset();             // 持有 Scene，须长于 World 的拆解
+_renderSystem.reset();             // 拆 pipeline/retained refs/program，须长于 World 的拆解
 _assetManager.reset();             // 放开全部资产，GPU buffer 须在 device 前释放
 _assetDatabase.reset();            // importer/settings 活过 manager 的在飞 task
 _windowManager->DetachAllSwapChains();
@@ -214,7 +218,6 @@ template <> struct ServiceTraits<AssetManager> {
 |---|---|
 | `OnInit` | 全部内部系统就绪后一次。加载资产、Spawn Actor、建相机 |
 | `OnUpdate` | 每帧，`AssetManager::Pump` 之后、`World::Tick` 之前 |
-| `OnRenderView` | 录制 view/window 场景内容。返回 true 表示已写 backbuffer |
 | `OnRenderFrameComplete` | 帧完成通知 |
 | `OnShutdown` | 关停，游戏侧清理 |
 

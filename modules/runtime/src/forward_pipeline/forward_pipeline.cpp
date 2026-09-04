@@ -1,5 +1,8 @@
 #include <radray/runtime/forward_pipeline/forward_pipeline.h>
 
+#include "forward_bindings.h"
+#include "forward_frame.h"
+
 #include <algorithm>
 #include <cstring>
 #include <limits>
@@ -9,44 +12,24 @@
 #include <radray/logger.h>
 #include <radray/render/render_pass_registry.h>
 #include <radray/runtime/application.h>
-#include <radray/runtime/components/camera_component.h>
 #include <radray/runtime/gpu_resource.h>
 #include <radray/runtime/gpu_system.h>
 #include <radray/runtime/material.h>
-#include <radray/runtime/render_framework/light_scene_proxy.h>
-#include <radray/runtime/render_framework/mesh_draw.h>
-#include <radray/runtime/render_framework/scene.h>
 #include <radray/runtime/render_framework/viewport.h>
 #include <radray/runtime/render_system.h>
 #include <radray/runtime/shader_program.h>
 #include <radray/runtime/window_manager.h>
 
 namespace radray {
+using namespace forward_detail;
 namespace {
 
 constexpr render::TextureFormat kForwardDepthFormat = render::TextureFormat::D32_FLOAT;
 constexpr uint32_t kMaxDirectionalLights = 8;
 constexpr uint32_t kMaxPointLights = 8;
 
-bool IsTransparent(const MeshDrawItem& item) noexcept {
-    return static_cast<int32_t>(item.DrawMaterial->GetRenderQueue()) >=
-           static_cast<int32_t>(RenderQueue::GeometryLast);
-}
-
-std::optional<uint32_t> FindSingleBuffer(
-    const ShaderParameterLayout& layout,
-    uint32_t group) noexcept {
-    std::optional<uint32_t> result;
-    for (uint32_t index = 0; index < layout.Buffers().size(); ++index) {
-        if (layout.Buffers()[index].Group != group) {
-            continue;
-        }
-        if (result.has_value()) {
-            return std::nullopt;
-        }
-        result = index;
-    }
-    return result;
+bool IsTransparent(const MaterialRenderData& material) noexcept {
+    return static_cast<int32_t>(material.Queue) >= static_cast<int32_t>(RenderQueue::GeometryLast);
 }
 
 std::optional<DynamicCBufferArena::Allocation> UploadBytes(
@@ -70,30 +53,112 @@ std::optional<DynamicCBufferArena::Allocation> UploadBytes(
 
 }  // namespace
 
-class ForwardDrawPass final : public RenderPipelinePass {
-public:
-    ForwardDrawPass(
-        ForwardPipeline* pipeline,
-        bool transparent) noexcept
-        : RenderPipelinePass(
-              transparent
-                  ? RenderPassEvent::BeforeRenderingTransparents
-                  : RenderPassEvent::BeforeRenderingOpaques),
-          _pipeline(pipeline),
-          _transparent(transparent) {}
-
-    void Execute(
-        RenderPipelineContext& ctx,
-        const RenderCamera& camera) override {
-        if (_pipeline->ExecutePreparedPass(ctx, camera, _transparent)) {
-            MarkContentDrawn();
-        }
+bool forward_detail::FillViewParameters(
+    ShaderParameterStorage& storage,
+    const ForwardFrameInput& input,
+    float aspect,
+    bool& lightOverflowWarned) {
+    struct SelectedLight {
+        LightRenderParameters Parameters;
+        float Radius;
+        float DistanceSquared;
+    };
+    if (!storage.SetMatrix4x4(
+            "ViewProj",
+            PerspectiveLH<float>(input.Camera.FovY, aspect, input.Camera.NearZ, input.Camera.FarZ) * input.Camera.View)) {
+        return false;
+    }
+    const Eigen::Vector3f eye = input.Camera.EyePosition;
+    if (!storage.SetFloat4(
+            "EyePosition",
+            Eigen::Vector4f{eye.x(), eye.y(), eye.z(), 1.0f})) {
+        return false;
     }
 
-private:
-    ForwardPipeline* _pipeline;
-    bool _transparent;
-};
+    vector<SelectedLight> directional;
+    vector<SelectedLight> points;
+    for (const ForwardFrameLight& light : input.Lights) {
+        SelectedLight selected{
+            .Parameters = light.Parameters,
+            .Radius = light.Radius,
+            .DistanceSquared = (light.Parameters.WorldPosition - eye).squaredNorm()};
+        if (light.Type == LightType::Directional) {
+            directional.push_back(selected);
+        } else if (light.Type == LightType::Point) {
+            points.push_back(selected);
+        }
+    }
+    const auto sortByDistance = [](vector<SelectedLight>& lights) {
+        std::stable_sort(
+            lights.begin(),
+            lights.end(),
+            [](const SelectedLight& lhs, const SelectedLight& rhs) noexcept {
+                return lhs.DistanceSquared < rhs.DistanceSquared;
+            });
+    };
+    sortByDistance(directional);
+    sortByDistance(points);
+    if ((directional.size() > kMaxDirectionalLights ||
+         points.size() > kMaxPointLights) &&
+        !lightOverflowWarned) {
+        RADRAY_WARN_LOG("forward pipeline light limit exceeded; nearest supported lights are used");
+        lightOverflowWarned = true;
+    }
+    directional.resize(std::min<size_t>(directional.size(), kMaxDirectionalLights));
+    points.resize(std::min<size_t>(points.size(), kMaxPointLights));
+    if (!storage.SetUInt(
+            "DirectionalLightCount",
+            static_cast<uint32_t>(directional.size())) ||
+        !storage.SetUInt(
+            "PointLightCount",
+            static_cast<uint32_t>(points.size()))) {
+        return false;
+    }
+    for (uint32_t index = 0; index < directional.size(); ++index) {
+        const LightRenderParameters& light = directional[index].Parameters;
+        if (!storage.SetFloat4(
+                "Direction",
+                Eigen::Vector4f{
+                    light.Direction.x(),
+                    light.Direction.y(),
+                    light.Direction.z(),
+                    0.0f},
+                index) ||
+            !storage.SetFloat4(
+                "Irradiance",
+                Eigen::Vector4f{
+                    light.Color.x() * light.DiffuseScale,
+                    light.Color.y() * light.DiffuseScale,
+                    light.Color.z() * light.DiffuseScale,
+                    0.0f},
+                index)) {
+            return false;
+        }
+    }
+    for (uint32_t index = 0; index < points.size(); ++index) {
+        const SelectedLight& selected = points[index];
+        const LightRenderParameters& light = selected.Parameters;
+        if (!storage.SetFloat4(
+                "Position",
+                Eigen::Vector4f{
+                    light.WorldPosition.x(),
+                    light.WorldPosition.y(),
+                    light.WorldPosition.z(),
+                    selected.Radius},
+                index) ||
+            !storage.SetFloat4(
+                "Intensity",
+                Eigen::Vector4f{
+                    light.Color.x() * light.DiffuseScale,
+                    light.Color.y() * light.DiffuseScale,
+                    light.Color.z() * light.DiffuseScale,
+                    0.0f},
+                index)) {
+            return false;
+        }
+    }
+    return true;
+}
 
 struct ForwardPipeline::Impl {
     struct DepthTarget {
@@ -113,13 +178,10 @@ struct ForwardPipeline::Impl {
         unique_ptr<render::ShaderParameterSet> ObjectSet;
     };
 
-    struct FlightResources {
-        unique_ptr<DynamicCBufferArena> Arena;
-        vector<ResidentProgramSets> ProgramSets;
-    };
-
     struct PreparedDraw {
-        MeshDrawItem Item;
+        ForwardFrameDraw Item;
+        ForwardProgramBindings Bindings{};
+        Nullable<render::GraphicsPipelineState*> PipelineState{nullptr};
         Nullable<render::ShaderParameterSet*> ViewSet{nullptr};
         Nullable<render::ShaderParameterSet*> MaterialSet{nullptr};
         Nullable<render::ShaderParameterSet*> ObjectSet{nullptr};
@@ -129,45 +191,36 @@ struct ForwardPipeline::Impl {
         bool Valid{false};
     };
 
-    struct SelectedLight {
-        const LightSceneProxy* Proxy;
-        LightRenderParameters Parameters;
-        float DistanceSquared{0.0f};
+    struct FlightResources {
+        ForwardFrameInput Input;
+        unique_ptr<DynamicCBufferArena> Arena;
+        vector<ResidentProgramSets> ProgramSets;
+        ForwardMaterialSets MaterialSets;
+        vector<PreparedDraw> Prepared;
     };
 
     Impl(
         Application* application,
         Scene* renderScene,
-        CameraComponent* viewCamera,
-        ForwardPipeline* owner)
-        : App(application),
-          RenderScene(renderScene),
+        CameraComponent* viewCamera)
+        : RenderScene(renderScene),
           ViewCamera(viewCamera),
           Device(application->GetDevice()),
-          Registry(application->GetRenderSystem()->GetRenderPassRegistry()),
-          BindingGroups(ForwardPipeline::GetBindingGroupPlan()),
-          OpaquePass(owner, false),
-          TransparentPass(owner, true) {
+          Registry(application->GetRenderSystem()->GetRenderPassRegistry()) {
         const GpuSystem* gpu = application->GetGpuSystem();
         if (gpu != nullptr) {
             Flights.resize(gpu->GetFlightDataCount());
         }
     }
 
-    Application* App;
     Scene* RenderScene;
     CameraComponent* ViewCamera;
     render::Device* Device;
     render::RenderPassRegistry* Registry;
-    BindingGroupPlan BindingGroups;
-    MeshDrawList DrawList;
-    vector<PreparedDraw> Prepared;
+    ForwardBindingCache Bindings;
     vector<FlightResources> Flights;
     unordered_map<AppWindow*, DepthTarget> DepthTargets;
-    vector<ShaderProgram*> InvalidPrograms;
     bool LightOverflowWarned{false};
-    ForwardDrawPass OpaquePass;
-    ForwardDrawPass TransparentPass;
 
     ~Impl() noexcept {
         if (Registry != nullptr) {
@@ -188,18 +241,17 @@ struct ForwardPipeline::Impl {
             DynamicCBufferArena::Descriptor descriptor;
             descriptor.BasicSize = 1024 * 1024;
             descriptor.Alignment = std::max<uint64_t>(Device->GetDetail().CBufferAlignment, 1);
-            // MaxResetSize must stay 0: FlightResources::ProgramSets caches raw
-            // render::Buffer* arena targets across frames and is never cleared, so
-            // Reset() must only rewind blocks and never release them.
-            descriptor.MaxResetSize = 0;
+            descriptor.MaxResetSize = 1024 * 1024;
             descriptor.NamePrefix = "ForwardPipeline";
             flight.Arena = make_unique<DynamicCBufferArena>(
                 Device,
                 &frame.GetHostWrites(),
                 descriptor);
         }
+        flight.Prepared.clear();
+        flight.ProgramSets.clear();
+        flight.MaterialSets.Clear();
         flight.Arena->Reset();
-        Prepared.clear();
         return flight.Arena->IsValid();
     }
 
@@ -256,139 +308,6 @@ struct ForwardPipeline::Impl {
         return true;
     }
 
-    bool ValidateProgram(ShaderProgram* program) {
-        if (std::find(InvalidPrograms.begin(), InvalidPrograms.end(), program) !=
-            InvalidPrograms.end()) {
-            return false;
-        }
-        const uint32_t groups[] = {
-            BindingGroups.ViewGroup,
-            BindingGroups.MaterialGroup,
-            BindingGroups.ObjectGroup};
-        for (const uint32_t group : groups) {
-            // The pipeline uploads each of these buffers from a per-frame arena, so the
-            // declaration has to be the group's only buffer and has to take its offset at bind
-            // time.
-            const std::optional<uint32_t> buffer =
-                FindSingleBuffer(program->GetParameterLayout(), group);
-            if (!buffer.has_value() ||
-                !program->IsBufferDynamic(
-                    program->GetParameterLayout().Buffers()[buffer.value()].Name)) {
-                InvalidPrograms.push_back(program);
-                RADRAY_ERR_LOG("forward pipeline rejected an incompatible shader program");
-                return false;
-            }
-        }
-        return true;
-    }
-
-    bool FillViewParameters(
-        ShaderParameterStorage& storage,
-        const RenderCamera& camera,
-        float aspect) {
-        if (!storage.SetMatrix4x4(
-                "ViewProj",
-                camera.ViewCamera->ComputeViewProjMatrix(aspect))) {
-            return false;
-        }
-        const Eigen::Vector3f eye = camera.ViewCamera->GetEyePosition();
-        if (!storage.SetFloat4(
-                "EyePosition",
-                Eigen::Vector4f{eye.x(), eye.y(), eye.z(), 1.0f})) {
-            return false;
-        }
-
-        vector<SelectedLight> directional;
-        vector<SelectedLight> points;
-        for (const unique_ptr<LightSceneProxy>& light : camera.RenderScene->Lights()) {
-            if (light == nullptr || !light->AffectsWorld()) {
-                continue;
-            }
-            LightRenderParameters parameters;
-            light->GetLightRenderParameters(parameters);
-            SelectedLight selected{
-                .Proxy = light.get(),
-                .Parameters = parameters,
-                .DistanceSquared =
-                    (parameters.WorldPosition - eye).squaredNorm()};
-            if (light->GetLightType() == LightType::Directional) {
-                directional.push_back(selected);
-            } else if (light->GetLightType() == LightType::Point) {
-                points.push_back(selected);
-            }
-        }
-        const auto sortByDistance = [](vector<SelectedLight>& lights) {
-            std::stable_sort(
-                lights.begin(),
-                lights.end(),
-                [](const SelectedLight& lhs, const SelectedLight& rhs) noexcept {
-                    return lhs.DistanceSquared < rhs.DistanceSquared;
-                });
-        };
-        sortByDistance(directional);
-        sortByDistance(points);
-        if ((directional.size() > kMaxDirectionalLights ||
-             points.size() > kMaxPointLights) &&
-            !LightOverflowWarned) {
-            RADRAY_WARN_LOG("forward pipeline light limit exceeded; nearest supported lights are used");
-            LightOverflowWarned = true;
-        }
-        directional.resize(std::min<size_t>(directional.size(), kMaxDirectionalLights));
-        points.resize(std::min<size_t>(points.size(), kMaxPointLights));
-        if (!storage.SetUInt(
-                "DirectionalLightCount",
-                static_cast<uint32_t>(directional.size())) ||
-            !storage.SetUInt(
-                "PointLightCount",
-                static_cast<uint32_t>(points.size()))) {
-            return false;
-        }
-        for (uint32_t index = 0; index < directional.size(); ++index) {
-            const LightRenderParameters& light = directional[index].Parameters;
-            if (!storage.SetFloat4(
-                    "Direction",
-                    Eigen::Vector4f{
-                        light.Direction.x(),
-                        light.Direction.y(),
-                        light.Direction.z(),
-                        0.0f},
-                    index) ||
-                !storage.SetFloat4(
-                    "Irradiance",
-                    Eigen::Vector4f{
-                        light.Color.x() * light.DiffuseScale,
-                        light.Color.y() * light.DiffuseScale,
-                        light.Color.z() * light.DiffuseScale,
-                        0.0f},
-                    index)) {
-                return false;
-            }
-        }
-        for (uint32_t index = 0; index < points.size(); ++index) {
-            const SelectedLight& selected = points[index];
-            const LightRenderParameters& light = selected.Parameters;
-            if (!storage.SetFloat4(
-                    "Position",
-                    Eigen::Vector4f{
-                        light.WorldPosition.x(),
-                        light.WorldPosition.y(),
-                        light.WorldPosition.z(),
-                        selected.Proxy->GetRadius()},
-                    index) ||
-                !storage.SetFloat4(
-                    "Intensity",
-                    Eigen::Vector4f{
-                        light.Color.x() * light.DiffuseScale,
-                        light.Color.y() * light.DiffuseScale,
-                        light.Color.z() * light.DiffuseScale,
-                        0.0f},
-                    index)) {
-                return false;
-            }
-        }
-        return true;
-    }
-
     Nullable<ResidentProgramSets*> GetOrCreateProgramSets(
         FlightResources& flight,
         ShaderProgram* program,
@@ -396,10 +315,6 @@ struct ForwardPipeline::Impl {
         const DynamicCBufferArena::Allocation& viewAllocation,
         const ShaderParameterBufferLayout& objectBuffer,
         const DynamicCBufferArena::Allocation& objectAllocation) {
-        // These sets hold raw arena buffer pointers for the lifetime of the flight,
-        // which is only sound while the arena never frees a block on Reset().
-        // See the MaxResetSize note in BeginFrame.
-        RADRAY_ASSERT(flight.Arena != nullptr && flight.Arena->GetMaxResetSize() == 0);
         const auto found = std::find_if(
             flight.ProgramSets.begin(),
             flight.ProgramSets.end(),
@@ -415,11 +330,11 @@ struct ForwardPipeline::Impl {
         Nullable<unique_ptr<render::ShaderParameterSet>> viewSet =
             Device->CreateShaderParameterSet(render::ShaderParameterSetDescriptor{
                 .Layout = program->GetPipelineLayout(),
-                .GroupIndex = BindingGroups.ViewGroup});
+                .GroupIndex = viewBuffer.Group});
         Nullable<unique_ptr<render::ShaderParameterSet>> objectSet =
             Device->CreateShaderParameterSet(render::ShaderParameterSetDescriptor{
                 .Layout = program->GetPipelineLayout(),
-                .GroupIndex = BindingGroups.ObjectGroup});
+                .GroupIndex = objectBuffer.Group});
         if (!viewSet.HasValue() || !objectSet.HasValue() ||
             !viewSet->Set(
                 viewBuffer.Binding,
@@ -445,54 +360,52 @@ struct ForwardPipeline::Impl {
         return &flight.ProgramSets.back();
     }
 
-    bool PrepareCamera(
-        RenderPipelineContext& ctx,
-        const RenderCamera& camera) {
+    bool PrepareTarget(RenderPipelineContext& ctx, const AppFrameTarget& target) {
+        FlightResources& flight = Flights[ctx.Frame.FlightIndex()];
+        const ForwardFrameInput& input = flight.Input;
+        vector<PreparedDraw>& Prepared = flight.Prepared;
         Prepared.clear();
-        if (!camera.Target.HasValue() || camera.Target.Get()->Window == nullptr ||
-            camera.Target.Get()->BackBuffer == nullptr || camera.ViewCamera == nullptr ||
-            camera.RenderScene == nullptr || ctx.Frame.FlightIndex() >= Flights.size()) {
+        if (target.Window == nullptr || target.BackBuffer == nullptr) {
             return false;
         }
         const render::TextureDescriptor targetDesc =
-            camera.Target.Get()->BackBuffer->GetDesc();
+            target.BackBuffer->GetDesc();
         if (targetDesc.Width == 0 || targetDesc.Height == 0 ||
             !EnsureDepth(
-                camera.Target.Get()->Window,
+                target.Window,
                 targetDesc.Width,
                 targetDesc.Height,
                 targetDesc.SampleCount)) {
             return false;
         }
 
-        DrawList.Collect(camera.RenderScene, camera.ViewCamera->ComputeViewMatrix());
-        DrawList.Sort();
-        Prepared.reserve(DrawList.Size());
-        for (const MeshDrawItem& item : DrawList.Items()) {
+        Prepared.reserve(input.Draws.size());
+        for (const ForwardFrameDraw& item : input.Draws) {
             Prepared.push_back(PreparedDraw{.Item = item});
         }
 
-        FlightResources& flight = Flights[ctx.Frame.FlightIndex()];
         if (flight.Arena == nullptr || !flight.Arena->IsValid()) {
             return false;
         }
         DynamicCBufferArena& arena = *flight.Arena;
         vector<ShaderProgram*> programs;
         for (const PreparedDraw& draw : Prepared) {
-            ShaderProgram* program = draw.Item.DrawMaterial->GetProgram();
+            ShaderProgram* program = input.Materials[draw.Item.MaterialIndex].Program.Get();
             if (std::find(programs.begin(), programs.end(), program) == programs.end()) {
                 programs.push_back(program);
             }
         }
         for (ShaderProgram* program : programs) {
-            if (!ValidateProgram(program)) {
+            const auto resolved = Bindings.Resolve(program);
+            if (!resolved.HasValue()) {
                 continue;
             }
+            const ForwardProgramBindings& bindings = *resolved.Get();
             const ShaderParameterLayout& layout = program->GetParameterLayout();
             const uint32_t viewBufferIndex =
-                FindSingleBuffer(layout, BindingGroups.ViewGroup).value();
+                bindings.ViewBufferIndex;
             const uint32_t objectBufferIndex =
-                FindSingleBuffer(layout, BindingGroups.ObjectGroup).value();
+                bindings.ObjectBufferIndex;
             const ShaderParameterBufferLayout& viewBuffer =
                 layout.Buffers()[viewBufferIndex];
             const ShaderParameterBufferLayout& objectBuffer =
@@ -501,9 +414,10 @@ struct ForwardPipeline::Impl {
             ShaderParameterStorage viewValues{&layout};
             if (!FillViewParameters(
                     viewValues,
-                    camera,
+                    input,
                     static_cast<float>(targetDesc.Width) /
-                        static_cast<float>(targetDesc.Height))) {
+                        static_cast<float>(targetDesc.Height),
+                    LightOverflowWarned)) {
                 continue;
             }
             const std::optional<DynamicCBufferArena::Allocation> viewAllocation =
@@ -514,7 +428,7 @@ struct ForwardPipeline::Impl {
 
             vector<size_t> drawIndices;
             for (size_t index = 0; index < Prepared.size(); ++index) {
-                if (Prepared[index].Item.DrawMaterial->GetProgram() == program) {
+                if (input.Materials[Prepared[index].Item.MaterialIndex].Program.Get() == program) {
                     drawIndices.push_back(index);
                 }
             }
@@ -572,6 +486,7 @@ struct ForwardPipeline::Impl {
             }
             for (size_t localIndex = 0; localIndex < drawIndices.size(); ++localIndex) {
                 PreparedDraw& draw = Prepared[drawIndices[localIndex]];
+                draw.Bindings = bindings;
                 draw.ViewSet = sets.Get()->ViewSet.get();
                 draw.ObjectSet = sets.Get()->ObjectSet.get();
                 draw.ViewOffsets = {{.Binding = viewBuffer.Binding,
@@ -582,58 +497,48 @@ struct ForwardPipeline::Impl {
             }
         }
 
-        vector<Material*> materials;
-        for (const PreparedDraw& draw : Prepared) {
-            if (draw.ViewSet.HasValue() &&
-                std::find(
-                    materials.begin(),
-                    materials.end(),
-                    draw.Item.DrawMaterial) == materials.end()) {
-                materials.push_back(draw.Item.DrawMaterial);
+        for (uint32_t materialIndex = 0; materialIndex < input.Materials.size(); ++materialIndex) {
+            const MaterialRenderData& material = input.Materials[materialIndex];
+            if (!material.Program.HasValue()) {
+                continue;
             }
-        }
-        for (Material* material : materials) {
-            ShaderProgram* program = material->GetProgram();
+            ShaderProgram* program = material.Program.Get();
+            const auto resolved = Bindings.Resolve(program);
+            if (!resolved.HasValue() || material.ParameterGroup != resolved.Get()->MaterialGroup) {
+                continue;
+            }
             const ShaderParameterLayout& layout = program->GetParameterLayout();
-            vector<MaterialBufferBinding> bindings;
+            vector<ForwardBufferBinding> bindings;
             vector<render::ShaderParameterDynamicOffset> offsets;
             bool valid = true;
-            for (uint32_t bufferIndex = 0;
-                 bufferIndex < layout.Buffers().size();
-                 ++bufferIndex) {
-                const ShaderParameterBufferLayout& buffer =
-                    layout.Buffers()[bufferIndex];
-                if (buffer.Group != BindingGroups.MaterialGroup) {
+            for (uint32_t bufferIndex = 0; bufferIndex < layout.Buffers().size(); ++bufferIndex) {
+                const ShaderParameterBufferLayout& buffer = layout.Buffers()[bufferIndex];
+                if (buffer.Group != material.ParameterGroup) {
                     continue;
                 }
-                const std::optional<DynamicCBufferArena::Allocation> allocation =
-                    UploadBytes(
-                        arena,
-                        material->GetParameterStorage().GetBufferData(bufferIndex));
+                const auto allocation = UploadBytes(arena, material.Parameters.GetBufferData(bufferIndex));
                 if (!allocation.has_value()) {
                     valid = false;
                     break;
                 }
-                bindings.push_back(MaterialBufferBinding{
+                const bool dynamic = program->IsBufferDynamic(buffer.Name);
+                bindings.push_back(ForwardBufferBinding{
                     .BufferIndex = bufferIndex,
                     .Value = render::ShaderBufferBinding{
                         .Target = allocation->Target,
-                        .Range = render::BufferRange{0, buffer.Size}}});
-                offsets.push_back(render::ShaderParameterDynamicOffset{
-                    .Binding = buffer.Binding,
-                    .Offset = static_cast<uint32_t>(allocation->Offset)});
+                        .Range = render::BufferRange{dynamic ? 0 : allocation->Offset, buffer.Size}}});
+                if (dynamic) {
+                    offsets.push_back(render::ShaderParameterDynamicOffset{
+                        .Binding = buffer.Binding,
+                        .Offset = static_cast<uint32_t>(allocation->Offset)});
+                }
             }
-            const Nullable<render::ShaderParameterSet*> set =
-                valid
-                    ? material->PrepareParameterSet(
-                          ctx.Frame.FlightIndex(),
-                          bindings)
-                    : nullptr;
+            const auto set = valid ? flight.MaterialSets.GetOrCreate(materialIndex, material, bindings) : nullptr;
             if (!set.HasValue()) {
                 continue;
             }
             for (PreparedDraw& draw : Prepared) {
-                if (draw.Item.DrawMaterial != material || !draw.ViewSet.HasValue()) {
+                if (draw.Item.MaterialIndex != materialIndex || !draw.ViewSet.HasValue()) {
                     continue;
                 }
                 draw.MaterialSet = set.Get();
@@ -644,16 +549,15 @@ struct ForwardPipeline::Impl {
         return true;
     }
 
-    bool Execute(
-        RenderPipelineContext& ctx,
-        const RenderCamera& camera,
-        bool transparent) {
-        if (!camera.Target.HasValue() || camera.Target.Get()->Window == nullptr ||
-            camera.Target.Get()->BackBuffer == nullptr ||
-            camera.Target.Get()->BackBufferView == nullptr || Registry == nullptr) {
+    bool Execute(RenderPipelineContext& ctx, AppFrameTarget& frameTarget, bool transparent) {
+        if (frameTarget.Window == nullptr || frameTarget.BackBuffer == nullptr ||
+            frameTarget.BackBufferView == nullptr || Registry == nullptr) {
             return false;
         }
-        AppFrameTarget* target = camera.Target.Get();
+        FlightResources& flight = Flights[ctx.Frame.FlightIndex()];
+        const ForwardFrameInput& input = flight.Input;
+        vector<PreparedDraw>& Prepared = flight.Prepared;
+        AppFrameTarget* target = &frameTarget;
         const render::TextureDescriptor targetDesc = target->BackBuffer->GetDesc();
         auto depthIt = DepthTargets.find(target->Window);
         if (depthIt == DepthTargets.end() || depthIt->second.View == nullptr) {
@@ -706,6 +610,16 @@ struct ForwardPipeline::Impl {
             return false;
         }
 
+        const GraphicsPassState passState{
+            vector<render::TextureFormat>{targetDesc.Format}, kForwardDepthFormat, targetDesc.SampleCount, pass.Get()};
+        for (PreparedDraw& draw : Prepared) {
+            const MaterialRenderData& material = input.Materials[draw.Item.MaterialIndex];
+            if (draw.Valid && IsTransparent(material) == transparent) {
+                draw.PipelineState = material.Program.Get()->GetOrCreateGraphicsPipelineState(
+                    material.PipelineState, draw.Item.Geometry->VertexLayout, draw.Item.Geometry->Topology, passState);
+            }
+        }
+
         const render::ColorClearValue colorClear{{0.025f, 0.030f, 0.040f, 1.0f}};
         const render::DepthStencilClearValue depthClear{1.0f, 0};
         Nullable<unique_ptr<render::GraphicsCommandEncoder>> encoder =
@@ -730,36 +644,21 @@ struct ForwardPipeline::Impl {
         graphics->SetScissor(Rect{
             0, 0, targetDesc.Width, targetDesc.Height});
 
-        const GraphicsPassState passState{
-            vector<render::TextureFormat>{targetDesc.Format},
-            kForwardDepthFormat,
-            targetDesc.SampleCount,
-            pass.Get()};
         for (const PreparedDraw& draw : Prepared) {
-            if (!draw.Valid || IsTransparent(draw.Item) != transparent) {
+            if (!draw.Valid || !draw.PipelineState.HasValue() || IsTransparent(input.Materials[draw.Item.MaterialIndex]) != transparent) {
                 continue;
             }
-            Material* material = draw.Item.DrawMaterial;
-            const Nullable<render::GraphicsPipelineState*> pso =
-                material->GetProgram()->GetOrCreateGraphicsPipelineState(
-                    material->GetPipelineState(),
-                    draw.Item.Geometry->VertexLayout,
-                    draw.Item.Geometry->Topology,
-                    passState);
-            if (!pso.HasValue()) {
-                continue;
-            }
-            graphics->BindGraphicsPipelineState(pso.Get());
+            graphics->BindGraphicsPipelineState(draw.PipelineState.Get());
             graphics->BindShaderParameterSet(
-                BindingGroups.ViewGroup,
+                draw.Bindings.ViewGroup,
                 draw.ViewSet.Get(),
                 draw.ViewOffsets);
             graphics->BindShaderParameterSet(
-                BindingGroups.MaterialGroup,
+                draw.Bindings.MaterialGroup,
                 draw.MaterialSet.Get(),
                 draw.MaterialOffsets);
             graphics->BindShaderParameterSet(
-                BindingGroups.ObjectGroup,
+                draw.Bindings.ObjectGroup,
                 draw.ObjectSet.Get(),
                 draw.ObjectOffsets);
             const render::VertexBufferBinding vertexBinding{
@@ -783,46 +682,40 @@ ForwardPipeline::ForwardPipeline(
     Application* app,
     Scene* scene,
     CameraComponent* camera)
-    : _impl(make_unique<Impl>(app, scene, camera, this)) {}
+    : _impl(make_unique<Impl>(app, scene, camera)) {}
 
 ForwardPipeline::~ForwardPipeline() noexcept = default;
 
-void ForwardPipeline::OnBeginFrame(RenderPipelineContext& ctx) {
-    _impl->BeginFrame(ctx.Frame);
+void ForwardPipeline::PrepareFrame(const AppUpdateContext& ctx, vector<StreamingAssetRefAny>& retainedAssets) {
+    RADRAY_ASSERT(ctx.FlightIndex < _impl->Flights.size());
+    CollectFrameInput(_impl->RenderScene, _impl->ViewCamera, _impl->Flights[ctx.FlightIndex].Input, retainedAssets);
 }
 
-void ForwardPipeline::OnBuildCameraList(
-    RenderPipelineContext& ctx,
-    RenderCameraList& cameras) {
-    cameras.Clear();
-    for (RenderPipelineTarget& target : ctx.Targets) {
-        cameras.Add(_impl->RenderScene, _impl->ViewCamera, &target.Target);
-    }
-}
-
-void ForwardPipeline::OnAddRenderPasses(
-    RenderPipelineContext& ctx,
-    const RenderCamera& camera) {
-    if (!_impl->PrepareCamera(ctx, camera)) {
+void ForwardPipeline::Render(RenderPipelineContext& ctx) {
+    if (!_impl->BeginFrame(ctx.Frame)) {
         return;
     }
-    EnqueuePass(&_impl->OpaquePass);
-    const bool hasTransparent = std::any_of(
-        _impl->Prepared.begin(),
-        _impl->Prepared.end(),
-        [](const Impl::PreparedDraw& draw) noexcept {
-            return draw.Valid && IsTransparent(draw.Item);
-        });
-    if (hasTransparent) {
-        EnqueuePass(&_impl->TransparentPass);
+    for (RenderPipelineTarget& target : ctx.Targets) {
+        if (!_impl->PrepareTarget(ctx, target.Target)) {
+            continue;
+        }
+        if (!_impl->Execute(ctx, target.Target, false)) {
+            continue;
+        }
+        target.ContentDrawn = true;
+        const auto& flight = _impl->Flights[ctx.Frame.FlightIndex()];
+        const bool hasTransparent = std::any_of(flight.Prepared.begin(), flight.Prepared.end(),
+                                                [&](const Impl::PreparedDraw& draw) {
+                                                    return draw.Valid && IsTransparent(flight.Input.Materials[draw.Item.MaterialIndex]);
+                                                });
+        if (hasTransparent) {
+            _impl->Execute(ctx, target.Target, true);
+        }
     }
 }
 
-bool ForwardPipeline::ExecutePreparedPass(
-    RenderPipelineContext& ctx,
-    const RenderCamera& camera,
-    bool transparent) {
-    return _impl->Execute(ctx, camera, transparent);
+const forward_detail::ForwardFrameInput& ForwardPipeline::GetFrameInput(uint32_t flightIndex) const noexcept {
+    return _impl->Flights[flightIndex].Input;
 }
 
 render::ShaderProgramLayoutRecipe ForwardPipeline::GetLayoutRecipe() noexcept {

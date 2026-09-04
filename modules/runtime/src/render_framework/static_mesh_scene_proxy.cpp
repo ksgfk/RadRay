@@ -14,6 +14,10 @@ StaticMeshSceneProxy::StaticMeshSceneProxy(
 
 StaticMeshSceneProxy::~StaticMeshSceneProxy() noexcept = default;
 
+void StaticMeshSceneProxy::CollectAssetReferences(vector<StreamingAssetRefAny>& out) const {
+    out.push_back(_mesh.AsAny());
+}
+
 MeshDrawArgs StaticMeshSceneProxy::GetDrawArgs(uint32_t sectionIndex) const noexcept {
     const StaticMesh* mesh = _mesh.Get();
     if (mesh == nullptr || sectionIndex >= mesh->GetSections().size()) {

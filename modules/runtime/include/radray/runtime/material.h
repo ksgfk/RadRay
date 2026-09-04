@@ -14,17 +14,35 @@ namespace radray {
 
 class ShaderProgram;
 
-struct MaterialBufferBinding {
-    uint32_t BufferIndex{0};
-    render::ShaderBufferBinding Value;
+struct MaterialTextureFrameData {
+    ShaderParameterInfo Parameter;
+    TextureAsset* Texture;
+    TextureSubViewDesc SubView;
+    uint32_t Element{0};
+};
+
+struct MaterialSamplerFrameData {
+    ShaderParameterInfo Parameter;
+    render::SamplerDescriptor Sampler;
+    uint32_t Element{0};
+};
+
+/// CPU value snapshot. Asset owners are retained separately on the game thread.
+struct MaterialRenderData {
+    Nullable<ShaderProgram*> Program{nullptr};
+    uint32_t ParameterGroup{0};
+    ShaderParameterStorage Parameters{};
+    MaterialPipelineState PipelineState;
+    RenderQueue Queue{RenderQueue::Geometry};
+    vector<MaterialTextureFrameData> Textures;
+    vector<MaterialSamplerFrameData> Samplers;
 };
 
 class Material {
 public:
     static Nullable<unique_ptr<Material>> Create(
         ShaderProgram* program,
-        BindingGroupPlan bindingGroups,
-        uint32_t flightCount);
+        std::string_view parameterGroupAnchor);
 
     Material(const Material&) = delete;
     Material(Material&&) = delete;
@@ -33,7 +51,7 @@ public:
     ~Material() noexcept;
 
     ShaderProgram* GetProgram() const noexcept { return _program; }
-    const BindingGroupPlan& GetBindingGroups() const noexcept { return _bindingGroups; }
+    uint32_t GetParameterGroup() const noexcept { return _parameterGroup; }
 
     MaterialPipelineState& GetPipelineState() noexcept { return _pipelineState; }
     const MaterialPipelineState& GetPipelineState() const noexcept { return _pipelineState; }
@@ -60,28 +78,20 @@ public:
         const render::SamplerDescriptor& sampler,
         uint32_t element = 0) noexcept;
 
-    Nullable<render::ShaderParameterSet*> PrepareParameterSet(
-        uint32_t flightIndex,
-        std::span<const MaterialBufferBinding> bufferBindings) noexcept;
-    Nullable<render::ShaderParameterSet*> GetResidentParameterSet(
-        uint32_t flightIndex) const noexcept;
-    uint64_t GetResourceVersion() const noexcept;
-    uint64_t GetResidentResourceVersion(uint32_t flightIndex) const noexcept;
+    /// Game thread only. Copies authoring values and retains ready texture owners without RHI calls.
+    bool BuildRenderData(MaterialRenderData& out, vector<StreamingAssetRefAny>& retainedAssets) const;
 
 private:
     struct ResourceState;
 
-    Material(
-        ShaderProgram* program,
-        BindingGroupPlan bindingGroups,
-        uint32_t flightCount);
+    Material(ShaderProgram* program, uint32_t parameterGroup);
 
-    const ShaderParameterInfo* FindNumericParameter(
+    Nullable<const ShaderParameterInfo*> FindNumericParameter(
         std::string_view name,
         ShaderParameterKind kind) const noexcept;
 
     ShaderProgram* _program;
-    BindingGroupPlan _bindingGroups;
+    uint32_t _parameterGroup;
     ShaderParameterStorage _parameters;
     MaterialPipelineState _pipelineState;
     RenderQueue _renderQueue{RenderQueue::Geometry};

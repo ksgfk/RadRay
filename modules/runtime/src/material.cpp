@@ -23,57 +23,38 @@ struct Material::ResourceState {
         render::SamplerDescriptor Sampler;
     };
 
-    struct FlightSet {
-        unique_ptr<render::ShaderParameterSet> Set;
-        uint64_t ResourceVersion{0};
-        vector<MaterialBufferBinding> BufferBindings;
-    };
-
-    explicit ResourceState(uint32_t flightCount)
-        : Flights(flightCount) {}
-
     vector<TextureValue> Textures;
     vector<SamplerValue> Samplers;
-    vector<FlightSet> Flights;
-    uint64_t Version{1};
 };
 
 Nullable<unique_ptr<Material>> Material::Create(
     ShaderProgram* program,
-    BindingGroupPlan bindingGroups,
-    uint32_t flightCount) {
-    if (program == nullptr || !bindingGroups.IsValid() || flightCount == 0) {
+    std::string_view parameterGroupAnchor) {
+    const auto buffers = program->GetParameterLayout().Buffers();
+    const auto anchor = std::find_if(buffers.begin(), buffers.end(),
+                                     [parameterGroupAnchor](const ShaderParameterBufferLayout& buffer) {
+                                         return buffer.Name == parameterGroupAnchor;
+                                     });
+    if (anchor == buffers.end()) {
         return nullptr;
     }
-    const bool materialGroupExists = std::any_of(
-        program->GetArtifact().Generic().Bindings().begin(),
-        program->GetArtifact().Generic().Bindings().end(),
-        [group = bindingGroups.MaterialGroup](const shader::WireBindingRecord& binding) noexcept {
-            return binding.Group == group;
-        });
-    if (!materialGroupExists) {
-        return nullptr;
-    }
-    return unique_ptr<Material>{new Material(program, bindingGroups, flightCount)};
+    return unique_ptr<Material>{new Material(program, anchor->Group)};
 }
 
-Material::Material(
-    ShaderProgram* program,
-    BindingGroupPlan bindingGroups,
-    uint32_t flightCount)
+Material::Material(ShaderProgram* program, uint32_t parameterGroup)
     : _program(program),
-      _bindingGroups(bindingGroups),
-      _parameters(&program->GetParameterLayout()),
-      _resources(make_unique<ResourceState>(flightCount)) {}
+      _parameterGroup(parameterGroup),
+      _parameters(&program->GetParameterLayout(), parameterGroup),
+      _resources(make_unique<ResourceState>()) {}
 
 Material::~Material() noexcept = default;
 
-const ShaderParameterInfo* Material::FindNumericParameter(
+Nullable<const ShaderParameterInfo*> Material::FindNumericParameter(
     std::string_view name,
     ShaderParameterKind kind) const noexcept {
     const ShaderParameterInfo* parameter = _program->GetParameterLayout().Find(name);
     if (parameter == nullptr || parameter->Kind != kind ||
-        parameter->Group != _bindingGroups.MaterialGroup) {
+        parameter->Group != _parameterGroup) {
         return nullptr;
     }
     return parameter;
@@ -125,7 +106,7 @@ bool Material::SetTexture(
     uint32_t element) noexcept {
     const ShaderParameterInfo* parameter = _program->GetParameterLayout().Find(name);
     if (parameter == nullptr || parameter->Kind != ShaderParameterKind::Texture ||
-        parameter->Group != _bindingGroups.MaterialGroup ||
+        parameter->Group != _parameterGroup ||
         element >= parameter->ElementCount || !texture.IsValid()) {
         return false;
     }
@@ -149,7 +130,6 @@ bool Material::SetTexture(
             .Texture = std::move(texture),
             .SubView = subView});
     }
-    ++_resources->Version;
     return true;
 }
 
@@ -159,7 +139,7 @@ bool Material::SetSampler(
     uint32_t element) noexcept {
     const ShaderParameterInfo* parameter = _program->GetParameterLayout().Find(name);
     if (parameter == nullptr || parameter->Kind != ShaderParameterKind::Sampler ||
-        parameter->Group != _bindingGroups.MaterialGroup ||
+        parameter->Group != _parameterGroup ||
         element >= parameter->ElementCount) {
         return false;
     }
@@ -181,171 +161,61 @@ bool Material::SetSampler(
             .Element = element,
             .Sampler = sampler});
     }
-    ++_resources->Version;
     return true;
 }
 
-Nullable<render::ShaderParameterSet*> Material::PrepareParameterSet(
-    uint32_t flightIndex,
-    std::span<const MaterialBufferBinding> bufferBindings) noexcept {
-    if (flightIndex >= _resources->Flights.size()) {
-        return nullptr;
-    }
-
-    vector<const MaterialBufferBinding*> materialBuffers;
-    for (uint32_t bufferIndex = 0;
-         bufferIndex < _program->GetParameterLayout().Buffers().size();
-         ++bufferIndex) {
-        const ShaderParameterBufferLayout& buffer =
-            _program->GetParameterLayout().Buffers()[bufferIndex];
-        if (buffer.Group != _bindingGroups.MaterialGroup) {
-            continue;
-        }
-        const auto found = std::find_if(
-            bufferBindings.begin(),
-            bufferBindings.end(),
-            [bufferIndex](const MaterialBufferBinding& value) noexcept {
-                return value.BufferIndex == bufferIndex;
-            });
-        if (found == bufferBindings.end() || found->Value.Target == nullptr) {
-            return nullptr;
-        }
-        materialBuffers.push_back(&*found);
-    }
-    if (materialBuffers.size() != bufferBindings.size()) {
-        return nullptr;
-    }
-
+bool Material::BuildRenderData(
+    MaterialRenderData& out,
+    vector<StreamingAssetRefAny>& retainedAssets) const {
+    // Fail before publishing an incomplete snapshot or retaining partial resources.
     for (const ShaderParameterRecord& parameter : _program->GetParameterLayout().Parameters()) {
-        if (parameter.Info.Group != _bindingGroups.MaterialGroup ||
-            (parameter.Info.Kind != ShaderParameterKind::Texture &&
-             parameter.Info.Kind != ShaderParameterKind::Sampler)) {
+        if (parameter.Info.Group != _parameterGroup) {
             continue;
         }
         for (uint32_t element = 0; element < parameter.Info.ElementCount; ++element) {
-            const bool exists = parameter.Info.Kind == ShaderParameterKind::Texture
-                                    ? std::any_of(
-                                          _resources->Textures.begin(),
-                                          _resources->Textures.end(),
-                                          [&](const ResourceState::TextureValue& value) noexcept {
-                                              return value.Name == parameter.Name &&
-                                                     value.Element == element;
-                                          })
-                                    : std::any_of(
-                                          _resources->Samplers.begin(),
-                                          _resources->Samplers.end(),
-                                          [&](const ResourceState::SamplerValue& value) noexcept {
-                                              return value.Name == parameter.Name &&
-                                                     value.Element == element;
-                                          });
-            if (!exists) {
-                return nullptr;
+            if (parameter.Info.Kind == ShaderParameterKind::Texture) {
+                const auto found = std::find_if(_resources->Textures.begin(), _resources->Textures.end(),
+                                                [&](const ResourceState::TextureValue& value) {
+                                                    return value.Parameter.Binding == parameter.Info.Binding &&
+                                                           value.Element == element;
+                                                });
+                if (found == _resources->Textures.end() || found->Texture.Get() == nullptr) {
+                    return false;
+                }
+            } else if (parameter.Info.Kind == ShaderParameterKind::Sampler) {
+                const auto found = std::find_if(_resources->Samplers.begin(), _resources->Samplers.end(),
+                                                [&](const ResourceState::SamplerValue& value) {
+                                                    return value.Parameter.Binding == parameter.Info.Binding &&
+                                                           value.Element == element;
+                                                });
+                if (found == _resources->Samplers.end()) {
+                    return false;
+                }
             }
         }
     }
-
-    ResourceState::FlightSet& flight = _resources->Flights[flightIndex];
-    const bool rebuild = flight.Set == nullptr ||
-                         flight.ResourceVersion != _resources->Version;
-    // A resident set may already be referenced by command buffers recorded for an
-    // earlier camera this frame. Vulkan resolves descriptors at execution time, so
-    // rewriting an unchanged binding would retroactively repoint that recording.
-    bool bufferBindingsChanged = rebuild ||
-                                 flight.BufferBindings.size() != materialBuffers.size();
-    if (!bufferBindingsChanged) {
-        for (size_t index = 0; index < materialBuffers.size(); ++index) {
-            if (flight.BufferBindings[index].BufferIndex !=
-                    materialBuffers[index]->BufferIndex ||
-                !(flight.BufferBindings[index].Value == materialBuffers[index]->Value)) {
-                bufferBindingsChanged = true;
-                break;
-            }
-        }
+    MaterialRenderData snapshot{
+        .Program = _program,
+        .ParameterGroup = _parameterGroup,
+        .Parameters = _parameters,
+        .PipelineState = _pipelineState,
+        .Queue = _renderQueue};
+    for (const ResourceState::TextureValue& value : _resources->Textures) {
+        snapshot.Textures.push_back(MaterialTextureFrameData{
+            .Parameter = value.Parameter,
+            .Texture = value.Texture.Get(),
+            .SubView = value.SubView,
+            .Element = value.Element});
+        retainedAssets.push_back(value.Texture.AsAny());
     }
-    if (!bufferBindingsChanged) {
-        return flight.Set.get();
+    for (const ResourceState::SamplerValue& value : _resources->Samplers) {
+        snapshot.Samplers.push_back(MaterialSamplerFrameData{
+            .Parameter = value.Parameter,
+            .Sampler = value.Sampler,
+            .Element = value.Element});
     }
-    if (!rebuild) {
-        // Rewriting a live set is only safe before anything binds it this frame.
-        // Callers that prepare the same material twice per frame with different
-        // targets (for example one camera per window, once the arena spills into a
-        // new block) would repoint an earlier recording under Vulkan.
-        RADRAY_WARN_LOG(
-            "material parameter set rewritten with new buffer targets on flight {}; "
-            "earlier recordings this frame may observe the new binding",
-            flightIndex);
-    }
-    unique_ptr<render::ShaderParameterSet> replacement;
-    render::ShaderParameterSet* set = flight.Set.get();
-    if (rebuild) {
-        Nullable<unique_ptr<render::ShaderParameterSet>> created =
-            _program->GetDevice()->CreateShaderParameterSet(
-                render::ShaderParameterSetDescriptor{
-                    .Layout = _program->GetPipelineLayout(),
-                    .GroupIndex = _bindingGroups.MaterialGroup});
-        if (!created.HasValue()) {
-            return nullptr;
-        }
-        replacement = created.Release();
-        set = replacement.get();
-    }
-
-    for (const MaterialBufferBinding* binding : materialBuffers) {
-        const ShaderParameterBufferLayout& buffer =
-            _program->GetParameterLayout().Buffers()[binding->BufferIndex];
-        if (!set->Set(buffer.Binding, 0, binding->Value)) {
-            return nullptr;
-        }
-    }
-    if (rebuild) {
-        for (const ResourceState::TextureValue& value : _resources->Textures) {
-            TextureAsset* texture = value.Texture.Get();
-            render::TextureView* view =
-                texture != nullptr ? texture->GetOrCreateSrv(value.SubView) : nullptr;
-            if (view == nullptr || !set->Set(value.Parameter.Binding, value.Element, view)) {
-                return nullptr;
-            }
-        }
-        for (const ResourceState::SamplerValue& value : _resources->Samplers) {
-            const Nullable<render::Sampler*> sampler =
-                _program->GetDevice()->GetOrCreateSampler(value.Sampler);
-            if (!sampler.HasValue() ||
-                !set->Set(value.Parameter.Binding, value.Element, sampler.Get())) {
-                return nullptr;
-            }
-        }
-    }
-    if (!set->FlushWrites()) {
-        return nullptr;
-    }
-    if (rebuild) {
-        flight.Set = std::move(replacement);
-        flight.ResourceVersion = _resources->Version;
-    }
-    flight.BufferBindings.clear();
-    flight.BufferBindings.reserve(materialBuffers.size());
-    for (const MaterialBufferBinding* binding : materialBuffers) {
-        flight.BufferBindings.push_back(*binding);
-    }
-    return flight.Set.get();
-}
-
-Nullable<render::ShaderParameterSet*> Material::GetResidentParameterSet(
-    uint32_t flightIndex) const noexcept {
-    if (flightIndex >= _resources->Flights.size()) {
-        return nullptr;
-    }
-    return _resources->Flights[flightIndex].Set.get();
-}
-
-uint64_t Material::GetResourceVersion() const noexcept {
-    return _resources->Version;
-}
-
-uint64_t Material::GetResidentResourceVersion(uint32_t flightIndex) const noexcept {
-    return flightIndex < _resources->Flights.size()
-               ? _resources->Flights[flightIndex].ResourceVersion
-               : 0;
+    out = std::move(snapshot);
+    return true;
 }
 
 }  // namespace radray

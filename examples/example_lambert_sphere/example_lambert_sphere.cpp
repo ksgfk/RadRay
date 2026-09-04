@@ -80,7 +80,6 @@ protected:
             return;
         }
 
-        const BindingGroupPlan groups = ForwardPipeline::GetBindingGroupPlan();
         ShaderProgramRequest request{
             .SourceName = "pipelines/forward/forward.hlsl",
             .LayoutRecipe = ForwardPipeline::GetLayoutRecipe()};
@@ -93,8 +92,7 @@ protected:
         }
         Nullable<unique_ptr<Material>> material = Material::Create(
             program.Get(),
-            groups,
-            GetGpuSystem()->GetFlightDataCount());
+            "ForwardMaterial");
         if (!material.HasValue()) {
             RADRAY_ERR_LOG("example_lambert_sphere: material creation failed");
             return;

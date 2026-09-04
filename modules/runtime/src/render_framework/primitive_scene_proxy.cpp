@@ -13,4 +13,6 @@ PrimitiveSceneProxy::PrimitiveSceneProxy() noexcept
 
 PrimitiveSceneProxy::~PrimitiveSceneProxy() noexcept = default;
 
+void PrimitiveSceneProxy::CollectAssetReferences(vector<StreamingAssetRefAny>&) const {}
+
 }  // namespace radray

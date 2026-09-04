@@ -28,6 +28,7 @@ RenderSystem::RenderSystem(Application* app) noexcept
 RenderSystem::~RenderSystem() noexcept {
     ReleaseAllScenes();
     _pipeline.reset();
+    _retainedAssets.clear();
     _shaderPrograms.clear();
     _shaderJit.reset();
     // 缓存的 RenderPass / Framebuffer 必须先于 GpuSystem 持有的 device 销毁。
@@ -42,6 +43,7 @@ void RenderSystem::OnInitialize() {
         return;
     }
 
+    _retainedAssets.resize(gpu->GetFlightDataCount());
     _renderPassRegistry = make_unique<render::RenderPassRegistry>(device);
     _shaderJit = make_unique<ShaderJit>(_app->GetShaderIncludePaths());
 }
@@ -303,6 +305,18 @@ void RenderSystem::SetPipeline(unique_ptr<RenderPipeline> pipeline) noexcept {
     _pipeline = std::move(pipeline);
 }
 
+void RenderSystem::BeginUpdateForFlight(uint32_t flightIndex) {
+    RADRAY_ASSERT(flightIndex < _retainedAssets.size());
+    _retainedAssets[flightIndex].clear();
+}
+
+void RenderSystem::PrepareFrame(const AppUpdateContext& ctx) {
+    RADRAY_ASSERT(ctx.FlightIndex < _retainedAssets.size());
+    if (_pipeline != nullptr) {
+        _pipeline->PrepareFrame(ctx, _retainedAssets[ctx.FlightIndex]);
+    }
+}
+
 void RenderSystem::Render(AppFrameContext& ctx) {
     if (_app == nullptr || _app->GetWindowManager() == nullptr) {
         return;
@@ -330,21 +344,64 @@ void RenderSystem::Render(AppFrameContext& ctx) {
         return;
     }
 
+    for (RenderPipelineTarget& target : targets) {
+        EnsureRenderTargetState(ctx, target);
+    }
     if (_pipeline != nullptr) {
-        RenderPipelineContext pipelineCtx(_app, ctx, targets);
-        RenderCameraList cameras;
-        _pipeline->BeginFrame(pipelineCtx);
-        _pipeline->BuildCameraList(pipelineCtx, cameras);
-        _pipeline->Render(pipelineCtx, cameras);
-        _pipeline->EndFrame(pipelineCtx);
-    } else {
-        for (RenderPipelineTarget& target : targets) {
-            EnsureRenderTargetState(ctx, target);
+        RenderPipelineContext pipelineCtx{ctx, targets};
+        _pipeline->Render(pipelineCtx);
+    }
+    for (RenderPipelineTarget& target : targets) {
+        if (!target.ContentDrawn) {
+            ClearTarget(ctx, target);
         }
+        EnsurePresentState(ctx, target);
+    }
+}
+
+void RenderSystem::ClearTarget(AppFrameContext& ctx, RenderPipelineTarget& target) {
+    if (target.Target.BackBufferView == nullptr) {
+        return;
     }
 
-    for (RenderPipelineTarget& target : targets) {
-        EnsurePresentState(ctx, target);
+    render::RenderPassRegistry* registry = _renderPassRegistry.get();
+    if (registry == nullptr || target.Target.BackBuffer == nullptr) {
+        return;
+    }
+    const render::TextureDescriptor texture = target.Target.BackBuffer->GetDesc();
+    render::RenderPassColorAttachmentDescriptor colorAttachment{
+        .Format = texture.Format,
+        .SampleCount = texture.SampleCount,
+        .Load = render::LoadAction::Clear,
+        .Store = render::StoreAction::Store};
+    render::RenderPassDescriptor renderPassDesc{
+        .ColorAttachments = std::span{&colorAttachment, 1}};
+    auto passOpt = registry->GetOrCreateRenderPass(renderPassDesc);
+    render::TextureView* colorView = target.Target.BackBufferView;
+    auto framebufferOpt = Nullable<render::Framebuffer*>{};
+    if (passOpt.HasValue()) {
+        const render::FramebufferDescriptor framebufferDesc{
+            .Pass = passOpt.Get(),
+            .ColorAttachments = std::span<render::TextureView* const>{&colorView, 1},
+            .DepthStencilAttachment = nullptr,
+            .Width = texture.Width,
+            .Height = texture.Height};
+        framebufferOpt = registry->GetOrCreateFramebuffer(framebufferDesc);
+    }
+    if (!passOpt.HasValue() || !framebufferOpt.HasValue()) {
+        return;
+    }
+    const render::ColorClearValue clearValue{{0.08f, 0.10f, 0.14f, 1.0f}};
+    render::RenderPassBeginDescriptor beginDesc{
+        .Pass = passOpt.Get(),
+        .Target = framebufferOpt.Get(),
+        .ColorClearValues = std::span{&clearValue, 1},
+        .Name = "Fallback Clear"};
+    auto encoderOpt = ctx.GetCommandBuffer()->BeginRenderPass(beginDesc);
+    if (encoderOpt.HasValue()) {
+        auto encoder = encoderOpt.Release();
+        ctx.GetCommandBuffer()->EndRenderPass(std::move(encoder));
+        target.ContentDrawn = true;
     }
 }
 

@@ -67,6 +67,12 @@ compiler-produced metadata 不依赖 `radrayshadercompiler`；`radrayruntime` �
 
 ## 当前边界
 
+Runtime pipeline 已收敛为 game-thread PrepareFrame 与 render-thread Render；Forward 消费每 flight
+值快照，RenderSystem 按 flight 保活资产，Material 仅保存 CPU authoring 状态。当前边界见
+`architecture/render-framework.md`，flight 生命周期见 `architecture/frame-and-gpu.md`。
+架构取舍见 [ADR-0053](../adr/0053-runtime-pipelines-consume-per-flight-value-snapshots.md)，
+实施与验收记录见 [最小 flight snapshots](../todo/runtime-minimal-flight-snapshots.md)。
+
 M-1 已移除旧的 shader 资产、手写 metadata、旧的命令行 shader 工具和未接线的 UI 路线。
 当前 `shaderlib/` 由共享数学层、target gate、内置 forward 产品 pass 与 depth/compute 最小 pass
 组成；compiler-owned

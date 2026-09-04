@@ -18,6 +18,8 @@ public:
         const Eigen::Matrix4f& localToWorld) noexcept;
     ~StaticMeshSceneProxy() noexcept override;
 
+    void CollectAssetReferences(vector<StreamingAssetRefAny>& out) const override;
+
     Eigen::Matrix4f GetLocalToWorld() const noexcept override { return _localToWorld; }
     MeshDrawArgs GetDrawArgs(uint32_t sectionIndex) const noexcept override;
     uint32_t GetSectionCount() const noexcept override;

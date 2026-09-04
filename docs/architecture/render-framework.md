@@ -26,42 +26,40 @@ Application            进程生命周期、runner 选择、帧循环
 
 ## 渲染管线
 
-```
-RenderSystem::Render
-  └─ 逐窗口 AcquireWindow → vector<RenderPipelineTarget>
-     └─ pipeline: BeginFrame → BuildCameraList → Render → EndFrame
-```
-
-`RenderPipeline::Render` 先 `PrepareTargets`（把每个 target 过渡到 `RenderTarget` 状态，
-并查 `RenderViewContent` 是否已画），然后逐相机走固定阶段链：
-
-```
-OnSetupCamera → OnSetupCulling → OnSetupLights → OnAddRenderPasses
-              → OnExecutePasses → OnFinishCamera
+```text
+Game thread:   flight 可写 → 清上一帧 retained refs → AssetManager::Pump
+               → ApplicationScheduler::Pump → OnUpdate → World::Tick → PrepareFrame
+Render thread: acquire targets → initial state → RenderTarget → pipeline.Render
+               → 对未写目标 fallback clear → Present
 ```
 
-最后对 `ContentDrawn == false` 的目标调 `ClearTarget` 兜底清屏——这样不必为"什么都没画"
-单独安排一个 clear pass。
+`RenderPipeline` 只提供 `PrepareFrame` 与 `Render` 两个入口。前者在 game thread 写当前 flight 的
+pipeline 私有输入，后者在 render thread 消费该输入。runner 既有的 slot semaphore / fence 保证
+flight 复用互斥，不增加 packet、sequence 或另一套同步协议。
+`RenderPipelineContext` 只有 `AppFrameContext& Frame` 与 target span；不携带 Application、Scene、
+Camera 或其他渲染模型。普通函数安排具体管线内部步骤，不提供通用 camera/pass/event 阶段链。
 
-`SetPipeline` 是应用侧装配入口：`RenderSystem` 只拥有当前 pipeline，不拥有其借用的
-`Scene`/component。`ForwardPipeline` 构造时借用 `Application`、`Scene` 与
-`CameraComponent`；example 只做对象装配，不再拥有命令录制实现。
+`RenderSystem` 取得窗口目标后统一转换到 `RenderTarget`，调用 pipeline，并清除仍未写入的目标，
+最后转换到 `Present`。pipeline 必须在 RenderTarget 状态使用 backbuffer，并在成功录制后设置
+`ContentDrawn`。没有 pipeline 时也走 fallback clear；没有取得 presentation target 时不执行
+pipeline。Application 不再提供独立的 view 内容录制钩子，自定义绘制由注入的 pipeline 完成。
 
-**pass 注册与排序**：`OnAddRenderPasses` 里用 `EnqueuePass` 把 pass 压进 `_activePasses`；
-`OnExecutePasses` 用 `std::stable_sort` 按 `RenderPassEvent` 的整数值升序排，
-然后逐个 `Setup → Execute → Cleanup`。`stable_sort` 是刻意的：同一 event 上的 pass
-保持入队顺序。`OnFinishCamera` 与 `OnEndFrame` 都会 `ClearPasses()`，
-所以 pass 队列是**每相机重建**的，不是持久配置。
+`SetPipeline` 是应用装配入口，应在 runner 启动前或 GPU idle 后调用；当前没有运行时替换协议。
+`ForwardPipeline` 在构造时借用 Scene 与 Camera，只在 `PrepareFrame` 访问它们，因此这些 source
+必须活过最后一次 PrepareFrame。已准备的帧不依赖 source、proxy 或 Material 的后续寿命。
 
-pass 在成功录制内容后调用受保护的 `MarkContentDrawn()`；框架根据当前 `RenderCamera::Target`
-回写对应的 `RenderPipelineTarget::ContentDrawn`。具体 pass 不遍历 `ctx.Targets`，也不直接改目标标志。
+`Material` 是一个 concrete program 的 CPU authoring state，包含自己负责的一个 parameter group、
+数值 bytes、texture refs/subview、sampler descriptor、固定功能状态和 RenderQueue。
+`Material::Create(program, "ForwardMaterial")` 通过 cbuffer declaration anchor 取得真实 group；
+只为该组分配数值 storage，typed setters 拒绝其他 group。参数身份是
+`ForwardMaterial.BaseColor` 这种 declaration-qualified 完整路径；全 program 唯一的叶名可作简写，
+重名叶子必须使用完整路径，不猜 group 0。
+`BuildRenderData` 复制 CPU 值，输出 raw TextureAsset pointer，并把 texture refs 追加到宿主的
+retained vector；这个过程不创建 RHI set / SRV，也不维护 flight 或 descriptor 版本。
 
-`Material` 持有一个 concrete Variant 的 `ShaderProgram*`、type-tree 打包后的数值参数、纹理引用、
-sampler 描述、完整固定功能状态基线和 `RenderQueue`。topology 与 `PrimitiveVertexLayout` 来自 geometry；
-color/depth format、sample count 与 compatible render pass 来自 pass。`ShaderProgram` 拥有 decoded
-artifact、layout、stage shader、扁平参数索引和自己的 PSO map；PSO key 正好组合这三方事实。
-`BindingGroupPlan` 则由具体 pipeline 指定 view/material/object group，material 与通用执行器不写
-group 数字字面量。
+`ShaderProgram` 继续拥有 artifact、layout、shader、参数索引与 PSO map。PSO key 由 material state、
+geometry vertex layout/topology、pass attachment facts 组成。ShaderJit、artifact/program cache 和
+失败 cache 继续由 RenderSystem 拥有，所有 program 活到 GPU idle 后的 shutdown。
 
 ### shader artifact 边界
 
@@ -85,7 +83,7 @@ PrimitiveComponent  → CreateRenderState → Scene::AddPrimitive(CreateScenePro
 LightComponent      → CreateRenderState → Scene::AddLight(CreateSceneProxy())
 ```
 
-**proxy 常驻，不是每帧重建快照，也不是逐字段增量同步。** proxy 在组件 `OnRegister` 时创建，
+**Scene 与 proxy 只在 game thread 使用。proxy 常驻，pipeline 输入每帧复制。** proxy 在组件 `OnRegister` 时创建，
 存在 `Scene` 的 `vector<unique_ptr<...>>` 里，`OnUnregister` 时移除。
 
 **任何属性或变换变化走 `MarkRenderStateDirty()` → 整棵 proxy 销毁重建。**
@@ -103,25 +101,33 @@ struct MeshDrawArgs {
 
 **覆写 `GetDrawArgs` 的 proxy 必须自持一份 `StreamingAssetRef<StaticMesh>`。**
 `Geometry` 是指向资产内部的裸指针，保命责任在 proxy 自己
-（见 `architecture/asset-system.md` 的引用计数不变量）。
+并覆写 `CollectAssetReferences`，让 PrepareFrame 复制几何 owner 到宿主 retained refs。
 
-`StaticMeshComponent` 按 section 保存 material，`StaticMeshSceneProxy` 自持 mesh ref、material 快照与
+`StaticMeshComponent` 按 section 保存 material，`StaticMeshSceneProxy` 自持 mesh ref、借用的 material 指针与
 local-to-world，并把 `StaticMeshSection` 的 `FirstIndex` / `IndexCount` / `VertexOffset` 投影成 draw。
-`MeshDrawList` 每相机主动遍历 `Scene::Primitives()`；queue 小于 2500 的 item 先按 program/material
+`MeshDrawList` 是 Forward 专用的 game-thread collector；PrepareFrame 主动遍历 `Scene::Primitives()`；queue 小于 2500 的 item 先按 program/material
 聚簇，queue 大于等于 2500 的 item 按 view depth 从远到近排序，同 key 保持收集顺序。
 
 ### 内置 ForwardPipeline
 
-`ForwardPipeline::GetBindingGroupPlan()` 固定返回 view/material/object = `0/1/2`。每个 flight 持有
-一个 `DynamicCBufferArena`；view/object parameter set 按 program 与 arena backing buffer 常驻，
-material 的纹理/sampler set 按 flight 常驻。每帧只把数值 bytes 写进 arena，draw loop 只绑定 set、
-下发 dynamic offset、绑定 VB/IB 并调用 `DrawIndexed`，不创建 descriptor。
+每个 flight 的 `ForwardFrameInput` 保存相机 view/eye/透视参数、材质值快照、逐 section geometry/
+index range/transform/material index，以及光源类型/参数/radius。它不含 Scene、proxy、CameraComponent、
+Material、AssetManager 或 StreamingAssetRef。Geometry/TextureAsset 由 RenderSystem 的 per-flight
+refs 保活；该 vector 仅在 game thread 清理和追加，flight 复用时清理后由既有 Pump 零引用回收。
 
-forward pipeline 为每个窗口维护 D32 depth texture/view，尺寸或 sample count 改变时先从
-`RenderPassRegistry` 清除引用旧 view 的 framebuffer，再重建 attachment。viewport 始终由
-`MakeViewport` 产生；只有该 helper 在 Vulkan 下使用负 height。光照从 `Scene::Lights()` 读取完整
-`LightRenderParameters`，在 pipeline 内投影到 forward view buffer；超过 shader 上限时点光按距相机
-由近到远截断，并且只记录一次 warning。
+Forward 私有 resolver 按 `ForwardView`、`ForwardMaterial`、`ForwardObject` 找到 cbuffer，读取
+当前 target 的真实 group，并要求三组不同、三个 buffer dynamic。active `AlbedoTexture` 和
+`LinearSampler` 必须属于 material group。失败按 program 负缓存并跳过 draw。DXIL spaces 与
+SPIR-V sets 可以不同；CPU 不硬编码 0/1/2，也不建立 remap table。
+
+每个 flight 自持 DynamicCBufferArena 和 frame-local parameter sets。开始复用时先销毁旧 sets，
+再 Reset arena。view/object set 按 program + backing buffer 复用；material set 按当前 snapshot
+index + backing bindings 复用。不同 backing target 创建不同 set，已发布的 set 在本帧内不再写。
+PSO、数值上传和资源 binding 都在绘制前准备；draw loop 只 bind PSO/set/VB/IB 和 DrawIndexed。
+
+每个窗口的 D32 depth attachment 由 Forward 维护；尺寸/sample count 改变时先清除引用旧 view 的
+framebuffer，再重建。viewport 使用 MakeViewport；只有它在 Vulkan 下使用负 height。光照从帧
+快照投影到 view bytes，点光按距已复制相机位置由近到远截断，超过上限只记录一次 warning。
 
 ## Application 与 runner
 
@@ -223,8 +229,7 @@ template <> struct ServiceTraits<AssetManager> {
   `example_lambert_sphere` 的 pipeline 注入是一个显式样例路径。
 - **第一期 forward 没有视锥剔除、instancing、shadow、post process 或 RT pool**；draw list 每相机
   每帧重建，depth attachment 是 pipeline 自有的最小子集。
-- **binding group plan 属于具体 pipeline**：只有 `ForwardPipeline` 可以假定 0/1/2；通用 material、
-  collector 和执行器都必须消费 plan。
+- **group 数字来自当前 target metadata**：具体 pipeline 按 declaration 解释职责，Material 只认识 anchor 选中的一组。
 - **`PrimitiveComponent` 基类仍返回空 proxy**：可绘制路径由 `StaticMeshComponent` 的派生实现提供。
 - **JIT 不是 runtime 的可用性前提**：关闭 JIT 后 program 源码请求失败；未来 AOT consumer 仍可
   直接构造 `ShaderProgram`。

@@ -168,7 +168,6 @@ public:
     int Shutdown(const AppShutdownContext& ctx);
     void OnRenderComplete(const AppRenderCompleteContext& ctx);
     void NotifyRenderComplete(const AppRenderCompleteContext& ctx);
-    bool RenderViewContent(AppFrameContext& ctx, const AppFrameTarget& target);
 
     int StartLoop();
 
@@ -182,10 +181,6 @@ protected:
 
     /// 每帧游戏逻辑(World::Tick 之前)。在 AssetManager::Pump 之后调用。
     virtual void OnUpdate(const AppUpdateContext& ctx);
-
-    /// 任意 view/window 场景内容录制。返回 true 表示已向 backbuffer 写入内容,
-    /// false 则框架可选择 Clear。默认不画任何东西。
-    virtual bool OnRenderView(AppFrameContext& ctx, const AppFrameTarget& target);
 
     /// 关闭前的游戏侧清理(WaitAndCleanupCompletedFlights 之后、World 拆除之前)。
     /// 典型用途:释放游戏自管的 per-flight 资源、置空指向 World 的非 owning 指针。

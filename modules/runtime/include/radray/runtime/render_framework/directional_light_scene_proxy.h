@@ -13,8 +13,7 @@ enum class CascadeSplitMode : uint32_t;
 /// 方向光的渲染代理 (对应 UE5 的 FDirectionalLightSceneProxy 精简版)。
 ///
 /// 方向光无位置、半径无穷 (照亮整个场景), 光照方向取自组件世界旋转的 +Z。
-/// 额外携带级联阴影 (CSM) 配置, 供 ForwardPipeline 在阴影 pass 里计算级联划分 /
-/// 正交投影矩阵。参数语义与 UE5 的 UDirectionalLightComponent 对齐。
+/// 额外携带级联阴影 (CSM) 的划分、投影与采样配置。
 class DirectionalLightSceneProxy final : public LightSceneProxy {
 public:
     explicit DirectionalLightSceneProxy(const DirectionalLightComponent& component);

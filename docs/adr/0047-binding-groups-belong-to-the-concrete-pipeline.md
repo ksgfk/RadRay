@@ -1,6 +1,6 @@
 # ADR-0047 binding group 分配属于具体 pipeline，runtime 提供内置 forward pipeline
 
-状态: 生效
+状态: 部分被 ADR-0053 取代
 日期: 2026-08
 影响: 新增 `modules/runtime/{include/radray/runtime,src}/forward_pipeline/`、
 新增 `shaderlib/pipelines/forward/`、删除 `shaderlib/passes/forward.hlsl`、

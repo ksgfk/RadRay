@@ -1,6 +1,6 @@
 # ADR-0049 dynamic buffer residency 由 pipeline 策略提供，per-object 数据不用 StructuredBuffer
 
-状态: 部分被 ADR-0051 取代
+状态: 部分被 ADR-0051、ADR-0053 取代
 日期: 2026-08
 影响: `modules/render/include/radray/render/backend_shader_artifact.h`、
 `modules/render/src/shader_artifact.cpp`、内置 `ForwardPipeline` 与其执行器、

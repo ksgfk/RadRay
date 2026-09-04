@@ -105,8 +105,9 @@ ctest --test-dir build_debug -C Debug -R AssetSlotTest --output-on-failure
 | `test_shaderlib_passes` | `RadRayShaderLibPass` |
 | `test_runtime_shader_jit` | `RadRayRuntimeShaderJit`（graphics/compute readback、14-fixture report、declaration owner、metadata negative） |
 | `test_material` | `RadRayRuntimeMaterial`（schema 7 owner 驱动 type tree 打包、qualified/unique-short parameter path、多 cbuffer、declaration modifier 与 fail-closed recipe） |
-| `test_mesh_draw` | `RadRayRuntimeMeshDraw`（排序、双后端 dynamic offset/indexed draw、shared/nested owner 与 push-only program、material 资源按 flight 轮转） |
-| `test_forward_pipeline` | `RadRayRuntimeForwardPipeline`（双后端跑真实窗口帧循环，程序化 quad 走完 ForwardPipeline 编排） |
+| `test_mesh_draw` | `RadRayRuntimeMeshDraw`, `RadRayRuntimeForwardSets`（排序、双后端 dynamic offset/indexed draw、shared/nested owner 与 push-only program、frame-local set 不改写旧 backing、material 资源快照按 flight 轮转） |
+| `test_forward_pipeline` | `RadRayRuntimeForwardPipeline`, `RadRayRuntimeMaterial`, `RadRayRuntimeForwardBindings`（双后端窗口帧、多线程 64 帧、准备后对象销毁/值变更、非标准 group、resolver 负缓存、Material snapshot 与 section collection） |
+| `test_render_pipeline` | `RadRayRuntimeRenderPipeline`, `RadRayRuntimeRenderSystem`, `RuntimeLayering`, `RadRayRuntimeForwardPipeline`（tick 顺序、非相机宿主、fallback clear、flight 资产回收与静态边界） |
 | `test_radray_render_shader_artifact` | `RadRayRenderShaderArtifact`（schema 7 raw golden、owner/type wire validation） |
 | `test_radray_render_shader_layout` | `RadRayRenderShaderLayout`（schema 7 decode 与 target-typed resolve） |
 | `test_radray_render_d3d12_layout` | `D3D12DeviceFixture`（真实 D3D12：placement 决定 table/root descriptor、carrier static sampler、root constant 全量进 push 表、非法 placement 拒绝、offset 双拓扑一致、push handle 端到端与误用拒绝） |

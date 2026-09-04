@@ -340,14 +340,15 @@ bool ShaderParameterLayout::AddParameter(
 }
 
 ShaderParameterStorage::ShaderParameterStorage(
-    const ShaderParameterLayout* layout)
+    const ShaderParameterLayout* layout,
+    std::optional<uint32_t> parameterGroup)
     : _layout(layout) {
     if (_layout == nullptr) {
         return;
     }
     _bufferData.reserve(_layout->Buffers().size());
     for (const ShaderParameterBufferLayout& buffer : _layout->Buffers()) {
-        _bufferData.emplace_back(buffer.Size, byte{0});
+        _bufferData.emplace_back(!parameterGroup.has_value() || buffer.Group == *parameterGroup ? buffer.Size : 0, byte{0});
     }
 }
 
