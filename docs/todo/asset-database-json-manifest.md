@@ -123,7 +123,6 @@ settings 全部退化为 `RawSettings`。这条要写进 `Open` 的注释。
 class AssetImportSettings {
 public:
     virtual ~AssetImportSettings() noexcept = default;
-    virtual RuntimeTypeId GetTypeId() const noexcept = 0;
     virtual bool Deserialize(const JsonValue& json) = 0;
     virtual bool Serialize(JsonWriteContext& context) const noexcept = 0;
 };
@@ -136,7 +135,7 @@ struct AssetEntry {
     string RawSettings;                        // 仅未注册 type / 解析失败时非空 (原文保真)
 };
 
-template <class T> const T* GetSettings(const AssetEntry& entry) noexcept;  // 经 IsA 判定
+template <class T> Nullable<const T*> GetSettings(const AssetEntry& entry) noexcept;  // 经 dynamic_cast 判定
 ```
 
 `unique_ptr` 成员让 `AssetEntry` 不可拷贝，故查询接口只能返回 `const AssetEntry*`。

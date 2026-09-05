@@ -5,8 +5,10 @@
 #include <optional>
 #include <span>
 #include <string_view>
+#include <type_traits>
 
 #include <radray/json.h>
+#include <radray/nullable.h>
 #include <radray/runtime/asset_source.h>
 #include <radray/types.h>
 
@@ -16,9 +18,6 @@ class AssetImportSettings {
 public:
     virtual ~AssetImportSettings() noexcept = default;
 
-    /// 类型判定的唯一出口。settings 只经 IsA 做向下转换，故不像 Asset 那样另设
-    /// GetTypeId —— 那会多出一个没人读、又必须在每个子类里覆写的平行事实。
-    virtual const RuntimeTypeInfo& GetTypeInfo() const noexcept = 0;
     virtual bool Deserialize(const JsonValue& json) = 0;
     virtual bool Serialize(JsonWriteContext& context) const noexcept = 0;
 };
@@ -33,12 +32,18 @@ struct AssetEntry {
 };
 
 template <class T>
-requires std::derived_from<T, AssetImportSettings>
-const T* GetSettings(const AssetEntry& entry) noexcept {
-    if (entry.Settings == nullptr || !entry.Settings->GetTypeInfo().IsA(runtime_type_id_v<T>)) {
+concept AssetSettingsQueryTarget =
+    std::is_class_v<std::remove_cv_t<T>> &&
+    std::same_as<T, std::remove_reference_t<T>> &&
+    requires { sizeof(std::remove_cv_t<T>); };
+
+template <class T>
+requires AssetSettingsQueryTarget<T>
+Nullable<const T*> GetSettings(const AssetEntry& entry) noexcept {
+    if (entry.Settings == nullptr) {
         return nullptr;
     }
-    return static_cast<const T*>(entry.Settings.get());
+    return dynamic_cast<const T*>(entry.Settings.get());
 }
 
 struct AssetLoadContext {
@@ -67,11 +72,16 @@ public:
     }
 
     task<AssetLoadResult> Load(const AssetLoadContext& ctx) final {
-        if (ctx.Settings == nullptr || !ctx.Settings->GetTypeInfo().IsA(runtime_type_id_v<TSettings>)) {
+        if (ctx.Settings == nullptr) {
             return InvalidSettings();
         }
-        const auto* settings = static_cast<const TSettings*>(ctx.Settings);
-        return LoadTyped(ctx.AbsolutePath, *settings);
+        const auto* settings = dynamic_cast<const TSettings*>(ctx.Settings);
+        if (settings == nullptr) {
+            return InvalidSettings();
+        }
+        std::filesystem::path path = ctx.AbsolutePath;
+        TSettings settingsSnapshot = *settings;
+        return LoadTyped(std::move(path), std::move(settingsSnapshot));
     }
 
 protected:
@@ -111,8 +121,8 @@ public:
         string& outError);
 
     template <class T>
-    requires std::derived_from<T, AssetImportSettings>
-    T* MutableSettings(const AssetId& id) noexcept;
+    requires AssetSettingsQueryTarget<T>
+    Nullable<T*> MutableSettings(const AssetId& id) noexcept;
 
     bool SetPath(const AssetId& id, std::string_view newRelPath, string& outError);
     bool RemoveEntry(const AssetId& id) noexcept;
@@ -142,14 +152,13 @@ private:
 };
 
 template <class T>
-requires std::derived_from<T, AssetImportSettings>
-T* AssetDatabase::MutableSettings(const AssetId& id) noexcept {
+requires AssetSettingsQueryTarget<T>
+Nullable<T*> AssetDatabase::MutableSettings(const AssetId& id) noexcept {
     auto it = _entries.find(id);
-    if (it == _entries.end() || it->second.Settings == nullptr ||
-        !it->second.Settings->GetTypeInfo().IsA(runtime_type_id_v<T>)) {
+    if (it == _entries.end() || it->second.Settings == nullptr) {
         return nullptr;
     }
-    return static_cast<T*>(it->second.Settings.get());
+    return dynamic_cast<T*>(it->second.Settings.get());
 }
 
 }  // namespace radray

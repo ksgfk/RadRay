@@ -1,11 +1,12 @@
 #pragma once
 
 #include <tuple>
+#include <typeindex>
 #include <type_traits>
 
-#include <radray/runtime_type.h>
-#include <radray/types.h>
 #include <radray/logger.h>
+#include <radray/nullable.h>
+#include <radray/types.h>
 
 namespace radray {
 
@@ -21,26 +22,14 @@ namespace radray {
 //     reg.Wire();                                 // phase 2 装配交叉引用
 //     reg.Initialize();                           // phase 3 可选 OnInitialize 钩子
 //
-// setter 形参是基类时, 只要来源类型用 RuntimeTypeTrait<T>::Bases 声明了该基类, Add 会自动
-// 登记基类别名 (指针偏移已在 typed 上下文修正)。不想动 Bases 就用 As<Source> 显式指定。
+// Add<Interfaces...>(service) 只登记 service 的静态类型及显式列出的接口。接口指针在
+// Add 的 typed 上下文完成调整；别名只参与 Resolve，不重复参与 Wire/Initialize。
 
 /// 类外特化点。默认无依赖。使用方按 `template <> struct ServiceTraits<T> { ... }` 声明。
 template <class T>
 struct ServiceTraits {
     static constexpr auto Inject = std::tuple{};
 };
-
-/// setter 形参类型 != 要 resolve 的具体类型时(派生 -> 基类上行转换),
-/// 用 As<Source> 显式指定 resolve 的来源具体类型。
-template <class Source, class M>
-struct ServiceInjectAs {
-    M Setter;
-};
-
-template <class Source, class M>
-constexpr ServiceInjectAs<Source, M> As(M setter) noexcept {
-    return ServiceInjectAs<Source, M>{setter};
-}
 
 namespace detail {
 
@@ -50,10 +39,9 @@ A ServiceSetterArg(void (C::*)(A));
 template <class C, class A>
 A ServiceSetterArg(void (C::*)(A) noexcept);
 
-// 使用项目统一的运行时类型 id 做服务 key。所有进入 registry 的类型都必须有固定 id。
 template <class T>
-constexpr RuntimeTypeId ServiceTypeKey() noexcept {
-    return runtime_type_id_v<T>;
+std::type_index ServiceTypeKey() noexcept {
+    return std::type_index{typeid(std::remove_cv_t<T>)};
 }
 
 }  // namespace detail
@@ -69,17 +57,26 @@ public:
 
     /// phase 1:登记一个已实例化的服务(非拥有)。所有权仍在调用方。
     ///
-    /// 若 RuntimeTypeTrait<T>::Bases 声明了基类,会一并为每个(直接与间接)基类的
-    /// RuntimeTypeId 登记一条 resolve-only 别名 —— 指针在此 typed 上下文用 static_cast
-    /// 完成偏移修正,故 Resolve<Base>() 拿到的指针在多继承下也正确。别名不参与 Wire/Initialize。
-    template <class T>
+    /// 静态类型 T 自动登记；Interfaces 仅在这里显式列出时登记。
+    /// T* 必须能公开、无歧义地转换为每个 Interfaces*。
+    template <class... Interfaces, class T>
     void Add(T* service) {
+        static_assert(std::is_class_v<T>, "ServiceRegistry services must be class types.");
+        static_assert(!std::is_const_v<T>, "ServiceRegistry services must be mutable objects.");
+        static_assert((std::is_class_v<Interfaces> && ...), "ServiceRegistry interfaces must be class types.");
+        static_assert((!std::is_const_v<Interfaces> && ...), "ServiceRegistry interface registrations must be mutable types.");
+        static_assert(
+            (std::is_convertible_v<T*, Interfaces*> && ...),
+            "ServiceRegistry interfaces must be public, unambiguous bases of the service type.");
         if (service == nullptr) {
             RADRAY_ABORT("ServiceRegistry::Add received null service pointer");
             return;
         }
-        Entry e{};
-        e.Key = detail::ServiceTypeKey<T>();
+
+        RegisterBinding<T>(service);
+        (RegisterBinding<Interfaces>(static_cast<Interfaces*>(service)), ...);
+
+        ServiceEntry e{};
         e.Ptr = service;
         e.WireFn = &ServiceRegistry::WireService<T>;
         if constexpr (requires(T* p) { p->OnInitialize(); }) {
@@ -87,33 +84,31 @@ public:
         } else {
             e.InitFn = nullptr;
         }
-        _entries.emplace_back(e);
-        RegisterBases<T, runtime_type_bases_t<T>>(service);
+        _services.emplace_back(e);
     }
 
-    /// 按具体类型取已登记服务。未登记返回 nullptr。
+    /// 只按显式登记的类型键查询；未登记返回空 Nullable。
     template <class T>
-    T* Resolve() const noexcept {
-        const RuntimeTypeId key = detail::ServiceTypeKey<T>();
-        for (const Entry& e : _entries) {
-            if (e.Key == key) {
-                return static_cast<T*>(e.Ptr);
-            }
+    Nullable<T*> Resolve() const noexcept {
+        static_assert(std::is_class_v<T>, "ServiceRegistry resolve targets must be class types.");
+        const auto it = _bindings.find(detail::ServiceTypeKey<T>());
+        if (it == _bindings.end()) {
+            return nullptr;
         }
-        return nullptr;
+        return static_cast<T*>(it->second);
     }
 
     /// phase 2:按各服务的 ServiceTraits<T>::Inject 装配交叉引用。
     /// 此刻全部实例已登记,互相持有引用(环)均可解析。
     void Wire() {
-        for (Entry& e : _entries) {
+        for (ServiceEntry& e : _services) {
             e.WireFn(*this, e.Ptr);
         }
     }
 
     /// phase 3:按登记(拓扑)序调用各服务可选的 OnInitialize() 钩子。
     void Initialize() {
-        for (Entry& e : _entries) {
+        for (ServiceEntry& e : _services) {
             if (e.InitFn != nullptr) {
                 e.InitFn(e.Ptr);
             }
@@ -121,38 +116,19 @@ public:
     }
 
 private:
-    struct Entry {
-        RuntimeTypeId Key{};
+    struct ServiceEntry {
         void* Ptr{nullptr};
         void (*WireFn)(ServiceRegistry&, void*){nullptr};
         void (*InitFn)(void*){nullptr};
     };
 
-    // 为 T 的直接基类逐一登记 resolve-only 别名,并递归到基类的基类。
-    // 用 tuple 指针做纯类型推导(不构造实例),故基类可以是抽象类型。
-    template <class T, class Tuple>
-    void RegisterBases(T* service) {
-        RegisterBasesImpl<T>(service, static_cast<Tuple*>(nullptr));
+    template <class T>
+    void RegisterBinding(T* service) {
+        const bool inserted = _bindings.emplace(detail::ServiceTypeKey<T>(), static_cast<void*>(service)).second;
+        if (!inserted) {
+            RADRAY_ABORT("ServiceRegistry::Add duplicate service type registration");
+        }
     }
-
-    template <class T, class... Bases>
-    void RegisterBasesImpl(T* service, std::tuple<Bases...>*) {
-        (RegisterBaseAlias<T, Bases>(service), ...);
-    }
-
-    template <class T, class Base>
-    void RegisterBaseAlias(T* service) {
-        static_assert(std::is_base_of_v<Base, T>, "RuntimeTypeTrait<T>::Bases lists a type that is not a base of T.");
-        Entry e{};
-        e.Key = detail::ServiceTypeKey<Base>();
-        e.Ptr = static_cast<Base*>(service);  // typed 上下文,偏移在此修正
-        e.WireFn = &ServiceRegistry::NoWire;
-        e.InitFn = nullptr;
-        _entries.emplace_back(e);
-        RegisterBases<T, runtime_type_bases_t<Base>>(service);
-    }
-
-    static void NoWire(ServiceRegistry&, void*) {}
 
     template <class T>
     static void WireService(ServiceRegistry& reg, void* self) {
@@ -166,27 +142,18 @@ private:
     requires std::is_member_function_pointer_v<M>
     static void ApplyBinding(ServiceRegistry& reg, T& self, M setter) {
         using Arg = decltype(detail::ServiceSetterArg(setter));
+        static_assert(std::is_pointer_v<Arg>, "ServiceRegistry setters must accept one service pointer.");
         using Service = std::remove_pointer_t<Arg>;
-        Service* dep = reg.Resolve<Service>();
-        if (dep == nullptr) {
+        Nullable<Service*> dep = reg.Resolve<Service>();
+        if (!dep) {
             RADRAY_ABORT("ServiceRegistry::Wire: required dependency not registered (check ServiceTraits Inject and Add order)");
             return;
         }
-        (self.*setter)(dep);
+        (self.*setter)(dep.Get());
     }
 
-    // As<Source> 绑定:resolve Source,隐式上行转换喂给 setter。
-    template <class T, class Source, class M>
-    static void ApplyBinding(ServiceRegistry& reg, T& self, ServiceInjectAs<Source, M> binding) {
-        Source* dep = reg.Resolve<Source>();
-        if (dep == nullptr) {
-            RADRAY_ABORT("ServiceRegistry::Wire: required source service not registered (check ServiceTraits As<Source> and Add order)");
-            return;
-        }
-        (self.*(binding.Setter))(dep);
-    }
-
-    vector<Entry> _entries;
+    vector<ServiceEntry> _services;
+    unordered_map<std::type_index, void*> _bindings;
 };
 
 }  // namespace radray

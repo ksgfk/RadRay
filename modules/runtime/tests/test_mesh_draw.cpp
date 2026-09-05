@@ -322,10 +322,10 @@ void RunMaterialResourceResidency(
     MaterialRenderData snapshotA{
         .Program = program.get(),
         .ParameterGroup = textureParameter->Group,
-        .Textures = {{*textureParameter, textureA.Get(), TextureSubViewDesc::Default(), 0}},
+        .Textures = {{*textureParameter, textureA.Get().Get(), TextureSubViewDesc::Default(), 0}},
         .Samplers = {{*samplerParameter, render::SamplerDescriptor{}, 0}}};
     MaterialRenderData snapshotB = snapshotA;
-    snapshotB.Textures[0].Texture = textureB.Get();
+    snapshotB.Textures[0].Texture = textureB.Get().Get();
     forward_detail::ForwardMaterialSets flights[2];
     const auto set0 = flights[0].GetOrCreate(0, snapshotA, {});
     const auto set1 = flights[1].GetOrCreate(0, snapshotA, {});

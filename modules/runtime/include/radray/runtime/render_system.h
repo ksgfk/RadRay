@@ -155,7 +155,6 @@ private:
 template <>
 struct RuntimeTypeTrait<RenderSystem> {
     static constexpr RuntimeTypeId value{0x241d4e78, 0x8f4e, 0x4d1c, 0xa8, 0xb9, 0x55, 0x09, 0x61, 0x6a, 0x90, 0x24};
-    using Bases = std::tuple<>;
 };
 
 }  // namespace radray

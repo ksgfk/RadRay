@@ -8,10 +8,6 @@ namespace radray {
 
 StaticMeshComponent::~StaticMeshComponent() noexcept = default;
 
-RuntimeTypeId StaticMeshComponent::GetTypeId() const noexcept {
-    return runtime_type_id_v<StaticMeshComponent>;
-}
-
 void StaticMeshComponent::SetStaticMesh(StreamingAssetRef<StaticMesh> mesh) {
     if (_mesh == mesh) {
         return;

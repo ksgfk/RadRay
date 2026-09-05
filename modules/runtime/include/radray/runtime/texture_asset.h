@@ -18,12 +18,10 @@ class TextureImportSettings;
 template <>
 struct RuntimeTypeTrait<TextureImportSettings> {
     static constexpr RuntimeTypeId value{0xbb83ae65, 0x95ec, 0x4737, 0xb9, 0x02, 0x64, 0x64, 0x72, 0xec, 0x6d, 0x9c};
-    using Bases = std::tuple<>;
 };
 
 class TextureImportSettings final : public AssetImportSettings {
 public:
-    const RuntimeTypeInfo& GetTypeInfo() const noexcept override;
     bool Deserialize(const JsonValue& json) override;
     bool Serialize(JsonWriteContext& context) const noexcept override;
 
@@ -87,7 +85,6 @@ public:
     ~TextureAsset() noexcept override;
 
     void OnUnload(AssetManager& manager) override;
-    RuntimeTypeId GetTypeId() const noexcept override;
 
     bool IsValid() const noexcept { return _texture != nullptr && _srv != nullptr; }
 
@@ -170,7 +167,6 @@ StreamingAssetRef<TextureAsset> LoadTextureAssetFromMemory(
 template <>
 struct RuntimeTypeTrait<TextureAsset> {
     static constexpr RuntimeTypeId value{0x7c3e9a14, 0x8b2d, 0x4f61, 0xa9, 0x05, 0x3e, 0x6c, 0x1d, 0x82, 0x4b, 0x90};
-    using Bases = std::tuple<Asset>;
 };
 
 }  // namespace radray

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <concepts>
+#include <type_traits>
 #include <utility>
 
 #include <radray/types.h>
@@ -18,8 +19,15 @@ class AssetManager;
 class AssetWaitAwaitable;
 class IWaitFrameProcessor;
 class StreamingAssetRefAny;
+
 template <class T>
-requires std::derived_from<T, Asset>
+concept AssetViewTarget =
+    std::is_class_v<std::remove_cv_t<T>> &&
+    std::same_as<T, std::remove_reference_t<T>> &&
+    requires { sizeof(std::remove_cv_t<T>); };
+
+template <class T>
+requires AssetViewTarget<T>
 class StreamingAssetRef;
 
 /// 一个资产的槽位。定义在 asset_manager.cpp —— 本头文件只需要它的地址。
@@ -69,8 +77,8 @@ public:
     StreamingAssetRefAny& operator=(StreamingAssetRefAny&& other) noexcept;
     ~StreamingAssetRefAny() noexcept;
 
-    Asset* Get() const noexcept;
-    Asset* operator->() const noexcept { return Get(); }
+    Nullable<Asset*> Get() const noexcept;
+    Asset* operator->() const noexcept { return Get().Get(); }
     Asset& operator*() const noexcept { return *Get(); }
 
     /// 引用非空。Loading / Ready / Faulted / Canceled 都是 valid; 默认构造与 Reset 后 invalid。
@@ -86,7 +94,6 @@ public:
     void Cancel() const noexcept;
 
     const AssetId& GetAssetId() const noexcept;
-    RuntimeTypeId GetTypeId() const noexcept;
 
     /// 等待本引用离开 Loading 态。`co_await ref` 得到 bool: true = 已到终态,
     /// false = 等待者自己被取消 (不是资产加载失败)。
@@ -99,11 +106,11 @@ public:
     }
 
     template <class T>
-    requires std::derived_from<T, Asset>
+    requires AssetViewTarget<T>
     bool Is() const noexcept;
 
     template <class T>
-    requires std::derived_from<T, Asset>
+    requires AssetViewTarget<T>
     StreamingAssetRef<T> CastTo() const noexcept;
 
     void Reset() noexcept;
@@ -112,14 +119,10 @@ private:
     friend class AssetManager;
     friend class AssetWaitAwaitable;
     template <class U>
-    requires std::derived_from<U, Asset>
+    requires AssetViewTarget<U>
     friend class StreamingAssetRef;
 
     StreamingAssetRefAny(AssetManager* manager, AssetSlot* slot) noexcept;
-
-    /// Ready 之后最终实例的类型描述符, 否则 nullptr。Is<T>/CastTo<T> 是模板, 而 AssetSlot
-    /// 在本头文件里是不完整类型, 故类型判定要经这个非模板出口取到描述符。
-    const RuntimeTypeInfo* GetTypeInfo() const noexcept;
 
     AssetManager* _manager{nullptr};
     AssetSlot* _slot{nullptr};
@@ -130,25 +133,25 @@ private:
 /// - Ready 且最终实例 is-a T 时可直接访问资产。
 /// - 参与引用计数;最后一份引用消失后资产在下一次 AssetManager::Pump 被销毁。
 template <class T>
-requires std::derived_from<T, Asset>
+requires AssetViewTarget<T>
 class StreamingAssetRef {
 public:
     StreamingAssetRef() noexcept = default;
     StreamingAssetRef(std::nullptr_t) noexcept {}
 
-    T* Get() const noexcept {
-        Asset* asset = _ref.Get();
-        if (asset == nullptr || !_ref.template Is<T>()) {
+    Nullable<T*> Get() const noexcept {
+        Nullable<Asset*> asset = _ref.Get();
+        if (!asset) {
             return nullptr;
         }
-        return static_cast<T*>(asset);
+        return dynamic_cast<T*>(asset.Get());
     }
-    T* operator->() const noexcept { return Get(); }
+    T* operator->() const noexcept { return Get().Get(); }
     T& operator*() const noexcept { return *Get(); }
 
     bool IsValid() const noexcept { return _ref.IsValid(); }
     bool IsCompleted() const noexcept { return _ref.IsCompleted(); }
-    bool IsReady() const noexcept { return _ref.IsReady() && _ref.template Is<T>(); }
+    bool IsReady() const noexcept { return Get().HasValue(); }
     bool IsCompletedSuccessfully() const noexcept { return IsReady(); }
     bool IsFaulted() const noexcept { return _ref.IsFaulted(); }
     bool IsCanceled() const noexcept { return _ref.IsCanceled(); }
@@ -157,7 +160,6 @@ public:
     void Cancel() const noexcept { _ref.Cancel(); }
 
     const AssetId& GetAssetId() const noexcept { return _ref.GetAssetId(); }
-    RuntimeTypeId GetTypeId() const noexcept { return _ref.GetTypeId(); }
 
     /// 见 StreamingAssetRefAny::operator co_await。
     AssetWaitAwaitable operator co_await() const noexcept;
@@ -215,7 +217,7 @@ inline AssetWaitAwaitable StreamingAssetRefAny::operator co_await() const noexce
 }
 
 template <class T>
-requires std::derived_from<T, Asset>
+requires AssetViewTarget<T>
 AssetWaitAwaitable StreamingAssetRef<T>::operator co_await() const noexcept {
     return AssetWaitAwaitable{AsAny()};
 }
@@ -248,16 +250,16 @@ public:
 
     /// 类型化加载入口。T 只是返回引用的类型视图,最终实例类型由 loader 的结果决定。
     template <class T>
-    requires std::derived_from<T, Asset>
+    requires AssetViewTarget<T>
     StreamingAssetRef<T> Load(AssetLoadRequest request);
 
     template <class T>
-    requires std::derived_from<T, Asset>
+    requires AssetViewTarget<T>
     StreamingAssetRef<T> Load(const AssetId& id);
 
     /// 人类可读路径入口。路径由 IAssetSource 解析为持久 id，再进入同一 slot 表。
     template <class T>
-    requires std::derived_from<T, Asset>
+    requires AssetViewTarget<T>
     StreamingAssetRef<T> Load(std::string_view relPath);
 
     /// 等待 streaming 引用离开 Loading 状态。等待者取消不会取消底层资产加载。
@@ -266,15 +268,15 @@ public:
     task<void> Wait(StreamingAssetRefAny ref);
 
     template <class T>
-    requires std::derived_from<T, Asset>
+    requires AssetViewTarget<T>
     task<void> Wait(StreamingAssetRef<T> ref);
 
     template <class T>
-    requires std::derived_from<T, Asset>
+    requires AssetViewTarget<T>
     task<StreamingAssetRef<T>> LoadAndWait(AssetLoadRequest request);
 
     /// 不启动 task,仅按 id 去重并登记一个 ready object。主要给测试/工具使用。
-    StreamingAssetRefAny AddReady(const AssetId& id, unique_ptr<Asset> object, const RuntimeTypeInfo& typeInfo);
+    StreamingAssetRefAny AddReady(const AssetId& id, unique_ptr<Asset> object);
 
     template <class T>
     requires std::derived_from<T, Asset>
@@ -284,19 +286,19 @@ public:
     StreamingAssetRefAny Find(const AssetId& id) noexcept;
 
     template <class T>
-    requires std::derived_from<T, Asset>
+    requires AssetViewTarget<T>
     StreamingAssetRef<T> Find(const AssetId& id) noexcept;
 
     /// 直查资产 streaming 引用。Get()/operator bool 只在 Ready 后有效。
     template <class T>
-    requires std::derived_from<T, Asset>
+    requires AssetViewTarget<T>
     StreamingAssetRef<T> Get(const AssetId& id) noexcept;
 
     /// 请求取消一次在飞加载。终态前生效,协程在挂起点感知后以 Canceled 终止。
     void Cancel(const StreamingAssetRefAny& ref) noexcept;
 
     template <class T>
-    requires std::derived_from<T, Asset>
+    requires AssetViewTarget<T>
     void Cancel(const StreamingAssetRef<T>& ref) noexcept {
         Cancel(ref.AsAny());
     }
@@ -385,31 +387,31 @@ private:
 };
 
 template <class T>
-requires std::derived_from<T, Asset>
+requires AssetViewTarget<T>
 StreamingAssetRef<T> AssetManager::Load(AssetLoadRequest request) {
     return Load(std::move(request)).template CastTo<T>();
 }
 
 template <class T>
-requires std::derived_from<T, Asset>
+requires AssetViewTarget<T>
 StreamingAssetRef<T> AssetManager::Load(const AssetId& id) {
     return Load(id).template CastTo<T>();
 }
 
 template <class T>
-requires std::derived_from<T, Asset>
+requires AssetViewTarget<T>
 StreamingAssetRef<T> AssetManager::Load(std::string_view relPath) {
     return LoadSourcePath(relPath).template CastTo<T>();
 }
 
 template <class T>
-requires std::derived_from<T, Asset>
+requires AssetViewTarget<T>
 task<void> AssetManager::Wait(StreamingAssetRef<T> ref) {
     co_await Wait(ref.AsAny());
 }
 
 template <class T>
-requires std::derived_from<T, Asset>
+requires AssetViewTarget<T>
 task<StreamingAssetRef<T>> AssetManager::LoadAndWait(AssetLoadRequest request) {
     StreamingAssetRef<T> ref = Load<T>(std::move(request));
     co_await Wait(ref.AsAny());
@@ -420,44 +422,47 @@ template <class T>
 requires std::derived_from<T, Asset>
 StreamingAssetRef<T> AssetManager::AddReady(const AssetId& id, unique_ptr<T> object) {
     unique_ptr<Asset> asset = std::move(object);
-    return AddReady(id, std::move(asset), runtime_type_info_v<T>).template CastTo<T>();
+    return AddReady(id, std::move(asset)).template CastTo<T>();
 }
 
 template <class T>
-requires std::derived_from<T, Asset>
+requires AssetViewTarget<T>
 StreamingAssetRef<T> AssetManager::Find(const AssetId& id) noexcept {
     return Find(id).template CastTo<T>();
 }
 
 template <class T>
-requires std::derived_from<T, Asset>
+requires AssetViewTarget<T>
 StreamingAssetRef<T> AssetManager::Get(const AssetId& id) noexcept {
     return Find<T>(id);
 }
 
 template <class T>
-requires std::derived_from<T, Asset>
+requires AssetViewTarget<T>
 bool StreamingAssetRefAny::Is() const noexcept {
-    const RuntimeTypeInfo* typeInfo = GetTypeInfo();
-    return typeInfo != nullptr && typeInfo->IsA(runtime_type_id_v<T>);
+    Nullable<Asset*> asset = Get();
+    return asset && dynamic_cast<T*>(asset.Get()) != nullptr;
 }
 
 template <class T>
-requires std::derived_from<T, Asset>
+requires AssetViewTarget<T>
 StreamingAssetRef<T> StreamingAssetRefAny::CastTo() const noexcept {
     if (_slot == nullptr) {
         return StreamingAssetRef<T>{};
     }
     // Ready 之前最终类型未知, 故不能拒绝 —— 那正是 streaming 引用要表达的"还没到"。
     // Ready 之后类型不符则返回空引用: 调用方要的视图与实际实例无关。
-    if (IsReady() && !Is<T>()) {
-        return StreamingAssetRef<T>{};
+    if (IsReady()) {
+        Nullable<Asset*> asset = Get();
+        if (!asset || dynamic_cast<T*>(asset.Get()) == nullptr) {
+            return StreamingAssetRef<T>{};
+        }
     }
     return StreamingAssetRef<T>{*this};
 }
 
 /// 依赖声明(非侵入,类外特化):AssetManager 只需要 IWaitFrameProcessor 接口,
-/// 由 ServiceRegistry 通过 RuntimeTypeTrait 的 Bases 别名解析到具体实现(如 GpuSystem)。
+/// 由 Application 在登记 GpuSystem 时显式暴露 IWaitFrameProcessor。
 template <>
 struct ServiceTraits<AssetManager> {
     static constexpr auto Inject = std::tuple{&AssetManager::SetWaitFrameProcessor};
@@ -466,7 +471,6 @@ struct ServiceTraits<AssetManager> {
 template <>
 struct RuntimeTypeTrait<AssetManager> {
     static constexpr RuntimeTypeId value{0xd4f18ebe, 0xb5c4, 0x46c2, 0x8b, 0x7b, 0x2d, 0xde, 0x5c, 0x96, 0xe5, 0xcf};
-    using Bases = std::tuple<>;
 };
 
 }  // namespace radray

@@ -922,7 +922,7 @@ void Application::InitializeRuntime(const ApplicationRuntimeDescriptor& desc) {
     // ════════════════════════════════════════════════════════════════
     ServiceRegistry registry;
     registry.Add(_windowManager.get());
-    registry.Add(_gpuSystem.get());
+    registry.Add<IWaitFrameProcessor>(_gpuSystem.get());
     registry.Add(_renderSystem.get());
     registry.Add(_assetManager.get());
     registry.Add(_world.get());

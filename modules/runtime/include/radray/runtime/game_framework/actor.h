@@ -2,16 +2,22 @@
 
 #include <concepts>
 #include <span>
+#include <type_traits>
 
 #include <radray/types.h>
 #include <radray/nullable.h>
-#include <radray/runtime_type.h>
 #include <radray/runtime/components/actor_component.h>
 
 namespace radray {
 
 class World;
 class SceneComponent;
+
+template <class T>
+concept ComponentQueryTarget =
+    std::is_class_v<std::remove_cv_t<T>> &&
+    std::same_as<T, std::remove_reference_t<T>> &&
+    requires { sizeof(std::remove_cv_t<T>); };
 
 /// 场景中的实体。不直接持有 Transform —— 空间信息由 RootComponent 提供。
 /// 对应 UE5 的 AActor。
@@ -40,19 +46,27 @@ public:
     ActorComponent* AddComponent(unique_ptr<ActorComponent> component);
 
     template <class T>
-    requires std::derived_from<T, ActorComponent>
-    T* FindComponent() noexcept {
-        return static_cast<T*>(FindComponent(runtime_type_id_v<T>));
+    requires ComponentQueryTarget<T>
+    Nullable<T*> FindComponent() noexcept {
+        for (const unique_ptr<ActorComponent>& component : _ownedComponents) {
+            if (auto* result = dynamic_cast<T*>(component.get()); result != nullptr) {
+                return result;
+            }
+        }
+        return nullptr;
     }
 
     template <class T>
-    requires std::derived_from<T, ActorComponent>
-    const T* FindComponent() const noexcept {
-        return static_cast<const T*>(FindComponent(runtime_type_id_v<T>));
+    requires ComponentQueryTarget<T>
+    Nullable<const T*> FindComponent() const noexcept {
+        for (const unique_ptr<ActorComponent>& component : _ownedComponents) {
+            const ActorComponent* object = component.get();
+            if (const auto* result = dynamic_cast<const T*>(object); result != nullptr) {
+                return result;
+            }
+        }
+        return nullptr;
     }
-
-    ActorComponent* FindComponent(RuntimeTypeId type) noexcept;
-    const ActorComponent* FindComponent(RuntimeTypeId type) const noexcept;
 
     void RemoveComponent(ActorComponent* component);
 

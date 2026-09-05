@@ -1,6 +1,6 @@
 > - 适用: 首次配置仓库；构建失败排查；跑测试；生成 compile_commands.json
 > - 权威: 本文是当前构建与测试命令的唯一来源
-> - 锚点: `CMakePresets.json`, `CMakeLists.txt`, `examples/CMakeLists.txt`, `examples/example_lambert_sphere/CMakeLists.txt`, `cmake/Utility.cmake`, `tools/fetch_third_party.py`, `tools/fetch_sdks.py`
+> - 锚点: `CMakePresets.json`, `CMakeLists.txt`, `examples/CMakeLists.txt`, `examples/example_lambert_sphere/CMakeLists.txt`, `benchmarks/bench_read_obj/CMakeLists.txt`, `cmake/Utility.cmake`, `tools/fetch_third_party.py`, `tools/fetch_sdks.py`
 
 # 构建与测试
 
@@ -44,6 +44,14 @@ cmake --build build_debug --config Debug --parallel 24
 ```
 
 二进制落在 `build_debug/_build/<Config>/`。
+
+RadRay 公共对象查询依赖标准 C++ RTTI。所有自有 target 必须调用
+`radray_default_compile_flags`（`radray_add_test` 已代为调用）；该函数以 `PRIVATE` 方式为
+C++ 编译设置 MSVC/ClangCL 的 `/GR` 或其他前端的 `-frtti`，覆盖所有构建配置。库、工具、
+样例和 benchmark 均遵循同一约定，不通过 core 的链接接口传播选项，也不修改第三方目标。
+不要在单个目标上用 `/GR-` / `-fno-rtti` 覆盖它；仓库外使用公共对象查询的 consumer 需自行
+开启 RTTI。`test_runtime_type` 检查 RTTI 特征宏，runtime 的跨链接单元资产测试检查库内构造的
+对象能在最终 executable 中正确查询。决策见 [ADR-0056](../adr/0056-rtti-belongs-to-project-compile-defaults.md)。
 
 Ninja + MSVC 构建应在 Visual Studio Developer PowerShell 中执行；普通 PowerShell 可先载入
 本机 Visual Studio 安装目录下的 `Common7/Tools/Launch-VsDevShell.ps1 -Arch amd64 -HostArch amd64
@@ -100,8 +108,11 @@ ctest --test-dir build_debug -C Debug -R AssetSlotTest --output-on-failure
 
 | target | suite |
 |---|---|
+| `test_runtime_type` | `RuntimeTypeIdTest`（稳定 GUID、cv/ref 归一化与 RTTI 构建契约） |
 | `test_asset_slot` | `AssetSlotTest` |
 | `test_asset_database` | `AssetDatabaseTest` |
+| `test_component_rtti` | `ComponentRttiTest`（基类/接口横向转换、多继承、虚继承、const 与移除脱离） |
+| `test_service_registry` | `ServiceRegistryTest`, `ServiceRegistryDeathTest`（`std::type_index` 精确键、显式接口、装配顺序与 fail-fast） |
 | `test_render_pass_registry` | `RenderPassCacheKeyTest`, `FramebufferCacheKeyTest`, `RenderPassRegistryTest` |
 | `test_device_capabilities` | `TextureDescriptorValidation`, `DeviceCapabilitiesTest`（双 backend 支持查询与 attachment/MSAA 创建、mip/layer barrier 读回、debug labels） |
 | `test_foundation_compute` | `FoundationComputeTest`（双 backend buffer/texture 显式 UAV ordering，依赖 JIT） |
@@ -128,6 +139,19 @@ ctest --test-dir build_debug -C Debug -R AssetSlotTest --output-on-failure
 
 无可用后端设备的 GPU 测试应 `SKIP`；已创建设备后出现资源、PSO、提交或读回错误必须
 `FAIL`。不要同时运行 build 和 ctest。
+
+涉及 RTTI、公共 C++ ABI 或跨静态库对象查询的改动，要分别完整验收 Debug 与 Release，且每个
+配置都先完成全量 build 再启动测试：
+
+```powershell
+cmake --preset win-x64-debug-clangcl
+cmake --build build_debug --config Debug --parallel 24
+ctest --test-dir build_debug -C Debug --output-on-failure
+
+cmake --preset win-x64-release-clangcl
+cmake --build build_release --config Release --parallel 24
+ctest --test-dir build_release -C Release --output-on-failure
+```
 
 新增测试放在 `modules/<module>/tests/`，通过同目录 `CMakeLists.txt` 的 `radray_add_test`
 注册。新增源文件后重新 configure；测试命令不会替你构建。

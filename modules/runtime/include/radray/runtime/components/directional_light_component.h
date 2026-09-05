@@ -25,8 +25,6 @@ public:
     DirectionalLightComponent() noexcept = default;
     ~DirectionalLightComponent() noexcept override;
 
-    RuntimeTypeId GetTypeId() const noexcept override;
-
     LightType GetLightType() const noexcept override { return LightType::Directional; }
     unique_ptr<LightSceneProxy> CreateSceneProxy() const override;
 
@@ -85,7 +83,6 @@ private:
 template <>
 struct RuntimeTypeTrait<DirectionalLightComponent> {
     static constexpr RuntimeTypeId value{0x6f2b1c84, 0x9a3d, 0x4e17, 0xb2, 0x6e, 0x51, 0xa8, 0x7c, 0x0d, 0x33, 0x91};
-    using Bases = std::tuple<LightComponent>;
 };
 
 }  // namespace radray

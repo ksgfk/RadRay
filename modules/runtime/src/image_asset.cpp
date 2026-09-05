@@ -105,10 +105,6 @@ void ImageAsset::OnUnload(AssetManager& manager) {
     (void)manager;
 }
 
-RuntimeTypeId ImageAsset::GetTypeId() const noexcept {
-    return runtime_type_id_v<ImageAsset>;
-}
-
 ImageData MakeSolidImage(uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
     ImageData img;
     img.Width = 1;

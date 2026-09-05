@@ -15,9 +15,6 @@ public:
     SceneComponent() noexcept = default;
     ~SceneComponent() noexcept override;
 
-    bool IsSceneComponent() const noexcept final { return true; }
-    RuntimeTypeId GetTypeId() const noexcept override;
-
     // ─── 变换 ───
 
     /// 相对于父组件的变换
@@ -70,7 +67,6 @@ private:
 template <>
 struct RuntimeTypeTrait<SceneComponent> {
     static constexpr RuntimeTypeId value{0x2aab6ba6, 0xd4d6, 0x40c5, 0x99, 0xae, 0xc7, 0x32, 0x4d, 0x36, 0xe7, 0x5b};
-    using Bases = std::tuple<ActorComponent>;
 };
 
 }  // namespace radray

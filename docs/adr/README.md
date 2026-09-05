@@ -95,7 +95,7 @@ docs/adr/*.md
 | [0039](0039-abandon-bundle-organization-stabilize-asset-system.md) | 放弃 per-bundle 组织，先稳定 asset 系统 | 部分被 ADR-0041 取代 |
 | [0040](0040-single-text-manifest-is-asset-identity-authority.md) | 单文本 JSON 清单是资产身份权威 | 部分被 ADR-0050 取代 |
 | [0041](0041-load-bridging-belongs-to-asset-manager.md) | 加载桥接归 AssetManager，资产来源经 IAssetSource 反转 | 生效 |
-| [0042](0042-importers-are-interfaces-with-typed-settings.md) | 导入器是虚接口，导入设置强类型化 | 生效 |
+| [0042](0042-importers-are-interfaces-with-typed-settings.md) | 导入器是虚接口，导入设置强类型化 | 生效；类型判断机制已被 ADR-0055 取代 |
 | [0043](0043-runtime-device-bridges-to-target-typed-shader-artifact.md) | 运行时 Device 通过单一动态桥消费 target-typed shader artifact | 部分被 ADR-0049 取代 |
 | [0044](0044-material-owns-full-render-state-baseline.md) | Material 拥有完整固定功能状态基线，attachment 格式由 pass 注入 | 生效 |
 | [0045](0045-shader-parameter-packing-driven-by-type-tree.md) | CPU 参数值由 compiler type tree 驱动打包，不写 CPU mirror struct | 部分被 ADR-0052 取代 |
@@ -108,3 +108,5 @@ docs/adr/*.md
 | [0052](0052-qualified-shader-parameter-paths-on-ambiguity.md) | Shader 参数以声明限定路径消歧，唯一叶名保留为简写 | 生效 |
 | [0053](0053-runtime-pipelines-consume-per-flight-value-snapshots.md) | Runtime pipeline 通过 per-flight 值快照跨越线程边界 | 部分被 ADR-0054 取代 |
 | [0054](0054-explicit-workloads-and-single-queue-render-graph.md) | 显式 workload 与单队列 RenderGraph | 生效 |
+| [0055](0055-cpp-rtti-is-runtime-object-query-authority.md) | C++ RTTI 是运行时对象查询权威 | 构建选项归属部分被 ADR-0056 取代 |
+| [0056](0056-rtti-belongs-to-project-compile-defaults.md) | RTTI 开关归工程统一编译函数所有 | 生效 |

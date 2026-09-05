@@ -269,10 +269,6 @@ void StaticMesh::OnUnload(AssetManager& manager) {
     _renderMesh = GpuMesh{};
 }
 
-RuntimeTypeId StaticMesh::GetTypeId() const noexcept {
-    return runtime_type_id_v<StaticMesh>;
-}
-
 task<AssetLoadResult> LoadStaticMesh(
     FrameUploadScheduler& frameUploads,
     MeshResource meshResource) {

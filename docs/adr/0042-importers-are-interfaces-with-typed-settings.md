@@ -1,6 +1,6 @@
 # ADR-0042 导入器是虚接口，导入设置强类型化
 
-状态: 生效
+状态: 生效；类型判断机制已被 ADR-0055 取代
 日期: 2026-08
 影响: `modules/runtime` 的 `AssetImporter` / `AssetImportSettings` / `AssetEntry` /
 `AssetDatabase`；全部资产 importer 实现；取代 ADR-0038 关于 data 段编码归属的部分

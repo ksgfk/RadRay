@@ -1,6 +1,6 @@
 > - 适用: 需要某个基础设施但不确定仓库里已有什么；踩到 core 的坑
 > - 权威: 本文是 `radraycore` 提供什么、以及怎么正确用它的唯一说明
-> - 锚点: `modules/core/include/radray/types.h`, `modules/core/include/radray/nullable.h`, `modules/core/include/radray/coroutine.h`, `modules/core/include/radray/enum_flags.h`
+> - 锚点: `modules/core/include/radray/types.h`, `modules/core/include/radray/nullable.h`, `modules/core/include/radray/coroutine.h`, `modules/core/include/radray/enum_flags.h`, `modules/core/include/radray/runtime_type.h`, `cmake/Utility.cmake`
 
 # core 基础设施
 
@@ -219,10 +219,16 @@ template <> struct JsonDeserializer<T> {
 - **`scope_guard.h`** — `ScopeGuard` / `MakeScopeGuard`，`Dismiss()` 取消。移动后源自动 dismiss。
 - **`allocator.h`** — `BuddyAllocator` / `FirstFitAllocator`，都是**偏移量式子分配器**
   （返回 `Allocation{Offset, ...}`），给描述符堆和 GPU 内存用。**不是堆分配器**，那是 `memory.h`。
-- **`runtime_type.h`** — 无 RTTI 的类型标识。特化 `RuntimeTypeTrait<T>` 给一个 Guid，
-  用 `Bases = std::tuple<...>` 声明继承，`runtime_is_a_v<D, B>` 编译期沿 Bases 图判断。
-  **运行期只有 Guid，算不出多继承的基类子对象偏移**——那必须由持有确切静态类型的上下文
-  用 `static_cast` 修正（`ServiceRegistry::RegisterBaseAlias` 就是这么做的）。
+- **`runtime_type.h`** — 独立、稳定的 GUID 声明设施。`RuntimeTypeId` 是 `Guid` 的别名；
+  需要稳定标识的类型特化 `RuntimeTypeTrait<T>::value`，显式读取 `runtime_type_id_v<T>` 时会先按
+  `remove_cvref_t` 归一化并要求 GUID 非空。它不描述继承、不保存对象描述符，也不建立 GUID 与
+  RTTI 的全局映射。对象关系查询使用指针形式 `dynamic_cast`，精确动态类型使用 `typeid`，
+  进程内服务键使用 `std::type_index`；仅为这些查询不需要声明 GUID。
+- **RTTI 是工程编译约定** — `radray_default_compile_flags` 为每个自有 target 以 `PRIVATE`
+  方式设置 MSVC/ClangCL 的 `/GR` 或其他前端的 `-frtti`，仅作用于 C++ 编译。新增库、测试、
+  工具、样例与 benchmark 都必须调用该函数；`radray_add_test` 已代为调用。core 不通过链接接口
+  传播 RTTI 选项，仓库外使用公共对象查询的 consumer 需自行开启 RTTI。归属理由见
+  [ADR-0056](../adr/0056-rtti-belongs-to-project-compile-defaults.md)。
 - **`intrusive_ptr.h`** — `IntrusivePtr` + `AdoptRef` / `RetainRef`，依赖 ADL 的
   `IntrusivePtrAddRef` / `IntrusivePtrRelease`。
 - **`structured_buffer.h`** — CPU 侧反射式结构化缓冲。新代码用 `TrySetValue`（fail-fast），
@@ -252,7 +258,7 @@ template <> struct JsonDeserializer<T> {
 | `test_sparse_set.cpp` | `SparseSetTest` |
 | `test_structured_buffer.cpp` | `StructuredBufferTest` |
 | `test_pod_hash.cpp` | `PodHashTest`, `HashCodeTest` |
-| `test_runtime_type.cpp` | `RuntimeTypeIsA` |
+| `test_runtime_type.cpp` | `RuntimeTypeIdTest` |
 | `test_binary_io.cpp` | `BinaryIoTest` |
 | `test_json.cpp` | `JsonTest` |
 | `test_json_serializer.cpp` | `JsonSerializerTest` |

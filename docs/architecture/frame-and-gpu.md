@@ -103,8 +103,8 @@ template <> struct ServiceTraits<MyCache> {
 };
 ```
 
-`GpuSystem` 已经用 `Bases = std::tuple<IWaitFrameProcessor>` 声明了这个基类，
-所以 `Wire()` 能解析到它。装配细节见「服务装配」一节。
+`Application` 登记 `GpuSystem` 时用 `Add<IWaitFrameProcessor>(gpu)` 显式暴露这个接口，
+所以 `Wire()` 能按接口的 `std::type_index` 精确解析。装配细节见「服务装配」一节。
 
 目前仓库里只有资产走这条路，所以没有现成的非资产调用点可参照。
 
@@ -217,9 +217,9 @@ template <> struct ServiceTraits<AssetManager> {
 };
 ```
 
-`AssetManager` 要的是 `IWaitFrameProcessor` 接口，由 `ServiceRegistry` 通过
-`RuntimeTypeTrait<GpuSystem>::Bases` 解析到 `GpuSystem`。所以给 `GpuSystem` 的
-`RuntimeTypeTrait` 加/删基类会影响装配能否解析。
+`AssetManager` 要的是 `IWaitFrameProcessor` 接口；`Application` 用
+`registry.Add<IWaitFrameProcessor>(gpu)` 同时登记 `GpuSystem` 静态类型和该接口。接口 binding
+只参与 resolve，`GpuSystem` 仍只 Wire/Initialize 一次；GUID trait 不参与服务装配。
 
 ## 游戏侧扩展点
 

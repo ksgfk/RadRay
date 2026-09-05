@@ -86,13 +86,14 @@ LF，跨行 settings 因此被改写并以 LF 存回，在 CRLF 工作树里表�
 `AssetImporter` 是由数据库独占的虚接口，声明稳定的 type 名、`Refresh` 认领的扩展名、settings
 工厂和加载入口。依赖在 importer 构造时注入，`AssetLoadContext` 只有绝对路径与 settings 指针。
 
-`AssetImportSettings` 只暴露 `GetTypeInfo()` 作为类型判定出口，向下转换一律经 `IsA`。它不像
-`Asset` 那样另设 `GetTypeId()`——那里的 `GetTypeId` 有存在理由（`AssetManager` 用它与 loader
-声明的 `TypeInfo` 交叉校验），settings 这侧没有对应校验点，多一个出口只会变成每个子类都要覆写
-却无人读取的平行事实。
+`AssetImportSettings` 只提供多态析构与 JSON 编解码，不提供自定义类型虚函数。
+`GetSettings<T>()` 和 `MutableSettings<T>()` 直接对实际 settings 对象使用指针形式
+`dynamic_cast`，并返回 `Nullable`；查询目标可以是任意完整类类型，所以基类、接口、横向转换和
+const 视图都遵循真实 C++ 继承关系。仅为查询 settings 不需要声明 GUID。
 
 有 settings 的 importer 继承 `TypedAssetImporter<TSettings>`。它在普通（非协程）的 `Load`
-中同步检查并复制 context，再把 `std::filesystem::path` 与 `TSettings` 按值传给真正的惰性 task。
+中先用 `dynamic_cast` 同步检查 settings 类型并复制 context，再把 `std::filesystem::path` 与
+`TSettings` 按值传给真正的惰性 task。
 因此 task 挂起后不会回查可能已被修改或删除的 `AssetEntry`。自定义 `AssetImporter::Load` 也必须
 保持这条同步读取契约。
 

@@ -11,10 +11,6 @@ LightComponent::~LightComponent() noexcept {
     DestroyRenderState();
 }
 
-RuntimeTypeId LightComponent::GetTypeId() const noexcept {
-    return runtime_type_id_v<LightComponent>;
-}
-
 void LightComponent::OnRegister() {
     CreateRenderState();
 }

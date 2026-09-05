@@ -8,10 +8,6 @@ namespace radray {
 
 PointLightComponent::~PointLightComponent() noexcept = default;
 
-RuntimeTypeId PointLightComponent::GetTypeId() const noexcept {
-    return runtime_type_id_v<PointLightComponent>;
-}
-
 unique_ptr<LightSceneProxy> PointLightComponent::CreateSceneProxy() const {
     return make_unique<PointLightSceneProxy>(*this);
 }

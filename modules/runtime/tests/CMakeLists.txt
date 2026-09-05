@@ -2,6 +2,8 @@ radray_add_test(test_render_pipeline SOURCES test_render_pipeline.cpp test_runti
 target_include_directories(test_render_pipeline PRIVATE "${CMAKE_SOURCE_DIR}/modules/render/tests" "${CMAKE_SOURCE_DIR}/modules/runtime/src")
 target_compile_definitions(test_render_pipeline PRIVATE RADRAY_PROJECT_DIR="${CMAKE_SOURCE_DIR}")
 radray_add_test(test_asset_slot SOURCES test_asset_slot.cpp LINK_LIBS radrayruntime)
+radray_add_test(test_component_rtti SOURCES test_component_rtti.cpp LINK_LIBS radrayruntime)
+radray_add_test(test_service_registry SOURCES test_service_registry.cpp LINK_LIBS radrayruntime)
 radray_add_test(test_render_foundation SOURCES test_render_foundation.cpp LINK_LIBS radrayruntime)
 radray_add_test(test_render_graph_compile SOURCES test_render_graph_compile.cpp LINK_LIBS radrayruntime)
 target_include_directories(test_render_foundation PRIVATE "${CMAKE_SOURCE_DIR}/modules/render/tests")

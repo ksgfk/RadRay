@@ -1,6 +1,6 @@
 > - 适用: 改渲染管线、场景表示、Application 生命周期或服务装配
 > - 权威: 本文描述场景、Forward 与 Application 装配；workload/graph/history 契约见 `renderer-foundation.md`，资产与 GPU 帧管理见 `asset-system.md`、`frame-and-gpu.md`
-> - 锚点: `modules/runtime/include/radray/runtime/render_framework/render_pipeline.h`, `modules/runtime/include/radray/runtime/forward_pipeline/forward_pipeline.h`, `modules/runtime/include/radray/runtime/material.h`, `modules/runtime/include/radray/runtime/shader_program.h`, `modules/runtime/include/radray/runtime/render_framework/mesh_draw.h`, `modules/runtime/include/radray/runtime/components/static_mesh_component.h`, `modules/runtime/src/render_system.cpp`, `examples/example_lambert_sphere/example_lambert_sphere.cpp`
+> - 锚点: `modules/runtime/include/radray/runtime/render_framework/render_pipeline.h`, `modules/runtime/include/radray/runtime/forward_pipeline/forward_pipeline.h`, `modules/runtime/include/radray/runtime/material.h`, `modules/runtime/include/radray/runtime/shader_program.h`, `modules/runtime/include/radray/runtime/render_framework/mesh_draw.h`, `modules/runtime/include/radray/runtime/components/static_mesh_component.h`, `modules/runtime/include/radray/runtime/game_framework/actor.h`, `modules/runtime/include/radray/runtime/service_registry.h`, `modules/runtime/src/application.cpp`, `modules/runtime/src/render_system.cpp`, `examples/example_lambert_sphere/example_lambert_sphere.cpp`
 
 # 渲染框架与 game framework
 
@@ -92,6 +92,11 @@ LightComponent      → CreateRenderState → Scene::AddLight(CreateSceneProxy()
 **任何属性或变换变化走 `MarkRenderStateDirty()` → 整棵 proxy 销毁重建。**
 `OnTransformChanged` 也走这条路。Light proxy 的参数在构造函数里一次性从 component 快照。
 这个粒度很粗，但它让"proxy 里的数据什么时候会变"有一个确定答案：只在重建时。
+
+`Actor::FindComponent<T>()` 按拥有顺序对实际组件做指针形式 `dynamic_cast`，返回第一个可转换
+对象的 `Nullable`；查询目标可以是任意完整类类型，因此支持组件基类、接口、横向转换和虚继承。
+const Actor 只返回 const 视图。移除组件时也以 `dynamic_cast<SceneComponent*>` 判断是否需要先从
+父节点脱离，不维护平行的场景组件标志或 GUID 查询重载。
 
 ### draw call
 
@@ -202,16 +207,20 @@ template <> struct ServiceTraits<AssetManager> {
 };
 ```
 
-`Inject` 的元素是 **setter 成员函数指针**（形参类型自动抽出），
-或 `As<Source>(setter)` 显式指定 resolve 来源类型（派生 → 基类上行转换时用）。
+`Inject` 的元素是 **setter 成员函数指针**，形参指针类型就是要精确 resolve 的服务键。
+查询返回 `Nullable<T*>`；未登记不会尝试派生类搜索或动态转换。
 
 三阶段：
 
 | 阶段 | API | 做什么 |
 |---|---|---|
-| 1 | `Add(T*)` | 非拥有登记。自动按 `RuntimeTypeTrait<T>::Bases` 为每个基类登记 resolve 别名（在 typed 上下文里 `static_cast` 修正多继承偏移） |
-| 2 | `Wire()` | 展开每个服务的 `Inject`，按 `RuntimeTypeId` resolve 并调 setter。**缺依赖直接 `RADRAY_ABORT`** |
+| 1 | `Add<Interfaces...>(T*)` | 非拥有登记静态类型 `T`，并只为显式列出的接口增加 resolve binding；在 typed 上下文用 `static_cast` 修正多继承偏移 |
+| 2 | `Wire()` | 展开每个服务的 `Inject`，按 `std::type_index(typeid(T))` 精确 resolve 并调 setter。**缺依赖直接 `RADRAY_ABORT`** |
 | 3 | `Initialize()` | 按登记序调用可选的 `OnInitialize()` |
+
+一个服务无论登记多少接口，都只有一条 lifecycle entry，所以只 Wire/Initialize 一次。null、重复
+静态类型、重复接口键和缺失必需依赖都 fail-fast。服务索引只在进程内存在，不使用稳定 GUID，
+也不建立 GUID 与 RTTI 的映射。
 
 **分三阶段的理由**：装配发生时全部实例已存在，所以互相持有引用天然可解。
 `WindowManager` ↔ `GpuSystem` 就是一个双向环。
@@ -222,7 +231,7 @@ template <> struct ServiceTraits<AssetManager> {
 |---|---|---|
 | `WindowManager` | `SetGpuSystem`, `SetRenderSystem` | — |
 | `GpuSystem` | `SetWindowManager` | — |
-| `AssetManager` | `SetWaitFrameProcessor`（经 `Bases = IWaitFrameProcessor` 解析到 `GpuSystem`） | — |
+| `AssetManager` | `SetWaitFrameProcessor`（`Application` 以 `Add<IWaitFrameProcessor>(gpu)` 显式暴露接口） | — |
 | `RenderSystem` | — | 有（建 `RenderPassRegistry`） |
 | `World` | — | — |
 

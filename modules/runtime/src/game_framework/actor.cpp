@@ -11,24 +11,6 @@ Actor::~Actor() noexcept {
     UnregisterAllComponents();
 }
 
-ActorComponent* Actor::FindComponent(RuntimeTypeId type) noexcept {
-    for (const unique_ptr<ActorComponent>& component : _ownedComponents) {
-        if (component != nullptr && component->GetTypeId() == type) {
-            return component.get();
-        }
-    }
-    return nullptr;
-}
-
-const ActorComponent* Actor::FindComponent(RuntimeTypeId type) const noexcept {
-    for (const unique_ptr<ActorComponent>& component : _ownedComponents) {
-        if (component != nullptr && component->GetTypeId() == type) {
-            return component.get();
-        }
-    }
-    return nullptr;
-}
-
 ActorComponent* Actor::AddComponent(unique_ptr<ActorComponent> component) {
     if (component == nullptr) {
         return nullptr;
@@ -58,8 +40,8 @@ void Actor::RemoveComponent(ActorComponent* component) {
         _rootComponent = nullptr;
     }
     // 若是 SceneComponent,从层级中摘除
-    if (component->IsSceneComponent()) {
-        static_cast<SceneComponent*>(component)->DetachFromParent();
+    if (auto* sceneComponent = dynamic_cast<SceneComponent*>(component); sceneComponent != nullptr) {
+        sceneComponent->DetachFromParent();
     }
     component->_owner = nullptr;
     auto it = std::find_if(_ownedComponents.begin(), _ownedComponents.end(),
@@ -77,7 +59,6 @@ void Actor::SetRootComponent(Nullable<SceneComponent*> component) noexcept {
     }
     _rootComponent = component;
 }
-
 
 void Actor::Tick(float deltaTime) {
     for (auto& comp : _ownedComponents) {

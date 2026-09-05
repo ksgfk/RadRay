@@ -9,32 +9,57 @@
 
 #include <radray/coroutine.h>
 #include <radray/runtime/asset.h>
+#include <radray/runtime/image_asset.h>
 #include <radray/runtime/wait_frame.h>
 #include <radray/types.h>
 
 #include <gtest/gtest.h>
 
 #include <coroutine>
+#include <cstdint>
+#include <typeinfo>
 
 namespace radray {
 namespace {
-class ProbeAsset;
-}  // namespace
 
-/// 【必须在 ProbeAsset 定义之前】: 它的 GetTypeId 体内用了 runtime_type_id_v<ProbeAsset>,
-/// 而非模板成员函数的体在类定义处就编译 —— 特化放在后面会先实例化出默认的空 Guid 特化,
-/// 撞上 runtime_type.h 的 static_assert。
-template <>
-struct RuntimeTypeTrait<ProbeAsset> {
-    static constexpr RuntimeTypeId value{0x7c31a05e, 0x2a44, 0x4f13, 0x9d, 0x62, 0x11, 0x8b, 0x40, 0xe7, 0x55, 0x0a};
-    using Bases = std::tuple<Asset>;
+class AssetFacet {
+public:
+    virtual ~AssetFacet() noexcept = default;
 };
 
-namespace {
+class AssetPaddingFacet {
+public:
+    virtual ~AssetPaddingFacet() noexcept = default;
+    uint64_t Padding{0x123456789abcdef0ull};
+};
+
+class SharedAssetFacet {
+public:
+    virtual ~SharedAssetFacet() noexcept = default;
+};
+
+class LeftAssetFacet : public virtual SharedAssetFacet {
+public:
+    ~LeftAssetFacet() noexcept override = default;
+};
+
+class RightAssetFacet : public virtual SharedAssetFacet {
+public:
+    ~RightAssetFacet() noexcept override = default;
+};
+
+class UnrelatedAssetFacet {
+public:
+    virtual ~UnrelatedAssetFacet() noexcept = default;
+};
 
 /// 一个不碰 GPU 的假资产。它把 OnUnload 与析构的次数记到外部计数器上, 使"OnUnload
 /// 先于析构"与"引用归零才卸载"可被断言。
-class ProbeAsset : public Asset {
+class ProbeAsset : public Asset,
+                   public AssetPaddingFacet,
+                   public AssetFacet,
+                   public LeftAssetFacet,
+                   public RightAssetFacet {
 public:
     struct Counters {
         uint32_t Unloaded{0};
@@ -70,8 +95,6 @@ public:
         // 不是资源类型。
         manager.DeferDestroy([guard = DestroyGuard{_counters}]() noexcept {});
     }
-
-    RuntimeTypeId GetTypeId() const noexcept override { return runtime_type_id_v<ProbeAsset>; }
 
 private:
     /// 析构时给 PayloadDestroyed +1, 被移走的那份不再记账。
@@ -288,12 +311,12 @@ TEST_F(AssetSlotTest, ReacquiringBeforePumpKeepsTheSameAsset) {
         StreamingAssetRef<ProbeAsset> ref =
             Assets().AddReady<ProbeAsset>(id, make_unique<ProbeAsset>(counters, false));
         ASSERT_TRUE(ref.IsReady());
-        raw = ref.Get();
+        raw = ref.Get().Get();
     }
 
     StreamingAssetRef<ProbeAsset> revived = Assets().Find<ProbeAsset>(id);
     ASSERT_TRUE(revived.IsReady());
-    EXPECT_EQ(revived.Get(), raw);
+    EXPECT_EQ(revived.Get().Get(), raw);
 
     Assets().Pump();
     EXPECT_EQ(counters->Unloaded, 0u) << "the slot was referenced again before Pump ran";
@@ -377,8 +400,7 @@ TEST_F(AssetSlotTest, CollectingCascadesToDependenciesWithinOnePump) {
             Assets().AddReady<ProbeAsset>(heldId, make_unique<ProbeAsset>(heldCounters, false));
         ASSERT_TRUE(held.IsReady());
 
-        // OwnerAsset 是 ProbeAsset 的派生类, 但运行时类型元数据必须报 ProbeAsset ——
-        // GetTypeId 未被覆写, 而 CommitLoadResult 会核对两者一致。
+        // 创建入口仍受 Asset 基类约束；实际对象可以是更深的派生类型。
         StreamingAssetRef<ProbeAsset> owner = Assets().AddReady<ProbeAsset>(
             MakeId(10),
             unique_ptr<ProbeAsset>{make_unique<OwnerAsset>(ownerCounters, held.AsAny())});
@@ -449,22 +471,75 @@ TEST_F(AssetSlotTest, EqualityComparesSlotIdentityNotAssetId) {
     EXPECT_FALSE(emptyA == first);
 }
 
-/// 类型判定走 RuntimeTypeTrait 的 Bases 图, 故基类也匹配; CastTo 在类型不符时给空引用。
-TEST_F(AssetSlotTest, TypedReferenceRefusesAMismatchedType) {
+/// 查询直接遵循真实 C++ 继承关系；测试类型没有声明 Guid。
+TEST_F(AssetSlotTest, RttiViewsSupportBasesCrossCastsPointerAdjustmentAndVirtualInheritance) {
     shared_ptr<Counters> counters = MakeCounters();
     StreamingAssetRefAny any = Assets().AddReady(
         MakeId(14),
-        unique_ptr<Asset>{make_unique<ProbeAsset>(counters, false)},
-        runtime_type_info_v<ProbeAsset>);
+        unique_ptr<Asset>{make_unique<ProbeAsset>(counters, false)});
     ASSERT_TRUE(any.IsReady());
 
     EXPECT_TRUE(any.Is<ProbeAsset>());
-    EXPECT_TRUE(any.Is<Asset>()) << "Bases should make the base type match too";
+    EXPECT_TRUE(any.Is<Asset>());
+    EXPECT_TRUE(any.Is<AssetFacet>());
+    EXPECT_TRUE(any.Is<SharedAssetFacet>());
+    EXPECT_FALSE(any.Is<UnrelatedAssetFacet>());
 
     StreamingAssetRef<ProbeAsset> typed = any.CastTo<ProbeAsset>();
+    StreamingAssetRef<AssetFacet> facet = any.CastTo<AssetFacet>();
+    StreamingAssetRef<LeftAssetFacet> left = any.CastTo<LeftAssetFacet>();
+    StreamingAssetRef<RightAssetFacet> right = any.CastTo<RightAssetFacet>();
+    StreamingAssetRef<SharedAssetFacet> shared = any.CastTo<SharedAssetFacet>();
+    StreamingAssetRef<const AssetFacet> constFacet = any.CastTo<const AssetFacet>();
     ASSERT_TRUE(typed.IsReady());
+    ASSERT_TRUE(facet.IsReady());
+    ASSERT_TRUE(left.IsReady());
+    ASSERT_TRUE(right.IsReady());
+    ASSERT_TRUE(shared.IsReady());
+    ASSERT_TRUE(constFacet.IsReady());
     EXPECT_EQ(typed.Get(), any.Get());
     EXPECT_TRUE(typed == any);
+    EXPECT_TRUE(facet == any);
+    EXPECT_TRUE(shared == any);
+    EXPECT_EQ(constFacet.Get().Get(), static_cast<const AssetFacet*>(facet.Get().Get()));
+
+    Nullable<Asset*> object = any.Get();
+    ASSERT_TRUE(object);
+    Asset* rawObject = object.Get();
+    EXPECT_EQ(typeid(*rawObject), typeid(ProbeAsset));
+    EXPECT_NE(
+        static_cast<const void*>(facet.Get().Get()),
+        static_cast<const void*>(object.Get()));
+    EXPECT_EQ(
+        dynamic_cast<SharedAssetFacet*>(left.Get().Get()),
+        shared.Get().Get());
+    EXPECT_EQ(
+        dynamic_cast<SharedAssetFacet*>(right.Get().Get()),
+        shared.Get().Get());
+
+    StreamingAssetRef<UnrelatedAssetFacet> unrelated = any.CastTo<UnrelatedAssetFacet>();
+    EXPECT_FALSE(unrelated.IsValid());
+}
+
+/// ImageAsset 的构造发生在 radrayruntime 静态库内部，查询模板实例位于最终测试程序中；
+/// 这条覆盖跨链接单元的真实生产 RTTI。
+TEST_F(AssetSlotTest, LibraryCreatedImageAssetIsQueryableFromFinalExecutable) {
+    ImageAssetLoadOptions options;
+    options.FallbackImage = MakeSolidImage(1, 2, 3, 255);
+    StreamingAssetRef<ImageAsset> image = LoadImageAsset(
+        Assets(),
+        MakeId(41),
+        std::filesystem::path{"__radray_missing_image_for_rtti__.png"},
+        options);
+
+    Assets().Pump();
+
+    ASSERT_TRUE(image.IsReady());
+    Nullable<Asset*> object = image.AsAny().Get();
+    ASSERT_TRUE(object);
+    Asset* rawObject = object.Get();
+    EXPECT_EQ(typeid(*rawObject), typeid(ImageAsset));
+    EXPECT_TRUE(image.AsAny().Is<ImageAsset>());
 }
 
 // ════════════════════════════════════════════════════════════
@@ -477,7 +552,7 @@ TEST_F(AssetSlotTest, LoadHoldsItsOwnReferenceWhileInFlight) {
     const AssetId id = MakeId(15);
 
     ManualGate gate;
-    StreamingAssetRef<ProbeAsset> ref = Assets().Load<ProbeAsset>(AssetLoadRequest{
+    StreamingAssetRef<AssetFacet> ref = Assets().Load<AssetFacet>(AssetLoadRequest{
         .Id = id,
         .Task = [](ManualGate* g) -> task<AssetLoadResult> {
             co_await g->Wait();
@@ -608,24 +683,66 @@ TEST_F(AssetSlotTest, CancelDoesNotAbortALoadThatIgnoresItsStopToken) {
     EXPECT_FALSE(ref.IsCanceled());
 }
 
-/// 加载结果的运行时类型元数据与最终实例不符时置 Faulted, 不上架一个类型说谎的资产。
-TEST_F(AssetSlotTest, MismatchedTypeMetadataFaultsTheSlot) {
-    shared_ptr<Counters> counters = MakeCounters();
+/// Success(null) 仍是失败结果；槽位不得进入 Ready。
+TEST_F(AssetSlotTest, EmptySuccessfulResultFaultsTheSlot) {
     StreamingAssetRefAny ref = Assets().Load(AssetLoadRequest{
         .Id = MakeId(20),
-        .Task = [](shared_ptr<Counters> c) -> task<AssetLoadResult> {
-            // 实例是 ProbeAsset, 却报 Asset 的类型描述符。
-            co_return AssetLoadResult::Success(
-                unique_ptr<Asset>{make_unique<ProbeAsset>(c, false)},
-                runtime_type_info_v<Asset>);
-        }(counters)});
+        .Task = []() -> task<AssetLoadResult> {
+            co_return AssetLoadResult::Success(unique_ptr<Asset>{});
+        }()});
     Assets().Pump();
 
     EXPECT_TRUE(ref.IsFaulted());
     EXPECT_EQ(ref.Get(), nullptr);
-    // 元数据校验发生在上架之前, 故那个实例根本没进槽位 —— 它随 AssetLoadResult 一起析构,
-    // 也就不会走 OnUnload。
-    EXPECT_EQ(counters->Unloaded, 0u);
+}
+
+/// Loading 时任何完整类视图都能共享槽位；最终不匹配的既有视图保留终态观察权，
+/// 但不把实际 Ready 暴露成自己的成功。
+TEST_F(AssetSlotTest, LoadingViewRetainsSlotAfterFinalTypeMismatch) {
+    shared_ptr<Counters> counters = MakeCounters();
+    const AssetId id = MakeId(40);
+    StreamingAssetRef<UnrelatedAssetFacet> mismatch = Assets().Load<UnrelatedAssetFacet>(AssetLoadRequest{
+        .Id = id,
+        .Task = [](shared_ptr<Counters> c) -> task<AssetLoadResult> {
+            co_return AssetLoadResult::Success(make_unique<ProbeAsset>(c, false));
+        }(counters)});
+    StreamingAssetRefAny any = mismatch.AsAny();
+    StreamingAssetRef<AssetFacet> matching = Assets().Find<AssetFacet>(id);
+
+    ASSERT_TRUE(mismatch.IsValid());
+    ASSERT_TRUE(matching.IsValid());
+    EXPECT_TRUE(mismatch == any);
+    EXPECT_TRUE(matching == any);
+    EXPECT_FALSE(mismatch.IsCompleted());
+    EXPECT_FALSE(matching.IsCompleted());
+
+    Assets().Pump();
+
+    ASSERT_TRUE(any.IsReady());
+    EXPECT_TRUE(matching.IsCompleted());
+    EXPECT_TRUE(matching.IsReady());
+    EXPECT_NE(matching.Get(), nullptr);
+    EXPECT_TRUE(mismatch.IsValid());
+    EXPECT_TRUE(mismatch.IsCompleted());
+    EXPECT_FALSE(mismatch.IsReady());
+    EXPECT_FALSE(mismatch.IsFaulted());
+    EXPECT_FALSE(mismatch.IsCanceled());
+    EXPECT_EQ(mismatch.Get(), nullptr);
+
+    StreamingAssetRef<UnrelatedAssetFacet> lateMismatch =
+        any.CastTo<UnrelatedAssetFacet>();
+    EXPECT_FALSE(lateMismatch.IsValid());
+
+    any.Reset();
+    matching.Reset();
+    Assets().Pump();
+    EXPECT_EQ(Assets().GetAssetCount(), 1u)
+        << "the mismatched view still owns the shared slot";
+
+    mismatch.Reset();
+    Assets().Pump();
+    EXPECT_EQ(Assets().GetAssetCount(), 0u);
+    EXPECT_EQ(counters->Unloaded, 1u);
     EXPECT_EQ(counters->Destroyed, 1u);
 }
 
@@ -718,7 +835,7 @@ TEST_F(AssetSlotTest, AwaitingAReferenceResumesAfterPump) {
     bool sawReady = false;
 
     ManualGate gate;
-    StreamingAssetRef<ProbeAsset> ref = Assets().Load<ProbeAsset>(AssetLoadRequest{
+    StreamingAssetRef<AssetFacet> ref = Assets().Load<AssetFacet>(AssetLoadRequest{
         .Id = MakeId(22),
         .Task = [](ManualGate* g, shared_ptr<Counters> c) -> task<AssetLoadResult> {
             co_await g->Wait();
@@ -726,11 +843,11 @@ TEST_F(AssetSlotTest, AwaitingAReferenceResumesAfterPump) {
         }(&gate, counters)});
 
     TaskScope waiters;
-    waiters.Spawn([](StreamingAssetRef<ProbeAsset> r, bool* resumedOut, bool* readyOut) -> task<void> {
-        const bool completed = co_await r;
-        *resumedOut = completed;
+    waiters.Spawn([](AssetManager* manager, StreamingAssetRef<AssetFacet> r, bool* resumedOut, bool* readyOut) -> task<void> {
+        co_await manager->Wait(r);
+        *resumedOut = true;
         *readyOut = r.IsReady();
-    }(ref, &resumed, &sawReady));
+    }(&Assets(), ref, &resumed, &sawReady));
 
     EXPECT_FALSE(resumed) << "the waiter must not resume before the load completes";
 

@@ -13,8 +13,6 @@ public:
     LightComponent() noexcept = default;
     ~LightComponent() noexcept override;
 
-    RuntimeTypeId GetTypeId() const noexcept override;
-
     void OnRegister() override;
     void OnUnregister() override;
 
@@ -60,7 +58,6 @@ private:
 template <>
 struct RuntimeTypeTrait<LightComponent> {
     static constexpr RuntimeTypeId value{0x37e0491c, 0x0429, 0x4b5d, 0xb1, 0x40, 0x72, 0xec, 0x91, 0x99, 0x56, 0x45};
-    using Bases = std::tuple<SceneComponent>;
 };
 
 }  // namespace radray

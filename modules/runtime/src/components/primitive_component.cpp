@@ -10,10 +10,6 @@ PrimitiveComponent::~PrimitiveComponent() noexcept {
     DestroyRenderState();
 }
 
-RuntimeTypeId PrimitiveComponent::GetTypeId() const noexcept {
-    return runtime_type_id_v<PrimitiveComponent>;
-}
-
 void PrimitiveComponent::OnRegister() {
     CreateRenderState();
 }

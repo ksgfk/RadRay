@@ -29,7 +29,6 @@ public:
 template <>
 struct RuntimeTypeTrait<IWaitFrameProcessor> {
     static constexpr RuntimeTypeId value{0x1a7c4d92, 0x63be, 0x4f05, 0x9c, 0x2e, 0x80, 0x47, 0xb6, 0x15, 0xda, 0x38};
-    using Bases = std::tuple<>;
 };
 
 }  // namespace radray

@@ -9,8 +9,6 @@ public:
     PointLightComponent() noexcept = default;
     ~PointLightComponent() noexcept override;
 
-    RuntimeTypeId GetTypeId() const noexcept override;
-
     LightType GetLightType() const noexcept override { return LightType::Point; }
     unique_ptr<LightSceneProxy> CreateSceneProxy() const override;
 
@@ -55,7 +53,6 @@ private:
 template <>
 struct RuntimeTypeTrait<PointLightComponent> {
     static constexpr RuntimeTypeId value{0xd289eae9, 0xf0e6, 0x45cc, 0x9d, 0x55, 0xb8, 0xd1, 0x02, 0x2a, 0xa9, 0x6d};
-    using Bases = std::tuple<LightComponent>;
 };
 
 }  // namespace radray

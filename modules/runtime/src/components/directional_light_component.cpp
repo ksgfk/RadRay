@@ -8,10 +8,6 @@ namespace radray {
 
 DirectionalLightComponent::~DirectionalLightComponent() noexcept = default;
 
-RuntimeTypeId DirectionalLightComponent::GetTypeId() const noexcept {
-    return runtime_type_id_v<DirectionalLightComponent>;
-}
-
 unique_ptr<LightSceneProxy> DirectionalLightComponent::CreateSceneProxy() const {
     return make_unique<DirectionalLightSceneProxy>(*this);
 }

@@ -422,7 +422,6 @@ struct ServiceTraits<GpuSystem> {
 template <>
 struct RuntimeTypeTrait<GpuSystem> {
     static constexpr RuntimeTypeId value{0xe7c701b1, 0xcab6, 0x4be7, 0x94, 0xec, 0xfd, 0x8c, 0x6f, 0xd4, 0xf4, 0x68};
-    using Bases = std::tuple<IWaitFrameProcessor>;
 };
 
 }  // namespace radray

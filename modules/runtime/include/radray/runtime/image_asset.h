@@ -15,7 +15,6 @@ public:
     ~ImageAsset() noexcept override;
 
     void OnUnload(AssetManager& manager) override;
-    RuntimeTypeId GetTypeId() const noexcept override;
 
     bool IsValid() const noexcept { return _image.Data != nullptr && _image.Width != 0 && _image.Height != 0; }
 
@@ -61,7 +60,6 @@ StreamingAssetRef<ImageAsset> LoadImageAssetFromMemory(
 template <>
 struct RuntimeTypeTrait<ImageAsset> {
     static constexpr RuntimeTypeId value{0x59d6a2e3, 0x5c8a, 0x49be, 0xb1, 0x32, 0x2f, 0x4d, 0x65, 0xb9, 0x1a, 0x07};
-    using Bases = std::tuple<Asset>;
 };
 
 }  // namespace radray

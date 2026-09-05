@@ -160,7 +160,7 @@ TEST(RadRayRuntimeMaterial, BuildRenderDataCopiesNumericAndResourceState) {
         EXPECT_EQ((vector<byte>{actual.begin(), actual.end()}), (vector<byte>{expected.begin(), expected.end()}));
         EXPECT_NE(actual.data(), expected.data());
         ASSERT_EQ(snapshot.Textures.size(), 1u);
-        EXPECT_EQ(snapshot.Textures[0].Texture, data.TextureA.Get());
+        EXPECT_EQ(snapshot.Textures[0].Texture, data.TextureA.Get().Get());
         EXPECT_EQ(snapshot.Textures[0].Parameter.Binding, data.Program->GetParameterLayout().Find("AlbedoTexture")->Binding);
         EXPECT_EQ(snapshot.Textures[0].Element, 0u);
         EXPECT_FALSE(snapshot.Textures[0].SubView.IsDefault());
@@ -194,8 +194,8 @@ TEST(RadRayRuntimeMaterial, RenderDataDoesNotChangeAfterMaterialMutation) {
         EXPECT_EQ((vector<byte>{oldBytes.begin(), oldBytes.end()}), (vector<byte>{savedBytes.begin(), savedBytes.end()}));
         EXPECT_NE((vector<byte>{oldBytes.begin(), oldBytes.end()}), (vector<byte>{newBytes.begin(), newBytes.end()}));
         EXPECT_NE(oldBytes.data(), newBytes.data());
-        EXPECT_EQ(oldData.Textures[0].Texture, data.TextureA.Get());
-        EXPECT_EQ(newData.Textures[0].Texture, data.TextureB.Get());
+        EXPECT_EQ(oldData.Textures[0].Texture, data.TextureA.Get().Get());
+        EXPECT_EQ(newData.Textures[0].Texture, data.TextureB.Get().Get());
         EXPECT_EQ(oldData.Samplers[0].Sampler, saved.Samplers[0].Sampler);
         EXPECT_NE(oldData.Samplers[0].Sampler, newData.Samplers[0].Sampler);
         EXPECT_EQ(oldData.Queue, RenderQueue::Geometry);
@@ -278,7 +278,7 @@ TEST(RadRayRuntimeForwardPipeline, CollectsEachSectionWithCopiedFacts) {
             EXPECT_EQ(draw.FirstIndex, draw.SectionIndex * 3);
             EXPECT_EQ(draw.VertexOffset, static_cast<int32_t>(draw.SectionIndex));
             EXPECT_TRUE(draw.LocalToWorld.isApprox(transform));
-            const auto* expectedTexture = draw.SectionIndex == 0 ? data.TextureA.Get() : data.TextureB.Get();
+            const auto* expectedTexture = draw.SectionIndex == 0 ? data.TextureA.Get().Get() : data.TextureB.Get().Get();
             EXPECT_EQ(input.Materials[draw.MaterialIndex].Textures[0].Texture, expectedTexture);
         }
     });

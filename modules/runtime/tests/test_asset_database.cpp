@@ -15,28 +15,39 @@
 
 namespace radray {
 namespace {
-class TestImportSettings;
-class OtherImportSettings;
-}  // namespace
 
-template <>
-struct RuntimeTypeTrait<TestImportSettings> {
-    static constexpr RuntimeTypeId value{0xcf96688c, 0xc3de, 0x4c3f, 0xb2, 0xa5, 0xa6, 0x2d, 0xa3, 0x7c, 0x10, 0x11};
-    using Bases = std::tuple<>;
-};
-
-template <>
-struct RuntimeTypeTrait<OtherImportSettings> {
-    static constexpr RuntimeTypeId value{0x95363339, 0xc182, 0x42af, 0x89, 0x35, 0xce, 0xa2, 0x52, 0xc4, 0x63, 0xa8};
-    using Bases = std::tuple<>;
-};
-
-namespace {
-
-class TestImportSettings final : public AssetImportSettings {
+class SettingsFacet {
 public:
-    const RuntimeTypeInfo& GetTypeInfo() const noexcept override { return runtime_type_info_v<TestImportSettings>; }
+    virtual ~SettingsFacet() noexcept = default;
+};
 
+class SettingsPaddingFacet {
+public:
+    virtual ~SettingsPaddingFacet() noexcept = default;
+    uint64_t Padding{0x123456789abcdef0ull};
+};
+
+class SharedSettingsFacet {
+public:
+    virtual ~SharedSettingsFacet() noexcept = default;
+};
+
+class LeftSettingsFacet : public virtual SharedSettingsFacet {
+public:
+    ~LeftSettingsFacet() noexcept override = default;
+};
+
+class RightSettingsFacet : public virtual SharedSettingsFacet {
+public:
+    ~RightSettingsFacet() noexcept override = default;
+};
+
+class TestImportSettings final : public AssetImportSettings,
+                                 public SettingsPaddingFacet,
+                                 public SettingsFacet,
+                                 public LeftSettingsFacet,
+                                 public RightSettingsFacet {
+public:
     bool Deserialize(const JsonValue& json) override {
         JsonObjectReader object{json};
         if (!object.IsValid()) {
@@ -69,7 +80,6 @@ public:
 
 class OtherImportSettings final : public AssetImportSettings {
 public:
-    const RuntimeTypeInfo& GetTypeInfo() const noexcept override { return runtime_type_info_v<OtherImportSettings>; }
     bool Deserialize(const JsonValue&) override { return true; }
     bool Serialize(JsonWriteContext& context) const noexcept override { return context.Null(); }
 };
@@ -190,11 +200,25 @@ TEST_F(AssetDatabaseTest, MissingManifestOpensAsAnEmptyMutableDatabase) {
     EXPECT_EQ(database->ResolveId("textures\\wall.test"), first);
     EXPECT_EQ(database->ResolvePath(*entry), (Root() / "textures" / "wall.test").lexically_normal());
 
-    const TestImportSettings* settings = GetSettings<TestImportSettings>(*entry);
+    Nullable<const TestImportSettings*> settings = GetSettings<TestImportSettings>(*entry);
     ASSERT_NE(settings, nullptr);
     EXPECT_TRUE(settings->Enabled);
     EXPECT_EQ(settings->Scale, 1u);
     EXPECT_EQ(GetSettings<OtherImportSettings>(*entry), nullptr);
+
+    Nullable<const SettingsFacet*> facet = GetSettings<SettingsFacet>(*entry);
+    Nullable<const LeftSettingsFacet*> left = GetSettings<LeftSettingsFacet>(*entry);
+    Nullable<const RightSettingsFacet*> right = GetSettings<RightSettingsFacet>(*entry);
+    Nullable<const SharedSettingsFacet*> shared = GetSettings<SharedSettingsFacet>(*entry);
+    ASSERT_TRUE(facet);
+    ASSERT_TRUE(left);
+    ASSERT_TRUE(right);
+    ASSERT_TRUE(shared);
+    EXPECT_NE(
+        static_cast<const void*>(facet.Get()),
+        static_cast<const void*>(entry->Settings.get()));
+    EXPECT_EQ(dynamic_cast<const SharedSettingsFacet*>(left.Get()), shared.Get());
+    EXPECT_EQ(dynamic_cast<const SharedSettingsFacet*>(right.Get()), shared.Get());
 
     const std::optional<AssetId> second = database->AddEntry("other.test", "test", error);
     ASSERT_TRUE(second.has_value()) << error;
@@ -204,10 +228,13 @@ TEST_F(AssetDatabaseTest, MissingManifestOpensAsAnEmptyMutableDatabase) {
     EXPECT_FALSE(duplicate.has_value());
     EXPECT_NE(error.find(first->ToString()), string::npos);
 
-    TestImportSettings* mutableSettings = database->MutableSettings<TestImportSettings>(first.value());
+    Nullable<TestImportSettings*> mutableSettings =
+        database->MutableSettings<TestImportSettings>(first.value());
     ASSERT_NE(mutableSettings, nullptr);
     mutableSettings->Enabled = false;
     mutableSettings->Scale = 7;
+    EXPECT_NE(database->MutableSettings<SettingsFacet>(first.value()), nullptr);
+    EXPECT_EQ(database->MutableSettings<OtherImportSettings>(first.value()), nullptr);
 
     ASSERT_TRUE(database->SetPath(first.value(), "moved//./wall.test", error)) << error;
     EXPECT_EQ(database->Find(first.value())->Path, "moved/wall.test");
@@ -224,7 +251,8 @@ TEST_F(AssetDatabaseTest, MissingManifestOpensAsAnEmptyMutableDatabase) {
     const AssetEntry* reopenedEntry = reopened->Find(first.value());
     ASSERT_NE(reopenedEntry, nullptr);
     EXPECT_EQ(reopenedEntry->Path, "moved/wall.test");
-    const TestImportSettings* reopenedSettings = GetSettings<TestImportSettings>(*reopenedEntry);
+    Nullable<const TestImportSettings*> reopenedSettings =
+        GetSettings<TestImportSettings>(*reopenedEntry);
     ASSERT_NE(reopenedSettings, nullptr);
     EXPECT_FALSE(reopenedSettings->Enabled);
     EXPECT_EQ(reopenedSettings->Scale, 7u);
@@ -332,7 +360,8 @@ TEST_F(AssetDatabaseTest, LoadTaskOwnsAPathAndSettingsSnapshot) {
     ASSERT_NE(database, nullptr) << error;
     const std::optional<AssetId> id = database->AddEntry("before.snapshot", "snapshot", error);
     ASSERT_TRUE(id.has_value()) << error;
-    TestImportSettings* settings = database->MutableSettings<TestImportSettings>(id.value());
+    Nullable<TestImportSettings*> settings =
+        database->MutableSettings<TestImportSettings>(id.value());
     ASSERT_NE(settings, nullptr);
     settings->Scale = 3;
 
@@ -352,6 +381,28 @@ TEST_F(AssetDatabaseTest, LoadTaskOwnsAPathAndSettingsSnapshot) {
     EXPECT_FALSE(result->IsSuccess());
     EXPECT_EQ(probe->Path, (Root() / "before.snapshot").lexically_normal());
     EXPECT_EQ(probe->Scale, 3u);
+}
+
+TEST_F(AssetDatabaseTest, TypedImporterRejectsMismatchedSettingsThroughRtti) {
+    shared_ptr<SnapshotProbe> probe = make_shared<SnapshotProbe>();
+    SnapshotImporter importer{probe};
+    OtherImportSettings wrongSettings;
+    AssetLoadContext context{
+        .AbsolutePath = Root() / "wrong.test",
+        .Settings = &wrongSettings};
+
+    std::optional<AssetLoadResult> result;
+    TaskScope scope;
+    scope.Spawn(AwaitLoadResult(importer.Load(context), &result));
+    scope.WaitUntilEmpty();
+
+    ASSERT_TRUE(result.has_value());
+    EXPECT_FALSE(result->IsSuccess());
+    EXPECT_EQ(
+        result->Error,
+        "asset import settings are missing or have the wrong type");
+    EXPECT_TRUE(probe->Path.empty());
+    EXPECT_EQ(probe->Scale, 0u);
 }
 
 TEST_F(AssetDatabaseTest, UnknownAndInvalidSettingsKeepTheirOriginalJsonText) {

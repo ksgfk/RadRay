@@ -13,14 +13,12 @@ namespace radray {
 
 struct AssetLoadResult {
     unique_ptr<Asset> Object;
-    const RuntimeTypeInfo* TypeInfo{nullptr};
     string Error;
     bool Succeeded{false};
 
-    static AssetLoadResult Success(unique_ptr<Asset> object, const RuntimeTypeInfo& typeInfo) noexcept {
+    static AssetLoadResult Success(unique_ptr<Asset> object) noexcept {
         AssetLoadResult result;
         result.Object = std::move(object);
-        result.TypeInfo = &typeInfo;
         result.Succeeded = true;
         return result;
     }
@@ -29,7 +27,7 @@ struct AssetLoadResult {
     requires std::derived_from<T, Asset> && (!std::same_as<T, Asset>)
     static AssetLoadResult Success(unique_ptr<T> object) noexcept {
         unique_ptr<Asset> asset = std::move(object);
-        return Success(std::move(asset), runtime_type_info_v<T>);
+        return Success(std::move(asset));
     }
 
     static AssetLoadResult Failure(string error = {}) noexcept {
@@ -38,7 +36,7 @@ struct AssetLoadResult {
         return result;
     }
 
-    bool IsSuccess() const noexcept { return Succeeded && Object != nullptr && TypeInfo != nullptr; }
+    bool IsSuccess() const noexcept { return Succeeded && Object != nullptr; }
 };
 
 /// AssetManager 的可选资产来源。实现必须在 CreateLoadTask 返回前同步取齐加载所需数据；

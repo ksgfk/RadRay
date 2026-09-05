@@ -11,10 +11,6 @@ SceneComponent::~SceneComponent() noexcept {
     }
 }
 
-RuntimeTypeId SceneComponent::GetTypeId() const noexcept {
-    return runtime_type_id_v<SceneComponent>;
-}
-
 void SceneComponent::SetRelativeLocation(const Eigen::Vector3f& location) noexcept {
     _relativeLocation = location;
     OnTransformChanged();

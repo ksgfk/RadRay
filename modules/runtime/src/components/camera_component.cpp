@@ -2,10 +2,6 @@
 
 namespace radray {
 
-RuntimeTypeId CameraComponent::GetTypeId() const noexcept {
-    return runtime_type_id_v<CameraComponent>;
-}
-
 void CameraComponent::SetPerspective(float fovYRadians, float nearZ, float farZ) noexcept {
     _fovY = fovYRadians;
     _nearZ = nearZ;

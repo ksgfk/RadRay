@@ -1,6 +1,6 @@
 > - 适用: 资产生命周期、引用计数、加载去重或延迟 GPU 销毁
 > - 权威: 本文是 runtime 资产系统的唯一说明；帧边界与上传见 `architecture/frame-and-gpu.md`，开发时身份登记与 AssetDatabase 见 `architecture/asset-database.md`
-> - 锚点: `modules/runtime/include/radray/runtime/asset_manager.h`, `modules/runtime/src/asset_manager.cpp`, `modules/runtime/include/radray/runtime/asset.h`, `modules/runtime/include/radray/runtime/texture_asset.h`, `modules/runtime/include/radray/runtime/static_mesh.h`, `modules/runtime/src/static_mesh.cpp`, `modules/runtime/include/radray/runtime/render_framework/static_mesh_scene_proxy.h`
+> - 锚点: `modules/runtime/include/radray/runtime/asset_manager.h`, `modules/runtime/src/asset_manager.cpp`, `modules/runtime/include/radray/runtime/asset.h`, `modules/runtime/include/radray/runtime/asset_source.h`, `modules/runtime/include/radray/runtime/texture_asset.h`, `modules/runtime/include/radray/runtime/static_mesh.h`, `modules/runtime/src/static_mesh.cpp`, `modules/runtime/include/radray/runtime/render_framework/static_mesh_scene_proxy.h`
 
 # 资产系统
 
@@ -10,7 +10,7 @@
 ## 生命周期
 
 ```text
-Load request / source task → AssetSlot::Loading → AssetManager::Pump → Loaded
+Load request / source task → AssetSlot::Loading → AssetManager::Pump → Ready
                                                ↓
                               最后一份 StreamingAssetRef 归零
                                                ↓
@@ -25,7 +25,19 @@ Load request / source task → AssetSlot::Loading → AssetManager::Pump → Loa
 无效引用，不创建 faulted slot。`AssetDatabase` 是当前 source 实现，细节见
 `architecture/asset-database.md`。
 
-`StreamingAssetRef<T>` 是类型安全的视图，内部仍由 `StreamingAssetRefAny` 参与计数。
+`AssetLoadResult::Success` 只携带 `unique_ptr<Asset>`；`AssetSlot` 只保存实际对象，不另存声明类型
+或对象 GUID，也不做两份类型事实的交叉校验。空对象的 success 仍作为加载失败提交。
+
+`StreamingAssetRef<T>` 是实际 `Asset` 对象上的 RTTI 视图，内部仍由 `StreamingAssetRefAny`
+参与计数。`T` 可以是任意完整类类型，不要求继承 `Asset` 或声明 GUID；`Get()` 以指针形式
+`dynamic_cast`，并返回 `Nullable<T*>`。`StreamingAssetRefAny::Get()` 同样返回
+`Nullable<Asset*>`。精确类型判断必须先确认对象存在，再对对象使用 `typeid`。
+
+Loading 时最终对象未知，`Load<T>`、`Find<T>`、`Wait<T>` 和 `CastTo<T>` 都可以先建立接口或
+其他类视图。若最终 Ready 对象不能转换为 `T`，既有视图继续持有同一 slot 并观察到终态，
+但其 `Get()` 为空且 `IsReady()` 为 false；Ready 后新做的不匹配 `CastTo<T>` 返回无效引用。
+每次访问至多执行一次必要转换，当前不缓存调整后的子对象指针。
+
 引用的复制、查询、移动和析构都只在 AssetManager 所在的 game thread 进行，计数不是原子的。
 引用必须在 `AssetManager` 之前销毁；slot 随 manager 释放，之后不能再查询引用状态。
 
@@ -91,15 +103,18 @@ World 先拆除 proxy 与 asset ref，RenderSystem 释放 render-side 对象，A
 
 ## 新增资产类型
 
-1. 继承 `Asset`，实现 `OnUnload` 与 `GetTypeId`。
-2. 为 `RuntimeTypeTrait<T>` 生成全新的 GUID，并声明 `Asset` 基类。
+1. 继承 `Asset` 并实现 `OnUnload`；创建和加载结果仍受 `Asset` 基类约束。
+2. 只有其他协议确实需要独立稳定类型标识时，才为 `RuntimeTypeTrait<T>` 生成新 GUID；对象查询
+   不需要 GUID，也不声明基类图。
 3. 散文件写独占 namespace 的 `Make...AssetId`；入库类型实现 `AssetImporter` 并使用 manifest GUID。
 4. GPU 对象在 `OnUnload` 中整包交给 `DeferDestroy`；纯 CPU 数据留给析构。
-5. 在 `modules/runtime/tests/` 增加生命周期测试，能不用 GPU 就不要创建 GPU。
+5. 在 `modules/runtime/tests/` 增加生命周期和 RTTI 视图测试，能不用 GPU 就不要创建 GPU。
 
 ## 测试
 
-`AssetSlotTest` 覆盖引用计数唯一权威下的 slot 状态转换、加载去重和延迟回收边界。
+`AssetSlotTest` 覆盖引用计数唯一权威下的 slot 状态转换、加载去重和延迟回收边界，也用无 GUID
+测试类覆盖基类、横向接口、多继承指针调整、虚继承、const 与不匹配视图。生产 `ImageAsset`
+由静态库内部构造、最终测试程序查询的用例负责覆盖链接单元边界。
 `test_asset_slot.cpp` 的 `ManualGate` 用于让异步 task 停在明确的恢复点；必须等待 gate，
 不能直接拷贝 awaiter。它也覆盖 `IAssetSource` 的 ID/path 桥接；manifest 与 importer settings
 由 `AssetDatabaseTest` 覆盖。

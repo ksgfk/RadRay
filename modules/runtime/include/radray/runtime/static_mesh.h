@@ -55,7 +55,6 @@ public:
     ~StaticMesh() noexcept override;
 
     void OnUnload(AssetManager& manager) override;
-    RuntimeTypeId GetTypeId() const noexcept override;
 
     const MeshResource& GetMeshResource() const noexcept { return _meshResource; }
     const vector<StaticMeshSection>& GetSections() const noexcept { return _sections; }
@@ -105,7 +104,6 @@ private:
 template <>
 struct RuntimeTypeTrait<StaticMesh> {
     static constexpr RuntimeTypeId value{0x9226f085, 0xb0b1, 0x476f, 0xb7, 0x29, 0x69, 0xec, 0xee, 0x38, 0x99, 0x8c};
-    using Bases = std::tuple<Asset>;
 };
 
 }  // namespace radray

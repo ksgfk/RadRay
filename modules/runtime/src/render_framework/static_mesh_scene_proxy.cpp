@@ -19,8 +19,8 @@ void StaticMeshSceneProxy::CollectAssetReferences(vector<StreamingAssetRefAny>& 
 }
 
 MeshDrawArgs StaticMeshSceneProxy::GetDrawArgs(uint32_t sectionIndex) const noexcept {
-    const StaticMesh* mesh = _mesh.Get();
-    if (mesh == nullptr || sectionIndex >= mesh->GetSections().size()) {
+    Nullable<StaticMesh*> mesh = _mesh.Get();
+    if (!mesh || sectionIndex >= mesh->GetSections().size()) {
         return {};
     }
     const StaticMeshSection& section = mesh->GetSections()[sectionIndex];
@@ -35,8 +35,8 @@ MeshDrawArgs StaticMeshSceneProxy::GetDrawArgs(uint32_t sectionIndex) const noex
 }
 
 uint32_t StaticMeshSceneProxy::GetSectionCount() const noexcept {
-    const StaticMesh* mesh = _mesh.Get();
-    return mesh != nullptr ? static_cast<uint32_t>(mesh->GetSections().size()) : 0;
+    Nullable<StaticMesh*> mesh = _mesh.Get();
+    return mesh ? static_cast<uint32_t>(mesh->GetSections().size()) : 0;
 }
 
 Nullable<Material*> StaticMeshSceneProxy::GetMaterial(uint32_t sectionIndex) const noexcept {

@@ -11,13 +11,6 @@
 
 namespace radray {
 
-class FlightProbeAsset;
-template <>
-struct RuntimeTypeTrait<FlightProbeAsset> {
-    static constexpr RuntimeTypeId value{0xc34d90be, 0x9897, 0x4eba, 0x91, 0x13, 0x6e, 0xf8, 0xd0, 0x8f, 0x29, 0xb5};
-    using Bases = std::tuple<Asset>;
-};
-
 struct HostResult {
     int Value{0};
     int UpdatedValue{0};
@@ -44,7 +37,6 @@ public:
         EXPECT_EQ(std::this_thread::get_id(), _result->GameThread);
         ++_result->Unloaded;
     }
-    RuntimeTypeId GetTypeId() const noexcept override { return runtime_type_id_v<FlightProbeAsset>; }
 
 private:
     HostResult* _result;

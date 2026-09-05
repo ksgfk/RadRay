@@ -36,9 +36,6 @@ public:
     /// 列表, 须经 manager.DeferDestroy 整包交出。不放进析构函数是因为析构里拿不到 manager。
     virtual void OnUnload(AssetManager& manager) = 0;
 
-    /// 返回资产自身的运行时类型 id。
-    virtual RuntimeTypeId GetTypeId() const noexcept = 0;
-
     const AssetId& GetAssetId() const noexcept { return _id; }
 
 private:
@@ -50,7 +47,6 @@ private:
 template <>
 struct RuntimeTypeTrait<Asset> {
     static constexpr RuntimeTypeId value{0x8b445298, 0x4242, 0x4524, 0xb3, 0x7f, 0x37, 0x24, 0xc3, 0x5b, 0x3c, 0x94};
-    using Bases = std::tuple<>;
 };
 
 /// 文件路径派生的 AssetId。同一份文件必须得到同一个 id, 不同文件必须得到不同 id。

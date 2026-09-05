@@ -11,8 +11,6 @@ struct AssetSlot {
     AssetId Id;
     AssetState State{AssetState::Loading};
     unique_ptr<Asset> Object;
-    /// 最终实例的类型描述符。Ready 时非空, 静态生命周期。
-    const RuntimeTypeInfo* TypeInfo{nullptr};
     stop_source Stop;
     /// 加载协程写入、Pump 提交。协程与 Pump 都在主线程, 故无需同步。
     std::optional<AssetLoadResult> PendingResult;
@@ -105,7 +103,7 @@ void StreamingAssetRefAny::Reset() noexcept {
     _slot = nullptr;
 }
 
-Asset* StreamingAssetRefAny::Get() const noexcept {
+Nullable<Asset*> StreamingAssetRefAny::Get() const noexcept {
     if (_slot == nullptr || _slot->State != AssetState::Ready) {
         return nullptr;
     }
@@ -145,18 +143,6 @@ void StreamingAssetRefAny::Cancel() const noexcept {
 const AssetId& StreamingAssetRefAny::GetAssetId() const noexcept {
     static const AssetId empty{};
     return _slot != nullptr ? _slot->Id : empty;
-}
-
-const RuntimeTypeInfo* StreamingAssetRefAny::GetTypeInfo() const noexcept {
-    if (_slot == nullptr || _slot->State != AssetState::Ready) {
-        return nullptr;
-    }
-    return _slot->TypeInfo;
-}
-
-RuntimeTypeId StreamingAssetRefAny::GetTypeId() const noexcept {
-    const RuntimeTypeInfo* typeInfo = GetTypeInfo();
-    return typeInfo != nullptr ? typeInfo->Id : Guid::Empty();
 }
 
 // ════════════════════════════════════════════════════════════
@@ -300,8 +286,7 @@ task<void> AssetManager::Wait(StreamingAssetRefAny ref) {
 
 StreamingAssetRefAny AssetManager::AddReady(
     const AssetId& id,
-    unique_ptr<Asset> object,
-    const RuntimeTypeInfo& typeInfo) {
+    unique_ptr<Asset> object) {
     if (Slot* existing = FindSlot(id); existing != nullptr) {
         return MakeRef(existing);
     }
@@ -309,7 +294,7 @@ StreamingAssetRefAny AssetManager::AddReady(
     // 先建引用再提交结果: CommitLoadResult 不会销毁槽位, 但保持"槽位一旦存在就有人持有"
     // 这条不变量能让后续改动不必再推理中间态。
     StreamingAssetRefAny ref = MakeRef(slot);
-    CommitLoadResult(slot, AssetLoadResult::Success(std::move(object), typeInfo));
+    CommitLoadResult(slot, AssetLoadResult::Success(std::move(object)));
     return ref;
 }
 
@@ -362,15 +347,8 @@ void AssetManager::CommitLoadResult(Slot* slot, AssetLoadResult result) noexcept
         return;
     }
     unique_ptr<Asset> object = std::move(result.Object);
-    const RuntimeTypeInfo* typeInfo = result.TypeInfo;
-    if (object->GetTypeId() != typeInfo->Id || !typeInfo->IsA(runtime_type_id_v<Asset>)) {
-        RADRAY_ERR_LOG("AssetManager: loaded asset runtime type metadata does not match the final instance");
-        slot->State = AssetState::Faulted;
-        return;
-    }
     object->_id = slot->Id;
     slot->Object = std::move(object);
-    slot->TypeInfo = typeInfo;
     slot->State = AssetState::Ready;
 }
 

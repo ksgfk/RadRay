@@ -203,7 +203,7 @@ bool Material::BuildRenderData(
     for (const ResourceState::TextureValue& value : _resources->Textures) {
         snapshot.Textures.push_back(MaterialTextureFrameData{
             .Parameter = value.Parameter,
-            .Texture = value.Texture.Get(),
+            .Texture = value.Texture.Get().Get(),
             .SubView = value.SubView,
             .Element = value.Element});
         retainedAssets.push_back(value.Texture.AsAny());

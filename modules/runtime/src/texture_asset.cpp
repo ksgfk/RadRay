@@ -235,10 +235,6 @@ task<AssetLoadResult> LoadTextureFromMemoryTask(
 
 }  // namespace
 
-const RuntimeTypeInfo& TextureImportSettings::GetTypeInfo() const noexcept {
-    return runtime_type_info_v<TextureImportSettings>;
-}
-
 bool TextureImportSettings::Deserialize(const JsonValue& json) {
     JsonObjectReader object{json};
     if (!object.IsValid()) {
@@ -345,10 +341,6 @@ void TextureAsset::OnUnload(AssetManager& manager) {
          texture = std::move(_texture)]() noexcept {});
     _viewCache.clear();
     _name.clear();
-}
-
-RuntimeTypeId TextureAsset::GetTypeId() const noexcept {
-    return runtime_type_id_v<TextureAsset>;
 }
 
 render::TextureView* TextureAsset::GetOrCreateSrv(const TextureSubViewDesc& sub) noexcept {
