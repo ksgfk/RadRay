@@ -127,6 +127,9 @@ CTest 阶段避免构建期竞争。修改注册逻辑时，比较各 exe 的 `-
 .\build_debug\_build\Debug\example_lambert_sphere.exe --backend vulkan
 ```
 
+可自由漫游的完整展示样例见[潮汐光庭](tidal-atrium.md)，包含资产生成、控制按键、双后端巡游与
+图像读回验证。其独立目标为 `example_tidal_atrium`。
+
 只构建 raw shader CLI 可以关闭 render/runtime/tests 并单独选择工具目标：
 
 ```powershell

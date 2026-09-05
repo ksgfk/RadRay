@@ -10,6 +10,10 @@
 `examples/example_lambert_sphere` 用 `AssetManager`、`StaticMeshComponent`、`Material` 和内置
 forward pipeline 验证完整的 scene → proxy → draw 路径。
 
+`examples/example_tidal_atrium` 在这些公开接口之上实现可漫游的多展区场景、外部相机输出、计算
+反馈屏和截图读回，运行方法及展示边界见[潮汐光庭](../guide/tidal-atrium.md)。该样例在 `OnInit`
+安装管线，资产就绪前只请求 presentation fallback clear；就绪后再发布完整场景 workload。
+
 ## 分层
 
 ```
@@ -250,8 +254,8 @@ template <> struct ServiceTraits<AssetManager> {
 
 - **默认 pipeline 为空**：`RenderSystem::_pipeline` 只有在应用调用 `SetPipeline` 后才接线；
   `example_lambert_sphere` 的 pipeline 注入是一个显式样例路径。
-- **第一期 forward 没有视锥剔除、instancing、shadow、post process 或 RT pool**；draw list 每相机
-  每帧重建，depth attachment 是 pipeline 自有的最小子集。
+- **当前 Forward 使用 snapshot、逐 view 剔除、renderer lists 和 graph pool**；没有自动 instancing、
+  shadow 或内置 post process。样例自定义计算与合成 pass 的接入不改变内置 Forward 的范围。
 - **group 数字来自当前 target metadata**：具体 pipeline 按 declaration 解释职责，Material 只认识 anchor 选中的一组。
 - **`PrimitiveComponent` 基类仍返回空 proxy**：可绘制路径由 `StaticMeshComponent` 的派生实现提供。
 - **JIT 不是 runtime 的可用性前提**：关闭 JIT 后 program 源码请求失败；未来 AOT consumer 仍可

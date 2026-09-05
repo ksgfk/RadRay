@@ -46,6 +46,7 @@ artifact 不需要 compiler，开发期 JIT 通过配置开关接入 client。
 | 主题 | 文档 |
 |---|---|
 | 配置、恢复依赖、构建、测试、编译数据库 | [构建与测试](../guide/build-test.md) |
+| 运行可漫游的渲染展示场景 | [潮汐光庭](../guide/tidal-atrium.md) |
 | 命名、接口、异常、测试和注释约定 | [C++ 约定](../guide/cpp-conventions.md) |
 | IDE、clangd、调试器 | [开发环境](../guide/dev-env.md) |
 | 写 HLSL pass、keyword、binding 与 target gate | [Shader authoring](../guide/shader-authoring.md) |

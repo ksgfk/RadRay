@@ -39,6 +39,7 @@
 | `core/platform.hlsli` | `VK_LOCATION`、`VK_BINDING`、`VK_PUSH_CONSTANT` target gate |
 | `pipelines/forward/bindings.hlsli` | forward 的 view/material/object binding ABI |
 | `pipelines/forward/forward.hlsl` | 纹理 Lambert 光照与颜色转换产品 pass |
+| `pipelines/atrium/` | [潮汐光庭](../guide/tidal-atrium.md) 的 surface、sky、panel、HUD 与计算反馈示例 pass |
 | `passes/depth.hlsl` | vertex-only depth topology pass |
 | `passes/compute.hlsl` | storage buffer compute pass |
 

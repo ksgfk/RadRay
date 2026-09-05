@@ -1,1 +1,2 @@
 add_subdirectory(example_lambert_sphere)
+add_subdirectory(example_tidal_atrium)
