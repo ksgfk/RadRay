@@ -4,10 +4,10 @@
 #include <atomic>
 #include <cstring>
 #include <fstream>
-#include <radray/file.h>
 #include <radray/image_data.h>
 #include <radray/logger.h>
 #include <radray/runtime/application.h>
+#include <radray/runtime/forward_pipeline/forward_graph.h>
 #include <radray/runtime/forward_pipeline/forward_pipeline.h>
 #include <radray/runtime/render_framework/frame_draw_resources.h>
 #include <radray/runtime/render_framework/mesh_pass_processor.h>
@@ -15,7 +15,6 @@
 #include <radray/runtime/render_framework/scene.h>
 #include <radray/runtime/render_framework/viewport.h>
 #include <radray/runtime/render_system.h>
-#include <radray/runtime/shader_jit.h>
 
 namespace radray::atrium {
 namespace {
@@ -146,62 +145,21 @@ struct PreparedView {
     CullingResults Culling;
     RendererList Depth, Opaque, Transparent;
 };
-struct SignalProgram {
-    unique_ptr<render::PipelineLayout> Layout;
-    unique_ptr<render::Shader> Shader;
-    unique_ptr<render::ComputePipelineState> Pso;
-    ShaderParameterLayout Parameters;
-    uint32_t ParameterBuffer{0};
-};
-
-std::optional<SignalProgram> CompileSignal(Application& app) {
-    const auto path = app.GetShaderSourceRoot() / "examples/example_tidal_atrium/shaders/signal.hlsl";
-    auto source = ReadBinaryFile(path);
-    if (!source) return std::nullopt;
-    ShaderJit jit{app.GetShaderIncludePaths()};
-    const auto target = render::GetShaderTargetForBackend(app.GetDevice()->GetBackend());
-    if (!target) return std::nullopt;
-    const auto hash = jit.DiscoverContractHash("examples/example_tidal_atrium/shaders/signal.hlsl", *source, *target);
-    if (!hash) return std::nullopt;
-    shader::CompileVariantRequest request{};
-    request.SourceName = "examples/example_tidal_atrium/shaders/signal.hlsl";
-    request.RootSource = std::move(*source);
-    request.Targets = static_cast<shader::ShaderTargetMask>(shader::ToTargetMask(*target));
-    request.ExpectedContract = *hash;
-    const auto compiled = jit.Compile(request, *target);
-    if (!compiled) return std::nullopt;
-    auto artifact = render::CreateBackendShaderArtifact(*app.GetDevice(), compiled->Metadata, {*target, compiled->ExpectedGpuArtifact});
-    if (!artifact) return std::nullopt;
-    auto parameters = ShaderParameterLayout::Create(*artifact);
-    if (!parameters || !parameters->Find("SignalFrame.State")) return std::nullopt;
-    const uint32_t parameterBuffer = parameters->Find("SignalFrame.State")->BufferIndex;
-    const auto bytes = artifact->Generic().FindStageBytecode(shader::ShaderStage::Compute);
-    if (!bytes) return std::nullopt;
-    auto shader = app.GetDevice()->CreateShader({*bytes, artifact->Category, render::ShaderStage::Compute});
-    if (!shader) return std::nullopt;
-    SignalProgram result{std::move(artifact->Layout), shader.Release(), {}, std::move(*parameters), parameterBuffer};
-    auto pso = app.GetDevice()->CreateComputePipelineState({result.Layout.get(), {result.Shader.get(), "CSMain"}});
-    if (!pso) return std::nullopt;
-    result.Pso = pso.Release();
-    return result;
-}
-
 }  // namespace
 
 struct AtriumPipeline::Impl {
     struct Flight {
         explicit Flight(render::Device* device) : Resources(device) {}
-        ~Flight() noexcept {
-            Views.clear();
-            ExtraSets.clear();
-        }
+        ~Flight() noexcept { Views.clear(); }
         Settings State;
         RenderSceneSnapshot Scene;
         FrameDrawResources Resources;
         vector<PreparedView> Views;
-        vector<unique_ptr<render::ShaderParameterSet>> ExtraSets;
-        unique_ptr<render::Buffer> HudBuffer, SignalBuffer, Readback;
-        std::optional<RenderExternalBuffer> HudImport, SignalImport, CaptureImport;
+        unique_ptr<render::Buffer> HudBuffer, Readback;
+        std::optional<RenderExternalBuffer> HudImport, CaptureImport;
+        vector<render::TextureStates> FontStates;
+        vector<uint8_t> FontValid;
+        std::optional<RenderExternalTexture> FontImport;
         Nullable<TextureAsset*> Font{nullptr};
         vector<HudVertex> HudVertices;
         uint32_t CaptureWidth{0}, CaptureHeight{0};
@@ -218,8 +176,7 @@ struct AtriumPipeline::Impl {
     std::filesystem::path CaptureDirectory;
     vector<unique_ptr<Flight>> Flights;
     array<ViewStateId, 3> Ids{AllocateViewStateId(), AllocateViewStateId(), AllocateViewStateId()};
-    Nullable<ShaderProgram*> Sky{nullptr}, Panel{nullptr}, Hud{nullptr};
-    std::optional<SignalProgram> Signal;
+    Nullable<ShaderProgram*> Sky{nullptr}, Panel{nullptr}, Hud{nullptr}, Signal{nullptr};
     unique_ptr<render::Texture> CameraTexture;
     unique_ptr<render::TextureView> CameraRtv;
     RenderOutputId CameraOutput;
@@ -232,7 +189,9 @@ struct AtriumPipeline::Impl {
         Sky = renderSystem->GetOrCreateShaderProgram({.SourceName = "examples/example_tidal_atrium/shaders/sky.hlsl", .LayoutRecipe = DynamicRecipe("SkyFrame")});
         Panel = renderSystem->GetOrCreateShaderProgram({.SourceName = "examples/example_tidal_atrium/shaders/panel.hlsl", .LayoutRecipe = DynamicRecipe("PanelFrame")});
         Hud = renderSystem->GetOrCreateShaderProgram({.SourceName = "examples/example_tidal_atrium/shaders/hud.hlsl", .LayoutRecipe = DynamicRecipe("HudFrame")});
-        Signal = CompileSignal(*app);
+        Signal = renderSystem->GetOrCreateShaderProgram({
+            .SourceName = "examples/example_tidal_atrium/shaders/signal.hlsl",
+            .LayoutRecipe = DynamicRecipe("SignalFrame")});
         auto texture = Device->CreateTexture({render::TextureDimension::Dim2D, 512, 384, 1, 1, 1, render::TextureFormat::RGBA8_UNORM, render::MemoryType::Device, render::TextureUse::RenderTarget | render::TextureUse::Resource});
         if (texture) {
             CameraTexture = texture.Release();
@@ -252,36 +211,51 @@ struct AtriumPipeline::Impl {
         if (CameraRtv) App->GetRenderSystem()->GetRenderPassRegistry()->RemoveFramebuffersUsing(CameraRtv.get());
     }
 
-    Nullable<render::ShaderParameterSet*> TextureSet(Flight& flight, render::PipelineLayout* layout,
-                                                     std::string_view textureName, std::string_view samplerName, render::TextureView* texture) {
-        auto set = Device->CreateShaderParameterSet({layout, 1});
-        const auto sampler = Device->GetOrCreateSampler({.AddressS = render::AddressMode::ClampToEdge, .AddressT = render::AddressMode::ClampToEdge, .MinFilter = render::FilterMode::Linear, .MagFilter = render::FilterMode::Linear});
-        if (!set || !sampler || !set->Set(layout->FindBinding(textureName), 0, texture) ||
-            !set->Set(layout->FindBinding(samplerName), 0, sampler.Get()) || !set->FlushWrites()) {
-            Error = true;
-            return nullptr;
-        }
-        auto* pointer = set.Get();
-        flight.ExtraSets.push_back(set.Release());
-        return pointer;
-    }
-
-    std::optional<PreparedShaderGroup> PanelValues(Flight& flight, const Eigen::Matrix4f& matrix, const Eigen::Vector4f& tint = Eigen::Vector4f::Ones()) {
+    std::optional<vector<byte>> PanelValues(
+        const Eigen::Matrix4f& matrix,
+        const Eigen::Vector4f& tint = Eigen::Vector4f::Ones()) {
         ShaderParameterStorage values{&Panel->GetParameterLayout(), 0};
         if (!values.SetMatrix4x4("PanelFrame.Transform", matrix) || !values.SetFloat4("PanelFrame.Tint", tint)) return std::nullopt;
-        return flight.Resources.PrepareGroup(*Panel.Get(), 0, values);
+        const ShaderParameterInfo* parameter = Panel->GetParameterLayout().Find("PanelFrame.Transform");
+        if (parameter == nullptr) return std::nullopt;
+        const std::span<const byte> bytes = values.GetBufferData(parameter->BufferIndex);
+        return vector<byte>{bytes.begin(), bytes.end()};
     }
 
-    void DrawPanel(Flight& flight, RenderGraphRasterContext& ctx, render::TextureView* texture, const PreparedShaderGroup& values, bool depth) {
+    struct PanelBindings {
+        RgParameterSetHandle Frame;
+        RgParameterSetHandle Texture;
+        bool IsValid() const noexcept { return Frame.IsValid() && Texture.IsValid(); }
+    };
+
+    PanelBindings CreatePanelBindings(
+        RenderGraphRasterBuilder& builder, RgTextureHandle texture,
+        std::span<const byte> values) {
+        const array<RgParameterBinding, 1> frameBindings{{
+            {.Declaration = "PanelFrame", .Value = RgCBufferParameterBinding{values}}}};
+        const array<RgParameterBinding, 2> textureBindings{{
+            {.Declaration = "PanelTexture",
+             .Value = RgTextureParameterBinding{.Texture = texture}},
+            {.Declaration = "PanelSampler",
+             .Value = RgSamplerParameterBinding{.Sampler = {
+                 .AddressS = render::AddressMode::ClampToEdge,
+                 .AddressT = render::AddressMode::ClampToEdge,
+                 .MinFilter = render::FilterMode::Linear,
+                 .MagFilter = render::FilterMode::Linear}}}}};
+        return {
+            builder.CreateParameterSet(*Panel.Get(), 0, frameBindings),
+            builder.CreateParameterSet(*Panel.Get(), 1, textureBindings)};
+    }
+
+    void DrawPanel(RenderGraphRasterContext& ctx, const PanelBindings& bindings, bool depth) {
         const auto pso = Panel->GetOrCreateGraphicsPipelineState(FlatState(false, depth), {}, PrimitiveTopology::TriangleList, ctx.PassState());
-        const auto set = TextureSet(flight, Panel->GetPipelineLayout(), "PanelTexture", "PanelSampler", texture);
-        if (!pso || !set) {
+        if (!pso || !bindings.IsValid()) {
             Error = true;
             return;
         }
         ctx.Encoder().BindGraphicsPipelineState(pso.Get());
-        ctx.Encoder().BindShaderParameterSet(0, values.Set.Get(), values.DynamicOffsets);
-        ctx.Encoder().BindShaderParameterSet(1, set.Get());
+        ctx.BindParameterSet(bindings.Frame);
+        ctx.BindParameterSet(bindings.Texture);
         ctx.Encoder().Draw(6, 1, 0, 0);
     }
 
@@ -324,34 +298,52 @@ struct AtriumPipeline::Impl {
             previous = graph.CreateTexture({render::TextureDimension::Dim2D, 1, 1, 1, 1, 1, render::TextureFormat::RGBA8_UNORM, render::MemoryType::Device, render::TextureUse::RenderTarget | render::TextureUse::Resource}, "History reset black");
             graph.AddRasterPass<uint32_t>("Signal.Reset", [&](uint32_t&, RenderGraphRasterBuilder& b) { b.SetColorAttachment(0, previous); }, +[](const uint32_t&, RenderGraphRasterContext&) {});
         }
-        ShaderParameterStorage constants{&Signal->Parameters, 0};
+        ShaderParameterStorage constants{&Signal->GetParameterLayout(), 0};
         if (!constants.SetFloat4("SignalFrame.State", {flight.State.Time, flight.State.History && history.PreviousValid ? 1.f : 0.f, flight.State.Paused ? 1.f : 0.f, history.PreviousValid ? 1.f : 0.f})) {
             Error = true;
             return {};
         }
-        if (!WriteUpload(flight.SignalBuffer, constants.GetBufferData(Signal->ParameterBuffer), render::BufferUse::CBuffer)) return {};
-        flight.SignalImport = RenderExternalBuffer{flight.SignalBuffer.get(), flight.SignalBuffer->GetDesc(), render::BufferState::HostWrite, true};
-        const auto buffer = graph.ImportBuffer(*flight.SignalImport, "Signal constants", RenderGraphExternalAccess::ReadOnly);
+        const ShaderParameterInfo* state = Signal->GetParameterLayout().Find("SignalFrame.State");
+        if (state == nullptr) {
+            Error = true;
+            return {};
+        }
+        const std::span<const byte> constantBytes = constants.GetBufferData(state->BufferIndex);
         struct Pass {
-            Impl* Self;
-            Flight* Frame;
-            RgTextureViewHandle Current, Previous;
-            RgBufferHandle Constants;
+            RgComputeProgramHandle Program;
+            RgParameterSetHandle Frame;
+            RgParameterSetHandle Resources;
         };
-        graph.AddComputePass<Pass>("Signal.ComputeFeedback", [&](Pass& p, RenderGraphComputeBuilder& b) { p = {this, &flight, b.WriteTexture(current), b.ReadTexture(previous), b.ReadBuffer(buffer, RgBufferAccess::Constant)}; }, +[](const Pass& p, RenderGraphComputeContext& ctx) {
-            auto& self=*p.Self; auto* layout=self.Signal->Layout.get();
-            auto constants=self.Device->CreateShaderParameterSet({layout,0});
-            auto textures=self.Device->CreateShaderParameterSet({layout,1});
-            const auto sampler=self.Device->GetOrCreateSampler({.AddressS=render::AddressMode::ClampToEdge,.AddressT=render::AddressMode::ClampToEdge,.MinFilter=render::FilterMode::Linear,.MagFilter=render::FilterMode::Linear});
-            if (!constants || !textures || !sampler ||
-                !constants->Set(layout->FindBinding("SignalFrame"),0,render::ShaderBufferBinding{ctx.GetBuffer(p.Constants),{0,self.Signal->Parameters.Buffers()[self.Signal->ParameterBuffer].Size}}) ||
-                !textures->Set(layout->FindBinding("SignalOutput"),0,ctx.GetTextureView(p.Current)) ||
-                !textures->Set(layout->FindBinding("SignalPrevious"),0,ctx.GetTextureView(p.Previous)) ||
-                !textures->Set(layout->FindBinding("SignalSampler"),0,sampler.Get()) || !constants->FlushWrites() || !textures->FlushWrites()) { self.Error=true; return; }
-            ctx.Encoder().BindComputePipelineState(self.Signal->Pso.get());
-            ctx.Encoder().BindShaderParameterSet(0,constants.Get()); ctx.Encoder().BindShaderParameterSet(1,textures.Get());
-            ctx.Encoder().Dispatch(64,40,1);
-            p.Frame->ExtraSets.push_back(constants.Release()); p.Frame->ExtraSets.push_back(textures.Release()); });
+        graph.AddComputePass<Pass>(
+            "Signal.ComputeFeedback",
+            [&](Pass& pass, RenderGraphComputeBuilder& builder) {
+                const array<RgParameterBinding, 1> frameBindings{{
+                    {.Declaration = "SignalFrame",
+                     .Value = RgCBufferParameterBinding{constantBytes}}}};
+                const array<RgParameterBinding, 3> resourceBindings{{
+                    {.Declaration = "SignalOutput",
+                     .Value = RgTextureParameterBinding{
+                         .Texture = current,
+                         .Access = RgParameterAccess::Write}},
+                    {.Declaration = "SignalPrevious",
+                     .Value = RgTextureParameterBinding{.Texture = previous}},
+                    {.Declaration = "SignalSampler",
+                     .Value = RgSamplerParameterBinding{.Sampler = {
+                         .AddressS = render::AddressMode::ClampToEdge,
+                         .AddressT = render::AddressMode::ClampToEdge,
+                         .MinFilter = render::FilterMode::Linear,
+                         .MagFilter = render::FilterMode::Linear}}}}};
+                pass = {
+                    builder.UseComputeProgram(*Signal.Get()),
+                    builder.CreateParameterSet(*Signal.Get(), 0, frameBindings),
+                    builder.CreateParameterSet(*Signal.Get(), 1, resourceBindings)};
+            },
+            +[](const Pass& pass, RenderGraphComputeContext& ctx) {
+                ctx.BindComputeProgram(pass.Program);
+                ctx.BindParameterSet(pass.Frame);
+                ctx.BindParameterSet(pass.Resources);
+                ctx.Encoder().Dispatch(64, 40, 1);
+            });
         return current;
     }
 
@@ -365,23 +357,21 @@ struct AtriumPipeline::Impl {
                 world(0, 3) = screen ? 9.f : -9.f;
                 world(1, 3) = 3;
                 world(2, 3) = 19.6f;
-                const auto values = PanelValues(flight, (view.ViewProjection * world).eval());
+                const auto values = PanelValues((view.ViewProjection * world).eval());
                 if (!values) {
                     Error = true;
                     return;
                 }
                 struct Pass {
                     Impl* Self;
-                    Flight* Frame;
-                    RgTextureViewHandle Source;
-                    PreparedShaderGroup Values;
+                    PanelBindings Bindings;
                     Rect Viewport, Scissor;
                 };
                 graph.AddRasterPass<Pass>(screen ? "Gallery.LiveCameraScreen" : "Gallery.FeedbackScreen", [&](Pass& p, RenderGraphRasterBuilder& b) {
-                    p={this,&flight,b.ReadTexture(screen?observer:signal),*values,view.ViewRect,view.ScissorRect};
+                    p={this,CreatePanelBindings(b,screen?observer:signal,*values),view.ViewRect,view.ScissorRect};
                     b.SetColorAttachment(0,color,{.Load=render::LoadAction::Load}); b.SetDepthAttachment(depth,{.Load=render::LoadAction::Load,.ReadOnly=true}); }, +[](const Pass& p, RenderGraphRasterContext& ctx) {
                     ctx.Encoder().SetViewport(MakeViewport(p.Self->Device->GetBackend(),float(p.Viewport.X),float(p.Viewport.Y),float(p.Viewport.Width),float(p.Viewport.Height)));
-                    ctx.Encoder().SetScissor(p.Scissor); p.Self->DrawPanel(*p.Frame,ctx,ctx.GetTextureView(p.Source),p.Values,true); });
+                    ctx.Encoder().SetScissor(p.Scissor); p.Self->DrawPanel(ctx,p.Bindings,true); });
             }
         }
     }
@@ -402,7 +392,9 @@ struct AtriumPipeline::Impl {
             x += size * .55f;
         }
     }
-    void AddHud(RenderGraph& graph, Flight& flight, const ResolvedRenderViewFamily& family, RgTextureHandle color, RgTextureHandle signal, RgTextureHandle observer, size_t first) {
+    void AddHud(RenderGraph& graph, Flight& flight, const ResolvedRenderViewFamily& family,
+                RgTextureHandle color, RgTextureHandle font, RgTextureHandle signal,
+                RgTextureHandle observer, size_t first) {
         const float width = std::max(1100.f, float(family.OutputSize.Width)), height = std::max(720.f, float(family.OutputSize.Height));
         flight.HudVertices.clear();
         const Eigen::Vector4f white{.88f, .88f, .80f, 1}, muted{.48f, .66f, .68f, 1}, teal{.22f, .88f, .79f, 1}, back{.015f, .032f, .043f, .86f};
@@ -453,29 +445,46 @@ struct AtriumPipeline::Impl {
             Error = true;
             return;
         }
-        const auto values = flight.Resources.PrepareGroup(*Hud.Get(), 0, storage);
-        if (!values) {
+        const ShaderParameterInfo* sizeParameter = Hud->GetParameterLayout().Find("HudFrame.Size");
+        if (sizeParameter == nullptr) {
             Error = true;
             return;
         }
+        const std::span<const byte> values = storage.GetBufferData(sizeParameter->BufferIndex);
         struct Pass {
             Impl* Self;
             Flight* Frame;
             RgBufferHandle Vertices;
-            PreparedShaderGroup Values;
+            RgParameterSetHandle Values;
+            RgParameterSetHandle Font;
             uint32_t Width, Height;
         };
         graph.AddRasterPass<Pass>("Atrium.Interface", [&](Pass& p, RenderGraphRasterBuilder& b) {
-            p={this,&flight,b.ReadBuffer(buffer,RgBufferAccess::Vertex),*values,family.RenderSize.Width,family.RenderSize.Height}; b.SetColorAttachment(0,color,{.Load=render::LoadAction::Load}); }, +[](const Pass& p, RenderGraphRasterContext& ctx) {
+            const array<RgParameterBinding, 1> valueBindings{{
+                {.Declaration = "HudFrame",
+                 .Value = RgCBufferParameterBinding{values}}}};
+            const array<RgParameterBinding, 2> fontBindings{{
+                {.Declaration = "FontTexture",
+                 .Value = RgTextureParameterBinding{.Texture = font}},
+                {.Declaration = "FontSampler",
+                 .Value = RgSamplerParameterBinding{.Sampler = {
+                     .AddressS = render::AddressMode::ClampToEdge,
+                     .AddressT = render::AddressMode::ClampToEdge,
+                     .MinFilter = render::FilterMode::Linear,
+                     .MagFilter = render::FilterMode::Linear}}}}};
+            p={this,&flight,b.ReadBuffer(buffer,RgBufferAccess::Vertex),
+               b.CreateParameterSet(*Hud.Get(),0,valueBindings),
+               b.CreateParameterSet(*Hud.Get(),1,fontBindings),
+               family.RenderSize.Width,family.RenderSize.Height};
+            b.SetColorAttachment(0,color,{.Load=render::LoadAction::Load}); }, +[](const Pass& p, RenderGraphRasterContext& ctx) {
             PrimitiveVertexLayout layout;
             layout.Buffers={{0,sizeof(HudVertex),render::VertexStepMode::Vertex}};
             layout.Attributes={{"POSITION",0,0,0,render::VertexFormat::FLOAT32X2},{"TEXCOORD",0,0,8,render::VertexFormat::FLOAT32X2},{"COLOR",0,0,16,render::VertexFormat::FLOAT32X4}};
             const auto pso=p.Self->Hud->GetOrCreateGraphicsPipelineState(FlatState(true),layout,PrimitiveTopology::TriangleList,ctx.PassState());
-            const auto set=p.Self->TextureSet(*p.Frame,p.Self->Hud->GetPipelineLayout(),"FontTexture","FontSampler",p.Frame->Font->GetSrv());
-            if (!pso || !set) { p.Self->Error=true; return; }
+            if (!pso) { p.Self->Error=true; return; }
             ctx.Encoder().SetViewport(MakeViewport(p.Self->Device->GetBackend(),0,0,float(p.Width),float(p.Height)));
             ctx.Encoder().SetScissor({0,0,p.Width,p.Height}); ctx.Encoder().BindGraphicsPipelineState(pso.Get());
-            ctx.Encoder().BindShaderParameterSet(0,p.Values.Set.Get(),p.Values.DynamicOffsets); ctx.Encoder().BindShaderParameterSet(1,set.Get());
+            ctx.BindParameterSet(p.Values); ctx.BindParameterSet(p.Font);
             const render::VertexBufferBinding vb{0,{ctx.GetBuffer(p.Vertices),0,p.Frame->HudVertices.size()*sizeof(HudVertex)}};
             ctx.Encoder().BindVertexBuffers(std::span{&vb,1}); ctx.Encoder().Draw(uint32_t(p.Frame->HudVertices.size()),1,0,0); });
         for (int screen = 0; screen < 2; ++screen) {
@@ -485,22 +494,20 @@ struct AtriumPipeline::Impl {
             matrix(1, 1) = 2 * h / height;
             matrix(0, 3) = 2 * (x + w * .5f) / width - 1;
             matrix(1, 3) = 1 - 2 * (y + h * .5f) / height;
-            const auto panelValues = PanelValues(flight, matrix);
+            const auto panelValues = PanelValues(matrix);
             if (!panelValues) {
                 Error = true;
                 return;
             }
             struct Mini {
                 Impl* Self;
-                Flight* Frame;
-                RgTextureViewHandle Texture;
-                PreparedShaderGroup Values;
+                PanelBindings Bindings;
                 uint32_t Width, Height;
             };
             graph.AddRasterPass<Mini>(screen ? "Interface.Signal" : "Interface.LiveMap", [&](Mini& p, RenderGraphRasterBuilder& b) {
-                p={this,&flight,b.ReadTexture(screen?signal:observer),*panelValues,family.RenderSize.Width,family.RenderSize.Height}; b.SetColorAttachment(0,color,{.Load=render::LoadAction::Load}); }, +[](const Mini& p, RenderGraphRasterContext& ctx) {
+                p={this,CreatePanelBindings(b,screen?signal:observer,*panelValues),family.RenderSize.Width,family.RenderSize.Height}; b.SetColorAttachment(0,color,{.Load=render::LoadAction::Load}); }, +[](const Mini& p, RenderGraphRasterContext& ctx) {
                 ctx.Encoder().SetViewport(MakeViewport(p.Self->Device->GetBackend(),0,0,float(p.Width),float(p.Height)));
-                ctx.Encoder().SetScissor({0,0,p.Width,p.Height}); p.Self->DrawPanel(*p.Frame,ctx,ctx.GetTextureView(p.Texture),p.Values,false); });
+                ctx.Encoder().SetScissor({0,0,p.Width,p.Height}); p.Self->DrawPanel(ctx,p.Bindings,false); });
         }
     }
 
@@ -513,25 +520,14 @@ struct AtriumPipeline::Impl {
             return {};
         }
         const auto depth = graph.CreateTexture({render::TextureDimension::Dim2D, family.RenderSize.Width, family.RenderSize.Height, 1, 1, 1, *format, render::MemoryType::Device, usage}, "Atrium depth");
-        struct ScenePass {
-            Impl* Self;
-            Flight* Frame;
-            size_t First, Count;
-            int Kind;
-        };
         const size_t count = family.Views.size();
-        bool hasDepth = false, hasTransparent = false;
-        for (size_t i = 0; i < count; ++i) {
-            hasDepth |= !flight.Views[first + i].Depth.Commands.empty();
-            hasTransparent |= !flight.Views[first + i].Transparent.Commands.empty();
-        }
         struct SkyPass {
             Impl* Self;
             Flight* Frame;
             size_t First;
-            vector<PreparedShaderGroup> Values;
+            vector<RgParameterSetHandle> Values;
         };
-        vector<PreparedShaderGroup> skyValues;
+        vector<vector<byte>> skyValues;
         for (size_t i = 0; i < count; ++i) {
             const auto& view = flight.Views[first + i].View;
             Eigen::Matrix4f rotation = view.View;
@@ -542,15 +538,22 @@ struct AtriumPipeline::Impl {
                 Error = true;
                 return {};
             }
-            const auto prepared = flight.Resources.PrepareGroup(*Sky.Get(), 0, values);
-            if (!prepared) {
+            const ShaderParameterInfo* parameter = Sky->GetParameterLayout().Find("SkyFrame.ClipToWorld");
+            if (parameter == nullptr) {
                 Error = true;
                 return {};
             }
-            skyValues.push_back(*prepared);
+            const std::span<const byte> bytes = values.GetBufferData(parameter->BufferIndex);
+            skyValues.emplace_back(bytes.begin(), bytes.end());
         }
         graph.AddRasterPass<SkyPass>("Atrium.Sky", [&](SkyPass& p, RenderGraphRasterBuilder& b) {
-            p={this,&flight,first,std::move(skyValues)}; b.SetColorAttachment(0,color); }, +[](const SkyPass& p, RenderGraphRasterContext& ctx) {
+            p.Self=this; p.Frame=&flight; p.First=first; p.Values.reserve(skyValues.size());
+            for (const vector<byte>& bytes : skyValues) {
+                const array<RgParameterBinding,1> bindings{{
+                    {.Declaration="SkyFrame",.Value=RgCBufferParameterBinding{bytes}}}};
+                p.Values.push_back(b.CreateParameterSet(*Sky.Get(),0,bindings));
+            }
+            b.SetColorAttachment(0,color); }, +[](const SkyPass& p, RenderGraphRasterContext& ctx) {
             const auto pso=p.Self->Sky->GetOrCreateGraphicsPipelineState(FlatState(),{},PrimitiveTopology::TriangleList,ctx.PassState());
             if (!pso) { p.Self->Error=true; return; }
             ctx.Encoder().BindGraphicsPipelineState(pso.Get());
@@ -559,25 +562,55 @@ struct AtriumPipeline::Impl {
                 const auto& values=p.Values[i];
                 ctx.Encoder().SetViewport(MakeViewport(p.Self->Device->GetBackend(),float(view.ViewRect.X),float(view.ViewRect.Y),float(view.ViewRect.Width),float(view.ViewRect.Height)));
                 ctx.Encoder().SetScissor(view.ScissorRect);
-                ctx.Encoder().BindShaderParameterSet(0,values.Set.Get(),values.DynamicOffsets);
+                ctx.BindParameterSet(values);
                 ctx.Encoder().Draw(3,1,0,0);
             } });
-        for (int kind = 0; kind < 3; ++kind) {
-            if (kind == 2 && signal.IsValid() && observer.IsValid()) AddWorldScreens(graph, flight, family, color, depth, signal, observer, first);
-            if ((kind == 0 && !hasDepth) || (kind == 2 && !hasTransparent)) continue;
-            graph.AddRasterPass<ScenePass>(kind == 0 ? "Forward.DepthPrepass" : kind == 1 ? "Forward.Opaque"
-                                                                                          : "Forward.Transparent",
-                                           [&](ScenePass& p, RenderGraphRasterBuilder& b) {
-                    p={this,&flight,first,count,kind};
-                    if (kind) b.SetColorAttachment(0,color,{.Load=render::LoadAction::Load});
-                    b.SetDepthAttachment(depth,{.Load=kind==0||(kind==1&&!hasDepth)?render::LoadAction::Clear:render::LoadAction::Load,.ReadOnly=kind==2}); }, +[](const ScenePass& p, RenderGraphRasterContext& ctx) {
-                    for (size_t i=0;i<p.Count;++i) {
-                        const auto& v=p.Frame->Views[p.First+i];
-                        ctx.Encoder().SetViewport(MakeViewport(p.Self->Device->GetBackend(),float(v.View.ViewRect.X),float(v.View.ViewRect.Y),float(v.View.ViewRect.Width),float(v.View.ViewRect.Height)));
-                        ctx.Encoder().SetScissor(v.View.ScissorRect);
-                        SubmitRendererList(p.Kind==0?v.Depth:p.Kind==1?v.Opaque:v.Transparent,ctx,ctx.PassState(),p.Frame->Execution);
-                    } });
+        vector<ForwardGraphView> depthViews, opaqueViews, transparentViews;
+        depthViews.reserve(count);
+        opaqueViews.reserve(count);
+        transparentViews.reserve(count);
+        for (size_t i = 0; i < count; ++i) {
+            const PreparedView& view = flight.Views[first + i];
+            depthViews.push_back({view.View, &view.Depth});
+            opaqueViews.push_back({view.View, &view.Opaque});
+            transparentViews.push_back({view.View, &view.Transparent});
         }
+        const ForwardGraphStageOutput depthStage = ForwardGraph::BuildGraph(
+            graph, ForwardGraphStage::Depth,
+            {.Name = "Forward.DepthPrepass",
+             .Backend = Device->GetBackend(),
+             .Views = depthViews,
+             .Color = {},
+             .Depth = depth,
+             .ColorAttachment = {},
+             .DepthAttachment = {.Load = render::LoadAction::Clear},
+             .Execution = &flight.Execution});
+        const ForwardGraphStageOutput opaqueStage = ForwardGraph::BuildGraph(
+            graph, ForwardGraphStage::Opaque,
+            {.Name = "Forward.Opaque",
+             .Backend = Device->GetBackend(),
+             .Views = opaqueViews,
+             .Color = color,
+             .Depth = depth,
+             .ColorAttachment = {.Load = render::LoadAction::Load},
+             .DepthAttachment = {.Load = depthStage.Pass.IsValid()
+                                                   ? render::LoadAction::Load
+                                                   : render::LoadAction::Clear},
+             .Execution = &flight.Execution});
+        if (signal.IsValid() && observer.IsValid()) {
+            AddWorldScreens(graph, flight, family, color, depth, signal, observer, first);
+        }
+        const ForwardGraphStageOutput transparentStage = ForwardGraph::BuildGraph(
+            graph, ForwardGraphStage::Transparent,
+            {.Name = "Forward.Transparent",
+             .Backend = Device->GetBackend(),
+             .Views = transparentViews,
+             .Color = color,
+             .Depth = depth,
+             .ColorAttachment = {.Load = render::LoadAction::Load},
+             .DepthAttachment = {.Load = render::LoadAction::Load},
+             .Execution = &flight.Execution});
+        if (!depthStage.Success || !opaqueStage.Success || !transparentStage.Success) Error = true;
         return depth;
     }
 };
@@ -644,7 +677,6 @@ void AtriumPipeline::Render(RenderPipelineContext& ctx) {
     auto& flight = *self.Flights[ctx.FlightIndex()];
     if (!flight.State.Ready) return;
     flight.Views.clear();
-    flight.ExtraSets.clear();
     flight.Execution = {};
     if (!flight.Resources.BeginFrame(ctx.HostWrites())) {
         self.Error = true;
@@ -678,6 +710,27 @@ void AtriumPipeline::Render(RenderPipelineContext& ctx) {
         }
     }
     auto graph = ctx.CreateRenderGraph("Tidal Atrium / live framework gallery");
+    if (!flight.Font || !flight.Font->IsValid()) {
+        self.Error = true;
+        return;
+    }
+    const render::TextureDescriptor fontDesc = flight.Font->GetTexture()->GetDesc();
+    const uint32_t fontCells = fontDesc.MipLevels *
+                               (fontDesc.Dim == render::TextureDimension::Dim3D
+                                    ? 1
+                                    : fontDesc.DepthOrArraySize);
+    flight.FontStates.assign(fontCells, render::TextureState::ShaderRead);
+    flight.FontValid.assign(fontCells, 1);
+    flight.FontImport.emplace(RenderExternalTexture{
+        .Texture = flight.Font->GetTexture(),
+        .Desc = fontDesc,
+        .SubresourceStates = flight.FontStates,
+        .ContentValid = flight.FontValid,
+        .ColorAttachmentView = flight.Font->GetSrv(),
+        .Written = false,
+        .PersistentViews = nullptr});
+    const RgTextureHandle font = graph.ImportTexture(
+        *flight.FontImport, "Atrium font", RenderGraphExternalAccess::ReadOnly);
     RgTextureHandle observer;
     for (const auto& family : ctx.ViewFamilies())
         if (family.OutputId == self.CameraOutput && family.OutputAvailable) {
@@ -701,29 +754,27 @@ void AtriumPipeline::Render(RenderPipelineContext& ctx) {
         const auto output = ctx.ImportOutput(graph, family.OutputId);
         Eigen::Matrix4f fullscreen = Eigen::Matrix4f::Identity();
         fullscreen(0, 0) = fullscreen(1, 1) = 2;
-        const auto values = self.PanelValues(flight, fullscreen);
+        const auto values = self.PanelValues(fullscreen);
         if (!values) {
             self.Error = true;
             return;
         }
         struct Present {
             Impl* Self;
-            Impl::Flight* Frame;
-            RgTextureViewHandle Color;
-            PreparedShaderGroup Values;
+            Impl::PanelBindings Bindings;
             uint32_t Width, Height;
         };
         graph.AddRasterPass<Present>("Atrium.Downsample", [&](Present& p, RenderGraphRasterBuilder& b) {
-            p={&self,&flight,b.ReadTexture(sceneColor),*values,family.OutputSize.Width,family.OutputSize.Height}; b.SetColorAttachment(0,color); }, +[](const Present& p, RenderGraphRasterContext& context) {
+            p={&self,self.CreatePanelBindings(b,sceneColor,*values),family.OutputSize.Width,family.OutputSize.Height}; b.SetColorAttachment(0,color); }, +[](const Present& p, RenderGraphRasterContext& context) {
             context.Encoder().SetViewport(MakeViewport(p.Self->Device->GetBackend(),0,0,float(p.Width),float(p.Height)));
-            context.Encoder().SetScissor({0,0,p.Width,p.Height}); p.Self->DrawPanel(*p.Frame,context,context.GetTextureView(p.Color),p.Values,false); });
+            context.Encoder().SetScissor({0,0,p.Width,p.Height}); p.Self->DrawPanel(context,p.Bindings,false); });
         auto displayFamily = family;
         displayFamily.RenderSize = family.OutputSize;
-        if (flight.State.ShowUi) self.AddHud(graph, flight, displayFamily, color, signal, observer, firstViews[family.FrameLocalIndex]);
+        if (flight.State.ShowUi) self.AddHud(graph, flight, displayFamily, color, font, signal, observer, firstViews[family.FrameLocalIndex]);
         graph.AddRasterPass<Present>("Atrium.Present", [&](Present& p, RenderGraphRasterBuilder& b) {
-            p={&self,&flight,b.ReadTexture(color),*values,family.OutputSize.Width,family.OutputSize.Height}; b.SetColorAttachment(0,output); }, +[](const Present& p, RenderGraphRasterContext& context) {
+            p={&self,self.CreatePanelBindings(b,color,*values),family.OutputSize.Width,family.OutputSize.Height}; b.SetColorAttachment(0,output); }, +[](const Present& p, RenderGraphRasterContext& context) {
             context.Encoder().SetViewport(MakeViewport(p.Self->Device->GetBackend(),0,0,float(p.Width),float(p.Height)));
-            context.Encoder().SetScissor({0,0,p.Width,p.Height}); p.Self->DrawPanel(*p.Frame,context,context.GetTextureView(p.Color),p.Values,false); });
+            context.Encoder().SetScissor({0,0,p.Width,p.Height}); p.Self->DrawPanel(context,p.Bindings,false); });
         if (!flight.State.CaptureName.empty() && !self.CaptureDirectory.empty()) {
             flight.CaptureWidth = family.OutputSize.Width;
             flight.CaptureHeight = family.OutputSize.Height;

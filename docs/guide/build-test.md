@@ -142,6 +142,21 @@ Stage B 的 CPU suites 覆盖 bounds、zero-to-one 视锥、随机 AABB 参考�
 `StageBDraw` 在 D3D12/Vulkan 实际执行多顶点流的 snapshot → culling → lists → graph → readback；
 Forward GPU suites 覆盖深度预通道、缺 DepthOnly、透明混合、共享 attachment 的多视图和多线程寿命压力。
 
+`RenderGraphCompileTest` 以不创建原生对象的 fake device 覆盖 indirect usage/capability/alignment/range/
+跨图 handle、resolve 格式/尺寸/sample/array/culling 与 raster UAV stage 拒绝。`RenderGraphTest` 在
+D3D12/Vulkan 实机覆盖 Compute 生成 Draw/DrawIndexed/Dispatch 参数 → MSAA raster → resolve → Compute
+→ readback 的整链，以及 array-layer resolve、canonical/数组/动态 offset/static sampler 参数、Graph
+先析构后的 flight 寿命和 Pixel/Vertex raster UAV。设备缺失仍 SKIP；已经创建设备后的能力或执行失败
+必须 FAIL，Vertex UAV 只有报告能力不足时才允许显式 SKIP。
+
+Tidal Atrium 的有限帧 smoke 可直接验证 ForwardGraph 与样例 pass 的单图组合；`--tour` 还会切换深度、
+线框、history、split view、RenderScale，并触发 resize/restore：
+
+```powershell
+.\build_debug\_build\Debug\example_tidal_atrium.exe --backend d3d12 --tour --frames 360
+.\build_debug\_build\Debug\example_tidal_atrium.exe --backend vulkan --valid-layer --frames 120
+```
+
 RenderGraph 的 `*DumpAndLargeGraph*` 用例包含 100/1000-pass CPU benchmark，使用 Release
 记录性能基线，并注明机器与配置；不要混用 Debug 数据。排查相关内存错误时，Windows/MSVC
 AddressSanitizer 使用独立目录和 Developer PowerShell（PATH 需含 ASAN runtime），关闭 mimalloc：

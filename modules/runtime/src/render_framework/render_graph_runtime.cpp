@@ -3,15 +3,18 @@
 
 namespace radray {
 RenderGraphRuntime::RenderGraphRuntime(render::Device& device, render::RenderPassRegistry& registry, uint32_t flights) {
-    for (uint32_t flight = 0; flight < flights; ++flight) _pools.push_back(make_unique<RenderResourcePool>(device, registry));
+    for (uint32_t flight = 0; flight < flights; ++flight) {
+        _flights.push_back(make_unique<RenderGraphFrameResources>(device, registry));
+    }
 }
-RenderResourcePool& RenderGraphRuntime::BeginFlight(uint32_t flight, uint64_t serial) {
-    RADRAY_ASSERT(flight < _pools.size());
-    _pools[flight]->BeginFlight(serial);
-    return *_pools[flight];
+RenderGraphFrameResources& RenderGraphRuntime::BeginFlight(
+    uint32_t flight, uint64_t serial, HostWriteBatch& hostWrites) {
+    RADRAY_ASSERT(flight < _flights.size());
+    _flights[flight]->BeginFlight(serial, hostWrites);
+    return *_flights[flight];
 }
-const RenderResourcePoolStats& RenderGraphRuntime::GetPoolStats(uint32_t flight) const { return _pools[flight]->GetStats(); }
+const RenderResourcePoolStats& RenderGraphRuntime::GetPoolStats(uint32_t flight) const { return _flights[flight]->GetPoolStats(); }
 void RenderGraphRuntime::Clear() {
-    for (auto& pool : _pools) pool->Clear();
+    for (auto& flight : _flights) flight->Clear();
 }
 }  // namespace radray

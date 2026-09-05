@@ -24,6 +24,15 @@ struct BackendShaderArtifactError {
     shader::ShaderArtifactDecodeError DecodeFailure{shader::ShaderArtifactDecodeError::None};
 };
 
+struct ShaderBindingInfo {
+    shader::ShaderBindingKind LogicalKind{shader::ShaderBindingKind::CBuffer};
+    uint32_t Group{0};
+    uint32_t Count{0};
+    ShaderStages Stages{ShaderStage::UNKNOWN};
+    bool Dynamic{false};
+    bool Immutable{false};
+};
+
 class BackendShaderArtifact {
     using TypedArtifact = std::variant<shader::DxilShaderArtifactView, shader::SpirvShaderArtifactView>;
     using TypedResolvedLayout = std::variant<ResolvedD3D12Layout, ResolvedVulkanLayout>;
@@ -46,6 +55,10 @@ public:
     // True when the named declaration takes its buffer offset at bind time: a D3D12 root
     // descriptor or a Vulkan dynamic buffer descriptor. Unknown names are not dynamic.
     bool IsBindingDynamic(std::string_view declarationName) const noexcept;
+    // Returns the target-resolved properties of one canonical descriptor declaration. Push
+    // constants and unknown names have no descriptor binding information.
+    std::optional<ShaderBindingInfo> FindBindingInfo(
+        std::string_view declarationName) const noexcept;
 
     // Successful creation always supplies a layout. Callers may move it into their owner.
     unique_ptr<PipelineLayout> Layout;

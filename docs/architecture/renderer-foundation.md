@@ -1,6 +1,6 @@
 > - 适用: 编写 workload、接入 presentation/离屏 output、声明 graph pass、使用 transient pool 或 view history
 > - 权威: 本文描述 Stage A/B renderer foundation 的当前契约；帧同步见 `frame-and-gpu.md`，原生接口事实见 `render-rhi.md`
-> - 锚点: `modules/runtime/include/radray/runtime/render_framework/render_output.h`, `modules/runtime/include/radray/runtime/render_framework/render_workload.h`, `modules/runtime/include/radray/runtime/render_framework/render_view.h`, `modules/runtime/include/radray/runtime/render_framework/render_graph.h`, `modules/runtime/include/radray/runtime/render_framework/render_resource_pool.h`, `modules/runtime/include/radray/runtime/render_framework/view_state.h`, `modules/runtime/src/render_system.cpp`, `modules/runtime/src/forward_pipeline/forward_pipeline.cpp`, `modules/runtime/include/radray/runtime/render_framework/render_scene_snapshot.h`, `modules/runtime/include/radray/runtime/render_framework/culling.h`, `modules/runtime/include/radray/runtime/material_technique.h`, `modules/runtime/include/radray/runtime/render_framework/renderer_list.h`, `modules/runtime/include/radray/runtime/render_framework/frame_draw_resources.h`
+> - 锚点: `modules/runtime/include/radray/runtime/render_framework/render_output.h`, `modules/runtime/include/radray/runtime/render_framework/render_workload.h`, `modules/runtime/include/radray/runtime/render_framework/render_view.h`, `modules/runtime/include/radray/runtime/render_framework/render_graph.h`, `modules/runtime/include/radray/runtime/render_framework/render_graph_runtime.h`, `modules/runtime/include/radray/runtime/render_framework/render_resource_pool.h`, `modules/runtime/include/radray/runtime/render_framework/view_state.h`, `modules/runtime/include/radray/runtime/forward_pipeline/forward_graph.h`, `modules/runtime/src/render_system.cpp`, `modules/runtime/src/forward_pipeline/forward_pipeline.cpp`, `modules/runtime/include/radray/runtime/render_framework/render_scene_snapshot.h`, `modules/runtime/include/radray/runtime/render_framework/culling.h`, `modules/runtime/include/radray/runtime/material_technique.h`, `modules/runtime/include/radray/runtime/render_framework/renderer_list.h`, `modules/runtime/include/radray/runtime/render_framework/frame_draw_resources.h`
 
 # Renderer foundation
 
@@ -60,15 +60,31 @@ history 与 `CreateRenderGraph`/`ExecuteGraph`。AppFrameContext 和 surface 实
 不能从 pipeline context 取得窗口、swapchain、command buffer 或直接进行 barrier/submit。
 每个 context 只允许创建、执行一次自身 generation 的 graph。
 
-Texture/buffer/view/pass 使用类型不同且含 generation 的 handle。不能跨 graph 使用，也不能在 freeze
-后追加 setup。raster/compute setup 立即执行，把数据写入 graph 拥有的 payload；执行函数为非捕获
-函数指针，只能解析当前 pass 声明的 handle。payload 中借用的 program、set 等必须活过 graph 执行，
+Texture/buffer/view/pass、indirect arguments、compute program 与 parameter set 使用类型不同且含
+generation 的 handle。不能跨 graph 使用，也不能在 freeze 后追加 setup；indirect/program/set handle
+还绑定声明它的 pass 和命令种类。raster/compute setup 立即执行，把数据写入 graph 拥有的 payload；
+执行函数为非捕获函数指针，只能解析当前 pass 声明的 handle。program 与 RendererList 继续借用并须
+活过 graph 执行；Graph 参数的 CPU 常量在 setup 时复制，原生 set 与上传页由所属 flight 保活。
 资产仍由宿主 per-flight refs 保活。execute callback 返回 void，不通过异常恢复。
 
 Raster builder 声明 sampled read、buffer access、color/depth attachment 与 Load/Store/Clear；compute
-builder 另可声明 UAV write/read-write。copy pass 用专门的 buffer/texture/texture-to-buffer API。
-同 pass 的重叠 readonly access 可合并；重叠写入、attachment feedback、extent/sample 不匹配、
-无效 load/store 或超出 capability 的 descriptor 在录制前失败。
+builder 另可声明 UAV write/read-write 和 `UseComputeProgram`。两类 pass 都可用
+`CreateParameterSet(program, group, bindings)`，以 canonical declaration name 和数组元素绑定 Graph
+texture/buffer、sampler 或 setup 时复制的 cbuffer bytes。SRV/cbuffer 自动成为只读访问；可写声明必须
+显式选择 Read/Write/ReadWrite，Graph 据此生成依赖与 barrier。immutable/static sampler 来自 resolved
+layout，不由调用方重复提供。
+
+`ReadIndirectArguments` 把带 `Indirect` usage 的 buffer、Draw/DrawIndexed/Dispatch 种类、4-byte aligned
+offset 与固定 count 固化为 pass-local handle；没有 GPU count buffer。graphics/compute facade 只接受该
+handle，不再接收任意原生 buffer。copy pass 使用专门的 buffer/texture/texture-to-buffer API；
+`AddResolveTexturePass` 处理同格式、同尺寸的 2D/2D-array color 子资源，从 MSAA source resolve 到
+single-sample destination，一次选择一个 mip 与连续 layers，不做 depth/stencil、缩放或格式转换。
+
+Raster pass 可用参数 binding 写 buffer/texture UAV，也可直接调用带显式 stage mask 的
+`WriteTexture`/`ReadWriteTexture`。它仍须至少一个 attachment；Graph 汇总实际写阶段并在分配资源前与
+`UavWriteStages` 比较，能力不足即失败。D3D12 pass begin 的 `AllowUavWrites` 由 live declaration 推导，
+不进入 graphics PSO compatibility key。同 pass 的重叠 readonly access 可合并；重叠写入、attachment
+feedback、extent/sample 不匹配、无效 load/store 或超出 capability 的 descriptor 在录制前失败。
 
 `Compile` 只执行 CPU 工作，不创建原生资源。内容有效性按 mip × array layer 跟踪，depth/stencil
 共用一个 aspect domain，buffer 为整资源。transient 内容初始无效；external 从显式有效位开始。
@@ -79,8 +95,11 @@ observable external 的最终 writer 与 `SetSideEffect` 是 roots。沿消费�
 仅对 live passes 建立 RAW/WAR/WAW hazard edges。所有 edge 都指向后声明 pass，声明顺序本身就是
 稳定拓扑序。被后续 Clear 完整覆盖的旧 producer 可以裁掉，Load 则会保留它；hazard 不参与 liveness。
 
-执行前先 realize 所有 live resource/view/render pass/framebuffer，继续复用 RenderPassRegistry。
-任一 realize 失败均不录 graph 命令。随后从 pool/external 的真实状态产生 pass 前 barriers；相同 UAV
+执行顺序固定为 setup → compile → realize → prepare parameters/compute PSOs → plan barriers → execute。
+`Compile` 后先 realize 所有 live resource/view/render pass/framebuffer，继续复用 RenderPassRegistry；
+prepare 只处理 live pass，创建 Graph parameter sets、上传复制的常量并取得每个 compute program 的
+缓存 PSO。任一步失败均不录 graph 命令，diagnostic 携带 pass/binding/resource，history 不推进。
+随后从 pool/external 的真实状态产生 pass 前 barriers；相同 UAV
 state 的写后访问使用显式 UAV memory barrier。初始 UAV state 保守视作可能由前一图写入，
 因此首次只读 UAV 访问也有屏障；同队列提交顺序不代替跨图的内存依赖。
 每个 live pass 独立 Begin/End，并用同名 debug group。
@@ -91,9 +110,15 @@ pass commands facade 只转发绘制、dispatch、binding 和 viewport/scissor�
 失败 pass 不标记内容有效/已写，host 可据此恢复。成功 graph 才能提交 view/history。PSO 缺失时产品
 callback 可以跳过 draw，attachment clear 仍算有效内容。
 
-## Pool、history 与报告
+## Per-flight Graph 资源、pool、history 与报告
 
-每个 flight 独立持有 `RenderResourcePool`。key 覆盖完整 texture/buffer descriptor；view key 覆盖
+`RenderGraphRuntime` 为每个 flight 持有一个 `RenderGraphFrameResources`，聚合
+`RenderResourcePool`、Graph parameter sets/cache 与 `DynamicCBufferArena`。安全复用时先清 parameter
+sets/cache，再 reset 上传 arena，最后让 pool BeginFlight trim/复用；Graph 析构不会释放 GPU 仍引用的
+descriptor 或上传页。parameter-set cache key 覆盖 layout/group、完整 binding 身份、数组元素、资源、
+静态 offset/range、stride/format 与 sampler；dynamic offset 不进入物理 set key，命中后不改写 descriptor。
+
+pool key 覆盖完整 texture/buffer descriptor；view key 覆盖
 dimension、format、归一化 range、usage。一个对象在一次 flight cycle 最多租出一次，不做同 graph
 资源复用或 heap aliasing。`EndGraph` 只结束租约；下次安全 `BeginFlight` 才允许复用。物理状态跨帧
 保存，但新 transient 的内容有效位仍从 false 开始。
@@ -116,9 +141,10 @@ resize/descriptor 变化先成功创建新 generation，旧 generation 进入当
 下一次安全复用再销毁。长期未使用的 view 同样先 retire 后释放。沿用单 Direct queue 的提交顺序，
 不为 history 增加 fence。关停先 GPU idle，再按 pipeline → graph pools → view states → registry 顺序清理。
 
-`RenderGraphExecutionReport` 提供稳定 Text/JSON/DOT，记录 pass 类型/执行与裁剪原因、内容与 hazard
+`RenderGraphExecutionReport` 提供稳定 Text/JSON/DOT，`Resolve` 是独立 pass 类型；报告记录执行与裁剪
+原因、内容与 hazard
 依赖、资源 descriptor/lifetime/physical ID、逐 subresource before/after、UAV 数量、pool stats 和
-带 source location 的 diagnostic。ID 不使用原生地址；相同 setup 的 CPU dump 可直接比对。
+带 source location 及可选 binding/resource 的 diagnostic。ID 不使用原生地址；相同 setup 的 CPU dump 可直接比对。
 `RenderSystem::GetGraphReport`、`GetFramePlan`、`GetPoolStats` 只在对应阶段安全点读取。
 
 ## 场景快照与剔除
@@ -198,6 +224,13 @@ lists。每 family 支持多个不重叠 view，共享 attachments，通过各�
 完全退化或无效变换产生零矩阵，由 shader 的 `safe_normalize` 选择有限的默认方向。
 没有声明 `NormalToWorld` 的自定义 Forward program 继续只接收其实际声明的字段。
 
+`ForwardGraph::BuildGraph(graph, stage, inputs)` 是只向调用方同一张图声明阶段的组合模块。输入复制
+resolved view 值并借用 RendererList，携带 color/depth handles、attachment Load/Clear 和执行统计；输出
+返回资源 handles、成功状态与实际 pass handle。没有 command 的 Depth/Transparent 成功但不加 pass，
+Opaque 即使为空仍加 pass 定义输出。模块不创建/执行子图，不 acquire/present，也不提交 view/history。
+ForwardPipeline 使用它声明三个标准阶段；Tidal Atrium 在同一张图中保持
+Sky → Depth → Opaque → scene screens → Transparent → downsample/HUD/present 的显式组合。
+
 存在有效 DepthOnly command 时声明 `Forward.DepthPrepass`（深度 Clear/Store）；没有则省略。
 `Forward.Opaque` 总是存在，color Clear/Store；有预通道时 depth Load，否则 depth Clear。缺 DepthOnly
 的 opaque 材质仍在 opaque pass 正常绘制。opaque 启用 LessEqual 与深度写入；透明材质不进入预通道，
@@ -213,5 +246,5 @@ PSO key 使用 color/depth formats + sample count 的 `GraphicsPassCompatibility
 构建数、剔除调用/失败、三类 command 数量与执行失败。场景规模统计来自 snapshot，视图筛选来自 Cull，
 候选分类来自 list，避免重复计数。
 
-当前不实现 async compute、并行录制、pass merge、heap aliasing、常驻场景、GPU-driven 提交、
+当前不实现 async compute、并行录制、pass merge、heap aliasing、常驻场景、GPUScene、GPU count buffer、
 动态分辨率 upscale 或 temporal effect；pool/history 继续提供既有资源寿命基础。

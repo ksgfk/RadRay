@@ -1,4 +1,5 @@
 #include <radray/runtime/render_framework/render_pipeline.h>
+#include <radray/runtime/render_framework/render_graph_runtime.h>
 #include <radray/logger.h>
 
 namespace radray {
@@ -10,16 +11,16 @@ struct RenderPipelineContext::ImportedOutput {
     std::optional<RenderExternalTexture> External;
     RgTextureHandle Handle;
 };
-RenderPipelineContext::RenderPipelineContext(AppFrameContext& frame, RenderResourcePool& pool, render::RenderPassRegistry& registry,
+RenderPipelineContext::RenderPipelineContext(AppFrameContext& frame, RenderGraphFrameResources& graphResources, render::RenderPassRegistry& registry,
                                              ViewStateRegistry& views, uint64_t serial, std::span<const ResolvedRenderViewFamily> families, std::span<RenderSurfaceFrame> surfaces, RenderGraphExecutionReport& report)
-    : _frame(frame), _pool(pool), _registry(registry), _views(views), _serial(serial), _families(families), _surfaces(surfaces), _report(report) {}
+    : _frame(frame), _graphResources(graphResources), _registry(registry), _views(views), _serial(serial), _families(families), _surfaces(surfaces), _report(report) {}
 RenderPipelineContext::~RenderPipelineContext() = default;
 uint32_t RenderPipelineContext::FlightIndex() const noexcept { return _frame.FlightIndex(); }
 const render::RenderDeviceCapabilities& RenderPipelineContext::Capabilities() const noexcept { return _frame.GetDevice()->GetCapabilities(); }
 HostWriteBatch& RenderPipelineContext::HostWrites() const noexcept { return _frame.GetHostWrites(); }
 RenderGraph RenderPipelineContext::CreateRenderGraph(std::string_view name) {
     if (_graphGeneration != 0) RADRAY_ABORT("Only one RenderGraph may be created per Render invocation");
-    return RenderGraph{*_frame.GetDevice(), _pool, _registry, name, _graphGeneration};
+    return RenderGraph{*_frame.GetDevice(), _graphResources, _registry, name, _graphGeneration};
 }
 RgTextureHandle RenderPipelineContext::ImportOutput(RenderGraph& graph, RenderOutputId output) {
     if (_executed || _graphGeneration == 0) return {};

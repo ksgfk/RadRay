@@ -30,6 +30,10 @@ void CSMain(uint3 tid : SV_DispatchThreadID) {
     ASSERT_TRUE(support.Supported);
     auto program = test::CompileFoundationCompute(device, source);
     ASSERT_TRUE(program);
+    auto* pipelineState = program->GetOrCreateComputePipelineState().Get();
+    ASSERT_NE(pipelineState, nullptr);
+    EXPECT_EQ(program->GetOrCreateComputePipelineState().Get(), pipelineState);
+    EXPECT_EQ(program->GetComputePipelineStateCount(), 1u);
     auto buffer = device.CreateBuffer({4, render::MemoryType::Device, render::BufferUse::UnorderedAccess | render::BufferUse::CopySource | render::BufferUse::CopyDestination, {}});
     auto texture = device.CreateTexture({render::TextureDimension::Dim2D, 1, 1, 1, 1, 1, render::TextureFormat::R32_UINT, render::MemoryType::Device, render::TextureUse::UnorderedAccess | render::TextureUse::CopySource, {}});
     ASSERT_TRUE(buffer);
@@ -43,10 +47,10 @@ void CSMain(uint3 tid : SV_DispatchThreadID) {
     const uint64_t readbackSize = textureOffset + Align(uint64_t{4}, device.GetCapabilities().Detail.TextureDataPitchAlignment);
     auto readback = device.CreateBuffer({readbackSize, render::MemoryType::ReadBack, render::BufferUse::CopyDestination | render::BufferUse::MapRead, {}});
     ASSERT_TRUE(readback);
-    auto set = device.CreateShaderParameterSet({program->Layout.get(), 0});
+    auto set = device.CreateShaderParameterSet({program->GetPipelineLayout(), 0});
     ASSERT_TRUE(set);
-    ASSERT_TRUE(set->Set(program->Layout->FindBinding("BufferOutput"), 0, render::ShaderBufferBinding{buffer.Get(), {0, 4}, 4}));
-    ASSERT_TRUE(set->Set(program->Layout->FindBinding("TextureOutput"), 0, view.Get()));
+    ASSERT_TRUE(set->Set(program->GetPipelineLayout()->FindBinding("BufferOutput"), 0, render::ShaderBufferBinding{buffer.Get(), {0, 4}, 4}));
+    ASSERT_TRUE(set->Set(program->GetPipelineLayout()->FindBinding("TextureOutput"), 0, view.Get()));
     ASSERT_TRUE(set->FlushWrites());
     auto command = device.CreateCommandBuffer(context.Queue);
     ASSERT_TRUE(command);
@@ -66,7 +70,7 @@ void CSMain(uint3 tid : SV_DispatchThreadID) {
         }
         auto encoder = command->BeginComputePass();
         ASSERT_TRUE(encoder);
-        encoder->BindComputePipelineState(program->Pso.get());
+        encoder->BindComputePipelineState(pipelineState);
         encoder->BindShaderParameterSet(0, set.Get());
         encoder->Dispatch(1, 1, 1);
         command->EndComputePass(encoder.Release());

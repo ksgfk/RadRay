@@ -845,8 +845,19 @@ Nullable<shared_ptr<DeviceD3D12>> CreateDevice(const D3D12DeviceDescriptor& desc
         .MaxBufferSize = D3D12_REQ_RESOURCE_SIZE_IN_MEGABYTES_EXPRESSION_A_TERM * uint64_t{1024 * 1024},
         .MaxUniformBufferRange = D3D12_REQ_CONSTANT_BUFFER_ELEMENT_COUNT * uint64_t{16},
         .MaxPushConstantBytes = D3D12_MAX_ROOT_COST * 4,
-        .CBufferOffsetAlignment = detail.CBufferAlignment};
-    caps.Features = {true, true, true, true, true};
+        .CBufferOffsetAlignment = detail.CBufferAlignment,
+        .StorageBufferOffsetAlignment = 4};
+    caps.Features = {
+        .TimestampQueries = true,
+        .IndirectDraw = true,
+        .IndirectDispatch = true,
+        .SubresourceBarriers = true,
+        .UavMemoryBarrier = true,
+        .UavWriteStages = render::ShaderStage::Pixel | render::ShaderStage::Compute};
+    if (SUCCEEDED(fs.GetStatus()) &&
+        fs.MaxSupportedFeatureLevel() >= D3D_FEATURE_LEVEL_11_1) {
+        caps.Features.UavWriteStages |= render::ShaderStage::Vertex;
+    }
     DXGI_ADAPTER_DESC1 memoryDesc{};
     if (SUCCEEDED(adapter->GetDesc1(&memoryDesc))) {
         const uint64_t memory = memoryDesc.DedicatedVideoMemory != 0 ? memoryDesc.DedicatedVideoMemory : memoryDesc.SharedSystemMemory;
@@ -4032,6 +4043,9 @@ Nullable<unique_ptr<GraphicsCommandEncoder>> CmdListD3D12::BeginRenderPass(const
     D3D12_RENDER_PASS_DEPTH_STENCIL_DESC dsDesc{};
     D3D12_RENDER_PASS_DEPTH_STENCIL_DESC* pDsDesc = nullptr;
     D3D12_RENDER_PASS_FLAGS passFlags = D3D12_RENDER_PASS_FLAG_NONE;
+    if (desc.AllowUavWrites) {
+        passFlags |= D3D12_RENDER_PASS_FLAG_ALLOW_UAV_WRITES;
+    }
     if (passDesc.DepthStencilAttachment.has_value()) {
         const RenderPassDepthStencilAttachmentDescriptor& depthStencil = passDesc.DepthStencilAttachment.value();
         auto* v = CastD3D12Object(framebufferDesc.DepthStencilAttachment);

@@ -87,6 +87,9 @@ Debug abort，否则这些拒绝路径在唯一会跑测试的配置里无法验
 正确反应是修 recipe 或 shader。
 
 `ShaderParameterValue` 是 `variant<ShaderBufferBinding, ShaderTexelBufferBinding, TextureView*, Sampler*>`。
+`BackendShaderArtifact::FindBindingInfo(canonicalName)` 提供只读的 target-resolved descriptor 事实：
+logical kind、group、数组 count、实际 stages、dynamic placement 与 immutable/static sampler；push 或
+未知名称返回空。它不暴露可供 caller 重建 layout 的 schema，Graph 参数准备只消费这份查询结果。
 
 logical resource kind 与 native placement 分开保存。CBuffer、typed/structured/raw buffers、texture/
 storage texture 与 sampler 决定 value/descriptor class；D3 Table/RootDescriptor 和 Vulkan
@@ -207,13 +210,25 @@ Device::CreateCommandBuffer(queue) → CommandBuffer
   ResourceBarrier(span<ResourceBarrierDescriptor>)
   BeginRenderPass(...) → unique_ptr<GraphicsCommandEncoder>
   EndRenderPass(unique_ptr<...>)          // 收回并销毁
-  拷贝 / query
+  拷贝 / resolve / query
 ```
 
 D3D12 每个 `CommandBuffer` 自带一个 `ID3D12CommandAllocator`，`Begin()` 里 reset。
 Vulkan 每个 `CommandBufferVulkan` 独占一个 `CommandPoolVulkan`，`Begin()` reset 池并以
 `ONE_TIME_SUBMIT` 开始，且**把已结束的编码器存到 `_endedEncoders` 直到下次 `Begin`**——
 让编码器及它引用的 framebuffer 活到命令缓冲被重录。
+
+graphics encoder 的 `DrawIndirect`/`DrawIndexedIndirect` 与 compute encoder 的 `DispatchIndirect` 消费
+带 `BufferUse::Indirect` 的参数；固定 count 和 count=0 的行为由 RHI 保持，RHI 不提供 GPU count
+buffer。`CommandBuffer::ResolveTexture` 一次处理一个 mip 和连续 array layers，两个后端都要求同格式、
+同尺寸的 2D color source/destination，source 为 MSAA、destination 为单采样；depth/stencil、缩放与
+格式转换被拒绝。
+
+`RenderPassBeginDescriptor::AllowUavWrites` 是执行期开关，不属于 render pass/graphics PSO compatibility
+事实。D3D12 将它映射到
+[`D3D12_RENDER_PASS_FLAG_ALLOW_UAV_WRITES`](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/ne-d3d12-d3d12_render_pass_flags)；
+Vulkan dynamic render-pass 路径不需要对应 begin flag，写阶段是否合法由 device capabilities 与 barrier
+契约控制。
 
 ## 资源状态：显式 barrier，无自动推导
 
@@ -240,6 +255,14 @@ Vulkan debug-utils label；Vulkan 未启用 debug-utils 时不录标签。
 `Device::GetCapabilities()` 返回创建后不可变的 `RenderDeviceCapabilities`，包括原
 `DeviceDetail`、limits、features 与实际创建的 queue 数量。名称避免 Windows 的
 `DeviceCapabilities` 宏冲突；旧 `GetDetail()` 从同一份 Detail 返回兼容值。
+
+buffer offset limits 同时公开 constant 与 storage buffer 对齐：D3D12 分别报告 256 与 4，Vulkan
+来自 `minUniformBufferOffsetAlignment` / `minStorageBufferOffsetAlignment`。`UavWriteStages` 按 shader
+stage 报告 storage write 能力：Compute 必有；D3D12 Pixel 必有并在 Feature Level 11_1 以上加入
+Vertex，Vulkan 只在实际启用 `fragmentStoresAndAtomics` / `vertexPipelineStoresAndAtomics` 时加入对应
+阶段。Vulkan 特性语义以
+[`VkPhysicalDeviceFeatures`](https://docs.vulkan.org/spec/latest/chapters/features.html) 为准；上层必须在
+录制前拒绝缺失阶段，不能静默降级。
 
 D3D12 通过 `D3D12DeviceDescriptor::QueueCounts` 在 device 创建阶段建 queue，默认仅一条
 Direct queue；`GetCommandQueue` 只查询已创建的 slot，不再隐式增加 queue。Vulkan 仍使用

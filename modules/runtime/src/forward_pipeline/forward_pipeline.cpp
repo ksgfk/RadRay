@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <radray/logger.h>
+#include <radray/runtime/forward_pipeline/forward_graph.h>
 #include <radray/runtime/application.h>
 #include <radray/runtime/gpu_system.h>
 #include <radray/runtime/render_framework/viewport.h>
@@ -16,9 +17,6 @@ using namespace forward_detail;
 namespace {
 
 constexpr render::TextureFormat kForwardDepthCandidates[]{render::TextureFormat::D32_FLOAT, render::TextureFormat::D24_UNORM_S8_UINT, render::TextureFormat::D16_UNORM};
-enum class ForwardPass { Depth,
-                         Opaque,
-                         Transparent };
 
 render::ShaderProgramLayoutRecipe MakeLayoutRecipe(std::span<const std::string_view> names) {
     render::ShaderProgramLayoutRecipe recipe;
@@ -100,18 +98,6 @@ struct ForwardPipeline::Impl {
         return valid;
     }
 
-    void Execute(uint32_t flightIndex, uint32_t familyIndex, ForwardPass pass, RenderGraphRasterContext& ctx) {
-        auto& flight = Flights[flightIndex];
-        for (const auto& work : flight.Families[familyIndex].Views) {
-            if (!work.Culling.Stats.Valid) continue;
-            const auto& view = work.View;
-            ctx.Encoder().SetViewport(MakeViewport(Device->GetBackend(), static_cast<float>(view.ViewRect.X), static_cast<float>(view.ViewRect.Y),
-                                                   static_cast<float>(view.ViewRect.Width), static_cast<float>(view.ViewRect.Height)));
-            ctx.Encoder().SetScissor(view.ScissorRect);
-            const auto& list = pass == ForwardPass::Depth ? work.DepthOnly : (pass == ForwardPass::Opaque ? work.Opaque : work.Transparent);
-            SubmitRendererList(list, ctx, ctx.PassState(), flight.Stats.Execution);
-        }
-    }
 };
 
 ForwardPipeline::ForwardPipeline(Application* app, Scene* scene, CameraComponent* camera)
@@ -145,11 +131,6 @@ void ForwardPipeline::PrepareFrame(RenderPrepareContext& ctx) {
 void ForwardPipeline::Render(RenderPipelineContext& ctx) {
     if (!_impl->BeginFrame(ctx)) return;
     auto graph = ctx.CreateRenderGraph("Forward");
-    struct PassData {
-        Impl* Pipeline;
-        uint32_t Flight, Family;
-        ForwardPass Pass;
-    };
     vector<ViewStateId> rendered;
     for (const auto& family : ctx.ViewFamilies()) {
         if (!_impl->PrepareFamily(ctx.FlightIndex(), family) || !family.OutputAvailable || family.RenderSize != family.OutputSize) continue;
@@ -167,19 +148,49 @@ void ForwardPipeline::Render(RenderPipelineContext& ctx) {
         const auto color = ctx.ImportOutput(graph, family.OutputId);
         const auto depth = graph.CreateTexture(*descriptor, "Forward.Depth");
         const auto& work = _impl->Flights[ctx.FlightIndex()].Families[family.FrameLocalIndex];
-        const bool hasDepth = std::any_of(work.Views.begin(), work.Views.end(), [](const auto& view) { return !view.DepthOnly.Commands.empty(); });
-        const bool hasTransparent = std::any_of(work.Views.begin(), work.Views.end(), [](const auto& view) { return !view.Transparent.Commands.empty(); });
-        for (const auto pass : {ForwardPass::Depth, ForwardPass::Opaque, ForwardPass::Transparent}) {
-            if ((pass == ForwardPass::Depth && !hasDepth) || (pass == ForwardPass::Transparent && !hasTransparent)) continue;
-            const auto name = pass == ForwardPass::Depth ? "Forward.DepthPrepass" : (pass == ForwardPass::Opaque ? "Forward.Opaque" : "Forward.Transparent");
-            graph.AddRasterPass<PassData>(name, [&](PassData& data, RenderGraphRasterBuilder& builder) {
-                data = {_impl.get(), ctx.FlightIndex(), family.FrameLocalIndex, pass};
-                if (pass != ForwardPass::Depth) {
-                    builder.SetColorAttachment(0, color, {.Load = pass == ForwardPass::Opaque ? render::LoadAction::Clear : render::LoadAction::Load,
-                                                         .Clear = {{.025f, .030f, .040f, 1}}});
-                }
-                builder.SetDepthAttachment(depth, {.Load = pass == ForwardPass::Depth || (pass == ForwardPass::Opaque && !hasDepth) ? render::LoadAction::Clear : render::LoadAction::Load,
-                                                    .ReadOnly = pass == ForwardPass::Transparent}); }, +[](const PassData& data, RenderGraphRasterContext& context) { data.Pipeline->Execute(data.Flight, data.Family, data.Pass, context); });
+        vector<ForwardGraphView> depthViews, opaqueViews, transparentViews;
+        for (const auto& view : work.Views) {
+            if (!view.Culling.Stats.Valid) continue;
+            depthViews.push_back({view.View, &view.DepthOnly});
+            opaqueViews.push_back({view.View, &view.Opaque});
+            transparentViews.push_back({view.View, &view.Transparent});
+        }
+        auto& execution = _impl->Flights[ctx.FlightIndex()].Stats.Execution;
+        const ForwardGraphStageOutput depthStage = ForwardGraph::BuildGraph(
+            graph, ForwardGraphStage::Depth,
+            {.Name = "Forward.DepthPrepass",
+             .Backend = _impl->Device->GetBackend(),
+             .Views = depthViews,
+             .Color = {},
+             .Depth = depth,
+             .ColorAttachment = {},
+             .DepthAttachment = {.Load = render::LoadAction::Clear},
+             .Execution = &execution});
+        const ForwardGraphStageOutput opaqueStage = ForwardGraph::BuildGraph(
+            graph, ForwardGraphStage::Opaque,
+            {.Name = "Forward.Opaque",
+             .Backend = _impl->Device->GetBackend(),
+             .Views = opaqueViews,
+             .Color = color,
+             .Depth = depth,
+             .ColorAttachment = {.Load = render::LoadAction::Clear,
+                                 .Clear = {{.025f, .030f, .040f, 1}}},
+             .DepthAttachment = {.Load = depthStage.Pass.IsValid()
+                                                   ? render::LoadAction::Load
+                                                   : render::LoadAction::Clear},
+             .Execution = &execution});
+        const ForwardGraphStageOutput transparentStage = ForwardGraph::BuildGraph(
+            graph, ForwardGraphStage::Transparent,
+            {.Name = "Forward.Transparent",
+             .Backend = _impl->Device->GetBackend(),
+             .Views = transparentViews,
+             .Color = color,
+             .Depth = depth,
+             .ColorAttachment = {.Load = render::LoadAction::Load},
+             .DepthAttachment = {.Load = render::LoadAction::Load},
+             .Execution = &execution});
+        if (!depthStage.Success || !opaqueStage.Success || !transparentStage.Success) {
+            RADRAY_ERR_LOG("Forward graph stage declaration failed for '{}'", family.Name);
         }
         for (const auto& view : work.Views)
             if (view.Culling.Stats.Valid) rendered.push_back(view.View.StateId);

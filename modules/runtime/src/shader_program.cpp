@@ -377,4 +377,23 @@ Nullable<render::GraphicsPipelineState*> ShaderProgram::GetOrCreateGraphicsPipel
     return output;
 }
 
+Nullable<render::ComputePipelineState*> ShaderProgram::GetOrCreateComputePipelineState() noexcept {
+    if (_device == nullptr || _artifact.Layout == nullptr || _computeShader == nullptr ||
+        _vertexShader != nullptr || _pixelShader != nullptr || _computeEntry.empty()) {
+        return nullptr;
+    }
+    if (_computePipelineState != nullptr) {
+        return _computePipelineState.get();
+    }
+    Nullable<unique_ptr<render::ComputePipelineState>> result =
+        _device->CreateComputePipelineState(render::ComputePipelineStateDescriptor{
+            .PipelineLayout = _artifact.Layout.get(),
+            .CS = render::ShaderEntry{_computeShader.get(), _computeEntry}});
+    if (!result.HasValue()) {
+        return nullptr;
+    }
+    _computePipelineState = result.Release();
+    return _computePipelineState.get();
+}
+
 }  // namespace radray

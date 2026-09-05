@@ -779,12 +779,12 @@ DynamicCBufferArena::Reservation DynamicCBufferArena::Reserve(uint64_t size) noe
     }
     auto blockOpt = GetOrCreateBlock(size);
     if (!blockOpt.HasValue()) {
-        RADRAY_ABORT("allocation failed: cannot create dynamic cbuffer block");
+        return {};
     }
     Block* block = blockOpt.Release();
     Reservation reservation = block->Page->Reserve(size, _desc.Alignment, *_hostWrites);
     if (!reservation.IsValid()) {
-        RADRAY_ABORT("allocation failed: dynamic cbuffer page reservation failed");
+        return {};
     }
     _allocatedThisFrame += Align(size, _desc.Alignment);
     _highWatermark = std::max(_highWatermark, _allocatedThisFrame);

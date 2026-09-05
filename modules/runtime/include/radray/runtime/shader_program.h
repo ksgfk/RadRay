@@ -52,6 +52,7 @@ public:
         const PrimitiveVertexLayout& vertexLayout,
         PrimitiveTopology topology,
         const GraphicsPassState& passState) noexcept;
+    Nullable<render::ComputePipelineState*> GetOrCreateComputePipelineState() noexcept;
 
     const render::BackendShaderArtifact& GetArtifact() const noexcept { return _artifact; }
     render::PipelineLayout* GetPipelineLayout() const noexcept { return _artifact.Layout.get(); }
@@ -61,6 +62,7 @@ public:
     bool IsBufferDynamic(std::string_view declarationName) const noexcept;
     const ShaderParameterLayout& GetParameterLayout() const noexcept { return _parameterLayout; }
     size_t GetGraphicsPipelineStateCount() const noexcept { return _graphicsPipelineStates.size(); }
+    size_t GetComputePipelineStateCount() const noexcept { return _computePipelineState ? 1 : 0; }
 
 private:
     struct PsoKey {
@@ -118,6 +120,7 @@ private:
     ShaderParameterLayout _parameterLayout;
     unordered_map<PsoKey, unique_ptr<render::GraphicsPipelineState>, PsoKeyHash, PsoKeyEqual>
         _graphicsPipelineStates;
+    unique_ptr<render::ComputePipelineState> _computePipelineState;
 };
 
 }  // namespace radray

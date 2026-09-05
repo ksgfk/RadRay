@@ -59,8 +59,8 @@ string RenderGraphExecutionReport::ToJson() const {
     for (size_t i = 0; i < Diagnostics.size(); ++i) {
         const auto& d = Diagnostics[i];
         if (i) result += ',';
-        result += fmt::format("{{\"code\":{},\"graph\":{},\"pass\":{},\"resource\":{},\"message\":{},\"file\":{},\"line\":{}}}",
-                              Quote(d.Code), Quote(d.Graph), Quote(d.Pass), Quote(d.Resource), Quote(d.Message), Quote(d.File), d.Line);
+        result += fmt::format("{{\"code\":{},\"graph\":{},\"pass\":{},\"binding\":{},\"resource\":{},\"message\":{},\"file\":{},\"line\":{}}}",
+                              Quote(d.Code), Quote(d.Graph), Quote(d.Pass), Quote(d.Binding), Quote(d.Resource), Quote(d.Message), Quote(d.File), d.Line);
     }
     result += fmt::format("],\"pool\":{{\"hits\":{},\"misses\":{},\"created\":{},\"trimmed\":{},\"textures\":{},\"buffers\":{},\"views\":{},\"estimatedBytes\":{}}}}}",
                           Pool.Hits, Pool.Misses, Pool.Created, Pool.Trimmed, Pool.TextureCount, Pool.BufferCount, Pool.ViewCount, Pool.EstimatedBytes);
@@ -86,7 +86,7 @@ string RenderGraphExecutionReport::ToText() const {
     }
     for (const auto& r : Resources) result += fmt::format("  {}: {} physical={} lifetime={}..{}\n", r.Name, r.Descriptor, r.PhysicalId, r.FirstUse, r.LastUse);
     for (const auto& b : Barriers) result += fmt::format("  barrier pass={} resource={} sub={} {} -> {} {}\n", b.Pass, b.Resource, b.Subresource, b.Before, b.After, b.Uav ? "UAV" : "transition");
-    for (const auto& d : Diagnostics) result += fmt::format("  {}: {}/{}/{}: {} ({}:{})\n", d.Code, d.Graph, d.Pass, d.Resource, d.Message, d.File, d.Line);
+    for (const auto& d : Diagnostics) result += fmt::format("  {}: {}/{}/{}/{}: {} ({}:{})\n", d.Code, d.Graph, d.Pass, d.Binding, d.Resource, d.Message, d.File, d.Line);
     return result;
 }
 }  // namespace radray

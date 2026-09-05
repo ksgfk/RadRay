@@ -21,7 +21,7 @@ struct RenderPrepareContext {
 
 class RenderPipelineContext {
 public:
-    RenderPipelineContext(AppFrameContext& frame, RenderResourcePool& pool, render::RenderPassRegistry& registry,
+    RenderPipelineContext(AppFrameContext& frame, RenderGraphFrameResources& graphResources, render::RenderPassRegistry& registry,
                           ViewStateRegistry& views, uint64_t serial, std::span<const ResolvedRenderViewFamily> families,
                           std::span<RenderSurfaceFrame> surfaces, RenderGraphExecutionReport& report);
     ~RenderPipelineContext();
@@ -40,7 +40,7 @@ public:
 private:
     struct ImportedOutput;
     AppFrameContext& _frame;
-    RenderResourcePool& _pool;
+    RenderGraphFrameResources& _graphResources;
     render::RenderPassRegistry& _registry;
     ViewStateRegistry& _views;
     uint64_t _serial;

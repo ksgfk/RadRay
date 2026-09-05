@@ -348,7 +348,7 @@ void RenderSystem::Render(AppFrameContext& ctx) {
     if (!_graphRuntime || !_viewStates) return;
     const uint32_t flight = ctx.FlightIndex();
     const uint64_t serial = ++_frameSerial;
-    auto& pool = _graphRuntime->BeginFlight(flight, serial);
+    auto& graphResources = _graphRuntime->BeginFlight(flight, serial, ctx.GetHostWrites());
     _viewStates->BeginFlight(flight, serial);
     auto& report = _graphReports[flight];
     report = {};
@@ -401,7 +401,7 @@ void RenderSystem::Render(AppFrameContext& ctx) {
         for (auto& view : family->Views) _viewStates->Resolve(view, *family);
         families.push_back(std::move(*family));
     }
-    RenderPipelineContext pipelineContext(ctx, pool, *_renderPassRegistry, *_viewStates, serial, families, surfaces, report);
+    RenderPipelineContext pipelineContext(ctx, graphResources, *_renderPassRegistry, *_viewStates, serial, families, surfaces, report);
     if (_pipeline) _pipeline->Render(pipelineContext);
     for (auto& surface : surfaces) {
         if (!surface.Written) ClearTarget(ctx, surface);

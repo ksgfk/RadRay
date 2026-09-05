@@ -49,23 +49,41 @@ const ResolvedLayoutHash& BackendShaderArtifact::LayoutHash() const noexcept {
 }
 
 bool BackendShaderArtifact::IsBindingDynamic(std::string_view declarationName) const noexcept {
+    const std::optional<ShaderBindingInfo> info = FindBindingInfo(declarationName);
+    return info.has_value() && info->Dynamic;
+}
+
+std::optional<ShaderBindingInfo> BackendShaderArtifact::FindBindingInfo(
+    std::string_view declarationName) const noexcept {
     if (const auto* d3d12 = std::get_if<ResolvedD3D12Layout>(&_resolvedLayout)) {
         const Nullable<const ShaderLayoutMetadataRecord*> record =
             d3d12->FindRecord(declarationName);
         if (!record.HasValue() || record->Kind != ShaderLayoutRecordKind::Descriptor) {
-            return false;
+            return std::nullopt;
         }
-        return d3d12->Bindings[record->ResolvedIndex].Placement ==
-               shader::ShaderBindingPlacement::RootDescriptor;
+        const ResolvedD3D12Binding& binding = d3d12->Bindings[record->ResolvedIndex];
+        return ShaderBindingInfo{
+            .LogicalKind = binding.LogicalKind,
+            .Group = binding.Group,
+            .Count = binding.Count,
+            .Stages = binding.Stages,
+            .Dynamic = binding.Placement == shader::ShaderBindingPlacement::RootDescriptor,
+            .Immutable = binding.Placement == shader::ShaderBindingPlacement::StaticSampler};
     }
     const auto& vulkan = std::get<ResolvedVulkanLayout>(_resolvedLayout);
     const Nullable<const ShaderLayoutMetadataRecord*> record =
         vulkan.FindRecord(declarationName);
     if (!record.HasValue() || record->Kind != ShaderLayoutRecordKind::Descriptor) {
-        return false;
+        return std::nullopt;
     }
-    return vulkan.Bindings[record->ResolvedIndex].Placement ==
-           VulkanBufferDescriptorPlacement::Dynamic;
+    const ResolvedVulkanBinding& binding = vulkan.Bindings[record->ResolvedIndex];
+    return ShaderBindingInfo{
+        .LogicalKind = binding.LogicalKind,
+        .Group = binding.Set,
+        .Count = binding.Count,
+        .Stages = binding.Stages,
+        .Dynamic = binding.Placement == VulkanBufferDescriptorPlacement::Dynamic,
+        .Immutable = binding.ImmutableSamplerIndex != shader::kShaderNoSampler};
 }
 
 const shader::ShaderArtifactView& BackendShaderArtifact::Generic() const noexcept {

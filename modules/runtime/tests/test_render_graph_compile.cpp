@@ -144,6 +144,187 @@ TEST_F(RenderGraphCompileTest, DisjointMipsStayIndependentAndFullReadConsumesBot
     EXPECT_EQ(graph.GetReport().Passes[2].HazardDependencies, (vector<uint32_t>{0, 1}));
 }
 
+TEST_F(RenderGraphCompileTest, IndirectDeclarationsValidateAndCarryContentDependencies) {
+    auto graph = MakeGraph("indirect");
+    const auto arguments = graph.CreateBuffer(
+        {sizeof(render::DrawIndexedIndirectArguments), render::MemoryType::Device,
+         render::BufferUse::UnorderedAccess | render::BufferUse::Indirect, {}},
+        "arguments");
+    const auto color = graph.CreateTexture(GraphColor(), "color");
+    graph.AddComputePass<EmptyPass>(
+        "produce", [=](EmptyPass&, RenderGraphComputeBuilder& builder) {
+            builder.WriteBuffer(arguments);
+        }, EmptyCompute);
+    graph.AddRasterPass<EmptyPass>(
+        "consume", [=](EmptyPass&, RenderGraphRasterBuilder& builder) {
+            builder.SetColorAttachment(0, color);
+            EXPECT_TRUE(builder.ReadIndirectArguments(
+                arguments, RgIndirectCommand::DrawIndexed).IsValid());
+            builder.SetSideEffect();
+        }, EmptyRaster);
+    ASSERT_TRUE(graph.Compile()) << graph.GetReport().ToText();
+    EXPECT_EQ(graph.GetReport().Passes[1].DataDependencies, vector<uint32_t>{0});
+
+    const auto expectInvalid = [&](render::BufferUses usage, RgIndirectCommand command,
+                                   uint64_t offset, uint32_t count, bool indirectDraw,
+                                   bool indirectDispatch) {
+        Device.Capabilities.Features.IndirectDraw = indirectDraw;
+        Device.Capabilities.Features.IndirectDispatch = indirectDispatch;
+        auto invalid = MakeGraph("invalid indirect");
+        const auto buffer = invalid.CreateBuffer(
+            {32, render::MemoryType::Device, usage, {}}, "arguments");
+        invalid.AddComputePass<EmptyPass>(
+            "consume", [=](EmptyPass&, RenderGraphComputeBuilder& builder) {
+                EXPECT_FALSE(builder.ReadIndirectArguments(buffer, command, offset, count).IsValid());
+                builder.SetSideEffect();
+            }, EmptyCompute);
+        EXPECT_FALSE(invalid.Compile());
+        ASSERT_FALSE(invalid.GetReport().Diagnostics.empty());
+    };
+    expectInvalid(render::BufferUse::Resource, RgIndirectCommand::Dispatch, 0, 1, true, true);
+    expectInvalid(render::BufferUse::Indirect, RgIndirectCommand::Dispatch, 2, 1, true, true);
+    expectInvalid(render::BufferUse::Indirect, RgIndirectCommand::Dispatch, 24, 1, true, true);
+    expectInvalid(render::BufferUse::Indirect, RgIndirectCommand::Dispatch, 0, 2, true, true);
+    expectInvalid(render::BufferUse::Indirect, RgIndirectCommand::Dispatch, 0, 1, true, false);
+    expectInvalid(render::BufferUse::Indirect, RgIndirectCommand::Draw, 0, 1, false, true);
+    {
+        auto owner = MakeGraph("indirect owner");
+        const auto foreign = owner.CreateBuffer(
+            {sizeof(render::DrawIndirectArguments), render::MemoryType::Device,
+             render::BufferUse::Indirect, {}},
+            "foreign arguments");
+        auto consumer = MakeGraph("indirect consumer");
+        consumer.AddRasterPass<EmptyPass>(
+            "consume foreign", [=](EmptyPass&, RenderGraphRasterBuilder& builder) {
+                EXPECT_FALSE(builder.ReadIndirectArguments(
+                    foreign, RgIndirectCommand::Draw).IsValid());
+                builder.SetSideEffect();
+            }, EmptyRaster);
+        EXPECT_FALSE(consumer.Compile());
+        ASSERT_FALSE(consumer.GetReport().Diagnostics.empty());
+        EXPECT_EQ(consumer.GetReport().Diagnostics.front().Code, "InvalidHandle");
+    }
+    Device.Capabilities.Features.IndirectDraw = true;
+    Device.Capabilities.Features.IndirectDispatch = true;
+    EXPECT_EQ(Pool->GetStats().Created, 0u);
+}
+
+TEST_F(RenderGraphCompileTest, ResolveValidatesArrayRangesAndCullsUnusedWork) {
+    const auto sourceDesc = [] {
+        return render::TextureDescriptor{
+            render::TextureDimension::Dim2DArray, 32, 16, 4, 1, 4,
+            render::TextureFormat::RGBA8_UNORM, render::MemoryType::Device,
+            render::TextureUse::RenderTarget | render::TextureUse::CopySource, {}};
+    };
+    const auto destinationDesc = [] {
+        return render::TextureDescriptor{
+            render::TextureDimension::Dim2DArray, 32, 16, 4, 1, 1,
+            render::TextureFormat::RGBA8_UNORM, render::MemoryType::Device,
+            render::TextureUse::CopyDestination | render::TextureUse::Resource, {}};
+    };
+    {
+        auto graph = MakeGraph("resolve array");
+        const auto source = graph.CreateTexture(sourceDesc(), "msaa");
+        const auto destination = graph.CreateTexture(destinationDesc(), "resolved");
+        graph.AddRasterPass<EmptyPass>(
+            "msaa", [=](EmptyPass&, RenderGraphRasterBuilder& builder) {
+                builder.SetColorAttachment(
+                    0, source,
+                    {.View = {.Dimension = render::TextureDimension::Dim2DArray,
+                              .Range = {1, 2, 0, 1}}});
+            }, EmptyRaster);
+        graph.AddResolveTexturePass(
+            "resolve", source, destination, {1, 2, 0, 1}, {1, 2, 0, 1});
+        graph.AddComputePass<EmptyPass>(
+            "consume", [=](EmptyPass&, RenderGraphComputeBuilder& builder) {
+                builder.ReadTexture(destination, {
+                    .Dimension = render::TextureDimension::Dim2DArray,
+                    .Range = {1, 2, 0, 1}});
+                builder.SetSideEffect();
+            }, EmptyCompute);
+        ASSERT_TRUE(graph.Compile()) << graph.GetReport().ToText();
+        ASSERT_EQ(graph.GetReport().Passes[1].Type, RgPassType::Resolve);
+        EXPECT_EQ(graph.GetReport().Passes[1].DataDependencies, vector<uint32_t>{0});
+        EXPECT_EQ(graph.GetReport().Passes[2].DataDependencies, vector<uint32_t>{1});
+    }
+    {
+        auto graph = MakeGraph("culled resolve");
+        const auto source = graph.CreateTexture(sourceDesc(), "msaa");
+        const auto destination = graph.CreateTexture(destinationDesc(), "resolved");
+        graph.AddRasterPass<EmptyPass>(
+            "msaa", [=](EmptyPass&, RenderGraphRasterBuilder& builder) {
+                builder.SetColorAttachment(
+                    0, source,
+                    {.View = {.Dimension = render::TextureDimension::Dim2DArray,
+                              .Range = {0, 1, 0, 1}}});
+            }, EmptyRaster);
+        graph.AddResolveTexturePass(
+            "unused resolve", source, destination, {0, 1, 0, 1}, {0, 1, 0, 1});
+        ASSERT_TRUE(graph.Compile()) << graph.GetReport().ToText();
+        EXPECT_EQ(graph.GetReport().LivePasses, 0u);
+    }
+
+    const auto expectInvalid = [&](render::TextureDescriptor source,
+                                   render::TextureDescriptor destination) {
+        auto graph = MakeGraph("invalid resolve");
+        const auto src = graph.CreateTexture(source, "source");
+        const auto dst = graph.CreateTexture(destination, "destination");
+        graph.AddResolveTexturePass("resolve", src, dst);
+        EXPECT_FALSE(graph.Compile());
+        ASSERT_FALSE(graph.GetReport().Diagnostics.empty());
+        EXPECT_EQ(graph.GetReport().Diagnostics.front().Code, "ResolveTextureDescriptor");
+    };
+    auto source = sourceDesc();
+    auto destination = destinationDesc();
+    source.Format = render::TextureFormat::BGRA8_UNORM;
+    expectInvalid(source, destination);
+    source = sourceDesc();
+    destination.Width = 31;
+    expectInvalid(source, destination);
+    destination = destinationDesc();
+    source.SampleCount = 1;
+    expectInvalid(source, destination);
+    source = sourceDesc();
+    destination.SampleCount = 4;
+    expectInvalid(source, destination);
+    source = sourceDesc();
+    destination = destinationDesc();
+    source.Format = render::TextureFormat::D32_FLOAT;
+    destination.Format = render::TextureFormat::D32_FLOAT;
+    source.Usage = render::TextureUse::DepthStencilWrite | render::TextureUse::CopySource;
+    destination.Usage = render::TextureUse::DepthStencilRead | render::TextureUse::CopyDestination;
+    expectInvalid(source, destination);
+    EXPECT_EQ(Pool->GetStats().Created, 0u);
+}
+
+TEST_F(RenderGraphCompileTest, RasterUavStagesAreCheckedBeforeAllocation) {
+    const auto populate = [&](RenderGraph& graph) {
+        auto color = graph.CreateTexture(GraphColor(), "attachment");
+        auto storageDesc = GraphColor();
+        storageDesc.Usage |= render::TextureUse::UnorderedAccess;
+        auto storage = graph.CreateTexture(storageDesc, "storage");
+        graph.AddRasterPass<EmptyPass>(
+            "write", [=](EmptyPass&, RenderGraphRasterBuilder& builder) {
+                builder.SetColorAttachment(0, color);
+                builder.WriteTexture(storage, render::ShaderStage::Pixel);
+                builder.SetSideEffect();
+            }, EmptyRaster);
+    };
+    Device.Capabilities.Features.UavWriteStages = render::ShaderStage::Compute;
+    auto rejected = MakeGraph("raster uav rejected");
+    populate(rejected);
+    EXPECT_FALSE(rejected.Compile());
+    ASSERT_FALSE(rejected.GetReport().Diagnostics.empty());
+    EXPECT_EQ(rejected.GetReport().Diagnostics.back().Code, "UnsupportedUavStage");
+
+    Device.Capabilities.Features.UavWriteStages =
+        render::ShaderStage::Graphics | render::ShaderStage::Compute;
+    auto supported = MakeGraph("raster uav supported");
+    populate(supported);
+    EXPECT_TRUE(supported.Compile()) << supported.GetReport().ToText();
+    EXPECT_EQ(Pool->GetStats().Created, 0u);
+}
+
 TEST_F(RenderGraphCompileTest, DumpAndLargeGraphCompilationAreDeterministic) {
     string json, dot;
     for (uint32_t count : {100u, 1000u}) {

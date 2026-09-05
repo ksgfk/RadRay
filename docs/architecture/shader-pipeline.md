@@ -139,6 +139,11 @@ kind、duplicate modifier 等是 framework 构造错误。wrong/cross-layout han
 返回值报告并 fail closed（不 Debug abort，否则这条路径在唯一会跑测试的配置里无法验证），但不为此
 新增恢复 API。
 
+`BackendShaderArtifact::FindBindingInfo` 只按 canonical descriptor declaration 查询 current target 的
+logical kind、group、count、actual stages、dynamic 与 immutable 属性；push/unknown 返回空。runtime
+Graph 参数用它验证资源种类、数组、组与 UAV stage，但 caller 不能用查询结果构造或改写 layout，
+wire schema 与 DXC ABI 因此不需要为 Graph 参数扩张。
+
 type tree 属于所属 artifact 的 CPU upload schema。`WireTypeRecord` 保留 scalar/vector/matrix 的
 kind，并为 struct/struct-array member 携带 compiler-owned underlying `TypeIndex`；decoder 检查
 range、已知 record kind、element count、offset/size/stride、type reference、父结构范围、同级
@@ -214,7 +219,7 @@ compiler artifact key 覆盖 source input/identity、structured `Defines`、cano
 toolchain，不含 layout recipe。program/layout key 由 artifact identity 加 current backend 的
 `ResolvedLayoutHash` 组成；非 current backend recipe 字段、modifier 原始顺序和 native handles
 不进入 key。失败结果按同一完整 key 缓存。一个 program 仍拥有一个 concrete Variant 的 artifact、
-resolved/native layout、stage shaders、参数索引与 PSO map；不增加 global native layout cache。
+resolved/native layout、stage shaders、参数索引与 PSO cache；不增加 global native layout cache。
 JIT 关闭时这条源码请求明确返回空，不影响 runtime 构造。
 
 command binding 延续薄公共操作，但 identity 来自 resolved layout：
@@ -231,6 +236,11 @@ PSO，也不会通过 compiler client 或 runtime reflection 补齐 vertex schem
 `PrimitiveVertexLayout` 提供 geometry-owned stride/slot/format/offset，`ShaderProgram` 再与当前
 artifact 的 `VertexInputs()` 合并；PSO key 由 material 状态、geometry layout/topology 和 pass
 attachment facts 组成，不含 program 自己的 layout、bytecode 或指针。
+
+compute-only `ShaderProgram` 从 artifact entry record 保存真实 entry name，
+`GetOrCreateComputePipelineState()` 首次成功时创建并缓存一个 PSO；重复请求返回同一对象。graphics
+program 请求返回空，native create 失败也不缓存空值。RenderGraph 的 `UseComputeProgram` 只登记借用
+program，Compile 保持纯 CPU；仅 live compute pass 在录制前 prepare PSO，失败时整张图不开始录制。
 
 ## Build boundary
 

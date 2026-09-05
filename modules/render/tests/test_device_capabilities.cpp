@@ -110,6 +110,7 @@ TEST_P(DeviceCapabilitiesTest, LimitsAndCreatedQueuesAreConsistent) {
     const auto& caps = Context.Device->GetCapabilities();
     EXPECT_EQ(caps.Detail.CBufferAlignment, Context.Device->GetDetail().CBufferAlignment);
     EXPECT_EQ(caps.Limits.CBufferOffsetAlignment, caps.Detail.CBufferAlignment);
+    EXPECT_GE(caps.Limits.StorageBufferOffsetAlignment, 1u);
     EXPECT_GT(caps.Limits.MaxBufferSize, 0u);
     EXPECT_GT(caps.Limits.MaxColorAttachments, 0u);
     EXPECT_GE(caps.Limits.MaxTexture2DDimension, 4096u);
@@ -121,6 +122,10 @@ TEST_P(DeviceCapabilitiesTest, LimitsAndCreatedQueuesAreConsistent) {
     }
     EXPECT_TRUE(caps.Features.SubresourceBarriers);
     EXPECT_TRUE(caps.Features.UavMemoryBarrier);
+    EXPECT_TRUE(caps.Features.UavWriteStages.HasFlag(ShaderStage::Compute));
+    if (GetParam() == RenderBackend::D3D12) {
+        EXPECT_TRUE(caps.Features.UavWriteStages.HasFlag(ShaderStage::Pixel));
+    }
 }
 
 TEST_P(DeviceCapabilitiesTest, ReportedAttachmentFormatsAndSamplesCreate) {

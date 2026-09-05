@@ -28,7 +28,7 @@ struct ExampleOptions {
     bool EnableValidation{false};
 };
 
-bool ParseOptions(int argc, char** argv, ExampleOptions* options) {
+[[maybe_unused]] bool ParseOptions(int argc, char** argv, ExampleOptions* options) {
     if (options == nullptr) {
         return false;
     }
@@ -50,7 +50,7 @@ bool ParseOptions(int argc, char** argv, ExampleOptions* options) {
     return true;
 }
 
-std::filesystem::path FindAssetsRoot() {
+[[maybe_unused]] std::filesystem::path FindAssetsRoot() {
     if (const char* environment = std::getenv("RADRAY_ASSETS_DIR");
         environment != nullptr && environment[0] != '\0') {
         return std::filesystem::path{environment};
@@ -58,7 +58,7 @@ std::filesystem::path FindAssetsRoot() {
     return std::filesystem::path{RADRAY_ASSETS_DIR_DEFAULT};
 }
 
-std::filesystem::path FindProjectRoot() {
+[[maybe_unused]] std::filesystem::path FindProjectRoot() {
     return std::filesystem::path{RADRAY_PROJECT_DIR_DEFAULT};
 }
 

@@ -1,6 +1,6 @@
 > - 适用: 改渲染管线、场景表示、Application 生命周期或服务装配
 > - 权威: 本文描述场景、Forward 与 Application 装配；workload/graph/history 契约见 `renderer-foundation.md`，资产与 GPU 帧管理见 `asset-system.md`、`frame-and-gpu.md`
-> - 锚点: `modules/runtime/include/radray/runtime/render_framework/render_pipeline.h`, `modules/runtime/include/radray/runtime/forward_pipeline/forward_pipeline.h`, `modules/runtime/include/radray/runtime/material.h`, `modules/runtime/include/radray/runtime/shader_program.h`, `modules/runtime/include/radray/runtime/material_technique.h`, `modules/runtime/include/radray/runtime/render_framework/render_scene_snapshot.h`, `modules/runtime/include/radray/runtime/render_framework/renderer_list.h`, `modules/runtime/include/radray/runtime/components/static_mesh_component.h`, `modules/runtime/include/radray/runtime/game_framework/actor.h`, `modules/runtime/include/radray/runtime/service_registry.h`, `modules/runtime/src/application.cpp`, `modules/runtime/src/render_system.cpp`, `examples/example_lambert_sphere/example_lambert_sphere.cpp`
+> - 锚点: `modules/runtime/include/radray/runtime/render_framework/render_pipeline.h`, `modules/runtime/include/radray/runtime/forward_pipeline/forward_pipeline.h`, `modules/runtime/include/radray/runtime/forward_pipeline/forward_graph.h`, `modules/runtime/include/radray/runtime/material.h`, `modules/runtime/include/radray/runtime/shader_program.h`, `modules/runtime/include/radray/runtime/material_technique.h`, `modules/runtime/include/radray/runtime/render_framework/render_scene_snapshot.h`, `modules/runtime/include/radray/runtime/render_framework/renderer_list.h`, `modules/runtime/include/radray/runtime/components/static_mesh_component.h`, `modules/runtime/include/radray/runtime/game_framework/actor.h`, `modules/runtime/include/radray/runtime/service_registry.h`, `modules/runtime/src/application.cpp`, `modules/runtime/src/render_system.cpp`, `examples/example_lambert_sphere/example_lambert_sphere.cpp`, `examples/example_tidal_atrium/atrium_pipeline.cpp`
 
 # 渲染框架与 game framework
 
@@ -61,9 +61,10 @@ Material setter 接受 primary cbuffer 内的相对字段路径（如 `BaseColor
 `BuildRenderData` 为各 pass 复制独立的数值 bytes、状态和其实际消费的资源；缺资源只使消费它的 pass
 无效。资产 owner 追加到宿主 retained vector；snapshot 不创建 RHI set / SRV，也不维护 descriptor 版本。
 
-`ShaderProgram` 继续拥有 artifact、layout、shader、参数索引与 PSO map。PSO key 由 material state、
-geometry vertex layout/topology、pass attachment formats/sample count 组成；不包含 render pass 指针、
-Load/Store 或 framebuffer 尺寸。ShaderJit、artifact/program cache 和
+`ShaderProgram` 继续拥有 artifact、layout、shader、参数索引与 PSO cache。graphics PSO key 由 material
+state、geometry vertex layout/topology、pass attachment formats/sample count 组成；不包含 render pass
+指针、Load/Store 或 framebuffer 尺寸。compute-only program 按 artifact 中的真实 entry name 惰性创建并
+缓存一个 compute PSO；graphics program 请求该 PSO 返回空，创建失败不缓存空值。ShaderJit、artifact/program cache 和
 失败 cache 继续由 RenderSystem 拥有，所有 program 活到 GPU idle 后的 shutdown。
 
 ### shader artifact 边界
@@ -146,6 +147,12 @@ CPU 不硬编码 0/1/2。resolver 失败按 program 负缓存；不替换成其�
 每个 flight 的 `FrameDrawResources` 持有 arena 与不可变 sets；renderer lists 必须先清空，才能清 sets
 和重置 arena。graph callback 只查询 PSO、绑定已准备的资源并 draw。snapshot/culling/list/执行统计和
 精确的资源寿命契约见 [Renderer foundation](renderer-foundation.md#场景快照与剔除)。
+
+`ForwardGraph` 把 Depth/Opaque/Transparent 抽成可复用的阶段声明：调用方传入已准备的 view/list、
+attachment handles 与 Load/Clear 策略，模块只向同一张 graph 加 pass，不创建或执行另一张图。
+view 值复制进 callback payload，RendererList 借用至 graph 执行结束；空 Depth/Transparent 可成功省略，
+Opaque 即使列表为空仍定义输出。内置 ForwardPipeline 与 Tidal Atrium 共用该模块，后者在 Opaque 和
+Transparent 之间保留自有场景屏幕，并把 Signal/Sky/Panel/HUD/Downsample/Present 的 pass 参数交给 Graph 准备。
 
 Forward 在同一张 graph 中声明可选深度预通道、opaque 和必要的 transparent。一个 family 可以包含
 多个不重叠 view，独立保存剔除结果、排序、光照和 offsets，共享 family attachments。view/scissor
@@ -293,7 +300,7 @@ registry 析构不调用钩子、不释放借用对象。owner 显式选择 Shut
 
 - **默认 pipeline 为空**：`RenderSystem::_pipeline` 只有在应用调用 `SetPipeline` 后才接线；
   `example_lambert_sphere` 的 pipeline 注入是一个显式样例路径。
-- **当前 Forward 使用 snapshot、逐 view 剔除、renderer lists 和 graph pool**；没有自动 instancing、
+- **当前 Forward 使用 snapshot、逐 view 剔除、renderer lists、ForwardGraph 和 per-flight graph resources**；没有自动 instancing、
   shadow 或内置 post process。样例自定义计算与合成 pass 的接入不改变内置 Forward 的范围。
 - **group 数字来自当前 target metadata**：具体 pipeline 按 declaration 解释职责，Material 只认识 anchor 选中的一组。
 - **`PrimitiveComponent` 基类仍返回空 proxy**：可绘制路径由 `StaticMeshComponent` 的派生实现提供。

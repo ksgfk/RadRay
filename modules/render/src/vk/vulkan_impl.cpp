@@ -3693,8 +3693,21 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
             .MaxBufferSize = bufferLimits.maxBufferSize != 0 ? bufferLimits.maxBufferSize : allocationLimits.maxMemoryAllocationSize,
             .MaxUniformBufferRange = limits.maxUniformBufferRange,
             .MaxPushConstantBytes = limits.maxPushConstantsSize,
-            .CBufferOffsetAlignment = limits.minUniformBufferOffsetAlignment};
-        caps.Features = {false, true, true, true, true};
+            .CBufferOffsetAlignment = limits.minUniformBufferOffsetAlignment,
+            .StorageBufferOffsetAlignment = limits.minStorageBufferOffsetAlignment};
+        caps.Features = {
+            .TimestampQueries = false,
+            .IndirectDraw = true,
+            .IndirectDispatch = true,
+            .SubresourceBarriers = true,
+            .UavMemoryBarrier = true,
+            .UavWriteStages = render::ShaderStage::Compute};
+        if (deviceR->_feature.fragmentStoresAndAtomics) {
+            caps.Features.UavWriteStages |= render::ShaderStage::Pixel;
+        }
+        if (deviceR->_feature.vertexPipelineStoresAndAtomics) {
+            caps.Features.UavWriteStages |= render::ShaderStage::Vertex;
+        }
         for (size_t index = 0; index < deviceR->_queues.size(); ++index) {
             const auto& queues = deviceR->_queues[index];
             auto& queueCaps = caps.Queues[index];

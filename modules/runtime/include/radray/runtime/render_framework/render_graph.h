@@ -1,6 +1,7 @@
 #pragma once
 
 #include <source_location>
+#include <variant>
 #include <radray/runtime/render_framework/render_resource_pool.h>
 #include <radray/runtime/shader_program.h>
 
@@ -17,21 +18,32 @@ using RgTextureHandle = RgHandle<struct RgTextureTag>;
 using RgBufferHandle = RgHandle<struct RgBufferTag>;
 using RgTextureViewHandle = RgHandle<struct RgTextureViewTag>;
 using RgPassHandle = RgHandle<struct RgPassTag>;
+using RgIndirectArgumentsHandle = RgHandle<struct RgIndirectArgumentsTag>;
+using RgComputeProgramHandle = RgHandle<struct RgComputeProgramTag>;
+using RgParameterSetHandle = RgHandle<struct RgParameterSetTag>;
 
 enum class RenderGraphExternalAccess : uint8_t { ReadOnly,
                                                  ReadWrite,
                                                  ObservableOutput };
 enum class RgPassType : uint8_t { Raster,
                                   Compute,
-                                  Copy };
+                                  Copy,
+                                  Resolve };
 enum class RgBufferAccess : uint8_t { Vertex,
                                       Index,
                                       Constant,
                                       ShaderRead,
                                       UnorderedAccess,
+                                      Indirect,
                                       CopySource,
                                       CopyDestination,
                                       HostRead };
+enum class RgIndirectCommand : uint8_t { Draw,
+                                         DrawIndexed,
+                                         Dispatch };
+enum class RgParameterAccess : uint8_t { Read,
+                                         Write,
+                                         ReadWrite };
 
 struct RenderExternalTexture {
     render::Texture* Texture;
@@ -67,8 +79,33 @@ struct RgDepthAttachmentDesc {
     render::DepthStencilClearValue Clear{1.0f, 0};
     bool ReadOnly{false};
 };
+struct RgTextureParameterBinding {
+    RgTextureHandle Texture{};
+    RgTextureViewDesc View{};
+    RgParameterAccess Access{RgParameterAccess::Read};
+};
+struct RgBufferParameterBinding {
+    RgBufferHandle Buffer{};
+    render::BufferRange Range{render::BufferRange::AllRange()};
+    uint32_t StructureByteStride{0};
+    render::TextureFormat Format{render::TextureFormat::UNKNOWN};
+    RgParameterAccess Access{RgParameterAccess::Read};
+};
+struct RgSamplerParameterBinding {
+    render::SamplerDescriptor Sampler{};
+};
+struct RgCBufferParameterBinding {
+    std::span<const byte> Bytes{};
+};
+using RgParameterBindingValue = std::variant<RgCBufferParameterBinding, RgTextureParameterBinding,
+                                             RgBufferParameterBinding, RgSamplerParameterBinding>;
+struct RgParameterBinding {
+    std::string_view Declaration{};
+    uint32_t ArrayElement{0};
+    RgParameterBindingValue Value{};
+};
 struct RenderGraphDiagnostic {
-    string Code, Graph, Pass, Resource, Message, File;
+    string Code, Graph, Pass, Binding, Resource, Message, File;
     uint32_t Line{0};
 };
 struct RenderGraphPassReport {
@@ -108,6 +145,7 @@ struct RenderGraphExecutionResult {
 };
 
 class RenderGraph;
+class RenderGraphFrameResources;
 class RenderGraphRasterContext;
 class RenderGraphComputeContext;
 
@@ -117,6 +155,10 @@ public:
     RgBufferHandle ReadBuffer(RgBufferHandle buffer, RgBufferAccess access = RgBufferAccess::ShaderRead);
     RgBufferHandle WriteBuffer(RgBufferHandle buffer, RgBufferAccess access = RgBufferAccess::UnorderedAccess);
     RgBufferHandle ReadWriteBuffer(RgBufferHandle buffer, RgBufferAccess access = RgBufferAccess::UnorderedAccess);
+    RgIndirectArgumentsHandle ReadIndirectArguments(RgBufferHandle buffer, RgIndirectCommand command,
+                                                    uint64_t offset = 0, uint32_t count = 1);
+    RgParameterSetHandle CreateParameterSet(ShaderProgram& program, uint32_t group,
+                                            std::span<const RgParameterBinding> bindings);
     void SetSideEffect();
 
 protected:
@@ -130,12 +172,17 @@ public:
     using RenderGraphPassBuilder::RenderGraphPassBuilder;
     RgTextureViewHandle SetColorAttachment(uint32_t slot, RgTextureHandle texture, const RgColorAttachmentDesc& desc = {});
     RgTextureViewHandle SetDepthAttachment(RgTextureHandle texture, const RgDepthAttachmentDesc& desc = {});
+    RgTextureViewHandle WriteTexture(RgTextureHandle texture, render::ShaderStages stages,
+                                     const RgTextureViewDesc& view = {});
+    RgTextureViewHandle ReadWriteTexture(RgTextureHandle texture, render::ShaderStages stages,
+                                         const RgTextureViewDesc& view = {});
 };
 class RenderGraphComputeBuilder : public RenderGraphPassBuilder {
 public:
     using RenderGraphPassBuilder::RenderGraphPassBuilder;
     RgTextureViewHandle WriteTexture(RgTextureHandle texture, const RgTextureViewDesc& view = {});
     RgTextureViewHandle ReadWriteTexture(RgTextureHandle texture, const RgTextureViewDesc& view = {});
+    RgComputeProgramHandle UseComputeProgram(ShaderProgram& program);
 };
 
 class RenderGraphGraphicsCommands {
@@ -149,12 +196,15 @@ public:
     void BindGraphicsPipelineState(render::GraphicsPipelineState* pso) noexcept { _encoder.BindGraphicsPipelineState(pso); }
     void Draw(uint32_t vertices, uint32_t instances, uint32_t firstVertex, uint32_t firstInstance) noexcept { _encoder.Draw(vertices, instances, firstVertex, firstInstance); }
     void DrawIndexed(uint32_t indices, uint32_t instances, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance) noexcept { _encoder.DrawIndexed(indices, instances, firstIndex, vertexOffset, firstInstance); }
-    void DrawIndirect(render::Buffer* arguments, uint64_t offset, uint32_t count = 1) noexcept { _encoder.DrawIndirect(arguments, offset, count); }
-    void DrawIndexedIndirect(render::Buffer* arguments, uint64_t offset, uint32_t count = 1) noexcept { _encoder.DrawIndexedIndirect(arguments, offset, count); }
+    void DrawIndirect(RgIndirectArgumentsHandle arguments) noexcept;
+    void DrawIndexedIndirect(RgIndirectArgumentsHandle arguments) noexcept;
 
 private:
     friend class RenderGraphRasterContext;
-    explicit RenderGraphGraphicsCommands(render::GraphicsCommandEncoder& encoder) : _encoder(encoder) {}
+    RenderGraphGraphicsCommands(RenderGraph& graph, uint32_t pass, render::GraphicsCommandEncoder& encoder)
+        : _graph(graph), _pass(pass), _encoder(encoder) {}
+    RenderGraph& _graph;
+    uint32_t _pass;
     render::GraphicsCommandEncoder& _encoder;
 };
 
@@ -164,11 +214,14 @@ public:
     bool SetPushConstants(render::BindingHandle binding, std::span<const byte> data) noexcept { return _encoder.SetPushConstants(binding, data); }
     void BindComputePipelineState(render::ComputePipelineState* pso) noexcept { _encoder.BindComputePipelineState(pso); }
     void Dispatch(uint32_t x, uint32_t y, uint32_t z) noexcept { _encoder.Dispatch(x, y, z); }
-    void DispatchIndirect(render::Buffer* arguments, uint64_t offset) noexcept { _encoder.DispatchIndirect(arguments, offset); }
+    void DispatchIndirect(RgIndirectArgumentsHandle arguments) noexcept;
 
 private:
     friend class RenderGraphComputeContext;
-    explicit RenderGraphComputeCommands(render::ComputeCommandEncoder& encoder) : _encoder(encoder) {}
+    RenderGraphComputeCommands(RenderGraph& graph, uint32_t pass, render::ComputeCommandEncoder& encoder)
+        : _graph(graph), _pass(pass), _encoder(encoder) {}
+    RenderGraph& _graph;
+    uint32_t _pass;
     render::ComputeCommandEncoder& _encoder;
 };
 
@@ -177,12 +230,13 @@ public:
     RenderGraphGraphicsCommands& Encoder() noexcept { return _encoder; }
     render::TextureView* GetTextureView(RgTextureViewHandle handle) const;
     render::Buffer* GetBuffer(RgBufferHandle handle) const;
+    void BindParameterSet(RgParameterSetHandle handle) noexcept;
     const GraphicsPassState& PassState() const noexcept;
 
 private:
     friend class RenderGraph;
     RenderGraphRasterContext(RenderGraph& graph, uint32_t pass, render::GraphicsCommandEncoder& encoder)
-        : _graph(graph), _pass(pass), _encoder(encoder) {}
+        : _graph(graph), _pass(pass), _encoder(graph, pass, encoder) {}
     RenderGraph& _graph;
     uint32_t _pass;
     RenderGraphGraphicsCommands _encoder;
@@ -192,11 +246,13 @@ public:
     RenderGraphComputeCommands& Encoder() noexcept { return _encoder; }
     render::TextureView* GetTextureView(RgTextureViewHandle handle) const;
     render::Buffer* GetBuffer(RgBufferHandle handle) const;
+    void BindParameterSet(RgParameterSetHandle handle) noexcept;
+    void BindComputeProgram(RgComputeProgramHandle handle) noexcept;
 
 private:
     friend class RenderGraph;
     RenderGraphComputeContext(RenderGraph& graph, uint32_t pass, render::ComputeCommandEncoder& encoder)
-        : _graph(graph), _pass(pass), _encoder(encoder) {}
+        : _graph(graph), _pass(pass), _encoder(graph, pass, encoder) {}
     RenderGraph& _graph;
     uint32_t _pass;
     RenderGraphComputeCommands _encoder;
@@ -205,6 +261,8 @@ private:
 class RenderGraph {
 public:
     RenderGraph(render::Device& device, RenderResourcePool& pool, render::RenderPassRegistry& registry, std::string_view name);
+    RenderGraph(render::Device& device, RenderGraphFrameResources& resources,
+                render::RenderPassRegistry& registry, std::string_view name);
     ~RenderGraph();
     RenderGraph(const RenderGraph&) = delete;
     RenderGraph& operator=(const RenderGraph&) = delete;
@@ -247,6 +305,10 @@ public:
     RgPassHandle AddCopyTextureToBufferPass(std::string_view name, RgTextureHandle source, RgBufferHandle destination,
                                             render::SubresourceRange range = {0, 1, 0, 1}, uint64_t destinationOffset = 0,
                                             std::source_location location = std::source_location::current());
+    RgPassHandle AddResolveTexturePass(std::string_view name, RgTextureHandle source, RgTextureHandle destination,
+                                       render::SubresourceRange sourceRange = {0, 1, 0, 1},
+                                       render::SubresourceRange destinationRange = {0, 1, 0, 1},
+                                       std::source_location location = std::source_location::current());
     /// Freezes setup and validates/culls the graph without creating native resources or recording commands.
     bool Compile();
     const RenderGraphExecutionReport& GetReport() const noexcept;
@@ -258,10 +320,13 @@ private:
     friend class RenderGraphPassBuilder;
     friend class RenderGraphRasterBuilder;
     friend class RenderGraphComputeBuilder;
+    friend class RenderGraphGraphicsCommands;
+    friend class RenderGraphComputeCommands;
     friend class RenderGraphRasterContext;
     friend class RenderGraphComputeContext;
     friend struct RenderGraphTestDriver;
-    RenderGraph(render::Device& device, RenderResourcePool& pool, render::RenderPassRegistry& registry, std::string_view name, uint64_t& generation);
+    RenderGraph(render::Device& device, RenderGraphFrameResources& resources,
+                render::RenderPassRegistry& registry, std::string_view name, uint64_t& generation);
     RenderGraphExecutionResult Execute(render::CommandBuffer& command);
     struct Payload {
         virtual ~Payload() = default;
@@ -289,10 +354,24 @@ private:
     RgPassHandle AddPass(std::string_view name, RgPassType type, std::source_location location);
     void SetPayload(RgPassHandle pass, unique_ptr<Payload> payload);
     RgTextureViewHandle UseTexture(uint32_t pass, RgTextureHandle texture, RgTextureViewDesc view,
-                                   render::TextureViewUsage usage, bool read, bool write, bool validAfter);
-    RgBufferHandle UseBuffer(uint32_t pass, RgBufferHandle buffer, RgBufferAccess access, bool read, bool write);
+                                   render::TextureViewUsage usage, bool read, bool write, bool validAfter,
+                                   render::ShaderStages uavWriteStages = render::ShaderStage::UNKNOWN);
+    RgBufferHandle UseBuffer(uint32_t pass, RgBufferHandle buffer, RgBufferAccess access, bool read, bool write,
+                             render::ShaderStages uavWriteStages = render::ShaderStage::UNKNOWN);
+    RgIndirectArgumentsHandle AddIndirectArguments(uint32_t pass, RgBufferHandle buffer,
+                                                   RgIndirectCommand command, uint64_t offset, uint32_t count);
+    RgComputeProgramHandle AddComputeProgram(uint32_t pass, ShaderProgram& program);
+    RgParameterSetHandle AddParameterSet(uint32_t pass, ShaderProgram& program, uint32_t group,
+                                         std::span<const RgParameterBinding> bindings);
     render::TextureView* ResolveView(uint32_t pass, RgTextureViewHandle handle) const;
     render::Buffer* ResolveBuffer(uint32_t pass, RgBufferHandle handle) const;
+    void ExecuteIndirect(uint32_t pass, RgIndirectArgumentsHandle handle, RgIndirectCommand expected,
+                         render::GraphicsCommandEncoder* graphics, render::ComputeCommandEncoder* compute) noexcept;
+    void BindParameterSet(uint32_t pass, RgParameterSetHandle handle,
+                          render::GraphicsCommandEncoder* graphics, render::ComputeCommandEncoder* compute) noexcept;
+    void BindComputeProgram(uint32_t pass, RgComputeProgramHandle handle,
+                            render::ComputeCommandEncoder& encoder) noexcept;
+    bool Prepare();
 };
 
 }  // namespace radray

@@ -7,8 +7,24 @@ namespace radray::test {
 class GraphCompileDevice : public render::Device {
 public:
     GraphCompileDevice() {
-        Capabilities.Limits = {8, 16384, 16384, 2048, 2048, UINT64_MAX, 65536, 128, 256};
-        Capabilities.Features = {true, true, true, true, true};
+        Capabilities.Limits = {
+            .MaxColorAttachments = 8,
+            .MaxTexture1DDimension = 16384,
+            .MaxTexture2DDimension = 16384,
+            .MaxTexture3DDimension = 2048,
+            .MaxTextureArrayLayers = 2048,
+            .MaxBufferSize = UINT64_MAX,
+            .MaxUniformBufferRange = 65536,
+            .MaxPushConstantBytes = 128,
+            .CBufferOffsetAlignment = 256,
+            .StorageBufferOffsetAlignment = 16};
+        Capabilities.Features = {
+            .TimestampQueries = true,
+            .IndirectDraw = true,
+            .IndirectDispatch = true,
+            .SubresourceBarriers = true,
+            .UavMemoryBarrier = true,
+            .UavWriteStages = render::ShaderStage::Graphics | render::ShaderStage::Compute};
         Capabilities.Queues[static_cast<size_t>(render::QueueType::Direct)].CreatedCount = 1;
     }
     bool IsValid() const noexcept override { return true; }

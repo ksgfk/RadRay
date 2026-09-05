@@ -35,7 +35,7 @@ struct Options {
     std::filesystem::path Captures;
 };
 
-bool ParseOptions(int argc, char** argv, Options& options) {
+[[maybe_unused]] bool ParseOptions(int argc, char** argv, Options& options) {
     for (int i = 1; i < argc; ++i) {
         const std::string_view argument{argv[i]};
         if (argument == "--multithread")
@@ -669,6 +669,8 @@ bool AtriumApplication::CreateScene() {
 
 int main(int argc, char** argv) {
 #if !defined(RADRAY_ENABLE_SHADER_JIT)
+    (void)argc;
+    (void)argv;
     RADRAY_ERR_LOG("Tidal Atrium requires RADRAY_ENABLE_SHADER_JIT");
     return 1;
 #else

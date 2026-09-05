@@ -161,9 +161,11 @@ Forward 的 `FrameDrawResources` 在下次安全复用时，先清空借用它�
 最后重置或裁减 arena；不会改写已发布的 backing set。精确缓存 key 与命令边界见
 [Renderer foundation](renderer-foundation.md#renderer-lists-与帧内绘制资源)。
 
-`RenderGraphRuntime` 的每个 flight 独立持有 texture/buffer/view pool。`RenderSystem::Render` 开始时，
-该 flight 的 fence 已完成，才调用 pool `BeginFlight` trim/复用。`EndGraph` 不提前释放 GPU 对象。
-物理 resource states 保存至下次使用，transient 逻辑内容仍从无效开始。
+`RenderGraphRuntime` 的每个 flight 独立持有一个 `RenderGraphFrameResources`，其中聚合
+texture/buffer/view pool、Graph parameter sets/cache 与 `DynamicCBufferArena`。`RenderSystem::Render`
+开始时该 flight 的 fence 已完成，才按 parameter sets/cache → arena reset → pool BeginFlight trim/复用
+的顺序清理。Graph setup 对象可以先析构；已准备 descriptor 与上传页仍活到 flight 安全复用。
+`EndGraph` 不提前释放 GPU 对象。物理 resource states 保存至下次使用，transient 逻辑内容仍从无效开始。
 
 `ViewStateRegistry` 在 render thread 跟踪稳定 view 身份和 history generations。替换/长期闲置的
 generation 进入当前 flight retire bin，到同 flight 下次安全 Begin 才销毁。view 销毁前先调用

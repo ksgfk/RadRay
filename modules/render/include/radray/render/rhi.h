@@ -829,6 +829,7 @@ struct RenderPassBeginDescriptor {
     std::span<const ColorClearValue> ColorClearValues{};
     std::optional<DepthStencilClearValue> DepthStencilClearValue{};
     std::string_view Name{};
+    bool AllowUavWrites{false};
 };
 
 struct TextureDescriptor {
@@ -1228,6 +1229,7 @@ struct DeviceLimits {
     uint64_t MaxUniformBufferRange{0};
     uint32_t MaxPushConstantBytes{0};
     uint64_t CBufferOffsetAlignment{1};
+    uint64_t StorageBufferOffsetAlignment{1};
 };
 
 struct DeviceFeatures {
@@ -1236,6 +1238,7 @@ struct DeviceFeatures {
     bool IndirectDispatch{false};
     bool SubresourceBarriers{false};
     bool UavMemoryBarrier{false};
+    ShaderStages UavWriteStages{ShaderStage::UNKNOWN};
 };
 
 struct RenderDeviceCapabilities {
