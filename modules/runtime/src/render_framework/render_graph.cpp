@@ -728,20 +728,20 @@ RgParameterSetHandle RenderGraph::AddParameterSet(
                                       range->Offset % alignment == 0;
             } else if (kind == shader::ShaderBindingKind::StructuredBuffer ||
                        kind == shader::ShaderBindingKind::RWStructuredBuffer) {
-                const uint64_t dynamicAlignment = std::max<uint64_t>(
+                const uint64_t storageAlignment = std::max<uint64_t>(
                     1, impl.Device.GetCapabilities().Limits.StorageBufferOffsetAlignment);
                 representationValid = representationValid && buffer->StructureByteStride != 0 &&
                                        buffer->StructureByteStride % 4 == 0 && buffer->StructureByteStride <= 2048 &&
                                        range->Offset % buffer->StructureByteStride == 0 &&
                                        range->Size % buffer->StructureByteStride == 0 &&
-                                       (!info->Dynamic || range->Offset % dynamicAlignment == 0);
+                                       range->Offset % storageAlignment == 0;
             } else if (kind == shader::ShaderBindingKind::RawBuffer ||
                        kind == shader::ShaderBindingKind::RWRawBuffer) {
-                const uint64_t dynamicAlignment = std::max<uint64_t>(
+                const uint64_t storageAlignment = std::max<uint64_t>(
                     1, impl.Device.GetCapabilities().Limits.StorageBufferOffsetAlignment);
                 representationValid = representationValid && buffer->StructureByteStride == 0 &&
                                        range->Offset % 4 == 0 && range->Size % 4 == 0 &&
-                                       (!info->Dynamic || range->Offset % dynamicAlignment == 0);
+                                       range->Offset % storageAlignment == 0;
             } else {
                 const uint32_t elementSize = render::GetTextureFormatBytesPerPixel(buffer->Format);
                 representationValid = buffer->StructureByteStride == 0 && elementSize != 0 &&

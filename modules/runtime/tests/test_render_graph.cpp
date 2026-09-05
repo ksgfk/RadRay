@@ -1163,14 +1163,16 @@ void ValidateBindings() {
     auto program = test::CompileFoundationCompute(device, source);
     ASSERT_TRUE(program);
 
-    const array<std::string_view, 7> expectedCodes{
+    const array<std::string_view, 9> expectedCodes{
         "MissingParameterBinding",
         "ParameterDeclaration",
         "ParameterGroup",
         "ParameterType",
         "ParameterArrayElement",
         "ParameterBufferLayout",
-        "ParameterGroup"};
+        "ParameterGroup",
+        "ParameterBufferLayout",
+        "ParameterBufferRange"};
     for (uint32_t scenario = 0; scenario < expectedCodes.size(); ++scenario) {
         SCOPED_TRACE(scenario);
         auto graph = MakeGraph("parameter validation");
@@ -1178,7 +1180,7 @@ void ValidateBindings() {
         inputDesc.Usage = render::TextureUse::Resource;
         const auto input = graph.CreateTexture(inputDesc, "input");
         const auto output = graph.CreateBuffer(
-            {4, render::MemoryType::Device, render::BufferUse::UnorderedAccess, {}},
+            {32, render::MemoryType::Device, render::BufferUse::UnorderedAccess, {}},
             "output");
         graph.AddComputePass<EmptyPass>(
             "invalid parameters",
@@ -1219,6 +1221,24 @@ void ValidateBindings() {
                     case 6:
                         group = 11;
                         bindings.clear();
+                        break;
+                    case 7: {
+                        const uint64_t storageAlignment = std::max<uint64_t>(
+                            1, device.GetCapabilities().Limits.StorageBufferOffsetAlignment);
+                        const uint64_t misalignedOffset = storageAlignment > 4 ? 4 : 2;
+                        bindings[2].Value = RgBufferParameterBinding{
+                            .Buffer = output,
+                            .Range = {misalignedOffset, 4},
+                            .StructureByteStride = 4,
+                            .Access = RgParameterAccess::Write};
+                        break;
+                    }
+                    case 8:
+                        bindings[2].Value = RgBufferParameterBinding{
+                            .Buffer = output,
+                            .Range = {32, 4},
+                            .StructureByteStride = 4,
+                            .Access = RgParameterAccess::Write};
                         break;
                     default:
                         break;
