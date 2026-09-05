@@ -228,6 +228,88 @@ void CSMain(uint3 tid : SV_DispatchThreadID) { Value[0] = Value[0] * 3 + 7; }
     readback->Unmap();
 }
 
+TEST_P(RenderGraphTest, FirstReadOnlyUavAccessSynchronizesPreviousGraphSubmission) {
+    auto& device = *DeviceContext.Device;
+    constexpr std::string_view writeSource = R"hlsl(
+#include <core/platform.hlsli>
+VK_BINDING(0, 0) RWStructuredBuffer<uint> Value : register(u0);
+[shader("compute")][numthreads(1, 1, 1)]
+void CSMain() { Value[0] = 73; }
+)hlsl";
+    constexpr std::string_view readSource = R"hlsl(
+#include <core/platform.hlsli>
+VK_BINDING(0, 0) RWStructuredBuffer<uint> Value : register(u0);
+VK_BINDING(1, 0) RWStructuredBuffer<uint> Output : register(u1);
+[shader("compute")][numthreads(1, 1, 1)]
+void CSMain() { Output[0] = Value[0] + 9; }
+)hlsl";
+    auto writer = test::CompileFoundationCompute(device, writeSource);
+    auto reader = test::CompileFoundationCompute(device, readSource);
+    ASSERT_TRUE(writer);
+    ASSERT_TRUE(reader);
+    auto buffer = device.CreateBuffer({4, render::MemoryType::Device, render::BufferUse::UnorderedAccess, {}});
+    auto output = device.CreateBuffer({4, render::MemoryType::Device, render::BufferUse::UnorderedAccess | render::BufferUse::CopySource, {}});
+    auto readback = device.CreateBuffer({4, render::MemoryType::ReadBack, render::BufferUse::CopyDestination | render::BufferUse::MapRead, {}});
+    auto writeSet = device.CreateShaderParameterSet({writer->Layout.get(), 0});
+    auto readSet = device.CreateShaderParameterSet({reader->Layout.get(), 0});
+    ASSERT_TRUE(buffer);
+    ASSERT_TRUE(output);
+    ASSERT_TRUE(readback);
+    ASSERT_TRUE(writeSet);
+    ASSERT_TRUE(readSet);
+    EXPECT_TRUE(writeSet->Set(writer->Layout->FindBinding("Value"), 0, render::ShaderBufferBinding{buffer.Get(), {0, 4}, 4}));
+    EXPECT_TRUE(readSet->Set(reader->Layout->FindBinding("Value"), 0, render::ShaderBufferBinding{buffer.Get(), {0, 4}, 4}));
+    EXPECT_TRUE(readSet->Set(reader->Layout->FindBinding("Output"), 0, render::ShaderBufferBinding{output.Get(), {0, 4}, 4}));
+    ASSERT_TRUE(writeSet->FlushWrites());
+    ASSERT_TRUE(readSet->FlushWrites());
+    RenderExternalBuffer shared{buffer.Get(), buffer->GetDesc(), render::BufferState::Undefined};
+    RenderExternalBuffer result{output.Get(), output->GetDesc(), render::BufferState::Undefined};
+    RenderExternalBuffer bytes{readback.Get(), readback->GetDesc(), render::BufferState::CopyDestination};
+    struct Data {
+        render::ComputePipelineState* Pso;
+        render::ShaderParameterSet* Set;
+    };
+    const auto dispatch = +[](const Data& data, RenderGraphComputeContext& ctx) {
+        ctx.Encoder().BindComputePipelineState(data.Pso);
+        ctx.Encoder().BindShaderParameterSet(0, data.Set);
+        ctx.Encoder().Dispatch(1, 1, 1);
+    };
+    auto first = MakeGraph("producer");
+    const auto destination = first.ImportBuffer(shared, "shared", RenderGraphExternalAccess::ObservableOutput);
+    first.AddComputePass<Data>("write", [&](Data& data, RenderGraphComputeBuilder& builder) {
+        builder.WriteBuffer(destination); data = {writer->Pso.get(), writeSet.Get()}; }, dispatch);
+    auto firstCommand = device.CreateCommandBuffer(DeviceContext.Queue);
+    auto secondCommand = device.CreateCommandBuffer(DeviceContext.Queue);
+    ASSERT_TRUE(firstCommand);
+    ASSERT_TRUE(secondCommand);
+    firstCommand->Begin();
+    ASSERT_TRUE(RenderGraphTestDriver::Execute(first, *firstCommand).Success);
+    firstCommand->End();
+    ASSERT_EQ(shared.State, render::BufferState::UnorderedAccess);
+
+    auto second = MakeGraph("consumer");
+    const auto source = second.ImportBuffer(shared, "shared", RenderGraphExternalAccess::ReadOnly);
+    const auto target = second.ImportBuffer(result, "result", RenderGraphExternalAccess::ReadWrite);
+    const auto host = second.ImportBuffer(bytes, "readback", RenderGraphExternalAccess::ObservableOutput);
+    second.AddComputePass<Data>("read UAV", [&](Data& data, RenderGraphComputeBuilder& builder) {
+        builder.ReadBuffer(source, RgBufferAccess::UnorderedAccess); builder.WriteBuffer(target);
+        data = {reader->Pso.get(), readSet.Get()}; }, dispatch);
+    second.AddCopyBufferPass("readback", target, host, 4);
+    second.AddComputePass<EmptyPass>("host", [=](EmptyPass&, RenderGraphComputeBuilder& builder) {
+        builder.ReadBuffer(host, RgBufferAccess::HostRead); builder.SetSideEffect(); }, EmptyCompute);
+    secondCommand->Begin();
+    ASSERT_TRUE(RenderGraphTestDriver::Execute(second, *secondCommand).Success);
+    EXPECT_EQ(second.GetReport().UavBarriers, 1u);
+    auto* command = firstCommand.Get();
+    DeviceContext.Queue->Submit({.CmdBuffers = std::span{&command, 1}});
+    Submit(*secondCommand);
+    auto* mapped = static_cast<const uint32_t*>(readback->Map(0, 4));
+    ASSERT_NE(mapped, nullptr);
+    readback->InvalidateMappedRange({0, 4});
+    EXPECT_EQ(*mapped, 82u);
+    readback->Unmap();
+}
+
 TEST_P(RenderGraphTest, RasterAndComputeWritesAreSampledAndClearLoadSharePso) {
     auto& device = *DeviceContext.Device;
     constexpr std::string_view graphicsSource = R"hlsl(

@@ -712,7 +712,8 @@ void RenderGraph::Impl::PlanBarriers() {
     vector<vector<uint8_t>> writes;
     for (const auto& resource : Resources) {
         states.push_back(resource.States);
-        writes.emplace_back(resource.States.size(), 0);
+        // An initial UAV state may contain writes from an earlier graph or flight.
+        writes.emplace_back(resource.States.size(), 1);
     }
     for (uint32_t p = 0; p < Passes.size(); ++p) {
         if (!Report.Passes[p].Live) continue;

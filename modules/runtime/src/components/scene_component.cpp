@@ -4,6 +4,13 @@
 
 namespace radray {
 
+void SceneComponent::NotifyTransformChanged() {
+    OnTransformChanged();
+    for (SceneComponent* child : _children) {
+        child->NotifyTransformChanged();
+    }
+}
+
 SceneComponent::~SceneComponent() noexcept {
     DetachFromParent();
     while (!_children.empty()) {
@@ -13,17 +20,17 @@ SceneComponent::~SceneComponent() noexcept {
 
 void SceneComponent::SetRelativeLocation(const Eigen::Vector3f& location) noexcept {
     _relativeLocation = location;
-    OnTransformChanged();
+    NotifyTransformChanged();
 }
 
 void SceneComponent::SetRelativeRotation(const Eigen::Quaternionf& rotation) noexcept {
     _relativeRotation = rotation;
-    OnTransformChanged();
+    NotifyTransformChanged();
 }
 
 void SceneComponent::SetRelativeScale(const Eigen::Vector3f& scale) noexcept {
     _relativeScale = scale;
-    OnTransformChanged();
+    NotifyTransformChanged();
 }
 
 Eigen::Matrix4f SceneComponent::ComputeLocalMatrix() const noexcept {
@@ -63,7 +70,7 @@ void SceneComponent::SetWorldLocation(const Eigen::Vector3f& location) noexcept 
     } else {
         _relativeLocation = location;
     }
-    OnTransformChanged();
+    NotifyTransformChanged();
 }
 
 void SceneComponent::SetWorldRotation(const Eigen::Quaternionf& rotation) noexcept {
@@ -73,17 +80,22 @@ void SceneComponent::SetWorldRotation(const Eigen::Quaternionf& rotation) noexce
     } else {
         _relativeRotation = rotation;
     }
-    OnTransformChanged();
+    NotifyTransformChanged();
 }
 
 void SceneComponent::AttachTo(SceneComponent* parent) noexcept {
     if (parent == this || parent == _parent.Get()) {
         return;
     }
+    for (Nullable<SceneComponent*> ancestor = parent; ancestor; ancestor = ancestor->_parent) {
+        if (ancestor.Get() == this) {
+            return;
+        }
+    }
     DetachFromParent();
     _parent = parent;
     parent->_children.push_back(this);
-    OnTransformChanged();
+    NotifyTransformChanged();
 }
 
 void SceneComponent::DetachFromParent() noexcept {
@@ -96,7 +108,7 @@ void SceneComponent::DetachFromParent() noexcept {
         siblings.erase(it);
     }
     _parent = nullptr;
-    OnTransformChanged();
+    NotifyTransformChanged();
 }
 
 }  // namespace radray

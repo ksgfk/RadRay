@@ -667,15 +667,21 @@ std::optional<GpuMesh> ResourceUploader::UploadMeshResource(
         }
         auto buf = bufOpt.Release();
         buf->SetDebugName(fmt::format("{}_{}", meshResource.Name, binIdx));
+        bufferByBin[binIdx] = buf.get();
+        result.Buffers.emplace_back(std::move(buf));
+    }
+
+    // Allocation failure must leave the command buffer untouched.
+    for (size_t binIdx = 0; binIdx < meshResource.Bins.size(); ++binIdx) {
+        if (!bufferByBin[binIdx]) {
+            continue;
+        }
         UploadBuffer(cmdBuffer, BufferUploadRequest{
-                                    .SrcData = data,
-                                    .DstBuffer = buf.get(),
+                                    .SrcData = meshResource.Bins[binIdx].GetData(),
+                                    .DstBuffer = bufferByBin[binIdx].Get(),
                                     .DstOffset = 0,
                                     .Before = render::BufferState::Common,
                                     .After = render::BufferState::Vertex | render::BufferState::Index});
-
-        bufferByBin[binIdx] = buf.get();
-        result.Buffers.emplace_back(std::move(buf));
     }
 
     for (size_t primIdx = 0; primIdx < meshResource.Primitives.size(); ++primIdx) {

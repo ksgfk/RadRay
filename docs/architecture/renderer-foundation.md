@@ -81,7 +81,9 @@ observable external 的最终 writer 与 `SetSideEffect` 是 roots。沿消费�
 
 执行前先 realize 所有 live resource/view/render pass/framebuffer，继续复用 RenderPassRegistry。
 任一 realize 失败均不录 graph 命令。随后从 pool/external 的真实状态产生 pass 前 barriers；相同 UAV
-state 的写后访问使用显式 UAV memory barrier。每个 live pass 独立 Begin/End，并用同名 debug group。
+state 的写后访问使用显式 UAV memory barrier。初始 UAV state 保守视作可能由前一图写入，
+因此首次只读 UAV 访问也有屏障；同队列提交顺序不代替跨图的内存依赖。
+每个 live pass 独立 Begin/End，并用同名 debug group。
 pass commands facade 只转发绘制、dispatch、binding 和 viewport/scissor，不能通过 RHI encoder 的
 `GetCommandBuffer` 绕过 graph。静态 mesh/asset bindings 暂由原有固定状态契约约束。
 
@@ -189,6 +191,12 @@ Forward PrepareFrame 为 active presentation outputs 提交一个 view 的 famil
 外部 output families。Render 对每个 resolved view 保存独立 CullingResults 和 DepthOnly/Opaque/Transparent
 lists。每 family 支持多个不重叠 view，共享 attachments，通过各自 viewport/scissor 隔离写入。
 当前调用方负责提供不重叠视图，Forward 仍只支持 RenderScale=1，不提供 upscale。
+
+产品 ForwardObject 同时保存 `LocalToWorld` 与 `NormalToWorld`。CPU 按对象计算后者，作为
+线性变换逆转置的正比例矩阵，shader 使用后再归一化，支持非均匀缩放、shear 与镜像。
+实现用缩放后的余子式矩阵和行列式符号避免除以零；退化为平面时保留可定义的法线方向，
+完全退化或无效变换产生零矩阵，由 shader 的 `safe_normalize` 选择有限的默认方向。
+没有声明 `NormalToWorld` 的自定义 Forward program 继续只接收其实际声明的字段。
 
 存在有效 DepthOnly command 时声明 `Forward.DepthPrepass`（深度 Clear/Store）；没有则省略。
 `Forward.Opaque` 总是存在，color Clear/Store；有预通道时 depth Load，否则 depth Clear。缺 DepthOnly

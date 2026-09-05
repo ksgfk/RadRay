@@ -84,6 +84,10 @@ auto* p = maybe.Unwrap();              // 为空则 throw NullableAccessExceptio
 `ManualCoroutineScheduler` 的记录不能搬动——记录里存着回指调度器的指针（stop callback）。
 `GpuSystem::_flights` 因此是 `vector<unique_ptr<FlightSlot>>` 而非 `vector<FlightSlot>`。
 
+记录默认在 stop callback 中立即恢复。持有尚未完成的外部操作时，可以设置
+`ResumeOnCancel=false`：stop callback 仍标记 `Canceled`，由记录拥有者在操作安全完成后恢复。
+`CancelAll` 是最终清理，仍会强制恢复全部记录；调用前必须先结束这些外部操作。
+
 `TaskScope` 不可拷贝不可移动，且析构会阻塞。它必须在它所依赖的系统（例如 `GpuSystem`）
 之前析构，否则取消时的析构会碰到已死的 device。
 

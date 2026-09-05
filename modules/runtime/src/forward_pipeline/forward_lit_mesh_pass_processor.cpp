@@ -34,6 +34,11 @@ void ForwardLitMeshPassProcessor::AddMeshBatch(const RendererListDesc& desc, con
         out.Reject(MeshPassRejectReason::InvalidBindings);
         return;
     }
+    if (layout.Find("ForwardObject.NormalToWorld") != nullptr &&
+        !object.SetMatrix4x4("ForwardObject.NormalToWorld", MakeNormalToWorld(scene.Primitives[batch.Primitive].LocalToWorld))) {
+        out.Reject(MeshPassRejectReason::InvalidBindings);
+        return;
+    }
     auto objectGroup = _resources.PrepareGroup(*program, binding->ObjectGroup, object);
     if (!view->second || !material->second || !objectGroup) {
         out.Reject(MeshPassRejectReason::PrepareResourceFailed);

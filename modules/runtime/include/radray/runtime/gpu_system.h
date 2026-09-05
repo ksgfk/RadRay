@@ -3,6 +3,7 @@
 #include <atomic>
 #include <chrono>
 #include <limits>
+#include <mutex>
 #include <optional>
 #include <span>
 
@@ -180,8 +181,11 @@ public:
     ~FrameUploadScheduler() noexcept;
 
     task<FrameUploadScope> BeginUpload();
+    /// Run and Pump are serialized by the runner; consume completions before reusing a flight.
     void RunUploadPhase(render::CommandBuffer* cmdBuffer, ResourceUploader& uploader, uint32_t flightIndex);
+    /// May run concurrently with Run/Pump; only queues a completed flight notification.
     void NotifyFlightComplete(uint32_t flightIndex);
+    /// Resume completed/canceled loads on the game thread.
     void PumpCompletedUploads();
 
     FrameUploadRecord* RegisterUpload(stop_token stop, std::coroutine_handle<> continuation);
@@ -191,8 +195,11 @@ private:
     bool IsUploadAlive(FrameUploadRecord* record) const noexcept;
     void ResumeRecord(FrameUploadRecord* record);
     void CancelRecord(FrameUploadRecord* record) noexcept;
+    void ApplyCompletedFlights();
 
     ManualCoroutineScheduler<FrameUploadRecord> _uploads;
+    std::mutex _completedFlightsMutex;
+    vector<uint32_t> _completedFlights;
 };
 
 /// co_await GpuSystem::Wait() 的 awaitable。恢复点在 GpuSystem::PumpWaitFrame(主线程)。
@@ -246,7 +253,7 @@ public:
     /// flight fence 完成后:读回并换算耗时。
     void Resolve(uint32_t flightIndex);
 
-    float GetLastGpuTimeMs() const noexcept { return _lastGpuTimeMs; }
+    float GetLastGpuTimeMs() const noexcept { return _lastGpuTimeMs.load(std::memory_order_relaxed); }
 
 private:
     static constexpr uint32_t TimestampQueryCount = 2;
@@ -260,7 +267,7 @@ private:
     render::CommandQueue* _queue;
     bool _readbackNeedsBarrier{false};
     vector<FrameTiming> _frames;
-    float _lastGpuTimeMs{0.0f};
+    std::atomic<float> _lastGpuTimeMs{0.0f};
 };
 
 /// Render 回调的唯一入参，封装一帧录制 API。
@@ -372,7 +379,7 @@ public:
     uint32_t GetFlightDataCount() const noexcept { return _flightDataCount; }
     uint64_t GetFrameIndex() const noexcept { return _nowFrameIndex; }
     uint32_t GetCurrentFlightIndex() const noexcept;
-    std::chrono::duration<float> GetLastFrameLatency() const noexcept { return _lastFrameLatency; }
+    std::chrono::duration<float> GetLastFrameLatency() const noexcept { return std::chrono::duration<float>{_lastFrameLatencySeconds.load(std::memory_order_relaxed)}; }
     void AdvanceFrameIndex() noexcept { ++_nowFrameIndex; }
 
     /// 上一帧 GPU 执行耗时(毫秒)。启用 GpuSystemDescriptor::EnableFrameProfiler 后由
@@ -411,7 +418,7 @@ private:
     unique_ptr<FrameUploadScheduler> _frameUploadScheduler;
     unique_ptr<GpuFrameProfiler> _frameProfiler;
     uint64_t _nowFrameIndex{0};
-    std::chrono::duration<float> _lastFrameLatency{};
+    std::atomic<float> _lastFrameLatencySeconds{0.0f};
 };
 
 template <>

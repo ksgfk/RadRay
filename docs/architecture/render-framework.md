@@ -91,8 +91,10 @@ LightComponent      → CreateRenderState → Scene::AddLight(CreateSceneProxy()
 **Scene 与 proxy 只在 game thread 使用。proxy 常驻，pipeline 输入每帧复制。** proxy 在组件 `OnRegister` 时创建，
 存在 `Scene` 的 `vector<unique_ptr<...>>` 里，`OnUnregister` 时移除。
 
-**任何属性或变换变化走 `MarkRenderStateDirty()` → 整棵 proxy 销毁重建。**
-`OnTransformChanged` 也走这条路。Light proxy 的参数在构造函数里一次性从 component 快照。
+**任何属性或变换变化走 `MarkRenderStateDirty()` → 对应 proxy 销毁重建。**
+SceneComponent 的变换、重挂接和解除挂接会递归通知自身及后代的 `OnTransformChanged`，
+使缓存世界变换的 mesh/light proxy 一起更新；拒绝把祖先挂到后代之下。Light proxy 的参数在
+构造函数里一次性从 component 快照。
 这个粒度很粗，但它让"proxy 里的数据什么时候会变"有一个确定答案：只在重建时。
 
 `Actor::FindComponent<T>()` 按拥有顺序对实际组件做指针形式 `dynamic_cast`，返回第一个可转换
@@ -115,6 +117,8 @@ struct MeshDrawArgs {
 
 `StaticMeshComponent` 按 section 保存 material，`StaticMeshSceneProxy` 自持 mesh ref、借用的 material 指针与
 local-to-world，并把 `StaticMeshSection` 的 `FirstIndex` / `IndexCount` / `VertexOffset` 投影成 draw。
+mesh 可以在 Loading 时设置到组件；`World::Tick` 中的组件 tick 在它变成有效 Ready 资产后创建
+proxy，已存在且仍有效的 proxy 保持不变。清空或替换 mesh 仍立即刷新对应渲染状态。
 每个 flight 在 PrepareFrame 中构建一次与 view 无关的 `RenderSceneSnapshot`：primitive 保存变换、
 世界 AABB、layer mask 和连续 MeshBatch 范围；batch 借用 geometry 并保存 section draw range、primitive
 和 material 索引。材质按首次出现去重，所有 pass 的 program 分配帧内整数 ID。光源保存参数和球形界限。

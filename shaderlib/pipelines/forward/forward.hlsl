@@ -33,7 +33,7 @@ ForwardVertexOutput VSMain(ForwardVertexInput input) {
     output.Position = mul(ForwardView.ViewProj, positionWorld);
     output.PositionWorld = positionWorld.xyz;
     output.NormalWorld = safe_normalize(
-        mul((float3x3)ForwardObject.LocalToWorld, input.Normal),
+        mul((float3x3)ForwardObject.NormalToWorld, input.Normal),
         float3(0.0f, 1.0f, 0.0f));
     output.UV = input.UV;
     return output;

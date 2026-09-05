@@ -19,6 +19,28 @@ RenderViewDesc CollectRenderView(const CameraComponent& camera) {
     return view;
 }
 
+Eigen::Matrix4f MakeNormalToWorld(const Eigen::Matrix4f& localToWorld) {
+    Eigen::Matrix3f linear = localToWorld.block<3, 3>(0, 0);
+    Eigen::Matrix4f result = Eigen::Matrix4f::Zero();
+    const float scale = linear.cwiseAbs().maxCoeff();
+    if (!linear.allFinite() || scale == 0.0f) {
+        return result;
+    }
+    linear /= scale;
+    Eigen::Matrix3f cofactor;
+    cofactor.col(0) = linear.col(1).cross(linear.col(2));
+    cofactor.col(1) = linear.col(2).cross(linear.col(0));
+    cofactor.col(2) = linear.col(0).cross(linear.col(1));
+    if (linear.col(0).dot(cofactor.col(0)) < 0.0f) {
+        cofactor = -cofactor;
+    }
+    const float normalScale = cofactor.cwiseAbs().maxCoeff();
+    if (normalScale > 0.0f) {
+        result.block<3, 3>(0, 0) = cofactor / normalScale;
+    }
+    return result;
+}
+
 bool FillViewParameters(
     ShaderParameterStorage& storage,
     const CullingResults& culling,

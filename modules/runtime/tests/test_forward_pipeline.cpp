@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <atomic>
 #include <functional>
+#include <cmath>
 #include "runtime_test_support.h"
 #include "gpu_test_fixture.h"
 #include "forward_test_access.h"
@@ -56,12 +57,18 @@ enum class Scenario { Baseline,
                       DepthPrepass,
                       PartialDepth,
                       TransparentDepth,
-                      MultipleViews };
+                      MultipleViews,
+                      NonUniformNormals,
+                      MirroredNormals,
+                      FlattenedNormals };
+bool UsesScaledNormals(Scenario scenario) {
+    return scenario == Scenario::NonUniformNormals || scenario == Scenario::MirroredNormals || scenario == Scenario::FlattenedNormals;
+}
 bool UsesDepth(Scenario scenario) {
     return scenario == Scenario::DepthPrepass || scenario == Scenario::PartialDepth || scenario == Scenario::TransparentDepth || scenario == Scenario::MultipleViews || scenario == Scenario::ThreadedStress;
 }
 bool UsesOffscreen(Scenario scenario) {
-    return scenario == Scenario::OffscreenViews || scenario == Scenario::DepthPrepass || scenario == Scenario::PartialDepth || scenario == Scenario::TransparentDepth || scenario == Scenario::MultipleViews;
+    return scenario == Scenario::OffscreenViews || scenario == Scenario::DepthPrepass || scenario == Scenario::PartialDepth || scenario == Scenario::TransparentDepth || scenario == Scenario::MultipleViews || UsesScaledNormals(scenario);
 }
 constexpr AssetId kMeshId{
     0x11111111, 0x2222, 0x3333, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb};
@@ -75,13 +82,16 @@ struct QuadVertex {
 };
 
 // A unit quad facing -Z so the camera at -Z looks at its front face.
-MeshResource MakeQuadMeshResource() {
-    constexpr array<QuadVertex, 4> vertices{
+MeshResource MakeQuadMeshResource(bool slantedNormals = false) {
+    array<QuadVertex, 4> vertices{
         QuadVertex{{-1.0f, -1.0f, 0.0f}, {0.0f, 0.0f, -1.0f}, {0.0f, 1.0f}},
         QuadVertex{{1.0f, -1.0f, 0.0f}, {0.0f, 0.0f, -1.0f}, {1.0f, 1.0f}},
         QuadVertex{{1.0f, 1.0f, 0.0f}, {0.0f, 0.0f, -1.0f}, {1.0f, 0.0f}},
         QuadVertex{{-1.0f, 1.0f, 0.0f}, {0.0f, 0.0f, -1.0f}, {0.0f, 0.0f}}};
     constexpr array<uint32_t, 6> indices{0, 2, 1, 0, 3, 2};
+    if (slantedNormals) {
+        for (auto& vertex : vertices) vertex.Normal[0] = 1;
+    }
 
     MeshResource resource;
     resource.Name = "forward-pipeline-test-quad";
@@ -273,7 +283,7 @@ protected:
             .Id = kMeshId,
             .Task = LoadStaticMesh(
                 GetGpuSystem()->GetFrameUploadScheduler(),
-                MakeQuadMeshResource()),
+                MakeQuadMeshResource(UsesScaledNormals(_scenario))),
             .DebugName = "forward-pipeline-test-quad"});
         if (!_texture.IsValid() || !_mesh.IsValid()) {
             Fail("asset registration failed");
@@ -367,6 +377,12 @@ protected:
         _pointLightActor.Get()->SetRootComponent(pointLight);
         pointLight->SetWorldLocation(Eigen::Vector3f{1.0f, 1.0f, -2.0f});
         pointLight->SetIntensity(2.0f);
+        if (UsesScaledNormals(_scenario)) {
+            _meshComponent->SetRelativeScale({_scenario == Scenario::MirroredNormals ? -2.0f : 2.0f, 1.0f,
+                                              _scenario == Scenario::FlattenedNormals ? 0.0f : 1.0f});
+            _material->GetPipelineState().Primitive.Cull = render::CullMode::None;
+            pointLight->SetIntensity(0);
+        }
 
         if (_scenario == Scenario::ThreadedStress) {
             auto second = MakeWhiteTexture(*GetDevice());
@@ -527,6 +543,13 @@ protected:
             readback->InvalidateMappedRange({0, row * desc.Height});
             const auto* pixel = mapped + row * (desc.Height / 2) + (desc.Width / (_scenario == Scenario::MultipleViews ? 4 : 2)) * 4;
             if (i == 0) {
+                if (UsesScaledNormals(_scenario)) {
+                    const float cosine = _scenario == Scenario::FlattenedNormals ? 1.0f : 2.0f / std::sqrt(5.0f);
+                    const float red = (.03f + 3.0f * cosine) / 3.14159265358979323846f;
+                    const float mappedRed = red / (1 + .212671f * red);
+                    const float expected = (1.055f * std::pow(mappedRed, 1.0f / 2.4f) - .055f) * 255;
+                    EXPECT_NEAR(pixel[0], expected, 2);
+                }
                 if (_scenario == Scenario::TransparentDepth) {
                     EXPECT_GT(pixel[0], 20);
                     EXPECT_GT(pixel[1], 20);
@@ -944,5 +967,11 @@ TEST(RadRayRuntimeForwardPipeline, D3D12TransparentExcludedFromDepthAndBlends) {
 TEST(RadRayRuntimeForwardPipeline, VulkanTransparentExcludedFromDepthAndBlends) { RunForwardPipeline(render::RenderBackend::Vulkan, Scenario::TransparentDepth); }
 TEST(RadRayRuntimeForwardPipeline, D3D12MultipleViewsShareAttachments) { RunForwardPipeline(render::RenderBackend::D3D12, Scenario::MultipleViews); }
 TEST(RadRayRuntimeForwardPipeline, VulkanMultipleViewsShareAttachments) { RunForwardPipeline(render::RenderBackend::Vulkan, Scenario::MultipleViews); }
+TEST(RadRayRuntimeForwardPipeline, D3D12NonUniformScaleUsesInverseTransposeNormals) { RunForwardPipeline(render::RenderBackend::D3D12, Scenario::NonUniformNormals); }
+TEST(RadRayRuntimeForwardPipeline, VulkanNonUniformScaleUsesInverseTransposeNormals) { RunForwardPipeline(render::RenderBackend::Vulkan, Scenario::NonUniformNormals); }
+TEST(RadRayRuntimeForwardPipeline, D3D12MirroredScalePreservesNormalDirection) { RunForwardPipeline(render::RenderBackend::D3D12, Scenario::MirroredNormals); }
+TEST(RadRayRuntimeForwardPipeline, VulkanMirroredScalePreservesNormalDirection) { RunForwardPipeline(render::RenderBackend::Vulkan, Scenario::MirroredNormals); }
+TEST(RadRayRuntimeForwardPipeline, D3D12FlattenedMeshKeepsFiniteNormals) { RunForwardPipeline(render::RenderBackend::D3D12, Scenario::FlattenedNormals); }
+TEST(RadRayRuntimeForwardPipeline, VulkanFlattenedMeshKeepsFiniteNormals) { RunForwardPipeline(render::RenderBackend::Vulkan, Scenario::FlattenedNormals); }
 
 }  // namespace radray

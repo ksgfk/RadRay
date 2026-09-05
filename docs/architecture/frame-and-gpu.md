@@ -138,6 +138,17 @@ co_await scope->WaitGpu();                          // 恢复点在该 flight fe
 `TextureAsset` 与 `StaticMesh` 的 loader 就走这条路。这样"构造即完整"得以兑现：
 资产一出生即可被采样绑定。
 
+取消发生在 upload phase 之前时，等待者可以立即退出；一旦开始录制，取消只标记请求，
+`WaitGpu` 必须等对应 flight fence 完成后才终止加载协程。loader 的局部 GPU payload 因此会
+活过所有已录制的复制命令。`UploadMeshResource` 先分配全部目标 buffer，再开始录制；任一
+目标分配失败时，不留下引用局部资源的命令。
+
+`NotifyFlightComplete` 可以与 game thread 并发，只把 flight ID 写入受 mutex 保护的完成队列，
+不遍历或修改上传记录。runner 串行驱动 `RunUploadPhase` 与 `PumpCompletedUploads`：二者先
+应用完成通知，只有后者在 game thread 恢复等待 fence 的加载协程。复用 flight 前先消费旧通知，
+避免上一轮完成事件误完成新上传。关停的 `WaitAndCleanupCompletedFlights` 在 GPU idle 后也会
+pump 上传调度器，然后才能销毁 AssetManager 及其 task scope。
+
 ## 渲染资源的帧寿命
 
 RenderSystem 继续拥有 ShaderJit、artifact/program cache；ShaderProgram 自持 PSO map。program 的
@@ -165,6 +176,7 @@ generation 进入当前 flight retire bin，到同 flight 下次安全 Begin 才
 由 `GpuSystem` 在 `BeginFrameRecord`/`EndFrameRecordAndSubmit` 自动包裹本帧录制，
 `CompleteFlight` 时 resolve。应用只读 `GetLastGpuTimeMs()`。后端 readback barrier 差异
 内部隐藏。
+最近一次 GPU 耗时和 frame latency 通过原子标量发布，允许 game thread 在另一 flight 回收时读取。
 
 ## 呈现
 

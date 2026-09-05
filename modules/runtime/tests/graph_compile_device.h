@@ -4,7 +4,7 @@
 
 namespace radray::test {
 
-class GraphCompileDevice final : public render::Device {
+class GraphCompileDevice : public render::Device {
 public:
     GraphCompileDevice() {
         Capabilities.Limits = {8, 16384, 16384, 2048, 2048, UINT64_MAX, 65536, 128, 256};

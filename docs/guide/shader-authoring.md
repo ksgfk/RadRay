@@ -150,7 +150,7 @@ group 的语义属于具体 pipeline，不是 shaderlib 全局规则。当前 fo
 |---|---|---|
 | 0 | per-view | `ForwardView`：view-projection、eye 与光照数组 |
 | 1 | per-material | `ForwardMaterial`、`AlbedoTexture`、`LinearSampler` |
-| 2 | per-object | `ForwardObject`：local-to-world |
+| 2 | per-object | `ForwardObject`：local-to-world 与 normal-to-world |
 
 Forward 按 `ForwardView` / `ForwardMaterial` / `ForwardObject` declaration name 从当前 artifact
 读取 group；上表只是产品 shader 的当前数字，不是 CPU ABI。两 target 的组号可各自变化。

@@ -71,6 +71,8 @@ cmake --build build_runtime_only --config Debug --parallel 24
 |---|---|
 | `test_runtime_type` | `RuntimeTypeIdTest` |
 | `test_asset_slot` | `AssetSlotTest` |
+| `test_frame_upload` | `FrameUploadTest` |
+| `test_scene_render_state` | `SceneTransformTest`, `SceneRenderStateTest` |
 | `test_asset_database` | `AssetDatabaseTest` |
 | `test_component_rtti` | `ComponentRttiTest` |
 | `test_service_registry` | `ServiceRegistryTest`（含编译期组合校验） |
@@ -85,6 +87,7 @@ cmake --build build_runtime_only --config Debug --parallel 24
 | `test_material` | `RadRayRuntimeMaterial` |
 | `test_mesh_draw` | `RadRayRuntimeMeshDraw`, `RadRayRuntimeForwardSets` |
 | `test_forward_pipeline` | `RadRayRuntimeForwardPipeline`, `RadRayRuntimeMaterial`, `RadRayRuntimeForwardBindings`, `MaterialTechnique`, `FrameDrawResources`, `RenderSceneSnapshot` |
+| `test_forward_pipeline`（法线变换） | `ForwardNormalTransform` |
 | `test_culling` | `RenderBounds`, `Culling` |
 | `test_renderer_list` | `RendererList` |
 | `test_stage_b_draw` | `StageBDraw` |

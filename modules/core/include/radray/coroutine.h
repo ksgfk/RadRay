@@ -30,6 +30,9 @@ struct ManualCoroutineRecord {
     std::coroutine_handle<> Continuation{};
     stop_token Stop;
     bool Canceled{false};
+    /// Set false while an external operation must finish before the coroutine can unwind.
+    /// Cancellation still marks the record; its owner must resume it after that operation.
+    bool ResumeOnCancel{true};
 };
 
 template <class TRecord>
@@ -123,7 +126,9 @@ public:
             return;
         }
         record->Canceled = true;
-        ResumeRecord(record);
+        if (record->ResumeOnCancel) {
+            ResumeRecord(record);
+        }
     }
 
     void CancelAll() noexcept {

@@ -11,6 +11,7 @@
 #include <radray/runtime/window_manager.h>
 
 #include <cstring>
+#include <algorithm>
 #include <type_traits>
 
 namespace radray {
@@ -19,7 +20,9 @@ namespace radray {
 //  FrameUploadScheduler
 // ═══════════════════════════════════════════════════════════════
 
-FrameUploadScheduler::~FrameUploadScheduler() noexcept = default;
+FrameUploadScheduler::~FrameUploadScheduler() noexcept {
+    _uploads.CancelAll();
+}
 
 task<FrameUploadScope> FrameUploadScheduler::BeginUpload() {
     stop_token stop = co_await CurrentStopToken();
@@ -60,6 +63,7 @@ void FrameUploadScheduler::RunUploadPhase(
     render::CommandBuffer* cmdBuffer,
     ResourceUploader& uploader,
     uint32_t flightIndex) {
+    ApplyCompletedFlights();
     vector<FrameUploadRecord*> pending;
     const size_t uploadCount = _uploads.Count();
     for (size_t i = 0; i < uploadCount; ++i) {
@@ -70,6 +74,9 @@ void FrameUploadScheduler::RunUploadPhase(
     }
 
     for (FrameUploadRecord* rec : pending) {
+        if (!IsUploadAlive(rec)) {
+            continue;
+        }
         if (rec->Canceled || rec->Stop.stop_requested()) {
             rec->Canceled = true;
             ResumeRecord(rec);
@@ -83,6 +90,7 @@ void FrameUploadScheduler::RunUploadPhase(
         rec->Uploader = &uploader;
         rec->FlightIndex = flightIndex;
         rec->CurrentStage = FrameUploadStage::InFrame;
+        rec->ResumeOnCancel = false;
 
         ResumeRecord(rec);
 
@@ -97,19 +105,34 @@ void FrameUploadScheduler::RunUploadPhase(
 }
 
 void FrameUploadScheduler::NotifyFlightComplete(uint32_t flightIndex) {
+    std::lock_guard lock(_completedFlightsMutex);
+    _completedFlights.push_back(flightIndex);
+}
+
+void FrameUploadScheduler::ApplyCompletedFlights() {
+    vector<uint32_t> completed;
+    {
+        std::lock_guard lock(_completedFlightsMutex);
+        completed.swap(_completedFlights);
+    }
+    if (completed.empty()) {
+        return;
+    }
     const size_t uploadCount = _uploads.Count();
     for (size_t i = 0; i < uploadCount; ++i) {
         FrameUploadRecord* rec = _uploads.At(i);
         if (rec == nullptr) {
             continue;
         }
-        if (rec->CurrentStage == FrameUploadStage::AwaitingFence && rec->FlightIndex == flightIndex) {
+        if (rec->CurrentStage == FrameUploadStage::AwaitingFence &&
+            std::find(completed.begin(), completed.end(), rec->FlightIndex) != completed.end()) {
             rec->CurrentStage = FrameUploadStage::FenceComplete;
         }
     }
 }
 
 void FrameUploadScheduler::PumpCompletedUploads() {
+    ApplyCompletedFlights();
     bool resumedAny = true;
     while (resumedAny) {
         resumedAny = false;
@@ -118,7 +141,8 @@ void FrameUploadScheduler::PumpCompletedUploads() {
             if (rec->Stop.stop_requested()) {
                 rec->Canceled = true;
             }
-            if (rec->Canceled || rec->CurrentStage == FrameUploadStage::FenceComplete) {
+            if ((rec->Canceled && rec->CurrentStage == FrameUploadStage::AwaitingFrame) ||
+                rec->CurrentStage == FrameUploadStage::FenceComplete) {
                 ResumeRecord(rec);
                 if (IsUploadAlive(rec)) {
                     EraseUpload(rec);
@@ -138,7 +162,7 @@ bool WaitFrameUploadGpuAwaitable::await_ready() noexcept {
     if (_record->Stop.stop_requested()) {
         _record->Canceled = true;
     }
-    return _record->Canceled || _record->CurrentStage == FrameUploadStage::FenceComplete;
+    return _record->CurrentStage == FrameUploadStage::FenceComplete;
 }
 
 bool WaitFrameUploadGpuAwaitable::await_suspend(std::coroutine_handle<> h) noexcept {
@@ -147,7 +171,6 @@ bool WaitFrameUploadGpuAwaitable::await_suspend(std::coroutine_handle<> h) noexc
     }
     if (_record->Stop.stop_requested()) {
         _record->Canceled = true;
-        return false;
     }
     _record->Continuation = h;
     _record->CurrentStage = FrameUploadStage::AwaitingFence;
@@ -300,7 +323,8 @@ bool GpuSystem::CompleteFlight(uint32_t flightIndex) {
         return false;
     }
 
-    _lastFrameLatency = std::chrono::steady_clock::now() - flight.FrameStartTime;
+    const std::chrono::duration<float> latency = std::chrono::steady_clock::now() - flight.FrameStartTime;
+    _lastFrameLatencySeconds.store(latency.count(), std::memory_order_relaxed);
     flight.Signal = GpuSystem::FenceSignal::Invalid();
     if (_frameProfiler != nullptr) {
         _frameProfiler->Resolve(flightIndex);
@@ -451,7 +475,7 @@ void GpuFrameProfiler::Resolve(uint32_t flightIndex) {
         return;
     }
     const double elapsedNs = static_cast<double>(ticks[1] - ticks[0]) * calibration.TickPeriodNs;
-    _lastGpuTimeMs = static_cast<float>(elapsedNs / 1'000'000.0);
+    _lastGpuTimeMs.store(static_cast<float>(elapsedNs / 1'000'000.0), std::memory_order_relaxed);
 }
 
 // ═════════════════════════════════════════════════════════════════
@@ -569,6 +593,7 @@ void GpuSystem::WaitAndCleanupCompletedFlights() {
     for (uint32_t flightIndex = 0; flightIndex < _flights.size(); ++flightIndex) {
         PumpWaitFrame(flightIndex);
     }
+    PumpFrameUploadScheduler();
 }
 
 AppFrameContext GpuSystem::BeginFrameRecord(

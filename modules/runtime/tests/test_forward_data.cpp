@@ -20,6 +20,33 @@ namespace {
 
 const std::filesystem::path kProjectRoot{RADRAY_PROJECT_DIR};
 
+TEST(ForwardNormalTransform, MatchesInverseTransposeWithScaleShearAndReflection) {
+    for (const Eigen::Vector3f& scale : {Eigen::Vector3f{2, 1, .5f}, Eigen::Vector3f{-2, 3, 1}, Eigen::Vector3f{2e-8f, 1e-8f, .5e-8f}}) {
+        Eigen::Matrix4f transform = Eigen::Matrix4f::Identity();
+        transform.block<3, 3>(0, 0) = Eigen::AngleAxisf{.7f, Eigen::Vector3f{1, 2, 3}.normalized()}.toRotationMatrix() * scale.asDiagonal();
+        transform.col(1) += transform.col(0) * .3f;
+        const Eigen::Matrix3f linear = transform.block<3, 3>(0, 0);
+        const Eigen::Matrix3f normalMatrix = forward_detail::MakeNormalToWorld(transform).block<3, 3>(0, 0);
+        const Eigen::Vector3f normal{1, 1, -1};
+        const Eigen::Vector3f tangent{1, 0, 1};
+        const Eigen::Vector3f actual = (normalMatrix * normal).normalized();
+        EXPECT_TRUE(actual.isApprox((linear.inverse().transpose() * normal).normalized(), 1e-5f));
+        EXPECT_NEAR(actual.dot((linear * tangent).normalized()), 0, 1e-5f);
+    }
+}
+
+TEST(ForwardNormalTransform, SingularTransformsStayFiniteAndKeepSurvivingPlaneNormal) {
+    Eigen::Matrix4f transform = Eigen::Matrix4f::Identity();
+    transform(0, 0) = 2;
+    transform(2, 2) = 0;
+    const auto normal = forward_detail::MakeNormalToWorld(transform);
+    EXPECT_TRUE(normal.allFinite());
+    EXPECT_TRUE((normal.block<3, 3>(0, 0) * Eigen::Vector3f{1, 0, -1}).isApprox(Eigen::Vector3f{0, 0, -1}));
+    transform(1, 1) = 0;
+    EXPECT_TRUE(forward_detail::MakeNormalToWorld(transform).allFinite());
+    EXPECT_TRUE(forward_detail::MakeNormalToWorld(Eigen::Matrix4f::Zero()).allFinite());
+}
+
 Nullable<unique_ptr<ShaderProgram>> CompileProgram(render::Device& device, const std::filesystem::path& path, bool production = false) {
     auto source = ReadBinaryFile(path);
     if (!source) {
@@ -234,6 +261,7 @@ TEST(RadRayRuntimeForwardBindings, ResolvesProductionDeclarations) {
         EXPECT_EQ(buffers[bindings->ViewBufferIndex].Name, "ForwardView");
         EXPECT_EQ(buffers[bindings->MaterialBufferIndex].Name, "ForwardMaterial");
         EXPECT_EQ(buffers[bindings->ObjectBufferIndex].Name, "ForwardObject");
+        EXPECT_NE(production->GetParameterLayout().Find("ForwardObject.NormalToWorld"), nullptr);
         EXPECT_EQ(buffers[bindings->ViewBufferIndex].Group, bindings->ViewGroup);
         EXPECT_EQ(buffers[bindings->MaterialBufferIndex].Group, bindings->MaterialGroup);
         EXPECT_EQ(buffers[bindings->ObjectBufferIndex].Group, bindings->ObjectGroup);

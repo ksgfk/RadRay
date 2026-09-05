@@ -20,6 +20,7 @@ struct ForwardMaterialData {
 
 struct ForwardObjectData {
     float4x4 LocalToWorld;
+    float4x4 NormalToWorld;
 };
 
 VK_BINDING(0, 0)

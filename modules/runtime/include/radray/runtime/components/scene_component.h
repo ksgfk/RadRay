@@ -48,11 +48,12 @@ public:
     std::span<SceneComponent* const> GetAttachChildren() const noexcept { return _children; }
 
 protected:
-    /// Transform 变更后调用，派生类可覆写以标记渲染状态脏
+    /// 本节点或祖先的世界变换变更后调用，派生类可覆写以标记渲染状态脏。
     virtual void OnTransformChanged() {}
 
 private:
     Eigen::Matrix4f ComputeLocalMatrix() const noexcept;
+    void NotifyTransformChanged();
 
     // Relative transform（相对于 parent）
     Eigen::Quaternionf _relativeRotation{Eigen::Quaternionf::Identity()};

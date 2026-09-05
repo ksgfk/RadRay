@@ -8,6 +8,13 @@ namespace radray {
 
 StaticMeshComponent::~StaticMeshComponent() noexcept = default;
 
+void StaticMeshComponent::TickComponent(float deltaTime) {
+    PrimitiveComponent::TickComponent(deltaTime);
+    if (IsRegistered() && (GetSceneProxy() != nullptr) != ShouldCreateRenderState()) {
+        MarkRenderStateDirty();
+    }
+}
+
 void StaticMeshComponent::SetStaticMesh(StreamingAssetRef<StaticMesh> mesh) {
     if (_mesh == mesh) {
         return;

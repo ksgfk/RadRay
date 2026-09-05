@@ -17,6 +17,8 @@ public:
     StaticMeshComponent() noexcept = default;
     ~StaticMeshComponent() noexcept override;
 
+    void TickComponent(float deltaTime) override;
+
     void SetStaticMesh(StreamingAssetRef<StaticMesh> mesh);
     const StreamingAssetRef<StaticMesh>& GetStaticMesh() const noexcept { return _mesh; }
 
