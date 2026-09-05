@@ -12,12 +12,14 @@
 #include <radray/runtime/render_framework/render_graph_runtime.h>
 #include <radray/runtime/render_framework/scene.h>
 #include <radray/runtime/shader_jit.h>
+#include <radray/runtime/service_traits.h>
 #include <radray/shader/shader_compiler_contract.h>
 #include <radray/types.h>
 
 namespace radray {
 
 class Application;
+class GpuSystem;
 class AppFrameContext;
 class ShaderProgram;
 struct AppFrameTarget;
@@ -48,7 +50,10 @@ public:
     ~RenderSystem() noexcept;
 
     /// 装配阶段调用并创建 RenderPassRegistry。
-    void OnInitialize();
+    [[nodiscard]] ServiceStatus OnInitialize();
+    /// Requires GPU idle and released World/scene users; also accepts partial initialization.
+    void OnShutdown() noexcept;
+    void SetGpuSystem(Nullable<GpuSystem*> gpu) noexcept { _gpuSystem = gpu; }
 
     void SetPipeline(unique_ptr<RenderPipeline> pipeline) noexcept;
 
@@ -135,6 +140,7 @@ private:
     void ClearTarget(AppFrameContext& ctx, RenderSurfaceFrame& target);
 
     Application* _app{nullptr};
+    Nullable<GpuSystem*> _gpuSystem;
     unique_ptr<render::RenderPassRegistry> _renderPassRegistry;
     RenderOutputRegistry _outputs;
     vector<RenderFramePlan> _framePlans;
@@ -150,6 +156,16 @@ private:
     vector<unique_ptr<Scene>> _scenes;
     // Only the game thread touches these refs; shutdown releases them after GPU idle.
     vector<vector<StreamingAssetRefAny>> _retainedAssets;
+};
+
+template <>
+struct ServiceTraits<RenderSystem> {
+    static constexpr std::string_view Name{"RenderSystem"};
+    using Dependencies = TypeList<Required<GpuSystem>>;
+    static void Inject(RenderSystem& self, GpuSystem& gpu) noexcept { self.SetGpuSystem(&gpu); }
+    static ServiceStatus Initialize(RenderSystem& self) { return self.OnInitialize(); }
+    static void Shutdown(RenderSystem& self) noexcept { self.OnShutdown(); }
+    static void Unwire(RenderSystem& self) noexcept { self.SetGpuSystem(nullptr); }
 };
 
 template <>

@@ -31,7 +31,7 @@ std::filesystem::path ShaderlibRoot() {
     return std::filesystem::path{RADRAY_PROJECT_DIR} / "shaderlib";
 }
 
-TEST(RadRayShaderLibPass, ProductPassesCompileAsAtomicTwoTargetVariants) {
+TEST(RadRayShaderLibPass, PassesCompileAsAtomicTwoTargetVariants) {
     struct BindingFact {
         std::string_view Name;
         uint32_t DxilGroup;
@@ -43,7 +43,6 @@ TEST(RadRayShaderLibPass, ProductPassesCompileAsAtomicTwoTargetVariants) {
     };
     struct PassCase {
         std::string_view SourceName;
-        std::string_view RelativePath;
         shader::ShaderKind Kind;
         size_t EntryCount;
         std::span<const BindingFact> Bindings;
@@ -62,16 +61,16 @@ TEST(RadRayShaderLibPass, ProductPassesCompileAsAtomicTwoTargetVariants) {
         {"ForwardView", 0, 0, 0, 0, 1, "ForwardDepthViewData"},
         {"ForwardObject", 2, 0, 2, 0, 1, "ForwardDepthObjectData"}};
     const PassCase cases[] = {
-        {"pipelines/forward/forward.hlsl", "pipelines/forward/forward.hlsl", shader::ShaderKind::Graphics, 2, forwardBindings, "QUALITY", "low"},
-        {"passes/depth.hlsl", "passes/depth.hlsl", shader::ShaderKind::Graphics, 1, {}, "DEPTH_MODE", "regular"},
-        {"pipelines/forward/depth_only.hlsl", "pipelines/forward/depth_only.hlsl", shader::ShaderKind::Graphics, 1, depthOnlyBindings, "", ""},
-        {"passes/compute.hlsl", "passes/compute.hlsl", shader::ShaderKind::Compute, 1, computeBindings, "COMPUTE_MODE", "clear"}};
+        {"shaderlib/pipelines/forward/forward.hlsl", shader::ShaderKind::Graphics, 2, forwardBindings, "QUALITY", "low"},
+        {"modules/shader_compiler/tests/data/depth.hlsl", shader::ShaderKind::Graphics, 1, {}, "DEPTH_MODE", "regular"},
+        {"shaderlib/pipelines/forward/depth_only.hlsl", shader::ShaderKind::Graphics, 1, depthOnlyBindings, "", ""},
+        {"modules/shader_compiler/tests/data/compute.hlsl", shader::ShaderKind::Compute, 1, computeBindings, "COMPUTE_MODE", "clear"}};
 
     Client client;
     ASSERT_TRUE(client.IsAvailable());
     const vector<std::filesystem::path> includePaths{ShaderlibRoot()};
     for (const PassCase& pass : cases) {
-        const vector<byte> source = ReadBytes(ShaderlibRoot() / pass.RelativePath);
+        const vector<byte> source = ReadBytes(std::filesystem::path{RADRAY_PROJECT_DIR} / pass.SourceName);
         ASSERT_FALSE(source.empty()) << pass.SourceName;
         const DiscoveryResult discovery = client.DiscoverSourceContract(
             shader::SourceContractRequest{
@@ -226,18 +225,18 @@ TEST(RadRayShaderLibPass, ForwardQualityKeywordChangesBytecode) {
     }
 }
 
-TEST(RadRayShaderLibPass, ProductPassesDeclareBothTargetBindingsExplicitly) {
+TEST(RadRayShaderLibPass, PassesDeclareBothTargetBindingsExplicitly) {
     struct BindingCase {
         std::string_view RelativePath;
         bool HasResources;
     };
     constexpr BindingCase cases[] = {
-        {"pipelines/forward/bindings.hlsli", true},
-        {"passes/depth.hlsl", false},
-        {"passes/compute.hlsl", true}};
+        {"shaderlib/pipelines/forward/bindings.hlsli", true},
+        {"modules/shader_compiler/tests/data/depth.hlsl", false},
+        {"modules/shader_compiler/tests/data/compute.hlsl", true}};
 
     for (const BindingCase& pass : cases) {
-        const vector<byte> source = ReadBytes(ShaderlibRoot() / pass.RelativePath);
+        const vector<byte> source = ReadBytes(std::filesystem::path{RADRAY_PROJECT_DIR} / pass.RelativePath);
         ASSERT_FALSE(source.empty()) << pass.RelativePath;
         const string text{
             reinterpret_cast<const char*>(source.data()),

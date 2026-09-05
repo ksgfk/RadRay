@@ -73,7 +73,7 @@ cmake --build build_runtime_only --config Debug --parallel 24
 | `test_asset_slot` | `AssetSlotTest` |
 | `test_asset_database` | `AssetDatabaseTest` |
 | `test_component_rtti` | `ComponentRttiTest` |
-| `test_service_registry` | `ServiceRegistryTest`, `ServiceRegistryDeathTest` |
+| `test_service_registry` | `ServiceRegistryTest`（含编译期组合校验） |
 | `test_render_pass_registry` | `RenderPassCacheKeyTest`, `FramebufferCacheKeyTest`, `RenderPassRegistryTest` |
 | `test_device_capabilities` | `TextureDescriptorValidation`, `DeviceCapabilitiesTest` |
 | `test_render_foundation` | `RenderWorkloadTest`, `RenderFoundationTest` |
@@ -126,9 +126,6 @@ CTest 阶段避免构建期竞争。修改注册逻辑时，比较各 exe 的 `-
 .\build_debug\_build\Debug\example_lambert_sphere.exe --backend d3d12
 .\build_debug\_build\Debug\example_lambert_sphere.exe --backend vulkan
 ```
-
-可自由漫游的完整展示样例见[潮汐光庭](tidal-atrium.md)，包含资产生成、控制按键、双后端巡游与
-图像读回验证。其独立目标为 `example_tidal_atrium`。
 
 只构建 raw shader CLI 可以关闭 render/runtime/tests 并单独选择工具目标：
 

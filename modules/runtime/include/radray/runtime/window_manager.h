@@ -8,7 +8,7 @@
 #include <radray/types.h>
 // #include <radray/render/rhi.h>
 #include <radray/window/native_window.h>
-#include <radray/runtime/service_registry.h>
+#include <radray/runtime/service_traits.h>
 #include <radray/runtime/render_framework/render_output.h>
 
 namespace radray {
@@ -110,10 +110,10 @@ public:
     void SetPresentMode(render::PresentMode presentMode) noexcept;
     void DispatchEvents() noexcept;
     sigslot::signal<NativeWindow*>& EventModalLoopTick() noexcept;
-    void SetGpuSystem(GpuSystem* gpuSystem) noexcept { _gpuSystem = gpuSystem; }
+    void SetGpuSystem(Nullable<GpuSystem*> gpuSystem) noexcept { _gpuSystem = gpuSystem.Get(); }
     GpuSystem* GetGpuSystem() const noexcept { return _gpuSystem; }
     /// 注入渲染系统(非拥有)。窗口在 backbuffer view 失效时需要淘汰其上的 Framebuffer 缓存。
-    void SetRenderSystem(RenderSystem* renderSystem) noexcept { _renderSystem = renderSystem; }
+    void SetRenderSystem(Nullable<RenderSystem*> renderSystem) noexcept { _renderSystem = renderSystem.Get(); }
     RenderSystem* GetRenderSystem() const noexcept { return _renderSystem; }
     void DetachAllSwapChains() noexcept;
     NativeWindow* FindMainNativeWindow(NativeWindowType type) const noexcept;
@@ -128,11 +128,11 @@ private:
     std::optional<render::PresentMode> _desiredPresentMode;
 };
 
-/// 依赖声明(非侵入,类外特化):WindowManager 需要 GpuSystem 与 RenderSystem,
-/// 复用已有 public setter。
 template <>
 struct ServiceTraits<WindowManager> {
-    static constexpr auto Inject = std::tuple{&WindowManager::SetGpuSystem, &WindowManager::SetRenderSystem};
+    using Dependencies = TypeList<Link<GpuSystem>, Link<RenderSystem>>;
+    static void Inject(WindowManager& self, GpuSystem& gpu, RenderSystem& render) noexcept;
+    static void Unwire(WindowManager& self) noexcept;
 };
 
 template <>

@@ -193,7 +193,7 @@ protected:
     bool ShouldExit() const noexcept;
 
 private:
-    void InitializeRuntime(const ApplicationRuntimeDescriptor& desc);
+    bool InitializeRuntime(const ApplicationRuntimeDescriptor& desc);
     void DestroyRuntime() noexcept;
 
     unique_ptr<WindowManager> _windowManager;

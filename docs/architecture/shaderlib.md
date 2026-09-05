@@ -1,13 +1,22 @@
-> - 适用: 在 `shaderlib/` 里找现成实现；增加 HLSL 数学、光照、阴影或最小产品 pass
+> - 适用: 在 `shaderlib/` 里找现成实现；增加 HLSL 数学、光照、阴影或产品 pass
 > - 权威: 本文是 schema 7 当前 HLSL 共享库边界与 target gate 契约；完整编译契约见 shader pipeline 架构文档
-> - 锚点: `shaderlib/core/math.hlsli`, `shaderlib/core/color.hlsli`, `shaderlib/core/frame.hlsli`, `shaderlib/core/platform.hlsli`, `shaderlib/bsdf/principled.hlsli`, `shaderlib/lighting/lights.hlsli`, `shaderlib/shadow/filtering.hlsli`, `shaderlib/pipelines/forward/bindings.hlsli`, `shaderlib/pipelines/forward/forward.hlsl`, `shaderlib/passes/depth.hlsl`, `shaderlib/passes/compute.hlsl`
+> - 锚点: `shaderlib/core/math.hlsli`, `shaderlib/core/color.hlsli`, `shaderlib/core/frame.hlsli`, `shaderlib/core/platform.hlsli`, `shaderlib/bsdf/principled.hlsli`, `shaderlib/lighting/lights.hlsli`, `shaderlib/shadow/filtering.hlsli`, `shaderlib/pipelines/forward/bindings.hlsli`, `shaderlib/pipelines/forward/forward.hlsl`, `shaderlib/pipelines/forward/depth_only.hlsl`, `modules/shader_compiler/tests/data/depth.hlsl`, `modules/shader_compiler/tests/data/compute.hlsl`
 
 # shaderlib
 
 `shaderlib/` 是 HLSL 源码树，也是 compiler include 解析使用的逻辑根目录。共享数学、材质、
-光照和阴影原语位于库层；具体渲染管线的产品 source 位于 `pipelines/`，独立的 depth/compute
-最小 pass 位于 `passes/`。compiler discovery 从根 `.hlsl` 推导 entry topology 和 keyword domain；
+光照和阴影原语位于库层；具体渲染管线的产品 source 位于 `pipelines/`。
+compiler discovery 从根 `.hlsl` 推导 entry topology 和 keyword domain；
 作者不维护 sidecar metadata，active binding 与 type tree 随 concrete target lane artifact 生成。
+
+测试专用 shader 随所属模块放在 `modules/<module>/tests/`，不放入 `shaderlib/`。
+shader compiler 的最小 depth/compute 测试 source 位于 `modules/shader_compiler/tests/data/`；
+测试以仓库相对路径读取它们，共享 include root 仍是 `shaderlib/`。
+
+示例专用 shader 随示例维护，不放入 `shaderlib/`。Tidal Atrium 的 surface、sky、panel、HUD
+与 signal compute source 位于 `examples/example_tidal_atrium/shaders/`；该示例以仓库根作为
+`ShaderSourceRoot`，以仓库相对路径请求这些 source 和共享的
+`shaderlib/pipelines/forward/depth_only.hlsl`，`ShaderIncludePaths` 仍指向 `shaderlib/`。
 
 ## 分层
 
@@ -20,7 +29,6 @@
 | `lighting/` | 光源布局与辐照度求值 | 不包含 entry pass |
 | `shadow/` | 过滤、级联和 cube shadow 原语 | 不包含 pipeline binding |
 | `pipelines/` | 具体 pipeline 的 binding ABI 与产品 pass | group 语义只在所属 pipeline 内有效 |
-| `passes/` | 独立的 depth-only、compute 根 pass | 只通过 `core/platform.hlsli` 使用 target gate |
 
 ## 文件导航
 
@@ -39,9 +47,7 @@
 | `core/platform.hlsli` | `VK_LOCATION`、`VK_BINDING`、`VK_PUSH_CONSTANT` target gate |
 | `pipelines/forward/bindings.hlsli` | forward 的 view/material/object binding ABI |
 | `pipelines/forward/forward.hlsl` | 纹理 Lambert 光照与颜色转换产品 pass |
-| `pipelines/atrium/` | [潮汐光庭](../guide/tidal-atrium.md) 的 surface、sky、panel、HUD 与计算反馈示例 pass |
-| `passes/depth.hlsl` | vertex-only depth topology pass |
-| `passes/compute.hlsl` | storage buffer compute pass |
+| `pipelines/forward/depth_only.hlsl` | Forward 的 depth-only 产品 pass，执行 view/object 变换 |
 
 ## 编码约定
 
@@ -71,6 +77,6 @@ SPIR-V metadata保留完整filter/address/LOD/bias/anisotropy/compare/border/red
 immutable bit。
 
 新pass的keyword pragma必须写在根`.hlsl`；每个concrete compile request为每个group提供一个合法
-assignment。`RadRayShaderLibPass`验证forward、depth与compute三条source的双target compile、active
-binding和actual stage visibility。DXIL的`tN`、`sN`数字可以相同，但资源与sampler namespace不能
+assignment。`RadRayShaderLibPass`验证forward产品source及测试目录中的depth/compute source的双target
+compile、active binding和actual stage visibility。DXIL的`tN`、`sN`数字可以相同，但资源与sampler namespace不能
 混淆。

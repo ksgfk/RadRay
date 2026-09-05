@@ -10,10 +10,6 @@
 `examples/example_lambert_sphere` 用 `AssetManager`、`StaticMeshComponent`、`Material` 和内置
 forward pipeline 验证完整的 scene → proxy → draw 路径。
 
-`examples/example_tidal_atrium` 在这些公开接口之上实现可漫游的多展区场景、外部相机输出、计算
-反馈屏和截图读回，运行方法及展示边界见[潮汐光庭](../guide/tidal-atrium.md)。该样例在 `OnInit`
-安装管线，资产就绪前只请求 presentation fallback clear；就绪后再发布完整场景 workload。
-
 ## 分层
 
 ```
@@ -156,15 +152,17 @@ Forward 在同一张 graph 中声明可选深度预通道、opaque 和必要的 
 
 **启动**：`Run(desc)` = `InitializeRuntime` → `OnInit` → `StartLoop`。
 
-`InitializeRuntime` 走 `ServiceRegistry` 的三阶段：
+`InitializeRuntime` 创建实例后执行静态服务装配：
 
 1. 创建 5 个核心服务（`WindowManager`、`GpuSystem`、`RenderSystem`、`AssetManager`、`World`）；
-   `desc.AssetRoot` 非空时另开可选 `AssetDatabase`。交叉引用推迟到 phase 2。
-2. `Add` 全部服务后 `Wire()`。
-   数据库不进 registry；`Wire()` 后手工调用 `AssetManager::SetAssetSource`。
-3. `Initialize()`，触发 `RenderSystem::OnInitialize`（建 `RenderPassRegistry`）。
+   `desc.AssetRoot` 非空时另开可选 `AssetDatabase`。
+2. 用固定的 `ServiceRegistry<...>` 集合借用这些实例；数据库占据 `OptionalService<AssetDatabase>` 槽位。
+3. `Initialize()` 先展开所有 trait 的注入，再按编译期顺序初始化。`RenderSystem` 的 trait
+   显式调用 `OnInitialize` 创建 `RenderPassRegistry`，`AssetManager` 自动取得可选的 `IAssetSource`。
 
-之后建主窗口并挂 swapchain。
+成功后建主窗口并挂 swapchain。trait 初始化失败会先回滚，再由 `Application` 回收对象并让
+`Run` 返回 1，不进入游戏钩子和 runner。实例创建仍在 registry 之前：例如 `GpuSystem` 构造中的
+设备创建不属于 registry 初始化事务。
 
 正常 runner 走 `Shutdown`；若初始化或游戏钩子的异常绕过正常路径，`Application` 析构仍调用同一
 幂等内部 teardown（不再调用游戏侧虚钩子），先断开窗口的非 owning 引用，再按下述服务顺序回收。
@@ -211,44 +209,81 @@ Windows 下还有 `Win32ModalLoopVBlankRenderer`：模态循环（拖窗口、�
 
 ## ServiceRegistry
 
-非侵入、无单例、trait 驱动的三阶段装配。
+`ServiceRegistry<Entries...>` 是非拥有的静态装配器。系统头文件只包含轻量的
+`service_traits.h` 并声明自己的契约；Application 只列出服务集合。`service_registry.h` 中的
+`detail` 命名空间在编译期匹配提供者、检查签名并计算稳定拓扑序，装配器按类型序列展开直接调用。
+实例里只有固定 tuple 的对象指针、执行进度与状态，没有 RTTI 索引、函数指针表或运行时图。
 
 ```cpp
 template <> struct ServiceTraits<AssetManager> {
-    static constexpr auto Inject = std::tuple{&AssetManager::SetWaitFrameProcessor};
+    using Dependencies = TypeList<Required<IWaitFrameProcessor>, Optional<IAssetSource>>;
+    static void Inject(AssetManager& self, IWaitFrameProcessor& frames,
+                       Nullable<IAssetSource*> source) noexcept;
+    static void Unwire(AssetManager& self) noexcept;
 };
 ```
 
-`Inject` 的元素是 **setter 成员函数指针**，形参指针类型就是要精确 resolve 的服务键。
-查询返回 `Nullable<T*>`；未登记不会尝试派生类搜索或动态转换。
+`ServiceTraits<T>::Provides = TypeList<Interfaces...>` 显式暴露接口；具体类型 T 自动可查。
+接口必须能从 T 公开、无歧义地转换，转换在已知类型下使用 `static_cast`，保留多继承指针调整。
+同一实例的多个接口只共享一份生命周期。重复具体类型、重复导出、多个提供者、缺失必需依赖、
+非法钩子签名与生命周期环都会阻止 registry 实例化。`kValidServiceRegistry<...>` 可用于
+静态检查组合，`kInitializationOrder` 是编译期槽位索引数组；无依赖节点按集合声明顺序打破平局。
 
-三阶段：
+依赖列表的顺序也是 `Inject(T&, args...)` 的参数顺序：
 
-| 阶段 | API | 做什么 |
-|---|---|---|
-| 1 | `Add<Interfaces...>(T*)` | 非拥有登记静态类型 `T`，并只为显式列出的接口增加 resolve binding；在 typed 上下文用 `static_cast` 修正多继承偏移 |
-| 2 | `Wire()` | 展开每个服务的 `Inject`，按 `std::type_index(typeid(T))` 精确 resolve 并调 setter。**缺依赖直接 `RADRAY_ABORT`** |
-| 3 | `Initialize()` | 按登记序调用可选的 `OnInitialize()` |
+| 声明 | 注入参数 | 存在性 | 生命周期顺序 |
+|---|---|---|---|
+| `Required<T>` | `T&` | 必须是非空槽位 | 提供者先初始化、后 Shutdown |
+| `Optional<T>` | `Nullable<T*>` | 可缺类型或实例 | 存在该类型时建立顺序 |
+| `Link<T>` | `T&` | 必须是非空槽位 | 只接引用，不建立启动边 |
+| `OptionalLink<T>` | `Nullable<T*>` | 可缺类型或实例 | 只接引用，不建立启动边 |
 
-一个服务无论登记多少接口，都只有一条 lifecycle entry，所以只 Wire/Initialize 一次。null、重复
-静态类型、重复接口键和缺失必需依赖都 fail-fast。服务索引只在进程内存在，不使用稳定 GUID，
-也不建立 GUID 与 RTTI 的映射。
+所有对象先存在，再调用注入函数，因此引用环合法。需要对方已初始化的能力必须声明为
+`Required`/`Optional`，不能用 `Link` 隐藏真实的生命周期环。`const T` 依赖注入 const 视图。
 
-**分三阶段的理由**：装配发生时全部实例已存在，所以互相持有引用天然可解。
-`WindowManager` ↔ `GpuSystem` 就是一个双向环。
+普通槽位的构造参数是 `T&`；`OptionalService<T>` 接受 `Nullable<T*>`，绑定时复制存在状态，
+之后不可替换。必需依赖不能由可选槽位满足，即使调用方本次传入非空对象也一样。
+图按所有可能存在的槽位静态校验；空槽位只跳过该对象的钩子，不重新排序。
+已存在的可选服务初始化失败仍然失败，不会悄悄变成缺席。
 
-当前的装配关系：
+`Get<T>()` 返回 `T&`，要求编译期存在非可选提供者。`Resolve<T>()` 返回 `Nullable<T*>`，
+未导出的类型或空可选槽位返回空；查询直接访问固定槽位。registry 的 const 不改变借用对象的
+可变性，需要只读视图时显式查询 `const T`。查询表示对象身份，不表示已经初始化。
 
-| 服务 | Inject | OnInitialize |
-|---|---|---|
-| `WindowManager` | `SetGpuSystem`, `SetRenderSystem` | — |
-| `GpuSystem` | `SetWindowManager` | — |
-| `AssetManager` | `SetWaitFrameProcessor`（`Application` 以 `Add<IWaitFrameProcessor>(gpu)` 显式暴露接口） | — |
-| `RenderSystem` | — | 有（建 `RenderPassRegistry`） |
-| `World` | — | — |
+静态钩子契约：
 
-`AssetDatabase` 是可选依赖：`ServiceRegistry::Wire` 对缺失依赖会 abort，所以它不登记为服务，
-也不出现在 `ServiceTraits<AssetManager>::Inject`。只有 `AssetRoot` 非空且 `Open` 成功时才手工注入。
+- `Inject(T&, args...) noexcept` 只连接引用；有依赖时必须提供。没有依赖也可以提供该钩子。
+  参数必须精确匹配依赖列表，不能通过按值复制服务或其他隐式转换接受依赖。
+- `Initialize(T&) -> ServiceStatus` 显式初始化；没有钩子的服务按已就绪处理。
+- 声明 Initialize 时必须提供 `Shutdown(T&) noexcept`，并支持部分初始化；只提供 Shutdown 也合法。
+- `Unwire(T&) noexcept` 可选，在所有 Shutdown 之后解除引用。Shutdown 期间对象与引用仍有效，
+  操作已启动能力必须遵守依赖顺序。绑定对象必须活过整个调用。
+- `Name` 可选，必须引用静态存储期字符串，用来标识运行时失败；不存在时 `ServiceStatus::Service`
+  为空，`Message` 仍保留服务报告的原因。服务自身同名成员不会自动变成钩子。
+
+`Initialize()` 仅允许从 Ready 调用一次：先全部 Inject，再按编译期拓扑顺序启动。进入每个
+Initialize 前记录进度，失败时先 Shutdown 当前部分初始化的服务，再逆序处理此前服务，
+最后按注入的逆序 Unwire 全部已接线对象。错误包含 `Code/Message/Service`；失败后状态为 Failed。
+作用域守卫也在栈展开时执行相同清理，但不捕获、转换异常。注入/清理钩子不得抛异常。
+
+正常 `Shutdown()` 使用相同的反向展开，幂等；生命周期调用中的重入返回 false，重复 Initialize
+返回 InvalidState。Stopped/Failed 不允许重新启动。生命周期操作由调用方串行化；只读查询不修改
+registry，但对象的线程安全仍由对象自己保证。
+
+registry 析构不调用钩子、不释放借用对象。owner 显式选择 Shutdown 时机，负责先使 GPU、任务与
+引用持有者静默。Application 当前只用局部 registry 完成启动事务，正常运行后的对象析构仍由
+上文固定 teardown 执行；`RenderSystem::OnShutdown` 与析构共享幂等资源清理。
+
+当前系统契约：
+
+| 服务 | Provides | Dependencies | 生命周期 |
+|---|---|---|---|
+| `WindowManager` | — | `Link<GpuSystem>`, `Link<RenderSystem>` | Unwire |
+| `GpuSystem` | `IWaitFrameProcessor` | `Required<WindowManager>` | Unwire；设备已由构造创建 |
+| `AssetManager` | — | `Required<IWaitFrameProcessor>`, `Optional<IAssetSource>` | Unwire |
+| `AssetDatabase` | `IAssetSource` | — | 打开成功后作为可选实例绑定 |
+| `RenderSystem` | — | `Required<GpuSystem>` | Initialize / Shutdown / Unwire |
+| `World` | — | — | 当前由 Application 构造与析构 |
 
 ## 现状陷阱
 

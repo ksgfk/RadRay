@@ -558,8 +558,8 @@ private:
 };
 
 bool AtriumApplication::CreateMaterials() {
-    const auto surface = GetRenderSystem()->GetOrCreateShaderProgram({.SourceName = "pipelines/atrium/surface.hlsl", .LayoutRecipe = ForwardPipeline::GetLayoutRecipe()});
-    const auto depth = GetRenderSystem()->GetOrCreateShaderProgram({.SourceName = "pipelines/forward/depth_only.hlsl", .LayoutRecipe = ForwardPipeline::GetDepthOnlyLayoutRecipe()});
+    const auto surface = GetRenderSystem()->GetOrCreateShaderProgram({.SourceName = "examples/example_tidal_atrium/shaders/surface.hlsl", .LayoutRecipe = ForwardPipeline::GetLayoutRecipe()});
+    const auto depth = GetRenderSystem()->GetOrCreateShaderProgram({.SourceName = "shaderlib/pipelines/forward/depth_only.hlsl", .LayoutRecipe = ForwardPipeline::GetDepthOnlyLayoutRecipe()});
     if (!surface || !depth) return false;
     MaterialPipelineState state;
     state.Primitive.Cull = render::CullMode::None;
@@ -685,7 +685,7 @@ int main(int argc, char** argv) {
     }
     const std::filesystem::path project{RADRAY_PROJECT_DIR_DEFAULT};
     const ApplicationRuntimeDescriptor descriptor{
-        .Backend = options.Backend, .EnableValidation = options.Validation, .Multithreaded = options.Multithread, .AppName = "Tidal Atrium", .EngineName = "RadRay", .AssetRoot = atrium::AssetsRoot(), .ShaderSourceRoot = project / "shaderlib", .ShaderIncludePaths = {project / "shaderlib"}, .WindowTitle = "Tidal Atrium / RadRay", .WindowWidth = int(options.Width), .WindowHeight = int(options.Height), .BackBufferCount = 3, .FlightDataCount = 2, .BackBufferFormat = render::TextureFormat::BGRA8_UNORM, .PresentMode = render::PresentMode::Immediate};
+        .Backend = options.Backend, .EnableValidation = options.Validation, .Multithreaded = options.Multithread, .AppName = "Tidal Atrium", .EngineName = "RadRay", .AssetRoot = atrium::AssetsRoot(), .ShaderSourceRoot = project, .ShaderIncludePaths = {project / "shaderlib"}, .WindowTitle = "Tidal Atrium / RadRay", .WindowWidth = int(options.Width), .WindowHeight = int(options.Height), .BackBufferCount = 3, .FlightDataCount = 2, .BackBufferFormat = render::TextureFormat::BGRA8_UNORM, .PresentMode = render::PresentMode::Immediate};
     std::atomic_bool loggedFailure{false};
     SetLogCallback(+[](LogLevel level, std::string_view message, void* data) {
         if (level == LogLevel::Err || level == LogLevel::Critical ||

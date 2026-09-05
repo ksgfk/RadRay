@@ -99,12 +99,15 @@ device），且**恢复点在主线程**，所以析构里可以安全动 GPU �
 
 ```cpp
 template <> struct ServiceTraits<MyCache> {
-    static constexpr auto Inject = std::tuple{&MyCache::SetWaitFrameProcessor};
+    using Dependencies = TypeList<Required<IWaitFrameProcessor>>;
+    static void Inject(MyCache& self, IWaitFrameProcessor& frames) noexcept {
+        self.SetWaitFrameProcessor(&frames);
+    }
 };
 ```
 
-`Application` 登记 `GpuSystem` 时用 `Add<IWaitFrameProcessor>(gpu)` 显式暴露这个接口，
-所以 `Wire()` 能按接口的 `std::type_index` 精确解析。装配细节见「服务装配」一节。
+`ServiceTraits<GpuSystem>::Provides` 暴露 `IWaitFrameProcessor`，编译期确定唯一提供者并生成
+直接注入调用。装配细节见「服务装配」一节。
 
 目前仓库里只有资产走这条路，所以没有现成的非资产调用点可参照。
 
@@ -206,22 +209,13 @@ _windowManager.reset();
 
 ## 服务装配
 
-三阶段（实例化 → 装配 → 初始化），由 `ServiceRegistry` 驱动。构造函数只做平凡/自身初始化，
-不碰兄弟系统，故 phase 1 的顺序任意；互相引用（`WindowManager` ↔ `GpuSystem`）在 phase 2
-装配时全部实例已存在，天然可解。
+Application 先创建对象，再把它们绑定到 `ServiceRegistry<...>` 的固定槽位。各系统通过
+`ServiceTraits` 声明接口、依赖和静态钩子；编译期完成接口匹配与启动排序。
+WindowManager 用 `Link` 保存 GPU/Render 引用，GpuSystem 对窗口使用 `Required`，
+所以双向引用不会形成启动环。设备仍由 GpuSystem 构造函数创建，构造顺序不能任意交换。
 
-```cpp
-template <> struct ServiceTraits<GpuSystem> {
-    static constexpr auto Inject = std::tuple{&GpuSystem::SetWindowManager};
-};
-template <> struct ServiceTraits<AssetManager> {
-    static constexpr auto Inject = std::tuple{&AssetManager::SetWaitFrameProcessor};
-};
-```
-
-`AssetManager` 要的是 `IWaitFrameProcessor` 接口；`Application` 用
-`registry.Add<IWaitFrameProcessor>(gpu)` 同时登记 `GpuSystem` 静态类型和该接口。接口 binding
-只参与 resolve，`GpuSystem` 仍只 Wire/Initialize 一次；GUID trait 不参与服务装配。
+可选实例、错误回滚、显式 Shutdown 与 Application 的所有权边界统一见
+[ServiceRegistry](render-framework.md#serviceregistry)。GUID 与 RTTI 不参与这条装配路径。
 
 ## 游戏侧扩展点
 

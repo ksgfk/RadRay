@@ -458,6 +458,14 @@ void GpuFrameProfiler::Resolve(uint32_t flightIndex) {
 //  GpuSystem
 // ═════════════════════════════════════════════════════════════════
 
+void ServiceTraits<GpuSystem>::Inject(GpuSystem& self, WindowManager& windows) noexcept {
+    self.SetWindowManager(&windows);
+}
+
+void ServiceTraits<GpuSystem>::Unwire(GpuSystem& self) noexcept {
+    self.SetWindowManager(nullptr);
+}
+
 GpuSystem::GpuSystem(Application* app, const GpuSystemDescriptor& desc)
     : _app(app),
       _backBufferCount(desc.BackBufferCount),

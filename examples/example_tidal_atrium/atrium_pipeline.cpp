@@ -155,16 +155,16 @@ struct SignalProgram {
 };
 
 std::optional<SignalProgram> CompileSignal(Application& app) {
-    const auto path = app.GetShaderSourceRoot() / "pipelines/atrium/signal.hlsl";
+    const auto path = app.GetShaderSourceRoot() / "examples/example_tidal_atrium/shaders/signal.hlsl";
     auto source = ReadBinaryFile(path);
     if (!source) return std::nullopt;
     ShaderJit jit{app.GetShaderIncludePaths()};
     const auto target = render::GetShaderTargetForBackend(app.GetDevice()->GetBackend());
     if (!target) return std::nullopt;
-    const auto hash = jit.DiscoverContractHash("pipelines/atrium/signal.hlsl", *source, *target);
+    const auto hash = jit.DiscoverContractHash("examples/example_tidal_atrium/shaders/signal.hlsl", *source, *target);
     if (!hash) return std::nullopt;
     shader::CompileVariantRequest request{};
-    request.SourceName = "pipelines/atrium/signal.hlsl";
+    request.SourceName = "examples/example_tidal_atrium/shaders/signal.hlsl";
     request.RootSource = std::move(*source);
     request.Targets = static_cast<shader::ShaderTargetMask>(shader::ToTargetMask(*target));
     request.ExpectedContract = *hash;
@@ -229,9 +229,9 @@ struct AtriumPipeline::Impl {
     Impl(Application* app, Scene* scene, CameraComponent* camera, StreamingAssetRef<TextureAsset> font, std::filesystem::path captures)
         : App(app), Source(scene), Camera(camera), Device(app->GetDevice()), Font(std::move(font)), CaptureDirectory(std::move(captures)) {
         auto* renderSystem = App->GetRenderSystem();
-        Sky = renderSystem->GetOrCreateShaderProgram({.SourceName = "pipelines/atrium/sky.hlsl", .LayoutRecipe = DynamicRecipe("SkyFrame")});
-        Panel = renderSystem->GetOrCreateShaderProgram({.SourceName = "pipelines/atrium/panel.hlsl", .LayoutRecipe = DynamicRecipe("PanelFrame")});
-        Hud = renderSystem->GetOrCreateShaderProgram({.SourceName = "pipelines/atrium/hud.hlsl", .LayoutRecipe = DynamicRecipe("HudFrame")});
+        Sky = renderSystem->GetOrCreateShaderProgram({.SourceName = "examples/example_tidal_atrium/shaders/sky.hlsl", .LayoutRecipe = DynamicRecipe("SkyFrame")});
+        Panel = renderSystem->GetOrCreateShaderProgram({.SourceName = "examples/example_tidal_atrium/shaders/panel.hlsl", .LayoutRecipe = DynamicRecipe("PanelFrame")});
+        Hud = renderSystem->GetOrCreateShaderProgram({.SourceName = "examples/example_tidal_atrium/shaders/hud.hlsl", .LayoutRecipe = DynamicRecipe("HudFrame")});
         Signal = CompileSignal(*app);
         auto texture = Device->CreateTexture({render::TextureDimension::Dim2D, 512, 384, 1, 1, 1, render::TextureFormat::RGBA8_UNORM, render::MemoryType::Device, render::TextureUse::RenderTarget | render::TextureUse::Resource});
         if (texture) {

@@ -11,6 +11,16 @@
 
 namespace radray {
 
+void ServiceTraits<WindowManager>::Inject(WindowManager& self, GpuSystem& gpu, RenderSystem& render) noexcept {
+    self.SetGpuSystem(&gpu);
+    self.SetRenderSystem(&render);
+}
+
+void ServiceTraits<WindowManager>::Unwire(WindowManager& self) noexcept {
+    self.SetRenderSystem(nullptr);
+    self.SetGpuSystem(nullptr);
+}
+
 bool WindowManager::NeedsRecreateSwapChain(AppWindow* window) const noexcept {
     return window != nullptr && window->NeedsSwapChainRecreate(_desiredPresentMode);
 }

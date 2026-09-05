@@ -1,6 +1,6 @@
-> - 适用: 新增或修改 shaderlib 根 `.hlsl` pass、keyword domain、binding 或 target gate
+> - 适用: 新增或修改 HLSL 根 `.hlsl` pass、keyword domain、binding 或 target gate
 > - 权威: 本文是 schema 7 当前 HLSL authoring 契约；wire 与 runtime 边界见 shader pipeline 架构文档
-> - 锚点: `shaderlib/core/platform.hlsli`, `shaderlib/pipelines/forward/bindings.hlsli`, `shaderlib/pipelines/forward/forward.hlsl`, `shaderlib/passes/depth.hlsl`, `shaderlib/passes/compute.hlsl`, `modules/shader_compiler/tests/test_shaderlib_passes.cpp`
+> - 锚点: `shaderlib/core/platform.hlsli`, `shaderlib/pipelines/forward/bindings.hlsli`, `shaderlib/pipelines/forward/forward.hlsl`, `shaderlib/pipelines/forward/depth_only.hlsl`, `modules/shader_compiler/tests/test_shaderlib_passes.cpp`
 
 # HLSL authoring
 
@@ -14,8 +14,10 @@ header；include 必须使用 root-relative、尖括号路径：
 #include <core/color.hlsli>
 ```
 
-不要把 `shaderlib/` 重复写进 include path，也不要用物理文件系统路径作为 `SourceName`。caller
-传入的逻辑路径应类似 `pipelines/forward/forward.hlsl`，它会进入诊断和 compile input identity。
+不要把 `shaderlib/` 重复写进 include path，也不要用物理文件系统绝对路径作为 `SourceName`。
+`SourceName` 相对 caller 的 source root，它与 include root 可以不同；以 `shaderlib/` 为 source
+root 时，逻辑路径类似 `pipelines/forward/forward.hlsl`，会进入诊断和 compile input identity。
+测试与示例专用 source 的归属与路径配置见 [Shaderlib](../architecture/shaderlib.md)。
 
 ## Entry 与 keyword
 
@@ -170,18 +172,18 @@ Material 的数值 setter 使用 primary cbuffer 的相对路径或完整 primar
 含其他属性的几何；使用 `SetPassPipelineState` 单独调整其固定功能状态。metadata 尚不能验证标量类型与
 矩阵形状，具体限制见 [材质 technique](../architecture/renderer-foundation.md#材质-technique)。
 
-## 现有最小 pass
+## 产品 pass 与测试
 
 | Pass | 用途 | contract facts |
 |---|---|---|
 | `pipelines/forward/forward.hlsl` | 内置 forward vertex + pixel | view/material/object、纹理、sampler、Lambert 光照、`QUALITY` |
 | `pipelines/forward/depth_only.hlsl` | Forward 的 `DepthOnly` pass | 只有 dynamic view/object cbuffer，无材质组，无 keyword |
-| `passes/depth.hlsl` | vertex-only | depth topology、`DEPTH_MODE` |
-| `passes/compute.hlsl` | compute dispatch | storage buffer、`COMPUTE_MODE` |
 
-这些 pass 由 `RadRayShaderLibPass` 读取真实 shaderlib source，执行 discovery，并同时编译
-DXIL/SPIR-V lane。新增 pass 后应在同一测试中验证 entry 数量、active binding、stage visibility
-和 target-specific binding facts。
+`RadRayShaderLibPass` 读取这些产品 source 和测试目录中的最小 depth/compute source，执行
+discovery，并同时编译 DXIL/SPIR-V lane。测试 source 分别覆盖 vertex-only topology 与 storage
+buffer compute，以及 `DEPTH_MODE` / `COMPUTE_MODE` keyword domain；具体归属见
+[Shaderlib](../architecture/shaderlib.md)。新增 pass 后应在同一测试中验证 entry 数量、active
+binding、stage visibility 和 target-specific binding facts。
 
 ## 验收命令
 

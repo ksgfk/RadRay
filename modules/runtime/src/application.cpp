@@ -857,16 +857,12 @@ void Application::DestroyRuntime() noexcept {
     _windowManager.reset();
 }
 
-void Application::InitializeRuntime(const ApplicationRuntimeDescriptor& desc) {
+bool Application::InitializeRuntime(const ApplicationRuntimeDescriptor& desc) {
     _multithreaded = desc.Multithreaded;
     _renderCachePath = desc.RenderCachePath;
     _shaderSourceRoot = desc.ShaderSourceRoot;
     _shaderIncludePaths = desc.ShaderIncludePaths;
 
-    // ════════════════════════════════════════════════════════════════
-    //  phase 1:实例化全部核心服务(构造函数只做平凡/自身初始化,不碰兄弟系统)。
-    //  顺序任意 —— 互相引用的装配推迟到 phase 2。
-    // ════════════════════════════════════════════════════════════════
     WindowManagerDescriptor windowManagerDesc{};
 #ifdef RADRAY_PLATFORM_WINDOWS
     windowManagerDesc.Type = NativeWindowType::Win32HWND;
@@ -915,28 +911,17 @@ void Application::InitializeRuntime(const ApplicationRuntimeDescriptor& desc) {
     }
     _world = make_unique<World>(this);
 
-    // ════════════════════════════════════════════════════════════════
-    //  phase 2:按 ServiceTraits 装配交叉引用。此刻全部实例已在,
-    //  WindowManager <-> GpuSystem 的环天然可解;
-    //  AssetManager 拿到 GpuSystem 作 IWaitFrameProcessor(资产延迟销毁的帧边界)。
-    // ════════════════════════════════════════════════════════════════
-    ServiceRegistry registry;
-    registry.Add(_windowManager.get());
-    registry.Add<IWaitFrameProcessor>(_gpuSystem.get());
-    registry.Add(_renderSystem.get());
-    registry.Add(_assetManager.get());
-    registry.Add(_world.get());
-    registry.Wire();
-    // AssetDatabase 是可选服务，不能进入 ServiceTraits 的必需依赖装配。
-    if (_assetDatabase != nullptr) {
-        _assetManager->SetAssetSource(_assetDatabase.get());
+    using RuntimeServices = ServiceRegistry<
+        WindowManager, GpuSystem, RenderSystem, AssetManager, World,
+        OptionalService<AssetDatabase>>;
+    RuntimeServices registry{
+        *_windowManager, *_gpuSystem, *_renderSystem, *_assetManager, *_world,
+        Nullable<AssetDatabase*>{_assetDatabase.get()}};
+    if (auto status = registry.Initialize(); !status) {
+        RADRAY_ERR_LOG("initialize service '{}' failed: {}", status.Service, status.Message);
+        DestroyRuntime();
+        return false;
     }
-
-    // ════════════════════════════════════════════════════════════════
-    //  phase 3:初始化数据。先跑各服务可选的 OnInitialize 钩子,
-    //  再创建主窗口 + swapchain(依赖 WindowManager 已装配 GpuSystem)。
-    // ════════════════════════════════════════════════════════════════
-    registry.Initialize();
 
 #ifdef RADRAY_PLATFORM_WINDOWS
     Win32WindowCreateDescriptor wndDesc{};
@@ -955,10 +940,11 @@ void Application::InitializeRuntime(const ApplicationRuntimeDescriptor& desc) {
     swapchainDesc.Format = desc.BackBufferFormat;
     swapchainDesc.PresentMode = desc.PresentMode;
     mainWindow->AttachSwapChain(swapchainDesc);
+    return true;
 }
 
 int Application::Run(const ApplicationRuntimeDescriptor& desc) {
-    InitializeRuntime(desc);
+    if (!InitializeRuntime(desc)) return 1;
     OnInit();
     return StartLoop();
 }

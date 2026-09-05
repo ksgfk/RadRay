@@ -5,6 +5,16 @@
 
 namespace radray {
 
+void ServiceTraits<AssetManager>::Inject(AssetManager& self, IWaitFrameProcessor& frames, Nullable<IAssetSource*> source) noexcept {
+    self.SetWaitFrameProcessor(&frames);
+    self.SetAssetSource(source);
+}
+
+void ServiceTraits<AssetManager>::Unwire(AssetManager& self) noexcept {
+    self.SetAssetSource(nullptr);
+    self.SetWaitFrameProcessor(nullptr);
+}
+
 /// 一个资产的槽位。地址稳定 (unordered_map 里的 unique_ptr 元素), 故 StreamingAssetRefAny
 /// 直接持它的裸指针 —— RefCount > 0 期间它一定不被销毁。
 struct AssetSlot {

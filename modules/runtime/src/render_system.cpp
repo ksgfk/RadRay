@@ -26,6 +26,10 @@ RenderSystem::RenderSystem(Application* app) noexcept
 }
 
 RenderSystem::~RenderSystem() noexcept {
+    OnShutdown();
+}
+
+void RenderSystem::OnShutdown() noexcept {
     ReleaseAllScenes();
     _pipeline.reset();
     _graphRuntime.reset();
@@ -35,15 +39,17 @@ RenderSystem::~RenderSystem() noexcept {
     _shaderJit.reset();
     // 缓存的 RenderPass / Framebuffer 必须先于 GpuSystem 持有的 device 销毁。
     _renderPassRegistry.reset();
+    _shaderArtifacts.clear();
+    _framePlans.clear();
+    _graphReports.clear();
 }
 
-void RenderSystem::OnInitialize() {
-    GpuSystem* gpu = _app != nullptr ? _app->GetGpuSystem() : nullptr;
-    render::Device* device = _app != nullptr ? _app->GetDevice() : nullptr;
-    if (gpu == nullptr || device == nullptr) {
-        RADRAY_ERR_LOG("RenderSystem::OnInitialize: GpuSystem or Device is null");
-        return;
+ServiceStatus RenderSystem::OnInitialize() {
+    auto gpu = _gpuSystem;
+    if (_app == nullptr || !gpu || gpu->GetDevice() == nullptr) {
+        return ServiceStatus::Failure("Application, GpuSystem or Device is missing");
     }
+    render::Device* device = gpu->GetDevice();
 
     _retainedAssets.resize(gpu->GetFlightDataCount());
     _framePlans.resize(gpu->GetFlightDataCount());
@@ -52,6 +58,7 @@ void RenderSystem::OnInitialize() {
     _graphRuntime = make_unique<RenderGraphRuntime>(*device, *_renderPassRegistry, gpu->GetFlightDataCount());
     _viewStates = make_unique<ViewStateRegistry>(*device, *_renderPassRegistry, gpu->GetFlightDataCount());
     _shaderJit = make_unique<ShaderJit>(_app->GetShaderIncludePaths());
+    return {};
 }
 
 namespace {

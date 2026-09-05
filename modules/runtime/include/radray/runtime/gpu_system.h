@@ -13,7 +13,7 @@
 #include <radray/runtime/asset.h>
 #include <radray/runtime/gpu_resource.h>
 #include <radray/runtime/wait_frame.h>
-#include <radray/runtime/service_registry.h>
+#include <radray/runtime/service_traits.h>
 
 // device / queue / flight / 上传 / 帧边界等待。帧序与关停顺序: docs/architecture/frame-and-gpu.md
 
@@ -367,7 +367,7 @@ public:
     render::CommandQueue* GetMainQueue() const noexcept { return _mainQueue; }
     WindowManager* GetWindowManager() const noexcept { return _windowManager; }
     /// 注入窗口系统(非拥有)。由装配阶段(ServiceRegistry / Application)调用。
-    void SetWindowManager(WindowManager* windowManager) noexcept { _windowManager = windowManager; }
+    void SetWindowManager(Nullable<WindowManager*> windowManager) noexcept { _windowManager = windowManager.Get(); }
     uint32_t GetBackBufferCount() const noexcept { return _backBufferCount; }
     uint32_t GetFlightDataCount() const noexcept { return _flightDataCount; }
     uint64_t GetFrameIndex() const noexcept { return _nowFrameIndex; }
@@ -416,7 +416,10 @@ private:
 
 template <>
 struct ServiceTraits<GpuSystem> {
-    static constexpr auto Inject = std::tuple{&GpuSystem::SetWindowManager};
+    using Provides = TypeList<IWaitFrameProcessor>;
+    using Dependencies = TypeList<Required<WindowManager>>;
+    static void Inject(GpuSystem& self, WindowManager& windows) noexcept;
+    static void Unwire(GpuSystem& self) noexcept;
 };
 
 template <>

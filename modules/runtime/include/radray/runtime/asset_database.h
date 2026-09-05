@@ -10,6 +10,7 @@
 #include <radray/json.h>
 #include <radray/nullable.h>
 #include <radray/runtime/asset_source.h>
+#include <radray/runtime/service_traits.h>
 #include <radray/types.h>
 
 namespace radray {
@@ -149,6 +150,11 @@ private:
     unordered_map<string, AssetImporter*> _extensionImporters;
     unordered_map<AssetId, AssetEntry> _entries;
     unordered_map<string, AssetId> _paths;
+};
+
+template <>
+struct ServiceTraits<AssetDatabase> {
+    using Provides = TypeList<IAssetSource>;
 };
 
 template <class T>

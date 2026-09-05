@@ -9,7 +9,7 @@
 #include <radray/coroutine.h>
 #include <radray/runtime/asset.h>
 #include <radray/runtime/asset_source.h>
-#include <radray/runtime/service_registry.h>
+#include <radray/runtime/service_traits.h>
 
 // 资产槽位、引用类型与加载调度。引用语义、销毁时机与关停顺序: docs/architecture/asset-system.md
 
@@ -321,7 +321,7 @@ public:
 
     /// 注入帧边界等待器 (非拥有)。【必须装配】见 ServiceTraits<AssetManager>。
     /// 调用方保证它活得比本 AssetManager 更久 (关停顺序里 AssetManager 先于 GpuSystem 死)。
-    void SetWaitFrameProcessor(IWaitFrameProcessor* processor) noexcept { _waitFrame = processor; }
+    void SetWaitFrameProcessor(Nullable<IWaitFrameProcessor*> processor) noexcept { _waitFrame = processor.Get(); }
 
     /// 注入可选资产来源（非拥有）。来源必须活过本对象及其全部在飞加载。
     void SetAssetSource(Nullable<IAssetSource*> source) noexcept { _assetSource = source; }
@@ -460,11 +460,11 @@ StreamingAssetRef<T> StreamingAssetRefAny::CastTo() const noexcept {
     return StreamingAssetRef<T>{*this};
 }
 
-/// 依赖声明(非侵入,类外特化):AssetManager 只需要 IWaitFrameProcessor 接口,
-/// 由 Application 在登记 GpuSystem 时显式暴露 IWaitFrameProcessor。
 template <>
 struct ServiceTraits<AssetManager> {
-    static constexpr auto Inject = std::tuple{&AssetManager::SetWaitFrameProcessor};
+    using Dependencies = TypeList<Required<IWaitFrameProcessor>, Optional<IAssetSource>>;
+    static void Inject(AssetManager& self, IWaitFrameProcessor& frames, Nullable<IAssetSource*> source) noexcept;
+    static void Unwire(AssetManager& self) noexcept;
 };
 
 template <>

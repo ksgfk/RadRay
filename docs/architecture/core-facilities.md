@@ -223,7 +223,8 @@ template <> struct JsonDeserializer<T> {
   需要稳定标识的类型特化 `RuntimeTypeTrait<T>::value`，显式读取 `runtime_type_id_v<T>` 时会先按
   `remove_cvref_t` 归一化并要求 GUID 非空。它不描述继承、不保存对象描述符，也不建立 GUID 与
   RTTI 的全局映射。对象关系查询使用指针形式 `dynamic_cast`，精确动态类型使用 `typeid`，
-  进程内服务键使用 `std::type_index`；仅为这些查询不需要声明 GUID。
+  服务集合使用编译期类型匹配与固定槽位，见 [ServiceRegistry](render-framework.md#serviceregistry)；
+  仅为这些查询不需要声明 GUID。
 - **RTTI 是工程编译约定** — `radray_default_compile_flags` 为每个自有 target 以 `PRIVATE`
   方式设置 MSVC/ClangCL 的 `/GR` 或其他前端的 `-frtti`，仅作用于 C++ 编译。新增库、测试、
   工具、样例与 benchmark 都必须调用该函数；`radray_add_test` 已代为调用。core 不通过链接接口
