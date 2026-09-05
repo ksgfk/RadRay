@@ -26,30 +26,17 @@ private:
     unordered_map<ShaderProgram*, std::optional<ForwardProgramBindings>> _programs;
 };
 
-struct ForwardBufferBinding {
-    uint32_t BufferIndex{0};
-    render::ShaderBufferBinding Value;
-
-    friend bool operator==(const ForwardBufferBinding&, const ForwardBufferBinding&) = default;
+struct DepthOnlyProgramBindings {
+    uint32_t ViewBufferIndex, ObjectBufferIndex, ViewGroup, ObjectGroup;
 };
 
-// Owned by one Forward flight. A cached set is never written after publication.
-class ForwardMaterialSets {
+std::optional<DepthOnlyProgramBindings> ResolveDepthOnlyProgramBindings(const ShaderProgram& program);
+class DepthOnlyBindingCache {
 public:
-    Nullable<render::ShaderParameterSet*> GetOrCreate(
-        uint32_t materialIndex,
-        const MaterialRenderData& material,
-        std::span<const ForwardBufferBinding> bindings);
-    void Clear() noexcept { _sets.clear(); }
+    Nullable<const DepthOnlyProgramBindings*> Resolve(ShaderProgram* program);
 
 private:
-    struct Entry {
-        uint32_t MaterialIndex;
-        ShaderProgram* Program;
-        vector<ForwardBufferBinding> Bindings;
-        unique_ptr<render::ShaderParameterSet> Set;
-    };
-    vector<Entry> _sets;
+    unordered_map<ShaderProgram*, std::optional<DepthOnlyProgramBindings>> _programs;
 };
 
 }  // namespace radray::forward_detail

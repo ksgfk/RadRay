@@ -52,7 +52,17 @@ enum class Scenario { Baseline,
                       SnapshotValues,
                       NonCanonical,
                       MissingObject,
-                      NonDynamic };
+                      NonDynamic,
+                      DepthPrepass,
+                      PartialDepth,
+                      TransparentDepth,
+                      MultipleViews };
+bool UsesDepth(Scenario scenario) {
+    return scenario == Scenario::DepthPrepass || scenario == Scenario::PartialDepth || scenario == Scenario::TransparentDepth || scenario == Scenario::MultipleViews || scenario == Scenario::ThreadedStress;
+}
+bool UsesOffscreen(Scenario scenario) {
+    return scenario == Scenario::OffscreenViews || scenario == Scenario::DepthPrepass || scenario == Scenario::PartialDepth || scenario == Scenario::TransparentDepth || scenario == Scenario::MultipleViews;
+}
 constexpr AssetId kMeshId{
     0x11111111, 0x2222, 0x3333, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb};
 constexpr AssetId kTextureId{
@@ -300,9 +310,22 @@ protected:
             CheckCacheRules(request, _program);
         }
 
-        Nullable<unique_ptr<Material>> material = Material::Create(
-            _program,
-            "ForwardMaterial");
+        vector<MaterialPassDesc> passes{{"ForwardLit", _program, "ForwardMaterial", {}}};
+        if (UsesDepth(_scenario)) {
+            const auto depth = GetRenderSystem()->GetOrCreateShaderProgram({.SourceName = "pipelines/forward/depth_only.hlsl", .LayoutRecipe = ForwardPipeline::GetDepthOnlyLayoutRecipe()});
+            if (!depth) {
+                Fail("depth shader program creation failed");
+                return;
+            }
+            passes.push_back({"DepthOnly", depth.Get(), "", {}});
+        }
+        auto technique = MaterialTechnique::Create(std::move(passes), "ForwardLit");
+        if (!technique) {
+            Fail("technique creation failed");
+            return;
+        }
+        _technique = technique.Release();
+        Nullable<unique_ptr<Material>> material = Material::Create(_technique.get());
         if (!material.HasValue()) {
             Fail("material creation failed");
             return;
@@ -360,9 +383,32 @@ protected:
             EXPECT_EQ(bindings->MaterialGroup, d3d12 ? 7u : 5u);
             EXPECT_EQ(bindings->ObjectGroup, d3d12 ? 9u : 8u);
         }
-        if (_scenario == Scenario::OffscreenViews) {
-            for (uint32_t i = 0; i < 2; ++i) {
-                auto target = render::test::MakeRenderTarget(GetDevice(), render::TextureFormat::RGBA8_UNORM, i ? 64 : 96, i ? 96 : 64,
+        if (_scenario == Scenario::PartialDepth || _scenario == Scenario::TransparentDepth) {
+            auto secondaryTechnique = MaterialTechnique::Create({{"ForwardLit", _program, "ForwardMaterial", {}}}, "ForwardLit");
+            ASSERT_TRUE(secondaryTechnique);
+            _secondaryTechnique = secondaryTechnique.Release();
+            auto secondary = Material::Create(_scenario == Scenario::TransparentDepth ? _technique.get() : _secondaryTechnique.get());
+            ASSERT_TRUE(secondary);
+            _secondaryMaterial = secondary.Release();
+            const bool transparent = _scenario == Scenario::TransparentDepth;
+            EXPECT_TRUE(_secondaryMaterial->SetFloat4("BaseColor", transparent ? Eigen::Vector4f{0, 1, 0, .5f} : Eigen::Vector4f{1, 0, 0, 1}));
+            EXPECT_TRUE(_secondaryMaterial->SetTexture("AlbedoTexture", _texture));
+            EXPECT_TRUE(_secondaryMaterial->SetSampler("LinearSampler", sampler));
+            if (transparent) {
+                _secondaryMaterial->SetRenderQueue(RenderQueue::Transparent);
+                auto blend = render::BlendState::Default();
+                blend.Color = {render::BlendFactor::SrcAlpha, render::BlendFactor::OneMinusSrcAlpha, render::BlendOperation::Add};
+                _secondaryMaterial->GetPipelineState().Blend = blend;
+            }
+            _secondaryActor = GetWorld()->SpawnActor<Actor>();
+            auto* component = _secondaryActor->AddComponent<StaticMeshComponent>();
+            _secondaryActor->SetRootComponent(component);
+            component->SetMaterial(0, _secondaryMaterial.get());
+            component->SetWorldLocation({0, 0, -.1f});
+        }
+        if (UsesOffscreen(_scenario)) {
+            for (uint32_t i = 0; i < (_scenario == Scenario::MultipleViews ? 1u : 2u); ++i) {
+                auto target = render::test::MakeRenderTarget(GetDevice(), render::TextureFormat::RGBA8_UNORM, _scenario == Scenario::MultipleViews ? 128 : (i ? 64 : 96), i ? 96 : 64,
                                                              render::TextureUse::RenderTarget | render::TextureUse::Resource | render::TextureUse::CopySource);
                 ASSERT_TRUE(target);
                 _offscreenIds.push_back(GetRenderSystem()->GetOutputs().RegisterExternal({fmt::format("Forward Offscreen {}", i), target->Tex.get(), target->View.get()}));
@@ -371,6 +417,7 @@ protected:
                 _offscreenTargets.push_back(std::move(*target));
             }
         }
+        if (_scenario == Scenario::MultipleViews) _secondView = AllocateViewStateId();
         GetRenderSystem()->SetPipeline(make_unique<ObservedForwardPipeline>(
             make_unique<ForwardPipeline>(this, GetWorld()->GetScene(), camera),
             [this](ForwardPipeline& pipeline, const AppUpdateContext& ctx) { return AfterPrepare(pipeline, ctx); },
@@ -385,7 +432,16 @@ protected:
                         view.WorldToView(0, 3) -= 100;
                         view.WorldPosition.x() += 100;
                     }
-                    EXPECT_TRUE(prepare.Workloads.AddViewFamily({fmt::format("Offscreen {}", i), _offscreenIds[i], 1, {view}}));
+                    if (_scenario == Scenario::MultipleViews) {
+                        view.ViewRect = view.ScissorRect = {0, 0, .5f, 1};
+                        auto right = view;
+                        right.StateId = _secondView;
+                        right.ViewRect = right.ScissorRect = {.5f, 0, .5f, 1};
+                        right.WorldToView(0, 3) -= 100;
+                        right.WorldPosition.x() += 100;
+                        EXPECT_TRUE(prepare.Workloads.AddViewFamily({"Split views", _offscreenIds[i], 1, {view, right}}));
+                    } else
+                        EXPECT_TRUE(prepare.Workloads.AddViewFamily({fmt::format("Offscreen {}", i), _offscreenIds[i], 1, {view}}));
                 }
             }));
         _result->InitSucceeded = true;
@@ -394,6 +450,7 @@ protected:
     void OnUpdate(const AppUpdateContext& ctx) override {
         if (!_result->MeshAssigned && _mesh.IsReady() && _meshComponent.HasValue()) {
             _meshComponent.Get()->SetStaticMesh(_mesh);
+            if (_secondaryActor) _secondaryActor->FindComponent<StaticMeshComponent>()->SetStaticMesh(_mesh);
             _result->MeshAssigned = true;
         } else if (_mesh.IsFaulted() || _mesh.IsCanceled()) {
             Fail("mesh loading failed");
@@ -468,15 +525,26 @@ protected:
             auto* mapped = static_cast<const uint8_t*>(readback->Map(0, row * desc.Height));
             ASSERT_NE(mapped, nullptr);
             readback->InvalidateMappedRange({0, row * desc.Height});
-            const auto* pixel = mapped + row * (desc.Height / 2) + (desc.Width / 2) * 4;
+            const auto* pixel = mapped + row * (desc.Height / 2) + (desc.Width / (_scenario == Scenario::MultipleViews ? 4 : 2)) * 4;
             if (i == 0) {
-                EXPECT_GT(pixel[0], pixel[1] * 2 + 10);
-                EXPECT_LT(pixel[1], 4);
+                if (_scenario == Scenario::TransparentDepth) {
+                    EXPECT_GT(pixel[0], 20);
+                    EXPECT_GT(pixel[1], 20);
+                } else {
+                    EXPECT_GT(pixel[0], pixel[1] * 2 + 10);
+                    EXPECT_LT(pixel[1], 4);
+                }
                 EXPECT_LT(pixel[2], 4);
             } else {
                 EXPECT_NEAR(pixel[0], .025f * 255, 1);
                 EXPECT_NEAR(pixel[1], .030f * 255, 1);
                 EXPECT_NEAR(pixel[2], .040f * 255, 1);
+            }
+            if (_scenario == Scenario::MultipleViews) {
+                const auto* right = mapped + row * (desc.Height / 2) + (desc.Width * 3 / 4) * 4;
+                EXPECT_NEAR(right[0], .025f * 255, 1);
+                EXPECT_NEAR(right[1], .030f * 255, 1);
+                EXPECT_NEAR(right[2], .040f * 255, 1);
             }
             readback->Unmap();
             EXPECT_TRUE(GetRenderSystem()->GetOutputs().Unregister(_offscreenIds[i]));
@@ -496,6 +564,9 @@ protected:
                 *actor = nullptr;
             }
         }
+        if (_secondaryActor) GetWorld()->DestroyActor(_secondaryActor.Get());
+        _secondaryActor = nullptr;
+        _secondaryMaterial.reset();
         _meshComponent = nullptr;
         if (GetRenderSystem() != nullptr) {
             GetRenderSystem()->SetPipeline(nullptr);
@@ -510,10 +581,10 @@ protected:
 private:
     bool AfterPrepare(ForwardPipeline& pipeline, const AppUpdateContext& ctx) {
         const auto& input = forward_detail::ForwardPipelineTestAccess::Input(pipeline, ctx.FlightIndex);
-        if (input.Draws.empty()) {
+        if (input.MeshBatches.empty()) {
             return false;
         }
-        const auto& material = input.Materials[input.Draws.front().MaterialIndex];
+        const auto& material = input.Materials[input.MeshBatches.front().Material].Passes.front();
         const auto bindings = forward_detail::ResolveProgramBindings(*material.Program.Get());
         if (!bindings) {
             return false;
@@ -528,7 +599,9 @@ private:
         string reason;
         auto resolved = ResolveRenderViewFamily(family, *output, 0, GetDevice()->GetCapabilities().Limits.MaxTexture2DDimension, reason);
         if (!resolved) return false;
-        EXPECT_TRUE(forward_detail::FillViewParameters(values, input, resolved->Views.front(), warned));
+        CullingResults culling;
+        EXPECT_TRUE(Cull({&input, &resolved->Views.front()}, culling));
+        EXPECT_TRUE(forward_detail::FillViewParameters(values, culling, resolved->Views.front(), warned));
         const auto view = values.GetBufferData(bindings->ViewBufferIndex);
         _expectedView[ctx.FlightIndex] = {view.begin(), view.end()};
         if (_scenario == Scenario::SnapshotValues) {
@@ -566,10 +639,10 @@ private:
 
     void AfterRender(const ForwardPipeline& pipeline, uint32_t flight) {
         const auto& input = forward_detail::ForwardPipelineTestAccess::Input(pipeline, flight);
-        if (input.Draws.empty()) {
+        if (input.MeshBatches.empty()) {
             return;
         }
-        const auto& material = input.Materials[input.Draws.front().MaterialIndex];
+        const auto& material = input.Materials[input.MeshBatches.front().Material].Passes.front();
         const auto bindings = forward_detail::ResolveProgramBindings(*material.Program.Get());
         if (!bindings) {
             return;
@@ -584,12 +657,38 @@ private:
         string reason;
         auto resolved = ResolveRenderViewFamily(family, *output, 0, GetDevice()->GetCapabilities().Limits.MaxTexture2DDimension, reason);
         if (!resolved) return;
-        EXPECT_TRUE(forward_detail::FillViewParameters(values, input, resolved->Views.front(), warned));
+        CullingResults culling;
+        EXPECT_TRUE(Cull({&input, &resolved->Views.front()}, culling));
+        EXPECT_TRUE(forward_detail::FillViewParameters(values, culling, resolved->Views.front(), warned));
         const auto view = values.GetBufferData(bindings->ViewBufferIndex);
         EXPECT_EQ((vector<byte>{view.begin(), view.end()}), _expectedView[flight]);
-        EXPECT_NE(input.Draws.front().Geometry->Vbv.Target, nullptr);
+        EXPECT_NE(input.MeshBatches.front().Geometry->VertexBuffers.front().View.Target, nullptr);
         ASSERT_FALSE(material.Textures.empty());
         EXPECT_TRUE(material.Textures.front().Texture->IsValid());
+        const auto& stage = pipeline.GetStageBStats(flight);
+        EXPECT_EQ(stage.SnapshotBuilds, 1u);
+        const auto& report = GetRenderSystem()->GetGraphReport(flight);
+        const bool hasDepth = std::any_of(report.Passes.begin(), report.Passes.end(), [](const auto& pass) { return pass.Name == "Forward.DepthPrepass"; });
+        EXPECT_EQ(hasDepth, UsesDepth(_scenario));
+        if (UsesDepth(_scenario)) {
+            EXPECT_GT(stage.DepthCommands, 0u);
+            EXPECT_EQ(stage.Execution.Skipped, 0u);
+            const auto views = forward_detail::ForwardPipelineTestAccess::Views(pipeline, flight, 0);
+            ASSERT_EQ(views.size(), 1u);
+            EXPECT_EQ(views[0].DepthOnly.Commands.size(), 1u);
+            EXPECT_EQ(views[0].Opaque.Commands.size(), _scenario == Scenario::PartialDepth ? 2u : 1u);
+            EXPECT_EQ(views[0].Transparent.Commands.size(), _scenario == Scenario::TransparentDepth ? 1u : 0u);
+            if (_scenario == Scenario::PartialDepth) EXPECT_EQ(views[0].DepthOnly.Stats.MissingPass, 1u);
+        }
+        if (_scenario == Scenario::MultipleViews) {
+            const auto split = forward_detail::ForwardPipelineTestAccess::Views(pipeline, flight, 1);
+            ASSERT_EQ(split.size(), 2u);
+            EXPECT_EQ(split[0].Opaque.Commands.size(), 1u);
+            EXPECT_TRUE(split[1].Opaque.Commands.empty());
+            EXPECT_EQ(split[1].Culling.Stats.FrustumRejected, 1u);
+            EXPECT_EQ(stage.CullCalls, 3u);
+        }
+        if (_scenario == Scenario::TransparentDepth) EXPECT_TRUE(std::any_of(report.Passes.begin(), report.Passes.end(), [](const auto& pass) { return pass.Name == "Forward.Transparent"; }));
         _result->SnapshotRendered = true;
         if (_destroyedInputs[flight]) {
             _result->DestroyedFrameRendered = true;
@@ -713,6 +812,11 @@ private:
     uint32_t _destroyedFlight{0};
     StreamingAssetRef<StaticMesh> _mesh;
     StreamingAssetRef<TextureAsset> _texture;
+    ViewStateId _secondView;
+    Nullable<Actor*> _secondaryActor{nullptr};
+    unique_ptr<MaterialTechnique> _secondaryTechnique;
+    unique_ptr<Material> _secondaryMaterial;
+    unique_ptr<MaterialTechnique> _technique;
     unique_ptr<Material> _material;
     ShaderProgram* _program{nullptr};
     Nullable<Actor*> _cameraActor{nullptr};
@@ -762,8 +866,8 @@ void RunForwardPipeline(render::RenderBackend backend, Scenario scenario = Scena
     // constants packed, the material set prepared and the draw loop reached
     // GetOrCreateGraphicsPipelineState. One key per (material, geometry, pass).
     const bool invalid = scenario == Scenario::MissingObject || scenario == Scenario::NonDynamic;
-    EXPECT_EQ(result.PipelineStateCount, invalid ? 0u : scenario == Scenario::OffscreenViews ? 2u
-                                                                                             : 1u);
+    EXPECT_EQ(result.PipelineStateCount, invalid ? 0u : UsesOffscreen(scenario) ? (scenario == Scenario::TransparentDepth ? 4u : 2u)
+                                                                                : 1u);
     EXPECT_TRUE(logs.Errors().empty()) << logs.Errors();
     EXPECT_EQ(logs.DescriptorRewrites.load(), 0u);
     EXPECT_EQ(logs.IncompatiblePrograms.load(), invalid ? 1u : 0u);
@@ -831,5 +935,14 @@ TEST(RadRayRuntimeForwardBindings, D3D12NonCanonicalGroupsAreUsedVerbatim) { Run
 TEST(RadRayRuntimeForwardBindings, VulkanNonCanonicalGroupsAreUsedVerbatim) { RunForwardPipeline(render::RenderBackend::Vulkan, Scenario::NonCanonical); }
 TEST(RadRayRuntimeForwardBindings, MissingRequiredDeclarationFailsClosed) { RunForwardPipeline(render::RenderBackend::D3D12, Scenario::MissingObject); }
 TEST(RadRayRuntimeForwardBindings, NonDynamicRequiredBufferFailsClosed) { RunForwardPipeline(render::RenderBackend::Vulkan, Scenario::NonDynamic); }
+
+TEST(RadRayRuntimeForwardPipeline, D3D12DepthPrepassAndForwardReadback) { RunForwardPipeline(render::RenderBackend::D3D12, Scenario::DepthPrepass); }
+TEST(RadRayRuntimeForwardPipeline, VulkanDepthPrepassAndForwardReadback) { RunForwardPipeline(render::RenderBackend::Vulkan, Scenario::DepthPrepass); }
+TEST(RadRayRuntimeForwardPipeline, D3D12MissingDepthPassKeepsOpaqueCorrect) { RunForwardPipeline(render::RenderBackend::D3D12, Scenario::PartialDepth); }
+TEST(RadRayRuntimeForwardPipeline, VulkanMissingDepthPassKeepsOpaqueCorrect) { RunForwardPipeline(render::RenderBackend::Vulkan, Scenario::PartialDepth); }
+TEST(RadRayRuntimeForwardPipeline, D3D12TransparentExcludedFromDepthAndBlends) { RunForwardPipeline(render::RenderBackend::D3D12, Scenario::TransparentDepth); }
+TEST(RadRayRuntimeForwardPipeline, VulkanTransparentExcludedFromDepthAndBlends) { RunForwardPipeline(render::RenderBackend::Vulkan, Scenario::TransparentDepth); }
+TEST(RadRayRuntimeForwardPipeline, D3D12MultipleViewsShareAttachments) { RunForwardPipeline(render::RenderBackend::D3D12, Scenario::MultipleViews); }
+TEST(RadRayRuntimeForwardPipeline, VulkanMultipleViewsShareAttachments) { RunForwardPipeline(render::RenderBackend::Vulkan, Scenario::MultipleViews); }
 
 }  // namespace radray

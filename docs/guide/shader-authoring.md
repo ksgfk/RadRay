@@ -153,25 +153,33 @@ group 的语义属于具体 pipeline，不是 shaderlib 全局规则。当前 fo
 Forward 按 `ForwardView` / `ForwardMaterial` / `ForwardObject` declaration name 从当前 artifact
 读取 group；上表只是产品 shader 的当前数字，不是 CPU ABI。两 target 的组号可各自变化。
 新增或修改 binding 时核对 Forward 私有 resolver 的 declaration/dynamic/同组资源检查；material
-通过 `Material::Create(program, "ForwardMaterial")` 选组，消费者不再传 group plan 或写 0/1/2。
+先用 `MaterialTechnique::Create` 声明 pass 名、program 与 `"ForwardMaterial"` anchor，再调用
+`Material::Create(technique)`。每个 pass 按自己的 anchor 选组，不传 group plan 或写死 0/1/2。
 view/material/object 数值 buffer 使用具名 struct 加 `ConstantBuffer<T>`，让 artifact type tree
 为 CPU 按名打包保留完整根结构与成员 offset；CPU 不声明 mirror struct。
 
-CPU 参数的 canonical 名称从 CBuffer declaration 开始并包含完整成员路径，例如
+ShaderParameterStorage 的 canonical 名称从 CBuffer declaration 开始并包含完整成员路径，例如
 `ForwardMaterial.BaseColor` 或 `ForwardView.Lights.Direction`。全 program 唯一的叶名仍可作为简写；
 两个路径以同名叶子结尾时，仅该简写不可用，必须写 qualified path，program 不会因此拒绝创建。
 struct array 的下标不写进名称，由 setter 的 `element` 参数选择。Texture/Sampler declaration 保持
 顶层 exact name；若它与 CBuffer 叶名相同，资源 exact name 优先，字段仍可用 qualified path 访问。
+
+Material 的数值 setter 使用 primary cbuffer 的相对路径或完整 primary 路径；secondary 的数值字段布局
+必须完整兼容，texture/sampler 可以是 primary 声明的子集。DepthOnly 的 material anchor 为空，使用
+`ForwardPipeline::GetDepthOnlyLayoutRecipe()` 配置动态 view/object buffers。它只需 POSITION，可以复用
+含其他属性的几何；使用 `SetPassPipelineState` 单独调整其固定功能状态。metadata 尚不能验证标量类型与
+矩阵形状，具体限制见 [材质 technique](../architecture/renderer-foundation.md#材质-technique)。
 
 ## 现有最小 pass
 
 | Pass | 用途 | contract facts |
 |---|---|---|
 | `pipelines/forward/forward.hlsl` | 内置 forward vertex + pixel | view/material/object、纹理、sampler、Lambert 光照、`QUALITY` |
+| `pipelines/forward/depth_only.hlsl` | Forward 的 `DepthOnly` pass | 只有 dynamic view/object cbuffer，无材质组，无 keyword |
 | `passes/depth.hlsl` | vertex-only | depth topology、`DEPTH_MODE` |
 | `passes/compute.hlsl` | compute dispatch | storage buffer、`COMPUTE_MODE` |
 
-这三条 pass 由 `RadRayShaderLibPass` 读取真实 shaderlib source，执行 discovery，并同时编译
+这些 pass 由 `RadRayShaderLibPass` 读取真实 shaderlib source，执行 discovery，并同时编译
 DXIL/SPIR-V lane。新增 pass 后应在同一测试中验证 entry 数量、active binding、stage visibility
 和 target-specific binding facts。
 

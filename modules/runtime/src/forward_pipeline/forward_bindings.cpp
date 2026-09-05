@@ -8,6 +8,8 @@ namespace radray::forward_detail {
 
 std::optional<ForwardProgramBindings> ResolveProgramBindings(const ShaderProgram& program) {
     const ShaderParameterLayout& layout = program.GetParameterLayout();
+    const auto& artifact = program.GetArtifact().Generic();
+    if (layout.Buffers().size() != 3 || !artifact.RootConstants().empty()) return std::nullopt;
     const auto find = [&](std::string_view name) -> std::optional<uint32_t> {
         for (uint32_t index = 0; index < layout.Buffers().size(); ++index) {
             if (layout.Buffers()[index].Name == name && program.IsBufferDynamic(name)) {
@@ -38,6 +40,15 @@ std::optional<ForwardProgramBindings> ResolveProgramBindings(const ShaderProgram
             return std::nullopt;
         }
     }
+    for (const auto& binding : artifact.Bindings()) {
+        const auto kind = static_cast<shader::ShaderBindingKind>(binding.Type);
+        if (kind == shader::ShaderBindingKind::CBuffer) {
+            if (binding.Count != 1) return std::nullopt;
+        } else if ((kind != shader::ShaderBindingKind::Texture && kind != shader::ShaderBindingKind::Sampler) ||
+                   binding.Group != bindings.MaterialGroup) {
+            return std::nullopt;
+        }
+    }
     return bindings;
 }
 
@@ -52,59 +63,37 @@ Nullable<const ForwardProgramBindings*> ForwardBindingCache::Resolve(ShaderProgr
     return found->second.has_value() ? &*found->second : nullptr;
 }
 
-Nullable<render::ShaderParameterSet*> ForwardMaterialSets::GetOrCreate(
-    uint32_t materialIndex,
-    const MaterialRenderData& material,
-    std::span<const ForwardBufferBinding> bindings) {
-    if (!material.Program.HasValue()) {
-        return nullptr;
+std::optional<DepthOnlyProgramBindings> ResolveDepthOnlyProgramBindings(const ShaderProgram& program) {
+    const auto& artifact = program.GetArtifact().Generic();
+    if (!artifact.RootConstants().empty()) return std::nullopt;
+    for (const auto& binding : artifact.Bindings()) {
+        if (static_cast<shader::ShaderBindingKind>(binding.Type) != shader::ShaderBindingKind::CBuffer || binding.Count != 1) return std::nullopt;
     }
-    ShaderProgram* program = material.Program.Get();
-    const auto found = std::find_if(_sets.begin(), _sets.end(), [&](const Entry& entry) {
-        return entry.MaterialIndex == materialIndex && entry.Program == program &&
-               std::equal(entry.Bindings.begin(), entry.Bindings.end(), bindings.begin(), bindings.end());
-    });
-    if (found != _sets.end()) {
-        return found->Set.get();
+    const auto buffers = program.GetParameterLayout().Buffers();
+    std::optional<uint32_t> view, object;
+    for (uint32_t index = 0; index < buffers.size(); ++index) {
+        if (!program.IsBufferDynamic(buffers[index].Name)) return std::nullopt;
+        if (buffers[index].Name == "ForwardView")
+            view = index;
+        else if (buffers[index].Name == "ForwardObject")
+            object = index;
+        else
+            return std::nullopt;
     }
-    const auto buffers = program->GetParameterLayout().Buffers();
-    const auto expectedCount = std::count_if(buffers.begin(), buffers.end(), [&](const auto& buffer) {
-        return buffer.Group == material.ParameterGroup;
-    });
-    if (bindings.size() != static_cast<size_t>(expectedCount)) {
-        return nullptr;
+    if (!view || !object || buffers[*view].Group == buffers[*object].Group) return std::nullopt;
+    for (const auto& parameter : program.GetParameterLayout().Parameters()) {
+        if (parameter.Info.Kind == ShaderParameterKind::Texture || parameter.Info.Kind == ShaderParameterKind::Sampler) return std::nullopt;
     }
-    auto created = program->GetDevice()->CreateShaderParameterSet(render::ShaderParameterSetDescriptor{
-        .Layout = program->GetPipelineLayout(),
-        .GroupIndex = material.ParameterGroup});
-    if (!created.HasValue()) {
-        return nullptr;
+    return DepthOnlyProgramBindings{*view, *object, buffers[*view].Group, buffers[*object].Group};
+}
+
+Nullable<const DepthOnlyProgramBindings*> DepthOnlyBindingCache::Resolve(ShaderProgram* program) {
+    auto found = _programs.find(program);
+    if (found == _programs.end()) {
+        found = _programs.emplace(program, ResolveDepthOnlyProgramBindings(*program)).first;
+        if (!found->second) RADRAY_ERR_LOG("DepthOnly rejected an incompatible shader program; its depth draws are disabled");
     }
-    auto set = created.Release();
-    for (const ForwardBufferBinding& binding : bindings) {
-        if (binding.BufferIndex >= buffers.size() ||
-            buffers[binding.BufferIndex].Group != material.ParameterGroup ||
-            !set->Set(buffers[binding.BufferIndex].Binding, 0, binding.Value)) {
-            return nullptr;
-        }
-    }
-    for (const MaterialTextureFrameData& value : material.Textures) {
-        const Nullable<render::TextureView*> view = value.Texture->GetOrCreateSrv(value.SubView);
-        if (!view.HasValue() || !set->Set(value.Parameter.Binding, value.Element, view.Get())) {
-            return nullptr;
-        }
-    }
-    for (const MaterialSamplerFrameData& value : material.Samplers) {
-        const auto sampler = program->GetDevice()->GetOrCreateSampler(value.Sampler);
-        if (!sampler.HasValue() || !set->Set(value.Parameter.Binding, value.Element, sampler.Get())) {
-            return nullptr;
-        }
-    }
-    if (!set->FlushWrites()) {
-        return nullptr;
-    }
-    _sets.push_back(Entry{materialIndex, program, {bindings.begin(), bindings.end()}, std::move(set)});
-    return _sets.back().Set.get();
+    return found->second ? &*found->second : nullptr;
 }
 
 }  // namespace radray::forward_detail

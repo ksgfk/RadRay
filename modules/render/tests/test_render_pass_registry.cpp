@@ -191,6 +191,17 @@ TEST(RenderPassCacheKeyTest, GetRoundTripsDescriptor) {
     ExpectSameKey(key, RenderPassCacheKey::Build(readBack));
 }
 
+TEST(RenderPassCacheKeyTest, ReadOnlyDepthHasDistinctNativePassKey) {
+    auto depth = MakeDepth();
+    depth.DepthLoad = depth.StencilLoad = LoadAction::Load;
+    depth.DepthStore = depth.StencilStore = StoreAction::Store;
+    const auto writable = RenderPassCacheKey::Build({.DepthStencilAttachment = depth});
+    depth.ReadOnly = true;
+    const auto readOnly = RenderPassCacheKey::Build({.DepthStencilAttachment = depth});
+    ExpectDifferentKey(writable, readOnly);
+    EXPECT_TRUE(readOnly.Get().DepthStencilAttachment->ReadOnly);
+}
+
 TEST(RenderPassCacheKeyTest, DefaultKeyEqualsBuiltEmptyKey) {
     // depth-only / 空 pass 是合法输入, 默认构造的 key 不能和它撞或错开。
     ExpectSameKey(RenderPassCacheKey{}, RenderPassCacheKey::Build(RenderPassDescriptor{}));

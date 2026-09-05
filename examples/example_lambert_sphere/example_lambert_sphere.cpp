@@ -90,9 +90,16 @@ protected:
             RADRAY_ERR_LOG("example_lambert_sphere: forward shader program creation failed");
             return;
         }
-        Nullable<unique_ptr<Material>> material = Material::Create(
-            program.Get(),
-            "ForwardMaterial");
+        vector<MaterialPassDesc> passes{{"ForwardLit", program.Get(), "ForwardMaterial", {}}};
+        const auto depth = GetRenderSystem()->GetOrCreateShaderProgram({.SourceName = "pipelines/forward/depth_only.hlsl", .LayoutRecipe = ForwardPipeline::GetDepthOnlyLayoutRecipe()});
+        if (depth)
+            passes.push_back({"DepthOnly", depth.Get(), "", {}});
+        else
+            RADRAY_WARN_LOG("example_lambert_sphere: DepthOnly unavailable; using Forward opaque rendering");
+        auto technique = MaterialTechnique::Create(std::move(passes), "ForwardLit");
+        if (!technique) return;
+        _technique = technique.Release();
+        Nullable<unique_ptr<Material>> material = Material::Create(_technique.get());
         if (!material.HasValue()) {
             RADRAY_ERR_LOG("example_lambert_sphere: material creation failed");
             return;
@@ -184,6 +191,7 @@ protected:
 private:
     StreamingAssetRef<StaticMesh> _mesh;
     StreamingAssetRef<TextureAsset> _texture;
+    unique_ptr<MaterialTechnique> _technique;
     unique_ptr<Material> _material;
     Nullable<Actor*> _cameraActor{nullptr};
     Nullable<Actor*> _meshActor{nullptr};

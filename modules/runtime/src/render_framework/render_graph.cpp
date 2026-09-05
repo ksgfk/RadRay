@@ -689,7 +689,7 @@ bool RenderGraph::Impl::Realize() {
             const auto& view = Views[attachment.View];
             depthFormat = view.Key.Format;
             depthView = view.Native;
-            depth = render::RenderPassDepthStencilAttachmentDescriptor{view.Key.Format, pass.Samples, attachment.Desc.Load, attachment.Desc.Store, attachment.Desc.Load, attachment.Desc.Store};
+            depth = render::RenderPassDepthStencilAttachmentDescriptor{view.Key.Format, pass.Samples, attachment.Desc.Load, attachment.Desc.Store, attachment.Desc.Load, attachment.Desc.Store, attachment.Desc.ReadOnly};
         }
         pass.NativePass = Registry.GetOrCreateRenderPass({colors, depth});
         if (!pass.NativePass) {

@@ -5,6 +5,7 @@
 
 #include <radray/nullable.h>
 #include <radray/runtime/material_state.h>
+#include <radray/runtime/material_technique.h>
 #include <radray/runtime/render_framework/render_types.h>
 #include <radray/runtime/shader_parameters.h>
 #include <radray/runtime/texture_asset.h>
@@ -28,21 +29,28 @@ struct MaterialSamplerFrameData {
 };
 
 /// CPU value snapshot. Asset owners are retained separately on the game thread.
-struct MaterialRenderData {
+struct MaterialPassRenderData {
+    string PassName{};
     Nullable<ShaderProgram*> Program{nullptr};
-    uint32_t ParameterGroup{0};
+    uint32_t ProgramFrameId{0};
+    std::optional<uint32_t> ParameterGroup;
     ShaderParameterStorage Parameters{};
     MaterialPipelineState PipelineState{};
-    RenderQueue Queue{RenderQueue::Geometry};
     vector<MaterialTextureFrameData> Textures{};
     vector<MaterialSamplerFrameData> Samplers{};
+    bool Valid{false};
+};
+
+struct MaterialRenderData {
+    RenderQueue Queue{RenderQueue::Geometry};
+    vector<MaterialPassRenderData> Passes;
+
+    Nullable<const MaterialPassRenderData*> FindPass(std::string_view name) const noexcept;
 };
 
 class Material {
 public:
-    static Nullable<unique_ptr<Material>> Create(
-        ShaderProgram* program,
-        std::string_view parameterGroupAnchor);
+    static Nullable<unique_ptr<Material>> Create(const MaterialTechnique* technique);
 
     Material(const Material&) = delete;
     Material(Material&&) = delete;
@@ -53,8 +61,9 @@ public:
     ShaderProgram* GetProgram() const noexcept { return _program; }
     uint32_t GetParameterGroup() const noexcept { return _parameterGroup; }
 
-    MaterialPipelineState& GetPipelineState() noexcept { return _pipelineState; }
-    const MaterialPipelineState& GetPipelineState() const noexcept { return _pipelineState; }
+    MaterialPipelineState& GetPipelineState() noexcept { return _pipelineStates[_technique->GetPrimaryPassIndex()]; }
+    const MaterialPipelineState& GetPipelineState() const noexcept { return _pipelineStates[_technique->GetPrimaryPassIndex()]; }
+    bool SetPassPipelineState(std::string_view pass, const MaterialPipelineState& state) noexcept;
     RenderQueue GetRenderQueue() const noexcept { return _renderQueue; }
     void SetRenderQueue(RenderQueue value) noexcept { _renderQueue = value; }
 
@@ -84,16 +93,18 @@ public:
 private:
     struct ResourceState;
 
-    Material(ShaderProgram* program, uint32_t parameterGroup);
+    explicit Material(const MaterialTechnique* technique);
+    string CanonicalName(std::string_view name) const;
 
     Nullable<const ShaderParameterInfo*> FindNumericParameter(
         std::string_view name,
         ShaderParameterKind kind) const noexcept;
 
+    const MaterialTechnique* _technique;
     ShaderProgram* _program;
     uint32_t _parameterGroup;
     ShaderParameterStorage _parameters;
-    MaterialPipelineState _pipelineState;
+    vector<MaterialPipelineState> _pipelineStates;
     RenderQueue _renderQueue{RenderQueue::Geometry};
     unique_ptr<ResourceState> _resources;
 };

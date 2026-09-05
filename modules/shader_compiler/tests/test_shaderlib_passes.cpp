@@ -58,9 +58,13 @@ TEST(RadRayShaderLibPass, ProductPassesCompileAsAtomicTwoTargetVariants) {
         {"ForwardObject", 2, 0, 2, 0, 1, "ForwardObjectData"}};
     constexpr BindingFact computeBindings[] = {
         {"Output", 0, 0, 2, 6, 4}};
+    constexpr BindingFact depthOnlyBindings[] = {
+        {"ForwardView", 0, 0, 0, 0, 1, "ForwardDepthViewData"},
+        {"ForwardObject", 2, 0, 2, 0, 1, "ForwardDepthObjectData"}};
     const PassCase cases[] = {
         {"pipelines/forward/forward.hlsl", "pipelines/forward/forward.hlsl", shader::ShaderKind::Graphics, 2, forwardBindings, "QUALITY", "low"},
         {"passes/depth.hlsl", "passes/depth.hlsl", shader::ShaderKind::Graphics, 1, {}, "DEPTH_MODE", "regular"},
+        {"pipelines/forward/depth_only.hlsl", "pipelines/forward/depth_only.hlsl", shader::ShaderKind::Graphics, 1, depthOnlyBindings, "", ""},
         {"passes/compute.hlsl", "passes/compute.hlsl", shader::ShaderKind::Compute, 1, computeBindings, "COMPUTE_MODE", "clear"}};
 
     Client client;
@@ -89,6 +93,7 @@ TEST(RadRayShaderLibPass, ProductPassesCompileAsAtomicTwoTargetVariants) {
             .Assignments = {{string{pass.AssignmentName}, string{pass.AssignmentValue}}},
             .Targets = shader::ShaderTargetMask::All,
             .ExpectedContract = discovery.Contract.Hash};
+        if (pass.AssignmentName.empty()) request.Assignments.clear();
         const shader::CompileVariantResult result = client.CompileVariant(request, includePaths);
         ASSERT_EQ(result.Status, shader::CompileStatus::Success)
             << (result.Diagnostics.empty() ? "" : result.Diagnostics.back().Message);

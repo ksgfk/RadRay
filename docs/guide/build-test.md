@@ -84,7 +84,10 @@ cmake --build build_runtime_only --config Debug --parallel 24
 | `test_render_outputs` | `RenderOutputTest` |
 | `test_material` | `RadRayRuntimeMaterial` |
 | `test_mesh_draw` | `RadRayRuntimeMeshDraw`, `RadRayRuntimeForwardSets` |
-| `test_forward_pipeline` | `RadRayRuntimeForwardPipeline`, `RadRayRuntimeMaterial`, `RadRayRuntimeForwardBindings` |
+| `test_forward_pipeline` | `RadRayRuntimeForwardPipeline`, `RadRayRuntimeMaterial`, `RadRayRuntimeForwardBindings`, `MaterialTechnique`, `FrameDrawResources`, `RenderSceneSnapshot` |
+| `test_culling` | `RenderBounds`, `Culling` |
+| `test_renderer_list` | `RendererList` |
+| `test_stage_b_draw` | `StageBDraw` |
 | `test_render_pipeline` | `RadRayRuntimeRenderPipeline`, `RadRayRuntimeRenderSystem`, `RuntimeLayering`, `RadRayRuntimeForwardPipeline` |
 | `test_runtime_shader_jit` | `RadRayRuntimeShaderJit` |
 | `test_radray_render_shader_artifact` | `RadRayRenderShaderArtifact` |
@@ -130,6 +133,11 @@ CTest 阶段避免构建期竞争。修改注册逻辑时，比较各 exe 的 `-
 cmake --preset win-x64-debug -B build_shader_tools -DRADRAY_BUILD_TESTS=OFF -DRADRAY_BUILD_RENDER=OFF -DRADRAY_BUILD_RUNTIME=OFF
 cmake --build build_shader_tools --config Debug --target radray_shader_compile --parallel 24
 ```
+
+Stage B 的 CPU suites 覆盖 bounds、zero-to-one 视锥、随机 AABB 参考对照、mask 与稳定 list 排序。
+`MaterialTechnique` / `FrameDrawResources` 覆盖布局、资源子集、pass 局部失效、不可变 set 与 arena spill。
+`StageBDraw` 在 D3D12/Vulkan 实际执行多顶点流的 snapshot → culling → lists → graph → readback；
+Forward GPU suites 覆盖深度预通道、缺 DepthOnly、透明混合、共享 attachment 的多视图和多线程寿命压力。
 
 RenderGraph 的 `*DumpAndLargeGraph*` 用例包含 100/1000-pass CPU benchmark，使用 Release
 记录性能基线，并注明机器与配置；不要混用 Debug 数据。排查相关内存错误时，Windows/MSVC

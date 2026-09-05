@@ -143,7 +143,9 @@ layout/参数 metadata 活过所有 flight，关停 GPU idle 后才销毁。
 RenderSystem 的每个 flight 保存一张 StreamingAssetRefAny vector。game thread 取得可写 flight 后
 清上一帧引用，再 Pump 资产；World tick 后 pipeline PrepareFrame 把本帧几何/纹理 owner 追加回来。
 render thread 不操作引用计数，只读取 pipeline 私有值快照和被保活的 immutable asset payload。
-Forward 的 frame-local sets 在下次录制复用时先销毁，再重置或裁减 arena；不会改写旧 backing set。
+Forward 的 `FrameDrawResources` 在下次安全复用时，先清空借用它的 renderer lists，再销毁 sets，
+最后重置或裁减 arena；不会改写已发布的 backing set。精确缓存 key 与命令边界见
+[Renderer foundation](renderer-foundation.md#renderer-lists-与帧内绘制资源)。
 
 `RenderGraphRuntime` 的每个 flight 独立持有 texture/buffer/view pool。`RenderSystem::Render` 开始时，
 该 flight 的 fence 已完成，才调用 pool `BeginFlight` trim/复用。`EndGraph` 不提前释放 GPU 对象。

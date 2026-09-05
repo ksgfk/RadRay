@@ -21,6 +21,7 @@ public:
     void CollectAssetReferences(vector<StreamingAssetRefAny>& out) const override;
 
     Eigen::Matrix4f GetLocalToWorld() const noexcept override { return _localToWorld; }
+    AxisAlignedBounds GetLocalBounds() const noexcept override;
     MeshDrawArgs GetDrawArgs(uint32_t sectionIndex) const noexcept override;
     uint32_t GetSectionCount() const noexcept override;
     Nullable<Material*> GetMaterial(uint32_t sectionIndex) const noexcept override;

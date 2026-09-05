@@ -5,6 +5,8 @@ radray_add_test(test_asset_slot SOURCES test_asset_slot.cpp LINK_LIBS radrayrunt
 radray_add_test(test_component_rtti SOURCES test_component_rtti.cpp LINK_LIBS radrayruntime)
 radray_add_test(test_service_registry SOURCES test_service_registry.cpp LINK_LIBS radrayruntime)
 radray_add_test(test_render_foundation SOURCES test_render_foundation.cpp LINK_LIBS radrayruntime)
+radray_add_test(test_culling SOURCES test_culling.cpp LINK_LIBS radrayruntime)
+radray_add_test(test_renderer_list SOURCES test_renderer_list.cpp LINK_LIBS radrayruntime)
 radray_add_test(test_render_graph_compile SOURCES test_render_graph_compile.cpp LINK_LIBS radrayruntime)
 target_include_directories(test_render_foundation PRIVATE "${CMAKE_SOURCE_DIR}/modules/render/tests")
 radray_add_test(test_view_state SOURCES test_view_state.cpp LINK_LIBS radrayruntime)
@@ -23,6 +25,9 @@ target_include_directories(test_mesh_draw PRIVATE
 target_compile_definitions(test_mesh_draw PRIVATE RADRAY_PROJECT_DIR="${CMAKE_SOURCE_DIR}")
 
 if (RADRAY_ENABLE_SHADER_JIT)
+    radray_add_test(test_stage_b_draw SOURCES test_stage_b_draw.cpp LINK_LIBS radrayruntime)
+    target_include_directories(test_stage_b_draw PRIVATE "${CMAKE_SOURCE_DIR}/modules/runtime/src" "${CMAKE_SOURCE_DIR}/modules/render/tests")
+    target_compile_definitions(test_stage_b_draw PRIVATE RADRAY_PROJECT_DIR="${CMAKE_SOURCE_DIR}")
     radray_add_test(test_render_graph SOURCES test_render_graph.cpp LINK_LIBS radrayruntime)
     target_include_directories(test_render_graph PRIVATE "${CMAKE_SOURCE_DIR}/modules/render/tests")
     target_compile_definitions(test_render_graph PRIVATE RADRAY_PROJECT_DIR="${CMAKE_SOURCE_DIR}")

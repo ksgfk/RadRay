@@ -1,6 +1,6 @@
 > - 适用: 改渲染管线、场景表示、Application 生命周期或服务装配
 > - 权威: 本文描述场景、Forward 与 Application 装配；workload/graph/history 契约见 `renderer-foundation.md`，资产与 GPU 帧管理见 `asset-system.md`、`frame-and-gpu.md`
-> - 锚点: `modules/runtime/include/radray/runtime/render_framework/render_pipeline.h`, `modules/runtime/include/radray/runtime/forward_pipeline/forward_pipeline.h`, `modules/runtime/include/radray/runtime/material.h`, `modules/runtime/include/radray/runtime/shader_program.h`, `modules/runtime/include/radray/runtime/render_framework/mesh_draw.h`, `modules/runtime/include/radray/runtime/components/static_mesh_component.h`, `modules/runtime/include/radray/runtime/game_framework/actor.h`, `modules/runtime/include/radray/runtime/service_registry.h`, `modules/runtime/src/application.cpp`, `modules/runtime/src/render_system.cpp`, `examples/example_lambert_sphere/example_lambert_sphere.cpp`
+> - 锚点: `modules/runtime/include/radray/runtime/render_framework/render_pipeline.h`, `modules/runtime/include/radray/runtime/forward_pipeline/forward_pipeline.h`, `modules/runtime/include/radray/runtime/material.h`, `modules/runtime/include/radray/runtime/shader_program.h`, `modules/runtime/include/radray/runtime/material_technique.h`, `modules/runtime/include/radray/runtime/render_framework/render_scene_snapshot.h`, `modules/runtime/include/radray/runtime/render_framework/renderer_list.h`, `modules/runtime/include/radray/runtime/components/static_mesh_component.h`, `modules/runtime/include/radray/runtime/game_framework/actor.h`, `modules/runtime/include/radray/runtime/service_registry.h`, `modules/runtime/src/application.cpp`, `modules/runtime/src/render_system.cpp`, `examples/example_lambert_sphere/example_lambert_sphere.cpp`
 
 # 渲染框架与 game framework
 
@@ -50,14 +50,16 @@ Application 不提供独立的 view 内容录制钩子。
 `ForwardPipeline` 在构造时借用 Scene 与 Camera，只在 `PrepareFrame` 访问它们，因此这些 source
 必须活过最后一次 PrepareFrame。已准备的帧不依赖 source、proxy 或 Material 的后续寿命。
 
-`Material` 是一个 concrete program 的 CPU authoring state，包含自己负责的一个 parameter group、
-数值 bytes、texture refs/subview、sampler descriptor、固定功能状态和 RenderQueue。
-`Material::Create(program, "ForwardMaterial")` 通过 cbuffer declaration anchor 取得真实 group；
-只为该组分配数值 storage，typed setters 拒绝其他 group。参数身份是
-`ForwardMaterial.BaseColor` 这种 declaration-qualified 完整路径；全 program 唯一的叶名可作简写，
-重名叶子必须使用完整路径，不猜 group 0。
-`BuildRenderData` 复制 CPU 值，输出 raw TextureAsset pointer，并把 texture refs 追加到宿主的
-retained vector；这个过程不创建 RHI set / SRV，也不维护 flight 或 descriptor 版本。
+`MaterialTechnique` 是 game-thread 创建的不可变 pass 表，包含唯一 pass 名、program、material cbuffer
+anchor 和默认固定功能状态。`Material::Create(technique)` 借用 technique，后者及其 programs 必须活过
+Material 的 authoring/snapshot 调用；program 还必须活过帧执行。primary pass 定义 canonical 数值布局
+与资源声明，Material 保存一份数值/纹理/sampler 值及逐 pass 的状态覆盖。布局兼容、资源子集与
+metadata 的校验限制见 [Renderer foundation](renderer-foundation.md#材质-technique)。
+
+Material setter 接受 primary cbuffer 内的相对字段路径（如 `BaseColor`）或带 primary declaration 的
+完整路径（如 `ForwardMaterial.BaseColor`），拒绝其他 cbuffer。Texture/Sampler 使用声明的 exact name。
+`BuildRenderData` 为各 pass 复制独立的数值 bytes、状态和其实际消费的资源；缺资源只使消费它的 pass
+无效。资产 owner 追加到宿主 retained vector；snapshot 不创建 RHI set / SRV，也不维护 descriptor 版本。
 
 `ShaderProgram` 继续拥有 artifact、layout、shader、参数索引与 PSO map。PSO key 由 material state、
 geometry vertex layout/topology、pass attachment formats/sample count 组成；不包含 render pass 指针、
@@ -113,32 +115,38 @@ struct MeshDrawArgs {
 
 `StaticMeshComponent` 按 section 保存 material，`StaticMeshSceneProxy` 自持 mesh ref、借用的 material 指针与
 local-to-world，并把 `StaticMeshSection` 的 `FirstIndex` / `IndexCount` / `VertexOffset` 投影成 draw。
-`MeshDrawList` 是 Forward 专用的 game-thread collector；PrepareFrame 主动遍历 `Scene::Primitives()`；queue 小于 2500 的 item 先按 program/material
-聚簇，queue 大于等于 2500 的 item 按 view depth 从远到近排序，同 key 保持收集顺序。
+每个 flight 在 PrepareFrame 中构建一次与 view 无关的 `RenderSceneSnapshot`：primitive 保存变换、
+世界 AABB、layer mask 和连续 MeshBatch 范围；batch 借用 geometry 并保存 section draw range、primitive
+和 material 索引。材质按首次出现去重，所有 pass 的 program 分配帧内整数 ID。光源保存参数和球形界限。
+`StaticMeshSceneProxy` 从 mesh asset 提供局部 bounds；自定义 proxy 可以覆盖 layer mask 与禁用视锥剔除标志。
+无效 bounds 保守可见；几何和纹理由宿主 per-flight refs 保活。
+
+`GpuMesh::DrawData::VertexBuffers` 保存真实 binding number 与 buffer view，可描述多个顶点流。
+现有 mesh uploader 仍生成一个交错流；手工几何可以使用多个或不连续的 binding。PSO resolver 从几何中
+选取当前 shader 所需的属性及其 buffer，允许 DepthOnly 复用 Forward 的完整几何；缺失或重复匹配的
+必需语义会失败。执行器按连续 binding 段调用底层接口，不重新编号。
 
 ### 内置 ForwardPipeline
 
-每个 flight 的 `ForwardFrameInput` 保存材质值快照、逐 section geometry/index range/transform/material
-index，以及光源类型/参数/radius。相机事实位于同 flight 的 frame plan view descriptors，resolve 后
-按实际输出尺寸生成 projection。input 不含 Scene、proxy、CameraComponent、
-Material、AssetManager 或 StreamingAssetRef。Geometry/TextureAsset 由 RenderSystem 的 per-flight
-refs 保活；该 vector 仅在 game thread 清理和追加，flight 复用时清理后由既有 Pump 零引用回收。
+Forward 在 render thread 对每个 resolved view 调用一次 CPU `Cull`，从同一结果生成 DepthOnly、
+Opaque、Transparent 三个 `RendererList`。通用 builder 处理 pass/queue/mask、排序与统计；具体
+`ForwardLitMeshPassProcessor` / `DepthOnlyMeshPassProcessor` 解释 shader 契约，准备 per-view/object/material
+bytes 与 frame-local sets，输出只借用资源的 `MeshDrawCommand`。render thread 不访问 Scene、proxy、
+CameraComponent、Material、AssetManager 或 StreamingAssetRef。
 
-Forward 私有 resolver 按 `ForwardView`、`ForwardMaterial`、`ForwardObject` 找到 cbuffer，读取
-当前 target 的真实 group，并要求三组不同、三个 buffer dynamic。active `AlbedoTexture` 和
-`LinearSampler` 必须属于 material group。失败按 program 负缓存并跳过 draw。DXIL spaces 与
-SPIR-V sets 可以不同；CPU 不硬编码 0/1/2，也不建立 remap table。
+Forward resolver 按 `ForwardView`、`ForwardMaterial`、`ForwardObject` 找到当前 target 的真实 group，
+要求三个 cbuffer dynamic 且组号不同；active `AlbedoTexture` / `LinearSampler` 必须属于 material group。
+DepthOnly 只接受独立的 dynamic view/object 组，不绑定 material。DXIL spaces 与 SPIR-V sets 可以不同，
+CPU 不硬编码 0/1/2。resolver 失败按 program 负缓存；不替换成其他 pass。
 
-每个 flight 自持 DynamicCBufferArena 和 frame-local parameter sets。开始复用时先销毁旧 sets，
-再 Reset arena。view/object set 按 program + backing buffer 复用；material set 按当前 snapshot
-index + backing bindings 复用。不同 backing target 创建不同 set，已发布的 set 在本帧内不再写。
-数值上传和资源 binding 在 graph 执行前为每个 family 独立准备；callback 取得实际兼容 pass state 后
-查询 ShaderProgram PSO cache，再 bind PSO/set/VB/IB 和 DrawIndexed。不同 view 的 offsets 保留至执行完毕。
+每个 flight 的 `FrameDrawResources` 持有 arena 与不可变 sets；renderer lists 必须先清空，才能清 sets
+和重置 arena。graph callback 只查询 PSO、绑定已准备的资源并 draw。snapshot/culling/list/执行统计和
+精确的资源寿命契约见 [Renderer foundation](renderer-foundation.md#场景快照与剔除)。
 
-Forward 每个可用 family 声明 graph transient depth，按 D32/D24S8/D16 的支持顺序选择；由 per-flight
-pool 管理复用和 resize 后安全回收。opaque Clear 与必要的 transparent Load 在一张 graph 中执行。
-viewport 使用 MakeViewport；只有它在 Vulkan 下使用负 height。光照从帧快照按当前 resolved view
-投影到 view bytes，点光按距该 view 位置由近到远截断，超过上限只记录一次 warning。
+Forward 在同一张 graph 中声明可选深度预通道、opaque 和必要的 transparent。一个 family 可以包含
+多个不重叠 view，独立保存剔除结果、排序、光照和 offsets，共享 family attachments。view/scissor
+经 `MakeViewport` 统一处理 Vulkan Y 翻转；点光按各 view 的距离截断。目标、深度 Load/Store、
+视图提交和当前范围见 [Renderer foundation](renderer-foundation.md#forward-范围)。
 
 ## Application 与 runner
 

@@ -157,7 +157,7 @@ CPU buffer/parameter 表，pure-push artifact 因而得到合法空 layout。
 `ShaderParameterStorage` 的 typed setter 在 kind/size/element 不匹配或 ambiguous lookup 时不修改
 目标 bytes。非 struct 元素的数组（`float4 Foo[4]`）仍受 type tree 表达上限约束：record 只带
 stride 与 count，layout 把它记为 `ShaderParameterKind::Raw`，只接受 `SetRaw`。
-Material 的 storage 只为 declaration anchor 选中的 group 分配 bytes，其他 buffer 的
+Material 的 canonical storage 只为 technique primary declaration anchor 选中的 group 分配 bytes，其他 buffer 的
 `GetBufferData` 返回空；参数查找仍遵守上述完整路径与唯一叶名规则。
 
 ## Target layout resolution

@@ -19,7 +19,7 @@ class MeshResource;
 class GpuMesh {
 public:
     struct DrawData {
-        render::VertexBufferView Vbv;
+        vector<render::VertexBufferBinding> VertexBuffers;
         render::IndexBufferView Ibv;
         PrimitiveVertexLayout VertexLayout;
         PrimitiveTopology Topology{PrimitiveTopology::TriangleList};

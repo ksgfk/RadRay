@@ -323,6 +323,12 @@ render pass。所以 key 保持原序，哈希也按顺序喂入。这是最容�
 `Clear()` 不置空 `_device`，清完可继续用；`GetOrCreateFramebuffer` 的 `desc.Pass` 必须来自
 同一个 registry。
 
+`RenderPassDepthStencilAttachmentDescriptor::ReadOnly` 表示整个 depth/stencil attachment 只读，要求
+已有 aspect 使用 Load/Store，framebuffer view 的 usage 必须对应 DepthRead；可写 pass 使用 DepthWrite。
+完整 render pass key 包含此标志。D3D12 BeginRenderPass 设置只读 depth/stencil flags；Vulkan attachment
+reference 与 initial/final layout 使用与 DepthRead barrier 一致的只读 layout。PSO 的 attachment 兼容 key
+仍只包含格式和 sample count；调用方必须同时关闭 PSO 的 depth/stencil 写入。
+
 ## 两个后端实现文件的分区
 
 `vulkan_impl.cpp`（5.6k 行）与 `d3d12_impl.cpp`（4.6k 行）都在文件顶部有 banner 列出章节，

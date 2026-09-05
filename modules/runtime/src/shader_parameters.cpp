@@ -358,6 +358,12 @@ void ShaderParameterStorage::Reset() noexcept {
     }
 }
 
+bool ShaderParameterStorage::CopyCompatibleBufferBytes(uint32_t bufferIndex, std::span<const byte> data) noexcept {
+    if (bufferIndex >= _bufferData.size() || data.empty() || data.size() != _bufferData[bufferIndex].size()) return false;
+    std::memcpy(_bufferData[bufferIndex].data(), data.data(), data.size());
+    return true;
+}
+
 std::span<const byte> ShaderParameterStorage::GetBufferData(
     uint32_t bufferIndex) const noexcept {
     if (bufferIndex >= _bufferData.size()) {

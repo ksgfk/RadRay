@@ -50,6 +50,7 @@ public:
     bool CastShadow() const noexcept { return _castShadow; }
 
     virtual float GetRadius() const noexcept { return std::numeric_limits<float>::max(); }
+    virtual uint32_t GetLayerMask() const noexcept { return 0xffffffffu; }
     virtual float GetSourceRadius() const noexcept { return 0.0f; }
     virtual bool IsInverseSquared() const noexcept { return true; }
     virtual bool IsLocalLight() const noexcept { return false; }

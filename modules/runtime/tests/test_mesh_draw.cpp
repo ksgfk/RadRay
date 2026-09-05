@@ -1,12 +1,13 @@
 #include "gpu_test_fixture.h"
-#include "forward_pipeline/forward_bindings.h"
+#include <radray/runtime/render_framework/frame_draw_resources.h>
+#include <radray/runtime/render_framework/mesh_pass_processor.h>
 #include "shader_contract_fixtures.h"
 
 #include <radray/render/backend_shader_artifact.h>
 #include <radray/runtime/asset_manager.h>
 #include <radray/runtime/components/primitive_component.h>
 #include <radray/runtime/material.h>
-#include <radray/runtime/render_framework/mesh_draw.h>
+#include <radray/runtime/render_framework/render_scene_snapshot.h>
 #include <radray/runtime/render_framework/scene.h>
 #include <radray/runtime/render_framework/viewport.h>
 #include <radray/runtime/shader_program.h>
@@ -319,26 +320,26 @@ void RunMaterialResourceResidency(
     const auto* samplerParameter = program->GetParameterLayout().Find("LinearSampler");
     ASSERT_NE(textureParameter, nullptr);
     ASSERT_NE(samplerParameter, nullptr);
-    MaterialRenderData snapshotA{
+    MaterialPassRenderData snapshotA{
         .Program = program.get(),
         .ParameterGroup = textureParameter->Group,
         .Textures = {{*textureParameter, textureA.Get().Get(), TextureSubViewDesc::Default(), 0}},
         .Samplers = {{*samplerParameter, render::SamplerDescriptor{}, 0}}};
-    MaterialRenderData snapshotB = snapshotA;
+    MaterialPassRenderData snapshotB = snapshotA;
     snapshotB.Textures[0].Texture = textureB.Get().Get();
-    forward_detail::ForwardMaterialSets flights[2];
-    const auto set0 = flights[0].GetOrCreate(0, snapshotA, {});
-    const auto set1 = flights[1].GetOrCreate(0, snapshotA, {});
+    FrameDrawResources flights[]{FrameDrawResources{&device}, FrameDrawResources{&device}};
+    const auto set0 = flights[0].PrepareSet(*snapshotA.Program.Get(), *snapshotA.ParameterGroup, {}, snapshotA.Textures, snapshotA.Samplers);
+    const auto set1 = flights[1].PrepareSet(*snapshotA.Program.Get(), *snapshotA.ParameterGroup, {}, snapshotA.Textures, snapshotA.Samplers);
     ASSERT_TRUE(set0.HasValue());
     ASSERT_TRUE(set1.HasValue());
     EXPECT_NE(set0.Get(), set1.Get());
-    flights[0].Clear();
-    ASSERT_TRUE(flights[0].GetOrCreate(0, snapshotB, {}).HasValue());
-    EXPECT_EQ(flights[1].GetOrCreate(0, snapshotA, {}).Get(), set1.Get());
-    flights[1].Clear();
-    ASSERT_TRUE(flights[1].GetOrCreate(0, snapshotB, {}).HasValue());
-    flights[0].Clear();
-    flights[1].Clear();
+    flights[0].ClearSets();
+    ASSERT_TRUE(flights[0].PrepareSet(*snapshotB.Program.Get(), *snapshotB.ParameterGroup, {}, snapshotB.Textures, snapshotB.Samplers).HasValue());
+    EXPECT_EQ(flights[1].PrepareSet(*snapshotA.Program.Get(), *snapshotA.ParameterGroup, {}, snapshotA.Textures, snapshotA.Samplers).Get(), set1.Get());
+    flights[1].ClearSets();
+    ASSERT_TRUE(flights[1].PrepareSet(*snapshotB.Program.Get(), *snapshotB.ParameterGroup, {}, snapshotB.Textures, snapshotB.Samplers).HasValue());
+    flights[0].ClearSets();
+    flights[1].ClearSets();
     textureB.Reset();
     textureA.Reset();
     assets.Pump();
@@ -391,9 +392,9 @@ void RunMeshDraw(
     unique_ptr<render::Framebuffer> framebuffer = framebufferResult.Release();
 
     const PrimitiveVertexLayout vertexLayout = MakePositionLayout();
-    Nullable<unique_ptr<Material>> materialResult = Material::Create(
-        program.get(),
-        "Constants");
+    auto technique = MaterialTechnique::Create({{"ForwardLit", program.get(), "Constants", {}}}, "ForwardLit");
+    ASSERT_TRUE(technique);
+    Nullable<unique_ptr<Material>> materialResult = Material::Create(technique.Get());
     ASSERT_TRUE(materialResult.HasValue());
     unique_ptr<Material> material = materialResult.Release();
     material->GetPipelineState().Primitive.Cull = render::CullMode::None;
@@ -508,30 +509,31 @@ void RunMeshDraw(
             parameterBytes,
             render::BufferUse::CBuffer);
     ASSERT_TRUE(parameterBuffer.HasValue());
-    const forward_detail::ForwardBufferBinding materialBuffer{
+    const FrameBufferBinding materialBuffer{
         .BufferIndex = 0,
         .Value = render::ShaderBufferBinding{
             .Target = parameterBuffer.Get(),
             .Range = render::BufferRange{0, parameterBufferLayout.Size}}};
-    MaterialRenderData snapshot;
+    MaterialRenderData snapshotData;
     vector<StreamingAssetRefAny> retained;
-    ASSERT_TRUE(material->BuildRenderData(snapshot, retained));
+    ASSERT_TRUE(material->BuildRenderData(snapshotData, retained));
+    const auto& snapshot = snapshotData.Passes.front();
     Nullable<unique_ptr<render::Buffer>> otherBuffer;
-    forward_detail::ForwardMaterialSets flights[2];
-    const auto flightZeroSet = flights[0].GetOrCreate(0, snapshot, std::span{&materialBuffer, 1});
-    const auto flightOneSet = flights[1].GetOrCreate(0, snapshot, std::span{&materialBuffer, 1});
+    FrameDrawResources flights[]{FrameDrawResources{&device}, FrameDrawResources{&device}};
+    const auto flightZeroSet = flights[0].PrepareSet(*snapshot.Program.Get(), *snapshot.ParameterGroup, std::span{&materialBuffer, 1}, snapshot.Textures, snapshot.Samplers);
+    const auto flightOneSet = flights[1].PrepareSet(*snapshot.Program.Get(), *snapshot.ParameterGroup, std::span{&materialBuffer, 1}, snapshot.Textures, snapshot.Samplers);
     ASSERT_TRUE(flightZeroSet.HasValue());
     ASSERT_TRUE(flightOneSet.HasValue());
     EXPECT_NE(flightZeroSet.Get(), flightOneSet.Get());
-    EXPECT_EQ(flights[0].GetOrCreate(0, snapshot, std::span{&materialBuffer, 1}).Get(), flightZeroSet.Get());
+    EXPECT_EQ(flights[0].PrepareSet(*snapshot.Program.Get(), *snapshot.ParameterGroup, std::span{&materialBuffer, 1}, snapshot.Textures, snapshot.Samplers).Get(), flightZeroSet.Get());
 
     // A spill to another arena target must not rewrite the set used by the first draw.
     otherBuffer = render::test::MakeUploadBuffer(device, parameterBytes, render::BufferUse::CBuffer);
     ASSERT_TRUE(otherBuffer.HasValue());
-    const forward_detail::ForwardBufferBinding otherBinding{
+    const FrameBufferBinding otherBinding{
         .BufferIndex = 0,
         .Value = {.Target = otherBuffer.Get(), .Range = {0, parameterBufferLayout.Size}}};
-    const auto otherSet = flights[0].GetOrCreate(0, snapshot, std::span{&otherBinding, 1});
+    const auto otherSet = flights[0].PrepareSet(*snapshot.Program.Get(), *snapshot.ParameterGroup, std::span{&otherBinding, 1}, snapshot.Textures, snapshot.Samplers);
     ASSERT_TRUE(otherSet.HasValue());
     EXPECT_NE(otherSet.Get(), flightZeroSet.Get());
     const auto assertOriginalTarget = [&](const auto* native) {
@@ -704,14 +706,17 @@ void RunDrawListSort(render::test::DeviceContext& context) {
     ASSERT_TRUE(secondProgramResult.HasValue());
     unique_ptr<ShaderProgram> firstProgram = firstProgramResult.Release();
     unique_ptr<ShaderProgram> secondProgram = secondProgramResult.Release();
-    Nullable<unique_ptr<Material>> materialAResult =
-        Material::Create(firstProgram.get(), "Constants");
+    auto techniqueA = MaterialTechnique::Create({{"ForwardLit", firstProgram.get(), "Constants", {}}}, "ForwardLit");
+    auto techniqueB = MaterialTechnique::Create({{"ForwardLit", secondProgram.get(), "Constants", {}}}, "ForwardLit");
+    ASSERT_TRUE(techniqueA);
+    ASSERT_TRUE(techniqueB);
+    Nullable<unique_ptr<Material>> materialAResult = Material::Create(techniqueA.Get());
     Nullable<unique_ptr<Material>> materialA2Result =
-        Material::Create(firstProgram.get(), "Constants");
+        Material::Create(techniqueA.Get());
     Nullable<unique_ptr<Material>> materialBResult =
-        Material::Create(secondProgram.get(), "Constants");
+        Material::Create(techniqueB.Get());
     Nullable<unique_ptr<Material>> transparentResult =
-        Material::Create(firstProgram.get(), "Constants");
+        Material::Create(techniqueA.Get());
     ASSERT_TRUE(materialAResult.HasValue());
     ASSERT_TRUE(materialA2Result.HasValue());
     ASSERT_TRUE(materialBResult.HasValue());
@@ -762,50 +767,45 @@ void RunDrawListSort(render::test::DeviceContext& context) {
     ASSERT_NE(scene.AddPrimitive(&opaqueARepeat), nullptr);
     ASSERT_NE(scene.AddPrimitive(&farTransparent), nullptr);
     ASSERT_NE(scene.AddPrimitive(&nearTransparent), nullptr);
-    MeshDrawList list;
-    list.Collect(&scene, Eigen::Matrix4f::Identity());
-    ASSERT_EQ(list.Size(), 7u);
-    list.Sort();
-    const std::span<const MeshDrawItem> items = list.Items();
-
-    for (size_t index = 0; index < 4; ++index) {
-        EXPECT_LT(
-            static_cast<int32_t>(items[index].DrawMaterial->GetRenderQueue()),
-            static_cast<int32_t>(RenderQueue::GeometryLast));
-    }
-    size_t programTransitions = 0;
-    for (size_t index = 1; index < 4; ++index) {
-        programTransitions +=
-            items[index - 1].DrawMaterial->GetProgram() !=
-                    items[index].DrawMaterial->GetProgram()
-                ? 1
-                : 0;
-    }
-    EXPECT_EQ(programTransitions, 1u);
-
-    std::optional<size_t> firstA;
-    std::optional<size_t> repeatedA;
-    for (size_t index = 0; index < 4; ++index) {
-        if (items[index].FirstIndex == 11) {
-            firstA = index;
-        } else if (items[index].FirstIndex == 44) {
-            repeatedA = index;
+    RenderSceneSnapshot snapshot;
+    vector<StreamingAssetRefAny> owners;
+    ASSERT_TRUE(BuildRenderSceneSnapshot(scene, snapshot, owners));
+    ASSERT_EQ(snapshot.MeshBatches.size(), 7u);
+    ASSERT_EQ(snapshot.Materials.size(), 4u);
+    ResolvedRenderView view;
+    view.View = view.ViewProjection = Eigen::Matrix4f::Identity();
+    view.WorldPosition.setZero();
+    CullingResults culling;
+    ASSERT_TRUE(Cull({&snapshot, &view}, culling));
+    class SortProcessor final : public MeshPassProcessor {
+        void AddMeshBatch(const RendererListDesc& desc, const RenderSceneSnapshot& scene, const MeshBatch& batch, MeshPassDrawListContext& out) override {
+            MeshDrawCommand command;
+            command.Program = scene.Materials[batch.Material].FindPass(desc.MaterialPassName)->Program;
+            command.Geometry = batch.Geometry;
+            command.FirstIndex = batch.FirstIndex;
+            command.IndexCount = batch.IndexCount;
+            command.VertexOffset = batch.VertexOffset;
+            out.AddCommand(std::move(command));
         }
-    }
-    ASSERT_TRUE(firstA.has_value());
-    ASSERT_TRUE(repeatedA.has_value());
-    EXPECT_EQ(repeatedA.value(), firstA.value() + 1);
-
-    EXPECT_FLOAT_EQ(items[4].ViewDepth, 5.0f);
-    EXPECT_FLOAT_EQ(items[5].ViewDepth, 5.0f);
-    EXPECT_FLOAT_EQ(items[6].ViewDepth, 2.0f);
-    EXPECT_EQ(items[4].SectionIndex, 0u);
-    EXPECT_EQ(items[5].SectionIndex, 1u);
-    EXPECT_EQ(items[4].FirstIndex, 55u);
-    EXPECT_EQ(items[4].IndexCount, 7u);
-    EXPECT_EQ(items[4].VertexOffset, -5);
-    EXPECT_EQ(items[5].FirstIndex, 56u);
-    EXPECT_EQ(items[6].FirstIndex, 66u);
+    } processor;
+    RendererList opaque, transparentList;
+    ASSERT_TRUE(BuildRendererList({"Opaque", "ForwardLit", &culling, &view, RenderQueueRange::Opaque()}, processor, opaque));
+    ASSERT_TRUE(BuildRendererList({"Transparent", "ForwardLit", &culling, &view, RenderQueueRange::Transparent(), 0xffffffffu, RendererListSorting::BackToFront}, processor, transparentList));
+    ASSERT_EQ(opaque.Commands.size(), 4u);
+    EXPECT_EQ(opaque.Commands[0].FirstIndex, 11u);
+    EXPECT_EQ(opaque.Commands[1].FirstIndex, 44u);
+    EXPECT_EQ(opaque.Commands[2].FirstIndex, 33u);
+    EXPECT_EQ(opaque.Commands[3].FirstIndex, 22u);
+    ASSERT_EQ(transparentList.Commands.size(), 3u);
+    const auto& items = transparentList.Commands;
+    EXPECT_FLOAT_EQ(items[0].SortData.ViewDepth, 5.0f);
+    EXPECT_FLOAT_EQ(items[1].SortData.ViewDepth, 5.0f);
+    EXPECT_FLOAT_EQ(items[2].SortData.ViewDepth, 2.0f);
+    EXPECT_EQ(items[0].FirstIndex, 55u);
+    EXPECT_EQ(items[0].IndexCount, 7u);
+    EXPECT_EQ(items[0].VertexOffset, -5);
+    EXPECT_EQ(items[1].FirstIndex, 56u);
+    EXPECT_EQ(items[2].FirstIndex, 66u);
 }
 
 TEST(RadRayRuntimeMeshDraw, DrawListClustersOpaqueAndSortsTransparentStably) {

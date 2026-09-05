@@ -27,7 +27,7 @@ TEST(RuntimeLayering, LegacyPipelineScaffoldingRemoved) {
             }
             const string source = ReadSource(entry.path());
             for (const auto symbol : {"BindingGroupPlan", "RenderPassEvent", "RenderPipelinePass", "RenderCameraList",
-                                      "PrepareParameterSet", "GetResidentParameterSet", "OnRenderView", "RenderViewContent", "RenderPipelineTarget"}) {
+                                      "PrepareParameterSet", "GetResidentParameterSet", "OnRenderView", "RenderViewContent", "RenderPipelineTarget", "MeshDrawList", "MeshDrawItem", "ForwardFrameDraw"}) {
                 EXPECT_EQ(source.find(symbol), string::npos) << entry.path().string() << ": " << symbol;
             }
         }
@@ -109,21 +109,21 @@ string StructBody(const string& source, std::string_view name) {
     return {};
 }
 
-TEST(RadRayRuntimeForwardPipeline, FrameInputContainsNoGameObjects) {
-    static_assert(std::is_same_v<decltype(forward_detail::ForwardFrameDraw::Geometry), const GpuMesh::DrawData*>);
+TEST(RuntimeLayering, SnapshotContainsNoGameThreadObjectsOrAssetRefs) {
+    static_assert(std::is_same_v<decltype(MeshBatch::Geometry), Nullable<const GpuMesh::DrawData*>>);
     static_assert(std::is_same_v<decltype(MaterialTextureFrameData::Texture), TextureAsset*>);
-    static_assert(std::is_same_v<decltype(MaterialRenderData::Program), Nullable<ShaderProgram*>>);
-    const auto frame = ReadSource("modules/runtime/src/forward_pipeline/forward_frame.h");
+    static_assert(std::is_same_v<decltype(MaterialPassRenderData::Program), Nullable<ShaderProgram*>>);
+    const auto frame = ReadSource("modules/runtime/include/radray/runtime/render_framework/render_scene_snapshot.h");
+    const auto batch = ReadSource("modules/runtime/include/radray/runtime/render_framework/mesh_batch.h");
     const auto material = ReadSource("modules/runtime/include/radray/runtime/material.h");
+    const auto command = ReadSource("modules/runtime/include/radray/runtime/render_framework/mesh_draw_command.h");
     string bodies;
-    for (const auto name : {"ForwardFrameDraw", "ForwardFrameLight", "ForwardFrameInput"}) {
-        bodies += StructBody(frame, name);
-    }
-    for (const auto name : {"MaterialRenderData", "MaterialTextureFrameData", "MaterialSamplerFrameData"}) {
-        bodies += StructBody(material, name);
-    }
-    for (const auto symbol : {"Scene", "PrimitiveSceneProxy", "LightSceneProxy", "CameraComponent", "Material", "StreamingAssetRef", "StreamingAssetRefAny", "AssetManager"}) {
-        const std::regex pattern{fmt::format("\\b{}\\b", symbol)};
+    for (const auto name : {"RenderPrimitiveData", "RenderLightData", "RenderSceneSnapshot"}) bodies += StructBody(frame, name);
+    bodies += StructBody(batch, "MeshBatch");
+    bodies += StructBody(command, "MeshDrawCommand");
+    for (const auto name : {"MaterialRenderData", "MaterialPassRenderData", "MaterialTextureFrameData", "MaterialSamplerFrameData"}) bodies += StructBody(material, name);
+    for (const auto symbol : {"Scene", "PrimitiveSceneProxy", "LightSceneProxy", "CameraComponent", "Material", "MaterialTechnique", "StreamingAssetRef", "StreamingAssetRefAny", "AssetManager"}) {
+        const std::regex pattern{fmt::format("\\b{}\\b{}", symbol, std::string_view{symbol} == "Material" ? "\\s*[*&>]" : "")};
         EXPECT_FALSE(std::regex_search(bodies.begin(), bodies.end(), pattern)) << symbol;
     }
 }

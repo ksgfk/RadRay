@@ -14,6 +14,11 @@ StaticMeshSceneProxy::StaticMeshSceneProxy(
 
 StaticMeshSceneProxy::~StaticMeshSceneProxy() noexcept = default;
 
+AxisAlignedBounds StaticMeshSceneProxy::GetLocalBounds() const noexcept {
+    const auto mesh = _mesh.Get();
+    return mesh ? AxisAlignedBounds{mesh->GetBoundsMin(), mesh->GetBoundsMax()} : AxisAlignedBounds{};
+}
+
 void StaticMeshSceneProxy::CollectAssetReferences(vector<StreamingAssetRefAny>& out) const {
     out.push_back(_mesh.AsAny());
 }

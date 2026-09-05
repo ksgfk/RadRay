@@ -687,10 +687,10 @@ std::optional<GpuMesh> ResourceUploader::UploadMeshResource(
             const VertexBufferEntry& vbEntry = prim.VertexBuffers[0];
             if (vbEntry.BufferIndex < bufferByBin.size() && bufferByBin[vbEntry.BufferIndex].HasValue()) {
                 const uint64_t vbSize = static_cast<uint64_t>(prim.VertexCount) * vbEntry.Stride;
-                drawData.Vbv = render::VertexBufferView{
-                    .Target = bufferByBin[vbEntry.BufferIndex].Get(),
-                    .Offset = 0,
-                    .Size = vbSize};
+                drawData.VertexBuffers.push_back({drawData.VertexLayout.Buffers.front().Binding, render::VertexBufferView{
+                                                                                                     .Target = bufferByBin[vbEntry.BufferIndex].Get(),
+                                                                                                     .Offset = 0,
+                                                                                                     .Size = vbSize}});
             }
         }
         if (prim.IndexBuffer.BufferIndex < bufferByBin.size() && bufferByBin[prim.IndexBuffer.BufferIndex].HasValue()) {

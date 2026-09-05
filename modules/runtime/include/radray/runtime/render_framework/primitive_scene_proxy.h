@@ -3,6 +3,7 @@
 #include <radray/basic_math.h>
 #include <radray/nullable.h>
 #include <radray/runtime/gpu_resource.h>
+#include <radray/runtime/render_framework/render_bounds.h>
 #include <radray/types.h>
 
 // 基本体侧代理。场景数据如何从 Actor/Component 流到渲染侧:
@@ -42,6 +43,10 @@ public:
     /// 逐物体 local->world 变换 (对应 UE5 的 GetLocalToWorld / Unity 的 unity_ObjectToWorld)。
     /// 基类默认单位阵; 具体 proxy 覆写。
     virtual Eigen::Matrix4f GetLocalToWorld() const noexcept { return Eigen::Matrix4f::Identity(); }
+
+    virtual AxisAlignedBounds GetLocalBounds() const noexcept { return {}; }
+    virtual uint32_t GetLayerMask() const noexcept { return 0xffffffffu; }
+    virtual bool IsFrustumCullingDisabled() const noexcept { return false; }
 
     /// 取指定 section 的绘制参数 (几何 + 索引范围)。执行器据此绑定 VB/IB 并 DrawIndexed。
     /// 基类默认无几何 (Geometry=nullptr); 具体 proxy 覆写。

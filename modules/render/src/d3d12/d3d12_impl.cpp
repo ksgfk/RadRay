@@ -1597,6 +1597,15 @@ Nullable<unique_ptr<RenderPass>> DeviceD3D12::CreateRenderPass(const RenderPassD
         RADRAY_ERR_LOG("d3d12 render pass has invalid depth attachment");
         return nullptr;
     }
+    if (desc.DepthStencilAttachment) {
+        const auto& depth = *desc.DepthStencilAttachment;
+        const bool hasStencil = IsStencilFormatDXGI(MapType(depth.Format));
+        if (depth.ReadOnly && (depth.DepthLoad != LoadAction::Load || depth.DepthStore != StoreAction::Store ||
+                               (hasStencil && (depth.StencilLoad != LoadAction::Load || depth.StencilStore != StoreAction::Store)))) {
+            RADRAY_ERR_LOG("d3d12 read-only depth/stencil attachment must preserve its contents");
+            return nullptr;
+        }
+    }
     return make_unique<RenderPassD3D12>(desc);
 }
 
@@ -1629,6 +1638,7 @@ Nullable<unique_ptr<Framebuffer>> DeviceD3D12::CreateFramebuffer(const Framebuff
         const TextureDescriptor texture = view->_texture->GetDesc();
         const auto& depth = passDesc.DepthStencilAttachment.value();
         if (!view->IsValid() || view->_desc.Format != depth.Format ||
+            view->_desc.Usage != (depth.ReadOnly ? TextureViewUsage::DepthRead : TextureViewUsage::DepthWrite) ||
             texture.SampleCount != depth.SampleCount ||
             texture.Width < desc.Width || texture.Height < desc.Height) {
             RADRAY_ERR_LOG("d3d12 framebuffer depth attachment is incompatible");
@@ -4021,9 +4031,14 @@ Nullable<unique_ptr<GraphicsCommandEncoder>> CmdListD3D12::BeginRenderPass(const
     }
     D3D12_RENDER_PASS_DEPTH_STENCIL_DESC dsDesc{};
     D3D12_RENDER_PASS_DEPTH_STENCIL_DESC* pDsDesc = nullptr;
+    D3D12_RENDER_PASS_FLAGS passFlags = D3D12_RENDER_PASS_FLAG_NONE;
     if (passDesc.DepthStencilAttachment.has_value()) {
         const RenderPassDepthStencilAttachmentDescriptor& depthStencil = passDesc.DepthStencilAttachment.value();
         auto* v = CastD3D12Object(framebufferDesc.DepthStencilAttachment);
+        if (depthStencil.ReadOnly) {
+            passFlags |= D3D12_RENDER_PASS_FLAG_BIND_READ_ONLY_DEPTH;
+            if (IsStencilFormatDXGI(v->_rawFormat)) passFlags |= D3D12_RENDER_PASS_FLAG_BIND_READ_ONLY_STENCIL;
+        }
         D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE depthBeginningAccess = MapType(depthStencil.DepthLoad);
         D3D12_RENDER_PASS_ENDING_ACCESS_TYPE depthEndingAccess = MapType(depthStencil.DepthStore);
         D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE stencilBeginningAccess = MapType(depthStencil.StencilLoad);
@@ -4045,7 +4060,7 @@ Nullable<unique_ptr<GraphicsCommandEncoder>> CmdListD3D12::BeginRenderPass(const
         dsDesc.StencilEndingAccess.Type = stencilEndingAccess;
         pDsDesc = &dsDesc;
     }
-    cmdList4->BeginRenderPass((UINT32)rtDescs.size(), rtDescs.data(), pDsDesc, D3D12_RENDER_PASS_FLAG_NONE);
+    cmdList4->BeginRenderPass((UINT32)rtDescs.size(), rtDescs.data(), pDsDesc, passFlags);
     return make_unique<CmdRenderPassD3D12>(this);
 }
 

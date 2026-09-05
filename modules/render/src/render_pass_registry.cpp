@@ -27,6 +27,7 @@ void AddDepthStencilAttachment(
     hash.Add(static_cast<radray::int32_t>(attachment.DepthStore));
     hash.Add(static_cast<radray::int32_t>(attachment.StencilLoad));
     hash.Add(static_cast<radray::int32_t>(attachment.StencilStore));
+    hash.Add(attachment.ReadOnly);
 }
 
 }  // namespace

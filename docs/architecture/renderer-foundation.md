@@ -1,10 +1,10 @@
 > - 适用: 编写 workload、接入 presentation/离屏 output、声明 graph pass、使用 transient pool 或 view history
-> - 权威: 本文描述 Stage A renderer foundation 的当前契约；帧同步见 `frame-and-gpu.md`，原生接口事实见 `render-rhi.md`
-> - 锚点: `modules/runtime/include/radray/runtime/render_framework/render_output.h`, `modules/runtime/include/radray/runtime/render_framework/render_workload.h`, `modules/runtime/include/radray/runtime/render_framework/render_view.h`, `modules/runtime/include/radray/runtime/render_framework/render_graph.h`, `modules/runtime/include/radray/runtime/render_framework/render_resource_pool.h`, `modules/runtime/include/radray/runtime/render_framework/view_state.h`, `modules/runtime/src/render_system.cpp`, `modules/runtime/src/forward_pipeline/forward_pipeline.cpp`
+> - 权威: 本文描述 Stage A/B renderer foundation 的当前契约；帧同步见 `frame-and-gpu.md`，原生接口事实见 `render-rhi.md`
+> - 锚点: `modules/runtime/include/radray/runtime/render_framework/render_output.h`, `modules/runtime/include/radray/runtime/render_framework/render_workload.h`, `modules/runtime/include/radray/runtime/render_framework/render_view.h`, `modules/runtime/include/radray/runtime/render_framework/render_graph.h`, `modules/runtime/include/radray/runtime/render_framework/render_resource_pool.h`, `modules/runtime/include/radray/runtime/render_framework/view_state.h`, `modules/runtime/src/render_system.cpp`, `modules/runtime/src/forward_pipeline/forward_pipeline.cpp`, `modules/runtime/include/radray/runtime/render_framework/render_scene_snapshot.h`, `modules/runtime/include/radray/runtime/render_framework/culling.h`, `modules/runtime/include/radray/runtime/material_technique.h`, `modules/runtime/include/radray/runtime/render_framework/renderer_list.h`, `modules/runtime/include/radray/runtime/render_framework/frame_draw_resources.h`
 
 # Renderer foundation
 
-Stage A 的系统都属于 `radrayruntime`。保留 game-thread `PrepareFrame` → render-thread `Render`
+Renderer foundation 的系统都属于 `radrayruntime`。保留 game-thread `PrepareFrame` → render-thread `Render`
 和 per-flight 资产保活；一次 Render 最多执行一张 graph，使用 GpuSystem 已经 Begin 的 Direct command
 buffer。graph 不提交、不等待、不 acquire/present，也不增加线程、flight 或队列同步协议。
 
@@ -119,17 +119,91 @@ resize/descriptor 变化先成功创建新 generation，旧 generation 进入当
 带 source location 的 diagnostic。ID 不使用原生地址；相同 setup 的 CPU dump 可直接比对。
 `RenderSystem::GetGraphReport`、`GetFramePlan`、`GetPoolStats` 只在对应阶段安全点读取。
 
+## 场景快照与剔除
+
+`BuildRenderSceneSnapshot` 只在 game thread 调用，每 flight/frame 构建一次，与输出和视图数量无关。
+它复制 primitive 变换、世界 AABB、layer mask、禁用剔除标志、MeshBatch 范围及 light 参数，按首次遇到
+的 Material 去重并生成 pass 值快照。geometry/texture 仅借用指针，几何 owner 必须由 proxy 的
+`CollectAssetReferences` 先追加到宿主 retained refs。快照不保存 game object 或 asset ref；发布后只读。
+缺几何、空 draw、越界 index range 或不可用材质会跳过对应 section，并计入 `RenderSceneSnapshotStats`。
+索引溢出拒绝整次构建，输出为空。`ResetForReuse` 清逻辑内容并保留 vector 容量及以元素计的容量高水位。
+
+AABB 由局部中心/半长经过 affine transform 的绝对线性部分变换，支持旋转、非均匀和负缩放。
+非法或非有限 bounds 不参与视锥拒绝，统计并保守保留；mask 仍然有效，Forward 只警告一次。
+`Cull` 消费 snapshot 和一个 `ResolvedRenderView`，输出可见 primitive 索引与 view-space Z、可见光索引
+与 distance squared。primitive、view 和额外 mask 逐位相交；禁用剔除标志只绕过视锥测试。
+
+视锥从实际 `ViewProjection` 提取，使用 D3D/Vulkan 公共的 zero-to-one clip depth。Perspective、Ortho、
+旋转视图与无限远平面都按矩阵处理；无限 far 的退化平面停用，其余无效 view 拒绝剔除并清空结果。
+非有限 bounds 不产生 NaN 排序值。方向光仅受 mask 约束；点光按有效世界球界限测试，负 radius、
+非有限 position/radius 与不支持的 light type 计入拒绝统计。`CullingStats` 区分各拒绝原因并记录 CPU 时间。
+
+每个 resolved view 在一帧只剔除一次，结果可供任意数量的 lists 消费，不在 pass 内重复遍历 Scene。
+这些数组是帧局部 CPU 数据；不实现常驻 render scene、BVH、增量同步或 GPU-driven culling。
+
+## 材质 technique
+
+`MaterialTechnique::Create` 验证唯一且非空的 pass 名、非空 program、存在的 primary pass，以及每个
+非空 material anchor 所在组恰有一个非数组 cbuffer。material group 只接受该 cbuffer、texture 与
+sampler，不接收其他 buffer/UAV。空 anchor 表示这个 pass 完全不消费材质组，DepthOnly 使用此形式。
+
+primary cbuffer 定义 canonical 相对字段路径。其他消费材质的 pass 必须匹配完整数值布局：字段集合、
+kind、byte offset、size、stride、element count 及 cbuffer 总大小；物理组号、binding handle 和 cbuffer
+声明前缀可以不同。各 pass 保留自己的 storage/layout，只有验证成功后才复制 canonical bytes。
+
+**当前 metadata 限制**：schema 7 的 runtime 参数信息不包含标量类型或矩阵行列数。这里按现有 metadata
+可表达的布局事实校验，不能区分布局相同的 float/int、矩阵形状或其他缺失的类型语义；这不是完整类型
+等价验证。编写 technique 时必须保持这些语义一致，完整验证需要将来扩展编译器与 runtime 的公共契约。
+
+secondary pass 的 texture/sampler 必须是 primary 声明的子集，按名称、kind 和数组数量一致匹配；不得
+新增只在 secondary 存在的材质资源。数值字段不允许做子集。运行时缺资源仅使实际消费它的 pass
+无效，因此缺纹理的 ForwardLit 仍可保留不消费材质的 DepthOnly。缺少/无效 pass 时 list 跳过对应 batch，
+不回退到 primary 或其他 pass。固定功能状态可用 `SetPassPipelineState` 逐 pass 覆盖，RenderQueue 属于材质。
+
+## Renderer lists 与帧内绘制资源
+
+`RendererListDesc` 指定所需 pass、闭区间 queue 范围、额外 layer mask、view/culling 和排序方式。
+通用 builder 验证结果与 view 的身份及 snapshot 索引，筛选候选 batch，再交给 `MeshPassProcessor`。
+processor 每 batch 最多输出一条 command，拒绝原因汇总进 `RendererListStats`；无效描述会清空旧 commands。
+默认 opaque 范围为 queue < 2500，transparent 为 queue >= 2500。
+
+排序只使用 queue、按快照首次出现分配的 ProgramFrameId、material 索引、view depth、primitive/batch
+索引。StateThenFrontToBack 按 queue/program/material 聚簇后从近到远；FrontToBack 与 BackToFront 按
+queue 后的深度顺序排列。primitive/batch 为稳定的最终 tie-breaker，不使用资源地址决定绘制顺序。
+所有过滤后的 commands 及其 view/group offsets 必须保存至 graph 执行完毕。
+
+`FrameDrawResources` 持有每 flight 的 `DynamicCBufferArena` 与 `ShaderParameterSet`。`PrepareGroup`
+在 graph 执行前上传 bytes、按实际 binding number 排列 dynamic offsets，并解析纹理 subview/sampler。
+set cache 精确 key 为 pipeline layout、group、所有 buffer target/静态 offset/range、解析后的 texture view
+和 sampler（含绑定身份/数组元素）。dynamic offset 不属于 key，相同 backing page 上的切片可复用 set；
+spill 或静态 range/资源变化创建新 set。缓存命中后绝不改写已发布 descriptor，执行阶段不上传或写 set。
+
+复用顺序为清空 renderer lists/借用 command → 清 set cache 与 sets → reset/裁减 arena，全部依赖既有
+flight fence 安全边界。`MeshDrawCommand` 不拥有 RHI 资源或资产，只保存 program、PSO 输入、geometry、
+draw range、已准备的 groups 和排序值。`SubmitRendererList` 验证几何/有序唯一 groups，取得实际 pass
+的 PSO，再 bind/draw；失败跳过单条 draw 并计入 `DrawExecutionStats`，不重建数据或返回 game thread。
+
 ## Forward 范围
 
-Forward PrepareFrame 为 active presentation outputs 提交一个 view 的 family；自定义包装 pipeline
-可追加外部 output families。Render 消费通用 resolved families，为每 family 保存独立 prepared draws
-和 view/object/material offsets，透明排序与光源筛选使用该 view。Stage A Forward 只支持一 view/family
-和 RenderScale=1；其他 workload 由自定义 pipeline 处理或 host fallback。
+Forward PrepareFrame 为 active presentation outputs 提交一个 view 的 family；包装 pipeline 可以追加
+外部 output families。Render 对每个 resolved view 保存独立 CullingResults 和 DepthOnly/Opaque/Transparent
+lists。每 family 支持多个不重叠 view，共享 attachments，通过各自 viewport/scissor 隔离写入。
+当前调用方负责提供不重叠视图，Forward 仍只支持 RenderScale=1，不提供 upscale。
 
-Forward 的 opaque Clear、必要的 transparent Load 都进入同一张 graph；depth 是相对 family 尺寸的
-transient，按 D32_FLOAT → D24_UNORM_S8_UINT → D16_UNORM 查询支持后选择。不存在 per-window depth
-owner 或手工 resource barrier。ShaderProgram 的 PSO key 使用 color/depth formats + sample count 的
-`GraphicsPassCompatibilityKey`；Clear/Load 和 framebuffer 尺寸不分裂 PSO，创建时仍传真实兼容 pass。
+存在有效 DepthOnly command 时声明 `Forward.DepthPrepass`（深度 Clear/Store）；没有则省略。
+`Forward.Opaque` 总是存在，color Clear/Store；有预通道时 depth Load，否则 depth Clear。缺 DepthOnly
+的 opaque 材质仍在 opaque pass 正常绘制。opaque 启用 LessEqual 与深度写入；透明材质不进入预通道，
+`Forward.Transparent` 在有 command 时 Load color/depth，深度 attachment 只读且 PSO 禁用 depth/stencil 写入。
+所有 family 的 passes 进入同一张 graph；即使列表为空，opaque clear 仍定义输出内容。
 
-Stage A 不实现 async compute、并行录制、pass merge、heap aliasing、scene culling、renderer list、
-material multipass、动态分辨率 upscale 或 temporal effect；history 提供这些功能将来需要的寿命基础。
+depth 为 family 相对尺寸的 transient，按 D32_FLOAT → D24_UNORM_S8_UINT → D16_UNORM 选择支持格式。
+PSO key 使用 color/depth formats + sample count 的 `GraphicsPassCompatibilityKey`，Clear/Load、只读标志
+和 framebuffer 尺寸不分裂兼容 PSO；原生 render pass 的完整 key 仍包含这些访问事实。
+只有 graph 成功且对应 output 已写入才提交 view；剔除失败、不可用 output 或 graph 失败不推进 view state。
+
+`ForwardPipeline::GetSceneSnapshot` / `GetStageBStats` 只在所属 flight 的阶段安全点读取；统计包括快照
+构建数、剔除调用/失败、三类 command 数量与执行失败。场景规模统计来自 snapshot，视图筛选来自 Cull，
+候选分类来自 list，避免重复计数。
+
+当前不实现 async compute、并行录制、pass merge、heap aliasing、常驻场景、GPU-driven 提交、
+动态分辨率 upscale 或 temporal effect；pool/history 继续提供既有资源寿命基础。

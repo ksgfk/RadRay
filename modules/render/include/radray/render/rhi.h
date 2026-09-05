@@ -803,6 +803,8 @@ struct RenderPassDepthStencilAttachmentDescriptor {
     StoreAction DepthStore{};
     LoadAction StencilLoad{};
     StoreAction StencilStore{};
+    // Read-only depth/stencil requires Load/Store and a DepthRead framebuffer view.
+    bool ReadOnly{false};
 
     friend bool operator==(const RenderPassDepthStencilAttachmentDescriptor&, const RenderPassDepthStencilAttachmentDescriptor&) noexcept = default;
 };

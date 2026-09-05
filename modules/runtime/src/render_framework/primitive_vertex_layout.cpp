@@ -144,44 +144,24 @@ void ResolvedPrimitiveVertexLayout::RebindSemantics() noexcept {
 std::optional<ResolvedPrimitiveVertexLayout> ResolvePrimitiveVertexLayout(
     const PrimitiveVertexLayout& layout,
     const shader::ShaderArtifactView& artifact) noexcept {
-    if (layout.Attributes.size() != artifact.VertexInputs().size()) {
-        return std::nullopt;
-    }
-
     ResolvedPrimitiveVertexLayout result;
-    result._buffers = layout.Buffers;
-    result._semantics.reserve(layout.Attributes.size());
-    result._attributes.reserve(layout.Attributes.size());
-    for (const PrimitiveVertexAttribute& source : layout.Attributes) {
-        const auto input = std::find_if(
-            artifact.VertexInputs().begin(),
-            artifact.VertexInputs().end(),
-            [&](const shader::WireVertexInputRecord& value) noexcept {
-                const std::optional<std::string_view> semantic =
-                    artifact.GetName(value.Semantic);
-                return semantic.has_value() && semantic.value() == source.Semantic &&
-                       value.SemanticIndex == source.SemanticIndex;
-            });
-        if (input == artifact.VertexInputs().end()) {
-            return std::nullopt;
-        }
-        const bool duplicateLocation = std::any_of(
-            result._attributes.begin(),
-            result._attributes.end(),
-            [&](const render::VertexAttribute& value) noexcept {
-                return value.Location == input->Location;
-            });
-        if (duplicateLocation) {
-            return std::nullopt;
-        }
+    result._semantics.reserve(artifact.VertexInputs().size());
+    result._attributes.reserve(artifact.VertexInputs().size());
+    for (const auto& input : artifact.VertexInputs()) {
+        const auto semantic = artifact.GetName(input.Semantic);
+        if (!semantic) return std::nullopt;
+        const auto matches = [&](const PrimitiveVertexAttribute& value) {
+            return value.Semantic == *semantic && value.SemanticIndex == input.SemanticIndex;
+        };
+        if (std::count_if(layout.Attributes.begin(), layout.Attributes.end(), matches) != 1) return std::nullopt;
+        const auto& source = *std::find_if(layout.Attributes.begin(), layout.Attributes.end(), matches);
         result._semantics.push_back(source.Semantic);
         result._attributes.push_back(render::VertexAttribute{
-            .BufferBinding = source.BufferBinding,
-            .Offset = source.Offset,
-            .Semantic = {},
-            .SemanticIndex = source.SemanticIndex,
-            .Format = source.Format,
-            .Location = input->Location});
+            .BufferBinding = source.BufferBinding, .Offset = source.Offset, .Semantic = {}, .SemanticIndex = source.SemanticIndex, .Format = source.Format, .Location = input.Location});
+    }
+    for (const auto& buffer : layout.Buffers) {
+        if (std::any_of(result._attributes.begin(), result._attributes.end(), [&](const auto& attribute) { return attribute.BufferBinding == buffer.Binding; }))
+            result._buffers.push_back(buffer);
     }
     result.RebindSemantics();
     if (!render::ValidateVertexInputStateAgainstArtifact(result.GetState(), artifact)) {

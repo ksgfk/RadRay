@@ -14,7 +14,7 @@
 | 类型（class / struct / enum） | PascalCase | `RenderPipeline`, `GpuSystem`, `ScopeGuard` |
 | 函数与方法（含自由函数） | PascalCase | `GetWorld`, `BeginFrameRecord`, `PerspectiveLH` |
 | 私有成员变量 | `_` 前缀 + camelCase | `_activePasses`, `_renderStateCreated` |
-| 公开数据成员（descriptor / POD） | PascalCase | `BufferDescriptor::Usage`, `GpuMesh::DrawData::Vbv` |
+| 公开数据成员（descriptor / POD） | PascalCase | `BufferDescriptor::Usage`, `GpuMesh::DrawData::VertexBuffers` |
 | `constexpr` 常量 | `k` 前缀 + PascalCase | `kShaderAssetFormatVersion`, `kMaxPointLights` |
 | 宏 | ALL_CAPS | `RADRAY_ABORT`, `RADRAY_FORWARD_OBJECT_GROUP` |
 | 命名空间 | 全小写 | `radray`, `radray::render`, `radray::detail` |

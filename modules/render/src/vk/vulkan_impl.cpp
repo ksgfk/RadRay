@@ -3015,9 +3015,13 @@ Nullable<unique_ptr<RenderPass>> DeviceVulkan::CreateRenderPass(const RenderPass
         }
         const bool hasStencil = depth.Format == TextureFormat::D24_UNORM_S8_UINT ||
                                 depth.Format == TextureFormat::D32_FLOAT_S8_UINT;
-        const VkImageLayout layout = hasStencil
-                                         ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
-                                         : VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+        if (depth.ReadOnly && (depth.DepthLoad != LoadAction::Load || depth.DepthStore != StoreAction::Store ||
+                               (hasStencil && (depth.StencilLoad != LoadAction::Load || depth.StencilStore != StoreAction::Store)))) {
+            RADRAY_ERR_LOG("vk read-only depth/stencil attachment must preserve its contents");
+            return nullptr;
+        }
+        const VkImageLayout layout = depth.ReadOnly ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL : hasStencil ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+                                                                                                                   : VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
         attachments.push_back(VkAttachmentDescription{
             .flags = 0,
             .format = MapType(depth.Format),
@@ -3083,6 +3087,7 @@ Nullable<unique_ptr<Framebuffer>> DeviceVulkan::CreateFramebuffer(const Framebuf
         auto* view = CastVkObject(desc.DepthStencilAttachment);
         const auto& depth = passDesc.DepthStencilAttachment.value();
         if (!view->IsValid() || view->_mdesc.Format != depth.Format ||
+            view->_mdesc.Usage != (depth.ReadOnly ? TextureViewUsage::DepthRead : TextureViewUsage::DepthWrite) ||
             view->_image->_sampleCount != depth.SampleCount ||
             view->_image->_width < desc.Width || view->_image->_height < desc.Height) {
             RADRAY_ERR_LOG("vk framebuffer depth attachment is incompatible");
