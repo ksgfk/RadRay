@@ -1,6 +1,6 @@
 > - 适用: 配置 IDE、clangd、调试器
-> - 权威: 本文是 IDE 侧配置的唯一来源。构建命令本身见 `guide/build-test.md`
-> - 锚点: `opencode.json`, `.clang-format`, `tools/win_gen_compile_commands.py`
+> - 权威: 本文是 IDE 侧配置的唯一来源。构建命令本身见 [build-test](build-test.md)
+> - 锚点: `.clang-format`, `CMakePresets.json`, `tools/win_gen_compile_commands.py`
 
 # 开发环境
 
@@ -60,8 +60,8 @@
 }
 ```
 
-`--compile-commands-dir` 指向 `.vscode`，所以改完构建配置要重跑
-`tools/win_gen_compile_commands.py`（见 `guide/build-test.md`）。
+`--compile-commands-dir` 指向 `.vscode`，所以改完构建配置要重新生成或复制编译数据库；
+Ninja 和 MSBuild 的处理不同，见[构建与测试](build-test.md)。
 
 ### launch.json
 

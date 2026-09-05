@@ -1,238 +1,162 @@
-> - 适用: 首次配置仓库；构建失败排查；跑测试；生成 compile_commands.json
-> - 权威: 本文是当前构建与测试命令的唯一来源
-> - 锚点: `CMakePresets.json`, `CMakeLists.txt`, `examples/CMakeLists.txt`, `examples/example_lambert_sphere/CMakeLists.txt`, `benchmarks/bench_read_obj/CMakeLists.txt`, `cmake/Utility.cmake`, `tools/fetch_third_party.py`, `tools/fetch_sdks.py`
+> - 适用: 恢复依赖、配置与构建 RadRay、运行测试或生成编译数据库
+> - 权威: 本文说明仓库构建操作；选项与预设以锚点中的 CMake 文件为准
+> - 锚点: `CMakeLists.txt`, `CMakePresets.json`, `cmake/Utility.cmake`, `project_manifest.json`, `tools/fetch_third_party.py`, `tools/fetch_sdks.py`, `tools/win_gen_compile_commands.py`, `modules/*/tests/CMakeLists.txt`
 
 # 构建与测试
 
-## 首次准备
+命令在仓库根执行。Windows Ninja 预设需要已配置 x64 C++ 工具链的终端，以及 CMake、Ninja、
+Python 和 Git。现有构建目录的 generator 以其 `CMakeCache.txt` 为准，不直接用另一 generator
+覆盖；需要切换时用 `-B` 指定独立构建目录。
 
-依赖树不在版本控制内，configure 前恢复依赖：
+## 恢复与构建
 
 ```powershell
 python tools/fetch_third_party.py restore
 python tools/fetch_sdks.py restore
-```
-
-两个脚本支持 `list`、`upgrade`、`lock`、`prune` 和 `refetch`。`third_party/` 与 `SDKs/`
-由脚本维护，不能手工编辑。
-
-`project_manifest.json` 的 `Artifacts` 除了远程 GitHub release 包，还支持本地包：Url 用
-仓库根相对或 `file://` 绝对路径（例如 `SDKs/staging/radray-dxc-...zip`），`fetch_sdks.py`
-直接复制本地 archive 而不是联网下载，并同样校验 `EnforceHash`。RadRay DXC fork 就以这种
-本地包形式交付：`SDKs/` 目录不在版本控制内，fork 开发者重新打包后用新 hash 更新 manifest
-即可，其他机器 restore 时按 manifest 复制/校验。
-
-## 配置与构建
-
-| 预设 | 生成器 / 工具链 | 输出目录 |
-|---|---|---|
-| `win-x64-debug` | Ninja + MSVC | `build_debug/` |
-| `win-x64-release` | Ninja + MSVC | `build_release/` |
-| `win-x64-debug-clangcl` | Visual Studio 18 2026 + ClangCL | `build_debug/` |
-| `win-x64-release-clangcl` | Visual Studio 18 2026 + ClangCL | `build_release/` |
-| `macos-arm64-debug` / `-release` | Ninja | `build_debug/` / `build_release/` |
-
-当前 CMakePresets.json 不再提供独立的 shader-compiler / shader-tools / runtime-only 预设；
-这些配置通过主预设加 `-D` 开关与 `-B` 输出目录表达（见下方「隔离边界」）。
-
-Ninja 与 ClangCL 预设不要交替复用同一个 binary directory。Windows 机器上也可以按当前
-工作树的生成器执行：
-
-```powershell
-cmake --preset win-x64-debug-clangcl
+cmake --preset win-x64-debug
 cmake --build build_debug --config Debug --parallel 24
 ```
 
-二进制落在 `build_debug/_build/<Config>/`。
+恢复脚本读取 `project_manifest.json`。第三方源码进入 `third_party/`，RadRay DXC package
+进入 `SDKs/radray_dxc/extracted`；不手改这些目录。shader compiler 开启时需要匹配的 fork
+package，stock DXC 不能替代。包的 ABI 与部署边界见 [Shader pipeline](../architecture/shader-pipeline.md)。
 
-RadRay 公共对象查询依赖标准 C++ RTTI。所有自有 target 必须调用
-`radray_default_compile_flags`（`radray_add_test` 已代为调用）；该函数以 `PRIVATE` 方式为
-C++ 编译设置 MSVC/ClangCL 的 `/GR` 或其他前端的 `-frtti`，覆盖所有构建配置。库、工具、
-样例和 benchmark 均遵循同一约定，不通过 core 的链接接口传播选项，也不修改第三方目标。
-不要在单个目标上用 `/GR-` / `-fno-rtti` 覆盖它；仓库外使用公共对象查询的 consumer 需自行
-开启 RTTI。`test_runtime_type` 检查 RTTI 特征宏，runtime 的跨链接单元资产测试检查库内构造的
-对象能在最终 executable 中正确查询。决策见 [ADR-0056](../adr/0056-rtti-belongs-to-project-compile-defaults.md)。
-
-Ninja + MSVC 构建应在 Visual Studio Developer PowerShell 中执行；普通 PowerShell 可先载入
-本机 Visual Studio 安装目录下的 `Common7/Tools/Launch-VsDevShell.ps1 -Arch amd64 -HostArch amd64
--SkipAutomaticLocation`。仅找到 cl.exe 而未配置 INCLUDE/LIB 时，会报标准库头文件缺失。
-
-## 运行 shader JIT 样例
-
-`example_lambert_sphere` 是普通 executable，不注册 CTest。它默认按 D3D12 构建，运行时把
-工程根目录作为当前工作目录，把 `shaderlib/` 物理目录作为 root-relative HLSL include path；
-shaderlib 不会复制到输出目录。资产根优先读 `RADRAY_ASSETS_DIR`，否则使用构建时注入的
-`${CMAKE_SOURCE_DIR}/assets`。该目录不进入版本控制；运行样例前需通过项目约定的外部分发渠道
-准备对应资产包，或用环境变量指向已准备的资产根。构建不复制或校验运行资产。
-`RADRAY_ENABLE_SHADER_JIT=OFF` 时目标仍可构建，但应用会在创建窗口前记录错误并返回非零码。
+`win-x64-debug` / `win-x64-release` 使用 Ninja，分别输出到 `build_debug` / `build_release`。
+`win-x64-*-clangcl` 使用 Visual Studio 18 2026 的 ClangCL toolset；它们与 Ninja 预设默认共用
+同名目录，切换时应另给 `-B`。例如新建独立 ClangCL 构建：
 
 ```powershell
-cmake --build build_debug --config Debug --target example_lambert_sphere --parallel 24
-Set-Location F:\cpp\RadRay
-.\build_debug\_build\Debug\example_lambert_sphere.exe --multithread --valid-layer
+cmake --preset win-x64-debug-clangcl -B build_clangcl
+cmake --build build_clangcl --config Debug --parallel 24
 ```
 
-使用 Vulkan lane 时增加 `--vulkan`；`--d3d12` 可显式选择默认 lane。窗口关闭后程序正常退出。
+二进制经 `radray_set_build_path` 放在 `<build-dir>/_build/<Config>/`，可由
+`RADRAY_BUILD_PATH` 改写基础路径。macOS 的 Ninja 预设为 `macos-arm64-debug` / `macos-arm64-release`，
+是否可用还取决于 manifest 对应平台依赖；不能将 Windows 验收结果当作 macOS 验证。
 
-## 主要选项
+## 常用配置边界
 
-| 选项 | 默认 | 说明 |
-|---|---|---|
-| `RADRAY_BUILD_TESTS` | ON | 构建 core、render、runtime 测试 |
-| `RADRAY_BUILD_BENCHMARKS` | Release 默认 ON | 构建性能基线 |
-| `RADRAY_BUILD_WINDOW` | ON | 构建窗口模块 |
-| `RADRAY_BUILD_RENDER` | ON | 构建 RHI 与后端 |
-| `RADRAY_BUILD_RUNTIME` | ON | 依赖 render 与 window |
-| `RADRAY_BUILD_EXAMPLES` | ON（依赖 runtime） | 构建普通 executable 样例，包括 `example_lambert_sphere` |
-| `RADRAY_ENABLE_D3D12` | Windows 下 ON | D3D12 backend |
-| `RADRAY_ENABLE_VULKAN` | ON | Vulkan backend |
-| `RADRAY_BUILD_SHADER_COMPILER` | ON | 从 `project_manifest.json` 的 `radray_dxc` 本地包发现 RadRay DXC fork SDK，构建可选 `radrayshadercompiler`、source-contract/metadata suite 与 fixture generator |
-| `RADRAY_ENABLE_SHADER_JIT` | ON（依赖 compiler） | 开启 runtime 对 compiler client 的开发期 JIT；compiler 关闭时强制 OFF |
-| `RADRAY_BUILD_SHADER_TOOLS` | ON（依赖 compiler） | 构建只依赖 compiler client 的 `radray_shader_compile` raw-lane 工具；compiler 关闭时强制 OFF |
-| `RADRAY_ENABLE_MIMALLOC` | ON | 使用 mimalloc |
-| `RADRAY_ENABLE_ZLIB` / `RADRAY_ENABLE_LIBPNG` | ON | 图片支持 |
-| `RADRAY_ENABLE_LIBJPEG` | ON | JPEG 支持 |
+| 开关 | 默认与依赖 |
+|---|---|
+| `RADRAY_BUILD_TESTS` | ON |
+| `RADRAY_BUILD_BENCHMARKS` | 单配置 Release 或包含 Release 的多配置 generator 默认 ON |
+| `RADRAY_BUILD_WINDOW`、`RADRAY_BUILD_RENDER` | ON |
+| `RADRAY_BUILD_RUNTIME` | 默认 ON，要求 render 和 window |
+| `RADRAY_BUILD_EXAMPLES` | 默认 ON，要求 runtime |
+| `RADRAY_ENABLE_D3D12` | Windows 且 render 开启时默认 ON |
+| `RADRAY_ENABLE_VULKAN` | render 开启时默认 ON |
+| `RADRAY_BUILD_SHADER_COMPILER` | ON |
+| `RADRAY_ENABLE_SHADER_JIT`、`RADRAY_BUILD_SHADER_TOOLS` | 默认 ON，要求 shader compiler |
 
-`RADRAY_BUILD_SHADER_COMPILER=OFF` 不应改变 render 库的公共依赖。编译器能力只影响明确
-门控的 client、JIT 和 compiler tests；关闭 compiler 时用独立 binary directory 隔离（见下）。
+验证不带编译器的 runtime 时使用独立目录：
+
+```powershell
+cmake --preset win-x64-debug -B build_runtime_only -DRADRAY_BUILD_SHADER_COMPILER=OFF
+cmake --build build_runtime_only --config Debug --parallel 24
+```
+
+该配置使 JIT/tools 一起关闭，不发现或部署 DXC。检查实际 target 边使用链接 map（MSVC
+`/MAP`）或 Ninja 的 `ninja -C build_runtime_only -t commands`；Vulkan 由 volk 加载，
+`dumpbin /DEPENDENTS` 不能证明静态库依赖隔离。
+
+所有自有 target 接入 `radray_default_compile_flags`；它私有设置 C++ RTTI，
+不通过 core 向第三方或外部 consumer 传播。对象查询的边界见 [Core](../architecture/core-facilities.md)。
 
 ## 测试
 
-构建完成后单独运行 CTest：
+先完成构建再运行 CTest，不并发执行两者。`-R` 匹配注册用例名中的 gtest suite，
+不是 CMake target；以下是常用目标与 suite 的对应关系，可能还包含同一目标内的其他 suite：
 
-```powershell
-ctest --test-dir build_debug -C Debug -R AssetSlotTest --output-on-failure
-```
-
-`-R` 匹配 gtest suite 名，不是 CMake target 名。当前 target 与 suite：
-
-| target | suite |
+| CMake target | `ctest -R` 示例 |
 |---|---|
-| `test_runtime_type` | `RuntimeTypeIdTest`（稳定 GUID、cv/ref 归一化与 RTTI 构建契约） |
+| `test_runtime_type` | `RuntimeTypeIdTest` |
 | `test_asset_slot` | `AssetSlotTest` |
 | `test_asset_database` | `AssetDatabaseTest` |
-| `test_component_rtti` | `ComponentRttiTest`（基类/接口横向转换、多继承、虚继承、const 与移除脱离） |
-| `test_service_registry` | `ServiceRegistryTest`, `ServiceRegistryDeathTest`（`std::type_index` 精确键、显式接口、装配顺序与 fail-fast） |
+| `test_component_rtti` | `ComponentRttiTest` |
+| `test_service_registry` | `ServiceRegistryTest`, `ServiceRegistryDeathTest` |
 | `test_render_pass_registry` | `RenderPassCacheKeyTest`, `FramebufferCacheKeyTest`, `RenderPassRegistryTest` |
-| `test_device_capabilities` | `TextureDescriptorValidation`, `DeviceCapabilitiesTest`（双 backend 支持查询与 attachment/MSAA 创建、mip/layer barrier 读回、debug labels） |
-| `test_foundation_compute` | `FoundationComputeTest`（双 backend buffer/texture 显式 UAV ordering，依赖 JIT） |
-| `test_render_foundation` | `RenderWorkloadTest`, `RenderFoundationTest`（output ID/mutation gate、view resolve、relative extent、双 backend pool/trim） |
-| `test_render_graph_compile` | `RenderGraphCompileTest`（纯 CPU capabilities stub、handle/access/content version/culling、100/1000 pass benchmark 与确定性 dump；不依赖 GPU 或 JIT） |
-| `test_render_graph` | `RenderGraphTest`（双 backend raster/compute/copy、UAV、102 帧 mip 读回及复用、encoder 失败恢复、兼容 PSO；依赖 JIT） |
-| `test_view_state` | `ViewStateTest`（previous matrix、history 提交/失效/retire 与双 backend 跨帧读回） |
-| `test_render_outputs` | `RenderOutputTest`（双 backend 零 presentation、多离屏 output、未写/失败 fallback、实际 final state） |
+| `test_device_capabilities` | `TextureDescriptorValidation`, `DeviceCapabilitiesTest` |
+| `test_render_foundation` | `RenderWorkloadTest`, `RenderFoundationTest` |
+| `test_render_graph_compile` | `RenderGraphCompileTest` |
+| `test_render_graph` | `RenderGraphTest` |
+| `test_foundation_compute` | `FoundationComputeTest` |
+| `test_view_state` | `ViewStateTest` |
+| `test_render_outputs` | `RenderOutputTest` |
+| `test_material` | `RadRayRuntimeMaterial` |
+| `test_mesh_draw` | `RadRayRuntimeMeshDraw`, `RadRayRuntimeForwardSets` |
+| `test_forward_pipeline` | `RadRayRuntimeForwardPipeline`, `RadRayRuntimeMaterial`, `RadRayRuntimeForwardBindings` |
+| `test_render_pipeline` | `RadRayRuntimeRenderPipeline`, `RadRayRuntimeRenderSystem`, `RuntimeLayering`, `RadRayRuntimeForwardPipeline` |
+| `test_runtime_shader_jit` | `RadRayRuntimeShaderJit` |
+| `test_radray_render_shader_artifact` | `RadRayRenderShaderArtifact` |
+| `test_radray_shader_contract` | `RadRayShaderContract` |
+| `test_radray_render_shader_layout` | `RadRayRenderShaderLayout` |
+| `test_radray_render_d3d12_layout` | `D3D12DeviceFixture` |
+| `test_radray_render_vulkan_layout` | `VulkanDeviceFixture` |
 | `test_radray_render_pso_smoke` | `RadRayRenderPsoSmoke` |
 | `test_radray_shader_compiler_client` | `RadRayShaderCompilerClient` |
 | `test_radray_dxc_metadata` | `RadRayDxcMetadata` |
 | `test_shaderlib_passes` | `RadRayShaderLibPass` |
-| `test_runtime_shader_jit` | `RadRayRuntimeShaderJit`（graphics/compute readback、14-fixture report、declaration owner、metadata negative） |
-| `test_material` | `RadRayRuntimeMaterial`（schema 7 owner 驱动 type tree 打包、qualified/unique-short parameter path、多 cbuffer、declaration modifier 与 fail-closed recipe） |
-| `test_mesh_draw` | `RadRayRuntimeMeshDraw`, `RadRayRuntimeForwardSets`（排序、双后端 dynamic offset/indexed draw、shared/nested owner 与 push-only program、frame-local set 不改写旧 backing、material 资源快照按 flight 轮转） |
-| `test_forward_pipeline` | `RadRayRuntimeForwardPipeline`, `RadRayRuntimeMaterial`, `RadRayRuntimeForwardBindings`（双后端窗口帧、220 帧多线程 mutation/resize、多视图离屏像素、准备后对象销毁/值变更、非标准 group、resolver 负缓存、Material snapshot 与 section collection） |
-| `test_render_pipeline` | `RadRayRuntimeRenderPipeline`, `RadRayRuntimeRenderSystem`, `RuntimeLayering`, `RadRayRuntimeForwardPipeline`（tick 顺序、非相机宿主、fallback clear、flight 资产回收与静态边界） |
-| `test_radray_render_shader_artifact` | `RadRayRenderShaderArtifact`（schema 7 raw golden、owner/type wire validation） |
-| `test_radray_render_shader_layout` | `RadRayRenderShaderLayout`（schema 7 decode 与 target-typed resolve） |
-| `test_radray_render_d3d12_layout` | `D3D12DeviceFixture`（真实 D3D12：placement 决定 table/root descriptor、carrier static sampler、root constant 全量进 push 表、非法 placement 拒绝、offset 双拓扑一致、push handle 端到端与误用拒绝） |
-| `test_radray_render_vulkan_layout` | `VulkanDeviceFixture`（真实 Vulkan：logical kind 决定 descriptor type、非法 dynamic placement 拒绝、immutable sampler 与 empty set hole、push handle 端到端与误用拒绝） |
-| `test_radray_shader_contract` | `RadRayShaderContract`（ABI 4/schema 7 layout 与旧 schema 拒绝） |
-| 其余 core target | 对应源码中的 suite 名 |
-
-无可用后端设备的 GPU 测试应 `SKIP`；已创建设备后出现资源、PSO、提交或读回错误必须
-`FAIL`。不要同时运行 build 和 ctest。
-
-涉及 RTTI、公共 C++ ABI 或跨静态库对象查询的改动，要分别完整验收 Debug 与 Release，且每个
-配置都先完成全量 build 再启动测试：
 
 ```powershell
-cmake --preset win-x64-debug-clangcl
-cmake --build build_debug --config Debug --parallel 24
-ctest --test-dir build_debug -C Debug --output-on-failure
-
-cmake --preset win-x64-release-clangcl
-cmake --build build_release --config Release --parallel 24
-ctest --test-dir build_release -C Release --output-on-failure
+cmake --build build_debug --config Debug --target test_asset_slot --parallel 24
+ctest --test-dir build_debug -C Debug -R AssetSlotTest --output-on-failure
 ```
 
-新增测试放在 `modules/<module>/tests/`，通过同目录 `CMakeLists.txt` 的 `radray_add_test`
-注册。新增源文件后重新 configure；测试命令不会替你构建。
+全量构建后去掉 `-R` 可运行全部已注册测试。GPU 用例在后端不可用时由用例内 `GTEST_SKIP()`
+报告跳过；已创建设备后的资源、PSO、提交或读回错误必须失败。样例资产在被忽略的 `assets/`
+下，通过源码仓库外的渠道准备。新增测试源文件后重新 configure；CTest 不负责构建。
 
-Stage A regression 与 CPU benchmark（先完成 build，再执行）：
+涉及 RTTI、公共 C++ ABI 或跨静态库对象查询时，Debug 与 Release 都要分别完成全量构建，
+再运行各自配置的测试。其他改动选择相关 suite 验证，不复用旧会话的通过计数。
+
+`radray_add_test` 固定使用 `DISCOVERY_MODE PRE_TEST`：仓库曾遇到同目录多个 target 并行
+POST_BUILD discovery 争用中间 JSON，导致随机失败甚至注册到错误可执行文件。将发现推迟到
+CTest 阶段避免构建期竞争。修改注册逻辑时，比较各 exe 的 `--gtest_list_tests` 与 CTest 列表及
+实际命令，不能仅凭 `ctest -N` 的总数判断正确性。注册写法见 [C++ 约定](cpp-conventions.md)。
+
+## 样例与专项验证
+
+从仓库根运行 JIT 样例，确保源码树的 `shaderlib/` 可访问。资产根优先使用
+`RADRAY_ASSETS_DIR`，否则使用构建时的仓库 `assets/`；shaderlib 不复制到输出目录。
 
 ```powershell
-ctest --test-dir build_debug -C Debug -R 'RenderGraph|RenderWorkloadTest|RenderFoundationTest|RenderOutputTest|ViewStateTest|DeviceCapabilitiesTest|FoundationComputeTest|RuntimeLayering|RadRayRuntimeForwardPipeline' --output-on-failure
-.\build_debug\_build\Debug\test_render_graph_compile.exe --gtest_filter='*DumpAndLargeGraph*' --gtest_output=xml:stage-a-benchmark.xml
+.\build_debug\_build\Debug\example_lambert_sphere.exe --backend d3d12
+.\build_debug\_build\Debug\example_lambert_sphere.exe --backend vulkan
 ```
 
-benchmark XML 包含 100 次重复的平均 Compile 时间、setup/compile/dump 总时间与 native create 次数。
-用 Release 同目标取得性能基线；具体机器、配置和验证范围记录在
-[Stage A 验收](../todo/renderer-foundation-stage-a.md)。不要把 Debug 数值与 Release 混合比较。
-
-Windows/MSVC 的 Stage A AddressSanitizer 配置使用单独输出目录，关闭 mimalloc，并在 Developer
-PowerShell 中依次执行（该 shell 的 PATH 同时提供 ASAN runtime DLL）：
+只构建 raw shader CLI 可以关闭 render/runtime/tests 并单独选择工具目标：
 
 ```powershell
-cmake --preset win-x64-debug -B build_stage_a_asan -DRADRAY_ENABLE_MIMALLOC=OFF -DRADRAY_BUILD_EXAMPLES=OFF -DRADRAY_BUILD_BENCHMARKS=OFF '-DCMAKE_CXX_FLAGS_DEBUG=/Od /Z7 /fsanitize=address' '-DCMAKE_C_FLAGS_DEBUG=/Od /Z7 /fsanitize=address' '-DCMAKE_EXE_LINKER_FLAGS_DEBUG=/INCREMENTAL:NO'
-cmake --build build_stage_a_asan --target test_render_graph_compile test_render_graph test_view_state test_forward_pipeline test_render_outputs --parallel 24
+cmake --preset win-x64-debug -B build_shader_tools -DRADRAY_BUILD_TESTS=OFF -DRADRAY_BUILD_RENDER=OFF -DRADRAY_BUILD_RUNTIME=OFF
+cmake --build build_shader_tools --config Debug --target radray_shader_compile --parallel 24
+```
+
+RenderGraph 的 `*DumpAndLargeGraph*` 用例包含 100/1000-pass CPU benchmark，使用 Release
+记录性能基线，并注明机器与配置；不要混用 Debug 数据。排查相关内存错误时，Windows/MSVC
+AddressSanitizer 使用独立目录和 Developer PowerShell（PATH 需含 ASAN runtime），关闭 mimalloc：
+
+```powershell
+cmake --preset win-x64-debug -B build_graph_asan -DRADRAY_ENABLE_MIMALLOC=OFF -DRADRAY_BUILD_EXAMPLES=OFF -DRADRAY_BUILD_BENCHMARKS=OFF '-DCMAKE_CXX_FLAGS_DEBUG=/Od /Z7 /fsanitize=address' '-DCMAKE_C_FLAGS_DEBUG=/Od /Z7 /fsanitize=address' '-DCMAKE_EXE_LINKER_FLAGS_DEBUG=/INCREMENTAL:NO'
+cmake --build build_graph_asan --target test_render_graph_compile test_render_graph test_view_state test_forward_pipeline test_render_outputs --parallel 24
 $env:ASAN_OPTIONS = 'alloc_dealloc_mismatch=1'
-ctest --test-dir build_stage_a_asan -C Debug -R 'RenderGraph|ViewStateTest|RenderOutputTest|OffscreenViews|MultithreadedDrawsWhileGameStateChanges' --output-on-failure
+ctest --test-dir build_graph_asan -C Debug -R 'RenderGraph|ViewStateTest|RenderOutputTest|OffscreenViews|MultithreadedDrawsWhileGameStateChanges' --output-on-failure
 ```
 
-## 隔离边界
+## 编译数据库与文档检查
 
-CMakePresets.json 只保留通用预设；隔离配置用主预设加 `-B`（输出目录）与 `-D`（选项）表达。
-默认 `win-x64-debug` 即包含 compiler、JIT 与 tools（三者默认 ON）。
-
-编译器开发路径（默认配置即覆盖，不设任何 env/cache override）：
+Ninja 配置已开启 `CMAKE_EXPORT_COMPILE_COMMANDS`，直接让 clangd 指向构建目录，或复制到
+IDE 默认读取的 `.vscode/compile_commands.json`：
 
 ```powershell
-python tools/fetch_sdks.py restore
-cmake --preset win-x64-debug
-cmake --build build_debug --parallel 24
-ctest --test-dir build_debug -C Debug -R "RadRayShaderCompilerClient|RadRayDxcMetadata|RadRayShaderLibPass|RadRayRuntimeShaderJit" --output-on-failure
+New-Item -ItemType Directory -Force .vscode | Out-Null
+Copy-Item -LiteralPath build_debug/compile_commands.json -Destination .vscode/compile_commands.json
 ```
 
-正式 compiler 配置按 Manifest `Name` 使用
-`SDKs/radray_dxc/extracted`，再以 `find_package(RadRayDXC CONFIG REQUIRED COMPONENTS
-Headers Compiler)` 导入 fork package。`tools/fetch_sdks.py restore` 仍负责按
-`project_manifest.json` 下载、版本锁定和 SHA-256 校验；CMake 配置阶段不再解析 manifest、
-`.radray-sdk.json` 或 archive。配置阶段不把 DXC fork 加入 RadRay 源码树；它通过
-`RadRayDXC::Compiler` 的 runtime copy 与 `RadRayDXC::Headers` 的 include target 接入。
-`RadRayShaderCompilerClient` 进一步校验 RadRay extension 的 ABI、schema、toolchain identity；stock DXC
-不会被当作兼容 compiler，`RADRAY_SHADER_COMPILER_FORK` 在 compiler 构建中恒定义。
-
-shader tools 隔离路径（`-B` 覆盖主预设的 binaryDir，`-D` 关掉 render/runtime/tests）：
+Visual Studio/MSBuild 构建使用仓库脚本求值项目，不编译源码：
 
 ```powershell
-cmake --fresh --preset win-x64-debug -B build_shader_tools `
-    -DRADRAY_BUILD_TESTS=OFF -DRADRAY_BUILD_RENDER=OFF -DRADRAY_BUILD_RUNTIME=OFF
-cmake --build build_shader_tools --target radray_shader_compile --parallel 24
+python tools/win_gen_compile_commands.py --build-dir build_clangcl --configuration Debug
 ```
 
-`radray_shader_compile` 只输出 raw target metadata blob，不实现 artifact index、cook 或 publisher。
-
-纯 runtime 路径（关 compiler，JIT 与 tools 随之强制 OFF）：
-
-```powershell
-cmake --fresh --preset win-x64-debug -B build_runtime_only -DRADRAY_BUILD_SHADER_COMPILER=OFF
-cmake --build build_runtime_only --parallel 24
-ctest --test-dir build_runtime_only -C Debug -R "RadRayRenderShaderArtifact" --output-on-failure
-```
-
-runtime-only 的 build tree 不应包含 `dxcompiler`、`dxc.exe`、`dxil` 或
-`radrayshadercompiler` 文件，`build_runtime_only/CMakeCache.txt` 也不应出现 `RADRAY_DXC_*`
-或 `RadRayDXC_DIR`。默认（compiler 开启）构建的输出目录应包含 fork 的 `dxcompiler.dll` ——
-运行库部署集中在一个 `radray_dxc_runtime_deploy` custom target，消费 target 只做依赖衔接，
-`radray_deploy_dxc_runtime` 不再各自拷贝。`test_radray_shader_compiler_client` 是最小 consumer
-gate：它用裸的 canonical library name 验证平台搜索路径加载、ABI/schema/toolchain handshake，
-并用不存在的库名验证失败；ClangCL 构建还生成
-`build_debug/_build/Debug/test_radray_shader_compiler_client.map`，可与
-`llvm-readobj --coff-imports` 一起检查 client/tool 没有引入 render/runtime/backend 或 compiler DLL。
-
-## compile_commands
-
-```powershell
-python tools/win_gen_compile_commands.py --build-dir build_debug --configuration Debug
-```
-
-脚本写入 `.vscode/compile_commands.json` 使用的编译数据库；`.vscode/` 是个人配置，
-不提交到仓库。
+默认输出 `.vscode/compile_commands.json`。IDE 设置见 [开发环境](dev-env.md)。
+文档或技能修改运行 `python tools/check_docs.py` 与 `git diff --check`，详见[文档维护](documentation.md)。

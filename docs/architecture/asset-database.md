@@ -1,5 +1,5 @@
 > - 适用: 开发时资产身份登记、`assets.json` schema、importer/settings、按路径加载或 `Refresh`
-> - 权威: 本文是当前 JSON `AssetDatabase` 的唯一现状说明；资产 slot 与引用生命周期见 `architecture/asset-system.md`
+> - 权威: 本文是当前 JSON `AssetDatabase` 的唯一现状说明；资产 slot 与引用生命周期见 [asset-system](asset-system.md)
 > - 锚点: `modules/runtime/include/radray/runtime/asset_database.h`, `modules/runtime/include/radray/runtime/asset_source.h`, `modules/runtime/include/radray/runtime/texture_asset.h`, `modules/runtime/include/radray/runtime/static_mesh.h`, `modules/runtime/src/asset_database.cpp`, `modules/runtime/src/texture_asset.cpp`, `modules/runtime/src/static_mesh.cpp`, `modules/runtime/src/application.cpp`, `examples/example_lambert_sphere/example_lambert_sphere.cpp`
 
 # 开发时资产数据库

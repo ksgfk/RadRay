@@ -310,8 +310,7 @@ public:
     ///
     /// 【整包交出, 不逐个交】payload 是一个可移动的可调用对象 (通常是捕获了整组 GPU 对象
     /// 的 lambda), 在一个帧边界之后被销毁。销毁顺序由 payload 内部的捕获/成员声明顺序
-    /// 显式表达, 不要依赖多次调用的先后。理由见
-    /// docs/adr/0009-deferred-destroy-hands-over-suspension.md。
+    /// 显式表达, 不要依赖多次调用的先后。
     ///
     /// 同一次 Pump 内的全部 payload 攒成一批共用一个协程帧。
     /// wait processor 未装配时立即销毁 payload 并记 error log。

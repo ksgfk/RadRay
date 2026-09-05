@@ -57,7 +57,7 @@ auto* p = maybe.Unwrap();              // 为空则 throw NullableAccessExceptio
 
 **没有 `Value()`**（不同于 `std::optional`）。`Unwrap()` 抛异常是误用检测，不是错误处理路径。
 
-与 `optional` 的分工、以及"裸指针即非空"的约定见 `guide/cpp-conventions.md`。
+与 `optional` 的分工、以及"裸指针即非空"的约定见 [cpp-conventions](../guide/cpp-conventions.md)。
 
 ## 协程
 
@@ -79,7 +79,7 @@ auto* p = maybe.Unwrap();              // 为空则 throw NullableAccessExceptio
 `coroutine_handle`，而 `coroutine_handle<>` 已经把 promise 的 env 擦除了，
 于是取不到 stop token。这个函数探测 promise 里有没有 `get_stop_token`，
 没有就返回一个 `stop_requested()` 恒为 false 的默认 token（= 不可取消）。
-`AssetWaitAwaitable::await_suspend` 为此把自己模板化，见 `architecture/asset-system.md`。
+`AssetWaitAwaitable::await_suspend` 为此把自己模板化，见 [asset-system](asset-system.md)。
 
 `ManualCoroutineScheduler` 的记录不能搬动——记录里存着回指调度器的指针（stop callback）。
 `GpuSystem::_flights` 因此是 `vector<unique_ptr<FlightSlot>>` 而非 `vector<FlightSlot>`。
@@ -172,9 +172,9 @@ return h.ToHashCode();
    "空容器 + 原 `_hash`"的源，那个源与一个真正的空 key 内容相等却散列不等，直接违反契约。
    移动后把源的散列值重算（此时源已空，是常数开销）。
 
-`PipelineLayoutKey` 是这三条都踩过的实例，见 `architecture/asset-system.md`。
+`PipelineLayoutKey` 是这三条都踩过的实例，见 [asset-system](asset-system.md)。
 另一个方向的例子是 `RenderPassCacheKey`：它**刻意不归一化**，因为字段顺序携带语义，
-见 `architecture/render-rhi.md`。
+见 [render-rhi](render-rhi.md)。
 
 ## JSON
 
@@ -208,7 +208,7 @@ template <> struct JsonDeserializer<T> {
 函数名带 `LH` 后缀：`PerspectiveLH`、`OrthoLH`、`LookAtLH`、`LookAtFrontLH`。
 
 这套约定跟 D3D12 对齐。Vulkan 的 NDC Y 轴朝下且 RHI 不替你翻，处理它是调用方的事，
-见 `architecture/render-rhi.md` 的「视口」一节。
+见 [render-rhi](render-rhi.md) 的「视口」一节。
 
 辅助：`Align`、`Degree` / `Radian`、`Lerp`、`Clamp`、`AbsDot`、`ComposeTransform` /
 `DecomposeTransform`。另有 `Viewport`、`Rect`。Eigen 的向量/矩阵/四元数都有 fmt formatter，
@@ -227,8 +227,8 @@ template <> struct JsonDeserializer<T> {
 - **RTTI 是工程编译约定** — `radray_default_compile_flags` 为每个自有 target 以 `PRIVATE`
   方式设置 MSVC/ClangCL 的 `/GR` 或其他前端的 `-frtti`，仅作用于 C++ 编译。新增库、测试、
   工具、样例与 benchmark 都必须调用该函数；`radray_add_test` 已代为调用。core 不通过链接接口
-  传播 RTTI 选项，仓库外使用公共对象查询的 consumer 需自行开启 RTTI。归属理由见
-  [ADR-0056](../adr/0056-rtti-belongs-to-project-compile-defaults.md)。
+  传播 RTTI 选项，仓库外使用公共对象查询的 consumer 需自行开启 RTTI。把开关放在现有的
+  工程编译函数中，可以统一自有目标而不改变第三方配置，也不把工程策略挂在 core 的公共接口上。
 - **`intrusive_ptr.h`** — `IntrusivePtr` + `AdoptRef` / `RetainRef`，依赖 ADL 的
   `IntrusivePtrAddRef` / `IntrusivePtrRelease`。
 - **`structured_buffer.h`** — CPU 侧反射式结构化缓冲。新代码用 `TrySetValue`（fail-fast），

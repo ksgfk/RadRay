@@ -1,6 +1,5 @@
 > - 适用: 加 RHI 接口或改后端；排查 barrier / 描述符 / 同步问题；找某个后端实现在哪一段
-> - 权威: 本文是 ADR-0051/schema 7 当前 RHI layout 契约及两个后端映射关系的唯一说明。上层怎么用它见 `architecture/frame-and-gpu.md`
-> - 状态: 已落地。两个后端的 native chain、binding handle、dynamic offset 与 push 提交都按本文实现（含 `1.9.2607.radray.6` package），实施记录见 `docs/todo/shader-layout-contract-correction.md`；非 layout 章节同样描述当前实现
+> - 权威: 本文说明 schema 7 当前 RHI layout 契约、所有权与两个后端映射。上层使用方式见帧与 GPU 文档
 > - 锚点: `modules/render/include/radray/render/rhi.h`, `modules/render/include/radray/render/backend_shader_artifact.h`, `modules/render/include/radray/render/render_pass_registry.h`, `modules/render/include/radray/render/sampler_cache.h`, `modules/render/src/rhi.cpp`, `modules/render/src/backend_shader_artifact.cpp`, `modules/render/src/sampler_cache.cpp`, `modules/render/src/d3d12/d3d12_impl.cpp`, `modules/render/src/vk/vulkan_impl.cpp`
 
 # RHI 与后端
@@ -294,7 +293,7 @@ DXGI 的 frame-latency waitable object 达到同一效果。
 Vulkan 的 NDC Y 轴朝下，要得到与 D3D12 一致的画面，处理它是**调用方的责任**——在投影矩阵里
 翻，或者传一个负 `Height` 的 viewport。RHI 刻意不替你决定，因为这两种做法对
 front-face winding 的影响不同。相机侧因此保持后端无关（见
-`architecture/render-framework.md`）。
+[render-framework](render-framework.md)）。
 
 当 Vulkan 物理设备 API 版本低于 1.1 时，负 `Height` 依赖
 `VK_KHR_maintenance1`；runtime 会在现有 device-extension 集合中只补这个扩展。API 版本为

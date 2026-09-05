@@ -7,7 +7,11 @@
 Stage A 的系统都属于 `radrayruntime`。保留 game-thread `PrepareFrame` → render-thread `Render`
 和 per-flight 资产保活；一次 Render 最多执行一张 graph，使用 GpuSystem 已经 Begin 的 Direct command
 buffer。graph 不提交、不等待、不 acquire/present，也不增加线程、flight 或队列同步协议。
-取舍记录见 [ADR-0054](../adr/0054-explicit-workloads-and-single-queue-render-graph.md)。
+
+单队列和 per-flight pool 复用已有同步边界，避免再引入跨队列/flight 的资源回收协议；代价是
+暂不做 heap aliasing，可能多占显存。history 独立于 transient pool，区分物理复用与跨帧内容
+有效性，才能保证 skip/失败不旋转历史。窄 commands facade 封住 raw command buffer 的
+barrier/submit 旁路，让 graph 负责状态收口。每帧 graph setup/payload 的 CPU 分配需按实际负载衡量。
 
 ## Output 与 frame plan
 

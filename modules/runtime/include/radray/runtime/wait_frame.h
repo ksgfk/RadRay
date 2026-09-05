@@ -1,5 +1,7 @@
 #pragma once
 
+// 帧边界等待与延迟销毁: docs/architecture/frame-and-gpu.md
+
 #include <radray/coroutine.h>
 #include <radray/runtime_type.h>
 #include <radray/types.h>
@@ -10,7 +12,6 @@ namespace radray {
 ///
 /// 这是 GPU 资源延迟销毁的机制: 不交对象, 而是交出一个挂起点 —— 持有者 co_await 本接口,
 /// 恢复后在自己的作用域里正常析构一整包数据, 销毁顺序由该包内的声明顺序显式表达。
-/// 完整取舍见 docs/adr/0009-deferred-destroy-hands-over-suspension.md。
 ///
 /// 【必须在主线程恢复】实现方不得在 GPU 完成的那一刻就地恢复 —— 多线程模式下那是渲染
 /// 线程, 在那里恢复等于在渲染线程跑资产析构。故实现拆成"标记完成"与"泵恢复"两步。

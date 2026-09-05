@@ -1,6 +1,5 @@
 > - 适用: 新增或修改 shaderlib 根 `.hlsl` pass、keyword domain、binding 或 target gate
 > - 权威: 本文是 schema 7 当前 HLSL authoring 契约；wire 与 runtime 边界见 shader pipeline 架构文档
-> - 状态: ADR-0051、ADR-0052 已落地。本文描述的 policy frontend、declaration owner、target-typed resolve 与两个后端 native chain 都是当前实现；实施记录见 `docs/todo/shader-layout-contract-correction.md`
 > - 锚点: `shaderlib/core/platform.hlsli`, `shaderlib/pipelines/forward/bindings.hlsli`, `shaderlib/pipelines/forward/forward.hlsl`, `shaderlib/passes/depth.hlsl`, `shaderlib/passes/compute.hlsl`, `modules/shader_compiler/tests/test_shaderlib_passes.cpp`
 
 # HLSL authoring

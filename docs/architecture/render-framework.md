@@ -157,7 +157,7 @@ viewport 使用 MakeViewport；只有它在 Vulkan 下使用负 height。光照�
 正常 runner 走 `Shutdown`；若初始化或游戏钩子的异常绕过正常路径，`Application` 析构仍调用同一
 幂等内部 teardown（不再调用游戏侧虚钩子），先断开窗口的非 owning 引用，再按下述服务顺序回收。
 
-**关停顺序是固定的**，理由见 `architecture/asset-system.md`：
+**关停顺序是固定的**，理由见 [asset-system](asset-system.md)：
 
 ```
 WaitAndCleanupCompletedFlights → OnShutdown → scheduler.CancelAll
@@ -191,8 +191,8 @@ DispatchEvents → BeginUpdateForFlight → PumpFrameUploadScheduler → Update
 （notify / wait）和 `_retireMutex`。
 
 **帧边界等待的恢复必须回到主线程**：flight 完成是渲染线程观察到的，
-在那里恢复就等于在渲染线程跑资产析构。见
-[ADR-0009](../adr/0009-deferred-destroy-hands-over-suspension.md)。
+在那里恢复就等于在渲染线程跑资产析构。引用计数与 manager 表只在 game thread 访问，
+因此渲染线程只标记完成，由主线程泵恢复；机制见[帧与 GPU](frame-and-gpu.md)。
 
 Windows 下还有 `Win32ModalLoopVBlankRenderer`：模态循环（拖窗口、菜单）期间用 DXGI
 `WaitForVBlank` + 一个消息窗口驱动渲染线程补帧，避免界面冻住。

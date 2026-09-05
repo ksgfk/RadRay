@@ -1,5 +1,5 @@
 > - 适用: 资产生命周期、引用计数、加载去重或延迟 GPU 销毁
-> - 权威: 本文是 runtime 资产系统的唯一说明；帧边界与上传见 `architecture/frame-and-gpu.md`，开发时身份登记与 AssetDatabase 见 `architecture/asset-database.md`
+> - 权威: 本文是 runtime 资产系统的唯一说明；帧边界与上传见 [frame-and-gpu](frame-and-gpu.md)，开发时身份登记与 AssetDatabase 见 [asset-database](asset-database.md)
 > - 锚点: `modules/runtime/include/radray/runtime/asset_manager.h`, `modules/runtime/src/asset_manager.cpp`, `modules/runtime/include/radray/runtime/asset.h`, `modules/runtime/include/radray/runtime/asset_source.h`, `modules/runtime/include/radray/runtime/texture_asset.h`, `modules/runtime/include/radray/runtime/static_mesh.h`, `modules/runtime/src/static_mesh.cpp`, `modules/runtime/include/radray/runtime/render_framework/static_mesh_scene_proxy.h`
 
 # 资产系统
@@ -17,13 +17,17 @@ Load request / source task → AssetSlot::Loading → AssetManager::Pump → Rea
                                   下一次 Pump 调用 Asset::OnUnload
 ```
 
+引用归零后由 `Pump` 统一销毁，不在引用析构时就地删除 slot，避免连锁释放引起递归析构和
+遍历期间的迭代器失效。强制卸载会使资产交出的内部指针失效，因此不提供绕过引用计数的入口，
+也不另设一层内容引用来补救；释放时机由最后一个显式 owner 决定。
+
 加载去重按 `AssetId` 进行。dedup 命中时不会重新执行 loader，因此带 options 的 loader
 必须在发起请求前检查参数；不能把一次请求的共享设施指针寄希望于第二次命中时更新。
 
 加载有两种入口，共用同一张 slot 表：显式 `Load(AssetLoadRequest)` 直接提交 task；
 `Load(AssetId)` / `Load<T>(path)` 经可选 `IAssetSource` 取得 task。source 未装配或未命中时返回
 无效引用，不创建 faulted slot。`AssetDatabase` 是当前 source 实现，细节见
-`architecture/asset-database.md`。
+[asset-database](asset-database.md)。
 
 `AssetLoadResult::Success` 只携带 `unique_ptr<Asset>`；`AssetSlot` 只保存实际对象，不另存声明类型
 或对象 GUID，也不做两份类型事实的交叉校验。空对象的 success 仍作为加载失败提交。
@@ -50,8 +54,10 @@ AssetId MakeAssetIdFromPath(std::string_view namespacePrefix, const std::filesys
 namespace prefix 隔离资产类型；同一路径在不同资产类型下必须产生不同 ID。路径归一化
 使用 `weakly_canonical`，失败时依次退到 `absolute + lexically_normal` 和纯词法归一化，
 再以 `generic_string` 作为哈希输入；Windows 下转小写，POSIX 下保留大小写。
+归一化避免同一文件的不同路径写法落入重复 slot；类型 namespace 防止一份文件的不同资产表示
+相互冲突。这是散文件身份规则，不把物理路径提升为 shader compiler 的逻辑 source identity。
 
-AssetId 双轨并存（`architecture/asset-database.md`）：入库资产以 `AssetDatabase` 登记的
+AssetId 双轨并存（[asset-database](asset-database.md)）：入库资产以 `AssetDatabase` 登记的
 GUID 为身份（一次分配、永不改变），散文件继续走这里的路径哈希；两轨共用 `AssetManager`
 的单 slot 表，互不迁移。`example_lambert_sphere` 通过 `AssetManager` 消费 GUID 轨，但其运行资产
 属于被忽略的顶层 `assets/`，由源码仓库之外的渠道分发。shaderlib 与显式测试资源继续使用

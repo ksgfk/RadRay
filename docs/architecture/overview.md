@@ -1,124 +1,76 @@
-> - 适用: 不知道从哪开始；要定位某个功能属于哪个模块/文件
-> - 权威: 本文是全仓库唯一的地图。任何子系统的细节不在这里，只给出去哪读
-> - 锚点: `CMakeLists.txt`, `modules/CMakeLists.txt`, `cmake/Utility.cmake`
+> - 适用: 不知道从哪开始；定位某个功能所属的模块与文档
+> - 权威: 本文是仓库地图与完整文档索引，子系统契约在对应页面维护
+> - 锚点: `CMakeLists.txt`, `modules/CMakeLists.txt`, `cmake/Utility.cmake`, `AGENTS.md`, `.agents/skills/`
 
 # 全局地图
 
-RadRay 是 C++20 实时渲染器，当前支持 Windows 下的 D3D12 与 Vulkan 后端。
-构建产物、依赖恢复和测试命令以 `docs/guide/build-test.md` 为准。
+RadRay 是 C++20 实时渲染器，提供 D3D12 与 Vulkan 后端。仓库工作规则见
+[AGENTS.md](../../AGENTS.md)，操作入口见[构建与测试](../guide/build-test.md)。
 
 ## 目录职责
 
-| 目录 | 内容 | 可写 |
-|---|---|---|
-| `modules/` | core、shader、window、render、runtime，以及可选 shader compiler client | 是 |
-| `shaderlib/` | HLSL 数学、光照共享库与最小产品 pass，目录本身是 include 根 | 是 |
-| `tools/` | 依赖恢复、文档检查、编译数据库脚本，以及可选的 raw shader compile CLI | 是 |
-| `assets/` | 被忽略的本地资产根；测试与样例资产通过源码仓库之外的渠道分发 | 本地数据 |
-| `cmake/` | 构建辅助函数 | 是 |
-| `docs/` | 当前架构、指南、ADR 和研究记录 | 是 |
-| `third_party/`, `SDKs/` | 由恢复脚本填充的依赖树 | **否** |
-| `build_*/` | 构建产物 | **否** |
+| 目录 | 内容 |
+|---|---|
+| `modules/` | core、shader、window、render、runtime，以及可选 shader compiler client |
+| `shaderlib/` | HLSL 共享库与产品 pass，目录本身是 include 根 |
+| `tools/` | 依赖恢复、文档检查、编译数据库脚本和 raw shader compile CLI |
+| `examples/`、`benchmarks/` | 样例与性能测量程序 |
+| `cmake/` | 构建辅助函数 |
+| `docs/architecture/` | 当前设计、接口边界、术语及必要的设计理由 |
+| `docs/guide/` | 使用、开发、验证和文档维护方法 |
+| `.agents/skills/` | 随仓库维护的 RadRay doc 与 grill 技能 |
+| `assets/` | 被忽略的本地资产根；样例和测试资产通过仓库外渠道分发 |
+| `third_party/`、`SDKs/` | 恢复脚本填充的只读依赖树 |
+| `build*/` | 本机构建产物 |
 
 ## 模块依赖
 
+箭头表示依赖方向，只列自有 target：
+
 ```text
-                 radraycore
-                /     |     \
-      radraywindow  radrayshader  radrayshadercompiler
-                       |
-                  radrayrender
-                       |
-                   radrayruntime
+shader         → core
+window         → core
+shadercompiler → shader, core                 可选
+render         → shader, core
+runtime        → render, window, shader, core
+runtime        → shadercompiler               仅 RADRAY_ENABLE_SHADER_JIT=ON
 ```
 
-| 库 | 职责 | 去哪读 |
-|---|---|---|
-| `radraycore` | 容器别名、分配器、数学、JSON、日志、协程、哈希和 IO | `architecture/core-facilities.md` |
-| `radrayshader` | compiler/render 共享的 shader wire contract、artifact decoder 与双 target view；只依赖 core，不依赖 DXC | `architecture/shader-pipeline.md` |
-| `radraywindow` | 窗口、输入和平台事件 | `guide/dev-env.md` |
-| `radrayshadercompiler` | 可选 source-contract discovery 与 DXC boundary client；依赖 shader 与 core，不拥有 render/runtime | `architecture/shader-pipeline.md`, `docs/todo/shader-layout-contract-correction.md`, `docs/todo/filesystem-backed-shader-include-correction.md` |
-| `radrayrender` | RHI、D3D12/Vulkan 后端、资源、命令和 PSO | `architecture/render-rhi.md` |
-| `radrayruntime` | 资产生命周期与 JSON 身份库、帧节奏、workload/graph/history、渲染框架和 Application | `architecture/asset-system.md`, `architecture/asset-database.md`, `architecture/frame-and-gpu.md`, `architecture/render-framework.md`, `architecture/renderer-foundation.md` |
-
-`radrayshadercompiler` 只在 `RADRAY_BUILD_SHADER_COMPILER=ON` 时进入构建图；它依赖
-`radraycore` 与 `radrayshader`，不反向依赖 render/runtime。当前 target 已提供 source-contract
-discovery、typed variant compile、RadRay DXC fork extension client 和 extension probe；client
-只用 fork extension ABI，无 stock adapter。`tools/fetch_sdks.py` 按 `project_manifest.json` 准备
-本地包，正式配置按 Manifest `Name` 使用 `SDKs/radray_dxc/extracted` 并发现
-`RadRayDXC::Headers/Compiler`，不把 DXC 源码加入 RadRay build graph。shader wire
-contract 与 artifact decoder 由 `radrayshader` 提供，因此 render 与 runtime 解析
-compiler-produced metadata 不依赖 `radrayshadercompiler`；`radrayruntime` 仅在
-`RADRAY_ENABLE_SHADER_JIT=ON`（默认）时 PUBLIC 链接它以驱动开发期 JIT。
-
-## 关键入口
-
-| 关注点 | 入口 | 文件 |
-|---|---|---|
-| 进程启动与主循环 | `Application::Run` → `StartLoop` | `modules/runtime/src/application.cpp` |
-| 创建 GPU 设备 | `Device::Create` | `modules/render/src/rhi.cpp` |
-| 帧节奏、flight、提交 | `GpuSystem::BeginFrameRecord` / `EndFrameRecordAndSubmit` | `modules/runtime/src/gpu_system.cpp` |
-| 资产加载与回收 | `AssetManager::Load` / `Pump` | `modules/runtime/src/asset_manager.cpp` |
-| 开发时资产身份与 path 反查 | `AssetDatabase::Open` / `Refresh` / `Save` | `modules/runtime/src/asset_database.cpp` |
-| render pass / framebuffer 去重 | `RenderPassRegistry` | `modules/render/include/radray/render/render_pass_registry.h` |
-| material、program 与 mesh draw | `Material` / `ShaderProgram` / `MeshDrawList` | `modules/runtime/include/radray/runtime/` |
-| 内置前向管线 | `ForwardPipeline` | `modules/runtime/include/radray/runtime/forward_pipeline/forward_pipeline.h` |
-| Output、view families、RenderGraph、pool/history | `RenderPipelineContext` / `RenderGraph` / `ViewStateRegistry` | `modules/runtime/include/radray/runtime/render_framework/` |
-| 场景 tick | `World::Tick` | `modules/runtime/src/game_framework/world.cpp` |
-
-## 当前边界
-
-Runtime pipeline 已收敛为 game-thread PrepareFrame 与 render-thread Render；Forward 消费每 flight
-值快照，RenderSystem 按 flight 保活资产，Material 仅保存 CPU authoring 状态。Stage A 增加显式
-output/view workload、设备能力事实、串行 RenderGraph、per-flight pool 和成功提交的 history；
-pipeline context 不公开窗口和 raw command buffer。当前接口见 [Renderer foundation](renderer-foundation.md)，
-集成边界见 `architecture/render-framework.md`，flight 生命周期见 `architecture/frame-and-gpu.md`。
-取舍见 [ADR-0053](../adr/0053-runtime-pipelines-consume-per-flight-value-snapshots.md) 与
-[ADR-0054](../adr/0054-explicit-workloads-and-single-queue-render-graph.md)，验收见
-[Stage A](../todo/renderer-foundation-stage-a.md)。
-
-M-1 已移除旧的 shader 资产、手写 metadata、旧的命令行 shader 工具和未接线的 UI 路线。
-当前 `shaderlib/` 由共享数学层、target gate、内置 forward 产品 pass 与 depth/compute 最小 pass
-组成；compiler-owned
-metadata、target-native artifact decoder/layout 与 runtime JIT 已接通。RHI 的 layout 构造入口
-按 DXIL/SPIR-V view 分开；运行时已选定 device 的调用方经 render 的单一动态桥核对
-device/request/envelope target 后进入对应 typed 入口。公共 `PipelineLayout::FindBinding` 只按
-declaration name 颁发不透明 `BindingHandle`，绑定提交不暴露 layout 数字。
-
-ADR-0051 的 layout contract 已经落地：compiler-owned RootSignature policy frontend、target
-artifact decode -> typed resolve -> native creation、精确 target layout modifiers 与
-`ResolvedD3D12Layout`/`ResolvedVulkanLayout`。两个后端直接消费 resolved layout，runtime 走
-`ShaderProgramRequest` 与 artifact/program 两层 cache，group-wide `ShaderLayoutPolicy` 已删除。
-实施记录与检查站见 `todo/shader-layout-contract-correction.md`。
-
-`radray_shader_compile`（`RADRAY_BUILD_SHADER_TOOLS` 默认 ON）只输出 raw DXIL/SPIR-V
-metadata blob，不生成 artifact index、cook 或 publisher；client 只用 fork extension ABI，
-无 stock adapter（测试内的 stock DXC 仅作为 Pso smoke 的 bytecode 来源）。正式 cook/artifact
-发布链和 RadRay 自身安装导出层仍不在当前工作树。
+`radrayshader` 提供 compiler/render 共享 wire contract 与 artifact decoder，不依赖 DXC。
+可选 `radrayshadercompiler` 通过 RadRay DXC fork extension ABI 提供 discovery 与 typed variant
+compile；包发现与运行库部署见 [Shader pipeline](shader-pipeline.md)。render/runtime 解析
+artifact 不需要 compiler，开发期 JIT 通过配置开关接入 client。
 
 ## 文档索引
 
-```text
-docs/
-  guide/
-    build-test.md       配置、构建、测试、依赖和 compile_commands
-    shader-authoring.md 新 HLSL pass、keyword 与 target gate 约定
-    cpp-conventions.md  命名、接口风格和测试约定
-    dev-env.md          IDE、clangd 和调试器设置
-  architecture/
-    overview.md         本文
-    core-facilities.md  core 提供的容器、协程、日志和基础设施
-    shaderlib.md        当前 HLSL 共享库边界
-    shader-pipeline.md  source contract、双 target wire、decoder 与 JIT 边界
-    asset-system.md     资产引用计数与延迟销毁
-    asset-database.md   JSON manifest、importer/settings 与加载桥接
-    frame-and-gpu.md    帧序、flight、上传和关停
-    render-rhi.md       RHI、后端、barrier 和同步
-    render-framework.md 渲染框架、SceneProxy、Application、ServiceRegistry
-    renderer-foundation.md output/view/workload、RenderGraph、pool/history 与状态收口
-  adr/                  设计决策记录，只追加不修改
-  todo/                 有范围和检查站的实施计划
-```
+| 主题 | 文档 |
+|---|---|
+| 配置、恢复依赖、构建、测试、编译数据库 | [构建与测试](../guide/build-test.md) |
+| 命名、接口、异常、测试和注释约定 | [C++ 约定](../guide/cpp-conventions.md) |
+| IDE、clangd、调试器 | [开发环境](../guide/dev-env.md) |
+| 写 HLSL pass、keyword、binding 与 target gate | [Shader authoring](../guide/shader-authoring.md) |
+| 文档归属、格式、项目技能与检查 | [文档维护](../guide/documentation.md) |
+| 容器、协程、日志、RTTI、数学和 IO | [Core 基础设施](core-facilities.md) |
+| HLSL 共享库导航 | [Shaderlib](shaderlib.md) |
+| Source contract、wire、target layout、JIT 与发布边界 | [Shader pipeline](shader-pipeline.md) |
+| 资产引用计数、加载与延迟销毁 | [资产系统](asset-system.md) |
+| JSON 身份库、importer/settings 与加载桥接 | [AssetDatabase](asset-database.md) |
+| 帧序、flight、上传与关停 | [帧与 GPU](frame-and-gpu.md) |
+| RHI、后端、barrier 与同步 | [RHI 与后端](render-rhi.md) |
+| Scene、Forward、Application 与服务装配 | [渲染框架](render-framework.md) |
+| Output/view/workload、RenderGraph、pool 与 history | [Renderer foundation](renderer-foundation.md) |
 
-`guide/` 与 `architecture/` 描述当前状态；`adr/` 记录为什么采用某个设计；`research/`
-只保存带版本和范围的外部证据，不替代当前契约。
+## 关键代码入口
+
+| 关注点 | 入口 | 文件 |
+|---|---|---|
+| 主循环 | `Application::Run` / `StartLoop` | `modules/runtime/src/application.cpp` |
+| GPU 设备 | `Device::Create` | `modules/render/src/rhi.cpp` |
+| flight 与提交 | `GpuSystem::BeginFrameRecord` / `EndFrameRecordAndSubmit` | `modules/runtime/src/gpu_system.cpp` |
+| 资产加载与回收 | `AssetManager::Load` / `Pump` | `modules/runtime/src/asset_manager.cpp` |
+| 身份登记与 path 反查 | `AssetDatabase::Open` / `Refresh` / `Save` | `modules/runtime/src/asset_database.cpp` |
+| 内置前向管线 | `ForwardPipeline` | `modules/runtime/include/radray/runtime/forward_pipeline/forward_pipeline.h` |
+| Workload 与 graph | `RenderPipelineContext` / `RenderGraph` | `modules/runtime/include/radray/runtime/render_framework/` |
+| 场景 tick | `World::Tick` | `modules/runtime/src/game_framework/world.cpp` |
+
+当前能力与未实现边界在各子系统页面说明，不在地图中维护另一份进度或决策清单。

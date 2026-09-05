@@ -596,7 +596,7 @@ private:
         }
     }
 
-    // The cache rules from ADR-0051: the compiled artifact is identified by source, defines,
+    // The compiled artifact is identified by source, defines,
     // assignments, the full policy, the target and the toolchain, and a program by that artifact plus
     // the resolved layout hash of the active backend only. Nothing else may split or merge an entry.
     void CheckCacheRules(const ShaderProgramRequest& base, ShaderProgram* program) {

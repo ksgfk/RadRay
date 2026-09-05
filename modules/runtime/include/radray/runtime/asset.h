@@ -1,5 +1,7 @@
 #pragma once
 
+// 资产生命周期与身份: docs/architecture/asset-system.md
+
 #include <filesystem>
 #include <string_view>
 
@@ -18,8 +20,6 @@ using AssetId = Guid;
 /// 【生命周期只由引用计数决定】没有强制卸载。引用归零后资产立即销毁 (对齐到
 /// AssetManager::Pump 这一确定时刻), 不做闲置缓存。由此资产可以放心向外交出指向自身
 /// 内部的指针 —— 持有一份 StreamingAssetRef 即保证它们不悬垂。
-///
-/// 改这条不变量之前先读 docs/adr/0007-asset-lifetime-refcount-only.md。
 class Asset {
 public:
     Asset() noexcept = default;
@@ -53,8 +53,6 @@ struct RuntimeTypeTrait<Asset> {
 ///
 /// namespacePrefix 做资产类型的命名空间隔离 ("shader" / "image" / ...), 各资产类型必须
 /// 用独占前缀。路径先归一化再哈希, 这是【正确性要求而非优化】。
-///
-/// 归一化口径与改动它之前必须读的取舍: docs/adr/0008-asset-id-path-normalization.md
 AssetId MakeAssetIdFromPath(std::string_view namespacePrefix, const std::filesystem::path& path);
 
 }  // namespace radray

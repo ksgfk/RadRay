@@ -1,5 +1,5 @@
 > - 适用: 改帧节奏、提交时序、GPU 上传；排查"GPU 对象被提前销毁"或帧同步问题
-> - 权威: 本文是帧节奏与 GPU 资源上传的唯一说明。资产侧的延迟销毁契约见 `architecture/asset-system.md`；RHI 本身见 `architecture/render-rhi.md`
+> - 权威: 本文是帧节奏与 GPU 资源上传的唯一说明。资产侧的延迟销毁契约见 [asset-system](asset-system.md)；RHI 本身见 [render-rhi](render-rhi.md)
 > - 锚点: `modules/runtime/include/radray/runtime/gpu_system.h`, `modules/runtime/include/radray/runtime/gpu_resource.h`, `modules/runtime/include/radray/runtime/wait_frame.h`, `modules/runtime/include/radray/runtime/render_system.h`, `modules/runtime/src/gpu_system.cpp`
 
 # 帧节奏与 GPU 上传
@@ -54,9 +54,9 @@ Application::StartLoop
 
 ## 帧边界等待
 
-这是 GPU 资源延迟销毁的机制。核心设计（不交对象，交出挂起点）见
-[ADR-0009](../adr/0009-deferred-destroy-hands-over-suspension.md)，使用侧见
-`architecture/asset-system.md`。实现侧三条：
+这是 GPU 资源延迟销毁的机制：持有者等待帧边界，在恢复后的作用域内析构整包 payload，
+使资源依赖通过包内成员声明顺序表达，不依赖逐对象回收队列的入队顺序。
+资产侧入口见[资产系统](asset-system.md)。实现约束如下：
 
 **等待表挂在 per-flight 槽位上**（`GpuFlightSlot::WaitFrame`），不是全局表。flight 的
 fence 就是完成条件，记在槽位上便无需另存 fence 值再逐个比较。
@@ -174,7 +174,7 @@ generation 进入当前 flight retire bin，到同 flight 下次安全 Begin 才
 
 交换链尺寸变化时后备缓冲 view 会重建，此时必须调
 `RenderPassRegistry::RemoveFramebuffersUsing(oldView)`：framebuffer 存的是 `TextureView`
-裸指针。见 `architecture/render-rhi.md`。
+裸指针。见 [render-rhi](render-rhi.md)。
 
 ## 关停顺序
 

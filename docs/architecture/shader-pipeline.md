@@ -1,11 +1,10 @@
 > - 适用: 维护 shader compiler client、metadata wire、artifact decoder 或 runtime JIT
-> - 权威: 本文描述 ADR-0051、ADR-0052 与 schema 7 的当前 shader pipeline 契约；实施检查站见 `docs/todo/shader-layout-contract-correction.md`
-> - 状态: 已落地。schema 7 declaration owner、qualified CPU parameter path、target-typed resolver、两个后端 native chain、runtime request/cache 与 `1.9.2607.radray.6` package 均按本文实现
+> - 权威: 本文描述 schema 7 当前 shader pipeline 契约、编译边界与设计理由；HLSL 写法见 authoring 指南
 > - 锚点: `modules/shader/include/radray/shader/shader_compiler_contract.h`, `modules/shader/include/radray/shader/shader_artifact.h`, `modules/render/include/radray/render/backend_shader_artifact.h`, `modules/render/src/backend_shader_artifact.cpp`, `modules/shader_compiler/include/radray/shader_compiler/client.h`, `modules/runtime/include/radray/runtime/shader_jit.h`, `modules/runtime/include/radray/runtime/shader_program.h`, `modules/runtime/include/radray/runtime/shader_parameters.h`, `CMakePresets.json`
 
 # Shader pipeline
 
-## 迁移状态
+## 当前边界
 
 HLSL 是 pass source 的唯一 authoring 输入。schema 5 记录过的 layout 缺口都已经关闭：program
 cache 现在按完整 compile identity 与当前 backend 的 resolved layout 分两层；`[RootSignature]` 由
@@ -25,6 +24,10 @@ mode 没有 upstream fallback，只会在 extension 能力上 fail closed。
 
 ## Source contract
 
+Pass 是同一 source unit 的完整 graphics 或 compute 程序，Stage 是其中的可编程阶段。
+Variant 是一组 target-independent keyword assignments；Compiled Variant artifact 则属于
+一个具体 target。资产层的 PassName/AssetId 由调用方映射到 artifact，不进入 compiler contract。
+
 根 `.hlsl` 文件定义一个 source unit：
 
 - graphics 必须有一个 vertex entry，可以有一个 pixel entry；depth-only 不需要 pixel。
@@ -37,6 +40,17 @@ mode 没有 upstream fallback，只会在 extension 能力上 fail closed。
 `DiscoverSourceContract` 输出 kind、entry topology、keyword domain 和 `ContractHash`。caller
 只把 shaderlib-root-relative 的逻辑 `SourceName` 传给 compiler；物理仓库路径不属于 source
 identity。`CompileVariant` 会重新 discovery 并拒绝 `ExpectedContract` 漂移。
+
+entry topology 在合法 keyword domain 内保持不变；keyword 可以改变资源使用和函数体，不能
+让 entry 声明只在部分 Variant 出现。discovery 与 compile 共享 Defines、CompilePolicy 和
+include 配置，语义由 Clang/DXC frontend 校验，不再建立独立的 source/metadata scanner。
+
+Root source 以调用方提供的内存 bytes 编译，`SourceName` 是诊断与 virtual main-file context，
+不是从磁盘重读 root 的位置。共享 include 才由每次 invocation 的 DXC default handler 按
+有序路径搜索；同名 include 由先命中的目录提供。路径列表独立于 shader request/identity，
+ABI 借用显式长度的 UTF-8 view，允许空列表，拒绝空 path 或嵌入 NUL。
+caller/build system 在一次 discovery、compile 或 multi-target batch 读取期间保持 include tree
+不变；编译器不建立跨调用 snapshot。include 内容变化后的缓存失效由调用方管理。
 
 ## Target lanes
 
@@ -178,6 +192,11 @@ native layout descriptor 或 global native layout cache。
 builder。compiler
 关闭时 `RADRAY_ENABLE_SHADER_JIT` 被 `cmake_dependent_option` 强制 OFF，`ShaderJit` 退化为
 `IsAvailable()==false` 的桩。
+
+include path list 是显式构造参数，无 include 时显式传空数组；JIT 不提供 setter，也不做
+绝对化或存在性检查，相对路径在调用时按进程 CWD 解析。需要切换 include 配置时新建 JIT。
+compiler client 的结果保留 status 与 diagnostics，runtime JIT 提供无状态的 optional convenience
+结果，不保存可变的 LastDiagnostics。这样 const 编译调用不依赖上一请求遗留的错误状态。
 
 JIT 在 request 不包含 target、contract drift、非法 assignment、损坏 metadata 或 toolchain
 identity 不匹配时直接失败，不改请求去尝试另一 lane，也不调用 runtime reflection 或第二套

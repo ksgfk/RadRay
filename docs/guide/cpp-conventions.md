@@ -4,8 +4,8 @@
 
 # C++ 约定
 
-`AGENTS.md` 的 Hard rules 是**必须遵守**的（违反算缺陷）。本文是它之外的**惯例**：不遵守不算错，
-但跟着写能让新代码和既有代码一致。
+[AGENTS.md](../../AGENTS.md) 的硬规则必须遵守。本文补充命名、接口与测试的具体写法；
+涉及硬约束的地方明确注明，其余惯例遵循所在文件的既有风格。
 
 ## 命名
 
@@ -72,7 +72,7 @@ std::optional<AppFrameTarget> AcquireWindow(...); // 值类，可能没有
 
 **错误处理的主流做法是：`RADRAY_ERR_LOG` + 返回空/false。** 不可恢复的不变量违反用
 `RADRAY_ABORT`。业务代码几乎不用异常——异常只出现在三类边界：第三方 C/C++ 库
-（libpng、spirv-cross）、平台 API、以及必须吞掉异常的 C 回调。新增 `try`/`catch`/`throw`
+（例如 libpng）、平台 API、以及需要处理可恢复异常的 C 回调。新增 `try`/`catch`/`throw`
 **要先问用户**（`AGENTS.md`）。
 
 `noexcept` 用得很密：访问器、setter、析构一律标。虚接口批量标（`rhi.h` 大部分纯虚方法）。
@@ -90,7 +90,7 @@ static Nullable<shared_ptr<Device>> Device::Create(const DeviceDescriptor& desc)
 `World`）。区别的理由是前者可能创建失败，后者不会。
 
 **两段式析构（`Destroy()` + `DestroyImpl()`）集中在 render 后端实现类**，理由见
-[ADR-0010](../adr/0010-rhi-ownership-model.md)。runtime 层不用它，靠析构函数 + 成员声明顺序。
+[RHI 所有权](../architecture/render-rhi.md)。runtime 层不用它，靠析构函数 + 成员声明顺序。
 
 RAII 包装类的后缀是 `Scope` / `Scoped` / `Guard`，**没有 `*RAII`**：`ScopeGuard`、`TaskScope`、
 `ScopedBufferMap`、`FrameUploadScope`。（`d3d12_impl.h` 内部的 `DescriptorHeapViewRAII`
@@ -108,13 +108,13 @@ radray_add_test(test_foo SOURCES test_foo.cpp LINK_LIBS radrayruntime)
 
 `radray_add_test` 建独立可执行目标，链接 `GTest::gtest_main`，并用
 `gtest_discover_tests(... DISCOVERY_MODE PRE_TEST)` 注册。那个 `PRE_TEST` 是硬约束，
-不要改，理由见 [ADR-0001](../adr/0001-gtest-discovery-pre-test.md)。
+不要改，原因与验证方法见[构建与测试](build-test.md)。
 
 `radray_add_radray_gtest_case` 是在**已有**目标上按 `--gtest_filter` 注册单个 ctest 用例，
 并自动注入 `RADRAY_PROJECT_DIR` / `RADRAY_ASSETS_DIR` 等环境变量。目前仓库里还没有调用方。
 
 **`ctest -R` 匹配 gtest 套件名（C++ 类名），不是 cmake 目标名。** 对照表在
-`guide/build-test.md`。
+[build-test](build-test.md)。
 
 **需要 GPU 的测试无条件注册，用例内 `GTEST_SKIP()`**，不做条件 CMake 注册：
 
@@ -160,6 +160,6 @@ if (!device) {
 `AGENTS.md` 已定基调：**代码注释只承载 API 契约，设计理由归 `docs/`**。落到实践：
 
 - 写"调用方必须做什么"、"这里为什么不能改成显然的写法"——保留。
-- 写"为什么选 X 不选 Y"、"从前那条路的代价"——写进 `docs/adr/`，代码里留一行指路。
+- 必要的设计理由与代价写进所属 architecture/guide 页面；代码文件只在文件头保留至多一个文档入口。
 - 用 `【】` 标出真正会导致出错的约束，让它在扫读时跳出来。
 - 改了某个文档描述的行为，同一次提交里改那个文档。

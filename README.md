@@ -9,9 +9,11 @@ C++20 实时渲染器。D3D12 + Vulkan 后端，Windows 为主平台，macOS 走
 | 了解仓库结构、定位子系统 | [docs/architecture/overview.md](docs/architecture/overview.md) |
 | 配置、构建、跑测试、拉依赖 | [docs/guide/build-test.md](docs/guide/build-test.md) |
 | 配置 IDE / clangd / 调试器 | [docs/guide/dev-env.md](docs/guide/dev-env.md) |
-| 某个设计为什么这样 | [docs/adr/](docs/adr/README.md) |
+| 当前设计、术语与取舍 | 从[架构地图](docs/architecture/overview.md)进入所属子系统文档 |
+| 整理文档、使用项目 doc / grill 技能 | [文档维护](docs/guide/documentation.md) |
 
-`AGENTS.md` 是给编码 agent 的入口约束，人类读者可以跳过。
+[AGENTS.md](AGENTS.md) 也是长期文档，记录仓库级约束与阅读入口。
+长期知识集中在它与 `docs/architecture/`、`docs/guide/`，历史版本由 Git 保存。
 
 ## 快速开始
 
