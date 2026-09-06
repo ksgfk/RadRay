@@ -16,6 +16,7 @@ struct RenderPrimitiveData {
     bool DisableFrustumCulling{false};
     uint32_t FirstMeshBatch{0};
     uint32_t MeshBatchCount{0};
+    uint64_t Generation{0}, MotionRevision{0};
 };
 
 struct RenderLightData {
@@ -23,6 +24,7 @@ struct RenderLightData {
     LightRenderParameters Parameters{};
     SphereBounds WorldBounds{};
     uint32_t LayerMask{0xffffffffu};
+    bool CastShadow{true};
 };
 
 struct RenderSceneSnapshotStats {

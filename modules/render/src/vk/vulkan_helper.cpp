@@ -248,7 +248,7 @@ VkPipelineStageFlags TextureStateToPipelineStageFlags(TextureStates v, bool isSr
     return stage;
 }
 
-VkImageLayout TextureStateToLayout(TextureStates v) noexcept {
+VkImageLayout TextureStateToLayout(TextureStates v, TextureFormat format) noexcept {
     if (v.HasFlag(TextureState::Present)) {
         return VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
     }
@@ -268,7 +268,7 @@ VkImageLayout TextureStateToLayout(TextureStates v) noexcept {
         return VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
     }
     if (v.HasFlag(TextureState::ShaderRead)) {
-        return VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        return IsDepthStencilFormat(format) ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     }
     if (v.HasFlag(TextureState::UnorderedAccess) || v.HasFlag(TextureState::Common)) {
         return VK_IMAGE_LAYOUT_GENERAL;

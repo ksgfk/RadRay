@@ -29,16 +29,16 @@ RgPassHandle Clear(RenderGraph& graph, RgTextureHandle texture, std::string_view
 class RenderGraphTest : public testing::TestWithParam<render::RenderBackend> {
 protected:
     void SetUp() override {
-        ASSERT_TRUE(render::test::TryCreateDevice(GetParam(), DeviceContext, true));
+        if (!render::test::TryCreateDevice(GetParam(), DeviceContext, true)) GTEST_SKIP() << DeviceContext.Reason;
         Registry = make_unique<render::RenderPassRegistry>(DeviceContext.Device.get());
         FrameResources = make_unique<RenderGraphFrameResources>(*DeviceContext.Device, *Registry);
         BeginFlight(1);
     }
     void TearDown() override {
-        DeviceContext.Queue->Wait();
+        if (DeviceContext.Queue) DeviceContext.Queue->Wait();
         FrameResources.reset();
         Registry.reset();
-        DeviceContext.Device.reset();
+        DeviceContext.Reset();
         EXPECT_EQ(DeviceContext.ValidationErrors.load(), 0u);
     }
     void BeginFlight(uint64_t serial) {
@@ -222,8 +222,7 @@ void CSMain(uint3 tid : SV_DispatchThreadID) { Value[0] = Value[0] * 3 + 7; }
                  .StructureByteStride = 4,
                  .Access = RgParameterAccess::ReadWrite}}}};
         data = {builder.UseComputeProgram(*program.Get()),
-                builder.CreateParameterSet(*program.Get(), 0, bindings)};
-    }, +[](const Data& data, RenderGraphComputeContext& context) {
+                builder.CreateParameterSet(*program.Get(), 0, bindings)}; }, +[](const Data& data, RenderGraphComputeContext& context) {
         context.BindComputeProgram(data.Program);
         context.BindParameterSet(data.Parameters);
         context.Encoder().Dispatch(1, 1, 1); });
@@ -384,8 +383,7 @@ void CSMain(uint3 tid : SV_DispatchThreadID) { OutputTexture[tid.xy] = float4(.2
                          .Texture = input,
                          .Access = RgParameterAccess::Write}}}};
                 data = {builder.UseComputeProgram(*compute.Get()),
-                        builder.CreateParameterSet(*compute.Get(), 0, bindings)};
-            }, +[](const Data& data, RenderGraphComputeContext& ctx) {
+                        builder.CreateParameterSet(*compute.Get(), 0, bindings)}; }, +[](const Data& data, RenderGraphComputeContext& ctx) {
                 ctx.BindComputeProgram(data.Program);
                 ctx.BindParameterSet(data.Parameters);
                 ctx.Encoder().Dispatch(2, 2, 1); });
@@ -493,9 +491,7 @@ void ReadResolved() {
     const array<uint32_t, 3> indices{0, 1, 2};
     auto indexBuffer = render::test::MakeUploadBuffer(
         device, std::as_bytes(std::span{indices}), render::BufferUse::Index);
-    auto readback = device.CreateBuffer({
-        4, render::MemoryType::ReadBack,
-        render::BufferUse::CopyDestination | render::BufferUse::MapRead, {}});
+    auto readback = device.CreateBuffer({4, render::MemoryType::ReadBack, render::BufferUse::CopyDestination | render::BufferUse::MapRead, {}});
     ASSERT_TRUE(indexBuffer);
     ASSERT_TRUE(readback);
     RenderExternalBuffer externalIndex{
@@ -505,8 +501,7 @@ void ReadResolved() {
 
     auto graph = MakeGraph("indirect resolve integration");
     const auto arguments = graph.CreateBuffer(
-        {48, render::MemoryType::Device,
-         render::BufferUse::UnorderedAccess | render::BufferUse::Indirect, {}},
+        {48, render::MemoryType::Device, render::BufferUse::UnorderedAccess | render::BufferUse::Indirect, {}},
         "indirect arguments");
     const auto index = graph.ImportBuffer(
         externalIndex, "indices", RenderGraphExternalAccess::ReadOnly);
@@ -518,8 +513,7 @@ void ReadResolved() {
     resolvedDesc.Usage = render::TextureUse::CopyDestination | render::TextureUse::Resource;
     const auto resolved = graph.CreateTexture(resolvedDesc, "resolved color");
     const auto result = graph.CreateBuffer(
-        {4, render::MemoryType::Device,
-         render::BufferUse::UnorderedAccess | render::BufferUse::CopySource, {}},
+        {4, render::MemoryType::Device, render::BufferUse::UnorderedAccess | render::BufferUse::CopySource, {}},
         "post result");
     const auto host = graph.ImportBuffer(
         externalReadback, "readback", RenderGraphExternalAccess::ObservableOutput);
@@ -532,12 +526,11 @@ void ReadResolved() {
     graph.AddComputePass<ComputeData>(
         "build indirect arguments",
         [&](ComputeData& data, RenderGraphComputeBuilder& builder) {
-            const array<RgParameterBinding, 1> bindings{{
-                {.Declaration = "Arguments",
-                 .Value = RgBufferParameterBinding{
-                     .Buffer = arguments,
-                     .Range = {0, 48},
-                     .Access = RgParameterAccess::Write}}}};
+            const array<RgParameterBinding, 1> bindings{{{.Declaration = "Arguments",
+                                                          .Value = RgBufferParameterBinding{
+                                                              .Buffer = arguments,
+                                                              .Range = {0, 48},
+                                                              .Access = RgParameterAccess::Write}}}};
             data.Program = builder.UseComputeProgram(*argumentProgram.Get());
             data.Parameters = builder.CreateParameterSet(*argumentProgram.Get(), 2, bindings);
         },
@@ -583,15 +576,14 @@ void ReadResolved() {
     graph.AddComputePass<ComputeData>(
         "post process",
         [&](ComputeData& data, RenderGraphComputeBuilder& builder) {
-            const array<RgParameterBinding, 2> bindings{{
-                {.Declaration = "Resolved",
-                 .Value = RgTextureParameterBinding{.Texture = resolved}},
-                {.Declaration = "Output",
-                 .Value = RgBufferParameterBinding{
-                     .Buffer = result,
-                     .Range = {0, 4},
-                     .StructureByteStride = 4,
-                     .Access = RgParameterAccess::Write}}}};
+            const array<RgParameterBinding, 2> bindings{{{.Declaration = "Resolved",
+                                                          .Value = RgTextureParameterBinding{.Texture = resolved}},
+                                                         {.Declaration = "Output",
+                                                          .Value = RgBufferParameterBinding{
+                                                              .Buffer = result,
+                                                              .Range = {0, 4},
+                                                              .StructureByteStride = 4,
+                                                              .Access = RgParameterAccess::Write}}}};
             data.Program = builder.UseComputeProgram(*postProgram.Get());
             data.Parameters = builder.CreateParameterSet(*postProgram.Get(), 3, bindings);
             data.Arguments = builder.ReadIndirectArguments(
@@ -637,21 +629,16 @@ TEST_P(RenderGraphTest, ResolveArrayLayersRoundTrip) {
         GTEST_SKIP() << "Backend does not support two-layer 4x RGBA8 resolve sources";
     }
     const uint64_t row = Align(uint64_t{8 * 4}, device.GetDetail().TextureDataPitchAlignment);
-    auto readback = device.CreateBuffer({
-        row * 8, render::MemoryType::ReadBack,
-        render::BufferUse::CopyDestination | render::BufferUse::MapRead, {}});
+    auto readback = device.CreateBuffer({row * 8, render::MemoryType::ReadBack, render::BufferUse::CopyDestination | render::BufferUse::MapRead, {}});
     ASSERT_TRUE(readback);
     RenderExternalBuffer hostExternal{
         readback.Get(), readback->GetDesc(), render::BufferState::CopyDestination};
     auto graph = MakeGraph("array resolve");
     const auto source = graph.CreateTexture(
-        {render::TextureDimension::Dim2DArray, 8, 8, 2, 1, 4,
-         render::TextureFormat::RGBA8_UNORM, render::MemoryType::Device, sourceUsage, {}},
+        {render::TextureDimension::Dim2DArray, 8, 8, 2, 1, 4, render::TextureFormat::RGBA8_UNORM, render::MemoryType::Device, sourceUsage, {}},
         "msaa layers");
     const auto resolved = graph.CreateTexture(
-        {render::TextureDimension::Dim2DArray, 8, 8, 2, 1, 1,
-         render::TextureFormat::RGBA8_UNORM, render::MemoryType::Device,
-         render::TextureUse::CopyDestination | render::TextureUse::CopySource, {}},
+        {render::TextureDimension::Dim2DArray, 8, 8, 2, 1, 1, render::TextureFormat::RGBA8_UNORM, render::MemoryType::Device, render::TextureUse::CopyDestination | render::TextureUse::CopySource, {}},
         "resolved layers");
     const auto host = graph.ImportBuffer(
         hostExternal, "readback", RenderGraphExternalAccess::ObservableOutput);
@@ -723,11 +710,10 @@ void ParameterMain() {
 }
 )hlsl";
     render::ShaderProgramLayoutRecipe recipe;
-    recipe.Vulkan.BufferDescriptors.push_back({
-        .Selector = {
-            .DeclarationName = "Values",
-            .ExpectedLogicalResourceKind = shader::ShaderBindingKind::CBuffer},
-        .Placement = render::VulkanBufferDescriptorPlacement::Dynamic});
+    recipe.Vulkan.BufferDescriptors.push_back({.Selector = {
+                                                   .DeclarationName = "Values",
+                                                   .ExpectedLogicalResourceKind = shader::ShaderBindingKind::CBuffer},
+                                               .Placement = render::VulkanBufferDescriptorPlacement::Dynamic});
     auto program = test::CompileFoundationCompute(device, source, recipe);
     ASSERT_TRUE(program);
     const auto samplerInfo = program->GetArtifact().FindBindingInfo("FixedSampler");
@@ -749,12 +735,8 @@ void ParameterMain() {
         device, std::as_bytes(std::span{&rawValue, 1}), render::BufferUse::Resource);
     auto typedBuffer = render::test::MakeUploadBuffer(
         device, std::as_bytes(std::span{&typedValue, 1}), render::BufferUse::Resource);
-    auto firstReadback = device.CreateBuffer({
-        4, render::MemoryType::ReadBack,
-        render::BufferUse::CopyDestination | render::BufferUse::MapRead, {}});
-    auto secondReadback = device.CreateBuffer({
-        4, render::MemoryType::ReadBack,
-        render::BufferUse::CopyDestination | render::BufferUse::MapRead, {}});
+    auto firstReadback = device.CreateBuffer({4, render::MemoryType::ReadBack, render::BufferUse::CopyDestination | render::BufferUse::MapRead, {}});
+    auto secondReadback = device.CreateBuffer({4, render::MemoryType::ReadBack, render::BufferUse::CopyDestination | render::BufferUse::MapRead, {}});
     ASSERT_TRUE(structuredBuffer);
     ASSERT_TRUE(rawBuffer);
     ASSERT_TRUE(typedBuffer);
@@ -815,12 +797,10 @@ void ParameterMain() {
             const auto host1 = graph.ImportBuffer(
                 secondHost, "second readback", RenderGraphExternalAccess::ObservableOutput);
             const auto output0 = graph.CreateBuffer(
-                {4, render::MemoryType::Device,
-                 render::BufferUse::UnorderedAccess | render::BufferUse::CopySource, {}},
+                {4, render::MemoryType::Device, render::BufferUse::UnorderedAccess | render::BufferUse::CopySource, {}},
                 "output zero");
             const auto output1 = graph.CreateBuffer(
-                {4, render::MemoryType::Device,
-                 render::BufferUse::UnorderedAccess | render::BufferUse::CopySource, {}},
+                {4, render::MemoryType::Device, render::BufferUse::UnorderedAccess | render::BufferUse::CopySource, {}},
                 "output one");
             auto imageDesc = GraphColor();
             imageDesc.Usage = render::TextureUse::RenderTarget | render::TextureUse::Resource;
@@ -829,47 +809,29 @@ void ParameterMain() {
             graph.AddComputePass<Data>(
                 "parameter dispatches",
                 [&](Data& data, RenderGraphComputeBuilder& builder) {
-                    const array<RgParameterBinding, 2> outputBindings{{
-                        {.Declaration = "Outputs",
-                         .ArrayElement = 0,
-                         .Value = RgBufferParameterBinding{
-                             .Buffer = output0,
-                             .Range = {0, 4},
-                             .StructureByteStride = 4,
-                             .Access = RgParameterAccess::Write}},
-                        {.Declaration = "Outputs",
-                         .ArrayElement = 1,
-                         .Value = RgBufferParameterBinding{
-                             .Buffer = output1,
-                             .Range = {0, 4},
-                             .StructureByteStride = 4,
-                             .Access = RgParameterAccess::Write}}}};
-                    const array<RgParameterBinding, 1> imageBindings{{
-                        {.Declaration = "Image",
-                         .Value = RgTextureParameterBinding{.Texture = image}}}};
-                    const array<RgParameterBinding, 3> sourceBindings{{
-                        {.Declaration = "Structured",
-                         .Value = RgBufferParameterBinding{
-                             .Buffer = structured,
-                             .Range = {0, 4},
-                             .StructureByteStride = 4}},
-                        {.Declaration = "Raw",
-                         .Value = RgBufferParameterBinding{
-                             .Buffer = raw,
-                             .Range = {0, 4}}},
-                        {.Declaration = "Typed",
-                         .Value = RgBufferParameterBinding{
-                             .Buffer = typed,
-                             .Range = {0, 4},
-                             .Format = render::TextureFormat::R32_UINT}}}};
-                    const array<RgParameterBinding, 1> firstBindings{{
-                        {.Declaration = "Values",
-                         .Value = RgCBufferParameterBinding{
-                             .Bytes = std::as_bytes(std::span{&first, 1})}}}};
-                    const array<RgParameterBinding, 1> secondBindings{{
-                        {.Declaration = "Values",
-                         .Value = RgCBufferParameterBinding{
-                             .Bytes = std::as_bytes(std::span{&second, 1})}}}};
+                    const array<RgParameterBinding, 2> outputBindings{{{.Declaration = "Outputs",
+                                                                        .ArrayElement = 0,
+                                                                        .Value = RgBufferParameterBinding{
+                                                                            .Buffer = output0,
+                                                                            .Range = {0, 4},
+                                                                            .StructureByteStride = 4,
+                                                                            .Access = RgParameterAccess::Write}},
+                                                                       {.Declaration = "Outputs", .ArrayElement = 1, .Value = RgBufferParameterBinding{.Buffer = output1, .Range = {0, 4}, .StructureByteStride = 4, .Access = RgParameterAccess::Write}}}};
+                    const array<RgParameterBinding, 1> imageBindings{{{.Declaration = "Image",
+                                                                       .Value = RgTextureParameterBinding{.Texture = image}}}};
+                    const array<RgParameterBinding, 3> sourceBindings{{{.Declaration = "Structured",
+                                                                        .Value = RgBufferParameterBinding{
+                                                                            .Buffer = structured,
+                                                                            .Range = {0, 4},
+                                                                            .StructureByteStride = 4}},
+                                                                       {.Declaration = "Raw", .Value = RgBufferParameterBinding{.Buffer = raw, .Range = {0, 4}}},
+                                                                       {.Declaration = "Typed", .Value = RgBufferParameterBinding{.Buffer = typed, .Range = {0, 4}, .Format = render::TextureFormat::R32_UINT}}}};
+                    const array<RgParameterBinding, 1> firstBindings{{{.Declaration = "Values",
+                                                                       .Value = RgCBufferParameterBinding{
+                                                                           .Bytes = std::as_bytes(std::span{&first, 1})}}}};
+                    const array<RgParameterBinding, 1> secondBindings{{{.Declaration = "Values",
+                                                                        .Value = RgCBufferParameterBinding{
+                                                                            .Bytes = std::as_bytes(std::span{&second, 1})}}}};
                     data.Program = builder.UseComputeProgram(*program.Get());
                     data.Resources = {
                         builder.CreateParameterSet(*program.Get(), 4, outputBindings),
@@ -947,9 +909,7 @@ void ConsumeRasterUav() {
     auto computeProgram = test::CompileFoundationCompute(device, computeSource);
     ASSERT_TRUE(rasterProgram);
     ASSERT_TRUE(computeProgram);
-    auto readback = device.CreateBuffer({
-        4, render::MemoryType::ReadBack,
-        render::BufferUse::CopyDestination | render::BufferUse::MapRead, {}});
+    auto readback = device.CreateBuffer({4, render::MemoryType::ReadBack, render::BufferUse::CopyDestination | render::BufferUse::MapRead, {}});
     ASSERT_TRUE(readback);
     RenderExternalBuffer hostExternal{
         readback.Get(), readback->GetDesc(), render::BufferState::CopyDestination};
@@ -963,8 +923,7 @@ void ConsumeRasterUav() {
         {4, render::MemoryType::Device, render::BufferUse::UnorderedAccess, {}},
         "storage buffer");
     const auto result = graph.CreateBuffer(
-        {4, render::MemoryType::Device,
-         render::BufferUse::UnorderedAccess | render::BufferUse::CopySource, {}},
+        {4, render::MemoryType::Device, render::BufferUse::UnorderedAccess | render::BufferUse::CopySource, {}},
         "result");
     const auto host = graph.ImportBuffer(
         hostExternal, "readback", RenderGraphExternalAccess::ObservableOutput);
@@ -976,17 +935,11 @@ void ConsumeRasterUav() {
     graph.AddRasterPass<RasterData>(
         "pixel UAV writes",
         [&](RasterData& data, RenderGraphRasterBuilder& builder) {
-            const array<RgParameterBinding, 2> bindings{{
-                {.Declaration = "StorageImage",
-                 .Value = RgTextureParameterBinding{
-                     .Texture = storageImage,
-                     .Access = RgParameterAccess::Write}},
-                {.Declaration = "StorageBuffer",
-                 .Value = RgBufferParameterBinding{
-                     .Buffer = storageBuffer,
-                     .Range = {0, 4},
-                     .StructureByteStride = 4,
-                     .Access = RgParameterAccess::Write}}}};
+            const array<RgParameterBinding, 2> bindings{{{.Declaration = "StorageImage",
+                                                          .Value = RgTextureParameterBinding{
+                                                              .Texture = storageImage,
+                                                              .Access = RgParameterAccess::Write}},
+                                                         {.Declaration = "StorageBuffer", .Value = RgBufferParameterBinding{.Buffer = storageBuffer, .Range = {0, 4}, .StructureByteStride = 4, .Access = RgParameterAccess::Write}}}};
             data = {
                 rasterProgram.Get(),
                 builder.CreateParameterSet(*rasterProgram.Get(), 1, bindings),
@@ -1012,23 +965,16 @@ void ConsumeRasterUav() {
     graph.AddComputePass<ComputeData>(
         "consume pixel UAV",
         [&](ComputeData& data, RenderGraphComputeBuilder& builder) {
-            const array<RgParameterBinding, 4> bindings{{
-                {.Declaration = "StorageImage",
-                 .Value = RgTextureParameterBinding{.Texture = storageImage}},
-                {.Declaration = "StorageBuffer",
-                 .Value = RgBufferParameterBinding{
-                     .Buffer = storageBuffer,
-                     .Range = {0, 4},
-                     .StructureByteStride = 4,
-                     .Access = RgParameterAccess::Read}},
-                {.Declaration = "Result",
-                 .Value = RgBufferParameterBinding{
-                     .Buffer = result,
-                     .Range = {0, 4},
-                     .StructureByteStride = 4,
-                     .Access = RgParameterAccess::Write}},
-                {.Declaration = "PointSampler",
-                 .Value = RgSamplerParameterBinding{}}}};
+            const array<RgParameterBinding, 4> bindings{{{.Declaration = "StorageImage",
+                                                          .Value = RgTextureParameterBinding{.Texture = storageImage}},
+                                                         {.Declaration = "StorageBuffer",
+                                                          .Value = RgBufferParameterBinding{
+                                                              .Buffer = storageBuffer,
+                                                              .Range = {0, 4},
+                                                              .StructureByteStride = 4,
+                                                              .Access = RgParameterAccess::Read}},
+                                                         {.Declaration = "Result", .Value = RgBufferParameterBinding{.Buffer = result, .Range = {0, 4}, .StructureByteStride = 4, .Access = RgParameterAccess::Write}},
+                                                         {.Declaration = "PointSampler", .Value = RgSamplerParameterBinding{}}}};
             data = {
                 builder.UseComputeProgram(*computeProgram.Get()),
                 builder.CreateParameterSet(*computeProgram.Get(), 2, bindings)};
@@ -1079,17 +1025,14 @@ float4 VertexUavPS() : SV_Target0 { return 0; }
 )hlsl";
     auto program = test::CompileFoundationGraphics(device, source);
     ASSERT_TRUE(program);
-    auto readback = device.CreateBuffer({
-        4, render::MemoryType::ReadBack,
-        render::BufferUse::CopyDestination | render::BufferUse::MapRead, {}});
+    auto readback = device.CreateBuffer({4, render::MemoryType::ReadBack, render::BufferUse::CopyDestination | render::BufferUse::MapRead, {}});
     ASSERT_TRUE(readback);
     RenderExternalBuffer hostExternal{
         readback.Get(), readback->GetDesc(), render::BufferState::CopyDestination};
     auto graph = MakeGraph("vertex raster UAV");
     const auto attachment = graph.CreateTexture(GraphColor(), "attachment");
     const auto output = graph.CreateBuffer(
-        {4, render::MemoryType::Device,
-         render::BufferUse::UnorderedAccess | render::BufferUse::CopySource, {}},
+        {4, render::MemoryType::Device, render::BufferUse::UnorderedAccess | render::BufferUse::CopySource, {}},
         "vertex output");
     const auto host = graph.ImportBuffer(
         hostExternal, "readback", RenderGraphExternalAccess::ObservableOutput);
@@ -1101,13 +1044,12 @@ float4 VertexUavPS() : SV_Target0 { return 0; }
     graph.AddRasterPass<Data>(
         "vertex UAV write",
         [&](Data& data, RenderGraphRasterBuilder& builder) {
-            const array<RgParameterBinding, 1> bindings{{
-                {.Declaration = "VertexOutput",
-                 .Value = RgBufferParameterBinding{
-                     .Buffer = output,
-                     .Range = {0, 4},
-                     .StructureByteStride = 4,
-                     .Access = RgParameterAccess::Write}}}};
+            const array<RgParameterBinding, 1> bindings{{{.Declaration = "VertexOutput",
+                                                          .Value = RgBufferParameterBinding{
+                                                              .Buffer = output,
+                                                              .Range = {0, 4},
+                                                              .StructureByteStride = 4,
+                                                              .Access = RgParameterAccess::Write}}}};
             data = {
                 program.Get(), builder.CreateParameterSet(*program.Get(), 1, bindings),
                 device.GetBackend()};
@@ -1186,14 +1128,11 @@ void ValidateBindings() {
             "invalid parameters",
             [&](EmptyPass&, RenderGraphComputeBuilder& builder) {
                 vector<RgParameterBinding> bindings{
-                    {.Declaration = "Inputs", .ArrayElement = 0,
-                     .Value = RgTextureParameterBinding{.Texture = input}},
-                    {.Declaration = "Inputs", .ArrayElement = 1,
-                     .Value = RgTextureParameterBinding{.Texture = input}},
+                    {.Declaration = "Inputs", .ArrayElement = 0, .Value = RgTextureParameterBinding{.Texture = input}},
+                    {.Declaration = "Inputs", .ArrayElement = 1, .Value = RgTextureParameterBinding{.Texture = input}},
                     {.Declaration = "Output",
                      .Value = RgBufferParameterBinding{
-                         .Buffer = output, .Range = {0, 4}, .StructureByteStride = 4,
-                         .Access = RgParameterAccess::Write}},
+                         .Buffer = output, .Range = {0, 4}, .StructureByteStride = 4, .Access = RgParameterAccess::Write}},
                     {.Declaration = "InputSampler", .Value = RgSamplerParameterBinding{}}};
                 uint32_t group = 7;
                 switch (scenario) {
@@ -1215,8 +1154,7 @@ void ValidateBindings() {
                         break;
                     case 5:
                         bindings[2].Value = RgBufferParameterBinding{
-                            .Buffer = output, .Range = {0, 4},
-                            .Access = RgParameterAccess::Write};
+                            .Buffer = output, .Range = {0, 4}, .Access = RgParameterAccess::Write};
                         break;
                     case 6:
                         group = 11;

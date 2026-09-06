@@ -13,6 +13,11 @@ PrimitiveSceneProxy::PrimitiveSceneProxy() noexcept
 
 PrimitiveSceneProxy::~PrimitiveSceneProxy() noexcept = default;
 
+void PrimitiveSceneProxy::ResetMotion() noexcept {
+    if (_motionRevision == UINT64_MAX) RADRAY_ABORT("Primitive motion revision exhausted");
+    ++_motionRevision;
+}
+
 void PrimitiveSceneProxy::CollectAssetReferences(vector<StreamingAssetRefAny>&) const {}
 
 }  // namespace radray

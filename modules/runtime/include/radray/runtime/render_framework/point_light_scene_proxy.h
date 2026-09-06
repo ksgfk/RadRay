@@ -6,7 +6,7 @@ namespace radray {
 
 class PointLightComponent;
 
-class PointLightSceneProxy final : public LightSceneProxy {
+class PointLightSceneProxy : public LightSceneProxy {
 public:
     explicit PointLightSceneProxy(const PointLightComponent& component);
     ~PointLightSceneProxy() noexcept override;

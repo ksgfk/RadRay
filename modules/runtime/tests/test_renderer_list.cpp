@@ -1,6 +1,8 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <numeric>
+#include <tuple>
 #include <radray/runtime/render_framework/mesh_pass_processor.h>
 
 namespace radray {
@@ -96,6 +98,11 @@ TEST(RendererList, AdditionalLayerAndMissingPassHaveNoFallback) {
     EXPECT_EQ(list.Stats.LayerRejected, 1u);
     EXPECT_EQ(list.Stats.MissingPass, 1u);
     EXPECT_EQ(processor.Calls, 0u);
+    EXPECT_TRUE(list.Stats.ContentSucceeded());
+    desc.RequireMaterialPass = true;
+    ASSERT_TRUE(BuildRendererList(desc, processor, list));
+    EXPECT_EQ(list.Stats.MissingRequiredPass, 1u);
+    EXPECT_FALSE(list.Stats.ContentSucceeded());
 }
 
 TEST(RendererList, OpaqueOrderUsesFrameIdsAndNotAddresses) {
@@ -117,6 +124,38 @@ TEST(RendererList, OpaqueOrderUsesFrameIdsAndNotAddresses) {
     actual.clear();
     for (const auto& command : list.Commands) actual.push_back(command.SortData.Primitive);
     EXPECT_EQ(actual, expected);
+}
+
+TEST(RendererList, S07TwelveBatchesMatchIndependentSortForOneHundredAllocationOrders) {
+    for (uint32_t repeat = 0; repeat < 100; ++repeat) {
+        ListFixture data;
+        vector<byte> tokenStorage(128 + repeat);
+        for (uint32_t material = 0; material < 3; ++material)
+            for (auto& pass : data.Scene.Materials[material].Passes)
+                pass.Program = reinterpret_cast<ShaderProgram*>(tokenStorage.data() + (material * 17 + repeat) % tokenStorage.size());
+        for (uint32_t i = 0; i < 12; ++i) data.Add(i % 3, float((i / 2) % 3));
+        for (const auto sorting : {RendererListSorting::StateThenFrontToBack, RendererListSorting::BackToFront}) {
+            vector<uint32_t> expected(12);
+            std::iota(expected.begin(), expected.end(), 0);
+            const auto key = [&](uint32_t primitive) {
+                const auto& batch = data.Scene.MeshBatches[primitive];
+                const auto& material = data.Scene.Materials[batch.Material];
+                const bool back = sorting == RendererListSorting::BackToFront;
+                return std::tuple{static_cast<uint32_t>(material.Queue), back ? 0u : material.Passes[0].ProgramFrameId,
+                                  back ? 0u : batch.Material, data.Culling.Primitives[primitive].ViewDepth * (back ? -1 : 1), primitive};
+            };
+            std::sort(expected.begin(), expected.end(), [&](uint32_t a, uint32_t b) { return key(a) < key(b); });
+            RendererList list;
+            RecordingProcessor processor;
+            ASSERT_TRUE(BuildRendererList(data.Desc({}, sorting), processor, list));
+            ASSERT_EQ(list.Commands.size(), expected.size());
+            for (uint32_t i = 0; i < expected.size(); ++i) {
+                EXPECT_EQ(list.Commands[i].SortData.Primitive, expected[i]);
+                EXPECT_EQ(list.Commands[i].FirstIndex, expected[i] * 3);
+                EXPECT_EQ(list.Commands[i].IndexCount, 3u);
+            }
+        }
+    }
 }
 
 TEST(RendererList, TransparentDepthHasDeterministicTiesAndNonFiniteEndpoint) {

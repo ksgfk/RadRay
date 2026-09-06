@@ -69,7 +69,7 @@ bool Cull(const CullingParameters& parameters, CullingResults& out) noexcept {
     out.ResetForReuse();
     const auto started = std::chrono::steady_clock::now();
     if (!parameters.Scene || !parameters.View || !parameters.View->View.allFinite() || !parameters.View->WorldPosition.allFinite()) return false;
-    const auto frustum = ExtractViewFrustum(parameters.View->ViewProjection);
+    const auto frustum = ExtractViewFrustum(parameters.ViewProjection.value_or(parameters.View->ViewProjection));
     if (!frustum) return false;
     const auto& scene = *parameters.Scene.Get();
     const auto& view = *parameters.View.Get();
@@ -106,8 +106,8 @@ bool Cull(const CullingParameters& parameters, CullingResults& out) noexcept {
             ++out.Stats.LightLayerRejected;
             continue;
         }
-        if (light.Type == LightType::Point) {
-            if (!light.WorldBounds.IsFiniteValid()) {
+        if (light.Type == LightType::Point || light.Type == LightType::Spot) {
+            if (!light.WorldBounds.IsFiniteValid() || light.WorldBounds.Radius == 0) {
                 ++out.Stats.InvalidLightBounds;
                 continue;
             }
@@ -117,6 +117,20 @@ bool Cull(const CullingParameters& parameters, CullingResults& out) noexcept {
             }
         } else if (light.Type != LightType::Directional) {
             ++out.Stats.UnsupportedLights;
+            continue;
+        }
+        const auto& p = light.Parameters;
+        const float scalars[]{p.InvRadius, p.FalloffExponent, p.SpecularScale, p.DiffuseScale, p.SourceRadius, p.SoftSourceRadius, p.SourceLength};
+        const bool finite = p.WorldPosition.allFinite() && p.Color.allFinite() && p.Direction.allFinite() && p.Tangent.allFinite() &&
+                            (p.Color * p.DiffuseScale).allFinite() &&
+                            std::all_of(std::begin(scalars), std::end(scalars), [](float value) { return std::isfinite(value); });
+        const float directionLength = p.Direction.squaredNorm();
+        const bool direction = light.Type == LightType::Point || (std::isfinite(directionLength) && directionLength > 1e-12f);
+        const bool cone = light.Type != LightType::Spot ||
+                          (p.SpotAngles.allFinite() && p.SpotAngles.x() > 0 && p.SpotAngles.x() < 1 && p.SpotAngles.y() > 0 &&
+                           p.SpotAngles.x() + 1 / p.SpotAngles.y() <= 1.000001f);
+        if (!finite || !direction || !cone) {
+            ++out.Stats.InvalidLightParameters;
             continue;
         }
         const double distance = (light.Parameters.WorldPosition.cast<double>() - view.WorldPosition.cast<double>()).squaredNorm();

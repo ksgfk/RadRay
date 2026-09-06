@@ -10,6 +10,7 @@ struct ForwardGraphPassData {
     struct ViewData {
         ResolvedRenderView View;
         const RendererList* List{nullptr};
+        std::optional<RendererListPassBindings> Bindings;
     };
 
     render::RenderBackend Backend{render::RenderBackend::MAX_COUNT};
@@ -27,7 +28,10 @@ void ExecuteForwardGraphPass(
             static_cast<float>(view.View.ViewRect.Width),
             static_cast<float>(view.View.ViewRect.Height)));
         context.Encoder().SetScissor(view.View.ScissorRect);
-        SubmitRendererList(*view.List, context, context.PassState(), *data.Execution);
+        if (view.Bindings)
+            SubmitRendererList(*view.List, context, context.PassState(), *view.Bindings, *data.Execution);
+        else
+            SubmitRendererList(*view.List, context, context.PassState(), *data.Execution);
     }
 }
 
@@ -53,7 +57,7 @@ ForwardGraphStageOutput ForwardGraph::BuildGraph(
     const bool hasCommands = std::any_of(
         inputs.Views.begin(), inputs.Views.end(),
         [](const ForwardGraphView& view) { return !view.List->Commands.empty(); });
-    if (!hasCommands && stage != ForwardGraphStage::Opaque) {
+    if (!hasCommands && stage != ForwardGraphStage::Opaque && !inputs.PreserveEmptyPass) {
         result.Success = true;
         return result;
     }
@@ -66,14 +70,21 @@ ForwardGraphStageOutput ForwardGraph::BuildGraph(
             data.Execution = inputs.Execution;
             data.Views.reserve(inputs.Views.size());
             for (const ForwardGraphView& view : inputs.Views) {
-                data.Views.push_back({view.View, view.List});
+                ForwardGraphPassData::ViewData next{view.View, view.List, {}};
+                if (!view.Parameters.empty()) {
+                    next.Bindings = RendererListPassBindings::Create(builder, *view.List, view.Parameters);
+                    if (!next.Bindings) setupSuccess = false;
+                }
+                data.Views.push_back(std::move(next));
             }
             if (stage != ForwardGraphStage::Depth &&
                 !builder.SetColorAttachment(0, inputs.Color, inputs.ColorAttachment).IsValid()) {
                 setupSuccess = false;
             }
             RgDepthAttachmentDesc depth = inputs.DepthAttachment;
-            depth.ReadOnly = stage == ForwardGraphStage::Transparent;
+            depth.ReadOnly = depth.ReadOnly || stage == ForwardGraphStage::Transparent;
+            for (uint32_t i = 0; i < inputs.AuxiliaryColors.size(); ++i)
+                if (!builder.SetColorAttachment(i + 1, inputs.AuxiliaryColors[i]).IsValid()) setupSuccess = false;
             if (!builder.SetDepthAttachment(inputs.Depth, depth).IsValid()) setupSuccess = false;
         },
         ExecuteForwardGraphPass);

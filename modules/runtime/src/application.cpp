@@ -873,7 +873,8 @@ bool Application::InitializeRuntime(const ApplicationRuntimeDescriptor& desc) {
         .AppName = desc.AppName,
         .EngineName = desc.EngineName,
         .IsEnableDebugLayer = desc.EnableValidation,
-        .IsEnableGpuBasedValid = false};
+        .IsEnableGpuBasedValid = false,
+        .IsEnableSynchronizationValidation = desc.EnableSynchronizationValidation};
     render::DXGIFactoryDescriptor factoryDesc{
         .IsEnableDebugLayer = desc.EnableValidation,
         .IsEnableGpuBasedValid = false};

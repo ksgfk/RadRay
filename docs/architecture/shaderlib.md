@@ -44,10 +44,18 @@ shader compiler 的最小 depth/compute 测试 source 位于 `modules/shader_com
 | `shadow/filtering.hlsli` | 阴影 UV、bias、PCF 原语 |
 | `shadow/cascade.hlsli` | 方向光级联阴影数据与求值 |
 | `shadow/cube.hlsli` | 点光源 cube shadow 数据与面序 |
-| `core/platform.hlsli` | `VK_LOCATION`、`VK_BINDING`、`VK_PUSH_CONSTANT` target gate |
+| `core/platform.hlsli` | `VK_LOCATION`、`VK_BINDING`、`VK_PUSH_CONSTANT`、`VK_IMAGE_FORMAT` target gate |
 | `pipelines/forward/bindings.hlsli` | forward 的 view/material/object binding ABI |
 | `pipelines/forward/forward.hlsl` | 纹理 Lambert 光照与颜色转换产品 pass |
 | `pipelines/forward/depth_only.hlsl` | Forward 的 depth-only 产品 pass，执行 view/object 变换 |
+| `pipelines/forward/pbr.hlsl`, `pipelines/forward/surface.hlsli` | HDR Forward 材质、GGX 光照与 cutout 契约 |
+| `pipelines/forward/depth_normals_motion.hlsl`, `pipelines/forward/shadow_caster.hlsl` | 深度/法线/刚体 motion 与阴影投影 |
+| `pipelines/forward/tile_lights.hlsl`, `pipelines/forward/local_light.hlsli` | tile 局部灯列表与溢出完整遍历 |
+| `pipelines/forward/linear_depth.hlsl`, `pipelines/forward/depth_pyramid.hlsl` | 线性深度与逐 mip 归约 |
+| `pipelines/forward/ambient_occlusion.hlsl`, `pipelines/forward/ao_blur.hlsl` | 半分辨率 AO 与 bilateral 滤波 |
+| `pipelines/forward/temporal_resolve.hlsl`, `pipelines/forward/sky.hlsl` | opaque/sky 时域重投影 |
+| `pipelines/forward/firefly_update.hlsl`, `pipelines/forward/firefly_draw.hlsl` | Compute 生成间接参数与发光粒子绘制 |
+| `pipelines/forward/bloom.hlsl`, `pipelines/forward/output.hlsl`, `pipelines/forward/debug.hlsl` | Bloom、曝光/tone map、SDR 合成与调试显示 |
 
 ## 编码约定
 

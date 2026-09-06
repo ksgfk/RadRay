@@ -39,6 +39,9 @@ public:
     virtual void CollectAssetReferences(vector<StreamingAssetRefAny>& out) const;
 
     uint64_t GetGeneration() const noexcept { return _generation; }
+    /// Game-thread revision for discontinuous motion; observing it never consumes the reset.
+    uint64_t GetMotionRevision() const noexcept { return _motionRevision; }
+    void ResetMotion() noexcept;
 
     /// 逐物体 local->world 变换 (对应 UE5 的 GetLocalToWorld / Unity 的 unity_ObjectToWorld)。
     /// 基类默认单位阵; 具体 proxy 覆写。
@@ -56,6 +59,7 @@ public:
 
 private:
     uint64_t _generation{0};
+    uint64_t _motionRevision{0};
 };
 
 }  // namespace radray

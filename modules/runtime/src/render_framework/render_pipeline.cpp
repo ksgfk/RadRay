@@ -1,6 +1,7 @@
 #include <radray/runtime/render_framework/render_pipeline.h>
 #include <radray/runtime/render_framework/render_graph_runtime.h>
 #include <radray/logger.h>
+#include <algorithm>
 
 namespace radray {
 
@@ -55,13 +56,15 @@ RenderGraphExecutionResult RenderPipelineContext::ExecuteGraph(RenderGraph& grap
     }
     if (result.Success)
         for (const auto& history : _histories)
-            if (history.Current && history.Current->Written) _views.CommitHistory(history.CommitToken);
+            if (history.CommitToken.CommitMode == HistoryCommitMode::Independent && history.Current && history.Current->Written) _views.CommitHistory(history.CommitToken);
+    for (auto& completion : _completions)
+        completion.Executed = result.Success && graph.PassWroteTexture(completion.Pass, completion.Output);
     _report = graph.GetReport();
     if (!result.Success) RADRAY_ERR_LOG("{}", _report.ToText());
     return result;
 }
 bool RenderPipelineContext::CommitView(ViewStateId id) {
-    if (!_success) return false;
+    if (!_success || std::find(_failedTemporalViews.begin(), _failedTemporalViews.end(), id) != _failedTemporalViews.end()) return false;
     for (const auto& family : _families)
         for (const auto& view : family.Views) {
             if (view.StateId != id) continue;
@@ -70,6 +73,55 @@ bool RenderPipelineContext::CommitView(ViewStateId id) {
         }
     return false;
 }
+ViewCompletionToken RenderPipelineContext::RegisterViewCompletion(RenderGraph& graph, ViewStateId id, RgPassHandle pass) {
+    if (_executed || _graphGeneration != graph.GetGeneration() || pass.Generation != _graphGeneration ||
+        pass.Index >= graph.GetReport().Passes.size() || !id.IsValid()) return {};
+    for (const auto& completion : _completions)
+        if (completion.View == id || completion.Pass == pass) return {};
+    for (const auto& family : _families) {
+        if (!family.OutputAvailable) continue;
+        for (const auto& view : family.Views) {
+            if (view.StateId != id) continue;
+            const auto output = ImportOutput(graph, family.OutputId);
+            if (!output.IsValid()) return {};
+            ViewCompletionToken token;
+            token._view = id;
+            token._graph = _graphGeneration;
+            token._serial = _serial;
+            token._index = static_cast<uint32_t>(_completions.size());
+            _completions.push_back({id, pass, output});
+            return token;
+        }
+    }
+    return {};
+}
+bool RenderPipelineContext::CommitView(ViewStateId id, const ViewCompletionToken& token, bool requiredDrawsSucceeded) {
+    if (!_success || token._view != id || token._graph != _graphGeneration ||
+        token._serial != _serial || token._index >= _completions.size()) return false;
+    const auto& completion = _completions[token._index];
+    if (completion.View != id || !completion.Executed || std::find(_failedTemporalViews.begin(), _failedTemporalViews.end(), id) != _failedTemporalViews.end()) return false;
+    if (!requiredDrawsSucceeded) {
+        _failedTemporalViews.push_back(id);
+        return false;
+    }
+    vector<HistoryWriteToken> tokens;
+    for (const auto& history : _histories)
+        if (history.CommitToken.View == id && history.CommitToken.CommitMode == HistoryCommitMode::WithView) tokens.push_back(history.CommitToken);
+    return _views.CommitViewWithHistory(id, tokens);
+}
+void RenderPipelineContext::InvalidateView(ViewStateId id) {
+    if (_executed) return;
+    _views.InvalidateTemporal(id);
+}
+bool RenderPipelineContext::PreparePrimitiveHistory(ResolvedRenderView& view, const RenderSceneSnapshot& snapshot) {
+    if (_executed) return false;
+    const bool success = _views.PreparePrimitiveHistory(view, snapshot);
+    if (!success) _failedTemporalViews.push_back(view.StateId);
+    return success;
+}
+PrimitiveMotionData RenderPipelineContext::GetPrimitiveMotion(ViewStateId id, const RenderPrimitiveData& primitive) const noexcept {
+    return _views.GetPrimitiveMotion(id, primitive);
+}
 HistoryTexturePair RenderPipelineContext::AcquireHistoryTexture(const ResolvedRenderView& view, const ResolvedRenderViewFamily& family,
                                                                 const HistoryTextureRequest& request, string& reason) {
     if (_executed) {
@@ -77,7 +129,10 @@ HistoryTexturePair RenderPipelineContext::AcquireHistoryTexture(const ResolvedRe
         return {};
     }
     auto result = _views.AcquireHistoryTexture(view, family, request, reason);
-    if (result.Current) _histories.push_back(result);
+    if (result.Current)
+        _histories.push_back(result);
+    else if (request.CommitMode == HistoryCommitMode::WithView)
+        _failedTemporalViews.push_back(view.StateId);
     return result;
 }
 RenderPipeline::~RenderPipeline() noexcept = default;

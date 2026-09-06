@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <radray/runtime/render_framework/renderer_list.h>
 #include <radray/runtime/render_framework/render_graph.h>
+#include <radray/runtime/render_framework/renderer_list_pass_bindings.h>
+#include <radray/logger.h>
 
 namespace radray {
 
@@ -39,23 +41,36 @@ bool FinalizeMeshDrawCommand(MeshDrawCommand& command) noexcept {
     return ValidateMeshDrawCommand(command);
 }
 
-void SubmitRendererList(const RendererList& list, RenderGraphRasterContext& ctx, const GraphicsPassState& passState, DrawExecutionStats& stats) {
+namespace {
+void Submit(const RendererList& list, RenderGraphRasterContext& ctx, const GraphicsPassState& passState,
+            Nullable<const RendererListPassBindings*> bindings, DrawExecutionStats& stats) {
     auto& commands = ctx.Encoder();
     for (const auto& draw : list.Commands) {
         ++stats.Commands;
-        if (!ValidateMeshDrawCommand(draw)) {
+        if (!ValidateMeshDrawCommand(draw) || (bindings && !bindings->IsValidFor(ctx, *draw.Program))) {
             ++stats.BindingFailure;
             ++stats.Skipped;
+            RADRAY_ERR_LOG("RendererList binding failure in pass {} for program {} batch {}", ctx.GetPassHandle().Index, draw.SortData.ProgramFrameId, draw.SortData.Batch);
             continue;
         }
         const auto pso = draw.Program->GetOrCreateGraphicsPipelineState(draw.PipelineState, draw.Geometry->VertexLayout, draw.Geometry->Topology, passState);
         if (!pso) {
             ++stats.PsoFailure;
             ++stats.Skipped;
+            RADRAY_ERR_LOG("RendererList PSO failure in pass {} for program {} batch {}", ctx.GetPassHandle().Index, draw.SortData.ProgramFrameId, draw.SortData.Batch);
             continue;
         }
         commands.BindGraphicsPipelineState(pso.Get());
-        for (const auto& group : draw.Groups) commands.BindShaderParameterSet(group.Group, group.Set.Get(), group.DynamicOffsets);
+        const auto graphGroups = bindings ? bindings->Find(*draw.Program) : std::span<const RendererListPassBinding>{};
+        size_t nativeIndex = 0, graphIndex = 0;
+        while (nativeIndex < draw.Groups.size() || graphIndex < graphGroups.size()) {
+            if (graphIndex == graphGroups.size() || (nativeIndex < draw.Groups.size() && draw.Groups[nativeIndex].Group < graphGroups[graphIndex].Group)) {
+                const auto& group = draw.Groups[nativeIndex++];
+                commands.BindShaderParameterSet(group.Group, group.Set.Get(), group.DynamicOffsets);
+            } else {
+                ctx.BindParameterSet(graphGroups[graphIndex++].Parameters);
+            }
+        }
         const auto bindings = std::span{draw.Geometry->VertexBuffers};
         for (size_t first = 0; first < bindings.size();) {
             size_t end = first + 1;
@@ -67,6 +82,16 @@ void SubmitRendererList(const RendererList& list, RenderGraphRasterContext& ctx,
         commands.DrawIndexed(draw.IndexCount, 1, draw.FirstIndex, draw.VertexOffset, 0);
         ++stats.Draws;
     }
+}
+}  // namespace
+
+void SubmitRendererList(const RendererList& list, RenderGraphRasterContext& ctx, const GraphicsPassState& passState, DrawExecutionStats& stats) {
+    Submit(list, ctx, passState, nullptr, stats);
+}
+
+void SubmitRendererList(const RendererList& list, RenderGraphRasterContext& ctx, const GraphicsPassState& passState,
+                        const RendererListPassBindings& bindings, DrawExecutionStats& stats) {
+    Submit(list, ctx, passState, &bindings, stats);
 }
 
 }  // namespace radray

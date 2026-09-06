@@ -20,6 +20,7 @@ struct ViewStateRegistry::Impl {
         uint32_t LastCommitted{0};
         bool HasCommitted{false};
         uint64_t AcquiredFrame{0}, CommittedFrame{0};
+        HistoryCommitMode CommitMode{HistoryCommitMode::Independent};
     };
     struct View {
         Eigen::Matrix4f Previous{Eigen::Matrix4f::Identity()}, Pending{Eigen::Matrix4f::Identity()};
@@ -30,6 +31,8 @@ struct ViewStateRegistry::Impl {
         bool PreviousValid{false}, Available{false};
         ViewHistoryInvalidationReason Reason{ViewHistoryInvalidationReason::FirstFrame};
         unordered_map<ViewHistoryKey, unique_ptr<Generation>> Histories;
+        PrimitiveHistory Primitives;
+        uint64_t PrimitivePreparedFrame{0};
     };
     render::Device& Device;
     render::RenderPassRegistry& Registry;
@@ -47,14 +50,31 @@ struct ViewStateRegistry::Impl {
         generation.Images.clear();
         ++GenerationsDestroyed;
     }
-    void Invalidate(View& view, ViewHistoryInvalidationReason reason) {
+    void Invalidate(View& view, ViewHistoryInvalidationReason reason, bool temporalOnly = false) {
         view.PreviousValid = false;
+        view.Primitives.Invalidate();
         view.Reason = reason;
         for (auto& [key, generation] : view.Histories) {
-            if (!generation) continue;
+            if (!generation || (temporalOnly && generation->CommitMode != HistoryCommitMode::WithView)) continue;
             generation->HasCommitted = false;
             for (auto& image : generation->Images) std::fill(image->Valid.begin(), image->Valid.end(), uint8_t{0});
         }
+    }
+    bool ValidHistory(const View& view, const Generation& generation, const HistoryWriteToken& token) const {
+        if (token.FrameSerial != Serial || !view.Available || view.PendingFrame != Serial ||
+            generation.CommitMode != token.CommitMode || generation.Id != token.Generation || generation.AcquiredFrame != Serial ||
+            generation.CommittedFrame == Serial || token.Index >= generation.Images.size()) return false;
+        const uint32_t expected = generation.HasCommitted ? (generation.LastCommitted + 1) % static_cast<uint32_t>(generation.Images.size()) : 0;
+        if (token.Index != expected) return false;
+        const auto& current = *generation.Images[token.Index];
+        return current.External->Written && std::all_of(current.Valid.begin(), current.Valid.end(), [](uint8_t value) { return value != 0; });
+    }
+    void AdvanceView(View& view) noexcept {
+        view.Previous = view.Pending;
+        view.PreviousExtent = view.PendingExtent;
+        view.LastCommitted = Serial;
+        view.PreviousValid = true;
+        view.Reason = ViewHistoryInvalidationReason::None;
     }
 };
 
@@ -108,12 +128,69 @@ bool ViewStateRegistry::CommitView(ViewStateId id) {
     if (found == impl.Views.end()) return false;
     auto& view = found->second;
     if (!view.Available || view.PendingFrame != impl.Serial || view.LastCommitted == impl.Serial) return false;
-    view.Previous = view.Pending;
-    view.PreviousExtent = view.PendingExtent;
-    view.LastCommitted = impl.Serial;
-    view.PreviousValid = true;
-    view.Reason = ViewHistoryInvalidationReason::None;
+    if (view.PrimitivePreparedFrame == impl.Serial) return false;
+    for (const auto& [key, generation] : view.Histories)
+        if (generation && generation->CommitMode == HistoryCommitMode::WithView && generation->AcquiredFrame == impl.Serial) return false;
+    impl.AdvanceView(view);
     return true;
+}
+
+bool ViewStateRegistry::CommitViewWithHistory(ViewStateId id, std::span<const HistoryWriteToken> tokens) {
+    auto& impl = *_impl;
+    const auto found = impl.Views.find(id);
+    if (found == impl.Views.end()) return false;
+    auto& view = found->second;
+    if (!view.Available || view.PendingFrame != impl.Serial || view.LastCommitted == impl.Serial) return false;
+    size_t acquired = 0;
+    for (const auto& [key, generation] : view.Histories)
+        if (generation && generation->CommitMode == HistoryCommitMode::WithView && generation->AcquiredFrame == impl.Serial) ++acquired;
+    if (tokens.size() != acquired) return false;
+    for (size_t index = 0; index < tokens.size(); ++index) {
+        const auto& token = tokens[index];
+        if (token.View != id || token.CommitMode != HistoryCommitMode::WithView) return false;
+        for (size_t earlier = 0; earlier < index; ++earlier)
+            if (tokens[earlier].Key == token.Key) return false;
+        const auto history = view.Histories.find(token.Key);
+        if (history == view.Histories.end() || !history->second || !impl.ValidHistory(view, *history->second, token)) return false;
+    }
+    const bool hasPrimitives = view.PrimitivePreparedFrame == impl.Serial;
+    if (hasPrimitives && !view.Primitives.CanCommit(impl.Serial)) return false;
+    for (const auto& token : tokens) {
+        auto& generation = *view.Histories.find(token.Key)->second;
+        generation.LastCommitted = token.Index;
+        generation.HasCommitted = true;
+        generation.CommittedFrame = impl.Serial;
+    }
+    if (hasPrimitives) view.Primitives.Commit(impl.Serial);
+    impl.AdvanceView(view);
+    return true;
+}
+
+bool ViewStateRegistry::PreparePrimitiveHistory(ResolvedRenderView& view, const RenderSceneSnapshot& snapshot) {
+    auto& impl = *_impl;
+    const auto found = impl.Views.find(view.StateId);
+    if (found == impl.Views.end() || !found->second.Available || found->second.PendingFrame != impl.Serial) return false;
+    view.PreviousViewValid = found->second.PreviousValid;
+    view.PreviousViewProjection = view.PreviousViewValid ? found->second.Previous : view.ViewProjection;
+    found->second.PrimitivePreparedFrame = impl.Serial;
+    return found->second.Primitives.Prepare(snapshot, impl.Serial);
+}
+
+PrimitiveMotionData ViewStateRegistry::GetPrimitiveMotion(ViewStateId id, const RenderPrimitiveData& primitive) const noexcept {
+    const auto found = _impl->Views.find(id);
+    return found == _impl->Views.end() ? PrimitiveMotionData{primitive.LocalToWorld, false} : found->second.Primitives.Lookup(primitive);
+}
+uint64_t ViewStateRegistry::GetCommittedSerial(ViewStateId id) const noexcept {
+    const auto found = _impl->Views.find(id);
+    return found == _impl->Views.end() ? 0 : found->second.LastCommitted;
+}
+uint64_t ViewStateRegistry::GetPrimitiveCommittedSerial(ViewStateId id) const noexcept {
+    const auto found = _impl->Views.find(id);
+    return found == _impl->Views.end() ? 0 : found->second.Primitives.CommittedSerial();
+}
+void ViewStateRegistry::InvalidateTemporal(ViewStateId id, ViewHistoryInvalidationReason reason) {
+    const auto found = _impl->Views.find(id);
+    if (found != _impl->Views.end()) _impl->Invalidate(found->second, reason, true);
 }
 
 void ViewStateRegistry::Invalidate(ViewStateId id, ViewHistoryInvalidationReason reason) {
@@ -127,7 +204,7 @@ HistoryTexturePair ViewStateRegistry::AcquireHistoryTexture(const ResolvedRender
     auto& impl = *_impl;
     const auto found = impl.Views.find(view.StateId);
     if (!view.StateId.IsValid() || found == impl.Views.end() || found->second.PendingFrame != impl.Serial || !family.OutputAvailable ||
-        request.Key.empty() || request.BufferCount < 2 || request.BufferCount > 4) {
+        request.Key.empty() || request.BufferCount < 2 || request.BufferCount > 4 || !EnumContains(request.CommitMode)) {
         reason = "History requires a resolved available view, nonempty key and 2..4 buffers";
         return {};
     }
@@ -139,10 +216,11 @@ HistoryTexturePair ViewStateRegistry::AcquireHistoryTexture(const ResolvedRender
         reason = "History key already acquired for this view and frame";
         return {};
     }
-    if (!generation || !(generation->Key == TexturePoolKey{*desc}) || generation->Images.size() != request.BufferCount) {
+    if (!generation || !(generation->Key == TexturePoolKey{*desc}) || generation->Images.size() != request.BufferCount || generation->CommitMode != request.CommitMode) {
         auto next = make_unique<Impl::Generation>();
         next->Id = impl.NextGeneration++;
         next->Key = {*desc};
+        next->CommitMode = request.CommitMode;
         for (uint32_t i = 0; i < request.BufferCount; ++i) {
             auto texture = impl.Device.CreateTexture(*desc);
             if (!texture) {
@@ -160,7 +238,11 @@ HistoryTexturePair ViewStateRegistry::AcquireHistoryTexture(const ResolvedRender
             next->Images.push_back(std::move(image));
             ++impl.TexturesCreated;
         }
-        if (generation) impl.RetireBins[impl.Flight].push_back(std::move(generation));
+        if (generation) {
+            if (request.CommitMode == HistoryCommitMode::WithView || generation->CommitMode == HistoryCommitMode::WithView)
+                impl.Invalidate(record, ViewHistoryInvalidationReason::FormatChanged, true);
+            impl.RetireBins[impl.Flight].push_back(std::move(generation));
+        }
         generation = std::move(next);
     }
     generation->AcquiredFrame = impl.Serial;
@@ -170,7 +252,7 @@ HistoryTexturePair ViewStateRegistry::AcquireHistoryTexture(const ResolvedRender
     currentImage.External->Written = false;
     auto* previous = generation->HasCommitted ? &*generation->Images[generation->LastCommitted]->External : nullptr;
     const bool valid = previous && std::all_of(previous->ContentValid.begin(), previous->ContentValid.end(), [](uint8_t value) { return value != 0; });
-    return {valid ? previous : nullptr, &*currentImage.External, valid, {view.StateId, request.Key, generation->Id, impl.Serial, current}};
+    return {valid ? previous : nullptr, &*currentImage.External, valid, {view.StateId, request.Key, generation->Id, impl.Serial, current, request.CommitMode}};
 }
 
 bool ViewStateRegistry::CommitHistory(const HistoryWriteToken& token) {
@@ -180,11 +262,7 @@ bool ViewStateRegistry::CommitHistory(const HistoryWriteToken& token) {
     const auto history = view->second.Histories.find(token.Key);
     if (history == view->second.Histories.end() || !history->second) return false;
     auto& generation = *history->second;
-    if (generation.Id != token.Generation || generation.AcquiredFrame != impl.Serial || generation.CommittedFrame == impl.Serial || token.Index >= generation.Images.size()) return false;
-    const uint32_t expected = generation.HasCommitted ? (generation.LastCommitted + 1) % static_cast<uint32_t>(generation.Images.size()) : 0;
-    if (token.Index != expected) return false;
-    const auto& current = *generation.Images[token.Index];
-    if (!current.External->Written || !std::all_of(current.Valid.begin(), current.Valid.end(), [](uint8_t value) { return value != 0; })) return false;
+    if (generation.CommitMode != HistoryCommitMode::Independent || !impl.ValidHistory(view->second, generation, token)) return false;
     generation.LastCommitted = token.Index;
     generation.HasCommitted = true;
     generation.CommittedFrame = impl.Serial;

@@ -2570,12 +2570,12 @@ bool ShaderParameterSetVulkan::FlushWrites() noexcept {
                             info.sampler = CastVkObject(std::get<Sampler*>(parameterValue))->_sampler;
                             info.imageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
                         } else {
-                            info.imageView =
-                                CastVkObject(std::get<TextureView*>(parameterValue))->_imageView;
+                            const auto view = CastVkObject(std::get<TextureView*>(parameterValue));
+                            info.imageView = view->_imageView;
                             info.imageLayout =
                                 entry.LogicalKind == shader::ShaderBindingKind::RWTexture
                                     ? VK_IMAGE_LAYOUT_GENERAL
-                                    : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                                    : TextureStateToLayout(TextureState::ShaderRead, view->_image->_format);
                         }
                         imageInfos.push_back(info);
                     }
@@ -3278,6 +3278,9 @@ Nullable<InstanceVulkanImpl*> InitVulkanEnvImpl(const VulkanInstanceDescriptor& 
     validFeature.sType = VK_STRUCTURE_TYPE_VALIDATION_FEATURES_EXT;
     validFeature.pNext = nullptr;
     if (isValidFeatureExtEnable) {
+        if (desc.IsEnableSynchronizationValidation) {
+            validEnables.emplace_back(VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT);
+        }
         // Extra validation features are unstable on some Windows driver/SDK setups
         // and can crash before device creation. Keep the validation layer enabled,
         // but avoid opting into these non-essential feature toggles by default.
@@ -4074,8 +4077,8 @@ void CommandBufferVulkan::ResourceBarrier(std::span<const ResourceBarrierDescrip
             imgBarrier.pNext = nullptr;
             imgBarrier.srcAccessMask = TextureStateToAccessFlags(tb->Before);
             imgBarrier.dstAccessMask = TextureStateToAccessFlags(tb->After);
-            imgBarrier.oldLayout = TextureStateToLayout(tb->Before);
-            imgBarrier.newLayout = TextureStateToLayout(tb->After);
+            imgBarrier.oldLayout = TextureStateToLayout(tb->Before, tex->_format);
+            imgBarrier.newLayout = TextureStateToLayout(tb->After, tex->_format);
             if (tb->OtherQueue.HasValue()) {
                 if (!_device->_extFeatures.feature12.timelineSemaphore) {
                     RADRAY_ABORT("cross-queue sync requires timeline semaphore support on Vulkan backend");

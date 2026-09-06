@@ -1,5 +1,5 @@
 > - 适用: 编写 workload、接入 presentation/离屏 output、声明 graph pass、使用 transient pool 或 view history
-> - 权威: 本文描述 Stage A/B renderer foundation 的当前契约；帧同步见 `frame-and-gpu.md`，原生接口事实见 `render-rhi.md`
+> - 权威: 本文描述 renderer foundation 与内置 Forward 的当前契约；帧同步见 `frame-and-gpu.md`，原生接口事实见 `render-rhi.md`
 > - 锚点: `modules/runtime/include/radray/runtime/render_framework/render_output.h`, `modules/runtime/include/radray/runtime/render_framework/render_workload.h`, `modules/runtime/include/radray/runtime/render_framework/render_view.h`, `modules/runtime/include/radray/runtime/render_framework/render_graph.h`, `modules/runtime/include/radray/runtime/render_framework/render_graph_runtime.h`, `modules/runtime/include/radray/runtime/render_framework/render_resource_pool.h`, `modules/runtime/include/radray/runtime/render_framework/view_state.h`, `modules/runtime/include/radray/runtime/forward_pipeline/forward_graph.h`, `modules/runtime/src/render_system.cpp`, `modules/runtime/src/forward_pipeline/forward_pipeline.cpp`, `modules/runtime/include/radray/runtime/render_framework/render_scene_snapshot.h`, `modules/runtime/include/radray/runtime/render_framework/culling.h`, `modules/runtime/include/radray/runtime/material_technique.h`, `modules/runtime/include/radray/runtime/render_framework/renderer_list.h`, `modules/runtime/include/radray/runtime/render_framework/frame_draw_resources.h`
 
 # Renderer foundation
@@ -100,15 +100,16 @@ observable external 的最终 writer 与 `SetSideEffect` 是 roots。沿消费�
 prepare 只处理 live pass，创建 Graph parameter sets、上传复制的常量并取得每个 compute program 的
 缓存 PSO。任一步失败均不录 graph 命令，diagnostic 携带 pass/binding/resource，history 不推进。
 随后从 pool/external 的真实状态产生 pass 前 barriers；相同 UAV
-state 的写后访问使用显式 UAV memory barrier。初始 UAV state 保守视作可能由前一图写入，
+state 的写后访问使用显式 UAV memory barrier；同状态的非 UAV 写后写仍保留必要的内存依赖。
+初始 UAV state 保守视作可能由前一图写入，
 因此首次只读 UAV 访问也有屏障；同队列提交顺序不代替跨图的内存依赖。
 每个 live pass 独立 Begin/End，并用同名 debug group。
 pass commands facade 只转发绘制、dispatch、binding 和 viewport/scissor，不能通过 RHI encoder 的
 `GetCommandBuffer` 绕过 graph。静态 mesh/asset bindings 暂由原有固定状态契约约束。
 
 若 BeginRenderPass/BeginComputePass 失败，停止后续 pass；已录 barrier 的真实状态仍提交给 storage，
-失败 pass 不标记内容有效/已写，host 可据此恢复。成功 graph 才能提交 view/history。PSO 缺失时产品
-callback 可以跳过 draw，attachment clear 仍算有效内容。
+失败 pass 不标记内容有效/已写，host 可据此恢复。PSO 缺失时 callback 可以跳过 draw，attachment
+clear 仍算有效内容，但必需 draw 失败必须通过 completion 提交参数拒绝时域推进。
 
 ## Per-flight Graph 资源、pool、history 与报告
 
@@ -130,12 +131,25 @@ pool stats 区分累计 hits/misses/created/views-created/trimmed 与当前数�
 
 `ViewStateRegistry` 是 render-thread-owned。resolve 读取最后成功提交的 previous matrix，第一次、
 camera cut、extent/format/sample 改变时 previous 无效。输出不可用、跳过、graph 失败不会推进。
-`CommitView` 仅在 context 成功执行且对应 output 已写时有效。
+`RegisterViewCompletion` 把 view、graph generation、frame serial 和末端 pass 绑定为不透明 token。
+`CommitView(view, token, requiredDrawsSucceeded)` 同时验证 graph 成功、该 pass 实际执行且写入对应
+output、必需 draw 成功；共享 output 的另一 view 写入不能代替本 view 的完成证明。
 
 history 以稳定 view ID + string key 标识，descriptor 精确匹配，允许 2–4 buffers。一个 key 每 frame
 只能 acquire 一次；Previous 是最后成功提交的 image，Current 是下一写入 image。首次/失效时
 PreviousValid=false。token 含 generation/serial/index，重复或过期提交失败；只有成功 graph 中实际执行
 并有效写完 Current 的全部 subresources 才旋转，不因 acquire、被裁掉或失败而推进。
+
+`HistoryCommitMode::Independent` 保持独立反馈纹理的提交行为；`WithView` 的所有已申请 key、view
+矩阵和 primitive history 必须原子提交。颜色或深度任一未写、旧 token、重复提交、必需 draw 失败时
+整组保持上次成功状态。旧的无 completion `CommitView` 入口不能推进 `WithView`。
+`InvalidateView` 只失效时域组，不旋转或抹掉 Independent history；效果关闭再开启及 view rect 改变
+由 pipeline 显式失效，不能仅比较纹理尺寸。
+
+`PreparePrimitiveHistory` 从 immutable snapshot 准备该 view 的 pending 变换，以现有 proxy generation
+为身份、MotionRevision 为连续性版本。上次成功提交的矩阵才是 previous；跳帧、其他 view 提交、
+新建/重建/瞬移及非有限矩阵都不能伪造连续运动。所有 active primitive 进入 pending，不能只记录
+当前可见列表。提交前不访问 Actor、Component 或 proxy，也不消费一次性的 reset 标志。
 
 resize/descriptor 变化先成功创建新 generation，旧 generation 进入当前 flight retire bin，到该 flight
 下一次安全复用再销毁。长期未使用的 view 同样先 retire 后释放。沿用单 Direct queue 的提交顺序，
@@ -150,7 +164,7 @@ resize/descriptor 变化先成功创建新 generation，旧 generation 进入当
 ## 场景快照与剔除
 
 `BuildRenderSceneSnapshot` 只在 game thread 调用，每 flight/frame 构建一次，与输出和视图数量无关。
-它复制 primitive 变换、世界 AABB、layer mask、禁用剔除标志、MeshBatch 范围及 light 参数，按首次遇到
+它复制 primitive generation、MotionRevision、变换、世界 AABB、layer mask、CastShadow、禁用剔除标志、MeshBatch 范围及 light 参数，按首次遇到
 的 Material 去重并生成 pass 值快照。geometry/texture 仅借用指针，几何 owner 必须由 proxy 的
 `CollectAssetReferences` 先追加到宿主 retained refs。快照不保存 game object 或 asset ref；发布后只读。
 缺几何、空 draw、越界 index range 或不可用材质会跳过对应 section，并计入 `RenderSceneSnapshotStats`。
@@ -160,13 +174,20 @@ AABB 由局部中心/半长经过 affine transform 的绝对线性部分变换�
 非法或非有限 bounds 不参与视锥拒绝，统计并保守保留；mask 仍然有效，Forward 只警告一次。
 `Cull` 消费 snapshot 和一个 `ResolvedRenderView`，输出可见 primitive 索引与 view-space Z、可见光索引
 与 distance squared。primitive、view 和额外 mask 逐位相交；禁用剔除标志只绕过视锥测试。
+`PrimitiveSceneProxy::ResetMotion` 单调增加 revision；正常移动保留 revision。重建 proxy 使用新
+generation，不能复用地址充当身份。光源快照也复制 CastShadow。
 
 视锥从实际 `ViewProjection` 提取，使用 D3D/Vulkan 公共的 zero-to-one clip depth。Perspective、Ortho、
 旋转视图与无限远平面都按矩阵处理；无限 far 的退化平面停用，其余无效 view 拒绝剔除并清空结果。
 非有限 bounds 不产生 NaN 排序值。方向光仅受 mask 约束；点光按有效世界球界限测试，负 radius、
-非有限 position/radius 与不支持的 light type 计入拒绝统计。`CullingStats` 区分各拒绝原因并记录 CPU 时间。
+非有限 position/radius 与不支持的 light type 计入拒绝统计。Spot 使用 normalized direction、正 radius
+与 inner/outer cone cosine，要求 `0 <= inner < outer < pi/2`；Cull 用以灯为中心的 radius 球保守包住
+锥体，不再把 Spot 当作 unsupported light。负数/非有限 radius setter 保留原值，零 radius 表示禁用
+并由 Cull 拒绝；非有限光参数、无效方向和锥角计入 `InvalidLightParameters`，不进入 GPU 上传。
+`CullingStats` 区分各拒绝原因并记录 CPU 时间。
 
-每个 resolved view 在一帧只剔除一次，结果可供任意数量的 lists 消费，不在 pass 内重复遍历 Scene。
+每个相机 view 的主视锥剔除结果可供任意数量的 lists 消费；阴影 cascade 使用独立的 light view
+剔除，不能从相机可见集挑选投影者。不在 pass 内重复遍历 Scene。
 这些数组是帧局部 CPU 数据；不实现常驻 render scene、BVH、增量同步或 GPU-driven culling。
 
 ## 材质 technique
@@ -194,6 +215,7 @@ secondary pass 的 texture/sampler 必须是 primary 声明的子集，按名称
 通用 builder 验证结果与 view 的身份及 snapshot 索引，筛选候选 batch，再交给 `MeshPassProcessor`。
 processor 每 batch 最多输出一条 command，拒绝原因汇总进 `RendererListStats`；无效描述会清空旧 commands。
 默认 opaque 范围为 queue < 2500，transparent 为 queue >= 2500。
+`RequireMaterialPass` 使产品必需 pass 的缺失单独计入 `MissingRequiredPass`，与可选 pass 跳过区分。
 
 排序只使用 queue、按快照首次出现分配的 ProgramFrameId、material 索引、view depth、primitive/batch
 索引。StateThenFrontToBack 按 queue/program/material 聚簇后从近到远；FrontToBack 与 BackToFront 按
@@ -211,12 +233,26 @@ flight fence 安全边界。`MeshDrawCommand` 不拥有 RHI 资源或资产，�
 draw range、已准备的 groups 和排序值。`SubmitRendererList` 验证几何/有序唯一 groups，取得实际 pass
 的 PSO，再 bind/draw；失败跳过单条 draw 并计入 `DrawExecutionStats`，不重建数据或返回 game thread。
 
+`RendererListPassBindings::Create/Build` 把 graph parameter set 与当前 pass、program、真实 group 关联，
+供同一 `SubmitRendererList` draw loop 合并 native per-view/object/material 组。按 program 逐 draw 绑定，
+不会沿用上一 program 的组；native/graph 冲突、缺组、数组洞、错误 layout 或跨图/跨 pass set 在
+执行前拒绝。不把 Shadow/AO/light-list 等产品字段写入通用 mesh draw executor。
+`DrawExecutionStats::Succeeded` 是产品判定必需绘制完成的入口；只读深度 attachment 的 PSO 禁止
+depth/stencil 写入，这一访问检查不扩大兼容 PSO key。
+D3D12 在 encoder 结束时绑定 command-buffer-owned 的空 root signature，结束旧 static-data 参数
+的使用期。使用有效空签名使后续 GBV barrier 注入仍可恢复状态；其寿命随原 command buffer，
+不增加每帧 descriptor 分配，也不修改已发布 parameter set。
+
 ## Forward 范围
 
-Forward PrepareFrame 为 active presentation outputs 提交一个 view 的 family；包装 pipeline 可以追加
-外部 output families。Render 对每个 resolved view 保存独立 CullingResults 和 DepthOnly/Opaque/Transparent
-lists。每 family 支持多个不重叠 view，共享 attachments，通过各自 viewport/scissor 隔离写入。
-当前调用方负责提供不重叠视图，Forward 仍只支持 RenderScale=1，不提供 upscale。
+现有 `ForwardPipeline(app, scene, camera)` 保持默认的基础 Forward 用法；同一类的 `SetSettings`
+开启 HDR 与效果，`Temporal()` / `Msaa()` 提供互斥 AA 配置。`SetViews` 支持 presentation/外部 output、
+多个独立或不重叠的 view rect；空列表恢复构造时相机。设置和 view 在 game thread 写入，PrepareFrame
+复制到当前可写 flight。稳定 ViewStateId 保持跨帧身份，切换设置不能修改已发布 flight。
+
+HDR 工作尺寸按 RenderScale 解析，view 使用各自局部 attachments，最后合成到 output rect；每 view
+独立保存剔除、列表、光照与 histories。`SetOutputOverlays` 在所有 view family 后把本帧产生的 SDR
+离屏 output 采样进目标 rect，仍在同一张图中。调用方负责 output 的借用寿命，不能形成反馈环。
 
 产品 ForwardObject 同时保存 `LocalToWorld` 与 `NormalToWorld`。CPU 按对象计算后者，作为
 线性变换逆转置的正比例矩阵，shader 使用后再归一化，支持非均匀缩放、shear 与镜像。
@@ -228,7 +264,7 @@ lists。每 family 支持多个不重叠 view，共享 attachments，通过各�
 resolved view 值并借用 RendererList，携带 color/depth handles、attachment Load/Clear 和执行统计；输出
 返回资源 handles、成功状态与实际 pass handle。没有 command 的 Depth/Transparent 成功但不加 pass，
 Opaque 即使为空仍加 pass 定义输出。模块不创建/执行子图，不 acquire/present，也不提交 view/history。
-ForwardPipeline 使用它声明三个标准阶段；Tidal Atrium 在同一张图中保持
+ForwardPipeline 的基础与 HDR 配置共用该模块及提交循环；Tidal Atrium 在同一张图中保持
 Sky → Depth → Opaque → scene screens → Transparent → downsample/HUD/present 的显式组合。
 
 存在有效 DepthOnly command 时声明 `Forward.DepthPrepass`（深度 Clear/Store）；没有则省略。
@@ -240,11 +276,41 @@ Sky → Depth → Opaque → scene screens → Transparent → downsample/HUD/pr
 depth 为 family 相对尺寸的 transient，按 D32_FLOAT → D24_UNORM_S8_UINT → D16_UNORM 选择支持格式。
 PSO key 使用 color/depth formats + sample count 的 `GraphicsPassCompatibilityKey`，Clear/Load、只读标志
 和 framebuffer 尺寸不分裂兼容 PSO；原生 render pass 的完整 key 仍包含这些访问事实。
-只有 graph 成功且对应 output 已写入才提交 view；剔除失败、不可用 output 或 graph 失败不推进 view state。
+HDR 每个 view 注册末端 output pass 的 completion token，并合并必需 list/draw 的失败状态。
+剔除、必需材质 pass、PSO、参数、graph 或末端合成失败均不推进时域组。
+
+HDR 的两个配置组合如下；效果 shader 只属于产品层，基础图/RHI 数值验收使用独立最小 shader：
+
+| 阶段 | Temporal | Msaa4 |
+|---|---|---|
+| 阴影 | 主方向光四 cascade、独立 light-view Cull、稳定正交投影、深度数组与 PCF | 相同 |
+| 深度 | depth/normal/刚体 motion 预通道，包含 alpha cutout | 4x depth；不采样 MSAA 深度 |
+| 光照 | 16x16 tile compute、固定全 near/far 区间；opaque 与 transparent 共用完整局部灯 | 相同 |
+| AO | 线性深度、多 mip 金字塔、半分辨率 AO 与 bilateral 合成 | 关闭 |
+| HDR | PBR opaque + sky，opaque history → TAA → 独立 transparent → indirect fireflies | 4x opaque/sky/transparent/fireflies → color resolve |
+| 输出 | Bloom、曝光、tone map、SDR 合成 | 相同 |
+
+局部灯最多 256、每 tile 默认 64；溢出 tile 回退遍历完整灯列表，不能静默丢灯。Spot 与 Point 通过
+同一固定大小 GPU 记录传输。级联阴影只收集 CastShadow primitive；主相机 cull 与 tile frustum 额外
+覆盖一个像素，避免 jitter 边缘漏物体。history color/depth 用三图环，TAA 只处理 opaque/sky；sky
+按相机旋转重投影，运动只包含刚体变换。effect signature 改变、cut、尺寸/rect/AA 变化先失效。
+
+depth pyramid 是一张带 mip 的 R32_FLOAT texture，pass 按精确 subresource 声明依赖；没有消费者的
+mip 会裁剪。CurrentHdr 在时域和透明之前保留独立副本，避免读写同一附件。SDR 的线性/sRGB 编码
+依据 output 格式在正确边界完成一次；离屏叠加先解码再按目标格式编码。
+
+设置拒绝非有限或越界参数、MSAA 与 AO/TAA 的组合以及依赖不存在输入的 debug mode。能力验证或
+必需 shader 失败使 `Failed()` 为 true，不能以黑屏、清屏或跳过伪造成功。debug 支持线性深度、法线、
+motion、AO、tile occupancy/overflow、Bloom、cascade、当前/历史 HDR 和深度金字塔末级。
 
 `ForwardPipeline::GetSceneSnapshot` / `GetStageBStats` 只在所属 flight 的阶段安全点读取；统计包括快照
 构建数、剔除调用/失败、三类 command 数量与执行失败。场景规模统计来自 snapshot，视图筛选来自 Cull，
 候选分类来自 list，避免重复计数。
 
+`RequestCapture` 只申请下一次 prepared frame；readback 由 graph 声明，`CompleteCaptures(flight)`
+必须在所属 fence 完成后调用，生成 PNG 与 graph JSON/DOT。正常帧不增加全队列等待。
+展示宿主与回归命令见 [构建与测试](../guide/build-test.md#样例与专项验证)。
+
 当前不实现 async compute、并行录制、pass merge、heap aliasing、常驻场景、GPUScene、GPU count buffer、
-动态分辨率 upscale 或 temporal effect；pool/history 继续提供既有资源寿命基础。
+depth resolve、骨骼/形变运动、透明时域重投影或跨分辨率 history 重建。缩放使用产品合成采样，
+不声称实现生产级时域超分；pool/history 沿用既有 flight 同步。

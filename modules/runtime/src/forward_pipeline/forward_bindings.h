@@ -14,6 +14,7 @@ struct ForwardProgramBindings {
     uint32_t ViewGroup;
     uint32_t MaterialGroup;
     uint32_t ObjectGroup;
+    std::optional<uint32_t> PassGroup{};
 };
 
 std::optional<ForwardProgramBindings> ResolveProgramBindings(const ShaderProgram& program);

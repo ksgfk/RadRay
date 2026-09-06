@@ -24,11 +24,16 @@ struct RendererListDesc {
     RenderQueueRange QueueRange;
     uint32_t LayerMask{0xffffffffu};
     RendererListSorting Sorting{RendererListSorting::StateThenFrontToBack};
+    bool RequireMaterialPass{false};
 };
 struct RendererListStats {
     uint64_t VisiblePrimitives{0}, ConsideredBatches{0}, LayerRejected{0}, QueueRejected{0}, MissingPass{0};
     uint64_t InvalidBindings{0}, InvalidGeometry{0}, PrepareResourceFailed{0}, ProcessorRejected{0}, Commands{0}, NonFiniteDepth{0};
     bool Valid{false};
+    uint64_t MissingRequiredPass{0};
+    bool ContentSucceeded() const noexcept {
+        return Valid && MissingRequiredPass == 0 && InvalidBindings == 0 && InvalidGeometry == 0 && PrepareResourceFailed == 0 && ProcessorRejected == 0;
+    }
 };
 struct RendererList {
     vector<MeshDrawCommand> Commands;

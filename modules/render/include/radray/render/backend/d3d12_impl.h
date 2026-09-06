@@ -465,7 +465,8 @@ public:
         DeviceD3D12* _device,
         ComPtr<ID3D12CommandAllocator> cmdAlloc,
         ComPtr<ID3D12GraphicsCommandList> cmdList,
-        D3D12_COMMAND_LIST_TYPE type) noexcept;
+        D3D12_COMMAND_LIST_TYPE type,
+        ComPtr<ID3D12RootSignature> emptyRootSignature) noexcept;
     ~CmdListD3D12() noexcept override = default;
 
     bool IsValid() const noexcept override;
@@ -512,6 +513,7 @@ public:
     DeviceD3D12* _device;
     ComPtr<ID3D12CommandAllocator> _cmdAlloc;
     ComPtr<ID3D12GraphicsCommandList> _cmdList;
+    ComPtr<ID3D12RootSignature> _emptyRootSignature;
     D3D12_COMMAND_LIST_TYPE _type;
     vector<unique_ptr<Buffer>> _keepAliveBuffers;
 };

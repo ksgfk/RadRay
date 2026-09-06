@@ -24,7 +24,8 @@ void ForwardLitMeshPassProcessor::AddMeshBatch(const RendererListDesc& desc, con
     auto [view, newView] = _views.try_emplace(program, std::nullopt);
     if (newView) {
         ShaderParameterStorage values{&layout, binding->ViewGroup};
-        if (FillViewParameters(values, *desc.Culling.Get(), *desc.View.Get(), _lightOverflowWarned))
+        if (FillViewParameters(values, *desc.Culling.Get(), *desc.View.Get(), _lightOverflowWarned,
+                               binding->PassGroup.has_value() || desc.MaterialPassName == "DepthNormalsMotion" || desc.MaterialPassName == "ShadowCaster"))
             view->second = _resources.PrepareGroup(*program, binding->ViewGroup, values);
     }
     auto [material, newMaterial] = _materials.try_emplace(batch.Material, std::nullopt);
@@ -38,6 +39,15 @@ void ForwardLitMeshPassProcessor::AddMeshBatch(const RendererListDesc& desc, con
         !object.SetMatrix4x4("ForwardObject.NormalToWorld", MakeNormalToWorld(scene.Primitives[batch.Primitive].LocalToWorld))) {
         out.Reject(MeshPassRejectReason::InvalidBindings);
         return;
+    }
+    if (layout.Find("ForwardObject.PreviousLocalToWorld") != nullptr) {
+        const auto& primitive = scene.Primitives[batch.Primitive];
+        const auto motion = _temporal ? _temporal->GetPrimitiveMotion(desc.View->StateId, primitive) : PrimitiveMotionData{primitive.LocalToWorld, false};
+        if (!object.SetMatrix4x4("ForwardObject.PreviousLocalToWorld", motion.PreviousLocalToWorld) ||
+            !object.SetUInt("ForwardObject.MotionValid", motion.Valid && desc.View->PreviousViewValid ? 1u : 0u)) {
+            out.Reject(MeshPassRejectReason::InvalidBindings);
+            return;
+        }
     }
     auto objectGroup = _resources.PrepareGroup(*program, binding->ObjectGroup, object);
     if (!view->second || !material->second || !objectGroup) {

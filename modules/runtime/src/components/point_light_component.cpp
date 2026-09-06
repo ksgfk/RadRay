@@ -1,6 +1,7 @@
 #include <radray/runtime/components/point_light_component.h>
 
 #include <algorithm>
+#include <cmath>
 
 #include <radray/runtime/render_framework/point_light_scene_proxy.h>
 
@@ -13,6 +14,7 @@ unique_ptr<LightSceneProxy> PointLightComponent::CreateSceneProxy() const {
 }
 
 void PointLightComponent::SetAttenuationRadius(float radius) noexcept {
+    if (!std::isfinite(radius) || radius < 0) return;
     _attenuationRadius = std::max(radius, 0.0f);
     MarkRenderStateDirty();
 }

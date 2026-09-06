@@ -12,6 +12,17 @@ namespace radray {
 
 struct AppUpdateContext;
 
+class ViewCompletionToken {
+public:
+    bool IsValid() const noexcept { return _graph != 0 && _view.IsValid(); }
+
+private:
+    friend class RenderPipelineContext;
+    ViewStateId _view;
+    uint64_t _graph{0}, _serial{0};
+    uint32_t _index{UINT32_MAX};
+};
+
 struct RenderPrepareContext {
     const AppUpdateContext& App;
     std::span<const RenderOutputInfo> Outputs;
@@ -34,6 +45,11 @@ public:
     RgTextureHandle ImportOutput(RenderGraph& graph, RenderOutputId output);
     RenderGraphExecutionResult ExecuteGraph(RenderGraph& graph);
     bool CommitView(ViewStateId view);
+    ViewCompletionToken RegisterViewCompletion(RenderGraph& graph, ViewStateId view, RgPassHandle pass);
+    bool CommitView(ViewStateId view, const ViewCompletionToken& completion, bool requiredDrawsSucceeded);
+    void InvalidateView(ViewStateId view);
+    bool PreparePrimitiveHistory(ResolvedRenderView& view, const RenderSceneSnapshot& snapshot);
+    PrimitiveMotionData GetPrimitiveMotion(ViewStateId view, const RenderPrimitiveData& primitive) const noexcept;
     HistoryTexturePair AcquireHistoryTexture(const ResolvedRenderView& view, const ResolvedRenderViewFamily& family,
                                              const HistoryTextureRequest& request, string& reason);
 
@@ -49,6 +65,14 @@ private:
     RenderGraphExecutionReport& _report;
     vector<unique_ptr<ImportedOutput>> _imports;
     vector<HistoryTexturePair> _histories;
+    struct ViewCompletion {
+        ViewStateId View;
+        RgPassHandle Pass;
+        RgTextureHandle Output;
+        bool Executed{false};
+    };
+    vector<ViewCompletion> _completions;
+    vector<ViewStateId> _failedTemporalViews;
     uint64_t _graphGeneration{0};
     bool _executed{false}, _success{false};
 };

@@ -8,7 +8,7 @@ namespace radray::test {
 
 inline Nullable<unique_ptr<ShaderProgram>> CompileFoundationGraphics(
     render::Device& device, std::string_view source,
-    const render::ShaderProgramLayoutRecipe& recipe = {}) {
+    const render::ShaderProgramLayoutRecipe& recipe = {}, Nullable<render::Device*> programDevice = nullptr) {
     ShaderJit jit{{std::filesystem::path{RADRAY_PROJECT_DIR} / "shaderlib"}};
     const auto target = render::GetShaderTargetForBackend(device.GetBackend());
     if (!jit.IsAvailable() || !target) return nullptr;
@@ -24,12 +24,12 @@ inline Nullable<unique_ptr<ShaderProgram>> CompileFoundationGraphics(
     if (!artifact) return nullptr;
     auto backend = render::CreateBackendShaderArtifact(
         device, artifact->Metadata, {*target, artifact->ExpectedGpuArtifact}, recipe);
-    return backend ? ShaderProgram::Create(&device, std::move(*backend)) : nullptr;
+    return backend ? ShaderProgram::Create(programDevice ? programDevice.Get() : &device, std::move(*backend)) : nullptr;
 }
 
 inline Nullable<unique_ptr<ShaderProgram>> CompileFoundationCompute(
     render::Device& device, std::string_view source,
-    const render::ShaderProgramLayoutRecipe& recipe = {}) {
+    const render::ShaderProgramLayoutRecipe& recipe = {}, Nullable<render::Device*> programDevice = nullptr) {
     ShaderJit jit{{std::filesystem::path{RADRAY_PROJECT_DIR} / "shaderlib"}};
     const auto target = render::GetShaderTargetForBackend(device.GetBackend());
     if (!jit.IsAvailable() || !target) return nullptr;
@@ -45,7 +45,7 @@ inline Nullable<unique_ptr<ShaderProgram>> CompileFoundationCompute(
     if (!artifact) return nullptr;
     auto backend = render::CreateBackendShaderArtifact(
         device, artifact->Metadata, {*target, artifact->ExpectedGpuArtifact}, recipe);
-    return backend ? ShaderProgram::Create(&device, std::move(*backend)) : nullptr;
+    return backend ? ShaderProgram::Create(programDevice ? programDevice.Get() : &device, std::move(*backend)) : nullptr;
 }
 
 }  // namespace radray::test

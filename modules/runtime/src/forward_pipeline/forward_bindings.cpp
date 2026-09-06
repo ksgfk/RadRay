@@ -9,7 +9,7 @@ namespace radray::forward_detail {
 std::optional<ForwardProgramBindings> ResolveProgramBindings(const ShaderProgram& program) {
     const ShaderParameterLayout& layout = program.GetParameterLayout();
     const auto& artifact = program.GetArtifact().Generic();
-    if (layout.Buffers().size() != 3 || !artifact.RootConstants().empty()) return std::nullopt;
+    if ((layout.Buffers().size() != 3 && layout.Buffers().size() != 4) || !artifact.RootConstants().empty()) return std::nullopt;
     const auto find = [&](std::string_view name) -> std::optional<uint32_t> {
         for (uint32_t index = 0; index < layout.Buffers().size(); ++index) {
             if (layout.Buffers()[index].Name == name && program.IsBufferDynamic(name)) {
@@ -24,16 +24,21 @@ std::optional<ForwardProgramBindings> ResolveProgramBindings(const ShaderProgram
     if (!view || !material || !object) {
         return std::nullopt;
     }
+    std::optional<uint32_t> passGroup;
+    for (const auto& buffer : layout.Buffers())
+        if (buffer.Name == "ForwardPass") passGroup = buffer.Group;
+    if (layout.Buffers().size() == 4 && !passGroup) return std::nullopt;
     const ForwardProgramBindings bindings{
         *view, *material, *object,
         layout.Buffers()[*view].Group,
         layout.Buffers()[*material].Group,
-        layout.Buffers()[*object].Group};
+        layout.Buffers()[*object].Group, passGroup};
     if (bindings.ViewGroup == bindings.MaterialGroup ||
         bindings.ViewGroup == bindings.ObjectGroup ||
         bindings.MaterialGroup == bindings.ObjectGroup) {
         return std::nullopt;
     }
+    if (passGroup && (*passGroup == bindings.ViewGroup || *passGroup == bindings.MaterialGroup || *passGroup == bindings.ObjectGroup)) return std::nullopt;
     for (const std::string_view name : {"AlbedoTexture", "LinearSampler"}) {
         const ShaderParameterInfo* resource = layout.Find(name);
         if (resource != nullptr && resource->Group != bindings.MaterialGroup) {
@@ -41,6 +46,9 @@ std::optional<ForwardProgramBindings> ResolveProgramBindings(const ShaderProgram
         }
     }
     for (const auto& binding : artifact.Bindings()) {
+        const auto name = artifact.GetName(binding.Name);
+        const auto info = name ? program.GetArtifact().FindBindingInfo(*name) : std::nullopt;
+        if (passGroup && info && info->Group == *passGroup) continue;
         const auto kind = static_cast<shader::ShaderBindingKind>(binding.Type);
         if (kind == shader::ShaderBindingKind::CBuffer) {
             if (binding.Count != 1) return std::nullopt;

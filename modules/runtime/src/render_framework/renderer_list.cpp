@@ -40,6 +40,7 @@ bool BuildRendererList(const RendererListDesc& desc, MeshPassProcessor& processo
             const auto pass = material.FindPass(desc.MaterialPassName);
             if (!pass) {
                 ++out.Stats.MissingPass;
+                if (desc.RequireMaterialPass) ++out.Stats.MissingRequiredPass;
                 continue;
             }
             if (!pass->Valid || !pass->Program) {
@@ -50,7 +51,10 @@ bool BuildRendererList(const RendererListDesc& desc, MeshPassProcessor& processo
             processor.AddMeshBatch(desc, scene, batch, result);
             if (!result._command) {
                 switch (result._reason) {
-                    case MeshPassRejectReason::MissingPass: ++out.Stats.MissingPass; break;
+                    case MeshPassRejectReason::MissingPass:
+                        ++out.Stats.MissingPass;
+                        if (desc.RequireMaterialPass) ++out.Stats.MissingRequiredPass;
+                        break;
                     case MeshPassRejectReason::InvalidBindings: ++out.Stats.InvalidBindings; break;
                     case MeshPassRejectReason::InvalidGeometry: ++out.Stats.InvalidGeometry; break;
                     case MeshPassRejectReason::PrepareResourceFailed: ++out.Stats.PrepareResourceFailed; break;

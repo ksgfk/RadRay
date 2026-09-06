@@ -303,6 +303,9 @@ Nullable<render::GraphicsPipelineState*> ShaderProgram::GetOrCreateGraphicsPipel
         return nullptr;
     }
 
+    if (passState.DepthReadOnly && (materialState.DepthStencil.DepthWriteEnable ||
+                                    (materialState.DepthStencil.Stencil && materialState.DepthStencil.Stencil->WriteMask != 0))) return nullptr;
+
     const PsoKeyRef lookup{
         .MaterialState = &materialState,
         .VertexLayout = &vertexLayout,

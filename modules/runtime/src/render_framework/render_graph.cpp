@@ -371,6 +371,36 @@ RenderGraph::RenderGraph(render::Device& device, RenderGraphFrameResources& reso
     : RenderGraph(device, resources, registry, name) { generation = _impl->Generation; }
 RenderGraph::~RenderGraph() = default;
 uint64_t RenderGraph::GetGeneration() const noexcept { return _impl->Generation; }
+bool RenderGraph::WasPassExecuted(RgPassHandle handle) const noexcept {
+    return handle.Generation == _impl->Generation && handle.Index < _impl->Report.Passes.size() && _impl->Report.Passes[handle.Index].Executed;
+}
+bool RenderGraph::PassWroteTexture(RgPassHandle pass, RgTextureHandle texture) const noexcept {
+    if (!WasPassExecuted(pass) || texture.Generation != _impl->Generation || texture.Index >= _impl->Resources.size()) return false;
+    const auto& resource = _impl->Resources[texture.Index];
+    if (!resource.IsTexture || !resource.Written) return false;
+    for (const auto& access : _impl->Passes[pass.Index].Cells)
+        if (access.Resource == texture.Index && access.Write && access.ValidAfter && resource.Valid[access.Cell]) return true;
+    return false;
+}
+
+RgPassHandle RenderGraphPassBuilder::GetPassHandle() const noexcept { return {_pass, _graph.GetGeneration()}; }
+bool RenderGraphPassBuilder::OwnsParameterSet(RgParameterSetHandle handle, const ShaderProgram& program, uint32_t group) const noexcept {
+    const auto& impl = *_graph._impl;
+    if (handle.Generation != impl.Generation || handle.Index >= impl.ParameterSets.size()) return false;
+    const auto& set = impl.ParameterSets[handle.Index];
+    return set.Pass == _pass && set.Program == &program && set.Group == group;
+}
+void RenderGraphPassBuilder::Reject(std::string_view code, std::string_view message, std::string_view binding) {
+    _graph._impl->Error(code, message, _pass, InvalidIndex, binding);
+}
+
+RgPassHandle RenderGraphRasterContext::GetPassHandle() const noexcept { return {_pass, _graph.GetGeneration()}; }
+bool RenderGraphRasterContext::OwnsParameterSet(RgParameterSetHandle handle, const ShaderProgram& program, uint32_t group) const noexcept {
+    const auto& impl = *_graph._impl;
+    if (handle.Generation != impl.Generation || handle.Index >= impl.ParameterSets.size()) return false;
+    const auto& set = impl.ParameterSets[handle.Index];
+    return set.Pass == _pass && set.Program == &program && set.Group == group && set.Native.HasValue();
+}
 const RenderGraphExecutionReport& RenderGraph::GetReport() const noexcept { return _impl->Report; }
 
 RgTextureHandle RenderGraph::CreateTexture(const render::TextureDescriptor& desc, std::string_view name, std::source_location location) {
@@ -441,8 +471,8 @@ RgPassHandle RenderGraph::AddPass(std::string_view name, RgPassType type, std::s
 void RenderGraph::SetPayload(RgPassHandle pass, unique_ptr<Payload> payload) { _impl->Passes[pass.Index].Data = std::move(payload); }
 
 RgTextureViewHandle RenderGraph::UseTexture(uint32_t pass, RgTextureHandle texture, RgTextureViewDesc view,
-                                             render::TextureViewUsage usage, bool read, bool write, bool validAfter,
-                                             render::ShaderStages uavWriteStages) {
+                                            render::TextureViewUsage usage, bool read, bool write, bool validAfter,
+                                            render::ShaderStages uavWriteStages) {
     auto& impl = *_impl;
     if (!impl.Mutable() || !impl.Handle(texture.Index, texture.Generation, true, pass)) return {};
     const auto& desc = impl.Resources[texture.Index].TextureDesc;
@@ -731,17 +761,17 @@ RgParameterSetHandle RenderGraph::AddParameterSet(
                 const uint64_t storageAlignment = std::max<uint64_t>(
                     1, impl.Device.GetCapabilities().Limits.StorageBufferOffsetAlignment);
                 representationValid = representationValid && buffer->StructureByteStride != 0 &&
-                                       buffer->StructureByteStride % 4 == 0 && buffer->StructureByteStride <= 2048 &&
-                                       range->Offset % buffer->StructureByteStride == 0 &&
-                                       range->Size % buffer->StructureByteStride == 0 &&
-                                       range->Offset % storageAlignment == 0;
+                                      buffer->StructureByteStride % 4 == 0 && buffer->StructureByteStride <= 2048 &&
+                                      range->Offset % buffer->StructureByteStride == 0 &&
+                                      range->Size % buffer->StructureByteStride == 0 &&
+                                      range->Offset % storageAlignment == 0;
             } else if (kind == shader::ShaderBindingKind::RawBuffer ||
                        kind == shader::ShaderBindingKind::RWRawBuffer) {
                 const uint64_t storageAlignment = std::max<uint64_t>(
                     1, impl.Device.GetCapabilities().Limits.StorageBufferOffsetAlignment);
                 representationValid = representationValid && buffer->StructureByteStride == 0 &&
-                                       range->Offset % 4 == 0 && range->Size % 4 == 0 &&
-                                       range->Offset % storageAlignment == 0;
+                                      range->Offset % 4 == 0 && range->Size % 4 == 0 &&
+                                      range->Offset % storageAlignment == 0;
             } else {
                 const uint32_t elementSize = render::GetTextureFormatBytesPerPixel(buffer->Format);
                 representationValid = buffer->StructureByteStride == 0 && elementSize != 0 &&
@@ -794,7 +824,7 @@ RgParameterSetHandle RenderGraph::AddParameterSet(
                     return value.Declaration == name.value() && value.ArrayElement == element;
                 });
             if (!found) {
-                fail("MissingParameterBinding", "A required binding array element is missing", name.value());
+                fail("MissingParameterBinding", fmt::format("Required binding array element {} is missing", element), name.value());
                 return {};
             }
         }
@@ -911,8 +941,10 @@ RgPassHandle RenderGraph::AddCopyTextureToBufferPass(std::string_view name, RgTe
     const auto& src = impl.Resources[source.Index].TextureDesc;
     auto normalized = render::NormalizeSubresourceRange(src, range);
     const auto& detail = impl.Device.GetDetail();
+    const uint32_t texelBytes = render::GetTextureFormatBytesPerPixel(src.Format);
     if (!normalized || normalized->MipLevelCount != 1 || normalized->ArrayLayerCount != 1 || src.Dim == render::TextureDimension::Dim3D ||
-        src.SampleCount != 1 || !src.Usage.HasFlag(render::TextureUse::CopySource) || destinationOffset % detail.TextureDataPlacementAlignment != 0) {
+        src.SampleCount != 1 || !src.Usage.HasFlag(render::TextureUse::CopySource) || texelBytes == 0 ||
+        destinationOffset % detail.TextureDataPlacementAlignment != 0 || destinationOffset % texelBytes != 0) {
         impl.Error("CopyTextureRange", "Texture readback requires one non-MSAA 2D subresource and aligned destination", pass.Index);
         return pass;
     }
@@ -1230,6 +1262,7 @@ bool RenderGraph::Impl::Realize() {
             return false;
         }
         pass.PassState.emplace(std::move(formats), depthFormat, pass.Samples, pass.NativePass.Get());
+        pass.PassState->DepthReadOnly = pass.DepthAttachment && pass.DepthAttachment->Desc.ReadOnly;
     }
     Report.PhysicalAllocations = static_cast<uint32_t>(Pool.GetStats().Created - createdBefore);
     return true;
@@ -1359,9 +1392,8 @@ bool RenderGraph::Prepare() {
             continue;
         }
         Nullable<unique_ptr<render::ShaderParameterSet>> created =
-            impl.Device.CreateShaderParameterSet({
-                .Layout = key.Layout,
-                .GroupIndex = parameterSet.Group});
+            impl.Device.CreateShaderParameterSet({.Layout = key.Layout,
+                                                  .GroupIndex = parameterSet.Group});
         if (!created) {
             impl.Error("ParameterSetAllocation", "Parameter set allocation failed before recording",
                        parameterSet.Pass);
@@ -1392,7 +1424,7 @@ void RenderGraph::Impl::PlanBarriers() {
     vector<vector<uint8_t>> writes;
     for (const auto& resource : Resources) {
         states.push_back(resource.States);
-        // An initial UAV state may contain writes from an earlier graph or flight.
+        // Initial states may contain writes from an earlier graph or flight.
         writes.emplace_back(resource.States.size(), 1);
     }
     for (uint32_t p = 0; p < Passes.size(); ++p) {
@@ -1403,7 +1435,10 @@ void RenderGraph::Impl::PlanBarriers() {
             auto& resource = Resources[access.Resource];
             auto& state = states[access.Resource][access.Cell];
             const uint32_t uav = resource.IsTexture ? uint32_t(render::TextureState::UnorderedAccess) : uint32_t(render::BufferState::UnorderedAccess);
-            if (state != access.State) {
+            // Vulkan also requires memory dependencies for consecutive writes with
+            // unchanged layouts/access states. D3D12 elides these non-UAV barriers.
+            const bool sameStateWrite = state != uav && (writes[access.Resource][access.Cell] || access.Write);
+            if (state != access.State || sameStateWrite) {
                 if (resource.IsTexture) {
                     pass.Barriers.push_back(render::BarrierTextureDescriptor{.Target = resource.NativeTexture(), .Before = static_cast<render::TextureState>(state), .After = static_cast<render::TextureState>(access.State), .IsSubresourceBarrier = true, .Range = {access.Cell / resource.TextureDesc.MipLevels, 1, access.Cell % resource.TextureDesc.MipLevels, 1}});
                 } else
@@ -1479,14 +1514,13 @@ RenderGraphExecutionResult RenderGraph::Execute(render::CommandBuffer& command) 
             else if (copy.Type == Impl::CopyType::TextureToBuffer)
                 command.CopyTextureToBuffer(dst.NativeBuffer(), copy.DestinationOffset, src.NativeTexture(), copy.SourceRange);
             else if (copy.Type == Impl::CopyType::Resolve)
-                command.ResolveTexture({
-                    .Destination = dst.NativeTexture(),
-                    .DestinationMipLevel = copy.DestinationRange.BaseMipLevel,
-                    .DestinationArrayLayer = copy.DestinationRange.BaseArrayLayer,
-                    .Source = src.NativeTexture(),
-                    .SourceMipLevel = copy.SourceRange.BaseMipLevel,
-                    .SourceArrayLayer = copy.SourceRange.BaseArrayLayer,
-                    .ArrayLayerCount = copy.SourceRange.ArrayLayerCount});
+                command.ResolveTexture({.Destination = dst.NativeTexture(),
+                                        .DestinationMipLevel = copy.DestinationRange.BaseMipLevel,
+                                        .DestinationArrayLayer = copy.DestinationRange.BaseArrayLayer,
+                                        .Source = src.NativeTexture(),
+                                        .SourceMipLevel = copy.SourceRange.BaseMipLevel,
+                                        .SourceArrayLayer = copy.SourceRange.BaseArrayLayer,
+                                        .ArrayLayerCount = copy.SourceRange.ArrayLayerCount});
             else
                 command.CopyTextureToTexture({.Destination = dst.NativeTexture(), .DestinationMipLevel = copy.DestinationRange.BaseMipLevel, .DestinationArrayLayer = copy.DestinationRange.BaseArrayLayer, .Source = src.NativeTexture(), .SourceMipLevel = copy.SourceRange.BaseMipLevel, .SourceArrayLayer = copy.SourceRange.BaseArrayLayer, .Width = std::max(1u, src.TextureDesc.Width >> copy.SourceRange.BaseMipLevel), .Height = std::max(1u, src.TextureDesc.Height >> copy.SourceRange.BaseMipLevel), .ArrayLayerCount = copy.SourceRange.ArrayLayerCount});
         }

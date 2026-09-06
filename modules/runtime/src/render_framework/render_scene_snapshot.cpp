@@ -37,6 +37,8 @@ bool BuildRenderSceneSnapshot(const Scene& scene, RenderSceneSnapshot& out, vect
         if (next.Primitives.size() >= kMaxIndex) return false;
         RenderPrimitiveData primitive;
         primitive.LocalToWorld = proxy->GetLocalToWorld();
+        primitive.Generation = proxy->GetGeneration();
+        primitive.MotionRevision = proxy->GetMotionRevision();
         primitive.WorldBounds = TransformBounds(proxy->GetLocalBounds(), primitive.LocalToWorld);
         primitive.LayerMask = proxy->GetLayerMask();
         primitive.DisableFrustumCulling = proxy->IsFrustumCullingDisabled();
@@ -101,6 +103,7 @@ bool BuildRenderSceneSnapshot(const Scene& scene, RenderSceneSnapshot& out, vect
         light->GetLightRenderParameters(data.Parameters);
         data.WorldBounds = {data.Parameters.WorldPosition, light->GetRadius()};
         data.LayerMask = light->GetLayerMask();
+        data.CastShadow = light->CastShadow();
         next.Lights.push_back(std::move(data));
     }
     next.Stats.Primitives = next.Primitives.size();

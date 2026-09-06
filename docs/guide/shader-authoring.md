@@ -94,6 +94,11 @@ policy 相关的编译诊断：
 每个普通资源声明都必须同时写明两侧的 binding：SPIR-V 侧用 `core/platform.hlsli` 的
 `VK_BINDING` gate 宏，DXIL 侧用 `register()`。
 
+浮点 storage image 的 SPIR-V 格式必须匹配真实 view。`platform.hlsli` 提供唯一的
+`VK_IMAGE_FORMAT("rgba16f")` gate，例如 `VK_BINDING(0, 0) VK_IMAGE_FORMAT("rgba16f")
+RWTexture2D<float4> Output : register(u0);`。该属性在 DXIL 侧为空；不要在产品 shader 重复定义
+平台宏，或把 RGBA16_FLOAT UAV 声明成默认的 rgba32f storage image。
+
 ```hlsl
 VK_BINDING(6, 2) Texture2D<float4> AlbedoTexture : register(t0);
 VK_BINDING(7, 2) SamplerState LinearSampler : register(s0);

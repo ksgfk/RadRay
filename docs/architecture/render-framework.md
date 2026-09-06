@@ -92,7 +92,9 @@ LightComponent      → CreateRenderState → Scene::AddLight(CreateSceneProxy()
 **Scene 与 proxy 只在 game thread 使用。proxy 常驻，pipeline 输入每帧复制。** proxy 在组件 `OnRegister` 时创建，
 存在 `Scene` 的 `vector<unique_ptr<...>>` 里，`OnUnregister` 时移除。
 
-**任何属性或变换变化走 `MarkRenderStateDirty()` → 对应 proxy 销毁重建。**
+**基类默认的属性或变换变化走 `MarkRenderStateDirty()` → 对应 proxy 销毁重建。**
+需要连续刚体 motion 的组件可以像 `example_pipeline_probe` 一样，在 game thread 更新自己的 proxy
+变换缓存并保持 generation/revision；瞬移调用 `ResetMotion`。重建 proxy 视为新身份，不能沿用旧运动。
 SceneComponent 的变换、重挂接和解除挂接会递归通知自身及后代的 `OnTransformChanged`，
 使缓存世界变换的 mesh/light proxy 一起更新；拒绝把祖先挂到后代之下。Light proxy 的参数在
 构造函数里一次性从 component 快照。
@@ -120,8 +122,8 @@ struct MeshDrawArgs {
 local-to-world，并把 `StaticMeshSection` 的 `FirstIndex` / `IndexCount` / `VertexOffset` 投影成 draw。
 mesh 可以在 Loading 时设置到组件；`World::Tick` 中的组件 tick 在它变成有效 Ready 资产后创建
 proxy，已存在且仍有效的 proxy 保持不变。清空或替换 mesh 仍立即刷新对应渲染状态。
-每个 flight 在 PrepareFrame 中构建一次与 view 无关的 `RenderSceneSnapshot`：primitive 保存变换、
-世界 AABB、layer mask 和连续 MeshBatch 范围；batch 借用 geometry 并保存 section draw range、primitive
+每个 flight 在 PrepareFrame 中构建一次与 view 无关的 `RenderSceneSnapshot`：primitive 保存 generation、
+MotionRevision、变换、世界 AABB、layer mask、CastShadow 和连续 MeshBatch 范围；batch 借用 geometry 并保存 section draw range、primitive
 和 material 索引。材质按首次出现去重，所有 pass 的 program 分配帧内整数 ID。光源保存参数和球形界限。
 `StaticMeshSceneProxy` 从 mesh asset 提供局部 bounds；自定义 proxy 可以覆盖 layer mask 与禁用视锥剔除标志。
 无效 bounds 保守可见；几何和纹理由宿主 per-flight refs 保活。
@@ -154,10 +156,10 @@ view 值复制进 callback payload，RendererList 借用至 graph 执行结束�
 Opaque 即使列表为空仍定义输出。内置 ForwardPipeline 与 Tidal Atrium 共用该模块，后者在 Opaque 和
 Transparent 之间保留自有场景屏幕，并把 Signal/Sky/Panel/HUD/Downsample/Present 的 pass 参数交给 Graph 准备。
 
-Forward 在同一张 graph 中声明可选深度预通道、opaque 和必要的 transparent。一个 family 可以包含
-多个不重叠 view，独立保存剔除结果、排序、光照和 offsets，共享 family attachments。view/scissor
-经 `MakeViewport` 统一处理 Vulkan Y 翻转；点光按各 view 的距离截断。目标、深度 Load/Store、
-视图提交和当前范围见 [Renderer foundation](renderer-foundation.md#forward-范围)。
+Forward 默认保持基础深度/opaque/transparent 路径；同一类通过配置组合 HDR、级联阴影、Forward+、
+AO、TAA 或 4x MSAA、Bloom 与多 view 输出。view/scissor 经 `MakeViewport` 统一处理 Vulkan Y 翻转。
+产品 pass 的 graph 资源经通用 `RendererListPassBindings` 进入既有提交循环。目标、时域原子提交、
+配置互斥和当前范围统一见 [Renderer foundation](renderer-foundation.md#forward-范围)。
 
 ## Application 与 runner
 
@@ -300,8 +302,8 @@ registry 析构不调用钩子、不释放借用对象。owner 显式选择 Shut
 
 - **默认 pipeline 为空**：`RenderSystem::_pipeline` 只有在应用调用 `SetPipeline` 后才接线；
   `example_lambert_sphere` 的 pipeline 注入是一个显式样例路径。
-- **当前 Forward 使用 snapshot、逐 view 剔除、renderer lists、ForwardGraph 和 per-flight graph resources**；没有自动 instancing、
-  shadow 或内置 post process。样例自定义计算与合成 pass 的接入不改变内置 Forward 的范围。
+- **当前 Forward 使用 snapshot、逐 view 剔除、renderer lists、ForwardGraph 和 per-flight graph resources**；
+  HDR 效果属于同一 pipeline 的配置组合，仍没有自动 instancing。
 - **group 数字来自当前 target metadata**：具体 pipeline 按 declaration 解释职责，Material 只认识 anchor 选中的一组。
 - **`PrimitiveComponent` 基类仍返回空 proxy**：可绘制路径由 `StaticMeshComponent` 的派生实现提供。
 - **JIT 不是 runtime 的可用性前提**：关闭 JIT 后 program 源码请求失败；未来 AOT consumer 仍可

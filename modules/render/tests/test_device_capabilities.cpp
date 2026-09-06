@@ -100,7 +100,7 @@ protected:
     void TearDown() override {
         if (Context.Device) {
             Context.Queue->Wait();
-            Context.Device.reset();
+            Context.Reset();
         }
         EXPECT_EQ(Context.ValidationErrors.load(), 0u);
     }

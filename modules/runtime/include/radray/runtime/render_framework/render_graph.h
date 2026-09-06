@@ -160,6 +160,9 @@ public:
     RgParameterSetHandle CreateParameterSet(ShaderProgram& program, uint32_t group,
                                             std::span<const RgParameterBinding> bindings);
     void SetSideEffect();
+    RgPassHandle GetPassHandle() const noexcept;
+    bool OwnsParameterSet(RgParameterSetHandle handle, const ShaderProgram& program, uint32_t group) const noexcept;
+    void Reject(std::string_view code, std::string_view message, std::string_view binding = {});
 
 protected:
     friend class RenderGraph;
@@ -232,6 +235,8 @@ public:
     render::Buffer* GetBuffer(RgBufferHandle handle) const;
     void BindParameterSet(RgParameterSetHandle handle) noexcept;
     const GraphicsPassState& PassState() const noexcept;
+    RgPassHandle GetPassHandle() const noexcept;
+    bool OwnsParameterSet(RgParameterSetHandle handle, const ShaderProgram& program, uint32_t group) const noexcept;
 
 private:
     friend class RenderGraph;
@@ -313,6 +318,8 @@ public:
     bool Compile();
     const RenderGraphExecutionReport& GetReport() const noexcept;
     bool WasWritten(RgTextureHandle handle) const noexcept;
+    bool WasPassExecuted(RgPassHandle handle) const noexcept;
+    bool PassWroteTexture(RgPassHandle pass, RgTextureHandle texture) const noexcept;
     uint64_t GetGeneration() const noexcept;
 
 private:

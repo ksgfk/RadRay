@@ -45,7 +45,7 @@ bool FillViewParameters(
     ShaderParameterStorage& storage,
     const CullingResults& culling,
     const ResolvedRenderView& view,
-    bool& lightOverflowWarned) {
+    bool& lightOverflowWarned, bool localLightsFromPass) {
     struct SelectedLight {
         LightRenderParameters Parameters;
         float Radius;
@@ -57,6 +57,8 @@ bool FillViewParameters(
         return false;
     }
     const Eigen::Vector3f eye = view.WorldPosition;
+    if (storage.GetLayout()->Find("ForwardView.PreviousViewProj") &&
+        !storage.SetMatrix4x4("ForwardView.PreviousViewProj", view.PreviousViewValid ? view.PreviousViewProjection : view.ViewProjection)) return false;
     if (!storage.SetFloat4(
             "EyePosition",
             Eigen::Vector4f{eye.x(), eye.y(), eye.z(), 1.0f})) {
@@ -73,7 +75,7 @@ bool FillViewParameters(
             .DistanceSquared = visible.DistanceSquared};
         if (light.Type == LightType::Directional) {
             directional.push_back(selected);
-        } else if (light.Type == LightType::Point) {
+        } else if (light.Type == LightType::Point && !localLightsFromPass) {
             points.push_back(selected);
         }
     }

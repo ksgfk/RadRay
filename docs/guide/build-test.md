@@ -51,8 +51,9 @@ cmake --build build_clangcl --config Debug --parallel 24
 验证不带编译器的 runtime 时使用独立目录：
 
 ```powershell
-cmake --preset win-x64-debug -B build_runtime_only -DRADRAY_BUILD_SHADER_COMPILER=OFF
+cmake --preset win-x64-debug-clangcl -B build_runtime_only -DRADRAY_BUILD_SHADER_COMPILER=OFF
 cmake --build build_runtime_only --config Debug --parallel 24
+ctest --test-dir build_runtime_only -C Debug --output-on-failure
 ```
 
 该配置使 JIT/tools 一起关闭，不发现或部署 DXC。检查实际 target 边使用链接 map（MSVC
@@ -81,6 +82,15 @@ cmake --build build_runtime_only --config Debug --parallel 24
 | `test_render_foundation` | `RenderWorkloadTest`, `RenderFoundationTest` |
 | `test_render_graph_compile` | `RenderGraphCompileTest` |
 | `test_render_graph` | `RenderGraphTest` |
+| `test_graph_contracts` | `GraphContractTest`（整数数据链、Clear/Load、layer/mip、间接工作量） |
+| `test_graph_preparation` | `GraphPreparationTest`（分配/参数故障注入与恢复） |
+| `test_renderer_list_pass_bindings` | `RendererListPassBindingsTest` |
+| `test_forward_foundation_probes` | `ForwardFoundationProbe`（底层独立 shader，具体 suite 以 `ctest -N` 为准） |
+| `test_flight_lifetime` | `FlightLifetimeTest`（真实三 flight、history 退休、外部 output） |
+| `test_gpu_test_fixture` | `GpuTestFixture`, `GpuValidationProbe` |
+| `test_primitive_history` | `PrimitiveHistory` |
+| `test_spot_light` | `SpotLight` |
+| `test_view_temporal_commit` | `ViewTemporalGpuTest`, `ViewTemporalContextTest` |
 | `test_foundation_compute` | `FoundationComputeTest` |
 | `test_view_state` | `ViewStateTest` |
 | `test_render_outputs` | `RenderOutputTest` |
@@ -108,8 +118,9 @@ cmake --build build_debug --config Debug --target test_asset_slot --parallel 24
 ctest --test-dir build_debug -C Debug -R AssetSlotTest --output-on-failure
 ```
 
-全量构建后去掉 `-R` 可运行全部已注册测试。GPU 用例在后端不可用时由用例内 `GTEST_SKIP()`
-报告跳过；已创建设备后的资源、PSO、提交或读回错误必须失败。样例资产在被忽略的 `assets/`
+全量构建后去掉 `-R` 可运行全部已注册测试。GPU 用例区分后端未编译、无 adapter、缺验证层与
+初始化失败；可选后端不可用时可 `GTEST_SKIP()`，native 初始化、资源、PSO、提交或读回错误必须
+失败。`RADRAY_TEST_REQUIRED_BACKENDS=d3d12,vulkan` 使必测后端缺失也失败。样例资产在被忽略的 `assets/`
 下，通过源码仓库外的渠道准备。新增测试源文件后重新 configure；CTest 不负责构建。
 
 涉及 RTTI、公共 C++ ABI 或跨静态库对象查询时，Debug 与 Release 都要分别完成全量构建，
@@ -120,14 +131,37 @@ POST_BUILD discovery 争用中间 JSON，导致随机失败甚至注册到错误
 CTest 阶段避免构建期竞争。修改注册逻辑时，比较各 exe 的 `--gtest_list_tests` 与 CTest 列表及
 实际命令，不能仅凭 `ctest -N` 的总数判断正确性。注册写法见 [C++ 约定](cpp-conventions.md)。
 
+`tools/run_render_validation.py` 对已构建配置串行运行 CTest，保存每用例 gtest XML、CTest JUnit、日志
+和汇总 JSON。每份结果记录 SHA、未提交改动摘要、配置开关、OS/驱动以及 fixture 提供的 backend、
+adapter 和 validation 属性；required backend 必须实际执行，通过总数不能掩盖后端全跳过。输出目录
+必须为空，失败与环境失败单独统计。返回非零时先检查 `summary.json` 和对应 XML/日志。
+
+```powershell
+python tools/run_render_validation.py --self-test
+python tools/run_render_validation.py --build-dir build_debug --config Debug --output-dir validation/debug --required-backends d3d12,vulkan
+cmake --build build_debug --config Release --parallel 24
+python tools/run_render_validation.py --build-dir build_debug --config Release --output-dir validation/release --required-backends d3d12,vulkan
+python tools/run_render_validation.py --build-dir build_debug --config Debug --output-dir validation/gpu-check --regex "GraphContractTest|ForwardFoundationProbe" --gpu-validation
+```
+
+正常 GPU fixture 开启 D3D debug layer 或 Vulkan validation + synchronization validation。
+`--gpu-validation` 另启 D3D GBV / Vulkan GPU-assisted validation，只用于少量数值用例；延迟 host-signaled
+fence 压力和性能基准独立运行，避免验证层 semaphore 跟踪阻塞影响压力协议。H04 在独立测试进程注入
+一条原生回调错误，单独记为 expected probe；普通验收的 unexpected validation errors 必须为零。
+有意拒绝非法 graph 的产品诊断也不等同于 native validation 错误。
+
+无 JIT 配置仍运行 graph compile、primitive history、spot、culling、renderer-list 等 CPU 用例；依赖
+编译器的 GPU shader suites 不注册，CMake cache 中 JIT/compiler 的 OFF 值说明原因。runtime-only
+仍可通过加载匹配 backend 的已编译 artifact 使用 runtime；源码请求不会反向链接 compiler client。
+
 ## 样例与专项验证
 
 从仓库根运行 JIT 样例，确保源码树的 `shaderlib/` 可访问。资产根优先使用
 `RADRAY_ASSETS_DIR`，否则使用构建时的仓库 `assets/`；shaderlib 不复制到输出目录。
 
 ```powershell
-.\build_debug\_build\Debug\example_lambert_sphere.exe --backend d3d12
-.\build_debug\_build\Debug\example_lambert_sphere.exe --backend vulkan
+.\build_debug\_build\Debug\example_lambert_sphere.exe --d3d12
+.\build_debug\_build\Debug\example_lambert_sphere.exe --vulkan
 ```
 
 只构建 raw shader CLI 可以关闭 render/runtime/tests 并单独选择工具目标：
@@ -157,8 +191,25 @@ Tidal Atrium 的有限帧 smoke 可直接验证 ForwardGraph 与样例 pass 的�
 .\build_debug\_build\Debug\example_tidal_atrium.exe --backend vulkan --valid-layer --frames 120
 ```
 
-RenderGraph 的 `*DumpAndLargeGraph*` 用例包含 100/1000-pass CPU benchmark，使用 Release
-记录性能基线，并注明机器与配置；不要混用 Debug 数据。排查相关内存错误时，Windows/MSVC
+`example_pipeline_probe` 直接使用内置 `ForwardPipeline`，提供 PBR 材质、cutout、移动刚体、四级联
+阴影、局部灯群、透明层和间接萤火虫；不建立效果算法的金图或 SSIM 测试。以下运行打开主窗口、
+分屏和离屏观察者，并在所属 flight fence 后输出 PNG、graph JSON/DOT：
+
+```powershell
+.\build_debug\_build\Debug\example_pipeline_probe.exe --backend d3d12 --profile temporal --frames 200 --tour --split --observer --fireflies --multithread --capture-dir validation/probe-d3d12 --dump-graph
+.\build_debug\_build\Debug\example_pipeline_probe.exe --backend vulkan --profile msaa --frames 200 --tour --split --observer --fireflies --multithread --capture-dir validation/probe-vulkan --dump-graph
+```
+
+WASD/QE 移动，方向键转向，R/F 调曝光；F2 阴影、F3 AO、F4 分屏、F5 debug 显示、F6 TAA、F7
+RenderScale、F8 Temporal/MSAA、F9 Bloom、F10 Forward+、F11 萤火虫；P 暂停第二视图，Space 暂停运动。
+窗口标题显示当前配置。`--tour` 自动改变比例、尺寸、AA、暂停/恢复第二视图和历史显示，再恢复原值。
+debug 包括深度/法线/motion、AO、cascade、tile 占用及 overflow、当前/历史 HDR、Bloom 与 depth pyramid。
+图报告用于检查资源裁剪、物理复用和 barrier；截图只作为人工巡检证据。
+
+RenderGraph 的 `*G08DependentGraphs*` 用例包含固定种子的 100/1000-pass chain/fan-out/mip 图，
+每种重复 100 次并对照独立依赖遍历与确定性 JSON/DOT，记录 median/p95、报告容器容量与分配数。
+这是所测 CPU 编译/报告容器数据，不是进程总内存或帧 GPU 时间；使用 Release 记录基线，并注明
+机器与配置，不混用 Debug 数据。排查相关内存错误时，Windows/MSVC
 AddressSanitizer 使用独立目录和 Developer PowerShell（PATH 需含 ASAN runtime），关闭 mimalloc：
 
 ```powershell

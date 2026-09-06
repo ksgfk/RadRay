@@ -10,7 +10,7 @@ class ViewStateTest : public testing::TestWithParam<render::RenderBackend> {};
 
 TEST_P(ViewStateTest, PreviousMatrixOnlyAdvancesOnCommitAndCutInvalidates) {
     render::test::DeviceContext device;
-    ASSERT_TRUE(render::test::TryCreateDevice(GetParam(), device, true));
+    if (!render::test::TryCreateDevice(GetParam(), device, true)) GTEST_SKIP() << device.Reason;
     render::RenderPassRegistry passes(device.Device.get());
     ViewStateRegistry registry(*device.Device, passes, 2);
     ResolvedRenderViewFamily family{};
@@ -52,7 +52,7 @@ TEST_P(ViewStateTest, PreviousMatrixOnlyAdvancesOnCommitAndCutInvalidates) {
 
 TEST_P(ViewStateTest, HistoryGpuRoundTripRotationResizeAndRetirement) {
     render::test::DeviceContext device;
-    ASSERT_TRUE(render::test::TryCreateDevice(GetParam(), device, true));
+    if (!render::test::TryCreateDevice(GetParam(), device, true)) GTEST_SKIP() << device.Reason;
     render::RenderPassRegistry passes(device.Device.get());
     RenderResourcePool pools[]{RenderResourcePool{*device.Device, passes}, RenderResourcePool{*device.Device, passes}};
     ViewStateRegistry registry(*device.Device, passes, 2);
@@ -152,7 +152,7 @@ TEST_P(ViewStateTest, HistoryGpuRoundTripRotationResizeAndRetirement) {
 
 TEST_P(ViewStateTest, IndependentViewsAndInactiveRecordsRetireAtOwningFlight) {
     render::test::DeviceContext device;
-    ASSERT_TRUE(render::test::TryCreateDevice(GetParam(), device, true));
+    if (!render::test::TryCreateDevice(GetParam(), device, true)) GTEST_SKIP() << device.Reason;
     render::RenderPassRegistry passes(device.Device.get());
     ViewStateRegistry registry(*device.Device, passes, 2, 1);
     ResolvedRenderViewFamily family{};

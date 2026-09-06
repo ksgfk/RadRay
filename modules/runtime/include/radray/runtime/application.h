@@ -127,6 +127,7 @@ struct ApplicationRuntimeDescriptor {
     uint32_t FlightDataCount{2};
     render::TextureFormat BackBufferFormat;
     render::PresentMode PresentMode;
+    bool EnableSynchronizationValidation{false};
 };
 
 class Application {

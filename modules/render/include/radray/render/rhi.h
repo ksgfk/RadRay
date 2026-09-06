@@ -558,6 +558,7 @@ struct VulkanInstanceDescriptor {
     uint32_t EngineVersion{0};
     bool IsEnableDebugLayer{false};
     bool IsEnableGpuBasedValid{false};
+    bool IsEnableSynchronizationValidation{false};
     RenderLogCallback LogCallback{nullptr};
     void* LogUserData{nullptr};
 };

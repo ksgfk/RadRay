@@ -2,6 +2,7 @@
 
 #include <radray/runtime/render_framework/render_graph.h>
 #include <radray/runtime/render_framework/renderer_list.h>
+#include <radray/runtime/render_framework/renderer_list_pass_bindings.h>
 
 namespace radray {
 
@@ -14,6 +15,7 @@ enum class ForwardGraphStage : uint8_t {
 struct ForwardGraphView {
     ResolvedRenderView View;
     const RendererList* List{nullptr};
+    std::span<const RendererListProgramParameters> Parameters{};
 };
 
 struct ForwardGraphStageInputs {
@@ -25,6 +27,8 @@ struct ForwardGraphStageInputs {
     RgColorAttachmentDesc ColorAttachment{};
     RgDepthAttachmentDesc DepthAttachment{};
     DrawExecutionStats* Execution{nullptr};
+    bool PreserveEmptyPass{false};
+    std::span<const RgTextureHandle> AuxiliaryColors{};
 };
 
 struct ForwardGraphStageOutput {

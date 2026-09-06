@@ -1,4 +1,5 @@
 #include "gpu_test_fixture.h"
+#include "gpu_submission_gate.h"
 #include "render_graph_test_driver.h"
 #include "stage_b_test_support.h"
 #include "forward_pipeline/forward_lit_mesh_pass_processor.h"
@@ -172,6 +173,8 @@ struct Output { float4 Position : SV_Position; float2 UV : TEXCOORD0; };
     const auto commitsBefore = writes.GetStats().CommitCount;
     auto command = device.CreateCommandBuffer(Device.Queue);
     ASSERT_TRUE(command);
+    test::GpuSubmissionGate retainedGate{device, *Device.Queue};
+    ASSERT_TRUE(retainedGate.Fence);
     command->Begin();
     ASSERT_TRUE(RenderGraphTestDriver::Execute(graph, *command).Success) << graph.GetReport().ToText();
     EXPECT_EQ(resources.GetSetCount(), setsBefore);
@@ -181,7 +184,12 @@ struct Output { float4 Position : SV_Position; float2 UV : TEXCOORD0; };
     EXPECT_EQ(execution.PsoFailure, 1u);
     command->End();
     auto* raw = command.Get();
-    Device.Queue->Submit({.CmdBuffers = std::span{&raw, 1}});
+    auto* gateWait = retainedGate.Fence.get();
+    uint64_t gateValue = 1;
+    Device.Queue->Submit({.CmdBuffers = std::span{&raw, 1}, .WaitFences = std::span{&gateWait, 1}, .WaitValues = std::span{&gateValue, 1}});
+    assets.Pump();
+    EXPECT_EQ(assets.GetAssetCount(), 1u);
+    ASSERT_TRUE(retainedGate.Release(1));
     Device.Queue->Wait();
     const auto* mapped = static_cast<const uint8_t*>(readback->Map(0, row * 64));
     ASSERT_NE(mapped, nullptr);

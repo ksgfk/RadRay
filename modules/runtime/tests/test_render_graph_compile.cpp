@@ -1,6 +1,8 @@
 #include "graph_compile_device.h"
 #include <radray/runtime/render_framework/render_graph.h>
 #include <chrono>
+#include <algorithm>
+#include <random>
 #include <gtest/gtest.h>
 
 namespace radray {
@@ -31,6 +33,42 @@ protected:
     test::GraphCompileDevice Device;
     unique_ptr<render::RenderPassRegistry> Registry;
     unique_ptr<RenderResourcePool> Pool;
+};
+
+TEST_F(RenderGraphCompileTest, RejectsTextureReadbackOffsetInsideATexelBeforeAllocation) {
+    auto graph = MakeGraph();
+    auto color = graph.CreateTexture(GraphColor(), "color");
+    Clear(graph, color);
+    auto destination = graph.CreateBuffer({4096, render::MemoryType::ReadBack, render::BufferUse::CopyDestination | render::BufferUse::MapRead, {}}, "readback");
+    graph.AddCopyTextureToBufferPass("unaligned texel", color, destination, {0, 1, 0, 1}, 31);
+    EXPECT_FALSE(graph.Compile());
+    EXPECT_NE(graph.GetReport().ToText().find("CopyTextureRange"), string::npos);
+}
+
+TEST_F(RenderGraphCompileTest, G06PartialWritesDoNotInventBufferRangeValidityAndInvalidCopiesAllocateNothing) {
+    for (uint32_t scenario = 0; scenario < 4; ++scenario) {
+        auto graph = MakeGraph("partial buffer validity");
+        const auto source = graph.CreateBuffer({16, render::MemoryType::Device, render::BufferUse::UnorderedAccess | render::BufferUse::CopySource, {}}, "source");
+        const auto target = graph.CreateBuffer({16, render::MemoryType::Device, render::BufferUse::CopySource | render::BufferUse::CopyDestination, {}}, "target");
+        graph.AddComputePass<EmptyPass>("source initialized", [=](EmptyPass&, RenderGraphComputeBuilder& builder) { builder.WriteBuffer(source); }, EmptyCompute);
+        const uint64_t size = scenario == 1 ? 0 : 8;
+        const uint64_t offset = scenario == 2 ? 12 : scenario == 3 ? std::numeric_limits<uint64_t>::max() - 3
+                                                                   : 0;
+        graph.AddCopyBufferPass("partial copy", source, target, size, 0, offset);
+        graph.AddComputePass<EmptyPass>("whole buffer consumer", [=](EmptyPass&, RenderGraphComputeBuilder& builder) { builder.ReadBuffer(target, RgBufferAccess::CopySource); builder.SetSideEffect(); }, EmptyCompute);
+        EXPECT_FALSE(graph.Compile());
+        ASSERT_FALSE(graph.GetReport().Diagnostics.empty());
+        EXPECT_EQ(Device.NativeCreates, 0u);
+    }
+}
+class CompileTexture final : public render::Texture {
+public:
+    explicit CompileTexture(render::TextureDescriptor descriptor) : Desc(descriptor) {}
+    bool IsValid() const noexcept override { return true; }
+    void Destroy() noexcept override {}
+    void SetDebugName(std::string_view) noexcept override {}
+    render::TextureDescriptor GetDesc() const noexcept override { return Desc; }
+    render::TextureDescriptor Desc;
 };
 
 TEST_F(RenderGraphCompileTest, ContentVersionsCullDiscardingOverwriteButPreserveLoad) {
@@ -147,21 +185,23 @@ TEST_F(RenderGraphCompileTest, DisjointMipsStayIndependentAndFullReadConsumesBot
 TEST_F(RenderGraphCompileTest, IndirectDeclarationsValidateAndCarryContentDependencies) {
     auto graph = MakeGraph("indirect");
     const auto arguments = graph.CreateBuffer(
-        {sizeof(render::DrawIndexedIndirectArguments), render::MemoryType::Device,
-         render::BufferUse::UnorderedAccess | render::BufferUse::Indirect, {}},
+        {sizeof(render::DrawIndexedIndirectArguments), render::MemoryType::Device, render::BufferUse::UnorderedAccess | render::BufferUse::Indirect, {}},
         "arguments");
     const auto color = graph.CreateTexture(GraphColor(), "color");
     graph.AddComputePass<EmptyPass>(
         "produce", [=](EmptyPass&, RenderGraphComputeBuilder& builder) {
             builder.WriteBuffer(arguments);
-        }, EmptyCompute);
+        },
+        EmptyCompute);
     graph.AddRasterPass<EmptyPass>(
         "consume", [=](EmptyPass&, RenderGraphRasterBuilder& builder) {
             builder.SetColorAttachment(0, color);
             EXPECT_TRUE(builder.ReadIndirectArguments(
-                arguments, RgIndirectCommand::DrawIndexed).IsValid());
+                                   arguments, RgIndirectCommand::DrawIndexed)
+                            .IsValid());
             builder.SetSideEffect();
-        }, EmptyRaster);
+        },
+        EmptyRaster);
     ASSERT_TRUE(graph.Compile()) << graph.GetReport().ToText();
     EXPECT_EQ(graph.GetReport().Passes[1].DataDependencies, vector<uint32_t>{0});
 
@@ -177,7 +217,8 @@ TEST_F(RenderGraphCompileTest, IndirectDeclarationsValidateAndCarryContentDepend
             "consume", [=](EmptyPass&, RenderGraphComputeBuilder& builder) {
                 EXPECT_FALSE(builder.ReadIndirectArguments(buffer, command, offset, count).IsValid());
                 builder.SetSideEffect();
-            }, EmptyCompute);
+            },
+            EmptyCompute);
         EXPECT_FALSE(invalid.Compile());
         ASSERT_FALSE(invalid.GetReport().Diagnostics.empty());
     };
@@ -190,16 +231,17 @@ TEST_F(RenderGraphCompileTest, IndirectDeclarationsValidateAndCarryContentDepend
     {
         auto owner = MakeGraph("indirect owner");
         const auto foreign = owner.CreateBuffer(
-            {sizeof(render::DrawIndirectArguments), render::MemoryType::Device,
-             render::BufferUse::Indirect, {}},
+            {sizeof(render::DrawIndirectArguments), render::MemoryType::Device, render::BufferUse::Indirect, {}},
             "foreign arguments");
         auto consumer = MakeGraph("indirect consumer");
         consumer.AddRasterPass<EmptyPass>(
             "consume foreign", [=](EmptyPass&, RenderGraphRasterBuilder& builder) {
                 EXPECT_FALSE(builder.ReadIndirectArguments(
-                    foreign, RgIndirectCommand::Draw).IsValid());
+                                        foreign, RgIndirectCommand::Draw)
+                                 .IsValid());
                 builder.SetSideEffect();
-            }, EmptyRaster);
+            },
+            EmptyRaster);
         EXPECT_FALSE(consumer.Compile());
         ASSERT_FALSE(consumer.GetReport().Diagnostics.empty());
         EXPECT_EQ(consumer.GetReport().Diagnostics.front().Code, "InvalidHandle");
@@ -212,15 +254,11 @@ TEST_F(RenderGraphCompileTest, IndirectDeclarationsValidateAndCarryContentDepend
 TEST_F(RenderGraphCompileTest, ResolveValidatesArrayRangesAndCullsUnusedWork) {
     const auto sourceDesc = [] {
         return render::TextureDescriptor{
-            render::TextureDimension::Dim2DArray, 32, 16, 4, 1, 4,
-            render::TextureFormat::RGBA8_UNORM, render::MemoryType::Device,
-            render::TextureUse::RenderTarget | render::TextureUse::CopySource, {}};
+            render::TextureDimension::Dim2DArray, 32, 16, 4, 1, 4, render::TextureFormat::RGBA8_UNORM, render::MemoryType::Device, render::TextureUse::RenderTarget | render::TextureUse::CopySource, {}};
     };
     const auto destinationDesc = [] {
         return render::TextureDescriptor{
-            render::TextureDimension::Dim2DArray, 32, 16, 4, 1, 1,
-            render::TextureFormat::RGBA8_UNORM, render::MemoryType::Device,
-            render::TextureUse::CopyDestination | render::TextureUse::Resource, {}};
+            render::TextureDimension::Dim2DArray, 32, 16, 4, 1, 1, render::TextureFormat::RGBA8_UNORM, render::MemoryType::Device, render::TextureUse::CopyDestination | render::TextureUse::Resource, {}};
     };
     {
         auto graph = MakeGraph("resolve array");
@@ -232,16 +270,17 @@ TEST_F(RenderGraphCompileTest, ResolveValidatesArrayRangesAndCullsUnusedWork) {
                     0, source,
                     {.View = {.Dimension = render::TextureDimension::Dim2DArray,
                               .Range = {1, 2, 0, 1}}});
-            }, EmptyRaster);
+            },
+            EmptyRaster);
         graph.AddResolveTexturePass(
             "resolve", source, destination, {1, 2, 0, 1}, {1, 2, 0, 1});
         graph.AddComputePass<EmptyPass>(
             "consume", [=](EmptyPass&, RenderGraphComputeBuilder& builder) {
-                builder.ReadTexture(destination, {
-                    .Dimension = render::TextureDimension::Dim2DArray,
-                    .Range = {1, 2, 0, 1}});
+                builder.ReadTexture(destination, {.Dimension = render::TextureDimension::Dim2DArray,
+                                                  .Range = {1, 2, 0, 1}});
                 builder.SetSideEffect();
-            }, EmptyCompute);
+            },
+            EmptyCompute);
         ASSERT_TRUE(graph.Compile()) << graph.GetReport().ToText();
         ASSERT_EQ(graph.GetReport().Passes[1].Type, RgPassType::Resolve);
         EXPECT_EQ(graph.GetReport().Passes[1].DataDependencies, vector<uint32_t>{0});
@@ -257,7 +296,8 @@ TEST_F(RenderGraphCompileTest, ResolveValidatesArrayRangesAndCullsUnusedWork) {
                     0, source,
                     {.View = {.Dimension = render::TextureDimension::Dim2DArray,
                               .Range = {0, 1, 0, 1}}});
-            }, EmptyRaster);
+            },
+            EmptyRaster);
         graph.AddResolveTexturePass(
             "unused resolve", source, destination, {0, 1, 0, 1}, {0, 1, 0, 1});
         ASSERT_TRUE(graph.Compile()) << graph.GetReport().ToText();
@@ -308,7 +348,8 @@ TEST_F(RenderGraphCompileTest, RasterUavStagesAreCheckedBeforeAllocation) {
                 builder.SetColorAttachment(0, color);
                 builder.WriteTexture(storage, render::ShaderStage::Pixel);
                 builder.SetSideEffect();
-            }, EmptyRaster);
+            },
+            EmptyRaster);
     };
     Device.Capabilities.Features.UavWriteStages = render::ShaderStage::Compute;
     auto rejected = MakeGraph("raster uav rejected");
@@ -325,31 +366,129 @@ TEST_F(RenderGraphCompileTest, RasterUavStagesAreCheckedBeforeAllocation) {
     EXPECT_EQ(Pool->GetStats().Created, 0u);
 }
 
-TEST_F(RenderGraphCompileTest, DumpAndLargeGraphCompilationAreDeterministic) {
-    string json, dot;
-    for (uint32_t count : {100u, 1000u}) {
-        const auto start = std::chrono::steady_clock::now();
-        std::chrono::nanoseconds compileTime{};
-        for (uint32_t iteration = 0; iteration < 100; ++iteration) {
-            auto graph = MakeGraph("stable");
-            for (uint32_t p = 0; p < count; ++p) graph.AddComputePass<EmptyPass>(fmt::format("pass {}", p), [](EmptyPass&, RenderGraphComputeBuilder& builder) { builder.SetSideEffect(); }, EmptyCompute);
-            const auto compileStart = std::chrono::steady_clock::now();
-            ASSERT_TRUE(graph.Compile());
-            compileTime += std::chrono::steady_clock::now() - compileStart;
-            EXPECT_EQ(graph.GetReport().LivePasses, count);
-            if (iteration == 0) {
-                json = graph.GetReport().ToJson();
-                dot = graph.GetReport().ToDot();
-            } else {
-                EXPECT_EQ(graph.GetReport().ToJson(), json);
-                EXPECT_EQ(graph.GetReport().ToDot(), dot);
+TEST_F(RenderGraphCompileTest, G05UnusedSixPassEffectsAreCulledFromObservableConsumers) {
+    for (uint32_t consumed = 0; consumed <= 2; ++consumed) {
+        auto graph = MakeGraph("effect consumers");
+        CompileTexture output{GraphColor()};
+        array<render::TextureStates, 1> states{render::TextureState::Undefined};
+        array<uint8_t, 1> valid{0};
+        RenderExternalTexture external{&output, output.Desc, states, valid};
+        const auto target = graph.ImportTexture(external, "observable output", RenderGraphExternalAccess::ObservableOutput);
+        array<RgTextureHandle, 3> ends;
+        for (uint32_t chain = 0; chain < 3; ++chain) {
+            RgTextureHandle previous;
+            for (uint32_t step = 0; step < 6; ++step) {
+                const auto resource = graph.CreateTexture(GraphColor(), fmt::format("effect {} step {}", chain, step));
+                graph.AddRasterPass<EmptyPass>(fmt::format("chain {} pass {}", chain, step), [=](EmptyPass&, RenderGraphRasterBuilder& builder) {
+                    if (step) builder.ReadTexture(previous);
+                    builder.SetColorAttachment(0, resource); }, EmptyRaster);
+                previous = resource;
             }
+            ends[chain] = previous;
         }
-        RecordProperty(fmt::format("compile_and_dump_{}_passes_us", count),
-                       static_cast<int>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count() / 100));
-        RecordProperty(fmt::format("compile_{}_passes_us", count), static_cast<int>(std::chrono::duration_cast<std::chrono::microseconds>(compileTime).count() / 100));
-        RecordProperty(fmt::format("native_creates_{}_passes", count), Device.NativeCreates);
+        graph.AddRasterPass<EmptyPass>("composite", [=](EmptyPass&, RenderGraphRasterBuilder& builder) {
+            for (uint32_t chain = 0; chain < consumed; ++chain) builder.ReadTexture(ends[chain]);
+            builder.SetColorAttachment(0, target); }, EmptyRaster);
+        ASSERT_TRUE(graph.Compile()) << graph.GetReport().ToText();
+        const auto& report = graph.GetReport();
+        EXPECT_EQ(report.LivePasses, consumed * 6 + 1);
+        for (uint32_t p = 0; p < 18; ++p) {
+            EXPECT_EQ(report.Passes[p].Live, p / 6 < consumed);
+            EXPECT_EQ(report.Resources[p + 1].FirstUse >= 0, p / 6 < consumed);
+            EXPECT_FALSE(report.Passes[p].Executed);
+        }
+        EXPECT_EQ(report.PhysicalAllocations, 0u);
     }
+}
+
+TEST_F(RenderGraphCompileTest, G08DependentGraphsMatchReferenceAndDeterministicPerformanceSamples) {
+    for (uint32_t count : {100u, 1000u})
+        for (uint32_t shape = 0; shape < 3; ++shape) {
+            std::mt19937 random{20260906};
+            vector<vector<uint32_t>> reference(count);
+            for (uint32_t p = 1; p < count; ++p) {
+                if (shape == 0)
+                    reference[p].push_back(p - 1);
+                else {
+                    const uint32_t edges = 1 + random() % std::min(4u, p);
+                    while (reference[p].size() < edges) {
+                        const auto producer = random() % p;
+                        if (std::find(reference[p].begin(), reference[p].end(), producer) == reference[p].end()) reference[p].push_back(producer);
+                    }
+                    std::sort(reference[p].begin(), reference[p].end());
+                }
+            }
+            vector<bool> live(count, false);
+            vector<uint32_t> pending{count - 1};
+            while (!pending.empty()) {
+                const auto p = pending.back();
+                pending.pop_back();
+                if (live[p]) continue;
+                live[p] = true;
+                pending.insert(pending.end(), reference[p].begin(), reference[p].end());
+            }
+            vector<double> micros;
+            string json, dot;
+            uint64_t reportBytes = 0, reportBlocks = 0;
+            for (uint32_t iteration = 0; iteration < 100; ++iteration) {
+                auto graph = MakeGraph("dependent benchmark");
+                auto descriptor = GraphColor();
+                descriptor.Usage |= render::TextureUse::UnorderedAccess;
+                CompileTexture output{descriptor};
+                array<render::TextureStates, 1> states{render::TextureState::Undefined};
+                array<uint8_t, 1> valid{0};
+                RenderExternalTexture external{&output, output.Desc, states, valid};
+                const auto target = graph.ImportTexture(external, "observable final content", RenderGraphExternalAccess::ObservableOutput);
+                vector<RgTextureHandle> textures;
+                if (shape == 2) {
+                    descriptor.Dim = render::TextureDimension::Dim2DArray;
+                    descriptor.DepthOrArraySize = 3;
+                    descriptor.MipLevels = 4;
+                }
+                const uint32_t cells = shape == 2 ? 12 : 1;
+                for (uint32_t r = 0; r < (count + cells - 1) / cells; ++r) textures.push_back(graph.CreateTexture(descriptor, fmt::format("texture {}", r)));
+                const auto view = [=](uint32_t p) { return RgTextureViewDesc{.Dimension = descriptor.Dim, .Range = {(p % cells) / 4, 1, (p % cells) % 4, 1}}; };
+                for (uint32_t p = 0; p < count; ++p) graph.AddComputePass<EmptyPass>(fmt::format("pass {}", p), [&](EmptyPass&, RenderGraphComputeBuilder& builder) {
+                for (const auto producer : reference[p]) builder.ReadTexture(textures[producer / cells], view(producer));
+                builder.WriteTexture(textures[p / cells], view(p));
+                if (p == count - 1) builder.WriteTexture(target); }, EmptyCompute);
+                const auto compileStart = std::chrono::steady_clock::now();
+                ASSERT_TRUE(graph.Compile()) << graph.GetReport().ToText();
+                micros.push_back(std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - compileStart).count());
+                const auto& report = graph.GetReport();
+                EXPECT_EQ(report.LivePasses, std::count(live.begin(), live.end(), true));
+                for (uint32_t p = 0; p < count; ++p) {
+                    ASSERT_EQ(report.Passes[p].Live, live[p]);
+                    auto edges = report.Passes[p].DataDependencies;
+                    std::sort(edges.begin(), edges.end());
+                    ASSERT_EQ(edges, reference[p]);
+                    for (const auto dep : edges) EXPECT_LT(dep, p);  // Declaration order is the independent stable topological order.
+                }
+                if (iteration == 0) {
+                    json = report.ToJson();
+                    dot = report.ToDot();
+                    reportBytes = report.Passes.capacity() * sizeof(RenderGraphPassReport) + report.Resources.capacity() * sizeof(RenderGraphResourceReport);
+                    reportBlocks = 2;
+                    for (const auto& pass : report.Passes) {
+                        reportBytes += (pass.DataDependencies.capacity() + pass.HazardDependencies.capacity()) * sizeof(uint32_t);
+                        reportBlocks += !pass.DataDependencies.empty();
+                        reportBlocks += !pass.HazardDependencies.empty();
+                    }
+                } else {
+                    ASSERT_EQ(report.ToJson(), json);
+                    ASSERT_EQ(report.ToDot(), dot);
+                }
+            }
+            std::sort(micros.begin(), micros.end());
+            const auto prefix = fmt::format("{}_{}_", count, shape == 0 ? "chain" : shape == 1 ? "fanout"
+                                                                                               : "mips");
+            RecordProperty(prefix + "compile_median_us", fmt::format("{:.3f}", micros[50]));
+            RecordProperty(prefix + "compile_p95_us", fmt::format("{:.3f}", micros[94]));
+            RecordProperty(prefix + "report_capacity_bytes", std::to_string(reportBytes));
+            RecordProperty(prefix + "report_vector_allocations", std::to_string(reportBlocks));
+            RecordProperty(prefix + "native_creates", Device.NativeCreates);
+            RecordProperty(prefix + "repeats", 100);
+        }
 }
 
 }  // namespace

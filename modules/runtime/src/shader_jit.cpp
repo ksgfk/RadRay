@@ -57,6 +57,8 @@ std::optional<shader::ContractHash> ShaderJit::DiscoverContractHash(
     const shader_compiler::DiscoveryResult result =
         _client->Client.DiscoverSourceContract(request, _client->IncludePaths);
     if (!result.Succeeded()) {
+        for (const auto& diagnostic : result.Diagnostics)
+            RADRAY_ERR_LOG("Shader discovery '{}': {}, {}", request.SourceName, diagnostic.Code, diagnostic.Message);
         return std::nullopt;
     }
     return result.Contract.Hash;

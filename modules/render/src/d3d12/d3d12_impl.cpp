@@ -963,6 +963,16 @@ TextureSupport DeviceD3D12::QueryTextureSupport(const TextureSupportQuery& query
 
 Nullable<unique_ptr<CommandBuffer>> DeviceD3D12::CreateCommandBuffer(CommandQueue* queue_) noexcept {
     auto queue = CastD3D12Object(queue_);
+    D3D12_VERSIONED_ROOT_SIGNATURE_DESC emptyDesc{};
+    emptyDesc.Version = D3D_ROOT_SIGNATURE_VERSION_1_0;
+    ComPtr<ID3DBlob> emptyBlob;
+    ComPtr<ID3D12RootSignature> emptyRoot;
+    HRESULT emptyResult = ::D3D12SerializeVersionedRootSignature(&emptyDesc, emptyBlob.GetAddressOf(), nullptr);
+    if (SUCCEEDED(emptyResult)) emptyResult = _device->CreateRootSignature(0, emptyBlob->GetBufferPointer(), emptyBlob->GetBufferSize(), IID_PPV_ARGS(emptyRoot.GetAddressOf()));
+    if (FAILED(emptyResult)) {
+        RADRAY_ERR_LOG("D3D12 empty pass root signature creation failed: {} {}", GetErrorName(emptyResult), emptyResult);
+        return nullptr;
+    }
     ComPtr<ID3D12CommandAllocator> alloc;
     if (HRESULT hr = _device->CreateCommandAllocator(queue->_type, IID_PPV_ARGS(alloc.GetAddressOf()));
         FAILED(hr)) {
@@ -980,7 +990,8 @@ Nullable<unique_ptr<CommandBuffer>> DeviceD3D12::CreateCommandBuffer(CommandQueu
             this,
             std::move(alloc),
             std::move(list),
-            queue->_type);
+            queue->_type,
+            std::move(emptyRoot));
     } else {
         RADRAY_ERR_LOG("ID3D12Device::CreateCommandList failed: {} {}", GetErrorName(hr), hr);
         return nullptr;
@@ -3852,10 +3863,12 @@ CmdListD3D12::CmdListD3D12(
     DeviceD3D12* device,
     ComPtr<ID3D12CommandAllocator> cmdAlloc,
     ComPtr<ID3D12GraphicsCommandList> cmdList,
-    D3D12_COMMAND_LIST_TYPE type) noexcept
+    D3D12_COMMAND_LIST_TYPE type,
+    ComPtr<ID3D12RootSignature> emptyRootSignature) noexcept
     : _device(device),
       _cmdAlloc(std::move(cmdAlloc)),
       _cmdList(std::move(cmdList)),
+      _emptyRootSignature(std::move(emptyRootSignature)),
       _type(type) {}
 
 bool CmdListD3D12::IsValid() const noexcept {
@@ -3866,6 +3879,7 @@ void CmdListD3D12::Destroy() noexcept {
     _keepAliveBuffers.clear();
     _cmdAlloc = nullptr;
     _cmdList = nullptr;
+    _emptyRootSignature = nullptr;
 }
 
 void CmdListD3D12::SetDebugName(std::string_view name) noexcept {
@@ -4086,6 +4100,11 @@ void CmdListD3D12::EndRenderPass(unique_ptr<GraphicsCommandEncoder> encoder) noe
         return;
     }
     cmdList4->EndRenderPass();
+    // Parameter bindings belong to this encoder. End their static-data lifetime
+    // before later compute/copy passes can write the same resources.
+    // Keep a valid empty root while GBV injects barrier-validation compute work.
+    // A null root crashes the NVIDIA driver during GBV state restoration.
+    _cmdList->SetGraphicsRootSignature(_emptyRootSignature.Get());
     encoder->Destroy();
 }
 
@@ -4094,6 +4113,7 @@ Nullable<unique_ptr<ComputeCommandEncoder>> CmdListD3D12::BeginComputePass() noe
 }
 
 void CmdListD3D12::EndComputePass(unique_ptr<ComputeCommandEncoder> encoder) noexcept {
+    _cmdList->SetComputeRootSignature(_emptyRootSignature.Get());
     encoder->Destroy();
 }
 

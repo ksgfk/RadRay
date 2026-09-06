@@ -29,6 +29,7 @@ struct GraphicsPassState : GraphicsPassCompatibilityKey {
     bool IsValid() const noexcept;
 
     render::RenderPass* CompatibleRenderPass;
+    bool DepthReadOnly{false};
 
     friend bool operator==(const GraphicsPassState&, const GraphicsPassState&) = default;
 };

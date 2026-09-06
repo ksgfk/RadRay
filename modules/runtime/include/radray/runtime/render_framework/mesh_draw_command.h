@@ -10,6 +10,7 @@ class ShaderProgram;
 struct GraphicsPassState;
 struct RendererList;
 class RenderGraphRasterContext;
+class RendererListPassBindings;
 
 struct PreparedShaderGroup {
     uint32_t Group{0};
@@ -36,11 +37,14 @@ struct MeshDrawCommand {
 };
 struct DrawExecutionStats {
     uint64_t Commands{0}, Draws{0}, PsoFailure{0}, BindingFailure{0}, Skipped{0};
+    bool Succeeded() const noexcept { return PsoFailure == 0 && BindingFailure == 0 && Skipped == 0; }
 };
 
 bool ValidateMeshGeometry(const GpuMesh::DrawData& geometry, uint32_t firstIndex, uint32_t indexCount) noexcept;
 bool ValidateMeshDrawCommand(const MeshDrawCommand& command) noexcept;
 bool FinalizeMeshDrawCommand(MeshDrawCommand& command) noexcept;
 void SubmitRendererList(const RendererList& list, RenderGraphRasterContext& ctx, const GraphicsPassState& passState, DrawExecutionStats& stats);
+void SubmitRendererList(const RendererList& list, RenderGraphRasterContext& ctx, const GraphicsPassState& passState,
+                        const RendererListPassBindings& bindings, DrawExecutionStats& stats);
 
 }  // namespace radray
