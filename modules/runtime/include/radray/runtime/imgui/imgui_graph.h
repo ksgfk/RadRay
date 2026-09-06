@@ -1,5 +1,7 @@
 #pragma once
 
+#ifdef RADRAY_ENABLE_IMGUI
+
 #include <radray/runtime/imgui/imgui_system.h>
 #include <radray/runtime/render_framework/render_pipeline.h>
 
@@ -38,3 +40,5 @@ private:
 };
 
 }  // namespace radray
+
+#endif  // RADRAY_ENABLE_IMGUI

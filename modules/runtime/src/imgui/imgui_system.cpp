@@ -1,3 +1,5 @@
+#ifdef RADRAY_ENABLE_IMGUI
+
 #include "imgui_internal.h"
 
 #include <algorithm>
@@ -721,3 +723,5 @@ void ImGuiSystem::RequestOutputs(uint32_t flight, RenderWorkloadBuilder& builder
 }
 
 }  // namespace radray
+
+#endif  // RADRAY_ENABLE_IMGUI

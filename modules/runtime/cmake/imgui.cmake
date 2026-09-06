@@ -8,7 +8,9 @@ add_library(radray_imgui STATIC
     "${_imgui_root}/imgui_demo.cpp" "${_imgui_root}/misc/cpp/imgui_stdlib.cpp")
 target_include_directories(radray_imgui SYSTEM PUBLIC "${_imgui_root}")
 target_include_directories(radray_imgui PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
-target_compile_definitions(radray_imgui PUBLIC IMGUI_USER_CONFIG="radray/runtime/imgui/imgui_config.h")
+target_compile_definitions(radray_imgui PUBLIC
+    RADRAY_ENABLE_IMGUI
+    IMGUI_USER_CONFIG="radray/runtime/imgui/imgui_config.h")
 target_link_libraries(radray_imgui PUBLIC radraycore)
 if (NOT RADRAY_IMGUI_DEMO_WINDOWS)
     target_compile_definitions(radray_imgui PUBLIC IMGUI_DISABLE_DEMO_WINDOWS)
@@ -38,7 +40,4 @@ if (RADRAY_IMGUI_USE_FREETYPE)
 endif()
 radray_optimize_flags_library(radray_imgui)
 radray_set_build_path(radray_imgui)
-file(GLOB_RECURSE _runtime_imgui_sources CONFIGURE_DEPENDS "src/*.cpp" "include/*.h")
-target_sources(radrayruntime PRIVATE ${_runtime_imgui_sources})
 target_link_libraries(radrayruntime PUBLIC radray_imgui)
-target_compile_definitions(radrayruntime PUBLIC RADRAY_ENABLE_IMGUI)

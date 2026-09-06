@@ -1,5 +1,7 @@
 #pragma once
 
+#ifdef RADRAY_ENABLE_IMGUI
+
 #include <atomic>
 #include <thread>
 #include <radray/runtime/imgui/imgui_graph.h>
@@ -106,3 +108,5 @@ struct ImGuiSystem::Impl {
 };
 
 }  // namespace radray
+
+#endif  // RADRAY_ENABLE_IMGUI

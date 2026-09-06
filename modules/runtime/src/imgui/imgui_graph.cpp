@@ -1,3 +1,5 @@
+#ifdef RADRAY_ENABLE_IMGUI
+
 #include "imgui_internal.h"
 
 #include <algorithm>
@@ -326,3 +328,5 @@ void ImGuiOnlyPipeline::Render(RenderPipelineContext& context) {
 }
 
 }  // namespace radray
+
+#endif  // RADRAY_ENABLE_IMGUI

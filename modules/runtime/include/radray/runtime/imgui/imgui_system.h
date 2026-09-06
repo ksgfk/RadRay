@@ -1,5 +1,7 @@
 #pragma once
 
+#ifdef RADRAY_ENABLE_IMGUI
+
 #include <filesystem>
 #include <imgui.h>
 #include <radray/runtime/texture_asset.h>
@@ -82,3 +84,5 @@ private:
 };
 
 }  // namespace radray
+
+#endif  // RADRAY_ENABLE_IMGUI

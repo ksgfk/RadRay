@@ -21,7 +21,7 @@ radray_optimize_flags_library(radrayruntime)
 radray_set_build_path(radrayruntime)
 
 if (RADRAY_ENABLE_IMGUI)
-    add_subdirectory(imgui)
+    include(cmake/imgui.cmake)
 endif()
 
 if (RADRAY_BUILD_TESTS)

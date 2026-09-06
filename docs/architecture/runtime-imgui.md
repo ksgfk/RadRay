@@ -1,6 +1,6 @@
 > - 适用: 接入可选 runtime UI、字体、平台窗口、资产图片或本帧 Graph 图片
 > - 权威: 本文描述 RadRay 的 ImGui 适配契约；通用帧同步见 [帧与 GPU](frame-and-gpu.md)，Graph 规则见 [Renderer foundation](renderer-foundation.md)
-> - 锚点: `modules/runtime/imgui/CMakeLists.txt`, `modules/runtime/imgui/include/radray/runtime/imgui/imgui_config.h`, `modules/runtime/imgui/include/radray/runtime/imgui/imgui_system.h`, `modules/runtime/imgui/include/radray/runtime/imgui/imgui_graph.h`, `modules/runtime/imgui/src/imgui_system.cpp`, `modules/runtime/imgui/src/imgui_graph.cpp`, `modules/runtime/tests/test_imgui_rendering.cpp`, `shaderlib/ui/`, `tools/generate_imgui_shaders.py`
+> - 锚点: `modules/runtime/cmake/imgui.cmake`, `modules/runtime/include/radray/runtime/imgui/imgui_config.h`, `modules/runtime/include/radray/runtime/imgui/imgui_system.h`, `modules/runtime/include/radray/runtime/imgui/imgui_graph.h`, `modules/runtime/src/imgui/imgui_system.cpp`, `modules/runtime/src/imgui/imgui_graph.cpp`, `modules/runtime/tests/test_imgui_rendering.cpp`, `shaderlib/ui/`, `tools/generate_imgui_shaders.py`
 
 # 可选 runtime ImGui
 
@@ -11,16 +11,20 @@
 
 ## 装配与剥离
 
-`RADRAY_ENABLE_IMGUI` 默认 OFF，开启要求 Win32 runtime。可选头文件、源码、CMake 与内置
-artifact 全在 `modules/runtime/imgui/`，不落入 runtime 常规 `src/` 收集范围。
-OFF 时不进入该子目录，不检查 ImGui/FreeType 源码，不创建其 target，也不传播其 include、
-链接或编译定义。通用窗口、输入路由、输出请求及区域拷贝仍属于原模块。
+`RADRAY_ENABLE_IMGUI` 默认 OFF，开启要求 Win32 runtime。ImGui 适配仍属于 runtime：公开头在
+`modules/runtime/include/radray/runtime/imgui/`，实现、私有头与内置 artifact 在
+`modules/runtime/src/imgui/`，依赖配置由 runtime 按开关包含 `cmake/imgui.cmake`。
+头文件与 `.cpp` 由 runtime 常规规则收集，内容均以 `RADRAY_ENABLE_IMGUI` 包裹。
+OFF 时头文件可直接包含且不引入依赖，源码编译为空翻译单元；不检查 ImGui/FreeType 源码，
+不创建其 target，也不传播其 include、链接或编译定义。通用窗口、输入路由、输出请求及区域拷贝
+仍属于原模块。
 
 FreeType 子目录既关闭可选依赖发现，也在局部变量作用域屏蔽父项目的 PNG、zlib 等发现结果，
 避免其 CMake 在禁用发现后继续消费已有的 `*_FOUND`。项目其他模块的依赖配置保持独立。
 
-ON 时 `radray_imgui` 静态库的 PUBLIC 使用要求向 runtime 和消费者传播唯一的
-`IMGUI_USER_CONFIG`，保证 WCHAR、断言、字体后端和诊断裁剪宏一致。消费者链接
+ON 时 `radray_imgui` 静态库的 PUBLIC 使用要求向 runtime 和消费者传播 `RADRAY_ENABLE_IMGUI`
+与唯一的 `IMGUI_USER_CONFIG`，保证上游源码、适配层及消费者的 WCHAR、断言、字体后端和
+诊断裁剪宏一致。消费者链接
 `radrayruntime`，显式包含可选头；不要独立编译另一份 ImGui 或覆盖其 ABI 宏。
 
 编译启用不等于实例启用。`ApplicationRuntimeDescriptor::ImGui.Enabled` 默认 false；
@@ -120,7 +124,7 @@ Graph 从参数绑定自动声明 sampled read 依赖，不需要外部手写 ba
 |---|---|
 | `RADRAY_IMGUI_USE_FREETYPE` | ON；OFF 使用内置 STB。FreeType 禁用 ZLIB/BZIP2/PNG/HARFBUZZ/BROTLI 自动发现，SVG 扩展关闭 |
 | `RADRAY_IMGUI_DEMO_WINDOWS` / `RADRAY_IMGUI_DEBUG_TOOLS` | 均 ON；OFF 分别定义 IMGUI_DISABLE_DEMO_WINDOWS / IMGUI_DISABLE_DEBUG_TOOLS |
-| IMGUI_API / IMGUI_DISABLE | 静态默认；不定义 IMGUI_DISABLE，模块剥离由 CMake 执行 |
+| IMGUI_API / IMGUI_DISABLE | 静态默认；不定义 IMGUI_DISABLE，上游依赖由 CMake 剥离，适配层由 RADRAY_ENABLE_IMGUI 条件编译 |
 | IM_ASSERT | 接入 RadRay 日志与终止，Release 保留 |
 | 旧 API / 默认分配器 | 禁用；context 创建前绑定 radray::Malloc / Free |
 | 默认 Win32 clipboard、IME、shell | 禁用，使用窗口能力；shell callback 为空 |
