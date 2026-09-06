@@ -125,6 +125,13 @@ static bool _IsD3D12Supported(IDXGIAdapter1* adapter) noexcept {
            SUCCEEDED(::D3D12CreateDevice(adapter, D3D_FEATURE_LEVEL_11_0, _uuidof(ID3D12Device), nullptr));
 }
 
+static DXGI_FORMAT _SwapChainStorageFormat(TextureFormat format) noexcept {
+    // Flip-model swapchains store UNORM; the requested sRGB interpretation belongs to the RTV.
+    if (format == TextureFormat::BGRA8_UNORM_SRGB) return DXGI_FORMAT_B8G8R8A8_UNORM;
+    if (format == TextureFormat::RGBA8_UNORM_SRGB) return DXGI_FORMAT_R8G8B8A8_UNORM;
+    return MapType(format);
+}
+
 static bool _RefreshSwapChainBackBuffers(SwapChainD3D12* swapChain) noexcept {
     RADRAY_ASSERT(swapChain != nullptr);
 
@@ -1036,7 +1043,7 @@ Nullable<unique_ptr<SwapChain>> DeviceD3D12::CreateSwapChain(const SwapChainDesc
     DXGI_SWAP_CHAIN_DESC1 scDesc{};
     scDesc.Width = desc.Width;
     scDesc.Height = desc.Height;
-    scDesc.Format = MapType(desc.Format);
+    scDesc.Format = _SwapChainStorageFormat(desc.Format);
     if (scDesc.Format != DXGI_FORMAT_R16G16B16A16_FLOAT &&
         scDesc.Format != DXGI_FORMAT_B8G8R8A8_UNORM &&
         scDesc.Format != DXGI_FORMAT_R8G8B8A8_UNORM &&
@@ -4125,6 +4132,29 @@ void CmdListD3D12::CopyBufferToBuffer(Buffer* dst_, uint64_t dstOffset, Buffer* 
     _cmdList->CopyBufferRegion(dst->_buf.Get(), dstOffset, src->_buf.Get(), srcOffset, size);
 }
 
+bool CmdListD3D12::CopyBufferToTextureRegion(const BufferToTextureCopyDescriptor& desc) noexcept {
+    if (!desc.Source || !desc.Destination) return false;
+    const auto validation = ValidateBufferTextureCopyRegion(desc.Source->GetDesc(), desc.Destination->GetDesc(), desc.Region, _device->GetDetail());
+    if (!validation.Supported) {
+        RADRAY_ERR_LOG("{}", validation.Reason);
+        return false;
+    }
+    auto src = CastD3D12Object(desc.Source);
+    auto dst = CastD3D12Object(desc.Destination);
+    const auto& r = desc.Region;
+    D3D12_TEXTURE_COPY_LOCATION from{};
+    from.pResource = src->_buf.Get();
+    from.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    from.PlacedFootprint.Offset = r.SourceOffset;
+    from.PlacedFootprint.Footprint = {dst->_rawDesc.Format, r.Width, r.Height, 1, r.RowPitch};
+    D3D12_TEXTURE_COPY_LOCATION to{};
+    to.pResource = dst->_tex.Get();
+    to.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    to.SubresourceIndex = D3D12CalcSubresource(r.MipLevel, r.ArrayLayer, 0, dst->_rawDesc.MipLevels, dst->_rawDesc.DepthOrArraySize);
+    _cmdList->CopyTextureRegion(&to, r.X, r.Y, 0, &from, nullptr);
+    return true;
+}
+
 void CmdListD3D12::CopyBufferToTexture(Texture* dst_, SubresourceRange dstRange, Buffer* src_, uint64_t srcOffset) noexcept {
     auto src = CastD3D12Object(src_);
     auto dst = CastD3D12Object(dst_);
@@ -5282,7 +5312,7 @@ bool SwapChainD3D12::Recreate(uint32_t width, uint32_t height, TextureFormat for
         return false;
     }
 
-    const DXGI_FORMAT rawFormat = MapType(format);
+    const DXGI_FORMAT rawFormat = _SwapChainStorageFormat(format);
     _frames.clear();
     const HRESULT hr = _swapchain->ResizeBuffers(desc.BufferCount, width, height, rawFormat, desc.Flags);
     if (SUCCEEDED(hr)) {

@@ -230,6 +230,7 @@ private:
 
 class RenderGraphRasterContext {
 public:
+    void Fail(std::string_view message);
     RenderGraphGraphicsCommands& Encoder() noexcept { return _encoder; }
     render::TextureView* GetTextureView(RgTextureViewHandle handle) const;
     render::Buffer* GetBuffer(RgBufferHandle handle) const;
@@ -314,6 +315,9 @@ public:
                                        render::SubresourceRange sourceRange = {0, 1, 0, 1},
                                        render::SubresourceRange destinationRange = {0, 1, 0, 1},
                                        std::source_location location = std::source_location::current());
+    RgPassHandle AddCopyBufferToTexturePass(std::string_view name, RgBufferHandle source, RgTextureHandle destination,
+                                            const render::BufferTextureCopyRegion& region,
+                                            std::source_location location = std::source_location::current());
     /// Freezes setup and validates/culls the graph without creating native resources or recording commands.
     bool Compile();
     const RenderGraphExecutionReport& GetReport() const noexcept;
@@ -321,6 +325,10 @@ public:
     bool WasPassExecuted(RgPassHandle handle) const noexcept;
     bool PassWroteTexture(RgPassHandle pass, RgTextureHandle texture) const noexcept;
     uint64_t GetGeneration() const noexcept;
+    std::optional<render::TextureDescriptor> GetTextureDescriptor(RgTextureHandle texture) const noexcept;
+    std::optional<RgTextureParameterBinding> GetTextureViewBinding(RgTextureViewHandle view) const noexcept;
+    /// Add a setup diagnostic, preventing graph execution.
+    void AddDiagnostic(std::string_view code, std::string_view message);
 
 private:
     friend class RenderPipelineContext;

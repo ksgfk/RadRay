@@ -42,6 +42,9 @@ cmake --build build_clangcl --config Debug --parallel 24
 | `RADRAY_BUILD_BENCHMARKS` | 单配置 Release 或包含 Release 的多配置 generator 默认 ON |
 | `RADRAY_BUILD_WINDOW`、`RADRAY_BUILD_RENDER` | ON |
 | `RADRAY_BUILD_RUNTIME` | 默认 ON，要求 render 和 window |
+| `RADRAY_ENABLE_IMGUI` | OFF；开启要求 Win32 runtime |
+| `RADRAY_IMGUI_USE_FREETYPE` | ImGui 开启时默认 ON；OFF 使用 STB |
+| `RADRAY_IMGUI_DEMO_WINDOWS`、`RADRAY_IMGUI_DEBUG_TOOLS` | ImGui 开启时默认 ON，可分别裁剪 |
 | `RADRAY_BUILD_EXAMPLES` | 默认 ON，要求 runtime |
 | `RADRAY_ENABLE_D3D12` | Windows 且 render 开启时默认 ON |
 | `RADRAY_ENABLE_VULKAN` | render 开启时默认 ON |
@@ -62,6 +65,50 @@ ctest --test-dir build_runtime_only -C Debug --output-on-failure
 
 所有自有 target 接入 `radray_default_compile_flags`；它私有设置 C++ RTTI，
 不通过 core 向第三方或外部 consumer 传播。对象查询的边界见 [Core](../architecture/core-facilities.md)。
+
+## 可选 ImGui
+
+默认 OFF 时不需要 ImGui 或 FreeType 目录。开启使用固定依赖清单；不要改写上游配置头，
+项目配置与运行期默认值见 [Runtime ImGui](../architecture/runtime-imgui.md)。
+
+```powershell
+python tools/fetch_third_party.py restore --only imgui
+python tools/fetch_third_party.py restore --only freetype
+cmake --preset win-x64-debug-clangcl -B build_ui -DRADRAY_ENABLE_IMGUI=ON
+cmake --build build_ui --config Debug --parallel 8
+ctest --test-dir build_ui -C Debug --output-on-failure -R "ImGuiRenderingTest|WindowInputRouterTest|TextureRegionTest"
+build_ui/_build/Debug/example_imgui.exe --vulkan --frames 120 --multithread --flights 3 --stress --srgb
+build_ui/_build/Debug/example_imgui.exe --d3d12 --only --font C:/Windows/Fonts/msyh.ttc --settings build_ui/gallery.ini
+```
+
+字体路径为本机示例；没有该字体时换成应用提供的 TTF/OTF/TTC。不指定 `--frames` 时交互运行，
+`--no-viewports` 只保留主窗口；`--only` 显式使用 ImGuiOnlyPipeline，默认样例额外展示本帧 Graph
+生成的图像。Forward 与 Tidal 样例使用 `--imgui` 打开 UI，现有场景参数保持有效。
+
+```powershell
+cmake --preset win-x64-debug-clangcl -B build_ui_stb -DRADRAY_ENABLE_IMGUI=ON -DRADRAY_IMGUI_USE_FREETYPE=OFF -DRADRAY_IMGUI_DEMO_WINDOWS=OFF -DRADRAY_IMGUI_DEBUG_TOOLS=OFF -DRADRAY_BUILD_SHADER_COMPILER=OFF
+cmake --build build_ui_stb --config Debug --parallel 8
+build_ui_stb/_build/Debug/example_imgui.exe --d3d12 --only --frames 120
+```
+
+compiler/JIT/tools 关闭时纯 UI 使用内置 artifact，不发现、链接或部署 DXC。维护 shader 时在
+开启 compiler/tools 的构建中显式运行以下目标；普通 ALL 构建不会触发它们：
+
+```powershell
+cmake --build build_ui --config Debug --target radray_imgui_shaders_check
+cmake --build build_ui --config Debug --target radray_imgui_shaders_regenerate
+```
+
+生成器记录源与 include 的 hash、生成命令和 artifact 身份；`check` 重新编译后逐字节比较。
+变更 shader、shader contract 或固定 SDK 后先 regenerate，再 check，生成物随可选模块提交。
+
+验收按 Debug 构建/专项/全量测试、Release 构建/测试、独立裁剪配置的顺序串行执行。
+独立配置覆盖 OFF、ON+FreeType、ON+STB、Demo/Debug OFF、compiler/JIT OFF、D3D12-only 和
+Vulkan-only。OFF 还需要在不含 ImGui/FreeType 的依赖树中 configure/build，并检查公开头、target、
+编译命令、静态库符号和链接边。检查项目自有 warning 与验证层日志；混合 DPI、热插拔、实际
+IME 输入和桌面拖放需要记录实机结果，未验证不能计作通过。
+FreeType 依赖隔离还应检查生成的 `ftoption.h` 中外部功能宏与 freetype target 的实际链接边，
+不能仅凭 `FT_DISABLE_*` 的值判断；父项目已有的依赖发现结果也可能被上游 CMake 消费。
 
 ## 测试
 
@@ -103,6 +150,9 @@ ctest --test-dir build_runtime_only -C Debug --output-on-failure
 | `test_stage_b_draw` | `StageBDraw` |
 | `test_render_pipeline` | `RadRayRuntimeRenderPipeline`, `RadRayRuntimeRenderSystem`, `RuntimeLayering`, `RadRayRuntimeForwardPipeline` |
 | `test_runtime_shader_jit` | `RadRayRuntimeShaderJit` |
+| `test_window_input_router` | `WindowInputRouterTest`, `RenderWorkloadTest` |
+| `test_texture_region` | `TextureRegionTest` |
+| `test_imgui_rendering`（可选） | `ImGuiRenderingTest` |
 | `test_radray_render_shader_artifact` | `RadRayRenderShaderArtifact` |
 | `test_radray_shader_contract` | `RadRayShaderContract` |
 | `test_radray_render_shader_layout` | `RadRayRenderShaderLayout` |

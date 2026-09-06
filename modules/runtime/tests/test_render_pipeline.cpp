@@ -75,12 +75,12 @@ public:
     void Render(RenderPipelineContext& ctx) override {
         _result->RenderThread = std::this_thread::get_id();
         EXPECT_GT(_values[ctx.FlightIndex()], 0);
-        ASSERT_FALSE(ctx.ViewFamilies().empty());
+        EXPECT_TRUE(ctx.ViewFamilies().empty());
+        ASSERT_FALSE(ctx.OutputSurfaces().empty());
         auto graph = ctx.CreateRenderGraph("Non-camera pipeline");
         struct Data {};
-        for (const auto& family : ctx.ViewFamilies()) {
-            if (!family.OutputAvailable) continue;
-            const auto color = ctx.ImportOutput(graph, family.OutputId);
+        for (const auto& surface : ctx.OutputSurfaces()) {
+            const auto color = ctx.ImportOutput(graph, surface.Id);
             graph.AddRasterPass<Data>("clear", [=](Data&, RenderGraphRasterBuilder& builder) { builder.SetColorAttachment(0, color, {.Clear = {{.3f, .5f, .7f, 1}}}); }, +[](const Data&, RenderGraphRasterContext&) {});
         }
         EXPECT_TRUE(ctx.ExecuteGraph(graph).Success);

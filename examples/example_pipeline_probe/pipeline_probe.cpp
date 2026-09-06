@@ -22,6 +22,9 @@
 namespace radray::probe {
 namespace {
 struct Options {
+#ifdef RADRAY_ENABLE_IMGUI
+    bool ImGui{false};
+#endif
     render::RenderBackend Backend{render::RenderBackend::D3D12};
     ForwardPipelineSettings Settings{ForwardPipelineSettings::Temporal()};
     uint32_t Frames{120}, Width{1280}, Height{800};
@@ -31,6 +34,12 @@ struct Options {
 [[maybe_unused]] bool Parse(int argc, char** argv, Options& options) {
     for (int i = 1; i < argc; ++i) {
         const std::string_view arg{argv[i]};
+#ifdef RADRAY_ENABLE_IMGUI
+        if (arg == "--imgui") {
+            options.ImGui = true;
+            continue;
+        }
+#endif
         if (arg == "--vulkan")
             options.Backend = render::RenderBackend::Vulkan;
         else if (arg == "--d3d12")
@@ -159,6 +168,22 @@ protected:
         settings.DebugView = ForwardDebugView::Final;
         _pipeline->SetSettings(settings);
     }
+#ifdef RADRAY_ENABLE_IMGUI
+    void ConfigureImGui(ImGuiSystemDescriptor& descriptor) override { descriptor.Enabled = _options.ImGui; }
+    void OnImGui() override {
+        ImGui::SetNextWindowSize({320, 180}, ImGuiCond_FirstUseEver);
+        if (ImGui::Begin("Forward rendering")) {
+            ImGui::TextUnformatted("UI is composed after scene tone mapping.");
+            ImGui::Text("Frame %u", _frame);
+            if (_pipeline) {
+                auto settings = _pipeline->GetSettings();
+                if (ImGui::SliderFloat("Exposure", &settings.Exposure, .1f, 5.0f)) _pipeline->SetSettings(settings);
+                ImGui::Text("Scene scale %.2f", settings.RenderScale);
+            }
+        }
+        ImGui::End();
+    }
+#endif
     void OnInit() override {
         for (const auto name : {"block", "panel", "sphere", "ring", "spire", "vase"}) _meshes.emplace(name, GetAssetManager()->Load<StaticMesh>(fmt::format("tidal_atrium/{}.obj", name)));
         _white = GetAssetManager()->Load<TextureAsset>("tidal_atrium/white.png");
@@ -167,7 +192,10 @@ protected:
         _camera->SetWorldLocation({0, 8, -22});
         _camera->SetWorldRotation(Rotation({13, 0, 0}));
         _camera->SetPerspective(Radian(55.f), .1f, 250.f);
-        _keyboard = GetWindowManager()->GetMainWindow()->GetNativeWindow()->EventKeyboard().connect([this](KeyCode key, Action action) {
+        _keyboard = GetWindowManager()->GetMainWindow()->GetInput().EventInput().connect([this](const WindowInputEvent& event) {
+            if (event.Type != WindowInputType::Key) return;
+            const auto key = event.Key;
+            const auto action = event.State;
             if (action == Action::PRESSED)
                 _keys.insert(key);
             else if (action == Action::RELEASED)

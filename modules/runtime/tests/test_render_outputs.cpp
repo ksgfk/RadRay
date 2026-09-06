@@ -139,7 +139,16 @@ private:
     vector<render::test::RenderTarget> Targets;
 };
 
-class RenderOutputTest : public testing::TestWithParam<render::RenderBackend> {};
+class RenderOutputTest : public testing::TestWithParam<render::RenderBackend> {
+protected:
+    void SetUp() override {
+        render::test::DeviceContext probe;
+        if (!render::test::TryCreateDevice(GetParam(), probe, true)) {
+            if (render::test::SetupMustFail(probe.Status, render::test::RequiredBackend(GetParam()))) FAIL() << probe.Reason;
+            GTEST_SKIP() << probe.Reason;
+        }
+    }
+};
 TEST_P(RenderOutputTest, ExplicitZeroOffscreenMultipleSkipAndFailureWorkloads) {
     for (const auto scenario : {OutputScenario::Zero, OutputScenario::External, OutputScenario::Multiple, OutputScenario::Skip, OutputScenario::Failure, OutputScenario::FinalRead}) {
         OutputResult result;

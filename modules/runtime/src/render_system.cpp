@@ -36,6 +36,7 @@ void RenderSystem::OnShutdown() noexcept {
     _viewStates.reset();
     _retainedAssets.clear();
     _shaderPrograms.clear();
+    _precompiledPrograms.clear();
     _shaderJit.reset();
     // 缓存的 RenderPass / Framebuffer 必须先于 GpuSystem 持有的 device 销毁。
     _renderPassRegistry.reset();
@@ -318,6 +319,38 @@ void RenderSystem::SetPipeline(unique_ptr<RenderPipeline> pipeline) noexcept {
     _pipeline = std::move(pipeline);
 }
 
+Nullable<ShaderProgram*> RenderSystem::GetOrCreateShaderProgram(
+    std::span<const byte> bytes, const shader::GpuArtifactHash& expectedIdentity, const render::ShaderProgramLayoutRecipe& recipe) {
+    if (!_app || !_app->GetDevice() || bytes.empty()) return nullptr;
+    auto& device = *_app->GetDevice();
+    const auto target = render::GetShaderTargetForBackend(device.GetBackend());
+    if (!target) return nullptr;
+    const shader::ShaderArtifactDecodeOptions options{.Target = *target, .ExpectedGpuArtifact = expectedIdentity};
+    render::BackendShaderArtifactError error;
+    auto layout = render::ResolveBackendLayoutHash(device.GetBackend(), bytes, options, recipe, &error);
+    if (!layout) {
+        RADRAY_ERR_LOG("Precompiled shader layout failed: {}:{}", uint32_t(error.Failure), uint32_t(error.DecodeFailure));
+        return nullptr;
+    }
+    for (auto& value : _precompiledPrograms) {
+        if (value.LayoutHash == *layout && std::ranges::equal(value.Bytes, bytes)) return value.Program.get();
+    }
+    PrecompiledProgram value;
+    value.Bytes.assign(bytes.begin(), bytes.end());
+    value.LayoutHash = *layout;
+    auto artifact = render::CreateBackendShaderArtifact(device, value.Bytes, options, recipe, &error);
+    if (!artifact) {
+        RADRAY_ERR_LOG("Precompiled shader creation failed: {}:{}", uint32_t(error.Failure), uint32_t(error.DecodeFailure));
+        return nullptr;
+    }
+    auto program = ShaderProgram::Create(&device, std::move(*artifact));
+    if (!program) return nullptr;
+    value.Program = program.Release();
+    auto* result = value.Program.get();
+    _precompiledPrograms.push_back(std::move(value));
+    return result;
+}
+
 void RenderSystem::BeginUpdateForFlight(uint32_t flightIndex) {
     RADRAY_ASSERT(flightIndex < _retainedAssets.size());
     _retainedAssets[flightIndex].clear();
@@ -336,6 +369,9 @@ void RenderSystem::PrepareFrame(const AppUpdateContext& ctx) {
             }
         }
     RenderWorkloadBuilder workloads(_framePlans[ctx.FlightIndex], outputs);
+#ifdef RADRAY_ENABLE_IMGUI
+    if (auto ui = _app->GetImGuiSystem()) ui->RequestOutputs(ctx.FlightIndex, workloads);
+#endif
     RenderPrepareContext prepare{ctx, outputs, workloads, _retainedAssets[ctx.FlightIndex]};
     if (_pipeline)
         _pipeline->PrepareFrame(prepare);
@@ -359,15 +395,15 @@ void RenderSystem::Render(AppFrameContext& ctx) {
     };
     vector<Presentation> presentations;
     vector<ResolvedRenderViewFamily> families;
+    vector<RenderOutputInfo> resolvedOutputs;
     auto* windows = _app->GetWindowManager();
-    for (uint32_t index = 0; index < _framePlans[flight].ViewFamilies.size(); ++index) {
-        const auto& requested = _framePlans[flight].ViewFamilies[index];
-        const auto known = _outputs.Find(requested.Output);
-        RenderOutputInfo info = known ? *known : RenderOutputInfo{.Id = requested.Output};
+    for (const auto output : _framePlans[flight].Outputs) {
+        const auto known = _outputs.Find(output);
+        RenderOutputInfo info = known ? *known : RenderOutputInfo{.Id = output};
         info.Active = false;
         if (known && known->Active) {
             if (known->Kind == RenderOutputKind::ExternalColorTexture) {
-                auto surface = _outputs.ResolveExternal(requested.Output);
+                auto surface = _outputs.ResolveExternal(output);
                 if (surface) {
                     surfaces.push_back(*surface);
                     info.Active = true;
@@ -375,12 +411,12 @@ void RenderSystem::Render(AppFrameContext& ctx) {
             } else {
                 for (size_t w = 0; w < windows->GetWindowCount(); ++w) {
                     auto* window = windows->GetWindow(w);
-                    if (window->GetRenderOutputId() != requested.Output || window->IsMinimized() || !window->GetSwapChain()) continue;
+                    if (window->GetRenderOutputId() != output || window->IsMinimized() || !window->GetSwapChain()) continue;
                     auto target = ctx.AcquireWindow(window);
                     if (!target) break;
                     const auto desc = target->BackBuffer->GetDesc();
                     presentations.push_back({static_cast<uint32_t>(surfaces.size()), *target});
-                    surfaces.push_back({requested.Output, target->BackBuffer, target->BackBufferView, desc,
+                    surfaces.push_back({output, target->BackBuffer, target->BackBufferView, desc,
                                         window->GetBackBufferState(target->BackBufferIndex), render::TextureState::Present, false, false});
                     info.Width = desc.Width;
                     info.Height = desc.Height;
@@ -391,6 +427,13 @@ void RenderSystem::Render(AppFrameContext& ctx) {
                 }
             }
         }
+        resolvedOutputs.push_back(info);
+    }
+    for (uint32_t index = 0; index < _framePlans[flight].ViewFamilies.size(); ++index) {
+        const auto& requested = _framePlans[flight].ViewFamilies[index];
+        RenderOutputInfo info{.Id = requested.Output};
+        for (const auto& resolved : resolvedOutputs)
+            if (resolved.Id == requested.Output) info = resolved;
         string reason;
         auto family = ResolveRenderViewFamily(requested, info, index, ctx.GetDevice()->GetCapabilities().Limits.MaxTexture2DDimension, reason);
         if (!family) {

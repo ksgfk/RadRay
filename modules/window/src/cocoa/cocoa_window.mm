@@ -556,6 +556,7 @@ KeyCode MapCocoaKeyCodeToKeyCode(unsigned short keyCode) noexcept {
     (void)deltaX;
     if (self.window != nullptr) {
         self.window->EventMouseWheel()(radray::ToInt(deltaY));
+        self.window->EventScroll()(float(deltaX), float(deltaY));
     }
 }
 

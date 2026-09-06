@@ -4,6 +4,19 @@
 
 namespace radray {
 
+bool RenderWorkloadBuilder::RequestOutput(RenderOutputId id) {
+    bool known = false;
+    for (const auto& output : _outputs) known |= output.Id == id && id.IsValid();
+    if (!known) {
+        _plan.Diagnostics.push_back(fmt::format("Unknown output {}", id.Value));
+        return false;
+    }
+    for (const auto requested : _plan.Outputs)
+        if (requested == id) return true;
+    _plan.Outputs.push_back(id);
+    return true;
+}
+
 bool RenderWorkloadBuilder::AddViewFamily(RenderViewFamilyDesc family) {
     const auto fail = [&](std::string_view reason) {
         _plan.Diagnostics.push_back(fmt::format("Family '{}' output {}: {}", family.Name, family.Output.Value, reason));
@@ -29,13 +42,14 @@ bool RenderWorkloadBuilder::AddViewFamily(RenderViewFamilyDesc family) {
         for (size_t old = 0; old < index; ++old)
             if (family.Views[index].StateId.IsValid() && family.Views[index].StateId == family.Views[old].StateId) return fail("duplicate ViewStateId in family");
     }
+    RequestOutput(family.Output);
     _plan.ViewFamilies.push_back(std::move(family));
     return true;
 }
 
 void RenderWorkloadBuilder::AddPresentationOutputs() {
     for (const auto& output : _outputs) {
-        if (output.Active && output.Kind == RenderOutputKind::Presentation) AddViewFamily({output.Name, output.Id, 1, {}});
+        if (output.Active && output.Kind == RenderOutputKind::Presentation) RequestOutput(output.Id);
     }
 }
 

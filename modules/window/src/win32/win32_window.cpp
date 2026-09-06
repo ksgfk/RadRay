@@ -3,6 +3,7 @@
 #include <radray/platform/win32_headers.h>
 #include <radray/text_encoding.h>
 #include <radray/logger.h>
+#include <imm.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -451,11 +452,43 @@ static LRESULT CALLBACK _RadrayWin32WindowProc(HWND hWnd, UINT uMsg, WPARAM wPar
             }
             return 0;
         }
+        case WM_SETCURSOR: {
+            auto window = std::bit_cast<Win32Window*>(::GetProp(hWnd, RADRAY_WIN32_WINDOW_PROP));
+            if (window && LOWORD(lParam) == HTCLIENT) {
+                window->SetCursor(window->_cursor);
+                return TRUE;
+            }
+            break;
+        }
+        case WM_DPICHANGED: {
+            const auto* rect = reinterpret_cast<const RECT*>(lParam);
+            ::SetWindowPos(hWnd, nullptr, rect->left, rect->top, rect->right - rect->left, rect->bottom - rect->top, SWP_NOZORDER | SWP_NOACTIVATE);
+            auto window = std::bit_cast<Win32Window*>(::GetProp(hWnd, RADRAY_WIN32_WINDOW_PROP));
+            if (window) window->EventDisplayChanged()();
+            return 0;
+        }
+        case WM_DISPLAYCHANGE:
+        case WM_SETTINGCHANGE: {
+            auto window = std::bit_cast<Win32Window*>(::GetProp(hWnd, RADRAY_WIN32_WINDOW_PROP));
+            if (window && (uMsg == WM_DISPLAYCHANGE || wParam == SPI_SETWORKAREA)) window->EventDisplayChanged()();
+            break;
+        }
+        case WM_CAPTURECHANGED: {
+            auto window = std::bit_cast<Win32Window*>(::GetProp(hWnd, RADRAY_WIN32_WINDOW_PROP));
+            if (window && reinterpret_cast<HWND>(lParam) != hWnd) window->EventCaptureLost()();
+            break;
+        }
+        case WM_MOUSEHWHEEL: {
+            auto window = std::bit_cast<Win32Window*>(::GetProp(hWnd, RADRAY_WIN32_WINDOW_PROP));
+            if (window) window->EventScroll()(-float(GET_WHEEL_DELTA_WPARAM(wParam)) / float(WHEEL_DELTA), 0);
+            return 0;
+        }
         case WM_MOUSEWHEEL: {
             auto window = std::bit_cast<Win32Window*>(::GetProp(hWnd, RADRAY_WIN32_WINDOW_PROP));
             if (window) {
                 int delta = GET_WHEEL_DELTA_WPARAM(wParam);
                 window->_eventMouseWheel(delta);
+                window->EventScroll()(0, float(delta) / float(WHEEL_DELTA));
             }
             return 0;
         }
@@ -614,6 +647,7 @@ static LRESULT CALLBACK _RadrayWin32WindowProc(HWND hWnd, UINT uMsg, WPARAM wPar
             return ::DefWindowProc(hWnd, uMsg, wParam, lParam);
         }
     }
+    return ::DefWindowProc(hWnd, uMsg, wParam, lParam);
 }
 
 static UINT _GetDpiForWindow(HWND hwnd) noexcept {
@@ -1242,6 +1276,118 @@ MouseButton MapWin32MSGToMouseButton(UINT msg, WPARAM wParam) noexcept {
         default:
             return MouseButton::UNKNOWN;
     }
+}
+
+bool Win32Window::SetCursor(NativeCursor cursor) noexcept {
+    _cursor = cursor;
+    LPCWSTR id = IDC_ARROW;
+    switch (cursor) {
+        case NativeCursor::Hidden: ::SetCursor(nullptr); return true;
+        case NativeCursor::TextInput: id = IDC_IBEAM; break;
+        case NativeCursor::ResizeAll: id = IDC_SIZEALL; break;
+        case NativeCursor::ResizeNS: id = IDC_SIZENS; break;
+        case NativeCursor::ResizeEW: id = IDC_SIZEWE; break;
+        case NativeCursor::ResizeNESW: id = IDC_SIZENESW; break;
+        case NativeCursor::ResizeNWSE: id = IDC_SIZENWSE; break;
+        case NativeCursor::Hand: id = IDC_HAND; break;
+        case NativeCursor::NotAllowed: id = IDC_NO; break;
+        case NativeCursor::Wait: id = IDC_WAIT; break;
+        case NativeCursor::Progress: id = IDC_APPSTARTING; break;
+        case NativeCursor::Arrow: break;
+    }
+    HCURSOR handle = ::LoadCursorW(nullptr, id);
+    if (!handle) return false;
+    ::SetCursor(handle);
+    return true;
+}
+
+std::optional<Eigen::Vector2i> Win32Window::GetDesktopMousePosition() const noexcept {
+    POINT point{};
+    if (!::GetCursorPos(&point)) return {};
+    return Eigen::Vector2i{point.x, point.y};
+}
+bool Win32Window::SetDesktopMousePosition(Eigen::Vector2i position) noexcept {
+    return ::SetCursorPos(position.x(), position.y()) != 0;
+}
+Nullable<NativeWindow*> Win32Window::GetHoveredWindow() const noexcept {
+    POINT point{};
+    if (!::GetCursorPos(&point)) return nullptr;
+    auto* window = static_cast<Win32Window*>(::GetPropW(::WindowFromPoint(point), RADRAY_WIN32_WINDOW_PROP));
+    return window && !window->_inputPassthrough ? window : nullptr;
+}
+vector<NativeMonitor> Win32Window::GetMonitors() const {
+    vector<NativeMonitor> result;
+    ::EnumDisplayMonitors(nullptr, nullptr, +[](HMONITOR monitor, HDC, LPRECT, LPARAM data) -> BOOL {
+        MONITORINFO info{};
+        info.cbSize = sizeof(info);
+        if (!::GetMonitorInfoW(monitor, &info)) return TRUE;
+        NativeMonitor value;
+        value.Position = {info.rcMonitor.left, info.rcMonitor.top};
+        value.Size = {info.rcMonitor.right - info.rcMonitor.left, info.rcMonitor.bottom - info.rcMonitor.top};
+        value.WorkPosition = {info.rcWork.left, info.rcWork.top};
+        value.WorkSize = {info.rcWork.right - info.rcWork.left, info.rcWork.bottom - info.rcWork.top};
+        value.Primary = (info.dwFlags & MONITORINFOF_PRIMARY) != 0;
+        if (HMODULE library = ::LoadLibraryW(L"shcore.dll")) {
+            using QueryDpi = HRESULT(WINAPI*)(HMONITOR, int, UINT*, UINT*);
+            auto query = reinterpret_cast<QueryDpi>(::GetProcAddress(library, "GetDpiForMonitor"));
+            UINT x = 96, y = 96;
+            if (query && SUCCEEDED(query(monitor, 0, &x, &y))) value.DpiScale = float(x) / 96.f;
+            ::FreeLibrary(library);
+        }
+        auto& values = *reinterpret_cast<vector<NativeMonitor>*>(data);
+        if (value.Primary) values.insert(values.begin(), value); else values.push_back(value);
+        return TRUE; }, reinterpret_cast<LPARAM>(&result));
+    return result;
+}
+std::optional<string> Win32Window::GetClipboardText() const {
+    if (!::OpenClipboard(_hwnd)) return {};
+    std::optional<string> result;
+    if (HANDLE handle = ::GetClipboardData(CF_UNICODETEXT)) {
+        if (auto* text = static_cast<const wchar_t*>(::GlobalLock(handle))) {
+            result = *text ? ToUtf8(text) : std::optional<string>{string{}};
+            ::GlobalUnlock(handle);
+        }
+    }
+    ::CloseClipboard();
+    return result;
+}
+bool Win32Window::SetClipboardText(std::string_view text) {
+    const auto wide = text.empty() ? std::optional<wstring>{wstring{}} : ToWideChar(text);
+    if (!wide) return false;
+    const size_t bytes = (wide->size() + 1) * sizeof(wchar_t);
+    HGLOBAL allocation = ::GlobalAlloc(GMEM_MOVEABLE, bytes);
+    if (!allocation) return false;
+    void* destination = ::GlobalLock(allocation);
+    if (!destination) {
+        ::GlobalFree(allocation);
+        return false;
+    }
+    std::memcpy(destination, wide->c_str(), bytes);
+    ::GlobalUnlock(allocation);
+    bool success = false;
+    if (::OpenClipboard(_hwnd)) {
+        if (::EmptyClipboard()) success = ::SetClipboardData(CF_UNICODETEXT, allocation) != nullptr;
+        ::CloseClipboard();
+    }
+    if (!success) ::GlobalFree(allocation);
+    return success;
+}
+bool Win32Window::SetImePosition(Eigen::Vector2i position, int lineHeight, bool visible) noexcept {
+    HIMC context = ::ImmGetContext(_hwnd);
+    if (!context) return false;
+    if (visible) {
+        COMPOSITIONFORM composition{};
+        composition.dwStyle = CFS_FORCE_POSITION;
+        composition.ptCurrentPos = {position.x(), position.y()};
+        ::ImmSetCompositionWindow(context, &composition);
+        CANDIDATEFORM candidate{};
+        candidate.dwStyle = CFS_EXCLUDE;
+        candidate.ptCurrentPos = composition.ptCurrentPos;
+        candidate.rcArea = {position.x(), position.y(), position.x() + 1, position.y() + lineHeight};
+        ::ImmSetCandidateWindow(context, &candidate);
+    }
+    ::ImmReleaseContext(_hwnd, context);
+    return true;
 }
 
 }  // namespace radray

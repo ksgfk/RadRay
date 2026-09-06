@@ -5,6 +5,7 @@
 #include <functional>
 #include <limits>
 #include <span>
+#include <optional>
 
 #include <radray/types.h>
 #include <radray/nullable.h>
@@ -26,6 +27,27 @@ enum class NativeWindowShowMode {
 };
 
 class NativeWindow;
+
+enum class NativeCursor : uint8_t { Arrow,
+                                    TextInput,
+                                    ResizeAll,
+                                    ResizeNS,
+                                    ResizeEW,
+                                    ResizeNESW,
+                                    ResizeNWSE,
+                                    Hand,
+                                    NotAllowed,
+                                    Wait,
+                                    Progress,
+                                    Hidden };
+struct NativeMonitor {
+    Eigen::Vector2i Position{}, Size{}, WorkPosition{}, WorkSize{};
+    float DpiScale{1};
+    bool Primary{false};
+};
+struct NativeDesktopCapabilities {
+    bool MouseCursors{false}, MousePosition{false}, Clipboard{false}, Ime{false}, Monitors{false}, HoveredWindow{false};
+};
 
 struct Win32WindowCreateDescriptor {
     std::string_view Title{};
@@ -100,6 +122,19 @@ public:
     virtual Eigen::Vector2i ClientToScreen(Eigen::Vector2i pos) const noexcept = 0;
     virtual Eigen::Vector2i ScreenToClient(Eigen::Vector2i pos) const noexcept = 0;
 
+    virtual NativeDesktopCapabilities GetDesktopCapabilities() const noexcept { return {}; }
+    virtual bool SetCursor(NativeCursor) noexcept { return false; }
+    virtual std::optional<Eigen::Vector2i> GetDesktopMousePosition() const noexcept { return {}; }
+    virtual bool SetDesktopMousePosition(Eigen::Vector2i) noexcept { return false; }
+    virtual Nullable<NativeWindow*> GetHoveredWindow() const noexcept { return nullptr; }
+    virtual vector<NativeMonitor> GetMonitors() const { return {}; }
+    virtual std::optional<string> GetClipboardText() const { return {}; }
+    virtual bool SetClipboardText(std::string_view) { return false; }
+    virtual bool SetImePosition(Eigen::Vector2i, int, bool) noexcept { return false; }
+    sigslot::signal<float, float>& EventScroll() noexcept { return _eventScroll; }
+    sigslot::signal<>& EventCaptureLost() noexcept { return _eventCaptureLost; }
+    sigslot::signal<>& EventDisplayChanged() noexcept { return _eventDisplayChanged; }
+
     virtual sigslot::signal<int, int>& EventResized() noexcept = 0;
     virtual sigslot::signal<int, int, MouseButton, Action>& EventTouch() noexcept = 0;
     virtual sigslot::signal<KeyCode, Action>& EventKeyboard() noexcept = 0;
@@ -114,6 +149,11 @@ public:
     static void GlobalInit() noexcept;
     static void GlobalShutdown() noexcept;
     static Nullable<unique_ptr<NativeWindow>> Create(const NativeWindowCreateDescriptor& desc) noexcept;
+
+private:
+    sigslot::signal<float, float> _eventScroll;
+    sigslot::signal<> _eventCaptureLost;
+    sigslot::signal<> _eventDisplayChanged;
 };
 
 class NativeEventPump {

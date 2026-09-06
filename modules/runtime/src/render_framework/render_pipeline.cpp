@@ -24,6 +24,26 @@ RenderGraph RenderPipelineContext::CreateRenderGraph(std::string_view name) {
     return RenderGraph{*_frame.GetDevice(), _graphResources, _registry, name, _graphGeneration};
 }
 RgTextureHandle RenderPipelineContext::ImportOutput(RenderGraph& graph, RenderOutputId output) {
+    if (_executed || _graphGeneration != graph.GetGeneration()) return {};
+    for (const auto& entry : _intermediates)
+        if (entry.first == output) return entry.second;
+    return ImportOutputTarget(graph, output);
+}
+bool RenderPipelineContext::SetOutputIntermediate(RenderGraph& graph, RenderOutputId output, RgTextureHandle texture) {
+    if (_executed || _graphGeneration != graph.GetGeneration()) return false;
+    auto desc = graph.GetTextureDescriptor(texture);
+    if (!desc) return false;
+    for (const auto& entry : _intermediates)
+        if (entry.first == output) return false;
+    for (const auto& surface : _surfaces) {
+        if (surface.Id != output) continue;
+        if (desc->Width != surface.Desc.Width || desc->Height != surface.Desc.Height || desc->Format != surface.Desc.Format || desc->SampleCount != 1) return false;
+        _intermediates.emplace_back(output, texture);
+        return true;
+    }
+    return false;
+}
+RgTextureHandle RenderPipelineContext::ImportOutputTarget(RenderGraph& graph, RenderOutputId output) {
     if (_executed || _graphGeneration == 0) return {};
     if (_graphGeneration != graph.GetGeneration()) return {};
     for (const auto& imported : _imports)

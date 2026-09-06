@@ -38,10 +38,10 @@ void RenderOutputRegistry::SetRenderIdle(bool idle) noexcept {
     _renderIdle = idle;
 }
 
-RenderOutputId RenderOutputRegistry::RegisterPresentation(string name, const render::TextureDescriptor& desc) {
+RenderOutputId RenderOutputRegistry::RegisterPresentation(string name, const render::TextureDescriptor& desc, RenderOutputUsage usage) {
     AssertMutable();
     const auto id = AllocateOutputId();
-    _records.push_back({{id, RenderOutputKind::Presentation, std::move(name), desc.Width, desc.Height, desc.Format, desc.SampleCount, true}, {}});
+    _records.push_back({{id, RenderOutputKind::Presentation, std::move(name), desc.Width, desc.Height, desc.Format, desc.SampleCount, true, usage}, {}});
     return id;
 }
 

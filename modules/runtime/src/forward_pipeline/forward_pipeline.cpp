@@ -15,6 +15,9 @@
 #include <radray/runtime/gpu_system.h>
 #include <radray/runtime/render_framework/viewport.h>
 #include <radray/runtime/render_system.h>
+#ifdef RADRAY_ENABLE_IMGUI
+#include <radray/runtime/imgui/imgui_graph.h>
+#endif
 
 namespace radray {
 using namespace forward_detail;
@@ -237,7 +240,7 @@ void ForwardPipeline::PrepareFrame(RenderPrepareContext& ctx) {
         return;
     }
     for (const auto& output : ctx.Outputs) {
-        if (!output.Active || output.Kind != RenderOutputKind::Presentation) continue;
+        if (!output.Active || output.Kind != RenderOutputKind::Presentation || output.Usage != RenderOutputUsage::Scene) continue;
         auto& id = _impl->ViewIds[output.Id];
         if (!id.IsValid()) id = AllocateViewStateId();
         RenderViewDesc view = CollectRenderView(*_impl->ViewCamera);
@@ -259,6 +262,10 @@ void ForwardPipeline::Render(RenderPipelineContext& ctx) {
         return;
     }
     auto graph = ctx.CreateRenderGraph("Forward");
+#ifdef RADRAY_ENABLE_IMGUI
+    auto ui = _impl->System->GetApplication()->GetImGuiSystem();
+    const auto uiScenes = ui ? ImGuiGraph::PrepareSceneOutputs(graph, ctx) : vector<ImGuiSceneOutput>{};
+#endif
     vector<ViewStateId> rendered;
     if (flight.Settings.Hdr) {
         bool overlaysSucceeded = true;
@@ -283,7 +290,13 @@ void ForwardPipeline::Render(RenderPipelineContext& ctx) {
         for (const auto& overlay : flight.Overlays)
             overlaysSucceeded &= BuildForwardOutputOverlay(graph, ctx, _impl->Effects, overlay, _impl->Device->GetBackend(), overlaysSucceeded);
         if (!flight.Capture.Build(graph, ctx, *_impl->Device)) _impl->Error = true;
+#ifdef RADRAY_ENABLE_IMGUI
+        if (ui) ImGuiGraph::BuildGraph(graph, ctx, *ui.Get(), uiScenes);
+#endif
         const auto result = ctx.ExecuteGraph(graph);
+#ifdef RADRAY_ENABLE_IMGUI
+        if (ui) ImGuiGraph::CompleteGraph(graph, ctx, *ui.Get(), result.Success);
+#endif
         flight.Capture.Report = graph.GetReport().ToJson();
         flight.Capture.Dot = graph.GetReport().ToDot();
         if (result.Success) {
@@ -380,7 +393,13 @@ void ForwardPipeline::Render(RenderPipelineContext& ctx) {
             if (view.Culling.Stats.Valid) rendered.push_back(view.View.StateId);
     }
     if (!flight.Capture.Build(graph, ctx, *_impl->Device)) _impl->Error = true;
+#ifdef RADRAY_ENABLE_IMGUI
+    if (ui) ImGuiGraph::BuildGraph(graph, ctx, *ui.Get(), uiScenes);
+#endif
     const auto result = ctx.ExecuteGraph(graph);
+#ifdef RADRAY_ENABLE_IMGUI
+    if (ui) ImGuiGraph::CompleteGraph(graph, ctx, *ui.Get(), result.Success);
+#endif
     flight.Capture.Report = graph.GetReport().ToJson();
     flight.Capture.Dot = graph.GetReport().ToDot();
     if (result.Success && flight.Stats.Execution.Succeeded())

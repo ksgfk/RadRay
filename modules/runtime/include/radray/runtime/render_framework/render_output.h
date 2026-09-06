@@ -19,6 +19,8 @@ struct RenderOutputIdHash {
 
 enum class RenderOutputKind : uint8_t { Presentation,
                                         ExternalColorTexture };
+enum class RenderOutputUsage : uint8_t { Scene,
+                                         Auxiliary };
 
 struct RenderOutputInfo {
     RenderOutputId Id;
@@ -28,6 +30,7 @@ struct RenderOutputInfo {
     render::TextureFormat Format{render::TextureFormat::UNKNOWN};
     uint32_t SampleCount{1};
     bool Active{false};
+    RenderOutputUsage Usage{RenderOutputUsage::Scene};
 };
 
 struct ExternalRenderOutputDesc {
@@ -58,7 +61,7 @@ public:
 
     /// Host-only lifecycle gate. Set true only after the render thread has stopped consuming plans.
     void SetRenderIdle(bool idle) noexcept;
-    RenderOutputId RegisterPresentation(string name, const render::TextureDescriptor& desc);
+    RenderOutputId RegisterPresentation(string name, const render::TextureDescriptor& desc, RenderOutputUsage usage = RenderOutputUsage::Scene);
     RenderOutputId RegisterExternal(const ExternalRenderOutputDesc& desc);
     bool Unregister(RenderOutputId id);
     bool UpdatePresentation(RenderOutputId id, uint32_t width, uint32_t height, bool active);

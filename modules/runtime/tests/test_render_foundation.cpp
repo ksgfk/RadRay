@@ -68,7 +68,10 @@ class RenderFoundationTest : public testing::TestWithParam<render::RenderBackend
 
 TEST_P(RenderFoundationTest, ExternalOutputsAndRelativeExtentsAreValidated) {
     render::test::DeviceContext context;
-    ASSERT_TRUE(render::test::TryCreateDevice(GetParam(), context, true));
+    if (!render::test::TryCreateDevice(GetParam(), context, true)) {
+        if (render::test::SetupMustFail(context.Status, render::test::RequiredBackend(GetParam()))) FAIL() << context.Reason;
+        GTEST_SKIP() << context.Reason;
+    }
     auto target = render::test::MakeRenderTarget(context.Device.get(), render::TextureFormat::RGBA8_UNORM, 64, 32,
                                                  render::TextureUse::RenderTarget | render::TextureUse::Resource);
     ASSERT_TRUE(target);
@@ -106,7 +109,10 @@ TEST_P(RenderFoundationTest, ExternalOutputsAndRelativeExtentsAreValidated) {
 
 TEST_P(RenderFoundationTest, PoolKeepsExactKeysPhysicalStatesAndSafeViewLifetime) {
     render::test::DeviceContext context;
-    ASSERT_TRUE(render::test::TryCreateDevice(GetParam(), context, true));
+    if (!render::test::TryCreateDevice(GetParam(), context, true)) {
+        if (render::test::SetupMustFail(context.Status, render::test::RequiredBackend(GetParam()))) FAIL() << context.Reason;
+        GTEST_SKIP() << context.Reason;
+    }
     render::RenderPassRegistry registry(context.Device.get());
     RenderResourcePool pool(*context.Device, registry, 2), other(*context.Device, registry, 2);
     pool.BeginFlight(1);

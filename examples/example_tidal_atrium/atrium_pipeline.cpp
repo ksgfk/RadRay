@@ -1,4 +1,7 @@
 #include "atrium_pipeline.h"
+#ifdef RADRAY_ENABLE_IMGUI
+#include <radray/runtime/imgui/imgui_graph.h>
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -641,7 +644,7 @@ void AtriumPipeline::PrepareFrame(RenderPrepareContext& ctx) {
         return;
     }
     for (const auto& output : ctx.Outputs) {
-        if (!output.Active || output.Kind != RenderOutputKind::Presentation) continue;
+        if (!output.Active || output.Kind != RenderOutputKind::Presentation || output.Usage != RenderOutputUsage::Scene) continue;
         RenderViewDesc view;
         view.Name = "Free flight";
         view.StateId = _impl->Ids[0];
@@ -710,6 +713,10 @@ void AtriumPipeline::Render(RenderPipelineContext& ctx) {
         }
     }
     auto graph = ctx.CreateRenderGraph("Tidal Atrium / live framework gallery");
+#ifdef RADRAY_ENABLE_IMGUI
+    auto ui = self.App->GetImGuiSystem();
+    const auto uiScenes = ui ? ImGuiGraph::PrepareSceneOutputs(graph, ctx) : vector<ImGuiSceneOutput>{};
+#endif
     if (!flight.Font || !flight.Font->IsValid()) {
         self.Error = true;
         return;
@@ -795,7 +802,13 @@ void AtriumPipeline::Render(RenderPipelineContext& ctx) {
             flight.PendingCapture = flight.State.CaptureName;
         }
     }
+#ifdef RADRAY_ENABLE_IMGUI
+    if (ui) ImGuiGraph::BuildGraph(graph, ctx, *ui.Get(), uiScenes);
+#endif
     const auto result = ctx.ExecuteGraph(graph);
+#ifdef RADRAY_ENABLE_IMGUI
+    if (ui) ImGuiGraph::CompleteGraph(graph, ctx, *ui.Get(), result.Success);
+#endif
     self.LastReport = graph.GetReport();
     if (!flight.PendingCapture.empty()) flight.Report = self.LastReport.ToJson();
     if (!result.Success) RADRAY_ERR_LOG("Atrium graph failed: {}", self.LastReport.ToText());

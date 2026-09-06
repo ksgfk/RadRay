@@ -43,6 +43,10 @@ public:
     std::span<const ResolvedRenderViewFamily> ViewFamilies() const noexcept { return _families; }
     RenderGraph CreateRenderGraph(std::string_view name);
     RgTextureHandle ImportOutput(RenderGraph& graph, RenderOutputId output);
+    /// Explicit display composition may route scene output through a sampleable intermediate.
+    bool SetOutputIntermediate(RenderGraph& graph, RenderOutputId output, RgTextureHandle texture);
+    RgTextureHandle ImportOutputTarget(RenderGraph& graph, RenderOutputId output);
+    std::span<const RenderSurfaceFrame> OutputSurfaces() const noexcept { return _surfaces; }
     RenderGraphExecutionResult ExecuteGraph(RenderGraph& graph);
     bool CommitView(ViewStateId view);
     ViewCompletionToken RegisterViewCompletion(RenderGraph& graph, ViewStateId view, RgPassHandle pass);
@@ -64,6 +68,7 @@ private:
     std::span<RenderSurfaceFrame> _surfaces;
     RenderGraphExecutionReport& _report;
     vector<unique_ptr<ImportedOutput>> _imports;
+    vector<std::pair<RenderOutputId, RgTextureHandle>> _intermediates;
     vector<HistoryTexturePair> _histories;
     struct ViewCompletion {
         ViewStateId View;

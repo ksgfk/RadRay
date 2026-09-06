@@ -12,6 +12,20 @@ layout 章节以下以 schema 7 contract 为准，并且已经是实现形态：
 `BindingHandle` 的内部 token 是 layout generation 加该 layout metadata table 的 record index，
 位布局不是 ABI，只有两个后端可以拆开它。
 
+## 区域纹理上传
+
+`CommandBuffer::CopyBufferToTextureRegion` 接受 `BufferToTextureCopyDescriptor`，其中
+`BufferTextureCopyRegion` 明确源 byte offset、row pitch 和目标 mip、array layer、X/Y、宽高。
+`ValidateBufferTextureCopyRegion` 验证单采样、非压缩 color 2D、copy usage、子资源与区域边界、
+设备 pitch/placement 对齐及源 buffer 范围。源内容从指定 offset 开始，只上传区域的行；
+目标区域外的 texel 保持原值。D3D12 映射到 placed footprint + CopyTextureRegion，Vulkan
+映射到 VkBufferImageCopy + vkCmdCopyBufferToImage。不支持的 command buffer 实现返回 false。
+Graph 对应 typed Pass 见 [Renderer foundation](renderer-foundation.md)。
+
+D3D12 flip swapchain 的 sRGB 请求使用 UNORM DXGI 存储格式，并保留逻辑 sRGB 格式创建 RTV；
+创建与 resize 使用同一映射。编码发生在 RTV 写入，符合
+[DXGI 色彩空间契约](https://learn.microsoft.com/en-us/windows/win32/direct3ddxgi/converting-data-color-space)。
+
 ## 所有权：一个 shared，其余全 unique
 
 | 对象 | 持有方式 |

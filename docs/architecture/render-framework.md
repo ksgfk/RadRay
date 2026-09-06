@@ -17,6 +17,7 @@ Application            进程生命周期、runner 选择、帧循环
   ├─ WindowManager     窗口与 swapchain
   ├─ GpuSystem         device、queue、flight、上传        → frame-and-gpu.md
   ├─ RenderSystem      workload/output、graph pools/history、registry 与 pipeline
+  ├─ ImGuiSystem       可选 context、原始输入适配和 per-flight UI 快照 → runtime-imgui.md
   ├─ AssetDatabase     可选 JSON 身份库与 importer              → asset-database.md
   ├─ AssetManager      资产生命周期                       → asset-system.md
   └─ World             Actor / Component / Scene
@@ -28,7 +29,8 @@ Application            进程生命周期、runner 选择、帧循环
 
 ```text
 Game thread:   flight 可写 → 清上一帧 retained refs → AssetManager::Pump
-               → ApplicationScheduler::Pump → OnUpdate → World::Tick → PrepareFrame
+               → ApplicationScheduler::Pump → 可选 UI NewFrame → 输入路由 → OnUpdate → World::Tick
+               → 可选 OnImGui / UI 快照 → PrepareFrame
 Render thread: pool/history safe Begin → resolve requested outputs/views → pipeline.Render
                → compile/realize/execute graph → 未写目标 fallback clear → required final states
 ```
@@ -76,7 +78,11 @@ layout recipe，discovery 与 compile 由同一个 request 驱动。缓存分两
 source/defines/assignments/policy/target/toolchain 缓存（不含 layout recipe），program 按 artifact 身份
 加当前 backend 的 canonical resolved layout hash 缓存。按实际 backend 只编译一个 target；失败按完整
 key 记成显式失败记录以避免逐帧重试，同时不会污染其他 key。
-`RADRAY_ENABLE_SHADER_JIT=OFF` 时 `RenderSystem` 与 pipeline 仍可构造，program 请求明确返回空。
+`RADRAY_ENABLE_SHADER_JIT=OFF` 时源码请求明确返回空；artifact 重载
+`GetOrCreateShaderProgram(bytes, expectedIdentity, recipe)` 不依赖 compiler，按当前设备 target
+验证、复制 bytes，并复用现有 decoder、layout 与 ShaderProgram。该缓存按 bytes 和 resolved
+layout 区分，GPU idle 后随 RenderSystem 销毁。内置 UI shader 使用这个入口，具体装配见
+[Runtime ImGui](runtime-imgui.md)。
 
 ## 场景表示
 

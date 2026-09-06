@@ -31,6 +31,10 @@ v1 只接收单 mip、单 layer 的 2D color render target，格式/view/range/u
 未知 output、重复 primary output、重复稳定 view ID、非法 view/scale 会记录 diagnostic 并拒绝整条
 family。`BeginUpdateForFlight` 只清理当前可写 flight 的 plan 和 retained refs。
 
+`RequestOutput(id)` 可以不创建 view family，供纯 UI 等无相机工作量使用；AddViewFamily 自动
+请求其 output。plan 内请求去重，host 对每个 ID acquire 一次。`RenderOutputUsage::Scene`
+与 `Auxiliary` 区分场景窗口和工具窗口，Forward/Tidal 的默认场景枚举跳过 Auxiliary。
+
 host 只 acquire plan 请求的 output。acquire 失败的 family 保留身份，`OutputAvailable=false`；其他
 family 正常执行。没有 presentation 或所有 output 都不可用时仍调用 pipeline，允许 side-effect
 compute/copy。acquire 不录 barrier。graph 从 surface 的真实状态导入 output，成功写入标记由 executor
@@ -60,6 +64,10 @@ history 与 `CreateRenderGraph`/`ExecuteGraph`。AppFrameContext 和 surface 实
 不能从 pipeline context 取得窗口、swapchain、command buffer 或直接进行 barrier/submit。
 每个 context 只允许创建、执行一次自身 generation 的 graph。
 
+`OutputSurfaces()` 提供已取得输出的只读范围。`SetOutputIntermediate` 在本图为 output
+安装同尺寸、同格式的场景中间目标；普通 `ImportOutput` 与 view completion 使用该目标，
+`ImportOutputTarget` 明确导入实际输出。这样 UI 可以显式组合到后处理之后，仍只执行一张图。
+
 Texture/buffer/view/pass、indirect arguments、compute program 与 parameter set 使用类型不同且含
 generation 的 handle。不能跨 graph 使用，也不能在 freeze 后追加 setup；indirect/program/set handle
 还绑定声明它的 pass 和命令种类。raster/compute setup 立即执行，把数据写入 graph 拥有的 payload；
@@ -77,6 +85,8 @@ layout，不由调用方重复提供。
 `ReadIndirectArguments` 把带 `Indirect` usage 的 buffer、Draw/DrawIndexed/Dispatch 种类、4-byte aligned
 offset 与固定 count 固化为 pass-local handle；没有 GPU count buffer。graphics/compute facade 只接受该
 handle，不再接收任意原生 buffer。copy pass 使用专门的 buffer/texture/texture-to-buffer API；
+`AddCopyBufferToTexturePass` 接受源 offset/row pitch 和目标 mip/layer/区域，验证见
+[RHI 区域上传](render-rhi.md#区域纹理上传)。部分区域写入要求该子资源原内容有效；完整覆盖可建立有效性。
 `AddResolveTexturePass` 处理同格式、同尺寸的 2D/2D-array color 子资源，从 MSAA source resolve 到
 single-sample destination，一次选择一个 mip 与连续 layers，不做 depth/stencil、缩放或格式转换。
 

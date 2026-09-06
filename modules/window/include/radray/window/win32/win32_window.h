@@ -74,6 +74,15 @@ public:
     float GetDpiScale() const noexcept override;
     Eigen::Vector2i ClientToScreen(Eigen::Vector2i pos) const noexcept override;
     Eigen::Vector2i ScreenToClient(Eigen::Vector2i pos) const noexcept override;
+    NativeDesktopCapabilities GetDesktopCapabilities() const noexcept override { return {true, true, true, true, true, true}; }
+    bool SetCursor(NativeCursor cursor) noexcept override;
+    std::optional<Eigen::Vector2i> GetDesktopMousePosition() const noexcept override;
+    bool SetDesktopMousePosition(Eigen::Vector2i position) noexcept override;
+    Nullable<NativeWindow*> GetHoveredWindow() const noexcept override;
+    vector<NativeMonitor> GetMonitors() const override;
+    std::optional<string> GetClipboardText() const override;
+    bool SetClipboardText(std::string_view text) override;
+    bool SetImePosition(Eigen::Vector2i position, int lineHeight, bool visible) noexcept override;
 
     sigslot::signal<int, int>& EventResized() noexcept override;
     sigslot::signal<int, int, MouseButton, Action>& EventTouch() noexcept override;
@@ -96,6 +105,7 @@ public:
     void DestroyImpl() noexcept;
 
     HWND _hwnd{nullptr};
+    NativeCursor _cursor{NativeCursor::Arrow};
     Win32EventPump* _eventPump{nullptr};
     HMONITOR _monitor{nullptr};
     std::atomic<RECT> _windowedRect{};

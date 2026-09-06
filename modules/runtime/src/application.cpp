@@ -144,6 +144,10 @@ const render::Device* Application::GetDevice() const noexcept {
 
 void Application::OnInit() {
 }
+#ifdef RADRAY_ENABLE_IMGUI
+void Application::ConfigureImGui(ImGuiSystemDescriptor&) {}
+void Application::OnImGui() {}
+#endif
 
 void Application::OnUpdate(const AppUpdateContext& ctx) {
     (void)ctx;
@@ -484,6 +488,12 @@ public:
     }
 
     void TickFrame(bool isInModalLoop) {
+        if (_ticking) return;
+        _ticking = true;
+        struct TickScope {
+            bool& Flag;
+            ~TickScope() { Flag = false; }
+        } scope{_ticking};
         if (isInModalLoop) {
             MarkModalLoopActivityDuringDispatch();
         }
@@ -536,6 +546,7 @@ public:
     std::chrono::steady_clock::time_point _lastFrameTime{std::chrono::steady_clock::now()};
     bool _reqExit{false};
     bool _isDispatchingEvents{false};
+    bool _ticking{false};
     bool _hasModalLoopActivityDuringDispatch{false};
 
 private:
@@ -673,7 +684,14 @@ public:
     }
 
     std::optional<uint64_t> TickFrame(bool isInModalLoop, bool waitForWritableSlot) {
+        if (_ticking) return std::nullopt;
+        _ticking = true;
+        struct TickScope {
+            bool& Flag;
+            ~TickScope() { Flag = false; }
+        } scope{_ticking};
         auto* gpuSystem = _app->GetGpuSystem();
+        if (!waitForWritableSlot && _renderedFrameCount.load(std::memory_order_acquire) < gpuSystem->GetFrameIndex()) return std::nullopt;
         if (waitForWritableSlot) {
             WaitRenderFrameComplete(gpuSystem->GetFrameIndex());
             RetireRenderedFrames(false, false);
@@ -768,6 +786,7 @@ public:
     std::atomic<uint64_t> _renderedFrameCount{0};
     std::mutex _retireMutex;
     // 主线程独占
+    bool _ticking{false};
     std::chrono::steady_clock::time_point _lastFrameTime{std::chrono::steady_clock::now()};
     bool _hasModalLoopActivityDuringDispatch{false};
     // 渲染线程独占
@@ -788,18 +807,31 @@ AppUpdateResult Application::Update(const AppUpdateContext& ctx) {
     if (_renderSystem != nullptr) {
         _renderSystem->BeginUpdateForFlight(ctx.FlightIndex);
     }
+#ifdef RADRAY_ENABLE_IMGUI
+    if (_imguiSystem) _imguiSystem->BeginUpdate(ctx.FlightIndex);
+#endif
     // 1) 推进资产加载状态机(恢复本帧 GPU 上传已完成的协程 → 启动未启动协程 → reap 终态)。
     if (_assetManager != nullptr) {
         _assetManager->Pump();
     }
     // 恢复需要在应用 update 线程上继续执行的协程。
     _scheduler.Pump();
+#ifdef RADRAY_ENABLE_IMGUI
+    const bool uiFrame = _imguiSystem && _imguiSystem->NewFrame(ctx);
+#endif
     // 2) 游戏逻辑。
+    if (_windowManager) _windowManager->DispatchInput();
     OnUpdate(ctx);
     // 3) World Tick(组件解析当帧就绪的资产、建代理)。
     if (_world != nullptr) {
         _world->Tick(ctx.DeltaTime.count());
     }
+#ifdef RADRAY_ENABLE_IMGUI
+    if (uiFrame) {
+        OnImGui();
+        _imguiSystem->CaptureFrame(ctx.FlightIndex);
+    }
+#endif
     if (_renderSystem != nullptr) {
         _renderSystem->PrepareFrame(ctx);
     }
@@ -817,6 +849,9 @@ void Application::Render(AppFrameContext& ctx) {
 }
 
 void Application::OnRenderComplete(const AppRenderCompleteContext& ctx) {
+#ifdef RADRAY_ENABLE_IMGUI
+    if (_imguiSystem) _imguiSystem->NotifyFlightComplete(ctx.FlightIndex, ctx.GpuWorkCompleted);
+#endif
     OnRenderFrameComplete(ctx);
 }
 
@@ -834,6 +869,9 @@ int Application::Shutdown(const AppShutdownContext& ctx) {
 }
 
 void Application::DestroyRuntime() noexcept {
+#ifdef RADRAY_ENABLE_IMGUI
+    _imguiSystem.reset();
+#endif
     // 拆 World:销毁 Actor → 移除 SceneProxy → drop 其持有的 StreamingAssetRef。
     _world.reset();
     // RenderSystem 持有 Scene 对象,生命周期必须长于 World 的拆解。
@@ -931,7 +969,11 @@ bool Application::InitializeRuntime(const ApplicationRuntimeDescriptor& desc) {
     wndDesc.Height = desc.WindowHeight;
     wndDesc.Resizable = true;
     wndDesc.StartVisible = true;
-    AppWindow* mainWindow = _windowManager->CreateWindow(wndDesc, true);
+    auto mainWindow = _windowManager->CreateWindow(wndDesc, true);
+    if (!mainWindow) {
+        DestroyRuntime();
+        return false;
+    }
 #else
     RADRAY_ABORT("unsupported platform");
 #endif
@@ -940,7 +982,21 @@ bool Application::InitializeRuntime(const ApplicationRuntimeDescriptor& desc) {
     swapchainDesc.Height = static_cast<uint32_t>(desc.WindowHeight);
     swapchainDesc.Format = desc.BackBufferFormat;
     swapchainDesc.PresentMode = desc.PresentMode;
-    mainWindow->AttachSwapChain(swapchainDesc);
+    if (!mainWindow->AttachSwapChain(swapchainDesc)) {
+        DestroyRuntime();
+        return false;
+    }
+#ifdef RADRAY_ENABLE_IMGUI
+    auto uiDescriptor = desc.ImGui;
+    ConfigureImGui(uiDescriptor);
+    if (uiDescriptor.Enabled) {
+        _imguiSystem = make_unique<ImGuiSystem>(*this);
+        if (!_imguiSystem->Initialize(uiDescriptor)) {
+            DestroyRuntime();
+            return false;
+        }
+    }
+#endif
     return true;
 }
 

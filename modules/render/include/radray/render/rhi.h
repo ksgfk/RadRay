@@ -646,6 +646,20 @@ struct QueryResolveDescriptor {
     uint64_t DestinationOffset{0};
 };
 
+/// One uncompressed, single-sample 2D subresource region. RowPitch includes padding.
+struct BufferTextureCopyRegion {
+    uint64_t SourceOffset{0};
+    uint32_t RowPitch{0};
+    uint32_t MipLevel{0}, ArrayLayer{0};
+    uint32_t X{0}, Y{0}, Width{0}, Height{0};
+};
+
+struct BufferToTextureCopyDescriptor {
+    Buffer* Source{nullptr};
+    Texture* Destination{nullptr};
+    BufferTextureCopyRegion Region{};
+};
+
 struct TextureCopyDescriptor {
     Texture* Destination{nullptr};
     uint32_t DestinationMipLevel{0};
@@ -1366,6 +1380,8 @@ public:
     virtual void CopyBufferToBuffer(Buffer* dst, uint64_t dstOffset, Buffer* src, uint64_t srcOffset, uint64_t size) noexcept = 0;
 
     virtual void CopyBufferToTexture(Texture* dst, SubresourceRange dstRange, Buffer* src, uint64_t srcOffset) noexcept = 0;
+    /// Returns false without recording commands when unsupported or invalid.
+    virtual bool CopyBufferToTextureRegion(const BufferToTextureCopyDescriptor&) noexcept { return false; }
 
     virtual void CopyTextureToBuffer(Buffer* dst, uint64_t dstOffset, Texture* src, SubresourceRange srcRange) noexcept = 0;
 
@@ -1657,6 +1673,9 @@ public:
 // == 工具函数 ==
 // SamplerCache 在 sampler_cache.h
 bool IsDepthStencilFormat(TextureFormat format) noexcept;
+TextureDescriptorValidationResult ValidateBufferTextureCopyRegion(
+    const BufferDescriptor& source, const TextureDescriptor& destination,
+    const BufferTextureCopyRegion& region, const DeviceDetail& detail);
 
 bool IsValidTextureSupportQuery(const TextureSupportQuery& query) noexcept;
 

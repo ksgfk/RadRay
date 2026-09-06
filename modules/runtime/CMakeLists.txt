@@ -20,6 +20,10 @@ radray_default_compile_flags(radrayruntime)
 radray_optimize_flags_library(radrayruntime)
 radray_set_build_path(radrayruntime)
 
+if (RADRAY_ENABLE_IMGUI)
+    add_subdirectory(imgui)
+endif()
+
 if (RADRAY_BUILD_TESTS)
     add_subdirectory(tests)
 endif()

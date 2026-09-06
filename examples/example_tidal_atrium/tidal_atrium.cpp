@@ -29,6 +29,9 @@ namespace radray::atrium {
 namespace {
 
 struct Options {
+#ifdef RADRAY_ENABLE_IMGUI
+    bool ImGui{false};
+#endif
     render::RenderBackend Backend{render::RenderBackend::D3D12};
     bool Multithread{false}, Validation{false}, Tour{false}, SkyTest{false};
     uint32_t Frames{0}, Width{1280}, Height{800};
@@ -38,6 +41,12 @@ struct Options {
 [[maybe_unused]] bool ParseOptions(int argc, char** argv, Options& options) {
     for (int i = 1; i < argc; ++i) {
         const std::string_view argument{argv[i]};
+#ifdef RADRAY_ENABLE_IMGUI
+        if (argument == "--imgui") {
+            options.ImGui = true;
+            continue;
+        }
+#endif
         if (argument == "--multithread")
             options.Multithread = true;
         else if (argument == "--valid-layer")
@@ -198,13 +207,31 @@ public:
     bool Failed() const noexcept { return _failed; }
 
 protected:
+#ifdef RADRAY_ENABLE_IMGUI
+    void ConfigureImGui(ImGuiSystemDescriptor& descriptor) override { descriptor.Enabled = _options.ImGui; }
+    void OnImGui() override {
+        ImGui::SetNextWindowSize({340, 260}, ImGuiCond_FirstUseEver);
+        if (ImGui::Begin("Tidal Atrium runtime", nullptr, _options.Tour ? ImGuiWindowFlags_NoInputs : ImGuiWindowFlags_None)) {
+            ImGui::TextUnformatted("Native docking and viewport tools");
+            if (!_imguiMural && _textures.contains("tidal_mural") && _textures.at("tidal_mural"))
+                _imguiMural = GetImGuiSystem()->RegisterTexture(_textures.at("tidal_mural"));
+            if (_imguiMural) ImGui::Image(_imguiMural, {280, 160});
+        }
+        ImGui::End();
+    }
+    ImTextureID _imguiMural{0};
+#endif
     void OnInit() override {
         _window = GetWindowManager()->GetMainWindow()->GetNativeWindow();
-        _keyboard = _window->EventKeyboard().connect([this](KeyCode key, Action action) { Key(key, action); });
-        _mouse = _window->EventTouch().connect([this](int, int, MouseButton button, Action action) {
+        auto& input = GetWindowManager()->GetMainWindow()->GetInput().EventInput();
+        _keyboard = input.connect([this](const WindowInputEvent& event) { if (event.Type == WindowInputType::Key) Key(event.Key, event.State); });
+        _mouse = input.connect([this](const WindowInputEvent& event) {
+            if (event.Type != WindowInputType::Button) return;
+            const auto button = event.Button;
+            const auto action = event.State;
             if (button == MouseButton::BUTTON_RIGHT && action != Action::REPEATED) CaptureMouse(action == Action::PRESSED);
         });
-        _focus = _window->EventFocused().connect([this](bool focused) { if (!focused) { _keys.clear(); CaptureMouse(false); } });
+        _focus = input.connect([this](const WindowInputEvent& event) { if (event.Type == WindowInputType::Focus && !event.Focused) { _keys.clear(); CaptureMouse(false); } });
         for (const auto name : {"block", "panel", "sphere", "ring", "spire", "vase"})
             _meshes.emplace(name, GetAssetManager()->Load<StaticMesh>(fmt::format("tidal_atrium/{}.obj", name)));
         for (const auto name : {"white", "basalt", "limestone", "sampler_grid", "font", "tidal_mural", "contact", "welcome", "light", "glass", "material", "signal", "observatory", "nearest", "linear", "streams"})
@@ -297,6 +324,13 @@ protected:
     }
 
     void OnShutdown() override {
+#ifdef RADRAY_ENABLE_IMGUI
+        if (auto ui = GetImGuiSystem()) {
+            _failed |= ui->HasError();
+            if (_imguiMural) ui->UnregisterTexture(_imguiMural);
+            _imguiMural = 0;
+        }
+#endif
         CaptureMouse(false);
         _keyboard.disconnect();
         _mouse.disconnect();
@@ -445,6 +479,8 @@ private:
         }
         if (frame == 20) {
             _window->EventKeyboard()(KeyCode::W, Action::RELEASED);
+        }
+        if (frame == 21) {
             if ((_camera->GetEyePosition() - _moveStart).norm() < .5f) {
                 _failed = true;
                 RADRAY_ERR_LOG("Atrium tour movement check failed");
@@ -457,11 +493,16 @@ private:
             _lookStart = _yaw;
             _lookChecked = true;
             _window->EventTouch()(0, 0, MouseButton::BUTTON_RIGHT, Action::PRESSED);
+        }
+        if (frame == 22 && !_lookChecked) RADRAY_WARN_LOG("SKIP Atrium mouse-look probe: native window did not receive foreground focus");
+        if (frame == 23 && _lookChecked) {
             const auto center = _window->ClientToScreen(_window->GetSize() / 2);
             SetCursorPos(center.x() + 25, center.y() + 12);
         }
-        if (frame == 23 && _lookChecked) {
+        if (frame == 24 && _lookChecked) {
             _window->EventTouch()(0, 0, MouseButton::BUTTON_RIGHT, Action::RELEASED);
+        }
+        if (frame == 25 && _lookChecked) {
             if (std::abs(_yaw - _lookStart) < .01f || _captured) {
                 _failed = true;
                 RADRAY_ERR_LOG("Atrium mouse-look check failed");

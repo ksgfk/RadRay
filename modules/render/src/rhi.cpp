@@ -139,6 +139,31 @@ std::string_view format_as(VertexFormat v) noexcept {
     Unreachable();
 }
 
+TextureDescriptorValidationResult ValidateBufferTextureCopyRegion(
+    const BufferDescriptor& source, const TextureDescriptor& destination,
+    const BufferTextureCopyRegion& r, const DeviceDetail& detail) {
+    const auto bpp = GetTextureFormatBytesPerPixel(destination.Format);
+    if (destination.Dim != TextureDimension::Dim2D || destination.SampleCount != 1 || bpp == 0 ||
+        IsDepthStencilFormat(destination.Format) || !source.Usage.HasFlag(BufferUse::CopySource) ||
+        !destination.Usage.HasFlag(TextureUse::CopyDestination))
+        return {false, "Region upload requires an uncompressed color 2D texture, single sample and copy usages"};
+    if (r.MipLevel >= destination.MipLevels || r.MipLevel >= 32 || r.ArrayLayer >= destination.DepthOrArraySize || r.Width == 0 || r.Height == 0)
+        return {false, "Region upload subresource or extent is invalid"};
+    const auto width = std::max(1u, destination.Width >> r.MipLevel);
+    const auto height = std::max(1u, destination.Height >> r.MipLevel);
+    if (r.X > width || r.Width > width - r.X || r.Y > height || r.Height > height - r.Y)
+        return {false, "Region upload exceeds the destination mip"};
+    const uint64_t rowBytes = uint64_t{r.Width} * bpp;
+    if (r.SourceOffset % std::max(uint64_t{1}, detail.TextureDataPlacementAlignment) != 0 ||
+        r.SourceOffset % bpp != 0 || r.RowPitch < rowBytes || r.RowPitch % bpp != 0 ||
+        r.RowPitch % std::max(1u, detail.TextureDataPitchAlignment) != 0)
+        return {false, "Region upload source offset or row pitch is not aligned"};
+    const uint64_t size = uint64_t{r.RowPitch} * (r.Height - 1) + rowBytes;
+    if (r.SourceOffset > source.Size || size > source.Size - r.SourceOffset)
+        return {false, "Region upload exceeds the source buffer"};
+    return {true, {}};
+}
+
 }  // namespace radray::render
 
 namespace radray::render {

@@ -4229,6 +4229,27 @@ void CommandBufferVulkan::CopyBufferToBuffer(Buffer* dst_, uint64_t dstOffset, B
     _device->_ftb.vkCmdCopyBuffer(_cmdBuffer, src->_buffer, dst->_buffer, 1, &copyInfo);
 }
 
+bool CommandBufferVulkan::CopyBufferToTextureRegion(const BufferToTextureCopyDescriptor& desc) noexcept {
+    if (!desc.Source || !desc.Destination) return false;
+    const auto validation = ValidateBufferTextureCopyRegion(desc.Source->GetDesc(), desc.Destination->GetDesc(), desc.Region, _device->GetDetail());
+    if (!validation.Supported) {
+        RADRAY_ERR_LOG("{}", validation.Reason);
+        return false;
+    }
+    auto src = CastVkObject(desc.Source);
+    auto dst = CastVkObject(desc.Destination);
+    const auto& r = desc.Region;
+    VkBufferImageCopy copy{};
+    copy.bufferOffset = r.SourceOffset;
+    copy.bufferRowLength = r.RowPitch / GetTextureFormatBytesPerPixel(dst->_format);
+    copy.bufferImageHeight = r.Height;
+    copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, r.MipLevel, r.ArrayLayer, 1};
+    copy.imageOffset = {static_cast<int32_t>(r.X), static_cast<int32_t>(r.Y), 0};
+    copy.imageExtent = {r.Width, r.Height, 1};
+    _device->_ftb.vkCmdCopyBufferToImage(_cmdBuffer, src->_buffer, dst->_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+    return true;
+}
+
 void CommandBufferVulkan::CopyBufferToTexture(Texture* dst_, SubresourceRange dstRange, Buffer* src_, uint64_t srcOffset) noexcept {
     auto dst = CastVkObject(dst_);
     auto src = CastVkObject(src_);

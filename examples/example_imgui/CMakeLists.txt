@@ -1,0 +1,5 @@
+add_executable(example_imgui imgui_demo.cpp)
+target_link_libraries(example_imgui PRIVATE radrayruntime)
+radray_default_compile_flags(example_imgui)
+radray_optimize_flags_binary(example_imgui)
+radray_set_build_path(example_imgui)

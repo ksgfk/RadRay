@@ -76,8 +76,11 @@ public:
     const RenderResourcePoolStats& GetPoolStats(uint32_t flight) const { return _graphRuntime->GetPoolStats(flight); }
 
     Nullable<ShaderProgram*> GetOrCreateShaderProgram(const ShaderProgramRequest& request);
+    Nullable<ShaderProgram*> GetOrCreateShaderProgram(std::span<const byte> artifact,
+                                                      const shader::GpuArtifactHash& expectedIdentity,
+                                                      const render::ShaderProgramLayoutRecipe& recipe = {});
 
-    size_t GetShaderProgramCacheSize() const noexcept { return _shaderPrograms.size(); }
+    size_t GetShaderProgramCacheSize() const noexcept { return _shaderPrograms.size() + _precompiledPrograms.size(); }
 
     /// 编译产物缓存条目数。与 program 数不同: 同一个 artifact 可以服务多个 layout recipe。
     size_t GetShaderArtifactCacheSize() const noexcept { return _shaderArtifacts.size(); }
@@ -151,6 +154,12 @@ private:
     unique_ptr<ShaderJit> _shaderJit;
     unordered_map<ArtifactKey, ArtifactRecord, ArtifactKeyHash> _shaderArtifacts;
     unordered_map<ProgramKey, ProgramRecord, ProgramKeyHash> _shaderPrograms;
+    struct PrecompiledProgram {
+        vector<byte> Bytes;
+        render::ResolvedLayoutHash LayoutHash{};
+        unique_ptr<ShaderProgram> Program;
+    };
+    vector<PrecompiledProgram> _precompiledPrograms;
     uint64_t _nextArtifactIdentity{1};
     unique_ptr<RenderPipeline> _pipeline;
     vector<unique_ptr<Scene>> _scenes;

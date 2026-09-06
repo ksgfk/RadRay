@@ -38,12 +38,14 @@ AppWindow::AppWindow(
     WindowManager* manager,
     unique_ptr<NativeWindow> window,
     NativeEventPump* pump,
-    bool isMain) noexcept
+    bool isMain, RenderOutputUsage usage) noexcept
     : _manager(manager),
       _window(std::move(window)),
+      _input(*_window),
+      _usage(usage),
       _pump(pump),
       _isMain(isMain) {
-    _pump->Register(_window.get());
+    _input.SetApplicationEnabled(usage == RenderOutputUsage::Scene);
 }
 
 AppWindow::~AppWindow() noexcept {
@@ -51,19 +53,25 @@ AppWindow::~AppWindow() noexcept {
     _pump->Unregister(_window.get());
 }
 
-render::SwapChain* AppWindow::AttachSwapChain(const render::SwapChainDescriptor& desc) noexcept {
+Nullable<render::SwapChain*> AppWindow::AttachSwapChain(const render::SwapChainDescriptor& desc) noexcept {
     auto* gpuSystem = _manager->GetGpuSystem();
     render::SwapChainDescriptor swapChainDesc = desc;
     swapChainDesc.PresentQueue = gpuSystem->GetMainQueue();
     swapChainDesc.NativeHandler = _window->GetNativeHandler();
     swapChainDesc.BackBufferCount = gpuSystem->GetBackBufferCount();
     DetachSwapChain();
-    _swapchain = gpuSystem->GetDevice()->CreateSwapChain(swapChainDesc).Unwrap();
+    _swapchain = gpuSystem->GetDevice()->CreateSwapChain(swapChainDesc);
+    if (!_swapchain) return nullptr;
     if (auto* renderSystem = _manager->GetRenderSystem()) {
         const auto actual = _swapchain->GetDesc();
         _outputId = renderSystem->GetOutputs().RegisterPresentation(_isMain ? "Main Window" : "Window",
                                                                     {render::TextureDimension::Dim2D, actual.Width, actual.Height, 1, 1, 1, actual.Format,
-                                                                     render::MemoryType::Device, render::TextureUse::RenderTarget, render::ResourceHint::External});
+                                                                     render::MemoryType::Device, render::TextureUse::RenderTarget, render::ResourceHint::External},
+                                                                    _usage);
+        if (!_outputId.IsValid()) {
+            _swapchain = nullptr;
+            return nullptr;
+        }
     }
     const uint32_t backBufferCount = _swapchain->GetBackBufferCount();
     _backBufferViews.resize(backBufferCount);
@@ -189,9 +197,11 @@ WindowManager::~WindowManager() noexcept {
     NativeWindow::GlobalShutdown();
 }
 
-AppWindow* WindowManager::CreateWindow(const NativeWindowCreateDescriptor& desc, bool isMain) {
-    auto window = NativeWindow::Create(desc).Unwrap();
-    auto& newWindow = _windows.emplace_back(make_unique<AppWindow>(this, std::move(window), _eventPump.get(), isMain));
+Nullable<AppWindow*> WindowManager::CreateWindow(const NativeWindowCreateDescriptor& desc, bool isMain, RenderOutputUsage usage) {
+    auto window = NativeWindow::Create(desc);
+    if (!window) return nullptr;
+    if (!_eventPump->Register(window.Get())) return nullptr;
+    auto& newWindow = _windows.emplace_back(make_unique<AppWindow>(this, window.Release(), _eventPump.get(), isMain, usage));
     if (isMain) {
         _mainWindow = newWindow.get();
     }
@@ -264,6 +274,7 @@ void WindowManager::DestroyWindow(AppWindow* window) noexcept {
         return item.get() == window;
     });
     if (iter != _windows.end()) {
+        (*iter)->GetInput().Cancel();
         if (_mainWindow == iter->get()) {
             _mainWindow = nullptr;
         }
@@ -354,6 +365,10 @@ void WindowManager::DispatchEvents() noexcept {
     if (_eventPump != nullptr) {
         _eventPump->DispatchEvents();
     }
+}
+
+void WindowManager::DispatchInput() {
+    for (const auto& window : _windows) window->GetInput().Dispatch();
 }
 
 sigslot::signal<NativeWindow*>& WindowManager::EventModalLoopTick() noexcept {

@@ -66,7 +66,7 @@
             "Name": "mimalloc",
             "Type": "git",
             "Git": "https://github.com/microsoft/mimalloc.git",
-            "Tag": "v3.4.5"
+            "Tag": "v3.5.1"
         },
         {
             "Name": "pugixml",
@@ -127,6 +127,18 @@
             "Type": "git",
             "Git": "https://github.com/GPUOpen-LibrariesAndSDKs/D3D12MemoryAllocator.git",
             "Tag": "v3.2.0"
+        },
+        {
+            "Name": "freetype",
+            "Type": "git",
+            "Git": "https://github.com/freetype/freetype.git",
+            "Tag": "VER-2-14-3"
+        },
+        {
+            "Name": "imgui",
+            "Type": "git",
+            "Git": "https://github.com/ocornut/imgui.git",
+            "Tag": "v1.92.9b-docking"
         },
         {
             "Name": "googletest",

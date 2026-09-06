@@ -217,12 +217,14 @@ struct RenderGraph::Impl {
     enum class CopyType { Buffer,
                           Texture,
                           TextureToBuffer,
+                          BufferToTexture,
                           Resolve };
     struct Copy {
         CopyType Type;
         uint32_t Source, Destination;
         uint64_t Size{0}, SourceOffset{0}, DestinationOffset{0};
         render::SubresourceRange SourceRange{0, 1, 0, 1}, DestinationRange{0, 1, 0, 1};
+        render::BufferTextureCopyRegion Upload{};
     };
     struct IndirectArguments {
         uint32_t Pass{InvalidIndex};
@@ -962,6 +964,28 @@ RgPassHandle RenderGraph::AddCopyTextureToBufferPass(std::string_view name, RgTe
     return pass;
 }
 
+RgPassHandle RenderGraph::AddCopyBufferToTexturePass(std::string_view name, RgBufferHandle source, RgTextureHandle destination,
+                                                     const render::BufferTextureCopyRegion& region, std::source_location location) {
+    auto pass = AddPass(name, RgPassType::Copy, location);
+    auto& impl = *_impl;
+    if (!pass.IsValid() || !impl.Handle(destination.Index, destination.Generation, true, pass.Index) ||
+        !UseBuffer(pass.Index, source, RgBufferAccess::CopySource, true, false).IsValid()) return pass;
+    const auto& dst = impl.Resources[destination.Index].TextureDesc;
+    const auto validation = render::ValidateBufferTextureCopyRegion(impl.Resources[source.Index].BufferDesc, dst, region, impl.Device.GetDetail());
+    if (!validation.Supported) {
+        impl.Error("CopyBufferTextureRegion", validation.Reason, pass.Index);
+        return pass;
+    }
+    const bool partial = region.X != 0 || region.Y != 0 || region.Width != std::max(1u, dst.Width >> region.MipLevel) ||
+                         region.Height != std::max(1u, dst.Height >> region.MipLevel);
+    const render::SubresourceRange range{region.ArrayLayer, 1, region.MipLevel, 1};
+    impl.Passes[pass.Index].Accesses.push_back({destination.Index, range, static_cast<uint32_t>(render::TextureState::CopyDestination), partial, true, true});
+    Impl::Copy copy{Impl::CopyType::BufferToTexture, source.Index, destination.Index};
+    copy.Upload = region;
+    impl.Passes[pass.Index].CopyOp = copy;
+    return pass;
+}
+
 bool RenderGraph::Impl::ValidateResources() {
     Report.Resources.reserve(Resources.size());
     for (uint32_t index = 0; index < Resources.size(); ++index) {
@@ -1513,7 +1537,12 @@ RenderGraphExecutionResult RenderGraph::Execute(render::CommandBuffer& command) 
                 command.CopyBufferToBuffer(dst.NativeBuffer(), copy.DestinationOffset, src.NativeBuffer(), copy.SourceOffset, copy.Size);
             else if (copy.Type == Impl::CopyType::TextureToBuffer)
                 command.CopyTextureToBuffer(dst.NativeBuffer(), copy.DestinationOffset, src.NativeTexture(), copy.SourceRange);
-            else if (copy.Type == Impl::CopyType::Resolve)
+            else if (copy.Type == Impl::CopyType::BufferToTexture) {
+                if (!command.CopyBufferToTextureRegion({src.NativeBuffer(), dst.NativeTexture(), copy.Upload})) {
+                    impl.Error("CopyBufferTextureRegion", "Backend rejected the region upload", p);
+                    result.Success = false;
+                }
+            } else if (copy.Type == Impl::CopyType::Resolve)
                 command.ResolveTexture({.Destination = dst.NativeTexture(),
                                         .DestinationMipLevel = copy.DestinationRange.BaseMipLevel,
                                         .DestinationArrayLayer = copy.DestinationRange.BaseArrayLayer,
@@ -1525,6 +1554,7 @@ RenderGraphExecutionResult RenderGraph::Execute(render::CommandBuffer& command) 
                 command.CopyTextureToTexture({.Destination = dst.NativeTexture(), .DestinationMipLevel = copy.DestinationRange.BaseMipLevel, .DestinationArrayLayer = copy.DestinationRange.BaseArrayLayer, .Source = src.NativeTexture(), .SourceMipLevel = copy.SourceRange.BaseMipLevel, .SourceArrayLayer = copy.SourceRange.BaseArrayLayer, .Width = std::max(1u, src.TextureDesc.Width >> copy.SourceRange.BaseMipLevel), .Height = std::max(1u, src.TextureDesc.Height >> copy.SourceRange.BaseMipLevel), .ArrayLayerCount = copy.SourceRange.ArrayLayerCount});
         }
         command.PopDebugGroup();
+        if (!impl.Report.Diagnostics.empty()) result.Success = false;
         if (!result.Success) break;
         report.Executed = true;
         for (const auto& access : pass.Cells)
@@ -1542,6 +1572,21 @@ RenderGraphExecutionResult RenderGraph::Execute(render::CommandBuffer& command) 
 
 bool RenderGraph::WasWritten(RgTextureHandle handle) const noexcept {
     return handle.Generation == _impl->Generation && handle.Index < _impl->Resources.size() && _impl->Resources[handle.Index].IsTexture && _impl->Resources[handle.Index].Written;
+}
+std::optional<render::TextureDescriptor> RenderGraph::GetTextureDescriptor(RgTextureHandle handle) const noexcept {
+    if (handle.Generation != _impl->Generation || handle.Index >= _impl->Resources.size() || !_impl->Resources[handle.Index].IsTexture) return {};
+    return _impl->Resources[handle.Index].TextureDesc;
+}
+std::optional<RgTextureParameterBinding> RenderGraph::GetTextureViewBinding(RgTextureViewHandle handle) const noexcept {
+    if (handle.Generation != _impl->Generation || handle.Index >= _impl->Views.size()) return {};
+    const auto& view = _impl->Views[handle.Index];
+    return RgTextureParameterBinding{{view.Resource, _impl->Generation}, {view.Key.Dimension, view.Key.Format, view.Key.Range}};
+}
+void RenderGraph::AddDiagnostic(std::string_view code, std::string_view message) {
+    _impl->Error(code, message);
+}
+void RenderGraphRasterContext::Fail(std::string_view message) {
+    _graph._impl->Error("RasterExecution", message, _pass);
 }
 render::TextureView* RenderGraph::ResolveView(uint32_t pass, RgTextureViewHandle handle) const {
     const auto& impl = *_impl;

@@ -17,11 +17,17 @@
 
 ```
 Application::StartLoop
+  ├─ NativeEventPump                 收集原始窗口输入
   ├─ BeginUpdateForFlight(flight)     取得该 flight 的可写槽位；PumpWaitFrame
   ├─ RenderSystem::BeginUpdateForFlight 清除该 flight 上一帧的 retained asset refs 和 frame plan
+  ├─ ImGuiSystem::BeginUpdate         可选；消费已完成 flight 的纹理反馈，释放当前槽快照
   ├─ AssetManager::Pump               提交加载结果；销毁零引用资产
+  ├─ ApplicationScheduler::Pump
+  ├─ ImGuiSystem::NewFrame            可选；消费原始输入并决定输入捕获
+  ├─ WindowManager::DispatchInput     向应用派发经过路由的输入
   ├─ Application::OnUpdate            游戏逻辑
   ├─ World::Tick
+  ├─ Application::OnImGui             可选；随后 Render、UpdatePlatformWindows、复制拥有数据的快照
   ├─ RenderSystem::PrepareFrame        game thread 复制 pipeline input 并构造 view families
   ├─ GpuSystem::BeginFrameRecord      取/建 CommandBuffer 并 Begin()；清上帧 targets
   │    ├─ upload phase                FrameUploadScheduler 恢复等待帧顶的协程
@@ -35,6 +41,23 @@ Application::StartLoop
 `CompleteFlight` 在 fence 完成后跑：resolve profiler、`CollectFlight` 回收 staging、
 标记该 flight 上的 `WaitFrameRecord`。多线程模式下它在渲染线程
 （`ThreadedRunner::RetireRenderedFrames`）。
+
+可选 UI 的完成通知只发布 flight 结果，主线程在下一次 update 消费，渲染线程不访问活的
+ImGui context。窗口模态 Tick 在正在进行的帧内拒绝重入，多线程 runner 只在 render idle
+时允许窗口事件触发新帧。完整 UI 快照及纹理寿命见 [Runtime ImGui](runtime-imgui.md)。
+
+### 窗口输入
+
+NativeWindow 保留原始事件职责，AppWindow 的 `GetInput().EventInput()` 提供应用输入。
+WindowInputRouter 复制 UTF-8 文本和双轴浮点滚轮，在 Update 前统一派发；不要在游戏代码中
+直接订阅 NativeWindow 的键鼠信号。每次按下记录应用/UI 归属，抬起归还原归属；应用持有的
+拖动不因 UI 捕获改变而丢失。失焦、关闭和 capture 丢失产生取消，避免卡键。Auxiliary
+窗口默认不派发应用输入。ImGui 始终从原始队列取事件，跨受管窗口按全局到达顺序处理。
+
+通用窗口能力通过 `NativeDesktopCapabilities` 查询：光标形状与显隐、桌面鼠标定位、显示器
+工作区和 DPI、UTF-8 clipboard、IME 候选框定位。Win32 实现这些能力及 DPI/display/capture
+消息；Cocoa 的新增桌面接口明确返回能力缺失，不伪装成功。Cocoa 滚轮继续发送原始滚轮事件，
+同时提供新双轴浮点事件；这里不增加 macOS runtime。
 
 ## Flight 槽位
 

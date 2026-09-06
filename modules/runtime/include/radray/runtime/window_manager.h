@@ -9,6 +9,7 @@
 // #include <radray/render/rhi.h>
 #include <radray/window/native_window.h>
 #include <radray/runtime/service_traits.h>
+#include <radray/runtime/window_input_router.h>
 #include <radray/runtime/render_framework/render_output.h>
 
 namespace radray {
@@ -43,14 +44,14 @@ public:
         render::TextureStates State{render::TextureState::Undefined};
     };
 
-    AppWindow(WindowManager* manager, unique_ptr<NativeWindow> window, NativeEventPump* pump, bool isMain) noexcept;
+    AppWindow(WindowManager* manager, unique_ptr<NativeWindow> window, NativeEventPump* pump, bool isMain, RenderOutputUsage usage = RenderOutputUsage::Scene) noexcept;
     AppWindow(const AppWindow&) = delete;
     AppWindow(AppWindow&&) = delete;
     AppWindow& operator=(const AppWindow&) = delete;
     AppWindow& operator=(AppWindow&&) = delete;
     ~AppWindow() noexcept;
 
-    render::SwapChain* AttachSwapChain(const render::SwapChainDescriptor& desc) noexcept;
+    Nullable<render::SwapChain*> AttachSwapChain(const render::SwapChainDescriptor& desc) noexcept;
     unique_ptr<render::SwapChain> ReleaseSwapChain() noexcept;
     void DetachSwapChain() noexcept;
     render::SwapChainAcquireResult AcquireNextSwapChainFrame(const AppRenderContext& ctx) noexcept;
@@ -59,6 +60,8 @@ public:
     render::SwapChain* GetSwapChain() const noexcept;
     bool IsMainWindow() const noexcept;
     RenderOutputId GetRenderOutputId() const noexcept { return _outputId; }
+    WindowInputRouter& GetInput() noexcept { return _input; }
+    RenderOutputUsage GetOutputUsage() const noexcept { return _usage; }
     render::TextureView* GetOrCreateBackBufferView(const render::SwapChainFrame& frame) noexcept;
     /// 读 / 写指定 backbuffer 索引的遗留状态(供起始/收尾 barrier 使用)。
     render::TextureStates GetBackBufferState(uint32_t backBufferIndex) const noexcept;
@@ -77,6 +80,8 @@ private:
 
     WindowManager* _manager;
     unique_ptr<NativeWindow> _window;
+    WindowInputRouter _input;
+    RenderOutputUsage _usage;
     NativeEventPump* _pump;
     Nullable<unique_ptr<render::SwapChain>> _swapchain;
     vector<BackBufferView> _backBufferViews;
@@ -94,7 +99,7 @@ public:
     WindowManager& operator=(WindowManager&&) = delete;
     ~WindowManager() noexcept;
 
-    AppWindow* CreateWindow(const NativeWindowCreateDescriptor& desc, bool isMain);
+    Nullable<AppWindow*> CreateWindow(const NativeWindowCreateDescriptor& desc, bool isMain, RenderOutputUsage usage = RenderOutputUsage::Scene);
     void DestroyWindow(AppWindow* window) noexcept;
     size_t GetWindowCount() const noexcept;
     AppWindow* GetWindow(size_t index) noexcept;
@@ -109,6 +114,7 @@ public:
     void CheckRecreateSwapChains() noexcept;
     void SetPresentMode(render::PresentMode presentMode) noexcept;
     void DispatchEvents() noexcept;
+    void DispatchInput();
     sigslot::signal<NativeWindow*>& EventModalLoopTick() noexcept;
     void SetGpuSystem(Nullable<GpuSystem*> gpuSystem) noexcept { _gpuSystem = gpuSystem.Get(); }
     GpuSystem* GetGpuSystem() const noexcept { return _gpuSystem; }
