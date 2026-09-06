@@ -1,6 +1,6 @@
 > - 适用: 改渲染管线、场景表示、Application 生命周期或服务装配
 > - 权威: 本文描述场景、Forward 与 Application 装配；workload/graph/history 契约见 `renderer-foundation.md`，资产与 GPU 帧管理见 `asset-system.md`、`frame-and-gpu.md`
-> - 锚点: `modules/runtime/include/radray/runtime/render_framework/render_pipeline.h`, `modules/runtime/include/radray/runtime/forward_pipeline/forward_pipeline.h`, `modules/runtime/include/radray/runtime/forward_pipeline/forward_graph.h`, `modules/runtime/include/radray/runtime/material.h`, `modules/runtime/include/radray/runtime/shader_program.h`, `modules/runtime/include/radray/runtime/material_technique.h`, `modules/runtime/include/radray/runtime/render_framework/render_scene_snapshot.h`, `modules/runtime/include/radray/runtime/render_framework/renderer_list.h`, `modules/runtime/include/radray/runtime/components/static_mesh_component.h`, `modules/runtime/include/radray/runtime/game_framework/actor.h`, `modules/runtime/include/radray/runtime/service_registry.h`, `modules/runtime/src/application.cpp`, `modules/runtime/src/render_system.cpp`, `examples/example_lambert_sphere/example_lambert_sphere.cpp`, `examples/example_tidal_atrium/atrium_pipeline.cpp`
+> - 锚点: `modules/runtime/include/radray/runtime/render_framework/render_pipeline.h`, `modules/runtime/include/radray/runtime/forward_pipeline/forward_pipeline.h`, `modules/runtime/include/radray/runtime/forward_pipeline/forward_graph.h`, `modules/runtime/include/radray/runtime/material.h`, `modules/runtime/include/radray/runtime/shader_program.h`, `modules/runtime/include/radray/runtime/material_technique.h`, `modules/runtime/include/radray/runtime/render_framework/render_scene_snapshot.h`, `modules/runtime/include/radray/runtime/render_framework/renderer_list.h`, `modules/runtime/include/radray/runtime/components/static_mesh_component.h`, `modules/runtime/include/radray/runtime/game_framework/actor.h`, `modules/runtime/include/radray/runtime/service_registry.h`, `modules/runtime/src/application.cpp`, `modules/runtime/src/render_system.cpp`, `examples/example_lambert_sphere/example_lambert_sphere.cpp`, `examples/example_tidal_atrium/tidal_atrium.cpp`
 
 # 渲染框架与 game framework
 
@@ -159,8 +159,8 @@ CPU 不硬编码 0/1/2。resolver 失败按 program 负缓存；不替换成其�
 `ForwardGraph` 把 Depth/Opaque/Transparent 抽成可复用的阶段声明：调用方传入已准备的 view/list、
 attachment handles 与 Load/Clear 策略，模块只向同一张 graph 加 pass，不创建或执行另一张图。
 view 值复制进 callback payload，RendererList 借用至 graph 执行结束；空 Depth/Transparent 可成功省略，
-Opaque 即使列表为空仍定义输出。内置 ForwardPipeline 与 Tidal Atrium 共用该模块，后者在 Opaque 和
-Transparent 之间保留自有场景屏幕，并把 Signal/Sky/Panel/HUD/Downsample/Present 的 pass 参数交给 Graph 准备。
+Opaque 即使列表为空仍定义输出。内置 ForwardPipeline 的基础与 HDR 路径共用该模块。
+Tidal Atrium 直接装配 ForwardPipeline，只提供场景、材质、相机、输出屏幕描述和 ImGui 控件。
 
 Forward 默认保持基础深度/opaque/transparent 路径；同一类通过配置组合 HDR、级联阴影、Forward+、
 AO、TAA 或 4x MSAA、Bloom 与多 view 输出。view/scissor 经 `MakeViewport` 统一处理 Vulkan Y 翻转。

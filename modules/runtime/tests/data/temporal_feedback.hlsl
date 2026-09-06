@@ -1,5 +1,5 @@
 #include <core/platform.hlsli>
-struct SignalData { float4 State; };
+struct SignalData { float4 State; }; // time, feedback enabled, paused, previous valid
 VK_BINDING(0,0) ConstantBuffer<SignalData> SignalFrame : register(b0,space0);
 VK_BINDING(0,1) RWTexture2D<float4> SignalOutput : register(u0,space1);
 VK_BINDING(1,1) Texture2D<float4> SignalPrevious : register(t0,space1);

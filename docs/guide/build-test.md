@@ -78,17 +78,18 @@ cmake --preset win-x64-debug-clangcl -B build_ui -DRADRAY_ENABLE_IMGUI=ON
 cmake --build build_ui --config Debug --parallel 8
 ctest --test-dir build_ui -C Debug --output-on-failure -R "ImGuiRenderingTest|WindowInputRouterTest|TextureRegionTest"
 build_ui/_build/Debug/example_imgui.exe --vulkan --frames 120 --multithread --flights 3 --stress --srgb
-build_ui/_build/Debug/example_imgui.exe --d3d12 --only --font C:/Windows/Fonts/msyh.ttc --settings build_ui/gallery.ini
+build_ui/_build/Debug/example_imgui.exe --d3d12 --font C:/Windows/Fonts/msyh.ttc --settings build_ui/gallery.ini
 ```
 
 字体路径为本机示例；没有该字体时换成应用提供的 TTF/OTF/TTC。不指定 `--frames` 时交互运行，
-`--no-viewports` 只保留主窗口；`--only` 显式使用 ImGuiOnlyPipeline，默认样例额外展示本帧 Graph
-生成的图像。Forward 与 Tidal 样例使用 `--imgui` 打开 UI，现有场景参数保持有效。
+`--no-viewports` 只保留主窗口；样例始终使用 ImGuiOnlyPipeline，CPU 图片通过 ImGui 动态纹理上传。
+Lambert、Forward 与 Tidal 在编译开启 ImGui 时默认显示 UI，`--no-imgui` 可关闭实例。Graph 图片的
+自定义 producer 保留在 ImGuiRenderingTest 中。
 
 ```powershell
 cmake --preset win-x64-debug-clangcl -B build_ui_stb -DRADRAY_ENABLE_IMGUI=ON -DRADRAY_IMGUI_USE_FREETYPE=OFF -DRADRAY_IMGUI_DEMO_WINDOWS=OFF -DRADRAY_IMGUI_DEBUG_TOOLS=OFF -DRADRAY_BUILD_SHADER_COMPILER=OFF
 cmake --build build_ui_stb --config Debug --parallel 8
-build_ui_stb/_build/Debug/example_imgui.exe --d3d12 --only --frames 120
+build_ui_stb/_build/Debug/example_imgui.exe --d3d12 --frames 120
 ```
 
 compiler/JIT/tools 关闭时纯 UI 使用内置 artifact，不发现、链接或部署 DXC。维护 shader 时在
@@ -132,6 +133,7 @@ FreeType 依赖隔离还应检查生成的 `ftoption.h` 中外部功能宏与 fr
 | `test_graph_contracts` | `GraphContractTest`（整数数据链、Clear/Load、layer/mip、间接工作量） |
 | `test_graph_preparation` | `GraphPreparationTest`（分配/参数故障注入与恢复） |
 | `test_renderer_list_pass_bindings` | `RendererListPassBindingsTest` |
+| `test_temporal_feedback` | `TemporalFeedbackTest`（D3D12/Vulkan 跨图反馈） |
 | `test_forward_foundation_probes` | `ForwardFoundationProbe`（底层独立 shader，具体 suite 以 `ctest -N` 为准） |
 | `test_flight_lifetime` | `FlightLifetimeTest`（真实三 flight、history 退休、外部 output） |
 | `test_gpu_test_fixture` | `GpuTestFixture`, `GpuValidationProbe` |
@@ -233,8 +235,10 @@ D3D12/Vulkan 实机覆盖 Compute 生成 Draw/DrawIndexed/Dispatch 参数 → MS
 先析构后的 flight 寿命和 Pixel/Vertex raster UAV。设备缺失仍 SKIP；已经创建设备后的能力或执行失败
 必须 FAIL，Vertex UAV 只有报告能力不足时才允许显式 SKIP。
 
-Tidal Atrium 的有限帧 smoke 可直接验证 ForwardGraph 与样例 pass 的单图组合；`--tour` 还会切换深度、
-线框、history、split view、RenderScale，并触发 resize/restore：
+Tidal Atrium 使用内置 HDR Forward、PBR 材质和 ImGui；两个世界屏幕及 UI 图片展示俯视/透视相机。
+`--profile temporal|msaa` 选择 AA 组合；`--tour` 切换阴影、线框、TAA、分屏、图层、RenderScale，并触发 resize/restore。F2 改为阴影开关，
+F6 改为 TAA，F7 切换 67%/100%；Space 暂停场景动画，Tab 隐藏 UI。原 Compute 反馈演示迁入
+TemporalFeedbackTest，覆盖真实 GPU 跨图反馈、暂停和重置；不再作为样例自有管线存在。
 
 ```powershell
 .\build_debug\_build\Debug\example_tidal_atrium.exe --backend d3d12 --tour --frames 360

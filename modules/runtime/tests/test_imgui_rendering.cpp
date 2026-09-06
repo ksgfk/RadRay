@@ -27,7 +27,7 @@ public:
         uint32_t Height{0}, Stage{0}, Frame{0};
         bool Pending{false}, Bgra{false};
     };
-    UiProbePipeline(Application& app, ImTextureID image, bool negative) : App(app), Ui(*app.GetImGuiSystem().Get()), Image(image), Negative(negative) {
+    UiProbePipeline(Application& app, ImTextureID image, bool negative, bool outputPreview) : App(app), Ui(*app.GetImGuiSystem().Get()), Image(image), Negative(negative), OutputPreview(outputPreview) {
         for (uint32_t i = 0; i < app.GetGpuSystem()->GetFlightDataCount(); ++i) Flights.push_back(make_unique<Flight>());
     }
     uint32_t Stage{0}, Frame{0}, Verified{0}, Rejected{0};
@@ -56,18 +56,30 @@ public:
             view = builder.SetColorAttachment(0, target, {.Clear = {{.25f, .5f, .75f, 1}}}); }, nullptr);
         const ImGuiGraphImageBinding binding{Image, Negative && flight.Frame == 7 ? PreviousView : view};
         PreviousView = view;
+        const auto previousImage = PreviousImage;
+        PreviousImage = image;
         if (Negative && flight.Frame <= 10) {
             vector<ImGuiGraphImageBinding> badBindings{binding};
             if (flight.Frame == 5) badBindings.clear();
             if (flight.Frame == 10) badBindings.push_back(binding);
-            ImGuiGraph::BuildGraph(graph, ctx, Ui, {}, badBindings);
+            if (OutputPreview) {
+                vector<ImGuiSceneOutput> scenes{{App.GetWindowManager()->GetMainWindow()->GetRenderOutputId(), image, ImGuiColorEncoding::Srgb}};
+                if (flight.Frame == 5) scenes.clear();
+                if (flight.Frame == 7) scenes.front().Texture = previousImage;
+                if (flight.Frame == 9) scenes.front().Texture = ctx.ImportOutputTarget(graph, scenes.front().Output);
+                if (flight.Frame == 10) scenes.push_back(scenes.front());
+                ImGuiGraph::BuildGraph(graph, ctx, Ui, scenes);
+            } else
+                ImGuiGraph::BuildGraph(graph, ctx, Ui, {}, badBindings);
             EXPECT_FALSE(graph.Compile());
             EXPECT_FALSE(graph.GetReport().Diagnostics.empty());
             ImGuiGraph::CompleteGraph(graph, ctx, Ui, false);
             ++Rejected;
             return;
         }
-        EXPECT_TRUE(ImGuiGraph::BuildGraph(graph, ctx, Ui, {}, std::span{&binding, 1}));
+        const ImGuiSceneOutput scene{App.GetWindowManager()->GetMainWindow()->GetRenderOutputId(), image, ImGuiColorEncoding::Srgb};
+        EXPECT_TRUE(OutputPreview ? ImGuiGraph::BuildGraph(graph, ctx, Ui, std::span{&scene, 1})
+                                  : ImGuiGraph::BuildGraph(graph, ctx, Ui, {}, std::span{&binding, 1}));
         for (const auto& surface : ctx.OutputSurfaces()) {
             if (surface.Id != App.GetWindowManager()->GetMainWindow()->GetRenderOutputId()) continue;
             const auto output = ctx.ImportOutputTarget(graph, surface.Id);
@@ -105,13 +117,16 @@ public:
             return static_cast<const uint8_t*>(map.Data())[y * flight.Pitch + x * 4 + c];
         };
         const auto encode = [](float value) { return (value <= .0031308f ? 12.92f * value : 1.055f * std::pow(value, 1 / 2.4f) - .055f) * 255; };
+        const auto decode = [](float value) { return value <= .04045f ? value / 12.92f : std::pow((value + .055f) / 1.055f, 2.4f); };
+        const float backgroundR = OutputPreview ? decode(64 / 255.f) : .012f;
+        const float backgroundG = OutputPreview ? decode(128 / 255.f) : .012f;
         const float alpha = 128 / 255.0f;
-        EXPECT_NEAR(sample(12, 12, 0), encode(alpha + .012f * (1 - alpha)), 2);
-        EXPECT_NEAR(sample(12, 12, 1), encode(.012f * (1 - alpha)), 2);
-        EXPECT_NEAR(sample(100, 12, 0), encode(64 / 255.0f), 2);
-        EXPECT_NEAR(sample(100, 12, 1), encode(128 / 255.0f), 2);
-        EXPECT_NEAR(sample(100, 12, 2), encode(191 / 255.0f), 2);
-        EXPECT_NEAR(sample(130, 12, 1), encode(alpha + .012f * (1 - alpha)), 2);
+        EXPECT_NEAR(sample(12, 12, 0), encode(alpha + backgroundR * (1 - alpha)), 2);
+        EXPECT_NEAR(sample(12, 12, 1), encode(backgroundG * (1 - alpha)), 2);
+        EXPECT_NEAR(sample(100, 12, 0), OutputPreview ? 64.f : encode(64 / 255.0f), 2);
+        EXPECT_NEAR(sample(100, 12, 1), OutputPreview ? 128.f : encode(128 / 255.0f), 2);
+        EXPECT_NEAR(sample(100, 12, 2), OutputPreview ? 191.f : encode(191 / 255.0f), 2);
+        EXPECT_NEAR(sample(130, 12, 1), encode(alpha + backgroundG * (1 - alpha)), 2);
         EXPECT_NEAR(sample(159, 12, 0), encode(.4375f), 2);
         if (flight.Stage < 2) {
             EXPECT_NEAR(sample(66, 10, 1), 255, 1);
@@ -126,20 +141,22 @@ private:
     ImGuiSystem& Ui;
     ImTextureID Image;
     bool Negative;
+    bool OutputPreview;
     RgTextureViewHandle PreviousView;
+    RgTextureHandle PreviousImage;
     vector<unique_ptr<Flight>> Flights;
 };
 class UiProbeApp final : public Application {
 public:
-    explicit UiProbeApp(bool negative = false) : Negative(negative) {}
+    explicit UiProbeApp(bool negative = false, bool outputPreview = false) : Negative(negative), OutputPreview(outputPreview) {}
     bool SawCreateAck{false}, SawUpdateAck{false}, SawDestroyAck{false}, Clean{false};
     uint32_t Verified{0}, Rejected{0};
     bool AtlasGrew{false};
 
 protected:
     void OnInit() override {
-        Image = GetImGuiSystem()->CreateGraphImage();
-        auto pipeline = make_unique<UiProbePipeline>(*this, Image, Negative);
+        Image = OutputPreview ? GetImGuiSystem()->RegisterOutput(GetWindowManager()->GetMainWindow()->GetRenderOutputId()) : GetImGuiSystem()->CreateGraphImage();
+        auto pipeline = make_unique<UiProbePipeline>(*this, Image, Negative, OutputPreview);
         Pipeline = pipeline.get();
         GetRenderSystem()->SetPipeline(std::move(pipeline));
         Texture.Create(ImTextureFormat_RGBA32, 8, 8);
@@ -227,6 +244,7 @@ private:
     uint32_t Frame{0}, Stage{0};
     ImTextureData Texture, Alpha, Color;
     bool Negative;
+    bool OutputPreview;
     int AtlasArea{0};
 };
 class ImGuiRenderingTest : public testing::TestWithParam<UiTestMode> {
@@ -360,6 +378,29 @@ TEST_P(ImGuiRenderingTest, DynamicTextureRegionsOffsetsGraphImagesAndLinearBlend
     EXPECT_TRUE(app.SawDestroyAck);
     EXPECT_GT(app.Verified, 20u);
     EXPECT_TRUE(app.AtlasGrew);
+    EXPECT_TRUE(logs.Errors().empty()) << logs.Errors();
+}
+TEST_P(ImGuiRenderingTest, OutputPreviewSamplesSceneBeforeUiAndDecodesSrgbOnce) {
+    const auto mode = GetParam();
+    test::RuntimeLogCapture logs;
+    UiProbeApp app(false, true);
+    ApplicationRuntimeDescriptor desc{.Backend = mode.Backend, .EnableValidation = true, .Multithreaded = mode.Threaded, .WindowTitle = "ImGui output preview", .WindowWidth = 240, .WindowHeight = 160, .FlightDataCount = mode.Flights, .BackBufferFormat = mode.Srgb ? render::TextureFormat::BGRA8_UNORM_SRGB : render::TextureFormat::BGRA8_UNORM, .PresentMode = render::PresentMode::FIFO, .EnableSynchronizationValidation = true};
+    desc.ImGui.Enabled = true;
+    ASSERT_EQ(app.Run(desc), 0);
+    EXPECT_TRUE(app.Clean);
+    EXPECT_GT(app.Verified, 20u);
+    EXPECT_TRUE(logs.Errors().empty()) << logs.Errors();
+}
+TEST_P(ImGuiRenderingTest, OutputPreviewRejectsMissingStaleMsaaUninitializedFeedbackAndDuplicateScenes) {
+    const auto mode = GetParam();
+    test::RuntimeLogCapture logs;
+    UiProbeApp app(true, true);
+    ApplicationRuntimeDescriptor desc{.Backend = mode.Backend, .EnableValidation = true, .Multithreaded = mode.Threaded, .WindowTitle = "ImGui invalid output preview", .WindowWidth = 240, .WindowHeight = 160, .FlightDataCount = mode.Flights, .BackBufferFormat = mode.Srgb ? render::TextureFormat::BGRA8_UNORM_SRGB : render::TextureFormat::BGRA8_UNORM, .PresentMode = render::PresentMode::FIFO, .EnableSynchronizationValidation = true};
+    desc.ImGui.Enabled = true;
+    ASSERT_EQ(app.Run(desc), 0);
+    EXPECT_FALSE(app.Clean);
+    EXPECT_EQ(app.Rejected, 6u);
+    EXPECT_GT(app.Verified, 20u);
     EXPECT_TRUE(logs.Errors().empty()) << logs.Errors();
 }
 TEST_P(ImGuiRenderingTest, RejectsMissingStaleMsaaUninitializedFeedbackAndDuplicateGraphImagesWithoutAcknowledgingUploads) {

@@ -21,7 +21,7 @@ bool ForwardCapture::Build(RenderGraph& graph, RenderPipelineContext& context, r
             Readback = buffer.Release();
         }
         Import = {Readback.get(), Readback->GetDesc(), render::BufferState::CopyDestination};
-        const auto output = context.ImportOutput(graph, family.OutputId);
+        const auto output = context.ImportOutputTarget(graph, family.OutputId);
         const auto host = graph.ImportBuffer(Import, "Forward.Capture", RenderGraphExternalAccess::ObservableOutput);
         graph.AddCopyTextureToBufferPass("Forward.Capture", output, host);
         graph.AddComputePass<uint32_t>("Forward.CaptureHostVisibility", [=](uint32_t&, RenderGraphComputeBuilder& builder) {

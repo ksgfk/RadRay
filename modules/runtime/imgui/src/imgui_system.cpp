@@ -441,6 +441,13 @@ ImTextureID ImGuiSystem::RegisterTexture(shared_ptr<ImGuiTextureLease> lease, co
     record->Descriptor = descriptor;
     return _impl->AddRecord(std::move(record));
 }
+ImTextureID ImGuiSystem::RegisterOutput(RenderOutputId output) {
+    _impl->CheckThread();
+    if (!output.IsValid()) return 0;
+    auto record = make_shared<UiTextureRecord>();
+    record->Output = output;
+    return _impl->AddRecord(std::move(record));
+}
 ImTextureID ImGuiSystem::CreateGraphImage(const ImGuiTextureDescriptor& descriptor) {
     auto record = make_shared<UiTextureRecord>();
     record->Graph = true;

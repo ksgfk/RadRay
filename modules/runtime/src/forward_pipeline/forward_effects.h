@@ -10,7 +10,7 @@ class RenderSystem;
 namespace forward_detail {
 
 struct ForwardEffectPrograms {
-    array<Nullable<ShaderProgram*>, 14> Programs{};
+    array<Nullable<ShaderProgram*>, 15> Programs{};
     bool Initialize(RenderSystem& system);
 };
 
@@ -37,7 +37,8 @@ bool BuildForwardHdrView(RenderGraph& graph, RenderPipelineContext& context, ren
                          const ForwardEffectPrograms& programs, const ForwardPipelineSettings& settings,
                          const ResolvedRenderViewFamily& family, const ResolvedRenderView& sourceView,
                          const RenderSceneSnapshot& scene, FrameDrawResources& draws, ForwardBindingCache& bindings,
-                         ForwardHdrView& work, bool firstOutputView, bool& lightOverflowWarned);
+                         ForwardHdrView& work, bool firstOutputView, bool& lightOverflowWarned,
+                         std::span<const ForwardOutputSurface> surfaces = {});
 
 bool BuildForwardOutputOverlay(RenderGraph& graph, RenderPipelineContext& context, const ForwardEffectPrograms& programs,
                                const ForwardOutputOverlay& overlay, render::RenderBackend backend, bool& success);

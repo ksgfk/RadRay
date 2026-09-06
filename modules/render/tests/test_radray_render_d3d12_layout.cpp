@@ -295,6 +295,28 @@ std::optional<uint32_t> DispatchComputeAndReadBack(
 
 }  // namespace
 
+TEST_F(D3D12DeviceFixture, SamplerDescriptorsSupportMultipleViewFlights) {
+    if (!Available) {
+        GTEST_SKIP() << "no d3d12 device";
+    }
+    ResolvedD3D12Layout description;
+    description.Bindings = {MakeBinding("ViewSamplers", shader::ShaderBindingKind::Sampler, 0, 0)};
+    description.Bindings[0].Count = 2;
+    auto created = Device->CreatePipelineLayout(description);
+    ASSERT_TRUE(created.HasValue());
+    auto layout = created.Release();
+    // Several camera views and in-flight frames keep their immutable sets alive together.
+    // Release the whole flight batch, then require that its descriptor ranges can be reused.
+    for (uint32_t round = 0; round < 3; ++round) {
+        vector<unique_ptr<ShaderParameterSet>> sets;
+        for (uint32_t index = 0; index < 512; ++index) {
+            auto set = Device->CreateShaderParameterSet({.Layout = layout.get(), .GroupIndex = 0});
+            ASSERT_TRUE(set.HasValue()) << "round " << round << ", set " << index;
+            sets.push_back(set.Release());
+        }
+    }
+}
+
 // A buffer placement modifier must move where the binding lives without changing what it is. The
 // table lane and the root lane are read off the same fixture so the only difference is the modifier.
 TEST_F(D3D12DeviceFixture, BufferPlacementDecidesTableVersusRootDescriptor) {

@@ -26,6 +26,7 @@ VK_BINDING(8, 3) SamplerState ScreenSampler : register(s1, space3);
 [shader("vertex")] SurfaceVertexOutput VSMain(SurfaceVertexInput v) { return forward_surface_vertex(v); }
 [shader("pixel")] float4 PSMain(SurfaceVertexOutput v) : SV_Target0 {
     float4 base = forward_surface_color(v.UV);
+    if (ForwardMaterial.Transmission.y != 0) return float4(base.rgb * max(1, ForwardMaterial.Surface.w), base.a);
     float3 n = safe_normalize(v.Normal, float3(0, 1, 0));
     Frame3 frame = make_frame(n);
     float3 wi = frame_to_local(frame, safe_normalize(ForwardView.EyePosition.xyz - v.WorldPosition, n));

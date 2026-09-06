@@ -132,6 +132,7 @@ bool ImGuiGraph::BuildGraph(RenderGraph& graph, RenderPipelineContext& context, 
         return false;
     }
     unordered_map<ImTextureID, RgTextureParameterBinding> bindings;
+    unordered_map<ImTextureID, ImGuiColorEncoding> outputEncodings;
     unordered_map<render::Texture*, RgTextureHandle> imports;
     const auto import = [&](render::Texture* texture, std::span<render::TextureStates> states, std::span<uint8_t> valid, bool observable) {
         auto found = imports.find(texture);
@@ -183,7 +184,15 @@ bool ImGuiGraph::BuildGraph(RenderGraph& graph, RenderPipelineContext& context, 
     for (const auto& [id, record] : flight.Textures) {
         if (!record || record->Graph || bindings.contains(id)) continue;
         RgTextureHandle texture;
-        if (record->Dynamic) {
+        if (record->Output.IsValid()) {
+            const auto scene = std::find_if(scenes.begin(), scenes.end(), [&](const auto& value) { return value.Output == record->Output; });
+            if (scene == scenes.end() || std::count_if(scenes.begin(), scenes.end(), [&](const auto& value) { return value.Output == record->Output; }) != 1) {
+                graph.AddDiagnostic("ImGuiOutputImage", "Registered output requires exactly one scene producer in this frame");
+                continue;
+            }
+            texture = scene->Texture;
+            outputEncodings.emplace(id, scene->SampleEncoding);
+        } else if (record->Dynamic) {
             auto found = self.GpuTextures.find(id);
             if (found == self.GpuTextures.end()) continue;
             const auto& resource = found->second;
@@ -265,8 +274,9 @@ bool ImGuiGraph::BuildGraph(RenderGraph& graph, RenderPipelineContext& context, 
                     const float bottom = std::clamp((r.w - viewport.Position.y) * viewport.Scale.y, 0.0f, float(desc->Height));
                     if (right <= left || bottom <= top) continue;
                     const auto& texture = *flight.Textures.at(draw.Texture);
+                    const auto encoding = outputEncodings.contains(draw.Texture) ? outputEncodings.at(draw.Texture) : texture.Descriptor.Encoding;
                     UiConstants values{{2 / viewport.Size.x, -2 / viewport.Size.y, -1 - viewport.Position.x * 2 / viewport.Size.x, 1 + viewport.Position.y * 2 / viewport.Size.y},
-                                       {texture.Descriptor.Encoding == ImGuiColorEncoding::Srgb ? 1.0f : 0.0f, 0, 0, 0}};
+                                       {encoding == ImGuiColorEncoding::Srgb ? 1.0f : 0.0f, 0, 0, 0}};
                     const auto sampler = draw.Sampler == 0 && texture.Descriptor.Sampler ? *texture.Descriptor.Sampler : Sampler(draw.Sampler);
                     const RgParameterBinding parameters[]{
                         {"Ui", 0, RgCBufferParameterBinding{std::as_bytes(std::span{&values, 1})}},

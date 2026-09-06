@@ -8,6 +8,8 @@
 #include <radray/runtime/game_framework/actor.h>
 #include <radray/runtime/game_framework/world.h>
 #include <radray/runtime/render_system.h>
+#include <radray/runtime/components/camera_component.h>
+#include <radray/runtime/forward_pipeline/forward_pipeline.h>
 
 namespace radray {
 
@@ -169,6 +171,44 @@ void RunHost(render::RenderBackend backend, bool threaded, bool pipeline, bool r
         EXPECT_EQ(result.Unloaded, 1u);
         EXPECT_EQ(result.Destroyed, 1u);
     }
+}
+
+class OutputSurfaceContractApp final : public Application {
+    void OnInit() override {
+        auto* actor = GetWorld()->SpawnActor<Actor>();
+        auto* camera = actor->AddComponent<CameraComponent>();
+        actor->SetRootComponent(camera);
+        ForwardPipeline pipeline{this, GetWorld()->GetScene(), camera};
+        ForwardOutputSurface surface{{10}, {20}};
+        EXPECT_FALSE(pipeline.SetOutputSurfaces(std::span{&surface, 1}));
+        EXPECT_TRUE(pipeline.SetSettings(ForwardPipelineSettings::Temporal()));
+        EXPECT_TRUE(pipeline.SetOutputSurfaces(std::span{&surface, 1}));
+        EXPECT_FALSE(pipeline.SetSettings({}));
+        const array<ForwardOutputSurface, 3> cycle{{{{10}, {20}}, {{20}, {30}}, {{30}, {10}}}};
+        EXPECT_FALSE(pipeline.SetOutputSurfaces(cycle));
+        surface.Source = surface.Destination;
+        EXPECT_FALSE(pipeline.SetOutputSurfaces(std::span{&surface, 1}));
+        surface.Source = {10};
+        surface.LocalToWorld(0, 0) = std::numeric_limits<float>::quiet_NaN();
+        EXPECT_FALSE(pipeline.SetOutputSurfaces(std::span{&surface, 1}));
+        surface.LocalToWorld = Eigen::Matrix4f::Identity();
+        surface.Brightness = -1;
+        EXPECT_FALSE(pipeline.SetOutputSurfaces(std::span{&surface, 1}));
+        EXPECT_TRUE(pipeline.SetOutputSurfaces({}));
+        EXPECT_TRUE(pipeline.SetSettings({}));
+    }
+    void OnUpdate(const AppUpdateContext&) override { test::CloseMainWindow(*this); }
+};
+
+TEST(RadRayRuntimeForwardPipeline, OutputSurfacesRejectCyclesInvalidValuesAndUnsupportedProfiles) {
+    render::test::DeviceContext device;
+    if (!render::test::TryCreateDevice(render::RenderBackend::D3D12, device)) GTEST_SKIP() << device.Reason;
+    device.Reset();
+    test::RuntimeLogCapture logs;
+    OutputSurfaceContractApp app;
+    EXPECT_EQ(app.Run({.Backend = render::RenderBackend::D3D12, .EnableValidation = true, .WindowWidth = 160, .WindowHeight = 120,
+                      .BackBufferFormat = render::TextureFormat::BGRA8_UNORM, .PresentMode = render::PresentMode::FIFO}), 0);
+    EXPECT_TRUE(logs.Errors().empty()) << logs.Errors();
 }
 
 TEST(RadRayRuntimeRenderPipeline, PrepareFrameRunsAfterWorldTick) {

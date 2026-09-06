@@ -1,3 +1,4 @@
+#include <charconv>
 #include <cstdlib>
 #include <filesystem>
 #include <span>
@@ -5,6 +6,10 @@
 
 #include <radray/logger.h>
 #include <radray/runtime/application.h>
+#include <radray/runtime/window_manager.h>
+#ifdef RADRAY_ENABLE_IMGUI
+#include <radray/runtime/imgui/imgui_system.h>
+#endif
 #include <radray/runtime/asset_manager.h>
 #include <radray/runtime/components/camera_component.h>
 #include <radray/runtime/components/directional_light_component.h>
@@ -17,6 +22,9 @@
 #include <radray/runtime/shader_program.h>
 #include <radray/runtime/static_mesh.h>
 #include <radray/runtime/texture_asset.h>
+#ifdef RADRAY_PLATFORM_WINDOWS
+#include <radray/platform/win32_headers.h>
+#endif
 
 namespace {
 
@@ -26,6 +34,8 @@ struct ExampleOptions {
     render::RenderBackend Backend{render::RenderBackend::D3D12};
     bool Multithreaded{false};
     bool EnableValidation{false};
+    bool ImGui{true};
+    uint32_t Frames{0};
 };
 
 [[maybe_unused]] bool ParseOptions(int argc, char** argv, ExampleOptions* options) {
@@ -43,6 +53,12 @@ struct ExampleOptions {
             options->Multithreaded = true;
         } else if (argument == "--valid-layer") {
             options->EnableValidation = true;
+        } else if (argument == "--imgui" || argument == "--no-imgui") {
+            options->ImGui = argument == "--imgui";
+        } else if (argument == "--frames" && index + 1 < argc) {
+            const std::string_view value{argv[++index]};
+            const auto parsed = std::from_chars(value.data(), value.data() + value.size(), options->Frames);
+            if (parsed.ec != std::errc{} || parsed.ptr != value.data() + value.size() || !options->Frames) return false;
         } else {
             RADRAY_WARN_LOG("unknown example argument: {}", argument);
         }
@@ -63,7 +79,27 @@ struct ExampleOptions {
 }
 
 class LambertApplication final : public Application {
+public:
+    explicit LambertApplication(ExampleOptions options) : _options(options) {}
+
 protected:
+#ifdef RADRAY_ENABLE_IMGUI
+    void ConfigureImGui(ImGuiSystemDescriptor& descriptor) override { descriptor.Enabled = _options.ImGui; }
+    void OnImGui() override {
+        ImGui::SetNextWindowSize({310, 170}, ImGuiCond_FirstUseEver);
+        if (ImGui::Begin("Lambert sphere")) {
+            ImGui::TextUnformatted(_meshAssigned ? "Mesh ready" : "Loading mesh...");
+            if (_material && ImGui::ColorEdit4("Base color", _color.data())) _material->SetFloat4("BaseColor", _color);
+            if (_material && ImGui::Checkbox("Wireframe", &_wireframe)) {
+                auto state = _material->GetPipelineState();
+                state.Primitive.Poly = _wireframe ? render::PolygonMode::Line : render::PolygonMode::Fill;
+                _material->GetPipelineState() = state;
+                _material->SetPassPipelineState("DepthOnly", state);
+            }
+        }
+        ImGui::End();
+    }
+#endif
     void OnInit() override {
         if (GetWorld() == nullptr || GetRenderSystem() == nullptr ||
             GetAssetManager() == nullptr || GetGpuSystem() == nullptr) {
@@ -148,6 +184,14 @@ protected:
     }
 
     void OnUpdate(const AppUpdateContext&) override {
+        if (_options.Frames && ++_frame >= _options.Frames) {
+            auto* window = GetWindowManager()->GetMainWindow()->GetNativeWindow();
+#ifdef RADRAY_PLATFORM_WINDOWS
+            PostMessageW(static_cast<HWND>(window->GetNativeHandler()), WM_CLOSE, 0, 0);
+#else
+            window->Destroy();
+#endif
+        }
         if (!_meshAssigned && _mesh.IsReady() && _meshComponent.HasValue()) {
             _meshComponent.Get()->SetStaticMesh(_mesh);
             _meshAssigned = true;
@@ -189,6 +233,12 @@ protected:
     }
 
 private:
+    ExampleOptions _options;
+    uint32_t _frame{0};
+#ifdef RADRAY_ENABLE_IMGUI
+    Eigen::Vector4f _color{Eigen::Vector4f::Ones()};
+    bool _wireframe{false};
+#endif
     StreamingAssetRef<StaticMesh> _mesh;
     StreamingAssetRef<TextureAsset> _texture;
     unique_ptr<MaterialTechnique> _technique;
@@ -246,7 +296,7 @@ int main(int argc, char** argv) {
         .FlightDataCount = 2,
         .BackBufferFormat = render::TextureFormat::BGRA8_UNORM,
         .PresentMode = render::PresentMode::FIFO};
-    LambertApplication application;
+    LambertApplication application{options};
     return application.Run(descriptor);
 #endif
 }

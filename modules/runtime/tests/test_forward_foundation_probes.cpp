@@ -25,13 +25,13 @@ TEST_P(ForwardFoundationProbe, ForwardEffectShadersAndMaterialPassesHaveUsableAr
                                                       {"ShadowCaster", materialPrograms[2].get(), "ForwardMaterial", {}}},
                                                      "ForwardLit");
     ASSERT_TRUE(technique);
-    const std::string_view effects[]{"linear_depth", "depth_pyramid", "ambient_occlusion", "ao_blur", "temporal_resolve", "bloom", "bloom", "bloom", "output", "tile_lights", "sky", "firefly_update", "firefly_draw", "debug"};
-    for (uint32_t effect = 0; effect < 14; ++effect) {
+    const std::string_view effects[]{"linear_depth", "depth_pyramid", "ambient_occlusion", "ao_blur", "temporal_resolve", "bloom", "bloom", "bloom", "output", "tile_lights", "sky", "firefly_update", "firefly_draw", "debug", "output_surface"};
+    for (uint32_t effect = 0; effect < std::size(effects); ++effect) {
         SCOPED_TRACE(effect);
         const auto source = fmt::format("#define FORWARD_EFFECT {}\n{}", effect, read(fmt::format("{}.hlsl", effects[effect])));
         auto program = test::CompileFoundationGraphics(*Context.Device, source);
         ASSERT_TRUE(program);
-        if (effect != 8 && effect != 10 && effect != 12) EXPECT_TRUE(program->GetOrCreateComputePipelineState());
+        if (effect != 8 && effect != 10 && effect != 12 && effect != 14) EXPECT_TRUE(program->GetOrCreateComputePipelineState());
     }
 }
 

@@ -72,6 +72,8 @@ struct ForwardPipeline::Impl {
         vector<unique_ptr<ForwardHdrView>> HdrViews;
         ForwardPipelineSettings Settings;
         vector<ForwardOutputOverlay> Overlays;
+        vector<ForwardOutputSurface> Surfaces;
+        vector<RenderOutputId> SurfaceOrder;
         bool ProgramsReady{false};
         ForwardCapture Capture;
         ForwardStageBStats Stats;
@@ -90,6 +92,8 @@ struct ForwardPipeline::Impl {
     ForwardEffectPrograms Effects;
     vector<ForwardViewSource> Sources;
     vector<ForwardOutputOverlay> Overlays;
+    vector<ForwardOutputSurface> Surfaces;
+    vector<RenderOutputId> SurfaceOrder;
     unordered_map<ViewStateId, ForwardViewSignature, ViewStateIdHash> Signatures;
     uint64_t PreparedSerial{0};
     std::filesystem::path CaptureDirectory;
@@ -154,7 +158,7 @@ ForwardPipeline::ForwardPipeline(Application* app, Scene* scene, CameraComponent
 ForwardPipeline::~ForwardPipeline() noexcept = default;
 
 bool ForwardPipeline::SetSettings(const ForwardPipelineSettings& settings) noexcept {
-    if (!settings.IsValid()) return false;
+    if (!settings.IsValid() || (!settings.Hdr && !_impl->Surfaces.empty())) return false;
     _impl->Settings = settings;
     return true;
 }
@@ -192,12 +196,40 @@ bool ForwardPipeline::SetOutputOverlays(std::span<const ForwardOutputOverlay> ov
     return true;
 }
 
+bool ForwardPipeline::SetOutputSurfaces(std::span<const ForwardOutputSurface> surfaces) {
+    if (!surfaces.empty() && !_impl->Settings.Hdr) return false;
+    vector<RenderOutputId> pending, order;
+    for (const auto& surface : surfaces) {
+        const auto& matrix = surface.LocalToWorld;
+        if (!surface.Source.IsValid() || !surface.Destination.IsValid() || surface.Source == surface.Destination ||
+            !matrix.allFinite() || !matrix.row(3).isApprox(Eigen::RowVector4f{0, 0, 0, 1}) ||
+            !std::isfinite(surface.Brightness) || surface.Brightness < 0) return false;
+        for (const auto output : {surface.Source, surface.Destination})
+            if (std::find(pending.begin(), pending.end(), output) == pending.end()) pending.push_back(output);
+    }
+    while (!pending.empty()) {
+        const auto ready = std::find_if(pending.begin(), pending.end(), [&](RenderOutputId output) {
+            return std::none_of(surfaces.begin(), surfaces.end(), [&](const auto& surface) {
+                return surface.Destination == output && std::find(pending.begin(), pending.end(), surface.Source) != pending.end();
+            });
+        });
+        if (ready == pending.end()) return false;
+        order.push_back(*ready);
+        pending.erase(ready);
+    }
+    _impl->Surfaces.assign(surfaces.begin(), surfaces.end());
+    _impl->SurfaceOrder = std::move(order);
+    return true;
+}
+
 void ForwardPipeline::PrepareFrame(RenderPrepareContext& ctx) {
     const uint32_t index = ctx.App.FlightIndex;
     RADRAY_ASSERT(index < _impl->Flights.size());
     auto& flight = _impl->Flights[index];
     flight.Settings = _impl->Settings;
     flight.Overlays = _impl->Overlays;
+    flight.Surfaces = _impl->Surfaces;
+    flight.SurfaceOrder = _impl->SurfaceOrder;
     flight.Capture.Directory = _impl->CaptureDirectory;
     flight.Capture.Name = std::exchange(_impl->CaptureName, {});
     flight.ProgramsReady = !flight.Settings.Hdr || _impl->Effects.Initialize(*_impl->System);
@@ -270,7 +302,22 @@ void ForwardPipeline::Render(RenderPipelineContext& ctx) {
     if (flight.Settings.Hdr) {
         bool overlaysSucceeded = true;
         size_t viewIndex = 0;
-        for (const auto& family : ctx.ViewFamilies()) {
+        vector<const ResolvedRenderViewFamily*> families;
+        for (const auto& family : ctx.ViewFamilies()) families.push_back(&family);
+        for (const auto& surface : flight.Surfaces) {
+            const auto source = std::find_if(families.begin(), families.end(), [&](const auto* family) { return family->OutputId == surface.Source; });
+            const auto destination = std::find_if(families.begin(), families.end(), [&](const auto* family) { return family->OutputId == surface.Destination; });
+            if (source == families.end() || destination == families.end() ||
+                ((*destination)->OutputAvailable && !(*source)->OutputAvailable)) {
+                _impl->Error = true;
+                RADRAY_ERR_LOG("Forward output surface requires both camera outputs in this frame");
+                return;
+            }
+        }
+        const auto rank = [&](RenderOutputId output) { return std::find(flight.SurfaceOrder.begin(), flight.SurfaceOrder.end(), output) - flight.SurfaceOrder.begin(); };
+        std::stable_sort(families.begin(), families.end(), [&](const auto* a, const auto* b) { return rank(a->OutputId) < rank(b->OutputId); });
+        for (const auto* familyPointer : families) {
+            const auto& family = *familyPointer;
             bool firstOutput = true;
             for (const auto& view : family.Views) {
                 if (!family.OutputAvailable) continue;
@@ -281,7 +328,7 @@ void ForwardPipeline::Render(RenderPipelineContext& ctx) {
                 if (viewIndex == flight.HdrViews.size()) flight.HdrViews.push_back(make_unique<ForwardHdrView>());
                 auto& work = *flight.HdrViews[viewIndex++];
                 if (BuildForwardHdrView(graph, ctx, *_impl->Device, _impl->Effects, flight.Settings, family, view, flight.Scene,
-                                        *flight.DrawResources, _impl->Bindings, work, firstOutput, _impl->LightOverflowWarned))
+                                        *flight.DrawResources, _impl->Bindings, work, firstOutput, _impl->LightOverflowWarned, flight.Surfaces))
                     firstOutput = false;
                 else
                     _impl->Error = true;
@@ -289,10 +336,10 @@ void ForwardPipeline::Render(RenderPipelineContext& ctx) {
         }
         for (const auto& overlay : flight.Overlays)
             overlaysSucceeded &= BuildForwardOutputOverlay(graph, ctx, _impl->Effects, overlay, _impl->Device->GetBackend(), overlaysSucceeded);
-        if (!flight.Capture.Build(graph, ctx, *_impl->Device)) _impl->Error = true;
 #ifdef RADRAY_ENABLE_IMGUI
         if (ui) ImGuiGraph::BuildGraph(graph, ctx, *ui.Get(), uiScenes);
 #endif
+        if (!flight.Capture.Build(graph, ctx, *_impl->Device)) _impl->Error = true;
         const auto result = ctx.ExecuteGraph(graph);
 #ifdef RADRAY_ENABLE_IMGUI
         if (ui) ImGuiGraph::CompleteGraph(graph, ctx, *ui.Get(), result.Success);
@@ -392,10 +439,10 @@ void ForwardPipeline::Render(RenderPipelineContext& ctx) {
         for (const auto& view : work.Views)
             if (view.Culling.Stats.Valid) rendered.push_back(view.View.StateId);
     }
-    if (!flight.Capture.Build(graph, ctx, *_impl->Device)) _impl->Error = true;
 #ifdef RADRAY_ENABLE_IMGUI
     if (ui) ImGuiGraph::BuildGraph(graph, ctx, *ui.Get(), uiScenes);
 #endif
+    if (!flight.Capture.Build(graph, ctx, *_impl->Device)) _impl->Error = true;
     const auto result = ctx.ExecuteGraph(graph);
 #ifdef RADRAY_ENABLE_IMGUI
     if (ui) ImGuiGraph::CompleteGraph(graph, ctx, *ui.Get(), result.Success);

@@ -264,6 +264,17 @@ HDR 工作尺寸按 RenderScale 解析，view 使用各自局部 attachments，�
 独立保存剔除、列表、光照与 histories。`SetOutputOverlays` 在所有 view family 后把本帧产生的 SDR
 离屏 output 采样进目标 rect，仍在同一张图中。调用方负责 output 的借用寿命，不能形成反馈环。
 
+`SetOutputSurfaces` 为 HDR 路径提供本帧输出到世界空间屏幕的映射。每条描述包含 source/destination
+output、单位 XY 平面的 LocalToWorld、layer mask 和亮度。管线按输出依赖排序各 family，拒绝环和
+缺失的相机输出；数据复制到 flight，输出所有者必须保活到 fence。屏幕采样单采样 2D SDR 输出，
+先解码到线性亮度，在 TAA 后、透明与折射取样前绘制。屏幕使用只读深度，不进入时域历史或投射阴影。
+普通材质纹理仍由 TextureAsset 提供；动态显示通过此产品接口声明，不从样例注入渲染回调。
+
+内置 PBR 的 Surface 是 metallic/roughness/alpha-cutoff/emission；Transmission.y 选择 unlit。
+UVTransform.xy/zw 指定纹理缩放/偏移，xy 全零表示单位缩放。三个材质 pass 共享这些字段，
+保持 cutout、阴影和颜色采样一致。HDR 材质输出线性值，不自行进行 tone mapping 或 sRGB 编码。
+RenderScale 的范围为 0.25 到 1，基础非 HDR 配置固定为 1。
+
 产品 ForwardObject 同时保存 `LocalToWorld` 与 `NormalToWorld`。CPU 按对象计算后者，作为
 线性变换逆转置的正比例矩阵，shader 使用后再归一化，支持非均匀缩放、shear 与镜像。
 实现用缩放后的余子式矩阵和行列式符号避免除以零；退化为平面时保留可定义的法线方向，
@@ -274,8 +285,8 @@ HDR 工作尺寸按 RenderScale 解析，view 使用各自局部 attachments，�
 resolved view 值并借用 RendererList，携带 color/depth handles、attachment Load/Clear 和执行统计；输出
 返回资源 handles、成功状态与实际 pass handle。没有 command 的 Depth/Transparent 成功但不加 pass，
 Opaque 即使为空仍加 pass 定义输出。模块不创建/执行子图，不 acquire/present，也不提交 view/history。
-ForwardPipeline 的基础与 HDR 配置共用该模块及提交循环；Tidal Atrium 在同一张图中保持
-Sky → Depth → Opaque → scene screens → Transparent → downsample/HUD/present 的显式组合。
+ForwardPipeline 的基础与 HDR 配置共用该模块及提交循环。Tidal Atrium 和 Pipeline Probe 均直接
+使用该管线，样例不再组织 Graph Pass。
 
 存在有效 DepthOnly command 时声明 `Forward.DepthPrepass`（深度 Clear/Store）；没有则省略。
 `Forward.Opaque` 总是存在，color Clear/Store；有预通道时 depth Load，否则 depth Clear。缺 DepthOnly
@@ -318,7 +329,8 @@ motion、AO、tile occupancy/overflow、Bloom、cascade、当前/历史 HDR 和�
 候选分类来自 list，避免重复计数。
 
 `RequestCapture` 只申请下一次 prepared frame；readback 由 graph 声明，`CompleteCaptures(flight)`
-必须在所属 fence 完成后调用，生成 PNG 与 graph JSON/DOT。正常帧不增加全队列等待。
+必须在所属 fence 完成后调用，生成 PNG 与 graph JSON/DOT。截图读取最终输出目标，包含启用的
+ImGui；默认选择 workload 中首个可用 view family。正常帧不增加全队列等待。
 展示宿主与回归命令见 [构建与测试](../guide/build-test.md#样例与专项验证)。
 
 当前不实现 async compute、并行录制、pass merge、heap aliasing、常驻场景、GPUScene、GPU count buffer、

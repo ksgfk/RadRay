@@ -52,7 +52,7 @@ GPU 纹理、平台子窗口与 context。部分初始化失败也销毁已经�
 
 ## 显式组合 Graph
 
-Forward 与 Tidal 在顶层管线的同一张图中按以下顺序装配：
+ForwardPipeline（含 Tidal Atrium 与 Pipeline Probe）在同一张图中按以下顺序装配：
 
 1. `ImGuiGraph::PrepareSceneOutputs` 将有相机的场景输出路由到可采样中间纹理。
 2. 原场景 `BuildGraph` 完成光照、后处理、tone mapping 和输出分辨率重建。
@@ -87,8 +87,12 @@ FramebufferScale、桌面负坐标及裁剪。Vulkan 继续使用统一的 `Make
 |---|---|
 | `RegisterTexture(StreamingAssetRef<TextureAsset>)` | 注册资产引用；实际绘制要求资产已经就绪，发布快照保留引用 |
 | `RegisterTexture(shared_ptr<ImGuiTextureLease>)` | lease 独占 RHI texture 和状态追踪；调用者交付已正确初始化的资源与初始状态，随后不能从图外改变其状态 |
+| `RegisterOutput(RenderOutputId)` | 显示本帧相机输出的场景纹理；编码由场景输出提供，UI 在合成前取样；不替调用者创建相机或拥有输出 |
 | `CreateGraphImage()` | 主线程取得稳定逻辑 ID；渲染线程每帧通过 `ImGuiGraphImageBinding` 绑定本图的 `RgTextureViewHandle` |
 | `UnregisterTexture(id)` | 阻止未来快照使用该 ID；已发布 flight 继续拥有纹理，重复注销或旧 generation 返回 false |
+
+RegisterOutput 的 source 必须在本帧 scene outputs 中有且只有一个生产者；缺失或重复时诊断并拒绝图。输出所有者负责
+保持注册与资源到 flight fence。主场景也可在 ImGui 中预览：读取合成前的独立场景纹理，避免 UI 反馈。
 
 Graph image 的 ID 可以跨帧保留，Graph view handle 只能在所属图使用。实际 Image 必须有唯一
 有效绑定、正确初始化、Resource usage，且是单采样 2D 纹理。缺失、重复、跨图、MSAA、非法

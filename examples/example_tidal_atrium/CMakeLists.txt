@@ -1,4 +1,4 @@
-add_executable(example_tidal_atrium tidal_atrium.cpp atrium_pipeline.cpp)
+add_executable(example_tidal_atrium tidal_atrium.cpp)
 target_link_libraries(example_tidal_atrium PRIVATE radrayruntime)
 target_compile_definitions(example_tidal_atrium PRIVATE
     RADRAY_ASSETS_DIR_DEFAULT="${CMAKE_SOURCE_DIR}/assets"

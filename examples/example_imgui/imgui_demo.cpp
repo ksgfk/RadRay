@@ -5,6 +5,7 @@
 #include <radray/runtime/render_system.h>
 #include <radray/runtime/window_manager.h>
 #include <misc/cpp/imgui_stdlib.h>
+#include <imgui_internal.h>
 #ifdef RADRAY_PLATFORM_WINDOWS
 #include <radray/platform/win32_headers.h>
 #endif
@@ -14,29 +15,8 @@ namespace {
 struct Options {
     render::RenderBackend Backend{render::RenderBackend::D3D12};
     uint32_t Frames{0}, Flights{2};
-    bool Multithread{false}, Viewports{true}, Stress{false}, Srgb{false}, Only{false};
+    bool Multithread{false}, Viewports{true}, Stress{false}, Srgb{false};
     std::filesystem::path Font, Settings;
-};
-class GalleryPipeline final : public RenderPipeline {
-public:
-    GalleryPipeline(ImGuiSystem& ui, ImTextureID image) : Ui(ui), Image(image) {}
-    void PrepareFrame(RenderPrepareContext& ctx) override { Ui.RequestOutputs(ctx.App.FlightIndex, ctx.Workloads); }
-    void Render(RenderPipelineContext& ctx) override {
-        auto graph = ctx.CreateRenderGraph("ImGui gallery");
-        const auto texture = graph.CreateTexture({render::TextureDimension::Dim2D, 128, 128, 1, 1, 1, render::TextureFormat::RGBA8_UNORM,
-                                                  render::MemoryType::Device, render::TextureUse::RenderTarget | render::TextureUse::Resource},
-                                                 "Image produced this frame");
-        RgTextureViewHandle view;
-        graph.AddRasterPass<int>("Graph image producer", [&](int&, RenderGraphRasterBuilder& builder) { view = builder.SetColorAttachment(0, texture, {.Clear = {{.03f, .45f, .18f, 1}}}); }, nullptr);
-        const ImGuiGraphImageBinding binding{Image, view};
-        ImGuiGraph::BuildGraph(graph, ctx, Ui, {}, std::span{&binding, 1});
-        const auto result = ctx.ExecuteGraph(graph);
-        ImGuiGraph::CompleteGraph(graph, ctx, Ui, result.Success);
-    }
-
-private:
-    ImGuiSystem& Ui;
-    ImTextureID Image;
 };
 class Gallery final : public Application {
 public:
@@ -45,12 +25,17 @@ public:
 
 protected:
     void OnInit() override {
-        if (Opt.Only)
-            GetRenderSystem()->SetPipeline(make_unique<ImGuiOnlyPipeline>(*GetImGuiSystem().Get()));
-        else {
-            Image = GetImGuiSystem()->CreateGraphImage();
-            GetRenderSystem()->SetPipeline(make_unique<GalleryPipeline>(*GetImGuiSystem().Get(), Image));
-        }
+        GetRenderSystem()->SetPipeline(make_unique<ImGuiOnlyPipeline>(*GetImGuiSystem().Get()));
+        Image.Create(ImTextureFormat_RGBA32, 128, 128);
+        for (uint32_t y = 0; y < 128; ++y)
+            for (uint32_t x = 0; x < 128; ++x) {
+                const auto offset = (y * 128 + x) * 4;
+                Image.Pixels[offset] = static_cast<unsigned char>(x * 2);
+                Image.Pixels[offset + 1] = static_cast<unsigned char>(y * 2);
+                Image.Pixels[offset + 2] = 100;
+                Image.Pixels[offset + 3] = 255;
+            }
+        ImGui::RegisterUserTexture(&Image);
     }
     void OnUpdate(const AppUpdateContext&) override {
         ++Frame;
@@ -68,9 +53,9 @@ protected:
             ImGui::Text("Frame %u, %u GPU flights", Frame, Opt.Flights);
             ImGui::InputText("UTF-8 / IME", &Text);
             ImGui::TextUnformatted("\xe4\xb8\xad\xe6\x96\x87 / Unicode: \xf0\x9f\x8e\xa8");
-            if (Image) {
-                ImGui::Image(Image, {192, 192});
-                ImGui::TextUnformatted("The green image is produced in this frame's graph.");
+            {
+                ImGui::Image(Image.GetTexRef(), {192, 192});
+                ImGui::TextUnformatted("The runtime uploads and draws this CPU-authored image.");
             }
             ImGui::Checkbox("Official demo", &Demo);
             ImGui::Checkbox("Detached tool", &Tool);
@@ -80,7 +65,7 @@ protected:
                 const auto p = ImGui::GetCursorScreenPos();
                 for (int i = 0; i < 18000; ++i) list->AddRectFilled({p.x + float(i % 160), p.y + float((i / 160) % 60)}, {p.x + float(i % 160) + 1, p.y + float((i / 160) % 60) + 1}, IM_COL32(200, 100, 40, 80));
                 list->AddCallback(ImGui::GetPlatformIO().DrawCallback_SetSamplerNearest, nullptr);
-                if (Image) ImGui::Image(Image, {80, 80});
+                ImGui::Image(Image.GetTexRef(), {80, 80});
                 list->AddCallback(ImGui::GetPlatformIO().DrawCallback_ResetRenderState, nullptr);
             }
         }
@@ -91,7 +76,7 @@ protected:
             ImGui::SetNextWindowSize({260, 230}, ImGuiCond_FirstUseEver);
             ImGui::Begin("Detached runtime tool", &Tool);
             ImGui::TextUnformatted("Drag back to dock.");
-            if (Image) ImGui::Image(Image, {128, 128});
+            ImGui::Image(Image.GetTexRef(), {128, 128});
             ImGui::End();
         }
 #ifndef IMGUI_DISABLE_DEMO_WINDOWS
@@ -100,7 +85,7 @@ protected:
     }
     void OnShutdown() override {
         Failed = GetImGuiSystem()->HasError();
-        if (Image) GetImGuiSystem()->UnregisterTexture(Image);
+        ImGui::UnregisterUserTexture(&Image);
         GetRenderSystem()->SetPipeline(nullptr);
         RADRAY_INFO_LOG("ImGui gallery completed {} frames: {}", Frame, Failed ? "FAILED" : "clean");
     }
@@ -108,7 +93,7 @@ protected:
 private:
     Options Opt;
     uint32_t Frame{0};
-    ImTextureID Image{0};
+    ImTextureData Image;
     bool Demo{false}, Tool{true};
     float Scale{1};
     string Text{"RadRay"};
@@ -133,8 +118,6 @@ int main(int argc, char** argv) {
             options.Stress = true;
         else if (arg == "--srgb")
             options.Srgb = true;
-        else if (arg == "--only")
-            options.Only = true;
         else if ((arg == "--font" || arg == "--settings") && i + 1 < argc) {
             if (arg == "--font")
                 options.Font = argv[++i];

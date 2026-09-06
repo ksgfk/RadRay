@@ -13,10 +13,9 @@ compiler discovery 从根 `.hlsl` 推导 entry topology 和 keyword domain；
 shader compiler 的最小 depth/compute 测试 source 位于 `modules/shader_compiler/tests/data/`；
 测试以仓库相对路径读取它们，共享 include root 仍是 `shaderlib/`。
 
-示例专用 shader 随示例维护，不放入 `shaderlib/`。Tidal Atrium 的 surface、sky、panel、HUD
-与 signal compute source 位于 `examples/example_tidal_atrium/shaders/`；该示例以仓库根作为
-`ShaderSourceRoot`，以仓库相对路径请求这些 source 和共享的
-`shaderlib/pipelines/forward/depth_only.hlsl`，`ShaderIncludePaths` 仍指向 `shaderlib/`。
+示例专用 shader 随示例维护，不放入 `shaderlib/`。Tidal Atrium 使用内置 Forward 产品 shader，
+不维护自己的 shader 或管线。原信号反馈 source 位于 `modules/runtime/tests/data/temporal_feedback.hlsl`，
+由 TemporalFeedbackTest 验证。
 
 ## 分层
 
@@ -47,6 +46,7 @@ shader compiler 的最小 depth/compute 测试 source 位于 `modules/shader_com
 | `core/platform.hlsli` | `VK_LOCATION`、`VK_BINDING`、`VK_PUSH_CONSTANT`、`VK_IMAGE_FORMAT` target gate |
 | `pipelines/forward/bindings.hlsli` | forward 的 view/material/object binding ABI |
 | `pipelines/forward/forward.hlsl` | 纹理 Lambert 光照与颜色转换产品 pass |
+| `pipelines/forward/output_surface.hlsl` | 本帧 SDR 输出到世界空间屏幕，按深度遮挡并输出线性亮度 |
 | `pipelines/forward/depth_only.hlsl` | Forward 的 depth-only 产品 pass，执行 view/object 变换 |
 | `pipelines/forward/pbr.hlsl`, `pipelines/forward/surface.hlsli` | HDR Forward 材质、GGX 光照与 cutout 契约 |
 | `pipelines/forward/depth_normals_motion.hlsl`, `pipelines/forward/shadow_caster.hlsl` | 深度/法线/刚体 motion 与阴影投影 |

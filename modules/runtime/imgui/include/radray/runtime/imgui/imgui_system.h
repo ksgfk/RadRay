@@ -4,6 +4,7 @@
 #include <imgui.h>
 #include <radray/runtime/texture_asset.h>
 #include <radray/runtime/render_framework/render_graph.h>
+#include <radray/runtime/render_framework/render_output.h>
 
 namespace radray {
 
@@ -61,6 +62,9 @@ public:
     void SetStyleScale(float scale);
     ImTextureID RegisterTexture(StreamingAssetRef<TextureAsset> asset, const ImGuiTextureDescriptor& descriptor = {});
     ImTextureID RegisterTexture(shared_ptr<ImGuiTextureLease> lease, const ImGuiTextureDescriptor& descriptor = {});
+    /// Display an SDR scene output produced in this frame, before UI composition. Encoding is inferred from its format.
+    /// The output owner must keep it registered through all published flights; this does not request a camera view.
+    ImTextureID RegisterOutput(RenderOutputId output);
     ImTextureID CreateGraphImage(const ImGuiTextureDescriptor& descriptor = {});
     bool UnregisterTexture(ImTextureID texture);
     bool HasError() const noexcept;

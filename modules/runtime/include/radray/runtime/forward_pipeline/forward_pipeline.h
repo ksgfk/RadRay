@@ -60,6 +60,14 @@ struct ForwardOutputOverlay {
     NormalizedRect Rectangle{.72f, .03f, .25f, .25f};
 };
 
+struct ForwardOutputSurface {
+    RenderOutputId Source, Destination;
+    /// Unit XY quad centered at the origin, transformed into world space.
+    Eigen::Matrix4f LocalToWorld{Eigen::Matrix4f::Identity()};
+    uint32_t LayerMask{0xffffffffu};
+    float Brightness{1};
+};
+
 class ForwardPipeline final : public RenderPipeline {
 public:
     ForwardPipeline(
@@ -78,6 +86,9 @@ public:
     bool SetViews(std::span<const ForwardViewSource> views);
     /// Sources are SDR offscreen outputs produced by this frame, sampled by the final composite.
     bool SetOutputOverlays(std::span<const ForwardOutputOverlay> overlays);
+    /// HDR only. Display this frame's SDR output on depth-tested world quads, after TAA and before transparency.
+    /// Outputs are borrowed through the flight fence. Dependencies must be acyclic and have active camera views.
+    bool SetOutputSurfaces(std::span<const ForwardOutputSurface> surfaces);
     /// Capture the next prepared frame. CompleteCaptures is called after that flight's fence.
     void RequestCapture(std::filesystem::path directory, string name);
     bool CompleteCaptures(uint32_t flightIndex);

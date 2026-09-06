@@ -1,4 +1,7 @@
-#include "atrium_pipeline.h"
+#include <radray/runtime/components/camera_component.h>
+#ifdef RADRAY_ENABLE_IMGUI
+#include <radray/runtime/imgui/imgui_system.h>
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -30,10 +33,10 @@ namespace {
 
 struct Options {
 #ifdef RADRAY_ENABLE_IMGUI
-    bool ImGui{false};
+    bool ImGui{true};
 #endif
     render::RenderBackend Backend{render::RenderBackend::D3D12};
-    bool Multithread{false}, Validation{false}, Tour{false}, SkyTest{false};
+    bool Multithread{false}, Validation{false}, Tour{false}, SkyTest{false}, Msaa{false};
     uint32_t Frames{0}, Width{1280}, Height{800};
     std::filesystem::path Captures;
 };
@@ -42,8 +45,8 @@ struct Options {
     for (int i = 1; i < argc; ++i) {
         const std::string_view argument{argv[i]};
 #ifdef RADRAY_ENABLE_IMGUI
-        if (argument == "--imgui") {
-            options.ImGui = true;
+        if (argument == "--imgui" || argument == "--no-imgui") {
+            options.ImGui = argument == "--imgui";
             continue;
         }
 #endif
@@ -55,7 +58,11 @@ struct Options {
             options.Tour = true;
         else if (argument == "--sky-test")
             options.SkyTest = true;
-        else if (argument == "--d3d12")
+        else if (argument == "--profile" && i + 1 < argc) {
+            const std::string_view profile{argv[++i]};
+            if (profile != "temporal" && profile != "msaa") return false;
+            options.Msaa = profile == "msaa";
+        } else if (argument == "--d3d12")
             options.Backend = render::RenderBackend::D3D12;
         else if (argument == "--vulkan")
             options.Backend = render::RenderBackend::Vulkan;
@@ -203,23 +210,65 @@ StreamingAssetRef<StaticMesh> MakeSplitMesh(Application& app, const StaticMesh& 
 
 class AtriumApplication final : public Application {
 public:
-    explicit AtriumApplication(Options options) : _options(std::move(options)) {}
+    explicit AtriumApplication(Options options) : _settings(options.Msaa ? ForwardPipelineSettings::Msaa() : ForwardPipelineSettings::Temporal()), _options(std::move(options)) {}
     bool Failed() const noexcept { return _failed; }
 
 protected:
 #ifdef RADRAY_ENABLE_IMGUI
     void ConfigureImGui(ImGuiSystemDescriptor& descriptor) override { descriptor.Enabled = _options.ImGui; }
     void OnImGui() override {
-        ImGui::SetNextWindowSize({340, 260}, ImGuiCond_FirstUseEver);
-        if (ImGui::Begin("Tidal Atrium runtime", nullptr, _options.Tour ? ImGuiWindowFlags_NoInputs : ImGuiWindowFlags_None)) {
-            ImGui::TextUnformatted("Native docking and viewport tools");
-            if (!_imguiMural && _textures.contains("tidal_mural") && _textures.at("tidal_mural"))
-                _imguiMural = GetImGuiSystem()->RegisterTexture(_textures.at("tidal_mural"));
-            if (_imguiMural) ImGui::Image(_imguiMural, {280, 160});
+        if (!_state.ShowUi) return;
+        ImGui::SetNextWindowSize({350, 630}, ImGuiCond_FirstUseEver);
+        bool changed = false;
+        if (ImGui::Begin("Tidal Atrium", nullptr, _options.Tour ? ImGuiWindowFlags_NoInputs : ImGuiWindowFlags_None)) {
+            ImGui::PushItemWidth(145);
+            ImGui::TextUnformatted(fmt::format("{} / {:.0f} FPS", _options.Backend, _state.Fps).c_str());
+            if (!_ready) ImGui::TextUnformatted("Loading gallery assets...");
+            if (ImGui::CollapsingHeader("Explore", ImGuiTreeNodeFlags_DefaultOpen)) {
+                const char* stations[]{"Light court", "Chromatic walk", "Material library", "Live cameras", "Observatory"};
+                int station = int(_state.Station);
+                if (ImGui::Combo("Viewpoint", &station, stations, 5)) {
+                    Station(uint32_t(station));
+                    changed = true;
+                }
+                ImGui::Checkbox("Pause animation", &_state.Paused);
+                changed |= ImGui::Checkbox("Split view", &_state.Split);
+                changed |= ImGui::Checkbox("Beacon layer", &_state.Beacons);
+                changed |= ImGui::Checkbox("Wireframe", &_state.Wireframe);
+            }
+            if (ImGui::CollapsingHeader("Forward renderer", ImGuiTreeNodeFlags_DefaultOpen)) {
+                changed |= ImGui::Checkbox("Shadows", &_settings.Shadows);
+                changed |= ImGui::Checkbox("Forward+", &_settings.ForwardPlus);
+                changed |= ImGui::Checkbox("Bloom", &_settings.Bloom);
+                int aa = int(_settings.Antialiasing);
+                if (ImGui::Combo("Antialiasing", &aa, "None\0Temporal\0MSAA 4x\0")) {
+                    _settings.Antialiasing = ForwardAntialiasing(aa);
+                    _settings.AmbientOcclusion = aa != int(ForwardAntialiasing::Msaa4);
+                    _settings.DebugView = ForwardDebugView::Final;
+                    changed = true;
+                }
+                if (_settings.Antialiasing != ForwardAntialiasing::Msaa4)
+                    changed |= ImGui::Checkbox("Ambient occlusion", &_settings.AmbientOcclusion);
+                changed |= ImGui::SliderFloat("Exposure", &_settings.Exposure, .1f, 5.f);
+                changed |= ImGui::SliderFloat("Render scale", &_settings.RenderScale, .25f, 1.f, "%.2f");
+            }
+            if (_ready && ImGui::CollapsingHeader("Live cameras", ImGuiTreeNodeFlags_DefaultOpen)) {
+                for (size_t i = 0; i < _observers.size(); ++i) {
+                    ImGui::TextUnformatted(i == 0 ? "Orthographic" : "Perspective");
+                    ImGui::Image(_observers[i].Image, {288, 216});
+                }
+            }
+            if (ImGui::CollapsingHeader("Statistics")) {
+                ImGui::TextUnformatted(fmt::format("Scene: {} primitives", _primitiveCount).c_str());
+                ImGui::TextUnformatted(fmt::format("All views: {} draws / {} culls", _stats.Execution.Draws, _stats.CullCalls).c_str());
+                ImGui::TextUnformatted(fmt::format("Depth {} / opaque {} / transparent {}", _stats.DepthCommands, _stats.OpaqueCommands, _stats.TransparentCommands).c_str());
+            }
+            if (_state.Help) ImGui::TextWrapped("WASD + RMB / arrows: move and look. Q/E: height. 1-5: viewpoints. Space: pause. F2: shadows. F3: wireframe. F4: split. F5: layer. F6: TAA. F7: resolution. H: help. Tab: UI.");
+            ImGui::PopItemWidth();
         }
         ImGui::End();
+        if (changed && _pipeline) UpdateRendering();
     }
-    ImTextureID _imguiMural{0};
 #endif
     void OnInit() override {
         _window = GetWindowManager()->GetMainWindow()->GetNativeWindow();
@@ -234,7 +283,7 @@ protected:
         _focus = input.connect([this](const WindowInputEvent& event) { if (event.Type == WindowInputType::Focus && !event.Focused) { _keys.clear(); CaptureMouse(false); } });
         for (const auto name : {"block", "panel", "sphere", "ring", "spire", "vase"})
             _meshes.emplace(name, GetAssetManager()->Load<StaticMesh>(fmt::format("tidal_atrium/{}.obj", name)));
-        for (const auto name : {"white", "basalt", "limestone", "sampler_grid", "font", "tidal_mural", "contact", "welcome", "light", "glass", "material", "signal", "observatory", "nearest", "linear", "streams"})
+        for (const auto name : {"white", "basalt", "limestone", "sampler_grid", "tidal_mural", "contact", "welcome", "light", "glass", "material", "signal", "observatory", "nearest", "linear", "streams"})
             _textures.emplace(name, GetAssetManager()->Load<TextureAsset>(fmt::format("tidal_atrium/{}.png", name)));
         _camera = Spawn<CameraComponent>();
         _camera->SetPerspective(Radian(58.f), .1f, 250.f);
@@ -245,14 +294,16 @@ protected:
             Close();
             return;
         }
-        auto pipeline = make_unique<AtriumPipeline>(this, GetWorld()->GetScene(), _camera.Get(), _textures.at("font"), _options.Captures);
-        if (!pipeline->IsValid()) {
+        auto pipeline = make_unique<ForwardPipeline>(this, GetWorld()->GetScene(), _camera.Get());
+        _pipeline = pipeline.get();
+        if (!pipeline->SetSettings(_settings) || !CreateObservers()) {
             _failed = true;
+            _pipeline = nullptr;
             Close();
             return;
         }
-        _pipeline = pipeline.get();
         GetRenderSystem()->SetPipeline(std::move(pipeline));
+        UpdateRendering();
     }
 
     void OnUpdate(const AppUpdateContext& ctx) override {
@@ -283,7 +334,6 @@ protected:
                 return;
             }
             _ready = true;
-            _pipeline->GameSettings.Ready = true;
             RADRAY_INFO_LOG("Tidal Atrium ready: {} scene actors, {} materials; WASD + right mouse, 1-5 viewpoints, H help", _actors.size(), _materials.size());
         }
         if (_pipeline->Failed()) {
@@ -291,7 +341,7 @@ protected:
             Close();
             return;
         }
-        auto& state = _pipeline->GameSettings;
+        auto& state = _state;
         state.CaptureName.clear();
         ++state.Frame;
         state.Fps = state.Fps * .95f + .05f / std::max(ctx.DeltaTime.count(), .001f);
@@ -316,19 +366,27 @@ protected:
         }
         if (state.Frame % 45 == 0) _window->SetTitle(fmt::format("Tidal Atrium | {} | {:.0f} fps | WASD + RMB / 1-5 viewpoints / H help", _options.Backend, state.Fps));
         if (!_options.Tour && !_options.SkyTest && _options.Frames && state.Frame == _options.Frames - 2) state.CaptureName = "atrium";
+        UpdateRendering();
+        if (!state.CaptureName.empty() && !_options.Captures.empty()) _pipeline->RequestCapture(_options.Captures, state.CaptureName);
         if (_options.Frames && state.Frame >= _options.Frames) Close();
     }
 
     void OnRenderFrameComplete(const AppRenderCompleteContext& ctx) override {
-        if (_pipeline && ctx.GpuWorkCompleted) _pipeline->Complete(ctx.FlightIndex);
+        if (_pipeline && ctx.GpuWorkCompleted) {
+            _failed |= !_pipeline->CompleteCaptures(ctx.FlightIndex);
+            _stats = _pipeline->GetStageBStats(ctx.FlightIndex);
+            _primitiveCount = uint32_t(_pipeline->GetSceneSnapshot(ctx.FlightIndex).Primitives.size());
+        }
     }
 
     void OnShutdown() override {
 #ifdef RADRAY_ENABLE_IMGUI
         if (auto ui = GetImGuiSystem()) {
             _failed |= ui->HasError();
-            if (_imguiMural) ui->UnregisterTexture(_imguiMural);
-            _imguiMural = 0;
+            for (auto& observer : _observers) {
+                if (observer.Image) ui->UnregisterTexture(observer.Image);
+                observer.Image = 0;
+            }
         }
 #endif
         CaptureMouse(false);
@@ -343,6 +401,12 @@ protected:
         _orbs.clear();
         GetRenderSystem()->SetPipeline(nullptr);
         _pipeline = nullptr;
+        for (auto& observer : _observers) {
+            if (observer.Output.IsValid()) GetRenderSystem()->GetOutputs().Unregister(observer.Output);
+            if (observer.Rtv) GetRenderSystem()->GetRenderPassRegistry()->RemoveFramebuffersUsing(observer.Rtv.get());
+            observer.Rtv.reset();
+            observer.Texture.reset();
+        }
         _camera = nullptr;
         _materials.clear();
         _techniques.clear();
@@ -399,16 +463,19 @@ private:
                 Close();
         }
         if (!_pipeline) return;
-        auto& state = _pipeline->GameSettings;
+        auto& state = _state;
         if (key >= KeyCode::NUM1 && key <= KeyCode::NUM5) Station(static_cast<uint32_t>(key) - static_cast<uint32_t>(KeyCode::NUM1));
         if (key == KeyCode::H || key == KeyCode::F1) state.Help = !state.Help;
         if (key == KeyCode::SPACE) state.Paused = !state.Paused;
-        if (key == KeyCode::F2) state.Depth = !state.Depth;
+        if (key == KeyCode::F2) _settings.Shadows = !_settings.Shadows;
         if (key == KeyCode::F3) state.Wireframe = !state.Wireframe;
         if (key == KeyCode::F4) state.Split = !state.Split;
         if (key == KeyCode::F5) state.Beacons = !state.Beacons;
-        if (key == KeyCode::F6) state.History = !state.History;
-        if (key == KeyCode::F7) state.RenderScale = state.RenderScale > 1 ? 1.f : 1.5f;
+        if (key == KeyCode::F6) {
+            _settings.Antialiasing = _settings.Antialiasing == ForwardAntialiasing::Temporal ? ForwardAntialiasing::None : ForwardAntialiasing::Temporal;
+            _settings.DebugView = ForwardDebugView::Final;
+        }
+        if (key == KeyCode::F7) _settings.RenderScale = _settings.RenderScale < 1 ? 1.f : .67f;
         if (key == KeyCode::TAB) state.ShowUi = !state.ShowUi;
     }
     void Station(uint32_t station) {
@@ -419,7 +486,7 @@ private:
         _pitch = -std::asin(direction.y());
         _camera->SetWorldLocation(eyes[station]);
         ApplyRotation();
-        if (_pipeline) _pipeline->GameSettings.Station = station;
+        if (_pipeline) _state.Station = station;
         _cutRequested = true;
     }
     void ApplyRotation() { _camera->SetWorldRotation(Eigen::Quaternionf{Eigen::AngleAxisf{_yaw, Eigen::Vector3f::UnitY()} * Eigen::AngleAxisf{_pitch, Eigen::Vector3f::UnitX()}}); }
@@ -458,10 +525,10 @@ private:
         const array<Probe, 8> probes{{{"sky-level", {0, 0, 0}}, {"sky-up", {-20, 0, 0}}, {"sky-down", {20, 0, 0}}, {"sky-yaw", {0, 90, 0}}, {"sky-translated", {0, 0, 0}}, {"sky-roll", {0, 0, 25}}, {"sky-split", {0, 0, 0}}, {"sky-narrow", {-10, 0, 0}, 35}}};
         const uint32_t index = std::min((frame - 1) / 10, uint32_t(probes.size() - 1));
         const auto& probe = probes[index];
-        auto& state = _pipeline->GameSettings;
+        auto& state = _state;
         state.Paused = true;
         state.ShowUi = false;
-        state.RenderScale = 1;
+        _settings.RenderScale = 1;
         state.Split = index == 6;
         _camera->SetPerspective(Radian(probe.Fov), .1f, 250);
         // Keep geometry outside the far plane so the captures measure only the sky.
@@ -471,7 +538,7 @@ private:
         if (frame % 10 == 8) state.CaptureName = probe.Name;
     }
     void Tour(uint32_t frame) {
-        auto& state = _pipeline->GameSettings;
+        auto& state = _state;
         const auto tap = [&](KeyCode key) { _window->EventKeyboard()(key,Action::PRESSED); _window->EventKeyboard()(key,Action::RELEASED); };
         if (frame == 10) {
             _moveStart = _camera->GetEyePosition();
@@ -522,7 +589,7 @@ private:
         }
         if (frame == 60) state.CaptureName = "02-light-court";
         if (frame == 70) tap(KeyCode::F2);
-        if (frame == 80) state.CaptureName = "03-depth-disabled";
+        if (frame == 80) state.CaptureName = "03-shadows-disabled";
         if (frame == 90) {
             tap(KeyCode::SPACE);
             tap(KeyCode::F2);
@@ -541,9 +608,9 @@ private:
             tap(KeyCode::F3);
             tap(KeyCode::NUM4);
         }
-        if (frame == 195) state.CaptureName = "07-signal-garden";
+        if (frame == 195) state.CaptureName = "07-live-cameras";
         if (frame == 200) tap(KeyCode::F6);
-        if (frame == 215) state.CaptureName = "08-history-disabled";
+        if (frame == 215) state.CaptureName = "08-taa-disabled";
         if (frame == 225) {
             tap(KeyCode::F6);
             tap(KeyCode::NUM5);
@@ -565,12 +632,85 @@ private:
         if (frame == 325) state.CaptureName = "12-restored";
         if (frame == 335) tap(KeyCode::SPACE);
         if (frame == 336) tap(KeyCode::F7);
-        if (frame == 340) state.CaptureName = "13-native-resolution";
+        if (frame == 340) state.CaptureName = "13-scaled-resolution";
         if (frame == 345) {
             tap(KeyCode::F7);
             tap(KeyCode::TAB);
         }
         if (frame == 350) state.CaptureName = "14-gallery";
+    }
+    bool CreateObservers() {
+        for (auto& observer : _observers) {
+            auto texture = GetDevice()->CreateTexture({render::TextureDimension::Dim2D, 512, 384, 1, 1, 1, render::TextureFormat::RGBA8_UNORM,
+                                                       render::MemoryType::Device, render::TextureUse::RenderTarget | render::TextureUse::Resource | render::TextureUse::CopySource});
+            if (!texture) return false;
+            observer.Texture = texture.Release();
+            auto rtv = GetDevice()->CreateTextureView({observer.Texture.get(), render::TextureDimension::Dim2D, render::TextureFormat::RGBA8_UNORM, {0, 1, 0, 1}, render::TextureViewUsage::RenderTarget});
+            if (!rtv) return false;
+            observer.Rtv = rtv.Release();
+            observer.Output = GetRenderSystem()->GetOutputs().RegisterExternal({"Atrium observer", observer.Texture.get(), observer.Rtv.get()});
+            if (!observer.Output.IsValid()) return false;
+#ifdef RADRAY_ENABLE_IMGUI
+            if (auto ui = GetImGuiSystem()) {
+                observer.Image = ui->RegisterOutput(observer.Output);
+                if (!observer.Image) return false;
+            }
+#endif
+        }
+        return true;
+    }
+    void UpdateRendering() {
+        if (!_pipeline->SetSettings(_settings)) {
+            _failed = true;
+            return;
+        }
+        const auto main = GetWindowManager()->GetMainWindow()->GetRenderOutputId();
+        RenderViewDesc view;
+        view.Name = "Atrium main";
+        view.StateId = _viewIds[0];
+        view.WorldPosition = _camera->GetEyePosition();
+        view.WorldToView = _camera->ComputeViewMatrix();
+        view.Projection = PerspectiveProjectionDesc{_camera->GetFovY(), .1f, 250};
+        view.LayerMask = _state.Beacons ? 3u : 1u;
+        view.CameraCut = _state.CameraCut || _cutRequested;
+        vector<ForwardViewSource> views{{main, view}};
+        if (_state.Split) {
+            views.front().View.ViewRect = views.front().View.ScissorRect = {0, 0, .5f, 1};
+            view.Name = "Architecture layer";
+            view.StateId = _viewIds[1];
+            view.ViewRect = view.ScissorRect = {.5f, 0, .5f, 1};
+            view.LayerMask = 1;
+            views.push_back({main, view});
+        }
+        vector<ForwardOutputSurface> screens;
+        for (size_t i = 0; i < _observers.size(); ++i) {
+            view = {};
+            view.Name = i == 0 ? "Orthographic observer" : "Perspective observer";
+            view.StateId = _viewIds[i + 2];
+            view.WorldPosition = i == 0 ? Eigen::Vector3f{0, 48, 6} : Eigen::Vector3f{24, 12, -10};
+            view.WorldToView = LookAtLH(view.WorldPosition, Eigen::Vector3f{0, 0, 6}, i == 0 ? Eigen::Vector3f::UnitZ().eval() : Eigen::Vector3f::UnitY().eval());
+            if (i == 0)
+                view.Projection = OrthographicProjectionDesc{62, .1f, 100};
+            else
+                view.Projection = PerspectiveProjectionDesc{Radian(58.f), .1f, 250};
+            view.LayerMask = 3;
+            views.push_back({_observers[i].Output, view});
+            ForwardOutputSurface screen{_observers[i].Output, main};
+            screen.LocalToWorld(0, 0) = 6.6f;
+            screen.LocalToWorld(1, 1) = 4.f;
+            screen.LocalToWorld(0, 3) = i == 0 ? 9.f : -9.f;
+            screen.LocalToWorld(1, 3) = 3;
+            screen.LocalToWorld(2, 3) = 19.6f;
+            screen.LayerMask = 1;
+            screens.push_back(screen);
+        }
+        if (!_pipeline->SetViews(views) || !_pipeline->SetOutputSurfaces(screens)) _failed = true;
+        for (const auto& [name, material] : _materials) {
+            auto state = material->GetPipelineState();
+            state.Primitive.Poly = _state.Wireframe ? render::PolygonMode::Line : render::PolygonMode::Fill;
+            material->GetPipelineState() = state;
+            if (!material->SetPassPipelineState("DepthNormalsMotion", state) || !material->SetPassPipelineState("ShadowCaster", state)) _failed = true;
+        }
     }
     bool CreateMaterials();
     bool CreateScene();
@@ -579,10 +719,29 @@ private:
         Eigen::Vector3f Position, Rotation;
         string Motion;
     };
+    struct Settings {
+        float Time{0}, Fps{60};
+        uint32_t Frame{0}, Station{0};
+        bool Wireframe{false}, Split{false}, Beacons{true}, Help{true}, Paused{false}, CameraCut{false}, ShowUi{true};
+        string CaptureName;
+    } _state;
+    struct Observer {
+        unique_ptr<render::Texture> Texture;
+        unique_ptr<render::TextureView> Rtv;
+        RenderOutputId Output;
+#ifdef RADRAY_ENABLE_IMGUI
+        ImTextureID Image{0};
+#endif
+    };
+    array<Observer, 2> _observers;
+    array<ViewStateId, 4> _viewIds{AllocateViewStateId(), AllocateViewStateId(), AllocateViewStateId(), AllocateViewStateId()};
+    ForwardPipelineSettings _settings{ForwardPipelineSettings::Temporal()};
+    ForwardStageBStats _stats;
+    uint32_t _primitiveCount{0};
     Options _options;
     Nullable<NativeWindow*> _window{nullptr};
     Nullable<CameraComponent*> _camera{nullptr};
-    Nullable<AtriumPipeline*> _pipeline{nullptr};
+    Nullable<ForwardPipeline*> _pipeline{nullptr};
     vector<Actor*> _actors;
     unordered_map<string, StreamingAssetRef<StaticMesh>> _meshes;
     unordered_map<string, StreamingAssetRef<TextureAsset>> _textures;
@@ -599,38 +758,39 @@ private:
 };
 
 bool AtriumApplication::CreateMaterials() {
-    const auto surface = GetRenderSystem()->GetOrCreateShaderProgram({.SourceName = "examples/example_tidal_atrium/shaders/surface.hlsl", .LayoutRecipe = ForwardPipeline::GetLayoutRecipe()});
-    const auto depth = GetRenderSystem()->GetOrCreateShaderProgram({.SourceName = "shaderlib/pipelines/forward/depth_only.hlsl", .LayoutRecipe = ForwardPipeline::GetDepthOnlyLayoutRecipe()});
-    if (!surface || !depth) return false;
+    auto* system = GetRenderSystem();
+    const auto surface = system->GetOrCreateShaderProgram({.SourceName = "shaderlib/pipelines/forward/pbr.hlsl", .LayoutRecipe = ForwardPipeline::GetLayoutRecipe()});
+    const auto depth = system->GetOrCreateShaderProgram({.SourceName = "shaderlib/pipelines/forward/depth_normals_motion.hlsl", .LayoutRecipe = ForwardPipeline::GetLayoutRecipe()});
+    const auto shadow = system->GetOrCreateShaderProgram({.SourceName = "shaderlib/pipelines/forward/shadow_caster.hlsl", .LayoutRecipe = ForwardPipeline::GetLayoutRecipe()});
+    if (!surface || !depth || !shadow) return false;
     MaterialPipelineState state;
     state.Primitive.Cull = render::CullMode::None;
     state.Primitive.UnclippedDepth = false;
-    for (bool prepass : {true, false}) {
-        vector<MaterialPassDesc> passes{{"ForwardLit", surface.Get(), "ForwardMaterial", state}};
-        if (prepass) passes.push_back({"DepthOnly", depth.Get(), "", state});
-        auto technique = MaterialTechnique::Create(std::move(passes), "ForwardLit");
-        if (!technique) return false;
-        _techniques.push_back(technique.Release());
-    }
+    auto technique = MaterialTechnique::Create({{"ForwardLit", surface.Get(), "ForwardMaterial", state}, {"DepthNormalsMotion", depth.Get(), "ForwardMaterial", state}, {"ShadowCaster", shadow.Get(), "ForwardMaterial", state}}, "ForwardLit");
+    if (!technique) return false;
+    _techniques.push_back(technique.Release());
     struct Desc {
         const char* Name;
         const char* Texture;
         Eigen::Vector4f Color;
         float Emission, Scale, Gloss;
-        bool Nearest{false}, NoDepth{false};
+        bool Nearest{false}, Unlit{false};
     };
     const vector<Desc> descriptions{
         {"dark", "basalt", {.06f, .1f, .14f, 1}, 0, 8, .1f}, {"stone", "basalt", {.28f, .38f, .42f, 1}, 0, 12, .2f}, {"navy", "white", {.035f, .075f, .11f, 1}, 0, 1, .4f}, {"limestone", "limestone", {.88f, .87f, .8f, 1}, 0, 2, .25f}, {"copper", "white", {.65f, .30f, .12f, 1}, 0, 1, .9f}, {"gold", "white", {.88f, .57f, .25f, 1}, .35f, 1, .8f}, {"cyan", "white", {.04f, .75f, .65f, 1}, 2.8f, 1, .4f}, {"warm", "white", {1, .52f, .18f, 1}, 3, 1, .2f}, {"core", "white", {.45f, 1, .86f, 1}, 4, 1, .6f}, {"pearl", "limestone", {.85f, .88f, .87f, 1}, 0, 1, .7f}, {"foliage", "white", {.045f, .24f, .18f, 1}, 0, 1, .25f}, {"glass_cyan", "white", {.05f, .65f, .68f, .28f}, .15f, 1, .8f}, {"glass_amber", "white", {.95f, .42f, .1f, .3f}, .15f, 1, .8f}, {"glass_rose", "white", {.7f, .12f, .25f, .3f}, .15f, 1, .8f}, {"grid_nearest", "sampler_grid", {1, 1, 1, 1}, .15f, 4, .1f, true}, {"grid_linear", "sampler_grid", {1, 1, 1, 1}, .15f, 4, .1f}, {"mural", "tidal_mural", {1, 1, 1, 1}, 1.25f, 1, 0, false, true}, {"contact", "contact", {1, 1, 1, .99f}, 0, 1, 0, false, true}};
     auto make = [&](const Desc& d) {
-        auto material = Material::Create(_techniques[d.NoDepth ? 1 : 0].get());
+        auto material = Material::Create(_techniques.front().get());
         if (!material) return false;
         render::SamplerDescriptor sampler{};
         sampler.AddressS = sampler.AddressT = sampler.AddressR = render::AddressMode::Repeat;
         sampler.MinFilter = sampler.MagFilter = sampler.MipmapFilter = d.Nearest ? render::FilterMode::Nearest : render::FilterMode::Linear;
         sampler.LodMax = d.Nearest ? 0.f : 1000.f;
-        if (!material->SetFloat4("BaseColor", d.Color) || !material->SetFloat4("Surface", {d.Emission, d.Scale, d.Gloss, 0}) ||
+        const bool metal = std::string_view{d.Name} == "copper" || std::string_view{d.Name} == "gold";
+        if (!material->SetFloat4("BaseColor", d.Color) ||
+            !material->SetFloat4("Surface", {metal ? 1.f : 0.f, std::clamp(1.f - d.Gloss, .08f, 1.f), 0, d.Emission}) ||
+            !material->SetFloat4("Transmission", {0, d.Unlit ? 1.f : 0.f, 0, 0}) ||
+            !material->SetFloat4("UVTransform", {d.Scale, -d.Scale, 0, d.Scale}) ||
             !material->SetTexture("AlbedoTexture", _textures.at(d.Texture)) || !material->SetSampler("LinearSampler", sampler)) return false;
-        if (std::string_view{d.Name} == "contact" && !material->SetFloat4("Surface", {0, 1, 0, 1})) return false;
         if (d.Color.w() < 1) {
             material->SetRenderQueue(RenderQueue::Transparent);
             auto& pipeline = material->GetPipelineState();
@@ -644,7 +804,7 @@ bool AtriumApplication::CreateMaterials() {
     for (const auto& d : descriptions)
         if (!make(d)) return false;
     for (const auto name : {"welcome", "light", "glass", "material", "signal", "observatory", "nearest", "linear", "streams"})
-        if (!make({name, name, {1, 1, 1, 1}, 1, 1, 0, false, true})) return false;
+        if (!make({name, std::string_view{name} == "signal" ? "observatory" : name, {1, 1, 1, 1}, 1, 1, 0, false, true})) return false;
     return true;
 }
 
@@ -689,7 +849,7 @@ bool AtriumApplication::CreateScene() {
     sun->SetIntensity(3.5f);
     sun->SetLightColor({1, .84f, .64f});
     sun->SetWorldRotation(Rotation({42, -32, 0}));
-    sun->SetCastShadow(false);
+    sun->SetCastShadow(true);
     const array<Eigen::Vector3f, 3> colors{{{.12f, 1, .85f}, {1, .35f, .1f}, {.2f, .4f, 1}}};
     for (size_t i = 0; i < 3; ++i) {
         auto* light = Spawn<PointLightComponent>();
@@ -716,7 +876,7 @@ int main(int argc, char** argv) {
     return 1;
 #else
     using namespace radray;
-    constexpr std::string_view usage = "Usage: example_tidal_atrium [--backend d3d12|vulkan] [--multithread] [--valid-layer] [--tour|--sky-test] [--frames N] [--capture-dir PATH] [--width N] [--height N]";
+    constexpr std::string_view usage = "Usage: example_tidal_atrium [--backend d3d12|vulkan] [--profile temporal|msaa] [--no-imgui] [--multithread] [--valid-layer] [--tour|--sky-test] [--frames N] [--capture-dir PATH] [--width N] [--height N]";
     if (argc == 2 && std::string_view{argv[1]} == "--help") {
         RADRAY_INFO_LOG("{}", usage);
         return 0;

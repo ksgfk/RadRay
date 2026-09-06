@@ -40,6 +40,9 @@ target_include_directories(test_mesh_draw PRIVATE
 target_compile_definitions(test_mesh_draw PRIVATE RADRAY_PROJECT_DIR="${CMAKE_SOURCE_DIR}")
 
 if (RADRAY_ENABLE_SHADER_JIT)
+    radray_add_test(test_temporal_feedback SOURCES test_temporal_feedback.cpp LINK_LIBS radrayruntime)
+    target_include_directories(test_temporal_feedback PRIVATE "${CMAKE_SOURCE_DIR}/modules/render/tests")
+    target_compile_definitions(test_temporal_feedback PRIVATE RADRAY_PROJECT_DIR="${CMAKE_SOURCE_DIR}")
     radray_add_test(test_graph_preparation SOURCES test_graph_preparation.cpp LINK_LIBS radrayruntime)
     target_include_directories(test_graph_preparation PRIVATE "${CMAKE_SOURCE_DIR}/modules/render/tests")
     target_compile_definitions(test_graph_preparation PRIVATE RADRAY_PROJECT_DIR="${CMAKE_SOURCE_DIR}")

@@ -207,7 +207,8 @@ graphics PSO 创建前会做共享 CPU 校验：semantic、format、location、s
 
 D3D12 分两套：`CpuDescriptorAllocator` 是分页堆，每页用 `D3D12MA::VirtualBlock` 做子分配；
 `GpuDescriptorAllocator` 是单个 shader-visible 堆 + `FirstFitAllocator`。Device 持 4 个 CPU
-分配器（CBV_SRV_UAV / RTV / DSV / Sampler）和 2 个 GPU 堆（resource 65536、sampler 256）。
+分配器（CBV_SRV_UAV / RTV / DSV / Sampler）和 2 个 GPU 堆（resource 65536、sampler 2048）。
+Sampler 堆使用 D3D12 允许的完整 shader-visible 容量，容纳多视图、多 flight 同时持有的 parameter sets。
 `CmdListD3D12::Begin` 时把两个 GPU 堆 `SetDescriptorHeaps`（copy 队列除外）。
 `DescriptorHeapViewRAII` 负责归还。
 

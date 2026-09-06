@@ -18,8 +18,10 @@ struct ForwardMaterialData {
     float4 BaseColor;
     // metallic, perceptual roughness, alpha cutoff, emission
     float4 Surface;
-    // refraction offset in pixels, reserved
+    // refraction offset in pixels, unlit, reserved
     float4 Transmission;
+    // UV scale and offset; zero scale selects the identity scale.
+    float4 UVTransform;
 };
 struct ForwardObjectData {
     float4x4 LocalToWorld;
@@ -54,6 +56,8 @@ SurfaceVertexOutput forward_surface_vertex(SurfaceVertexInput v) {
     return o;
 }
 float4 forward_surface_color(float2 uv) {
+    float2 scale = any(ForwardMaterial.UVTransform.xy != 0) ? ForwardMaterial.UVTransform.xy : float2(1, 1);
+    uv = uv * scale + ForwardMaterial.UVTransform.zw;
     float4 color = AlbedoTexture.Sample(LinearSampler, uv) * ForwardMaterial.BaseColor;
     clip(color.a - ForwardMaterial.Surface.z);
     return color;

@@ -12,6 +12,7 @@ struct UiTextureRecord {
     ImGuiTextureDescriptor Descriptor;
     StreamingAssetRef<TextureAsset> Asset;
     shared_ptr<ImGuiTextureLease> Lease;
+    RenderOutputId Output;
     bool Graph{false}, Dynamic{false};
 };
 struct UiDrawCommand {

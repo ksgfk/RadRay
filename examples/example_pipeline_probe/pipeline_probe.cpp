@@ -23,7 +23,7 @@ namespace radray::probe {
 namespace {
 struct Options {
 #ifdef RADRAY_ENABLE_IMGUI
-    bool ImGui{false};
+    bool ImGui{true};
 #endif
     render::RenderBackend Backend{render::RenderBackend::D3D12};
     ForwardPipelineSettings Settings{ForwardPipelineSettings::Temporal()};
@@ -35,8 +35,8 @@ struct Options {
     for (int i = 1; i < argc; ++i) {
         const std::string_view arg{argv[i]};
 #ifdef RADRAY_ENABLE_IMGUI
-        if (arg == "--imgui") {
-            options.ImGui = true;
+        if (arg == "--imgui" || arg == "--no-imgui") {
+            options.ImGui = arg == "--imgui";
             continue;
         }
 #endif

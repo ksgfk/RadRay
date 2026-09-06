@@ -369,7 +369,7 @@ LitBindings MakeLitBindings(const RendererList& list, const ShadowData& shadow, 
 }  // namespace
 
 bool ForwardEffectPrograms::Initialize(RenderSystem& system) {
-    static constexpr std::string_view sources[]{"linear_depth", "depth_pyramid", "ambient_occlusion", "ao_blur", "temporal_resolve", "bloom", "bloom", "bloom", "output", "tile_lights", "sky", "firefly_update", "firefly_draw", "debug"};
+    static constexpr std::string_view sources[]{"linear_depth", "depth_pyramid", "ambient_occlusion", "ao_blur", "temporal_resolve", "bloom", "bloom", "bloom", "output", "tile_lights", "sky", "firefly_update", "firefly_draw", "debug", "output_surface"};
     for (uint32_t effect = 0; effect < Programs.size(); ++effect) {
         if (!Programs[effect]) Programs[effect] = system.GetOrCreateShaderProgram({.SourceName = fmt::format("shaderlib/pipelines/forward/{}.hlsl", sources[effect]), .Defines = {{"FORWARD_EFFECT", std::to_string(effect)}}});
         if (!Programs[effect]) return false;
@@ -395,12 +395,69 @@ void ForwardHdrView::Reset() {
     PassesSucceeded = true;
 }
 
+namespace {
+bool BuildOutputSurfaces(RenderGraph& graph, RenderPipelineContext& context, ShaderProgram& program,
+                         const ResolvedRenderViewFamily& family, const ResolvedRenderView& view,
+                         RgTextureHandle color, RgTextureHandle depth, render::RenderBackend backend,
+                         std::span<const ForwardOutputSurface> surfaces) {
+    for (const auto& surface : surfaces) {
+        if (surface.Destination != family.OutputId || !(surface.LayerMask & view.LayerMask)) continue;
+        const auto texture = context.ImportOutput(graph, surface.Source);
+        const auto descriptor = graph.GetTextureDescriptor(texture);
+        if (!descriptor || descriptor->SampleCount != 1 || descriptor->Dim != render::TextureDimension::Dim2D ||
+            !descriptor->Usage.HasFlag(TextureUse::Resource)) {
+            graph.AddDiagnostic("ForwardOutputSurface", "Screen source requires a sampleable single-sample 2D output");
+            return false;
+        }
+        const auto format = descriptor->Format;
+        const bool srgb = format == TextureFormat::RGBA8_UNORM_SRGB || format == TextureFormat::BGRA8_UNORM_SRGB;
+        if (!srgb && format != TextureFormat::RGBA8_UNORM && format != TextureFormat::BGRA8_UNORM) {
+            graph.AddDiagnostic("ForwardOutputSurface", "Screen source must contain an SDR scene output");
+            return false;
+        }
+        ShaderParameterStorage values{&program.GetParameterLayout(), 0};
+        if (!values.SetMatrix4x4("OutputSurface.LocalToClip", (view.ViewProjection * surface.LocalToWorld).eval()) ||
+            !values.SetFloat4("OutputSurface.Options", {surface.Brightness, srgb ? 0.f : 1.f, 0, 0})) return false;
+        const RgParameterBinding bindings[]{
+            {"OutputSurface", 0, RgCBufferParameterBinding{values.GetBufferData(0)}},
+            {"SceneOutput", 0, RgTextureParameterBinding{texture}},
+            {"OutputSampler", 0, RgSamplerParameterBinding{ClampSampler()}}};
+        struct Data {
+            ShaderProgram* Program;
+            RgParameterSetHandle Set;
+            Rect Viewport, Scissor;
+            render::RenderBackend Backend;
+        };
+        graph.AddRasterPass<Data>("Forward.OutputSurface", [&](Data& data, RenderGraphRasterBuilder& builder) {
+            data = {&program, builder.CreateParameterSet(program, 0, bindings), view.ViewRect, view.ScissorRect, backend};
+            builder.SetColorAttachment(0, color, {.Load = render::LoadAction::Load});
+            builder.SetDepthAttachment(depth, {.Load = render::LoadAction::Load, .ReadOnly = true}); }, +[](const Data& data, RenderGraphRasterContext& ctx) {
+            MaterialPipelineState state;
+            state.Primitive.Cull = render::CullMode::None;
+            state.Primitive.UnclippedDepth = false;
+            state.DepthStencil.DepthTestEnable = true;
+            state.DepthStencil.DepthWriteEnable = false;
+            state.DepthStencil.DepthCompare = render::CompareFunction::LessEqual;
+            const auto pso = data.Program->GetOrCreateGraphicsPipelineState(state, {}, PrimitiveTopology::TriangleList, ctx.PassState());
+            if (!pso) { ctx.Fail("Forward output surface PSO creation failed"); return; }
+            auto& encoder = ctx.Encoder();
+            encoder.BindGraphicsPipelineState(pso.Get());
+            ctx.BindParameterSet(data.Set);
+            encoder.SetViewport(MakeViewport(data.Backend, float(data.Viewport.X), float(data.Viewport.Y), float(data.Viewport.Width), float(data.Viewport.Height)));
+            encoder.SetScissor(data.Scissor);
+            encoder.Draw(6, 1, 0, 0); });
+    }
+    return true;
+}
+}  // namespace
+
 // The top-level ForwardPipeline appends this view's stages to the same frame graph.
 bool BuildForwardHdrView(RenderGraph& graph, RenderPipelineContext& context, render::Device& device,
                          const ForwardEffectPrograms& programs, const ForwardPipelineSettings& settings,
                          const ResolvedRenderViewFamily& family, const ResolvedRenderView& sourceView,
                          const RenderSceneSnapshot& scene, FrameDrawResources& draws, ForwardBindingCache& bindings,
-                         ForwardHdrView& work, bool firstOutputView, bool& lightOverflowWarned) {
+                         ForwardHdrView& work, bool firstOutputView, bool& lightOverflowWarned,
+                         std::span<const ForwardOutputSurface> surfaces) {
     const bool temporal = settings.Antialiasing == ForwardAntialiasing::Temporal;
     const bool msaa = settings.Antialiasing == ForwardAntialiasing::Msaa4;
     const uint32_t samples = msaa ? 4 : 1;
@@ -550,10 +607,11 @@ bool BuildForwardHdrView(RenderGraph& graph, RenderPipelineContext& context, ren
     }
     // A separate opaque copy is sampled by refraction; the mutable target is never fed back.
     RgTextureHandle opaqueCopy = neutral;
+    if (current != hdr) graph.AddCopyTexturePass("Forward.CopyTemporalToMutableHDR", current, hdr);
+    work.PassesSucceeded &= BuildOutputSurfaces(graph, context, *programs.Programs[14].Get(), family, view, hdr, depth, device.GetBackend(), surfaces);
     if (!msaa) {
         opaqueCopy = Texture(graph, size, TextureFormat::RGBA16_FLOAT, kHdrUsage, "Forward.OpaqueColor");
-        graph.AddCopyTexturePass("Forward.CopyOpaque", current, opaqueCopy);
-        if (current != hdr) graph.AddCopyTexturePass("Forward.CopyTemporalToMutableHDR", current, hdr);
+        graph.AddCopyTexturePass("Forward.CopyOpaque", hdr, opaqueCopy);
     }
     auto transparentBindings = MakeLitBindings(work.Main.Transparent, shadow, size, settings, shadows, lights, count, headers, indices, ao, opaqueCopy, !msaa, work.ContentValid);
     const ForwardGraphView transparentView{view, &work.Main.Transparent, transparentBindings.Programs};
