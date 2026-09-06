@@ -4,6 +4,11 @@
 
 namespace radray {
 
+/**
+本帧要画到哪个 output？
+使用哪些 view？
+每个 view 的相机、矩形、layer、渲染比例是什么？
+ */
 struct RenderFramePlan {
     vector<RenderOutputId> Outputs;
     vector<RenderViewFamilyDesc> ViewFamilies;
