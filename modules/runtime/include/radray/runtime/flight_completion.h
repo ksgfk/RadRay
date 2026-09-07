@@ -17,38 +17,20 @@ struct FlightCompletion {
 /// 任意 retire 线程发布，game thread 排空。载体不知道谁消费。
 class FlightCompletionQueue {
 public:
-    void Push(FlightCompletion completion) {
-        std::lock_guard lock(_mutex);
-        _pending.push_back(completion);
-    }
+    void Push(FlightCompletion completion);
 
     /// RAII 排空。已有排空在进行时 Items() 为空，新发布的项留到下一轮。
     class Drain {
     public:
-        explicit Drain(FlightCompletionQueue& queue) : _queue(queue) {
-            std::lock_guard lock(queue._mutex);
-            if (queue._draining) {
-                return;
-            }
-            queue._draining = true;
-            _active = true;
-            _items.swap(queue._pending);
-        }
-
-        ~Drain() noexcept {
-            if (!_active) {
-                return;
-            }
-            std::lock_guard lock(_queue._mutex);
-            _queue._draining = false;
-        }
+        explicit Drain(FlightCompletionQueue& queue);
+        ~Drain() noexcept;
 
         Drain(const Drain&) = delete;
         Drain& operator=(const Drain&) = delete;
         Drain(Drain&&) = delete;
         Drain& operator=(Drain&&) = delete;
 
-        std::span<const FlightCompletion> Items() const noexcept { return _items; }
+        std::span<const FlightCompletion> Items() const noexcept;
 
     private:
         FlightCompletionQueue& _queue;

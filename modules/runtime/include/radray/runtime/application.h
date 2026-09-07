@@ -190,7 +190,7 @@ protected:
     /// 典型用途:释放游戏自管的 per-flight 资源、置空指向 World 的非 owning 指针。
     virtual void OnShutdown();
 
-    /// Game thread, before flight reuse or shutdown. Check GpuWorkCompleted for discarded frames.
+    /// 主线程, 帧 flight 重用或销毁时调用. 丢弃的帧用 GpuWorkCompleted 检查.
     virtual void OnRenderFrameComplete(const FlightCompletion& ctx);
 
     /// 是否请求退出。默认:主窗口被关闭。

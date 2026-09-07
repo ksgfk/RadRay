@@ -10,6 +10,7 @@
 #include <thread>
 
 #include <radray/logger.h>
+#include <radray/scope_guard.h>
 #include <radray/render/rhi.h>
 #include <radray/runtime/asset_database.h>
 #include <radray/runtime/gpu_system.h>
@@ -490,10 +491,7 @@ public:
     void TickFrame(bool isInModalLoop) {
         if (_ticking) return;
         _ticking = true;
-        struct TickScope {
-            bool& Flag;
-            ~TickScope() { Flag = false; }
-        } scope{_ticking};
+        auto scope = MakeScopeGuard([this]() noexcept { _ticking = false; });
         if (isInModalLoop) {
             MarkModalLoopActivityDuringDispatch();
         }
@@ -683,10 +681,7 @@ public:
     std::optional<uint64_t> TickFrame(bool isInModalLoop, bool waitForWritableSlot) {
         if (_ticking) return std::nullopt;
         _ticking = true;
-        struct TickScope {
-            bool& Flag;
-            ~TickScope() { Flag = false; }
-        } scope{_ticking};
+        auto scope = MakeScopeGuard([this]() noexcept { _ticking = false; });
         auto* gpuSystem = _app->GetGpuSystem();
         if (!waitForWritableSlot && _renderedFrameCount.load(std::memory_order_acquire) < gpuSystem->GetFrameIndex()) return std::nullopt;
         if (waitForWritableSlot) {
