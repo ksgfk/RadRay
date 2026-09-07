@@ -230,6 +230,10 @@ AssetWaitAwaitable StreamingAssetRef<T>::operator co_await() const noexcept {
 /// - 【引用计数是唯一的回收权威】没有 Unload / CollectUnreferenced / 闲置缓存。最后一份
 ///   引用消失后, 资产在下一次 Pump 里 OnUnload + 析构 + 摘除 slot。
 ///
+struct AssetCollectionStats {
+    uint64_t CandidatesVisited{0}, SlotsDestroyed{0}, PendingCandidates{0}, PeakCandidates{0};
+};
+
 class AssetManager {
 public:
     AssetManager() noexcept;
@@ -327,6 +331,7 @@ public:
     void SetAssetSource(Nullable<IAssetSource*> source) noexcept { _assetSource = source; }
 
     uint32_t GetAssetCount() const noexcept;
+    const AssetCollectionStats& GetCollectionStats() const noexcept { return _collectionStats; }
 
 private:
     friend class AssetWaitAwaitable;
@@ -376,6 +381,8 @@ private:
     TaskScope _loadScope;
     ManualCoroutineScheduler<AssetWaitRecord> _waiters;
     unordered_map<AssetId, unique_ptr<Slot>> _slots;
+    Nullable<Slot*> _zeroRefHead{nullptr}, _zeroRefTail{nullptr};
+    AssetCollectionStats _collectionStats;
     /// 在飞加载的 slot。manager 自持一份引用 —— 加载期间外部引用可能全部消失, 但槽位要
     /// 活到协程跑完。
     vector<StreamingAssetRefAny> _activeLoads;

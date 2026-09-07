@@ -5,7 +5,7 @@
 # 渲染框架与 game framework
 
 **先读这条**：runtime 提供内置 `ForwardPipeline`，但不会把它设成隐式默认值。
-`RenderSystem::_pipeline` 初始为 null，由应用在 `OnInit` 中通过
+`RenderSystem::_pipeline` 初始为 null，由应用在 `OnInit` 或资源加载就绪后的 `OnUpdate` 中通过
 `RenderSystem::SetPipeline(unique_ptr<RenderPipeline>)` 显式注入并转移所有权。
 `examples/example_lambert_sphere` 用 `AssetManager`、`StaticMeshComponent`、`Material` 和内置
 forward pipeline 验证完整的 scene → proxy → draw 路径。
@@ -48,7 +48,11 @@ host 对未写 output clear 后转换到各自 required final state。没有 pip
 presentation outputs 并 fallback clear；没有 presentation target 时仍执行自定义 pipeline。
 Application 不提供独立的 view 内容录制钩子。
 
-`SetPipeline` 是应用装配入口，应在 runner 启动前或 GPU idle 后调用；当前没有运行时替换协议。
+`SetPipeline` 返回是否安装成功，只允许 game thread 调用。首次安装可在资源加载就绪后进行：
+若空 pipeline 已产生 fallback 帧，宿主先让已发布帧完成录制/提交，避免新 pipeline 读取未经自身 Prepare 的旧计划；
+初始化期间安装不增加等待。已有 pipeline 只可在首次 Prepare/Render 前替换，或由
+`Application::Shutdown` 完成 GPU idle 后释放；开始渲染后拒绝替换并保留旧 pipeline。
+此限制防止 pipeline 自有 buffer、texture、descriptor 在飞行中被销毁。调用方应检查返回值后再保存借用指针。
 `ForwardPipeline` 在构造时借用 Scene 与 Camera，只在 `PrepareFrame` 访问它们，因此这些 source
 必须活过最后一次 PrepareFrame。已准备的帧不依赖 source、proxy 或 Material 的后续寿命。
 
@@ -66,8 +70,10 @@ Material setter 接受 primary cbuffer 内的相对字段路径（如 `BaseColor
 `ShaderProgram` 继续拥有 artifact、layout、shader、参数索引与 PSO cache。graphics PSO key 由 material
 state、geometry vertex layout/topology、pass attachment formats/sample count 组成；不包含 render pass
 指针、Load/Store 或 framebuffer 尺寸。compute-only program 按 artifact 中的真实 entry name 惰性创建并
-缓存一个 compute PSO；graphics program 请求该 PSO 返回空，创建失败不缓存空值。ShaderJit、artifact/program cache 和
-失败 cache 继续由 RenderSystem 拥有，所有 program 活到 GPU idle 后的 shutdown。
+缓存一个 compute PSO；graphics program 请求该 PSO 返回空，创建失败不缓存空值。
+RenderSystem 私有的 `ShaderProgramCache` 集中管理 JIT、artifact/program 与失败缓存，仅接受 device、
+shader root 和 include roots，不依赖 Application/World/窗口。program 保留到 GPU idle 后的 shutdown。
+呈现桥接另由同库内的 `PresentationAdapter` 处理，两个实现都不新增公共 runtime 子模块。
 
 ### shader artifact 边界
 
@@ -78,6 +84,9 @@ layout recipe，discovery 与 compile 由同一个 request 驱动。缓存分两
 source/defines/assignments/policy/target/toolchain 缓存（不含 layout recipe），program 按 artifact 身份
 加当前 backend 的 canonical resolved layout hash 缓存。按实际 backend 只编译一个 target；失败按完整
 key 记成显式失败记录以避免逐帧重试，同时不会污染其他 key。
+`InvalidateShaderSource(SourceName)` 增加该逻辑源的 revision，下一次请求重新读取并编译，包含此前
+失败的请求；include 改动应使所有受影响的根源失效。失效不销毁旧 artifact/program，已发布 flight
+继续使用其原对象。缓存内部锁串行保护查找、失效和创建。
 `RADRAY_ENABLE_SHADER_JIT=OFF` 时源码请求明确返回空；artifact 重载
 `GetOrCreateShaderProgram(bytes, expectedIdentity, recipe)` 不依赖 compiler，按当前设备 target
 验证、复制 bytes，并复用现有 decoder、layout 与 ShaderProgram。该缓存按 bytes 和 resolved
@@ -98,13 +107,16 @@ LightComponent      → CreateRenderState → Scene::AddLight(CreateSceneProxy()
 **Scene 与 proxy 只在 game thread 使用。proxy 常驻，pipeline 输入每帧复制。** proxy 在组件 `OnRegister` 时创建，
 存在 `Scene` 的 `vector<unique_ptr<...>>` 里，`OnUnregister` 时移除。
 
-**基类默认的属性或变换变化走 `MarkRenderStateDirty()` → 对应 proxy 销毁重建。**
-需要连续刚体 motion 的组件可以像 `example_pipeline_probe` 一样，在 game thread 更新自己的 proxy
-变换缓存并保持 generation/revision；瞬移调用 `ResetMotion`。重建 proxy 视为新身份，不能沿用旧运动。
+PrimitiveComponent 在 game thread 直接更新现有 proxy 的 LocalToWorld；普通位移、旋转、缩放保留
+generation/revision，不遍历 Scene 删除重建。瞬移或显式不连续运动调用 `ResetMotion`。
+自定义 proxy 若把 `GetLocalToWorld` 委托给内层 proxy，也必须转发 `SetLocalToWorld`；
+组件通知在 Debug 验证更新后的矩阵与组件一致，避免只改到未被读取的基类存储。
+mesh/material 等结构性属性通过 `MarkRenderStateDirty` 重建，产生新 generation，旧运动不再连续。
 SceneComponent 的变换、重挂接和解除挂接会递归通知自身及后代的 `OnTransformChanged`，
 使缓存世界变换的 mesh/light proxy 一起更新；拒绝把祖先挂到后代之下。Light proxy 的参数在
 构造函数里一次性从 component 快照。
-这个粒度很粗，但它让"proxy 里的数据什么时候会变"有一个确定答案：只在重建时。
+Scene 只接收并拥有组件创建的 `unique_ptr<PrimitiveSceneProxy/LightSceneProxy>`，返回借用句柄；
+不会反向调用 component 工厂，也不依赖 game-framework 头。light 仍通过重建刷新完整参数。
 
 `Actor::FindComponent<T>()` 按拥有顺序对实际组件做指针形式 `dynamic_cast`，返回第一个可转换
 对象的 `Nullable`；查询目标可以是任意完整类类型，因此支持组件基类、接口、横向转换和虚继承。

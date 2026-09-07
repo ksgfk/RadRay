@@ -590,7 +590,9 @@ public:
           _writableSlotsSemaphore(_app->GetGpuSystem()->GetFlightDataCount()),
           _readySlotsSemaphore(0),
           _runnerFrameDatas(_app->GetGpuSystem()->GetFlightDataCount()),
-          _renderThread(&ThreadedRunner::RenderThread, this) {}
+          _renderThread(&ThreadedRunner::RenderThread, this) {
+        _app->GetRenderSystem()->GetOutputs().SetRenderIdleWaiter([this] { WaitRenderThreadIdle(); });
+    }
 
     int Run() {
         while (true) {
@@ -618,6 +620,8 @@ public:
 
         _app->GetRenderSystem()->GetOutputs().SetRenderIdle(true);
 
+        _app->GetRenderSystem()->GetOutputs().SetRenderIdleWaiter({});
+
         _modalLoopTickConnection.disconnect();
 
         AppShutdownContext ctx{};
@@ -631,27 +635,21 @@ public:
             auto* gpuSystem = _app->GetGpuSystem();
             _readySlotsSemaphore.acquire();
 
-            if (_reqExit) {
+            if (_reqExit && _renderFrameIndex == _publishedFrameCount.load(std::memory_order_acquire)) {
                 RetireRenderedFrames(true, false);
                 break;
             }
 
             uint32_t flightIndex = static_cast<uint32_t>(_renderFrameIndex % gpuSystem->GetFlightDataCount());
             auto& runnerFrameData = _runnerFrameDatas[flightIndex];
-            if (!runnerFrameData.IsInModalLoop && _renderFrameIndex < _discardNonModalFramesBefore.load(std::memory_order_acquire)) {
-                _app->NotifyRenderComplete(AppRenderCompleteContext{
-                    .FlightIndex = flightIndex,
-                    .GpuWorkCompleted = false});
-                _renderFrameIndex++;
-                NotifyRenderFrameComplete(_renderFrameIndex);
-                continue;
-            }
+            const bool discard = _reqExit || (!runnerFrameData.IsInModalLoop &&
+                _renderFrameIndex < _discardNonModalFramesBefore.load(std::memory_order_acquire));
             AppFrameContext frameCtx = gpuSystem->BeginFrameRecord(
                 flightIndex,
                 runnerFrameData.DeltaTime,
                 gpuSystem->GetLastFrameLatency(),
-                runnerFrameData.IsInModalLoop);
-            _app->Render(frameCtx);
+                runnerFrameData.IsInModalLoop, !discard);
+            if (!discard) _app->Render(frameCtx);
             gpuSystem->EndFrameRecordAndSubmit(flightIndex);
 
             _renderFrameIndex++;
@@ -693,7 +691,6 @@ public:
         auto* gpuSystem = _app->GetGpuSystem();
         if (!waitForWritableSlot && _renderedFrameCount.load(std::memory_order_acquire) < gpuSystem->GetFrameIndex()) return std::nullopt;
         if (waitForWritableSlot) {
-            WaitRenderFrameComplete(gpuSystem->GetFrameIndex());
             RetireRenderedFrames(false, false);
             CheckRecreateSwapChains();
             _writableSlotsSemaphore.acquire();
@@ -705,7 +702,6 @@ public:
 
         const uint64_t frameIndex = gpuSystem->GetFrameIndex();
         const uint32_t flightIndex = static_cast<uint32_t>(frameIndex % gpuSystem->GetFlightDataCount());
-        _app->GetRenderSystem()->GetOutputs().SetRenderIdle(true);
         gpuSystem->BeginUpdateForFlight(flightIndex);
 
         const auto now = std::chrono::steady_clock::now();
@@ -726,7 +722,10 @@ public:
 
         CheckRecreateSwapChains();
 
+        gpuSystem->PrepareFrameUploads(flightIndex);
+
         gpuSystem->AdvanceFrameIndex();
+        _publishedFrameCount.store(frameIndex + 1, std::memory_order_release);
         _app->GetRenderSystem()->GetOutputs().SetRenderIdle(false);
         _readySlotsSemaphore.release();
         return frameIndex + 1;
@@ -784,6 +783,7 @@ public:
     std::atomic_bool _reqExit{false};
     std::atomic<uint64_t> _discardNonModalFramesBefore{0};
     std::atomic<uint64_t> _renderedFrameCount{0};
+    std::atomic<uint64_t> _publishedFrameCount{0};
     std::mutex _retireMutex;
     // 主线程独占
     bool _ticking{false};
@@ -796,7 +796,21 @@ public:
 };
 
 void Application::NotifyRenderComplete(const AppRenderCompleteContext& ctx) {
-    OnRenderComplete(ctx);
+    std::lock_guard lock(_renderCompletionMutex);
+    _renderCompletions.push_back(ctx);
+}
+
+void Application::PumpRenderCompletions() {
+    RADRAY_ASSERT(std::this_thread::get_id() == _applicationThread);
+    if (_pumpingRenderCompletions) return;
+    _pumpingRenderCompletions = true;
+    vector<AppRenderCompleteContext> completed;
+    {
+        std::lock_guard lock(_renderCompletionMutex);
+        completed.swap(_renderCompletions);
+    }
+    for (const auto& ctx : completed) OnRenderComplete(ctx);
+    _pumpingRenderCompletions = false;
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -849,6 +863,7 @@ void Application::Render(AppFrameContext& ctx) {
 }
 
 void Application::OnRenderComplete(const AppRenderCompleteContext& ctx) {
+    RADRAY_ASSERT(std::this_thread::get_id() == _applicationThread);
 #ifdef RADRAY_ENABLE_IMGUI
     if (_imguiSystem) _imguiSystem->NotifyFlightComplete(ctx.FlightIndex, ctx.GpuWorkCompleted);
 #endif
@@ -860,7 +875,10 @@ int Application::Shutdown(const AppShutdownContext& ctx) {
     if (_gpuSystem != nullptr) {
         _gpuSystem->WaitAndCleanupCompletedFlights();
     }
-    if (_renderSystem != nullptr) _renderSystem->GetOutputs().SetRenderIdle(true);
+    if (_renderSystem != nullptr) {
+        _renderSystem->GetOutputs().SetRenderIdle(true);
+        _renderSystem->_pipelineShutdownIdle = true;
+    }
     // 游戏侧清理:释放自管 per-flight 资源、置空指向 World 的非 owning 指针。
     OnShutdown();
     _scheduler.CancelAll();

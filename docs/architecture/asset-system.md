@@ -21,6 +21,12 @@ Load request / source task → AssetSlot::Loading → AssetManager::Pump → Rea
 遍历期间的迭代器失效。强制卸载会使资产交出的内部指针失效，因此不提供绕过引用计数的入口，
 也不另设一层内容引用来补救；释放时机由最后一个显式 owner 决定。
 
+引用从非零降至零时，将 slot 放入 manager 的侵入式候选队列；每个 slot 至多排队一次。
+`Pump` 只访问这些候选，不扫描全部常驻资产。弹出时再次检查引用，期间重新取得的引用会阻止销毁，
+以后再次归零仍可入队。先从 ID 表摘除旧 slot，再调用 `OnUnload`，允许重入加载同 ID；依赖链释放
+产生的新候选在同次循环继续处理。`GetCollectionStats` 提供访问、销毁、待处理和峰值计数。
+关停对仍被错误持有的 slot 保留强制卸载诊断路径，它不属于普通帧回收。
+
 加载去重按 `AssetId` 进行。dedup 命中时不会重新执行 loader，因此带 options 的 loader
 必须在发起请求前检查参数；不能把一次请求的共享设施指针寄希望于第二次命中时更新。
 

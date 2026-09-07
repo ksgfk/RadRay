@@ -14,6 +14,12 @@ public:
                       const MeshBatch& batch, MeshPassDrawListContext& out) override;
 
 private:
+    struct ObjectPreparation {
+        ObjectPreparation(const ShaderParameterLayout* layout, uint32_t group) : Values(layout, group) {}
+        ShaderParameterStorage Values;
+        unordered_map<RenderPrimitiveIndex, std::optional<PreparedShaderGroup>> Groups;
+    };
+    unordered_map<ShaderProgram*, ObjectPreparation> _objects;
     FrameDrawResources& _resources;
     DepthOnlyBindingCache& _bindings;
     unordered_map<ShaderProgram*, std::optional<PreparedShaderGroup>> _views;

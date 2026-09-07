@@ -30,6 +30,7 @@ struct PooledTexture {
     vector<PooledTextureView> Views;
     vector<render::TextureStates> States;
     uint64_t LastUsedCycle{0};
+    uint64_t ViewId{0};
     bool InUse{false};
 };
 struct PooledBuffer {
@@ -38,12 +39,20 @@ struct PooledBuffer {
     unique_ptr<render::Buffer> Buffer;
     render::BufferStates State{render::BufferState::Undefined};
     uint64_t LastUsedCycle{0};
+    uint64_t ViewId{0};
     bool InUse{false};
+};
+struct RenderResourceMemoryStats {
+    uint64_t ViewId{0};
+    uint64_t ColorTextureBytes{0}, DepthTextureBytes{0}, StorageTextureBytes{0}, BufferBytes{0}, InactiveBytes{0};
+    uint64_t TotalBytes() const noexcept { return ColorTextureBytes + DepthTextureBytes + StorageTextureBytes + BufferBytes; }
 };
 struct RenderResourcePoolStats {
     uint64_t Hits{0}, Misses{0}, Created{0}, Trimmed{0}, ViewsCreated{0};
     uint32_t TextureCount{0}, BufferCount{0}, ViewCount{0};
     uint64_t EstimatedBytes{0};
+    uint64_t PeakEstimatedBytes{0};
+    vector<RenderResourceMemoryStats> MemoryByView;
 };
 
 class RenderResourcePool {
@@ -55,8 +64,8 @@ public:
 
     /// Called only after the owning flight's previous GPU work is complete.
     void BeginFlight(uint64_t frameSerial);
-    Nullable<PooledTexture*> AcquireTexture(const render::TextureDescriptor& desc, std::string_view name);
-    Nullable<PooledBuffer*> AcquireBuffer(const render::BufferDescriptor& desc, std::string_view name);
+    Nullable<PooledTexture*> AcquireTexture(const render::TextureDescriptor& desc, std::string_view name, uint64_t viewId = 0);
+    Nullable<PooledBuffer*> AcquireBuffer(const render::BufferDescriptor& desc, std::string_view name, uint64_t viewId = 0);
     Nullable<render::TextureView*> GetTextureView(PooledTexture& texture, TextureViewKey key);
     Nullable<render::TextureView*> CreateExternalTextureView(const render::TextureViewDescriptor& desc);
     void EndGraph() noexcept;

@@ -10,6 +10,9 @@ struct FrameBufferBinding {
     render::ShaderBufferBinding Value;
     friend bool operator==(const FrameBufferBinding&, const FrameBufferBinding&) = default;
 };
+struct FrameDrawResourceStats {
+    uint64_t GroupPreparations{0}, RecipeBuilds{0}, SetCacheHits{0}, SetCreations{0}, BufferBytesCopied{0};
+};
 
 /// Render-thread, per-flight arena and immutable descriptor sets. Clear list references before BeginFrame.
 class FrameDrawResources {
@@ -22,6 +25,7 @@ public:
     bool BeginFrame(HostWriteBatch& hostWrites) noexcept;
     void ClearSets() noexcept;
     size_t GetSetCount() const noexcept { return _sets.size(); }
+    const FrameDrawResourceStats& GetStats() const noexcept { return _stats; }
 
     std::optional<PreparedShaderGroup> PrepareGroup(
         ShaderProgram& program, uint32_t group, const ShaderParameterStorage& parameters,
@@ -54,6 +58,17 @@ private:
     struct FrameSetKeyHash {
         size_t operator()(const FrameSetKey& key) const noexcept;
     };
+    struct GroupRecipe {
+        struct Buffer {
+            uint32_t Index;
+            bool Dynamic;
+        };
+        uint32_t Group{0};
+        vector<Buffer> Buffers;
+        vector<uint32_t> Textures, Samplers;
+        size_t TextureCount{0}, SamplerCount{0};
+    };
+    const GroupRecipe& GetRecipe(ShaderProgram& program, uint32_t group);
 
     render::Device* _device;
     DynamicCBufferArena::Descriptor _descriptor;
@@ -62,6 +77,11 @@ private:
     // Sets must be destroyed before their arena buffers.
     vector<unique_ptr<render::ShaderParameterSet>> _sets;
     unordered_map<FrameSetKey, render::ShaderParameterSet*, FrameSetKeyHash> _setCache;
+    // Layouts are borrowed only for this flight; clearing avoids pointer reuse across program lifetimes.
+    unordered_map<ShaderProgram*, vector<GroupRecipe>> _recipes;
+    vector<FrameBufferBinding> _bindingScratch;
+    FrameSetKey _keyScratch{};
+    FrameDrawResourceStats _stats;
 };
 
 }  // namespace radray

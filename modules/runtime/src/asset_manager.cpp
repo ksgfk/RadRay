@@ -18,6 +18,10 @@ void ServiceTraits<AssetManager>::Unwire(AssetManager& self) noexcept {
 /// 一个资产的槽位。地址稳定 (unordered_map 里的 unique_ptr 元素), 故 StreamingAssetRefAny
 /// 直接持它的裸指针 —— RefCount > 0 期间它一定不被销毁。
 struct AssetSlot {
+    explicit AssetSlot(AssetManager& manager) noexcept : Manager(manager) {}
+    AssetManager& Manager;
+    Nullable<AssetSlot*> NextZeroRef{nullptr};
+    bool ZeroRefQueued{false};
     AssetId Id;
     AssetState State{AssetState::Loading};
     unique_ptr<Asset> Object;
@@ -211,7 +215,7 @@ Slot* AssetManager::FindSlot(const AssetId& id) const noexcept {
 }
 
 Slot* AssetManager::EmplaceLoadingSlot(const AssetId& id) {
-    auto slot = make_unique<Slot>();
+    auto slot = make_unique<Slot>(*this);
     slot->Id = id;
     slot->State = AssetState::Loading;
     Slot* raw = slot.get();
@@ -231,7 +235,19 @@ void AssetManager::AddRef(Slot* slot) noexcept {
 
 void AssetManager::Release(Slot* slot) noexcept {
     if (slot != nullptr) {
+        RADRAY_ASSERT(slot->RefCount > 0);
         --slot->RefCount;
+        if (slot->RefCount == 0 && !slot->ZeroRefQueued) {
+            auto& manager = slot->Manager;
+            slot->ZeroRefQueued = true;
+            slot->NextZeroRef = nullptr;
+            if (manager._zeroRefTail) manager._zeroRefTail->NextZeroRef = slot;
+            else manager._zeroRefHead = slot;
+            manager._zeroRefTail = slot;
+            auto& stats = manager._collectionStats;
+            ++stats.PendingCandidates;
+            if (stats.PendingCandidates > stats.PeakCandidates) stats.PeakCandidates = stats.PendingCandidates;
+        }
     }
     // 归零【不】在此销毁。析构路径是 noexcept 且可能正处在资产表的遍历中,
     // 就地销毁会递归跑资产析构并使迭代器失效 —— 理由详见头文件 AssetManager 的说明。
@@ -392,11 +408,13 @@ AssetWaitRecord* AssetManager::RegisterWait(
 }
 
 void AssetManager::DestroySlot(Slot* slot) noexcept {
-    // Object 先析构再摘表: 资产析构可能查询 manager (例如放开它自己持有的引用),
-    // 此时表里还留着自己的槽位是无害的, 而反过来则会让 unique_ptr 析构发生在
-    // erase 内部、此时 slot 指针已不可用。
-    slot->Object.reset();
-    _slots.erase(slot->Id);
+    // Remove identity before callbacks; a reentrant load of this ID creates a distinct live slot.
+    const auto found = _slots.find(slot->Id);
+    RADRAY_ASSERT(found != _slots.end() && found->second.get() == slot);
+    auto owner = std::move(found->second);
+    _slots.erase(found);
+    if (owner->State == AssetState::Ready && owner->Object) owner->Object->OnUnload(*this);
+    ++_collectionStats.SlotsDestroyed;
 }
 
 void AssetManager::CollectZeroRefSlots() {
@@ -405,29 +423,15 @@ void AssetManager::CollectZeroRefSlots() {
     }
     _collecting = true;
 
-    // 循环到不动点: 销毁一个资产会放开它持有的 StreamingAssetRef, 从而可能令别的
-    // 槽位归零。每轮重新扫表, 因为上一轮的销毁已经改过 _slots。
-    for (;;) {
-        vector<Slot*> zeroRef;
-        for (auto& [id, slot] : _slots) {
-            if (slot && slot->RefCount == 0) {
-                zeroRef.push_back(slot.get());
-            }
-        }
-        if (zeroRef.empty()) {
-            break;
-        }
-        for (Slot* slot : zeroRef) {
-            // 上一轮的销毁不会令这里的指针失效 (只有本循环销毁槽位, 且每个只销毁一次),
-            // 但资产析构可能新建引用又放开, 故仍要复查 RefCount。
-            if (slot->RefCount > 0) {
-                continue;
-            }
-            if (slot->State == AssetState::Ready && slot->Object) {
-                slot->Object->OnUnload(*this);
-            }
-            DestroySlot(slot);
-        }
+    while (_zeroRefHead) {
+        Slot* slot = _zeroRefHead.Get();
+        _zeroRefHead = slot->NextZeroRef;
+        if (!_zeroRefHead) _zeroRefTail = nullptr;
+        slot->NextZeroRef = nullptr;
+        slot->ZeroRefQueued = false;
+        --_collectionStats.PendingCandidates;
+        ++_collectionStats.CandidatesVisited;
+        if (slot->RefCount == 0) DestroySlot(slot);
     }
 
     _collecting = false;

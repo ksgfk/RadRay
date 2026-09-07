@@ -9,6 +9,8 @@
 #include <radray/runtime/game_framework/world.h>
 #include <radray/runtime/gpu_system.h>
 #include <radray/runtime/render_framework/light_scene_proxy.h>
+#include <radray/runtime/render_framework/primitive_history.h>
+#include <radray/runtime/render_framework/scene.h>
 
 namespace radray {
 namespace {
@@ -64,6 +66,7 @@ TEST(SceneTransformTest, AttachingAnAncestorBelowItsDescendantIsRejected) {
 
 enum class SceneScenario { ParentLight,
                            LoadingMesh,
+                           MotionHistory,
                            DrainUploads };
 class SceneStateApp final : public Application {
 public:
@@ -102,7 +105,7 @@ protected:
         EXPECT_EQ(_component->GetSceneProxy(), nullptr);
     }
     void OnUpdate(const AppUpdateContext&) override {
-        if (_scenario != SceneScenario::LoadingMesh || Checked) return;
+        if ((_scenario != SceneScenario::LoadingMesh && _scenario != SceneScenario::MotionHistory) || Checked) return;
         if (_mesh.IsReady()) {
             GetWorld()->Tick(0);
             EXPECT_TRUE(_component->ShouldCreateRenderState());
@@ -110,6 +113,7 @@ protected:
             auto* proxy = _component->GetSceneProxy();
             GetWorld()->Tick(0);
             EXPECT_EQ(_component->GetSceneProxy(), proxy);
+            if (_scenario == SceneScenario::MotionHistory) CheckMotionHistory();
             _component->SetStaticMesh({});
             EXPECT_EQ(_component->GetSceneProxy(), nullptr);
             Checked = true;
@@ -122,6 +126,75 @@ protected:
     void OnShutdown() override { _mesh.Reset(); }
 
 private:
+    void CheckMotionHistory() {
+        auto* scene = GetWorld()->GetScene();
+        auto* proxy = _component->GetSceneProxy();
+        ASSERT_NE(proxy, nullptr);
+        const auto generation = proxy->GetGeneration();
+        RenderSceneSnapshot snapshot;
+        vector<StreamingAssetRefAny> retained;
+        PrimitiveHistory history;
+        const auto snapshotNow = [&] {
+            retained.clear();
+            EXPECT_TRUE(BuildRenderSceneSnapshot(*scene, snapshot, retained));
+        };
+        snapshotNow();
+        const Eigen::Matrix4f original = snapshot.Primitives.front().LocalToWorld;
+        ASSERT_TRUE(history.Prepare(snapshot, 1));
+        ASSERT_TRUE(history.Commit(1));
+        _component->SetRelativeLocation({2, 3, 4});
+        snapshotNow();
+        EXPECT_EQ(_component->GetSceneProxy(), proxy);
+        EXPECT_EQ(snapshot.Primitives.front().Generation, generation);
+        auto motion = history.Lookup(snapshot.Primitives.front());
+        EXPECT_TRUE(motion.Valid);
+        EXPECT_TRUE(motion.PreviousLocalToWorld.isApprox(original));
+
+        SceneComponent parent;
+        _component->AttachTo(&parent);
+        parent.SetRelativeLocation({7, 0, 0});
+        _component->SetRelativeRotation(Eigen::Quaternionf{Eigen::AngleAxisf{0.5f, Eigen::Vector3f::UnitY()}});
+        _component->SetRelativeScale({2, 3, 4});
+        snapshotNow();
+        EXPECT_EQ(snapshot.Primitives.front().Generation, generation);
+        EXPECT_TRUE(snapshot.Primitives.front().LocalToWorld.isApprox(_component->GetWorldMatrix()));
+        EXPECT_TRUE(history.Lookup(snapshot.Primitives.front()).Valid);
+        EXPECT_TRUE(history.Lookup(snapshot.Primitives.front()).PreviousLocalToWorld.isApprox(original));
+        EXPECT_TRUE(snapshot.Primitives.front().WorldBounds.Min.isApprox(
+            TransformBounds(proxy->GetLocalBounds(), _component->GetWorldMatrix()).Min));
+        proxy->ResetMotion();
+        snapshotNow();
+        EXPECT_EQ(snapshot.Primitives.front().Generation, generation);
+        EXPECT_FALSE(history.Lookup(snapshot.Primitives.front()).Valid);
+        ASSERT_TRUE(history.Prepare(snapshot, 2));
+        ASSERT_TRUE(history.Commit(2));
+        _component->MarkRenderStateDirty();
+        snapshotNow();
+        EXPECT_NE(snapshot.Primitives.front().Generation, generation);
+        EXPECT_FALSE(history.Lookup(snapshot.Primitives.front()).Valid);
+
+        vector<StaticMeshComponent*> components;
+        vector<uint64_t> generations;
+        auto* actor = GetWorld()->SpawnActor<Actor>();
+        for (uint32_t i = 0; i < 1000; ++i) {
+            auto* component = actor->AddComponent<StaticMeshComponent>();
+            component->SetStaticMesh(_mesh);
+            components.push_back(component);
+            generations.push_back(component->GetSceneProxy()->GetGeneration());
+        }
+        const size_t registrations = scene->Primitives().size();
+        PrimitiveSceneProxy before;
+        for (uint32_t i = 0; i < components.size(); ++i) {
+            components[i]->SetRelativeLocation({float(i), 2, 3});
+            components[i]->SetRelativeScale({2, 2, 2});
+            EXPECT_EQ(components[i]->GetSceneProxy()->GetGeneration(), generations[i]);
+            EXPECT_TRUE(components[i]->GetSceneProxy()->GetLocalToWorld().isApprox(components[i]->GetWorldMatrix()));
+        }
+        PrimitiveSceneProxy after;
+        EXPECT_EQ(after.GetGeneration(), before.GetGeneration() + 1);
+        EXPECT_EQ(scene->Primitives().size(), registrations);
+    }
+
     SceneScenario _scenario;
     uint32_t _updates{0};
     StreamingAssetRef<StaticMesh> _mesh;
@@ -144,6 +217,7 @@ protected:
 };
 TEST_P(SceneRenderStateTest, ParentMovementRefreshesLightProxy) { Run(SceneScenario::ParentLight); }
 TEST_P(SceneRenderStateTest, MeshAssignedWhileLoadingCreatesProxyWhenReady) { Run(SceneScenario::LoadingMesh); }
+TEST_P(SceneRenderStateTest, RealStaticMeshTransformsPreserveTemporalIdentity) { Run(SceneScenario::MotionHistory); }
 TEST_P(SceneRenderStateTest, WaitAndCleanupDrainsPendingUploads) { Run(SceneScenario::DrainUploads); }
 INSTANTIATE_TEST_SUITE_P(Backends, SceneRenderStateTest, testing::Values(render::RenderBackend::D3D12, render::RenderBackend::Vulkan));
 

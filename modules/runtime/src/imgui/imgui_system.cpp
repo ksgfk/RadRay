@@ -97,7 +97,13 @@ ImGuiTextureLease::ImGuiTextureLease(unique_ptr<render::Texture> texture, render
     }
 }
 ImGuiTextureLease::~ImGuiTextureLease() = default;
+ImGuiSystem::Impl::Impl(Application& app)
+    : App(app), Thread(std::this_thread::get_id()), Graph{*app.GetDevice(), *app.GetRenderSystem()->_shaderCache, Error, {}, {}, {}} {}
 ImGuiSystem::ImGuiSystem(Application& app) : _impl(make_unique<Impl>(app)) {}
+ImGuiGraphFrame ImGuiSystem::GetGraphFrame(uint32_t flight) noexcept {
+    RADRAY_ASSERT(flight < _impl->Flights.size());
+    return {*_impl->Flights[flight], _impl->Graph, flight};
+}
 void ImGuiSystem::Impl::CheckThread() const {
     if (std::this_thread::get_id() != Thread) RADRAY_ABORT("ImGui context access must remain on the application thread");
 }
@@ -357,6 +363,7 @@ bool ImGuiSystem::Initialize(const ImGuiSystemDescriptor& descriptor) {
         if (auto settings = ReadTextFile(descriptor.SettingsPath)) ImGui::LoadIniSettingsFromMemory(settings->data(), settings->size());
     }
     for (uint32_t i = 0; i < self.App.GetGpuSystem()->GetFlightDataCount(); ++i) self.Flights.push_back(make_unique<UiFlight>());
+    self.FrameOwners.resize(self.Flights.size());
     return true;
 }
 
@@ -382,7 +389,8 @@ ImGuiSystem::~ImGuiSystem() {
     if (self.InFrame) ImGui::EndFrame();
     self.SaveSettings();
     self.Flights.clear();
-    self.GpuTextures.clear();
+    self.Graph.GpuTextures.clear();
+    self.FrameOwners.clear();
     self.Slots.clear();
     ImGui::DestroyPlatformWindows();
     for (auto& entry : self.Pending) {
@@ -495,6 +503,7 @@ void ImGuiSystem::BeginUpdate(uint32_t flightIndex) {
     auto& flight = *self.Flights[flightIndex];
     flight.Viewports.clear();
     flight.Textures.clear();
+    self.FrameOwners[flightIndex].clear();
     flight.Requests.clear();
     flight.Retained.clear();
     flight.ExternalTextures.clear();
@@ -615,6 +624,13 @@ void ImGuiSystem::CaptureFrame(uint32_t flightIndex) {
     ImGui::Render();
     ImGui::UpdatePlatformWindows();
     auto& flight = *self.Flights[flightIndex];
+    const auto captureTexture = [&](ImTextureID id, const shared_ptr<UiTextureRecord>& record) {
+        if (!record || flight.Textures.contains(id)) return;
+        auto asset = record->Asset.Get();
+        flight.Textures.emplace(id, UiFrameTexture{record->Descriptor, asset ? asset->GetTexture() : nullptr,
+                                                   record->Lease.get(), record->Output, record->Graph, record->Dynamic});
+        self.FrameOwners[flightIndex].push_back(record);
+    };
     auto& platform = ImGui::GetPlatformIO();
     for (auto* texture : platform.Textures) {
         if (texture->Status == ImTextureStatus_Destroyed) continue;
@@ -625,7 +641,7 @@ void ImGuiSystem::CaptureFrame(uint32_t flightIndex) {
             entry->second.Id = self.AddRecord(record);
         }
         auto& pending = entry->second;
-        flight.Textures.emplace(pending.Id, self.FindRecord(pending.Id));
+        captureTexture(pending.Id, self.FindRecord(pending.Id));
         if (texture->Status == ImTextureStatus_OK) continue;
         UiTextureRequest request;
         request.Id = pending.Id;
@@ -663,7 +679,7 @@ void ImGuiSystem::CaptureFrame(uint32_t flightIndex) {
         flight.Requests.push_back(std::move(request));
     }
     for (const auto& slot : self.Slots)
-        if (slot.Record && slot.Record->Graph) flight.Textures.emplace(slot.Record->Id, slot.Record);
+        if (slot.Record && slot.Record->Graph) captureTexture(slot.Record->Id, slot.Record);
     for (auto* viewport : platform.Viewports) {
         const auto* data = static_cast<Impl::PlatformWindow*>(viewport->PlatformUserData);
         const auto* draw = viewport->DrawData;
@@ -706,7 +722,7 @@ void ImGuiSystem::CaptureFrame(uint32_t flightIndex) {
                     RADRAY_ERR_LOG("ImGui image {} is not registered or has been unregistered", id);
                     continue;
                 }
-                flight.Textures.emplace(id, record);
+                captureTexture(id, record);
                 snapshot.Commands.push_back({command.ClipRect, id, command.ElemCount, baseIndex + command.IdxOffset, int32_t(baseVertex + command.VtxOffset), sampler});
             }
         }
@@ -720,6 +736,14 @@ void ImGuiSystem::NotifyFlightComplete(uint32_t flight, bool completed) noexcept
 }
 void ImGuiSystem::RequestOutputs(uint32_t flight, RenderWorkloadBuilder& builder) const {
     for (const auto& viewport : _impl->Flights[flight]->Viewports) builder.RequestOutput(viewport.Output);
+}
+
+void ImGuiOnlyPipeline::PrepareFrame(RenderPrepareContext& context) { _system.RequestOutputs(context.App.FlightIndex, context.Workloads); }
+void ImGuiOnlyPipeline::Render(RenderPipelineContext& context) {
+    auto graph = context.CreateRenderGraph("ImGuiOnly");
+    ImGuiGraph::BuildGraph(graph, context, _system.GetGraphFrame(context.FlightIndex()));
+    const auto result = context.ExecuteGraph(graph);
+    ImGuiGraph::CompleteGraph(graph, context, _system.GetGraphFrame(context.FlightIndex()), result.Success);
 }
 
 }  // namespace radray

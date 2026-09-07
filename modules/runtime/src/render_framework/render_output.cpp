@@ -29,7 +29,17 @@ bool ValidExternalState(const render::TextureDescriptor& desc, render::TextureSt
 RenderOutputRegistry::RenderOutputRegistry() : _gameThread(std::this_thread::get_id()) {}
 
 void RenderOutputRegistry::AssertMutable() const noexcept {
+    EnsureRenderIdle();
+}
+
+void RenderOutputRegistry::SetRenderIdleWaiter(std::function<void()> waiter) {
     RADRAY_ASSERT(_gameThread == std::this_thread::get_id());
+    _renderIdleWaiter = std::move(waiter);
+}
+
+void RenderOutputRegistry::EnsureRenderIdle() const noexcept {
+    RADRAY_ASSERT(_gameThread == std::this_thread::get_id());
+    if (!_renderIdle && _renderIdleWaiter) _renderIdleWaiter();
     RADRAY_ASSERT(_renderIdle);
 }
 
@@ -113,6 +123,7 @@ Nullable<const RenderOutputInfo*> RenderOutputRegistry::Find(RenderOutputId id) 
 }
 
 std::optional<RenderSurfaceFrame> RenderOutputRegistry::ResolveExternal(RenderOutputId id) const {
+    std::lock_guard lock(_externalStateMutex);
     for (const auto& record : _records) {
         if (record.Info.Id == id && record.External) {
             const auto& external = *record.External;
@@ -124,6 +135,7 @@ std::optional<RenderSurfaceFrame> RenderOutputRegistry::ResolveExternal(RenderOu
 }
 
 void RenderOutputRegistry::CommitExternalState(const RenderSurfaceFrame& surface) {
+    std::lock_guard lock(_externalStateMutex);
     for (auto& record : _records) {
         if (record.Info.Id == surface.Id && record.External) {
             record.External->CurrentState = surface.CurrentState;

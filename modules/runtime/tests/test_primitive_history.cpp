@@ -99,11 +99,7 @@ TEST(PrimitiveHistory, InvalidSnapshotsCannotPublishPartialMaps) {
     EXPECT_FALSE(history.Prepare(invalid, 2));
 }
 
-class SnapshotProxy : public PrimitiveSceneProxy {
-public:
-    Eigen::Matrix4f Matrix{Eigen::Matrix4f::Identity()};
-    Eigen::Matrix4f GetLocalToWorld() const noexcept override { return Matrix; }
-};
+class SnapshotProxy : public PrimitiveSceneProxy {};
 class SnapshotComponent : public PrimitiveComponent {
 public:
     unique_ptr<PrimitiveSceneProxy> CreateSceneProxy() override { return make_unique<SnapshotProxy>(); }
@@ -112,14 +108,16 @@ public:
 TEST(RenderSceneIdentity, S01S02SnapshotOwnsGenerationRevisionAndTransform) {
     SnapshotComponent component;
     Scene scene;
-    auto* proxy = static_cast<SnapshotProxy*>(scene.AddPrimitive(&component));
+    auto* proxy = static_cast<SnapshotProxy*>(scene.AddPrimitive(component.CreateSceneProxy()).Get());
     ASSERT_NE(proxy, nullptr);
     RenderSceneSnapshot first, second;
     vector<StreamingAssetRefAny> retained;
     ASSERT_TRUE(BuildRenderSceneSnapshot(scene, first, retained));
     const auto generation = first.Primitives[0].Generation;
     EXPECT_EQ(generation, proxy->GetGeneration());
-    proxy->Matrix(0, 3) = 5;
+    auto matrix = proxy->GetLocalToWorld();
+    matrix(0, 3) = 5;
+    proxy->SetLocalToWorld(matrix);
     proxy->ResetMotion();
     ASSERT_TRUE(BuildRenderSceneSnapshot(scene, second, retained));
     EXPECT_FLOAT_EQ(first.Primitives[0].LocalToWorld(0, 3), 0);

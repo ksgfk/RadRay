@@ -30,26 +30,31 @@ void ForwardLitMeshPassProcessor::AddMeshBatch(const RendererListDesc& desc, con
     }
     auto [material, newMaterial] = _materials.try_emplace(batch.Material, std::nullopt);
     if (newMaterial) material->second = _resources.PrepareGroup(*program, binding->MaterialGroup, pass->Parameters, pass->Textures, pass->Samplers);
-    ShaderParameterStorage object{&layout, binding->ObjectGroup};
-    if (!object.SetMatrix4x4("ForwardObject.LocalToWorld", scene.Primitives[batch.Primitive].LocalToWorld)) {
-        out.Reject(MeshPassRejectReason::InvalidBindings);
-        return;
-    }
-    if (layout.Find("ForwardObject.NormalToWorld") != nullptr &&
-        !object.SetMatrix4x4("ForwardObject.NormalToWorld", MakeNormalToWorld(scene.Primitives[batch.Primitive].LocalToWorld))) {
-        out.Reject(MeshPassRejectReason::InvalidBindings);
-        return;
-    }
-    if (layout.Find("ForwardObject.PreviousLocalToWorld") != nullptr) {
-        const auto& primitive = scene.Primitives[batch.Primitive];
-        const auto motion = _temporal ? _temporal->GetPrimitiveMotion(desc.View->StateId, primitive) : PrimitiveMotionData{primitive.LocalToWorld, false};
-        if (!object.SetMatrix4x4("ForwardObject.PreviousLocalToWorld", motion.PreviousLocalToWorld) ||
-            !object.SetUInt("ForwardObject.MotionValid", motion.Valid && desc.View->PreviousViewValid ? 1u : 0u)) {
+    auto [objects, newObjects] = _objects.try_emplace(program, &layout, binding->ObjectGroup);
+    auto [prepared, newObject] = objects->second.Groups.try_emplace(batch.Primitive, std::nullopt);
+    if (newObject) {
+        auto& object = objects->second.Values;
+        if (!object.SetMatrix4x4("ForwardObject.LocalToWorld", scene.Primitives[batch.Primitive].LocalToWorld)) {
             out.Reject(MeshPassRejectReason::InvalidBindings);
             return;
         }
+        if (layout.Find("ForwardObject.NormalToWorld") != nullptr &&
+            !object.SetMatrix4x4("ForwardObject.NormalToWorld", MakeNormalToWorld(scene.Primitives[batch.Primitive].LocalToWorld))) {
+            out.Reject(MeshPassRejectReason::InvalidBindings);
+            return;
+        }
+        if (layout.Find("ForwardObject.PreviousLocalToWorld") != nullptr) {
+            const auto& primitive = scene.Primitives[batch.Primitive];
+            const auto motion = _temporal ? _temporal->GetPrimitiveMotion(desc.View->StateId, primitive) : PrimitiveMotionData{primitive.LocalToWorld, false};
+            if (!object.SetMatrix4x4("ForwardObject.PreviousLocalToWorld", motion.PreviousLocalToWorld) ||
+                !object.SetUInt("ForwardObject.MotionValid", motion.Valid && desc.View->PreviousViewValid ? 1u : 0u)) {
+                out.Reject(MeshPassRejectReason::InvalidBindings);
+                return;
+            }
+        }
+        prepared->second = _resources.PrepareGroup(*program, binding->ObjectGroup, object);
     }
-    auto objectGroup = _resources.PrepareGroup(*program, binding->ObjectGroup, object);
+    const auto& objectGroup = prepared->second;
     if (!view->second || !material->second || !objectGroup) {
         out.Reject(MeshPassRejectReason::PrepareResourceFailed);
         return;
@@ -67,7 +72,7 @@ void ForwardLitMeshPassProcessor::AddMeshBatch(const RendererListDesc& desc, con
     command.FirstIndex = batch.FirstIndex;
     command.IndexCount = batch.IndexCount;
     command.VertexOffset = batch.VertexOffset;
-    command.Groups = {*view->second, *material->second, std::move(*objectGroup)};
+    command.Groups = {*view->second, *material->second, *objectGroup};
     if (!FinalizeMeshDrawCommand(command)) {
         out.Reject(MeshPassRejectReason::InvalidBindings);
         return;

@@ -118,6 +118,7 @@ public:
         : _mesh(std::move(mesh), std::move(materials), transform), _layer(layer) {}
     void CollectAssetReferences(vector<StreamingAssetRefAny>& out) const override { _mesh.CollectAssetReferences(out); }
     Eigen::Matrix4f GetLocalToWorld() const noexcept override { return _mesh.GetLocalToWorld(); }
+    void SetLocalToWorld(const Eigen::Matrix4f& value) noexcept override { _mesh.SetLocalToWorld(value); }
     AxisAlignedBounds GetLocalBounds() const noexcept override { return _mesh.GetLocalBounds(); }
     uint32_t GetLayerMask() const noexcept override { return _layer; }
     MeshDrawArgs GetDrawArgs(uint32_t section) const noexcept override { return _mesh.GetDrawArgs(section); }
@@ -302,7 +303,12 @@ protected:
             Close();
             return;
         }
-        GetRenderSystem()->SetPipeline(std::move(pipeline));
+        if (!GetRenderSystem()->SetPipeline(std::move(pipeline))) {
+            _failed = true;
+            _pipeline = nullptr;
+            Close();
+            return;
+        }
         UpdateRendering();
     }
 

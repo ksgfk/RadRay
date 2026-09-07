@@ -84,6 +84,87 @@ TEST_F(FrameUploadTest, CanceledTextureRetainsTextureAndViewUntilFence) {
     EXPECT_EQ(Device.LiveTextureViews, 0);
 }
 
+TEST_F(FrameUploadTest, LargeTextureMipPreparationPrecedesUploadAndReadyPublishesOnGameThread) {
+    const auto gameThread = std::this_thread::get_id();
+    for (const bool generateMips : {false, true}) {
+        ImageData pixels;
+        pixels.Width = pixels.Height = 1024;
+        pixels.Format = ImageFormat::RGBA8_BYTE;
+        pixels.Data = make_unique<byte[]>(1024 * 1024 * 4);
+        std::fill_n(pixels.Data.get(), 1024 * 1024 * 4, byte{128});
+        auto texture = LoadTextureAssetFromImage(Assets, Uploads, test::kUploadTestId, "large texture", std::move(pixels), {.GenerateMips = generateMips});
+        EXPECT_FALSE(Uploads.IsRecordingUploads());
+        EXPECT_EQ(Device.LiveTextures, 0);
+        EXPECT_FALSE(texture.IsReady());
+        Command.Copies = 0;
+        Record(0);
+        EXPECT_EQ(Command.Copies, generateMips ? 11u : 1u);
+        EXPECT_FALSE(texture.IsReady());
+        std::thread completion([&] { Uploads.NotifyFlightComplete(0); });
+        completion.join();
+        EXPECT_FALSE(texture.IsReady());
+        Uploads.PumpCompletedUploads();
+        Assets.Pump();
+        ASSERT_TRUE(texture.IsReady());
+        EXPECT_EQ(std::this_thread::get_id(), gameThread);
+        EXPECT_EQ(texture.Get()->GetTexture()->GetDesc().MipLevels, generateMips ? 11u : 1u);
+        texture = {};
+        Assets.Pump();
+        EXPECT_EQ(Device.LiveTextures, 0);
+        Uploader.CollectFlight(0);
+    }
+}
+
+TEST_F(FrameUploadTest, UploadStageAndCompletionHaveExplicitThreadAndPhaseBoundaries) {
+    const auto gameThread = std::this_thread::get_id();
+    bool entered = false, completed = false;
+    const auto load = [&](FrameUploadScheduler& uploads) -> task<void> {
+        EXPECT_FALSE(uploads.IsRecordingUploads());
+        auto frame = co_await uploads.BeginUpload();
+        EXPECT_EQ(std::this_thread::get_id(), gameThread);
+        EXPECT_TRUE(uploads.IsRecordingUploads());
+        entered = true;
+        co_await frame.WaitGpu();
+        EXPECT_FALSE(uploads.IsRecordingUploads());
+        EXPECT_EQ(std::this_thread::get_id(), gameThread);
+        completed = true;
+    };
+    TaskScope tasks;
+    tasks.Spawn(load(Uploads));
+    EXPECT_FALSE(entered);
+    Record(0);
+    EXPECT_TRUE(entered);
+    EXPECT_FALSE(completed);
+    EXPECT_FALSE(Uploads.IsRecordingUploads());
+    std::thread notify([&] { Uploads.NotifyFlightComplete(0); });
+    notify.join();
+    EXPECT_FALSE(completed);
+    Uploads.PumpCompletedUploads();
+    EXPECT_TRUE(completed);
+}
+
+TEST_F(FrameUploadTest, DecodeFailureAndPreUploadTextureCancellationDoNotCreateGpuObjects) {
+    auto failed = LoadTextureAssetFromMemory(Assets, Uploads, test::kUploadTestId, "invalid image", {byte{1}, byte{2}, byte{3}});
+    Assets.Pump();
+    EXPECT_TRUE(failed.IsFaulted());
+    Record(0);
+    EXPECT_EQ(Command.Copies, 0u);
+    EXPECT_EQ(Device.LiveTextures, 0);
+    failed = {};
+    Assets.Pump();
+    ImageData pixels;
+    pixels.Width = pixels.Height = 1024;
+    pixels.Format = ImageFormat::RGBA8_BYTE;
+    pixels.Data = make_unique<byte[]>(1024 * 1024 * 4);
+    auto canceled = LoadTextureAssetFromImage(Assets, Uploads, test::kUploadTestId, "cancel mip texture", std::move(pixels), {.GenerateMips = true});
+    canceled.Cancel();
+    Assets.Pump();
+    Record(0);
+    EXPECT_TRUE(canceled.IsCanceled());
+    EXPECT_EQ(Command.Copies, 0u);
+    EXPECT_EQ(Device.LiveTextures, 0);
+}
+
 TEST_F(FrameUploadTest, CancellationBeforeWaitGpuStillRetainsRecordedResources) {
     StreamingAssetRef<StaticMesh> mesh;
     auto load = [](FrameUploadScheduler& uploads, StreamingAssetRef<StaticMesh>* ref) -> task<AssetLoadResult> {

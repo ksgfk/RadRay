@@ -25,6 +25,7 @@ public:
     static std::optional<RendererListPassBindings> Create(RenderGraphRasterBuilder& builder, const RendererList& list,
                                                           std::span<const RendererListProgramParameters> parameters);
     bool IsValidFor(const RenderGraphRasterContext& context, const ShaderProgram& program) const noexcept;
+    bool IsValidFor(const RenderGraphRasterBuilder& builder, const ShaderProgram& program) const noexcept;
     std::span<const RendererListPassBinding> Find(const ShaderProgram& program) const noexcept;
 
 private:

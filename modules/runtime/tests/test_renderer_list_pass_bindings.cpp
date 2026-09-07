@@ -101,6 +101,7 @@ VK_BINDING(0, 0) RWTexture2D<uint> Destination : register(u0);
         DrawExecutionStats* Stats;
         render::RenderBackend Backend;
         std::optional<RendererListPassBindings> Bindings;
+                std::optional<PreparedRendererList> Prepared;
     };
     graph.AddRasterPass<Raster>("A B A", [&](Raster& data, RenderGraphRasterBuilder& builder) {
         data.List = &list; data.Stats = &stats; data.Backend = GetParam();
@@ -110,11 +111,12 @@ VK_BINDING(0, 0) RWTexture2D<uint> Destination : register(u0);
         const RgParameterBinding bp[]{{"Graph", 0, RgCBufferParameterBinding{std::as_bytes(std::span{second})}}, {"Source", 0, RgTextureParameterBinding{source}}};
         const RendererListProgramParameters parameters[]{{a.Get(), 3, ap}, {b.Get(), 2, bp}};
         data.Bindings = RendererListPassBindings::Create(builder, list, parameters);
+        if (data.Bindings) data.Prepared = PrepareRendererList(list, builder, &*data.Bindings);
         first.fill(199); second.fill(199);
         ASSERT_TRUE(data.Bindings); }, +[](const Raster& data, RenderGraphRasterContext& context) {
         context.Encoder().SetViewport(MakeViewport(data.Backend, 0, 0, 96, 32));
         context.Encoder().SetScissor({0, 0, 96, 32});
-        SubmitRendererList(*data.List, context, context.PassState(), *data.Bindings, *data.Stats); });
+        SubmitRendererList(*data.Prepared, context, *data.Stats); });
     const uint64_t pitch = Align(uint64_t{96 * 4}, device.GetDetail().TextureDataPitchAlignment);
     auto readback = device.CreateBuffer({pitch * 32, render::MemoryType::ReadBack, render::BufferUse::MapRead | render::BufferUse::CopyDestination, {}});
     ASSERT_TRUE(readback);
@@ -226,6 +228,7 @@ VK_BINDING(0, 0) Texture2D<float> Images[2] : register(t0);
             DrawExecutionStats* Stats;
             render::RenderBackend Backend;
             std::optional<RendererListPassBindings> Bindings;
+                std::optional<PreparedRendererList> Prepared;
         };
         graph.AddRasterPass<Data>("array consumer", [&](Data& data, RenderGraphRasterBuilder& builder) {
             data.List = &list; data.Stats = &stats; data.Backend = GetParam(); builder.SetColorAttachment(0, images[2]);
@@ -236,9 +239,10 @@ VK_BINDING(0, 0) Texture2D<float> Images[2] : register(t0);
             if (scenario == 2) bindings[1].Value = RgCBufferParameterBinding{std::as_bytes(std::span{wrong})};
             const auto set = builder.CreateParameterSet(scenario == 3 ? *other : *program, 0, bindings);
             const RendererListPassBinding parameters{program.Get(), 0, set};
-            data.Bindings = RendererListPassBindings::Build(builder, list, std::span{&parameters, 1}); }, +[](const Data& data, RenderGraphRasterContext& context) {
+            data.Bindings = RendererListPassBindings::Build(builder, list, std::span{&parameters, 1});
+            if (data.Bindings) data.Prepared = PrepareRendererList(list, builder, &*data.Bindings); }, +[](const Data& data, RenderGraphRasterContext& context) {
             ASSERT_TRUE(data.Bindings); context.Encoder().SetViewport(MakeViewport(data.Backend, 0, 0, 16, 16)); context.Encoder().SetScissor({0, 0, 16, 16});
-            SubmitRendererList(*data.List, context, context.PassState(), *data.Bindings, *data.Stats); });
+            SubmitRendererList(*data.Prepared, context, *data.Stats); });
         const auto pitch = Align(uint64_t{16 * 4}, device.GetDetail().TextureDataPitchAlignment);
         auto readback = device.CreateBuffer({pitch * 16, render::MemoryType::ReadBack, render::BufferUse::MapRead | render::BufferUse::CopyDestination, {}});
         ASSERT_TRUE(readback);

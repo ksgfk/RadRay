@@ -18,7 +18,7 @@ TEST(SpotLight, S05ConeShadowSnapshotAndConservativeCulling) {
     component.SetAttenuationRadius(std::numeric_limits<float>::infinity());
     EXPECT_FLOAT_EQ(component.GetAttenuationRadius(), 3);
     Scene scene;
-    auto* proxy = scene.AddLight(&component);
+    auto* proxy = scene.AddLight(component.CreateSceneProxy()).Get();
     ASSERT_NE(proxy, nullptr);
     RenderSceneSnapshot snapshot;
     vector<StreamingAssetRefAny> retained;

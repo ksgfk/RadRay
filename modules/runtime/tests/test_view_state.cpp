@@ -188,6 +188,84 @@ TEST_P(ViewStateTest, IndependentViewsAndInactiveRecordsRetireAtOwningFlight) {
     EXPECT_EQ(registry.GetStats().GenerationsDestroyed, 2u);
     EXPECT_EQ(device.ValidationErrors.load(), 0u);
 }
+TEST_P(ViewStateTest, ThreeFlightsReportPerViewMemoryAndConvergeAfterRepeatedResizeAndDisable) {
+    render::test::DeviceContext device;
+    if (!render::test::TryCreateDevice(GetParam(), device, true)) GTEST_SKIP() << device.Reason;
+    render::RenderPassRegistry passes(device.Device.get());
+    RenderResourcePool pools[]{RenderResourcePool{*device.Device, passes, 2}, RenderResourcePool{*device.Device, passes, 2}, RenderResourcePool{*device.Device, passes, 2}};
+    ViewStateRegistry histories(*device.Device, passes, 3, 2);
+    ResolvedRenderView views[2];
+    for (auto& view : views) view.StateId = AllocateViewStateId();
+    ResolvedRenderViewFamily family{};
+    family.OutputAvailable = true;
+    family.OutputFormat = render::TextureFormat::RGBA8_UNORM;
+    family.SampleCount = 1;
+    HistoryTextureRequest request;
+    request.Key = "resizing";
+    request.Desc.Extent.Mode = RenderExtentMode::RelativeToFamilyRenderExtent;
+    request.Desc.Format = family.OutputFormat;
+    request.Desc.Usage = render::TextureUse::RenderTarget | render::TextureUse::Resource;
+    request.BufferCount = 3;
+    uint64_t historyPeak = 0;
+    for (uint64_t frame = 1; frame <= 72; ++frame) {
+        const auto flight = uint32_t((frame - 1) % 3);
+        auto& pool = pools[flight];
+        pool.BeginFlight(frame);
+        histories.BeginFlight(flight, frame);
+        for (uint32_t index = 0; index < 2; ++index) {
+            if (frame > (index == 0 ? 60u : 30u)) continue;
+            family.RenderSize = family.OutputSize = {uint32_t(32 + ((frame / 2 + index) % 3) * 16), 32};
+            histories.Resolve(views[index], family);
+            string reason;
+            ASSERT_TRUE(histories.AcquireHistoryTexture(views[index], family, request, reason).Current) << reason;
+            auto desc = *ResolveRuntimeTextureDesc(request.Desc, family, *device.Device, reason);
+            const auto id = views[index].StateId.Value;
+            ASSERT_TRUE(pool.AcquireTexture(desc, "color", id));
+            desc.Format = render::TextureFormat::D32_FLOAT;
+            desc.Usage = render::TextureUse::DepthStencilWrite;
+            ASSERT_TRUE(pool.AcquireTexture(desc, "depth", id));
+            desc.Format = render::TextureFormat::RGBA8_UNORM;
+            desc.Usage = render::TextureUse::UnorderedAccess | render::TextureUse::Resource;
+            ASSERT_TRUE(pool.AcquireTexture(desc, "storage", id));
+            ASSERT_TRUE(pool.AcquireBuffer({1024, render::MemoryType::Device, render::BufferUse::UnorderedAccess, {}}, "buffer", id));
+        }
+        pool.EndGraph();
+        const auto& memory = pool.GetStats();
+        uint64_t sum = 0;
+        for (const auto& entry : memory.MemoryByView) {
+            sum += entry.TotalBytes();
+            EXPECT_LE(entry.InactiveBytes, entry.TotalBytes());
+            EXPECT_TRUE(entry.ViewId == views[0].StateId.Value || entry.ViewId == views[1].StateId.Value);
+        }
+        EXPECT_EQ(sum, memory.EstimatedBytes);
+        EXPECT_GE(memory.PeakEstimatedBytes, memory.EstimatedBytes);
+        EXPECT_LE(memory.EstimatedBytes, 2u * 3u * (64u * 32u * 4u * 3u + 1024u));
+        const auto history = histories.GetStats();
+        uint64_t active = 0, retired = 0, flights = 0;
+        for (const auto& entry : history.MemoryByView) {
+            active += entry.ActiveBytes;
+            retired += entry.RetiredBytes;
+        }
+        for (const auto bytes : history.RetiredBytesByFlight) flights += bytes;
+        EXPECT_EQ(active + retired, history.EstimatedBytes);
+        EXPECT_EQ(retired, history.RetiredBytes);
+        EXPECT_EQ(flights, retired);
+        historyPeak = std::max(historyPeak, history.EstimatedBytes);
+        EXPECT_EQ(history.PeakEstimatedBytes, historyPeak);
+        if (frame == 72) {
+            EXPECT_EQ(history.EstimatedBytes, 0u);
+            EXPECT_EQ(history.ActiveViews, 0u);
+            EXPECT_EQ(history.RetiredGenerations, 0u);
+        }
+    }
+    for (const auto& pool : pools) {
+        EXPECT_EQ(pool.GetStats().EstimatedBytes, 0u);
+        EXPECT_GT(pool.GetStats().PeakEstimatedBytes, 0u);
+        EXPECT_GT(pool.GetStats().Trimmed, 0u);
+    }
+    EXPECT_EQ(device.ValidationErrors.load(), 0u);
+}
+
 INSTANTIATE_TEST_SUITE_P(Backends, ViewStateTest, testing::Values(render::RenderBackend::D3D12, render::RenderBackend::Vulkan));
 }  // namespace
 }  // namespace radray

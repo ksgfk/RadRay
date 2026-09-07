@@ -15,6 +15,7 @@ struct ViewStateRegistry::Impl {
     };
     struct Generation {
         uint64_t Id{0};
+        ViewStateId OwnerView;
         TexturePoolKey Key;
         vector<unique_ptr<Image>> Images;
         uint32_t LastCommitted{0};
@@ -40,9 +41,11 @@ struct ViewStateRegistry::Impl {
     vector<vector<unique_ptr<Generation>>> RetireBins;
     uint32_t Flight{0};
     uint64_t Serial{0}, NextGeneration{1}, InactiveFrames{120}, TexturesCreated{0}, GenerationsDestroyed{0};
+    uint64_t EstimatedBytes{0}, PeakEstimatedBytes{0};
     Impl(render::Device& device, render::RenderPassRegistry& registry, uint32_t flights, uint64_t inactive)
         : Device(device), Registry(registry), RetireBins(flights), InactiveFrames(inactive) { RADRAY_ASSERT(flights > 0); }
     void Destroy(Generation& generation) {
+        EstimatedBytes -= EstimateTextureBytes(generation.Key.Desc) * generation.Images.size();
         for (const auto& image : generation.Images) {
             for (const auto& view : image->Views) Registry.RemoveFramebuffersUsing(view.View.get());
             image->Views.clear();
@@ -219,6 +222,7 @@ HistoryTexturePair ViewStateRegistry::AcquireHistoryTexture(const ResolvedRender
     if (!generation || !(generation->Key == TexturePoolKey{*desc}) || generation->Images.size() != request.BufferCount || generation->CommitMode != request.CommitMode) {
         auto next = make_unique<Impl::Generation>();
         next->Id = impl.NextGeneration++;
+        next->OwnerView = view.StateId;
         next->Key = {*desc};
         next->CommitMode = request.CommitMode;
         for (uint32_t i = 0; i < request.BufferCount; ++i) {
@@ -237,6 +241,8 @@ HistoryTexturePair ViewStateRegistry::AcquireHistoryTexture(const ResolvedRender
             image->External.emplace(RenderExternalTexture{image->Texture.get(), *desc, image->States, image->Valid, nullptr, false, &image->Views});
             next->Images.push_back(std::move(image));
             ++impl.TexturesCreated;
+            impl.EstimatedBytes += EstimateTextureBytes(*desc);
+            impl.PeakEstimatedBytes = std::max(impl.PeakEstimatedBytes, impl.EstimatedBytes);
         }
         if (generation) {
             if (request.CommitMode == HistoryCommitMode::WithView || generation->CommitMode == HistoryCommitMode::WithView)
@@ -276,12 +282,31 @@ ViewHistoryInvalidationReason ViewStateRegistry::GetInvalidationReason(ViewState
 ViewStateStats ViewStateRegistry::GetStats() const {
     ViewStateStats result{};
     result.ActiveViews = static_cast<uint32_t>(_impl->Views.size());
+    const auto memory = [&](ViewStateId id) -> ViewHistoryMemoryStats& {
+        for (auto& item : result.MemoryByView) if (item.View == id) return item;
+        return result.MemoryByView.emplace_back(ViewHistoryMemoryStats{.View = id});
+    };
     for (const auto& [key, view] : _impl->Views)
         for (const auto& [history, generation] : view.Histories)
-            if (generation) ++result.HistoryGenerations;
-    for (const auto& bin : _impl->RetireBins) result.RetiredGenerations += static_cast<uint32_t>(bin.size());
+            if (generation) {
+                ++result.HistoryGenerations;
+                memory(key).ActiveBytes += EstimateTextureBytes(generation->Key.Desc) * generation->Images.size();
+            }
+    for (const auto& bin : _impl->RetireBins) {
+        result.RetiredGenerations += static_cast<uint32_t>(bin.size());
+        uint64_t bytes = 0;
+        for (const auto& generation : bin) {
+            const auto size = EstimateTextureBytes(generation->Key.Desc) * generation->Images.size();
+            bytes += size;
+            memory(generation->OwnerView).RetiredBytes += size;
+        }
+        result.RetiredBytesByFlight.push_back(bytes);
+        result.RetiredBytes += bytes;
+    }
     result.TexturesCreated = _impl->TexturesCreated;
     result.GenerationsDestroyed = _impl->GenerationsDestroyed;
+    result.EstimatedBytes = _impl->EstimatedBytes;
+    result.PeakEstimatedBytes = _impl->PeakEstimatedBytes;
     return result;
 }
 void ViewStateRegistry::Clear() {

@@ -2,8 +2,6 @@
 
 #include <algorithm>
 
-#include <radray/runtime/components/light_component.h>
-#include <radray/runtime/components/primitive_component.h>
 #include <radray/runtime/render_framework/light_scene_proxy.h>
 #include <radray/runtime/render_framework/primitive_scene_proxy.h>
 
@@ -11,12 +9,7 @@ namespace radray {
 
 Scene::~Scene() noexcept = default;
 
-PrimitiveSceneProxy* Scene::AddPrimitive(PrimitiveComponent* component) {
-    if (component == nullptr) {
-        return nullptr;
-    }
-
-    unique_ptr<PrimitiveSceneProxy> proxy = component->CreateSceneProxy();
+Nullable<PrimitiveSceneProxy*> Scene::AddPrimitive(unique_ptr<PrimitiveSceneProxy> proxy) {
     if (proxy == nullptr) {
         return nullptr;
     }
@@ -40,12 +33,7 @@ void Scene::RemovePrimitive(PrimitiveSceneProxy* proxy) noexcept {
     }
 }
 
-LightSceneProxy* Scene::AddLight(LightComponent* component) {
-    if (component == nullptr) {
-        return nullptr;
-    }
-
-    unique_ptr<LightSceneProxy> proxy = component->CreateSceneProxy();
+Nullable<LightSceneProxy*> Scene::AddLight(unique_ptr<LightSceneProxy> proxy) {
     if (proxy == nullptr) {
         return nullptr;
     }

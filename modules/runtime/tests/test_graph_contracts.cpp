@@ -266,6 +266,111 @@ VK_BINDING(0, 0) RWStructuredBuffer<uint> Counts : register(u0);
     }
 }
 
+TEST_P(GraphContractTest, GeneratedGeometryRequiresMatchingReadsAndPreparesGraphicsPsoBeforeRecording) {
+    auto& device = *Context.Device;
+    auto producer = test::CompileFoundationCompute(device, R"hlsl(
+#include <core/platform.hlsli>
+VK_BINDING(0, 0) RWStructuredBuffer<float3> Vertices : register(u0);
+VK_BINDING(1, 0) RWStructuredBuffer<uint> Indices : register(u1);
+VK_BINDING(2, 0) RWStructuredBuffer<uint> Arguments : register(u2);
+[shader("compute")] [numthreads(1,1,1)] void CSMain() {
+    Vertices[0] = float3(-1,-1,0); Vertices[1] = float3(3,-1,0); Vertices[2] = float3(-1,3,0);
+    Indices[0] = 0; Indices[1] = 1; Indices[2] = 2;
+    Arguments[0] = 3; Arguments[1] = 1; Arguments[2] = 0; Arguments[3] = 0; Arguments[4] = 0;
+})hlsl");
+    auto graphics = test::CompileFoundationGraphics(device, R"hlsl(
+#include <core/platform.hlsli>
+[shader("vertex")] float4 VSMain(float3 p : POSITION) : SV_Position { return float4(p,1); }
+[shader("pixel")] uint PSMain() : SV_Target0 { return 42; }
+)hlsl");
+    ASSERT_TRUE(producer);
+    ASSERT_TRUE(graphics);
+    PrimitiveVertexLayout layout;
+    layout.Buffers = {{0,12,render::VertexStepMode::Vertex}};
+    layout.Attributes = {{"POSITION",0,0,0,render::VertexFormat::FLOAT32X3}};
+    MaterialPipelineState state;
+    state.Primitive.Cull = render::CullMode::None;
+    state.DepthStencil.DepthTestEnable = state.DepthStencil.DepthWriteEnable = false;
+    for (uint32_t scenario = 0; scenario < 5; ++scenario) {
+        SCOPED_TRACE(scenario);
+        Writes.Reset();
+        Resources->BeginFlight(scenario + 2, Writes);
+        auto graph = MakeGraph("generated native geometry");
+        const auto vertices = graph.CreateBuffer({36, render::MemoryType::Device, render::BufferUse::UnorderedAccess | render::BufferUse::Vertex | render::BufferUse::Resource, {}}, "vertices");
+        const auto indices = graph.CreateBuffer({12, render::MemoryType::Device, render::BufferUse::UnorderedAccess | render::BufferUse::Index | render::BufferUse::Resource, {}}, "indices");
+        const auto arguments = graph.CreateBuffer({20, render::MemoryType::Device, render::BufferUse::UnorderedAccess | render::BufferUse::Indirect, {}}, "arguments");
+        struct NativeGeometry { render::Buffer* Vertices{nullptr}; render::Buffer* Indices{nullptr}; } native;
+        struct Compute {
+            RgComputeProgramHandle Program;
+            RgParameterSetHandle Set;
+            RgBufferHandle Vertices, Indices;
+            NativeGeometry* Native;
+        };
+        graph.AddComputePass<Compute>("generate", [&](Compute& data, RenderGraphComputeBuilder& builder) {
+            const RgParameterBinding bindings[]{
+                {"Vertices",0,RgBufferParameterBinding{vertices,render::BufferRange::AllRange(),12,render::TextureFormat::UNKNOWN,RgParameterAccess::Write}},
+                {"Indices",0,RgBufferParameterBinding{indices,render::BufferRange::AllRange(),4,render::TextureFormat::UNKNOWN,RgParameterAccess::Write}},
+                {"Arguments",0,RgBufferParameterBinding{arguments,render::BufferRange::AllRange(),4,render::TextureFormat::UNKNOWN,RgParameterAccess::Write}}};
+            data = {builder.UseComputeProgram(*producer), builder.CreateParameterSet(*producer,0,bindings),vertices,indices,&native};
+        }, +[](const Compute& data, RenderGraphComputeContext& ctx) {
+            data.Native->Vertices = ctx.GetBuffer(data.Vertices); data.Native->Indices = ctx.GetBuffer(data.Indices);
+            ctx.BindComputeProgram(data.Program); ctx.BindParameterSet(data.Set); ctx.Encoder().Dispatch(1,1,1);
+        });
+        const auto target = graph.CreateTexture({render::TextureDimension::Dim2D,4,4,1,1,1,render::TextureFormat::R32_UINT,
+            render::MemoryType::Device,render::TextureUse::RenderTarget | render::TextureUse::CopySource,{}},"target");
+        struct Raster {
+            RgGraphicsProgramHandle Program;
+            RgIndirectArgumentsHandle Arguments;
+            const NativeGeometry* Native;
+            ShaderProgram* Shader;
+            render::RenderBackend Backend;
+        };
+        graph.AddRasterPass<Raster>("consume", [&](Raster& data, RenderGraphRasterBuilder& builder) {
+            builder.SetColorAttachment(0,target);
+            if (scenario != 0) builder.ReadBuffer(vertices,scenario == 1 ? RgBufferAccess::ShaderRead : RgBufferAccess::Vertex);
+            builder.ReadBuffer(indices,scenario == 2 ? RgBufferAccess::ShaderRead : RgBufferAccess::Index);
+            const auto program = builder.UseGraphicsProgram(*graphics,state,layout);
+            EXPECT_EQ(program,builder.UseGraphicsProgram(*graphics,state,layout));
+            data = {program,builder.ReadIndirectArguments(arguments,RgIndirectCommand::DrawIndexed),&native,graphics.Get(),GetParam()};
+        }, +[](const Raster& data, RenderGraphRasterContext& ctx) {
+            // Native creation has already finished when the record callback starts, including the cold frame.
+            const auto count = data.Shader->GetGraphicsPipelineStateCount();
+            EXPECT_EQ(count,1u);
+            ctx.BindGraphicsProgram(data.Program);
+            const render::VertexBufferBinding binding{0,{data.Native->Vertices,0,36}};
+            ctx.Encoder().BindVertexBuffers(std::span{&binding,1}); ctx.Encoder().BindIndexBuffer({data.Native->Indices,0,4});
+            ctx.Encoder().SetViewport(MakeViewport(data.Backend,0,0,4,4)); ctx.Encoder().SetScissor({0,0,4,4});
+            ctx.Encoder().DrawIndexedIndirect(data.Arguments);
+            EXPECT_EQ(data.Shader->GetGraphicsPipelineStateCount(),count);
+        });
+        const auto pitch = Align(uint64_t{16},device.GetDetail().TextureDataPitchAlignment);
+        auto readback = device.CreateBuffer({pitch * 4,render::MemoryType::ReadBack,render::BufferUse::CopyDestination | render::BufferUse::MapRead,{}});
+        ASSERT_TRUE(readback);
+        RenderExternalBuffer external{readback.Get(),readback->GetDesc(),render::BufferState::CopyDestination};
+        const auto host = graph.ImportBuffer(external,"readback",RenderGraphExternalAccess::ObservableOutput);
+        graph.AddCopyTextureToBufferPass("read pixels",target,host); HostRead(graph,host);
+        EXPECT_EQ(Run(graph),scenario >= 3) << graph.GetReport().ToText();
+        EXPECT_EQ(graph.GetReport().GraphicsPipelineRequests,2u);
+        EXPECT_EQ(graph.GetReport().GraphicsPipelinePreparations,1u);
+        EXPECT_EQ(graph.GetReport().GraphicsPipelineCreations,scenario == 0 ? 1u : 0u);
+        if (scenario < 3) {
+            ASSERT_FALSE(graph.GetReport().Diagnostics.empty());
+            EXPECT_EQ(graph.GetReport().Diagnostics[0].Code,"UndeclaredGeometryRead");
+        } else {
+            const auto bytes = Read(*readback);
+            uint32_t pixel = 0;
+            std::memcpy(&pixel,bytes.data() + pitch + 4,sizeof(pixel));
+            EXPECT_EQ(pixel,42u);
+            for (const auto [resource,after] : {std::pair{vertices.Index,render::BufferState::Vertex},
+                {indices.Index,render::BufferState::Index},{arguments.Index,render::BufferState::Indirect}}) {
+                EXPECT_TRUE(std::any_of(graph.GetReport().Barriers.begin(),graph.GetReport().Barriers.end(),[&](const auto& barrier) {
+                    return barrier.Pass == 1 && barrier.Resource == resource && barrier.After == uint32_t(after);
+                }));
+            }
+        }
+    }
+}
+
 INSTANTIATE_TEST_SUITE_P(Backends, GraphContractTest, testing::Values(render::RenderBackend::D3D12, render::RenderBackend::Vulkan));
 }  // namespace
 }  // namespace radray

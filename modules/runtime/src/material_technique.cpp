@@ -25,7 +25,7 @@ vector<NumericField> NumericSchema(const MaterialPassLayout& pass) {
     return result;
 }
 
-bool ResolveMaterialGroup(MaterialPassLayout& pass) {
+bool ResolveMaterialGroup(MaterialPassLayout& pass, string& reason) {
     if (pass.MaterialBufferAnchor.empty()) return true;
     const auto& layout = pass.Program->GetParameterLayout();
     for (uint32_t index = 0; index < layout.Buffers().size(); ++index) {
@@ -35,15 +35,18 @@ bool ResolveMaterialGroup(MaterialPassLayout& pass) {
             break;
         }
     }
-    if (!pass.BufferIndex) return false;
+    if (!pass.BufferIndex) { reason = "named material cbuffer is missing"; return false; }
     if (std::count_if(layout.Buffers().begin(), layout.Buffers().end(), [&](const auto& buffer) {
             return buffer.Group == *pass.ParameterGroup;
-        }) != 1) return false;
+        }) != 1) { reason = "a material group supports exactly one cbuffer"; return false; }
     for (const auto& binding : pass.Program->GetArtifact().Generic().Bindings()) {
         if (binding.Group != *pass.ParameterGroup) continue;
         const auto kind = static_cast<shader::ShaderBindingKind>(binding.Type);
         if ((kind == shader::ShaderBindingKind::CBuffer && binding.Count != 1) ||
-            (kind != shader::ShaderBindingKind::CBuffer && kind != shader::ShaderBindingKind::Texture && kind != shader::ShaderBindingKind::Sampler)) return false;
+            (kind != shader::ShaderBindingKind::CBuffer && kind != shader::ShaderBindingKind::Texture && kind != shader::ShaderBindingKind::Sampler)) {
+            reason = "material groups support one non-array cbuffer and texture/sampler resources only";
+            return false;
+        }
     }
     for (const auto& parameter : layout.Parameters()) {
         if (parameter.Info.Group == *pass.ParameterGroup &&
@@ -67,14 +70,15 @@ Nullable<unique_ptr<MaterialTechnique>> MaterialTechnique::Create(vector<Materia
         }
         if (desc.Name == primaryPass) primaryIndex = static_cast<uint32_t>(layouts.size());
         MaterialPassLayout pass{std::move(desc.Name), desc.Program.Get(), std::move(desc.MaterialBufferAnchor), {}, {}, {}, desc.DefaultPipelineState};
-        if (!ResolveMaterialGroup(pass)) {
-            RADRAY_ERR_LOG("material pass '{}' has invalid material buffer/group '{}'", pass.Name, pass.MaterialBufferAnchor);
+        string reason;
+        if (!ResolveMaterialGroup(pass, reason)) {
+            RADRAY_ERR_LOG("unsupported material ABI in pass '{}' at '{}': {}", pass.Name, pass.MaterialBufferAnchor, reason);
             return nullptr;
         }
         layouts.push_back(std::move(pass));
     }
     if (!primaryIndex || !layouts[*primaryIndex].BufferIndex) {
-        RADRAY_ERR_LOG("material technique primary pass '{}' must define one material cbuffer", primaryPass);
+        RADRAY_ERR_LOG("unsupported material ABI: primary pass '{}' must define one material cbuffer", primaryPass);
         return nullptr;
     }
     const auto& primary = layouts[*primaryIndex];
@@ -85,14 +89,14 @@ Nullable<unique_ptr<MaterialTechnique>> MaterialTechnique::Create(vector<Materia
         const auto secondary = NumericSchema(pass);
         if (pass.Program->GetParameterLayout().Buffers()[*pass.BufferIndex].Size != size || secondary != schema) {
             const auto mismatch = std::mismatch(schema.begin(), schema.end(), secondary.begin(), secondary.end());
-            RADRAY_ERR_LOG("material pass '{}' has incompatible numeric layout at '{}'", pass.Name,
+            RADRAY_ERR_LOG("unsupported material ABI: pass '{}' must match the primary numeric layout at '{}'", pass.Name,
                            mismatch.first != schema.end() ? mismatch.first->Path : string{"buffer size or extra field"});
             return nullptr;
         }
         for (const auto& resource : pass.Resources) {
             const auto found = std::find_if(primary.Resources.begin(), primary.Resources.end(), [&](const auto& value) { return value.Name == resource.Name; });
             if (found == primary.Resources.end() || found->Info.Kind != resource.Info.Kind || found->Info.ElementCount != resource.Info.ElementCount) {
-                RADRAY_ERR_LOG("material pass '{}' has incompatible resource '{}'", pass.Name, resource.Name);
+                RADRAY_ERR_LOG("unsupported material ABI: pass '{}' has incompatible resource '{}'", pass.Name, resource.Name);
                 return nullptr;
             }
         }

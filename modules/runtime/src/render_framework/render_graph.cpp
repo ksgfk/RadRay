@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstring>
 #include <limits>
 #include <type_traits>
@@ -186,6 +187,7 @@ struct RenderGraph::Impl {
         vector<uint32_t> States;
         vector<uint8_t> Valid;
         bool Written{false};
+        uint64_t ViewId{0};
         uint32_t CellCount() const { return IsTexture ? TextureDesc.MipLevels * (TextureDesc.Dim == render::TextureDimension::Dim3D ? 1 : TextureDesc.DepthOrArraySize) : 1; }
         render::Texture* NativeTexture() const { return ExternalTexture ? ExternalTexture->Texture : PoolTexture->Texture.get(); }
         render::Buffer* NativeBuffer() const { return ExternalBuffer ? ExternalBuffer->Buffer : PoolBuffer->Buffer.get(); }
@@ -238,6 +240,14 @@ struct RenderGraph::Impl {
         ShaderProgram* Program{nullptr};
         Nullable<render::ComputePipelineState*> PipelineState{nullptr};
     };
+    struct GraphicsProgram {
+        uint32_t Pass;
+        ShaderProgram* Program;
+        MaterialPipelineState State;
+        PrimitiveVertexLayout Layout;
+        PrimitiveTopology Topology;
+        Nullable<render::GraphicsPipelineState*> PipelineState{nullptr};
+    };
     struct CBufferBytes {
         vector<byte> Bytes;
     };
@@ -275,6 +285,7 @@ struct RenderGraph::Impl {
         vector<Access> Accesses;
         vector<CellAccess> Cells;
         vector<uint32_t> DeclaredViews, DeclaredBuffers;
+        unordered_map<render::Buffer*, uint32_t> BufferReadStates;
         vector<std::optional<Color>> Colors;
         std::optional<Depth> DepthAttachment;
         std::optional<Copy> CopyOp;
@@ -293,18 +304,24 @@ struct RenderGraph::Impl {
     render::RenderPassRegistry& Registry;
     Nullable<RenderGraphFrameResources*> FrameResources{nullptr};
     uint64_t Generation;
+    uint64_t ResourceView{0};
     bool Frozen{false}, Compiled{false}, Executed{false};
     vector<Resource> Resources;
     vector<View> Views;
     vector<Pass> Passes;
     vector<IndirectArguments> IndirectArgumentsRecords;
     vector<ComputeProgram> ComputePrograms;
+    vector<GraphicsProgram> GraphicsPrograms;
+    unordered_map<ShaderProgram*, vector<uint32_t>> GraphicsProgramIndices;
+    unordered_map<render::Buffer*, uint32_t> NativeBuffers;
     vector<ParameterSet> ParameterSets;
-    RenderGraphExecutionReport Report;
+    RenderGraphExecutionReport OwnedReport;
+    RenderGraphExecutionReport& Report;
 
     Impl(render::Device& device, RenderResourcePool& pool, render::RenderPassRegistry& registry,
-         Nullable<RenderGraphFrameResources*> frameResources, std::string_view name)
-        : Device(device), Pool(pool), Registry(registry), FrameResources(frameResources), Generation(NextGraphGeneration.fetch_add(1, std::memory_order_relaxed)) {
+         Nullable<RenderGraphFrameResources*> frameResources, std::string_view name, Nullable<RenderGraphExecutionReport*> report = nullptr)
+        : Device(device), Pool(pool), Registry(registry), FrameResources(frameResources), Generation(NextGraphGeneration.fetch_add(1, std::memory_order_relaxed)),
+          Report(report ? *report : OwnedReport) {
         if (Generation == 0 || Generation == UINT64_MAX) RADRAY_ABORT("RenderGraph generation exhausted");
         Report.Name = name;
     }
@@ -369,10 +386,14 @@ RenderGraph::RenderGraph(render::Device& device, RenderGraphFrameResources& reso
                          render::RenderPassRegistry& registry, std::string_view name)
     : _impl(make_unique<Impl>(device, resources.GetPool(), registry, &resources, name)) {}
 RenderGraph::RenderGraph(render::Device& device, RenderGraphFrameResources& resources,
-                         render::RenderPassRegistry& registry, std::string_view name, uint64_t& generation)
-    : RenderGraph(device, resources, registry, name) { generation = _impl->Generation; }
+                         render::RenderPassRegistry& registry, std::string_view name, uint64_t& generation, RenderGraphExecutionReport& report)
+    : _impl(make_unique<Impl>(device, resources.GetPool(), registry, &resources, name, &report)) { generation = _impl->Generation; }
 RenderGraph::~RenderGraph() = default;
 uint64_t RenderGraph::GetGeneration() const noexcept { return _impl->Generation; }
+uint64_t RenderGraph::SetResourceView(uint64_t viewId) {
+    if (!_impl->Mutable()) return _impl->ResourceView;
+    return std::exchange(_impl->ResourceView, viewId);
+}
 bool RenderGraph::WasPassExecuted(RgPassHandle handle) const noexcept {
     return handle.Generation == _impl->Generation && handle.Index < _impl->Report.Passes.size() && _impl->Report.Passes[handle.Index].Executed;
 }
@@ -414,6 +435,7 @@ RgTextureHandle RenderGraph::CreateTexture(const render::TextureDescriptor& desc
     resource.Location = location;
     resource.IsTexture = true;
     resource.TextureDesc = desc;
+    resource.ViewId = impl.ResourceView;
     impl.Resources.push_back(std::move(resource));
     return {index, impl.Generation};
 }
@@ -425,6 +447,7 @@ RgBufferHandle RenderGraph::CreateBuffer(const render::BufferDescriptor& desc, s
     resource.Name = name;
     resource.Location = location;
     resource.BufferDesc = desc;
+    resource.ViewId = impl.ResourceView;
     impl.Resources.push_back(std::move(resource));
     return {index, impl.Generation};
 }
@@ -605,6 +628,33 @@ RgComputeProgramHandle RenderGraph::AddComputeProgram(uint32_t pass, ShaderProgr
     }
     const uint32_t index = static_cast<uint32_t>(impl.ComputePrograms.size());
     impl.ComputePrograms.push_back({pass, &program, nullptr});
+    return {index, impl.Generation};
+}
+
+RgGraphicsProgramHandle RenderGraphRasterBuilder::UseGraphicsProgram(ShaderProgram& program, const MaterialPipelineState& state,
+    const PrimitiveVertexLayout& layout, PrimitiveTopology topology) {
+    return _graph.AddGraphicsProgram(_pass, program, state, layout, topology);
+}
+
+RgGraphicsProgramHandle RenderGraph::AddGraphicsProgram(uint32_t pass, ShaderProgram& program, const MaterialPipelineState& state,
+    const PrimitiveVertexLayout& layout, PrimitiveTopology topology) {
+    auto& impl = *_impl;
+    if (!impl.Mutable()) return {};
+    ++impl.Report.GraphicsPipelineRequests;
+    if (program.GetDevice() != &impl.Device || !ProgramStages(program).HasFlag(render::ShaderStage::Vertex) ||
+        ProgramStages(program).HasFlag(render::ShaderStage::Compute)) {
+        impl.Error("GraphicsProgram", "Raster passes require a graphics ShaderProgram from this graph's device", pass);
+        return {};
+    }
+    auto& entries = impl.GraphicsProgramIndices[&program];
+    for (const auto entry : entries) {
+        const auto& value = impl.GraphicsPrograms[entry];
+        if (value.Pass == pass && value.State == state && value.Layout == layout && value.Topology == topology)
+            return {entry, impl.Generation};
+    }
+    const auto index = static_cast<uint32_t>(impl.GraphicsPrograms.size());
+    impl.GraphicsPrograms.push_back({pass, &program, state, layout, topology});
+    entries.push_back(index);
     return {index, impl.Generation};
 }
 
@@ -1035,6 +1085,8 @@ bool RenderGraph::Impl::ValidateResources() {
         }
         if (!EnumContains(resource.ExternalAccess)) Error("ExternalAccess", "Invalid external access mode", InvalidIndex, index);
         Report.Resources.push_back({resource.Name, std::move(descriptor), resource.IsTexture, resource.External()});
+        Report.Resources.back().ViewId = resource.ViewId;
+        Report.Resources.back().EstimatedBytes = resource.IsTexture ? EstimateTextureBytes(resource.TextureDesc) : resource.BufferDesc.Size;
     }
     return Report.Diagnostics.empty();
 }
@@ -1192,10 +1244,11 @@ bool RenderGraph::Impl::Realize() {
     const uint64_t createdBefore = Pool.GetStats().Created;
     for (uint32_t r = 0; r < Resources.size(); ++r) {
         auto& resource = Resources[r];
+        if (resource.ExternalBuffer) NativeBuffers.emplace(resource.ExternalBuffer->Buffer, r);
         if (Report.Resources[r].FirstUse < 0) continue;
         if (resource.IsTexture) {
             if (!resource.ExternalTexture) {
-                resource.PoolTexture = Pool.AcquireTexture(resource.TextureDesc, resource.Name);
+                resource.PoolTexture = Pool.AcquireTexture(resource.TextureDesc, resource.Name, resource.ViewId);
                 if (!resource.PoolTexture) {
                     Error("TextureAllocation", "Texture allocation failed before recording", InvalidIndex, r);
                     return false;
@@ -1206,7 +1259,7 @@ bool RenderGraph::Impl::Realize() {
             for (const auto state : states) resource.States.push_back(state.value());
         } else {
             if (!resource.ExternalBuffer) {
-                resource.PoolBuffer = Pool.AcquireBuffer(resource.BufferDesc, resource.Name);
+                resource.PoolBuffer = Pool.AcquireBuffer(resource.BufferDesc, resource.Name, resource.ViewId);
                 if (!resource.PoolBuffer) {
                     Error("BufferAllocation", "Buffer allocation failed before recording", InvalidIndex, r);
                     return false;
@@ -1214,11 +1267,15 @@ bool RenderGraph::Impl::Realize() {
                 Report.Resources[r].PhysicalId = resource.PoolBuffer->Id;
             }
             resource.States.push_back((resource.ExternalBuffer ? resource.ExternalBuffer->State : resource.PoolBuffer->State).value());
+            NativeBuffers.emplace(resource.NativeBuffer(), r);
         }
     }
     for (uint32_t p = 0; p < Passes.size(); ++p) {
         if (!Report.Passes[p].Live) continue;
         auto& pass = Passes[p];
+        for (const auto& access : pass.Accesses)
+            if (!Resources[access.Resource].IsTexture && access.Read)
+                pass.BufferReadStates[Resources[access.Resource].NativeBuffer()] |= access.State;
         for (const auto v : pass.DeclaredViews) {
             auto& view = Views[v];
             if (view.Native) continue;
@@ -1294,6 +1351,18 @@ bool RenderGraph::Impl::Realize() {
 
 bool RenderGraph::Prepare() {
     auto& impl = *_impl;
+    for (auto& value : impl.GraphicsPrograms) {
+        if (!impl.Report.Passes[value.Pass].Live) continue;
+        const auto before = value.Program->GetGraphicsPipelineStateCount();
+        value.PipelineState = value.Program->GetOrCreateGraphicsPipelineState(value.State, value.Layout, value.Topology,
+            *impl.Passes[value.Pass].PassState);
+        ++impl.Report.GraphicsPipelinePreparations;
+        impl.Report.GraphicsPipelineCreations += static_cast<uint32_t>(value.Program->GetGraphicsPipelineStateCount() - before);
+        if (!value.PipelineState) {
+            impl.Error("GraphicsPipelineState", "Graphics pipeline state creation failed before recording", value.Pass);
+            return false;
+        }
+    }
     for (Impl::ComputeProgram& value : impl.ComputePrograms) {
         if (!impl.Report.Passes[value.Pass].Live) continue;
         value.PipelineState = value.Program->GetOrCreateComputePipelineState();
@@ -1492,11 +1561,20 @@ RenderGraphExecutionResult RenderGraph::Execute(render::CommandBuffer& command) 
         return {};
     }
     impl.Executed = true;
-    if (!Compile() || !impl.Realize() || !Prepare()) {
+    const auto measure = [](uint64_t& nanos, auto&& run) {
+        const auto start = std::chrono::steady_clock::now();
+        const bool success = run();
+        nanos = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count();
+        return success;
+    };
+    if (!measure(impl.Report.Cpu.CompileNanoseconds, [&] { return Compile(); }) ||
+        !measure(impl.Report.Cpu.RealizeNanoseconds, [&] { return impl.Realize(); }) ||
+        !measure(impl.Report.Cpu.PrepareNanoseconds, [&] { return Prepare(); })) {
         impl.Pool.EndGraph();
         impl.Report.Pool = impl.Pool.GetStats();
         return {};
     }
+    const auto recordStart = std::chrono::steady_clock::now();
     impl.PlanBarriers();
     RenderGraphExecutionResult result{true, false};
     for (uint32_t p = 0; p < impl.Passes.size(); ++p) {
@@ -1567,6 +1645,7 @@ RenderGraphExecutionResult RenderGraph::Execute(render::CommandBuffer& command) 
     impl.CommitStates();
     impl.Pool.EndGraph();
     impl.Report.Pool = impl.Pool.GetStats();
+    impl.Report.Cpu.RecordNanoseconds = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - recordStart).count();
     return result;
 }
 
@@ -1665,11 +1744,50 @@ void RenderGraph::BindComputeProgram(
     encoder.BindComputePipelineState(program.PipelineState.Get());
 }
 
+void RenderGraph::BindGraphicsProgram(uint32_t pass, RgGraphicsProgramHandle handle, render::GraphicsCommandEncoder& encoder) noexcept {
+    const auto& impl = *_impl;
+    if (handle.Generation != impl.Generation || handle.Index >= impl.GraphicsPrograms.size())
+        RADRAY_ABORT("RenderGraph graphics program belongs to another graph or is invalid");
+    const auto& program = impl.GraphicsPrograms[handle.Index];
+    if (program.Pass != pass || !program.PipelineState)
+        RADRAY_ABORT("RenderGraph graphics program was not declared and prepared for this pass");
+    encoder.BindGraphicsPipelineState(program.PipelineState.Get());
+}
+
+bool RenderGraph::ValidateNativeBuffer(uint32_t pass, render::Buffer* buffer, RgBufferAccess access) noexcept {
+    auto& impl = *_impl;
+    if (!buffer) {
+        impl.Error("GeometryBuffer", "Geometry binding requires a non-null buffer", pass);
+        return false;
+    }
+    const auto tracked = impl.NativeBuffers.find(buffer);
+    if (tracked == impl.NativeBuffers.end()) return true;
+    const auto& reads = impl.Passes[pass].BufferReadStates;
+    const auto declared = reads.find(buffer);
+    const uint32_t required = static_cast<uint32_t>(BufferAccessInfo(access).first);
+    if (declared == reads.end() || (declared->second & required) != required) {
+        impl.Error("UndeclaredGeometryRead", "Graph geometry requires a matching Vertex or Index read declaration in this pass",
+            pass, tracked->second);
+        return false;
+    }
+    return true;
+}
+
+void RenderGraphGraphicsCommands::BindVertexBuffers(std::span<const render::VertexBufferBinding> bindings) noexcept {
+    for (const auto& binding : bindings)
+        if (!_graph.ValidateNativeBuffer(_pass, binding.View.Target, RgBufferAccess::Vertex)) _valid = false;
+    if (_valid) _encoder.BindVertexBuffers(bindings);
+}
+void RenderGraphGraphicsCommands::BindIndexBuffer(render::IndexBufferView view) noexcept {
+    if (!_graph.ValidateNativeBuffer(_pass, view.Target, RgBufferAccess::Index)) _valid = false;
+    if (_valid) _encoder.BindIndexBuffer(view);
+}
+
 void RenderGraphGraphicsCommands::DrawIndirect(RgIndirectArgumentsHandle arguments) noexcept {
-    _graph.ExecuteIndirect(_pass, arguments, RgIndirectCommand::Draw, &_encoder, nullptr);
+    if (_valid) _graph.ExecuteIndirect(_pass, arguments, RgIndirectCommand::Draw, &_encoder, nullptr);
 }
 void RenderGraphGraphicsCommands::DrawIndexedIndirect(RgIndirectArgumentsHandle arguments) noexcept {
-    _graph.ExecuteIndirect(_pass, arguments, RgIndirectCommand::DrawIndexed, &_encoder, nullptr);
+    if (_valid) _graph.ExecuteIndirect(_pass, arguments, RgIndirectCommand::DrawIndexed, &_encoder, nullptr);
 }
 void RenderGraphComputeCommands::DispatchIndirect(RgIndirectArgumentsHandle arguments) noexcept {
     _graph.ExecuteIndirect(_pass, arguments, RgIndirectCommand::Dispatch, nullptr, &_encoder);
@@ -1678,6 +1796,9 @@ render::TextureView* RenderGraphRasterContext::GetTextureView(RgTextureViewHandl
 render::Buffer* RenderGraphRasterContext::GetBuffer(RgBufferHandle handle) const { return _graph.ResolveBuffer(_pass, handle); }
 void RenderGraphRasterContext::BindParameterSet(RgParameterSetHandle handle) noexcept {
     _graph.BindParameterSet(_pass, handle, &_encoder._encoder, nullptr);
+}
+void RenderGraphRasterContext::BindGraphicsProgram(RgGraphicsProgramHandle handle) noexcept {
+    _graph.BindGraphicsProgram(_pass, handle, _encoder._encoder);
 }
 const GraphicsPassState& RenderGraphRasterContext::PassState() const noexcept { return *_graph._impl->Passes[_pass].PassState; }
 render::TextureView* RenderGraphComputeContext::GetTextureView(RgTextureViewHandle handle) const { return _graph.ResolveView(_pass, handle); }

@@ -63,6 +63,12 @@ void FrameUploadScheduler::RunUploadPhase(
     render::CommandBuffer* cmdBuffer,
     ResourceUploader& uploader,
     uint32_t flightIndex) {
+    RADRAY_ASSERT(!_recordingUploads);
+    _recordingUploads = true;
+    struct ExitPhase {
+        bool& Recording;
+        ~ExitPhase() { Recording = false; }
+    } exitPhase{_recordingUploads};
     ApplyCompletedFlights();
     vector<FrameUploadRecord*> pending;
     const size_t uploadCount = _uploads.Count();
@@ -132,6 +138,7 @@ void FrameUploadScheduler::ApplyCompletedFlights() {
 }
 
 void FrameUploadScheduler::PumpCompletedUploads() {
+    RADRAY_ASSERT(!_recordingUploads);
     ApplyCompletedFlights();
     bool resumedAny = true;
     while (resumedAny) {
@@ -289,6 +296,9 @@ void GpuSystem::PumpWaitFrame(uint32_t flightIndex) {
         return;
     }
     ManualCoroutineScheduler<WaitFrameRecord>& waiters = _flights[flightIndex]->WaitFrame;
+    if (_flights[flightIndex]->WaitersCompleted.exchange(false, std::memory_order_acquire)) {
+        for (size_t i = 0; i < waiters.Count(); ++i) waiters.At(i)->FlightComplete = true;
+    }
     // 每轮从头重扫: 恢复一条记录会跑调用方的代码, 它可能新增或摘除记录。
     bool resumedAny = true;
     while (resumedAny) {
@@ -329,21 +339,18 @@ bool GpuSystem::CompleteFlight(uint32_t flightIndex) {
     if (_frameProfiler != nullptr) {
         _frameProfiler->Resolve(flightIndex);
     }
-    _app->NotifyRenderComplete(AppRenderCompleteContext{.FlightIndex = flightIndex});
-    _uploader->CollectFlight(flightIndex);
+    {
+        std::lock_guard lock(_uploadStatsMutex);
+        _completedUploadStats[flightIndex] = flight.HostWrites.GetStats();
+    }
+    _app->NotifyRenderComplete(AppRenderCompleteContext{.FlightIndex = flightIndex, .GpuWorkCompleted = flight.Rendered});
+    flight.Uploader->CollectFlight(flightIndex);
     // 该 flight 的 fence 已完成:标记等在这个 flight 上的上传记录(供下次 scheduler pump 恢复加载协程)。
     if (_frameUploadScheduler != nullptr) {
         _frameUploadScheduler->NotifyFlightComplete(flightIndex);
     }
-    // 【只标记,不恢复】: 本函数在多线程模式下由渲染线程调用 (ThreadedRunner::
-    // RetireRenderedFrames), 而等待者恢复后会跑资产析构 —— 那必须在主线程。恢复交给
-    // PumpWaitFrame。
-    const size_t waiterCount = flight.WaitFrame.Count();
-    for (size_t i = 0; i < waiterCount; ++i) {
-        if (WaitFrameRecord* rec = flight.WaitFrame.At(i); rec != nullptr) {
-            rec->FlightComplete = true;
-        }
-    }
+    // The coroutine records, including cancellation, remain entirely game-thread owned.
+    flight.WaitersCompleted.store(true, std::memory_order_release);
     return true;
 }
 
@@ -369,6 +376,7 @@ void GpuSystem::BeginUpdateForFlight(uint32_t flightIndex) {
         return;
     }
 
+    _app->PumpRenderCompletions();
     FlightSlot& flight = *_flights[flightIndex];
     flight.HostWrites.Reset();
     flight.FrameStartTime = std::chrono::steady_clock::now();
@@ -518,10 +526,10 @@ GpuSystem::GpuSystem(Application* app, const GpuSystemDescriptor& desc)
     _mainQueueTrack.Fence = _device->CreateFence().Unwrap();
     _mainQueueTrack.Fence->SetDebugName("AppMainQueue");
     _flights.reserve(_flightDataCount);
+    _completedUploadStats.resize(_flightDataCount);
     for (uint32_t i = 0; i < _flightDataCount; ++i) {
         _flights.push_back(make_unique<FlightSlot>());
     }
-    _uploader = make_unique<ResourceUploader>(_device.get(), _flightDataCount);
     _frameUploadScheduler = make_unique<FrameUploadScheduler>();
     if (desc.EnableFrameProfiler) {
         _frameProfiler = make_unique<GpuFrameProfiler>(_device.get(), _mainQueue, _flightDataCount);
@@ -536,10 +544,9 @@ GpuSystem::~GpuSystem() noexcept {
     // 槽位时才发生, 于是前一个槽位的 CmdBuffer 已经死了而后一个槽位的等待者才刚恢复。
     // 显式先取消全部, 把"恢复"与"拆 flight"分成两个不重叠的阶段。
     CancelAllWaitFrames();
-    _flights.clear();
     _frameUploadScheduler.reset();
+    _flights.clear();
     _frameProfiler.reset();
-    _uploader.reset();
     _mainQueueTrack.Fence.reset();
     _mainQueueTrack.Queue = nullptr;
     _mainQueue = nullptr;
@@ -556,9 +563,9 @@ float GpuSystem::GetLastGpuTimeMs() const noexcept {
 }
 
 UploadMemoryStats GpuSystem::GetUploadMemoryStats() const noexcept {
+    std::lock_guard lock(_uploadStatsMutex);
     UploadMemoryStats result{};
-    for (const unique_ptr<FlightSlot>& flight : _flights) {
-        const UploadMemoryStats& stats = flight->HostWrites.GetStats();
+    for (const auto& stats : _completedUploadStats) {
         result.PageCount += stats.PageCount;
         result.PageCapacityBytes += stats.PageCapacityBytes;
         result.CommitCount += stats.CommitCount;
@@ -580,11 +587,13 @@ void GpuSystem::PumpFrameUploadScheduler() {
 }
 
 void GpuSystem::WaitAndCleanupCompletedFlights() {
+    if (_windowManager) _windowManager->EnsureRenderIdle();
     _mainQueue->Wait();
 
     for (uint32_t flightIndex = 0; flightIndex < _flights.size(); ++flightIndex) {
         CompleteFlight(flightIndex);
     }
+    _app->PumpRenderCompletions();
     // 队列已 idle,故所有【已提交】flight 的等待者都已就绪。此处恢复它们,让延迟销毁的
     // GPU 对象在正常路径上归还。挂在未提交 flight 上的记录等不到 fence,留给析构里的
     // CancelAllWaitFrames。
@@ -596,26 +605,35 @@ void GpuSystem::WaitAndCleanupCompletedFlights() {
     PumpFrameUploadScheduler();
 }
 
+void GpuSystem::PrepareFrameUploads(uint32_t flightIndex) {
+    FlightSlot& record = *_flights.at(flightIndex);
+    RADRAY_ASSERT(!record.UploadsPrepared && !record.Signal.IsValid());
+    if (!record.UploadCommands) record.UploadCommands = _device->CreateCommandBuffer(_mainQueue).Unwrap();
+    if (!record.Uploader) record.Uploader = make_unique<ResourceUploader>(_device.get(), _flightDataCount);
+    record.UploadCommands->Begin();
+    record.Uploader->BeginFlight(flightIndex, record.HostWrites);
+    if (_frameUploadScheduler) _frameUploadScheduler->RunUploadPhase(record.UploadCommands.get(), *record.Uploader, flightIndex);
+    record.UploadCommands->End();
+    record.UploadsPrepared = true;
+}
+
 AppFrameContext GpuSystem::BeginFrameRecord(
     uint32_t flightIndex,
     std::chrono::duration<float> deltaTime,
     std::chrono::duration<float> lastFrameLatency,
-    bool isInModalLoop) {
+    bool isInModalLoop,
+    bool rendered) {
     FlightSlot& record = *_flights[flightIndex];
+    // Direct/manual callers run both phases on one thread. ThreadedRunner prepares before handoff.
+    if (!record.UploadsPrepared) PrepareFrameUploads(flightIndex);
     if (record.CmdBuffer == nullptr) {
         record.CmdBuffer = _device->CreateCommandBuffer(_mainQueue).Unwrap();
     }
     record.Targets.clear();
     record.Submitted = false;
     record.Recording = true;
+    record.Rendered = rendered;
     record.CmdBuffer->Begin();
-    _uploader->BeginFlight(flightIndex, record.HostWrites);
-    // 帧顶(任何 RenderPass 之前、裸 CommandBuffer):交付本帧 cmd/uploader/flight 给等在
-    // GPU 上传点的加载协程并 inline 恢复,让它们在本帧默认 cmdbuffer 上录制 copy。
-    // copy 与本帧绘制同一提交,fence 完成后由 CompleteFlight 推进加载协程。
-    if (_frameUploadScheduler != nullptr) {
-        _frameUploadScheduler->RunUploadPhase(record.CmdBuffer.get(), *_uploader, flightIndex);
-    }
     if (_frameProfiler != nullptr) {
         _frameProfiler->BeginFrame(record.CmdBuffer.get(), flightIndex);
     }
@@ -644,7 +662,7 @@ void GpuSystem::SubmitFrame(
     record.Recording = false;
 
     // 闭合上传链路：本帧录制的 staging + AssetRef 绑定到该 flight。
-    _uploader->EndFlight(flightIndex);
+    record.Uploader->EndFlight(flightIndex);
 
     // 帧尾 GPU 耗时收尾:写 Bottom timestamp + resolve 到 readback(在 End 之前、后续 barrier 之后录制)。
     if (_frameProfiler != nullptr) {
@@ -669,7 +687,8 @@ void GpuSystem::SubmitFrame(
 
     render::Fence* frameFence = _mainQueueTrack.Fence.get();
     vector<render::CommandBuffer*> submitCmdBuffers;
-    submitCmdBuffers.reserve(desc.CmdBuffers.size() + 1);
+    submitCmdBuffers.reserve(desc.CmdBuffers.size() + 2);
+    submitCmdBuffers.push_back(record.UploadCommands.get());
     submitCmdBuffers.push_back(record.CmdBuffer.get());
     submitCmdBuffers.insert(submitCmdBuffers.end(), desc.CmdBuffers.begin(), desc.CmdBuffers.end());
 
@@ -711,6 +730,7 @@ void GpuSystem::SubmitFrame(
     }
     record.Targets.clear();
     record.Submitted = true;
+    record.UploadsPrepared = false;
 }
 
 // ══════════════════════════════════════════════
@@ -760,7 +780,7 @@ std::optional<AppFrameTarget> AppFrameContext::AcquireWindow(AppWindow* window) 
 }
 
 ResourceUploader& AppFrameContext::GetUploader() const noexcept {
-    return *_gpuSystem->_uploader;
+    return *_gpuSystem->_flights[_flightIndex]->Uploader;
 }
 
 HostWriteBatch& AppFrameContext::GetHostWrites() const noexcept {

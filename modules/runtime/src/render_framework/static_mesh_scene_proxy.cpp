@@ -9,8 +9,9 @@ StaticMeshSceneProxy::StaticMeshSceneProxy(
     vector<Nullable<Material*>> materials,
     const Eigen::Matrix4f& localToWorld) noexcept
     : _mesh(std::move(mesh)),
-      _materials(std::move(materials)),
-      _localToWorld(localToWorld) {}
+      _materials(std::move(materials)) {
+    SetLocalToWorld(localToWorld);
+}
 
 StaticMeshSceneProxy::~StaticMeshSceneProxy() noexcept = default;
 

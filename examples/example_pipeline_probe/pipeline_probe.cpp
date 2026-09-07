@@ -112,26 +112,21 @@ Eigen::Quaternionf Rotation(const Eigen::Vector3f& degrees) {
 class MovingProxy final : public PrimitiveSceneProxy {
 public:
     MovingProxy(StreamingAssetRef<StaticMesh> mesh, Material* material, const Eigen::Matrix4f& transform)
-        : Geometry(mesh, vector<Nullable<Material*>>(mesh.Get()->GetSections().size(), material), transform), Transform(transform) {}
+        : Geometry(mesh, vector<Nullable<Material*>>(mesh.Get()->GetSections().size(), material), transform) {}
     void CollectAssetReferences(vector<StreamingAssetRefAny>& out) const override { Geometry.CollectAssetReferences(out); }
-    Eigen::Matrix4f GetLocalToWorld() const noexcept override { return Transform; }
+    Eigen::Matrix4f GetLocalToWorld() const noexcept override { return Geometry.GetLocalToWorld(); }
+    void SetLocalToWorld(const Eigen::Matrix4f& value) noexcept override { Geometry.SetLocalToWorld(value); }
     AxisAlignedBounds GetLocalBounds() const noexcept override { return Geometry.GetLocalBounds(); }
     MeshDrawArgs GetDrawArgs(uint32_t section) const noexcept override { return Geometry.GetDrawArgs(section); }
     uint32_t GetSectionCount() const noexcept override { return Geometry.GetSectionCount(); }
     Nullable<Material*> GetMaterial(uint32_t section) const noexcept override { return Geometry.GetMaterial(section); }
     StaticMeshSceneProxy Geometry;
-    Eigen::Matrix4f Transform;
 };
 class MovingComponent final : public PrimitiveComponent {
 public:
     MovingComponent(StreamingAssetRef<StaticMesh> mesh, Material* material) : Mesh(std::move(mesh)), Surface(material) {}
     bool ShouldCreateRenderState() const override { return Mesh.IsReady(); }
     unique_ptr<PrimitiveSceneProxy> CreateSceneProxy() override { return make_unique<MovingProxy>(Mesh, Surface, GetWorldMatrix()); }
-
-protected:
-    void OnTransformChanged() override {
-        if (auto* proxy = dynamic_cast<MovingProxy*>(GetSceneProxy())) proxy->Transform = GetWorldMatrix();
-    }
 
 private:
     StreamingAssetRef<StaticMesh> Mesh;
@@ -360,8 +355,9 @@ protected:
         }
         auto pipeline = make_unique<ForwardPipeline>(this, GetWorld()->GetScene(), _camera.Get());
         if (!pipeline->SetSettings(_options.Settings)) return false;
-        _pipeline = pipeline.get();
-        GetRenderSystem()->SetPipeline(std::move(pipeline));
+        auto* installed = pipeline.get();
+        if (!GetRenderSystem()->SetPipeline(std::move(pipeline))) return false;
+        _pipeline = installed;
         if (_options.Observer) {
             auto texture = GetDevice()->CreateTexture({render::TextureDimension::Dim2D, 512, 384, 1, 1, 1, render::TextureFormat::RGBA8_UNORM, render::MemoryType::Device, render::TextureUse::RenderTarget | render::TextureUse::Resource | render::TextureUse::CopySource, {}});
             if (!texture) return false;

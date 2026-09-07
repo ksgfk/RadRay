@@ -92,7 +92,7 @@ void LightComponent::CreateRenderState() {
 
     Scene* scene = GetScene();
     if (scene != nullptr) {
-        _sceneProxy = scene->AddLight(this);
+        _sceneProxy = scene->AddLight(CreateSceneProxy()).Get();
     }
     _renderStateCreated = _sceneProxy != nullptr;
 }

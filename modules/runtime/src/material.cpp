@@ -176,23 +176,28 @@ bool Material::SetSampler(
 }
 
 bool Material::BuildRenderData(MaterialRenderData& out, vector<StreamingAssetRefAny>& retainedAssets) const {
-    MaterialRenderData snapshot;
+    auto& snapshot = out;
     snapshot.Queue = _renderQueue;
-    vector<StreamingAssetRefAny> owners;
+    snapshot.Passes.resize(_technique->Passes().size());
+    const auto ownerStart = retainedAssets.size();
     const auto canonicalBytes = _parameters.GetBufferData(*_technique->GetPrimaryPass().BufferIndex);
     bool anyValid = false;
     for (uint32_t index = 0; index < _technique->Passes().size(); ++index) {
         const auto& layout = _technique->Passes()[index];
-        MaterialPassRenderData pass;
+        auto& pass = snapshot.Passes[index];
+        pass.Textures.clear();
+        pass.Samplers.clear();
+        const auto previousGroup = pass.ParameterGroup;
         pass.PassName = layout.Name;
         pass.Program = layout.Program;
         pass.ParameterGroup = layout.ParameterGroup;
         pass.PipelineState = _pipelineStates[index];
         pass.Valid = true;
         if (layout.BufferIndex) {
-            pass.Parameters = ShaderParameterStorage{&layout.Program->GetParameterLayout(), layout.ParameterGroup};
+            if (pass.Parameters.GetLayout() != &layout.Program->GetParameterLayout() || previousGroup != layout.ParameterGroup)
+                pass.Parameters = ShaderParameterStorage{&layout.Program->GetParameterLayout(), layout.ParameterGroup};
             pass.Valid = pass.Parameters.CopyCompatibleBufferBytes(*layout.BufferIndex, canonicalBytes);
-        }
+        } else pass.Parameters = ShaderParameterStorage{};
         for (const auto& resource : layout.Resources) {
             for (uint32_t element = 0; element < resource.Info.ElementCount; ++element) {
                 if (resource.Info.Kind == ShaderParameterKind::Texture) {
@@ -205,7 +210,7 @@ bool Material::BuildRenderData(MaterialRenderData& out, vector<StreamingAssetRef
                         continue;
                     }
                     pass.Textures.push_back({resource.Info, texture.Get(), value->SubView, element});
-                    owners.push_back(value->Texture.AsAny());
+                    retainedAssets.push_back(value->Texture.AsAny());
                 } else {
                     const auto value = std::find_if(_resources->Samplers.begin(), _resources->Samplers.end(), [&](const auto& entry) {
                         return entry.Name == resource.Name && entry.Element == element;
@@ -219,10 +224,8 @@ bool Material::BuildRenderData(MaterialRenderData& out, vector<StreamingAssetRef
             }
         }
         anyValid |= pass.Valid;
-        snapshot.Passes.push_back(std::move(pass));
     }
-    if (anyValid) retainedAssets.insert(retainedAssets.end(), std::make_move_iterator(owners.begin()), std::make_move_iterator(owners.end()));
-    out = std::move(snapshot);
+    if (!anyValid) retainedAssets.resize(ownerStart);
     return anyValid;
 }
 

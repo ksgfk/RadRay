@@ -7,6 +7,7 @@
 #include <radray/file.h>
 #include "forward_pipeline/forward_frame.h"
 #include <radray/runtime/render_framework/render_pipeline.h>
+#include <radray/runtime/render_framework/scene.h>
 
 namespace radray {
 namespace {
@@ -17,6 +18,44 @@ string ReadSource(const std::filesystem::path& path) {
     auto text = ReadTextFile(kRoot / path);
     EXPECT_TRUE(text.has_value()) << path.string();
     return text.value_or(string{});
+}
+
+TEST(RuntimeLayering, SceneOwnsProxiesWithoutComponentFactories) {
+    static_assert(std::is_same_v<decltype(std::declval<Scene&>().AddPrimitive(std::declval<unique_ptr<PrimitiveSceneProxy>>())), Nullable<PrimitiveSceneProxy*>>);
+    for (const auto path : {"modules/runtime/include/radray/runtime/render_framework/scene.h", "modules/runtime/src/render_framework/scene.cpp"}) {
+        const auto source = ReadSource(path);
+        for (const auto forbidden : {"components/", "game_framework/", "PrimitiveComponent", "LightComponent", "CreateSceneProxy"})
+            EXPECT_EQ(source.find(forbidden), string::npos) << path << ": " << forbidden;
+    }
+    Scene scene;
+    auto owner = make_unique<PrimitiveSceneProxy>();
+    const auto identity = owner->GetGeneration();
+    const auto proxy = scene.AddPrimitive(std::move(owner));
+    ASSERT_TRUE(proxy);
+    EXPECT_FALSE(owner);
+    RenderSceneSnapshot snapshot;
+    vector<StreamingAssetRefAny> retained;
+    ASSERT_TRUE(BuildRenderSceneSnapshot(scene, snapshot, retained));
+    ASSERT_EQ(snapshot.Primitives.size(), 1u);
+    EXPECT_EQ(snapshot.Primitives.front().Generation, identity);
+    scene.RemovePrimitive(proxy.Get());
+    EXPECT_TRUE(scene.Primitives().empty());
+    EXPECT_FALSE(scene.AddPrimitive(nullptr));
+}
+
+TEST(RuntimeLayering, ShaderCacheAndUiGraphHaveExplicitInputs) {
+    for (const auto path : {"modules/runtime/src/shader_program_cache.h", "modules/runtime/src/shader_program_cache.cpp",
+                            "modules/runtime/src/imgui/imgui_graph_frame.h", "modules/runtime/src/imgui/imgui_graph.cpp"}) {
+        const auto source = ReadSource(path);
+        for (const auto forbidden : {"application.h", "window_manager.h", "GetApplication", "WindowManager", "self.App", "record->Asset"})
+            EXPECT_EQ(source.find(forbidden), string::npos) << path << ": " << forbidden;
+    }
+    const auto uiFrame = ReadSource("modules/runtime/src/imgui/imgui_graph_frame.h");
+    EXPECT_EQ(uiFrame.find("StreamingAssetRef"), string::npos);
+    EXPECT_EQ(uiFrame.find("RenderSystem"), string::npos);
+    EXPECT_EQ(ReadSource("modules/runtime/src/imgui/imgui_graph.cpp").find("render_system.h"), string::npos);
+    const auto forward = ReadSource("modules/runtime/src/forward_pipeline/forward_pipeline.cpp");
+    EXPECT_EQ(forward.find("GetApplication"), string::npos);
 }
 
 TEST(RuntimeLayering, LegacyPipelineScaffoldingRemoved) {

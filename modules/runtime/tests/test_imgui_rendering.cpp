@@ -68,18 +68,18 @@ public:
                 if (flight.Frame == 7) scenes.front().Texture = previousImage;
                 if (flight.Frame == 9) scenes.front().Texture = ctx.ImportOutputTarget(graph, scenes.front().Output);
                 if (flight.Frame == 10) scenes.push_back(scenes.front());
-                ImGuiGraph::BuildGraph(graph, ctx, Ui, scenes);
+                ImGuiGraph::BuildGraph(graph, ctx, Ui.GetGraphFrame(ctx.FlightIndex()), scenes);
             } else
-                ImGuiGraph::BuildGraph(graph, ctx, Ui, {}, badBindings);
+                ImGuiGraph::BuildGraph(graph, ctx, Ui.GetGraphFrame(ctx.FlightIndex()), {}, badBindings);
             EXPECT_FALSE(graph.Compile());
             EXPECT_FALSE(graph.GetReport().Diagnostics.empty());
-            ImGuiGraph::CompleteGraph(graph, ctx, Ui, false);
+            ImGuiGraph::CompleteGraph(graph, ctx, Ui.GetGraphFrame(ctx.FlightIndex()), false);
             ++Rejected;
             return;
         }
         const ImGuiSceneOutput scene{App.GetWindowManager()->GetMainWindow()->GetRenderOutputId(), image, ImGuiColorEncoding::Srgb};
-        EXPECT_TRUE(OutputPreview ? ImGuiGraph::BuildGraph(graph, ctx, Ui, std::span{&scene, 1})
-                                  : ImGuiGraph::BuildGraph(graph, ctx, Ui, {}, std::span{&binding, 1}));
+        EXPECT_TRUE(OutputPreview ? ImGuiGraph::BuildGraph(graph, ctx, Ui.GetGraphFrame(ctx.FlightIndex()), std::span{&scene, 1})
+                                  : ImGuiGraph::BuildGraph(graph, ctx, Ui.GetGraphFrame(ctx.FlightIndex()), {}, std::span{&binding, 1}));
         for (const auto& surface : ctx.OutputSurfaces()) {
             if (surface.Id != App.GetWindowManager()->GetMainWindow()->GetRenderOutputId()) continue;
             const auto output = ctx.ImportOutputTarget(graph, surface.Id);
@@ -102,7 +102,7 @@ public:
             flight.Pending = true;
         }
         const auto result = ctx.ExecuteGraph(graph);
-        ImGuiGraph::CompleteGraph(graph, ctx, Ui, result.Success);
+        ImGuiGraph::CompleteGraph(graph, ctx, Ui.GetGraphFrame(ctx.FlightIndex()), result.Success);
         EXPECT_TRUE(result.Success) << graph.GetReport().ToText();
         flight.Pending &= result.Success;
     }

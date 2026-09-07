@@ -649,11 +649,8 @@ public:
         vector<Nullable<Material*>> materials,
         const Eigen::Matrix4f& localToWorld)
         : _draws(std::move(draws)),
-          _materials(std::move(materials)),
-          _localToWorld(localToWorld) {}
-
-    Eigen::Matrix4f GetLocalToWorld() const noexcept override {
-        return _localToWorld;
+          _materials(std::move(materials)) {
+        SetLocalToWorld(localToWorld);
     }
     MeshDrawArgs GetDrawArgs(uint32_t sectionIndex) const noexcept override {
         return sectionIndex < _draws.size() ? _draws[sectionIndex] : MeshDrawArgs{};
@@ -668,7 +665,6 @@ public:
 private:
     vector<MeshDrawArgs> _draws;
     vector<Nullable<Material*>> _materials;
-    Eigen::Matrix4f _localToWorld;
 };
 
 class TestPrimitiveComponent final : public PrimitiveComponent {
@@ -761,12 +757,12 @@ void RunDrawListSort(render::test::DeviceContext& context) {
         2.0f);
 
     Scene scene;
-    ASSERT_NE(scene.AddPrimitive(&opaqueA), nullptr);
-    ASSERT_NE(scene.AddPrimitive(&opaqueB), nullptr);
-    ASSERT_NE(scene.AddPrimitive(&opaqueA2), nullptr);
-    ASSERT_NE(scene.AddPrimitive(&opaqueARepeat), nullptr);
-    ASSERT_NE(scene.AddPrimitive(&farTransparent), nullptr);
-    ASSERT_NE(scene.AddPrimitive(&nearTransparent), nullptr);
+    ASSERT_NE(scene.AddPrimitive(opaqueA.CreateSceneProxy()).Get(), nullptr);
+    ASSERT_NE(scene.AddPrimitive(opaqueB.CreateSceneProxy()).Get(), nullptr);
+    ASSERT_NE(scene.AddPrimitive(opaqueA2.CreateSceneProxy()).Get(), nullptr);
+    ASSERT_NE(scene.AddPrimitive(opaqueARepeat.CreateSceneProxy()).Get(), nullptr);
+    ASSERT_NE(scene.AddPrimitive(farTransparent.CreateSceneProxy()).Get(), nullptr);
+    ASSERT_NE(scene.AddPrimitive(nearTransparent.CreateSceneProxy()).Get(), nullptr);
     RenderSceneSnapshot snapshot;
     vector<StreamingAssetRefAny> owners;
     ASSERT_TRUE(BuildRenderSceneSnapshot(scene, snapshot, owners));

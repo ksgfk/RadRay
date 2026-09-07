@@ -53,6 +53,8 @@ struct ImGuiSystemDescriptor {
     vector<ImGuiFontDescriptor> Fonts{};
 };
 
+class ImGuiGraphFrame;
+
 class ImGuiSystem {
 public:
     explicit ImGuiSystem(Application& app);
@@ -70,6 +72,7 @@ public:
     ImTextureID CreateGraphImage(const ImGuiTextureDescriptor& descriptor = {});
     bool UnregisterTexture(ImTextureID texture);
     bool HasError() const noexcept;
+    ImGuiGraphFrame GetGraphFrame(uint32_t flight) noexcept;
     /// Framework entry points. Context and platform callbacks are confined to the creating thread.
     void BeginUpdate(uint32_t flight);
     bool NewFrame(const AppUpdateContext& context);

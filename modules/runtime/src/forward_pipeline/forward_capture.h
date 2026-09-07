@@ -11,6 +11,7 @@ struct ForwardCapture {
     std::filesystem::path Directory;
     string Name, Report, Dot;
     bool Pending{false};
+    void CaptureReport(const RenderGraphExecutionReport& report);
     bool Build(RenderGraph& graph, RenderPipelineContext& context, render::Device& device);
     bool Complete();
 };

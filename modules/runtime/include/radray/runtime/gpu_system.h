@@ -112,19 +112,23 @@ struct GpuFlightSlot {
     // —— 录制态（渲染线程独占）。CmdBuffer 池化复用，
     //    Targets 收集本帧 acquire 的全部窗口以支持多窗口/多 viewport。
     unique_ptr<render::CommandBuffer> CmdBuffer;
+    unique_ptr<render::CommandBuffer> UploadCommands;
+    unique_ptr<ResourceUploader> Uploader;
     HostWriteBatch HostWrites;
     vector<AcquiredTarget> Targets;
     bool Submitted{false};
     bool Recording{false};
+    bool UploadsPrepared{false};
+    bool Rendered{true};
 
     // —— 计时态（游戏线程写）。
     std::chrono::steady_clock::time_point FrameStartTime{};
 
     /// 等在本 flight 帧边界上的协程 (IWaitFrameProcessor::Wait 的挂起点)。
     /// 【挂在这里而不是全局表】flight 的 fence 就是完成条件, 无需另存 fence 值再比较。
-    /// 【两段式】CompleteFlight 只标记 FlightComplete (可能在渲染线程), resume 由主线程的
-    /// PumpWaitFrame 做。
+    /// CompleteFlight 只发布 WaitersCompleted；主线程 PumpWaitFrame 标记并恢复记录。
     ManualCoroutineScheduler<WaitFrameRecord> WaitFrame;
+    std::atomic_bool WaitersCompleted{false};
 
     // —— 提交态（渲染线程写，retire 经 _retireMutex 读后清）。
     GpuFenceSignal Signal;
@@ -181,12 +185,14 @@ public:
     ~FrameUploadScheduler() noexcept;
 
     task<FrameUploadScope> BeginUpload();
-    /// Run and Pump are serialized by the runner; consume completions before reusing a flight.
+    /// Run and Pump execute on the game thread; consume completions before reusing a flight.
     void RunUploadPhase(render::CommandBuffer* cmdBuffer, ResourceUploader& uploader, uint32_t flightIndex);
     /// May run concurrently with Run/Pump; only queues a completed flight notification.
     void NotifyFlightComplete(uint32_t flightIndex);
     /// Resume completed/canceled loads on the game thread.
     void PumpCompletedUploads();
+    /// Calling-thread stage marker; CPU file/decode/mip preparation must precede this phase.
+    bool IsRecordingUploads() const noexcept { return _recordingUploads; }
 
     FrameUploadRecord* RegisterUpload(stop_token stop, std::coroutine_handle<> continuation);
     bool EraseUpload(FrameUploadRecord* record) noexcept;
@@ -200,6 +206,7 @@ private:
     ManualCoroutineScheduler<FrameUploadRecord> _uploads;
     std::mutex _completedFlightsMutex;
     vector<uint32_t> _completedFlights;
+    bool _recordingUploads{false};
 };
 
 /// co_await GpuSystem::Wait() 的 awaitable。恢复点在 GpuSystem::PumpWaitFrame(主线程)。
@@ -354,6 +361,9 @@ public:
     void WaitAndCleanupCompletedFlights();
     bool CompleteFlightIfReady(uint32_t flightIndex, bool wait);
     void BeginUpdateForFlight(uint32_t flightIndex);
+    /// Game thread, after Update and before publishing the flight to the render thread.
+    /// Upload commands and staging pages are owned by this flight until its real submit fence.
+    void PrepareFrameUploads(uint32_t flightIndex);
 
     /// 一帧开头：取/建该 flight 的 CommandBuffer 并 Begin()，清空上帧 acquire 的目标。
     /// 返回供应用在 Render 中使用的帧上下文。
@@ -361,7 +371,8 @@ public:
         uint32_t flightIndex,
         std::chrono::duration<float> deltaTime,
         std::chrono::duration<float> lastFrameLatency,
-        bool isInModalLoop);
+        bool isInModalLoop,
+        bool rendered = true);
 
     /// 一帧收尾：uploader.EndFlight → CmdBuffer.End → 聚合 sync object → Submit
     /// → 写 flight.Signal → Present 全部 target。
@@ -414,11 +425,12 @@ private:
     /// ManualCoroutineScheduler, 挂起的协程记录里存着回指调度器的指针 (stop callback),
     /// 搬动槽位会让那些指针指向旧地址。数量构造时定下, 故间接一层无代价。
     vector<unique_ptr<FlightSlot>> _flights;
-    unique_ptr<ResourceUploader> _uploader;
     unique_ptr<FrameUploadScheduler> _frameUploadScheduler;
     unique_ptr<GpuFrameProfiler> _frameProfiler;
     uint64_t _nowFrameIndex{0};
     std::atomic<float> _lastFrameLatencySeconds{0.0f};
+    mutable std::mutex _uploadStatsMutex;
+    vector<UploadMemoryStats> _completedUploadStats;
 };
 
 template <>

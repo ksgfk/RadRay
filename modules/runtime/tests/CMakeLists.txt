@@ -40,6 +40,9 @@ target_include_directories(test_mesh_draw PRIVATE
 target_compile_definitions(test_mesh_draw PRIVATE RADRAY_PROJECT_DIR="${CMAKE_SOURCE_DIR}")
 
 if (RADRAY_ENABLE_SHADER_JIT)
+    radray_add_test(test_runtime_profile SOURCES test_runtime_profile.cpp LINK_LIBS radrayruntime)
+    target_include_directories(test_runtime_profile PRIVATE "${CMAKE_SOURCE_DIR}/modules/render/tests" "${CMAKE_SOURCE_DIR}/modules/runtime/src")
+    target_compile_definitions(test_runtime_profile PRIVATE RADRAY_PROJECT_DIR="${CMAKE_SOURCE_DIR}")
     radray_add_test(test_temporal_feedback SOURCES test_temporal_feedback.cpp LINK_LIBS radrayruntime)
     target_include_directories(test_temporal_feedback PRIVATE "${CMAKE_SOURCE_DIR}/modules/render/tests")
     target_compile_definitions(test_temporal_feedback PRIVATE RADRAY_PROJECT_DIR="${CMAKE_SOURCE_DIR}")
@@ -72,7 +75,7 @@ if (RADRAY_ENABLE_SHADER_JIT)
     target_compile_definitions(test_forward_pipeline PRIVATE RADRAY_PROJECT_DIR="${CMAKE_SOURCE_DIR}")
     radray_add_test(test_runtime_shader_jit SOURCES test_runtime_shader_jit.cpp LINK_LIBS radrayruntime)
     target_include_directories(test_runtime_shader_jit PRIVATE
-        "${CMAKE_SOURCE_DIR}/modules/render/tests")
+        "${CMAKE_SOURCE_DIR}/modules/render/tests" "${CMAKE_SOURCE_DIR}/modules/runtime/src")
     target_link_libraries(test_runtime_shader_jit PRIVATE RadRayDXC::Headers)
     target_compile_definitions(test_runtime_shader_jit PRIVATE RADRAY_PROJECT_DIR="${CMAKE_SOURCE_DIR}")
 endif()

@@ -61,13 +61,14 @@ void RenderResourcePool::BeginFlight(uint64_t frameSerial) {
     RefreshStats();
 }
 
-Nullable<PooledTexture*> RenderResourcePool::AcquireTexture(const render::TextureDescriptor& desc, std::string_view name) {
+Nullable<PooledTexture*> RenderResourcePool::AcquireTexture(const render::TextureDescriptor& desc, std::string_view name, uint64_t viewId) {
     RADRAY_ASSERT(_cycle != 0);
     const TexturePoolKey key{desc};
     for (auto& texture : _textures) {
         if (!texture->InUse && texture->LastUsedCycle != _cycle && texture->Key == key) {
             texture->InUse = true;
             texture->LastUsedCycle = _cycle;
+            texture->ViewId = viewId;
             ++_stats.Hits;
             return texture.get();
         }
@@ -85,6 +86,7 @@ Nullable<PooledTexture*> RenderResourcePool::AcquireTexture(const render::Textur
     texture->States.assign(size_t{layers} * desc.MipLevels, render::TextureState::Undefined);
     texture->InUse = true;
     texture->LastUsedCycle = _cycle;
+    texture->ViewId = viewId;
     auto* result = texture.get();
     _textures.push_back(std::move(texture));
     ++_stats.Created;
@@ -92,13 +94,14 @@ Nullable<PooledTexture*> RenderResourcePool::AcquireTexture(const render::Textur
     return result;
 }
 
-Nullable<PooledBuffer*> RenderResourcePool::AcquireBuffer(const render::BufferDescriptor& desc, std::string_view name) {
+Nullable<PooledBuffer*> RenderResourcePool::AcquireBuffer(const render::BufferDescriptor& desc, std::string_view name, uint64_t viewId) {
     RADRAY_ASSERT(_cycle != 0);
     const BufferPoolKey key{desc};
     for (auto& buffer : _buffers) {
         if (!buffer->InUse && buffer->LastUsedCycle != _cycle && buffer->Key == key) {
             buffer->InUse = true;
             buffer->LastUsedCycle = _cycle;
+            buffer->ViewId = viewId;
             ++_stats.Hits;
             return buffer.get();
         }
@@ -115,6 +118,7 @@ Nullable<PooledBuffer*> RenderResourcePool::AcquireBuffer(const render::BufferDe
     buffer->State = InitialBufferState(desc);
     buffer->InUse = true;
     buffer->LastUsedCycle = _cycle;
+    buffer->ViewId = viewId;
     auto* result = buffer.get();
     _buffers.push_back(std::move(buffer));
     ++_stats.Created;
@@ -142,6 +146,7 @@ Nullable<render::TextureView*> RenderResourcePool::GetTextureView(PooledTexture&
 void RenderResourcePool::EndGraph() noexcept {
     for (auto& texture : _textures) texture->InUse = false;
     for (auto& buffer : _buffers) buffer->InUse = false;
+    RefreshStats();
 }
 
 Nullable<render::TextureView*> RenderResourcePool::CreateExternalTextureView(const render::TextureViewDescriptor& desc) {
@@ -171,11 +176,29 @@ void RenderResourcePool::RefreshStats() {
     _stats.BufferCount = static_cast<uint32_t>(_buffers.size());
     _stats.ViewCount = 0;
     _stats.EstimatedBytes = 0;
+    _stats.MemoryByView.clear();
+    const auto memory = [&](uint64_t id) -> RenderResourceMemoryStats& {
+        for (auto& entry : _stats.MemoryByView) if (entry.ViewId == id) return entry;
+        return _stats.MemoryByView.emplace_back(RenderResourceMemoryStats{.ViewId = id});
+    };
     for (const auto& texture : _textures) {
         _stats.ViewCount += static_cast<uint32_t>(texture->Views.size());
-        _stats.EstimatedBytes += EstimateTextureBytes(texture->Key.Desc);
+        const auto bytes = EstimateTextureBytes(texture->Key.Desc);
+        _stats.EstimatedBytes += bytes;
+        auto& entry = memory(texture->ViewId);
+        if (render::IsDepthStencilFormat(texture->Key.Desc.Format)) entry.DepthTextureBytes += bytes;
+        else if (texture->Key.Desc.Usage.HasFlag(render::TextureUse::UnorderedAccess)) entry.StorageTextureBytes += bytes;
+        else entry.ColorTextureBytes += bytes;
+        if (texture->LastUsedCycle != _cycle) entry.InactiveBytes += bytes;
     }
-    for (const auto& buffer : _buffers) _stats.EstimatedBytes += buffer->Key.Desc.Size;
+    for (const auto& buffer : _buffers) {
+        const auto bytes = buffer->Key.Desc.Size;
+        _stats.EstimatedBytes += bytes;
+        auto& entry = memory(buffer->ViewId);
+        entry.BufferBytes += bytes;
+        if (buffer->LastUsedCycle != _cycle) entry.InactiveBytes += bytes;
+    }
+    _stats.PeakEstimatedBytes = std::max(_stats.PeakEstimatedBytes, _stats.EstimatedBytes);
 }
 
 }  // namespace radray

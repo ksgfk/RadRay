@@ -46,8 +46,8 @@ string RenderGraphExecutionReport::ToJson() const {
     for (size_t i = 0; i < Resources.size(); ++i) {
         const auto& r = Resources[i];
         if (i) result += ',';
-        result += fmt::format("{{\"name\":{},\"descriptor\":{},\"texture\":{},\"external\":{},\"physicalId\":{},\"firstUse\":{},\"lastUse\":{}}}",
-                              Quote(r.Name), Quote(r.Descriptor), r.Texture, r.External, r.PhysicalId, r.FirstUse, r.LastUse);
+        result += fmt::format("{{\"name\":{},\"descriptor\":{},\"texture\":{},\"external\":{},\"physicalId\":{},\"firstUse\":{},\"lastUse\":{},\"viewId\":{},\"estimatedBytes\":{}}}",
+                              Quote(r.Name), Quote(r.Descriptor), r.Texture, r.External, r.PhysicalId, r.FirstUse, r.LastUse, r.ViewId, r.EstimatedBytes);
     }
     result += "],\"barriers\":[";
     for (size_t i = 0; i < Barriers.size(); ++i) {
@@ -62,8 +62,17 @@ string RenderGraphExecutionReport::ToJson() const {
         result += fmt::format("{{\"code\":{},\"graph\":{},\"pass\":{},\"binding\":{},\"resource\":{},\"message\":{},\"file\":{},\"line\":{}}}",
                               Quote(d.Code), Quote(d.Graph), Quote(d.Pass), Quote(d.Binding), Quote(d.Resource), Quote(d.Message), Quote(d.File), d.Line);
     }
-    result += fmt::format("],\"pool\":{{\"hits\":{},\"misses\":{},\"created\":{},\"trimmed\":{},\"textures\":{},\"buffers\":{},\"views\":{},\"estimatedBytes\":{}}}}}",
-                          Pool.Hits, Pool.Misses, Pool.Created, Pool.Trimmed, Pool.TextureCount, Pool.BufferCount, Pool.ViewCount, Pool.EstimatedBytes);
+    result += fmt::format("],\"cpuNanoseconds\":{{\"compile\":{},\"realize\":{},\"prepare\":{},\"record\":{}}},\"graphicsPipelines\":{{\"requests\":{},\"preparations\":{},\"creations\":{}}},\"pool\":{{\"hits\":{},\"misses\":{},\"created\":{},\"trimmed\":{},\"textures\":{},\"buffers\":{},\"views\":{},\"estimatedBytes\":{},\"peakEstimatedBytes\":{},\"memoryByView\":[",
+                          Cpu.CompileNanoseconds, Cpu.RealizeNanoseconds, Cpu.PrepareNanoseconds, Cpu.RecordNanoseconds,
+                          GraphicsPipelineRequests, GraphicsPipelinePreparations, GraphicsPipelineCreations,
+                          Pool.Hits, Pool.Misses, Pool.Created, Pool.Trimmed, Pool.TextureCount, Pool.BufferCount, Pool.ViewCount, Pool.EstimatedBytes, Pool.PeakEstimatedBytes);
+    for (size_t i = 0; i < Pool.MemoryByView.size(); ++i) {
+        if (i) result += ',';
+        const auto& m = Pool.MemoryByView[i];
+        result += fmt::format("{{\"viewId\":{},\"colorTextureBytes\":{},\"depthTextureBytes\":{},\"storageTextureBytes\":{},\"bufferBytes\":{},\"inactiveBytes\":{}}}",
+                              m.ViewId, m.ColorTextureBytes, m.DepthTextureBytes, m.StorageTextureBytes, m.BufferBytes, m.InactiveBytes);
+    }
+    result += "]}}";
     return result;
 }
 

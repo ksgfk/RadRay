@@ -122,6 +122,7 @@ public:
     void SetRenderSystem(Nullable<RenderSystem*> renderSystem) noexcept { _renderSystem = renderSystem.Get(); }
     RenderSystem* GetRenderSystem() const noexcept { return _renderSystem; }
     void DetachAllSwapChains() noexcept;
+    void EnsureRenderIdle() const noexcept;
     NativeWindow* FindMainNativeWindow(NativeWindowType type) const noexcept;
     NativeWindow* FindFirstNativeWindow(NativeWindowType type) const noexcept;
 

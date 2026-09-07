@@ -26,12 +26,17 @@ void DepthOnlyMeshPassProcessor::AddMeshBatch(const RendererListDesc& desc, cons
         if (values.SetMatrix4x4("ForwardView.ViewProj", desc.View->ViewProjection))
             view->second = _resources.PrepareGroup(*program, binding->ViewGroup, values);
     }
-    ShaderParameterStorage object{&layout, binding->ObjectGroup};
-    if (!object.SetMatrix4x4("ForwardObject.LocalToWorld", scene.Primitives[batch.Primitive].LocalToWorld)) {
-        out.Reject(MeshPassRejectReason::InvalidBindings);
-        return;
+    auto [objects, newObjects] = _objects.try_emplace(program, &layout, binding->ObjectGroup);
+    auto [prepared, newObject] = objects->second.Groups.try_emplace(batch.Primitive, std::nullopt);
+    if (newObject) {
+        auto& object = objects->second.Values;
+        if (!object.SetMatrix4x4("ForwardObject.LocalToWorld", scene.Primitives[batch.Primitive].LocalToWorld)) {
+            out.Reject(MeshPassRejectReason::InvalidBindings);
+            return;
+        }
+        prepared->second = _resources.PrepareGroup(*program, binding->ObjectGroup, object);
     }
-    auto objectGroup = _resources.PrepareGroup(*program, binding->ObjectGroup, object);
+    const auto& objectGroup = prepared->second;
     if (!view->second || !objectGroup) {
         out.Reject(MeshPassRejectReason::PrepareResourceFailed);
         return;
@@ -45,7 +50,7 @@ void DepthOnlyMeshPassProcessor::AddMeshBatch(const RendererListDesc& desc, cons
     command.FirstIndex = batch.FirstIndex;
     command.IndexCount = batch.IndexCount;
     command.VertexOffset = batch.VertexOffset;
-    command.Groups = {*view->second, std::move(*objectGroup)};
+    command.Groups = {*view->second, *objectGroup};
     if (!FinalizeMeshDrawCommand(command)) {
         out.Reject(MeshPassRejectReason::InvalidBindings);
         return;

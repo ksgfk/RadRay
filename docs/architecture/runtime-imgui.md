@@ -19,6 +19,11 @@ OFF 时头文件可直接包含且不引入依赖，源码编译为空翻译单�
 不创建其 target，也不传播其 include、链接或编译定义。通用窗口、输入路由、输出请求及区域拷贝
 仍属于原模块。
 
+UI graph 实现只接收私有 `ImGuiGraphFrame`：当前 flight 的 UI 值快照与 graph 资源引用。
+它不依赖 Application、WindowManager 或 AssetManager。带资产的注册记录由 game-thread 的
+flight owner 容器保活，快照只携带纹理指针和原生 lease；退休时也在 game thread 释放资产引用。
+`ImGuiOnlyPipeline` 的装配留在 system 适配层，UI native PSO 通过 graph prepare 阶段创建。
+
 FreeType 子目录既关闭可选依赖发现，也在局部变量作用域屏蔽父项目的 PNG、zlib 等发现结果，
 避免其 CMake 在禁用发现后继续消费已有的 `*_FOUND`。项目其他模块的依赖配置保持独立。
 

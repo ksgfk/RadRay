@@ -29,18 +29,28 @@ Application::StartLoop
   ├─ World::Tick
   ├─ Application::OnImGui             可选；随后 Render、UpdatePlatformWindows、复制拥有数据的快照
   ├─ RenderSystem::PrepareFrame        game thread 复制 pipeline input 并构造 view families
-  ├─ GpuSystem::BeginFrameRecord      取/建 CommandBuffer 并 Begin()；清上帧 targets
-  │    ├─ upload phase                FrameUploadScheduler 恢复等待帧顶的协程
-  │    └─ GpuFrameProfiler::BeginFrame
+  ├─ GpuSystem::PrepareFrameUploads   game thread 恢复 BeginUpload，录制当前 flight 的 UploadCommands
+  ├─ 发布当前 flight；game thread 可以开始下一可写 flight 的 Update
+  ├─ GpuSystem::BeginFrameRecord      render thread Begin 主 CommandBuffer；清 targets、开始 profiler
   ├─ Application::Render              → pool/history BeginFlight → output/view resolve → pipeline graph → host finalize
   └─ GpuSystem::EndFrameRecordAndSubmit
-       uploader.EndFlight → CmdBuffer.End → 聚合 sync object → Submit
+       uploader.EndFlight → CmdBuffer.End → 聚合 sync object → UploadCommands + 主 CommandBuffer 一次 Submit
        → 写 flight.Signal → Present 全部 target
 ```
 
-`CompleteFlight` 在 fence 完成后跑：resolve profiler、`CollectFlight` 回收 staging、
-标记该 flight 上的 `WaitFrameRecord`。多线程模式下它在渲染线程
-（`ThreadedRunner::RetireRenderedFrames`）。
+`CompleteFlight` 在 fence 完成后 resolve profiler、回收 staging，并发布完成通知和原子
+`WaitersCompleted`。多线程模式下它在渲染线程，不访问 game-thread 的协程等待表或资产引用。
+`Application::PumpRenderCompletions` 在 game thread 消费通知并调用 `OnRenderFrameComplete`；
+正常、跳过和 shutdown 路径保持相同线程归属。上传统计也读取已完成 flight 的受锁保护快照。
+
+多线程普通帧只等待当前 flight 可写，不等待上一帧 CPU record 结束，允许 `Update(n+1)` 与
+`Record(n)` 重叠。同一 flight 仍必须等 fence。每个 flight 拥有独立上传命令和 uploader，
+发布后 game thread 不再改它。关闭、模态丢帧和 shutdown 仍提交已经录制的上传并等待真实 fence，
+但完成通知的 `GpuWorkCompleted=false`，不能据此提交图像历史。单线程/手动录制入口会补做尚未准备的上传。
+
+创建、销毁、resize 或修改 output 时，`WindowManager`/output registry 才调用 runner 的
+`EnsureRenderIdle`，排空已发布工作和 GPU 引用后修改。窗口的 Active/尺寸目录在 PrepareFrame
+复制进 flight；record 不反查活的最小化状态。这个生命周期等待不发生在普通无变更帧。
 
 可选 UI 的完成通知只发布 flight 结果，主线程在下一次 update 消费，渲染线程不访问活的
 ImGui context。窗口模态 Tick 在正在进行的帧内拒绝重入，多线程 runner 只在 render idle
@@ -65,7 +75,8 @@ WindowInputRouter 复制 UTF-8 文本和双轴浮点滚轮，在 Update 前统�
 
 | 组 | 成员 | 谁访问 |
 |---|---|---|
-| 录制态 | `CmdBuffer`, `HostWrites`, `Targets`, `Submitted`, `Recording` | 渲染线程独占（单线程模式即主线程），`BeginFrameRecord`→`Render`→`EndFrameRecordAndSubmit` 期间 |
+| 上传态 | `UploadCommands`, `Uploader`, `UploadsPrepared`, `HostWrites` | game thread 准备，发布后转交 render thread；fence 后回收 |
+| 录制态 | `CmdBuffer`, `HostWrites`, `Targets`, `Submitted`, `Recording` | render thread 在发布后独占，`BeginFrameRecord`→`Render`→提交期间 |
 | 计时态 | `FrameStartTime` | 游戏线程在帧开头写 |
 | 提交态 | `Signal` | `EndFrameRecordAndSubmit` 写；retire/`CompleteFlight` 经 `_retireMutex` 读后清 |
 | 等待表 | `WaitFrame` | 见下 |
@@ -84,19 +95,16 @@ WindowInputRouter 复制 UTF-8 文本和双轴浮点滚轮，在 Update 前统�
 **等待表挂在 per-flight 槽位上**（`GpuFlightSlot::WaitFrame`），不是全局表。flight 的
 fence 就是完成条件，记在槽位上便无需另存 fence 值再逐个比较。
 
-**两段式恢复。** `CompleteFlight` 只把记录标记 `FlightComplete`（它可能跑在渲染线程），
-真正的 resume 由主线程的 `PumpWaitFrame` 做。
+**两段式恢复。** `CompleteFlight` 只发布槽位完成的原子标记；主线程的 `PumpWaitFrame`
+消费标记，更新该 flight 的等待记录并 resume。
 
 **`Wait()` 挂进当前 flight，不是"上一次提交的 fence 值"。** 调用点在帧顶 Update 期间，
 此刻当前 flight 还没开始录制，故"已录制的 work"全都属于更早的 flight——等当前 flight 的
 fence 必然晚于它们完成。这样就不必记录并比较 fence 值，代价是最多多等一轮
 （口径本就允许多等）。
 
-**`PumpWaitFrame` 只泵一个 flight，且必须是调用线程当前独占的那个。** 多线程模式下渲染
-线程会在 `CompleteFlight` 里标记别的 flight 的记录，若在此扫全表就与之竞争。调用点固定在
-`BeginUpdateForFlight`——那一刻 runner 刚拿到该 flight 的可写槽位，该 flight 上一轮的
-fence 必然已完成、记录必然已被标记，且此后到下一次 `BeginUpdateForFlight` 之间只有本线程
-访问它。
+**`PumpWaitFrame` 只泵当前可写 flight。** 调用点固定在 `BeginUpdateForFlight`，关停时则在
+排空工作后逐 flight 泵送。等待表始终由 game thread 修改，render thread 只写原子完成标记。
 
 **关停必须 `CancelAllWaitFrames`。** 挂在未提交 flight 上的记录永远等不到 fence，
 不取消就是协程帧连同它捕获的 GPU 对象一起泄漏。
@@ -159,7 +167,11 @@ co_await scope->WaitGpu();                          // 恢复点在该 flight fe
 ```
 
 `TextureAsset` 与 `StaticMesh` 的 loader 就走这条路。这样"构造即完整"得以兑现：
-资产一出生即可被采样绑定。
+资产一出生即可被采样绑定。纹理解码、RGBA 转换和 mip 生成发生在 `BeginUpload` 之前，
+upload phase 只分配 GPU 对象、复制已准备的 mip 数据并录制命令。CPU 准备仍同步发生在加载调用线程；
+这里没有后台解码线程，不能将其误称为异步 I/O 或并行 mip 生成。
+`FrameUploadScheduler::IsRecordingUploads` 标识当前阶段，纹理读取、解码和像素准备入口在 Debug
+断言其为 false；上传协程在 BeginUpload 恢复后为 true，GPU 完成后的主线程恢复已离开此阶段。
 
 取消发生在 upload phase 之前时，等待者可以立即退出；一旦开始录制，取消只标记请求，
 `WaitGpu` 必须等对应 flight fence 完成后才终止加载协程。loader 的局部 GPU payload 因此会
@@ -167,14 +179,14 @@ co_await scope->WaitGpu();                          // 恢复点在该 flight fe
 目标分配失败时，不留下引用局部资源的命令。
 
 `NotifyFlightComplete` 可以与 game thread 并发，只把 flight ID 写入受 mutex 保护的完成队列，
-不遍历或修改上传记录。runner 串行驱动 `RunUploadPhase` 与 `PumpCompletedUploads`：二者先
+不遍历或修改上传记录。game thread 串行驱动 `RunUploadPhase` 与 `PumpCompletedUploads`：二者先
 应用完成通知，只有后者在 game thread 恢复等待 fence 的加载协程。复用 flight 前先消费旧通知，
 避免上一轮完成事件误完成新上传。关停的 `WaitAndCleanupCompletedFlights` 在 GPU idle 后也会
 pump 上传调度器，然后才能销毁 AssetManager 及其 task scope。
 
 ## 渲染资源的帧寿命
 
-RenderSystem 继续拥有 ShaderJit、artifact/program cache；ShaderProgram 自持 PSO map。program 的
+RenderSystem 通过同一 runtime 库内的私有 ShaderProgramCache 拥有 JIT、artifact/program cache；ShaderProgram 自持 PSO map。program 的
 layout/参数 metadata 活过所有 flight，关停 GPU idle 后才销毁。
 
 RenderSystem 的每个 flight 保存一张 StreamingAssetRefAny vector。game thread 取得可写 flight 后
@@ -262,7 +274,7 @@ WindowManager 用 `Link` 保存 GPU/Render 引用，GpuSystem 对窗口使用 `R
 |---|---|
 | `OnInit` | 全部内部系统就绪后一次。加载资产、Spawn Actor、建相机 |
 | `OnUpdate` | 每帧，`AssetManager::Pump` 之后、`World::Tick` 之前 |
-| `OnRenderFrameComplete` | 帧完成通知 |
+| `OnRenderFrameComplete` | game thread 消费 flight 完成通知，包括跳过和 shutdown；允许释放 GT 资产引用 |
 | `OnShutdown` | 关停，游戏侧清理 |
 
 `Application::Update` / `Render` / `Shutdown` 是**框架方法**（已固化帧序），不是 override 点。

@@ -41,32 +41,40 @@ bool FinalizeMeshDrawCommand(MeshDrawCommand& command) noexcept {
     return ValidateMeshDrawCommand(command);
 }
 
-namespace {
-void Submit(const RendererList& list, RenderGraphRasterContext& ctx, const GraphicsPassState& passState,
-            Nullable<const RendererListPassBindings*> bindings, DrawExecutionStats& stats) {
-    auto& commands = ctx.Encoder();
+std::optional<PreparedRendererList> PrepareRendererList(const RendererList& list, RenderGraphRasterBuilder& builder,
+                                                       Nullable<const RendererListPassBindings*> bindings) {
+    PreparedRendererList prepared{builder.GetPassHandle(), {}};
+    prepared.Draws.reserve(list.Commands.size());
     for (const auto& draw : list.Commands) {
+        if (!ValidateMeshDrawCommand(draw) || (bindings && !bindings->IsValidFor(builder, *draw.Program))) {
+            builder.Reject("RendererListPreparation", "Draw geometry or pass parameter bindings are invalid");
+            return std::nullopt;
+        }
+        const auto program = builder.UseGraphicsProgram(*draw.Program, draw.PipelineState, draw.Geometry->VertexLayout, draw.Geometry->Topology);
+        if (!program.IsValid()) return std::nullopt;
+        prepared.Draws.push_back({&draw, program, bindings ? bindings->Find(*draw.Program) : std::span<const RendererListPassBinding>{}});
+    }
+    return prepared;
+}
+
+void SubmitRendererList(const PreparedRendererList& list, RenderGraphRasterContext& ctx, DrawExecutionStats& stats) {
+    if (list.Pass != ctx.GetPassHandle()) {
+        stats.BindingFailure += list.Draws.size();
+        stats.Skipped += list.Draws.size();
+        ctx.Fail("Prepared renderer list belongs to another graph or pass");
+        return;
+    }
+    auto& commands = ctx.Encoder();
+    for (const auto& prepared : list.Draws) {
+        const auto& draw = *prepared.Command;
         ++stats.Commands;
-        if (!ValidateMeshDrawCommand(draw) || (bindings && !bindings->IsValidFor(ctx, *draw.Program))) {
-            ++stats.BindingFailure;
-            ++stats.Skipped;
-            RADRAY_ERR_LOG("RendererList binding failure in pass {} for program {} batch {}", ctx.GetPassHandle().Index, draw.SortData.ProgramFrameId, draw.SortData.Batch);
-            continue;
-        }
-        const auto pso = draw.Program->GetOrCreateGraphicsPipelineState(draw.PipelineState, draw.Geometry->VertexLayout, draw.Geometry->Topology, passState);
-        if (!pso) {
-            ++stats.PsoFailure;
-            ++stats.Skipped;
-            RADRAY_ERR_LOG("RendererList PSO failure in pass {} for program {} batch {}", ctx.GetPassHandle().Index, draw.SortData.ProgramFrameId, draw.SortData.Batch);
-            continue;
-        }
-        commands.BindGraphicsPipelineState(pso.Get());
-        const auto graphGroups = bindings ? bindings->Find(*draw.Program) : std::span<const RendererListPassBinding>{};
+        ctx.BindGraphicsProgram(prepared.Program);
+        const auto graphGroups = prepared.GraphGroups;
         size_t nativeIndex = 0, graphIndex = 0;
         while (nativeIndex < draw.Groups.size() || graphIndex < graphGroups.size()) {
             if (graphIndex == graphGroups.size() || (nativeIndex < draw.Groups.size() && draw.Groups[nativeIndex].Group < graphGroups[graphIndex].Group)) {
                 const auto& group = draw.Groups[nativeIndex++];
-                commands.BindShaderParameterSet(group.Group, group.Set.Get(), group.DynamicOffsets);
+                commands.BindPersistentShaderParameterSet(group.Group, group.Set.Get(), group.DynamicOffsets);
             } else {
                 ctx.BindParameterSet(graphGroups[graphIndex++].Parameters);
             }
@@ -82,16 +90,6 @@ void Submit(const RendererList& list, RenderGraphRasterContext& ctx, const Graph
         commands.DrawIndexed(draw.IndexCount, 1, draw.FirstIndex, draw.VertexOffset, 0);
         ++stats.Draws;
     }
-}
-}  // namespace
-
-void SubmitRendererList(const RendererList& list, RenderGraphRasterContext& ctx, const GraphicsPassState& passState, DrawExecutionStats& stats) {
-    Submit(list, ctx, passState, nullptr, stats);
-}
-
-void SubmitRendererList(const RendererList& list, RenderGraphRasterContext& ctx, const GraphicsPassState& passState,
-                        const RendererListPassBindings& bindings, DrawExecutionStats& stats) {
-    Submit(list, ctx, passState, &bindings, stats);
 }
 
 }  // namespace radray

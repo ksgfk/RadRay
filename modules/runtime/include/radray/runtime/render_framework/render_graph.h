@@ -20,6 +20,7 @@ using RgTextureViewHandle = RgHandle<struct RgTextureViewTag>;
 using RgPassHandle = RgHandle<struct RgPassTag>;
 using RgIndirectArgumentsHandle = RgHandle<struct RgIndirectArgumentsTag>;
 using RgComputeProgramHandle = RgHandle<struct RgComputeProgramTag>;
+using RgGraphicsProgramHandle = RgHandle<struct RgGraphicsProgramTag>;
 using RgParameterSetHandle = RgHandle<struct RgParameterSetTag>;
 
 enum class RenderGraphExternalAccess : uint8_t { ReadOnly,
@@ -121,6 +122,7 @@ struct RenderGraphResourceReport {
     bool Texture{false}, External{false};
     uint64_t PhysicalId{0};
     int32_t FirstUse{-1}, LastUse{-1};
+    uint64_t ViewId{0}, EstimatedBytes{0};
 };
 struct RenderGraphBarrierReport {
     uint32_t Pass, Resource, Subresource, Before, After;
@@ -130,6 +132,10 @@ struct RenderGraphExecutionReport {
     string Name;
     uint32_t DeclaredPasses{0}, LivePasses{0}, CulledPasses{0}, Textures{0}, Buffers{0}, PhysicalAllocations{0};
     uint32_t TransitionBarriers{0}, UavBarriers{0};
+    uint32_t GraphicsPipelineRequests{0}, GraphicsPipelinePreparations{0}, GraphicsPipelineCreations{0};
+    struct CpuTimes {
+        uint64_t CompileNanoseconds{0}, RealizeNanoseconds{0}, PrepareNanoseconds{0}, RecordNanoseconds{0};
+    } Cpu;
     RenderResourcePoolStats Pool;
     vector<RenderGraphPassReport> Passes;
     vector<RenderGraphResourceReport> Resources;
@@ -173,6 +179,8 @@ protected:
 class RenderGraphRasterBuilder : public RenderGraphPassBuilder {
 public:
     using RenderGraphPassBuilder::RenderGraphPassBuilder;
+    RgGraphicsProgramHandle UseGraphicsProgram(ShaderProgram& program, const MaterialPipelineState& state,
+        const PrimitiveVertexLayout& layout = {}, PrimitiveTopology topology = PrimitiveTopology::TriangleList);
     RgTextureViewHandle SetColorAttachment(uint32_t slot, RgTextureHandle texture, const RgColorAttachmentDesc& desc = {});
     RgTextureViewHandle SetDepthAttachment(RgTextureHandle texture, const RgDepthAttachmentDesc& desc = {});
     RgTextureViewHandle WriteTexture(RgTextureHandle texture, render::ShaderStages stages,
@@ -190,15 +198,19 @@ public:
 
 class RenderGraphGraphicsCommands {
 public:
-    void BindShaderParameterSet(uint32_t group, render::ShaderParameterSet* set, std::span<const render::ShaderParameterDynamicOffset> offsets = {}) noexcept { _encoder.BindShaderParameterSet(group, set, offsets); }
+    /// All resources in an opaque native set must be persistent, read-only during this graph and
+    /// retained until the flight fence. Graph-written/imported resources use BindParameterSet handles.
+    void BindPersistentShaderParameterSet(uint32_t group, render::ShaderParameterSet* set, std::span<const render::ShaderParameterDynamicOffset> offsets = {}) noexcept { _encoder.BindShaderParameterSet(group, set, offsets); }
     bool SetPushConstants(render::BindingHandle binding, std::span<const byte> data) noexcept { return _encoder.SetPushConstants(binding, data); }
     void SetViewport(Viewport viewport) noexcept { _encoder.SetViewport(viewport); }
     void SetScissor(Rect rect) noexcept { _encoder.SetScissor(rect); }
-    void BindVertexBuffers(std::span<const render::VertexBufferBinding> bindings) noexcept { _encoder.BindVertexBuffers(bindings); }
-    void BindIndexBuffer(render::IndexBufferView view) noexcept { _encoder.BindIndexBuffer(view); }
+    /// Graph-owned/imported buffers require a matching Vertex/Index read declaration in this pass.
+    /// Unregistered asset buffers must remain read-only and retained until the flight fence.
+    void BindVertexBuffers(std::span<const render::VertexBufferBinding> bindings) noexcept;
+    void BindIndexBuffer(render::IndexBufferView view) noexcept;
     void BindGraphicsPipelineState(render::GraphicsPipelineState* pso) noexcept { _encoder.BindGraphicsPipelineState(pso); }
-    void Draw(uint32_t vertices, uint32_t instances, uint32_t firstVertex, uint32_t firstInstance) noexcept { _encoder.Draw(vertices, instances, firstVertex, firstInstance); }
-    void DrawIndexed(uint32_t indices, uint32_t instances, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance) noexcept { _encoder.DrawIndexed(indices, instances, firstIndex, vertexOffset, firstInstance); }
+    void Draw(uint32_t vertices, uint32_t instances, uint32_t firstVertex, uint32_t firstInstance) noexcept { if (_valid) _encoder.Draw(vertices, instances, firstVertex, firstInstance); }
+    void DrawIndexed(uint32_t indices, uint32_t instances, uint32_t firstIndex, int32_t vertexOffset, uint32_t firstInstance) noexcept { if (_valid) _encoder.DrawIndexed(indices, instances, firstIndex, vertexOffset, firstInstance); }
     void DrawIndirect(RgIndirectArgumentsHandle arguments) noexcept;
     void DrawIndexedIndirect(RgIndirectArgumentsHandle arguments) noexcept;
 
@@ -209,11 +221,13 @@ private:
     RenderGraph& _graph;
     uint32_t _pass;
     render::GraphicsCommandEncoder& _encoder;
+    bool _valid{true};
 };
 
 class RenderGraphComputeCommands {
 public:
-    void BindShaderParameterSet(uint32_t group, render::ShaderParameterSet* set, std::span<const render::ShaderParameterDynamicOffset> offsets = {}) noexcept { _encoder.BindShaderParameterSet(group, set, offsets); }
+    /// Persistent read-only, flight-retained resources only; graph resources use typed parameter sets.
+    void BindPersistentShaderParameterSet(uint32_t group, render::ShaderParameterSet* set, std::span<const render::ShaderParameterDynamicOffset> offsets = {}) noexcept { _encoder.BindShaderParameterSet(group, set, offsets); }
     bool SetPushConstants(render::BindingHandle binding, std::span<const byte> data) noexcept { return _encoder.SetPushConstants(binding, data); }
     void BindComputePipelineState(render::ComputePipelineState* pso) noexcept { _encoder.BindComputePipelineState(pso); }
     void Dispatch(uint32_t x, uint32_t y, uint32_t z) noexcept { _encoder.Dispatch(x, y, z); }
@@ -235,6 +249,7 @@ public:
     render::TextureView* GetTextureView(RgTextureViewHandle handle) const;
     render::Buffer* GetBuffer(RgBufferHandle handle) const;
     void BindParameterSet(RgParameterSetHandle handle) noexcept;
+    void BindGraphicsProgram(RgGraphicsProgramHandle handle) noexcept;
     const GraphicsPassState& PassState() const noexcept;
     RgPassHandle GetPassHandle() const noexcept;
     bool OwnsParameterSet(RgParameterSetHandle handle, const ShaderProgram& program, uint32_t group) const noexcept;
@@ -325,6 +340,9 @@ public:
     bool WasPassExecuted(RgPassHandle handle) const noexcept;
     bool PassWroteTexture(RgPassHandle pass, RgTextureHandle texture) const noexcept;
     uint64_t GetGeneration() const noexcept;
+    /// Attributes subsequent resources for memory diagnostics; zero means shared/unclassified.
+    /// Returns the previous scope so nested graph helpers can restore it.
+    uint64_t SetResourceView(uint64_t viewId);
     std::optional<render::TextureDescriptor> GetTextureDescriptor(RgTextureHandle texture) const noexcept;
     std::optional<RgTextureParameterBinding> GetTextureViewBinding(RgTextureViewHandle view) const noexcept;
     /// Add a setup diagnostic, preventing graph execution.
@@ -341,7 +359,7 @@ private:
     friend class RenderGraphComputeContext;
     friend struct RenderGraphTestDriver;
     RenderGraph(render::Device& device, RenderGraphFrameResources& resources,
-                render::RenderPassRegistry& registry, std::string_view name, uint64_t& generation);
+                render::RenderPassRegistry& registry, std::string_view name, uint64_t& generation, RenderGraphExecutionReport& report);
     RenderGraphExecutionResult Execute(render::CommandBuffer& command);
     struct Payload {
         virtual ~Payload() = default;
@@ -376,6 +394,10 @@ private:
     RgIndirectArgumentsHandle AddIndirectArguments(uint32_t pass, RgBufferHandle buffer,
                                                    RgIndirectCommand command, uint64_t offset, uint32_t count);
     RgComputeProgramHandle AddComputeProgram(uint32_t pass, ShaderProgram& program);
+    RgGraphicsProgramHandle AddGraphicsProgram(uint32_t pass, ShaderProgram& program, const MaterialPipelineState& state,
+        const PrimitiveVertexLayout& layout, PrimitiveTopology topology);
+    void BindGraphicsProgram(uint32_t pass, RgGraphicsProgramHandle handle, render::GraphicsCommandEncoder& encoder) noexcept;
+    bool ValidateNativeBuffer(uint32_t pass, render::Buffer* buffer, RgBufferAccess access) noexcept;
     RgParameterSetHandle AddParameterSet(uint32_t pass, ShaderProgram& program, uint32_t group,
                                          std::span<const RgParameterBinding> bindings);
     render::TextureView* ResolveView(uint32_t pass, RgTextureViewHandle handle) const;

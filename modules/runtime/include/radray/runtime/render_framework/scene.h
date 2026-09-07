@@ -8,9 +8,7 @@
 
 namespace radray {
 
-class LightComponent;
-class PrimitiveComponent;
-
+/// Game-thread proxy registry. Registration transfers ownership; snapshots retain asset owners separately.
 class Scene {
 public:
     Scene() = default;
@@ -20,9 +18,9 @@ public:
     Scene& operator=(Scene&&) = delete;
     ~Scene() noexcept;
 
-    PrimitiveSceneProxy* AddPrimitive(PrimitiveComponent* component);
+    Nullable<PrimitiveSceneProxy*> AddPrimitive(unique_ptr<PrimitiveSceneProxy> proxy);
     void RemovePrimitive(PrimitiveSceneProxy* proxy) noexcept;
-    LightSceneProxy* AddLight(LightComponent* component);
+    Nullable<LightSceneProxy*> AddLight(unique_ptr<LightSceneProxy> proxy);
     void RemoveLight(LightSceneProxy* proxy) noexcept;
 
     std::span<const unique_ptr<PrimitiveSceneProxy>> Primitives() const noexcept { return _primitiveProxies; }

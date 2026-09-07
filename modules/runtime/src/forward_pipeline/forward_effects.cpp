@@ -99,24 +99,33 @@ RgTextureHandle ColorEffect(RenderGraph& graph, const ForwardEffectPrograms& pro
     return output;
 }
 
+MaterialPipelineState EffectRasterState(bool depth = false, bool additive = false) {
+    MaterialPipelineState state;
+    state.Primitive.Cull = render::CullMode::None;
+    state.DepthStencil.DepthTestEnable = depth;
+    state.DepthStencil.DepthWriteEnable = false;
+    state.DepthStencil.DepthCompare = render::CompareFunction::LessEqual;
+    if (additive) {
+        state.Blend = render::BlendState::Default();
+        state.Blend->Color = {render::BlendFactor::One, render::BlendFactor::One, render::BlendOperation::Add};
+    }
+    return state;
+}
+
 RgPassHandle Composite(RenderGraph& graph, ShaderProgram& program, const ShaderParameterStorage& values,
                        std::span<const RgParameterBinding> inputs, RgTextureHandle output, Rect viewport, Rect scissor,
                        render::LoadAction load, render::RenderBackend backend, bool& success, std::string_view name) {
     struct Data {
-        ShaderProgram* Program;
+        RgGraphicsProgramHandle Program;
         RgParameterSetHandle Set;
         render::RenderBackend Backend;
         Rect Viewport, Scissor;
         bool* Success;
     };
     return graph.AddRasterPass<Data>(name, [&](Data& data, RenderGraphRasterBuilder& builder) {
-        data = {&program, builder.CreateParameterSet(program, 0, EffectBindings(program, values, inputs)), backend, viewport, scissor, &success};
+        data = {builder.UseGraphicsProgram(program, EffectRasterState()), builder.CreateParameterSet(program, 0, EffectBindings(program, values, inputs)), backend, viewport, scissor, &success};
         builder.SetColorAttachment(0, output, {.Load = load}); }, +[](const Data& data, RenderGraphRasterContext& ctx) {
-        MaterialPipelineState state; state.Primitive.Cull = render::CullMode::None;
-        state.DepthStencil.DepthTestEnable = state.DepthStencil.DepthWriteEnable = false;
-        auto pso = data.Program->GetOrCreateGraphicsPipelineState(state, {}, PrimitiveTopology::TriangleList, ctx.PassState());
-        if (!pso) { *data.Success = false; RADRAY_ERR_LOG("Forward composite PSO creation failed"); return; }
-        ctx.Encoder().BindGraphicsPipelineState(pso.Get()); ctx.BindParameterSet(data.Set);
+        ctx.BindGraphicsProgram(data.Program); ctx.BindParameterSet(data.Set);
         ctx.Encoder().SetViewport(MakeViewport(data.Backend, float(data.Viewport.X), float(data.Viewport.Y), float(data.Viewport.Width), float(data.Viewport.Height)));
         ctx.Encoder().SetScissor(data.Scissor); ctx.Encoder().Draw(3, 1, 0, 0); });
 }
@@ -126,21 +135,17 @@ void DrawSky(RenderGraph& graph, const ForwardEffectPrograms& programs, const Re
     auto& program = *programs.Programs[10].Get();
     auto values = EffectValues(program, view, size, size);
     struct Data {
-        ShaderProgram* Program;
+        RgGraphicsProgramHandle Program;
         RgParameterSetHandle Set;
         ResolvedRenderView View;
         render::RenderBackend Backend;
         bool* Success;
     };
     graph.AddRasterPass<Data>("Forward.Sky", [&](Data& data, RenderGraphRasterBuilder& builder) {
-        data = {&program, builder.CreateParameterSet(program, 0, EffectBindings(program, values, {})), view, backend, &success};
+        data = {builder.UseGraphicsProgram(program, EffectRasterState(true)), builder.CreateParameterSet(program, 0, EffectBindings(program, values, {})), view, backend, &success};
         builder.SetColorAttachment(0, hdr, {.Load = render::LoadAction::Load});
         builder.SetDepthAttachment(depth, {.Load = render::LoadAction::Load, .ReadOnly = true}); }, +[](const Data& data, RenderGraphRasterContext& context) {
-        MaterialPipelineState state; state.Primitive.Cull = render::CullMode::None;
-        state.DepthStencil.DepthTestEnable = true; state.DepthStencil.DepthWriteEnable = false; state.DepthStencil.DepthCompare = render::CompareFunction::LessEqual;
-        const auto pso = data.Program->GetOrCreateGraphicsPipelineState(state, {}, PrimitiveTopology::TriangleList, context.PassState());
-        if (!pso) { *data.Success = false; return; }
-        context.Encoder().BindGraphicsPipelineState(pso.Get()); context.BindParameterSet(data.Set);
+        context.BindGraphicsProgram(data.Program); context.BindParameterSet(data.Set);
         context.Encoder().SetViewport(MakeViewport(data.Backend, 0, 0, float(data.View.ViewRect.Width), float(data.View.ViewRect.Height)));
         context.Encoder().SetScissor(data.View.ScissorRect); context.Encoder().Draw(3, 1, 0, 0); });
 }
@@ -160,7 +165,7 @@ void Fireflies(RenderGraph& graph, const ForwardEffectPrograms& programs, const 
     auto constants = EffectValues(draw, view, size, size);
     const RgParameterBinding reads[]{{"Particles", 0, RgBufferParameterBinding{particles, render::BufferRange::AllRange(), 16}}};
     struct Data {
-        ShaderProgram* Program;
+        RgGraphicsProgramHandle Program;
         RgParameterSetHandle Set;
         RgIndirectArgumentsHandle Arguments;
         ResolvedRenderView View;
@@ -168,15 +173,10 @@ void Fireflies(RenderGraph& graph, const ForwardEffectPrograms& programs, const 
         bool* Success;
     };
     graph.AddRasterPass<Data>("Forward.Fireflies.Draw", [&](Data& data, RenderGraphRasterBuilder& builder) {
-        data = {&draw, builder.CreateParameterSet(draw, 0, EffectBindings(draw, constants, reads)), builder.ReadIndirectArguments(arguments, RgIndirectCommand::Draw, 0, 1), view, backend, &success};
+        data = {builder.UseGraphicsProgram(draw, EffectRasterState(true, true)), builder.CreateParameterSet(draw, 0, EffectBindings(draw, constants, reads)), builder.ReadIndirectArguments(arguments, RgIndirectCommand::Draw, 0, 1), view, backend, &success};
         builder.SetColorAttachment(0, hdr, {.Load = render::LoadAction::Load});
         builder.SetDepthAttachment(depth, {.Load = render::LoadAction::Load, .ReadOnly = true}); }, +[](const Data& data, RenderGraphRasterContext& context) {
-        MaterialPipelineState state; state.Primitive.Cull = render::CullMode::None;
-        state.DepthStencil.DepthTestEnable = true; state.DepthStencil.DepthWriteEnable = false; state.DepthStencil.DepthCompare = render::CompareFunction::LessEqual;
-        state.Blend = render::BlendState::Default(); state.Blend->Color = {render::BlendFactor::One, render::BlendFactor::One, render::BlendOperation::Add};
-        const auto pso = data.Program->GetOrCreateGraphicsPipelineState(state, {}, PrimitiveTopology::TriangleList, context.PassState());
-        if (!pso) { *data.Success = false; return; }
-        context.Encoder().BindGraphicsPipelineState(pso.Get()); context.BindParameterSet(data.Set);
+        context.BindGraphicsProgram(data.Program); context.BindParameterSet(data.Set);
         context.Encoder().SetViewport(MakeViewport(data.Backend, 0, 0, float(data.View.ViewRect.Width), float(data.View.ViewRect.Height)));
         context.Encoder().SetScissor(data.View.ScissorRect); context.Encoder().DrawIndirect(data.Arguments); });
 }
@@ -423,25 +423,17 @@ bool BuildOutputSurfaces(RenderGraph& graph, RenderPipelineContext& context, Sha
             {"SceneOutput", 0, RgTextureParameterBinding{texture}},
             {"OutputSampler", 0, RgSamplerParameterBinding{ClampSampler()}}};
         struct Data {
-            ShaderProgram* Program;
+            RgGraphicsProgramHandle Program;
             RgParameterSetHandle Set;
             Rect Viewport, Scissor;
             render::RenderBackend Backend;
         };
         graph.AddRasterPass<Data>("Forward.OutputSurface", [&](Data& data, RenderGraphRasterBuilder& builder) {
-            data = {&program, builder.CreateParameterSet(program, 0, bindings), view.ViewRect, view.ScissorRect, backend};
+            data = {builder.UseGraphicsProgram(program, EffectRasterState(true)), builder.CreateParameterSet(program, 0, bindings), view.ViewRect, view.ScissorRect, backend};
             builder.SetColorAttachment(0, color, {.Load = render::LoadAction::Load});
             builder.SetDepthAttachment(depth, {.Load = render::LoadAction::Load, .ReadOnly = true}); }, +[](const Data& data, RenderGraphRasterContext& ctx) {
-            MaterialPipelineState state;
-            state.Primitive.Cull = render::CullMode::None;
-            state.Primitive.UnclippedDepth = false;
-            state.DepthStencil.DepthTestEnable = true;
-            state.DepthStencil.DepthWriteEnable = false;
-            state.DepthStencil.DepthCompare = render::CompareFunction::LessEqual;
-            const auto pso = data.Program->GetOrCreateGraphicsPipelineState(state, {}, PrimitiveTopology::TriangleList, ctx.PassState());
-            if (!pso) { ctx.Fail("Forward output surface PSO creation failed"); return; }
             auto& encoder = ctx.Encoder();
-            encoder.BindGraphicsPipelineState(pso.Get());
+            ctx.BindGraphicsProgram(data.Program);
             ctx.BindParameterSet(data.Set);
             encoder.SetViewport(MakeViewport(data.Backend, float(data.Viewport.X), float(data.Viewport.Y), float(data.Viewport.Width), float(data.Viewport.Height)));
             encoder.SetScissor(data.Scissor);
@@ -458,6 +450,12 @@ bool BuildForwardHdrView(RenderGraph& graph, RenderPipelineContext& context, ren
                          const RenderSceneSnapshot& scene, FrameDrawResources& draws, ForwardBindingCache& bindings,
                          ForwardHdrView& work, bool firstOutputView, bool& lightOverflowWarned,
                          std::span<const ForwardOutputSurface> surfaces) {
+    const auto previousScope = graph.SetResourceView(sourceView.StateId.Value);
+    struct RestoreScope {
+        RenderGraph& Graph;
+        uint64_t Previous;
+        ~RestoreScope() { Graph.SetResourceView(Previous); }
+    } restore{graph, previousScope};
     const bool temporal = settings.Antialiasing == ForwardAntialiasing::Temporal;
     const bool msaa = settings.Antialiasing == ForwardAntialiasing::Msaa4;
     const uint32_t samples = msaa ? 4 : 1;

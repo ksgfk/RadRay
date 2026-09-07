@@ -36,9 +36,17 @@ struct HistoryTexturePair {
     bool PreviousValid{false};
     HistoryWriteToken CommitToken;
 };
+struct ViewHistoryMemoryStats {
+    ViewStateId View;
+    uint64_t ActiveBytes{0}, RetiredBytes{0};
+};
 struct ViewStateStats {
     uint32_t ActiveViews{0}, HistoryGenerations{0}, RetiredGenerations{0};
     uint64_t TexturesCreated{0}, GenerationsDestroyed{0};
+    /// Descriptor estimates; excludes driver alignment, metadata and residency.
+    uint64_t EstimatedBytes{0}, PeakEstimatedBytes{0}, RetiredBytes{0};
+    vector<ViewHistoryMemoryStats> MemoryByView;
+    vector<uint64_t> RetiredBytesByFlight;
 };
 
 class ViewStateRegistry {

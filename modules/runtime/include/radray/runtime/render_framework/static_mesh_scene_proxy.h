@@ -20,7 +20,6 @@ public:
 
     void CollectAssetReferences(vector<StreamingAssetRefAny>& out) const override;
 
-    Eigen::Matrix4f GetLocalToWorld() const noexcept override { return _localToWorld; }
     AxisAlignedBounds GetLocalBounds() const noexcept override;
     MeshDrawArgs GetDrawArgs(uint32_t sectionIndex) const noexcept override;
     uint32_t GetSectionCount() const noexcept override;
@@ -29,7 +28,6 @@ public:
 private:
     StreamingAssetRef<StaticMesh> _mesh;
     vector<Nullable<Material*>> _materials;
-    Eigen::Matrix4f _localToWorld;
 };
 
 }  // namespace radray

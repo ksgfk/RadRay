@@ -1,9 +1,11 @@
 #include <radray/runtime/render_framework/render_scene_snapshot.h>
 
 #include <algorithm>
+#include <chrono>
 #include <limits>
 #include <radray/logger.h>
 #include <radray/runtime/render_framework/scene.h>
+#include <radray/runtime/shader_program.h>
 
 namespace radray {
 
@@ -21,15 +23,30 @@ void RenderSceneSnapshot::ResetForReuse() noexcept {
 }
 
 bool BuildRenderSceneSnapshot(const Scene& scene, RenderSceneSnapshot& out, vector<StreamingAssetRefAny>& retainedAssets) {
+    RenderSceneSnapshotBuilder builder;
+    return builder.Build(scene, out, retainedAssets);
+}
+
+bool RenderSceneSnapshotBuilder::Build(const Scene& scene, RenderSceneSnapshot& out, vector<StreamingAssetRefAny>& retainedAssets) {
+    const auto start = std::chrono::steady_clock::now();
+    if (++_epoch == 0) { _materials.clear(); _programs.clear(); ++_epoch; }
     RenderSceneSnapshot next = std::move(out);
     out = {};
+    auto materialStorage = std::move(next.Materials);
     next.ResetForReuse();
-    vector<StreamingAssetRefAny> owners;
-    unordered_map<Material*, std::optional<RenderMaterialIndex>> materials;
-    unordered_map<ShaderProgram*, uint32_t> programs;
+    next.Materials = std::move(materialStorage);
+    size_t materialCount = 0;
+    uint32_t programCount = 0;
+    const auto ownerStart = retainedAssets.size();
+    struct Rollback {
+        vector<StreamingAssetRefAny>& Owners;
+        size_t Start;
+        bool Success{false};
+        ~Rollback() { if (!Success) Owners.resize(Start); }
+    } rollback{retainedAssets, ownerStart};
     constexpr size_t kMaxIndex = std::numeric_limits<uint32_t>::max();
     for (const auto& proxy : scene.Primitives()) {
-        if (proxy) proxy->CollectAssetReferences(owners);
+        if (proxy) proxy->CollectAssetReferences(retainedAssets);
     }
     for (const auto& proxy : scene.Primitives()) {
         ++next.Stats.InputPrimitives;
@@ -68,28 +85,37 @@ bool BuildRenderSceneSnapshot(const Scene& scene, RenderSceneSnapshot& out, vect
                 ++next.Stats.MaterialUnavailable;
                 continue;
             }
-            auto [found, inserted] = materials.try_emplace(material.Get(), std::nullopt);
-            if (inserted) {
+            auto [found, inserted] = _materials.try_emplace(material.Get());
+            next.Stats.ScratchEntriesCreated += inserted ? 1 : 0;
+            if (found->second.Epoch != _epoch) {
+                found->second = {_epoch, {}};
                 ++next.Stats.InputMaterials;
-                MaterialRenderData data;
-                if (material->BuildRenderData(data, owners)) {
-                    if (next.Materials.size() >= kMaxIndex) return false;
+                if (materialCount >= kMaxIndex) return false;
+                if (materialCount == next.Materials.size()) next.Materials.emplace_back();
+                auto& data = next.Materials[materialCount];
+                if (material->BuildRenderData(data, retainedAssets)) {
                     for (auto& pass : data.Passes) {
                         if (!pass.Program) continue;
-                        if (!programs.contains(pass.Program.Get()) && programs.size() >= kMaxIndex) return false;
-                        auto [program, unused] = programs.try_emplace(pass.Program.Get(), static_cast<uint32_t>(programs.size()));
-                        pass.ProgramFrameId = program->second;
+                        auto [program, created] = _programs.try_emplace(pass.Program.Get());
+                        next.Stats.ScratchEntriesCreated += created ? 1 : 0;
+                        if (program->second.Epoch != _epoch) {
+                            if (programCount == kMaxIndex) return false;
+                            program->second = {_epoch, programCount++};
+                        }
+                        pass.ProgramFrameId = *program->second.Index;
+                        const auto buffers = pass.Program->GetParameterLayout().Buffers();
+                        for (uint32_t index = 0; index < buffers.size(); ++index)
+                            next.Stats.MaterialBytesCopied += pass.Parameters.GetBufferData(index).size();
                     }
-                    found->second = static_cast<uint32_t>(next.Materials.size());
-                    next.Materials.push_back(std::move(data));
+                    found->second.Index = static_cast<uint32_t>(materialCount++);
                 }
             }
-            if (!found->second) {
+            if (!found->second.Index) {
                 ++next.Stats.MaterialUnavailable;
                 continue;
             }
             if (next.MeshBatches.size() >= kMaxIndex) return false;
-            next.MeshBatches.push_back({primitiveIndex, *found->second, args.Geometry, args.FirstIndex, args.IndexCount, args.VertexOffset, section});
+            next.MeshBatches.push_back({primitiveIndex, *found->second.Index, args.Geometry, args.FirstIndex, args.IndexCount, args.VertexOffset, section});
             ++primitive.MeshBatchCount;
         }
         next.Primitives.push_back(std::move(primitive));
@@ -106,16 +132,20 @@ bool BuildRenderSceneSnapshot(const Scene& scene, RenderSceneSnapshot& out, vect
         data.CastShadow = light->CastShadow();
         next.Lights.push_back(std::move(data));
     }
+    next.Materials.resize(materialCount);
+    std::erase_if(_materials, [&](const auto& entry) { return entry.second.Epoch != _epoch; });
+    std::erase_if(_programs, [&](const auto& entry) { return entry.second.Epoch != _epoch; });
     next.Stats.Primitives = next.Primitives.size();
     next.Stats.MeshBatches = next.MeshBatches.size();
     next.Stats.Materials = next.Materials.size();
     next.Stats.Lights = next.Lights.size();
-    next.Stats.RetainedAssets = owners.size();
+    next.Stats.RetainedAssets = retainedAssets.size() - ownerStart;
     next.Stats.PrimitiveHighWatermark = std::max(next.Stats.PrimitiveHighWatermark, next.Primitives.capacity());
     next.Stats.BatchHighWatermark = std::max(next.Stats.BatchHighWatermark, next.MeshBatches.capacity());
     next.Stats.MaterialHighWatermark = std::max(next.Stats.MaterialHighWatermark, next.Materials.capacity());
     next.Stats.LightHighWatermark = std::max(next.Stats.LightHighWatermark, next.Lights.capacity());
-    retainedAssets.insert(retainedAssets.end(), std::make_move_iterator(owners.begin()), std::make_move_iterator(owners.end()));
+    next.Stats.CpuNanoseconds = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count();
+    rollback.Success = true;
     out = std::move(next);
     return true;
 }

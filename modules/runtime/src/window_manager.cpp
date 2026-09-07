@@ -54,6 +54,7 @@ AppWindow::~AppWindow() noexcept {
 }
 
 Nullable<render::SwapChain*> AppWindow::AttachSwapChain(const render::SwapChainDescriptor& desc) noexcept {
+    _manager->EnsureRenderIdle();
     auto* gpuSystem = _manager->GetGpuSystem();
     render::SwapChainDescriptor swapChainDesc = desc;
     swapChainDesc.PresentQueue = gpuSystem->GetMainQueue();
@@ -80,6 +81,7 @@ Nullable<render::SwapChain*> AppWindow::AttachSwapChain(const render::SwapChainD
 }
 
 unique_ptr<render::SwapChain> AppWindow::ReleaseSwapChain() noexcept {
+    _manager->EnsureRenderIdle();
     if (auto* system = _manager->GetRenderSystem(); system && _outputId.IsValid()) system->GetOutputs().Unregister(_outputId);
     _outputId = {};
     ReleaseBackBufferViews();
@@ -88,6 +90,7 @@ unique_ptr<render::SwapChain> AppWindow::ReleaseSwapChain() noexcept {
 }
 
 void AppWindow::DetachSwapChain() noexcept {
+    _manager->EnsureRenderIdle();
     if (auto* system = _manager->GetRenderSystem(); system && _outputId.IsValid()) system->GetOutputs().Unregister(_outputId);
     _outputId = {};
     if (_swapchain && _manager->GetGpuSystem() != nullptr) {
@@ -198,6 +201,7 @@ WindowManager::~WindowManager() noexcept {
 }
 
 Nullable<AppWindow*> WindowManager::CreateWindow(const NativeWindowCreateDescriptor& desc, bool isMain, RenderOutputUsage usage) {
+    EnsureRenderIdle();
     auto window = NativeWindow::Create(desc);
     if (!window) return nullptr;
     if (!_eventPump->Register(window.Get())) return nullptr;
@@ -240,6 +244,7 @@ void AppWindow::ResetSwapChainRecreateRequest() noexcept {
 }
 
 bool AppWindow::RecreateSwapChain(uint32_t width, uint32_t height, render::PresentMode presentMode) noexcept {
+    _manager->EnsureRenderIdle();
     if (!_swapchain) {
         return false;
     }
@@ -270,6 +275,7 @@ void AppWindow::ReleaseBackBufferViews() noexcept {
 }
 
 void WindowManager::DestroyWindow(AppWindow* window) noexcept {
+    EnsureRenderIdle();
     auto iter = std::ranges::find_if(_windows, [window](const unique_ptr<AppWindow>& item) {
         return item.get() == window;
     });
@@ -339,6 +345,8 @@ void WindowManager::CheckRecreateSwapChains() noexcept {
         return;
     }
 
+    EnsureRenderIdle();
+
     _gpuSystem->WaitAndCleanupCompletedFlights();
 
     for (const auto& window : _windows) {
@@ -379,6 +387,10 @@ void WindowManager::DetachAllSwapChains() noexcept {
     for (const unique_ptr<AppWindow>& window : _windows) {
         window->DetachSwapChain();
     }
+}
+
+void WindowManager::EnsureRenderIdle() const noexcept {
+    if (_renderSystem) _renderSystem->GetOutputs().EnsureRenderIdle();
 }
 
 NativeWindow* WindowManager::FindMainNativeWindow(NativeWindowType type) const noexcept {

@@ -111,6 +111,7 @@ VK_BINDING(1, 1) Texture2D<float> Marker : register(t0, space1);
                 DrawExecutionStats* Stats;
                 render::RenderBackend Backend;
                 std::optional<RendererListPassBindings> Bindings;
+                std::optional<PreparedRendererList> Prepared;
             };
             graph.AddRasterPass<Draw>("1000 shared draws", [&](Draw& data, RenderGraphRasterBuilder& builder) {
                 data.List = &list; data.Stats = &stats; data.Backend = GetParam(); builder.SetColorAttachment(0, color);
@@ -118,15 +119,19 @@ VK_BINDING(1, 1) Texture2D<float> Marker : register(t0, space1);
                 const RgParameterBinding values[]{{declaration, 0, RgCBufferParameterBinding{std::as_bytes(std::span{constants})}}, {"Marker", 0, RgTextureParameterBinding{marker}}};
                 const RendererListProgramParameters parameters{program.Get(), 1, values};
                 data.Bindings = RendererListPassBindings::Create(builder, list, std::span{&parameters, 1}); ASSERT_TRUE(data.Bindings);
+                data.Prepared = PrepareRendererList(list, builder, &*data.Bindings); ASSERT_TRUE(data.Prepared);
                 constants.fill(0xdeadbeef); declaration.assign(100, 'x'); }, +[](const Draw& data, RenderGraphRasterContext& context) {
                 context.Encoder().SetViewport(MakeViewport(data.Backend, 0, 0, 4, 4)); context.Encoder().SetScissor({0, 0, 4, 4});
-                SubmitRendererList(*data.List, context, context.PassState(), *data.Bindings, *data.Stats); });
+                SubmitRendererList(*data.Prepared, context, *data.Stats); });
             const auto host = graph.ImportBuffer(flight.External, "readback", RenderGraphExternalAccess::ObservableOutput);
             graph.AddCopyTextureToBufferPass("copy constants", color, host);
             HostRead(graph, host);
             ASSERT_TRUE(RenderGraphTestDriver::Execute(graph, *flight.Command).Success) << graph.GetReport().ToText();
             EXPECT_TRUE(stats.Succeeded());
             EXPECT_EQ(stats.Draws, 1000u);
+            EXPECT_EQ(graph.GetReport().GraphicsPipelineRequests, 1000u);
+            EXPECT_EQ(graph.GetReport().GraphicsPipelinePreparations, 1u);
+            EXPECT_EQ(graph.GetReport().GraphicsPipelineCreations, frame == 1 ? 1u : 0u);
             const auto id = graph.GetReport().Resources[1].PhysicalId;
             if (flight.TextureId)
                 EXPECT_EQ(id, flight.TextureId);
@@ -244,6 +249,12 @@ TEST_P(FlightLifetimeTest, L04HistoryResizeRetiresAfterTheProtectingFlightAndPre
             EXPECT_FALSE(first.PreviousValid);
             EXPECT_EQ(histories.GetStats().RetiredGenerations, 1u);
             EXPECT_EQ(histories.GetStats().GenerationsDestroyed, 0u);
+            const auto memory = histories.GetStats();
+            EXPECT_EQ(memory.RetiredBytes, 64u * 32u * 4u * 3u);
+            ASSERT_EQ(memory.RetiredBytesByFlight.size(), 3u);
+            EXPECT_EQ(memory.RetiredBytesByFlight[0], memory.RetiredBytes);
+            EXPECT_EQ(memory.EstimatedBytes, (64u * 32u * 2u + 96u * 48u) * 4u * 3u);
+            EXPECT_EQ(memory.PeakEstimatedBytes, memory.EstimatedBytes);
         }
         commands[frame - 1]->Begin();
         {
@@ -282,6 +293,8 @@ TEST_P(FlightLifetimeTest, L04HistoryResizeRetiresAfterTheProtectingFlightAndPre
     histories.BeginFlight(0, 7);
     EXPECT_EQ(histories.GetStats().GenerationsDestroyed, 1u);
     EXPECT_EQ(histories.GetStats().RetiredGenerations, 0u);
+    EXPECT_EQ(histories.GetStats().RetiredBytes, 0u);
+    EXPECT_EQ(histories.GetStats().EstimatedBytes, (64u * 32u + 96u * 48u) * 4u * 3u);
     EXPECT_LT(Registry->GetFramebufferCount(), framebufferCount);
     for (uint32_t i = 0; i < 4; ++i) {
         const auto bytes = Read(*readbacks[i]);

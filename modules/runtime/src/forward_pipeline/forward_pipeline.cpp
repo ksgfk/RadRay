@@ -82,12 +82,18 @@ struct ForwardPipeline::Impl {
     Impl(Application* application, Scene* renderScene, CameraComponent* viewCamera)
         : RenderScene(renderScene), ViewCamera(viewCamera), Device(application->GetDevice()), System(application->GetRenderSystem()) {
         Flights.resize(application->GetGpuSystem()->GetFlightDataCount());
+#ifdef RADRAY_ENABLE_IMGUI
+        Ui = application->GetImGuiSystem();
+#endif
     }
 
     Scene* RenderScene;
     CameraComponent* ViewCamera;
     render::Device* Device;
     RenderSystem* System;
+#ifdef RADRAY_ENABLE_IMGUI
+    Nullable<ImGuiSystem*> Ui;
+#endif
     ForwardPipelineSettings Settings;
     ForwardEffectPrograms Effects;
     vector<ForwardViewSource> Sources;
@@ -100,6 +106,7 @@ struct ForwardPipeline::Impl {
     string CaptureName;
     std::atomic_bool Error{false};
     ForwardBindingCache Bindings;
+    RenderSceneSnapshotBuilder SnapshotBuilder;
     DepthOnlyBindingCache DepthBindings;
     vector<FlightResources> Flights;
     unordered_map<RenderOutputId, ViewStateId, RenderOutputIdHash> ViewIds;
@@ -236,7 +243,7 @@ void ForwardPipeline::PrepareFrame(RenderPrepareContext& ctx) {
     ++_impl->PreparedSerial;
     flight.Stats = {};
     ++flight.Stats.SnapshotBuilds;
-    if (!BuildRenderSceneSnapshot(*_impl->RenderScene, flight.Scene, ctx.RetainedAssets)) {
+    if (!_impl->SnapshotBuilder.Build(*_impl->RenderScene, flight.Scene, ctx.RetainedAssets)) {
         RADRAY_ERR_LOG("Forward scene snapshot exceeded its frame-local index capacity");
         return;
     }
@@ -295,7 +302,7 @@ void ForwardPipeline::Render(RenderPipelineContext& ctx) {
     }
     auto graph = ctx.CreateRenderGraph("Forward");
 #ifdef RADRAY_ENABLE_IMGUI
-    auto ui = _impl->System->GetApplication()->GetImGuiSystem();
+    auto ui = _impl->Ui;
     const auto uiScenes = ui ? ImGuiGraph::PrepareSceneOutputs(graph, ctx) : vector<ImGuiSceneOutput>{};
 #endif
     vector<ViewStateId> rendered;
@@ -337,15 +344,14 @@ void ForwardPipeline::Render(RenderPipelineContext& ctx) {
         for (const auto& overlay : flight.Overlays)
             overlaysSucceeded &= BuildForwardOutputOverlay(graph, ctx, _impl->Effects, overlay, _impl->Device->GetBackend(), overlaysSucceeded);
 #ifdef RADRAY_ENABLE_IMGUI
-        if (ui) ImGuiGraph::BuildGraph(graph, ctx, *ui.Get(), uiScenes);
+        if (ui) ImGuiGraph::BuildGraph(graph, ctx, ui->GetGraphFrame(ctx.FlightIndex()), uiScenes);
 #endif
         if (!flight.Capture.Build(graph, ctx, *_impl->Device)) _impl->Error = true;
         const auto result = ctx.ExecuteGraph(graph);
 #ifdef RADRAY_ENABLE_IMGUI
-        if (ui) ImGuiGraph::CompleteGraph(graph, ctx, *ui.Get(), result.Success);
+        if (ui) ImGuiGraph::CompleteGraph(graph, ctx, ui->GetGraphFrame(ctx.FlightIndex()), result.Success);
 #endif
-        flight.Capture.Report = graph.GetReport().ToJson();
-        flight.Capture.Dot = graph.GetReport().ToDot();
+        flight.Capture.CaptureReport(graph.GetReport());
         if (result.Success) {
             for (size_t i = 0; i < viewIndex; ++i) {
                 auto& work = *flight.HdrViews[i];
@@ -440,15 +446,14 @@ void ForwardPipeline::Render(RenderPipelineContext& ctx) {
             if (view.Culling.Stats.Valid) rendered.push_back(view.View.StateId);
     }
 #ifdef RADRAY_ENABLE_IMGUI
-    if (ui) ImGuiGraph::BuildGraph(graph, ctx, *ui.Get(), uiScenes);
+    if (ui) ImGuiGraph::BuildGraph(graph, ctx, ui->GetGraphFrame(ctx.FlightIndex()), uiScenes);
 #endif
     if (!flight.Capture.Build(graph, ctx, *_impl->Device)) _impl->Error = true;
     const auto result = ctx.ExecuteGraph(graph);
 #ifdef RADRAY_ENABLE_IMGUI
-    if (ui) ImGuiGraph::CompleteGraph(graph, ctx, *ui.Get(), result.Success);
+    if (ui) ImGuiGraph::CompleteGraph(graph, ctx, ui->GetGraphFrame(ctx.FlightIndex()), result.Success);
 #endif
-    flight.Capture.Report = graph.GetReport().ToJson();
-    flight.Capture.Dot = graph.GetReport().ToDot();
+    flight.Capture.CaptureReport(graph.GetReport());
     if (result.Success && flight.Stats.Execution.Succeeded())
         for (const auto view : rendered) ctx.CommitView(view);
     else {

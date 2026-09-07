@@ -1,5 +1,6 @@
 #include <radray/runtime/components/primitive_component.h>
 
+#include <radray/logger.h>
 #include <radray/runtime/game_framework/world.h>
 #include <radray/runtime/render_framework/scene.h>
 #include <radray/runtime/render_framework/primitive_scene_proxy.h>
@@ -40,7 +41,11 @@ unique_ptr<PrimitiveSceneProxy> PrimitiveComponent::CreateSceneProxy() {
 }
 
 void PrimitiveComponent::OnTransformChanged() {
-    MarkRenderStateDirty();
+    if (_sceneProxy != nullptr) {
+        const auto& transform = GetWorldMatrix();
+        _sceneProxy->SetLocalToWorld(transform);
+        RADRAY_ASSERT(!transform.allFinite() || _sceneProxy->GetLocalToWorld().isApprox(transform));
+    }
 }
 
 Scene* PrimitiveComponent::GetScene() const noexcept {
@@ -58,7 +63,7 @@ void PrimitiveComponent::CreateRenderState() {
 
     Scene* scene = GetScene();
     if (scene != nullptr) {
-        _sceneProxy = scene->AddPrimitive(this);
+        _sceneProxy = scene->AddPrimitive(CreateSceneProxy()).Get();
     }
     _renderStateCreated = _sceneProxy != nullptr;
 }

@@ -21,7 +21,7 @@ const render::RenderDeviceCapabilities& RenderPipelineContext::Capabilities() co
 HostWriteBatch& RenderPipelineContext::HostWrites() const noexcept { return _frame.GetHostWrites(); }
 RenderGraph RenderPipelineContext::CreateRenderGraph(std::string_view name) {
     if (_graphGeneration != 0) RADRAY_ABORT("Only one RenderGraph may be created per Render invocation");
-    return RenderGraph{*_frame.GetDevice(), _graphResources, _registry, name, _graphGeneration};
+    return RenderGraph{*_frame.GetDevice(), _graphResources, _registry, name, _graphGeneration, _report};
 }
 RgTextureHandle RenderPipelineContext::ImportOutput(RenderGraph& graph, RenderOutputId output) {
     if (_executed || _graphGeneration != graph.GetGeneration()) return {};
@@ -79,7 +79,6 @@ RenderGraphExecutionResult RenderPipelineContext::ExecuteGraph(RenderGraph& grap
             if (history.CommitToken.CommitMode == HistoryCommitMode::Independent && history.Current && history.Current->Written) _views.CommitHistory(history.CommitToken);
     for (auto& completion : _completions)
         completion.Executed = result.Success && graph.PassWroteTexture(completion.Pass, completion.Output);
-    _report = graph.GetReport();
     if (!result.Success) RADRAY_ERR_LOG("{}", _report.ToText());
     return result;
 }

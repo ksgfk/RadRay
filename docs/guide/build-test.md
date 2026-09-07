@@ -63,6 +63,32 @@ ctest --test-dir build_runtime_only -C Debug --output-on-failure
 `/MAP`）或 Ninja 的 `ninja -C build_runtime_only -t commands`；Vulkan 由 volk 加载，
 `dumpbin /DEPENDENTS` 不能证明静态库依赖隔离。
 
+## Runtime 阶段采样
+
+启用 JIT 时，`test_runtime_profile` 的默认 gtest 回归用 1000 个双 section primitive 验证
+对象参数复用、PSO 预热、普通帧不序列化和空闲 GC 不扫描。扩展采样在同一机器上运行：
+
+```powershell
+cmake --build build_debug --config Release --target test_runtime_profile --parallel 24
+$env:RADRAY_RUNTIME_PROFILE = '1'
+& .\build_debug\_build\Release\test_runtime_profile.exe > build_debug/runtime-profile-release.log 2>&1
+Remove-Item Env:RADRAY_RUNTIME_PROFILE
+```
+
+扩展模式包含 1千/1万/10万 primitive、静止/全部移动、普通/JSON+DOT 导出；每组预热 3 帧后
+采样 32 帧，输出 `PROFILE` JSON 行的 p50/p95/p99。相同命令可换 Debug 对照，采样固定关闭 GPU
+validation，16×16 离屏、单 Direct queue，逐帧等待 GPU，用于隔离 CPU 阶段成本，不测实际帧流水并行度。
+该场景只有共享材质和双 section 几何，不代表复杂产品场景或大规模 GPU-driven 能力。
+扩展模式还运行测试内的旧 record 路径参考，`prepared=false` 表示逐 draw 校验和 PSO cache 查找，
+可独立比较只关闭导出、只提前 PSO 准备和两者同时启用。该参考共享当前 snapshot/list 实现，
+不等于旧 revision 的完整性能基线，也不恢复公共兼容接口。
+
+计时包括 proxy transform、asset Pump、snapshot、Cull、list/参数、graph setup/execute、诊断序列化、
+flush/submit 与 GPU wait；graph report 另拆 compile/realize/prepare/record。分配计数只覆盖采样线程
+在本测试可执行文件中调用的 C++ new，不包含 DLL/驱动/malloc；graph 子阶段的分配字段为 null，
+由整体 execute 的分配数覆盖。`PROFILE_COUNTS` 报告参数与 pool 数量，pool 字节是描述符估算。
+样本数有限，p99 接近最慢样本；不要据此设固定 FPS 门槛或声称有未测量的前后性能增益。
+
 所有自有 target 接入 `radray_default_compile_flags`；它私有设置 C++ RTTI，
 不通过 core 向第三方或外部 consumer 传播。对象查询的边界见 [Core](../architecture/core-facilities.md)。
 

@@ -22,9 +22,9 @@ v1 只接收单 mip、单 layer 的 2D color render target，格式/view/range/u
 重复注册同一 texture、非法初始或最终状态会被拒绝。`PreserveContents` 是调用方声明，成功写入
 只更新真实 `CurrentState`，不会擅自改变下一帧的保留策略。
 
-注册、更新和注销只能在 game thread 且 render idle 时进行，debug 下由 registry 检查。runner 在
-发布 render work 前关闭 mutation gate，待既有 render idle 同步完成后再开放。CPU render idle
-不等于 GPU idle；销毁外部 texture/view 仍需等待引用它的 GPU work 完成，并先摘除缓存 framebuffer。
+注册、更新和注销只能在 game thread；runner 安装的 idle waiter 在实际修改前排空 render/GPU work，
+再开放 mutation gate。独立使用 registry 时由调用者确保 idle。外部资源仍由调用方拥有，注销前后的
+原生资源销毁必须遵守 fence 寿命，并先摘除缓存 framebuffer。只读取已发布 output 状态不会触发生命周期等待。
 
 `RenderPrepareContext` 提供 AppUpdateContext、无原生指针的 output catalog、`RenderWorkloadBuilder`
 和 retained asset vector。builder 向当前 flight 的 `RenderFramePlan` 写入值类型 view families；
@@ -76,7 +76,8 @@ generation 的 handle。不能跨 graph 使用，也不能在 freeze 后追加 s
 资产仍由宿主 per-flight refs 保活。execute callback 返回 void，不通过异常恢复。
 
 Raster builder 声明 sampled read、buffer access、color/depth attachment 与 Load/Store/Clear；compute
-builder 另可声明 UAV write/read-write 和 `UseComputeProgram`。两类 pass 都可用
+builder 另可声明 UAV write/read-write 和 `UseComputeProgram`；raster builder 用 `UseGraphicsProgram`
+声明 program、固定功能状态、顶点布局与 topology，得到 pass-local handle。两类 pass 都可用
 `CreateParameterSet(program, group, bindings)`，以 canonical declaration name 和数组元素绑定 Graph
 texture/buffer、sampler 或 setup 时复制的 cbuffer bytes。SRV/cbuffer 自动成为只读访问；可写声明必须
 显式选择 Read/Write/ReadWrite，Graph 据此生成依赖与 barrier。immutable/static sampler 来自 resolved
@@ -105,21 +106,26 @@ observable external 的最终 writer 与 `SetSideEffect` 是 roots。沿消费�
 仅对 live passes 建立 RAW/WAR/WAW hazard edges。所有 edge 都指向后声明 pass，声明顺序本身就是
 稳定拓扑序。被后续 Clear 完整覆盖的旧 producer 可以裁掉，Load 则会保留它；hazard 不参与 liveness。
 
-执行顺序固定为 setup → compile → realize → prepare parameters/compute PSOs → plan barriers → execute。
+执行顺序固定为 setup → compile → realize → prepare parameters/graphics/compute PSOs → plan barriers → execute。
 `Compile` 后先 realize 所有 live resource/view/render pass/framebuffer，继续复用 RenderPassRegistry；
 prepare 只处理 live pass，创建 Graph parameter sets、上传复制的常量并取得每个 compute program 的
-缓存 PSO。任一步失败均不录 graph 命令，diagnostic 携带 pass/binding/resource，history 不推进。
+缓存 PSO。graphics PSO 以已知 attachment compatibility 在此阶段准备，同 pass 相同请求只准备一次。
+任一步失败均不录 graph 命令，diagnostic 携带 pass/binding/resource，history 不推进。
 随后从 pool/external 的真实状态产生 pass 前 barriers；相同 UAV
 state 的写后访问使用显式 UAV memory barrier；同状态的非 UAV 写后写仍保留必要的内存依赖。
 初始 UAV state 保守视作可能由前一图写入，
 因此首次只读 UAV 访问也有屏障；同队列提交顺序不代替跨图的内存依赖。
 每个 live pass 独立 Begin/End，并用同名 debug group。
 pass commands facade 只转发绘制、dispatch、binding 和 viewport/scissor，不能通过 RHI encoder 的
-`GetCommandBuffer` 绕过 graph。静态 mesh/asset bindings 暂由原有固定状态契约约束。
+`GetCommandBuffer` 绕过 graph。`BindPersistentShaderParameterSet` 明确表示图外、只读且由 flight
+保活的 mesh/asset set；不得把 graph 写入资源藏进该原生 set。图内资源应使用 `CreateParameterSet`。
+原生 vertex/index buffer 若属于本图已导入或 realize 的资源，wrapper 检查当前 pass 声明了匹配
+`Vertex`/`Index` read；缺失或错误 usage 产生 `UndeclaredGeometryRead` 并禁止该次绘制。
+图外 immutable asset 几何由既有只读状态和 retained owner 契约保护。indirect 始终使用 graph handle。
 
 若 BeginRenderPass/BeginComputePass 失败，停止后续 pass；已录 barrier 的真实状态仍提交给 storage，
-失败 pass 不标记内容有效/已写，host 可据此恢复。PSO 缺失时 callback 可以跳过 draw，attachment
-clear 仍算有效内容，但必需 draw 失败必须通过 completion 提交参数拒绝时域推进。
+失败 pass 不标记内容有效/已写，host 可据此恢复。声明的 PSO 创建失败会在任何 graph 命令前拒绝整图；
+callback 发生必需 draw 失败时仍必须通过 completion 提交参数拒绝时域推进。
 
 ## Per-flight Graph 资源、pool、history 与报告
 
@@ -137,7 +143,11 @@ dimension、format、归一化 range、usage。一个对象在一次 flight cycl
 trim 默认删除超过三个未使用 flight cycles 的 entry，只在安全 BeginFlight 运行；先从
 RenderPassRegistry 删除引用 view 的 framebuffers，再释放 view/texture。普通 external 临时 view 由
 当前 flight 保存至下次安全 Begin；history view 缓存在所属 generation，避免逐帧创建。
-pool stats 区分累计 hits/misses/created/views-created/trimmed 与当前数量、估算字节数；不是驱动真实显存占用。
+pool stats 区分累计 hits/misses/created/views-created/trimmed 与当前数量、估算字节和历史峰值。
+`SetResourceView` 标记随后创建的 transient 归属，0 表示共享资源；每 flight 的 `MemoryByView` 按
+颜色、深度、存储纹理与 buffer 分组，并报告本 cycle 未使用的字节。Forward HDR 为各 view 自动标记。
+history 单独报告 active/retired 字节、view 归属和各 flight retire bin 字节。估算只覆盖描述符数据量，
+不含驱动对齐、压缩元数据、heap 空洞或实际 residency；不能据此宣称真实显存峰值或推导 heap aliasing 收益。
 
 `ViewStateRegistry` 是 render-thread-owned。resolve 读取最后成功提交的 previous matrix，第一次、
 camera cut、extent/format/sample 改变时 previous 无效。输出不可用、跳过、graph 失败不会推进。
@@ -165,15 +175,21 @@ resize/descriptor 变化先成功创建新 generation，旧 generation 进入当
 下一次安全复用再销毁。长期未使用的 view 同样先 retire 后释放。沿用单 Direct queue 的提交顺序，
 不为 history 增加 fence。关停先 GPU idle，再按 pipeline → graph pools → view states → registry 顺序清理。
 
-`RenderGraphExecutionReport` 提供稳定 Text/JSON/DOT，`Resolve` 是独立 pass 类型；报告记录执行与裁剪
+`RenderGraphExecutionReport` 按调用请求生成 Text/JSON/DOT，`Resolve` 是独立 pass 类型；报告记录执行与裁剪
 原因、内容与 hazard
 依赖、资源 descriptor/lifetime/physical ID、逐 subresource before/after、UAV 数量、pool stats 和
-带 source location 及可选 binding/resource 的 diagnostic。ID 不使用原生地址；相同 setup 的 CPU dump 可直接比对。
+带 source location 及可选 binding/resource 的 diagnostic。ID 不使用原生地址。宿主图直接写入对应 flight
+的 report，不在 ExecuteGraph 返回时整份复制。普通 Forward 帧不生成 JSON/DOT，capture 才序列化；
+失败 diagnostic 始终保留。报告还记录 graphics PSO 请求/准备/新建次数和 compile/realize/prepare/record
+CPU 纳秒数；比较结构时应排除这些会变动的时间字段。
 `RenderSystem::GetGraphReport`、`GetFramePlan`、`GetPoolStats` 只在对应阶段安全点读取。
+`GetViewStateStats` 汇总跨 flight 的 history，必须在 render thread 或全局 render idle 读取。
 
 ## 场景快照与剔除
 
-`BuildRenderSceneSnapshot` 只在 game thread 调用，每 flight/frame 构建一次，与输出和视图数量无关。
+`RenderSceneSnapshotBuilder::Build` 只在 game thread 调用，每 flight/frame 构建一次，与输出和视图数量无关。
+Forward 持久复用 builder 的去重表节点以及当前 flight 的材质、参数 bytes 和向量存储；每次仍复制
+当前 authoring 值，未引入材质 revision 或跨视图参数共享。一次性调用可使用 `BuildRenderSceneSnapshot`。
 它复制 primitive generation、MotionRevision、变换、世界 AABB、layer mask、CastShadow、禁用剔除标志、MeshBatch 范围及 light 参数，按首次遇到
 的 Material 去重并生成 pass 值快照。geometry/texture 仅借用指针，几何 owner 必须由 proxy 的
 `CollectAssetReferences` 先追加到宿主 retained refs。快照不保存 game object 或 asset ref；发布后只读。
@@ -234,14 +250,20 @@ queue 后的深度顺序排列。primitive/batch 为稳定的最终 tie-breaker�
 
 `FrameDrawResources` 持有每 flight 的 `DynamicCBufferArena` 与 `ShaderParameterSet`。`PrepareGroup`
 在 graph 执行前上传 bytes、按实际 binding number 排列 dynamic offsets，并解析纹理 subview/sampler。
+buffer 排序、dynamic 标志和资源反射按 program/group 每 flight 解析一次，临时绑定与 set key 复用容量；
+recipe 在安全复用时清除，避免旧 program 指针重用。Forward 每个视图/list 内按 program、primitive
+复用对象参数，同一物体多个 section 不重复上传。跨视图和历史语义不同的 pass 使用独立 processor。
+`FrameDrawResourceStats` 提供 recipe 构建、组准备、set 命中/创建和常量复制字节数。
 set cache 精确 key 为 pipeline layout、group、所有 buffer target/静态 offset/range、解析后的 texture view
 和 sampler（含绑定身份/数组元素）。dynamic offset 不属于 key，相同 backing page 上的切片可复用 set；
 spill 或静态 range/资源变化创建新 set。缓存命中后绝不改写已发布 descriptor，执行阶段不上传或写 set。
 
 复用顺序为清空 renderer lists/借用 command → 清 set cache 与 sets → reset/裁减 arena，全部依赖既有
 flight fence 安全边界。`MeshDrawCommand` 不拥有 RHI 资源或资产，只保存 program、PSO 输入、geometry、
-draw range、已准备的 groups 和排序值。`SubmitRendererList` 验证几何/有序唯一 groups，取得实际 pass
-的 PSO，再 bind/draw；失败跳过单条 draw 并计入 `DrawExecutionStats`，不重建数据或返回 game thread。
+draw range、已准备的 groups 和排序值。setup 中 `PrepareRendererList` 验证几何/有序唯一 groups、
+合并 graph 组并声明各 PSO，得到借用原 list 与 bindings 的 `PreparedRendererList`。二者必须保持不变
+直到图执行完毕。`SubmitRendererList` 只接受 prepared list，以 pass-local handle 绑定已准备的 PSO，
+再执行 bind/draw；record 不逐 draw 查找 PSO、分配校验容器或重建参数。
 
 `RendererListPassBindings::Create/Build` 把 graph parameter set 与当前 pass、program、真实 group 关联，
 供同一 `SubmitRendererList` draw loop 合并 native per-view/object/material 组。按 program 逐 draw 绑定，

@@ -3,6 +3,7 @@
 #include <radray/runtime/material_state.h>
 #include <radray/runtime/render_framework/mesh_batch.h>
 #include <radray/runtime/render_framework/render_types.h>
+#include <radray/runtime/render_framework/render_graph.h>
 
 namespace radray {
 
@@ -11,12 +12,14 @@ struct GraphicsPassState;
 struct RendererList;
 class RenderGraphRasterContext;
 class RendererListPassBindings;
+struct RendererListPassBinding;
 
 struct PreparedShaderGroup {
     uint32_t Group{0};
     Nullable<render::ShaderParameterSet*> Set{nullptr};
     vector<render::ShaderParameterDynamicOffset> DynamicOffsets;
 };
+// Native groups may reference only persistent read-only resources retained through the flight fence.
 struct DrawSortData {
     RenderQueue Queue{RenderQueue::Geometry};
     uint32_t ProgramFrameId{0};
@@ -40,11 +43,23 @@ struct DrawExecutionStats {
     bool Succeeded() const noexcept { return PsoFailure == 0 && BindingFailure == 0 && Skipped == 0; }
 };
 
+/// Prepared during graph setup; native graphics PSOs are realized before any pass is recorded.
+/// The list and optional graph bindings remain immutable until graph execution finishes.
+struct PreparedRendererList {
+    struct Draw {
+        const MeshDrawCommand* Command;
+        RgGraphicsProgramHandle Program;
+        std::span<const RendererListPassBinding> GraphGroups;
+    };
+    RgPassHandle Pass;
+    vector<Draw> Draws;
+};
+
 bool ValidateMeshGeometry(const GpuMesh::DrawData& geometry, uint32_t firstIndex, uint32_t indexCount) noexcept;
 bool ValidateMeshDrawCommand(const MeshDrawCommand& command) noexcept;
 bool FinalizeMeshDrawCommand(MeshDrawCommand& command) noexcept;
-void SubmitRendererList(const RendererList& list, RenderGraphRasterContext& ctx, const GraphicsPassState& passState, DrawExecutionStats& stats);
-void SubmitRendererList(const RendererList& list, RenderGraphRasterContext& ctx, const GraphicsPassState& passState,
-                        const RendererListPassBindings& bindings, DrawExecutionStats& stats);
+std::optional<PreparedRendererList> PrepareRendererList(const RendererList& list, RenderGraphRasterBuilder& builder,
+    Nullable<const RendererListPassBindings*> bindings = nullptr);
+void SubmitRendererList(const PreparedRendererList& list, RenderGraphRasterContext& ctx, DrawExecutionStats& stats);
 
 }  // namespace radray

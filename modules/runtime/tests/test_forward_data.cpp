@@ -297,7 +297,7 @@ TEST(RadRayRuntimeForwardPipeline, CollectsEachSectionWithCopiedFacts) {
         transform(0, 3) = 4.0f;
         SectionComponent component{mesh, {data.Authoring.get(), second.Get()}, transform};
         Scene scene;
-        auto* proxy = scene.AddPrimitive(&component);
+        auto* proxy = scene.AddPrimitive(component.CreateSceneProxy()).Get();
         ASSERT_NE(proxy, nullptr);
         CameraComponent camera;
         RenderSceneSnapshot input;
@@ -360,7 +360,7 @@ TEST(RenderSceneSnapshot, DeduplicatesMaterialsClassifiesSectionsAndRetainsCapac
                                                              Eigen::Vector3f::Ones(), Eigen::Vector3f::Zero(), std::move(geometry)));
         SectionComponent component{mesh, {data.Authoring.get(), data.Authoring.get(), data.Authoring.get(), data.Authoring.get(), data.Authoring.get(), nullptr}, Eigen::Matrix4f::Identity()};
         Scene scene;
-        auto* proxy = scene.AddPrimitive(&component);
+        auto* proxy = scene.AddPrimitive(component.CreateSceneProxy()).Get();
         ASSERT_NE(proxy, nullptr);
         RenderSceneSnapshot snapshot;
         vector<StreamingAssetRefAny> retained;
@@ -480,6 +480,10 @@ TEST(FrameDrawResources, DynamicOffsetsReuseImmutableSetsAndSpillsCreateNewSets)
         }
         EXPECT_TRUE(spilled);
         EXPECT_GT(resources.GetSetCount(), 1u);
+        EXPECT_EQ(resources.GetStats().RecipeBuilds, 1u);
+        EXPECT_EQ(resources.GetStats().GroupPreparations, 12u);
+        EXPECT_EQ(resources.GetStats().SetCreations + resources.GetStats().SetCacheHits, 12u);
+        EXPECT_EQ(resources.GetStats().BufferBytesCopied, 12u * pass.Parameters.GetBufferData(data.Bindings.MaterialBufferIndex).size());
         EXPECT_FALSE(resources.PrepareGroup(*pass.Program.Get(), *pass.ParameterGroup, ShaderParameterStorage{}, pass.Textures, pass.Samplers));
         EXPECT_FALSE(resources.PrepareGroup(*pass.Program.Get(), *pass.ParameterGroup, pass.Parameters));
         writes.Flush(*data.Device.Device);

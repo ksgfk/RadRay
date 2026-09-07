@@ -2,6 +2,8 @@
 
 #include <atomic>
 #include <thread>
+#include <functional>
+#include <mutex>
 
 #include <radray/render/rhi.h>
 
@@ -61,6 +63,9 @@ public:
 
     /// Host-only lifecycle gate. Set true only after the render thread has stopped consuming plans.
     void SetRenderIdle(bool idle) noexcept;
+    /// Host-installed safe point. Mutations wait only when published frames still consume outputs.
+    void SetRenderIdleWaiter(std::function<void()> waiter);
+    void EnsureRenderIdle() const noexcept;
     RenderOutputId RegisterPresentation(string name, const render::TextureDescriptor& desc, RenderOutputUsage usage = RenderOutputUsage::Scene);
     RenderOutputId RegisterExternal(const ExternalRenderOutputDesc& desc);
     bool Unregister(RenderOutputId id);
@@ -81,6 +86,8 @@ private:
     vector<Record> _records;
     std::thread::id _gameThread;
     bool _renderIdle{true};
+    std::function<void()> _renderIdleWaiter;
+    mutable std::mutex _externalStateMutex;
 };
 
 }  // namespace radray

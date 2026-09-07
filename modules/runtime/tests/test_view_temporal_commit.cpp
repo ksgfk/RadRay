@@ -249,17 +249,17 @@ public:
                     const auto depthTarget = graph.CreateTexture({render::TextureDimension::Dim2D, family.OutputSize.Width, family.OutputSize.Height, 1, 1, 1, render::TextureFormat::D32_FLOAT, render::MemoryType::Device, render::TextureUse::DepthStencilRead | render::TextureUse::DepthStencilWrite, {}}, "PSO rejection depth");
                     graph.AddRasterPass<test::EmptyGraphPass>("initialize depth", [=](test::EmptyGraphPass&, RenderGraphRasterBuilder& builder) { builder.SetDepthAttachment(depthTarget); }, +[](const test::EmptyGraphPass&, RenderGraphRasterContext&){});
                     struct Draw {
-                        RendererList* List;
+                        std::optional<PreparedRendererList> List;
                         DrawExecutionStats* Stats;
                         render::RenderBackend Backend;
                     };
                     completion = graph.AddRasterPass<Draw>("required draw PSO failure", [&](Draw& data, RenderGraphRasterBuilder& builder) {
-                        data = {&RequiredList, &RequiredDraws, Backend};
+                        data = {PrepareRendererList(RequiredList, builder), &RequiredDraws, Backend};
                         builder.SetColorAttachment(0, output);
                         builder.SetDepthAttachment(depthTarget, {.Load = render::LoadAction::Load, .ReadOnly = true}); }, +[](const Draw& data, RenderGraphRasterContext& pass) {
                         pass.Encoder().SetViewport(MakeViewport(data.Backend, 0, 0, 96, 64));
                         pass.Encoder().SetScissor({0, 0, 96, 64});
-                        SubmitRendererList(*data.List, pass, pass.PassState(), *data.Stats); });
+                        SubmitRendererList(*data.List, pass, *data.Stats); });
                 } else
 #endif
                     completion = graph.AddRasterPass<test::EmptyGraphPass>(fmt::format("complete {}", i), [=](test::EmptyGraphPass&, RenderGraphRasterBuilder& builder) { builder.SetColorAttachment(0, output, {.Load = i == 0 ? render::LoadAction::Clear : render::LoadAction::Load}); }, +[](const test::EmptyGraphPass&, RenderGraphRasterContext&) {});
@@ -274,13 +274,18 @@ public:
         ASSERT_TRUE(independent.Current);
         EXPECT_EQ(independent.PreviousValid, Frame > 1);
         WriteHistory(graph, independent, "independent feedback");
-        ASSERT_TRUE(context.ExecuteGraph(graph).Success);
+        const auto execution = context.ExecuteGraph(graph);
 #if defined(RADRAY_ENABLE_SHADER_JIT)
+        EXPECT_EQ(execution.Success, Frame != 5);
         if (Frame == 5) {
-            EXPECT_EQ(RequiredDraws.Draws, 1u);
-            EXPECT_EQ(RequiredDraws.PsoFailure, 1u);
-            Result.PsoFailures += static_cast<uint32_t>(RequiredDraws.PsoFailure);
+            EXPECT_FALSE(execution.CommandsRecorded);
+            EXPECT_EQ(RequiredDraws.Draws, 0u);
+            ASSERT_EQ(graph.GetReport().Diagnostics.size(), 1u);
+            EXPECT_EQ(graph.GetReport().Diagnostics[0].Code, "GraphicsPipelineState");
+            ++Result.PsoFailures;
         }
+#else
+        EXPECT_TRUE(execution.Success);
 #endif
         EXPECT_FALSE(context.CommitView(Ids[1], tokens[0], true));
         if (Old.IsValid()) EXPECT_FALSE(context.CommitView(Ids[0], Old, true));
@@ -291,7 +296,7 @@ public:
 #else
                                         false;
 #endif
-            const bool expected = Frame != 2 && !(Frame == 3 && i == 1) && !(Frame == 4 && i == 0) && drawsSucceeded;
+            const bool expected = execution.Success && Frame != 2 && !(Frame == 3 && i == 1) && !(Frame == 4 && i == 0) && drawsSucceeded;
             const bool committed = context.CommitView(Ids[i], tokens[i], drawsSucceeded);
             EXPECT_EQ(committed, expected) << "frame " << Frame << " view " << i;
             EXPECT_FALSE(context.CommitView(Ids[i], tokens[i], true));
@@ -353,7 +358,8 @@ TEST_P(ViewTemporalContextTest, T01T02T03T04T08T12OutputProofDrawFailureAndIndep
 #if defined(RADRAY_ENABLE_SHADER_JIT)
     EXPECT_EQ(result.PsoFailures, 1u);
     RecordProperty("actual_required_pso_failures", result.PsoFailures);
-    EXPECT_EQ(logs.Errors(), "RendererList PSO failure in pass 3 for program 0 batch 0\n");
+    EXPECT_NE(logs.Errors().find("GraphicsPipelineState"), string::npos);
+    EXPECT_EQ(logs.Errors().find("Validation Layer"), string::npos);
 #else
     RecordProperty("actual_required_pso_failures", "not_built_without_jit");
     EXPECT_TRUE(logs.Errors().empty()) << logs.Errors();

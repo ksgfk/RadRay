@@ -4,6 +4,14 @@
 #include <radray/utility.h>
 
 namespace radray::forward_detail {
+void ForwardCapture::CaptureReport(const RenderGraphExecutionReport& report) {
+    Report.clear();
+    Dot.clear();
+    if (Name.empty() || Directory.empty()) return;
+    Report = report.ToJson();
+    Dot = report.ToDot();
+}
+
 bool ForwardCapture::Build(RenderGraph& graph, RenderPipelineContext& context, render::Device& device) {
     Pending = false;
     if (Name.empty() || Directory.empty()) return true;

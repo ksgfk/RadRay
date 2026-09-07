@@ -2,7 +2,9 @@
 
 #include <chrono>
 #include <filesystem>
+#include <mutex>
 #include <string_view>
+#include <thread>
 
 #include <radray/coroutine.h>
 #include <radray/types.h>
@@ -177,7 +179,9 @@ public:
     void Render(AppFrameContext& ctx);
     int Shutdown(const AppShutdownContext& ctx);
     void OnRenderComplete(const AppRenderCompleteContext& ctx);
+    /// Any retirement thread: enqueue only. Callbacks drain on the application thread before flight reuse.
     void NotifyRenderComplete(const AppRenderCompleteContext& ctx);
+    void PumpRenderCompletions();
 
     int StartLoop();
 
@@ -200,7 +204,7 @@ protected:
     /// 典型用途:释放游戏自管的 per-flight 资源、置空指向 World 的非 owning 指针。
     virtual void OnShutdown();
 
-    /// 某个 flight 的 GPU work 完成后回调。典型用途:回收应用自管的延迟销毁 GPU 资源。
+    /// Game thread, before flight reuse or shutdown. Check GpuWorkCompleted for discarded frames.
     virtual void OnRenderFrameComplete(const AppRenderCompleteContext& ctx);
 
     /// 是否请求退出。默认:主窗口被关闭。
@@ -224,6 +228,10 @@ private:
     std::filesystem::path _shaderSourceRoot;
     vector<std::filesystem::path> _shaderIncludePaths;
     bool _multithreaded{false};
+    const std::thread::id _applicationThread{std::this_thread::get_id()};
+    std::mutex _renderCompletionMutex;
+    vector<AppRenderCompleteContext> _renderCompletions;
+    bool _pumpingRenderCompletions{false};
 };
 
 }  // namespace radray

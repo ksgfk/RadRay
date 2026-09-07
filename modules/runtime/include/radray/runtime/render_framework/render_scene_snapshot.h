@@ -32,6 +32,7 @@ struct RenderSceneSnapshotStats {
     uint64_t Primitives{0}, MeshBatches{0}, Materials{0}, Lights{0};
     uint64_t MissingGeometry{0}, EmptyDraw{0}, InvalidDrawRange{0}, MaterialUnavailable{0}, InvalidBounds{0};
     uint64_t RetainedAssets{0};
+    uint64_t MaterialBytesCopied{0}, ScratchEntriesCreated{0}, CpuNanoseconds{0};
     // Peak vector capacities, measured in elements across reuse cycles.
     size_t PrimitiveHighWatermark{0}, BatchHighWatermark{0}, MaterialHighWatermark{0}, LightHighWatermark{0};
 };
@@ -49,5 +50,20 @@ struct RenderSceneSnapshot {
 
 /// Game thread only, after acquiring a writable flight. Failure publishes an empty snapshot.
 bool BuildRenderSceneSnapshot(const Scene& scene, RenderSceneSnapshot& out, vector<StreamingAssetRefAny>& retainedAssets);
+
+/// Game-thread scratch; never published as part of a GPU snapshot. Stable scenes reuse map nodes,
+/// vector storage and material parameter bytes while every writable flight receives current values.
+class RenderSceneSnapshotBuilder {
+public:
+    bool Build(const Scene& scene, RenderSceneSnapshot& out, vector<StreamingAssetRefAny>& retainedAssets);
+private:
+    struct Entry {
+        uint64_t Epoch{0};
+        std::optional<uint32_t> Index;
+    };
+    unordered_map<Material*, Entry> _materials;
+    unordered_map<ShaderProgram*, Entry> _programs;
+    uint64_t _epoch{0};
+};
 
 }  // namespace radray

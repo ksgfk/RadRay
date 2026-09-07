@@ -38,14 +38,16 @@ public:
     /// Game thread: retain every asset owning geometry exposed by this proxy.
     virtual void CollectAssetReferences(vector<StreamingAssetRefAny>& out) const;
 
+    /// Stable for this registration; ordinary transform updates preserve identity and motion revision.
     uint64_t GetGeneration() const noexcept { return _generation; }
     /// Game-thread revision for discontinuous motion; observing it never consumes the reset.
     uint64_t GetMotionRevision() const noexcept { return _motionRevision; }
     void ResetMotion() noexcept;
 
     /// 逐物体 local->world 变换 (对应 UE5 的 GetLocalToWorld / Unity 的 unity_ObjectToWorld)。
-    /// 基类默认单位阵; 具体 proxy 覆写。
-    virtual Eigen::Matrix4f GetLocalToWorld() const noexcept { return Eigen::Matrix4f::Identity(); }
+    virtual Eigen::Matrix4f GetLocalToWorld() const noexcept { return _localToWorld; }
+    /// Game thread only. Derived proxies with transform-dependent data must update it here.
+    virtual void SetLocalToWorld(const Eigen::Matrix4f& value) noexcept { _localToWorld = value; }
 
     virtual AxisAlignedBounds GetLocalBounds() const noexcept { return {}; }
     virtual uint32_t GetLayerMask() const noexcept { return 0xffffffffu; }
@@ -60,6 +62,7 @@ public:
 private:
     uint64_t _generation{0};
     uint64_t _motionRevision{0};
+    Eigen::Matrix4f _localToWorld{Eigen::Matrix4f::Identity()};
 };
 
 }  // namespace radray

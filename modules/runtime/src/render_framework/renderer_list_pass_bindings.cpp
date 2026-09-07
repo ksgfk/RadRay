@@ -86,4 +86,11 @@ bool RendererListPassBindings::IsValidFor(const RenderGraphRasterContext& contex
     return true;
 }
 
+bool RendererListPassBindings::IsValidFor(const RenderGraphRasterBuilder& builder, const ShaderProgram& program) const noexcept {
+    if (_pass != builder.GetPassHandle() || std::find(_programs.begin(), _programs.end(), &program) == _programs.end()) return false;
+    for (const auto& binding : Find(program))
+        if (!builder.OwnsParameterSet(binding.Parameters, program, binding.Group)) return false;
+    return true;
+}
+
 }  // namespace radray

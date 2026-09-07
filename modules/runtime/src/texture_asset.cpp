@@ -38,6 +38,12 @@ struct UploadedTexture {
     unique_ptr<render::TextureView> Srv;
 };
 
+struct PreparedTextureUpload {
+    uint32_t Width, Height;
+    render::TextureFormat Format;
+    vector<vector<byte>> MipChain;
+};
+
 float SrgbToLinear(uint32_t value) noexcept {
     const float normalized = static_cast<float>(value) / 255.0f;
     return normalized <= 0.04045f
@@ -113,21 +119,19 @@ vector<vector<byte>> BuildRgba8MipChain(const ImageData& rgba8, bool generateMip
 
 std::optional<UploadedTexture> RecordTextureUpload(
     const FrameUploadScope& frame,
-    const ImageData& rgba8,
-    bool srgb,
-    bool generateMips,
+    const PreparedTextureUpload& prepared,
     std::string_view debugName) {
     render::Device* device = frame.GetUploader().GetDevice();
-    if (device == nullptr || rgba8.Data == nullptr || rgba8.Width == 0 || rgba8.Height == 0) {
+    if (device == nullptr || prepared.MipChain.empty() || prepared.Width == 0 || prepared.Height == 0) {
         return std::nullopt;
     }
-    const render::TextureFormat format = PickFormat(srgb);
-    const vector<vector<byte>> mipChain = BuildRgba8MipChain(rgba8, generateMips, srgb);
+    const auto format = prepared.Format;
+    const auto& mipChain = prepared.MipChain;
 
     render::TextureDescriptor texDesc{
         .Dim = render::TextureDimension::Dim2D,
-        .Width = rgba8.Width,
-        .Height = rgba8.Height,
+        .Width = prepared.Width,
+        .Height = prepared.Height,
         .DepthOrArraySize = 1,
         .MipLevels = static_cast<uint32_t>(mipChain.size()),
         .SampleCount = 1,
@@ -182,6 +186,7 @@ task<AssetLoadResult> LoadTextureFromImageTask(
     string name,
     ImageData image,
     TextureAssetLoadOptions options) {
+    RADRAY_ASSERT(!frameUploads.IsRecordingUploads());
     // RGBA8 归一(GPU 仅支持 RGBA8 上传路径)。
     ImageData rgba8 = ConvertToRGBA8(image);
     if (rgba8.Data == nullptr || rgba8.Width == 0 || rgba8.Height == 0) {
@@ -193,12 +198,15 @@ task<AssetLoadResult> LoadTextureFromImageTask(
         co_return AssetLoadResult::Failure(fmt::format("texture '{}' has no valid pixels", name));
     }
 
+    PreparedTextureUpload prepared{rgba8.Width, rgba8.Height, PickFormat(options.Srgb),
+                                   BuildRgba8MipChain(rgba8, options.GenerateMips, options.Srgb)};
+    rgba8 = {};
+    image = {};
+    options.FallbackImage = {};
     FrameUploadScope frame = co_await frameUploads.BeginUpload();
     std::optional<UploadedTexture> uploaded = RecordTextureUpload(
         frame,
-        rgba8,
-        options.Srgb,
-        options.GenerateMips,
+        prepared,
         name);
     if (!uploaded.has_value()) {
         co_return AssetLoadResult::Failure(fmt::format("texture '{}' upload recording failed", name));
@@ -219,6 +227,7 @@ task<AssetLoadResult> LoadTextureFromMemoryTask(
     string name,
     vector<byte> encodedBytes,
     TextureAssetLoadOptions options) {
+    RADRAY_ASSERT(!frameUploads.IsRecordingUploads());
     std::optional<ImageData> decoded = DecodeImageBytes(encodedBytes);
     ImageData image;
     if (decoded.has_value()) {
@@ -277,6 +286,7 @@ std::span<const std::string_view> TextureImporter::GetFileExtensions() const noe
 task<AssetLoadResult> TextureImporter::LoadTyped(
     std::filesystem::path path,
     TextureImportSettings settings) {
+    RADRAY_ASSERT(!_frameUploads.IsRecordingUploads());
     std::optional<vector<byte>> encoded = ReadBinaryFile(path);
     if (!encoded.has_value()) {
         co_return AssetLoadResult::Failure(fmt::format("cannot read texture source '{}'", path.string()));

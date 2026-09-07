@@ -414,6 +414,72 @@ TEST_F(AssetSlotTest, CollectingCascadesToDependenciesWithinOnePump) {
     EXPECT_EQ(Assets().GetAssetCount(), 0u);
 }
 
+TEST_F(AssetSlotTest, UnchangedResidentAssetsDoNotEnterCollectionAndDependenciesAreLinear) {
+    auto counters = MakeCounters();
+    vector<StreamingAssetRef<ProbeAsset>> resident;
+    for (uint32_t i = 0; i < 10000; ++i)
+        resident.push_back(Assets().AddReady<ProbeAsset>(MakeId(10000 + i), make_unique<ProbeAsset>(counters, false)));
+    for (uint32_t i = 0; i < 100; ++i) Assets().Pump();
+    EXPECT_EQ(Assets().GetCollectionStats().CandidatesVisited, 0u);
+    EXPECT_EQ(Assets().GetCollectionStats().SlotsDestroyed, 0u);
+    const auto rescuedId = resident.back().GetAssetId();
+    resident.back().Reset();
+    auto rescued = Assets().Find(rescuedId);
+    Assets().Pump();
+    EXPECT_EQ(Assets().GetCollectionStats().CandidatesVisited, 1u);
+    EXPECT_EQ(Assets().GetCollectionStats().SlotsDestroyed, 0u);
+    rescued.Reset();
+    resident.clear();
+    Assets().Pump();
+    EXPECT_EQ(Assets().GetCollectionStats().SlotsDestroyed, 10000u);
+    EXPECT_EQ(Assets().GetCollectionStats().PendingCandidates, 0u);
+
+    class DependencyAsset final : public ProbeAsset {
+    public:
+        DependencyAsset(shared_ptr<Counters> counters, StreamingAssetRefAny dependency)
+            : ProbeAsset(std::move(counters), false), Dependency(std::move(dependency)) {}
+        StreamingAssetRefAny Dependency;
+    };
+    StreamingAssetRefAny chain;
+    for (uint32_t i = 0; i < 10000; ++i)
+        chain = Assets().AddReady(MakeId(20000 + i), make_unique<DependencyAsset>(counters, std::move(chain)));
+    const auto before = Assets().GetCollectionStats();
+    chain.Reset();
+    Assets().Pump();
+    EXPECT_EQ(Assets().GetCollectionStats().CandidatesVisited - before.CandidatesVisited, 10000u);
+    EXPECT_EQ(Assets().GetCollectionStats().SlotsDestroyed - before.SlotsDestroyed, 10000u);
+    EXPECT_EQ(Assets().GetAssetCount(), 0u);
+    EXPECT_EQ(counters->Destroyed, 20000u);
+    EXPECT_EQ(counters->Unloaded, 20000u);
+}
+
+TEST_F(AssetSlotTest, ReentrantUnloadCanReloadItsIdentityWithoutRevivingTheDyingObject) {
+    auto counters = MakeCounters();
+    StreamingAssetRefAny replacement;
+    class ReloadingAsset final : public ProbeAsset {
+    public:
+        ReloadingAsset(shared_ptr<Counters> counters, StreamingAssetRefAny& replacement)
+            : ProbeAsset(counters, false), Counts(std::move(counters)), Replacement(replacement) {}
+        void OnUnload(AssetManager& manager) override {
+            ProbeAsset::OnUnload(manager);
+            EXPECT_FALSE(manager.Find(MakeId(40000)).IsValid());
+            Replacement = manager.AddReady(MakeId(40000), make_unique<ProbeAsset>(Counts, false));
+            manager.Pump();
+        }
+        shared_ptr<Counters> Counts;
+        StreamingAssetRefAny& Replacement;
+    };
+    auto ref = Assets().AddReady(MakeId(40000), make_unique<ReloadingAsset>(counters, replacement));
+    ref.Reset();
+    Assets().Pump();
+    EXPECT_TRUE(replacement.IsReady());
+    EXPECT_EQ(counters->Destroyed, 1u);
+    EXPECT_EQ(Assets().GetAssetCount(), 1u);
+    replacement.Reset();
+    Assets().Pump();
+    EXPECT_EQ(counters->Destroyed, 2u);
+}
+
 /// 引用归零、Pump 回收之后, 同 id 可以重新建槽位。验的是回收真的把索引项擦掉了 ——
 /// 若只清了对象而留着索引, 这里会命中一个空槽位。
 TEST_F(AssetSlotTest, SameIdCanBeReoccupiedAfterCollection) {

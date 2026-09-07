@@ -11,6 +11,7 @@ struct ForwardGraphPassData {
         ResolvedRenderView View;
         const RendererList* List{nullptr};
         std::optional<RendererListPassBindings> Bindings;
+        std::optional<PreparedRendererList> Prepared;
     };
 
     render::RenderBackend Backend{render::RenderBackend::MAX_COUNT};
@@ -21,17 +22,14 @@ struct ForwardGraphPassData {
 void ExecuteForwardGraphPass(
     const ForwardGraphPassData& data, RenderGraphRasterContext& context) {
     for (const ForwardGraphPassData::ViewData& view : data.Views) {
-        if (view.List == nullptr) continue;
+        if (!view.Prepared) continue;
         context.Encoder().SetViewport(MakeViewport(
             data.Backend, static_cast<float>(view.View.ViewRect.X),
             static_cast<float>(view.View.ViewRect.Y),
             static_cast<float>(view.View.ViewRect.Width),
             static_cast<float>(view.View.ViewRect.Height)));
         context.Encoder().SetScissor(view.View.ScissorRect);
-        if (view.Bindings)
-            SubmitRendererList(*view.List, context, context.PassState(), *view.Bindings, *data.Execution);
-        else
-            SubmitRendererList(*view.List, context, context.PassState(), *data.Execution);
+        SubmitRendererList(*view.Prepared, context, *data.Execution);
     }
 }
 
@@ -70,11 +68,13 @@ ForwardGraphStageOutput ForwardGraph::BuildGraph(
             data.Execution = inputs.Execution;
             data.Views.reserve(inputs.Views.size());
             for (const ForwardGraphView& view : inputs.Views) {
-                ForwardGraphPassData::ViewData next{view.View, view.List, {}};
+                ForwardGraphPassData::ViewData next{view.View, view.List, {}, {}};
                 if (!view.Parameters.empty()) {
                     next.Bindings = RendererListPassBindings::Create(builder, *view.List, view.Parameters);
                     if (!next.Bindings) setupSuccess = false;
                 }
+                next.Prepared = PrepareRendererList(*view.List, builder, next.Bindings ? &*next.Bindings : nullptr);
+                if (!next.Prepared) setupSuccess = false;
                 data.Views.push_back(std::move(next));
             }
             if (stage != ForwardGraphStage::Depth &&

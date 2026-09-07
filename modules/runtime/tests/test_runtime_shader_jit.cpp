@@ -1,5 +1,7 @@
 #include "gpu_test_fixture.h"
 #include "shader_contract_fixtures.h"
+#include "shader_program_cache.h"
+#include <radray/file.h>
 
 #include <radray/render/backend/pipeline_layout_types.h>
 #include <radray/render/backend_shader_artifact.h>
@@ -12,6 +14,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <chrono>
 
 namespace radray {
 namespace {
@@ -662,6 +665,44 @@ TEST(RadRayRuntimeShaderJit, D3D12) {
 #else
     GTEST_SKIP() << "D3D12 is disabled";
 #endif
+}
+
+TEST(RadRayRuntimeShaderJit, CacheUsesDeviceAndConfigurationAndRetainsProgramsAcrossSourceRevisions) {
+    render::test::DeviceContext context;
+    if (!render::test::TryCreateDevice(render::RenderBackend::D3D12, context)) GTEST_SKIP() << context.Reason;
+    struct SourceDirectory {
+        std::filesystem::path Path;
+        ~SourceDirectory() {
+            std::error_code error;
+            std::filesystem::remove_all(Path, error);
+        }
+    } source{std::filesystem::temp_directory_path() / fmt::format("radray_shader_revision_{}", std::chrono::steady_clock::now().time_since_epoch().count())};
+    std::error_code error;
+    ASSERT_TRUE(std::filesystem::create_directories(source.Path, error));
+    ASSERT_FALSE(error);
+    ASSERT_TRUE(WriteTextFile(source.Path / "graphics.hlsl", kGraphicsSource));
+    ShaderProgramCache cache{*context.Device, source.Path, {}};
+    ShaderProgramRequest request{.SourceName = "graphics.hlsl"};
+    const auto original = cache.GetOrCreateShaderProgram(request);
+    ASSERT_TRUE(original);
+    EXPECT_EQ(cache.GetOrCreateShaderProgram(request).Get(), original.Get());
+    EXPECT_EQ(cache.GetProgramCount(), 1u);
+    EXPECT_EQ(cache.GetArtifactCount(), 1u);
+    ASSERT_TRUE(cache.InvalidateSource(request.SourceName));
+    const auto replacement = cache.GetOrCreateShaderProgram(request);
+    ASSERT_TRUE(replacement);
+    EXPECT_NE(replacement.Get(), original.Get());
+    EXPECT_EQ(cache.GetProgramCount(), 2u);
+    EXPECT_EQ(cache.GetArtifactCount(), 2u);
+    EXPECT_NE(original->GetPipelineLayout(), nullptr);
+
+    request.SourceName = "retry.hlsl";
+    EXPECT_FALSE(cache.GetOrCreateShaderProgram(request));
+    ASSERT_TRUE(WriteTextFile(source.Path / "retry.hlsl", kGraphicsSource));
+    EXPECT_FALSE(cache.GetOrCreateShaderProgram(request));
+    ASSERT_TRUE(cache.InvalidateSource(request.SourceName));
+    EXPECT_TRUE(cache.GetOrCreateShaderProgram(request));
+    EXPECT_FALSE(cache.InvalidateSource("../outside.hlsl"));
 }
 
 TEST(RadRayRuntimeShaderJit, ExplicitRootSignatureD3D12) {
