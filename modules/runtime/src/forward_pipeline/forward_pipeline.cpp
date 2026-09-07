@@ -15,9 +15,6 @@
 #include <radray/runtime/gpu_system.h>
 #include <radray/runtime/render_framework/viewport.h>
 #include <radray/runtime/render_system.h>
-#ifdef RADRAY_ENABLE_IMGUI
-#include <radray/runtime/imgui/imgui_graph.h>
-#endif
 
 namespace radray {
 using namespace forward_detail;
@@ -77,23 +74,20 @@ struct ForwardPipeline::Impl {
         bool ProgramsReady{false};
         ForwardCapture Capture;
         ForwardStageBStats Stats;
+        size_t HdrViewCount{0};
+        bool OverlaysSucceeded{true};
+        vector<ViewStateId> RenderedViews;
     };
 
     Impl(Application* application, Scene* renderScene, CameraComponent* viewCamera)
         : RenderScene(renderScene), ViewCamera(viewCamera), Device(application->GetDevice()), System(application->GetRenderSystem()) {
         Flights.resize(application->GetGpuSystem()->GetFlightDataCount());
-#ifdef RADRAY_ENABLE_IMGUI
-        Ui = application->GetImGuiSystem();
-#endif
     }
 
     Scene* RenderScene;
     CameraComponent* ViewCamera;
     render::Device* Device;
     RenderSystem* System;
-#ifdef RADRAY_ENABLE_IMGUI
-    Nullable<ImGuiSystem*> Ui;
-#endif
     ForwardPipelineSettings Settings;
     ForwardEffectPrograms Effects;
     vector<ForwardViewSource> Sources;
@@ -289,7 +283,7 @@ void ForwardPipeline::PrepareFrame(RenderPrepareContext& ctx) {
     }
 }
 
-void ForwardPipeline::Render(RenderPipelineContext& ctx) {
+void ForwardPipeline::BuildGraph(RenderPipelineContext& ctx, RenderGraph& graph, std::span<RenderGraphOutputBinding> outputs) {
     if (!_impl->BeginFrame(ctx)) {
         _impl->Error = true;
         return;
@@ -300,12 +294,9 @@ void ForwardPipeline::Render(RenderPipelineContext& ctx) {
         _impl->Error = true;
         return;
     }
-    auto graph = ctx.CreateRenderGraph("Forward");
-#ifdef RADRAY_ENABLE_IMGUI
-    auto ui = _impl->Ui;
-    const auto uiScenes = ui ? ImGuiGraph::PrepareSceneOutputs(graph, ctx) : vector<ImGuiSceneOutput>{};
-#endif
-    vector<ViewStateId> rendered;
+    flight.RenderedViews.clear();
+    auto& rendered = flight.RenderedViews;
+    flight.HdrViewCount = 0;
     if (flight.Settings.Hdr) {
         bool overlaysSucceeded = true;
         size_t viewIndex = 0;
@@ -335,49 +326,17 @@ void ForwardPipeline::Render(RenderPipelineContext& ctx) {
                 if (viewIndex == flight.HdrViews.size()) flight.HdrViews.push_back(make_unique<ForwardHdrView>());
                 auto& work = *flight.HdrViews[viewIndex++];
                 if (BuildForwardHdrView(graph, ctx, *_impl->Device, _impl->Effects, flight.Settings, family, view, flight.Scene,
-                                        *flight.DrawResources, _impl->Bindings, work, firstOutput, _impl->LightOverflowWarned, flight.Surfaces))
+                                        *flight.DrawResources, _impl->Bindings, work, firstOutput, _impl->LightOverflowWarned, flight.Surfaces, outputs))
                     firstOutput = false;
                 else
                     _impl->Error = true;
             }
         }
         for (const auto& overlay : flight.Overlays)
-            overlaysSucceeded &= BuildForwardOutputOverlay(graph, ctx, _impl->Effects, overlay, _impl->Device->GetBackend(), overlaysSucceeded);
-#ifdef RADRAY_ENABLE_IMGUI
-        if (ui) ImGuiGraph::BuildGraph(graph, ctx, ui->GetGraphFrame(ctx.FlightIndex()), uiScenes);
-#endif
-        if (!flight.Capture.Build(graph, ctx, *_impl->Device)) _impl->Error = true;
-        const auto result = ctx.ExecuteGraph(graph);
-#ifdef RADRAY_ENABLE_IMGUI
-        if (ui) ImGuiGraph::CompleteGraph(graph, ctx, ui->GetGraphFrame(ctx.FlightIndex()), result.Success);
-#endif
-        flight.Capture.CaptureReport(graph.GetReport());
-        if (result.Success) {
-            for (size_t i = 0; i < viewIndex; ++i) {
-                auto& work = *flight.HdrViews[i];
-                const bool content = overlaysSucceeded && work.ContentValid && work.PassesSucceeded && work.Execution.Succeeded();
-                if (!content) {
-                    _impl->Error = true;
-                    const auto describe = [](const RendererList& list) { const auto& s = list.Stats; return fmt::format("valid={} required={} bindings={} geometry={} prepare={} rejected={}", s.Valid, s.MissingRequiredPass, s.InvalidBindings, s.InvalidGeometry, s.PrepareResourceFailed, s.ProcessorRejected); };
-                    RADRAY_ERR_LOG("Forward view '{}' incomplete: content={} passes={} pso={} bind={} skip={} depth[{}] opaque[{}] transparent[{}] shadows[{}/{}/{}/{}]",
-                                   work.Main.View.Name, work.ContentValid, work.PassesSucceeded, work.Execution.PsoFailure, work.Execution.BindingFailure, work.Execution.Skipped,
-                                   describe(work.Main.DepthOnly), describe(work.Main.Opaque), describe(work.Main.Transparent), describe(work.Cascades[0].DepthOnly), describe(work.Cascades[1].DepthOnly), describe(work.Cascades[2].DepthOnly), describe(work.Cascades[3].DepthOnly));
-                }
-                ctx.CommitView(work.Main.View.StateId, work.Completion, content);
-                flight.Stats.CullCalls += 1 + (flight.Settings.Shadows ? 4 : 0);
-                flight.Stats.DepthCommands += work.Main.DepthOnly.Commands.size();
-                flight.Stats.OpaqueCommands += work.Main.Opaque.Commands.size();
-                flight.Stats.TransparentCommands += work.Main.Transparent.Commands.size();
-                flight.Stats.Execution.Commands += work.Execution.Commands;
-                flight.Stats.Execution.Draws += work.Execution.Draws;
-                flight.Stats.Execution.PsoFailure += work.Execution.PsoFailure;
-                flight.Stats.Execution.BindingFailure += work.Execution.BindingFailure;
-                flight.Stats.Execution.Skipped += work.Execution.Skipped;
-            }
-        } else {
-            _impl->Error = true;
-            RADRAY_ERR_LOG("Forward graph failed: {}", graph.GetReport().ToText());
-        }
+            overlaysSucceeded &= BuildForwardOutputOverlay(graph, ctx, _impl->Effects, overlay, _impl->Device->GetBackend(), overlaysSucceeded, outputs);
+        if (!flight.Capture.Build(graph, ctx, *_impl->Device, *_impl->System, outputs)) _impl->Error = true;
+        flight.HdrViewCount = viewIndex;
+        flight.OverlaysSucceeded = overlaysSucceeded;
         return;
     }
     for (const auto& family : ctx.ViewFamilies()) {
@@ -395,7 +354,9 @@ void ForwardPipeline::Render(RenderPipelineContext& ctx) {
         string reason;
         const auto descriptor = ResolveRuntimeTextureDesc(depthDesc, family, *_impl->Device, reason);
         if (!descriptor) continue;
-        const auto color = ctx.ImportOutput(graph, family.OutputId);
+        auto target = FindGraphOutput(outputs, family.OutputId);
+        if (!target) continue;
+        const auto color = target->Texture;
         const auto depth = graph.CreateTexture(*descriptor, "Forward.Depth");
         const auto& work = _impl->Flights[ctx.FlightIndex()].Families[family.FrameLocalIndex];
         vector<ForwardGraphView> depthViews, opaqueViews, transparentViews;
@@ -422,7 +383,7 @@ void ForwardPipeline::Render(RenderPipelineContext& ctx) {
              .Backend = _impl->Device->GetBackend(),
              .Views = opaqueViews,
              .Color = color,
-             .Depth = depth,
+             .Depth = depthStage.Depth,
              .ColorAttachment = {.Load = render::LoadAction::Clear,
                                  .Clear = {{.025f, .030f, .040f, 1}}},
              .DepthAttachment = {.Load = depthStage.Pass.IsValid()
@@ -434,28 +395,56 @@ void ForwardPipeline::Render(RenderPipelineContext& ctx) {
             {.Name = "Forward.Transparent",
              .Backend = _impl->Device->GetBackend(),
              .Views = transparentViews,
-             .Color = color,
-             .Depth = depth,
+             .Color = opaqueStage.Color,
+             .Depth = opaqueStage.Depth,
              .ColorAttachment = {.Load = render::LoadAction::Load},
              .DepthAttachment = {.Load = render::LoadAction::Load},
              .Execution = &execution});
+        target->Texture = transparentStage.Color;
         if (!depthStage.Success || !opaqueStage.Success || !transparentStage.Success) {
             RADRAY_ERR_LOG("Forward graph stage declaration failed for '{}'", family.Name);
         }
         for (const auto& view : work.Views)
             if (view.Culling.Stats.Valid) rendered.push_back(view.View.StateId);
     }
-#ifdef RADRAY_ENABLE_IMGUI
-    if (ui) ImGuiGraph::BuildGraph(graph, ctx, ui->GetGraphFrame(ctx.FlightIndex()), uiScenes);
-#endif
-    if (!flight.Capture.Build(graph, ctx, *_impl->Device)) _impl->Error = true;
-    const auto result = ctx.ExecuteGraph(graph);
-#ifdef RADRAY_ENABLE_IMGUI
-    if (ui) ImGuiGraph::CompleteGraph(graph, ctx, ui->GetGraphFrame(ctx.FlightIndex()), result.Success);
-#endif
+    if (!flight.Capture.Build(graph, ctx, *_impl->Device, *_impl->System, outputs)) _impl->Error = true;
+}
+
+void ForwardPipeline::GraphRecorded(RenderPipelineContext& ctx, const RenderGraph& graph, RenderGraphExecutionResult result) {
+    auto& flight = _impl->Flights[ctx.FlightIndex()];
+    if (flight.Settings.Hdr) {
+        flight.Capture.CaptureReport(graph.GetReport());
+        if (result.Success) {
+            for (size_t i = 0; i < flight.HdrViewCount; ++i) {
+                auto& work = *flight.HdrViews[i];
+                const bool content = flight.OverlaysSucceeded && work.ContentValid && work.PassesSucceeded && work.Execution.Succeeded();
+                if (!content) {
+                    _impl->Error = true;
+                    const auto describe = [](const RendererList& list) { const auto& s = list.Stats; return fmt::format("valid={} required={} bindings={} geometry={} prepare={} rejected={}", s.Valid, s.MissingRequiredPass, s.InvalidBindings, s.InvalidGeometry, s.PrepareResourceFailed, s.ProcessorRejected); };
+                    RADRAY_ERR_LOG("Forward view '{}' incomplete: content={} passes={} pso={} bind={} skip={} depth[{}] opaque[{}] transparent[{}] shadows[{}/{}/{}/{}]",
+                                   work.Main.View.Name, work.ContentValid, work.PassesSucceeded, work.Execution.PsoFailure, work.Execution.BindingFailure, work.Execution.Skipped,
+                                   describe(work.Main.DepthOnly), describe(work.Main.Opaque), describe(work.Main.Transparent), describe(work.Cascades[0].DepthOnly), describe(work.Cascades[1].DepthOnly), describe(work.Cascades[2].DepthOnly), describe(work.Cascades[3].DepthOnly));
+                }
+                ctx.CommitView(work.Main.View.StateId, work.Completion, content);
+                flight.Stats.CullCalls += 1 + (flight.Settings.Shadows ? 4 : 0);
+                flight.Stats.DepthCommands += work.Main.DepthOnly.Commands.size();
+                flight.Stats.OpaqueCommands += work.Main.Opaque.Commands.size();
+                flight.Stats.TransparentCommands += work.Main.Transparent.Commands.size();
+                flight.Stats.Execution.Commands += work.Execution.Commands;
+                flight.Stats.Execution.Draws += work.Execution.Draws;
+                flight.Stats.Execution.PsoFailure += work.Execution.PsoFailure;
+                flight.Stats.Execution.BindingFailure += work.Execution.BindingFailure;
+                flight.Stats.Execution.Skipped += work.Execution.Skipped;
+            }
+        } else {
+            _impl->Error = true;
+            RADRAY_ERR_LOG("Forward graph failed: {}", graph.GetReport().ToText());
+        }
+        return;
+    }
     flight.Capture.CaptureReport(graph.GetReport());
     if (result.Success && flight.Stats.Execution.Succeeded())
-        for (const auto view : rendered) ctx.CommitView(view);
+        for (const auto view : flight.RenderedViews) ctx.CommitView(view);
     else {
         _impl->Error = true;
         RADRAY_ERR_LOG("Forward frame failed: {}", graph.GetReport().ToText());

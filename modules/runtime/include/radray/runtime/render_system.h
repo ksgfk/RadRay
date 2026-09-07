@@ -10,7 +10,7 @@
 #include <radray/runtime_type.h>
 #include <radray/runtime/gpu_resource.h>
 #include <radray/render/render_pass_registry.h>
-#include <radray/runtime/render_framework/render_pipeline.h>
+#include <radray/runtime/render_framework/frame_graph.h>
 #include <radray/runtime/render_framework/render_graph_runtime.h>
 #include <radray/runtime/render_framework/scene.h>
 #include <radray/runtime/shader_program_request.h>
@@ -50,6 +50,7 @@ public:
     /// An installed pipeline can only be replaced before the first PrepareFrame/Render or at GPU-idle OnShutdown.
     /// Other replacements fail without releasing the installed pipeline.
     bool SetPipeline(unique_ptr<RenderPipeline> pipeline) noexcept;
+    bool SetGraphComposer(unique_ptr<FrameGraphComposer> composer) noexcept;
 
     /// Game thread; the runner has made this flight writable after GPU completion.
     void BeginUpdateForFlight(uint32_t flightIndex);
@@ -84,7 +85,6 @@ public:
 
 private:
     friend class Application;
-    friend class ImGuiSystem;
     void TransitionSurface(AppFrameContext& ctx, RenderSurfaceFrame& target, render::TextureStates state);
     void ClearTarget(AppFrameContext& ctx, RenderSurfaceFrame& target);
 
@@ -98,10 +98,10 @@ private:
     vector<RenderGraphExecutionReport> _graphReports;
     unique_ptr<RenderGraphRuntime> _graphRuntime;
     unique_ptr<ViewStateRegistry> _viewStates;
-    uint64_t _frameSerial{0};
     unique_ptr<ShaderProgramCache> _shaderCache;
     unique_ptr<PresentationAdapter> _presentation;
     unique_ptr<RenderPipeline> _pipeline;
+    unique_ptr<FrameGraphComposer> _graphComposer;
     std::atomic_bool _pipelineStarted{false};
     bool _pipelineShutdownIdle{false};
     vector<unique_ptr<Scene>> _scenes;

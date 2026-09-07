@@ -1438,7 +1438,13 @@ Nullable<unique_ptr<TextureView>> DeviceVulkan::CreateTextureView(const TextureV
     if (!rangeOpt.has_value()) {
         return nullptr;
     }
-    const SubresourceRange range = rangeOpt.value();
+    auto requestedRange = rangeOpt.value();
+    if (!requestedRange.Aspects && desc.Usage == TextureViewUsage::Resource && IsDepthStencilFormat(desc.Format)) requestedRange.Aspects = TextureAspect::Depth;
+    const auto normalized = NormalizeSubresourceRange(image->GetDesc(), requestedRange);
+    if (!normalized) return nullptr;
+    const SubresourceRange range = *normalized;
+    if (desc.Usage == TextureViewUsage::Resource && range.Aspects.HasFlag(TextureAspect::Depth) && range.Aspects.HasFlag(TextureAspect::Stencil)) return nullptr;
+    if ((desc.Usage == TextureViewUsage::DepthRead || desc.Usage == TextureViewUsage::DepthWrite) && range.Aspects != GetTextureFormatAspects(desc.Format)) return nullptr;
     VkImageViewCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
     createInfo.pNext = nullptr;
@@ -1452,7 +1458,7 @@ Nullable<unique_ptr<TextureView>> DeviceVulkan::CreateTextureView(const TextureV
         VK_COMPONENT_SWIZZLE_B,
         VK_COMPONENT_SWIZZLE_A};
     createInfo.subresourceRange = {
-        ImageFormatToAspectFlags(createInfo.format),
+        static_cast<VkImageAspectFlags>(range.Aspects.value()),
         desc.Range.BaseMipLevel,
         desc.Range.MipLevelCount == SubresourceRange::All ? VK_REMAINING_MIP_LEVELS : desc.Range.MipLevelCount,
         range.BaseArrayLayer,
@@ -4031,6 +4037,15 @@ void CommandBufferVulkan::End() noexcept {
 }
 
 void CommandBufferVulkan::ResourceBarrier(std::span<const ResourceBarrierDescriptor> barriers) noexcept {
+    const auto shaderStages = [](VkPipelineStageFlags native, ShaderStages stages) {
+        constexpr VkPipelineStageFlags mask = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+        if (!stages || !(native & mask)) return native;
+        VkPipelineStageFlags selected = 0;
+        if (stages.HasFlag(ShaderStage::Vertex)) selected |= VK_PIPELINE_STAGE_VERTEX_SHADER_BIT;
+        if (stages.HasFlag(ShaderStage::Pixel)) selected |= VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        if (stages.HasFlag(ShaderStage::Compute)) selected |= VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+        return (native & ~mask) | selected;
+    };
     VkPipelineStageFlags srcStageMask = 0;
     VkPipelineStageFlags dstStageMask = 0;
     vector<VkBufferMemoryBarrier> bufferBarriers;
@@ -4063,11 +4078,12 @@ void CommandBufferVulkan::ResourceBarrier(std::span<const ResourceBarrierDescrip
                 bufBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
             }
             bufBarrier.buffer = buf->_buffer;
-            bufBarrier.offset = 0;
-            bufBarrier.size = buf->_reqSize;
+            if (bb->Range.Offset > buf->_reqSize || (bb->Range.Size != BufferRange::All() && bb->Range.Size > buf->_reqSize - bb->Range.Offset)) RADRAY_ABORT("Vulkan buffer barrier range is invalid");
+            bufBarrier.offset = bb->Range.Offset;
+            bufBarrier.size = bb->Range.Size == BufferRange::All() ? buf->_reqSize - bb->Range.Offset : bb->Range.Size;
 
-            auto srcStage = BufferStateToPipelineStageFlags(bb->Before);
-            auto dstStage = BufferStateToPipelineStageFlags(bb->After);
+            auto srcStage = shaderStages(BufferStateToPipelineStageFlags(bb->Before), bb->BeforeStages);
+            auto dstStage = shaderStages(BufferStateToPipelineStageFlags(bb->After), bb->AfterStages);
             srcStageMask |= srcStage;
             dstStageMask |= dstStage;
         } else if (const auto* tb = std::get_if<BarrierTextureDescriptor>(&v)) {
@@ -4096,14 +4112,17 @@ void CommandBufferVulkan::ResourceBarrier(std::span<const ResourceBarrierDescrip
                 imgBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
             }
             imgBarrier.image = tex->_image;
+            const auto normalized = NormalizeSubresourceRange(tex->GetDesc(), tb->IsSubresourceBarrier ? tb->Range : SubresourceRange::AllSub());
+            if (!normalized) RADRAY_ABORT("Vulkan texture barrier range is invalid");
+            // This backend uses coupled depth/stencil layouts, so transitions cover both aspects.
             imgBarrier.subresourceRange.aspectMask = ImageFormatToAspectFlags(tex->_rawFormat);
             imgBarrier.subresourceRange.baseMipLevel = tb->IsSubresourceBarrier ? tb->Range.BaseMipLevel : 0;
             imgBarrier.subresourceRange.levelCount = tb->IsSubresourceBarrier ? tb->Range.MipLevelCount : VK_REMAINING_MIP_LEVELS;
             imgBarrier.subresourceRange.baseArrayLayer = tb->IsSubresourceBarrier ? tb->Range.BaseArrayLayer : 0;
             imgBarrier.subresourceRange.layerCount = tb->IsSubresourceBarrier ? tb->Range.ArrayLayerCount : VK_REMAINING_ARRAY_LAYERS;
 
-            auto srcStage = TextureStateToPipelineStageFlags(tb->Before, true);
-            auto dstStage = TextureStateToPipelineStageFlags(tb->After, false);
+            auto srcStage = shaderStages(TextureStateToPipelineStageFlags(tb->Before, true), tb->BeforeStages);
+            auto dstStage = shaderStages(TextureStateToPipelineStageFlags(tb->After, false), tb->AfterStages);
             // 如果是 swapchain image 从 undefined 转换, 增加 src stage 确保之前的写入操作都能被正确同步
             if (tex->_isSwapchainImage && tb->Before == TextureState::Undefined) {
                 srcStage |= VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;

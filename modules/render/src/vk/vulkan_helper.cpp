@@ -194,7 +194,7 @@ VkAccessFlags TextureStateToAccessFlags(TextureStates v) noexcept {
         access |= VK_ACCESS_TRANSFER_WRITE_BIT;
     }
     if (v.HasFlag(TextureState::ShaderRead)) {
-        access |= VK_ACCESS_INPUT_ATTACHMENT_READ_BIT | VK_ACCESS_SHADER_READ_BIT;
+        access |= VK_ACCESS_SHADER_READ_BIT;
     }
     if (v.HasFlag(TextureState::RenderTarget)) {
         access |= VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;

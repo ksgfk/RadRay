@@ -2,6 +2,7 @@
 #include <fstream>
 #include <radray/image_data.h>
 #include <radray/utility.h>
+#include <radray/runtime/render_framework/render_graph_blit.h>
 
 namespace radray::forward_detail {
 void ForwardCapture::CaptureReport(const RenderGraphExecutionReport& report) {
@@ -12,7 +13,7 @@ void ForwardCapture::CaptureReport(const RenderGraphExecutionReport& report) {
     Dot = report.ToDot();
 }
 
-bool ForwardCapture::Build(RenderGraph& graph, RenderPipelineContext& context, render::Device& device) {
+bool ForwardCapture::Build(RenderGraph& graph, RenderPipelineContext& context, render::Device& device, RenderSystem& renderer, std::span<RenderGraphOutputBinding> outputs) {
     Pending = false;
     if (Name.empty() || Directory.empty()) return true;
     for (const auto& family : context.ViewFamilies()) {
@@ -22,18 +23,22 @@ bool ForwardCapture::Build(RenderGraph& graph, RenderPipelineContext& context, r
         Size = family.OutputSize;
         Format = family.OutputFormat;
         Pitch = Align(uint64_t{Size.Width} * 4, device.GetDetail().TextureDataPitchAlignment);
-        const uint64_t bytes = Pitch * Size.Height;
-        if (!Readback || Readback->GetDesc().Size != bytes) {
-            auto buffer = device.CreateBuffer({bytes, render::MemoryType::ReadBack, render::BufferUse::MapRead | render::BufferUse::CopyDestination, {}});
-            if (!buffer) return false;
-            Readback = buffer.Release();
+        const auto source = FindGraphOutput(outputs, family.OutputId);
+        if (!source) return false;
+        const auto descriptor = graph.GetTextureDescriptor(source->Texture);
+        if (!descriptor) return false;
+        auto value = source->Texture;
+        if (descriptor->Format != Format) {
+            if (descriptor->Format != render::TextureFormat::RGBA16_FLOAT) return false;
+            auto target = *descriptor;
+            target.Format = Format;
+            target.Hints = render::ResourceHint::None;
+            target.Usage = render::TextureUse::RenderTarget | render::TextureUse::CopySource;
+            const bool srgb = Format == render::TextureFormat::RGBA8_UNORM_SRGB || Format == render::TextureFormat::BGRA8_UNORM_SRGB;
+            value = AddRenderGraphBlit(graph, renderer, device.GetBackend(), value, graph.CreateTexture(target, "Capture.Encoded"), false, !srgb);
         }
-        Import = {Readback.get(), Readback->GetDesc(), render::BufferState::CopyDestination};
-        const auto output = context.ImportOutputTarget(graph, family.OutputId);
-        const auto host = graph.ImportBuffer(Import, "Forward.Capture", RenderGraphExternalAccess::ObservableOutput);
-        graph.AddCopyTextureToBufferPass("Forward.Capture", output, host);
-        graph.AddComputePass<uint32_t>("Forward.CaptureHostVisibility", [=](uint32_t&, RenderGraphComputeBuilder& builder) {
-            builder.ReadBuffer(host, RgBufferAccess::HostRead); builder.SetSideEffect(); }, +[](const uint32_t&, RenderGraphComputeContext&) {});
+        Readback = graph.ReadbackTexture("Forward.Capture", value);
+        if (!Readback.IsValid()) return false;
         Pending = true;
         return true;
     }
@@ -42,8 +47,8 @@ bool ForwardCapture::Build(RenderGraph& graph, RenderPipelineContext& context, r
 bool ForwardCapture::Complete() {
     if (!Pending) return true;
     Pending = false;
-    ScopedBufferMap map{Readback.get(), {0, Pitch * Size.Height}};
-    if (!map) return false;
+    vector<byte> bytes;
+    if (!Readback.Read(bytes)) return false;
     ImageData image;
     image.Width = Size.Width;
     image.Height = Size.Height;
@@ -51,7 +56,7 @@ bool ForwardCapture::Complete() {
     image.Data = make_unique<byte[]>(uint64_t{Size.Width} * Size.Height * 4);
     const bool bgra = Format == render::TextureFormat::BGRA8_UNORM || Format == render::TextureFormat::BGRA8_UNORM_SRGB;
     for (uint32_t y = 0; y < Size.Height; ++y) {
-        const auto* source = static_cast<const byte*>(map.Data()) + y * Pitch;
+        const auto* source = bytes.data() + y * Pitch;
         auto* destination = image.Data.get() + uint64_t{y} * Size.Width * 4;
         std::memcpy(destination, source, uint64_t{Size.Width} * 4);
         if (bgra)

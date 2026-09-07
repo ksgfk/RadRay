@@ -25,7 +25,6 @@ public:
 
 protected:
     void OnInit() override {
-        GetRenderSystem()->SetPipeline(make_unique<ImGuiOnlyPipeline>(*GetImGuiSystem().Get()));
         Image.Create(ImTextureFormat_RGBA32, 128, 128);
         for (uint32_t y = 0; y < 128; ++y)
             for (uint32_t x = 0; x < 128; ++x) {

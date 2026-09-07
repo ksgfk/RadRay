@@ -35,10 +35,15 @@ Application::StartLoop
   ├─ Application::Render              → pool/history BeginFlight → output/view resolve → pipeline graph → host finalize
   └─ GpuSystem::EndFrameRecordAndSubmit
        uploader.EndFlight → CmdBuffer.End → 聚合 sync object → UploadCommands + 主 CommandBuffer 一次 Submit
-       → 写 flight.Signal → Present 全部 target
+       → 写 flight.Signal → Submission.OnSubmitted → Present 全部 target
 ```
 
-`CompleteFlight` 在 fence 完成后 resolve profiler、回收 staging，并 `NotifyFlightComplete`
+`BeginFrameRecord` 为每次录制生成独立 FrameSerial，收据同时校验 serial 与阶段，不能以可复用
+flight index 代替提交身份。`FrameSubmission` 的 Recorded/Submitted/GpuCompleted 分别对应录制、
+void Submit 返回与真实 fence 完成；未提交收据取消不发布资源状态和历史。提交后的收据由 flight
+保留至 fence，graph tickets/readback/owner 随该收据完成。
+
+`CompleteFlight` 在 fence 完成后 resolve profiler、回收 staging、完成 submission receipts，并 `NotifyFlightComplete`
 入队，同时发布原子 `WaitersCompleted`。多线程模式下它在渲染线程，不访问 game-thread 的协程等待表或资产引用。
 `GpuSystem::PumpFlightCompletions` 在 game thread 排空队列：先让上传调度器 `ApplyCompletedFlights`，
 再按注册顺序调用 `IFlightCompletionObserver`。`Application` 与 `ImGuiSystem` 都是观察者；

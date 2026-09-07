@@ -1,6 +1,6 @@
 > - 适用: 编写 workload、接入 presentation/离屏 output、声明 graph pass、使用 transient pool 或 view history
 > - 权威: 本文描述 renderer foundation 与内置 Forward 的当前契约；帧同步见 `frame-and-gpu.md`，原生接口事实见 `render-rhi.md`
-> - 锚点: `modules/runtime/include/radray/runtime/render_framework/render_output.h`, `modules/runtime/include/radray/runtime/render_framework/render_workload.h`, `modules/runtime/include/radray/runtime/render_framework/render_view.h`, `modules/runtime/include/radray/runtime/render_framework/render_graph.h`, `modules/runtime/include/radray/runtime/render_framework/render_graph_runtime.h`, `modules/runtime/include/radray/runtime/render_framework/render_resource_pool.h`, `modules/runtime/include/radray/runtime/render_framework/view_state.h`, `modules/runtime/include/radray/runtime/forward_pipeline/forward_graph.h`, `modules/runtime/src/render_system.cpp`, `modules/runtime/src/forward_pipeline/forward_pipeline.cpp`, `modules/runtime/include/radray/runtime/render_framework/render_scene_snapshot.h`, `modules/runtime/include/radray/runtime/render_framework/culling.h`, `modules/runtime/include/radray/runtime/material_technique.h`, `modules/runtime/include/radray/runtime/render_framework/renderer_list.h`, `modules/runtime/include/radray/runtime/render_framework/frame_draw_resources.h`
+> - 锚点: `modules/runtime/include/radray/runtime/render_framework/render_output.h`, `modules/runtime/include/radray/runtime/render_framework/render_workload.h`, `modules/runtime/include/radray/runtime/render_framework/render_view.h`, `modules/runtime/include/radray/runtime/render_framework/render_graph.h`, `modules/runtime/include/radray/runtime/render_framework/render_graph_compiler.h`, `modules/runtime/include/radray/runtime/render_framework/frame_graph.h`, `modules/runtime/include/radray/runtime/frame_submission.h`, `modules/runtime/include/radray/runtime/render_framework/render_graph_runtime.h`, `modules/runtime/include/radray/runtime/render_framework/render_resource_pool.h`, `modules/runtime/include/radray/runtime/render_framework/view_state.h`, `modules/runtime/include/radray/runtime/forward_pipeline/forward_graph.h`, `modules/runtime/src/render_system.cpp`, `modules/runtime/src/forward_pipeline/forward_pipeline.cpp`, `modules/runtime/include/radray/runtime/render_framework/render_scene_snapshot.h`, `modules/runtime/include/radray/runtime/render_framework/culling.h`, `modules/runtime/include/radray/runtime/material_technique.h`, `modules/runtime/include/radray/runtime/render_framework/renderer_list.h`, `modules/runtime/include/radray/runtime/render_framework/frame_draw_resources.h`
 
 # Renderer foundation
 
@@ -39,7 +39,7 @@ host 只 acquire plan 请求的 output。acquire 失败的 family 保留身份�
 family 正常执行。没有 presentation 或所有 output 都不可用时仍调用 pipeline，允许 side-effect
 compute/copy。acquire 不录 barrier。graph 从 surface 的真实状态导入 output，成功写入标记由 executor
 产生。pipeline 返回后 host 对未写 surface 做 fallback clear，再从实际状态转换到 RequiredFinalState；
-presentation 为 Present，external 为注册时声明的状态。finalize 后外部 registry/AppWindow 保存真实状态。
+presentation 为 Present，external 为注册时声明的状态。录制阶段只保存预测状态；队列 Submit 返回后外部 registry/AppWindow 才发布实际已提交状态。
 
 ## View resolve
 
@@ -64,68 +64,77 @@ history 与 `CreateRenderGraph`/`ExecuteGraph`。AppFrameContext 和 surface 实
 不能从 pipeline context 取得窗口、swapchain、command buffer 或直接进行 barrier/submit。
 每个 context 只允许创建、执行一次自身 generation 的 graph。
 
-`OutputSurfaces()` 提供已取得输出的只读范围。`SetOutputIntermediate` 在本图为 output
-安装同尺寸、同格式的场景中间目标；普通 `ImportOutput` 与 view completion 使用该目标，
-`ImportOutputTarget` 明确导入实际输出。这样 UI 可以显式组合到后处理之后，仍只执行一张图。
+`OutputSurfaces()` 给装配器提供已取得的输出。`ImportOutputTarget` 导入真实目标；组件通过
+`RenderGraphOutputBinding` 收到显式输入值，并返回显式输出值。`RenderPipeline` 是
+`RenderGraphComponent`，提供 `PrepareFrame`、`BuildGraph`、`GraphRecorded`；RenderSystem 负责
+创建唯一一张图、调用装配器、展开组件、执行，再分发录制结果。Forward 不引用 ImGui。
 
-Texture/buffer/view/pass、indirect arguments、compute program 与 parameter set 使用类型不同且含
-generation 的 handle。不能跨 graph 使用，也不能在 freeze 后追加 setup；indirect/program/set handle
-还绑定声明它的 pass 和命令种类。raster/compute setup 立即执行，把数据写入 graph 拥有的 payload；
-执行函数为非捕获函数指针，只能解析当前 pass 声明的 handle。program 与 RendererList 继续借用并须
-活过 graph 执行；Graph 参数的 CPU 常量在 setup 时复制，原生 set 与上传页由所属 flight 保活。
-资产仍由宿主 per-flight refs 保活。execute callback 返回 void，不通过异常恢复。
+`FrameGraphComposer` 是应用装配策略。`FrameGraph::AddComponent` 按描述符预先声明 typed input/output
+ports，`Connect` 连接指定生产值，`Expand` 调用组件的 BuildGraph 并连接其返回值。所有端口必须且
+只能连接一次，描述符精确匹配。消费者可以先声明，依赖决定执行顺序；端口循环、缺失连接、非法
+版本在 freeze 前诊断。默认装配器连接 renderer 与输出，ImGui 的默认装配由 Application 安装的
+可选装配器负责。没有全局 latest output、固定 UI 阶段或隐式输出重定向。
 
-Raster builder 声明 sampled read、buffer access、color/depth attachment 与 Load/Store/Clear；compute
-builder 另可声明 UAV write/read-write 和 `UseComputeProgram`；raster builder 用 `UseGraphicsProgram`
-声明 program、固定功能状态、顶点布局与 topology，得到 pass-local handle。两类 pass 都可用
-`CreateParameterSet(program, group, bindings)`，以 canonical declaration name 和数组元素绑定 Graph
-texture/buffer、sampler 或 setup 时复制的 cbuffer bytes。SRV/cbuffer 自动成为只读访问；可写声明必须
-显式选择 Read/Write/ReadWrite，Graph 据此生成依赖与 barrier。immutable/static sampler 来自 resolved
-layout，不由调用方重复提供。
+Texture/Buffer 使用 `RgTextureValue` / `RgBufferValue`，携带资源 index、graph generation 和内容
+version；view/pass/port/program/parameter/indirect handle 具有独立类型和 generation。跨图、错误类型、
+越界版本及 freeze 后修改都会被拒绝。`CreateTexture` / `CreateBuffer` 返回预留的首个写版本；
+`ImportTexture` / `ImportBuffer` 返回入口 version 0。写已有资源先调用 `NextVersion`，每个被写范围
+只能有一个 producer。Read 消费指定版本，Load/ReadWrite 消费后继的前驱内容；Clear/Discard write
+不消费旧内容。版本表达内容，所有版本仍共享一个原生存储，旧版本的读者通过 WAR 边排在覆盖前。
+需要同时保留旧、新内容时显式 copy 到另一资源，不能分叉一个存储的版本链。
 
-`ReadIndirectArguments` 把带 `Indirect` usage 的 buffer、Draw/DrawIndexed/Dispatch 种类、4-byte aligned
-offset 与固定 count 固化为 pass-local handle；没有 GPU count buffer。graphics/compute facade 只接受该
-handle，不再接收任意原生 buffer。copy pass 使用专门的 buffer/texture/texture-to-buffer API；
-`AddCopyBufferToTexturePass` 接受源 offset/row pitch 和目标 mip/layer/区域，验证见
-[RHI 区域上传](render-rhi.md#区域纹理上传)。部分区域写入要求该子资源原内容有效；完整覆盖可建立有效性。
-`AddResolveTexturePass` 处理同格式、同尺寸的 2D/2D-array color 子资源，从 MSAA source resolve 到
-single-sample destination，一次选择一个 mip 与连续 layers，不做 depth/stencil、缩放或格式转换。
+纯 CPU `CompileRenderGraph` 接收资源版本节点、执行节点和导出 roots；前端先解析 ports，再把
+访问归一化成 texture mip × layer × aspect 或 Buffer 字节区间。depth 与 stencil 有独立内容有效位。
+未写区间继承前驱，transient 初始无效；external 明确提供初始状态与有效位。即使最终被裁剪，非法
+read/Load/ReadWrite 仍拒绝。Store Discard 产生无效内容，不能随后读取。
 
-Raster pass 可用参数 binding 写 buffer/texture UAV，也可直接调用带显式 stage mask 的
-`WriteTexture`/`ReadWriteTexture`。它仍须至少一个 attachment；Graph 汇总实际写阶段并在分配资源前与
-`UavWriteStages` 比较，能力不足即失败。D3D12 pass begin 的 `AllowUavWrites` 由 live declaration 推导，
-不进入 graphics PSO compatibility key。同 pass 的重叠 readonly access 可合并；重叠写入、attachment
-feedback、extent/sample 不匹配、无效 load/store 或超出 capability 的 descriptor 在录制前失败。
+图为二分有向图：资源版本 → 消费 pass，生产 pass → 新资源版本。编译器从精确导出版本、
+ObservableOutput 的最终内容和 `SetSideEffect` 反向标记 live，只沿内容依赖保留生产者；再为 live
+passes 加 RAW/WAR/WAW 存储约束，并做稳定拓扑排序、环检测和最终生命周期分析。覆盖写可裁掉
+旧 producer，hazard 不参与 liveness，也不要求声明顺序是执行顺序。
 
-`Compile` 只执行 CPU 工作，不创建原生资源。内容有效性按 mip × array layer 跟踪，depth/stencil
-共用一个 aspect domain，buffer 为整资源。transient 内容初始无效；external 从显式有效位开始。
-Read、Load、ReadWrite 消费当前内容版本；Clear/Discard write 产生不依赖旧内容的新版本；Store Discard
-使之后读取无效。即使 pass 最后被裁掉，非法 read/Load 也会报错。
+Raster builder 声明 attachment、Load/Store/Clear、采样、Buffer 或 UAV 访问；compute builder 声明
+compute program 与读写。`CreateParameterSet` 用 canonical declaration name 和数组元素绑定图内
+资源、sampler 或立即复制的 cbuffer bytes，反射决定参数类型；可写 binding 必须声明
+Read/Write/ReadWrite。常量、上传数据和 payload 均由图/flight 持有。program 与 RendererList 借用至
+录制结束；底层 native material sets 只允许 flight 保活的不可变资源，不能隐藏图内写资源。
+`PrepareRendererList` 显式登记持久 geometry 的只读 usage；`ReadImmutableBuffer` 接受固定读取状态
+和可选 owner，未传 owner 时由宿主 flight refs 保活。需要图内生成 geometry 时先声明其精确版本读取。
 
-observable external 的最终 writer 与 `SetSideEffect` 是 roots。沿消费内容的依赖反向标记 live 后，
-仅对 live passes 建立 RAW/WAR/WAW hazard edges。所有 edge 都指向后声明 pass，声明顺序本身就是
-稳定拓扑序。被后续 Clear 完整覆盖的旧 producer 可以裁掉，Load 则会保留它；hazard 不参与 liveness。
+`ReadIndirectArguments` 把 Draw/DrawIndexed/Dispatch、offset 和固定 count 固化为 pass-local handle。
+copy/resolve 为专用执行节点；区域 texture upload 的部分覆盖需要前驱该 mip/layer 内容有效。
+纹理直接复制沿用 RHI 的 color-only 契约；depth/stencil 数据可采样后写入 Buffer 再读回。
+`AddResolveTexturePass` 只接受相同格式、尺寸的 MSAA color → single-sample color，不做格式转换。
+`AddRenderGraphBlit` 提供普通 raster 格式/尺寸与颜色编码转换，内置 artifact 独立于 ImGui 和 JIT。
 
-执行顺序固定为 setup → compile → realize → prepare parameters/graphics/compute PSOs → plan barriers → execute。
-`Compile` 后先 realize 所有 live resource/view/render pass/framebuffer，继续复用 RenderPassRegistry；
-prepare 只处理 live pass，创建 Graph parameter sets、上传复制的常量并取得每个 compute program 的
-缓存 PSO。graphics PSO 以已知 attachment compatibility 在此阶段准备，同 pass 相同请求只准备一次。
-任一步失败均不录 graph 命令，diagnostic 携带 pass/binding/resource，history 不推进。
-随后从 pool/external 的真实状态产生 pass 前 barriers；相同 UAV
-state 的写后访问使用显式 UAV memory barrier；同状态的非 UAV 写后写仍保留必要的内存依赖。
-初始 UAV state 保守视作可能由前一图写入，
-因此首次只读 UAV 访问也有屏障；同队列提交顺序不代替跨图的内存依赖。
-每个 live pass 独立 Begin/End，并用同名 debug group。
-pass commands facade 只转发绘制、dispatch、binding 和 viewport/scissor，不能通过 RHI encoder 的
-`GetCommandBuffer` 绕过 graph。`BindPersistentShaderParameterSet` 明确表示图外、只读且由 flight
-保活的 mesh/asset set；不得把 graph 写入资源藏进该原生 set。图内资源应使用 `CreateParameterSet`。
-原生 vertex/index buffer 若属于本图已导入或 realize 的资源，wrapper 检查当前 pass 声明了匹配
-`Vertex`/`Index` read；缺失或错误 usage 产生 `UndeclaredGeometryRead` 并禁止该次绘制。
-图外 immutable asset 几何由既有只读状态和 retained owner 契约保护。indirect 始终使用 graph handle。
+`UploadBuffer` 复制源 bytes，声明上传执行节点；只有 live upload 才分配、map、写入和 flush。
+`ReadbackBuffer` / `ReadbackTexture` 创建拥有 readback 存储的 ticket，并添加 copy 与 HostRead export；
+只有匹配 frame serial 的 fence 完成后 `Read` 才复制 bytes。`ExportTexture` / `ExportBuffer` 是明确的
+边界执行节点，声明根与最终状态，无需空 compute pass。Texture readback 当前为一个非 MSAA 2D
+color 子资源；跨帧 history 仍通过专用 registry 导入。
 
-若 BeginRenderPass/BeginComputePass 失败，停止后续 pass；已录 barrier 的真实状态仍提交给 storage，
-失败 pass 不标记内容有效/已写，host 可据此恢复。声明的 PSO 创建失败会在任何 graph 命令前拒绝整图；
-callback 发生必需 draw 失败时仍必须通过 completion 提交参数拒绝时域推进。
+同一原生外部资源在图中只有一个身份。重复 import 返回同一个 version 0，并验证描述符、初始
+状态和有效位一致；冲突拒绝，写权限合并，所有登记的状态接收者在提交时一起更新。wrapper 与
+其状态 span 必须活到 Submit，可通过 `Owner` / `Retain` 保留包装和 GPU owner；owner 随执行收据
+保留到 fence 完成。原生指针仅用于本帧身份匹配，不作为报告或跨帧持久 ID。
+
+执行次序为 setup → ports/freeze → pure compile → storage/attachment plan → realize → prepare →
+barrier plan → record。任何 allocation/参数/PSO 准备失败都发生在图内命令录制前。图只录制，不提交。
+同 mip/layer 的 depth/stencil 采用共同原生 layout，Buffer 采用整资源原生状态；内容依赖仍保持
+aspect/字节精度。不兼容的同 pass 原生状态组合被拒绝，保守扩大范围的原因写入报告。
+
+`RenderGraphCompileOptions` 可独立关闭 culling、compatible resource reuse、attachment store 裁剪、
+raster merge、barrier elimination 与 batch。无 live consumer 的 transient attachment store 可丢弃；
+Load 不会凭空改为 discard。相邻 raster 只有相同 attachment/view、后续 Load、前序 Store，且没有
+非 attachment 访问或 UAV 时合并；各逻辑 pass 保留各自 callback、票据与报告，一个 group 只 Begin/End
+一次。屏障批处理沿用 RHI span，同状态读可消除，写后访问保留 memory dependency。
+
+`RenderGraphExecutionResult::Submission` 区分 Declared、Recorded、Submitted、GpuCompleted 和
+Cancelled。Recorded 仅说明命令进入 command buffer；当前 RHI Submit 返回 void，Submitted 只说明
+调用返回，不能证明设备接受或执行成功。宿主将收据放入当前 flight，Submit 后提交已录前缀的状态，
+fence 后完成 tickets。未提交的收据析构或取消会取消其操作。encoder/回调失败时停止后续 pass，
+失败写内容失效，已录 barrier 状态仍作为 host fallback 的起点；整体失败不能推进 view history。
+完整提交和线程边界见 [帧与 GPU](frame-and-gpu.md)。
 
 ## Per-flight Graph 资源、pool、history 与报告
 
@@ -136,8 +145,8 @@ descriptor 或上传页。parameter-set cache key 覆盖 layout/group、完整 b
 静态 offset/range、stride/format 与 sampler；dynamic offset 不进入物理 set key，命中后不改写 descriptor。
 
 pool key 覆盖完整 texture/buffer descriptor；view key 覆盖
-dimension、format、归一化 range、usage。一个对象在一次 flight cycle 最多租出一次，不做同 graph
-资源复用或 heap aliasing。`EndGraph` 只结束租约；下次安全 `BeginFlight` 才允许复用。物理状态跨帧
+dimension、format、归一化 range/aspects、usage。pool 一次 flight cycle 租出的对象由图内 storage planner
+分配给描述符完全相同且最终生命周期不重叠的 transient；这是兼容对象复用，不是 placed-resource heap aliasing。`EndGraph` 只结束租约；下次安全 `BeginFlight` 才允许复用。物理状态跨帧
 保存，但新 transient 的内容有效位仍从 false 开始。
 
 trim 默认删除超过三个未使用 flight cycles 的 entry，只在安全 BeginFlight 运行；先从
@@ -151,9 +160,10 @@ history 单独报告 active/retired 字节、view 归属和各 flight retire bin
 
 `ViewStateRegistry` 是 render-thread-owned。resolve 读取最后成功提交的 previous matrix，第一次、
 camera cut、extent/format/sample 改变时 previous 无效。输出不可用、跳过、graph 失败不会推进。
-`RegisterViewCompletion` 把 view、graph generation、frame serial 和末端 pass 绑定为不透明 token。
+`RegisterViewCompletion` 把 view、graph generation、frame serial、末端 pass 和确切输出版本绑定为不透明 token。
 `CommitView(view, token, requiredDrawsSucceeded)` 同时验证 graph 成功、该 pass 实际执行且写入对应
-output、必需 draw 成功；共享 output 的另一 view 写入不能代替本 view 的完成证明。
+output、必需 draw 成功；共享 output 的另一 view 写入不能代替本 view 的完成证明。该检查只排队提交，
+view matrix、WithView 与 Independent history 都在对应 Submission 的 OnSubmitted 中推进，取消录制不推进。
 
 history 以稳定 view ID + string key 标识，descriptor 精确匹配，允许 2–4 buffers。一个 key 每 frame
 只能 acquire 一次；Previous 是最后成功提交的 image，Current 是下一写入 image。首次/失效时
@@ -176,8 +186,9 @@ resize/descriptor 变化先成功创建新 generation，旧 generation 进入当
 不为 history 增加 fence。关停先 GPU idle，再按 pipeline → graph pools → view states → registry 顺序清理。
 
 `RenderGraphExecutionReport` 按调用请求生成 Text/JSON/DOT，`Resolve` 是独立 pass 类型；报告记录执行与裁剪
-原因、内容与 hazard
-依赖、资源 descriptor/lifetime/physical ID、逐 subresource before/after、UAV 数量、pool stats 和
+原因、二分版本节点/read-write edges、内容与 hazard
+依赖、最终执行序、资源 descriptor/lifetime/physical slot/ID、访问范围/stage、raster group、优化决定、
+逐 subresource before/after、UAV 数量、pool stats 和
 带 source location 及可选 binding/resource 的 diagnostic。ID 不使用原生地址。宿主图直接写入对应 flight
 的 report，不在 ExecuteGraph 返回时整份复制。普通 Forward 帧不生成 JSON/DOT，capture 才序列化；
 失败 diagnostic 始终保留。报告还记录 graphics PSO 请求/准备/新建次数和 compile/realize/prepare/record

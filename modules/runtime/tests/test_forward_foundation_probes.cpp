@@ -69,7 +69,7 @@ VK_BINDING(1, 0) RWStructuredBuffer<float> Values : register(u0);
     auto readback = device.CreateBuffer({16, render::MemoryType::ReadBack, render::BufferUse::MapRead | render::BufferUse::CopyDestination, {}});
     ASSERT_TRUE(readback);
     RenderExternalBuffer external{readback.Get(), readback->GetDesc(), render::BufferState::CopyDestination};
-    const auto host = graph.ImportBuffer(external, "readback", RenderGraphExternalAccess::ObservableOutput);
+    const auto host = graph.NextVersion(graph.ImportBuffer(external, "readback", RenderGraphExternalAccess::ObservableOutput));
     graph.AddCopyBufferPass("copy", values, host, 16);
     HostRead(graph, host);
     ASSERT_TRUE(Run(graph)) << graph.GetReport().ToText();
@@ -124,7 +124,7 @@ VK_BINDING(0, 0) Texture2D<float> Depth : register(t0);
     auto readback = device.CreateBuffer({pitch * 16, render::MemoryType::ReadBack, render::BufferUse::MapRead | render::BufferUse::CopyDestination, {}});
     ASSERT_TRUE(readback);
     RenderExternalBuffer external{readback.Get(), readback->GetDesc(), render::BufferState::CopyDestination};
-    const auto host = graph.ImportBuffer(external, "readback", RenderGraphExternalAccess::ObservableOutput);
+    const auto host = graph.NextVersion(graph.ImportBuffer(external, "readback", RenderGraphExternalAccess::ObservableOutput));
     graph.AddCopyTextureToBufferPass("copy", color, host);
     HostRead(graph, host);
     ASSERT_TRUE(Run(graph)) << graph.GetReport().ToText();
@@ -152,7 +152,7 @@ struct Output { float4 A : SV_Target0; float2 B : SV_Target1; };
         const render::TextureFormat formats[]{scenario == 1 ? render::TextureFormat::RGBA32_FLOAT : render::TextureFormat::RGBA16_FLOAT,
                                               scenario == 1 ? render::TextureFormat::RG16_FLOAT : render::TextureFormat::RG32_FLOAT};
         auto graph = MakeGraph("floating MRT");
-        RgTextureHandle attachments[2], resolved[2];
+        RgTextureValue attachments[2], resolved[2];
         for (uint32_t i = 0; i < 2; ++i) {
             attachments[i] = graph.CreateTexture({render::TextureDimension::Dim2D, 16, 16, 1, 1, samples, formats[i], render::MemoryType::Device, render::TextureUse::RenderTarget | render::TextureUse::CopySource, {}}, fmt::format("MRT {}", i));
             resolved[i] = attachments[i];
@@ -184,7 +184,7 @@ struct Output { float4 A : SV_Target0; float2 B : SV_Target1; };
             ASSERT_TRUE(buffer);
             readback[i] = buffer.Release();
             imports[i] = {readback[i].get(), readback[i]->GetDesc(), render::BufferState::CopyDestination};
-            const auto host = graph.ImportBuffer(imports[i], "MRT readback", RenderGraphExternalAccess::ObservableOutput);
+            const auto host = graph.NextVersion(graph.ImportBuffer(imports[i], "MRT readback", RenderGraphExternalAccess::ObservableOutput));
             graph.AddCopyTextureToBufferPass("copy MRT", resolved[i], host);
             HostRead(graph, host);
         }
@@ -259,7 +259,7 @@ VK_BINDING(1, 0) RWStructuredBuffer<float4> Result : register(u0);
     ASSERT_TRUE(encoded);
     ASSERT_TRUE(decoded);
     RenderExternalBuffer a{encoded.Get(), encoded->GetDesc(), render::BufferState::CopyDestination}, b{decoded.Get(), decoded->GetDesc(), render::BufferState::CopyDestination};
-    const auto encodedHost = graph.ImportBuffer(a, "encoded", RenderGraphExternalAccess::ObservableOutput), decodedHost = graph.ImportBuffer(b, "decoded", RenderGraphExternalAccess::ObservableOutput);
+    const auto encodedHost = graph.NextVersion(graph.ImportBuffer(a, "encoded", RenderGraphExternalAccess::ObservableOutput)), decodedHost = graph.NextVersion(graph.ImportBuffer(b, "decoded", RenderGraphExternalAccess::ObservableOutput));
     graph.AddCopyTextureToBufferPass("encoded bytes", texture, encodedHost);
     graph.AddCopyBufferPass("decoded floats", result, decodedHost, 16);
     HostRead(graph, encodedHost);
@@ -304,7 +304,7 @@ TEST_P(ForwardFoundationProbe, R07OddDimensionsRespectPitchPlacementAndSentinels
     RenderExternalBuffer output{readback.Get(), readback->GetDesc(), render::BufferState::CopyDestination};
     auto graph = MakeGraph("odd readback");
     const auto source = graph.ImportBuffer(uploadExternal, "sentinels", RenderGraphExternalAccess::ReadOnly);
-    const auto host = graph.ImportBuffer(output, "readback", RenderGraphExternalAccess::ObservableOutput);
+    auto host = graph.NextVersion(graph.ImportBuffer(output, "readback", RenderGraphExternalAccess::ObservableOutput));
     graph.AddCopyBufferPass("initialize entire buffer", source, host, initial.size());
     const auto color = graph.CreateTexture({render::TextureDimension::Dim2D, 13, 7, 1, 1, 1, render::TextureFormat::RGBA8_UNORM, render::MemoryType::Device, render::TextureUse::RenderTarget | render::TextureUse::CopySource, {}}, "pattern");
     struct Data {
@@ -323,6 +323,7 @@ TEST_P(ForwardFoundationProbe, R07OddDimensionsRespectPitchPlacementAndSentinels
         context.Encoder().BindGraphicsPipelineState(pso.Get());
         context.Encoder().SetViewport(MakeViewport(data.Backend, 0, 0, 13, 7)); context.Encoder().SetScissor({0, 0, 13, 7});
         context.Encoder().Draw(3, 1, 0, 0); });
+    host = graph.NextVersion(host);
     graph.AddCopyTextureToBufferPass("partial readback", color, host, {0, 1, 0, 1}, offset);
     HostRead(graph, host);
     ASSERT_TRUE(Run(graph)) << graph.GetReport().ToText();

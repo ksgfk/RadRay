@@ -145,16 +145,13 @@ struct Output { float4 Position : SV_Position; float2 UV : TEXCOORD0; };
         RenderResourcePool negativePool{device, negativeRegistry};
         negativePool.BeginFlight(1);
         RenderGraph negative{device, negativePool, negativeRegistry, "reject invalid prepared draw"};
-        const auto target = negative.CreateTexture({render::TextureDimension::Dim2D, 4, 4, 1, 1, 1, render::TextureFormat::RGBA8_UNORM,
-            render::MemoryType::Device, render::TextureUse::RenderTarget, {}}, "target");
-        const auto depth = negative.CreateTexture({render::TextureDimension::Dim2D, 4, 4, 1, 1, 1, render::TextureFormat::D32_FLOAT,
-            render::MemoryType::Device, render::TextureUse::DepthStencilWrite, {}}, "depth");
+        const auto target = negative.CreateTexture({render::TextureDimension::Dim2D, 4, 4, 1, 1, 1, render::TextureFormat::RGBA8_UNORM, render::MemoryType::Device, render::TextureUse::RenderTarget, {}}, "target");
+        const auto depth = negative.CreateTexture({render::TextureDimension::Dim2D, 4, 4, 1, 1, 1, render::TextureFormat::D32_FLOAT, render::MemoryType::Device, render::TextureUse::DepthStencilWrite, {}}, "depth");
         negative.AddRasterPass<std::optional<PreparedRendererList>>("invalid", [&](auto& data, RenderGraphRasterBuilder& builder) {
             data = PrepareRendererList(list, builder);
             builder.SetColorAttachment(0, target);
             builder.SetDepthAttachment(depth);
-            builder.SetSideEffect();
-        }, +[](const std::optional<PreparedRendererList>&, RenderGraphRasterContext&) { ADD_FAILURE() << "Invalid draw was recorded"; });
+            builder.SetSideEffect(); }, +[](const std::optional<PreparedRendererList>&, RenderGraphRasterContext&) { ADD_FAILURE() << "Invalid draw was recorded"; });
         auto rejected = device.CreateCommandBuffer(Device.Queue);
         ASSERT_TRUE(rejected);
         rejected->Begin();
@@ -170,7 +167,7 @@ struct Output { float4 Position : SV_Position; float2 UV : TEXCOORD0; };
     pool.BeginFlight(1);
     RenderGraph graph{device, pool, registry, "StageB streams"};
     const auto color = graph.CreateTexture({render::TextureDimension::Dim2D, 64, 64, 1, 1, 1, render::TextureFormat::RGBA8_UNORM, render::MemoryType::Device, render::TextureUse::RenderTarget | render::TextureUse::CopySource, {}}, "color");
-    const auto depthTarget = graph.CreateTexture({render::TextureDimension::Dim2D, 64, 64, 1, 1, 1, render::TextureFormat::D32_FLOAT, render::MemoryType::Device, render::TextureUse::DepthStencilWrite, {}}, "depth");
+    auto depthTarget = graph.CreateTexture({render::TextureDimension::Dim2D, 64, 64, 1, 1, 1, render::TextureFormat::D32_FLOAT, render::MemoryType::Device, render::TextureUse::DepthStencilWrite, {}}, "depth");
     DrawExecutionStats execution;
     struct Payload {
         std::optional<PreparedRendererList> List;
@@ -184,13 +181,14 @@ struct Output { float4 Position : SV_Position; float2 UV : TEXCOORD0; };
     };
     graph.AddRasterPass<Payload>("depth", [&](Payload& data, RenderGraphRasterBuilder& builder) {
         data = {PrepareRendererList(depthList, builder), &execution, GetParam()}; builder.SetDepthAttachment(depthTarget); }, execute);
+    depthTarget = graph.NextVersion(depthTarget);
     graph.AddRasterPass<Payload>("opaque", [&](Payload& data, RenderGraphRasterBuilder& builder) {
         data = {PrepareRendererList(opaque, builder), &execution, GetParam()}; builder.SetColorAttachment(0, color); builder.SetDepthAttachment(depthTarget, {.Load = render::LoadAction::Load}); }, execute);
     const auto row = Align(uint64_t{64 * 4}, device.GetDetail().TextureDataPitchAlignment);
     auto readback = device.CreateBuffer({row * 64, render::MemoryType::ReadBack, render::BufferUse::CopyDestination | render::BufferUse::MapRead, {}});
     ASSERT_TRUE(readback);
     RenderExternalBuffer destination{readback.Get(), readback->GetDesc(), render::BufferState::CopyDestination};
-    const auto output = graph.ImportBuffer(destination, "readback", RenderGraphExternalAccess::ObservableOutput);
+    const auto output = graph.NextVersion(graph.ImportBuffer(destination, "readback", RenderGraphExternalAccess::ObservableOutput));
     graph.AddCopyTextureToBufferPass("readback", color, output);
     graph.AddComputePass<uint32_t>("host visibility", [&](uint32_t&, RenderGraphComputeBuilder& builder) {
         builder.ReadBuffer(output, RgBufferAccess::HostRead); builder.SetSideEffect(); }, +[](const uint32_t&, RenderGraphComputeContext&) {});
@@ -213,6 +211,7 @@ struct Output { float4 Position : SV_Position; float2 UV : TEXCOORD0; };
     auto* gateWait = retainedGate.Fence.get();
     uint64_t gateValue = 1;
     Device.Queue->Submit({.CmdBuffers = std::span{&raw, 1}, .WaitFences = std::span{&gateWait, 1}, .WaitValues = std::span{&gateValue, 1}});
+    RenderGraphTestDriver::Submitted(raw);
     assets.Pump();
     EXPECT_EQ(assets.GetAssetCount(), 1u);
     ASSERT_TRUE(retainedGate.Release(1));
@@ -258,7 +257,9 @@ TEST_P(StageBDraw, ReadOnlyDepthPassPreservesEverySupportedDepthFormat) {
     command->End();
     auto* raw = command.Get();
     Device.Queue->Submit({.CmdBuffers = std::span{&raw, 1}});
+    RenderGraphTestDriver::Submitted(raw);
     Device.Queue->Wait();
+    RenderGraphTestDriver::Completed(raw);
 }
 
 INSTANTIATE_TEST_SUITE_P(Backends, StageBDraw, testing::Values(render::RenderBackend::D3D12, render::RenderBackend::Vulkan));

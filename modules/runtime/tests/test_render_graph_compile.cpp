@@ -13,8 +13,9 @@ void EmptyCompute(const EmptyPass&, RenderGraphComputeContext&) {}
 render::TextureDescriptor GraphColor(uint32_t mips = 1) {
     return {render::TextureDimension::Dim2D, 16, 16, 1, mips, 1, render::TextureFormat::RGBA8_UNORM, render::MemoryType::Device, render::TextureUse::RenderTarget | render::TextureUse::Resource | render::TextureUse::CopySource, {}};
 }
-RgPassHandle Clear(RenderGraph& graph, RgTextureHandle texture, std::string_view name = "clear", render::LoadAction load = render::LoadAction::Clear,
+RgPassHandle Clear(RenderGraph& graph, RgTextureValue& texture, std::string_view name = "clear", render::LoadAction load = render::LoadAction::Clear,
                    render::StoreAction store = render::StoreAction::Store, bool root = false, uint32_t mip = 0) {
+    texture = graph.NextVersion(texture);
     return graph.AddRasterPass<EmptyPass>(name, [=](EmptyPass&, RenderGraphRasterBuilder& builder) {
         RgColorAttachmentDesc desc;
         desc.Load = load; desc.Store = store; desc.View.Range = {0, 1, mip, 1}; desc.Clear = {.25f, .5f, .75f, 1};
@@ -43,6 +44,29 @@ TEST_F(RenderGraphCompileTest, RejectsTextureReadbackOffsetInsideATexelBeforeAll
     graph.AddCopyTextureToBufferPass("unaligned texel", color, destination, {0, 1, 0, 1}, 31);
     EXPECT_FALSE(graph.Compile());
     EXPECT_NE(graph.GetReport().ToText().find("CopyTextureRange"), string::npos);
+}
+
+TEST_F(RenderGraphCompileTest, RejectsUnsupportedDepthCopiesBeforeAllocation) {
+    for (uint32_t operation = 0; operation < 3; ++operation) {
+        auto graph = MakeGraph();
+        const render::TextureDescriptor desc{render::TextureDimension::Dim2D, 16, 16, 1, 1, 1, render::TextureFormat::D24_UNORM_S8_UINT, render::MemoryType::Device, render::TextureUse::DepthStencilWrite | render::TextureUse::CopySource | render::TextureUse::CopyDestination, {}};
+        const auto depth = graph.CreateTexture(desc, "depth");
+        graph.AddRasterPass<EmptyPass>("initialize", [=](EmptyPass&, RenderGraphRasterBuilder& builder) { builder.SetDepthAttachment(depth); }, EmptyRaster);
+        if (operation == 0) {
+            const auto destination = graph.CreateTexture(desc, "destination");
+            graph.AddCopyTexturePass("depth copy", depth, destination);
+        } else if (operation == 1) {
+            const auto destination = graph.CreateBuffer({4096, render::MemoryType::ReadBack, render::BufferUse::CopyDestination | render::BufferUse::MapRead, {}}, "readback");
+            graph.AddCopyTextureToBufferPass("depth readback", depth, destination);
+        } else {
+            EXPECT_FALSE(graph.ReadbackTexture("owned depth readback", depth).IsValid());
+        }
+        EXPECT_FALSE(graph.Compile());
+        ASSERT_FALSE(graph.GetReport().Diagnostics.empty());
+        const char* expected[]{"CopyTextureDescriptor", "CopyTextureRange", "ReadbackFormat"};
+        EXPECT_EQ(graph.GetReport().Diagnostics.front().Code, expected[operation]);
+        EXPECT_EQ(Device.NativeCreates, 0u);
+    }
 }
 
 TEST_F(RenderGraphCompileTest, G06PartialWritesDoNotInventBufferRangeValidityAndInvalidCopiesAllocateNothing) {
@@ -169,7 +193,7 @@ TEST_F(RenderGraphCompileTest, CapabilityRejectionHasCallerLocationAndDescriptor
 
 TEST_F(RenderGraphCompileTest, DisjointMipsStayIndependentAndFullReadConsumesBoth) {
     auto graph = MakeGraph();
-    const auto texture = graph.CreateTexture(GraphColor(2), "mips");
+    auto texture = graph.CreateTexture(GraphColor(2), "mips");
     const auto output = graph.CreateTexture(GraphColor(), "output");
     Clear(graph, texture, "mip zero");
     Clear(graph, texture, "mip one", render::LoadAction::Clear, render::StoreAction::Store, false, 1);
@@ -373,10 +397,10 @@ TEST_F(RenderGraphCompileTest, G05UnusedSixPassEffectsAreCulledFromObservableCon
         array<render::TextureStates, 1> states{render::TextureState::Undefined};
         array<uint8_t, 1> valid{0};
         RenderExternalTexture external{&output, output.Desc, states, valid};
-        const auto target = graph.ImportTexture(external, "observable output", RenderGraphExternalAccess::ObservableOutput);
-        array<RgTextureHandle, 3> ends;
+        const auto target = graph.NextVersion(graph.ImportTexture(external, "observable output", RenderGraphExternalAccess::ObservableOutput));
+        array<RgTextureValue, 3> ends;
         for (uint32_t chain = 0; chain < 3; ++chain) {
-            RgTextureHandle previous;
+            RgTextureValue previous;
             for (uint32_t step = 0; step < 6; ++step) {
                 const auto resource = graph.CreateTexture(GraphColor(), fmt::format("effect {} step {}", chain, step));
                 graph.AddRasterPass<EmptyPass>(fmt::format("chain {} pass {}", chain, step), [=](EmptyPass&, RenderGraphRasterBuilder& builder) {
@@ -438,8 +462,8 @@ TEST_F(RenderGraphCompileTest, G08DependentGraphsMatchReferenceAndDeterministicP
                 array<render::TextureStates, 1> states{render::TextureState::Undefined};
                 array<uint8_t, 1> valid{0};
                 RenderExternalTexture external{&output, output.Desc, states, valid};
-                const auto target = graph.ImportTexture(external, "observable final content", RenderGraphExternalAccess::ObservableOutput);
-                vector<RgTextureHandle> textures;
+                const auto target = graph.NextVersion(graph.ImportTexture(external, "observable final content", RenderGraphExternalAccess::ObservableOutput));
+                vector<RgTextureValue> textures;
                 if (shape == 2) {
                     descriptor.Dim = render::TextureDimension::Dim2DArray;
                     descriptor.DepthOrArraySize = 3;
@@ -489,6 +513,176 @@ TEST_F(RenderGraphCompileTest, G08DependentGraphsMatchReferenceAndDeterministicP
             RecordProperty(prefix + "native_creates", Device.NativeCreates);
             RecordProperty(prefix + "repeats", 100);
         }
+}
+
+TEST_F(RenderGraphCompileTest, PortsConnectConsumerDeclaredBeforeProducer) {
+    auto graph = MakeGraph("component ports");
+    auto input = graph.DeclareTexturePort(GraphColor(), "consumer input");
+    const auto output = graph.CreateTexture(GraphColor(), "output");
+    graph.AddRasterPass<EmptyPass>("consumer", [&](EmptyPass&, RenderGraphRasterBuilder& builder) {
+        builder.ReadTexture(graph.Value(input));
+        builder.SetColorAttachment(0, output);
+        builder.SetSideEffect(); }, EmptyRaster);
+    auto source = graph.CreateTexture(GraphColor(), "source");
+    Clear(graph, source, "producer");
+    ASSERT_TRUE(graph.Connect(input, source));
+    ASSERT_TRUE(graph.Compile()) << graph.GetReport().ToText();
+    EXPECT_EQ(graph.GetCompiledGraph().ExecutionOrder, (vector<uint32_t>{1, 0}));
+    EXPECT_NE(graph.GetReport().ToDot().find("shape=ellipse"), string::npos);
+}
+
+TEST_F(RenderGraphCompileTest, PortsRejectMissingConnectionsCyclesAndBranches) {
+    {
+        auto graph = MakeGraph();
+        graph.DeclareTexturePort(GraphColor(), "missing");
+        EXPECT_FALSE(graph.Compile());
+        EXPECT_EQ(graph.GetReport().Diagnostics.front().Code, "UnconnectedPort");
+    }
+    {
+        auto graph = MakeGraph();
+        const auto a = graph.DeclareTexturePort(GraphColor(), "a");
+        const auto b = graph.DeclareTexturePort(GraphColor(), "b");
+        ASSERT_TRUE(graph.Connect(a, graph.Value(b)));
+        ASSERT_TRUE(graph.Connect(b, graph.Value(a)));
+        EXPECT_FALSE(graph.Compile());
+        EXPECT_EQ(graph.GetReport().Diagnostics.front().Code, "PortCycle");
+    }
+    {
+        auto graph = MakeGraph();
+        const auto a = graph.CreateTexture(GraphColor(), "a");
+        graph.NextVersion(a);
+        EXPECT_FALSE(graph.NextVersion(a).IsValid());
+        EXPECT_FALSE(graph.Compile());
+    }
+}
+
+TEST_F(RenderGraphCompileTest, CompatibleStorageReusesOnlyDisjointFinalLifetimes) {
+    for (const bool reuse : {false, true}) {
+        auto graph = MakeGraph();
+        graph.SetCompileOptions({.ReuseResources = reuse});
+        auto a = graph.CreateTexture(GraphColor(), "a");
+        auto b = graph.CreateTexture(GraphColor(), "b");
+        Clear(graph, a, "a", render::LoadAction::Clear, render::StoreAction::Store, true);
+        Clear(graph, b, "b", render::LoadAction::Clear, render::StoreAction::Store, true);
+        ASSERT_TRUE(graph.Compile()) << graph.GetReport().ToText();
+        EXPECT_EQ(graph.GetReport().ReusedResources, reuse ? 1u : 0u);
+        EXPECT_EQ(graph.GetReport().Resources[0].PhysicalSlot == graph.GetReport().Resources[1].PhysicalSlot, reuse);
+    }
+}
+
+TEST_F(RenderGraphCompileTest, PartialBufferConsumersNeedOnlyTheirDeclaredBytes) {
+    auto graph = MakeGraph();
+    const auto buffer = graph.CreateBuffer({64, render::MemoryType::Device, render::BufferUse::UnorderedAccess | render::BufferUse::Resource, {}}, "partial");
+    graph.AddComputePass<EmptyPass>("writer", [=](EmptyPass&, RenderGraphComputeBuilder& builder) { builder.WriteBuffer(buffer, RgBufferAccess::UnorderedAccess, {16, 16}); }, EmptyCompute);
+    graph.AddComputePass<EmptyPass>("reader", [=](EmptyPass&, RenderGraphComputeBuilder& builder) { builder.ReadBuffer(buffer, RgBufferAccess::ShaderRead, {16, 16}); builder.SetSideEffect(); }, EmptyCompute);
+    ASSERT_TRUE(graph.Compile()) << graph.GetReport().ToText();
+    EXPECT_EQ(graph.GetReport().Passes[1].DataDependencies, (vector<uint32_t>{0}));
+}
+
+TEST(FrameSubmissionTest, FrameSerialGuardsSubmitCompletionAndCancellation) {
+    FrameSubmission receipt{42};
+    uint32_t submitted = 0, completed = 0;
+    receipt.OnSubmitted = [&] { ++submitted; };
+    receipt.OnCompleted = [&](bool success) { if (success) ++completed; };
+    EXPECT_FALSE(receipt.Complete(42, true));
+    EXPECT_TRUE(receipt.Record());
+    EXPECT_FALSE(receipt.Submit(43));
+    EXPECT_TRUE(receipt.Submit(42));
+    EXPECT_FALSE(receipt.Submit(42));
+    EXPECT_FALSE(receipt.Complete(43, true));
+    EXPECT_TRUE(receipt.Complete(42, true));
+    EXPECT_EQ(receipt.Status(), FrameOperationStatus::GpuCompleted);
+    EXPECT_EQ(submitted, 1u);
+    EXPECT_EQ(completed, 1u);
+    FrameSubmission cancelled{44};
+    cancelled.Record();
+    cancelled.Cancel();
+    EXPECT_FALSE(cancelled.Submit(44));
+    EXPECT_EQ(cancelled.Status(), FrameOperationStatus::Cancelled);
+}
+
+TEST_F(RenderGraphCompileTest, AspectValidityAndIllegalAspectViewsAreIndependent) {
+    auto desc = GraphColor();
+    desc.Format = render::TextureFormat::D24_UNORM_S8_UINT;
+    desc.Usage = render::TextureUse::Resource | render::TextureUse::DepthStencilRead | render::TextureUse::DepthStencilWrite;
+    CompileTexture native{desc};
+    array<render::TextureStates, 1> states{render::TextureState::ShaderRead};
+    array<uint8_t, 2> valid{1, 0};
+    RenderExternalTexture external{&native, desc, states, valid};
+    for (const auto aspect : {render::TextureAspect::Depth, render::TextureAspect::Stencil, render::TextureAspect::Color}) {
+        auto graph = MakeGraph();
+        const auto value = graph.ImportTexture(external, "depth-stencil", RenderGraphExternalAccess::ReadOnly);
+        graph.AddComputePass<EmptyPass>("read one aspect", [=](EmptyPass&, RenderGraphComputeBuilder& b) {
+            b.ReadTexture(value, {.Range = {0, 1, 0, 1, aspect}}); b.SetSideEffect(); }, EmptyCompute);
+        EXPECT_EQ(graph.Compile(), aspect == render::TextureAspect::Depth) << graph.GetReport().ToText();
+        if (aspect == render::TextureAspect::Depth) {
+            ASSERT_EQ(graph.GetReport().Passes[0].Reads.size(), 1u);
+            const auto& node = graph.GetCompiledGraph().Versions[graph.GetReport().Passes[0].Reads[0]];
+            EXPECT_EQ(node.Cell, 0u);
+        }
+    }
+}
+
+TEST_F(RenderGraphCompileTest, CanonicalImportsRejectConflictsAndInvalidVersionPorts) {
+    CompileTexture native{GraphColor()};
+    array<render::TextureStates, 1> states{render::TextureState::ShaderRead};
+    array<uint8_t, 1> valid{1};
+    RenderExternalTexture first{&native, native.Desc, states, valid}, second{&native, native.Desc, states, valid};
+    {
+        auto graph = MakeGraph();
+        const auto a = graph.ImportTexture(first, "a", RenderGraphExternalAccess::ReadOnly);
+        const auto b = graph.ImportTexture(second, "b", RenderGraphExternalAccess::ReadOnly);
+        EXPECT_EQ(a, b);
+        graph.ExportTexture(b, render::TextureState::ShaderRead);
+        EXPECT_TRUE(graph.Compile()) << graph.GetReport().ToText();
+        EXPECT_EQ(graph.GetReport().Resources.size(), 1u);
+    }
+    {
+        auto graph = MakeGraph();
+        graph.ImportTexture(first, "a", RenderGraphExternalAccess::ReadOnly);
+        array<uint8_t, 1> invalid{0};
+        second.ContentValid = invalid;
+        EXPECT_FALSE(graph.ImportTexture(second, "conflict", RenderGraphExternalAccess::ReadOnly).IsValid());
+        EXPECT_FALSE(graph.Compile());
+    }
+    {
+        auto graph = MakeGraph();
+        const auto port = graph.DeclareTexturePort(GraphColor(), "port");
+        auto bad = graph.Value(port);
+        bad.Version = 999;
+        graph.AddComputePass<EmptyPass>("bad value", [=](EmptyPass&, RenderGraphComputeBuilder& b) { b.ReadTexture(bad); }, EmptyCompute);
+        auto source = graph.CreateTexture(GraphColor(), "source");
+        Clear(graph, source);
+        ASSERT_TRUE(graph.Connect(port, source));
+        EXPECT_FALSE(graph.Compile());
+        EXPECT_EQ(graph.GetReport().Diagnostics.front().Code, "InvalidVersion");
+    }
+}
+
+TEST_F(RenderGraphCompileTest, RasterMergingAndDeadStoresHaveIndependentSwitches) {
+    for (const bool merge : {false, true})
+        for (const bool discard : {false, true}) {
+            auto graph = MakeGraph();
+            graph.SetCompileOptions({.MergeRasterPasses = merge, .OptimizeAttachmentStores = discard});
+            auto color = graph.CreateTexture(GraphColor(), "color");
+            Clear(graph, color, "clear");
+            Clear(graph, color, "load", render::LoadAction::Load, render::StoreAction::Store, true);
+            ASSERT_TRUE(graph.Compile()) << graph.GetReport().ToText();
+            EXPECT_EQ(graph.GetReport().MergedRasterPasses, merge ? 1u : 0u);
+            EXPECT_EQ(graph.GetReport().DiscardedStores, discard ? 1u : 0u);
+            EXPECT_EQ(graph.GetReport().Passes[1].RasterGroup, merge ? 0u : 1u);
+        }
+}
+
+TEST(FrameSubmissionTest, AbandonedRecordingCancelsDependentOperations) {
+    auto operation = make_shared<FrameSubmission>(8);
+    operation->Record();
+    {
+        FrameSubmission recording{8};
+        recording.Record();
+        recording.OnCompleted = [operation](bool) { operation->Cancel(); };
+    }
+    EXPECT_EQ(operation->Status(), FrameOperationStatus::Cancelled);
 }
 
 }  // namespace

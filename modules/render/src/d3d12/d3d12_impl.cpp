@@ -1358,7 +1358,13 @@ Nullable<unique_ptr<TextureView>> DeviceD3D12::CreateTextureView(const TextureVi
     if (!rangeOpt.has_value()) {
         return nullptr;
     }
-    const SubresourceRange range = rangeOpt.value();
+    auto requestedRange = rangeOpt.value();
+    if (!requestedRange.Aspects && desc.Usage == TextureViewUsage::Resource && IsDepthStencilFormat(desc.Format)) requestedRange.Aspects = TextureAspect::Depth;
+    const auto normalized = NormalizeSubresourceRange(tex->GetDesc(), requestedRange);
+    if (!normalized) return nullptr;
+    const SubresourceRange range = *normalized;
+    if (desc.Usage == TextureViewUsage::Resource && range.Aspects.HasFlag(TextureAspect::Depth) && range.Aspects.HasFlag(TextureAspect::Stencil)) return nullptr;
+    if ((desc.Usage == TextureViewUsage::DepthRead || desc.Usage == TextureViewUsage::DepthWrite) && range.Aspects != GetTextureFormatAspects(desc.Format)) return nullptr;
     CpuDescriptorHeapViewRAII heapView{};
     DXGI_FORMAT dxgiFormat;
     if (desc.Usage == TextureViewUsage::Resource) {
@@ -1373,7 +1379,10 @@ Nullable<unique_ptr<TextureView>> DeviceD3D12::CreateTextureView(const TextureVi
         }
         D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
         srvDesc.Format = MapShaderResourceType(desc.Format);
-        srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        if (range.Aspects == TextureAspect::Stencil) srvDesc.Format = desc.Format == TextureFormat::D24_UNORM_S8_UINT ? DXGI_FORMAT_X24_TYPELESS_G8_UINT : DXGI_FORMAT_X32_TYPELESS_G8X24_UINT;
+        srvDesc.Shader4ComponentMapping = range.Aspects == TextureAspect::Stencil
+                                              ? D3D12_ENCODE_SHADER_4_COMPONENT_MAPPING(1, D3D12_SHADER_COMPONENT_MAPPING_FORCE_VALUE_0, D3D12_SHADER_COMPONENT_MAPPING_FORCE_VALUE_0, D3D12_SHADER_COMPONENT_MAPPING_FORCE_VALUE_1)
+                                              : D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         switch (desc.Dim) {
             case TextureDimension::Dim1D:
                 srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE1D;
@@ -1394,7 +1403,7 @@ Nullable<unique_ptr<TextureView>> DeviceD3D12::CreateTextureView(const TextureVi
                     srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
                     srvDesc.Texture2D.MostDetailedMip = desc.Range.BaseMipLevel;
                     srvDesc.Texture2D.MipLevels = desc.Range.MipLevelCount == SubresourceRange::All ? static_cast<UINT>(-1) : desc.Range.MipLevelCount;
-                    srvDesc.Texture2D.PlaneSlice = 0;
+                    srvDesc.Texture2D.PlaneSlice = range.Aspects == TextureAspect::Stencil ? 1 : 0;
                 }
                 break;
             case TextureDimension::Dim2DArray:
@@ -1408,7 +1417,7 @@ Nullable<unique_ptr<TextureView>> DeviceD3D12::CreateTextureView(const TextureVi
                     srvDesc.Texture2DArray.MipLevels = desc.Range.MipLevelCount == SubresourceRange::All ? static_cast<UINT>(-1) : desc.Range.MipLevelCount;
                     srvDesc.Texture2DArray.FirstArraySlice = range.BaseArrayLayer;
                     srvDesc.Texture2DArray.ArraySize = range.ArrayLayerCount;
-                    srvDesc.Texture2DArray.PlaneSlice = 0;
+                    srvDesc.Texture2DArray.PlaneSlice = range.Aspects == TextureAspect::Stencil ? 1 : 0;
                 }
                 break;
             case TextureDimension::Dim3D:
@@ -3982,6 +3991,7 @@ void CmdListD3D12::ResourceBarrier(std::span<const ResourceBarrierDescriptor> ba
                     const uint32_t planes = D3D12GetFormatPlaneCount(_device->_device.Get(), tex->_rawDesc.Format);
                     const uint32_t layers = tex->_dimension == TextureDimension::Dim3D ? 1 : tex->_rawDesc.DepthOrArraySize;
                     for (uint32_t plane = 0; plane < planes; ++plane) {
+                        if (planes == 2 && !(range->Aspects.HasFlag(plane == 0 ? TextureAspect::Depth : TextureAspect::Stencil))) continue;
                         for (uint32_t layer = range->BaseArrayLayer; layer < range->BaseArrayLayer + range->ArrayLayerCount; ++layer) {
                             for (uint32_t mip = range->BaseMipLevel; mip < range->BaseMipLevel + range->MipLevelCount; ++mip) {
                                 raw.Transition.Subresource = D3D12CalcSubresource(mip, layer, plane, tex->_rawDesc.MipLevels, layers);

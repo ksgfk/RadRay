@@ -27,12 +27,11 @@ public:
                 EXPECT_TRUE(ctx.Workloads.AddViewFamily({output.Name, output.Id}));
             }
     }
-    void Render(RenderPipelineContext& ctx) override {
+    void BuildGraph(RenderPipelineContext& ctx, RenderGraph& graph, std::span<RenderGraphOutputBinding> outputs) override {
         ++Result.Rendered;
         for (const auto& family : ctx.ViewFamilies())
             if (family.OutputAvailable) ++Result.Available;
         if (Scenario == OutputScenario::Skip) return;
-        auto graph = ctx.CreateRenderGraph(Scenario == OutputScenario::Failure ? "ExpectedFailure" : "Offscreen");
         struct Data {};
         if (Scenario == OutputScenario::Zero) {
             struct SideEffectData {
@@ -44,8 +43,13 @@ public:
         for (const auto& family : ctx.ViewFamilies()) {
             if (!family.OutputAvailable) continue;
             if (Scenario == OutputScenario::Multiple && family.FrameLocalIndex == 1) continue;
-            const auto color = ctx.ImportOutput(graph, family.OutputId);
-            EXPECT_EQ(ctx.ImportOutput(graph, family.OutputId), color);
+            auto& color = FindGraphOutput(outputs, family.OutputId)->Texture;
+            color = graph.NextVersion(color);
+            EXPECT_EQ(FindGraphOutput(outputs, family.OutputId)->Texture, color);
+            if (Scenario == OutputScenario::Failure) {
+                auto invalid = graph.CreateTexture(graph.GetTextureDescriptor(color).value(), "undefined source");
+                graph.AddComputePass<int>("invalid read", [=](int&, RenderGraphComputeBuilder& builder) { builder.ReadTexture(invalid); }, nullptr);
+            }
             graph.AddRasterPass<Data>("output", [=, this](Data&, RenderGraphRasterBuilder& builder) {
                 const auto load = Scenario == OutputScenario::Failure ? render::LoadAction::Load : render::LoadAction::Clear;
                 const float red = family.FrameLocalIndex == 0 ? .75f : .25f;
@@ -53,14 +57,14 @@ public:
             if (Scenario == OutputScenario::FinalRead) graph.AddComputePass<Data>("leave shader read", [=](Data&, RenderGraphComputeBuilder& builder) {
                 builder.ReadTexture(color); builder.SetSideEffect(); }, +[](const Data&, RenderGraphComputeContext&) {});
         }
-        const auto result = ctx.ExecuteGraph(graph);
+    }
+    void GraphRecorded(RenderPipelineContext&, const RenderGraph&, RenderGraphExecutionResult result) override {
         if (Scenario == OutputScenario::Failure) {
             EXPECT_FALSE(result.Success);
             EXPECT_FALSE(result.CommandsRecorded);
             Result.FailureObserved = true;
         } else
             EXPECT_TRUE(result.Success);
-        EXPECT_FALSE(ctx.ExecuteGraph(graph).Success);
     }
 
 private:

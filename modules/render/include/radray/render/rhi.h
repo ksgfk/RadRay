@@ -46,6 +46,13 @@ enum class ShaderStage : uint32_t {
     Graphics = Vertex | Pixel,
 };
 
+enum class TextureAspect : uint32_t {
+    Auto = 0,
+    Color = 1,
+    Depth = 2,
+    Stencil = 4,
+};
+
 enum class ShaderBlobCategory : int32_t {
     DXIL,
     SPIRV,
@@ -461,6 +468,8 @@ template <>
 struct is_flags<render::TextureState> : public std::true_type {};
 
 template <>
+struct is_flags<render::TextureAspect> : public std::true_type {};
+template <>
 struct is_flags<render::ShaderStage> : public std::true_type {};
 template <>
 struct is_compound_enum_flags<render::ShaderStage> : public std::true_type {};
@@ -476,6 +485,7 @@ using SampleCountMask = EnumFlags<render::SampleCount>;
 using BufferStates = EnumFlags<render::BufferState>;
 using TextureStates = EnumFlags<render::TextureState>;
 using ShaderStages = EnumFlags<ShaderStage>;
+using TextureAspects = EnumFlags<TextureAspect>;
 
 }  // namespace render
 
@@ -759,6 +769,21 @@ struct SwapChainPresentResult {
     SwapChainStatus Status{SwapChainStatus::Error};
 };
 
+struct BufferRange {
+    uint64_t Offset{0};
+    uint64_t Size{0};
+
+    static constexpr uint64_t All() noexcept {
+        return std::numeric_limits<uint64_t>::max();
+    }
+
+    static constexpr BufferRange AllRange() noexcept {
+        return BufferRange{0, BufferRange::All()};
+    }
+
+    friend bool operator==(const BufferRange&, const BufferRange&) noexcept = default;
+};
+
 // == barrier 描述符 ==
 
 struct BarrierBufferDescriptor {
@@ -767,6 +792,9 @@ struct BarrierBufferDescriptor {
     BufferStates After{BufferState::UNKNOWN};
     Nullable<CommandQueue*> OtherQueue{nullptr};
     bool IsFromOrToOtherQueue{false};  // true: from, false: to
+    // D3D12 legacy barriers widen this range to the whole buffer.
+    BufferRange Range{BufferRange::AllRange()};
+    ShaderStages BeforeStages{ShaderStage::UNKNOWN}, AfterStages{ShaderStage::UNKNOWN};
 };
 
 struct SubresourceRange {
@@ -774,6 +802,7 @@ struct SubresourceRange {
     uint32_t ArrayLayerCount{0};
     uint32_t BaseMipLevel{0};
     uint32_t MipLevelCount{0};
+    TextureAspects Aspects{TextureAspect::Auto};
 
     static constexpr auto All = std::numeric_limits<uint32_t>::max();
 
@@ -792,6 +821,7 @@ struct BarrierTextureDescriptor {
     bool IsFromOrToOtherQueue{false};
     bool IsSubresourceBarrier{false};
     SubresourceRange Range{};
+    ShaderStages BeforeStages{ShaderStage::UNKNOWN}, AfterStages{ShaderStage::UNKNOWN};
 };
 
 struct BarrierUavDescriptor {
@@ -873,21 +903,6 @@ struct BufferDescriptor {
     MemoryType Memory{};
     BufferUses Usage{BufferUse::UNKNOWN};
     ResourceHints Hints{};
-};
-
-struct BufferRange {
-    uint64_t Offset{0};
-    uint64_t Size{0};
-
-    static constexpr uint64_t All() noexcept {
-        return std::numeric_limits<uint64_t>::max();
-    }
-
-    static constexpr BufferRange AllRange() noexcept {
-        return BufferRange{0, BufferRange::All()};
-    }
-
-    friend bool operator==(const BufferRange&, const BufferRange&) noexcept = default;
 };
 
 struct MappedBufferRange {
@@ -1684,6 +1699,7 @@ TextureDescriptorValidationResult ValidateTextureDescriptor(const TextureDescrip
 TextureDescriptorValidationResult ValidateTextureDescriptor(
     const TextureDescriptor& desc, const RenderDeviceCapabilities& capabilities, const TextureSupport& support);
 
+TextureAspects GetTextureFormatAspects(TextureFormat format) noexcept;
 std::optional<SubresourceRange> NormalizeSubresourceRange(const TextureDescriptor& desc, SubresourceRange range) noexcept;
 bool IsUintFormat(TextureFormat format) noexcept;
 bool IsSintFormat(TextureFormat format) noexcept;
@@ -1708,6 +1724,7 @@ std::string_view format_as(RenderObjectTag v) noexcept;
 std::string_view format_as(PresentMode v) noexcept;
 std::string_view format_as(SwapChainStatus v) noexcept;
 std::string_view format_as(ShaderStage v) noexcept;
+std::string_view format_as(TextureAspect v) noexcept;
 std::string_view format_as(ShaderBlobCategory v) noexcept;
 std::string_view format_as(VertexFormat v) noexcept;
 

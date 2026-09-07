@@ -101,7 +101,7 @@ VK_BINDING(0, 0) RWTexture2D<uint> Destination : register(u0);
         DrawExecutionStats* Stats;
         render::RenderBackend Backend;
         std::optional<RendererListPassBindings> Bindings;
-                std::optional<PreparedRendererList> Prepared;
+        std::optional<PreparedRendererList> Prepared;
     };
     graph.AddRasterPass<Raster>("A B A", [&](Raster& data, RenderGraphRasterBuilder& builder) {
         data.List = &list; data.Stats = &stats; data.Backend = GetParam();
@@ -121,7 +121,7 @@ VK_BINDING(0, 0) RWTexture2D<uint> Destination : register(u0);
     auto readback = device.CreateBuffer({pitch * 32, render::MemoryType::ReadBack, render::BufferUse::MapRead | render::BufferUse::CopyDestination, {}});
     ASSERT_TRUE(readback);
     RenderExternalBuffer external{readback.Get(), readback->GetDesc(), render::BufferState::CopyDestination};
-    const auto host = graph.ImportBuffer(external, "readback", RenderGraphExternalAccess::ObservableOutput);
+    const auto host = graph.NextVersion(graph.ImportBuffer(external, "readback", RenderGraphExternalAccess::ObservableOutput));
     graph.AddCopyTextureToBufferPass("read color", color, host);
     HostRead(graph, host);
     ASSERT_TRUE(Run(graph)) << graph.GetReport().ToText();
@@ -217,7 +217,7 @@ VK_BINDING(0, 0) Texture2D<float> Images[2] : register(t0);
     for (uint32_t scenario = 0; scenario < 5; ++scenario) {
         SCOPED_TRACE(scenario);
         auto graph = MakeGraph("array declarations");
-        array<RgTextureHandle, 3> images;
+        array<RgTextureValue, 3> images;
         for (uint32_t i = 0; i < 3; ++i) {
             images[i] = graph.CreateTexture({render::TextureDimension::Dim2D, 16, 16, 1, 1, 1, render::TextureFormat::R32_FLOAT, render::MemoryType::Device, render::TextureUse::RenderTarget | render::TextureUse::Resource | render::TextureUse::CopySource, {}}, fmt::format("image {}", i));
             if (i < 2) graph.AddRasterPass<test::EmptyGraphPass>("clear input", [=](test::EmptyGraphPass&, RenderGraphRasterBuilder& builder) { builder.SetColorAttachment(0, images[i], {.Clear = {float(i + 1), 0, 0, 0}}); }, +[](const test::EmptyGraphPass&, RenderGraphRasterContext&) {});
@@ -228,7 +228,7 @@ VK_BINDING(0, 0) Texture2D<float> Images[2] : register(t0);
             DrawExecutionStats* Stats;
             render::RenderBackend Backend;
             std::optional<RendererListPassBindings> Bindings;
-                std::optional<PreparedRendererList> Prepared;
+            std::optional<PreparedRendererList> Prepared;
         };
         graph.AddRasterPass<Data>("array consumer", [&](Data& data, RenderGraphRasterBuilder& builder) {
             data.List = &list; data.Stats = &stats; data.Backend = GetParam(); builder.SetColorAttachment(0, images[2]);
@@ -247,7 +247,7 @@ VK_BINDING(0, 0) Texture2D<float> Images[2] : register(t0);
         auto readback = device.CreateBuffer({pitch * 16, render::MemoryType::ReadBack, render::BufferUse::MapRead | render::BufferUse::CopyDestination, {}});
         ASSERT_TRUE(readback);
         RenderExternalBuffer external{readback.Get(), readback->GetDesc(), render::BufferState::CopyDestination};
-        const auto host = graph.ImportBuffer(external, "readback", RenderGraphExternalAccess::ObservableOutput);
+        const auto host = graph.NextVersion(graph.ImportBuffer(external, "readback", RenderGraphExternalAccess::ObservableOutput));
         graph.AddCopyTextureToBufferPass("copy", images[2], host);
         HostRead(graph, host);
         if (scenario < 4) {

@@ -98,7 +98,7 @@ VK_BINDING(3, 0) SamplerState PointSampler : register(s0);
                 resources.BeginFlight(attempt + 1, writes);
                 fault.Arm(attempt ? FailurePoint::None : point, nth);
                 RenderGraph graph{fault, resources, registry, "prepare failure recovery"};
-                array<RgTextureHandle, 4> images;
+                array<RgTextureValue, 4> images;
                 for (uint32_t i = 0; i < 4; ++i) images[i] = graph.CreateTexture({render::TextureDimension::Dim2D, 16, 16, 1, 1, 1, render::TextureFormat::R32_FLOAT, render::MemoryType::Device, render::TextureUse::RenderTarget | render::TextureUse::Resource | render::TextureUse::CopySource, {}}, fmt::format("image {}", i));
                 for (uint32_t i = 0; i < 2; ++i) graph.AddRasterPass<test::EmptyGraphPass>("clear", [=](test::EmptyGraphPass&, RenderGraphRasterBuilder& builder) { builder.SetColorAttachment(0, images[i], {.Clear = {.25f * (i + 1), 0, 0, 0}}); }, +[](const test::EmptyGraphPass&, RenderGraphRasterContext&) {});
                 struct Draw {
@@ -116,14 +116,14 @@ VK_BINDING(3, 0) SamplerState PointSampler : register(s0);
                     const auto pso = data.Program->GetOrCreateGraphicsPipelineState(state, {}, PrimitiveTopology::TriangleList, context.PassState()); ASSERT_TRUE(pso);
                     context.Encoder().BindGraphicsPipelineState(pso.Get()); context.BindParameterSet(data.Set);
                     context.Encoder().SetViewport(MakeViewport(data.Backend, 0, 0, 16, 16)); context.Encoder().SetScissor({0, 0, 16, 16}); context.Encoder().Draw(3, 1, 0, 0); });
-                const auto host = graph.ImportBuffer(external, "readback", RenderGraphExternalAccess::ObservableOutput);
+                const auto host = graph.NextVersion(graph.ImportBuffer(external, "readback", RenderGraphExternalAccess::ObservableOutput));
                 graph.AddCopyTextureToBufferPass("copy", images[3], host);
                 HostRead(graph, host);
                 auto command = device.CreateCommandBuffer(Context.Queue);
                 ASSERT_TRUE(command);
                 command->Begin();
                 test::FailingGraphCommand recordingProbe{*command};
-                const auto result = RenderGraphTestDriver::Execute(graph, attempt ? *command.Get() : recordingProbe);
+                const auto result = RenderGraphTestDriver::Execute(graph, attempt ? *command.Get() : recordingProbe, command.Get());
                 if (!attempt) {
                     EXPECT_FALSE(result.Success);
                     EXPECT_FALSE(result.CommandsRecorded);
@@ -139,7 +139,9 @@ VK_BINDING(3, 0) SamplerState PointSampler : register(s0);
                 if (result.CommandsRecorded) {
                     auto* raw = command.Get();
                     Context.Queue->Submit({.CmdBuffers = std::span{&raw, 1}});
+                    RenderGraphTestDriver::Submitted(raw);
                     Context.Queue->Wait();
+                    RenderGraphTestDriver::Completed(raw);
                 }
                 if (attempt) {
                     const auto bytes = Read(*readback);

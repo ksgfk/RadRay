@@ -88,7 +88,16 @@ TextureDescriptorValidationResult ValidateTextureDescriptor(const TextureDescrip
     return ValidateTextureDescriptor(desc, device.GetCapabilities(), device.QueryTextureSupport(query));
 }
 
+TextureAspects GetTextureFormatAspects(TextureFormat format) noexcept {
+    if (format == TextureFormat::D24_UNORM_S8_UINT || format == TextureFormat::D32_FLOAT_S8_UINT) return TextureAspect::Depth | TextureAspect::Stencil;
+    return IsDepthStencilFormat(format) ? TextureAspects{TextureAspect::Depth} : TextureAspects{TextureAspect::Color};
+}
+std::string_view format_as(TextureAspect value) noexcept { return EnumNameOr(value); }
+
 std::optional<SubresourceRange> NormalizeSubresourceRange(const TextureDescriptor& desc, SubresourceRange range) noexcept {
+    const auto aspects = GetTextureFormatAspects(desc.Format);
+    if (!range.Aspects) range.Aspects = aspects;
+    if ((range.Aspects.value() & ~aspects.value()) != 0) return std::nullopt;
     const uint32_t layers = desc.Dim == TextureDimension::Dim3D ? 1 : desc.DepthOrArraySize;
     if (range.BaseArrayLayer >= layers || range.BaseMipLevel >= desc.MipLevels) return std::nullopt;
     if (range.ArrayLayerCount == SubresourceRange::All) range.ArrayLayerCount = layers - range.BaseArrayLayer;

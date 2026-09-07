@@ -333,7 +333,9 @@ bool GpuSystem::CompleteFlight(uint32_t flightIndex) {
         std::lock_guard lock(_uploadStatsMutex);
         _completedUploadStats[flightIndex] = flight.HostWrites.GetStats();
     }
-    NotifyFlightComplete(FlightCompletion{.FlightIndex = flightIndex, .GpuWorkCompleted = flight.Rendered});
+    for (const auto& submission : flight.Submissions) submission->Complete(flight.FrameSerial, flight.Rendered);
+    flight.Submissions.clear();
+    NotifyFlightComplete(FlightCompletion{.FlightIndex = flightIndex, .GpuWorkCompleted = flight.Rendered, .FrameSerial = flight.FrameSerial});
     flight.Uploader->CollectFlight(flightIndex);
     // The coroutine records, including cancellation, remain entirely game-thread owned.
     flight.WaitersCompleted.store(true, std::memory_order_release);
@@ -642,6 +644,11 @@ AppFrameContext GpuSystem::BeginFrameRecord(
     }
     record.Targets.clear();
     record.Submitted = false;
+    for (const auto& submission : record.Submissions) submission->Cancel();
+    record.Submissions.clear();
+    static std::atomic<uint64_t> nextFrameSerial{1};
+    record.FrameSerial = nextFrameSerial.fetch_add(1, std::memory_order_relaxed);
+    if (record.FrameSerial == 0 || record.FrameSerial == UINT64_MAX) RADRAY_ABORT("Frame serial exhausted");
     record.Recording = true;
     record.Rendered = rendered;
     record.CmdBuffer->Begin();
@@ -727,6 +734,7 @@ void GpuSystem::SubmitFrame(
     _flights[flightIndex]->Signal = GpuSystem::FenceSignal{
         .Fence = frameFence,
         .Value = frameFenceValue};
+    for (const auto& submission : record.Submissions) submission->Submit(record.FrameSerial);
 
     // 逐个呈现。RequireRecreate 静默跳过，其余非 Success 记日志。
     for (FlightSlot::AcquiredTarget& target : record.Targets) {
@@ -747,6 +755,12 @@ void GpuSystem::SubmitFrame(
 // ══════════════════════════════════════════════
 //  AppFrameContext
 // ══════════════════════════════════════════════
+
+uint64_t AppFrameContext::FrameSerial() const noexcept { return _gpuSystem->_flights[_flightIndex]->FrameSerial; }
+void AppFrameContext::TrackSubmission(shared_ptr<FrameSubmission> submission) {
+    if (!submission || submission->Serial() != FrameSerial()) RADRAY_ABORT("Submission receipt belongs to another frame serial");
+    _gpuSystem->_flights[_flightIndex]->Submissions.push_back(std::move(submission));
+}
 
 render::CommandBuffer* AppFrameContext::GetCommandBuffer() const noexcept {
     return _gpuSystem->_flights[_flightIndex]->CmdBuffer.get();

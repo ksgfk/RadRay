@@ -123,7 +123,7 @@ VK_BINDING(1, 1) Texture2D<float> Marker : register(t0, space1);
                 constants.fill(0xdeadbeef); declaration.assign(100, 'x'); }, +[](const Draw& data, RenderGraphRasterContext& context) {
                 context.Encoder().SetViewport(MakeViewport(data.Backend, 0, 0, 4, 4)); context.Encoder().SetScissor({0, 0, 4, 4});
                 SubmitRendererList(*data.Prepared, context, *data.Stats); });
-            const auto host = graph.ImportBuffer(flight.External, "readback", RenderGraphExternalAccess::ObservableOutput);
+            const auto host = graph.NextVersion(graph.ImportBuffer(flight.External, "readback", RenderGraphExternalAccess::ObservableOutput));
             graph.AddCopyTextureToBufferPass("copy constants", color, host);
             HostRead(graph, host);
             ASSERT_TRUE(RenderGraphTestDriver::Execute(graph, *flight.Command).Success) << graph.GetReport().ToText();
@@ -159,6 +159,7 @@ VK_BINDING(1, 1) Texture2D<float> Marker : register(t0, space1);
         auto* wait = gate.Fence.get();
         uint64_t waitValue = frame;
         Context.Queue->Submit({.CmdBuffers = std::span{&command, 1}, .SignalFences = std::span{&signal, 1}, .SignalValues = std::span{&frame, 1}, .WaitFences = frame <= 3 ? std::span{&wait, 1} : std::span<render::Fence*>{}, .WaitValues = frame <= 3 ? std::span{&waitValue, 1} : std::span<uint64_t>{}});
+        RenderGraphTestDriver::Submitted(command);
         flight.Signal = frame;
         if (frame == 3) {
             EXPECT_EQ(completed->GetCompletedValue(), 0u);
@@ -259,18 +260,14 @@ TEST_P(FlightLifetimeTest, L04HistoryResizeRetiresAfterTheProtectingFlightAndPre
         commands[frame - 1]->Begin();
         {
             RenderGraph graph{device, *resources[flight], *Registry, "history generations in flight"};
-            const auto color = graph.ImportTexture(*first.Current, "resizing view", RenderGraphExternalAccess::ObservableOutput);
-            const auto second = graph.ImportTexture(*other.Current, "independent view", RenderGraphExternalAccess::ObservableOutput);
+            const auto color = graph.NextVersion(graph.ImportTexture(*first.Current, "resizing view", RenderGraphExternalAccess::ObservableOutput));
+            const auto second = graph.NextVersion(graph.ImportTexture(*other.Current, "independent view", RenderGraphExternalAccess::ObservableOutput));
             for (const auto target : {color, second}) graph.AddRasterPass<test::EmptyGraphPass>("clear history", [=](test::EmptyGraphPass&, RenderGraphRasterBuilder& builder) { builder.SetColorAttachment(0, target, {.Clear = {float(frame), 0, 0, 0}}); }, +[](const test::EmptyGraphPass&, RenderGraphRasterContext&) {});
-            const auto host = graph.ImportBuffer(imports[frame - 1], "readback", RenderGraphExternalAccess::ObservableOutput);
+            const auto host = graph.NextVersion(graph.ImportBuffer(imports[frame - 1], "readback", RenderGraphExternalAccess::ObservableOutput));
             graph.AddCopyTextureToBufferPass("read history marker", color, host);
             HostRead(graph, host);
             ASSERT_TRUE(RenderGraphTestDriver::Execute(graph, *commands[frame - 1]).Success) << graph.GetReport().ToText();
         }
-        EXPECT_TRUE(histories.CommitHistory(first.CommitToken));
-        EXPECT_TRUE(histories.CommitHistory(other.CommitToken));
-        EXPECT_TRUE(histories.CommitView(a.StateId));
-        EXPECT_TRUE(histories.CommitView(b.StateId));
         writes[flight].Flush(device);
         commands[frame - 1]->End();
         auto* command = commands[frame - 1].get();
@@ -278,6 +275,11 @@ TEST_P(FlightLifetimeTest, L04HistoryResizeRetiresAfterTheProtectingFlightAndPre
         auto* wait = gate.Fence.get();
         uint64_t waitValue = frame;
         Context.Queue->Submit({.CmdBuffers = std::span{&command, 1}, .SignalFences = std::span{&signal, 1}, .SignalValues = std::span{&frame, 1}, .WaitFences = frame <= 3 ? std::span{&wait, 1} : std::span<render::Fence*>{}, .WaitValues = frame <= 3 ? std::span{&waitValue, 1} : std::span<uint64_t>{}});
+        RenderGraphTestDriver::Submitted(command);
+        EXPECT_TRUE(histories.CommitHistory(first.CommitToken));
+        EXPECT_TRUE(histories.CommitHistory(other.CommitToken));
+        EXPECT_TRUE(histories.CommitView(a.StateId));
+        EXPECT_TRUE(histories.CommitView(b.StateId));
         if (frame == 3) EXPECT_EQ(complete->GetCompletedValue(), 0u);
     }
     ASSERT_TRUE(gate.Release(2));
@@ -334,10 +336,10 @@ TEST_P(FlightLifetimeTest, L08UnregisterDetachesTheIdWhileCallerKeepsInFlightOut
     command->Begin();
     {
         auto graph = MakeGraph("borrowed output lifetime");
-        const auto color = graph.ImportTexture(external, "caller output", RenderGraphExternalAccess::ObservableOutput);
+        const auto color = graph.NextVersion(graph.ImportTexture(external, "caller output", RenderGraphExternalAccess::ObservableOutput));
         graph.AddRasterPass<test::EmptyGraphPass>("output producer", [=](test::EmptyGraphPass&, RenderGraphRasterBuilder& builder) { builder.SetColorAttachment(0, color, {.Clear = {.25f, .5f, .75f, 1}}); }, +[](const test::EmptyGraphPass&, RenderGraphRasterContext&) {});
         for (uint32_t i = 0; i < 2; ++i) {
-            const auto host = graph.ImportBuffer(imports[i], fmt::format("view {} readback", i), RenderGraphExternalAccess::ObservableOutput);
+            const auto host = graph.NextVersion(graph.ImportBuffer(imports[i], fmt::format("view {} readback", i), RenderGraphExternalAccess::ObservableOutput));
             graph.AddCopyTextureToBufferPass(fmt::format("view {} consumer", i), color, host);
             HostRead(graph, host);
         }
@@ -349,6 +351,7 @@ TEST_P(FlightLifetimeTest, L08UnregisterDetachesTheIdWhileCallerKeepsInFlightOut
     auto* signal = complete.Get();
     uint64_t value = 1;
     Context.Queue->Submit({.CmdBuffers = std::span{&raw, 1}, .SignalFences = std::span{&signal, 1}, .SignalValues = std::span{&value, 1}, .WaitFences = std::span{&wait, 1}, .WaitValues = std::span{&value, 1}});
+    RenderGraphTestDriver::Submitted(raw);
     EXPECT_TRUE(outputs.Unregister(id));
     EXPECT_FALSE(outputs.ResolveExternal(id));
     EXPECT_FALSE(outputs.Find(id));

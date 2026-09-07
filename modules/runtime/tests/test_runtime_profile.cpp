@@ -274,8 +274,10 @@ TEST_P(RuntimeProfile, StageCostsAndWarmResourceCounts) {
                         command->End();
                         auto* raw = command.Get();
                         context.Queue->Submit({.CmdBuffers = std::span{&raw, 1}});
+                        RenderGraphTestDriver::Submitted(raw);
                     });
                     values[9] = Measure([&] { context.Queue->Wait(); });
+                    RenderGraphTestDriver::Completed(command.Get());
                     if (frame >= 3) {
                         for (size_t i = 0; i < values.size(); ++i) samples[i].push_back(values[i]);
                         const auto& cpu = graph->GetReport().Cpu;

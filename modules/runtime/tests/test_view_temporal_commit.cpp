@@ -22,7 +22,7 @@ HistoryTextureRequest HistoryRequest(std::string_view name, uint32_t count = 2, 
 }
 
 RgPassHandle WriteHistory(RenderGraph& graph, HistoryTexturePair& pair, std::string_view name) {
-    const auto texture = graph.ImportTexture(*pair.Current, name, RenderGraphExternalAccess::ObservableOutput);
+    const auto texture = graph.NextVersion(graph.ImportTexture(*pair.Current, name, RenderGraphExternalAccess::ObservableOutput));
     return graph.AddRasterPass<test::EmptyGraphPass>(name, [=](test::EmptyGraphPass&, RenderGraphRasterBuilder& builder) { builder.SetColorAttachment(0, texture, {.Clear = {{.2f, .4f, .6f, 1}}}); }, +[](const test::EmptyGraphPass&, RenderGraphRasterContext&) {});
 }
 
@@ -124,7 +124,7 @@ TEST_P(ViewTemporalGpuTest, T04LateRasterAndComputeEncoderFailurePreservesTheWho
             auto graph = MakeGraph("late history failure");
             WriteHistory(graph, color, "color written before failure");
             if (frame == 1 && compute) {
-                const auto texture = graph.ImportTexture(*depth.Current, "depth", RenderGraphExternalAccess::ObservableOutput);
+                const auto texture = graph.NextVersion(graph.ImportTexture(*depth.Current, "depth", RenderGraphExternalAccess::ObservableOutput));
                 graph.AddComputePass<test::EmptyGraphPass>("fail compute", [=](test::EmptyGraphPass&, RenderGraphComputeBuilder& builder) { builder.WriteTexture(texture); }, +[](const test::EmptyGraphPass&, RenderGraphComputeContext&) {});
             } else
                 WriteHistory(graph, depth, "depth");
@@ -133,7 +133,7 @@ TEST_P(ViewTemporalGpuTest, T04LateRasterAndComputeEncoderFailurePreservesTheWho
             command->Begin();
             test::FailingGraphCommand failure(*command);
             failure.PassesBeforeFailure = 1;
-            const auto result = RenderGraphTestDriver::Execute(graph, frame == 1 ? failure : *command.Get());
+            const auto result = RenderGraphTestDriver::Execute(graph, frame == 1 ? failure : *command.Get(), command.Get());
             EXPECT_EQ(result.Success, frame != 1);
             EXPECT_TRUE(result.CommandsRecorded);
             EXPECT_TRUE(graph.GetReport().Passes[0].Executed);
@@ -142,7 +142,9 @@ TEST_P(ViewTemporalGpuTest, T04LateRasterAndComputeEncoderFailurePreservesTheWho
             command->End();
             auto* raw = command.Get();
             Context.Queue->Submit({.CmdBuffers = std::span{&raw, 1}});
+            RenderGraphTestDriver::Submitted(raw);
             Context.Queue->Wait();
+            RenderGraphTestDriver::Completed(raw);
             const array tokens{color.CommitToken, depth.CommitToken};
             EXPECT_EQ(registry.CommitViewWithHistory(view.StateId, tokens), frame != 1);
             if (frame == 0) committed = {color.Current->Texture, depth.Current->Texture};
@@ -214,18 +216,17 @@ public:
             context.Workloads.AddViewFamily(std::move(family));
         }
     }
-    void Render(RenderPipelineContext& context) override {
+    void BuildGraph(RenderPipelineContext& context, RenderGraph& graph, std::span<RenderGraphOutputBinding> outputs) override {
         RequiredDraws = {};
         ASSERT_EQ(context.ViewFamilies().size(), 1u);
         const auto& family = context.ViewFamilies().front();
         ASSERT_TRUE(family.OutputAvailable);
-        auto graph = context.CreateRenderGraph("temporal context probe");
-        const auto output = context.ImportOutput(graph, family.OutputId);
+        auto& output = FindGraphOutput(outputs, family.OutputId)->Texture;
         RenderSceneSnapshot snapshot;
         snapshot.Primitives.emplace_back();
         snapshot.Primitives[0].Generation = 42;
         snapshot.Primitives[0].LocalToWorld(0, 3) = static_cast<float>(Frame);
-        array<ViewCompletionToken, 2> tokens;
+        Tokens = {};
         for (uint32_t i = 0; i < 2; ++i) {
             auto view = family.Views[i];
             if (Frame == 7) context.InvalidateView(view.StateId);
@@ -244,6 +245,7 @@ public:
             const bool outputWritten = Frame != 2 && !(Frame == 3 && i == 1);
             RgPassHandle completion;
             if (outputWritten) {
+                output = graph.NextVersion(output);
 #if defined(RADRAY_ENABLE_SHADER_JIT)
                 if (Frame == 5 && i == 0) {
                     const auto depthTarget = graph.CreateTexture({render::TextureDimension::Dim2D, family.OutputSize.Width, family.OutputSize.Height, 1, 1, 1, render::TextureFormat::D32_FLOAT, render::MemoryType::Device, render::TextureUse::DepthStencilRead | render::TextureUse::DepthStencilWrite, {}}, "PSO rejection depth");
@@ -266,15 +268,16 @@ public:
             } else {
                 completion = graph.AddComputePass<test::EmptyGraphPass>(fmt::format("not complete {}", i), [](test::EmptyGraphPass&, RenderGraphComputeBuilder&) {}, +[](const test::EmptyGraphPass&, RenderGraphComputeContext&) {});
             }
-            tokens[i] = context.RegisterViewCompletion(graph, view.StateId, completion);
-            ASSERT_TRUE(tokens[i].IsValid());
-            EXPECT_FALSE(context.RegisterViewCompletion(graph, view.StateId, completion).IsValid());
+            Tokens[i] = context.RegisterViewCompletion(graph, view.StateId, completion, output);
+            ASSERT_TRUE(Tokens[i].IsValid());
+            EXPECT_FALSE(context.RegisterViewCompletion(graph, view.StateId, completion, output).IsValid());
         }
         auto independent = context.AcquireHistoryTexture(family.Views[0], family, HistoryRequest("feedback", 2, HistoryCommitMode::Independent), Reason);
         ASSERT_TRUE(independent.Current);
         EXPECT_EQ(independent.PreviousValid, Frame > 1);
         WriteHistory(graph, independent, "independent feedback");
-        const auto execution = context.ExecuteGraph(graph);
+    }
+    void GraphRecorded(RenderPipelineContext& context, const RenderGraph& graph, RenderGraphExecutionResult execution) override {
 #if defined(RADRAY_ENABLE_SHADER_JIT)
         EXPECT_EQ(execution.Success, Frame != 5);
         if (Frame == 5) {
@@ -287,7 +290,7 @@ public:
 #else
         EXPECT_TRUE(execution.Success);
 #endif
-        EXPECT_FALSE(context.CommitView(Ids[1], tokens[0], true));
+        EXPECT_FALSE(context.CommitView(Ids[1], Tokens[0], true));
         if (Old.IsValid()) EXPECT_FALSE(context.CommitView(Ids[0], Old, true));
         for (uint32_t i = 0; i < 2; ++i) {
             const bool drawsSucceeded = i != 0 || Frame != 5 ||
@@ -297,15 +300,15 @@ public:
                                         false;
 #endif
             const bool expected = execution.Success && Frame != 2 && !(Frame == 3 && i == 1) && !(Frame == 4 && i == 0) && drawsSucceeded;
-            const bool committed = context.CommitView(Ids[i], tokens[i], drawsSucceeded);
+            const bool committed = context.CommitView(Ids[i], Tokens[i], drawsSucceeded);
             EXPECT_EQ(committed, expected) << "frame " << Frame << " view " << i;
-            EXPECT_FALSE(context.CommitView(Ids[i], tokens[i], true));
+            EXPECT_FALSE(context.CommitView(Ids[i], Tokens[i], true));
             if (committed) {
                 Result.LastX[i] = static_cast<float>(Frame);
                 ++Result.Commits[i];
             }
         }
-        Old = tokens[0];
+        Old = Tokens[0];
         ++Result.Frames;
     }
 
@@ -314,6 +317,7 @@ private:
     uint32_t Frame{0};
     array<ViewStateId, 2> Ids{AllocateViewStateId(), AllocateViewStateId()};
     ViewCompletionToken Old;
+    array<ViewCompletionToken, 2> Tokens;
     string Reason;
     DrawExecutionStats RequiredDraws;
 #if defined(RADRAY_ENABLE_SHADER_JIT)

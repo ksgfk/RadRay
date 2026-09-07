@@ -77,7 +77,8 @@ public:
     ~ForwardPipeline() noexcept override;
 
     void PrepareFrame(RenderPrepareContext& ctx) override;
-    void Render(RenderPipelineContext& ctx) override;
+    void BuildGraph(RenderPipelineContext& ctx, RenderGraph& graph, std::span<RenderGraphOutputBinding> outputs) override;
+    void GraphRecorded(RenderPipelineContext& ctx, const RenderGraph& graph, RenderGraphExecutionResult result) override;
 
     /// Game thread. Inputs are copied into the next writable flight during PrepareFrame.
     bool SetSettings(const ForwardPipelineSettings& settings) noexcept;

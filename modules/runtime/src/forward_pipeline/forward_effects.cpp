@@ -16,7 +16,7 @@ using render::TextureUses;
 constexpr TextureUses kHdrUsage = TextureUse::Resource | TextureUse::UnorderedAccess | TextureUse::CopySource | TextureUse::CopyDestination;
 constexpr TextureUses kScalarUsage = TextureUse::Resource | TextureUse::UnorderedAccess | TextureUse::CopySource | TextureUse::CopyDestination;
 
-RgTextureHandle Texture(RenderGraph& graph, RenderExtent extent, TextureFormat format, TextureUses usage, std::string_view name, uint32_t samples = 1, uint32_t layers = 1) {
+RgTextureValue Texture(RenderGraph& graph, RenderExtent extent, TextureFormat format, TextureUses usage, std::string_view name, uint32_t samples = 1, uint32_t layers = 1) {
     return graph.CreateTexture({layers == 1 ? render::TextureDimension::Dim2D : render::TextureDimension::Dim2DArray,
                                 extent.Width,
                                 extent.Height,
@@ -75,9 +75,9 @@ void Compute(RenderGraph& graph, std::string_view name, ShaderProgram& program, 
         ctx.BindComputeProgram(data.Program); ctx.BindParameterSet(data.Set);
         ctx.Encoder().Dispatch((data.Size.Width + 7) / 8, (data.Size.Height + 7) / 8, 1); });
 }
-RgTextureHandle ScalarEffect(RenderGraph& graph, const ForwardEffectPrograms& programs, uint32_t effect, std::string_view name,
-                             const ResolvedRenderView& view, RenderExtent size, RenderExtent inputSize,
-                             RgTextureHandle a, RgTextureHandle b = {}, Eigen::Vector4f options = Eigen::Vector4f::Zero()) {
+RgTextureValue ScalarEffect(RenderGraph& graph, const ForwardEffectPrograms& programs, uint32_t effect, std::string_view name,
+                            const ResolvedRenderView& view, RenderExtent size, RenderExtent inputSize,
+                            RgTextureValue a, RgTextureValue b = {}, Eigen::Vector4f options = Eigen::Vector4f::Zero()) {
     auto& program = *programs.Programs[effect].Get();
     const auto output = Texture(graph, size, TextureFormat::R32_FLOAT, kScalarUsage, name);
     auto values = EffectValues(program, view, size, inputSize);
@@ -87,9 +87,9 @@ RgTextureHandle ScalarEffect(RenderGraph& graph, const ForwardEffectPrograms& pr
     Compute(graph, name, program, values, bindings, size);
     return output;
 }
-RgTextureHandle ColorEffect(RenderGraph& graph, const ForwardEffectPrograms& programs, uint32_t effect, std::string_view name,
-                            const ResolvedRenderView& view, RenderExtent size, RenderExtent inputSize,
-                            RgTextureHandle a, RgTextureHandle b = {}) {
+RgTextureValue ColorEffect(RenderGraph& graph, const ForwardEffectPrograms& programs, uint32_t effect, std::string_view name,
+                           const ResolvedRenderView& view, RenderExtent size, RenderExtent inputSize,
+                           RgTextureValue a, RgTextureValue b = {}) {
     auto& program = *programs.Programs[effect].Get();
     const auto output = Texture(graph, size, TextureFormat::RGBA16_FLOAT, kHdrUsage, name);
     auto values = EffectValues(program, view, size, inputSize);
@@ -113,7 +113,7 @@ MaterialPipelineState EffectRasterState(bool depth = false, bool additive = fals
 }
 
 RgPassHandle Composite(RenderGraph& graph, ShaderProgram& program, const ShaderParameterStorage& values,
-                       std::span<const RgParameterBinding> inputs, RgTextureHandle output, Rect viewport, Rect scissor,
+                       std::span<const RgParameterBinding> inputs, RgTextureValue& output, Rect viewport, Rect scissor,
                        render::LoadAction load, render::RenderBackend backend, bool& success, std::string_view name) {
     struct Data {
         RgGraphicsProgramHandle Program;
@@ -122,6 +122,7 @@ RgPassHandle Composite(RenderGraph& graph, ShaderProgram& program, const ShaderP
         Rect Viewport, Scissor;
         bool* Success;
     };
+    output = graph.NextVersion(output);
     return graph.AddRasterPass<Data>(name, [&](Data& data, RenderGraphRasterBuilder& builder) {
         data = {builder.UseGraphicsProgram(program, EffectRasterState()), builder.CreateParameterSet(program, 0, EffectBindings(program, values, inputs)), backend, viewport, scissor, &success};
         builder.SetColorAttachment(0, output, {.Load = load}); }, +[](const Data& data, RenderGraphRasterContext& ctx) {
@@ -131,7 +132,7 @@ RgPassHandle Composite(RenderGraph& graph, ShaderProgram& program, const ShaderP
 }
 
 void DrawSky(RenderGraph& graph, const ForwardEffectPrograms& programs, const ResolvedRenderView& view, RenderExtent size,
-             RgTextureHandle hdr, RgTextureHandle depth, render::RenderBackend backend, bool& success) {
+             RgTextureValue& hdr, RgTextureValue depth, render::RenderBackend backend, bool& success) {
     auto& program = *programs.Programs[10].Get();
     auto values = EffectValues(program, view, size, size);
     struct Data {
@@ -141,6 +142,7 @@ void DrawSky(RenderGraph& graph, const ForwardEffectPrograms& programs, const Re
         render::RenderBackend Backend;
         bool* Success;
     };
+    hdr = graph.NextVersion(hdr);
     graph.AddRasterPass<Data>("Forward.Sky", [&](Data& data, RenderGraphRasterBuilder& builder) {
         data = {builder.UseGraphicsProgram(program, EffectRasterState(true)), builder.CreateParameterSet(program, 0, EffectBindings(program, values, {})), view, backend, &success};
         builder.SetColorAttachment(0, hdr, {.Load = render::LoadAction::Load});
@@ -150,7 +152,7 @@ void DrawSky(RenderGraph& graph, const ForwardEffectPrograms& programs, const Re
         context.Encoder().SetScissor(data.View.ScissorRect); context.Encoder().Draw(3, 1, 0, 0); });
 }
 void Fireflies(RenderGraph& graph, const ForwardEffectPrograms& programs, const ResolvedRenderView& view, RenderExtent size,
-               RgTextureHandle hdr, RgTextureHandle depth, render::RenderBackend backend, uint64_t serial, bool& success) {
+               RgTextureValue& hdr, RgTextureValue depth, render::RenderBackend backend, uint64_t serial, bool& success) {
     constexpr uint32_t count = 128;
     const auto particles = graph.CreateBuffer({count * 16, render::MemoryType::Device, render::BufferUse::Resource | render::BufferUse::UnorderedAccess, {}}, "Forward.Fireflies.Instances");
     const auto arguments = graph.CreateBuffer({16, render::MemoryType::Device, render::BufferUse::Indirect | render::BufferUse::UnorderedAccess, {}}, "Forward.Fireflies.Arguments");
@@ -172,6 +174,7 @@ void Fireflies(RenderGraph& graph, const ForwardEffectPrograms& programs, const 
         render::RenderBackend Backend;
         bool* Success;
     };
+    hdr = graph.NextVersion(hdr);
     graph.AddRasterPass<Data>("Forward.Fireflies.Draw", [&](Data& data, RenderGraphRasterBuilder& builder) {
         data = {builder.UseGraphicsProgram(draw, EffectRasterState(true, true)), builder.CreateParameterSet(draw, 0, EffectBindings(draw, constants, reads)), builder.ReadIndirectArguments(arguments, RgIndirectCommand::Draw, 0, 1), view, backend, &success};
         builder.SetColorAttachment(0, hdr, {.Load = render::LoadAction::Load});
@@ -185,8 +188,8 @@ struct LocalLightGpu {
     float PositionRadius[4], ColorType[4], DirectionCosOuter[4], Cone[4];
 };
 static_assert(sizeof(LocalLightGpu) == 64 && std::is_trivially_copyable_v<LocalLightGpu>);
-uint32_t UploadLights(render::Device& device, RenderPipelineContext& context, const CullingResults& culling,
-                      uint32_t maxCount, ForwardHdrView& work, bool& warned) {
+uint32_t UploadLights(RenderGraph& graph, RgBufferValue& lights, const CullingResults& culling,
+                      uint32_t maxCount, bool& warned) {
     vector<VisibleLight> selected;
     for (const auto& visible : culling.Lights) {
         const auto type = culling.Scene->Lights[visible.Light].Type;
@@ -213,19 +216,8 @@ uint32_t UploadLights(render::Device& device, RenderPipelineContext& context, co
         packed.DirectionCosOuter[3] = p.SpotAngles.x();
         packed.Cone[0] = p.SpotAngles.y();
     }
-    const uint64_t size = gpu.size() * sizeof(LocalLightGpu);
-    if (!work.Lights || work.Lights->GetCapacity() != size) {
-        auto buffer = device.CreateBuffer({size, render::MemoryType::Upload, render::BufferUse::MapWrite | render::BufferUse::Resource, render::ResourceHint::PersistentMap});
-        if (!buffer) return UINT32_MAX;
-        work.Lights = make_unique<MappedUploadPage>(buffer.Release(), &context.HostWrites());
-    }
-    work.Lights->Reset();
-    auto reservation = work.Lights->Reserve(size, 16, context.HostWrites());
-    if (!reservation.IsValid()) return UINT32_MAX;
-    std::memcpy(reservation.Data(), gpu.data(), size);
-    reservation.Commit(size);
-    auto* buffer = work.Lights->GetBuffer();
-    work.LightImport = {buffer, buffer->GetDesc(), render::BufferState::HostWrite, true};
+    lights = graph.UploadBuffer("Forward.LocalLights", std::as_bytes(std::span{gpu}), render::BufferUse::Resource);
+    if (!lights.IsValid()) return UINT32_MAX;
     return static_cast<uint32_t>(selected.size());
 }
 
@@ -236,7 +228,7 @@ struct ShadowData {
 };
 ShadowData BuildShadows(RenderGraph& graph, const ForwardPipelineSettings& settings, const ResolvedRenderView& main,
                         const RenderSceneSnapshot& scene, FrameDrawResources& draws, ForwardBindingCache& bindings,
-                        ForwardHdrView& work, RgTextureHandle texture, render::RenderBackend backend, bool& warned) {
+                        ForwardHdrView& work, RgTextureValue& texture, render::RenderBackend backend, bool& warned) {
     ShadowData shadow;
     const RenderLightData* sun = nullptr;
     for (const auto& visible : work.Main.Culling.Lights) {
@@ -307,6 +299,7 @@ ShadowData BuildShadows(RenderGraph& graph, const ForwardPipelineSettings& setti
         const auto stage = ForwardGraph::BuildGraph(graph, ForwardGraphStage::Depth,
                                                     {.Name = fmt::format("Forward.Shadow.{}", cascade), .Backend = backend, .Views = std::span{&shadowView, 1}, .Depth = texture, .DepthAttachment = attachment, .Execution = &work.Execution, .PreserveEmptyPass = true});
         work.PassesSucceeded &= stage.Success;
+        texture = stage.Depth;
         previous = split;
     }
     shadow.Params = {enabled ? 1.f : 0.f, float(settings.ShadowResolution), 4, 1};
@@ -319,8 +312,8 @@ struct LitBindings {
     vector<RendererListProgramParameters> Programs;
 };
 LitBindings MakeLitBindings(const RendererList& list, const ShadowData& shadow, RenderExtent extent, const ForwardPipelineSettings& settings,
-                            RgTextureHandle shadows, RgBufferHandle lights, uint32_t count, RgBufferHandle headers, RgBufferHandle indices,
-                            RgTextureHandle ao, RgTextureHandle opaqueColor, bool transparent, bool& valid) {
+                            RgTextureValue shadows, RgBufferValue lights, uint32_t count, RgBufferValue headers, RgBufferValue indices,
+                            RgTextureValue ao, RgTextureValue opaqueColor, bool transparent, bool& valid) {
     LitBindings result;
     vector<ShaderProgram*> programs;
     for (const auto& draw : list.Commands)
@@ -396,13 +389,14 @@ void ForwardHdrView::Reset() {
 }
 
 namespace {
-bool BuildOutputSurfaces(RenderGraph& graph, RenderPipelineContext& context, ShaderProgram& program,
+bool BuildOutputSurfaces(RenderGraph& graph, ShaderProgram& program,
                          const ResolvedRenderViewFamily& family, const ResolvedRenderView& view,
-                         RgTextureHandle color, RgTextureHandle depth, render::RenderBackend backend,
-                         std::span<const ForwardOutputSurface> surfaces) {
+                         RgTextureValue& color, RgTextureValue depth, render::RenderBackend backend,
+                         std::span<const ForwardOutputSurface> surfaces, std::span<RenderGraphOutputBinding> outputs) {
     for (const auto& surface : surfaces) {
         if (surface.Destination != family.OutputId || !(surface.LayerMask & view.LayerMask)) continue;
-        const auto texture = context.ImportOutput(graph, surface.Source);
+        const auto source = FindGraphOutput(outputs, surface.Source);
+        const auto texture = source ? source->Texture : RgTextureValue{};
         const auto descriptor = graph.GetTextureDescriptor(texture);
         if (!descriptor || descriptor->SampleCount != 1 || descriptor->Dim != render::TextureDimension::Dim2D ||
             !descriptor->Usage.HasFlag(TextureUse::Resource)) {
@@ -411,13 +405,13 @@ bool BuildOutputSurfaces(RenderGraph& graph, RenderPipelineContext& context, Sha
         }
         const auto format = descriptor->Format;
         const bool srgb = format == TextureFormat::RGBA8_UNORM_SRGB || format == TextureFormat::BGRA8_UNORM_SRGB;
-        if (!srgb && format != TextureFormat::RGBA8_UNORM && format != TextureFormat::BGRA8_UNORM) {
+        if (!srgb && format != TextureFormat::RGBA8_UNORM && format != TextureFormat::BGRA8_UNORM && format != TextureFormat::RGBA16_FLOAT) {
             graph.AddDiagnostic("ForwardOutputSurface", "Screen source must contain an SDR scene output");
             return false;
         }
         ShaderParameterStorage values{&program.GetParameterLayout(), 0};
         if (!values.SetMatrix4x4("OutputSurface.LocalToClip", (view.ViewProjection * surface.LocalToWorld).eval()) ||
-            !values.SetFloat4("OutputSurface.Options", {surface.Brightness, srgb ? 0.f : 1.f, 0, 0})) return false;
+            !values.SetFloat4("OutputSurface.Options", {surface.Brightness, srgb || format == TextureFormat::RGBA16_FLOAT ? 0.f : 1.f, 0, 0})) return false;
         const RgParameterBinding bindings[]{
             {"OutputSurface", 0, RgCBufferParameterBinding{values.GetBufferData(0)}},
             {"SceneOutput", 0, RgTextureParameterBinding{texture}},
@@ -428,6 +422,7 @@ bool BuildOutputSurfaces(RenderGraph& graph, RenderPipelineContext& context, Sha
             Rect Viewport, Scissor;
             render::RenderBackend Backend;
         };
+        color = graph.NextVersion(color);
         graph.AddRasterPass<Data>("Forward.OutputSurface", [&](Data& data, RenderGraphRasterBuilder& builder) {
             data = {builder.UseGraphicsProgram(program, EffectRasterState(true)), builder.CreateParameterSet(program, 0, bindings), view.ViewRect, view.ScissorRect, backend};
             builder.SetColorAttachment(0, color, {.Load = render::LoadAction::Load});
@@ -449,7 +444,7 @@ bool BuildForwardHdrView(RenderGraph& graph, RenderPipelineContext& context, ren
                          const ResolvedRenderViewFamily& family, const ResolvedRenderView& sourceView,
                          const RenderSceneSnapshot& scene, FrameDrawResources& draws, ForwardBindingCache& bindings,
                          ForwardHdrView& work, bool firstOutputView, bool& lightOverflowWarned,
-                         std::span<const ForwardOutputSurface> surfaces) {
+                         std::span<const ForwardOutputSurface> surfaces, std::span<RenderGraphOutputBinding> outputs) {
     const auto previousScope = graph.SetResourceView(sourceView.StateId.Value);
     struct RestoreScope {
         RenderGraph& Graph;
@@ -509,25 +504,27 @@ bool BuildForwardHdrView(RenderGraph& graph, RenderPipelineContext& context, ren
     work.ContentValid &= work.Main.Opaque.Stats.ContentSucceeded() && work.Main.Transparent.Stats.ContentSucceeded();
     if (!msaa)
         for (auto& command : work.Main.Opaque.Commands) command.PipelineState.DepthStencil.DepthWriteEnable = false;
-    const auto depth = Texture(graph, size, TextureFormat::D32_FLOAT, TextureUse::DepthStencilWrite | TextureUse::DepthStencilRead | (msaa ? TextureUses{} : TextureUses{TextureUse::Resource}), "Forward.Depth", samples);
-    const auto hdr = Texture(graph, size, TextureFormat::RGBA16_FLOAT, msaa ? TextureUse::RenderTarget | TextureUse::CopySource : kHdrUsage | TextureUse::RenderTarget, "Forward.HDR", samples);
-    const auto normals = msaa ? RgTextureHandle{} : Texture(graph, size, TextureFormat::RGBA16_FLOAT, kHdrUsage | TextureUse::RenderTarget, "Forward.Normals");
-    const auto motion = msaa ? RgTextureHandle{} : Texture(graph, size, TextureFormat::RGBA16_FLOAT, kHdrUsage | TextureUse::RenderTarget, "Forward.Motion");
-    const auto shadows = Texture(graph, {settings.ShadowResolution, settings.ShadowResolution}, TextureFormat::D32_FLOAT,
-                                 TextureUse::DepthStencilWrite | TextureUse::Resource, "Forward.Shadows", 1, 4);
+    auto depth = Texture(graph, size, TextureFormat::D32_FLOAT, TextureUse::DepthStencilWrite | TextureUse::DepthStencilRead | (msaa ? TextureUses{} : TextureUses{TextureUse::Resource}), "Forward.Depth", samples);
+    auto hdr = Texture(graph, size, TextureFormat::RGBA16_FLOAT, msaa ? TextureUse::RenderTarget | TextureUse::CopySource : kHdrUsage | TextureUse::RenderTarget, "Forward.HDR", samples);
+    auto normals = msaa ? RgTextureValue{} : Texture(graph, size, TextureFormat::RGBA16_FLOAT, kHdrUsage | TextureUse::RenderTarget, "Forward.Normals");
+    const auto motion = msaa ? RgTextureValue{} : Texture(graph, size, TextureFormat::RGBA16_FLOAT, kHdrUsage | TextureUse::RenderTarget, "Forward.Motion");
+    auto shadows = Texture(graph, {settings.ShadowResolution, settings.ShadowResolution}, TextureFormat::D32_FLOAT,
+                           TextureUse::DepthStencilWrite | TextureUse::Resource, "Forward.Shadows", 1, 4);
     const auto shadow = BuildShadows(graph, settings, view, scene, draws, bindings, work, shadows, device.GetBackend(), lightOverflowWarned);
     if (!msaa) {
         const ForwardGraphView draw{view, &work.Main.DepthOnly};
-        const RgTextureHandle auxiliary[]{motion};
-        work.PassesSucceeded &= ForwardGraph::BuildGraph(graph, ForwardGraphStage::Opaque,
-                                                         {.Name = "Forward.DepthNormalsMotion", .Backend = device.GetBackend(), .Views = std::span{&draw, 1}, .Color = normals, .Depth = depth, .Execution = &work.Execution, .PreserveEmptyPass = true, .AuxiliaryColors = auxiliary})
-                                    .Success;
+        const RgTextureValue auxiliary[]{motion};
+        const auto prepassStage = ForwardGraph::BuildGraph(graph, ForwardGraphStage::Opaque,
+                                                           {.Name = "Forward.DepthNormalsMotion", .Backend = device.GetBackend(), .Views = std::span{&draw, 1}, .Color = normals, .Depth = depth, .Execution = &work.Execution, .PreserveEmptyPass = true, .AuxiliaryColors = auxiliary});
+        work.PassesSucceeded &= prepassStage.Success;
+        normals = prepassStage.Color;
+        depth = prepassStage.Depth;
     }
     // Neutral resources remain real graph producers so disabled effects have explicit valid inputs.
     const auto neutral = Texture(graph, {1, 1}, TextureFormat::RGBA16_FLOAT, kHdrUsage | TextureUse::RenderTarget, "Forward.Neutral");
     struct Empty {};
     graph.AddRasterPass<Empty>("Forward.Neutral", [=](Empty&, RenderGraphRasterBuilder& builder) { builder.SetColorAttachment(0, neutral, {.Clear = {1, 1, 1, 1}}); }, +[](const Empty&, RenderGraphRasterContext&) {});
-    RgTextureHandle linearDepth = neutral, ao = neutral, pyramid = neutral;
+    RgTextureValue linearDepth = neutral, ao = neutral, pyramid = neutral;
     uint32_t pyramidLevels = 1;
     if (!msaa) {
         linearDepth = ScalarEffect(graph, programs, 0, "Forward.LinearDepth", view, size, size, depth);
@@ -560,9 +557,9 @@ bool BuildForwardHdrView(RenderGraph& graph, RenderPipelineContext& context, ren
             ao = ScalarEffect(graph, programs, 3, "Forward.AO.Vertical", view, halfSize, halfSize, ao, linearDepth, {0, 1, 0, 0});
         }
     }
-    const auto count = UploadLights(device, context, work.Main.Culling, settings.MaxLocalLights, work, lightOverflowWarned);
+    RgBufferValue lights;
+    const auto count = UploadLights(graph, lights, work.Main.Culling, settings.MaxLocalLights, lightOverflowWarned);
     if (count == UINT32_MAX) return false;
-    const auto lights = graph.ImportBuffer(work.LightImport, "Forward.LocalLights", RenderGraphExternalAccess::ReadOnly);
     const RenderExtent tiles{(size.Width + 15) / 16, (size.Height + 15) / 16};
     const auto tileCount = uint64_t{tiles.Width} * tiles.Height;
     const auto headers = graph.CreateBuffer({tileCount * 8, render::MemoryType::Device, render::BufferUse::UnorderedAccess | render::BufferUse::Resource, {}}, "Forward.TileHeaders");
@@ -578,9 +575,11 @@ bool BuildForwardHdrView(RenderGraph& graph, RenderPipelineContext& context, ren
     Compute(graph, "Forward.TileLightCull", tileProgram, tileValues, tileBindings, tiles);
     auto opaqueBindings = MakeLitBindings(work.Main.Opaque, shadow, size, settings, shadows, lights, count, headers, indices, ao, neutral, false, work.ContentValid);
     const ForwardGraphView opaqueView{view, &work.Main.Opaque, opaqueBindings.Programs};
-    work.PassesSucceeded &= ForwardGraph::BuildGraph(graph, ForwardGraphStage::Opaque,
-                                                     {.Name = "Forward.Opaque", .Backend = device.GetBackend(), .Views = std::span{&opaqueView, 1}, .Color = hdr, .Depth = depth, .ColorAttachment = {.Clear = {.035f, .06f, .1f, 1}}, .DepthAttachment = {.Load = msaa ? render::LoadAction::Clear : render::LoadAction::Load, .ReadOnly = !msaa}, .Execution = &work.Execution})
-                                .Success;
+    const auto opaqueStage = ForwardGraph::BuildGraph(graph, ForwardGraphStage::Opaque,
+                                                      {.Name = "Forward.Opaque", .Backend = device.GetBackend(), .Views = std::span{&opaqueView, 1}, .Color = hdr, .Depth = depth, .ColorAttachment = {.Clear = {.035f, .06f, .1f, 1}}, .DepthAttachment = {.Load = msaa ? render::LoadAction::Clear : render::LoadAction::Load, .ReadOnly = !msaa}, .Execution = &work.Execution});
+    work.PassesSucceeded &= opaqueStage.Success;
+    hdr = opaqueStage.Color;
+    depth = opaqueStage.Depth;
     DrawSky(graph, programs, view, size, hdr, depth, device.GetBackend(), work.PassesSucceeded);
     auto current = hdr;
     auto currentHdrDebug = hdr, historyHdrDebug = hdr;
@@ -595,36 +594,43 @@ bool BuildForwardHdrView(RenderGraph& graph, RenderPipelineContext& context, ren
         values.SetUInt("Effects.HistoryValid", valid ? 1u : 0u);
         const auto previous = valid ? graph.ImportTexture(*colorHistory.Previous.Get(), "Forward.PreviousColor", RenderGraphExternalAccess::ReadOnly) : hdr;
         const auto previousDepth = valid ? graph.ImportTexture(*depthHistory.Previous.Get(), "Forward.PreviousDepth", RenderGraphExternalAccess::ReadOnly) : depth;
-        const auto colorOut = graph.ImportTexture(*colorHistory.Current.Get(), "Forward.CurrentColor", RenderGraphExternalAccess::ObservableOutput);
-        const auto depthOut = graph.ImportTexture(*depthHistory.Current.Get(), "Forward.CurrentDepth", RenderGraphExternalAccess::ObservableOutput);
+        const auto colorOut = graph.NextVersion(graph.ImportTexture(*colorHistory.Current.Get(), "Forward.CurrentColor", RenderGraphExternalAccess::ReadWrite));
+        const auto depthOut = graph.NextVersion(graph.ImportTexture(*depthHistory.Current.Get(), "Forward.CurrentDepth", RenderGraphExternalAccess::ReadWrite));
         const RgParameterBinding taa[]{
             {"InputA", 0, RgTextureParameterBinding{hdr}}, {"InputB", 0, RgTextureParameterBinding{previous}}, {"InputC", 0, RgTextureParameterBinding{motion}}, {"InputD", 0, RgTextureParameterBinding{depth}}, {"InputE", 0, RgTextureParameterBinding{previousDepth}}, {"OutputColor", 0, RgTextureParameterBinding{colorOut, {}, RgParameterAccess::Write}}, {"OutputScalar", 0, RgTextureParameterBinding{depthOut, {}, RgParameterAccess::Write}}};
         Compute(graph, "Forward.TAA", program, values, taa, size);
+        graph.ExportTexture(colorOut, render::TextureState::ShaderRead);
+        graph.ExportTexture(depthOut, render::TextureState::ShaderRead);
         historyHdrDebug = valid ? previous : colorOut;
         current = colorOut;
     }
     // A separate opaque copy is sampled by refraction; the mutable target is never fed back.
-    RgTextureHandle opaqueCopy = neutral;
-    if (current != hdr) graph.AddCopyTexturePass("Forward.CopyTemporalToMutableHDR", current, hdr);
-    work.PassesSucceeded &= BuildOutputSurfaces(graph, context, *programs.Programs[14].Get(), family, view, hdr, depth, device.GetBackend(), surfaces);
+    RgTextureValue opaqueCopy = neutral;
+    if (current != hdr) {
+        hdr = graph.NextVersion(hdr);
+        graph.AddCopyTexturePass("Forward.CopyTemporalToMutableHDR", current, hdr);
+    }
+    work.PassesSucceeded &= BuildOutputSurfaces(graph, *programs.Programs[14].Get(), family, view, hdr, depth, device.GetBackend(), surfaces, outputs);
     if (!msaa) {
         opaqueCopy = Texture(graph, size, TextureFormat::RGBA16_FLOAT, kHdrUsage, "Forward.OpaqueColor");
         graph.AddCopyTexturePass("Forward.CopyOpaque", hdr, opaqueCopy);
     }
     auto transparentBindings = MakeLitBindings(work.Main.Transparent, shadow, size, settings, shadows, lights, count, headers, indices, ao, opaqueCopy, !msaa, work.ContentValid);
     const ForwardGraphView transparentView{view, &work.Main.Transparent, transparentBindings.Programs};
-    work.PassesSucceeded &= ForwardGraph::BuildGraph(graph, ForwardGraphStage::Transparent,
-                                                     {.Name = "Forward.Transparent", .Backend = device.GetBackend(), .Views = std::span{&transparentView, 1}, .Color = hdr, .Depth = depth, .ColorAttachment = {.Load = render::LoadAction::Load}, .DepthAttachment = {.Load = render::LoadAction::Load, .ReadOnly = true}, .Execution = &work.Execution})
-                                .Success;
+    const auto transparentStage = ForwardGraph::BuildGraph(graph, ForwardGraphStage::Transparent,
+                                                           {.Name = "Forward.Transparent", .Backend = device.GetBackend(), .Views = std::span{&transparentView, 1}, .Color = hdr, .Depth = depth, .ColorAttachment = {.Load = render::LoadAction::Load}, .DepthAttachment = {.Load = render::LoadAction::Load, .ReadOnly = true}, .Execution = &work.Execution});
+    work.PassesSucceeded &= transparentStage.Success;
+    hdr = transparentStage.Color;
+    depth = transparentStage.Depth;
     if (settings.Fireflies) Fireflies(graph, programs, view, size, hdr, depth, device.GetBackend(), context.FrameSerial(), work.PassesSucceeded);
     current = hdr;
     if (msaa) {
         current = Texture(graph, size, TextureFormat::RGBA16_FLOAT, kHdrUsage, "Forward.ResolvedHDR");
         graph.AddResolveTexturePass("Forward.ResolveColor4x", hdr, current);
     }
-    RgTextureHandle bloom = neutral;
+    RgTextureValue bloom = neutral;
     if (settings.Bloom) {
-        vector<std::pair<RgTextureHandle, RenderExtent>> levels;
+        vector<std::pair<RgTextureValue, RenderExtent>> levels;
         RenderExtent levelSize = Half(size);
         auto last = current;
         auto lastSize = size;
@@ -688,22 +694,25 @@ bool BuildForwardHdrView(RenderGraph& graph, RenderPipelineContext& context, ren
     }
     auto& outputProgram = *programs.Programs[8].Get();
     auto outputValues = EffectValues(outputProgram, view, size, size);
-    const bool srgbAttachment = family.OutputFormat == TextureFormat::RGBA8_UNORM_SRGB || family.OutputFormat == TextureFormat::BGRA8_UNORM_SRGB;
+    auto outputBinding = FindGraphOutput(outputs, family.OutputId);
+    if (!outputBinding) return false;
+    auto& output = outputBinding->Texture;
+    const auto outputFormat = graph.GetTextureDescriptor(output)->Format;
+    const bool srgbAttachment = outputFormat == TextureFormat::RGBA8_UNORM_SRGB || outputFormat == TextureFormat::BGRA8_UNORM_SRGB || outputFormat == TextureFormat::RGBA16_FLOAT;
     outputValues.SetFloat4("Effects.Options", {settings.Exposure, settings.Bloom && settings.DebugView == ForwardDebugView::Final ? settings.BloomStrength : 0.f, srgbAttachment ? 0.f : 1.f, 0});
     outputValues.SetUInt("Effects.DebugMode", debug);
     const RgParameterBinding outputInputs[]{{"InputA", 0, RgTextureParameterBinding{current, debugInputView}}, {"InputB", 0, RgTextureParameterBinding{bloom}}};
-    const auto output = context.ImportOutput(graph, family.OutputId);
     const auto scaleX = [&](uint32_t x) { return uint32_t(uint64_t{x} * family.OutputSize.Width / family.RenderSize.Width); };
     const auto scaleY = [&](uint32_t y) { return uint32_t(uint64_t{y} * family.OutputSize.Height / family.RenderSize.Height); };
     const auto convert = [&](Rect r) { return Rect{int32_t(scaleX(r.X)), int32_t(scaleY(r.Y)), scaleX(r.X + r.Width) - scaleX(r.X), scaleY(r.Y + r.Height) - scaleY(r.Y)}; };
     const auto pass = Composite(graph, outputProgram, outputValues, outputInputs, output, convert(sourceView.ViewRect), convert(sourceView.ScissorRect),
                                 firstOutputView ? render::LoadAction::Clear : render::LoadAction::Load, device.GetBackend(), work.PassesSucceeded, "Forward.ToneMapAndComposite");
-    work.Completion = context.RegisterViewCompletion(graph, sourceView.StateId, pass);
+    work.Completion = context.RegisterViewCompletion(graph, sourceView.StateId, pass, output);
     return work.Completion.IsValid();
 }
 
 bool BuildForwardOutputOverlay(RenderGraph& graph, RenderPipelineContext& context, const ForwardEffectPrograms& programs,
-                               const ForwardOutputOverlay& overlay, render::RenderBackend backend, bool& success) {
+                               const ForwardOutputOverlay& overlay, render::RenderBackend backend, bool& success, std::span<RenderGraphOutputBinding> outputs) {
     Nullable<const ResolvedRenderViewFamily*> source, destination;
     for (const auto& family : context.ViewFamilies()) {
         if (family.OutputId == overlay.Source) source = &family;
@@ -717,10 +726,13 @@ bool BuildForwardOutputOverlay(RenderGraph& graph, RenderPipelineContext& contex
     if (source->Views.empty()) return false;
     auto& program = *programs.Programs[8].Get();
     auto values = EffectValues(program, source->Views.front(), destination->OutputSize, source->OutputSize);
-    const auto isSrgb = [](TextureFormat f) { return f == TextureFormat::RGBA8_UNORM_SRGB || f == TextureFormat::BGRA8_UNORM_SRGB; };
+    const auto isSrgb = [](TextureFormat f) { return f == TextureFormat::RGBA8_UNORM_SRGB || f == TextureFormat::BGRA8_UNORM_SRGB || f == TextureFormat::RGBA16_FLOAT; };
     values.SetUInt("Effects.DebugMode", 5);
-    values.SetFloat4("Effects.Options", {1, 0, isSrgb(destination->OutputFormat) ? 0.f : 1.f, isSrgb(source->OutputFormat) ? 0.f : 1.f});
-    const auto input = context.ImportOutput(graph, overlay.Source), output = context.ImportOutput(graph, overlay.Destination);
+    auto sourceOutput = FindGraphOutput(outputs, overlay.Source), destinationOutput = FindGraphOutput(outputs, overlay.Destination);
+    if (!sourceOutput || !destinationOutput) return false;
+    values.SetFloat4("Effects.Options", {1, 0, isSrgb(graph.GetTextureDescriptor(destinationOutput->Texture)->Format) ? 0.f : 1.f, isSrgb(graph.GetTextureDescriptor(sourceOutput->Texture)->Format) ? 0.f : 1.f});
+    const auto input = sourceOutput->Texture;
+    auto& output = destinationOutput->Texture;
     const RgParameterBinding resources[]{{"InputA", 0, RgTextureParameterBinding{input}}, {"InputB", 0, RgTextureParameterBinding{input}}};
     const auto& r = overlay.Rectangle;
     const auto size = destination->OutputSize;

@@ -36,6 +36,10 @@
 #endif
 #endif
 
+#ifdef RADRAY_ENABLE_IMGUI
+#include <radray/runtime/imgui/imgui_graph.h>
+#endif
+
 namespace radray {
 
 namespace {
@@ -640,7 +644,7 @@ public:
             uint32_t flightIndex = static_cast<uint32_t>(_renderFrameIndex % gpuSystem->GetFlightDataCount());
             auto& runnerFrameData = _runnerFrameDatas[flightIndex];
             const bool discard = _reqExit || (!runnerFrameData.IsInModalLoop &&
-                _renderFrameIndex < _discardNonModalFramesBefore.load(std::memory_order_acquire));
+                                              _renderFrameIndex < _discardNonModalFramesBefore.load(std::memory_order_acquire));
             AppFrameContext frameCtx = gpuSystem->BeginFrameRecord(
                 flightIndex,
                 runnerFrameData.DeltaTime,
@@ -988,6 +992,7 @@ bool Application::InitializeRuntime(const ApplicationRuntimeDescriptor& desc) {
             DestroyRuntime();
             return false;
         }
+        _renderSystem->SetGraphComposer(make_unique<ImGuiFrameComposer>(*_imguiSystem, *_renderSystem));
     }
 #endif
     return true;

@@ -1,7 +1,7 @@
 #include <core/platform.hlsli>
 #include <core/color.hlsli>
-struct UiData { float4 Transform; float4 Options; };
-VK_BINDING(0, 0) ConstantBuffer<UiData> Ui : register(b0);
+struct BlitData { float4 Transform; float4 Options; };
+VK_BINDING(0, 0) ConstantBuffer<BlitData> Blit : register(b0);
 VK_BINDING(1, 0) Texture2D<float4> Image : register(t0);
 VK_BINDING(2, 0) SamplerState ImageSampler : register(s0);
 struct Fragment { float4 Position : SV_Position; float2 UV : TEXCOORD0; };
@@ -11,7 +11,7 @@ struct Fragment { float4 Position : SV_Position; float2 UV : TEXCOORD0; };
 }
 [shader("pixel")] float4 PSMain(Fragment v) : SV_Target0 {
     float4 value = Image.SampleLevel(ImageSampler, v.UV, 0);
-    if (Ui.Options.x > .5) value.rgb = srgb_to_linear(value.rgb);
-    if (Ui.Options.y > .5) value.rgb = linear_to_srgb(saturate(value.rgb));
+    if (Blit.Options.x > .5) value.rgb = srgb_to_linear(value.rgb);
+    if (Blit.Options.y > .5) value.rgb = linear_to_srgb(saturate(value.rgb));
     return value;
 }

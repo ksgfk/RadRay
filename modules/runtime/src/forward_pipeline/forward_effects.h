@@ -25,8 +25,6 @@ struct ForwardViewSignature {
 struct ForwardHdrView {
     ForwardViewDrawWork Main;
     array<ForwardViewDrawWork, 4> Cascades;
-    unique_ptr<MappedUploadPage> Lights;
-    RenderExternalBuffer LightImport{};
     DrawExecutionStats Execution;
     ViewCompletionToken Completion;
     bool ContentValid{false}, PassesSucceeded{true};
@@ -38,10 +36,10 @@ bool BuildForwardHdrView(RenderGraph& graph, RenderPipelineContext& context, ren
                          const ResolvedRenderViewFamily& family, const ResolvedRenderView& sourceView,
                          const RenderSceneSnapshot& scene, FrameDrawResources& draws, ForwardBindingCache& bindings,
                          ForwardHdrView& work, bool firstOutputView, bool& lightOverflowWarned,
-                         std::span<const ForwardOutputSurface> surfaces = {});
+                         std::span<const ForwardOutputSurface> surfaces, std::span<RenderGraphOutputBinding> outputs);
 
 bool BuildForwardOutputOverlay(RenderGraph& graph, RenderPipelineContext& context, const ForwardEffectPrograms& programs,
-                               const ForwardOutputOverlay& overlay, render::RenderBackend backend, bool& success);
+                               const ForwardOutputOverlay& overlay, render::RenderBackend backend, bool& success, std::span<RenderGraphOutputBinding> outputs);
 
 }  // namespace forward_detail
 }  // namespace radray

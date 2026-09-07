@@ -38,7 +38,7 @@ TEST_P(TemporalFeedbackTest, FeedbackPersistsAcrossGraphsAndSupportsPauseAndRese
                                                                 render::TextureFormat::RGBA8_UNORM, render::MemoryType::Device, render::TextureUse::RenderTarget | render::TextureUse::Resource},
                                                                "initial black")
                                          : graph.ImportTexture(imports[(frame + 1) % 2], "previous feedback", RenderGraphExternalAccess::ReadOnly);
-        const auto current = graph.ImportTexture(imports[frame % 2], "current feedback", RenderGraphExternalAccess::ObservableOutput);
+        const auto current = graph.NextVersion(graph.ImportTexture(imports[frame % 2], "current feedback", RenderGraphExternalAccess::ObservableOutput));
         if (frame == 0) graph.AddRasterPass<int>("initialize history", [&](int&, RenderGraphRasterBuilder& builder) { builder.SetColorAttachment(0, previous); }, nullptr);
         ShaderParameterStorage values{&program->GetParameterLayout(), 0};
         ASSERT_TRUE(values.SetFloat4("SignalFrame.State", parameters[frame]));
@@ -60,7 +60,7 @@ TEST_P(TemporalFeedbackTest, FeedbackPersistsAcrossGraphsAndSupportsPauseAndRese
             ctx.BindParameterSet(data.Frame);
             ctx.BindParameterSet(data.Resources);
             ctx.Encoder().Dispatch(width / 8, height / 8, 1); });
-        const auto destination = graph.ImportBuffer(host, "feedback readback", RenderGraphExternalAccess::ObservableOutput);
+        const auto destination = graph.NextVersion(graph.ImportBuffer(host, "feedback readback", RenderGraphExternalAccess::ObservableOutput));
         graph.AddCopyTextureToBufferPass("read feedback", current, destination);
         HostRead(graph, destination);
         ASSERT_TRUE(Run(graph)) << graph.GetReport().ToText();

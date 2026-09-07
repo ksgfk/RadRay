@@ -10,7 +10,7 @@ struct RenderPipelineContext::ImportedOutput {
     array<render::TextureStates, 1> States;
     array<uint8_t, 1> Valid;
     std::optional<RenderExternalTexture> External;
-    RgTextureHandle Handle;
+    RgTextureValue Handle;
 };
 RenderPipelineContext::RenderPipelineContext(AppFrameContext& frame, RenderGraphFrameResources& graphResources, render::RenderPassRegistry& registry,
                                              ViewStateRegistry& views, uint64_t serial, std::span<const ResolvedRenderViewFamily> families, std::span<RenderSurfaceFrame> surfaces, RenderGraphExecutionReport& report)
@@ -23,27 +23,7 @@ RenderGraph RenderPipelineContext::CreateRenderGraph(std::string_view name) {
     if (_graphGeneration != 0) RADRAY_ABORT("Only one RenderGraph may be created per Render invocation");
     return RenderGraph{*_frame.GetDevice(), _graphResources, _registry, name, _graphGeneration, _report};
 }
-RgTextureHandle RenderPipelineContext::ImportOutput(RenderGraph& graph, RenderOutputId output) {
-    if (_executed || _graphGeneration != graph.GetGeneration()) return {};
-    for (const auto& entry : _intermediates)
-        if (entry.first == output) return entry.second;
-    return ImportOutputTarget(graph, output);
-}
-bool RenderPipelineContext::SetOutputIntermediate(RenderGraph& graph, RenderOutputId output, RgTextureHandle texture) {
-    if (_executed || _graphGeneration != graph.GetGeneration()) return false;
-    auto desc = graph.GetTextureDescriptor(texture);
-    if (!desc) return false;
-    for (const auto& entry : _intermediates)
-        if (entry.first == output) return false;
-    for (const auto& surface : _surfaces) {
-        if (surface.Id != output) continue;
-        if (desc->Width != surface.Desc.Width || desc->Height != surface.Desc.Height || desc->Format != surface.Desc.Format || desc->SampleCount != 1) return false;
-        _intermediates.emplace_back(output, texture);
-        return true;
-    }
-    return false;
-}
-RgTextureHandle RenderPipelineContext::ImportOutputTarget(RenderGraph& graph, RenderOutputId output) {
+RgTextureValue RenderPipelineContext::ImportOutputTarget(RenderGraph& graph, RenderOutputId output) {
     if (_executed || _graphGeneration == 0) return {};
     if (_graphGeneration != graph.GetGeneration()) return {};
     for (const auto& imported : _imports)
@@ -51,7 +31,7 @@ RgTextureHandle RenderPipelineContext::ImportOutputTarget(RenderGraph& graph, Re
     for (uint32_t index = 0; index < _surfaces.size(); ++index) {
         auto& surface = _surfaces[index];
         if (surface.Id != output) continue;
-        auto imported = make_unique<ImportedOutput>();
+        auto imported = make_shared<ImportedOutput>();
         imported->SurfaceIndex = index;
         imported->States = {surface.CurrentState};
         imported->Valid = {surface.PreserveContents ? uint8_t{1} : uint8_t{0}};
@@ -69,30 +49,53 @@ RenderGraphExecutionResult RenderPipelineContext::ExecuteGraph(RenderGraph& grap
     _executed = true;
     const auto result = graph.Execute(*_frame.GetCommandBuffer());
     _success = result.Success;
+    _submission = result.Submission;
+    if (_submission) {
+        // External output wrappers and their state spans survive the Submit callback.
+        const auto imports = _imports;
+        const auto commitGraph = _submission->OnSubmitted;
+        _submission->OnSubmitted = [imports, commitGraph] { if (commitGraph) commitGraph(); };
+        _frame.TrackSubmission(_submission);
+    }
     for (const auto& imported : _imports) {
         auto& surface = _surfaces[imported->SurfaceIndex];
-        surface.CurrentState = imported->States[0];
-        surface.Written = result.Success && imported->External->Written && imported->Valid[0] != 0;
+        if (auto state = graph.RecordedTextureState(imported->Handle)) surface.CurrentState = *state;
+        surface.Written = result.Success && graph.WasWritten(imported->Handle);
     }
     if (result.Success)
         for (const auto& history : _histories)
-            if (history.CommitToken.CommitMode == HistoryCommitMode::Independent && history.Current && history.Current->Written) _views.CommitHistory(history.CommitToken);
+            if (history.CommitToken.CommitMode == HistoryCommitMode::Independent && history.Current && _submission) {
+                const auto token = history.CommitToken;
+                auto* views = &_views;
+                auto* current = history.Current.Get();
+                const auto prior = _submission->OnSubmitted;
+                _submission->OnSubmitted = [prior, token, views, current] { if (prior) prior(); if (current->Written) views->CommitHistory(token); };
+            }
     for (auto& completion : _completions)
         completion.Executed = result.Success && graph.PassWroteTexture(completion.Pass, completion.Output);
+    for (const auto& history : _histories) _recordedHistories.push_back(history.Current && graph.WasWritten(*history.Current));
     if (!result.Success) RADRAY_ERR_LOG("{}", _report.ToText());
     return result;
 }
 bool RenderPipelineContext::CommitView(ViewStateId id) {
-    if (!_success || std::find(_failedTemporalViews.begin(), _failedTemporalViews.end(), id) != _failedTemporalViews.end()) return false;
+    if (!_success || std::find(_failedTemporalViews.begin(), _failedTemporalViews.end(), id) != _failedTemporalViews.end() || std::find(_queuedViews.begin(), _queuedViews.end(), id) != _queuedViews.end()) return false;
     for (const auto& family : _families)
         for (const auto& view : family.Views) {
             if (view.StateId != id) continue;
             for (const auto& surface : _surfaces)
-                if (surface.Id == family.OutputId && surface.Written) return _views.CommitView(id);
+                if (surface.Id == family.OutputId && surface.Written && _submission) {
+                    for (const auto& history : _histories)
+                        if (history.CommitToken.View == id && history.CommitToken.CommitMode == HistoryCommitMode::WithView) return false;
+                    _queuedViews.push_back(id);
+                    auto* views = &_views;
+                    const auto prior = _submission->OnSubmitted;
+                    _submission->OnSubmitted = [prior, views, id] { if (prior) prior(); views->CommitView(id); };
+                    return true;
+                }
         }
     return false;
 }
-ViewCompletionToken RenderPipelineContext::RegisterViewCompletion(RenderGraph& graph, ViewStateId id, RgPassHandle pass) {
+ViewCompletionToken RenderPipelineContext::RegisterViewCompletion(RenderGraph& graph, ViewStateId id, RgPassHandle pass, RgTextureValue output) {
     if (_executed || _graphGeneration != graph.GetGeneration() || pass.Generation != _graphGeneration ||
         pass.Index >= graph.GetReport().Passes.size() || !id.IsValid()) return {};
     for (const auto& completion : _completions)
@@ -101,7 +104,6 @@ ViewCompletionToken RenderPipelineContext::RegisterViewCompletion(RenderGraph& g
         if (!family.OutputAvailable) continue;
         for (const auto& view : family.Views) {
             if (view.StateId != id) continue;
-            const auto output = ImportOutput(graph, family.OutputId);
             if (!output.IsValid()) return {};
             ViewCompletionToken token;
             token._view = id;
@@ -116,17 +118,29 @@ ViewCompletionToken RenderPipelineContext::RegisterViewCompletion(RenderGraph& g
 }
 bool RenderPipelineContext::CommitView(ViewStateId id, const ViewCompletionToken& token, bool requiredDrawsSucceeded) {
     if (!_success || token._view != id || token._graph != _graphGeneration ||
-        token._serial != _serial || token._index >= _completions.size()) return false;
-    const auto& completion = _completions[token._index];
-    if (completion.View != id || !completion.Executed || std::find(_failedTemporalViews.begin(), _failedTemporalViews.end(), id) != _failedTemporalViews.end()) return false;
+        token._serial != _serial || token._index >= _completions.size() ||
+        std::find(_queuedViews.begin(), _queuedViews.end(), id) != _queuedViews.end()) return false;
+    auto& completion = _completions[token._index];
+    if (completion.View != id || !completion.Executed || completion.Consumed || std::find(_failedTemporalViews.begin(), _failedTemporalViews.end(), id) != _failedTemporalViews.end()) return false;
+    completion.Consumed = true;
     if (!requiredDrawsSucceeded) {
         _failedTemporalViews.push_back(id);
         return false;
     }
     vector<HistoryWriteToken> tokens;
-    for (const auto& history : _histories)
-        if (history.CommitToken.View == id && history.CommitToken.CommitMode == HistoryCommitMode::WithView) tokens.push_back(history.CommitToken);
-    return _views.CommitViewWithHistory(id, tokens);
+    for (size_t i = 0; i < _histories.size(); ++i) {
+        const auto& history = _histories[i];
+        if (history.CommitToken.View == id && history.CommitToken.CommitMode == HistoryCommitMode::WithView) {
+            if (!_recordedHistories[i]) return false;
+            tokens.push_back(history.CommitToken);
+        }
+    }
+    if (!_submission) return false;
+    _queuedViews.push_back(id);
+    auto* views = &_views;
+    const auto prior = _submission->OnSubmitted;
+    _submission->OnSubmitted = [prior, views, id, tokens = std::move(tokens)] { if (prior) prior(); views->CommitViewWithHistory(id, tokens); };
+    return true;
 }
 void RenderPipelineContext::InvalidateView(ViewStateId id) {
     if (_executed) return;

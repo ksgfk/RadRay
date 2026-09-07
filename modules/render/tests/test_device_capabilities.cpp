@@ -82,13 +82,13 @@ TEST(TextureDescriptorValidation, NormalizesAllSubresourcesAndRejectsOverflow) {
     desc.Dim = TextureDimension::Dim2DArray;
     desc.DepthOrArraySize = 4;
     desc.MipLevels = 5;
-    EXPECT_EQ(NormalizeSubresourceRange(desc, SubresourceRange::AllSub()), (SubresourceRange{0, 4, 0, 5}));
-    EXPECT_EQ(NormalizeSubresourceRange(desc, {2, SubresourceRange::All, 3, SubresourceRange::All}), (SubresourceRange{2, 2, 3, 2}));
+    EXPECT_EQ(NormalizeSubresourceRange(desc, SubresourceRange::AllSub()), (SubresourceRange{0, 4, 0, 5, TextureAspect::Color}));
+    EXPECT_EQ(NormalizeSubresourceRange(desc, {2, SubresourceRange::All, 3, SubresourceRange::All}), (SubresourceRange{2, 2, 3, 2, TextureAspect::Color}));
     EXPECT_FALSE(NormalizeSubresourceRange(desc, {4, 1, 0, 1}));
     EXPECT_FALSE(NormalizeSubresourceRange(desc, {0, 1, 0, 0}));
     EXPECT_FALSE(NormalizeSubresourceRange(desc, {1, UINT32_MAX - 1, 0, 1}));
     desc.Dim = TextureDimension::Dim3D;
-    EXPECT_EQ(NormalizeSubresourceRange(desc, SubresourceRange::AllSub()), (SubresourceRange{0, 1, 0, 5}));
+    EXPECT_EQ(NormalizeSubresourceRange(desc, SubresourceRange::AllSub()), (SubresourceRange{0, 1, 0, 5, TextureAspect::Color}));
 }
 
 class DeviceCapabilitiesTest : public testing::TestWithParam<RenderBackend> {

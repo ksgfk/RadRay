@@ -243,9 +243,15 @@ public:
             _stopped = _prepare(*_forward, ctx);
         }
     }
-    void Render(RenderPipelineContext& ctx) override {
+    void BuildGraph(RenderPipelineContext& ctx, RenderGraph& graph, std::span<RenderGraphOutputBinding> outputs) override {
         if (_enabled[ctx.FlightIndex()]) {
-            _forward->Render(ctx);
+            _forward->BuildGraph(ctx, graph, outputs);
+        }
+    }
+
+    void GraphRecorded(RenderPipelineContext& ctx, const RenderGraph& graph, RenderGraphExecutionResult result) override {
+        if (_enabled[ctx.FlightIndex()]) {
+            _forward->GraphRecorded(ctx, graph, result);
             _render(*_forward, ctx.FlightIndex());
         }
     }

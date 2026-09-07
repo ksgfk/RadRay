@@ -18,8 +18,9 @@ void EmptyCompute(const EmptyPass&, RenderGraphComputeContext&) {}
 render::TextureDescriptor GraphColor(uint32_t mips = 1) {
     return {render::TextureDimension::Dim2D, 16, 16, 1, mips, 1, render::TextureFormat::RGBA8_UNORM, render::MemoryType::Device, render::TextureUse::RenderTarget | render::TextureUse::Resource | render::TextureUse::CopySource, {}};
 }
-RgPassHandle Clear(RenderGraph& graph, RgTextureHandle texture, std::string_view name = "clear", render::LoadAction load = render::LoadAction::Clear,
+RgPassHandle Clear(RenderGraph& graph, RgTextureValue& texture, std::string_view name = "clear", render::LoadAction load = render::LoadAction::Clear,
                    render::StoreAction store = render::StoreAction::Store, bool root = false, uint32_t mip = 0) {
+    texture = graph.NextVersion(texture);
     return graph.AddRasterPass<EmptyPass>(name, [=](EmptyPass&, RenderGraphRasterBuilder& builder) {
         RgColorAttachmentDesc desc;
         desc.Load = load; desc.Store = store; desc.View.Range = {0, 1, mip, 1}; desc.Clear = {.25f, .5f, .75f, 1};
@@ -51,7 +52,9 @@ protected:
         command.End();
         auto* raw = &command;
         DeviceContext.Queue->Submit({.CmdBuffers = std::span{&raw, 1}});
+        RenderGraphTestDriver::Submitted(raw);
         DeviceContext.Queue->Wait();
+        RenderGraphTestDriver::Completed(raw);
     }
     render::test::DeviceContext DeviceContext;
     HostWriteBatch Writes;
@@ -70,7 +73,7 @@ TEST_P(RenderGraphTest, CopyBufferRoundTripAndNoCommandsOnCompileFailure) {
     RenderExternalBuffer output{readback.Get(), readback->GetDesc(), render::BufferState::CopyDestination};
     auto graph = MakeGraph();
     auto src = graph.ImportBuffer(source, "upload", RenderGraphExternalAccess::ReadOnly);
-    auto dst = graph.ImportBuffer(output, "readback", RenderGraphExternalAccess::ObservableOutput);
+    auto dst = graph.NextVersion(graph.ImportBuffer(output, "readback", RenderGraphExternalAccess::ObservableOutput));
     auto intermediate = graph.CreateBuffer({16, render::MemoryType::Device, render::BufferUse::CopySource | render::BufferUse::CopyDestination, {}}, "intermediate");
     graph.AddCopyBufferPass("upload", src, intermediate, 16);
     graph.AddCopyBufferPass("readback", intermediate, dst, 16);
@@ -108,7 +111,7 @@ TEST_P(RenderGraphTest, MipClearReadbackAndPhysicalStateSurvivesFlightReuse) {
         if (frame > 1) BeginFlight(frame);
         auto graph = MakeGraph();
         auto color = graph.CreateTexture(GraphColor(2), "mipped");
-        auto dst = graph.ImportBuffer(output, "readback", RenderGraphExternalAccess::ObservableOutput);
+        auto dst = graph.NextVersion(graph.ImportBuffer(output, "readback", RenderGraphExternalAccess::ObservableOutput));
         Clear(graph, color, "mip one", render::LoadAction::Clear, render::StoreAction::Store, false, 1);
         graph.AddCopyTextureToBufferPass("readback", color, dst, {0, 1, 1, 1});
         graph.AddComputePass<EmptyPass>("host", [=](EmptyPass&, RenderGraphComputeBuilder& builder) { builder.ReadBuffer(dst, RgBufferAccess::HostRead); builder.SetSideEffect(); }, EmptyCompute);
@@ -146,7 +149,7 @@ TEST_P(RenderGraphTest, EncoderFailureCommitsActualStateBeforeRecovery) {
         array<uint8_t, 1> valid{0};
         RenderExternalTexture external{target.Get(), desc, states, valid};
         auto graph = MakeGraph("failure");
-        const auto output = graph.ImportTexture(external, "output", RenderGraphExternalAccess::ObservableOutput);
+        auto output = graph.NextVersion(graph.ImportTexture(external, "output", RenderGraphExternalAccess::ObservableOutput));
         if (compute)
             graph.AddComputePass<EmptyPass>("fail compute", [=](EmptyPass&, RenderGraphComputeBuilder& builder) { builder.WriteTexture(output); }, EmptyCompute);
         else
@@ -155,11 +158,14 @@ TEST_P(RenderGraphTest, EncoderFailureCommitsActualStateBeforeRecovery) {
         ASSERT_TRUE(command);
         command->Begin();
         test::FailingGraphCommand failing(*command);
-        const auto result = RenderGraphTestDriver::Execute(graph, failing);
+        const auto result = RenderGraphTestDriver::Execute(graph, failing, command.Get());
         EXPECT_FALSE(result.Success);
         EXPECT_TRUE(result.CommandsRecorded);
         EXPECT_FALSE(external.Written);
         EXPECT_EQ(valid[0], 0);
+        EXPECT_EQ(states[0], render::TextureState::Undefined);
+        Submit(*command);
+        command->Begin();
         EXPECT_EQ(states[0], compute ? render::TextureState::UnorderedAccess : render::TextureState::RenderTarget);
         EXPECT_FALSE(graph.GetReport().Passes[0].Executed);
         EXPECT_EQ(graph.GetReport().Diagnostics[0].Code, compute ? "BeginComputePass" : "BeginRenderPass");
@@ -169,8 +175,8 @@ TEST_P(RenderGraphTest, EncoderFailureCommitsActualStateBeforeRecovery) {
         ASSERT_TRUE(readback);
         RenderExternalBuffer bytes{readback.Get(), readback->GetDesc(), render::BufferState::CopyDestination};
         auto recovery = MakeGraph("recovery");
-        const auto color = recovery.ImportTexture(external, "output", RenderGraphExternalAccess::ReadWrite);
-        const auto dest = recovery.ImportBuffer(bytes, "readback", RenderGraphExternalAccess::ObservableOutput);
+        auto color = recovery.NextVersion(recovery.ImportTexture(external, "output", RenderGraphExternalAccess::ReadWrite));
+        const auto dest = recovery.NextVersion(recovery.ImportBuffer(bytes, "readback", RenderGraphExternalAccess::ObservableOutput));
         Clear(recovery, color);
         recovery.AddCopyTextureToBufferPass("readback", color, dest);
         recovery.AddComputePass<EmptyPass>("host", [=](EmptyPass&, RenderGraphComputeBuilder& builder) { builder.ReadBuffer(dest, RgBufferAccess::HostRead); builder.SetSideEffect(); }, EmptyCompute);
@@ -206,7 +212,7 @@ void CSMain(uint3 tid : SV_DispatchThreadID) { Value[0] = Value[0] * 3 + 7; }
     RenderExternalBuffer dst{readback.Get(), readback->GetDesc(), render::BufferState::CopyDestination};
     auto graph = MakeGraph();
     auto input = graph.ImportBuffer(src, "upload", RenderGraphExternalAccess::ReadOnly);
-    auto output = graph.ImportBuffer(dst, "output", RenderGraphExternalAccess::ObservableOutput);
+    auto output = graph.NextVersion(graph.ImportBuffer(dst, "output", RenderGraphExternalAccess::ObservableOutput));
     auto buffer = graph.CreateBuffer({4, render::MemoryType::Device, render::BufferUse::CopyDestination | render::BufferUse::CopySource | render::BufferUse::UnorderedAccess, {}}, "uav");
     graph.AddCopyBufferPass("initialize", input, buffer, 4);
     struct Data {
@@ -214,6 +220,7 @@ void CSMain(uint3 tid : SV_DispatchThreadID) { Value[0] = Value[0] * 3 + 7; }
         RgParameterSetHandle Parameters;
     };
     for (uint32_t p = 0; p < 2; ++p) graph.AddComputePass<Data>("transform", [&](Data& data, RenderGraphComputeBuilder& builder) {
+        buffer = graph.NextVersion(buffer);
         const array<RgParameterBinding, 1> bindings{{
             {.Declaration = "Value",
              .Value = RgBufferParameterBinding{
@@ -279,7 +286,7 @@ void CSMain() { Output[0] = Value[0] + 9; }
         ctx.Encoder().Dispatch(1, 1, 1);
     };
     auto first = MakeGraph("producer");
-    const auto destination = first.ImportBuffer(shared, "shared", RenderGraphExternalAccess::ObservableOutput);
+    const auto destination = first.NextVersion(first.ImportBuffer(shared, "shared", RenderGraphExternalAccess::ObservableOutput));
     first.AddComputePass<Data>("write", [&](Data& data, RenderGraphComputeBuilder& builder) {
         const array<RgParameterBinding, 1> bindings{{
             {.Declaration = "Value",
@@ -297,12 +304,16 @@ void CSMain() { Output[0] = Value[0] + 9; }
     firstCommand->Begin();
     ASSERT_TRUE(RenderGraphTestDriver::Execute(first, *firstCommand).Success);
     firstCommand->End();
+    Writes.Flush(device);
+    auto* firstNative = firstCommand.Get();
+    DeviceContext.Queue->Submit({.CmdBuffers = std::span{&firstNative, 1}});
+    RenderGraphTestDriver::Submitted(firstNative);
     ASSERT_EQ(shared.State, render::BufferState::UnorderedAccess);
 
     auto second = MakeGraph("consumer");
     const auto source = second.ImportBuffer(shared, "shared", RenderGraphExternalAccess::ReadOnly);
-    const auto target = second.ImportBuffer(result, "result", RenderGraphExternalAccess::ReadWrite);
-    const auto host = second.ImportBuffer(bytes, "readback", RenderGraphExternalAccess::ObservableOutput);
+    const auto target = second.NextVersion(second.ImportBuffer(result, "result", RenderGraphExternalAccess::ReadWrite));
+    const auto host = second.NextVersion(second.ImportBuffer(bytes, "readback", RenderGraphExternalAccess::ObservableOutput));
     second.AddComputePass<Data>("read UAV", [&](Data& data, RenderGraphComputeBuilder& builder) {
         const array<RgParameterBinding, 2> bindings{{
             {.Declaration = "Value",
@@ -326,9 +337,8 @@ void CSMain() { Output[0] = Value[0] + 9; }
     ASSERT_TRUE(RenderGraphTestDriver::Execute(second, *secondCommand).Success);
     EXPECT_EQ(second.GetReport().UavBarriers, 1u);
     Writes.Flush(device);
-    auto* command = firstCommand.Get();
-    DeviceContext.Queue->Submit({.CmdBuffers = std::span{&command, 1}});
     Submit(*secondCommand);
+    RenderGraphTestDriver::Completed(firstNative);
     auto* mapped = static_cast<const uint32_t*>(readback->Map(0, 4));
     ASSERT_NE(mapped, nullptr);
     readback->InvalidateMappedRange({0, 4});
@@ -394,6 +404,7 @@ void CSMain(uint3 tid : SV_DispatchThreadID) { OutputTexture[tid.xy] = float4(.2
             render::RenderBackend Backend;
         };
         for (const auto load : {render::LoadAction::Clear, render::LoadAction::Load}) {
+            output = graph.NextVersion(output);
             graph.AddRasterPass<Data>("sample", [&](Data& data, RenderGraphRasterBuilder& builder) {
                 const array<RgParameterBinding, 1> bindings{{
                     {.Declaration = "InputTexture",
@@ -408,7 +419,7 @@ void CSMain(uint3 tid : SV_DispatchThreadID) { OutputTexture[tid.xy] = float4(.2
                 ctx.BindParameterSet(data.Parameters); ctx.Encoder().SetViewport(MakeViewport(data.Backend, 16, 16));
                 ctx.Encoder().SetScissor({0, 0, 16, 16}); ctx.Encoder().Draw(3, 1, 0, 0); });
         }
-        auto destination = graph.ImportBuffer(external, "readback", RenderGraphExternalAccess::ObservableOutput);
+        auto destination = graph.NextVersion(graph.ImportBuffer(external, "readback", RenderGraphExternalAccess::ObservableOutput));
         graph.AddCopyTextureToBufferPass("readback", output, destination);
         graph.AddComputePass<EmptyPass>("host", [=](EmptyPass&, RenderGraphComputeBuilder& builder) { builder.ReadBuffer(destination, RgBufferAccess::HostRead); builder.SetSideEffect(); }, EmptyCompute);
         auto command = device.CreateCommandBuffer(DeviceContext.Queue);
@@ -515,8 +526,8 @@ void ReadResolved() {
     const auto result = graph.CreateBuffer(
         {4, render::MemoryType::Device, render::BufferUse::UnorderedAccess | render::BufferUse::CopySource, {}},
         "post result");
-    const auto host = graph.ImportBuffer(
-        externalReadback, "readback", RenderGraphExternalAccess::ObservableOutput);
+    const auto host = graph.NextVersion(graph.ImportBuffer(
+        externalReadback, "readback", RenderGraphExternalAccess::ObservableOutput));
 
     struct ComputeData {
         RgComputeProgramHandle Program;
@@ -542,7 +553,7 @@ void ReadResolved() {
 
     struct RasterData {
         ShaderProgram* Program{nullptr};
-        RgBufferHandle Index;
+        RgBufferValue Index;
         RgIndirectArgumentsHandle Draw;
         RgIndirectArgumentsHandle DrawIndexed;
         render::RenderBackend Backend{render::RenderBackend::D3D12};
@@ -640,8 +651,8 @@ TEST_P(RenderGraphTest, ResolveArrayLayersRoundTrip) {
     const auto resolved = graph.CreateTexture(
         {render::TextureDimension::Dim2DArray, 8, 8, 2, 1, 1, render::TextureFormat::RGBA8_UNORM, render::MemoryType::Device, render::TextureUse::CopyDestination | render::TextureUse::CopySource, {}},
         "resolved layers");
-    const auto host = graph.ImportBuffer(
-        hostExternal, "readback", RenderGraphExternalAccess::ObservableOutput);
+    const auto host = graph.NextVersion(graph.ImportBuffer(
+        hostExternal, "readback", RenderGraphExternalAccess::ObservableOutput));
     graph.AddRasterPass<EmptyPass>(
         "clear layers",
         [=](EmptyPass&, RenderGraphRasterBuilder& builder) {
@@ -792,10 +803,10 @@ void ParameterMain() {
                 rawExternal, "raw", RenderGraphExternalAccess::ReadOnly);
             const auto typed = graph.ImportBuffer(
                 typedExternal, "typed", RenderGraphExternalAccess::ReadOnly);
-            const auto host0 = graph.ImportBuffer(
-                firstHost, "first readback", RenderGraphExternalAccess::ObservableOutput);
-            const auto host1 = graph.ImportBuffer(
-                secondHost, "second readback", RenderGraphExternalAccess::ObservableOutput);
+            const auto host0 = graph.NextVersion(graph.ImportBuffer(
+                firstHost, "first readback", RenderGraphExternalAccess::ObservableOutput));
+            const auto host1 = graph.NextVersion(graph.ImportBuffer(
+                secondHost, "second readback", RenderGraphExternalAccess::ObservableOutput));
             const auto output0 = graph.CreateBuffer(
                 {4, render::MemoryType::Device, render::BufferUse::UnorderedAccess | render::BufferUse::CopySource, {}},
                 "output zero");
@@ -804,7 +815,7 @@ void ParameterMain() {
                 "output one");
             auto imageDesc = GraphColor();
             imageDesc.Usage = render::TextureUse::RenderTarget | render::TextureUse::Resource;
-            const auto image = graph.CreateTexture(imageDesc, "sampled image");
+            auto image = graph.CreateTexture(imageDesc, "sampled image");
             Clear(graph, image, "image clear");
             graph.AddComputePass<Data>(
                 "parameter dispatches",
@@ -925,8 +936,8 @@ void ConsumeRasterUav() {
     const auto result = graph.CreateBuffer(
         {4, render::MemoryType::Device, render::BufferUse::UnorderedAccess | render::BufferUse::CopySource, {}},
         "result");
-    const auto host = graph.ImportBuffer(
-        hostExternal, "readback", RenderGraphExternalAccess::ObservableOutput);
+    const auto host = graph.NextVersion(graph.ImportBuffer(
+        hostExternal, "readback", RenderGraphExternalAccess::ObservableOutput));
     struct RasterData {
         ShaderProgram* Program{nullptr};
         RgParameterSetHandle Parameters;
@@ -1031,11 +1042,11 @@ float4 VertexUavPS() : SV_Target0 { return 0; }
         readback.Get(), readback->GetDesc(), render::BufferState::CopyDestination};
     auto graph = MakeGraph("vertex raster UAV");
     const auto attachment = graph.CreateTexture(GraphColor(), "attachment");
-    const auto output = graph.CreateBuffer(
+    auto output = graph.CreateBuffer(
         {4, render::MemoryType::Device, render::BufferUse::UnorderedAccess | render::BufferUse::CopySource, {}},
         "vertex output");
-    const auto host = graph.ImportBuffer(
-        hostExternal, "readback", RenderGraphExternalAccess::ObservableOutput);
+    const auto host = graph.NextVersion(graph.ImportBuffer(
+        hostExternal, "readback", RenderGraphExternalAccess::ObservableOutput));
     struct Data {
         ShaderProgram* Program{nullptr};
         RgParameterSetHandle Parameters;
@@ -1120,8 +1131,8 @@ void ValidateBindings() {
         auto graph = MakeGraph("parameter validation");
         auto inputDesc = GraphColor();
         inputDesc.Usage = render::TextureUse::Resource;
-        const auto input = graph.CreateTexture(inputDesc, "input");
-        const auto output = graph.CreateBuffer(
+        auto input = graph.CreateTexture(inputDesc, "input");
+        auto output = graph.CreateBuffer(
             {32, render::MemoryType::Device, render::BufferUse::UnorderedAccess, {}},
             "output");
         graph.AddComputePass<EmptyPass>(
@@ -1194,6 +1205,115 @@ void ValidateBindings() {
         EXPECT_NE(found, graph.GetReport().Diagnostics.end()) << graph.GetReport().ToText();
         EXPECT_EQ(FrameResources->GetPoolStats().Created, 0u);
     }
+}
+
+TEST_P(RenderGraphTest, OwnedUploadReadbackAndResourceReuseFollowFenceReceipts) {
+    auto& device = *DeviceContext.Device;
+    for (const bool optimize : {false, true}) {
+        BeginFlight(optimize ? 102 : 101);
+        auto command = device.CreateCommandBuffer(DeviceContext.Queue);
+        ASSERT_TRUE(command);
+        command->Begin();
+        RgReadbackTicket bytesTicket, firstImage, secondImage;
+        shared_ptr<FrameSubmission> receipt;
+        weak_ptr<int> lifetime;
+        {
+            auto graph = MakeGraph();
+            graph.SetCompileOptions({.ReuseResources = optimize, .MergeRasterPasses = optimize, .OptimizeAttachmentStores = optimize, .EliminateBarriers = optimize, .BatchBarriers = optimize});
+            auto owner = make_shared<int>(123);
+            lifetime = owner;
+            graph.Retain(owner);
+            const array<uint32_t, 4> bytes{19, 73, 0x12345678, 0xffffffff};
+            const auto upload = graph.UploadBuffer("upload", std::as_bytes(std::span{bytes}), render::BufferUse::CopySource);
+            graph.UploadBuffer("dead upload", std::as_bytes(std::span{bytes}), render::BufferUse::CopySource);
+            bytesTicket = graph.ReadbackBuffer("owned readback", upload);
+            auto a = graph.CreateTexture(GraphColor(), "a");
+            Clear(graph, a, "clear a");
+            Clear(graph, a, "preserve a", render::LoadAction::Load);
+            firstImage = graph.ReadbackTexture("read a", a);
+            const auto b = graph.CreateTexture(GraphColor(), "b");
+            graph.AddRasterPass<EmptyPass>("clear b", [=](EmptyPass&, RenderGraphRasterBuilder& builder) { builder.SetColorAttachment(0, b, {.Clear = {{1, 0, 0, 1}}}); }, EmptyRaster);
+            secondImage = graph.ReadbackTexture("read b", b);
+            EXPECT_EQ(bytesTicket.Status(), FrameOperationStatus::Declared);
+            const auto result = RenderGraphTestDriver::Execute(graph, *command);
+            ASSERT_TRUE(result.Success) << graph.GetReport().ToText();
+            receipt = result.Submission;
+            EXPECT_FALSE(graph.GetReport().Passes[1].Live);
+            EXPECT_EQ(graph.GetReport().ReusedResources, optimize ? 1u : 0u);
+            EXPECT_EQ(graph.GetReport().MergedRasterPasses, optimize ? 1u : 0u);
+            EXPECT_EQ(bytesTicket.Status(), FrameOperationStatus::Recorded);
+            vector<byte> premature;
+            EXPECT_FALSE(bytesTicket.Read(premature));
+        }
+        EXPECT_FALSE(lifetime.expired());
+        Writes.Flush(device);
+        command->End();
+        auto* native = command.Get();
+        DeviceContext.Queue->Submit({.CmdBuffers = std::span{&native, 1}});
+        ASSERT_TRUE(receipt->Submit(receipt->Serial()));
+        EXPECT_EQ(bytesTicket.Status(), FrameOperationStatus::Submitted);
+        vector<byte> premature;
+        EXPECT_FALSE(bytesTicket.Read(premature));
+        EXPECT_FALSE(receipt->Complete(receipt->Serial() + 1, true));
+        DeviceContext.Queue->Wait();
+        ASSERT_TRUE(receipt->Complete(receipt->Serial(), true));
+        EXPECT_TRUE(lifetime.expired());
+        vector<byte> actual, imageA, imageB;
+        ASSERT_TRUE(bytesTicket.Read(actual));
+        ASSERT_TRUE(firstImage.Read(imageA));
+        ASSERT_TRUE(secondImage.Read(imageB));
+        array<uint32_t, 4> unpacked;
+        std::memcpy(unpacked.data(), actual.data(), sizeof(unpacked));
+        EXPECT_EQ(unpacked, (array<uint32_t, 4>{19, 73, 0x12345678, 0xffffffff}));
+        EXPECT_NEAR(uint8_t(imageA[0]), 64, 1);
+        EXPECT_NEAR(uint8_t(imageA[1]), 128, 1);
+        EXPECT_NEAR(uint8_t(imageA[2]), 191, 1);
+        EXPECT_EQ(uint8_t(imageB[0]), 255);
+        EXPECT_EQ(uint8_t(imageB[1]), 0);
+        EXPECT_EQ(uint8_t(imageB[2]), 0);
+    }
+}
+
+TEST_P(RenderGraphTest, DepthAndStencilViewsSampleTheirSelectedAspects) {
+    auto& device = *DeviceContext.Device;
+    auto program = test::CompileFoundationCompute(device, R"hlsl(
+#include <core/platform.hlsli>
+VK_BINDING(0,0) Texture2D<float> Depth : register(t0);
+VK_BINDING(1,0) Texture2D<uint> Stencil : register(t1);
+VK_BINDING(2,0) RWStructuredBuffer<uint2> Result : register(u0);
+[shader("compute")][numthreads(1,1,1)] void CSMain() { Result[0] = uint2((uint)round(Depth.Load(int3(0,0,0)) * 1000), Stencil.Load(int3(0,0,0))); }
+)hlsl");
+    ASSERT_TRUE(program);
+    auto graph = MakeGraph();
+    auto desc = GraphColor();
+    desc.Format = render::TextureFormat::D24_UNORM_S8_UINT;
+    desc.Usage = render::TextureUse::DepthStencilWrite | render::TextureUse::Resource;
+    if (!render::ValidateTextureDescriptor(desc, device).Supported) GTEST_SKIP() << "Sampled depth/stencil format unavailable";
+    const auto depth = graph.CreateTexture(desc, "depth/stencil");
+    graph.AddRasterPass<EmptyPass>("clear aspects", [=](EmptyPass&, RenderGraphRasterBuilder& b) { b.SetDepthAttachment(depth, {.Clear = {.25f, 7}}); }, EmptyRaster);
+    const auto buffer = graph.CreateBuffer({8, render::MemoryType::Device, render::BufferUse::UnorderedAccess | render::BufferUse::CopySource, {}}, "values");
+    struct Data {
+        RgComputeProgramHandle Program;
+        RgParameterSetHandle Set;
+    };
+    graph.AddComputePass<Data>("sample aspects", [&](Data& data, RenderGraphComputeBuilder& b) {
+        const RgParameterBinding bindings[]{
+            {"Depth", 0, RgTextureParameterBinding{depth, {.Range = {0,1,0,1,render::TextureAspect::Depth}}}},
+            {"Stencil", 0, RgTextureParameterBinding{depth, {.Range = {0,1,0,1,render::TextureAspect::Stencil}}}},
+            {"Result", 0, RgBufferParameterBinding{buffer, {0,8}, 8, render::TextureFormat::UNKNOWN, RgParameterAccess::Write}}};
+        data = {b.UseComputeProgram(*program), b.CreateParameterSet(*program, 0, bindings)}; }, +[](const Data& data, RenderGraphComputeContext& c) { c.BindComputeProgram(data.Program); c.BindParameterSet(data.Set); c.Encoder().Dispatch(1,1,1); });
+    auto ticket = graph.ReadbackBuffer("values", buffer);
+    auto command = device.CreateCommandBuffer(DeviceContext.Queue);
+    ASSERT_TRUE(command);
+    command->Begin();
+    ASSERT_TRUE(RenderGraphTestDriver::Execute(graph, *command).Success) << graph.GetReport().ToText();
+    Submit(*command);
+    vector<byte> bytes;
+    ASSERT_TRUE(ticket.Read(bytes));
+    array<uint32_t, 2> actual;
+    std::memcpy(actual.data(), bytes.data(), sizeof(actual));
+    EXPECT_EQ(actual[0], 250u);
+    EXPECT_EQ(actual[1], 7u);
 }
 
 INSTANTIATE_TEST_SUITE_P(Backends, RenderGraphTest, testing::Values(render::RenderBackend::D3D12, render::RenderBackend::Vulkan));

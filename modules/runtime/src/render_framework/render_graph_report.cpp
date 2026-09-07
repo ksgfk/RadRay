@@ -39,21 +39,39 @@ string RenderGraphExecutionReport::ToJson() const {
     for (size_t i = 0; i < Passes.size(); ++i) {
         const auto& p = Passes[i];
         if (i) result += ',';
-        result += fmt::format("{{\"name\":{},\"type\":{},\"live\":{},\"executed\":{},\"file\":{},\"line\":{},\"dataDependencies\":{},\"hazardDependencies\":{},\"livenessReason\":{}}}",
-                              Quote(p.Name), Quote(EnumName(p.Type)), p.Live, p.Executed, Quote(p.File), p.Line, Indices(p.DataDependencies), Indices(p.HazardDependencies), Quote(p.LivenessReason));
+        result += fmt::format("{{\"name\":{},\"type\":{},\"live\":{},\"executed\":{},\"file\":{},\"line\":{},\"dataDependencies\":{},\"hazardDependencies\":{},\"livenessReason\":{},\"reads\":{},\"writes\":{},\"rasterGroup\":{},\"decisions\":[",
+                              Quote(p.Name), Quote(EnumName(p.Type)), p.Live, p.Executed, Quote(p.File), p.Line, Indices(p.DataDependencies), Indices(p.HazardDependencies), Quote(p.LivenessReason), Indices(p.Reads), Indices(p.Writes), p.RasterGroup);
+        for (size_t d = 0; d < p.Decisions.size(); ++d) {
+            if (d) result += ',';
+            result += Quote(p.Decisions[d]);
+        }
+        result += "],\"accesses\":[";
+        for (size_t a = 0; a < p.Accesses.size(); ++a) {
+            if (a) result += ',';
+            const auto& access = p.Accesses[a];
+            const auto& r = access.TextureRange;
+            result += fmt::format("{{\"resource\":{},\"version\":{},\"state\":{},\"stages\":{},\"read\":{},\"write\":{},\"textureRange\":[{},{},{},{},{}],\"bufferRange\":[{},{}]}}", access.Resource, access.Version, access.State, access.Stages.value(), access.Read, access.Write, r.BaseArrayLayer, r.ArrayLayerCount, r.BaseMipLevel, r.MipLevelCount, r.Aspects.value(), access.BufferRange.Offset, access.BufferRange.Size);
+        }
+        result += "]}";
     }
     result += "],\"resources\":[";
     for (size_t i = 0; i < Resources.size(); ++i) {
         const auto& r = Resources[i];
         if (i) result += ',';
-        result += fmt::format("{{\"name\":{},\"descriptor\":{},\"texture\":{},\"external\":{},\"physicalId\":{},\"firstUse\":{},\"lastUse\":{},\"viewId\":{},\"estimatedBytes\":{}}}",
-                              Quote(r.Name), Quote(r.Descriptor), r.Texture, r.External, r.PhysicalId, r.FirstUse, r.LastUse, r.ViewId, r.EstimatedBytes);
+        result += fmt::format("{{\"name\":{},\"descriptor\":{},\"texture\":{},\"external\":{},\"physicalId\":{},\"firstUse\":{},\"lastUse\":{},\"viewId\":{},\"estimatedBytes\":{},\"physicalSlot\":{},\"port\":{},\"immutable\":{},\"retainedOwner\":{}}}",
+                              Quote(r.Name), Quote(r.Descriptor), r.Texture, r.External, r.PhysicalId, r.FirstUse, r.LastUse, r.ViewId, r.EstimatedBytes, r.PhysicalSlot, r.Port, r.Immutable, r.RetainedOwner);
     }
     result += "],\"barriers\":[";
     for (size_t i = 0; i < Barriers.size(); ++i) {
         const auto& b = Barriers[i];
         if (i) result += ',';
-        result += fmt::format("{{\"pass\":{},\"resource\":{},\"subresource\":{},\"before\":{},\"after\":{},\"uav\":{}}}", b.Pass, b.Resource, b.Subresource, b.Before, b.After, b.Uav);
+        result += fmt::format("{{\"pass\":{},\"resource\":{},\"subresource\":{},\"before\":{},\"after\":{},\"uav\":{},\"scopeReason\":{}}}", b.Pass, b.Resource, b.Subresource, b.Before, b.After, b.Uav, Quote(b.ScopeReason));
+    }
+    result += fmt::format("],\"optimizations\":{{\"mergedRasterPasses\":{},\"discardedStores\":{},\"barrierBatches\":{}}},\"reusedResources\":{},\"executionOrder\":{},\"versions\":[", MergedRasterPasses, DiscardedStores, BarrierBatches, ReusedResources, Indices(ExecutionOrder));
+    for (size_t i = 0; i < Versions.size(); ++i) {
+        if (i) result += ',';
+        const auto& v = Versions[i];
+        result += fmt::format("{{\"resource\":{},\"cell\":{},\"version\":{},\"producer\":{},\"predecessor\":{},\"initialized\":{}}}", v.Resource, v.Cell, v.Version, v.Producer, v.Predecessor, v.Initialized);
     }
     result += "],\"diagnostics\":[";
     for (size_t i = 0; i < Diagnostics.size(); ++i) {
@@ -77,11 +95,17 @@ string RenderGraphExecutionReport::ToJson() const {
 }
 
 string RenderGraphExecutionReport::ToDot() const {
-    string result = "digraph RenderGraph {\n";
+    string result = "digraph RenderGraph {\n  rankdir=LR;\n";
+    for (size_t i = 0; i < Versions.size(); ++i) {
+        const auto& v = Versions[i];
+        const auto name = v.Resource < Resources.size() ? Resources[v.Resource].Name : string{"invalid"};
+        result += fmt::format("  v{} [shape=ellipse,label={}];\n", i, Quote(fmt::format("{} v{} cell {}{}", name, v.Version, v.Cell, v.Initialized ? "" : " (undefined)")));
+    }
     for (size_t p = 0; p < Passes.size(); ++p) {
         const auto& pass = Passes[p];
-        result += fmt::format("  p{} [label={},style={}];\n", p, Quote(pass.Name), pass.Live ? "solid" : "dashed");
-        for (const auto dependency : pass.DataDependencies) result += fmt::format("  p{} -> p{} [label=\"content\"];\n", dependency, p);
+        result += fmt::format("  p{} [shape=box,label={},style={}];\n", p, Quote(pass.Name), pass.Live ? "solid" : "dashed");
+        for (const auto value : pass.Reads) result += fmt::format("  v{} -> p{} [label=\"read\"];\n", value, p);
+        for (const auto value : pass.Writes) result += fmt::format("  p{} -> v{} [label=\"write\"];\n", p, value);
         for (const auto dependency : pass.HazardDependencies) result += fmt::format("  p{} -> p{} [label=\"hazard\",style=dotted];\n", dependency, p);
     }
     return result + "}\n";
@@ -92,6 +116,7 @@ string RenderGraphExecutionReport::ToText() const {
     for (size_t p = 0; p < Passes.size(); ++p) {
         const auto& pass = Passes[p];
         result += fmt::format("  [{}] {} {} {} ({}) at {}:{}\n", p, pass.Live ? "live" : "culled", EnumName(pass.Type), pass.Name, pass.LivenessReason, pass.File, pass.Line);
+        for (const auto& decision : pass.Decisions) result += fmt::format("    {}\n", decision);
     }
     for (const auto& r : Resources) result += fmt::format("  {}: {} physical={} lifetime={}..{}\n", r.Name, r.Descriptor, r.PhysicalId, r.FirstUse, r.LastUse);
     for (const auto& b : Barriers) result += fmt::format("  barrier pass={} resource={} sub={} {} -> {} {}\n", b.Pass, b.Resource, b.Subresource, b.Before, b.After, b.Uav ? "UAV" : "transition");

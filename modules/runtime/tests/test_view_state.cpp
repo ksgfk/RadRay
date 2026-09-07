@@ -81,7 +81,7 @@ TEST_P(ViewStateTest, HistoryGpuRoundTripRotationResizeAndRetirement) {
     EXPECT_FALSE(registry.AcquireHistoryTexture(view, family, request, reason).Current);
     EXPECT_FALSE(registry.CommitHistory(first.CommitToken));
     RenderGraph write(*device.Device, pools[0], passes, "history write");
-    auto current = write.ImportTexture(*first.Current, "history current", RenderGraphExternalAccess::ObservableOutput);
+    auto current = write.NextVersion(write.ImportTexture(*first.Current, "history current", RenderGraphExternalAccess::ObservableOutput));
     struct Data {};
     write.AddRasterPass<Data>("history clear", [=](Data&, RenderGraphRasterBuilder& builder) { builder.SetColorAttachment(0, current, {.Clear = {{.2f, .4f, .6f, 1}}}); }, +[](const Data&, RenderGraphRasterContext&) {});
     auto command = device.Device->CreateCommandBuffer(device.Queue);
@@ -91,7 +91,9 @@ TEST_P(ViewStateTest, HistoryGpuRoundTripRotationResizeAndRetirement) {
     command->End();
     auto* raw = command.Get();
     device.Queue->Submit({.CmdBuffers = std::span{&raw, 1}});
+    RenderGraphTestDriver::Submitted(raw);
     device.Queue->Wait();
+    RenderGraphTestDriver::Completed(raw);
     EXPECT_TRUE(registry.CommitHistory(first.CommitToken));
     EXPECT_FALSE(registry.CommitHistory(first.CommitToken));
     EXPECT_TRUE(registry.CommitView(view.StateId));
@@ -111,7 +113,7 @@ TEST_P(ViewStateTest, HistoryGpuRoundTripRotationResizeAndRetirement) {
     RenderExternalBuffer external{readback.Get(), readback->GetDesc(), render::BufferState::CopyDestination};
     RenderGraph read(*device.Device, pools[1], passes, "history read");
     const auto previous = read.ImportTexture(*next.Previous, "previous", RenderGraphExternalAccess::ReadOnly);
-    const auto destination = read.ImportBuffer(external, "readback", RenderGraphExternalAccess::ObservableOutput);
+    const auto destination = read.NextVersion(read.ImportBuffer(external, "readback", RenderGraphExternalAccess::ObservableOutput));
     read.AddCopyTextureToBufferPass("copy previous", previous, destination);
     read.AddComputePass<Data>("host", [=](Data&, RenderGraphComputeBuilder& builder) { builder.ReadBuffer(destination, RgBufferAccess::HostRead); builder.SetSideEffect(); }, +[](const Data&, RenderGraphComputeContext&) {});
     auto readCommand = device.Device->CreateCommandBuffer(device.Queue);
@@ -121,7 +123,9 @@ TEST_P(ViewStateTest, HistoryGpuRoundTripRotationResizeAndRetirement) {
     readCommand->End();
     raw = readCommand.Get();
     device.Queue->Submit({.CmdBuffers = std::span{&raw, 1}});
+    RenderGraphTestDriver::Submitted(raw);
     device.Queue->Wait();
+    RenderGraphTestDriver::Completed(raw);
     auto* mapped = static_cast<const uint8_t*>(readback->Map(0, row * 16));
     ASSERT_NE(mapped, nullptr);
     readback->InvalidateMappedRange({0, row * 16});

@@ -15,6 +15,7 @@
 #include <radray/runtime/gpu_resource.h>
 #include <radray/runtime/wait_frame.h>
 #include <radray/runtime/flight_completion.h>
+#include <radray/runtime/frame_submission.h>
 #include <radray/runtime/service_traits.h>
 
 // device / queue / flight / 上传 / 帧边界等待。帧序与关停顺序: docs/architecture/frame-and-gpu.md
@@ -120,6 +121,8 @@ struct GpuFlightSlot {
     bool Recording{false};
     bool UploadsPrepared{false};
     bool Rendered{true};
+    uint64_t FrameSerial{0};
+    vector<shared_ptr<FrameSubmission>> Submissions;
 
     // —— 计时态（游戏线程写）。
     std::chrono::steady_clock::time_point FrameStartTime{};
@@ -290,6 +293,8 @@ public:
           _isInModalLoop(isInModalLoop) {}
 
     uint32_t FlightIndex() const noexcept { return _flightIndex; }
+    uint64_t FrameSerial() const noexcept;
+    void TrackSubmission(shared_ptr<FrameSubmission> submission);
     std::chrono::duration<float> DeltaTime() const noexcept { return _deltaTime; }
     std::chrono::duration<float> LastFrameLatency() const noexcept { return _lastFrameLatency; }
     bool IsInModalLoop() const noexcept { return _isInModalLoop; }

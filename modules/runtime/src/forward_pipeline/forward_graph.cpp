@@ -60,6 +60,9 @@ ForwardGraphStageOutput ForwardGraph::BuildGraph(
         return result;
     }
 
+    if (stage != ForwardGraphStage::Depth) result.Color = graph.NextVersion(inputs.Color);
+    const bool readOnlyDepth = inputs.DepthAttachment.ReadOnly || stage == ForwardGraphStage::Transparent;
+    if (!readOnlyDepth) result.Depth = graph.NextVersion(inputs.Depth);
     bool setupSuccess = true;
     result.Pass = graph.AddRasterPass<ForwardGraphPassData>(
         inputs.Name,
@@ -78,14 +81,14 @@ ForwardGraphStageOutput ForwardGraph::BuildGraph(
                 data.Views.push_back(std::move(next));
             }
             if (stage != ForwardGraphStage::Depth &&
-                !builder.SetColorAttachment(0, inputs.Color, inputs.ColorAttachment).IsValid()) {
+                !builder.SetColorAttachment(0, result.Color, inputs.ColorAttachment).IsValid()) {
                 setupSuccess = false;
             }
             RgDepthAttachmentDesc depth = inputs.DepthAttachment;
             depth.ReadOnly = depth.ReadOnly || stage == ForwardGraphStage::Transparent;
             for (uint32_t i = 0; i < inputs.AuxiliaryColors.size(); ++i)
                 if (!builder.SetColorAttachment(i + 1, inputs.AuxiliaryColors[i]).IsValid()) setupSuccess = false;
-            if (!builder.SetDepthAttachment(inputs.Depth, depth).IsValid()) setupSuccess = false;
+            if (!builder.SetDepthAttachment(result.Depth, depth).IsValid()) setupSuccess = false;
         },
         ExecuteForwardGraphPass);
     result.Success = result.Pass.IsValid() && setupSuccess;

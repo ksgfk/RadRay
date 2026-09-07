@@ -259,8 +259,17 @@ access mask 与 layout 由 helper 映射，swapchain image 从 Undefined 转换�
 `BarrierUavDescriptor` 显式表达 UAV 写入后的 shader read/write memory ordering，`Target` 必须是
 非空 texture 或 buffer。D3D12 使用 resource UAV barrier；Vulkan 使用 shader write → shader
 read/write 的全局 memory dependency，不改变 layout，因此不会假设 texture 的所有 mip 都处于
-GENERAL。D3D12 的 subresource transition 展开完整 mip/layer range 与 depth/stencil planes；
-`NormalizeSubresourceRange` 统一展开 All，拒绝零 count、越界和加法溢出。
+GENERAL。`SubresourceRange::Aspects` 选择 Color、Depth、Stencil，Auto 在归一化时展开为格式的全部
+aspects。采样 depth/stencil 默认只选 Depth，可显式选择 Stencil；DS attachment 必须包含全部 aspects。
+D3D12 transition 按选中 plane 展开 mip/layer；stencil SRV 使用对应 plane 与 X24/X32 类型映射。
+Vulkan 当前采用 coupled depth/stencil layout，转换会扩大至两个 aspects；不启用独立 DS layouts 时
+这是 [Vulkan barrier 规范](https://docs.vulkan.org/refpages/latest/refpages/source/VkImageMemoryBarrier.html) 的要求。
+`NormalizeSubresourceRange` 同时拒绝格式不具备的 aspect、零 count、越界和加法溢出。
+
+Buffer barrier 携带 `BufferRange`，Vulkan 映射 offset/size，D3D12 legacy barrier 保守转换整 buffer。
+Texture/Buffer barrier 都携带 BeforeStages/AfterStages，UNKNOWN 保留保守映射；Vulkan 只收窄 shader
+stage，保留 transfer、host、attachment 阶段。ShaderRead 对应普通 shader resource，不附带未公开的
+input-attachment access。RG 的物理状态策略与逻辑区间有效性见 [Renderer foundation](renderer-foundation.md)。
 
 `PushDebugGroup` / `PopDebugGroup` 必须平衡，分别映射 D3D12 command-list Unicode event 与
 Vulkan debug-utils label；Vulkan 未启用 debug-utils 时不录标签。

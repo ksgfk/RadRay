@@ -12,6 +12,7 @@ namespace radray {
 struct FlightCompletion {
     uint32_t FlightIndex{0};
     bool GpuWorkCompleted{true};
+    uint64_t FrameSerial{0};
 };
 
 /// 任意 retire 线程发布，game thread 排空。载体不知道谁消费。

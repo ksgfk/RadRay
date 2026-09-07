@@ -11,6 +11,18 @@
 #include <radray/utility.h>
 
 namespace radray {
+struct RgReadbackTicket::Storage {
+    shared_ptr<render::Buffer> Buffer;
+    uint64_t Size{0};
+};
+bool RgReadbackTicket::Read(vector<byte>& destination) const {
+    if (Status() != FrameOperationStatus::GpuCompleted || !_storage || !_storage->Buffer) return false;
+    ScopedBufferMap map{_storage->Buffer.get(), {0, _storage->Size}};
+    if (!map) return false;
+    const auto* data = static_cast<const byte*>(map.Data());
+    destination.assign(data, data + _storage->Size);
+    return true;
+}
 namespace {
 std::atomic<uint64_t> NextGraphGeneration{1};
 constexpr uint32_t InvalidIndex = UINT32_MAX;
@@ -51,6 +63,18 @@ std::pair<render::BufferState, render::BufferUse> BufferAccessInfo(RgBufferAcces
         case HostRead: return {render::BufferState::HostRead, render::BufferUse::MapRead};
     }
     return {render::BufferState::UNKNOWN, render::BufferUse::UNKNOWN};
+}
+bool ValidTextureState(const render::TextureDescriptor& desc, render::TextureStates state, bool allowUndefined) {
+    using enum render::TextureState;
+    if (state == Undefined) return allowUndefined;
+    constexpr uint32_t known = uint32_t(Common) | uint32_t(Present) | uint32_t(CopySource) | uint32_t(CopyDestination) | uint32_t(ShaderRead) | uint32_t(RenderTarget) | uint32_t(DepthRead) | uint32_t(DepthWrite) | uint32_t(UnorderedAccess) | uint32_t(ResolveSource) | uint32_t(ResolveDestination);
+    if (!state || (state.value() & ~known)) return false;
+    const auto depthSampling = render::TextureState::DepthRead | render::TextureState::ShaderRead;
+    if ((state.value() & (state.value() - 1)) && state != depthSampling) return false;
+    if (state.HasFlag(Present) && !desc.Hints.HasFlag(render::ResourceHint::External)) return false;
+    for (const auto [bit, usage] : {std::pair{CopySource, render::TextureUse::CopySource}, {CopyDestination, render::TextureUse::CopyDestination}, {ShaderRead, render::TextureUse::Resource}, {RenderTarget, render::TextureUse::RenderTarget}, {DepthRead, render::TextureUse::DepthStencilRead}, {DepthWrite, render::TextureUse::DepthStencilWrite}, {UnorderedAccess, render::TextureUse::UnorderedAccess}, {ResolveSource, render::TextureUse::CopySource}, {ResolveDestination, render::TextureUse::CopyDestination}})
+        if (state.HasFlag(bit) && !desc.Usage.HasFlag(usage)) return false;
+    return true;
 }
 void AddUnique(vector<uint32_t>& values, uint32_t value) {
     if (std::find(values.begin(), values.end(), value) == values.end()) values.push_back(value);
@@ -177,36 +201,55 @@ struct RenderGraph::Impl {
         string Name;
         std::source_location Location;
         bool IsTexture{false};
+        uint32_t Physical{InvalidIndex};
+        vector<uint32_t> VersionParents{InvalidIndex, 0};
+        vector<uint64_t> BufferBoundaries;
+        bool Port{false}, Immutable{false};
+        uint32_t Connection{InvalidIndex}, ConnectionVersion{0};
+        vector<std::pair<uint32_t, uint32_t>> ResolvedValues;
         render::TextureDescriptor TextureDesc;
         render::BufferDescriptor BufferDesc;
         Nullable<RenderExternalTexture*> ExternalTexture{nullptr};
         Nullable<RenderExternalBuffer*> ExternalBuffer{nullptr};
+        vector<RenderExternalTexture*> TextureImports;
+        vector<RenderExternalBuffer*> BufferImports;
         RenderGraphExternalAccess ExternalAccess{RenderGraphExternalAccess::ReadWrite};
         Nullable<PooledTexture*> PoolTexture{nullptr};
         Nullable<PooledBuffer*> PoolBuffer{nullptr};
+        shared_ptr<RgReadbackTicket::Storage> Readback;
         vector<uint32_t> States;
         vector<uint8_t> Valid;
         bool Written{false};
         uint64_t ViewId{0};
-        uint32_t CellCount() const { return IsTexture ? TextureDesc.MipLevels * (TextureDesc.Dim == render::TextureDimension::Dim3D ? 1 : TextureDesc.DepthOrArraySize) : 1; }
+        uint32_t SubresourceCount() const { return TextureDesc.MipLevels * (TextureDesc.Dim == render::TextureDimension::Dim3D ? 1 : TextureDesc.DepthOrArraySize); }
+        uint32_t AspectCount() const { return render::GetTextureFormatAspects(TextureDesc.Format).HasFlag(render::TextureAspect::Stencil) ? 2u : 1u; }
+        uint32_t PhysicalCell(uint32_t cell) const { return IsTexture ? cell % SubresourceCount() : 0; }
+        uint32_t CellCount() const { return IsTexture ? SubresourceCount() * AspectCount() : static_cast<uint32_t>(BufferBoundaries.size() > 1 ? BufferBoundaries.size() - 1 : 1); }
         render::Texture* NativeTexture() const { return ExternalTexture ? ExternalTexture->Texture : PoolTexture->Texture.get(); }
-        render::Buffer* NativeBuffer() const { return ExternalBuffer ? ExternalBuffer->Buffer : PoolBuffer->Buffer.get(); }
+        render::Buffer* NativeBuffer() const { return ExternalBuffer ? ExternalBuffer->Buffer : Readback ? Readback->Buffer.get()
+                                                                                                         : PoolBuffer->Buffer.get(); }
         bool External() const { return ExternalTexture || ExternalBuffer; }
     };
     struct View {
         uint32_t Resource;
         TextureViewKey Key;
         Nullable<render::TextureView*> Native;
+        uint32_t Version{0};
     };
     struct Access {
         uint32_t Resource;
         render::SubresourceRange Range;
         uint32_t State;
         bool Read, Write, ValidAfter;
+        uint32_t Version{0};
+        render::BufferRange Bytes{render::BufferRange::AllRange()};
+        render::ShaderStages Stages{render::ShaderStage::UNKNOWN};
     };
     struct CellAccess {
         uint32_t Resource, Cell, State;
         bool Read, Write, ValidAfter;
+        uint32_t Version{0};
+        render::ShaderStages Stages{render::ShaderStage::UNKNOWN};
     };
     struct Color {
         uint32_t View;
@@ -290,6 +333,7 @@ struct RenderGraph::Impl {
         std::optional<Depth> DepthAttachment;
         std::optional<Copy> CopyOp;
         bool SideEffect{false};
+        uint32_t MergeTail{InvalidIndex};
         Nullable<render::RenderPass*> NativePass{nullptr};
         Nullable<render::Framebuffer*> Framebuffer{nullptr};
         std::optional<GraphicsPassState> PassState;
@@ -298,12 +342,15 @@ struct RenderGraph::Impl {
         uint32_t Width{0}, Height{0}, Layers{0}, Samples{0};
         render::ShaderStages UavWriteStages{render::ShaderStage::UNKNOWN};
         bool AllowUavWrites{false};
+        vector<byte> UploadBytes;
+        RgOperationTicket Ticket;
     };
     render::Device& Device;
     RenderResourcePool& Pool;
     render::RenderPassRegistry& Registry;
     Nullable<RenderGraphFrameResources*> FrameResources{nullptr};
     uint64_t Generation;
+    uint64_t GenerationSerial{0};
     uint64_t ResourceView{0};
     bool Frozen{false}, Compiled{false}, Executed{false};
     vector<Resource> Resources;
@@ -315,6 +362,9 @@ struct RenderGraph::Impl {
     unordered_map<ShaderProgram*, vector<uint32_t>> GraphicsProgramIndices;
     unordered_map<render::Buffer*, uint32_t> NativeBuffers;
     vector<ParameterSet> ParameterSets;
+    vector<shared_ptr<void>> Owners;
+    RenderGraphCompileOptions Options;
+    CompiledRenderGraph CompiledGraph;
     RenderGraphExecutionReport OwnedReport;
     RenderGraphExecutionReport& Report;
 
@@ -323,6 +373,7 @@ struct RenderGraph::Impl {
         : Device(device), Pool(pool), Registry(registry), FrameResources(frameResources), Generation(NextGraphGeneration.fetch_add(1, std::memory_order_relaxed)),
           Report(report ? *report : OwnedReport) {
         if (Generation == 0 || Generation == UINT64_MAX) RADRAY_ABORT("RenderGraph generation exhausted");
+        GenerationSerial = Pool.GetFrameSerial();
         Report.Name = name;
     }
     void Error(std::string_view code, std::string_view message, uint32_t pass = InvalidIndex,
@@ -357,37 +408,56 @@ struct RenderGraph::Impl {
     void CommitStates() {
         for (auto& resource : Resources) {
             if (resource.States.empty()) continue;
+            const auto& actual = Resources[resource.Physical].States;
             if (resource.IsTexture) {
                 auto states = resource.ExternalTexture ? resource.ExternalTexture->SubresourceStates : resource.PoolTexture ? std::span<render::TextureStates>{resource.PoolTexture->States}
                                                                                                                             : std::span<render::TextureStates>{};
-                for (size_t i = 0; i < states.size(); ++i) states[i] = static_cast<render::TextureState>(resource.States[i]);
+                for (size_t i = 0; i < states.size(); ++i) states[i] = static_cast<render::TextureState>(actual[i]);
                 if (resource.ExternalTexture) {
-                    std::copy(resource.Valid.begin(), resource.Valid.end(), resource.ExternalTexture->ContentValid.begin());
+                    auto validity = resource.ExternalTexture->ContentValid;
+                    for (uint32_t cell = 0; cell < validity.size(); ++cell) {
+                        validity[cell] = resource.Valid[cell];
+                        if (validity.size() == resource.SubresourceCount() && resource.AspectCount() == 2) validity[cell] &= resource.Valid[cell + resource.SubresourceCount()];
+                    }
                     resource.ExternalTexture->Written = resource.Written;
                 }
+                for (auto* sink : resource.TextureImports) {
+                    if (sink == resource.ExternalTexture.Get()) continue;
+                    std::copy(resource.ExternalTexture->SubresourceStates.begin(), resource.ExternalTexture->SubresourceStates.end(), sink->SubresourceStates.begin());
+                    std::copy(resource.ExternalTexture->ContentValid.begin(), resource.ExternalTexture->ContentValid.end(), sink->ContentValid.begin());
+                    sink->Written = resource.Written;
+                }
             } else if (resource.ExternalBuffer) {
-                resource.ExternalBuffer->State = static_cast<render::BufferState>(resource.States[0]);
-                resource.ExternalBuffer->ContentValid = resource.Valid[0] != 0;
+                resource.ExternalBuffer->State = static_cast<render::BufferState>(actual[0]);
+                resource.ExternalBuffer->ContentValid = std::all_of(resource.Valid.begin(), resource.Valid.end(), [](uint8_t valid) { return valid != 0; });
                 resource.ExternalBuffer->Written = resource.Written;
+                for (auto* sink : resource.BufferImports) {
+                    sink->State = resource.ExternalBuffer->State;
+                    sink->ContentValid = resource.ExternalBuffer->ContentValid;
+                    sink->Written = resource.Written;
+                }
             } else if (resource.PoolBuffer)
-                resource.PoolBuffer->State = static_cast<render::BufferState>(resource.States[0]);
+                resource.PoolBuffer->State = static_cast<render::BufferState>(actual[0]);
         }
     }
     bool ValidateResources();
+    bool ResolvePorts();
     bool NormalizePasses();
     void Cull();
+    void PlanStorage();
     bool Realize();
     void PlanBarriers();
+    void OptimizeRaster();
 };
 
 RenderGraph::RenderGraph(render::Device& device, RenderResourcePool& pool, render::RenderPassRegistry& registry, std::string_view name)
-    : _impl(make_unique<Impl>(device, pool, registry, nullptr, name)) {}
+    : _impl(make_shared<Impl>(device, pool, registry, nullptr, name)) {}
 RenderGraph::RenderGraph(render::Device& device, RenderGraphFrameResources& resources,
                          render::RenderPassRegistry& registry, std::string_view name)
-    : _impl(make_unique<Impl>(device, resources.GetPool(), registry, &resources, name)) {}
+    : _impl(make_shared<Impl>(device, resources.GetPool(), registry, &resources, name)) {}
 RenderGraph::RenderGraph(render::Device& device, RenderGraphFrameResources& resources,
                          render::RenderPassRegistry& registry, std::string_view name, uint64_t& generation, RenderGraphExecutionReport& report)
-    : _impl(make_unique<Impl>(device, resources.GetPool(), registry, &resources, name, &report)) { generation = _impl->Generation; }
+    : _impl(make_shared<Impl>(device, resources.GetPool(), registry, &resources, name, &report)) { generation = _impl->Generation; }
 RenderGraph::~RenderGraph() = default;
 uint64_t RenderGraph::GetGeneration() const noexcept { return _impl->Generation; }
 uint64_t RenderGraph::SetResourceView(uint64_t viewId) {
@@ -397,12 +467,18 @@ uint64_t RenderGraph::SetResourceView(uint64_t viewId) {
 bool RenderGraph::WasPassExecuted(RgPassHandle handle) const noexcept {
     return handle.Generation == _impl->Generation && handle.Index < _impl->Report.Passes.size() && _impl->Report.Passes[handle.Index].Executed;
 }
-bool RenderGraph::PassWroteTexture(RgPassHandle pass, RgTextureHandle texture) const noexcept {
+bool RenderGraph::PassWroteTexture(RgPassHandle pass, RgTextureValue texture) const noexcept {
     if (!WasPassExecuted(pass) || texture.Generation != _impl->Generation || texture.Index >= _impl->Resources.size()) return false;
+    if (_impl->Resources[texture.Index].Port && texture.Version < _impl->Resources[texture.Index].ResolvedValues.size()) {
+        const auto mapped = _impl->Resources[texture.Index].ResolvedValues[texture.Version];
+        texture.Index = mapped.first;
+        texture.Version = mapped.second;
+    }
+    if (texture.Index >= _impl->Resources.size()) return false;
     const auto& resource = _impl->Resources[texture.Index];
     if (!resource.IsTexture || !resource.Written) return false;
     for (const auto& access : _impl->Passes[pass.Index].Cells)
-        if (access.Resource == texture.Index && access.Write && access.ValidAfter && resource.Valid[access.Cell]) return true;
+        if (access.Resource == texture.Index && access.Version == texture.Version && access.Write && access.ValidAfter && resource.Valid[access.Cell]) return true;
     return false;
 }
 
@@ -426,7 +502,7 @@ bool RenderGraphRasterContext::OwnsParameterSet(RgParameterSetHandle handle, con
 }
 const RenderGraphExecutionReport& RenderGraph::GetReport() const noexcept { return _impl->Report; }
 
-RgTextureHandle RenderGraph::CreateTexture(const render::TextureDescriptor& desc, std::string_view name, std::source_location location) {
+RgTextureValue RenderGraph::CreateTexture(const render::TextureDescriptor& desc, std::string_view name, std::source_location location) {
     auto& impl = *_impl;
     if (!impl.Mutable()) return {};
     const auto index = static_cast<uint32_t>(impl.Resources.size());
@@ -437,9 +513,9 @@ RgTextureHandle RenderGraph::CreateTexture(const render::TextureDescriptor& desc
     resource.TextureDesc = desc;
     resource.ViewId = impl.ResourceView;
     impl.Resources.push_back(std::move(resource));
-    return {index, impl.Generation};
+    return {index, impl.Generation, 1};
 }
-RgBufferHandle RenderGraph::CreateBuffer(const render::BufferDescriptor& desc, std::string_view name, std::source_location location) {
+RgBufferValue RenderGraph::CreateBuffer(const render::BufferDescriptor& desc, std::string_view name, std::source_location location) {
     auto& impl = *_impl;
     if (!impl.Mutable()) return {};
     const auto index = static_cast<uint32_t>(impl.Resources.size());
@@ -449,40 +525,329 @@ RgBufferHandle RenderGraph::CreateBuffer(const render::BufferDescriptor& desc, s
     resource.BufferDesc = desc;
     resource.ViewId = impl.ResourceView;
     impl.Resources.push_back(std::move(resource));
-    return {index, impl.Generation};
+    return {index, impl.Generation, 1};
 }
-RgTextureHandle RenderGraph::ImportTexture(RenderExternalTexture& texture, std::string_view name, RenderGraphExternalAccess access, std::source_location location) {
+RgTextureValue RenderGraph::ImportTexture(RenderExternalTexture& texture, std::string_view name, RenderGraphExternalAccess access, std::source_location location) {
     auto& impl = *_impl;
-    for (const auto& existing : impl.Resources) {
-        if (existing.ExternalTexture && existing.ExternalTexture->Texture == texture.Texture) {
-            impl.Error("DuplicateExternal", "A native texture may be imported only once per graph");
+    if (!impl.Mutable()) return {};
+    for (uint32_t i = 0; i < impl.Resources.size(); ++i) {
+        auto& existing = impl.Resources[i];
+        if (!existing.ExternalTexture || existing.ExternalTexture->Texture != texture.Texture) continue;
+        const auto& first = *existing.ExternalTexture;
+        if (!(TexturePoolKey{first.Desc} == TexturePoolKey{texture.Desc}) || !std::equal(first.SubresourceStates.begin(), first.SubresourceStates.end(), texture.SubresourceStates.begin(), texture.SubresourceStates.end()) ||
+            !std::equal(first.ContentValid.begin(), first.ContentValid.end(), texture.ContentValid.begin(), texture.ContentValid.end())) {
+            impl.Error("ConflictingImport", "One native texture identity has conflicting descriptors, states or content validity");
             return {};
         }
+        existing.ExternalAccess = static_cast<RenderGraphExternalAccess>(std::max(uint8_t(existing.ExternalAccess), uint8_t(access)));
+        if (std::find(existing.TextureImports.begin(), existing.TextureImports.end(), &texture) == existing.TextureImports.end()) existing.TextureImports.push_back(&texture);
+        Retain(texture.Owner);
+        return {i, impl.Generation, 0};
     }
     auto result = CreateTexture(texture.Desc, name, location);
     if (result.IsValid()) {
         auto& resource = impl.Resources[result.Index];
         resource.ExternalTexture = &texture;
+        resource.TextureImports.push_back(&texture);
+        Retain(texture.Owner);
+        resource.VersionParents.resize(1);
+        result.Version = 0;
         resource.ExternalAccess = access;
     }
     return result;
 }
-RgBufferHandle RenderGraph::ImportBuffer(RenderExternalBuffer& buffer, std::string_view name, RenderGraphExternalAccess access, std::source_location location) {
+RgBufferValue RenderGraph::ImportBuffer(RenderExternalBuffer& buffer, std::string_view name, RenderGraphExternalAccess access, std::source_location location) {
     auto& impl = *_impl;
-    for (const auto& existing : impl.Resources) {
-        if (existing.ExternalBuffer && existing.ExternalBuffer->Buffer == buffer.Buffer) {
-            impl.Error("DuplicateExternal", "A native buffer may be imported only once per graph");
+    if (!impl.Mutable()) return {};
+    for (uint32_t i = 0; i < impl.Resources.size(); ++i) {
+        auto& existing = impl.Resources[i];
+        if (!existing.ExternalBuffer || existing.ExternalBuffer->Buffer != buffer.Buffer) continue;
+        if (existing.Immutable && access != RenderGraphExternalAccess::ReadOnly) {
+            impl.Error("ImmutableAssetWrite", "An immutable asset cannot be imported for writing");
             return {};
         }
+        const auto& first = *existing.ExternalBuffer;
+        if (!(BufferPoolKey{first.Desc} == BufferPoolKey{buffer.Desc}) || first.State != buffer.State || first.ContentValid != buffer.ContentValid) {
+            impl.Error("ConflictingImport", "One native buffer identity has conflicting descriptors, states or content validity");
+            return {};
+        }
+        existing.ExternalAccess = static_cast<RenderGraphExternalAccess>(std::max(uint8_t(existing.ExternalAccess), uint8_t(access)));
+        if (std::find(existing.BufferImports.begin(), existing.BufferImports.end(), &buffer) == existing.BufferImports.end()) existing.BufferImports.push_back(&buffer);
+        Retain(buffer.Owner);
+        return {i, impl.Generation, 0};
     }
     auto result = CreateBuffer(buffer.Desc, name, location);
     if (result.IsValid()) {
         auto& resource = impl.Resources[result.Index];
         resource.ExternalBuffer = &buffer;
+        resource.BufferImports.push_back(&buffer);
+        Retain(buffer.Owner);
+        resource.VersionParents.resize(1);
+        result.Version = 0;
         resource.ExternalAccess = access;
     }
     return result;
 }
+void RenderGraph::Retain(shared_ptr<void> owner) {
+    if (owner && _impl->Mutable()) _impl->Owners.push_back(std::move(owner));
+}
+RgBufferValue RenderGraph::UploadBuffer(std::string_view name, std::span<const byte> bytes, render::BufferUses usage) {
+    if (bytes.empty()) {
+        AddDiagnostic("UploadSize", "An upload must contain bytes");
+        return {};
+    }
+    const auto value = CreateBuffer({bytes.size(), render::MemoryType::Upload, usage | render::BufferUse::MapWrite, {}}, name);
+    const auto pass = AddPass(name, RgPassType::Upload, std::source_location::current());
+    if (!value.IsValid() || !pass.IsValid()) return {};
+    auto& data = _impl->Passes[pass.Index];
+    data.UploadBytes.assign(bytes.begin(), bytes.end());
+    data.Accesses.push_back({value.Index, {0, 1, 0, 1}, uint32_t(render::BufferState::HostWrite), false, true, true, value.Version, {0, bytes.size()}});
+    return value;
+}
+RgOperationTicket RenderGraph::Track(RgPassHandle pass) {
+    auto& impl = *_impl;
+    if (!impl.Mutable() || pass.Generation != impl.Generation || pass.Index >= impl.Passes.size()) {
+        impl.Error("OperationTicket", "Operation ticket requires a pass from this graph");
+        return {};
+    }
+    auto& ticket = impl.Passes[pass.Index].Ticket;
+    if (!ticket._state) ticket._state = make_shared<FrameSubmission>(impl.GenerationSerial);
+    return ticket;
+}
+RgOperationTicket RenderGraph::ExportTexture(RgTextureValue value, render::TextureStates finalState, render::SubresourceRange range) {
+    auto& impl = *_impl;
+    if (!impl.Mutable() || !impl.Handle(value.Index, value.Generation, true)) return {};
+    const auto normalized = render::NormalizeSubresourceRange(impl.Resources[value.Index].TextureDesc, range);
+    if (!normalized || !ValidTextureState(impl.Resources[value.Index].TextureDesc, finalState, false)) {
+        impl.Error("ExportState", "Export requires a valid range and defined final state");
+        return {};
+    }
+    const auto pass = AddPass("Export." + impl.Resources[value.Index].Name, RgPassType::Export, std::source_location::current());
+    auto& data = impl.Passes[pass.Index];
+    data.SideEffect = true;
+    data.Accesses.push_back({value.Index, *normalized, finalState.value(), true, false, true, value.Version});
+    return Track(pass);
+}
+RgOperationTicket RenderGraph::ExportBuffer(RgBufferValue value, RgBufferAccess finalAccess, render::BufferRange range) {
+    auto& impl = *_impl;
+    const auto pass = AddPass("Export.Buffer", RgPassType::Export, std::source_location::current());
+    if (!pass.IsValid()) return {};
+    if (!UseBuffer(pass.Index, value, finalAccess, false, false, render::ShaderStage::UNKNOWN, range).IsValid()) return {};
+    impl.Passes[pass.Index].Accesses.back().Read = true;
+    impl.Passes[pass.Index].SideEffect = true;
+    return Track(pass);
+}
+RgReadbackTicket RenderGraph::ReadbackTexture(std::string_view name, RgTextureValue value, render::SubresourceRange range) {
+    auto& impl = *_impl;
+    if (!impl.Mutable() || !impl.Handle(value.Index, value.Generation, true)) return {};
+    const auto& desc = impl.Resources[value.Index].TextureDesc;
+    const auto normalized = render::NormalizeSubresourceRange(desc, range);
+    if (!normalized || normalized->ArrayLayerCount != 1 || normalized->MipLevelCount != 1) {
+        impl.Error("ReadbackRange", "Texture readback requires one mip and layer");
+        return {};
+    }
+    const uint32_t texelBytes = render::GetTextureFormatBytesPerPixel(desc.Format);
+    if (!texelBytes || render::IsDepthStencilFormat(desc.Format)) {
+        impl.Error("ReadbackFormat", "Texture readback requires a color format");
+        return {};
+    }
+    const auto pitch = Align(uint64_t{std::max(1u, desc.Width >> normalized->BaseMipLevel)} * texelBytes, std::max(1u, impl.Device.GetDetail().TextureDataPitchAlignment));
+    const auto size = pitch * std::max(1u, desc.Height >> normalized->BaseMipLevel);
+    auto target = CreateBuffer({size, render::MemoryType::ReadBack, render::BufferUse::CopyDestination | render::BufferUse::MapRead, {}}, name);
+    RgReadbackTicket ticket;
+    ticket._storage = make_shared<RgReadbackTicket::Storage>();
+    ticket._storage->Size = size;
+    impl.Resources[target.Index].Readback = ticket._storage;
+    AddCopyTextureToBufferPass(name, value, target, *normalized);
+    ticket._operation = ExportBuffer(target, RgBufferAccess::HostRead);
+    return ticket;
+}
+RgReadbackTicket RenderGraph::ReadbackBuffer(std::string_view name, RgBufferValue value, render::BufferRange range) {
+    auto& impl = *_impl;
+    if (!impl.Mutable() || !impl.Handle(value.Index, value.Generation, false)) return {};
+    const auto size = impl.Resources[value.Index].BufferDesc.Size;
+    if (range.Offset > size) {
+        impl.Error("ReadbackRange", "Buffer readback offset exceeds size");
+        return {};
+    }
+    if (range.Size == render::BufferRange::All()) range.Size = size - range.Offset;
+    if (!range.Size || range.Size > size - range.Offset) {
+        impl.Error("ReadbackRange", "Buffer readback range exceeds size");
+        return {};
+    }
+    auto target = CreateBuffer({range.Size, render::MemoryType::ReadBack, render::BufferUse::CopyDestination | render::BufferUse::MapRead, {}}, name);
+    RgReadbackTicket ticket;
+    ticket._storage = make_shared<RgReadbackTicket::Storage>();
+    ticket._storage->Size = range.Size;
+    impl.Resources[target.Index].Readback = ticket._storage;
+    AddCopyBufferPass(name, value, target, range.Size, range.Offset);
+    ticket._operation = ExportBuffer(target, RgBufferAccess::HostRead);
+    return ticket;
+}
+
+RgTexturePort RenderGraph::DeclareTexturePort(const render::TextureDescriptor& desc, std::string_view name) {
+    const auto value = CreateTexture(desc, name);
+    if (!value.IsValid()) return {};
+    auto& resource = _impl->Resources[value.Index];
+    resource.Port = true;
+    resource.VersionParents.resize(1);
+    return {value.Index, value.Generation};
+}
+RgBufferPort RenderGraph::DeclareBufferPort(const render::BufferDescriptor& desc, std::string_view name) {
+    const auto value = CreateBuffer(desc, name);
+    if (!value.IsValid()) return {};
+    auto& resource = _impl->Resources[value.Index];
+    resource.Port = true;
+    resource.VersionParents.resize(1);
+    return {value.Index, value.Generation};
+}
+RgTextureValue RenderGraph::Value(RgTexturePort port) const noexcept {
+    const auto& impl = *_impl;
+    if (port.Generation != impl.Generation || port.Index >= impl.Resources.size() || !impl.Resources[port.Index].Port || !impl.Resources[port.Index].IsTexture) return {};
+    return {port.Index, port.Generation, 0};
+}
+RgBufferValue RenderGraph::Value(RgBufferPort port) const noexcept {
+    const auto& impl = *_impl;
+    if (port.Generation != impl.Generation || port.Index >= impl.Resources.size() || !impl.Resources[port.Index].Port || impl.Resources[port.Index].IsTexture) return {};
+    return {port.Index, port.Generation, 0};
+}
+bool RenderGraph::Connect(RgTexturePort input, RgTextureValue output) {
+    auto& impl = *_impl;
+    if (!impl.Mutable() || !impl.Handle(input.Index, input.Generation, true) || !impl.Handle(output.Index, output.Generation, true)) return false;
+    auto& port = impl.Resources[input.Index];
+    const auto& source = impl.Resources[output.Index];
+    if (!port.Port || port.Connection != InvalidIndex || output.Version >= source.VersionParents.size() || !(TexturePoolKey{port.TextureDesc} == TexturePoolKey{source.TextureDesc})) {
+        impl.Error("PortConnection", "Texture port must have one producer with an identical descriptor", InvalidIndex, input.Index);
+        return false;
+    }
+    port.Connection = output.Index;
+    port.ConnectionVersion = output.Version;
+    return true;
+}
+bool RenderGraph::Connect(RgBufferPort input, RgBufferValue output) {
+    auto& impl = *_impl;
+    if (!impl.Mutable() || !impl.Handle(input.Index, input.Generation, false) || !impl.Handle(output.Index, output.Generation, false)) return false;
+    auto& port = impl.Resources[input.Index];
+    const auto& source = impl.Resources[output.Index];
+    if (!port.Port || port.Connection != InvalidIndex || output.Version >= source.VersionParents.size() || !(BufferPoolKey{port.BufferDesc} == BufferPoolKey{source.BufferDesc})) {
+        impl.Error("PortConnection", "Buffer port must have one producer with an identical descriptor", InvalidIndex, input.Index);
+        return false;
+    }
+    port.Connection = output.Index;
+    port.ConnectionVersion = output.Version;
+    return true;
+}
+
+bool RenderGraph::Impl::ResolvePorts() {
+    vector<vector<uint8_t>> visiting(Resources.size());
+    for (uint32_t r = 0; r < Resources.size(); ++r) {
+        auto& resource = Resources[r];
+        resource.ResolvedValues.assign(resource.VersionParents.size(), {InvalidIndex, InvalidIndex});
+        visiting[r].assign(resource.VersionParents.size(), 0);
+        if (resource.Port && resource.Connection == InvalidIndex) Error("UnconnectedPort", "Every declared input port requires one connection", InvalidIndex, r);
+    }
+    if (!Report.Diagnostics.empty()) return false;
+    for (const auto& pass : Passes)
+        for (const auto& access : pass.Accesses)
+            if (access.Resource >= Resources.size() || access.Version >= Resources[access.Resource].VersionParents.size()) Error("InvalidVersion", "Pass access names an unreserved resource version");
+    for (const auto& view : Views)
+        if (view.Resource >= Resources.size() || view.Version >= Resources[view.Resource].VersionParents.size()) Error("InvalidVersion", "View names an unreserved resource version");
+    if (!Report.Diagnostics.empty()) return false;
+    const auto resolve = [&](auto&& self, uint32_t r, uint32_t v) -> std::pair<uint32_t, uint32_t> {
+        if (r >= Resources.size() || v >= Resources[r].VersionParents.size()) {
+            Error("InvalidVersion", "Port connects an unreserved version");
+            return {InvalidIndex, InvalidIndex};
+        }
+        auto& resource = Resources[r];
+        if (!resource.Port) return {r, v};
+        auto& result = resource.ResolvedValues[v];
+        if (result.first != InvalidIndex) return result;
+        if (visiting[r][v]) {
+            Error("PortCycle", "Resource port connections contain a cycle", InvalidIndex, r);
+            return {InvalidIndex, InvalidIndex};
+        }
+        visiting[r][v] = 1;
+        const auto parent = v == 0 ? self(self, resource.Connection, resource.ConnectionVersion) : self(self, r, resource.VersionParents[v]);
+        if (parent.first != InvalidIndex) {
+            if (v == 0)
+                result = parent;
+            else {
+                auto& parents = Resources[parent.first].VersionParents;
+                result = {parent.first, static_cast<uint32_t>(parents.size())};
+                parents.push_back(parent.second);
+            }
+        }
+        visiting[r][v] = 0;
+        return result;
+    };
+    for (uint32_t r = 0; r < Resources.size(); ++r) {
+        const auto count = static_cast<uint32_t>(Resources[r].ResolvedValues.size());
+        for (uint32_t v = 0; v < count; ++v) {
+            const auto value = resolve(resolve, r, v);
+            Resources[r].ResolvedValues[v] = value;
+        }
+    }
+    if (!Report.Diagnostics.empty()) return false;
+    const auto mapped = [&](uint32_t r, uint32_t v) { return Resources[r].Port ? Resources[r].ResolvedValues[v] : std::pair{r, v}; };
+    for (auto& pass : Passes) {
+        for (auto& access : pass.Accesses) {
+            const auto value = mapped(access.Resource, access.Version);
+            access.Resource = value.first;
+            access.Version = value.second;
+        }
+        for (auto& r : pass.DeclaredBuffers) r = mapped(r, 0).first;
+        if (pass.CopyOp) {
+            pass.CopyOp->Source = mapped(pass.CopyOp->Source, 0).first;
+            pass.CopyOp->Destination = mapped(pass.CopyOp->Destination, 0).first;
+        }
+    }
+    for (auto& view : Views) {
+        const auto value = mapped(view.Resource, view.Version);
+        view.Resource = value.first;
+        view.Version = value.second;
+    }
+    for (auto& arguments : IndirectArgumentsRecords) arguments.Resource = mapped(arguments.Resource, 0).first;
+    for (auto& set : ParameterSets)
+        for (auto& binding : set.Bindings) {
+            if (auto* buffer = std::get_if<BufferParameter>(&binding.Value)) buffer->Resource = mapped(buffer->Resource, 0).first;
+            if (auto* texture = std::get_if<TextureParameter>(&binding.Value)) texture->Resource = mapped(texture->Resource, 0).first;
+        }
+    return true;
+}
+
+RgTextureValue RenderGraph::NextVersion(RgTextureValue value) {
+    auto& impl = *_impl;
+    if (!impl.Mutable() || !impl.Handle(value.Index, value.Generation, true)) return {};
+    auto& parents = impl.Resources[value.Index].VersionParents;
+    if (value.Version >= parents.size()) {
+        impl.Error("InvalidVersion", "Texture version is out of range");
+        return {};
+    }
+    if (value.Version + 1 != parents.size()) {
+        impl.Error("VersionBranch", "In-place versions form one storage chain; copy to another resource to branch contents");
+        return {};
+    }
+    parents.push_back(value.Version);
+    value.Version = static_cast<uint32_t>(parents.size() - 1);
+    return value;
+}
+RgBufferValue RenderGraph::NextVersion(RgBufferValue value) {
+    auto& impl = *_impl;
+    if (!impl.Mutable() || !impl.Handle(value.Index, value.Generation, false)) return {};
+    auto& parents = impl.Resources[value.Index].VersionParents;
+    if (value.Version >= parents.size()) {
+        impl.Error("InvalidVersion", "Buffer version is out of range");
+        return {};
+    }
+    if (value.Version + 1 != parents.size()) {
+        impl.Error("VersionBranch", "In-place versions form one storage chain; copy to another resource to branch contents");
+        return {};
+    }
+    parents.push_back(value.Version);
+    value.Version = static_cast<uint32_t>(parents.size() - 1);
+    return value;
+}
+
 RgPassHandle RenderGraph::AddPass(std::string_view name, RgPassType type, std::source_location location) {
     auto& impl = *_impl;
     if (!impl.Mutable()) return {};
@@ -495,12 +860,13 @@ RgPassHandle RenderGraph::AddPass(std::string_view name, RgPassType type, std::s
 }
 void RenderGraph::SetPayload(RgPassHandle pass, unique_ptr<Payload> payload) { _impl->Passes[pass.Index].Data = std::move(payload); }
 
-RgTextureViewHandle RenderGraph::UseTexture(uint32_t pass, RgTextureHandle texture, RgTextureViewDesc view,
+RgTextureViewHandle RenderGraph::UseTexture(uint32_t pass, RgTextureValue texture, RgTextureViewDesc view,
                                             render::TextureViewUsage usage, bool read, bool write, bool validAfter,
                                             render::ShaderStages uavWriteStages) {
     auto& impl = *_impl;
     if (!impl.Mutable() || !impl.Handle(texture.Index, texture.Generation, true, pass)) return {};
     const auto& desc = impl.Resources[texture.Index].TextureDesc;
+    if (!view.Range.Aspects && usage == render::TextureViewUsage::Resource && render::IsDepthStencilFormat(desc.Format)) view.Range.Aspects = render::TextureAspect::Depth;
     auto range = render::NormalizeSubresourceRange(desc, view.Range);
     if (!range) {
         impl.Error("InvalidRange", "Texture view range is empty or outside the resource", pass, texture.Index);
@@ -521,12 +887,19 @@ RgTextureViewHandle RenderGraph::UseTexture(uint32_t pass, RgTextureHandle textu
         impl.Error("InvalidView", "View dimensions or mip count are unsupported for this access", pass, texture.Index);
         return {};
     }
+    if ((attachment && range->Aspects != render::GetTextureFormatAspects(desc.Format)) ||
+        (usage == render::TextureViewUsage::Resource && range->Aspects.HasFlag(render::TextureAspect::Depth) && range->Aspects.HasFlag(render::TextureAspect::Stencil))) {
+        impl.Error("InvalidAspect", "Attachments require all format aspects; sampled views require one aspect", pass, texture.Index);
+        return {};
+    }
     const TextureViewKey key{view.Dimension, view.Format, *range, usage};
     uint32_t index = 0;
     for (; index < impl.Views.size(); ++index)
-        if (impl.Views[index].Resource == texture.Index && impl.Views[index].Key == key) break;
-    if (index == impl.Views.size()) impl.Views.push_back({texture.Index, key, nullptr});
-    impl.Passes[pass].Accesses.push_back({texture.Index, *range, StateFor(usage), read, write, validAfter});
+        if (impl.Views[index].Resource == texture.Index && impl.Views[index].Version == texture.Version && impl.Views[index].Key == key) break;
+    if (index == impl.Views.size()) impl.Views.push_back({texture.Index, key, nullptr, texture.Version});
+    impl.Passes[pass].Accesses.push_back({texture.Index, *range, StateFor(usage), read, write, validAfter, texture.Version});
+    impl.Passes[pass].Accesses.back().Stages = view.Stages ? view.Stages : uavWriteStages ? uavWriteStages
+                                                                                          : render::ShaderStages{impl.Report.Passes[pass].Type == RgPassType::Compute ? render::ShaderStage::Compute : render::ShaderStage::Graphics};
     AddUnique(impl.Passes[pass].DeclaredViews, index);
     if (write && usage == render::TextureViewUsage::UnorderedAccess &&
         impl.Report.Passes[pass].Type == RgPassType::Raster) {
@@ -536,8 +909,8 @@ RgTextureViewHandle RenderGraph::UseTexture(uint32_t pass, RgTextureHandle textu
     }
     return {index, impl.Generation};
 }
-RgBufferHandle RenderGraph::UseBuffer(uint32_t pass, RgBufferHandle buffer, RgBufferAccess access, bool read, bool write,
-                                      render::ShaderStages uavWriteStages) {
+RgBufferValue RenderGraph::UseBuffer(uint32_t pass, RgBufferValue buffer, RgBufferAccess access, bool read, bool write,
+                                     render::ShaderStages uavWriteStages, render::BufferRange range) {
     auto& impl = *_impl;
     if (!impl.Mutable() || !impl.Handle(buffer.Index, buffer.Generation, false, pass)) return {};
     const auto [state, usage] = BufferAccessInfo(access);
@@ -548,7 +921,8 @@ RgBufferHandle RenderGraph::UseBuffer(uint32_t pass, RgBufferHandle buffer, RgBu
         impl.Error("InvalidBufferAccess", "Buffer access is incompatible with its usage or read/write mode", pass, buffer.Index);
         return {};
     }
-    impl.Passes[pass].Accesses.push_back({buffer.Index, {0, 1, 0, 1}, static_cast<uint32_t>(state), read, write, true});
+    impl.Passes[pass].Accesses.push_back({buffer.Index, {0, 1, 0, 1}, static_cast<uint32_t>(state), read, write, true, buffer.Version, range});
+    impl.Passes[pass].Accesses.back().Stages = uavWriteStages ? uavWriteStages : render::ShaderStages{impl.Report.Passes[pass].Type == RgPassType::Compute ? render::ShaderStage::Compute : render::ShaderStage::Graphics};
     AddUnique(impl.Passes[pass].DeclaredBuffers, buffer.Index);
     if (write && access == RgBufferAccess::UnorderedAccess &&
         impl.Report.Passes[pass].Type == RgPassType::Raster) {
@@ -558,12 +932,40 @@ RgBufferHandle RenderGraph::UseBuffer(uint32_t pass, RgBufferHandle buffer, RgBu
     }
     return buffer;
 }
-RgTextureViewHandle RenderGraphPassBuilder::ReadTexture(RgTextureHandle texture, const RgTextureViewDesc& view) { return _graph.UseTexture(_pass, texture, view, render::TextureViewUsage::Resource, true, false, true); }
-RgBufferHandle RenderGraphPassBuilder::ReadBuffer(RgBufferHandle buffer, RgBufferAccess access) { return _graph.UseBuffer(_pass, buffer, access, true, false); }
-RgBufferHandle RenderGraphPassBuilder::WriteBuffer(RgBufferHandle buffer, RgBufferAccess access) { return _graph.UseBuffer(_pass, buffer, access, false, true); }
-RgBufferHandle RenderGraphPassBuilder::ReadWriteBuffer(RgBufferHandle buffer, RgBufferAccess access) { return _graph.UseBuffer(_pass, buffer, access, true, true); }
+RgTextureViewHandle RenderGraphPassBuilder::ReadTexture(RgTextureValue texture, const RgTextureViewDesc& view) { return _graph.UseTexture(_pass, texture, view, render::TextureViewUsage::Resource, true, false, true); }
+RgBufferValue RenderGraphPassBuilder::ReadImmutableBuffer(render::Buffer& buffer, render::BufferStates state, RgBufferAccess access, render::BufferRange range, shared_ptr<void> owner) {
+    auto& impl = *_graph._impl;
+    if (!impl.Mutable()) return {};
+    const auto required = BufferAccessInfo(access).first;
+    const uint32_t writes = uint32_t(render::BufferState::UnorderedAccess) | uint32_t(render::BufferState::CopyDestination) | uint32_t(render::BufferState::Undefined);
+    if (!state || (state.value() & writes) || (buffer.GetDesc().Memory == render::MemoryType::Device && !state.HasFlag(required))) {
+        impl.Error("ImmutableAssetState", "Immutable geometry requires a compatible persistent read state", _pass);
+        return {};
+    }
+    for (uint32_t i = 0; i < impl.Resources.size(); ++i) {
+        const auto& resource = impl.Resources[i];
+        if (!resource.ExternalBuffer || resource.ExternalBuffer->Buffer != &buffer) continue;
+        if (!resource.Immutable) {
+            for (const auto& declared : impl.Passes[_pass].Accesses)
+                if (declared.Resource == i && declared.Read && (declared.State & uint32_t(required)) != 0) return {i, impl.Generation, declared.Version};
+            impl.Error("ImmutableAssetIdentity", "Graph geometry requires an explicit read of its produced value", _pass, i);
+            return {};
+        }
+        _graph.Retain(std::move(owner));
+        return ReadBuffer({i, impl.Generation, 0}, access, range);
+    }
+    auto external = make_shared<RenderExternalBuffer>(RenderExternalBuffer{&buffer, buffer.GetDesc(), state, true, false, std::move(owner)});
+    const auto value = _graph.ImportBuffer(*external, "Immutable.Geometry", RenderGraphExternalAccess::ReadOnly);
+    if (!value.IsValid()) return {};
+    impl.Resources[value.Index].Immutable = true;
+    _graph.Retain(external);
+    return ReadBuffer(value, access, range);
+}
+RgBufferValue RenderGraphPassBuilder::ReadBuffer(RgBufferValue buffer, RgBufferAccess access, render::BufferRange range) { return _graph.UseBuffer(_pass, buffer, access, true, false, {}, range); }
+RgBufferValue RenderGraphPassBuilder::WriteBuffer(RgBufferValue buffer, RgBufferAccess access, render::BufferRange range) { return _graph.UseBuffer(_pass, buffer, access, false, true, {}, range); }
+RgBufferValue RenderGraphPassBuilder::ReadWriteBuffer(RgBufferValue buffer, RgBufferAccess access, render::BufferRange range) { return _graph.UseBuffer(_pass, buffer, access, true, true, {}, range); }
 RgIndirectArgumentsHandle RenderGraphPassBuilder::ReadIndirectArguments(
-    RgBufferHandle buffer, RgIndirectCommand command, uint64_t offset, uint32_t count) {
+    RgBufferValue buffer, RgIndirectCommand command, uint64_t offset, uint32_t count) {
     return _graph.AddIndirectArguments(_pass, buffer, command, offset, count);
 }
 RgParameterSetHandle RenderGraphPassBuilder::CreateParameterSet(
@@ -571,22 +973,22 @@ RgParameterSetHandle RenderGraphPassBuilder::CreateParameterSet(
     return _graph.AddParameterSet(_pass, program, group, bindings);
 }
 void RenderGraphPassBuilder::SetSideEffect() { _graph._impl->Passes[_pass].SideEffect = true; }
-RgTextureViewHandle RenderGraphComputeBuilder::WriteTexture(RgTextureHandle texture, const RgTextureViewDesc& view) { return _graph.UseTexture(_pass, texture, view, render::TextureViewUsage::UnorderedAccess, false, true, true); }
-RgTextureViewHandle RenderGraphComputeBuilder::ReadWriteTexture(RgTextureHandle texture, const RgTextureViewDesc& view) { return _graph.UseTexture(_pass, texture, view, render::TextureViewUsage::UnorderedAccess, true, true, true); }
+RgTextureViewHandle RenderGraphComputeBuilder::WriteTexture(RgTextureValue texture, const RgTextureViewDesc& view) { return _graph.UseTexture(_pass, texture, view, render::TextureViewUsage::UnorderedAccess, false, true, true); }
+RgTextureViewHandle RenderGraphComputeBuilder::ReadWriteTexture(RgTextureValue texture, const RgTextureViewDesc& view) { return _graph.UseTexture(_pass, texture, view, render::TextureViewUsage::UnorderedAccess, true, true, true); }
 RgComputeProgramHandle RenderGraphComputeBuilder::UseComputeProgram(ShaderProgram& program) { return _graph.AddComputeProgram(_pass, program); }
 RgTextureViewHandle RenderGraphRasterBuilder::WriteTexture(
-    RgTextureHandle texture, render::ShaderStages stages, const RgTextureViewDesc& view) {
+    RgTextureValue texture, render::ShaderStages stages, const RgTextureViewDesc& view) {
     return _graph.UseTexture(_pass, texture, view, render::TextureViewUsage::UnorderedAccess,
                              false, true, true, stages);
 }
 RgTextureViewHandle RenderGraphRasterBuilder::ReadWriteTexture(
-    RgTextureHandle texture, render::ShaderStages stages, const RgTextureViewDesc& view) {
+    RgTextureValue texture, render::ShaderStages stages, const RgTextureViewDesc& view) {
     return _graph.UseTexture(_pass, texture, view, render::TextureViewUsage::UnorderedAccess,
                              true, true, true, stages);
 }
 
 RgIndirectArgumentsHandle RenderGraph::AddIndirectArguments(
-    uint32_t pass, RgBufferHandle buffer, RgIndirectCommand command,
+    uint32_t pass, RgBufferValue buffer, RgIndirectCommand command,
     uint64_t offset, uint32_t count) {
     auto& impl = *_impl;
     if (!impl.Mutable() || !impl.Handle(buffer.Index, buffer.Generation, false, pass)) return {};
@@ -632,12 +1034,12 @@ RgComputeProgramHandle RenderGraph::AddComputeProgram(uint32_t pass, ShaderProgr
 }
 
 RgGraphicsProgramHandle RenderGraphRasterBuilder::UseGraphicsProgram(ShaderProgram& program, const MaterialPipelineState& state,
-    const PrimitiveVertexLayout& layout, PrimitiveTopology topology) {
+                                                                     const PrimitiveVertexLayout& layout, PrimitiveTopology topology) {
     return _graph.AddGraphicsProgram(_pass, program, state, layout, topology);
 }
 
 RgGraphicsProgramHandle RenderGraph::AddGraphicsProgram(uint32_t pass, ShaderProgram& program, const MaterialPipelineState& state,
-    const PrimitiveVertexLayout& layout, PrimitiveTopology topology) {
+                                                        const PrimitiveVertexLayout& layout, PrimitiveTopology topology) {
     auto& impl = *_impl;
     if (!impl.Mutable()) return {};
     ++impl.Report.GraphicsPipelineRequests;
@@ -842,12 +1244,7 @@ RgParameterSetHandle RenderGraph::AddParameterSet(
                                                : writable
                                                    ? RgBufferAccess::UnorderedAccess
                                                    : RgBufferAccess::ShaderRead;
-            if (!UseBuffer(pass, buffer->Buffer, graphAccess, read, write, info->Stages).IsValid()) return {};
-            if (write && (range->Offset != 0 || range->Size != impl.Resources[buffer->Buffer.Index].BufferDesc.Size)) {
-                // Buffer contents are tracked as one cell. A partial write therefore consumes the
-                // previous whole-resource contents so the untouched bytes remain valid.
-                impl.Passes[pass].Accesses.back().Read = true;
-            }
+            if (!UseBuffer(pass, buffer->Buffer, graphAccess, read, write, info->Stages, *range).IsValid()) return {};
             destination.Value = Impl::BufferParameter{
                 buffer->Buffer.Index, *range, buffer->StructureByteStride, buffer->Format};
         } else if (const auto* sampler = std::get_if<RgSamplerParameterBinding>(&source.Value)) {
@@ -890,7 +1287,7 @@ RgParameterSetHandle RenderGraph::AddParameterSet(
     impl.ParameterSets.push_back(std::move(parameterSet));
     return {index, impl.Generation};
 }
-RgTextureViewHandle RenderGraphRasterBuilder::SetColorAttachment(uint32_t slot, RgTextureHandle texture, const RgColorAttachmentDesc& desc) {
+RgTextureViewHandle RenderGraphRasterBuilder::SetColorAttachment(uint32_t slot, RgTextureValue texture, const RgColorAttachmentDesc& desc) {
     auto& impl = *_graph._impl;
     if (slot >= 8 || (slot < impl.Passes[_pass].Colors.size() && impl.Passes[_pass].Colors[slot])) {
         impl.Error("InvalidAttachmentSlot", "Color slots must be unique and less than 8", _pass);
@@ -904,7 +1301,7 @@ RgTextureViewHandle RenderGraphRasterBuilder::SetColorAttachment(uint32_t slot, 
     }
     return result;
 }
-RgTextureViewHandle RenderGraphRasterBuilder::SetDepthAttachment(RgTextureHandle texture, const RgDepthAttachmentDesc& desc) {
+RgTextureViewHandle RenderGraphRasterBuilder::SetDepthAttachment(RgTextureValue texture, const RgDepthAttachmentDesc& desc) {
     auto& impl = *_graph._impl;
     if (impl.Passes[_pass].DepthAttachment || (desc.ReadOnly && (desc.Load != render::LoadAction::Load || desc.Store != render::StoreAction::Store))) {
         impl.Error("InvalidDepthAttachment", "Depth is already bound, or read-only depth would clear/discard", _pass);
@@ -916,7 +1313,7 @@ RgTextureViewHandle RenderGraphRasterBuilder::SetDepthAttachment(RgTextureHandle
     return result;
 }
 
-RgPassHandle RenderGraph::AddCopyBufferPass(std::string_view name, RgBufferHandle source, RgBufferHandle destination,
+RgPassHandle RenderGraph::AddCopyBufferPass(std::string_view name, RgBufferValue source, RgBufferValue destination,
                                             uint64_t size, uint64_t sourceOffset, uint64_t destinationOffset, std::source_location location) {
     auto pass = AddPass(name, RgPassType::Copy, location);
     if (!pass.IsValid()) return pass;
@@ -928,11 +1325,12 @@ RgPassHandle RenderGraph::AddCopyBufferPass(std::string_view name, RgBufferHandl
         _impl->Error("CopyRange", "Buffer copy range exceeds its source or destination", pass.Index);
         return pass;
     }
-    if (size != destinationSize) _impl->Passes[pass.Index].Accesses.back().Read = true;
+    _impl->Passes[pass.Index].Accesses[0].Bytes = {sourceOffset, size};
+    _impl->Passes[pass.Index].Accesses[1].Bytes = {destinationOffset, size};
     _impl->Passes[pass.Index].CopyOp = Impl::Copy{Impl::CopyType::Buffer, source.Index, destination.Index, size, sourceOffset, destinationOffset};
     return pass;
 }
-RgPassHandle RenderGraph::AddCopyTexturePass(std::string_view name, RgTextureHandle source, RgTextureHandle destination,
+RgPassHandle RenderGraph::AddCopyTexturePass(std::string_view name, RgTextureValue source, RgTextureValue destination,
                                              render::SubresourceRange sourceRange, render::SubresourceRange destinationRange, std::source_location location) {
     auto pass = AddPass(name, RgPassType::Copy, location);
     auto& impl = *_impl;
@@ -942,20 +1340,20 @@ RgPassHandle RenderGraph::AddCopyTexturePass(std::string_view name, RgTextureHan
     const auto sr = render::NormalizeSubresourceRange(src, sourceRange);
     const auto dr = render::NormalizeSubresourceRange(dst, destinationRange);
     if (!sr || !dr || sr->MipLevelCount != 1 || dr->MipLevelCount != 1 || sr->ArrayLayerCount != dr->ArrayLayerCount ||
-        src.Format != dst.Format || src.SampleCount != 1 || dst.SampleCount != 1 || src.Dim == render::TextureDimension::Dim3D || dst.Dim == render::TextureDimension::Dim3D ||
+        src.Format != dst.Format || render::IsDepthStencilFormat(src.Format) || src.SampleCount != 1 || dst.SampleCount != 1 || src.Dim == render::TextureDimension::Dim3D || dst.Dim == render::TextureDimension::Dim3D ||
         std::max(1u, src.Width >> sr->BaseMipLevel) != std::max(1u, dst.Width >> dr->BaseMipLevel) ||
         std::max(1u, src.Height >> sr->BaseMipLevel) != std::max(1u, dst.Height >> dr->BaseMipLevel) ||
         !src.Usage.HasFlag(render::TextureUse::CopySource) || !dst.Usage.HasFlag(render::TextureUse::CopyDestination)) {
-        impl.Error("CopyTextureDescriptor", "Texture copy needs matching format, mip extents, layer counts and copy usages", pass.Index);
+        impl.Error("CopyTextureDescriptor", "Texture copy needs matching color format, mip extents, layer counts and copy usages", pass.Index);
         return pass;
     }
-    impl.Passes[pass.Index].Accesses.push_back({source.Index, *sr, static_cast<uint32_t>(render::TextureState::CopySource), true, false, true});
-    impl.Passes[pass.Index].Accesses.push_back({destination.Index, *dr, static_cast<uint32_t>(render::TextureState::CopyDestination), false, true, true});
+    impl.Passes[pass.Index].Accesses.push_back({source.Index, *sr, static_cast<uint32_t>(render::TextureState::CopySource), true, false, true, source.Version});
+    impl.Passes[pass.Index].Accesses.push_back({destination.Index, *dr, static_cast<uint32_t>(render::TextureState::CopyDestination), false, true, true, destination.Version});
     impl.Passes[pass.Index].CopyOp = Impl::Copy{Impl::CopyType::Texture, source.Index, destination.Index, 0, 0, 0, *sr, *dr};
     return pass;
 }
 RgPassHandle RenderGraph::AddResolveTexturePass(
-    std::string_view name, RgTextureHandle source, RgTextureHandle destination,
+    std::string_view name, RgTextureValue source, RgTextureValue destination,
     render::SubresourceRange sourceRange, render::SubresourceRange destinationRange,
     std::source_location location) {
     auto pass = AddPass(name, RgPassType::Resolve, location);
@@ -979,12 +1377,12 @@ RgPassHandle RenderGraph::AddResolveTexturePass(
         impl.Error("ResolveTextureDescriptor", "Resolve needs matching 2D color subresources, an MSAA source, a single-sample destination and copy usages", pass.Index);
         return pass;
     }
-    impl.Passes[pass.Index].Accesses.push_back({source.Index, *sr, static_cast<uint32_t>(render::TextureState::ResolveSource), true, false, true});
-    impl.Passes[pass.Index].Accesses.push_back({destination.Index, *dr, static_cast<uint32_t>(render::TextureState::ResolveDestination), false, true, true});
+    impl.Passes[pass.Index].Accesses.push_back({source.Index, *sr, static_cast<uint32_t>(render::TextureState::ResolveSource), true, false, true, source.Version});
+    impl.Passes[pass.Index].Accesses.push_back({destination.Index, *dr, static_cast<uint32_t>(render::TextureState::ResolveDestination), false, true, true, destination.Version});
     impl.Passes[pass.Index].CopyOp = Impl::Copy{Impl::CopyType::Resolve, source.Index, destination.Index, 0, 0, 0, *sr, *dr};
     return pass;
 }
-RgPassHandle RenderGraph::AddCopyTextureToBufferPass(std::string_view name, RgTextureHandle source, RgBufferHandle destination,
+RgPassHandle RenderGraph::AddCopyTextureToBufferPass(std::string_view name, RgTextureValue source, RgBufferValue destination,
                                                      render::SubresourceRange range, uint64_t destinationOffset, std::source_location location) {
     auto pass = AddPass(name, RgPassType::Copy, location);
     auto& impl = *_impl;
@@ -995,9 +1393,9 @@ RgPassHandle RenderGraph::AddCopyTextureToBufferPass(std::string_view name, RgTe
     const auto& detail = impl.Device.GetDetail();
     const uint32_t texelBytes = render::GetTextureFormatBytesPerPixel(src.Format);
     if (!normalized || normalized->MipLevelCount != 1 || normalized->ArrayLayerCount != 1 || src.Dim == render::TextureDimension::Dim3D ||
-        src.SampleCount != 1 || !src.Usage.HasFlag(render::TextureUse::CopySource) || texelBytes == 0 ||
+        src.SampleCount != 1 || render::IsDepthStencilFormat(src.Format) || !src.Usage.HasFlag(render::TextureUse::CopySource) || texelBytes == 0 ||
         destinationOffset % detail.TextureDataPlacementAlignment != 0 || destinationOffset % texelBytes != 0) {
-        impl.Error("CopyTextureRange", "Texture readback requires one non-MSAA 2D subresource and aligned destination", pass.Index);
+        impl.Error("CopyTextureRange", "Texture readback requires one non-MSAA 2D color subresource and aligned destination", pass.Index);
         return pass;
     }
     const uint64_t row = Align(uint64_t{std::max(1u, src.Width >> normalized->BaseMipLevel)} * render::GetTextureFormatBytesPerPixel(src.Format), detail.TextureDataPitchAlignment);
@@ -1007,14 +1405,13 @@ RgPassHandle RenderGraph::AddCopyTextureToBufferPass(std::string_view name, RgTe
         impl.Error("CopyRange", "Readback buffer is too small for the aligned texture footprint", pass.Index);
         return pass;
     }
-    // Buffer validity is whole-resource; untouched bytes must have prior valid contents.
-    if (size != destinationSize) impl.Passes[pass.Index].Accesses.back().Read = true;
-    impl.Passes[pass.Index].Accesses.push_back({source.Index, *normalized, static_cast<uint32_t>(render::TextureState::CopySource), true, false, true});
+    impl.Passes[pass.Index].Accesses.back().Bytes = {destinationOffset, size};
+    impl.Passes[pass.Index].Accesses.push_back({source.Index, *normalized, static_cast<uint32_t>(render::TextureState::CopySource), true, false, true, source.Version});
     impl.Passes[pass.Index].CopyOp = Impl::Copy{Impl::CopyType::TextureToBuffer, source.Index, destination.Index, size, 0, destinationOffset, *normalized};
     return pass;
 }
 
-RgPassHandle RenderGraph::AddCopyBufferToTexturePass(std::string_view name, RgBufferHandle source, RgTextureHandle destination,
+RgPassHandle RenderGraph::AddCopyBufferToTexturePass(std::string_view name, RgBufferValue source, RgTextureValue destination,
                                                      const render::BufferTextureCopyRegion& region, std::source_location location) {
     auto pass = AddPass(name, RgPassType::Copy, location);
     auto& impl = *_impl;
@@ -1029,7 +1426,8 @@ RgPassHandle RenderGraph::AddCopyBufferToTexturePass(std::string_view name, RgBu
     const bool partial = region.X != 0 || region.Y != 0 || region.Width != std::max(1u, dst.Width >> region.MipLevel) ||
                          region.Height != std::max(1u, dst.Height >> region.MipLevel);
     const render::SubresourceRange range{region.ArrayLayer, 1, region.MipLevel, 1};
-    impl.Passes[pass.Index].Accesses.push_back({destination.Index, range, static_cast<uint32_t>(render::TextureState::CopyDestination), partial, true, true});
+    impl.Passes[pass.Index].Accesses.back().Bytes = {region.SourceOffset, uint64_t{region.RowPitch} * (region.Height - 1) + uint64_t{region.Width} * render::GetTextureFormatBytesPerPixel(dst.Format)};
+    impl.Passes[pass.Index].Accesses.push_back({destination.Index, range, static_cast<uint32_t>(render::TextureState::CopyDestination), partial, true, true, destination.Version});
     Impl::Copy copy{Impl::CopyType::BufferToTexture, source.Index, destination.Index};
     copy.Upload = region;
     impl.Passes[pass.Index].CopyOp = copy;
@@ -1044,7 +1442,7 @@ bool RenderGraph::Impl::ValidateResources() {
         if (resource.IsTexture) {
             ++Report.Textures;
             auto desc = resource.TextureDesc;
-            if (resource.External()) desc.Hints = desc.Hints & render::ResourceHint::Dedicated;
+            if (resource.External() || resource.Port) desc.Hints = desc.Hints & render::ResourceHint::Dedicated;
             const auto validation = render::ValidateTextureDescriptor(desc, Device);
             if (!validation.Supported) {
                 Error("UnsupportedTexture", validation.Reason, InvalidIndex, index);
@@ -1054,14 +1452,14 @@ bool RenderGraph::Impl::ValidateResources() {
             resource.Valid.assign(resource.CellCount(), 0);
             if (resource.ExternalTexture) {
                 const auto& external = *resource.ExternalTexture;
-                if (!(TexturePoolKey{external.Texture->GetDesc()} == TexturePoolKey{external.Desc}) || external.SubresourceStates.size() != resource.CellCount() || external.ContentValid.size() != resource.CellCount()) {
+                if (!(TexturePoolKey{external.Texture->GetDesc()} == TexturePoolKey{external.Desc}) || external.SubresourceStates.size() != resource.SubresourceCount() || (external.ContentValid.size() != resource.CellCount() && external.ContentValid.size() != resource.SubresourceCount())) {
                     Error("ExternalStorage", "External descriptor or state/validity storage does not match native texture", InvalidIndex, index);
                     continue;
                 }
-                std::copy(external.ContentValid.begin(), external.ContentValid.end(), resource.Valid.begin());
+                for (uint32_t cell = 0; cell < resource.CellCount(); ++cell) resource.Valid[cell] = external.ContentValid[cell % external.ContentValid.size()];
                 for (size_t cell = 0; cell < external.SubresourceStates.size(); ++cell) {
                     const auto state = external.SubresourceStates[cell];
-                    if (!state || (resource.Valid[cell] && state.HasFlag(render::TextureState::Undefined))) Error("ExternalState", "Valid external contents require a defined state", InvalidIndex, index);
+                    if (!ValidTextureState(external.Desc, state, !resource.Valid[cell])) Error("ExternalState", "Valid external contents require a defined state", InvalidIndex, index);
                 }
             }
         } else {
@@ -1070,14 +1468,14 @@ bool RenderGraph::Impl::ValidateResources() {
             constexpr uint32_t knownUses = 2047;
             if (desc.Size == 0 || desc.Size > Device.GetCapabilities().Limits.MaxBufferSize || !EnumContains(desc.Memory) || !desc.Usage ||
                 (desc.Usage.value() & ~knownUses) != 0 || (desc.Hints.value() & ~uint32_t{7}) != 0 ||
-                (!resource.External() && desc.Hints.HasFlag(render::ResourceHint::External)) ||
+                (!resource.External() && !resource.Port && desc.Hints.HasFlag(render::ResourceHint::External)) ||
                 (desc.Memory == render::MemoryType::Upload && !desc.Usage.HasFlag(render::BufferUse::MapWrite)) ||
                 (desc.Memory == render::MemoryType::ReadBack && !desc.Usage.HasFlag(render::BufferUse::MapRead))) {
                 Error("UnsupportedBuffer", "Invalid buffer size, usage, memory or hints", InvalidIndex, index);
                 continue;
             }
             descriptor = fmt::format("size={} memory={} usage={}", desc.Size, EnumName(desc.Memory), desc.Usage);
-            resource.Valid.assign(1, resource.ExternalBuffer && resource.ExternalBuffer->ContentValid ? 1 : 0);
+            resource.Valid.assign(resource.CellCount(), resource.ExternalBuffer && resource.ExternalBuffer->ContentValid ? 1 : 0);
             if (resource.ExternalBuffer && (!(BufferPoolKey{resource.ExternalBuffer->Buffer->GetDesc()} == BufferPoolKey{desc}) || !resource.ExternalBuffer->State ||
                                             (resource.Valid[0] && resource.ExternalBuffer->State.HasFlag(render::BufferState::Undefined)))) {
                 Error("ExternalStorage", "External buffer descriptor or initial state is invalid", InvalidIndex, index);
@@ -1086,6 +1484,10 @@ bool RenderGraph::Impl::ValidateResources() {
         if (!EnumContains(resource.ExternalAccess)) Error("ExternalAccess", "Invalid external access mode", InvalidIndex, index);
         Report.Resources.push_back({resource.Name, std::move(descriptor), resource.IsTexture, resource.External()});
         Report.Resources.back().ViewId = resource.ViewId;
+        Report.Resources.back().Port = resource.Port;
+        Report.Resources.back().Immutable = resource.Immutable;
+        Report.Resources.back().RetainedOwner = resource.ExternalTexture ? bool(resource.ExternalTexture->Owner) : resource.ExternalBuffer ? bool(resource.ExternalBuffer->Owner)
+                                                                                                                                           : false;
         Report.Resources.back().EstimatedBytes = resource.IsTexture ? EstimateTextureBytes(resource.TextureDesc) : resource.BufferDesc.Size;
     }
     return Report.Diagnostics.empty();
@@ -1098,22 +1500,38 @@ bool RenderGraph::Impl::NormalizePasses() {
         for (const auto& access : pass.Accesses) {
             auto& resource = Resources[access.Resource];
             if (access.Write && resource.External() && resource.ExternalAccess == RenderGraphExternalAccess::ReadOnly) Error("ReadOnlyExternal", "Cannot write a read-only external resource", p, access.Resource);
-            for (uint32_t layer = access.Range.BaseArrayLayer; layer < access.Range.BaseArrayLayer + access.Range.ArrayLayerCount; ++layer) {
-                for (uint32_t mip = access.Range.BaseMipLevel; mip < access.Range.BaseMipLevel + access.Range.MipLevelCount; ++mip) {
-                    const uint32_t cell = resource.IsTexture ? layer * resource.TextureDesc.MipLevels + mip : 0;
-                    const uint64_t key = (uint64_t{access.Resource} << 32) | cell;
-                    auto [it, inserted] = cellMap.emplace(key, static_cast<uint32_t>(pass.Cells.size()));
-                    if (inserted)
-                        pass.Cells.push_back({access.Resource, cell, access.State, access.Read, access.Write, access.ValidAfter});
+            if ((access.Stages.value() & ~uint32_t{7}) != 0) Error("ShaderStages", "Access contains unsupported shader-stage bits", p, access.Resource);
+            vector<uint32_t> cells;
+            if (resource.IsTexture) {
+                for (uint32_t aspect = 0; aspect < resource.AspectCount(); ++aspect) {
+                    const auto bit = aspect == 1 ? render::TextureAspect::Stencil : render::IsDepthStencilFormat(resource.TextureDesc.Format) ? render::TextureAspect::Depth
+                                                                                                                                              : render::TextureAspect::Color;
+                    if (access.Range.Aspects && !access.Range.Aspects.HasFlag(bit)) continue;
+                    for (uint32_t layer = access.Range.BaseArrayLayer; layer < access.Range.BaseArrayLayer + access.Range.ArrayLayerCount; ++layer)
+                        for (uint32_t mip = access.Range.BaseMipLevel; mip < access.Range.BaseMipLevel + access.Range.MipLevelCount; ++mip)
+                            cells.push_back(aspect * resource.SubresourceCount() + layer * resource.TextureDesc.MipLevels + mip);
+                }
+            } else {
+                for (uint32_t c = 0; c < resource.CellCount(); ++c)
+                    if (resource.BufferBoundaries[c] >= access.Bytes.Offset && resource.BufferBoundaries[c + 1] <= access.Bytes.Offset + access.Bytes.Size)
+                        cells.push_back(c);
+            }
+            for (const auto cell : cells) {
+                const uint64_t key = (uint64_t{access.Resource} << 32) | cell;
+                auto [it, inserted] = cellMap.emplace(key, static_cast<uint32_t>(pass.Cells.size()));
+                if (inserted)
+                    pass.Cells.push_back({access.Resource, cell, access.State, access.Read, access.Write, access.ValidAfter, access.Version, access.Stages});
+                else {
+                    auto& existing = pass.Cells[it->second];
+                    if (existing.Write || access.Write)
+                        Error("OverlappingAccess", "Overlapping writes require one explicit read-write declaration; attachment feedback is unsupported", p, access.Resource);
+                    else if (existing.Version != access.Version)
+                        Error("VersionFeedback", "One pass cannot access overlapping versions of the same physical range", p, access.Resource);
                     else {
-                        auto& existing = pass.Cells[it->second];
-                        if (existing.Write || access.Write)
-                            Error("OverlappingAccess", "Overlapping writes require one explicit read-write declaration; attachment feedback is unsupported", p, access.Resource);
-                        else {
-                            const auto uav = static_cast<uint32_t>(resource.IsTexture ? uint32_t(render::TextureState::UnorderedAccess) : uint32_t(render::BufferState::UnorderedAccess));
-                            if (existing.State != access.State && ((existing.State | access.State) & uav)) Error("IncompatibleReadStates", "UAV and other read layouts cannot be combined", p, access.Resource);
-                            existing.State |= access.State;
-                        }
+                        const auto uav = resource.IsTexture ? uint32_t(render::TextureState::UnorderedAccess) : uint32_t(render::BufferState::UnorderedAccess);
+                        if (existing.State != access.State && ((existing.State | access.State) & uav)) Error("IncompatibleReadStates", "UAV and other read layouts cannot be combined", p, access.Resource);
+                        existing.State |= access.State;
+                        existing.Stages |= access.Stages;
                     }
                 }
             }
@@ -1127,6 +1545,33 @@ bool RenderGraph::Impl::NormalizePasses() {
                                   requiredBits, supported.value()),
                       p);
             }
+        }
+        for (const auto& cell : pass.Cells)
+            if (Resources[cell.Resource].IsTexture && !ValidTextureState(Resources[cell.Resource].TextureDesc, static_cast<render::TextureState>(cell.State), false))
+                Error("IncompatibleTextureStates", "Texture access requires an invalid usage or incompatible layouts", p, cell.Resource);
+        // The current Direct-queue RHI tracks a whole buffer state. Content validity
+        // remains byte-granular, but simultaneous disjoint accesses must share one
+        // legal native state. Never widen a write layout into an incompatible read.
+        unordered_map<uint32_t, uint32_t> bufferStates;
+        for (const auto& cell : pass.Cells) {
+            if (Resources[cell.Resource].IsTexture) continue;
+            auto [it, inserted] = bufferStates.emplace(cell.Resource, cell.State);
+            constexpr uint32_t exclusive = uint32_t(render::BufferState::UnorderedAccess) | uint32_t(render::BufferState::CopyDestination) | uint32_t(render::BufferState::HostRead);
+            if (!inserted && it->second != cell.State && ((it->second | cell.State) & exclusive))
+                Error("IncompatibleBufferStates", "Disjoint buffer ranges require incompatible whole-buffer states in one pass", p, cell.Resource);
+            it->second |= cell.State;
+            const auto& resource = Resources[cell.Resource];
+            if (resource.Immutable && resource.BufferDesc.Memory == render::MemoryType::Device) it->second |= resource.ExternalBuffer->State.value();
+        }
+        for (auto& cell : pass.Cells)
+            if (!Resources[cell.Resource].IsTexture) cell.State = bufferStates[cell.Resource];
+        unordered_map<uint64_t, uint32_t> textureStates;
+        for (const auto& cell : pass.Cells) {
+            const auto& resource = Resources[cell.Resource];
+            if (!resource.IsTexture || resource.AspectCount() == 1) continue;
+            const uint64_t key = uint64_t(cell.Resource) << 32 | resource.PhysicalCell(cell.Cell);
+            auto [it, inserted] = textureStates.emplace(key, cell.State);
+            if (!inserted && it->second != cell.State) Error("IncompatibleAspectStates", "Depth and stencil share a native layout; incompatible simultaneous aspect accesses are unsupported", p, cell.Resource);
         }
         if (Report.Passes[p].Type != RgPassType::Raster) continue;
         const auto checkAttachment = [&](uint32_t viewIndex, render::LoadAction load, render::StoreAction store) {
@@ -1155,89 +1600,223 @@ bool RenderGraph::Impl::NormalizePasses() {
 }
 
 void RenderGraph::Impl::Cull() {
-    struct Content {
-        int32_t Producer{-1};
-        bool Valid{false};
-    };
-    vector<vector<Content>> contents(Resources.size());
-    for (size_t r = 0; r < Resources.size(); ++r) {
-        contents[r].resize(Resources[r].CellCount());
-        for (size_t c = 0; c < contents[r].size(); ++c) contents[r][c].Valid = Resources[r].Valid[c] != 0;
+    vector<RgResourceVersionNode> versions;
+    vector<RgExecutionNode> nodes(Passes.size());
+    vector<vector<vector<uint32_t>>> values(Resources.size());
+    vector<vector<vector<uint32_t>>> producers(Resources.size());
+    vector<vector<vector<uint8_t>>> initialized(Resources.size());
+    for (uint32_t r = 0; r < Resources.size(); ++r) {
+        const auto count = Resources[r].VersionParents.size();
+        values[r].resize(count);
+        producers[r].assign(count, vector<uint32_t>(Resources[r].CellCount(), InvalidIndex));
+        initialized[r].assign(count, vector<uint8_t>(Resources[r].CellCount(), 0));
     }
     for (uint32_t p = 0; p < Passes.size(); ++p) {
+        nodes[p].SideEffect = Passes[p].SideEffect;
         for (const auto& access : Passes[p].Cells) {
-            auto& content = contents[access.Resource][access.Cell];
-            if (access.Read) {
-                if (!content.Valid) Error("UninitializedRead", fmt::format("Subresource {} has no valid contents (read/Load after creation or Discard)", access.Cell), p, access.Resource);
-                if (content.Producer >= 0) AddUnique(Report.Passes[p].DataDependencies, static_cast<uint32_t>(content.Producer));
+            if (access.Version >= values[access.Resource].size() || (access.Write && access.Version == 0)) {
+                Error("InvalidVersion", "Access references an unknown version or writes an imported initial value; reserve a successor with NextVersion", p, access.Resource);
+                continue;
             }
-            if (access.Write) content = {static_cast<int32_t>(p), access.ValidAfter};
+            if (!access.Write) continue;
+            auto& producer = producers[access.Resource][access.Version][access.Cell];
+            if (producer != InvalidIndex && producer != p)
+                Error("MultipleProducers", "A content version/range can have only one producer; reserve a successor with NextVersion", p, access.Resource);
+            producer = p;
+            initialized[access.Resource][access.Version][access.Cell] = access.ValidAfter ? 1 : 0;
         }
     }
-    vector<uint32_t> pending;
-    for (uint32_t p = 0; p < Passes.size(); ++p)
-        if (Passes[p].SideEffect) {
-            pending.push_back(p);
-            Report.Passes[p].LivenessReason = "explicit side effect";
-        }
-    for (size_t r = 0; r < Resources.size(); ++r)
-        if (Resources[r].ExternalAccess == RenderGraphExternalAccess::ObservableOutput)
-            for (const auto& content : contents[r])
-                if (content.Producer >= 0) {
-                    pending.push_back(static_cast<uint32_t>(content.Producer));
-                    Report.Passes[content.Producer].LivenessReason = "observable final content";
+    if (!Report.Diagnostics.empty()) return;
+    for (uint32_t r = 0; r < Resources.size(); ++r) {
+        const auto& resource = Resources[r];
+        for (uint32_t v = 0; v < values[r].size(); ++v) {
+            auto& cells = values[r][v];
+            cells.resize(resource.CellCount());
+            for (uint32_t c = 0; c < resource.CellCount(); ++c) {
+                const uint32_t predecessor = v == 0 ? InvalidIndex : values[r][resource.VersionParents[v]][c];
+                const uint32_t producer = producers[r][v][c];
+                if (v != 0 && producer == InvalidIndex) {
+                    cells[c] = predecessor;
+                    continue;
                 }
-    while (!pending.empty()) {
-        const uint32_t p = pending.back();
-        pending.pop_back();
-        auto& report = Report.Passes[p];
-        if (report.Live) continue;
-        report.Live = true;
-        if (report.LivenessReason.empty()) report.LivenessReason = "content consumed by a live pass";
-        pending.insert(pending.end(), report.DataDependencies.begin(), report.DataDependencies.end());
+                cells[c] = static_cast<uint32_t>(versions.size());
+                versions.push_back({r, c, v, producer, predecessor, v == 0 ? resource.Valid[c] != 0 : initialized[r][v][c] != 0});
+            }
+        }
     }
-    struct Hazard {
-        int32_t Writer{-1};
-        vector<uint32_t> Readers;
-    };
-    vector<vector<Hazard>> hazards(Resources.size());
-    for (size_t r = 0; r < Resources.size(); ++r) hazards[r].resize(Resources[r].CellCount());
-    // Every hazard edge points forward in declaration order, which is already the stable topological order.
     for (uint32_t p = 0; p < Passes.size(); ++p) {
-        auto& passReport = Report.Passes[p];
-        if (!passReport.Live) {
-            passReport.LivenessReason = "unconsumed or overwritten content";
-            continue;
-        }
-        ++Report.LivePasses;
         for (const auto& access : Passes[p].Cells) {
-            auto& hazard = hazards[access.Resource][access.Cell];
-            if (hazard.Writer >= 0) AddUnique(passReport.HazardDependencies, static_cast<uint32_t>(hazard.Writer));
-            if (access.Write) {
-                for (const auto reader : hazard.Readers) AddUnique(passReport.HazardDependencies, reader);
-                hazard.Readers.clear();
-                hazard.Writer = static_cast<int32_t>(p);
-            } else
-                AddUnique(hazard.Readers, p);
-            auto& report = Report.Resources[access.Resource];
-            if (report.FirstUse < 0) report.FirstUse = static_cast<int32_t>(p);
-            report.LastUse = static_cast<int32_t>(p);
+            const auto& resource = Resources[access.Resource];
+            const auto version = access.Write ? resource.VersionParents[access.Version] : access.Version;
+            if (access.Read) AddUnique(nodes[p].Reads, values[access.Resource][version][access.Cell]);
+            if (access.Write) AddUnique(nodes[p].Writes, values[access.Resource][access.Version][access.Cell]);
         }
-        std::sort(passReport.DataDependencies.begin(), passReport.DataDependencies.end());
-        std::sort(passReport.HazardDependencies.begin(), passReport.HazardDependencies.end());
     }
+    vector<uint32_t> roots;
+    for (uint32_t r = 0; r < Resources.size(); ++r)
+        if (Resources[r].ExternalAccess == RenderGraphExternalAccess::ObservableOutput)
+            for (const auto v : values[r].back())
+                if (versions[v].Producer != InvalidIndex) roots.push_back(v);
+    CompiledGraph = CompileRenderGraph(static_cast<uint32_t>(Resources.size()), versions, nodes, roots, Options);
+    for (const auto& diagnostic : CompiledGraph.Diagnostics)
+        Error(diagnostic.Code, diagnostic.Message, diagnostic.Pass, diagnostic.Resource);
+    for (uint32_t p = 0; p < Passes.size(); ++p) {
+        const auto& compiled = CompiledGraph.Passes[p];
+        auto& report = Report.Passes[p];
+        report.Live = compiled.Live;
+        report.DataDependencies = compiled.DataDependencies;
+        report.HazardDependencies = compiled.HazardDependencies;
+        report.LivenessReason = compiled.LivenessReason;
+        report.Reads = compiled.Reads;
+        report.Writes = compiled.Writes;
+        if (compiled.Live) ++Report.LivePasses;
+    }
+    for (uint32_t r = 0; r < Resources.size(); ++r) {
+        Report.Resources[r].FirstUse = CompiledGraph.Lifetimes[r].FirstUse;
+        Report.Resources[r].LastUse = CompiledGraph.Lifetimes[r].LastUse;
+    }
+    Report.Versions = CompiledGraph.Versions;
+    Report.ExecutionOrder = CompiledGraph.ExecutionOrder;
     Report.CulledPasses = Report.DeclaredPasses - Report.LivePasses;
 }
+
+void RenderGraph::SetCompileOptions(RenderGraphCompileOptions options) {
+    if (_impl->Mutable()) _impl->Options = options;
+}
+const CompiledRenderGraph& RenderGraph::GetCompiledGraph() const noexcept { return _impl->CompiledGraph; }
 
 bool RenderGraph::Compile() {
     auto& impl = *_impl;
     if (impl.Frozen) return impl.Compiled && impl.Report.Diagnostics.empty();
     impl.Frozen = true;
+    if (!impl.ResolvePorts()) return false;
     impl.Report.DeclaredPasses = static_cast<uint32_t>(impl.Passes.size());
+    for (auto& resource : impl.Resources)
+        if (!resource.IsTexture) resource.BufferBoundaries = {0, resource.BufferDesc.Size};
+    for (auto& pass : impl.Passes)
+        for (auto& access : pass.Accesses) {
+            auto& resource = impl.Resources[access.Resource];
+            if (resource.IsTexture) continue;
+            const uint64_t size = resource.BufferDesc.Size;
+            if (access.Bytes.Offset > size) {
+                impl.Error("BufferRange", "Buffer range starts outside resource", InvalidIndex, access.Resource);
+                continue;
+            }
+            if (access.Bytes.Size == render::BufferRange::All()) access.Bytes.Size = size - access.Bytes.Offset;
+            if (access.Bytes.Size == 0 || access.Bytes.Size > size - access.Bytes.Offset) {
+                impl.Error("BufferRange", "Buffer range is empty or outside resource", InvalidIndex, access.Resource);
+                continue;
+            }
+            resource.BufferBoundaries.push_back(access.Bytes.Offset);
+            resource.BufferBoundaries.push_back(access.Bytes.Offset + access.Bytes.Size);
+        }
+    for (auto& resource : impl.Resources) {
+        auto& boundaries = resource.BufferBoundaries;
+        std::sort(boundaries.begin(), boundaries.end());
+        boundaries.erase(std::unique(boundaries.begin(), boundaries.end()), boundaries.end());
+    }
     if (!impl.Report.Diagnostics.empty() || !impl.ValidateResources() || !impl.NormalizePasses()) return false;
+    for (uint32_t p = 0; p < impl.Passes.size(); ++p)
+        for (const auto& access : impl.Passes[p].Accesses)
+            impl.Report.Passes[p].Accesses.push_back({access.Resource, access.Version, access.State, access.Range, access.Bytes, access.Stages, access.Read, access.Write});
     impl.Cull();
+    if (impl.Report.Diagnostics.empty()) {
+        impl.PlanStorage();
+        impl.OptimizeRaster();
+    }
     impl.Compiled = impl.Report.Diagnostics.empty();
     return impl.Compiled;
+}
+
+void RenderGraph::Impl::PlanStorage() {
+    vector<uint32_t> order;
+    for (uint32_t r = 0; r < Resources.size(); ++r) {
+        Resources[r].Physical = r;
+        if (Report.Resources[r].FirstUse >= 0) order.push_back(r);
+    }
+    std::stable_sort(order.begin(), order.end(), [&](uint32_t a, uint32_t b) { return Report.Resources[a].FirstUse < Report.Resources[b].FirstUse; });
+    struct Slot {
+        uint32_t Resource;
+        int32_t LastUse;
+    };
+    vector<Slot> slots;
+    for (const uint32_t r : order) {
+        auto& resource = Resources[r];
+        const auto& life = Report.Resources[r];
+        const bool reusable = Options.ReuseResources && !resource.External() &&
+                              (resource.IsTexture ? resource.TextureDesc.Memory : resource.BufferDesc.Memory) == render::MemoryType::Device;
+        if (reusable) {
+            for (auto& slot : slots) {
+                const auto& candidate = Resources[slot.Resource];
+                if (slot.LastUse >= life.FirstUse || candidate.IsTexture != resource.IsTexture) continue;
+                const bool matches = resource.IsTexture ? TexturePoolKey{resource.TextureDesc} == TexturePoolKey{candidate.TextureDesc} : BufferPoolKey{resource.BufferDesc} == BufferPoolKey{candidate.BufferDesc};
+                if (!matches) continue;
+                resource.Physical = slot.Resource;
+                slot.LastUse = life.LastUse;
+                ++Report.ReusedResources;
+                break;
+            }
+            if (resource.Physical == r) slots.push_back({r, life.LastUse});
+        }
+        Report.Resources[r].PhysicalSlot = resource.Physical;
+    }
+}
+
+void RenderGraph::Impl::OptimizeRaster() {
+    vector<uint8_t> consumed(CompiledGraph.Versions.size(), 0);
+    for (const auto p : CompiledGraph.ExecutionOrder)
+        for (const auto value : CompiledGraph.Passes[p].Reads) consumed[value] = 1;
+    uint32_t previous = InvalidIndex;
+    for (const auto p : CompiledGraph.ExecutionOrder) {
+        auto& pass = Passes[p];
+        auto& report = Report.Passes[p];
+        if (report.Type != RgPassType::Raster) {
+            previous = InvalidIndex;
+            continue;
+        }
+        report.RasterGroup = p;
+        pass.MergeTail = p;
+        const auto discard = [&](uint32_t view, render::StoreAction& store) {
+            const auto resource = Views[view].Resource;
+            if (store != render::StoreAction::Store || Resources[resource].External()) return;
+            for (const auto value : CompiledGraph.Passes[p].Writes)
+                if (CompiledGraph.Versions[value].Resource == resource && consumed[value]) return;
+            store = render::StoreAction::Discard;
+            for (auto& cell : pass.Cells)
+                if (cell.Resource == resource && cell.Write) cell.ValidAfter = false;
+            report.Decisions.push_back(fmt::format("Discard store for {}: no live consumer", Resources[resource].Name));
+            ++Report.DiscardedStores;
+        };
+        if (Options.OptimizeAttachmentStores) {
+            for (auto& color : pass.Colors) discard(color->View, color->Desc.Store);
+            if (pass.DepthAttachment && !pass.DepthAttachment->Desc.ReadOnly) discard(pass.DepthAttachment->View, pass.DepthAttachment->Desc.Store);
+        }
+        const auto attachmentOnly = [&](const Pass& entry) {
+            if (entry.AllowUavWrites) return false;
+            for (const auto& access : entry.Accesses) {
+                if (!Resources[access.Resource].IsTexture || (access.State != uint32_t(render::TextureState::RenderTarget) && access.State != uint32_t(render::TextureState::DepthRead) && access.State != uint32_t(render::TextureState::DepthWrite))) return false;
+            }
+            return true;
+        };
+        const auto sameView = [&](uint32_t a, uint32_t b) { return Views[a].Resource == Views[b].Resource && Views[a].Key == Views[b].Key; };
+        bool merge = Options.MergeRasterPasses && previous != InvalidIndex && attachmentOnly(pass) && attachmentOnly(Passes[previous]);
+        if (merge) {
+            const auto& prior = Passes[previous];
+            merge = prior.Colors.size() == pass.Colors.size() && prior.DepthAttachment.has_value() == pass.DepthAttachment.has_value();
+            if (merge)
+                for (size_t i = 0; i < pass.Colors.size(); ++i)
+                    merge &= sameView(prior.Colors[i]->View, pass.Colors[i]->View) && pass.Colors[i]->Desc.Load == render::LoadAction::Load && prior.Colors[i]->Desc.Store == render::StoreAction::Store;
+            if (merge && pass.DepthAttachment) merge &= sameView(prior.DepthAttachment->View, pass.DepthAttachment->View) && prior.DepthAttachment->Desc.ReadOnly == pass.DepthAttachment->Desc.ReadOnly && pass.DepthAttachment->Desc.Load == render::LoadAction::Load && prior.DepthAttachment->Desc.Store == render::StoreAction::Store;
+        }
+        if (merge) {
+            report.RasterGroup = Report.Passes[previous].RasterGroup;
+            Passes[report.RasterGroup].MergeTail = p;
+            report.Decisions.push_back("Merged: adjacent raster passes preserve identical attachments and need no non-attachment barriers");
+            ++Report.MergedRasterPasses;
+        } else
+            report.Decisions.push_back(Options.MergeRasterPasses ? "Raster boundary: attachment identity, load/store, or non-attachment access requires separation" : "Raster merging disabled");
+        previous = p;
+    }
 }
 
 bool RenderGraph::Impl::Realize() {
@@ -1246,6 +1825,7 @@ bool RenderGraph::Impl::Realize() {
         auto& resource = Resources[r];
         if (resource.ExternalBuffer) NativeBuffers.emplace(resource.ExternalBuffer->Buffer, r);
         if (Report.Resources[r].FirstUse < 0) continue;
+        if (resource.Physical != r) continue;
         if (resource.IsTexture) {
             if (!resource.ExternalTexture) {
                 resource.PoolTexture = Pool.AcquireTexture(resource.TextureDesc, resource.Name, resource.ViewId);
@@ -1258,7 +1838,14 @@ bool RenderGraph::Impl::Realize() {
             const auto states = resource.ExternalTexture ? std::span<const render::TextureStates>{resource.ExternalTexture->SubresourceStates} : std::span<const render::TextureStates>{resource.PoolTexture->States};
             for (const auto state : states) resource.States.push_back(state.value());
         } else {
-            if (!resource.ExternalBuffer) {
+            if (resource.Readback) {
+                auto buffer = Device.CreateBuffer(resource.BufferDesc);
+                if (!buffer) {
+                    Error("ReadbackAllocation", "Readback allocation failed", InvalidIndex, r);
+                    return false;
+                }
+                resource.Readback->Buffer = shared_ptr<render::Buffer>(buffer.Release());
+            } else if (!resource.ExternalBuffer) {
                 resource.PoolBuffer = Pool.AcquireBuffer(resource.BufferDesc, resource.Name, resource.ViewId);
                 if (!resource.PoolBuffer) {
                     Error("BufferAllocation", "Buffer allocation failed before recording", InvalidIndex, r);
@@ -1266,12 +1853,22 @@ bool RenderGraph::Impl::Realize() {
                 }
                 Report.Resources[r].PhysicalId = resource.PoolBuffer->Id;
             }
-            resource.States.push_back((resource.ExternalBuffer ? resource.ExternalBuffer->State : resource.PoolBuffer->State).value());
+            resource.States.assign(1, (resource.ExternalBuffer ? resource.ExternalBuffer->State : resource.Readback ? InitialBufferState(resource.BufferDesc)
+                                                                                                                    : resource.PoolBuffer->State)
+                                          .value());
             NativeBuffers.emplace(resource.NativeBuffer(), r);
         }
     }
-    for (uint32_t p = 0; p < Passes.size(); ++p) {
-        if (!Report.Passes[p].Live) continue;
+    for (uint32_t r = 0; r < Resources.size(); ++r) {
+        auto& resource = Resources[r];
+        if (resource.Physical == r || Report.Resources[r].FirstUse < 0) continue;
+        auto& physical = Resources[resource.Physical];
+        resource.PoolTexture = physical.PoolTexture;
+        resource.PoolBuffer = physical.PoolBuffer;
+        resource.States = physical.States;
+        Report.Resources[r].PhysicalId = Report.Resources[resource.Physical].PhysicalId;
+    }
+    for (const uint32_t p : CompiledGraph.ExecutionOrder) {
         auto& pass = Passes[p];
         for (const auto& access : pass.Accesses)
             if (!Resources[access.Resource].IsTexture && access.Read)
@@ -1312,12 +1909,21 @@ bool RenderGraph::Impl::Realize() {
             }
         }
         if (Report.Passes[p].Type != RgPassType::Raster) continue;
+        const auto group = Report.Passes[p].RasterGroup;
+        if (group != p) {
+            pass.NativePass = Passes[group].NativePass;
+            pass.Framebuffer = Passes[group].Framebuffer;
+            pass.PassState = Passes[group].PassState;
+            continue;
+        }
+        const uint32_t tail = pass.MergeTail;
         vector<render::RenderPassColorAttachmentDescriptor> colors;
         vector<render::TextureView*> views;
         vector<render::TextureFormat> formats;
+        size_t colorIndex = 0;
         for (const auto& attachment : pass.Colors) {
             const auto& view = Views[attachment->View];
-            colors.push_back({view.Key.Format, pass.Samples, attachment->Desc.Load, attachment->Desc.Store});
+            colors.push_back({view.Key.Format, pass.Samples, attachment->Desc.Load, Passes[tail].Colors[colorIndex++]->Desc.Store});
             formats.push_back(view.Key.Format);
             views.push_back(view.Native.Get());
             pass.Clears.push_back(attachment->Desc.Clear);
@@ -1330,7 +1936,7 @@ bool RenderGraph::Impl::Realize() {
             const auto& view = Views[attachment.View];
             depthFormat = view.Key.Format;
             depthView = view.Native;
-            depth = render::RenderPassDepthStencilAttachmentDescriptor{view.Key.Format, pass.Samples, attachment.Desc.Load, attachment.Desc.Store, attachment.Desc.Load, attachment.Desc.Store, attachment.Desc.ReadOnly};
+            depth = render::RenderPassDepthStencilAttachmentDescriptor{view.Key.Format, pass.Samples, attachment.Desc.Load, Passes[tail].DepthAttachment->Desc.Store, attachment.Desc.Load, Passes[tail].DepthAttachment->Desc.Store, attachment.Desc.ReadOnly};
         }
         pass.NativePass = Registry.GetOrCreateRenderPass({colors, depth});
         if (!pass.NativePass) {
@@ -1351,11 +1957,22 @@ bool RenderGraph::Impl::Realize() {
 
 bool RenderGraph::Prepare() {
     auto& impl = *_impl;
+    for (uint32_t p : impl.CompiledGraph.ExecutionOrder) {
+        auto& pass = impl.Passes[p];
+        if (pass.UploadBytes.empty()) continue;
+        auto& resource = impl.Resources[pass.Accesses.front().Resource];
+        ScopedBufferMap map{resource.NativeBuffer(), {0, pass.UploadBytes.size()}};
+        if (!map) {
+            impl.Error("UploadMap", "Graph upload buffer mapping failed before recording", p);
+            return false;
+        }
+        std::memcpy(map.Data(), pass.UploadBytes.data(), pass.UploadBytes.size());
+    }
     for (auto& value : impl.GraphicsPrograms) {
         if (!impl.Report.Passes[value.Pass].Live) continue;
         const auto before = value.Program->GetGraphicsPipelineStateCount();
         value.PipelineState = value.Program->GetOrCreateGraphicsPipelineState(value.State, value.Layout, value.Topology,
-            *impl.Passes[value.Pass].PassState);
+                                                                              *impl.Passes[value.Pass].PassState);
         ++impl.Report.GraphicsPipelinePreparations;
         impl.Report.GraphicsPipelineCreations += static_cast<uint32_t>(value.Program->GetGraphicsPipelineStateCount() - before);
         if (!value.PipelineState) {
@@ -1515,40 +2132,56 @@ bool RenderGraph::Prepare() {
 void RenderGraph::Impl::PlanBarriers() {
     vector<vector<uint32_t>> states;
     vector<vector<uint8_t>> writes;
+    vector<vector<render::ShaderStages>> stages;
     for (const auto& resource : Resources) {
         states.push_back(resource.States);
-        // Initial states may contain writes from an earlier graph or flight.
         writes.emplace_back(resource.States.size(), 1);
+        stages.emplace_back(resource.States.size(), render::ShaderStage::UNKNOWN);
     }
-    for (uint32_t p = 0; p < Passes.size(); ++p) {
-        if (!Report.Passes[p].Live) continue;
+    for (const uint32_t p : CompiledGraph.ExecutionOrder) {
         auto& pass = Passes[p];
         vector<uint32_t> uavResources;
+        unordered_set<uint64_t> visited;
+        const bool continuation = Report.Passes[p].Type == RgPassType::Raster && Report.Passes[p].RasterGroup != p;
         for (const auto& access : pass.Cells) {
             auto& resource = Resources[access.Resource];
-            auto& state = states[access.Resource][access.Cell];
+            const auto physical = resource.Physical, cell = resource.PhysicalCell(access.Cell);
+            if (!visited.insert(uint64_t(physical) << 32 | cell).second) continue;
+            bool write = false;
+            render::ShaderStages afterStages;
+            for (const auto& candidate : pass.Cells)
+                if (candidate.Resource == access.Resource && resource.PhysicalCell(candidate.Cell) == cell) {
+                    write |= candidate.Write;
+                    afterStages |= candidate.Stages;
+                }
+            auto& state = states[physical][cell];
+            auto& beforeStages = stages[physical][cell];
             const uint32_t uav = resource.IsTexture ? uint32_t(render::TextureState::UnorderedAccess) : uint32_t(render::BufferState::UnorderedAccess);
-            // Vulkan also requires memory dependencies for consecutive writes with
-            // unchanged layouts/access states. D3D12 elides these non-UAV barriers.
-            const bool sameStateWrite = state != uav && (writes[access.Resource][access.Cell] || access.Write);
-            if (state != access.State || sameStateWrite) {
-                if (resource.IsTexture) {
-                    pass.Barriers.push_back(render::BarrierTextureDescriptor{.Target = resource.NativeTexture(), .Before = static_cast<render::TextureState>(state), .After = static_cast<render::TextureState>(access.State), .IsSubresourceBarrier = true, .Range = {access.Cell / resource.TextureDesc.MipLevels, 1, access.Cell % resource.TextureDesc.MipLevels, 1}});
-                } else
-                    pass.Barriers.push_back(render::BarrierBufferDescriptor{.Target = resource.NativeBuffer(), .Before = static_cast<render::BufferState>(state), .After = static_cast<render::BufferState>(access.State)});
-                Report.Barriers.push_back({p, access.Resource, access.Cell, state, access.State, false});
+            const bool sameStateWrite = state != uav && (writes[physical][cell] || write);
+            if (!continuation && (state != access.State || sameStateWrite || !Options.EliminateBarriers)) {
+                if (resource.IsTexture)
+                    pass.Barriers.push_back(render::BarrierTextureDescriptor{.Target = resource.NativeTexture(), .Before = static_cast<render::TextureState>(state), .After = static_cast<render::TextureState>(access.State), .IsSubresourceBarrier = true, .Range = {cell / resource.TextureDesc.MipLevels, 1, cell % resource.TextureDesc.MipLevels, 1}, .BeforeStages = beforeStages, .AfterStages = afterStages});
+                else
+                    pass.Barriers.push_back(render::BarrierBufferDescriptor{.Target = resource.NativeBuffer(), .Before = static_cast<render::BufferState>(state), .After = static_cast<render::BufferState>(access.State), .BeforeStages = beforeStages, .AfterStages = afterStages});
+                Report.Barriers.push_back({p, access.Resource, cell, state, access.State, false,
+                                           !resource.IsTexture ? "Whole-buffer state; content dependencies retain byte ranges" : resource.AspectCount() == 2 ? "Coupled depth/stencil native layout; content dependencies retain aspects"
+                                                                                                                                                             : "Exact mip/layer"});
                 ++Report.TransitionBarriers;
-            } else if (state == uav && (writes[access.Resource][access.Cell] || access.Write))
+            } else if (!continuation && state == uav && (writes[physical][cell] || write))
                 AddUnique(uavResources, access.Resource);
+            if (state == access.State && !write && !writes[physical][cell])
+                beforeStages |= afterStages;
+            else
+                beforeStages = afterStages;
             state = access.State;
-            writes[access.Resource][access.Cell] = access.Write ? 1 : 0;
+            writes[physical][cell] = write ? 1 : 0;
         }
         for (const auto r : uavResources) {
             auto& resource = Resources[r];
             render::Resource* native = resource.IsTexture ? static_cast<render::Resource*>(resource.NativeTexture()) : static_cast<render::Resource*>(resource.NativeBuffer());
             pass.Barriers.push_back(render::BarrierUavDescriptor{native});
-            Report.Barriers.push_back({p, r, 0, resource.IsTexture ? uint32_t(render::TextureState::UnorderedAccess) : uint32_t(render::BufferState::UnorderedAccess),
-                                       resource.IsTexture ? uint32_t(render::TextureState::UnorderedAccess) : uint32_t(render::BufferState::UnorderedAccess), true});
+            const auto state = resource.IsTexture ? uint32_t(render::TextureState::UnorderedAccess) : uint32_t(render::BufferState::UnorderedAccess);
+            Report.Barriers.push_back({p, r, 0, state, state, true, "UAV memory dependency"});
             ++Report.UavBarriers;
         }
     }
@@ -1570,32 +2203,49 @@ RenderGraphExecutionResult RenderGraph::Execute(render::CommandBuffer& command) 
     if (!measure(impl.Report.Cpu.CompileNanoseconds, [&] { return Compile(); }) ||
         !measure(impl.Report.Cpu.RealizeNanoseconds, [&] { return impl.Realize(); }) ||
         !measure(impl.Report.Cpu.PrepareNanoseconds, [&] { return Prepare(); })) {
+        for (auto& pass : impl.Passes)
+            if (pass.Ticket._state) pass.Ticket._state->Cancel();
         impl.Pool.EndGraph();
         impl.Report.Pool = impl.Pool.GetStats();
         return {};
     }
     const auto recordStart = std::chrono::steady_clock::now();
     impl.PlanBarriers();
-    RenderGraphExecutionResult result{true, false};
-    for (uint32_t p = 0; p < impl.Passes.size(); ++p) {
+    RenderGraphExecutionResult result{true, false, {}};
+    Nullable<unique_ptr<render::GraphicsCommandEncoder>> rasterEncoder{nullptr};
+    for (size_t order = 0; order < impl.CompiledGraph.ExecutionOrder.size(); ++order) {
+        const uint32_t p = impl.CompiledGraph.ExecutionOrder[order];
         auto& report = impl.Report.Passes[p];
         if (!report.Live) continue;
         auto& pass = impl.Passes[p];
         command.PushDebugGroup(report.Name);
         result.CommandsRecorded = true;
-        if (!pass.Barriers.empty()) command.ResourceBarrier(pass.Barriers);
-        for (const auto& access : pass.Cells) impl.Resources[access.Resource].States[access.Cell] = access.State;
+        if (!pass.Barriers.empty()) {
+            if (impl.Options.BatchBarriers) {
+                command.ResourceBarrier(pass.Barriers);
+                ++impl.Report.BarrierBatches;
+            } else
+                for (const auto& barrier : pass.Barriers) {
+                    command.ResourceBarrier(std::span{&barrier, 1});
+                    ++impl.Report.BarrierBatches;
+                }
+        }
+        for (const auto& access : pass.Cells) {
+            const auto& resource = impl.Resources[access.Resource];
+            impl.Resources[resource.Physical].States[resource.PhysicalCell(access.Cell)] = access.State;
+        }
         if (report.Type == RgPassType::Raster) {
             const auto depthClear = pass.DepthAttachment ? std::optional{pass.DepthAttachment->Desc.Clear} : std::nullopt;
-            auto encoder = command.BeginRenderPass({pass.NativePass.Get(), pass.Framebuffer.Get(), pass.Clears,
-                                                    depthClear, report.Name, pass.AllowUavWrites});
-            if (!encoder) {
+            if (report.RasterGroup == p) rasterEncoder = command.BeginRenderPass({pass.NativePass.Get(), pass.Framebuffer.Get(), pass.Clears,
+                                                                                  depthClear, report.Name, pass.AllowUavWrites});
+            if (!rasterEncoder) {
                 impl.Error("BeginRenderPass", "Encoder creation failed after barriers; actual states are committed for host recovery", p);
                 result.Success = false;
             } else {
-                RenderGraphRasterContext context(*this, p, *encoder);
+                RenderGraphRasterContext context(*this, p, *rasterEncoder);
                 if (pass.Data) pass.Data->Run(context);
-                command.EndRenderPass(encoder.Release());
+                const bool last = order + 1 == impl.CompiledGraph.ExecutionOrder.size() || impl.Report.Passes[impl.CompiledGraph.ExecutionOrder[order + 1]].RasterGroup != report.RasterGroup;
+                if (last || !impl.Report.Diagnostics.empty()) command.EndRenderPass(rasterEncoder.Release());
             }
         } else if (report.Type == RgPassType::Compute) {
             auto encoder = command.BeginComputePass();
@@ -1633,8 +2283,13 @@ RenderGraphExecutionResult RenderGraph::Execute(render::CommandBuffer& command) 
         }
         command.PopDebugGroup();
         if (!impl.Report.Diagnostics.empty()) result.Success = false;
-        if (!result.Success) break;
+        if (!result.Success) {
+            for (const auto& access : pass.Cells)
+                if (access.Write) impl.Resources[access.Resource].Valid[access.Cell] = 0;
+            break;
+        }
         report.Executed = true;
+        if (pass.Ticket._state) pass.Ticket._state->Record();
         for (const auto& access : pass.Cells)
             if (access.Write) {
                 auto& resource = impl.Resources[access.Resource];
@@ -1642,24 +2297,62 @@ RenderGraphExecutionResult RenderGraph::Execute(render::CommandBuffer& command) 
                 resource.Written = access.ValidAfter;
             }
     }
-    impl.CommitStates();
+    result.Submission = make_shared<FrameSubmission>(impl.GenerationSerial);
+    result.Submission->Record();
+    const auto retained = _impl;
+    result.Submission->OnSubmitted = [retained] {
+        retained->CommitStates();
+        for (auto& pass : retained->Passes)
+            if (pass.Ticket._state) {
+                if (pass.Ticket.Status() == FrameOperationStatus::Recorded)
+                    pass.Ticket._state->Submit(retained->GenerationSerial);
+                else
+                    pass.Ticket._state->Cancel();
+            }
+    };
+    const auto serial = impl.GenerationSerial;
+    result.Submission->OnCompleted = [retained, serial](bool success) {
+        for (auto& pass : retained->Passes)
+            if (pass.Ticket._state) {
+                if (pass.Ticket.Status() == FrameOperationStatus::Submitted)
+                    pass.Ticket._state->Complete(serial, success);
+                else
+                    pass.Ticket._state->Cancel();
+            }
+    };
     impl.Pool.EndGraph();
     impl.Report.Pool = impl.Pool.GetStats();
     impl.Report.Cpu.RecordNanoseconds = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - recordStart).count();
     return result;
 }
 
-bool RenderGraph::WasWritten(RgTextureHandle handle) const noexcept {
+std::optional<render::TextureStates> RenderGraph::RecordedTextureState(RgTextureValue handle, uint32_t subresource) const noexcept {
+    const auto& impl = *_impl;
+    if (handle.Generation != impl.Generation || handle.Index >= impl.Resources.size()) return {};
+    if (impl.Resources[handle.Index].Port && handle.Version < impl.Resources[handle.Index].ResolvedValues.size()) handle.Index = impl.Resources[handle.Index].ResolvedValues[handle.Version].first;
+    if (handle.Index >= impl.Resources.size()) return {};
+    const auto& resource = impl.Resources[handle.Index];
+    if (!resource.IsTexture || resource.Physical >= impl.Resources.size()) return {};
+    const auto& states = impl.Resources[resource.Physical].States;
+    if (subresource >= states.size()) return {};
+    return static_cast<render::TextureState>(states[subresource]);
+}
+bool RenderGraph::WasWritten(RgTextureValue handle) const noexcept {
     return handle.Generation == _impl->Generation && handle.Index < _impl->Resources.size() && _impl->Resources[handle.Index].IsTexture && _impl->Resources[handle.Index].Written;
 }
-std::optional<render::TextureDescriptor> RenderGraph::GetTextureDescriptor(RgTextureHandle handle) const noexcept {
+bool RenderGraph::WasWritten(const RenderExternalTexture& texture) const noexcept {
+    for (const auto& resource : _impl->Resources)
+        if (resource.ExternalTexture && resource.ExternalTexture->Texture == texture.Texture) return resource.Written;
+    return false;
+}
+std::optional<render::TextureDescriptor> RenderGraph::GetTextureDescriptor(RgTextureValue handle) const noexcept {
     if (handle.Generation != _impl->Generation || handle.Index >= _impl->Resources.size() || !_impl->Resources[handle.Index].IsTexture) return {};
     return _impl->Resources[handle.Index].TextureDesc;
 }
 std::optional<RgTextureParameterBinding> RenderGraph::GetTextureViewBinding(RgTextureViewHandle handle) const noexcept {
     if (handle.Generation != _impl->Generation || handle.Index >= _impl->Views.size()) return {};
     const auto& view = _impl->Views[handle.Index];
-    return RgTextureParameterBinding{{view.Resource, _impl->Generation}, {view.Key.Dimension, view.Key.Format, view.Key.Range}};
+    return RgTextureParameterBinding{{view.Resource, _impl->Generation, view.Version}, {view.Key.Dimension, view.Key.Format, view.Key.Range}};
 }
 void RenderGraph::AddDiagnostic(std::string_view code, std::string_view message) {
     _impl->Error(code, message);
@@ -1673,9 +2366,14 @@ render::TextureView* RenderGraph::ResolveView(uint32_t pass, RgTextureViewHandle
     if (handle.Generation != impl.Generation || std::find(declared.begin(), declared.end(), handle.Index) == declared.end() || !impl.Views[handle.Index].Native) RADRAY_ABORT("RenderGraph texture view was not declared by this pass");
     return impl.Views[handle.Index].Native.Get();
 }
-render::Buffer* RenderGraph::ResolveBuffer(uint32_t pass, RgBufferHandle handle) const {
+render::Buffer* RenderGraph::ResolveBuffer(uint32_t pass, RgBufferValue handle) const {
     const auto& impl = *_impl;
     const auto& declared = impl.Passes[pass].DeclaredBuffers;
+    if (handle.Generation == impl.Generation && handle.Index < impl.Resources.size() && impl.Resources[handle.Index].Port && handle.Version < impl.Resources[handle.Index].ResolvedValues.size()) {
+        const auto value = impl.Resources[handle.Index].ResolvedValues[handle.Version];
+        handle.Index = value.first;
+        handle.Version = value.second;
+    }
     if (handle.Generation != impl.Generation || std::find(declared.begin(), declared.end(), handle.Index) == declared.end()) RADRAY_ABORT("RenderGraph buffer was not declared by this pass");
     return impl.Resources[handle.Index].NativeBuffer();
 }
@@ -1767,7 +2465,7 @@ bool RenderGraph::ValidateNativeBuffer(uint32_t pass, render::Buffer* buffer, Rg
     const uint32_t required = static_cast<uint32_t>(BufferAccessInfo(access).first);
     if (declared == reads.end() || (declared->second & required) != required) {
         impl.Error("UndeclaredGeometryRead", "Graph geometry requires a matching Vertex or Index read declaration in this pass",
-            pass, tracked->second);
+                   pass, tracked->second);
         return false;
     }
     return true;
@@ -1793,7 +2491,7 @@ void RenderGraphComputeCommands::DispatchIndirect(RgIndirectArgumentsHandle argu
     _graph.ExecuteIndirect(_pass, arguments, RgIndirectCommand::Dispatch, nullptr, &_encoder);
 }
 render::TextureView* RenderGraphRasterContext::GetTextureView(RgTextureViewHandle handle) const { return _graph.ResolveView(_pass, handle); }
-render::Buffer* RenderGraphRasterContext::GetBuffer(RgBufferHandle handle) const { return _graph.ResolveBuffer(_pass, handle); }
+render::Buffer* RenderGraphRasterContext::GetBuffer(RgBufferValue handle) const { return _graph.ResolveBuffer(_pass, handle); }
 void RenderGraphRasterContext::BindParameterSet(RgParameterSetHandle handle) noexcept {
     _graph.BindParameterSet(_pass, handle, &_encoder._encoder, nullptr);
 }
@@ -1802,7 +2500,7 @@ void RenderGraphRasterContext::BindGraphicsProgram(RgGraphicsProgramHandle handl
 }
 const GraphicsPassState& RenderGraphRasterContext::PassState() const noexcept { return *_graph._impl->Passes[_pass].PassState; }
 render::TextureView* RenderGraphComputeContext::GetTextureView(RgTextureViewHandle handle) const { return _graph.ResolveView(_pass, handle); }
-render::Buffer* RenderGraphComputeContext::GetBuffer(RgBufferHandle handle) const { return _graph.ResolveBuffer(_pass, handle); }
+render::Buffer* RenderGraphComputeContext::GetBuffer(RgBufferValue handle) const { return _graph.ResolveBuffer(_pass, handle); }
 void RenderGraphComputeContext::BindParameterSet(RgParameterSetHandle handle) noexcept {
     _graph.BindParameterSet(_pass, handle, nullptr, &_encoder._encoder);
 }

@@ -99,7 +99,7 @@ ImGuiTextureLease::ImGuiTextureLease(unique_ptr<render::Texture> texture, render
 }
 ImGuiTextureLease::~ImGuiTextureLease() = default;
 ImGuiSystem::Impl::Impl(Application& app)
-    : App(app), Thread(std::this_thread::get_id()), Graph{*app.GetDevice(), *app.GetRenderSystem()->_shaderCache, Error, {}, {}, {}} {}
+    : App(app), Thread(std::this_thread::get_id()), Graph{*app.GetDevice(), [renderer = app.GetRenderSystem()](std::span<const byte> bytes, const shader::GpuArtifactHash& identity) { return renderer->GetOrCreateShaderProgram(bytes, identity); }, Error, {}, {}} {}
 ImGuiSystem::ImGuiSystem(Application& app) : _impl(make_unique<Impl>(app)) {}
 ImGuiGraphFrame ImGuiSystem::GetGraphFrame(uint32_t flight) noexcept {
     RADRAY_ASSERT(flight < _impl->Flights.size());
@@ -486,6 +486,7 @@ void ImGuiSystem::BeginUpdate(uint32_t flightIndex) {
     ImGui::SetCurrentContext(self.Context.Get());
     for (auto& flight : self.Flights) {
         if (!flight->Completed.exchange(false, std::memory_order_acq_rel) || !flight->GraphSuccess) continue;
+        if (std::any_of(flight->UploadTickets.begin(), flight->UploadTickets.end(), [](const auto& ticket) { return ticket.Status() != FrameOperationStatus::GpuCompleted; })) continue;
         for (const auto& request : flight->Requests) {
             auto it = std::find_if(self.Pending.begin(), self.Pending.end(), [&](const auto& pair) { return pair.second.Id == request.Id; });
             if (it == self.Pending.end() || it->second.Version != request.Version) continue;
@@ -512,11 +513,9 @@ void ImGuiSystem::BeginUpdate(uint32_t flightIndex) {
     flight.Requests.clear();
     flight.Retained.clear();
     flight.ExternalTextures.clear();
-    flight.ExternalBuffers.clear();
-    flight.Uploads.clear();
     flight.AssetStates.clear();
     flight.AssetValid.clear();
-    flight.UploadPasses.clear();
+    flight.UploadTickets.clear();
     flight.GraphSuccess = false;
     flight.Valid = true;
 }
@@ -739,20 +738,13 @@ void ImGuiSystem::CaptureFrame(uint32_t flightIndex) {
 void ImGuiSystem::OnFlightsComplete(std::span<const FlightCompletion> completions) noexcept {
     for (const auto& completion : completions) {
         if (completion.FlightIndex < _impl->Flights.size()) {
-            _impl->Flights[completion.FlightIndex]->Completed.store(completion.GpuWorkCompleted, std::memory_order_release);
+            auto& flight = *_impl->Flights[completion.FlightIndex];
+            if (completion.FrameSerial == flight.FrameSerial) flight.Completed.store(completion.GpuWorkCompleted, std::memory_order_release);
         }
     }
 }
 void ImGuiSystem::RequestOutputs(uint32_t flight, RenderWorkloadBuilder& builder) const {
     for (const auto& viewport : _impl->Flights[flight]->Viewports) builder.RequestOutput(viewport.Output);
-}
-
-void ImGuiOnlyPipeline::PrepareFrame(RenderPrepareContext& context) { _system.RequestOutputs(context.App.FlightIndex, context.Workloads); }
-void ImGuiOnlyPipeline::Render(RenderPipelineContext& context) {
-    auto graph = context.CreateRenderGraph("ImGuiOnly");
-    ImGuiGraph::BuildGraph(graph, context, _system.GetGraphFrame(context.FlightIndex()));
-    const auto result = context.ExecuteGraph(graph);
-    ImGuiGraph::CompleteGraph(graph, context, _system.GetGraphFrame(context.FlightIndex()), result.Success);
 }
 
 }  // namespace radray

@@ -27,6 +27,7 @@ RenderSystem::~RenderSystem() noexcept {
 
 void RenderSystem::OnShutdown() noexcept {
     ReleaseAllScenes();
+    _graphComposer.reset();
     _pipeline.reset();
     _graphRuntime.reset();
     _viewStates.reset();
@@ -63,12 +64,18 @@ Nullable<ShaderProgram*> RenderSystem::GetOrCreateShaderProgram(const ShaderProg
     return _shaderCache ? _shaderCache->GetOrCreateShaderProgram(request) : nullptr;
 }
 Nullable<ShaderProgram*> RenderSystem::GetOrCreateShaderProgram(std::span<const byte> bytes, const shader::GpuArtifactHash& identity,
-                                                               const render::ShaderProgramLayoutRecipe& recipe) {
+                                                                const render::ShaderProgramLayoutRecipe& recipe) {
     return _shaderCache ? _shaderCache->GetOrCreateShaderProgram(bytes, identity, recipe) : nullptr;
 }
 size_t RenderSystem::GetShaderProgramCacheSize() const noexcept { return _shaderCache ? _shaderCache->GetProgramCount() : 0; }
 size_t RenderSystem::GetShaderArtifactCacheSize() const noexcept { return _shaderCache ? _shaderCache->GetArtifactCount() : 0; }
 bool RenderSystem::InvalidateShaderSource(std::string_view sourceName) { return _shaderCache && _shaderCache->InvalidateSource(sourceName); }
+
+bool RenderSystem::SetGraphComposer(unique_ptr<FrameGraphComposer> composer) noexcept {
+    if (std::this_thread::get_id() != _gameThread || (_pipelineStarted.load(std::memory_order_acquire) && !_pipelineShutdownIdle)) return false;
+    _graphComposer = std::move(composer);
+    return true;
+}
 
 bool RenderSystem::SetPipeline(unique_ptr<RenderPipeline> pipeline) noexcept {
     if (std::this_thread::get_id() != _gameThread) {
@@ -101,14 +108,12 @@ void RenderSystem::PrepareFrame(const AppUpdateContext& ctx) {
     auto& outputs = _frameOutputInfos[ctx.FlightIndex];
     outputs = _presentation->GetOutputInfos(_outputs);
     RenderWorkloadBuilder workloads(_framePlans[ctx.FlightIndex], outputs);
-#ifdef RADRAY_ENABLE_IMGUI
-    if (auto ui = _app->GetImGuiSystem()) ui->RequestOutputs(ctx.FlightIndex, workloads);
-#endif
     RenderPrepareContext prepare{ctx, outputs, workloads, _retainedAssets[ctx.FlightIndex]};
     if (_pipeline)
         _pipeline->PrepareFrame(prepare);
     else
         workloads.AddPresentationOutputs();
+    if (_graphComposer) _graphComposer->PrepareFrame(prepare);
     for (const auto& diagnostic : _framePlans[ctx.FlightIndex].Diagnostics) RADRAY_ERR_LOG("Render workload: {}", diagnostic);
 }
 
@@ -116,7 +121,7 @@ void RenderSystem::Render(AppFrameContext& ctx) {
     _pipelineStarted.store(true, std::memory_order_release);
     if (!_graphRuntime || !_viewStates) return;
     const uint32_t flight = ctx.FlightIndex();
-    const uint64_t serial = ++_frameSerial;
+    const uint64_t serial = ctx.FrameSerial();
     auto& graphResources = _graphRuntime->BeginFlight(flight, serial, ctx.GetHostWrites());
     _viewStates->BeginFlight(flight, serial);
     auto& report = _graphReports[flight];
@@ -141,13 +146,31 @@ void RenderSystem::Render(AppFrameContext& ctx) {
         families.push_back(std::move(*family));
     }
     RenderPipelineContext pipelineContext(ctx, graphResources, *_renderPassRegistry, *_viewStates, serial, families, surfaces, report);
-    if (_pipeline) _pipeline->Render(pipelineContext);
+    auto graph = pipelineContext.CreateRenderGraph("Frame");
+    FrameGraph frame{pipelineContext, graph};
+    if (_graphComposer)
+        _graphComposer->Compose(frame, _pipeline.get());
+    else
+        ComposeDefaultFrameGraph(frame, _pipeline.get());
+    frame.Expand();
+    const auto result = pipelineContext.ExecuteGraph(graph);
+    frame.Recorded(result);
     for (auto& surface : surfaces) {
         if (!surface.Written) ClearTarget(ctx, surface);
         TransitionSurface(ctx, surface, surface.RequiredFinalState);
-        _outputs.CommitExternalState(surface);
     }
-    _presentation->Commit(outputFrame);
+    auto submission = result.Submission;
+    if (!submission) {
+        submission = make_shared<FrameSubmission>(serial);
+        submission->Record();
+        ctx.TrackSubmission(submission);
+    }
+    const auto prior = submission->OnSubmitted;
+    submission->OnSubmitted = [this, prior, outputFrame = std::move(outputFrame)] {
+        if (prior) prior();
+        for (const auto& surface : outputFrame.Surfaces) _outputs.CommitExternalState(surface);
+        _presentation->Commit(outputFrame);
+    };
 }
 
 void RenderSystem::ClearTarget(AppFrameContext& ctx, RenderSurfaceFrame& target) {

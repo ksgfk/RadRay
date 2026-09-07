@@ -37,11 +37,13 @@ protected:
         if (result.CommandsRecorded) {
             auto* raw = command.Get();
             Context.Queue->Submit({.CmdBuffers = std::span{&raw, 1}});
+            RenderGraphTestDriver::Submitted(raw);
             Context.Queue->Wait();
+            RenderGraphTestDriver::Completed(raw);
         }
         return result.Success;
     }
-    void HostRead(RenderGraph& graph, RgBufferHandle buffer) {
+    void HostRead(RenderGraph& graph, RgBufferValue buffer) {
         graph.AddComputePass<EmptyGraphPass>("host visibility", [=](EmptyGraphPass&, RenderGraphComputeBuilder& builder) {
             builder.ReadBuffer(buffer, RgBufferAccess::HostRead);
             builder.SetSideEffect(); }, +[](const EmptyGraphPass&, RenderGraphComputeContext&) {});

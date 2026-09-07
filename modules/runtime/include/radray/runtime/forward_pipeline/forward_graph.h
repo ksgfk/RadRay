@@ -22,18 +22,18 @@ struct ForwardGraphStageInputs {
     std::string_view Name;
     render::RenderBackend Backend{render::RenderBackend::MAX_COUNT};
     std::span<const ForwardGraphView> Views;
-    RgTextureHandle Color{};
-    RgTextureHandle Depth{};
+    RgTextureValue Color{};
+    RgTextureValue Depth{};
     RgColorAttachmentDesc ColorAttachment{};
     RgDepthAttachmentDesc DepthAttachment{};
     DrawExecutionStats* Execution{nullptr};
     bool PreserveEmptyPass{false};
-    std::span<const RgTextureHandle> AuxiliaryColors{};
+    std::span<const RgTextureValue> AuxiliaryColors{};
 };
 
 struct ForwardGraphStageOutput {
-    RgTextureHandle Color{};
-    RgTextureHandle Depth{};
+    RgTextureValue Color{};
+    RgTextureValue Depth{};
     RgPassHandle Pass{};
     bool Success{false};
 };

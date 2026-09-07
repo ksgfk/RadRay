@@ -108,7 +108,7 @@ build_ui/_build/Debug/example_imgui.exe --d3d12 --font C:/Windows/Fonts/msyh.ttc
 ```
 
 字体路径为本机示例；没有该字体时换成应用提供的 TTF/OTF/TTC。不指定 `--frames` 时交互运行，
-`--no-viewports` 只保留主窗口；样例始终使用 ImGuiOnlyPipeline，CPU 图片通过 ImGui 动态纹理上传。
+`--no-viewports` 只保留主窗口；样例使用 Application 默认的 ImGuiFrameComposer，CPU 图片通过 ImGui 动态纹理上传。
 Lambert、Forward 与 Tidal 在编译开启 ImGui 时默认显示 UI，`--no-imgui` 可关闭实例。Graph 图片的
 自定义 producer 保留在 ImGuiRenderingTest 中。
 
@@ -122,12 +122,12 @@ compiler/JIT/tools 关闭时纯 UI 使用内置 artifact，不发现、链接或
 开启 compiler/tools 的构建中显式运行以下目标；普通 ALL 构建不会触发它们：
 
 ```powershell
-cmake --build build_ui --config Debug --target radray_imgui_shaders_check
-cmake --build build_ui --config Debug --target radray_imgui_shaders_regenerate
+cmake --build build_ui --config Debug --target radray_builtin_shaders_check
+cmake --build build_ui --config Debug --target radray_builtin_shaders_regenerate
 ```
 
 生成器记录源与 include 的 hash、生成命令和 artifact 身份；`check` 重新编译后逐字节比较。
-变更 shader、shader contract 或固定 SDK 后先 regenerate，再 check，生成物随可选模块提交。
+变更 shader、shader contract 或固定 SDK 后先 regenerate，再 check，UI 与通用 blit 生成物分别提交；blit 在 ImGui OFF 时同样可用。
 
 验收按 Debug 构建/专项/全量测试、Release 构建/测试、独立裁剪配置的顺序串行执行。
 独立配置覆盖 OFF、ON+FreeType、ON+STB、Demo/Debug OFF、compiler/JIT OFF、D3D12-only 和
@@ -156,6 +156,7 @@ FreeType 依赖隔离还应检查生成的 `ftoption.h` 中外部功能宏与 fr
 | `test_device_capabilities` | `TextureDescriptorValidation`, `DeviceCapabilitiesTest` |
 | `test_render_foundation` | `RenderWorkloadTest`, `RenderFoundationTest` |
 | `test_render_graph_compile` | `RenderGraphCompileTest` |
+| `test_render_graph_compiler`（纯 CPU IR） | `RenderGraphCompilerTest` |
 | `test_render_graph` | `RenderGraphTest` |
 | `test_graph_contracts` | `GraphContractTest`（整数数据链、Clear/Load、layer/mip、间接工作量） |
 | `test_graph_preparation` | `GraphPreparationTest`（分配/参数故障注入与恢复） |

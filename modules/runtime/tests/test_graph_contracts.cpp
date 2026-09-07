@@ -22,10 +22,11 @@ TEST_P(GraphContractTest, G06InitializedPartialCopyPreservesEightSentinelBytes) 
     RenderExternalBuffer b{patch.Get(), patch->GetDesc(), render::BufferState::HostWrite, true};
     RenderExternalBuffer c{readback.Get(), readback->GetDesc(), render::BufferState::CopyDestination};
     auto graph = MakeGraph("partial copy sentinel");
-    const auto target = graph.CreateBuffer({16, render::MemoryType::Device, render::BufferUse::CopyDestination | render::BufferUse::CopySource, {}}, "target");
+    auto target = graph.CreateBuffer({16, render::MemoryType::Device, render::BufferUse::CopyDestination | render::BufferUse::CopySource, {}}, "target");
     graph.AddCopyBufferPass("initialize", graph.ImportBuffer(a, "initial", RenderGraphExternalAccess::ReadOnly), target, 16);
+    target = graph.NextVersion(target);
     graph.AddCopyBufferPass("replace first eight", graph.ImportBuffer(b, "patch", RenderGraphExternalAccess::ReadOnly), target, 8);
-    const auto host = graph.ImportBuffer(c, "readback", RenderGraphExternalAccess::ObservableOutput);
+    const auto host = graph.NextVersion(graph.ImportBuffer(c, "readback", RenderGraphExternalAccess::ObservableOutput));
     graph.AddCopyBufferPass("read all", target, host, 16);
     HostRead(graph, host);
     ASSERT_TRUE(Run(graph)) << graph.GetReport().ToText();
@@ -98,7 +99,7 @@ VK_BINDING(0, 0) StructuredBuffer<uint> Values : register(t0);
     auto readback = device.CreateBuffer({pitch * 64, render::MemoryType::ReadBack, render::BufferUse::MapRead | render::BufferUse::CopyDestination, {}});
     ASSERT_TRUE(readback);
     RenderExternalBuffer external{readback.Get(), readback->GetDesc(), render::BufferState::CopyDestination};
-    const auto host = graph.ImportBuffer(external, "readback", RenderGraphExternalAccess::ObservableOutput);
+    const auto host = graph.NextVersion(graph.ImportBuffer(external, "readback", RenderGraphExternalAccess::ObservableOutput));
     graph.AddCopyTextureToBufferPass("copy", output, host);
     HostRead(graph, host);
     ASSERT_TRUE(Run(graph)) << graph.GetReport().ToText();
@@ -122,13 +123,16 @@ TEST_P(GraphContractTest, G02ClearOverwriteAndLoadPreserveObservablePixels) {
         auto graph = MakeGraph("G02 content versions");
         auto descriptor = IntegerImage();
         descriptor.Format = render::TextureFormat::R32_FLOAT;
-        const auto texture = graph.CreateTexture(descriptor, "versioned color");
-        for (uint32_t p = 0; p < 2; ++p) graph.AddRasterPass<test::EmptyGraphPass>(p ? "B" : "A", [=](test::EmptyGraphPass&, RenderGraphRasterBuilder& builder) { builder.SetColorAttachment(0, texture, {.Load = p ? action : render::LoadAction::Clear, .Clear = {p ? .75f : .25f, 0, 0, 0}}); }, +[](const test::EmptyGraphPass&, RenderGraphRasterContext&) {});
+        auto texture = graph.CreateTexture(descriptor, "versioned color");
+        for (uint32_t p = 0; p < 2; ++p) {
+            texture = graph.NextVersion(texture);
+            graph.AddRasterPass<test::EmptyGraphPass>(p ? "B" : "A", [=](test::EmptyGraphPass&, RenderGraphRasterBuilder& builder) { builder.SetColorAttachment(0, texture, {.Load = p ? action : render::LoadAction::Clear, .Clear = {p ? .75f : .25f, 0, 0, 0}}); }, +[](const test::EmptyGraphPass&, RenderGraphRasterContext&) {});
+        }
         const auto pitch = Align(uint64_t{64 * 4}, device.GetDetail().TextureDataPitchAlignment);
         auto readback = device.CreateBuffer({pitch * 64, render::MemoryType::ReadBack, render::BufferUse::MapRead | render::BufferUse::CopyDestination, {}});
         ASSERT_TRUE(readback);
         RenderExternalBuffer external{readback.Get(), readback->GetDesc(), render::BufferState::CopyDestination};
-        const auto host = graph.ImportBuffer(external, "readback", RenderGraphExternalAccess::ObservableOutput);
+        const auto host = graph.NextVersion(graph.ImportBuffer(external, "readback", RenderGraphExternalAccess::ObservableOutput));
         graph.AddCopyTextureToBufferPass("observable readback", texture, host);
         HostRead(graph, host);
         ASSERT_TRUE(Run(graph)) << graph.GetReport().ToText();
@@ -158,7 +162,7 @@ TEST_P(GraphContractTest, G03InterleavedThreeLayersFourMipsHaveIndependentConten
                 readbacks[cell] = device.CreateBuffer({pitch * (16 >> mip), render::MemoryType::ReadBack, render::BufferUse::MapRead | render::BufferUse::CopyDestination, {}}).Release();
                 ASSERT_TRUE(readbacks[cell]);
                 imports[cell] = {readbacks[cell].get(), readbacks[cell]->GetDesc(), render::BufferState::CopyDestination};
-                const auto host = graph.ImportBuffer(imports[cell], fmt::format("readback {}", cell), RenderGraphExternalAccess::ObservableOutput);
+                const auto host = graph.NextVersion(graph.ImportBuffer(imports[cell], fmt::format("readback {}", cell), RenderGraphExternalAccess::ObservableOutput));
                 graph.AddCopyTextureToBufferPass(fmt::format("copy cell {}", cell), texture, host, {layer, 1, mip, 1});
                 HostRead(graph, host);
             }
@@ -216,7 +220,7 @@ VK_BINDING(0, 0) RWStructuredBuffer<uint> Counts : register(u0);
         Resources->BeginFlight(count + 2, Writes);
         auto graph = MakeGraph("indirect counts");
         const auto args = graph.CreateBuffer({48, render::MemoryType::Device, render::BufferUse::UnorderedAccess | render::BufferUse::Indirect, {}}, "arguments");
-        const auto counts = graph.CreateBuffer({12, render::MemoryType::Device, render::BufferUse::UnorderedAccess | render::BufferUse::CopySource, {}}, "counts");
+        auto counts = graph.CreateBuffer({12, render::MemoryType::Device, render::BufferUse::UnorderedAccess | render::BufferUse::CopySource, {}}, "counts");
         const auto color = graph.CreateTexture({render::TextureDimension::Dim2D, 2, 1, 1, 1, 1, render::TextureFormat::RGBA8_UNORM, render::MemoryType::Device, render::TextureUse::RenderTarget, {}}, "raster");
         struct Compute {
             RgComputeProgramHandle Program;
@@ -236,6 +240,7 @@ VK_BINDING(0, 0) RWStructuredBuffer<uint> Counts : register(u0);
             RgParameterSetHandle Set;
             RgIndirectArgumentsHandle Draw, Indexed;
         };
+        counts = graph.NextVersion(counts);
         graph.AddRasterPass<Raster>("count fragments", [&](Raster& data, RenderGraphRasterBuilder& builder) {
             data.Program = raster.Get(); data.Index = index.Get(); data.Backend = GetParam(); builder.SetColorAttachment(0, color);
             const RgParameterBinding binding{"Counts", 0, RgBufferParameterBinding{counts, {0, 12}, 4, render::TextureFormat::UNKNOWN, RgParameterAccess::ReadWrite}};
@@ -248,6 +253,7 @@ VK_BINDING(0, 0) RWStructuredBuffer<uint> Counts : register(u0);
             pass.Encoder().SetViewport(MakeViewport(data.Backend, 0, 0, 1, 1)); pass.Encoder().SetScissor({0, 0, 1, 1}); pass.Encoder().DrawIndirect(data.Draw);
             pass.Encoder().SetViewport(MakeViewport(data.Backend, 1, 0, 1, 1)); pass.Encoder().SetScissor({1, 0, 1, 1});
             pass.Encoder().BindIndexBuffer({data.Index, 0, 4}); pass.Encoder().DrawIndexedIndirect(data.Indexed); });
+        counts = graph.NextVersion(counts);
         graph.AddComputePass<Compute>("indirect dispatch", [&](Compute& data, RenderGraphComputeBuilder& builder) {
             const RgParameterBinding binding{"Counts", 0, RgBufferParameterBinding{counts, {0, 12}, 4, render::TextureFormat::UNKNOWN, RgParameterAccess::ReadWrite}};
             data.Program = builder.UseComputeProgram(*consumer); data.Set = builder.CreateParameterSet(*consumer, 0, std::span{&binding, 1});
@@ -255,7 +261,7 @@ VK_BINDING(0, 0) RWStructuredBuffer<uint> Counts : register(u0);
         auto buffer = device.CreateBuffer({12, render::MemoryType::ReadBack, render::BufferUse::MapRead | render::BufferUse::CopyDestination, {}});
         ASSERT_TRUE(buffer);
         RenderExternalBuffer external{buffer.Get(), buffer->GetDesc(), render::BufferState::CopyDestination};
-        const auto host = graph.ImportBuffer(external, "host", RenderGraphExternalAccess::ObservableOutput);
+        const auto host = graph.NextVersion(graph.ImportBuffer(external, "host", RenderGraphExternalAccess::ObservableOutput));
         graph.AddCopyBufferPass("read counts", counts, host, 12);
         HostRead(graph, host);
         ASSERT_TRUE(Run(graph)) << graph.GetReport().ToText();
@@ -286,8 +292,8 @@ VK_BINDING(2, 0) RWStructuredBuffer<uint> Arguments : register(u2);
     ASSERT_TRUE(producer);
     ASSERT_TRUE(graphics);
     PrimitiveVertexLayout layout;
-    layout.Buffers = {{0,12,render::VertexStepMode::Vertex}};
-    layout.Attributes = {{"POSITION",0,0,0,render::VertexFormat::FLOAT32X3}};
+    layout.Buffers = {{0, 12, render::VertexStepMode::Vertex}};
+    layout.Attributes = {{"POSITION", 0, 0, 0, render::VertexFormat::FLOAT32X3}};
     MaterialPipelineState state;
     state.Primitive.Cull = render::CullMode::None;
     state.DepthStencil.DepthTestEnable = state.DepthStencil.DepthWriteEnable = false;
@@ -299,11 +305,14 @@ VK_BINDING(2, 0) RWStructuredBuffer<uint> Arguments : register(u2);
         const auto vertices = graph.CreateBuffer({36, render::MemoryType::Device, render::BufferUse::UnorderedAccess | render::BufferUse::Vertex | render::BufferUse::Resource, {}}, "vertices");
         const auto indices = graph.CreateBuffer({12, render::MemoryType::Device, render::BufferUse::UnorderedAccess | render::BufferUse::Index | render::BufferUse::Resource, {}}, "indices");
         const auto arguments = graph.CreateBuffer({20, render::MemoryType::Device, render::BufferUse::UnorderedAccess | render::BufferUse::Indirect, {}}, "arguments");
-        struct NativeGeometry { render::Buffer* Vertices{nullptr}; render::Buffer* Indices{nullptr}; } native;
+        struct NativeGeometry {
+            render::Buffer* Vertices{nullptr};
+            render::Buffer* Indices{nullptr};
+        } native;
         struct Compute {
             RgComputeProgramHandle Program;
             RgParameterSetHandle Set;
-            RgBufferHandle Vertices, Indices;
+            RgBufferValue Vertices, Indices;
             NativeGeometry* Native;
         };
         graph.AddComputePass<Compute>("generate", [&](Compute& data, RenderGraphComputeBuilder& builder) {
@@ -311,13 +320,10 @@ VK_BINDING(2, 0) RWStructuredBuffer<uint> Arguments : register(u2);
                 {"Vertices",0,RgBufferParameterBinding{vertices,render::BufferRange::AllRange(),12,render::TextureFormat::UNKNOWN,RgParameterAccess::Write}},
                 {"Indices",0,RgBufferParameterBinding{indices,render::BufferRange::AllRange(),4,render::TextureFormat::UNKNOWN,RgParameterAccess::Write}},
                 {"Arguments",0,RgBufferParameterBinding{arguments,render::BufferRange::AllRange(),4,render::TextureFormat::UNKNOWN,RgParameterAccess::Write}}};
-            data = {builder.UseComputeProgram(*producer), builder.CreateParameterSet(*producer,0,bindings),vertices,indices,&native};
-        }, +[](const Compute& data, RenderGraphComputeContext& ctx) {
+            data = {builder.UseComputeProgram(*producer), builder.CreateParameterSet(*producer,0,bindings),vertices,indices,&native}; }, +[](const Compute& data, RenderGraphComputeContext& ctx) {
             data.Native->Vertices = ctx.GetBuffer(data.Vertices); data.Native->Indices = ctx.GetBuffer(data.Indices);
-            ctx.BindComputeProgram(data.Program); ctx.BindParameterSet(data.Set); ctx.Encoder().Dispatch(1,1,1);
-        });
-        const auto target = graph.CreateTexture({render::TextureDimension::Dim2D,4,4,1,1,1,render::TextureFormat::R32_UINT,
-            render::MemoryType::Device,render::TextureUse::RenderTarget | render::TextureUse::CopySource,{}},"target");
+            ctx.BindComputeProgram(data.Program); ctx.BindParameterSet(data.Set); ctx.Encoder().Dispatch(1,1,1); });
+        const auto target = graph.CreateTexture({render::TextureDimension::Dim2D, 4, 4, 1, 1, 1, render::TextureFormat::R32_UINT, render::MemoryType::Device, render::TextureUse::RenderTarget | render::TextureUse::CopySource, {}}, "target");
         struct Raster {
             RgGraphicsProgramHandle Program;
             RgIndirectArgumentsHandle Arguments;
@@ -331,8 +337,7 @@ VK_BINDING(2, 0) RWStructuredBuffer<uint> Arguments : register(u2);
             builder.ReadBuffer(indices,scenario == 2 ? RgBufferAccess::ShaderRead : RgBufferAccess::Index);
             const auto program = builder.UseGraphicsProgram(*graphics,state,layout);
             EXPECT_EQ(program,builder.UseGraphicsProgram(*graphics,state,layout));
-            data = {program,builder.ReadIndirectArguments(arguments,RgIndirectCommand::DrawIndexed),&native,graphics.Get(),GetParam()};
-        }, +[](const Raster& data, RenderGraphRasterContext& ctx) {
+            data = {program,builder.ReadIndirectArguments(arguments,RgIndirectCommand::DrawIndexed),&native,graphics.Get(),GetParam()}; }, +[](const Raster& data, RenderGraphRasterContext& ctx) {
             // Native creation has already finished when the record callback starts, including the cold frame.
             const auto count = data.Shader->GetGraphicsPipelineStateCount();
             EXPECT_EQ(count,1u);
@@ -341,29 +346,30 @@ VK_BINDING(2, 0) RWStructuredBuffer<uint> Arguments : register(u2);
             ctx.Encoder().BindVertexBuffers(std::span{&binding,1}); ctx.Encoder().BindIndexBuffer({data.Native->Indices,0,4});
             ctx.Encoder().SetViewport(MakeViewport(data.Backend,0,0,4,4)); ctx.Encoder().SetScissor({0,0,4,4});
             ctx.Encoder().DrawIndexedIndirect(data.Arguments);
-            EXPECT_EQ(data.Shader->GetGraphicsPipelineStateCount(),count);
-        });
-        const auto pitch = Align(uint64_t{16},device.GetDetail().TextureDataPitchAlignment);
-        auto readback = device.CreateBuffer({pitch * 4,render::MemoryType::ReadBack,render::BufferUse::CopyDestination | render::BufferUse::MapRead,{}});
+            EXPECT_EQ(data.Shader->GetGraphicsPipelineStateCount(),count); });
+        const auto pitch = Align(uint64_t{16}, device.GetDetail().TextureDataPitchAlignment);
+        auto readback = device.CreateBuffer({pitch * 4, render::MemoryType::ReadBack, render::BufferUse::CopyDestination | render::BufferUse::MapRead, {}});
         ASSERT_TRUE(readback);
-        RenderExternalBuffer external{readback.Get(),readback->GetDesc(),render::BufferState::CopyDestination};
-        const auto host = graph.ImportBuffer(external,"readback",RenderGraphExternalAccess::ObservableOutput);
-        graph.AddCopyTextureToBufferPass("read pixels",target,host); HostRead(graph,host);
-        EXPECT_EQ(Run(graph),scenario >= 3) << graph.GetReport().ToText();
-        EXPECT_EQ(graph.GetReport().GraphicsPipelineRequests,2u);
-        EXPECT_EQ(graph.GetReport().GraphicsPipelinePreparations,1u);
-        EXPECT_EQ(graph.GetReport().GraphicsPipelineCreations,scenario == 0 ? 1u : 0u);
+        RenderExternalBuffer external{readback.Get(), readback->GetDesc(), render::BufferState::CopyDestination};
+        const auto host = graph.NextVersion(graph.ImportBuffer(external, "readback", RenderGraphExternalAccess::ObservableOutput));
+        graph.AddCopyTextureToBufferPass("read pixels", target, host);
+        HostRead(graph, host);
+        EXPECT_EQ(Run(graph), scenario >= 3) << graph.GetReport().ToText();
+        EXPECT_EQ(graph.GetReport().GraphicsPipelineRequests, 2u);
+        EXPECT_EQ(graph.GetReport().GraphicsPipelinePreparations, 1u);
+        EXPECT_EQ(graph.GetReport().GraphicsPipelineCreations, scenario == 0 ? 1u : 0u);
         if (scenario < 3) {
             ASSERT_FALSE(graph.GetReport().Diagnostics.empty());
-            EXPECT_EQ(graph.GetReport().Diagnostics[0].Code,"UndeclaredGeometryRead");
+            EXPECT_EQ(graph.GetReport().Diagnostics[0].Code, "UndeclaredGeometryRead");
         } else {
             const auto bytes = Read(*readback);
             uint32_t pixel = 0;
-            std::memcpy(&pixel,bytes.data() + pitch + 4,sizeof(pixel));
-            EXPECT_EQ(pixel,42u);
-            for (const auto [resource,after] : {std::pair{vertices.Index,render::BufferState::Vertex},
-                {indices.Index,render::BufferState::Index},{arguments.Index,render::BufferState::Indirect}}) {
-                EXPECT_TRUE(std::any_of(graph.GetReport().Barriers.begin(),graph.GetReport().Barriers.end(),[&](const auto& barrier) {
+            std::memcpy(&pixel, bytes.data() + pitch + 4, sizeof(pixel));
+            EXPECT_EQ(pixel, 42u);
+            for (const auto [resource, after] : {std::pair{vertices.Index, render::BufferState::Vertex},
+                                                 {indices.Index, render::BufferState::Index},
+                                                 {arguments.Index, render::BufferState::Indirect}}) {
+                EXPECT_TRUE(std::any_of(graph.GetReport().Barriers.begin(), graph.GetReport().Barriers.end(), [&](const auto& barrier) {
                     return barrier.Pass == 1 && barrier.Resource == resource && barrier.After == uint32_t(after);
                 }));
             }

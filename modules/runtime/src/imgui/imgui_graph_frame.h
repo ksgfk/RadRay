@@ -2,7 +2,8 @@
 #ifdef RADRAY_ENABLE_IMGUI
 #include <atomic>
 #include <radray/runtime/imgui/imgui_graph.h>
-#include "../shader_program_cache.h"
+#include <functional>
+#include <radray/runtime/shader_program.h>
 
 namespace radray {
 struct UiFrameTexture {
@@ -45,22 +46,21 @@ struct UiFlight {
     unordered_map<ImTextureID, UiFrameTexture> Textures;
     vector<UiTextureRequest> Requests;
     vector<shared_ptr<UiGpuTexture>> Retained;
-    vector<unique_ptr<MappedUploadPage>> Uploads;
     vector<unique_ptr<RenderExternalTexture>> ExternalTextures;
-    vector<unique_ptr<RenderExternalBuffer>> ExternalBuffers;
     vector<vector<render::TextureStates>> AssetStates;
     vector<vector<uint8_t>> AssetValid;
-    vector<RgPassHandle> UploadPasses;
+    vector<RgOperationTicket> UploadTickets;
+    uint64_t FrameSerial{0};
     bool GraphSuccess{false}, Valid{true};
     std::atomic_bool Completed{false};
 };
 
 struct UiGraphResources {
     render::Device& Device;
-    ShaderProgramCache& Programs;
+    std::function<Nullable<ShaderProgram*>(std::span<const byte>, const shader::GpuArtifactHash&)> CreateProgram;
     std::atomic_bool& Error;
     unordered_map<ImTextureID, shared_ptr<UiGpuTexture>> GpuTextures;
-    Nullable<ShaderProgram*> DrawProgram{nullptr}, CompositeProgram{nullptr};
+    Nullable<ShaderProgram*> DrawProgram{nullptr};
 };
 }  // namespace radray
 #endif

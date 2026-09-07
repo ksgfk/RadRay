@@ -20,6 +20,7 @@ radray_add_test(test_primitive_history SOURCES test_primitive_history.cpp LINK_L
 radray_add_test(test_spot_light SOURCES test_spot_light.cpp LINK_LIBS radrayruntime)
 radray_add_test(test_renderer_list SOURCES test_renderer_list.cpp LINK_LIBS radrayruntime)
 radray_add_test(test_render_graph_compile SOURCES test_render_graph_compile.cpp LINK_LIBS radrayruntime)
+radray_add_test(test_render_graph_compiler SOURCES test_render_graph_compiler.cpp LINK_LIBS radrayruntime)
 target_include_directories(test_render_foundation PRIVATE "${CMAKE_SOURCE_DIR}/modules/render/tests")
 radray_add_test(test_view_state SOURCES test_view_state.cpp LINK_LIBS radrayruntime)
 radray_add_test(test_view_temporal_commit SOURCES test_view_temporal_commit.cpp LINK_LIBS radrayruntime)

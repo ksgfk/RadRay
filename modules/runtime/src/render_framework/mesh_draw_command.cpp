@@ -42,7 +42,7 @@ bool FinalizeMeshDrawCommand(MeshDrawCommand& command) noexcept {
 }
 
 std::optional<PreparedRendererList> PrepareRendererList(const RendererList& list, RenderGraphRasterBuilder& builder,
-                                                       Nullable<const RendererListPassBindings*> bindings) {
+                                                        Nullable<const RendererListPassBindings*> bindings) {
     PreparedRendererList prepared{builder.GetPassHandle(), {}};
     prepared.Draws.reserve(list.Commands.size());
     for (const auto& draw : list.Commands) {
@@ -50,6 +50,19 @@ std::optional<PreparedRendererList> PrepareRendererList(const RendererList& list
             builder.Reject("RendererListPreparation", "Draw geometry or pass parameter bindings are invalid");
             return std::nullopt;
         }
+        const auto declare = [&](render::Buffer& buffer, RgBufferAccess access, render::BufferRange range) {
+            const auto desc = buffer.GetDesc();
+            render::BufferStates state = render::BufferState::HostWrite;
+            if (desc.Memory == render::MemoryType::Device) {
+                state = render::BufferState::UNKNOWN;
+                if (desc.Usage.HasFlag(render::BufferUse::Vertex)) state |= render::BufferState::Vertex;
+                if (desc.Usage.HasFlag(render::BufferUse::Index)) state |= render::BufferState::Index;
+            }
+            return builder.ReadImmutableBuffer(buffer, state, access, range).IsValid();
+        };
+        for (const auto& vertex : draw.Geometry->VertexBuffers)
+            if (!declare(*vertex.View.Target, RgBufferAccess::Vertex, {vertex.View.Offset, vertex.View.Size})) return std::nullopt;
+        if (!declare(*draw.Geometry->Ibv.Target, RgBufferAccess::Index, {draw.Geometry->Ibv.Offset, render::BufferRange::All()})) return std::nullopt;
         const auto program = builder.UseGraphicsProgram(*draw.Program, draw.PipelineState, draw.Geometry->VertexLayout, draw.Geometry->Topology);
         if (!program.IsValid()) return std::nullopt;
         prepared.Draws.push_back({&draw, program, bindings ? bindings->Find(*draw.Program) : std::span<const RendererListPassBinding>{}});

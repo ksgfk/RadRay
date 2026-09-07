@@ -31,13 +31,13 @@ Application            进程生命周期、runner 选择、帧循环
 Game thread:   flight 可写 → 清上一帧 retained refs → AssetManager::Pump
                → ApplicationScheduler::Pump → 可选 UI NewFrame → 输入路由 → OnUpdate → World::Tick
                → 可选 OnImGui / UI 快照 → PrepareFrame
-Render thread: pool/history safe Begin → resolve requested outputs/views → pipeline.Render
-               → compile/realize/execute graph → 未写目标 fallback clear → required final states
+Render thread: pool/history safe Begin → resolve requested outputs/views
+               → composer 连接 ports → 展开 BuildGraph → compile/realize/execute graph → 未写目标 fallback clear → required final states
 ```
 
-`RenderPipeline` 只提供 `PrepareFrame` 与 `Render` 两个入口。前者在 game thread 写当前 flight 的
-pipeline 私有输入，后者在 render thread 消费该输入。runner 既有的 slot semaphore / fence 保证
-flight 复用互斥，不增加 packet、sequence 或另一套同步协议。
+`RenderPipeline` 提供 `PrepareFrame`、`BuildGraph` 和 `GraphRecorded`。PrepareFrame 在 game thread 写当前 flight 的
+pipeline 私有输入，BuildGraph 在 render thread 消费该输入，GraphRecorded 处理录制结果。runner 既有的 slot semaphore / fence 保证
+flight 复用互斥，通过 frame serial 校验收据，沿用现有提交和回收协议。
 `RenderPrepareContext` 提供 output 值目录和 workload builder；pipeline 向当前 flight 的 frame plan
 写入 view families。`RenderPipelineContext` 提供 resolved families、graph/output/history 操作，
 不公开 AppFrameContext、窗口或 command buffer。具体接口与验证见

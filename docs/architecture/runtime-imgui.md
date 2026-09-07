@@ -1,6 +1,6 @@
 > - 适用: 接入可选 runtime UI、字体、平台窗口、资产图片或本帧 Graph 图片
 > - 权威: 本文描述 RadRay 的 ImGui 适配契约；通用帧同步见 [帧与 GPU](frame-and-gpu.md)，Graph 规则见 [Renderer foundation](renderer-foundation.md)
-> - 锚点: `modules/runtime/cmake/imgui.cmake`, `modules/runtime/include/radray/runtime/imgui/imgui_config.h`, `modules/runtime/include/radray/runtime/imgui/imgui_system.h`, `modules/runtime/include/radray/runtime/imgui/imgui_graph.h`, `modules/runtime/src/imgui/imgui_system.cpp`, `modules/runtime/src/imgui/imgui_graph.cpp`, `modules/runtime/tests/test_imgui_rendering.cpp`, `shaderlib/ui/`, `tools/generate_imgui_shaders.py`
+> - 锚点: `modules/runtime/cmake/imgui.cmake`, `modules/runtime/include/radray/runtime/imgui/imgui_config.h`, `modules/runtime/include/radray/runtime/imgui/imgui_system.h`, `modules/runtime/include/radray/runtime/imgui/imgui_graph.h`, `modules/runtime/src/imgui/imgui_system.cpp`, `modules/runtime/src/imgui/imgui_graph.cpp`, `modules/runtime/tests/test_imgui_rendering.cpp`, `shaderlib/ui/`, `tools/generate_builtin_shaders.py`
 
 # 可选 runtime ImGui
 
@@ -22,7 +22,7 @@ OFF 时头文件可直接包含且不引入依赖，源码编译为空翻译单�
 UI graph 实现只接收私有 `ImGuiGraphFrame`：当前 flight 的 UI 值快照与 graph 资源引用。
 它不依赖 Application、WindowManager 或 AssetManager。带资产的注册记录由 game-thread 的
 flight owner 容器保活，快照只携带纹理指针和原生 lease；退休时也在 game thread 释放资产引用。
-`ImGuiOnlyPipeline` 的装配留在 system 适配层，UI native PSO 通过 graph prepare 阶段创建。
+`ImGuiFrameComposer` 的装配留在 Application 层，UI 通过注入的 artifact 创建函数取得 program，native PSO 在 graph prepare 阶段创建。
 
 FreeType 子目录既关闭可选依赖发现，也在局部变量作用域屏蔽父项目的 PNG、zlib 等发现结果，
 避免其 CMake 在禁用发现后继续消费已有的 `*_FOUND`。项目其他模块的依赖配置保持独立。
@@ -34,14 +34,11 @@ ON 时 `radray_imgui` 静态库的 PUBLIC 使用要求向 runtime 和消费者�
 
 编译启用不等于实例启用。`ApplicationRuntimeDescriptor::ImGui.Enabled` 默认 false；
 关闭实例不创建 context、UI 上传页或平台窗口。`ConfigureImGui` 在 context 创建前调整描述符；
-`OnImGui` 在主线程的有效帧内调用。应用在 `OnInit` 显式选择管线：
+`OnImGui` 在主线程的有效帧内调用。实例开启时 Application 自动安装默认装配器；纯工具程序无需另装 pipeline：
 
 ```cpp
 #ifdef RADRAY_ENABLE_IMGUI
 void ConfigureImGui(ImGuiSystemDescriptor& descriptor) override { descriptor.Enabled = true; }
-void OnInit() override {
-    GetRenderSystem()->SetPipeline(make_unique<ImGuiOnlyPipeline>(*GetImGuiSystem().Get()));
-}
 void OnImGui() override {
     ImGui::Begin("Tools");
     ImGui::TextUnformatted("RadRay runtime");
@@ -61,26 +58,26 @@ GPU 纹理、平台子窗口与 context。部分初始化失败也销毁已经�
 
 ## 显式组合 Graph
 
-ForwardPipeline（含 Tidal Atrium 与 Pipeline Probe）在同一张图中按以下顺序装配：
+`ImGuiGraphComponent` 是普通 `RenderGraphComponent`。它接收显式 target versions、图像 value/view
+bindings 和已复制的 UI 快照，声明 texture upload、VB/IB upload 与 raster draw，然后返回 target 的
+后继版本。它不决定显示目标、背景、场景排序、tone mapping 或最终编码，不访问 Application、窗口
+或 RenderSystem。核心 RG、Forward、RenderSystem 都没有 ImGui 分支。
 
-1. `ImGuiGraph::PrepareSceneOutputs` 将有相机的场景输出路由到可采样中间纹理。
-2. 原场景 `BuildGraph` 完成光照、后处理、tone mapping 和输出分辨率重建。
-3. `ImGuiGraph::BuildGraph` 添加动态纹理上传、UI 绘制、线性合成和最终输出 Pass。
-4. 原 `ExecuteGraph` 执行一次；随后 `ImGuiGraph::CompleteGraph` 记录这次执行结果。
+`Application` 在 UI 实例开启时安装 `ImGuiFrameComposer`。默认策略为 Scene → UI → Display.Blit →
+Export；它选择显示线性的 RGBA16_FLOAT canvas。UNORM 输出显式 sRGB 编码，sRGB attachment 由
+硬件编码；注册输出预览时，装配器显式 copy 场景旧版本供 UI 采样。PreserveContents 的输出先通过
+通用 blit 载入 canvas。Forward 依据实际绑定格式决定编码，不再设置 UI intermediate。
 
-纯工具程序显式装配 `ImGuiOnlyPipeline`。自定义管线可以传入 `ImGuiSceneOutput`，明确场景纹理
-**采样后数值**的编码；没有场景输入的 viewport 使用深色背景。无相机 UI 通过
-`RenderWorkloadBuilder::RequestOutput` 请求呈现，场景和 UI 共享 output 时只 acquire 一次。
-
-UI 在输出尺寸的 RGBA16_FLOAT 显示线性目标上混合，顶点颜色从 sRGB 解码；纹理按其描述符
-解码。FreeType 覆盖率只影响 alpha，UI 不参与场景曝光、TAA、Bloom 或 RenderScale。
-UNORM 最终目标显式编码 sRGB，sRGB attachment 由硬件编码；sRGB 纹理视图已经硬件解码，
-因此注册为 `ImGuiColorEncoding::Linear`，不能再次标成 Srgb。
+自定义应用可用 `SetGraphComposer` 安装其他策略，通过 `FrameGraph` ports 将同一个 UI 组件的输出
+连接为场景材质输入，或做独立离屏 UI。消费者可先声明，编译器解析连接后排序；没有固定 UI 阶段。
+ImGuiRenderingTest 的 `UiTextureFeedsSceneComponentDeclaredBeforeItsProducer` 在两后端验证
+UI texture → Scene 的依赖顺序和回读像素。无相机 UI 通过 `RequestOutput` 请求输出，共享 ID 只 acquire
+一次。输出颜色编码由装配器和图像 binding 明确约定；sRGB view 已硬件解码，不能再声明为 Srgb。
 
 绘制保留标准 `ImDrawVert`、16 位 `ImDrawIdx`、`IdxOffset` 与 `VtxOffset`，处理 DisplayPos、
 FramebufferScale、桌面负坐标及裁剪。Vulkan 继续使用统一的 `MakeViewport` Y 方向契约。
 关闭深度和剔除，颜色用 SrcAlpha / OneMinusSrcAlpha，alpha 用 One / OneMinusSrcAlpha。
-顶点、索引经 `MappedUploadPage` / `HostWriteBatch`，常量和 descriptor 经 Graph parameter set；
+顶点、索引和纹理像素经通用 `UploadBuffer`，常量和 descriptor 经 Graph parameter set；
 全部保留到对应 flight 安全复用。
 
 支持 `ImGuiPlatformIO` 的 ResetRenderState、SetSamplerLinear、SetSamplerNearest 回调标记，
@@ -96,12 +93,12 @@ FramebufferScale、桌面负坐标及裁剪。Vulkan 继续使用统一的 `Make
 |---|---|
 | `RegisterTexture(StreamingAssetRef<TextureAsset>)` | 注册资产引用；实际绘制要求资产已经就绪，发布快照保留引用 |
 | `RegisterTexture(shared_ptr<ImGuiTextureLease>)` | lease 独占 RHI texture 和状态追踪；调用者交付已正确初始化的资源与初始状态，随后不能从图外改变其状态 |
-| `RegisterOutput(RenderOutputId)` | 显示本帧相机输出的场景纹理；编码由场景输出提供，UI 在合成前取样；不替调用者创建相机或拥有输出 |
-| `CreateGraphImage()` | 主线程取得稳定逻辑 ID；渲染线程每帧通过 `ImGuiGraphImageBinding` 绑定本图的 `RgTextureViewHandle` |
+| `RegisterOutput(RenderOutputId)` | 绑定本帧明确提供的 output image；默认装配器复制 UI 之前的场景版本，不创建相机或拥有输出 |
+| `CreateGraphImage()` | 主线程取得稳定逻辑 ID；渲染线程每帧通过 `ImGuiGraphImageBinding` 绑定本图的 `RgTextureValue` 与 `RgTextureViewDesc` |
 | `UnregisterTexture(id)` | 阻止未来快照使用该 ID；已发布 flight 继续拥有纹理，重复注销或旧 generation 返回 false |
 
 RegisterOutput 的 source 必须在本帧 scene outputs 中有且只有一个生产者；缺失或重复时诊断并拒绝图。输出所有者负责
-保持注册与资源到 flight fence。主场景也可在 ImGui 中预览：读取合成前的独立场景纹理，避免 UI 反馈。
+保持注册与资源到 flight fence。采样同一存储的旧内容同时写后继属于反馈错误；需要保留时由装配器显式 copy。
 
 Graph image 的 ID 可以跨帧保留，Graph view handle 只能在所属图使用。实际 Image 必须有唯一
 有效绑定、正确初始化、Resource usage，且是单采样 2D 纹理。缺失、重复、跨图、MSAA、非法
@@ -116,7 +113,7 @@ Graph 从参数绑定自动声明 sampled read 依赖，不需要外部手写 ba
 [FreeType 彩色位图契约](https://freetype.org/freetype2/docs/reference/ft2-basic_types.html#ft_pixel_mode)。
 首次加入彩色字形导致格式变化时完整上传到新资源，旧 flight 继续保留原资源；覆盖率图集保持 UNORM。
 
-上传结果必须同时满足 Graph 执行成功、所有上传 Pass 实际执行、对应 flight 真正完成，
+上传结果必须同时满足 Graph 执行成功、所有上传 ticket 达到 GpuCompleted、frame serial 匹配，
 主线程才对同版本请求调用 SetTexID / SetStatus。未执行、丢弃、编译失败的快照不会确认；
 请求继续保留并重试。QueueUserData 在待处理期间阻止上游提前退休纹理，atlas 扩容的旧资源、
 局部更新上传页及注销前的引用由真实 flight 保活，UnusedFrames 不作为 GPU 安全依据。

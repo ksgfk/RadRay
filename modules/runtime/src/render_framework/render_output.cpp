@@ -65,7 +65,7 @@ RenderOutputId RenderOutputRegistry::RegisterExternal(const ExternalRenderOutput
     if (texture.Dim != render::TextureDimension::Dim2D || texture.MipLevels != 1 || texture.DepthOrArraySize != 1 ||
         render::IsDepthStencilFormat(texture.Format) || !texture.Usage.HasFlag(render::TextureUse::RenderTarget) ||
         view.Target != desc.Texture.Get() || view.Format != texture.Format || view.Usage != render::TextureViewUsage::RenderTarget ||
-        render::NormalizeSubresourceRange(texture, view.Range) != render::SubresourceRange{0, 1, 0, 1} ||
+        render::NormalizeSubresourceRange(texture, view.Range) != render::SubresourceRange{0, 1, 0, 1, render::TextureAspect::Color} ||
         view.Dim != render::TextureDimension::Dim2D ||
         !ValidExternalState(texture, desc.RequiredFinalState, false) || !ValidExternalState(texture, desc.CurrentState, !desc.PreserveContents)) {
         RADRAY_ERR_LOG("Invalid external output '{}'", desc.Name);

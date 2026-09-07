@@ -78,18 +78,20 @@ public:
         }
     }
 
-    void Render(RenderPipelineContext& ctx) override {
+    void BuildGraph(RenderPipelineContext& ctx, RenderGraph& graph, std::span<RenderGraphOutputBinding> outputs) override {
         _result->RenderThread = std::this_thread::get_id();
         EXPECT_GT(_values[ctx.FlightIndex()], 0);
         EXPECT_TRUE(ctx.ViewFamilies().empty());
         ASSERT_FALSE(ctx.OutputSurfaces().empty());
-        auto graph = ctx.CreateRenderGraph("Non-camera pipeline");
         struct Data {};
         for (const auto& surface : ctx.OutputSurfaces()) {
-            const auto color = ctx.ImportOutput(graph, surface.Id);
+            auto& color = FindGraphOutput(outputs, surface.Id)->Texture;
+            color = graph.NextVersion(color);
             graph.AddRasterPass<Data>("clear", [=](Data&, RenderGraphRasterBuilder& builder) { builder.SetColorAttachment(0, color, {.Clear = {{.3f, .5f, .7f, 1}}}); }, +[](const Data&, RenderGraphRasterContext&) {});
         }
-        EXPECT_TRUE(ctx.ExecuteGraph(graph).Success);
+    }
+    void GraphRecorded(RenderPipelineContext&, const RenderGraph&, RenderGraphExecutionResult result) override {
+        EXPECT_TRUE(result.Success);
         ++_result->Rendered;
     }
 
@@ -220,8 +222,7 @@ TEST(RadRayRuntimeForwardPipeline, OutputSurfacesRejectCyclesInvalidValuesAndUns
     device.Reset();
     test::RuntimeLogCapture logs;
     OutputSurfaceContractApp app;
-    EXPECT_EQ(app.Run({.Backend = render::RenderBackend::D3D12, .EnableValidation = true, .WindowWidth = 160, .WindowHeight = 120,
-                      .BackBufferFormat = render::TextureFormat::BGRA8_UNORM, .PresentMode = render::PresentMode::FIFO}), 0);
+    EXPECT_EQ(app.Run({.Backend = render::RenderBackend::D3D12, .EnableValidation = true, .WindowWidth = 160, .WindowHeight = 120, .BackBufferFormat = render::TextureFormat::BGRA8_UNORM, .PresentMode = render::PresentMode::FIFO}), 0);
     EXPECT_TRUE(logs.Errors().empty()) << logs.Errors();
 }
 
@@ -283,11 +284,9 @@ struct OverlapProbe {
 class OverlapPipeline final : public RenderPipeline {
 public:
     OverlapPipeline(OverlapProbe& probe, render::Device& device, RenderOutputRegistry& outputs) : _probe(probe), _outputs(outputs) {
-        _texture = device.CreateTexture({render::TextureDimension::Dim2D, 4, 4, 1, 1, 1, render::TextureFormat::RGBA8_UNORM,
-            render::MemoryType::Device, render::TextureUse::RenderTarget | render::TextureUse::Resource, {}}).Release();
+        _texture = device.CreateTexture({render::TextureDimension::Dim2D, 4, 4, 1, 1, 1, render::TextureFormat::RGBA8_UNORM, render::MemoryType::Device, render::TextureUse::RenderTarget | render::TextureUse::Resource, {}}).Release();
         if (!_texture) return;
-        _view = device.CreateTextureView({_texture.get(), render::TextureDimension::Dim2D, render::TextureFormat::RGBA8_UNORM,
-            {0, 1, 0, 1}, render::TextureViewUsage::RenderTarget}).Release();
+        _view = device.CreateTextureView({_texture.get(), render::TextureDimension::Dim2D, render::TextureFormat::RGBA8_UNORM, {0, 1, 0, 1}, render::TextureViewUsage::RenderTarget}).Release();
         if (_view) _output = outputs.RegisterExternal({.Name = "Blocked pipeline-owned output", .Texture = _texture.get(), .ColorAttachmentView = _view.get()});
     }
     ~OverlapPipeline() override {
@@ -298,7 +297,7 @@ public:
         _values[ctx.App.FlightIndex] = _probe.Updates.load();
         EXPECT_TRUE(ctx.Workloads.RequestOutput(_output));
     }
-    void Render(RenderPipelineContext& ctx) override {
+    void BuildGraph(RenderPipelineContext& ctx, RenderGraph& graph, std::span<RenderGraphOutputBinding> outputs) override {
         EXPECT_NE(std::this_thread::get_id(), _probe.GameThread);
         const auto value = _values[ctx.FlightIndex()];
         if (_records++ == 0) {
@@ -308,16 +307,15 @@ public:
         } else if (_records == 2) {
             _probe.SecondRecord.release();
         }
-        auto graph = ctx.CreateRenderGraph("runner overlap");
         for (const auto& surface : ctx.OutputSurfaces()) {
-            const auto color = ctx.ImportOutput(graph, surface.Id);
+            auto& color = FindGraphOutput(outputs, surface.Id)->Texture;
+            color = graph.NextVersion(color);
             struct Clear {};
-            graph.AddRasterPass<Clear>("clear", [=](Clear&, RenderGraphRasterBuilder& builder) {
-                builder.SetColorAttachment(0, color);
-            }, +[](const Clear&, RenderGraphRasterContext&) {});
+            graph.AddRasterPass<Clear>("clear", [=](Clear&, RenderGraphRasterBuilder& builder) { builder.SetColorAttachment(0, color); }, +[](const Clear&, RenderGraphRasterContext&) {});
         }
-        EXPECT_TRUE(ctx.ExecuteGraph(graph).Success);
     }
+    void GraphRecorded(RenderPipelineContext&, const RenderGraph&, RenderGraphExecutionResult result) override { EXPECT_TRUE(result.Success); }
+
 private:
     OverlapProbe& _probe;
     RenderOutputRegistry& _outputs;
@@ -331,6 +329,7 @@ private:
 class OverlapApp final : public Application {
 public:
     explicit OverlapApp(OverlapProbe& probe) : _probe(probe) {}
+
 protected:
     void OnInit() override {
         _probe.GameThread = std::this_thread::get_id();
@@ -346,8 +345,7 @@ protected:
         auto* wait = _gate->Fence.get();
         auto* signal = _marker.get();
         uint64_t value = 1;
-        GetGpuSystem()->GetMainQueue()->Submit({.CmdBuffers = std::span{&command, 1}, .SignalFences = std::span{&signal, 1},
-            .SignalValues = std::span{&value, 1}, .WaitFences = std::span{&wait, 1}, .WaitValues = std::span{&value, 1}});
+        GetGpuSystem()->GetMainQueue()->Submit({.CmdBuffers = std::span{&command, 1}, .SignalFences = std::span{&signal, 1}, .SignalValues = std::span{&value, 1}, .WaitFences = std::span{&wait, 1}, .WaitValues = std::span{&value, 1}});
         ASSERT_TRUE(GetRenderSystem()->SetPipeline(make_unique<OverlapPipeline>(_probe, *GetDevice(), GetRenderSystem()->GetOutputs())));
     }
     void OnUpdate(const AppUpdateContext& ctx) override {
@@ -380,6 +378,7 @@ protected:
         _marker.reset();
         _command.reset();
     }
+
 private:
     OverlapProbe& _probe;
     unique_ptr<test::GpuSubmissionGate> _gate;
@@ -395,9 +394,7 @@ void RunOverlap(render::RenderBackend backend) {
     OverlapProbe probe;
     test::RuntimeLogCapture logs;
     OverlapApp app{probe};
-    ASSERT_EQ(app.Run({.Backend = backend, .EnableValidation = true, .Multithreaded = true,
-        .WindowTitle = "Real runner overlap and GPU lifetime", .WindowWidth = 160, .WindowHeight = 120,
-        .FlightDataCount = 2, .BackBufferFormat = render::TextureFormat::BGRA8_UNORM, .PresentMode = render::PresentMode::FIFO}), 0);
+    ASSERT_EQ(app.Run({.Backend = backend, .EnableValidation = true, .Multithreaded = true, .WindowTitle = "Real runner overlap and GPU lifetime", .WindowWidth = 160, .WindowHeight = 120, .FlightDataCount = 2, .BackBufferFormat = render::TextureFormat::BGRA8_UNORM, .PresentMode = render::PresentMode::FIFO}), 0);
     EXPECT_TRUE(probe.Overlapped);
     EXPECT_TRUE(probe.FenceProtectedReuse);
     EXPECT_TRUE(probe.GateReleased);

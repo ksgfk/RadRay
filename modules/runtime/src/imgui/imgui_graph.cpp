@@ -11,9 +11,6 @@ namespace radray {
 namespace {
 #include "imgui_shaders.inc"
 
-bool SrgbAttachment(render::TextureFormat format) {
-    return format == render::TextureFormat::RGBA8_UNORM_SRGB || format == render::TextureFormat::BGRA8_UNORM_SRGB;
-}
 render::SamplerDescriptor Sampler(int kind) {
     render::SamplerDescriptor sampler;
     sampler.AddressS = sampler.AddressT = sampler.AddressR = render::AddressMode::ClampToEdge;
@@ -39,100 +36,30 @@ const PrimitiveVertexLayout& UiLayout() {
 struct UiConstants {
     array<float, 4> Transform{}, Options{};
 };
-RgBufferHandle Upload(RenderGraph& graph, RenderPipelineContext& context, render::Device& device, UiFlight& flight,
-                      std::span<const byte> bytes, render::BufferUses usage) {
-    if (bytes.empty()) return {};
-    render::BufferDescriptor desc;
-    desc.Size = bytes.size();
-    desc.Memory = render::MemoryType::Upload;
-    desc.Usage = usage | render::BufferUse::MapWrite;
-    desc.Hints = render::ResourceHint::PersistentMap;
-    auto buffer = device.CreateBuffer(desc);
-    if (!buffer) {
-        graph.AddDiagnostic("ImGuiUpload", "Mapped upload buffer allocation failed");
-        return {};
-    }
-    auto page = make_unique<MappedUploadPage>(buffer.Release(), &context.HostWrites());
-    auto reservation = page->Reserve(bytes.size(), 1, context.HostWrites());
-    if (!reservation.IsValid()) {
-        graph.AddDiagnostic("ImGuiUpload", "Mapped upload reservation failed");
-        return {};
-    }
-    std::memcpy(reservation.Data(), bytes.data(), bytes.size());
-    const auto allocation = reservation.Commit(bytes.size());
-    auto external = make_unique<RenderExternalBuffer>(RenderExternalBuffer{allocation.Target, desc, render::BufferState::HostWrite, true});
-    const auto handle = graph.ImportBuffer(*external, "ImGui.Upload", RenderGraphExternalAccess::ReadOnly);
-    flight.ExternalBuffers.push_back(std::move(external));
-    flight.Uploads.push_back(std::move(page));
-    return handle;
-}
-void Composite(RenderGraph& graph, RenderPipelineContext& context, ShaderProgram& program, RgTextureHandle source,
-               RgTextureHandle destination, uint32_t width, uint32_t height, bool decode, bool encode, render::RenderBackend backend) {
-    (void)context;
-    struct Data {
-        RgGraphicsProgramHandle Program;
-        RgParameterSetHandle Parameters;
-        uint32_t Width, Height;
-        render::RenderBackend Backend;
-    };
-    const UiConstants values{{}, {decode ? 1.0f : 0.0f, encode ? 1.0f : 0.0f, 0, 0}};
-    graph.AddRasterPass<Data>(encode ? "ImGui.EncodeOutput" : "ImGui.LinearComposite", [&](Data& data, RenderGraphRasterBuilder& builder) {
-        const RgParameterBinding bindings[]{
-            {"Ui", 0, RgCBufferParameterBinding{std::as_bytes(std::span{&values, 1})}},
-            {"Image", 0, RgTextureParameterBinding{source}}, {"ImageSampler", 0, RgSamplerParameterBinding{Sampler(1)}}};
-        data = {builder.UseGraphicsProgram(program, UiState(false)), builder.CreateParameterSet(program, 0, bindings), width, height, backend};
-        builder.SetColorAttachment(0, destination); }, +[](const Data& data, RenderGraphRasterContext& ctx) {
-        auto& encoder = ctx.Encoder();
-        ctx.BindGraphicsProgram(data.Program); ctx.BindParameterSet(data.Parameters);
-        encoder.SetViewport(MakeViewport(data.Backend, 0, 0, float(data.Width), float(data.Height)));
-        encoder.SetScissor({0, 0, data.Width, data.Height}); encoder.Draw(3, 1, 0, 0); });
-}
 }  // namespace
 
-vector<ImGuiSceneOutput> ImGuiGraph::PrepareSceneOutputs(RenderGraph& graph, RenderPipelineContext& context) {
-    vector<ImGuiSceneOutput> outputs;
-    for (const auto& family : context.ViewFamilies()) {
-        if (!family.OutputAvailable || family.Views.empty()) continue;
-        if (std::any_of(outputs.begin(), outputs.end(), [&](const auto& entry) { return entry.Output == family.OutputId; })) continue;
-        const auto target = context.ImportOutputTarget(graph, family.OutputId);
-        auto desc = graph.GetTextureDescriptor(target);
-        if (!desc) continue;
-        desc->Usage |= render::TextureUse::Resource | render::TextureUse::RenderTarget;
-        desc->Hints = render::ResourceHint::None;
-        const auto scene = graph.CreateTexture(*desc, "ImGui.SceneDisplayInput");
-        if (!context.SetOutputIntermediate(graph, family.OutputId, scene)) {
-            graph.AddDiagnostic("ImGuiOutput", "Could not redirect the scene display output");
-            continue;
-        }
-        outputs.push_back({family.OutputId, scene, SrgbAttachment(desc->Format) ? ImGuiColorEncoding::Linear : ImGuiColorEncoding::Srgb});
-    }
-    return outputs;
-}
-
 bool ImGuiGraph::BuildGraph(RenderGraph& graph, RenderPipelineContext& context, ImGuiGraphFrame frame,
-                            std::span<const ImGuiSceneOutput> scenes, std::span<const ImGuiGraphImageBinding> images) {
+                            std::span<RenderGraphOutputBinding> targets, std::span<const ImGuiSceneOutput> scenes, std::span<const ImGuiGraphImageBinding> images) {
     RADRAY_ASSERT(frame._index == context.FlightIndex());
     auto& self = frame._resources;
     auto& flight = frame._flight;
+    flight.FrameSerial = context.FrameSerial();
     if (!flight.Valid) {
         graph.AddDiagnostic("ImGuiSnapshot", "The UI snapshot contains an invalid texture or unsupported callback");
         return false;
     }
     auto& device = self.Device;
-    auto& programs = self.Programs;
     const bool dxil = device.GetBackend() == render::RenderBackend::D3D12;
-    if (!self.DrawProgram) self.DrawProgram = programs.GetOrCreateShaderProgram(
-                               dxil ? std::as_bytes(std::span<const unsigned char>{imgui_dxil}) : std::as_bytes(std::span<const unsigned char>{imgui_spirv}), dxil ? imgui_dxil_identity : imgui_spirv_identity, {});
-    if (!self.CompositeProgram) self.CompositeProgram = programs.GetOrCreateShaderProgram(
-                                    dxil ? std::as_bytes(std::span<const unsigned char>{composite_dxil}) : std::as_bytes(std::span<const unsigned char>{composite_spirv}), dxil ? composite_dxil_identity : composite_spirv_identity, {});
-    if (!self.DrawProgram || !self.CompositeProgram) {
+    if (!self.DrawProgram) self.DrawProgram = self.CreateProgram(
+                               dxil ? std::as_bytes(std::span<const unsigned char>{imgui_dxil}) : std::as_bytes(std::span<const unsigned char>{imgui_spirv}), dxil ? imgui_dxil_identity : imgui_spirv_identity);
+    if (!self.DrawProgram) {
         graph.AddDiagnostic("ImGuiShader", "Embedded ImGui artifact could not create a shader program");
         self.Error = true;
         return false;
     }
     unordered_map<ImTextureID, RgTextureParameterBinding> bindings;
     unordered_map<ImTextureID, ImGuiColorEncoding> outputEncodings;
-    unordered_map<render::Texture*, RgTextureHandle> imports;
+    unordered_map<render::Texture*, RgTextureValue> imports;
     const auto import = [&](render::Texture* texture, std::span<render::TextureStates> states, std::span<uint8_t> valid, bool observable) {
         auto found = imports.find(texture);
         if (found != imports.end()) return found->second;
@@ -143,7 +70,11 @@ bool ImGuiGraph::BuildGraph(RenderGraph& graph, RenderPipelineContext& context, 
         return handle;
     };
     for (const auto& request : flight.Requests) {
-        if (request.Status == ImTextureStatus_WantDestroy) continue;
+        if (request.Status == ImTextureStatus_WantDestroy) {
+            const auto found = self.GpuTextures.find(request.Id);
+            if (found != self.GpuTextures.end()) flight.Retained.push_back(found->second);
+            continue;
+        }
         auto& texture = self.GpuTextures[request.Id];
         bool full = !texture || texture->Texture->GetDesc().Width != request.Width || texture->Texture->GetDesc().Height != request.Height || texture->Texture->GetDesc().Format != request.Format;
         if (full) {
@@ -159,8 +90,7 @@ bool ImGuiGraph::BuildGraph(RenderGraph& graph, RenderPipelineContext& context, 
             texture->Texture = native.Release();
         }
         full |= texture->Valid[0] == 0;
-        const auto destination = import(texture->Texture.get(), texture->States, texture->Valid, true);
-        bindings.emplace(request.Id, RgTextureParameterBinding{destination});
+        auto destination = import(texture->Texture.get(), texture->States, texture->Valid, true);
         flight.Retained.push_back(texture);
         vector<ImTextureRect> regions = request.Regions;
         if (full) regions = {{0, 0, uint16_t(request.Width), uint16_t(request.Height)}};
@@ -173,16 +103,19 @@ bool ImGuiGraph::BuildGraph(RenderGraph& graph, RenderPipelineContext& context, 
             vector<byte> pixels(uint64_t(pitch) * region.h);
             for (uint32_t row = 0; row < region.h; ++row)
                 std::memcpy(pixels.data() + uint64_t(row) * pitch, request.Pixels.data() + (uint64_t(region.y + row) * request.Width + region.x) * 4, uint64_t(region.w) * 4);
-            const auto source = Upload(graph, context, device, flight, pixels, render::BufferUse::CopySource);
-            flight.UploadPasses.push_back(graph.AddCopyBufferToTexturePass("ImGui.TextureUpdate", source, destination,
-                                                                           {0, pitch, 0, 0, region.x, region.y, region.w, region.h}));
+            const auto source = graph.UploadBuffer("ImGui.TexturePixels", pixels, render::BufferUse::CopySource);
+            destination = graph.NextVersion(destination);
+            flight.UploadTickets.push_back(graph.Track(graph.AddCopyBufferToTexturePass("ImGui.TextureUpdate", source, destination,
+                                                                                        {0, pitch, 0, 0, region.x, region.y, region.w, region.h})));
         }
+        imports.insert_or_assign(texture->Texture.get(), destination);
+        bindings.emplace(request.Id, RgTextureParameterBinding{destination});
     }
     flight.AssetStates.reserve(flight.Textures.size());
     flight.AssetValid.reserve(flight.Textures.size());
     for (const auto& [id, record] : flight.Textures) {
         if (record.Graph || bindings.contains(id)) continue;
-        RgTextureHandle texture;
+        RgTextureValue texture;
         if (record.Output.IsValid()) {
             const auto scene = std::find_if(scenes.begin(), scenes.end(), [&](const auto& value) { return value.Output == record.Output; });
             if (scene == scenes.end() || std::count_if(scenes.begin(), scenes.end(), [&](const auto& value) { return value.Output == record.Output; }) != 1) {
@@ -211,26 +144,19 @@ bool ImGuiGraph::BuildGraph(RenderGraph& graph, RenderPipelineContext& context, 
     }
     for (const auto& image : images) {
         auto record = flight.Textures.find(image.Image);
-        auto binding = graph.GetTextureViewBinding(image.View);
-        if (record == flight.Textures.end() || !record->second.Graph || !binding || !bindings.emplace(image.Image, *binding).second)
+        const auto descriptor = graph.GetTextureDescriptor(image.Texture);
+        if (record == flight.Textures.end() || !record->second.Graph || !descriptor || !bindings.emplace(image.Image, RgTextureParameterBinding{image.Texture, image.View}).second)
             graph.AddDiagnostic("ImGuiGraphImage", "Graph image binding is missing, duplicated, stale or belongs to another graph");
     }
     for (const auto& viewport : flight.Viewports) {
-        const auto output = context.ImportOutputTarget(graph, viewport.Output);
-        const auto desc = graph.GetTextureDescriptor(output);
-        if (!desc) continue;  // Minimized/unavailable swapchain: no acquired output this frame.
-        render::TextureDescriptor canvasDesc{render::TextureDimension::Dim2D, desc->Width, desc->Height, 1, 1, 1,
-                                             render::TextureFormat::RGBA16_FLOAT, render::MemoryType::Device, render::TextureUse::Resource | render::TextureUse::RenderTarget};
-        const auto canvas = graph.CreateTexture(canvasDesc, "ImGui.DisplayLinear");
-        auto scene = std::find_if(scenes.begin(), scenes.end(), [&](const auto& s) { return s.Output == viewport.Output; });
-        if (scene != scenes.end())
-            Composite(graph, context, *self.CompositeProgram.Get(), scene->Texture, canvas, desc->Width, desc->Height,
-                      scene->SampleEncoding == ImGuiColorEncoding::Srgb, false, device.GetBackend());
-        else
-            graph.AddRasterPass<int>("ImGui.ClearDisplay", [&](int&, RenderGraphRasterBuilder& builder) { builder.SetColorAttachment(0, canvas, {.Clear = {{.012f, .012f, .012f, 1}}}); }, nullptr);
+        const auto target = FindGraphOutput(targets, viewport.Output);
+        if (!target) continue;
+        const auto desc = graph.GetTextureDescriptor(target->Texture);
+        if (!desc) continue;
+        auto& canvas = target->Texture;
         if (!viewport.Vertices.empty() && !viewport.Indices.empty()) {
-            const auto vertices = Upload(graph, context, device, flight, std::as_bytes(std::span{viewport.Vertices}), render::BufferUse::Vertex);
-            const auto indices = Upload(graph, context, device, flight, std::as_bytes(std::span{viewport.Indices}), render::BufferUse::Index);
+            const auto vertices = graph.UploadBuffer("ImGui.Vertices", std::as_bytes(std::span{viewport.Vertices}), render::BufferUse::Vertex);
+            const auto indices = graph.UploadBuffer("ImGui.Indices", std::as_bytes(std::span{viewport.Indices}), render::BufferUse::Index);
             struct Draw {
                 RgParameterSetHandle Set;
                 Rect Clip;
@@ -239,12 +165,13 @@ bool ImGuiGraph::BuildGraph(RenderGraph& graph, RenderPipelineContext& context, 
             };
             struct Data {
                 RgGraphicsProgramHandle Program;
-                RgBufferHandle Vertices, Indices;
+                RgBufferValue Vertices, Indices;
                 uint64_t VertexBytes;
                 uint32_t Width, Height;
                 render::RenderBackend Backend;
                 vector<Draw> Draws;
             };
+            canvas = graph.NextVersion(canvas);
             graph.AddRasterPass<Data>("ImGui.Draw", [&](Data& data, RenderGraphRasterBuilder& builder) {
                 data.Program = builder.UseGraphicsProgram(*self.DrawProgram, UiState(true), UiLayout()); data.Vertices = builder.ReadBuffer(vertices, RgBufferAccess::Vertex); data.Indices = builder.ReadBuffer(indices, RgBufferAccess::Index);
                 data.VertexBytes = viewport.Vertices.size() * sizeof(ImDrawVert); data.Width = desc->Width; data.Height = desc->Height; data.Backend = device.GetBackend();
@@ -254,7 +181,7 @@ bool ImGuiGraph::BuildGraph(RenderGraph& graph, RenderPipelineContext& context, 
                     if (found == bindings.end()) { graph.AddDiagnostic("ImGuiImage", "Image has no texture binding in this frame"); continue; }
                     const auto textureDesc = graph.GetTextureDescriptor(found->second.Texture);
                     if (!textureDesc || textureDesc->SampleCount != 1 || !textureDesc->Usage.HasFlag(render::TextureUse::Resource) ||
-                        textureDesc->Dim != render::TextureDimension::Dim2D || found->second.Texture == canvas || found->second.Texture == output) {
+                        textureDesc->Dim != render::TextureDimension::Dim2D) {
                         graph.AddDiagnostic("ImGuiImage", "Image requires a sampleable single-sample 2D texture without attachment feedback; resolve MSAA explicitly"); continue;
                     }
                     if (draw.IndexOffset > viewport.Indices.size() || draw.Count > viewport.Indices.size() - draw.IndexOffset || draw.VertexOffset < 0) {
@@ -290,14 +217,6 @@ bool ImGuiGraph::BuildGraph(RenderGraph& graph, RenderPipelineContext& context, 
                 encoder.SetViewport(MakeViewport(data.Backend, 0, 0, float(data.Width), float(data.Height)));
                 for (const auto& draw : data.Draws) { ctx.BindParameterSet(draw.Set); encoder.SetScissor(draw.Clip); encoder.DrawIndexed(draw.Count, 1, draw.Index, draw.Vertex, 0); } });
         }
-        Composite(graph, context, *self.CompositeProgram.Get(), canvas, output, desc->Width, desc->Height, false, !SrgbAttachment(desc->Format), device.GetBackend());
-    }
-    // A scene may render while its ImGui viewport is empty/minimized or intentionally has no draw data.
-    for (const auto& scene : scenes) {
-        if (std::any_of(flight.Viewports.begin(), flight.Viewports.end(), [&](const auto& vp) { return vp.Output == scene.Output; })) continue;
-        const auto output = context.ImportOutputTarget(graph, scene.Output);
-        if (auto desc = graph.GetTextureDescriptor(output)) Composite(graph, context, *self.CompositeProgram.Get(), scene.Texture, output, desc->Width, desc->Height,
-                                                                      scene.SampleEncoding == ImGuiColorEncoding::Srgb, !SrgbAttachment(desc->Format), device.GetBackend());
     }
     return graph.GetReport().Diagnostics.empty();
 }
@@ -306,7 +225,8 @@ void ImGuiGraph::CompleteGraph(const RenderGraph& graph, RenderPipelineContext& 
     (void)context;
     auto& self = frame._resources;
     auto& flight = frame._flight;
-    for (auto pass : flight.UploadPasses) success &= graph.WasPassExecuted(pass);
+    (void)graph;
+    for (const auto& ticket : flight.UploadTickets) success &= ticket.Status() == FrameOperationStatus::Recorded;
     flight.GraphSuccess = success;
     if (!success) {
         self.Error = true;
