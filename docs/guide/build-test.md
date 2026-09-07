@@ -147,6 +147,7 @@ FreeType 依赖隔离还应检查生成的 `ftoption.h` 中外部功能宏与 fr
 | `test_runtime_type` | `RuntimeTypeIdTest` |
 | `test_asset_slot` | `AssetSlotTest` |
 | `test_frame_upload` | `FrameUploadTest` |
+| `test_flight_completion` | `FlightCompletionTest` |
 | `test_scene_render_state` | `SceneTransformTest`, `SceneRenderStateTest` |
 | `test_asset_database` | `AssetDatabaseTest` |
 | `test_component_rtti` | `ComponentRttiTest` |

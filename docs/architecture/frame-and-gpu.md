@@ -1,6 +1,6 @@
 > - 适用: 改帧节奏、提交时序、GPU 上传；排查"GPU 对象被提前销毁"或帧同步问题
 > - 权威: 本文是帧节奏与 GPU 资源上传的唯一说明。资产侧的延迟销毁契约见 [asset-system](asset-system.md)；RHI 本身见 [render-rhi](render-rhi.md)
-> - 锚点: `modules/runtime/include/radray/runtime/gpu_system.h`, `modules/runtime/include/radray/runtime/gpu_resource.h`, `modules/runtime/include/radray/runtime/wait_frame.h`, `modules/runtime/include/radray/runtime/render_system.h`, `modules/runtime/src/gpu_system.cpp`
+> - 锚点: `modules/runtime/include/radray/runtime/gpu_system.h`, `modules/runtime/include/radray/runtime/flight_completion.h`, `modules/runtime/include/radray/runtime/gpu_resource.h`, `modules/runtime/include/radray/runtime/wait_frame.h`, `modules/runtime/include/radray/runtime/render_system.h`, `modules/runtime/src/gpu_system.cpp`
 
 # 帧节奏与 GPU 上传
 
@@ -8,7 +8,7 @@
 
 | 系统 | 负责 | 不负责 |
 |---|---|---|
-| `GpuSystem` | **何时画**。instance/factory/device/主队列/fence、flight 槽位、上传器、帧 profiler、帧边界等待表 | 画什么 |
+| `GpuSystem` | **何时画**。instance/factory/device/主队列/fence、flight 槽位、上传器、帧 profiler、帧边界等待表、flight 完成通知的发布与排空 | 画什么 |
 | `RenderSystem` | **画什么**。pipeline、workload/output、graph pools/history、program/artifact cache、RenderPass/Framebuffer registry、game-thread Scene 与 per-flight asset refs | GPU 提交时序 |
 | `WindowManager` | 窗口创建/销毁、swapchain acquire/present/recreate、事件分发 | — |
 | `Application` | 固化帧序与关停顺序；游戏侧的窄扩展点 | — |
@@ -18,7 +18,7 @@
 ```
 Application::StartLoop
   ├─ NativeEventPump                 收集原始窗口输入
-  ├─ BeginUpdateForFlight(flight)     取得该 flight 的可写槽位；PumpWaitFrame
+  ├─ BeginUpdateForFlight(flight)     取得该 flight 的可写槽位；PumpFlightCompletions → PumpWaitFrame → PumpFrameUploadScheduler
   ├─ RenderSystem::BeginUpdateForFlight 清除该 flight 上一帧的 retained asset refs 和 frame plan
   ├─ ImGuiSystem::BeginUpdate         可选；消费已完成 flight 的纹理反馈，释放当前槽快照
   ├─ AssetManager::Pump               提交加载结果；销毁零引用资产
@@ -38,10 +38,14 @@ Application::StartLoop
        → 写 flight.Signal → Present 全部 target
 ```
 
-`CompleteFlight` 在 fence 完成后 resolve profiler、回收 staging，并发布完成通知和原子
-`WaitersCompleted`。多线程模式下它在渲染线程，不访问 game-thread 的协程等待表或资产引用。
-`Application::PumpRenderCompletions` 在 game thread 消费通知并调用 `OnRenderFrameComplete`；
-正常、跳过和 shutdown 路径保持相同线程归属。上传统计也读取已完成 flight 的受锁保护快照。
+`CompleteFlight` 在 fence 完成后 resolve profiler、回收 staging，并 `NotifyFlightComplete`
+入队，同时发布原子 `WaitersCompleted`。多线程模式下它在渲染线程，不访问 game-thread 的协程等待表或资产引用。
+`GpuSystem::PumpFlightCompletions` 在 game thread 排空队列：先让上传调度器 `ApplyCompletedFlights`，
+再按注册顺序调用 `IFlightCompletionObserver`。`Application` 与 `ImGuiSystem` 都是观察者；
+`Application::OnFlightsComplete` 再转到 `OnRenderFrameComplete`。线程断言留在 `Application` 一侧
+（它持有 `_applicationThread`）；`GpuSystem` 全文没有 `this_thread::get_id()`，靠调用点固定在
+`BeginUpdateForFlight` 与 `WaitAndCleanupCompletedFlights`。正常、跳过和 shutdown 路径保持相同线程归属。
+上传统计也读取已完成 flight 的受锁保护快照。
 
 多线程普通帧只等待当前 flight 可写，不等待上一帧 CPU record 结束，允许 `Update(n+1)` 与
 `Record(n)` 重叠。同一 flight 仍必须等 fence。每个 flight 拥有独立上传命令和 uploader，
@@ -80,6 +84,9 @@ WindowInputRouter 复制 UTF-8 文本和双轴浮点滚轮，在 Update 前统�
 | 计时态 | `FrameStartTime` | 游戏线程在帧开头写 |
 | 提交态 | `Signal` | `EndFrameRecordAndSubmit` 写；retire/`CompleteFlight` 经 `_retireMutex` 读后清 |
 | 等待表 | `WaitFrame` | 见下 |
+
+完成通知不挂在槽位上。`FlightCompletionQueue` 属于 `GpuSystem`：任意 retire 线程 `Push`，
+game thread 在 `PumpFlightCompletions` 全排空并扇出。`WaitFrame` 仍用槽位上的原子位，见下一节。
 
 `_flights` 是 `vector<unique_ptr<FlightSlot>>` 而不是 `vector<FlightSlot>`：`FlightSlot`
 内含 `ManualCoroutineScheduler`，它不可拷贝也不可移动——挂起的协程记录里存着回指调度器的
@@ -142,6 +149,36 @@ template <> struct ServiceTraits<MyCache> {
 
 目前仓库里只有资产走这条路，所以没有现成的非资产调用点可参照。
 
+## 完成通知与三条恢复路径
+
+retire 线程观察到 fence 之后，有三条互不替代的恢复路径：
+
+| 路径 | 载体 | 排空 |
+|---|---|---|
+| 上传协程（`AwaitingFence` → `FenceComplete`） | `GpuSystem` 的 `FlightCompletionQueue` | `PumpFlightCompletions` 全排空，再 `PumpFrameUploadScheduler` 恢复 |
+| 游戏 / ImGui 观察者 | 同一条队列 | 同上，apply 之后按注册顺序扇出 |
+| 帧边界等待（`IWaitFrameProcessor::Wait`） | per-flight 原子 `WaitersCompleted` | `PumpWaitFrame` **只泵当前独占 flight** |
+
+前两条曾各有一份「retire 发布 / game thread 排空」队列，现已合成 `FlightCompletionQueue`。
+`WaitFrame` 不并入：记录本身挂在 flight 上，通知只需一个 bit，且排空必须只碰当前独占的那个
+flight，与队列的全排空语义相反。
+
+`BeginUpdateForFlight` 里三者的顺序是固定的：`PumpFlightCompletions` → `PumpWaitFrame` →
+`PumpFrameUploadScheduler`。不要对调后两步——`PumpWaitFrame` 用 `WaitersCompleted.exchange(false)`
+把当时表里的记录全部标成 `FlightComplete`；若先恢复上传协程，新注册的 `Wait()` 会被同一轮零等待恢复。
+
+两条跨子系统前提支撑这个形状，不能从单个函数看出来：
+
+1. **观察者回调不会产生同轮 `Wait()` 记录。** `DeferDestroy` 只 `_pendingDeferred.push_back`；
+   `co_await Wait()` 发生在 `RunDeferredDestroy`，由 `FlushDeferredBatch` spawn，而后者的唯一调用点
+   是 `AssetManager::Pump` → `Application::Update`，发生在 `BeginUpdateForFlight` 返回之后。
+   因此 `PumpFlightCompletions` 排在 `PumpWaitFrame` 之前是安全的。上传协程恢复后直接执行游戏代码，
+   不适用这条两层间接，所以 `PumpFrameUploadScheduler` 仍在 `PumpWaitFrame` 之后。
+2. **当前 flight 的完成不可能在帧顶排空之后到达。** `TickFrame` 先 `_writableSlotsSemaphore.acquire()`
+   才算出 `flightIndex` 并 `BeginUpdateForFlight`；`RetireRenderedFrames` 只在 `CompleteFlightIfReady`
+   成功后才 `release()`。因此 `CompleteFlight(N)` 严格早于 game thread 取得 flight N 的可写槽位，
+   帧顶一次排空就够，不必在 `PrepareFrameUploads` 再排一次。
+
 ## 上传
 
 三层，按"数据从哪来"选：
@@ -178,11 +215,16 @@ upload phase 只分配 GPU 对象、复制已准备的 mip 数据并录制命令
 活过所有已录制的复制命令。`UploadMeshResource` 先分配全部目标 buffer，再开始录制；任一
 目标分配失败时，不留下引用局部资源的命令。
 
-`NotifyFlightComplete` 可以与 game thread 并发，只把 flight ID 写入受 mutex 保护的完成队列，
-不遍历或修改上传记录。game thread 串行驱动 `RunUploadPhase` 与 `PumpCompletedUploads`：二者先
-应用完成通知，只有后者在 game thread 恢复等待 fence 的加载协程。复用 flight 前先消费旧通知，
-避免上一轮完成事件误完成新上传。关停的 `WaitAndCleanupCompletedFlights` 在 GPU idle 后也会
-pump 上传调度器，然后才能销毁 AssetManager 及其 task scope。
+`FrameUploadScheduler` 不自持完成队列。它是 `GpuSystem` 共享队列的消费方：`PumpFlightCompletions`
+先 `ApplyCompletedFlights`（只读 `.FlightIndex`，把对应 `AwaitingFence` 记录标成 `FenceComplete`），
+`PumpCompletedUploads` 再恢复这些协程。`RunUploadPhase` 不再自排空。
+
+帧顶一次排空足够：`TickFrame` 先 `_writableSlotsSemaphore.acquire()` 才算出 `flightIndex` 并
+`BeginUpdateForFlight`；`RetireRenderedFrames` 只在 `CompleteFlightIfReady` 成功后才 `release()`。
+因此 `CompleteFlight(N)` 严格早于 game thread 取得 flight N 的可写槽位，挂在 flight N 上的
+`AwaitingFence` 记录在 `RunUploadPhase(N)` 之前已被 apply 并恢复。中途到达的其他 flight 完成
+推迟到下一帧顶 apply；它们也只在下一帧的 `PumpFrameUploadScheduler` 才恢复，没有额外延迟。关停的 `WaitAndCleanupCompletedFlights` 在 GPU idle 后
+也会 `PumpFlightCompletions` 再 pump 上传调度器，然后才能销毁 AssetManager 及其 task scope。
 
 ## 渲染资源的帧寿命
 
@@ -274,7 +316,7 @@ WindowManager 用 `Link` 保存 GPU/Render 引用，GpuSystem 对窗口使用 `R
 |---|---|
 | `OnInit` | 全部内部系统就绪后一次。加载资产、Spawn Actor、建相机 |
 | `OnUpdate` | 每帧，`AssetManager::Pump` 之后、`World::Tick` 之前 |
-| `OnRenderFrameComplete` | game thread 消费 flight 完成通知，包括跳过和 shutdown；允许释放 GT 资产引用 |
+| `OnRenderFrameComplete` | game thread 消费 `FlightCompletion`，包括跳过和 shutdown；允许释放 GT 资产引用 |
 | `OnShutdown` | 关停，游戏侧清理 |
 
 `Application::Update` / `Render` / `Shutdown` 是**框架方法**（已固化帧序），不是 override 点。

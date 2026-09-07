@@ -377,7 +377,7 @@ protected:
         if (_options.Frames && state.Frame >= _options.Frames) Close();
     }
 
-    void OnRenderFrameComplete(const AppRenderCompleteContext& ctx) override {
+    void OnRenderFrameComplete(const FlightCompletion& ctx) override {
         if (_pipeline && ctx.GpuWorkCompleted) {
             _failed |= !_pipeline->CompleteCaptures(ctx.FlightIndex);
             _stats = _pipeline->GetStageBStats(ctx.FlightIndex);

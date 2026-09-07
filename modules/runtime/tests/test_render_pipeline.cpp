@@ -144,7 +144,7 @@ protected:
         _result->PassCount = GetRenderSystem()->GetRenderPassRegistry()->GetRenderPassCount();
     }
 
-    void OnRenderFrameComplete(const AppRenderCompleteContext&) override {
+    void OnRenderFrameComplete(const FlightCompletion&) override {
         EXPECT_EQ(std::this_thread::get_id(), _result->GameThread);
         ++_result->Completed;
     }
@@ -251,30 +251,6 @@ TEST(RadRayRuntimeRenderPipeline, VulkanFirstPipelineAfterLoadingThreaded) {
 }
 TEST(RadRayRuntimeRenderSystem, RetainedAssetLivesUntilFlightReuse) {
     RunHost(render::RenderBackend::D3D12, true, true, true);
-}
-
-TEST(RadRayRuntimeRenderSystem, CompletionNotificationsAreQueuedUntilTheApplicationThreadPumps) {
-    class CompletionApp final : public Application {
-    public:
-        vector<AppRenderCompleteContext> Completed;
-        const std::thread::id Owner{std::this_thread::get_id()};
-        void OnRenderFrameComplete(const AppRenderCompleteContext& ctx) override {
-            EXPECT_EQ(std::this_thread::get_id(), Owner);
-            Completed.push_back(ctx);
-        }
-    } app;
-    std::thread worker([&] {
-        app.NotifyRenderComplete({.FlightIndex = 1});
-        app.NotifyRenderComplete({.FlightIndex = 2, .GpuWorkCompleted = false});
-    });
-    worker.join();
-    EXPECT_TRUE(app.Completed.empty());
-    app.PumpRenderCompletions();
-    ASSERT_EQ(app.Completed.size(), 2u);
-    EXPECT_TRUE(app.Completed[0].GpuWorkCompleted);
-    EXPECT_FALSE(app.Completed[1].GpuWorkCompleted);
-    app.PumpRenderCompletions();
-    EXPECT_EQ(app.Completed.size(), 2u);
 }
 
 TEST(RadRayRuntimeForwardPipeline, GraphSerializationRequiresAnExplicitCaptureRequest) {
@@ -393,7 +369,7 @@ protected:
         }
         if (update >= 4) test::CloseMainWindow(*this);
     }
-    void OnRenderFrameComplete(const AppRenderCompleteContext&) override {
+    void OnRenderFrameComplete(const FlightCompletion&) override {
         EXPECT_EQ(std::this_thread::get_id(), _probe.GameThread);
         ++_probe.Completed;
     }

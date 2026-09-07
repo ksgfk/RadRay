@@ -7,6 +7,7 @@
 #include <radray/runtime/texture_asset.h>
 #include <radray/runtime/render_framework/render_graph.h>
 #include <radray/runtime/render_framework/render_output.h>
+#include <radray/runtime/flight_completion.h>
 
 namespace radray {
 
@@ -55,7 +56,7 @@ struct ImGuiSystemDescriptor {
 
 class ImGuiGraphFrame;
 
-class ImGuiSystem {
+class ImGuiSystem : public IFlightCompletionObserver {
 public:
     explicit ImGuiSystem(Application& app);
     ~ImGuiSystem();
@@ -77,7 +78,7 @@ public:
     void BeginUpdate(uint32_t flight);
     bool NewFrame(const AppUpdateContext& context);
     void CaptureFrame(uint32_t flight);
-    void NotifyFlightComplete(uint32_t flight, bool gpuCompleted) noexcept;
+    void OnFlightsComplete(std::span<const FlightCompletion> completions) noexcept override;
     void RequestOutputs(uint32_t flight, class RenderWorkloadBuilder& builder) const;
 
 private:

@@ -2,12 +2,12 @@
 
 #include <chrono>
 #include <filesystem>
-#include <mutex>
 #include <string_view>
 #include <thread>
 
 #include <radray/coroutine.h>
 #include <radray/types.h>
+#include <radray/runtime/flight_completion.h>
 #ifdef RADRAY_ENABLE_IMGUI
 #include <radray/runtime/imgui/imgui_system.h>
 #endif
@@ -48,11 +48,6 @@ struct AppRenderContext {
     std::chrono::duration<float> DeltaTime{};
     std::chrono::duration<float> LastFrameLatency{};
     bool IsInModalLoop{false};
-};
-
-struct AppRenderCompleteContext {
-    uint32_t FlightIndex{0};
-    bool GpuWorkCompleted{true};
 };
 
 struct AppUpdateResult {
@@ -110,11 +105,9 @@ struct ApplicationRuntimeDescriptor {
     render::RenderBackend Backend;
     bool EnableValidation{false};
     bool Multithreaded{false};
+    bool EnableSynchronizationValidation{false};
     std::string_view AppName{"RadRay Application"};
     std::string_view EngineName{"RadRay"};
-    /// 显式指定的可写目录，用于持久化图形管线缓存。
-    /// shader artifact 的加载策略由 runtime/render 边界负责。
-    std::filesystem::path RenderCachePath{};
     /// 开发时资产根；清单固定为 `<AssetRoot>/assets.json`。空路径不启用 AssetDatabase。
     std::filesystem::path AssetRoot{};
     /// 开发时 shader 逻辑源名的文件系统根。空路径会让 program 请求明确失败。
@@ -132,13 +125,12 @@ struct ApplicationRuntimeDescriptor {
     uint32_t FlightDataCount{2};
     render::TextureFormat BackBufferFormat;
     render::PresentMode PresentMode;
-    bool EnableSynchronizationValidation{false};
 #ifdef RADRAY_ENABLE_IMGUI
     ImGuiSystemDescriptor ImGui{};
 #endif
 };
 
-class Application {
+class Application : public IFlightCompletionObserver {
 public:
     Application() noexcept;
     Application(const Application&) = delete;
@@ -168,20 +160,14 @@ public:
     /// 兼容性便捷入口；device 的所有权与生命周期由 GpuSystem 管理。
     render::Device* GetDevice() noexcept;
     const render::Device* GetDevice() const noexcept;
-    const std::filesystem::path& GetRenderCachePath() const noexcept { return _renderCachePath; }
     const std::filesystem::path& GetShaderSourceRoot() const noexcept { return _shaderSourceRoot; }
-    const vector<std::filesystem::path>& GetShaderIncludePaths() const noexcept {
-        return _shaderIncludePaths;
-    }
+    const vector<std::filesystem::path>& GetShaderIncludePaths() const noexcept { return _shaderIncludePaths; }
 
     // —— runner / 运行时内部系统调用的框架方法(已固化帧序,非游戏 override 点)——
     AppUpdateResult Update(const AppUpdateContext& ctx);
     void Render(AppFrameContext& ctx);
     int Shutdown(const AppShutdownContext& ctx);
-    void OnRenderComplete(const AppRenderCompleteContext& ctx);
-    /// Any retirement thread: enqueue only. Callbacks drain on the application thread before flight reuse.
-    void NotifyRenderComplete(const AppRenderCompleteContext& ctx);
-    void PumpRenderCompletions();
+    void OnFlightsComplete(std::span<const FlightCompletion> completions) noexcept override;
 
     int StartLoop();
 
@@ -205,7 +191,7 @@ protected:
     virtual void OnShutdown();
 
     /// Game thread, before flight reuse or shutdown. Check GpuWorkCompleted for discarded frames.
-    virtual void OnRenderFrameComplete(const AppRenderCompleteContext& ctx);
+    virtual void OnRenderFrameComplete(const FlightCompletion& ctx);
 
     /// 是否请求退出。默认:主窗口被关闭。
     bool ShouldExit() const noexcept;
@@ -224,14 +210,10 @@ private:
     unique_ptr<ImGuiSystem> _imguiSystem;
 #endif
     ApplicationScheduler _scheduler;
-    std::filesystem::path _renderCachePath;
     std::filesystem::path _shaderSourceRoot;
     vector<std::filesystem::path> _shaderIncludePaths;
     bool _multithreaded{false};
     const std::thread::id _applicationThread{std::this_thread::get_id()};
-    std::mutex _renderCompletionMutex;
-    vector<AppRenderCompleteContext> _renderCompletions;
-    bool _pumpingRenderCompletions{false};
 };
 
 }  // namespace radray

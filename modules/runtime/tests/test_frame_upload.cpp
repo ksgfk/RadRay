@@ -5,6 +5,7 @@
 #include <thread>
 
 #include <gtest/gtest.h>
+#include <radray/runtime/flight_completion.h>
 #include <radray/runtime/gpu_system.h>
 #include <radray/runtime/texture_asset.h>
 
@@ -16,6 +17,7 @@ protected:
     test::UploadTestDevice Device;
     ResourceUploader Uploader{&Device, 2};
     FrameUploadScheduler Uploads;
+    FlightCompletionQueue Completions;
     AssetManager Assets;
     HostWriteBatch Writes;
     test::UploadTestCommand Command;
@@ -23,13 +25,19 @@ protected:
     StreamingAssetRef<StaticMesh> LoadMesh() {
         return Assets.Load<StaticMesh>({test::kUploadTestId, LoadStaticMesh(Uploads, test::MakeUploadTestMesh()), "upload test"});
     }
+    void Apply() {
+        FlightCompletionQueue::Drain drain{Completions};
+        Uploads.ApplyCompletedFlights(drain.Items());
+    }
     void Record(uint32_t flight) {
+        Apply();
         Uploader.BeginFlight(flight, Writes);
         Uploads.RunUploadPhase(&Command, Uploader, flight);
         Uploader.EndFlight(flight);
     }
     void Complete(uint32_t flight) {
-        Uploads.NotifyFlightComplete(flight);
+        Completions.Push({flight, true});
+        Apply();
         Uploads.PumpCompletedUploads();
         Assets.Pump();
     }
@@ -57,9 +65,10 @@ TEST_F(FrameUploadTest, CanceledMeshSurvivesUntilItsFlightCompletes) {
     EXPECT_EQ(Device.LiveDeviceBuffers, 2);
     Complete(1);
     EXPECT_EQ(Device.LiveDeviceBuffers, 2);
-    std::thread completion([&] { Uploads.NotifyFlightComplete(0); });
+    std::thread completion([&] { Completions.Push({0, true}); });
     completion.join();
     EXPECT_EQ(Device.LiveDeviceBuffers, 2);
+    Apply();
     Uploads.PumpCompletedUploads();
     Assets.Pump();
     EXPECT_EQ(Device.LiveDeviceBuffers, 0);
@@ -100,9 +109,10 @@ TEST_F(FrameUploadTest, LargeTextureMipPreparationPrecedesUploadAndReadyPublishe
         Record(0);
         EXPECT_EQ(Command.Copies, generateMips ? 11u : 1u);
         EXPECT_FALSE(texture.IsReady());
-        std::thread completion([&] { Uploads.NotifyFlightComplete(0); });
+        std::thread completion([&] { Completions.Push({0, true}); });
         completion.join();
         EXPECT_FALSE(texture.IsReady());
+        Apply();
         Uploads.PumpCompletedUploads();
         Assets.Pump();
         ASSERT_TRUE(texture.IsReady());
@@ -136,9 +146,10 @@ TEST_F(FrameUploadTest, UploadStageAndCompletionHaveExplicitThreadAndPhaseBounda
     EXPECT_TRUE(entered);
     EXPECT_FALSE(completed);
     EXPECT_FALSE(Uploads.IsRecordingUploads());
-    std::thread notify([&] { Uploads.NotifyFlightComplete(0); });
+    std::thread notify([&] { Completions.Push({0, true}); });
     notify.join();
     EXPECT_FALSE(completed);
+    Apply();
     Uploads.PumpCompletedUploads();
     EXPECT_TRUE(completed);
 }
@@ -202,7 +213,7 @@ TEST_F(FrameUploadTest, ReusedFlightDoesNotConsumeItsPreviousCompletion) {
     auto first = LoadMesh();
     Record(0);
     first.Cancel();
-    Uploads.NotifyFlightComplete(0);
+    Completions.Push({0, true});
     const AssetId secondId{0x1234, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
     auto second = Assets.Load<StaticMesh>({secondId, LoadStaticMesh(Uploads, test::MakeUploadTestMesh()), "second upload"});
     Uploader.CollectFlight(0);
@@ -230,7 +241,7 @@ TEST_F(FrameUploadTest, ConcurrentCompletionsAndGameThreadCancellationDrainExact
     std::thread completion([&] {
         start.acquire();
         while (!done.load(std::memory_order_acquire)) {
-            Uploads.NotifyFlightComplete(0);
+            Completions.Push({0, true});
             std::this_thread::yield();
         }
     });
@@ -240,10 +251,12 @@ TEST_F(FrameUploadTest, ConcurrentCompletionsAndGameThreadCancellationDrainExact
         TaskScope scope;
         scope.Spawn(AwaitCanceledUpload(Uploads, canceled));
         scope.RequestStop();
+        Apply();
         Uploads.PumpCompletedUploads();
     }
     done.store(true, std::memory_order_release);
     completion.join();
+    Apply();
     Uploads.PumpCompletedUploads();
     EXPECT_EQ(canceled, 2000u);
     EXPECT_EQ(Device.LiveDeviceBuffers, 0);

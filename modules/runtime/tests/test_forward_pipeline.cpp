@@ -866,7 +866,6 @@ void RunForwardPipeline(render::RenderBackend backend, Scenario scenario = Scena
         .Multithreaded = scenario != Scenario::Baseline,
         .AppName = "test_forward_pipeline",
         .EngineName = "RadRay",
-        .RenderCachePath = {},
         .AssetRoot = {},
         .ShaderSourceRoot = (scenario == Scenario::NonCanonical || scenario == Scenario::MissingObject)
                                 ? projectRoot / "modules/runtime/tests/data"

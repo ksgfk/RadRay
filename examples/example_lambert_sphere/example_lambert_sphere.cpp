@@ -285,7 +285,6 @@ int main(int argc, char** argv) {
         .Multithreaded = options.Multithreaded,
         .AppName = "example_lambert_sphere",
         .EngineName = "RadRay",
-        .RenderCachePath = {},
         .AssetRoot = FindAssetsRoot(),
         .ShaderSourceRoot = projectRoot / "shaderlib",
         .ShaderIncludePaths = {projectRoot / "shaderlib"},

@@ -9,6 +9,7 @@ target_include_directories(test_render_pipeline PRIVATE "${CMAKE_SOURCE_DIR}/mod
 target_compile_definitions(test_render_pipeline PRIVATE RADRAY_PROJECT_DIR="${CMAKE_SOURCE_DIR}")
 radray_add_test(test_asset_slot SOURCES test_asset_slot.cpp LINK_LIBS radrayruntime)
 radray_add_test(test_frame_upload SOURCES test_frame_upload.cpp LINK_LIBS radrayruntime)
+radray_add_test(test_flight_completion SOURCES test_flight_completion.cpp LINK_LIBS radrayruntime)
 radray_add_test(test_scene_render_state SOURCES test_scene_render_state.cpp LINK_LIBS radrayruntime)
 target_include_directories(test_scene_render_state PRIVATE "${CMAKE_SOURCE_DIR}/modules/render/tests")
 radray_add_test(test_component_rtti SOURCES test_component_rtti.cpp LINK_LIBS radrayruntime)

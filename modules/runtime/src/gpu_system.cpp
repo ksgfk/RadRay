@@ -69,7 +69,6 @@ void FrameUploadScheduler::RunUploadPhase(
         bool& Recording;
         ~ExitPhase() { Recording = false; }
     } exitPhase{_recordingUploads};
-    ApplyCompletedFlights();
     vector<FrameUploadRecord*> pending;
     const size_t uploadCount = _uploads.Count();
     for (size_t i = 0; i < uploadCount; ++i) {
@@ -110,18 +109,8 @@ void FrameUploadScheduler::RunUploadPhase(
     }
 }
 
-void FrameUploadScheduler::NotifyFlightComplete(uint32_t flightIndex) {
-    std::lock_guard lock(_completedFlightsMutex);
-    _completedFlights.push_back(flightIndex);
-}
-
-void FrameUploadScheduler::ApplyCompletedFlights() {
-    vector<uint32_t> completed;
-    {
-        std::lock_guard lock(_completedFlightsMutex);
-        completed.swap(_completedFlights);
-    }
-    if (completed.empty()) {
+void FrameUploadScheduler::ApplyCompletedFlights(std::span<const FlightCompletion> completions) {
+    if (completions.empty()) {
         return;
     }
     const size_t uploadCount = _uploads.Count();
@@ -131,7 +120,9 @@ void FrameUploadScheduler::ApplyCompletedFlights() {
             continue;
         }
         if (rec->CurrentStage == FrameUploadStage::AwaitingFence &&
-            std::find(completed.begin(), completed.end(), rec->FlightIndex) != completed.end()) {
+            std::find_if(completions.begin(), completions.end(), [rec](const FlightCompletion& completion) {
+                return completion.FlightIndex == rec->FlightIndex;
+            }) != completions.end()) {
             rec->CurrentStage = FrameUploadStage::FenceComplete;
         }
     }
@@ -139,7 +130,6 @@ void FrameUploadScheduler::ApplyCompletedFlights() {
 
 void FrameUploadScheduler::PumpCompletedUploads() {
     RADRAY_ASSERT(!_recordingUploads);
-    ApplyCompletedFlights();
     bool resumedAny = true;
     while (resumedAny) {
         resumedAny = false;
@@ -343,12 +333,8 @@ bool GpuSystem::CompleteFlight(uint32_t flightIndex) {
         std::lock_guard lock(_uploadStatsMutex);
         _completedUploadStats[flightIndex] = flight.HostWrites.GetStats();
     }
-    _app->NotifyRenderComplete(AppRenderCompleteContext{.FlightIndex = flightIndex, .GpuWorkCompleted = flight.Rendered});
+    NotifyFlightComplete(FlightCompletion{.FlightIndex = flightIndex, .GpuWorkCompleted = flight.Rendered});
     flight.Uploader->CollectFlight(flightIndex);
-    // 该 flight 的 fence 已完成:标记等在这个 flight 上的上传记录(供下次 scheduler pump 恢复加载协程)。
-    if (_frameUploadScheduler != nullptr) {
-        _frameUploadScheduler->NotifyFlightComplete(flightIndex);
-    }
     // The coroutine records, including cancellation, remain entirely game-thread owned.
     flight.WaitersCompleted.store(true, std::memory_order_release);
     return true;
@@ -376,13 +362,14 @@ void GpuSystem::BeginUpdateForFlight(uint32_t flightIndex) {
         return;
     }
 
-    _app->PumpRenderCompletions();
+    PumpFlightCompletions();
     FlightSlot& flight = *_flights[flightIndex];
     flight.HostWrites.Reset();
     flight.FrameStartTime = std::chrono::steady_clock::now();
     // 此刻本 flight 上一轮的 fence 已完成 (runner 拿到可写槽位的前提), 等待者已被
     // CompleteFlight 标记, 且此后到下一次进入本函数之间只有本线程访问该 flight。
     PumpWaitFrame(flightIndex);
+    PumpFrameUploadScheduler();
 }
 
 // ═════════════════════════════════════════════════════════════════
@@ -498,9 +485,8 @@ void ServiceTraits<GpuSystem>::Unwire(GpuSystem& self) noexcept {
     self.SetWindowManager(nullptr);
 }
 
-GpuSystem::GpuSystem(Application* app, const GpuSystemDescriptor& desc)
-    : _app(app),
-      _backBufferCount(desc.BackBufferCount),
+GpuSystem::GpuSystem(const GpuSystemDescriptor& desc)
+    : _backBufferCount(desc.BackBufferCount),
       _flightDataCount(desc.FlightDataCount) {
     render::DeviceDescriptor deviceDesc = desc.Device;
     std::visit(
@@ -580,6 +566,31 @@ uint32_t GpuSystem::GetCurrentFlightIndex() const noexcept {
     return static_cast<uint32_t>(_nowFrameIndex % _flightDataCount);
 }
 
+void GpuSystem::NotifyFlightComplete(FlightCompletion completion) {
+    _flightCompletions.Push(completion);
+}
+
+void GpuSystem::PumpFlightCompletions() {
+    FlightCompletionQueue::Drain drain{_flightCompletions};
+    if (drain.Items().empty()) {
+        return;
+    }
+    if (_frameUploadScheduler) {
+        _frameUploadScheduler->ApplyCompletedFlights(drain.Items());
+    }
+    for (auto* observer : _completionObservers) {
+        observer->OnFlightsComplete(drain.Items());
+    }
+}
+
+void GpuSystem::AddFlightCompletionObserver(IFlightCompletionObserver* observer) {
+    _completionObservers.push_back(observer);
+}
+
+void GpuSystem::RemoveFlightCompletionObserver(IFlightCompletionObserver* observer) noexcept {
+    std::erase(_completionObservers, observer);
+}
+
 void GpuSystem::PumpFrameUploadScheduler() {
     if (_frameUploadScheduler != nullptr) {
         _frameUploadScheduler->PumpCompletedUploads();
@@ -593,7 +604,7 @@ void GpuSystem::WaitAndCleanupCompletedFlights() {
     for (uint32_t flightIndex = 0; flightIndex < _flights.size(); ++flightIndex) {
         CompleteFlight(flightIndex);
     }
-    _app->PumpRenderCompletions();
+    PumpFlightCompletions();
     // 队列已 idle,故所有【已提交】flight 的等待者都已就绪。此处恢复它们,让延迟销毁的
     // GPU 对象在正常路径上归还。挂在未提交 flight 上的记录等不到 fence,留给析构里的
     // CancelAllWaitFrames。

@@ -156,7 +156,7 @@ void Application::OnUpdate(const AppUpdateContext& ctx) {
 void Application::OnShutdown() {
 }
 
-void Application::OnRenderFrameComplete(const AppRenderCompleteContext& ctx) {
+void Application::OnRenderFrameComplete(const FlightCompletion& ctx) {
     (void)ctx;
 }
 
@@ -506,7 +506,6 @@ public:
         _lastFrameTime = now;
 
         _app->GetWindowManager()->CheckRecreateSwapChains();
-        gpuSystem->PumpFrameUploadScheduler();
 
         auto result = _app->Update(AppUpdateContext{
             .FlightIndex = flightIndex,
@@ -710,7 +709,6 @@ public:
 
         _runnerFrameDatas[flightIndex].DeltaTime = deltaTime;
         _runnerFrameDatas[flightIndex].IsInModalLoop = isInModalLoop;
-        gpuSystem->PumpFrameUploadScheduler();
         auto result = _app->Update(AppUpdateContext{
             .FlightIndex = flightIndex,
             .DeltaTime = deltaTime,
@@ -795,22 +793,11 @@ public:
     std::thread _renderThread;
 };
 
-void Application::NotifyRenderComplete(const AppRenderCompleteContext& ctx) {
-    std::lock_guard lock(_renderCompletionMutex);
-    _renderCompletions.push_back(ctx);
-}
-
-void Application::PumpRenderCompletions() {
+void Application::OnFlightsComplete(std::span<const FlightCompletion> completions) noexcept {
     RADRAY_ASSERT(std::this_thread::get_id() == _applicationThread);
-    if (_pumpingRenderCompletions) return;
-    _pumpingRenderCompletions = true;
-    vector<AppRenderCompleteContext> completed;
-    {
-        std::lock_guard lock(_renderCompletionMutex);
-        completed.swap(_renderCompletions);
+    for (const auto& completion : completions) {
+        OnRenderFrameComplete(completion);
     }
-    for (const auto& ctx : completed) OnRenderComplete(ctx);
-    _pumpingRenderCompletions = false;
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -862,14 +849,6 @@ void Application::Render(AppFrameContext& ctx) {
     }
 }
 
-void Application::OnRenderComplete(const AppRenderCompleteContext& ctx) {
-    RADRAY_ASSERT(std::this_thread::get_id() == _applicationThread);
-#ifdef RADRAY_ENABLE_IMGUI
-    if (_imguiSystem) _imguiSystem->NotifyFlightComplete(ctx.FlightIndex, ctx.GpuWorkCompleted);
-#endif
-    OnRenderFrameComplete(ctx);
-}
-
 int Application::Shutdown(const AppShutdownContext& ctx) {
     (void)ctx;
     if (_gpuSystem != nullptr) {
@@ -908,6 +887,7 @@ void Application::DestroyRuntime() noexcept {
     }
     if (_gpuSystem != nullptr) {
         _gpuSystem->SetWindowManager(nullptr);
+        _gpuSystem->RemoveFlightCompletionObserver(this);
     }
     _gpuSystem.reset();
     _windowManager.reset();
@@ -915,7 +895,6 @@ void Application::DestroyRuntime() noexcept {
 
 bool Application::InitializeRuntime(const ApplicationRuntimeDescriptor& desc) {
     _multithreaded = desc.Multithreaded;
-    _renderCachePath = desc.RenderCachePath;
     _shaderSourceRoot = desc.ShaderSourceRoot;
     _shaderIncludePaths = desc.ShaderIncludePaths;
 
@@ -953,7 +932,8 @@ bool Application::InitializeRuntime(const ApplicationRuntimeDescriptor& desc) {
         .MainQueueIndex = 0,
         .BackBufferCount = desc.BackBufferCount,
         .FlightDataCount = desc.FlightDataCount};
-    _gpuSystem = make_unique<GpuSystem>(this, gpuSysDesc);
+    _gpuSystem = make_unique<GpuSystem>(gpuSysDesc);
+    _gpuSystem->AddFlightCompletionObserver(this);
     _renderSystem = make_unique<RenderSystem>(this);
     _assetManager = make_unique<AssetManager>();
     if (!desc.AssetRoot.empty()) {

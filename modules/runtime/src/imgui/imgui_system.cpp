@@ -8,6 +8,7 @@
 #include <radray/file.h>
 #include <radray/memory.h>
 #include <radray/runtime/application.h>
+#include <radray/runtime/gpu_system.h>
 #include <radray/runtime/render_system.h>
 
 namespace radray {
@@ -364,6 +365,7 @@ bool ImGuiSystem::Initialize(const ImGuiSystemDescriptor& descriptor) {
     }
     for (uint32_t i = 0; i < self.App.GetGpuSystem()->GetFlightDataCount(); ++i) self.Flights.push_back(make_unique<UiFlight>());
     self.FrameOwners.resize(self.Flights.size());
+    self.App.GetGpuSystem()->AddFlightCompletionObserver(this);
     return true;
 }
 
@@ -384,6 +386,9 @@ void ImGuiSystem::Impl::SaveSettings() {
 ImGuiSystem::~ImGuiSystem() {
     auto& self = *_impl;
     self.CheckThread();
+    if (GpuSystem* gpu = self.App.GetGpuSystem()) {
+        gpu->RemoveFlightCompletionObserver(this);
+    }
     if (!self.Context) return;
     ImGui::SetCurrentContext(self.Context.Get());
     if (self.InFrame) ImGui::EndFrame();
@@ -731,8 +736,12 @@ void ImGuiSystem::CaptureFrame(uint32_t flightIndex) {
     if (ImGui::GetIO().WantSaveIniSettings) self.SaveSettings();
     self.InFrame = false;
 }
-void ImGuiSystem::NotifyFlightComplete(uint32_t flight, bool completed) noexcept {
-    if (flight < _impl->Flights.size()) _impl->Flights[flight]->Completed.store(completed, std::memory_order_release);
+void ImGuiSystem::OnFlightsComplete(std::span<const FlightCompletion> completions) noexcept {
+    for (const auto& completion : completions) {
+        if (completion.FlightIndex < _impl->Flights.size()) {
+            _impl->Flights[completion.FlightIndex]->Completed.store(completion.GpuWorkCompleted, std::memory_order_release);
+        }
+    }
 }
 void ImGuiSystem::RequestOutputs(uint32_t flight, RenderWorkloadBuilder& builder) const {
     for (const auto& viewport : _impl->Flights[flight]->Viewports) builder.RequestOutput(viewport.Output);

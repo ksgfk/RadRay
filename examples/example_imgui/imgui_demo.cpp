@@ -138,7 +138,7 @@ int main(int argc, char** argv) {
         }
     }
     if (options.Flights < 2 || options.Flights > 3) return 2;
-    ApplicationRuntimeDescriptor descriptor{.Backend = options.Backend, .EnableValidation = true, .Multithreaded = options.Multithread, .WindowTitle = "RadRay ImGui", .WindowWidth = 960, .WindowHeight = 720, .FlightDataCount = options.Flights, .BackBufferFormat = options.Srgb ? render::TextureFormat::BGRA8_UNORM_SRGB : render::TextureFormat::BGRA8_UNORM, .PresentMode = render::PresentMode::FIFO, .EnableSynchronizationValidation = true};
+    ApplicationRuntimeDescriptor descriptor{.Backend = options.Backend, .EnableValidation = true, .Multithreaded = options.Multithread, .EnableSynchronizationValidation = true, .WindowTitle = "RadRay ImGui", .WindowWidth = 960, .WindowHeight = 720, .FlightDataCount = options.Flights, .BackBufferFormat = options.Srgb ? render::TextureFormat::BGRA8_UNORM_SRGB : render::TextureFormat::BGRA8_UNORM, .PresentMode = render::PresentMode::FIFO};
     descriptor.ImGui.Enabled = true;
     descriptor.ImGui.Viewports = options.Viewports;
     descriptor.ImGui.SettingsPath = options.Settings;

@@ -216,7 +216,7 @@ WaitAndCleanupCompletedFlights → OnShutdown → scheduler.CancelAll
 **`SingleThreadRunner`** — 一个循环里顺序做完：
 
 ```
-DispatchEvents → BeginUpdateForFlight → PumpFrameUploadScheduler → Update
+DispatchEvents → BeginUpdateForFlight → Update
               → BeginFrameRecord → Render → EndFrameRecordAndSubmit → AdvanceFrameIndex
 ```
 

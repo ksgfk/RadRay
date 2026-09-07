@@ -223,7 +223,7 @@ protected:
         list->AddImage(Color.GetTexRef(), {p.x + 152, p.y + 8}, {p.x + 168, p.y + 16});
         list->AddCallback(ImGui::GetPlatformIO().DrawCallback_ResetRenderState, nullptr);
     }
-    void OnRenderFrameComplete(const AppRenderCompleteContext& ctx) override {
+    void OnRenderFrameComplete(const FlightCompletion& ctx) override {
         if (Pipeline && ctx.GpuWorkCompleted) Pipeline->Complete(ctx.FlightIndex);
     }
     void OnShutdown() override {
@@ -349,7 +349,7 @@ TEST_P(ImGuiRenderingTest, AuxiliaryWindowsResizeMinimizeCloseRecreateAndRejectM
 #endif
     test::RuntimeLogCapture logs;
     UiWindowProbeApp app;
-    ApplicationRuntimeDescriptor desc{.Backend = mode.Backend, .EnableValidation = true, .Multithreaded = mode.Threaded, .WindowTitle = "ImGui viewport lifecycle regression", .WindowWidth = 240, .WindowHeight = 160, .FlightDataCount = mode.Flights, .BackBufferFormat = mode.Srgb ? render::TextureFormat::BGRA8_UNORM_SRGB : render::TextureFormat::BGRA8_UNORM, .PresentMode = render::PresentMode::FIFO, .EnableSynchronizationValidation = true};
+    ApplicationRuntimeDescriptor desc{.Backend = mode.Backend, .EnableValidation = true, .Multithreaded = mode.Threaded, .EnableSynchronizationValidation = true, .WindowTitle = "ImGui viewport lifecycle regression", .WindowWidth = 240, .WindowHeight = 160, .FlightDataCount = mode.Flights, .BackBufferFormat = mode.Srgb ? render::TextureFormat::BGRA8_UNORM_SRGB : render::TextureFormat::BGRA8_UNORM, .PresentMode = render::PresentMode::FIFO};
     desc.ImGui.Enabled = true;
     ASSERT_EQ(app.Run(desc), 0);
     EXPECT_TRUE(app.SawAuxiliary);
@@ -369,7 +369,7 @@ TEST_P(ImGuiRenderingTest, DynamicTextureRegionsOffsetsGraphImagesAndLinearBlend
 #endif
     test::RuntimeLogCapture logs;
     UiProbeApp app;
-    ApplicationRuntimeDescriptor desc{.Backend = mode.Backend, .EnableValidation = true, .Multithreaded = mode.Threaded, .WindowTitle = "ImGui pixel/lifetime regression", .WindowWidth = 240, .WindowHeight = 160, .FlightDataCount = mode.Flights, .BackBufferFormat = mode.Srgb ? render::TextureFormat::BGRA8_UNORM_SRGB : render::TextureFormat::BGRA8_UNORM, .PresentMode = render::PresentMode::FIFO, .EnableSynchronizationValidation = true};
+    ApplicationRuntimeDescriptor desc{.Backend = mode.Backend, .EnableValidation = true, .Multithreaded = mode.Threaded, .EnableSynchronizationValidation = true, .WindowTitle = "ImGui pixel/lifetime regression", .WindowWidth = 240, .WindowHeight = 160, .FlightDataCount = mode.Flights, .BackBufferFormat = mode.Srgb ? render::TextureFormat::BGRA8_UNORM_SRGB : render::TextureFormat::BGRA8_UNORM, .PresentMode = render::PresentMode::FIFO};
     desc.ImGui.Enabled = true;
     ASSERT_EQ(app.Run(desc), 0);
     EXPECT_TRUE(app.Clean);
@@ -384,7 +384,7 @@ TEST_P(ImGuiRenderingTest, OutputPreviewSamplesSceneBeforeUiAndDecodesSrgbOnce) 
     const auto mode = GetParam();
     test::RuntimeLogCapture logs;
     UiProbeApp app(false, true);
-    ApplicationRuntimeDescriptor desc{.Backend = mode.Backend, .EnableValidation = true, .Multithreaded = mode.Threaded, .WindowTitle = "ImGui output preview", .WindowWidth = 240, .WindowHeight = 160, .FlightDataCount = mode.Flights, .BackBufferFormat = mode.Srgb ? render::TextureFormat::BGRA8_UNORM_SRGB : render::TextureFormat::BGRA8_UNORM, .PresentMode = render::PresentMode::FIFO, .EnableSynchronizationValidation = true};
+    ApplicationRuntimeDescriptor desc{.Backend = mode.Backend, .EnableValidation = true, .Multithreaded = mode.Threaded, .EnableSynchronizationValidation = true, .WindowTitle = "ImGui output preview", .WindowWidth = 240, .WindowHeight = 160, .FlightDataCount = mode.Flights, .BackBufferFormat = mode.Srgb ? render::TextureFormat::BGRA8_UNORM_SRGB : render::TextureFormat::BGRA8_UNORM, .PresentMode = render::PresentMode::FIFO};
     desc.ImGui.Enabled = true;
     ASSERT_EQ(app.Run(desc), 0);
     EXPECT_TRUE(app.Clean);
@@ -395,7 +395,7 @@ TEST_P(ImGuiRenderingTest, OutputPreviewRejectsMissingStaleMsaaUninitializedFeed
     const auto mode = GetParam();
     test::RuntimeLogCapture logs;
     UiProbeApp app(true, true);
-    ApplicationRuntimeDescriptor desc{.Backend = mode.Backend, .EnableValidation = true, .Multithreaded = mode.Threaded, .WindowTitle = "ImGui invalid output preview", .WindowWidth = 240, .WindowHeight = 160, .FlightDataCount = mode.Flights, .BackBufferFormat = mode.Srgb ? render::TextureFormat::BGRA8_UNORM_SRGB : render::TextureFormat::BGRA8_UNORM, .PresentMode = render::PresentMode::FIFO, .EnableSynchronizationValidation = true};
+    ApplicationRuntimeDescriptor desc{.Backend = mode.Backend, .EnableValidation = true, .Multithreaded = mode.Threaded, .EnableSynchronizationValidation = true, .WindowTitle = "ImGui invalid output preview", .WindowWidth = 240, .WindowHeight = 160, .FlightDataCount = mode.Flights, .BackBufferFormat = mode.Srgb ? render::TextureFormat::BGRA8_UNORM_SRGB : render::TextureFormat::BGRA8_UNORM, .PresentMode = render::PresentMode::FIFO};
     desc.ImGui.Enabled = true;
     ASSERT_EQ(app.Run(desc), 0);
     EXPECT_FALSE(app.Clean);
@@ -413,7 +413,7 @@ TEST_P(ImGuiRenderingTest, RejectsMissingStaleMsaaUninitializedFeedbackAndDuplic
 #endif
     test::RuntimeLogCapture logs;
     UiProbeApp app(true);
-    ApplicationRuntimeDescriptor desc{.Backend = mode.Backend, .EnableValidation = true, .Multithreaded = mode.Threaded, .WindowTitle = "ImGui rejected graph regression", .WindowWidth = 240, .WindowHeight = 160, .FlightDataCount = mode.Flights, .BackBufferFormat = mode.Srgb ? render::TextureFormat::BGRA8_UNORM_SRGB : render::TextureFormat::BGRA8_UNORM, .PresentMode = render::PresentMode::FIFO, .EnableSynchronizationValidation = true};
+    ApplicationRuntimeDescriptor desc{.Backend = mode.Backend, .EnableValidation = true, .Multithreaded = mode.Threaded, .EnableSynchronizationValidation = true, .WindowTitle = "ImGui rejected graph regression", .WindowWidth = 240, .WindowHeight = 160, .FlightDataCount = mode.Flights, .BackBufferFormat = mode.Srgb ? render::TextureFormat::BGRA8_UNORM_SRGB : render::TextureFormat::BGRA8_UNORM, .PresentMode = render::PresentMode::FIFO};
     desc.ImGui.Enabled = true;
     ASSERT_EQ(app.Run(desc), 0);
     EXPECT_FALSE(app.Clean);

@@ -483,7 +483,7 @@ protected:
         }
         if (_frame >= _options.Frames) Close();
     }
-    void OnRenderFrameComplete(const AppRenderCompleteContext& context) override {
+    void OnRenderFrameComplete(const FlightCompletion& context) override {
         if (_pipeline && context.GpuWorkCompleted && !_pipeline->CompleteCaptures(context.FlightIndex)) _failed = true;
         if (_pipeline && context.GpuWorkCompleted && ++_completed % 60 == 0) {
             const auto& stats = _pipeline->GetStageBStats(context.FlightIndex);
@@ -549,7 +549,7 @@ int main(int argc, char** argv) {
         return 1;
     }
     const std::filesystem::path root{RADRAY_PROJECT_DIR_DEFAULT};
-    const ApplicationRuntimeDescriptor descriptor{.Backend = options.Backend, .EnableValidation = options.Validation, .Multithreaded = options.Multithread, .AppName = "Forward pipeline probe", .AssetRoot = root / "assets", .ShaderSourceRoot = root, .ShaderIncludePaths = {root / "shaderlib"}, .WindowTitle = "RadRay Forward pipeline probe", .WindowWidth = int(options.Width), .WindowHeight = int(options.Height), .BackBufferCount = 3, .FlightDataCount = 3, .BackBufferFormat = render::TextureFormat::BGRA8_UNORM, .PresentMode = render::PresentMode::Immediate, .EnableSynchronizationValidation = options.Validation};
+    const ApplicationRuntimeDescriptor descriptor{.Backend = options.Backend, .EnableValidation = options.Validation, .Multithreaded = options.Multithread, .EnableSynchronizationValidation = options.Validation, .AppName = "Forward pipeline probe", .AssetRoot = root / "assets", .ShaderSourceRoot = root, .ShaderIncludePaths = {root / "shaderlib"}, .WindowTitle = "RadRay Forward pipeline probe", .WindowWidth = int(options.Width), .WindowHeight = int(options.Height), .BackBufferCount = 3, .FlightDataCount = 3, .BackBufferFormat = render::TextureFormat::BGRA8_UNORM, .PresentMode = render::PresentMode::Immediate};
     std::atomic_bool errors{false};
     SetLogCallback(+[](LogLevel level, std::string_view message, void* data) {
         if (level == LogLevel::Err || level == LogLevel::Critical || (level == LogLevel::Warn && message.find("Validation Layer") != std::string_view::npos)) static_cast<std::atomic_bool*>(data)->store(true); }, &errors);

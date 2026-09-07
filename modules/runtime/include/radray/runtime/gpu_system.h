@@ -14,6 +14,7 @@
 #include <radray/runtime/asset.h>
 #include <radray/runtime/gpu_resource.h>
 #include <radray/runtime/wait_frame.h>
+#include <radray/runtime/flight_completion.h>
 #include <radray/runtime/service_traits.h>
 
 // device / queue / flight / 上传 / 帧边界等待。帧序与关停顺序: docs/architecture/frame-and-gpu.md
@@ -24,7 +25,6 @@ class CommandBuffer;
 
 namespace radray {
 
-class Application;
 class AppWindow;
 class WindowManager;
 class AppFrameContext;
@@ -185,14 +185,13 @@ public:
     ~FrameUploadScheduler() noexcept;
 
     task<FrameUploadScope> BeginUpload();
-    /// Run and Pump execute on the game thread; consume completions before reusing a flight.
+    /// Run and Pump execute on the game thread.
     void RunUploadPhase(render::CommandBuffer* cmdBuffer, ResourceUploader& uploader, uint32_t flightIndex);
-    /// May run concurrently with Run/Pump; only queues a completed flight notification.
-    void NotifyFlightComplete(uint32_t flightIndex);
     /// Resume completed/canceled loads on the game thread.
     void PumpCompletedUploads();
     /// Calling-thread stage marker; CPU file/decode/mip preparation must precede this phase.
     bool IsRecordingUploads() const noexcept { return _recordingUploads; }
+    void ApplyCompletedFlights(std::span<const FlightCompletion> completions);
 
     FrameUploadRecord* RegisterUpload(stop_token stop, std::coroutine_handle<> continuation);
     bool EraseUpload(FrameUploadRecord* record) noexcept;
@@ -201,11 +200,8 @@ private:
     bool IsUploadAlive(FrameUploadRecord* record) const noexcept;
     void ResumeRecord(FrameUploadRecord* record);
     void CancelRecord(FrameUploadRecord* record) noexcept;
-    void ApplyCompletedFlights();
 
     ManualCoroutineScheduler<FrameUploadRecord> _uploads;
-    std::mutex _completedFlightsMutex;
-    vector<uint32_t> _completedFlights;
     bool _recordingUploads{false};
 };
 
@@ -340,7 +336,7 @@ public:
     using QueueFrameTrack = GpuQueueFrameTrack;
     using FlightSlot = GpuFlightSlot;
 
-    GpuSystem(Application* app, const GpuSystemDescriptor& desc);
+    GpuSystem(const GpuSystemDescriptor& desc);
     GpuSystem(const GpuSystem&) = delete;
     GpuSystem(GpuSystem&&) = delete;
     GpuSystem& operator=(const GpuSystem&) = delete;
@@ -360,6 +356,14 @@ public:
     bool CompleteFlight(uint32_t flightIndex);
     void WaitAndCleanupCompletedFlights();
     bool CompleteFlightIfReady(uint32_t flightIndex, bool wait);
+    /// 任意 retire 线程：只入队，不回调。
+    void NotifyFlightComplete(FlightCompletion completion);
+    /// Game thread：排空一次，扇出给上传调度器与全部观察者。调用点固定在 BeginUpdateForFlight
+    /// 与 WaitAndCleanupCompletedFlights。
+    void PumpFlightCompletions();
+    /// 非拥有。观察者必须在自己析构前注销。注册顺序即调用顺序。
+    void AddFlightCompletionObserver(IFlightCompletionObserver* observer);
+    void RemoveFlightCompletionObserver(IFlightCompletionObserver* observer) noexcept;
     void BeginUpdateForFlight(uint32_t flightIndex);
     /// Game thread, after Update and before publishing the flight to the render thread.
     /// Upload commands and staging pages are owned by this flight until its real submit fence.
@@ -401,7 +405,6 @@ public:
 
 private:
     friend class AppFrameContext;
-    friend class Application;
     friend class WaitFrameAwaitable;
 
     void SubmitFrame(uint32_t flightIndex, const AppFrameSubmitDescriptor& desc);
@@ -412,7 +415,6 @@ private:
     /// 不取消就是协程帧连同它捕获的 GPU 对象一起泄漏。
     void CancelAllWaitFrames() noexcept;
 
-    Application* _app;
     WindowManager* _windowManager{nullptr};
     Nullable<render::InstanceVulkan*> _vulkanInstance{nullptr};
     unique_ptr<render::DXGIFactory> _dxgiFactory;
@@ -426,6 +428,8 @@ private:
     /// 搬动槽位会让那些指针指向旧地址。数量构造时定下, 故间接一层无代价。
     vector<unique_ptr<FlightSlot>> _flights;
     unique_ptr<FrameUploadScheduler> _frameUploadScheduler;
+    FlightCompletionQueue _flightCompletions;
+    vector<IFlightCompletionObserver*> _completionObservers;
     unique_ptr<GpuFrameProfiler> _frameProfiler;
     uint64_t _nowFrameIndex{0};
     std::atomic<float> _lastFrameLatencySeconds{0.0f};
