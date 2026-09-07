@@ -1,7 +1,7 @@
 #include <atomic>
 #include <charconv>
 #include <radray/runtime/application.h>
-#include <radray/runtime/imgui/imgui_graph.h>
+#include <radray/imgui/imgui_graph.h>
 #include <radray/runtime/render_system.h>
 #include <radray/runtime/window_manager.h>
 #include <misc/cpp/imgui_stdlib.h>
@@ -25,6 +25,17 @@ public:
 
 protected:
     void OnInit() override {
+        ImGuiSystemDescriptor descriptor;
+        descriptor.Viewports = Opt.Viewports;
+        descriptor.SettingsPath = Opt.Settings;
+        if (!Opt.Font.empty()) descriptor.Fonts.push_back({Opt.Font});
+        Ui = ImGuiSystem::Install(*this, descriptor);
+        if (!Ui) {
+            Failed = true;
+            RequestClose();
+            return;
+        }
+        DrawConnection = Ui->EventDraw().connect(&Gallery::DrawUi, this);
         Image.Create(ImTextureFormat_RGBA32, 128, 128);
         for (uint32_t y = 0; y < 128; ++y)
             for (uint32_t x = 0; x < 128; ++x) {
@@ -38,13 +49,14 @@ protected:
     }
     void OnUpdate(const AppUpdateContext&) override {
         ++Frame;
-        if (Opt.Frames && Frame > Opt.Frames) {
-#ifdef RADRAY_PLATFORM_WINDOWS
-            ::PostMessageW(static_cast<HWND>(GetWindowManager()->GetMainWindow()->GetNativeWindow()->GetNativeHandler()), WM_CLOSE, 0, 0);
-#endif
-        }
+        if (Opt.Frames && Frame > Opt.Frames) RequestClose();
     }
-    void OnImGui() override {
+    void RequestClose() {
+#ifdef RADRAY_PLATFORM_WINDOWS
+        ::PostMessageW(static_cast<HWND>(GetWindowManager()->GetMainWindow()->GetNativeWindow()->GetNativeHandler()), WM_CLOSE, 0, 0);
+#endif
+    }
+    void DrawUi() {
         ImGui::DockSpaceOverViewport();
         ImGui::SetNextWindowSize({430, 530}, ImGuiCond_FirstUseEver);
         if (ImGui::Begin("RadRay runtime UI")) {
@@ -58,7 +70,7 @@ protected:
             }
             ImGui::Checkbox("Official demo", &Demo);
             ImGui::Checkbox("Detached tool", &Tool);
-            if (ImGui::SliderFloat("Style scale", &Scale, .75f, 2.0f)) GetImGuiSystem()->SetStyleScale(Scale);
+            if (ImGui::SliderFloat("Style scale", &Scale, .75f, 2.0f)) Ui->SetStyleScale(Scale);
             if (Opt.Stress) {
                 auto* list = ImGui::GetWindowDrawList();
                 const auto p = ImGui::GetCursorScreenPos();
@@ -83,8 +95,10 @@ protected:
 #endif
     }
     void OnShutdown() override {
-        Failed = GetImGuiSystem()->HasError();
-        ImGui::UnregisterUserTexture(&Image);
+        DrawConnection.disconnect();
+        if (Ui) Failed |= Ui->HasError();
+        if (Ui) ImGui::UnregisterUserTexture(&Image);
+        Ui = nullptr;
         GetRenderSystem()->SetPipeline(nullptr);
         RADRAY_INFO_LOG("ImGui gallery completed {} frames: {}", Frame, Failed ? "FAILED" : "clean");
     }
@@ -92,6 +106,8 @@ protected:
 private:
     Options Opt;
     uint32_t Frame{0};
+    Nullable<ImGuiSystem*> Ui{nullptr};
+    sigslot::scoped_connection DrawConnection;
     ImTextureData Image;
     bool Demo{false}, Tool{true};
     float Scale{1};
@@ -138,10 +154,6 @@ int main(int argc, char** argv) {
     }
     if (options.Flights < 2 || options.Flights > 3) return 2;
     ApplicationRuntimeDescriptor descriptor{.Backend = options.Backend, .EnableValidation = true, .Multithreaded = options.Multithread, .EnableSynchronizationValidation = true, .WindowTitle = "RadRay ImGui", .WindowWidth = 960, .WindowHeight = 720, .FlightDataCount = options.Flights, .BackBufferFormat = options.Srgb ? render::TextureFormat::BGRA8_UNORM_SRGB : render::TextureFormat::BGRA8_UNORM, .PresentMode = render::PresentMode::FIFO};
-    descriptor.ImGui.Enabled = true;
-    descriptor.ImGui.Viewports = options.Viewports;
-    descriptor.ImGui.SettingsPath = options.Settings;
-    if (!options.Font.empty()) descriptor.ImGui.Fonts.push_back({options.Font});
     std::atomic_bool errors{false};
     SetLogCallback(+[](LogLevel level, std::string_view, void* data) { if (level == LogLevel::Err || level == LogLevel::Critical) static_cast<std::atomic_bool*>(data)->store(true); }, &errors);
     Gallery app(options);

@@ -1,5 +1,3 @@
-#ifdef RADRAY_ENABLE_IMGUI
-
 #include "imgui_internal.h"
 
 #include <algorithm>
@@ -98,9 +96,37 @@ ImGuiTextureLease::ImGuiTextureLease(unique_ptr<render::Texture> texture, render
     }
 }
 ImGuiTextureLease::~ImGuiTextureLease() = default;
-ImGuiSystem::Impl::Impl(Application& app)
-    : App(app), Thread(std::this_thread::get_id()), Graph{*app.GetDevice(), [renderer = app.GetRenderSystem()](std::span<const byte> bytes, const shader::GpuArtifactHash& identity) { return renderer->GetOrCreateShaderProgram(bytes, identity); }, Error, {}, {}} {}
-ImGuiSystem::ImGuiSystem(Application& app) : _impl(make_unique<Impl>(app)) {}
+ImGuiSystem::Impl::Impl(Application& app, ImGuiSystem& owner)
+    : App(app), Thread(std::this_thread::get_id()), Component(owner), Graph{*app.GetDevice(), [renderer = app.GetRenderSystem()](std::span<const byte> bytes, const shader::GpuArtifactHash& identity) { return renderer->GetOrCreateShaderProgram(bytes, identity); }, Error, {}, {}} {}
+ImGuiSystem::ImGuiSystem(Application& app) : _impl(make_unique<Impl>(app, *this)) {}
+Nullable<ImGuiSystem*> ImGuiSystem::Install(Application& app, const ImGuiSystemDescriptor& descriptor) {
+    if (app.GetDevice() == nullptr || app.GetRenderSystem() == nullptr || app.GetGpuSystem() == nullptr || app.GetWindowManager() == nullptr) return nullptr;
+    unique_ptr<ImGuiSystem> system{new ImGuiSystem(app)};
+    if (!system->Initialize(descriptor)) return nullptr;
+    auto& self = *system->_impl;
+    if (descriptor.InstallDefaultOverlay) {
+        if (!app.GetRenderSystem()->AddOverlay(self.Component)) {
+            RADRAY_ERR_LOG("ImGui overlay could not be registered with the RenderSystem");
+            return nullptr;
+        }
+        self.OverlayRegistered = true;
+    }
+    ImGuiSystem* raw = system.get();
+    if (!app.AddExtension(std::move(system))) {
+        RADRAY_ERR_LOG("ImGuiSystem must be installed inside Application::OnInit");
+        return nullptr;
+    }
+    return raw;
+}
+sigslot::signal<>& ImGuiSystem::EventDraw() noexcept { return _impl->Draw; }
+ImGuiGraphComponent& ImGuiSystem::GetGraphComponent() noexcept { return _impl->Component; }
+void ImGuiSystem::OnBeginUpdate(uint32_t flight) { BeginUpdate(flight); }
+void ImGuiSystem::OnBeforeInput(const AppUpdateContext& ctx) { NewFrame(ctx); }
+void ImGuiSystem::OnAfterWorldTick(const AppUpdateContext& ctx) {
+    if (!_impl->InFrame) return;
+    _impl->Draw();
+    CaptureFrame(ctx.FlightIndex);
+}
 ImGuiGraphFrame ImGuiSystem::GetGraphFrame(uint32_t flight) noexcept {
     RADRAY_ASSERT(flight < _impl->Flights.size());
     return {*_impl->Flights[flight], _impl->Graph, flight};
@@ -272,7 +298,7 @@ void ImGuiSystem::Impl::InstallPlatform() {
 bool ImGuiSystem::Initialize(const ImGuiSystemDescriptor& descriptor) {
     auto& self = *_impl;
     self.CheckThread();
-    if (!descriptor.Enabled || self.Context || ImGui::GetCurrentContext() != nullptr ||
+    if (self.Context || ImGui::GetCurrentContext() != nullptr ||
         !std::isfinite(descriptor.FontSize) || descriptor.FontSize <= 0 || !std::isfinite(descriptor.StyleScale) || descriptor.StyleScale <= 0) return false;
     auto* main = self.App.GetWindowManager()->GetMainWindow();
     if (!main || main->GetNativeWindow()->GetType() != NativeWindowType::Win32HWND) return false;
@@ -366,6 +392,7 @@ bool ImGuiSystem::Initialize(const ImGuiSystemDescriptor& descriptor) {
     for (uint32_t i = 0; i < self.App.GetGpuSystem()->GetFlightDataCount(); ++i) self.Flights.push_back(make_unique<UiFlight>());
     self.FrameOwners.resize(self.Flights.size());
     self.App.GetGpuSystem()->AddFlightCompletionObserver(this);
+    self.ObserverRegistered = true;
     return true;
 }
 
@@ -386,8 +413,13 @@ void ImGuiSystem::Impl::SaveSettings() {
 ImGuiSystem::~ImGuiSystem() {
     auto& self = *_impl;
     self.CheckThread();
-    if (GpuSystem* gpu = self.App.GetGpuSystem()) {
-        gpu->RemoveFlightCompletionObserver(this);
+    if (self.OverlayRegistered) {
+        if (RenderSystem* renderer = self.App.GetRenderSystem()) renderer->RemoveOverlay(self.Component);
+        self.OverlayRegistered = false;
+    }
+    if (self.ObserverRegistered) {
+        if (GpuSystem* gpu = self.App.GetGpuSystem()) gpu->RemoveFlightCompletionObserver(this);
+        self.ObserverRegistered = false;
     }
     if (!self.Context) return;
     ImGui::SetCurrentContext(self.Context.Get());
@@ -746,7 +778,8 @@ void ImGuiSystem::OnFlightsComplete(std::span<const FlightCompletion> completion
 void ImGuiSystem::RequestOutputs(uint32_t flight, RenderWorkloadBuilder& builder) const {
     for (const auto& viewport : _impl->Flights[flight]->Viewports) builder.RequestOutput(viewport.Output);
 }
+void ImGuiGraphComponent::PrepareFrame(RenderPrepareContext& context) {
+    _system.RequestOutputs(context.App.FlightIndex, context.Workloads);
+}
 
 }  // namespace radray
-
-#endif  // RADRAY_ENABLE_IMGUI

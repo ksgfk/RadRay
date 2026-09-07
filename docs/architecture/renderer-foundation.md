@@ -72,8 +72,9 @@ history 与 `CreateRenderGraph`/`ExecuteGraph`。AppFrameContext 和 surface 实
 `FrameGraphComposer` 是应用装配策略。`FrameGraph::AddComponent` 按描述符预先声明 typed input/output
 ports，`Connect` 连接指定生产值，`Expand` 调用组件的 BuildGraph 并连接其返回值。所有端口必须且
 只能连接一次，描述符精确匹配。消费者可以先声明，依赖决定执行顺序；端口循环、缺失连接、非法
-版本在 freeze 前诊断。默认装配器连接 renderer 与输出，ImGui 的默认装配由 Application 安装的
-可选装配器负责。没有全局 latest output、固定 UI 阶段或隐式输出重定向。
+版本在 freeze 前诊断。默认装配器连接 renderer 与输出；注册了 overlay 时在线性 canvas 上串接
+Scene 与 overlays 再编码导出（见 [Render framework](render-framework.md#overlay-与默认装配)）。
+没有全局 latest output、固定 UI 阶段或隐式输出重定向。
 
 Texture/Buffer 使用 `RgTextureValue` / `RgBufferValue`，携带资源 index、graph generation 和内容
 version；view/pass/port/program/parameter/indirect handle 具有独立类型和 generation。跨图、错误类型、

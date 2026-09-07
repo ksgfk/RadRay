@@ -1,6 +1,6 @@
 #include <radray/runtime/components/camera_component.h>
 #ifdef RADRAY_ENABLE_IMGUI
-#include <radray/runtime/imgui/imgui_system.h>
+#include <radray/imgui/imgui_system.h>
 #endif
 
 #include <algorithm>
@@ -216,8 +216,7 @@ public:
 
 protected:
 #ifdef RADRAY_ENABLE_IMGUI
-    void ConfigureImGui(ImGuiSystemDescriptor& descriptor) override { descriptor.Enabled = _options.ImGui; }
-    void OnImGui() override {
+    void DrawUi() {
         if (!_state.ShowUi) return;
         ImGui::SetNextWindowSize({350, 630}, ImGuiCond_FirstUseEver);
         bool changed = false;
@@ -272,6 +271,12 @@ protected:
     }
 #endif
     void OnInit() override {
+#ifdef RADRAY_ENABLE_IMGUI
+        if (_options.ImGui) {
+            _ui = ImGuiSystem::Install(*this, {});
+            if (_ui) _uiDraw = _ui->EventDraw().connect(&AtriumApplication::DrawUi, this);
+        }
+#endif
         _window = GetWindowManager()->GetMainWindow()->GetNativeWindow();
         auto& input = GetWindowManager()->GetMainWindow()->GetInput().EventInput();
         _keyboard = input.connect([this](const WindowInputEvent& event) { if (event.Type == WindowInputType::Key) Key(event.Key, event.State); });
@@ -387,13 +392,15 @@ protected:
 
     void OnShutdown() override {
 #ifdef RADRAY_ENABLE_IMGUI
-        if (auto ui = GetImGuiSystem()) {
+        _uiDraw.disconnect();
+        if (auto ui = _ui) {
             _failed |= ui->HasError();
             for (auto& observer : _observers) {
                 if (observer.Image) ui->UnregisterTexture(observer.Image);
                 observer.Image = 0;
             }
         }
+        _ui = nullptr;
 #endif
         CaptureMouse(false);
         _keyboard.disconnect();
@@ -657,7 +664,7 @@ private:
             observer.Output = GetRenderSystem()->GetOutputs().RegisterExternal({"Atrium observer", observer.Texture.get(), observer.Rtv.get()});
             if (!observer.Output.IsValid()) return false;
 #ifdef RADRAY_ENABLE_IMGUI
-            if (auto ui = GetImGuiSystem()) {
+            if (auto ui = _ui) {
                 observer.Image = ui->RegisterOutput(observer.Output);
                 if (!observer.Image) return false;
             }
@@ -758,6 +765,10 @@ private:
     vector<DisplayComponent*> _orbs;
     unordered_set<KeyCode> _keys;
     sigslot::scoped_connection _keyboard, _mouse, _focus;
+#ifdef RADRAY_ENABLE_IMGUI
+    Nullable<ImGuiSystem*> _ui{nullptr};
+    sigslot::scoped_connection _uiDraw;
+#endif
     Eigen::Vector3f _moveStart{Eigen::Vector3f::Zero()};
     float _yaw{0}, _pitch{0}, _loadingTime{0}, _lookStart{0};
     bool _captured{false}, _failed{false}, _ready{false}, _cutRequested{true}, _lookChecked{false};

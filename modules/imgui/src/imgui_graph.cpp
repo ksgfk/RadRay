@@ -1,5 +1,3 @@
-#ifdef RADRAY_ENABLE_IMGUI
-
 #include "imgui_graph_frame.h"
 
 #include <algorithm>
@@ -236,6 +234,32 @@ void ImGuiGraph::CompleteGraph(const RenderGraph& graph, RenderPipelineContext& 
         if (request.Status == ImTextureStatus_WantDestroy) self.GpuTextures.erase(request.Id);
 }
 
-}  // namespace radray
+void ImGuiGraphComponent::BuildGraph(RenderPipelineContext& context, RenderGraph& graph, std::span<RenderGraphOutputBinding> outputs) {
+    const auto frame = _system.GetGraphFrame(context.FlightIndex());
+    vector<ImGuiSceneOutput> scenes{OutputImages.begin(), OutputImages.end()};
+    // Registered outputs without an explicit preview image sample a snapshot of the incoming
+    // target version; the same display storage advances while the UI draws over it.
+    for (const auto& target : outputs) {
+        if (std::any_of(scenes.begin(), scenes.end(), [&](const auto& scene) { return scene.Output == target.Output; })) continue;
+        bool registered = false;
+        for (const auto& [id, texture] : frame._flight.Textures) {
+            (void)id;
+            registered |= texture.Output == target.Output;
+        }
+        if (!registered) continue;
+        const auto desc = graph.GetTextureDescriptor(target.Texture);
+        if (!desc) continue;
+        const bool unorm = desc->Format == render::TextureFormat::RGBA8_UNORM || desc->Format == render::TextureFormat::BGRA8_UNORM;
+        auto snapshotDesc = *desc;
+        snapshotDesc.Usage = render::TextureUse::Resource | render::TextureUse::CopyDestination;
+        const auto image = graph.CreateTexture(snapshotDesc, "ImGui.OutputSnapshot");
+        graph.AddCopyTexturePass("ImGui.OutputSnapshot", target.Texture, image);
+        scenes.push_back({target.Output, image, unorm ? ImGuiColorEncoding::Srgb : ImGuiColorEncoding::Linear});
+    }
+    ImGuiGraph::BuildGraph(graph, context, frame, outputs, scenes, Images);
+}
+void ImGuiGraphComponent::GraphRecorded(RenderPipelineContext& context, const RenderGraph& graph, RenderGraphExecutionResult result) {
+    ImGuiGraph::CompleteGraph(graph, context, _system.GetGraphFrame(context.FlightIndex()), result.Success);
+}
 
-#endif  // RADRAY_ENABLE_IMGUI
+}  // namespace radray

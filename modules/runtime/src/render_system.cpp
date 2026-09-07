@@ -77,6 +77,21 @@ bool RenderSystem::SetGraphComposer(unique_ptr<FrameGraphComposer> composer) noe
     return true;
 }
 
+bool RenderSystem::AddOverlay(RenderGraphComponent& overlay) noexcept {
+    if (std::this_thread::get_id() != _gameThread || (_pipelineStarted.load(std::memory_order_acquire) && !_pipelineShutdownIdle)) return false;
+    if (std::find(_overlays.begin(), _overlays.end(), &overlay) != _overlays.end()) return false;
+    _overlays.push_back(&overlay);
+    return true;
+}
+
+bool RenderSystem::RemoveOverlay(RenderGraphComponent& overlay) noexcept {
+    if (std::this_thread::get_id() != _gameThread || (_pipelineStarted.load(std::memory_order_acquire) && !_pipelineShutdownIdle)) return false;
+    const auto it = std::find(_overlays.begin(), _overlays.end(), &overlay);
+    if (it == _overlays.end()) return false;
+    _overlays.erase(it);
+    return true;
+}
+
 bool RenderSystem::SetPipeline(unique_ptr<RenderPipeline> pipeline) noexcept {
     if (std::this_thread::get_id() != _gameThread) {
         RADRAY_ERR_LOG("Pipeline installation must run on the game thread");
@@ -113,6 +128,7 @@ void RenderSystem::PrepareFrame(const AppUpdateContext& ctx) {
         _pipeline->PrepareFrame(prepare);
     else
         workloads.AddPresentationOutputs();
+    for (auto* overlay : _overlays) overlay->PrepareFrame(prepare);
     if (_graphComposer) _graphComposer->PrepareFrame(prepare);
     for (const auto& diagnostic : _framePlans[ctx.FlightIndex].Diagnostics) RADRAY_ERR_LOG("Render workload: {}", diagnostic);
 }
@@ -151,7 +167,7 @@ void RenderSystem::Render(AppFrameContext& ctx) {
     if (_graphComposer)
         _graphComposer->Compose(frame, _pipeline.get());
     else
-        ComposeDefaultFrameGraph(frame, _pipeline.get());
+        ComposeDefaultFrameGraph(frame, _pipeline.get(), _overlays, *this);
     frame.Expand();
     const auto result = pipelineContext.ExecuteGraph(graph);
     frame.Recorded(result);

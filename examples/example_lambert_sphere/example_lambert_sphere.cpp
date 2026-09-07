@@ -8,7 +8,7 @@
 #include <radray/runtime/application.h>
 #include <radray/runtime/window_manager.h>
 #ifdef RADRAY_ENABLE_IMGUI
-#include <radray/runtime/imgui/imgui_system.h>
+#include <radray/imgui/imgui_system.h>
 #endif
 #include <radray/runtime/asset_manager.h>
 #include <radray/runtime/components/camera_component.h>
@@ -84,8 +84,7 @@ public:
 
 protected:
 #ifdef RADRAY_ENABLE_IMGUI
-    void ConfigureImGui(ImGuiSystemDescriptor& descriptor) override { descriptor.Enabled = _options.ImGui; }
-    void OnImGui() override {
+    void DrawUi() {
         ImGui::SetNextWindowSize({310, 170}, ImGuiCond_FirstUseEver);
         if (ImGui::Begin("Lambert sphere")) {
             ImGui::TextUnformatted(_meshAssigned ? "Mesh ready" : "Loading mesh...");
@@ -106,6 +105,12 @@ protected:
             RADRAY_ERR_LOG("example_lambert_sphere: runtime services are incomplete");
             return;
         }
+#ifdef RADRAY_ENABLE_IMGUI
+        if (_options.ImGui) {
+            _ui = ImGuiSystem::Install(*this, {});
+            if (_ui) _uiDraw = _ui->EventDraw().connect(&LambertApplication::DrawUi, this);
+        }
+#endif
 
         _mesh = GetAssetManager()->Load<StaticMesh>(
             "example_lambert_sphere/lambert_sphere.obj");
@@ -208,6 +213,10 @@ protected:
     }
 
     void OnShutdown() override {
+#ifdef RADRAY_ENABLE_IMGUI
+        _uiDraw.disconnect();
+        _ui = nullptr;
+#endif
         World* world = GetWorld();
         if (world != nullptr) {
             if (_meshActor.HasValue()) {
@@ -236,6 +245,8 @@ private:
     ExampleOptions _options;
     uint32_t _frame{0};
 #ifdef RADRAY_ENABLE_IMGUI
+    Nullable<ImGuiSystem*> _ui{nullptr};
+    sigslot::scoped_connection _uiDraw;
     Eigen::Vector4f _color{Eigen::Vector4f::Ones()};
     bool _wireframe{false};
 #endif

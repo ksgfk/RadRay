@@ -34,7 +34,7 @@ shadercompiler → shader, core                 可选
 render         → shader, core
 runtime        → render, window, shader, core
 runtime        → shadercompiler               仅 RADRAY_ENABLE_SHADER_JIT=ON
-runtime        → radray_imgui                  仅 RADRAY_ENABLE_IMGUI=ON
+imgui          → runtime, radray_imgui         仅 RADRAY_ENABLE_IMGUI=ON；runtime 不依赖 imgui
 ```
 
 `radrayshader` 提供 compiler/render 共享 wire contract 与 artifact decoder，不依赖 DXC。
@@ -57,7 +57,7 @@ artifact 不需要 compiler，开发期 JIT 通过配置开关接入 client。
 | 资产引用计数、加载与延迟销毁 | [资产系统](asset-system.md) |
 | JSON 身份库、importer/settings 与加载桥接 | [AssetDatabase](asset-database.md) |
 | 帧序、flight、上传与关停 | [帧与 GPU](frame-and-gpu.md) |
-| 可选 ImGui、平台窗口、图内图片与配置 | [Runtime ImGui](runtime-imgui.md) |
+| 可选 ImGui 模块、平台窗口、图内图片与配置 | [Runtime ImGui](runtime-imgui.md) |
 | RHI、后端、barrier 与同步 | [RHI 与后端](render-rhi.md) |
 | Scene、Forward、Application 与服务装配 | [渲染框架](render-framework.md) |
 | Output/view/workload、RenderGraph、pool 与 history | [Renderer foundation](renderer-foundation.md) |
@@ -67,6 +67,8 @@ artifact 不需要 compiler，开发期 JIT 通过配置开关接入 client。
 | 关注点 | 入口 | 文件 |
 |---|---|---|
 | 主循环 | `Application::Run` / `StartLoop` | `modules/runtime/src/application.cpp` |
+| 帧内扩展 | `ApplicationExtension` / `Application::AddExtension` | `modules/runtime/include/radray/runtime/application_extension.h` |
+| 可选 UI | `ImGuiSystem::Install` | `modules/imgui/include/radray/imgui/imgui_system.h` |
 | GPU 设备 | `Device::Create` | `modules/render/src/rhi.cpp` |
 | flight 与提交 | `GpuSystem::BeginFrameRecord` / `EndFrameRecordAndSubmit` | `modules/runtime/src/gpu_system.cpp` |
 | 资产加载与回收 | `AssetManager::Load` / `Pump` | `modules/runtime/src/asset_manager.cpp` |

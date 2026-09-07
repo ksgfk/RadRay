@@ -45,17 +45,40 @@ TEST(RuntimeLayering, SceneOwnsProxiesWithoutComponentFactories) {
 
 TEST(RuntimeLayering, ShaderCacheAndUiGraphHaveExplicitInputs) {
     for (const auto path : {"modules/runtime/src/shader_program_cache.h", "modules/runtime/src/shader_program_cache.cpp",
-                            "modules/runtime/src/imgui/imgui_graph_frame.h", "modules/runtime/src/imgui/imgui_graph.cpp"}) {
+                            "modules/imgui/src/imgui_graph_frame.h", "modules/imgui/src/imgui_graph.cpp"}) {
+        if (!std::filesystem::exists(kRoot / path)) continue;  // imgui module is optional
         const auto source = ReadSource(path);
         for (const auto forbidden : {"application.h", "window_manager.h", "GetApplication", "WindowManager", "self.App", "record->Asset"})
             EXPECT_EQ(source.find(forbidden), string::npos) << path << ": " << forbidden;
     }
-    const auto uiFrame = ReadSource("modules/runtime/src/imgui/imgui_graph_frame.h");
-    EXPECT_EQ(uiFrame.find("StreamingAssetRef"), string::npos);
-    EXPECT_EQ(uiFrame.find("RenderSystem"), string::npos);
-    EXPECT_EQ(ReadSource("modules/runtime/src/imgui/imgui_graph.cpp").find("render_system.h"), string::npos);
+    if (std::filesystem::exists(kRoot / "modules/imgui/src/imgui_graph_frame.h")) {
+        const auto uiFrame = ReadSource("modules/imgui/src/imgui_graph_frame.h");
+        EXPECT_EQ(uiFrame.find("StreamingAssetRef"), string::npos);
+        EXPECT_EQ(uiFrame.find("RenderSystem"), string::npos);
+        EXPECT_EQ(ReadSource("modules/imgui/src/imgui_graph.cpp").find("render_system.h"), string::npos);
+    }
     const auto forward = ReadSource("modules/runtime/src/forward_pipeline/forward_pipeline.cpp");
     EXPECT_EQ(forward.find("GetApplication"), string::npos);
+}
+
+TEST(RuntimeLayering, RuntimeDoesNotReferenceImGui) {
+    vector<std::filesystem::path> paths{
+        "modules/runtime/CMakeLists.txt",
+        "modules/runtime/include/radray/runtime/application.h", "modules/runtime/src/application.cpp",
+        "modules/runtime/include/radray/runtime/render_system.h", "modules/runtime/src/render_system.cpp"};
+    for (const auto root : {"modules/runtime/include/radray/runtime/render_framework", "modules/runtime/src/render_framework"}) {
+        for (const auto& entry : std::filesystem::recursive_directory_iterator{kRoot / root}) {
+            if (entry.is_regular_file()) paths.push_back(entry.path());
+        }
+    }
+    for (const auto& path : paths) {
+        const auto source = ReadSource(path);
+        for (const auto symbol : {"ImGui", "imgui", "RADRAY_ENABLE_IMGUI"}) {
+            EXPECT_EQ(source.find(symbol), string::npos) << path.string() << ": " << symbol;
+        }
+    }
+    EXPECT_FALSE(std::filesystem::exists(kRoot / "modules/runtime/src/imgui"));
+    EXPECT_FALSE(std::filesystem::exists(kRoot / "modules/runtime/include/radray/runtime/imgui"));
 }
 
 TEST(RuntimeLayering, LegacyPipelineScaffoldingRemoved) {

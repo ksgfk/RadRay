@@ -1,8 +1,7 @@
 #pragma once
-#ifdef RADRAY_ENABLE_IMGUI
 #include <atomic>
-#include <radray/runtime/imgui/imgui_graph.h>
 #include <functional>
+#include <radray/imgui/imgui_graph.h>
 #include <radray/runtime/shader_program.h>
 
 namespace radray {
@@ -63,4 +62,3 @@ struct UiGraphResources {
     Nullable<ShaderProgram*> DrawProgram{nullptr};
 };
 }  // namespace radray
-#endif

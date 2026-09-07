@@ -1,7 +1,5 @@
 #pragma once
 
-#ifdef RADRAY_ENABLE_IMGUI
-
 #include <atomic>
 #include <thread>
 #include "imgui_graph_frame.h"
@@ -18,15 +16,19 @@ struct UiTextureRecord {
     bool Graph{false}, Dynamic{false};
 };
 struct ImGuiSystem::Impl {
-    explicit Impl(Application& app);
+    Impl(Application& app, ImGuiSystem& owner);
     Application& App;
     std::thread::id Thread;
     Nullable<ImGuiContext*> Context{nullptr};
     ImGuiSystemDescriptor Descriptor;
     ImGuiStyle Baseline;
     bool InFrame{false};
+    bool ObserverRegistered{false};
+    bool OverlayRegistered{false};
     std::atomic_bool Error{false};
     string Clipboard;
+    sigslot::signal<> Draw;
+    ImGuiGraphComponent Component;
     struct PlatformWindow {
         Nullable<AppWindow*> Window{nullptr};
         bool Main{false};
@@ -65,5 +67,3 @@ struct ImGuiSystem::Impl {
 };
 
 }  // namespace radray
-
-#endif  // RADRAY_ENABLE_IMGUI

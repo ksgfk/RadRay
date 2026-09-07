@@ -1,5 +1,8 @@
 add_executable(example_tidal_atrium tidal_atrium.cpp)
 target_link_libraries(example_tidal_atrium PRIVATE radrayruntime)
+if (RADRAY_ENABLE_IMGUI)
+    target_link_libraries(example_tidal_atrium PRIVATE radrayimgui)
+endif()
 target_compile_definitions(example_tidal_atrium PRIVATE
     RADRAY_ASSETS_DIR_DEFAULT="${CMAKE_SOURCE_DIR}/assets"
     RADRAY_PROJECT_DIR_DEFAULT="${CMAKE_SOURCE_DIR}")

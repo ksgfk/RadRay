@@ -1,5 +1,9 @@
 #include <radray/runtime/render_framework/frame_graph.h>
 
+#include <algorithm>
+
+#include <radray/runtime/render_framework/render_graph_blit.h>
+
 namespace radray {
 Nullable<RenderGraphOutputBinding*> FindGraphOutput(std::span<RenderGraphOutputBinding> outputs, RenderOutputId id) noexcept {
     for (auto& output : outputs)
@@ -77,5 +81,54 @@ void ComposeDefaultFrameGraph(FrameGraph& frame, Nullable<RenderPipeline*> pipel
         }
         frame.Graph.ExportTexture(target, surface.RequiredFinalState);
     }
+}
+vector<RenderGraphOutputBinding> ComposeDefaultFrameGraph(FrameGraph& frame, Nullable<RenderPipeline*> pipeline,
+                                                          std::span<RenderGraphComponent* const> overlays, RenderSystem& renderer) {
+    vector<RenderGraphOutputBinding> exported;
+    if (overlays.empty()) {
+        ComposeDefaultFrameGraph(frame, pipeline);
+        return exported;
+    }
+    auto& graph = frame.Graph;
+    auto& context = frame.Context;
+    const auto backend = context.Backend();
+    vector<FrameGraphOutputDesc> descriptions;
+    for (const auto& surface : context.OutputSurfaces()) {
+        auto desc = surface.Desc;
+        desc.Format = render::TextureFormat::RGBA16_FLOAT;
+        desc.SampleCount = 1;
+        desc.Hints = render::ResourceHint::None;
+        desc.Usage = render::TextureUse::RenderTarget | render::TextureUse::Resource | render::TextureUse::CopySource | render::TextureUse::CopyDestination;
+        descriptions.push_back({surface.Id, desc});
+    }
+    const auto scene = pipeline ? frame.AddComponent("Scene", *pipeline, descriptions) : RgComponentHandle{};
+    vector<RgComponentHandle> overlayHandles;
+    for (size_t index = 0; index < overlays.size(); ++index)
+        overlayHandles.push_back(frame.AddComponent(fmt::format("Overlay.{}", index), *overlays[index], descriptions));
+    for (const auto& output : descriptions) {
+        const auto surface = std::find_if(context.OutputSurfaces().begin(), context.OutputSurfaces().end(), [&](const auto& value) { return value.Id == output.Output; });
+        if (surface == context.OutputSurfaces().end()) continue;
+        const auto destination = context.ImportOutputTarget(graph, output.Output);
+        auto canvas = graph.CreateTexture(output.Desc, "Display.Linear");
+        const auto format = surface->Desc.Format;
+        const bool srgb = format == render::TextureFormat::RGBA8_UNORM_SRGB || format == render::TextureFormat::BGRA8_UNORM_SRGB;
+        const bool unorm = format == render::TextureFormat::RGBA8_UNORM || format == render::TextureFormat::BGRA8_UNORM;
+        if (surface->PreserveContents)
+            canvas = AddRenderGraphBlit(graph, renderer, backend, destination, canvas, unorm);
+        else
+            graph.AddRasterPass<int>("Display.Clear", [=](int&, RenderGraphRasterBuilder& builder) { builder.SetColorAttachment(0, canvas, {.Clear = {{.012f, .012f, .012f, 1}}}); }, nullptr);
+        if (scene.IsValid()) {
+            graph.Connect(frame.Input(scene, output.Output), canvas);
+            canvas = graph.Value(frame.Output(scene, output.Output));
+        }
+        for (const auto& overlay : overlayHandles) {
+            graph.Connect(frame.Input(overlay, output.Output), canvas);
+            canvas = graph.Value(frame.Output(overlay, output.Output));
+        }
+        const auto presented = AddRenderGraphBlit(graph, renderer, backend, canvas, destination, false, !srgb);
+        graph.ExportTexture(presented, surface->RequiredFinalState);
+        exported.push_back({output.Output, presented});
+    }
+    return exported;
 }
 }  // namespace radray

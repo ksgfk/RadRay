@@ -3,7 +3,7 @@
 #include <cstring>
 #include <gtest/gtest.h>
 #include <imgui_internal.h>
-#include <radray/runtime/imgui/imgui_graph.h>
+#include <radray/imgui/imgui_graph.h>
 #include <radray/runtime/render_framework/render_graph_blit.h>
 #include <radray/runtime/render_system.h>
 
@@ -27,7 +27,7 @@ public:
         uint32_t Height{0}, Stage{0}, Frame{0};
         bool Pending{false}, Bgra{false};
     };
-    UiProbePipeline(Application& app, ImTextureID image, bool negative, bool outputPreview) : App(app), Ui(*app.GetImGuiSystem().Get()), Image(image), Negative(negative), OutputPreview(outputPreview) {
+    UiProbePipeline(Application& app, ImGuiSystem& ui, ImTextureID image, bool negative, bool outputPreview) : App(app), Ui(ui), Image(image), Negative(negative), OutputPreview(outputPreview) {
         for (uint32_t i = 0; i < app.GetGpuSystem()->GetFlightDataCount(); ++i) Flights.push_back(make_unique<Flight>());
     }
     uint32_t Stage{0}, Frame{0}, Verified{0}, Rejected{0};
@@ -163,9 +163,13 @@ public:
 
 protected:
     void OnInit() override {
-        ASSERT_TRUE(GetRenderSystem()->SetGraphComposer(nullptr));
-        Image = OutputPreview ? GetImGuiSystem()->RegisterOutput(GetWindowManager()->GetMainWindow()->GetRenderOutputId()) : GetImGuiSystem()->CreateGraphImage();
-        auto pipeline = make_unique<UiProbePipeline>(*this, Image, Negative, OutputPreview);
+        ImGuiSystemDescriptor descriptor;
+        descriptor.InstallDefaultOverlay = false;
+        Ui = ImGuiSystem::Install(*this, descriptor);
+        ASSERT_TRUE(Ui);
+        UiDraw = Ui->EventDraw().connect(&UiProbeApp::DrawUi, this);
+        Image = OutputPreview ? Ui->RegisterOutput(GetWindowManager()->GetMainWindow()->GetRenderOutputId()) : Ui->CreateGraphImage();
+        auto pipeline = make_unique<UiProbePipeline>(*this, *Ui.Get(), Image, Negative, OutputPreview);
         Pipeline = pipeline.get();
         GetRenderSystem()->SetPipeline(std::move(pipeline));
         Texture.Create(ImTextureFormat_RGBA32, 8, 8);
@@ -189,7 +193,7 @@ protected:
         Pipeline->Frame = Frame;
         if (Frame <= (Negative ? 11u : 5u)) EXPECT_EQ(Texture.GetTexID(), ImTextureID_Invalid);
     }
-    void OnImGui() override {
+    void DrawUi() {
         if (Stage == 0 && Texture.Status == ImTextureStatus_OK && Frame > 16) {
             SawCreateAck = true;
             EXPECT_NE(Texture.GetTexID(), ImTextureID_Invalid);
@@ -238,17 +242,21 @@ protected:
     void OnShutdown() override {
         Verified = Pipeline->Verified;
         Rejected = Pipeline->Rejected;
-        Clean = !GetImGuiSystem()->HasError();
+        UiDraw.disconnect();
+        Clean = !Ui->HasError();
         ImGui::UnregisterUserTexture(&Texture);
         ImGui::UnregisterUserTexture(&Alpha);
         ImGui::UnregisterUserTexture(&Color);
-        GetImGuiSystem()->UnregisterTexture(Image);
+        Ui->UnregisterTexture(Image);
+        Ui = nullptr;
         Pipeline = nullptr;
         GetRenderSystem()->SetPipeline(nullptr);
     }
 
 private:
     Nullable<UiProbePipeline*> Pipeline{nullptr};
+    Nullable<ImGuiSystem*> Ui{nullptr};
+    sigslot::scoped_connection UiDraw;
     ImTextureID Image{0};
     uint32_t Frame{0}, Stage{0};
     ImTextureData Texture, Alpha, Color;
@@ -292,8 +300,8 @@ public:
         uint64_t Pitch{0};
         bool Bgra{false};
     };
-    UiTextureComposer(Application& app) : Ui(*app.GetImGuiSystem().Get()), Renderer(*app.GetRenderSystem()), Backend(app.GetDevice()->GetBackend()), UiComponent(Ui), SceneConsumer(Renderer, Backend), Readbacks(app.GetGpuSystem()->GetFlightDataCount()) {}
-    void PrepareFrame(RenderPrepareContext& context) override { Ui.RequestOutputs(context.App.FlightIndex, context.Workloads); }
+    UiTextureComposer(Application& app, ImGuiSystem& ui) : Ui(ui), Renderer(*app.GetRenderSystem()), Backend(app.GetDevice()->GetBackend()), UiComponent(ui.GetGraphComponent()), SceneConsumer(Renderer, Backend), Readbacks(app.GetGpuSystem()->GetFlightDataCount()) {}
+    void PrepareFrame(RenderPrepareContext& context) override { UiComponent.PrepareFrame(context); }
     void Compose(FrameGraph& frame, Nullable<RenderPipeline*>) override {
         vector<FrameGraphOutputDesc> descriptions;
         for (const auto& surface : frame.Context.OutputSurfaces()) {
@@ -345,7 +353,7 @@ public:
     ImGuiSystem& Ui;
     RenderSystem& Renderer;
     render::RenderBackend Backend;
-    ImGuiGraphComponent UiComponent;
+    ImGuiGraphComponent& UiComponent;
     Consumer SceneConsumer;
     vector<Readback> Readbacks;
     uint32_t Verified{0};
@@ -354,14 +362,19 @@ class UiTextureApp final : public Application {
 public:
     uint32_t Verified{0};
     void OnInit() override {
-        auto composer = make_unique<UiTextureComposer>(*this);
+        ImGuiSystemDescriptor descriptor;
+        descriptor.InstallDefaultOverlay = false;
+        Ui = ImGuiSystem::Install(*this, descriptor);
+        ASSERT_TRUE(Ui);
+        UiDraw = Ui->EventDraw().connect(&UiTextureApp::DrawUi, this);
+        auto composer = make_unique<UiTextureComposer>(*this, *Ui.Get());
         Composer = composer.get();
         ASSERT_TRUE(GetRenderSystem()->SetGraphComposer(std::move(composer)));
     }
     void OnUpdate(const AppUpdateContext&) override {
         if (++Frames > 20) test::CloseMainWindow(*this);
     }
-    void OnImGui() override {
+    void DrawUi() {
         auto* viewport = ImGui::GetMainViewport();
         const auto p = viewport->Pos;
         ImGui::GetForegroundDrawList(viewport)->AddRectFilled({p.x + 8, p.y + 8}, {p.x + 40, p.y + 40}, IM_COL32(255, 0, 0, 255));
@@ -371,13 +384,17 @@ public:
     }
     void OnShutdown() override {
         Verified = Composer->Verified;
-        EXPECT_FALSE(GetImGuiSystem()->HasError());
+        UiDraw.disconnect();
+        EXPECT_FALSE(Ui->HasError());
+        Ui = nullptr;
         Composer = nullptr;
         ASSERT_TRUE(GetRenderSystem()->SetGraphComposer(nullptr));
     }
 
 private:
     Nullable<UiTextureComposer*> Composer{nullptr};
+    Nullable<ImGuiSystem*> Ui{nullptr};
+    sigslot::scoped_connection UiDraw;
     uint32_t Frames{0};
 };
 class ImGuiRenderingTest : public testing::TestWithParam<UiTestMode> {
@@ -392,25 +409,36 @@ protected:
     }
 };
 class DisabledUiProbeApp final : public Application {
+public:
+    explicit DisabledUiProbeApp(bool attemptFailingInstall = false) : AttemptFailingInstall(attemptFailingInstall) {}
+    bool InstallReturnedNull{false};
+    size_t OverlayCount{SIZE_MAX};
+
 protected:
     void OnInit() override {
-        EXPECT_FALSE(GetImGuiSystem());
+        EXPECT_EQ(ImGui::GetCurrentContext(), nullptr);
+        if (!AttemptFailingInstall) return;
+        ImGuiSystemDescriptor descriptor;
+        descriptor.Fonts.push_back({"__radray_missing_imgui_font__.ttf"});
+        InstallReturnedNull = !ImGuiSystem::Install(*this, descriptor);
+        OverlayCount = GetRenderSystem()->GetOverlays().size();
         EXPECT_EQ(ImGui::GetCurrentContext(), nullptr);
     }
     void OnUpdate(const AppUpdateContext&) override { test::CloseMainWindow(*this); }
-    void OnImGui() override { FAIL() << "Disabled ImGui instance invoked its UI hook"; }
+
+private:
+    bool AttemptFailingInstall;
 };
 TEST_P(ImGuiRenderingTest, DisabledInstanceAndPartialInitializationRollbackLeaveNoContext) {
     ApplicationRuntimeDescriptor desc{.Backend = GetParam().Backend, .EnableValidation = true, .WindowTitle = "ImGui instance boundary", .WindowWidth = 96, .WindowHeight = 64, .BackBufferFormat = render::TextureFormat::BGRA8_UNORM, .PresentMode = render::PresentMode::FIFO};
     DisabledUiProbeApp disabled;
     ASSERT_EQ(disabled.Run(desc), 0);
     EXPECT_EQ(ImGui::GetCurrentContext(), nullptr);
-    desc.ImGui.Enabled = true;
-    desc.ImGui.Fonts.push_back({"__radray_missing_imgui_font__.ttf"});
-    DisabledUiProbeApp failed;
+    DisabledUiProbeApp failed(true);
     test::RuntimeLogCapture logs;
-    EXPECT_EQ(failed.Run(desc), 1);
-    EXPECT_FALSE(failed.GetImGuiSystem());
+    EXPECT_EQ(failed.Run(desc), 0);
+    EXPECT_TRUE(failed.InstallReturnedNull);
+    EXPECT_EQ(failed.OverlayCount, 0u);
     EXPECT_EQ(ImGui::GetCurrentContext(), nullptr);
     EXPECT_NE(logs.Errors().find("ImGui font read failed"), string::npos);
 }
@@ -420,7 +448,11 @@ public:
     uint32_t ToolInput{0};
 
 protected:
-    void OnInit() override {}
+    void OnInit() override {
+        Ui = ImGuiSystem::Install(*this, {});
+        ASSERT_TRUE(Ui);
+        UiDraw = Ui->EventDraw().connect(&UiWindowProbeApp::DrawUi, this);
+    }
     void OnUpdate(const AppUpdateContext&) override {
         ++Frame;
         auto* manager = GetWindowManager();
@@ -451,7 +483,7 @@ protected:
         if (Frame == 18) Tool = true;
         if (Frame > 30) test::CloseMainWindow(*this);
     }
-    void OnImGui() override {
+    void DrawUi() {
         // Native modal callbacks can occur while frame construction is on the stack.
         GetWindowManager()->EventModalLoopTick()(GetWindowManager()->GetMainWindow()->GetNativeWindow());
         if (!Tool) return;
@@ -462,7 +494,9 @@ protected:
         ImGui::End();
     }
     void OnShutdown() override {
-        Clean = !GetImGuiSystem()->HasError();
+        UiDraw.disconnect();
+        Clean = !Ui->HasError();
+        Ui = nullptr;
         Input.disconnect();
         GetRenderSystem()->SetPipeline(nullptr);
     }
@@ -470,6 +504,8 @@ protected:
 private:
     bool Tool{true};
     uint32_t Frame{0};
+    Nullable<ImGuiSystem*> Ui{nullptr};
+    sigslot::scoped_connection UiDraw;
     sigslot::scoped_connection Input;
 };
 TEST_P(ImGuiRenderingTest, AuxiliaryWindowsResizeMinimizeCloseRecreateAndRejectModalFrameReentry) {
@@ -483,7 +519,6 @@ TEST_P(ImGuiRenderingTest, AuxiliaryWindowsResizeMinimizeCloseRecreateAndRejectM
     test::RuntimeLogCapture logs;
     UiWindowProbeApp app;
     ApplicationRuntimeDescriptor desc{.Backend = mode.Backend, .EnableValidation = true, .Multithreaded = mode.Threaded, .EnableSynchronizationValidation = true, .WindowTitle = "ImGui viewport lifecycle regression", .WindowWidth = 240, .WindowHeight = 160, .FlightDataCount = mode.Flights, .BackBufferFormat = mode.Srgb ? render::TextureFormat::BGRA8_UNORM_SRGB : render::TextureFormat::BGRA8_UNORM, .PresentMode = render::PresentMode::FIFO};
-    desc.ImGui.Enabled = true;
     ASSERT_EQ(app.Run(desc), 0);
     EXPECT_TRUE(app.SawAuxiliary);
     EXPECT_TRUE(app.SawClosed);
@@ -503,7 +538,6 @@ TEST_P(ImGuiRenderingTest, DynamicTextureRegionsOffsetsGraphImagesAndLinearBlend
     test::RuntimeLogCapture logs;
     UiProbeApp app;
     ApplicationRuntimeDescriptor desc{.Backend = mode.Backend, .EnableValidation = true, .Multithreaded = mode.Threaded, .EnableSynchronizationValidation = true, .WindowTitle = "ImGui pixel/lifetime regression", .WindowWidth = 240, .WindowHeight = 160, .FlightDataCount = mode.Flights, .BackBufferFormat = mode.Srgb ? render::TextureFormat::BGRA8_UNORM_SRGB : render::TextureFormat::BGRA8_UNORM, .PresentMode = render::PresentMode::FIFO};
-    desc.ImGui.Enabled = true;
     ASSERT_EQ(app.Run(desc), 0);
     EXPECT_TRUE(app.Clean);
     EXPECT_TRUE(app.SawCreateAck);
@@ -518,7 +552,6 @@ TEST_P(ImGuiRenderingTest, OutputPreviewSamplesSceneBeforeUiAndDecodesSrgbOnce) 
     test::RuntimeLogCapture logs;
     UiProbeApp app(false, true);
     ApplicationRuntimeDescriptor desc{.Backend = mode.Backend, .EnableValidation = true, .Multithreaded = mode.Threaded, .EnableSynchronizationValidation = true, .WindowTitle = "ImGui output preview", .WindowWidth = 240, .WindowHeight = 160, .FlightDataCount = mode.Flights, .BackBufferFormat = mode.Srgb ? render::TextureFormat::BGRA8_UNORM_SRGB : render::TextureFormat::BGRA8_UNORM, .PresentMode = render::PresentMode::FIFO};
-    desc.ImGui.Enabled = true;
     ASSERT_EQ(app.Run(desc), 0);
     EXPECT_TRUE(app.Clean);
     EXPECT_GT(app.Verified, 20u);
@@ -530,7 +563,6 @@ TEST_P(ImGuiRenderingTest, OutputPreviewRejectsMissingStaleMsaaUninitializedFeed
     logs.ExpectedGraphErrors = 6;
     UiProbeApp app(true, true);
     ApplicationRuntimeDescriptor desc{.Backend = mode.Backend, .EnableValidation = true, .Multithreaded = mode.Threaded, .EnableSynchronizationValidation = true, .WindowTitle = "ImGui invalid output preview", .WindowWidth = 240, .WindowHeight = 160, .FlightDataCount = mode.Flights, .BackBufferFormat = mode.Srgb ? render::TextureFormat::BGRA8_UNORM_SRGB : render::TextureFormat::BGRA8_UNORM, .PresentMode = render::PresentMode::FIFO};
-    desc.ImGui.Enabled = true;
     ASSERT_EQ(app.Run(desc), 0);
     EXPECT_FALSE(app.Clean);
     EXPECT_EQ(app.Rejected, 6u);
@@ -550,7 +582,6 @@ TEST_P(ImGuiRenderingTest, RejectsMissingStaleMsaaUninitializedFeedbackAndDuplic
     logs.ExpectedGraphErrors = 6;
     UiProbeApp app(true);
     ApplicationRuntimeDescriptor desc{.Backend = mode.Backend, .EnableValidation = true, .Multithreaded = mode.Threaded, .EnableSynchronizationValidation = true, .WindowTitle = "ImGui rejected graph regression", .WindowWidth = 240, .WindowHeight = 160, .FlightDataCount = mode.Flights, .BackBufferFormat = mode.Srgb ? render::TextureFormat::BGRA8_UNORM_SRGB : render::TextureFormat::BGRA8_UNORM, .PresentMode = render::PresentMode::FIFO};
-    desc.ImGui.Enabled = true;
     ASSERT_EQ(app.Run(desc), 0);
     EXPECT_FALSE(app.Clean);
     EXPECT_EQ(app.Rejected, 6u);
@@ -568,7 +599,6 @@ TEST_P(ImGuiRenderingTest, UiTextureFeedsSceneComponentDeclaredBeforeItsProducer
     test::RuntimeLogCapture logs;
     UiTextureApp app;
     ApplicationRuntimeDescriptor desc{.Backend = mode.Backend, .EnableValidation = true, .Multithreaded = mode.Threaded, .EnableSynchronizationValidation = true, .WindowTitle = "UI texture consumed by scene", .WindowWidth = 96, .WindowHeight = 64, .FlightDataCount = mode.Flights, .BackBufferFormat = mode.Srgb ? render::TextureFormat::BGRA8_UNORM_SRGB : render::TextureFormat::BGRA8_UNORM, .PresentMode = render::PresentMode::FIFO};
-    desc.ImGui.Enabled = true;
     ASSERT_EQ(app.Run(desc), 0);
     EXPECT_GE(app.Verified, 15u);
     EXPECT_TRUE(logs.Errors().empty()) << logs.Errors();

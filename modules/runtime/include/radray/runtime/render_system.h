@@ -51,6 +51,12 @@ public:
     /// Other replacements fail without releasing the installed pipeline.
     bool SetPipeline(unique_ptr<RenderPipeline> pipeline) noexcept;
     bool SetGraphComposer(unique_ptr<FrameGraphComposer> composer) noexcept;
+    /// Non-owning overlay components appended after the scene pipeline by the default composer,
+    /// in registration order. Same installation window as SetGraphComposer. The caller keeps the
+    /// component alive until RemoveOverlay or RenderSystem shutdown.
+    bool AddOverlay(RenderGraphComponent& overlay) noexcept;
+    bool RemoveOverlay(RenderGraphComponent& overlay) noexcept;
+    std::span<RenderGraphComponent* const> GetOverlays() const noexcept { return _overlays; }
 
     /// Game thread; the runner has made this flight writable after GPU completion.
     void BeginUpdateForFlight(uint32_t flightIndex);
@@ -102,6 +108,7 @@ private:
     unique_ptr<PresentationAdapter> _presentation;
     unique_ptr<RenderPipeline> _pipeline;
     unique_ptr<FrameGraphComposer> _graphComposer;
+    vector<RenderGraphComponent*> _overlays;
     std::atomic_bool _pipelineStarted{false};
     bool _pipelineShutdownIdle{false};
     vector<unique_ptr<Scene>> _scenes;

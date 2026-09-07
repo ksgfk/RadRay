@@ -45,6 +45,7 @@ public:
     uint32_t FlightIndex() const noexcept;
     uint64_t FrameSerial() const noexcept { return _serial; }
     const render::RenderDeviceCapabilities& Capabilities() const noexcept;
+    render::RenderBackend Backend() const noexcept;
     HostWriteBatch& HostWrites() const noexcept;
     std::span<const ResolvedRenderViewFamily> ViewFamilies() const noexcept { return _families; }
     RenderGraph CreateRenderGraph(std::string_view name);

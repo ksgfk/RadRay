@@ -1,19 +1,23 @@
 #pragma once
 
-#ifdef RADRAY_ENABLE_IMGUI
-
 #include <filesystem>
 #include <imgui.h>
+#include <sigslot/signal.hpp>
+#include <radray/nullable.h>
+#include <radray/runtime/application_extension.h>
+#include <radray/runtime/flight_completion.h>
 #include <radray/runtime/texture_asset.h>
 #include <radray/runtime/render_framework/render_graph.h>
 #include <radray/runtime/render_framework/render_output.h>
-#include <radray/runtime/flight_completion.h>
 
 namespace radray {
 
 class Application;
+class RenderSystem;
+class RenderWorkloadBuilder;
 struct AppUpdateContext;
 class ImGuiGraph;
+class ImGuiGraphComponent;
 
 enum class ImGuiColorEncoding : uint8_t { Linear,
                                           Srgb };
@@ -44,10 +48,12 @@ struct ImGuiFontDescriptor {
     vector<ImWchar> ExcludeRanges{};
 };
 struct ImGuiSystemDescriptor {
-    bool Enabled{false};
     bool Docking{true};
     bool Viewports{true};
     bool KeyboardNavigation{true};
+    /// Register the UI component as a RenderSystem overlay so the default composer draws it
+    /// after the scene. Disable when installing a custom FrameGraphComposer that places the UI itself.
+    bool InstallDefaultOverlay{true};
     float FontSize{16};
     float StyleScale{1};
     std::filesystem::path SettingsPath{};
@@ -56,13 +62,23 @@ struct ImGuiSystemDescriptor {
 
 class ImGuiGraphFrame;
 
-class ImGuiSystem : public IFlightCompletionObserver {
+/// One ImGui context per Application, installed as an ApplicationExtension. All ImGui API and
+/// platform callbacks stay on the application thread. Contract: docs/architecture/runtime-imgui.md
+class ImGuiSystem final : public ApplicationExtension, public IFlightCompletionObserver {
 public:
-    explicit ImGuiSystem(Application& app);
-    ~ImGuiSystem();
+    /// Game thread, inside Application::OnInit. Creates the context, installs the extension, the
+    /// flight observer and (optionally) the default overlay. Returns null without any residual
+    /// registration when initialization fails. The Application owns the returned system.
+    static Nullable<ImGuiSystem*> Install(Application& app, const ImGuiSystemDescriptor& descriptor);
+    ~ImGuiSystem() override;
     ImGuiSystem(const ImGuiSystem&) = delete;
     ImGuiSystem& operator=(const ImGuiSystem&) = delete;
-    bool Initialize(const ImGuiSystemDescriptor& descriptor);
+
+    /// Emitted inside the active ImGui frame after World::Tick; subscribers issue ImGui calls here.
+    sigslot::signal<>& EventDraw() noexcept;
+    /// The UI graph component; connect it in a custom FrameGraphComposer when the default overlay is disabled.
+    ImGuiGraphComponent& GetGraphComponent() noexcept;
+
     /// GT only. Rebuild spacing from the unscaled baseline; font DPI remains upstream-owned.
     void SetStyleScale(float scale);
     ImTextureID RegisterTexture(StreamingAssetRef<TextureAsset> asset, const ImGuiTextureDescriptor& descriptor = {});
@@ -74,19 +90,24 @@ public:
     bool UnregisterTexture(ImTextureID texture);
     bool HasError() const noexcept;
     ImGuiGraphFrame GetGraphFrame(uint32_t flight) noexcept;
-    /// Framework entry points. Context and platform callbacks are confined to the creating thread.
-    void BeginUpdate(uint32_t flight);
-    bool NewFrame(const AppUpdateContext& context);
-    void CaptureFrame(uint32_t flight);
+    /// Request the outputs of every viewport captured for this flight.
+    void RequestOutputs(uint32_t flight, RenderWorkloadBuilder& builder) const;
+
+    // ApplicationExtension slots; framework use only.
+    void OnBeginUpdate(uint32_t flight) override;
+    void OnBeforeInput(const AppUpdateContext& ctx) override;
+    void OnAfterWorldTick(const AppUpdateContext& ctx) override;
     void OnFlightsComplete(std::span<const FlightCompletion> completions) noexcept override;
-    void RequestOutputs(uint32_t flight, class RenderWorkloadBuilder& builder) const;
 
 private:
     friend class ImGuiGraph;
+    explicit ImGuiSystem(Application& app);
+    bool Initialize(const ImGuiSystemDescriptor& descriptor);
+    void BeginUpdate(uint32_t flight);
+    bool NewFrame(const AppUpdateContext& context);
+    void CaptureFrame(uint32_t flight);
     struct Impl;
     unique_ptr<Impl> _impl;
 };
 
 }  // namespace radray
-
-#endif  // RADRAY_ENABLE_IMGUI

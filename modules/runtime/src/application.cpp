@@ -36,10 +36,6 @@
 #endif
 #endif
 
-#ifdef RADRAY_ENABLE_IMGUI
-#include <radray/runtime/imgui/imgui_graph.h>
-#endif
-
 namespace radray {
 
 namespace {
@@ -149,10 +145,6 @@ const render::Device* Application::GetDevice() const noexcept {
 
 void Application::OnInit() {
 }
-#ifdef RADRAY_ENABLE_IMGUI
-void Application::ConfigureImGui(ImGuiSystemDescriptor&) {}
-void Application::OnImGui() {}
-#endif
 
 void Application::OnUpdate(const AppUpdateContext& ctx) {
     (void)ctx;
@@ -807,18 +799,14 @@ AppUpdateResult Application::Update(const AppUpdateContext& ctx) {
     if (_renderSystem != nullptr) {
         _renderSystem->BeginUpdateForFlight(ctx.FlightIndex);
     }
-#ifdef RADRAY_ENABLE_IMGUI
-    if (_imguiSystem) _imguiSystem->BeginUpdate(ctx.FlightIndex);
-#endif
+    for (auto& extension : _extensions) extension->OnBeginUpdate(ctx.FlightIndex);
     // 1) 推进资产加载状态机(恢复本帧 GPU 上传已完成的协程 → 启动未启动协程 → reap 终态)。
     if (_assetManager != nullptr) {
         _assetManager->Pump();
     }
     // 恢复需要在应用 update 线程上继续执行的协程。
     _scheduler.Pump();
-#ifdef RADRAY_ENABLE_IMGUI
-    const bool uiFrame = _imguiSystem && _imguiSystem->NewFrame(ctx);
-#endif
+    for (auto& extension : _extensions) extension->OnBeforeInput(ctx);
     // 2) 游戏逻辑。
     if (_windowManager) _windowManager->DispatchInput();
     OnUpdate(ctx);
@@ -826,12 +814,7 @@ AppUpdateResult Application::Update(const AppUpdateContext& ctx) {
     if (_world != nullptr) {
         _world->Tick(ctx.DeltaTime.count());
     }
-#ifdef RADRAY_ENABLE_IMGUI
-    if (uiFrame) {
-        OnImGui();
-        _imguiSystem->CaptureFrame(ctx.FlightIndex);
-    }
-#endif
+    for (auto& extension : _extensions) extension->OnAfterWorldTick(ctx);
     if (_renderSystem != nullptr) {
         _renderSystem->PrepareFrame(ctx);
     }
@@ -865,9 +848,9 @@ int Application::Shutdown(const AppShutdownContext& ctx) {
 }
 
 void Application::DestroyRuntime() noexcept {
-#ifdef RADRAY_ENABLE_IMGUI
-    _imguiSystem.reset();
-#endif
+    _runtimeInitialized = false;
+    // 扩展依赖 World / RenderSystem / GpuSystem / WindowManager，先按安装逆序销毁。
+    while (!_extensions.empty()) _extensions.pop_back();
     // 拆 World:销毁 Actor → 移除 SceneProxy → drop 其持有的 StreamingAssetRef。
     _world.reset();
     // RenderSystem 持有 Scene 对象,生命周期必须长于 World 的拆解。
@@ -983,19 +966,23 @@ bool Application::InitializeRuntime(const ApplicationRuntimeDescriptor& desc) {
         DestroyRuntime();
         return false;
     }
-#ifdef RADRAY_ENABLE_IMGUI
-    auto uiDescriptor = desc.ImGui;
-    ConfigureImGui(uiDescriptor);
-    if (uiDescriptor.Enabled) {
-        _imguiSystem = make_unique<ImGuiSystem>(*this);
-        if (!_imguiSystem->Initialize(uiDescriptor)) {
-            DestroyRuntime();
-            return false;
-        }
-        _renderSystem->SetGraphComposer(make_unique<ImGuiFrameComposer>(*_imguiSystem, *_renderSystem));
-    }
-#endif
+    _runtimeInitialized = true;
     return true;
+}
+
+Nullable<ApplicationExtension*> Application::AddExtension(unique_ptr<ApplicationExtension> extension) {
+    if (!extension) return nullptr;
+    if (std::this_thread::get_id() != _applicationThread) {
+        RADRAY_ERR_LOG("Application extensions must be installed on the application thread");
+        return nullptr;
+    }
+    if (!_runtimeInitialized || _loopStarted) {
+        RADRAY_ERR_LOG("Application extensions must be installed after runtime initialization and before the main loop starts");
+        return nullptr;
+    }
+    ApplicationExtension* raw = extension.get();
+    _extensions.push_back(std::move(extension));
+    return raw;
 }
 
 int Application::Run(const ApplicationRuntimeDescriptor& desc) {
@@ -1005,6 +992,7 @@ int Application::Run(const ApplicationRuntimeDescriptor& desc) {
 }
 
 int Application::StartLoop() {
+    _loopStarted = true;
     if (_multithreaded) {
         return ThreadedRunner{this}.Run();
     } else {

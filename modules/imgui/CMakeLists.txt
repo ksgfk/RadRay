@@ -1,7 +1,10 @@
+# ImGui adapter: optional runtime module. Contract: docs/architecture/runtime-imgui.md
 set(_imgui_root "${RADRAY_THIRDPARTY_ROOT}/imgui")
 if (NOT EXISTS "${_imgui_root}/imgui.cpp")
     message(FATAL_ERROR "RADRAY_ENABLE_IMGUI requires imgui: run tools/fetch_third_party.py restore --only imgui")
 endif()
+
+# Upstream ImGui sources with the project's single imconfig.
 add_library(radray_imgui STATIC
     "${_imgui_root}/imgui.cpp" "${_imgui_root}/imgui_draw.cpp"
     "${_imgui_root}/imgui_tables.cpp" "${_imgui_root}/imgui_widgets.cpp"
@@ -10,7 +13,7 @@ target_include_directories(radray_imgui SYSTEM PUBLIC "${_imgui_root}")
 target_include_directories(radray_imgui PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_compile_definitions(radray_imgui PUBLIC
     RADRAY_ENABLE_IMGUI
-    IMGUI_USER_CONFIG="radray/runtime/imgui/imgui_config.h")
+    IMGUI_USER_CONFIG="radray/imgui/imgui_config.h")
 target_link_libraries(radray_imgui PUBLIC radraycore)
 if (NOT RADRAY_IMGUI_DEMO_WINDOWS)
     target_compile_definitions(radray_imgui PUBLIC IMGUI_DISABLE_DEMO_WINDOWS)
@@ -41,4 +44,17 @@ endif()
 radray_default_compile_flags(radray_imgui)
 radray_optimize_flags_library(radray_imgui)
 radray_set_build_path(radray_imgui)
-target_link_libraries(radrayruntime PUBLIC radray_imgui)
+
+# RadRay adapter: ApplicationExtension + RenderGraphComponent on top of radrayruntime.
+file(GLOB_RECURSE RADRAY_IMGUI_INC CONFIGURE_DEPENDS "include/*.h")
+file(GLOB_RECURSE RADRAY_IMGUI_SRC CONFIGURE_DEPENDS "src/*.cpp")
+add_library(radrayimgui STATIC ${RADRAY_IMGUI_SRC} ${RADRAY_IMGUI_INC})
+target_include_directories(radrayimgui PUBLIC include)
+target_link_libraries(radrayimgui PUBLIC radrayruntime radray_imgui)
+radray_default_compile_flags(radrayimgui)
+radray_optimize_flags_library(radrayimgui)
+radray_set_build_path(radrayimgui)
+
+if (RADRAY_BUILD_TESTS)
+    add_subdirectory(tests)
+endif()

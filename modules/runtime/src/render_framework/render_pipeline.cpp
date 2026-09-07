@@ -18,6 +18,7 @@ RenderPipelineContext::RenderPipelineContext(AppFrameContext& frame, RenderGraph
 RenderPipelineContext::~RenderPipelineContext() = default;
 uint32_t RenderPipelineContext::FlightIndex() const noexcept { return _frame.FlightIndex(); }
 const render::RenderDeviceCapabilities& RenderPipelineContext::Capabilities() const noexcept { return _frame.GetDevice()->GetCapabilities(); }
+render::RenderBackend RenderPipelineContext::Backend() const noexcept { return _frame.GetDevice()->GetBackend(); }
 HostWriteBatch& RenderPipelineContext::HostWrites() const noexcept { return _frame.GetHostWrites(); }
 RenderGraph RenderPipelineContext::CreateRenderGraph(std::string_view name) {
     if (_graphGeneration != 0) RADRAY_ABORT("Only one RenderGraph may be created per Render invocation");

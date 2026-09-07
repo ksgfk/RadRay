@@ -20,15 +20,15 @@ Application::StartLoop
   ├─ NativeEventPump                 收集原始窗口输入
   ├─ BeginUpdateForFlight(flight)     取得该 flight 的可写槽位；PumpFlightCompletions → PumpWaitFrame → PumpFrameUploadScheduler
   ├─ RenderSystem::BeginUpdateForFlight 清除该 flight 上一帧的 retained asset refs 和 frame plan
-  ├─ ImGuiSystem::BeginUpdate         可选；消费已完成 flight 的纹理反馈，释放当前槽快照
+  ├─ ApplicationExtension::OnBeginUpdate  按安装序；ImGui 在此消费已完成 flight 的纹理反馈，释放当前槽快照
   ├─ AssetManager::Pump               提交加载结果；销毁零引用资产
   ├─ ApplicationScheduler::Pump
-  ├─ ImGuiSystem::NewFrame            可选；消费原始输入并决定输入捕获
+  ├─ ApplicationExtension::OnBeforeInput  按安装序；ImGui 在此消费原始输入、决定输入捕获并 NewFrame
   ├─ WindowManager::DispatchInput     向应用派发经过路由的输入
   ├─ Application::OnUpdate            游戏逻辑
   ├─ World::Tick
-  ├─ Application::OnImGui             可选；随后 Render、UpdatePlatformWindows、复制拥有数据的快照
-  ├─ RenderSystem::PrepareFrame        game thread 复制 pipeline input 并构造 view families
+  ├─ ApplicationExtension::OnAfterWorldTick 按安装序；ImGui 在此触发 EventDraw、Render、UpdatePlatformWindows、复制拥有数据的快照
+  ├─ RenderSystem::PrepareFrame        game thread 复制 pipeline input 并构造 view families；pipeline → overlays → composer
   ├─ GpuSystem::PrepareFrameUploads   game thread 恢复 BeginUpload，录制当前 flight 的 UploadCommands
   ├─ 发布当前 flight；game thread 可以开始下一可写 flight 的 Update
   ├─ GpuSystem::BeginFrameRecord      render thread Begin 主 CommandBuffer；清 targets、开始 profiler
@@ -38,6 +38,10 @@ Application::StartLoop
        → 写 flight.Signal → Submission.OnSubmitted → Present 全部 target
 ```
 
+`ApplicationExtension` 是 runtime 唯一的帧内扩展点（`modules/runtime/include/radray/runtime/application_extension.h`）：
+`Application::AddExtension` 只在运行时初始化后、主循环启动前（即 `OnInit` 内）接受安装，三槽按安装序在
+game thread 调用，`DestroyRuntime` 在 World 之前按逆序销毁扩展。runtime 本身不知道任何具体扩展。
+
 `BeginFrameRecord` 为每次录制生成独立 FrameSerial，收据同时校验 serial 与阶段，不能以可复用
 flight index 代替提交身份。`FrameSubmission` 的 Recorded/Submitted/GpuCompleted 分别对应录制、
 void Submit 返回与真实 fence 完成；未提交收据取消不发布资源状态和历史。提交后的收据由 flight
@@ -46,7 +50,7 @@ void Submit 返回与真实 fence 完成；未提交收据取消不发布资源�
 `CompleteFlight` 在 fence 完成后 resolve profiler、回收 staging、完成 submission receipts，并 `NotifyFlightComplete`
 入队，同时发布原子 `WaitersCompleted`。多线程模式下它在渲染线程，不访问 game-thread 的协程等待表或资产引用。
 `GpuSystem::PumpFlightCompletions` 在 game thread 排空队列：先让上传调度器 `ApplyCompletedFlights`，
-再按注册顺序调用 `IFlightCompletionObserver`。`Application` 与 `ImGuiSystem` 都是观察者；
+再按注册顺序调用 `IFlightCompletionObserver`。`Application` 与 `ImGuiSystem`（imgui 模块自行注册）都是观察者；
 `Application::OnFlightsComplete` 再转到 `OnRenderFrameComplete`。线程断言留在 `Application` 一侧
 （它持有 `_applicationThread`）；`GpuSystem` 全文没有 `this_thread::get_id()`，靠调用点固定在
 `BeginUpdateForFlight` 与 `WaitAndCleanupCompletedFlights`。正常、跳过和 shutdown 路径保持相同线程归属。

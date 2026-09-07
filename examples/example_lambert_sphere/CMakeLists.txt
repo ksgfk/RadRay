@@ -1,6 +1,9 @@
 add_executable(example_lambert_sphere example_lambert_sphere.cpp)
 
 target_link_libraries(example_lambert_sphere PRIVATE radrayruntime)
+if (RADRAY_ENABLE_IMGUI)
+    target_link_libraries(example_lambert_sphere PRIVATE radrayimgui)
+endif()
 target_compile_definitions(example_lambert_sphere PRIVATE
     RADRAY_ASSETS_DIR_DEFAULT="${CMAKE_SOURCE_DIR}/assets"
     RADRAY_PROJECT_DIR_DEFAULT="${CMAKE_SOURCE_DIR}")

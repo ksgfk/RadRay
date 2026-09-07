@@ -28,7 +28,7 @@ C++20 实时渲染器，D3D12 + Vulkan 后端。
 - 不重命名已有枚举成员，它们被 `magic_enum` 与序列化消费；需要改名时新增成员并显式迁移数据。
 - 新增任何 `try`、`catch`、`throw` 前先征得用户同意。优先验证、`std::error_code` 或现有结果类型。
 - 不为保留 `noexcept` 增加捕获；仅捕获具体、可恢复的异常，不用 `catch (...)` 把分配失败、程序错误或不变量破坏转成空值/诊断。
-- 模块基础依赖：shader → core，window → core，render → shader/core，runtime → render/window/shader/core。
+- 模块基础依赖：shader → core，window → core，render → shader/core，runtime → render/window/shader/core；可选 imgui → runtime，runtime 与渲染框架不引用 ImGui。
 - shader 不依赖 DXC 或 render/runtime；可选 shadercompiler → shader/core。runtime 仅在启用 JIT 时链接该 client，公共 shader/render/runtime 契约不依赖 DXC SDK 头。
 - `third_party/`、`SDKs/` 是脚本填充的只读目录，不编辑。
 - HLSL include 以 `shaderlib/` 为根，使用 `<core/math.hlsli>` 形式；当前不使用文件相对的双引号 include。

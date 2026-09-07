@@ -1,13 +1,10 @@
 #pragma once
 
-#ifdef RADRAY_ENABLE_IMGUI
-
-#include <radray/runtime/imgui/imgui_system.h>
+#include <radray/imgui/imgui_system.h>
 #include <radray/runtime/render_framework/frame_graph.h>
 
 namespace radray {
 
-class RenderSystem;
 struct UiFlight;
 struct UiGraphResources;
 /// Borrowed state for one flight. The system retains all referenced assets until that flight completes.
@@ -15,7 +12,7 @@ class ImGuiGraphFrame {
 private:
     friend class ImGuiSystem;
     friend class ImGuiGraph;
-    friend class ImGuiFrameComposer;
+    friend class ImGuiGraphComponent;
     ImGuiGraphFrame(UiFlight& flight, UiGraphResources& resources, uint32_t index) noexcept
         : _flight(flight), _resources(resources), _index(index) {}
     UiFlight& _flight;
@@ -46,11 +43,17 @@ public:
                               bool success);
 };
 
+/// Ordinary RenderGraphComponent. PrepareFrame requests the captured viewport outputs. BuildGraph
+/// draws the UI over the supplied target versions; for outputs registered with RegisterOutput and
+/// not covered by OutputImages it copies the incoming (pre-UI) target version as the preview image,
+/// inferring its encoding from the target format.
 class ImGuiGraphComponent final : public RenderGraphComponent {
 public:
     explicit ImGuiGraphComponent(ImGuiSystem& system) : _system(system) {}
+    void PrepareFrame(RenderPrepareContext& context) override;
     void BuildGraph(RenderPipelineContext& context, RenderGraph& graph, std::span<RenderGraphOutputBinding> outputs) override;
     void GraphRecorded(RenderPipelineContext& context, const RenderGraph& graph, RenderGraphExecutionResult result) override;
+    /// Custom composers may supply explicit preview images / graph image bindings before expansion.
     vector<ImGuiSceneOutput> OutputImages;
     vector<ImGuiGraphImageBinding> Images;
 
@@ -58,20 +61,4 @@ private:
     ImGuiSystem& _system;
 };
 
-/// The application's default composition policy. Custom applications can install another
-/// FrameGraphComposer and connect this same UI component anywhere in the graph.
-class ImGuiFrameComposer final : public FrameGraphComposer {
-public:
-    ImGuiFrameComposer(ImGuiSystem& system, RenderSystem& renderer) : _system(system), _renderer(renderer), _component(system) {}
-    void PrepareFrame(RenderPrepareContext& context) override;
-    void Compose(FrameGraph& frame, Nullable<RenderPipeline*> pipeline) override;
-
-private:
-    ImGuiSystem& _system;
-    RenderSystem& _renderer;
-    ImGuiGraphComponent _component;
-};
-
 }  // namespace radray
-
-#endif  // RADRAY_ENABLE_IMGUI

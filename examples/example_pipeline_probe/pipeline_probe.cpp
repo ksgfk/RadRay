@@ -15,6 +15,9 @@
 #include <radray/runtime/render_framework/static_mesh_scene_proxy.h>
 #include <radray/runtime/render_system.h>
 #include <radray/runtime/window_manager.h>
+#ifdef RADRAY_ENABLE_IMGUI
+#include <radray/imgui/imgui_system.h>
+#endif
 #if defined(RADRAY_PLATFORM_WINDOWS)
 #include <radray/platform/win32_headers.h>
 #endif
@@ -164,8 +167,7 @@ protected:
         _pipeline->SetSettings(settings);
     }
 #ifdef RADRAY_ENABLE_IMGUI
-    void ConfigureImGui(ImGuiSystemDescriptor& descriptor) override { descriptor.Enabled = _options.ImGui; }
-    void OnImGui() override {
+    void DrawUi() {
         ImGui::SetNextWindowSize({320, 180}, ImGuiCond_FirstUseEver);
         if (ImGui::Begin("Forward rendering")) {
             ImGui::TextUnformatted("UI is composed after scene tone mapping.");
@@ -180,6 +182,12 @@ protected:
     }
 #endif
     void OnInit() override {
+#ifdef RADRAY_ENABLE_IMGUI
+        if (_options.ImGui) {
+            _ui = ImGuiSystem::Install(*this, {});
+            if (_ui) _uiDraw = _ui->EventDraw().connect(&ProbeApplication::DrawUi, this);
+        }
+#endif
         for (const auto name : {"block", "panel", "sphere", "ring", "spire", "vase"}) _meshes.emplace(name, GetAssetManager()->Load<StaticMesh>(fmt::format("tidal_atrium/{}.obj", name)));
         _white = GetAssetManager()->Load<TextureAsset>("tidal_atrium/white.png");
         _contact = GetAssetManager()->Load<TextureAsset>("tidal_atrium/contact.png");
@@ -492,6 +500,11 @@ protected:
     }
     void OnShutdown() override {
         _keyboard.disconnect();
+#ifdef RADRAY_ENABLE_IMGUI
+        _uiDraw.disconnect();
+        if (_ui && _ui->HasError()) _failed = true;
+        _ui = nullptr;
+#endif
         if (_pipeline && _pipeline->Failed()) _failed = true;
         for (auto* actor : _actors) GetWorld()->DestroyActor(actor);
         _actors.clear();
@@ -528,6 +541,10 @@ private:
     unordered_map<string, unique_ptr<Material>, StringHash, StringEqual> _materials;
     unordered_set<KeyCode> _keys;
     sigslot::scoped_connection _keyboard;
+#ifdef RADRAY_ENABLE_IMGUI
+    Nullable<ImGuiSystem*> _ui{nullptr};
+    sigslot::scoped_connection _uiDraw;
+#endif
     unique_ptr<render::Texture> _observer;
     unique_ptr<render::TextureView> _observerRtv;
     RenderOutputId _observerId;

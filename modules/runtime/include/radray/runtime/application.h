@@ -6,11 +6,10 @@
 #include <thread>
 
 #include <radray/coroutine.h>
+#include <radray/nullable.h>
 #include <radray/types.h>
+#include <radray/runtime/application_extension.h>
 #include <radray/runtime/flight_completion.h>
-#ifdef RADRAY_ENABLE_IMGUI
-#include <radray/runtime/imgui/imgui_system.h>
-#endif
 
 namespace radray {
 
@@ -99,7 +98,8 @@ private:
 
 /// 一站式运行时启动描述。Application::Run(desc) 据此创建 GpuSystem(由其持有 device/factory)、
 /// 窗口系统、主窗口 + swapchain、AssetManager、World,并固化帧序与 shutdown 顺序。
-/// 所有系统(含渲染)都在运行时内部生命周期里创建与驱动,不提供外部注册钩子。
+/// 核心系统都在运行时内部生命周期里创建与驱动；可选参与者通过 Application::AddExtension
+/// 在 OnInit 内安装,不改变固定帧序。
 struct ApplicationRuntimeDescriptor {
     // —— 后端 / 运行模式 ——
     render::RenderBackend Backend;
@@ -125,9 +125,6 @@ struct ApplicationRuntimeDescriptor {
     uint32_t FlightDataCount{2};
     render::TextureFormat BackBufferFormat;
     render::PresentMode PresentMode;
-#ifdef RADRAY_ENABLE_IMGUI
-    ImGuiSystemDescriptor ImGui{};
-#endif
 };
 
 class Application : public IFlightCompletionObserver {
@@ -153,10 +150,10 @@ public:
     ApplicationScheduler& GetScheduler() noexcept { return _scheduler; }
     const ApplicationScheduler& GetScheduler() const noexcept { return _scheduler; }
     World* GetWorld() noexcept { return _world.get(); }
-#ifdef RADRAY_ENABLE_IMGUI
-    Nullable<ImGuiSystem*> GetImGuiSystem() noexcept { return _imguiSystem.get(); }
-#endif
     const World* GetWorld() const noexcept { return _world.get(); }
+    /// Game thread, after the runtime is initialized and before the main loop starts (OnInit).
+    /// Returns null and destroys the rejected extension otherwise. Extensions run in installation order.
+    Nullable<ApplicationExtension*> AddExtension(unique_ptr<ApplicationExtension> extension);
     /// 兼容性便捷入口；device 的所有权与生命周期由 GpuSystem 管理。
     render::Device* GetDevice() noexcept;
     const render::Device* GetDevice() const noexcept;
@@ -178,10 +175,6 @@ protected:
     /// 运行时全部内部系统就绪后(device/window/gpu/render/asset/world 全部建好)的一次性初始化。
     /// 典型用途:加载资产、Spawn Actor、建相机。
     virtual void OnInit();
-#ifdef RADRAY_ENABLE_IMGUI
-    virtual void ConfigureImGui(ImGuiSystemDescriptor& descriptor);
-    virtual void OnImGui();
-#endif
 
     /// 每帧游戏逻辑(World::Tick 之前)。在 AssetManager::Pump 之后调用。
     virtual void OnUpdate(const AppUpdateContext& ctx);
@@ -206,13 +199,14 @@ private:
     unique_ptr<AssetManager> _assetManager;
     unique_ptr<RenderSystem> _renderSystem;
     unique_ptr<World> _world;
-#ifdef RADRAY_ENABLE_IMGUI
-    unique_ptr<ImGuiSystem> _imguiSystem;
-#endif
+    // 在 World 之前逆序销毁；见 DestroyRuntime。
+    vector<unique_ptr<ApplicationExtension>> _extensions;
     ApplicationScheduler _scheduler;
     std::filesystem::path _shaderSourceRoot;
     vector<std::filesystem::path> _shaderIncludePaths;
     bool _multithreaded{false};
+    bool _runtimeInitialized{false};
+    bool _loopStarted{false};
     const std::thread::id _applicationThread{std::this_thread::get_id()};
 };
 

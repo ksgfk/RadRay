@@ -94,22 +94,23 @@ flush/submit 与 GPU wait；graph report 另拆 compile/realize/prepare/record�
 
 ## 可选 ImGui
 
-默认 OFF 时不需要 ImGui 或 FreeType 目录。开启使用固定依赖清单；不要改写上游配置头，
-项目配置与运行期默认值见 [Runtime ImGui](../architecture/runtime-imgui.md)。
+默认 OFF 时不需要 ImGui 或 FreeType 目录，`modules/imgui` 不参与配置。开启使用固定依赖清单；
+不要改写上游配置头，模块边界、`ImGuiSystem::Install` 与运行期默认值见 [Runtime ImGui](../architecture/runtime-imgui.md)。
+消费者在 `if (RADRAY_ENABLE_IMGUI)` 下链接 `radrayimgui`，头文件路径为 `<radray/imgui/...>`。
 
 ```powershell
 python tools/fetch_third_party.py restore --only imgui
 python tools/fetch_third_party.py restore --only freetype
 cmake --preset win-x64-debug-clangcl -B build_ui -DRADRAY_ENABLE_IMGUI=ON
 cmake --build build_ui --config Debug --parallel 8
-ctest --test-dir build_ui -C Debug --output-on-failure -R "ImGuiRenderingTest|WindowInputRouterTest|TextureRegionTest"
+ctest --test-dir build_ui -C Debug --output-on-failure -R "ImGuiRenderingTest|WindowInputRouterTest|TextureRegionTest|ApplicationExtension|RenderSystemOverlay|RuntimeLayering"
 build_ui/_build/Debug/example_imgui.exe --vulkan --frames 120 --multithread --flights 3 --stress --srgb
 build_ui/_build/Debug/example_imgui.exe --d3d12 --font C:/Windows/Fonts/msyh.ttc --settings build_ui/gallery.ini
 ```
 
 字体路径为本机示例；没有该字体时换成应用提供的 TTF/OTF/TTC。不指定 `--frames` 时交互运行，
-`--no-viewports` 只保留主窗口；样例使用 Application 默认的 ImGuiFrameComposer，CPU 图片通过 ImGui 动态纹理上传。
-Lambert、Forward 与 Tidal 在编译开启 ImGui 时默认显示 UI，`--no-imgui` 可关闭实例。Graph 图片的
+`--no-viewports` 只保留主窗口；样例在 `OnInit` 内 `ImGuiSystem::Install` 并使用 RenderSystem 默认 overlay 装配，CPU 图片通过 ImGui 动态纹理上传。
+Lambert、Forward 与 Tidal 在编译开启 ImGui 时默认显示 UI，`--no-imgui` 跳过 Install。Graph 图片的
 自定义 producer 保留在 ImGuiRenderingTest 中。
 
 ```powershell
@@ -127,7 +128,7 @@ cmake --build build_ui --config Debug --target radray_builtin_shaders_regenerate
 ```
 
 生成器记录源与 include 的 hash、生成命令和 artifact 身份；`check` 重新编译后逐字节比较。
-变更 shader、shader contract 或固定 SDK 后先 regenerate，再 check，UI 与通用 blit 生成物分别提交；blit 在 ImGui OFF 时同样可用。
+变更 shader、shader contract 或固定 SDK 后先 regenerate，再 check，UI（`modules/imgui/src/imgui_shaders.inc`）与通用 blit 生成物分别提交；blit 在 ImGui OFF 时同样可用。
 
 验收按 Debug 构建/专项/全量测试、Release 构建/测试、独立裁剪配置的顺序串行执行。
 独立配置覆盖 OFF、ON+FreeType、ON+STB、Demo/Debug OFF、compiler/JIT OFF、D3D12-only 和
@@ -182,7 +183,8 @@ FreeType 依赖隔离还应检查生成的 `ftoption.h` 中外部功能宏与 fr
 | `test_runtime_shader_jit` | `RadRayRuntimeShaderJit` |
 | `test_window_input_router` | `WindowInputRouterTest`, `RenderWorkloadTest` |
 | `test_texture_region` | `TextureRegionTest` |
-| `test_imgui_rendering`（可选） | `ImGuiRenderingTest` |
+| `test_application_extension` | `ApplicationExtension`, `RenderSystemOverlay` |
+| `test_imgui_rendering`（可选，`modules/imgui/tests`） | `ImGuiRenderingTest` |
 | `test_radray_render_shader_artifact` | `RadRayRenderShaderArtifact` |
 | `test_radray_shader_contract` | `RadRayShaderContract` |
 | `test_radray_render_shader_layout` | `RadRayRenderShaderLayout` |

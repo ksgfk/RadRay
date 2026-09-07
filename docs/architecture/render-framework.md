@@ -13,14 +13,14 @@ forward pipeline 验证完整的 scene → proxy → draw 路径。
 ## 分层
 
 ```
-Application            进程生命周期、runner 选择、帧循环
+Application            进程生命周期、runner 选择、帧循环、ApplicationExtension 槽
   ├─ WindowManager     窗口与 swapchain
   ├─ GpuSystem         device、queue、flight、上传        → frame-and-gpu.md
-  ├─ RenderSystem      workload/output、graph pools/history、registry 与 pipeline
-  ├─ ImGuiSystem       可选 context、原始输入适配和 per-flight UI 快照 → runtime-imgui.md
+  ├─ RenderSystem      workload/output、graph pools/history、registry、pipeline 与 overlays
   ├─ AssetDatabase     可选 JSON 身份库与 importer              → asset-database.md
   ├─ AssetManager      资产生命周期                       → asset-system.md
   └─ World             Actor / Component / Scene
+可选模块 imgui → runtime：ImGuiSystem 作为 ApplicationExtension / flight observer / overlay 自行注册 → runtime-imgui.md
 ```
 
 `RenderSystem` 拥有"怎么画"，**不拥有帧时序**——那是 `GpuSystem` 与 runner 的事。
@@ -28,9 +28,9 @@ Application            进程生命周期、runner 选择、帧循环
 ## 渲染管线
 
 ```text
-Game thread:   flight 可写 → 清上一帧 retained refs → AssetManager::Pump
-               → ApplicationScheduler::Pump → 可选 UI NewFrame → 输入路由 → OnUpdate → World::Tick
-               → 可选 OnImGui / UI 快照 → PrepareFrame
+Game thread:   flight 可写 → 清上一帧 retained refs → Extension::OnBeginUpdate → AssetManager::Pump
+               → ApplicationScheduler::Pump → Extension::OnBeforeInput → 输入路由 → OnUpdate → World::Tick
+               → Extension::OnAfterWorldTick → PrepareFrame（pipeline → overlays → composer）
 Render thread: pool/history safe Begin → resolve requested outputs/views
                → composer 连接 ports → 展开 BuildGraph → compile/realize/execute graph → 未写目标 fallback clear → required final states
 ```
@@ -53,6 +53,21 @@ Application 不提供独立的 view 内容录制钩子。
 初始化期间安装不增加等待。已有 pipeline 只可在首次 Prepare/Render 前替换，或由
 `Application::Shutdown` 完成 GPU idle 后释放；开始渲染后拒绝替换并保留旧 pipeline。
 此限制防止 pipeline 自有 buffer、texture、descriptor 在飞行中被销毁。调用方应检查返回值后再保存借用指针。
+
+### overlay 与默认装配
+
+`RenderSystem::AddOverlay / RemoveOverlay` 登记非拥有的 `RenderGraphComponent`，安装窗口与
+`SetGraphComposer` 相同（game thread，且未开始渲染或 GPU-idle shutdown 阶段）；调用方保证组件活到移除
+或 RenderSystem 关停。`PrepareFrame` 在 pipeline 之后、composer 之前按注册序调用各 overlay 的
+`PrepareFrame`，overlay 在此请求自己的输出。
+
+无 composer 时 `ComposeDefaultFrameGraph(frame, pipeline, overlays, renderer)` 装配：没有 overlay
+时每个输出直接由 scene pipeline 写入（保持原路径）；有 overlay 时每个输出使用显示线性
+`RGBA16_FLOAT` canvas —— PreserveContents 的输出先经 `AddRenderGraphBlit` 载入（非 sRGB UNORM 解码），
+否则 `Display.Clear`；随后 Scene 组件、overlays 按注册序串接，最后一次 blit 编码到输出（非 sRGB UNORM
+显式 sRGB 编码，sRGB attachment 由硬件编码）并 Export。该重载返回每个输出的导出值，包装它的自定义
+composer 可以在其后追加 readback 等操作。渲染框架不知道 overlay 的内容；ImGui 只是一个 overlay
+（见 [Runtime ImGui](runtime-imgui.md)）。`RenderSystemOverlay` 测试用回读验证 UNORM 与 sRGB 输出的编码一致。
 `ForwardPipeline` 在构造时借用 Scene 与 Camera，只在 `PrepareFrame` 访问它们，因此这些 source
 必须活过最后一次 PrepareFrame。已准备的帧不依赖 source、proxy 或 Material 的后续寿命。
 

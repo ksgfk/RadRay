@@ -1,5 +1,8 @@
 add_executable(example_pipeline_probe pipeline_probe.cpp)
 target_link_libraries(example_pipeline_probe PRIVATE radrayruntime)
+if (RADRAY_ENABLE_IMGUI)
+    target_link_libraries(example_pipeline_probe PRIVATE radrayimgui)
+endif()
 target_compile_definitions(example_pipeline_probe PRIVATE RADRAY_PROJECT_DIR_DEFAULT="${CMAKE_SOURCE_DIR}")
 if (RADRAY_ENABLE_SHADER_JIT)
     target_compile_definitions(example_pipeline_probe PRIVATE RADRAY_ENABLE_SHADER_JIT)
