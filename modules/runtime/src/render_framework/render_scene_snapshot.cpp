@@ -189,8 +189,8 @@ bool RenderSceneSnapshotBuilder::Build(const Scene& scene, RenderSceneSnapshot& 
                 if (valid) {
                     for (auto& pass : data.Passes) {
                         if (!pass.Program) continue;
-                        auto [program, created] = _programs.try_emplace(pass.Program.Get());
-                        next.Stats.ScratchEntriesCreated += created ? 1 : 0;
+                        auto [program, created2] = _programs.try_emplace(pass.Program.Get());
+                        next.Stats.ScratchEntriesCreated += created2 ? 1 : 0;
                         if (program->second.Epoch != _epoch) {
                             if (programCount == kMaxIndex) return false;
                             program->second = {_epoch, programCount++};
