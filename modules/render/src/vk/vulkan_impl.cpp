@@ -2605,6 +2605,7 @@ bool ShaderParameterSetVulkan::FlushWrites() noexcept {
         _texelBufferViews[pending.ValueIndex] = std::move(pending.View);
     }
     std::fill(_dirty.begin(), _dirty.end(), uint8_t{0});
+    ++_flushGeneration;
     return true;
 }
 
@@ -4651,6 +4652,7 @@ void SimulateCommandEncoderVulkan::DestroyImpl() noexcept {
     _framebuffer = nullptr;
     _boundLayout = nullptr;
     _boundPso = nullptr;
+    _boundGroups.fill({});
 }
 
 void SimulateCommandEncoderVulkan::SetViewport(Viewport vp) noexcept {
@@ -4745,6 +4747,9 @@ void SimulateCommandEncoderVulkan::BindGraphicsPipelineState(GraphicsPipelineSta
     }
     _device->_ftb.vkCmdBindPipeline(_cmdBuffer->_cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, p->_pipeline);
     _boundPso = p;
+    if (_boundLayout != p->_layout) {
+        _boundGroups.fill({});
+    }
     _boundLayout = p->_layout;
 }
 
@@ -4769,12 +4774,6 @@ static bool BindShaderParameterSetVulkan(
     // Each offset names a declaration in the layout being bound, so the set and the register class
     // come from the handle instead of from a bare binding number. A handle from another layout or for
     // another set is rejected here rather than shifting the wrong dynamic descriptor.
-    struct ResolvedDynamicOffsetVulkan {
-        const BackendBindingName* Record{nullptr};
-        uint32_t Offset{0};
-    };
-    vector<ResolvedDynamicOffsetVulkan> resolvedDynamicOffsets;
-    resolvedDynamicOffsets.reserve(dynamicOffsets.size());
     for (const ShaderParameterDynamicOffset& dynamicOffset : dynamicOffsets) {
         const auto offsetRecord = FindBackendBindingRecord(
             destinationLayout->_bindingNames,
@@ -4792,25 +4791,43 @@ static bool BindShaderParameterSetVulkan(
                 groupIndex);
             return false;
         }
-        resolvedDynamicOffsets.push_back(
-            ResolvedDynamicOffsetVulkan{offsetRecord.Get(), dynamicOffset.Offset});
     }
 
     // vkCmdBindDescriptorSets consumes one offset per dynamic descriptor in the set, in the set's
     // own binding order. Packing walks the resolved order and looks up the caller's value for each
     // slot, so a missing or duplicated offset is a failure instead of a silent shift that would
     // hand every later dynamic buffer somebody else's offset.
-    vector<uint32_t> packedDynamicOffsets;
-    packedDynamicOffsets.reserve(dynamicEntryOrder.size());
-    for (uint32_t entryIndex : dynamicEntryOrder) {
+    if (dynamicOffsets.size() != dynamicEntryOrder.size()) {
+        RADRAY_ERR_LOG(
+            "vk group {} takes {} dynamic offsets but {} were given",
+            groupIndex,
+            dynamicEntryOrder.size(),
+            dynamicOffsets.size());
+        return false;
+    }
+    constexpr size_t kInlinePackedOffsets = 16;
+    std::array<uint32_t, kInlinePackedOffsets> inlinePacked{};
+    vector<uint32_t> heapPacked;
+    uint32_t* packedDynamicOffsets = inlinePacked.data();
+    if (dynamicEntryOrder.size() > kInlinePackedOffsets) {
+        heapPacked.resize(dynamicEntryOrder.size());
+        packedDynamicOffsets = heapPacked.data();
+    }
+    for (size_t slot = 0; slot < dynamicEntryOrder.size(); ++slot) {
+        const uint32_t entryIndex = dynamicEntryOrder[slot];
         RADRAY_ASSERT(entryIndex < destinationEntries.size());
         const uint32_t bindingNumber = destinationEntries[entryIndex].Binding;
         const uint32_t bindingNamespace = shader::GetWireBindingNamespace(
             static_cast<uint32_t>(destinationEntries[entryIndex].LogicalKind));
-        const ResolvedDynamicOffsetVulkan* found = nullptr;
-        for (const ResolvedDynamicOffsetVulkan& dynamicOffset : resolvedDynamicOffsets) {
-            if (dynamicOffset.Record->Location.Binding != bindingNumber ||
-                dynamicOffset.Record->Namespace != bindingNamespace) {
+        const ShaderParameterDynamicOffset* found = nullptr;
+        for (const ShaderParameterDynamicOffset& dynamicOffset : dynamicOffsets) {
+            const auto* record = FindBackendBindingRecord(
+                                     destinationLayout->_bindingNames,
+                                     destinationLayout->_bindingGeneration,
+                                     dynamicOffset.Binding)
+                                     .Get();
+            if (record->Location.Binding != bindingNumber ||
+                record->Namespace != bindingNamespace) {
                 continue;
             }
             if (found != nullptr) {
@@ -4829,15 +4846,7 @@ static bool BindShaderParameterSetVulkan(
                 bindingNumber);
             return false;
         }
-        packedDynamicOffsets.push_back(found->Offset);
-    }
-    if (dynamicOffsets.size() != packedDynamicOffsets.size()) {
-        RADRAY_ERR_LOG(
-            "vk group {} takes {} dynamic offsets but {} were given",
-            groupIndex,
-            packedDynamicOffsets.size(),
-            dynamicOffsets.size());
-        return false;
+        packedDynamicOffsets[slot] = found->Offset;
     }
     device->_ftb.vkCmdBindDescriptorSets(
         commandBuffer->_cmdBuffer,
@@ -4846,8 +4855,8 @@ static bool BindShaderParameterSetVulkan(
         groupIndex,
         1,
         &set->_allocation.Set,
-        static_cast<uint32_t>(packedDynamicOffsets.size()),
-        packedDynamicOffsets.empty() ? nullptr : packedDynamicOffsets.data());
+        static_cast<uint32_t>(dynamicEntryOrder.size()),
+        dynamicEntryOrder.empty() ? nullptr : packedDynamicOffsets);
     return true;
 }
 
@@ -4855,14 +4864,36 @@ void SimulateCommandEncoderVulkan::BindShaderParameterSet(
     uint32_t groupIndex,
     ShaderParameterSet* set,
     std::span<const ShaderParameterDynamicOffset> dynamicOffsets) noexcept {
-    BindShaderParameterSetVulkan(
+    auto* native = CastVkObject(set);
+    const bool trackable = groupIndex < _boundGroups.size() && native != nullptr &&
+                           dynamicOffsets.size() <= _boundGroups[groupIndex].Offsets.size();
+    if (trackable) {
+        const BoundParameterGroupVulkan& bound = _boundGroups[groupIndex];
+        if (bound.Set == native && bound.FlushGeneration == native->_flushGeneration &&
+            bound.OffsetCount == dynamicOffsets.size() &&
+            std::equal(dynamicOffsets.begin(), dynamicOffsets.end(), bound.Offsets.begin())) {
+            return;
+        }
+    }
+    const bool ok = BindShaderParameterSetVulkan(
         _device,
         _cmdBuffer,
         _boundLayout,
         VK_PIPELINE_BIND_POINT_GRAPHICS,
         groupIndex,
-        CastVkObject(set),
+        native,
         dynamicOffsets);
+    if (groupIndex < _boundGroups.size()) {
+        BoundParameterGroupVulkan& bound = _boundGroups[groupIndex];
+        if (ok && trackable) {
+            bound.Set = native;
+            bound.FlushGeneration = native->_flushGeneration;
+            bound.OffsetCount = static_cast<uint32_t>(dynamicOffsets.size());
+            std::copy(dynamicOffsets.begin(), dynamicOffsets.end(), bound.Offsets.begin());
+        } else {
+            bound = {};
+        }
+    }
 }
 
 static bool SetPushConstantsVulkan(

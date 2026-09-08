@@ -464,6 +464,16 @@ public:
     vector<unique_ptr<CommandEncoder>> _endedEncoders;
 };
 
+// Last parameter set bound to one descriptor-set slot on an encoder. Offsets beyond the inline
+// capacity force a rebind rather than a comparison.
+inline constexpr uint32_t kBoundParameterGroupCountVulkan = 8;
+struct BoundParameterGroupVulkan {
+    ShaderParameterSetVulkan* Set{nullptr};
+    uint64_t FlushGeneration{0};
+    uint32_t OffsetCount{0};
+    std::array<ShaderParameterDynamicOffset, 4> Offsets{};
+};
+
 class SimulateCommandEncoderVulkan final : public GraphicsCommandEncoder {
 public:
     SimulateCommandEncoderVulkan(
@@ -513,6 +523,7 @@ public:
     FrameBufferVulkan* _framebuffer{nullptr};
     GraphicsPipelineVulkan* _boundPso{nullptr};
     PipelineLayoutVulkan* _boundLayout{nullptr};
+    std::array<BoundParameterGroupVulkan, kBoundParameterGroupCountVulkan> _boundGroups{};
 };
 
 class SimulateComputeEncoderVulkan final : public ComputeCommandEncoder {
@@ -1069,6 +1080,8 @@ public:
     vector<std::optional<ShaderParameterValue>> _values;
     vector<uint8_t> _dirty;
     vector<unique_ptr<BufferViewVulkan>> _texelBufferViews;
+    // Incremented by every FlushWrites that reaches the device; encoders compare it to skip redundant binds.
+    uint64_t _flushGeneration{1};
 };
 
 class GraphicsPipelineVulkan final : public GraphicsPipelineState {

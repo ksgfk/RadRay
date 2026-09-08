@@ -1,5 +1,6 @@
 #pragma once
 
+#include <radray/inline_vector.h>
 #include <radray/runtime/material_state.h>
 #include <radray/runtime/render_framework/mesh_batch.h>
 #include <radray/runtime/render_framework/render_types.h>
@@ -14,10 +15,12 @@ class RenderGraphRasterContext;
 class RendererListPassBindings;
 struct RendererListPassBinding;
 
+// Inline capacities cover the common case (one dynamic buffer per group, view/material/object groups)
+// so building a command performs no heap allocation; larger counts spill to the heap transparently.
 struct PreparedShaderGroup {
     uint32_t Group{0};
     Nullable<render::ShaderParameterSet*> Set{nullptr};
-    vector<render::ShaderParameterDynamicOffset> DynamicOffsets;
+    InlineVector<render::ShaderParameterDynamicOffset, 2> DynamicOffsets;
 };
 // Native groups may reference only persistent read-only resources retained through the flight fence.
 struct DrawSortData {
@@ -35,7 +38,7 @@ struct MeshDrawCommand {
     Nullable<const GpuMesh::DrawData*> Geometry{nullptr};
     uint32_t FirstIndex{0}, IndexCount{0};
     int32_t VertexOffset{0};
-    vector<PreparedShaderGroup> Groups;
+    InlineVector<PreparedShaderGroup, 3> Groups;
     DrawSortData SortData;
 };
 struct DrawExecutionStats {
