@@ -42,7 +42,6 @@ cmake --build build_clangcl --config Debug --parallel 24
 | 宏 | 作用 | 保留的检查 |
 |---|---|---|
 | `_ITERATOR_DEBUG_LEVEL=1`（仅 MSVC） | 关闭 STL 迭代器 owner 追踪与加锁 | 越界、失效迭代器解引用 |
-| `EIGEN_NO_DEBUG` | 关闭 Eigen 内部 `eigen_assert` | `RADRAY_ASSERT` 不受影响 |
 
 `_ITERATOR_DEBUG_LEVEL` 影响 STL 对象布局，必须在同一二进制的所有 C++ TU 一致，所以在此全局设置，
 第三方库随工程编译时自动继承；预编译的 DXC package 与 libjpeg-turbo 是 C 接口，不受影响。
