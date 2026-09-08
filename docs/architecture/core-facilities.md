@@ -1,6 +1,6 @@
 > - 适用: 需要某个基础设施但不确定仓库里已有什么；踩到 core 的坑
 > - 权威: 本文是 `radraycore` 提供什么、以及怎么正确用它的唯一说明
-> - 锚点: `modules/core/include/radray/types.h`, `modules/core/include/radray/nullable.h`, `modules/core/include/radray/coroutine.h`, `modules/core/include/radray/enum_flags.h`, `modules/core/include/radray/runtime_type.h`, `cmake/Utility.cmake`
+> - 锚点: `modules/core/include/radray/types.h`, `modules/core/include/radray/inline_vector.h`, `modules/core/include/radray/nullable.h`, `modules/core/include/radray/coroutine.h`, `modules/core/include/radray/enum_flags.h`, `modules/core/include/radray/runtime_type.h`, `cmake/Utility.cmake`
 
 # core 基础设施
 
@@ -43,6 +43,24 @@ template <class T> using vector = std::vector<T, allocator<T>>;
 所以"用了 radray 别名"和"走 mimalloc"是两件独立的事——别名的价值在于统一，不在于分配器。
 
 `AGENTS.md` 要求 STL 容器一律走这些别名。
+
+### InlineVector
+
+`inline_vector.h` 的 `InlineVector<T, N>` 用于通常只有少量元素的连续序列，`N` 必须大于零。
+存储参考 [LLVM SmallVector](https://llvm.org/doxygen/SmallVector_8h_source.html)：对齐的原始内联空间加
+data/size/capacity，只有 `[0, size)` 中的元素被构造。未溢出时不创建堆容器或调试元数据，
+因此空容器及内联容量内的嵌套容器操作，在 Debug 迭代器检查开启时也不产生容器自身的堆分配；
+元素类型自己的分配不受此保证约束。`T` 不要求默认构造或赋值。
+
+溢出和 `reserve` 通过 `radray::allocator<T>` 获取满足元素对齐的存储。扩容使全部迭代器和引用失效；
+未扩容的追加保留已有元素的引用。`pop_back` 立即析构末尾元素，`clear` 析构全部有效元素，二者均保留
+现有容量，不在长度降到 `N` 时搬回内联区。这样重复清空、填充不会反复分配和搬迁。
+
+复制只复制有效元素；移动堆存储时转移其所有权，移动内联存储时逐元素构造，源在成功后为空且可复用。
+移动操作的 `noexcept` 取决于 `T` 的移动构造。扩容插入先在新存储构造新增元素，再搬迁旧元素，
+允许参数引用已有元素及其子对象；`assign(first, last)` 也接受自身的子范围和输入迭代器。
+重定位优先使用不抛异常的移动，否则在可复制时复制。临时存储通过 RAII 清理；不可复制且移动可能失败的
+元素不保证在失败后保留原值。超过 `max_size()` 的容量请求通过 `RADRAY_ABORT` 拒绝。
 
 ## Nullable
 
@@ -258,6 +276,7 @@ template <> struct JsonDeserializer<T> {
 | `test_str_convert.cpp` | `Core_Utility` |
 | `test_img_rw.cpp` | `PNG`（仅 `RADRAY_ENABLE_LIBPNG`，需 `RADRAY_ASSETS_DIR`） |
 | `test_nullable.cpp` | `NullableTest` |
+| `test_inline_vector.cpp` | `InlineVectorTest`（内联零分配、元素寿命、溢出复用、别名插入、复制移动与对齐） |
 | `test_intrusive_ptr.cpp` | `IntrusivePtr` |
 | `test_enum_flags.cpp` | `EnumFlagsTest` |
 | `test_sparse_set.cpp` | `SparseSetTest` |
