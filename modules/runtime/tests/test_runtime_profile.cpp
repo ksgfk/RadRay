@@ -81,7 +81,7 @@ Sample Measure(F&& callback) {
     profile_allocations::Enabled = false;
     return {uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count()), profile_allocations::Count, profile_allocations::Bytes};
 }
-void PrintSamples(std::string_view backend, uint32_t primitives, bool moving, bool diagnostics, bool prepared, std::string_view stage, vector<Sample> samples, bool allocationsMeasured = true) {
+void PrintSamples(std::string_view backend, uint32_t primitives, bool moving, bool diagnostics, bool prepared, std::string_view stage, vector<Sample> samples) {
 #ifdef RADRAY_IS_DEBUG
     constexpr bool isDebug = true;
 #else
@@ -100,7 +100,7 @@ void PrintSamples(std::string_view backend, uint32_t primitives, bool moving, bo
     fmt::print("PROFILE {{\"backend\":\"{}\",\"debug\":{},\"primitives\":{},\"moving\":{},\"diagnostics\":{},\"prepared\":{},\"samples\":{},\"stage\":\"{}\",\"p50Ms\":{:.6f},\"p95Ms\":{:.6f},\"p99Ms\":{:.6f},\"p50Allocations\":{},\"p50AllocatedBytes\":{}}}\n",
                backend, isDebug, primitives, moving, diagnostics, prepared, samples.size(), stage,
                double(quantile(times, 50)) / 1e6, double(quantile(times, 95)) / 1e6, double(quantile(times, 99)) / 1e6,
-               allocationsMeasured ? fmt::format("{}", quantile(counts, 50)) : "null", allocationsMeasured ? fmt::format("{}", quantile(bytes, 50)) : "null");
+               quantile(counts, 50), quantile(bytes, 50));
 }
 class ImmediateWait final : public IWaitFrameProcessor {
 public:
@@ -200,7 +200,6 @@ TEST_P(RuntimeProfile, StageCostsAndWarmResourceCounts) {
                 const bool prepared = mode < 2;
                 const bool diagnostics = mode % 2 != 0;
                 array<vector<Sample>, 10> samples;
-                array<vector<Sample>, 4> graphStages;
                 for (uint32_t frame = 0; frame < 3 + sampleCount; ++frame) {
                     ++serial;
                     owners.clear();
@@ -293,15 +292,10 @@ TEST_P(RuntimeProfile, StageCostsAndWarmResourceCounts) {
                     RenderGraphTestDriver::Completed(command.Get());
                     if (frame >= 3) {
                         for (size_t i = 0; i < values.size(); ++i) samples[i].push_back(values[i]);
-                        const auto& cpu = graph->GetReport().Cpu;
-                        const uint64_t times[]{cpu.CompileNanoseconds, cpu.RealizeNanoseconds, cpu.PrepareNanoseconds, cpu.RecordNanoseconds};
-                        for (size_t i = 0; i < graphStages.size(); ++i) graphStages[i].push_back({times[i], 0, 0});
                     }
                 }
                 const std::string_view names[]{"proxyTransform", "assetPump", "snapshot", "cull", "listAndParameters", "graphSetup", "graphExecute", "diagnosticSerialization", "flushAndSubmit", "gpuWait"};
                 for (size_t i = 0; i < samples.size(); ++i) PrintSamples(EnumName(GetParam()), count, moving, diagnostics, prepared, names[i], std::move(samples[i]));
-                const std::string_view stages[]{"graphCompile", "graphRealize", "graphPrepare", "graphRecord"};
-                for (size_t i = 0; i < graphStages.size(); ++i) PrintSamples(EnumName(GetParam()), count, moving, diagnostics, prepared, stages[i], std::move(graphStages[i]), false);
                 const auto& resourceStats = draws.GetStats();
                 fmt::print("PROFILE_COUNTS {{\"backend\":\"{}\",\"primitives\":{},\"moving\":{},\"diagnostics\":{},\"prepared\":{},\"groupPreparations\":{},\"recipeBuilds\":{},\"setCreations\":{},\"setCacheHits\":{},\"constantBytes\":{},\"snapshotMaterialBytes\":{},\"poolBytes\":{},\"poolPeakBytes\":{}}}\n",
                            EnumName(GetParam()), count, moving, diagnostics, prepared, resourceStats.GroupPreparations, resourceStats.RecipeBuilds, resourceStats.SetCreations,

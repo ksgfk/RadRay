@@ -329,10 +329,6 @@ bool GpuSystem::CompleteFlight(uint32_t flightIndex) {
     if (_frameProfiler != nullptr) {
         _frameProfiler->Resolve(flightIndex);
     }
-    {
-        std::lock_guard lock(_uploadStatsMutex);
-        _completedUploadStats[flightIndex] = flight.HostWrites.GetStats();
-    }
     for (const auto& submission : flight.Submissions) submission->Complete(flight.FrameSerial, flight.Rendered);
     flight.Submissions.clear();
     NotifyFlightComplete(FlightCompletion{.FlightIndex = flightIndex, .GpuWorkCompleted = flight.Rendered, .FrameSerial = flight.FrameSerial});
@@ -514,7 +510,6 @@ GpuSystem::GpuSystem(const GpuSystemDescriptor& desc)
     _mainQueueTrack.Fence = _device->CreateFence().Unwrap();
     _mainQueueTrack.Fence->SetDebugName("AppMainQueue");
     _flights.reserve(_flightDataCount);
-    _completedUploadStats.resize(_flightDataCount);
     for (uint32_t i = 0; i < _flightDataCount; ++i) {
         _flights.push_back(make_unique<FlightSlot>());
     }
@@ -548,20 +543,6 @@ GpuSystem::~GpuSystem() noexcept {
 
 float GpuSystem::GetLastGpuTimeMs() const noexcept {
     return _frameProfiler != nullptr ? _frameProfiler->GetLastGpuTimeMs() : 0.0f;
-}
-
-UploadMemoryStats GpuSystem::GetUploadMemoryStats() const noexcept {
-    std::lock_guard lock(_uploadStatsMutex);
-    UploadMemoryStats result{};
-    for (const auto& stats : _completedUploadStats) {
-        result.PageCount += stats.PageCount;
-        result.PageCapacityBytes += stats.PageCapacityBytes;
-        result.CommitCount += stats.CommitCount;
-        result.CommittedBytes += stats.CommittedBytes;
-        result.RecordedRangeCount += stats.RecordedRangeCount;
-        result.FlushedRangeCount += stats.FlushedRangeCount;
-    }
-    return result;
 }
 
 uint32_t GpuSystem::GetCurrentFlightIndex() const noexcept {

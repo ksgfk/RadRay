@@ -290,7 +290,6 @@ public:
     void Reset() noexcept;
     void Clear() noexcept;
     bool Contains(const render::Buffer* buffer) const noexcept;
-    uint64_t GetHighWatermark() const noexcept { return _highWatermark; }
     uint64_t GetMaxResetSize() const noexcept { return _desc.MaxResetSize; }
 
     friend void swap(DynamicCBufferArena& a, DynamicCBufferArena& b) noexcept;
@@ -305,7 +304,6 @@ private:
     size_t _activeBlockIndex{};
     uint64_t _minBlockSize{};
     uint64_t _allocatedThisFrame{};
-    uint64_t _highWatermark{};
 };
 
 }  // namespace radray

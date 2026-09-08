@@ -35,7 +35,7 @@ struct RenderSceneSnapshotStats {
     uint64_t Primitives{0}, MeshBatches{0}, Materials{0}, Lights{0};
     uint64_t MissingGeometry{0}, EmptyDraw{0}, InvalidDrawRange{0}, MaterialUnavailable{0}, InvalidBounds{0};
     uint64_t RetainedAssets{0};
-    uint64_t MaterialBytesCopied{0}, ScratchEntriesCreated{0}, CpuNanoseconds{0};
+    uint64_t MaterialBytesCopied{0}, ScratchEntriesCreated{0};
     uint64_t PrimitiveStructuresRebuilt{0}, PrimitiveStructuresReused{0};
     uint64_t PrimitiveBoundsRebuilt{0}, PrimitiveBoundsReused{0};
     uint64_t MaterialsRebuilt{0}, MaterialsReused{0};

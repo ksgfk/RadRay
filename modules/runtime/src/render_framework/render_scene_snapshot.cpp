@@ -1,7 +1,6 @@
 #include <radray/runtime/render_framework/render_scene_snapshot.h>
 
 #include <algorithm>
-#include <chrono>
 #include <limits>
 #include <radray/logger.h>
 #include <radray/runtime/render_framework/scene.h>
@@ -28,7 +27,6 @@ bool BuildRenderSceneSnapshot(const Scene& scene, RenderSceneSnapshot& out, vect
 }
 
 bool RenderSceneSnapshotBuilder::Build(const Scene& scene, RenderSceneSnapshot& out, vector<StreamingAssetRefAny>& retainedAssets) {
-    const auto start = std::chrono::steady_clock::now();
     if (++_epoch == 0) {
         _primitives.clear();
         _materials.clear();
@@ -242,7 +240,6 @@ bool RenderSceneSnapshotBuilder::Build(const Scene& scene, RenderSceneSnapshot& 
     next.Stats.BatchHighWatermark = std::max(next.Stats.BatchHighWatermark, next.MeshBatches.capacity());
     next.Stats.MaterialHighWatermark = std::max(next.Stats.MaterialHighWatermark, next.Materials.capacity());
     next.Stats.LightHighWatermark = std::max(next.Stats.LightHighWatermark, next.Lights.capacity());
-    next.Stats.CpuNanoseconds = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count();
     rollback.Success = true;
     out = std::move(next);
     return true;

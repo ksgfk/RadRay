@@ -3,7 +3,6 @@
 
 #include <algorithm>
 #include <atomic>
-#include <chrono>
 #include <cstring>
 #include <limits>
 #include <type_traits>
@@ -1926,6 +1925,7 @@ void RenderGraph::Impl::OptimizeRaster() {
 }
 
 bool RenderGraph::Impl::Realize() {
+    RADRAY_PROFILE_SCOPE_N("RenderGraph::Realize");
     const uint64_t createdBefore = Pool.GetStats().Created;
     for (uint32_t r = 0; r < Resources.size(); ++r) {
         auto& resource = Resources[r];
@@ -2062,6 +2062,7 @@ bool RenderGraph::Impl::Realize() {
 }
 
 bool RenderGraph::Prepare() {
+    RADRAY_PROFILE_SCOPE_N("RenderGraph::Prepare");
     auto& impl = *_impl;
     for (uint32_t p : impl.CompiledGraph.ExecutionOrder) {
         auto& pass = impl.Passes[p];
@@ -2316,21 +2317,7 @@ RenderGraphExecutionResult RenderGraph::Execute(render::CommandBuffer& command) 
         return {};
     }
     impl.Executed = true;
-    const auto measure = [](uint64_t& nanos, auto&& run) {
-        const auto start = std::chrono::steady_clock::now();
-        const bool success = run();
-        nanos = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count();
-        return success;
-    };
-    if (!measure(impl.Report.Cpu.CompileNanoseconds, [&] { return Compile(); }) ||
-        !measure(impl.Report.Cpu.RealizeNanoseconds, [&] {
-            RADRAY_PROFILE_SCOPE_N("RenderGraph::Realize");
-            return impl.Realize();
-        }) ||
-        !measure(impl.Report.Cpu.PrepareNanoseconds, [&] {
-            RADRAY_PROFILE_SCOPE_N("RenderGraph::Prepare");
-            return Prepare();
-        })) {
+    if (!Compile() || !impl.Realize() || !Prepare()) {
         for (auto& pass : impl.Passes)
             if (pass.Ticket._state) pass.Ticket._state->Cancel();
         impl.Pool.EndGraph();
@@ -2338,7 +2325,6 @@ RenderGraphExecutionResult RenderGraph::Execute(render::CommandBuffer& command) 
         return {};
     }
     RADRAY_PROFILE_SCOPE_N("RenderGraph::Record");
-    const auto recordStart = std::chrono::steady_clock::now();
     impl.PlanBarriers();
     RenderGraphExecutionResult result{true, false, {}};
     Nullable<unique_ptr<render::GraphicsCommandEncoder>> rasterEncoder{nullptr};
@@ -2436,7 +2422,6 @@ RenderGraphExecutionResult RenderGraph::Execute(render::CommandBuffer& command) 
     result.Submission->OnCompleted = [retained = std::move(submission.Retained), serial](bool success) { retained->Complete(serial, success); };
     impl.Pool.EndGraph();
     impl.Report.Pool = impl.Pool.GetStats();
-    impl.Report.Cpu.RecordNanoseconds = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - recordStart).count();
     return result;
 }
 

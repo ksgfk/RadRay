@@ -4,7 +4,6 @@
 #include "failing_graph_command.h"
 
 #include <algorithm>
-#include <chrono>
 #include <gtest/gtest.h>
 #include <radray/utility.h>
 #include <radray/runtime/render_framework/render_graph_runtime.h>

@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <cstring>
-#include <radray/profiler.h>
 #include <radray/runtime/shader_program.h>
 
 namespace radray {
@@ -129,7 +128,6 @@ Nullable<render::ShaderParameterSet*> FrameDrawResources::PrepareSetForGroup(
 Nullable<render::ShaderParameterSet*> FrameDrawResources::PrepareSet(
     ShaderProgram& program, uint32_t group, std::span<const FrameBufferBinding> buffers,
     std::span<const MaterialTextureFrameData> textures, std::span<const MaterialSamplerFrameData> samplers) {
-    RADRAY_PROFILE_SCOPE_N("FrameDrawResources::PrepareSet");
     if (program.GetDevice() != _device) return nullptr;
     const auto& layout = program.GetParameterLayout();
     const auto& recipe = GetRecipe(program, group);

@@ -57,7 +57,6 @@ void Submit 返回与真实 fence 完成；未提交收据取消不发布资源�
 `Application::OnFlightsComplete` 再转到 `OnRenderFrameComplete`。线程断言留在 `Application` 一侧
 （它持有 `_applicationThread`）；`GpuSystem` 全文没有 `this_thread::get_id()`，靠调用点固定在
 `BeginUpdateForFlight` 与 `WaitAndCleanupCompletedFlights`。正常、跳过和 shutdown 路径保持相同线程归属。
-上传统计也读取已完成 flight 的受锁保护快照。
 
 多线程普通帧只等待当前 flight 可写，不等待上一帧 CPU record 结束，允许 `Update(n+1)` 与
 `Record(n)` 重叠。同一 flight 仍必须等 fence。每个 flight 拥有独立上传命令和 uploader，

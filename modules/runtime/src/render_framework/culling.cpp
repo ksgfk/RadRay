@@ -1,6 +1,5 @@
 #include <radray/runtime/render_framework/culling.h>
 
-#include <chrono>
 #include <cmath>
 #include <limits>
 #include <radray/profiler.h>
@@ -82,7 +81,6 @@ void CullingResults::ResetForReuse() noexcept {
 bool Cull(const CullingParameters& parameters, CullingResults& out) noexcept {
     RADRAY_PROFILE_SCOPE_N("Cull");
     out.ResetForReuse();
-    const auto started = std::chrono::steady_clock::now();
     if (!parameters.Scene || !parameters.View || !parameters.View->View.allFinite() || !parameters.View->WorldPosition.allFinite()) return false;
     const auto frustum = ExtractViewFrustum(parameters.ViewProjection.value_or(parameters.View->ViewProjection));
     if (!frustum) return false;
@@ -168,7 +166,6 @@ bool Cull(const CullingParameters& parameters, CullingResults& out) noexcept {
     out.Stats.VisiblePrimitives = out.Primitives.size();
     out.Stats.VisibleLights = out.Lights.size();
     out.Stats.Valid = true;
-    out.Stats.CpuMilliseconds = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
     return true;
 }
 

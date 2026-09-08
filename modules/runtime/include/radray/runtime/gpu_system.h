@@ -3,7 +3,6 @@
 #include <atomic>
 #include <chrono>
 #include <limits>
-#include <mutex>
 #include <optional>
 #include <span>
 
@@ -406,8 +405,6 @@ public:
     /// 内置 GpuFrameProfiler 在每帧 resolve 后更新；未启用时返回 0。
     float GetLastGpuTimeMs() const noexcept;
 
-    UploadMemoryStats GetUploadMemoryStats() const noexcept;
-
 private:
     friend class AppFrameContext;
     friend class WaitFrameAwaitable;
@@ -438,8 +435,6 @@ private:
     unique_ptr<GpuFrameProfiler> _frameProfiler;
     uint64_t _nowFrameIndex{0};
     std::atomic<float> _lastFrameLatencySeconds{0.0f};
-    mutable std::mutex _uploadStatsMutex;
-    vector<UploadMemoryStats> _completedUploadStats;
 };
 
 template <>

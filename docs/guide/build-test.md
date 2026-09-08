@@ -99,9 +99,8 @@ validation，16×16 离屏、单 Direct queue，逐帧等待 GPU，用于隔离 
 不等于旧 revision 的完整性能基线，也不恢复公共兼容接口。
 
 计时包括 proxy transform、asset Pump、snapshot、Cull、list/参数、graph setup/execute、诊断序列化、
-flush/submit 与 GPU wait；graph report 另拆 compile/realize/prepare/record。分配计数只覆盖采样线程
-在本测试可执行文件中调用的 C++ new，不包含 DLL/驱动/malloc；graph 子阶段的分配字段为 null，
-由整体 execute 的分配数覆盖。flight 重置、完成回调和 graph 析构在计时范围外，阶段耗时之和不代表
+flush/submit 与 GPU wait。分配计数只覆盖采样线程
+在本测试可执行文件中调用的 C++ new，不包含 DLL/驱动/malloc。flight 重置、完成回调和 graph 析构在计时范围外，阶段耗时之和不代表
 完整 CPU 帧成本；收据缩短 CPU 数据寿命的效果需要另外测量常驻内存。
 `PROFILE_COUNTS` 报告参数与 pool 数量，并标识 prepared/reference；GroupPreparations 包含 view、
 material 和 object 等所有组，pool 字节是描述符估算。

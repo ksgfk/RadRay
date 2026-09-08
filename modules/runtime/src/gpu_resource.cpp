@@ -741,14 +741,12 @@ DynamicCBufferArena::DynamicCBufferArena(DynamicCBufferArena&& other) noexcept
       _desc(std::move(other._desc)),
       _activeBlockIndex(other._activeBlockIndex),
       _minBlockSize(other._minBlockSize),
-      _allocatedThisFrame(other._allocatedThisFrame),
-      _highWatermark(other._highWatermark) {
+      _allocatedThisFrame(other._allocatedThisFrame) {
     other._device = nullptr;
     other._hostWrites = nullptr;
     other._activeBlockIndex = 0;
     other._minBlockSize = 0;
     other._allocatedThisFrame = 0;
-    other._highWatermark = 0;
 }
 
 DynamicCBufferArena& DynamicCBufferArena::operator=(DynamicCBufferArena&& other) noexcept {
@@ -787,7 +785,6 @@ DynamicCBufferArena::Reservation DynamicCBufferArena::Reserve(uint64_t size) noe
         return {};
     }
     _allocatedThisFrame += Align(size, _desc.Alignment);
-    _highWatermark = std::max(_highWatermark, _allocatedThisFrame);
     return reservation;
 }
 
@@ -877,7 +874,6 @@ void swap(DynamicCBufferArena& a, DynamicCBufferArena& b) noexcept {
     swap(a._activeBlockIndex, b._activeBlockIndex);
     swap(a._minBlockSize, b._minBlockSize);
     swap(a._allocatedThisFrame, b._allocatedThisFrame);
-    swap(a._highWatermark, b._highWatermark);
 }
 
 }  // namespace radray

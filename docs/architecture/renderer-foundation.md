@@ -201,10 +201,9 @@ resize/descriptor 变化先成功创建新 generation，旧 generation 进入当
 逐 subresource before/after、UAV 数量、pool stats 和
 带 source location 及可选 binding/resource 的 diagnostic。ID 不使用原生地址。宿主图直接写入对应 flight
 的 report，不在 ExecuteGraph 返回时整份复制。普通 Forward 帧不生成 JSON/DOT，capture 才序列化；
-失败 diagnostic 始终保留。报告还记录 graphics PSO 请求/准备/新建次数和 compile/realize/prepare/record
-CPU 纳秒数；比较结构时应排除这些会变动的时间字段。
+失败 diagnostic 始终保留。报告还记录 graphics PSO 请求/准备/新建次数。
 `RenderSystem::GetGraphReport`、`GetFramePlan`、`GetPoolStats` 只在对应阶段安全点读取。
-`GetViewStateStats` 汇总跨 flight 的 history，必须在 render thread 或全局 render idle 读取。
+history 统计通过 `ViewStateRegistry::GetStats` 汇总跨 flight 的 generation 与估算显存，必须在 render thread 或全局 render idle 读取。
 
 ## 场景快照与剔除
 

@@ -23,7 +23,7 @@
 | `scope_guard.h` | `ScopeGuard` / `MakeScopeGuard` |
 
 专用的：`json.h`（yyjson）、`xml.h`（pugixml）、`binary_io.h`（小端读写）、`file.h`、`environment.h`、
-`dynamic_library.h`、`guid.h`、`stopwatch.h`、`text_encoding.h`、`runtime_type.h`、
+`dynamic_library.h`、`guid.h`、`text_encoding.h`、`runtime_type.h`、
 `allocator.h`（GPU 子分配器，与堆无关）、`memory.h`、`sparse_set.h`、`channel.h`、
 `intrusive_ptr.h`、`structured_buffer.h`、`image_data.h`、`vertex_data.h`、
 `triangle_mesh.h`、`wavefront_obj.h`、`camera_control.h`、`platform/win32_headers.h`。

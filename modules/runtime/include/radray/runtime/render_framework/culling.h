@@ -38,7 +38,6 @@ struct CullingStats {
     uint64_t InputLights{0}, LightLayerRejected{0}, LightFrustumRejected{0}, InvalidLightBounds{0}, UnsupportedLights{0}, VisibleLights{0};
     uint64_t InvalidLightParameters{0};
     uint64_t InvalidDepth{0};
-    double CpuMilliseconds{0};
     bool Valid{false};
 };
 /// Scene and View are borrowed from the current flight and must remain unchanged during list building.

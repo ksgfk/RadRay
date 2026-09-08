@@ -80,8 +80,7 @@ string RenderGraphExecutionReport::ToJson() const {
         result += fmt::format("{{\"code\":{},\"graph\":{},\"pass\":{},\"binding\":{},\"resource\":{},\"message\":{},\"file\":{},\"line\":{}}}",
                               Quote(d.Code), Quote(d.Graph), Quote(d.Pass), Quote(d.Binding), Quote(d.Resource), Quote(d.Message), Quote(d.File), d.Line);
     }
-    result += fmt::format("],\"cpuNanoseconds\":{{\"compile\":{},\"realize\":{},\"prepare\":{},\"record\":{}}},\"graphicsPipelines\":{{\"requests\":{},\"preparations\":{},\"creations\":{}}},\"pool\":{{\"hits\":{},\"misses\":{},\"created\":{},\"trimmed\":{},\"textures\":{},\"buffers\":{},\"views\":{},\"estimatedBytes\":{},\"peakEstimatedBytes\":{},\"memoryByView\":[",
-                          Cpu.CompileNanoseconds, Cpu.RealizeNanoseconds, Cpu.PrepareNanoseconds, Cpu.RecordNanoseconds,
+    result += fmt::format("],\"graphicsPipelines\":{{\"requests\":{},\"preparations\":{},\"creations\":{}}},\"pool\":{{\"hits\":{},\"misses\":{},\"created\":{},\"trimmed\":{},\"textures\":{},\"buffers\":{},\"views\":{},\"estimatedBytes\":{},\"peakEstimatedBytes\":{},\"memoryByView\":[",
                           GraphicsPipelineRequests, GraphicsPipelinePreparations, GraphicsPipelineCreations,
                           Pool.Hits, Pool.Misses, Pool.Created, Pool.Trimmed, Pool.TextureCount, Pool.BufferCount, Pool.ViewCount, Pool.EstimatedBytes, Pool.PeakEstimatedBytes);
     for (size_t i = 0; i < Pool.MemoryByView.size(); ++i) {

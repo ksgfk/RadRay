@@ -74,8 +74,6 @@ public:
     const RenderGraphExecutionReport& GetGraphReport(uint32_t flight) const { return _graphReports[flight]; }
     const RenderFramePlan& GetFramePlan(uint32_t flight) const { return _framePlans[flight]; }
     const RenderResourcePoolStats& GetPoolStats(uint32_t flight) const { return _graphRuntime->GetPoolStats(flight); }
-    /// Render thread or global render idle; history is shared across flights.
-    ViewStateStats GetViewStateStats() const { return _viewStates ? _viewStates->GetStats() : ViewStateStats{}; }
 
     Nullable<ShaderProgram*> GetOrCreateShaderProgram(const ShaderProgramRequest& request);
     Nullable<ShaderProgram*> GetOrCreateShaderProgram(std::span<const byte> artifact,

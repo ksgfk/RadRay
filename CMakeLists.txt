@@ -37,8 +37,6 @@ if (MSVC)
     # 该宏必须在所有链接进同一二进制的 C++ TU 中一致, 因此在任何 add_subdirectory 之前全局设置.
     add_compile_definitions($<$<CONFIG:Debug>:_ITERATOR_DEBUG_LEVEL=1>)
 endif()
-# Debug 下关闭 Eigen 内部 eigen_assert (RADRAY_ASSERT 不受影响); Eigen 是 header-only, 需对所有使用者生效.
-add_compile_definitions($<$<CONFIG:Debug>:EIGEN_NO_DEBUG>)
 
 # 设置全局构建输出路径
 set(RADRAY_BUILD_PATH "" CACHE PATH "RadRay build binary path")
