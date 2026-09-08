@@ -455,10 +455,6 @@ protected:
     }
     void OnUpdate(const AppUpdateContext&) override {
         ++Frame;
-        {  // TEMP PROBE
-            const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count() % 100000;
-            fmt::print(stderr, "PROBE test t={} Frame={} windows={} tid={}\n", ms, Frame, GetWindowManager()->GetWindowCount(), ::GetCurrentThreadId());
-        }
         auto* manager = GetWindowManager();
         auto* main = manager->GetMainWindow()->GetNativeWindow();
         if (Frame >= 4 && Frame <= 8) main->SetSize(240 + int(Frame) * 4, 160 + int(Frame) * 2);
@@ -492,7 +488,7 @@ protected:
         GetWindowManager()->EventModalLoopTick()(GetWindowManager()->GetMainWindow()->GetNativeWindow());
         if (!Tool) return;
         ImGui::SetNextWindowPos({-40, 40}, ImGuiCond_Always);
-        ImGui::SetNextWindowSize({float(210 + (Frame % 4) * 7 * (std::getenv("PROBE_NORESIZE") ? 0 : 1)), 130}, ImGuiCond_Always);  // TEMP PROBE
+        ImGui::SetNextWindowSize({float(210 + (Frame % 4) * 7), 130}, ImGuiCond_Always);
         ImGui::Begin("auxiliary lifecycle", &Tool);
         ImGui::TextUnformatted("resize / minimize / close / recreate");
         ImGui::End();
@@ -607,7 +603,6 @@ TEST_P(ImGuiRenderingTest, UiTextureFeedsSceneComponentDeclaredBeforeItsProducer
     EXPECT_GE(app.Verified, 15u);
     EXPECT_TRUE(logs.Errors().empty()) << logs.Errors();
 }
-INSTANTIATE_TEST_SUITE_P(Backends, ImGuiRenderingTest, testing::Values(UiTestMode{render::RenderBackend::D3D12, false, false, 2}, UiTestMode{render::RenderBackend::D3D12, true, true, 3}, UiTestMode{render::RenderBackend::Vulkan, false, false, 2}, UiTestMode{render::RenderBackend::Vulkan, true, true, 3},
-    UiTestMode{render::RenderBackend::D3D12, true, false, 2}, UiTestMode{render::RenderBackend::D3D12, true, true, 2}, UiTestMode{render::RenderBackend::D3D12, false, true, 3}, UiTestMode{render::RenderBackend::D3D12, true, false, 3}));  // TEMP PROBE: extra modes /4../7
+INSTANTIATE_TEST_SUITE_P(Backends, ImGuiRenderingTest, testing::Values(UiTestMode{render::RenderBackend::D3D12, false, false, 2}, UiTestMode{render::RenderBackend::D3D12, true, true, 3}, UiTestMode{render::RenderBackend::Vulkan, false, false, 2}, UiTestMode{render::RenderBackend::Vulkan, true, true, 3}));
 }  // namespace
 }  // namespace radray

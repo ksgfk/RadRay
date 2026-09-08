@@ -245,7 +245,6 @@ void AppWindow::ResetSwapChainRecreateRequest() noexcept {
 
 bool AppWindow::RecreateSwapChain(uint32_t width, uint32_t height, render::PresentMode presentMode) noexcept {
     _manager->EnsureRenderIdle();
-    if (std::getenv("PROBE_QUEUE_IDLE") && _manager->GetGpuSystem()) _manager->GetGpuSystem()->WaitAndCleanupCompletedFlights();  // TEMP PROBE
     if (!_swapchain) {
         return false;
     }

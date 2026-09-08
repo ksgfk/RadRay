@@ -704,7 +704,6 @@ public:
         _ticking = true;
         auto scope = MakeScopeGuard([this]() noexcept { _ticking = false; });
         auto* gpuSystem = _app->GetGpuSystem();
-        if (std::getenv("PROBE_SERIAL")) WaitRenderThreadIdle();  // TEMP PROBE
         if (!waitForWritableSlot && _renderedFrameCount.load(std::memory_order_acquire) < gpuSystem->GetFrameIndex()) return std::nullopt;
         RADRAY_PROFILE_SCOPE_N("TickFrame");
         if (waitForWritableSlot) {
@@ -929,7 +928,7 @@ bool Application::InitializeRuntime(const ApplicationRuntimeDescriptor& desc) {
         .IsEnableSynchronizationValidation = desc.EnableSynchronizationValidation};
     render::DXGIFactoryDescriptor factoryDesc{
         .IsEnableDebugLayer = desc.EnableValidation,
-        .IsEnableGpuBasedValid = std::getenv("PROBE_GBV") != nullptr};  // TEMP PROBE
+        .IsEnableGpuBasedValid = false};
     render::VulkanCommandQueueDescriptor queueDesc{render::QueueType::Direct, 1};
     render::DeviceDescriptor deviceDesc{};
     if (desc.Backend == render::RenderBackend::Vulkan) {

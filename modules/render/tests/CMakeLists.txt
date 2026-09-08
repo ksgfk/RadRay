@@ -32,3 +32,5 @@ if (RADRAY_BUILD_SHADER_COMPILER)
     target_link_libraries(test_radray_render_pso_smoke PRIVATE RadRayDXC::Headers)
     radray_deploy_dxc_runtime(test_radray_render_pso_smoke)
 endif()
+
+radray_add_test(test_d3d12_device_loss SOURCES test_d3d12_device_loss.cpp LINK_LIBS radrayrender)

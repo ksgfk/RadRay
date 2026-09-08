@@ -7,8 +7,6 @@
 
 #include <radray/scope_guard.h>
 #include <radray/text_encoding.h>
-#include <dxgidebug.h>  // TEMP PROBE
-#pragma comment(lib, "dxguid.lib")  // TEMP PROBE
 #ifdef RADRAY_ENABLE_PROFILER
 #include <tracy/TracyD3D12.hpp>
 #endif
@@ -35,31 +33,24 @@
 
 namespace radray::render::d3d12 {
 
-static std::array<string, 32> g_probeRing{};  // TEMP PROBE
-static std::atomic<uint32_t> g_probeRingHead{0};
-static std::mutex g_probeMutex;
-static void ProbeDeviceRemoved(ID3D12Device* device, string where) {  // TEMP PROBE
-    {
-        const auto now = std::chrono::system_clock::now().time_since_epoch();
-        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now).count() % 100000;
-        std::lock_guard lock(g_probeMutex);
-        g_probeRing[g_probeRingHead.fetch_add(1) % g_probeRing.size()] = fmt::format("t={} {}", ms, where);
-    }
-    static bool reported = false;
-    if (reported || device == nullptr) return;
+static void _CheckD3D12Result(ID3D12Device* device, HRESULT hr, std::string_view operation) noexcept {
     const HRESULT reason = device->GetDeviceRemovedReason();
-    if (reason != S_OK) {
-        reported = true;
-        RADRAY_ERR_LOG("PROBE device removed detected at {}: {} {:#x}", g_probeRing[(g_probeRingHead.load() - 1) % g_probeRing.size()], GetErrorName(reason), static_cast<uint32_t>(reason));
+    if (FAILED(hr) || FAILED(reason)) {
+        RADRAY_ABORT("{} failed: {} {:#x}; device removed reason: {} {:#x}",
+                     operation, GetErrorName(hr), static_cast<uint32_t>(hr),
+                     GetErrorName(reason), static_cast<uint32_t>(reason));
     }
 }
-static void ProbeDumpRing() {  // TEMP PROBE
-    std::lock_guard lock(g_probeMutex);
-    const uint32_t head = g_probeRingHead.load();
-    for (uint32_t i = 0; i < g_probeRing.size(); ++i) {
-        const auto& s = g_probeRing[(head + i) % g_probeRing.size()];
-        if (!s.empty()) RADRAY_ERR_LOG("PROBE ring[{}] {}", i, s);
+
+static void _CheckD3D12FenceResult(ID3D12Fence* fence, HRESULT hr, std::string_view operation) noexcept {
+    ComPtr<ID3D12Device> device;
+    const HRESULT parentHr = fence->GetDevice(IID_PPV_ARGS(device.GetAddressOf()));
+    if (FAILED(parentHr)) {
+        RADRAY_ABORT("{} failed: {} {:#x}; fence GetDevice failed: {} {:#x}",
+                     operation, GetErrorName(hr), static_cast<uint32_t>(hr),
+                     GetErrorName(parentHr), static_cast<uint32_t>(parentHr));
     }
+    _CheckD3D12Result(device.Get(), hr, operation);
 }
 
 // == 命令签名与验证消息 ==
@@ -610,14 +601,6 @@ std::optional<uint32_t> DXGIFactoryImpl::SelectHighPerformanceAdapter() const no
 Nullable<unique_ptr<DXGIFactory>> CreateDXGIFactory(const DXGIFactoryDescriptor& desc) {
     uint32_t dxgiFactoryFlags = 0;
     if (desc.IsEnableDebugLayer) {
-        {  // TEMP PROBE: DRED
-            ComPtr<ID3D12DeviceRemovedExtendedDataSettings1> dred;
-            if (SUCCEEDED(::D3D12GetDebugInterface(IID_PPV_ARGS(&dred)))) {
-                dred->SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
-                dred->SetBreadcrumbContextEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
-                dred->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
-            }
-        }
         ComPtr<ID3D12Debug> debugController;
         if (SUCCEEDED(::D3D12GetDebugInterface(IID_PPV_ARGS(&debugController)))) {
             debugController->EnableDebugLayer();
@@ -1110,13 +1093,11 @@ Nullable<unique_ptr<SwapChain>> DeviceD3D12::CreateSwapChain(const SwapChainDesc
     auto queue = CastD3D12Object(desc.PresentQueue);
     HWND hwnd = std::bit_cast<HWND>(desc.NativeHandler);
     ComPtr<IDXGISwapChain1> temp;
-    ProbeDeviceRemoved(_device.Get(), "before CreateSwapChainForHwnd");  // TEMP PROBE
     if (HRESULT hr = _dxgiFactory->CreateSwapChainForHwnd(queue->_queue.Get(), hwnd, &scDesc, nullptr, nullptr, temp.GetAddressOf());
         FAILED(hr)) {
         RADRAY_ERR_LOG("IDXGIFactory::CreateSwapChainForHwnd failed: {} {}", GetErrorName(hr), hr);
         return nullptr;
     }
-    ProbeDeviceRemoved(_device.Get(), "after CreateSwapChainForHwnd");  // TEMP PROBE
     if (HRESULT hr = _dxgiFactory->MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER);  // 阻止 Alt + Enter 进全屏
         FAILED(hr)) {
         RADRAY_WARN_LOG("IDXGIFactory::MakeWindowAssociation failed: {} {}", GetErrorName(hr), hr);
@@ -3854,10 +3835,11 @@ void CmdQueueD3D12::Destroy() noexcept {
 }
 
 void CmdQueueD3D12::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
+    _CheckD3D12Result(_device->_device.Get(), S_OK, "CommandQueue::Submit");
     for (size_t i = 0; i < desc.WaitFences.size(); ++i) {
         auto* f = CastD3D12Object(desc.WaitFences[i]);
         uint64_t waitValue = desc.WaitValues[i];
-        _queue->Wait(f->_fence.Get(), waitValue);
+        _CheckD3D12Result(_device->_device.Get(), _queue->Wait(f->_fence.Get(), waitValue), "ID3D12CommandQueue::Wait");
     }
 
     vector<ID3D12CommandList*> submits;
@@ -3867,9 +3849,8 @@ void CmdQueueD3D12::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
         submits.emplace_back(cmdList->_cmdList.Get());
     }
     if (!submits.empty()) {
-        ProbeDeviceRemoved(_device->_device.Get(), "before ExecuteCommandLists");  // TEMP PROBE
         _queue->ExecuteCommandLists(static_cast<UINT>(submits.size()), submits.data());
-        ProbeDeviceRemoved(_device->_device.Get(), "after ExecuteCommandLists");  // TEMP PROBE
+        _CheckD3D12Result(_device->_device.Get(), S_OK, "ID3D12CommandQueue::ExecuteCommandLists");
 #ifdef RADRAY_ENABLE_PROFILER
         if (_profilerContext != nullptr) TracyD3D12Collect(static_cast<TracyD3D12Ctx>(_profilerContext));
 #endif
@@ -3878,7 +3859,7 @@ void CmdQueueD3D12::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
     for (size_t i = 0; i < desc.SignalFences.size(); ++i) {
         auto* f = CastD3D12Object(desc.SignalFences[i]);
         uint64_t signalValue = desc.SignalValues[i];
-        _queue->Signal(f->_fence.Get(), signalValue);
+        _CheckD3D12Result(_device->_device.Get(), _queue->Signal(f->_fence.Get(), signalValue), "ID3D12CommandQueue::Signal");
         if (signalValue + 1 > f->_fenceValue) {
             f->_fenceValue = signalValue + 1;
         }
@@ -3888,7 +3869,9 @@ void CmdQueueD3D12::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
 }
 
 void CmdQueueD3D12::Wait() noexcept {
-    _queue->Signal(_fence->_fence.Get(), _fence->_fenceValue++);
+    _CheckD3D12Result(_device->_device.Get(),
+                      _queue->Signal(_fence->_fence.Get(), _fence->_fenceValue), "ID3D12CommandQueue::Signal");
+    ++_fence->_fenceValue;
     _fence->Wait();
     _device->TryDrainValidationMessages();
 }
@@ -3927,26 +3910,34 @@ void FenceD3D12::SetDebugName(std::string_view name) noexcept {
 }
 
 void FenceD3D12::Wait() noexcept {
-    UINT64 completedValue = _fence->GetCompletedValue();
-    uint64_t signaledValue = _fenceValue - 1;
-    if (completedValue < signaledValue) {
-        _fence->SetEventOnCompletion(signaledValue, _event.Get());
-        ::WaitForSingleObject(_event.Get(), INFINITE);
-    }
+    Wait(_fenceValue - 1);
 }
 
 void FenceD3D12::Wait(uint64_t value) noexcept {
-    UINT64 completedValue = _fence->GetCompletedValue();
-    if (completedValue < value) {
-        ProbeDeviceRemoved(nullptr, fmt::format("FenceWait value={} completed={} tid={}", value, completedValue, ::GetCurrentThreadId()));  // TEMP PROBE
-        _fence->SetEventOnCompletion(value, _event.Get());
-        ::WaitForSingleObject(_event.Get(), INFINITE);
-        ProbeDeviceRemoved(nullptr, fmt::format("FenceWait done completed={}", _fence->GetCompletedValue()));  // TEMP PROBE
+    if (GetCompletedValue() < value) {
+        const HRESULT hr = _fence->SetEventOnCompletion(value, _event.Get());
+        if (FAILED(hr)) {
+            _CheckD3D12FenceResult(_fence.Get(), hr, "ID3D12Fence::SetEventOnCompletion");
+        }
+        const DWORD waitResult = ::WaitForSingleObject(_event.Get(), INFINITE);
+        if (waitResult != WAIT_OBJECT_0) {
+            const DWORD error = waitResult == WAIT_FAILED ? ::GetLastError() : ERROR_GEN_FAILURE;
+            _CheckD3D12FenceResult(_fence.Get(), HRESULT_FROM_WIN32(error), "Fence::WaitForSingleObject");
+            RADRAY_ABORT("Fence::WaitForSingleObject returned unexpected status: {}", waitResult);
+        }
+        // Device removal also wakes fence events; waking alone does not prove GPU completion.
+        if (GetCompletedValue() < value) {
+            RADRAY_ABORT("D3D12 fence event woke before requested value {} completed", value);
+        }
     }
 }
 
 uint64_t FenceD3D12::GetCompletedValue() const noexcept {
-    return _fence->GetCompletedValue();
+    const uint64_t value = _fence->GetCompletedValue();
+    if (value == std::numeric_limits<uint64_t>::max()) {
+        _CheckD3D12FenceResult(_fence.Get(), DXGI_ERROR_DEVICE_REMOVED, "ID3D12Fence::GetCompletedValue");
+    }
+    return value;
 }
 
 uint64_t FenceD3D12::GetLastSignaledValue() const noexcept {
@@ -4001,7 +3992,6 @@ void CmdListD3D12::SetDebugName(std::string_view name) noexcept {
 }
 
 void CmdListD3D12::Begin() noexcept {
-    ProbeDeviceRemoved(_device->_device.Get(), fmt::format("CmdList Begin list={} tid={}", static_cast<const void*>(this), ::GetCurrentThreadId()));  // TEMP PROBE
     _keepAliveBuffers.clear();
     if (HRESULT hr = _cmdAlloc->Reset();
         FAILED(hr)) {
@@ -4029,7 +4019,7 @@ void CmdListD3D12::End() noexcept {
     _deferredZonePops = 0;
     _suppressedZonePushes = 0;
 #endif
-    _cmdList->Close();
+    _CheckD3D12Result(_device->_device.Get(), _cmdList->Close(), "ID3D12GraphicsCommandList::Close");
 }
 
 void CmdListD3D12::ResourceBarrier(std::span<const ResourceBarrierDescriptor> barriers) noexcept {
@@ -4192,7 +4182,6 @@ Nullable<unique_ptr<GraphicsCommandEncoder>> CmdListD3D12::BeginRenderPass(const
         D3D12_RENDER_PASS_ENDING_ACCESS_TYPE endingAccess = MapType(color.Store);
         auto& rtDesc = rtDescs.emplace_back(D3D12_RENDER_PASS_RENDER_TARGET_DESC{});
         rtDesc.cpuDescriptor = v->_heapView.HandleCpu();
-        if (v->_texture && v->_texture->_name.starts_with("SwapChain_BackBuffer")) ProbeDeviceRemoved(nullptr, fmt::format("BeginRenderPass rt[{}] tex={} res={} name={} {}x{} tid={}", index, static_cast<const void*>(v->_texture), static_cast<const void*>(v->_texture->_tex.Get()), v->_texture->_name, v->_texture->_rawDesc.Width, v->_texture->_rawDesc.Height, ::GetCurrentThreadId()));  // TEMP PROBE
         rtDesc.BeginningAccess.Type = beginningAccess;
         rtDesc.BeginningAccess.Clear.ClearValue = clearColor;
         rtDesc.EndingAccess.Type = endingAccess;
@@ -5340,12 +5329,10 @@ SwapChainD3D12::SwapChainD3D12(
       _reqFormat(desc.Format) {}
 
 SwapChainD3D12::~SwapChainD3D12() noexcept {
-    ProbeDeviceRemoved(_device->_device.Get(), "before ~SwapChainD3D12");  // TEMP PROBE
     _frames.clear();
     _hasOutstandingFrame = false;
     _outstandingBackBufferIndex = std::numeric_limits<uint32_t>::max();
     _swapchain = nullptr;
-    ProbeDeviceRemoved(_device->_device.Get(), "after ~SwapChainD3D12");  // TEMP PROBE
     if (_frameLatencyEvent) {
         CloseHandle(_frameLatencyEvent);
         _frameLatencyEvent = nullptr;
@@ -5390,7 +5377,6 @@ SwapChainAcquireResult SwapChainD3D12::AcquireNext(uint64_t timeoutMs) noexcept 
     const DWORD waitResult = ::WaitForSingleObjectEx(_frameLatencyEvent, milliseconds, false);
     if (waitResult == WAIT_OBJECT_0) {
         const auto curr = static_cast<uint32_t>(_swapchain->GetCurrentBackBufferIndex());
-        ProbeDeviceRemoved(_device->_device.Get(), fmt::format("AcquireNext sc={} current={} tex={} res={} {}x{}", static_cast<const void*>(this), curr, static_cast<const void*>(_frames[curr].image.get()), static_cast<const void*>(_frames[curr].image->_tex.Get()), _frames[curr].image->_rawDesc.Width, _frames[curr].image->_rawDesc.Height));  // TEMP PROBE
         _hasOutstandingFrame = true;
         _outstandingBackBufferIndex = curr;
         ++_outstandingFrameToken;
@@ -5455,30 +5441,10 @@ SwapChainPresentResult SwapChainD3D12::Present(SwapChainFrame&& frame) noexcept 
             break;
         }
     }
-    ProbeDeviceRemoved(_device->_device.Get(), fmt::format("before Present sc={} outstanding={} current={} sync={} flags={}", static_cast<const void*>(this), _outstandingBackBufferIndex, _swapchain->GetCurrentBackBufferIndex(), syncInterval, presentFlags));  // TEMP PROBE
     const HRESULT hr = _swapchain->Present(syncInterval, presentFlags);
-    ProbeDeviceRemoved(_device->_device.Get(), fmt::format("after Present sc={} hr={:#x}", static_cast<const void*>(this), static_cast<uint32_t>(hr)));  // TEMP PROBE
+    _CheckD3D12Result(_device->_device.Get(), hr, "IDXGISwapChain::Present");
     result.NativeStatusCode = static_cast<int64_t>(hr);
-    if (SUCCEEDED(hr)) {
-        result.Status = SwapChainStatus::Success;
-        return result;
-    }
-    if (hr == DXGI_ERROR_DEVICE_REMOVED ||
-        hr == DXGI_ERROR_DEVICE_RESET ||
-        hr == DXGI_ERROR_ACCESS_LOST ||
-        hr == DXGI_ERROR_ACCESS_DENIED ||
-        hr == DXGI_ERROR_INVALID_CALL) {
-        RADRAY_WARN_LOG("IDXGISwapChain::Present requires recreate: {} {}", GetErrorName(hr), hr);
-        result.Status = SwapChainStatus::RequireRecreate;
-        return result;
-    }
-    if (hr == DXGI_ERROR_WAS_STILL_DRAWING) {
-        RADRAY_ERR_LOG("IDXGISwapChain::Present returned unexpected DXGI_ERROR_WAS_STILL_DRAWING");
-        result.Status = SwapChainStatus::Error;
-        return result;
-    }
-    RADRAY_ERR_LOG("IDXGISwapChain::Present failed: {} {}", GetErrorName(hr), hr);
-    result.Status = SwapChainStatus::Error;
+    result.Status = SwapChainStatus::Success;
     return result;
 }
 
@@ -5495,25 +5461,15 @@ bool SwapChainD3D12::Recreate(uint32_t width, uint32_t height, TextureFormat for
 
     const DXGI_FORMAT rawFormat = _SwapChainStorageFormat(format);
     _frames.clear();
-    ProbeDeviceRemoved(_device->_device.Get(), fmt::format("before ResizeBuffers sc={} {}x{} -> {}x{} outstanding={}", static_cast<const void*>(this), desc.Width, desc.Height, width, height, _hasOutstandingFrame));  // TEMP PROBE
     const HRESULT hr = _swapchain->ResizeBuffers(desc.BufferCount, width, height, rawFormat, desc.Flags);
-    ProbeDeviceRemoved(_device->_device.Get(), fmt::format("after ResizeBuffers sc={} hr={:#x}", static_cast<const void*>(this), static_cast<uint32_t>(hr)));  // TEMP PROBE
-    if (SUCCEEDED(hr)) {
-        _reqFormat = format;
-        _mode = presentMode;
-        if (!_RefreshSwapChainBackBuffers(this)) {
-            return false;
-        }
-        _outstandingBackBufferIndex = std::numeric_limits<uint32_t>::max();
-        return true;
-    }
-
+    _CheckD3D12Result(_device->_device.Get(), hr, "IDXGISwapChain::ResizeBuffers");
+    _reqFormat = format;
+    _mode = presentMode;
     if (!_RefreshSwapChainBackBuffers(this)) {
-        RADRAY_WARN_LOG("IDXGISwapChain::ResizeBuffers failed and old back buffers could not be restored");
+        return false;
     }
-
-    RADRAY_ERR_LOG("IDXGISwapChain::ResizeBuffers failed: {} {}", GetErrorName(hr), hr);
-    return false;
+    _outstandingBackBufferIndex = std::numeric_limits<uint32_t>::max();
+    return true;
 }
 
 uint32_t SwapChainD3D12::GetBackBufferCount() const noexcept {
@@ -5574,70 +5530,8 @@ void* BufferD3D12::Map(uint64_t offset, uint64_t size) noexcept {
                                       ? D3D12_RANGE{offset, offset + size}
                                       : D3D12_RANGE{0, 0};
     void* ptr = nullptr;
-    ProbeDeviceRemoved(_device->_device.Get(), fmt::format("Map buf={} tid={}", static_cast<const void*>(this), ::GetCurrentThreadId()));  // TEMP PROBE
     if (HRESULT hr = _buf->Map(0, &readRange, &ptr);
         FAILED(hr)) {
-        if (hr == DXGI_ERROR_DEVICE_REMOVED) {  // TEMP PROBE
-            const HRESULT reason = _device->_device->GetDeviceRemovedReason();
-            RADRAY_ERR_LOG("PROBE device removed reason: {} {:#x}", GetErrorName(reason), static_cast<uint32_t>(reason));
-            ProbeDumpRing();
-            {
-                ComPtr<IDXGIInfoQueue> dxgiQueue;
-                if (SUCCEEDED(::DXGIGetDebugInterface1(0, IID_PPV_ARGS(&dxgiQueue)))) {
-                    const UINT64 count = dxgiQueue->GetNumStoredMessages(DXGI_DEBUG_ALL);
-                    RADRAY_ERR_LOG("PROBE dxgi stored messages: {}", count);
-                    for (UINT64 i = 0; i < count; i++) {
-                        SIZE_T len = 0;
-                        dxgiQueue->GetMessage(DXGI_DEBUG_ALL, i, nullptr, &len);
-                        vector<byte> storage(len);
-                        auto* message = reinterpret_cast<DXGI_INFO_QUEUE_MESSAGE*>(storage.data());
-                        if (SUCCEEDED(dxgiQueue->GetMessage(DXGI_DEBUG_ALL, i, message, &len)) && message->Severity <= DXGI_INFO_QUEUE_MESSAGE_SEVERITY_WARNING)
-                            RADRAY_ERR_LOG("PROBE dxgi sev={} id={} {}", static_cast<int>(message->Severity), static_cast<int>(message->ID), message->pDescription);
-                    }
-                }
-            }
-            ComPtr<ID3D12DeviceRemovedExtendedData1> dred;
-            if (SUCCEEDED(_device->_device.As(&dred))) {
-                D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT1 crumbs{};
-                if (SUCCEEDED(dred->GetAutoBreadcrumbsOutput1(&crumbs))) {
-                    for (const auto* node = crumbs.pHeadAutoBreadcrumbNode; node != nullptr; node = node->pNext) {
-                        const UINT last = node->pLastBreadcrumbValue ? *node->pLastBreadcrumbValue : 0;
-                        const bool incomplete = last < node->BreadcrumbCount;
-                        if (!incomplete) continue;
-                        RADRAY_ERR_LOG("PROBE DRED node list='{}' queue='{}' count={} last={}",
-                                       node->pCommandListDebugNameA ? node->pCommandListDebugNameA : "?",
-                                       node->pCommandQueueDebugNameA ? node->pCommandQueueDebugNameA : "?", node->BreadcrumbCount, last);
-                        for (UINT i = last > 8 ? last - 8 : 0; i < node->BreadcrumbCount && i <= last + 2; ++i) {
-                            const char* ctx = nullptr;
-                            for (UINT c = 0; c < node->BreadcrumbContextsCount; ++c)
-                                if (node->pBreadcrumbContexts[c].BreadcrumbIndex == i) ctx = "ctx";
-                            RADRAY_ERR_LOG("PROBE   [{}] op={} {}{}", i, static_cast<int>(node->pCommandHistory[i]), i == last ? "<-- executing" : "", ctx ? " (has ctx)" : "");
-                        }
-                        for (UINT c = 0; c < node->BreadcrumbContextsCount; ++c)
-                            if (node->pBreadcrumbContexts[c].BreadcrumbIndex + 3 >= last && node->pBreadcrumbContexts[c].BreadcrumbIndex <= last + 1)
-                                RADRAY_ERR_LOG("PROBE   ctx[{}]='{}'", node->pBreadcrumbContexts[c].BreadcrumbIndex, ToMultiByte(node->pBreadcrumbContexts[c].pContextString).value_or("?"));
-                    }
-                }
-                D3D12_DRED_PAGE_FAULT_OUTPUT fault{};
-                if (SUCCEEDED(dred->GetPageFaultAllocationOutput(&fault))) {
-                    RADRAY_ERR_LOG("PROBE DRED page fault VA={:#x}", fault.PageFaultVA);
-                    for (const auto* n = fault.pHeadExistingAllocationNode; n; n = n->pNext) RADRAY_ERR_LOG("PROBE   existing '{}' type={}", n->ObjectNameA ? n->ObjectNameA : "?", static_cast<int>(n->AllocationType));
-                    for (const auto* n = fault.pHeadRecentFreedAllocationNode; n; n = n->pNext) RADRAY_ERR_LOG("PROBE   freed '{}' type={}", n->ObjectNameA ? n->ObjectNameA : "?", static_cast<int>(n->AllocationType));
-                }
-            }
-            ComPtr<ID3D12InfoQueue> infoQueue;
-            if (SUCCEEDED(_device->_device.As(&infoQueue))) {
-                const UINT64 count = infoQueue->GetNumStoredMessages();
-                RADRAY_ERR_LOG("PROBE stored validation messages: {}", count);
-                for (UINT64 i = 0; i < count; i++) {
-                    SIZE_T len = 0;
-                    infoQueue->GetMessage(i, nullptr, &len);
-                    vector<byte> storage(len);
-                    auto* message = reinterpret_cast<D3D12_MESSAGE*>(storage.data());
-                    if (SUCCEEDED(infoQueue->GetMessage(i, message, &len))) RADRAY_ERR_LOG("PROBE msg sev={} id={} {}", static_cast<int>(message->Severity), static_cast<int>(message->ID), message->pDescription);
-                }
-            }
-        }
         RADRAY_ABORT("ID3D12Resource::Map failed: {} {}", GetErrorName(hr), hr);
     }
     if (_hints.HasFlag(ResourceHint::PersistentMap)) {

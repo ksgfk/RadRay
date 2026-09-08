@@ -12,6 +12,15 @@ layout 章节以下以 schema 7 contract 为准，并且已经是实现形态：
 `BindingHandle` 的内部 token 是 layout generation 加该 layout metadata table 的 record index，
 位布局不是 ABI，只有两个后端可以拆开它。
 
+## D3D12 执行失败
+
+D3D12 命令列表 Close、队列 Wait/Signal、Present 与 ResizeBuffers 的失败立即终止进程，
+诊断同时保留调用 HRESULT 和 `GetDeviceRemovedReason()`；执行提交边界也检查设备状态，
+因为设备移除后部分队列调用仍可能返回成功。创建接口原有的可空结果契约不变。
+Fence 查询把 `UINT64_MAX` 视为设备移除，禁止上层将其比较为成功完成。
+CPU fence 等待检查事件注册、系统等待结果，并在唤醒后重新核验完成值；设备移除也能唤醒事件。
+这些检查在检测到错误的边界终止，避免继续发布成功的 flight 完成通知；不提供设备恢复。
+
 ## 区域纹理上传
 
 `CommandBuffer::CopyBufferToTextureRegion` 接受 `BufferToTextureCopyDescriptor`，其中
