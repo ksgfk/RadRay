@@ -34,6 +34,17 @@ struct GraphicsPassState : GraphicsPassCompatibilityKey {
     friend bool operator==(const GraphicsPassState&, const GraphicsPassState&) = default;
 };
 
+struct ShaderParameterGroupRecipe {
+    struct Buffer {
+        uint32_t Index;
+        bool Dynamic;
+    };
+    uint32_t Group{0};
+    vector<Buffer> Buffers;
+    vector<uint32_t> Textures, Samplers;
+    size_t TextureCount{0}, SamplerCount{0};
+};
+
 class ShaderProgram {
 public:
     // The artifact already carries the layout the recipe produced, so the recipe itself is not an
@@ -62,6 +73,9 @@ public:
     // property of one declaration, not of a whole descriptor group.
     bool IsBufferDynamic(std::string_view declarationName) const noexcept;
     const ShaderParameterLayout& GetParameterLayout() const noexcept { return _parameterLayout; }
+    // Render-thread preparation. References remain valid until this program is destroyed.
+    const ShaderParameterGroupRecipe& GetOrCreateParameterGroupRecipe(uint32_t group);
+    size_t GetParameterGroupRecipeCount() const noexcept { return _parameterGroupRecipes.size(); }
     size_t GetGraphicsPipelineStateCount() const noexcept { return _graphicsPipelineStates.size(); }
     size_t GetComputePipelineStateCount() const noexcept { return _computePipelineState ? 1 : 0; }
 
@@ -119,6 +133,7 @@ private:
     unique_ptr<render::Shader> _computeShader;
     string _computeEntry;
     ShaderParameterLayout _parameterLayout;
+    unordered_map<uint32_t, ShaderParameterGroupRecipe> _parameterGroupRecipes;
     unordered_map<PsoKey, unique_ptr<render::GraphicsPipelineState>, PsoKeyHash, PsoKeyEqual>
         _graphicsPipelineStates;
     unique_ptr<render::ComputePipelineState> _computePipelineState;

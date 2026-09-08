@@ -46,6 +46,9 @@ game thread 调用，`DestroyRuntime` 在 World 之前按逆序销毁扩展。ru
 flight index 代替提交身份。`FrameSubmission` 的 Recorded/Submitted/GpuCompleted 分别对应录制、
 void Submit 返回与真实 fence 完成；未提交收据取消不发布资源状态和历史。提交后的收据由 flight
 保留至 fence，graph tickets/readback/owner 随该收据完成。
+成功 Submit 后立即清空 `OnSubmitted`，释放状态快照与提交阶段捕获，不再访问借用的外部资源 wrapper；
+需要活到 GPU 完成的 owner 必须由 `OnCompleted` 保留。已提交收据的 Cancel 不提前释放这些 owner，
+正常完成或失败完成仍由匹配 frame serial 的 fence 路径处理。
 
 `CompleteFlight` 在 fence 完成后 resolve profiler、回收 staging、完成 submission receipts，并 `NotifyFlightComplete`
 入队，同时发布原子 `WaitersCompleted`。多线程模式下它在渲染线程，不访问 game-thread 的协程等待表或资产引用。
@@ -251,6 +254,8 @@ Forward 的 `FrameDrawResources` 在下次安全复用时，先清空借用它�
 texture/buffer/view pool、Graph parameter sets/cache 与 `DynamicCBufferArena`。`RenderSystem::Render`
 开始时该 flight 的 fence 已完成，才按 parameter sets/cache → arena reset → pool BeginFlight trim/复用
 的顺序清理。Graph setup 对象可以先析构；已准备 descriptor 与上传页仍活到 flight 安全复用。
+CPU 编译工作空间也归各 flight 资源对象所有，复用其容量；编译结果独立于该工作空间。Graph 的
+提交收据分别持有提交时状态写回数据与完成时资源，具体契约见 [Renderer foundation](renderer-foundation.md)。
 `EndGraph` 不提前释放 GPU 对象。物理 resource states 保存至下次使用，transient 逻辑内容仍从无效开始。
 
 `ViewStateRegistry` 在 render thread 跟踪稳定 view 身份和 history generations。替换/长期闲置的

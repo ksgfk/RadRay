@@ -477,7 +477,7 @@ private:
         }
     };
     struct Impl;
-    shared_ptr<Impl> _impl;
+    unique_ptr<Impl> _impl;
     RgPassHandle AddPass(std::string_view name, RgPassType type, std::source_location location);
     void SetPayload(RgPassHandle pass, unique_ptr<Payload> payload);
     RgTextureViewHandle UseTexture(uint32_t pass, RgTextureValue texture, RgTextureViewDesc view,

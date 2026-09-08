@@ -25,6 +25,7 @@ public:
     bool Submit(uint64_t serial);
     bool Complete(uint64_t serial, bool success);
     void Cancel();
+    /// Submit-only captures are released after a successful Submit; GPU owners belong in OnCompleted.
     std::function<void()> OnSubmitted;
     std::function<void(bool)> OnCompleted;
 

@@ -1274,6 +1274,191 @@ TEST_P(RenderGraphTest, OwnedUploadReadbackAndResourceReuseFollowFenceReceipts) 
     }
 }
 
+TEST_P(RenderGraphTest, DetachedSubmissionKeepsPayloadAndPublishesDuplicateImportsAfterWorkspaceReuse) {
+    auto& device = *DeviceContext.Device;
+    auto texture = device.CreateTexture(GraphColor(2));
+    auto command = device.CreateCommandBuffer(DeviceContext.Queue);
+    ASSERT_TRUE(texture);
+    ASSERT_TRUE(command);
+    array<render::TextureStates, 2> states{render::TextureState::Undefined, render::TextureState::Undefined};
+    array<render::TextureStates, 2> duplicateStates = states;
+    array<uint8_t, 2> valid{}, duplicateValid{};
+    auto external = make_unique<RenderExternalTexture>(RenderExternalTexture{texture.Get(), texture->GetDesc(), states, valid});
+    auto duplicate = make_unique<RenderExternalTexture>(RenderExternalTexture{texture.Get(), texture->GetDesc(), duplicateStates, duplicateValid});
+    weak_ptr<int> ownerLifetime, payloadLifetime;
+    shared_ptr<FrameSubmission> receipt;
+    RgOperationTicket ticket;
+    command->Begin();
+    {
+        auto graph = MakeGraph("detached state snapshot");
+        auto owner = make_shared<int>(17);
+        auto payloadOwner = make_shared<int>(23);
+        ownerLifetime = owner;
+        payloadLifetime = payloadOwner;
+        graph.Retain(owner);
+        auto value = graph.ImportTexture(*external, "external", RenderGraphExternalAccess::ObservableOutput);
+        EXPECT_EQ(value, graph.ImportTexture(*duplicate, "duplicate", RenderGraphExternalAccess::ObservableOutput));
+        value = graph.NextVersion(value);
+        struct Payload { shared_ptr<int> Owner; };
+        const auto pass = graph.AddRasterPass<Payload>("write mip one", [&](Payload& data, RenderGraphRasterBuilder& builder) {
+            data.Owner = payloadOwner;
+            builder.SetColorAttachment(0, value, {.View = {.Range = {0, 1, 1, 1}}, .Clear = {{.25f, .5f, .75f, 1}}});
+        }, +[](const Payload& data, RenderGraphRasterContext&) { EXPECT_EQ(*data.Owner, 23); });
+        ticket = graph.Track(pass);
+        const auto result = RenderGraphTestDriver::Execute(graph, *command);
+        ASSERT_TRUE(result.Success) << graph.GetReport().ToText();
+        receipt = result.Submission;
+    }
+    EXPECT_FALSE(ownerLifetime.expired());
+    EXPECT_FALSE(payloadLifetime.expired());
+    EXPECT_EQ(ticket.Status(), FrameOperationStatus::Recorded);
+    {
+        auto unrelated = MakeGraph("reuse CPU workspace before prior submission");
+        auto color = unrelated.CreateTexture(GraphColor(), "unrelated");
+        Clear(unrelated, color, "other topology", render::LoadAction::Clear, render::StoreAction::Store, true);
+        ASSERT_TRUE(unrelated.Compile()) << unrelated.GetReport().ToText();
+    }
+    EXPECT_EQ(states[1], render::TextureState::Undefined);
+    EXPECT_EQ(valid, (array<uint8_t, 2>{0, 0}));
+    Writes.Flush(device);
+    command->End();
+    auto* native = command.Get();
+    DeviceContext.Queue->Submit({.CmdBuffers = std::span{&native, 1}});
+    ASSERT_TRUE(receipt->Submit(receipt->Serial()));
+    EXPECT_EQ(states, (array<render::TextureStates, 2>{render::TextureState::Undefined, render::TextureState::RenderTarget}));
+    EXPECT_EQ(duplicateStates, states);
+    EXPECT_EQ(valid, (array<uint8_t, 2>{0, 1}));
+    EXPECT_EQ(duplicateValid, valid);
+    EXPECT_TRUE(external->Written);
+    EXPECT_TRUE(duplicate->Written);
+    EXPECT_EQ(ticket.Status(), FrameOperationStatus::Submitted);
+    EXPECT_FALSE(ownerLifetime.expired());
+    EXPECT_FALSE(payloadLifetime.expired());
+    external.reset();
+    duplicate.reset();
+    DeviceContext.Queue->Wait();
+    ASSERT_TRUE(receipt->Complete(receipt->Serial(), true));
+    EXPECT_EQ(ticket.Status(), FrameOperationStatus::GpuCompleted);
+    EXPECT_TRUE(ownerLifetime.expired());
+    EXPECT_TRUE(payloadLifetime.expired());
+    RenderGraphTestDriver::Completed(native);
+}
+
+TEST_P(RenderGraphTest, DetachedFailedPrefixCommitsOnlyOnSubmitAndCancelsUnrecordedTickets) {
+    auto& device = *DeviceContext.Device;
+    for (const bool cancel : {true, false}) {
+        BeginFlight(cancel ? 201 : 202);
+        auto texture = device.CreateTexture(GraphColor(2));
+        auto command = device.CreateCommandBuffer(DeviceContext.Queue);
+        ASSERT_TRUE(texture);
+        ASSERT_TRUE(command);
+        array<render::TextureStates, 2> states{render::TextureState::Undefined, render::TextureState::Undefined};
+        array<uint8_t, 2> valid{};
+        RenderExternalTexture external{texture.Get(), texture->GetDesc(), states, valid};
+        shared_ptr<FrameSubmission> receipt;
+        RgOperationTicket recorded, failed, culled;
+        weak_ptr<int> lifetime;
+        command->Begin();
+        {
+            auto graph = MakeGraph("detached partial recording");
+            auto owner = make_shared<int>(42);
+            lifetime = owner;
+            graph.Retain(owner);
+            auto value = graph.ImportTexture(external, "output", RenderGraphExternalAccess::ObservableOutput);
+            recorded = graph.Track(Clear(graph, value, "recorded mip zero", render::LoadAction::Clear, render::StoreAction::Store, false, 0));
+            failed = graph.Track(Clear(graph, value, "failed mip one", render::LoadAction::Clear, render::StoreAction::Store, false, 1));
+            culled = graph.Track(graph.AddComputePass<EmptyPass>("unobservable", [](EmptyPass&, RenderGraphComputeBuilder&) {}, EmptyCompute));
+            test::FailingGraphCommand failing(*command);
+            failing.PassesBeforeFailure = 1;
+            const auto result = RenderGraphTestDriver::Execute(graph, failing, command.Get());
+            EXPECT_FALSE(result.Success);
+            EXPECT_TRUE(result.CommandsRecorded);
+            EXPECT_EQ(graph.GetReport().Diagnostics.front().Code, "BeginRenderPass");
+            receipt = result.Submission;
+        }
+        ASSERT_TRUE(receipt);
+        EXPECT_FALSE(lifetime.expired());
+        EXPECT_EQ(recorded.Status(), FrameOperationStatus::Recorded);
+        EXPECT_EQ(failed.Status(), FrameOperationStatus::Declared);
+        EXPECT_EQ(culled.Status(), FrameOperationStatus::Declared);
+        EXPECT_EQ(valid, (array<uint8_t, 2>{0, 0}));
+        EXPECT_EQ(states[0], render::TextureState::Undefined);
+        command->End();
+        auto* native = command.Get();
+        if (cancel) {
+            receipt->Cancel();
+            EXPECT_EQ(recorded.Status(), FrameOperationStatus::Cancelled);
+            EXPECT_EQ(states, (array<render::TextureStates, 2>{render::TextureState::Undefined, render::TextureState::Undefined}));
+            EXPECT_EQ(valid, (array<uint8_t, 2>{0, 0}));
+            EXPECT_FALSE(external.Written);
+        } else {
+            DeviceContext.Queue->Submit({.CmdBuffers = std::span{&native, 1}});
+            ASSERT_TRUE(receipt->Submit(receipt->Serial()));
+            EXPECT_EQ(states, (array<render::TextureStates, 2>{render::TextureState::RenderTarget, render::TextureState::RenderTarget}));
+            EXPECT_EQ(valid, (array<uint8_t, 2>{1, 0}));
+            EXPECT_TRUE(external.Written);
+            EXPECT_EQ(recorded.Status(), FrameOperationStatus::Submitted);
+            EXPECT_FALSE(lifetime.expired());
+            DeviceContext.Queue->Wait();
+            ASSERT_TRUE(receipt->Complete(receipt->Serial(), false));
+            EXPECT_EQ(recorded.Status(), FrameOperationStatus::Cancelled);
+        }
+        EXPECT_EQ(failed.Status(), FrameOperationStatus::Cancelled);
+        EXPECT_EQ(culled.Status(), FrameOperationStatus::Cancelled);
+        EXPECT_TRUE(lifetime.expired());
+        RenderGraphTestDriver::Completed(native);
+    }
+}
+
+TEST_P(RenderGraphTest, PhysicalAccessPlanAggregatesRangesAndPreservesAccumulatedReadStages) {
+    auto& device = *DeviceContext.Device;
+    auto buffer = device.CreateBuffer({64, render::MemoryType::Device, render::BufferUse::UnorderedAccess | render::BufferUse::Resource, {}});
+    auto command = device.CreateCommandBuffer(DeviceContext.Queue);
+    ASSERT_TRUE(buffer);
+    ASSERT_TRUE(command);
+    RenderExternalBuffer external{buffer.Get(), buffer->GetDesc(), render::BufferState::Undefined};
+    auto graph = MakeGraph("physical access summary");
+    auto value = graph.NextVersion(graph.ImportBuffer(external, "ranges", RenderGraphExternalAccess::ObservableOutput));
+    graph.AddComputePass<EmptyPass>("write two ranges", [=](EmptyPass&, RenderGraphComputeBuilder& builder) {
+        builder.WriteBuffer(value, RgBufferAccess::UnorderedAccess, {0, 32});
+        builder.WriteBuffer(value, RgBufferAccess::UnorderedAccess, {32, 32});
+    }, EmptyCompute);
+    graph.AddComputePass<EmptyPass>("compute reads", [=](EmptyPass&, RenderGraphComputeBuilder& builder) {
+        builder.ReadBuffer(value, RgBufferAccess::ShaderRead, {0, 32});
+        builder.ReadBuffer(value, RgBufferAccess::ShaderRead, {32, 32});
+        builder.SetSideEffect();
+    }, EmptyCompute);
+    const auto color = graph.CreateTexture(GraphColor(), "raster attachment");
+    graph.AddRasterPass<EmptyPass>("graphics reads", [=](EmptyPass&, RenderGraphRasterBuilder& builder) {
+        builder.SetColorAttachment(0, color);
+        builder.ReadBuffer(value, RgBufferAccess::ShaderRead, {0, 64});
+        builder.SetSideEffect();
+    }, EmptyRaster);
+    value = graph.NextVersion(value);
+    graph.AddComputePass<EmptyPass>("overwrite two ranges", [=](EmptyPass&, RenderGraphComputeBuilder& builder) {
+        builder.WriteBuffer(value, RgBufferAccess::UnorderedAccess, {0, 32});
+        builder.WriteBuffer(value, RgBufferAccess::UnorderedAccess, {32, 32});
+    }, EmptyCompute);
+    command->Begin();
+    test::FailingGraphCommand recording(*command);
+    recording.PassesBeforeFailure = UINT32_MAX;
+    ASSERT_TRUE(RenderGraphTestDriver::Execute(graph, recording, command.Get()).Success) << graph.GetReport().ToText();
+    vector<render::BarrierBufferDescriptor> barriers;
+    for (const auto& recorded : recording.RecordedBarriers)
+        if (const auto* barrier = std::get_if<render::BarrierBufferDescriptor>(&recorded); barrier && barrier->Target == buffer.Get())
+            barriers.push_back(*barrier);
+    ASSERT_EQ(barriers.size(), 3u);
+    EXPECT_EQ(barriers[0].Before, render::BufferState::Undefined);
+    EXPECT_EQ(barriers[0].After, render::BufferState::UnorderedAccess);
+    EXPECT_EQ(barriers[1].Before, render::BufferState::UnorderedAccess);
+    EXPECT_EQ(barriers[1].After, render::BufferState::ShaderRead);
+    EXPECT_EQ(barriers[2].Before, render::BufferState::ShaderRead);
+    EXPECT_EQ(barriers[2].After, render::BufferState::UnorderedAccess);
+    EXPECT_EQ(barriers[2].BeforeStages, render::ShaderStage::Compute | render::ShaderStage::Graphics);
+    EXPECT_EQ(barriers[2].AfterStages, render::ShaderStage::Compute);
+    Submit(*command);
+}
+
 TEST_P(RenderGraphTest, DepthAndStencilViewsSampleTheirSelectedAspects) {
     auto& device = *DeviceContext.Device;
     auto program = test::CompileFoundationCompute(device, R"hlsl(

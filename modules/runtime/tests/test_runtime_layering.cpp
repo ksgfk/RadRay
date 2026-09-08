@@ -152,7 +152,8 @@ TEST(RuntimeLayering, PipelineAndPassContextsHaveNoRawCommandEscape) {
 }
 
 string StructBody(const string& source, std::string_view name) {
-    const size_t start = source.find(fmt::format("struct {} {{", name));
+    size_t start = source.find(fmt::format("struct {} {{", name));
+    if (start == string::npos) start = source.find(fmt::format("struct {} :", name));
     EXPECT_NE(start, string::npos) << name;
     if (start == string::npos) {
         return {};
@@ -175,6 +176,7 @@ TEST(RuntimeLayering, SnapshotContainsNoGameThreadObjectsOrAssetRefs) {
     static_assert(std::is_same_v<decltype(MeshBatch::Geometry), Nullable<const GpuMesh::DrawData*>>);
     static_assert(std::is_same_v<decltype(MaterialTextureFrameData::Texture), TextureAsset*>);
     static_assert(std::is_same_v<decltype(MaterialPassRenderData::Program), Nullable<ShaderProgram*>>);
+    static_assert(std::is_base_of_v<MeshDrawDescription, MeshDrawCommand>);
     const auto frame = ReadSource("modules/runtime/include/radray/runtime/render_framework/render_scene_snapshot.h");
     const auto batch = ReadSource("modules/runtime/include/radray/runtime/render_framework/mesh_batch.h");
     const auto material = ReadSource("modules/runtime/include/radray/runtime/material.h");
@@ -182,7 +184,7 @@ TEST(RuntimeLayering, SnapshotContainsNoGameThreadObjectsOrAssetRefs) {
     string bodies;
     for (const auto name : {"RenderPrimitiveData", "RenderLightData", "RenderSceneSnapshot"}) bodies += StructBody(frame, name);
     bodies += StructBody(batch, "MeshBatch");
-    bodies += StructBody(command, "MeshDrawCommand");
+    for (const auto name : {"MeshDrawDescription", "MeshDrawCommand"}) bodies += StructBody(command, name);
     for (const auto name : {"MaterialRenderData", "MaterialPassRenderData", "MaterialTextureFrameData", "MaterialSamplerFrameData"}) bodies += StructBody(material, name);
     for (const auto symbol : {"Scene", "PrimitiveSceneProxy", "LightSceneProxy", "CameraComponent", "Material", "MaterialTechnique", "StreamingAssetRef", "StreamingAssetRefAny", "AssetManager"}) {
         const std::regex pattern{fmt::format("\\b{}\\b{}", symbol, std::string_view{symbol} == "Material" ? "\\s*[*&>]" : "")};

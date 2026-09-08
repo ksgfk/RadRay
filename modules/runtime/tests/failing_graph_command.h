@@ -19,6 +19,7 @@ public:
     void PopDebugGroup() noexcept override { _command.PopDebugGroup(); }
     void ResourceBarrier(std::span<const render::ResourceBarrierDescriptor> barriers) noexcept override {
         ++RecordingCalls;
+        RecordedBarriers.insert(RecordedBarriers.end(), barriers.begin(), barriers.end());
         _command.ResourceBarrier(barriers);
     }
     Nullable<unique_ptr<render::GraphicsCommandEncoder>> BeginRenderPass(const render::RenderPassBeginDescriptor& desc) noexcept override { return PassesBeforeFailure && PassesBeforeFailure-- ? _command.BeginRenderPass(desc) : nullptr; }
@@ -36,6 +37,7 @@ public:
 
     uint32_t RecordingCalls{0};
     uint32_t PassesBeforeFailure{0};
+    vector<render::ResourceBarrierDescriptor> RecordedBarriers;
 
 private:
     render::CommandBuffer& _command;

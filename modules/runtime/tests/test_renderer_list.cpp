@@ -80,7 +80,7 @@ TEST(RendererList, OneCullingResultBuildsDepthOpaqueTransparent) {
     EXPECT_EQ(transparent.Commands.size(), 1u);
     EXPECT_EQ(processor.Calls, 5u);
     EXPECT_EQ(data.Culling.Primitives.size(), 3u);
-    EXPECT_EQ(opaque.Commands[0].SortData.Primitive, depth.Commands[0].SortData.Primitive);
+    EXPECT_EQ(opaque.GetItems()[0].SortData.Primitive, depth.GetItems()[0].SortData.Primitive);
 }
 
 TEST(RendererList, AdditionalLayerAndMissingPassHaveNoFallback) {
@@ -117,12 +117,12 @@ TEST(RendererList, OpaqueOrderUsesFrameIdsAndNotAddresses) {
     ASSERT_TRUE(BuildRendererList(desc, processor, list));
     const vector<uint32_t> expected{2, 3, 1, 0};
     vector<uint32_t> actual;
-    for (const auto& command : list.Commands) actual.push_back(command.SortData.Primitive);
+    for (const auto& item : list.GetItems()) actual.push_back(item.SortData.Primitive);
     EXPECT_EQ(actual, expected);
     std::swap(data.Scene.Materials[0].Passes[0].Program, data.Scene.Materials[1].Passes[0].Program);
     ASSERT_TRUE(BuildRendererList(desc, processor, list));
     actual.clear();
-    for (const auto& command : list.Commands) actual.push_back(command.SortData.Primitive);
+    for (const auto& item : list.GetItems()) actual.push_back(item.SortData.Primitive);
     EXPECT_EQ(actual, expected);
 }
 
@@ -150,9 +150,9 @@ TEST(RendererList, S07TwelveBatchesMatchIndependentSortForOneHundredAllocationOr
             ASSERT_TRUE(BuildRendererList(data.Desc({}, sorting), processor, list));
             ASSERT_EQ(list.Commands.size(), expected.size());
             for (uint32_t i = 0; i < expected.size(); ++i) {
-                EXPECT_EQ(list.Commands[i].SortData.Primitive, expected[i]);
-                EXPECT_EQ(list.Commands[i].FirstIndex, expected[i] * 3);
-                EXPECT_EQ(list.Commands[i].IndexCount, 3u);
+                EXPECT_EQ(list.GetItems()[i].SortData.Primitive, expected[i]);
+                EXPECT_EQ(list.GetCommand(i).FirstIndex, expected[i] * 3);
+                EXPECT_EQ(list.GetCommand(i).IndexCount, 3u);
             }
         }
     }
@@ -165,7 +165,7 @@ TEST(RendererList, TransparentDepthHasDeterministicTiesAndNonFiniteEndpoint) {
     RendererList list;
     ASSERT_TRUE(BuildRendererList(data.Desc({}, RendererListSorting::BackToFront), processor, list));
     vector<uint32_t> actual;
-    for (const auto& command : list.Commands) actual.push_back(command.SortData.Primitive);
+    for (const auto& item : list.GetItems()) actual.push_back(item.SortData.Primitive);
     EXPECT_EQ(actual, (vector<uint32_t>{3, 1, 2, 0}));
     EXPECT_EQ(list.Stats.NonFiniteDepth, 1u);
 }
@@ -208,6 +208,7 @@ TEST(RendererList, InvalidDescriptorAndBatchRangesPublishEmptyList) {
     EXPECT_FALSE(list.Stats.Valid);
     EXPECT_TRUE(list.Commands.empty());
     EXPECT_EQ(list.Commands.capacity(), capacity);
+    EXPECT_TRUE(list.GetItems().empty());
     data.Scene.Primitives[0].MeshBatchCount = 1;
     ResolvedRenderView other;
     desc.View = &other;
@@ -227,6 +228,38 @@ TEST(RendererList, EmptyInputSucceedsWithoutProcessorCalls) {
     EXPECT_TRUE(list.Stats.Valid);
     EXPECT_TRUE(list.Commands.empty());
     EXPECT_EQ(processor.Calls, 0u);
+}
+
+TEST(RendererList, SortingKeepsDescriptionsAndFrameBindingsInPublicationOrder) {
+    ListFixture data;
+    for (float depth : {2.0f, 5.0f, 3.0f}) data.Add(2, depth);
+    class GroupProcessor final : public MeshPassProcessor {
+    public:
+        array<byte, 3> Sets{};
+        void AddMeshBatch(const RendererListDesc&, const RenderSceneSnapshot&, const MeshBatch& batch, MeshPassDrawListContext& out) override {
+            MeshDrawCommand command;
+            command.FirstIndex = batch.FirstIndex;
+            // These tokens are only compared; no set or binding is dereferenced by list construction.
+            command.Groups.push_back({0, reinterpret_cast<render::ShaderParameterSet*>(&Sets[batch.Primitive]), {}});
+            out.AddCommand(std::move(command));
+        }
+    } processor;
+    RendererList list;
+    ASSERT_TRUE(BuildRendererList(data.Desc({}, RendererListSorting::BackToFront), processor, list));
+    const array<uint32_t, 3> sorted{1, 2, 0};
+    for (uint32_t index = 0; index < sorted.size(); ++index) {
+        EXPECT_EQ(list.Commands[index].FirstIndex, index * 3);
+        EXPECT_EQ(list.Commands[index].Groups[0].Set.Get(), reinterpret_cast<render::ShaderParameterSet*>(&processor.Sets[index]));
+        EXPECT_EQ(&list.GetCommand(index), &list.Commands[sorted[index]]);
+        EXPECT_EQ(list.GetCommand(index).FirstIndex, sorted[index] * 3);
+        EXPECT_EQ(list.GetCommand(index).Groups[0].Set.Get(), reinterpret_cast<render::ShaderParameterSet*>(&processor.Sets[sorted[index]]));
+    }
+    list.ResetForReuse();
+    EXPECT_TRUE(list.GetItems().empty());
+    MeshDrawCommand manual;
+    manual.FirstIndex = 99;
+    list.Commands.push_back(std::move(manual));
+    EXPECT_EQ(list.GetCommand(0).FirstIndex, 99u);
 }
 
 }  // namespace

@@ -490,6 +490,22 @@ TEST(FrameDrawResources, DynamicOffsetsReuseImmutableSetsAndSpillsCreateNewSets)
         writes.Reset();
         ASSERT_TRUE(resources.BeginFrame(writes));
         EXPECT_EQ(resources.GetSetCount(), 0u);
+        const auto* recipe = &pass.Program->GetOrCreateParameterGroupRecipe(*pass.ParameterGroup);
+        const auto next = resources.PrepareGroup(*pass.Program.Get(), *pass.ParameterGroup, pass.Parameters, pass.Textures, pass.Samplers);
+        ASSERT_TRUE(next);
+        EXPECT_EQ(resources.GetStats().RecipeBuilds, 0u);
+        EXPECT_EQ(resources.GetStats().SetCreations, 1u);
+        EXPECT_EQ(resources.GetStats().BufferBytesCopied, pass.Parameters.GetBufferData(data.Bindings.MaterialBufferIndex).size());
+        HostWriteBatch otherWrites;
+        FrameDrawResources otherFlight{data.Device.Device.get(), descriptor};
+        ASSERT_TRUE(otherFlight.BeginFrame(otherWrites));
+        const auto other = otherFlight.PrepareGroup(*pass.Program.Get(), *pass.ParameterGroup, pass.Parameters, pass.Textures, pass.Samplers);
+        ASSERT_TRUE(other);
+        EXPECT_NE(other->Set.Get(), next->Set.Get());
+        EXPECT_EQ(otherFlight.GetStats().RecipeBuilds, 0u);
+        EXPECT_EQ(&pass.Program->GetOrCreateParameterGroupRecipe(*pass.ParameterGroup), recipe);
+        writes.Flush(*data.Device.Device);
+        otherWrites.Flush(*data.Device.Device);
     });
 }
 

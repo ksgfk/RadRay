@@ -1,6 +1,7 @@
 #include <radray/runtime/shader_program.h>
 
 #include <bit>
+#include <algorithm>
 #include <cstdint>
 #include <type_traits>
 #include <utility>
@@ -187,6 +188,32 @@ ShaderProgram::~ShaderProgram() noexcept = default;
 
 bool ShaderProgram::IsBufferDynamic(std::string_view declarationName) const noexcept {
     return _artifact.IsBindingDynamic(declarationName);
+}
+
+const ShaderParameterGroupRecipe& ShaderProgram::GetOrCreateParameterGroupRecipe(uint32_t group) {
+    const auto [entry, inserted] = _parameterGroupRecipes.try_emplace(group);
+    auto& recipe = entry->second;
+    if (!inserted) return recipe;
+    recipe.Group = group;
+    const auto buffers = _parameterLayout.Buffers();
+    for (uint32_t index = 0; index < buffers.size(); ++index)
+        if (buffers[index].Group == group) recipe.Buffers.push_back({index, IsBufferDynamic(buffers[index].Name)});
+    std::sort(recipe.Buffers.begin(), recipe.Buffers.end(), [&](const auto& a, const auto& b) {
+        return buffers[a.Index].BindingNumber < buffers[b.Index].BindingNumber;
+    });
+    const auto parameters = _parameterLayout.Parameters();
+    for (uint32_t index = 0; index < parameters.size(); ++index) {
+        const auto& parameter = parameters[index].Info;
+        if (parameter.Group != group) continue;
+        if (parameter.Kind == ShaderParameterKind::Texture) {
+            recipe.Textures.push_back(index);
+            recipe.TextureCount += parameter.ElementCount;
+        } else if (parameter.Kind == ShaderParameterKind::Sampler) {
+            recipe.Samplers.push_back(index);
+            recipe.SamplerCount += parameter.ElementCount;
+        }
+    }
+    return recipe;
 }
 
 namespace {

@@ -44,8 +44,12 @@ struct MaterialPassRenderData {
 struct MaterialRenderData {
     RenderQueue Queue{RenderQueue::Geometry};
     vector<MaterialPassRenderData> Passes;
+    uint64_t Generation{0}, Revision{0};
 
     Nullable<const MaterialPassRenderData*> FindPass(std::string_view name) const noexcept;
+    /// Call before changing authoring-derived snapshot fields outside BuildRenderData.
+    /// ProgramFrameId is builder bookkeeping and does not require invalidation.
+    void Invalidate() noexcept { Generation = Revision = 0; }
 };
 
 class Material {
@@ -60,12 +64,15 @@ public:
 
     ShaderProgram* GetProgram() const noexcept { return _program; }
     uint32_t GetParameterGroup() const noexcept { return _parameterGroup; }
+    uint64_t GetGeneration() const noexcept { return _generation; }
+    /// Game thread only. Includes resource readiness and edits through GetPipelineState().
+    uint64_t GetRevision() const noexcept;
 
     MaterialPipelineState& GetPipelineState() noexcept { return _pipelineStates[_technique->GetPrimaryPassIndex()]; }
     const MaterialPipelineState& GetPipelineState() const noexcept { return _pipelineStates[_technique->GetPrimaryPassIndex()]; }
     bool SetPassPipelineState(std::string_view pass, const MaterialPipelineState& state) noexcept;
     RenderQueue GetRenderQueue() const noexcept { return _renderQueue; }
-    void SetRenderQueue(RenderQueue value) noexcept { _renderQueue = value; }
+    void SetRenderQueue(RenderQueue value) noexcept;
 
     const ShaderParameterStorage& GetParameterStorage() const noexcept { return _parameters; }
 
@@ -87,14 +94,20 @@ public:
         const render::SamplerDescriptor& sampler,
         uint32_t element = 0) noexcept;
 
-    /// Game thread only. Copies authoring values and retains ready texture owners without RHI calls.
-    bool BuildRenderData(MaterialRenderData& out, vector<StreamingAssetRefAny>& retainedAssets) const;
+    /// Game thread only. Reuses matching generation/revision values and always retains ready owners.
+    /// `out` belongs to a writable flight. Authoring-derived fields remain read-only between builds;
+    /// external edits require out.Invalidate(). ProgramFrameId is independent builder bookkeeping.
+    bool BuildRenderData(MaterialRenderData& out, vector<StreamingAssetRefAny>& retainedAssets,
+                         Nullable<uint64_t*> bytesCopied = nullptr) const;
 
 private:
     struct ResourceState;
 
     explicit Material(const MaterialTechnique* technique);
     string CanonicalName(std::string_view name) const;
+    void MarkChanged() const noexcept;
+    bool SetNumericBytes(std::string_view name, ShaderParameterKind kind,
+                         std::span<const byte> value, uint32_t element) noexcept;
 
     Nullable<const ShaderParameterInfo*> FindNumericParameter(
         std::string_view name,
@@ -105,6 +118,9 @@ private:
     uint32_t _parameterGroup;
     ShaderParameterStorage _parameters;
     vector<MaterialPipelineState> _pipelineStates;
+    mutable vector<MaterialPipelineState> _observedPipelineStates;
+    uint64_t _generation{0};
+    mutable uint64_t _revision{1};
     RenderQueue _renderQueue{RenderQueue::Geometry};
     unique_ptr<ResourceState> _resources;
 };

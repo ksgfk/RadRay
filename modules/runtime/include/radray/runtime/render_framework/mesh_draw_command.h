@@ -22,7 +22,6 @@ struct PreparedShaderGroup {
     Nullable<render::ShaderParameterSet*> Set{nullptr};
     InlineVector<render::ShaderParameterDynamicOffset, 2> DynamicOffsets;
 };
-// Native groups may reference only persistent read-only resources retained through the flight fence.
 struct DrawSortData {
     RenderQueue Queue{RenderQueue::Geometry};
     uint32_t ProgramFrameId{0};
@@ -31,15 +30,18 @@ struct DrawSortData {
     RenderPrimitiveIndex Primitive{0};
     MeshBatchIndex Batch{0};
 };
-/// Borrowed draw payload. Referenced sets are immutable until the flight retires.
-struct MeshDrawCommand {
+/// Pipeline and geometry inputs without frame bindings or graph handles. Referenced objects must outlive use.
+struct MeshDrawDescription {
     Nullable<ShaderProgram*> Program{nullptr};
     MaterialPipelineState PipelineState;
     Nullable<const GpuMesh::DrawData*> Geometry{nullptr};
     uint32_t FirstIndex{0}, IndexCount{0};
     int32_t VertexOffset{0};
+};
+/// A description and its frame-local bindings. Groups are immutable until the flight retires.
+struct MeshDrawCommand : MeshDrawDescription {
+    // Native groups reference only persistent read-only resources retained through the flight fence.
     InlineVector<PreparedShaderGroup, 3> Groups;
-    DrawSortData SortData;
 };
 struct DrawExecutionStats {
     uint64_t Commands{0}, Draws{0}, PsoFailure{0}, BindingFailure{0}, Skipped{0};
@@ -50,7 +52,8 @@ struct DrawExecutionStats {
 /// The list and optional graph bindings remain immutable until graph execution finishes.
 struct PreparedRendererList {
     struct Draw {
-        const MeshDrawCommand* Command;
+        const MeshDrawDescription* Description;
+        std::span<const PreparedShaderGroup> Groups;
         RgGraphicsProgramHandle Program;
         std::span<const RendererListPassBinding> GraphGroups;
     };

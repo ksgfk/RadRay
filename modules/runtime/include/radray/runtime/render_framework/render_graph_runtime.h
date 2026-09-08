@@ -7,7 +7,8 @@ namespace radray {
 class RenderGraph;
 
 /// Per-flight storage that outlives a graph and keeps its descriptors and uploaded constants alive
-/// until the flight is safe to reuse.
+/// until the flight is safe to reuse. Compilation scratch is CPU-only and may be reused by the
+/// next serialized compile; compiled results and submissions do not borrow that scratch.
 class RenderGraphFrameResources {
 public:
     RenderGraphFrameResources(render::Device& device, render::RenderPassRegistry& registry);

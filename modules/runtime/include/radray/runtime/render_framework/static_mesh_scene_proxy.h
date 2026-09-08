@@ -19,6 +19,8 @@ public:
     ~StaticMeshSceneProxy() noexcept override;
 
     void CollectAssetReferences(vector<StreamingAssetRefAny>& out) const override;
+    uint64_t GetRenderDataRevision() const noexcept override;
+    uint64_t GetTransformRevision() const noexcept override { return GetLocalToWorldRevision(); }
 
     AxisAlignedBounds GetLocalBounds() const noexcept override;
     MeshDrawArgs GetDrawArgs(uint32_t sectionIndex) const noexcept override;

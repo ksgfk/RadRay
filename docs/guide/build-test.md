@@ -86,7 +86,13 @@ validation，16×16 离屏、单 Direct queue，逐帧等待 GPU，用于隔离 
 计时包括 proxy transform、asset Pump、snapshot、Cull、list/参数、graph setup/execute、诊断序列化、
 flush/submit 与 GPU wait；graph report 另拆 compile/realize/prepare/record。分配计数只覆盖采样线程
 在本测试可执行文件中调用的 C++ new，不包含 DLL/驱动/malloc；graph 子阶段的分配字段为 null，
-由整体 execute 的分配数覆盖。`PROFILE_COUNTS` 报告参数与 pool 数量，pool 字节是描述符估算。
+由整体 execute 的分配数覆盖。flight 重置、完成回调和 graph 析构在计时范围外，阶段耗时之和不代表
+完整 CPU 帧成本；收据缩短 CPU 数据寿命的效果需要另外测量常驻内存。
+`PROFILE_COUNTS` 报告参数与 pool 数量，并标识 prepared/reference；GroupPreparations 包含 view、
+material 和 object 等所有组，pool 字节是描述符估算。
+`PROFILE_REUSE` 另报 primitive 结构、世界包围盒和材质的 rebuilt/reused 次数。稳定结构与材质在
+预热后应命中缓存，静止物体不重算 bounds；RecipeBuilds 只计 program 第一次解析 group，warm flight
+为 0。移动场景仍需更新变换和 bounds，不能把结构复用解释为整条 snapshot 链路零成本。
 样本数有限，p99 接近最慢样本；不要据此设固定 FPS 门槛或声称有未测量的前后性能增益。
 
 所有自有 target 接入 `radray_default_compile_flags`；它私有设置 C++ RTTI，

@@ -15,6 +15,11 @@ StaticMeshSceneProxy::StaticMeshSceneProxy(
 
 StaticMeshSceneProxy::~StaticMeshSceneProxy() noexcept = default;
 
+uint64_t StaticMeshSceneProxy::GetRenderDataRevision() const noexcept {
+    // The owned slot cannot be replaced or recycled; its immutable payload is published once.
+    return _mesh.IsReady() ? 2 : 1;
+}
+
 AxisAlignedBounds StaticMeshSceneProxy::GetLocalBounds() const noexcept {
     const auto mesh = _mesh.Get();
     return mesh ? AxisAlignedBounds{mesh->GetBoundsMin(), mesh->GetBoundsMax()} : AxisAlignedBounds{};

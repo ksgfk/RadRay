@@ -44,10 +44,16 @@ public:
     uint64_t GetMotionRevision() const noexcept { return _motionRevision; }
     void ResetMotion() noexcept;
 
+    /// Game thread only. Nonzero revisions opt into snapshot reuse for this proxy generation.
+    /// Change RenderDataRevision before changing section count/draw geometry/ranges or local bounds;
+    /// include asynchronous geometry readiness. Zero keeps custom proxies conservatively refreshed.
+    virtual uint64_t GetRenderDataRevision() const noexcept { return 0; }
+    virtual uint64_t GetTransformRevision() const noexcept { return 0; }
+
     /// 逐物体 local->world 变换 (对应 UE5 的 GetLocalToWorld / Unity 的 unity_ObjectToWorld)。
     virtual Eigen::Matrix4f GetLocalToWorld() const noexcept { return _localToWorld; }
     /// Game thread only. Derived proxies with transform-dependent data must update it here.
-    virtual void SetLocalToWorld(const Eigen::Matrix4f& value) noexcept { _localToWorld = value; }
+    virtual void SetLocalToWorld(const Eigen::Matrix4f& value) noexcept;
 
     virtual AxisAlignedBounds GetLocalBounds() const noexcept { return {}; }
     virtual uint32_t GetLayerMask() const noexcept { return 0xffffffffu; }
@@ -59,9 +65,14 @@ public:
     virtual uint32_t GetSectionCount() const noexcept { return 0; }
     virtual Nullable<Material*> GetMaterial(uint32_t /*sectionIndex*/) const noexcept { return nullptr; }
 
+protected:
+    /// For proxies whose GetLocalToWorld() uses the base transform storage.
+    uint64_t GetLocalToWorldRevision() const noexcept { return _transformRevision; }
+
 private:
     uint64_t _generation{0};
     uint64_t _motionRevision{0};
+    uint64_t _transformRevision{1};
     Eigen::Matrix4f _localToWorld{Eigen::Matrix4f::Identity()};
 };
 

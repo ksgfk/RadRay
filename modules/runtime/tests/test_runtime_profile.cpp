@@ -112,7 +112,8 @@ class RuntimeProfile : public testing::TestWithParam<render::RenderBackend> {};
 // This is not a public compatibility API and does not emulate the former snapshot/runner implementation.
 void RecordReference(const RendererList& list, RenderGraphRasterContext& ctx, DrawExecutionStats& stats) {
     auto& commands = ctx.Encoder();
-    for (const auto& draw : list.Commands) {
+    for (size_t index = 0; index < list.Commands.size(); ++index) {
+        const auto& draw = list.GetCommand(index);
         if (!ValidateMeshDrawCommand(draw)) {
             ctx.Fail("Invalid reference geometry");
             return;
@@ -222,9 +223,20 @@ TEST_P(RuntimeProfile, StageCostsAndWarmResourceCounts) {
                     bool valid = false;
                     values[2] = Measure([&] { valid = builder.Build(scene, snapshot, owners); });
                     ASSERT_TRUE(valid);
-                    if (frame) EXPECT_EQ(snapshot.Stats.ScratchEntriesCreated, 0u);
+                    if (frame) {
+                        EXPECT_EQ(snapshot.Stats.ScratchEntriesCreated, 0u);
+                        EXPECT_EQ(snapshot.Stats.PrimitiveStructuresRebuilt, 0u);
+                        EXPECT_EQ(snapshot.Stats.PrimitiveStructuresReused, count);
+                        EXPECT_EQ(snapshot.Stats.MaterialsRebuilt, 0u);
+                        EXPECT_EQ(snapshot.Stats.MaterialBytesCopied, 0u);
+                        if (!moving) {
+                            EXPECT_EQ(snapshot.Stats.PrimitiveBoundsRebuilt, 0u);
+                            EXPECT_EQ(snapshot.Stats.PrimitiveBoundsReused, count);
+                        }
+                    }
                     values[3] = Measure([&] { valid = Cull({&snapshot, &view}, culling); });
                     ASSERT_TRUE(valid);
+                    const auto recipesBefore = program->GetParameterGroupRecipeCount();
                     values[4] = Measure([&] {
                         forward_detail::ForwardLitMeshPassProcessor processor{draws, bindings, warned};
                         valid = BuildRendererList({"profile", "ForwardLit", &culling, &view, RenderQueueRange::Opaque()}, processor, list);
@@ -232,7 +244,8 @@ TEST_P(RuntimeProfile, StageCostsAndWarmResourceCounts) {
                     ASSERT_TRUE(valid);
                     ASSERT_EQ(list.Commands.size(), count * 2u);
                     EXPECT_EQ(draws.GetStats().GroupPreparations, count + 2u);
-                    EXPECT_EQ(draws.GetStats().RecipeBuilds, 3u);
+                    EXPECT_EQ(draws.GetStats().RecipeBuilds, program->GetParameterGroupRecipeCount() - recipesBefore);
+                    if (frame) EXPECT_EQ(draws.GetStats().RecipeBuilds, 0u);
                     DrawExecutionStats stats;
                     unique_ptr<RenderGraph> graph;
                     values[5] = Measure([&] {
@@ -290,9 +303,15 @@ TEST_P(RuntimeProfile, StageCostsAndWarmResourceCounts) {
                 const std::string_view stages[]{"graphCompile", "graphRealize", "graphPrepare", "graphRecord"};
                 for (size_t i = 0; i < graphStages.size(); ++i) PrintSamples(EnumName(GetParam()), count, moving, diagnostics, prepared, stages[i], std::move(graphStages[i]), false);
                 const auto& resourceStats = draws.GetStats();
-                fmt::print("PROFILE_COUNTS {{\"backend\":\"{}\",\"primitives\":{},\"moving\":{},\"diagnostics\":{},\"objectAndMaterialPreparations\":{},\"recipeBuilds\":{},\"setCreations\":{},\"setCacheHits\":{},\"constantBytes\":{},\"snapshotMaterialBytes\":{},\"poolBytes\":{},\"poolPeakBytes\":{}}}\n",
-                           EnumName(GetParam()), count, moving, diagnostics, resourceStats.GroupPreparations, resourceStats.RecipeBuilds, resourceStats.SetCreations,
+                fmt::print("PROFILE_COUNTS {{\"backend\":\"{}\",\"primitives\":{},\"moving\":{},\"diagnostics\":{},\"prepared\":{},\"groupPreparations\":{},\"recipeBuilds\":{},\"setCreations\":{},\"setCacheHits\":{},\"constantBytes\":{},\"snapshotMaterialBytes\":{},\"poolBytes\":{},\"poolPeakBytes\":{}}}\n",
+                           EnumName(GetParam()), count, moving, diagnostics, prepared, resourceStats.GroupPreparations, resourceStats.RecipeBuilds, resourceStats.SetCreations,
                            resourceStats.SetCacheHits, resourceStats.BufferBytesCopied, snapshot.Stats.MaterialBytesCopied, graphResources.GetPoolStats().EstimatedBytes, graphResources.GetPoolStats().PeakEstimatedBytes);
+                const auto& snapshotStats = snapshot.Stats;
+                fmt::print("PROFILE_REUSE {{\"backend\":\"{}\",\"primitives\":{},\"moving\":{},\"diagnostics\":{},\"prepared\":{},\"structuresRebuilt\":{},\"structuresReused\":{},\"boundsRebuilt\":{},\"boundsReused\":{},\"materialsRebuilt\":{},\"materialsReused\":{}}}\n",
+                           EnumName(GetParam()), count, moving, diagnostics, prepared,
+                           snapshotStats.PrimitiveStructuresRebuilt, snapshotStats.PrimitiveStructuresReused,
+                           snapshotStats.PrimitiveBoundsRebuilt, snapshotStats.PrimitiveBoundsReused,
+                           snapshotStats.MaterialsRebuilt, snapshotStats.MaterialsReused);
             }
     }
 }

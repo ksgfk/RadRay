@@ -67,11 +67,15 @@ bool BuildRendererList(const RendererListDesc& desc, MeshPassProcessor& processo
                 ++out.Stats.NonFiniteDepth;
                 depth = std::numeric_limits<float>::max();
             }
-            result._command->SortData = {material.Queue, pass->ProgramFrameId, batch.Material, depth, batch.Primitive, batchIndex};
+            if (out.Commands.size() >= std::numeric_limits<uint32_t>::max()) {
+                out.ResetForReuse();
+                return false;
+            }
+            out.Items.push_back({{material.Queue, pass->ProgramFrameId, batch.Material, depth, batch.Primitive, batchIndex}, static_cast<uint32_t>(out.Commands.size())});
             out.Commands.push_back(std::move(*result._command));
         }
     }
-    std::sort(out.Commands.begin(), out.Commands.end(), [&](const auto& left, const auto& right) {
+    std::sort(out.Items.begin(), out.Items.end(), [&](const auto& left, const auto& right) {
         const auto& a = left.SortData;
         const auto& b = right.SortData;
         if (a.Queue != b.Queue) return static_cast<int32_t>(a.Queue) < static_cast<int32_t>(b.Queue);

@@ -788,20 +788,20 @@ void RunDrawListSort(render::test::DeviceContext& context) {
     ASSERT_TRUE(BuildRendererList({"Opaque", "ForwardLit", &culling, &view, RenderQueueRange::Opaque()}, processor, opaque));
     ASSERT_TRUE(BuildRendererList({"Transparent", "ForwardLit", &culling, &view, RenderQueueRange::Transparent(), 0xffffffffu, RendererListSorting::BackToFront}, processor, transparentList));
     ASSERT_EQ(opaque.Commands.size(), 4u);
-    EXPECT_EQ(opaque.Commands[0].FirstIndex, 11u);
-    EXPECT_EQ(opaque.Commands[1].FirstIndex, 44u);
-    EXPECT_EQ(opaque.Commands[2].FirstIndex, 33u);
-    EXPECT_EQ(opaque.Commands[3].FirstIndex, 22u);
+    EXPECT_EQ(opaque.GetCommand(0).FirstIndex, 11u);
+    EXPECT_EQ(opaque.GetCommand(1).FirstIndex, 44u);
+    EXPECT_EQ(opaque.GetCommand(2).FirstIndex, 33u);
+    EXPECT_EQ(opaque.GetCommand(3).FirstIndex, 22u);
     ASSERT_EQ(transparentList.Commands.size(), 3u);
-    const auto& items = transparentList.Commands;
+    const auto items = transparentList.GetItems();
     EXPECT_FLOAT_EQ(items[0].SortData.ViewDepth, 5.0f);
     EXPECT_FLOAT_EQ(items[1].SortData.ViewDepth, 5.0f);
     EXPECT_FLOAT_EQ(items[2].SortData.ViewDepth, 2.0f);
-    EXPECT_EQ(items[0].FirstIndex, 55u);
-    EXPECT_EQ(items[0].IndexCount, 7u);
-    EXPECT_EQ(items[0].VertexOffset, -5);
-    EXPECT_EQ(items[1].FirstIndex, 56u);
-    EXPECT_EQ(items[2].FirstIndex, 66u);
+    EXPECT_EQ(transparentList.GetCommand(0).FirstIndex, 55u);
+    EXPECT_EQ(transparentList.GetCommand(0).IndexCount, 7u);
+    EXPECT_EQ(transparentList.GetCommand(0).VertexOffset, -5);
+    EXPECT_EQ(transparentList.GetCommand(1).FirstIndex, 56u);
+    EXPECT_EQ(transparentList.GetCommand(2).FirstIndex, 66u);
 }
 
 TEST(RadRayRuntimeMeshDraw, DrawListClustersOpaqueAndSortsTransparentStably) {

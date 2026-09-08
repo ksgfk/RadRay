@@ -35,10 +35,24 @@ struct RendererListStats {
         return Valid && MissingRequiredPass == 0 && InvalidBindings == 0 && InvalidGeometry == 0 && PrepareResourceFailed == 0 && ProcessorRejected == 0;
     }
 };
+struct RendererListItem {
+    DrawSortData SortData;
+    uint32_t CommandIndex{0};
+};
 struct RendererList {
+    // Payloads remain in publication order; Items alone defines the sorted execution order.
+    // Empty Items uses publication order for explicitly assembled lists.
+    // Nonempty Items must be a permutation of Commands; PrepareRendererList validates it before use.
     vector<MeshDrawCommand> Commands;
+    vector<RendererListItem> Items;
     RendererListStats Stats;
+    std::span<const RendererListItem> GetItems() const noexcept { return Items; }
+    // The caller supplies an in-range index and a valid item permutation.
+    const MeshDrawCommand& GetCommand(size_t executionIndex) const noexcept {
+        return Commands[Items.empty() ? executionIndex : Items[executionIndex].CommandIndex];
+    }
     void ResetForReuse() noexcept {
+        Items.clear();
         Commands.clear();
         Stats = {};
     }

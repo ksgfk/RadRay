@@ -79,7 +79,8 @@ metadata 的校验限制见 [Renderer foundation](renderer-foundation.md#材质-
 
 Material setter 接受 primary cbuffer 内的相对字段路径（如 `BaseColor`）或带 primary declaration 的
 完整路径（如 `ForwardMaterial.BaseColor`），拒绝其他 cbuffer。Texture/Sampler 使用声明的 exact name。
-`BuildRenderData` 为各 pass 复制独立的数值 bytes、状态和其实际消费的资源；缺资源只使消费它的 pass
+`BuildRenderData` 按材质 generation/revision 为各 flight 物化独立的 pass 值，版本未变时复用原值；
+缺资源只使消费它的 pass
 无效。资产 owner 追加到宿主 retained vector；snapshot 不创建 RHI set / SRV，也不维护 descriptor 版本。
 
 `ShaderProgram` 继续拥有 artifact、layout、shader、参数索引与 PSO cache。graphics PSO key 由 material
@@ -123,7 +124,7 @@ LightComponent      → CreateRenderState → Scene::AddLight(CreateSceneProxy()
 存在 `Scene` 的 `vector<unique_ptr<...>>` 里，`OnUnregister` 时移除。
 
 PrimitiveComponent 在 game thread 直接更新现有 proxy 的 LocalToWorld；普通位移、旋转、缩放保留
-generation/revision，不遍历 Scene 删除重建。瞬移或显式不连续运动调用 `ResetMotion`。
+generation/MotionRevision，并增加 TransformRevision，不遍历 Scene 删除重建。瞬移或显式不连续运动调用 `ResetMotion`。
 自定义 proxy 若把 `GetLocalToWorld` 委托给内层 proxy，也必须转发 `SetLocalToWorld`；
 组件通知在 Debug 验证更新后的矩阵与组件一致，避免只改到未被读取的基类存储。
 mesh/material 等结构性属性通过 `MarkRenderStateDirty` 重建，产生新 generation，旧运动不再连续。
@@ -156,7 +157,7 @@ local-to-world，并把 `StaticMeshSection` 的 `FirstIndex` / `IndexCount` / `V
 mesh 可以在 Loading 时设置到组件；`World::Tick` 中的组件 tick 在它变成有效 Ready 资产后创建
 proxy，已存在且仍有效的 proxy 保持不变。清空或替换 mesh 仍立即刷新对应渲染状态。
 每个 flight 在 PrepareFrame 中构建一次与 view 无关的 `RenderSceneSnapshot`：primitive 保存 generation、
-MotionRevision、变换、世界 AABB、layer mask、CastShadow 和连续 MeshBatch 范围；batch 借用 geometry 并保存 section draw range、primitive
+MotionRevision、变换、世界 AABB、layer mask 和连续 MeshBatch 范围；batch 借用 geometry 并保存 section draw range、primitive
 和 material 索引。材质按首次出现去重，所有 pass 的 program 分配帧内整数 ID。光源保存参数和球形界限。
 `StaticMeshSceneProxy` 从 mesh asset 提供局部 bounds；自定义 proxy 可以覆盖 layer mask 与禁用视锥剔除标志。
 无效 bounds 保守可见；几何和纹理由宿主 per-flight refs 保活。

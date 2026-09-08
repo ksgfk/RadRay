@@ -1,11 +1,22 @@
 #include <radray/runtime/material.h>
 
 #include <algorithm>
+#include <atomic>
+#include <cstring>
 #include <utility>
 
 #include <radray/runtime/shader_program.h>
 
 namespace radray {
+
+namespace {
+std::atomic<uint64_t> gNextMaterialGeneration{1};
+
+template <typename T>
+std::span<const byte> AsBytes(const T& value) noexcept {
+    return std::as_bytes(std::span{&value, size_t{1}});
+}
+}  // namespace
 
 struct Material::ResourceState {
     struct TextureValue {
@@ -14,6 +25,7 @@ struct Material::ResourceState {
         uint32_t Element{0};
         StreamingAssetRef<TextureAsset> Texture;
         TextureSubViewDesc SubView;
+        Nullable<TextureAsset*> ObservedTexture{nullptr};
     };
 
     struct SamplerValue {
@@ -36,11 +48,41 @@ Material::Material(const MaterialTechnique* technique)
       _program(technique->GetPrimaryPass().Program),
       _parameterGroup(*technique->GetPrimaryPass().ParameterGroup),
       _parameters(&_program->GetParameterLayout(), _parameterGroup),
+      _generation(gNextMaterialGeneration.fetch_add(1, std::memory_order_relaxed)),
       _resources(make_unique<ResourceState>()) {
+    if (_generation == 0 || _generation == UINT64_MAX) RADRAY_ABORT("Material generation exhausted");
     for (const auto& pass : technique->Passes()) _pipelineStates.push_back(pass.DefaultPipelineState);
+    _observedPipelineStates = _pipelineStates;
 }
 
 Material::~Material() noexcept = default;
+
+void Material::MarkChanged() const noexcept {
+    if (_revision == UINT64_MAX) RADRAY_ABORT("Material revision exhausted");
+    ++_revision;
+}
+
+uint64_t Material::GetRevision() const noexcept {
+    // Mutable pipeline-state references are part of the authoring API; observe their values on GT.
+    if (_observedPipelineStates != _pipelineStates) {
+        _observedPipelineStates = _pipelineStates;
+        MarkChanged();
+    }
+    for (auto& value : _resources->Textures) {
+        const auto ready = value.Texture.Get();
+        if (ready != value.ObservedTexture) {
+            value.ObservedTexture = ready;
+            MarkChanged();
+        }
+    }
+    return _revision;
+}
+
+void Material::SetRenderQueue(RenderQueue value) noexcept {
+    if (_renderQueue == value) return;
+    _renderQueue = value;
+    MarkChanged();
+}
 
 string Material::CanonicalName(std::string_view name) const {
     const string prefix = _technique->GetPrimaryPass().MaterialBufferAnchor + ".";
@@ -72,42 +114,48 @@ Nullable<const ShaderParameterInfo*> Material::FindNumericParameter(
 }
 
 bool Material::SetFloat(std::string_view name, float value, uint32_t element) noexcept {
-    return FindNumericParameter(name, ShaderParameterKind::Scalar) != nullptr &&
-           _parameters.SetFloat(CanonicalName(name), value, element);
+    return SetNumericBytes(name, ShaderParameterKind::Scalar, AsBytes(value), element);
 }
 
 bool Material::SetFloat2(
     std::string_view name, const Eigen::Vector2f& value, uint32_t element) noexcept {
-    return FindNumericParameter(name, ShaderParameterKind::Vector) != nullptr &&
-           _parameters.SetFloat2(CanonicalName(name), value, element);
+    return SetNumericBytes(name, ShaderParameterKind::Vector, AsBytes(value), element);
 }
 
 bool Material::SetFloat3(
     std::string_view name, const Eigen::Vector3f& value, uint32_t element) noexcept {
-    return FindNumericParameter(name, ShaderParameterKind::Vector) != nullptr &&
-           _parameters.SetFloat3(CanonicalName(name), value, element);
+    return SetNumericBytes(name, ShaderParameterKind::Vector, AsBytes(value), element);
 }
 
 bool Material::SetFloat4(
     std::string_view name, const Eigen::Vector4f& value, uint32_t element) noexcept {
-    return FindNumericParameter(name, ShaderParameterKind::Vector) != nullptr &&
-           _parameters.SetFloat4(CanonicalName(name), value, element);
+    return SetNumericBytes(name, ShaderParameterKind::Vector, AsBytes(value), element);
 }
 
 bool Material::SetInt(std::string_view name, int32_t value, uint32_t element) noexcept {
-    return FindNumericParameter(name, ShaderParameterKind::Scalar) != nullptr &&
-           _parameters.SetInt(CanonicalName(name), value, element);
+    return SetNumericBytes(name, ShaderParameterKind::Scalar, AsBytes(value), element);
 }
 
 bool Material::SetUInt(std::string_view name, uint32_t value, uint32_t element) noexcept {
-    return FindNumericParameter(name, ShaderParameterKind::Scalar) != nullptr &&
-           _parameters.SetUInt(CanonicalName(name), value, element);
+    return SetNumericBytes(name, ShaderParameterKind::Scalar, AsBytes(value), element);
 }
 
 bool Material::SetMatrix4x4(
     std::string_view name, const Eigen::Matrix4f& value, uint32_t element) noexcept {
-    return FindNumericParameter(name, ShaderParameterKind::Matrix) != nullptr &&
-           _parameters.SetMatrix4x4(CanonicalName(name), value, element);
+    return SetNumericBytes(name, ShaderParameterKind::Matrix, AsBytes(value), element);
+}
+
+bool Material::SetNumericBytes(std::string_view name, ShaderParameterKind kind,
+                               std::span<const byte> value, uint32_t element) noexcept {
+    const auto parameter = FindNumericParameter(name, kind);
+    if (!parameter || parameter->Size != value.size() || element >= parameter->ElementCount) return false;
+    const auto bytes = _parameters.GetBufferData(parameter->BufferIndex);
+    const uint64_t offset = uint64_t{parameter->ByteOffset} + uint64_t{element} * parameter->Stride;
+    if (offset > bytes.size() || value.size() > bytes.size() - offset) return false;
+    if (std::memcmp(bytes.data() + offset, value.data(), value.size()) == 0) return true;
+    if (!_parameters.SetBytes(*parameter, kind, value, element)) return false;
+    MarkChanged();
+    return true;
 }
 
 bool Material::SetTexture(
@@ -141,6 +189,7 @@ bool Material::SetTexture(
             .Texture = std::move(texture),
             .SubView = subView});
     }
+    MarkChanged();
     return true;
 }
 
@@ -172,14 +221,28 @@ bool Material::SetSampler(
             .Element = element,
             .Sampler = sampler});
     }
+    MarkChanged();
     return true;
 }
 
-bool Material::BuildRenderData(MaterialRenderData& out, vector<StreamingAssetRefAny>& retainedAssets) const {
+bool Material::BuildRenderData(MaterialRenderData& out, vector<StreamingAssetRefAny>& retainedAssets,
+                               Nullable<uint64_t*> bytesCopied) const {
+    if (bytesCopied != nullptr) *bytesCopied = 0;
+    const uint64_t revision = GetRevision();
+    const auto retainReadyTextures = [&] {
+        for (const auto& value : _resources->Textures)
+            if (value.ObservedTexture) retainedAssets.push_back(value.Texture.AsAny());
+    };
+    if (out.Generation == _generation && out.Revision == revision &&
+        out.Passes.size() == _technique->Passes().size()) {
+        const bool valid = std::any_of(out.Passes.begin(), out.Passes.end(), [](const auto& pass) { return pass.Valid; });
+        if (valid) retainReadyTextures();
+        return valid;
+    }
     auto& snapshot = out;
+    const bool sameMaterial = snapshot.Generation == _generation;
     snapshot.Queue = _renderQueue;
     snapshot.Passes.resize(_technique->Passes().size());
-    const auto ownerStart = retainedAssets.size();
     const auto canonicalBytes = _parameters.GetBufferData(*_technique->GetPrimaryPass().BufferIndex);
     bool anyValid = false;
     for (uint32_t index = 0; index < _technique->Passes().size(); ++index) {
@@ -194,23 +257,24 @@ bool Material::BuildRenderData(MaterialRenderData& out, vector<StreamingAssetRef
         pass.PipelineState = _pipelineStates[index];
         pass.Valid = true;
         if (layout.BufferIndex) {
-            if (pass.Parameters.GetLayout() != &layout.Program->GetParameterLayout() || previousGroup != layout.ParameterGroup)
+            if (!sameMaterial || pass.Parameters.GetLayout() != &layout.Program->GetParameterLayout() || previousGroup != layout.ParameterGroup)
                 pass.Parameters = ShaderParameterStorage{&layout.Program->GetParameterLayout(), layout.ParameterGroup};
             pass.Valid = pass.Parameters.CopyCompatibleBufferBytes(*layout.BufferIndex, canonicalBytes);
-        } else pass.Parameters = ShaderParameterStorage{};
+            if (bytesCopied != nullptr && pass.Valid) *bytesCopied += canonicalBytes.size();
+        } else
+            pass.Parameters = ShaderParameterStorage{};
         for (const auto& resource : layout.Resources) {
             for (uint32_t element = 0; element < resource.Info.ElementCount; ++element) {
                 if (resource.Info.Kind == ShaderParameterKind::Texture) {
                     const auto value = std::find_if(_resources->Textures.begin(), _resources->Textures.end(), [&](const auto& entry) {
                         return entry.Name == resource.Name && entry.Element == element;
                     });
-                    const auto texture = value != _resources->Textures.end() ? value->Texture.Get() : nullptr;
+                    const auto texture = value != _resources->Textures.end() ? value->ObservedTexture : nullptr;
                     if (!texture) {
                         pass.Valid = false;
                         continue;
                     }
                     pass.Textures.push_back({resource.Info, texture.Get(), value->SubView, element});
-                    retainedAssets.push_back(value->Texture.AsAny());
                 } else {
                     const auto value = std::find_if(_resources->Samplers.begin(), _resources->Samplers.end(), [&](const auto& entry) {
                         return entry.Name == resource.Name && entry.Element == element;
@@ -225,7 +289,9 @@ bool Material::BuildRenderData(MaterialRenderData& out, vector<StreamingAssetRef
         }
         anyValid |= pass.Valid;
     }
-    if (!anyValid) retainedAssets.resize(ownerStart);
+    snapshot.Generation = _generation;
+    snapshot.Revision = revision;
+    if (anyValid) retainReadyTextures();
     return anyValid;
 }
 

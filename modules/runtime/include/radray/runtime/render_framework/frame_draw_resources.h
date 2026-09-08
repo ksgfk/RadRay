@@ -5,12 +5,15 @@
 
 namespace radray {
 
+struct ShaderParameterGroupRecipe;
+
 struct FrameBufferBinding {
     uint32_t BufferIndex{0};
     render::ShaderBufferBinding Value;
     friend bool operator==(const FrameBufferBinding&, const FrameBufferBinding&) = default;
 };
 struct FrameDrawResourceStats {
+    // RecipeBuilds counts only recipes first materialized in their owning ShaderProgram by this frame.
     uint64_t GroupPreparations{0}, RecipeBuilds{0}, SetCacheHits{0}, SetCreations{0}, BufferBytesCopied{0};
 };
 
@@ -58,17 +61,7 @@ private:
     struct FrameSetKeyHash {
         size_t operator()(const FrameSetKey& key) const noexcept;
     };
-    struct GroupRecipe {
-        struct Buffer {
-            uint32_t Index;
-            bool Dynamic;
-        };
-        uint32_t Group{0};
-        vector<Buffer> Buffers;
-        vector<uint32_t> Textures, Samplers;
-        size_t TextureCount{0}, SamplerCount{0};
-    };
-    const GroupRecipe& GetRecipe(ShaderProgram& program, uint32_t group);
+    const ShaderParameterGroupRecipe& GetRecipe(ShaderProgram& program, uint32_t group);
 
     render::Device* _device;
     DynamicCBufferArena::Descriptor _descriptor;
@@ -77,8 +70,6 @@ private:
     // Sets must be destroyed before their arena buffers.
     vector<unique_ptr<render::ShaderParameterSet>> _sets;
     unordered_map<FrameSetKey, render::ShaderParameterSet*, FrameSetKeyHash> _setCache;
-    // Layouts are borrowed only for this flight; clearing avoids pointer reuse across program lifetimes.
-    unordered_map<ShaderProgram*, vector<GroupRecipe>> _recipes;
     vector<FrameBufferBinding> _bindingScratch;
     FrameSetKey _keyScratch{};
     FrameDrawResourceStats _stats;

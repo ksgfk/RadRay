@@ -77,5 +77,32 @@ TEST(RenderGraphCompilerTest, MalformedIndicesAndVersionChainsAreDiagnostics) {
     EXPECT_FALSE(CompileRenderGraph(1, versions, passes, {}).IsValid());
     EXPECT_FALSE(CompileRenderGraph(0, versions, passes, {}).IsValid());
 }
+
+TEST(RenderGraphCompilerTest, ReusedWorkspaceOwnsNoResultAndRecoversAfterAnInvalidCompilation) {
+    RenderGraphCompilerWorkspace workspace;
+    const vector<RgResourceVersionNode> versions{{0, 0, 0, None, None, true}, {0, 0, 1, 0, 0, true}};
+    const vector<RgExecutionNode> passes{{{}, {1}, true}, {{0}, {}, true}};
+    const auto first = CompileRenderGraph(1, versions, passes, {}, {}, workspace);
+    ASSERT_TRUE(first.IsValid());
+    EXPECT_EQ(first.ExecutionOrder, (vector<uint32_t>{1, 0}));
+
+    const vector<RgResourceVersionNode> invalidVersions{{0, 0, 0, None, None, false}};
+    const vector<RgExecutionNode> invalidPasses{{{0}, {}, false}};
+    EXPECT_FALSE(CompileRenderGraph(1, invalidVersions, invalidPasses, {}, {}, workspace).IsValid());
+    const vector<RgExecutionNode> independentPasses{{{}, {}, true}};
+    const auto independent = CompileRenderGraph(0, {}, independentPasses, {}, {}, workspace);
+    ASSERT_TRUE(independent.IsValid());
+    EXPECT_EQ(independent.ExecutionOrder, (vector<uint32_t>{0}));
+    EXPECT_TRUE(independent.Passes[0].DataDependencies.empty());
+    EXPECT_TRUE(independent.Passes[0].HazardDependencies.empty());
+
+    const auto again = CompileRenderGraph(1, versions, passes, {}, {}, workspace);
+    ASSERT_TRUE(again.IsValid());
+    EXPECT_EQ(again.ExecutionOrder, first.ExecutionOrder);
+    EXPECT_EQ(again.Passes[0].HazardDependencies, first.Passes[0].HazardDependencies);
+    EXPECT_EQ(first.ExecutionOrder, (vector<uint32_t>{1, 0}));
+    EXPECT_EQ(first.Passes[0].HazardDependencies, (vector<uint32_t>{1}));
+    EXPECT_EQ(first.Lifetimes[0].LastUse, 1);
+}
 }  // namespace
 }  // namespace radray

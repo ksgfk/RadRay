@@ -44,8 +44,23 @@ bool FinalizeMeshDrawCommand(MeshDrawCommand& command) noexcept {
 std::optional<PreparedRendererList> PrepareRendererList(const RendererList& list, RenderGraphRasterBuilder& builder,
                                                         Nullable<const RendererListPassBindings*> bindings) {
     PreparedRendererList prepared{builder.GetPassHandle(), {}};
+    if (!list.Items.empty()) {
+        if (list.Items.size() != list.Commands.size()) {
+            builder.Reject("RendererListPreparation", "Draw order must reference every command exactly once");
+            return std::nullopt;
+        }
+        vector<bool> visited(list.Commands.size());
+        for (const auto& item : list.Items) {
+            if (item.CommandIndex >= list.Commands.size() || visited[item.CommandIndex]) {
+                builder.Reject("RendererListPreparation", "Draw order contains an invalid or duplicate command index");
+                return std::nullopt;
+            }
+            visited[item.CommandIndex] = true;
+        }
+    }
     prepared.Draws.reserve(list.Commands.size());
-    for (const auto& draw : list.Commands) {
+    for (size_t index = 0; index < list.Commands.size(); ++index) {
+        const auto& draw = list.GetCommand(index);
         if (!ValidateMeshDrawCommand(draw) || (bindings && !bindings->IsValidFor(builder, *draw.Program))) {
             builder.Reject("RendererListPreparation", "Draw geometry or pass parameter bindings are invalid");
             return std::nullopt;
@@ -65,7 +80,7 @@ std::optional<PreparedRendererList> PrepareRendererList(const RendererList& list
         if (!declare(*draw.Geometry->Ibv.Target, RgBufferAccess::Index, {draw.Geometry->Ibv.Offset, render::BufferRange::All()})) return std::nullopt;
         const auto program = builder.UseGraphicsProgram(*draw.Program, draw.PipelineState, draw.Geometry->VertexLayout, draw.Geometry->Topology);
         if (!program.IsValid()) return std::nullopt;
-        prepared.Draws.push_back({&draw, program, bindings ? bindings->Find(*draw.Program) : std::span<const RendererListPassBinding>{}});
+        prepared.Draws.push_back({&draw, {draw.Groups.data(), draw.Groups.size()}, program, bindings ? bindings->Find(*draw.Program) : std::span<const RendererListPassBinding>{}});
     }
     return prepared;
 }
@@ -79,14 +94,15 @@ void SubmitRendererList(const PreparedRendererList& list, RenderGraphRasterConte
     }
     auto& commands = ctx.Encoder();
     for (const auto& prepared : list.Draws) {
-        const auto& draw = *prepared.Command;
+        const auto& draw = *prepared.Description;
+        const auto groups = prepared.Groups;
         ++stats.Commands;
         ctx.BindGraphicsProgram(prepared.Program);
         const auto graphGroups = prepared.GraphGroups;
         size_t nativeIndex = 0, graphIndex = 0;
-        while (nativeIndex < draw.Groups.size() || graphIndex < graphGroups.size()) {
-            if (graphIndex == graphGroups.size() || (nativeIndex < draw.Groups.size() && draw.Groups[nativeIndex].Group < graphGroups[graphIndex].Group)) {
-                const auto& group = draw.Groups[nativeIndex++];
+        while (nativeIndex < groups.size() || graphIndex < graphGroups.size()) {
+            if (graphIndex == graphGroups.size() || (nativeIndex < groups.size() && groups[nativeIndex].Group < graphGroups[graphIndex].Group)) {
+                const auto& group = groups[nativeIndex++];
                 commands.BindPersistentShaderParameterSet(group.Group, group.Set.Get(), group.DynamicOffsets);
             } else {
                 ctx.BindParameterSet(graphGroups[graphIndex++].Parameters);

@@ -121,6 +121,8 @@ color 子资源；跨帧 history 仍通过专用 registry 导入。
 
 执行次序为 setup → ports/freeze → pure compile → storage/attachment plan → realize → prepare →
 barrier plan → record。任何 allocation/参数/PSO 准备失败都发生在图内命令录制前。图只录制，不提交。
+逻辑内容依赖与物理执行访问分开保存：storage plan 确定物理对象后，按 pass/物理 cell 聚合
+state、write 与 shader stages；barrier 规划和录制状态收口消费这一执行计划，不再逐 cell 重扫逻辑访问。
 同 mip/layer 的 depth/stencil 采用共同原生 layout，Buffer 采用整资源原生状态；内容依赖仍保持
 aspect/字节精度。不兼容的同 pass 原生状态组合被拒绝，保守扩大范围的原因写入报告。
 
@@ -137,10 +139,17 @@ fence 后完成 tickets。未提交的收据析构或取消会取消其操作。
 失败写内容失效，已录 barrier 状态仍作为 host fallback 的起点；整体失败不能推进 view history。
 完整提交和线程边界见 [帧与 GPU](frame-and-gpu.md)。
 
+Graph 独占 setup、编译结果和执行计划，完成收据不再保留整个 Graph 实现。提交阶段只保存最终状态
+与有效位的写回快照，成功 Submit 后释放；完成阶段保存 tickets、显式 retained owners、readback 存储
+以及可能自持 GPU 资源的泛型 pass payload，保留到 fence 完成。Graph 析构不会提前销毁这些 GPU owner。
+
 ## Per-flight Graph 资源、pool、history 与报告
 
 `RenderGraphRuntime` 为每个 flight 持有一个 `RenderGraphFrameResources`，聚合
-`RenderResourcePool`、Graph parameter sets/cache 与 `DynamicCBufferArena`。安全复用时先清 parameter
+`RenderResourcePool`、Graph parameter sets/cache、`DynamicCBufferArena` 与 CPU 编译工作空间。工作空间
+复用 version/cell 映射、读者和消费者集合、拓扑遍历暂存的容量；编译结果不借用工作空间，下一次编译
+不会改写前一张图的依赖或执行顺序。共享工作空间的调用必须串行，Clear 时释放其容量，不缓存图拓扑。
+安全复用时先清 parameter
 sets/cache，再 reset 上传 arena，最后让 pool BeginFlight trim/复用；Graph 析构不会释放 GPU 仍引用的
 descriptor 或上传页。parameter-set cache key 覆盖 layout/group、完整 binding 身份、数组元素、资源、
 静态 offset/range、stride/format 与 sampler；dynamic offset 不进入物理 set key，命中后不改写 descriptor。
@@ -200,19 +209,30 @@ CPU 纳秒数；比较结构时应排除这些会变动的时间字段。
 ## 场景快照与剔除
 
 `RenderSceneSnapshotBuilder::Build` 只在 game thread 调用，每 flight/frame 构建一次，与输出和视图数量无关。
-Forward 持久复用 builder 的去重表节点以及当前 flight 的材质、参数 bytes 和向量存储；每次仍复制
-当前 authoring 值，未引入材质 revision 或跨视图参数共享。一次性调用可使用 `BuildRenderSceneSnapshot`。
-它复制 primitive generation、MotionRevision、变换、世界 AABB、layer mask、CastShadow、禁用剔除标志、MeshBatch 范围及 light 参数，按首次遇到
+Forward 持久复用 builder 的去重表和连续 primitive 结构记录，以及当前 flight 的变换、包围盒、材质和向量存储。
+结构记录按场景发布顺序保存，稳定槽位直接比较 generation，只有成员或顺序变化才临时建立索引重排；
+常见一到两个 section 随记录内联存储，更多 section 可溢出。变换与世界包围盒只保留在各 flight 的物化值中。
+primitive 缓存以 generation 标识实例，RenderDataRevision 表示 section/geometry/range/local bounds
+的结构变化，TransformRevision 表示变换变化；稳定结构不重复读取和验证 draw 范围，稳定变换不重算
+世界包围盒。自定义 proxy 默认 revision 为 0，保持逐帧刷新；声明非零版本时必须覆盖相应数据和
+异步几何就绪变化。StaticMesh proxy 的不可变 mesh payload 与基类变换版本满足这一契约。
+一次性调用可使用 `BuildRenderSceneSnapshot`，跨调用结构缓存需持久持有 builder。
+它物化 primitive generation、MotionRevision、变换、世界 AABB、layer mask、禁用剔除标志、MeshBatch 范围及 light 参数，按首次遇到
 的 Material 去重并生成 pass 值快照。geometry/texture 仅借用指针，几何 owner 必须由 proxy 的
 `CollectAssetReferences` 先追加到宿主 retained refs。快照不保存 game object 或 asset ref；发布后只读。
 缺几何、空 draw、越界 index range 或不可用材质会跳过对应 section，并计入 `RenderSceneSnapshotStats`。
-索引溢出拒绝整次构建，输出为空。`ResetForReuse` 清逻辑内容并保留 vector 容量及以元素计的容量高水位。
+索引溢出拒绝整次构建，输出为空。primitive 值由 builder 管理，不得原地修改后继续复用版本；
+`ResetForReuse` 清逻辑内容及物化状态，保留 vector 容量及以元素计的容量高水位。
+每个 flight 仍持有独立值快照，builder 缓存只在 game thread 使用。材质按 generation 找回所属 flight 的
+物化值，不依赖场景遍历顺序；未就绪材质暂存于 builder，不覆盖公开快照中的有效材质槽。generation/revision 命中时
+复用该 flight 已物化的 pass 参数，并重新保活当前 ready 资源；新 flight、材质值/状态/资源就绪变化
+重新物化。`MaterialBytesCopied` 只计本次实际复制字节；结构、包围盒与材质另报 rebuilt/reused 计数。
 
 AABB 由局部中心/半长经过 affine transform 的绝对线性部分变换，支持旋转、非均匀和负缩放。
 非法或非有限 bounds 不参与视锥拒绝，统计并保守保留；mask 仍然有效，Forward 只警告一次。
 `Cull` 消费 snapshot 和一个 `ResolvedRenderView`，输出可见 primitive 索引与 view-space Z、可见光索引
 与 distance squared。primitive、view 和额外 mask 逐位相交；禁用剔除标志只绕过视锥测试。
-`PrimitiveSceneProxy::ResetMotion` 单调增加 revision；正常移动保留 revision。重建 proxy 使用新
+`PrimitiveSceneProxy::ResetMotion` 单调增加 MotionRevision；正常移动保留 MotionRevision，并增加 TransformRevision。重建 proxy 使用新
 generation，不能复用地址充当身份。光源快照也复制 CastShadow。
 
 视锥从实际 `ViewProjection` 提取，使用 D3D/Vulkan 公共的 zero-to-one clip depth。Perspective、Ortho、
@@ -226,7 +246,7 @@ generation，不能复用地址充当身份。光源快照也复制 CastShadow�
 
 每个相机 view 的主视锥剔除结果可供任意数量的 lists 消费；阴影 cascade 使用独立的 light view
 剔除，不能从相机可见集挑选投影者。不在 pass 内重复遍历 Scene。
-这些数组是帧局部 CPU 数据；不实现常驻 render scene、BVH、增量同步或 GPU-driven culling。
+这些数组是帧局部 CPU 数据；增量物化缓存不改变 Scene 的 game-thread 所有权，也不引入 BVH 或 GPU-driven culling。
 
 ## 材质 technique
 
@@ -247,6 +267,12 @@ secondary pass 的 texture/sampler 必须是 primary 声明的子集，按名称
 无效，因此缺纹理的 ForwardLit 仍可保留不消费材质的 DepthOnly。缺少/无效 pass 时 list 跳过对应 batch，
 不回退到 primary 或其他 pass。固定功能状态可用 `SetPassPipelineState` 逐 pass 覆盖，RenderQueue 属于材质。
 
+Material 实例拥有不可复用的 generation 与单调内容 revision。数值 setter 只在字节实际变化时增加
+revision，纹理/sampler/queue 变化也使快照失效；game-thread `GetRevision` 还观察资源就绪状态以及
+通过可变 `GetPipelineState` 引用写入的状态。`BuildRenderData` 是已物化材质快照的更新入口，消费方
+不得原地修改其值后继续把原 generation/revision 当作有效缓存；手工修改前调用 `Invalidate`，下一次
+Build 完整恢复 authoring 值。ProgramFrameId 由 builder 每帧分配，不影响材质内容版本。已发布 flight 的快照保持只读。
+
 ## Renderer lists 与帧内绘制资源
 
 `RendererListDesc` 指定所需 pass、闭区间 queue 范围、额外 layer mask、view/culling 和排序方式。
@@ -258,21 +284,29 @@ processor 每 batch 最多输出一条 command，拒绝原因汇总进 `Renderer
 排序只使用 queue、按快照首次出现分配的 ProgramFrameId、material 索引、view depth、primitive/batch
 索引。StateThenFrontToBack 按 queue/program/material 聚簇后从近到远；FrontToBack 与 BackToFront 按
 queue 后的深度顺序排列。primitive/batch 为稳定的最终 tie-breaker，不使用资源地址决定绘制顺序。
-所有过滤后的 commands 及其 view/group offsets 必须保存至 graph 执行完毕。
+`Commands` 保存发布顺序的完整 payload，紧凑 `RendererListItem` 保存排序值与 command 索引；排序仅
+移动 Items。按执行顺序读取使用 `GetCommand`，不得把 Commands 的物理顺序当作绘制顺序。手工装配
+且 Items 为空的列表按发布顺序执行；非空 Items 必须完整且唯一地引用所有 commands，在 graph setup
+时验证。所有过滤后的 commands 及其 view/group offsets 必须保存至 graph 执行完毕。
 
 `FrameDrawResources` 持有每 flight 的 `DynamicCBufferArena` 与 `ShaderParameterSet`。`PrepareGroup`
 在 graph 执行前上传 bytes、按实际 binding number 排列 dynamic offsets，并解析纹理 subview/sampler。
-buffer 排序、dynamic 标志和资源反射按 program/group 每 flight 解析一次，临时绑定与 set key 复用容量；
-recipe 在安全复用时清除，避免旧 program 指针重用。Forward 每个视图/list 内按 program、primitive
-复用对象参数，同一物体多个 section 不重复上传。跨视图和历史语义不同的 pass 使用独立 processor。
-`FrameDrawResourceStats` 提供 recipe 构建、组准备、set 命中/创建和常量复制字节数。
+buffer 排序、dynamic 标志和资源反射形成 `ShaderParameterGroupRecipe`，由拥有 layout 的 ShaderProgram
+按 group 惰性创建并保持到 program 销毁。准备调用仍归 render thread，共享 program 的准备不能并发
+修改其缓存。新 program 自带新 recipe 身份，不通过借用指针维持跨 program 的缓存。
+临时绑定与 set key 复用容量；flight 安全复用仍清理 native sets 并重置 arena，不清 program recipe。
+Forward 在同一 processor 内按 program、primitive 复用对象参数，同一物体多个 section 不重复上传；
+HDR 同一 view 的列表和同一主视图的四个阴影级联已共享 processor，view-dependent motion
+仍单独准备。`FrameDrawResourceStats::RecipeBuilds` 计实际首次构建，warm flight 为 0；另报组准备、
+set 命中/创建和常量复制字节数。set 命中不代表本次参数上传被省略。
 set cache 精确 key 为 pipeline layout、group、所有 buffer target/静态 offset/range、解析后的 texture view
 和 sampler（含绑定身份/数组元素）。dynamic offset 不属于 key，相同 backing page 上的切片可复用 set；
 spill 或静态 range/资源变化创建新 set。缓存命中后绝不改写已发布 descriptor，执行阶段不上传或写 set。
 
 复用顺序为清空 renderer lists/借用 command → 清 set cache 与 sets → reset/裁减 arena，全部依赖既有
-flight fence 安全边界。`MeshDrawCommand` 不拥有 RHI 资源或资产，只保存 program、PSO 输入、geometry、
-draw range、已准备的 groups 和排序值。setup 中 `PrepareRendererList` 验证几何/有序唯一 groups、
+flight fence 安全边界。`MeshDrawDescription` 保存与视图无关的 program、PSO 输入、geometry 和 draw range；
+`MeshDrawCommand` 加入帧内已准备的 groups，均不拥有 RHI 资源或资产。setup 中 `PrepareRendererList`
+验证执行索引、几何/有序唯一 groups、
 合并 graph 组并声明各 PSO，得到借用原 list 与 bindings 的 `PreparedRendererList`。二者必须保持不变
 直到图执行完毕。`SubmitRendererList` 只接受 prepared list，以 pass-local handle 绑定已准备的 PSO，
 再执行 bind/draw；record 不逐 draw 查找 PSO、分配校验容器或重建参数。
@@ -346,7 +380,7 @@ HDR 的两个配置组合如下；效果 shader 只属于产品层，基础图/R
 | 输出 | Bloom、曝光、tone map、SDR 合成 | 相同 |
 
 局部灯最多 256、每 tile 默认 64；溢出 tile 回退遍历完整灯列表，不能静默丢灯。Spot 与 Point 通过
-同一固定大小 GPU 记录传输。级联阴影只收集 CastShadow primitive；主相机 cull 与 tile frustum 额外
+同一固定大小 GPU 记录传输。主方向光启用 CastShadow 时，级联阴影请求可见 opaque 的 ShadowCaster 材质 pass；主相机 cull 与 tile frustum 额外
 覆盖一个像素，避免 jitter 边缘漏物体。history color/depth 用三图环，TAA 只处理 opaque/sky；sky
 按相机旋转重投影，运动只包含刚体变换。effect signature 改变、cut、尺寸/rect/AA 变化先失效。
 
@@ -367,6 +401,6 @@ motion、AO、tile occupancy/overflow、Bloom、cascade、当前/历史 HDR 和�
 ImGui；默认选择 workload 中首个可用 view family。正常帧不增加全队列等待。
 展示宿主与回归命令见 [构建与测试](../guide/build-test.md#样例与专项验证)。
 
-当前不实现 async compute、并行录制、pass merge、heap aliasing、常驻场景、GPUScene、GPU count buffer、
+当前不实现 async compute、并行录制、heap aliasing、常驻场景、GPUScene、GPU count buffer、
 depth resolve、骨骼/形变运动、透明时域重投影或跨分辨率 history 重建。缩放使用产品合成采样，
 不声称实现生产级时域超分；pool/history 沿用既有 flight 同步。

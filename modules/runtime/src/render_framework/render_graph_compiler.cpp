@@ -18,6 +18,16 @@ CompiledRenderGraph CompileRenderGraph(uint32_t resourceCount,
                                        std::span<const RgExecutionNode> passes,
                                        std::span<const uint32_t> roots,
                                        const RenderGraphCompileOptions& options) {
+    RenderGraphCompilerWorkspace workspace;
+    return CompileRenderGraph(resourceCount, versions, passes, roots, options, workspace);
+}
+
+CompiledRenderGraph CompileRenderGraph(uint32_t resourceCount,
+                                       std::span<const RgResourceVersionNode> versions,
+                                       std::span<const RgExecutionNode> passes,
+                                       std::span<const uint32_t> roots,
+                                       const RenderGraphCompileOptions& options,
+                                       RenderGraphCompilerWorkspace& workspace) {
     CompiledRenderGraph result;
     result.Versions.assign(versions.begin(), versions.end());
     result.Passes.resize(passes.size());
@@ -25,9 +35,13 @@ CompiledRenderGraph CompileRenderGraph(uint32_t resourceCount,
     const auto error = [&](std::string_view code, string message, uint32_t pass = RgInvalidIndex, uint32_t resource = RgInvalidIndex) {
         result.Diagnostics.push_back({string{code}, std::move(message), pass, resource});
     };
-    vector<vector<uint32_t>> readers(versions.size());
-    vector<uint32_t> writeOwners(versions.size(), RgInvalidIndex);
-    vector<uint32_t> successors(versions.size(), RgInvalidIndex);
+    auto& readers = workspace.Readers;
+    auto& writeOwners = workspace.WriteOwners;
+    auto& successors = workspace.Successors;
+    readers.resize(versions.size());
+    for (auto& entries : readers) entries.clear();
+    writeOwners.assign(versions.size(), RgInvalidIndex);
+    successors.assign(versions.size(), RgInvalidIndex);
     for (uint32_t v = 0; v < versions.size(); ++v) {
         const auto& value = versions[v];
         if (value.Resource >= resourceCount || (value.Producer != RgInvalidIndex && value.Producer >= passes.size()))
@@ -70,7 +84,8 @@ CompiledRenderGraph CompileRenderGraph(uint32_t resourceCount,
     for (uint32_t v = 0; v < versions.size(); ++v)
         if (versions[v].Producer != RgInvalidIndex && writeOwners[v] == RgInvalidIndex)
             error("MissingProducer", "A produced version is absent from its pass writes", versions[v].Producer, versions[v].Resource);
-    vector<uint32_t> pending;
+    auto& pending = workspace.Pending;
+    pending.clear();
     for (uint32_t p = 0; p < passes.size(); ++p) {
         if (passes[p].SideEffect || !options.CullPasses) {
             pending.push_back(p);
@@ -122,12 +137,17 @@ CompiledRenderGraph CompileRenderGraph(uint32_t resourceCount,
         std::sort(compiled.DataDependencies.begin(), compiled.DataDependencies.end());
         std::sort(compiled.HazardDependencies.begin(), compiled.HazardDependencies.end());
     }
-    vector<vector<uint32_t>> consumers(passes.size());
-    vector<uint32_t> indegrees(passes.size(), 0);
-    vector<uint32_t> ready;
+    auto& consumers = workspace.Consumers;
+    auto& indegrees = workspace.Indegrees;
+    auto& ready = workspace.Ready;
+    consumers.resize(passes.size());
+    for (auto& entries : consumers) entries.clear();
+    indegrees.assign(passes.size(), 0);
+    ready.clear();
     for (uint32_t p = 0; p < passes.size(); ++p) {
         if (!result.Passes[p].Live) continue;
-        auto dependencies = result.Passes[p].DataDependencies;
+        auto& dependencies = workspace.Dependencies;
+        dependencies = result.Passes[p].DataDependencies;
         for (const auto dependency : result.Passes[p].HazardDependencies) AddDependency(dependencies, dependency, p);
         indegrees[p] = static_cast<uint32_t>(dependencies.size());
         for (const auto dependency : dependencies) consumers[dependency].push_back(p);

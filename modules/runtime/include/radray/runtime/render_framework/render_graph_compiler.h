@@ -63,6 +63,19 @@ struct CompiledRenderGraph {
     bool IsValid() const noexcept { return Diagnostics.empty(); }
 };
 
+/// Reusable CPU-only scratch. A compilation owns its result and never borrows this storage.
+/// Calls sharing a workspace must be serialized; no flight completion is needed between calls.
+struct RenderGraphCompilerWorkspace {
+    vector<vector<uint32_t>> Readers;
+    vector<vector<uint32_t>> Consumers;
+    vector<uint32_t> WriteOwners;
+    vector<uint32_t> Successors;
+    vector<uint32_t> Pending;
+    vector<uint32_t> Indegrees;
+    vector<uint32_t> Ready;
+    vector<uint32_t> Dependencies;
+};
+
 /// Pure CPU compilation. Every index is local to this input, and roots name the exact
 /// content versions observed outside the graph. No RHI object or shader program is accessed.
 CompiledRenderGraph CompileRenderGraph(
@@ -71,5 +84,13 @@ CompiledRenderGraph CompileRenderGraph(
     std::span<const RgExecutionNode> passes,
     std::span<const uint32_t> roots,
     const RenderGraphCompileOptions& options = {});
+
+CompiledRenderGraph CompileRenderGraph(
+    uint32_t resourceCount,
+    std::span<const RgResourceVersionNode> versions,
+    std::span<const RgExecutionNode> passes,
+    std::span<const uint32_t> roots,
+    const RenderGraphCompileOptions& options,
+    RenderGraphCompilerWorkspace& workspace);
 
 }  // namespace radray

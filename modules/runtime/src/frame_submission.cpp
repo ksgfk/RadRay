@@ -10,6 +10,7 @@ bool FrameSubmission::Submit(uint64_t serial) {
     if (serial != _serial || Status() != FrameOperationStatus::Recorded) return false;
     if (OnSubmitted) OnSubmitted();
     _status.store(FrameOperationStatus::Submitted, std::memory_order_release);
+    OnSubmitted = {};
     return true;
 }
 bool FrameSubmission::Complete(uint64_t serial, bool success) {

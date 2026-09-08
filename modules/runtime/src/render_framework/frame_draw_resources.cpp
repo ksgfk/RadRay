@@ -16,7 +16,6 @@ FrameDrawResources::~FrameDrawResources() noexcept = default;
 void FrameDrawResources::ClearSets() noexcept {
     _setCache.clear();
     _sets.clear();
-    _recipes.clear();
 }
 
 bool FrameDrawResources::BeginFrame(HostWriteBatch& hostWrites) noexcept {
@@ -54,32 +53,10 @@ size_t FrameDrawResources::FrameSetKeyHash::operator()(const FrameSetKey& key) c
     return result;
 }
 
-const FrameDrawResources::GroupRecipe& FrameDrawResources::GetRecipe(ShaderProgram& program, uint32_t group) {
-    auto& recipes = _recipes[&program];
-    for (const auto& recipe : recipes)
-        if (recipe.Group == group) return recipe;
-    auto& recipe = recipes.emplace_back();
-    recipe.Group = group;
-    const auto& layout = program.GetParameterLayout();
-    const auto buffers = layout.Buffers();
-    for (uint32_t i = 0; i < buffers.size(); ++i)
-        if (buffers[i].Group == group) recipe.Buffers.push_back({i, program.IsBufferDynamic(buffers[i].Name)});
-    std::sort(recipe.Buffers.begin(), recipe.Buffers.end(), [&](const auto& a, const auto& b) {
-        return buffers[a.Index].BindingNumber < buffers[b.Index].BindingNumber;
-    });
-    const auto parameters = layout.Parameters();
-    for (uint32_t i = 0; i < parameters.size(); ++i) {
-        const auto& parameter = parameters[i].Info;
-        if (parameter.Group != group) continue;
-        if (parameter.Kind == ShaderParameterKind::Texture) {
-            recipe.Textures.push_back(i);
-            recipe.TextureCount += parameter.ElementCount;
-        } else if (parameter.Kind == ShaderParameterKind::Sampler) {
-            recipe.Samplers.push_back(i);
-            recipe.SamplerCount += parameter.ElementCount;
-        }
-    }
-    ++_stats.RecipeBuilds;
+const ShaderParameterGroupRecipe& FrameDrawResources::GetRecipe(ShaderProgram& program, uint32_t group) {
+    const auto before = program.GetParameterGroupRecipeCount();
+    const auto& recipe = program.GetOrCreateParameterGroupRecipe(group);
+    _stats.RecipeBuilds += program.GetParameterGroupRecipeCount() - before;
     return recipe;
 }
 

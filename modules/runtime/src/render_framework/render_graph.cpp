@@ -99,6 +99,16 @@ render::ShaderStages ProgramStages(const ShaderProgram& program) noexcept {
     }
     return stages;
 }
+
+struct GraphCompileWorkspace {
+    RenderGraphCompilerWorkspace Compiler;
+    vector<RgResourceVersionNode> Versions;
+    vector<RgExecutionNode> Nodes;
+    vector<vector<vector<uint32_t>>> Values;
+    vector<vector<vector<uint32_t>>> Producers;
+    vector<vector<vector<uint8_t>>> Initialized;
+    vector<uint32_t> Roots;
+};
 }  // namespace
 
 struct RenderGraphFrameResources::Impl {
@@ -160,6 +170,7 @@ struct RenderGraphFrameResources::Impl {
     // Sets are released before the upload pages and pooled resources they reference.
     vector<unique_ptr<render::ShaderParameterSet>> Sets;
     unordered_map<ParameterSetKey, render::ShaderParameterSet*, ParameterSetKeyHash> SetCache;
+    GraphCompileWorkspace CompileWorkspace;
 };
 
 RenderGraphFrameResources::RenderGraphFrameResources(
@@ -194,6 +205,7 @@ void RenderGraphFrameResources::Clear() {
     _impl->Sets.clear();
     if (_impl->Arena) _impl->Arena->Clear();
     _impl->Pool.Clear();
+    _impl->CompileWorkspace = {};
 }
 
 struct RenderGraph::Impl {
@@ -250,6 +262,75 @@ struct RenderGraph::Impl {
         bool Read, Write, ValidAfter;
         uint32_t Version{0};
         render::ShaderStages Stages{render::ShaderStage::UNKNOWN};
+    };
+    struct PhysicalAccess {
+        uint32_t Resource, Physical, Cell, State;
+        bool Write;
+        render::ShaderStages Stages;
+    };
+    struct PassExecutionPlan {
+        vector<PhysicalAccess> Accesses;
+        vector<render::ResourceBarrierDescriptor> Barriers;
+    };
+    struct SubmissionState {
+        struct TextureCommit {
+            Nullable<PooledTexture*> Pool{nullptr};
+            vector<RenderExternalTexture*> Imports;
+            vector<render::TextureStates> States;
+            vector<uint8_t> Valid;
+            bool Written{false};
+        };
+        struct BufferCommit {
+            Nullable<PooledBuffer*> Pool{nullptr};
+            vector<RenderExternalBuffer*> Imports;
+            render::BufferStates State;
+            bool Valid{false}, Written{false};
+        };
+        vector<TextureCommit> Textures;
+        vector<BufferCommit> Buffers;
+
+        void Commit() {
+            for (const auto& texture : Textures) {
+                if (texture.Pool) std::copy(texture.States.begin(), texture.States.end(), texture.Pool->States.begin());
+                for (auto* sink : texture.Imports) {
+                    std::copy(texture.States.begin(), texture.States.end(), sink->SubresourceStates.begin());
+                    std::copy(texture.Valid.begin(), texture.Valid.end(), sink->ContentValid.begin());
+                    sink->Written = texture.Written;
+                }
+            }
+            for (const auto& buffer : Buffers) {
+                if (buffer.Pool) buffer.Pool->State = buffer.State;
+                for (auto* sink : buffer.Imports) {
+                    sink->State = buffer.State;
+                    sink->ContentValid = buffer.Valid;
+                    sink->Written = buffer.Written;
+                }
+            }
+        }
+    };
+    struct SubmissionResources {
+        vector<shared_ptr<void>> Owners;
+        vector<shared_ptr<RgReadbackTicket::Storage>> Readbacks;
+        // Generic payloads may own GPU resources, so their lifetime still extends to completion.
+        vector<unique_ptr<Payload>> Payloads;
+        vector<shared_ptr<FrameSubmission>> Tickets;
+
+        void Submit(uint64_t serial) {
+            for (const auto& ticket : Tickets) {
+                if (ticket->Status() == FrameOperationStatus::Recorded) ticket->Submit(serial);
+                else ticket->Cancel();
+            }
+        }
+        void Complete(uint64_t serial, bool success) {
+            for (const auto& ticket : Tickets) {
+                if (ticket->Status() == FrameOperationStatus::Submitted) ticket->Complete(serial, success);
+                else ticket->Cancel();
+            }
+        }
+    };
+    struct SubmissionData {
+        shared_ptr<SubmissionState> State;
+        shared_ptr<SubmissionResources> Retained;
     };
     struct Color {
         uint32_t View;
@@ -338,7 +419,6 @@ struct RenderGraph::Impl {
         Nullable<render::Framebuffer*> Framebuffer{nullptr};
         std::optional<GraphicsPassState> PassState;
         vector<render::ColorClearValue> Clears;
-        vector<render::ResourceBarrierDescriptor> Barriers;
         uint32_t Width{0}, Height{0}, Layers{0}, Samples{0};
         render::ShaderStages UavWriteStages{render::ShaderStage::UNKNOWN};
         bool AllowUavWrites{false};
@@ -365,6 +445,7 @@ struct RenderGraph::Impl {
     vector<shared_ptr<void>> Owners;
     RenderGraphCompileOptions Options;
     CompiledRenderGraph CompiledGraph;
+    vector<PassExecutionPlan> ExecutionPlan;
     RenderGraphExecutionReport OwnedReport;
     RenderGraphExecutionReport& Report;
 
@@ -405,59 +486,67 @@ struct RenderGraph::Impl {
         }
         return true;
     }
-    void CommitStates() {
-        for (auto& resource : Resources) {
-            if (resource.States.empty()) continue;
-            const auto& actual = Resources[resource.Physical].States;
-            if (resource.IsTexture) {
-                auto states = resource.ExternalTexture ? resource.ExternalTexture->SubresourceStates : resource.PoolTexture ? std::span<render::TextureStates>{resource.PoolTexture->States}
-                                                                                                                            : std::span<render::TextureStates>{};
-                for (size_t i = 0; i < states.size(); ++i) states[i] = static_cast<render::TextureState>(actual[i]);
-                if (resource.ExternalTexture) {
-                    auto validity = resource.ExternalTexture->ContentValid;
-                    for (uint32_t cell = 0; cell < validity.size(); ++cell) {
-                        validity[cell] = resource.Valid[cell];
-                        if (validity.size() == resource.SubresourceCount() && resource.AspectCount() == 2) validity[cell] &= resource.Valid[cell + resource.SubresourceCount()];
-                    }
-                    resource.ExternalTexture->Written = resource.Written;
-                }
-                for (auto* sink : resource.TextureImports) {
-                    if (sink == resource.ExternalTexture.Get()) continue;
-                    std::copy(resource.ExternalTexture->SubresourceStates.begin(), resource.ExternalTexture->SubresourceStates.end(), sink->SubresourceStates.begin());
-                    std::copy(resource.ExternalTexture->ContentValid.begin(), resource.ExternalTexture->ContentValid.end(), sink->ContentValid.begin());
-                    sink->Written = resource.Written;
-                }
-            } else if (resource.ExternalBuffer) {
-                resource.ExternalBuffer->State = static_cast<render::BufferState>(actual[0]);
-                resource.ExternalBuffer->ContentValid = std::all_of(resource.Valid.begin(), resource.Valid.end(), [](uint8_t valid) { return valid != 0; });
-                resource.ExternalBuffer->Written = resource.Written;
-                for (auto* sink : resource.BufferImports) {
-                    sink->State = resource.ExternalBuffer->State;
-                    sink->ContentValid = resource.ExternalBuffer->ContentValid;
-                    sink->Written = resource.Written;
-                }
-            } else if (resource.PoolBuffer)
-                resource.PoolBuffer->State = static_cast<render::BufferState>(actual[0]);
-        }
-    }
+    SubmissionData DetachSubmissionResources();
     bool ValidateResources();
     bool ResolvePorts();
     bool NormalizePasses();
     void Cull();
     void PlanStorage();
+    void BuildExecutionPlan();
     bool Realize();
     void PlanBarriers();
     void OptimizeRaster();
 };
 
+RenderGraph::Impl::SubmissionData RenderGraph::Impl::DetachSubmissionResources() {
+    SubmissionData submission{make_shared<SubmissionState>(), make_shared<SubmissionResources>()};
+    auto& retained = submission.Retained;
+    retained->Owners = Owners;
+    for (auto& pass : Passes) {
+        if (pass.Data) retained->Payloads.push_back(std::move(pass.Data));
+        if (pass.Ticket._state) retained->Tickets.push_back(pass.Ticket._state);
+    }
+    for (uint32_t index = 0; index < Resources.size(); ++index) {
+        auto& resource = Resources[index];
+        if (resource.Readback) retained->Readbacks.push_back(resource.Readback);
+        if (resource.States.empty() || resource.Physical != index) continue;
+        if (resource.IsTexture) {
+            if (!resource.ExternalTexture && !resource.PoolTexture) continue;
+            auto& commit = submission.State->Textures.emplace_back();
+            commit.Pool = resource.PoolTexture;
+            commit.Imports = std::move(resource.TextureImports);
+            commit.Written = resource.Written;
+            commit.States.reserve(resource.States.size());
+            for (const auto state : resource.States) commit.States.push_back(static_cast<render::TextureState>(state));
+            if (resource.ExternalTexture) {
+                const auto count = resource.ExternalTexture->ContentValid.size();
+                commit.Valid.resize(count);
+                for (uint32_t cell = 0; cell < count; ++cell) {
+                    commit.Valid[cell] = resource.Valid[cell];
+                    if (count == resource.SubresourceCount() && resource.AspectCount() == 2)
+                        commit.Valid[cell] &= resource.Valid[cell + resource.SubresourceCount()];
+                }
+            }
+        } else if (resource.ExternalBuffer || resource.PoolBuffer) {
+            auto& commit = submission.State->Buffers.emplace_back();
+            commit.Pool = resource.PoolBuffer;
+            commit.Imports = std::move(resource.BufferImports);
+            commit.State = static_cast<render::BufferState>(resource.States[0]);
+            commit.Valid = std::all_of(resource.Valid.begin(), resource.Valid.end(), [](uint8_t valid) { return valid != 0; });
+            commit.Written = resource.Written;
+        }
+    }
+    return submission;
+}
+
 RenderGraph::RenderGraph(render::Device& device, RenderResourcePool& pool, render::RenderPassRegistry& registry, std::string_view name)
-    : _impl(make_shared<Impl>(device, pool, registry, nullptr, name)) {}
+    : _impl(make_unique<Impl>(device, pool, registry, nullptr, name)) {}
 RenderGraph::RenderGraph(render::Device& device, RenderGraphFrameResources& resources,
                          render::RenderPassRegistry& registry, std::string_view name)
-    : _impl(make_shared<Impl>(device, resources.GetPool(), registry, &resources, name)) {}
+    : _impl(make_unique<Impl>(device, resources.GetPool(), registry, &resources, name)) {}
 RenderGraph::RenderGraph(render::Device& device, RenderGraphFrameResources& resources,
                          render::RenderPassRegistry& registry, std::string_view name, uint64_t& generation, RenderGraphExecutionReport& report)
-    : _impl(make_shared<Impl>(device, resources.GetPool(), registry, &resources, name, &report)) { generation = _impl->Generation; }
+    : _impl(make_unique<Impl>(device, resources.GetPool(), registry, &resources, name, &report)) { generation = _impl->Generation; }
 RenderGraph::~RenderGraph() = default;
 uint64_t RenderGraph::GetGeneration() const noexcept { return _impl->Generation; }
 uint64_t RenderGraph::SetResourceView(uint64_t viewId) {
@@ -1600,16 +1689,29 @@ bool RenderGraph::Impl::NormalizePasses() {
 }
 
 void RenderGraph::Impl::Cull() {
-    vector<RgResourceVersionNode> versions;
-    vector<RgExecutionNode> nodes(Passes.size());
-    vector<vector<vector<uint32_t>>> values(Resources.size());
-    vector<vector<vector<uint32_t>>> producers(Resources.size());
-    vector<vector<vector<uint8_t>>> initialized(Resources.size());
+    GraphCompileWorkspace localWorkspace;
+    auto& workspace = FrameResources ? FrameResources->_impl->CompileWorkspace : localWorkspace;
+    auto& versions = workspace.Versions;
+    auto& nodes = workspace.Nodes;
+    auto& values = workspace.Values;
+    auto& producers = workspace.Producers;
+    auto& initialized = workspace.Initialized;
+    versions.clear();
+    nodes.resize(Passes.size());
+    for (auto& node : nodes) {
+        node.Reads.clear();
+        node.Writes.clear();
+    }
+    values.resize(Resources.size());
+    producers.resize(Resources.size());
+    initialized.resize(Resources.size());
     for (uint32_t r = 0; r < Resources.size(); ++r) {
         const auto count = Resources[r].VersionParents.size();
         values[r].resize(count);
-        producers[r].assign(count, vector<uint32_t>(Resources[r].CellCount(), InvalidIndex));
-        initialized[r].assign(count, vector<uint8_t>(Resources[r].CellCount(), 0));
+        producers[r].resize(count);
+        initialized[r].resize(count);
+        for (auto& cells : producers[r]) cells.assign(Resources[r].CellCount(), InvalidIndex);
+        for (auto& cells : initialized[r]) cells.assign(Resources[r].CellCount(), 0);
     }
     for (uint32_t p = 0; p < Passes.size(); ++p) {
         nodes[p].SideEffect = Passes[p].SideEffect;
@@ -1652,12 +1754,13 @@ void RenderGraph::Impl::Cull() {
             if (access.Write) AddUnique(nodes[p].Writes, values[access.Resource][access.Version][access.Cell]);
         }
     }
-    vector<uint32_t> roots;
+    auto& roots = workspace.Roots;
+    roots.clear();
     for (uint32_t r = 0; r < Resources.size(); ++r)
         if (Resources[r].ExternalAccess == RenderGraphExternalAccess::ObservableOutput)
             for (const auto v : values[r].back())
                 if (versions[v].Producer != InvalidIndex) roots.push_back(v);
-    CompiledGraph = CompileRenderGraph(static_cast<uint32_t>(Resources.size()), versions, nodes, roots, Options);
+    CompiledGraph = CompileRenderGraph(static_cast<uint32_t>(Resources.size()), versions, nodes, roots, Options, workspace.Compiler);
     for (const auto& diagnostic : CompiledGraph.Diagnostics)
         Error(diagnostic.Code, diagnostic.Message, diagnostic.Pass, diagnostic.Resource);
     for (uint32_t p = 0; p < Passes.size(); ++p) {
@@ -1723,6 +1826,7 @@ bool RenderGraph::Compile() {
     if (impl.Report.Diagnostics.empty()) {
         impl.PlanStorage();
         impl.OptimizeRaster();
+        impl.BuildExecutionPlan();
     }
     impl.Compiled = impl.Report.Diagnostics.empty();
     return impl.Compiled;
@@ -2129,6 +2233,29 @@ bool RenderGraph::Prepare() {
     return true;
 }
 
+void RenderGraph::Impl::BuildExecutionPlan() {
+    ExecutionPlan.resize(Passes.size());
+    unordered_map<uint64_t, uint32_t> indices;
+    for (const uint32_t p : CompiledGraph.ExecutionOrder) {
+        auto& plan = ExecutionPlan[p];
+        indices.clear();
+        plan.Accesses.reserve(Passes[p].Cells.size());
+        for (const auto& access : Passes[p].Cells) {
+            const auto& resource = Resources[access.Resource];
+            const auto physical = resource.Physical, cell = resource.PhysicalCell(access.Cell);
+            const auto key = uint64_t{physical} << 32 | cell;
+            const auto [it, inserted] = indices.emplace(key, static_cast<uint32_t>(plan.Accesses.size()));
+            if (inserted)
+                plan.Accesses.push_back({access.Resource, physical, cell, access.State, access.Write, access.Stages});
+            else {
+                auto& existing = plan.Accesses[it->second];
+                existing.Write |= access.Write;
+                existing.Stages |= access.Stages;
+            }
+        }
+    }
+}
+
 void RenderGraph::Impl::PlanBarriers() {
     vector<vector<uint32_t>> states;
     vector<vector<uint8_t>> writes;
@@ -2139,30 +2266,23 @@ void RenderGraph::Impl::PlanBarriers() {
         stages.emplace_back(resource.States.size(), render::ShaderStage::UNKNOWN);
     }
     for (const uint32_t p : CompiledGraph.ExecutionOrder) {
-        auto& pass = Passes[p];
+        auto& plan = ExecutionPlan[p];
         vector<uint32_t> uavResources;
-        unordered_set<uint64_t> visited;
         const bool continuation = Report.Passes[p].Type == RgPassType::Raster && Report.Passes[p].RasterGroup != p;
-        for (const auto& access : pass.Cells) {
+        for (const auto& access : plan.Accesses) {
             auto& resource = Resources[access.Resource];
-            const auto physical = resource.Physical, cell = resource.PhysicalCell(access.Cell);
-            if (!visited.insert(uint64_t(physical) << 32 | cell).second) continue;
-            bool write = false;
-            render::ShaderStages afterStages;
-            for (const auto& candidate : pass.Cells)
-                if (candidate.Resource == access.Resource && resource.PhysicalCell(candidate.Cell) == cell) {
-                    write |= candidate.Write;
-                    afterStages |= candidate.Stages;
-                }
+            const auto physical = access.Physical, cell = access.Cell;
+            const bool write = access.Write;
+            const auto afterStages = access.Stages;
             auto& state = states[physical][cell];
             auto& beforeStages = stages[physical][cell];
             const uint32_t uav = resource.IsTexture ? uint32_t(render::TextureState::UnorderedAccess) : uint32_t(render::BufferState::UnorderedAccess);
             const bool sameStateWrite = state != uav && (writes[physical][cell] || write);
             if (!continuation && (state != access.State || sameStateWrite || !Options.EliminateBarriers)) {
                 if (resource.IsTexture)
-                    pass.Barriers.push_back(render::BarrierTextureDescriptor{.Target = resource.NativeTexture(), .Before = static_cast<render::TextureState>(state), .After = static_cast<render::TextureState>(access.State), .IsSubresourceBarrier = true, .Range = {cell / resource.TextureDesc.MipLevels, 1, cell % resource.TextureDesc.MipLevels, 1}, .BeforeStages = beforeStages, .AfterStages = afterStages});
+                    plan.Barriers.push_back(render::BarrierTextureDescriptor{.Target = resource.NativeTexture(), .Before = static_cast<render::TextureState>(state), .After = static_cast<render::TextureState>(access.State), .IsSubresourceBarrier = true, .Range = {cell / resource.TextureDesc.MipLevels, 1, cell % resource.TextureDesc.MipLevels, 1}, .BeforeStages = beforeStages, .AfterStages = afterStages});
                 else
-                    pass.Barriers.push_back(render::BarrierBufferDescriptor{.Target = resource.NativeBuffer(), .Before = static_cast<render::BufferState>(state), .After = static_cast<render::BufferState>(access.State), .BeforeStages = beforeStages, .AfterStages = afterStages});
+                    plan.Barriers.push_back(render::BarrierBufferDescriptor{.Target = resource.NativeBuffer(), .Before = static_cast<render::BufferState>(state), .After = static_cast<render::BufferState>(access.State), .BeforeStages = beforeStages, .AfterStages = afterStages});
                 Report.Barriers.push_back({p, access.Resource, cell, state, access.State, false,
                                            !resource.IsTexture ? "Whole-buffer state; content dependencies retain byte ranges" : resource.AspectCount() == 2 ? "Coupled depth/stencil native layout; content dependencies retain aspects"
                                                                                                                                                              : "Exact mip/layer"});
@@ -2179,7 +2299,7 @@ void RenderGraph::Impl::PlanBarriers() {
         for (const auto r : uavResources) {
             auto& resource = Resources[r];
             render::Resource* native = resource.IsTexture ? static_cast<render::Resource*>(resource.NativeTexture()) : static_cast<render::Resource*>(resource.NativeBuffer());
-            pass.Barriers.push_back(render::BarrierUavDescriptor{native});
+            plan.Barriers.push_back(render::BarrierUavDescriptor{native});
             const auto state = resource.IsTexture ? uint32_t(render::TextureState::UnorderedAccess) : uint32_t(render::BufferState::UnorderedAccess);
             Report.Barriers.push_back({p, r, 0, state, state, true, "UAV memory dependency"});
             ++Report.UavBarriers;
@@ -2218,22 +2338,20 @@ RenderGraphExecutionResult RenderGraph::Execute(render::CommandBuffer& command) 
         auto& report = impl.Report.Passes[p];
         if (!report.Live) continue;
         auto& pass = impl.Passes[p];
+        const auto& plan = impl.ExecutionPlan[p];
         command.PushDebugGroup(report.Name);
         result.CommandsRecorded = true;
-        if (!pass.Barriers.empty()) {
+        if (!plan.Barriers.empty()) {
             if (impl.Options.BatchBarriers) {
-                command.ResourceBarrier(pass.Barriers);
+                command.ResourceBarrier(plan.Barriers);
                 ++impl.Report.BarrierBatches;
             } else
-                for (const auto& barrier : pass.Barriers) {
+                for (const auto& barrier : plan.Barriers) {
                     command.ResourceBarrier(std::span{&barrier, 1});
                     ++impl.Report.BarrierBatches;
                 }
         }
-        for (const auto& access : pass.Cells) {
-            const auto& resource = impl.Resources[access.Resource];
-            impl.Resources[resource.Physical].States[resource.PhysicalCell(access.Cell)] = access.State;
-        }
+        for (const auto& access : plan.Accesses) impl.Resources[access.Physical].States[access.Cell] = access.State;
         if (report.Type == RgPassType::Raster) {
             const auto depthClear = pass.DepthAttachment ? std::optional{pass.DepthAttachment->Desc.Clear} : std::nullopt;
             if (report.RasterGroup == p) rasterEncoder = command.BeginRenderPass({pass.NativePass.Get(), pass.Framebuffer.Get(), pass.Clears,
@@ -2299,27 +2417,13 @@ RenderGraphExecutionResult RenderGraph::Execute(render::CommandBuffer& command) 
     }
     result.Submission = make_shared<FrameSubmission>(impl.GenerationSerial);
     result.Submission->Record();
-    const auto retained = _impl;
-    result.Submission->OnSubmitted = [retained] {
-        retained->CommitStates();
-        for (auto& pass : retained->Passes)
-            if (pass.Ticket._state) {
-                if (pass.Ticket.Status() == FrameOperationStatus::Recorded)
-                    pass.Ticket._state->Submit(retained->GenerationSerial);
-                else
-                    pass.Ticket._state->Cancel();
-            }
-    };
+    auto submission = impl.DetachSubmissionResources();
     const auto serial = impl.GenerationSerial;
-    result.Submission->OnCompleted = [retained, serial](bool success) {
-        for (auto& pass : retained->Passes)
-            if (pass.Ticket._state) {
-                if (pass.Ticket.Status() == FrameOperationStatus::Submitted)
-                    pass.Ticket._state->Complete(serial, success);
-                else
-                    pass.Ticket._state->Cancel();
-            }
+    result.Submission->OnSubmitted = [state = std::move(submission.State), retained = submission.Retained, serial] {
+        state->Commit();
+        retained->Submit(serial);
     };
+    result.Submission->OnCompleted = [retained = std::move(submission.Retained), serial](bool success) { retained->Complete(serial, success); };
     impl.Pool.EndGraph();
     impl.Report.Pool = impl.Pool.GetStats();
     impl.Report.Cpu.RecordNanoseconds = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - recordStart).count();
