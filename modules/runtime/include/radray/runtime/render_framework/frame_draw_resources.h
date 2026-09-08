@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <radray/runtime/material.h>
 #include <radray/runtime/render_framework/mesh_draw_command.h>
 
@@ -62,6 +63,21 @@ private:
         size_t operator()(const FrameSetKey& key) const noexcept;
     };
     const ShaderParameterGroupRecipe& GetRecipe(ShaderProgram& program, uint32_t group);
+    Nullable<render::ShaderParameterSet*> PrepareSetForGroup(
+        ShaderProgram& program, uint32_t group, const ShaderParameterGroupRecipe& recipe, std::span<const FrameBufferBinding> buffers,
+        std::span<const MaterialTextureFrameData> textures, std::span<const MaterialSamplerFrameData> samplers);
+
+    // Sets for groups made only of dynamic constant buffers, keyed by (layout, group, arena block per buffer).
+    // Such groups are re-prepared per object each frame; this is a linear scan over a few entries and avoids
+    // building and hashing the generic FrameSetKey for every call.
+    static constexpr uint32_t kDynamicOnlyTargets = 4;
+    struct DynamicOnlySet {
+        render::PipelineLayout* Layout;
+        uint32_t Group, Count;
+        std::array<render::Buffer*, kDynamicOnlyTargets> Targets;
+        std::array<uint32_t, kDynamicOnlyTargets> Indices;
+        render::ShaderParameterSet* Set;
+    };
 
     render::Device* _device;
     DynamicCBufferArena::Descriptor _descriptor;
@@ -70,6 +86,7 @@ private:
     // Sets must be destroyed before their arena buffers.
     vector<unique_ptr<render::ShaderParameterSet>> _sets;
     unordered_map<FrameSetKey, render::ShaderParameterSet*, FrameSetKeyHash> _setCache;
+    vector<DynamicOnlySet> _dynamicOnlySets;
     vector<FrameBufferBinding> _bindingScratch;
     FrameSetKey _keyScratch{};
     FrameDrawResourceStats _stats;

@@ -32,7 +32,13 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 if (MSVC)
     add_compile_options(/MP)
+    # Debug 运行性能: MSVC STL 默认 _ITERATOR_DEBUG_LEVEL=2 会为每个迭代器登记 owner 并加锁,
+    # 是 Debug 下容器操作慢的主因. 降为 1 保留越界/无效迭代器检查, 去掉 owner 追踪.
+    # 该宏必须在所有链接进同一二进制的 C++ TU 中一致, 因此在任何 add_subdirectory 之前全局设置.
+    add_compile_definitions($<$<CONFIG:Debug>:_ITERATOR_DEBUG_LEVEL=1>)
 endif()
+# Debug 下关闭 Eigen 内部 eigen_assert (RADRAY_ASSERT 不受影响); Eigen 是 header-only, 需对所有使用者生效.
+add_compile_definitions($<$<CONFIG:Debug>:EIGEN_NO_DEBUG>)
 
 # 设置全局构建输出路径
 set(RADRAY_BUILD_PATH "" CACHE PATH "RadRay build binary path")
@@ -56,6 +62,7 @@ option(RADRAY_BUILD_BENCHMARKS "Build the RadRay benchmarks (enabled by default 
 unset(_radray_benchmarks_default)
 unset(_radray_release_cfg_index)
 option(RADRAY_ENABLE_MIMALLOC "Enable mimalloc as allocator" ON)
+option(RADRAY_ENABLE_PROFILER "Build with the Tracy profiler client (on-demand; idle until a viewer connects)" ON)
 option(RADRAY_ENABLE_ZLIB "Enable zlib support" ON)
 cmake_dependent_option(RADRAY_ENABLE_LIBPNG "Enable libpng support" ON "RADRAY_ENABLE_ZLIB" OFF)
 option(RADRAY_ENABLE_LIBJPEG "Enable libjpeg-turbo support" ON)
@@ -328,6 +335,20 @@ if (RADRAY_BUILD_BENCHMARKS)
     add_subdirectory(${RADRAY_THIRDPARTY_ROOT}/googlebenchmark)
     radray_optimize_flags_library(benchmark)
     radray_set_build_path(benchmark)
+endif()
+
+# Tracy profiler client. Static, on-demand: nothing is captured until a viewer connects, so it stays
+# on in every configuration. The viewer executable must match this tag exactly (see docs/guide/build-test.md).
+if (RADRAY_ENABLE_PROFILER)
+    set(TRACY_ENABLE ON CACHE BOOL "" FORCE)
+    set(TRACY_ON_DEMAND ON CACHE BOOL "" FORCE)
+    set(TRACY_STATIC ON CACHE BOOL "" FORCE)
+    set(TRACY_ONLY_LOCALHOST ON CACHE BOOL "" FORCE)
+    set(TRACY_NO_BROADCAST ON CACHE BOOL "" FORCE)
+    set(TRACY_NO_CRASH_HANDLER ON CACHE BOOL "" FORCE)
+    add_subdirectory(${RADRAY_THIRDPARTY_ROOT}/tracy)
+    radray_optimize_flags_library(TracyClient)
+    radray_set_build_path(TracyClient)
 endif()
 
 # 添加工程子目录

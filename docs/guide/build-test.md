@@ -34,6 +34,20 @@ cmake --build build_clangcl --config Debug --parallel 24
 `RADRAY_BUILD_PATH` 改写基础路径。macOS 的 Ninja 预设为 `macos-arm64-debug` / `macos-arm64-release`，
 是否可用还取决于 manifest 对应平台依赖；不能将 Windows 验收结果当作 macOS 验证。
 
+### Debug 配置的运行时检查
+
+`Debug` 保留 CMake/MSVC 默认的 `/Od /Ob0 /RTC1`，但根 `CMakeLists.txt` 在任何 `add_subdirectory`
+之前全局定义两项宏，以换取可用的 Debug 帧率：
+
+| 宏 | 作用 | 保留的检查 |
+|---|---|---|
+| `_ITERATOR_DEBUG_LEVEL=1`（仅 MSVC） | 关闭 STL 迭代器 owner 追踪与加锁 | 越界、失效迭代器解引用 |
+| `EIGEN_NO_DEBUG` | 关闭 Eigen 内部 `eigen_assert` | `RADRAY_ASSERT` 不受影响 |
+
+`_ITERATOR_DEBUG_LEVEL` 影响 STL 对象布局，必须在同一二进制的所有 C++ TU 一致，所以在此全局设置，
+第三方库随工程编译时自动继承；预编译的 DXC package 与 libjpeg-turbo 是 C 接口，不受影响。
+不在单个 target 上改写它。`RelWithDebInfo`/`MinSizeRel` 不受此配置影响。
+
 ## 常用配置边界
 
 | 开关 | 默认与依赖 |
@@ -50,6 +64,7 @@ cmake --build build_clangcl --config Debug --parallel 24
 | `RADRAY_ENABLE_VULKAN` | render 开启时默认 ON |
 | `RADRAY_BUILD_SHADER_COMPILER` | ON |
 | `RADRAY_ENABLE_SHADER_JIT`、`RADRAY_BUILD_SHADER_TOOLS` | 默认 ON，要求 shader compiler |
+| `RADRAY_ENABLE_PROFILER` | 所有配置默认 ON；链接 Tracy client，见[性能采样](#性能采样tracy) |
 
 验证不带编译器的 runtime 时使用独立目录：
 
@@ -97,6 +112,28 @@ material 和 object 等所有组，pool 字节是描述符估算。
 
 所有自有 target 接入 `radray_default_compile_flags`；它私有设置 C++ RTTI，
 不通过 core 向第三方或外部 consumer 传播。对象查询的边界见 [Core](../architecture/core-facilities.md)。
+
+## 性能采样（Tracy）
+
+`RADRAY_ENABLE_PROFILER`（默认 ON）把 `third_party/tracy` 的 `TracyClient` 静态链接进 `radraycore`，并定义
+`TRACY_ENABLE` + `TRACY_ON_DEMAND`：没有 viewer 连接时 zone 只做一次连接状态判断，因此 Release 也保持开启。
+根 `CMakeLists.txt` 另固定 `TRACY_ONLY_LOCALHOST`、`TRACY_NO_BROADCAST`、`TRACY_NO_CRASH_HANDLER`，
+不接管崩溃处理。业务代码只使用 `radray/profiler.h` 的宏，契约见 [Core](../architecture/core-facilities.md#性能采样宏)。
+
+采样步骤：
+
+1. viewer 版本必须与 `project_manifest.json` 中 tracy 的 tag 完全一致（当前 `v0.14.1`），协议不兼容会直接拒连。
+   从 [Tracy releases](https://github.com/wolfpld/tracy/releases) 下载对应 `tracy-profiler` 或从 `third_party/tracy/profiler` 自行构建；
+   viewer 不进入本仓库的 CMake。
+2. 先启动 viewer 并点击 Connect（client 只监听 localhost），再运行任意 RadRay 可执行文件，例如
+   `build_debug/_build/Debug/example_tidal_atrium.exe --backend d3d12 --tour --frames 600`。
+3. 帧标记来自 `TickFrame`（单线程）或渲染线程（多线程 runner），GPU 时间线按 backend 与 queue 分 context。
+   火焰图：Statistics → Flame graph。调用栈采样与 context switch 需要以管理员运行被测程序，否则只有插桩 zone。
+
+GPU zone 挂在 `PushDebugGroup` / `PopDebugGroup` 上，所以 RenderGraph 每个 live pass 一个 zone；两个后端的
+差异（D3D12 每个 raster group 一个 zone）见 [RHI](../architecture/render-rhi.md#命令录制)。
+采样机器负载会显著影响 Debug 帧时间，对照前先看 CPU 占用。
+关闭方式：`-DRADRAY_ENABLE_PROFILER=OFF`，所有宏展开为空，后端不创建查询堆。
 
 ## 可选 ImGui
 

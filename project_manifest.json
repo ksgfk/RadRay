@@ -151,6 +151,12 @@
             "Type": "git",
             "Git": "https://github.com/google/benchmark.git",
             "Tag": "v1.9.5"
+        },
+        {
+            "Name": "tracy",
+            "Type": "git",
+            "Git": "https://github.com/wolfpld/tracy.git",
+            "Tag": "v0.14.1"
         }
     ]
 }

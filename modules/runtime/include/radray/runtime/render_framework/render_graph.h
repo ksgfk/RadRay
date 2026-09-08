@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <source_location>
 #include <variant>
 #include <radray/runtime/frame_submission.h>
@@ -289,6 +290,11 @@ private:
     RenderGraph& _graph;
     uint32_t _pass;
     render::GraphicsCommandEncoder& _encoder;
+    // Buffers that already passed the declaration check in this pass; consecutive draws usually share
+    // geometry, so this skips two hash lookups per buffer per draw.
+    static constexpr size_t kValidatedBuffers = 4;
+    std::array<render::Buffer*, kValidatedBuffers> _validatedVertex{};
+    render::Buffer* _validatedIndex{nullptr};
     bool _valid{true};
 };
 

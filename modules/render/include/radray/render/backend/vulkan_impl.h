@@ -378,6 +378,8 @@ public:
     QueueIndexInFamily _family;
     QueueType _type;
     VkQueueFlags _queueFlags{0};
+    // Profiler GPU timestamp context for this queue; null when profiling is disabled or the family has no timestamps.
+    void* _profilerContext{nullptr};
 };
 
 class CommandPoolVulkan final : public RenderBase {
@@ -462,6 +464,10 @@ public:
     unique_ptr<CommandPoolVulkan> _cmdPool;
     VkCommandBuffer _cmdBuffer;
     vector<unique_ptr<CommandEncoder>> _endedEncoders;
+    // Profiler GPU zones opened by PushDebugGroup; timestamps are legal inside Vulkan render passes,
+    // so every debug group maps to one zone.
+    struct ProfilerZoneStack;
+    unique_ptr<ProfilerZoneStack> _profilerZones;
 };
 
 // Last parameter set bound to one descriptor-set slot on an encoder. Offsets beyond the inline
@@ -524,6 +530,10 @@ public:
     GraphicsPipelineVulkan* _boundPso{nullptr};
     PipelineLayoutVulkan* _boundLayout{nullptr};
     std::array<BoundParameterGroupVulkan, kBoundParameterGroupCountVulkan> _boundGroups{};
+    // Identical vertex/index rebinds are skipped; reset on DestroyImpl. Slots beyond the array force a rebind.
+    static constexpr uint32_t kTrackedVertexBindings = 16;
+    std::array<std::optional<VertexBufferView>, kTrackedVertexBindings> _boundVbvs{};
+    std::optional<IndexBufferView> _boundIbv{};
 };
 
 class SimulateComputeEncoderVulkan final : public ComputeCommandEncoder {

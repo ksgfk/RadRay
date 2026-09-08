@@ -274,6 +274,18 @@ input-attachment access。RG 的物理状态策略与逻辑区间有效性见 [R
 `PushDebugGroup` / `PopDebugGroup` 必须平衡，分别映射 D3D12 command-list Unicode event 与
 Vulkan debug-utils label；Vulkan 未启用 debug-utils 时不录标签。
 
+启用 `RADRAY_ENABLE_PROFILER` 时这对调用同时是 GPU 时间戳 zone 的边界：每个 Direct/Compute queue
+在构造时创建一个 Tracy GPU context（Copy queue 不采样），命令缓冲持有已打开 zone 的栈，`End()` 关闭
+未平衡的 zone，销毁时丢弃并告警。两个后端的 zone 与 debug group 不完全一一对应：
+
+| 后端 | zone 边界 | 原因 |
+|---|---|---|
+| Vulkan | 每个 debug group 一个 zone | `vkCmdWriteTimestamp` 在 render pass 内合法；`Begin()` 时回收查询槽 |
+| D3D12 | render pass 外的 group 一个 zone；render pass 内的 push 不开 zone，pop 推迟到 `EndRenderPass` | Tracy 在 zone 结束时调用 `ResolveQueryData`，它在 `BeginRenderPass/EndRenderPass` 内被运行时禁止 |
+
+因此 D3D12 上被 RenderGraph 合并为同一 raster group 的多个 pass 只显示为一个 zone，名字取该组第一个
+pass；`Submit()` 后收集已完成的时间戳。宏入口与开关见 [Core](core-facilities.md#性能采样宏)。
+
 ## 设备能力与纹理支持
 
 `Device::GetCapabilities()` 返回创建后不可变的 `RenderDeviceCapabilities`，包括原

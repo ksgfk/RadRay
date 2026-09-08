@@ -127,6 +127,25 @@ auto* p = maybe.Unwrap();              // 为空则 throw NullableAccessExceptio
 
 `*_CSTYLE` 变体走 printf 风格。Debug 检测一律用 `RADRAY_IS_DEBUG`，不用 `NDEBUG` / `_DEBUG`。
 
+## 性能采样宏
+
+`profiler.h` 是全仓库唯一的插桩入口，后端是 Tracy（`third_party/tracy`）；业务代码不 include `tracy/*`，
+只有 render 后端为 GPU 时间戳直接使用 `TracyD3D12.hpp` / `TracyVulkan.hpp`。
+`RADRAY_ENABLE_PROFILER` 未定义时所有宏展开为空。开关、viewer 与采样步骤见
+[构建与测试](../guide/build-test.md#性能采样tracy)。
+
+| 宏 | 语义 |
+|---|---|
+| `RADRAY_PROFILE_SCOPE()` | 以所在函数名命名的作用域 zone |
+| `RADRAY_PROFILE_SCOPE_N("name")` | 字符串字面量命名；同一花括号作用域内只能出现一个 `SCOPE*` 宏，需要嵌套时用 `{}` 分隔 |
+| `RADRAY_PROFILE_SCOPE_DYN(sv)` | 运行时 `string_view` 命名（profiler 复制），用于 pass 名等动态名称；与 `SCOPE*` 同样受单作用域限制 |
+| `RADRAY_PROFILE_FRAME()` | 当前线程一帧结束；单线程 runner 在 `TickFrame` 尾部，多线程 runner 在渲染线程 |
+| `RADRAY_PROFILE_PLOT("name", v)` | 数值曲线 |
+| `RADRAY_PROFILE_THREAD("name")` | 命名当前线程 |
+| `RADRAY_PROFILE_MESSAGE(sv)` | 时间线文本消息 |
+
+zone 的粒度停在帧阶段、pass 与 per-draw 批次，不放进逐元素循环；开启但未连接 viewer 时每个 zone 只剩一次连接状态判断。
+
 ## 枚举
 
 ```cpp

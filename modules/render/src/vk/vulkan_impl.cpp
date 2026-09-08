@@ -13,6 +13,12 @@
 #include <radray/hash.h>
 #include <radray/scope_guard.h>
 
+#ifdef RADRAY_ENABLE_PROFILER
+// volk dispatches through a device table, so Tracy must load its own symbols instead of linking prototypes.
+#define TRACY_VK_USE_SYMBOL_TABLE
+#include <tracy/TracyVulkan.hpp>
+#endif
+
 #if defined(_WIN32)
 #include <excpt.h>
 #endif
@@ -3803,6 +3809,15 @@ Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescript
 
 // == Queue / CommandPool / CommandBuffer 与 barrier ==
 
+#ifdef RADRAY_ENABLE_PROFILER
+struct CommandBufferVulkan::ProfilerZoneStack {
+    // VkCtxScope is not movable; keep them in a deque so pushes never relocate open zones.
+    deque<tracy::VkCtxScope> Zones;
+};
+#else
+struct CommandBufferVulkan::ProfilerZoneStack {};
+#endif
+
 QueueVulkan::QueueVulkan(
     DeviceVulkan* device,
     VkQueue queue,
@@ -3813,7 +3828,32 @@ QueueVulkan::QueueVulkan(
       _queue(queue),
       _family(family),
       _type(type),
-      _queueFlags(queueFlags) {}
+      _queueFlags(queueFlags) {
+#ifdef RADRAY_ENABLE_PROFILER
+    // Context creation records a calibration command buffer several times (implicit resets) and waits for
+    // the queue; a transient, resettable pool is enough.
+    if ((_queueFlags & (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT)) == 0) return;
+    VkCommandPoolCreateInfo poolInfo{};
+    poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    poolInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT | VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+    poolInfo.queueFamilyIndex = _family.Family;
+    VkCommandPool pool{VK_NULL_HANDLE};
+    if (_device->_ftb.vkCreateCommandPool(_device->_device, &poolInfo, _device->GetAllocationCallbacks(), &pool) != VK_SUCCESS) return;
+    VkCommandBufferAllocateInfo bufferInfo{};
+    bufferInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    bufferInfo.commandPool = pool;
+    bufferInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    bufferInfo.commandBufferCount = 1;
+    VkCommandBuffer cmdBuf{VK_NULL_HANDLE};
+    if (_device->_ftb.vkAllocateCommandBuffers(_device->_device, &bufferInfo, &cmdBuf) == VK_SUCCESS) {
+        _profilerContext = TracyVkContext(_device->_instance->_instance, _device->_physicalDevice, _device->_device, _queue, cmdBuf,
+                                          vkGetInstanceProcAddr, vkGetDeviceProcAddr);
+        const auto name = fmt::format("Vulkan {}", _type);
+        TracyVkContextName(static_cast<TracyVkCtx>(_profilerContext), name.c_str(), static_cast<uint16_t>(name.size()));
+    }
+    _device->_ftb.vkDestroyCommandPool(_device->_device, pool, _device->GetAllocationCallbacks());
+#endif
+}
 
 QueueVulkan::~QueueVulkan() noexcept {
     this->DestroyImpl();
@@ -3941,6 +3981,12 @@ QueueType QueueVulkan::GetQueueType() const noexcept {
 }
 
 void QueueVulkan::DestroyImpl() noexcept {
+#ifdef RADRAY_ENABLE_PROFILER
+    if (_profilerContext != nullptr) {
+        TracyVkDestroy(static_cast<TracyVkCtx>(_profilerContext));
+        _profilerContext = nullptr;
+    }
+#endif
     if (_queue != VK_NULL_HANDLE) {
         _queue = VK_NULL_HANDLE;
     }
@@ -3986,7 +4032,8 @@ CommandBufferVulkan::CommandBufferVulkan(
     : _device(device),
       _queue(queue),
       _cmdPool(std::move(cmdPool)),
-      _cmdBuffer(cmdBuffer) {}
+      _cmdBuffer(cmdBuffer),
+      _profilerZones(make_unique<ProfilerZoneStack>()) {}
 
 CommandBufferVulkan::~CommandBufferVulkan() noexcept {
     this->DestroyImpl();
@@ -4008,6 +4055,13 @@ void CommandBufferVulkan::SetDebugName(std::string_view name) noexcept {
 }
 
 void CommandBufferVulkan::DestroyImpl() noexcept {
+#ifdef RADRAY_ENABLE_PROFILER
+    // Open zones would record end timestamps into a buffer that is being freed; drop them.
+    if (_profilerZones && !_profilerZones->Zones.empty()) {
+        RADRAY_WARN_LOG("vk command buffer destroyed with {} open profiler zones", _profilerZones->Zones.size());
+        _profilerZones->Zones.clear();
+    }
+#endif
     _endedEncoders.clear();
     if (_cmdBuffer != VK_NULL_HANDLE) {
         _device->_ftb.vkFreeCommandBuffers(_device->_device, _cmdPool->_cmdPool, 1, &_cmdBuffer);
@@ -4028,9 +4082,17 @@ void CommandBufferVulkan::Begin() noexcept {
         vr != VK_SUCCESS) {
         RADRAY_ABORT("vkBeginCommandBuffer failed: {}", vr);
     }
+#ifdef RADRAY_ENABLE_PROFILER
+    // Collect finished timestamps and recycle query slots; the reset must be recorded into a live command buffer.
+    if (_queue->_profilerContext != nullptr) TracyVkCollect(static_cast<TracyVkCtx>(_queue->_profilerContext), _cmdBuffer);
+#endif
 }
 
 void CommandBufferVulkan::End() noexcept {
+#ifdef RADRAY_ENABLE_PROFILER
+    // Zone end timestamps must be recorded before vkEndCommandBuffer; unbalanced groups are closed here.
+    _profilerZones->Zones.clear();
+#endif
     if (auto vr = _device->_ftb.vkEndCommandBuffer(_cmdBuffer);
         vr != VK_SUCCESS) {
         RADRAY_ABORT("vkEndCommandBuffer failed: {}", vr);
@@ -4152,6 +4214,13 @@ void CommandBufferVulkan::ResourceBarrier(std::span<const ResourceBarrierDescrip
 }
 
 void CommandBufferVulkan::PushDebugGroup(std::string_view name) noexcept {
+#ifdef RADRAY_ENABLE_PROFILER
+    if (_queue->_profilerContext != nullptr) {
+        _profilerZones->Zones.emplace_back(
+            static_cast<TracyVkCtx>(_queue->_profilerContext), TracyLine, TracyFile, strlen(TracyFile), TracyFunction, strlen(TracyFunction),
+            name.data(), name.size(), _cmdBuffer, true);
+    }
+#endif
     const auto& extensions = _device->_instance->_exts;
     if (!vkCmdBeginDebugUtilsLabelEXT ||
         std::find(extensions.begin(), extensions.end(), VK_EXT_DEBUG_UTILS_EXTENSION_NAME) == extensions.end()) return;
@@ -4161,6 +4230,9 @@ void CommandBufferVulkan::PushDebugGroup(std::string_view name) noexcept {
 }
 
 void CommandBufferVulkan::PopDebugGroup() noexcept {
+#ifdef RADRAY_ENABLE_PROFILER
+    if (!_profilerZones->Zones.empty()) _profilerZones->Zones.pop_back();
+#endif
     const auto& extensions = _device->_instance->_exts;
     if (!vkCmdEndDebugUtilsLabelEXT ||
         std::find(extensions.begin(), extensions.end(), VK_EXT_DEBUG_UTILS_EXTENSION_NAME) == extensions.end()) return;
@@ -4653,6 +4725,8 @@ void SimulateCommandEncoderVulkan::DestroyImpl() noexcept {
     _boundLayout = nullptr;
     _boundPso = nullptr;
     _boundGroups.fill({});
+    for (auto& view : _boundVbvs) view.reset();
+    _boundIbv.reset();
 }
 
 void SimulateCommandEncoderVulkan::SetViewport(Viewport vp) noexcept {
@@ -4715,8 +4789,36 @@ void SimulateCommandEncoderVulkan::BindVertexBuffers(std::span<const VertexBuffe
         return;
     }
 
-    vector<VkBuffer> buffers(bindingCount, VkBuffer{VK_NULL_HANDLE});
-    vector<VkDeviceSize> offsets(bindingCount, VkDeviceSize{0});
+    // Skip the native call when every binding already holds this exact view (consecutive draws often
+    // share geometry). Bindings beyond the tracked range always rebind.
+    bool changed = false;
+    for (const VertexBufferBinding& binding : bindings) {
+        if (binding.Binding >= _boundVbvs.size()) {
+            changed = true;
+            continue;
+        }
+        std::optional<VertexBufferView>& bound = _boundVbvs[binding.Binding];
+        if (!bound.has_value() || bound->Target != binding.View.Target || bound->Offset != binding.View.Offset || bound->Size != binding.View.Size) {
+            bound = binding.View;
+            changed = true;
+        }
+    }
+    if (!changed) {
+        return;
+    }
+    constexpr uint32_t kInlineBindings = 16;
+    std::array<VkBuffer, kInlineBindings> inlineBuffers{};
+    std::array<VkDeviceSize, kInlineBindings> inlineOffsets{};
+    vector<VkBuffer> heapBuffers;
+    vector<VkDeviceSize> heapOffsets;
+    VkBuffer* buffers = inlineBuffers.data();
+    VkDeviceSize* offsets = inlineOffsets.data();
+    if (bindingCount > kInlineBindings) {
+        heapBuffers.assign(bindingCount, VkBuffer{VK_NULL_HANDLE});
+        heapOffsets.assign(bindingCount, VkDeviceSize{0});
+        buffers = heapBuffers.data();
+        offsets = heapOffsets.data();
+    }
     for (const VertexBufferBinding& binding : bindings) {
         const uint32_t index = binding.Binding - lowest;
         buffers[index] = CastVkObject(binding.View.Target)->_buffer;
@@ -4726,8 +4828,8 @@ void SimulateCommandEncoderVulkan::BindVertexBuffers(std::span<const VertexBuffe
         _cmdBuffer->_cmdBuffer,
         lowest,
         bindingCount,
-        buffers.data(),
-        offsets.data());
+        buffers,
+        offsets);
 }
 
 void SimulateCommandEncoderVulkan::BindIndexBuffer(IndexBufferView ibv) noexcept {
@@ -4737,7 +4839,11 @@ void SimulateCommandEncoderVulkan::BindIndexBuffer(IndexBufferView ibv) noexcept
         RADRAY_ERR_LOG("vk index buffer stride must be 2 or 4 bytes, got {}", ibv.Stride);
         return;
     }
+    if (_boundIbv.has_value() && _boundIbv->Target == ibv.Target && _boundIbv->Offset == ibv.Offset && _boundIbv->Stride == ibv.Stride) {
+        return;
+    }
     _device->_ftb.vkCmdBindIndexBuffer(_cmdBuffer->_cmdBuffer, buffer->_buffer, ibv.Offset, indexType);
+    _boundIbv = ibv;
 }
 
 void SimulateCommandEncoderVulkan::BindGraphicsPipelineState(GraphicsPipelineState* pso) noexcept {

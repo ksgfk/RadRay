@@ -8,6 +8,7 @@
 #include <limits>
 #include <type_traits>
 #include <radray/logger.h>
+#include <radray/profiler.h>
 #include <radray/utility.h>
 
 namespace radray {
@@ -1789,6 +1790,7 @@ void RenderGraph::SetCompileOptions(RenderGraphCompileOptions options) {
 const CompiledRenderGraph& RenderGraph::GetCompiledGraph() const noexcept { return _impl->CompiledGraph; }
 
 bool RenderGraph::Compile() {
+    RADRAY_PROFILE_SCOPE_N("RenderGraph::Compile");
     auto& impl = *_impl;
     if (impl.Frozen) return impl.Compiled && impl.Report.Diagnostics.empty();
     impl.Frozen = true;
@@ -2321,14 +2323,21 @@ RenderGraphExecutionResult RenderGraph::Execute(render::CommandBuffer& command) 
         return success;
     };
     if (!measure(impl.Report.Cpu.CompileNanoseconds, [&] { return Compile(); }) ||
-        !measure(impl.Report.Cpu.RealizeNanoseconds, [&] { return impl.Realize(); }) ||
-        !measure(impl.Report.Cpu.PrepareNanoseconds, [&] { return Prepare(); })) {
+        !measure(impl.Report.Cpu.RealizeNanoseconds, [&] {
+            RADRAY_PROFILE_SCOPE_N("RenderGraph::Realize");
+            return impl.Realize();
+        }) ||
+        !measure(impl.Report.Cpu.PrepareNanoseconds, [&] {
+            RADRAY_PROFILE_SCOPE_N("RenderGraph::Prepare");
+            return Prepare();
+        })) {
         for (auto& pass : impl.Passes)
             if (pass.Ticket._state) pass.Ticket._state->Cancel();
         impl.Pool.EndGraph();
         impl.Report.Pool = impl.Pool.GetStats();
         return {};
     }
+    RADRAY_PROFILE_SCOPE_N("RenderGraph::Record");
     const auto recordStart = std::chrono::steady_clock::now();
     impl.PlanBarriers();
     RenderGraphExecutionResult result{true, false, {}};
@@ -2339,6 +2348,7 @@ RenderGraphExecutionResult RenderGraph::Execute(render::CommandBuffer& command) 
         if (!report.Live) continue;
         auto& pass = impl.Passes[p];
         const auto& plan = impl.ExecutionPlan[p];
+        RADRAY_PROFILE_SCOPE_DYN(report.Name);
         command.PushDebugGroup(report.Name);
         result.CommandsRecorded = true;
         if (!plan.Barriers.empty()) {
@@ -2576,12 +2586,23 @@ bool RenderGraph::ValidateNativeBuffer(uint32_t pass, render::Buffer* buffer, Rg
 }
 
 void RenderGraphGraphicsCommands::BindVertexBuffers(std::span<const render::VertexBufferBinding> bindings) noexcept {
-    for (const auto& binding : bindings)
-        if (!_graph.ValidateNativeBuffer(_pass, binding.View.Target, RgBufferAccess::Vertex)) _valid = false;
+    for (const auto& binding : bindings) {
+        render::Buffer* target = binding.View.Target;
+        if (target != nullptr && std::find(_validatedVertex.begin(), _validatedVertex.end(), target) != _validatedVertex.end()) continue;
+        if (!_graph.ValidateNativeBuffer(_pass, target, RgBufferAccess::Vertex)) {
+            _valid = false;
+            continue;
+        }
+        std::rotate(_validatedVertex.rbegin(), _validatedVertex.rbegin() + 1, _validatedVertex.rend());
+        _validatedVertex.front() = target;
+    }
     if (_valid) _encoder.BindVertexBuffers(bindings);
 }
 void RenderGraphGraphicsCommands::BindIndexBuffer(render::IndexBufferView view) noexcept {
-    if (!_graph.ValidateNativeBuffer(_pass, view.Target, RgBufferAccess::Index)) _valid = false;
+    if (view.Target == nullptr || view.Target != _validatedIndex) {
+        if (!_graph.ValidateNativeBuffer(_pass, view.Target, RgBufferAccess::Index)) _valid = false;
+        else _validatedIndex = view.Target;
+    }
     if (_valid) _encoder.BindIndexBuffer(view);
 }
 

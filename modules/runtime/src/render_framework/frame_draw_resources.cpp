@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <radray/profiler.h>
 #include <radray/runtime/shader_program.h>
 
 namespace radray {
@@ -15,6 +16,7 @@ FrameDrawResources::~FrameDrawResources() noexcept = default;
 
 void FrameDrawResources::ClearSets() noexcept {
     _setCache.clear();
+    _dynamicOnlySets.clear();
     _sets.clear();
 }
 
@@ -86,14 +88,48 @@ std::optional<PreparedShaderGroup> FrameDrawResources::PrepareGroup(
         bindings.push_back({index, {allocation.Target, {dynamic ? 0 : allocation.Offset, buffer.Size}}});
         if (dynamic) result.DynamicOffsets.push_back({buffer.Binding, static_cast<uint32_t>(allocation.Offset)});
     }
-    result.Set = PrepareSet(program, group, bindings, textures, samplers);
+    result.Set = PrepareSetForGroup(program, group, recipe, bindings, textures, samplers);
     if (!result.Set) return std::nullopt;
     return result;
+}
+
+Nullable<render::ShaderParameterSet*> FrameDrawResources::PrepareSetForGroup(
+    ShaderProgram& program, uint32_t group, const ShaderParameterGroupRecipe& recipe, std::span<const FrameBufferBinding> buffers,
+    std::span<const MaterialTextureFrameData> textures, std::span<const MaterialSamplerFrameData> samplers) {
+    // Fast path: a group made only of dynamic constant buffers (the common view/object case) binds every
+    // buffer at offset 0 of its arena block, so the set is fully determined by (layout, group, blocks).
+    // Skip the generic key construction and hash lookup that PrepareSet performs per call.
+    const bool pureDynamic = textures.empty() && samplers.empty() && recipe.TextureCount == 0 && recipe.SamplerCount == 0 &&
+                             !buffers.empty() && buffers.size() <= kDynamicOnlyTargets &&
+                             std::all_of(recipe.Buffers.begin(), recipe.Buffers.end(), [](const auto& entry) { return entry.Dynamic; });
+    if (!pureDynamic) return PrepareSet(program, group, buffers, textures, samplers);
+    auto* layout = program.GetPipelineLayout();
+    for (const auto& entry : _dynamicOnlySets) {
+        if (entry.Layout != layout || entry.Group != group || entry.Count != buffers.size()) continue;
+        bool same = true;
+        for (size_t index = 0; index < buffers.size() && same; ++index)
+            same = entry.Targets[index] == buffers[index].Value.Target && entry.Indices[index] == buffers[index].BufferIndex;
+        if (same) {
+            ++_stats.SetCacheHits;
+            return entry.Set;
+        }
+    }
+    const auto set = PrepareSet(program, group, buffers, textures, samplers);
+    if (set) {
+        DynamicOnlySet entry{layout, group, static_cast<uint32_t>(buffers.size()), {}, {}, set.Get()};
+        for (size_t index = 0; index < buffers.size(); ++index) {
+            entry.Targets[index] = buffers[index].Value.Target;
+            entry.Indices[index] = buffers[index].BufferIndex;
+        }
+        _dynamicOnlySets.push_back(entry);
+    }
+    return set;
 }
 
 Nullable<render::ShaderParameterSet*> FrameDrawResources::PrepareSet(
     ShaderProgram& program, uint32_t group, std::span<const FrameBufferBinding> buffers,
     std::span<const MaterialTextureFrameData> textures, std::span<const MaterialSamplerFrameData> samplers) {
+    RADRAY_PROFILE_SCOPE_N("FrameDrawResources::PrepareSet");
     if (program.GetDevice() != _device) return nullptr;
     const auto& layout = program.GetParameterLayout();
     const auto& recipe = GetRecipe(program, group);

@@ -98,6 +98,23 @@ RAII 包装类的后缀是 `Scope` / `Scoped` / `Guard`，**没有 `*RAII`**：`
 
 **成员声明顺序常常有语义**，因为析构是逆序的。这类地方都有注释标出，不要"顺手整理"。
 
+## 每帧热路径
+
+每帧按 primitive / draw 执行的函数（snapshot 变换、culling、renderer list 处理、后端 encoder 绑定）
+要同时对 Release 与 Debug 负责：Debug 默认 `/Od /Ob0`，Eigen 表达式模板、`std::span`、小容器的
+每个算子都是一次真实调用，Debug 帧率主要由这些路径决定。约定：
+
+- 每 primitive 一次的数值代码直接操作 `data()` 分量数组（`render_bounds.cpp`、`culling.cpp`、
+  `MakeNormalToWorld`）；Eigen 仍用于接口类型与非热路径。Eigen 是列主序，`(r, c)` 在 `data()[c * 4 + r]`。
+- 不在每 draw 路径上构造 `string`、`fmt::format`、按名字 `Find` 参数；启动或首次遇到 program 时解析成
+  `ShaderParameterInfo*` / 索引再复用（`ForwardLitMeshPassProcessor::ProgramState`）。
+- 以 snapshot 索引为键的每帧查找用稠密槽位表而不是 `unordered_map`。
+- 相邻 draw 通常重复相同状态，graph 命令包装与后端 encoder 都以"与当前已绑定状态相同则跳过"去重，
+  不依赖上层保证不重复调用。
+
+改动前后用 `test_runtime_profile` 的 `PROFILE` 行对照（见 [构建与测试](build-test.md#runtime-阶段采样)），
+不凭直觉声称收益。
+
 ## 测试
 
 测试源码放 `modules/<module>/tests/test_<topic>.cpp`，目标名 = 文件名。

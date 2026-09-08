@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cmath>
 #include <limits>
+#include <radray/profiler.h>
 
 namespace radray {
 
@@ -30,16 +31,27 @@ std::optional<ViewFrustum> ExtractViewFrustum(const Eigen::Matrix4f& matrix) noe
     return result;
 }
 
+// Per-primitive tests use raw component arrays: in unoptimized builds each Eigen operator is an
+// out-of-line call chain, and these run for every primitive and light of every culled view.
 bool IntersectsFrustum(const ViewFrustum& frustum, const AxisAlignedBounds& bounds) noexcept {
     if (!bounds.IsFiniteValid()) return true;
-    const auto center = bounds.Center().cast<double>().eval();
-    const auto extents = bounds.Extents().cast<double>().eval();
+    const float* lo = bounds.Min.data();
+    const float* hi = bounds.Max.data();
+    double center[3], extents[3];
+    for (int i = 0; i < 3; ++i) {
+        center[i] = double(lo[i]) * 0.5 + double(hi[i]) * 0.5;
+        extents[i] = double(hi[i]) * 0.5 - double(lo[i]) * 0.5;
+    }
     for (uint32_t index = 0; index < frustum.Planes.size(); ++index) {
         if (!(frustum.ActivePlaneMask & (1u << index))) continue;
         const auto& plane = frustum.Planes[index];
-        const auto normal = plane.Normal.cast<double>().eval();
-        const double distance = normal.dot(center) + plane.Distance;
-        const double radius = normal.cwiseAbs().dot(extents);
+        const float* n = plane.Normal.data();
+        double distance = plane.Distance, radius = 0;
+        for (int i = 0; i < 3; ++i) {
+            const double v = n[i];
+            distance += v * center[i];
+            radius += std::abs(v) * extents[i];
+        }
         const double tolerance = 1e-6 * (1 + std::abs(distance) + radius);
         if (distance + radius < -tolerance) return false;
     }
@@ -48,10 +60,12 @@ bool IntersectsFrustum(const ViewFrustum& frustum, const AxisAlignedBounds& boun
 
 bool IntersectsFrustum(const ViewFrustum& frustum, const SphereBounds& bounds) noexcept {
     if (!bounds.IsFiniteValid()) return false;
+    const float* c = bounds.Center.data();
     for (uint32_t index = 0; index < frustum.Planes.size(); ++index) {
         if (!(frustum.ActivePlaneMask & (1u << index))) continue;
         const auto& plane = frustum.Planes[index];
-        const double distance = plane.Normal.cast<double>().dot(bounds.Center.cast<double>()) + plane.Distance;
+        const float* n = plane.Normal.data();
+        const double distance = double(n[0]) * c[0] + double(n[1]) * c[1] + double(n[2]) * c[2] + plane.Distance;
         if (distance + bounds.Radius < -1e-6 * (1 + std::abs(distance) + bounds.Radius)) return false;
     }
     return true;
@@ -66,6 +80,7 @@ void CullingResults::ResetForReuse() noexcept {
 }
 
 bool Cull(const CullingParameters& parameters, CullingResults& out) noexcept {
+    RADRAY_PROFILE_SCOPE_N("Cull");
     out.ResetForReuse();
     const auto started = std::chrono::steady_clock::now();
     if (!parameters.Scene || !parameters.View || !parameters.View->View.allFinite() || !parameters.View->WorldPosition.allFinite()) return false;
@@ -78,6 +93,9 @@ bool Cull(const CullingParameters& parameters, CullingResults& out) noexcept {
     out.View = &view;
     const uint32_t mask = view.LayerMask & parameters.LayerMask;
     out.Stats.InputPrimitives = scene.Primitives.size();
+    // View row 2 (column-major: (2, c) at data[c * 4 + 2]) gives view-space depth of a world point.
+    const float* viewData = view.View.data();
+    const float depthRow[4]{viewData[2], viewData[6], viewData[10], viewData[14]};
     for (uint32_t index = 0; index < scene.Primitives.size(); ++index) {
         const auto& primitive = scene.Primitives[index];
         if (!(primitive.LayerMask & mask)) {
@@ -91,8 +109,18 @@ bool Cull(const CullingParameters& parameters, CullingResults& out) noexcept {
             ++out.Stats.FrustumRejected;
             continue;
         }
-        const Eigen::Vector3f center = validBounds ? primitive.WorldBounds.Center() : Eigen::Vector3f{primitive.LocalToWorld.block<3, 1>(0, 3)};
-        float depth = view.View.row(2).head<3>().dot(center) + view.View(2, 3);
+        float center[3];
+        if (validBounds) {
+            const float* lo = primitive.WorldBounds.Min.data();
+            const float* hi = primitive.WorldBounds.Max.data();
+            for (int i = 0; i < 3; ++i) center[i] = lo[i] * 0.5f + hi[i] * 0.5f;
+        } else {
+            const float* m = primitive.LocalToWorld.data();
+            center[0] = m[12];
+            center[1] = m[13];
+            center[2] = m[14];
+        }
+        float depth = depthRow[0] * center[0] + depthRow[1] * center[1] + depthRow[2] * center[2] + depthRow[3];
         if (!std::isfinite(depth)) {
             depth = 0;
             ++out.Stats.InvalidDepth;

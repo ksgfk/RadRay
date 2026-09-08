@@ -4,10 +4,12 @@
 #include <algorithm>
 #include <cmath>
 #include <tuple>
+#include <radray/profiler.h>
 
 namespace radray {
 
 bool BuildRendererList(const RendererListDesc& desc, MeshPassProcessor& processor, RendererList& out) {
+    RADRAY_PROFILE_SCOPE_N("BuildRendererList");
     out.ResetForReuse();
     if (!desc.Culling || !desc.View || !desc.Culling->Scene || !desc.Culling->Stats.Valid ||
         desc.Culling->View != desc.View || desc.QueueRange.Min > desc.QueueRange.Max || desc.MaterialPassName.empty()) return false;

@@ -1,25 +1,45 @@
 #include "forward_lit_mesh_pass_processor.h"
 #include "forward_frame.h"
 
+#include <algorithm>
+
 namespace radray::forward_detail {
 
-ForwardLitMeshPassProcessor::ObjectPreparation::ObjectPreparation(const ShaderParameterLayout* layout, uint32_t group)
-    : Values(layout, group),
-      LocalToWorld(layout->Find("ForwardObject.LocalToWorld")),
-      NormalToWorld(layout->Find("ForwardObject.NormalToWorld")),
-      PreviousLocalToWorld(layout->Find("ForwardObject.PreviousLocalToWorld")),
-      MotionValid(layout->Find("ForwardObject.MotionValid")) {}
+ForwardLitMeshPassProcessor::ProgramState::ProgramState(ShaderProgram* program, const ForwardProgramBindings* binding)
+    : Program(program),
+      Binding(binding),
+      Layout(&program->GetParameterLayout()),
+      ObjectValues(Layout, binding->ObjectGroup),
+      LocalToWorld(Layout->Find("ForwardObject.LocalToWorld")),
+      NormalToWorld(Layout->Find("ForwardObject.NormalToWorld")),
+      PreviousLocalToWorld(Layout->Find("ForwardObject.PreviousLocalToWorld")),
+      MotionValid(Layout->Find("ForwardObject.MotionValid")) {}
+
+Nullable<ForwardLitMeshPassProcessor::ProgramState*> ForwardLitMeshPassProcessor::ResolveProgram(ShaderProgram* program) {
+    if (program == _lastProgram) return _lastState;
+    auto [found, inserted] = _programs.try_emplace(program);
+    if (inserted) {
+        const auto binding = _bindings.Resolve(program);
+        if (binding) found->second = make_unique<ProgramState>(program, binding.Get());
+    }
+    _lastProgram = program;
+    _lastState = found->second.get();
+    return _lastState;
+}
 
 void ForwardLitMeshPassProcessor::ResetView() noexcept {
-    _views.clear();
-    for (auto& [program, objects] : _objects) {
-        if (objects.ViewDependent()) objects.Groups.clear();
+    for (auto& [program, state] : _programs) {
+        if (!state) continue;
+        state->ViewPrepared = false;
+        state->View.reset();
+        if (state->ViewDependent()) state->Objects.Clear();
     }
 }
 
 void ForwardLitMeshPassProcessor::AddMeshBatch(const RendererListDesc& desc, const RenderSceneSnapshot& scene,
                                                const MeshBatch& batch, MeshPassDrawListContext& out) {
-    const auto pass = scene.Materials[batch.Material].FindPass(desc.MaterialPassName);
+    const auto& materialData = scene.Materials[batch.Material];
+    const auto pass = materialData.FindPass(desc.MaterialPassName);
     if (!pass || !pass->Valid || !pass->Program) {
         out.Reject(MeshPassRejectReason::MissingPass);
         return;
@@ -29,49 +49,51 @@ void ForwardLitMeshPassProcessor::AddMeshBatch(const RendererListDesc& desc, con
         return;
     }
     auto* program = pass->Program.Get();
-    const auto binding = _bindings.Resolve(program);
-    if (!binding || pass->ParameterGroup != binding->MaterialGroup) {
+    const auto state = ResolveProgram(program);
+    if (!state || pass->ParameterGroup != state->Binding->MaterialGroup) {
         out.Reject(MeshPassRejectReason::InvalidBindings);
         return;
     }
-    const auto& layout = program->GetParameterLayout();
-    auto [view, newView] = _views.try_emplace(program, std::nullopt);
-    if (newView) {
-        ShaderParameterStorage values{&layout, binding->ViewGroup};
+    auto& ps = *state.Get();
+    const auto& binding = *ps.Binding;
+    if (!ps.ViewPrepared) {
+        ps.ViewPrepared = true;
+        ShaderParameterStorage values{ps.Layout, binding.ViewGroup};
         if (FillViewParameters(values, *desc.Culling.Get(), *desc.View.Get(), _lightOverflowWarned,
-                               binding->PassGroup.has_value() || desc.MaterialPassName == "DepthNormalsMotion" || desc.MaterialPassName == "ShadowCaster"))
-            view->second = _resources.PrepareGroup(*program, binding->ViewGroup, values);
+                               binding.PassGroup.has_value() || desc.MaterialPassName == "DepthNormalsMotion" || desc.MaterialPassName == "ShadowCaster"))
+            ps.View = _resources.PrepareGroup(*program, binding.ViewGroup, values);
     }
-    auto [material, newMaterial] = _materials[program].try_emplace(batch.Material, std::nullopt);
-    if (newMaterial) material->second = _resources.PrepareGroup(*program, binding->MaterialGroup, pass->Parameters, pass->Textures, pass->Samplers);
-    auto [objects, newObjects] = _objects.try_emplace(program, &layout, binding->ObjectGroup);
-    auto [prepared, newObject] = objects->second.Groups.try_emplace(batch.Primitive, std::nullopt);
-    if (newObject) {
-        auto& preparation = objects->second;
-        auto& object = preparation.Values;
+    auto* material = ps.Materials.Find(batch.Material);
+    if (material == nullptr) {
+        material = &ps.Materials.Insert(batch.Material);
+        *material = _resources.PrepareGroup(*program, binding.MaterialGroup, pass->Parameters, pass->Textures, pass->Samplers);
+    }
+    auto* object = ps.Objects.Find(batch.Primitive);
+    if (object == nullptr) {
+        object = &ps.Objects.Insert(batch.Primitive);
+        auto& values = ps.ObjectValues;
         const auto& primitive = scene.Primitives[batch.Primitive];
-        if (preparation.LocalToWorld == nullptr || !object.SetMatrix4x4(*preparation.LocalToWorld, primitive.LocalToWorld)) {
+        if (ps.LocalToWorld == nullptr || !values.SetMatrix4x4(*ps.LocalToWorld, primitive.LocalToWorld)) {
             out.Reject(MeshPassRejectReason::InvalidBindings);
             return;
         }
-        if (preparation.NormalToWorld != nullptr &&
-            !object.SetMatrix4x4(*preparation.NormalToWorld, MakeNormalToWorld(primitive.LocalToWorld))) {
+        if (ps.NormalToWorld != nullptr &&
+            !values.SetMatrix4x4(*ps.NormalToWorld, MakeNormalToWorld(primitive.LocalToWorld))) {
             out.Reject(MeshPassRejectReason::InvalidBindings);
             return;
         }
-        if (preparation.PreviousLocalToWorld != nullptr) {
+        if (ps.PreviousLocalToWorld != nullptr) {
             const auto motion = _temporal ? _temporal->GetPrimitiveMotion(desc.View->StateId, primitive) : PrimitiveMotionData{primitive.LocalToWorld, false};
-            if (!object.SetMatrix4x4(*preparation.PreviousLocalToWorld, motion.PreviousLocalToWorld) ||
-                preparation.MotionValid == nullptr ||
-                !object.SetUInt(*preparation.MotionValid, motion.Valid && desc.View->PreviousViewValid ? 1u : 0u)) {
+            if (!values.SetMatrix4x4(*ps.PreviousLocalToWorld, motion.PreviousLocalToWorld) ||
+                ps.MotionValid == nullptr ||
+                !values.SetUInt(*ps.MotionValid, motion.Valid && desc.View->PreviousViewValid ? 1u : 0u)) {
                 out.Reject(MeshPassRejectReason::InvalidBindings);
                 return;
             }
         }
-        prepared->second = _resources.PrepareGroup(*program, binding->ObjectGroup, object);
+        *object = _resources.PrepareGroup(*program, binding.ObjectGroup, values);
     }
-    const auto& objectGroup = prepared->second;
-    if (!view->second || !material->second || !objectGroup) {
+    if (!ps.View || !*material || !*object) {
         out.Reject(MeshPassRejectReason::PrepareResourceFailed);
         return;
     }
@@ -80,7 +102,7 @@ void ForwardLitMeshPassProcessor::AddMeshBatch(const RendererListDesc& desc, con
     command.PipelineState = pass->PipelineState;
     command.PipelineState.DepthStencil.DepthTestEnable = true;
     command.PipelineState.DepthStencil.DepthCompare = render::CompareFunction::LessEqual;
-    command.PipelineState.DepthStencil.DepthWriteEnable = RenderQueueRange::Opaque().Contains(scene.Materials[batch.Material].Queue);
+    command.PipelineState.DepthStencil.DepthWriteEnable = RenderQueueRange::Opaque().Contains(materialData.Queue);
     if (!command.PipelineState.DepthStencil.DepthWriteEnable && command.PipelineState.DepthStencil.Stencil) {
         command.PipelineState.DepthStencil.Stencil->WriteMask = 0;
     }
@@ -88,11 +110,11 @@ void ForwardLitMeshPassProcessor::AddMeshBatch(const RendererListDesc& desc, con
     command.FirstIndex = batch.FirstIndex;
     command.IndexCount = batch.IndexCount;
     command.VertexOffset = batch.VertexOffset;
-    command.Groups = {*view->second, *material->second, *objectGroup};
-    if (!FinalizeMeshDrawCommand(command)) {
-        out.Reject(MeshPassRejectReason::InvalidBindings);
-        return;
-    }
+    // Groups must be ascending by group index (see ValidateMeshDrawCommand); the three forward groups are
+    // distinct, so emit them in order here instead of sorting and re-validating geometry per draw.
+    const PreparedShaderGroup* groups[3]{&*ps.View, &**material, &**object};
+    std::sort(std::begin(groups), std::end(groups), [](const auto* a, const auto* b) { return a->Group < b->Group; });
+    for (const auto* group : groups) command.Groups.push_back(*group);
     out.AddCommand(std::move(command));
 }
 

@@ -9,7 +9,8 @@ target_link_libraries(radraycore PUBLIC
     Eigen3::Eigen
     Pal::Sigslot
     STDEXEC::stdexec
-    $<$<BOOL:${RADRAY_ENABLE_MIMALLOC}>:mimalloc-override>)
+    $<$<BOOL:${RADRAY_ENABLE_MIMALLOC}>:mimalloc-override>
+    $<$<BOOL:${RADRAY_ENABLE_PROFILER}>:Tracy::TracyClient>)
 target_link_libraries(radraycore PRIVATE
     spdlog::spdlog
     xxHash::xxhash
@@ -20,6 +21,7 @@ target_link_libraries(radraycore PRIVATE
     $<$<BOOL:${RADRAY_ENABLE_LIBJPEG}>:jpeg-static>)
 target_compile_definitions(radraycore PUBLIC
     $<$<BOOL:${RADRAY_ENABLE_MIMALLOC}>:RADRAY_ENABLE_MIMALLOC>
+    $<$<BOOL:${RADRAY_ENABLE_PROFILER}>:RADRAY_ENABLE_PROFILER>
     $<$<BOOL:${RADRAY_ENABLE_LIBPNG}>:RADRAY_ENABLE_PNG>
     $<$<BOOL:${RADRAY_ENABLE_LIBJPEG}>:RADRAY_ENABLE_JPEG>)
 radray_default_compile_flags(radraycore)

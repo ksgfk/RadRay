@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <radray/logger.h>
+#include <radray/profiler.h>
 #include <radray/runtime/forward_pipeline/forward_graph.h>
 #include <radray/runtime/render_framework/viewport.h>
 #include <radray/runtime/render_system.h>
@@ -229,6 +230,7 @@ struct ShadowData {
 ShadowData BuildShadows(RenderGraph& graph, const ForwardPipelineSettings& settings, const ResolvedRenderView& main,
                         const RenderSceneSnapshot& scene, FrameDrawResources& draws, ForwardBindingCache& bindings,
                         ForwardHdrView& work, RgTextureValue& texture, render::RenderBackend backend, bool& warned) {
+    RADRAY_PROFILE_SCOPE_N("BuildShadows");
     ShadowData shadow;
     const RenderLightData* sun = nullptr;
     for (const auto& visible : work.Main.Culling.Lights) {
@@ -291,6 +293,7 @@ ShadowData BuildShadows(RenderGraph& graph, const ForwardPipelineSettings& setti
         shadow.Spheres[cascade] = {center.x(), center.y(), center.z(), radius * radius};
         shadow.Bias[cascade] = {texel, texel * 2, 0, 0};
         if (enabled) {
+            RADRAY_PROFILE_SCOPE_N("ShadowCascadeCullAndList");
             Cull({&scene, &draw.View}, draw.Culling);
             processor.ResetView();
             BuildRendererList({"ShadowCaster", "ShadowCaster", &draw.Culling, &draw.View, RenderQueueRange::Opaque(), 0xffffffffu, RendererListSorting::FrontToBack, true}, processor, draw.DepthOnly);
@@ -448,6 +451,7 @@ bool BuildForwardHdrView(RenderGraph& graph, RenderPipelineContext& context, ren
                          const RenderSceneSnapshot& scene, FrameDrawResources& draws, ForwardBindingCache& bindings,
                          ForwardHdrView& work, bool firstOutputView, bool& lightOverflowWarned,
                          std::span<const ForwardOutputSurface> surfaces, std::span<RenderGraphOutputBinding> outputs) {
+    RADRAY_PROFILE_SCOPE_N("BuildForwardHdrView");
     const auto previousScope = graph.SetResourceView(sourceView.StateId.Value);
     struct RestoreScope {
         RenderGraph& Graph;
@@ -493,17 +497,23 @@ bool BuildForwardHdrView(RenderGraph& graph, RenderPipelineContext& context, ren
     cullProjection.row(0) *= float(size.Width) / float(size.Width + 2);
     cullProjection.row(1) *= float(size.Height) / float(size.Height + 2);
     const auto cullMatrix = (cullProjection * view.View).eval();
-    if (!Cull({&scene, &view, 0xffffffffu, cullMatrix}, work.Main.Culling)) return false;
+    {
+        RADRAY_PROFILE_SCOPE_N("MainViewCull");
+        if (!Cull({&scene, &view, 0xffffffffu, cullMatrix}, work.Main.Culling)) return false;
+    }
     // One processor for prepass/opaque/transparent: same view, so view and object groups are shared across lists.
     ForwardLitMeshPassProcessor processor{draws, bindings, lightOverflowWarned, temporal ? &context : nullptr};
     work.ContentValid = true;
-    if (!msaa) {
-        BuildRendererList({"DepthNormalsMotion", "DepthNormalsMotion", &work.Main.Culling, &view, RenderQueueRange::Opaque(), 0xffffffffu, RendererListSorting::FrontToBack, true}, processor, work.Main.DepthOnly);
-        work.ContentValid &= work.Main.DepthOnly.Stats.ContentSucceeded();
+    {
+        RADRAY_PROFILE_SCOPE_N("MainViewRendererLists");
+        if (!msaa) {
+            BuildRendererList({"DepthNormalsMotion", "DepthNormalsMotion", &work.Main.Culling, &view, RenderQueueRange::Opaque(), 0xffffffffu, RendererListSorting::FrontToBack, true}, processor, work.Main.DepthOnly);
+            work.ContentValid &= work.Main.DepthOnly.Stats.ContentSucceeded();
+        }
+        BuildRendererList({"Opaque", "ForwardLit", &work.Main.Culling, &view, RenderQueueRange::Opaque(), 0xffffffffu, RendererListSorting::StateThenFrontToBack, true}, processor, work.Main.Opaque);
+        BuildRendererList({"Transparent", "ForwardLit", &work.Main.Culling, &view, RenderQueueRange::Transparent(), 0xffffffffu, RendererListSorting::BackToFront, true}, processor, work.Main.Transparent);
+        work.ContentValid &= work.Main.Opaque.Stats.ContentSucceeded() && work.Main.Transparent.Stats.ContentSucceeded();
     }
-    BuildRendererList({"Opaque", "ForwardLit", &work.Main.Culling, &view, RenderQueueRange::Opaque(), 0xffffffffu, RendererListSorting::StateThenFrontToBack, true}, processor, work.Main.Opaque);
-    BuildRendererList({"Transparent", "ForwardLit", &work.Main.Culling, &view, RenderQueueRange::Transparent(), 0xffffffffu, RendererListSorting::BackToFront, true}, processor, work.Main.Transparent);
-    work.ContentValid &= work.Main.Opaque.Stats.ContentSucceeded() && work.Main.Transparent.Stats.ContentSucceeded();
     if (!msaa)
         for (auto& command : work.Main.Opaque.Commands) command.PipelineState.DepthStencil.DepthWriteEnable = false;
     auto depth = Texture(graph, size, TextureFormat::D32_FLOAT, TextureUse::DepthStencilWrite | TextureUse::DepthStencilRead | (msaa ? TextureUses{} : TextureUses{TextureUse::Resource}), "Forward.Depth", samples);

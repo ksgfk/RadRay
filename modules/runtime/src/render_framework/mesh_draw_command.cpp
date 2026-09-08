@@ -5,6 +5,7 @@
 #include <radray/runtime/render_framework/render_graph.h>
 #include <radray/runtime/render_framework/renderer_list_pass_bindings.h>
 #include <radray/logger.h>
+#include <radray/profiler.h>
 
 namespace radray {
 
@@ -43,6 +44,7 @@ bool FinalizeMeshDrawCommand(MeshDrawCommand& command) noexcept {
 
 std::optional<PreparedRendererList> PrepareRendererList(const RendererList& list, RenderGraphRasterBuilder& builder,
                                                         Nullable<const RendererListPassBindings*> bindings) {
+    RADRAY_PROFILE_SCOPE_N("PrepareRendererList");
     PreparedRendererList prepared{builder.GetPassHandle(), {}};
     if (!list.Items.empty()) {
         if (list.Items.size() != list.Commands.size()) {
@@ -59,6 +61,13 @@ std::optional<PreparedRendererList> PrepareRendererList(const RendererList& list
         }
     }
     prepared.Draws.reserve(list.Commands.size());
+    // Many draws share geometry; declaring the same (buffer, range) read repeatedly only grows the pass
+    // access list (and every compile step that walks it), so each distinct read is declared once.
+    struct DeclaredRange {
+        uint64_t Offset, Size;
+        RgBufferAccess Access;
+    };
+    unordered_map<render::Buffer*, InlineVector<DeclaredRange, 2>> declared;
     for (size_t index = 0; index < list.Commands.size(); ++index) {
         const auto& draw = list.GetCommand(index);
         if (!ValidateMeshDrawCommand(draw) || (bindings && !bindings->IsValidFor(builder, *draw.Program))) {
@@ -66,6 +75,9 @@ std::optional<PreparedRendererList> PrepareRendererList(const RendererList& list
             return std::nullopt;
         }
         const auto declare = [&](render::Buffer& buffer, RgBufferAccess access, render::BufferRange range) {
+            auto& ranges = declared[&buffer];
+            for (const auto& seen : ranges)
+                if (seen.Offset == range.Offset && seen.Size == range.Size && seen.Access == access) return true;
             const auto desc = buffer.GetDesc();
             render::BufferStates state = render::BufferState::HostWrite;
             if (desc.Memory == render::MemoryType::Device) {
@@ -73,7 +85,9 @@ std::optional<PreparedRendererList> PrepareRendererList(const RendererList& list
                 if (desc.Usage.HasFlag(render::BufferUse::Vertex)) state |= render::BufferState::Vertex;
                 if (desc.Usage.HasFlag(render::BufferUse::Index)) state |= render::BufferState::Index;
             }
-            return builder.ReadImmutableBuffer(buffer, state, access, range).IsValid();
+            if (!builder.ReadImmutableBuffer(buffer, state, access, range).IsValid()) return false;
+            ranges.push_back({range.Offset, range.Size, access});
+            return true;
         };
         for (const auto& vertex : draw.Geometry->VertexBuffers)
             if (!declare(*vertex.View.Target, RgBufferAccess::Vertex, {vertex.View.Offset, vertex.View.Size})) return std::nullopt;
@@ -86,6 +100,7 @@ std::optional<PreparedRendererList> PrepareRendererList(const RendererList& list
 }
 
 void SubmitRendererList(const PreparedRendererList& list, RenderGraphRasterContext& ctx, DrawExecutionStats& stats) {
+    RADRAY_PROFILE_SCOPE_N("SubmitRendererList");
     if (list.Pass != ctx.GetPassHandle()) {
         stats.BindingFailure += list.Draws.size();
         stats.Skipped += list.Draws.size();

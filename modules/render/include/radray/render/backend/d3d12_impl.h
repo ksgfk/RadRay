@@ -410,7 +410,7 @@ public:
         ComPtr<ID3D12CommandQueue> queue,
         D3D12_COMMAND_LIST_TYPE type,
         unique_ptr<FenceD3D12> fence) noexcept;
-    ~CmdQueueD3D12() noexcept override = default;
+    ~CmdQueueD3D12() noexcept override;
 
     bool IsValid() const noexcept override;
 
@@ -427,6 +427,8 @@ public:
     ComPtr<ID3D12CommandQueue> _queue;
     unique_ptr<FenceD3D12> _fence;
     D3D12_COMMAND_LIST_TYPE _type;
+    // Profiler GPU timestamp context for this queue; null when profiling is disabled or unsupported.
+    void* _profilerContext{nullptr};
 };
 
 /**
@@ -463,11 +465,12 @@ class CmdListD3D12 final : public CommandBuffer {
 public:
     CmdListD3D12(
         DeviceD3D12* _device,
+        CmdQueueD3D12* queue,
         ComPtr<ID3D12CommandAllocator> cmdAlloc,
         ComPtr<ID3D12GraphicsCommandList> cmdList,
         D3D12_COMMAND_LIST_TYPE type,
         ComPtr<ID3D12RootSignature> emptyRootSignature) noexcept;
-    ~CmdListD3D12() noexcept override = default;
+    ~CmdListD3D12() noexcept override;
 
     bool IsValid() const noexcept override;
 
@@ -512,11 +515,20 @@ public:
 
 public:
     DeviceD3D12* _device;
+    CmdQueueD3D12* _queue;
     ComPtr<ID3D12CommandAllocator> _cmdAlloc;
     ComPtr<ID3D12GraphicsCommandList> _cmdList;
     ComPtr<ID3D12RootSignature> _emptyRootSignature;
     D3D12_COMMAND_LIST_TYPE _type;
     vector<unique_ptr<Buffer>> _keepAliveBuffers;
+    // Profiler GPU zones opened by PushDebugGroup. D3D12 forbids query resolution inside a render pass, so
+    // zones open only outside one, and pops issued while a render pass is recording are deferred to
+    // EndRenderPass; a merged raster group therefore reports as a single zone named after its first pass.
+    struct ProfilerZoneStack;
+    unique_ptr<ProfilerZoneStack> _profilerZones;
+    bool _inRenderPass{false};
+    uint32_t _deferredZonePops{0};
+    uint32_t _suppressedZonePushes{0};
 };
 
 // Last parameter set bound to one root-signature group on an encoder. Offsets beyond the inline
@@ -576,6 +588,8 @@ public:
     GraphicsPsoD3D12* _boundPso{nullptr};
     RootSigD3D12* _boundRs{nullptr};
     std::array<std::optional<VertexBufferView>, D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT> _boundVbvs{};
+    // Identical index-buffer rebinds are skipped; reset on Destroy.
+    std::optional<IndexBufferView> _boundIbv{};
     // Root parameters persist across draws under one root signature; identical (set, flush generation,
     // offsets) rebinds of a group are skipped. Cleared whenever the root signature changes.
     std::array<BoundParameterGroupD3D12, kBoundParameterGroupCountD3D12> _boundGroups{};

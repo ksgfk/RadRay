@@ -7,6 +7,11 @@
 
 #include <radray/scope_guard.h>
 #include <radray/text_encoding.h>
+#include <dxgidebug.h>  // TEMP PROBE
+#pragma comment(lib, "dxguid.lib")  // TEMP PROBE
+#ifdef RADRAY_ENABLE_PROFILER
+#include <tracy/TracyD3D12.hpp>
+#endif
 
 // 章节索引。跳转: Grep "^// ==" 本文件。设计说明见 docs/architecture/render-rhi.md
 //
@@ -29,6 +34,33 @@
 //   == 各对象类实现 ==
 
 namespace radray::render::d3d12 {
+
+static std::array<string, 32> g_probeRing{};  // TEMP PROBE
+static std::atomic<uint32_t> g_probeRingHead{0};
+static std::mutex g_probeMutex;
+static void ProbeDeviceRemoved(ID3D12Device* device, string where) {  // TEMP PROBE
+    {
+        const auto now = std::chrono::system_clock::now().time_since_epoch();
+        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now).count() % 100000;
+        std::lock_guard lock(g_probeMutex);
+        g_probeRing[g_probeRingHead.fetch_add(1) % g_probeRing.size()] = fmt::format("t={} {}", ms, where);
+    }
+    static bool reported = false;
+    if (reported || device == nullptr) return;
+    const HRESULT reason = device->GetDeviceRemovedReason();
+    if (reason != S_OK) {
+        reported = true;
+        RADRAY_ERR_LOG("PROBE device removed detected at {}: {} {:#x}", g_probeRing[(g_probeRingHead.load() - 1) % g_probeRing.size()], GetErrorName(reason), static_cast<uint32_t>(reason));
+    }
+}
+static void ProbeDumpRing() {  // TEMP PROBE
+    std::lock_guard lock(g_probeMutex);
+    const uint32_t head = g_probeRingHead.load();
+    for (uint32_t i = 0; i < g_probeRing.size(); ++i) {
+        const auto& s = g_probeRing[(head + i) % g_probeRing.size()];
+        if (!s.empty()) RADRAY_ERR_LOG("PROBE ring[{}] {}", i, s);
+    }
+}
 
 // == 命令签名与验证消息 ==
 
@@ -578,6 +610,14 @@ std::optional<uint32_t> DXGIFactoryImpl::SelectHighPerformanceAdapter() const no
 Nullable<unique_ptr<DXGIFactory>> CreateDXGIFactory(const DXGIFactoryDescriptor& desc) {
     uint32_t dxgiFactoryFlags = 0;
     if (desc.IsEnableDebugLayer) {
+        {  // TEMP PROBE: DRED
+            ComPtr<ID3D12DeviceRemovedExtendedDataSettings1> dred;
+            if (SUCCEEDED(::D3D12GetDebugInterface(IID_PPV_ARGS(&dred)))) {
+                dred->SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+                dred->SetBreadcrumbContextEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+                dred->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+            }
+        }
         ComPtr<ID3D12Debug> debugController;
         if (SUCCEEDED(::D3D12GetDebugInterface(IID_PPV_ARGS(&debugController)))) {
             debugController->EnableDebugLayer();
@@ -995,6 +1035,7 @@ Nullable<unique_ptr<CommandBuffer>> DeviceD3D12::CreateCommandBuffer(CommandQueu
         }
         return make_unique<CmdListD3D12>(
             this,
+            queue,
             std::move(alloc),
             std::move(list),
             queue->_type,
@@ -1069,11 +1110,13 @@ Nullable<unique_ptr<SwapChain>> DeviceD3D12::CreateSwapChain(const SwapChainDesc
     auto queue = CastD3D12Object(desc.PresentQueue);
     HWND hwnd = std::bit_cast<HWND>(desc.NativeHandler);
     ComPtr<IDXGISwapChain1> temp;
+    ProbeDeviceRemoved(_device.Get(), "before CreateSwapChainForHwnd");  // TEMP PROBE
     if (HRESULT hr = _dxgiFactory->CreateSwapChainForHwnd(queue->_queue.Get(), hwnd, &scDesc, nullptr, nullptr, temp.GetAddressOf());
         FAILED(hr)) {
         RADRAY_ERR_LOG("IDXGIFactory::CreateSwapChainForHwnd failed: {} {}", GetErrorName(hr), hr);
         return nullptr;
     }
+    ProbeDeviceRemoved(_device.Get(), "after CreateSwapChainForHwnd");  // TEMP PROBE
     if (HRESULT hr = _dxgiFactory->MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER);  // 阻止 Alt + Enter 进全屏
         FAILED(hr)) {
         RADRAY_WARN_LOG("IDXGIFactory::MakeWindowAssociation failed: {} {}", GetErrorName(hr), hr);
@@ -3764,6 +3807,15 @@ void DeviceD3D12::TryDrainValidationMessages() {
 
 // == CmdQueue / Fence / CmdList 与 barrier ==
 
+#ifdef RADRAY_ENABLE_PROFILER
+struct CmdListD3D12::ProfilerZoneStack {
+    // D3D12ZoneScope is not movable; keep them in a deque so pushes never relocate open zones.
+    deque<tracy::D3D12ZoneScope> Zones;
+};
+#else
+struct CmdListD3D12::ProfilerZoneStack {};
+#endif
+
 CmdQueueD3D12::CmdQueueD3D12(
     DeviceD3D12* device,
     ComPtr<ID3D12CommandQueue> queue,
@@ -3772,13 +3824,31 @@ CmdQueueD3D12::CmdQueueD3D12(
     : _device(device),
       _queue(std::move(queue)),
       _fence(std::move(fence)),
-      _type(type) {}
+      _type(type) {
+#ifdef RADRAY_ENABLE_PROFILER
+    if (_type != D3D12_COMMAND_LIST_TYPE_COPY && _queue != nullptr) {
+        _profilerContext = TracyD3D12Context(_device->_device.Get(), _queue.Get());
+        const auto name = fmt::format("D3D12 {}", GetQueueType());
+        TracyD3D12ContextName(static_cast<TracyD3D12Ctx>(_profilerContext), name.c_str(), static_cast<uint16_t>(name.size()));
+    }
+#endif
+}
+
+CmdQueueD3D12::~CmdQueueD3D12() noexcept {
+    Destroy();
+}
 
 bool CmdQueueD3D12::IsValid() const noexcept {
     return _queue != nullptr;
 }
 
 void CmdQueueD3D12::Destroy() noexcept {
+#ifdef RADRAY_ENABLE_PROFILER
+    if (_profilerContext != nullptr) {
+        TracyD3D12Destroy(static_cast<TracyD3D12Ctx>(_profilerContext));
+        _profilerContext = nullptr;
+    }
+#endif
     _fence = nullptr;
     _queue = nullptr;
 }
@@ -3797,7 +3867,12 @@ void CmdQueueD3D12::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
         submits.emplace_back(cmdList->_cmdList.Get());
     }
     if (!submits.empty()) {
+        ProbeDeviceRemoved(_device->_device.Get(), "before ExecuteCommandLists");  // TEMP PROBE
         _queue->ExecuteCommandLists(static_cast<UINT>(submits.size()), submits.data());
+        ProbeDeviceRemoved(_device->_device.Get(), "after ExecuteCommandLists");  // TEMP PROBE
+#ifdef RADRAY_ENABLE_PROFILER
+        if (_profilerContext != nullptr) TracyD3D12Collect(static_cast<TracyD3D12Ctx>(_profilerContext));
+#endif
     }
 
     for (size_t i = 0; i < desc.SignalFences.size(); ++i) {
@@ -3863,8 +3938,10 @@ void FenceD3D12::Wait() noexcept {
 void FenceD3D12::Wait(uint64_t value) noexcept {
     UINT64 completedValue = _fence->GetCompletedValue();
     if (completedValue < value) {
+        ProbeDeviceRemoved(nullptr, fmt::format("FenceWait value={} completed={} tid={}", value, completedValue, ::GetCurrentThreadId()));  // TEMP PROBE
         _fence->SetEventOnCompletion(value, _event.Get());
         ::WaitForSingleObject(_event.Get(), INFINITE);
+        ProbeDeviceRemoved(nullptr, fmt::format("FenceWait done completed={}", _fence->GetCompletedValue()));  // TEMP PROBE
     }
 }
 
@@ -3878,21 +3955,38 @@ uint64_t FenceD3D12::GetLastSignaledValue() const noexcept {
 
 CmdListD3D12::CmdListD3D12(
     DeviceD3D12* device,
+    CmdQueueD3D12* queue,
     ComPtr<ID3D12CommandAllocator> cmdAlloc,
     ComPtr<ID3D12GraphicsCommandList> cmdList,
     D3D12_COMMAND_LIST_TYPE type,
     ComPtr<ID3D12RootSignature> emptyRootSignature) noexcept
     : _device(device),
+      _queue(queue),
       _cmdAlloc(std::move(cmdAlloc)),
       _cmdList(std::move(cmdList)),
       _emptyRootSignature(std::move(emptyRootSignature)),
-      _type(type) {}
+      _type(type),
+      _profilerZones(make_unique<ProfilerZoneStack>()) {}
+
+CmdListD3D12::~CmdListD3D12() noexcept {
+    Destroy();
+}
 
 bool CmdListD3D12::IsValid() const noexcept {
     return _cmdAlloc != nullptr && _cmdList != nullptr;
 }
 
 void CmdListD3D12::Destroy() noexcept {
+#ifdef RADRAY_ENABLE_PROFILER
+    // Open zones would record end queries into a list that is being destroyed; drop them.
+    if (_profilerZones && !_profilerZones->Zones.empty()) {
+        RADRAY_WARN_LOG("d3d12 command list destroyed with {} open profiler zones", _profilerZones->Zones.size());
+        _profilerZones->Zones.clear();
+    }
+#endif
+    _deferredZonePops = 0;
+    _suppressedZonePushes = 0;
+    _inRenderPass = false;
     _keepAliveBuffers.clear();
     _cmdAlloc = nullptr;
     _cmdList = nullptr;
@@ -3907,6 +4001,7 @@ void CmdListD3D12::SetDebugName(std::string_view name) noexcept {
 }
 
 void CmdListD3D12::Begin() noexcept {
+    ProbeDeviceRemoved(_device->_device.Get(), fmt::format("CmdList Begin list={} tid={}", static_cast<const void*>(this), ::GetCurrentThreadId()));  // TEMP PROBE
     _keepAliveBuffers.clear();
     if (HRESULT hr = _cmdAlloc->Reset();
         FAILED(hr)) {
@@ -3928,6 +4023,12 @@ void CmdListD3D12::Begin() noexcept {
 }
 
 void CmdListD3D12::End() noexcept {
+#ifdef RADRAY_ENABLE_PROFILER
+    // Zone end queries must be recorded before Close(); unbalanced groups are closed here.
+    _profilerZones->Zones.clear();
+    _deferredZonePops = 0;
+    _suppressedZonePushes = 0;
+#endif
     _cmdList->Close();
 }
 
@@ -4025,10 +4126,33 @@ void CmdListD3D12::ResourceBarrier(std::span<const ResourceBarrierDescriptor> ba
 void CmdListD3D12::PushDebugGroup(std::string_view name) noexcept {
     const auto wide = ToWideChar(name).value_or(L"RenderGraph");
     _cmdList->BeginEvent(0, wide.c_str(), static_cast<UINT>((wide.size() + 1) * sizeof(wchar_t)));
+#ifdef RADRAY_ENABLE_PROFILER
+    if (_inRenderPass) {
+        // Query resolution is illegal inside a render pass; this pass joins the zone opened by its raster group.
+        ++_suppressedZonePushes;
+        return;
+    }
+    if (_queue->_profilerContext != nullptr) {
+        _profilerZones->Zones.emplace_back(
+            static_cast<TracyD3D12Ctx>(_queue->_profilerContext), TracyLine, TracyFile, strlen(TracyFile), TracyFunction, strlen(TracyFunction),
+            name.data(), name.size(), _cmdList.Get(), true);
+    }
+#endif
 }
 
 void CmdListD3D12::PopDebugGroup() noexcept {
     _cmdList->EndEvent();
+#ifdef RADRAY_ENABLE_PROFILER
+    if (_suppressedZonePushes > 0) {
+        --_suppressedZonePushes;
+        return;
+    }
+    if (_inRenderPass) {
+        ++_deferredZonePops;
+        return;
+    }
+    if (!_profilerZones->Zones.empty()) _profilerZones->Zones.pop_back();
+#endif
 }
 
 Nullable<unique_ptr<GraphicsCommandEncoder>> CmdListD3D12::BeginRenderPass(const RenderPassBeginDescriptor& desc) noexcept {
@@ -4068,6 +4192,7 @@ Nullable<unique_ptr<GraphicsCommandEncoder>> CmdListD3D12::BeginRenderPass(const
         D3D12_RENDER_PASS_ENDING_ACCESS_TYPE endingAccess = MapType(color.Store);
         auto& rtDesc = rtDescs.emplace_back(D3D12_RENDER_PASS_RENDER_TARGET_DESC{});
         rtDesc.cpuDescriptor = v->_heapView.HandleCpu();
+        if (v->_texture && v->_texture->_name.starts_with("SwapChain_BackBuffer")) ProbeDeviceRemoved(nullptr, fmt::format("BeginRenderPass rt[{}] tex={} res={} name={} {}x{} tid={}", index, static_cast<const void*>(v->_texture), static_cast<const void*>(v->_texture->_tex.Get()), v->_texture->_name, v->_texture->_rawDesc.Width, v->_texture->_rawDesc.Height, ::GetCurrentThreadId()));  // TEMP PROBE
         rtDesc.BeginningAccess.Type = beginningAccess;
         rtDesc.BeginningAccess.Clear.ClearValue = clearColor;
         rtDesc.EndingAccess.Type = endingAccess;
@@ -4107,6 +4232,7 @@ Nullable<unique_ptr<GraphicsCommandEncoder>> CmdListD3D12::BeginRenderPass(const
         pDsDesc = &dsDesc;
     }
     cmdList4->BeginRenderPass((UINT32)rtDescs.size(), rtDescs.data(), pDsDesc, passFlags);
+    _inRenderPass = true;
     return make_unique<CmdRenderPassD3D12>(this);
 }
 
@@ -4118,12 +4244,18 @@ void CmdListD3D12::EndRenderPass(unique_ptr<GraphicsCommandEncoder> encoder) noe
         return;
     }
     cmdList4->EndRenderPass();
+    _inRenderPass = false;
     // Parameter bindings belong to this encoder. End their static-data lifetime
     // before later compute/copy passes can write the same resources.
     // Keep a valid empty root while GBV injects barrier-validation compute work.
     // A null root crashes the NVIDIA driver during GBV state restoration.
     _cmdList->SetGraphicsRootSignature(_emptyRootSignature.Get());
     encoder->Destroy();
+#ifdef RADRAY_ENABLE_PROFILER
+    // Pops deferred while the render pass was recording close their zones now that query resolution is legal.
+    for (; _deferredZonePops > 0; --_deferredZonePops)
+        if (!_profilerZones->Zones.empty()) _profilerZones->Zones.pop_back();
+#endif
 }
 
 Nullable<unique_ptr<ComputeCommandEncoder>> CmdListD3D12::BeginComputePass() noexcept {
@@ -4499,6 +4631,7 @@ void CmdRenderPassD3D12::Destroy() noexcept {
     for (std::optional<VertexBufferView>& view : _boundVbvs) {
         view.reset();
     }
+    _boundIbv.reset();
     _boundGroups.fill({});
     _boundRs = nullptr;
     _boundPso = nullptr;
@@ -4615,11 +4748,20 @@ void CmdRenderPassD3D12::BindVertexBuffers(std::span<const VertexBufferBinding> 
         return;
     }
 
+    bool changed = false;
     for (const VertexBufferBinding& binding : bindings) {
-        _boundVbvs[binding.Binding] = binding.View;
+        std::optional<VertexBufferView>& bound = _boundVbvs[binding.Binding];
+        if (!bound.has_value() || bound->Target != binding.View.Target || bound->Offset != binding.View.Offset || bound->Size != binding.View.Size) {
+            bound = binding.View;
+            changed = true;
+        }
     }
     if (_boundPso == nullptr) {
         // stride 未知, 等 pso 绑定时再一次性下发。
+        return;
+    }
+    // 同一 pso 下重复绑定相同的 view 无需再下发 (pso 切换时 BindGraphicsPipelineState 会全量重发).
+    if (!changed) {
         return;
     }
     FlushVertexBuffers(lowest, slotCount);
@@ -4630,12 +4772,16 @@ void CmdRenderPassD3D12::BindIndexBuffer(IndexBufferView ibv) noexcept {
         RADRAY_ERR_LOG("d3d12 index buffer stride must be 2 or 4 bytes, got {}", ibv.Stride);
         return;
     }
+    if (_boundIbv.has_value() && _boundIbv->Target == ibv.Target && _boundIbv->Offset == ibv.Offset && _boundIbv->Stride == ibv.Stride) {
+        return;
+    }
     auto buf = CastD3D12Object(ibv.Target);
     D3D12_INDEX_BUFFER_VIEW view{};
     view.BufferLocation = buf->_gpuAddr + ibv.Offset;
     view.SizeInBytes = (UINT)buf->_rawDesc.Width - ibv.Offset;
     view.Format = ibv.Stride == 2 ? DXGI_FORMAT_R16_UINT : DXGI_FORMAT_R32_UINT;
     _cmdList->_cmdList->IASetIndexBuffer(&view);
+    _boundIbv = ibv;
 }
 
 void CmdRenderPassD3D12::BindGraphicsPipelineState(GraphicsPipelineState* pso) noexcept {
@@ -5194,10 +5340,12 @@ SwapChainD3D12::SwapChainD3D12(
       _reqFormat(desc.Format) {}
 
 SwapChainD3D12::~SwapChainD3D12() noexcept {
+    ProbeDeviceRemoved(_device->_device.Get(), "before ~SwapChainD3D12");  // TEMP PROBE
     _frames.clear();
     _hasOutstandingFrame = false;
     _outstandingBackBufferIndex = std::numeric_limits<uint32_t>::max();
     _swapchain = nullptr;
+    ProbeDeviceRemoved(_device->_device.Get(), "after ~SwapChainD3D12");  // TEMP PROBE
     if (_frameLatencyEvent) {
         CloseHandle(_frameLatencyEvent);
         _frameLatencyEvent = nullptr;
@@ -5242,6 +5390,7 @@ SwapChainAcquireResult SwapChainD3D12::AcquireNext(uint64_t timeoutMs) noexcept 
     const DWORD waitResult = ::WaitForSingleObjectEx(_frameLatencyEvent, milliseconds, false);
     if (waitResult == WAIT_OBJECT_0) {
         const auto curr = static_cast<uint32_t>(_swapchain->GetCurrentBackBufferIndex());
+        ProbeDeviceRemoved(_device->_device.Get(), fmt::format("AcquireNext sc={} current={} tex={} res={} {}x{}", static_cast<const void*>(this), curr, static_cast<const void*>(_frames[curr].image.get()), static_cast<const void*>(_frames[curr].image->_tex.Get()), _frames[curr].image->_rawDesc.Width, _frames[curr].image->_rawDesc.Height));  // TEMP PROBE
         _hasOutstandingFrame = true;
         _outstandingBackBufferIndex = curr;
         ++_outstandingFrameToken;
@@ -5306,7 +5455,9 @@ SwapChainPresentResult SwapChainD3D12::Present(SwapChainFrame&& frame) noexcept 
             break;
         }
     }
+    ProbeDeviceRemoved(_device->_device.Get(), fmt::format("before Present sc={} outstanding={} current={} sync={} flags={}", static_cast<const void*>(this), _outstandingBackBufferIndex, _swapchain->GetCurrentBackBufferIndex(), syncInterval, presentFlags));  // TEMP PROBE
     const HRESULT hr = _swapchain->Present(syncInterval, presentFlags);
+    ProbeDeviceRemoved(_device->_device.Get(), fmt::format("after Present sc={} hr={:#x}", static_cast<const void*>(this), static_cast<uint32_t>(hr)));  // TEMP PROBE
     result.NativeStatusCode = static_cast<int64_t>(hr);
     if (SUCCEEDED(hr)) {
         result.Status = SwapChainStatus::Success;
@@ -5344,7 +5495,9 @@ bool SwapChainD3D12::Recreate(uint32_t width, uint32_t height, TextureFormat for
 
     const DXGI_FORMAT rawFormat = _SwapChainStorageFormat(format);
     _frames.clear();
+    ProbeDeviceRemoved(_device->_device.Get(), fmt::format("before ResizeBuffers sc={} {}x{} -> {}x{} outstanding={}", static_cast<const void*>(this), desc.Width, desc.Height, width, height, _hasOutstandingFrame));  // TEMP PROBE
     const HRESULT hr = _swapchain->ResizeBuffers(desc.BufferCount, width, height, rawFormat, desc.Flags);
+    ProbeDeviceRemoved(_device->_device.Get(), fmt::format("after ResizeBuffers sc={} hr={:#x}", static_cast<const void*>(this), static_cast<uint32_t>(hr)));  // TEMP PROBE
     if (SUCCEEDED(hr)) {
         _reqFormat = format;
         _mode = presentMode;
@@ -5421,8 +5574,70 @@ void* BufferD3D12::Map(uint64_t offset, uint64_t size) noexcept {
                                       ? D3D12_RANGE{offset, offset + size}
                                       : D3D12_RANGE{0, 0};
     void* ptr = nullptr;
+    ProbeDeviceRemoved(_device->_device.Get(), fmt::format("Map buf={} tid={}", static_cast<const void*>(this), ::GetCurrentThreadId()));  // TEMP PROBE
     if (HRESULT hr = _buf->Map(0, &readRange, &ptr);
         FAILED(hr)) {
+        if (hr == DXGI_ERROR_DEVICE_REMOVED) {  // TEMP PROBE
+            const HRESULT reason = _device->_device->GetDeviceRemovedReason();
+            RADRAY_ERR_LOG("PROBE device removed reason: {} {:#x}", GetErrorName(reason), static_cast<uint32_t>(reason));
+            ProbeDumpRing();
+            {
+                ComPtr<IDXGIInfoQueue> dxgiQueue;
+                if (SUCCEEDED(::DXGIGetDebugInterface1(0, IID_PPV_ARGS(&dxgiQueue)))) {
+                    const UINT64 count = dxgiQueue->GetNumStoredMessages(DXGI_DEBUG_ALL);
+                    RADRAY_ERR_LOG("PROBE dxgi stored messages: {}", count);
+                    for (UINT64 i = 0; i < count; i++) {
+                        SIZE_T len = 0;
+                        dxgiQueue->GetMessage(DXGI_DEBUG_ALL, i, nullptr, &len);
+                        vector<byte> storage(len);
+                        auto* message = reinterpret_cast<DXGI_INFO_QUEUE_MESSAGE*>(storage.data());
+                        if (SUCCEEDED(dxgiQueue->GetMessage(DXGI_DEBUG_ALL, i, message, &len)) && message->Severity <= DXGI_INFO_QUEUE_MESSAGE_SEVERITY_WARNING)
+                            RADRAY_ERR_LOG("PROBE dxgi sev={} id={} {}", static_cast<int>(message->Severity), static_cast<int>(message->ID), message->pDescription);
+                    }
+                }
+            }
+            ComPtr<ID3D12DeviceRemovedExtendedData1> dred;
+            if (SUCCEEDED(_device->_device.As(&dred))) {
+                D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT1 crumbs{};
+                if (SUCCEEDED(dred->GetAutoBreadcrumbsOutput1(&crumbs))) {
+                    for (const auto* node = crumbs.pHeadAutoBreadcrumbNode; node != nullptr; node = node->pNext) {
+                        const UINT last = node->pLastBreadcrumbValue ? *node->pLastBreadcrumbValue : 0;
+                        const bool incomplete = last < node->BreadcrumbCount;
+                        if (!incomplete) continue;
+                        RADRAY_ERR_LOG("PROBE DRED node list='{}' queue='{}' count={} last={}",
+                                       node->pCommandListDebugNameA ? node->pCommandListDebugNameA : "?",
+                                       node->pCommandQueueDebugNameA ? node->pCommandQueueDebugNameA : "?", node->BreadcrumbCount, last);
+                        for (UINT i = last > 8 ? last - 8 : 0; i < node->BreadcrumbCount && i <= last + 2; ++i) {
+                            const char* ctx = nullptr;
+                            for (UINT c = 0; c < node->BreadcrumbContextsCount; ++c)
+                                if (node->pBreadcrumbContexts[c].BreadcrumbIndex == i) ctx = "ctx";
+                            RADRAY_ERR_LOG("PROBE   [{}] op={} {}{}", i, static_cast<int>(node->pCommandHistory[i]), i == last ? "<-- executing" : "", ctx ? " (has ctx)" : "");
+                        }
+                        for (UINT c = 0; c < node->BreadcrumbContextsCount; ++c)
+                            if (node->pBreadcrumbContexts[c].BreadcrumbIndex + 3 >= last && node->pBreadcrumbContexts[c].BreadcrumbIndex <= last + 1)
+                                RADRAY_ERR_LOG("PROBE   ctx[{}]='{}'", node->pBreadcrumbContexts[c].BreadcrumbIndex, ToMultiByte(node->pBreadcrumbContexts[c].pContextString).value_or("?"));
+                    }
+                }
+                D3D12_DRED_PAGE_FAULT_OUTPUT fault{};
+                if (SUCCEEDED(dred->GetPageFaultAllocationOutput(&fault))) {
+                    RADRAY_ERR_LOG("PROBE DRED page fault VA={:#x}", fault.PageFaultVA);
+                    for (const auto* n = fault.pHeadExistingAllocationNode; n; n = n->pNext) RADRAY_ERR_LOG("PROBE   existing '{}' type={}", n->ObjectNameA ? n->ObjectNameA : "?", static_cast<int>(n->AllocationType));
+                    for (const auto* n = fault.pHeadRecentFreedAllocationNode; n; n = n->pNext) RADRAY_ERR_LOG("PROBE   freed '{}' type={}", n->ObjectNameA ? n->ObjectNameA : "?", static_cast<int>(n->AllocationType));
+                }
+            }
+            ComPtr<ID3D12InfoQueue> infoQueue;
+            if (SUCCEEDED(_device->_device.As(&infoQueue))) {
+                const UINT64 count = infoQueue->GetNumStoredMessages();
+                RADRAY_ERR_LOG("PROBE stored validation messages: {}", count);
+                for (UINT64 i = 0; i < count; i++) {
+                    SIZE_T len = 0;
+                    infoQueue->GetMessage(i, nullptr, &len);
+                    vector<byte> storage(len);
+                    auto* message = reinterpret_cast<D3D12_MESSAGE*>(storage.data());
+                    if (SUCCEEDED(infoQueue->GetMessage(i, message, &len))) RADRAY_ERR_LOG("PROBE msg sev={} id={} {}", static_cast<int>(message->Severity), static_cast<int>(message->ID), message->pDescription);
+                }
+            }
+        }
         RADRAY_ABORT("ID3D12Resource::Map failed: {} {}", GetErrorName(hr), hr);
     }
     if (_hints.HasFlag(ResourceHint::PersistentMap)) {

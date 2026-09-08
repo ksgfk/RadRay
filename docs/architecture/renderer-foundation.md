@@ -297,19 +297,26 @@ buffer 排序、dynamic 标志和资源反射形成 `ShaderParameterGroupRecipe`
 临时绑定与 set key 复用容量；flight 安全复用仍清理 native sets 并重置 arena，不清 program recipe。
 Forward 在同一 processor 内按 program、primitive 复用对象参数，同一物体多个 section 不重复上传；
 HDR 同一 view 的列表和同一主视图的四个阴影级联已共享 processor，view-dependent motion
-仍单独准备。`FrameDrawResourceStats::RecipeBuilds` 计实际首次构建，warm flight 为 0；另报组准备、
+仍单独准备。processor 的 material/primitive 准备以 snapshot 索引为键，因此一个 processor 只服务
+同一帧、同一 snapshot 的列表。`FrameDrawResourceStats::RecipeBuilds` 计实际首次构建，warm flight 为 0；另报组准备、
 set 命中/创建和常量复制字节数。set 命中不代表本次参数上传被省略。
 set cache 精确 key 为 pipeline layout、group、所有 buffer target/静态 offset/range、解析后的 texture view
 和 sampler（含绑定身份/数组元素）。dynamic offset 不属于 key，相同 backing page 上的切片可复用 set；
 spill 或静态 range/资源变化创建新 set。缓存命中后绝不改写已发布 descriptor，执行阶段不上传或写 set。
+只含 dynamic constant buffer 的组（view/object）另有快速路径：set 仅由 layout、group 与各 buffer 所在
+arena block 决定，用线性小表命中，不构造通用 key；语义与精确 key 缓存一致。
 
 复用顺序为清空 renderer lists/借用 command → 清 set cache 与 sets → reset/裁减 arena，全部依赖既有
 flight fence 安全边界。`MeshDrawDescription` 保存与视图无关的 program、PSO 输入、geometry 和 draw range；
 `MeshDrawCommand` 加入帧内已准备的 groups，均不拥有 RHI 资源或资产。setup 中 `PrepareRendererList`
-验证执行索引、几何/有序唯一 groups、
-合并 graph 组并声明各 PSO，得到借用原 list 与 bindings 的 `PreparedRendererList`。二者必须保持不变
+验证执行索引、几何/有序唯一 groups，
+合并 graph 组并声明各 PSO，得到借用原 list 与 bindings 的 `PreparedRendererList`。同一 (buffer, range,
+access) 的持久 geometry 读取在一次 prepare 内只向 pass 声明一次；重复声明只会线性放大 access 列表
+与之后每个编译步骤，不改变语义。二者必须保持不变
 直到图执行完毕。`SubmitRendererList` 只接受 prepared list，以 pass-local handle 绑定已准备的 PSO，
-再执行 bind/draw；record 不逐 draw 查找 PSO、分配校验容器或重建参数。
+再执行 bind/draw；record 不逐 draw 查找 PSO、分配校验容器或重建参数。graph 命令包装对本 pass 内
+已通过声明检查的 vertex/index buffer 做少量缓存，相邻 draw 共享几何时不重复查表；后端 encoder 亦跳过
+与当前状态完全相同的 vertex/index 重绑定，pso 切换时全量重发。
 
 `RendererListPassBindings::Create/Build` 把 graph parameter set 与当前 pass、program、真实 group 关联，
 供同一 `SubmitRendererList` draw loop 合并 native per-view/object/material 组。按 program 逐 draw 绑定，

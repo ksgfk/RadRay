@@ -10,6 +10,7 @@
 #include <atomic>
 #include <cmath>
 #include <radray/logger.h>
+#include <radray/profiler.h>
 #include <radray/runtime/forward_pipeline/forward_graph.h>
 #include <radray/runtime/application.h>
 #include <radray/runtime/gpu_system.h>
@@ -224,6 +225,7 @@ bool ForwardPipeline::SetOutputSurfaces(std::span<const ForwardOutputSurface> su
 }
 
 void ForwardPipeline::PrepareFrame(RenderPrepareContext& ctx) {
+    RADRAY_PROFILE_SCOPE_N("ForwardPipeline::PrepareFrame");
     const uint32_t index = ctx.App.FlightIndex;
     RADRAY_ASSERT(index < _impl->Flights.size());
     auto& flight = _impl->Flights[index];
@@ -237,7 +239,12 @@ void ForwardPipeline::PrepareFrame(RenderPrepareContext& ctx) {
     ++_impl->PreparedSerial;
     flight.Stats = {};
     ++flight.Stats.SnapshotBuilds;
-    if (!_impl->SnapshotBuilder.Build(*_impl->RenderScene, flight.Scene, ctx.RetainedAssets)) {
+    bool snapshotOk = false;
+    {
+        RADRAY_PROFILE_SCOPE_N("SceneSnapshotBuild");
+        snapshotOk = _impl->SnapshotBuilder.Build(*_impl->RenderScene, flight.Scene, ctx.RetainedAssets);
+    }
+    if (!snapshotOk) {
         RADRAY_ERR_LOG("Forward scene snapshot exceeded its frame-local index capacity");
         return;
     }
@@ -284,6 +291,7 @@ void ForwardPipeline::PrepareFrame(RenderPrepareContext& ctx) {
 }
 
 void ForwardPipeline::BuildGraph(RenderPipelineContext& ctx, RenderGraph& graph, std::span<RenderGraphOutputBinding> outputs) {
+    RADRAY_PROFILE_SCOPE_N("ForwardPipeline::BuildGraph");
     if (!_impl->BeginFrame(ctx)) {
         _impl->Error = true;
         return;

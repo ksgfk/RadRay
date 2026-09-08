@@ -10,6 +10,7 @@
 #include <thread>
 
 #include <radray/logger.h>
+#include <radray/profiler.h>
 #include <radray/scope_guard.h>
 #include <radray/render/rhi.h>
 #include <radray/runtime/asset_database.h>
@@ -488,6 +489,7 @@ public:
         if (_ticking) return;
         _ticking = true;
         auto scope = MakeScopeGuard([this]() noexcept { _ticking = false; });
+        RADRAY_PROFILE_SCOPE_N("TickFrame");
         if (isInModalLoop) {
             MarkModalLoopActivityDuringDispatch();
         }
@@ -501,10 +503,14 @@ public:
 
         _app->GetWindowManager()->CheckRecreateSwapChains();
 
-        auto result = _app->Update(AppUpdateContext{
-            .FlightIndex = flightIndex,
-            .DeltaTime = deltaTime,
-            .LastFrameLatency = gpuSystem->GetLastFrameLatency()});
+        AppUpdateResult result{};
+        {
+            RADRAY_PROFILE_SCOPE_N("Update");
+            result = _app->Update(AppUpdateContext{
+                .FlightIndex = flightIndex,
+                .DeltaTime = deltaTime,
+                .LastFrameLatency = gpuSystem->GetLastFrameLatency()});
+        }
         _reqExit = result.ShouldExit;
         if (_reqExit) {
             return;
@@ -518,10 +524,17 @@ public:
             gpuSystem->GetLastFrameLatency(),
             isInModalLoop);
         _app->GetRenderSystem()->GetOutputs().SetRenderIdle(false);
-        _app->Render(frameCtx);
-        gpuSystem->EndFrameRecordAndSubmit(flightIndex);
+        {
+            RADRAY_PROFILE_SCOPE_N("Render");
+            _app->Render(frameCtx);
+        }
+        {
+            RADRAY_PROFILE_SCOPE_N("Submit");
+            gpuSystem->EndFrameRecordAndSubmit(flightIndex);
+        }
         _app->GetRenderSystem()->GetOutputs().SetRenderIdle(true);
         gpuSystem->AdvanceFrameIndex();
+        RADRAY_PROFILE_FRAME();
     }
 
     bool IsExitRequested() const noexcept {
@@ -622,17 +635,22 @@ public:
     }
 
     void RenderThread() {
+        RADRAY_PROFILE_THREAD("RadRay Render");
         while (true) {
             RetireRenderedFrames(false, true);
 
             auto* gpuSystem = _app->GetGpuSystem();
-            _readySlotsSemaphore.acquire();
+            {
+                RADRAY_PROFILE_SCOPE_N("WaitReadySlot");
+                _readySlotsSemaphore.acquire();
+            }
 
             if (_reqExit && _renderFrameIndex == _publishedFrameCount.load(std::memory_order_acquire)) {
                 RetireRenderedFrames(true, false);
                 break;
             }
 
+            RADRAY_PROFILE_SCOPE_N("RenderFrame");
             uint32_t flightIndex = static_cast<uint32_t>(_renderFrameIndex % gpuSystem->GetFlightDataCount());
             auto& runnerFrameData = _runnerFrameDatas[flightIndex];
             const bool discard = _reqExit || (!runnerFrameData.IsInModalLoop &&
@@ -642,11 +660,18 @@ public:
                 runnerFrameData.DeltaTime,
                 gpuSystem->GetLastFrameLatency(),
                 runnerFrameData.IsInModalLoop, !discard);
-            if (!discard) _app->Render(frameCtx);
-            gpuSystem->EndFrameRecordAndSubmit(flightIndex);
+            if (!discard) {
+                RADRAY_PROFILE_SCOPE_N("Render");
+                _app->Render(frameCtx);
+            }
+            {
+                RADRAY_PROFILE_SCOPE_N("Submit");
+                gpuSystem->EndFrameRecordAndSubmit(flightIndex);
+            }
 
             _renderFrameIndex++;
             NotifyRenderFrameComplete(_renderFrameIndex);
+            RADRAY_PROFILE_FRAME();
         }
     }
 
@@ -679,10 +704,13 @@ public:
         _ticking = true;
         auto scope = MakeScopeGuard([this]() noexcept { _ticking = false; });
         auto* gpuSystem = _app->GetGpuSystem();
+        if (std::getenv("PROBE_SERIAL")) WaitRenderThreadIdle();  // TEMP PROBE
         if (!waitForWritableSlot && _renderedFrameCount.load(std::memory_order_acquire) < gpuSystem->GetFrameIndex()) return std::nullopt;
+        RADRAY_PROFILE_SCOPE_N("TickFrame");
         if (waitForWritableSlot) {
             RetireRenderedFrames(false, false);
             CheckRecreateSwapChains();
+            RADRAY_PROFILE_SCOPE_N("WaitWritableSlot");
             _writableSlotsSemaphore.acquire();
         } else if (!_writableSlotsSemaphore.try_acquire()) {
             return std::nullopt;
@@ -700,10 +728,14 @@ public:
 
         _runnerFrameDatas[flightIndex].DeltaTime = deltaTime;
         _runnerFrameDatas[flightIndex].IsInModalLoop = isInModalLoop;
-        auto result = _app->Update(AppUpdateContext{
-            .FlightIndex = flightIndex,
-            .DeltaTime = deltaTime,
-            .LastFrameLatency = gpuSystem->GetLastFrameLatency()});
+        AppUpdateResult result{};
+        {
+            RADRAY_PROFILE_SCOPE_N("Update");
+            result = _app->Update(AppUpdateContext{
+                .FlightIndex = flightIndex,
+                .DeltaTime = deltaTime,
+                .LastFrameLatency = gpuSystem->GetLastFrameLatency()});
+        }
         _reqExit = result.ShouldExit;
         if (_reqExit) {
             return std::nullopt;
@@ -711,7 +743,10 @@ public:
 
         CheckRecreateSwapChains();
 
-        gpuSystem->PrepareFrameUploads(flightIndex);
+        {
+            RADRAY_PROFILE_SCOPE_N("PrepareFrameUploads");
+            gpuSystem->PrepareFrameUploads(flightIndex);
+        }
 
         gpuSystem->AdvanceFrameIndex();
         _publishedFrameCount.store(frameIndex + 1, std::memory_order_release);
@@ -894,7 +929,7 @@ bool Application::InitializeRuntime(const ApplicationRuntimeDescriptor& desc) {
         .IsEnableSynchronizationValidation = desc.EnableSynchronizationValidation};
     render::DXGIFactoryDescriptor factoryDesc{
         .IsEnableDebugLayer = desc.EnableValidation,
-        .IsEnableGpuBasedValid = false};
+        .IsEnableGpuBasedValid = std::getenv("PROBE_GBV") != nullptr};  // TEMP PROBE
     render::VulkanCommandQueueDescriptor queueDesc{render::QueueType::Direct, 1};
     render::DeviceDescriptor deviceDesc{};
     if (desc.Backend == render::RenderBackend::Vulkan) {

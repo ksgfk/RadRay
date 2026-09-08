@@ -7,6 +7,8 @@
 
 namespace radray::forward_detail {
 
+/// One processor serves renderer lists built from a single RenderSceneSnapshot within one frame:
+/// material and primitive preparations are keyed by snapshot indices.
 class ForwardLitMeshPassProcessor final : public MeshPassProcessor {
 public:
     ForwardLitMeshPassProcessor(FrameDrawResources& resources, ForwardBindingCache& bindings, bool& lightOverflowWarned,
@@ -21,23 +23,50 @@ public:
     void ResetView() noexcept;
 
 private:
-    struct ObjectPreparation {
-        ObjectPreparation(const ShaderParameterLayout* layout, uint32_t group);
-        ShaderParameterStorage Values;
+    static constexpr uint32_t kNoSlot = std::numeric_limits<uint32_t>::max();
+    // Snapshot index -> slot in a dense group array; kNoSlot means not yet prepared.
+    struct SlotTable {
+        vector<uint32_t> Slots;
+        vector<std::optional<PreparedShaderGroup>> Groups;
+        std::optional<PreparedShaderGroup>* Find(uint32_t index) noexcept {
+            return index < Slots.size() && Slots[index] != kNoSlot ? &Groups[Slots[index]] : nullptr;
+        }
+        std::optional<PreparedShaderGroup>& Insert(uint32_t index) {
+            if (index >= Slots.size()) Slots.resize(size_t{index} + 1, kNoSlot);
+            Slots[index] = static_cast<uint32_t>(Groups.size());
+            return Groups.emplace_back();
+        }
+        void Clear() noexcept {
+            std::fill(Slots.begin(), Slots.end(), kNoSlot);
+            Groups.clear();
+        }
+    };
+    struct ProgramState {
+        ProgramState(ShaderProgram* program, const ForwardProgramBindings* binding);
+        ShaderProgram* Program;
+        const ForwardProgramBindings* Binding;
+        const ShaderParameterLayout* Layout;
+        bool ViewPrepared{false};
+        std::optional<PreparedShaderGroup> View;
+        SlotTable Materials;
+        ShaderParameterStorage ObjectValues;
         const ShaderParameterInfo* LocalToWorld{nullptr};
         const ShaderParameterInfo* NormalToWorld{nullptr};
         const ShaderParameterInfo* PreviousLocalToWorld{nullptr};
         const ShaderParameterInfo* MotionValid{nullptr};
-        unordered_map<RenderPrimitiveIndex, std::optional<PreparedShaderGroup>> Groups;
+        SlotTable Objects;
         bool ViewDependent() const noexcept { return PreviousLocalToWorld != nullptr; }
     };
-    unordered_map<ShaderProgram*, ObjectPreparation> _objects;
+    Nullable<ProgramState*> ResolveProgram(ShaderProgram* program);
+
     FrameDrawResources& _resources;
     ForwardBindingCache& _bindings;
     bool& _lightOverflowWarned;
     Nullable<const RenderPipelineContext*> _temporal;
-    unordered_map<ShaderProgram*, std::optional<PreparedShaderGroup>> _views;
-    unordered_map<ShaderProgram*, unordered_map<RenderMaterialIndex, std::optional<PreparedShaderGroup>>> _materials;
+    // Consecutive batches usually share a program; the last resolution short-circuits the map lookup.
+    unordered_map<ShaderProgram*, unique_ptr<ProgramState>> _programs;
+    ShaderProgram* _lastProgram{nullptr};
+    ProgramState* _lastState{nullptr};
 };
 
 }  // namespace radray::forward_detail

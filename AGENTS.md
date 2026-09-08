@@ -25,6 +25,7 @@ C++20 实时渲染器，D3D12 + Vulkan 后端。
 - STL 容器使用 `radray/types.h` 的别名；协程使用 `radray/coroutine.h` 的别名，不直接用 `exec::task` / `stdexec::*`。
 - 可空接口指针使用 `Nullable<T>`，裸指针表示非空；Debug 判断使用 `RADRAY_IS_DEBUG`。
 - 字符串格式化使用 `fmt`，先查已有 formatter；标志枚举使用 `enum_flags.h` 的 `EnumFlags<T>`、`is_flags<T>`、`format_as`。
+- 性能插桩只用 `radray/profiler.h` 的 `RADRAY_PROFILE_*` 宏，不直接 include `tracy/*`；仅 render 后端为 GPU 时间戳例外。
 - 不重命名已有枚举成员，它们被 `magic_enum` 与序列化消费；需要改名时新增成员并显式迁移数据。
 - 新增任何 `try`、`catch`、`throw` 前先征得用户同意。优先验证、`std::error_code` 或现有结果类型。
 - 不为保留 `noexcept` 增加捕获；仅捕获具体、可恢复的异常，不用 `catch (...)` 把分配失败、程序错误或不变量破坏转成空值/诊断。

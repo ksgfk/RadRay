@@ -9,6 +9,7 @@
 #include <utility>
 
 #include <radray/logger.h>
+#include <radray/profiler.h>
 #include <radray/render/rhi.h>
 #include <radray/runtime/application.h>
 #include <radray/runtime/gpu_system.h>
@@ -134,6 +135,7 @@ void RenderSystem::PrepareFrame(const AppUpdateContext& ctx) {
 }
 
 void RenderSystem::Render(AppFrameContext& ctx) {
+    RADRAY_PROFILE_SCOPE_N("RenderSystem::Render");
     _pipelineStarted.store(true, std::memory_order_release);
     if (!_graphRuntime || !_viewStates) return;
     const uint32_t flight = ctx.FlightIndex();
@@ -146,30 +148,40 @@ void RenderSystem::Render(AppFrameContext& ctx) {
     auto& surfaces = outputFrame.Surfaces;
     const auto& resolvedOutputs = outputFrame.Outputs;
     vector<ResolvedRenderViewFamily> families;
-    for (uint32_t index = 0; index < _framePlans[flight].ViewFamilies.size(); ++index) {
-        const auto& requested = _framePlans[flight].ViewFamilies[index];
-        RenderOutputInfo info{.Id = requested.Output};
-        for (const auto& resolved : resolvedOutputs)
-            if (resolved.Id == requested.Output) info = resolved;
-        string reason;
-        auto family = ResolveRenderViewFamily(requested, info, index, ctx.GetDevice()->GetCapabilities().Limits.MaxTexture2DDimension, reason);
-        if (!family) {
-            RADRAY_ERR_LOG("View family '{}': {}", requested.Name, reason);
-            families.push_back({.FrameLocalIndex = index, .Name = requested.Name, .OutputId = requested.Output});
-            continue;
+    {
+        RADRAY_PROFILE_SCOPE_N("ResolveViewFamilies");
+        for (uint32_t index = 0; index < _framePlans[flight].ViewFamilies.size(); ++index) {
+            const auto& requested = _framePlans[flight].ViewFamilies[index];
+            RenderOutputInfo info{.Id = requested.Output};
+            for (const auto& resolved : resolvedOutputs)
+                if (resolved.Id == requested.Output) info = resolved;
+            string reason;
+            auto family = ResolveRenderViewFamily(requested, info, index, ctx.GetDevice()->GetCapabilities().Limits.MaxTexture2DDimension, reason);
+            if (!family) {
+                RADRAY_ERR_LOG("View family '{}': {}", requested.Name, reason);
+                families.push_back({.FrameLocalIndex = index, .Name = requested.Name, .OutputId = requested.Output});
+                continue;
+            }
+            for (auto& view : family->Views) _viewStates->Resolve(view, *family);
+            families.push_back(std::move(*family));
         }
-        for (auto& view : family->Views) _viewStates->Resolve(view, *family);
-        families.push_back(std::move(*family));
     }
     RenderPipelineContext pipelineContext(ctx, graphResources, *_renderPassRegistry, *_viewStates, serial, families, surfaces, report);
     auto graph = pipelineContext.CreateRenderGraph("Frame");
     FrameGraph frame{pipelineContext, graph};
-    if (_graphComposer)
-        _graphComposer->Compose(frame, _pipeline.get());
-    else
-        ComposeDefaultFrameGraph(frame, _pipeline.get(), _overlays, *this);
-    frame.Expand();
-    const auto result = pipelineContext.ExecuteGraph(graph);
+    {
+        RADRAY_PROFILE_SCOPE_N("ComposeGraph");
+        if (_graphComposer)
+            _graphComposer->Compose(frame, _pipeline.get());
+        else
+            ComposeDefaultFrameGraph(frame, _pipeline.get(), _overlays, *this);
+        frame.Expand();
+    }
+    RenderGraphExecutionResult result;
+    {
+        RADRAY_PROFILE_SCOPE_N("ExecuteGraph");
+        result = pipelineContext.ExecuteGraph(graph);
+    }
     frame.Recorded(result);
     for (auto& surface : surfaces) {
         if (!surface.Written) ClearTarget(ctx, surface);
