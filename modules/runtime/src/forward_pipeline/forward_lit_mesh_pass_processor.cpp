@@ -3,6 +3,20 @@
 
 namespace radray::forward_detail {
 
+ForwardLitMeshPassProcessor::ObjectPreparation::ObjectPreparation(const ShaderParameterLayout* layout, uint32_t group)
+    : Values(layout, group),
+      LocalToWorld(layout->Find("ForwardObject.LocalToWorld")),
+      NormalToWorld(layout->Find("ForwardObject.NormalToWorld")),
+      PreviousLocalToWorld(layout->Find("ForwardObject.PreviousLocalToWorld")),
+      MotionValid(layout->Find("ForwardObject.MotionValid")) {}
+
+void ForwardLitMeshPassProcessor::ResetView() noexcept {
+    _views.clear();
+    for (auto& [program, objects] : _objects) {
+        if (objects.ViewDependent()) objects.Groups.clear();
+    }
+}
+
 void ForwardLitMeshPassProcessor::AddMeshBatch(const RendererListDesc& desc, const RenderSceneSnapshot& scene,
                                                const MeshBatch& batch, MeshPassDrawListContext& out) {
     const auto pass = scene.Materials[batch.Material].FindPass(desc.MaterialPassName);
@@ -28,26 +42,28 @@ void ForwardLitMeshPassProcessor::AddMeshBatch(const RendererListDesc& desc, con
                                binding->PassGroup.has_value() || desc.MaterialPassName == "DepthNormalsMotion" || desc.MaterialPassName == "ShadowCaster"))
             view->second = _resources.PrepareGroup(*program, binding->ViewGroup, values);
     }
-    auto [material, newMaterial] = _materials.try_emplace(batch.Material, std::nullopt);
+    auto [material, newMaterial] = _materials[program].try_emplace(batch.Material, std::nullopt);
     if (newMaterial) material->second = _resources.PrepareGroup(*program, binding->MaterialGroup, pass->Parameters, pass->Textures, pass->Samplers);
     auto [objects, newObjects] = _objects.try_emplace(program, &layout, binding->ObjectGroup);
     auto [prepared, newObject] = objects->second.Groups.try_emplace(batch.Primitive, std::nullopt);
     if (newObject) {
-        auto& object = objects->second.Values;
-        if (!object.SetMatrix4x4("ForwardObject.LocalToWorld", scene.Primitives[batch.Primitive].LocalToWorld)) {
+        auto& preparation = objects->second;
+        auto& object = preparation.Values;
+        const auto& primitive = scene.Primitives[batch.Primitive];
+        if (preparation.LocalToWorld == nullptr || !object.SetMatrix4x4(*preparation.LocalToWorld, primitive.LocalToWorld)) {
             out.Reject(MeshPassRejectReason::InvalidBindings);
             return;
         }
-        if (layout.Find("ForwardObject.NormalToWorld") != nullptr &&
-            !object.SetMatrix4x4("ForwardObject.NormalToWorld", MakeNormalToWorld(scene.Primitives[batch.Primitive].LocalToWorld))) {
+        if (preparation.NormalToWorld != nullptr &&
+            !object.SetMatrix4x4(*preparation.NormalToWorld, MakeNormalToWorld(primitive.LocalToWorld))) {
             out.Reject(MeshPassRejectReason::InvalidBindings);
             return;
         }
-        if (layout.Find("ForwardObject.PreviousLocalToWorld") != nullptr) {
-            const auto& primitive = scene.Primitives[batch.Primitive];
+        if (preparation.PreviousLocalToWorld != nullptr) {
             const auto motion = _temporal ? _temporal->GetPrimitiveMotion(desc.View->StateId, primitive) : PrimitiveMotionData{primitive.LocalToWorld, false};
-            if (!object.SetMatrix4x4("ForwardObject.PreviousLocalToWorld", motion.PreviousLocalToWorld) ||
-                !object.SetUInt("ForwardObject.MotionValid", motion.Valid && desc.View->PreviousViewValid ? 1u : 0u)) {
+            if (!object.SetMatrix4x4(*preparation.PreviousLocalToWorld, motion.PreviousLocalToWorld) ||
+                preparation.MotionValid == nullptr ||
+                !object.SetUInt(*preparation.MotionValid, motion.Valid && desc.View->PreviousViewValid ? 1u : 0u)) {
                 out.Reject(MeshPassRejectReason::InvalidBindings);
                 return;
             }

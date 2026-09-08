@@ -15,11 +15,21 @@ public:
     void AddMeshBatch(const RendererListDesc& desc, const RenderSceneSnapshot& scene,
                       const MeshBatch& batch, MeshPassDrawListContext& out) override;
 
+    // Call before reusing this processor for a list whose view differs from the previous one.
+    // Drops view-group preparations and object preparations that depend on the view (motion vectors);
+    // material groups and view-independent object groups are kept.
+    void ResetView() noexcept;
+
 private:
     struct ObjectPreparation {
-        ObjectPreparation(const ShaderParameterLayout* layout, uint32_t group) : Values(layout, group) {}
+        ObjectPreparation(const ShaderParameterLayout* layout, uint32_t group);
         ShaderParameterStorage Values;
+        const ShaderParameterInfo* LocalToWorld{nullptr};
+        const ShaderParameterInfo* NormalToWorld{nullptr};
+        const ShaderParameterInfo* PreviousLocalToWorld{nullptr};
+        const ShaderParameterInfo* MotionValid{nullptr};
         unordered_map<RenderPrimitiveIndex, std::optional<PreparedShaderGroup>> Groups;
+        bool ViewDependent() const noexcept { return PreviousLocalToWorld != nullptr; }
     };
     unordered_map<ShaderProgram*, ObjectPreparation> _objects;
     FrameDrawResources& _resources;
@@ -27,7 +37,7 @@ private:
     bool& _lightOverflowWarned;
     Nullable<const RenderPipelineContext*> _temporal;
     unordered_map<ShaderProgram*, std::optional<PreparedShaderGroup>> _views;
-    unordered_map<RenderMaterialIndex, std::optional<PreparedShaderGroup>> _materials;
+    unordered_map<ShaderProgram*, unordered_map<RenderMaterialIndex, std::optional<PreparedShaderGroup>>> _materials;
 };
 
 }  // namespace radray::forward_detail

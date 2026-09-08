@@ -519,6 +519,16 @@ public:
     vector<unique_ptr<Buffer>> _keepAliveBuffers;
 };
 
+// Last parameter set bound to one root-signature group on an encoder. Offsets beyond the inline
+// capacity force a rebind rather than a comparison.
+inline constexpr uint32_t kBoundParameterGroupCountD3D12 = 8;
+struct BoundParameterGroupD3D12 {
+    ShaderParameterSetD3D12* Set{nullptr};
+    uint64_t FlushGeneration{0};
+    uint32_t OffsetCount{0};
+    std::array<ShaderParameterDynamicOffset, 4> Offsets{};
+};
+
 class CmdRenderPassD3D12 final : public GraphicsCommandEncoder {
 public:
     explicit CmdRenderPassD3D12(CmdListD3D12* cmdList) noexcept;
@@ -566,6 +576,9 @@ public:
     GraphicsPsoD3D12* _boundPso{nullptr};
     RootSigD3D12* _boundRs{nullptr};
     std::array<std::optional<VertexBufferView>, D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT> _boundVbvs{};
+    // Root parameters persist across draws under one root signature; identical (set, flush generation,
+    // offsets) rebinds of a group are skipped. Cleared whenever the root signature changes.
+    std::array<BoundParameterGroupD3D12, kBoundParameterGroupCountD3D12> _boundGroups{};
 };
 
 class CmdComputePassD3D12 final : public ComputeCommandEncoder {
@@ -963,6 +976,9 @@ public:
     vector<size_t> _bindingValueOffsets;
     vector<std::optional<ShaderParameterValue>> _values;
     vector<uint8_t> _dirty;
+    // Incremented by every FlushWrites that changes descriptors or values; encoders use it to tell a
+    // rewritten set from an identical rebind.
+    uint64_t _flushGeneration{1};
     GpuDescriptorHeapViewRAII _resourceDescriptors;
     GpuDescriptorHeapViewRAII _samplerDescriptors;
 };

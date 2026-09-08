@@ -9,6 +9,8 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <numeric>
+#include <tuple>
 #include <radray/json.h>
 #include <radray/logger.h>
 #include <radray/runtime/application.h>
@@ -356,6 +358,10 @@ protected:
         state.CaptureName.clear();
         ++state.Frame;
         state.Fps = state.Fps * .95f + .05f / std::max(ctx.DeltaTime.count(), .001f);
+        if (state.Frame > 30) {
+            _frameTimesMs.push_back(ctx.DeltaTime.count() * 1000.f);
+            _gpuTimesMs.push_back(GetGpuSystem()->GetLastGpuTimeMs());
+        }
         if (_options.Tour) Tour(state.Frame);
         if (_options.SkyTest) SkyTest(state.Frame);
         state.CameraCut = _cutRequested;
@@ -425,6 +431,16 @@ protected:
         _techniques.clear();
         _meshes.clear();
         _textures.clear();
+        if (_frameTimesMs.size() > 8) {
+            auto stats = [](vector<float> values) {
+                std::sort(values.begin(), values.end());
+                const float sum = std::accumulate(values.begin(), values.end(), 0.f);
+                return std::tuple{sum / float(values.size()), values[values.size() / 2], values[values.size() * 95 / 100]};
+            };
+            const auto [frameAvg, frameP50, frameP95] = stats(_frameTimesMs);
+            const auto [gpuAvg, gpuP50, gpuP95] = stats(_gpuTimesMs);
+            RADRAY_INFO_LOG("PERF frames={} frameMs avg={:.3f} p50={:.3f} p95={:.3f} (avg {:.1f} fps) | gpuMs avg={:.3f} p50={:.3f} p95={:.3f}", _frameTimesMs.size(), frameAvg, frameP50, frameP95, 1000.f / std::max(frameAvg, .001f), gpuAvg, gpuP50, gpuP95);
+        }
         RADRAY_INFO_LOG("Tidal Atrium shutdown: {}", _failed ? "FAILED" : "clean");
     }
 
@@ -770,6 +786,7 @@ private:
     sigslot::scoped_connection _uiDraw;
 #endif
     Eigen::Vector3f _moveStart{Eigen::Vector3f::Zero()};
+    vector<float> _frameTimesMs, _gpuTimesMs;
     float _yaw{0}, _pitch{0}, _loadingTime{0}, _lookStart{0};
     bool _captured{false}, _failed{false}, _ready{false}, _cutRequested{true}, _lookChecked{false};
 };

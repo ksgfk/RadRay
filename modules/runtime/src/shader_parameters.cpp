@@ -431,6 +431,16 @@ bool ShaderParameterStorage::SetRaw(
     return true;
 }
 
+bool ShaderParameterStorage::SetUInt(
+    const ShaderParameterInfo& info, uint32_t value, uint32_t element) noexcept {
+    return SetBytes(info, ShaderParameterKind::Scalar, AsBytes(value), element);
+}
+
+bool ShaderParameterStorage::SetMatrix4x4(
+    const ShaderParameterInfo& info, const Eigen::Matrix4f& value, uint32_t element) noexcept {
+    return SetBytes(info, ShaderParameterKind::Matrix, AsBytes(value), element);
+}
+
 bool ShaderParameterStorage::SetBytes(
     std::string_view name,
     ShaderParameterKind expectedKind,
@@ -440,7 +450,19 @@ bool ShaderParameterStorage::SetBytes(
         return false;
     }
     const ShaderParameterInfo* parameter = _layout->Find(name);
-    if (parameter == nullptr || parameter->Kind != expectedKind ||
+    if (parameter == nullptr) {
+        return false;
+    }
+    return SetBytes(*parameter, expectedKind, value, element);
+}
+
+bool ShaderParameterStorage::SetBytes(
+    const ShaderParameterInfo& info,
+    ShaderParameterKind expectedKind,
+    std::span<const byte> value,
+    uint32_t element) noexcept {
+    const ShaderParameterInfo* parameter = &info;
+    if (_layout == nullptr || parameter->Kind != expectedKind ||
         parameter->Size != value.size() || element >= parameter->ElementCount ||
         parameter->BufferIndex >= _bufferData.size()) {
         return false;

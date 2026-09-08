@@ -252,6 +252,9 @@ ShadowData BuildShadows(RenderGraph& graph, const ForwardPipelineSettings& setti
     const float cameraFar = (main.View * Eigen::Vector4f{farCorners[0].x(), farCorners[0].y(), farCorners[0].z(), 1}).z();
     const float farZ = std::min(cameraFar, std::max(nearZ + .1f, settings.ShadowDistance));
     float previous = nearZ;
+    // One processor for all cascades: material and view-independent object groups (ShadowCaster has no motion data)
+    // are prepared once per primitive instead of once per cascade; only the view group is rebuilt per cascade.
+    ForwardLitMeshPassProcessor processor{draws, bindings, warned};
     for (uint32_t cascade = 0; cascade < 4; ++cascade) {
         auto& draw = work.Cascades[cascade];
         draw.View = main;
@@ -289,7 +292,7 @@ ShadowData BuildShadows(RenderGraph& graph, const ForwardPipelineSettings& setti
         shadow.Bias[cascade] = {texel, texel * 2, 0, 0};
         if (enabled) {
             Cull({&scene, &draw.View}, draw.Culling);
-            ForwardLitMeshPassProcessor processor{draws, bindings, warned};
+            processor.ResetView();
             BuildRendererList({"ShadowCaster", "ShadowCaster", &draw.Culling, &draw.View, RenderQueueRange::Opaque(), 0xffffffffu, RendererListSorting::FrontToBack, true}, processor, draw.DepthOnly);
             work.ContentValid = work.ContentValid && draw.DepthOnly.Stats.ContentSucceeded();
         }
@@ -491,16 +494,15 @@ bool BuildForwardHdrView(RenderGraph& graph, RenderPipelineContext& context, ren
     cullProjection.row(1) *= float(size.Height) / float(size.Height + 2);
     const auto cullMatrix = (cullProjection * view.View).eval();
     if (!Cull({&scene, &view, 0xffffffffu, cullMatrix}, work.Main.Culling)) return false;
-    ForwardLitMeshPassProcessor prepass{draws, bindings, lightOverflowWarned, temporal ? &context : nullptr};
-    ForwardLitMeshPassProcessor opaque{draws, bindings, lightOverflowWarned, temporal ? &context : nullptr};
-    ForwardLitMeshPassProcessor transparent{draws, bindings, lightOverflowWarned, temporal ? &context : nullptr};
+    // One processor for prepass/opaque/transparent: same view, so view and object groups are shared across lists.
+    ForwardLitMeshPassProcessor processor{draws, bindings, lightOverflowWarned, temporal ? &context : nullptr};
     work.ContentValid = true;
     if (!msaa) {
-        BuildRendererList({"DepthNormalsMotion", "DepthNormalsMotion", &work.Main.Culling, &view, RenderQueueRange::Opaque(), 0xffffffffu, RendererListSorting::FrontToBack, true}, prepass, work.Main.DepthOnly);
+        BuildRendererList({"DepthNormalsMotion", "DepthNormalsMotion", &work.Main.Culling, &view, RenderQueueRange::Opaque(), 0xffffffffu, RendererListSorting::FrontToBack, true}, processor, work.Main.DepthOnly);
         work.ContentValid &= work.Main.DepthOnly.Stats.ContentSucceeded();
     }
-    BuildRendererList({"Opaque", "ForwardLit", &work.Main.Culling, &view, RenderQueueRange::Opaque(), 0xffffffffu, RendererListSorting::StateThenFrontToBack, true}, opaque, work.Main.Opaque);
-    BuildRendererList({"Transparent", "ForwardLit", &work.Main.Culling, &view, RenderQueueRange::Transparent(), 0xffffffffu, RendererListSorting::BackToFront, true}, transparent, work.Main.Transparent);
+    BuildRendererList({"Opaque", "ForwardLit", &work.Main.Culling, &view, RenderQueueRange::Opaque(), 0xffffffffu, RendererListSorting::StateThenFrontToBack, true}, processor, work.Main.Opaque);
+    BuildRendererList({"Transparent", "ForwardLit", &work.Main.Culling, &view, RenderQueueRange::Transparent(), 0xffffffffu, RendererListSorting::BackToFront, true}, processor, work.Main.Transparent);
     work.ContentValid &= work.Main.Opaque.Stats.ContentSucceeded() && work.Main.Transparent.Stats.ContentSucceeded();
     if (!msaa)
         for (auto& command : work.Main.Opaque.Commands) command.PipelineState.DepthStencil.DepthWriteEnable = false;

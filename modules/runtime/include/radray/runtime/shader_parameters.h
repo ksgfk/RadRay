@@ -94,12 +94,21 @@ public:
     bool SetMatrix4x4(std::string_view name, const Eigen::Matrix4f& value, uint32_t element = 0) noexcept;
     bool SetRaw(std::string_view name, std::span<const byte> value, uint32_t element = 0) noexcept;
 
+    // Pre-resolved overloads: `info` must come from GetLayout()->Find(); skips the name lookup.
+    bool SetUInt(const ShaderParameterInfo& info, uint32_t value, uint32_t element = 0) noexcept;
+    bool SetMatrix4x4(const ShaderParameterInfo& info, const Eigen::Matrix4f& value, uint32_t element = 0) noexcept;
+
 private:
     friend class Material;
     // Only MaterialTechnique-validated upload schemas may use this whole-buffer copy.
     bool CopyCompatibleBufferBytes(uint32_t bufferIndex, std::span<const byte> data) noexcept;
     bool SetBytes(
         std::string_view name,
+        ShaderParameterKind expectedKind,
+        std::span<const byte> value,
+        uint32_t element) noexcept;
+    bool SetBytes(
+        const ShaderParameterInfo& info,
         ShaderParameterKind expectedKind,
         std::span<const byte> value,
         uint32_t element) noexcept;

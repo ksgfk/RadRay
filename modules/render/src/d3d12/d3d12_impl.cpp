@@ -3489,6 +3489,7 @@ bool ShaderParameterSetD3D12::FlushWrites() noexcept {
         }
     }
     std::fill(_dirty.begin(), _dirty.end(), uint8_t{0});
+    ++_flushGeneration;
     return true;
 }
 
@@ -4498,6 +4499,7 @@ void CmdRenderPassD3D12::Destroy() noexcept {
     for (std::optional<VertexBufferView>& view : _boundVbvs) {
         view.reset();
     }
+    _boundGroups.fill({});
     _boundRs = nullptr;
     _boundPso = nullptr;
     _cmdList = nullptr;
@@ -4644,6 +4646,7 @@ void CmdRenderPassD3D12::BindGraphicsPipelineState(GraphicsPipelineState* pso) n
     if (_boundRs != ps->_layout) {
         _cmdList->_cmdList->SetGraphicsRootSignature(ps->_layout->_rootSig.Get());
         _boundRs = ps->_layout;
+        _boundGroups.fill({});
     }
     _cmdList->_cmdList->SetPipelineState(ps->_pso.Get());
     _cmdList->_cmdList->IASetPrimitiveTopology(ps->_topo);
@@ -4675,7 +4678,7 @@ static bool BindShaderParameterSetD3D12(
     const auto& sourceEntries = sourceGroup.Get()->Entries;
 
     constexpr uint32_t invalidRootParameter = std::numeric_limits<uint32_t>::max();
-    const auto bindTables = [&](const vector<DescriptorTableBindingD3D12>& tables,
+    const auto bindTables = [&](std::span<const DescriptorTableBindingD3D12> tables,
                                 const GpuDescriptorHeapViewRAII& descriptors,
                                 bool graphicsTable) noexcept {
         for (const DescriptorTableBindingD3D12& table : tables) {
@@ -4701,12 +4704,10 @@ static bool BindShaderParameterSetD3D12(
             return false;
         }
     } else if (destinationGroup.Get()->ResourceTableRootParameter != invalidRootParameter) {
-        if (!bindTables(
-                vector<DescriptorTableBindingD3D12>{{destinationGroup.Get()->ResourceTableRootParameter,
-                                                     0,
-                                                     destinationGroup.Get()->ResourceDescriptorCount}},
-                set->_resourceDescriptors,
-                graphics)) {
+        const DescriptorTableBindingD3D12 table{destinationGroup.Get()->ResourceTableRootParameter,
+                                                0,
+                                                destinationGroup.Get()->ResourceDescriptorCount};
+        if (!bindTables(std::span{&table, 1}, set->_resourceDescriptors, graphics)) {
             return false;
         }
     }
@@ -4715,12 +4716,10 @@ static bool BindShaderParameterSetD3D12(
             return false;
         }
     } else if (destinationGroup.Get()->SamplerTableRootParameter != invalidRootParameter) {
-        if (!bindTables(
-                vector<DescriptorTableBindingD3D12>{{destinationGroup.Get()->SamplerTableRootParameter,
-                                                     0,
-                                                     destinationGroup.Get()->SamplerDescriptorCount}},
-                set->_samplerDescriptors,
-                graphics)) {
+        const DescriptorTableBindingD3D12 table{destinationGroup.Get()->SamplerTableRootParameter,
+                                                0,
+                                                destinationGroup.Get()->SamplerDescriptorCount};
+        if (!bindTables(std::span{&table, 1}, set->_samplerDescriptors, graphics)) {
             return false;
         }
     }
@@ -4801,12 +4800,8 @@ static bool BindShaderParameterSetD3D12(
     // Each offset names a declaration in the layout being bound, so the group and the register class
     // come from the handle instead of from a bare register number. A handle from another layout or
     // for another group is rejected here rather than shifting the wrong root descriptor.
-    struct ResolvedDynamicOffsetD3D12 {
-        const BackendBindingName* Record{nullptr};
-        uint32_t Offset{0};
-    };
-    vector<ResolvedDynamicOffsetD3D12> resolvedDynamicOffsets;
-    resolvedDynamicOffsets.reserve(dynamicOffsets.size());
+    // Offsets are validated first and re-resolved per root descriptor below; both lists are tiny and
+    // this avoids a heap allocation on every bind.
     for (const ShaderParameterDynamicOffset& dynamicOffset : dynamicOffsets) {
         const auto offsetRecord = FindBackendBindingRecord(
             destinationLayout->_bindingNames,
@@ -4824,8 +4819,6 @@ static bool BindShaderParameterSetD3D12(
                 groupIndex);
             return false;
         }
-        resolvedDynamicOffsets.push_back(
-            ResolvedDynamicOffsetD3D12{offsetRecord.Get(), dynamicOffset.Offset});
     }
 
     // One offset per root-descriptor binding in the group, in the layout's own order, each looked up
@@ -4846,10 +4839,15 @@ static bool BindShaderParameterSetD3D12(
                 destinationEntry.Binding);
             return false;
         }
-        const ResolvedDynamicOffsetD3D12* foundOffset = nullptr;
-        for (const ResolvedDynamicOffsetD3D12& dynamicOffset : resolvedDynamicOffsets) {
-            if (dynamicOffset.Record->Location.Binding != destinationEntry.Binding ||
-                dynamicOffset.Record->Namespace != destinationEntry.Namespace) {
+        const ShaderParameterDynamicOffset* foundOffset = nullptr;
+        for (const ShaderParameterDynamicOffset& dynamicOffset : dynamicOffsets) {
+            const auto* record = FindBackendBindingRecord(
+                                     destinationLayout->_bindingNames,
+                                     destinationLayout->_bindingGeneration,
+                                     dynamicOffset.Binding)
+                                     .Get();
+            if (record->Location.Binding != destinationEntry.Binding ||
+                record->Namespace != destinationEntry.Namespace) {
                 continue;
             }
             if (foundOffset != nullptr) {
@@ -4913,13 +4911,35 @@ void CmdRenderPassD3D12::BindShaderParameterSet(
     uint32_t groupIndex,
     ShaderParameterSet* set,
     std::span<const ShaderParameterDynamicOffset> dynamicOffsets) noexcept {
-    BindShaderParameterSetD3D12(
+    auto* native = CastD3D12Object(set);
+    const bool trackable = groupIndex < _boundGroups.size() && native != nullptr &&
+                           dynamicOffsets.size() <= _boundGroups[groupIndex].Offsets.size();
+    if (trackable) {
+        const BoundParameterGroupD3D12& bound = _boundGroups[groupIndex];
+        if (bound.Set == native && bound.FlushGeneration == native->_flushGeneration &&
+            bound.OffsetCount == dynamicOffsets.size() &&
+            std::equal(dynamicOffsets.begin(), dynamicOffsets.end(), bound.Offsets.begin())) {
+            return;
+        }
+    }
+    const bool ok = BindShaderParameterSetD3D12(
         _cmdList->_cmdList.Get(),
         _boundRs,
         groupIndex,
-        CastD3D12Object(set),
+        native,
         dynamicOffsets,
         true);
+    if (groupIndex < _boundGroups.size()) {
+        BoundParameterGroupD3D12& bound = _boundGroups[groupIndex];
+        if (ok && trackable) {
+            bound.Set = native;
+            bound.FlushGeneration = native->_flushGeneration;
+            bound.OffsetCount = static_cast<uint32_t>(dynamicOffsets.size());
+            std::copy(dynamicOffsets.begin(), dynamicOffsets.end(), bound.Offsets.begin());
+        } else {
+            bound = {};
+        }
+    }
 }
 
 static bool SetPushConstantsD3D12(
