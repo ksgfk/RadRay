@@ -19,6 +19,41 @@ void PrintTo(const UiTestMode& mode, std::ostream* output) {
     *output << (mode.Backend == render::RenderBackend::D3D12 ? "D3D12" : "Vulkan") << (mode.Threaded ? "Threaded" : "Single")
             << (mode.Srgb ? "Srgb" : "Unorm") << mode.Flights;
 }
+bool BackendIsBuilt(render::RenderBackend backend) {
+#ifndef RADRAY_ENABLE_D3D12
+    if (backend == render::RenderBackend::D3D12) return false;
+#endif
+#ifndef RADRAY_ENABLE_VULKAN
+    if (backend == render::RenderBackend::Vulkan) return false;
+#endif
+    (void)backend;
+    return true;
+}
+ApplicationRuntimeDescriptor MakeUiRuntime(const UiTestMode& mode, const char* title, render::PresentMode presentMode = render::PresentMode::FIFO) {
+    return {.Backend = mode.Backend, .EnableValidation = true, .Multithreaded = mode.Threaded, .EnableSynchronizationValidation = true, .WindowTitle = title, .WindowWidth = 240, .WindowHeight = 160, .FlightDataCount = mode.Flights, .BackBufferFormat = mode.Srgb ? render::TextureFormat::BGRA8_UNORM_SRGB : render::TextureFormat::BGRA8_UNORM, .PresentMode = presentMode};
+}
+vector<AppWindow*> AuxiliaryWindows(WindowManager* manager) {
+    vector<AppWindow*> windows;
+    for (size_t i = 0; i < manager->GetWindowCount(); ++i) {
+        AppWindow* window = manager->GetWindow(i);
+        if (window->GetOutputUsage() == RenderOutputUsage::Auxiliary) windows.push_back(window);
+    }
+    return windows;
+}
+uint32_t PresentableAuxiliaryCount(WindowManager* manager) {
+    uint32_t count = 0;
+    for (AppWindow* window : AuxiliaryWindows(manager)) {
+        if (window->IsSwapChainPresentable()) ++count;
+    }
+    return count;
+}
+void DrawHostedAuxiliary(const char* name, float x, float y) {
+    ImGui::SetNextWindowPos({x, y}, ImGuiCond_Always);
+    ImGui::SetNextWindowSize({180, 110}, ImGuiCond_Always);
+    ImGui::Begin(name);
+    ImGui::TextUnformatted(name);
+    ImGui::End();
+}
 class UiProbePipeline final : public RenderPipeline {
 public:
     struct Flight {
@@ -605,6 +640,170 @@ TEST_P(ImGuiRenderingTest, UiTextureFeedsSceneComponentDeclaredBeforeItsProducer
     ASSERT_EQ(app.Run(desc), 0);
     EXPECT_GE(app.Verified, 15u);
     EXPECT_TRUE(logs.Errors().empty()) << logs.Errors();
+}
+class UiMultiViewportPresentApp final : public Application {
+public:
+    uint32_t FramesWithTwoAux{0};
+    bool Clean{false};
+
+protected:
+    void OnInit() override {
+        Ui = ImGuiSystem::Install(*this, {});
+        ASSERT_TRUE(Ui);
+        UiDraw = Ui->EventDraw().connect(&UiMultiViewportPresentApp::DrawUi, this);
+    }
+    void OnUpdate(const AppUpdateContext&) override {
+        ++Frame;
+        if (AuxiliaryWindows(GetWindowManager()).size() >= 2) ++FramesWithTwoAux;
+        if (Frame > 40) test::CloseMainWindow(*this);
+    }
+    void DrawUi() {
+        DrawHostedAuxiliary("aux present a", -80.f, 40.f);
+        DrawHostedAuxiliary("aux present b", -80.f, 180.f);
+    }
+    void OnShutdown() override {
+        UiDraw.disconnect();
+        Clean = !Ui->HasError();
+        Ui = nullptr;
+        GetRenderSystem()->SetPipeline(nullptr);
+    }
+
+private:
+    uint32_t Frame{0};
+    Nullable<ImGuiSystem*> Ui{nullptr};
+    sigslot::scoped_connection UiDraw;
+};
+TEST_P(ImGuiRenderingTest, MultipleAuxiliaryViewportsPresentTogetherAcrossManyFlights) {
+    const auto mode = GetParam();
+    if (!BackendIsBuilt(mode.Backend)) GTEST_SKIP() << "backend not built";
+    test::RuntimeLogCapture logs;
+    UiMultiViewportPresentApp app;
+    ASSERT_EQ(app.Run(MakeUiRuntime(mode, "ImGui multi-viewport present soak")), 0);
+    EXPECT_GE(app.FramesWithTwoAux, 25u);
+    EXPECT_TRUE(app.Clean);
+    EXPECT_TRUE(logs.Errors().empty()) << logs.Errors();
+}
+class UiStaggeredImmediateViewportApp final : public Application {
+public:
+    bool SawSingleAux{false}, SawTwoAux{false}, SawDroppedSecond{false}, SawRecreatedSecond{false}, Clean{false};
+
+protected:
+    void OnInit() override {
+        Ui = ImGuiSystem::Install(*this, {});
+        ASSERT_TRUE(Ui);
+        UiDraw = Ui->EventDraw().connect(&UiStaggeredImmediateViewportApp::DrawUi, this);
+    }
+    void OnUpdate(const AppUpdateContext&) override {
+        ++Frame;
+        ShowSecond = Frame >= 10 && (Frame < 22 || Frame >= 28);
+        const size_t aux = AuxiliaryWindows(GetWindowManager()).size();
+        if (Frame < 10 && aux == 1) SawSingleAux = true;
+        if (aux >= 2) {
+            SawTwoAux = true;
+            if (SawDroppedSecond) SawRecreatedSecond = true;
+        }
+        if (Frame >= 22 && Frame < 28 && aux == 1) SawDroppedSecond = true;
+        if (Frame > 40) test::CloseMainWindow(*this);
+    }
+    void DrawUi() {
+        DrawHostedAuxiliary("aux stagger a", -80.f, 40.f);
+        if (ShowSecond) DrawHostedAuxiliary("aux stagger b", -80.f, 180.f);
+    }
+    void OnShutdown() override {
+        UiDraw.disconnect();
+        Clean = !Ui->HasError();
+        Ui = nullptr;
+        GetRenderSystem()->SetPipeline(nullptr);
+    }
+
+private:
+    bool ShowSecond{false};
+    uint32_t Frame{0};
+    Nullable<ImGuiSystem*> Ui{nullptr};
+    sigslot::scoped_connection UiDraw;
+};
+TEST_P(ImGuiRenderingTest, ImmediatePresentStaggersSecondViewportThenRecreatesItWhileAnotherKeepsPresenting) {
+    const auto mode = GetParam();
+    if (!BackendIsBuilt(mode.Backend)) GTEST_SKIP() << "backend not built";
+    test::RuntimeLogCapture logs;
+    UiStaggeredImmediateViewportApp app;
+    ASSERT_EQ(app.Run(MakeUiRuntime(mode, "ImGui staggered immediate viewports", render::PresentMode::Immediate)), 0);
+    EXPECT_TRUE(app.SawSingleAux);
+    EXPECT_TRUE(app.SawTwoAux);
+    EXPECT_TRUE(app.SawDroppedSecond);
+    EXPECT_TRUE(app.SawRecreatedSecond);
+    EXPECT_TRUE(app.Clean);
+    EXPECT_TRUE(logs.Errors().empty()) << logs.Errors();
+}
+class UiAuxiliarySurfaceAndPartialMinimizeApp final : public Application {
+public:
+    uint32_t FramesWithTwoPresentable{0}, FramesWithPartialUnpresentable{0};
+    bool MutatedSurface{false}, Clean{false};
+
+protected:
+    void OnInit() override {
+        Ui = ImGuiSystem::Install(*this, {});
+        ASSERT_TRUE(Ui);
+        UiDraw = Ui->EventDraw().connect(&UiAuxiliarySurfaceAndPartialMinimizeApp::DrawUi, this);
+    }
+    void OnUpdate(const AppUpdateContext&) override {
+        ++Frame;
+        auto* manager = GetWindowManager();
+        auto aux = AuxiliaryWindows(manager);
+        const uint32_t presentable = PresentableAuxiliaryCount(manager);
+        if (aux.size() >= 2 && presentable >= 2) ++FramesWithTwoPresentable;
+        if (aux.size() >= 2 && presentable == 1) ++FramesWithPartialUnpresentable;
+        if (aux.size() >= 2 && Frame >= 8 && Frame <= 16) {
+            NativeWindow* native = aux[0]->GetNativeWindow();
+            native->SetSize(160 + int(Frame % 5) * 8, 100 + int(Frame % 3) * 6);
+            native->SetPosition(-120 - int(Frame % 4) * 6, 48 + int(Frame % 3) * 4);
+            if (Frame == 10) native->SetAlpha(.55f);
+            if (Frame == 12) native->SetAlpha(1.f);
+            if (Frame == 14) native->SetOwner(manager->GetMainWindow()->GetNativeWindow());
+            if (Frame == 16) native->SetOwner(nullptr);
+            MutatedSurface = true;
+        }
+#ifdef _WIN32
+        if (aux.size() >= 2 && Frame == 20) {
+            manager->EnsureRenderIdle();
+            ::ShowWindow(static_cast<HWND>(aux[1]->GetNativeWindow()->GetNativeHandler()), SW_MINIMIZE);
+        }
+        if (aux.size() >= 2 && Frame == 26) {
+            manager->EnsureRenderIdle();
+            ::ShowWindow(static_cast<HWND>(aux[1]->GetNativeWindow()->GetNativeHandler()), SW_SHOWNOACTIVATE);
+        }
+#endif
+        if (Frame > 36) test::CloseMainWindow(*this);
+    }
+    void DrawUi() {
+        DrawHostedAuxiliary("aux mutate a", -80.f, 40.f);
+        DrawHostedAuxiliary("aux mutate b", -80.f, 180.f);
+    }
+    void OnShutdown() override {
+        UiDraw.disconnect();
+        Clean = !Ui->HasError();
+        Ui = nullptr;
+        GetRenderSystem()->SetPipeline(nullptr);
+    }
+
+private:
+    uint32_t Frame{0};
+    Nullable<ImGuiSystem*> Ui{nullptr};
+    sigslot::scoped_connection UiDraw;
+};
+TEST_P(ImGuiRenderingTest, AuxiliaryNativeSurfaceChangeAndMinimizeOneWhileAnotherPresents) {
+    const auto mode = GetParam();
+    if (!BackendIsBuilt(mode.Backend)) GTEST_SKIP() << "backend not built";
+    test::RuntimeLogCapture logs;
+    UiAuxiliarySurfaceAndPartialMinimizeApp app;
+    ASSERT_EQ(app.Run(MakeUiRuntime(mode, "ImGui aux surface and partial minimize")), 0);
+    EXPECT_GE(app.FramesWithTwoPresentable, 10u);
+    EXPECT_TRUE(app.MutatedSurface);
+    EXPECT_TRUE(app.Clean);
+    EXPECT_TRUE(logs.Errors().empty()) << logs.Errors();
+#ifdef _WIN32
+    EXPECT_GE(app.FramesWithPartialUnpresentable, 1u);
+#endif
 }
 INSTANTIATE_TEST_SUITE_P(Backends, ImGuiRenderingTest, testing::Values(UiTestMode{render::RenderBackend::D3D12, false, false, 2}, UiTestMode{render::RenderBackend::D3D12, true, true, 3}, UiTestMode{render::RenderBackend::Vulkan, false, false, 2}, UiTestMode{render::RenderBackend::Vulkan, true, true, 3}));
 }  // namespace
