@@ -140,11 +140,18 @@ void RenderSystem::Render(AppFrameContext& ctx) {
     if (!_graphRuntime || !_viewStates) return;
     const uint32_t flight = ctx.FlightIndex();
     const uint64_t serial = ctx.FrameSerial();
-    auto& graphResources = _graphRuntime->BeginFlight(flight, serial, ctx.GetHostWrites());
-    _viewStates->BeginFlight(flight, serial);
+    RenderGraphFrameResources* graphResources = nullptr;
+    {
+        RADRAY_PROFILE_SCOPE_N("BeginGraphFlight");
+        graphResources = &_graphRuntime->BeginFlight(flight, serial, ctx.GetHostWrites());
+        _viewStates->BeginFlight(flight, serial);
+    }
     auto& report = _graphReports[flight];
     report = {};
-    auto outputFrame = _presentation->Acquire(ctx, _outputs, _frameOutputInfos[flight], _framePlans[flight].Outputs);
+    auto outputFrame = [&] {
+        RADRAY_PROFILE_SCOPE_N("PresentationAcquire");
+        return _presentation->Acquire(ctx, _outputs, _frameOutputInfos[flight], _framePlans[flight].Outputs);
+    }();
     auto& surfaces = outputFrame.Surfaces;
     const auto& resolvedOutputs = outputFrame.Outputs;
     vector<ResolvedRenderViewFamily> families;
@@ -166,8 +173,11 @@ void RenderSystem::Render(AppFrameContext& ctx) {
             families.push_back(std::move(*family));
         }
     }
-    RenderPipelineContext pipelineContext(ctx, graphResources, *_renderPassRegistry, *_viewStates, serial, families, surfaces, report);
-    auto graph = pipelineContext.CreateRenderGraph("Frame");
+    RenderPipelineContext pipelineContext(ctx, *graphResources, *_renderPassRegistry, *_viewStates, serial, families, surfaces, report);
+    auto graph = [&] {
+        RADRAY_PROFILE_SCOPE_N("CreateRenderGraph");
+        return pipelineContext.CreateRenderGraph("Frame");
+    }();
     FrameGraph frame{pipelineContext, graph};
     {
         RADRAY_PROFILE_SCOPE_N("ComposeGraph");
@@ -183,9 +193,12 @@ void RenderSystem::Render(AppFrameContext& ctx) {
         result = pipelineContext.ExecuteGraph(graph);
     }
     frame.Recorded(result);
-    for (auto& surface : surfaces) {
-        if (!surface.Written) ClearTarget(ctx, surface);
-        TransitionSurface(ctx, surface, surface.RequiredFinalState);
+    {
+        RADRAY_PROFILE_SCOPE_N("PresentFinalize");
+        for (auto& surface : surfaces) {
+            if (!surface.Written) ClearTarget(ctx, surface);
+            TransitionSurface(ctx, surface, surface.RequiredFinalState);
+        }
     }
     auto submission = result.Submission;
     if (!submission) {

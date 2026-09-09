@@ -138,7 +138,7 @@ auto* p = maybe.Unwrap();              // 为空则 throw NullableAccessExceptio
 |---|---|
 | `RADRAY_PROFILE_SCOPE()` | 以所在函数名命名的作用域 zone |
 | `RADRAY_PROFILE_SCOPE_N("name")` | 字符串字面量命名；同一花括号作用域内只能出现一个 `SCOPE*` 宏，需要嵌套时用 `{}` 分隔 |
-| `RADRAY_PROFILE_SCOPE_DYN(sv)` | 运行时 `string_view` 命名（profiler 复制），用于 pass 名等动态名称；与 `SCOPE*` 同样受单作用域限制 |
+| `RADRAY_PROFILE_SCOPE_DYN(sv)` | 运行时 `string_view` 作为 **zone 名**（Tracy transient，导出与 GUI 都用该名字，而不是函数名）；与 `SCOPE*` 同样受单作用域限制 |
 | `RADRAY_PROFILE_FRAME()` | 当前线程一帧结束；单线程 runner 在 `TickFrame` 尾部，多线程 runner 在渲染线程 |
 | `RADRAY_PROFILE_PLOT("name", v)` | 数值曲线 |
 | `RADRAY_PROFILE_THREAD("name")` | 命名当前线程 |

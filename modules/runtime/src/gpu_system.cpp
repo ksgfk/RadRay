@@ -357,6 +357,13 @@ bool GpuSystem::CompleteFlightIfReady(uint32_t flightIndex, bool wait) {
     return CompleteFlight(flightIndex);
 }
 
+GpuFenceSignal GpuSystem::GetFlightGpuSignal(uint32_t flightIndex) const noexcept {
+    if (flightIndex >= _flights.size()) {
+        return GpuFenceSignal::Invalid();
+    }
+    return _flights[flightIndex]->Signal;
+}
+
 void GpuSystem::BeginUpdateForFlight(uint32_t flightIndex) {
     if (flightIndex >= _flights.size()) {
         return;
@@ -849,6 +856,7 @@ render::CommandBuffer* AppFrameContext::GetCommandBufferForTexture(render::Textu
 }
 
 std::optional<AppFrameTarget> AppFrameContext::AcquireWindow(AppWindow* window) {
+    RADRAY_PROFILE_SCOPE_N("AcquireWindow");
     if (window == nullptr) {
         return std::nullopt;
     }

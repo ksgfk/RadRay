@@ -851,6 +851,7 @@ bool RenderGraph::Connect(RgBufferPort input, RgBufferValue output) {
 }
 
 bool RenderGraph::Impl::ResolvePorts() {
+    RADRAY_PROFILE_SCOPE_N("RenderGraph::ResolvePorts");
     vector<vector<uint8_t>> visiting(Resources.size());
     for (uint32_t r = 0; r < Resources.size(); ++r) {
         auto& resource = Resources[r];
@@ -1547,6 +1548,7 @@ RgPassHandle RenderGraph::AddCopyBufferToTexturePass(std::string_view name, RgBu
 }
 
 bool RenderGraph::Impl::ValidateResources() {
+    RADRAY_PROFILE_SCOPE_N("RenderGraph::ValidateResources");
     Report.Resources.reserve(Resources.size());
     for (uint32_t index = 0; index < Resources.size(); ++index) {
         auto& resource = Resources[index];
@@ -1606,6 +1608,7 @@ bool RenderGraph::Impl::ValidateResources() {
 }
 
 bool RenderGraph::Impl::NormalizePasses() {
+    RADRAY_PROFILE_SCOPE_N("RenderGraph::NormalizePasses");
     for (uint32_t p = 0; p < Passes.size(); ++p) {
         auto& pass = Passes[p];
         unordered_map<uint64_t, uint32_t> cellMap;
@@ -1879,7 +1882,10 @@ bool RenderGraph::Compile() {
             for (const auto& access : impl.Passes[p].Accesses)
                 impl.Report.Passes[p].Accesses.push_back({access.Resource, access.Version, access.State, access.Range, access.Bytes, access.Stages, access.Read, access.Write});
     }
-    impl.Cull();
+    {
+        RADRAY_PROFILE_SCOPE_N("RenderGraph::Cull");
+        impl.Cull();
+    }
     if (impl.Report.Diagnostics.empty()) {
         RADRAY_PROFILE_SCOPE_N("RenderGraph::Optimize");
         impl.PlanStorage();

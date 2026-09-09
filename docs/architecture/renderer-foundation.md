@@ -97,7 +97,8 @@ read/Load/ReadWrite 仍拒绝。Store Discard 产生无效内容，不能随后�
 
 CPU 阶段在 Tracy 上拆开：`ComposeGraph` 只声明 IR（含 Forward 的剔除与 `PrepareRendererList`），
 `ExecuteGraph` / `RenderGraph::Execute` 才是 Compile、Realize、Prepare、PlanBarriers 与 Record。
-`Record` 把 live pass 写入共享 Direct command buffer，或写入该 pass 所写 flip backbuffer 对应的 present command buffer；GPU 实际执行在随后的 `Submit` 与 GPU 时间线。
+`Record` 内每个 live pass 用 `RADRAY_PROFILE_SCOPE_DYN(pass.Name)`，CSV/GUI 看到的是 pass 名。
+把 live pass 写入共享 Direct command buffer，或写入该 pass 所写 flip backbuffer 对应的 present command buffer；GPU 实际执行在随后的 `Submit` 与 GPU 时间线。
 
 图为二分有向图：资源版本 → 消费 pass，生产 pass → 新资源版本。编译器从精确导出版本、
 ObservableOutput 的最终内容和 `SetSideEffect` 反向标记 live，只沿内容依赖保留生产者；再为 live

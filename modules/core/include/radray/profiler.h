@@ -15,6 +15,7 @@
 // All macros expand to nothing when RADRAY_ENABLE_PROFILER is undefined. Zones are cheap (tens of ns)
 // but not free; keep them at the granularity of frame stages, passes and per-draw batches, not per element.
 
+#include <cstring>
 #include <string_view>
 
 #ifdef RADRAY_ENABLE_PROFILER
@@ -23,12 +24,14 @@
 
 #define RADRAY_PROFILE_SCOPE() ZoneScoped
 #define RADRAY_PROFILE_SCOPE_N(name) ZoneScopedN(name)
-#define RADRAY_PROFILE_SCOPE_DYN(name)                                                     \
-    ZoneScoped;                                                                            \
-    do {                                                                                   \
-        const std::string_view radray_profile_dyn_name_{name};                             \
-        ZoneName(radray_profile_dyn_name_.data(), radray_profile_dyn_name_.size());        \
-    } while (false)
+// ZoneTransient copies the runtime name into the zone event. ZoneScoped+ZoneName keeps the
+// function name as the exported identity, so csvexport/stats collapse every pass together.
+#define RADRAY_PROFILE_SCOPE_DYN(name)                                                                                          \
+    const std::string_view radray_profile_dyn_name_{name};                                                                     \
+    SuppressVarShadowWarning(tracy::ScopedZone ___tracy_scoped_zone(                                                          \
+        TracyLine, TracyFile, strlen(TracyFile), TracyFunction, strlen(TracyFunction),                                           \
+        radray_profile_dyn_name_.data() != nullptr ? radray_profile_dyn_name_.data() : "",                                      \
+        radray_profile_dyn_name_.size(), TRACY_CALLSTACK, true))
 #define RADRAY_PROFILE_FRAME() FrameMark
 #define RADRAY_PROFILE_PLOT(name, value) TracyPlot(name, value)
 #define RADRAY_PROFILE_THREAD(name) tracy::SetThreadName(name)

@@ -12,6 +12,7 @@ namespace radray {
 namespace {
 
 void SortRendererListItems(const RendererListDesc& desc, RendererList& out) {
+    RADRAY_PROFILE_SCOPE_N("SortRendererList");
     std::sort(out.Items.begin(), out.Items.end(), [&](const auto& left, const auto& right) {
         const auto& a = left.SortData;
         const auto& b = right.SortData;

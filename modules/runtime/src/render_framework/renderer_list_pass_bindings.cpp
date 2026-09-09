@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <functional>
+#include <radray/profiler.h>
 
 namespace radray {
 
@@ -59,6 +60,7 @@ std::optional<RendererListPassBindings> RendererListPassBindings::Build(
 
 std::optional<RendererListPassBindings> RendererListPassBindings::Create(
     RenderGraphRasterBuilder& builder, const RendererList& list, std::span<const RendererListProgramParameters> parameters) {
+    RADRAY_PROFILE_SCOPE_N("CreatePassBindings");
     vector<RendererListPassBinding> bindings;
     bindings.reserve(parameters.size());
     for (const auto& parameter : parameters) {

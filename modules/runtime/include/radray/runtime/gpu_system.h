@@ -365,6 +365,8 @@ public:
     bool CompleteFlight(uint32_t flightIndex);
     void WaitAndCleanupCompletedFlights();
     bool CompleteFlightIfReady(uint32_t flightIndex, bool wait);
+    /// 提交态快照。仅在该 flight 已计入 rendered 之后读，与 Submit 的 release 成对。
+    GpuFenceSignal GetFlightGpuSignal(uint32_t flightIndex) const noexcept;
     /// 任意 retire 线程：只入队，不回调。
     void NotifyFlightComplete(FlightCompletion completion);
     /// Game thread：排空一次，扇出给上传调度器与全部观察者。调用点固定在 BeginUpdateForFlight

@@ -710,7 +710,7 @@ public:
             RetireRenderedFrames(false, false);
             CheckRecreateSwapChains();
             RADRAY_PROFILE_SCOPE_N("WaitWritableSlot");
-            _writableSlotsSemaphore.acquire();
+            WaitForWritableFlightSlot();
         } else if (!_writableSlotsSemaphore.try_acquire()) {
             return std::nullopt;
         } else {
@@ -771,6 +771,38 @@ public:
         WaitRenderFrameComplete(_app->GetGpuSystem()->GetFrameIndex());
         RetireRenderedFrames(true, false);
         _app->GetRenderSystem()->GetOutputs().SetRenderIdle(true);
+    }
+
+    void WaitForWritableFlightSlot() {
+        for (;;) {
+            if (_writableSlotsSemaphore.try_acquire()) {
+                return;
+            }
+            RetireRenderedFrames(false, false);
+            if (_writableSlotsSemaphore.try_acquire()) {
+                return;
+            }
+
+            GpuFenceSignal submitted{};
+            uint64_t waitRendered = 0;
+            {
+                std::lock_guard lock(_retireMutex);
+                auto* gpuSystem = _app->GetGpuSystem();
+                const uint64_t renderedFrameCount = _renderedFrameCount.load(std::memory_order_acquire);
+                if (_retireFrameIndex < renderedFrameCount) {
+                    const uint32_t flightIndex = static_cast<uint32_t>(_retireFrameIndex % gpuSystem->GetFlightDataCount());
+                    submitted = gpuSystem->GetFlightGpuSignal(flightIndex);
+                } else {
+                    waitRendered = _retireFrameIndex + 1;
+                }
+            }
+            if (submitted.IsValid()) {
+                RADRAY_PROFILE_SCOPE_N("WaitSubmittedFlight");
+                submitted.Fence->Wait(submitted.Value);
+            } else if (waitRendered != 0) {
+                WaitRenderFrameComplete(waitRendered);
+            }
+        }
     }
 
     void RetireRenderedFrames(bool waitForPendingFrames, bool waitWhenFrameSlotsFull) {

@@ -53,7 +53,8 @@ void Submit 返回与真实 fence 完成；未提交收据取消不发布资源�
 正常完成或失败完成仍由匹配 frame serial 的 fence 路径处理。
 
 `CompleteFlight` 在 fence 完成后 resolve profiler、回收 staging、完成 submission receipts，并 `NotifyFlightComplete`
-入队，同时发布原子 `WaitersCompleted`。多线程模式下它在渲染线程，不访问 game-thread 的协程等待表或资产引用。
+入队，同时发布原子 `WaitersCompleted`。调用点是 `RetireRenderedFrames`（渲染线程在两帧 Record 之间，
+game thread 在 `WaitWritableSlot` 等已提交 fence 之后）。不访问协程等待表。
 `GpuSystem::PumpFlightCompletions` 在 game thread 排空队列：先让上传调度器 `ApplyCompletedFlights`，
 再按注册顺序调用 `IFlightCompletionObserver`。`Application` 与 `ImGuiSystem`（imgui 模块自行注册）都是观察者；
 `Application::OnFlightsComplete` 再转到 `OnRenderFrameComplete`。线程断言留在 `Application` 一侧
@@ -61,7 +62,8 @@ void Submit 返回与真实 fence 完成；未提交收据取消不发布资源�
 `BeginUpdateForFlight` 与 `WaitAndCleanupCompletedFlights`。正常、跳过和 shutdown 路径保持相同线程归属。
 
 多线程普通帧只等待当前 flight 可写，不等待上一帧 CPU record 结束，允许 `Update(n+1)` 与
-`Record(n)` 重叠。同一 flight 仍必须等 fence。每个 flight 拥有独立上传命令和 uploader，
+`Record(n)` 重叠。槽位在 GPU fence 之后才能复用；`WaitWritableSlot` 等的是**已提交** flight 的
+fence，并在等待中 retire，不把 game thread 堵到当前 `Record` 结束。同一 flight 仍必须等 fence。每个 flight 拥有独立上传命令和 uploader，
 发布后 game thread 不再改它。关闭、模态丢帧和 shutdown 仍提交已经录制的上传并等待真实 fence，
 但完成通知的 `GpuWorkCompleted=false`，不能据此提交图像历史。单线程/手动录制入口会补做尚未准备的上传。
 
@@ -201,9 +203,10 @@ flight，与队列的全排空语义相反。
    是 `AssetManager::Pump` → `Application::Update`，发生在 `BeginUpdateForFlight` 返回之后。
    因此 `PumpFlightCompletions` 排在 `PumpWaitFrame` 之前是安全的。上传协程恢复后直接执行游戏代码，
    不适用这条两层间接，所以 `PumpFrameUploadScheduler` 仍在 `PumpWaitFrame` 之后。
-2. **当前 flight 的完成不可能在帧顶排空之后到达。** `TickFrame` 先 `_writableSlotsSemaphore.acquire()`
+2. **当前 flight 的完成不可能在帧顶排空之后到达。** `TickFrame` 先取得可写槽位
    才算出 `flightIndex` 并 `BeginUpdateForFlight`；`RetireRenderedFrames` 只在 `CompleteFlightIfReady`
-   成功后才 `release()`。因此 `CompleteFlight(N)` 严格早于 game thread 取得 flight N 的可写槽位，
+   成功后才 `release()`。`WaitWritableSlot` 在 `acquire` 前会 retire 已完成的 submitted flight
+  （必要时等它的 fence），因此 `CompleteFlight(N)` 仍严格早于 game thread 取得 flight N 的可写槽位，
    帧顶一次排空就够，不必在 `PrepareFrameUploads` 再排一次。
 
 ## 上传
@@ -246,7 +249,7 @@ upload phase 只分配 GPU 对象、复制已准备的 mip 数据并录制命令
 先 `ApplyCompletedFlights`（只读 `.FlightIndex`，把对应 `AwaitingFence` 记录标成 `FenceComplete`），
 `PumpCompletedUploads` 再恢复这些协程。`RunUploadPhase` 不再自排空。
 
-帧顶一次排空足够：`TickFrame` 先 `_writableSlotsSemaphore.acquire()` 才算出 `flightIndex` 并
+帧顶一次排空足够：`TickFrame` 先取得可写槽位才算出 `flightIndex` 并
 `BeginUpdateForFlight`；`RetireRenderedFrames` 只在 `CompleteFlightIfReady` 成功后才 `release()`。
 因此 `CompleteFlight(N)` 严格早于 game thread 取得 flight N 的可写槽位，挂在 flight N 上的
 `AwaitingFence` 记录在 `RunUploadPhase(N)` 之前已被 apply 并恢复。中途到达的其他 flight 完成
