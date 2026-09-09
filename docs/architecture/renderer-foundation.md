@@ -5,8 +5,9 @@
 # Renderer foundation
 
 Renderer foundation 的系统都属于 `radrayruntime`。保留 game-thread `PrepareFrame` → render-thread `Render`
-和 per-flight 资产保活；一次 Render 最多执行一张 graph，使用 GpuSystem 已经 Begin 的 Direct command
-buffer。graph 不提交、不等待、不 acquire/present，也不增加线程、flight 或队列同步协议。
+和 per-flight 资产保活；一次 Render 最多执行一张 graph。GpuSystem 已 Begin 共享 Direct command
+buffer；每个已 acquire 的窗口另有一条 present command buffer，graph 把写入该 flip backbuffer 的
+pass 以及把它收到 Present 的 Export 录进对应 CB。graph 不提交、不等待、不 acquire/present，也不增加线程、flight 或队列同步协议。
 CPU 绘制准备在调用线程串行执行，不为 view 或 primitive 新开 worker；既有 `ThreadedRunner` 的 game/render
 两线程边界不变。
 
@@ -96,7 +97,7 @@ read/Load/ReadWrite 仍拒绝。Store Discard 产生无效内容，不能随后�
 
 CPU 阶段在 Tracy 上拆开：`ComposeGraph` 只声明 IR（含 Forward 的剔除与 `PrepareRendererList`），
 `ExecuteGraph` / `RenderGraph::Execute` 才是 Compile、Realize、Prepare、PlanBarriers 与 Record。
-`Record` 是把 live pass 写入当前 Direct command buffer；GPU 实际执行在随后的 `Submit` 与 GPU 时间线。
+`Record` 把 live pass 写入共享 Direct command buffer，或写入该 pass 所写 flip backbuffer 对应的 present command buffer；GPU 实际执行在随后的 `Submit` 与 GPU 时间线。
 
 图为二分有向图：资源版本 → 消费 pass，生产 pass → 新资源版本。编译器从精确导出版本、
 ObservableOutput 的最终内容和 `SetSideEffect` 反向标记 live，只沿内容依赖保留生产者；再为 live

@@ -2377,6 +2377,10 @@ void RenderGraph::Impl::PlanBarriers() {
 }
 
 RenderGraphExecutionResult RenderGraph::Execute(render::CommandBuffer& command) {
+    return Execute(command, {});
+}
+
+RenderGraphExecutionResult RenderGraph::Execute(render::CommandBuffer& command, std::span<const PresentCommandTarget> presentTargets) {
     RADRAY_PROFILE_SCOPE_N("RenderGraph::Execute");
     auto& impl = *_impl;
     if (impl.Executed) {
@@ -2400,29 +2404,63 @@ RenderGraphExecutionResult RenderGraph::Execute(render::CommandBuffer& command) 
     {
         RADRAY_PROFILE_SCOPE_N("RenderGraph::Record");
     Nullable<unique_ptr<render::GraphicsCommandEncoder>> rasterEncoder{nullptr};
+    render::CommandBuffer* rasterCommand = nullptr;
+    const auto resolveCommand = [&](const Impl::PassExecutionPlan& plan, uint32_t passIndex) -> render::CommandBuffer* {
+        render::CommandBuffer* found = nullptr;
+        for (const auto& access : plan.Accesses) {
+            // 写 flip 的 blit 与只读 Export（RTV→Present）必须落在同一 present CB。
+            auto& resource = impl.Resources[access.Physical];
+            if (!resource.IsTexture || (!resource.ExternalTexture && !resource.PoolTexture)) continue;
+            render::Texture* texture = resource.NativeTexture();
+            for (const PresentCommandTarget& present : presentTargets) {
+                if (present.Texture == nullptr || present.Commands == nullptr || present.Texture != texture) continue;
+                if (found != nullptr && found != present.Commands) {
+                    impl.Error("PresentCommandSplit", "A pass writes more than one presentation surface", passIndex);
+                    return &command;
+                }
+                found = present.Commands;
+            }
+        }
+        return found != nullptr ? found : &command;
+    };
     for (size_t order = 0; order < impl.CompiledGraph.ExecutionOrder.size(); ++order) {
         const uint32_t p = impl.CompiledGraph.ExecutionOrder[order];
         auto& report = impl.Report.Passes[p];
         if (!report.Live) continue;
         auto& pass = impl.Passes[p];
         const auto& plan = impl.ExecutionPlan[p];
+        render::CommandBuffer* dest = resolveCommand(plan, p);
+        render::CommandBuffer* recording = dest;
+        if (report.Type == RgPassType::Raster) {
+            if (report.RasterGroup == p) {
+                rasterCommand = dest;
+                recording = dest;
+            } else {
+                recording = rasterCommand != nullptr ? rasterCommand : dest;
+                if (dest != recording) {
+                    impl.Error("PresentCommandSplit", "Raster group spans multiple presentation command buffers", p);
+                }
+            }
+        } else {
+            rasterCommand = nullptr;
+        }
         RADRAY_PROFILE_SCOPE_DYN(report.Name);
-        command.PushDebugGroup(report.Name);
+        recording->PushDebugGroup(report.Name);
         result.CommandsRecorded = true;
         if (!plan.Barriers.empty()) {
             if (impl.Options.BatchBarriers) {
-                command.ResourceBarrier(plan.Barriers);
+                recording->ResourceBarrier(plan.Barriers);
                 ++impl.Report.BarrierBatches;
             } else
                 for (const auto& barrier : plan.Barriers) {
-                    command.ResourceBarrier(std::span{&barrier, 1});
+                    recording->ResourceBarrier(std::span{&barrier, 1});
                     ++impl.Report.BarrierBatches;
                 }
         }
         for (const auto& access : plan.Accesses) impl.Resources[access.Physical].States[access.Cell] = access.State;
         if (report.Type == RgPassType::Raster) {
             const auto depthClear = pass.DepthAttachment ? std::optional{pass.DepthAttachment->Desc.Clear} : std::nullopt;
-            if (report.RasterGroup == p) rasterEncoder = command.BeginRenderPass({pass.NativePass.Get(), pass.Framebuffer.Get(), pass.Clears,
+            if (report.RasterGroup == p) rasterEncoder = recording->BeginRenderPass({pass.NativePass.Get(), pass.Framebuffer.Get(), pass.Clears,
                                                                                   depthClear, report.Name, pass.AllowUavWrites});
             if (!rasterEncoder) {
                 impl.Error("BeginRenderPass", "Encoder creation failed after barriers; actual states are committed for host recovery", p);
@@ -2431,33 +2469,33 @@ RenderGraphExecutionResult RenderGraph::Execute(render::CommandBuffer& command) 
                 RenderGraphRasterContext context(*this, p, *rasterEncoder);
                 if (pass.Data) pass.Data->Run(context);
                 const bool last = order + 1 == impl.CompiledGraph.ExecutionOrder.size() || impl.Report.Passes[impl.CompiledGraph.ExecutionOrder[order + 1]].RasterGroup != report.RasterGroup;
-                if (last || !impl.Report.Diagnostics.empty()) command.EndRenderPass(rasterEncoder.Release());
+                if (last || !impl.Report.Diagnostics.empty()) recording->EndRenderPass(rasterEncoder.Release());
             }
         } else if (report.Type == RgPassType::Compute) {
-            auto encoder = command.BeginComputePass();
+            auto encoder = recording->BeginComputePass();
             if (!encoder) {
                 impl.Error("BeginComputePass", "Encoder creation failed after barriers; actual states are committed for host recovery", p);
                 result.Success = false;
             } else {
                 RenderGraphComputeContext context(*this, p, *encoder);
                 if (pass.Data) pass.Data->Run(context);
-                command.EndComputePass(encoder.Release());
+                recording->EndComputePass(encoder.Release());
             }
         } else if (pass.CopyOp) {
             const auto& copy = *pass.CopyOp;
             auto& src = impl.Resources[copy.Source];
             auto& dst = impl.Resources[copy.Destination];
             if (copy.Type == Impl::CopyType::Buffer)
-                command.CopyBufferToBuffer(dst.NativeBuffer(), copy.DestinationOffset, src.NativeBuffer(), copy.SourceOffset, copy.Size);
+                recording->CopyBufferToBuffer(dst.NativeBuffer(), copy.DestinationOffset, src.NativeBuffer(), copy.SourceOffset, copy.Size);
             else if (copy.Type == Impl::CopyType::TextureToBuffer)
-                command.CopyTextureToBuffer(dst.NativeBuffer(), copy.DestinationOffset, src.NativeTexture(), copy.SourceRange);
+                recording->CopyTextureToBuffer(dst.NativeBuffer(), copy.DestinationOffset, src.NativeTexture(), copy.SourceRange);
             else if (copy.Type == Impl::CopyType::BufferToTexture) {
-                if (!command.CopyBufferToTextureRegion({src.NativeBuffer(), dst.NativeTexture(), copy.Upload})) {
+                if (!recording->CopyBufferToTextureRegion({src.NativeBuffer(), dst.NativeTexture(), copy.Upload})) {
                     impl.Error("CopyBufferTextureRegion", "Backend rejected the region upload", p);
                     result.Success = false;
                 }
             } else if (copy.Type == Impl::CopyType::Resolve)
-                command.ResolveTexture({.Destination = dst.NativeTexture(),
+                recording->ResolveTexture({.Destination = dst.NativeTexture(),
                                         .DestinationMipLevel = copy.DestinationRange.BaseMipLevel,
                                         .DestinationArrayLayer = copy.DestinationRange.BaseArrayLayer,
                                         .Source = src.NativeTexture(),
@@ -2465,9 +2503,9 @@ RenderGraphExecutionResult RenderGraph::Execute(render::CommandBuffer& command) 
                                         .SourceArrayLayer = copy.SourceRange.BaseArrayLayer,
                                         .ArrayLayerCount = copy.SourceRange.ArrayLayerCount});
             else
-                command.CopyTextureToTexture({.Destination = dst.NativeTexture(), .DestinationMipLevel = copy.DestinationRange.BaseMipLevel, .DestinationArrayLayer = copy.DestinationRange.BaseArrayLayer, .Source = src.NativeTexture(), .SourceMipLevel = copy.SourceRange.BaseMipLevel, .SourceArrayLayer = copy.SourceRange.BaseArrayLayer, .Width = std::max(1u, src.TextureDesc.Width >> copy.SourceRange.BaseMipLevel), .Height = std::max(1u, src.TextureDesc.Height >> copy.SourceRange.BaseMipLevel), .ArrayLayerCount = copy.SourceRange.ArrayLayerCount});
+                recording->CopyTextureToTexture({.Destination = dst.NativeTexture(), .DestinationMipLevel = copy.DestinationRange.BaseMipLevel, .DestinationArrayLayer = copy.DestinationRange.BaseArrayLayer, .Source = src.NativeTexture(), .SourceMipLevel = copy.SourceRange.BaseMipLevel, .SourceArrayLayer = copy.SourceRange.BaseArrayLayer, .Width = std::max(1u, src.TextureDesc.Width >> copy.SourceRange.BaseMipLevel), .Height = std::max(1u, src.TextureDesc.Height >> copy.SourceRange.BaseMipLevel), .ArrayLayerCount = copy.SourceRange.ArrayLayerCount});
         }
-        command.PopDebugGroup();
+        recording->PopDebugGroup();
         if (!impl.Report.Diagnostics.empty()) result.Success = false;
         if (!result.Success) {
             for (const auto& access : pass.Cells)

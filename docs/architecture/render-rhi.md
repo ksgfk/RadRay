@@ -23,9 +23,9 @@ CPU fence 等待检查事件注册、系统等待结果，并在唤醒后重新�
 D3D12 flip-model 不能对已最小化、已隐藏、已销毁或客户区为 0 的 HWND 提交 GPU 写入，也不能
 对其调用 `Present`：驱动会以 `DXGI_ERROR_ACCESS_DENIED` 移除设备。Acquire 在这种 HWND 上
 返回 `RetryLater`。已经 acquire 的帧在 submit 时若窗口已不可呈现，则只提交上传命令；Present
-跳过 DXGI Present，先等待 present queue。同一帧 Present 多个 D3D12 flip HWND 时，`Submit`
-之后、Present 之前等待 graphics queue：DXGI Present 不会等待刚提交的 `ExecuteCommandLists`，
-GPU 仍以 RTV 占用 backbuffer 时 Present 会 `ACCESS_DENIED`。单窗口路径不插入这次等待。
+跳过 DXGI Present，先等待 present queue。同一帧有多个 D3D12 flip HWND 时，每个 HWND 使用独立
+present command buffer：对该窗 `Execute` 后立刻 `Present`，不在 Present 前等待 graphics queue。
+单窗口与 Vulkan 仍一次 Submit 再 Present。
 已挂 swapchain 的窗口走 `NativeWindow` 的
 `SetSize` / `SetPosition` / `Show` / `SetAlpha` / `SetOwner` 时会先 `EnsureRenderIdle`（含 present
 队列等待），避免多线程下 `Update` 改 HWND 与上一帧 Present/DWM 重叠。绕过 NativeWindow 的原始 `ShowWindow`

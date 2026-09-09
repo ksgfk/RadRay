@@ -2,6 +2,7 @@
 
 #include <array>
 #include <source_location>
+#include <span>
 #include <variant>
 #include <radray/runtime/frame_submission.h>
 #include <radray/runtime/render_framework/render_resource_pool.h>
@@ -459,6 +460,11 @@ private:
     RenderGraph(render::Device& device, RenderGraphFrameResources& resources,
                 render::RenderPassRegistry& registry, std::string_view name, uint64_t& generation, RenderGraphExecutionReport& report);
     RenderGraphExecutionResult Execute(render::CommandBuffer& command);
+    struct PresentCommandTarget {
+        render::Texture* Texture{nullptr};
+        render::CommandBuffer* Commands{nullptr};
+    };
+    RenderGraphExecutionResult Execute(render::CommandBuffer& command, std::span<const PresentCommandTarget> presentTargets);
     struct Payload {
         virtual ~Payload() = default;
         virtual void Run(RenderGraphRasterContext&) {}

@@ -48,7 +48,16 @@ RenderGraphExecutionResult RenderPipelineContext::ExecuteGraph(RenderGraph& grap
     if (_executed || _graphGeneration != graph.GetGeneration()) return {};
     _graphGeneration = graph.GetGeneration();
     _executed = true;
-    const auto result = graph.Execute(*_frame.GetCommandBuffer());
+    vector<RenderGraph::PresentCommandTarget> presentTargets;
+    presentTargets.reserve(_surfaces.size());
+    render::CommandBuffer* shared = _frame.GetCommandBuffer();
+    for (const RenderSurfaceFrame& surface : _surfaces) {
+        render::CommandBuffer* commands = _frame.GetCommandBufferForTexture(surface.Texture);
+        if (commands != nullptr && commands != shared) {
+            presentTargets.push_back({surface.Texture, commands});
+        }
+    }
+    const auto result = graph.Execute(*shared, presentTargets);
     _success = result.Success;
     _submission = result.Submission;
     if (_submission) {

@@ -13,6 +13,7 @@
 
 #include <cstring>
 #include <algorithm>
+#include <span>
 #include <type_traits>
 
 namespace radray {
@@ -671,8 +672,12 @@ void GpuSystem::SubmitFrame(
     }
 
     record.CmdBuffer->End();
+    for (FlightSlot::AcquiredTarget& target : record.Targets) {
+        if (target.Commands != nullptr) {
+            target.Commands->End();
+        }
+    }
 
-    // 聚合全部 target 的同步对象。
     vector<render::SwapChainSyncObject*> waitToExecute;
     vector<render::SwapChainSyncObject*> readyToPresent;
     waitToExecute.reserve(record.Targets.size());
@@ -698,54 +703,118 @@ void GpuSystem::SubmitFrame(
     }
 
     render::Fence* frameFence = _mainQueueTrack.Fence.get();
-    vector<render::CommandBuffer*> submitCmdBuffers;
-    submitCmdBuffers.reserve(desc.CmdBuffers.size() + 2);
-    submitCmdBuffers.push_back(record.UploadCommands.get());
+    const uint64_t frameFenceValue = _mainQueueTrack.NextFenceValue.fetch_add(1, std::memory_order_acq_rel);
+    vector<render::Fence*> frameSignalFences;
+    vector<uint64_t> frameSignalValues;
+    frameSignalFences.reserve(desc.SignalFences.size() + 1);
+    frameSignalValues.reserve(desc.SignalValues.size() + 1);
+    frameSignalFences.push_back(frameFence);
+    frameSignalValues.push_back(frameFenceValue);
+    frameSignalFences.insert(frameSignalFences.end(), desc.SignalFences.begin(), desc.SignalFences.end());
+    frameSignalValues.insert(frameSignalValues.end(), desc.SignalValues.begin(), desc.SignalValues.end());
+
+    const auto submitQueue = [&](std::span<render::CommandBuffer*> cmdBuffers,
+                                 std::span<render::Fence*> signalFences,
+                                 std::span<uint64_t> signalValues,
+                                 std::span<render::Fence*> waitFences,
+                                 std::span<uint64_t> waitValues,
+                                 std::span<render::SwapChainSyncObject*> waitSync,
+                                 std::span<render::SwapChainSyncObject*> readySync) {
+        _mainQueue->Submit(render::CommandQueueSubmitDescriptor{
+            .CmdBuffers = cmdBuffers,
+            .SignalFences = signalFences,
+            .SignalValues = signalValues,
+            .WaitFences = waitFences,
+            .WaitValues = waitValues,
+            .WaitToExecute = waitSync,
+            .ReadyToPresent = readySync});
+    };
+
+    const bool splitHwndPresent =
+        !dropPresentationWork &&
+        record.Targets.size() > 1 &&
+        _device->GetBackend() == render::RenderBackend::D3D12;
+
+    vector<render::CommandBuffer*> sharedCmdBuffers;
+    sharedCmdBuffers.reserve(desc.CmdBuffers.size() + 2 + record.Targets.size());
+    sharedCmdBuffers.push_back(record.UploadCommands.get());
     if (!dropPresentationWork) {
-        submitCmdBuffers.push_back(record.CmdBuffer.get());
-        submitCmdBuffers.insert(submitCmdBuffers.end(), desc.CmdBuffers.begin(), desc.CmdBuffers.end());
+        sharedCmdBuffers.push_back(record.CmdBuffer.get());
+        sharedCmdBuffers.insert(sharedCmdBuffers.end(), desc.CmdBuffers.begin(), desc.CmdBuffers.end());
     }
 
-    vector<render::Fence*> signalFences;
-    vector<uint64_t> signalValues;
-    signalFences.reserve(desc.SignalFences.size() + 1);
-    signalValues.reserve(desc.SignalValues.size() + 1);
-    signalFences.push_back(frameFence);
-    const uint64_t frameFenceValue = _mainQueueTrack.NextFenceValue.fetch_add(1, std::memory_order_acq_rel);
-    signalValues.push_back(frameFenceValue);
-    signalFences.insert(signalFences.end(), desc.SignalFences.begin(), desc.SignalFences.end());
-    signalValues.insert(signalValues.end(), desc.SignalValues.begin(), desc.SignalValues.end());
-
-    render::CommandQueueSubmitDescriptor submitDesc{
-        .CmdBuffers = submitCmdBuffers,
-        .SignalFences = signalFences,
-        .SignalValues = signalValues,
-        .WaitFences = desc.WaitFences,
-        .WaitValues = desc.WaitValues,
-        .WaitToExecute = std::span{waitToExecute},
-        .ReadyToPresent = std::span{readyToPresent}};
     record.HostWrites.Flush(*_device);
-    _mainQueue->Submit(submitDesc);
-    if (record.Targets.size() > 1) {
-        _mainQueue->Wait();  // 多 flip HWND 的 Present 不等待刚提交的 Execute
+    const std::span<render::Fence*> noFences{};
+    const std::span<uint64_t> noFenceValues{};
+    const std::span<render::SwapChainSyncObject*> noSync{};
+    if (splitHwndPresent) {
+        submitQueue(sharedCmdBuffers, noFences, noFenceValues, desc.WaitFences, desc.WaitValues, noSync, noSync);
+        for (size_t i = 0; i < record.Targets.size(); ++i) {
+            FlightSlot::AcquiredTarget& target = record.Targets[i];
+            if (target.Commands == nullptr) {
+                RADRAY_ABORT("D3D12 multi-HWND present command buffer is missing");
+            }
+            const bool last = i + 1 == record.Targets.size();
+            render::CommandBuffer* presentCmds[]{target.Commands};
+            const size_t waitCount = target.Frame.GetWaitToDraw() != nullptr ? 1 : 0;
+            const size_t readyCount = target.Frame.GetReadyToPresent() != nullptr ? 1 : 0;
+            render::SwapChainSyncObject* waitSync[1]{};
+            render::SwapChainSyncObject* readySync[1]{};
+            if (waitCount != 0) {
+                waitSync[0] = target.Frame.GetWaitToDraw();
+            }
+            if (readyCount != 0) {
+                readySync[0] = target.Frame.GetReadyToPresent();
+            }
+            submitQueue(
+                std::span{presentCmds, 1},
+                last ? std::span{frameSignalFences} : std::span<render::Fence*>{},
+                last ? std::span{frameSignalValues} : std::span<uint64_t>{},
+                {},
+                {},
+                std::span{waitSync, waitCount},
+                std::span{readySync, readyCount});
+            render::SwapChainPresentResult present =
+                target.Window->PresentSwapChainFrame(std::move(target.Frame));
+            if (present.Status == render::SwapChainStatus::RequireRecreate) {
+                continue;
+            }
+            if (present.Status != render::SwapChainStatus::Success) {
+                RADRAY_ERR_LOG("failed to present swapchain frame: status={}, native={}", present.Status, present.NativeStatusCode);
+            }
+        }
+    } else {
+        if (!dropPresentationWork) {
+            for (FlightSlot::AcquiredTarget& target : record.Targets) {
+                if (target.Commands != nullptr) {
+                    sharedCmdBuffers.push_back(target.Commands);
+                }
+            }
+        }
+        submitQueue(
+            sharedCmdBuffers,
+            frameSignalFences,
+            frameSignalValues,
+            desc.WaitFences,
+            desc.WaitValues,
+            waitToExecute,
+            readyToPresent);
+        for (FlightSlot::AcquiredTarget& target : record.Targets) {
+            render::SwapChainPresentResult present =
+                target.Window->PresentSwapChainFrame(std::move(target.Frame));
+            if (present.Status == render::SwapChainStatus::RequireRecreate) {
+                continue;
+            }
+            if (present.Status != render::SwapChainStatus::Success) {
+                RADRAY_ERR_LOG("failed to present swapchain frame: status={}, native={}", present.Status, present.NativeStatusCode);
+            }
+        }
     }
     record.HostWrites.Seal();
     _flights[flightIndex]->Signal = GpuSystem::FenceSignal{
         .Fence = frameFence,
         .Value = frameFenceValue};
     for (const auto& submission : record.Submissions) submission->Submit(record.FrameSerial);
-
-    // 逐个呈现。RequireRecreate 静默跳过，其余非 Success 记日志。
-    for (FlightSlot::AcquiredTarget& target : record.Targets) {
-        render::SwapChainPresentResult present =
-            target.Window->PresentSwapChainFrame(std::move(target.Frame));
-        if (present.Status == render::SwapChainStatus::RequireRecreate) {
-            continue;
-        }
-        if (present.Status != render::SwapChainStatus::Success) {
-            RADRAY_ERR_LOG("failed to present swapchain frame: status={}, native={}", present.Status, present.NativeStatusCode);
-        }
-    }
     record.Targets.clear();
     record.Submitted = true;
     record.UploadsPrepared = false;
@@ -763,6 +832,20 @@ void AppFrameContext::TrackSubmission(shared_ptr<FrameSubmission> submission) {
 
 render::CommandBuffer* AppFrameContext::GetCommandBuffer() const noexcept {
     return _gpuSystem->_flights[_flightIndex]->CmdBuffer.get();
+}
+
+render::CommandBuffer* AppFrameContext::GetCommandBufferForTexture(render::Texture* texture) const noexcept {
+    render::CommandBuffer* shared = GetCommandBuffer();
+    if (texture == nullptr) {
+        return shared;
+    }
+    GpuSystem::FlightSlot& record = *_gpuSystem->_flights[_flightIndex];
+    for (GpuSystem::FlightSlot::AcquiredTarget& target : record.Targets) {
+        if (target.Commands != nullptr && target.Frame.GetBackBuffer() == texture) {
+            return target.Commands;
+        }
+    }
+    return shared;
 }
 
 std::optional<AppFrameTarget> AppFrameContext::AcquireWindow(AppWindow* window) {
@@ -793,9 +876,16 @@ std::optional<AppFrameTarget> AppFrameContext::AcquireWindow(AppWindow* window) 
     }
 
     GpuSystem::FlightSlot& record = *_gpuSystem->_flights[_flightIndex];
+    const uint32_t presentIndex = static_cast<uint32_t>(record.Targets.size());
+    if (record.PresentCommandPool.size() <= presentIndex) {
+        record.PresentCommandPool.push_back(_gpuSystem->_device->CreateCommandBuffer(_gpuSystem->_mainQueue).Unwrap());
+    }
+    render::CommandBuffer* presentCommands = record.PresentCommandPool[presentIndex].get();
+    presentCommands->Begin();
     record.Targets.emplace_back(GpuFlightAcquiredTarget{
         .Window = window,
-        .Frame = std::move(frame)});
+        .Frame = std::move(frame),
+        .Commands = presentCommands});
     return AppFrameTarget{
         .Window = window,
         .BackBuffer = backBuffer,

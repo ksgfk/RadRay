@@ -34,8 +34,10 @@ Application::StartLoop
   ├─ GpuSystem::BeginFrameRecord      render thread Begin 主 CommandBuffer；清 targets、开始 profiler
   ├─ Application::Render              → pool/history BeginFlight → output/view resolve → pipeline graph → host finalize
   └─ GpuSystem::EndFrameRecordAndSubmit
-       uploader.EndFlight → CmdBuffer.End → 聚合 sync object → UploadCommands（若仍可呈现则加上主 CommandBuffer）一次 Submit
-       → 写 flight.Signal → Submission.OnSubmitted → Present 全部 target
+       uploader.EndFlight → 结束共享 CB 与 per-HWND present CB → 聚合 sync object
+       → UploadCommands（若仍可呈现则加上共享 CB / 应用附加 CB）
+       D3D12 且多个 HWND：先 Submit 共享工作，再对每个窗口 Execute(present CB) 后立刻 Present
+       单窗口与 Vulkan：一次 Submit（含各 present CB）再 Present 全部 target
 ```
 
 `ApplicationExtension` 是 runtime 唯一的帧内扩展点（`modules/runtime/include/radray/runtime/application_extension.h`）：
@@ -63,8 +65,13 @@ void Submit 返回与真实 fence 完成；未提交收据取消不发布资源�
 发布后 game thread 不再改它。关闭、模态丢帧和 shutdown 仍提交已经录制的上传并等待真实 fence，
 但完成通知的 `GpuWorkCompleted=false`，不能据此提交图像历史。单线程/手动录制入口会补做尚未准备的上传。
 
-`GpuSystem::SubmitFrame` 在同一 flight 有多个已 acquire 的窗口时，Submit 之后、Present 之前
-等待 graphics queue，避免 D3D12 多 flip HWND 在 GPU 仍写入 backbuffer 时 Present。
+`GpuSystem::SubmitFrame` 把不写 flip backbuffer 的工作录在共享 command buffer 上；每个已 acquire
+的窗口有自己的 present command buffer。D3D12 在同一 flight 有多个窗口时，先提交共享工作，再对每个
+HWND `Execute` 该窗的 present CB 并立刻 `Present`，不再等待 graphics queue。这样 DXGI 把每次 Present
+绑到只写该 current backbuffer 的 Execute。应用附加 command buffer 与共享工作一起提交，不得写入
+flip backbuffer。单窗口与 Vulkan 仍一次 Submit 再逐个 Present。同一队列上 present blit 仍排在共享
+工作之后，GPU 可以接着跑；Acquire 的 waitable、FIFO Present 队列满、复用 flight 的 fence，以及
+`EnsureRenderIdle` 仍会挡住 CPU 或让 GPU 等下一帧工作。
 创建、销毁、resize 或修改 output 时，`WindowManager`/output registry 才调用 runner 的
 `EnsureRenderIdle`，排空已发布工作、GPU 引用，并等待 present 队列（D3D12 的 `Present` 在
 frame fence 之后入队，只等 fence 不够）。已挂 swapchain 的 `NativeWindow`

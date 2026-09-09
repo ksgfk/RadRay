@@ -210,9 +210,10 @@ void RenderSystem::ClearTarget(AppFrameContext& ctx, RenderSurfaceFrame& target)
     if (!framebuffer) return;
     TransitionSurface(ctx, target, render::TextureState::RenderTarget);
     const render::ColorClearValue clear{{.08f, .10f, .14f, 1}};
-    auto encoder = ctx.GetCommandBuffer()->BeginRenderPass({pass.Get(), framebuffer.Get(), std::span{&clear, 1}, {}, "Fallback Clear"});
+    render::CommandBuffer* commands = ctx.GetCommandBufferForTexture(target.Texture);
+    auto encoder = commands->BeginRenderPass({pass.Get(), framebuffer.Get(), std::span{&clear, 1}, {}, "Fallback Clear"});
     if (encoder) {
-        ctx.GetCommandBuffer()->EndRenderPass(encoder.Release());
+        commands->EndRenderPass(encoder.Release());
         target.Written = true;
     }
 }
@@ -220,7 +221,7 @@ void RenderSystem::ClearTarget(AppFrameContext& ctx, RenderSurfaceFrame& target)
 void RenderSystem::TransitionSurface(AppFrameContext& ctx, RenderSurfaceFrame& target, render::TextureStates state) {
     if (target.CurrentState == state) return;
     const render::ResourceBarrierDescriptor barrier = render::BarrierTextureDescriptor{.Target = target.Texture, .Before = target.CurrentState, .After = state};
-    ctx.GetCommandBuffer()->ResourceBarrier(std::span{&barrier, 1});
+    ctx.GetCommandBufferForTexture(target.Texture)->ResourceBarrier(std::span{&barrier, 1});
     target.CurrentState = state;
 }
 Scene* RenderSystem::AllocateScene() {

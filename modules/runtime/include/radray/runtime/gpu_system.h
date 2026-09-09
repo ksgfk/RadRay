@@ -98,6 +98,8 @@ struct GpuQueueFrameTrack {
 struct GpuFlightAcquiredTarget {
     AppWindow* Window{nullptr};
     render::SwapChainFrame Frame;
+    /// Acquire 时 Begin，只录写该 HWND current backbuffer 的 pass。Submit 时与 Present 成对 Execute。
+    render::CommandBuffer* Commands{nullptr};
 };
 
 /// runtime 拥有的 per-flight 槽位。代表流水线一条槽位在不同阶段的完整状态，
@@ -109,9 +111,10 @@ struct GpuFlightAcquiredTarget {
 struct GpuFlightSlot {
     using AcquiredTarget = GpuFlightAcquiredTarget;
 
-    // —— 录制态（渲染线程独占）。CmdBuffer 池化复用，
-    //    Targets 收集本帧 acquire 的全部窗口以支持多窗口/多 viewport。
+    // —— 录制态（渲染线程独占）。CmdBuffer 是共享前缀（不写 flip backbuffer）；
+    //    PresentCommandPool 按 acquire 的窗口复用，Targets 收集本帧窗口。
     unique_ptr<render::CommandBuffer> CmdBuffer;
+    vector<unique_ptr<render::CommandBuffer>> PresentCommandPool;
     unique_ptr<render::CommandBuffer> UploadCommands;
     unique_ptr<ResourceUploader> Uploader;
     HostWriteBatch HostWrites;
@@ -298,8 +301,10 @@ public:
     std::chrono::duration<float> LastFrameLatency() const noexcept { return _lastFrameLatency; }
     bool IsInModalLoop() const noexcept { return _isInModalLoop; }
 
-    /// runtime 已 Begin() 的主 command buffer，应用所有录制（含 backbuffer barrier）的落点。
+    /// runtime 已 Begin() 的共享 command buffer：不写 flip backbuffer 的录制落点。
     render::CommandBuffer* GetCommandBuffer() const noexcept;
+    /// 若 texture 是本帧已 acquire 的 backbuffer，返回该 HWND 的 present CB；否则共享 CB。
+    render::CommandBuffer* GetCommandBufferForTexture(render::Texture* texture) const noexcept;
 
     /// 按需获取窗口呈现目标。内部 AcquireNextSwapChainFrame：
     /// RequireRecreate/RetryLater/Error/最小化 → nullopt（应用跳过该窗口）。
@@ -316,8 +321,8 @@ public:
     render::Device* GetDevice() const noexcept;
     GpuSystem* GetGpuSystem() const noexcept { return _gpuSystem; }
 
-    /// 提交并呈现当前帧。runtime 始终注入主 command buffer、flight batch、内部 fence
-    /// 和 swapchain 同步；描述符中的对象仅作为附加提交内容。
+    /// 提交并呈现当前帧。runtime 始终注入共享 CB、per-HWND present CB、flight batch、内部 fence
+    /// 和 swapchain 同步；描述符中的附加 command buffer 与共享工作一起提交，不得写入 flip backbuffer。
     void SubmitFrame(const AppFrameSubmitDescriptor& desc = {});
 
 private:
@@ -373,8 +378,8 @@ public:
     /// Upload commands and staging pages are owned by this flight until its real submit fence.
     void PrepareFrameUploads(uint32_t flightIndex);
 
-    /// 一帧开头：取/建该 flight 的 CommandBuffer 并 Begin()，清空上帧 acquire 的目标。
-    /// 返回供应用在 Render 中使用的帧上下文。
+    /// 一帧开头：取/建该 flight 的共享 CommandBuffer 并 Begin()，清空上帧 acquire 的目标。
+    /// Present command buffer 在 AcquireWindow 时 Begin。返回 Render 用的帧上下文。
     AppFrameContext BeginFrameRecord(
         uint32_t flightIndex,
         std::chrono::duration<float> deltaTime,
@@ -382,8 +387,9 @@ public:
         bool isInModalLoop,
         bool rendered = true);
 
-    /// 一帧收尾：uploader.EndFlight → CmdBuffer.End → 聚合 sync object → Submit
-    /// （acquired 窗口已不可呈现时只提交上传命令）→ 写 flight.Signal → Present 全部 target。
+    /// 一帧收尾：uploader.EndFlight → 结束共享与 per-HWND CB → 聚合 sync object → Submit
+    /// （D3D12 多 HWND 时每窗 Execute 后立刻 Present；其余一次 Submit 再 Present）
+    /// （acquired 窗口已不可呈现时只提交上传命令）→ 写 flight.Signal。
     void EndFrameRecordAndSubmit(uint32_t flightIndex);
 
     FrameUploadScheduler& GetFrameUploadScheduler() noexcept { return *_frameUploadScheduler; }
