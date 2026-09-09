@@ -83,8 +83,7 @@ bool AppendPreparedCommand(const RendererListDesc& desc, const VisiblePrimitive&
     }
     if (out.Commands.size() >= std::numeric_limits<uint32_t>::max()) return false;
     out.Items.push_back({{queue, programFrameId, material, depth, visible.Primitive, batchIndex}, static_cast<uint32_t>(out.Commands.size())});
-    out.Commands.push_back(result.TakeCommand());
-    return true;
+    return result.AppendCommandTo(out.Commands);
 }
 
 void FinishList(const RendererListDesc& desc, RendererList& out) {

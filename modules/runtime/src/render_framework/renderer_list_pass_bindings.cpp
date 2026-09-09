@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <functional>
+#include <utility>
 #include <radray/profiler.h>
 
 namespace radray {
@@ -22,6 +23,7 @@ std::optional<RendererListPassBindings> RendererListPassBindings::Build(
             if (bindings[earlier].Program == binding.Program && bindings[earlier].Group == binding.Group)
                 return fail("RendererListGroupCollision", "A program group has more than one graph parameter set", binding.Group);
     }
+    unordered_map<ShaderProgram*, vector<std::pair<uint32_t, std::string_view>>> requiredByProgram;
     for (const auto& draw : list.Commands) {
         if (!draw.Program) return fail("RendererListProgram", "Draw has no shader program", 0);
         for (size_t index = 0; index < draw.Groups.size(); ++index) {
@@ -32,16 +34,22 @@ std::optional<RendererListPassBindings> RendererListPassBindings::Build(
                 if (binding.Program == draw.Program.Get() && binding.Group == native.Group)
                     return fail("RendererListGroupCollision", "Native and graph parameter sets collide for this program", native.Group);
         }
-        const auto& artifact = draw.Program->GetArtifact().Generic();
-        for (const auto& declaration : artifact.Bindings()) {
-            const auto name = artifact.GetName(declaration.Name);
-            if (!name) continue;
-            const auto info = draw.Program->GetArtifact().FindBindingInfo(*name);
-            if (!info || info->Immutable) continue;
-            const bool native = std::any_of(draw.Groups.begin(), draw.Groups.end(), [&](const auto& value) { return value.Group == info->Group; });
-            const bool graph = std::any_of(bindings.begin(), bindings.end(), [&](const auto& value) { return value.Program == draw.Program.Get() && value.Group == info->Group; });
+        auto [requirements, inserted] = requiredByProgram.try_emplace(draw.Program.Get());
+        if (inserted) {
+            const auto& artifact = draw.Program->GetArtifact().Generic();
+            for (const auto& declaration : artifact.Bindings()) {
+                const auto name = artifact.GetName(declaration.Name);
+                if (!name) continue;
+                const auto info = draw.Program->GetArtifact().FindBindingInfo(*name);
+                if (!info || info->Immutable) continue;
+                requirements->second.emplace_back(info->Group, *name);
+            }
+        }
+        for (const auto& [group, name] : requirements->second) {
+            const bool native = std::any_of(draw.Groups.begin(), draw.Groups.end(), [&](const auto& value) { return value.Group == group; });
+            const bool graph = std::any_of(bindings.begin(), bindings.end(), [&](const auto& value) { return value.Program == draw.Program.Get() && value.Group == group; });
             if (!native && !graph) {
-                builder.Reject("RendererListMissingGroup", "Draw is missing a required native or graph parameter group", *name);
+                builder.Reject("RendererListMissingGroup", "Draw is missing a required native or graph parameter group", name);
                 return std::nullopt;
             }
         }

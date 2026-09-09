@@ -294,6 +294,8 @@ Build 完整恢复 authoring 值。ProgramFrameId 由 builder 每帧分配，不
 `RendererListDesc` 指定所需 pass、闭区间 queue 范围、额外 layer mask、view/culling 和排序方式。
 snapshot 含对齐的 `DrawRecord` 表时，通用 builder 按可见 primitive 的记录范围筛选 pass/queue/layer，再交给
 `MeshPassProcessor::PrepareRecord`；几何与 batch 范围以 `CpuDrawStore::Sync` 写入的 `DrawRecord::Status` 为准，不再在 list 构建时重扫 `MeshBatches`。没有记录表时仍走 `AddMeshBatch`，并继续校验 snapshot 的 batch 范围。同一 `CullingResults` 与 view 的多个 desc 可通过 `BuildRendererLists` 一次校验后按 pass 顺序写出，保持 processor 的 program 局部性；单列表 `BuildRendererList` 是它的薄封装。processor 每 batch 最多输出一条 command，拒绝原因汇总进 `RendererListStats`；无效描述会清空旧 commands。
+`MeshPassDrawListContext::AddCommand` 消费右值候选，`AppendCommandTo` 将其直接移动到最终列表后清空候选；
+重复消费返回 false，消费后也不能再次发布。重复发布或显式拒绝会丢弃未消费候选，不暴露内部 command 引用。
 默认 opaque 范围为 queue < 2500，transparent 为 queue >= 2500。
 `RequireMaterialPass` 使产品必需 pass 的缺失单独计入 `MissingRequiredPass`，与可选 pass 跳过区分。
 `DrawRecord` 不含当前 CB offset 或 graph handle；镜像物体只翻转 `FaceClockwise`，不重建布局。
@@ -341,7 +343,9 @@ graph 命令包装对本 pass 内
 `RendererListPassBindings::Create/Build` 把 graph parameter set 与当前 pass、program、真实 group 关联，
 供同一 `SubmitRendererList` draw loop 合并 native per-view/object/material 组。按 program 逐 draw 绑定，
 不会沿用上一 program 的组；native/graph 冲突、缺组、数组洞、错误 layout 或跨图/跨 pass set 在
-执行前拒绝。不把 Shadow/AO/light-list 等产品字段写入通用 mesh draw executor。
+执行前拒绝。Build 内按 program 复用必需 binding 的反射解析结果，每条 draw 仍独立检查 native/graph
+组完整性、冲突与有效性；复用表只活到本次 Build 返回，不跨帧缓存 graph/pass handle。
+不把 Shadow/AO/light-list 等产品字段写入通用 mesh draw executor。
 `DrawExecutionStats::Succeeded` 是产品判定必需绘制完成的入口；只读深度 attachment 的 PSO 禁止
 depth/stencil 写入，这一访问检查不扩大兼容 PSO key。
 D3D12 在 encoder 结束时绑定 command-buffer-owned 的空 root signature，结束旧 static-data 参数

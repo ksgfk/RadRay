@@ -178,6 +178,10 @@ Opaque、Transparent 三个 `RendererList`。同一 family 内复用 Depth/Lit p
 HDR 多 view 共用一个 lit processor，主相机的三张列表走 `BuildRendererLists`（一次校验后按 pass 顺序写出）。通用 builder 处理 pass/queue/mask、排序与统计；具体
 `ForwardLitMeshPassProcessor` / `DepthOnlyMeshPassProcessor` 解释 shader 契约，准备 per-view/object/material
 bytes 与 frame-local sets，输出只借用资源的 `MeshDrawCommand`。layout 字段在 binding cache 首次解析，热路径不再按名字搜索。
+Lit processor 在首次准备 view 时按 snapshot 数量预留材质、对象和可复用命令模板的稠密表，
+每张表初始预分配最多 1024 项，超出后按需增长；法线缓存只在 program 消费法线时初始化。
+这减少帧内小容器随数组增长而反复搬移的成本，同时限制稀疏大场景的初始预留。
+切换 view 保留容量，Temporal 对象值与模板仍按原有失效规则清空，不跨帧复用资源。
 对象 `NormalToWorld` 按 snapshot primitive 计算一次。render thread 不访问 Scene、proxy、
 CameraComponent、Material、AssetManager 或 StreamingAssetRef。
 

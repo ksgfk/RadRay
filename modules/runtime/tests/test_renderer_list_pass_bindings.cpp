@@ -152,6 +152,13 @@ VK_BINDING(0, 0) ConstantBuffer<Values> ValuesBuffer : register(b0);
         MeshDrawCommand draw;
         draw.Program = program.Get();
         if (scenario == 0) draw.Groups.push_back({0, native.Get(), {}});
+        if (scenario == 2) {
+            // Populate the program requirements with a valid draw before a later draw omits its group.
+            MeshDrawCommand valid;
+            valid.Program = program.Get();
+            valid.Groups.push_back({0, native.Get(), {}});
+            list.Commands.push_back(std::move(valid));
+        }
         list.Commands.push_back(draw);
         auto graph = MakeGraph("invalid bindings");
         auto other = MakeGraph("other graph");
@@ -178,6 +185,7 @@ VK_BINDING(0, 0) ConstantBuffer<Values> ValuesBuffer : register(b0);
         EXPECT_FALSE(called);
         EXPECT_EQ(graph.GetReport().PhysicalAllocations, 0u);
         ASSERT_FALSE(graph.GetReport().Diagnostics.empty());
+        if (scenario == 2) EXPECT_EQ(graph.GetReport().Diagnostics.front().Code, "RendererListMissingGroup");
         EXPECT_FALSE(graph.GetReport().Diagnostics.front().Pass.empty());
         EXPECT_FALSE(graph.GetReport().Diagnostics.front().Binding.empty());
     }

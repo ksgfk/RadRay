@@ -2,6 +2,7 @@
 #include "forward_frame.h"
 
 #include <algorithm>
+#include <radray/profiler.h>
 #include <radray/runtime/render_framework/cpu_draw_record.h>
 
 namespace radray::forward_detail {
@@ -57,6 +58,7 @@ void ForwardLitMeshPassProcessor::PrepareCommand(const RendererListDesc& desc, c
                                                   const MeshBatch& batch, const MaterialPassRenderData& pass,
                                                   RenderQueue queue, bool mirrored, MeshBatchIndex batchIndex,
                                                   bool reuseCommand, MeshPassDrawListContext& out) {
+    RADRAY_PROFILE_SCOPE_N("PrepareCommand");
     auto* program = pass.Program.Get();
     const auto state = ResolveProgram(program);
     if (!state || pass.ParameterGroup != state->Binding->MaterialGroup) {
@@ -66,6 +68,22 @@ void ForwardLitMeshPassProcessor::PrepareCommand(const RendererListDesc& desc, c
     auto& ps = *state.Get();
     const auto& binding = *ps.Binding;
     if (!ps.ViewPrepared) {
+        constexpr size_t kInitialCapacityLimit = 1024;
+        const auto materialCapacity = std::min(scene.Materials.size(), kInitialCapacityLimit);
+        const auto objectCapacity = std::min(scene.Primitives.size(), kInitialCapacityLimit);
+        if (ps.Materials.Slots.size() < materialCapacity) ps.Materials.Slots.resize(materialCapacity, kNoSlot);
+        ps.Materials.Groups.reserve(materialCapacity);
+        if (ps.Objects.Slots.size() < objectCapacity) ps.Objects.Slots.resize(objectCapacity, kNoSlot);
+        ps.Objects.Groups.reserve(objectCapacity);
+        if (reuseCommand && !(ps.ViewDependent() && _temporal)) {
+            const auto templateCapacity = std::min(scene.MeshBatches.size(), kInitialCapacityLimit);
+            if (ps.Templates.Slots.size() < templateCapacity) ps.Templates.Slots.resize(templateCapacity, kNoSlot);
+            ps.Templates.Items.reserve(templateCapacity);
+        }
+        if (ps.NormalToWorld != nullptr && _normalReady.size() < objectCapacity) {
+            _normalReady.resize(objectCapacity, 0);
+            _normals.resize(objectCapacity);
+        }
         ps.ViewPrepared = true;
         ShaderParameterStorage values{ps.Layout, binding.ViewGroup};
         if (FillViewParameters(values, *desc.Culling.Get(), *desc.View.Get(), _lightOverflowWarned,

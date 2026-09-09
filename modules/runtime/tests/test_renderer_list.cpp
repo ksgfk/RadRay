@@ -10,6 +10,61 @@
 namespace radray {
 namespace {
 
+TEST(MeshPassDrawListContext, ConsumesInlineAndSpilledGroupsIntoFinalStorage) {
+    for (uint32_t groupCount : {3u, 5u}) {
+        MeshPassDrawListContext context;
+        MeshDrawCommand command;
+        command.IndexCount = 42;
+        command.FirstIndex = 7;
+        for (uint32_t index = 0; index < groupCount; ++index) {
+            PreparedShaderGroup group;
+            group.Group = index;
+            for (uint32_t offset = 0; offset < groupCount; ++offset)
+                group.DynamicOffsets.push_back({{}, offset * 256});
+            command.Groups.push_back(std::move(group));
+        }
+        vector<MeshDrawCommand> commands(1);
+        commands.front().IndexCount = 9;
+        context.AddCommand(std::move(command));
+        ASSERT_TRUE(context.HasCommand());
+        ASSERT_TRUE(context.AppendCommandTo(commands));
+        EXPECT_FALSE(context.HasCommand());
+        EXPECT_FALSE(context.AppendCommandTo(commands));
+        ASSERT_EQ(commands.size(), 2u);
+        EXPECT_EQ(commands.front().IndexCount, 9u);
+        EXPECT_EQ(commands.back().IndexCount, 42u);
+        EXPECT_EQ(commands.back().FirstIndex, 7u);
+        ASSERT_EQ(commands.back().Groups.size(), groupCount);
+        for (uint32_t index = 0; index < groupCount; ++index) {
+            EXPECT_EQ(commands.back().Groups[index].Group, index);
+            ASSERT_EQ(commands.back().Groups[index].DynamicOffsets.size(), groupCount);
+            for (uint32_t offset = 0; offset < groupCount; ++offset)
+                EXPECT_EQ(commands.back().Groups[index].DynamicOffsets[offset].Offset, offset * 256);
+        }
+        context.AddCommand(MeshDrawCommand{});
+        EXPECT_FALSE(context.HasCommand());
+        EXPECT_FALSE(context.AppendCommandTo(commands));
+        EXPECT_EQ(context.Reason(), MeshPassRejectReason::ProcessorRejected);
+    }
+}
+
+TEST(MeshPassDrawListContext, RejectAndDuplicatePublicationDiscardCandidate) {
+    vector<MeshDrawCommand> commands;
+    MeshPassDrawListContext duplicate;
+    duplicate.AddCommand(MeshDrawCommand{});
+    duplicate.AddCommand(MeshDrawCommand{});
+    EXPECT_FALSE(duplicate.HasCommand());
+    EXPECT_FALSE(duplicate.AppendCommandTo(commands));
+    MeshPassDrawListContext rejected;
+    rejected.AddCommand(MeshDrawCommand{});
+    rejected.Reject(MeshPassRejectReason::InvalidBindings);
+    EXPECT_FALSE(rejected.AppendCommandTo(commands));
+    EXPECT_EQ(rejected.Reason(), MeshPassRejectReason::InvalidBindings);
+    rejected.AddCommand(MeshDrawCommand{});
+    EXPECT_FALSE(rejected.HasCommand());
+    EXPECT_TRUE(commands.empty());
+}
+
 class RecordingProcessor final : public MeshPassProcessor {
 public:
     uint32_t Calls{0};
