@@ -1,6 +1,8 @@
 #pragma once
 
 #include "forward_bindings.h"
+#include <algorithm>
+#include <limits>
 #include <radray/runtime/render_framework/frame_draw_resources.h>
 #include <radray/runtime/render_framework/mesh_pass_processor.h>
 #include <radray/runtime/render_framework/render_pipeline.h>
@@ -16,11 +18,15 @@ public:
         : _resources(resources), _bindings(bindings), _lightOverflowWarned(lightOverflowWarned), _temporal(temporal) {}
     void AddMeshBatch(const RendererListDesc& desc, const RenderSceneSnapshot& scene,
                       const MeshBatch& batch, MeshPassDrawListContext& out) override;
+    void PrepareRecord(const RendererListDesc& desc, const RenderSceneSnapshot& scene,
+                       const DrawRecord& record, MeshPassDrawListContext& out) override;
 
     // Call before reusing this processor for a list whose view differs from the previous one.
     // Drops view-group preparations and object preparations that depend on the view (motion vectors);
     // material groups and view-independent object groups are kept.
     void ResetView() noexcept;
+    uint64_t DuplicateSameFramePreparations() const noexcept { return _duplicatePreparations; }
+    uint64_t ObjectMathComputes() const noexcept { return _objectMathComputes; }
 
 private:
     static constexpr uint32_t kNoSlot = std::numeric_limits<uint32_t>::max();
@@ -58,6 +64,9 @@ private:
         bool ViewDependent() const noexcept { return PreviousLocalToWorld != nullptr; }
     };
     Nullable<ProgramState*> ResolveProgram(ShaderProgram* program);
+    const Eigen::Matrix4f& CachedNormalToWorld(RenderPrimitiveIndex primitive, const Eigen::Matrix4f& localToWorld);
+    void PrepareCommand(const RendererListDesc& desc, const RenderSceneSnapshot& scene, const MeshBatch& batch,
+                         const MaterialPassRenderData& pass, RenderQueue queue, bool mirrored, MeshPassDrawListContext& out);
 
     FrameDrawResources& _resources;
     ForwardBindingCache& _bindings;
@@ -67,6 +76,10 @@ private:
     unordered_map<ShaderProgram*, unique_ptr<ProgramState>> _programs;
     ShaderProgram* _lastProgram{nullptr};
     ProgramState* _lastState{nullptr};
+    vector<uint8_t> _normalReady;
+    vector<Eigen::Matrix4f> _normals;
+    uint64_t _duplicatePreparations{0};
+    uint64_t _objectMathComputes{0};
 };
 
 }  // namespace radray::forward_detail

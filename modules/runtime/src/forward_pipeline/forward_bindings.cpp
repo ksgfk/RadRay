@@ -32,7 +32,12 @@ std::optional<ForwardProgramBindings> ResolveProgramBindings(const ShaderProgram
         *view, *material, *object,
         layout.Buffers()[*view].Group,
         layout.Buffers()[*material].Group,
-        layout.Buffers()[*object].Group, passGroup};
+        layout.Buffers()[*object].Group, passGroup,
+        layout.Find("ForwardObject.LocalToWorld"),
+        layout.Find("ForwardObject.NormalToWorld"),
+        layout.Find("ForwardObject.PreviousLocalToWorld"),
+        layout.Find("ForwardObject.MotionValid"),
+        layout.Find("ForwardView.ViewProj")};
     if (bindings.ViewGroup == bindings.MaterialGroup ||
         bindings.ViewGroup == bindings.ObjectGroup ||
         bindings.MaterialGroup == bindings.ObjectGroup) {
@@ -63,6 +68,7 @@ std::optional<ForwardProgramBindings> ResolveProgramBindings(const ShaderProgram
 Nullable<const ForwardProgramBindings*> ForwardBindingCache::Resolve(ShaderProgram* program) {
     auto found = _programs.find(program);
     if (found == _programs.end()) {
+        ++_layoutParses;
         found = _programs.emplace(program, ResolveProgramBindings(*program)).first;
         if (!found->second.has_value()) {
             RADRAY_ERR_LOG("forward pipeline rejected an incompatible shader program");
@@ -92,12 +98,15 @@ std::optional<DepthOnlyProgramBindings> ResolveDepthOnlyProgramBindings(const Sh
     for (const auto& parameter : program.GetParameterLayout().Parameters()) {
         if (parameter.Info.Kind == ShaderParameterKind::Texture || parameter.Info.Kind == ShaderParameterKind::Sampler) return std::nullopt;
     }
-    return DepthOnlyProgramBindings{*view, *object, buffers[*view].Group, buffers[*object].Group};
+    const auto& layout = program.GetParameterLayout();
+    return DepthOnlyProgramBindings{*view, *object, buffers[*view].Group, buffers[*object].Group,
+                                     layout.Find("ForwardView.ViewProj"), layout.Find("ForwardObject.LocalToWorld")};
 }
 
 Nullable<const DepthOnlyProgramBindings*> DepthOnlyBindingCache::Resolve(ShaderProgram* program) {
     auto found = _programs.find(program);
     if (found == _programs.end()) {
+        ++_layoutParses;
         found = _programs.emplace(program, ResolveDepthOnlyProgramBindings(*program)).first;
         if (!found->second) RADRAY_ERR_LOG("DepthOnly rejected an incompatible shader program; its depth draws are disabled");
     }

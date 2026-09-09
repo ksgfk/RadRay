@@ -14,6 +14,8 @@ void RenderSceneSnapshot::ResetForReuse() noexcept {
     MeshBatches.clear();
     Materials.clear();
     Lights.clear();
+    DrawRecords.clear();
+    PrimitiveDrawBegin.clear();
     Stats = {};
     Stats.PrimitiveHighWatermark = previous.PrimitiveHighWatermark;
     Stats.BatchHighWatermark = previous.BatchHighWatermark;
@@ -127,10 +129,18 @@ bool RenderSceneSnapshotBuilder::Build(const Scene& scene, RenderSceneSnapshot& 
         }
         if (primitiveCount == next.Primitives.size()) next.Primitives.emplace_back();
         auto& primitive = next.Primitives[primitiveCount];
+        primitive.Id = scene.GetPrimitiveId(proxy.get());
         const uint64_t transformRevision = proxy->GetTransformRevision();
+        const Eigen::Matrix4f localToWorld = proxy->GetLocalToWorld();
         if (rebuild || transformRevision == 0 || primitive.Generation != generation ||
             primitive.RenderDataRevision != revision || primitive.TransformRevision != transformRevision) {
-            primitive.LocalToWorld = proxy->GetLocalToWorld();
+            if (!rebuild && primitive.Generation == generation && primitive.RenderDataRevision == revision &&
+                (primitive.LocalToWorld.array() == localToWorld.array()).all()) {
+                ++next.Stats.EqualValueIgnored;
+            } else {
+                ++next.Stats.AppliedTransforms;
+            }
+            primitive.LocalToWorld = localToWorld;
             primitive.WorldBounds = TransformBounds(cachedPrimitive.LocalBounds, primitive.LocalToWorld);
             ++next.Stats.PrimitiveBoundsRebuilt;
         } else {
@@ -236,6 +246,7 @@ bool RenderSceneSnapshotBuilder::Build(const Scene& scene, RenderSceneSnapshot& 
     next.Stats.Materials = next.Materials.size();
     next.Stats.Lights = next.Lights.size();
     next.Stats.RetainedAssets = retainedAssets.size() - ownerStart;
+    if (!_draws.Sync(next)) return false;
     next.Stats.PrimitiveHighWatermark = std::max(next.Stats.PrimitiveHighWatermark, next.Primitives.capacity());
     next.Stats.BatchHighWatermark = std::max(next.Stats.BatchHighWatermark, next.MeshBatches.capacity());
     next.Stats.MaterialHighWatermark = std::max(next.Stats.MaterialHighWatermark, next.Materials.capacity());

@@ -166,6 +166,7 @@ struct RenderGraphExecutionReport {
     uint32_t TransitionBarriers{0}, UavBarriers{0};
     uint32_t ReusedResources{0}, MergedRasterPasses{0}, DiscardedStores{0}, BarrierBatches{0};
     uint32_t GraphicsPipelineRequests{0}, GraphicsPipelinePreparations{0}, GraphicsPipelineCreations{0};
+    bool CompilePlanReused{false};
     RenderResourcePoolStats Pool;
     vector<RenderGraphPassReport> Passes;
     vector<RenderGraphResourceReport> Resources;

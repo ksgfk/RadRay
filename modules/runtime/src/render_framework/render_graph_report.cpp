@@ -34,8 +34,8 @@ string Indices(std::span<const uint32_t> values) {
 }  // namespace
 
 string RenderGraphExecutionReport::ToJson() const {
-    string result = fmt::format("{{\"name\":{},\"declaredPasses\":{},\"livePasses\":{},\"culledPasses\":{},\"textures\":{},\"buffers\":{},\"physicalAllocations\":{},\"transitionBarriers\":{},\"uavBarriers\":{},\"passes\":[",
-                                Quote(Name), DeclaredPasses, LivePasses, CulledPasses, Textures, Buffers, PhysicalAllocations, TransitionBarriers, UavBarriers);
+    string result = fmt::format("{{\"name\":{},\"declaredPasses\":{},\"livePasses\":{},\"culledPasses\":{},\"compilePlanReused\":{},\"textures\":{},\"buffers\":{},\"physicalAllocations\":{},\"transitionBarriers\":{},\"uavBarriers\":{},\"passes\":[",
+                                Quote(Name), DeclaredPasses, LivePasses, CulledPasses, CompilePlanReused ? "true" : "false", Textures, Buffers, PhysicalAllocations, TransitionBarriers, UavBarriers);
     for (size_t i = 0; i < Passes.size(); ++i) {
         const auto& p = Passes[i];
         if (i) result += ',';
@@ -111,7 +111,8 @@ string RenderGraphExecutionReport::ToDot() const {
 }
 
 string RenderGraphExecutionReport::ToText() const {
-    string result = fmt::format("Graph {}: {} live / {} declared, {} culled; {} transitions, {} UAV barriers\n", Name, LivePasses, DeclaredPasses, CulledPasses, TransitionBarriers, UavBarriers);
+    string result = fmt::format("Graph {}: {} live / {} declared, {} culled, compile plan {}; {} transitions, {} UAV barriers\n",
+                                Name, LivePasses, DeclaredPasses, CulledPasses, CompilePlanReused ? "reused" : "compiled", TransitionBarriers, UavBarriers);
     for (size_t p = 0; p < Passes.size(); ++p) {
         const auto& pass = Passes[p];
         result += fmt::format("  [{}] {} {} {} ({}) at {}:{}\n", p, pass.Live ? "live" : "culled", EnumName(pass.Type), pass.Name, pass.LivenessReason, pass.File, pass.Line);

@@ -12,6 +12,13 @@ public:
         : _resources(resources), _bindings(bindings) {}
     void AddMeshBatch(const RendererListDesc& desc, const RenderSceneSnapshot& scene,
                       const MeshBatch& batch, MeshPassDrawListContext& out) override;
+    void PrepareRecord(const RendererListDesc& desc, const RenderSceneSnapshot& scene,
+                       const DrawRecord& record, MeshPassDrawListContext& out) override;
+    void ResetView() noexcept;
+
+private:
+    void PrepareCommand(const RendererListDesc& desc, const RenderSceneSnapshot& scene, const MeshBatch& batch,
+                         const MaterialPassRenderData& pass, bool mirrored, MeshPassDrawListContext& out);
 
 private:
     struct ObjectPreparation {

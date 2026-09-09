@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdint>
 #include <cstring>
 #include <limits>
 #include <type_traits>
@@ -108,7 +109,29 @@ struct GraphCompileWorkspace {
     vector<vector<vector<uint32_t>>> Producers;
     vector<vector<vector<uint8_t>>> Initialized;
     vector<uint32_t> Roots;
+    struct PlanCache {
+        uint64_t Hash{0};
+        uint32_t ResourceCount{0};
+        vector<RgResourceVersionNode> Versions;
+        vector<RgExecutionNode> Nodes;
+        vector<uint32_t> Roots;
+        RenderGraphCompileOptions Options{};
+        CompiledRenderGraph Result;
+        uint64_t Hits{0}, Misses{0};
+        bool Occupied{false};
+    } Cache;
 };
+
+void PlotGraphCpuStats(const RenderGraphExecutionReport& report) {
+    RADRAY_PROFILE_PLOT("RG.DeclaredPasses", static_cast<int64_t>(report.DeclaredPasses));
+    RADRAY_PROFILE_PLOT("RG.LivePasses", static_cast<int64_t>(report.LivePasses));
+    RADRAY_PROFILE_PLOT("RG.CompilePlanReused", report.CompilePlanReused ? int64_t{1} : int64_t{0});
+    RADRAY_PROFILE_PLOT("RG.PhysicalAllocations", static_cast<int64_t>(report.PhysicalAllocations));
+    RADRAY_PROFILE_PLOT("RG.GraphicsPipelinePreparations", static_cast<int64_t>(report.GraphicsPipelinePreparations));
+    RADRAY_PROFILE_PLOT("RG.GraphicsPipelineCreations", static_cast<int64_t>(report.GraphicsPipelineCreations));
+    RADRAY_PROFILE_PLOT("RG.MergedRasterPasses", static_cast<int64_t>(report.MergedRasterPasses));
+    RADRAY_PROFILE_PLOT("RG.BarrierBatches", static_cast<int64_t>(report.BarrierBatches));
+}
 }  // namespace
 
 struct RenderGraphFrameResources::Impl {
@@ -1696,91 +1719,121 @@ void RenderGraph::Impl::Cull() {
     auto& values = workspace.Values;
     auto& producers = workspace.Producers;
     auto& initialized = workspace.Initialized;
-    versions.clear();
-    nodes.resize(Passes.size());
-    for (auto& node : nodes) {
-        node.Reads.clear();
-        node.Writes.clear();
-    }
-    values.resize(Resources.size());
-    producers.resize(Resources.size());
-    initialized.resize(Resources.size());
-    for (uint32_t r = 0; r < Resources.size(); ++r) {
-        const auto count = Resources[r].VersionParents.size();
-        values[r].resize(count);
-        producers[r].resize(count);
-        initialized[r].resize(count);
-        for (auto& cells : producers[r]) cells.assign(Resources[r].CellCount(), InvalidIndex);
-        for (auto& cells : initialized[r]) cells.assign(Resources[r].CellCount(), 0);
-    }
-    for (uint32_t p = 0; p < Passes.size(); ++p) {
-        nodes[p].SideEffect = Passes[p].SideEffect;
-        for (const auto& access : Passes[p].Cells) {
-            if (access.Version >= values[access.Resource].size() || (access.Write && access.Version == 0)) {
-                Error("InvalidVersion", "Access references an unknown version or writes an imported initial value; reserve a successor with NextVersion", p, access.Resource);
-                continue;
-            }
-            if (!access.Write) continue;
-            auto& producer = producers[access.Resource][access.Version][access.Cell];
-            if (producer != InvalidIndex && producer != p)
-                Error("MultipleProducers", "A content version/range can have only one producer; reserve a successor with NextVersion", p, access.Resource);
-            producer = p;
-            initialized[access.Resource][access.Version][access.Cell] = access.ValidAfter ? 1 : 0;
+    uint64_t hash = 0;
+    {
+        RADRAY_PROFILE_SCOPE_N("RenderGraph::BuildIR");
+        versions.clear();
+        nodes.resize(Passes.size());
+        for (auto& node : nodes) {
+            node.Reads.clear();
+            node.Writes.clear();
         }
-    }
-    if (!Report.Diagnostics.empty()) return;
-    for (uint32_t r = 0; r < Resources.size(); ++r) {
-        const auto& resource = Resources[r];
-        for (uint32_t v = 0; v < values[r].size(); ++v) {
-            auto& cells = values[r][v];
-            cells.resize(resource.CellCount());
-            for (uint32_t c = 0; c < resource.CellCount(); ++c) {
-                const uint32_t predecessor = v == 0 ? InvalidIndex : values[r][resource.VersionParents[v]][c];
-                const uint32_t producer = producers[r][v][c];
-                if (v != 0 && producer == InvalidIndex) {
-                    cells[c] = predecessor;
+        values.resize(Resources.size());
+        producers.resize(Resources.size());
+        initialized.resize(Resources.size());
+        for (uint32_t r = 0; r < Resources.size(); ++r) {
+            const auto count = Resources[r].VersionParents.size();
+            values[r].resize(count);
+            producers[r].resize(count);
+            initialized[r].resize(count);
+            for (auto& cells : producers[r]) cells.assign(Resources[r].CellCount(), InvalidIndex);
+            for (auto& cells : initialized[r]) cells.assign(Resources[r].CellCount(), 0);
+        }
+        for (uint32_t p = 0; p < Passes.size(); ++p) {
+            nodes[p].SideEffect = Passes[p].SideEffect;
+            for (const auto& access : Passes[p].Cells) {
+                if (access.Version >= values[access.Resource].size() || (access.Write && access.Version == 0)) {
+                    Error("InvalidVersion", "Access references an unknown version or writes an imported initial value; reserve a successor with NextVersion", p, access.Resource);
                     continue;
                 }
-                cells[c] = static_cast<uint32_t>(versions.size());
-                versions.push_back({r, c, v, producer, predecessor, v == 0 ? resource.Valid[c] != 0 : initialized[r][v][c] != 0});
+                if (!access.Write) continue;
+                auto& producer = producers[access.Resource][access.Version][access.Cell];
+                if (producer != InvalidIndex && producer != p)
+                    Error("MultipleProducers", "A content version/range can have only one producer; reserve a successor with NextVersion", p, access.Resource);
+                producer = p;
+                initialized[access.Resource][access.Version][access.Cell] = access.ValidAfter ? 1 : 0;
             }
         }
-    }
-    for (uint32_t p = 0; p < Passes.size(); ++p) {
-        for (const auto& access : Passes[p].Cells) {
-            const auto& resource = Resources[access.Resource];
-            const auto version = access.Write ? resource.VersionParents[access.Version] : access.Version;
-            if (access.Read) AddUnique(nodes[p].Reads, values[access.Resource][version][access.Cell]);
-            if (access.Write) AddUnique(nodes[p].Writes, values[access.Resource][access.Version][access.Cell]);
+        if (!Report.Diagnostics.empty()) return;
+        for (uint32_t r = 0; r < Resources.size(); ++r) {
+            const auto& resource = Resources[r];
+            for (uint32_t v = 0; v < values[r].size(); ++v) {
+                auto& cells = values[r][v];
+                cells.resize(resource.CellCount());
+                for (uint32_t c = 0; c < resource.CellCount(); ++c) {
+                    const uint32_t predecessor = v == 0 ? InvalidIndex : values[r][resource.VersionParents[v]][c];
+                    const uint32_t producer = producers[r][v][c];
+                    if (v != 0 && producer == InvalidIndex) {
+                        cells[c] = predecessor;
+                        continue;
+                    }
+                    cells[c] = static_cast<uint32_t>(versions.size());
+                    versions.push_back({r, c, v, producer, predecessor, v == 0 ? resource.Valid[c] != 0 : initialized[r][v][c] != 0});
+                }
+            }
         }
+        for (uint32_t p = 0; p < Passes.size(); ++p) {
+            for (const auto& access : Passes[p].Cells) {
+                const auto& resource = Resources[access.Resource];
+                const auto version = access.Write ? resource.VersionParents[access.Version] : access.Version;
+                if (access.Read) AddUnique(nodes[p].Reads, values[access.Resource][version][access.Cell]);
+                if (access.Write) AddUnique(nodes[p].Writes, values[access.Resource][access.Version][access.Cell]);
+            }
+        }
+        auto& roots = workspace.Roots;
+        roots.clear();
+        for (uint32_t r = 0; r < Resources.size(); ++r)
+            if (Resources[r].ExternalAccess == RenderGraphExternalAccess::ObservableOutput)
+                for (const auto v : values[r].back())
+                    if (versions[v].Producer != InvalidIndex) roots.push_back(v);
+        hash = HashRenderGraphCompileInput(static_cast<uint32_t>(Resources.size()), versions, nodes, roots, Options);
     }
+    auto& cache = workspace.Cache;
     auto& roots = workspace.Roots;
-    roots.clear();
-    for (uint32_t r = 0; r < Resources.size(); ++r)
-        if (Resources[r].ExternalAccess == RenderGraphExternalAccess::ObservableOutput)
-            for (const auto v : values[r].back())
-                if (versions[v].Producer != InvalidIndex) roots.push_back(v);
-    CompiledGraph = CompileRenderGraph(static_cast<uint32_t>(Resources.size()), versions, nodes, roots, Options, workspace.Compiler);
-    for (const auto& diagnostic : CompiledGraph.Diagnostics)
-        Error(diagnostic.Code, diagnostic.Message, diagnostic.Pass, diagnostic.Resource);
-    for (uint32_t p = 0; p < Passes.size(); ++p) {
-        const auto& compiled = CompiledGraph.Passes[p];
-        auto& report = Report.Passes[p];
-        report.Live = compiled.Live;
-        report.DataDependencies = compiled.DataDependencies;
-        report.HazardDependencies = compiled.HazardDependencies;
-        report.LivenessReason = compiled.LivenessReason;
-        report.Reads = compiled.Reads;
-        report.Writes = compiled.Writes;
-        if (compiled.Live) ++Report.LivePasses;
+    if (Options.ReuseCompiledPlan && cache.Occupied && cache.Hash == hash &&
+        EqualRenderGraphCompileInput(static_cast<uint32_t>(Resources.size()), versions, nodes, roots, Options,
+                                      cache.ResourceCount, cache.Versions, cache.Nodes, cache.Roots, cache.Options)) {
+        RADRAY_PROFILE_SCOPE_N("RenderGraph::CompilePlanHit");
+        CompiledGraph = cache.Result;
+        ++cache.Hits;
+        Report.CompilePlanReused = true;
+    } else {
+        RADRAY_PROFILE_SCOPE_N("RenderGraph::CompilePlanMiss");
+        CompiledGraph = CompileRenderGraph(static_cast<uint32_t>(Resources.size()), versions, nodes, roots, Options, workspace.Compiler);
+        cache.Hash = hash;
+        cache.ResourceCount = static_cast<uint32_t>(Resources.size());
+        cache.Versions = versions;
+        cache.Nodes = nodes;
+        cache.Roots = roots;
+        cache.Options = Options;
+        cache.Result = CompiledGraph;
+        cache.Occupied = true;
+        ++cache.Misses;
+        Report.CompilePlanReused = false;
     }
-    for (uint32_t r = 0; r < Resources.size(); ++r) {
-        Report.Resources[r].FirstUse = CompiledGraph.Lifetimes[r].FirstUse;
-        Report.Resources[r].LastUse = CompiledGraph.Lifetimes[r].LastUse;
+    {
+        RADRAY_PROFILE_SCOPE_N("RenderGraph::ApplyCompiledPlan");
+        for (const auto& diagnostic : CompiledGraph.Diagnostics)
+            Error(diagnostic.Code, diagnostic.Message, diagnostic.Pass, diagnostic.Resource);
+        for (uint32_t p = 0; p < Passes.size(); ++p) {
+            const auto& compiled = CompiledGraph.Passes[p];
+            auto& report = Report.Passes[p];
+            report.Live = compiled.Live;
+            report.DataDependencies = compiled.DataDependencies;
+            report.HazardDependencies = compiled.HazardDependencies;
+            report.LivenessReason = compiled.LivenessReason;
+            report.Reads = compiled.Reads;
+            report.Writes = compiled.Writes;
+            if (compiled.Live) ++Report.LivePasses;
+        }
+        for (uint32_t r = 0; r < Resources.size(); ++r) {
+            Report.Resources[r].FirstUse = CompiledGraph.Lifetimes[r].FirstUse;
+            Report.Resources[r].LastUse = CompiledGraph.Lifetimes[r].LastUse;
+        }
+        Report.Versions = CompiledGraph.Versions;
+        Report.ExecutionOrder = CompiledGraph.ExecutionOrder;
+        Report.CulledPasses = Report.DeclaredPasses - Report.LivePasses;
     }
-    Report.Versions = CompiledGraph.Versions;
-    Report.ExecutionOrder = CompiledGraph.ExecutionOrder;
-    Report.CulledPasses = Report.DeclaredPasses - Report.LivePasses;
 }
 
 void RenderGraph::SetCompileOptions(RenderGraphCompileOptions options) {
@@ -1793,38 +1846,42 @@ bool RenderGraph::Compile() {
     auto& impl = *_impl;
     if (impl.Frozen) return impl.Compiled && impl.Report.Diagnostics.empty();
     impl.Frozen = true;
-    if (!impl.ResolvePorts()) return false;
-    impl.Report.DeclaredPasses = static_cast<uint32_t>(impl.Passes.size());
-    for (auto& resource : impl.Resources)
-        if (!resource.IsTexture) resource.BufferBoundaries = {0, resource.BufferDesc.Size};
-    for (auto& pass : impl.Passes)
-        for (auto& access : pass.Accesses) {
-            auto& resource = impl.Resources[access.Resource];
-            if (resource.IsTexture) continue;
-            const uint64_t size = resource.BufferDesc.Size;
-            if (access.Bytes.Offset > size) {
-                impl.Error("BufferRange", "Buffer range starts outside resource", InvalidIndex, access.Resource);
-                continue;
+    {
+        RADRAY_PROFILE_SCOPE_N("RenderGraph::Validate");
+        if (!impl.ResolvePorts()) return false;
+        impl.Report.DeclaredPasses = static_cast<uint32_t>(impl.Passes.size());
+        for (auto& resource : impl.Resources)
+            if (!resource.IsTexture) resource.BufferBoundaries = {0, resource.BufferDesc.Size};
+        for (auto& pass : impl.Passes)
+            for (auto& access : pass.Accesses) {
+                auto& resource = impl.Resources[access.Resource];
+                if (resource.IsTexture) continue;
+                const uint64_t size = resource.BufferDesc.Size;
+                if (access.Bytes.Offset > size) {
+                    impl.Error("BufferRange", "Buffer range starts outside resource", InvalidIndex, access.Resource);
+                    continue;
+                }
+                if (access.Bytes.Size == render::BufferRange::All()) access.Bytes.Size = size - access.Bytes.Offset;
+                if (access.Bytes.Size == 0 || access.Bytes.Size > size - access.Bytes.Offset) {
+                    impl.Error("BufferRange", "Buffer range is empty or outside resource", InvalidIndex, access.Resource);
+                    continue;
+                }
+                resource.BufferBoundaries.push_back(access.Bytes.Offset);
+                resource.BufferBoundaries.push_back(access.Bytes.Offset + access.Bytes.Size);
             }
-            if (access.Bytes.Size == render::BufferRange::All()) access.Bytes.Size = size - access.Bytes.Offset;
-            if (access.Bytes.Size == 0 || access.Bytes.Size > size - access.Bytes.Offset) {
-                impl.Error("BufferRange", "Buffer range is empty or outside resource", InvalidIndex, access.Resource);
-                continue;
-            }
-            resource.BufferBoundaries.push_back(access.Bytes.Offset);
-            resource.BufferBoundaries.push_back(access.Bytes.Offset + access.Bytes.Size);
+        for (auto& resource : impl.Resources) {
+            auto& boundaries = resource.BufferBoundaries;
+            std::sort(boundaries.begin(), boundaries.end());
+            boundaries.erase(std::unique(boundaries.begin(), boundaries.end()), boundaries.end());
         }
-    for (auto& resource : impl.Resources) {
-        auto& boundaries = resource.BufferBoundaries;
-        std::sort(boundaries.begin(), boundaries.end());
-        boundaries.erase(std::unique(boundaries.begin(), boundaries.end()), boundaries.end());
+        if (!impl.Report.Diagnostics.empty() || !impl.ValidateResources() || !impl.NormalizePasses()) return false;
+        for (uint32_t p = 0; p < impl.Passes.size(); ++p)
+            for (const auto& access : impl.Passes[p].Accesses)
+                impl.Report.Passes[p].Accesses.push_back({access.Resource, access.Version, access.State, access.Range, access.Bytes, access.Stages, access.Read, access.Write});
     }
-    if (!impl.Report.Diagnostics.empty() || !impl.ValidateResources() || !impl.NormalizePasses()) return false;
-    for (uint32_t p = 0; p < impl.Passes.size(); ++p)
-        for (const auto& access : impl.Passes[p].Accesses)
-            impl.Report.Passes[p].Accesses.push_back({access.Resource, access.Version, access.State, access.Range, access.Bytes, access.Stages, access.Read, access.Write});
     impl.Cull();
     if (impl.Report.Diagnostics.empty()) {
+        RADRAY_PROFILE_SCOPE_N("RenderGraph::Optimize");
         impl.PlanStorage();
         impl.OptimizeRaster();
         impl.BuildExecutionPlan();
@@ -2064,18 +2121,23 @@ bool RenderGraph::Impl::Realize() {
 bool RenderGraph::Prepare() {
     RADRAY_PROFILE_SCOPE_N("RenderGraph::Prepare");
     auto& impl = *_impl;
-    for (uint32_t p : impl.CompiledGraph.ExecutionOrder) {
-        auto& pass = impl.Passes[p];
-        if (pass.UploadBytes.empty()) continue;
-        auto& resource = impl.Resources[pass.Accesses.front().Resource];
-        ScopedBufferMap map{resource.NativeBuffer(), {0, pass.UploadBytes.size()}};
-        if (!map) {
-            impl.Error("UploadMap", "Graph upload buffer mapping failed before recording", p);
-            return false;
+    {
+        RADRAY_PROFILE_SCOPE_N("RenderGraph::PrepareUploads");
+        for (uint32_t p : impl.CompiledGraph.ExecutionOrder) {
+            auto& pass = impl.Passes[p];
+            if (pass.UploadBytes.empty()) continue;
+            auto& resource = impl.Resources[pass.Accesses.front().Resource];
+            ScopedBufferMap map{resource.NativeBuffer(), {0, pass.UploadBytes.size()}};
+            if (!map) {
+                impl.Error("UploadMap", "Graph upload buffer mapping failed before recording", p);
+                return false;
+            }
+            std::memcpy(map.Data(), pass.UploadBytes.data(), pass.UploadBytes.size());
         }
-        std::memcpy(map.Data(), pass.UploadBytes.data(), pass.UploadBytes.size());
     }
-    for (auto& value : impl.GraphicsPrograms) {
+    {
+        RADRAY_PROFILE_SCOPE_N("RenderGraph::PreparePipelines");
+        for (auto& value : impl.GraphicsPrograms) {
         if (!impl.Report.Passes[value.Pass].Live) continue;
         const auto before = value.Program->GetGraphicsPipelineStateCount();
         value.PipelineState = value.Program->GetOrCreateGraphicsPipelineState(value.State, value.Layout, value.Topology,
@@ -2095,8 +2157,11 @@ bool RenderGraph::Prepare() {
             return false;
         }
     }
+    }
 
-    const bool hasLiveParameters = std::any_of(
+    {
+        RADRAY_PROFILE_SCOPE_N("RenderGraph::PrepareParameters");
+        const bool hasLiveParameters = std::any_of(
         impl.ParameterSets.begin(), impl.ParameterSets.end(),
         [&](const Impl::ParameterSet& value) { return impl.Report.Passes[value.Pass].Live; });
     if (!hasLiveParameters) return true;
@@ -2233,6 +2298,7 @@ bool RenderGraph::Prepare() {
         frame.Sets.push_back(std::move(set));
         frame.SetCache.emplace(std::move(key), parameterSet.Native.Get());
     }
+    }
     return true;
 }
 
@@ -2311,6 +2377,7 @@ void RenderGraph::Impl::PlanBarriers() {
 }
 
 RenderGraphExecutionResult RenderGraph::Execute(render::CommandBuffer& command) {
+    RADRAY_PROFILE_SCOPE_N("RenderGraph::Execute");
     auto& impl = *_impl;
     if (impl.Executed) {
         impl.Error("AlreadyExecuted", "A graph may execute only once");
@@ -2322,11 +2389,16 @@ RenderGraphExecutionResult RenderGraph::Execute(render::CommandBuffer& command) 
             if (pass.Ticket._state) pass.Ticket._state->Cancel();
         impl.Pool.EndGraph();
         impl.Report.Pool = impl.Pool.GetStats();
+        PlotGraphCpuStats(impl.Report);
         return {};
     }
-    RADRAY_PROFILE_SCOPE_N("RenderGraph::Record");
-    impl.PlanBarriers();
+    {
+        RADRAY_PROFILE_SCOPE_N("RenderGraph::PlanBarriers");
+        impl.PlanBarriers();
+    }
     RenderGraphExecutionResult result{true, false, {}};
+    {
+        RADRAY_PROFILE_SCOPE_N("RenderGraph::Record");
     Nullable<unique_ptr<render::GraphicsCommandEncoder>> rasterEncoder{nullptr};
     for (size_t order = 0; order < impl.CompiledGraph.ExecutionOrder.size(); ++order) {
         const uint32_t p = impl.CompiledGraph.ExecutionOrder[order];
@@ -2420,8 +2492,10 @@ RenderGraphExecutionResult RenderGraph::Execute(render::CommandBuffer& command) 
         retained->Submit(serial);
     };
     result.Submission->OnCompleted = [retained = std::move(submission.Retained), serial](bool success) { retained->Complete(serial, success); };
+    }
     impl.Pool.EndGraph();
     impl.Report.Pool = impl.Pool.GetStats();
+    PlotGraphCpuStats(impl.Report);
     return result;
 }
 

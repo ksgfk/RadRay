@@ -59,6 +59,7 @@ struct PreparedRendererList {
     };
     RgPassHandle Pass;
     vector<Draw> Draws;
+    uint64_t UniqueBufferReads{0};
 };
 
 bool ValidateMeshGeometry(const GpuMesh::DrawData& geometry, uint32_t firstIndex, uint32_t indexCount) noexcept;

@@ -2,6 +2,7 @@
 #include "forward_frame.h"
 
 #include <algorithm>
+#include <radray/runtime/render_framework/cpu_draw_record.h>
 
 namespace radray::forward_detail {
 
@@ -10,10 +11,10 @@ ForwardLitMeshPassProcessor::ProgramState::ProgramState(ShaderProgram* program, 
       Binding(binding),
       Layout(&program->GetParameterLayout()),
       ObjectValues(Layout, binding->ObjectGroup),
-      LocalToWorld(Layout->Find("ForwardObject.LocalToWorld")),
-      NormalToWorld(Layout->Find("ForwardObject.NormalToWorld")),
-      PreviousLocalToWorld(Layout->Find("ForwardObject.PreviousLocalToWorld")),
-      MotionValid(Layout->Find("ForwardObject.MotionValid")) {}
+      LocalToWorld(binding->LocalToWorld),
+      NormalToWorld(binding->NormalToWorld),
+      PreviousLocalToWorld(binding->PreviousLocalToWorld),
+      MotionValid(binding->MotionValid) {}
 
 Nullable<ForwardLitMeshPassProcessor::ProgramState*> ForwardLitMeshPassProcessor::ResolveProgram(ShaderProgram* program) {
     if (program == _lastProgram) return _lastState;
@@ -36,21 +37,25 @@ void ForwardLitMeshPassProcessor::ResetView() noexcept {
     }
 }
 
-void ForwardLitMeshPassProcessor::AddMeshBatch(const RendererListDesc& desc, const RenderSceneSnapshot& scene,
-                                               const MeshBatch& batch, MeshPassDrawListContext& out) {
-    const auto& materialData = scene.Materials[batch.Material];
-    const auto pass = materialData.FindPass(desc.MaterialPassName);
-    if (!pass || !pass->Valid || !pass->Program) {
-        out.Reject(MeshPassRejectReason::MissingPass);
-        return;
+const Eigen::Matrix4f& ForwardLitMeshPassProcessor::CachedNormalToWorld(RenderPrimitiveIndex primitive, const Eigen::Matrix4f& localToWorld) {
+    if (primitive >= _normalReady.size()) {
+        _normalReady.resize(size_t{primitive} + 1, 0);
+        _normals.resize(size_t{primitive} + 1);
     }
-    if (!batch.Geometry || !ValidateMeshGeometry(*batch.Geometry.Get(), batch.FirstIndex, batch.IndexCount)) {
-        out.Reject(MeshPassRejectReason::InvalidGeometry);
-        return;
+    if (!_normalReady[primitive]) {
+        _normals[primitive] = MakeNormalToWorld(localToWorld);
+        _normalReady[primitive] = 1;
+        ++_objectMathComputes;
     }
-    auto* program = pass->Program.Get();
+    return _normals[primitive];
+}
+
+void ForwardLitMeshPassProcessor::PrepareCommand(const RendererListDesc& desc, const RenderSceneSnapshot& scene,
+                                                  const MeshBatch& batch, const MaterialPassRenderData& pass,
+                                                  RenderQueue queue, bool mirrored, MeshPassDrawListContext& out) {
+    auto* program = pass.Program.Get();
     const auto state = ResolveProgram(program);
-    if (!state || pass->ParameterGroup != state->Binding->MaterialGroup) {
+    if (!state || pass.ParameterGroup != state->Binding->MaterialGroup) {
         out.Reject(MeshPassRejectReason::InvalidBindings);
         return;
     }
@@ -66,7 +71,9 @@ void ForwardLitMeshPassProcessor::AddMeshBatch(const RendererListDesc& desc, con
     auto* material = ps.Materials.Find(batch.Material);
     if (material == nullptr) {
         material = &ps.Materials.Insert(batch.Material);
-        *material = _resources.PrepareGroup(*program, binding.MaterialGroup, pass->Parameters, pass->Textures, pass->Samplers);
+        *material = _resources.PrepareGroup(*program, binding.MaterialGroup, pass.Parameters, pass.Textures, pass.Samplers);
+    } else {
+        ++_duplicatePreparations;
     }
     auto* object = ps.Objects.Find(batch.Primitive);
     if (object == nullptr) {
@@ -78,7 +85,7 @@ void ForwardLitMeshPassProcessor::AddMeshBatch(const RendererListDesc& desc, con
             return;
         }
         if (ps.NormalToWorld != nullptr &&
-            !values.SetMatrix4x4(*ps.NormalToWorld, MakeNormalToWorld(primitive.LocalToWorld))) {
+            !values.SetMatrix4x4(*ps.NormalToWorld, CachedNormalToWorld(batch.Primitive, primitive.LocalToWorld))) {
             out.Reject(MeshPassRejectReason::InvalidBindings);
             return;
         }
@@ -92,6 +99,8 @@ void ForwardLitMeshPassProcessor::AddMeshBatch(const RendererListDesc& desc, con
             }
         }
         *object = _resources.PrepareGroup(*program, binding.ObjectGroup, values);
+    } else {
+        ++_duplicatePreparations;
     }
     if (!ps.View || !*material || !*object) {
         out.Reject(MeshPassRejectReason::PrepareResourceFailed);
@@ -99,23 +108,52 @@ void ForwardLitMeshPassProcessor::AddMeshBatch(const RendererListDesc& desc, con
     }
     MeshDrawCommand command;
     command.Program = program;
-    command.PipelineState = pass->PipelineState;
+    command.PipelineState = pass.PipelineState;
     command.PipelineState.DepthStencil.DepthTestEnable = true;
     command.PipelineState.DepthStencil.DepthCompare = render::CompareFunction::LessEqual;
-    command.PipelineState.DepthStencil.DepthWriteEnable = RenderQueueRange::Opaque().Contains(materialData.Queue);
+    command.PipelineState.DepthStencil.DepthWriteEnable = RenderQueueRange::Opaque().Contains(queue);
     if (!command.PipelineState.DepthStencil.DepthWriteEnable && command.PipelineState.DepthStencil.Stencil) {
         command.PipelineState.DepthStencil.Stencil->WriteMask = 0;
     }
+    if (mirrored) command.PipelineState.Primitive.FaceClockwise = OppositeFrontFace(command.PipelineState.Primitive.FaceClockwise);
     command.Geometry = batch.Geometry;
     command.FirstIndex = batch.FirstIndex;
     command.IndexCount = batch.IndexCount;
     command.VertexOffset = batch.VertexOffset;
-    // Groups must be ascending by group index (see ValidateMeshDrawCommand); the three forward groups are
-    // distinct, so emit them in order here instead of sorting and re-validating geometry per draw.
     const PreparedShaderGroup* groups[3]{&*ps.View, &**material, &**object};
     std::sort(std::begin(groups), std::end(groups), [](const auto* a, const auto* b) { return a->Group < b->Group; });
     for (const auto* group : groups) command.Groups.push_back(*group);
     out.AddCommand(std::move(command));
+}
+
+void ForwardLitMeshPassProcessor::AddMeshBatch(const RendererListDesc& desc, const RenderSceneSnapshot& scene,
+                                               const MeshBatch& batch, MeshPassDrawListContext& out) {
+    const auto& materialData = scene.Materials[batch.Material];
+    const auto pass = materialData.FindPass(desc.MaterialPassName);
+    if (!pass || !pass->Valid || !pass->Program) {
+        out.Reject(MeshPassRejectReason::MissingPass);
+        return;
+    }
+    if (!batch.Geometry || !ValidateMeshGeometry(*batch.Geometry.Get(), batch.FirstIndex, batch.IndexCount)) {
+        out.Reject(MeshPassRejectReason::InvalidGeometry);
+        return;
+    }
+    PrepareCommand(desc, scene, batch, *pass.Get(), materialData.Queue, IsMirroredAffine(scene.Primitives[batch.Primitive].LocalToWorld), out);
+}
+
+void ForwardLitMeshPassProcessor::PrepareRecord(const RendererListDesc& desc, const RenderSceneSnapshot& scene,
+                                                const DrawRecord& record, MeshPassDrawListContext& out) {
+    if (record.Batch >= scene.MeshBatches.size() || record.Material >= scene.Materials.size() ||
+        record.PassIndex >= scene.Materials[record.Material].Passes.size()) {
+        out.Reject(MeshPassRejectReason::InvalidBindings);
+        return;
+    }
+    const auto& pass = scene.Materials[record.Material].Passes[record.PassIndex];
+    if (!pass.Valid || !pass.Program) {
+        out.Reject(MeshPassRejectReason::InvalidBindings);
+        return;
+    }
+    PrepareCommand(desc, scene, scene.MeshBatches[record.Batch], pass, record.Queue, record.Mirrored, out);
 }
 
 }  // namespace radray::forward_detail

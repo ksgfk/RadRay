@@ -79,7 +79,7 @@ void CullingResults::ResetForReuse() noexcept {
 }
 
 bool Cull(const CullingParameters& parameters, CullingResults& out) noexcept {
-    RADRAY_PROFILE_SCOPE_N("Cull");
+    RADRAY_PROFILE_SCOPE_N("FrustumCull");
     out.ResetForReuse();
     if (!parameters.Scene || !parameters.View || !parameters.View->View.allFinite() || !parameters.View->WorldPosition.allFinite()) return false;
     const auto frustum = ExtractViewFrustum(parameters.ViewProjection.value_or(parameters.View->ViewProjection));

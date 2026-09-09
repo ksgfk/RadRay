@@ -127,6 +127,8 @@ struct ForwardPipeline::Impl {
         auto& flight = Flights[flightIndex];
         auto& work = flight.Families[family.FrameLocalIndex];
         work.Views.resize(family.Views.size());
+        DepthOnlyMeshPassProcessor depth{*flight.DrawResources, DepthBindings};
+        ForwardLitMeshPassProcessor lit{*flight.DrawResources, Bindings, LightOverflowWarned};
         bool valid = false;
         for (uint32_t index = 0; index < family.Views.size(); ++index) {
             auto& view = work.Views[index];
@@ -141,12 +143,11 @@ struct ForwardPipeline::Impl {
                 continue;
             }
             valid = true;
-            DepthOnlyMeshPassProcessor depth{*flight.DrawResources, DepthBindings};
-            ForwardLitMeshPassProcessor opaque{*flight.DrawResources, Bindings, LightOverflowWarned};
-            ForwardLitMeshPassProcessor transparent{*flight.DrawResources, Bindings, LightOverflowWarned};
+            depth.ResetView();
+            lit.ResetView();
             BuildRendererList({"DepthOnly", "DepthOnly", &view.Culling, &view.View, RenderQueueRange::Opaque(), 0xffffffffu, RendererListSorting::FrontToBack}, depth, view.DepthOnly);
-            BuildRendererList({"Opaque", "ForwardLit", &view.Culling, &view.View, RenderQueueRange::Opaque()}, opaque, view.Opaque);
-            BuildRendererList({"Transparent", "ForwardLit", &view.Culling, &view.View, RenderQueueRange::Transparent(), 0xffffffffu, RendererListSorting::BackToFront}, transparent, view.Transparent);
+            BuildRendererList({"Opaque", "ForwardLit", &view.Culling, &view.View, RenderQueueRange::Opaque()}, lit, view.Opaque);
+            BuildRendererList({"Transparent", "ForwardLit", &view.Culling, &view.View, RenderQueueRange::Transparent(), 0xffffffffu, RendererListSorting::BackToFront}, lit, view.Transparent);
             flight.Stats.DepthCommands += view.DepthOnly.Commands.size();
             flight.Stats.OpaqueCommands += view.Opaque.Commands.size();
             flight.Stats.TransparentCommands += view.Transparent.Commands.size();
@@ -322,6 +323,7 @@ void ForwardPipeline::BuildGraph(RenderPipelineContext& ctx, RenderGraph& graph,
         }
         const auto rank = [&](RenderOutputId output) { return std::find(flight.SurfaceOrder.begin(), flight.SurfaceOrder.end(), output) - flight.SurfaceOrder.begin(); };
         std::stable_sort(families.begin(), families.end(), [&](const auto* a, const auto* b) { return rank(a->OutputId) < rank(b->OutputId); });
+        ForwardLitMeshPassProcessor hdrLit{*flight.DrawResources, _impl->Bindings, _impl->LightOverflowWarned, &ctx};
         for (const auto* familyPointer : families) {
             const auto& family = *familyPointer;
             bool firstOutput = true;
@@ -334,7 +336,7 @@ void ForwardPipeline::BuildGraph(RenderPipelineContext& ctx, RenderGraph& graph,
                 if (viewIndex == flight.HdrViews.size()) flight.HdrViews.push_back(make_unique<ForwardHdrView>());
                 auto& work = *flight.HdrViews[viewIndex++];
                 if (BuildForwardHdrView(graph, ctx, *_impl->Device, _impl->Effects, flight.Settings, family, view, flight.Scene,
-                                        *flight.DrawResources, _impl->Bindings, work, firstOutput, _impl->LightOverflowWarned, flight.Surfaces, outputs))
+                                        *flight.DrawResources, _impl->Bindings, work, firstOutput, _impl->LightOverflowWarned, flight.Surfaces, outputs, &hdrLit))
                     firstOutput = false;
                 else
                     _impl->Error = true;
@@ -344,6 +346,7 @@ void ForwardPipeline::BuildGraph(RenderPipelineContext& ctx, RenderGraph& graph,
             overlaysSucceeded &= BuildForwardOutputOverlay(graph, ctx, _impl->Effects, overlay, _impl->Device->GetBackend(), overlaysSucceeded, outputs);
         if (!flight.Capture.Build(graph, ctx, *_impl->Device, *_impl->System, outputs)) _impl->Error = true;
         flight.HdrViewCount = viewIndex;
+        RADRAY_PROFILE_PLOT("Forward.HdrViews", static_cast<int64_t>(viewIndex));
         flight.OverlaysSucceeded = overlaysSucceeded;
         return;
     }

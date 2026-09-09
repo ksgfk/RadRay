@@ -1,6 +1,6 @@
 > - 适用: 改渲染管线、场景表示、Application 生命周期或服务装配
 > - 权威: 本文描述场景、Forward 与 Application 装配；workload/graph/history 契约见 `renderer-foundation.md`，资产与 GPU 帧管理见 `asset-system.md`、`frame-and-gpu.md`
-> - 锚点: `modules/runtime/include/radray/runtime/render_framework/render_pipeline.h`, `modules/runtime/include/radray/runtime/forward_pipeline/forward_pipeline.h`, `modules/runtime/include/radray/runtime/forward_pipeline/forward_graph.h`, `modules/runtime/include/radray/runtime/material.h`, `modules/runtime/include/radray/runtime/shader_program.h`, `modules/runtime/include/radray/runtime/material_technique.h`, `modules/runtime/include/radray/runtime/render_framework/render_scene_snapshot.h`, `modules/runtime/include/radray/runtime/render_framework/renderer_list.h`, `modules/runtime/include/radray/runtime/components/static_mesh_component.h`, `modules/runtime/include/radray/runtime/game_framework/actor.h`, `modules/runtime/include/radray/runtime/service_registry.h`, `modules/runtime/src/application.cpp`, `modules/runtime/src/render_system.cpp`, `examples/example_lambert_sphere/example_lambert_sphere.cpp`, `examples/example_tidal_atrium/tidal_atrium.cpp`
+> - 锚点: `modules/runtime/include/radray/runtime/render_framework/render_pipeline.h`, `modules/runtime/include/radray/runtime/forward_pipeline/forward_pipeline.h`, `modules/runtime/include/radray/runtime/forward_pipeline/forward_graph.h`, `modules/runtime/include/radray/runtime/material.h`, `modules/runtime/include/radray/runtime/shader_program.h`, `modules/runtime/include/radray/runtime/material_technique.h`, `modules/runtime/include/radray/runtime/render_framework/render_scene_snapshot.h`, `modules/runtime/include/radray/runtime/render_framework/renderer_list.h`, `modules/runtime/include/radray/runtime/components/static_mesh_component.h`, `modules/runtime/include/radray/runtime/game_framework/actor.h`, `modules/runtime/include/radray/runtime/service_registry.h`, `modules/runtime/src/application.cpp`, `modules/runtime/src/render_system.cpp`, `examples/example_lambert_sphere/example_lambert_sphere.cpp`, `examples/example_tidal_atrium/tidal_atrium.cpp`, `modules/runtime/include/radray/runtime/render_framework/scene.h`, `modules/runtime/include/radray/runtime/render_framework/cpu_draw_record.h`
 
 # 渲染框架与 game framework
 
@@ -32,7 +32,10 @@ Game thread:   flight 可写 → 清上一帧 retained refs → Extension::OnBeg
                → ApplicationScheduler::Pump → Extension::OnBeforeInput → 输入路由 → OnUpdate → World::Tick
                → Extension::OnAfterWorldTick → PrepareFrame（pipeline → overlays → composer）
 Render thread: pool/history safe Begin → resolve requested outputs/views
-               → composer 连接 ports → 展开 BuildGraph → compile/realize/execute graph → 未写目标 fallback clear → required final states
+               → composer 连接 ports → 展开 BuildGraph（构图：剔除、list、`AddPass`）
+               → `RenderGraph::Execute`：Compile / Realize / Prepare / Record
+               → 未写目标 fallback clear → required final states
+               → `Submit` 关 command buffer 并提交；GPU 执行见 GPU 时间线，不是 CPU 的 `Record`
 ```
 
 `RenderPipeline` 提供 `PrepareFrame`、`BuildGraph` 和 `GraphRecorded`。PrepareFrame 在 game thread 写当前 flight 的
@@ -121,7 +124,8 @@ LightComponent      → CreateRenderState → Scene::AddLight(CreateSceneProxy()
 ```
 
 **Scene 与 proxy 只在 game thread 使用。proxy 常驻，pipeline 输入每帧复制。** proxy 在组件 `OnRegister` 时创建，
-存在 `Scene` 的 `vector<unique_ptr<...>>` 里，`OnUnregister` 时移除。
+存在 `Scene` 的 packed `vector<unique_ptr<...>>` 里，`OnUnregister` 时移除。`SceneObjectId` 是稀疏 slot+generation；
+`FindPrimitive` / `FindLight` 在 generation 不匹配或 slot 已空时拒绝，避免 ABA。
 
 PrimitiveComponent 在 game thread 直接更新现有 proxy 的 LocalToWorld；普通位移、旋转、缩放保留
 generation/MotionRevision，并增加 TransformRevision，不遍历 Scene 删除重建。瞬移或显式不连续运动调用 `ResetMotion`。
@@ -157,8 +161,8 @@ local-to-world，并把 `StaticMeshSection` 的 `FirstIndex` / `IndexCount` / `V
 mesh 可以在 Loading 时设置到组件；`World::Tick` 中的组件 tick 在它变成有效 Ready 资产后创建
 proxy，已存在且仍有效的 proxy 保持不变。清空或替换 mesh 仍立即刷新对应渲染状态。
 每个 flight 在 PrepareFrame 中构建一次与 view 无关的 `RenderSceneSnapshot`：primitive 保存 generation、
-MotionRevision、变换、世界 AABB、layer mask 和连续 MeshBatch 范围；batch 借用 geometry 并保存 section draw range、primitive
-和 material 索引。材质按首次出现去重，所有 pass 的 program 分配帧内整数 ID。光源保存参数和球形界限。
+`SceneObjectId`、MotionRevision、变换、世界 AABB、layer mask 和连续 MeshBatch 范围；batch 借用 geometry 并保存 section draw range、primitive
+和 material 索引。同一 snapshot 附带稳定 `DrawRecord` 目录，view 只筛选紧凑可见子集。材质按首次出现去重，所有 pass 的 program 分配帧内整数 ID。光源保存参数和球形界限。
 `StaticMeshSceneProxy` 从 mesh asset 提供局部 bounds；自定义 proxy 可以覆盖 layer mask 与禁用视锥剔除标志。
 无效 bounds 保守可见；几何和纹理由宿主 per-flight refs 保活。
 
@@ -170,9 +174,11 @@ MotionRevision、变换、世界 AABB、layer mask 和连续 MeshBatch 范围；
 ### 内置 ForwardPipeline
 
 Forward 在 render thread 对每个 resolved view 调用一次 CPU `Cull`，从同一结果生成 DepthOnly、
-Opaque、Transparent 三个 `RendererList`。通用 builder 处理 pass/queue/mask、排序与统计；具体
+Opaque、Transparent 三个 `RendererList`。同一 family 内复用 Depth/Lit processor，view 切换时 `ResetView`；
+HDR 多 view 共用一个 lit processor。通用 builder 处理 pass/queue/mask、排序与统计；具体
 `ForwardLitMeshPassProcessor` / `DepthOnlyMeshPassProcessor` 解释 shader 契约，准备 per-view/object/material
-bytes 与 frame-local sets，输出只借用资源的 `MeshDrawCommand`。render thread 不访问 Scene、proxy、
+bytes 与 frame-local sets，输出只借用资源的 `MeshDrawCommand`。layout 字段在 binding cache 首次解析，热路径不再按名字搜索。
+对象 `NormalToWorld` 按 snapshot primitive 计算一次。render thread 不访问 Scene、proxy、
 CameraComponent、Material、AssetManager 或 StreamingAssetRef。
 
 Forward resolver 按 `ForwardView`、`ForwardMaterial`、`ForwardObject` 找到当前 target 的真实 group，
@@ -336,8 +342,8 @@ registry 析构不调用钩子、不释放借用对象。owner 显式选择 Shut
 
 - **默认 pipeline 为空**：`RenderSystem::_pipeline` 只有在应用调用 `SetPipeline` 后才接线；
   `example_lambert_sphere` 的 pipeline 注入是一个显式样例路径。
-- **当前 Forward 使用 snapshot、逐 view 剔除、renderer lists、ForwardGraph 和 per-flight graph resources**；
-  HDR 效果属于同一 pipeline 的配置组合，仍没有自动 instancing。
+- **当前 Forward 使用 snapshot、DrawRecord、逐 view 剔除、renderer lists、ForwardGraph 和 per-flight graph resources**；
+  HDR 效果属于同一 pipeline 的配置组合，仍没有自动 instancing。CPU 准备串行，不新开绘制 worker。
 - **group 数字来自当前 target metadata**：具体 pipeline 按 declaration 解释职责，Material 只认识 anchor 选中的一组。
 - **`PrimitiveComponent` 基类仍返回空 proxy**：可绘制路径由 `StaticMeshComponent` 的派生实现提供。
 - **JIT 不是 runtime 的可用性前提**：关闭 JIT 后 program 源码请求失败；未来 AOT consumer 仍可

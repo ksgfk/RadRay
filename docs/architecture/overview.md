@@ -74,6 +74,7 @@ artifact 不需要 compiler，开发期 JIT 通过配置开关接入 client。
 | 资产加载与回收 | `AssetManager::Load` / `Pump` | `modules/runtime/src/asset_manager.cpp` |
 | 身份登记与 path 反查 | `AssetDatabase::Open` / `Refresh` / `Save` | `modules/runtime/src/asset_database.cpp` |
 | 内置前向管线 | `ForwardPipeline` | `modules/runtime/include/radray/runtime/forward_pipeline/forward_pipeline.h` |
+| CPU 绘制目录 | `CpuDrawStore` / `DrawRecord` | `modules/runtime/include/radray/runtime/render_framework/cpu_draw_record.h` |
 | Workload 与 graph | `RenderPipelineContext` / `RenderGraph` | `modules/runtime/include/radray/runtime/render_framework/` |
 | 场景 tick | `World::Tick` | `modules/runtime/src/game_framework/world.cpp` |
 

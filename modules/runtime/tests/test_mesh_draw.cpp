@@ -768,6 +768,9 @@ void RunDrawListSort(render::test::DeviceContext& context) {
     ASSERT_TRUE(BuildRenderSceneSnapshot(scene, snapshot, owners));
     ASSERT_EQ(snapshot.MeshBatches.size(), 7u);
     ASSERT_EQ(snapshot.Materials.size(), 4u);
+    // Placeholder DrawData is not GPU-valid; the catalog marks those records invalid.
+    snapshot.DrawRecords.clear();
+    snapshot.PrimitiveDrawBegin.clear();
     ResolvedRenderView view;
     view.View = view.ViewProjection = Eigen::Matrix4f::Identity();
     view.WorldPosition.setZero();

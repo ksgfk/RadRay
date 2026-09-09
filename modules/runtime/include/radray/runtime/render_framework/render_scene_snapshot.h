@@ -2,6 +2,7 @@
 
 #include <radray/inline_vector.h>
 #include <radray/runtime/material.h>
+#include <radray/runtime/render_framework/cpu_draw_record.h>
 #include <radray/runtime/render_framework/light_scene_proxy.h>
 #include <radray/runtime/render_framework/mesh_batch.h>
 #include <radray/runtime/render_framework/primitive_scene_proxy.h>
@@ -12,6 +13,7 @@ namespace radray {
 class Scene;
 
 struct RenderPrimitiveData {
+    SceneObjectId Id{};
     Eigen::Matrix4f LocalToWorld{Eigen::Matrix4f::Identity()};
     AxisAlignedBounds WorldBounds{};
     uint32_t LayerMask{0xffffffffu};
@@ -39,17 +41,23 @@ struct RenderSceneSnapshotStats {
     uint64_t PrimitiveStructuresRebuilt{0}, PrimitiveStructuresReused{0};
     uint64_t PrimitiveBoundsRebuilt{0}, PrimitiveBoundsReused{0};
     uint64_t MaterialsRebuilt{0}, MaterialsReused{0};
+    uint64_t DrawRecordBuilds{0}, DrawRecordsReused{0}, DrawRecordStateSelects{0};
+    uint64_t DrawRecordBytes{0}, CpuSceneBytes{0};
+    uint64_t AppliedTransforms{0}, EqualValueIgnored{0};
     // Peak vector capacities, measured in elements across reuse cycles.
     size_t PrimitiveHighWatermark{0}, BatchHighWatermark{0}, MaterialHighWatermark{0}, LightHighWatermark{0};
 };
 
 /// Per-flight values. Geometry/texture payloads and programs must outlive flight retirement.
 /// Primitive values are builder-owned; ResetForReuse discards their materialization state.
+/// DrawRecords are the stable catalog for this published epoch; views consume compact indices.
 struct RenderSceneSnapshot {
     vector<RenderPrimitiveData> Primitives;
     vector<MeshBatch> MeshBatches;
     vector<MaterialRenderData> Materials;
     vector<RenderLightData> Lights;
+    vector<DrawRecord> DrawRecords;
+    vector<uint32_t> PrimitiveDrawBegin;
     RenderSceneSnapshotStats Stats;
 
     void ResetForReuse() noexcept;
@@ -63,6 +71,8 @@ bool BuildRenderSceneSnapshot(const Scene& scene, RenderSceneSnapshot& out, vect
 class RenderSceneSnapshotBuilder {
 public:
     bool Build(const Scene& scene, RenderSceneSnapshot& out, vector<StreamingAssetRefAny>& retainedAssets);
+    CpuDrawStore& DrawStore() noexcept { return _draws; }
+    const CpuDrawStore& DrawStore() const noexcept { return _draws; }
 
 private:
     struct Entry {
@@ -86,6 +96,7 @@ private:
     };
     struct PrimitiveEntry {
         uint64_t Generation{0}, Revision{0};
+        uint64_t TransformRevision{0};
         AxisAlignedBounds LocalBounds;
         InlineVector<Section, 2> Sections;
     };
@@ -93,6 +104,7 @@ private:
     unordered_map<uint64_t, MaterialEntry> _materials;
     vector<MaterialRenderData> _materialScratch;
     unordered_map<ShaderProgram*, Entry> _programs;
+    CpuDrawStore _draws;
     uint64_t _epoch{0};
 };
 

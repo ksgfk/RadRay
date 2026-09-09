@@ -9,6 +9,8 @@ namespace radray {
 class RenderSystem;
 namespace forward_detail {
 
+class ForwardLitMeshPassProcessor;
+
 struct ForwardEffectPrograms {
     array<Nullable<ShaderProgram*>, 15> Programs{};
     bool Initialize(RenderSystem& system);
@@ -36,7 +38,8 @@ bool BuildForwardHdrView(RenderGraph& graph, RenderPipelineContext& context, ren
                          const ResolvedRenderViewFamily& family, const ResolvedRenderView& sourceView,
                          const RenderSceneSnapshot& scene, FrameDrawResources& draws, ForwardBindingCache& bindings,
                          ForwardHdrView& work, bool firstOutputView, bool& lightOverflowWarned,
-                         std::span<const ForwardOutputSurface> surfaces, std::span<RenderGraphOutputBinding> outputs);
+                         std::span<const ForwardOutputSurface> surfaces, std::span<RenderGraphOutputBinding> outputs,
+                         ForwardLitMeshPassProcessor* sharedLit = nullptr);
 
 bool BuildForwardOutputOverlay(RenderGraph& graph, RenderPipelineContext& context, const ForwardEffectPrograms& programs,
                                const ForwardOutputOverlay& overlay, render::RenderBackend backend, bool& success, std::span<RenderGraphOutputBinding> outputs);

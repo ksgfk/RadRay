@@ -2,6 +2,7 @@
 
 #include <algorithm>
 
+#include <radray/profiler.h>
 #include <radray/runtime/render_framework/render_graph_blit.h>
 
 namespace radray {
@@ -43,6 +44,7 @@ RgTexturePort FrameGraph::Output(RgComponentHandle component, RenderOutputId out
     return {};
 }
 bool FrameGraph::Expand() {
+    RADRAY_PROFILE_SCOPE_N("FrameGraph::Expand");
     if (_expanded) {
         Graph.AddDiagnostic("ComponentsFrozen", "Components expand only once");
         return false;

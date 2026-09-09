@@ -128,6 +128,21 @@ material 和 object 等所有组，pool 字节是描述符估算。
 3. 帧标记来自 `TickFrame`（单线程）或渲染线程（多线程 runner），GPU 时间线按 backend 与 queue 分 context。
    火焰图：Statistics → Flame graph。调用栈采样与 context switch 需要以管理员运行被测程序，否则只有插桩 zone。
 
+CPU 上 `Render` 分成构图与执行，不要把 `BuildForwardHdrView` 当成 GPU：
+
+- `ComposeGraph` → `FrameGraph::Expand` → `ForwardPipeline::BuildGraph` / `BuildForwardHdrView`：按相机声明 pass。
+  其内部 `MainViewCull` / `FrustumCull`、`MainViewRendererLists`、`BuildShadows` 是场景准备；
+  `DeclareHdrGraph` / `ForwardGraph::BuildGraph` / `PrepareRendererList` 才是往图里挂节点。
+- `ExecuteGraph` → `RenderGraph::Execute`：`RenderGraph::Compile`（`Validate`、`BuildIR`、`CompilePlanHit` 或
+  `CompilePlanMiss`/`CompileRenderGraph`、`Optimize`）、`RenderGraph::Realize`（transient 分配）、
+  `RenderGraph::Prepare`（`PrepareUploads` / `PreparePipelines` / `PrepareParameters`）、`PlanBarriers`、
+  `RenderGraph::Record`（CPU 编码；每个 live pass 一个 zone，内含 `SubmitRendererList`）。
+- `Submit` / `GpuSystem::SubmitFrame`：结束 command buffer 并提交队列。GPU 时间线才是 GPU 执行。
+
+Plots：`RG.DeclaredPasses`、`RG.LivePasses`、`RG.CompilePlanReused`（1=复用编译计划）、
+`RG.PhysicalAllocations`、`RG.GraphicsPipelinePreparations`、`RG.GraphicsPipelineCreations`、
+`RG.MergedRasterPasses`、`RG.BarrierBatches`、`Forward.HdrViews`。
+
 GPU zone 挂在 `PushDebugGroup` / `PopDebugGroup` 上，所以 RenderGraph 每个 live pass 一个 zone；两个后端的
 差异（D3D12 每个 raster group 一个 zone）见 [RHI](../architecture/render-rhi.md#命令录制)。
 采样机器负载会显著影响 Debug 帧时间，对照前先看 CPU 占用。

@@ -4,6 +4,7 @@
 #include <radray/file.h>
 #include <radray/hash.h>
 #include <radray/logger.h>
+#include <radray/profiler.h>
 #include <radray/render/rhi.h>
 #include <radray/runtime/gpu_resource.h>
 #include <radray/vertex_data.h>
@@ -650,6 +651,7 @@ void GpuSystem::EndFrameRecordAndSubmit(uint32_t flightIndex) {
 void GpuSystem::SubmitFrame(
     uint32_t flightIndex,
     const AppFrameSubmitDescriptor& desc) {
+    RADRAY_PROFILE_SCOPE_N("GpuSystem::SubmitFrame");
     FlightSlot& record = *_flights.at(flightIndex);
     if (!record.Recording || record.Submitted) {
         RADRAY_ABORT("GpuSystem::SubmitFrame called outside an active frame");

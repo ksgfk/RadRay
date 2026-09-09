@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <functional>
 #include <fmt/format.h>
+#include <radray/hash.h>
+#include <radray/profiler.h>
 
 namespace radray {
 namespace {
@@ -28,6 +30,7 @@ CompiledRenderGraph CompileRenderGraph(uint32_t resourceCount,
                                        std::span<const uint32_t> roots,
                                        const RenderGraphCompileOptions& options,
                                        RenderGraphCompilerWorkspace& workspace) {
+    RADRAY_PROFILE_SCOPE_N("CompileRenderGraph");
     CompiledRenderGraph result;
     result.Versions.assign(versions.begin(), versions.end());
     result.Passes.resize(passes.size());
@@ -181,6 +184,74 @@ CompiledRenderGraph CompileRenderGraph(uint32_t resourceCount,
         for (const auto v : passes[p].Writes) touch(v);
     }
     return result;
+}
+
+uint64_t HashRenderGraphCompileInput(
+    uint32_t resourceCount,
+    std::span<const RgResourceVersionNode> versions,
+    std::span<const RgExecutionNode> passes,
+    std::span<const uint32_t> roots,
+    const RenderGraphCompileOptions& options) noexcept {
+    HashCode hash;
+    hash.Add(resourceCount);
+    hash.Add(static_cast<uint32_t>(versions.size()));
+    hash.Add(static_cast<uint32_t>(passes.size()));
+    hash.Add(static_cast<uint32_t>(roots.size()));
+    hash.Add(static_cast<uint32_t>(options.CullPasses));
+    hash.Add(static_cast<uint32_t>(options.ReuseResources));
+    hash.Add(static_cast<uint32_t>(options.MergeRasterPasses));
+    hash.Add(static_cast<uint32_t>(options.OptimizeAttachmentStores));
+    hash.Add(static_cast<uint32_t>(options.EliminateBarriers));
+    hash.Add(static_cast<uint32_t>(options.BatchBarriers));
+    hash.Add(static_cast<uint32_t>(options.ReuseCompiledPlan));
+    for (const auto& version : versions) {
+        hash.Add(version.Resource);
+        hash.Add(version.Cell);
+        hash.Add(version.Version);
+        hash.Add(version.Producer);
+        hash.Add(version.Predecessor);
+        hash.Add(static_cast<uint32_t>(version.Initialized));
+    }
+    for (const auto& pass : passes) {
+        hash.Add(static_cast<uint32_t>(pass.SideEffect));
+        hash.Add(static_cast<uint32_t>(pass.Reads.size()));
+        for (const auto read : pass.Reads) hash.Add(read);
+        hash.Add(static_cast<uint32_t>(pass.Writes.size()));
+        for (const auto write : pass.Writes) hash.Add(write);
+    }
+    for (const auto root : roots) hash.Add(root);
+    return static_cast<uint64_t>(hash.ToHashCode());
+}
+
+bool EqualRenderGraphCompileInput(
+    uint32_t resourceCount,
+    std::span<const RgResourceVersionNode> versions,
+    std::span<const RgExecutionNode> passes,
+    std::span<const uint32_t> roots,
+    const RenderGraphCompileOptions& options,
+    uint32_t otherResourceCount,
+    std::span<const RgResourceVersionNode> otherVersions,
+    std::span<const RgExecutionNode> otherPasses,
+    std::span<const uint32_t> otherRoots,
+    const RenderGraphCompileOptions& otherOptions) noexcept {
+    if (resourceCount != otherResourceCount || options != otherOptions ||
+        versions.size() != otherVersions.size() || passes.size() != otherPasses.size() || roots.size() != otherRoots.size())
+        return false;
+    for (size_t i = 0; i < versions.size(); ++i) {
+        const auto& a = versions[i];
+        const auto& b = otherVersions[i];
+        if (a.Resource != b.Resource || a.Cell != b.Cell || a.Version != b.Version || a.Producer != b.Producer ||
+            a.Predecessor != b.Predecessor || a.Initialized != b.Initialized)
+            return false;
+    }
+    for (size_t i = 0; i < passes.size(); ++i) {
+        if (passes[i].SideEffect != otherPasses[i].SideEffect || passes[i].Reads != otherPasses[i].Reads ||
+            passes[i].Writes != otherPasses[i].Writes)
+            return false;
+    }
+    for (size_t i = 0; i < roots.size(); ++i)
+        if (roots[i] != otherRoots[i]) return false;
+    return true;
 }
 
 }  // namespace radray

@@ -14,6 +14,8 @@ struct RenderGraphCompileOptions {
     bool OptimizeAttachmentStores{true};
     bool EliminateBarriers{true};
     bool BatchBarriers{true};
+    bool ReuseCompiledPlan{true};
+    friend bool operator==(const RenderGraphCompileOptions&, const RenderGraphCompileOptions&) = default;
 };
 
 /// One initialized or discarded content range. Predecessor describes storage ordering,
@@ -92,5 +94,24 @@ CompiledRenderGraph CompileRenderGraph(
     std::span<const uint32_t> roots,
     const RenderGraphCompileOptions& options,
     RenderGraphCompilerWorkspace& workspace);
+
+uint64_t HashRenderGraphCompileInput(
+    uint32_t resourceCount,
+    std::span<const RgResourceVersionNode> versions,
+    std::span<const RgExecutionNode> passes,
+    std::span<const uint32_t> roots,
+    const RenderGraphCompileOptions& options) noexcept;
+
+bool EqualRenderGraphCompileInput(
+    uint32_t resourceCount,
+    std::span<const RgResourceVersionNode> versions,
+    std::span<const RgExecutionNode> passes,
+    std::span<const uint32_t> roots,
+    const RenderGraphCompileOptions& options,
+    uint32_t otherResourceCount,
+    std::span<const RgResourceVersionNode> otherVersions,
+    std::span<const RgExecutionNode> otherPasses,
+    std::span<const uint32_t> otherRoots,
+    const RenderGraphCompileOptions& otherOptions) noexcept;
 
 }  // namespace radray

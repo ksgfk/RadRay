@@ -2,6 +2,7 @@
 #include "forward_lit_mesh_pass_processor.h"
 #include <algorithm>
 #include <cmath>
+#include <optional>
 #include <radray/logger.h>
 #include <radray/profiler.h>
 #include <radray/runtime/forward_pipeline/forward_graph.h>
@@ -450,7 +451,8 @@ bool BuildForwardHdrView(RenderGraph& graph, RenderPipelineContext& context, ren
                          const ResolvedRenderViewFamily& family, const ResolvedRenderView& sourceView,
                          const RenderSceneSnapshot& scene, FrameDrawResources& draws, ForwardBindingCache& bindings,
                          ForwardHdrView& work, bool firstOutputView, bool& lightOverflowWarned,
-                         std::span<const ForwardOutputSurface> surfaces, std::span<RenderGraphOutputBinding> outputs) {
+                         std::span<const ForwardOutputSurface> surfaces, std::span<RenderGraphOutputBinding> outputs,
+                         ForwardLitMeshPassProcessor* sharedLit) {
     RADRAY_PROFILE_SCOPE_N("BuildForwardHdrView");
     const auto previousScope = graph.SetResourceView(sourceView.StateId.Value);
     struct RestoreScope {
@@ -476,22 +478,25 @@ bool BuildForwardHdrView(RenderGraph& graph, RenderPipelineContext& context, ren
     view.ScissorRect = {sourceView.ScissorRect.X - sourceView.ViewRect.X, sourceView.ScissorRect.Y - sourceView.ViewRect.Y,
                         sourceView.ScissorRect.Width, sourceView.ScissorRect.Height};
     HistoryTexturePair colorHistory, depthHistory;
-    if (temporal) {
-        string reason;
-        RuntimeTextureDesc history;
-        history.Extent.Width = size.Width;
-        history.Extent.Height = size.Height;
-        history.Format = TextureFormat::RGBA16_FLOAT;
-        history.Usage = kHdrUsage;
-        colorHistory = context.AcquireHistoryTexture(sourceView, family, {"Forward.Color.v1", "Forward.ColorHistory", history, 3, HistoryCommitMode::WithView}, reason);
-        history.Format = TextureFormat::R32_FLOAT;
-        history.Usage = kScalarUsage;
-        depthHistory = context.AcquireHistoryTexture(sourceView, family, {"Forward.Depth.v1", "Forward.DepthHistory", history, 3, HistoryCommitMode::WithView}, reason);
-        if (!colorHistory.Current || !depthHistory.Current) {
-            RADRAY_ERR_LOG("Forward history allocation failed: {}", reason);
-            return false;
+    {
+        RADRAY_PROFILE_SCOPE_N("HdrHistoryAcquire");
+        if (temporal) {
+            string reason;
+            RuntimeTextureDesc history;
+            history.Extent.Width = size.Width;
+            history.Extent.Height = size.Height;
+            history.Format = TextureFormat::RGBA16_FLOAT;
+            history.Usage = kHdrUsage;
+            colorHistory = context.AcquireHistoryTexture(sourceView, family, {"Forward.Color.v1", "Forward.ColorHistory", history, 3, HistoryCommitMode::WithView}, reason);
+            history.Format = TextureFormat::R32_FLOAT;
+            history.Usage = kScalarUsage;
+            depthHistory = context.AcquireHistoryTexture(sourceView, family, {"Forward.Depth.v1", "Forward.DepthHistory", history, 3, HistoryCommitMode::WithView}, reason);
+            if (!colorHistory.Current || !depthHistory.Current) {
+                RADRAY_ERR_LOG("Forward history allocation failed: {}", reason);
+                return false;
+            }
+            if (!context.PreparePrimitiveHistory(view, scene)) return false;
         }
-        if (!context.PreparePrimitiveHistory(view, scene)) return false;
     }
     auto cullProjection = UnjitteredProjection(view);
     cullProjection.row(0) *= float(size.Width) / float(size.Width + 2);
@@ -502,21 +507,30 @@ bool BuildForwardHdrView(RenderGraph& graph, RenderPipelineContext& context, ren
         if (!Cull({&scene, &view, 0xffffffffu, cullMatrix}, work.Main.Culling)) return false;
     }
     // One processor for prepass/opaque/transparent: same view, so view and object groups are shared across lists.
-    ForwardLitMeshPassProcessor processor{draws, bindings, lightOverflowWarned, temporal ? &context : nullptr};
+    std::optional<ForwardLitMeshPassProcessor> localProcessor;
+    ForwardLitMeshPassProcessor* processor = sharedLit;
+    if (processor == nullptr) {
+        localProcessor.emplace(draws, bindings, lightOverflowWarned, temporal ? &context : nullptr);
+        processor = &*localProcessor;
+    } else {
+        processor->ResetView();
+    }
     work.ContentValid = true;
     {
         RADRAY_PROFILE_SCOPE_N("MainViewRendererLists");
         if (!msaa) {
-            BuildRendererList({"DepthNormalsMotion", "DepthNormalsMotion", &work.Main.Culling, &view, RenderQueueRange::Opaque(), 0xffffffffu, RendererListSorting::FrontToBack, true}, processor, work.Main.DepthOnly);
+            BuildRendererList({"DepthNormalsMotion", "DepthNormalsMotion", &work.Main.Culling, &view, RenderQueueRange::Opaque(), 0xffffffffu, RendererListSorting::FrontToBack, true}, *processor, work.Main.DepthOnly);
             work.ContentValid &= work.Main.DepthOnly.Stats.ContentSucceeded();
         }
-        BuildRendererList({"Opaque", "ForwardLit", &work.Main.Culling, &view, RenderQueueRange::Opaque(), 0xffffffffu, RendererListSorting::StateThenFrontToBack, true}, processor, work.Main.Opaque);
-        BuildRendererList({"Transparent", "ForwardLit", &work.Main.Culling, &view, RenderQueueRange::Transparent(), 0xffffffffu, RendererListSorting::BackToFront, true}, processor, work.Main.Transparent);
+        BuildRendererList({"Opaque", "ForwardLit", &work.Main.Culling, &view, RenderQueueRange::Opaque(), 0xffffffffu, RendererListSorting::StateThenFrontToBack, true}, *processor, work.Main.Opaque);
+        BuildRendererList({"Transparent", "ForwardLit", &work.Main.Culling, &view, RenderQueueRange::Transparent(), 0xffffffffu, RendererListSorting::BackToFront, true}, *processor, work.Main.Transparent);
         work.ContentValid &= work.Main.Opaque.Stats.ContentSucceeded() && work.Main.Transparent.Stats.ContentSucceeded();
     }
     if (!msaa)
         for (auto& command : work.Main.Opaque.Commands) command.PipelineState.DepthStencil.DepthWriteEnable = false;
-    auto depth = Texture(graph, size, TextureFormat::D32_FLOAT, TextureUse::DepthStencilWrite | TextureUse::DepthStencilRead | (msaa ? TextureUses{} : TextureUses{TextureUse::Resource}), "Forward.Depth", samples);
+    {
+        RADRAY_PROFILE_SCOPE_N("DeclareHdrGraph");
+        auto depth = Texture(graph, size, TextureFormat::D32_FLOAT, TextureUse::DepthStencilWrite | TextureUse::DepthStencilRead | (msaa ? TextureUses{} : TextureUses{TextureUse::Resource}), "Forward.Depth", samples);
     auto hdr = Texture(graph, size, TextureFormat::RGBA16_FLOAT, msaa ? TextureUse::RenderTarget | TextureUse::CopySource : kHdrUsage | TextureUse::RenderTarget, "Forward.HDR", samples);
     auto normals = msaa ? RgTextureValue{} : Texture(graph, size, TextureFormat::RGBA16_FLOAT, kHdrUsage | TextureUse::RenderTarget, "Forward.Normals");
     const auto motion = msaa ? RgTextureValue{} : Texture(graph, size, TextureFormat::RGBA16_FLOAT, kHdrUsage | TextureUse::RenderTarget, "Forward.Motion");
@@ -719,8 +733,9 @@ bool BuildForwardHdrView(RenderGraph& graph, RenderPipelineContext& context, ren
     const auto convert = [&](Rect r) { return Rect{int32_t(scaleX(r.X)), int32_t(scaleY(r.Y)), scaleX(r.X + r.Width) - scaleX(r.X), scaleY(r.Y + r.Height) - scaleY(r.Y)}; };
     const auto pass = Composite(graph, outputProgram, outputValues, outputInputs, output, convert(sourceView.ViewRect), convert(sourceView.ScissorRect),
                                 firstOutputView ? render::LoadAction::Clear : render::LoadAction::Load, device.GetBackend(), work.PassesSucceeded, "Forward.ToneMapAndComposite");
-    work.Completion = context.RegisterViewCompletion(graph, sourceView.StateId, pass, output);
-    return work.Completion.IsValid();
+        work.Completion = context.RegisterViewCompletion(graph, sourceView.StateId, pass, output);
+        return work.Completion.IsValid();
+    }
 }
 
 bool BuildForwardOutputOverlay(RenderGraph& graph, RenderPipelineContext& context, const ForwardEffectPrograms& programs,

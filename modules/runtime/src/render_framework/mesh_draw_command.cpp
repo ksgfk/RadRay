@@ -68,6 +68,7 @@ std::optional<PreparedRendererList> PrepareRendererList(const RendererList& list
         RgBufferAccess Access;
     };
     unordered_map<render::Buffer*, InlineVector<DeclaredRange, 2>> declared;
+    uint64_t uniqueReads = 0;
     for (size_t index = 0; index < list.Commands.size(); ++index) {
         const auto& draw = list.GetCommand(index);
         if (!ValidateMeshDrawCommand(draw) || (bindings && !bindings->IsValidFor(builder, *draw.Program))) {
@@ -87,6 +88,7 @@ std::optional<PreparedRendererList> PrepareRendererList(const RendererList& list
             }
             if (!builder.ReadImmutableBuffer(buffer, state, access, range).IsValid()) return false;
             ranges.push_back({range.Offset, range.Size, access});
+            ++uniqueReads;
             return true;
         };
         for (const auto& vertex : draw.Geometry->VertexBuffers)
@@ -96,6 +98,7 @@ std::optional<PreparedRendererList> PrepareRendererList(const RendererList& list
         if (!program.IsValid()) return std::nullopt;
         prepared.Draws.push_back({&draw, {draw.Groups.data(), draw.Groups.size()}, program, bindings ? bindings->Find(*draw.Program) : std::span<const RendererListPassBinding>{}});
     }
+    prepared.UniqueBufferReads = uniqueReads;
     return prepared;
 }
 
@@ -108,20 +111,49 @@ void SubmitRendererList(const PreparedRendererList& list, RenderGraphRasterConte
         return;
     }
     auto& commands = ctx.Encoder();
+    RgGraphicsProgramHandle lastProgram{};
+    std::span<const PreparedShaderGroup> lastNative{};
+    std::span<const RendererListPassBinding> lastGraph{};
+    bool haveProgram = false;
+    const auto sameNative = [](std::span<const PreparedShaderGroup> a, std::span<const PreparedShaderGroup> b) {
+        if (a.size() != b.size()) return false;
+        for (size_t i = 0; i < a.size(); ++i)
+            if (a[i].Group != b[i].Group || a[i].Set.Get() != b[i].Set.Get() || a[i].DynamicOffsets != b[i].DynamicOffsets) return false;
+        return true;
+    };
+    const auto sameGraph = [](std::span<const RendererListPassBinding> a, std::span<const RendererListPassBinding> b) {
+        if (a.size() != b.size()) return false;
+        for (size_t i = 0; i < a.size(); ++i)
+            if (a[i].Program != b[i].Program || a[i].Group != b[i].Group || a[i].Parameters.Index != b[i].Parameters.Index ||
+                a[i].Parameters.Generation != b[i].Parameters.Generation)
+                return false;
+        return true;
+    };
     for (const auto& prepared : list.Draws) {
         const auto& draw = *prepared.Description;
         const auto groups = prepared.Groups;
         ++stats.Commands;
-        ctx.BindGraphicsProgram(prepared.Program);
+        const bool samePso = haveProgram && lastProgram.Index == prepared.Program.Index && lastProgram.Generation == prepared.Program.Generation;
+        if (!samePso) {
+            ctx.BindGraphicsProgram(prepared.Program);
+            lastProgram = prepared.Program;
+            haveProgram = true;
+            lastNative = {};
+            lastGraph = {};
+        }
         const auto graphGroups = prepared.GraphGroups;
-        size_t nativeIndex = 0, graphIndex = 0;
-        while (nativeIndex < groups.size() || graphIndex < graphGroups.size()) {
-            if (graphIndex == graphGroups.size() || (nativeIndex < groups.size() && groups[nativeIndex].Group < graphGroups[graphIndex].Group)) {
-                const auto& group = groups[nativeIndex++];
-                commands.BindPersistentShaderParameterSet(group.Group, group.Set.Get(), group.DynamicOffsets);
-            } else {
-                ctx.BindParameterSet(graphGroups[graphIndex++].Parameters);
+        if (!(samePso && sameNative(groups, lastNative) && sameGraph(graphGroups, lastGraph))) {
+            size_t nativeIndex = 0, graphIndex = 0;
+            while (nativeIndex < groups.size() || graphIndex < graphGroups.size()) {
+                if (graphIndex == graphGroups.size() || (nativeIndex < groups.size() && groups[nativeIndex].Group < graphGroups[graphIndex].Group)) {
+                    const auto& group = groups[nativeIndex++];
+                    commands.BindPersistentShaderParameterSet(group.Group, group.Set.Get(), group.DynamicOffsets);
+                } else {
+                    ctx.BindParameterSet(graphGroups[graphIndex++].Parameters);
+                }
             }
+            lastNative = groups;
+            lastGraph = graphGroups;
         }
         const auto bindings = std::span{draw.Geometry->VertexBuffers};
         for (size_t first = 0; first < bindings.size();) {

@@ -1,6 +1,7 @@
 #include <radray/runtime/forward_pipeline/forward_graph.h>
 
 #include <algorithm>
+#include <radray/profiler.h>
 #include <radray/runtime/render_framework/viewport.h>
 
 namespace radray {
@@ -38,6 +39,7 @@ void ExecuteForwardGraphPass(
 ForwardGraphStageOutput ForwardGraph::BuildGraph(
     RenderGraph& graph, ForwardGraphStage stage,
     const ForwardGraphStageInputs& inputs) {
+    RADRAY_PROFILE_SCOPE_N("ForwardGraph::BuildGraph");
     ForwardGraphStageOutput result{
         .Color = inputs.Color,
         .Depth = inputs.Depth,
