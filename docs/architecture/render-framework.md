@@ -175,7 +175,7 @@ proxy，已存在且仍有效的 proxy 保持不变。清空或替换 mesh 仍�
 
 Forward 在 render thread 对每个 resolved view 调用一次 CPU `Cull`，从同一结果生成 DepthOnly、
 Opaque、Transparent 三个 `RendererList`。同一 family 内复用 Depth/Lit processor，view 切换时 `ResetView`；
-HDR 多 view 共用一个 lit processor。通用 builder 处理 pass/queue/mask、排序与统计；具体
+HDR 多 view 共用一个 lit processor，主相机的三张列表走 `BuildRendererLists`（一次校验后按 pass 顺序写出）。通用 builder 处理 pass/queue/mask、排序与统计；具体
 `ForwardLitMeshPassProcessor` / `DepthOnlyMeshPassProcessor` 解释 shader 契约，准备 per-view/object/material
 bytes 与 frame-local sets，输出只借用资源的 `MeshDrawCommand`。layout 字段在 binding cache 首次解析，热路径不再按名字搜索。
 对象 `NormalToWorld` 按 snapshot primitive 计算一次。render thread 不访问 Scene、proxy、
@@ -197,7 +197,8 @@ Opaque 即使列表为空仍定义输出。内置 ForwardPipeline 的基础与 H
 Tidal Atrium 直接装配 ForwardPipeline，只提供场景、材质、相机、输出屏幕描述和 ImGui 控件。
 
 Forward 默认保持基础深度/opaque/transparent 路径；同一类通过配置组合 HDR、级联阴影、Forward+、
-AO、TAA 或 4x MSAA、Bloom 与多 view 输出。view/scissor 经 `MakeViewport` 统一处理 Vulkan Y 翻转。
+AO、TAA 或 4x MSAA、Bloom 与多 view 输出。HDR 多相机时阴影图集每帧声明一次；`ForwardViewSource::Auxiliary`
+观察相机采样该图集并跳过 TAA/AO/Bloom/预通道。view/scissor 经 `MakeViewport` 统一处理 Vulkan Y 翻转。
 产品 pass 的 graph 资源经通用 `RendererListPassBindings` 进入既有提交循环。目标、时域原子提交、
 配置互斥和当前范围统一见 [Renderer foundation](renderer-foundation.md#forward-范围)。
 

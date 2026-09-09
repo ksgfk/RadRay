@@ -78,6 +78,8 @@ struct ForwardPipeline::Impl {
         size_t HdrViewCount{0};
         bool OverlaysSucceeded{true};
         vector<ViewStateId> RenderedViews;
+        unordered_set<ViewStateId, ViewStateIdHash> AuxiliaryViews;
+        unique_ptr<ForwardHdrView> SharedShadowView;
     };
 
     Impl(Application* application, Scene* renderScene, CameraComponent* viewCamera)
@@ -111,6 +113,7 @@ struct ForwardPipeline::Impl {
         if (frame.FlightIndex() >= Flights.size()) return false;
         auto& flight = Flights[frame.FlightIndex()];
         for (auto& view : flight.HdrViews) view->Reset();
+        if (flight.SharedShadowView) flight.SharedShadowView->Reset();
         for (auto& family : flight.Families)
             for (auto& view : family.Views) view.ResetForReuse();
         flight.Families.resize(frame.ViewFamilies().size());
@@ -146,8 +149,12 @@ struct ForwardPipeline::Impl {
             depth.ResetView();
             lit.ResetView();
             BuildRendererList({"DepthOnly", "DepthOnly", &view.Culling, &view.View, RenderQueueRange::Opaque(), 0xffffffffu, RendererListSorting::FrontToBack}, depth, view.DepthOnly);
-            BuildRendererList({"Opaque", "ForwardLit", &view.Culling, &view.View, RenderQueueRange::Opaque()}, lit, view.Opaque);
-            BuildRendererList({"Transparent", "ForwardLit", &view.Culling, &view.View, RenderQueueRange::Transparent(), 0xffffffffu, RendererListSorting::BackToFront}, lit, view.Transparent);
+            const RendererListDesc litDescs[] = {
+                {"Opaque", "ForwardLit", &view.Culling, &view.View, RenderQueueRange::Opaque()},
+                {"Transparent", "ForwardLit", &view.Culling, &view.View, RenderQueueRange::Transparent(), 0xffffffffu, RendererListSorting::BackToFront},
+            };
+            RendererList* litOuts[] = {&view.Opaque, &view.Transparent};
+            BuildRendererLists(litDescs, lit, litOuts);
             flight.Stats.DepthCommands += view.DepthOnly.Commands.size();
             flight.Stats.OpaqueCommands += view.Opaque.Commands.size();
             flight.Stats.TransparentCommands += view.Transparent.Commands.size();
@@ -253,6 +260,7 @@ void ForwardPipeline::PrepareFrame(RenderPrepareContext& ctx) {
         RADRAY_WARN_LOG("Forward scene contains invalid bounds; these primitives remain conservatively visible");
         _impl->InvalidBoundsWarned = true;
     }
+    flight.AuxiliaryViews.clear();
     const auto jitter = [&](RenderViewDesc& view) {
         if (flight.Settings.Antialiasing != ForwardAntialiasing::Temporal) return;
         const auto radicalInverse = [](uint64_t value, uint32_t base) {
@@ -274,7 +282,10 @@ void ForwardPipeline::PrepareFrame(RenderPrepareContext& ctx) {
             for (const auto& source : _impl->Sources)
                 if (source.Output == output.Id) {
                     views.push_back(source.View);
-                    jitter(views.back());
+                    if (source.Auxiliary)
+                        flight.AuxiliaryViews.insert(views.back().StateId);
+                    else
+                        jitter(views.back());
                 }
             if (!views.empty()) ctx.Workloads.AddViewFamily({"Forward " + output.Name, output.Id, flight.Settings.RenderScale, std::move(views)});
         }
@@ -323,20 +334,48 @@ void ForwardPipeline::BuildGraph(RenderPipelineContext& ctx, RenderGraph& graph,
         }
         const auto rank = [&](RenderOutputId output) { return std::find(flight.SurfaceOrder.begin(), flight.SurfaceOrder.end(), output) - flight.SurfaceOrder.begin(); };
         std::stable_sort(families.begin(), families.end(), [&](const auto* a, const auto* b) { return rank(a->OutputId) < rank(b->OutputId); });
+        const ResolvedRenderView* primary = nullptr;
+        for (const auto* family : families) {
+            if (!family->OutputAvailable) continue;
+            for (const auto& view : family->Views) {
+                if (flight.AuxiliaryViews.contains(view.StateId)) continue;
+                primary = &view;
+                break;
+            }
+            if (primary) break;
+        }
+        if (!primary) {
+            for (const auto* family : families) {
+                if (!family->OutputAvailable || family->Views.empty()) continue;
+                primary = &family->Views.front();
+                break;
+            }
+        }
+        ForwardShadowAtlas atlas{};
+        if (primary) {
+            if (!flight.SharedShadowView) flight.SharedShadowView = make_unique<ForwardHdrView>();
+            if (!DeclareForwardSharedShadows(graph, flight.Settings, *primary, flight.Scene, *flight.DrawResources, _impl->Bindings,
+                                             *flight.SharedShadowView, _impl->Device->GetBackend(), _impl->LightOverflowWarned, atlas)) {
+                _impl->Error = true;
+                return;
+            }
+        }
         ForwardLitMeshPassProcessor hdrLit{*flight.DrawResources, _impl->Bindings, _impl->LightOverflowWarned, &ctx};
         for (const auto* familyPointer : families) {
             const auto& family = *familyPointer;
             bool firstOutput = true;
             for (const auto& view : family.Views) {
                 if (!family.OutputAvailable) continue;
-                const ForwardViewSignature signature{{view.ViewRect.Width, view.ViewRect.Height}, view.ViewRect, family.OutputFormat, flight.Settings};
+                const bool auxiliary = flight.AuxiliaryViews.contains(view.StateId);
+                const ForwardViewSignature signature{{view.ViewRect.Width, view.ViewRect.Height}, view.ViewRect, family.OutputFormat, flight.Settings, auxiliary};
                 const auto previous = _impl->Signatures.find(view.StateId);
                 if (previous == _impl->Signatures.end() || !previous->second.Matches(signature)) ctx.InvalidateView(view.StateId);
                 _impl->Signatures.insert_or_assign(view.StateId, signature);
                 if (viewIndex == flight.HdrViews.size()) flight.HdrViews.push_back(make_unique<ForwardHdrView>());
                 auto& work = *flight.HdrViews[viewIndex++];
                 if (BuildForwardHdrView(graph, ctx, *_impl->Device, _impl->Effects, flight.Settings, family, view, flight.Scene,
-                                        *flight.DrawResources, _impl->Bindings, work, firstOutput, _impl->LightOverflowWarned, flight.Surfaces, outputs, &hdrLit))
+                                        *flight.DrawResources, _impl->Bindings, work, firstOutput, _impl->LightOverflowWarned, flight.Surfaces, outputs,
+                                        atlas, auxiliary, &hdrLit))
                     firstOutput = false;
                 else
                     _impl->Error = true;
@@ -426,18 +465,21 @@ void ForwardPipeline::GraphRecorded(RenderPipelineContext& ctx, const RenderGrap
     if (flight.Settings.Hdr) {
         flight.Capture.CaptureReport(graph.GetReport());
         if (result.Success) {
+            auto* sharedShadows = flight.SharedShadowView.get();
+            const bool shadowsOk = !sharedShadows || (sharedShadows->ContentValid && sharedShadows->PassesSucceeded && sharedShadows->Execution.Succeeded());
             for (size_t i = 0; i < flight.HdrViewCount; ++i) {
                 auto& work = *flight.HdrViews[i];
-                const bool content = flight.OverlaysSucceeded && work.ContentValid && work.PassesSucceeded && work.Execution.Succeeded();
+                const bool content = flight.OverlaysSucceeded && work.ContentValid && work.PassesSucceeded && work.Execution.Succeeded() && shadowsOk;
                 if (!content) {
                     _impl->Error = true;
                     const auto describe = [](const RendererList& list) { const auto& s = list.Stats; return fmt::format("valid={} required={} bindings={} geometry={} prepare={} rejected={}", s.Valid, s.MissingRequiredPass, s.InvalidBindings, s.InvalidGeometry, s.PrepareResourceFailed, s.ProcessorRejected); };
+                    auto& cascades = sharedShadows ? sharedShadows->Cascades : work.Cascades;
                     RADRAY_ERR_LOG("Forward view '{}' incomplete: content={} passes={} pso={} bind={} skip={} depth[{}] opaque[{}] transparent[{}] shadows[{}/{}/{}/{}]",
                                    work.Main.View.Name, work.ContentValid, work.PassesSucceeded, work.Execution.PsoFailure, work.Execution.BindingFailure, work.Execution.Skipped,
-                                   describe(work.Main.DepthOnly), describe(work.Main.Opaque), describe(work.Main.Transparent), describe(work.Cascades[0].DepthOnly), describe(work.Cascades[1].DepthOnly), describe(work.Cascades[2].DepthOnly), describe(work.Cascades[3].DepthOnly));
+                                   describe(work.Main.DepthOnly), describe(work.Main.Opaque), describe(work.Main.Transparent), describe(cascades[0].DepthOnly), describe(cascades[1].DepthOnly), describe(cascades[2].DepthOnly), describe(cascades[3].DepthOnly));
                 }
                 ctx.CommitView(work.Main.View.StateId, work.Completion, content);
-                flight.Stats.CullCalls += 1 + (flight.Settings.Shadows ? 4 : 0);
+                flight.Stats.CullCalls += 1;
                 flight.Stats.DepthCommands += work.Main.DepthOnly.Commands.size();
                 flight.Stats.OpaqueCommands += work.Main.Opaque.Commands.size();
                 flight.Stats.TransparentCommands += work.Main.Transparent.Commands.size();
@@ -446,6 +488,14 @@ void ForwardPipeline::GraphRecorded(RenderPipelineContext& ctx, const RenderGrap
                 flight.Stats.Execution.PsoFailure += work.Execution.PsoFailure;
                 flight.Stats.Execution.BindingFailure += work.Execution.BindingFailure;
                 flight.Stats.Execution.Skipped += work.Execution.Skipped;
+            }
+            if (sharedShadows && flight.HdrViewCount > 0) {
+                if (flight.Settings.Shadows) flight.Stats.CullCalls += 4;
+                flight.Stats.Execution.Commands += sharedShadows->Execution.Commands;
+                flight.Stats.Execution.Draws += sharedShadows->Execution.Draws;
+                flight.Stats.Execution.PsoFailure += sharedShadows->Execution.PsoFailure;
+                flight.Stats.Execution.BindingFailure += sharedShadows->Execution.BindingFailure;
+                flight.Stats.Execution.Skipped += sharedShadows->Execution.Skipped;
             }
         } else {
             _impl->Error = true;

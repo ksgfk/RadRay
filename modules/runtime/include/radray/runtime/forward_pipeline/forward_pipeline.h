@@ -53,6 +53,8 @@ struct ForwardPipelineSettings {
 struct ForwardViewSource {
     RenderOutputId Output;
     RenderViewDesc View;
+    /// Auxiliary views sample the frame's shared shadow atlas and skip TAA/AO/Bloom/prepass.
+    bool Auxiliary{false};
 };
 
 struct ForwardOutputOverlay {
@@ -84,6 +86,7 @@ public:
     bool SetSettings(const ForwardPipelineSettings& settings) noexcept;
     const ForwardPipelineSettings& GetSettings() const noexcept;
     /// Empty restores the camera supplied to the constructor for each presentation output.
+    /// Auxiliary sources skip TAA/AO/Bloom/prepass and sample the frame's shared shadow atlas.
     bool SetViews(std::span<const ForwardViewSource> views);
     /// Sources are SDR offscreen outputs produced by this frame, sampled by the final composite.
     bool SetOutputOverlays(std::span<const ForwardOutputOverlay> overlays);

@@ -33,7 +33,10 @@ void ForwardLitMeshPassProcessor::ResetView() noexcept {
         if (!state) continue;
         state->ViewPrepared = false;
         state->View.reset();
-        if (state->ViewDependent()) state->Objects.Clear();
+        if (state->ViewDependent() && _temporal) {
+            state->Objects.Clear();
+            state->Templates.Clear();
+        }
     }
 }
 
@@ -52,7 +55,8 @@ const Eigen::Matrix4f& ForwardLitMeshPassProcessor::CachedNormalToWorld(RenderPr
 
 void ForwardLitMeshPassProcessor::PrepareCommand(const RendererListDesc& desc, const RenderSceneSnapshot& scene,
                                                   const MeshBatch& batch, const MaterialPassRenderData& pass,
-                                                  RenderQueue queue, bool mirrored, MeshPassDrawListContext& out) {
+                                                  RenderQueue queue, bool mirrored, MeshBatchIndex batchIndex,
+                                                  bool reuseCommand, MeshPassDrawListContext& out) {
     auto* program = pass.Program.Get();
     const auto state = ResolveProgram(program);
     if (!state || pass.ParameterGroup != state->Binding->MaterialGroup) {
@@ -67,6 +71,20 @@ void ForwardLitMeshPassProcessor::PrepareCommand(const RendererListDesc& desc, c
         if (FillViewParameters(values, *desc.Culling.Get(), *desc.View.Get(), _lightOverflowWarned,
                                binding.PassGroup.has_value() || desc.MaterialPassName == "DepthNormalsMotion" || desc.MaterialPassName == "ShadowCaster"))
             ps.View = _resources.PrepareGroup(*program, binding.ViewGroup, values);
+    }
+    const bool cacheCommand = reuseCommand && !(ps.ViewDependent() && _temporal);
+    if (cacheCommand) {
+        if (auto* tmpl = ps.Templates.Find(batchIndex)) {
+            ++_duplicatePreparations;
+            if (!ps.View) {
+                out.Reject(MeshPassRejectReason::PrepareResourceFailed);
+                return;
+            }
+            MeshDrawCommand command = tmpl->Command;
+            if (tmpl->ViewGroupIndex < command.Groups.size()) command.Groups[tmpl->ViewGroupIndex] = *ps.View;
+            out.AddCommand(std::move(command));
+            return;
+        }
     }
     auto* material = ps.Materials.Find(batch.Material);
     if (material == nullptr) {
@@ -123,6 +141,18 @@ void ForwardLitMeshPassProcessor::PrepareCommand(const RendererListDesc& desc, c
     const PreparedShaderGroup* groups[3]{&*ps.View, &**material, &**object};
     std::sort(std::begin(groups), std::end(groups), [](const auto* a, const auto* b) { return a->Group < b->Group; });
     for (const auto* group : groups) command.Groups.push_back(*group);
+    if (cacheCommand) {
+        uint32_t viewIndex = 0;
+        for (uint32_t index = 0; index < command.Groups.size(); ++index) {
+            if (command.Groups[index].Group == binding.ViewGroup) {
+                viewIndex = index;
+                break;
+            }
+        }
+        auto& stored = ps.Templates.Insert(batchIndex);
+        stored.Command = command;
+        stored.ViewGroupIndex = viewIndex;
+    }
     out.AddCommand(std::move(command));
 }
 
@@ -138,7 +168,7 @@ void ForwardLitMeshPassProcessor::AddMeshBatch(const RendererListDesc& desc, con
         out.Reject(MeshPassRejectReason::InvalidGeometry);
         return;
     }
-    PrepareCommand(desc, scene, batch, *pass.Get(), materialData.Queue, IsMirroredAffine(scene.Primitives[batch.Primitive].LocalToWorld), out);
+    PrepareCommand(desc, scene, batch, *pass.Get(), materialData.Queue, IsMirroredAffine(scene.Primitives[batch.Primitive].LocalToWorld), 0, false, out);
 }
 
 void ForwardLitMeshPassProcessor::PrepareRecord(const RendererListDesc& desc, const RenderSceneSnapshot& scene,
@@ -153,7 +183,7 @@ void ForwardLitMeshPassProcessor::PrepareRecord(const RendererListDesc& desc, co
         out.Reject(MeshPassRejectReason::InvalidBindings);
         return;
     }
-    PrepareCommand(desc, scene, scene.MeshBatches[record.Batch], pass, record.Queue, record.Mirrored, out);
+    PrepareCommand(desc, scene, scene.MeshBatches[record.Batch], pass, record.Queue, record.Mirrored, record.Batch, true, out);
 }
 
 }  // namespace radray::forward_detail

@@ -469,7 +469,7 @@ protected:
             view.WorldToView = LookAtLH(view.WorldPosition, Eigen::Vector3f{0, 0, 5}, Eigen::Vector3f::UnitZ().eval());
             view.Projection = OrthographicProjectionDesc{48, .1f, 100};
             view.ViewRect = view.ScissorRect = {};
-            views.push_back({_observerId, view});
+            views.push_back({_observerId, view, true});
         }
         if (!_pipeline->SetViews(views)) {
             _failed = true;

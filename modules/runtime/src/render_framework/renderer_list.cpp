@@ -2,14 +2,25 @@
 #include <radray/runtime/render_framework/mesh_pass_processor.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <limits>
+#include <span>
 #include <tuple>
 #include <radray/profiler.h>
 #include <radray/runtime/render_framework/cpu_draw_record.h>
+#include <radray/types.h>
 
 namespace radray {
 namespace {
+
+constexpr uint32_t kMaxSharedRendererLists = 8;
+
+struct ListTarget {
+    const RendererListDesc* Desc;
+    RendererList* Out;
+    uint32_t PassHash;
+};
 
 void SortRendererListItems(const RendererListDesc& desc, RendererList& out) {
     RADRAY_PROFILE_SCOPE_N("SortRendererList");
@@ -24,6 +35,29 @@ void SortRendererListItems(const RendererListDesc& desc, RendererList& out) {
         if (a.ViewDepth != b.ViewDepth) return desc.Sorting == RendererListSorting::BackToFront ? a.ViewDepth > b.ViewDepth : a.ViewDepth < b.ViewDepth;
         return std::tie(a.Primitive, a.Batch) < std::tie(b.Primitive, b.Batch);
     });
+}
+
+bool HasDrawRecordTable(const RenderSceneSnapshot& scene) noexcept {
+    return !scene.DrawRecords.empty() && scene.PrimitiveDrawBegin.size() == scene.Primitives.size() + 1;
+}
+
+bool DescriptorIsValid(const RendererListDesc& desc) noexcept {
+    return desc.Culling && desc.View && desc.Culling->Scene && desc.Culling->Stats.Valid &&
+           desc.Culling->View == desc.View && desc.QueueRange.Min <= desc.QueueRange.Max && !desc.MaterialPassName.empty();
+}
+
+bool ValidateVisibleBatches(const CullingResults& culling) {
+    const auto& scene = *culling.Scene.Get();
+    for (const auto& visible : culling.Primitives) {
+        if (visible.Primitive >= scene.Primitives.size()) return false;
+        const auto& primitive = scene.Primitives[visible.Primitive];
+        if (primitive.FirstMeshBatch > scene.MeshBatches.size() || primitive.MeshBatchCount > scene.MeshBatches.size() - primitive.FirstMeshBatch) return false;
+        for (uint32_t offset = 0; offset < primitive.MeshBatchCount; ++offset) {
+            const auto& batch = scene.MeshBatches[primitive.FirstMeshBatch + offset];
+            if (batch.Primitive != visible.Primitive || batch.Material >= scene.Materials.size()) return false;
+        }
+    }
+    return true;
 }
 
 bool AppendPreparedCommand(const RendererListDesc& desc, const VisiblePrimitive& visible, MeshBatchIndex batchIndex,
@@ -47,18 +81,26 @@ bool AppendPreparedCommand(const RendererListDesc& desc, const VisiblePrimitive&
         ++out.Stats.NonFiniteDepth;
         depth = std::numeric_limits<float>::max();
     }
-    if (out.Commands.size() >= std::numeric_limits<uint32_t>::max()) {
-        out.ResetForReuse();
-        return false;
-    }
+    if (out.Commands.size() >= std::numeric_limits<uint32_t>::max()) return false;
     out.Items.push_back({{queue, programFrameId, material, depth, visible.Primitive, batchIndex}, static_cast<uint32_t>(out.Commands.size())});
     out.Commands.push_back(result.TakeCommand());
     return true;
 }
 
-bool BuildRendererListFromRecords(const RendererListDesc& desc, MeshPassProcessor& processor, RendererList& out) {
+void FinishList(const RendererListDesc& desc, RendererList& out) {
+    SortRendererListItems(desc, out);
+    out.Stats.Commands = out.Commands.size();
+    out.Stats.Valid = true;
+}
+
+void ResetTargets(std::span<ListTarget> targets) {
+    for (auto& target : targets) target.Out->ResetForReuse();
+}
+
+bool EmitFromRecords(const ListTarget& target, MeshPassProcessor& processor) {
+    const auto& desc = *target.Desc;
     const auto& scene = *desc.Culling->Scene.Get();
-    const uint32_t passHash = HashPassName(desc.MaterialPassName);
+    auto& out = *target.Out;
     out.Stats.VisiblePrimitives = desc.Culling->Primitives.size();
     for (const auto& visible : desc.Culling->Primitives) {
         if (visible.Primitive >= scene.Primitives.size() || visible.Primitive + 1 >= scene.PrimitiveDrawBegin.size()) return false;
@@ -72,7 +114,7 @@ bool BuildRendererListFromRecords(const RendererListDesc& desc, MeshPassProcesso
         bool matchedPass = false;
         for (uint32_t index = begin; index < end; ++index) {
             const auto& record = scene.DrawRecords[index];
-            if (record.PassNameHash != passHash) continue;
+            if (record.PassNameHash != target.PassHash) continue;
             matchedPass = true;
             ++out.Stats.ConsideredBatches;
             if (!desc.QueueRange.Contains(record.Queue)) {
@@ -102,40 +144,14 @@ bool BuildRendererListFromRecords(const RendererListDesc& desc, MeshPassProcesso
             if (desc.RequireMaterialPass) out.Stats.MissingRequiredPass += primitive.MeshBatchCount;
         }
     }
-    SortRendererListItems(desc, out);
-    out.Stats.Commands = out.Commands.size();
-    out.Stats.Valid = true;
+    FinishList(desc, out);
     return true;
 }
 
-}  // namespace
-
-void MeshPassProcessor::PrepareRecord(const RendererListDesc& desc, const RenderSceneSnapshot& scene,
-                                      const DrawRecord& record, MeshPassDrawListContext& out) {
-    if (record.Batch >= scene.MeshBatches.size()) {
-        out.Reject(MeshPassRejectReason::InvalidGeometry);
-        return;
-    }
-    AddMeshBatch(desc, scene, scene.MeshBatches[record.Batch], out);
-}
-
-bool BuildRendererList(const RendererListDesc& desc, MeshPassProcessor& processor, RendererList& out) {
-    RADRAY_PROFILE_SCOPE_N("BuildRendererList");
-    out.ResetForReuse();
-    if (!desc.Culling || !desc.View || !desc.Culling->Scene || !desc.Culling->Stats.Valid ||
-        desc.Culling->View != desc.View || desc.QueueRange.Min > desc.QueueRange.Max || desc.MaterialPassName.empty()) return false;
+bool EmitFromBatches(const ListTarget& target, MeshPassProcessor& processor) {
+    const auto& desc = *target.Desc;
     const auto& scene = *desc.Culling->Scene.Get();
-    for (const auto& visible : desc.Culling->Primitives) {
-        if (visible.Primitive >= scene.Primitives.size()) return false;
-        const auto& primitive = scene.Primitives[visible.Primitive];
-        if (primitive.FirstMeshBatch > scene.MeshBatches.size() || primitive.MeshBatchCount > scene.MeshBatches.size() - primitive.FirstMeshBatch) return false;
-        for (uint32_t offset = 0; offset < primitive.MeshBatchCount; ++offset) {
-            const auto& batch = scene.MeshBatches[primitive.FirstMeshBatch + offset];
-            if (batch.Primitive != visible.Primitive || batch.Material >= scene.Materials.size()) return false;
-        }
-    }
-    if (!scene.DrawRecords.empty() && scene.PrimitiveDrawBegin.size() == scene.Primitives.size() + 1)
-        return BuildRendererListFromRecords(desc, processor, out);
+    auto& out = *target.Out;
     out.Stats.VisiblePrimitives = desc.Culling->Primitives.size();
     for (const auto& visible : desc.Culling->Primitives) {
         const auto& primitive = scene.Primitives[visible.Primitive];
@@ -167,10 +183,68 @@ bool BuildRendererList(const RendererListDesc& desc, MeshPassProcessor& processo
             if (!AppendPreparedCommand(desc, visible, batchIndex, material.Queue, pass->ProgramFrameId, batch.Material, result, out)) return false;
         }
     }
-    SortRendererListItems(desc, out);
-    out.Stats.Commands = out.Commands.size();
-    out.Stats.Valid = true;
+    FinishList(desc, out);
     return true;
+}
+
+bool EmitTargets(std::span<ListTarget> targets, MeshPassProcessor& processor, bool records) {
+    for (auto& target : targets) {
+        const bool ok = records ? EmitFromRecords(target, processor) : EmitFromBatches(target, processor);
+        if (!ok) return false;
+    }
+    return true;
+}
+
+bool BuildRendererListsImpl(std::span<const RendererListDesc> descs, MeshPassProcessor& processor, std::span<RendererList*> outs) {
+    if (descs.size() != outs.size() || descs.size() > kMaxSharedRendererLists) return false;
+    for (auto* out : outs) {
+        if (out == nullptr) return false;
+        out->ResetForReuse();
+    }
+    if (descs.empty()) return true;
+    for (const auto& desc : descs) {
+        if (!DescriptorIsValid(desc) || desc.Culling != descs[0].Culling || desc.View != descs[0].View) {
+            for (auto* out : outs) out->ResetForReuse();
+            return false;
+        }
+    }
+    const auto& scene = *descs[0].Culling->Scene.Get();
+    const bool records = HasDrawRecordTable(scene);
+    if (!records && !ValidateVisibleBatches(*descs[0].Culling.Get())) return false;
+    array<ListTarget, kMaxSharedRendererLists> storage{};
+    const uint32_t listCount = static_cast<uint32_t>(descs.size());
+    const size_t visible = descs[0].Culling->Primitives.size();
+    for (uint32_t list = 0; list < listCount; ++list) {
+        storage[list] = {&descs[list], outs[list], HashPassName(descs[list].MaterialPassName)};
+        outs[list]->Commands.reserve(visible);
+        outs[list]->Items.reserve(visible);
+    }
+    auto targets = std::span<ListTarget>{storage.data(), listCount};
+    const bool ok = EmitTargets(targets, processor, records);
+    if (!ok) ResetTargets(targets);
+    return ok;
+}
+
+}  // namespace
+
+void MeshPassProcessor::PrepareRecord(const RendererListDesc& desc, const RenderSceneSnapshot& scene,
+                                      const DrawRecord& record, MeshPassDrawListContext& out) {
+    if (record.Batch >= scene.MeshBatches.size()) {
+        out.Reject(MeshPassRejectReason::InvalidGeometry);
+        return;
+    }
+    AddMeshBatch(desc, scene, scene.MeshBatches[record.Batch], out);
+}
+
+bool BuildRendererList(const RendererListDesc& desc, MeshPassProcessor& processor, RendererList& out) {
+    RADRAY_PROFILE_SCOPE_N("BuildRendererList");
+    RendererList* outPtr = &out;
+    return BuildRendererListsImpl(std::span<const RendererListDesc>{&desc, 1}, processor, std::span<RendererList*>{&outPtr, 1});
+}
+
+bool BuildRendererLists(std::span<const RendererListDesc> descs, MeshPassProcessor& processor, std::span<RendererList*> outs) {
+    RADRAY_PROFILE_SCOPE_N("BuildRendererLists");
+    return BuildRendererListsImpl(descs, processor, outs);
 }
 
 }  // namespace radray

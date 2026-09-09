@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <numeric>
+#include <span>
 #include <tuple>
+#include <radray/runtime/render_framework/cpu_draw_record.h>
 #include <radray/runtime/render_framework/mesh_pass_processor.h>
 
 namespace radray {
@@ -56,6 +58,33 @@ struct ListFixture {
         Scene.Primitives.push_back({.LayerMask = layer, .FirstMeshBatch = index, .MeshBatchCount = 1});
         Scene.MeshBatches.push_back({index, material, nullptr, index * 3, 3, 0, 0});
         Culling.Primitives.push_back({index, depth});
+    }
+    void FillDrawRecords() {
+        Scene.DrawRecords.clear();
+        Scene.PrimitiveDrawBegin.resize(Scene.Primitives.size() + 1);
+        for (uint32_t primitiveIndex = 0; primitiveIndex < Scene.Primitives.size(); ++primitiveIndex) {
+            Scene.PrimitiveDrawBegin[primitiveIndex] = static_cast<uint32_t>(Scene.DrawRecords.size());
+            const auto& primitive = Scene.Primitives[primitiveIndex];
+            for (uint32_t offset = 0; offset < primitive.MeshBatchCount; ++offset) {
+                const auto batchIndex = primitive.FirstMeshBatch + offset;
+                const auto& batch = Scene.MeshBatches[batchIndex];
+                const auto& material = Scene.Materials[batch.Material];
+                for (uint32_t passIndex = 0; passIndex < material.Passes.size(); ++passIndex) {
+                    const auto& pass = material.Passes[passIndex];
+                    DrawRecord record;
+                    record.Primitive = primitiveIndex;
+                    record.Batch = batchIndex;
+                    record.Material = batch.Material;
+                    record.PassIndex = passIndex;
+                    record.PassNameHash = HashPassName(pass.PassName);
+                    record.ProgramFrameId = pass.ProgramFrameId;
+                    record.Queue = material.Queue;
+                    record.Status = DrawRecordStatus::Ready;
+                    Scene.DrawRecords.push_back(record);
+                }
+            }
+        }
+        Scene.PrimitiveDrawBegin.back() = static_cast<uint32_t>(Scene.DrawRecords.size());
     }
     RendererListDesc Desc(RenderQueueRange queue = {}, RendererListSorting sorting = RendererListSorting::StateThenFrontToBack) {
         return {"test", "ForwardLit", &Culling, &View, queue, 0xffffffffu, sorting};
@@ -260,6 +289,92 @@ TEST(RendererList, SortingKeepsDescriptionsAndFrameBindingsInPublicationOrder) {
     manual.FirstIndex = 99;
     list.Commands.push_back(std::move(manual));
     EXPECT_EQ(list.GetCommand(0).FirstIndex, 99u);
+}
+
+void ExpectSameList(const RendererList& left, const RendererList& right) {
+    EXPECT_EQ(left.Commands.size(), right.Commands.size());
+    EXPECT_EQ(left.Items.size(), right.Items.size());
+    EXPECT_EQ(left.Stats.Commands, right.Stats.Commands);
+    EXPECT_EQ(left.Stats.ConsideredBatches, right.Stats.ConsideredBatches);
+    EXPECT_EQ(left.Stats.QueueRejected, right.Stats.QueueRejected);
+    EXPECT_EQ(left.Stats.MissingPass, right.Stats.MissingPass);
+    EXPECT_EQ(left.Stats.LayerRejected, right.Stats.LayerRejected);
+    for (size_t index = 0; index < left.GetItems().size(); ++index) {
+        EXPECT_EQ(left.GetItems()[index].SortData.Primitive, right.GetItems()[index].SortData.Primitive);
+        EXPECT_EQ(left.GetCommand(index).FirstIndex, right.GetCommand(index).FirstIndex);
+    }
+}
+
+TEST(RendererList, SharedCullingBuildsDepthOpaqueTransparentTogether) {
+    ListFixture data;
+    data.Add(0, 2);
+    data.Add(1, 4);
+    data.Add(2, 6);
+    const RendererListDesc descs[] = {
+        {"depth", "DepthOnly", &data.Culling, &data.View, RenderQueueRange::Opaque(), 0xffffffffu, RendererListSorting::FrontToBack},
+        {"opaque", "ForwardLit", &data.Culling, &data.View, RenderQueueRange::Opaque()},
+        {"transparent", "ForwardLit", &data.Culling, &data.View, RenderQueueRange::Transparent(), 0xffffffffu, RendererListSorting::BackToFront},
+    };
+    RecordingProcessor sequential;
+    RendererList depth, opaque, transparent;
+    ASSERT_TRUE(BuildRendererList(descs[0], sequential, depth));
+    ASSERT_TRUE(BuildRendererList(descs[1], sequential, opaque));
+    ASSERT_TRUE(BuildRendererList(descs[2], sequential, transparent));
+    RecordingProcessor together;
+    RendererList sharedDepth, sharedOpaque, sharedTransparent;
+    RendererList* outs[] = {&sharedDepth, &sharedOpaque, &sharedTransparent};
+    ASSERT_TRUE(BuildRendererLists(descs, together, outs));
+    ExpectSameList(depth, sharedDepth);
+    ExpectSameList(opaque, sharedOpaque);
+    ExpectSameList(transparent, sharedTransparent);
+    EXPECT_EQ(sequential.Calls, together.Calls);
+}
+
+TEST(RendererList, DrawRecordsSharedCullingMatchesSequential) {
+    ListFixture data;
+    data.Add(0, 2);
+    data.Add(1, 4);
+    data.Add(2, 6);
+    data.FillDrawRecords();
+    const RendererListDesc descs[] = {
+        {"depth", "DepthOnly", &data.Culling, &data.View, RenderQueueRange::Opaque(), 0xffffffffu, RendererListSorting::FrontToBack},
+        {"opaque", "ForwardLit", &data.Culling, &data.View, RenderQueueRange::Opaque()},
+        {"transparent", "ForwardLit", &data.Culling, &data.View, RenderQueueRange::Transparent(), 0xffffffffu, RendererListSorting::BackToFront},
+    };
+    RecordingProcessor sequential;
+    RendererList depth, opaque, transparent;
+    ASSERT_TRUE(BuildRendererList(descs[0], sequential, depth));
+    ASSERT_TRUE(BuildRendererList(descs[1], sequential, opaque));
+    ASSERT_TRUE(BuildRendererList(descs[2], sequential, transparent));
+    RecordingProcessor together;
+    RendererList sharedDepth, sharedOpaque, sharedTransparent;
+    RendererList* outs[] = {&sharedDepth, &sharedOpaque, &sharedTransparent};
+    ASSERT_TRUE(BuildRendererLists(descs, together, outs));
+    ExpectSameList(depth, sharedDepth);
+    ExpectSameList(opaque, sharedOpaque);
+    ExpectSameList(transparent, sharedTransparent);
+    EXPECT_EQ(sequential.Calls, together.Calls);
+}
+
+TEST(RendererList, DrawRecordsSkipMeshBatchRangeValidation) {
+    ListFixture data;
+    data.Add(0, 0);
+    data.FillDrawRecords();
+    data.Scene.Primitives[0].MeshBatchCount = 2;
+    RecordingProcessor processor;
+    RendererList list;
+    ASSERT_TRUE(BuildRendererList(data.Desc(), processor, list));
+    EXPECT_EQ(list.Commands.size(), 1u);
+}
+
+TEST(RendererList, SharedListCountMustMatchOutputs) {
+    ListFixture data;
+    data.Add(0, 0);
+    RecordingProcessor processor;
+    RendererList list;
+    const RendererListDesc descs[] = {data.Desc(), data.Desc()};
+    RendererList* outs[] = {&list};
+    EXPECT_FALSE(BuildRendererLists(descs, processor, outs));
 }
 
 }  // namespace

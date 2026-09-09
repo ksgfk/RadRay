@@ -723,7 +723,7 @@ private:
             else
                 view.Projection = PerspectiveProjectionDesc{Radian(58.f), .1f, 250};
             view.LayerMask = 3;
-            views.push_back({_observers[i].Output, view});
+            views.push_back({_observers[i].Output, view, true});
             ForwardOutputSurface screen{_observers[i].Output, main};
             screen.LocalToWorld(0, 0) = 6.6f;
             screen.LocalToWorld(1, 1) = 4.f;

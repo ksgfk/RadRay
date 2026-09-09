@@ -16,11 +16,19 @@ struct ForwardEffectPrograms {
     bool Initialize(RenderSystem& system);
 };
 
+struct ForwardShadowAtlas {
+    RgTextureValue Texture;
+    array<Eigen::Matrix4f, 4> Matrices{};
+    array<Eigen::Vector4f, 4> Spheres{}, Bias{};
+    Eigen::Vector4f Params{Eigen::Vector4f::Zero()};
+};
+
 struct ForwardViewSignature {
     RenderExtent Extent;
     Rect ViewRect;
     render::TextureFormat OutputFormat;
     ForwardPipelineSettings Settings;
+    bool Auxiliary{false};
     bool Matches(const ForwardViewSignature& other) const noexcept;
 };
 
@@ -33,13 +41,17 @@ struct ForwardHdrView {
     void Reset();
 };
 
+bool DeclareForwardSharedShadows(RenderGraph& graph, const ForwardPipelineSettings& settings, const ResolvedRenderView& primary,
+                                 const RenderSceneSnapshot& scene, FrameDrawResources& draws, ForwardBindingCache& bindings,
+                                 ForwardHdrView& work, render::RenderBackend backend, bool& warned, ForwardShadowAtlas& out);
+
 bool BuildForwardHdrView(RenderGraph& graph, RenderPipelineContext& context, render::Device& device,
                          const ForwardEffectPrograms& programs, const ForwardPipelineSettings& settings,
                          const ResolvedRenderViewFamily& family, const ResolvedRenderView& sourceView,
                          const RenderSceneSnapshot& scene, FrameDrawResources& draws, ForwardBindingCache& bindings,
                          ForwardHdrView& work, bool firstOutputView, bool& lightOverflowWarned,
                          std::span<const ForwardOutputSurface> surfaces, std::span<RenderGraphOutputBinding> outputs,
-                         ForwardLitMeshPassProcessor* sharedLit = nullptr);
+                         const ForwardShadowAtlas& shadows, bool auxiliary, ForwardLitMeshPassProcessor* sharedLit = nullptr);
 
 bool BuildForwardOutputOverlay(RenderGraph& graph, RenderPipelineContext& context, const ForwardEffectPrograms& programs,
                                const ForwardOutputOverlay& overlay, render::RenderBackend backend, bool& success, std::span<RenderGraphOutputBinding> outputs);

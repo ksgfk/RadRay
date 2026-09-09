@@ -1,5 +1,7 @@
 #pragma once
 
+#include <span>
+
 #include <radray/runtime/render_framework/culling.h>
 #include <radray/runtime/render_framework/mesh_draw_command.h>
 
@@ -59,5 +61,7 @@ struct RendererList {
 };
 
 bool BuildRendererList(const RendererListDesc& desc, MeshPassProcessor& processor, RendererList& out);
+/// One traversal of a shared Culling/View into several lists. `descs` and `outs` must be the same size.
+bool BuildRendererLists(std::span<const RendererListDesc> descs, MeshPassProcessor& processor, std::span<RendererList*> outs);
 
 }  // namespace radray

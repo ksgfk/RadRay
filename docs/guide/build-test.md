@@ -131,7 +131,8 @@ material 和 object 等所有组，pool 字节是描述符估算。
 CPU 上 `Render` 分成构图与执行，不要把 `BuildForwardHdrView` 当成 GPU：
 
 - `ComposeGraph` → `FrameGraph::Expand` → `ForwardPipeline::BuildGraph` / `BuildForwardHdrView`：按相机声明 pass。
-  其内部 `MainViewCull` / `FrustumCull`、`MainViewRendererLists`、`BuildShadows` 是场景准备；
+  阴影在 `DeclareSharedShadows` / `BuildShadows` 中按本帧主相机声明一次；每个 view 的
+  `MainViewCull` / `FrustumCull`、`MainViewRendererLists` 是场景准备。
   `DeclareHdrGraph` / `ForwardGraph::BuildGraph` / `PrepareRendererList` 才是往图里挂节点。
 - `ExecuteGraph` → `RenderGraph::Execute`：`RenderGraph::Compile`（`Validate`、`BuildIR`、`CompilePlanHit` 或
   `CompilePlanMiss`/`CompileRenderGraph`、`Optimize`）、`RenderGraph::Realize`（transient 分配）、

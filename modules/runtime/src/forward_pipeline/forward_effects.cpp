@@ -235,8 +235,7 @@ ShadowData BuildShadows(RenderGraph& graph, const ForwardPipelineSettings& setti
     RADRAY_PROFILE_SCOPE_N("BuildShadows");
     ShadowData shadow;
     const RenderLightData* sun = nullptr;
-    for (const auto& visible : work.Main.Culling.Lights) {
-        const auto& light = scene.Lights[visible.Light];
+    for (const auto& light : scene.Lights) {
         if (light.Type == LightType::Directional) {
             sun = &light;
             break;
@@ -386,7 +385,8 @@ bool ForwardViewSignature::Matches(const ForwardViewSignature& other) const noex
     a.Bloom = b.Bloom;
     a.BloomStrength = b.BloomStrength;
     return Extent == other.Extent && ViewRect.X == other.ViewRect.X && ViewRect.Y == other.ViewRect.Y &&
-           ViewRect.Width == other.ViewRect.Width && ViewRect.Height == other.ViewRect.Height && OutputFormat == other.OutputFormat && a == b;
+           ViewRect.Width == other.ViewRect.Width && ViewRect.Height == other.ViewRect.Height && OutputFormat == other.OutputFormat &&
+           Auxiliary == other.Auxiliary && a == b;
 }
 void ForwardHdrView::Reset() {
     Main.ResetForReuse();
@@ -395,6 +395,28 @@ void ForwardHdrView::Reset() {
     Completion = {};
     ContentValid = false;
     PassesSucceeded = true;
+}
+
+bool DeclareForwardSharedShadows(RenderGraph& graph, const ForwardPipelineSettings& settings, const ResolvedRenderView& primary,
+                                  const RenderSceneSnapshot& scene, FrameDrawResources& draws, ForwardBindingCache& bindings,
+                                  ForwardHdrView& work, render::RenderBackend backend, bool& warned, ForwardShadowAtlas& out) {
+    RADRAY_PROFILE_SCOPE_N("DeclareSharedShadows");
+    const auto previousScope = graph.SetResourceView(primary.StateId.Value);
+    struct RestoreScope {
+        RenderGraph& Graph;
+        uint64_t Previous;
+        ~RestoreScope() { Graph.SetResourceView(Previous); }
+    } restore{graph, previousScope};
+    out = {};
+    work.ContentValid = true;
+    out.Texture = Texture(graph, {settings.ShadowResolution, settings.ShadowResolution}, TextureFormat::D32_FLOAT,
+                           TextureUse::DepthStencilWrite | TextureUse::Resource, "Forward.Shadows", 1, 4);
+    auto shadow = BuildShadows(graph, settings, primary, scene, draws, bindings, work, out.Texture, backend, warned);
+    out.Matrices = shadow.Matrices;
+    out.Spheres = shadow.Spheres;
+    out.Bias = shadow.Bias;
+    out.Params = shadow.Params;
+    return out.Texture.IsValid() && work.PassesSucceeded;
 }
 
 namespace {
@@ -454,7 +476,7 @@ bool BuildForwardHdrView(RenderGraph& graph, RenderPipelineContext& context, ren
                          const RenderSceneSnapshot& scene, FrameDrawResources& draws, ForwardBindingCache& bindings,
                          ForwardHdrView& work, bool firstOutputView, bool& lightOverflowWarned,
                          std::span<const ForwardOutputSurface> surfaces, std::span<RenderGraphOutputBinding> outputs,
-                         ForwardLitMeshPassProcessor* sharedLit) {
+                         const ForwardShadowAtlas& shadows, bool auxiliary, ForwardLitMeshPassProcessor* sharedLit) {
     RADRAY_PROFILE_SCOPE_N("BuildForwardHdrView");
     const auto previousScope = graph.SetResourceView(sourceView.StateId.Value);
     struct RestoreScope {
@@ -462,8 +484,11 @@ bool BuildForwardHdrView(RenderGraph& graph, RenderPipelineContext& context, ren
         uint64_t Previous;
         ~RestoreScope() { Graph.SetResourceView(Previous); }
     } restore{graph, previousScope};
-    const bool temporal = settings.Antialiasing == ForwardAntialiasing::Temporal;
-    const bool msaa = settings.Antialiasing == ForwardAntialiasing::Msaa4;
+    const bool temporal = !auxiliary && settings.Antialiasing == ForwardAntialiasing::Temporal;
+    const bool msaa = !auxiliary && settings.Antialiasing == ForwardAntialiasing::Msaa4;
+    const bool writeDepthInOpaque = msaa || auxiliary;
+    auto viewSettings = settings;
+    if (auxiliary) viewSettings.AmbientOcclusion = viewSettings.Bloom = viewSettings.Fireflies = false;
     const uint32_t samples = msaa ? 4 : 1;
     const RenderExtent size{sourceView.ViewRect.Width, sourceView.ViewRect.Height};
     if (!size.Width || !size.Height || !family.OutputAvailable || family.SampleCount != 1) return false;
@@ -520,31 +545,46 @@ bool BuildForwardHdrView(RenderGraph& graph, RenderPipelineContext& context, ren
     work.ContentValid = true;
     {
         RADRAY_PROFILE_SCOPE_N("MainViewRendererLists");
-        if (!msaa) {
-            BuildRendererList({"DepthNormalsMotion", "DepthNormalsMotion", &work.Main.Culling, &view, RenderQueueRange::Opaque(), 0xffffffffu, RendererListSorting::FrontToBack, true}, *processor, work.Main.DepthOnly);
+        if (!msaa && !auxiliary) {
+            const RendererListDesc descs[] = {
+                {"DepthNormalsMotion", "DepthNormalsMotion", &work.Main.Culling, &view, RenderQueueRange::Opaque(), 0xffffffffu, RendererListSorting::FrontToBack, true},
+                {"Opaque", "ForwardLit", &work.Main.Culling, &view, RenderQueueRange::Opaque(), 0xffffffffu, RendererListSorting::StateThenFrontToBack, true},
+                {"Transparent", "ForwardLit", &work.Main.Culling, &view, RenderQueueRange::Transparent(), 0xffffffffu, RendererListSorting::BackToFront, true},
+            };
+            RendererList* outs[] = {&work.Main.DepthOnly, &work.Main.Opaque, &work.Main.Transparent};
+            BuildRendererLists(descs, *processor, outs);
             work.ContentValid &= work.Main.DepthOnly.Stats.ContentSucceeded();
+        } else {
+            const RendererListDesc descs[] = {
+                {"Opaque", "ForwardLit", &work.Main.Culling, &view, RenderQueueRange::Opaque(), 0xffffffffu, RendererListSorting::StateThenFrontToBack, true},
+                {"Transparent", "ForwardLit", &work.Main.Culling, &view, RenderQueueRange::Transparent(), 0xffffffffu, RendererListSorting::BackToFront, true},
+            };
+            RendererList* outs[] = {&work.Main.Opaque, &work.Main.Transparent};
+            BuildRendererLists(descs, *processor, outs);
         }
-        BuildRendererList({"Opaque", "ForwardLit", &work.Main.Culling, &view, RenderQueueRange::Opaque(), 0xffffffffu, RendererListSorting::StateThenFrontToBack, true}, *processor, work.Main.Opaque);
-        BuildRendererList({"Transparent", "ForwardLit", &work.Main.Culling, &view, RenderQueueRange::Transparent(), 0xffffffffu, RendererListSorting::BackToFront, true}, *processor, work.Main.Transparent);
         work.ContentValid &= work.Main.Opaque.Stats.ContentSucceeded() && work.Main.Transparent.Stats.ContentSucceeded();
     }
-    if (!msaa)
+    if (!writeDepthInOpaque)
         for (auto& command : work.Main.Opaque.Commands) command.PipelineState.DepthStencil.DepthWriteEnable = false;
     {
         RADRAY_PROFILE_SCOPE_N("DeclareHdrGraph");
-        auto depth = Texture(graph, size, TextureFormat::D32_FLOAT, TextureUse::DepthStencilWrite | TextureUse::DepthStencilRead | (msaa ? TextureUses{} : TextureUses{TextureUse::Resource}), "Forward.Depth", samples);
+        auto depth = Texture(graph, size, TextureFormat::D32_FLOAT, TextureUse::DepthStencilWrite | TextureUse::DepthStencilRead | (msaa || auxiliary ? TextureUses{} : TextureUses{TextureUse::Resource}), "Forward.Depth", samples);
         auto hdr = Texture(graph, size, TextureFormat::RGBA16_FLOAT, msaa ? TextureUse::RenderTarget | TextureUse::CopySource : kHdrUsage | TextureUse::RenderTarget, "Forward.HDR", samples);
-        auto normals = msaa ? RgTextureValue{} : Texture(graph, size, TextureFormat::RGBA16_FLOAT, kHdrUsage | TextureUse::RenderTarget, "Forward.Normals");
-        const auto motion = msaa ? RgTextureValue{} : Texture(graph, size, TextureFormat::RGBA16_FLOAT, kHdrUsage | TextureUse::RenderTarget, "Forward.Motion");
-        auto shadows = Texture(graph, {settings.ShadowResolution, settings.ShadowResolution}, TextureFormat::D32_FLOAT,
-                               TextureUse::DepthStencilWrite | TextureUse::Resource, "Forward.Shadows", 1, 4);
-        const auto shadow = BuildShadows(graph, settings, view, scene, draws, bindings, work, shadows, device.GetBackend(), lightOverflowWarned);
-        if (!msaa) {
+        auto normals = msaa || auxiliary ? RgTextureValue{} : Texture(graph, size, TextureFormat::RGBA16_FLOAT, kHdrUsage | TextureUse::RenderTarget, "Forward.Normals");
+        const auto motion = msaa || auxiliary ? RgTextureValue{} : Texture(graph, size, TextureFormat::RGBA16_FLOAT, kHdrUsage | TextureUse::RenderTarget, "Forward.Motion");
+        if (!shadows.Texture.IsValid()) return false;
+        const auto shadowTexture = shadows.Texture;
+        ShadowData shadow;
+        shadow.Matrices = shadows.Matrices;
+        shadow.Spheres = shadows.Spheres;
+        shadow.Bias = shadows.Bias;
+        shadow.Params = shadows.Params;
+        if (!msaa && !auxiliary) {
             RADRAY_PROFILE_SCOPE_N("HdrPrepass");
             const ForwardGraphView draw{view, &work.Main.DepthOnly};
-            const RgTextureValue auxiliary[]{motion};
+            const RgTextureValue prepassAux[]{motion};
             const auto prepassStage = ForwardGraph::BuildGraph(graph, ForwardGraphStage::Opaque,
-                                                               {.Name = "Forward.DepthNormalsMotion", .Backend = device.GetBackend(), .Views = std::span{&draw, 1}, .Color = normals, .Depth = depth, .Execution = &work.Execution, .PreserveEmptyPass = true, .AuxiliaryColors = auxiliary});
+                                                               {.Name = "Forward.DepthNormalsMotion", .Backend = device.GetBackend(), .Views = std::span{&draw, 1}, .Color = normals, .Depth = depth, .Execution = &work.Execution, .PreserveEmptyPass = true, .AuxiliaryColors = prepassAux});
             work.PassesSucceeded &= prepassStage.Success;
             normals = prepassStage.Color;
             depth = prepassStage.Depth;
@@ -555,7 +595,7 @@ bool BuildForwardHdrView(RenderGraph& graph, RenderPipelineContext& context, ren
         graph.AddRasterPass<Empty>("Forward.Neutral", [=](Empty&, RenderGraphRasterBuilder& builder) { builder.SetColorAttachment(0, neutral, {.Clear = {1, 1, 1, 1}}); }, +[](const Empty&, RenderGraphRasterContext&) {});
         RgTextureValue linearDepth = neutral, ao = neutral, pyramid = neutral;
         uint32_t pyramidLevels = 1;
-        if (!msaa) {
+        if (!msaa && !auxiliary) {
             RADRAY_PROFILE_SCOPE_N("HdrDepthPyramidAo");
             linearDepth = ScalarEffect(graph, programs, 0, "Forward.LinearDepth", view, size, size, depth);
             const auto halfSize = Half(size);
@@ -572,7 +612,7 @@ bool BuildForwardHdrView(RenderGraph& graph, RenderPipelineContext& context, ren
                 Compute(graph, fmt::format("Forward.DepthPyramid.{}", mip), program, values, resources, mipSize);
                 previousSize = mipSize;
             }
-            if (settings.AmbientOcclusion) {
+            if (viewSettings.AmbientOcclusion) {
                 auto& program = *programs.Programs[2].Get();
                 auto values = EffectValues(program, view, halfSize, halfSize);
                 values.SetFloat4("Effects.Options", {settings.AoRadius, 0, 0, 0});
@@ -610,10 +650,10 @@ bool BuildForwardHdrView(RenderGraph& graph, RenderPipelineContext& context, ren
         }
         {
             RADRAY_PROFILE_SCOPE_N("HdrOpaqueSky");
-            auto opaqueBindings = MakeLitBindings(work.Main.Opaque, shadow, size, settings, shadows, lights, count, headers, indices, ao, neutral, false, work.ContentValid);
+            auto opaqueBindings = MakeLitBindings(work.Main.Opaque, shadow, size, viewSettings, shadowTexture, lights, count, headers, indices, ao, neutral, false, work.ContentValid);
             const ForwardGraphView opaqueView{view, &work.Main.Opaque, opaqueBindings.Programs};
             const auto opaqueStage = ForwardGraph::BuildGraph(graph, ForwardGraphStage::Opaque,
-                                                              {.Name = "Forward.Opaque", .Backend = device.GetBackend(), .Views = std::span{&opaqueView, 1}, .Color = hdr, .Depth = depth, .ColorAttachment = {.Clear = {.035f, .06f, .1f, 1}}, .DepthAttachment = {.Load = msaa ? render::LoadAction::Clear : render::LoadAction::Load, .ReadOnly = !msaa}, .Execution = &work.Execution});
+                                                              {.Name = "Forward.Opaque", .Backend = device.GetBackend(), .Views = std::span{&opaqueView, 1}, .Color = hdr, .Depth = depth, .ColorAttachment = {.Clear = {.035f, .06f, .1f, 1}}, .DepthAttachment = {.Load = writeDepthInOpaque ? render::LoadAction::Clear : render::LoadAction::Load, .ReadOnly = !writeDepthInOpaque}, .Execution = &work.Execution});
             work.PassesSucceeded &= opaqueStage.Success;
             hdr = opaqueStage.Color;
             depth = opaqueStage.Depth;
@@ -649,13 +689,13 @@ bool BuildForwardHdrView(RenderGraph& graph, RenderPipelineContext& context, ren
             graph.AddCopyTexturePass("Forward.CopyTemporalToMutableHDR", current, hdr);
         }
         work.PassesSucceeded &= BuildOutputSurfaces(graph, *programs.Programs[14].Get(), family, view, hdr, depth, device.GetBackend(), surfaces, outputs);
-        if (!msaa) {
+        if (!writeDepthInOpaque) {
             opaqueCopy = Texture(graph, size, TextureFormat::RGBA16_FLOAT, kHdrUsage, "Forward.OpaqueColor");
             graph.AddCopyTexturePass("Forward.CopyOpaque", hdr, opaqueCopy);
         }
         {
             RADRAY_PROFILE_SCOPE_N("HdrTransparent");
-            auto transparentBindings = MakeLitBindings(work.Main.Transparent, shadow, size, settings, shadows, lights, count, headers, indices, ao, opaqueCopy, !msaa, work.ContentValid);
+            auto transparentBindings = MakeLitBindings(work.Main.Transparent, shadow, size, viewSettings, shadowTexture, lights, count, headers, indices, ao, opaqueCopy, !writeDepthInOpaque, work.ContentValid);
             const ForwardGraphView transparentView{view, &work.Main.Transparent, transparentBindings.Programs};
             const auto transparentStage = ForwardGraph::BuildGraph(graph, ForwardGraphStage::Transparent,
                                                                {.Name = "Forward.Transparent", .Backend = device.GetBackend(), .Views = std::span{&transparentView, 1}, .Color = hdr, .Depth = depth, .ColorAttachment = {.Load = render::LoadAction::Load}, .DepthAttachment = {.Load = render::LoadAction::Load, .ReadOnly = true}, .Execution = &work.Execution});
@@ -665,14 +705,14 @@ bool BuildForwardHdrView(RenderGraph& graph, RenderPipelineContext& context, ren
         }
         {
             RADRAY_PROFILE_SCOPE_N("HdrBloomComposite");
-            if (settings.Fireflies) Fireflies(graph, programs, view, size, hdr, depth, device.GetBackend(), context.FrameSerial(), work.PassesSucceeded);
+            if (viewSettings.Fireflies) Fireflies(graph, programs, view, size, hdr, depth, device.GetBackend(), context.FrameSerial(), work.PassesSucceeded);
             current = hdr;
             if (msaa) {
                 current = Texture(graph, size, TextureFormat::RGBA16_FLOAT, kHdrUsage, "Forward.ResolvedHDR");
                 graph.AddResolveTexturePass("Forward.ResolveColor4x", hdr, current);
             }
             RgTextureValue bloom = neutral;
-            if (settings.Bloom) {
+            if (viewSettings.Bloom) {
                 vector<std::pair<RgTextureValue, RenderExtent>> levels;
                 RenderExtent levelSize = Half(size);
                 auto last = current;
@@ -699,7 +739,7 @@ bool BuildForwardHdrView(RenderGraph& graph, RenderPipelineContext& context, ren
                 values.SetUInt("Effects.TileCapacity", settings.MaxLightsPerTile);
                 current = Texture(graph, size, TextureFormat::RGBA16_FLOAT, kHdrUsage, "Forward.Debug");
                 const RgParameterBinding resources[]{
-                    {"DebugHeaders", 0, RgBufferParameterBinding{headers, render::BufferRange::AllRange(), 8}}, {"DebugShadows", 0, RgTextureParameterBinding{shadows}}, {"OutputColor", 0, RgTextureParameterBinding{current, {}, RgParameterAccess::Write}}};
+                    {"DebugHeaders", 0, RgBufferParameterBinding{headers, render::BufferRange::AllRange(), 8}}, {"DebugShadows", 0, RgTextureParameterBinding{shadowTexture}}, {"OutputColor", 0, RgTextureParameterBinding{current, {}, RgParameterAccess::Write}}};
                 Compute(graph, "Forward.Debug", program, values, resources, size);
                 debug = 4;
             }
@@ -742,7 +782,7 @@ bool BuildForwardHdrView(RenderGraph& graph, RenderPipelineContext& context, ren
             auto& output = outputBinding->Texture;
             const auto outputFormat = graph.GetTextureDescriptor(output)->Format;
             const bool srgbAttachment = outputFormat == TextureFormat::RGBA8_UNORM_SRGB || outputFormat == TextureFormat::BGRA8_UNORM_SRGB || outputFormat == TextureFormat::RGBA16_FLOAT;
-            outputValues.SetFloat4("Effects.Options", {settings.Exposure, settings.Bloom && settings.DebugView == ForwardDebugView::Final ? settings.BloomStrength : 0.f, srgbAttachment ? 0.f : 1.f, 0});
+            outputValues.SetFloat4("Effects.Options", {settings.Exposure, viewSettings.Bloom && settings.DebugView == ForwardDebugView::Final ? settings.BloomStrength : 0.f, srgbAttachment ? 0.f : 1.f, 0});
             outputValues.SetUInt("Effects.DebugMode", debug);
             const RgParameterBinding outputInputs[]{{"InputA", 0, RgTextureParameterBinding{current, debugInputView}}, {"InputB", 0, RgTextureParameterBinding{bloom}}};
             const auto scaleX = [&](uint32_t x) { return uint32_t(uint64_t{x} * family.OutputSize.Width / family.RenderSize.Width); };

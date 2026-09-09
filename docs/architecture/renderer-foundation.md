@@ -1,6 +1,6 @@
 > - 适用: 编写 workload、接入 presentation/离屏 output、声明 graph pass、使用 transient pool 或 view history
 > - 权威: 本文描述 renderer foundation 与内置 Forward 的当前契约；帧同步见 `frame-and-gpu.md`，原生接口事实见 `render-rhi.md`
-> - 锚点: `modules/runtime/include/radray/runtime/render_framework/render_output.h`, `modules/runtime/include/radray/runtime/render_framework/render_workload.h`, `modules/runtime/include/radray/runtime/render_framework/render_view.h`, `modules/runtime/include/radray/runtime/render_framework/render_graph.h`, `modules/runtime/include/radray/runtime/render_framework/render_graph_compiler.h`, `modules/runtime/include/radray/runtime/render_framework/frame_graph.h`, `modules/runtime/include/radray/runtime/frame_submission.h`, `modules/runtime/include/radray/runtime/render_framework/render_graph_runtime.h`, `modules/runtime/include/radray/runtime/render_framework/render_resource_pool.h`, `modules/runtime/include/radray/runtime/render_framework/view_state.h`, `modules/runtime/include/radray/runtime/forward_pipeline/forward_graph.h`, `modules/runtime/src/render_system.cpp`, `modules/runtime/src/forward_pipeline/forward_pipeline.cpp`, `modules/runtime/include/radray/runtime/render_framework/render_scene_snapshot.h`, `modules/runtime/include/radray/runtime/render_framework/culling.h`, `modules/runtime/include/radray/runtime/material_technique.h`, `modules/runtime/include/radray/runtime/render_framework/renderer_list.h`, `modules/runtime/include/radray/runtime/render_framework/frame_draw_resources.h`, `modules/runtime/include/radray/runtime/render_framework/cpu_draw_record.h`, `modules/runtime/include/radray/runtime/render_framework/scene.h`, `modules/runtime/src/render_framework/cpu_draw_store.cpp`
+> - 锚点: `modules/runtime/include/radray/runtime/render_framework/render_output.h`, `modules/runtime/include/radray/runtime/render_framework/render_workload.h`, `modules/runtime/include/radray/runtime/render_framework/render_view.h`, `modules/runtime/include/radray/runtime/render_framework/render_graph.h`, `modules/runtime/include/radray/runtime/render_framework/render_graph_compiler.h`, `modules/runtime/include/radray/runtime/render_framework/frame_graph.h`, `modules/runtime/include/radray/runtime/frame_submission.h`, `modules/runtime/include/radray/runtime/render_framework/render_graph_runtime.h`, `modules/runtime/include/radray/runtime/render_framework/render_resource_pool.h`, `modules/runtime/include/radray/runtime/render_framework/view_state.h`, `modules/runtime/include/radray/runtime/forward_pipeline/forward_pipeline.h`, `modules/runtime/include/radray/runtime/forward_pipeline/forward_graph.h`, `modules/runtime/src/render_system.cpp`, `modules/runtime/src/forward_pipeline/forward_pipeline.cpp`, `modules/runtime/include/radray/runtime/render_framework/render_scene_snapshot.h`, `modules/runtime/include/radray/runtime/render_framework/culling.h`, `modules/runtime/include/radray/runtime/material_technique.h`, `modules/runtime/include/radray/runtime/render_framework/renderer_list.h`, `modules/runtime/include/radray/runtime/render_framework/frame_draw_resources.h`, `modules/runtime/include/radray/runtime/render_framework/cpu_draw_record.h`, `modules/runtime/include/radray/runtime/render_framework/scene.h`, `modules/runtime/src/render_framework/cpu_draw_store.cpp`
 
 # Renderer foundation
 
@@ -292,8 +292,8 @@ Build 完整恢复 authoring 值。ProgramFrameId 由 builder 每帧分配，不
 ## Renderer lists 与帧内绘制资源
 
 `RendererListDesc` 指定所需 pass、闭区间 queue 范围、额外 layer mask、view/culling 和排序方式。
-snapshot 含 `DrawRecord` 时，通用 builder 按可见 primitive 的记录范围筛选 pass/queue/layer，再交给
-`MeshPassProcessor::PrepareRecord`；没有记录表时仍走 `AddMeshBatch`。processor 每 batch 最多输出一条 command，拒绝原因汇总进 `RendererListStats`；无效描述会清空旧 commands。
+snapshot 含对齐的 `DrawRecord` 表时，通用 builder 按可见 primitive 的记录范围筛选 pass/queue/layer，再交给
+`MeshPassProcessor::PrepareRecord`；几何与 batch 范围以 `CpuDrawStore::Sync` 写入的 `DrawRecord::Status` 为准，不再在 list 构建时重扫 `MeshBatches`。没有记录表时仍走 `AddMeshBatch`，并继续校验 snapshot 的 batch 范围。同一 `CullingResults` 与 view 的多个 desc 可通过 `BuildRendererLists` 一次校验后按 pass 顺序写出，保持 processor 的 program 局部性；单列表 `BuildRendererList` 是它的薄封装。processor 每 batch 最多输出一条 command，拒绝原因汇总进 `RendererListStats`；无效描述会清空旧 commands。
 默认 opaque 范围为 queue < 2500，transparent 为 queue >= 2500。
 `RequireMaterialPass` 使产品必需 pass 的缺失单独计入 `MissingRequiredPass`，与可选 pass 跳过区分。
 `DrawRecord` 不含当前 CB offset 或 graph handle；镜像物体只翻转 `FaceClockwise`，不重建布局。
@@ -313,8 +313,9 @@ buffer 排序、dynamic 标志和资源反射形成 `ShaderParameterGroupRecipe`
 修改其缓存。新 program 自带新 recipe 身份，不通过借用指针维持跨 program 的缓存。
 临时绑定与 set key 复用容量；flight 安全复用仍清理 native sets 并重置 arena，不清 program recipe。
 Forward 在同一 processor 内按 program、primitive 复用对象参数，同一物体多个 section 不重复上传；
-HDR 同一 view 的列表和同一主视图的四个阴影级联已共享 processor，view-dependent motion
-仍单独准备。processor 的 material/primitive 准备以 snapshot 索引为键，因此一个 processor 只服务
+HDR 同一 view 的列表共用一个 lit processor；本帧阴影级联使用单独的非 temporal processor，object 组与 command 模板跨级联保留，只换 view group。带时域的 lit processor 在 `ResetView` 时丢掉
+motion 相关的 object 组。
+processor 的 material/primitive 准备以 snapshot 索引为键，因此一个 processor 只服务
 同一帧、同一 snapshot 的列表。`FrameDrawResourceStats::RecipeBuilds` 计实际首次构建，warm flight 为 0；另报组准备、
 set 命中/创建和常量复制字节数。set 命中不代表本次参数上传被省略。
 set cache 精确 key 为 pipeline layout、group、所有 buffer target/静态 offset/range、解析后的 texture view
@@ -351,11 +352,16 @@ D3D12 在 encoder 结束时绑定 command-buffer-owned 的空 root signature，�
 
 现有 `ForwardPipeline(app, scene, camera)` 保持默认的基础 Forward 用法；同一类的 `SetSettings`
 开启 HDR 与效果，`Temporal()` / `Msaa()` 提供互斥 AA 配置。`SetViews` 支持 presentation/外部 output、
-多个独立或不重叠的 view rect；空列表恢复构造时相机。设置和 view 在 game thread 写入，PrepareFrame
-复制到当前可写 flight。稳定 ViewStateId 保持跨帧身份，切换设置不能修改已发布 flight。
+多个独立或不重叠的 view rect；空列表恢复构造时相机。`ForwardViewSource::Auxiliary` 标记观察相机：
+仍做主视锥 Cull、Opaque/Transparent 列表、Forward+ tiles 以及自己的 opaque/sky/tonemap；
+不写 DepthNormals、TAA history、AO、Bloom 或 Fireflies，opaque 内写深度。
+本帧只从第一个可用的非 Auxiliary 相机（若全是 Auxiliary 则退回第一个可用 view）声明一次四 cascade 阴影图集，
+所有 HDR view 采样该图集。`SetOutputSurfaces` 会把 observer family 排到主相机之前，因此阴影必须在
+per-view 循环之前声明，否则 CSM 会按正交观察相机裁剪。设置和 view 在 game thread 写入，PrepareFrame
+复制到当前可写 flight。稳定 ViewStateId 保持跨帧身份，切换设置或 Auxiliary 不能修改已发布 flight。
 
-HDR 工作尺寸按 RenderScale 解析，view 使用各自局部 attachments，最后合成到 output rect；每 view
-独立保存剔除、列表、光照与 histories。`SetOutputOverlays` 在所有 view family 后把本帧产生的 SDR
+HDR 工作尺寸按 RenderScale 解析，view 使用各自局部 attachments，最后合成到 output rect；每 Full view
+独立保存剔除、列表、光照与 histories，Auxiliary view 不持有 history。`SetOutputOverlays` 在所有 view family 后把本帧产生的 SDR
 离屏 output 采样进目标 rect，仍在同一张图中。调用方负责 output 的借用寿命，不能形成反馈环。
 
 `SetOutputSurfaces` 为 HDR 路径提供本帧输出到世界空间屏幕的映射。每条描述包含 source/destination
@@ -398,17 +404,19 @@ HDR 的两个配置组合如下；效果 shader 只属于产品层，基础图/R
 
 | 阶段 | Temporal | Msaa4 |
 |---|---|---|
-| 阴影 | 主方向光四 cascade、独立 light-view Cull、稳定正交投影、深度数组与 PCF | 相同 |
+| 阴影 | 每帧一次：主相机四 cascade、独立 light-view Cull、稳定正交投影、深度数组与 PCF；所有 view 采样同一 atlas | 相同 |
 | 深度 | depth/normal/刚体 motion 预通道，包含 alpha cutout | 4x depth；不采样 MSAA 深度 |
 | 光照 | 16x16 tile compute、固定全 near/far 区间；opaque 与 transparent 共用完整局部灯 | 相同 |
 | AO | 线性深度、多 mip 金字塔、半分辨率 AO 与 bilateral 合成 | 关闭 |
 | HDR | PBR opaque + sky，opaque history → TAA → 独立 transparent → indirect fireflies | 4x opaque/sky/transparent/fireflies → color resolve |
 | 输出 | Bloom、曝光、tone map、SDR 合成 | 相同 |
 
+上表描述 Full 相机。Auxiliary view 跳过预通道、TAA、AO、Bloom 与 Fireflies，仍采样本帧共享阴影图集。
+
 局部灯最多 256、每 tile 默认 64；溢出 tile 回退遍历完整灯列表，不能静默丢灯。Spot 与 Point 通过
 同一固定大小 GPU 记录传输。主方向光启用 CastShadow 时，级联阴影请求可见 opaque 的 ShadowCaster 材质 pass；主相机 cull 与 tile frustum 额外
 覆盖一个像素，避免 jitter 边缘漏物体。history color/depth 用三图环，TAA 只处理 opaque/sky；sky
-按相机旋转重投影，运动只包含刚体变换。effect signature 改变、cut、尺寸/rect/AA 变化先失效。
+按相机旋转重投影，运动只包含刚体变换。effect signature 改变、cut、尺寸/rect/AA 或 Auxiliary 变化先失效。
 
 depth pyramid 是一张带 mip 的 R32_FLOAT texture，pass 按精确 subresource 声明依赖；没有消费者的
 mip 会裁剪。CurrentHdr 在时域和透明之前保留独立副本，避免读写同一附件。SDR 的线性/sRGB 编码

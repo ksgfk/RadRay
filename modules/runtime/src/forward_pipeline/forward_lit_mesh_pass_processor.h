@@ -22,8 +22,9 @@ public:
                        const DrawRecord& record, MeshPassDrawListContext& out) override;
 
     // Call before reusing this processor for a list whose view differs from the previous one.
-    // Drops view-group preparations and object preparations that depend on the view (motion vectors);
-    // material groups and view-independent object groups are kept.
+    // Drops view-group preparations. Object groups and command templates that encode motion
+    // (PreviousLocalToWorld with a temporal context) are also dropped; ShadowCaster has no
+    // temporal context, so those stay across cascade ResetView.
     void ResetView() noexcept;
     uint64_t DuplicateSameFramePreparations() const noexcept { return _duplicatePreparations; }
     uint64_t ObjectMathComputes() const noexcept { return _objectMathComputes; }
@@ -47,6 +48,26 @@ private:
             Groups.clear();
         }
     };
+    struct CommandTemplate {
+        MeshDrawCommand Command;
+        uint32_t ViewGroupIndex{0};
+    };
+    struct TemplateTable {
+        vector<uint32_t> Slots;
+        vector<CommandTemplate> Items;
+        CommandTemplate* Find(uint32_t index) noexcept {
+            return index < Slots.size() && Slots[index] != kNoSlot ? &Items[Slots[index]] : nullptr;
+        }
+        CommandTemplate& Insert(uint32_t index) {
+            if (index >= Slots.size()) Slots.resize(size_t{index} + 1, kNoSlot);
+            Slots[index] = static_cast<uint32_t>(Items.size());
+            return Items.emplace_back();
+        }
+        void Clear() noexcept {
+            std::fill(Slots.begin(), Slots.end(), kNoSlot);
+            Items.clear();
+        }
+    };
     struct ProgramState {
         ProgramState(ShaderProgram* program, const ForwardProgramBindings* binding);
         ShaderProgram* Program;
@@ -61,12 +82,14 @@ private:
         const ShaderParameterInfo* PreviousLocalToWorld{nullptr};
         const ShaderParameterInfo* MotionValid{nullptr};
         SlotTable Objects;
+        TemplateTable Templates;
         bool ViewDependent() const noexcept { return PreviousLocalToWorld != nullptr; }
     };
     Nullable<ProgramState*> ResolveProgram(ShaderProgram* program);
     const Eigen::Matrix4f& CachedNormalToWorld(RenderPrimitiveIndex primitive, const Eigen::Matrix4f& localToWorld);
     void PrepareCommand(const RendererListDesc& desc, const RenderSceneSnapshot& scene, const MeshBatch& batch,
-                         const MaterialPassRenderData& pass, RenderQueue queue, bool mirrored, MeshPassDrawListContext& out);
+                         const MaterialPassRenderData& pass, RenderQueue queue, bool mirrored,
+                         MeshBatchIndex batchIndex, bool reuseCommand, MeshPassDrawListContext& out);
 
     FrameDrawResources& _resources;
     ForwardBindingCache& _bindings;
