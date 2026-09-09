@@ -264,10 +264,13 @@ ctest --test-dir build_debug -C Debug -R AssetSlotTest --output-on-failure
 涉及 RTTI、公共 C++ ABI 或跨静态库对象查询时，Debug 与 Release 都要分别完成全量构建，
 再运行各自配置的测试。其他改动选择相关 suite 验证，不复用旧会话的通过计数。
 
-`radray_add_test` 固定使用 `DISCOVERY_MODE PRE_TEST`：仓库曾遇到同目录多个 target 并行
-POST_BUILD discovery 争用中间 JSON，导致随机失败甚至注册到错误可执行文件。将发现推迟到
-CTest 阶段避免构建期竞争。修改注册逻辑时，比较各 exe 的 `--gtest_list_tests` 与 CTest 列表及
-实际命令，不能仅凭 `ctest -N` 的总数判断正确性。注册写法见 [C++ 约定](cpp-conventions.md)。
+`radray_add_test` 在链接后做 POST_BUILD discovery（`radray_gtest_discover_tests`），把每个
+`TEST()` 写成独立 CTest 用例；JSON 输出目录按 target 隔离，避免 CMake 4.4 同目录并行
+POST_BUILD 争用 `cmake_test_discovery_<hash>.json`。不要改回 `DISCOVERY_MODE PRE_TEST`：
+CMake 4.4 的 PRE_TEST 每次启动 CTest 都对全部测试 exe 跑 `--gtest_list_tests` 且不缓存，
+VSCode CMake 插件点一项也会先付这整笔发现时间。新增或改名 `TEST()` 后要重新链接对应
+target，CTest 不负责发现。修改注册逻辑时，比较各 exe 的 `--gtest_list_tests` 与 CTest
+列表及实际命令，不能仅凭 `ctest -N` 的总数判断正确性。注册写法见 [C++ 约定](cpp-conventions.md)。
 
 `tools/run_render_validation.py` 对已构建配置串行运行 CTest，保存每用例 gtest XML、CTest JUnit、日志
 和汇总 JSON。每份结果记录 SHA、未提交改动摘要、配置开关、OS/驱动以及 fixture 提供的 backend、

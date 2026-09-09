@@ -214,6 +214,12 @@ static void ApplyWindowStyles(Win32Window* window) noexcept {
     style |= oldStyle & (WS_VISIBLE | WS_DISABLED | WS_MINIMIZE | WS_MAXIMIZE);
     exStyle |= oldExStyle & WS_EX_LAYERED;
 
+    if (!window->_isFullscreen && style == oldStyle && exStyle == oldExStyle) {
+        return;
+    }
+
+    window->EventBeforeSurfaceChange()();
+
     if (!window->_isFullscreen) {
         ::SetWindowLongPtrW(window->_hwnd, GWL_STYLE, static_cast<LONG_PTR>(style));
         ::SetWindowLongPtrW(window->_hwnd, GWL_EXSTYLE, static_cast<LONG_PTR>(exStyle));
@@ -880,6 +886,10 @@ bool Win32Window::IsMinimized() const noexcept {
     return ::IsIconic(_hwnd) != 0;
 }
 
+bool Win32Window::IsVisible() const noexcept {
+    return _hwnd != nullptr && ::IsWindowVisible(_hwnd) != 0;
+}
+
 bool Win32Window::IsFocused() const noexcept {
     if (_hwnd == nullptr) {
         return false;
@@ -899,6 +909,11 @@ void Win32Window::SetSize(int width, int height) noexcept {
         RADRAY_ERR_LOG("cannot set size when in fullscreen mode");
         return;
     }
+    const Eigen::Vector2i current = GetSize();
+    if (current.x() == width && current.y() == height) {
+        return;
+    }
+    EventBeforeSurfaceChange()();
     RECT rc{0, 0, width, height};
     DWORD style = ::GetWindowLong(_hwnd, GWL_STYLE);
     DWORD exStyle = ::GetWindowLong(_hwnd, GWL_EXSTYLE);
@@ -916,6 +931,11 @@ void Win32Window::SetPosition(int x, int y) noexcept {
         RADRAY_ERR_LOG("cannot set position when in fullscreen mode");
         return;
     }
+    const Eigen::Vector2i current = GetPosition();
+    if (current.x() == x && current.y() == y) {
+        return;
+    }
+    EventBeforeSurfaceChange()();
     RECT rc{x, y, x, y};
     DWORD style = ::GetWindowLong(_hwnd, GWL_STYLE);
     DWORD exStyle = ::GetWindowLong(_hwnd, GWL_EXSTYLE);
@@ -943,6 +963,10 @@ void Win32Window::Show(NativeWindowShowMode mode) noexcept {
     if (_hwnd == nullptr) {
         return;
     }
+    if (::IsWindowVisible(_hwnd) != 0 && mode == NativeWindowShowMode::NoActivate) {
+        return;
+    }
+    EventBeforeSurfaceChange()();
     ::ShowWindow(_hwnd, mode == NativeWindowShowMode::NoActivate ? SW_SHOWNA : SW_SHOW);
     ::UpdateWindow(_hwnd);
 }
@@ -961,13 +985,16 @@ void Win32Window::SetAlpha(float alpha) noexcept {
         return;
     }
     alpha = Clamp(alpha, 0.0f, 1.0f);
+    const DWORD exStyle = static_cast<DWORD>(::GetWindowLongPtrW(_hwnd, GWL_EXSTYLE));
+    if (alpha >= 1.0f && (exStyle & WS_EX_LAYERED) == 0) {
+        return;
+    }
+    EventBeforeSurfaceChange()();
     if (alpha < 1.0f) {
-        const DWORD exStyle = static_cast<DWORD>(::GetWindowLongPtrW(_hwnd, GWL_EXSTYLE)) | WS_EX_LAYERED;
-        ::SetWindowLongPtrW(_hwnd, GWL_EXSTYLE, static_cast<LONG_PTR>(exStyle));
+        ::SetWindowLongPtrW(_hwnd, GWL_EXSTYLE, static_cast<LONG_PTR>(exStyle | WS_EX_LAYERED));
         ::SetLayeredWindowAttributes(_hwnd, 0, static_cast<BYTE>(255.0f * alpha), LWA_ALPHA);
     } else {
-        const DWORD exStyle = static_cast<DWORD>(::GetWindowLongPtrW(_hwnd, GWL_EXSTYLE)) & ~WS_EX_LAYERED;
-        ::SetWindowLongPtrW(_hwnd, GWL_EXSTYLE, static_cast<LONG_PTR>(exStyle));
+        ::SetWindowLongPtrW(_hwnd, GWL_EXSTYLE, static_cast<LONG_PTR>(exStyle & ~WS_EX_LAYERED));
     }
 }
 
@@ -981,7 +1008,11 @@ void Win32Window::SetOwner(Nullable<NativeWindow*> owner) noexcept {
         RADRAY_ERR_LOG("Win32Window cannot own itself");
         return;
     }
+    if (ownerHwnd == _ownerHwnd) {
+        return;
+    }
 
+    EventBeforeSurfaceChange()();
     _ownerHwnd = ownerHwnd;
     ::SetWindowLongPtrW(_hwnd, GWLP_HWNDPARENT, reinterpret_cast<LONG_PTR>(_ownerHwnd));
 }

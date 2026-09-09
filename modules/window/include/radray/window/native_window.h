@@ -107,6 +107,7 @@ public:
     virtual Eigen::Vector2i GetPosition() const noexcept = 0;
     virtual float GetDpiScale() const noexcept = 0;
     virtual bool IsMinimized() const noexcept = 0;
+    virtual bool IsVisible() const noexcept { return true; }
     virtual bool IsFocused() const noexcept = 0;
 
     virtual void SetSize(int width, int height) noexcept = 0;
@@ -134,6 +135,8 @@ public:
     sigslot::signal<float, float>& EventScroll() noexcept { return _eventScroll; }
     sigslot::signal<>& EventCaptureLost() noexcept { return _eventCaptureLost; }
     sigslot::signal<>& EventDisplayChanged() noexcept { return _eventDisplayChanged; }
+    /// Fired immediately before an API that mutates HWND/NSWindow geometry, visibility, owner, or alpha.
+    sigslot::signal<>& EventBeforeSurfaceChange() noexcept { return _eventBeforeSurfaceChange; }
 
     virtual sigslot::signal<int, int>& EventResized() noexcept = 0;
     virtual sigslot::signal<int, int, MouseButton, Action>& EventTouch() noexcept = 0;
@@ -154,6 +157,7 @@ private:
     sigslot::signal<float, float> _eventScroll;
     sigslot::signal<> _eventCaptureLost;
     sigslot::signal<> _eventDisplayChanged;
+    sigslot::signal<> _eventBeforeSurfaceChange;
 };
 
 class NativeEventPump {

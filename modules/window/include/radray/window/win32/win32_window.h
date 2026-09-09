@@ -56,6 +56,7 @@ public:
     Eigen::Vector2i GetSize() const noexcept override;
     Eigen::Vector2i GetPosition() const noexcept override;
     bool IsMinimized() const noexcept override;
+    bool IsVisible() const noexcept override;
     bool IsFocused() const noexcept override;
 
     void SetSize(int width, int height) noexcept override;

@@ -34,7 +34,7 @@ Application::StartLoop
   ├─ GpuSystem::BeginFrameRecord      render thread Begin 主 CommandBuffer；清 targets、开始 profiler
   ├─ Application::Render              → pool/history BeginFlight → output/view resolve → pipeline graph → host finalize
   └─ GpuSystem::EndFrameRecordAndSubmit
-       uploader.EndFlight → CmdBuffer.End → 聚合 sync object → UploadCommands + 主 CommandBuffer 一次 Submit
+       uploader.EndFlight → CmdBuffer.End → 聚合 sync object → UploadCommands（若仍可呈现则加上主 CommandBuffer）一次 Submit
        → 写 flight.Signal → Submission.OnSubmitted → Present 全部 target
 ```
 
@@ -63,9 +63,18 @@ void Submit 返回与真实 fence 完成；未提交收据取消不发布资源�
 发布后 game thread 不再改它。关闭、模态丢帧和 shutdown 仍提交已经录制的上传并等待真实 fence，
 但完成通知的 `GpuWorkCompleted=false`，不能据此提交图像历史。单线程/手动录制入口会补做尚未准备的上传。
 
+`GpuSystem::SubmitFrame` 在同一 flight 有多个已 acquire 的窗口时，Submit 之后、Present 之前
+等待 graphics queue，避免 D3D12 多 flip HWND 在 GPU 仍写入 backbuffer 时 Present。
 创建、销毁、resize 或修改 output 时，`WindowManager`/output registry 才调用 runner 的
-`EnsureRenderIdle`，排空已发布工作和 GPU 引用后修改。窗口的 Active/尺寸目录在 PrepareFrame
-复制进 flight；record 不反查活的最小化状态。这个生命周期等待不发生在普通无变更帧。
+`EnsureRenderIdle`，排空已发布工作、GPU 引用，并等待 present 队列（D3D12 的 `Present` 在
+frame fence 之后入队，只等 fence 不够）。已挂 swapchain 的 `NativeWindow`
+`SetSize` / `SetPosition` / `Show` / `SetAlpha` / `SetOwner` 同样先 idle，再改 HWND。
+窗口的 Active/尺寸目录在 PrepareFrame
+复制进 flight；`AcquireWindow` 与 `SubmitFrame` 会再查一次活的最小化、隐藏与客户区状态。
+已经 acquire 但提交前被最小化或隐藏的窗口不再执行写入 swapchain 的 GPU 工作；D3D12 在
+不可呈现的 HWND 上跳过 DXGI Present。绕过 NativeWindow 的原始 `ShowWindow(SW_MINIMIZE)`
+必须先 `EnsureRenderIdle`：在 Win32 钩子里等待会让渲染线程在最小化过程中 Present，同样
+`ACCESS_DENIED`。这个生命周期等待不发生在普通无变更帧。
 
 可选 UI 的完成通知只发布 flight 结果，主线程在下一次 update 消费，渲染线程不访问活的
 ImGui context。窗口模态 Tick 在正在进行的帧内拒绝重入，多线程 runner 只在 render idle

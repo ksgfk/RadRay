@@ -205,6 +205,7 @@ void CocoaWindow::Destroy() noexcept {
 void CocoaWindow::Show() noexcept {
     RadrayCocoaWindow* window = CocoaWindowObjC(this);
     if (window != nil) {
+        EventBeforeSurfaceChange()();
         [window show];
     }
 }
@@ -212,6 +213,7 @@ void CocoaWindow::Show() noexcept {
 void CocoaWindow::Show(NativeWindowShowMode mode) noexcept {
     RadrayCocoaWindow* window = CocoaWindowObjC(this);
     if (window != nil) {
+        EventBeforeSurfaceChange()();
         [window showWithMode:ToCocoaShowMode(mode)];
     }
 }
@@ -281,6 +283,11 @@ bool CocoaWindow::IsFocused() const noexcept {
 void CocoaWindow::SetSize(int width, int height) noexcept {
     RadrayCocoaWindow* window = CocoaWindowObjC(this);
     if (window != nil) {
+        const Eigen::Vector2i current = GetSize();
+        if (current.x() == width && current.y() == height) {
+            return;
+        }
+        EventBeforeSurfaceChange()();
         [window setContentSize:NSMakeSize(static_cast<CGFloat>(width), static_cast<CGFloat>(height))];
     }
 }
@@ -288,6 +295,11 @@ void CocoaWindow::SetSize(int width, int height) noexcept {
 void CocoaWindow::SetPosition(int x, int y) noexcept {
     RadrayCocoaWindow* window = CocoaWindowObjC(this);
     if (window != nil) {
+        const Eigen::Vector2i current = GetPosition();
+        if (current.x() == x && current.y() == y) {
+            return;
+        }
+        EventBeforeSurfaceChange()();
         [window setContentPosition:NSMakePoint(static_cast<CGFloat>(x), static_cast<CGFloat>(y))];
     }
 }
@@ -302,6 +314,7 @@ void CocoaWindow::SetTitle(std::string_view title) noexcept {
 void CocoaWindow::SetAlpha(float alpha) noexcept {
     RadrayCocoaWindow* window = CocoaWindowObjC(this);
     if (window != nil) {
+        EventBeforeSurfaceChange()();
         [window setAlpha:static_cast<CGFloat>(std::clamp(alpha, 0.0f, 1.0f))];
     }
 }
@@ -309,6 +322,7 @@ void CocoaWindow::SetAlpha(float alpha) noexcept {
 void CocoaWindow::SetOwner(Nullable<NativeWindow*> owner) noexcept {
     RadrayCocoaWindow* window = CocoaWindowObjC(this);
     if (window != nil) {
+        EventBeforeSurfaceChange()();
         [window setOwnerWindow:ExtractCocoaOwner(owner)];
     }
 }

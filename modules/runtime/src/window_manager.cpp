@@ -46,6 +46,11 @@ AppWindow::AppWindow(
       _pump(pump),
       _isMain(isMain) {
     _input.SetApplicationEnabled(usage == RenderOutputUsage::Scene);
+    _beforeSurfaceChange = _window->EventBeforeSurfaceChange().connect([this]() {
+        if (_swapchain) {
+            _manager->EnsureRenderIdle();
+        }
+    });
 }
 
 AppWindow::~AppWindow() noexcept {
@@ -105,6 +110,11 @@ void AppWindow::DetachSwapChain() noexcept {
 render::SwapChainAcquireResult AppWindow::AcquireNextSwapChainFrame(const AppRenderContext& ctx) noexcept {
     if (!_swapchain) {
         return render::SwapChainAcquireResult{};
+    }
+    if (!IsSwapChainPresentable()) {
+        render::SwapChainAcquireResult result{};
+        result.Status = render::SwapChainStatus::RetryLater;
+        return result;
     }
     uint64_t timeoutMs = ctx.IsInModalLoop ? 0 : std::numeric_limits<uint64_t>::max();
     render::SwapChainAcquireResult result = _swapchain->AcquireNext(timeoutMs);
@@ -214,6 +224,14 @@ Nullable<AppWindow*> WindowManager::CreateWindow(const NativeWindowCreateDescrip
 
 bool AppWindow::IsMinimized() const noexcept {
     return _window == nullptr || _window->IsMinimized();
+}
+
+bool AppWindow::IsSwapChainPresentable() const noexcept {
+    if (_window == nullptr || _swapchain == nullptr || IsMinimized() || !_window->IsVisible()) {
+        return false;
+    }
+    const Eigen::Vector2i size = GetSize();
+    return size.x() > 0 && size.y() > 0;
 }
 
 Eigen::Vector2i AppWindow::GetSize() const noexcept {
@@ -391,6 +409,9 @@ void WindowManager::DetachAllSwapChains() noexcept {
 
 void WindowManager::EnsureRenderIdle() const noexcept {
     if (_renderSystem) _renderSystem->GetOutputs().EnsureRenderIdle();
+    if (_gpuSystem != nullptr && _gpuSystem->GetMainQueue() != nullptr) {
+        _gpuSystem->GetMainQueue()->Wait();
+    }
 }
 
 NativeWindow* WindowManager::FindMainNativeWindow(NativeWindowType type) const noexcept {

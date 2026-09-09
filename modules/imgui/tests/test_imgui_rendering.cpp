@@ -471,7 +471,10 @@ protected:
             }
 #ifdef _WIN32
             const auto hwnd = static_cast<HWND>(native->GetNativeHandler());
-            if (Frame == 6) ::ShowWindow(hwnd, SW_MINIMIZE);
+            if (Frame == 6) {
+                GetWindowManager()->EnsureRenderIdle();
+                ::ShowWindow(hwnd, SW_MINIMIZE);
+            }
             if (Frame == 8) ::ShowWindow(hwnd, SW_SHOWNOACTIVATE);
             if (Frame == 11) ::PostMessageW(hwnd, WM_CLOSE, 0, 0);
 #endif

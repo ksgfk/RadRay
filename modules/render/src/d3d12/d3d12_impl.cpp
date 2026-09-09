@@ -155,6 +155,17 @@ static DXGI_FORMAT _SwapChainStorageFormat(TextureFormat format) noexcept {
     return MapType(format);
 }
 
+static bool _IsPresentableHwnd(HWND hwnd) noexcept {
+    if (hwnd == nullptr || ::IsWindow(hwnd) == 0 || ::IsIconic(hwnd) != 0 || ::IsWindowVisible(hwnd) == 0) {
+        return false;
+    }
+    RECT client{};
+    if (::GetClientRect(hwnd, &client) == 0) {
+        return false;
+    }
+    return client.right > client.left && client.bottom > client.top;
+}
+
 static bool _RefreshSwapChainBackBuffers(SwapChainD3D12* swapChain) noexcept {
     RADRAY_ASSERT(swapChain != nullptr);
 
@@ -5366,6 +5377,12 @@ SwapChainAcquireResult SwapChainD3D12::AcquireNext(uint64_t timeoutMs) noexcept 
     if (_swapchain == nullptr || _frameLatencyEvent == nullptr) {
         return result;
     }
+    const HWND hwnd = std::bit_cast<HWND>(_nativeHandler);
+    if (!_IsPresentableHwnd(hwnd)) {
+        result.Status = SwapChainStatus::RetryLater;
+        result.NativeStatusCode = static_cast<int64_t>(DXGI_STATUS_OCCLUDED);
+        return result;
+    }
     DWORD milliseconds;
     if (timeoutMs == std::numeric_limits<uint64_t>::max()) {
         milliseconds = INFINITE;
@@ -5420,6 +5437,16 @@ SwapChainPresentResult SwapChainD3D12::Present(SwapChainFrame&& frame) noexcept 
     if (_swapchain == nullptr) {
         result.NativeStatusCode = static_cast<int64_t>(E_POINTER);
         result.Status = SwapChainStatus::Error;
+        return result;
+    }
+    const HWND hwnd = std::bit_cast<HWND>(_nativeHandler);
+    if (!_IsPresentableHwnd(hwnd)) {
+        RADRAY_WARN_LOG("IDXGISwapChain::Present skipped: hwnd is not presentable");
+        if (_presentQueue != nullptr) {
+            _presentQueue->Wait();
+        }
+        result.NativeStatusCode = static_cast<int64_t>(DXGI_STATUS_OCCLUDED);
+        result.Status = SwapChainStatus::Success;
         return result;
     }
     UINT syncInterval = 0;

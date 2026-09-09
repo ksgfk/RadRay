@@ -20,6 +20,16 @@ D3D12 命令列表 Close、队列 Wait/Signal、Present 与 ResizeBuffers 的失
 Fence 查询把 `UINT64_MAX` 视为设备移除，禁止上层将其比较为成功完成。
 CPU fence 等待检查事件注册、系统等待结果，并在唤醒后重新核验完成值；设备移除也能唤醒事件。
 这些检查在检测到错误的边界终止，避免继续发布成功的 flight 完成通知；不提供设备恢复。
+D3D12 flip-model 不能对已最小化、已隐藏、已销毁或客户区为 0 的 HWND 提交 GPU 写入，也不能
+对其调用 `Present`：驱动会以 `DXGI_ERROR_ACCESS_DENIED` 移除设备。Acquire 在这种 HWND 上
+返回 `RetryLater`。已经 acquire 的帧在 submit 时若窗口已不可呈现，则只提交上传命令；Present
+跳过 DXGI Present，先等待 present queue。同一帧 Present 多个 D3D12 flip HWND 时，`Submit`
+之后、Present 之前等待 graphics queue：DXGI Present 不会等待刚提交的 `ExecuteCommandLists`，
+GPU 仍以 RTV 占用 backbuffer 时 Present 会 `ACCESS_DENIED`。单窗口路径不插入这次等待。
+已挂 swapchain 的窗口走 `NativeWindow` 的
+`SetSize` / `SetPosition` / `Show` / `SetAlpha` / `SetOwner` 时会先 `EnsureRenderIdle`（含 present
+队列等待），避免多线程下 `Update` 改 HWND 与上一帧 Present/DWM 重叠。绕过 NativeWindow 的原始 `ShowWindow`
+仍须由调用方先 `EnsureRenderIdle`；不要在 Win32 钩子或 `WndProc` 里等待渲染线程。
 
 ## 区域纹理上传
 

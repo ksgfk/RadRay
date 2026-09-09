@@ -686,12 +686,25 @@ void GpuSystem::SubmitFrame(
         }
     }
 
+    bool dropPresentationWork = false;
+    for (const FlightSlot::AcquiredTarget& target : record.Targets) {
+        if (target.Window == nullptr || !target.Window->IsSwapChainPresentable()) {
+            dropPresentationWork = true;
+            break;
+        }
+    }
+    if (dropPresentationWork) {
+        RADRAY_WARN_LOG("skip swapchain GPU work: an acquired window became unpresentable before submit");
+    }
+
     render::Fence* frameFence = _mainQueueTrack.Fence.get();
     vector<render::CommandBuffer*> submitCmdBuffers;
     submitCmdBuffers.reserve(desc.CmdBuffers.size() + 2);
     submitCmdBuffers.push_back(record.UploadCommands.get());
-    submitCmdBuffers.push_back(record.CmdBuffer.get());
-    submitCmdBuffers.insert(submitCmdBuffers.end(), desc.CmdBuffers.begin(), desc.CmdBuffers.end());
+    if (!dropPresentationWork) {
+        submitCmdBuffers.push_back(record.CmdBuffer.get());
+        submitCmdBuffers.insert(submitCmdBuffers.end(), desc.CmdBuffers.begin(), desc.CmdBuffers.end());
+    }
 
     vector<render::Fence*> signalFences;
     vector<uint64_t> signalValues;
@@ -713,6 +726,9 @@ void GpuSystem::SubmitFrame(
         .ReadyToPresent = std::span{readyToPresent}};
     record.HostWrites.Flush(*_device);
     _mainQueue->Submit(submitDesc);
+    if (record.Targets.size() > 1) {
+        _mainQueue->Wait();  // 多 flip HWND 的 Present 不等待刚提交的 Execute
+    }
     record.HostWrites.Seal();
     _flights[flightIndex]->Signal = GpuSystem::FenceSignal{
         .Fence = frameFence,

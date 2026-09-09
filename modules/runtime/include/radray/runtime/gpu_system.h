@@ -383,7 +383,7 @@ public:
         bool rendered = true);
 
     /// 一帧收尾：uploader.EndFlight → CmdBuffer.End → 聚合 sync object → Submit
-    /// → 写 flight.Signal → Present 全部 target。
+    /// （acquired 窗口已不可呈现时只提交上传命令）→ 写 flight.Signal → Present 全部 target。
     void EndFrameRecordAndSubmit(uint32_t flightIndex);
 
     FrameUploadScheduler& GetFrameUploadScheduler() noexcept { return *_frameUploadScheduler; }

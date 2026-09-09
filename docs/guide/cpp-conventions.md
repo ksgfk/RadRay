@@ -124,8 +124,8 @@ radray_add_test(test_foo SOURCES test_foo.cpp LINK_LIBS radrayruntime)
 ```
 
 `radray_add_test` 建独立可执行目标，链接 `GTest::gtest_main`，并用
-`gtest_discover_tests(... DISCOVERY_MODE PRE_TEST)` 注册。那个 `PRE_TEST` 是硬约束，
-不要改，原因与验证方法见[构建与测试](build-test.md)。
+`radray_gtest_discover_tests` 在链接后把每个 `TEST()` 注册成 CTest 用例。不要给它传
+`DISCOVERY_MODE PRE_TEST`，原因见[构建与测试](build-test.md)。
 
 `radray_add_radray_gtest_case` 是在**已有**目标上按 `--gtest_filter` 注册单个 ctest 用例，
 并自动注入 `RADRAY_PROJECT_DIR` / `RADRAY_ASSETS_DIR` 等环境变量。目前仓库里还没有调用方。

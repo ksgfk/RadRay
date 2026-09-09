@@ -139,6 +139,123 @@ function(radray_optimize_flags_binary target)
     radray_link_flag_lto(${target})
 endfunction()
 
+# radray_gtest_discover_tests(<target> [gtest_discover_tests extra args except DISCOVERY_MODE])
+# 构建期 POST_BUILD 发现, 把每个 TEST() 注册成独立 CTest 用例. 不用 CMake 4.4 的 PRE_TEST:
+# 它每次 ctest 都对全部测试 exe 跑 --gtest_list_tests, 无缓存. 也不直接调用
+# gtest_discover_tests(POST_BUILD): 同目录多目标并行时 JSON 路径只靠 TEST_TARGET 哈希,
+# 哈希为空就会争用同一文件. 这里把 JSON 目录固定为每目标独立路径.
+function(radray_gtest_discover_tests target)
+    set(_options NO_PRETTY_TYPES NO_PRETTY_VALUES)
+    set(_one_value_args TEST_PREFIX TEST_SUFFIX WORKING_DIRECTORY TEST_LIST DISCOVERY_TIMEOUT XML_OUTPUT_DIR DISCOVERY_MODE)
+    set(_multi_value_args EXTRA_ARGS DISCOVERY_EXTRA_ARGS PROPERTIES TEST_FILTER)
+    cmake_parse_arguments(PARSE_ARGV 1 arg "${_options}" "${_one_value_args}" "${_multi_value_args}")
+
+    if (arg_UNPARSED_ARGUMENTS)
+        message(FATAL_ERROR "radray_gtest_discover_tests: unexpected arguments: ${arg_UNPARSED_ARGUMENTS}")
+    endif()
+    if (arg_DISCOVERY_MODE AND NOT arg_DISCOVERY_MODE STREQUAL "POST_BUILD")
+        message(FATAL_ERROR "radray_gtest_discover_tests: DISCOVERY_MODE must be POST_BUILD")
+    endif()
+    if (NOT TARGET ${target})
+        message(FATAL_ERROR "radray_gtest_discover_tests: target '${target}' does not exist")
+    endif()
+    if (NOT arg_WORKING_DIRECTORY)
+        set(arg_WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
+    endif()
+    if (NOT arg_TEST_LIST)
+        set(arg_TEST_LIST ${target}_TESTS)
+    endif()
+    if (NOT arg_DISCOVERY_TIMEOUT)
+        set(arg_DISCOVERY_TIMEOUT 30)
+    endif()
+    if (arg_PROPERTIES)
+        list(LENGTH arg_PROPERTIES _len_PROPERTIES)
+        math(EXPR _odd_PROPERTIES "${_len_PROPERTIES} % 2")
+        if (_odd_PROPERTIES)
+            message(FATAL_ERROR "radray_gtest_discover_tests: PROPERTIES must be key-value pairs")
+        endif()
+    endif()
+
+    set(ctest_file_base "${CMAKE_CURRENT_BINARY_DIR}/${target}")
+    set(json_dir "${CMAKE_CURRENT_BINARY_DIR}/gtest_discovery/${target}")
+    get_property(_radray_multi_config GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+    if (_radray_multi_config)
+        string(APPEND ctest_file_base "_$<CONFIG>")
+        string(APPEND json_dir "/$<CONFIG>")
+    endif()
+
+    set(ctest_include_file "${ctest_file_base}_include.cmake")
+    set(discovery_file "${ctest_file_base}_discovery.cmake")
+    set(ctest_tests_file "${ctest_file_base}_tests.cmake")
+
+    if (NOT DEFINED arg_EXTRA_ARGS)
+        set(arg_EXTRA_ARGS "")
+    endif()
+    if (NOT DEFINED arg_PROPERTIES)
+        set(arg_PROPERTIES "")
+    endif()
+    if (NOT DEFINED arg_DISCOVERY_EXTRA_ARGS)
+        set(arg_DISCOVERY_EXTRA_ARGS "")
+    endif()
+    list(JOIN arg_EXTRA_ARGS "]==] [==[" arg_EXTRA_ARGS)
+    list(JOIN arg_PROPERTIES "]==] [==[" arg_PROPERTIES)
+    list(JOIN arg_DISCOVERY_EXTRA_ARGS "]==] [==[" arg_DISCOVERY_EXTRA_ARGS)
+
+    add_custom_command(
+        TARGET ${target} POST_BUILD
+        BYPRODUCTS "${ctest_tests_file}"
+        COMMAND "${CMAKE_COMMAND}" -P "${discovery_file}"
+        COMMENT "Discovering gtest cases for ${target}"
+    )
+
+    string(CONCAT discovery_content
+        "file(MAKE_DIRECTORY [==[${json_dir}]==])"                            "\n"
+        "include(\"${CMAKE_ROOT}/Modules/GoogleTestAddTests.cmake\")"         "\n"
+        "gtest_discover_tests_impl("                                          "\n"
+        "  TEST_TARGET"            " [==[${target}]==]"                       "\n"
+        "  TEST_EXECUTABLE"        " [==[$<TARGET_FILE:${target}>]==]"        "\n"
+        "  TEST_EXECUTOR"          " [==[]==]"                                 "\n"
+        "  TEST_WORKING_DIR"       " [==[${arg_WORKING_DIRECTORY}]==]"        "\n"
+        "  TEST_EXTRA_ARGS"        " [==[${arg_EXTRA_ARGS}]==]"               "\n"
+        "  TEST_PROPERTIES"        " [==[${arg_PROPERTIES}]==]"               "\n"
+        "  TEST_PREFIX"            " [==[${arg_TEST_PREFIX}]==]"              "\n"
+        "  TEST_SUFFIX"            " [==[${arg_TEST_SUFFIX}]==]"              "\n"
+        "  TEST_FILTER"            " [==[${arg_TEST_FILTER}]==]"              "\n"
+        "  NO_PRETTY_TYPES"        " [==[${arg_NO_PRETTY_TYPES}]==]"          "\n"
+        "  NO_PRETTY_VALUES"       " [==[${arg_NO_PRETTY_VALUES}]==]"         "\n"
+        "  TEST_LIST"              " [==[${arg_TEST_LIST}]==]"                "\n"
+        "  CTEST_FILE"             " [==[${ctest_tests_file}]==]"             "\n"
+        "  TEST_DISCOVERY_TIMEOUT" " [==[${arg_DISCOVERY_TIMEOUT}]==]"        "\n"
+        "  TEST_DISCOVERY_EXTRA_ARGS [==[${arg_DISCOVERY_EXTRA_ARGS}]==]"     "\n"
+        "  TEST_XML_OUTPUT_DIR"    " [==[${arg_XML_OUTPUT_DIR}]==]"           "\n"
+        "  TEST_JSON_OUTPUT_DIR"   " [==[${json_dir}]==]"                     "\n"
+        ")"                                                                   "\n"
+    )
+    file(GENERATE OUTPUT "${discovery_file}" CONTENT "${discovery_content}")
+
+    string(CONCAT ctest_include_content
+        "if(EXISTS \"${ctest_tests_file}\")"                                  "\n"
+        "  include(\"${ctest_tests_file}\")"                                  "\n"
+        "else()"                                                              "\n"
+        "  add_test(${target}_NOT_BUILT ${target}_NOT_BUILT)"                 "\n"
+        "endif()"                                                             "\n"
+    )
+    file(GENERATE OUTPUT "${ctest_include_file}" CONTENT "${ctest_include_content}")
+
+    if (_radray_multi_config)
+        string(REPLACE [[_$<CONFIG>]] [[_${CTEST_CONFIGURATION_TYPE}]]
+            include_file_cfg "${ctest_include_file}")
+        string(REPLACE [[_$<CONFIG>]] "" ctest_include_file "${ctest_include_file}")
+        file(WRITE "${ctest_include_file}"
+            "if(EXISTS \"${include_file_cfg}\")"                              "\n"
+            "  include(\"${include_file_cfg}\")"                              "\n"
+            "endif()"                                                         "\n"
+        )
+    endif()
+
+    set_property(DIRECTORY APPEND PROPERTY TEST_INCLUDE_FILES "${ctest_include_file}")
+endfunction()
+
 # radray_add_test(<target> SOURCES <src...> [LINK_LIBS <libs...>] [DISCOVER_ARGS <args...>] [COMPILE_OPTIONS <opts...>] [NO_DISCOVER])
 function(radray_add_test target)
     set(_options NO_DISCOVER)
@@ -156,21 +273,7 @@ function(radray_add_test target)
         target_compile_options(${target} PRIVATE ${RADRAY_TEST_COMPILE_OPTIONS})
     endif()
     if (NOT RADRAY_TEST_NO_DISCOVER)
-        # 【必须 PRE_TEST, 不能用默认的 POST_BUILD】CMake 4.4 的 GoogleTest.cmake 有 bug:
-        # 它生成 gtest_discover_tests_impl(...) 调用时**从不传 TEST_TARGET**, 于是
-        # GoogleTestAddTests.cmake:203 的 string(SHA256 target_hash "${arg_TEST_TARGET}")
-        # 恒等于空串的哈希 e3b0c44298 —— 那个哈希存在的唯一目的就是防止同目录多个目标
-        # 争用同一个 cmake_test_discovery_<hash>.json, 结果被空输入彻底废掉。
-        # POST_BUILD discovery 是并行跑的, 于是同目录下的 N 个测试目标 (modules/core/tests
-        # 有 13 个) 会同时读写同一个 json, 表现为随机的
-        # "string sub-command JSON failed parsing json string" 构建失败, 或更坏的情况:
-        # 注册到错误的用例集而 ctest 仍报绿 (见 8.8)。
-        # PRE_TEST 在 ctest 启动阶段串行执行, 无此竞争。
-        if (RADRAY_TEST_DISCOVER_ARGS)
-            gtest_discover_tests(${target} DISCOVERY_MODE PRE_TEST ${RADRAY_TEST_DISCOVER_ARGS})
-        else()
-            gtest_discover_tests(${target} DISCOVERY_MODE PRE_TEST)
-        endif()
+        radray_gtest_discover_tests(${target} ${RADRAY_TEST_DISCOVER_ARGS})
     endif()
     radray_default_compile_flags(${target})
     radray_optimize_flags_binary(${target})

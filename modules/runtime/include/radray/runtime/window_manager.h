@@ -3,6 +3,8 @@
 #include <atomic>
 #include <optional>
 
+#include <sigslot/signal.hpp>
+
 #include <radray/nullable.h>
 #include <radray/runtime_type.h>
 #include <radray/types.h>
@@ -69,6 +71,8 @@ public:
 
     bool IsMinimized() const noexcept;
     Eigen::Vector2i GetSize() const noexcept;
+    /// Live HWND/client-size check. Safe from the render thread; used at acquire and submit.
+    bool IsSwapChainPresentable() const noexcept;
     bool NeedsSwapChainRecreate(std::optional<render::PresentMode> desiredPresentMode) const noexcept;
     void ResetSwapChainRecreateRequest() noexcept;
     bool RecreateSwapChain(uint32_t width, uint32_t height, render::PresentMode presentMode) noexcept;
@@ -80,6 +84,7 @@ private:
 
     WindowManager* _manager;
     unique_ptr<NativeWindow> _window;
+    sigslot::scoped_connection _beforeSurfaceChange;
     WindowInputRouter _input;
     RenderOutputUsage _usage;
     NativeEventPump* _pump;
