@@ -69,12 +69,22 @@ std::optional<PreparedRendererList> PrepareRendererList(const RendererList& list
     };
     unordered_map<render::Buffer*, InlineVector<DeclaredRange, 2>> declared;
     uint64_t uniqueReads = 0;
+    Nullable<const MeshDrawCommand*> previousDraw{nullptr};
+    RgGraphicsProgramHandle previousProgram{};
+    Nullable<ShaderProgram*> validatedBindingProgram{nullptr};
+    std::span<const RendererListPassBinding> programBindings;
     for (size_t index = 0; index < list.Commands.size(); ++index) {
         const auto& draw = list.GetCommand(index);
-        if (!ValidateMeshDrawCommand(draw) || (bindings && !bindings->IsValidFor(builder, *draw.Program))) {
+        if (!ValidateMeshDrawCommand(draw) ||
+            (bindings && validatedBindingProgram.Get() != draw.Program.Get() && !bindings->IsValidFor(builder, *draw.Program))) {
             builder.Reject("RendererListPreparation", "Draw geometry or pass parameter bindings are invalid");
             return std::nullopt;
         }
+        if (bindings && validatedBindingProgram.Get() != draw.Program.Get()) {
+            validatedBindingProgram = draw.Program.Get();
+            programBindings = bindings->Find(*draw.Program);
+        }
+        const bool sameGeometry = previousDraw && previousDraw->Geometry.Get() == draw.Geometry.Get();
         const auto declare = [&](render::Buffer& buffer, RgBufferAccess access, render::BufferRange range) {
             auto& ranges = declared[&buffer];
             for (const auto& seen : ranges)
@@ -91,12 +101,17 @@ std::optional<PreparedRendererList> PrepareRendererList(const RendererList& list
             ++uniqueReads;
             return true;
         };
-        for (const auto& vertex : draw.Geometry->VertexBuffers)
-            if (!declare(*vertex.View.Target, RgBufferAccess::Vertex, {vertex.View.Offset, vertex.View.Size})) return std::nullopt;
-        if (!declare(*draw.Geometry->Ibv.Target, RgBufferAccess::Index, {draw.Geometry->Ibv.Offset, render::BufferRange::All()})) return std::nullopt;
-        const auto program = builder.UseGraphicsProgram(*draw.Program, draw.PipelineState, draw.Geometry->VertexLayout, draw.Geometry->Topology);
+        if (!sameGeometry) {
+            for (const auto& vertex : draw.Geometry->VertexBuffers)
+                if (!declare(*vertex.View.Target, RgBufferAccess::Vertex, {vertex.View.Offset, vertex.View.Size})) return std::nullopt;
+            if (!declare(*draw.Geometry->Ibv.Target, RgBufferAccess::Index, {draw.Geometry->Ibv.Offset, render::BufferRange::All()})) return std::nullopt;
+        }
+        const bool sameProgram = sameGeometry && previousDraw->Program.Get() == draw.Program.Get() && previousDraw->PipelineState == draw.PipelineState;
+        const auto program = sameProgram ? previousProgram : builder.UseGraphicsProgram(*draw.Program, draw.PipelineState, draw.Geometry->VertexLayout, draw.Geometry->Topology);
         if (!program.IsValid()) return std::nullopt;
-        prepared.Draws.push_back({&draw, {draw.Groups.data(), draw.Groups.size()}, program, bindings ? bindings->Find(*draw.Program) : std::span<const RendererListPassBinding>{}});
+        prepared.Draws.push_back({&draw, {draw.Groups.data(), draw.Groups.size()}, program, programBindings});
+        previousDraw = &draw;
+        previousProgram = program;
     }
     prepared.UniqueBufferReads = uniqueReads;
     return prepared;
@@ -115,20 +130,7 @@ void SubmitRendererList(const PreparedRendererList& list, RenderGraphRasterConte
     std::span<const PreparedShaderGroup> lastNative{};
     std::span<const RendererListPassBinding> lastGraph{};
     bool haveProgram = false;
-    const auto sameNative = [](std::span<const PreparedShaderGroup> a, std::span<const PreparedShaderGroup> b) {
-        if (a.size() != b.size()) return false;
-        for (size_t i = 0; i < a.size(); ++i)
-            if (a[i].Group != b[i].Group || a[i].Set.Get() != b[i].Set.Get() || a[i].DynamicOffsets != b[i].DynamicOffsets) return false;
-        return true;
-    };
-    const auto sameGraph = [](std::span<const RendererListPassBinding> a, std::span<const RendererListPassBinding> b) {
-        if (a.size() != b.size()) return false;
-        for (size_t i = 0; i < a.size(); ++i)
-            if (a[i].Program != b[i].Program || a[i].Group != b[i].Group || a[i].Parameters.Index != b[i].Parameters.Index ||
-                a[i].Parameters.Generation != b[i].Parameters.Generation)
-                return false;
-        return true;
-    };
+    Nullable<const GpuMesh::DrawData*> lastGeometry{nullptr};
     for (const auto& prepared : list.Draws) {
         const auto& draw = *prepared.Description;
         const auto groups = prepared.Groups;
@@ -142,27 +144,39 @@ void SubmitRendererList(const PreparedRendererList& list, RenderGraphRasterConte
             lastGraph = {};
         }
         const auto graphGroups = prepared.GraphGroups;
-        if (!(samePso && sameNative(groups, lastNative) && sameGraph(graphGroups, lastGraph))) {
-            size_t nativeIndex = 0, graphIndex = 0;
-            while (nativeIndex < groups.size() || graphIndex < graphGroups.size()) {
-                if (graphIndex == graphGroups.size() || (nativeIndex < groups.size() && groups[nativeIndex].Group < graphGroups[graphIndex].Group)) {
-                    const auto& group = groups[nativeIndex++];
-                    commands.BindPersistentShaderParameterSet(group.Group, group.Set.Get(), group.DynamicOffsets);
-                } else {
-                    ctx.BindParameterSet(graphGroups[graphIndex++].Parameters);
-                }
+        size_t nativeIndex = 0, graphIndex = 0;
+        while (nativeIndex < groups.size() || graphIndex < graphGroups.size()) {
+            if (graphIndex == graphGroups.size() || (nativeIndex < groups.size() && groups[nativeIndex].Group < graphGroups[graphIndex].Group)) {
+                const auto& group = groups[nativeIndex];
+                const bool unchanged = nativeIndex < lastNative.size() &&
+                                       group.Group == lastNative[nativeIndex].Group &&
+                                       group.Set.Get() == lastNative[nativeIndex].Set.Get() &&
+                                       group.DynamicOffsets == lastNative[nativeIndex].DynamicOffsets;
+                if (!unchanged) commands.BindPersistentShaderParameterSet(group.Group, group.Set.Get(), group.DynamicOffsets);
+                ++nativeIndex;
+            } else {
+                const auto& group = graphGroups[graphIndex];
+                const bool unchanged = graphIndex < lastGraph.size() &&
+                                       group.Program == lastGraph[graphIndex].Program && group.Group == lastGraph[graphIndex].Group &&
+                                       group.Parameters.Index == lastGraph[graphIndex].Parameters.Index &&
+                                       group.Parameters.Generation == lastGraph[graphIndex].Parameters.Generation;
+                if (!unchanged) ctx.BindParameterSet(group.Parameters);
+                ++graphIndex;
             }
-            lastNative = groups;
-            lastGraph = graphGroups;
         }
-        const auto bindings = std::span{draw.Geometry->VertexBuffers};
-        for (size_t first = 0; first < bindings.size();) {
-            size_t end = first + 1;
-            while (end < bindings.size() && uint64_t{bindings[end - 1].Binding} + 1 == bindings[end].Binding) ++end;
-            commands.BindVertexBuffers(bindings.subspan(first, end - first));
-            first = end;
+        lastNative = groups;
+        lastGraph = graphGroups;
+        if (!samePso || lastGeometry.Get() != draw.Geometry.Get()) {
+            const auto bindings = std::span{draw.Geometry->VertexBuffers};
+            for (size_t first = 0; first < bindings.size();) {
+                size_t end = first + 1;
+                while (end < bindings.size() && uint64_t{bindings[end - 1].Binding} + 1 == bindings[end].Binding) ++end;
+                commands.BindVertexBuffers(bindings.subspan(first, end - first));
+                first = end;
+            }
+            commands.BindIndexBuffer(draw.Geometry->Ibv);
+            lastGeometry = draw.Geometry.Get();
         }
-        commands.BindIndexBuffer(draw.Geometry->Ibv);
         commands.DrawIndexed(draw.IndexCount, 1, draw.FirstIndex, draw.VertexOffset, 0);
         ++stats.Draws;
     }

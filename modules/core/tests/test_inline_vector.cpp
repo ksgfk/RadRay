@@ -391,3 +391,32 @@ TEST(InlineVectorTest, GrowthCopiesWhenElementMoveIsPotentiallyThrowing) {
 TEST(InlineVectorTest, OversizedReserveTerminates) {
     EXPECT_DEATH((InlineVector<int, 2>{}.reserve(InlineVector<int, 2>::max_size() + 1)), "");
 }
+
+TEST(InlineVectorTest, TrivialNonDefaultValuesCopyAndMoveAcrossStorageStates) {
+    struct Value {
+        explicit Value(uint64_t value) : Number(value), Inverse(~value) {}
+        uint64_t Number, Inverse;
+    };
+    static_assert(std::is_trivially_copyable_v<Value>);
+    static_assert(!std::is_default_constructible_v<Value>);
+    for (size_t count : {0u, 1u, 2u, 3u, 9u}) {
+        InlineVector<Value, 2> source;
+        for (size_t index = 0; index < count; ++index) source.emplace_back(index);
+        InlineVector<Value, 2> copy{source};
+        InlineVector<Value, 2> assigned;
+        for (size_t index = 0; index < 7; ++index) assigned.emplace_back(100 + index);
+        assigned = source;
+        InlineVector<Value, 2> moved{std::move(copy)};
+        EXPECT_TRUE(copy.empty());
+        copy.emplace_back(99);
+        EXPECT_EQ(copy.front().Number, 99u);
+        ASSERT_EQ(moved.size(), count);
+        ASSERT_EQ(assigned.size(), count);
+        for (size_t index = 0; index < count; ++index) {
+            EXPECT_EQ(moved[index].Number, index);
+            EXPECT_EQ(moved[index].Inverse, ~uint64_t{index});
+            EXPECT_EQ(assigned[index].Number, index);
+            EXPECT_EQ(assigned[index].Inverse, ~uint64_t{index});
+        }
+    }
+}

@@ -270,8 +270,9 @@ TEST_P(RendererListPassBindingsTest, ExecutionItemsPreserveDynamicBindingsOrderA
 #include <core/platform.hlsli>
 struct Values { float4 Value; };
 VK_BINDING(0, 0) ConstantBuffer<Values> Color : register(b0);
+VK_BINDING(0, 1) ConstantBuffer<Values> Factor : register(b0, space1);
 [shader("vertex")] float4 VSMain(float3 p : POSITION) : SV_Position { return float4(p, 1); }
-[shader("pixel")] float4 PSMain() : SV_Target0 { return Color.Value; }
+[shader("pixel")] float4 PSMain() : SV_Target0 { return Color.Value * Factor.Value; }
 )hlsl", recipe);
     ASSERT_TRUE(program);
     const uint32_t alignment = static_cast<uint32_t>(std::max<uint64_t>(device.GetDetail().CBufferAlignment, 256));
@@ -286,6 +287,13 @@ VK_BINDING(0, 0) ConstantBuffer<Values> Color : register(b0);
     ASSERT_TRUE(set);
     ASSERT_TRUE(set->Set(binding, 0, render::ShaderBufferBinding{buffer.Get(), {0, 16}, 0}));
     ASSERT_TRUE(set->FlushWrites());
+    const array<float, 4> factorValues{.5f, .25f, .75f, 1.f};
+    auto factorBuffer = render::test::MakeUploadBuffer(device, std::as_bytes(std::span{factorValues}), render::BufferUse::CBuffer);
+    ASSERT_TRUE(factorBuffer);
+    auto factorSet = device.CreateShaderParameterSet({program->GetPipelineLayout(), 1});
+    ASSERT_TRUE(factorSet);
+    ASSERT_TRUE(factorSet->Set(program->GetPipelineLayout()->FindBinding("Factor"), 0, render::ShaderBufferBinding{factorBuffer.Get(), {0, 16}, 0}));
+    ASSERT_TRUE(factorSet->FlushWrites());
     const array<float, 9> positions{-1, -1, .5f, 3, -1, .5f, -1, 3, .5f};
     const array<uint32_t, 3> indices{0, 1, 2};
     auto vertices = render::test::MakeUploadBuffer(device, std::as_bytes(std::span{positions}), render::BufferUse::Vertex);
@@ -306,6 +314,8 @@ VK_BINDING(0, 0) ConstantBuffer<Values> Color : register(b0);
         draw.PipelineState.Primitive.Cull = render::CullMode::None;
         draw.PipelineState.DepthStencil.DepthTestEnable = draw.PipelineState.DepthStencil.DepthWriteEnable = false;
         draw.Groups.push_back({0, set.Get(), {{binding, index * alignment}}});
+        draw.Groups.push_back({1, factorSet.Get(), {}});
+        if (index == 2) draw.PipelineState.Primitive.FaceClockwise = render::FrontFace::CW;
         ASSERT_TRUE(FinalizeMeshDrawCommand(draw));
         list.Commands.push_back(std::move(draw));
     }
@@ -347,7 +357,7 @@ VK_BINDING(0, 0) ConstantBuffer<Values> Color : register(b0);
     ASSERT_EQ(bytes.size(), pitch * 16);
     const size_t pixel = pitch * 8 + 8 * 4;
     EXPECT_EQ(std::to_integer<uint8_t>(bytes[pixel]), 0u);
-    EXPECT_EQ(std::to_integer<uint8_t>(bytes[pixel + 1]), 255u);
+    EXPECT_NEAR(std::to_integer<uint8_t>(bytes[pixel + 1]), 64u, 1);
     EXPECT_EQ(std::to_integer<uint8_t>(bytes[pixel + 2]), 0u);
     auto foreign = MakeGraph("foreign execution");
     const auto foreignColor = foreign.CreateTexture({render::TextureDimension::Dim2D, 16, 16, 1, 1, 1, render::TextureFormat::RGBA8_UNORM, render::MemoryType::Device, render::TextureUse::RenderTarget, {}}, "foreign color");

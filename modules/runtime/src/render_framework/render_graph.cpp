@@ -1612,11 +1612,12 @@ bool RenderGraph::Impl::NormalizePasses() {
     for (uint32_t p = 0; p < Passes.size(); ++p) {
         auto& pass = Passes[p];
         unordered_map<uint64_t, uint32_t> cellMap;
+        vector<uint32_t> cells;
         for (const auto& access : pass.Accesses) {
             auto& resource = Resources[access.Resource];
             if (access.Write && resource.External() && resource.ExternalAccess == RenderGraphExternalAccess::ReadOnly) Error("ReadOnlyExternal", "Cannot write a read-only external resource", p, access.Resource);
             if ((access.Stages.value() & ~uint32_t{7}) != 0) Error("ShaderStages", "Access contains unsupported shader-stage bits", p, access.Resource);
-            vector<uint32_t> cells;
+            cells.clear();
             if (resource.IsTexture) {
                 for (uint32_t aspect = 0; aspect < resource.AspectCount(); ++aspect) {
                     const auto bit = aspect == 1 ? render::TextureAspect::Stencil : render::IsDepthStencilFormat(resource.TextureDesc.Format) ? render::TextureAspect::Depth

@@ -194,8 +194,15 @@ private:
     template <std::input_iterator It>
     void AssignUnaliased(It first, It last) {
         clear();
-        if constexpr (std::forward_iterator<It>) reserve(static_cast<size_t>(std::distance(first, last)));
-        for (; first != last; ++first) emplace_back(*first);
+        if constexpr (std::is_trivially_copyable_v<T> && std::is_trivially_copy_constructible_v<T> && (std::is_same_v<It, T*> || std::is_same_v<It, const T*>)) {
+            const size_t count = static_cast<size_t>(last - first);
+            reserve(count);
+            if (count != 0) std::memcpy(_data, first, count * sizeof(T));
+            _size = count;
+        } else {
+            if constexpr (std::forward_iterator<It>) reserve(static_cast<size_t>(std::distance(first, last)));
+            for (; first != last; ++first) emplace_back(*first);
+        }
     }
 
     void MoveFrom(InlineVector& other) noexcept(std::is_nothrow_move_constructible_v<T>) {
@@ -204,7 +211,11 @@ private:
             _size = std::exchange(other._size, 0);
             _capacity = std::exchange(other._capacity, N);
         } else {
-            std::uninitialized_move_n(other._data, other._size, _data);
+            if constexpr (std::is_trivially_copyable_v<T> && std::is_trivially_move_constructible_v<T>) {
+                if (other._size != 0) std::memcpy(_data, other._data, other._size * sizeof(T));
+            } else {
+                std::uninitialized_move_n(other._data, other._size, _data);
+            }
             _size = other._size;
             other.clear();
         }

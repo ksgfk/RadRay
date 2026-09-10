@@ -159,7 +159,9 @@ Graph 独占 setup、编译结果和执行计划，完成收据不再保留整�
 `RenderGraphRuntime` 为每个 flight 持有一个 `RenderGraphFrameResources`，聚合
 `RenderResourcePool`、Graph parameter sets/cache、`DynamicCBufferArena` 与 CPU 编译工作空间。工作空间
 复用 version/cell 映射、读者和消费者集合、拓扑遍历暂存的容量；编译结果不借用工作空间，下一次编译
-不会改写前一张图的依赖或执行顺序。共享工作空间的调用必须串行，Clear 时释放其容量，不缓存图拓扑。
+不会改写前一张图的依赖或执行顺序。共享工作空间的调用必须串行，Clear 时释放其容量与计划缓存。
+启用 `ReuseCompiledPlan` 时，工作空间以 IR 输入的 hash 加完整相等比较复用上次依赖编译结果；
+命中后仍复制结果给当前 Graph，每张图仍执行资源校验、访问规范化、IR 构建和物理执行规划。
 安全复用时先清 parameter
 sets/cache，再 reset 上传 arena，最后让 pool BeginFlight trim/复用；Graph 析构不会释放 GPU 仍引用的
 descriptor 或上传页。parameter-set cache key 覆盖 layout/group、完整 binding 身份、数组元素、资源、
@@ -324,7 +326,8 @@ set cache 精确 key 为 pipeline layout、group、所有 buffer target/静态 o
 和 sampler（含绑定身份/数组元素）。dynamic offset 不属于 key，相同 backing page 上的切片可复用 set；
 spill 或静态 range/资源变化创建新 set。缓存命中后绝不改写已发布 descriptor，执行阶段不上传或写 set。
 只含 dynamic constant buffer 的组（view/object）另有快速路径：set 仅由 layout、group 与各 buffer 所在
-arena block 决定，用线性小表命中，不构造通用 key；语义与精确 key 缓存一致。
+arena block 决定，先检查上一次命中的条目，再回退到线性小表，不构造通用 key；
+所有命中仍比较 layout、group、buffer 与 buffer index，语义与精确 key 缓存一致。
 
 复用顺序为清空 renderer lists/借用 command → 清 set cache 与 sets → reset/裁减 arena，全部依赖既有
 flight fence 安全边界。`MeshDrawDescription` 保存与视图无关的 program、PSO 输入、geometry 和 draw range；
@@ -333,9 +336,15 @@ flight fence 安全边界。`MeshDrawDescription` 保存与视图无关的 progr
 合并 graph 组并声明各 PSO，得到借用原 list 与 bindings 的 `PreparedRendererList`。同一 (buffer, range,
 access) 的持久 geometry 读取在一次 prepare 内只向 pass 声明一次；重复声明只会线性放大 access 列表
 与之后每个编译步骤，不改变语义。二者必须保持不变
-直到图执行完毕。`PrepareRendererList` 报告 `UniqueBufferReads`：同一 buffer/range/access 不随重复 draw 扩张。
+直到图执行完毕。prepare 内相邻 draw 共享几何时复用读取声明，共享 program 与相同 PSO 输入时复用
+graphics program handle；相邻同 program 的 pass binding 归属检查与查找只做一次，逐 draw 的几何与组检查仍保留。
+`GraphicsPipelineRequests` 统计实际向图声明 program 的请求次数，复用 handle 后可小于 draw 数；
+实际提交的绘制数量由 `DrawExecutionStats::Draws` 统计。
+`PrepareRendererList` 报告 `UniqueBufferReads`：同一 buffer/range/access 不随重复 draw 扩张。
 `SubmitRendererList` 只接受 prepared list，以 pass-local handle 绑定已准备的 PSO，
-再执行 bind/draw；record 不逐 draw 查找 PSO、分配校验容器或重建参数。相邻 draw 共享 PSO 与 parameter groups 时跳过绑定。
+再执行 bind/draw；record 不逐 draw 查找 PSO、分配校验容器或重建参数。同一 PSO 下逐组比较相邻 draw 的
+native set/dynamic offsets 与 graph parameter handle，仅绑定变化的组；几何对象相同时跳过 vertex/index 绑定。
+PSO 切换后重新绑定全部组与几何。跳过仅在一次 Submit 调用内生效，借用的 prepared 数据与几何保持不变。
 graph 命令包装对本 pass 内
 已通过声明检查的 vertex/index buffer 做少量缓存，相邻 draw 共享几何时不重复查表；后端 encoder 亦跳过
 与当前状态完全相同的 vertex/index 重绑定，pso 切换时全量重发。

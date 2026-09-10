@@ -87,6 +87,7 @@ private:
     vector<unique_ptr<render::ShaderParameterSet>> _sets;
     unordered_map<FrameSetKey, render::ShaderParameterSet*, FrameSetKeyHash> _setCache;
     vector<DynamicOnlySet> _dynamicOnlySets;
+    size_t _lastDynamicOnlySet{0};
     vector<FrameBufferBinding> _bindingScratch;
     FrameSetKey _keyScratch{};
     FrameDrawResourceStats _stats;

@@ -16,6 +16,7 @@ FrameDrawResources::~FrameDrawResources() noexcept = default;
 void FrameDrawResources::ClearSets() noexcept {
     _setCache.clear();
     _dynamicOnlySets.clear();
+    _lastDynamicOnlySet = 0;
     _sets.clear();
 }
 
@@ -103,15 +104,21 @@ Nullable<render::ShaderParameterSet*> FrameDrawResources::PrepareSetForGroup(
                              std::all_of(recipe.Buffers.begin(), recipe.Buffers.end(), [](const auto& entry) { return entry.Dynamic; });
     if (!pureDynamic) return PrepareSet(program, group, buffers, textures, samplers);
     auto* layout = program.GetPipelineLayout();
-    for (const auto& entry : _dynamicOnlySets) {
-        if (entry.Layout != layout || entry.Group != group || entry.Count != buffers.size()) continue;
-        bool same = true;
-        for (size_t index = 0; index < buffers.size() && same; ++index)
-            same = entry.Targets[index] == buffers[index].Value.Target && entry.Indices[index] == buffers[index].BufferIndex;
-        if (same) {
-            ++_stats.SetCacheHits;
-            return entry.Set;
-        }
+    const auto matches = [&](const DynamicOnlySet& entry) {
+        if (entry.Layout != layout || entry.Group != group || entry.Count != buffers.size()) return false;
+        for (size_t index = 0; index < buffers.size(); ++index)
+            if (entry.Targets[index] != buffers[index].Value.Target || entry.Indices[index] != buffers[index].BufferIndex) return false;
+        return true;
+    };
+    if (_lastDynamicOnlySet < _dynamicOnlySets.size() && matches(_dynamicOnlySets[_lastDynamicOnlySet])) {
+        ++_stats.SetCacheHits;
+        return _dynamicOnlySets[_lastDynamicOnlySet].Set;
+    }
+    for (size_t index = 0; index < _dynamicOnlySets.size(); ++index) {
+        if (index == _lastDynamicOnlySet || !matches(_dynamicOnlySets[index])) continue;
+        _lastDynamicOnlySet = index;
+        ++_stats.SetCacheHits;
+        return _dynamicOnlySets[index].Set;
     }
     const auto set = PrepareSet(program, group, buffers, textures, samplers);
     if (set) {
@@ -120,6 +127,7 @@ Nullable<render::ShaderParameterSet*> FrameDrawResources::PrepareSetForGroup(
             entry.Targets[index] = buffers[index].Value.Target;
             entry.Indices[index] = buffers[index].BufferIndex;
         }
+        _lastDynamicOnlySet = _dynamicOnlySets.size();
         _dynamicOnlySets.push_back(entry);
     }
     return set;

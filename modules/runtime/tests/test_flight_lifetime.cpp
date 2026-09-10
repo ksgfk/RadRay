@@ -129,7 +129,7 @@ VK_BINDING(1, 1) Texture2D<float> Marker : register(t0, space1);
             ASSERT_TRUE(RenderGraphTestDriver::Execute(graph, *flight.Command).Success) << graph.GetReport().ToText();
             EXPECT_TRUE(stats.Succeeded());
             EXPECT_EQ(stats.Draws, 1000u);
-            EXPECT_EQ(graph.GetReport().GraphicsPipelineRequests, 1000u);
+            EXPECT_EQ(graph.GetReport().GraphicsPipelineRequests, 1u);
             EXPECT_EQ(graph.GetReport().GraphicsPipelinePreparations, 1u);
             EXPECT_EQ(graph.GetReport().GraphicsPipelineCreations, frame == 1 ? 1u : 0u);
             const auto id = graph.GetReport().Resources[1].PhysicalId;
