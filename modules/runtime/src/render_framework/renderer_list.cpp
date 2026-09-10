@@ -153,7 +153,11 @@ bool EmitFromBatches(const ListTarget& target, MeshPassProcessor& processor) {
     auto& out = *target.Out;
     out.Stats.VisiblePrimitives = desc.Culling->Primitives.size();
     for (const auto& visible : desc.Culling->Primitives) {
+        if (visible.Primitive >= scene.Primitives.size()) return false;
         const auto& primitive = scene.Primitives[visible.Primitive];
+        if (primitive.FirstMeshBatch > scene.MeshBatches.size() ||
+            primitive.MeshBatchCount > scene.MeshBatches.size() - primitive.FirstMeshBatch)
+            return false;
         for (uint32_t offset = 0; offset < primitive.MeshBatchCount; ++offset) {
             ++out.Stats.ConsideredBatches;
             if (!(primitive.LayerMask & desc.LayerMask)) {
@@ -162,6 +166,7 @@ bool EmitFromBatches(const ListTarget& target, MeshPassProcessor& processor) {
             }
             const auto batchIndex = primitive.FirstMeshBatch + offset;
             const auto& batch = scene.MeshBatches[batchIndex];
+            if (batch.Material >= scene.Materials.size()) return false;
             const auto& material = scene.Materials[batch.Material];
             if (!desc.QueueRange.Contains(material.Queue)) {
                 ++out.Stats.QueueRejected;
@@ -209,7 +214,6 @@ bool BuildRendererListsImpl(std::span<const RendererListDesc> descs, MeshPassPro
     }
     const auto& scene = *descs[0].Culling->Scene.Get();
     const bool records = HasDrawRecordTable(scene);
-    if (!records && IsRenderValidationFull(descs[0].Validation) && !ValidateVisibleBatches(*descs[0].Culling.Get())) return false;
     array<ListTarget, kMaxSharedRendererLists> storage{};
     const uint32_t listCount = static_cast<uint32_t>(descs.size());
     const size_t visible = descs[0].Culling->Primitives.size();
@@ -219,9 +223,15 @@ bool BuildRendererListsImpl(std::span<const RendererListDesc> descs, MeshPassPro
         outs[list]->Items.reserve(visible);
     }
     auto targets = std::span<ListTarget>{storage.data(), listCount};
-    const bool ok = EmitTargets(targets, processor, records);
-    if (!ok) ResetTargets(targets);
-    return ok;
+    if (!EmitTargets(targets, processor, records)) {
+        ResetTargets(targets);
+        return false;
+    }
+    if (!records && IsRenderValidationFull(descs[0].Validation) && !ValidateVisibleBatches(*descs[0].Culling.Get())) {
+        ResetTargets(targets);
+        return false;
+    }
+    return true;
 }
 
 }  // namespace

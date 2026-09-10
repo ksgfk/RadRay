@@ -180,11 +180,6 @@ void ForwardLitMeshPassProcessor::AddMeshBatch(const RendererListDesc& desc, con
         out.Reject(MeshPassRejectReason::InvalidGeometry);
         return;
     }
-    if (IsRenderValidationFull(desc.Validation) &&
-        !ValidateMeshGeometry(*batch.Geometry.Get(), batch.FirstIndex, batch.IndexCount)) {
-        out.Reject(MeshPassRejectReason::InvalidGeometry);
-        return;
-    }
     const uint32_t passIndex = static_cast<uint32_t>(pass.Get() - materialData.Passes.data());
     PrepareCommand(desc, scene, batch, *pass.Get(), materialData.Queue, IsMirroredAffine(scene.Primitives[batch.Primitive].LocalToWorld),
                    batch.SectionIndex, passIndex, false, out);

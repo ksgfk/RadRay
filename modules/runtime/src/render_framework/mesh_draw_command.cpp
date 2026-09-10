@@ -37,34 +37,49 @@ bool ValidateMeshDrawCommand(const MeshDrawCommand& command) noexcept {
     return true;
 }
 
-bool FinalizeMeshDrawCommand(MeshDrawCommand& command, RenderValidationMode validation) noexcept {
-    std::sort(command.Groups.begin(), command.Groups.end(), [](const auto& a, const auto& b) { return a.Group < b.Group; });
-    return !IsRenderValidationFull(validation) || ValidateMeshDrawCommand(command);
-}
-
 bool FinalizeMeshDrawCommand(MeshDrawCommand& command) noexcept {
-    return FinalizeMeshDrawCommand(command, RenderValidationMode::Full);
+    std::sort(command.Groups.begin(), command.Groups.end(), [](const auto& a, const auto& b) { return a.Group < b.Group; });
+    return true;
 }
 
-std::optional<PreparedRendererList> PrepareRendererList(const RendererList& list, RenderGraphRasterBuilder& builder,
-                                                        Nullable<const RendererListPassBindings*> bindings) {
-    RADRAY_PROFILE_SCOPE_N("PrepareRendererList");
-    PreparedRendererList prepared{builder.GetPassHandle(), {}};
-    const bool validationFull = builder.IsValidationFull();
-    if (validationFull && !list.Items.empty()) {
+namespace {
+
+bool ValidatePreparedDraws(const RendererList& list, RenderGraphRasterBuilder& builder,
+                           Nullable<const RendererListPassBindings*> bindings) {
+    RADRAY_PROFILE_SCOPE_N("ValidatePreparedDraws");
+    if (!list.Items.empty()) {
         if (list.Items.size() != list.Commands.size()) {
             builder.Reject("RendererListPreparation", "Draw order must reference every command exactly once");
-            return std::nullopt;
+            return false;
         }
         vector<bool> visited(list.Commands.size());
         for (const auto& item : list.Items) {
             if (item.CommandIndex >= list.Commands.size() || visited[item.CommandIndex]) {
                 builder.Reject("RendererListPreparation", "Draw order contains an invalid or duplicate command index");
-                return std::nullopt;
+                return false;
             }
             visited[item.CommandIndex] = true;
         }
     }
+    Nullable<ShaderProgram*> resolvedBindingProgram{nullptr};
+    for (const auto& draw : list.Commands) {
+        if (!ValidateMeshDrawCommand(draw) ||
+            (bindings && resolvedBindingProgram.Get() != draw.Program.Get() && !bindings->IsValidFor(builder, *draw.Program))) {
+            builder.Reject("RendererListPreparation", "Draw geometry or pass parameter bindings are invalid");
+            return false;
+        }
+        resolvedBindingProgram = draw.Program.Get();
+    }
+    return true;
+}
+
+}  // namespace
+
+std::optional<PreparedRendererList> PrepareRendererList(const RendererList& list, RenderGraphRasterBuilder& builder,
+                                                        Nullable<const RendererListPassBindings*> bindings) {
+    RADRAY_PROFILE_SCOPE_N("PrepareRendererList");
+    if (builder.IsValidationFull() && !ValidatePreparedDraws(list, builder, bindings)) return std::nullopt;
+    PreparedRendererList prepared{builder.GetPassHandle(), {}};
     prepared.Draws.reserve(list.Commands.size());
     // Many draws share geometry; declaring the same (buffer, range) read repeatedly only grows the pass
     // access list (and every compile step that walks it), so each distinct read is declared once.
@@ -88,11 +103,6 @@ std::optional<PreparedRendererList> PrepareRendererList(const RendererList& list
     std::span<const RendererListPassBinding> programBindings;
     for (size_t index = 0; index < list.Commands.size(); ++index) {
         const auto& draw = list.GetCommand(index);
-        if (validationFull && (!ValidateMeshDrawCommand(draw) ||
-                               (bindings && resolvedBindingProgram.Get() != draw.Program.Get() && !bindings->IsValidFor(builder, *draw.Program)))) {
-            builder.Reject("RendererListPreparation", "Draw geometry or pass parameter bindings are invalid");
-            return std::nullopt;
-        }
         if (bindings && resolvedBindingProgram.Get() != draw.Program.Get()) {
             resolvedBindingProgram = draw.Program.Get();
             programBindings = bindings->Find(*draw.Program);

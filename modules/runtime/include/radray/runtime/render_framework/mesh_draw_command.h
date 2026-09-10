@@ -65,7 +65,6 @@ struct PreparedRendererList {
 bool ValidateMeshGeometry(const GpuMesh::DrawData& geometry, uint32_t firstIndex, uint32_t indexCount) noexcept;
 bool ValidateMeshDrawCommand(const MeshDrawCommand& command) noexcept;
 bool FinalizeMeshDrawCommand(MeshDrawCommand& command) noexcept;
-bool FinalizeMeshDrawCommand(MeshDrawCommand& command, RenderValidationMode validation) noexcept;
 std::optional<PreparedRendererList> PrepareRendererList(const RendererList& list, RenderGraphRasterBuilder& builder,
     Nullable<const RendererListPassBindings*> bindings = nullptr);
 void SubmitRendererList(const PreparedRendererList& list, RenderGraphRasterContext& ctx, DrawExecutionStats& stats);

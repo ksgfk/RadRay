@@ -48,10 +48,7 @@ void DepthOnlyMeshPassProcessor::PrepareCommand(const RendererListDesc& desc, co
     command.IndexCount = batch.IndexCount;
     command.VertexOffset = batch.VertexOffset;
     command.Groups = {*view->second, *objectGroup};
-    if (!FinalizeMeshDrawCommand(command, desc.Validation)) {
-        out.Reject(MeshPassRejectReason::InvalidBindings);
-        return;
-    }
+    FinalizeMeshDrawCommand(command);
     out.AddCommand(std::move(command));
 }
 
@@ -63,11 +60,6 @@ void DepthOnlyMeshPassProcessor::AddMeshBatch(const RendererListDesc& desc, cons
         return;
     }
     if (!batch.Geometry) {
-        out.Reject(MeshPassRejectReason::InvalidGeometry);
-        return;
-    }
-    if (IsRenderValidationFull(desc.Validation) &&
-        !ValidateMeshGeometry(*batch.Geometry.Get(), batch.FirstIndex, batch.IndexCount)) {
         out.Reject(MeshPassRejectReason::InvalidGeometry);
         return;
     }

@@ -1191,7 +1191,7 @@ void ValidateBindings() {
                     default:
                         break;
                 }
-                EXPECT_FALSE(builder.CreateParameterSet(*program.Get(), group, bindings).IsValid());
+                EXPECT_EQ(builder.CreateParameterSet(*program.Get(), group, bindings).IsValid(), scenario == 0);
                 builder.SetSideEffect();
             },
             EmptyCompute);

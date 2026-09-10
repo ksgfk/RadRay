@@ -38,7 +38,7 @@ size_t CpuDrawStore::KeyHash::operator()(const Key& key) const noexcept {
     return hash.ToHashCode();
 }
 
-bool CpuDrawStore::Sync(RenderSceneSnapshot& scene, RenderValidationMode validation) {
+bool CpuDrawStore::Sync(RenderSceneSnapshot& scene, RenderValidationMode) {
     _stats = {};
     scene.DrawRecords.clear();
     scene.PrimitiveDrawBegin.clear();
@@ -70,8 +70,6 @@ bool CpuDrawStore::Sync(RenderSceneSnapshot& scene, RenderValidationMode validat
                 DrawRecordStatus status = DrawRecordStatus::Ready;
                 if (!pass.Valid || !program) status = DrawRecordStatus::InvalidBindings;
                 else if (!geometry) status = DrawRecordStatus::InvalidGeometry;
-                else if (IsRenderValidationFull(validation) && !ValidateMeshGeometry(*geometry, batch.FirstIndex, batch.IndexCount))
-                    status = DrawRecordStatus::InvalidGeometry;
                 const bool same = !inserted && cached.Epoch != 0 &&
                                    cached.MaterialGeneration == material.Generation && cached.MaterialRevision == material.Revision &&
                                    cached.Geometry == geometry && cached.Program == program && cached.PipelineState == pass.PipelineState &&

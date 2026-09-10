@@ -527,6 +527,7 @@ struct RenderGraph::Impl {
     }
     SubmissionData DetachSubmissionResources();
     bool ValidateResources();
+    bool ValidateCanonicalInput();
     bool ResolvePorts();
     bool NormalizePasses();
     void Cull();
@@ -1286,16 +1287,6 @@ RgParameterSetHandle RenderGraph::AddParameterSet(
             fail("ParameterArrayElement", "Binding array element is outside the declaration count", declaration);
             return {};
         }
-        if (std::find_if(parameterSet.Bindings.begin(), parameterSet.Bindings.end(),
-                         [&](const Impl::ParameterBinding& value) {
-                             return value.Declaration == declaration &&
-                                    value.ArrayElement == source.ArrayElement;
-                         }) != parameterSet.Bindings.end()) {
-            if (impl.ValidationFull()) {
-                fail("DuplicateParameterBinding", "The same binding array element was supplied more than once", declaration);
-                return {};
-            }
-        }
 
         Impl::ParameterBinding destination{
             .Declaration = declaration,
@@ -1400,28 +1391,17 @@ RgParameterSetHandle RenderGraph::AddParameterSet(
         parameterSet.Bindings.push_back(std::move(destination));
     }
 
-    if (impl.ValidationFull()) {
-    const shader::ShaderArtifactView& artifact = program.GetArtifact().Generic();
-    for (const shader::WireBindingRecord& binding : artifact.Bindings()) {
-        const std::optional<std::string_view> name = artifact.GetName(binding.Name);
-        if (!name.has_value()) continue;
-        const std::optional<render::ShaderBindingInfo> info =
-            program.GetArtifact().FindBindingInfo(name.value());
-        if (!info.has_value() || info->Group != group) continue;
-        groupKnown = true;
-        if (info->Immutable) continue;
-        for (uint32_t element = 0; element < info->Count; ++element) {
-            const bool found = std::any_of(
-                parameterSet.Bindings.begin(), parameterSet.Bindings.end(),
-                [&](const Impl::ParameterBinding& value) {
-                    return value.Declaration == name.value() && value.ArrayElement == element;
-                });
-            if (!found) {
-                fail("MissingParameterBinding", fmt::format("Required binding array element {} is missing", element), name.value());
-                return {};
+    if (!groupKnown) {
+        const shader::ShaderArtifactView& artifact = program.GetArtifact().Generic();
+        for (const shader::WireBindingRecord& binding : artifact.Bindings()) {
+            const std::optional<std::string_view> name = artifact.GetName(binding.Name);
+            if (!name.has_value()) continue;
+            const std::optional<render::ShaderBindingInfo> info = program.GetArtifact().FindBindingInfo(name.value());
+            if (info.has_value() && info->Group == group) {
+                groupKnown = true;
+                break;
             }
         }
-    }
     }
     if (!groupKnown) {
         fail("ParameterGroup", "The program has no descriptor declarations in this parameter group", {});
@@ -1603,17 +1583,7 @@ bool RenderGraph::Impl::ValidateResources() {
                     Error("ExternalStorage", "External descriptor or state/validity storage does not match native texture", InvalidIndex, index);
                     continue;
                 }
-                if (ValidationFull() && !(TexturePoolKey{external.Texture->GetDesc()} == TexturePoolKey{external.Desc})) {
-                    Error("ExternalStorage", "External descriptor or state/validity storage does not match native texture", InvalidIndex, index);
-                    continue;
-                }
                 for (uint32_t cell = 0; cell < resource.CellCount(); ++cell) resource.Valid[cell] = external.ContentValid[cell % external.ContentValid.size()];
-                if (ValidationFull()) {
-                    for (size_t cell = 0; cell < external.SubresourceStates.size(); ++cell) {
-                        const auto state = external.SubresourceStates[cell];
-                        if (!ValidTextureState(external.Desc, state, !resource.Valid[cell])) Error("ExternalState", "Valid external contents require a defined state", InvalidIndex, index);
-                    }
-                }
             }
         } else {
             ++Report.Buffers;
@@ -1629,13 +1599,12 @@ bool RenderGraph::Impl::ValidateResources() {
             }
             if (reportFull) descriptor = fmt::format("size={} memory={} usage={}", desc.Size, EnumName(desc.Memory), desc.Usage);
             resource.Valid.assign(resource.CellCount(), resource.ExternalBuffer && resource.ExternalBuffer->ContentValid ? 1 : 0);
-            if (resource.ExternalBuffer && (ValidationFull() || resource.Valid[0]) &&
+            if (resource.ExternalBuffer && resource.Valid[0] &&
                 (!(BufferPoolKey{resource.ExternalBuffer->Buffer->GetDesc()} == BufferPoolKey{desc}) || !resource.ExternalBuffer->State ||
-                 (resource.Valid[0] && resource.ExternalBuffer->State.HasFlag(render::BufferState::Undefined)))) {
+                 resource.ExternalBuffer->State.HasFlag(render::BufferState::Undefined))) {
                 Error("ExternalStorage", "External buffer descriptor or initial state is invalid", InvalidIndex, index);
             }
         }
-        if (ValidationFull() && !EnumContains(resource.ExternalAccess)) Error("ExternalAccess", "Invalid external access mode", InvalidIndex, index);
         if (reportFull) {
             Report.Resources.push_back({resource.Name, std::move(descriptor), resource.IsTexture, resource.External()});
             Report.Resources.back().ViewId = resource.ViewId;
@@ -1658,7 +1627,6 @@ bool RenderGraph::Impl::NormalizePasses() {
         for (const auto& access : pass.Accesses) {
             auto& resource = Resources[access.Resource];
             if (access.Write && resource.External() && resource.ExternalAccess == RenderGraphExternalAccess::ReadOnly) Error("ReadOnlyExternal", "Cannot write a read-only external resource", p, access.Resource);
-            if (ValidationFull() && (access.Stages.value() & ~uint32_t{7}) != 0) Error("ShaderStages", "Access contains unsupported shader-stage bits", p, access.Resource);
             cells.clear();
             if (resource.IsTexture) {
                 for (uint32_t aspect = 0; aspect < resource.AspectCount(); ++aspect) {
@@ -1753,6 +1721,71 @@ bool RenderGraph::Impl::NormalizePasses() {
         }
         if (pass.DepthAttachment) checkAttachment(pass.DepthAttachment->View, pass.DepthAttachment->Desc.Load, pass.DepthAttachment->Desc.Store);
         if (pass.Width == 0) Error("MissingAttachment", "Raster passes require at least one attachment", p);
+    }
+    return !Failed;
+}
+
+bool RenderGraph::Impl::ValidateCanonicalInput() {
+    RADRAY_PROFILE_SCOPE_N("RenderGraph::ValidateCanonicalInput");
+    for (uint32_t index = 0; index < Resources.size(); ++index) {
+        auto& resource = Resources[index];
+        if (resource.IsTexture) {
+            if (resource.ExternalTexture) {
+                const auto& external = *resource.ExternalTexture;
+                if (!(TexturePoolKey{external.Texture->GetDesc()} == TexturePoolKey{external.Desc}))
+                    Error("ExternalStorage", "External descriptor or state/validity storage does not match native texture", InvalidIndex, index);
+                for (size_t cell = 0; cell < external.SubresourceStates.size(); ++cell) {
+                    const auto state = external.SubresourceStates[cell];
+                    const bool allowUndefined = cell < resource.Valid.size() && !resource.Valid[cell];
+                    if (!ValidTextureState(external.Desc, state, allowUndefined))
+                        Error("ExternalState", "Valid external contents require a defined state", InvalidIndex, index);
+                }
+            }
+        } else if (resource.ExternalBuffer) {
+            const bool validContent = !resource.Valid.empty() && resource.Valid[0] != 0;
+            if (!validContent &&
+                (!(BufferPoolKey{resource.ExternalBuffer->Buffer->GetDesc()} == BufferPoolKey{resource.BufferDesc}) ||
+                 !resource.ExternalBuffer->State))
+                Error("ExternalStorage", "External buffer descriptor or initial state is invalid", InvalidIndex, index);
+        }
+        if (!EnumContains(resource.ExternalAccess)) Error("ExternalAccess", "Invalid external access mode", InvalidIndex, index);
+    }
+    for (uint32_t p = 0; p < Passes.size(); ++p) {
+        for (const auto& access : Passes[p].Accesses) {
+            if ((access.Stages.value() & ~uint32_t{7}) != 0)
+                Error("ShaderStages", "Access contains unsupported shader-stage bits", p, access.Resource);
+        }
+    }
+    for (const auto& parameterSet : ParameterSets) {
+        if (!parameterSet.Program) continue;
+        for (size_t index = 0; index < parameterSet.Bindings.size(); ++index) {
+            const auto& binding = parameterSet.Bindings[index];
+            for (size_t earlier = 0; earlier < index; ++earlier) {
+                if (parameterSet.Bindings[earlier].Declaration == binding.Declaration &&
+                    parameterSet.Bindings[earlier].ArrayElement == binding.ArrayElement) {
+                    Error("DuplicateParameterBinding", "The same binding array element was supplied more than once",
+                          parameterSet.Pass, InvalidIndex, binding.Declaration);
+                    break;
+                }
+            }
+        }
+        const shader::ShaderArtifactView& artifact = parameterSet.Program->GetArtifact().Generic();
+        for (const shader::WireBindingRecord& record : artifact.Bindings()) {
+            const std::optional<std::string_view> name = artifact.GetName(record.Name);
+            if (!name.has_value()) continue;
+            const std::optional<render::ShaderBindingInfo> info = parameterSet.Program->GetArtifact().FindBindingInfo(name.value());
+            if (!info.has_value() || info->Group != parameterSet.Group || info->Immutable) continue;
+            for (uint32_t element = 0; element < info->Count; ++element) {
+                const bool found = std::any_of(
+                    parameterSet.Bindings.begin(), parameterSet.Bindings.end(),
+                    [&](const ParameterBinding& value) {
+                        return value.Declaration == name.value() && value.ArrayElement == element;
+                    });
+                if (!found)
+                    Error("MissingParameterBinding", fmt::format("Required binding array element {} is missing", element),
+                          parameterSet.Pass, InvalidIndex, name.value());
+            }
+        }
     }
     return !Failed;
 }
@@ -1932,6 +1965,7 @@ bool RenderGraph::Compile() {
             boundaries.erase(std::unique(boundaries.begin(), boundaries.end()), boundaries.end());
         }
         if (impl.Failed || !impl.ValidateResources() || !impl.NormalizePasses()) return false;
+        if (impl.ValidationFull() && !impl.ValidateCanonicalInput()) return false;
         if (impl.ReportFull()) {
             for (uint32_t p = 0; p < impl.Passes.size(); ++p)
                 for (const auto& access : impl.Passes[p].Accesses)
@@ -2642,6 +2676,7 @@ void RenderGraph::AddDiagnostic(std::string_view code, std::string_view message)
 void RenderGraphRasterContext::Fail(std::string_view message) {
     _graph._impl->Error("RasterExecution", message, _pass);
 }
+// Record checkpoint: Full only scans declared handles here and native VB/IB in BindVertex/BindIndex.
 render::TextureView* RenderGraph::ResolveView(uint32_t pass, RgTextureViewHandle handle) const {
     const auto& impl = *_impl;
     if (handle.Generation != impl.Generation || handle.Index >= impl.Views.size() || !impl.Views[handle.Index].Native)
