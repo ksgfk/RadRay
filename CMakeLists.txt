@@ -203,6 +203,9 @@ if (RADRAY_BUILD_SHADER_COMPILER)
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 "$<TARGET_FILE:${RADRAY_DXC_RUNTIME_TARGET}>"
                 "${RADRAY_BUILD_PATH}/$<CONFIG>/"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "$<TARGET_FILE_DIR:${RADRAY_DXC_RUNTIME_TARGET}>/dxil.dll"
+                "${RADRAY_BUILD_PATH}/$<CONFIG>/"
             COMMENT "Deploy RadRay DXC compiler runtime to build output")
     endif()
 endif()

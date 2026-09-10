@@ -62,7 +62,7 @@ bool FrameGraph::Expand() {
                 Graph.Connect(port.Output, value->Texture);
         }
     }
-    return Graph.GetReport().Diagnostics.empty();
+    return !Graph.HasFailed();
 }
 void FrameGraph::Recorded(RenderGraphExecutionResult result) {
     for (auto& component : _components) component.Value->GraphRecorded(Context, Graph, result);

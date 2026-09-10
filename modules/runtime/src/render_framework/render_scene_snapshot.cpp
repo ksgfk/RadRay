@@ -23,12 +23,14 @@ void RenderSceneSnapshot::ResetForReuse() noexcept {
     Stats.LightHighWatermark = previous.LightHighWatermark;
 }
 
-bool BuildRenderSceneSnapshot(const Scene& scene, RenderSceneSnapshot& out, vector<StreamingAssetRefAny>& retainedAssets) {
+bool BuildRenderSceneSnapshot(const Scene& scene, RenderSceneSnapshot& out, vector<StreamingAssetRefAny>& retainedAssets,
+                              RenderValidationMode validation) {
     RenderSceneSnapshotBuilder builder;
-    return builder.Build(scene, out, retainedAssets);
+    return builder.Build(scene, out, retainedAssets, validation);
 }
 
-bool RenderSceneSnapshotBuilder::Build(const Scene& scene, RenderSceneSnapshot& out, vector<StreamingAssetRefAny>& retainedAssets) {
+bool RenderSceneSnapshotBuilder::Build(const Scene& scene, RenderSceneSnapshot& out, vector<StreamingAssetRefAny>& retainedAssets,
+                                          RenderValidationMode validation) {
     if (++_epoch == 0) {
         _primitives.clear();
         _materials.clear();
@@ -246,7 +248,7 @@ bool RenderSceneSnapshotBuilder::Build(const Scene& scene, RenderSceneSnapshot& 
     next.Stats.Materials = next.Materials.size();
     next.Stats.Lights = next.Lights.size();
     next.Stats.RetainedAssets = retainedAssets.size() - ownerStart;
-    if (!_draws.Sync(next)) return false;
+    if (!_draws.Sync(next, validation)) return false;
     next.Stats.PrimitiveHighWatermark = std::max(next.Stats.PrimitiveHighWatermark, next.Primitives.capacity());
     next.Stats.BatchHighWatermark = std::max(next.Stats.BatchHighWatermark, next.MeshBatches.capacity());
     next.Stats.MaterialHighWatermark = std::max(next.Stats.MaterialHighWatermark, next.Materials.capacity());

@@ -10,6 +10,7 @@
 #include <radray/types.h>
 #include <radray/runtime/application_extension.h>
 #include <radray/runtime/flight_completion.h>
+#include <radray/runtime/render_framework/render_graph_runtime_options.h>
 
 namespace radray {
 
@@ -160,6 +161,10 @@ public:
     const std::filesystem::path& GetShaderSourceRoot() const noexcept { return _shaderSourceRoot; }
     const vector<std::filesystem::path>& GetShaderIncludePaths() const noexcept { return _shaderIncludePaths; }
 
+    /// Game thread. Takes effect on the next flight that has not yet frozen options in PrepareFrame.
+    void SetRenderGraphRuntimeOptions(RenderGraphRuntimeOptions options) noexcept { _pendingRenderGraphOptions = options; }
+    const RenderGraphRuntimeOptions& GetPendingRenderGraphRuntimeOptions() const noexcept { return _pendingRenderGraphOptions; }
+
     // —— runner / 运行时内部系统调用的框架方法(已固化帧序,非游戏 override 点)——
     AppUpdateResult Update(const AppUpdateContext& ctx);
     void Render(AppFrameContext& ctx);
@@ -204,6 +209,7 @@ private:
     ApplicationScheduler _scheduler;
     std::filesystem::path _shaderSourceRoot;
     vector<std::filesystem::path> _shaderIncludePaths;
+    RenderGraphRuntimeOptions _pendingRenderGraphOptions{kPerformanceRenderGraphRuntimeOptions};
     bool _multithreaded{false};
     bool _runtimeInitialized{false};
     bool _loopStarted{false};

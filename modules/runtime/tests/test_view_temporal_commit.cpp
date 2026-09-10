@@ -333,6 +333,7 @@ class TemporalHost : public Application {
 public:
     explicit TemporalHost(TemporalHostResult& result) : Result(result) {}
     void OnInit() override {
+        SetRenderGraphRuntimeOptions(kDiagnosticRenderGraphRuntimeOptions);
         auto pipeline = make_unique<TemporalProbePipeline>(Result);
 #if defined(RADRAY_ENABLE_SHADER_JIT)
         pipeline->InitializeGraphics(*GetDevice());

@@ -216,7 +216,7 @@ bool ImGuiGraph::BuildGraph(RenderGraph& graph, RenderPipelineContext& context, 
                 for (const auto& draw : data.Draws) { ctx.BindParameterSet(draw.Set); encoder.SetScissor(draw.Clip); encoder.DrawIndexed(draw.Count, 1, draw.Index, draw.Vertex, 0); } });
         }
     }
-    return graph.GetReport().Diagnostics.empty();
+    return !graph.HasFailed();
 }
 void ImGuiGraph::CompleteGraph(const RenderGraph& graph, RenderPipelineContext& context, ImGuiGraphFrame frame, bool success) {
     RADRAY_ASSERT(frame._index == context.FlightIndex());

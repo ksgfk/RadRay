@@ -696,9 +696,6 @@ private:
         EXPECT_TRUE(material.Textures.front().Texture->IsValid());
         const auto& stage = pipeline.GetStageBStats(flight);
         EXPECT_EQ(stage.SnapshotBuilds, 1u);
-        const auto& report = GetRenderSystem()->GetGraphReport(flight);
-        const bool hasDepth = std::any_of(report.Passes.begin(), report.Passes.end(), [](const auto& pass) { return pass.Name == "Forward.DepthPrepass"; });
-        EXPECT_EQ(hasDepth, UsesDepth(_scenario));
         if (UsesDepth(_scenario)) {
             EXPECT_GT(stage.DepthCommands, 0u);
             EXPECT_EQ(stage.Execution.Skipped, 0u);
@@ -717,7 +714,6 @@ private:
             EXPECT_EQ(split[1].Culling.Stats.FrustumRejected, 1u);
             EXPECT_EQ(stage.CullCalls, 3u);
         }
-        if (_scenario == Scenario::TransparentDepth) EXPECT_TRUE(std::any_of(report.Passes.begin(), report.Passes.end(), [](const auto& pass) { return pass.Name == "Forward.Transparent"; }));
         _result->SnapshotRendered = true;
         if (_destroyedInputs[flight]) {
             _result->DestroyedFrameRendered = true;

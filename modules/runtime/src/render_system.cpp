@@ -40,6 +40,7 @@ void RenderSystem::OnShutdown() noexcept {
     _framePlans.clear();
     _frameOutputInfos.clear();
     _graphReports.clear();
+    _flightOptions.clear();
 }
 
 ServiceStatus RenderSystem::OnInitialize() {
@@ -53,6 +54,7 @@ ServiceStatus RenderSystem::OnInitialize() {
     _framePlans.resize(gpu->GetFlightDataCount());
     _frameOutputInfos.resize(gpu->GetFlightDataCount());
     _graphReports.resize(gpu->GetFlightDataCount());
+    _flightOptions.assign(gpu->GetFlightDataCount(), kPerformanceRenderGraphRuntimeOptions);
     _renderPassRegistry = make_unique<render::RenderPassRegistry>(device);
     _graphRuntime = make_unique<RenderGraphRuntime>(*device, *_renderPassRegistry, gpu->GetFlightDataCount());
     _viewStates = make_unique<ViewStateRegistry>(*device, *_renderPassRegistry, gpu->GetFlightDataCount());
@@ -123,8 +125,9 @@ void RenderSystem::PrepareFrame(const AppUpdateContext& ctx) {
     RADRAY_ASSERT(ctx.FlightIndex < _retainedAssets.size());
     auto& outputs = _frameOutputInfos[ctx.FlightIndex];
     outputs = _presentation->GetOutputInfos(_outputs);
+    _flightOptions[ctx.FlightIndex] = _app->GetPendingRenderGraphRuntimeOptions();
     RenderWorkloadBuilder workloads(_framePlans[ctx.FlightIndex], outputs);
-    RenderPrepareContext prepare{ctx, outputs, workloads, _retainedAssets[ctx.FlightIndex]};
+    RenderPrepareContext prepare{ctx, outputs, workloads, _retainedAssets[ctx.FlightIndex], _flightOptions[ctx.FlightIndex]};
     if (_pipeline)
         _pipeline->PrepareFrame(prepare);
     else
@@ -173,7 +176,7 @@ void RenderSystem::Render(AppFrameContext& ctx) {
             families.push_back(std::move(*family));
         }
     }
-    RenderPipelineContext pipelineContext(ctx, *graphResources, *_renderPassRegistry, *_viewStates, serial, families, surfaces, report);
+    RenderPipelineContext pipelineContext(ctx, *graphResources, *_renderPassRegistry, *_viewStates, serial, families, surfaces, report, _flightOptions[flight]);
     auto graph = [&] {
         RADRAY_PROFILE_SCOPE_N("CreateRenderGraph");
         return pipelineContext.CreateRenderGraph("Frame");

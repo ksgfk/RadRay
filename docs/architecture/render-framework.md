@@ -1,6 +1,6 @@
 > - 适用: 改渲染管线、场景表示、Application 生命周期或服务装配
 > - 权威: 本文描述场景、Forward 与 Application 装配；workload/graph/history 契约见 `renderer-foundation.md`，资产与 GPU 帧管理见 `asset-system.md`、`frame-and-gpu.md`
-> - 锚点: `modules/runtime/include/radray/runtime/render_framework/render_pipeline.h`, `modules/runtime/include/radray/runtime/forward_pipeline/forward_pipeline.h`, `modules/runtime/include/radray/runtime/forward_pipeline/forward_graph.h`, `modules/runtime/include/radray/runtime/material.h`, `modules/runtime/include/radray/runtime/shader_program.h`, `modules/runtime/include/radray/runtime/material_technique.h`, `modules/runtime/include/radray/runtime/render_framework/render_scene_snapshot.h`, `modules/runtime/include/radray/runtime/render_framework/renderer_list.h`, `modules/runtime/include/radray/runtime/components/static_mesh_component.h`, `modules/runtime/include/radray/runtime/game_framework/actor.h`, `modules/runtime/include/radray/runtime/service_registry.h`, `modules/runtime/src/application.cpp`, `modules/runtime/src/render_system.cpp`, `examples/example_lambert_sphere/example_lambert_sphere.cpp`, `examples/example_tidal_atrium/tidal_atrium.cpp`, `modules/runtime/include/radray/runtime/render_framework/scene.h`, `modules/runtime/include/radray/runtime/render_framework/cpu_draw_record.h`, `modules/runtime/include/radray/runtime/render_framework/cbuffer_view.h`, `modules/runtime/include/radray/runtime/render_framework/hlsl_math.h`, `modules/runtime/include/radray/runtime/forward_pipeline/gen_forward_cbuffers.h`
+> - 锚点: `modules/runtime/include/radray/runtime/render_framework/render_pipeline.h`, `modules/runtime/include/radray/runtime/render_framework/render_graph_runtime_options.h`, `modules/runtime/include/radray/runtime/application.h`, `modules/runtime/include/radray/runtime/forward_pipeline/forward_pipeline.h`, `modules/runtime/include/radray/runtime/forward_pipeline/forward_graph.h`, `modules/runtime/include/radray/runtime/material.h`, `modules/runtime/include/radray/runtime/shader_program.h`, `modules/runtime/include/radray/runtime/material_technique.h`, `modules/runtime/include/radray/runtime/render_framework/render_scene_snapshot.h`, `modules/runtime/include/radray/runtime/render_framework/renderer_list.h`, `modules/runtime/include/radray/runtime/components/static_mesh_component.h`, `modules/runtime/include/radray/runtime/game_framework/actor.h`, `modules/runtime/include/radray/runtime/service_registry.h`, `modules/runtime/src/application.cpp`, `modules/runtime/src/render_system.cpp`, `examples/example_lambert_sphere/example_lambert_sphere.cpp`, `examples/example_tidal_atrium/tidal_atrium.cpp`, `modules/runtime/include/radray/runtime/render_framework/scene.h`, `modules/runtime/include/radray/runtime/render_framework/cpu_draw_record.h`, `modules/runtime/include/radray/runtime/render_framework/cbuffer_view.h`, `modules/runtime/include/radray/runtime/render_framework/hlsl_math.h`, `modules/runtime/include/radray/runtime/forward_pipeline/gen_forward_cbuffers.h`
 
 # 渲染框架与 game framework
 
@@ -41,9 +41,9 @@ Render thread: pool/history safe Begin → resolve requested outputs/views
 `RenderPipeline` 提供 `PrepareFrame`、`BuildGraph` 和 `GraphRecorded`。PrepareFrame 在 game thread 写当前 flight 的
 pipeline 私有输入，BuildGraph 在 render thread 消费该输入，GraphRecorded 处理录制结果。runner 既有的 slot semaphore / fence 保证
 flight 复用互斥，通过 frame serial 校验收据，沿用现有提交和回收协议。
-`RenderPrepareContext` 提供 output 值目录和 workload builder；pipeline 向当前 flight 的 frame plan
+`RenderPrepareContext` 提供 output 值目录、workload builder，以及本 flight 冻结的 `RenderGraphRuntimeOptions`；pipeline 向当前 flight 的 frame plan
 写入 view families。`RenderPipelineContext` 提供 resolved families、graph/output/history 操作，
-不公开 AppFrameContext、窗口或 command buffer。具体接口与验证见
+不公开 AppFrameContext、窗口或 command buffer。`Application::SetRenderGraphRuntimeOptions` 只影响尚未冻结的后续帧。具体接口与验证见
 [Renderer foundation](renderer-foundation.md)。
 
 `RenderSystem` 只取得 plan 请求的目标，graph 按真实初始状态导入；成功写入标记由 executor 产生。
@@ -175,13 +175,13 @@ proxy，已存在且仍有效的 proxy 保持不变。清空或替换 mesh 仍�
 
 Forward 在 render thread 对每个 resolved view 调用一次 CPU `Cull`，从同一结果生成 DepthOnly、
 Opaque、Transparent 三个 `RendererList`。同一 family 内复用 Depth/Lit processor，view 切换时 `ResetView`；
-HDR 多 view 共用一个 lit processor，主相机的三张列表走 `BuildRendererLists`（一次校验后按 pass 顺序写出）。通用 builder 处理 pass/queue/mask、排序与统计；具体
+HDR 多 view 共用一个 lit processor，主相机的三张列表走 `BuildRendererLists`（按 pass 顺序写出；契约校验仅 `Validation=Full`）。通用 builder 处理 pass/queue/mask、排序与统计；具体
 `ForwardLitMeshPassProcessor` / `DepthOnlyMeshPassProcessor` 解释 shader 契约，准备 per-view/object/material
 bytes 与 frame-local sets，输出只借用资源的 `MeshDrawCommand`。layout 字段在 binding cache 首次解析，热路径不再按名字搜索。
-Lit processor 在首次准备 view 时按 snapshot 数量预留材质、对象和可复用命令模板的稠密表，
-每张表初始预分配最多 1024 项，超出后按需增长。
-这减少帧内小容器随数组增长而反复搬移的成本，同时限制稀疏大场景的初始预留。
-切换 view 保留容量，Temporal 对象值与模板仍按原有失效规则清空，不跨帧复用资源。
+Lit processor 在首次准备 view 时按 snapshot 数量预留材质和对象槽表（初始最多 1024 项）。
+静态命令模板按 `(program, batchIndex, passIndex)` 保存 Description、material 组与 primitive 身份，不含 view/object 动态组。
+`ResetView` 清当前 View 槽；temporal 再清 Objects，保留 Materials 与模板。命中模板时仍为本 view 取 View 组并准备 object 切片。
+不跨帧复用 Rg handles 或 arena 切片。
 render thread 不访问 Scene、proxy、CameraComponent、Material、AssetManager 或 StreamingAssetRef。
 
 ### cbuffer 冻结与 gather

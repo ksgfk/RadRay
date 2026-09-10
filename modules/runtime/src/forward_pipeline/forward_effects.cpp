@@ -298,7 +298,7 @@ ShadowData BuildShadows(RenderGraph& graph, const ForwardPipelineSettings& setti
             RADRAY_PROFILE_SCOPE_N("ShadowCascadeCullAndList");
             Cull({&scene, &draw.View}, draw.Culling);
             processor.ResetView();
-            BuildRendererList({"ShadowCaster", "ShadowCaster", &draw.Culling, &draw.View, RenderQueueRange::Opaque(), 0xffffffffu, RendererListSorting::FrontToBack, true}, processor, draw.DepthOnly);
+            BuildRendererList({"ShadowCaster", "ShadowCaster", &draw.Culling, &draw.View, RenderQueueRange::Opaque(), 0xffffffffu, RendererListSorting::FrontToBack, true, graph.GetRuntimeOptions().Validation}, processor, draw.DepthOnly);
             work.ContentValid = work.ContentValid && draw.DepthOnly.Stats.ContentSucceeded();
         }
         const ForwardGraphView shadowView{draw.View, &draw.DepthOnly};
@@ -548,18 +548,20 @@ bool BuildForwardHdrView(RenderGraph& graph, RenderPipelineContext& context, ren
     {
         RADRAY_PROFILE_SCOPE_N("MainViewRendererLists");
         if (!msaa && !auxiliary) {
+            const auto validation = graph.GetRuntimeOptions().Validation;
             const RendererListDesc descs[] = {
-                {"DepthNormalsMotion", "DepthNormalsMotion", &work.Main.Culling, &view, RenderQueueRange::Opaque(), 0xffffffffu, RendererListSorting::FrontToBack, true},
-                {"Opaque", "ForwardLit", &work.Main.Culling, &view, RenderQueueRange::Opaque(), 0xffffffffu, RendererListSorting::StateThenFrontToBack, true},
-                {"Transparent", "ForwardLit", &work.Main.Culling, &view, RenderQueueRange::Transparent(), 0xffffffffu, RendererListSorting::BackToFront, true},
+                {"DepthNormalsMotion", "DepthNormalsMotion", &work.Main.Culling, &view, RenderQueueRange::Opaque(), 0xffffffffu, RendererListSorting::FrontToBack, true, validation},
+                {"Opaque", "ForwardLit", &work.Main.Culling, &view, RenderQueueRange::Opaque(), 0xffffffffu, RendererListSorting::StateThenFrontToBack, true, validation},
+                {"Transparent", "ForwardLit", &work.Main.Culling, &view, RenderQueueRange::Transparent(), 0xffffffffu, RendererListSorting::BackToFront, true, validation},
             };
             RendererList* outs[] = {&work.Main.DepthOnly, &work.Main.Opaque, &work.Main.Transparent};
             BuildRendererLists(descs, *processor, outs);
             work.ContentValid &= work.Main.DepthOnly.Stats.ContentSucceeded();
         } else {
+            const auto validation = graph.GetRuntimeOptions().Validation;
             const RendererListDesc descs[] = {
-                {"Opaque", "ForwardLit", &work.Main.Culling, &view, RenderQueueRange::Opaque(), 0xffffffffu, RendererListSorting::StateThenFrontToBack, true},
-                {"Transparent", "ForwardLit", &work.Main.Culling, &view, RenderQueueRange::Transparent(), 0xffffffffu, RendererListSorting::BackToFront, true},
+                {"Opaque", "ForwardLit", &work.Main.Culling, &view, RenderQueueRange::Opaque(), 0xffffffffu, RendererListSorting::StateThenFrontToBack, true, validation},
+                {"Transparent", "ForwardLit", &work.Main.Culling, &view, RenderQueueRange::Transparent(), 0xffffffffu, RendererListSorting::BackToFront, true, validation},
             };
             RendererList* outs[] = {&work.Main.Opaque, &work.Main.Transparent};
             BuildRendererLists(descs, *processor, outs);

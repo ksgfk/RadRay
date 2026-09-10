@@ -113,6 +113,7 @@ string RenderGraphExecutionReport::ToDot() const {
 string RenderGraphExecutionReport::ToText() const {
     string result = fmt::format("Graph {}: {} live / {} declared, {} culled, compile plan {}; {} transitions, {} UAV barriers\n",
                                 Name, LivePasses, DeclaredPasses, CulledPasses, CompilePlanReused ? "reused" : "compiled", TransitionBarriers, UavBarriers);
+    if (!FirstErrorCode.empty()) result += fmt::format("  FirstErrorCode: {}\n", FirstErrorCode);
     for (size_t p = 0; p < Passes.size(); ++p) {
         const auto& pass = Passes[p];
         result += fmt::format("  [{}] {} {} {} ({}) at {}:{}\n", p, pass.Live ? "live" : "culled", EnumName(pass.Type), pass.Name, pass.LivenessReason, pass.File, pass.Line);

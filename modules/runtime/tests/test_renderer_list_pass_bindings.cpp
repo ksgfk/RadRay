@@ -497,6 +497,64 @@ VK_BINDING(0, 0) RWStructuredBuffer<uint> Output : register(u0);
     }
 }
 
+TEST_P(RendererListPassBindingsTest, OffSkipsMissingGroupAndFullMinimalStillFails) {
+    auto& device = *Context.Device;
+    auto program = test::CompileFoundationGraphics(device, R"hlsl(
+#include <core/platform.hlsli>
+struct Values { float4 Value; };
+VK_BINDING(0, 0) ConstantBuffer<Values> ValuesBuffer : register(b0);
+[shader("vertex")] float4 VSMain(float3 p : POSITION) : SV_Position { return float4(p, 1); }
+[shader("pixel")] float4 PSMain() : SV_Target0 { return ValuesBuffer.Value; }
+)hlsl");
+    ASSERT_TRUE(program);
+    auto native = device.CreateShaderParameterSet({program->GetPipelineLayout(), 0});
+    ASSERT_TRUE(native);
+    const auto makeList = [&] {
+        RendererList list;
+        MeshDrawCommand valid;
+        valid.Program = program.Get();
+        valid.Groups.push_back({0, native.Get(), {}});
+        list.Commands.push_back(std::move(valid));
+        MeshDrawCommand missing;
+        missing.Program = program.Get();
+        list.Commands.push_back(std::move(missing));
+        return list;
+    };
+    {
+        auto graph = RenderGraph{*Context.Device, *Resources, *Registry, "off", kPerformanceRenderGraphRuntimeOptions};
+        auto list = makeList();
+        const auto color = graph.CreateTexture({render::TextureDimension::Dim2D, 4, 4, 1, 1, 1, render::TextureFormat::RGBA8_UNORM, render::MemoryType::Device, render::TextureUse::RenderTarget, {}}, "color");
+        graph.AddRasterPass<test::EmptyGraphPass>("skip", [&](test::EmptyGraphPass&, RenderGraphRasterBuilder& builder) {
+            EXPECT_FALSE(builder.IsValidationFull());
+            builder.SetColorAttachment(0, color);
+            EXPECT_TRUE(RendererListPassBindings::Build(builder, list, {}));
+            builder.SetSideEffect();
+        }, +[](const test::EmptyGraphPass&, RenderGraphRasterContext&) {});
+        EXPECT_TRUE(graph.Compile()) << graph.GetFirstErrorCode();
+        EXPECT_FALSE(graph.HasFailed());
+        EXPECT_TRUE(graph.GetReport().Diagnostics.empty());
+        EXPECT_TRUE(graph.GetFirstErrorCode().empty());
+    }
+    {
+        RenderGraphRuntimeOptions options = kDiagnosticRenderGraphRuntimeOptions;
+        options.Report = RenderGraphReportMode::Minimal;
+        auto graph = RenderGraph{*Context.Device, *Resources, *Registry, "full-minimal", options};
+        auto list = makeList();
+        const auto color = graph.CreateTexture({render::TextureDimension::Dim2D, 4, 4, 1, 1, 1, render::TextureFormat::RGBA8_UNORM, render::MemoryType::Device, render::TextureUse::RenderTarget, {}}, "color");
+        graph.AddRasterPass<test::EmptyGraphPass>("reject", [&](test::EmptyGraphPass&, RenderGraphRasterBuilder& builder) {
+            EXPECT_TRUE(builder.IsValidationFull());
+            builder.SetColorAttachment(0, color);
+            EXPECT_FALSE(RendererListPassBindings::Build(builder, list, {}));
+            builder.SetSideEffect();
+        }, +[](const test::EmptyGraphPass&, RenderGraphRasterContext&) {});
+        EXPECT_FALSE(graph.Compile());
+        EXPECT_TRUE(graph.HasFailed());
+        EXPECT_EQ(graph.GetFirstErrorCode(), "RendererListMissingGroup");
+        EXPECT_TRUE(graph.GetReport().Diagnostics.empty());
+        EXPECT_EQ(graph.GetReport().FirstErrorCode, "RendererListMissingGroup");
+    }
+}
+
 INSTANTIATE_TEST_SUITE_P(Backends, RendererListPassBindingsTest, testing::Values(render::RenderBackend::D3D12, render::RenderBackend::Vulkan));
 
 }  // namespace

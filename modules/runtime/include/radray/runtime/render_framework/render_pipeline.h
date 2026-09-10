@@ -5,6 +5,7 @@
 #include <radray/runtime/asset_manager.h>
 #include <radray/runtime/gpu_system.h>
 #include <radray/runtime/render_framework/render_workload.h>
+#include <radray/runtime/render_framework/render_graph_runtime_options.h>
 #include <radray/runtime/render_framework/view_state.h>
 #include <radray/types.h>
 
@@ -28,6 +29,7 @@ struct RenderPrepareContext {
     std::span<const RenderOutputInfo> Outputs;
     RenderWorkloadBuilder& Workloads;
     vector<StreamingAssetRefAny>& RetainedAssets;
+    RenderGraphRuntimeOptions RuntimeOptions{kPerformanceRenderGraphRuntimeOptions};
 };
 
 struct RenderGraphOutputBinding {
@@ -40,7 +42,8 @@ class RenderPipelineContext {
 public:
     RenderPipelineContext(AppFrameContext& frame, RenderGraphFrameResources& graphResources, render::RenderPassRegistry& registry,
                           ViewStateRegistry& views, uint64_t serial, std::span<const ResolvedRenderViewFamily> families,
-                          std::span<RenderSurfaceFrame> surfaces, RenderGraphExecutionReport& report);
+                          std::span<RenderSurfaceFrame> surfaces, RenderGraphExecutionReport& report,
+                          RenderGraphRuntimeOptions runtime = kDiagnosticRenderGraphRuntimeOptions);
     ~RenderPipelineContext();
     uint32_t FlightIndex() const noexcept;
     uint64_t FrameSerial() const noexcept { return _serial; }
@@ -48,6 +51,7 @@ public:
     render::RenderBackend Backend() const noexcept;
     HostWriteBatch& HostWrites() const noexcept;
     std::span<const ResolvedRenderViewFamily> ViewFamilies() const noexcept { return _families; }
+    const RenderGraphRuntimeOptions& GetRuntimeOptions() const noexcept { return _runtimeOptions; }
     RenderGraph CreateRenderGraph(std::string_view name);
     RgTextureValue ImportOutputTarget(RenderGraph& graph, RenderOutputId output);
     std::span<const RenderSurfaceFrame> OutputSurfaces() const noexcept { return _surfaces; }
@@ -71,6 +75,7 @@ private:
     std::span<const ResolvedRenderViewFamily> _families;
     std::span<RenderSurfaceFrame> _surfaces;
     RenderGraphExecutionReport& _report;
+    RenderGraphRuntimeOptions _runtimeOptions{kDiagnosticRenderGraphRuntimeOptions};
     vector<shared_ptr<ImportedOutput>> _imports;
     shared_ptr<FrameSubmission> _submission;
     vector<HistoryTexturePair> _histories;

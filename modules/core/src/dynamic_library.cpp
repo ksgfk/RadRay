@@ -1,5 +1,6 @@
 #include <radray/dynamic_library.h>
 
+#include <radray/file.h>
 #include <radray/logger.h>
 #include <radray/types.h>
 #include <radray/text_encoding.h>
@@ -54,13 +55,19 @@ DynamicLibrary::DynamicLibrary(std::string_view name_) noexcept {
         name = string{name_} + ".dll";
     }
     auto nameW = ToWideChar(name);
-    if (nameW.has_value()) {
-        HMODULE m = ::LoadLibraryW(nameW->c_str());
-        if (m == nullptr) {
-            RADRAY_ERR_LOG("LoadLibraryW failed: {}", _Win32LastErrMessage());
-        } else {
-            _handle = m;
+    if (!nameW.has_value()) return;
+    HMODULE m = nullptr;
+    if (name.find('\\') == string::npos && name.find('/') == string::npos) {
+        const auto exeDir = GetExecutableDirectory();
+        if (!exeDir.empty()) {
+            m = ::LoadLibraryExW((exeDir / name).c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
         }
+    }
+    if (m == nullptr) m = ::LoadLibraryW(nameW->c_str());
+    if (m == nullptr) {
+        RADRAY_ERR_LOG("LoadLibraryW failed: {}", _Win32LastErrMessage());
+    } else {
+        _handle = m;
     }
 }
 

@@ -17,40 +17,47 @@ std::optional<RendererListPassBindings> RendererListPassBindings::Build(
         const auto& binding = bindings[index];
         if (!binding.Program || !builder.OwnsParameterSet(binding.Parameters, *binding.Program, binding.Group))
             return fail("RendererListParameterScope", "Parameter set belongs to a different graph, pass, program or group", binding.Group);
-        if (std::none_of(list.Commands.begin(), list.Commands.end(), [&](const auto& draw) { return draw.Program.Get() == binding.Program; }))
+        if (builder.IsValidationFull() && std::none_of(list.Commands.begin(), list.Commands.end(), [&](const auto& draw) { return draw.Program.Get() == binding.Program; }))
             return fail("RendererListProgram", "Parameter program is not used by this renderer list", binding.Group);
-        for (size_t earlier = 0; earlier < index; ++earlier)
-            if (bindings[earlier].Program == binding.Program && bindings[earlier].Group == binding.Group)
-                return fail("RendererListGroupCollision", "A program group has more than one graph parameter set", binding.Group);
+        if (builder.IsValidationFull()) {
+            for (size_t earlier = 0; index > 0 && earlier < index; ++earlier)
+                if (bindings[earlier].Program == binding.Program && bindings[earlier].Group == binding.Group)
+                    return fail("RendererListGroupCollision", "A program group has more than one graph parameter set", binding.Group);
+        }
     }
     unordered_map<ShaderProgram*, vector<std::pair<uint32_t, std::string_view>>> requiredByProgram;
+    const bool validationFull = builder.IsValidationFull();
     for (const auto& draw : list.Commands) {
         if (!draw.Program) return fail("RendererListProgram", "Draw has no shader program", 0);
         for (size_t index = 0; index < draw.Groups.size(); ++index) {
             const auto& native = draw.Groups[index];
-            if (!native.Set || (index && draw.Groups[index - 1].Group >= native.Group))
+            if (validationFull && (!native.Set || (index && draw.Groups[index - 1].Group >= native.Group)))
                 return fail("RendererListNativeGroup", "Native groups must be valid, sorted and unique", native.Group);
-            for (const auto& binding : bindings)
-                if (binding.Program == draw.Program.Get() && binding.Group == native.Group)
-                    return fail("RendererListGroupCollision", "Native and graph parameter sets collide for this program", native.Group);
-        }
-        auto [requirements, inserted] = requiredByProgram.try_emplace(draw.Program.Get());
-        if (inserted) {
-            const auto& artifact = draw.Program->GetArtifact().Generic();
-            for (const auto& declaration : artifact.Bindings()) {
-                const auto name = artifact.GetName(declaration.Name);
-                if (!name) continue;
-                const auto info = draw.Program->GetArtifact().FindBindingInfo(*name);
-                if (!info || info->Immutable) continue;
-                requirements->second.emplace_back(info->Group, *name);
+            if (validationFull) {
+                for (const auto& binding : bindings)
+                    if (binding.Program == draw.Program.Get() && binding.Group == native.Group)
+                        return fail("RendererListGroupCollision", "Native and graph parameter sets collide for this program", native.Group);
             }
         }
-        for (const auto& [group, name] : requirements->second) {
-            const bool native = std::any_of(draw.Groups.begin(), draw.Groups.end(), [&](const auto& value) { return value.Group == group; });
-            const bool graph = std::any_of(bindings.begin(), bindings.end(), [&](const auto& value) { return value.Program == draw.Program.Get() && value.Group == group; });
-            if (!native && !graph) {
-                builder.Reject("RendererListMissingGroup", "Draw is missing a required native or graph parameter group", name);
-                return std::nullopt;
+        if (validationFull) {
+            auto [requirements, inserted] = requiredByProgram.try_emplace(draw.Program.Get());
+            if (inserted) {
+                const auto& artifact = draw.Program->GetArtifact().Generic();
+                for (const auto& declaration : artifact.Bindings()) {
+                    const auto name = artifact.GetName(declaration.Name);
+                    if (!name) continue;
+                    const auto info = draw.Program->GetArtifact().FindBindingInfo(*name);
+                    if (!info || info->Immutable) continue;
+                    requirements->second.emplace_back(info->Group, *name);
+                }
+            }
+            for (const auto& [group, name] : requirements->second) {
+                const bool native = std::any_of(draw.Groups.begin(), draw.Groups.end(), [&](const auto& value) { return value.Group == group; });
+                const bool graph = std::any_of(bindings.begin(), bindings.end(), [&](const auto& value) { return value.Program == draw.Program.Get() && value.Group == group; });
+                if (!native && !graph) {
+                    builder.Reject("RendererListMissingGroup", "Draw is missing a required native or graph parameter group", name);
+                    return std::nullopt;
+                }
             }
         }
     }

@@ -4,6 +4,7 @@
 
 #include <radray/runtime/render_framework/culling.h>
 #include <radray/runtime/render_framework/mesh_draw_command.h>
+#include <radray/runtime/render_framework/render_graph_runtime_options.h>
 
 namespace radray {
 
@@ -27,6 +28,7 @@ struct RendererListDesc {
     uint32_t LayerMask{0xffffffffu};
     RendererListSorting Sorting{RendererListSorting::StateThenFrontToBack};
     bool RequireMaterialPass{false};
+    RenderValidationMode Validation{RenderValidationMode::Full};
 };
 struct RendererListStats {
     uint64_t VisiblePrimitives{0}, ConsideredBatches{0}, LayerRejected{0}, QueueRejected{0}, MissingPass{0};
@@ -44,7 +46,7 @@ struct RendererListItem {
 struct RendererList {
     // Payloads remain in publication order; Items alone defines the sorted execution order.
     // Empty Items uses publication order for explicitly assembled lists.
-    // Nonempty Items must be a permutation of Commands; PrepareRendererList validates it before use.
+    // Nonempty Items must be a permutation of Commands; Full validation checks that before use.
     vector<MeshDrawCommand> Commands;
     vector<RendererListItem> Items;
     RendererListStats Stats;

@@ -3,6 +3,7 @@
 #include <radray/basic_math.h>
 #include <radray/hash.h>
 #include <radray/runtime/render_framework/mesh_draw_command.h>
+#include <radray/runtime/render_framework/render_graph_runtime_options.h>
 #include <radray/types.h>
 
 namespace radray {
@@ -56,7 +57,7 @@ render::FrontFace OppositeFrontFace(render::FrontFace face) noexcept;
 /// Game-thread cache of stable draw records. Sync writes snapshot-local copies; camera-only frames reuse.
 class CpuDrawStore {
 public:
-    bool Sync(RenderSceneSnapshot& scene);
+    bool Sync(RenderSceneSnapshot& scene, RenderValidationMode validation = RenderValidationMode::Full);
     const CpuDrawStoreStats& GetStats() const noexcept { return _stats; }
     void ResetCounters() noexcept { _stats = {}; }
 

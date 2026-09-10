@@ -29,17 +29,14 @@ void ForwardLitMeshPassProcessor::ResetView() noexcept {
         if (!state) continue;
         state->ViewPrepared = false;
         state->View.reset();
-        if (_temporal) {
-            state->Objects.Clear();
-            state->Templates.Clear();
-        }
+        if (_temporal) state->Objects.Clear();
     }
 }
 
 void ForwardLitMeshPassProcessor::PrepareCommand(const RendererListDesc& desc, const RenderSceneSnapshot& scene,
                                                   const MeshBatch& batch, const MaterialPassRenderData& pass,
                                                   RenderQueue queue, bool mirrored, MeshBatchIndex batchIndex,
-                                                  bool reuseCommand, MeshPassDrawListContext& out) {
+                                                  uint32_t passIndex, bool reuseCommand, MeshPassDrawListContext& out) {
     RADRAY_PROFILE_SCOPE_N("PrepareCommand");
     auto* program = pass.Program.Get();
     const auto state = ResolveProgram(program);
@@ -57,27 +54,57 @@ void ForwardLitMeshPassProcessor::PrepareCommand(const RendererListDesc& desc, c
         ps.Materials.Groups.reserve(materialCapacity);
         if (ps.Objects.Slots.size() < objectCapacity) ps.Objects.Slots.resize(objectCapacity, kNoSlot);
         ps.Objects.Groups.reserve(objectCapacity);
-        if (reuseCommand && !_temporal) {
-            const auto templateCapacity = std::min(scene.MeshBatches.size(), kInitialCapacityLimit);
-            if (ps.Templates.Slots.size() < templateCapacity) ps.Templates.Slots.resize(templateCapacity, kNoSlot);
-            ps.Templates.Items.reserve(templateCapacity);
-        }
         ps.ViewPrepared = true;
         FillViewParameters(_viewScratch, *desc.Culling.Get(), *desc.View.Get(), _lightOverflowWarned,
                            binding.PassGroup.has_value() || desc.MaterialPassName == "DepthNormalsMotion" || desc.MaterialPassName == "ShadowCaster");
         ps.View = _resources.PrepareGroup(*program, binding.ViewGroup, AsCBufferBytes(_viewScratch));
     }
-    const bool cacheCommand = reuseCommand && !_temporal;
-    if (cacheCommand) {
-        if (auto* tmpl = ps.Templates.Find(batchIndex)) {
-            ++_duplicatePreparations;
-            if (!ps.View) {
-                out.Reject(MeshPassRejectReason::PrepareResourceFailed);
+    const auto instantiate = [&](const CommandTemplate& tmpl) {
+        if (!ps.View) {
+            out.Reject(MeshPassRejectReason::PrepareResourceFailed);
+            return;
+        }
+        auto* object = ps.Objects.Find(tmpl.Primitive);
+        if (object == nullptr) {
+            object = &ps.Objects.Insert(tmpl.Primitive);
+            if (tmpl.Primitive >= _objects.RowCount()) {
+                out.Reject(MeshPassRejectReason::InvalidBindings);
                 return;
             }
-            MeshDrawCommand command = tmpl->Command;
-            if (tmpl->ViewGroupIndex < command.Groups.size()) command.Groups[tmpl->ViewGroupIndex] = *ps.View;
-            out.AddCommand(std::move(command));
+            const auto row = _objects.Row(tmpl.Primitive);
+            std::span<const byte> bytes = row;
+            if (_temporal) {
+                const auto motion = _temporal->GetPrimitiveMotion(desc.View->StateId, scene.Primitives[tmpl.Primitive]);
+                _objectScratch = *AsCBuffer<Forward_ObjectData>(row);
+                _objectScratch.PreviousLocalToWorld = motion.PreviousLocalToWorld;
+                _objectScratch.MotionValid = motion.Valid && desc.View->PreviousViewValid ? 1u : 0u;
+                bytes = AsCBufferBytes(_objectScratch);
+            }
+            *object = _resources.PrepareGroup(*program, binding.ObjectGroup, bytes);
+        } else {
+            ++_duplicatePreparations;
+        }
+        if (!*object) {
+            out.Reject(MeshPassRejectReason::PrepareResourceFailed);
+            return;
+        }
+        MeshDrawCommand command;
+        command.Program = tmpl.Description.Program;
+        command.PipelineState = tmpl.Description.PipelineState;
+        command.Geometry = tmpl.Description.Geometry;
+        command.FirstIndex = tmpl.Description.FirstIndex;
+        command.IndexCount = tmpl.Description.IndexCount;
+        command.VertexOffset = tmpl.Description.VertexOffset;
+        const PreparedShaderGroup* groups[3]{&*ps.View, &tmpl.Material, &**object};
+        std::sort(std::begin(groups), std::end(groups), [](const auto* a, const auto* b) { return a->Group < b->Group; });
+        for (const auto* group : groups) command.Groups.push_back(*group);
+        out.AddCommand(std::move(command));
+    };
+    const auto templateKey = (uint64_t{batchIndex} << 32) | passIndex;
+    if (reuseCommand) {
+        if (auto found = ps.Templates.find(templateKey); found != ps.Templates.end()) {
+            ++_duplicatePreparations;
+            instantiate(found->second);
             return;
         }
     }
@@ -131,17 +158,12 @@ void ForwardLitMeshPassProcessor::PrepareCommand(const RendererListDesc& desc, c
     const PreparedShaderGroup* groups[3]{&*ps.View, &**material, &**object};
     std::sort(std::begin(groups), std::end(groups), [](const auto* a, const auto* b) { return a->Group < b->Group; });
     for (const auto* group : groups) command.Groups.push_back(*group);
-    if (cacheCommand) {
-        uint32_t viewIndex = 0;
-        for (uint32_t index = 0; index < command.Groups.size(); ++index) {
-            if (command.Groups[index].Group == binding.ViewGroup) {
-                viewIndex = index;
-                break;
-            }
-        }
-        auto& stored = ps.Templates.Insert(batchIndex);
-        stored.Command = command;
-        stored.ViewGroupIndex = viewIndex;
+    if (reuseCommand) {
+        CommandTemplate stored;
+        stored.Description = command;
+        stored.Material = **material;
+        stored.Primitive = batch.Primitive;
+        ps.Templates.emplace(templateKey, stored);
     }
     out.AddCommand(std::move(command));
 }
@@ -154,11 +176,18 @@ void ForwardLitMeshPassProcessor::AddMeshBatch(const RendererListDesc& desc, con
         out.Reject(MeshPassRejectReason::MissingPass);
         return;
     }
-    if (!batch.Geometry || !ValidateMeshGeometry(*batch.Geometry.Get(), batch.FirstIndex, batch.IndexCount)) {
+    if (!batch.Geometry) {
         out.Reject(MeshPassRejectReason::InvalidGeometry);
         return;
     }
-    PrepareCommand(desc, scene, batch, *pass.Get(), materialData.Queue, IsMirroredAffine(scene.Primitives[batch.Primitive].LocalToWorld), 0, false, out);
+    if (IsRenderValidationFull(desc.Validation) &&
+        !ValidateMeshGeometry(*batch.Geometry.Get(), batch.FirstIndex, batch.IndexCount)) {
+        out.Reject(MeshPassRejectReason::InvalidGeometry);
+        return;
+    }
+    const uint32_t passIndex = static_cast<uint32_t>(pass.Get() - materialData.Passes.data());
+    PrepareCommand(desc, scene, batch, *pass.Get(), materialData.Queue, IsMirroredAffine(scene.Primitives[batch.Primitive].LocalToWorld),
+                   batch.SectionIndex, passIndex, false, out);
 }
 
 void ForwardLitMeshPassProcessor::PrepareRecord(const RendererListDesc& desc, const RenderSceneSnapshot& scene,
@@ -173,7 +202,7 @@ void ForwardLitMeshPassProcessor::PrepareRecord(const RendererListDesc& desc, co
         out.Reject(MeshPassRejectReason::InvalidBindings);
         return;
     }
-    PrepareCommand(desc, scene, scene.MeshBatches[record.Batch], pass, record.Queue, record.Mirrored, record.Batch, true, out);
+    PrepareCommand(desc, scene, scene.MeshBatches[record.Batch], pass, record.Queue, record.Mirrored, record.Batch, record.PassIndex, true, out);
 }
 
 }  // namespace radray::forward_detail

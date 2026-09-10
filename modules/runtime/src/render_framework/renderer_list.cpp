@@ -209,7 +209,7 @@ bool BuildRendererListsImpl(std::span<const RendererListDesc> descs, MeshPassPro
     }
     const auto& scene = *descs[0].Culling->Scene.Get();
     const bool records = HasDrawRecordTable(scene);
-    if (!records && !ValidateVisibleBatches(*descs[0].Culling.Get())) return false;
+    if (!records && IsRenderValidationFull(descs[0].Validation) && !ValidateVisibleBatches(*descs[0].Culling.Get())) return false;
     array<ListTarget, kMaxSharedRendererLists> storage{};
     const uint32_t listCount = static_cast<uint32_t>(descs.size());
     const size_t visible = descs[0].Culling->Primitives.size();

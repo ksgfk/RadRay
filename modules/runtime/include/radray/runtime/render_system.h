@@ -12,6 +12,7 @@
 #include <radray/render/render_pass_registry.h>
 #include <radray/runtime/render_framework/frame_graph.h>
 #include <radray/runtime/render_framework/render_graph_runtime.h>
+#include <radray/runtime/render_framework/render_graph_runtime_options.h>
 #include <radray/runtime/render_framework/scene.h>
 #include <radray/runtime/shader_program_request.h>
 #include <radray/runtime/service_traits.h>
@@ -100,6 +101,7 @@ private:
     vector<RenderFramePlan> _framePlans;
     vector<vector<RenderOutputInfo>> _frameOutputInfos;
     vector<RenderGraphExecutionReport> _graphReports;
+    vector<RenderGraphRuntimeOptions> _flightOptions;
     unique_ptr<RenderGraphRuntime> _graphRuntime;
     unique_ptr<ViewStateRegistry> _viewStates;
     unique_ptr<ShaderProgramCache> _shaderCache;

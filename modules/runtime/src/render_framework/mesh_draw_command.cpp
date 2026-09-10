@@ -37,16 +37,21 @@ bool ValidateMeshDrawCommand(const MeshDrawCommand& command) noexcept {
     return true;
 }
 
-bool FinalizeMeshDrawCommand(MeshDrawCommand& command) noexcept {
+bool FinalizeMeshDrawCommand(MeshDrawCommand& command, RenderValidationMode validation) noexcept {
     std::sort(command.Groups.begin(), command.Groups.end(), [](const auto& a, const auto& b) { return a.Group < b.Group; });
-    return ValidateMeshDrawCommand(command);
+    return !IsRenderValidationFull(validation) || ValidateMeshDrawCommand(command);
+}
+
+bool FinalizeMeshDrawCommand(MeshDrawCommand& command) noexcept {
+    return FinalizeMeshDrawCommand(command, RenderValidationMode::Full);
 }
 
 std::optional<PreparedRendererList> PrepareRendererList(const RendererList& list, RenderGraphRasterBuilder& builder,
                                                         Nullable<const RendererListPassBindings*> bindings) {
     RADRAY_PROFILE_SCOPE_N("PrepareRendererList");
     PreparedRendererList prepared{builder.GetPassHandle(), {}};
-    if (!list.Items.empty()) {
+    const bool validationFull = builder.IsValidationFull();
+    if (validationFull && !list.Items.empty()) {
         if (list.Items.size() != list.Commands.size()) {
             builder.Reject("RendererListPreparation", "Draw order must reference every command exactly once");
             return std::nullopt;
@@ -67,21 +72,29 @@ std::optional<PreparedRendererList> PrepareRendererList(const RendererList& list
         uint64_t Offset, Size;
         RgBufferAccess Access;
     };
+    struct Recipe {
+        ShaderProgram* Program{nullptr};
+        MaterialPipelineState State{};
+        const PrimitiveVertexLayout* Layout{nullptr};
+        PrimitiveTopology Topology{PrimitiveTopology::TriangleList};
+        RgGraphicsProgramHandle Handle{};
+    };
     unordered_map<render::Buffer*, InlineVector<DeclaredRange, 2>> declared;
+    vector<Recipe> recipes;
     uint64_t uniqueReads = 0;
     Nullable<const MeshDrawCommand*> previousDraw{nullptr};
     RgGraphicsProgramHandle previousProgram{};
-    Nullable<ShaderProgram*> validatedBindingProgram{nullptr};
+    Nullable<ShaderProgram*> resolvedBindingProgram{nullptr};
     std::span<const RendererListPassBinding> programBindings;
     for (size_t index = 0; index < list.Commands.size(); ++index) {
         const auto& draw = list.GetCommand(index);
-        if (!ValidateMeshDrawCommand(draw) ||
-            (bindings && validatedBindingProgram.Get() != draw.Program.Get() && !bindings->IsValidFor(builder, *draw.Program))) {
+        if (validationFull && (!ValidateMeshDrawCommand(draw) ||
+                               (bindings && resolvedBindingProgram.Get() != draw.Program.Get() && !bindings->IsValidFor(builder, *draw.Program)))) {
             builder.Reject("RendererListPreparation", "Draw geometry or pass parameter bindings are invalid");
             return std::nullopt;
         }
-        if (bindings && validatedBindingProgram.Get() != draw.Program.Get()) {
-            validatedBindingProgram = draw.Program.Get();
+        if (bindings && resolvedBindingProgram.Get() != draw.Program.Get()) {
+            resolvedBindingProgram = draw.Program.Get();
             programBindings = bindings->Find(*draw.Program);
         }
         const bool sameGeometry = previousDraw && previousDraw->Geometry.Get() == draw.Geometry.Get();
@@ -106,8 +119,25 @@ std::optional<PreparedRendererList> PrepareRendererList(const RendererList& list
                 if (!declare(*vertex.View.Target, RgBufferAccess::Vertex, {vertex.View.Offset, vertex.View.Size})) return std::nullopt;
             if (!declare(*draw.Geometry->Ibv.Target, RgBufferAccess::Index, {draw.Geometry->Ibv.Offset, render::BufferRange::All()})) return std::nullopt;
         }
-        const bool sameProgram = sameGeometry && previousDraw->Program.Get() == draw.Program.Get() && previousDraw->PipelineState == draw.PipelineState;
-        const auto program = sameProgram ? previousProgram : builder.UseGraphicsProgram(*draw.Program, draw.PipelineState, draw.Geometry->VertexLayout, draw.Geometry->Topology);
+        const bool adjacent = sameGeometry && previousDraw->Program.Get() == draw.Program.Get() &&
+                              previousDraw->PipelineState == draw.PipelineState &&
+                              previousDraw->Geometry->Topology == draw.Geometry->Topology;
+        RgGraphicsProgramHandle program{};
+        if (adjacent) {
+            program = previousProgram;
+        } else {
+            for (const auto& recipe : recipes) {
+                if (recipe.Program == draw.Program.Get() && recipe.State == draw.PipelineState &&
+                    recipe.Layout == &draw.Geometry->VertexLayout && recipe.Topology == draw.Geometry->Topology) {
+                    program = recipe.Handle;
+                    break;
+                }
+            }
+            if (!program.IsValid()) {
+                program = builder.UseGraphicsProgram(*draw.Program, draw.PipelineState, draw.Geometry->VertexLayout, draw.Geometry->Topology);
+                if (program.IsValid()) recipes.push_back({draw.Program.Get(), draw.PipelineState, &draw.Geometry->VertexLayout, draw.Geometry->Topology, program});
+            }
+        }
         if (!program.IsValid()) return std::nullopt;
         prepared.Draws.push_back({&draw, {draw.Groups.data(), draw.Groups.size()}, program, programBindings});
         previousDraw = &draw;

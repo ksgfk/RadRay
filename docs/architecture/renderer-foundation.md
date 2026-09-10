@@ -1,6 +1,6 @@
 > - 适用: 编写 workload、接入 presentation/离屏 output、声明 graph pass、使用 transient pool 或 view history
 > - 权威: 本文描述 renderer foundation 与内置 Forward 的当前契约；帧同步见 `frame-and-gpu.md`，原生接口事实见 `render-rhi.md`
-> - 锚点: `modules/runtime/include/radray/runtime/render_framework/render_output.h`, `modules/runtime/include/radray/runtime/render_framework/render_workload.h`, `modules/runtime/include/radray/runtime/render_framework/render_view.h`, `modules/runtime/include/radray/runtime/render_framework/render_graph.h`, `modules/runtime/include/radray/runtime/render_framework/render_graph_compiler.h`, `modules/runtime/include/radray/runtime/render_framework/frame_graph.h`, `modules/runtime/include/radray/runtime/frame_submission.h`, `modules/runtime/include/radray/runtime/render_framework/render_graph_runtime.h`, `modules/runtime/include/radray/runtime/render_framework/render_resource_pool.h`, `modules/runtime/include/radray/runtime/render_framework/view_state.h`, `modules/runtime/include/radray/runtime/forward_pipeline/forward_pipeline.h`, `modules/runtime/include/radray/runtime/forward_pipeline/forward_graph.h`, `modules/runtime/src/render_system.cpp`, `modules/runtime/src/forward_pipeline/forward_pipeline.cpp`, `modules/runtime/include/radray/runtime/render_framework/render_scene_snapshot.h`, `modules/runtime/include/radray/runtime/render_framework/culling.h`, `modules/runtime/include/radray/runtime/material_technique.h`, `modules/runtime/include/radray/runtime/render_framework/renderer_list.h`, `modules/runtime/include/radray/runtime/render_framework/frame_draw_resources.h`, `modules/runtime/include/radray/runtime/render_framework/cpu_draw_record.h`, `modules/runtime/include/radray/runtime/render_framework/scene.h`, `modules/runtime/src/render_framework/cpu_draw_store.cpp`
+> - 锚点: `modules/runtime/include/radray/runtime/render_framework/render_output.h`, `modules/runtime/include/radray/runtime/render_framework/render_workload.h`, `modules/runtime/include/radray/runtime/render_framework/render_view.h`, `modules/runtime/include/radray/runtime/render_framework/render_graph.h`, `modules/runtime/include/radray/runtime/render_framework/render_graph_compiler.h`, `modules/runtime/include/radray/runtime/render_framework/render_graph_runtime_options.h`, `modules/runtime/include/radray/runtime/render_framework/frame_graph.h`, `modules/runtime/include/radray/runtime/frame_submission.h`, `modules/runtime/include/radray/runtime/render_framework/render_graph_runtime.h`, `modules/runtime/include/radray/runtime/render_framework/render_resource_pool.h`, `modules/runtime/include/radray/runtime/render_framework/view_state.h`, `modules/runtime/include/radray/runtime/forward_pipeline/forward_pipeline.h`, `modules/runtime/include/radray/runtime/forward_pipeline/forward_graph.h`, `modules/runtime/src/render_system.cpp`, `modules/runtime/src/forward_pipeline/forward_pipeline.cpp`, `modules/runtime/include/radray/runtime/render_framework/render_scene_snapshot.h`, `modules/runtime/include/radray/runtime/render_framework/culling.h`, `modules/runtime/include/radray/runtime/material_technique.h`, `modules/runtime/include/radray/runtime/render_framework/renderer_list.h`, `modules/runtime/include/radray/runtime/render_framework/frame_draw_resources.h`, `modules/runtime/include/radray/runtime/render_framework/cpu_draw_record.h`, `modules/runtime/include/radray/runtime/render_framework/scene.h`, `modules/runtime/src/render_framework/cpu_draw_store.cpp`
 
 # Renderer foundation
 
@@ -95,6 +95,8 @@ read/Load/ReadWrite 仍拒绝。Store Discard 产生无效内容，不能随后�
 字段级结构比较，冲突的计划不会被复用。`RenderGraphCompileOptions::ReuseCompiledPlan` 关闭时走同一编译入口。
 `RenderGraph::CompilePlanHit` / `RenderGraph::CompilePlanMiss` 与 report 的 `CompilePlanReused` 区分复用和重编译。
 
+`RenderGraphRuntimeOptions` 按 flight 冻结，不是全局服务。`Application::SetRenderGraphRuntimeOptions` 只影响尚未在 `PrepareFrame` 冻结的后续帧；`RenderSystem` 把该副本写入 `RenderPrepareContext` 与 `RenderPipelineContext`，本帧创建的所有 graph component 共用一份。默认性能路径是 `Validation=Off`、`Report=Minimal`、`GpuMarkers=false`；独立 graph 测试默认 `Full` 校验与完整报告。`Off` 跳过开发者契约检查（缺组、Items 置换、逐 draw geometry/IB 范围、declared-native 扫描、详细 diagnostic 字符串），仍执行 ports/归一化/IR/依赖/barrier/PSO/上传与真实失败处理。`Full` 保留原拒绝契约。报告等级不改变合法执行计划；`HasFailed()` / `GetFirstErrorCode()` 判定成败，不再用 `Report.Diagnostics.empty()`。`Minimal`/`Counters` 不填充 `Report.Passes` / `Report.Resources` 明细（名字、依赖、Accesses、PhysicalId），只保留聚合计数与首个错误码；完整 pass/resource 表仅 `Report=Full`。GPU marker 独立于校验。编译缓存的字段级 equality 两种模式都保留；Full 在缓存命中后仍验证当前输入。驱动验证层不由该开关热切换。
+
 CPU 阶段在 Tracy 上拆开：`ComposeGraph` 只声明 IR（含 Forward 的剔除与 `PrepareRendererList`），
 `ExecuteGraph` / `RenderGraph::Execute` 才是 Compile、Realize、Prepare、PlanBarriers 与 Record。
 `Record` 内每个 live pass 用 `RADRAY_PROFILE_SCOPE_DYN(pass.Name)`，CSV/GUI 看到的是 pass 名。
@@ -184,6 +186,7 @@ history 单独报告 active/retired 字节、view 归属和各 flight retire bin
 `ViewStateRegistry` 是 render-thread-owned。resolve 读取最后成功提交的 previous matrix，第一次、
 camera cut、extent/format/sample 改变时 previous 无效。输出不可用、跳过、graph 失败不会推进。
 `RegisterViewCompletion` 把 view、graph generation、frame serial、末端 pass 和确切输出版本绑定为不透明 token。
+pass 范围用 graph 的核心 pass 计数，不依赖是否生成详细报告。
 `CommitView(view, token, requiredDrawsSucceeded)` 同时验证 graph 成功、该 pass 实际执行且写入对应
 output、必需 draw 成功；共享 output 的另一 view 写入不能代替本 view 的完成证明。该检查只排队提交，
 view matrix、WithView 与 Independent history 都在对应 Submission 的 OnSubmitted 中推进，取消录制不推进。
@@ -208,13 +211,13 @@ resize/descriptor 变化先成功创建新 generation，旧 generation 进入当
 下一次安全复用再销毁。长期未使用的 view 同样先 retire 后释放。沿用单 Direct queue 的提交顺序，
 不为 history 增加 fence。关停先 GPU idle，再按 pipeline → graph pools → view states → registry 顺序清理。
 
-`RenderGraphExecutionReport` 按调用请求生成 Text/JSON/DOT，`Resolve` 是独立 pass 类型；报告记录执行与裁剪
+`RenderGraphExecutionReport` 按调用请求生成 Text/JSON/DOT，`Resolve` 是独立 pass 类型；`Report=Full` 时记录执行与裁剪
 原因、二分版本节点/read-write edges、内容与 hazard
 依赖、最终执行序、资源 descriptor/lifetime/physical slot/ID、访问范围/stage、raster group、优化决定、
 逐 subresource before/after、UAV 数量、pool stats、本帧是否复用 compile plan，以及
 带 source location 及可选 binding/resource 的 diagnostic。ID 不使用原生地址。宿主图直接写入对应 flight
-的 report，不在 ExecuteGraph 返回时整份复制。普通 Forward 帧不生成 JSON/DOT，capture 才序列化；
-失败 diagnostic 始终保留。报告还记录 graphics PSO 请求/准备/新建次数。
+的 report，不在 ExecuteGraph 返回时整份复制。普通 Forward 帧使用 `Report=Minimal`，不生成 JSON/DOT、不填充 `Passes`/`Resources` 明细；
+`Counters` 只保留聚合统计。失败时 `HasFailed()` 与 `FirstErrorCode` 始终可用，`ToText()` 也会打印该码。报告还记录 graphics PSO 请求/准备/新建次数。
 `RenderSystem::GetGraphReport`、`GetFramePlan`、`GetPoolStats` 只在对应阶段安全点读取。
 history 统计通过 `ViewStateRegistry::GetStats` 汇总跨 flight 的 generation 与估算显存，必须在 render thread 或全局 render idle 读取。
 
@@ -315,8 +318,7 @@ snapshot 含对齐的 `DrawRecord` 表时，通用 builder 按可见 primitive �
 queue 后的深度顺序排列。primitive/batch 为稳定的最终 tie-breaker，不使用资源地址决定绘制顺序。
 `Commands` 保存发布顺序的完整 payload，紧凑 `RendererListItem` 保存排序值与 command 索引；排序仅
 移动 Items。按执行顺序读取使用 `GetCommand`，不得把 Commands 的物理顺序当作绘制顺序。手工装配
-且 Items 为空的列表按发布顺序执行；非空 Items 必须完整且唯一地引用所有 commands，在 graph setup
-时验证。所有过滤后的 commands 及其 view/group offsets 必须保存至 graph 执行完毕。
+且 Items 为空的列表按发布顺序执行；非空 Items 在 `Validation=Full` 时必须完整且唯一地引用所有 commands。所有过滤后的 commands 及其 view/group offsets 必须保存至 graph 执行完毕。
 
 `FrameDrawResources` 持有每 flight 的 `DynamicCBufferArena` 与 `ShaderParameterSet`。`PrepareGroup`
 在 graph 执行前上传 bytes、按实际 binding number 排列 dynamic offsets，并解析纹理 subview/sampler。
@@ -339,13 +341,11 @@ arena block 决定，先检查上一次命中的条目，再回退到线性小�
 
 复用顺序为清空 renderer lists/借用 command → 清 set cache 与 sets → reset/裁减 arena，全部依赖既有
 flight fence 安全边界。`MeshDrawDescription` 保存与视图无关的 program、PSO 输入、geometry 和 draw range；
-`MeshDrawCommand` 加入帧内已准备的 groups，均不拥有 RHI 资源或资产。setup 中 `PrepareRendererList`
-验证执行索引、几何/有序唯一 groups，
+`MeshDrawCommand` 加入帧内已准备的 groups，均不拥有 RHI 资源或资产。setup 中 `PrepareRendererList` 装配 Items 顺序、声明 geometry 读取并解析 program recipe。`Validation=Full` 时才检查 Items 置换、几何结构/IB 范围与组序；`Off` 不分配 visited 等校验容器，依赖调用者提供合法输入。
 合并 graph 组并声明各 PSO，得到借用原 list 与 bindings 的 `PreparedRendererList`。同一 (buffer, range,
 access) 的持久 geometry 读取在一次 prepare 内只向 pass 声明一次；重复声明只会线性放大 access 列表
 与之后每个编译步骤，不改变语义。二者必须保持不变
-直到图执行完毕。prepare 内相邻 draw 共享几何时复用读取声明，共享 program 与相同 PSO 输入时复用
-graphics program handle；相邻同 program 的 pass binding 归属检查与查找只做一次，逐 draw 的几何与组检查仍保留。
+直到图执行完毕。prepare 内相邻 draw 共享几何时复用读取声明；program recipe 以 `(ShaderProgram, MaterialPipelineState, PrimitiveVertexLayout, PrimitiveTopology)` 为完整 key，相邻快路径之外还可复用非相邻相同 recipe。`Validation=Full` 时逐 draw 检查几何与组；`Off` 跳过这些检查。
 `GraphicsPipelineRequests` 统计实际向图声明 program 的请求次数，复用 handle 后可小于 draw 数；
 实际提交的绘制数量由 `DrawExecutionStats::Draws` 统计。
 `PrepareRendererList` 报告 `UniqueBufferReads`：同一 buffer/range/access 不随重复 draw 扩张。

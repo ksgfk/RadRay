@@ -7,6 +7,7 @@
 #include <radray/runtime/render_framework/mesh_batch.h>
 #include <radray/runtime/render_framework/primitive_scene_proxy.h>
 #include <radray/runtime/render_framework/render_bounds.h>
+#include <radray/runtime/render_framework/render_graph_runtime_options.h>
 
 namespace radray {
 
@@ -64,13 +65,15 @@ struct RenderSceneSnapshot {
 };
 
 /// Game thread only, after acquiring a writable flight. Failure publishes an empty snapshot.
-bool BuildRenderSceneSnapshot(const Scene& scene, RenderSceneSnapshot& out, vector<StreamingAssetRefAny>& retainedAssets);
+bool BuildRenderSceneSnapshot(const Scene& scene, RenderSceneSnapshot& out, vector<StreamingAssetRefAny>& retainedAssets,
+                              RenderValidationMode validation = RenderValidationMode::Full);
 
 /// Game-thread cache; never published to the renderer. Geometry cache hits require proxy generation
 /// and an explicit nonzero revision. Material values are independently versioned in each flight.
 class RenderSceneSnapshotBuilder {
 public:
-    bool Build(const Scene& scene, RenderSceneSnapshot& out, vector<StreamingAssetRefAny>& retainedAssets);
+    bool Build(const Scene& scene, RenderSceneSnapshot& out, vector<StreamingAssetRefAny>& retainedAssets,
+               RenderValidationMode validation = RenderValidationMode::Full);
     CpuDrawStore& DrawStore() noexcept { return _draws; }
     const CpuDrawStore& DrawStore() const noexcept { return _draws; }
 

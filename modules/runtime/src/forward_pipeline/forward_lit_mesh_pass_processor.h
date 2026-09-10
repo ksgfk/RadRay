@@ -24,8 +24,8 @@ public:
                        const DrawRecord& record, MeshPassDrawListContext& out) override;
 
     // Call before reusing this processor for a list whose view differs from the previous one.
-    // Drops view-group preparations. Object groups and command templates that encode motion are
-    // also dropped; ShadowCaster has no temporal context, so those stay across cascade ResetView.
+    // Drops view-group preparations. Temporal object slices are view-dependent and cleared;
+    // materials and pass-aware static templates stay for the rest of the frame.
     void ResetView() noexcept;
     uint64_t DuplicateSameFramePreparations() const noexcept { return _duplicatePreparations; }
 
@@ -49,24 +49,9 @@ private:
         }
     };
     struct CommandTemplate {
-        MeshDrawCommand Command;
-        uint32_t ViewGroupIndex{0};
-    };
-    struct TemplateTable {
-        vector<uint32_t> Slots;
-        vector<CommandTemplate> Items;
-        CommandTemplate* Find(uint32_t index) noexcept {
-            return index < Slots.size() && Slots[index] != kNoSlot ? &Items[Slots[index]] : nullptr;
-        }
-        CommandTemplate& Insert(uint32_t index) {
-            if (index >= Slots.size()) Slots.resize(size_t{index} + 1, kNoSlot);
-            Slots[index] = static_cast<uint32_t>(Items.size());
-            return Items.emplace_back();
-        }
-        void Clear() noexcept {
-            std::fill(Slots.begin(), Slots.end(), kNoSlot);
-            Items.clear();
-        }
+        MeshDrawDescription Description;
+        PreparedShaderGroup Material;
+        RenderPrimitiveIndex Primitive{0};
     };
     struct ProgramState {
         ProgramState(ShaderProgram* program, const ForwardProgramBindings* binding);
@@ -77,18 +62,18 @@ private:
         std::optional<PreparedShaderGroup> View;
         SlotTable Materials;
         SlotTable Objects;
-        TemplateTable Templates;
+        unordered_map<uint64_t, CommandTemplate> Templates;
     };
     Nullable<ProgramState*> ResolveProgram(ShaderProgram* program);
     void PrepareCommand(const RendererListDesc& desc, const RenderSceneSnapshot& scene, const MeshBatch& batch,
                          const MaterialPassRenderData& pass, RenderQueue queue, bool mirrored,
-                         MeshBatchIndex batchIndex, bool reuseCommand, MeshPassDrawListContext& out);
+                         MeshBatchIndex batchIndex, uint32_t passIndex, bool reuseCommand, MeshPassDrawListContext& out);
 
     FrameDrawResources& _resources;
     ForwardBindingCache& _bindings;
     bool& _lightOverflowWarned;
     // Object rows frozen at PrepareFrame, indexed by snapshot primitive. Only the motion fields are
-    // view dependent, so a temporal context makes object groups and command templates per view.
+    // view dependent, so temporal object slices are cleared on ResetView. Pass-aware command templates stay.
     const PackedCBufferTable& _objects;
     Nullable<const RenderPipelineContext*> _temporal;
     // Consecutive batches usually share a program; the last resolution short-circuits the map lookup.

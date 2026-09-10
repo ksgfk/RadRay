@@ -13,8 +13,9 @@ struct RenderPipelineContext::ImportedOutput {
     RgTextureValue Handle;
 };
 RenderPipelineContext::RenderPipelineContext(AppFrameContext& frame, RenderGraphFrameResources& graphResources, render::RenderPassRegistry& registry,
-                                             ViewStateRegistry& views, uint64_t serial, std::span<const ResolvedRenderViewFamily> families, std::span<RenderSurfaceFrame> surfaces, RenderGraphExecutionReport& report)
-    : _frame(frame), _graphResources(graphResources), _registry(registry), _views(views), _serial(serial), _families(families), _surfaces(surfaces), _report(report) {}
+                                             ViewStateRegistry& views, uint64_t serial, std::span<const ResolvedRenderViewFamily> families, std::span<RenderSurfaceFrame> surfaces, RenderGraphExecutionReport& report,
+                                             RenderGraphRuntimeOptions runtime)
+    : _frame(frame), _graphResources(graphResources), _registry(registry), _views(views), _serial(serial), _families(families), _surfaces(surfaces), _report(report), _runtimeOptions(runtime) {}
 RenderPipelineContext::~RenderPipelineContext() = default;
 uint32_t RenderPipelineContext::FlightIndex() const noexcept { return _frame.FlightIndex(); }
 const render::RenderDeviceCapabilities& RenderPipelineContext::Capabilities() const noexcept { return _frame.GetDevice()->GetCapabilities(); }
@@ -22,7 +23,7 @@ render::RenderBackend RenderPipelineContext::Backend() const noexcept { return _
 HostWriteBatch& RenderPipelineContext::HostWrites() const noexcept { return _frame.GetHostWrites(); }
 RenderGraph RenderPipelineContext::CreateRenderGraph(std::string_view name) {
     if (_graphGeneration != 0) RADRAY_ABORT("Only one RenderGraph may be created per Render invocation");
-    return RenderGraph{*_frame.GetDevice(), _graphResources, _registry, name, _graphGeneration, _report};
+    return RenderGraph{*_frame.GetDevice(), _graphResources, _registry, name, _graphGeneration, _report, _runtimeOptions};
 }
 RgTextureValue RenderPipelineContext::ImportOutputTarget(RenderGraph& graph, RenderOutputId output) {
     if (_executed || _graphGeneration == 0) return {};
@@ -107,7 +108,7 @@ bool RenderPipelineContext::CommitView(ViewStateId id) {
 }
 ViewCompletionToken RenderPipelineContext::RegisterViewCompletion(RenderGraph& graph, ViewStateId id, RgPassHandle pass, RgTextureValue output) {
     if (_executed || _graphGeneration != graph.GetGeneration() || pass.Generation != _graphGeneration ||
-        pass.Index >= graph.GetReport().Passes.size() || !id.IsValid()) return {};
+        pass.Index >= graph.GetPassCount() || !id.IsValid()) return {};
     for (const auto& completion : _completions)
         if (completion.View == id || completion.Pass == pass) return {};
     for (const auto& family : _families) {

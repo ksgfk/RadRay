@@ -3,10 +3,12 @@
 #include <array>
 #include <source_location>
 #include <span>
+#include <string_view>
 #include <variant>
 #include <radray/runtime/frame_submission.h>
 #include <radray/runtime/render_framework/render_resource_pool.h>
 #include <radray/runtime/render_framework/render_graph_compiler.h>
+#include <radray/runtime/render_framework/render_graph_runtime_options.h>
 #include <radray/runtime/shader_program.h>
 
 namespace radray {
@@ -168,6 +170,7 @@ struct RenderGraphExecutionReport {
     uint32_t ReusedResources{0}, MergedRasterPasses{0}, DiscardedStores{0}, BarrierBatches{0};
     uint32_t GraphicsPipelineRequests{0}, GraphicsPipelinePreparations{0}, GraphicsPipelineCreations{0};
     bool CompilePlanReused{false};
+    string FirstErrorCode;
     RenderResourcePoolStats Pool;
     vector<RenderGraphPassReport> Passes;
     vector<RenderGraphResourceReport> Resources;
@@ -233,6 +236,8 @@ public:
     RgPassHandle GetPassHandle() const noexcept;
     bool OwnsParameterSet(RgParameterSetHandle handle, const ShaderProgram& program, uint32_t group) const noexcept;
     void Reject(std::string_view code, std::string_view message, std::string_view binding = {});
+    bool IsValidationFull() const noexcept;
+    const RenderGraphRuntimeOptions& GetRuntimeOptions() const noexcept;
 
 protected:
     friend class RenderGraph;
@@ -354,9 +359,11 @@ private:
 
 class RenderGraph {
 public:
-    RenderGraph(render::Device& device, RenderResourcePool& pool, render::RenderPassRegistry& registry, std::string_view name);
+    RenderGraph(render::Device& device, RenderResourcePool& pool, render::RenderPassRegistry& registry, std::string_view name,
+                RenderGraphRuntimeOptions runtime = kDiagnosticRenderGraphRuntimeOptions);
     RenderGraph(render::Device& device, RenderGraphFrameResources& resources,
-                render::RenderPassRegistry& registry, std::string_view name);
+                render::RenderPassRegistry& registry, std::string_view name,
+                RenderGraphRuntimeOptions runtime = kDiagnosticRenderGraphRuntimeOptions);
     ~RenderGraph();
     RenderGraph(const RenderGraph&) = delete;
     RenderGraph& operator=(const RenderGraph&) = delete;
@@ -433,6 +440,11 @@ public:
     void SetCompileOptions(RenderGraphCompileOptions options);
     const CompiledRenderGraph& GetCompiledGraph() const noexcept;
     const RenderGraphExecutionReport& GetReport() const noexcept;
+    const RenderGraphRuntimeOptions& GetRuntimeOptions() const noexcept;
+    bool IsValidationFull() const noexcept;
+    bool HasFailed() const noexcept;
+    uint32_t GetPassCount() const noexcept;
+    std::string_view GetFirstErrorCode() const noexcept;
     bool WasWritten(RgTextureValue handle) const noexcept;
     bool WasWritten(const RenderExternalTexture& texture) const noexcept;
     std::optional<render::TextureStates> RecordedTextureState(RgTextureValue handle, uint32_t subresource = 0) const noexcept;
@@ -458,7 +470,8 @@ private:
     friend class RenderGraphComputeContext;
     friend struct RenderGraphTestDriver;
     RenderGraph(render::Device& device, RenderGraphFrameResources& resources,
-                render::RenderPassRegistry& registry, std::string_view name, uint64_t& generation, RenderGraphExecutionReport& report);
+                render::RenderPassRegistry& registry, std::string_view name, uint64_t& generation, RenderGraphExecutionReport& report,
+                RenderGraphRuntimeOptions runtime = kDiagnosticRenderGraphRuntimeOptions);
     RenderGraphExecutionResult Execute(render::CommandBuffer& command);
     struct PresentCommandTarget {
         render::Texture* Texture{nullptr};

@@ -128,7 +128,7 @@ struct ForwardPipeline::Impl {
         return flight.DrawResources->BeginFrame(frame.HostWrites());
     }
 
-    bool PrepareFamily(uint32_t flightIndex, const ResolvedRenderViewFamily& family) {
+    bool PrepareFamily(uint32_t flightIndex, const ResolvedRenderViewFamily& family, RenderValidationMode validation) {
         auto& flight = Flights[flightIndex];
         auto& work = flight.Families[family.FrameLocalIndex];
         work.Views.resize(family.Views.size());
@@ -150,10 +150,10 @@ struct ForwardPipeline::Impl {
             valid = true;
             depth.ResetView();
             lit.ResetView();
-            BuildRendererList({"DepthOnly", "DepthOnly", &view.Culling, &view.View, RenderQueueRange::Opaque(), 0xffffffffu, RendererListSorting::FrontToBack}, depth, view.DepthOnly);
+            BuildRendererList({"DepthOnly", "DepthOnly", &view.Culling, &view.View, RenderQueueRange::Opaque(), 0xffffffffu, RendererListSorting::FrontToBack, false, validation}, depth, view.DepthOnly);
             const RendererListDesc litDescs[] = {
-                {"Opaque", "ForwardLit", &view.Culling, &view.View, RenderQueueRange::Opaque()},
-                {"Transparent", "ForwardLit", &view.Culling, &view.View, RenderQueueRange::Transparent(), 0xffffffffu, RendererListSorting::BackToFront},
+                {"Opaque", "ForwardLit", &view.Culling, &view.View, RenderQueueRange::Opaque(), 0xffffffffu, RendererListSorting::StateThenFrontToBack, false, validation},
+                {"Transparent", "ForwardLit", &view.Culling, &view.View, RenderQueueRange::Transparent(), 0xffffffffu, RendererListSorting::BackToFront, false, validation},
             };
             RendererList* litOuts[] = {&view.Opaque, &view.Transparent};
             BuildRendererLists(litDescs, lit, litOuts);
@@ -252,7 +252,7 @@ void ForwardPipeline::PrepareFrame(RenderPrepareContext& ctx) {
     bool snapshotOk = false;
     {
         RADRAY_PROFILE_SCOPE_N("SceneSnapshotBuild");
-        snapshotOk = _impl->SnapshotBuilder.Build(*_impl->RenderScene, flight.Scene, ctx.RetainedAssets);
+        snapshotOk = _impl->SnapshotBuilder.Build(*_impl->RenderScene, flight.Scene, ctx.RetainedAssets, ctx.RuntimeOptions.Validation);
     }
     if (!snapshotOk) {
         RADRAY_ERR_LOG("Forward scene snapshot exceeded its frame-local index capacity");
@@ -396,7 +396,7 @@ void ForwardPipeline::BuildGraph(RenderPipelineContext& ctx, RenderGraph& graph,
     for (const auto& family : ctx.ViewFamilies()) {
         for (const auto& view : family.Views)
             if (_impl->Signatures.erase(view.StateId)) ctx.InvalidateView(view.StateId);
-        if (!_impl->PrepareFamily(ctx.FlightIndex(), family) || !family.OutputAvailable || family.RenderSize != family.OutputSize) continue;
+        if (!_impl->PrepareFamily(ctx.FlightIndex(), family, ctx.GetRuntimeOptions().Validation) || !family.OutputAvailable || family.RenderSize != family.OutputSize) continue;
         const auto usage = render::TextureUse::DepthStencilWrite | render::TextureUse::DepthStencilRead;
         const auto format = SelectFirstSupportedFormat(*_impl->Device, kForwardDepthCandidates, render::TextureDimension::Dim2D, usage, family.SampleCount);
         if (!format) continue;

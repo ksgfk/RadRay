@@ -2,6 +2,7 @@
 
 #if defined(_WIN32)
 
+#include <radray/logger.h>
 #include <radray/text_encoding.h>
 
 #include <windows.h>
@@ -262,7 +263,13 @@ Client::Client(std::string_view compilerLibraryName) noexcept : _compilerLibrary
 
 bool Client::IsAvailable() const noexcept {
     ComPtr<shader::IRadRayDxcCompiler> compiler;
-    return _compilerLibrary.IsValid() && AcquireForkCompiler(_compilerLibrary, compiler);
+    vector<CompileDiagnostic> diagnostics;
+    if (!_compilerLibrary.IsValid()) return false;
+    if (AcquireForkCompiler(_compilerLibrary, compiler, &diagnostics)) return true;
+    for (const auto& diagnostic : diagnostics) {
+        RADRAY_ERR_LOG("shader compiler unavailable: {}, {}", diagnostic.Code, diagnostic.Message);
+    }
+    return false;
 }
 
 std::optional<shader::Hash128> Client::GetToolchainIdentity() const noexcept {
