@@ -160,7 +160,7 @@ TEST(RadRayShaderContract, MetadataEnvelopeFailsClosed) {
 TEST(RadRayShaderContract, RetiredMetadataSchemasAreRejectedRatherThanTranslated) {
     // Schema 7 replaces 4, 5, and 6 atomically. Older records cannot express declaration owners,
     // so an artifact is rejected instead of being reinterpreted with inferred payload roots.
-    static_assert(shader::kShaderMetadataSchemaVersion == 7);
+    static_assert(shader::kShaderMetadataSchemaVersion == 8);
     constexpr uint16_t retiredSchemas[]{
         4,
         5,

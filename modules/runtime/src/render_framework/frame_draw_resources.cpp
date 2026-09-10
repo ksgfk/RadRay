@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <radray/profiler.h>
 #include <radray/runtime/shader_program.h>
 
 namespace radray {
@@ -62,9 +63,25 @@ const ShaderParameterGroupRecipe& FrameDrawResources::GetRecipe(ShaderProgram& p
     return recipe;
 }
 
+bool FrameDrawResources::UploadBuffer(
+    const ShaderParameterBufferLayout& buffer, uint32_t index, bool dynamic, std::span<const byte> bytes,
+    vector<FrameBufferBinding>& bindings, PreparedShaderGroup& out) {
+    if (bytes.empty() || bytes.size() != buffer.Size) return false;
+    auto reservation = _arena->Reserve(bytes.size());
+    if (!reservation.IsValid()) return false;
+    std::memcpy(reservation.Data(), bytes.data(), bytes.size());
+    _stats.BufferBytesCopied += bytes.size();
+    const auto allocation = reservation.Commit(bytes.size());
+    if (!allocation.IsValid() || allocation.Offset > std::numeric_limits<uint32_t>::max()) return false;
+    bindings.push_back({index, {allocation.Target, {dynamic ? 0 : allocation.Offset, buffer.Size}}});
+    if (dynamic) out.DynamicOffsets.push_back({buffer.Binding, static_cast<uint32_t>(allocation.Offset)});
+    return true;
+}
+
 std::optional<PreparedShaderGroup> FrameDrawResources::PrepareGroup(
     ShaderProgram& program, uint32_t group, const ShaderParameterStorage& parameters,
     std::span<const MaterialTextureFrameData> textures, std::span<const MaterialSamplerFrameData> samplers) {
+    RADRAY_PROFILE_SCOPE_N("PrepareGroup");
     if (!_arena || parameters.GetLayout() != &program.GetParameterLayout()) return std::nullopt;
     ++_stats.GroupPreparations;
     auto& bindings = _bindingScratch;
@@ -73,21 +90,30 @@ std::optional<PreparedShaderGroup> FrameDrawResources::PrepareGroup(
     const auto& recipe = GetRecipe(program, group);
     PreparedShaderGroup result;
     result.Group = group;
-    for (const auto& entry : recipe.Buffers) {
-        const auto index = entry.Index;
-        const auto& buffer = buffers[index];
-        const auto bytes = parameters.GetBufferData(index);
-        if (bytes.empty() || bytes.size() != buffer.Size) return std::nullopt;
-        auto reservation = _arena->Reserve(bytes.size());
-        if (!reservation.IsValid()) return std::nullopt;
-        std::memcpy(reservation.Data(), bytes.data(), bytes.size());
-        _stats.BufferBytesCopied += bytes.size();
-        const auto allocation = reservation.Commit(bytes.size());
-        if (!allocation.IsValid() || allocation.Offset > std::numeric_limits<uint32_t>::max()) return std::nullopt;
-        const bool dynamic = entry.Dynamic;
-        bindings.push_back({index, {allocation.Target, {dynamic ? 0 : allocation.Offset, buffer.Size}}});
-        if (dynamic) result.DynamicOffsets.push_back({buffer.Binding, static_cast<uint32_t>(allocation.Offset)});
-    }
+    for (const auto& entry : recipe.Buffers)
+        if (!UploadBuffer(buffers[entry.Index], entry.Index, entry.Dynamic, parameters.GetBufferData(entry.Index), bindings, result))
+            return std::nullopt;
+    result.Set = PrepareSetForGroup(program, group, recipe, bindings, textures, samplers);
+    if (!result.Set) return std::nullopt;
+    return result;
+}
+
+std::optional<PreparedShaderGroup> FrameDrawResources::PrepareGroup(
+    ShaderProgram& program, uint32_t group, std::span<const byte> bufferBytes,
+    std::span<const MaterialTextureFrameData> textures, std::span<const MaterialSamplerFrameData> samplers) {
+    RADRAY_PROFILE_SCOPE_N("PrepareGroup");
+    if (!_arena) return std::nullopt;
+    ++_stats.GroupPreparations;
+    auto& bindings = _bindingScratch;
+    bindings.clear();
+    const auto& recipe = GetRecipe(program, group);
+    // One span describes one cbuffer, so multi-buffer groups stay on the named storage path.
+    if (recipe.Buffers.size() != 1) return std::nullopt;
+    const auto& entry = recipe.Buffers.front();
+    PreparedShaderGroup result;
+    result.Group = group;
+    if (!UploadBuffer(program.GetParameterLayout().Buffers()[entry.Index], entry.Index, entry.Dynamic, bufferBytes, bindings, result))
+        return std::nullopt;
     result.Set = PrepareSetForGroup(program, group, recipe, bindings, textures, samplers);
     if (!result.Set) return std::nullopt;
     return result;

@@ -19,11 +19,6 @@ enum class ShaderParameterKind : uint8_t {
     Matrix,
     Texture,
     Sampler,
-    // A cbuffer array whose element type the wire contract cannot express:
-    // WireTypeRecord::TypeIndex may only reference a root struct, so an array of
-    // scalars/vectors/matrices arrives with no element kind and no element size,
-    // only a stride and a count. Element extent is known exactly, the type is not,
-    // so such parameters accept raw bytes and reject every typed setter.
     Raw,
 };
 
@@ -79,11 +74,13 @@ class ShaderParameterStorage {
 public:
     explicit ShaderParameterStorage(
         const ShaderParameterLayout* layout = nullptr,
-        std::optional<uint32_t> parameterGroup = std::nullopt);
+        std::optional<uint32_t> parameterGroup = std::nullopt,
+        std::span<byte> aliasedGroupBuffer = {});
 
     void Reset() noexcept;
     const ShaderParameterLayout* GetLayout() const noexcept { return _layout; }
     std::span<const byte> GetBufferData(uint32_t bufferIndex) const noexcept;
+    std::span<byte> GetBufferData(uint32_t bufferIndex) noexcept;
 
     bool SetFloat(std::string_view name, float value, uint32_t element = 0) noexcept;
     bool SetFloat2(std::string_view name, const Eigen::Vector2f& value, uint32_t element = 0) noexcept;
@@ -114,7 +111,14 @@ private:
         uint32_t element) noexcept;
 
     const ShaderParameterLayout* _layout{nullptr};
-    vector<vector<byte>> _bufferData;
+    struct BufferSlot {
+        vector<byte> Owned;
+        byte* External{nullptr};
+        size_t Size{0};
+        byte* Data() noexcept { return External != nullptr ? External : Owned.data(); }
+        const byte* Data() const noexcept { return External != nullptr ? External : Owned.data(); }
+    };
+    vector<BufferSlot> _bufferData;
 };
 
 }  // namespace radray

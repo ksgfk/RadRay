@@ -1,6 +1,6 @@
 > - 适用: 改渲染管线、场景表示、Application 生命周期或服务装配
 > - 权威: 本文描述场景、Forward 与 Application 装配；workload/graph/history 契约见 `renderer-foundation.md`，资产与 GPU 帧管理见 `asset-system.md`、`frame-and-gpu.md`
-> - 锚点: `modules/runtime/include/radray/runtime/render_framework/render_pipeline.h`, `modules/runtime/include/radray/runtime/forward_pipeline/forward_pipeline.h`, `modules/runtime/include/radray/runtime/forward_pipeline/forward_graph.h`, `modules/runtime/include/radray/runtime/material.h`, `modules/runtime/include/radray/runtime/shader_program.h`, `modules/runtime/include/radray/runtime/material_technique.h`, `modules/runtime/include/radray/runtime/render_framework/render_scene_snapshot.h`, `modules/runtime/include/radray/runtime/render_framework/renderer_list.h`, `modules/runtime/include/radray/runtime/components/static_mesh_component.h`, `modules/runtime/include/radray/runtime/game_framework/actor.h`, `modules/runtime/include/radray/runtime/service_registry.h`, `modules/runtime/src/application.cpp`, `modules/runtime/src/render_system.cpp`, `examples/example_lambert_sphere/example_lambert_sphere.cpp`, `examples/example_tidal_atrium/tidal_atrium.cpp`, `modules/runtime/include/radray/runtime/render_framework/scene.h`, `modules/runtime/include/radray/runtime/render_framework/cpu_draw_record.h`
+> - 锚点: `modules/runtime/include/radray/runtime/render_framework/render_pipeline.h`, `modules/runtime/include/radray/runtime/forward_pipeline/forward_pipeline.h`, `modules/runtime/include/radray/runtime/forward_pipeline/forward_graph.h`, `modules/runtime/include/radray/runtime/material.h`, `modules/runtime/include/radray/runtime/shader_program.h`, `modules/runtime/include/radray/runtime/material_technique.h`, `modules/runtime/include/radray/runtime/render_framework/render_scene_snapshot.h`, `modules/runtime/include/radray/runtime/render_framework/renderer_list.h`, `modules/runtime/include/radray/runtime/components/static_mesh_component.h`, `modules/runtime/include/radray/runtime/game_framework/actor.h`, `modules/runtime/include/radray/runtime/service_registry.h`, `modules/runtime/src/application.cpp`, `modules/runtime/src/render_system.cpp`, `examples/example_lambert_sphere/example_lambert_sphere.cpp`, `examples/example_tidal_atrium/tidal_atrium.cpp`, `modules/runtime/include/radray/runtime/render_framework/scene.h`, `modules/runtime/include/radray/runtime/render_framework/cpu_draw_record.h`, `modules/runtime/include/radray/runtime/render_framework/cbuffer_view.h`, `modules/runtime/include/radray/runtime/render_framework/hlsl_math.h`, `modules/runtime/include/radray/runtime/forward_pipeline/gen_forward_cbuffers.h`
 
 # 渲染框架与 game framework
 
@@ -179,11 +179,38 @@ HDR 多 view 共用一个 lit processor，主相机的三张列表走 `BuildRend
 `ForwardLitMeshPassProcessor` / `DepthOnlyMeshPassProcessor` 解释 shader 契约，准备 per-view/object/material
 bytes 与 frame-local sets，输出只借用资源的 `MeshDrawCommand`。layout 字段在 binding cache 首次解析，热路径不再按名字搜索。
 Lit processor 在首次准备 view 时按 snapshot 数量预留材质、对象和可复用命令模板的稠密表，
-每张表初始预分配最多 1024 项，超出后按需增长；法线缓存只在 program 消费法线时初始化。
+每张表初始预分配最多 1024 项，超出后按需增长。
 这减少帧内小容器随数组增长而反复搬移的成本，同时限制稀疏大场景的初始预留。
 切换 view 保留容量，Temporal 对象值与模板仍按原有失效规则清空，不跨帧复用资源。
-对象 `NormalToWorld` 按 snapshot primitive 计算一次。render thread 不访问 Scene、proxy、
-CameraComponent、Material、AssetManager 或 StreamingAssetRef。
+render thread 不访问 Scene、proxy、CameraComponent、Material、AssetManager 或 StreamingAssetRef。
+
+### cbuffer 冻结与 gather
+
+Forward 的数值 cbuffer 走「PrepareFrame 冻住，cull 后 gather」两段，CPU bytes 与 GPU struct 同构：
+
+- **对象**：`PrepareFrame` 在 game thread 用 `forward_detail::FreezeObjectData` 把每个 snapshot
+  primitive 的 `Forward_ObjectData` 写进 flight 的 `PackedCBufferTable`（`{stride, vector<byte>}`，
+  `stride == sizeof(T)`，行下标就是 primitive 下标）。`NormalToWorld` 因此每 primitive 算一次，
+  而不是每 view 每 draw 算一次。冻结行的 motion 默认为「无运动」（`PreviousLocalToWorld` 等于
+  `LocalToWorld`，`MotionValid` 为 0），非 temporal view 因此可以把该行原样交给 arena；只有带
+  temporal context 的 view 需要按 `GetPrimitiveMotion` 补一次 motion，多付一次拷贝。
+- **材质**：`BuildRenderData` 已经把 authoring bytes 冻进 per-flight 的
+  `MaterialPassRenderData::NumericBytes`，processor 直接把这段 span 交给 arena。
+- **view / pass / effects / output**：这些依赖剔除结果（灯光表、tile 数、history 有效性），
+  不能在 PrepareFrame 冻死。数据齐了以后填对应的 `Forward_*` POD，再整块上传。
+
+`FrameDrawResources::PrepareGroup` 有两个重载：吃 `ShaderParameterStorage` 的按名路径（JIT/测试）
+和吃 `std::span<const byte>` 的 typed 路径（Forward 产品热路径）。后者要求该 group 恰好一个
+cbuffer，因为一段 span 只描述一个 cbuffer；多 buffer group 留在按名路径。两者共用同一个 arena，
+按 `DynamicCBufferArena` 的 `CBufferAlignment`（D3D12 上 256）对齐，字节从冻住的表直接 memcpy
+进映射槽，中间不再过一层 CPU staging。产品 mesh 热路径因此不再 `Find` / `SetMatrix4x4`。
+
+`AsCBuffer<T>(bytes)` 是这条路径的类型视图：本质是 `reinterpret_cast`，Debug 下断言
+`bytes.size() == sizeof(T)` 只为防写穿，不做布局身份检查。生成器已经用 DXC type tree 把布局做对
+（见 [shader pipeline](shader-pipeline.md)），运行时不再比 hash 或字段。空 bytes（DepthOnly 没有
+材质 cbuffer）不要调 `As<T>`。`hlsl_math.h` 的 `float2/3/4`、`float4x4` 是生成头用的存储类型：
+只保证 size 与 HLSL 一致，没有 `alignas(16)`，除与对应 Eigen 类型隐式互转外没有任何方法，因此
+game 侧仍用 Eigen 计算再直接赋值。
 
 Forward resolver 按 `ForwardView`、`ForwardMaterial`、`ForwardObject` 找到当前 target 的真实 group，
 要求三个 cbuffer dynamic 且组号不同；active `AlbedoTexture` / `LinearSampler` 必须属于 material group。

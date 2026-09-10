@@ -2,6 +2,7 @@
 #include "render_graph_test_driver.h"
 #include "stage_b_test_support.h"
 #include "forward_pipeline/forward_capture.h"
+#include "forward_pipeline/forward_frame.h"
 #include "forward_pipeline/forward_lit_mesh_pass_processor.h"
 
 #include <algorithm>
@@ -179,6 +180,7 @@ TEST_P(RuntimeProfile, StageCostsAndWarmResourceCounts) {
         for (uint32_t i = 0; i < count; ++i) ASSERT_TRUE(scene.AddPrimitive(make_unique<StaticMeshSceneProxy>(mesh, vector<Nullable<Material*>>{material.Get(), material.Get()}, Eigen::Matrix4f::Identity())));
         RenderSceneSnapshotBuilder builder;
         RenderSceneSnapshot snapshot;
+        PackedCBufferTable objects;
         vector<StreamingAssetRefAny> owners;
         ResolvedRenderView view;
         view.View = view.Projection = view.ViewProjection = Eigen::Matrix4f::Identity();
@@ -220,7 +222,10 @@ TEST_P(RuntimeProfile, StageCostsAndWarmResourceCounts) {
                     values[1] = Measure([&] { assets.Pump(); });
                     EXPECT_EQ(assets.GetCollectionStats().CandidatesVisited, beforeGc);
                     bool valid = false;
-                    values[2] = Measure([&] { valid = builder.Build(scene, snapshot, owners); });
+                    values[2] = Measure([&] {
+                        valid = builder.Build(scene, snapshot, owners);
+                        if (valid) forward_detail::FreezeObjectData(snapshot, objects);
+                    });
                     ASSERT_TRUE(valid);
                     if (frame) {
                         EXPECT_EQ(snapshot.Stats.ScratchEntriesCreated, 0u);
@@ -237,7 +242,7 @@ TEST_P(RuntimeProfile, StageCostsAndWarmResourceCounts) {
                     ASSERT_TRUE(valid);
                     const auto recipesBefore = program->GetParameterGroupRecipeCount();
                     values[4] = Measure([&] {
-                        forward_detail::ForwardLitMeshPassProcessor processor{draws, bindings, warned};
+                        forward_detail::ForwardLitMeshPassProcessor processor{draws, bindings, warned, objects};
                         valid = BuildRendererList({"profile", "ForwardLit", &culling, &view, RenderQueueRange::Opaque()}, processor, list);
                     });
                     ASSERT_TRUE(valid);

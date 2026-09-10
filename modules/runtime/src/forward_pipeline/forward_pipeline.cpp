@@ -65,6 +65,8 @@ render::ShaderProgramLayoutRecipe MakeLayoutRecipe(std::span<const std::string_v
 struct ForwardPipeline::Impl {
     struct FlightResources {
         RenderSceneSnapshot Scene;
+        // Object cbuffer rows frozen on the game thread, indexed by snapshot primitive.
+        PackedCBufferTable Objects;
         unique_ptr<FrameDrawResources> DrawResources;
         vector<ForwardFamilyDrawWork> Families;
         vector<unique_ptr<ForwardHdrView>> HdrViews;
@@ -130,8 +132,8 @@ struct ForwardPipeline::Impl {
         auto& flight = Flights[flightIndex];
         auto& work = flight.Families[family.FrameLocalIndex];
         work.Views.resize(family.Views.size());
-        DepthOnlyMeshPassProcessor depth{*flight.DrawResources, DepthBindings};
-        ForwardLitMeshPassProcessor lit{*flight.DrawResources, Bindings, LightOverflowWarned};
+        DepthOnlyMeshPassProcessor depth{*flight.DrawResources, DepthBindings, flight.Objects};
+        ForwardLitMeshPassProcessor lit{*flight.DrawResources, Bindings, LightOverflowWarned, flight.Objects};
         bool valid = false;
         for (uint32_t index = 0; index < family.Views.size(); ++index) {
             auto& view = work.Views[index];
@@ -254,8 +256,10 @@ void ForwardPipeline::PrepareFrame(RenderPrepareContext& ctx) {
     }
     if (!snapshotOk) {
         RADRAY_ERR_LOG("Forward scene snapshot exceeded its frame-local index capacity");
+        flight.Objects.Clear();
         return;
     }
+    forward_detail::FreezeObjectData(flight.Scene, flight.Objects);
     if (flight.Scene.Stats.InvalidBounds && !_impl->InvalidBoundsWarned) {
         RADRAY_WARN_LOG("Forward scene contains invalid bounds; these primitives remain conservatively visible");
         _impl->InvalidBoundsWarned = true;
@@ -354,13 +358,13 @@ void ForwardPipeline::BuildGraph(RenderPipelineContext& ctx, RenderGraph& graph,
         ForwardShadowAtlas atlas{};
         if (primary) {
             if (!flight.SharedShadowView) flight.SharedShadowView = make_unique<ForwardHdrView>();
-            if (!DeclareForwardSharedShadows(graph, flight.Settings, *primary, flight.Scene, *flight.DrawResources, _impl->Bindings,
+            if (!DeclareForwardSharedShadows(graph, flight.Settings, *primary, flight.Scene, flight.Objects, *flight.DrawResources, _impl->Bindings,
                                              *flight.SharedShadowView, _impl->Device->GetBackend(), _impl->LightOverflowWarned, atlas)) {
                 _impl->Error = true;
                 return;
             }
         }
-        ForwardLitMeshPassProcessor hdrLit{*flight.DrawResources, _impl->Bindings, _impl->LightOverflowWarned, &ctx};
+        ForwardLitMeshPassProcessor hdrLit{*flight.DrawResources, _impl->Bindings, _impl->LightOverflowWarned, flight.Objects, &ctx};
         for (const auto* familyPointer : families) {
             const auto& family = *familyPointer;
             bool firstOutput = true;
@@ -373,7 +377,7 @@ void ForwardPipeline::BuildGraph(RenderPipelineContext& ctx, RenderGraph& graph,
                 _impl->Signatures.insert_or_assign(view.StateId, signature);
                 if (viewIndex == flight.HdrViews.size()) flight.HdrViews.push_back(make_unique<ForwardHdrView>());
                 auto& work = *flight.HdrViews[viewIndex++];
-                if (BuildForwardHdrView(graph, ctx, *_impl->Device, _impl->Effects, flight.Settings, family, view, flight.Scene,
+                if (BuildForwardHdrView(graph, ctx, *_impl->Device, _impl->Effects, flight.Settings, family, view, flight.Scene, flight.Objects,
                                         *flight.DrawResources, _impl->Bindings, work, firstOutput, _impl->LightOverflowWarned, flight.Surfaces, outputs,
                                         atlas, auxiliary, &hdrLit))
                     firstOutput = false;

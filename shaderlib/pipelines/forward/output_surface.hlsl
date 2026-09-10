@@ -1,11 +1,8 @@
 #include <core/platform.hlsli>
 #include <core/color.hlsli>
+#include <pipelines/forward/cbuffers.hlsli>
 
-struct OutputSurfaceData {
-    float4x4 LocalToClip;
-    float4 Options; // brightness, decode sRGB, reserved
-};
-VK_BINDING(0, 0) ConstantBuffer<OutputSurfaceData> OutputSurface : register(b0);
+VK_BINDING(0, 0) ConstantBuffer<Forward_OutputSurfaceData> OutputSurface : register(b0);
 VK_BINDING(1, 0) Texture2D<float4> SceneOutput : register(t0);
 VK_BINDING(2, 0) SamplerState OutputSampler : register(s0);
 struct Varying { float4 Position : SV_Position; float2 UV : TEXCOORD0; };

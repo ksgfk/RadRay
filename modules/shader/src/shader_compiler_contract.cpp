@@ -31,8 +31,9 @@ bool ValidateWireMetadataEnvelope(
     uint16_t schema = 0;
     std::memcpy(&magic, blob.data(), sizeof(magic));
     std::memcpy(&schema, blob.data() + sizeof(magic), sizeof(schema));
-    // Schema 7 replaced 4, 5, and 6 atomically: older records cannot express declaration owners,
-    // so an artifact from an older toolchain is rejected rather than translated.
+    // Schema 8 replaced 4 through 7 atomically: older records cannot express
+    // scalar kind, matrix shape, or non-struct array elements, so an artifact
+    // from an older toolchain is rejected rather than translated.
     if (magic != kShaderWireMagic || schema != kShaderMetadataSchemaVersion) {
         return false;
     }

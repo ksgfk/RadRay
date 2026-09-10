@@ -50,16 +50,16 @@ TEST(RadRayShaderLibPass, PassesCompileAsAtomicTwoTargetVariants) {
         std::string_view AssignmentValue;
     };
     constexpr BindingFact forwardBindings[] = {
-        {"ForwardView", 0, 0, 0, 0, 3, "ForwardViewData"},
-        {"ForwardMaterial", 1, 0, 1, 0, 2, "ForwardMaterialData"},
+        {"ForwardView", 0, 0, 0, 0, 3, "Forward_ViewData"},
+        {"ForwardMaterial", 1, 0, 1, 0, 2, "Forward_MaterialData"},
         {"AlbedoTexture", 1, 0, 1, 1, 2},
         {"LinearSampler", 1, 0, 1, 2, 2},
-        {"ForwardObject", 2, 0, 2, 0, 1, "ForwardObjectData"}};
+        {"ForwardObject", 2, 0, 2, 0, 1, "Forward_ObjectData"}};
     constexpr BindingFact computeBindings[] = {
         {"Output", 0, 0, 2, 6, 4}};
     constexpr BindingFact depthOnlyBindings[] = {
-        {"ForwardView", 0, 0, 0, 0, 1, "ForwardDepthViewData"},
-        {"ForwardObject", 2, 0, 2, 0, 1, "ForwardDepthObjectData"}};
+        {"ForwardView", 0, 0, 0, 0, 1, "Forward_ViewData"},
+        {"ForwardObject", 2, 0, 2, 0, 1, "Forward_ObjectData"}};
     const PassCase cases[] = {
         {"shaderlib/pipelines/forward/forward.hlsl", shader::ShaderKind::Graphics, 2, forwardBindings, "QUALITY", "low"},
         {"modules/shader_compiler/tests/data/depth.hlsl", shader::ShaderKind::Graphics, 1, {}, "DEPTH_MODE", "regular"},

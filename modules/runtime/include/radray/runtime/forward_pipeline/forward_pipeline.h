@@ -1,6 +1,9 @@
 #pragma once
 
 #include <radray/render/shader_layout.h>
+// The generated cbuffer PODs are this pipeline's authoring ABI: products fill Forward_MaterialData
+// through Material::As<T>() instead of writing cbuffer fields by name.
+#include <radray/runtime/forward_pipeline/gen_forward_cbuffers.h>
 #include <radray/runtime/render_framework/render_pipeline.h>
 #include <radray/runtime/render_framework/render_scene_snapshot.h>
 #include <radray/runtime/render_framework/mesh_draw_command.h>

@@ -24,7 +24,7 @@ using shader::SpirvShaderArtifactView;
 
 // The identity moves with the wire schema, so every fixture decode names the same constant instead
 // of repeating the literal and drifting apart from it.
-constexpr uint64_t kFixtureToolchainIdentity = 0x0000000001090212ull;
+constexpr uint64_t kFixtureToolchainIdentity = shader::kShaderToolchainIdentity;
 
 vector<byte> ReadBinary(const std::filesystem::path& path) {
     std::ifstream file(path, std::ios::binary);

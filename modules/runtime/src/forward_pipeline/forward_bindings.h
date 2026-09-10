@@ -7,6 +7,8 @@
 
 namespace radray::forward_detail {
 
+// Forward cbuffers are one shared HLSL ABI mirrored by the generated PODs, so a program only has to
+// name its groups; individual fields are addressed by struct member, not by parameter lookup.
 struct ForwardProgramBindings {
     uint32_t ViewBufferIndex;
     uint32_t MaterialBufferIndex;
@@ -15,11 +17,6 @@ struct ForwardProgramBindings {
     uint32_t MaterialGroup;
     uint32_t ObjectGroup;
     std::optional<uint32_t> PassGroup{};
-    const ShaderParameterInfo* LocalToWorld{nullptr};
-    const ShaderParameterInfo* NormalToWorld{nullptr};
-    const ShaderParameterInfo* PreviousLocalToWorld{nullptr};
-    const ShaderParameterInfo* MotionValid{nullptr};
-    const ShaderParameterInfo* ViewProj{nullptr};
 };
 
 std::optional<ForwardProgramBindings> ResolveProgramBindings(const ShaderProgram& program);
@@ -36,8 +33,6 @@ private:
 
 struct DepthOnlyProgramBindings {
     uint32_t ViewBufferIndex, ObjectBufferIndex, ViewGroup, ObjectGroup;
-    const ShaderParameterInfo* ViewProj{nullptr};
-    const ShaderParameterInfo* LocalToWorld{nullptr};
 };
 
 std::optional<DepthOnlyProgramBindings> ResolveDepthOnlyProgramBindings(const ShaderProgram& program);

@@ -32,12 +32,7 @@ std::optional<ForwardProgramBindings> ResolveProgramBindings(const ShaderProgram
         *view, *material, *object,
         layout.Buffers()[*view].Group,
         layout.Buffers()[*material].Group,
-        layout.Buffers()[*object].Group, passGroup,
-        layout.Find("ForwardObject.LocalToWorld"),
-        layout.Find("ForwardObject.NormalToWorld"),
-        layout.Find("ForwardObject.PreviousLocalToWorld"),
-        layout.Find("ForwardObject.MotionValid"),
-        layout.Find("ForwardView.ViewProj")};
+        layout.Buffers()[*object].Group, passGroup};
     if (bindings.ViewGroup == bindings.MaterialGroup ||
         bindings.ViewGroup == bindings.ObjectGroup ||
         bindings.MaterialGroup == bindings.ObjectGroup) {
@@ -98,9 +93,7 @@ std::optional<DepthOnlyProgramBindings> ResolveDepthOnlyProgramBindings(const Sh
     for (const auto& parameter : program.GetParameterLayout().Parameters()) {
         if (parameter.Info.Kind == ShaderParameterKind::Texture || parameter.Info.Kind == ShaderParameterKind::Sampler) return std::nullopt;
     }
-    const auto& layout = program.GetParameterLayout();
-    return DepthOnlyProgramBindings{*view, *object, buffers[*view].Group, buffers[*object].Group,
-                                     layout.Find("ForwardView.ViewProj"), layout.Find("ForwardObject.LocalToWorld")};
+    return DepthOnlyProgramBindings{*view, *object, buffers[*view].Group, buffers[*object].Group};
 }
 
 Nullable<const DepthOnlyProgramBindings*> DepthOnlyBindingCache::Resolve(ShaderProgram* program) {

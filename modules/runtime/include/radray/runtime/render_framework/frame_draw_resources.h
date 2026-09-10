@@ -35,6 +35,10 @@ public:
         ShaderProgram& program, uint32_t group, const ShaderParameterStorage& parameters,
         std::span<const MaterialTextureFrameData> textures = {}, std::span<const MaterialSamplerFrameData> samplers = {});
 
+    std::optional<PreparedShaderGroup> PrepareGroup(
+        ShaderProgram& program, uint32_t group, std::span<const byte> bufferBytes,
+        std::span<const MaterialTextureFrameData> textures = {}, std::span<const MaterialSamplerFrameData> samplers = {});
+
     /// Pre-uploaded bindings use the same exact-tuple cache; dynamic offsets are supplied at bind time.
     Nullable<render::ShaderParameterSet*> PrepareSet(
         ShaderProgram& program, uint32_t group, std::span<const FrameBufferBinding> buffers,
@@ -63,6 +67,9 @@ private:
         size_t operator()(const FrameSetKey& key) const noexcept;
     };
     const ShaderParameterGroupRecipe& GetRecipe(ShaderProgram& program, uint32_t group);
+    bool UploadBuffer(
+        const ShaderParameterBufferLayout& buffer, uint32_t index, bool dynamic, std::span<const byte> bytes,
+        vector<FrameBufferBinding>& bindings, PreparedShaderGroup& out);
     Nullable<render::ShaderParameterSet*> PrepareSetForGroup(
         ShaderProgram& program, uint32_t group, const ShaderParameterGroupRecipe& recipe, std::span<const FrameBufferBinding> buffers,
         std::span<const MaterialTextureFrameData> textures, std::span<const MaterialSamplerFrameData> samplers);

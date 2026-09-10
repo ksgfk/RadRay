@@ -88,7 +88,7 @@ protected:
         ImGui::SetNextWindowSize({310, 170}, ImGuiCond_FirstUseEver);
         if (ImGui::Begin("Lambert sphere")) {
             ImGui::TextUnformatted(_meshAssigned ? "Mesh ready" : "Loading mesh...");
-            if (_material && ImGui::ColorEdit4("Base color", _color.data())) _material->SetFloat4("BaseColor", _color);
+            if (_material && ImGui::ColorEdit4("Base color", _color.data())) _material->As<Forward_MaterialData>()->BaseColor = _color;
             if (_material && ImGui::Checkbox("Wireframe", &_wireframe)) {
                 auto state = _material->GetPipelineState();
                 state.Primitive.Poly = _wireframe ? render::PolygonMode::Line : render::PolygonMode::Fill;
@@ -155,8 +155,8 @@ protected:
             .MipmapFilter = render::FilterMode::Linear,
             .LodMin = 0.0f,
             .LodMax = 1000.0f};
-        if (!_material->SetFloat4("BaseColor", Eigen::Vector4f::Ones()) ||
-            !_material->SetTexture("AlbedoTexture", _texture) ||
+        _material->As<Forward_MaterialData>()->BaseColor = Eigen::Vector4f{1.0f, 1.0f, 1.0f, 1.0f};
+        if (!_material->SetTexture("AlbedoTexture", _texture) ||
             !_material->SetSampler("LinearSampler", sampler)) {
             RADRAY_ERR_LOG("example_lambert_sphere: material parameter setup failed");
             return;

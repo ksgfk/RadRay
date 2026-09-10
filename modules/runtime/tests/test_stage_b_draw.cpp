@@ -2,6 +2,7 @@
 #include "gpu_submission_gate.h"
 #include "render_graph_test_driver.h"
 #include "stage_b_test_support.h"
+#include "forward_pipeline/forward_frame.h"
 #include "forward_pipeline/forward_lit_mesh_pass_processor.h"
 #include "forward_pipeline/depth_only_mesh_pass_processor.h"
 
@@ -120,8 +121,10 @@ struct Output { float4 Position : SV_Position; float2 UV : TEXCOORD0; };
     forward_detail::ForwardBindingCache bindings;
     forward_detail::DepthOnlyBindingCache depthBindings;
     bool warned = false;
-    forward_detail::ForwardLitMeshPassProcessor lit{resources, bindings, warned};
-    forward_detail::DepthOnlyMeshPassProcessor z{resources, depthBindings};
+    PackedCBufferTable objects;
+    forward_detail::FreezeObjectData(snapshot, objects);
+    forward_detail::ForwardLitMeshPassProcessor lit{resources, bindings, warned, objects};
+    forward_detail::DepthOnlyMeshPassProcessor z{resources, depthBindings, objects};
     RendererList opaque, depthList;
     ASSERT_TRUE(BuildRendererList({"opaque", "ForwardLit", &culling, &view, RenderQueueRange::Opaque()}, lit, opaque));
     ASSERT_TRUE(BuildRendererList({"depth", "DepthOnly", &culling, &view, RenderQueueRange::Opaque()}, z, depthList));

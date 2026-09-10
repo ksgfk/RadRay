@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <radray/logger.h>
+#include <radray/profiler.h>
 #include <radray/runtime/components/camera_component.h>
 
 namespace radray::forward_detail {
@@ -69,29 +70,35 @@ Eigen::Matrix4f MakeNormalToWorld(const Eigen::Matrix4f& localToWorld) {
     return result;
 }
 
-bool FillViewParameters(
-    ShaderParameterStorage& storage,
+void FreezeObjectData(const RenderSceneSnapshot& scene, PackedCBufferTable& out) {
+    RADRAY_PROFILE_SCOPE_N("FreezeObjectData");
+    out.Reset(sizeof(Forward_ObjectData), scene.Primitives.size());
+    for (size_t index = 0; index < scene.Primitives.size(); ++index) {
+        const Eigen::Matrix4f& localToWorld = scene.Primitives[index].LocalToWorld;
+        auto* row = AsCBuffer<Forward_ObjectData>(out.Row(index));
+        row->LocalToWorld = localToWorld;
+        row->NormalToWorld = MakeNormalToWorld(localToWorld);
+        row->PreviousLocalToWorld = localToWorld;
+        row->MotionValid = 0;
+    }
+}
+
+void FillViewParameters(
+    Forward_ViewData& out,
     const CullingResults& culling,
     const ResolvedRenderView& view,
     bool& lightOverflowWarned, bool localLightsFromPass) {
+    RADRAY_PROFILE_SCOPE_N("FillViewParameters");
     struct SelectedLight {
         LightRenderParameters Parameters;
         float Radius;
         float DistanceSquared;
     };
-    if (!storage.SetMatrix4x4(
-            "ViewProj",
-            view.ViewProjection)) {
-        return false;
-    }
+    out = {};
+    out.ViewProj = view.ViewProjection;
+    out.PreviousViewProj = view.PreviousViewValid ? view.PreviousViewProjection : view.ViewProjection;
     const Eigen::Vector3f eye = view.WorldPosition;
-    if (storage.GetLayout()->Find("ForwardView.PreviousViewProj") &&
-        !storage.SetMatrix4x4("ForwardView.PreviousViewProj", view.PreviousViewValid ? view.PreviousViewProjection : view.ViewProjection)) return false;
-    if (!storage.SetFloat4(
-            "EyePosition",
-            Eigen::Vector4f{eye.x(), eye.y(), eye.z(), 1.0f})) {
-        return false;
-    }
+    out.EyePosition = Eigen::Vector4f{eye.x(), eye.y(), eye.z(), 1.0f};
 
     vector<SelectedLight> directional;
     vector<SelectedLight> points;
@@ -125,58 +132,29 @@ bool FillViewParameters(
     }
     directional.resize(std::min<size_t>(directional.size(), kMaxDirectionalLights));
     points.resize(std::min<size_t>(points.size(), kMaxPointLights));
-    if (!storage.SetUInt(
-            "DirectionalLightCount",
-            static_cast<uint32_t>(directional.size())) ||
-        !storage.SetUInt(
-            "PointLightCount",
-            static_cast<uint32_t>(points.size()))) {
-        return false;
-    }
+    out.DirectionalLightCount = static_cast<uint32_t>(directional.size());
+    out.PointLightCount = static_cast<uint32_t>(points.size());
     for (uint32_t index = 0; index < directional.size(); ++index) {
         const LightRenderParameters& light = directional[index].Parameters;
-        if (!storage.SetFloat4(
-                "Direction",
-                Eigen::Vector4f{
-                    light.Direction.x(),
-                    light.Direction.y(),
-                    light.Direction.z(),
-                    0.0f},
-                index) ||
-            !storage.SetFloat4(
-                "Irradiance",
-                Eigen::Vector4f{
-                    light.Color.x() * light.DiffuseScale,
-                    light.Color.y() * light.DiffuseScale,
-                    light.Color.z() * light.DiffuseScale,
-                    0.0f},
-                index)) {
-            return false;
-        }
+        out.DirectionalLights[index].Direction =
+            Eigen::Vector4f{light.Direction.x(), light.Direction.y(), light.Direction.z(), 0.0f};
+        out.DirectionalLights[index].Irradiance = Eigen::Vector4f{
+            light.Color.x() * light.DiffuseScale,
+            light.Color.y() * light.DiffuseScale,
+            light.Color.z() * light.DiffuseScale,
+            0.0f};
     }
     for (uint32_t index = 0; index < points.size(); ++index) {
         const SelectedLight& selected = points[index];
         const LightRenderParameters& light = selected.Parameters;
-        if (!storage.SetFloat4(
-                "Position",
-                Eigen::Vector4f{
-                    light.WorldPosition.x(),
-                    light.WorldPosition.y(),
-                    light.WorldPosition.z(),
-                    selected.Radius},
-                index) ||
-            !storage.SetFloat4(
-                "Intensity",
-                Eigen::Vector4f{
-                    light.Color.x() * light.DiffuseScale,
-                    light.Color.y() * light.DiffuseScale,
-                    light.Color.z() * light.DiffuseScale,
-                    0.0f},
-                index)) {
-            return false;
-        }
+        out.PointLights[index].Position = Eigen::Vector4f{
+            light.WorldPosition.x(), light.WorldPosition.y(), light.WorldPosition.z(), selected.Radius};
+        out.PointLights[index].Intensity = Eigen::Vector4f{
+            light.Color.x() * light.DiffuseScale,
+            light.Color.y() * light.DiffuseScale,
+            light.Color.z() * light.DiffuseScale,
+            0.0f};
     }
-    return true;
 }
 
 }  // namespace radray::forward_detail

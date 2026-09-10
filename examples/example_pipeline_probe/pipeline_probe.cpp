@@ -299,9 +299,11 @@ protected:
         if (name == "cutout") cutoff = .5f;
         render::SamplerDescriptor sampler;
         sampler.MinFilter = sampler.MagFilter = render::FilterMode::Linear;
-        if (!material->SetFloat4("BaseColor", color) || !material->SetFloat4("Surface", {metal, roughness, cutoff, emission}) ||
-            !material->SetFloat4("Transmission", {color.w() < 1 ? 4.f : 0.f, 0, 0, 0}) ||
-            !material->SetTexture("AlbedoTexture", cutoff > 0 ? _contact : _white) || !material->SetSampler("LinearSampler", sampler)) return nullptr;
+        auto* values = material->As<Forward_MaterialData>();
+        values->BaseColor = color;
+        values->Surface = Eigen::Vector4f{metal, roughness, cutoff, emission};
+        values->Transmission = Eigen::Vector4f{color.w() < 1 ? 4.f : 0.f, 0, 0, 0};
+        if (!material->SetTexture("AlbedoTexture", cutoff > 0 ? _contact : _white) || !material->SetSampler("LinearSampler", sampler)) return nullptr;
         if (color.w() < 1) {
             material->SetRenderQueue(RenderQueue::Transparent);
             auto& state = material->GetPipelineState();

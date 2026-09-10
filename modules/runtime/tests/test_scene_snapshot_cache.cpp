@@ -337,18 +337,18 @@ TEST_P(MaterialSnapshotCache, UnchangedAndFailedWritesReuseBytesWhileFlightsKeep
     ASSERT_TRUE(material->BuildRenderData(a, retained, &bytes));
     EXPECT_EQ(bytes, 0u);
     EXPECT_EQ(a.Revision, revision);
-    a.Passes[0].Parameters.Reset();
+    a.Passes[0].NumericBytes.clear();
     a.Invalidate();
     ASSERT_TRUE(material->BuildRenderData(a, retained, &bytes));
     EXPECT_GT(bytes, 0u);
-    const auto old = a.Passes[0].Parameters.GetBufferData(*Technique->GetPrimaryPass().BufferIndex);
+    const auto& old = a.Passes[0].NumericBytes;
     const vector<byte> expected(old.begin(), old.end());
     ASSERT_TRUE(material->SetFloat4("BaseColor", changed));
     ASSERT_TRUE(material->BuildRenderData(b, retained, &bytes));
     EXPECT_GT(bytes, 0u);
     EXPECT_GT(b.Revision, a.Revision);
     EXPECT_TRUE(std::equal(expected.begin(), expected.end(), old.begin()));
-    const auto updated = b.Passes[0].Parameters.GetBufferData(*Technique->GetPrimaryPass().BufferIndex);
+    const auto& updated = b.Passes[0].NumericBytes;
     EXPECT_NE(std::memcmp(updated.data(), old.data(), old.size()), 0);
 
     auto& exposedState = material->GetPipelineState();
@@ -409,15 +409,13 @@ TEST_P(MaterialSnapshotCache, MovedFromAndInvalidatedSnapshotsCanBeMaterializedA
     EXPECT_GT(bytes, 0u);
     ASSERT_EQ(original.Passes.size(), moved.Passes.size());
     EXPECT_EQ(original.Generation, moved.Generation);
-    const auto buffer = *Technique->GetPrimaryPass().BufferIndex;
-    const auto expected = moved.Passes[0].Parameters.GetBufferData(buffer);
-    const auto restored = original.Passes[0].Parameters.GetBufferData(buffer);
-    EXPECT_TRUE(std::equal(expected.begin(), expected.end(), restored.begin(), restored.end()));
+    const vector<byte> expected = moved.Passes[0].NumericBytes;
+    const vector<byte> restored = original.Passes[0].NumericBytes;
+    EXPECT_EQ(expected, restored);
 
-    // An invalidated externally edited snapshot must rebuild storage, including its selected group.
+    // An invalidated externally edited snapshot must refill its bytes from the authoring material.
     moved.Invalidate();
-    moved.Passes[0].Parameters = ShaderParameterStorage{&Program->GetParameterLayout(), material->GetParameterGroup() + 1};
-    ASSERT_TRUE(moved.Passes[0].Parameters.GetBufferData(buffer).empty());
+    moved.Passes[0].NumericBytes.clear();
     const uint64_t generation = material->GetGeneration();
     material = nullptr;
     material = Material::Create(Technique.get());
@@ -426,8 +424,8 @@ TEST_P(MaterialSnapshotCache, MovedFromAndInvalidatedSnapshotsCanBeMaterializedA
     ASSERT_TRUE(material->BuildRenderData(moved, retained, &bytes));
     EXPECT_GT(bytes, 0u);
     EXPECT_EQ(moved.Generation, material->GetGeneration());
-    EXPECT_EQ(moved.Passes[0].Parameters.GetBufferData(buffer).size(), expected.size());
-    EXPECT_NE(std::memcmp(moved.Passes[0].Parameters.GetBufferData(buffer).data(), restored.data(), restored.size()), 0);
+    EXPECT_EQ(moved.Passes[0].NumericBytes.size(), expected.size());
+    EXPECT_NE(std::memcmp(moved.Passes[0].NumericBytes.data(), restored.data(), restored.size()), 0);
 }
 
 TEST_P(MaterialSnapshotCache, TextureReadinessReplacementAndSamplerChangesInvalidateMaterialValues) {
@@ -590,9 +588,8 @@ TEST_P(MaterialSnapshotCache, UnavailableMaterialsAndOrderChangesPreserveOtherFl
         EXPECT_EQ(flights[flight].Stats.MaterialsRebuilt, 1u);
         EXPECT_EQ(flights[flight].Stats.MaterialsReused, 1u);
     }
-    const auto buffer = *technique->GetPrimaryPass().BufferIndex;
-    EXPECT_NE(flights[0].Materials[1].Passes[0].Parameters.GetBufferData(buffer).data(),
-              flights[1].Materials[1].Passes[0].Parameters.GetBufferData(buffer).data());
+    EXPECT_NE(flights[0].Materials[1].Passes[0].NumericBytes.data(),
+              flights[1].Materials[1].Passes[0].NumericBytes.data());
 
     // Both previously published materials keep their storage even when their indices exchange.
     firstProxy->DrawMaterial = a.Get();

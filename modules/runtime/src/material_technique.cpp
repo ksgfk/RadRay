@@ -7,24 +7,6 @@
 namespace radray {
 namespace {
 
-struct NumericField {
-    string Path;
-    ShaderParameterKind Kind;
-    uint32_t Offset, Size, Stride, Count;
-    friend bool operator==(const NumericField&, const NumericField&) = default;
-};
-
-vector<NumericField> NumericSchema(const MaterialPassLayout& pass) {
-    vector<NumericField> result;
-    for (const auto& field : pass.Program->GetParameterLayout().Parameters()) {
-        if (field.Info.BufferIndex != *pass.BufferIndex) continue;
-        result.push_back({field.Name.substr(pass.MaterialBufferAnchor.size() + 1), field.Info.Kind,
-                          field.Info.ByteOffset, field.Info.Size, field.Info.Stride, field.Info.ElementCount});
-    }
-    std::sort(result.begin(), result.end(), [](const auto& a, const auto& b) { return a.Path < b.Path; });
-    return result;
-}
-
 bool ResolveMaterialGroup(MaterialPassLayout& pass, string& reason) {
     if (pass.MaterialBufferAnchor.empty()) return true;
     const auto& layout = pass.Program->GetParameterLayout();
@@ -82,17 +64,8 @@ Nullable<unique_ptr<MaterialTechnique>> MaterialTechnique::Create(vector<Materia
         return nullptr;
     }
     const auto& primary = layouts[*primaryIndex];
-    const auto schema = NumericSchema(primary);
-    const auto size = primary.Program->GetParameterLayout().Buffers()[*primary.BufferIndex].Size;
     for (const auto& pass : layouts) {
         if (!pass.BufferIndex) continue;
-        const auto secondary = NumericSchema(pass);
-        if (pass.Program->GetParameterLayout().Buffers()[*pass.BufferIndex].Size != size || secondary != schema) {
-            const auto mismatch = std::mismatch(schema.begin(), schema.end(), secondary.begin(), secondary.end());
-            RADRAY_ERR_LOG("unsupported material ABI: pass '{}' must match the primary numeric layout at '{}'", pass.Name,
-                           mismatch.first != schema.end() ? mismatch.first->Path : string{"buffer size or extra field"});
-            return nullptr;
-        }
         for (const auto& resource : pass.Resources) {
             const auto found = std::find_if(primary.Resources.begin(), primary.Resources.end(), [&](const auto& value) { return value.Name == resource.Name; });
             if (found == primary.Resources.end() || found->Info.Kind != resource.Info.Kind || found->Info.ElementCount != resource.Info.ElementCount) {

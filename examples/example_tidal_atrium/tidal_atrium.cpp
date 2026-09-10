@@ -368,7 +368,7 @@ protected:
         _cutRequested = false;
         if (!_options.SkyTest) Move(_options.Tour ? 1.f / 60.f : dt);
         if (!state.Paused) state.Time += _options.Tour ? 1.f / 60.f : dt;
-        if (!_materials.at("core")->SetFloat4("BaseColor", {.4f + .12f * std::sin(state.Time * 1.2f), 1, .86f, 1})) _failed = true;
+        _materials.at("core")->As<Forward_MaterialData>()->BaseColor = Eigen::Vector4f{.4f + .12f * std::sin(state.Time * 1.2f), 1, .86f, 1};
         for (const auto& item : _animated) {
             if (item.Motion == "core")
                 item.Component->SetWorldLocation(item.Position + Eigen::Vector3f{0, .18f * std::sin(state.Time), 0});
@@ -820,11 +820,12 @@ bool AtriumApplication::CreateMaterials() {
         sampler.MinFilter = sampler.MagFilter = sampler.MipmapFilter = d.Nearest ? render::FilterMode::Nearest : render::FilterMode::Linear;
         sampler.LodMax = d.Nearest ? 0.f : 1000.f;
         const bool metal = std::string_view{d.Name} == "copper" || std::string_view{d.Name} == "gold";
-        if (!material->SetFloat4("BaseColor", d.Color) ||
-            !material->SetFloat4("Surface", {metal ? 1.f : 0.f, std::clamp(1.f - d.Gloss, .08f, 1.f), 0, d.Emission}) ||
-            !material->SetFloat4("Transmission", {0, d.Unlit ? 1.f : 0.f, 0, 0}) ||
-            !material->SetFloat4("UVTransform", {d.Scale, -d.Scale, 0, d.Scale}) ||
-            !material->SetTexture("AlbedoTexture", _textures.at(d.Texture)) || !material->SetSampler("LinearSampler", sampler)) return false;
+        auto* values = material->As<Forward_MaterialData>();
+        values->BaseColor = d.Color;
+        values->Surface = Eigen::Vector4f{metal ? 1.f : 0.f, std::clamp(1.f - d.Gloss, .08f, 1.f), 0, d.Emission};
+        values->Transmission = Eigen::Vector4f{0, d.Unlit ? 1.f : 0.f, 0, 0};
+        values->UVTransform = Eigen::Vector4f{d.Scale, -d.Scale, 0, d.Scale};
+        if (!material->SetTexture("AlbedoTexture", _textures.at(d.Texture)) || !material->SetSampler("LinearSampler", sampler)) return false;
         if (d.Color.w() < 1) {
             material->SetRenderQueue(RenderQueue::Transparent);
             auto& pipeline = material->GetPipelineState();

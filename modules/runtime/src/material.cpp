@@ -47,12 +47,17 @@ Material::Material(const MaterialTechnique* technique)
     : _technique(technique),
       _program(technique->GetPrimaryPass().Program),
       _parameterGroup(*technique->GetPrimaryPass().ParameterGroup),
-      _parameters(&_program->GetParameterLayout(), _parameterGroup),
+      _numericBytes(
+          technique->GetPrimaryPass().BufferIndex
+              ? technique->GetPrimaryPass().Program->GetParameterLayout().Buffers()[*technique->GetPrimaryPass().BufferIndex].Size
+              : 0),
+      _parameters(&_program->GetParameterLayout(), _parameterGroup, _numericBytes),
       _generation(gNextMaterialGeneration.fetch_add(1, std::memory_order_relaxed)),
       _resources(make_unique<ResourceState>()) {
     if (_generation == 0 || _generation == UINT64_MAX) RADRAY_ABORT("Material generation exhausted");
     for (const auto& pass : technique->Passes()) _pipelineStates.push_back(pass.DefaultPipelineState);
     _observedPipelineStates = _pipelineStates;
+    _observedNumericBytes = _numericBytes;
 }
 
 Material::~Material() noexcept = default;
@@ -66,6 +71,11 @@ uint64_t Material::GetRevision() const noexcept {
     // Mutable pipeline-state references are part of the authoring API; observe their values on GT.
     if (_observedPipelineStates != _pipelineStates) {
         _observedPipelineStates = _pipelineStates;
+        MarkChanged();
+    }
+    // Typed As<T>() writes go straight to the bytes, so revision follows the bytes for both paths.
+    if (_observedNumericBytes != _numericBytes) {
+        _observedNumericBytes = _numericBytes;
         MarkChanged();
     }
     for (auto& value : _resources->Textures) {
@@ -153,9 +163,7 @@ bool Material::SetNumericBytes(std::string_view name, ShaderParameterKind kind,
     const uint64_t offset = uint64_t{parameter->ByteOffset} + uint64_t{element} * parameter->Stride;
     if (offset > bytes.size() || value.size() > bytes.size() - offset) return false;
     if (std::memcmp(bytes.data() + offset, value.data(), value.size()) == 0) return true;
-    if (!_parameters.SetBytes(*parameter, kind, value, element)) return false;
-    MarkChanged();
-    return true;
+    return _parameters.SetBytes(*parameter, kind, value, element);
 }
 
 bool Material::SetTexture(
@@ -240,29 +248,30 @@ bool Material::BuildRenderData(MaterialRenderData& out, vector<StreamingAssetRef
         return valid;
     }
     auto& snapshot = out;
-    const bool sameMaterial = snapshot.Generation == _generation;
     snapshot.Queue = _renderQueue;
     snapshot.Passes.resize(_technique->Passes().size());
-    const auto canonicalBytes = _parameters.GetBufferData(*_technique->GetPrimaryPass().BufferIndex);
     bool anyValid = false;
     for (uint32_t index = 0; index < _technique->Passes().size(); ++index) {
         const auto& layout = _technique->Passes()[index];
         auto& pass = snapshot.Passes[index];
         pass.Textures.clear();
         pass.Samplers.clear();
-        const auto previousGroup = pass.ParameterGroup;
         pass.PassName = layout.Name;
         pass.Program = layout.Program;
         pass.ParameterGroup = layout.ParameterGroup;
         pass.PipelineState = _pipelineStates[index];
         pass.Valid = true;
         if (layout.BufferIndex) {
-            if (!sameMaterial || pass.Parameters.GetLayout() != &layout.Program->GetParameterLayout() || previousGroup != layout.ParameterGroup)
-                pass.Parameters = ShaderParameterStorage{&layout.Program->GetParameterLayout(), layout.ParameterGroup};
-            pass.Valid = pass.Parameters.CopyCompatibleBufferBytes(*layout.BufferIndex, canonicalBytes);
-            if (bytesCopied != nullptr && pass.Valid) *bytesCopied += canonicalBytes.size();
-        } else
-            pass.Parameters = ShaderParameterStorage{};
+            // The snapshot bytes are the GPU cbuffer contents verbatim, so they only describe this
+            // pass when they are exactly the anchored buffer's size and that buffer is in the group.
+            const auto& buffer = layout.Program->GetParameterLayout().Buffers()[*layout.BufferIndex];
+            pass.NumericBytes.assign(_numericBytes.begin(), _numericBytes.end());
+            pass.Valid = !_numericBytes.empty() && _numericBytes.size() == buffer.Size &&
+                         (!layout.ParameterGroup || buffer.Group == *layout.ParameterGroup);
+            if (bytesCopied != nullptr && pass.Valid) *bytesCopied += _numericBytes.size();
+        } else {
+            pass.NumericBytes.clear();
+        }
         for (const auto& resource : layout.Resources) {
             for (uint32_t element = 0; element < resource.Info.ElementCount; ++element) {
                 if (resource.Info.Kind == ShaderParameterKind::Texture) {

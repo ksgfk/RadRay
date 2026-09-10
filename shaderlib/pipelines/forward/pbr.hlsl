@@ -3,18 +3,7 @@
 #include <bsdf/principled.hlsli>
 #include <core/frame.hlsli>
 #include <shadow/cascade.hlsli>
-struct ForwardPassData {
-    float4x4 ShadowMatrix0, ShadowMatrix1, ShadowMatrix2, ShadowMatrix3;
-    float4 ShadowSphere[4];
-    float4 ShadowBias[4];
-    float4 ShadowParams;
-    float4 Extent; // width, height, tilesX, per-tile capacity
-    uint LocalLightCount;
-    uint UseTiles;
-    uint UseAo;
-    uint Transparent;
-};
-VK_BINDING(0, 3) ConstantBuffer<ForwardPassData> ForwardPass : register(b0, space3);
+VK_BINDING(0, 3) ConstantBuffer<Forward_PassData> ForwardPass : register(b0, space3);
 VK_BINDING(1, 3) Texture2DArray<float> ShadowMap : register(t0, space3);
 VK_BINDING(2, 3) SamplerComparisonState ShadowSampler : register(s0, space3);
 VK_BINDING(3, 3) StructuredBuffer<ForwardLocalLight> LocalLights : register(t1, space3);

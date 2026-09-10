@@ -618,9 +618,9 @@ private:
         if (!bindings) {
             return false;
         }
-        const auto bytes = material.Parameters.GetBufferData(bindings->MaterialBufferIndex);
+        const auto bytes = material.NumericBytes;
         _expectedMaterial[ctx.FlightIndex] = {bytes.begin(), bytes.end()};
-        ShaderParameterStorage values{&material.Program.Get()->GetParameterLayout()};
+        Forward_ViewData values{};
         bool warned = false;
         const auto& family = GetRenderSystem()->GetFramePlan(ctx.FlightIndex).ViewFamilies.front();
         auto output = GetRenderSystem()->GetOutputs().Find(family.Output);
@@ -630,8 +630,8 @@ private:
         if (!resolved) return false;
         CullingResults culling;
         EXPECT_TRUE(Cull({&input, &resolved->Views.front()}, culling));
-        EXPECT_TRUE(forward_detail::FillViewParameters(values, culling, resolved->Views.front(), warned));
-        const auto view = values.GetBufferData(bindings->ViewBufferIndex);
+        forward_detail::FillViewParameters(values, culling, resolved->Views.front(), warned);
+        const auto view = AsCBufferBytes(values);
         _expectedView[ctx.FlightIndex] = {view.begin(), view.end()};
         if (_scenario == Scenario::SnapshotValues) {
             if (_mutated) {
@@ -676,9 +676,9 @@ private:
         if (!bindings) {
             return;
         }
-        const auto bytes = material.Parameters.GetBufferData(bindings->MaterialBufferIndex);
+        const auto bytes = material.NumericBytes;
         EXPECT_EQ((vector<byte>{bytes.begin(), bytes.end()}), _expectedMaterial[flight]);
-        ShaderParameterStorage values{&material.Program.Get()->GetParameterLayout()};
+        Forward_ViewData values{};
         bool warned = false;
         const auto& family = GetRenderSystem()->GetFramePlan(flight).ViewFamilies.front();
         auto output = GetRenderSystem()->GetOutputs().Find(family.Output);
@@ -688,8 +688,8 @@ private:
         if (!resolved) return;
         CullingResults culling;
         EXPECT_TRUE(Cull({&input, &resolved->Views.front()}, culling));
-        EXPECT_TRUE(forward_detail::FillViewParameters(values, culling, resolved->Views.front(), warned));
-        const auto view = values.GetBufferData(bindings->ViewBufferIndex);
+        forward_detail::FillViewParameters(values, culling, resolved->Views.front(), warned);
+        const auto view = AsCBufferBytes(values);
         EXPECT_EQ((vector<byte>{view.begin(), view.end()}), _expectedView[flight]);
         EXPECT_NE(input.MeshBatches.front().Geometry->VertexBuffers.front().View.Target, nullptr);
         ASSERT_FALSE(material.Textures.empty());

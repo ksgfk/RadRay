@@ -272,21 +272,29 @@ generation，不能复用地址充当身份。光源快照也复制 CastShadow�
 非空 material anchor 所在组恰有一个非数组 cbuffer。material group 只接受该 cbuffer、texture 与
 sampler，不接收其他 buffer/UAV。空 anchor 表示这个 pass 完全不消费材质组，DepthOnly 使用此形式。
 
-primary cbuffer 定义 canonical 相对字段路径。其他消费材质的 pass 必须匹配完整数值布局：字段集合、
-kind、byte offset、size、stride、element count 及 cbuffer 总大小；物理组号、binding handle 和 cbuffer
-声明前缀可以不同。各 pass 保留自己的 storage/layout，只有验证成功后才复制 canonical bytes。
+Create 只从 primary program 取该 cbuffer 的**字节数**，用来分配 Material 的数值存储；这是构造
+信息，不是类型校验。secondary pass 的数值布局是否与 primary 相同由调用方保证——产品路径的
+两个 pass include 同一份 HLSL cbuffer ABI，CPU 侧看的又是同一个生成 POD，逐字段扫描只会在
+热路径上重做一遍生成器已经做对的事。物理组号、binding handle 和 cbuffer 声明前缀可以不同。
 
-**当前 metadata 限制**：schema 7 的 runtime 参数信息不包含标量类型或矩阵行列数。这里按现有 metadata
-可表达的布局事实校验，不能区分布局相同的 float/int、矩阵形状或其他缺失的类型语义；这不是完整类型
-等价验证。编写 technique 时必须保持这些语义一致，完整验证需要将来扩展编译器与 runtime 的公共契约。
+之所以不做运行时校验：唯一能证明布局的事实来自 DXC type tree，而它已经在 AOT 生成 POD 时被
+用过一次，且两个 target lane 不一致时编译就会失败（见
+[shader pipeline](shader-pipeline.md)）。运行时再验一遍既不能发现新问题，也挡不住调用方写错
+`As<T>()` 的类型——那是调用方 bug。
 
 secondary pass 的 texture/sampler 必须是 primary 声明的子集，按名称、kind 和数组数量一致匹配；不得
-新增只在 secondary 存在的材质资源。数值字段不允许做子集。运行时缺资源仅使实际消费它的 pass
+新增只在 secondary 存在的材质资源。运行时缺资源仅使实际消费它的 pass
 无效，因此缺纹理的 ForwardLit 仍可保留不消费材质的 DepthOnly。缺少/无效 pass 时 list 跳过对应 batch，
 不回退到 primary 或其他 pass。固定功能状态可用 `SetPassPipelineState` 逐 pass 覆盖，RenderQueue 属于材质。
 
-Material 实例拥有不可复用的 generation 与单调内容 revision。数值 setter 只在字节实际变化时增加
-revision，纹理/sampler/queue 变化也使快照失效；game-thread `GetRevision` 还观察资源就绪状态以及
+Material 的 canonical 数值存储是一段 GPU 布局 `byte[]`（空 anchor 时长度为 0），有两个写入面：
+产品路径 `As<Forward_MaterialData>()` 直接把它当成生成 POD 写，JIT 与测试用按名 setter 经
+`ShaderParameterStorage` 盖在同一块 bytes 上。`Material` 与 `MaterialTechnique` 的头文件不出现
+`Forward_*`，方向是调用方选类型而不是 runtime 依赖 Forward。
+
+Material 实例拥有不可复用的 generation 与单调内容 revision。typed 写入绕过一切通知，所以
+`GetRevision` 的变化检测统一是「bytes 与上次观察到的副本是否不同」，两条写入面因此得到同一个
+语义；纹理/sampler/queue 变化也使快照失效；game-thread `GetRevision` 还观察资源就绪状态以及
 通过可变 `GetPipelineState` 引用写入的状态。`BuildRenderData` 是已物化材质快照的更新入口，消费方
 不得原地修改其值后继续把原 generation/revision 当作有效缓存；手工修改前调用 `Invalidate`，下一次
 Build 完整恢复 authoring 值。ProgramFrameId 由 builder 每帧分配，不影响材质内容版本。已发布 flight 的快照保持只读。

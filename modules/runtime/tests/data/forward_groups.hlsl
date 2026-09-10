@@ -1,35 +1,17 @@
 #include <core/platform.hlsli>
-#include <lighting/lights.hlsli>
+#include <pipelines/forward/cbuffers.hlsli>
 
-struct ForwardViewData {
-    float4x4 ViewProj;
-    float4 EyePosition;
-    uint DirectionalLightCount;
-    uint PointLightCount;
-    float2 LightCountPadding;
-    DirectionalLight DirectionalLights[RADRAY_MAX_DIRECTIONAL_LIGHTS];
-    PointLight PointLights[RADRAY_MAX_POINT_LIGHTS];
-};
-struct ForwardMaterialData {
-    float4 BaseColor;
-    float3 NormalBias;
-    float Roughness;
-    float2 Tint;
-    float2 MaterialPadding;
-    float4x4 MaterialTransform;
-};
-struct ForwardObjectData {
-    float4x4 LocalToWorld;
-};
+// Non-canonical spaces and Vulkan sets on purpose: the pipeline must use whatever the resolved
+// layout reports. The cbuffer ABI is the shared one, so the CPU PODs stay byte-identical here.
 
-VK_BINDING(0, 2) ConstantBuffer<ForwardViewData> ForwardView : register(b0, space4);
-VK_BINDING(0, 5) ConstantBuffer<ForwardMaterialData> ForwardMaterial : register(b0, space7);
+VK_BINDING(0, 2) ConstantBuffer<Forward_ViewData> ForwardView : register(b0, space4);
+VK_BINDING(0, 5) ConstantBuffer<Forward_MaterialData> ForwardMaterial : register(b0, space7);
 VK_BINDING(1, 5) Texture2D<float4> AlbedoTexture : register(t0, space7);
 VK_BINDING(2, 5) SamplerState LinearSampler : register(s0, space7);
 #if defined(MISSING_FORWARD_OBJECT)
-VK_BINDING(0, 8) ConstantBuffer<ForwardObjectData> ObjectData : register(b0, space9);
+VK_BINDING(0, 8) ConstantBuffer<Forward_ObjectData> ObjectData : register(b0, space9);
 #else
-VK_BINDING(0, 8) ConstantBuffer<ForwardObjectData> ForwardObject : register(b0, space9);
+VK_BINDING(0, 8) ConstantBuffer<Forward_ObjectData> ForwardObject : register(b0, space9);
 #endif
 
 struct VertexInput {

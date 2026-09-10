@@ -2,22 +2,9 @@
 #define RADRAY_FORWARD_EFFECTS_HLSLI
 #include <core/platform.hlsli>
 #include <core/color.hlsli>
+#include <pipelines/forward/cbuffers.hlsli>
 #include <pipelines/forward/local_light.hlsli>
-struct EffectsData {
-    float4x4 InverseProjection;
-    float4x4 InverseViewProjection;
-    float4x4 PreviousViewProjection;
-    float4x4 WorldToView;
-    float4x4 Projection;
-    float4 Extent; // output xy, input zw
-    float4 Options; // effect-specific controls
-    float4 Eye;
-    uint LocalLightCount;
-    uint TileCapacity;
-    uint HistoryValid;
-    uint DebugMode;
-};
-VK_BINDING(0, 0) ConstantBuffer<EffectsData> Effects : register(b0);
+VK_BINDING(0, 0) ConstantBuffer<Forward_EffectsData> Effects : register(b0);
 VK_BINDING(1, 0) Texture2D<float4> InputA : register(t0);
 VK_BINDING(2, 0) Texture2D<float4> InputB : register(t1);
 VK_BINDING(3, 0) Texture2D<float4> InputC : register(t2);

@@ -57,7 +57,7 @@ shader::ShaderArtifactDecodeOptions DecodeOptions(
     return shader::ShaderArtifactDecodeOptions{
         .Target = target,
         .ExpectedGpuArtifact = render::test::ExpectedGpuArtifact(index.value_or(0), target),
-        .ExpectedToolchainIdentity = 0x0000000001090212ull};
+        .ExpectedToolchainIdentity = shader::kShaderToolchainIdentity};
 }
 
 std::optional<shader::ShaderArtifactView> DecodeGeneric(
@@ -438,10 +438,10 @@ TEST(RadRayRuntimeMaterial, ReferencedPayloadRootCanAlsoOwnAnotherDeclaration) {
     }
 }
 
-// float4 SecondOffsets[4] is an array of a non-struct element. The wire contract cannot
-// name the element type, so the layout exposes it as Raw rather than failing the whole
-// program or guessing a kind.
-TEST(RadRayRuntimeMaterial, LeafArrayIsExposedAsRawParameter) {
+// float4 SecondOffsets[4] is an array of a non-struct element. Schema 8 carries the element
+// scalar kind and shape on the wire, so the array resolves to a typed Vector slot addressed
+// by element index instead of degrading to one opaque Raw blob.
+TEST(RadRayRuntimeMaterial, LeafArrayIsExposedAsTypedVectorElements) {
     const auto artifact = DecodeGeneric("multiple_cbuffers");
     ASSERT_TRUE(artifact.has_value());
     const auto layout = ShaderParameterLayout::Create(artifact.value());
@@ -449,7 +449,7 @@ TEST(RadRayRuntimeMaterial, LeafArrayIsExposedAsRawParameter) {
 
     const ShaderParameterInfo* offsets = layout->Find("SecondOffsets");
     ASSERT_NE(offsets, nullptr);
-    EXPECT_EQ(offsets->Kind, ShaderParameterKind::Raw);
+    EXPECT_EQ(offsets->Kind, ShaderParameterKind::Vector);
     EXPECT_EQ(offsets->ByteOffset, 0u);
     EXPECT_EQ(offsets->Stride, 16u);
     EXPECT_EQ(offsets->Size, 16u);
@@ -457,20 +457,18 @@ TEST(RadRayRuntimeMaterial, LeafArrayIsExposedAsRawParameter) {
 
     ShaderParameterStorage values{&layout.value()};
     const Eigen::Vector4f payload{1.0f, 2.0f, 3.0f, 4.0f};
-    const std::span<const byte> payloadBytes{
-        reinterpret_cast<const byte*>(payload.data()), sizeof(payload)};
-    ASSERT_TRUE(values.SetRaw("SecondOffsets", payloadBytes, 2));
+    ASSERT_TRUE(values.SetFloat4("SecondOffsets", payload, 2));
     const std::span<const byte> packed = values.GetBufferData(offsets->BufferIndex);
     EXPECT_TRUE(ReadValue<Eigen::Vector4f>(packed, 32).isApprox(payload));
 
-    // Typed setters must refuse a Raw slot, and Raw must refuse a typed slot.
-    EXPECT_FALSE(values.SetFloat4("SecondOffsets", payload, 0));
+    // Raw must refuse a typed slot, whichever way the element count runs.
+    const std::span<const byte> payloadBytes{
+        reinterpret_cast<const byte*>(payload.data()), sizeof(payload)};
+    EXPECT_FALSE(values.SetRaw("SecondOffsets", payloadBytes, 0));
     EXPECT_FALSE(values.SetRaw("SecondWeight", payloadBytes, 0));
-    // Out of range element and oversized payload are both rejected.
-    EXPECT_FALSE(values.SetRaw("SecondOffsets", payloadBytes, 4));
-    const vector<byte> oversized(17, byte{1});
-    EXPECT_FALSE(values.SetRaw("SecondOffsets", oversized, 0));
-    EXPECT_FALSE(values.SetRaw("SecondOffsets", {}, 0));
+    // A shape mismatch and an out of range element are both rejected.
+    EXPECT_FALSE(values.SetFloat2("SecondOffsets", Eigen::Vector2f{1.0f, 2.0f}, 0));
+    EXPECT_FALSE(values.SetFloat4("SecondOffsets", payload, 4));
 }
 
 TEST(RadRayRuntimeMaterial, InvalidParameterWritesAreTransactional) {

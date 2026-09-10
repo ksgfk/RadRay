@@ -6,6 +6,7 @@
 #include <radray/nullable.h>
 #include <radray/runtime/material_state.h>
 #include <radray/runtime/material_technique.h>
+#include <radray/runtime/render_framework/cbuffer_view.h>
 #include <radray/runtime/render_framework/render_types.h>
 #include <radray/runtime/shader_parameters.h>
 #include <radray/runtime/texture_asset.h>
@@ -34,7 +35,8 @@ struct MaterialPassRenderData {
     Nullable<ShaderProgram*> Program{nullptr};
     uint32_t ProgramFrameId{0};
     std::optional<uint32_t> ParameterGroup;
-    ShaderParameterStorage Parameters{};
+    /// The anchored cbuffer's GPU bytes verbatim. Empty for passes without a material cbuffer.
+    vector<byte> NumericBytes{};
     MaterialPipelineState PipelineState{};
     vector<MaterialTextureFrameData> Textures{};
     vector<MaterialSamplerFrameData> Samplers{};
@@ -75,6 +77,21 @@ public:
     void SetRenderQueue(RenderQueue value) noexcept;
 
     const ShaderParameterStorage& GetParameterStorage() const noexcept { return _parameters; }
+    std::span<byte> NumericBytes() noexcept { return _numericBytes; }
+    std::span<const byte> NumericBytes() const noexcept { return _numericBytes; }
+
+    /// The GPU-layout bytes seen as the POD generated for this material's cbuffer. The caller
+    /// asserts the type matches the shader ABI; nothing is validated here. Writes are picked up by
+    /// GetRevision comparing the bytes, so no explicit change notification is needed. Techniques
+    /// without a material cbuffer (DepthOnly) hold no bytes and must not be viewed.
+    template <class T>
+    T* As() noexcept {
+        return AsCBuffer<T>(NumericBytes());
+    }
+    template <class T>
+    const T* As() const noexcept {
+        return AsCBuffer<T>(NumericBytes());
+    }
 
     bool SetFloat(std::string_view name, float value, uint32_t element = 0) noexcept;
     bool SetFloat2(std::string_view name, const Eigen::Vector2f& value, uint32_t element = 0) noexcept;
@@ -116,6 +133,8 @@ private:
     const MaterialTechnique* _technique;
     ShaderProgram* _program;
     uint32_t _parameterGroup;
+    vector<byte> _numericBytes;
+    mutable vector<byte> _observedNumericBytes;
     ShaderParameterStorage _parameters;
     vector<MaterialPipelineState> _pipelineStates;
     mutable vector<MaterialPipelineState> _observedPipelineStates;

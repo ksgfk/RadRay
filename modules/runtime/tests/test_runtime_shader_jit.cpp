@@ -559,7 +559,7 @@ TEST(RadRayRuntimeShaderJit, FixtureCaseReportCoversTargetNativeJitFacts) {
             shader::ShaderArtifactDecodeOptions options{
                 .Target = target,
                 .ExpectedGpuArtifact = artifact->ExpectedGpuArtifact,
-                .ExpectedToolchainIdentity = 0x0000000001090212ull};
+                .ExpectedToolchainIdentity = shader::kShaderToolchainIdentity};
             shader::ShaderArtifactDecodeError error = shader::ShaderArtifactDecodeError::None;
             std::optional<shader::ShaderArtifactView> generic;
             // Counted off the resolved layout of whichever target this lane is: the two resolved

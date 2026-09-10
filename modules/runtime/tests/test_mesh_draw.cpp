@@ -100,7 +100,7 @@ Nullable<unique_ptr<ShaderProgram>> CreateFixtureProgram(
                 .ExpectedGpuArtifact = render::test::ExpectedGpuArtifact(
                     fixtureIndex,
                     target.value()),
-                .ExpectedToolchainIdentity = 0x0000000001090212ull},
+                .ExpectedToolchainIdentity = shader::kShaderToolchainIdentity},
             layoutRecipe);
     if (!artifact.has_value()) {
         return nullptr;

@@ -44,27 +44,28 @@ Eigen::Matrix4f UnjitteredProjection(const ResolvedRenderView& view) {
     p.row(1) -= view.JitterNdc.y() * p.row(3);
     return p;
 }
-ShaderParameterStorage EffectValues(ShaderProgram& program, const ResolvedRenderView& view, RenderExtent output, RenderExtent input) {
-    ShaderParameterStorage values{&program.GetParameterLayout(), 0};
-    values.SetFloat4("Effects.Extent", {float(output.Width), float(output.Height), float(input.Width), float(input.Height)});
-    values.SetMatrix4x4("Effects.InverseProjection", view.Projection.inverse());
-    values.SetMatrix4x4("Effects.InverseViewProjection", view.ViewProjection.inverse());
-    values.SetMatrix4x4("Effects.PreviousViewProjection", view.PreviousViewValid ? view.PreviousViewProjection : view.ViewProjection);
-    values.SetMatrix4x4("Effects.WorldToView", view.View);
-    values.SetMatrix4x4("Effects.Projection", UnjitteredProjection(view));
-    values.SetFloat4("Effects.Eye", {view.WorldPosition.x(), view.WorldPosition.y(), view.WorldPosition.z(), 1});
+Forward_EffectsData EffectValues(const ResolvedRenderView& view, RenderExtent output, RenderExtent input) {
+    Forward_EffectsData values{};
+    values.Extent = Eigen::Vector4f{float(output.Width), float(output.Height), float(input.Width), float(input.Height)};
+    values.InverseProjection = view.Projection.inverse().eval();
+    values.InverseViewProjection = view.ViewProjection.inverse().eval();
+    values.PreviousViewProjection = view.PreviousViewValid ? view.PreviousViewProjection : view.ViewProjection;
+    values.WorldToView = view.View;
+    values.Projection = UnjitteredProjection(view);
+    values.Eye = Eigen::Vector4f{view.WorldPosition.x(), view.WorldPosition.y(), view.WorldPosition.z(), 1};
     return values;
 }
-vector<RgParameterBinding> EffectBindings(ShaderProgram& program, const ShaderParameterStorage& values, std::span<const RgParameterBinding> resources) {
+// Graph parameter sets still bind by declaration name; only the numeric payload is a POD now.
+vector<RgParameterBinding> EffectBindings(ShaderProgram& program, const Forward_EffectsData& values, std::span<const RgParameterBinding> resources) {
     vector<RgParameterBinding> bindings;
-    for (uint32_t i = 0; i < program.GetParameterLayout().Buffers().size(); ++i)
-        bindings.push_back({program.GetParameterLayout().Buffers()[i].Name, 0, RgCBufferParameterBinding{values.GetBufferData(i)}});
+    for (const auto& buffer : program.GetParameterLayout().Buffers())
+        bindings.push_back({buffer.Name, 0, RgCBufferParameterBinding{AsCBufferBytes(values)}});
     for (const auto& resource : resources)
         if (program.GetArtifact().FindBindingInfo(resource.Declaration)) bindings.push_back(resource);
     if (program.GetArtifact().FindBindingInfo("ClampSampler")) bindings.push_back({"ClampSampler", 0, RgSamplerParameterBinding{ClampSampler()}});
     return bindings;
 }
-void Compute(RenderGraph& graph, std::string_view name, ShaderProgram& program, const ShaderParameterStorage& values,
+void Compute(RenderGraph& graph, std::string_view name, ShaderProgram& program, const Forward_EffectsData& values,
              std::span<const RgParameterBinding> bindings, RenderExtent size) {
     struct Data {
         RgComputeProgramHandle Program;
@@ -82,8 +83,8 @@ RgTextureValue ScalarEffect(RenderGraph& graph, const ForwardEffectPrograms& pro
                             RgTextureValue a, RgTextureValue b = {}, Eigen::Vector4f options = Eigen::Vector4f::Zero()) {
     auto& program = *programs.Programs[effect].Get();
     const auto output = Texture(graph, size, TextureFormat::R32_FLOAT, kScalarUsage, name);
-    auto values = EffectValues(program, view, size, inputSize);
-    values.SetFloat4("Effects.Options", options);
+    auto values = EffectValues(view, size, inputSize);
+    values.Options = options;
     const RgParameterBinding bindings[]{
         {"InputA", 0, RgTextureParameterBinding{a}}, {"InputB", 0, RgTextureParameterBinding{b}}, {"OutputScalar", 0, RgTextureParameterBinding{output, {}, RgParameterAccess::Write}}};
     Compute(graph, name, program, values, bindings, size);
@@ -94,7 +95,7 @@ RgTextureValue ColorEffect(RenderGraph& graph, const ForwardEffectPrograms& prog
                            RgTextureValue a, RgTextureValue b = {}) {
     auto& program = *programs.Programs[effect].Get();
     const auto output = Texture(graph, size, TextureFormat::RGBA16_FLOAT, kHdrUsage, name);
-    auto values = EffectValues(program, view, size, inputSize);
+    auto values = EffectValues(view, size, inputSize);
     const RgParameterBinding bindings[]{
         {"InputA", 0, RgTextureParameterBinding{a}}, {"InputB", 0, RgTextureParameterBinding{b}}, {"OutputColor", 0, RgTextureParameterBinding{output, {}, RgParameterAccess::Write}}};
     Compute(graph, name, program, values, bindings, size);
@@ -114,7 +115,7 @@ MaterialPipelineState EffectRasterState(bool depth = false, bool additive = fals
     return state;
 }
 
-RgPassHandle Composite(RenderGraph& graph, ShaderProgram& program, const ShaderParameterStorage& values,
+RgPassHandle Composite(RenderGraph& graph, ShaderProgram& program, const Forward_EffectsData& values,
                        std::span<const RgParameterBinding> inputs, RgTextureValue& output, Rect viewport, Rect scissor,
                        render::LoadAction load, render::RenderBackend backend, bool& success, std::string_view name) {
     struct Data {
@@ -136,7 +137,7 @@ RgPassHandle Composite(RenderGraph& graph, ShaderProgram& program, const ShaderP
 void DrawSky(RenderGraph& graph, const ForwardEffectPrograms& programs, const ResolvedRenderView& view, RenderExtent size,
              RgTextureValue& hdr, RgTextureValue depth, render::RenderBackend backend, bool& success) {
     auto& program = *programs.Programs[10].Get();
-    auto values = EffectValues(program, view, size, size);
+    auto values = EffectValues(view, size, size);
     struct Data {
         RgGraphicsProgramHandle Program;
         RgParameterSetHandle Set;
@@ -159,14 +160,14 @@ void Fireflies(RenderGraph& graph, const ForwardEffectPrograms& programs, const 
     const auto particles = graph.CreateBuffer({count * 16, render::MemoryType::Device, render::BufferUse::Resource | render::BufferUse::UnorderedAccess, {}}, "Forward.Fireflies.Instances");
     const auto arguments = graph.CreateBuffer({16, render::MemoryType::Device, render::BufferUse::Indirect | render::BufferUse::UnorderedAccess, {}}, "Forward.Fireflies.Arguments");
     auto& update = *programs.Programs[11].Get();
-    auto values = EffectValues(update, view, {count, 1}, size);
-    values.SetFloat4("Effects.Options", {float(serial % 360000) / 60, float(count), 0, 0});
+    auto values = EffectValues(view, {count, 1}, size);
+    values.Options = Eigen::Vector4f{float(serial % 360000) / 60, float(count), 0, 0};
     const RgParameterBinding writes[]{
         {"Particles", 0, RgBufferParameterBinding{particles, render::BufferRange::AllRange(), 16, TextureFormat::UNKNOWN, RgParameterAccess::Write}},
         {"Arguments", 0, RgBufferParameterBinding{arguments, render::BufferRange::AllRange(), 4, TextureFormat::UNKNOWN, RgParameterAccess::Write}}};
     Compute(graph, "Forward.Fireflies.Update", update, values, writes, {count, 1});
     auto& draw = *programs.Programs[12].Get();
-    auto constants = EffectValues(draw, view, size, size);
+    auto constants = EffectValues(view, size, size);
     const RgParameterBinding reads[]{{"Particles", 0, RgBufferParameterBinding{particles, render::BufferRange::AllRange(), 16}}};
     struct Data {
         RgGraphicsProgramHandle Program;
@@ -230,7 +231,7 @@ struct ShadowData {
     Eigen::Vector4f Params{Eigen::Vector4f::Zero()};
 };
 ShadowData BuildShadows(RenderGraph& graph, const ForwardPipelineSettings& settings, const ResolvedRenderView& main,
-                        const RenderSceneSnapshot& scene, FrameDrawResources& draws, ForwardBindingCache& bindings,
+                        const RenderSceneSnapshot& scene, const PackedCBufferTable& objects, FrameDrawResources& draws, ForwardBindingCache& bindings,
                         ForwardHdrView& work, RgTextureValue& texture, render::RenderBackend backend, bool& warned) {
     RADRAY_PROFILE_SCOPE_N("BuildShadows");
     ShadowData shadow;
@@ -257,7 +258,7 @@ ShadowData BuildShadows(RenderGraph& graph, const ForwardPipelineSettings& setti
     float previous = nearZ;
     // One processor for all cascades: material and view-independent object groups (ShadowCaster has no motion data)
     // are prepared once per primitive instead of once per cascade; only the view group is rebuilt per cascade.
-    ForwardLitMeshPassProcessor processor{draws, bindings, warned};
+    ForwardLitMeshPassProcessor processor{draws, bindings, warned, objects};
     for (uint32_t cascade = 0; cascade < 4; ++cascade) {
         auto& draw = work.Cascades[cascade];
         draw.View = main;
@@ -314,7 +315,9 @@ ShadowData BuildShadows(RenderGraph& graph, const ForwardPipelineSettings& setti
 }
 
 struct LitBindings {
-    vector<ShaderParameterStorage> Constants;
+    // Reserved to the program count before any binding is built: the graph holds spans into these
+    // rows, so the vector must not reallocate while MakeLitBindings runs.
+    vector<Forward_PassData> Constants;
     vector<vector<RgParameterBinding>> Resources;
     vector<RendererListProgramParameters> Programs;
 };
@@ -334,24 +337,23 @@ LitBindings MakeLitBindings(const RendererList& list, const ShadowData& shadow, 
             valid = false;
             continue;
         }
-        auto& values = result.Constants.emplace_back(&program->GetParameterLayout(), *binding->PassGroup);
-        bool good = true;
+        auto& values = result.Constants.emplace_back();
+        values.ShadowMatrix0 = shadow.Matrices[0];
+        values.ShadowMatrix1 = shadow.Matrices[1];
+        values.ShadowMatrix2 = shadow.Matrices[2];
+        values.ShadowMatrix3 = shadow.Matrices[3];
         for (uint32_t i = 0; i < 4; ++i) {
-            good &= values.SetMatrix4x4(fmt::format("ForwardPass.ShadowMatrix{}", i), shadow.Matrices[i]);
-            good &= values.SetRaw("ForwardPass.ShadowSphere", std::as_bytes(std::span{shadow.Spheres[i].data(), size_t{4}}), i);
-            good &= values.SetRaw("ForwardPass.ShadowBias", std::as_bytes(std::span{shadow.Bias[i].data(), size_t{4}}), i);
+            values.ShadowSphere[i] = shadow.Spheres[i];
+            values.ShadowBias[i] = shadow.Bias[i];
         }
-        good &= values.SetFloat4("ForwardPass.ShadowParams", shadow.Params);
-        good &= values.SetFloat4("ForwardPass.Extent", {float(extent.Width), float(extent.Height), float((extent.Width + 15) / 16), float(settings.MaxLightsPerTile)});
-        good &= values.SetUInt("ForwardPass.LocalLightCount", count);
-        good &= values.SetUInt("ForwardPass.UseTiles", settings.ForwardPlus ? 1u : 0u);
-        good &= values.SetUInt("ForwardPass.UseAo", settings.AmbientOcclusion ? 1u : 0u);
-        good &= values.SetUInt("ForwardPass.Transparent", transparent ? 1u : 0u);
-        if (!good) RADRAY_ERR_LOG("Forward pass constants do not match the material shader schema");
-        valid &= good;
+        values.ShadowParams = shadow.Params;
+        values.Extent = Eigen::Vector4f{float(extent.Width), float(extent.Height), float((extent.Width + 15) / 16), float(settings.MaxLightsPerTile)};
+        values.LocalLightCount = count;
+        values.UseTiles = settings.ForwardPlus ? 1u : 0u;
+        values.UseAo = settings.AmbientOcclusion ? 1u : 0u;
+        values.Transparent = transparent ? 1u : 0u;
         auto& resources = result.Resources.emplace_back();
-        for (uint32_t i = 0; i < program->GetParameterLayout().Buffers().size(); ++i)
-            if (program->GetParameterLayout().Buffers()[i].Name == "ForwardPass") resources.push_back({"ForwardPass", 0, RgCBufferParameterBinding{values.GetBufferData(i)}});
+        resources.push_back({"ForwardPass", 0, RgCBufferParameterBinding{AsCBufferBytes(values)}});
         auto compare = ClampSampler();
         compare.Compare = render::CompareFunction::LessEqual;
         resources.push_back({"ShadowMap", 0, RgTextureParameterBinding{shadows}});
@@ -398,7 +400,7 @@ void ForwardHdrView::Reset() {
 }
 
 bool DeclareForwardSharedShadows(RenderGraph& graph, const ForwardPipelineSettings& settings, const ResolvedRenderView& primary,
-                                  const RenderSceneSnapshot& scene, FrameDrawResources& draws, ForwardBindingCache& bindings,
+                                  const RenderSceneSnapshot& scene, const PackedCBufferTable& objects, FrameDrawResources& draws, ForwardBindingCache& bindings,
                                   ForwardHdrView& work, render::RenderBackend backend, bool& warned, ForwardShadowAtlas& out) {
     RADRAY_PROFILE_SCOPE_N("DeclareSharedShadows");
     const auto previousScope = graph.SetResourceView(primary.StateId.Value);
@@ -411,7 +413,7 @@ bool DeclareForwardSharedShadows(RenderGraph& graph, const ForwardPipelineSettin
     work.ContentValid = true;
     out.Texture = Texture(graph, {settings.ShadowResolution, settings.ShadowResolution}, TextureFormat::D32_FLOAT,
                            TextureUse::DepthStencilWrite | TextureUse::Resource, "Forward.Shadows", 1, 4);
-    auto shadow = BuildShadows(graph, settings, primary, scene, draws, bindings, work, out.Texture, backend, warned);
+    auto shadow = BuildShadows(graph, settings, primary, scene, objects, draws, bindings, work, out.Texture, backend, warned);
     out.Matrices = shadow.Matrices;
     out.Spheres = shadow.Spheres;
     out.Bias = shadow.Bias;
@@ -440,11 +442,11 @@ bool BuildOutputSurfaces(RenderGraph& graph, ShaderProgram& program,
             graph.AddDiagnostic("ForwardOutputSurface", "Screen source must contain an SDR scene output");
             return false;
         }
-        ShaderParameterStorage values{&program.GetParameterLayout(), 0};
-        if (!values.SetMatrix4x4("OutputSurface.LocalToClip", (view.ViewProjection * surface.LocalToWorld).eval()) ||
-            !values.SetFloat4("OutputSurface.Options", {surface.Brightness, srgb || format == TextureFormat::RGBA16_FLOAT ? 0.f : 1.f, 0, 0})) return false;
+        Forward_OutputSurfaceData values{};
+        values.LocalToClip = (view.ViewProjection * surface.LocalToWorld).eval();
+        values.Options = Eigen::Vector4f{surface.Brightness, srgb || format == TextureFormat::RGBA16_FLOAT ? 0.f : 1.f, 0, 0};
         const RgParameterBinding bindings[]{
-            {"OutputSurface", 0, RgCBufferParameterBinding{values.GetBufferData(0)}},
+            {"OutputSurface", 0, RgCBufferParameterBinding{AsCBufferBytes(values)}},
             {"SceneOutput", 0, RgTextureParameterBinding{texture}},
             {"OutputSampler", 0, RgSamplerParameterBinding{ClampSampler()}}};
         struct Data {
@@ -473,7 +475,7 @@ bool BuildOutputSurfaces(RenderGraph& graph, ShaderProgram& program,
 bool BuildForwardHdrView(RenderGraph& graph, RenderPipelineContext& context, render::Device& device,
                          const ForwardEffectPrograms& programs, const ForwardPipelineSettings& settings,
                          const ResolvedRenderViewFamily& family, const ResolvedRenderView& sourceView,
-                         const RenderSceneSnapshot& scene, FrameDrawResources& draws, ForwardBindingCache& bindings,
+                         const RenderSceneSnapshot& scene, const PackedCBufferTable& objects, FrameDrawResources& draws, ForwardBindingCache& bindings,
                          ForwardHdrView& work, bool firstOutputView, bool& lightOverflowWarned,
                          std::span<const ForwardOutputSurface> surfaces, std::span<RenderGraphOutputBinding> outputs,
                          const ForwardShadowAtlas& shadows, bool auxiliary, ForwardLitMeshPassProcessor* sharedLit) {
@@ -537,7 +539,7 @@ bool BuildForwardHdrView(RenderGraph& graph, RenderPipelineContext& context, ren
     std::optional<ForwardLitMeshPassProcessor> localProcessor;
     ForwardLitMeshPassProcessor* processor = sharedLit;
     if (processor == nullptr) {
-        localProcessor.emplace(draws, bindings, lightOverflowWarned, temporal ? &context : nullptr);
+        localProcessor.emplace(draws, bindings, lightOverflowWarned, objects, temporal ? &context : nullptr);
         processor = &*localProcessor;
     } else {
         processor->ResetView();
@@ -605,7 +607,7 @@ bool BuildForwardHdrView(RenderGraph& graph, RenderPipelineContext& context, ren
             for (uint32_t mip = 0; mip < pyramidLevels; ++mip) {
                 const RenderExtent mipSize{std::max(1u, halfSize.Width >> mip), std::max(1u, halfSize.Height >> mip)};
                 auto& program = *programs.Programs[1].Get();
-                const auto values = EffectValues(program, view, mipSize, previousSize);
+                const auto values = EffectValues(view, mipSize, previousSize);
                 const RgParameterBinding resources[]{
                     {"InputA", 0, RgTextureParameterBinding{mip == 0 ? linearDepth : pyramid, {.Range = {0, 1, mip == 0 ? 0 : mip - 1, 1}}}},
                     {"OutputScalar", 0, RgTextureParameterBinding{pyramid, {.Range = {0, 1, mip, 1}}, RgParameterAccess::Write}}};
@@ -614,8 +616,8 @@ bool BuildForwardHdrView(RenderGraph& graph, RenderPipelineContext& context, ren
             }
             if (viewSettings.AmbientOcclusion) {
                 auto& program = *programs.Programs[2].Get();
-                auto values = EffectValues(program, view, halfSize, halfSize);
-                values.SetFloat4("Effects.Options", {settings.AoRadius, 0, 0, 0});
+                auto values = EffectValues(view, halfSize, halfSize);
+                values.Options = Eigen::Vector4f{settings.AoRadius, 0, 0, 0};
                 ao = Texture(graph, halfSize, TextureFormat::R32_FLOAT, kScalarUsage, "Forward.AO");
                 const RgParameterBinding resources[]{
                     {"InputA", 0, RgTextureParameterBinding{pyramid, {.Range = {0, 1, 0, 1}}}},
@@ -639,9 +641,9 @@ bool BuildForwardHdrView(RenderGraph& graph, RenderPipelineContext& context, ren
             headers = graph.CreateBuffer({tileCount * 8, render::MemoryType::Device, render::BufferUse::UnorderedAccess | render::BufferUse::Resource, {}}, "Forward.TileHeaders");
             indices = graph.CreateBuffer({tileCount * settings.MaxLightsPerTile * 4, render::MemoryType::Device, render::BufferUse::UnorderedAccess | render::BufferUse::Resource, {}}, "Forward.TileIndices");
             auto& tileProgram = *programs.Programs[9].Get();
-            auto tileValues = EffectValues(tileProgram, view, tiles, size);
-            tileValues.SetUInt("Effects.LocalLightCount", count);
-            tileValues.SetUInt("Effects.TileCapacity", settings.MaxLightsPerTile);
+            auto tileValues = EffectValues(view, tiles, size);
+            tileValues.LocalLightCount = count;
+            tileValues.TileCapacity = settings.MaxLightsPerTile;
             const RgParameterBinding tileBindings[]{
                 {"Lights", 0, RgBufferParameterBinding{lights, render::BufferRange::AllRange(), sizeof(LocalLightGpu)}},
                 {"Headers", 0, RgBufferParameterBinding{headers, render::BufferRange::AllRange(), 8, TextureFormat::UNKNOWN, RgParameterAccess::Write}},
@@ -668,9 +670,9 @@ bool BuildForwardHdrView(RenderGraph& graph, RenderPipelineContext& context, ren
         if (temporal) {
             RADRAY_PROFILE_SCOPE_N("HdrTaa");
             auto& program = *programs.Programs[4].Get();
-            auto values = EffectValues(program, view, size, size);
+            auto values = EffectValues(view, size, size);
             const bool valid = colorHistory.PreviousValid && depthHistory.PreviousValid && view.PreviousViewValid;
-            values.SetUInt("Effects.HistoryValid", valid ? 1u : 0u);
+            values.HistoryValid = valid ? 1u : 0u;
             const auto previous = valid ? graph.ImportTexture(*colorHistory.Previous.Get(), "Forward.PreviousColor", RenderGraphExternalAccess::ReadOnly) : hdr;
             const auto previousDepth = valid ? graph.ImportTexture(*depthHistory.Previous.Get(), "Forward.PreviousDepth", RenderGraphExternalAccess::ReadOnly) : depth;
             const auto colorOut = graph.NextVersion(graph.ImportTexture(*colorHistory.Current.Get(), "Forward.CurrentColor", RenderGraphExternalAccess::ReadWrite));
@@ -734,9 +736,9 @@ bool BuildForwardHdrView(RenderGraph& graph, RenderPipelineContext& context, ren
             RgTextureViewDesc debugInputView;
             if (settings.DebugView == ForwardDebugView::TileOccupancy || settings.DebugView == ForwardDebugView::Shadows) {
                 auto& program = *programs.Programs[13].Get();
-                auto values = EffectValues(program, view, size, size);
-                values.SetUInt("Effects.DebugMode", uint32_t(settings.DebugView));
-                values.SetUInt("Effects.TileCapacity", settings.MaxLightsPerTile);
+                auto values = EffectValues(view, size, size);
+                values.DebugMode = uint32_t(settings.DebugView);
+                values.TileCapacity = settings.MaxLightsPerTile;
                 current = Texture(graph, size, TextureFormat::RGBA16_FLOAT, kHdrUsage, "Forward.Debug");
                 const RgParameterBinding resources[]{
                     {"DebugHeaders", 0, RgBufferParameterBinding{headers, render::BufferRange::AllRange(), 8}}, {"DebugShadows", 0, RgTextureParameterBinding{shadowTexture}}, {"OutputColor", 0, RgTextureParameterBinding{current, {}, RgParameterAccess::Write}}};
@@ -776,14 +778,14 @@ bool BuildForwardHdrView(RenderGraph& graph, RenderPipelineContext& context, ren
                 default: break;
             }
             auto& outputProgram = *programs.Programs[8].Get();
-            auto outputValues = EffectValues(outputProgram, view, size, size);
+            auto outputValues = EffectValues(view, size, size);
             auto outputBinding = FindGraphOutput(outputs, family.OutputId);
             if (!outputBinding) return false;
             auto& output = outputBinding->Texture;
             const auto outputFormat = graph.GetTextureDescriptor(output)->Format;
             const bool srgbAttachment = outputFormat == TextureFormat::RGBA8_UNORM_SRGB || outputFormat == TextureFormat::BGRA8_UNORM_SRGB || outputFormat == TextureFormat::RGBA16_FLOAT;
-            outputValues.SetFloat4("Effects.Options", {settings.Exposure, viewSettings.Bloom && settings.DebugView == ForwardDebugView::Final ? settings.BloomStrength : 0.f, srgbAttachment ? 0.f : 1.f, 0});
-            outputValues.SetUInt("Effects.DebugMode", debug);
+            outputValues.Options = Eigen::Vector4f{settings.Exposure, viewSettings.Bloom && settings.DebugView == ForwardDebugView::Final ? settings.BloomStrength : 0.f, srgbAttachment ? 0.f : 1.f, 0};
+            outputValues.DebugMode = debug;
             const RgParameterBinding outputInputs[]{{"InputA", 0, RgTextureParameterBinding{current, debugInputView}}, {"InputB", 0, RgTextureParameterBinding{bloom}}};
             const auto scaleX = [&](uint32_t x) { return uint32_t(uint64_t{x} * family.OutputSize.Width / family.RenderSize.Width); };
             const auto scaleY = [&](uint32_t y) { return uint32_t(uint64_t{y} * family.OutputSize.Height / family.RenderSize.Height); };
@@ -810,12 +812,12 @@ bool BuildForwardOutputOverlay(RenderGraph& graph, RenderPipelineContext& contex
     if (!source->OutputAvailable || !destination->OutputAvailable) return true;
     if (source->Views.empty()) return false;
     auto& program = *programs.Programs[8].Get();
-    auto values = EffectValues(program, source->Views.front(), destination->OutputSize, source->OutputSize);
+    auto values = EffectValues(source->Views.front(), destination->OutputSize, source->OutputSize);
     const auto isSrgb = [](TextureFormat f) { return f == TextureFormat::RGBA8_UNORM_SRGB || f == TextureFormat::BGRA8_UNORM_SRGB || f == TextureFormat::RGBA16_FLOAT; };
-    values.SetUInt("Effects.DebugMode", 5);
+    values.DebugMode = 5;
     auto sourceOutput = FindGraphOutput(outputs, overlay.Source), destinationOutput = FindGraphOutput(outputs, overlay.Destination);
     if (!sourceOutput || !destinationOutput) return false;
-    values.SetFloat4("Effects.Options", {1, 0, isSrgb(graph.GetTextureDescriptor(destinationOutput->Texture)->Format) ? 0.f : 1.f, isSrgb(graph.GetTextureDescriptor(sourceOutput->Texture)->Format) ? 0.f : 1.f});
+    values.Options = Eigen::Vector4f{1, 0, isSrgb(graph.GetTextureDescriptor(destinationOutput->Texture)->Format) ? 0.f : 1.f, isSrgb(graph.GetTextureDescriptor(sourceOutput->Texture)->Format) ? 0.f : 1.f};
     const auto input = sourceOutput->Texture;
     auto& output = destinationOutput->Texture;
     const RgParameterBinding resources[]{{"InputA", 0, RgTextureParameterBinding{input}}, {"InputB", 0, RgTextureParameterBinding{input}}};

@@ -18,10 +18,13 @@ inline constexpr uint32_t kShaderDiscoveryWireMagic = 0x44524452u;  // "RDRD" in
 inline constexpr uint16_t kShaderDiscoveryWireSchemaVersion = 3;
 inline constexpr uint32_t kShaderContractWireMagic = 0x54434452u;  // "RDCT" in little-endian bytes.
 inline constexpr uint16_t kShaderContractWireSchemaVersion = 1;
-inline constexpr uint16_t kShaderCompilerAbiVersion = 4;
-inline constexpr uint16_t kShaderMetadataSchemaVersion = 7;
+inline constexpr uint16_t kShaderCompilerAbiVersion = 5;
+inline constexpr uint16_t kShaderMetadataSchemaVersion = 8;
+inline constexpr uint64_t kShaderToolchainIdentity = 0x0000000001090213ull;
 inline constexpr uint32_t kShaderNoType = 0xffffffffu;
 inline constexpr uint32_t kShaderNoSampler = 0xffffffffu;
+inline constexpr uint32_t kShaderTypeFlagRowMajor = 0x1u;
+inline constexpr uint32_t kShaderTypeFlagMask = kShaderTypeFlagRowMajor;
 
 enum class ShaderTarget : uint8_t {
     DXIL = 0,
@@ -86,6 +89,16 @@ enum class ShaderTypeKind : uint32_t {
     Struct = 4,
     Array = 5,
     Member = 6,
+};
+
+// Persisted values used by WireTypeRecord::ScalarKind. None is for struct roots
+// and struct-typed arrays whose element identity is TypeIndex.
+enum class ShaderScalarKind : uint32_t {
+    None = 0,
+    Float = 1,
+    SignedInteger = 2,
+    UnsignedInteger = 3,
+    Bool = 4,
 };
 
 enum class WarningPolicy : uint8_t {
@@ -269,8 +282,12 @@ struct WireTypeRecord {
     uint32_t Offset{0};
     uint32_t Size{0};
     uint32_t Stride{0};
+    // bit 0: HLSL row_major matrix. Other bits are reserved and must be zero.
     uint32_t Flags{0};
     uint32_t TypeIndex{kShaderNoType};
+    uint32_t ScalarKind{0};
+    uint32_t RowCount{0};
+    uint32_t ColumnCount{0};
 };
 
 struct WireRootConstantRecord {
@@ -331,7 +348,8 @@ static_assert(sizeof(WireMetadataEnvelope) == 152);
 static_assert(sizeof(WireEntryRecord) == 24);
 static_assert(sizeof(WireBindingRecord) == 44);
 static_assert(offsetof(WireBindingRecord, TypeIndex) == 40);
-static_assert(sizeof(WireTypeRecord) == 40);
+static_assert(sizeof(WireTypeRecord) == 52);
+static_assert(offsetof(WireTypeRecord, ScalarKind) == 40);
 static_assert(sizeof(WireRootConstantRecord) == 36);
 static_assert(offsetof(WireRootConstantRecord, TypeIndex) == 32);
 static_assert(sizeof(WireSamplerRecord) == 64);

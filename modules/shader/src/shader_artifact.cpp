@@ -72,6 +72,10 @@ bool ValidateTypeRecords(const ShaderArtifactView& artifact) noexcept {
             type.Stride == 0 || type.Kind < kScalar || type.Kind > kMember || type.ElementCount == 0) {
             return false;
         }
+        if ((type.Flags & ~kShaderTypeFlagMask) != 0 ||
+            type.ScalarKind > static_cast<uint32_t>(ShaderScalarKind::Bool)) {
+            return false;
+        }
         if (type.Kind == kArray) {
             const uint64_t expectedSize = static_cast<uint64_t>(type.Stride) * type.ElementCount;
             if (expectedSize != type.Size) {

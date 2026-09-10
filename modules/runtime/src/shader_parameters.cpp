@@ -126,14 +126,17 @@ bool BuildBufferParameters(
                     return false;
                 }
                 if (child.TypeIndex == shader::kShaderNoType) {
-                    // Array of a non-struct element. The wire contract carries the
-                    // stride and the count but never the element kind, so the slot is
-                    // exposed as ShaderParameterKind::Raw instead of guessing a type.
+                    const ShaderParameterKind elementKind =
+                        child.RowCount > 1u      ? ShaderParameterKind::Matrix
+                        : child.ColumnCount > 1u ? ShaderParameterKind::Vector
+                        : child.ScalarKind != static_cast<uint32_t>(shader::ShaderScalarKind::None)
+                            ? ShaderParameterKind::Scalar
+                            : ShaderParameterKind::Raw;
                     if (!result.AddParameter(
                             path,
                             name.value(),
                             ShaderParameterInfo{
-                                .Kind = ShaderParameterKind::Raw,
+                                .Kind = elementKind,
                                 .Binding = bindingHandle,
                                 .Group = group,
                                 .BindingNumber = bindingNumber,
@@ -341,26 +344,40 @@ bool ShaderParameterLayout::AddParameter(
 
 ShaderParameterStorage::ShaderParameterStorage(
     const ShaderParameterLayout* layout,
-    std::optional<uint32_t> parameterGroup)
+    std::optional<uint32_t> parameterGroup,
+    std::span<byte> aliasedGroupBuffer)
     : _layout(layout) {
     if (_layout == nullptr) {
         return;
     }
     _bufferData.reserve(_layout->Buffers().size());
     for (const ShaderParameterBufferLayout& buffer : _layout->Buffers()) {
-        _bufferData.emplace_back(!parameterGroup.has_value() || buffer.Group == *parameterGroup ? buffer.Size : 0, byte{0});
+        BufferSlot slot;
+        if (!parameterGroup.has_value() || buffer.Group == *parameterGroup) {
+            if (aliasedGroupBuffer.size() == buffer.Size && !aliasedGroupBuffer.empty()) {
+                slot.External = aliasedGroupBuffer.data();
+                slot.Size = aliasedGroupBuffer.size();
+            } else {
+                slot.Owned.assign(buffer.Size, byte{0});
+                slot.Size = buffer.Size;
+            }
+        }
+        _bufferData.push_back(std::move(slot));
     }
 }
 
 void ShaderParameterStorage::Reset() noexcept {
-    for (vector<byte>& buffer : _bufferData) {
-        std::fill(buffer.begin(), buffer.end(), byte{0});
+    for (BufferSlot& buffer : _bufferData) {
+        if (buffer.Size == 0) {
+            continue;
+        }
+        std::fill(buffer.Data(), buffer.Data() + buffer.Size, byte{0});
     }
 }
 
 bool ShaderParameterStorage::CopyCompatibleBufferBytes(uint32_t bufferIndex, std::span<const byte> data) noexcept {
-    if (bufferIndex >= _bufferData.size() || data.empty() || data.size() != _bufferData[bufferIndex].size()) return false;
-    std::memcpy(_bufferData[bufferIndex].data(), data.data(), data.size());
+    if (bufferIndex >= _bufferData.size() || data.empty() || data.size() != _bufferData[bufferIndex].Size) return false;
+    std::memcpy(_bufferData[bufferIndex].Data(), data.data(), data.size());
     return true;
 }
 
@@ -369,7 +386,16 @@ std::span<const byte> ShaderParameterStorage::GetBufferData(
     if (bufferIndex >= _bufferData.size()) {
         return {};
     }
-    return _bufferData[bufferIndex];
+    const BufferSlot& slot = _bufferData[bufferIndex];
+    return {slot.Data(), slot.Size};
+}
+
+std::span<byte> ShaderParameterStorage::GetBufferData(uint32_t bufferIndex) noexcept {
+    if (bufferIndex >= _bufferData.size()) {
+        return {};
+    }
+    BufferSlot& slot = _bufferData[bufferIndex];
+    return {slot.Data(), slot.Size};
 }
 
 bool ShaderParameterStorage::SetFloat(
@@ -421,13 +447,13 @@ bool ShaderParameterStorage::SetRaw(
         parameter->BufferIndex >= _bufferData.size()) {
         return false;
     }
-    vector<byte>& target = _bufferData[parameter->BufferIndex];
+    BufferSlot& target = _bufferData[parameter->BufferIndex];
     const uint64_t offset = static_cast<uint64_t>(parameter->ByteOffset) +
                             static_cast<uint64_t>(element) * parameter->Stride;
-    if (offset > target.size() || value.size() > target.size() - offset) {
+    if (offset > target.Size || value.size() > target.Size - offset) {
         return false;
     }
-    std::memcpy(target.data() + offset, value.data(), value.size());
+    std::memcpy(target.Data() + offset, value.data(), value.size());
     return true;
 }
 
@@ -467,13 +493,13 @@ bool ShaderParameterStorage::SetBytes(
         parameter->BufferIndex >= _bufferData.size()) {
         return false;
     }
-    vector<byte>& target = _bufferData[parameter->BufferIndex];
+    BufferSlot& target = _bufferData[parameter->BufferIndex];
     const uint64_t offset = static_cast<uint64_t>(parameter->ByteOffset) +
                             static_cast<uint64_t>(element) * parameter->Stride;
-    if (offset > target.size() || value.size() > target.size() - offset) {
+    if (offset > target.Size || value.size() > target.Size - offset) {
         return false;
     }
-    std::memcpy(target.data() + offset, value.data(), value.size());
+    std::memcpy(target.Data() + offset, value.data(), value.size());
     return true;
 }
 

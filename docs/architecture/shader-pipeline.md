@@ -1,6 +1,6 @@
 > - 适用: 维护 shader compiler client、metadata wire、artifact decoder 或 runtime JIT
-> - 权威: 本文描述 schema 7 当前 shader pipeline 契约、编译边界与设计理由；HLSL 写法见 authoring 指南
-> - 锚点: `modules/shader/include/radray/shader/shader_compiler_contract.h`, `modules/shader/include/radray/shader/shader_artifact.h`, `modules/render/include/radray/render/backend_shader_artifact.h`, `modules/render/src/backend_shader_artifact.cpp`, `modules/shader_compiler/include/radray/shader_compiler/client.h`, `modules/runtime/include/radray/runtime/shader_jit.h`, `modules/runtime/include/radray/runtime/shader_program.h`, `modules/runtime/include/radray/runtime/shader_parameters.h`, `CMakePresets.json`
+> - 权威: 本文描述 schema 8 当前 shader pipeline 契约、编译边界与设计理由；HLSL 写法见 authoring 指南
+> - 锚点: `modules/shader/include/radray/shader/shader_compiler_contract.h`, `modules/shader/include/radray/shader/shader_artifact.h`, `modules/render/include/radray/render/backend_shader_artifact.h`, `modules/render/src/backend_shader_artifact.cpp`, `modules/shader_compiler/include/radray/shader_compiler/client.h`, `modules/runtime/include/radray/runtime/shader_jit.h`, `modules/runtime/include/radray/runtime/shader_program.h`, `modules/runtime/include/radray/runtime/shader_parameters.h`, `tools/generate_forward_cbuffers.py`, `tools/CMakeLists.txt`, `CMakePresets.json`
 
 # Shader pipeline
 
@@ -12,9 +12,9 @@ compiler policy frontend 同时下降到两个 target；sampler state 以完整 
 buffer 分开；placement 与 logical kind 是两个独立维度；push declaration 与 D3D12 root-descriptor
 dynamic offset 都走同一条 handle 链。
 
-以下章节既是接受的 schema 7 契约，也是当前实现。cutover 是原子的：schema 7 decoder 拒绝 4/5/6，
-RadRay DXC package 升级到 `1.9.2607.radray.6`，extension ABI 为 4，toolchain identity 为
-`0x0000000001090212`。`project_manifest.json` 按 `EnforceHash` 固定正式发布归档的 hash。
+以下章节既是接受的 schema 8 契约，也是当前实现。cutover 是原子的：schema 8 decoder 拒绝 4/5/6/7，
+RadRay DXC package 升级到 `1.9.2607.radray.7`，extension ABI 为 5，toolchain identity 为
+`0x0000000001090213`。`project_manifest.json` 按 `EnforceHash` 固定正式发布归档的 hash。
 
 正式 SDK 是独立构建并安装的 RadRay DXC fork package。`radrayshadercompiler` 只通过
 `RadRayDXC::Headers` 编译、以 canonical library name 加载 `RadRayDXC::Compiler` 的 runtime，
@@ -95,7 +95,7 @@ descriptor 或 D3 implicit root descriptor modifier。
 
 ## Artifact wire
 
-每个 lane 返回独立 bytecode 与 compiler-owned metadata blob。schema 7 envelope 固定 magic、schema、
+每个 lane 返回独立 bytecode 与 compiler-owned metadata blob。schema 8 envelope 固定 magic、schema、
 target、toolchain identity、contract、bytecode/base-layout/gpu artifact hashes 和各 payload range。
 payload 记录 entry、active logical declarations、type tree、root/push facts、target base placement、
 bytecode range，以及仅 DXIL 可有的 serialized Root Signature carrier。Explicit range 原样保存
@@ -152,6 +152,20 @@ range、已知 record kind、element count、offset/size/stride、type reference
 `Struct`，且 payload size 不得超过可写 root range。type tree 没有独立 schema hash，也不参与
 GPU artifact identity。
 
+schema 8 起每条 record 还携带 `ShaderScalarKind`（float/sint/uint/bool）与 `RowCount`/`ColumnCount`，
+`Flags` bit 0 表示 HLSL `row_major`，其余位保留为零。非 struct 元素的数组同样带上元素的标量种类
+与分量数，所以 `float4 Foo[4]` 在 wire 上是完整类型而不是不透明字节区间。这些事实存在的唯一原因
+是让 AOT 生成器能离线复现 GPU 布局；运行时不用它们做类型门闩。
+
+同一 shared struct 在 DXIL 与 SPIR-V lane 上发布的 offset/size/stride/标量种类/矩阵形状必须逐项
+相等，否则整个 batch 以 `CompileStatus::TargetFailure` 失败并在诊断里点名该 struct，而不是发布
+其中一个 lane 的答案——由有争议布局生成的 POD 会静默与 GPU 不符。当前已知的分歧构造有三类，
+Forward cbuffer 因此必须避开：非方阵（`float3x4` 两 lane 的 rows/cols 与 matrix stride 相反）、
+cbuffer 里的 `bool`（DXIL 报 Bool 且 size 补到寄存器边界，SPIR-V 报 uint 且 size 4）、以及元素
+大小不是 16 字节整数倍的 struct 数组（DXIL 报紧排 stride，SPIR-V 报 cbuffer 规则的 stride）。
+`RadRayDxcMetadata.CBufferTypePayloadPinsScalarKindShapeAndOffsets` 钉住两 lane 一致的部分，
+`RadRayDxcMetadata.CrossLaneTypePayloadDisagreementFailsClosed` 钉住分歧必须 fail closed。
+
 runtime 的 `ShaderParameterLayout` 是第一个生产消费者。它逐个读取 CBuffer binding 自带的 owner，
 不再扫描“未被引用的 root”、按数量或发射位置配对。每个 leaf 的 canonical identity 是
 `Binding.Member.Path`；struct array 的 element 仍由 setter 的 `element` 参数选择，不写进 path。
@@ -160,10 +174,14 @@ runtime 的 `ShaderParameterLayout` 是第一个生产消费者。它逐个读�
 CPU buffer/parameter 表，pure-push artifact 因而得到合法空 layout。
 
 `ShaderParameterStorage` 的 typed setter 在 kind/size/element 不匹配或 ambiguous lookup 时不修改
-目标 bytes。非 struct 元素的数组（`float4 Foo[4]`）仍受 type tree 表达上限约束：record 只带
-stride 与 count，layout 把它记为 `ShaderParameterKind::Raw`，只接受 `SetRaw`。
-Material 的 canonical storage 只为 technique primary declaration anchor 选中的 group 分配 bytes，其他 buffer 的
-`GetBufferData` 返回空；参数查找仍遵守上述完整路径与唯一叶名规则。
+目标 bytes。非 struct 元素的数组（`float4 Foo[4]`）现在按元素类型暴露：layout 记为
+`ShaderParameterKind::Vector`、`ElementCount` 为 4，`SetFloat4(name, value, element)` 直接写第
+`element` 项，`SetRaw` 反而被拒绝。
+
+`ShaderParameterStorage` 是按名写 blob 的路径，服务 JIT 与测试。Forward 产品热路径不再经过它：
+Material 的 canonical storage 是一段 GPU 布局 `byte[]`，长度取自 technique primary declaration anchor
+选中的 cbuffer size，由调用方用 AOT 生成的 POD 覆盖（见 [render-framework](render-framework.md)）。
+两条路径写的是同一块 bytes，参数查找仍遵守上述完整路径与唯一叶名规则。
 
 ## Target layout resolution
 
@@ -268,6 +286,18 @@ client handshake 进一步校验 RadRay extension 的 ABI、schema、toolchain i
 bytecode 与 metadata envelope；它不生成正式 manifest、
 artifact index 或 publisher 输出，也不代表 stock DXC 已提供 RadRay extension ABI。工具目标
 只链接 `radrayshadercompiler`，可用 map/import 检查确认没有反向引入 render/runtime/backend。
+
+`tools/generate_forward_cbuffers.py` 是 AOT POD 生成器：读若干 schema 8 metadata blob，按 CBuffer
+根 struct 生成 C++ POD 头。它不调用 DXC、不链 compiler，只解析已经编好的产物，因此 compiler-off
+构建也能编译生成结果。输入必须至少包含一对 DXIL + SPIR-V blob；同一 struct 跨 blob 的布局事实
+不一致就生成失败。`--prefix`（默认 `Forward_`）拼出 C++ 标识符，已带该前缀的名字不叠加；对齐空洞
+补 `_padN`；`--check` 只比较不写文件。
+
+生成头检入仓库，CMake 默认不在每次构建时跑生成器。`radray_forward_cbuffers_check` 与
+`radray_forward_cbuffers_regenerate` 两个 custom target 先编译 layout owner
+（`shaderlib/pipelines/forward/layout_owner.hlsl`，见 [shaderlib](shaderlib.md)）再喂给脚本，
+与 `radray_builtin_shaders_check`/`_regenerate` 同一习惯。改 Forward cbuffer ABI 或 wire schema 后
+手动跑 regenerate 并检入。
 
 第一阶段仍没有正式 shader artifact publisher、索引或安装导出层；fork SDK autobuild 只发布
 compiler package。runtime-only 的 compiler-free 验证消费版本控制的 raw golden bytecode/metadata

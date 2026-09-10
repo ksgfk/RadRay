@@ -1286,6 +1286,230 @@ float4 VSMain(VertexInput input) : SV_Position {
     }
 }
 
+// Fixture shared by the two cbuffer payload tests. Both stages read every field, because whatever a
+// stage leaves unread is dead-stripped out of that lane's type tree.
+constexpr std::string_view kCBufferPayloadSource = R"hlsl(
+#include <core/platform.hlsli>
+
+struct Leaf {
+    float4 Color;
+    uint4 Codes;
+};
+
+struct Shared {
+    float4x4 Transform;
+    float2 Uv;
+    float Scale;
+    int Signed;
+    uint Unsigned;
+    float3 Bias;
+    float4 Corners[4];
+    Leaf Leaves[2];
+};
+
+VK_BINDING(0, 0) ConstantBuffer<Shared> SharedData : register(b0, space0);
+
+float4 ReadEverything() {
+    float4 sum = mul(SharedData.Transform, SharedData.Corners[1]);
+    sum += SharedData.Uv.x * SharedData.Scale + SharedData.Uv.y;
+    sum += float(SharedData.Signed + int(SharedData.Unsigned) + int(SharedData.Leaves[0].Codes.w));
+    sum += float4(SharedData.Bias, 0) + SharedData.Leaves[1].Color + SharedData.Corners[3];
+    return sum;
+}
+
+[shader("vertex")]
+float4 VSMain() : SV_Position { return ReadEverything(); }
+
+[shader("pixel")]
+float4 PSMain() : SV_Target0 { return ReadEverything(); }
+)hlsl";
+
+// The AOT POD generator has nothing but the type payload to work from, so scalar kind, matrix
+// shape, offsets and array element identity must arrive fully resolved. The same struct is read by
+// both stages and published on both lanes, and every published fact has to agree.
+TEST(RadRayDxcMetadata, CBufferTypePayloadPinsScalarKindShapeAndOffsets) {
+    Client client;
+    ASSERT_TRUE(client.IsAvailable());
+    const auto includePaths = ShaderIncludePaths();
+    const auto discovery = client.DiscoverSourceContract(
+        "fixtures/cbuffer_type_payload.hlsl",
+        CopyBytes(kCBufferPayloadSource),
+        shader::ShaderTarget::DXIL,
+        includePaths);
+    ASSERT_TRUE(discovery.Succeeded())
+        << (discovery.Diagnostics.empty() ? "" : discovery.Diagnostics.back().Message);
+    const auto result = client.CompileVariant(
+        shader::CompileVariantRequest{
+            .SourceName = "fixtures/cbuffer_type_payload.hlsl",
+            .RootSource = CopyBytes(kCBufferPayloadSource),
+            .Defines = {},
+            .Assignments = {},
+            .Targets = shader::ShaderTargetMask::All,
+            .ExpectedContract = discovery.Contract.Hash},
+        includePaths);
+    ASSERT_EQ(result.Status, shader::CompileStatus::Success)
+        << (result.Diagnostics.empty() ? "" : result.Diagnostics.back().Message);
+    ASSERT_EQ(result.Lanes.size(), 2u);
+
+    using Kind = shader::ShaderTypeKind;
+    using Scalar = shader::ShaderScalarKind;
+    struct ExpectedField {
+        std::string_view Name;
+        Kind Kind;
+        Scalar Scalar;
+        uint32_t Rows, Columns, ElementCount, Offset, Size, Stride;
+        std::string_view Element;
+    };
+    // HLSL cbuffer packing, byte for byte: this is the layout the generated POD mirrors.
+    constexpr ExpectedField expected[] = {
+        {"Transform", Kind::Matrix, Scalar::Float, 4, 4, 1, 0, 64, 64, ""},
+        {"Uv", Kind::Vector, Scalar::Float, 1, 2, 1, 64, 8, 8, ""},
+        {"Scale", Kind::Scalar, Scalar::Float, 1, 1, 1, 72, 4, 4, ""},
+        {"Signed", Kind::Scalar, Scalar::SignedInteger, 1, 1, 1, 76, 4, 4, ""},
+        {"Unsigned", Kind::Scalar, Scalar::UnsignedInteger, 1, 1, 1, 80, 4, 4, ""},
+        {"Bias", Kind::Vector, Scalar::Float, 1, 3, 1, 84, 12, 12, ""},
+        // A float4 array carries its element scalar and component count directly; without them the
+        // generator could not tell it apart from an opaque byte range.
+        {"Corners", Kind::Array, Scalar::Float, 1, 4, 4, 96, 64, 16, ""},
+        // A struct array names its element through TypeIndex instead, so ScalarKind stays None.
+        {"Leaves", Kind::Array, Scalar::None, 1, 1, 2, 160, 64, 32, "Leaf"}};
+
+    // Per lane: every published fact of the root and of each field, compared as a whole at the end.
+    vector<vector<std::array<uint32_t, 8>>> perLane;
+    for (const shader::CompileTargetLane& lane : result.Lanes) {
+        const auto target = static_cast<uint32_t>(lane.Target);
+        shader::WireMetadataEnvelope envelope{};
+        ASSERT_GE(lane.Metadata.size(), sizeof(envelope));
+        std::memcpy(&envelope, lane.Metadata.data(), sizeof(envelope));
+        vector<shader::WireTypeRecord> types(envelope.TypeRecords.Size / sizeof(shader::WireTypeRecord));
+        ASSERT_FALSE(types.empty()) << "target=" << target;
+        std::memcpy(types.data(), lane.Metadata.data() + envelope.TypeRecords.Offset, envelope.TypeRecords.Size);
+        const auto name = [&](const shader::WireTypeRecord& record) {
+            return std::string_view{
+                reinterpret_cast<const char*>(lane.Metadata.data() + record.Name.Offset), record.Name.Size};
+        };
+        const auto find = [&](uint32_t parent, std::string_view wanted) {
+            return std::find_if(types.begin(), types.end(), [&](const auto& record) {
+                return record.ParentIndex == parent && name(record) == wanted;
+            });
+        };
+        const auto facts = [](const shader::WireTypeRecord& record) {
+            return std::array<uint32_t, 8>{record.Kind, record.ElementCount, record.Offset, record.Size,
+                                           record.Stride, record.ScalarKind, record.RowCount, record.ColumnCount};
+        };
+
+        const auto root = find(shader::kShaderNoType, "Shared");
+        ASSERT_NE(root, types.end()) << "target=" << target;
+        EXPECT_EQ(root->Kind, static_cast<uint32_t>(Kind::Struct)) << "target=" << target;
+        // The cbuffer size the runtime allocates and the POD's sizeof must be this number.
+        EXPECT_EQ(root->Size, 224u) << "target=" << target;
+        const auto rootIndex = static_cast<uint32_t>(std::distance(types.begin(), root));
+
+        auto& lanefacts = perLane.emplace_back();
+        lanefacts.push_back(facts(*root));
+        for (const ExpectedField& want : expected) {
+            const auto field = find(rootIndex, want.Name);
+            ASSERT_NE(field, types.end()) << want.Name << " target=" << target;
+            EXPECT_EQ(field->Kind, static_cast<uint32_t>(want.Kind)) << want.Name << " target=" << target;
+            EXPECT_EQ(field->ScalarKind, static_cast<uint32_t>(want.Scalar)) << want.Name << " target=" << target;
+            EXPECT_EQ(field->RowCount, want.Rows) << want.Name << " target=" << target;
+            EXPECT_EQ(field->ColumnCount, want.Columns) << want.Name << " target=" << target;
+            EXPECT_EQ(field->ElementCount, want.ElementCount) << want.Name << " target=" << target;
+            EXPECT_EQ(field->Offset, want.Offset) << want.Name << " target=" << target;
+            EXPECT_EQ(field->Size, want.Size) << want.Name << " target=" << target;
+            EXPECT_EQ(field->Stride, want.Stride) << want.Name << " target=" << target;
+            // Bit 0 would mean row_major. Column-major is the default the generated PODs mirror.
+            EXPECT_EQ(field->Flags, 0u) << want.Name << " target=" << target;
+            if (want.Element.empty()) {
+                EXPECT_EQ(field->TypeIndex, shader::kShaderNoType) << want.Name << " target=" << target;
+            } else {
+                ASSERT_LT(field->TypeIndex, types.size()) << want.Name << " target=" << target;
+                EXPECT_EQ(name(types[field->TypeIndex]), want.Element) << " target=" << target;
+            }
+            lanefacts.push_back(facts(*field));
+        }
+
+        // The nested element type is published with its own layout, uint4 included.
+        const auto leaf = find(shader::kShaderNoType, "Leaf");
+        ASSERT_NE(leaf, types.end()) << "target=" << target;
+        EXPECT_EQ(leaf->Size, 32u) << "target=" << target;
+        const auto leafIndex = static_cast<uint32_t>(std::distance(types.begin(), leaf));
+        const auto codes = find(leafIndex, "Codes");
+        ASSERT_NE(codes, types.end()) << "target=" << target;
+        EXPECT_EQ(codes->ScalarKind, static_cast<uint32_t>(Scalar::UnsignedInteger)) << "target=" << target;
+        EXPECT_EQ(codes->ColumnCount, 4u) << "target=" << target;
+        EXPECT_EQ(codes->Offset, 16u) << "target=" << target;
+        lanefacts.push_back(facts(*leaf));
+        lanefacts.push_back(facts(*codes));
+    }
+    ASSERT_EQ(perLane.size(), 2u);
+    EXPECT_EQ(perLane[0], perLane[1]) << "DXIL and SPIR-V published different type payloads";
+}
+
+// Where the two lanes cannot be made to agree, the compile must fail rather than publish one lane's
+// answer: a generated POD built from a disputed layout would silently mismatch the GPU.
+// bool, non-square matrices and struct arrays whose element is not a multiple of 16 bytes are the
+// known disagreements today, so Forward cbuffers must stay clear of them.
+TEST(RadRayDxcMetadata, CrossLaneTypePayloadDisagreementFailsClosed) {
+    // Field declaration plus the expression reading it, so the field survives dead-stripping.
+    struct DisputedField {
+        std::string_view Declaration, Read;
+    };
+    constexpr DisputedField kDisputedFields[] = {
+        {"float3x4 Disputed;", "SharedData.Disputed[0][0]"},
+        {"bool Disputed;", "SharedData.Disputed ? 1.0 : 0.0"},
+    };
+    Client client;
+    ASSERT_TRUE(client.IsAvailable());
+    const auto includePaths = ShaderIncludePaths();
+    constexpr std::string_view kPrologue = R"hlsl(
+#include <core/platform.hlsli>
+
+struct Shared {
+    float4x4 Transform;
+    )hlsl";
+    constexpr std::string_view kMiddle = R"hlsl(
+};
+
+VK_BINDING(0, 0) ConstantBuffer<Shared> SharedData : register(b0, space0);
+
+float4 ReadEverything() {
+    return mul(SharedData.Transform, float4(1, 1, 1, 1)) + float()hlsl";
+    constexpr std::string_view kEpilogue = R"hlsl();
+}
+
+[shader("vertex")]
+float4 VSMain() : SV_Position { return ReadEverything(); }
+
+[shader("pixel")]
+float4 PSMain() : SV_Target0 { return ReadEverything(); }
+)hlsl";
+    for (const DisputedField& field : kDisputedFields) {
+        const string source =
+            string{kPrologue} + string{field.Declaration} + string{kMiddle} + string{field.Read} + string{kEpilogue};
+        const auto discovery = client.DiscoverSourceContract(
+            "fixtures/cbuffer_disputed.hlsl", CopyBytes(source), shader::ShaderTarget::DXIL, includePaths);
+        ASSERT_TRUE(discovery.Succeeded())
+            << field.Declaration << ": " << (discovery.Diagnostics.empty() ? "" : discovery.Diagnostics.back().Message);
+        const auto result = client.CompileVariant(
+            shader::CompileVariantRequest{
+                .SourceName = "fixtures/cbuffer_disputed.hlsl",
+                .RootSource = CopyBytes(source),
+                .Defines = {},
+                .Assignments = {},
+                .Targets = shader::ShaderTargetMask::All,
+                .ExpectedContract = discovery.Contract.Hash},
+            includePaths);
+        EXPECT_EQ(result.Status, shader::CompileStatus::TargetFailure) << field.Declaration;
+        EXPECT_TRUE(result.Lanes.empty()) << field.Declaration;
+        const bool named = std::any_of(
+            result.Diagnostics.begin(), result.Diagnostics.end(), [](const shader::CompileDiagnostic& diagnostic) {
+                return diagnostic.Message.find("Shared") != string::npos;
+            });
+        EXPECT_TRUE(named) << field.Declaration << ": the diagnostic must name the struct that disagrees";
+    }
+}
+
 TEST(RadRayDxcMetadata, SpirvMergeRejectsCrossStageDxilRegisterDrift) {
     constexpr std::string_view source = R"hlsl(
 #include <core/platform.hlsli>
@@ -1731,7 +1955,7 @@ float4 VSMain(float3 position : POSITION) : SV_Position {
 // toolchain identity of the loaded compiler turns "tested the wrong DLL" from a
 // silent pass into a failure.
 TEST(RadRayDxcMetadata, LoadedCompilerReportsExpectedToolchainIdentity) {
-    constexpr uint64_t kExpectedToolchainIdentity = 0x0000000001090212ull;
+    constexpr uint64_t kExpectedToolchainIdentity = shader::kShaderToolchainIdentity;
     constexpr std::string_view source = R"hlsl(
 [shader("vertex")]
 float4 VSMain(float3 position : POSITION) : SV_Position {

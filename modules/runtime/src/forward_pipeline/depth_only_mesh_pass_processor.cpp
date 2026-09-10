@@ -16,26 +16,20 @@ void DepthOnlyMeshPassProcessor::PrepareCommand(const RendererListDesc& desc, co
         out.Reject(MeshPassRejectReason::InvalidBindings);
         return;
     }
-    const auto& layout = program->GetParameterLayout();
     auto [view, inserted] = _views.try_emplace(program, std::nullopt);
     if (inserted) {
-        ShaderParameterStorage values{&layout, binding->ViewGroup};
-        const bool wrote = binding->ViewProj ? values.SetMatrix4x4(*binding->ViewProj, desc.View->ViewProjection)
-                                             : values.SetMatrix4x4("ForwardView.ViewProj", desc.View->ViewProjection);
-        if (wrote) view->second = _resources.PrepareGroup(*program, binding->ViewGroup, values);
+        // DepthOnly reads only ViewProj, but shares the full view ABI, so the rest uploads as zero.
+        _viewScratch = {};
+        _viewScratch.ViewProj = desc.View->ViewProjection;
+        view->second = _resources.PrepareGroup(*program, binding->ViewGroup, AsCBufferBytes(_viewScratch));
     }
-    auto [objects, newObjects] = _objects.try_emplace(program, &layout, binding->ObjectGroup);
-    auto [prepared, newObject] = objects->second.Groups.try_emplace(batch.Primitive, std::nullopt);
+    auto [prepared, newObject] = _objectGroups[program].try_emplace(batch.Primitive, std::nullopt);
     if (newObject) {
-        auto& object = objects->second.Values;
-        const bool wrote = binding->LocalToWorld
-                                ? object.SetMatrix4x4(*binding->LocalToWorld, scene.Primitives[batch.Primitive].LocalToWorld)
-                                : object.SetMatrix4x4("ForwardObject.LocalToWorld", scene.Primitives[batch.Primitive].LocalToWorld);
-        if (!wrote) {
+        if (batch.Primitive >= _objects.RowCount()) {
             out.Reject(MeshPassRejectReason::InvalidBindings);
             return;
         }
-        prepared->second = _resources.PrepareGroup(*program, binding->ObjectGroup, object);
+        prepared->second = _resources.PrepareGroup(*program, binding->ObjectGroup, _objects.Row(batch.Primitive));
     }
     const auto& objectGroup = prepared->second;
     if (!view->second || !objectGroup) {

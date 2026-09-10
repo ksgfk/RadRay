@@ -10,12 +10,7 @@ namespace radray::forward_detail {
 ForwardLitMeshPassProcessor::ProgramState::ProgramState(ShaderProgram* program, const ForwardProgramBindings* binding)
     : Program(program),
       Binding(binding),
-      Layout(&program->GetParameterLayout()),
-      ObjectValues(Layout, binding->ObjectGroup),
-      LocalToWorld(binding->LocalToWorld),
-      NormalToWorld(binding->NormalToWorld),
-      PreviousLocalToWorld(binding->PreviousLocalToWorld),
-      MotionValid(binding->MotionValid) {}
+      Layout(&program->GetParameterLayout()) {}
 
 Nullable<ForwardLitMeshPassProcessor::ProgramState*> ForwardLitMeshPassProcessor::ResolveProgram(ShaderProgram* program) {
     if (program == _lastProgram) return _lastState;
@@ -34,24 +29,11 @@ void ForwardLitMeshPassProcessor::ResetView() noexcept {
         if (!state) continue;
         state->ViewPrepared = false;
         state->View.reset();
-        if (state->ViewDependent() && _temporal) {
+        if (_temporal) {
             state->Objects.Clear();
             state->Templates.Clear();
         }
     }
-}
-
-const Eigen::Matrix4f& ForwardLitMeshPassProcessor::CachedNormalToWorld(RenderPrimitiveIndex primitive, const Eigen::Matrix4f& localToWorld) {
-    if (primitive >= _normalReady.size()) {
-        _normalReady.resize(size_t{primitive} + 1, 0);
-        _normals.resize(size_t{primitive} + 1);
-    }
-    if (!_normalReady[primitive]) {
-        _normals[primitive] = MakeNormalToWorld(localToWorld);
-        _normalReady[primitive] = 1;
-        ++_objectMathComputes;
-    }
-    return _normals[primitive];
 }
 
 void ForwardLitMeshPassProcessor::PrepareCommand(const RendererListDesc& desc, const RenderSceneSnapshot& scene,
@@ -75,22 +57,17 @@ void ForwardLitMeshPassProcessor::PrepareCommand(const RendererListDesc& desc, c
         ps.Materials.Groups.reserve(materialCapacity);
         if (ps.Objects.Slots.size() < objectCapacity) ps.Objects.Slots.resize(objectCapacity, kNoSlot);
         ps.Objects.Groups.reserve(objectCapacity);
-        if (reuseCommand && !(ps.ViewDependent() && _temporal)) {
+        if (reuseCommand && !_temporal) {
             const auto templateCapacity = std::min(scene.MeshBatches.size(), kInitialCapacityLimit);
             if (ps.Templates.Slots.size() < templateCapacity) ps.Templates.Slots.resize(templateCapacity, kNoSlot);
             ps.Templates.Items.reserve(templateCapacity);
         }
-        if (ps.NormalToWorld != nullptr && _normalReady.size() < objectCapacity) {
-            _normalReady.resize(objectCapacity, 0);
-            _normals.resize(objectCapacity);
-        }
         ps.ViewPrepared = true;
-        ShaderParameterStorage values{ps.Layout, binding.ViewGroup};
-        if (FillViewParameters(values, *desc.Culling.Get(), *desc.View.Get(), _lightOverflowWarned,
-                               binding.PassGroup.has_value() || desc.MaterialPassName == "DepthNormalsMotion" || desc.MaterialPassName == "ShadowCaster"))
-            ps.View = _resources.PrepareGroup(*program, binding.ViewGroup, values);
+        FillViewParameters(_viewScratch, *desc.Culling.Get(), *desc.View.Get(), _lightOverflowWarned,
+                           binding.PassGroup.has_value() || desc.MaterialPassName == "DepthNormalsMotion" || desc.MaterialPassName == "ShadowCaster");
+        ps.View = _resources.PrepareGroup(*program, binding.ViewGroup, AsCBufferBytes(_viewScratch));
     }
-    const bool cacheCommand = reuseCommand && !(ps.ViewDependent() && _temporal);
+    const bool cacheCommand = reuseCommand && !_temporal;
     if (cacheCommand) {
         if (auto* tmpl = ps.Templates.Find(batchIndex)) {
             ++_duplicatePreparations;
@@ -107,34 +84,29 @@ void ForwardLitMeshPassProcessor::PrepareCommand(const RendererListDesc& desc, c
     auto* material = ps.Materials.Find(batch.Material);
     if (material == nullptr) {
         material = &ps.Materials.Insert(batch.Material);
-        *material = _resources.PrepareGroup(*program, binding.MaterialGroup, pass.Parameters, pass.Textures, pass.Samplers);
+        *material = _resources.PrepareGroup(*program, binding.MaterialGroup, pass.NumericBytes, pass.Textures, pass.Samplers);
     } else {
         ++_duplicatePreparations;
     }
     auto* object = ps.Objects.Find(batch.Primitive);
     if (object == nullptr) {
         object = &ps.Objects.Insert(batch.Primitive);
-        auto& values = ps.ObjectValues;
-        const auto& primitive = scene.Primitives[batch.Primitive];
-        if (ps.LocalToWorld == nullptr || !values.SetMatrix4x4(*ps.LocalToWorld, primitive.LocalToWorld)) {
+        if (batch.Primitive >= _objects.RowCount()) {
             out.Reject(MeshPassRejectReason::InvalidBindings);
             return;
         }
-        if (ps.NormalToWorld != nullptr &&
-            !values.SetMatrix4x4(*ps.NormalToWorld, CachedNormalToWorld(batch.Primitive, primitive.LocalToWorld))) {
-            out.Reject(MeshPassRejectReason::InvalidBindings);
-            return;
+        // The frozen row already holds the identity motion the non-temporal case wants, so it goes
+        // to the arena as is. Only a temporal view has to patch motion, and it pays one extra copy.
+        const auto row = _objects.Row(batch.Primitive);
+        std::span<const byte> bytes = row;
+        if (_temporal) {
+            const auto motion = _temporal->GetPrimitiveMotion(desc.View->StateId, scene.Primitives[batch.Primitive]);
+            _objectScratch = *AsCBuffer<Forward_ObjectData>(row);
+            _objectScratch.PreviousLocalToWorld = motion.PreviousLocalToWorld;
+            _objectScratch.MotionValid = motion.Valid && desc.View->PreviousViewValid ? 1u : 0u;
+            bytes = AsCBufferBytes(_objectScratch);
         }
-        if (ps.PreviousLocalToWorld != nullptr) {
-            const auto motion = _temporal ? _temporal->GetPrimitiveMotion(desc.View->StateId, primitive) : PrimitiveMotionData{primitive.LocalToWorld, false};
-            if (!values.SetMatrix4x4(*ps.PreviousLocalToWorld, motion.PreviousLocalToWorld) ||
-                ps.MotionValid == nullptr ||
-                !values.SetUInt(*ps.MotionValid, motion.Valid && desc.View->PreviousViewValid ? 1u : 0u)) {
-                out.Reject(MeshPassRejectReason::InvalidBindings);
-                return;
-            }
-        }
-        *object = _resources.PrepareGroup(*program, binding.ObjectGroup, values);
+        *object = _resources.PrepareGroup(*program, binding.ObjectGroup, bytes);
     } else {
         ++_duplicatePreparations;
     }

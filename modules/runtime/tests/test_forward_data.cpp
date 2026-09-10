@@ -136,10 +136,9 @@ struct ForwardData {
         render::SamplerDescriptor sampler;
         sampler.MinFilter = render::FilterMode::Linear;
         return Authoring->SetFloat4("ForwardMaterial.BaseColor", Eigen::Vector4f{1, 0, 0, 1}) &&
-               Authoring->SetFloat("Roughness", 0.4f) &&
-               Authoring->SetFloat2("Tint", Eigen::Vector2f{0.2f, 0.3f}) &&
-               Authoring->SetFloat3("NormalBias", Eigen::Vector3f{1, 2, 3}) &&
-               Authoring->SetMatrix4x4("MaterialTransform", Eigen::Matrix4f::Identity()) &&
+               Authoring->SetFloat4("Surface", Eigen::Vector4f{0.1f, 0.4f, 0.5f, 0.0f}) &&
+               Authoring->SetFloat4("Transmission", Eigen::Vector4f{1, 2, 3, 4}) &&
+               Authoring->SetFloat4("UVTransform", Eigen::Vector4f{1, 1, 0, 0}) &&
                Authoring->SetTexture("AlbedoTexture", TextureA, subview) &&
                Authoring->SetSampler("LinearSampler", sampler);
     }
@@ -190,8 +189,8 @@ TEST(RadRayRuntimeMaterial, BuildRenderDataCopiesNumericAndResourceState) {
         ASSERT_TRUE(data.Authoring->BuildRenderData(snapshot, refs));
         EXPECT_EQ(snapshot.Passes.front().Program.Get(), data.Program.get());
         EXPECT_EQ(snapshot.Passes.front().ParameterGroup, data.Bindings.MaterialGroup);
-        const auto actual = snapshot.Passes.front().Parameters.GetBufferData(data.Bindings.MaterialBufferIndex);
-        const auto expected = data.Authoring->GetParameterStorage().GetBufferData(data.Bindings.MaterialBufferIndex);
+        const auto actual = std::span<const byte>{snapshot.Passes.front().NumericBytes};
+        const auto expected = data.Authoring->NumericBytes();
         EXPECT_EQ((vector<byte>{actual.begin(), actual.end()}), (vector<byte>{expected.begin(), expected.end()}));
         EXPECT_NE(actual.data(), expected.data());
         ASSERT_EQ(snapshot.Passes.front().Textures.size(), 1u);
@@ -223,9 +222,9 @@ TEST(RadRayRuntimeMaterial, RenderDataDoesNotChangeAfterMaterialMutation) {
         data.Authoring->GetPipelineState().DepthStencil.DepthWriteEnable = false;
         data.Authoring->GetPipelineState().Blend = render::BlendState::Default();
         ASSERT_TRUE(data.Authoring->BuildRenderData(newData, refs));
-        auto oldBytes = oldData.Passes.front().Parameters.GetBufferData(data.Bindings.MaterialBufferIndex);
-        auto newBytes = newData.Passes.front().Parameters.GetBufferData(data.Bindings.MaterialBufferIndex);
-        auto savedBytes = saved.Passes.front().Parameters.GetBufferData(data.Bindings.MaterialBufferIndex);
+        const auto& oldBytes = oldData.Passes.front().NumericBytes;
+        const auto& newBytes = newData.Passes.front().NumericBytes;
+        const auto& savedBytes = saved.Passes.front().NumericBytes;
         EXPECT_EQ((vector<byte>{oldBytes.begin(), oldBytes.end()}), (vector<byte>{savedBytes.begin(), savedBytes.end()}));
         EXPECT_NE((vector<byte>{oldBytes.begin(), oldBytes.end()}), (vector<byte>{newBytes.begin(), newBytes.end()}));
         EXPECT_NE(oldBytes.data(), newBytes.data());
@@ -341,8 +340,8 @@ TEST(MaterialTechnique, EquivalentNumericBuffersUseTheirOwnPhysicalGroups) {
         ASSERT_EQ(snapshot.Passes.size(), 2u);
         EXPECT_TRUE(snapshot.Passes[0].Valid);
         EXPECT_TRUE(snapshot.Passes[1].Valid);
-        auto first = snapshot.Passes[0].Parameters.GetBufferData(*technique->Passes()[0].BufferIndex);
-        auto second = snapshot.Passes[1].Parameters.GetBufferData(*technique->Passes()[1].BufferIndex);
+        const auto& first = snapshot.Passes[0].NumericBytes;
+        const auto& second = snapshot.Passes[1].NumericBytes;
         EXPECT_EQ((vector<byte>{first.begin(), first.end()}), (vector<byte>{second.begin(), second.end()}));
         EXPECT_NE(first.data(), second.data());
         EXPECT_TRUE(snapshot.Passes[0].PipelineState.DepthStencil.DepthWriteEnable);
@@ -390,7 +389,7 @@ TEST(RenderSceneSnapshot, DeduplicatesMaterialsClassifiesSectionsAndRetainsCapac
     });
 }
 
-TEST(MaterialTechnique, InvalidNamesAnchorsAndNumericLayoutsFailClosed) {
+TEST(MaterialTechnique, InvalidNamesAndAnchorsFailClosed) {
     WithForwardData([](ForwardData& data) {
         auto a = test::CompileStageBProgram(*data.Device.Device, test::StageBMaterialSource());
         ASSERT_TRUE(a);
@@ -400,11 +399,22 @@ TEST(MaterialTechnique, InvalidNamesAnchorsAndNumericLayoutsFailClosed) {
         EXPECT_FALSE(MaterialTechnique::Create({{"Primary", nullptr, "MaterialValues", {}}}, "Primary"));
         EXPECT_FALSE(MaterialTechnique::Create({{"Primary", a.Get(), "Missing", {}}}, "Primary"));
         EXPECT_FALSE(MaterialTechnique::Create({{"Primary", a.Get(), "", {}}}, "Primary"));
+    });
+}
+
+// Create only needs the primary cbuffer's byte count to size the authoring storage. Numeric
+// layout agreement across passes is the caller's contract, kept by sharing one generated
+// header and one HLSL struct, so a differing secondary layout is no longer rejected here.
+TEST(MaterialTechnique, SecondaryNumericLayoutIsTheCallersContract) {
+    WithForwardData([](ForwardData& data) {
+        auto a = test::CompileStageBProgram(*data.Device.Device, test::StageBMaterialSource());
+        ASSERT_TRUE(a);
+        const MaterialPassDesc primary{"Primary", a.Get(), "MaterialValues", {}};
         for (const auto fields : {"float3 BaseColor;", "float4 Padding; float4 BaseColor;", "float4 BaseColor; float4 Extra[2];"}) {
             SCOPED_TRACE(fields);
             auto b = test::CompileStageBProgram(*data.Device.Device, test::StageBMaterialSource(fields, 3));
             ASSERT_TRUE(b);
-            EXPECT_FALSE(MaterialTechnique::Create({primary, {"Secondary", b.Get(), "MaterialValues", {}}}, "Primary"));
+            EXPECT_TRUE(MaterialTechnique::Create({primary, {"Secondary", b.Get(), "MaterialValues", {}}}, "Primary"));
         }
     });
 }
@@ -449,7 +459,7 @@ TEST(MaterialTechnique, MissingTextureLeavesDepthOnlyValidWithoutMaterialBinding
         EXPECT_FALSE(snapshot.FindPass("ForwardLit")->Valid);
         EXPECT_TRUE(snapshot.FindPass("DepthOnly")->Valid);
         EXPECT_FALSE(snapshot.FindPass("DepthOnly")->ParameterGroup);
-        EXPECT_EQ(snapshot.FindPass("DepthOnly")->Parameters.GetLayout(), nullptr);
+        EXPECT_TRUE(snapshot.FindPass("DepthOnly")->NumericBytes.empty());
         EXPECT_TRUE(owners.empty());
         EXPECT_TRUE(forward_detail::ResolveDepthOnlyProgramBindings(*depth.Get()));
     });
@@ -465,8 +475,8 @@ TEST(FrameDrawResources, DynamicOffsetsReuseImmutableSetsAndSpillsCreateNewSets)
         vector<StreamingAssetRefAny> owners;
         ASSERT_TRUE(data.Authoring->BuildRenderData(snapshot, owners));
         const auto& pass = snapshot.Passes.front();
-        const auto first = resources.PrepareGroup(*pass.Program.Get(), *pass.ParameterGroup, pass.Parameters, pass.Textures, pass.Samplers);
-        const auto second = resources.PrepareGroup(*pass.Program.Get(), *pass.ParameterGroup, pass.Parameters, pass.Textures, pass.Samplers);
+        const auto first = resources.PrepareGroup(*pass.Program.Get(), *pass.ParameterGroup, std::span<const byte>{pass.NumericBytes}, pass.Textures, pass.Samplers);
+        const auto second = resources.PrepareGroup(*pass.Program.Get(), *pass.ParameterGroup, std::span<const byte>{pass.NumericBytes}, pass.Textures, pass.Samplers);
         ASSERT_TRUE(first);
         ASSERT_TRUE(second);
         EXPECT_EQ(first->Set.Get(), second->Set.Get());
@@ -474,7 +484,7 @@ TEST(FrameDrawResources, DynamicOffsetsReuseImmutableSetsAndSpillsCreateNewSets)
         EXPECT_EQ(resources.GetSetCount(), 1u);
         bool spilled = false;
         for (uint32_t i = 0; i < 10; ++i) {
-            const auto group = resources.PrepareGroup(*pass.Program.Get(), *pass.ParameterGroup, pass.Parameters, pass.Textures, pass.Samplers);
+            const auto group = resources.PrepareGroup(*pass.Program.Get(), *pass.ParameterGroup, std::span<const byte>{pass.NumericBytes}, pass.Textures, pass.Samplers);
             ASSERT_TRUE(group);
             spilled |= group->Set.Get() != first->Set.Get();
         }
@@ -483,23 +493,23 @@ TEST(FrameDrawResources, DynamicOffsetsReuseImmutableSetsAndSpillsCreateNewSets)
         EXPECT_EQ(resources.GetStats().RecipeBuilds, 1u);
         EXPECT_EQ(resources.GetStats().GroupPreparations, 12u);
         EXPECT_EQ(resources.GetStats().SetCreations + resources.GetStats().SetCacheHits, 12u);
-        EXPECT_EQ(resources.GetStats().BufferBytesCopied, 12u * pass.Parameters.GetBufferData(data.Bindings.MaterialBufferIndex).size());
+        EXPECT_EQ(resources.GetStats().BufferBytesCopied, 12u * pass.NumericBytes.size());
         EXPECT_FALSE(resources.PrepareGroup(*pass.Program.Get(), *pass.ParameterGroup, ShaderParameterStorage{}, pass.Textures, pass.Samplers));
-        EXPECT_FALSE(resources.PrepareGroup(*pass.Program.Get(), *pass.ParameterGroup, pass.Parameters));
+        EXPECT_FALSE(resources.PrepareGroup(*pass.Program.Get(), *pass.ParameterGroup, std::span<const byte>{pass.NumericBytes}));
         writes.Flush(*data.Device.Device);
         writes.Reset();
         ASSERT_TRUE(resources.BeginFrame(writes));
         EXPECT_EQ(resources.GetSetCount(), 0u);
         const auto* recipe = &pass.Program->GetOrCreateParameterGroupRecipe(*pass.ParameterGroup);
-        const auto next = resources.PrepareGroup(*pass.Program.Get(), *pass.ParameterGroup, pass.Parameters, pass.Textures, pass.Samplers);
+        const auto next = resources.PrepareGroup(*pass.Program.Get(), *pass.ParameterGroup, std::span<const byte>{pass.NumericBytes}, pass.Textures, pass.Samplers);
         ASSERT_TRUE(next);
         EXPECT_EQ(resources.GetStats().RecipeBuilds, 0u);
         EXPECT_EQ(resources.GetStats().SetCreations, 1u);
-        EXPECT_EQ(resources.GetStats().BufferBytesCopied, pass.Parameters.GetBufferData(data.Bindings.MaterialBufferIndex).size());
+        EXPECT_EQ(resources.GetStats().BufferBytesCopied, pass.NumericBytes.size());
         HostWriteBatch otherWrites;
         FrameDrawResources otherFlight{data.Device.Device.get(), descriptor};
         ASSERT_TRUE(otherFlight.BeginFrame(otherWrites));
-        const auto other = otherFlight.PrepareGroup(*pass.Program.Get(), *pass.ParameterGroup, pass.Parameters, pass.Textures, pass.Samplers);
+        const auto other = otherFlight.PrepareGroup(*pass.Program.Get(), *pass.ParameterGroup, std::span<const byte>{pass.NumericBytes}, pass.Textures, pass.Samplers);
         ASSERT_TRUE(other);
         EXPECT_NE(other->Set.Get(), next->Set.Get());
         EXPECT_EQ(otherFlight.GetStats().RecipeBuilds, 0u);

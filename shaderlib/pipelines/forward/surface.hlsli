@@ -2,38 +2,12 @@
 #define RADRAY_FORWARD_SURFACE_HLSLI
 #include <core/platform.hlsli>
 #include <core/math.hlsli>
-#include <lighting/lights.hlsli>
-
-struct ForwardViewData {
-    float4x4 ViewProj;
-    float4x4 PreviousViewProj;
-    float4 EyePosition;
-    uint DirectionalLightCount;
-    uint PointLightCount;
-    float2 LightCountPadding;
-    DirectionalLight DirectionalLights[RADRAY_MAX_DIRECTIONAL_LIGHTS];
-    PointLight PointLights[RADRAY_MAX_POINT_LIGHTS];
-};
-struct ForwardMaterialData {
-    float4 BaseColor;
-    // metallic, perceptual roughness, alpha cutoff, emission
-    float4 Surface;
-    // refraction offset in pixels, unlit, reserved
-    float4 Transmission;
-    // UV scale and offset; zero scale selects the identity scale.
-    float4 UVTransform;
-};
-struct ForwardObjectData {
-    float4x4 LocalToWorld;
-    float4x4 NormalToWorld;
-    float4x4 PreviousLocalToWorld;
-    uint MotionValid;
-};
-VK_BINDING(0, 0) ConstantBuffer<ForwardViewData> ForwardView : register(b0, space0);
-VK_BINDING(0, 1) ConstantBuffer<ForwardMaterialData> ForwardMaterial : register(b0, space1);
+#include <pipelines/forward/cbuffers.hlsli>
+VK_BINDING(0, 0) ConstantBuffer<Forward_ViewData> ForwardView : register(b0, space0);
+VK_BINDING(0, 1) ConstantBuffer<Forward_MaterialData> ForwardMaterial : register(b0, space1);
 VK_BINDING(1, 1) Texture2D<float4> AlbedoTexture : register(t0, space1);
 VK_BINDING(2, 1) SamplerState LinearSampler : register(s0, space1);
-VK_BINDING(0, 2) ConstantBuffer<ForwardObjectData> ForwardObject : register(b0, space2);
+VK_BINDING(0, 2) ConstantBuffer<Forward_ObjectData> ForwardObject : register(b0, space2);
 
 struct SurfaceVertexInput { float3 Position : POSITION; float3 Normal : NORMAL; float2 UV : TEXCOORD0; };
 struct SurfaceVertexOutput {

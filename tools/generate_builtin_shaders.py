@@ -26,7 +26,7 @@ def main():
                             "--source", source, "--output", str(prefix), "--target", "all"], check=True)
             for backend in ("dxil", "spirv"):
                 data = prefix.with_suffix(f".{backend}.bin").read_bytes()
-                if len(data) < 152 or data[:8] != b"RDRY\x07\x00\x98\x00":
+                if len(data) < 152 or data[:8] != b"RDRY\x08\x00\x98\x00":
                     sys.exit("Unexpected compiler metadata schema; update the generator with the shader contract")
                 identity = ",".join(str(value) for value in data[136:152])
                 lines.append(f"static constexpr shader::GpuArtifactHash {name}_{backend}_identity{{{{{identity}}}}};")
