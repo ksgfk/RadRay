@@ -198,6 +198,7 @@ public:
 
 protected:
     void OnInit() override {
+        SetRenderGraphRuntimeOptions(kDiagnosticRenderGraphRuntimeOptions);
         ImGuiSystemDescriptor descriptor;
         descriptor.InstallDefaultOverlay = false;
         Ui = ImGuiSystem::Install(*this, descriptor);
@@ -397,6 +398,7 @@ class UiTextureApp final : public Application {
 public:
     uint32_t Verified{0};
     void OnInit() override {
+        SetRenderGraphRuntimeOptions(kDiagnosticRenderGraphRuntimeOptions);
         ImGuiSystemDescriptor descriptor;
         descriptor.InstallDefaultOverlay = false;
         Ui = ImGuiSystem::Install(*this, descriptor);
