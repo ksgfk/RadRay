@@ -58,8 +58,8 @@ string RenderGraphExecutionReport::ToJson() const {
     for (size_t i = 0; i < Resources.size(); ++i) {
         const auto& r = Resources[i];
         if (i) result += ',';
-        result += fmt::format("{{\"name\":{},\"descriptor\":{},\"texture\":{},\"external\":{},\"physicalId\":{},\"firstUse\":{},\"lastUse\":{},\"viewId\":{},\"estimatedBytes\":{},\"physicalSlot\":{},\"port\":{},\"immutable\":{},\"retainedOwner\":{}}}",
-                              Quote(r.Name), Quote(r.Descriptor), r.Texture, r.External, r.PhysicalId, r.FirstUse, r.LastUse, r.ViewId, r.EstimatedBytes, r.PhysicalSlot, r.Port, r.Immutable, r.RetainedOwner);
+        result += fmt::format("{{\"name\":{},\"descriptor\":{},\"texture\":{},\"external\":{},\"physicalId\":{},\"firstUse\":{},\"lastUse\":{},\"viewId\":{},\"estimatedBytes\":{},\"physicalSlot\":{},\"port\":{},\"retainedOwner\":{}}}",
+                              Quote(r.Name), Quote(r.Descriptor), r.Texture, r.External, r.PhysicalId, r.FirstUse, r.LastUse, r.ViewId, r.EstimatedBytes, r.PhysicalSlot, r.Port, r.RetainedOwner);
     }
     result += "],\"barriers\":[";
     for (size_t i = 0; i < Barriers.size(); ++i) {
@@ -80,8 +80,8 @@ string RenderGraphExecutionReport::ToJson() const {
         result += fmt::format("{{\"code\":{},\"graph\":{},\"pass\":{},\"binding\":{},\"resource\":{},\"message\":{},\"file\":{},\"line\":{}}}",
                               Quote(d.Code), Quote(d.Graph), Quote(d.Pass), Quote(d.Binding), Quote(d.Resource), Quote(d.Message), Quote(d.File), d.Line);
     }
-    result += fmt::format("],\"graphicsPipelines\":{{\"requests\":{},\"preparations\":{},\"creations\":{}}},\"pool\":{{\"hits\":{},\"misses\":{},\"created\":{},\"trimmed\":{},\"textures\":{},\"buffers\":{},\"views\":{},\"estimatedBytes\":{},\"peakEstimatedBytes\":{},\"memoryByView\":[",
-                          GraphicsPipelineRequests, GraphicsPipelinePreparations, GraphicsPipelineCreations,
+    result += fmt::format("],\"graphicsPipelines\":{{\"preparations\":{},\"creations\":{}}},\"pool\":{{\"hits\":{},\"misses\":{},\"created\":{},\"trimmed\":{},\"textures\":{},\"buffers\":{},\"views\":{},\"estimatedBytes\":{},\"peakEstimatedBytes\":{},\"memoryByView\":[",
+                          GraphicsPipelinePreparations, GraphicsPipelineCreations,
                           Pool.Hits, Pool.Misses, Pool.Created, Pool.Trimmed, Pool.TextureCount, Pool.BufferCount, Pool.ViewCount, Pool.EstimatedBytes, Pool.PeakEstimatedBytes);
     for (size_t i = 0; i < Pool.MemoryByView.size(); ++i) {
         if (i) result += ',';

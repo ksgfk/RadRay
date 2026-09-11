@@ -5,7 +5,19 @@
 namespace radray {
 namespace {
 #include "render_graph_blit_shaders.inc"
+
+MaterialPipelineState BlitState() {
+    MaterialPipelineState state;
+    state.Primitive.Cull = render::CullMode::None;
+    state.DepthStencil.DepthTestEnable = state.DepthStencil.DepthWriteEnable = false;
+    return state;
 }
+render::SamplerDescriptor BlitSampler() {
+    render::SamplerDescriptor sampler;
+    sampler.AddressS = sampler.AddressT = sampler.AddressR = render::AddressMode::ClampToEdge;
+    return sampler;
+}
+}  // namespace
 RgTextureValue AddRenderGraphBlit(RenderGraph& graph, RenderSystem& system, render::RenderBackend backend,
                                   RgTextureValue source, RgTextureValue destination, bool decodeSrgb, bool encodeSrgb) {
     const bool dxil = backend == render::RenderBackend::D3D12;
@@ -17,28 +29,33 @@ RgTextureValue AddRenderGraphBlit(RenderGraph& graph, RenderSystem& system, rend
     }
     destination = graph.NextVersion(destination);
     struct Data {
-        RgGraphicsProgramHandle Program;
-        RgParameterSetHandle Parameters;
-        uint32_t Width, Height;
-        render::RenderBackend Backend;
+        Nullable<ShaderProgram*> Program{nullptr};
+        RgTextureViewHandle Image{};
+        array<float, 8> Constants{};
+        Nullable<render::GraphicsPipelineState*> Pipeline{nullptr};
+        PreparedShaderGroup Parameters{};
+        uint32_t Width{0}, Height{0};
+        render::RenderBackend Backend{};
     };
-    const array<float, 8> constants{0, 0, 0, 0, decodeSrgb ? 1.f : 0.f, encodeSrgb ? 1.f : 0.f, 0, 0};
-    MaterialPipelineState state;
-    state.Primitive.Cull = render::CullMode::None;
-    state.DepthStencil.DepthTestEnable = state.DepthStencil.DepthWriteEnable = false;
-    render::SamplerDescriptor sampler;
-    sampler.AddressS = sampler.AddressT = sampler.AddressR = render::AddressMode::ClampToEdge;
     graph.AddRasterPass<Data>("Display.Blit", [&](Data& data, RenderGraphRasterBuilder& builder) {
+        data.Program = program; data.Image = builder.ReadTexture(source);
+        data.Constants = {0, 0, 0, 0, decodeSrgb ? 1.f : 0.f, encodeSrgb ? 1.f : 0.f, 0, 0};
+        data.Width = desc->Width; data.Height = desc->Height; data.Backend = backend;
+        builder.SetColorAttachment(0, destination); }, +[](Data& data, RenderGraphPrepareContext& context) {
+        data.Pipeline = context.ResolveGraphicsPipeline(*data.Program, BlitState());
+        if (!data.Pipeline) return false;
         const RgParameterBinding bindings[]{
-            {"Blit", 0, RgCBufferParameterBinding{std::as_bytes(std::span{constants})}},
-            {"Image", 0, RgTextureParameterBinding{source}},
-            {"ImageSampler", 0, RgSamplerParameterBinding{sampler}}};
-        data = {builder.UseGraphicsProgram(*program, state), builder.CreateParameterSet(*program, 0, bindings), desc->Width, desc->Height, backend};
-        builder.SetColorAttachment(0, destination); }, +[](const Data& data, RenderGraphRasterContext& context) {
-        context.BindGraphicsProgram(data.Program); context.BindParameterSet(data.Parameters);
-        context.Encoder().SetViewport(MakeViewport(data.Backend, 0, 0, float(data.Width), float(data.Height)));
-        context.Encoder().SetScissor({0, 0, data.Width, data.Height});
-        context.Encoder().Draw(3, 1, 0, 0); });
+            {"Blit", 0, RgCBufferParameterBinding{std::as_bytes(std::span{data.Constants})}},
+            {"Image", 0, RgTextureParameterBinding{data.Image}},
+            {"ImageSampler", 0, RgSamplerParameterBinding{BlitSampler()}}};
+        data.Parameters = context.CreateParameterSet(*data.Program, 0, bindings);
+        return data.Parameters.IsValid(); }, +[](const Data& data, RenderGraphRasterContext& context) {
+        auto& encoder = context.Encoder();
+        encoder.BindGraphicsPipelineState(data.Pipeline.Get());
+        encoder.BindShaderParameterSet(data.Parameters);
+        encoder.SetViewport(MakeViewport(data.Backend, 0, 0, float(data.Width), float(data.Height)));
+        encoder.SetScissor({0, 0, data.Width, data.Height});
+        encoder.Draw(3, 1, 0, 0); });
     return destination;
 }
 }  // namespace radray

@@ -3,7 +3,7 @@
 #include <algorithm>
 #include <radray/runtime/render_framework/renderer_list.h>
 #include <radray/runtime/render_framework/render_graph.h>
-#include <radray/runtime/render_framework/renderer_list_pass_bindings.h>
+#include <radray/runtime/render_framework/renderer_list_pass_sets.h>
 #include <radray/logger.h>
 #include <radray/profiler.h>
 
@@ -44,121 +44,114 @@ bool FinalizeMeshDrawCommand(MeshDrawCommand& command) noexcept {
 
 namespace {
 
-bool ValidatePreparedDraws(const RendererList& list, RenderGraphRasterBuilder& builder,
-                           Nullable<const RendererListPassBindings*> bindings) {
+bool ValidatePreparedDraws(const RendererList& list, RenderGraphPrepareContext& ctx) {
     RADRAY_PROFILE_SCOPE_N("ValidatePreparedDraws");
     if (!list.Items.empty()) {
         if (list.Items.size() != list.Commands.size()) {
-            builder.Reject("RendererListPreparation", "Draw order must reference every command exactly once");
+            ctx.Reject("RendererListPreparation", "Draw order must reference every command exactly once");
             return false;
         }
         vector<bool> visited(list.Commands.size());
         for (const auto& item : list.Items) {
             if (item.CommandIndex >= list.Commands.size() || visited[item.CommandIndex]) {
-                builder.Reject("RendererListPreparation", "Draw order contains an invalid or duplicate command index");
+                ctx.Reject("RendererListPreparation", "Draw order contains an invalid or duplicate command index");
                 return false;
             }
             visited[item.CommandIndex] = true;
         }
     }
-    Nullable<ShaderProgram*> resolvedBindingProgram{nullptr};
-    for (const auto& draw : list.Commands) {
-        if (!ValidateMeshDrawCommand(draw) ||
-            (bindings && resolvedBindingProgram.Get() != draw.Program.Get() && !bindings->IsValidFor(builder, *draw.Program))) {
-            builder.Reject("RendererListPreparation", "Draw geometry or pass parameter bindings are invalid");
+    for (const auto& draw : list.Commands)
+        if (!ValidateMeshDrawCommand(draw)) {
+            ctx.Reject("RendererListPreparation", "Draw geometry or parameter groups are invalid");
             return false;
         }
-        resolvedBindingProgram = draw.Program.Get();
-    }
     return true;
 }
 
 }  // namespace
 
-std::optional<PreparedRendererList> PrepareRendererList(const RendererList& list, RenderGraphRasterBuilder& builder,
-                                                        Nullable<const RendererListPassBindings*> bindings) {
+std::optional<PreparedRendererList> PrepareRendererList(const RendererList& list, RenderGraphPrepareContext& ctx,
+                                                        Nullable<const RendererListPassSets*> passSets) {
     RADRAY_PROFILE_SCOPE_N("PrepareRendererList");
-    if (builder.IsValidationFull() && !ValidatePreparedDraws(list, builder, bindings)) return std::nullopt;
-    PreparedRendererList prepared{builder.GetPassHandle(), {}};
+    // An argument precondition, so it precedes the content checks and holds at every validation level.
+    if (passSets && passSets->GetPass() != ctx.GetPassHandle()) {
+        ctx.Reject("RendererListPassSets", "Pass sets were built by another pass, so their views are undeclared here");
+        return std::nullopt;
+    }
+    if (ctx.IsValidationFull() && !ValidatePreparedDraws(list, ctx)) return std::nullopt;
+    PreparedRendererList prepared{ctx.GetPassHandle(), {}};
     prepared.Draws.reserve(list.Commands.size());
-    // Many draws share geometry; declaring the same (buffer, range) read repeatedly only grows the pass
-    // access list (and every compile step that walks it), so each distinct read is declared once.
-    struct DeclaredRange {
-        uint64_t Offset, Size;
-        RgBufferAccess Access;
-    };
+    // A pipeline is resolved per distinct recipe, not per draw: adjacent draws hit the fast path and
+    // the rest fall back to this list, which stays short because a list sorts by program.
     struct Recipe {
-        ShaderProgram* Program{nullptr};
-        MaterialPipelineState State{};
-        const PrimitiveVertexLayout* Layout{nullptr};
-        PrimitiveTopology Topology{PrimitiveTopology::TriangleList};
-        RgGraphicsProgramHandle Handle{};
+        ShaderProgram* Program;
+        MaterialPipelineState State;
+        const PrimitiveVertexLayout* Layout;
+        PrimitiveTopology Topology;
+        render::GraphicsPipelineState* Pipeline;
     };
-    unordered_map<render::Buffer*, InlineVector<DeclaredRange, 2>> declared;
     vector<Recipe> recipes;
-    uint64_t uniqueReads = 0;
+    // Geometry is checked once per distinct buffer and access, not per draw.
+    InlineVector<std::pair<render::Buffer*, RgBufferAccess>, 8> checked;
+    const auto check = [&](render::Buffer* buffer, RgBufferAccess access) {
+        for (const auto& seen : checked)
+            if (seen.first == buffer && seen.second == access) return true;
+        if (!ctx.ValidateGeometryBuffer(buffer, access)) return false;
+        checked.push_back({buffer, access});
+        return true;
+    };
     Nullable<const MeshDrawCommand*> previousDraw{nullptr};
-    RgGraphicsProgramHandle previousProgram{};
-    Nullable<ShaderProgram*> resolvedBindingProgram{nullptr};
-    std::span<const RendererListPassBinding> programBindings;
+    render::GraphicsPipelineState* previousPipeline{nullptr};
+    Nullable<const ShaderProgram*> setsProgram{nullptr};
+    std::span<const PreparedShaderGroup> programSets;
     for (size_t index = 0; index < list.Commands.size(); ++index) {
         const auto& draw = list.GetCommand(index);
-        if (bindings && resolvedBindingProgram.Get() != draw.Program.Get()) {
-            resolvedBindingProgram = draw.Program.Get();
-            programBindings = bindings->Find(*draw.Program);
+        if (!draw.Program || !draw.Geometry) {
+            ctx.Reject("RendererListPreparation", "Draw requires a shader program and geometry");
+            return std::nullopt;
+        }
+        if (passSets && setsProgram.Get() != draw.Program.Get()) {
+            setsProgram = draw.Program.Get();
+            programSets = passSets->Find(*draw.Program);
         }
         const bool sameGeometry = previousDraw && previousDraw->Geometry.Get() == draw.Geometry.Get();
-        const auto declare = [&](render::Buffer& buffer, RgBufferAccess access, render::BufferRange range) {
-            auto& ranges = declared[&buffer];
-            for (const auto& seen : ranges)
-                if (seen.Offset == range.Offset && seen.Size == range.Size && seen.Access == access) return true;
-            const auto desc = buffer.GetDesc();
-            render::BufferStates state = render::BufferState::HostWrite;
-            if (desc.Memory == render::MemoryType::Device) {
-                state = render::BufferState::UNKNOWN;
-                if (desc.Usage.HasFlag(render::BufferUse::Vertex)) state |= render::BufferState::Vertex;
-                if (desc.Usage.HasFlag(render::BufferUse::Index)) state |= render::BufferState::Index;
-            }
-            if (!builder.ReadImmutableBuffer(buffer, state, access, range).IsValid()) return false;
-            ranges.push_back({range.Offset, range.Size, access});
-            ++uniqueReads;
-            return true;
-        };
         if (!sameGeometry) {
             for (const auto& vertex : draw.Geometry->VertexBuffers)
-                if (!declare(*vertex.View.Target, RgBufferAccess::Vertex, {vertex.View.Offset, vertex.View.Size})) return std::nullopt;
-            if (!declare(*draw.Geometry->Ibv.Target, RgBufferAccess::Index, {draw.Geometry->Ibv.Offset, render::BufferRange::All()})) return std::nullopt;
+                if (!check(vertex.View.Target, RgBufferAccess::Vertex)) return std::nullopt;
+            if (!check(draw.Geometry->Ibv.Target, RgBufferAccess::Index)) return std::nullopt;
         }
         const bool adjacent = sameGeometry && previousDraw->Program.Get() == draw.Program.Get() &&
                               previousDraw->PipelineState == draw.PipelineState &&
                               previousDraw->Geometry->Topology == draw.Geometry->Topology;
-        RgGraphicsProgramHandle program{};
-        if (adjacent) {
-            program = previousProgram;
-        } else {
+        render::GraphicsPipelineState* pipeline{nullptr};
+        if (adjacent)
+            pipeline = previousPipeline;
+        else {
             for (const auto& recipe : recipes) {
                 if (recipe.Program == draw.Program.Get() && recipe.State == draw.PipelineState &&
                     recipe.Layout == &draw.Geometry->VertexLayout && recipe.Topology == draw.Geometry->Topology) {
-                    program = recipe.Handle;
+                    pipeline = recipe.Pipeline;
                     break;
                 }
             }
-            if (!program.IsValid()) {
-                program = builder.UseGraphicsProgram(*draw.Program, draw.PipelineState, draw.Geometry->VertexLayout, draw.Geometry->Topology);
-                if (program.IsValid()) recipes.push_back({draw.Program.Get(), draw.PipelineState, &draw.Geometry->VertexLayout, draw.Geometry->Topology, program});
+            if (pipeline == nullptr) {
+                const Nullable<render::GraphicsPipelineState*> resolved = ctx.ResolveGraphicsPipeline(
+                    *draw.Program, draw.PipelineState, draw.Geometry->VertexLayout, draw.Geometry->Topology);
+                if (!resolved) return std::nullopt;
+                pipeline = resolved.Get();
+                recipes.push_back({draw.Program.Get(), draw.PipelineState, &draw.Geometry->VertexLayout,
+                                   draw.Geometry->Topology, pipeline});
             }
         }
-        if (!program.IsValid()) return std::nullopt;
-        prepared.Draws.push_back({&draw, {draw.Groups.data(), draw.Groups.size()}, program, programBindings});
+        prepared.Draws.push_back({&draw, {draw.Groups.data(), draw.Groups.size()}, programSets, pipeline});
         previousDraw = &draw;
-        previousProgram = program;
+        previousPipeline = pipeline;
     }
-    prepared.UniqueBufferReads = uniqueReads;
     return prepared;
 }
 
-void SubmitRendererList(const PreparedRendererList& list, RenderGraphRasterContext& ctx, DrawExecutionStats& stats) {
-    RADRAY_PROFILE_SCOPE_N("SubmitRendererList");
+void RecordRendererList(const PreparedRendererList& list, RenderGraphRasterContext& ctx, DrawExecutionStats& stats) {
+    RADRAY_PROFILE_SCOPE_N("RecordRendererList");
     if (list.Pass != ctx.GetPassHandle()) {
         stats.BindingFailure += list.Draws.size();
         stats.Skipped += list.Draws.size();
@@ -166,46 +159,61 @@ void SubmitRendererList(const PreparedRendererList& list, RenderGraphRasterConte
         return;
     }
     auto& commands = ctx.Encoder();
-    RgGraphicsProgramHandle lastProgram{};
-    std::span<const PreparedShaderGroup> lastNative{};
-    std::span<const RendererListPassBinding> lastGraph{};
-    bool haveProgram = false;
+    render::GraphicsPipelineState* lastPipeline{nullptr};
+    std::span<const PreparedShaderGroup> lastNative{}, lastPass{};
     Nullable<const GpuMesh::DrawData*> lastGeometry{nullptr};
     for (const auto& prepared : list.Draws) {
         const auto& draw = *prepared.Description;
-        const auto groups = prepared.Groups;
         ++stats.Commands;
-        const bool samePso = haveProgram && lastProgram.Index == prepared.Program.Index && lastProgram.Generation == prepared.Program.Generation;
-        if (!samePso) {
-            ctx.BindGraphicsProgram(prepared.Program);
-            lastProgram = prepared.Program;
-            haveProgram = true;
-            lastNative = {};
-            lastGraph = {};
+        // The list is plain data a caller can build by hand, so a missing pipeline degrades the draw
+        // instead of reaching the encoder.
+        if (prepared.Pipeline == nullptr) {
+            ++stats.PsoFailure;
+            ++stats.Skipped;
+            continue;
         }
-        const auto graphGroups = prepared.GraphGroups;
-        size_t nativeIndex = 0, graphIndex = 0;
-        while (nativeIndex < groups.size() || graphIndex < graphGroups.size()) {
-            if (graphIndex == graphGroups.size() || (nativeIndex < groups.size() && groups[nativeIndex].Group < graphGroups[graphIndex].Group)) {
-                const auto& group = groups[nativeIndex];
-                const bool unchanged = nativeIndex < lastNative.size() &&
-                                       group.Group == lastNative[nativeIndex].Group &&
-                                       group.Set.Get() == lastNative[nativeIndex].Set.Get() &&
-                                       group.DynamicOffsets == lastNative[nativeIndex].DynamicOffsets;
-                if (!unchanged) commands.BindPersistentShaderParameterSet(group.Group, group.Set.Get(), group.DynamicOffsets);
-                ++nativeIndex;
-            } else {
-                const auto& group = graphGroups[graphIndex];
-                const bool unchanged = graphIndex < lastGraph.size() &&
-                                       group.Program == lastGraph[graphIndex].Program && group.Group == lastGraph[graphIndex].Group &&
-                                       group.Parameters.Index == lastGraph[graphIndex].Parameters.Index &&
-                                       group.Parameters.Generation == lastGraph[graphIndex].Parameters.Generation;
-                if (!unchanged) ctx.BindParameterSet(group.Parameters);
-                ++graphIndex;
+        const bool samePso = prepared.Pipeline == lastPipeline;
+        if (!samePso) {
+            commands.BindGraphicsPipelineState(prepared.Pipeline);
+            lastPipeline = prepared.Pipeline;
+            lastNative = {};
+            lastPass = {};
+        }
+        // Both spans are sorted by group, so one merge walk binds them in group order and skips the
+        // groups the previous draw already left bound.
+        const auto groups = prepared.Groups;
+        const auto passGroups = prepared.PassGroups;
+        size_t nativeIndex = 0, passIndex = 0;
+        bool bound = true;
+        while (nativeIndex < groups.size() || passIndex < passGroups.size()) {
+            const bool native = passIndex == passGroups.size() ||
+                                (nativeIndex < groups.size() && groups[nativeIndex].Group < passGroups[passIndex].Group);
+            const auto& group = native ? groups[nativeIndex] : passGroups[passIndex];
+            const auto& last = native ? lastNative : lastPass;
+            const size_t at = native ? nativeIndex : passIndex;
+            const bool unchanged = at < last.size() && group.Group == last[at].Group &&
+                                   group.Set.Get() == last[at].Set.Get() && group.DynamicOffsets == last[at].DynamicOffsets;
+            if (!unchanged) {
+                if (!group.Set) {
+                    bound = false;
+                    break;
+                }
+                commands.BindShaderParameterSet(group);
             }
+            if (native)
+                ++nativeIndex;
+            else
+                ++passIndex;
+        }
+        if (!bound) {
+            ++stats.BindingFailure;
+            ++stats.Skipped;
+            lastNative = {};
+            lastPass = {};
+            continue;
         }
         lastNative = groups;
-        lastGraph = graphGroups;
+        lastPass = passGroups;
         if (!samePso || lastGeometry.Get() != draw.Geometry.Get()) {
             const auto bindings = std::span{draw.Geometry->VertexBuffers};
             for (size_t first = 0; first < bindings.size();) {

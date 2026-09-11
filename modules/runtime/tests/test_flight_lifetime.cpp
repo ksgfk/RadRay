@@ -2,7 +2,7 @@
 #include "gpu_submission_gate.h"
 #include <radray/runtime/render_framework/frame_draw_resources.h>
 #include <radray/runtime/render_framework/render_workload.h>
-#include <radray/runtime/render_framework/renderer_list_pass_bindings.h>
+#include <radray/runtime/render_framework/renderer_list_pass_sets.h>
 #include <radray/runtime/render_framework/view_state.h>
 
 namespace radray {
@@ -110,26 +110,35 @@ VK_BINDING(1, 1) Texture2D<float> Marker : register(t0, space1);
                 const RendererList* List;
                 DrawExecutionStats* Stats;
                 render::RenderBackend Backend;
-                std::optional<RendererListPassBindings> Bindings;
+                ShaderProgram* Program;
+                RgTextureViewHandle Marker;
+                array<uint32_t, 4> Constants;
+                string Declaration;
+                std::optional<RendererListPassSets> Sets;
                 std::optional<PreparedRendererList> Prepared;
             };
             graph.AddRasterPass<Draw>("1000 shared draws", [&](Draw& data, RenderGraphRasterBuilder& builder) {
-                data.List = &list; data.Stats = &stats; data.Backend = GetParam(); builder.SetColorAttachment(0, color);
-                array<uint32_t, 4> constants{11, 22, 33, 44}; string declaration{"Pass"};
-                const RgParameterBinding values[]{{declaration, 0, RgCBufferParameterBinding{std::as_bytes(std::span{constants})}}, {"Marker", 0, RgTextureParameterBinding{marker}}};
-                const RendererListProgramParameters parameters{program.Get(), 1, values};
-                data.Bindings = RendererListPassBindings::Create(builder, list, std::span{&parameters, 1}); ASSERT_TRUE(data.Bindings);
-                data.Prepared = PrepareRendererList(list, builder, &*data.Bindings); ASSERT_TRUE(data.Prepared);
-                constants.fill(0xdeadbeef); declaration.assign(100, 'x'); }, +[](const Draw& data, RenderGraphRasterContext& context) {
+                data.List = &list; data.Stats = &stats; data.Backend = GetParam(); data.Program = program.Get();
+                builder.SetColorAttachment(0, color);
+                data.Marker = builder.ReadTexture(marker);
+                data.Constants = {11, 22, 33, 44}; data.Declaration = "Pass"; }, +[](Draw& data, RenderGraphPrepareContext& ctx) {
+                const RgParameterBinding values[]{{data.Declaration, 0, RgCBufferParameterBinding{std::as_bytes(std::span{data.Constants})}}, {"Marker", 0, RgTextureParameterBinding{data.Marker}}};
+                const RendererListProgramParameters parameters{data.Program, 1, values};
+                data.Sets = RendererListPassSets::Create(ctx, *data.List, std::span{&parameters, 1});
+                if (!data.Sets) return false;
+                data.Prepared = PrepareRendererList(*data.List, ctx, &*data.Sets);
+                if (!data.Prepared) return false;
+                // The created set copied both the constant bytes and the declaration name.
+                data.Constants.fill(0xdeadbeef); data.Declaration.assign(100, 'x');
+                return true; }, +[](const Draw& data, RenderGraphRasterContext& context) {
                 context.Encoder().SetViewport(MakeViewport(data.Backend, 0, 0, 4, 4)); context.Encoder().SetScissor({0, 0, 4, 4});
-                SubmitRendererList(*data.Prepared, context, *data.Stats); });
+                RecordRendererList(*data.Prepared, context, *data.Stats); });
             const auto host = graph.NextVersion(graph.ImportBuffer(flight.External, "readback", RenderGraphExternalAccess::ObservableOutput));
             graph.AddCopyTextureToBufferPass("copy constants", color, host);
             HostRead(graph, host);
             ASSERT_TRUE(RenderGraphTestDriver::Execute(graph, *flight.Command).Success) << graph.GetReport().ToText();
             EXPECT_TRUE(stats.Succeeded());
             EXPECT_EQ(stats.Draws, 1000u);
-            EXPECT_EQ(graph.GetReport().GraphicsPipelineRequests, 1u);
             EXPECT_EQ(graph.GetReport().GraphicsPipelinePreparations, 1u);
             EXPECT_EQ(graph.GetReport().GraphicsPipelineCreations, frame == 1 ? 1u : 0u);
             const auto id = graph.GetReport().Resources[1].PhysicalId;

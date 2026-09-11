@@ -46,19 +46,29 @@ TEST_P(TemporalFeedbackTest, FeedbackPersistsAcrossGraphsAndSupportsPauseAndRese
         sampler.AddressS = sampler.AddressT = render::AddressMode::ClampToEdge;
         sampler.MinFilter = sampler.MagFilter = render::FilterMode::Linear;
         struct Data {
-            RgComputeProgramHandle Program;
-            RgParameterSetHandle Frame, Resources;
+            ShaderProgram* Program;
+            render::ComputePipelineState* Pipeline;
+            RgTextureViewHandle Output, Previous;
+            std::span<const byte> Constants;
+            render::SamplerDescriptor Sampler;
+            PreparedShaderGroup Frame, Resources;
         };
         graph.AddComputePass<Data>("feedback", [&](Data& data, RenderGraphComputeBuilder& builder) {
-            const RgParameterBinding constants[]{{"SignalFrame", 0, RgCBufferParameterBinding{values.GetBufferData(0)}}};
+            data.Program = program.Get(); data.Constants = values.GetBufferData(0); data.Sampler = sampler;
+            data.Output = builder.WriteTexture(current);
+            data.Previous = builder.ReadTexture(previous); }, +[](Data& data, RenderGraphPrepareContext& ctx) {
+            const RgParameterBinding constants[]{{"SignalFrame", 0, RgCBufferParameterBinding{data.Constants}}};
             const RgParameterBinding resources[]{
-                {"SignalOutput", 0, RgTextureParameterBinding{current, {}, RgParameterAccess::Write}},
-                {"SignalPrevious", 0, RgTextureParameterBinding{previous}},
-                {"SignalSampler", 0, RgSamplerParameterBinding{sampler}}};
-            data = {builder.UseComputeProgram(*program.Get()), builder.CreateParameterSet(*program.Get(), 0, constants), builder.CreateParameterSet(*program.Get(), 1, resources)}; }, +[](const Data& data, RenderGraphComputeContext& ctx) {
-            ctx.BindComputeProgram(data.Program);
-            ctx.BindParameterSet(data.Frame);
-            ctx.BindParameterSet(data.Resources);
+                {"SignalOutput", 0, RgTextureParameterBinding{data.Output}},
+                {"SignalPrevious", 0, RgTextureParameterBinding{data.Previous}},
+                {"SignalSampler", 0, RgSamplerParameterBinding{data.Sampler}}};
+            data.Pipeline = ctx.ResolveComputePipeline(*data.Program).Get();
+            data.Frame = ctx.CreateParameterSet(*data.Program, 0, constants);
+            data.Resources = ctx.CreateParameterSet(*data.Program, 1, resources);
+            return data.Pipeline != nullptr && data.Frame.IsValid() && data.Resources.IsValid(); }, +[](const Data& data, RenderGraphComputeContext& ctx) {
+            ctx.Encoder().BindComputePipelineState(data.Pipeline);
+            ctx.Encoder().BindShaderParameterSet(data.Frame);
+            ctx.Encoder().BindShaderParameterSet(data.Resources);
             ctx.Encoder().Dispatch(width / 8, height / 8, 1); });
         const auto destination = graph.NextVersion(graph.ImportBuffer(host, "feedback readback", RenderGraphExternalAccess::ObservableOutput));
         graph.AddCopyTextureToBufferPass("read feedback", current, destination);

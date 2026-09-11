@@ -65,8 +65,9 @@ VK_BINDING(0, 0) StructuredBuffer<uint> Values : register(t0);
     const auto buffer = graph.CreateBuffer({64 * 4, render::MemoryType::Device, render::BufferUse::Resource | render::BufferUse::UnorderedAccess, {}}, "64 integers");
     struct Raster {
         ShaderProgram* Program;
-        RgParameterSetHandle Set;
+        PreparedShaderGroup Set;
         render::RenderBackend Backend;
+        RgBufferValue Values;
     };
     const auto draw = +[](const Raster& data, RenderGraphRasterContext& context) {
         MaterialPipelineState state;
@@ -75,24 +76,45 @@ VK_BINDING(0, 0) StructuredBuffer<uint> Values : register(t0);
         const auto pso = data.Program->GetOrCreateGraphicsPipelineState(state, {}, PrimitiveTopology::TriangleList, context.PassState());
         ASSERT_TRUE(pso);
         context.Encoder().BindGraphicsPipelineState(pso.Get());
-        if (data.Set.IsValid()) context.BindParameterSet(data.Set);
+        if (data.Set.IsValid()) context.Encoder().BindShaderParameterSet(data.Set);
         context.Encoder().SetViewport(MakeViewport(data.Backend, 0, 0, 64, 64));
         context.Encoder().SetScissor({0, 0, 64, 64});
         context.Encoder().Draw(3, 1, 0, 0);
     };
     graph.AddRasterPass<Raster>("raster producer", [&](Raster& data, RenderGraphRasterBuilder& builder) { data = {first.Get(), {}, GetParam()}; builder.SetColorAttachment(0, input); }, draw);
     struct Compute {
-        RgComputeProgramHandle Program;
-        RgParameterSetHandle Set;
+        ShaderProgram* Shader;
+        render::ComputePipelineState* Program;
+        PreparedShaderGroup Set;
+        RgTextureViewHandle Image;
+        RgBufferValue Values;
     };
-    graph.AddComputePass<Compute>("compute 2i+1", [&](Compute& data, RenderGraphComputeBuilder& builder) {
-        data.Program = builder.UseComputeProgram(*compute);
-        const RgParameterBinding bindings[]{{"Image", 0, RgTextureParameterBinding{input}}, {"Values", 0, RgBufferParameterBinding{buffer, {0, 256}, 4, render::TextureFormat::UNKNOWN, RgParameterAccess::Write}}};
-        data.Set = builder.CreateParameterSet(*compute, 0, bindings); }, +[](const Compute& data, RenderGraphComputeContext& context) { context.BindComputeProgram(data.Program); context.BindParameterSet(data.Set); context.Encoder().Dispatch(1, 1, 1); });
-    graph.AddRasterPass<Raster>("raster consumer", [&](Raster& data, RenderGraphRasterBuilder& builder) {
-        data = {last.Get(), {}, GetParam()}; builder.SetColorAttachment(0, output);
-        const RgParameterBinding binding{"Values", 0, RgBufferParameterBinding{buffer, {0, 256}, 4}};
-        data.Set = builder.CreateParameterSet(*last, 0, std::span{&binding, 1}); }, draw);
+    graph.AddComputePass<Compute>("compute 2i+1",
+        [&](Compute& data, RenderGraphComputeBuilder& builder) {
+            data.Shader = compute.Get();
+            data.Image = builder.ReadTexture(input);
+            data.Values = builder.WriteBuffer(buffer, RgBufferAccess::UnorderedAccess, {0, 256}); },
+        +[](Compute& data, RenderGraphPrepareContext& ctx) {
+            const RgParameterBinding bindings[]{{"Image", 0, RgTextureParameterBinding{data.Image}},
+                                                {"Values", 0, RgBufferParameterBinding{data.Values, {0, 256}, 4}}};
+            data.Program = ctx.ResolveComputePipeline(*data.Shader).Get();
+            data.Set = ctx.CreateParameterSet(*data.Shader, 0, bindings);
+            return data.Program != nullptr && data.Set.IsValid(); },
+        +[](const Compute& data, RenderGraphComputeContext& context) {
+            context.Encoder().BindComputePipelineState(data.Program);
+            context.Encoder().BindShaderParameterSet(data.Set);
+            context.Encoder().Dispatch(1, 1, 1); });
+    graph.AddRasterPass<Raster>("raster consumer",
+        [&](Raster& data, RenderGraphRasterBuilder& builder) {
+            data.Program = last.Get();
+            data.Backend = GetParam();
+            data.Values = builder.ReadBuffer(buffer, RgBufferAccess::ShaderRead, {0, 256});
+            builder.SetColorAttachment(0, output); },
+        +[](Raster& data, RenderGraphPrepareContext& ctx) {
+            const RgParameterBinding binding{"Values", 0, RgBufferParameterBinding{data.Values, {0, 256}, 4}};
+            data.Set = ctx.CreateParameterSet(*data.Program, 0, std::span{&binding, 1});
+            return data.Set.IsValid(); },
+        draw);
     const auto unused = graph.CreateTexture(inputDesc, "dead legal texture");
     graph.AddRasterPass<Raster>("dead legal producer", [&](Raster& data, RenderGraphRasterBuilder& builder) { data = {first.Get(), {}, GetParam()}; builder.SetColorAttachment(0, unused); }, draw);
     const auto pitch = Align(uint64_t{64 * 4}, device.GetDetail().TextureDataPitchAlignment);
@@ -223,41 +245,79 @@ VK_BINDING(0, 0) RWStructuredBuffer<uint> Counts : register(u0);
         auto counts = graph.CreateBuffer({12, render::MemoryType::Device, render::BufferUse::UnorderedAccess | render::BufferUse::CopySource, {}}, "counts");
         const auto color = graph.CreateTexture({render::TextureDimension::Dim2D, 2, 1, 1, 1, 1, render::TextureFormat::RGBA8_UNORM, render::MemoryType::Device, render::TextureUse::RenderTarget, {}}, "raster");
         struct Compute {
-            RgComputeProgramHandle Program;
-            RgParameterSetHandle Set;
+            ShaderProgram* Shader;
+            render::ComputePipelineState* Program;
+            PreparedShaderGroup Set;
             RgIndirectArgumentsHandle Indirect;
+            RgBufferValue Arguments, Counts;
+            array<uint32_t, 4> Count;
         };
-        graph.AddComputePass<Compute>("generate", [&](Compute& data, RenderGraphComputeBuilder& builder) {
-            const array<uint32_t, 4> value{count, 0, 0, 0};
-            const RgParameterBinding bindings[]{{"Count", 0, RgCBufferParameterBinding{std::as_bytes(std::span{value})}},
-                {"Arguments", 0, RgBufferParameterBinding{args, {0, 48}, 0, render::TextureFormat::UNKNOWN, RgParameterAccess::Write}},
-                {"Counts", 0, RgBufferParameterBinding{counts, {0, 12}, 4, render::TextureFormat::UNKNOWN, RgParameterAccess::Write}}};
-            data.Program = builder.UseComputeProgram(*producer); data.Set = builder.CreateParameterSet(*producer, 0, bindings); }, +[](const Compute& data, RenderGraphComputeContext& pass) { pass.BindComputeProgram(data.Program); pass.BindParameterSet(data.Set); pass.Encoder().Dispatch(1, 1, 1); });
+        graph.AddComputePass<Compute>("generate",
+            [&](Compute& data, RenderGraphComputeBuilder& builder) {
+                data.Shader = producer.Get();
+                data.Count = {count, 0, 0, 0};
+                data.Arguments = builder.WriteBuffer(args, RgBufferAccess::UnorderedAccess, {0, 48});
+                data.Counts = builder.WriteBuffer(counts, RgBufferAccess::UnorderedAccess, {0, 12}); },
+            +[](Compute& data, RenderGraphPrepareContext& ctx) {
+                const RgParameterBinding bindings[]{{"Count", 0, RgCBufferParameterBinding{std::as_bytes(std::span{data.Count})}},
+                                                    {"Arguments", 0, RgBufferParameterBinding{data.Arguments, {0, 48}}},
+                                                    {"Counts", 0, RgBufferParameterBinding{data.Counts, {0, 12}, 4}}};
+                data.Program = ctx.ResolveComputePipeline(*data.Shader).Get();
+                data.Set = ctx.CreateParameterSet(*data.Shader, 0, bindings);
+                return data.Program != nullptr && data.Set.IsValid(); },
+            +[](const Compute& data, RenderGraphComputeContext& pass) {
+                pass.Encoder().BindComputePipelineState(data.Program);
+                pass.Encoder().BindShaderParameterSet(data.Set);
+                pass.Encoder().Dispatch(1, 1, 1); });
         struct Raster {
             ShaderProgram* Program;
             render::Buffer* Index;
             render::RenderBackend Backend;
-            RgParameterSetHandle Set;
+            PreparedShaderGroup Set;
             RgIndirectArgumentsHandle Draw, Indexed;
+            RgBufferValue Counts;
         };
         counts = graph.NextVersion(counts);
-        graph.AddRasterPass<Raster>("count fragments", [&](Raster& data, RenderGraphRasterBuilder& builder) {
-            data.Program = raster.Get(); data.Index = index.Get(); data.Backend = GetParam(); builder.SetColorAttachment(0, color);
-            const RgParameterBinding binding{"Counts", 0, RgBufferParameterBinding{counts, {0, 12}, 4, render::TextureFormat::UNKNOWN, RgParameterAccess::ReadWrite}};
-            data.Set = builder.CreateParameterSet(*raster, 0, std::span{&binding, 1});
-            data.Draw = builder.ReadIndirectArguments(args, RgIndirectCommand::Draw, 0, 1);
-            data.Indexed = builder.ReadIndirectArguments(args, RgIndirectCommand::DrawIndexed, 16, 1); }, +[](const Raster& data, RenderGraphRasterContext& pass) {
-            MaterialPipelineState state; state.Primitive.Cull = render::CullMode::None; state.DepthStencil.DepthTestEnable = state.DepthStencil.DepthWriteEnable = false;
-            const auto pso = data.Program->GetOrCreateGraphicsPipelineState(state, {}, PrimitiveTopology::TriangleList, pass.PassState()); ASSERT_TRUE(pso);
-            pass.Encoder().BindGraphicsPipelineState(pso.Get()); pass.BindParameterSet(data.Set);
-            pass.Encoder().SetViewport(MakeViewport(data.Backend, 0, 0, 1, 1)); pass.Encoder().SetScissor({0, 0, 1, 1}); pass.Encoder().DrawIndirect(data.Draw);
-            pass.Encoder().SetViewport(MakeViewport(data.Backend, 1, 0, 1, 1)); pass.Encoder().SetScissor({1, 0, 1, 1});
-            pass.Encoder().BindIndexBuffer({data.Index, 0, 4}); pass.Encoder().DrawIndexedIndirect(data.Indexed); });
+        graph.AddRasterPass<Raster>("count fragments",
+            [&](Raster& data, RenderGraphRasterBuilder& builder) {
+                data.Program = raster.Get(); data.Index = index.Get(); data.Backend = GetParam();
+                builder.SetColorAttachment(0, color);
+                data.Counts = builder.ReadWriteBuffer(counts, RgBufferAccess::UnorderedAccess, {0, 12});
+                data.Draw = builder.ReadIndirectArguments(args, RgIndirectCommand::Draw, 0, 1);
+                data.Indexed = builder.ReadIndirectArguments(args, RgIndirectCommand::DrawIndexed, 16, 1); },
+            +[](Raster& data, RenderGraphPrepareContext& ctx) {
+                const RgParameterBinding binding{"Counts", 0, RgBufferParameterBinding{data.Counts, {0, 12}, 4}};
+                data.Set = ctx.CreateParameterSet(*data.Program, 0, std::span{&binding, 1});
+                return data.Set.IsValid() && ctx.ValidateGeometryBuffer(data.Index, RgBufferAccess::Index); },
+            +[](const Raster& data, RenderGraphRasterContext& pass) {
+                MaterialPipelineState state; state.Primitive.Cull = render::CullMode::None;
+                state.DepthStencil.DepthTestEnable = state.DepthStencil.DepthWriteEnable = false;
+                const auto pso = data.Program->GetOrCreateGraphicsPipelineState(state, {}, PrimitiveTopology::TriangleList, pass.PassState());
+                ASSERT_TRUE(pso);
+                pass.Encoder().BindGraphicsPipelineState(pso.Get());
+                pass.Encoder().BindShaderParameterSet(data.Set);
+                pass.Encoder().SetViewport(MakeViewport(data.Backend, 0, 0, 1, 1));
+                pass.Encoder().SetScissor({0, 0, 1, 1});
+                pass.Encoder().DrawIndirect(data.Draw);
+                pass.Encoder().SetViewport(MakeViewport(data.Backend, 1, 0, 1, 1));
+                pass.Encoder().SetScissor({1, 0, 1, 1});
+                pass.Encoder().BindIndexBuffer({data.Index, 0, 4});
+                pass.Encoder().DrawIndexedIndirect(data.Indexed); });
         counts = graph.NextVersion(counts);
-        graph.AddComputePass<Compute>("indirect dispatch", [&](Compute& data, RenderGraphComputeBuilder& builder) {
-            const RgParameterBinding binding{"Counts", 0, RgBufferParameterBinding{counts, {0, 12}, 4, render::TextureFormat::UNKNOWN, RgParameterAccess::ReadWrite}};
-            data.Program = builder.UseComputeProgram(*consumer); data.Set = builder.CreateParameterSet(*consumer, 0, std::span{&binding, 1});
-            data.Indirect = builder.ReadIndirectArguments(args, RgIndirectCommand::Dispatch, 36, 1); }, +[](const Compute& data, RenderGraphComputeContext& pass) { pass.BindComputeProgram(data.Program); pass.BindParameterSet(data.Set); pass.Encoder().DispatchIndirect(data.Indirect); });
+        graph.AddComputePass<Compute>("indirect dispatch",
+            [&](Compute& data, RenderGraphComputeBuilder& builder) {
+                data.Shader = consumer.Get();
+                data.Counts = builder.ReadWriteBuffer(counts, RgBufferAccess::UnorderedAccess, {0, 12});
+                data.Indirect = builder.ReadIndirectArguments(args, RgIndirectCommand::Dispatch, 36, 1); },
+            +[](Compute& data, RenderGraphPrepareContext& ctx) {
+                const RgParameterBinding binding{"Counts", 0, RgBufferParameterBinding{data.Counts, {0, 12}, 4}};
+                data.Program = ctx.ResolveComputePipeline(*data.Shader).Get();
+                data.Set = ctx.CreateParameterSet(*data.Shader, 0, std::span{&binding, 1});
+                return data.Program != nullptr && data.Set.IsValid(); },
+            +[](const Compute& data, RenderGraphComputeContext& pass) {
+                pass.Encoder().BindComputePipelineState(data.Program);
+                pass.Encoder().BindShaderParameterSet(data.Set);
+                pass.Encoder().DispatchIndirect(data.Indirect); });
         auto buffer = device.CreateBuffer({12, render::MemoryType::ReadBack, render::BufferUse::MapRead | render::BufferUse::CopyDestination, {}});
         ASSERT_TRUE(buffer);
         RenderExternalBuffer external{buffer.Get(), buffer->GetDesc(), render::BufferState::CopyDestination};
@@ -310,43 +370,71 @@ VK_BINDING(2, 0) RWStructuredBuffer<uint> Arguments : register(u2);
             render::Buffer* Indices{nullptr};
         } native;
         struct Compute {
-            RgComputeProgramHandle Program;
-            RgParameterSetHandle Set;
-            RgBufferValue Vertices, Indices;
+            ShaderProgram* Shader;
+            render::ComputePipelineState* Program;
+            PreparedShaderGroup Set;
+            RgBufferValue Vertices, Indices, Arguments;
             NativeGeometry* Native;
         };
-        graph.AddComputePass<Compute>("generate", [&](Compute& data, RenderGraphComputeBuilder& builder) {
-            const RgParameterBinding bindings[]{
-                {"Vertices",0,RgBufferParameterBinding{vertices,render::BufferRange::AllRange(),12,render::TextureFormat::UNKNOWN,RgParameterAccess::Write}},
-                {"Indices",0,RgBufferParameterBinding{indices,render::BufferRange::AllRange(),4,render::TextureFormat::UNKNOWN,RgParameterAccess::Write}},
-                {"Arguments",0,RgBufferParameterBinding{arguments,render::BufferRange::AllRange(),4,render::TextureFormat::UNKNOWN,RgParameterAccess::Write}}};
-            data = {builder.UseComputeProgram(*producer), builder.CreateParameterSet(*producer,0,bindings),vertices,indices,&native}; }, +[](const Compute& data, RenderGraphComputeContext& ctx) {
-            data.Native->Vertices = ctx.GetBuffer(data.Vertices); data.Native->Indices = ctx.GetBuffer(data.Indices);
-            ctx.BindComputeProgram(data.Program); ctx.BindParameterSet(data.Set); ctx.Encoder().Dispatch(1,1,1); });
+        graph.AddComputePass<Compute>("generate",
+            [&](Compute& data, RenderGraphComputeBuilder& builder) {
+                data.Shader = producer.Get();
+                data.Native = &native;
+                data.Vertices = builder.WriteBuffer(vertices, RgBufferAccess::UnorderedAccess);
+                data.Indices = builder.WriteBuffer(indices, RgBufferAccess::UnorderedAccess);
+                data.Arguments = builder.WriteBuffer(arguments, RgBufferAccess::UnorderedAccess); },
+            +[](Compute& data, RenderGraphPrepareContext& ctx) {
+                const RgParameterBinding bindings[]{
+                    {"Vertices", 0, RgBufferParameterBinding{data.Vertices, render::BufferRange::AllRange(), 12}},
+                    {"Indices", 0, RgBufferParameterBinding{data.Indices, render::BufferRange::AllRange(), 4}},
+                    {"Arguments", 0, RgBufferParameterBinding{data.Arguments, render::BufferRange::AllRange(), 4}}};
+                data.Program = ctx.ResolveComputePipeline(*data.Shader).Get();
+                data.Set = ctx.CreateParameterSet(*data.Shader, 0, bindings);
+                data.Native->Vertices = ctx.GetBuffer(data.Vertices);
+                data.Native->Indices = ctx.GetBuffer(data.Indices);
+                return data.Program != nullptr && data.Set.IsValid(); },
+            +[](const Compute& data, RenderGraphComputeContext& ctx) {
+                ctx.Encoder().BindComputePipelineState(data.Program);
+                ctx.Encoder().BindShaderParameterSet(data.Set);
+                ctx.Encoder().Dispatch(1, 1, 1); });
         const auto target = graph.CreateTexture({render::TextureDimension::Dim2D, 4, 4, 1, 1, 1, render::TextureFormat::R32_UINT, render::MemoryType::Device, render::TextureUse::RenderTarget | render::TextureUse::CopySource, {}}, "target");
         struct Raster {
-            RgGraphicsProgramHandle Program;
+            render::GraphicsPipelineState* Program;
             RgIndirectArgumentsHandle Arguments;
             const NativeGeometry* Native;
             ShaderProgram* Shader;
             render::RenderBackend Backend;
+            MaterialPipelineState State;
+            PrimitiveVertexLayout Layout;
         };
-        graph.AddRasterPass<Raster>("consume", [&](Raster& data, RenderGraphRasterBuilder& builder) {
-            builder.SetColorAttachment(0,target);
-            if (scenario != 0) builder.ReadBuffer(vertices,scenario == 1 ? RgBufferAccess::ShaderRead : RgBufferAccess::Vertex);
-            builder.ReadBuffer(indices,scenario == 2 ? RgBufferAccess::ShaderRead : RgBufferAccess::Index);
-            const auto program = builder.UseGraphicsProgram(*graphics,state,layout);
-            EXPECT_EQ(program,builder.UseGraphicsProgram(*graphics,state,layout));
-            data = {program,builder.ReadIndirectArguments(arguments,RgIndirectCommand::DrawIndexed),&native,graphics.Get(),GetParam()}; }, +[](const Raster& data, RenderGraphRasterContext& ctx) {
-            // Native creation has already finished when the record callback starts, including the cold frame.
-            const auto count = data.Shader->GetGraphicsPipelineStateCount();
-            EXPECT_EQ(count,1u);
-            ctx.BindGraphicsProgram(data.Program);
-            const render::VertexBufferBinding binding{0,{data.Native->Vertices,0,36}};
-            ctx.Encoder().BindVertexBuffers(std::span{&binding,1}); ctx.Encoder().BindIndexBuffer({data.Native->Indices,0,4});
-            ctx.Encoder().SetViewport(MakeViewport(data.Backend,0,0,4,4)); ctx.Encoder().SetScissor({0,0,4,4});
-            ctx.Encoder().DrawIndexedIndirect(data.Arguments);
-            EXPECT_EQ(data.Shader->GetGraphicsPipelineStateCount(),count); });
+        graph.AddRasterPass<Raster>("consume",
+            [&](Raster& data, RenderGraphRasterBuilder& builder) {
+                builder.SetColorAttachment(0, target);
+                if (scenario != 0) builder.ReadBuffer(vertices, scenario == 1 ? RgBufferAccess::ShaderRead : RgBufferAccess::Vertex);
+                builder.ReadBuffer(indices, scenario == 2 ? RgBufferAccess::ShaderRead : RgBufferAccess::Index);
+                data.Arguments = builder.ReadIndirectArguments(arguments, RgIndirectCommand::DrawIndexed);
+                data.Native = &native;
+                data.Shader = graphics.Get();
+                data.Backend = GetParam();
+                data.State = state;
+                data.Layout = layout; },
+            +[](Raster& data, RenderGraphPrepareContext& ctx) {
+                data.Program = ctx.ResolveGraphicsPipeline(*data.Shader, data.State, data.Layout).Get();
+                if (!data.Program) return false;
+                return ctx.ValidateGeometryBuffer(data.Native->Vertices, RgBufferAccess::Vertex) &&
+                       ctx.ValidateGeometryBuffer(data.Native->Indices, RgBufferAccess::Index); },
+            +[](const Raster& data, RenderGraphRasterContext& ctx) {
+                // Native creation has already finished when the record callback starts, including the cold frame.
+                const auto count = data.Shader->GetGraphicsPipelineStateCount();
+                EXPECT_EQ(count, 1u);
+                ctx.Encoder().BindGraphicsPipelineState(data.Program);
+                const render::VertexBufferBinding binding{0, {data.Native->Vertices, 0, 36}};
+                ctx.Encoder().BindVertexBuffers(std::span{&binding, 1});
+                ctx.Encoder().BindIndexBuffer({data.Native->Indices, 0, 4});
+                ctx.Encoder().SetViewport(MakeViewport(data.Backend, 0, 0, 4, 4));
+                ctx.Encoder().SetScissor({0, 0, 4, 4});
+                ctx.Encoder().DrawIndexedIndirect(data.Arguments);
+                EXPECT_EQ(data.Shader->GetGraphicsPipelineStateCount(), count); });
         const auto pitch = Align(uint64_t{16}, device.GetDetail().TextureDataPitchAlignment);
         auto readback = device.CreateBuffer({pitch * 4, render::MemoryType::ReadBack, render::BufferUse::CopyDestination | render::BufferUse::MapRead, {}});
         ASSERT_TRUE(readback);
@@ -355,7 +443,6 @@ VK_BINDING(2, 0) RWStructuredBuffer<uint> Arguments : register(u2);
         graph.AddCopyTextureToBufferPass("read pixels", target, host);
         HostRead(graph, host);
         EXPECT_EQ(Run(graph), scenario >= 3) << graph.GetReport().ToText();
-        EXPECT_EQ(graph.GetReport().GraphicsPipelineRequests, 2u);
         EXPECT_EQ(graph.GetReport().GraphicsPipelinePreparations, 1u);
         EXPECT_EQ(graph.GetReport().GraphicsPipelineCreations, scenario == 0 ? 1u : 0u);
         if (scenario < 3) {

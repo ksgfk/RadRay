@@ -54,7 +54,7 @@ bool BuildForwardHdrView(RenderGraph& graph, RenderPipelineContext& context, ren
                          const ForwardShadowAtlas& shadows, bool auxiliary, ForwardLitMeshPassProcessor* sharedLit = nullptr);
 
 bool BuildForwardOutputOverlay(RenderGraph& graph, RenderPipelineContext& context, const ForwardEffectPrograms& programs,
-                               const ForwardOutputOverlay& overlay, render::RenderBackend backend, bool& success, std::span<RenderGraphOutputBinding> outputs);
+                               const ForwardOutputOverlay& overlay, render::RenderBackend backend, std::span<RenderGraphOutputBinding> outputs);
 
 }  // namespace forward_detail
 }  // namespace radray

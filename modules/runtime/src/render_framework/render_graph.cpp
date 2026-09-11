@@ -81,14 +81,6 @@ void AddUnique(vector<uint32_t>& values, uint32_t value) {
     if (std::find(values.begin(), values.end(), value) == values.end()) values.push_back(value);
 }
 
-bool IsReadAccess(RgParameterAccess access) noexcept {
-    return access == RgParameterAccess::Read || access == RgParameterAccess::ReadWrite;
-}
-
-bool IsWriteAccess(RgParameterAccess access) noexcept {
-    return access == RgParameterAccess::Write || access == RgParameterAccess::ReadWrite;
-}
-
 render::ShaderStages ProgramStages(const ShaderProgram& program) noexcept {
     render::ShaderStages stages{render::ShaderStage::UNKNOWN};
     for (const shader::WireEntryRecord& entry : program.GetArtifact().Generic().Entries()) {
@@ -135,8 +127,11 @@ void PlotGraphCpuStats(const RenderGraphExecutionReport& report) {
 }  // namespace
 
 struct RenderGraphFrameResources::Impl {
+    // Keyed by the layout's binding record, not by its declaration name: a per-frame key must not
+    // copy strings. BindingHandle exposes only equality, so the hash below covers the value alone
+    // and lets equality separate two records that share it.
     struct ParameterValue {
-        string Declaration;
+        render::BindingHandle Handle;
         uint32_t ArrayElement{0};
         render::ShaderParameterValue Value;
 
@@ -157,7 +152,6 @@ struct RenderGraphFrameResources::Impl {
             };
             mix(key.Group);
             for (const ParameterValue& binding : key.Values) {
-                mix(std::hash<string>{}(binding.Declaration));
                 mix(binding.ArrayElement);
                 mix(binding.Value.index());
                 std::visit(
@@ -193,6 +187,8 @@ struct RenderGraphFrameResources::Impl {
     // Sets are released before the upload pages and pooled resources they reference.
     vector<unique_ptr<render::ShaderParameterSet>> Sets;
     unordered_map<ParameterSetKey, render::ShaderParameterSet*, ParameterSetKeyHash> SetCache;
+    // Scratch for the key under construction, reused by every set built in a frame.
+    ParameterSetKey KeyScratch;
     GraphCompileWorkspace CompileWorkspace;
 };
 
@@ -239,7 +235,7 @@ struct RenderGraph::Impl {
         uint32_t Physical{InvalidIndex};
         vector<uint32_t> VersionParents{InvalidIndex, 0};
         vector<uint64_t> BufferBoundaries;
-        bool Port{false}, Immutable{false};
+        bool Port{false};
         uint32_t Connection{InvalidIndex}, ConnectionVersion{0};
         vector<std::pair<uint32_t, uint32_t>> ResolvedValues;
         render::TextureDescriptor TextureDesc;
@@ -384,57 +380,12 @@ struct RenderGraph::Impl {
         uint64_t Offset{0};
         uint32_t Count{0};
     };
-    struct ComputeProgram {
-        uint32_t Pass{InvalidIndex};
-        ShaderProgram* Program{nullptr};
-        Nullable<render::ComputePipelineState*> PipelineState{nullptr};
-    };
-    struct GraphicsProgram {
-        uint32_t Pass;
-        ShaderProgram* Program;
-        MaterialPipelineState State;
-        PrimitiveVertexLayout Layout;
-        PrimitiveTopology Topology;
-        Nullable<render::GraphicsPipelineState*> PipelineState{nullptr};
-    };
-    struct CBufferBytes {
-        vector<byte> Bytes;
-    };
-    struct TextureParameter {
-        uint32_t View{InvalidIndex};
-        uint32_t Resource{InvalidIndex};
-    };
-    struct BufferParameter {
-        uint32_t Resource{InvalidIndex};
-        render::BufferRange Range{};
-        uint32_t StructureByteStride{0};
-        render::TextureFormat Format{render::TextureFormat::UNKNOWN};
-    };
-    struct SamplerParameter {
-        render::SamplerDescriptor Desc{};
-    };
-    using ParameterValue = std::variant<CBufferBytes, TextureParameter, BufferParameter, SamplerParameter>;
-    struct ParameterBinding {
-        string Declaration;
-        uint32_t ArrayElement{0};
-        render::ShaderBindingInfo Info{};
-        ParameterValue Value;
-    };
-    struct ParameterSet {
-        uint32_t Pass{InvalidIndex};
-        ShaderProgram* Program{nullptr};
-        uint32_t Group{0};
-        vector<ParameterBinding> Bindings;
-        Nullable<render::ShaderParameterSet*> Native{nullptr};
-        vector<render::ShaderParameterDynamicOffset> DynamicOffsets;
-    };
     struct Pass {
         std::source_location Location;
         unique_ptr<Payload> Data;
         vector<Access> Accesses;
         vector<CellAccess> Cells;
         vector<uint32_t> DeclaredViews, DeclaredBuffers;
-        unordered_map<render::Buffer*, uint32_t> BufferReadStates;
         vector<std::optional<Color>> Colors;
         std::optional<Depth> DepthAttachment;
         std::optional<Copy> CopyOp;
@@ -469,11 +420,7 @@ struct RenderGraph::Impl {
     vector<View> Views;
     vector<Pass> Passes;
     vector<IndirectArguments> IndirectArgumentsRecords;
-    vector<ComputeProgram> ComputePrograms;
-    vector<GraphicsProgram> GraphicsPrograms;
-    unordered_map<ShaderProgram*, vector<uint32_t>> GraphicsProgramIndices;
     unordered_map<render::Buffer*, uint32_t> NativeBuffers;
-    vector<ParameterSet> ParameterSets;
     vector<shared_ptr<void>> Owners;
     RenderGraphCompileOptions Options;
     CompiledRenderGraph CompiledGraph;
@@ -621,23 +568,11 @@ bool RenderGraph::PassWroteTexture(RgPassHandle pass, RgTextureValue texture) co
 }
 
 RgPassHandle RenderGraphPassBuilder::GetPassHandle() const noexcept { return {_pass, _graph.GetGeneration()}; }
-bool RenderGraphPassBuilder::OwnsParameterSet(RgParameterSetHandle handle, const ShaderProgram& program, uint32_t group) const noexcept {
-    const auto& impl = *_graph._impl;
-    if (handle.Generation != impl.Generation || handle.Index >= impl.ParameterSets.size()) return false;
-    const auto& set = impl.ParameterSets[handle.Index];
-    return set.Pass == _pass && set.Program == &program && set.Group == group;
-}
 void RenderGraphPassBuilder::Reject(std::string_view code, std::string_view message, std::string_view binding) {
     _graph._impl->Error(code, message, _pass, InvalidIndex, binding);
 }
 
 RgPassHandle RenderGraphRasterContext::GetPassHandle() const noexcept { return {_pass, _graph.GetGeneration()}; }
-bool RenderGraphRasterContext::OwnsParameterSet(RgParameterSetHandle handle, const ShaderProgram& program, uint32_t group) const noexcept {
-    const auto& impl = *_graph._impl;
-    if (handle.Generation != impl.Generation || handle.Index >= impl.ParameterSets.size()) return false;
-    const auto& set = impl.ParameterSets[handle.Index];
-    return set.Pass == _pass && set.Program == &program && set.Group == group && set.Native.HasValue();
-}
 const RenderGraphExecutionReport& RenderGraph::GetReport() const noexcept { return _impl->Report; }
 
 RgTextureValue RenderGraph::CreateTexture(const render::TextureDescriptor& desc, std::string_view name, std::source_location location) {
@@ -700,10 +635,6 @@ RgBufferValue RenderGraph::ImportBuffer(RenderExternalBuffer& buffer, std::strin
     for (uint32_t i = 0; i < impl.Resources.size(); ++i) {
         auto& existing = impl.Resources[i];
         if (!existing.ExternalBuffer || existing.ExternalBuffer->Buffer != buffer.Buffer) continue;
-        if (existing.Immutable && access != RenderGraphExternalAccess::ReadOnly) {
-            impl.Error("ImmutableAssetWrite", "An immutable asset cannot be imported for writing");
-            return {};
-        }
         const auto& first = *existing.ExternalBuffer;
         if (!(BufferPoolKey{first.Desc} == BufferPoolKey{buffer.Desc}) || first.State != buffer.State || first.ContentValid != buffer.ContentValid) {
             impl.Error("ConflictingImport", "One native buffer identity has conflicting descriptors, states or content validity");
@@ -946,11 +877,6 @@ bool RenderGraph::Impl::ResolvePorts() {
         view.Version = value.second;
     }
     for (auto& arguments : IndirectArgumentsRecords) arguments.Resource = mapped(arguments.Resource, 0).first;
-    for (auto& set : ParameterSets)
-        for (auto& binding : set.Bindings) {
-            if (auto* buffer = std::get_if<BufferParameter>(&binding.Value)) buffer->Resource = mapped(buffer->Resource, 0).first;
-            if (auto* texture = std::get_if<TextureParameter>(&binding.Value)) texture->Resource = mapped(texture->Resource, 0).first;
-        }
     return true;
 }
 
@@ -1075,34 +1001,6 @@ RgBufferValue RenderGraph::UseBuffer(uint32_t pass, RgBufferValue buffer, RgBuff
     return buffer;
 }
 RgTextureViewHandle RenderGraphPassBuilder::ReadTexture(RgTextureValue texture, const RgTextureViewDesc& view) { return _graph.UseTexture(_pass, texture, view, render::TextureViewUsage::Resource, true, false, true); }
-RgBufferValue RenderGraphPassBuilder::ReadImmutableBuffer(render::Buffer& buffer, render::BufferStates state, RgBufferAccess access, render::BufferRange range, shared_ptr<void> owner) {
-    auto& impl = *_graph._impl;
-    if (!impl.Mutable()) return {};
-    const auto required = BufferAccessInfo(access).first;
-    const uint32_t writes = uint32_t(render::BufferState::UnorderedAccess) | uint32_t(render::BufferState::CopyDestination) | uint32_t(render::BufferState::Undefined);
-    if (!state || (state.value() & writes) || (buffer.GetDesc().Memory == render::MemoryType::Device && !state.HasFlag(required))) {
-        impl.Error("ImmutableAssetState", "Immutable geometry requires a compatible persistent read state", _pass);
-        return {};
-    }
-    for (uint32_t i = 0; i < impl.Resources.size(); ++i) {
-        const auto& resource = impl.Resources[i];
-        if (!resource.ExternalBuffer || resource.ExternalBuffer->Buffer != &buffer) continue;
-        if (!resource.Immutable) {
-            for (const auto& declared : impl.Passes[_pass].Accesses)
-                if (declared.Resource == i && declared.Read && (declared.State & uint32_t(required)) != 0) return {i, impl.Generation, declared.Version};
-            impl.Error("ImmutableAssetIdentity", "Graph geometry requires an explicit read of its produced value", _pass, i);
-            return {};
-        }
-        _graph.Retain(std::move(owner));
-        return ReadBuffer({i, impl.Generation, 0}, access, range);
-    }
-    auto external = make_shared<RenderExternalBuffer>(RenderExternalBuffer{&buffer, buffer.GetDesc(), state, true, false, std::move(owner)});
-    const auto value = _graph.ImportBuffer(*external, "Immutable.Geometry", RenderGraphExternalAccess::ReadOnly);
-    if (!value.IsValid()) return {};
-    impl.Resources[value.Index].Immutable = true;
-    _graph.Retain(external);
-    return ReadBuffer(value, access, range);
-}
 RgBufferValue RenderGraphPassBuilder::ReadBuffer(RgBufferValue buffer, RgBufferAccess access, render::BufferRange range) { return _graph.UseBuffer(_pass, buffer, access, true, false, {}, range); }
 RgBufferValue RenderGraphPassBuilder::WriteBuffer(RgBufferValue buffer, RgBufferAccess access, render::BufferRange range) { return _graph.UseBuffer(_pass, buffer, access, false, true, {}, range); }
 RgBufferValue RenderGraphPassBuilder::ReadWriteBuffer(RgBufferValue buffer, RgBufferAccess access, render::BufferRange range) { return _graph.UseBuffer(_pass, buffer, access, true, true, {}, range); }
@@ -1110,14 +1008,9 @@ RgIndirectArgumentsHandle RenderGraphPassBuilder::ReadIndirectArguments(
     RgBufferValue buffer, RgIndirectCommand command, uint64_t offset, uint32_t count) {
     return _graph.AddIndirectArguments(_pass, buffer, command, offset, count);
 }
-RgParameterSetHandle RenderGraphPassBuilder::CreateParameterSet(
-    ShaderProgram& program, uint32_t group, std::span<const RgParameterBinding> bindings) {
-    return _graph.AddParameterSet(_pass, program, group, bindings);
-}
 void RenderGraphPassBuilder::SetSideEffect() { _graph._impl->Passes[_pass].SideEffect = true; }
 RgTextureViewHandle RenderGraphComputeBuilder::WriteTexture(RgTextureValue texture, const RgTextureViewDesc& view) { return _graph.UseTexture(_pass, texture, view, render::TextureViewUsage::UnorderedAccess, false, true, true); }
 RgTextureViewHandle RenderGraphComputeBuilder::ReadWriteTexture(RgTextureValue texture, const RgTextureViewDesc& view) { return _graph.UseTexture(_pass, texture, view, render::TextureViewUsage::UnorderedAccess, true, true, true); }
-RgComputeProgramHandle RenderGraphComputeBuilder::UseComputeProgram(ShaderProgram& program) { return _graph.AddComputeProgram(_pass, program); }
 RgTextureViewHandle RenderGraphRasterBuilder::WriteTexture(
     RgTextureValue texture, render::ShaderStages stages, const RgTextureViewDesc& view) {
     return _graph.UseTexture(_pass, texture, view, render::TextureViewUsage::UnorderedAccess,
@@ -1161,57 +1054,55 @@ RgIndirectArgumentsHandle RenderGraph::AddIndirectArguments(
     return {index, impl.Generation};
 }
 
-RgComputeProgramHandle RenderGraph::AddComputeProgram(uint32_t pass, ShaderProgram& program) {
+Nullable<render::ComputePipelineState*> RenderGraph::ResolveComputePipeline(uint32_t pass, ShaderProgram& program) {
     auto& impl = *_impl;
-    if (!impl.Mutable()) return {};
-    if (program.GetDevice() != &impl.Device ||
-        !ProgramStages(program).HasFlag(render::ShaderStage::Compute) ||
-        ProgramStages(program).HasFlag(render::ShaderStage::Graphics)) {
+    const render::ShaderStages stages = ProgramStages(program);
+    if (program.GetDevice() != &impl.Device || !stages.HasFlag(render::ShaderStage::Compute) ||
+        stages.HasFlag(render::ShaderStage::Graphics)) {
         impl.Error("ComputeProgram", "Compute passes require a compute-only ShaderProgram from this graph's device", pass);
-        return {};
+        return nullptr;
     }
-    const uint32_t index = static_cast<uint32_t>(impl.ComputePrograms.size());
-    impl.ComputePrograms.push_back({pass, &program, nullptr});
-    return {index, impl.Generation};
+    const Nullable<render::ComputePipelineState*> pipeline = program.GetOrCreateComputePipelineState();
+    if (!pipeline) impl.Error("ComputePipelineState", "Compute pipeline state creation failed before recording", pass);
+    return pipeline;
 }
 
-RgGraphicsProgramHandle RenderGraphRasterBuilder::UseGraphicsProgram(ShaderProgram& program, const MaterialPipelineState& state,
-                                                                     const PrimitiveVertexLayout& layout, PrimitiveTopology topology) {
-    return _graph.AddGraphicsProgram(_pass, program, state, layout, topology);
-}
-
-RgGraphicsProgramHandle RenderGraph::AddGraphicsProgram(uint32_t pass, ShaderProgram& program, const MaterialPipelineState& state,
-                                                        const PrimitiveVertexLayout& layout, PrimitiveTopology topology) {
+Nullable<render::GraphicsPipelineState*> RenderGraph::ResolveGraphicsPipeline(
+    uint32_t pass, ShaderProgram& program, const MaterialPipelineState& state,
+    const PrimitiveVertexLayout& layout, PrimitiveTopology topology) {
     auto& impl = *_impl;
-    if (!impl.Mutable()) return {};
-    ++impl.Report.GraphicsPipelineRequests;
-    if (program.GetDevice() != &impl.Device || !ProgramStages(program).HasFlag(render::ShaderStage::Vertex) ||
-        ProgramStages(program).HasFlag(render::ShaderStage::Compute)) {
+    const render::ShaderStages stages = ProgramStages(program);
+    if (program.GetDevice() != &impl.Device || !stages.HasFlag(render::ShaderStage::Vertex) ||
+        stages.HasFlag(render::ShaderStage::Compute)) {
         impl.Error("GraphicsProgram", "Raster passes require a graphics ShaderProgram from this graph's device", pass);
-        return {};
+        return nullptr;
     }
-    auto& entries = impl.GraphicsProgramIndices[&program];
-    for (const auto entry : entries) {
-        const auto& value = impl.GraphicsPrograms[entry];
-        if (value.Pass == pass && value.State == state && value.Layout == layout && value.Topology == topology)
-            return {entry, impl.Generation};
+    // A merged raster pass shares the group head's realized formats, so any member of the group
+    // resolves against the same GraphicsPassState.
+    const auto& passState = impl.Passes[pass].PassState;
+    if (impl.Passes[pass].Type != RgPassType::Raster || !passState) {
+        impl.Error("GraphicsProgram", "Graphics pipeline states require a realized raster pass", pass);
+        return nullptr;
     }
-    const auto index = static_cast<uint32_t>(impl.GraphicsPrograms.size());
-    impl.GraphicsPrograms.push_back({pass, &program, state, layout, topology});
-    entries.push_back(index);
-    return {index, impl.Generation};
+    const size_t before = program.GetGraphicsPipelineStateCount();
+    const Nullable<render::GraphicsPipelineState*> pipeline =
+        program.GetOrCreateGraphicsPipelineState(state, layout, topology, *passState);
+    ++impl.Report.GraphicsPipelinePreparations;
+    impl.Report.GraphicsPipelineCreations += static_cast<uint32_t>(program.GetGraphicsPipelineStateCount() - before);
+    if (!pipeline) impl.Error("GraphicsPipelineState", "Graphics pipeline state creation failed before recording", pass);
+    return pipeline;
 }
 
-RgParameterSetHandle RenderGraph::AddParameterSet(
-    uint32_t pass, ShaderProgram& program, uint32_t group,
-    std::span<const RgParameterBinding> bindings) {
+PreparedShaderGroup RenderGraph::CreateParameterSet(uint32_t pass, ShaderProgram& program, uint32_t group,
+                                                    std::span<const RgParameterBinding> bindings) {
     auto& impl = *_impl;
-    if (!impl.Mutable()) return {};
-    if (pass >= impl.Passes.size() || program.GetDevice() != &impl.Device) {
-        impl.Error("ParameterProgram", "Parameter sets require a ShaderProgram from this graph's device", pass);
-        return {};
-    }
-
+    const auto fail = [&](std::string_view code, std::string_view message,
+                          std::string_view declaration = {}, uint32_t resource = InvalidIndex) {
+        impl.Error(code, message, pass, resource, declaration);
+        return PreparedShaderGroup{};
+    };
+    if (pass >= impl.Passes.size() || program.GetDevice() != &impl.Device)
+        return fail("ParameterProgram", "Parameter sets require a ShaderProgram from this graph's device");
     const RgPassType passType = impl.Passes[pass].Type;
     const render::ShaderStages programStages = ProgramStages(program);
     const bool stageCompatible =
@@ -1219,106 +1110,115 @@ RgParameterSetHandle RenderGraph::AddParameterSet(
          !programStages.HasFlag(render::ShaderStage::Compute)) ||
         (passType == RgPassType::Compute && programStages.HasFlag(render::ShaderStage::Compute) &&
          !programStages.HasFlag(render::ShaderStage::Graphics));
-    if (!stageCompatible) {
-        impl.Error("ParameterProgram", "The parameter program's shader stages do not match the pass type", pass);
-        return {};
-    }
+    if (!stageCompatible)
+        return fail("ParameterProgram", "The parameter program's shader stages do not match the pass type");
+    render::PipelineLayout* layout = program.GetPipelineLayout();
+    if (layout == nullptr)
+        return fail("ParameterProgram", "The parameter program has no pipeline layout");
+    if (!impl.FrameResources || !impl.FrameResources->_impl->Arena || !impl.FrameResources->_impl->Arena->IsValid())
+        return fail("ParameterStorage", "Graph parameter sets require initialized per-flight frame resources");
+    RenderGraphFrameResources::Impl& frame = *impl.FrameResources->_impl;
+    const bool full = impl.ValidationFull();
 
-    Impl::ParameterSet parameterSet{
-        .Pass = pass,
-        .Program = &program,
-        .Group = group,
-        .Bindings = {},
-        .Native = nullptr,
-        .DynamicOffsets = {}};
-    const auto fail = [&](std::string_view code, std::string_view message,
-                          std::string_view declaration, uint32_t resource = InvalidIndex) {
-        impl.Error(code, message, pass, resource, declaration);
-    };
+    PreparedShaderGroup result{};
+    result.Group = group;
+    // The key is workspace-owned scratch: a steady-state frame reuses its storage and only a cache
+    // miss copies it into the map.
+    RenderGraphFrameResources::Impl::ParameterSetKey& key = frame.KeyScratch;
+    key.Layout = layout;
+    key.Group = group;
+    key.Values.clear();
+    key.Values.reserve(bindings.size());
+
     const auto findCBuffer = [&](std::string_view declaration) -> const ShaderParameterBufferLayout* {
-        for (const ShaderParameterBufferLayout& buffer : program.GetParameterLayout().Buffers()) {
+        for (const ShaderParameterBufferLayout& buffer : program.GetParameterLayout().Buffers())
             if (buffer.Name == declaration) return &buffer;
-        }
         return nullptr;
     };
-    const auto normalizedBufferRange = [&](const RgBufferParameterBinding& value,
-                                           std::string_view declaration)
-        -> std::optional<render::BufferRange> {
-        if (!impl.Handle(value.Buffer.Index, value.Buffer.Generation, false, pass)) return std::nullopt;
-        const uint64_t bufferSize = impl.Resources[value.Buffer.Index].BufferDesc.Size;
-        if (value.Range.Offset > bufferSize) {
-            fail("ParameterBufferRange", "Buffer parameter offset is outside the resource", declaration,
-                 value.Buffer.Index);
-            return std::nullopt;
+    // Full only: the plan must already contain an access covering what the shader does with this
+    // resource, otherwise the barrier compiled for the pass is too narrow.
+    const auto declaredAccess = [&](uint32_t resource, uint32_t version, bool read, bool write, uint32_t state,
+                                    render::ShaderStages stages, const render::BufferRange* bytes) {
+        for (const Impl::Access& access : impl.Passes[pass].Accesses) {
+            if (access.Resource != resource || access.Version != version) continue;
+            if ((read && !access.Read) || (write && !access.Write)) continue;
+            if ((access.State & state) != state) continue;
+            if ((stages.value() & ~access.Stages.value()) != 0) continue;
+            if (bytes != nullptr) {
+                const uint64_t end = access.Bytes.Size == render::BufferRange::All()
+                                         ? impl.Resources[resource].BufferDesc.Size
+                                         : access.Bytes.Offset + access.Bytes.Size;
+                if (access.Bytes.Offset > bytes->Offset || end < bytes->Offset + bytes->Size) continue;
+            }
+            return true;
         }
-        const uint64_t available = bufferSize - value.Range.Offset;
-        const uint64_t size = value.Range.Size == render::BufferRange::All()
-                                  ? available
-                                  : value.Range.Size;
-        if (size == 0 || size > available) {
-            fail("ParameterBufferRange", "Buffer parameter range is empty or outside the resource", declaration,
-                 value.Buffer.Index);
-            return std::nullopt;
-        }
-        return render::BufferRange{value.Range.Offset, size};
+        return false;
     };
 
     bool groupKnown = false;
-
     for (const RgParameterBinding& source : bindings) {
-        const string declaration{source.Declaration};
-        const std::optional<render::ShaderBindingInfo> info =
-            program.GetArtifact().FindBindingInfo(declaration);
-        if (declaration.empty() || !info.has_value()) {
-            fail("ParameterDeclaration", "Binding is not a canonical descriptor declaration in this program",
-                 declaration);
-            return {};
-        }
-        if (info->Group != group) {
-            fail("ParameterGroup", "Binding belongs to a different parameter group", declaration);
-            return {};
-        }
+        const std::string_view declaration = source.Declaration;
+        const std::optional<render::ShaderBindingInfo> info = program.GetArtifact().FindBindingInfo(declaration);
+        if (declaration.empty() || !info.has_value())
+            return fail("ParameterDeclaration", "Binding is not a canonical descriptor declaration in this program", declaration);
+        if (info->Group != group)
+            return fail("ParameterGroup", "Binding belongs to a different parameter group", declaration);
         groupKnown = true;
-        if (info->Immutable) {
-            fail("ImmutableBinding", "Static or immutable samplers must not be supplied by the caller", declaration);
-            return {};
-        }
-        if (source.ArrayElement >= info->Count) {
-            fail("ParameterArrayElement", "Binding array element is outside the declaration count", declaration);
-            return {};
-        }
+        if (info->Immutable)
+            return fail("ImmutableBinding", "Static or immutable samplers must not be supplied by the caller", declaration);
+        if (source.ArrayElement >= info->Count)
+            return fail("ParameterArrayElement", "Binding array element is outside the declaration count", declaration);
+        const render::BindingHandle handle = layout->FindBinding(declaration);
+        if (!handle.IsValid())
+            return fail("ParameterBinding", "Resolved pipeline binding is unavailable during preparation", declaration);
+        if (full)
+            for (const auto& earlier : key.Values)
+                if (earlier.Handle == handle && earlier.ArrayElement == source.ArrayElement)
+                    return fail("DuplicateParameterBinding", "The same binding array element was supplied more than once", declaration);
 
-        Impl::ParameterBinding destination{
-            .Declaration = declaration,
-            .ArrayElement = source.ArrayElement,
-            .Info = *info,
-            .Value = Impl::CBufferBytes{}};
         const shader::ShaderBindingKind kind = info->LogicalKind;
+        render::ShaderParameterValue value;
         if (const auto* bytes = std::get_if<RgCBufferParameterBinding>(&source.Value)) {
-            const ShaderParameterBufferLayout* layout = findCBuffer(declaration);
-            if (kind != shader::ShaderBindingKind::CBuffer || source.ArrayElement != 0 || layout == nullptr ||
-                layout->Group != group || bytes->Bytes.size() != layout->Size) {
-                fail("ParameterType", "Copied cbuffer bytes must exactly match a scalar cbuffer declaration", declaration);
-                return {};
-            }
-            destination.Value = Impl::CBufferBytes{{bytes->Bytes.begin(), bytes->Bytes.end()}};
+            const ShaderParameterBufferLayout* cbuffer = findCBuffer(declaration);
+            if (kind != shader::ShaderBindingKind::CBuffer || source.ArrayElement != 0 || cbuffer == nullptr ||
+                cbuffer->Group != group || bytes->Bytes.size() != cbuffer->Size)
+                return fail("ParameterType", "Copied cbuffer bytes must exactly match a scalar cbuffer declaration", declaration);
+            DynamicCBufferArena::Reservation reservation = frame.Arena->Reserve(bytes->Bytes.size());
+            if (!reservation.IsValid())
+                return fail("ParameterUpload", "Constant upload allocation failed before recording", declaration);
+            std::memcpy(reservation.Data(), bytes->Bytes.data(), bytes->Bytes.size());
+            const DynamicCBufferArena::Allocation allocation = reservation.Commit(bytes->Bytes.size());
+            if (!allocation.IsValid() || (info->Dynamic && allocation.Offset > std::numeric_limits<uint32_t>::max()))
+                return fail("ParameterUpload", "Constant upload commit or dynamic offset conversion failed", declaration);
+            value = render::ShaderBufferBinding{allocation.Target, {info->Dynamic ? 0 : allocation.Offset, allocation.Size}, 0};
+            if (info->Dynamic) result.DynamicOffsets.push_back({handle, static_cast<uint32_t>(allocation.Offset)});
         } else if (const auto* texture = std::get_if<RgTextureParameterBinding>(&source.Value)) {
-            if (!shader::IsImageKind(kind) || !EnumContains(texture->Access) ||
-                (!shader::IsWritableKind(kind) && texture->Access != RgParameterAccess::Read)) {
-                fail("ParameterType", "Texture value or access does not match the shader declaration", declaration,
-                     texture->Texture.Index);
-                return {};
-            }
+            if (!shader::IsImageKind(kind))
+                return fail("ParameterType", "Texture value does not match the shader declaration", declaration);
+            const RgTextureViewHandle view = texture->View;
+            if (view.Generation != impl.Generation || view.Index >= impl.Views.size())
+                return fail("ParameterUndeclared", "Texture binding uses a view handle from another graph", declaration);
+            const Impl::View& declared = impl.Views[view.Index];
+            if (!declared.Native)
+                return fail("ParameterTexture", "Graph texture view was not realized before parameter preparation",
+                            declaration, declared.Resource);
             const bool writable = shader::IsWritableKind(kind);
-            const bool read = writable ? IsReadAccess(texture->Access) : true;
-            const bool write = writable && IsWriteAccess(texture->Access);
-            const render::TextureViewUsage usage = writable
-                                                       ? render::TextureViewUsage::UnorderedAccess
-                                                       : render::TextureViewUsage::Resource;
-            const RgTextureViewHandle view = UseTexture(
-                pass, texture->Texture, texture->View, usage, read, write, true, info->Stages);
-            if (!view.IsValid()) return {};
-            destination.Value = Impl::TextureParameter{view.Index, texture->Texture.Index};
+            if (full) {
+                const render::TextureViewUsage required = writable ? render::TextureViewUsage::UnorderedAccess
+                                                                   : render::TextureViewUsage::Resource;
+                if (declared.Key.Usage != required)
+                    return fail("ParameterUndeclared", "A writable binding needs an unordered-access declaration and a sampled binding a resource declaration",
+                                declaration, declared.Resource);
+                const auto& views = impl.Passes[pass].DeclaredViews;
+                if (std::find(views.begin(), views.end(), view.Index) == views.end())
+                    return fail("ParameterUndeclared", "Texture view was not declared by this pass", declaration, declared.Resource);
+                // A writable descriptor kind may legally be bound read-only, so the direction comes from
+                // the declaration, not the kind: only sampled kinds must have a read declared.
+                if (!declaredAccess(declared.Resource, declared.Version, !writable, false, 0, info->Stages, nullptr))
+                    return fail("ParameterUndeclared", "Texture declaration does not cover this binding's shader stages",
+                                declaration, declared.Resource);
+            }
+            value = declared.Native.Get();
         } else if (const auto* buffer = std::get_if<RgBufferParameterBinding>(&source.Value)) {
             const bool bufferKind = kind == shader::ShaderBindingKind::CBuffer ||
                                     kind == shader::ShaderBindingKind::TypedBuffer ||
@@ -1327,68 +1227,90 @@ RgParameterSetHandle RenderGraph::AddParameterSet(
                                     kind == shader::ShaderBindingKind::RWStructuredBuffer ||
                                     kind == shader::ShaderBindingKind::RawBuffer ||
                                     kind == shader::ShaderBindingKind::RWRawBuffer;
+            if (!bufferKind)
+                return fail("ParameterType", "Buffer value does not match the shader declaration", declaration, buffer->Buffer.Index);
             const bool writable = shader::IsWritableKind(kind);
-            if (!bufferKind || !EnumContains(buffer->Access) ||
-                (!writable && buffer->Access != RgParameterAccess::Read)) {
-                fail("ParameterType", "Buffer value or access does not match the shader declaration", declaration,
-                     buffer->Buffer.Index);
-                return {};
+            RgBufferValue resolved = buffer->Buffer;
+            if (!impl.Handle(resolved.Index, resolved.Generation, false, pass)) return {};
+            if (impl.Resources[resolved.Index].Port) {
+                const auto& values = impl.Resources[resolved.Index].ResolvedValues;
+                if (resolved.Version >= values.size() || values[resolved.Version].first == InvalidIndex)
+                    return fail("ParameterUndeclared", "Buffer port was not connected", declaration, resolved.Index);
+                const auto mapped = values[resolved.Version];
+                resolved.Index = mapped.first;
+                resolved.Version = mapped.second;
             }
-            const std::optional<render::BufferRange> range = normalizedBufferRange(*buffer, declaration);
-            if (!range.has_value()) return {};
-
+            const uint64_t bufferSize = impl.Resources[resolved.Index].BufferDesc.Size;
+            if (buffer->Range.Offset > bufferSize)
+                return fail("ParameterBufferRange", "Buffer parameter offset is outside the resource", declaration, resolved.Index);
+            const uint64_t available = bufferSize - buffer->Range.Offset;
+            const uint64_t size = buffer->Range.Size == render::BufferRange::All() ? available : buffer->Range.Size;
+            if (size == 0 || size > available)
+                return fail("ParameterBufferRange", "Buffer parameter range is empty or outside the resource", declaration, resolved.Index);
+            const render::BufferRange range{buffer->Range.Offset, size};
             bool representationValid = buffer->Format == render::TextureFormat::UNKNOWN;
             if (kind == shader::ShaderBindingKind::CBuffer) {
-                const ShaderParameterBufferLayout* layout = findCBuffer(declaration);
+                const ShaderParameterBufferLayout* cbuffer = findCBuffer(declaration);
                 const uint64_t alignment = std::max<uint64_t>(1, impl.Device.GetCapabilities().Limits.CBufferOffsetAlignment);
                 representationValid = representationValid && buffer->StructureByteStride == 0 &&
-                                      layout != nullptr && layout->Group == group && range->Size == layout->Size &&
-                                      range->Offset % alignment == 0;
+                                      cbuffer != nullptr && cbuffer->Group == group && range.Size == cbuffer->Size &&
+                                      range.Offset % alignment == 0;
             } else if (kind == shader::ShaderBindingKind::StructuredBuffer ||
                        kind == shader::ShaderBindingKind::RWStructuredBuffer) {
                 const uint64_t storageAlignment = std::max<uint64_t>(
                     1, impl.Device.GetCapabilities().Limits.StorageBufferOffsetAlignment);
                 representationValid = representationValid && buffer->StructureByteStride != 0 &&
                                       buffer->StructureByteStride % 4 == 0 && buffer->StructureByteStride <= 2048 &&
-                                      range->Offset % buffer->StructureByteStride == 0 &&
-                                      range->Size % buffer->StructureByteStride == 0 &&
-                                      range->Offset % storageAlignment == 0;
+                                      range.Offset % buffer->StructureByteStride == 0 &&
+                                      range.Size % buffer->StructureByteStride == 0 &&
+                                      range.Offset % storageAlignment == 0;
             } else if (kind == shader::ShaderBindingKind::RawBuffer ||
                        kind == shader::ShaderBindingKind::RWRawBuffer) {
                 const uint64_t storageAlignment = std::max<uint64_t>(
                     1, impl.Device.GetCapabilities().Limits.StorageBufferOffsetAlignment);
                 representationValid = representationValid && buffer->StructureByteStride == 0 &&
-                                      range->Offset % 4 == 0 && range->Size % 4 == 0 &&
-                                      range->Offset % storageAlignment == 0;
+                                      range.Offset % 4 == 0 && range.Size % 4 == 0 &&
+                                      range.Offset % storageAlignment == 0;
             } else {
                 const uint32_t elementSize = render::GetTextureFormatBytesPerPixel(buffer->Format);
                 representationValid = buffer->StructureByteStride == 0 && elementSize != 0 &&
-                                      range->Offset % elementSize == 0 && range->Size % elementSize == 0;
+                                      range.Offset % elementSize == 0 && range.Size % elementSize == 0;
             }
-            if (!representationValid) {
-                fail("ParameterBufferLayout", "Buffer range, stride or format is incompatible with the declaration",
-                     declaration, buffer->Buffer.Index);
-                return {};
+            if (!representationValid)
+                return fail("ParameterBufferLayout", "Buffer range, stride or format is incompatible with the declaration",
+                            declaration, resolved.Index);
+            if (info->Dynamic && range.Offset > std::numeric_limits<uint32_t>::max())
+                return fail("ParameterDynamicOffset", "Dynamic buffer offset exceeds the RHI offset width", declaration, resolved.Index);
+            if (full) {
+                const RgBufferAccess graphAccess = kind == shader::ShaderBindingKind::CBuffer
+                                                       ? RgBufferAccess::Constant
+                                                   : writable
+                                                       ? RgBufferAccess::UnorderedAccess
+                                                       : RgBufferAccess::ShaderRead;
+                const uint32_t required = static_cast<uint32_t>(BufferAccessInfo(graphAccess).first);
+                // Read-only use of an RW descriptor is legal, so the state and range must be declared
+                // but the direction is the declaration's; only read-only kinds must have a read declared.
+                if (!declaredAccess(resolved.Index, resolved.Version, !writable, false, required, info->Stages, &range))
+                    return fail("ParameterUndeclared", "Buffer binding has no declaration in this pass covering its access state, range and stages",
+                                declaration, resolved.Index);
             }
-
-            const bool read = writable ? IsReadAccess(buffer->Access) : true;
-            const bool write = writable && IsWriteAccess(buffer->Access);
-            const RgBufferAccess graphAccess = kind == shader::ShaderBindingKind::CBuffer
-                                                   ? RgBufferAccess::Constant
-                                               : writable
-                                                   ? RgBufferAccess::UnorderedAccess
-                                                   : RgBufferAccess::ShaderRead;
-            if (!UseBuffer(pass, buffer->Buffer, graphAccess, read, write, info->Stages, *range).IsValid()) return {};
-            destination.Value = Impl::BufferParameter{
-                buffer->Buffer.Index, *range, buffer->StructureByteStride, buffer->Format};
-        } else if (const auto* sampler = std::get_if<RgSamplerParameterBinding>(&source.Value)) {
-            if (kind != shader::ShaderBindingKind::Sampler) {
-                fail("ParameterType", "Sampler value does not match the shader declaration", declaration);
-                return {};
-            }
-            destination.Value = Impl::SamplerParameter{sampler->Sampler};
+            render::Buffer* native = impl.Resources[resolved.Index].NativeBuffer();
+            const uint64_t descriptorOffset = info->Dynamic ? 0 : range.Offset;
+            if (shader::IsTexelBufferKind(kind))
+                value = render::ShaderTexelBufferBinding{native, {descriptorOffset, range.Size}, buffer->Format};
+            else
+                value = render::ShaderBufferBinding{native, {descriptorOffset, range.Size}, buffer->StructureByteStride};
+            if (info->Dynamic) result.DynamicOffsets.push_back({handle, static_cast<uint32_t>(range.Offset)});
+        } else {
+            const auto& sampler = std::get<RgSamplerParameterBinding>(source.Value);
+            if (kind != shader::ShaderBindingKind::Sampler)
+                return fail("ParameterType", "Sampler value does not match the shader declaration", declaration);
+            const Nullable<render::Sampler*> native = impl.Device.GetOrCreateSampler(sampler.Sampler);
+            if (!native)
+                return fail("ParameterSampler", "Sampler creation failed before recording", declaration);
+            value = native.Get();
         }
-        parameterSet.Bindings.push_back(std::move(destination));
+        key.Values.push_back({handle, source.ArrayElement, std::move(value)});
     }
 
     if (!groupKnown) {
@@ -1402,15 +1324,48 @@ RgParameterSetHandle RenderGraph::AddParameterSet(
                 break;
             }
         }
+        if (!groupKnown)
+            return fail("ParameterGroup", "The program has no descriptor declarations in this parameter group");
     }
-    if (!groupKnown) {
-        fail("ParameterGroup", "The program has no descriptor declarations in this parameter group", {});
-        return {};
+    if (full) {
+        const shader::ShaderArtifactView& artifact = program.GetArtifact().Generic();
+        for (const shader::WireBindingRecord& record : artifact.Bindings()) {
+            const std::optional<std::string_view> name = artifact.GetName(record.Name);
+            if (!name.has_value()) continue;
+            const std::optional<render::ShaderBindingInfo> info = program.GetArtifact().FindBindingInfo(name.value());
+            if (!info.has_value() || info->Group != group || info->Immutable) continue;
+            const render::BindingHandle handle = layout->FindBinding(name.value());
+            for (uint32_t element = 0; element < info->Count; ++element) {
+                const bool found = std::any_of(key.Values.begin(), key.Values.end(),
+                                               [&](const RenderGraphFrameResources::Impl::ParameterValue& value) {
+                                                   return value.Handle == handle && value.ArrayElement == element;
+                                               });
+                if (!found)
+                    return fail("MissingParameterBinding", fmt::format("Required binding array element {} is missing", element),
+                                name.value());
+            }
+        }
     }
 
-    const uint32_t index = static_cast<uint32_t>(impl.ParameterSets.size());
-    impl.ParameterSets.push_back(std::move(parameterSet));
-    return {index, impl.Generation};
+    const auto cached = frame.SetCache.find(key);
+    if (cached != frame.SetCache.end()) {
+        result.Set = cached->second;
+        return result;
+    }
+    Nullable<unique_ptr<render::ShaderParameterSet>> created =
+        impl.Device.CreateShaderParameterSet({.Layout = layout, .GroupIndex = group});
+    if (!created)
+        return fail("ParameterSetAllocation", "Parameter set allocation failed before recording");
+    unique_ptr<render::ShaderParameterSet> set = created.Release();
+    for (const RenderGraphFrameResources::Impl::ParameterValue& binding : key.Values)
+        if (!set->Set(binding.Handle, binding.ArrayElement, binding.Value))
+            return fail("ParameterSetWrite", "Parameter set rejected a validated binding value");
+    if (!set->FlushWrites())
+        return fail("ParameterSetFlush", "Parameter set descriptor writes failed before recording");
+    result.Set = set.get();
+    frame.Sets.push_back(std::move(set));
+    frame.SetCache.emplace(key, result.Set.Get());
+    return result;
 }
 RgTextureViewHandle RenderGraphRasterBuilder::SetColorAttachment(uint32_t slot, RgTextureValue texture, const RgColorAttachmentDesc& desc) {
     auto& impl = *_graph._impl;
@@ -1609,7 +1564,6 @@ bool RenderGraph::Impl::ValidateResources() {
             Report.Resources.push_back({resource.Name, std::move(descriptor), resource.IsTexture, resource.External()});
             Report.Resources.back().ViewId = resource.ViewId;
             Report.Resources.back().Port = resource.Port;
-            Report.Resources.back().Immutable = resource.Immutable;
             Report.Resources.back().RetainedOwner = resource.ExternalTexture ? bool(resource.ExternalTexture->Owner) : resource.ExternalBuffer ? bool(resource.ExternalBuffer->Owner)
                                                                                                                                                : false;
             Report.Resources.back().EstimatedBytes = resource.IsTexture ? EstimateTextureBytes(resource.TextureDesc) : resource.BufferDesc.Size;
@@ -1686,8 +1640,6 @@ bool RenderGraph::Impl::NormalizePasses() {
             if (!inserted && it->second != cell.State && ((it->second | cell.State) & exclusive))
                 Error("IncompatibleBufferStates", "Disjoint buffer ranges require incompatible whole-buffer states in one pass", p, cell.Resource);
             it->second |= cell.State;
-            const auto& resource = Resources[cell.Resource];
-            if (resource.Immutable && resource.BufferDesc.Memory == render::MemoryType::Device) it->second |= resource.ExternalBuffer->State.value();
         }
         for (auto& cell : pass.Cells)
             if (!Resources[cell.Resource].IsTexture) cell.State = bufferStates[cell.Resource];
@@ -1754,37 +1706,6 @@ bool RenderGraph::Impl::ValidateCanonicalInput() {
         for (const auto& access : Passes[p].Accesses) {
             if ((access.Stages.value() & ~uint32_t{7}) != 0)
                 Error("ShaderStages", "Access contains unsupported shader-stage bits", p, access.Resource);
-        }
-    }
-    for (const auto& parameterSet : ParameterSets) {
-        if (!parameterSet.Program) continue;
-        for (size_t index = 0; index < parameterSet.Bindings.size(); ++index) {
-            const auto& binding = parameterSet.Bindings[index];
-            for (size_t earlier = 0; earlier < index; ++earlier) {
-                if (parameterSet.Bindings[earlier].Declaration == binding.Declaration &&
-                    parameterSet.Bindings[earlier].ArrayElement == binding.ArrayElement) {
-                    Error("DuplicateParameterBinding", "The same binding array element was supplied more than once",
-                          parameterSet.Pass, InvalidIndex, binding.Declaration);
-                    break;
-                }
-            }
-        }
-        const shader::ShaderArtifactView& artifact = parameterSet.Program->GetArtifact().Generic();
-        for (const shader::WireBindingRecord& record : artifact.Bindings()) {
-            const std::optional<std::string_view> name = artifact.GetName(record.Name);
-            if (!name.has_value()) continue;
-            const std::optional<render::ShaderBindingInfo> info = parameterSet.Program->GetArtifact().FindBindingInfo(name.value());
-            if (!info.has_value() || info->Group != parameterSet.Group || info->Immutable) continue;
-            for (uint32_t element = 0; element < info->Count; ++element) {
-                const bool found = std::any_of(
-                    parameterSet.Bindings.begin(), parameterSet.Bindings.end(),
-                    [&](const ParameterBinding& value) {
-                        return value.Declaration == name.value() && value.ArrayElement == element;
-                    });
-                if (!found)
-                    Error("MissingParameterBinding", fmt::format("Required binding array element {} is missing", element),
-                          parameterSet.Pass, InvalidIndex, name.value());
-            }
         }
     }
     return !Failed;
@@ -2134,9 +2055,6 @@ bool RenderGraph::Impl::Realize() {
     }
     for (const uint32_t p : CompiledGraph.ExecutionOrder) {
         auto& pass = Passes[p];
-        for (const auto& access : pass.Accesses)
-            if (ValidationFull() && !Resources[access.Resource].IsTexture && access.Read)
-                pass.BufferReadStates[Resources[access.Resource].NativeBuffer()] |= access.State;
         for (const auto v : pass.DeclaredViews) {
             auto& view = Views[v];
             if (view.Native) continue;
@@ -2237,168 +2155,20 @@ bool RenderGraph::Prepare() {
         }
     }
     {
-        RADRAY_PROFILE_SCOPE_N("RenderGraph::PreparePipelines");
-        for (auto& value : impl.GraphicsPrograms) {
-        if (!impl.Passes[value.Pass].Live) continue;
-        const auto before = value.Program->GetGraphicsPipelineStateCount();
-        value.PipelineState = value.Program->GetOrCreateGraphicsPipelineState(value.State, value.Layout, value.Topology,
-                                                                              *impl.Passes[value.Pass].PassState);
-        ++impl.Report.GraphicsPipelinePreparations;
-        impl.Report.GraphicsPipelineCreations += static_cast<uint32_t>(value.Program->GetGraphicsPipelineStateCount() - before);
-        if (!value.PipelineState) {
-            impl.Error("GraphicsPipelineState", "Graphics pipeline state creation failed before recording", value.Pass);
-            return false;
-        }
-    }
-    for (Impl::ComputeProgram& value : impl.ComputePrograms) {
-        if (!impl.Passes[value.Pass].Live) continue;
-        value.PipelineState = value.Program->GetOrCreateComputePipelineState();
-        if (!value.PipelineState) {
-            impl.Error("ComputePipelineState", "Compute pipeline state creation failed before recording", value.Pass);
-            return false;
-        }
-    }
-    }
-
-    {
-        RADRAY_PROFILE_SCOPE_N("RenderGraph::PrepareParameters");
-        const bool hasLiveParameters = std::any_of(
-        impl.ParameterSets.begin(), impl.ParameterSets.end(),
-        [&](const Impl::ParameterSet& value) { return impl.Passes[value.Pass].Live; });
-    if (!hasLiveParameters) return true;
-    if (!impl.FrameResources || !impl.FrameResources->_impl->Arena ||
-        !impl.FrameResources->_impl->Arena->IsValid()) {
-        impl.Error("ParameterStorage", "Graph parameter sets require initialized per-flight frame resources");
-        return false;
-    }
-    RenderGraphFrameResources::Impl& frame = *impl.FrameResources->_impl;
-
-    for (Impl::ParameterSet& parameterSet : impl.ParameterSets) {
-        if (!impl.Passes[parameterSet.Pass].Live) continue;
-        parameterSet.DynamicOffsets.clear();
-        RenderGraphFrameResources::Impl::ParameterSetKey key{
-            .Layout = parameterSet.Program->GetPipelineLayout(),
-            .Group = parameterSet.Group,
-            .Values = {}};
-        struct PreparedBinding {
-            render::BindingHandle Handle;
-            uint32_t ArrayElement{0};
-            render::ShaderParameterValue Value;
-            string Declaration;
-        };
-        vector<PreparedBinding> prepared;
-        prepared.reserve(parameterSet.Bindings.size());
-        key.Values.reserve(parameterSet.Bindings.size());
-
-        for (const Impl::ParameterBinding& binding : parameterSet.Bindings) {
-            const render::BindingHandle handle =
-                parameterSet.Program->GetPipelineLayout()->FindBinding(binding.Declaration);
-            if (!handle.IsValid()) {
-                impl.Error("ParameterBinding", "Resolved pipeline binding is unavailable during preparation",
-                           parameterSet.Pass, InvalidIndex, binding.Declaration);
-                return false;
-            }
-
-            render::ShaderParameterValue value;
-            if (const auto* bytes = std::get_if<Impl::CBufferBytes>(&binding.Value)) {
-                DynamicCBufferArena::Reservation reservation = frame.Arena->Reserve(bytes->Bytes.size());
-                if (!reservation.IsValid()) {
-                    impl.Error("ParameterUpload", "Constant upload allocation failed before recording",
-                               parameterSet.Pass, InvalidIndex, binding.Declaration);
-                    return false;
-                }
-                std::memcpy(reservation.Data(), bytes->Bytes.data(), bytes->Bytes.size());
-                const DynamicCBufferArena::Allocation allocation = reservation.Commit(bytes->Bytes.size());
-                if (!allocation.IsValid() ||
-                    (binding.Info.Dynamic && allocation.Offset > std::numeric_limits<uint32_t>::max())) {
-                    impl.Error("ParameterUpload", "Constant upload commit or dynamic offset conversion failed",
-                               parameterSet.Pass, InvalidIndex, binding.Declaration);
-                    return false;
-                }
-                value = render::ShaderBufferBinding{
-                    allocation.Target,
-                    {binding.Info.Dynamic ? 0 : allocation.Offset, allocation.Size},
-                    0};
-                if (binding.Info.Dynamic) {
-                    parameterSet.DynamicOffsets.push_back(
-                        {handle, static_cast<uint32_t>(allocation.Offset)});
-                }
-            } else if (const auto* texture = std::get_if<Impl::TextureParameter>(&binding.Value)) {
-                render::TextureView* view = impl.Views[texture->View].Native.Get();
-                if (view == nullptr) {
-                    impl.Error("ParameterTexture", "Graph texture view was not realized before parameter preparation",
-                               parameterSet.Pass, texture->Resource, binding.Declaration);
-                    return false;
-                }
-                value = view;
-            } else if (const auto* buffer = std::get_if<Impl::BufferParameter>(&binding.Value)) {
-                const uint64_t descriptorOffset = binding.Info.Dynamic ? 0 : buffer->Range.Offset;
-                if (binding.Info.Dynamic && buffer->Range.Offset > std::numeric_limits<uint32_t>::max()) {
-                    impl.Error("ParameterDynamicOffset", "Dynamic buffer offset exceeds the RHI offset width",
-                               parameterSet.Pass, buffer->Resource, binding.Declaration);
-                    return false;
-                }
-                render::Buffer* native = impl.Resources[buffer->Resource].NativeBuffer();
-                if (shader::IsTexelBufferKind(binding.Info.LogicalKind)) {
-                    value = render::ShaderTexelBufferBinding{
-                        native, {descriptorOffset, buffer->Range.Size}, buffer->Format};
-                } else {
-                    value = render::ShaderBufferBinding{
-                        native, {descriptorOffset, buffer->Range.Size}, buffer->StructureByteStride};
-                }
-                if (binding.Info.Dynamic) {
-                    parameterSet.DynamicOffsets.push_back(
-                        {handle, static_cast<uint32_t>(buffer->Range.Offset)});
-                }
-            } else {
-                const auto& sampler = std::get<Impl::SamplerParameter>(binding.Value);
-                const Nullable<render::Sampler*> native = impl.Device.GetOrCreateSampler(sampler.Desc);
-                if (!native) {
-                    impl.Error("ParameterSampler", "Sampler creation failed before recording",
-                               parameterSet.Pass, InvalidIndex, binding.Declaration);
-                    return false;
-                }
-                value = native.Get();
-            }
-
-            prepared.push_back({handle, binding.ArrayElement, value, binding.Declaration});
-            key.Values.push_back({binding.Declaration, binding.ArrayElement, std::move(value)});
-        }
-        std::sort(key.Values.begin(), key.Values.end(), [](const auto& a, const auto& b) {
-            if (a.Declaration != b.Declaration) return a.Declaration < b.Declaration;
-            return a.ArrayElement < b.ArrayElement;
-        });
-
-        const auto cached = frame.SetCache.find(key);
-        if (cached != frame.SetCache.end()) {
-            parameterSet.Native = cached->second;
-            continue;
-        }
-        Nullable<unique_ptr<render::ShaderParameterSet>> created =
-            impl.Device.CreateShaderParameterSet({.Layout = key.Layout,
-                                                  .GroupIndex = parameterSet.Group});
-        if (!created) {
-            impl.Error("ParameterSetAllocation", "Parameter set allocation failed before recording",
-                       parameterSet.Pass);
-            return false;
-        }
-        unique_ptr<render::ShaderParameterSet> set = created.Release();
-        for (const PreparedBinding& binding : prepared) {
-            if (!set->Set(binding.Handle, binding.ArrayElement, binding.Value)) {
-                impl.Error("ParameterSetWrite", "Parameter set rejected a validated binding value",
-                           parameterSet.Pass, InvalidIndex, binding.Declaration);
+        // Live passes only: a culled pass creates no descriptor and resolves no pipeline state.
+        RADRAY_PROFILE_SCOPE_N("RenderGraph::PreparePasses");
+        for (const uint32_t p : impl.CompiledGraph.ExecutionOrder) {
+            Impl::Pass& pass = impl.Passes[p];
+            if (!pass.Live || !pass.Data) continue;
+            RADRAY_PROFILE_SCOPE_DYN(pass.Name);
+            RenderGraphPrepareContext context{*this, p};
+            const bool prepared = pass.Data->Prepare(context);
+            if (impl.Failed) return false;
+            if (!prepared) {
+                impl.Error("PassPreparation", "Pass preparation failed before recording", p);
                 return false;
             }
         }
-        if (!set->FlushWrites()) {
-            impl.Error("ParameterSetFlush", "Parameter set descriptor writes failed before recording",
-                       parameterSet.Pass);
-            return false;
-        }
-        parameterSet.Native = set.get();
-        frame.Sets.push_back(std::move(set));
-        frame.SetCache.emplace(std::move(key), parameterSet.Native.Get());
-    }
     }
     return true;
 }
@@ -2665,18 +2435,13 @@ std::optional<render::TextureDescriptor> RenderGraph::GetTextureDescriptor(RgTex
     if (handle.Generation != _impl->Generation || handle.Index >= _impl->Resources.size() || !_impl->Resources[handle.Index].IsTexture) return {};
     return _impl->Resources[handle.Index].TextureDesc;
 }
-std::optional<RgTextureParameterBinding> RenderGraph::GetTextureViewBinding(RgTextureViewHandle handle) const noexcept {
-    if (handle.Generation != _impl->Generation || handle.Index >= _impl->Views.size()) return {};
-    const auto& view = _impl->Views[handle.Index];
-    return RgTextureParameterBinding{{view.Resource, _impl->Generation, view.Version}, {view.Key.Dimension, view.Key.Format, view.Key.Range}};
-}
 void RenderGraph::AddDiagnostic(std::string_view code, std::string_view message) {
     _impl->Error(code, message);
 }
 void RenderGraphRasterContext::Fail(std::string_view message) {
     _graph._impl->Error("RasterExecution", message, _pass);
 }
-// Record checkpoint: Full only scans declared handles here and native VB/IB in BindVertex/BindIndex.
+// Record checkpoint: Full only scans declared view handles here. Geometry was checked in prepare.
 render::TextureView* RenderGraph::ResolveView(uint32_t pass, RgTextureViewHandle handle) const {
     const auto& impl = *_impl;
     if (handle.Generation != impl.Generation || handle.Index >= impl.Views.size() || !impl.Views[handle.Index].Native)
@@ -2733,122 +2498,69 @@ void RenderGraph::ExecuteIndirect(
     RADRAY_ABORT("RenderGraph indirect command kind is invalid");
 }
 
-void RenderGraph::BindParameterSet(
-    uint32_t pass, RgParameterSetHandle handle,
-    render::GraphicsCommandEncoder* graphics, render::ComputeCommandEncoder* compute) noexcept {
-    const auto& impl = *_impl;
-    if (handle.Generation != impl.Generation || handle.Index >= impl.ParameterSets.size()) {
-        RADRAY_ABORT("RenderGraph parameter-set handle belongs to another graph or is invalid");
-    }
-    const Impl::ParameterSet& parameterSet = impl.ParameterSets[handle.Index];
-    if (parameterSet.Pass != pass || !parameterSet.Native) {
-        RADRAY_ABORT("RenderGraph parameter set was not declared and prepared for this pass");
-    }
-    if (graphics != nullptr && compute == nullptr) {
-        graphics->BindShaderParameterSet(parameterSet.Group, parameterSet.Native.Get(),
-                                         parameterSet.DynamicOffsets);
-    } else if (compute != nullptr && graphics == nullptr) {
-        compute->BindShaderParameterSet(parameterSet.Group, parameterSet.Native.Get(),
-                                        parameterSet.DynamicOffsets);
-    } else {
-        RADRAY_ABORT("RenderGraph parameter set requires exactly one pass encoder");
-    }
-}
-
-void RenderGraph::BindComputeProgram(
-    uint32_t pass, RgComputeProgramHandle handle,
-    render::ComputeCommandEncoder& encoder) noexcept {
-    const auto& impl = *_impl;
-    if (handle.Generation != impl.Generation || handle.Index >= impl.ComputePrograms.size()) {
-        RADRAY_ABORT("RenderGraph compute-program handle belongs to another graph or is invalid");
-    }
-    const Impl::ComputeProgram& program = impl.ComputePrograms[handle.Index];
-    if (program.Pass != pass || !program.PipelineState) {
-        RADRAY_ABORT("RenderGraph compute program was not declared and prepared for this pass");
-    }
-    encoder.BindComputePipelineState(program.PipelineState.Get());
-}
-
-void RenderGraph::BindGraphicsProgram(uint32_t pass, RgGraphicsProgramHandle handle, render::GraphicsCommandEncoder& encoder) noexcept {
-    const auto& impl = *_impl;
-    if (handle.Generation != impl.Generation || handle.Index >= impl.GraphicsPrograms.size())
-        RADRAY_ABORT("RenderGraph graphics program belongs to another graph or is invalid");
-    const auto& program = impl.GraphicsPrograms[handle.Index];
-    if (program.Pass != pass || !program.PipelineState)
-        RADRAY_ABORT("RenderGraph graphics program was not declared and prepared for this pass");
-    encoder.BindGraphicsPipelineState(program.PipelineState.Get());
-}
-
-bool RenderGraph::ValidateNativeBuffer(uint32_t pass, render::Buffer* buffer, RgBufferAccess access) noexcept {
+bool RenderGraph::ValidateGeometryBuffer(uint32_t pass, Nullable<render::Buffer*> buffer, RgBufferAccess access) {
     auto& impl = *_impl;
-    if (!impl.ValidationFull()) return buffer != nullptr;
     if (!buffer) {
         impl.Error("GeometryBuffer", "Geometry binding requires a non-null buffer", pass);
         return false;
     }
-    const auto tracked = impl.NativeBuffers.find(buffer);
+    // Only graph-managed buffers can carry a planned state; a persistent asset never does, so it
+    // needs no declaration and costs one hash lookup per distinct buffer per pass.
+    const auto tracked = impl.NativeBuffers.find(buffer.Get());
     if (tracked == impl.NativeBuffers.end()) return true;
-    const auto& reads = impl.Passes[pass].BufferReadStates;
-    const auto declared = reads.find(buffer);
+    // Aliased resources share one native buffer while NativeBuffers only records the physical
+    // primary, so match on the pointer and merge every read this pass declared on that buffer.
     const uint32_t required = static_cast<uint32_t>(BufferAccessInfo(access).first);
-    if (declared == reads.end() || (declared->second & required) != required) {
-        impl.Error("UndeclaredGeometryRead", "Graph geometry requires a matching Vertex or Index read declaration in this pass",
-                   pass, tracked->second);
-        return false;
+    uint32_t states = 0;
+    for (const auto& declared : impl.Passes[pass].Accesses) {
+        const Impl::Resource& resource = impl.Resources[declared.Resource];
+        // A culled access never reached Realize, so its resource still has no native buffer.
+        const bool realized = resource.ExternalBuffer || resource.Readback || resource.PoolBuffer;
+        if (declared.Read && !resource.IsTexture && realized && resource.NativeBuffer() == buffer.Get()) states |= declared.State;
     }
-    return true;
-}
-
-void RenderGraphGraphicsCommands::BindVertexBuffers(std::span<const render::VertexBufferBinding> bindings) noexcept {
-    if (_graph.IsValidationFull()) {
-        for (const auto& binding : bindings) {
-            render::Buffer* target = binding.View.Target;
-            if (target != nullptr && std::find(_validatedVertex.begin(), _validatedVertex.end(), target) != _validatedVertex.end()) continue;
-            if (!_graph.ValidateNativeBuffer(_pass, target, RgBufferAccess::Vertex)) {
-                _valid = false;
-                continue;
-            }
-            std::rotate(_validatedVertex.rbegin(), _validatedVertex.rbegin() + 1, _validatedVertex.rend());
-            _validatedVertex.front() = target;
-        }
-    }
-    if (_valid) _encoder.BindVertexBuffers(bindings);
-}
-void RenderGraphGraphicsCommands::BindIndexBuffer(render::IndexBufferView view) noexcept {
-    if (_graph.IsValidationFull()) {
-        if (view.Target == nullptr || view.Target != _validatedIndex) {
-            if (!_graph.ValidateNativeBuffer(_pass, view.Target, RgBufferAccess::Index)) _valid = false;
-            else _validatedIndex = view.Target;
-        }
-    }
-    if (_valid) _encoder.BindIndexBuffer(view);
+    if ((states & required) == required) return true;
+    impl.Error("UndeclaredGeometryRead", "Graph-managed geometry requires a matching Vertex or Index read declaration in this pass",
+               pass, tracked->second);
+    return false;
 }
 
 void RenderGraphGraphicsCommands::DrawIndirect(RgIndirectArgumentsHandle arguments) noexcept {
-    if (_valid) _graph.ExecuteIndirect(_pass, arguments, RgIndirectCommand::Draw, &_encoder, nullptr);
+    _graph.ExecuteIndirect(_pass, arguments, RgIndirectCommand::Draw, &_encoder, nullptr);
 }
 void RenderGraphGraphicsCommands::DrawIndexedIndirect(RgIndirectArgumentsHandle arguments) noexcept {
-    if (_valid) _graph.ExecuteIndirect(_pass, arguments, RgIndirectCommand::DrawIndexed, &_encoder, nullptr);
+    _graph.ExecuteIndirect(_pass, arguments, RgIndirectCommand::DrawIndexed, &_encoder, nullptr);
 }
 void RenderGraphComputeCommands::DispatchIndirect(RgIndirectArgumentsHandle arguments) noexcept {
     _graph.ExecuteIndirect(_pass, arguments, RgIndirectCommand::Dispatch, nullptr, &_encoder);
 }
 render::TextureView* RenderGraphRasterContext::GetTextureView(RgTextureViewHandle handle) const { return _graph.ResolveView(_pass, handle); }
 render::Buffer* RenderGraphRasterContext::GetBuffer(RgBufferValue handle) const { return _graph.ResolveBuffer(_pass, handle); }
-void RenderGraphRasterContext::BindParameterSet(RgParameterSetHandle handle) noexcept {
-    _graph.BindParameterSet(_pass, handle, &_encoder._encoder, nullptr);
-}
-void RenderGraphRasterContext::BindGraphicsProgram(RgGraphicsProgramHandle handle) noexcept {
-    _graph.BindGraphicsProgram(_pass, handle, _encoder._encoder);
-}
 const GraphicsPassState& RenderGraphRasterContext::PassState() const noexcept { return *_graph._impl->Passes[_pass].PassState; }
 render::TextureView* RenderGraphComputeContext::GetTextureView(RgTextureViewHandle handle) const { return _graph.ResolveView(_pass, handle); }
 render::Buffer* RenderGraphComputeContext::GetBuffer(RgBufferValue handle) const { return _graph.ResolveBuffer(_pass, handle); }
-void RenderGraphComputeContext::BindParameterSet(RgParameterSetHandle handle) noexcept {
-    _graph.BindParameterSet(_pass, handle, nullptr, &_encoder._encoder);
+
+RgPassHandle RenderGraphPrepareContext::GetPassHandle() const noexcept { return {_pass, _graph.GetGeneration()}; }
+bool RenderGraphPrepareContext::IsValidationFull() const noexcept { return _graph.IsValidationFull(); }
+const RenderGraphRuntimeOptions& RenderGraphPrepareContext::GetRuntimeOptions() const noexcept { return _graph.GetRuntimeOptions(); }
+const GraphicsPassState& RenderGraphPrepareContext::PassState() const noexcept { return *_graph._impl->Passes[_pass].PassState; }
+render::TextureView* RenderGraphPrepareContext::GetTextureView(RgTextureViewHandle handle) const { return _graph.ResolveView(_pass, handle); }
+render::Buffer* RenderGraphPrepareContext::GetBuffer(RgBufferValue handle) const { return _graph.ResolveBuffer(_pass, handle); }
+Nullable<render::GraphicsPipelineState*> RenderGraphPrepareContext::ResolveGraphicsPipeline(
+    ShaderProgram& program, const MaterialPipelineState& state, const PrimitiveVertexLayout& layout, PrimitiveTopology topology) {
+    return _graph.ResolveGraphicsPipeline(_pass, program, state, layout, topology);
 }
-void RenderGraphComputeContext::BindComputeProgram(RgComputeProgramHandle handle) noexcept {
-    _graph.BindComputeProgram(_pass, handle, _encoder._encoder);
+Nullable<render::ComputePipelineState*> RenderGraphPrepareContext::ResolveComputePipeline(ShaderProgram& program) {
+    return _graph.ResolveComputePipeline(_pass, program);
+}
+PreparedShaderGroup RenderGraphPrepareContext::CreateParameterSet(ShaderProgram& program, uint32_t group,
+                                                                  std::span<const RgParameterBinding> bindings) {
+    return _graph.CreateParameterSet(_pass, program, group, bindings);
+}
+bool RenderGraphPrepareContext::ValidateGeometryBuffer(Nullable<render::Buffer*> buffer, RgBufferAccess access) {
+    return _graph.ValidateGeometryBuffer(_pass, buffer, access);
+}
+void RenderGraphPrepareContext::Reject(std::string_view code, std::string_view message, std::string_view binding) {
+    _graph._impl->Error(code, message, _pass, InvalidIndex, binding);
 }
 
 }  // namespace radray

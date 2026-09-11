@@ -1,10 +1,10 @@
 #include "foundation_graph_fixture.h"
-#include <radray/runtime/render_framework/renderer_list_pass_bindings.h>
+#include <radray/runtime/render_framework/renderer_list_pass_sets.h>
 
 namespace radray {
 namespace {
 
-class RendererListPassBindingsTest : public test::FoundationGraphGpuTest {};
+class RendererListPassSetsTest : public test::FoundationGraphGpuTest {};
 
 string BindingProgram(uint32_t group) {
     return fmt::format(R"hlsl(
@@ -22,7 +22,19 @@ VK_BINDING(1, {0}) Texture2D<uint> Source : register(t0, space{0});
                        group);
 }
 
-TEST_P(RendererListPassBindingsTest, B01B05B06AlternatingProgramsOwnConstantsAndDynamicOffsets) {
+constexpr std::string_view kSingleGroupProgram = R"hlsl(
+#include <core/platform.hlsli>
+struct Values { float4 Value; };
+VK_BINDING(0, 0) ConstantBuffer<Values> ValuesBuffer : register(b0);
+[shader("vertex")] float4 VSMain(float3 p : POSITION) : SV_Position { return float4(p, 1); }
+[shader("pixel")] float4 PSMain() : SV_Target0 { return ValuesBuffer.Value; }
+)hlsl";
+
+RgTextureValue MakeSmallTarget(RenderGraph& graph, std::string_view name) {
+    return graph.CreateTexture({render::TextureDimension::Dim2D, 4, 4, 1, 1, 1, render::TextureFormat::RGBA8_UNORM, render::MemoryType::Device, render::TextureUse::RenderTarget, {}}, name);
+}
+
+TEST_P(RendererListPassSetsTest, B01B05B06AlternatingProgramsOwnConstantsAndDynamicOffsets) {
     auto& device = *Context.Device;
     render::ShaderProgramLayoutRecipe recipe;
     const render::ShaderLayoutSelector selector{.DeclarationName = "Native", .ExpectedLogicalResourceKind = shader::ShaderBindingKind::CBuffer};
@@ -86,37 +98,56 @@ VK_BINDING(0, 0) RWTexture2D<uint> Destination : register(u0);
     auto graph = MakeGraph("binding alternation");
     const auto source = graph.CreateTexture({render::TextureDimension::Dim2D, 1, 1, 1, 1, 1, render::TextureFormat::R32_UINT, render::MemoryType::Device, render::TextureUse::Resource | render::TextureUse::UnorderedAccess, {}}, "compute texture");
     struct Compute {
-        RgComputeProgramHandle Program;
-        RgParameterSetHandle Set;
+        ShaderProgram* Program;
+        RgTextureViewHandle Destination;
+        render::ComputePipelineState* Pipeline;
+        PreparedShaderGroup Set;
     };
     graph.AddComputePass<Compute>("producer", [&](Compute& data, RenderGraphComputeBuilder& builder) {
-        data.Program = builder.UseComputeProgram(*producer);
-        const RgParameterBinding binding{"Destination", 0, RgTextureParameterBinding{source, {}, RgParameterAccess::Write}};
-        data.Set = builder.CreateParameterSet(*producer, 0, std::span{&binding, 1}); }, +[](const Compute& data, RenderGraphComputeContext& context) {
-        context.BindComputeProgram(data.Program); context.BindParameterSet(data.Set); context.Encoder().Dispatch(1, 1, 1); });
+        data.Program = producer.Get();
+        data.Destination = builder.WriteTexture(source); }, +[](Compute& data, RenderGraphPrepareContext& ctx) {
+        const RgParameterBinding binding{"Destination", 0, RgTextureParameterBinding{data.Destination}};
+        data.Set = ctx.CreateParameterSet(*data.Program, 0, std::span{&binding, 1});
+        data.Pipeline = ctx.ResolveComputePipeline(*data.Program).Get();
+        return data.Set.IsValid() && data.Pipeline != nullptr; }, +[](const Compute& data, RenderGraphComputeContext& context) {
+        context.Encoder().BindComputePipelineState(data.Pipeline);
+        context.Encoder().BindShaderParameterSet(data.Set);
+        context.Encoder().Dispatch(1, 1, 1); });
     const auto color = graph.CreateTexture({render::TextureDimension::Dim2D, 96, 32, 1, 1, 1, render::TextureFormat::RGBA8_UNORM, render::MemoryType::Device, render::TextureUse::RenderTarget | render::TextureUse::CopySource, {}}, "color");
     DrawExecutionStats stats;
     struct Raster {
         const RendererList* List;
         DrawExecutionStats* Stats;
         render::RenderBackend Backend;
-        std::optional<RendererListPassBindings> Bindings;
+        ShaderProgram* A;
+        ShaderProgram* B;
+        RgTextureViewHandle Source;
+        array<float, 4> First, Second;
+        std::optional<RendererListPassSets> Sets;
         std::optional<PreparedRendererList> Prepared;
     };
     graph.AddRasterPass<Raster>("A B A", [&](Raster& data, RenderGraphRasterBuilder& builder) {
         data.List = &list; data.Stats = &stats; data.Backend = GetParam();
+        data.A = a.Get(); data.B = b.Get();
+        data.First = {11, 0, 0, 0};
+        data.Second = {22, 0, 0, 0};
         builder.SetColorAttachment(0, color);
-        array<float, 4> first{11, 0, 0, 0}, second{22, 0, 0, 0};
-        const RgParameterBinding ap[]{{"Graph", 0, RgCBufferParameterBinding{std::as_bytes(std::span{first})}}, {"Source", 0, RgTextureParameterBinding{source}}};
-        const RgParameterBinding bp[]{{"Graph", 0, RgCBufferParameterBinding{std::as_bytes(std::span{second})}}, {"Source", 0, RgTextureParameterBinding{source}}};
-        const RendererListProgramParameters parameters[]{{a.Get(), 3, ap}, {b.Get(), 2, bp}};
-        data.Bindings = RendererListPassBindings::Create(builder, list, parameters);
-        if (data.Bindings) data.Prepared = PrepareRendererList(list, builder, &*data.Bindings);
-        first.fill(199); second.fill(199);
-        ASSERT_TRUE(data.Bindings); }, +[](const Raster& data, RenderGraphRasterContext& context) {
+        data.Source = builder.ReadTexture(source); }, +[](Raster& data, RenderGraphPrepareContext& ctx) {
+        const RgParameterBinding ap[]{{"Graph", 0, RgCBufferParameterBinding{std::as_bytes(std::span{data.First})}}, {"Source", 0, RgTextureParameterBinding{data.Source}}};
+        const RgParameterBinding bp[]{{"Graph", 0, RgCBufferParameterBinding{std::as_bytes(std::span{data.Second})}}, {"Source", 0, RgTextureParameterBinding{data.Source}}};
+        const RendererListProgramParameters parameters[]{{data.A, 3, ap}, {data.B, 2, bp}};
+        data.Sets = RendererListPassSets::Create(ctx, *data.List, parameters);
+        if (!data.Sets) return false;
+        EXPECT_EQ(data.Sets->Find(*data.A).size(), 1u);
+        EXPECT_EQ(data.Sets->Find(*data.B).size(), 1u);
+        // The created sets own their constants, so overwriting the source values cannot change a draw.
+        data.First.fill(199);
+        data.Second.fill(199);
+        data.Prepared = PrepareRendererList(*data.List, ctx, &*data.Sets);
+        return data.Prepared.has_value(); }, +[](const Raster& data, RenderGraphRasterContext& context) {
         context.Encoder().SetViewport(MakeViewport(data.Backend, 0, 0, 96, 32));
         context.Encoder().SetScissor({0, 0, 96, 32});
-        SubmitRendererList(*data.Prepared, context, *data.Stats); });
+        RecordRendererList(*data.Prepared, context, *data.Stats); });
     const uint64_t pitch = Align(uint64_t{96 * 4}, device.GetDetail().TextureDataPitchAlignment);
     auto readback = device.CreateBuffer({pitch * 32, render::MemoryType::ReadBack, render::BufferUse::MapRead | render::BufferUse::CopyDestination, {}});
     ASSERT_TRUE(readback);
@@ -135,63 +166,107 @@ VK_BINDING(0, 0) RWTexture2D<uint> Destination : register(u0);
     }
 }
 
-TEST_P(RendererListPassBindingsTest, B02B03B04RejectCollisionsMissingGroupsAndForeignScopeBeforeExecution) {
+TEST_P(RendererListPassSetsTest, B02B03PrepareRejectsCollisionsNativeGroupsMissingGroupsAndForeignPrograms) {
     auto& device = *Context.Device;
-    auto program = test::CompileFoundationGraphics(device, R"hlsl(
-#include <core/platform.hlsli>
-struct Values { float4 Value; };
-VK_BINDING(0, 0) ConstantBuffer<Values> ValuesBuffer : register(b0);
-[shader("vertex")] float4 VSMain(float3 p : POSITION) : SV_Position { return float4(p, 1); }
-[shader("pixel")] float4 PSMain() : SV_Target0 { return ValuesBuffer.Value; }
-)hlsl");
+    auto program = test::CompileFoundationGraphics(device, kSingleGroupProgram);
+    auto other = test::CompileFoundationGraphics(device, kSingleGroupProgram);
     ASSERT_TRUE(program);
+    ASSERT_TRUE(other);
     auto native = device.CreateShaderParameterSet({program->GetPipelineLayout(), 0});
     ASSERT_TRUE(native);
-    for (uint32_t scenario = 0; scenario < 5; ++scenario) {
+    enum class Case : uint32_t { NativeCollision,
+                                 DuplicateEntry,
+                                 MissingGroup,
+                                 ForeignProgram,
+                                 UnsortedNativeGroups,
+                                 InvalidNativeGroup };
+    struct Scenario {
+        Case Kind;
+        std::string_view Code;
+    };
+    const Scenario cases[]{
+        {Case::NativeCollision, "RendererListGroupCollision"},
+        {Case::DuplicateEntry, "RendererListGroupCollision"},
+        {Case::MissingGroup, "RendererListMissingGroup"},
+        {Case::ForeignProgram, "RendererListProgram"},
+        {Case::UnsortedNativeGroups, "RendererListNativeGroup"},
+        {Case::InvalidNativeGroup, "RendererListNativeGroup"}};
+    for (const Scenario& entry : cases) {
+        const Case scenario = entry.Kind;
+        const std::string_view code = entry.Code;
+        SCOPED_TRACE(code);
         RendererList list;
         MeshDrawCommand draw;
         draw.Program = program.Get();
-        if (scenario == 0) draw.Groups.push_back({0, native.Get(), {}});
-        if (scenario == 2) {
-            // Populate the program requirements with a valid draw before a later draw omits its group.
-            MeshDrawCommand valid;
-            valid.Program = program.Get();
-            valid.Groups.push_back({0, native.Get(), {}});
-            list.Commands.push_back(std::move(valid));
+        switch (scenario) {
+            case Case::DuplicateEntry:
+                // The graph supplies group 0 twice; the draw itself carries no native group.
+                break;
+            case Case::MissingGroup: {
+                // A valid draw first, so the program requirements are already known when the next draw omits its group.
+                MeshDrawCommand valid;
+                valid.Program = program.Get();
+                valid.Groups.push_back({0, native.Get(), {}});
+                list.Commands.push_back(std::move(valid));
+                break;
+            }
+            case Case::UnsortedNativeGroups:
+                draw.Groups.push_back({1, native.Get(), {}});
+                draw.Groups.push_back({0, native.Get(), {}});
+                break;
+            case Case::InvalidNativeGroup:
+                draw.Groups.push_back({0, nullptr, {}});
+                break;
+            default:
+                draw.Groups.push_back({0, native.Get(), {}});
+                break;
         }
-        list.Commands.push_back(draw);
-        auto graph = MakeGraph("invalid bindings");
-        auto other = MakeGraph("other graph");
-        RgParameterSetHandle foreign;
-        array<float, 4> bytes{1, 2, 3, 4};
-        const RgParameterBinding parameter{"ValuesBuffer", 0, RgCBufferParameterBinding{std::as_bytes(std::span{bytes})}};
-        if (scenario >= 3) {
-            auto& owner = scenario == 3 ? graph : other;
-            owner.AddRasterPass<test::EmptyGraphPass>("owner", [&](test::EmptyGraphPass&, RenderGraphRasterBuilder& builder) { foreign = builder.CreateParameterSet(*program, 0, std::span{&parameter, 1}); }, +[](const test::EmptyGraphPass&, RenderGraphRasterContext&) {});
-        }
-        bool called = false;
+        list.Commands.push_back(std::move(draw));
+        auto graph = MakeGraph("invalid pass sets");
+        const auto color = MakeSmallTarget(graph, "color");
+        bool recorded = false;
         struct Data {
-            bool* Called;
+            const RendererList* List;
+            ShaderProgram* Program;
+            ShaderProgram* Other;
+            Case Scenario;
+            bool* Recorded;
+            array<float, 4> Values;
+            std::optional<RendererListPassSets> Sets;
         };
         graph.AddRasterPass<Data>("reject", [&](Data& data, RenderGraphRasterBuilder& builder) {
-            data.Called = &called;
-            const auto set = scenario >= 3 ? foreign : builder.CreateParameterSet(*program, 0, std::span{&parameter, 1});
-            vector<RendererListPassBinding> bindings{{program.Get(), 0, set}};
-            if (scenario == 1) bindings.push_back(bindings.front());
-            if (scenario == 2) bindings.clear();
-            EXPECT_FALSE(RendererListPassBindings::Build(builder, list, bindings));
-            builder.SetSideEffect(); }, +[](const Data& data, RenderGraphRasterContext&) { *data.Called = true; });
+            data.List = &list;
+            data.Program = program.Get();
+            data.Other = other.Get();
+            data.Scenario = scenario;
+            data.Recorded = &recorded;
+            data.Values = {1, 2, 3, 4};
+            builder.SetColorAttachment(0, color);
+            builder.SetSideEffect(); }, +[](Data& data, RenderGraphPrepareContext& ctx) {
+            const RgParameterBinding parameter{"ValuesBuffer", 0, RgCBufferParameterBinding{std::as_bytes(std::span{data.Values})}};
+            vector<RendererListProgramParameters> parameters;
+            switch (data.Scenario) {
+                case Case::NativeCollision: parameters.push_back({data.Program, 0, std::span{&parameter, 1}}); break;
+                case Case::DuplicateEntry:
+                    parameters.push_back({data.Program, 0, std::span{&parameter, 1}});
+                    parameters.push_back({data.Program, 0, std::span{&parameter, 1}});
+                    break;
+                case Case::ForeignProgram: parameters.push_back({data.Other, 0, std::span{&parameter, 1}}); break;
+                default: break;
+            }
+            data.Sets = RendererListPassSets::Create(ctx, *data.List, parameters);
+            return data.Sets.has_value(); }, +[](const Data& data, RenderGraphRasterContext&) { *data.Recorded = true; });
         EXPECT_FALSE(Run(graph));
-        EXPECT_FALSE(called);
-        EXPECT_EQ(graph.GetReport().PhysicalAllocations, 0u);
+        EXPECT_FALSE(recorded);
+        EXPECT_EQ(graph.GetFirstErrorCode(), code);
         ASSERT_FALSE(graph.GetReport().Diagnostics.empty());
-        if (scenario == 2) EXPECT_EQ(graph.GetReport().Diagnostics.front().Code, "RendererListMissingGroup");
+        EXPECT_EQ(graph.GetReport().Diagnostics.front().Code, code);
         EXPECT_FALSE(graph.GetReport().Diagnostics.front().Pass.empty());
         EXPECT_FALSE(graph.GetReport().Diagnostics.front().Binding.empty());
     }
 }
 
-TEST_P(RendererListPassBindingsTest, InvalidItemIndexDuplicateAndIncompleteOrderFailBeforePreparation) {
+TEST_P(RendererListPassSetsTest, InvalidItemIndexDuplicateAndIncompleteOrderFailDuringPreparation) {
     for (uint32_t scenario = 0; scenario < 3; ++scenario) {
         SCOPED_TRACE(scenario);
         RendererList list;
@@ -199,21 +274,28 @@ TEST_P(RendererListPassBindingsTest, InvalidItemIndexDuplicateAndIncompleteOrder
         list.Items = {{{}, 0}, {{}, scenario == 0 ? 2u : 0u}};
         if (scenario == 2) list.Items.pop_back();
         auto graph = MakeGraph("invalid draw order");
-        graph.AddRasterPass<test::EmptyGraphPass>("reject order", [&](test::EmptyGraphPass&, RenderGraphRasterBuilder& builder) {
-            EXPECT_FALSE(PrepareRendererList(list, builder));
-            builder.SetSideEffect();
-        }, +[](const test::EmptyGraphPass&, RenderGraphRasterContext&) {
+        const auto color = MakeSmallTarget(graph, "color");
+        struct Data {
+            const RendererList* List;
+            std::optional<PreparedRendererList> Prepared;
+        };
+        graph.AddRasterPass<Data>("reject order", [&](Data& data, RenderGraphRasterBuilder& builder) {
+            data.List = &list;
+            builder.SetColorAttachment(0, color);
+            builder.SetSideEffect(); }, +[](Data& data, RenderGraphPrepareContext& ctx) {
+            data.Prepared = PrepareRendererList(*data.List, ctx);
+            return data.Prepared.has_value(); }, +[](const Data&, RenderGraphRasterContext&) {
             ADD_FAILURE() << "An invalid draw order reached recording";
         });
         EXPECT_FALSE(Run(graph));
-        EXPECT_EQ(graph.GetReport().GraphicsPipelineRequests, 0u);
-        EXPECT_EQ(graph.GetReport().PhysicalAllocations, 0u);
+        EXPECT_EQ(graph.GetReport().GraphicsPipelinePreparations, 0u);
+        EXPECT_EQ(graph.GetFirstErrorCode(), "RendererListPreparation");
         ASSERT_FALSE(graph.GetReport().Diagnostics.empty());
         EXPECT_EQ(graph.GetReport().Diagnostics.front().Code, "RendererListPreparation");
     }
 }
 
-TEST_P(RendererListPassBindingsTest, ProgramRecipesOwnResolvedGroupsAcrossLayoutChanges) {
+TEST_P(RendererListPassSetsTest, ProgramRecipesOwnResolvedGroupsAcrossLayoutChanges) {
     auto& device = *Context.Device;
     constexpr std::string_view source = R"hlsl(
 #include <core/platform.hlsli>
@@ -260,7 +342,7 @@ VK_BINDING(8, 2) SamplerState LinearSampler : register(s0, space2);
     for (const auto& buffer : replacement->GetOrCreateParameterGroupRecipe(2).Buffers) EXPECT_FALSE(buffer.Dynamic);
 }
 
-TEST_P(RendererListPassBindingsTest, ExecutionItemsPreserveDynamicBindingsOrderAndRejectForeignGraph) {
+TEST_P(RendererListPassSetsTest, ExecutionItemsPreserveDynamicBindingsOrderAndRejectForeignGraph) {
     auto& device = *Context.Device;
     render::ShaderProgramLayoutRecipe recipe;
     const render::ShaderLayoutSelector selector{.DeclarationName = "Color", .ExpectedLogicalResourceKind = shader::ShaderBindingKind::CBuffer};
@@ -325,24 +407,30 @@ VK_BINDING(0, 1) ConstantBuffer<Values> Factor : register(b0, space1);
     DrawExecutionStats stats;
     std::optional<PreparedRendererList> prepared;
     struct Data {
-        const PreparedRendererList* List;
+        const RendererList* Source;
+        std::optional<PreparedRendererList>* Prepared;
         DrawExecutionStats* Stats;
         render::RenderBackend Backend;
     };
     graph.AddRasterPass<Data>("blue red green", [&](Data& data, RenderGraphRasterBuilder& builder) {
         builder.SetColorAttachment(0, color);
-        prepared = PrepareRendererList(list, builder);
-        ASSERT_TRUE(prepared);
-        ASSERT_EQ(prepared->Draws.size(), 3u);
-        for (size_t index = 0; index < prepared->Draws.size(); ++index) {
-            EXPECT_EQ(prepared->Draws[index].Description, &list.GetCommand(index));
-            EXPECT_EQ(prepared->Draws[index].Groups.data(), list.GetCommand(index).Groups.data());
+        data = {&list, &prepared, &stats, GetParam()};
+    }, +[](Data& data, RenderGraphPrepareContext& ctx) {
+        *data.Prepared = PrepareRendererList(*data.Source, ctx);
+        if (!*data.Prepared) return false;
+        const auto& draws = (*data.Prepared)->Draws;
+        EXPECT_EQ(draws.size(), 3u);
+        for (size_t index = 0; index < draws.size(); ++index) {
+            EXPECT_EQ(draws[index].Description, &data.Source->GetCommand(index));
+            EXPECT_EQ(draws[index].Groups.data(), data.Source->GetCommand(index).Groups.data());
+            EXPECT_TRUE(draws[index].PassGroups.empty());
+            EXPECT_NE(draws[index].Pipeline, nullptr);
         }
-        data = {&*prepared, &stats, GetParam()};
+        return true;
     }, +[](const Data& data, RenderGraphRasterContext& context) {
         context.Encoder().SetViewport(MakeViewport(data.Backend, 0, 0, 16, 16));
         context.Encoder().SetScissor({0, 0, 16, 16});
-        SubmitRendererList(*data.List, context, *data.Stats);
+        RecordRendererList(**data.Prepared, context, *data.Stats);
     });
     const auto pitch = Align(uint64_t{16 * 4}, device.GetDetail().TextureDataPitchAlignment);
     auto readback = device.CreateBuffer({pitch * 16, render::MemoryType::ReadBack, render::BufferUse::MapRead | render::BufferUse::CopyDestination, {}});
@@ -359,22 +447,23 @@ VK_BINDING(0, 1) ConstantBuffer<Values> Factor : register(b0, space1);
     EXPECT_EQ(std::to_integer<uint8_t>(bytes[pixel]), 0u);
     EXPECT_NEAR(std::to_integer<uint8_t>(bytes[pixel + 1]), 64u, 1);
     EXPECT_EQ(std::to_integer<uint8_t>(bytes[pixel + 2]), 0u);
+    // A prepared list belongs to exactly one pass of one graph; recording it elsewhere binds nothing.
     auto foreign = MakeGraph("foreign execution");
     const auto foreignColor = foreign.CreateTexture({render::TextureDimension::Dim2D, 16, 16, 1, 1, 1, render::TextureFormat::RGBA8_UNORM, render::MemoryType::Device, render::TextureUse::RenderTarget, {}}, "foreign color");
     DrawExecutionStats rejected;
     foreign.AddRasterPass<Data>("reject previous graph", [&](Data& data, RenderGraphRasterBuilder& builder) {
-        data = {&*prepared, &rejected, GetParam()};
+        data = {&list, &prepared, &rejected, GetParam()};
         builder.SetColorAttachment(0, foreignColor);
         builder.SetSideEffect();
     }, +[](const Data& data, RenderGraphRasterContext& context) {
-        SubmitRendererList(*data.List, context, *data.Stats);
+        RecordRendererList(**data.Prepared, context, *data.Stats);
     });
     EXPECT_FALSE(Run(foreign));
     EXPECT_EQ(rejected.Draws, 0u);
     EXPECT_EQ(rejected.BindingFailure, 3u);
 }
 
-TEST_P(RendererListPassBindingsTest, B03TextureArraysRejectHolesKindsAndProgramsAndReadBothElements) {
+TEST_P(RendererListPassSetsTest, B03TextureArraysRejectHolesAndKindsAndReadBothElements) {
     auto& device = *Context.Device;
     constexpr std::string_view source = R"hlsl(
 #include <core/platform.hlsli>
@@ -382,9 +471,8 @@ VK_BINDING(0, 0) Texture2D<float> Images[2] : register(t0);
 [shader("vertex")] float4 VSMain(float3 p : POSITION) : SV_Position { return float4(p, 1); }
 [shader("pixel")] float PSMain() : SV_Target0 { return Images[0].Load(int3(0, 0, 0)) + Images[1].Load(int3(0, 0, 0)); }
 )hlsl";
-    auto program = test::CompileFoundationGraphics(device, source), other = test::CompileFoundationGraphics(device, source);
+    auto program = test::CompileFoundationGraphics(device, source);
     ASSERT_TRUE(program);
-    ASSERT_TRUE(other);
     const array<float, 9> positions{-1, -1, .5f, 3, -1, .5f, -1, 3, .5f};
     const array<uint32_t, 3> indices{0, 1, 2};
     auto vertices = render::test::MakeUploadBuffer(device, std::as_bytes(std::span{positions}), render::BufferUse::Vertex);
@@ -405,7 +493,8 @@ VK_BINDING(0, 0) Texture2D<float> Images[2] : register(t0);
     draw.PipelineState.DepthStencil.DepthTestEnable = draw.PipelineState.DepthStencil.DepthWriteEnable = false;
     ASSERT_TRUE(FinalizeMeshDrawCommand(draw));
     list.Commands.push_back(draw);
-    for (uint32_t scenario = 0; scenario < 5; ++scenario) {
+    // 0: array hole, 1: no bindings at all, 2: wrong binding kind for an element, 3: both elements read.
+    for (uint32_t scenario = 0; scenario < 4; ++scenario) {
         SCOPED_TRACE(scenario);
         auto graph = MakeGraph("array declarations");
         array<RgTextureValue, 3> images;
@@ -418,22 +507,35 @@ VK_BINDING(0, 0) Texture2D<float> Images[2] : register(t0);
             const RendererList* List;
             DrawExecutionStats* Stats;
             render::RenderBackend Backend;
-            std::optional<RendererListPassBindings> Bindings;
+            ShaderProgram* Program;
+            uint32_t Scenario;
+            array<RgTextureViewHandle, 2> Images;
+            array<uint32_t, 4> Wrong;
+            std::optional<RendererListPassSets> Sets;
             std::optional<PreparedRendererList> Prepared;
         };
         graph.AddRasterPass<Data>("array consumer", [&](Data& data, RenderGraphRasterBuilder& builder) {
-            data.List = &list; data.Stats = &stats; data.Backend = GetParam(); builder.SetColorAttachment(0, images[2]);
-            vector<RgParameterBinding> bindings{{"Images", 0, RgTextureParameterBinding{images[0]}}};
-            if (scenario != 0) bindings.push_back({"Images", 1, RgTextureParameterBinding{images[1]}});
-            if (scenario == 1) bindings.clear();
-            const array<uint32_t, 4> wrong{1, 2, 3, 4};
-            if (scenario == 2) bindings[1].Value = RgCBufferParameterBinding{std::as_bytes(std::span{wrong})};
-            const auto set = builder.CreateParameterSet(scenario == 3 ? *other : *program, 0, bindings);
-            const RendererListPassBinding parameters{program.Get(), 0, set};
-            data.Bindings = RendererListPassBindings::Build(builder, list, std::span{&parameters, 1});
-            if (data.Bindings) data.Prepared = PrepareRendererList(list, builder, &*data.Bindings); }, +[](const Data& data, RenderGraphRasterContext& context) {
-            ASSERT_TRUE(data.Bindings); context.Encoder().SetViewport(MakeViewport(data.Backend, 0, 0, 16, 16)); context.Encoder().SetScissor({0, 0, 16, 16});
-            SubmitRendererList(*data.Prepared, context, *data.Stats); });
+            data.List = &list;
+            data.Stats = &stats;
+            data.Backend = GetParam();
+            data.Program = program.Get();
+            data.Scenario = scenario;
+            data.Wrong = {1, 2, 3, 4};
+            builder.SetColorAttachment(0, images[2]);
+            data.Images[0] = builder.ReadTexture(images[0]);
+            data.Images[1] = builder.ReadTexture(images[1]); }, +[](Data& data, RenderGraphPrepareContext& ctx) {
+            vector<RgParameterBinding> bindings{{"Images", 0, RgTextureParameterBinding{data.Images[0]}}};
+            if (data.Scenario != 0) bindings.push_back({"Images", 1, RgTextureParameterBinding{data.Images[1]}});
+            if (data.Scenario == 1) bindings.clear();
+            if (data.Scenario == 2) bindings[1].Value = RgCBufferParameterBinding{std::as_bytes(std::span{data.Wrong})};
+            const RendererListProgramParameters parameters{data.Program, 0, bindings};
+            data.Sets = RendererListPassSets::Create(ctx, *data.List, std::span{&parameters, 1});
+            if (!data.Sets) return false;
+            data.Prepared = PrepareRendererList(*data.List, ctx, &*data.Sets);
+            return data.Prepared.has_value(); }, +[](const Data& data, RenderGraphRasterContext& context) {
+            context.Encoder().SetViewport(MakeViewport(data.Backend, 0, 0, 16, 16));
+            context.Encoder().SetScissor({0, 0, 16, 16});
+            RecordRendererList(*data.Prepared, context, *data.Stats); });
         const auto pitch = Align(uint64_t{16 * 4}, device.GetDetail().TextureDataPitchAlignment);
         auto readback = device.CreateBuffer({pitch * 16, render::MemoryType::ReadBack, render::BufferUse::MapRead | render::BufferUse::CopyDestination, {}});
         ASSERT_TRUE(readback);
@@ -441,9 +543,8 @@ VK_BINDING(0, 0) Texture2D<float> Images[2] : register(t0);
         const auto host = graph.NextVersion(graph.ImportBuffer(external, "readback", RenderGraphExternalAccess::ObservableOutput));
         graph.AddCopyTextureToBufferPass("copy", images[2], host);
         HostRead(graph, host);
-        if (scenario < 4) {
+        if (scenario < 3) {
             EXPECT_FALSE(Run(graph));
-            EXPECT_EQ(graph.GetReport().PhysicalAllocations, 0u);
             EXPECT_EQ(stats.Commands, 0u);
             ASSERT_FALSE(graph.GetReport().Diagnostics.empty());
             EXPECT_FALSE(graph.GetReport().Diagnostics.front().Binding.empty());
@@ -459,54 +560,12 @@ VK_BINDING(0, 0) Texture2D<float> Images[2] : register(t0);
     }
 }
 
-TEST_P(RendererListPassBindingsTest, B04RuntimeScopeViolationsAbortOnlyTheIsolatedProcessAndNextGraphWorks) {
-    auto program = test::CompileFoundationCompute(*Context.Device, R"hlsl(
-#include <core/platform.hlsli>
-VK_BINDING(0, 0) RWStructuredBuffer<uint> Output : register(u0);
-[shader("compute")] [numthreads(1, 1, 1)] void CSMain() { Output[0] = 17; }
-)hlsl");
-    ASSERT_TRUE(program);
-    const auto runScope = [&](uint32_t mode) {
-        auto graph = MakeGraph("scope execution");
-        auto owner = MakeGraph("foreign scope");
-        RgParameterSetHandle first, foreign;
-        struct Data {
-            RgComputeProgramHandle Program;
-            RgParameterSetHandle Set;
-        };
-        const auto append = [&](RenderGraph& target, RgParameterSetHandle& saved, bool misuse) {
-            const auto output = target.CreateBuffer({4, render::MemoryType::Device, render::BufferUse::UnorderedAccess, {}}, "value");
-            target.AddComputePass<Data>("bind scope", [&](Data& data, RenderGraphComputeBuilder& builder) {
-                const RgParameterBinding binding{"Output", 0, RgBufferParameterBinding{output, {0, 4}, 4, render::TextureFormat::UNKNOWN, RgParameterAccess::Write}};
-                data.Program = builder.UseComputeProgram(*program);
-                saved = builder.CreateParameterSet(*program, 0, std::span{&binding, 1});
-                data.Set = misuse ? (mode == 1 ? first : foreign) : saved;
-                builder.SetSideEffect(); }, +[](const Data& data, RenderGraphComputeContext& pass) { pass.BindComputeProgram(data.Program); pass.BindParameterSet(data.Set); pass.Encoder().Dispatch(1, 1, 1); });
-        };
-        append(owner, foreign, false);
-        append(graph, first, false);
-        RgParameterSetHandle second;
-        append(graph, second, mode != 0);
-        return Run(graph);
-    };
-    for (uint32_t mode : {1u, 2u}) {
-        EXPECT_DEATH({
-            SetLogCallback(+[](LogLevel, std::string_view message, void*) { std::fwrite(message.data(), 1, message.size(), stderr); std::fflush(stderr); }, nullptr);
-            runScope(mode); }, "RenderGraph parameter.set");
-        ASSERT_TRUE(runScope(0));
-    }
-}
-
-TEST_P(RendererListPassBindingsTest, OffSkipsMissingGroupAndFullMinimalStillFails) {
+TEST_P(RendererListPassSetsTest, OffSkipsMissingGroupButStillRejectsForeignProgramAndFullMinimalFails) {
     auto& device = *Context.Device;
-    auto program = test::CompileFoundationGraphics(device, R"hlsl(
-#include <core/platform.hlsli>
-struct Values { float4 Value; };
-VK_BINDING(0, 0) ConstantBuffer<Values> ValuesBuffer : register(b0);
-[shader("vertex")] float4 VSMain(float3 p : POSITION) : SV_Position { return float4(p, 1); }
-[shader("pixel")] float4 PSMain() : SV_Target0 { return ValuesBuffer.Value; }
-)hlsl");
+    auto program = test::CompileFoundationGraphics(device, kSingleGroupProgram);
+    auto other = test::CompileFoundationGraphics(device, kSingleGroupProgram);
     ASSERT_TRUE(program);
+    ASSERT_TRUE(other);
     auto native = device.CreateShaderParameterSet({program->GetPipelineLayout(), 0});
     ASSERT_TRUE(native);
     const auto makeList = [&] {
@@ -520,34 +579,63 @@ VK_BINDING(0, 0) ConstantBuffer<Values> ValuesBuffer : register(b0);
         list.Commands.push_back(std::move(missing));
         return list;
     };
+    struct Data {
+        const RendererList* List;
+        ShaderProgram* Program;
+        ShaderProgram* Foreign;
+        array<float, 4> Values;
+        std::optional<RendererListPassSets> Sets;
+    };
+    const auto prepare = +[](Data& data, RenderGraphPrepareContext& ctx) {
+        const RgParameterBinding parameter{"ValuesBuffer", 0, RgCBufferParameterBinding{std::as_bytes(std::span{data.Values})}};
+        const RendererListProgramParameters foreign{data.Foreign, 0, std::span{&parameter, 1}};
+        std::span<const RendererListProgramParameters> parameters{};
+        if (data.Foreign) parameters = std::span{&foreign, 1};
+        data.Sets = RendererListPassSets::Create(ctx, *data.List, parameters);
+        if (!data.Sets) return false;
+        // Only the no-parameter graphs get this far, so this pass contributes no graph sets at all.
+        EXPECT_TRUE(data.Sets->Find(*data.Program).empty());
+        return true;
+    };
     {
+        // Validation off keeps the per-draw scans out of the frame: a draw may omit a required group.
         auto graph = RenderGraph{*Context.Device, *Resources, *Registry, "off", kPerformanceRenderGraphRuntimeOptions};
         auto list = makeList();
-        const auto color = graph.CreateTexture({render::TextureDimension::Dim2D, 4, 4, 1, 1, 1, render::TextureFormat::RGBA8_UNORM, render::MemoryType::Device, render::TextureUse::RenderTarget, {}}, "color");
-        graph.AddRasterPass<test::EmptyGraphPass>("skip", [&](test::EmptyGraphPass&, RenderGraphRasterBuilder& builder) {
+        const auto color = MakeSmallTarget(graph, "color");
+        graph.AddRasterPass<Data>("skip", [&](Data& data, RenderGraphRasterBuilder& builder) {
+            data = {&list, program.Get(), nullptr, {1, 2, 3, 4}, std::nullopt};
             EXPECT_FALSE(builder.IsValidationFull());
             builder.SetColorAttachment(0, color);
-            EXPECT_TRUE(RendererListPassBindings::Build(builder, list, {}));
-            builder.SetSideEffect();
-        }, +[](const test::EmptyGraphPass&, RenderGraphRasterContext&) {});
-        EXPECT_TRUE(graph.Compile()) << graph.GetFirstErrorCode();
+            builder.SetSideEffect(); }, prepare, +[](const Data&, RenderGraphRasterContext&) {});
+        EXPECT_TRUE(Run(graph)) << graph.GetFirstErrorCode();
         EXPECT_FALSE(graph.HasFailed());
-        EXPECT_TRUE(graph.GetReport().Diagnostics.empty());
         EXPECT_TRUE(graph.GetFirstErrorCode().empty());
+    }
+    {
+        // The argument checks are cheap and stay on: a program no draw uses is always a mistake.
+        auto graph = RenderGraph{*Context.Device, *Resources, *Registry, "off foreign program", kPerformanceRenderGraphRuntimeOptions};
+        auto list = makeList();
+        const auto color = MakeSmallTarget(graph, "color");
+        graph.AddRasterPass<Data>("reject foreign", [&](Data& data, RenderGraphRasterBuilder& builder) {
+            data = {&list, program.Get(), other.Get(), {1, 2, 3, 4}, std::nullopt};
+            builder.SetColorAttachment(0, color);
+            builder.SetSideEffect(); }, prepare, +[](const Data&, RenderGraphRasterContext&) { ADD_FAILURE() << "A foreign parameter program reached recording"; });
+        EXPECT_FALSE(Run(graph));
+        EXPECT_TRUE(graph.HasFailed());
+        EXPECT_EQ(graph.GetFirstErrorCode(), "RendererListProgram");
     }
     {
         RenderGraphRuntimeOptions options = kDiagnosticRenderGraphRuntimeOptions;
         options.Report = RenderGraphReportMode::Minimal;
         auto graph = RenderGraph{*Context.Device, *Resources, *Registry, "full-minimal", options};
         auto list = makeList();
-        const auto color = graph.CreateTexture({render::TextureDimension::Dim2D, 4, 4, 1, 1, 1, render::TextureFormat::RGBA8_UNORM, render::MemoryType::Device, render::TextureUse::RenderTarget, {}}, "color");
-        graph.AddRasterPass<test::EmptyGraphPass>("reject", [&](test::EmptyGraphPass&, RenderGraphRasterBuilder& builder) {
+        const auto color = MakeSmallTarget(graph, "color");
+        graph.AddRasterPass<Data>("reject", [&](Data& data, RenderGraphRasterBuilder& builder) {
+            data = {&list, program.Get(), nullptr, {1, 2, 3, 4}, std::nullopt};
             EXPECT_TRUE(builder.IsValidationFull());
             builder.SetColorAttachment(0, color);
-            EXPECT_FALSE(RendererListPassBindings::Build(builder, list, {}));
-            builder.SetSideEffect();
-        }, +[](const test::EmptyGraphPass&, RenderGraphRasterContext&) {});
-        EXPECT_FALSE(graph.Compile());
+            builder.SetSideEffect(); }, prepare, +[](const Data&, RenderGraphRasterContext&) { ADD_FAILURE() << "A draw missing its group reached recording"; });
+        EXPECT_FALSE(Run(graph));
         EXPECT_TRUE(graph.HasFailed());
         EXPECT_EQ(graph.GetFirstErrorCode(), "RendererListMissingGroup");
         EXPECT_TRUE(graph.GetReport().Diagnostics.empty());
@@ -555,7 +643,55 @@ VK_BINDING(0, 0) ConstantBuffer<Values> ValuesBuffer : register(b0);
     }
 }
 
-INSTANTIATE_TEST_SUITE_P(Backends, RendererListPassBindingsTest, testing::Values(render::RenderBackend::D3D12, render::RenderBackend::Vulkan));
+// Pass sets hold views resolved against the declaring pass's accesses, so borrowing them in another
+// pass would record descriptors the graph planned no barrier for.
+TEST_P(RendererListPassSetsTest, PassSetsFromAnotherPassAreRejected) {
+    auto& device = *Context.Device;
+    auto program = test::CompileFoundationGraphics(device, kSingleGroupProgram);
+    ASSERT_TRUE(program);
+    RendererList list;
+    MeshDrawCommand draw;
+    // The graph set covers the program's only group, so the draw declares no native group.
+    draw.Program = program.Get();
+    list.Commands.push_back(std::move(draw));
+    struct Owner {
+        const RendererList* List;
+        ShaderProgram* Program;
+        array<float, 4> Values;
+        std::optional<RendererListPassSets>* Shared;
+    };
+    struct Borrower {
+        const RendererList* List;
+        std::optional<RendererListPassSets>* Shared;
+    };
+    for (const auto& options : {kDiagnosticRenderGraphRuntimeOptions, kPerformanceRenderGraphRuntimeOptions}) {
+        SCOPED_TRACE(options.Validation == RenderValidationMode::Full ? "full" : "off");
+        auto graph = RenderGraph{device, *Resources, *Registry, "cross pass sets", options};
+        const auto owned = MakeSmallTarget(graph, "owned");
+        const auto borrowed = MakeSmallTarget(graph, "borrowed");
+        std::optional<RendererListPassSets> shared;
+        graph.AddRasterPass<Owner>("owner", [&](Owner& data, RenderGraphRasterBuilder& builder) {
+            data = {&list, program.Get(), {1, 2, 3, 4}, &shared};
+            builder.SetColorAttachment(0, owned);
+            builder.SetSideEffect(); }, +[](Owner& data, RenderGraphPrepareContext& ctx) {
+            const RgParameterBinding parameter{"ValuesBuffer", 0, RgCBufferParameterBinding{std::as_bytes(std::span{data.Values})}};
+            const RendererListProgramParameters parameters{data.Program, 0, std::span{&parameter, 1}};
+            *data.Shared = RendererListPassSets::Create(ctx, *data.List, std::span{&parameters, 1});
+            return data.Shared->has_value(); }, +[](const Owner&, RenderGraphRasterContext&) {});
+        graph.AddRasterPass<Borrower>("borrower", [&](Borrower& data, RenderGraphRasterBuilder& builder) {
+            data = {&list, &shared};
+            builder.SetColorAttachment(0, borrowed);
+            builder.SetSideEffect(); }, +[](Borrower& data, RenderGraphPrepareContext& ctx) {
+            if (!*data.Shared) return false;
+            return PrepareRendererList(*data.List, ctx, &**data.Shared).has_value(); },
+            +[](const Borrower&, RenderGraphRasterContext&) { ADD_FAILURE() << "Sets from another pass reached recording"; });
+        EXPECT_FALSE(Run(graph));
+        EXPECT_TRUE(graph.HasFailed());
+        EXPECT_EQ(graph.GetFirstErrorCode(), "RendererListPassSets");
+    }
+}
+
+INSTANTIATE_TEST_SUITE_P(Backends, RendererListPassSetsTest, testing::Values(render::RenderBackend::D3D12, render::RenderBackend::Vulkan));
 
 }  // namespace
 }  // namespace radray

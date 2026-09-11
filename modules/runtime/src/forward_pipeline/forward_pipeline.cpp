@@ -386,7 +386,7 @@ void ForwardPipeline::BuildGraph(RenderPipelineContext& ctx, RenderGraph& graph,
             }
         }
         for (const auto& overlay : flight.Overlays)
-            overlaysSucceeded &= BuildForwardOutputOverlay(graph, ctx, _impl->Effects, overlay, _impl->Device->GetBackend(), overlaysSucceeded, outputs);
+            overlaysSucceeded &= BuildForwardOutputOverlay(graph, ctx, _impl->Effects, overlay, _impl->Device->GetBackend(), outputs);
         if (!flight.Capture.Build(graph, ctx, *_impl->Device, *_impl->System, outputs)) _impl->Error = true;
         flight.HdrViewCount = viewIndex;
         RADRAY_PROFILE_PLOT("Forward.HdrViews", static_cast<int64_t>(viewIndex));

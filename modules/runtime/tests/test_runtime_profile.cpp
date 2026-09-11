@@ -82,7 +82,7 @@ Sample Measure(F&& callback) {
     profile_allocations::Enabled = false;
     return {uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count()), profile_allocations::Count, profile_allocations::Bytes};
 }
-void PrintSamples(std::string_view backend, uint32_t primitives, bool moving, bool diagnostics, bool prepared, std::string_view stage, vector<Sample> samples) {
+void PrintSamples(std::string_view backend, uint32_t primitives, bool moving, bool diagnostics, std::string_view stage, vector<Sample> samples) {
 #ifdef RADRAY_IS_DEBUG
     constexpr bool isDebug = true;
 #else
@@ -98,8 +98,8 @@ void PrintSamples(std::string_view backend, uint32_t primitives, bool moving, bo
     std::sort(counts.begin(), counts.end());
     std::sort(bytes.begin(), bytes.end());
     const auto quantile = [](const auto& values, uint32_t percentage) { return values[std::min(values.size() - 1, (values.size() * percentage + 99) / 100 - 1)]; };
-    fmt::print("PROFILE {{\"backend\":\"{}\",\"debug\":{},\"primitives\":{},\"moving\":{},\"diagnostics\":{},\"prepared\":{},\"samples\":{},\"stage\":\"{}\",\"p50Ms\":{:.6f},\"p95Ms\":{:.6f},\"p99Ms\":{:.6f},\"p50Allocations\":{},\"p50AllocatedBytes\":{}}}\n",
-               backend, isDebug, primitives, moving, diagnostics, prepared, samples.size(), stage,
+    fmt::print("PROFILE {{\"backend\":\"{}\",\"debug\":{},\"primitives\":{},\"moving\":{},\"diagnostics\":{},\"samples\":{},\"stage\":\"{}\",\"p50Ms\":{:.6f},\"p95Ms\":{:.6f},\"p99Ms\":{:.6f},\"p50Allocations\":{},\"p50AllocatedBytes\":{}}}\n",
+               backend, isDebug, primitives, moving, diagnostics, samples.size(), stage,
                double(quantile(times, 50)) / 1e6, double(quantile(times, 95)) / 1e6, double(quantile(times, 99)) / 1e6,
                quantile(counts, 50), quantile(bytes, 50));
 }
@@ -108,30 +108,6 @@ public:
     task<void> Wait() override { co_return; }
 };
 class RuntimeProfile : public testing::TestWithParam<render::RenderBackend> {};
-
-// Reference of the old no-graph-groups record path for isolated PSO preparation comparison.
-// This is not a public compatibility API and does not emulate the former snapshot/runner implementation.
-void RecordReference(const RendererList& list, RenderGraphRasterContext& ctx, DrawExecutionStats& stats) {
-    auto& commands = ctx.Encoder();
-    for (size_t index = 0; index < list.Commands.size(); ++index) {
-        const auto& draw = list.GetCommand(index);
-        if (!ValidateMeshDrawCommand(draw)) {
-            ctx.Fail("Invalid reference geometry");
-            return;
-        }
-        const auto pso = draw.Program->GetOrCreateGraphicsPipelineState(draw.PipelineState, draw.Geometry->VertexLayout, draw.Geometry->Topology, ctx.PassState());
-        if (!pso) {
-            ctx.Fail("Reference PSO failed");
-            return;
-        }
-        commands.BindGraphicsPipelineState(pso.Get());
-        for (const auto& group : draw.Groups) commands.BindPersistentShaderParameterSet(group.Group, group.Set.Get(), group.DynamicOffsets);
-        commands.BindVertexBuffers(draw.Geometry->VertexBuffers);
-        commands.BindIndexBuffer(draw.Geometry->Ibv);
-        commands.DrawIndexed(draw.IndexCount, 1, draw.FirstIndex, draw.VertexOffset, 0);
-        ++stats.Draws;
-    }
-}
 
 TEST_P(RuntimeProfile, StageCostsAndWarmResourceCounts) {
     const bool extended = std::getenv("RADRAY_RUNTIME_PROFILE") != nullptr;
@@ -198,8 +174,7 @@ TEST_P(RuntimeProfile, StageCostsAndWarmResourceCounts) {
         bool warned = false;
         uint64_t serial = 0;
         for (const bool moving : {false, true})
-            for (uint32_t mode = 0; mode < (extended ? 4u : 2u); ++mode) {
-                const bool prepared = mode < 2;
+            for (uint32_t mode = 0; mode < 2u; ++mode) {
                 const bool diagnostics = mode % 2 != 0;
                 array<vector<Sample>, 10> samples;
                 for (uint32_t frame = 0; frame < 3 + sampleCount; ++frame) {
@@ -265,17 +240,18 @@ TEST_P(RuntimeProfile, StageCostsAndWarmResourceCounts) {
                         };
                         graph->AddRasterPass<Data>("draw", [&](Data& data, RenderGraphRasterBuilder& pass) {
                         pass.SetColorAttachment(0, color); pass.SetDepthAttachment(depth); pass.SetSideEffect();
-                        data = {prepared ? PrepareRendererList(list, pass) : std::nullopt, &list, &stats, GetParam()}; }, +[](const Data& data, RenderGraphRasterContext& ctx) {
+                        data = {std::nullopt, &list, &stats, GetParam()}; }, +[](Data& data, RenderGraphPrepareContext& ctx) {
+                        data.List = PrepareRendererList(*data.Source, ctx);
+                        return data.List.has_value(); }, +[](const Data& data, RenderGraphRasterContext& ctx) {
                         ctx.Encoder().SetViewport(MakeViewport(data.Backend, 0, 0, 16, 16)); ctx.Encoder().SetScissor({0, 0, 16, 16});
-                        if (data.List) SubmitRendererList(*data.List, ctx, *data.Stats);
-                        else RecordReference(*data.Source, ctx, *data.Stats); });
+                        RecordRendererList(*data.List, ctx, *data.Stats); });
                     });
                     command->Begin();
                     RenderGraphExecutionResult execution;
                     values[6] = Measure([&] { execution = RenderGraphTestDriver::Execute(*graph, *command); });
                     ASSERT_TRUE(execution.Success) << graph->GetReport().ToText();
                     EXPECT_EQ(stats.Draws, count * 2u);
-                    EXPECT_EQ(graph->GetReport().GraphicsPipelinePreparations, prepared ? 1u : 0u);
+                    EXPECT_EQ(graph->GetReport().GraphicsPipelinePreparations, 1u);
                     if (serial > 1) EXPECT_EQ(graph->GetReport().GraphicsPipelineCreations, 0u);
                     forward_detail::ForwardCapture capture;
                     if (diagnostics) {
@@ -300,14 +276,14 @@ TEST_P(RuntimeProfile, StageCostsAndWarmResourceCounts) {
                     }
                 }
                 const std::string_view names[]{"proxyTransform", "assetPump", "snapshot", "cull", "listAndParameters", "graphSetup", "graphExecute", "diagnosticSerialization", "flushAndSubmit", "gpuWait"};
-                for (size_t i = 0; i < samples.size(); ++i) PrintSamples(EnumName(GetParam()), count, moving, diagnostics, prepared, names[i], std::move(samples[i]));
+                for (size_t i = 0; i < samples.size(); ++i) PrintSamples(EnumName(GetParam()), count, moving, diagnostics, names[i], std::move(samples[i]));
                 const auto& resourceStats = draws.GetStats();
-                fmt::print("PROFILE_COUNTS {{\"backend\":\"{}\",\"primitives\":{},\"moving\":{},\"diagnostics\":{},\"prepared\":{},\"groupPreparations\":{},\"recipeBuilds\":{},\"setCreations\":{},\"setCacheHits\":{},\"constantBytes\":{},\"snapshotMaterialBytes\":{},\"poolBytes\":{},\"poolPeakBytes\":{}}}\n",
-                           EnumName(GetParam()), count, moving, diagnostics, prepared, resourceStats.GroupPreparations, resourceStats.RecipeBuilds, resourceStats.SetCreations,
+                fmt::print("PROFILE_COUNTS {{\"backend\":\"{}\",\"primitives\":{},\"moving\":{},\"diagnostics\":{},\"groupPreparations\":{},\"recipeBuilds\":{},\"setCreations\":{},\"setCacheHits\":{},\"constantBytes\":{},\"snapshotMaterialBytes\":{},\"poolBytes\":{},\"poolPeakBytes\":{}}}\n",
+                           EnumName(GetParam()), count, moving, diagnostics, resourceStats.GroupPreparations, resourceStats.RecipeBuilds, resourceStats.SetCreations,
                            resourceStats.SetCacheHits, resourceStats.BufferBytesCopied, snapshot.Stats.MaterialBytesCopied, graphResources.GetPoolStats().EstimatedBytes, graphResources.GetPoolStats().PeakEstimatedBytes);
                 const auto& snapshotStats = snapshot.Stats;
-                fmt::print("PROFILE_REUSE {{\"backend\":\"{}\",\"primitives\":{},\"moving\":{},\"diagnostics\":{},\"prepared\":{},\"structuresRebuilt\":{},\"structuresReused\":{},\"boundsRebuilt\":{},\"boundsReused\":{},\"materialsRebuilt\":{},\"materialsReused\":{}}}\n",
-                           EnumName(GetParam()), count, moving, diagnostics, prepared,
+                fmt::print("PROFILE_REUSE {{\"backend\":\"{}\",\"primitives\":{},\"moving\":{},\"diagnostics\":{},\"structuresRebuilt\":{},\"structuresReused\":{},\"boundsRebuilt\":{},\"boundsReused\":{},\"materialsRebuilt\":{},\"materialsReused\":{}}}\n",
+                           EnumName(GetParam()), count, moving, diagnostics,
                            snapshotStats.PrimitiveStructuresRebuilt, snapshotStats.PrimitiveStructuresReused,
                            snapshotStats.PrimitiveBoundsRebuilt, snapshotStats.PrimitiveBoundsReused,
                            snapshotStats.MaterialsRebuilt, snapshotStats.MaterialsReused);

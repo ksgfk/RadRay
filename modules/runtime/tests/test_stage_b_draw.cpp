@@ -141,7 +141,7 @@ struct Output { float4 Position : SV_Position; float2 UV : TEXCOORD0; };
     MeshDrawCommand psoFailure = opaque.Commands[0];
     psoFailure.Geometry = &incompatible;
 
-    // Invalid groups and incompatible vertex semantics fail before any draw or attachment commands.
+    // Invalid groups and incompatible vertex semantics fail during preparation, before any recording.
     for (const auto* invalid : {&duplicate, &psoFailure}) {
         RendererList list;
         list.Commands.push_back(*invalid);
@@ -151,11 +151,17 @@ struct Output { float4 Position : SV_Position; float2 UV : TEXCOORD0; };
         RenderGraph negative{device, negativePool, negativeRegistry, "reject invalid prepared draw"};
         const auto target = negative.CreateTexture({render::TextureDimension::Dim2D, 4, 4, 1, 1, 1, render::TextureFormat::RGBA8_UNORM, render::MemoryType::Device, render::TextureUse::RenderTarget, {}}, "target");
         const auto depth = negative.CreateTexture({render::TextureDimension::Dim2D, 4, 4, 1, 1, 1, render::TextureFormat::D32_FLOAT, render::MemoryType::Device, render::TextureUse::DepthStencilWrite, {}}, "depth");
-        negative.AddRasterPass<std::optional<PreparedRendererList>>("invalid", [&](auto& data, RenderGraphRasterBuilder& builder) {
-            data = PrepareRendererList(list, builder);
+        struct Rejected {
+            const RendererList* Source;
+            std::optional<PreparedRendererList> List;
+        };
+        negative.AddRasterPass<Rejected>("invalid", [&](Rejected& data, RenderGraphRasterBuilder& builder) {
+            data.Source = &list;
             builder.SetColorAttachment(0, target);
             builder.SetDepthAttachment(depth);
-            builder.SetSideEffect(); }, +[](const std::optional<PreparedRendererList>&, RenderGraphRasterContext&) { ADD_FAILURE() << "Invalid draw was recorded"; });
+            builder.SetSideEffect(); }, +[](Rejected& data, RenderGraphPrepareContext& ctx) {
+            data.List = PrepareRendererList(*data.Source, ctx);
+            return data.List.has_value(); }, +[](const Rejected&, RenderGraphRasterContext&) { ADD_FAILURE() << "Invalid draw was recorded"; });
         auto rejected = device.CreateCommandBuffer(Device.Queue);
         ASSERT_TRUE(rejected);
         rejected->Begin();
@@ -174,20 +180,25 @@ struct Output { float4 Position : SV_Position; float2 UV : TEXCOORD0; };
     auto depthTarget = graph.CreateTexture({render::TextureDimension::Dim2D, 64, 64, 1, 1, 1, render::TextureFormat::D32_FLOAT, render::MemoryType::Device, render::TextureUse::DepthStencilWrite, {}}, "depth");
     DrawExecutionStats execution;
     struct Payload {
+        const RendererList* Source;
         std::optional<PreparedRendererList> List;
         DrawExecutionStats* Stats;
         render::RenderBackend Backend;
     };
+    const auto prepare = +[](Payload& payload, RenderGraphPrepareContext& ctx) {
+        payload.List = PrepareRendererList(*payload.Source, ctx);
+        return payload.List.has_value();
+    };
     const auto execute = +[](const Payload& payload, RenderGraphRasterContext& ctx) {
         ctx.Encoder().SetViewport(MakeViewport(payload.Backend, 0, 0, 64, 64));
         ctx.Encoder().SetScissor({0, 0, 64, 64});
-        SubmitRendererList(*payload.List, ctx, *payload.Stats);
+        RecordRendererList(*payload.List, ctx, *payload.Stats);
     };
     graph.AddRasterPass<Payload>("depth", [&](Payload& data, RenderGraphRasterBuilder& builder) {
-        data = {PrepareRendererList(depthList, builder), &execution, GetParam()}; builder.SetDepthAttachment(depthTarget); }, execute);
+        data = {&depthList, std::nullopt, &execution, GetParam()}; builder.SetDepthAttachment(depthTarget); }, prepare, execute);
     depthTarget = graph.NextVersion(depthTarget);
     graph.AddRasterPass<Payload>("opaque", [&](Payload& data, RenderGraphRasterBuilder& builder) {
-        data = {PrepareRendererList(opaque, builder), &execution, GetParam()}; builder.SetColorAttachment(0, color); builder.SetDepthAttachment(depthTarget, {.Load = render::LoadAction::Load}); }, execute);
+        data = {&opaque, std::nullopt, &execution, GetParam()}; builder.SetColorAttachment(0, color); builder.SetDepthAttachment(depthTarget, {.Load = render::LoadAction::Load}); }, prepare, execute);
     const auto row = Align(uint64_t{64 * 4}, device.GetDetail().TextureDataPitchAlignment);
     auto readback = device.CreateBuffer({row * 64, render::MemoryType::ReadBack, render::BufferUse::CopyDestination | render::BufferUse::MapRead, {}});
     ASSERT_TRUE(readback);

@@ -93,15 +93,12 @@ Remove-Item Env:RADRAY_RUNTIME_PROFILE
 采样 32 帧，输出 `PROFILE` JSON 行的 p50/p95/p99。相同命令可换 Debug 对照，采样固定关闭 GPU
 validation，16×16 离屏、单 Direct queue，逐帧等待 GPU，用于隔离 CPU 阶段成本，不测实际帧流水并行度。
 该场景只有共享材质和双 section 几何，不代表复杂产品场景或大规模 GPU-driven 能力。
-扩展模式还运行测试内的旧 record 路径参考，`prepared=false` 表示逐 draw 校验和 PSO cache 查找，
-可独立比较只关闭导出、只提前 PSO 准备和两者同时启用。该参考共享当前 snapshot/list 实现，
-不等于旧 revision 的完整性能基线，也不恢复公共兼容接口。
 
 计时包括 proxy transform、asset Pump、snapshot、Cull、list/参数、graph setup/execute、诊断序列化、
 flush/submit 与 GPU wait。分配计数只覆盖采样线程
 在本测试可执行文件中调用的 C++ new，不包含 DLL/驱动/malloc。flight 重置、完成回调和 graph 析构在计时范围外，阶段耗时之和不代表
 完整 CPU 帧成本；收据缩短 CPU 数据寿命的效果需要另外测量常驻内存。
-`PROFILE_COUNTS` 报告参数与 pool 数量，并标识 prepared/reference；GroupPreparations 包含 view、
+`PROFILE_COUNTS` 报告参数与 pool 数量；GroupPreparations 包含 view、
 material 和 object 等所有组，pool 字节是描述符估算。
 `PROFILE_REUSE` 另报 primitive 结构、世界包围盒和材质的 rebuilt/reused 次数。稳定结构与材质在
 预热后应命中缓存，静止物体不重算 bounds；RecipeBuilds 只计 program 第一次解析 group，warm flight
@@ -133,16 +130,19 @@ CPU 上 `Render` 分成构图与执行，不要把 `BuildForwardHdrView` 当成 
 - `ComposeGraph` → `FrameGraph::Expand` → `ForwardPipeline::BuildGraph` / `BuildForwardHdrView`：按相机声明 pass。
   阴影在 `DeclareSharedShadows` / `BuildShadows` 中按本帧主相机声明一次；每个 view 的
   `MainViewCull` / `FrustumCull`、`MainViewRendererLists` 是场景准备。
-  `DeclareHdrGraph` / `ForwardGraph::BuildGraph` / `PrepareRendererList` 才是往图里挂节点。
+  `DeclareHdrGraph` / `ForwardGraph::BuildGraph` 才是往图里挂节点。
 - `ExecuteGraph` → `RenderGraph::Execute`：`RenderGraph::Compile`（`Validate`、`BuildIR`、`CompilePlanHit` 或
   `CompilePlanMiss`/`CompileRenderGraph`、`Optimize`）、`RenderGraph::Realize`（transient 分配）、
-  `RenderGraph::Prepare`（`PrepareUploads` / `PreparePipelines` / `PrepareParameters`）、`PlanBarriers`、
-  `RenderGraph::Record`（CPU 编码；每个 live pass 一个 zone，内含 `SubmitRendererList`）。
+  `RenderGraph::Prepare`（`PrepareUploads` / `PreparePasses`；后者每个 live pass 一个 zone，
+  内含该 pass 的 PSO/参数 set 解析与 `PrepareRendererList`）、`PlanBarriers`、
+  `RenderGraph::Record`（CPU 编码；每个 live pass 一个 zone，内含 `RecordRendererList`）。
 - `Submit` / `GpuSystem::SubmitFrame`：结束 command buffer 并提交队列。GPU 时间线才是 GPU 执行。
 
 Plots：`RG.DeclaredPasses`、`RG.LivePasses`、`RG.CompilePlanReused`（1=复用编译计划）、
 `RG.PhysicalAllocations`、`RG.GraphicsPipelinePreparations`、`RG.GraphicsPipelineCreations`、
 `RG.MergedRasterPasses`、`RG.BarrierBatches`、`Forward.HdrViews`。
+`RG.GraphicsPipelinePreparations` 计 prepare 阶段解析 graphics PSO 的次数，
+`RG.GraphicsPipelineCreations` 只计其中真正新建 native PSO 的次数。
 
 GPU zone 挂在 `PushDebugGroup` / `PopDebugGroup` 上，所以 RenderGraph 每个 live pass 一个 zone；两个后端的
 差异（D3D12 每个 raster group 一个 zone）见 [RHI](../architecture/render-rhi.md#命令录制)。
@@ -218,7 +218,7 @@ FreeType 依赖隔离还应检查生成的 `ftoption.h` 中外部功能宏与 fr
 | `test_render_graph` | `RenderGraphTest` |
 | `test_graph_contracts` | `GraphContractTest`（整数数据链、Clear/Load、layer/mip、间接工作量） |
 | `test_graph_preparation` | `GraphPreparationTest`（分配/参数故障注入与恢复） |
-| `test_renderer_list_pass_bindings` | `RendererListPassBindingsTest` |
+| `test_renderer_list_pass_sets` | `RendererListPassSetsTest`（prepare 阶段的 per-program 参数 set） |
 | `test_temporal_feedback` | `TemporalFeedbackTest`（D3D12/Vulkan 跨图反馈） |
 | `test_forward_foundation_probes` | `ForwardFoundationProbe`（底层独立 shader，具体 suite 以 `ctest -N` 为准） |
 | `test_flight_lifetime` | `FlightLifetimeTest`（真实三 flight、history 退休、外部 output） |

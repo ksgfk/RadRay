@@ -2,7 +2,7 @@
 #include "foundation_graph_fixture.h"
 #include "failing_graph_command.h"
 #include <radray/runtime/render_system.h>
-#include <radray/runtime/render_framework/renderer_list_pass_bindings.h>
+#include <radray/runtime/render_framework/renderer_list_pass_sets.h>
 
 namespace radray {
 namespace {
@@ -251,17 +251,20 @@ public:
                     const auto depthTarget = graph.CreateTexture({render::TextureDimension::Dim2D, family.OutputSize.Width, family.OutputSize.Height, 1, 1, 1, render::TextureFormat::D32_FLOAT, render::MemoryType::Device, render::TextureUse::DepthStencilRead | render::TextureUse::DepthStencilWrite, {}}, "PSO rejection depth");
                     graph.AddRasterPass<test::EmptyGraphPass>("initialize depth", [=](test::EmptyGraphPass&, RenderGraphRasterBuilder& builder) { builder.SetDepthAttachment(depthTarget); }, +[](const test::EmptyGraphPass&, RenderGraphRasterContext&){});
                     struct Draw {
+                        const RendererList* Source;
                         std::optional<PreparedRendererList> List;
                         DrawExecutionStats* Stats;
                         render::RenderBackend Backend;
                     };
                     completion = graph.AddRasterPass<Draw>("required draw PSO failure", [&](Draw& data, RenderGraphRasterBuilder& builder) {
-                        data = {PrepareRendererList(RequiredList, builder), &RequiredDraws, Backend};
+                        data = {&RequiredList, std::nullopt, &RequiredDraws, Backend};
                         builder.SetColorAttachment(0, output);
-                        builder.SetDepthAttachment(depthTarget, {.Load = render::LoadAction::Load, .ReadOnly = true}); }, +[](const Draw& data, RenderGraphRasterContext& pass) {
+                        builder.SetDepthAttachment(depthTarget, {.Load = render::LoadAction::Load, .ReadOnly = true}); }, +[](Draw& data, RenderGraphPrepareContext& ctx) {
+                        data.List = PrepareRendererList(*data.Source, ctx);
+                        return data.List.has_value(); }, +[](const Draw& data, RenderGraphRasterContext& pass) {
                         pass.Encoder().SetViewport(MakeViewport(data.Backend, 0, 0, 96, 64));
                         pass.Encoder().SetScissor({0, 0, 96, 64});
-                        SubmitRendererList(*data.List, pass, *data.Stats); });
+                        RecordRendererList(*data.List, pass, *data.Stats); });
                 } else
 #endif
                     completion = graph.AddRasterPass<test::EmptyGraphPass>(fmt::format("complete {}", i), [=](test::EmptyGraphPass&, RenderGraphRasterBuilder& builder) { builder.SetColorAttachment(0, output, {.Load = i == 0 ? render::LoadAction::Clear : render::LoadAction::Load}); }, +[](const test::EmptyGraphPass&, RenderGraphRasterContext&) {});

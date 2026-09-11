@@ -103,19 +103,36 @@ VK_BINDING(3, 0) SamplerState PointSampler : register(s0);
                 for (uint32_t i = 0; i < 2; ++i) graph.AddRasterPass<test::EmptyGraphPass>("clear", [=](test::EmptyGraphPass&, RenderGraphRasterBuilder& builder) { builder.SetColorAttachment(0, images[i], {.Clear = {.25f * (i + 1), 0, 0, 0}}); }, +[](const test::EmptyGraphPass&, RenderGraphRasterContext&) {});
                 struct Draw {
                     ShaderProgram* Program;
-                    RgParameterSetHandle Set;
+                    PreparedShaderGroup Set;
+                    Nullable<render::GraphicsPipelineState*> Pipeline;
                     render::RenderBackend Backend;
+                    array<RgTextureViewHandle, 3> Textures;
+                    array<float, 4> Value;
                 };
-                for (uint32_t i = 2; i < 4; ++i) graph.AddRasterPass<Draw>("parameters", [&](Draw& data, RenderGraphRasterBuilder& builder) {
-                    data.Program = program.Get(); data.Backend = GetParam(); builder.SetColorAttachment(0, images[i]);
-                    const array<float, 4> value{float(i - 1), 0, 0, 0};
-                    const RgParameterBinding bindings[]{{"Values", 0, RgCBufferParameterBinding{std::as_bytes(std::span{value})}},
-                        {"A", 0, RgTextureParameterBinding{images[i == 2 ? 0 : 2]}}, {"B", 0, RgTextureParameterBinding{images[1]}}, {"PointSampler", 0, RgSamplerParameterBinding{}}};
-                    data.Set = builder.CreateParameterSet(*program, 0, bindings); }, +[](const Draw& data, RenderGraphRasterContext& context) {
-                    MaterialPipelineState state; state.Primitive.Cull = render::CullMode::None; state.DepthStencil.DepthTestEnable = state.DepthStencil.DepthWriteEnable = false;
-                    const auto pso = data.Program->GetOrCreateGraphicsPipelineState(state, {}, PrimitiveTopology::TriangleList, context.PassState()); ASSERT_TRUE(pso);
-                    context.Encoder().BindGraphicsPipelineState(pso.Get()); context.BindParameterSet(data.Set);
-                    context.Encoder().SetViewport(MakeViewport(data.Backend, 0, 0, 16, 16)); context.Encoder().SetScissor({0, 0, 16, 16}); context.Encoder().Draw(3, 1, 0, 0); });
+                for (uint32_t i = 2; i < 4; ++i) graph.AddRasterPass<Draw>("parameters",
+                    [&](Draw& data, RenderGraphRasterBuilder& builder) {
+                        data.Program = program.Get(); data.Backend = GetParam(); builder.SetColorAttachment(0, images[i]);
+                        data.Value = {float(i - 1), 0, 0, 0};
+                        data.Textures[0] = builder.ReadTexture(images[i == 2 ? 0 : 2]);
+                        data.Textures[1] = builder.ReadTexture(images[1]);
+                        data.Textures[2] = builder.ReadTexture(images[0]); },
+                    +[](Draw& data, RenderGraphPrepareContext& ctx) {
+                        const RgParameterBinding bindings[]{
+                            {"Values", 0, RgCBufferParameterBinding{std::as_bytes(std::span{data.Value})}},
+                            {"A", 0, RgTextureParameterBinding{data.Textures[0]}},
+                            {"B", 0, RgTextureParameterBinding{data.Textures[1]}},
+                            {"PointSampler", 0, RgSamplerParameterBinding{}}};
+                        data.Set = ctx.CreateParameterSet(*data.Program, 0, bindings);
+                        MaterialPipelineState state; state.Primitive.Cull = render::CullMode::None;
+                        state.DepthStencil.DepthTestEnable = state.DepthStencil.DepthWriteEnable = false;
+                        data.Pipeline = ctx.ResolveGraphicsPipeline(*data.Program, state);
+                        return data.Set.IsValid() && bool(data.Pipeline); },
+                    +[](const Draw& data, RenderGraphRasterContext& context) {
+                        context.Encoder().BindGraphicsPipelineState(data.Pipeline.Get());
+                        context.Encoder().BindShaderParameterSet(data.Set);
+                        context.Encoder().SetViewport(MakeViewport(data.Backend, 0, 0, 16, 16));
+                        context.Encoder().SetScissor({0, 0, 16, 16});
+                        context.Encoder().Draw(3, 1, 0, 0); });
                 const auto host = graph.NextVersion(graph.ImportBuffer(external, "readback", RenderGraphExternalAccess::ObservableOutput));
                 graph.AddCopyTextureToBufferPass("copy", images[3], host);
                 HostRead(graph, host);
@@ -156,6 +173,56 @@ VK_BINDING(3, 0) SamplerState PointSampler : register(s0);
             EXPECT_EQ(fault.LiveFailedSets, 0u);
         }
     }
+}
+
+// The prepare stage is gated on liveness, so a culled pass must never create descriptors or
+// resolve pipeline states for work the graph already decided not to record.
+TEST_P(GraphPreparationTest, CulledPassIsNotPrepared) {
+    auto& device = *Context.Device;
+    render::RenderPassRegistry registry{&device};
+    RenderGraphFrameResources resources{device, registry};
+    HostWriteBatch writes;
+    resources.BeginFlight(1, writes);
+    RenderGraph graph{device, resources, registry, "culled prepare"};
+    const auto target = [&](std::string_view name) {
+        return graph.CreateTexture({render::TextureDimension::Dim2D, 16, 16, 1, 1, 1, render::TextureFormat::R32_FLOAT,
+                                    render::MemoryType::Device, render::TextureUse::RenderTarget, {}}, name);
+    };
+    struct Counted {
+        uint32_t* Prepares;
+    };
+    uint32_t live = 0, culled = 0;
+    graph.AddRasterPass<Counted>("live",
+        [&](Counted& data, RenderGraphRasterBuilder& builder) {
+            data.Prepares = &live;
+            builder.SetColorAttachment(0, target("observed"), {.Clear = {1, 0, 0, 0}});
+            builder.SetSideEffect(); },
+        +[](Counted& data, RenderGraphPrepareContext&) { ++*data.Prepares; return true; },
+        +[](const Counted&, RenderGraphRasterContext&) {});
+    graph.AddRasterPass<Counted>("culled",
+        [&](Counted& data, RenderGraphRasterBuilder& builder) {
+            data.Prepares = &culled;
+            builder.SetColorAttachment(0, target("dropped"), {.Clear = {0, 1, 0, 0}}); },
+        +[](Counted& data, RenderGraphPrepareContext&) { ++*data.Prepares; return true; },
+        +[](const Counted&, RenderGraphRasterContext&) {});
+    auto command = device.CreateCommandBuffer(Context.Queue);
+    ASSERT_TRUE(command);
+    command->Begin();
+    const auto result = RenderGraphTestDriver::Execute(graph, *command.Get(), command.Get());
+    writes.Flush(device);
+    command->End();
+    ASSERT_TRUE(result.Success) << graph.GetReport().ToText();
+    EXPECT_EQ(graph.GetReport().LivePasses, 1u);
+    EXPECT_EQ(live, 1u);
+    EXPECT_EQ(culled, 0u);
+    if (result.CommandsRecorded) {
+        auto* raw = command.Get();
+        Context.Queue->Submit({.CmdBuffers = std::span{&raw, 1}});
+        RenderGraphTestDriver::Submitted(raw);
+        Context.Queue->Wait();
+        RenderGraphTestDriver::Completed(raw);
+    }
+    resources.Clear();
 }
 INSTANTIATE_TEST_SUITE_P(Backends, GraphPreparationTest, testing::Values(render::RenderBackend::D3D12, render::RenderBackend::Vulkan));
 }  // namespace

@@ -57,15 +57,22 @@ VK_BINDING(1, 0) RWStructuredBuffer<float> Values : register(u0);
     }
     const auto values = graph.CreateBuffer({16, render::MemoryType::Device, render::BufferUse::UnorderedAccess | render::BufferUse::CopySource, {}}, "values");
     struct Data {
-        RgComputeProgramHandle Program;
-        RgParameterSetHandle Set;
+        ShaderProgram* Program;
+        render::ComputePipelineState* Pipeline;
+        RgTextureViewHandle Depths;
+        RgBufferValue Values;
+        PreparedShaderGroup Set;
     };
     graph.AddComputePass<Data>("sample layers", [&](Data& data, RenderGraphComputeBuilder& builder) {
-        data.Program = builder.UseComputeProgram(*shader);
-        const RgParameterBinding bindings[]{{"Depths", 0, RgTextureParameterBinding{depth}},
-                                           {"Values", 0, RgBufferParameterBinding{values, {0, 16}, 4, render::TextureFormat::UNKNOWN, RgParameterAccess::Write}}};
-        data.Set = builder.CreateParameterSet(*shader, 0, bindings); }, +[](const Data& data, RenderGraphComputeContext& context) {
-        context.BindComputeProgram(data.Program); context.BindParameterSet(data.Set); context.Encoder().Dispatch(1, 1, 1); });
+        data.Program = shader.Get();
+        data.Depths = builder.ReadTexture(depth);
+        data.Values = builder.WriteBuffer(values, RgBufferAccess::UnorderedAccess, {0, 16}); }, +[](Data& data, RenderGraphPrepareContext& ctx) {
+        const RgParameterBinding bindings[]{{"Depths", 0, RgTextureParameterBinding{data.Depths}},
+                                           {"Values", 0, RgBufferParameterBinding{data.Values, {0, 16}, 4}}};
+        data.Pipeline = ctx.ResolveComputePipeline(*data.Program).Get();
+        data.Set = ctx.CreateParameterSet(*data.Program, 0, bindings);
+        return data.Pipeline != nullptr && data.Set.IsValid(); }, +[](const Data& data, RenderGraphComputeContext& context) {
+        context.Encoder().BindComputePipelineState(data.Pipeline); context.Encoder().BindShaderParameterSet(data.Set); context.Encoder().Dispatch(1, 1, 1); });
     auto readback = device.CreateBuffer({16, render::MemoryType::ReadBack, render::BufferUse::MapRead | render::BufferUse::CopyDestination, {}});
     ASSERT_TRUE(readback);
     RenderExternalBuffer external{readback.Get(), readback->GetDesc(), render::BufferState::CopyDestination};
@@ -100,7 +107,9 @@ VK_BINDING(0, 0) Texture2D<float> Depth : register(t0);
     struct Data {
         ShaderProgram* Program;
         render::RenderBackend Backend;
-        RgParameterSetHandle Set;
+        render::GraphicsPipelineState* Pipeline;
+        RgTextureViewHandle Depth;
+        PreparedShaderGroup Set;
         bool* PsoCreated;
     };
     bool created = false;
@@ -108,16 +117,19 @@ VK_BINDING(0, 0) Texture2D<float> Depth : register(t0);
         data.Program = shader.Get(); data.Backend = GetParam(); data.PsoCreated = &created;
         builder.SetColorAttachment(0, color);
         builder.SetDepthAttachment(depth, {.Load = render::LoadAction::Load, .ReadOnly = true});
-        const RgParameterBinding binding{"Depth", 0, RgTextureParameterBinding{depth}};
-        data.Set = builder.CreateParameterSet(*shader, 0, std::span{&binding, 1}); }, +[](const Data& data, RenderGraphRasterContext& context) {
+        data.Depth = builder.ReadTexture(depth); }, +[](Data& data, RenderGraphPrepareContext& ctx) {
         MaterialPipelineState state;
         state.Primitive.Cull = render::CullMode::None; state.DepthStencil.DepthWriteEnable = true;
-        EXPECT_FALSE(data.Program->GetOrCreateGraphicsPipelineState(state, {}, PrimitiveTopology::TriangleList, context.PassState()));
+        // Probed against the program directly: routing the expected rejection through the graph would
+        // record a pipeline error and fail the whole graph.
+        EXPECT_FALSE(data.Program->GetOrCreateGraphicsPipelineState(state, {}, PrimitiveTopology::TriangleList, ctx.PassState()));
         state.DepthStencil.DepthWriteEnable = false;
-        const auto pso = data.Program->GetOrCreateGraphicsPipelineState(state, {}, PrimitiveTopology::TriangleList, context.PassState());
-        *data.PsoCreated = pso.HasValue();
-        if (!pso) return;
-        context.Encoder().BindGraphicsPipelineState(pso.Get()); context.BindParameterSet(data.Set);
+        data.Pipeline = ctx.ResolveGraphicsPipeline(*data.Program, state).Get();
+        *data.PsoCreated = data.Pipeline != nullptr;
+        const RgParameterBinding binding{"Depth", 0, RgTextureParameterBinding{data.Depth}};
+        data.Set = ctx.CreateParameterSet(*data.Program, 0, std::span{&binding, 1});
+        return data.Pipeline != nullptr && data.Set.IsValid(); }, +[](const Data& data, RenderGraphRasterContext& context) {
+        context.Encoder().BindGraphicsPipelineState(data.Pipeline); context.Encoder().BindShaderParameterSet(data.Set);
         context.Encoder().SetViewport(MakeViewport(data.Backend, 0, 0, 16, 16)); context.Encoder().SetScissor({0, 0, 16, 16});
         context.Encoder().Draw(3, 1, 0, 0); });
     const uint64_t pitch = Align(uint64_t{16 * 4}, device.GetDetail().TextureDataPitchAlignment);
@@ -246,13 +258,20 @@ VK_BINDING(1, 0) RWStructuredBuffer<float4> Result : register(u0);
         context.Encoder().SetScissor({0, 0, 16, 16}); context.Encoder().Draw(3, 1, 0, 0); });
     const auto result = graph.CreateBuffer({16, render::MemoryType::Device, render::BufferUse::UnorderedAccess | render::BufferUse::CopySource, {}}, "decoded value");
     struct Compute {
-        RgComputeProgramHandle Program;
-        RgParameterSetHandle Set;
+        ShaderProgram* Program;
+        render::ComputePipelineState* Pipeline;
+        RgTextureViewHandle Source;
+        RgBufferValue Result;
+        PreparedShaderGroup Set;
     };
     graph.AddComputePass<Compute>("decode sample", [&](Compute& data, RenderGraphComputeBuilder& builder) {
-        data.Program = builder.UseComputeProgram(*reader);
-        const RgParameterBinding bindings[]{{"Source", 0, RgTextureParameterBinding{texture}}, {"Result", 0, RgBufferParameterBinding{result, {0, 16}, 16, render::TextureFormat::UNKNOWN, RgParameterAccess::Write}}};
-        data.Set = builder.CreateParameterSet(*reader, 0, bindings); }, +[](const Compute& data, RenderGraphComputeContext& context) { context.BindComputeProgram(data.Program); context.BindParameterSet(data.Set); context.Encoder().Dispatch(1, 1, 1); });
+        data.Program = reader.Get();
+        data.Source = builder.ReadTexture(texture);
+        data.Result = builder.WriteBuffer(result, RgBufferAccess::UnorderedAccess, {0, 16}); }, +[](Compute& data, RenderGraphPrepareContext& ctx) {
+        const RgParameterBinding bindings[]{{"Source", 0, RgTextureParameterBinding{data.Source}}, {"Result", 0, RgBufferParameterBinding{data.Result, {0, 16}, 16}}};
+        data.Pipeline = ctx.ResolveComputePipeline(*data.Program).Get();
+        data.Set = ctx.CreateParameterSet(*data.Program, 0, bindings);
+        return data.Pipeline != nullptr && data.Set.IsValid(); }, +[](const Compute& data, RenderGraphComputeContext& context) { context.Encoder().BindComputePipelineState(data.Pipeline); context.Encoder().BindShaderParameterSet(data.Set); context.Encoder().Dispatch(1, 1, 1); });
     const uint64_t pitch = Align(64, device.GetDetail().TextureDataPitchAlignment);
     auto encoded = device.CreateBuffer({pitch * 16, render::MemoryType::ReadBack, render::BufferUse::MapRead | render::BufferUse::CopyDestination, {}});
     auto decoded = device.CreateBuffer({16, render::MemoryType::ReadBack, render::BufferUse::MapRead | render::BufferUse::CopyDestination, {}});

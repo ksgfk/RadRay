@@ -12,16 +12,9 @@ class ShaderProgram;
 struct GraphicsPassState;
 struct RendererList;
 class RenderGraphRasterContext;
-class RendererListPassBindings;
-struct RendererListPassBinding;
+class RenderGraphPrepareContext;
+class RendererListPassSets;
 
-// Inline capacities cover the common case (one dynamic buffer per group, view/material/object groups)
-// so building a command performs no heap allocation; larger counts spill to the heap transparently.
-struct PreparedShaderGroup {
-    uint32_t Group{0};
-    Nullable<render::ShaderParameterSet*> Set{nullptr};
-    InlineVector<render::ShaderParameterDynamicOffset, 2> DynamicOffsets;
-};
 struct DrawSortData {
     RenderQueue Queue{RenderQueue::Geometry};
     uint32_t ProgramFrameId{0};
@@ -41,6 +34,7 @@ struct MeshDrawDescription {
 /// A description and its frame-local bindings. Groups are immutable until the flight retires.
 struct MeshDrawCommand : MeshDrawDescription {
     // Native groups reference only persistent read-only resources retained through the flight fence.
+    // The inline capacity covers the common view/material/object triple without heap allocation.
     InlineVector<PreparedShaderGroup, 3> Groups;
 };
 struct DrawExecutionStats {
@@ -48,25 +42,24 @@ struct DrawExecutionStats {
     bool Succeeded() const noexcept { return PsoFailure == 0 && BindingFailure == 0 && Skipped == 0; }
 };
 
-/// Prepared during graph setup; native graphics PSOs are realized before any pass is recorded.
-/// The list and optional graph bindings remain immutable until graph execution finishes.
+/// Built during the prepare stage of its pass: pipeline states and parameter sets are already
+/// resolved, so recording only binds and draws. Immutable until graph execution finishes.
 struct PreparedRendererList {
     struct Draw {
         const MeshDrawDescription* Description;
         std::span<const PreparedShaderGroup> Groups;
-        RgGraphicsProgramHandle Program;
-        std::span<const RendererListPassBinding> GraphGroups;
+        std::span<const PreparedShaderGroup> PassGroups;
+        render::GraphicsPipelineState* Pipeline;
     };
     RgPassHandle Pass;
     vector<Draw> Draws;
-    uint64_t UniqueBufferReads{0};
 };
 
 bool ValidateMeshGeometry(const GpuMesh::DrawData& geometry, uint32_t firstIndex, uint32_t indexCount) noexcept;
 bool ValidateMeshDrawCommand(const MeshDrawCommand& command) noexcept;
 bool FinalizeMeshDrawCommand(MeshDrawCommand& command) noexcept;
-std::optional<PreparedRendererList> PrepareRendererList(const RendererList& list, RenderGraphRasterBuilder& builder,
-    Nullable<const RendererListPassBindings*> bindings = nullptr);
-void SubmitRendererList(const PreparedRendererList& list, RenderGraphRasterContext& ctx, DrawExecutionStats& stats);
+std::optional<PreparedRendererList> PrepareRendererList(const RendererList& list, RenderGraphPrepareContext& ctx,
+                                                        Nullable<const RendererListPassSets*> passSets = nullptr);
+void RecordRendererList(const PreparedRendererList& list, RenderGraphRasterContext& ctx, DrawExecutionStats& stats);
 
 }  // namespace radray

@@ -257,8 +257,10 @@ attachment facts 组成，不含 program 自己的 layout、bytecode 或指针�
 
 compute-only `ShaderProgram` 从 artifact entry record 保存真实 entry name，
 `GetOrCreateComputePipelineState()` 首次成功时创建并缓存一个 PSO；重复请求返回同一对象。graphics
-program 请求返回空，native create 失败也不缓存空值。RenderGraph 的 `UseComputeProgram` 只登记借用
-program，Compile 保持纯 CPU；仅 live compute pass 在录制前 prepare PSO，失败时整张图不开始录制。
+program 请求返回空，native create 失败也不缓存空值。RenderGraph 不登记借用 program，Compile 保持纯
+CPU；只有 live pass 的 prepare 阶段通过 `RenderGraphPrepareContext::ResolveComputePipeline` /
+`ResolveGraphicsPipeline` 直接命中 `ShaderProgram` 自己的 PSO 缓存，失败以 `ComputePipelineState` /
+`GraphicsPipelineState` 诊断在录制开始前终止整张图。
 
 ## Build boundary
 

@@ -34,6 +34,11 @@ const PrimitiveVertexLayout& UiLayout() {
 struct UiConstants {
     array<float, 4> Transform{}, Options{};
 };
+/// A UI image resolved to the graph value plus the view its shader read needs.
+struct UiImage {
+    RgTextureValue Texture{};
+    RgTextureViewDesc View{};
+};
 }  // namespace
 
 bool ImGuiGraph::BuildGraph(RenderGraph& graph, RenderPipelineContext& context, ImGuiGraphFrame frame,
@@ -55,7 +60,7 @@ bool ImGuiGraph::BuildGraph(RenderGraph& graph, RenderPipelineContext& context, 
         self.Error = true;
         return false;
     }
-    unordered_map<ImTextureID, RgTextureParameterBinding> bindings;
+    unordered_map<ImTextureID, UiImage> bindings;
     unordered_map<ImTextureID, ImGuiColorEncoding> outputEncodings;
     unordered_map<render::Texture*, RgTextureValue> imports;
     const auto import = [&](render::Texture* texture, std::span<render::TextureStates> states, std::span<uint8_t> valid, bool observable) {
@@ -107,7 +112,7 @@ bool ImGuiGraph::BuildGraph(RenderGraph& graph, RenderPipelineContext& context, 
                                                                                         {0, pitch, 0, 0, region.x, region.y, region.w, region.h})));
         }
         imports.insert_or_assign(texture->Texture.get(), destination);
-        bindings.emplace(request.Id, RgTextureParameterBinding{destination});
+        bindings.emplace(request.Id, UiImage{destination});
     }
     flight.AssetStates.reserve(flight.Textures.size());
     flight.AssetValid.reserve(flight.Textures.size());
@@ -138,12 +143,12 @@ bool ImGuiGraph::BuildGraph(RenderGraph& graph, RenderPipelineContext& context, 
             flight.AssetValid.emplace_back(count, 1);
             texture = import(native.Get(), flight.AssetStates.back(), flight.AssetValid.back(), false);
         }
-        if (texture.IsValid()) bindings.emplace(id, RgTextureParameterBinding{texture, record.Descriptor.View});
+        if (texture.IsValid()) bindings.emplace(id, UiImage{texture, record.Descriptor.View});
     }
     for (const auto& image : images) {
         auto record = flight.Textures.find(image.Image);
         const auto descriptor = graph.GetTextureDescriptor(image.Texture);
-        if (record == flight.Textures.end() || !record->second.Graph || !descriptor || !bindings.emplace(image.Image, RgTextureParameterBinding{image.Texture, image.View}).second)
+        if (record == flight.Textures.end() || !record->second.Graph || !descriptor || !bindings.emplace(image.Image, UiImage{image.Texture, image.View}).second)
             graph.AddDiagnostic("ImGuiGraphImage", "Graph image binding is missing, duplicated, stale or belongs to another graph");
     }
     for (const auto& viewport : flight.Viewports) {
@@ -156,13 +161,17 @@ bool ImGuiGraph::BuildGraph(RenderGraph& graph, RenderPipelineContext& context, 
             const auto vertices = graph.UploadBuffer("ImGui.Vertices", std::as_bytes(std::span{viewport.Vertices}), render::BufferUse::Vertex);
             const auto indices = graph.UploadBuffer("ImGui.Indices", std::as_bytes(std::span{viewport.Indices}), render::BufferUse::Index);
             struct Draw {
-                RgParameterSetHandle Set;
+                RgTextureViewHandle View;
+                UiConstants Constants;
+                render::SamplerDescriptor Sampler;
                 Rect Clip;
                 uint32_t Count, Index;
                 int32_t Vertex;
+                PreparedShaderGroup Set;
             };
             struct Data {
-                RgGraphicsProgramHandle Program;
+                Nullable<ShaderProgram*> Program{nullptr};
+                Nullable<render::GraphicsPipelineState*> Pipeline{nullptr};
                 RgBufferValue Vertices, Indices;
                 uint64_t VertexBytes;
                 uint32_t Width, Height;
@@ -171,9 +180,10 @@ bool ImGuiGraph::BuildGraph(RenderGraph& graph, RenderPipelineContext& context, 
             };
             canvas = graph.NextVersion(canvas);
             graph.AddRasterPass<Data>("ImGui.Draw", [&](Data& data, RenderGraphRasterBuilder& builder) {
-                data.Program = builder.UseGraphicsProgram(*self.DrawProgram, UiState(true), UiLayout()); data.Vertices = builder.ReadBuffer(vertices, RgBufferAccess::Vertex); data.Indices = builder.ReadBuffer(indices, RgBufferAccess::Index);
+                data.Program = self.DrawProgram; data.Vertices = builder.ReadBuffer(vertices, RgBufferAccess::Vertex); data.Indices = builder.ReadBuffer(indices, RgBufferAccess::Index);
                 data.VertexBytes = viewport.Vertices.size() * sizeof(ImDrawVert); data.Width = desc->Width; data.Height = desc->Height; data.Backend = device.GetBackend();
                 builder.SetColorAttachment(0, canvas, {.Load = render::LoadAction::Load});
+                unordered_map<ImTextureID, RgTextureViewHandle> declared;
                 for (const auto& draw : viewport.Commands) {
                     auto found = bindings.find(draw.Texture);
                     if (found == bindings.end()) { graph.AddDiagnostic("ImGuiImage", "Image has no texture binding in this frame"); continue; }
@@ -201,19 +211,28 @@ bool ImGuiGraph::BuildGraph(RenderGraph& graph, RenderPipelineContext& context, 
                     UiConstants values{{2 / viewport.Size.x, -2 / viewport.Size.y, -1 - viewport.Position.x * 2 / viewport.Size.x, 1 + viewport.Position.y * 2 / viewport.Size.y},
                                        {encoding == ImGuiColorEncoding::Srgb ? 1.0f : 0.0f, 0, 0, 0}};
                     const auto sampler = draw.Sampler == 0 && texture.Descriptor.Sampler ? *texture.Descriptor.Sampler : Sampler(draw.Sampler);
-                    const RgParameterBinding parameters[]{
-                        {"Ui", 0, RgCBufferParameterBinding{std::as_bytes(std::span{&values, 1})}},
-                        {"Image", 0, found->second}, {"ImageSampler", 0, RgSamplerParameterBinding{sampler}}};
-                    const auto set = builder.CreateParameterSet(*self.DrawProgram, 0, parameters);
+                    auto view = declared.find(draw.Texture);
+                    if (view == declared.end()) view = declared.emplace(draw.Texture, builder.ReadTexture(found->second.Texture, found->second.View)).first;
                     const int32_t x = int32_t(std::floor(left)), y = int32_t(std::floor(top));
-                    data.Draws.push_back({set, {x, y, uint32_t(std::ceil(right)) - uint32_t(x), uint32_t(std::ceil(bottom)) - uint32_t(y)}, draw.Count, draw.IndexOffset, draw.VertexOffset});
-                } }, +[](const Data& data, RenderGraphRasterContext& ctx) {
+                    data.Draws.push_back({view->second, values, sampler, {x, y, uint32_t(std::ceil(right)) - uint32_t(x), uint32_t(std::ceil(bottom)) - uint32_t(y)}, draw.Count, draw.IndexOffset, draw.VertexOffset});
+                } }, +[](Data& data, RenderGraphPrepareContext& ctx) {
+                data.Pipeline = ctx.ResolveGraphicsPipeline(*data.Program, UiState(true), UiLayout());
+                if (!data.Pipeline || !ctx.ValidateGeometryBuffer(ctx.GetBuffer(data.Vertices), RgBufferAccess::Vertex) ||
+                    !ctx.ValidateGeometryBuffer(ctx.GetBuffer(data.Indices), RgBufferAccess::Index)) return false;
+                for (auto& draw : data.Draws) {
+                    const RgParameterBinding parameters[]{
+                        {"Ui", 0, RgCBufferParameterBinding{std::as_bytes(std::span{&draw.Constants, 1})}},
+                        {"Image", 0, RgTextureParameterBinding{draw.View}}, {"ImageSampler", 0, RgSamplerParameterBinding{draw.Sampler}}};
+                    draw.Set = ctx.CreateParameterSet(*data.Program, 0, parameters);
+                    if (!draw.Set.IsValid()) return false;
+                }
+                return true; }, +[](const Data& data, RenderGraphRasterContext& ctx) {
                 auto& encoder = ctx.Encoder();
-                ctx.BindGraphicsProgram(data.Program);
+                encoder.BindGraphicsPipelineState(data.Pipeline.Get());
                 const render::VertexBufferBinding vertex{0, {ctx.GetBuffer(data.Vertices), 0, data.VertexBytes}};
                 encoder.BindVertexBuffers(std::span{&vertex, 1}); encoder.BindIndexBuffer({ctx.GetBuffer(data.Indices), 0, sizeof(ImDrawIdx)});
                 encoder.SetViewport(MakeViewport(data.Backend, 0, 0, float(data.Width), float(data.Height)));
-                for (const auto& draw : data.Draws) { ctx.BindParameterSet(draw.Set); encoder.SetScissor(draw.Clip); encoder.DrawIndexed(draw.Count, 1, draw.Index, draw.Vertex, 0); } });
+                for (const auto& draw : data.Draws) { encoder.BindShaderParameterSet(draw.Set); encoder.SetScissor(draw.Clip); encoder.DrawIndexed(draw.Count, 1, draw.Index, draw.Vertex, 0); } });
         }
     }
     return !graph.HasFailed();

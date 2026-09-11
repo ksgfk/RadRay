@@ -218,7 +218,7 @@ DepthOnly 只接受独立的 dynamic view/object 组，不绑定 material。DXIL
 CPU 不硬编码 0/1/2。resolver 失败按 program 负缓存；不替换成其他 pass。
 
 每个 flight 的 `FrameDrawResources` 持有 arena 与不可变 sets；renderer lists 必须先清空，才能清 sets
-和重置 arena。graph callback 只查询 PSO、绑定已准备的资源并 draw。snapshot/culling/list/执行统计和
+和重置 arena。pass 的 prepare 回调解析 PSO 与参数 set，execute 回调只绑定并 draw。snapshot/culling/list/执行统计和
 精确的资源寿命契约见 [Renderer foundation](renderer-foundation.md#场景快照与剔除)。
 
 `ForwardGraph` 把 Depth/Opaque/Transparent 抽成可复用的阶段声明：调用方传入已准备的 view/list、
@@ -230,7 +230,8 @@ Tidal Atrium 直接装配 ForwardPipeline，只提供场景、材质、相机、
 Forward 默认保持基础深度/opaque/transparent 路径；同一类通过配置组合 HDR、级联阴影、Forward+、
 AO、TAA 或 4x MSAA、Bloom 与多 view 输出。HDR 多相机时阴影图集每帧声明一次；`ForwardViewSource::Auxiliary`
 观察相机采样该图集并跳过 TAA/AO/Bloom/预通道。view/scissor 经 `MakeViewport` 统一处理 Vulkan Y 翻转。
-产品 pass 的 graph 资源经通用 `RendererListPassBindings` 进入既有提交循环。目标、时域原子提交、
+产品 pass 的 graph 资源经通用 `RendererListPassSets`（`renderer_list_pass_sets.{h,cpp}`）在该 pass 的 prepare
+阶段建成 per-program 参数 set，被该 program 的所有 draw 共用，再进入既有录制循环。目标、时域原子提交、
 配置互斥和当前范围统一见 [Renderer foundation](renderer-foundation.md#forward-范围)。
 
 ## Application 与 runner
