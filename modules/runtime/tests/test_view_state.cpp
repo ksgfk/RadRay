@@ -50,6 +50,78 @@ TEST_P(ViewStateTest, PreviousMatrixOnlyAdvancesOnCommitAndCutInvalidates) {
     EXPECT_EQ(device.ValidationErrors.load(), 0u);
 }
 
+TEST_P(ViewStateTest, PrimitiveStampTracksCommitInvalidationAndViewRecreation) {
+    render::test::DeviceContext device;
+    if (!render::test::TryCreateDevice(GetParam(), device, true)) GTEST_SKIP() << device.Reason;
+    render::RenderPassRegistry passes(device.Device.get());
+    ViewStateRegistry registry(*device.Device, passes, 2, 1);
+    ResolvedRenderViewFamily family{};
+    family.OutputAvailable = true;
+    family.RenderSize = {16, 16};
+    family.OutputFormat = render::TextureFormat::RGBA8_UNORM;
+    family.SampleCount = 1;
+    ResolvedRenderView view{};
+    view.StateId = AllocateViewStateId();
+    RenderSceneSnapshot snapshot;
+    EXPECT_EQ(registry.GetPrimitiveHistoryStamp(view.StateId), PrimitiveHistoryStamp{});
+    registry.BeginFlight(0, 1);
+    registry.Resolve(view, family);
+    auto stamp = registry.GetPrimitiveHistoryStamp(view.StateId);
+    EXPECT_NE(stamp.InvalidationRevision, 0u);
+    EXPECT_EQ(stamp.CommittedSerial, 0u);
+    ASSERT_TRUE(registry.PreparePrimitiveHistory(view, snapshot));
+    EXPECT_EQ(registry.GetPrimitiveHistoryStamp(view.StateId), stamp);
+    EXPECT_FALSE(registry.CommitView(view.StateId));
+    EXPECT_EQ(registry.GetPrimitiveHistoryStamp(view.StateId), stamp);
+    ASSERT_TRUE(registry.CommitViewWithHistory(view.StateId, {}));
+    auto committed = registry.GetPrimitiveHistoryStamp(view.StateId);
+    EXPECT_EQ(committed.CommittedSerial, 1u);
+    EXPECT_EQ(committed.InvalidationRevision, stamp.InvalidationRevision);
+    EXPECT_FALSE(registry.CommitViewWithHistory(view.StateId, {}));
+    EXPECT_EQ(registry.GetPrimitiveHistoryStamp(view.StateId), committed);
+    registry.InvalidateTemporal(view.StateId);
+    stamp = registry.GetPrimitiveHistoryStamp(view.StateId);
+    EXPECT_EQ(stamp.CommittedSerial, committed.CommittedSerial);
+    EXPECT_GT(stamp.InvalidationRevision, committed.InvalidationRevision);
+    registry.Invalidate(view.StateId);
+    EXPECT_GT(registry.GetPrimitiveHistoryStamp(view.StateId).InvalidationRevision, stamp.InvalidationRevision);
+    stamp = registry.GetPrimitiveHistoryStamp(view.StateId);
+    registry.BeginFlight(1, 2);
+    view.CameraCut = true;
+    registry.Resolve(view, family);
+    EXPECT_GT(registry.GetPrimitiveHistoryStamp(view.StateId).InvalidationRevision, stamp.InvalidationRevision);
+    stamp = registry.GetPrimitiveHistoryStamp(view.StateId);
+    registry.BeginFlight(0, 3);
+    view.CameraCut = false;
+    family.RenderSize.Width = 32;
+    registry.Resolve(view, family);
+    EXPECT_GT(registry.GetPrimitiveHistoryStamp(view.StateId).InvalidationRevision, stamp.InvalidationRevision);
+    stamp = registry.GetPrimitiveHistoryStamp(view.StateId);
+    registry.BeginFlight(1, 4);
+    family.OutputFormat = render::TextureFormat::BGRA8_UNORM;
+    registry.Resolve(view, family);
+    EXPECT_GT(registry.GetPrimitiveHistoryStamp(view.StateId).InvalidationRevision, stamp.InvalidationRevision);
+    stamp = registry.GetPrimitiveHistoryStamp(view.StateId);
+    registry.BeginFlight(0, 5);
+    family.SampleCount = 2;
+    registry.Resolve(view, family);
+    EXPECT_GT(registry.GetPrimitiveHistoryStamp(view.StateId).InvalidationRevision, stamp.InvalidationRevision);
+    stamp = registry.GetPrimitiveHistoryStamp(view.StateId);
+    registry.BeginFlight(1, 6);
+    registry.Resolve(view, family);
+    EXPECT_EQ(registry.GetPrimitiveHistoryStamp(view.StateId), stamp);
+    registry.BeginFlight(0, 8);
+    EXPECT_EQ(registry.GetPrimitiveHistoryStamp(view.StateId), PrimitiveHistoryStamp{});
+    registry.Resolve(view, family);
+    auto recreated = registry.GetPrimitiveHistoryStamp(view.StateId);
+    EXPECT_EQ(recreated.CommittedSerial, 0u);
+    EXPECT_GT(recreated.InvalidationRevision, stamp.InvalidationRevision);
+    registry.Clear();
+    registry.Resolve(view, family);
+    EXPECT_GT(registry.GetPrimitiveHistoryStamp(view.StateId).InvalidationRevision, recreated.InvalidationRevision);
+    EXPECT_EQ(device.ValidationErrors.load(), 0u);
+}
+
 TEST_P(ViewStateTest, HistoryGpuRoundTripRotationResizeAndRetirement) {
     render::test::DeviceContext device;
     if (!render::test::TryCreateDevice(GetParam(), device, true)) GTEST_SKIP() << device.Reason;

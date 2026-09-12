@@ -30,15 +30,18 @@ Application            进程生命周期、runner 选择、帧循环、Applicat
 ```text
 Game thread:   flight 可写 → 清上一帧 retained refs → Extension::OnBeginUpdate → AssetManager::Pump
                → ApplicationScheduler::Pump → Extension::OnBeforeInput → 输入路由 → OnUpdate → World::Tick
-               → Extension::OnAfterWorldTick → PrepareFrame（pipeline → overlays → composer）
+               → Extension::OnAfterWorldTick → CollectScenePolicies（pipeline → overlays → composer）
+               → FreezeRegisteredScenes → PrepareFrame（pipeline → overlays → composer）
 Render thread: pool/history safe Begin → resolve requested outputs/views
-               → composer 连接 ports → 展开 BuildGraph（构图：剔除、list、`AddPass`）
-               → `RenderGraph::Execute`：Compile / Realize / Prepare / Record
+               → composer 连接 ports → 展开 BuildGraph（声明 work、资源与 pass）
+               → `RenderGraph::Execute`：Compile / Realize / live work / upload / pass prepare / barrier patch / Record
                → 未写目标 fallback clear → required final states
                → `Submit` 关 command buffer 并提交；GPU 执行见 GPU 时间线，不是 CPU 的 `Record`
 ```
 
-`RenderPipeline` 提供 `PrepareFrame`、`BuildGraph` 和 `GraphRecorded`。PrepareFrame 在 game thread 写当前 flight 的
+`RenderPipeline` 提供 `CollectScenePolicies`、`PrepareFrame`、`BuildGraph` 和 `GraphRecorded`。所有组件和 composer
+先收集本帧需要的 Scene；`RenderSystem` 在任何 PrepareFrame 回调之前统一冻结这些 Scene，形成 GT 输入截止点。
+PrepareFrame 在 game thread 写当前 flight 的
 pipeline 私有输入，BuildGraph 在 render thread 消费该输入，GraphRecorded 处理录制结果。runner 既有的 slot semaphore / fence 保证
 flight 复用互斥，通过 frame serial 校验收据，沿用现有提交和回收协议。
 `RenderPrepareContext` 提供 output 值目录、workload builder，以及本 flight 冻结的 `RenderGraphRuntimeOptions`；pipeline 向当前 flight 的 frame plan
@@ -71,6 +74,11 @@ Application 不提供独立的 view 内容录制钩子。
 显式 sRGB 编码，sRGB attachment 由硬件编码）并 Export。该重载返回每个输出的导出值，包装它的自定义
 composer 可以在其后追加 readback 等操作。渲染框架不知道 overlay 的内容；ImGui 只是一个 overlay
 （见 [Runtime ImGui](runtime-imgui.md)）。`RenderSystemOverlay` 测试用回读验证 UNORM 与 sRGB 输出的编码一致。
+默认装配 shell 的 `FrameGraphTemplateCache` 在 graph runtime 内跨 flight 共享，最多保留四个结构变体。
+输出 ID/描述符、最终状态、PreserveContents、pipeline 是否存在及 overlay 数量决定 shell 结构；
+实际组件对象和注册顺序在当前帧绑定，组件仍各调用一次 `BuildGraph`。clear、canvas 与 blit 的稳定
+声明保存在模板中，原生输出资源每帧重新绑定；淘汰只移除 cache 引用，在用的 graph 继续持有原版本。
+
 `ForwardPipeline` 在构造时借用 Scene 与 Camera，只在 `PrepareFrame` 访问它们，因此这些 source
 必须活过最后一次 PrepareFrame。已准备的帧不依赖 source、proxy 或 Material 的后续寿命。
 
@@ -123,7 +131,7 @@ PrimitiveComponent  → CreateRenderState → Scene::AddPrimitive(CreateScenePro
 LightComponent      → CreateRenderState → Scene::AddLight(CreateSceneProxy())
 ```
 
-**Scene 与 proxy 只在 game thread 使用。proxy 常驻，pipeline 输入每帧复制。** proxy 在组件 `OnRegister` 时创建，
+**Scene 与 proxy 只在 game thread 使用。proxy 常驻，flight snapshot 按未同步页发布。** proxy 在组件 `OnRegister` 时创建，
 存在 `Scene` 的 packed `vector<unique_ptr<...>>` 里，`OnUnregister` 时移除。`SceneObjectId` 是稀疏 slot+generation；
 `FindPrimitive` / `FindLight` 在 generation 不匹配或 slot 已空时拒绝，避免 ABA。
 
@@ -131,7 +139,8 @@ PrimitiveComponent 在 game thread 直接更新现有 proxy 的 LocalToWorld；�
 generation/MotionRevision，并增加 TransformRevision，不遍历 Scene 删除重建。瞬移或显式不连续运动调用 `ResetMotion`。
 自定义 proxy 若把 `GetLocalToWorld` 委托给内层 proxy，也必须转发 `SetLocalToWorld`；
 组件通知在 Debug 验证更新后的矩阵与组件一致，避免只改到未被读取的基类存储。
-mesh/material 等结构性属性通过 `MarkRenderStateDirty` 重建，产生新 generation，旧运动不再连续。
+内建 StaticMeshComponent 的材质替换原地更新 proxy，保留注册身份与运动历史；mesh 替换也保留有效注册身份，
+但重置运动连续性。需要重建 proxy 的其他组件仍使用 `MarkRenderStateDirty`，新注册获得新 generation。
 SceneComponent 的变换、重挂接和解除挂接会递归通知自身及后代的 `OnTransformChanged`，
 使缓存世界变换的 mesh/light proxy 一起更新；拒绝把祖先挂到后代之下。Light proxy 的参数在
 构造函数里一次性从 component 快照。
@@ -160,9 +169,14 @@ struct MeshDrawArgs {
 local-to-world，并把 `StaticMeshSection` 的 `FirstIndex` / `IndexCount` / `VertexOffset` 投影成 draw。
 mesh 可以在 Loading 时设置到组件；`World::Tick` 中的组件 tick 在它变成有效 Ready 资产后创建
 proxy，已存在且仍有效的 proxy 保持不变。清空或替换 mesh 仍立即刷新对应渲染状态。
-每个 flight 在 PrepareFrame 中构建一次与 view 无关的 `RenderSceneSnapshot`：primitive 保存 generation、
+Scene 拥有唯一的 `SceneRenderState` 和 `CpuDrawStore`；冻结时合并变更，再为当前可写 flight 增量发布
+与 view 无关的 `RenderSceneSnapshot`。同一 Scene、prepare serial 与 flight 的消费者借用同一只读发布结果。
+primitive 保存 generation、
 `SceneObjectId`、MotionRevision、变换、世界 AABB、layer mask 和连续 MeshBatch 范围；batch 借用 geometry 并保存 section draw range、primitive
-和 material 索引。同一 snapshot 附带稳定 `DrawRecord` 目录，view 只筛选紧凑可见子集。材质按首次出现去重，所有 pass 的 program 分配帧内整数 ID。光源保存参数和球形界限。
+和 material 索引。同一 snapshot 附带稳定 `DrawRecord` 目录，view 只筛选紧凑可见子集。材质以唯一身份去重，
+不承诺按首次遇到顺序排列；batch 中的 material 索引是当前 snapshot 的映射。program generation 是稳定身份，
+ProgramFrameId 仅作帧内映射。光源保存参数和球形界限。发布、失败重试与资产保活的契约见
+[Renderer foundation](renderer-foundation.md#场景快照与剔除)。
 `StaticMeshSceneProxy` 从 mesh asset 提供局部 bounds；自定义 proxy 可以覆盖 layer mask 与禁用视锥剔除标志。
 无效 bounds 保守可见；几何和纹理由宿主 per-flight refs 保活。
 
@@ -176,32 +190,37 @@ proxy，已存在且仍有效的 proxy 保持不变。清空或替换 mesh 仍�
 Forward 在 render thread 对每个 resolved view 调用一次 CPU `Cull`，从同一结果生成 DepthOnly、
 Opaque、Transparent 三个 `RendererList`。同一 family 内复用 Depth/Lit processor，view 切换时 `ResetView`；
 HDR 多 view 共用一个 lit processor，主相机的三张列表走 `BuildRendererLists`（按 pass 顺序写出；契约校验仅 `Validation=Full`）。通用 builder 处理 pass/queue/mask、排序与统计；具体
-`ForwardLitMeshPassProcessor` / `DepthOnlyMeshPassProcessor` 解释 shader 契约，准备 per-view/object/material
-bytes 与 frame-local sets，输出只借用资源的 `MeshDrawCommand`。layout 字段在 binding cache 首次解析，热路径不再按名字搜索。
-Lit processor 在首次准备 view 时按 snapshot 数量预留材质和对象槽表（初始最多 1024 项）。
-静态命令模板按 `(program, batchIndex, passIndex)` 保存 Description、material 组与 primitive 身份，不含 view/object 动态组。
-`ResetView` 清当前 View 槽；temporal 再清 Objects，保留 Materials 与模板。命中模板时仍为本 view 取 View 组并准备 object 切片。
-不跨帧复用 Rg handles 或 arena 切片。
+`ForwardLitMeshPassProcessor` / `DepthOnlyMeshPassProcessor` 读取 snapshot 的静态 binding recipe，准备
+per-view/object/material bytes 与 frame-local groups，再发布 draw-record 索引和 `FrameDrawBindingId`。
+静态列表不创建 `MeshDrawCommand`；未知或 view-dependent batch 由动态适配入口创建一次拥有数据的候选。
+processor 不保留另一套 command 模板、material/object 组缓存；所有列表和 processor 共用所属 flight
+的 `FrameDrawResources` 元组表。`ResetView` 只清当前 view 数值身份，随后重新填充并驻留 view bytes。
+带时域的 object 身份包含 view、历史提供者、已提交 serial 与失效 revision，不能因对象 clean 而跳过必要的历史更新。
+不跨帧复用 Rg handles 或 arena 切片；完整索引、共享与失效契约见
+[Renderer foundation](renderer-foundation.md#renderer-lists-与帧内绘制资源)。
 render thread 不访问 Scene、proxy、CameraComponent、Material、AssetManager 或 StreamingAssetRef。
 
 ### cbuffer 冻结与 gather
 
 Forward 的数值 cbuffer 走「PrepareFrame 冻住，cull 后 gather」两段，CPU bytes 与 GPU struct 同构：
 
-- **对象**：`PrepareFrame` 在 game thread 用 `forward_detail::FreezeObjectData` 把每个 snapshot
-  primitive 的 `Forward_ObjectData` 写进 flight 的 `PackedCBufferTable`（`{stride, vector<byte>}`，
-  `stride == sizeof(T)`，行下标就是 primitive 下标）。`NormalToWorld` 因此每 primitive 算一次，
-  而不是每 view 每 draw 算一次。冻结行的 motion 默认为「无运动」（`PreviousLocalToWorld` 等于
-  `LocalToWorld`，`MotionValid` 为 0），非 temporal view 因此可以把该行原样交给 arena；只有带
-  temporal context 的 view 需要按 `GetPrimitiveMotion` 补一次 motion，多付一次拷贝。
+- **对象**：`PrepareFrame` 在 game thread 用 `forward_detail::ForwardObjectDataCache` 更新 flight 的
+  `PackedCBufferTable`（`stride == sizeof(Forward_ObjectData)`，行下标就是 primitive 下标）。
+  每行以 primitive generation 与 TransformRevision 判定是否需要重新填写矩阵和 normal；所有 flight
+  预热后，不变对象保留原行。只有连续消费同一发布目标的版本才直接使用 changed ranges；跳过发布版本或
+  切换到独立 snapshot 时扫描行版本，补齐漏过的变更。对象移位、替换或未知 transform revision 的行重新计算。`Clear` 同时清除
+  行版本，失败重试不能误复用旧行。`ObjectValueUpdates` 计实际填写的行数。
+  冻结行的 motion 默认为无运动（`PreviousLocalToWorld` 等于 `LocalToWorld`，`MotionValid` 为 0）；
+  temporal view 仍按自己的已提交历史调用 `GetPrimitiveMotion` 补齐，不能因对象版本未变而省略。
+  一次性工具可用 `FreezeObjectData` 全量填写表；产品路径持久复用上述 cache。
 - **材质**：`BuildRenderData` 已经把 authoring bytes 冻进 per-flight 的
   `MaterialPassRenderData::NumericBytes`，processor 直接把这段 span 交给 arena。
 - **view / pass / effects / output**：这些依赖剔除结果（灯光表、tile 数、history 有效性），
   不能在 PrepareFrame 冻死。数据齐了以后填对应的 `Forward_*` POD，再整块上传。
 
-`FrameDrawResources::PrepareGroup` 有两个重载：吃 `ShaderParameterStorage` 的按名路径（JIT/测试）
-和吃 `std::span<const byte>` 的 typed 路径（Forward 产品热路径）。后者要求该 group 恰好一个
-cbuffer，因为一段 span 只描述一个 cbuffer；多 buffer group 留在按名路径。两者共用同一个 arena，
+Forward 产品路径使用 `FrameDrawResources::PrepareGroupId`，按值身份共享恰好一个 cbuffer 的 group，
+材质纹理和 sampler 同时参与原生绑定身份。`PrepareGroup` 保留吃 `ShaderParameterStorage` 与
+`std::span<const byte>` 的返回值适配入口；多 buffer group 使用 storage 路径。各入口共用同一个 arena，
 按 `DynamicCBufferArena` 的 `CBufferAlignment`（D3D12 上 256）对齐，字节从冻住的表直接 memcpy
 进映射槽，中间不再过一层 CPU staging。产品 mesh 热路径因此不再 `Find` / `SetMatrix4x4`。
 
@@ -221,10 +240,13 @@ CPU 不硬编码 0/1/2。resolver 失败按 program 负缓存；不替换成其�
 和重置 arena。pass 的 prepare 回调解析 PSO 与参数 set，execute 回调只绑定并 draw。snapshot/culling/list/执行统计和
 精确的资源寿命契约见 [Renderer foundation](renderer-foundation.md#场景快照与剔除)。
 
-`ForwardGraph` 把 Depth/Opaque/Transparent 抽成可复用的阶段声明：调用方传入已准备的 view/list、
+`ForwardGraph` 把 Depth/Opaque/Transparent 抽成可复用的阶段声明：调用方传入 view/list、可选 work、
 attachment handles 与 Load/Clear 策略，模块只向同一张 graph 加 pass，不创建或执行另一张图。
-view 值复制进 callback payload，RendererList 借用至 graph 执行结束；空 Depth/Transparent 可成功省略，
-Opaque 即使列表为空仍定义输出。内置 ForwardPipeline 的基础与 HDR 路径共用该模块。
+view 值复制进 callback payload，RendererList 借用至 graph 执行结束。内置 ForwardPipeline 先注册
+flight-owned 空列表与 typed work，编译后只为 live work 执行剔除、temporal、灯光与列表准备；
+阴影共用一个 atlas work，合并所有存活 cascade 的 mask。所有 work 完成后，pass prepare 才读取
+本帧阴影数值与灯光数量、创建参数 set 和解析 PSO。空列表保留已声明阶段的 attachment 语义。
+既有直接传列表的适配路径仍允许省略空 Depth/Transparent；Opaque 始终定义输出。
 Tidal Atrium 直接装配 ForwardPipeline，只提供场景、材质、相机、输出屏幕描述和 ImGui 控件。
 
 Forward 默认保持基础深度/opaque/transparent 路径；同一类通过配置组合 HDR、级联阴影、Forward+、

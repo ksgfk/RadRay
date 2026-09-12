@@ -1,9 +1,53 @@
 #include <radray/runtime/render_framework/render_pipeline.h>
 #include <radray/runtime/render_framework/render_graph_runtime.h>
+#include <radray/runtime/render_framework/scene.h>
+#include <radray/runtime/application.h>
 #include <radray/logger.h>
+#include <radray/profiler.h>
 #include <algorithm>
 
 namespace radray {
+
+bool RenderPrepareContext::RegisterScene(const Scene& scene) {
+    if (std::find(RegisteredScenes.begin(), RegisteredScenes.end(), &scene) != RegisteredScenes.end()) return true;
+    if (ScenesFrozen) return false;
+    RegisteredScenes.push_back(&scene);
+    return true;
+}
+
+bool RenderPrepareContext::FreezeRegisteredScenes() {
+    if (ScenesFrozen) return true;
+    if (!PolicyRegistrationValid) return false;
+    for (const auto* scene : RegisteredScenes) {
+        vector<PassPolicy> policies;
+        for (const auto& registration : ScenePolicies)
+            if (registration.Source == scene) policies.push_back(registration.Policy);
+        if (!scene->GetDrawStore().SetActivePolicies(PrepareSerial, policies)) return false;
+        if (!scene->GetRenderState().PrepareShared(*scene, PrepareSerial, App.FlightIndex, RetainedAssets, RuntimeOptions.Validation)) return false;
+    }
+    ScenesFrozen = true;
+    return true;
+}
+
+bool RenderPrepareContext::RegisterScenePolicy(const Scene& scene, const PassPolicy& policy) {
+    if (ScenesFrozen || !policy.Id.IsValid() || policy.Revision == 0 || policy.PassName.empty() || !policy.CompileStatic || !RegisterScene(scene)) {
+        PolicyRegistrationValid = false;
+        return false;
+    }
+    for (const auto& registration : ScenePolicies)
+        if (registration.Source == &scene && registration.Policy.Id == policy.Id) {
+            const bool same = registration.Policy == policy;
+            PolicyRegistrationValid &= same;
+            return same;
+        }
+    ScenePolicies.push_back({&scene, policy});
+    return true;
+}
+
+Nullable<shared_ptr<const RenderSceneSnapshot>> RenderPrepareContext::PrepareScene(const Scene& scene) const {
+    if (!ScenesFrozen || std::find(RegisteredScenes.begin(), RegisteredScenes.end(), &scene) == RegisteredScenes.end()) return nullptr;
+    return scene.GetRenderState().PrepareShared(scene, PrepareSerial, App.FlightIndex, RetainedAssets, RuntimeOptions.Validation);
+}
 
 struct RenderPipelineContext::ImportedOutput {
     uint32_t SurfaceIndex;
@@ -17,6 +61,9 @@ RenderPipelineContext::RenderPipelineContext(AppFrameContext& frame, RenderGraph
                                              RenderGraphRuntimeOptions runtime)
     : _frame(frame), _graphResources(graphResources), _registry(registry), _views(views), _serial(serial), _families(families), _surfaces(surfaces), _report(report), _runtimeOptions(runtime) {}
 RenderPipelineContext::~RenderPipelineContext() = default;
+shared_ptr<FrameGraphTemplateCache>& RenderPipelineContext::DefaultCompositionCacheStorage() noexcept {
+    return _graphResources.DefaultCompositionCacheStorage();
+}
 uint32_t RenderPipelineContext::FlightIndex() const noexcept { return _frame.FlightIndex(); }
 const render::RenderDeviceCapabilities& RenderPipelineContext::Capabilities() const noexcept { return _frame.GetDevice()->GetCapabilities(); }
 render::RenderBackend RenderPipelineContext::Backend() const noexcept { return _frame.GetDevice()->GetBackend(); }
@@ -45,6 +92,28 @@ RgTextureValue RenderPipelineContext::ImportOutputTarget(RenderGraph& graph, Ren
     }
     return {};
 }
+RgTextureValue RenderPipelineContext::BindOutputTarget(RenderGraph& graph, const RenderGraphTemplateInstance& instance, RgTextureValue slot, RenderOutputId output) {
+    if (_executed || !_graphGeneration || _graphGeneration != graph.GetGeneration()) return {};
+    const auto value = instance.Value(slot);
+    if (value.Generation != _graphGeneration) return {};
+    for (const auto& imported : _imports)
+        if (_surfaces[imported->SurfaceIndex].Id == output)
+            return instance.Bind(slot, *imported->External) ? value : RgTextureValue{};
+    for (uint32_t index = 0; index < _surfaces.size(); ++index) {
+        auto& surface = _surfaces[index];
+        if (surface.Id != output) continue;
+        auto imported = make_shared<ImportedOutput>();
+        imported->SurfaceIndex = index;
+        imported->States = {surface.CurrentState};
+        imported->Valid = {surface.PreserveContents ? uint8_t{1} : uint8_t{0}};
+        imported->External.emplace(RenderExternalTexture{surface.Texture, surface.Desc, imported->States, imported->Valid, surface.ColorAttachmentView});
+        if (!instance.Bind(slot, *imported->External)) return {};
+        imported->Handle = value;
+        _imports.push_back(std::move(imported));
+        return value;
+    }
+    return {};
+}
 RenderGraphExecutionResult RenderPipelineContext::ExecuteGraph(RenderGraph& graph) {
     if (_executed || _graphGeneration != graph.GetGeneration()) return {};
     _graphGeneration = graph.GetGeneration();
@@ -58,6 +127,11 @@ RenderGraphExecutionResult RenderPipelineContext::ExecuteGraph(RenderGraph& grap
             presentTargets.push_back({surface.Texture, commands});
         }
     }
+    _executingGraph = &graph;
+    struct ExecuteScope {
+        Nullable<const RenderGraph*>& Active;
+        ~ExecuteScope() { Active = nullptr; }
+    } scope{_executingGraph};
     const auto result = graph.Execute(*shared, presentTargets);
     _success = result.Success;
     _submission = result.Submission;
@@ -89,6 +163,7 @@ RenderGraphExecutionResult RenderPipelineContext::ExecuteGraph(RenderGraph& grap
     return result;
 }
 bool RenderPipelineContext::CommitView(ViewStateId id) {
+    RADRAY_PROFILE_SCOPE_N("RenderPipelineContext::QueueViewCommit");
     if (!_success || std::find(_failedTemporalViews.begin(), _failedTemporalViews.end(), id) != _failedTemporalViews.end() || std::find(_queuedViews.begin(), _queuedViews.end(), id) != _queuedViews.end()) return false;
     for (const auto& family : _families)
         for (const auto& view : family.Views) {
@@ -128,6 +203,7 @@ ViewCompletionToken RenderPipelineContext::RegisterViewCompletion(RenderGraph& g
     return {};
 }
 bool RenderPipelineContext::CommitView(ViewStateId id, const ViewCompletionToken& token, bool requiredDrawsSucceeded) {
+    RADRAY_PROFILE_SCOPE_N("RenderPipelineContext::QueueViewCommit");
     if (!_success || token._view != id || token._graph != _graphGeneration ||
         token._serial != _serial || token._index >= _completions.size() ||
         std::find(_queuedViews.begin(), _queuedViews.end(), id) != _queuedViews.end()) return false;
@@ -158,13 +234,16 @@ void RenderPipelineContext::InvalidateView(ViewStateId id) {
     _views.InvalidateTemporal(id);
 }
 bool RenderPipelineContext::PreparePrimitiveHistory(ResolvedRenderView& view, const RenderSceneSnapshot& snapshot) {
-    if (_executed) return false;
+    if (_executed && (!_executingGraph || !_executingGraph->IsPreparingWork())) return false;
     const bool success = _views.PreparePrimitiveHistory(view, snapshot);
     if (!success) _failedTemporalViews.push_back(view.StateId);
     return success;
 }
 PrimitiveMotionData RenderPipelineContext::GetPrimitiveMotion(ViewStateId id, const RenderPrimitiveData& primitive) const noexcept {
     return _views.GetPrimitiveMotion(id, primitive);
+}
+PrimitiveHistoryStamp RenderPipelineContext::GetPrimitiveHistoryStamp(ViewStateId id) const noexcept {
+    return _views.GetPrimitiveHistoryStamp(id);
 }
 HistoryTexturePair RenderPipelineContext::AcquireHistoryTexture(const ResolvedRenderView& view, const ResolvedRenderViewFamily& family,
                                                                 const HistoryTextureRequest& request, string& reason) {

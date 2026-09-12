@@ -3,10 +3,14 @@
 #include "gpu_test_fixture.h"
 #include "forward_pipeline/forward_bindings.h"
 #include "forward_pipeline/forward_frame.h"
+#include "forward_pipeline/forward_lit_mesh_pass_processor.h"
+#include "forward_pipeline/depth_only_mesh_pass_processor.h"
 
 #include <gtest/gtest.h>
+#include <utility>
 
 #include <radray/file.h>
+#include <radray/runtime/application.h>
 #include <radray/runtime/components/camera_component.h>
 #include <radray/runtime/components/primitive_component.h>
 #include <radray/runtime/forward_pipeline/forward_pipeline.h>
@@ -45,6 +49,100 @@ TEST(ForwardNormalTransform, SingularTransformsStayFiniteAndKeepSurvivingPlaneNo
     transform(1, 1) = 0;
     EXPECT_TRUE(forward_detail::MakeNormalToWorld(transform).allFinite());
     EXPECT_TRUE(forward_detail::MakeNormalToWorld(Eigen::Matrix4f::Zero()).allFinite());
+}
+
+TEST(ForwardObjectValues, T46EveryWarmFlightReusesNormalAndObjectRowsForCameraOnlyFrames) {
+    RenderSceneSnapshot scene;
+    scene.Primitives.push_back({.Generation = 7, .TransformRevision = 1});
+    array<forward_detail::ForwardObjectDataCache, 3> flights;
+    for (auto& flight : flights) EXPECT_EQ(flight.Update(scene), 1u);
+    for (uint32_t frame = 0; frame < 1000; ++frame) {
+        auto& flight = flights[frame % flights.size()];
+        EXPECT_EQ(flight.Update(scene), 0u);
+        const auto* row = AsCBuffer<Forward_ObjectData>(flight.Rows().Row(0));
+        EXPECT_TRUE(static_cast<Eigen::Matrix4f>(row->LocalToWorld).isIdentity());
+        EXPECT_TRUE(static_cast<Eigen::Matrix4f>(row->PreviousLocalToWorld).isIdentity());
+        EXPECT_EQ(row->MotionValid, 0u);
+    }
+    scene.Primitives[0].LocalToWorld(0, 0) = -2;
+    scene.Primitives[0].LocalToWorld(1, 1) = 3;
+    scene.Primitives[0].LocalToWorld(0, 3) = 5;
+    ++scene.Primitives[0].TransformRevision;
+    EXPECT_EQ(flights[0].Update(scene), 1u);
+    EXPECT_EQ(flights[0].Update(scene), 0u);
+    EXPECT_TRUE(static_cast<Eigen::Matrix4f>(AsCBuffer<Forward_ObjectData>(flights[1].Rows().Row(0))->LocalToWorld).isIdentity());
+    for (const auto index : {2u, 1u}) {
+        EXPECT_EQ(flights[index].Update(scene), 1u);
+        const auto* row = AsCBuffer<Forward_ObjectData>(flights[index].Rows().Row(0));
+        EXPECT_TRUE(static_cast<Eigen::Matrix4f>(row->LocalToWorld).isApprox(scene.Primitives[0].LocalToWorld));
+        EXPECT_TRUE(static_cast<Eigen::Matrix4f>(row->NormalToWorld).isApprox(forward_detail::MakeNormalToWorld(scene.Primitives[0].LocalToWorld)));
+    }
+}
+
+TEST(ForwardObjectValues, SkippedPublicationRepairsValuesBeforeUsingSubsequentChangedRanges) {
+    RenderSceneSnapshot scene;
+    scene.Valid = true;
+    scene.PublicationId = 41;
+    scene.PublicationRevision = 1;
+    scene.Primitives.push_back({.Generation = 7, .TransformRevision = 1});
+    scene.Primitives.push_back({.Generation = 8, .TransformRevision = 1});
+    scene.ChangedPrimitiveRanges.push_back({0, 2});
+    forward_detail::ForwardObjectDataCache values;
+    ASSERT_EQ(values.Update(scene), 2u);
+
+    // The consumer misses a publication, then sees a clean publication of the same flight.
+    scene.Primitives[0].LocalToWorld(0, 3) = 31;
+    ++scene.Primitives[0].TransformRevision;
+    scene.PublicationRevision = 3;
+    scene.ChangedFromPublicationRevision = 2;
+    scene.ChangedPrimitiveRanges.clear();
+    ASSERT_EQ(values.Update(scene), 1u);
+    EXPECT_FLOAT_EQ(static_cast<Eigen::Matrix4f>(AsCBuffer<Forward_ObjectData>(values.Rows().Row(0))->LocalToWorld)(0, 3), 31);
+    EXPECT_EQ(values.Update(scene), 0u);
+
+    // A continuous publication uses its ranges even when the global Scene epoch jumps.
+    scene.SceneEpoch = 99;
+    scene.PublicationRevision = 4;
+    scene.ChangedFromPublicationRevision = 3;
+    scene.Primitives[1].LocalToWorld(2, 2) = -2;
+    ++scene.Primitives[1].TransformRevision;
+    scene.ChangedPrimitiveRanges.push_back({1, 1});
+    EXPECT_EQ(values.Update(scene), 1u);
+    EXPECT_TRUE(static_cast<Eigen::Matrix4f>(AsCBuffer<Forward_ObjectData>(values.Rows().Row(1))->NormalToWorld)
+                    .isApprox(forward_detail::MakeNormalToWorld(scene.Primitives[1].LocalToWorld)));
+
+    auto detached = scene;
+    detached.Primitives[0].LocalToWorld(0, 3) = 44;
+    ++detached.Primitives[0].TransformRevision;
+    detached.ChangedPrimitiveRanges.clear();
+    EXPECT_EQ(values.Update(detached), 1u);
+    EXPECT_FLOAT_EQ(static_cast<Eigen::Matrix4f>(AsCBuffer<Forward_ObjectData>(values.Rows().Row(0))->LocalToWorld)(0, 3), 44);
+}
+
+TEST(ForwardObjectValues, T36ReorderedAndUnversionedObjectsKeepCorrectDerivedValues) {
+    RenderSceneSnapshot scene;
+    scene.Primitives.push_back({.Generation = 7, .TransformRevision = 1});
+    scene.Primitives.push_back({.Generation = 8, .TransformRevision = 1});
+    scene.Primitives[1].LocalToWorld(2, 2) = 0;
+    forward_detail::ForwardObjectDataCache values;
+    EXPECT_EQ(values.Update(scene), 2u);
+    std::swap(scene.Primitives[0], scene.Primitives[1]);
+    EXPECT_EQ(values.Update(scene), 2u);
+    const auto* singular = AsCBuffer<Forward_ObjectData>(values.Rows().Row(0));
+    EXPECT_TRUE(static_cast<Eigen::Matrix4f>(singular->NormalToWorld).allFinite());
+    EXPECT_TRUE(static_cast<Eigen::Matrix4f>(singular->NormalToWorld).isApprox(forward_detail::MakeNormalToWorld(scene.Primitives[0].LocalToWorld)));
+    scene.Primitives.resize(1);
+    EXPECT_EQ(values.Update(scene), 0u);
+    scene.Primitives[0].TransformRevision = 0;
+    scene.Primitives[0].LocalToWorld(0, 3) = 21;
+    EXPECT_EQ(values.Update(scene), 1u);
+    EXPECT_FLOAT_EQ(static_cast<Eigen::Matrix4f>(AsCBuffer<Forward_ObjectData>(values.Rows().Row(0))->LocalToWorld)(0, 3), 21);
+    scene.Primitives[0].LocalToWorld(0, 3) = 24;
+    EXPECT_EQ(values.Update(scene), 1u);
+    EXPECT_FLOAT_EQ(static_cast<Eigen::Matrix4f>(AsCBuffer<Forward_ObjectData>(values.Rows().Row(0))->LocalToWorld)(0, 3), 24);
+    values.Clear();
+    EXPECT_EQ(values.Rows().RowCount(), 0u);
+    EXPECT_EQ(values.Update(scene), 1u);
 }
 
 Nullable<unique_ptr<ShaderProgram>> CompileProgram(render::Device& device, const std::filesystem::path& path, bool production = false) {
@@ -152,6 +250,159 @@ void WithForwardData(Callback callback) {
     }
     ASSERT_TRUE(data.Initialize());
     callback(data);
+}
+
+class ForwardPolicyProxy final : public PrimitiveSceneProxy {
+public:
+    explicit ForwardPolicyProxy(Material* material) : DrawMaterial(material) {}
+    Material* DrawMaterial;
+    GpuMesh::DrawData Geometry;
+    bool UsesRenderChangeNotifications() const noexcept override { return true; }
+    uint64_t GetRenderDataRevision() const noexcept override { return 1; }
+    uint64_t GetTransformRevision() const noexcept override { return GetLocalToWorldRevision(); }
+    uint32_t GetSectionCount() const noexcept override { return 1; }
+    AxisAlignedBounds GetLocalBounds() const noexcept override { return {Eigen::Vector3f::Zero(), Eigen::Vector3f::Ones()}; }
+    MeshDrawArgs GetDrawArgs(uint32_t) const noexcept override { return {&Geometry, 0, 3, 0}; }
+    Nullable<Material*> GetMaterial(uint32_t) const noexcept override { return DrawMaterial; }
+};
+
+TEST(ForwardStaticPolicies, ProductProcessorsReusePublishedStatesAndBindingSchemasAcrossViews) {
+    WithForwardData([](ForwardData& data) {
+        const auto source = ReadTextFile(kProjectRoot / "shaderlib/pipelines/forward/depth_only.hlsl");
+        ASSERT_TRUE(source);
+        auto depth = test::CompileStageBProgram(*data.Device.Device, *source, ForwardPipeline::GetDepthOnlyLayoutRecipe());
+        ASSERT_TRUE(depth);
+        auto technique = MaterialTechnique::Create({{"ForwardLit", data.Program.get(), "ForwardMaterial", {}}, {"DepthOnly", depth.Get(), "", {}}}, "ForwardLit");
+        ASSERT_TRUE(technique);
+        auto material = Material::Create(technique.Get());
+        ASSERT_TRUE(material->SetTexture("AlbedoTexture", data.TextureA));
+        ASSERT_TRUE(material->SetSampler("LinearSampler", {}));
+        Scene scene;
+        auto proxy = make_unique<ForwardPolicyProxy>(material.Get());
+        Eigen::Matrix4f mirror = Eigen::Matrix4f::Identity();
+        mirror(0, 0) = -1;
+        proxy->SetLocalToWorld(mirror);
+        scene.AddPrimitive(std::move(proxy));
+        AppUpdateContext app{};
+        RenderFramePlan plan;
+        RenderWorkloadBuilder workloads{plan, {}};
+        vector<StreamingAssetRefAny> owners;
+        RenderPrepareContext prepare{app, {}, workloads, owners, kPerformanceRenderGraphRuntimeOptions, 0};
+        ASSERT_TRUE(forward_detail::RegisterForwardPassPolicies(prepare, scene));
+        ASSERT_TRUE(forward_detail::RegisterForwardPassPolicies(prepare, scene));
+        ASSERT_EQ(prepare.ScenePolicies.size(), 5u);
+        ASSERT_TRUE(prepare.FreezeRegisteredScenes());
+        const auto snapshot = prepare.PrepareScene(scene);
+        ASSERT_TRUE(snapshot);
+        ASSERT_EQ(snapshot->DrawRecords.size(), 3u);
+        EXPECT_EQ(snapshot->Stats.BindingRecipeCompiles, 3u);
+        PackedCBufferTable objects;
+        forward_detail::FreezeObjectData(*snapshot, objects);
+        HostWriteBatch writes;
+        FrameDrawResources resources{data.Device.Device.get(), {.BasicSize = 16384, .Alignment = 256, .MaxResetSize = 16384}};
+        ASSERT_TRUE(resources.BeginFrame(writes));
+        forward_detail::ForwardBindingCache forwardBindings;
+        forward_detail::DepthOnlyBindingCache depthBindings;
+        bool overflow = false;
+        forward_detail::ForwardLitMeshPassProcessor forward{resources, forwardBindings, overflow, objects};
+        forward_detail::DepthOnlyMeshPassProcessor depthProcessor{resources, depthBindings, objects};
+        ResolvedRenderView view;
+        CullingResults culling;
+        culling.Scene = snapshot.Get();
+        culling.View = &view;
+        culling.Stats.Valid = true;
+        culling.Primitives.push_back({0, 0});
+        RendererList normal, readOnly, depthList;
+        RendererListDesc desc{"forward", "ForwardLit", &culling, &view};
+        for (uint32_t viewIndex = 0; viewIndex < 3; ++viewIndex) {
+            view.ViewProjection(0, 3) = static_cast<float>(viewIndex);
+            forward.ResetView();
+            depthProcessor.ResetView();
+            desc.Policy = forward_detail::kForwardLitPolicy;
+            ASSERT_TRUE(BuildRendererList(desc, forward, normal));
+            desc.Policy = forward_detail::kForwardLitReadOnlyDepthPolicy;
+            ASSERT_TRUE(BuildRendererList(desc, forward, readOnly));
+            desc.Policy = forward_detail::kDepthOnlyPolicy;
+            desc.MaterialPassName = "DepthOnly";
+            ASSERT_TRUE(BuildRendererList(desc, depthProcessor, depthList));
+            desc.MaterialPassName = "ForwardLit";
+            ASSERT_EQ(normal.GetDrawCount(), 1u);
+            EXPECT_TRUE(normal.Commands.empty());
+            ASSERT_EQ(readOnly.GetDrawCount(), 1u);
+            EXPECT_TRUE(readOnly.Commands.empty());
+            ASSERT_EQ(depthList.GetDrawCount(), 1u);
+            EXPECT_TRUE(depthList.Commands.empty());
+            EXPECT_TRUE(normal.GetPipelineState(0).DepthStencil.DepthWriteEnable);
+            EXPECT_FALSE(readOnly.GetPipelineState(0).DepthStencil.DepthWriteEnable);
+            EXPECT_TRUE(depthList.GetPipelineState(0).DepthStencil.DepthWriteEnable);
+            EXPECT_EQ(normal.GetPipelineState(0).Primitive.FaceClockwise,
+                      OppositeFrontFace(std::as_const(*material).GetPipelineState().Primitive.FaceClockwise));
+            EXPECT_EQ(normal.GetGroups(0).size(), 3u);
+            EXPECT_EQ(depthList.GetGroups(0).size(), 2u);
+            EXPECT_TRUE(normal.IsCurrent());
+            EXPECT_EQ(normal.GetFrameEpoch(), resources.GetEpoch());
+            EXPECT_TRUE(normal.GetBindingId(0).IsValid());
+            EXPECT_EQ(normal.GetBindingId(0), readOnly.GetBindingId(0));
+            EXPECT_NE(normal.GetEffectiveStateId(0), readOnly.GetEffectiveStateId(0));
+            EXPECT_EQ(normal.GetEffectiveStateId(0), snapshot->DrawRecords[0].MirroredStateId);
+            EXPECT_EQ(&normal.GetDescription(0), &snapshot->DrawRecords[0].Description);
+            EXPECT_EQ(normal.GetPrograms().size(), 1u);
+            // One material/object plus a distinct Forward/Depth view upload for each actual view.
+            EXPECT_EQ(resources.GetStats().SharedBufferUploads, 2u + (viewIndex + 1u) * 2u);
+            EXPECT_EQ(resources.GetStats().GroupPreparations, 3u + (viewIndex + 1u) * 2u);
+            EXPECT_EQ(forwardBindings.LayoutParses(), 0u);
+            EXPECT_EQ(depthBindings.LayoutParses(), 0u);
+        }
+        // Rebuilding a second processor for the same view uses the frame-owned tuple table.
+        const auto groupsBefore = resources.GetGroupCount();
+        const auto bindingsBefore = resources.GetBindingCount();
+        const auto bytesBefore = resources.GetStats().BufferBytesCopied;
+        forward_detail::ForwardLitMeshPassProcessor duplicate{resources, forwardBindings, overflow, objects};
+        RendererList shared;
+        desc.Policy = forward_detail::kForwardLitPolicy;
+        ASSERT_TRUE(BuildRendererList(desc, duplicate, shared));
+        EXPECT_EQ(shared.GetBindingId(0), normal.GetBindingId(0));
+        EXPECT_EQ(resources.GetGroupCount(), groupsBefore);
+        EXPECT_EQ(resources.GetBindingCount(), bindingsBefore);
+        EXPECT_EQ(resources.GetStats().BufferBytesCopied, bytesBefore);
+        RenderSceneSnapshot changedPublication = *snapshot;
+        changedPublication.PublicationId = 71;
+        changedPublication.PublicationRevision = 1;
+        changedPublication.SceneEpoch = 8;
+        culling.Scene = &changedPublication;
+        RendererList identityGuard;
+        ASSERT_TRUE(BuildRendererList(desc, duplicate, identityGuard));
+        EXPECT_TRUE(identityGuard.IsCurrent());
+        ++changedPublication.PublicationId;
+        EXPECT_FALSE(identityGuard.IsCurrent());
+        --changedPublication.PublicationId;
+        ++changedPublication.SceneEpoch;
+        EXPECT_FALSE(identityGuard.IsCurrent());
+        --changedPublication.SceneEpoch;
+        ++changedPublication.PublicationRevision;
+        EXPECT_FALSE(identityGuard.IsCurrent());
+        --changedPublication.PublicationRevision;
+        EXPECT_TRUE(identityGuard.IsCurrent());
+        RenderSceneSnapshot legacy = *snapshot;
+        CpuDrawStore legacyStore;
+        ASSERT_TRUE(legacyStore.Sync(legacy));
+        EXPECT_FALSE(legacy.HasPassPolicies);
+        culling.Scene = &legacy;
+        desc.Policy = forward_detail::kForwardLitReadOnlyDepthPolicy;
+        ASSERT_TRUE(BuildRendererList(desc, forward, readOnly));
+        ASSERT_EQ(readOnly.Commands.size(), 1u);
+        EXPECT_FALSE(readOnly.Commands[0].PipelineState.DepthStencil.DepthWriteEnable);
+        EXPECT_EQ(forwardBindings.LayoutParses(), 1u);
+        writes.Flush(*data.Device.Device);
+        writes.Reset();
+        ASSERT_TRUE(resources.BeginFrame(writes));
+        EXPECT_FALSE(normal.IsCurrent());
+        EXPECT_FALSE(shared.IsCurrent());
+        const auto revision = normal.GetBuildRevision();
+        normal.ResetForReuse();
+        EXPECT_GT(normal.GetBuildRevision(), revision);
+        EXPECT_EQ(normal.GetDrawCount(), 0u);
+    });
 }
 
 TEST(RadRayRuntimeMaterial, CreateUsesDeclarationAnchor) {
@@ -516,6 +767,179 @@ TEST(FrameDrawResources, DynamicOffsetsReuseImmutableSetsAndSpillsCreateNewSets)
         EXPECT_EQ(&pass.Program->GetOrCreateParameterGroupRecipe(*pass.ParameterGroup), recipe);
         writes.Flush(*data.Device.Device);
         otherWrites.Flush(*data.Device.Device);
+    });
+}
+
+TEST(FrameDrawResources, SharedObjectUploadsKeepWireViewAndNativeLayoutIdentitySeparate) {
+    WithForwardData([](ForwardData& data) {
+        auto second = CompileProgram(*data.Device.Device, kProjectRoot / "modules/runtime/tests/data/forward_groups.hlsl");
+        ASSERT_TRUE(second);
+        const auto secondBinding = forward_detail::ResolveProgramBindings(*second.Get());
+        ASSERT_TRUE(secondBinding);
+        EXPECT_NE(second->GetGeneration(), data.Program->GetGeneration());
+        HostWriteBatch writes;
+        FrameDrawResources resources{data.Device.Device.get(), {.BasicSize = 1024, .Alignment = 256, .MaxResetSize = 1024}};
+        ASSERT_TRUE(resources.BeginFrame(writes));
+        Forward_ObjectData object{};
+        object.LocalToWorld = Eigen::Matrix4f{Eigen::Matrix4f::Identity()};
+        static constexpr byte wireA{}, wireB{};
+        const FrameCBufferIdentity shared{&object, &wireA, 0};
+        const auto bytes = AsCBufferBytes(object);
+        const auto first = resources.PrepareSharedCBufferGroup(*data.Program, data.Bindings.ObjectGroup, shared, 0, bytes);
+        const auto duplicate = resources.PrepareSharedCBufferGroup(*data.Program, data.Bindings.ObjectGroup, shared, 0, bytes);
+        const auto otherProgram = resources.PrepareSharedCBufferGroup(*second.Get(), secondBinding->ObjectGroup, shared, 0, bytes);
+        ASSERT_TRUE(first);
+        ASSERT_TRUE(duplicate);
+        ASSERT_TRUE(otherProgram);
+        EXPECT_EQ(first->Set, duplicate->Set);
+        EXPECT_EQ(first->DynamicOffsets, duplicate->DynamicOffsets);
+        EXPECT_NE(first->Set, otherProgram->Set);
+        ASSERT_EQ(first->DynamicOffsets.size(), 1u);
+        ASSERT_EQ(otherProgram->DynamicOffsets.size(), 1u);
+        EXPECT_EQ(first->DynamicOffsets[0].Offset, otherProgram->DynamicOffsets[0].Offset);
+        EXPECT_EQ(first->DynamicOffsets[0].Binding, data.Program->GetParameterLayout().Buffers()[data.Bindings.ObjectBufferIndex].Binding);
+        EXPECT_EQ(otherProgram->DynamicOffsets[0].Binding, second->GetParameterLayout().Buffers()[secondBinding->ObjectBufferIndex].Binding);
+        EXPECT_NE(first->DynamicOffsets[0].Binding, otherProgram->DynamicOffsets[0].Binding);
+        EXPECT_EQ(resources.GetStats().BufferBytesCopied, sizeof(object));
+        EXPECT_EQ(resources.GetStats().SharedBufferUploads, 1u);
+        EXPECT_EQ(resources.GetStats().SharedBufferHits, 2u);
+        EXPECT_EQ(resources.GetStats().SharedGroupHits, 1u);
+        EXPECT_EQ(resources.GetStats().GroupPreparations, 2u);
+        const auto indexed = resources.PrepareSharedCBufferGroupId(*data.Program, data.Bindings.ObjectGroup, shared, 0, bytes);
+        ASSERT_TRUE(indexed.IsValid());
+        EXPECT_EQ(resources.GetGroup(indexed).Set, first->Set);
+        EXPECT_EQ(resources.GetStats().GroupPreparations, 2u);
+        for (const FrameCBufferIdentity identity : {FrameCBufferIdentity{&object, &wireB, 0}, FrameCBufferIdentity{&object, &wireA, 17}}) {
+            const auto distinct = resources.PrepareSharedCBufferGroup(*data.Program, data.Bindings.ObjectGroup, identity, 0, bytes);
+            ASSERT_TRUE(distinct);
+            EXPECT_NE(first->DynamicOffsets, distinct->DynamicOffsets);
+        }
+        EXPECT_EQ(resources.GetStats().SharedBufferUploads, 3u);
+        bool spilled = false;
+        for (uint32_t row = 1; row < 20; ++row) {
+            const auto value = resources.PrepareSharedCBufferGroup(*data.Program, data.Bindings.ObjectGroup, shared, row, bytes);
+            ASSERT_TRUE(value);
+            spilled |= value->Set != first->Set;
+        }
+        EXPECT_TRUE(spilled);
+        const auto stillFirst = resources.PrepareSharedCBufferGroup(*data.Program, data.Bindings.ObjectGroup, shared, 0, bytes);
+        ASSERT_TRUE(stillFirst);
+        EXPECT_EQ(stillFirst->Set, first->Set);
+        EXPECT_EQ(stillFirst->DynamicOffsets, first->DynamicOffsets);
+        EXPECT_EQ(resources.GetGroup(indexed).Set, first->Set);
+        EXPECT_EQ(resources.GetGroup(indexed).DynamicOffsets, first->DynamicOffsets);
+        writes.Flush(*data.Device.Device);
+        writes.Reset();
+        ASSERT_TRUE(resources.BeginFrame(writes));
+        const auto nextFrame = resources.PrepareSharedCBufferGroup(*data.Program, data.Bindings.ObjectGroup, shared, 0, bytes);
+        ASSERT_TRUE(nextFrame);
+        EXPECT_EQ(resources.GetStats().SharedBufferUploads, 1u);
+        EXPECT_EQ(resources.GetStats().SharedBufferHits, 0u);
+        EXPECT_EQ(resources.GetStats().SharedGroupHits, 0u);
+        writes.Flush(*data.Device.Device);
+        writes.Reset();
+        ASSERT_TRUE(resources.BeginFrame(writes));
+        object.MotionValid = 1;
+        const auto firstDomain = resources.PrepareSharedCBufferGroupId(*second.Get(), secondBinding->ObjectGroup,
+                                                                       {&object, &wireB, 17}, 0, bytes);
+        const auto secondDomain = resources.PrepareSharedCBufferGroupId(*second.Get(), secondBinding->ObjectGroup, shared, 0, bytes);
+        const auto reorderedProgram = resources.PrepareSharedCBufferGroupId(*data.Program, data.Bindings.ObjectGroup, shared, 0, bytes);
+        ASSERT_TRUE(firstDomain.IsValid());
+        ASSERT_TRUE(secondDomain.IsValid());
+        ASSERT_TRUE(reorderedProgram.IsValid());
+        EXPECT_NE(resources.GetGroup(firstDomain).DynamicOffsets[0].Offset, resources.GetGroup(secondDomain).DynamicOffsets[0].Offset);
+        EXPECT_EQ(resources.GetGroup(secondDomain).DynamicOffsets[0].Offset, resources.GetGroup(reorderedProgram).DynamicOffsets[0].Offset);
+        EXPECT_EQ(resources.GetGroup(reorderedProgram).DynamicOffsets[0].Binding, data.Program->GetParameterLayout().Buffers()[data.Bindings.ObjectBufferIndex].Binding);
+        EXPECT_EQ(resources.GetStats().SharedBufferUploads, 2u);
+        EXPECT_EQ(resources.GetStats().SharedBufferHits, 1u);
+        EXPECT_EQ(resources.GetStats().SharedGroupHits, 0u);
+        writes.Flush(*data.Device.Device);
+    });
+}
+
+TEST(FrameDrawResources, IndexedTuplesPublishOnlySuccessAndRetryWithoutUploadingAgain) {
+    WithForwardData([](ForwardData& data) {
+        HostWriteBatch writes;
+        FrameDrawResources resources{data.Device.Device.get()};
+        ASSERT_TRUE(resources.BeginFrame(writes));
+        Forward_ObjectData object{};
+        static constexpr byte wire{};
+        FrameCBufferIdentity identity{&object, &wire, 0, 1, 2, 3};
+        resources.FailNextGroupForTesting();
+        const auto failed = resources.PrepareGroupId(*data.Program, data.Bindings.ObjectGroup, identity, 0, AsCBufferBytes(object));
+        EXPECT_FALSE(failed.IsValid());
+        EXPECT_EQ(resources.GetGroupCount(), 0u);
+        EXPECT_EQ(resources.GetBindingCount(), 0u);
+        EXPECT_EQ(resources.GetStats().SharedBufferUploads, 1u);
+        const auto retry = resources.PrepareGroupId(*data.Program, data.Bindings.ObjectGroup, identity, 0, {});
+        ASSERT_TRUE(retry.IsValid());
+        EXPECT_EQ(resources.GetGroupCount(), 1u);
+        EXPECT_EQ(resources.GetStats().SharedBufferUploads, 1u);
+        EXPECT_EQ(resources.GetStats().BufferBytesCopied, sizeof(object));
+        const array groups{retry};
+        const auto first = resources.InternBinding(groups);
+        ASSERT_TRUE(first.IsValid());
+        EXPECT_EQ(resources.InternBinding(groups), first);
+        EXPECT_EQ(resources.GetBindingCount(), 1u);
+        EXPECT_FALSE(resources.InternBinding(array{FrameShaderGroupId{}}).IsValid());
+        const auto original = resources.GetGroup(retry).DynamicOffsets;
+        for (uint32_t row = 1; row < 500; ++row) {
+            const auto next = resources.PrepareGroupId(*data.Program, data.Bindings.ObjectGroup, identity, row, AsCBufferBytes(object));
+            ASSERT_TRUE(next.IsValid());
+            ASSERT_TRUE(resources.InternBinding(array{next}).IsValid());
+        }
+        EXPECT_EQ(resources.GetGroup(resources.GetBinding(first)[0]).DynamicOffsets, original);
+        // Equal byte count is insufficient: each temporal or lifetime dimension creates a new row.
+        for (uint32_t dimension = 0; dimension < 4; ++dimension) {
+            auto changed = identity;
+            if (dimension == 0) ++changed.Context;
+            if (dimension == 1) ++changed.Generation;
+            if (dimension == 2) ++changed.Revision;
+            if (dimension == 3) ++changed.HistoryRevision;
+            const auto next = resources.PrepareGroupId(*data.Program, data.Bindings.ObjectGroup, changed, 0, AsCBufferBytes(object));
+            ASSERT_TRUE(next.IsValid());
+            EXPECT_NE(resources.GetGroup(next).DynamicOffsets, original);
+        }
+        writes.Flush(*data.Device.Device);
+    });
+}
+
+TEST(FrameDrawResources, EpochTablesRetainWarmStorageWithoutKeepingHistoricalKeys) {
+    WithForwardData([](ForwardData& data) {
+        HostWriteBatch writes;
+        FrameDrawResources resources{data.Device.Device.get(), {.BasicSize = 65536, .Alignment = 256, .MaxResetSize = 65536}};
+        Forward_ObjectData object{};
+        Forward_ViewData view{};
+        static constexpr byte objectWire{}, viewWire{};
+        size_t warmedBytes = 0;
+        uint64_t epoch = 0;
+        for (uint64_t frame = 0; frame < 40; ++frame) {
+            ASSERT_TRUE(resources.BeginFrame(writes));
+            EXPECT_GT(resources.GetEpoch(), epoch);
+            epoch = resources.GetEpoch();
+            EXPECT_EQ(resources.GetGroupCount(), 0u);
+            EXPECT_EQ(resources.GetBindingCount(), 0u);
+            view.ViewProj.m[0] = static_cast<float>(frame + 1);
+            const auto values = resources.InternValues(&viewWire, AsCBufferBytes(view));
+            const auto viewId = resources.PrepareGroupId(*data.Program, data.Bindings.ViewGroup, values, 0, AsCBufferBytes(view));
+            ASSERT_TRUE(viewId.IsValid());
+            for (uint32_t row = 0; row < 64; ++row) {
+                const auto objectId = resources.PrepareGroupId(*data.Program, data.Bindings.ObjectGroup,
+                                                               {&object, &objectWire, frame + 1}, row, AsCBufferBytes(object));
+                ASSERT_TRUE(objectId.IsValid());
+                const array groups{viewId, objectId};
+                const auto tuple = resources.InternBinding(groups);
+                ASSERT_TRUE(tuple.IsValid());
+                for (uint32_t repeat = 0; repeat < 3; ++repeat) EXPECT_EQ(resources.InternBinding(groups), tuple);
+            }
+            EXPECT_EQ(resources.GetGroupCount(), 65u);
+            EXPECT_EQ(resources.GetBindingCount(), 64u);
+            EXPECT_EQ(resources.GetStats().SharedBufferUploads, 65u);
+            if (frame == 2) warmedBytes = resources.GetCacheCapacityBytes();
+            if (frame > 2) EXPECT_EQ(resources.GetCacheCapacityBytes(), warmedBytes);
+            writes.Flush(*data.Device.Device);
+            writes.Reset();
+        }
     });
 }
 

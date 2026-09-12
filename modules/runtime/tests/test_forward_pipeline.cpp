@@ -205,6 +205,8 @@ struct ForwardPipelineRunResult {
     bool MeshAssigned{false};
     uint32_t FramesRun{0};
     size_t PipelineStateCount{0};
+    uint32_t RejectedBindingFrames{0};
+    string ExpectedBindingErrors;
     // Two-layer cache facts, filled once the first program exists.
     size_t ArtifactsAfterFirst{0};
     size_t ProgramsAfterFirst{0};
@@ -231,9 +233,12 @@ class ObservedForwardPipeline final : public RenderPipeline {
 public:
     ObservedForwardPipeline(unique_ptr<ForwardPipeline> forward,
                             std::function<bool(ForwardPipeline&, const AppUpdateContext&)> prepare,
-                            std::function<void(const ForwardPipeline&, uint32_t)> render,
+                            std::function<void(const ForwardPipeline&, uint32_t, const RenderGraph&, const RenderGraphExecutionResult&)> render,
                             std::function<void(RenderPrepareContext&)> extra = {})
         : _forward(std::move(forward)), _prepare(std::move(prepare)), _render(std::move(render)), _extra(std::move(extra)) {}
+    void CollectScenePolicies(RenderPrepareContext& prepare) override {
+        if (!_stopped) _forward->CollectScenePolicies(prepare);
+    }
     void PrepareFrame(RenderPrepareContext& prepare) override {
         const auto& ctx = prepare.App;
         _enabled[ctx.FlightIndex] = !_stopped;
@@ -252,14 +257,14 @@ public:
     void GraphRecorded(RenderPipelineContext& ctx, const RenderGraph& graph, RenderGraphExecutionResult result) override {
         if (_enabled[ctx.FlightIndex()]) {
             _forward->GraphRecorded(ctx, graph, result);
-            _render(*_forward, ctx.FlightIndex());
+            _render(*_forward, ctx.FlightIndex(), graph, result);
         }
     }
 
 private:
     unique_ptr<ForwardPipeline> _forward;
     std::function<bool(ForwardPipeline&, const AppUpdateContext&)> _prepare;
-    std::function<void(const ForwardPipeline&, uint32_t)> _render;
+    std::function<void(const ForwardPipeline&, uint32_t, const RenderGraph&, const RenderGraphExecutionResult&)> _render;
     std::function<void(RenderPrepareContext&)> _extra;
     array<bool, 2> _enabled{};
     bool _stopped{false};
@@ -443,7 +448,7 @@ protected:
         GetRenderSystem()->SetPipeline(make_unique<ObservedForwardPipeline>(
             make_unique<ForwardPipeline>(this, GetWorld()->GetScene(), camera),
             [this](ForwardPipeline& pipeline, const AppUpdateContext& ctx) { return AfterPrepare(pipeline, ctx); },
-            [this](const ForwardPipeline& pipeline, uint32_t flight) { AfterRender(pipeline, flight); },
+            [this](const ForwardPipeline& pipeline, uint32_t flight, const RenderGraph& graph, const RenderGraphExecutionResult& result) { AfterRender(pipeline, flight, graph, result); },
             [this](RenderPrepareContext& prepare) {
                 if (_offscreenIds.empty()) return;
                 const RenderViewDesc source = GetRenderSystem()->GetFramePlan(prepare.App.FlightIndex).ViewFamilies.front().Views.front();
@@ -666,11 +671,46 @@ private:
         return true;
     }
 
-    void AfterRender(const ForwardPipeline& pipeline, uint32_t flight) {
+    void AfterRender(const ForwardPipeline& pipeline, uint32_t flight, const RenderGraph& graph, const RenderGraphExecutionResult& result) {
         const auto& input = forward_detail::ForwardPipelineTestAccess::Input(pipeline, flight);
         if (input.MeshBatches.empty()) {
             return;
         }
+        if (_scenario == Scenario::MissingObject || _scenario == Scenario::NonDynamic) {
+            const auto rejected = std::find_if(input.DrawRecords.begin(), input.DrawRecords.end(), [](const DrawRecord& record) {
+                return record.Batch == 0 && record.Policy == forward_detail::kForwardLitPolicy;
+            });
+            ASSERT_NE(rejected, input.DrawRecords.end());
+            EXPECT_EQ(rejected->Status, DrawRecordStatus::InvalidBindings);
+            const auto views = forward_detail::ForwardPipelineTestAccess::Views(pipeline, flight, 0);
+            ASSERT_EQ(views.size(), 1u);
+            EXPECT_GT(views.front().Opaque.Stats.InvalidBindings, 0u);
+            EXPECT_FALSE(views.front().Opaque.Stats.ContentSucceeded());
+            EXPECT_TRUE(views.front().Opaque.GetDrawCount() == 0);
+            EXPECT_FALSE(result.Success);
+            EXPECT_FALSE(result.CommandsRecorded);
+            EXPECT_TRUE(pipeline.Failed());
+            EXPECT_TRUE(graph.HasFailed());
+            EXPECT_EQ(graph.GetFirstErrorCode(), "WorkPreparation");
+            const auto& report = graph.GetReport();
+            EXPECT_EQ(report.GraphicsPipelinePreparations, 0u);
+            EXPECT_EQ(report.GraphicsPipelineCreations, 0u);
+            const auto& calls = report.CommandCalls;
+            EXPECT_EQ(calls.Draw + calls.DrawIndexed + calls.DrawIndirect + calls.DrawIndexedIndirect + calls.Dispatch + calls.DispatchIndirect, 0u);
+            EXPECT_EQ(calls.SetPipeline + calls.SetParameters + calls.VertexBuffer + calls.IndexBuffer, 0u);
+            const auto& execution = pipeline.GetStageBStats(flight).Execution;
+            EXPECT_EQ(execution.Commands + execution.Draws, 0u);
+            // These count draw-resource preparation; graph textures/framebuffers may already be realized.
+            const auto prepared = pipeline.GetFrameDrawResourceStats(flight);
+            EXPECT_EQ(prepared.GroupPreparations + prepared.SetCreations + prepared.BufferBytesCopied, 0u);
+            ++_result->RejectedBindingFrames;
+            // Require the complete two known messages, including this frame's precise graph report.
+            const auto text = report.ToText();
+            _result->ExpectedBindingErrors += text + "\nForward frame failed: " + text + "\n";
+            return;
+        }
+        EXPECT_TRUE(result.Success);
+        EXPECT_FALSE(pipeline.Failed());
         const auto& material = input.Materials[input.MeshBatches.front().Material].Passes.front();
         const auto bindings = forward_detail::ResolveProgramBindings(*material.Program.Get());
         if (!bindings) {
@@ -701,16 +741,16 @@ private:
             EXPECT_EQ(stage.Execution.Skipped, 0u);
             const auto views = forward_detail::ForwardPipelineTestAccess::Views(pipeline, flight, 0);
             ASSERT_EQ(views.size(), 1u);
-            EXPECT_EQ(views[0].DepthOnly.Commands.size(), 1u);
-            EXPECT_EQ(views[0].Opaque.Commands.size(), _scenario == Scenario::PartialDepth ? 2u : 1u);
-            EXPECT_EQ(views[0].Transparent.Commands.size(), _scenario == Scenario::TransparentDepth ? 1u : 0u);
+            EXPECT_EQ(views[0].DepthOnly.GetDrawCount(), 1u);
+            EXPECT_EQ(views[0].Opaque.GetDrawCount(), _scenario == Scenario::PartialDepth ? 2u : 1u);
+            EXPECT_EQ(views[0].Transparent.GetDrawCount(), _scenario == Scenario::TransparentDepth ? 1u : 0u);
             if (_scenario == Scenario::PartialDepth) EXPECT_EQ(views[0].DepthOnly.Stats.MissingPass, 1u);
         }
         if (_scenario == Scenario::MultipleViews) {
             const auto split = forward_detail::ForwardPipelineTestAccess::Views(pipeline, flight, 1);
             ASSERT_EQ(split.size(), 2u);
-            EXPECT_EQ(split[0].Opaque.Commands.size(), 1u);
-            EXPECT_TRUE(split[1].Opaque.Commands.empty());
+            EXPECT_EQ(split[0].Opaque.GetDrawCount(), 1u);
+            EXPECT_TRUE(split[1].Opaque.GetDrawCount() == 0);
             EXPECT_EQ(split[1].Culling.Stats.FrustumRejected, 1u);
             EXPECT_EQ(stage.CullCalls, 3u);
         }
@@ -892,9 +932,15 @@ void RunForwardPipeline(render::RenderBackend backend, Scenario scenario = Scena
     const bool invalid = scenario == Scenario::MissingObject || scenario == Scenario::NonDynamic;
     EXPECT_EQ(result.PipelineStateCount, invalid ? 0u : UsesOffscreen(scenario) ? (scenario == Scenario::TransparentDepth ? 4u : 2u)
                                                                                 : 1u);
-    EXPECT_TRUE(logs.Errors().empty()) << logs.Errors();
+    if (invalid) {
+        EXPECT_GT(result.RejectedBindingFrames, 0u);
+        EXPECT_EQ(logs.Errors(), result.ExpectedBindingErrors);
+    } else {
+        EXPECT_TRUE(logs.Errors().empty()) << logs.Errors();
+        EXPECT_EQ(result.RejectedBindingFrames, 0u);
+    }
     EXPECT_EQ(logs.DescriptorRewrites.load(), 0u);
-    EXPECT_EQ(logs.IncompatiblePrograms.load(), invalid ? 1u : 0u);
+    EXPECT_EQ(logs.IncompatiblePrograms.load(), 0u);
     if (!invalid) {
         EXPECT_TRUE(result.SnapshotRendered.load());
     }

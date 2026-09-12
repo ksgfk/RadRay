@@ -64,9 +64,9 @@ render::ShaderProgramLayoutRecipe MakeLayoutRecipe(std::span<const std::string_v
 
 struct ForwardPipeline::Impl {
     struct FlightResources {
-        RenderSceneSnapshot Scene;
+        shared_ptr<const RenderSceneSnapshot> Scene{make_shared<RenderSceneSnapshot>()};
         // Object cbuffer rows frozen on the game thread, indexed by snapshot primitive.
-        PackedCBufferTable Objects;
+        ForwardObjectDataCache Objects;
         unique_ptr<FrameDrawResources> DrawResources;
         vector<ForwardFamilyDrawWork> Families;
         vector<unique_ptr<ForwardHdrView>> HdrViews;
@@ -95,6 +95,7 @@ struct ForwardPipeline::Impl {
     RenderSystem* System;
     ForwardPipelineSettings Settings;
     ForwardEffectPrograms Effects;
+    ForwardEffectTemplates EffectTemplates;
     vector<ForwardViewSource> Sources;
     vector<ForwardOutputOverlay> Overlays;
     vector<ForwardOutputSurface> Surfaces;
@@ -105,13 +106,13 @@ struct ForwardPipeline::Impl {
     string CaptureName;
     std::atomic_bool Error{false};
     ForwardBindingCache Bindings;
-    RenderSceneSnapshotBuilder SnapshotBuilder;
     DepthOnlyBindingCache DepthBindings;
     vector<FlightResources> Flights;
     unordered_map<RenderOutputId, ViewStateId, RenderOutputIdHash> ViewIds;
     bool LightOverflowWarned{false}, InvalidBoundsWarned{false}, CullingFailureWarned{false};
 
     bool BeginFrame(RenderPipelineContext& frame) {
+        RADRAY_PROFILE_SCOPE_N("Forward::DrawWorkBuild.BeginFrame");
         if (frame.FlightIndex() >= Flights.size()) return false;
         auto& flight = Flights[frame.FlightIndex()];
         for (auto& view : flight.HdrViews) view->Reset();
@@ -128,40 +129,136 @@ struct ForwardPipeline::Impl {
         return flight.DrawResources->BeginFrame(frame.HostWrites());
     }
 
-    bool PrepareFamily(uint32_t flightIndex, const ResolvedRenderViewFamily& family, RenderValidationMode validation) {
-        auto& flight = Flights[flightIndex];
+    struct ViewWorkRequest {
+        FlightResources* Flight;
+        ForwardViewDrawWork* Output;
+        shared_ptr<DepthOnlyMeshPassProcessor> Depth;
+        shared_ptr<ForwardLitMeshPassProcessor> Lit;
+        RenderValidationMode Validation;
+    };
+    struct LdrFamilyTemplate {
+        render::TextureDescriptor ColorDesc, DepthDesc;
+        size_t ViewCount;
+        shared_ptr<const RenderGraphTemplate> Graph;
+        RgTexturePort ColorInput;
+        RgTextureValue ColorOutput;
+        vector<RgTemplateSlot<ViewWorkRequest>> WorkSlots;
+        vector<RgWorkHandle> Works;
+        array<RgTemplateSlot<ForwardGraphFrameData>, 3> StageSlots;
+        uint64_t Used{0};
+    };
+    vector<LdrFamilyTemplate> LdrTemplates;
+    uint64_t TemplateUseSerial{0};
+    static bool PrepareViewWork(ViewWorkRequest& request, uint64_t mask) {
+        RADRAY_PROFILE_SCOPE_N("Forward::DrawWorkBuild.Prepare");
+        auto& flight = *request.Flight;
+        auto& view = *request.Output;
+        view.RequestedRoles = mask;
+        ++view.CullCalls;
+        ++flight.Stats.CullCalls;
+        if (!Cull({flight.Scene.get(), &view.View}, view.Culling)) {
+            ++flight.Stats.CullFailures;
+            return false;
+        }
+        if (mask & kForwardWorkDepth) {
+            request.Depth->ResetView();
+            if (!BuildRendererList({"DepthOnly", "DepthOnly", &view.Culling, &view.View, RenderQueueRange::Opaque(), 0xffffffffu,
+                                    RendererListSorting::FrontToBack, false, request.Validation, kDepthOnlyPolicy},
+                                   *request.Depth, view.DepthOnly) ||
+                !view.DepthOnly.Stats.ContentSucceeded()) return false;
+        }
+        array<RendererListDesc, 2> descriptions;
+        array<RendererList*, 2> outputs{};
+        uint32_t count = 0;
+        if (mask & kForwardWorkOpaque) {
+            descriptions[count] = {"Opaque", "ForwardLit", &view.Culling, &view.View, RenderQueueRange::Opaque(), 0xffffffffu,
+                                   RendererListSorting::StateThenFrontToBack, false, request.Validation, kForwardLitPolicy};
+            outputs[count++] = &view.Opaque;
+        }
+        if (mask & kForwardWorkTransparent) {
+            descriptions[count] = {"Transparent", "ForwardLit", &view.Culling, &view.View, RenderQueueRange::Transparent(), 0xffffffffu,
+                                   RendererListSorting::BackToFront, false, request.Validation, kForwardLitPolicy};
+            outputs[count++] = &view.Transparent;
+        }
+        request.Lit->ResetView();
+        if (count && !BuildRendererLists(std::span{descriptions.data(), count}, *request.Lit, std::span{outputs.data(), count})) return false;
+        for (uint32_t i = 0; i < count; ++i)
+            if (!outputs[i]->Stats.ContentSucceeded()) return false;
+        flight.Stats.DepthCommands += view.DepthOnly.GetDrawCount();
+        flight.Stats.OpaqueCommands += view.Opaque.GetDrawCount();
+        flight.Stats.TransparentCommands += view.Transparent.GetDrawCount();
+        return true;
+    }
+    bool BuildLdrFamily(RenderGraph& graph, RenderPipelineContext& context, const ResolvedRenderViewFamily& family,
+                        const render::TextureDescriptor& depthDesc, RgTextureValue& color) {
+        const auto colorDesc = graph.GetTextureDescriptor(color);
+        if (!colorDesc) return false;
+        LdrFamilyTemplate* cached = nullptr;
+        for (auto& candidate : LdrTemplates)
+            if (candidate.ViewCount == family.Views.size() && TexturePoolKey{candidate.ColorDesc} == TexturePoolKey{*colorDesc} && TexturePoolKey{candidate.DepthDesc} == TexturePoolKey{depthDesc}) {
+                cached = &candidate;
+                break;
+            }
+        if (!cached) {
+            auto builder = graph.CreateTemplateBuilder("Forward.LdrFamily");
+            LdrFamilyTemplate next;
+            next.ColorDesc = *colorDesc;
+            next.DepthDesc = depthDesc;
+            next.ViewCount = family.Views.size();
+            next.ColorInput = builder.DeclareTexturePort(*colorDesc, "Forward.ColorInput");
+            auto depth = builder.CreateTexture(depthDesc, "Forward.Depth");
+            for (size_t index = 0; index < family.Views.size(); ++index) {
+                const auto slot = builder.DeclareTemplateSlot<ViewWorkRequest>();
+                next.WorkSlots.push_back(slot);
+                next.Works.push_back(builder.AddTemplateWork("Forward.MainViewWork", slot, PrepareViewWork));
+            }
+            array<vector<ForwardGraphView>, 3> views;
+            constexpr uint64_t masks[]{kForwardWorkDepth, kForwardWorkOpaque, kForwardWorkTransparent};
+            for (size_t stage = 0; stage < views.size(); ++stage) {
+                next.StageSlots[stage] = builder.DeclareTemplateSlot<ForwardGraphFrameData>();
+                for (const auto work : next.Works) views[stage].push_back({.Work = work, .WorkMask = masks[stage]});
+            }
+            const auto depthStage = ForwardGraph::DeclareTemplate(builder, ForwardGraphStage::Depth, next.StageSlots[0],
+                                                                  {.Name = "Forward.DepthPrepass", .Views = views[0], .Depth = depth, .DepthAttachment = {.Load = render::LoadAction::Clear}});
+            const auto opaqueStage = ForwardGraph::DeclareTemplate(builder, ForwardGraphStage::Opaque, next.StageSlots[1],
+                                                                   {.Name = "Forward.Opaque", .Views = views[1], .Color = builder.Value(next.ColorInput), .Depth = depthStage.Depth, .ColorAttachment = {.Load = render::LoadAction::Clear, .Clear = {{.025f, .030f, .040f, 1}}}, .DepthAttachment = {.Load = render::LoadAction::Load}});
+            const auto transparentStage = ForwardGraph::DeclareTemplate(builder, ForwardGraphStage::Transparent, next.StageSlots[2],
+                                                                        {.Name = "Forward.Transparent", .Views = views[2], .Color = opaqueStage.Color, .Depth = opaqueStage.Depth, .ColorAttachment = {.Load = render::LoadAction::Load}, .DepthAttachment = {.Load = render::LoadAction::Load}});
+            if (!depthStage.Success || !opaqueStage.Success || !transparentStage.Success) return false;
+            next.ColorOutput = transparentStage.Color;
+            next.Graph = builder.FreezeTemplate();
+            if (!next.Graph) return false;
+            if (LdrTemplates.size() < 4) {
+                LdrTemplates.push_back(std::move(next));
+                cached = &LdrTemplates.back();
+            } else {
+                cached = &*std::min_element(LdrTemplates.begin(), LdrTemplates.end(), [](const auto& a, const auto& b) { return a.Used < b.Used; });
+                *cached = std::move(next);
+            }
+        }
+        cached->Used = ++TemplateUseSerial;
+        const auto instance = graph.Instantiate(cached->Graph);
+        if (!instance.IsValid() || !graph.Connect(instance.Value(cached->ColorInput), color)) return false;
+        auto& flight = Flights[context.FlightIndex()];
         auto& work = flight.Families[family.FrameLocalIndex];
         work.Views.resize(family.Views.size());
-        DepthOnlyMeshPassProcessor depth{*flight.DrawResources, DepthBindings, flight.Objects};
-        ForwardLitMeshPassProcessor lit{*flight.DrawResources, Bindings, LightOverflowWarned, flight.Objects};
-        bool valid = false;
-        for (uint32_t index = 0; index < family.Views.size(); ++index) {
+        auto depth = make_shared<DepthOnlyMeshPassProcessor>(*flight.DrawResources, DepthBindings, flight.Objects.Rows());
+        auto lit = make_shared<ForwardLitMeshPassProcessor>(*flight.DrawResources, Bindings, LightOverflowWarned, flight.Objects.Rows());
+        array<vector<ForwardGraphView>, 3> views;
+        for (size_t index = 0; index < family.Views.size(); ++index) {
             auto& view = work.Views[index];
             view.View = family.Views[index];
-            ++flight.Stats.CullCalls;
-            if (!Cull({&flight.Scene, &view.View}, view.Culling)) {
-                ++flight.Stats.CullFailures;
-                if (!CullingFailureWarned) {
-                    RADRAY_ERR_LOG("Forward culling rejected an invalid view; its draw lists are skipped");
-                    CullingFailureWarned = true;
-                }
-                continue;
-            }
-            valid = true;
-            depth.ResetView();
-            lit.ResetView();
-            BuildRendererList({"DepthOnly", "DepthOnly", &view.Culling, &view.View, RenderQueueRange::Opaque(), 0xffffffffu, RendererListSorting::FrontToBack, false, validation}, depth, view.DepthOnly);
-            const RendererListDesc litDescs[] = {
-                {"Opaque", "ForwardLit", &view.Culling, &view.View, RenderQueueRange::Opaque(), 0xffffffffu, RendererListSorting::StateThenFrontToBack, false, validation},
-                {"Transparent", "ForwardLit", &view.Culling, &view.View, RenderQueueRange::Transparent(), 0xffffffffu, RendererListSorting::BackToFront, false, validation},
-            };
-            RendererList* litOuts[] = {&view.Opaque, &view.Transparent};
-            BuildRendererLists(litDescs, lit, litOuts);
-            flight.Stats.DepthCommands += view.DepthOnly.Commands.size();
-            flight.Stats.OpaqueCommands += view.Opaque.Commands.size();
-            flight.Stats.TransparentCommands += view.Transparent.Commands.size();
+            view.Work = instance.Value(cached->Works[index]);
+            if (!instance.Bind(cached->WorkSlots[index], make_shared<ViewWorkRequest>(ViewWorkRequest{&flight, &view, depth, lit, context.GetRuntimeOptions().Validation}))) return false;
+            views[0].push_back({.View = view.View, .List = &view.DepthOnly});
+            views[1].push_back({.View = view.View, .List = &view.Opaque});
+            views[2].push_back({.View = view.View, .List = &view.Transparent});
         }
-        return valid;
+        for (size_t stage = 0; stage < views.size(); ++stage)
+            if (!instance.Bind(cached->StageSlots[stage], ForwardGraph::MakeFrame({.Backend = Device->GetBackend(), .Views = views[stage], .Execution = &flight.Stats.Execution}))) return false;
+        color = instance.Value(cached->ColorOutput);
+        for (const auto& view : work.Views) flight.RenderedViews.push_back(view.View.StateId);
+        return true;
     }
 };
 
@@ -234,6 +331,10 @@ bool ForwardPipeline::SetOutputSurfaces(std::span<const ForwardOutputSurface> su
     return true;
 }
 
+void ForwardPipeline::CollectScenePolicies(RenderPrepareContext& ctx) {
+    if (!RegisterForwardPassPolicies(ctx, *_impl->RenderScene)) _impl->Error = true;
+}
+
 void ForwardPipeline::PrepareFrame(RenderPrepareContext& ctx) {
     RADRAY_PROFILE_SCOPE_N("ForwardPipeline::PrepareFrame");
     const uint32_t index = ctx.App.FlightIndex;
@@ -252,15 +353,17 @@ void ForwardPipeline::PrepareFrame(RenderPrepareContext& ctx) {
     bool snapshotOk = false;
     {
         RADRAY_PROFILE_SCOPE_N("SceneSnapshotBuild");
-        snapshotOk = _impl->SnapshotBuilder.Build(*_impl->RenderScene, flight.Scene, ctx.RetainedAssets, ctx.RuntimeOptions.Validation);
+        auto snapshot = ctx.PrepareScene(*_impl->RenderScene);
+        snapshotOk = snapshot.HasValue();
+        if (snapshotOk) flight.Scene = snapshot.Release();
     }
     if (!snapshotOk) {
         RADRAY_ERR_LOG("Forward scene snapshot exceeded its frame-local index capacity");
         flight.Objects.Clear();
         return;
     }
-    forward_detail::FreezeObjectData(flight.Scene, flight.Objects);
-    if (flight.Scene.Stats.InvalidBounds && !_impl->InvalidBoundsWarned) {
+    flight.Stats.ObjectValueUpdates = flight.Objects.Update(*flight.Scene);
+    if (flight.Scene->Stats.InvalidBounds && !_impl->InvalidBoundsWarned) {
         RADRAY_WARN_LOG("Forward scene contains invalid bounds; these primitives remain conservatively visible");
         _impl->InvalidBoundsWarned = true;
     }
@@ -319,7 +422,6 @@ void ForwardPipeline::BuildGraph(RenderPipelineContext& ctx, RenderGraph& graph,
         return;
     }
     flight.RenderedViews.clear();
-    auto& rendered = flight.RenderedViews;
     flight.HdrViewCount = 0;
     if (flight.Settings.Hdr) {
         bool overlaysSucceeded = true;
@@ -358,13 +460,16 @@ void ForwardPipeline::BuildGraph(RenderPipelineContext& ctx, RenderGraph& graph,
         ForwardShadowAtlas atlas{};
         if (primary) {
             if (!flight.SharedShadowView) flight.SharedShadowView = make_unique<ForwardHdrView>();
-            if (!DeclareForwardSharedShadows(graph, flight.Settings, *primary, flight.Scene, flight.Objects, *flight.DrawResources, _impl->Bindings,
+            if (!DeclareForwardSharedShadows(graph, _impl->EffectTemplates, flight.Settings, *primary, *flight.Scene, flight.Objects.Rows(), *flight.DrawResources, _impl->Bindings,
                                              *flight.SharedShadowView, _impl->Device->GetBackend(), _impl->LightOverflowWarned, atlas)) {
                 _impl->Error = true;
                 return;
             }
         }
-        ForwardLitMeshPassProcessor hdrLit{*flight.DrawResources, _impl->Bindings, _impl->LightOverflowWarned, flight.Objects, &ctx};
+        auto hdrLit = [&] {
+            RADRAY_PROFILE_SCOPE_N("Forward::DrawWorkBuild.Processor");
+            return make_shared<ForwardLitMeshPassProcessor>(*flight.DrawResources, _impl->Bindings, _impl->LightOverflowWarned, flight.Objects.Rows(), &ctx);
+        }();
         for (const auto* familyPointer : families) {
             const auto& family = *familyPointer;
             bool firstOutput = true;
@@ -377,16 +482,16 @@ void ForwardPipeline::BuildGraph(RenderPipelineContext& ctx, RenderGraph& graph,
                 _impl->Signatures.insert_or_assign(view.StateId, signature);
                 if (viewIndex == flight.HdrViews.size()) flight.HdrViews.push_back(make_unique<ForwardHdrView>());
                 auto& work = *flight.HdrViews[viewIndex++];
-                if (BuildForwardHdrView(graph, ctx, *_impl->Device, _impl->Effects, flight.Settings, family, view, flight.Scene, flight.Objects,
+                if (BuildForwardHdrView(graph, _impl->EffectTemplates, ctx, *_impl->Device, _impl->Effects, flight.Settings, family, view, *flight.Scene, flight.Objects.Rows(),
                                         *flight.DrawResources, _impl->Bindings, work, firstOutput, _impl->LightOverflowWarned, flight.Surfaces, outputs,
-                                        atlas, auxiliary, &hdrLit))
+                                        atlas, auxiliary, hdrLit))
                     firstOutput = false;
                 else
                     _impl->Error = true;
             }
         }
         for (const auto& overlay : flight.Overlays)
-            overlaysSucceeded &= BuildForwardOutputOverlay(graph, ctx, _impl->Effects, overlay, _impl->Device->GetBackend(), outputs);
+            overlaysSucceeded &= BuildForwardOutputOverlay(graph, _impl->EffectTemplates, ctx, _impl->Effects, overlay, _impl->Device->GetBackend(), outputs);
         if (!flight.Capture.Build(graph, ctx, *_impl->Device, *_impl->System, outputs)) _impl->Error = true;
         flight.HdrViewCount = viewIndex;
         RADRAY_PROFILE_PLOT("Forward.HdrViews", static_cast<int64_t>(viewIndex));
@@ -396,7 +501,7 @@ void ForwardPipeline::BuildGraph(RenderPipelineContext& ctx, RenderGraph& graph,
     for (const auto& family : ctx.ViewFamilies()) {
         for (const auto& view : family.Views)
             if (_impl->Signatures.erase(view.StateId)) ctx.InvalidateView(view.StateId);
-        if (!_impl->PrepareFamily(ctx.FlightIndex(), family, ctx.GetRuntimeOptions().Validation) || !family.OutputAvailable || family.RenderSize != family.OutputSize) continue;
+        if (!family.OutputAvailable || family.RenderSize != family.OutputSize) continue;
         const auto usage = render::TextureUse::DepthStencilWrite | render::TextureUse::DepthStencilRead;
         const auto format = SelectFirstSupportedFormat(*_impl->Device, kForwardDepthCandidates, render::TextureDimension::Dim2D, usage, family.SampleCount);
         if (!format) continue;
@@ -410,61 +515,16 @@ void ForwardPipeline::BuildGraph(RenderPipelineContext& ctx, RenderGraph& graph,
         if (!descriptor) continue;
         auto target = FindGraphOutput(outputs, family.OutputId);
         if (!target) continue;
-        const auto color = target->Texture;
-        const auto depth = graph.CreateTexture(*descriptor, "Forward.Depth");
-        const auto& work = _impl->Flights[ctx.FlightIndex()].Families[family.FrameLocalIndex];
-        vector<ForwardGraphView> depthViews, opaqueViews, transparentViews;
-        for (const auto& view : work.Views) {
-            if (!view.Culling.Stats.Valid) continue;
-            depthViews.push_back({view.View, &view.DepthOnly});
-            opaqueViews.push_back({view.View, &view.Opaque});
-            transparentViews.push_back({view.View, &view.Transparent});
-        }
-        auto& execution = _impl->Flights[ctx.FlightIndex()].Stats.Execution;
-        const ForwardGraphStageOutput depthStage = ForwardGraph::BuildGraph(
-            graph, ForwardGraphStage::Depth,
-            {.Name = "Forward.DepthPrepass",
-             .Backend = _impl->Device->GetBackend(),
-             .Views = depthViews,
-             .Color = {},
-             .Depth = depth,
-             .ColorAttachment = {},
-             .DepthAttachment = {.Load = render::LoadAction::Clear},
-             .Execution = &execution});
-        const ForwardGraphStageOutput opaqueStage = ForwardGraph::BuildGraph(
-            graph, ForwardGraphStage::Opaque,
-            {.Name = "Forward.Opaque",
-             .Backend = _impl->Device->GetBackend(),
-             .Views = opaqueViews,
-             .Color = color,
-             .Depth = depthStage.Depth,
-             .ColorAttachment = {.Load = render::LoadAction::Clear,
-                                 .Clear = {{.025f, .030f, .040f, 1}}},
-             .DepthAttachment = {.Load = depthStage.Pass.IsValid()
-                                             ? render::LoadAction::Load
-                                             : render::LoadAction::Clear},
-             .Execution = &execution});
-        const ForwardGraphStageOutput transparentStage = ForwardGraph::BuildGraph(
-            graph, ForwardGraphStage::Transparent,
-            {.Name = "Forward.Transparent",
-             .Backend = _impl->Device->GetBackend(),
-             .Views = transparentViews,
-             .Color = opaqueStage.Color,
-             .Depth = opaqueStage.Depth,
-             .ColorAttachment = {.Load = render::LoadAction::Load},
-             .DepthAttachment = {.Load = render::LoadAction::Load},
-             .Execution = &execution});
-        target->Texture = transparentStage.Color;
-        if (!depthStage.Success || !opaqueStage.Success || !transparentStage.Success) {
+        if (!_impl->BuildLdrFamily(graph, ctx, family, *descriptor, target->Texture)) {
+            _impl->Error = true;
             RADRAY_ERR_LOG("Forward graph stage declaration failed for '{}'", family.Name);
         }
-        for (const auto& view : work.Views)
-            if (view.Culling.Stats.Valid) rendered.push_back(view.View.StateId);
     }
     if (!flight.Capture.Build(graph, ctx, *_impl->Device, *_impl->System, outputs)) _impl->Error = true;
 }
 
 void ForwardPipeline::GraphRecorded(RenderPipelineContext& ctx, const RenderGraph& graph, RenderGraphExecutionResult result) {
+    RADRAY_PROFILE_SCOPE_N("ForwardPipeline::GraphRecorded");
     auto& flight = _impl->Flights[ctx.FlightIndex()];
     if (flight.Settings.Hdr) {
         flight.Capture.CaptureReport(graph.GetReport());
@@ -483,10 +543,12 @@ void ForwardPipeline::GraphRecorded(RenderPipelineContext& ctx, const RenderGrap
                                    describe(work.Main.DepthOnly), describe(work.Main.Opaque), describe(work.Main.Transparent), describe(cascades[0].DepthOnly), describe(cascades[1].DepthOnly), describe(cascades[2].DepthOnly), describe(cascades[3].DepthOnly));
                 }
                 ctx.CommitView(work.Main.View.StateId, work.Completion, content);
-                flight.Stats.CullCalls += 1;
-                flight.Stats.DepthCommands += work.Main.DepthOnly.Commands.size();
-                flight.Stats.OpaqueCommands += work.Main.Opaque.Commands.size();
-                flight.Stats.TransparentCommands += work.Main.Transparent.Commands.size();
+                flight.Stats.TemporalViews += work.TemporalHistory;
+                flight.Stats.ValidTemporalHistories += work.TemporalHistory && work.HistoryValid;
+                flight.Stats.CullCalls += work.Main.CullCalls;
+                flight.Stats.DepthCommands += work.Main.DepthOnly.GetDrawCount();
+                flight.Stats.OpaqueCommands += work.Main.Opaque.GetDrawCount();
+                flight.Stats.TransparentCommands += work.Main.Transparent.GetDrawCount();
                 flight.Stats.Execution.Commands += work.Execution.Commands;
                 flight.Stats.Execution.Draws += work.Execution.Draws;
                 flight.Stats.Execution.PsoFailure += work.Execution.PsoFailure;
@@ -494,7 +556,7 @@ void ForwardPipeline::GraphRecorded(RenderPipelineContext& ctx, const RenderGrap
                 flight.Stats.Execution.Skipped += work.Execution.Skipped;
             }
             if (sharedShadows && flight.HdrViewCount > 0) {
-                if (flight.Settings.Shadows) flight.Stats.CullCalls += 4;
+                for (const auto& cascade : sharedShadows->Cascades) flight.Stats.CullCalls += cascade.CullCalls;
                 flight.Stats.Execution.Commands += sharedShadows->Execution.Commands;
                 flight.Stats.Execution.Draws += sharedShadows->Execution.Draws;
                 flight.Stats.Execution.PsoFailure += sharedShadows->Execution.PsoFailure;
@@ -516,7 +578,11 @@ void ForwardPipeline::GraphRecorded(RenderPipelineContext& ctx, const RenderGrap
     }
 }
 
-const RenderSceneSnapshot& ForwardPipeline::GetSceneSnapshot(uint32_t flightIndex) const noexcept { return _impl->Flights[flightIndex].Scene; }
+const RenderSceneSnapshot& ForwardPipeline::GetSceneSnapshot(uint32_t flightIndex) const noexcept { return *_impl->Flights[flightIndex].Scene; }
+FrameDrawResourceStats ForwardPipeline::GetFrameDrawResourceStats(uint32_t flightIndex) const noexcept {
+    const auto& resources = _impl->Flights[flightIndex].DrawResources;
+    return resources ? resources->GetStats() : FrameDrawResourceStats{};
+}
 const ForwardStageBStats& ForwardPipeline::GetStageBStats(uint32_t flightIndex) const noexcept { return _impl->Flights[flightIndex].Stats; }
 std::span<const forward_detail::ForwardViewDrawWork> ForwardPipeline::GetViewWork(uint32_t flightIndex, uint32_t familyIndex) const noexcept { return _impl->Flights[flightIndex].Families[familyIndex].Views; }
 

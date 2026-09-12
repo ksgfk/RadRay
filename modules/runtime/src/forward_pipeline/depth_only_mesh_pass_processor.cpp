@@ -1,59 +1,62 @@
 #include "depth_only_mesh_pass_processor.h"
-#include <radray/runtime/render_framework/cpu_draw_record.h>
+#include "forward_frame.h"
 
 namespace radray::forward_detail {
 
 void DepthOnlyMeshPassProcessor::ResetView() noexcept {
-    _views.clear();
+    _viewValues = {};
+    _viewEpoch = _resources.GetEpoch();
+}
+FrameDrawBindingId DepthOnlyMeshPassProcessor::PrepareBindings(const RendererListDesc& desc, ShaderProgram& program,
+                                                               uint32_t primitive, uint32_t viewGroup, uint32_t objectGroup, bool viewFirst) {
+    if (primitive >= _objects.RowCount() || _objects.Stride() != sizeof(Forward_ObjectData)) return {};
+    if (_viewEpoch != _resources.GetEpoch()) ResetView();
+    if (!_viewValues.Source) {
+        _viewScratch = {};
+        _viewScratch.ViewProj = desc.View->ViewProjection;
+        _viewValues = _resources.InternValues(&kForwardViewWireIdentity, AsCBufferBytes(_viewScratch));
+    }
+    const auto view = _resources.PrepareGroupId(program, viewGroup, _viewValues, 0, AsCBufferBytes(_viewScratch));
+    if (!view.IsValid()) return {};
+    const auto object = _resources.PrepareGroupId(program, objectGroup, {&_objects, &kForwardObjectWireIdentity, 0}, primitive, _objects.Row(primitive));
+    if (!object.IsValid()) return {};
+    const array<FrameShaderGroupId, 2> groups = viewFirst ? array{view, object} : array{object, view};
+    return _resources.InternBinding(groups);
 }
 
-void DepthOnlyMeshPassProcessor::PrepareCommand(const RendererListDesc& desc, const RenderSceneSnapshot& scene,
-                                                 const MeshBatch& batch, const MaterialPassRenderData& pass,
-                                                 bool mirrored, MeshPassDrawListContext& out) {
-    auto* program = pass.Program.Get();
-    const auto binding = _bindings.Resolve(program);
-    if (!binding || pass.ParameterGroup) {
+void DepthOnlyMeshPassProcessor::PrepareRecord(const RendererListDesc& desc, const RenderSceneSnapshot& scene,
+                                               const DrawRecord& record, MeshPassDrawListContext& out) {
+    if (!record.Policy.IsValid()) {
+        MeshPassProcessor::PrepareRecord(desc, scene, record, out);
+        return;
+    }
+    if (record.Policy != desc.Policy || record.Material >= scene.Materials.size() ||
+        record.PassIndex >= scene.Materials[record.Material].Passes.size() || record.BindingRecipe >= scene.BindingRecipes.size()) {
         out.Reject(MeshPassRejectReason::InvalidBindings);
         return;
     }
-    auto [view, inserted] = _views.try_emplace(program, std::nullopt);
-    if (inserted) {
-        // DepthOnly reads only ViewProj, but shares the full view ABI, so the rest uploads as zero.
-        _viewScratch = {};
-        _viewScratch.ViewProj = desc.View->ViewProjection;
-        view->second = _resources.PrepareGroup(*program, binding->ViewGroup, AsCBufferBytes(_viewScratch));
+    const auto& pass = scene.Materials[record.Material].Passes[record.PassIndex];
+    const auto& recipe = scene.BindingRecipes[record.BindingRecipe];
+    if (!pass.Valid || !pass.Program || pass.ParameterGroup || !recipe.Valid || recipe.GroupCount != 2) {
+        out.Reject(MeshPassRejectReason::InvalidBindings);
+        return;
     }
-    auto [prepared, newObject] = _objectGroups[program].try_emplace(batch.Primitive, std::nullopt);
-    if (newObject) {
-        if (batch.Primitive >= _objects.RowCount()) {
-            out.Reject(MeshPassRejectReason::InvalidBindings);
-            return;
-        }
-        prepared->second = _resources.PrepareGroup(*program, binding->ObjectGroup, _objects.Row(batch.Primitive));
-    }
-    const auto& objectGroup = prepared->second;
-    if (!view->second || !objectGroup) {
+    constexpr auto viewRole = static_cast<size_t>(StaticBindingRole::View);
+    constexpr auto objectRole = static_cast<size_t>(StaticBindingRole::Object);
+    const auto binding = PrepareBindings(desc, *pass.Program.Get(), record.Primitive, recipe.Groups[viewRole], recipe.Groups[objectRole], recipe.GroupOrder[0] == viewRole);
+    if (!binding.IsValid()) {
         out.Reject(MeshPassRejectReason::PrepareResourceFailed);
         return;
     }
-    MeshDrawCommand command;
-    command.Program = program;
-    command.PipelineState = pass.PipelineState;
-    command.PipelineState.DepthStencil.DepthTestEnable = true;
-    command.PipelineState.DepthStencil.DepthWriteEnable = true;
-    if (mirrored)
-        command.PipelineState.Primitive.FaceClockwise = OppositeFrontFace(command.PipelineState.Primitive.FaceClockwise);
-    command.Geometry = batch.Geometry;
-    command.FirstIndex = batch.FirstIndex;
-    command.IndexCount = batch.IndexCount;
-    command.VertexOffset = batch.VertexOffset;
-    command.Groups = {*view->second, *objectGroup};
-    FinalizeMeshDrawCommand(command);
-    out.AddCommand(std::move(command));
+    out.AddRecord(_resources, binding);
 }
 
 void DepthOnlyMeshPassProcessor::AddMeshBatch(const RendererListDesc& desc, const RenderSceneSnapshot& scene,
-                                                const MeshBatch& batch, MeshPassDrawListContext& out) {
+                                              const MeshBatch& batch, MeshPassDrawListContext& out) {
+    if (batch.Material >= scene.Materials.size() || batch.Primitive >= scene.Primitives.size()) {
+        out.Reject(MeshPassRejectReason::InvalidBindings);
+        return;
+    }
     const auto pass = scene.Materials[batch.Material].FindPass(desc.MaterialPassName);
     if (!pass || !pass->Valid || !pass->Program) {
         out.Reject(MeshPassRejectReason::MissingPass);
@@ -63,22 +66,28 @@ void DepthOnlyMeshPassProcessor::AddMeshBatch(const RendererListDesc& desc, cons
         out.Reject(MeshPassRejectReason::InvalidGeometry);
         return;
     }
-    PrepareCommand(desc, scene, batch, *pass.Get(), IsMirroredAffine(scene.Primitives[batch.Primitive].LocalToWorld), out);
-}
-
-void DepthOnlyMeshPassProcessor::PrepareRecord(const RendererListDesc& desc, const RenderSceneSnapshot& scene,
-                                                const DrawRecord& record, MeshPassDrawListContext& out) {
-    if (record.Batch >= scene.MeshBatches.size() || record.Material >= scene.Materials.size() ||
-        record.PassIndex >= scene.Materials[record.Material].Passes.size()) {
+    const auto legacy = _bindings.Resolve(pass->Program.Get());
+    if (!legacy || pass->ParameterGroup) {
         out.Reject(MeshPassRejectReason::InvalidBindings);
         return;
     }
-    const auto& pass = scene.Materials[record.Material].Passes[record.PassIndex];
-    if (!pass.Valid || !pass.Program) {
-        out.Reject(MeshPassRejectReason::InvalidBindings);
+    const auto binding = PrepareBindings(desc, *pass->Program.Get(), batch.Primitive, legacy->ViewGroup, legacy->ObjectGroup, legacy->ViewGroup < legacy->ObjectGroup);
+    if (!binding.IsValid()) {
+        out.Reject(MeshPassRejectReason::PrepareResourceFailed);
         return;
     }
-    PrepareCommand(desc, scene, scene.MeshBatches[record.Batch], pass, record.Mirrored, out);
+    MeshDrawCommand command;
+    command.Program = pass->Program;
+    command.PipelineState = pass->PipelineState;
+    command.PipelineState.DepthStencil.DepthTestEnable = true;
+    command.PipelineState.DepthStencil.DepthWriteEnable = true;
+    if (IsMirroredAffine(scene.Primitives[batch.Primitive].LocalToWorld)) command.PipelineState.Primitive.FaceClockwise = OppositeFrontFace(command.PipelineState.Primitive.FaceClockwise);
+    command.Geometry = batch.Geometry;
+    command.FirstIndex = batch.FirstIndex;
+    command.IndexCount = batch.IndexCount;
+    command.VertexOffset = batch.VertexOffset;
+    for (const auto group : _resources.GetBinding(binding)) command.Groups.push_back(_resources.GetGroup(group));
+    out.AddCommand(std::move(command), &_resources);
 }
 
 }  // namespace radray::forward_detail

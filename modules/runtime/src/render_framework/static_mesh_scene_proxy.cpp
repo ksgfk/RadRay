@@ -16,8 +16,27 @@ StaticMeshSceneProxy::StaticMeshSceneProxy(
 StaticMeshSceneProxy::~StaticMeshSceneProxy() noexcept = default;
 
 uint64_t StaticMeshSceneProxy::GetRenderDataRevision() const noexcept {
-    // The owned slot cannot be replaced or recycled; its immutable payload is published once.
-    return _mesh.IsReady() ? 2 : 1;
+    return (_renderDataRevision << 1) | static_cast<uint64_t>(_mesh.IsReady());
+}
+
+bool StaticMeshSceneProxy::HasPendingRenderResources() const noexcept {
+    return _mesh.IsValid() && !_mesh.IsCompleted();
+}
+
+void StaticMeshSceneProxy::SetStaticMesh(StreamingAssetRef<StaticMesh> mesh) noexcept {
+    if (_mesh == mesh) return;
+    if (_renderDataRevision == (UINT64_MAX >> 1)) RADRAY_ABORT("Static mesh revision exhausted");
+    _mesh = std::move(mesh);
+    ++_renderDataRevision;
+    MarkRenderDirty(PrimitiveDirtyKind::Structure | PrimitiveDirtyKind::TransformOrBounds);
+    ResetMotion();
+}
+
+void StaticMeshSceneProxy::SetMaterial(uint32_t sectionIndex, Nullable<Material*> material) {
+    if (sectionIndex < _materials.size() && _materials[sectionIndex] == material) return;
+    if (sectionIndex >= _materials.size()) _materials.resize(static_cast<size_t>(sectionIndex) + 1);
+    _materials[sectionIndex] = material;
+    MarkRenderDirty(PrimitiveDirtyKind::MaterialAssignment);
 }
 
 AxisAlignedBounds StaticMeshSceneProxy::GetLocalBounds() const noexcept {

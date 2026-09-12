@@ -107,7 +107,7 @@ RAII 包装类的后缀是 `Scope` / `Scoped` / `Guard`，**没有 `*RAII`**：`
 - 每 primitive 一次的数值代码直接操作 `data()` 分量数组（`render_bounds.cpp`、`culling.cpp`、
   `MakeNormalToWorld`）；Eigen 仍用于接口类型与非热路径。Eigen 是列主序，`(r, c)` 在 `data()[c * 4 + r]`。
 - 不在每 draw 路径上构造 `string`、`fmt::format`、按名字 `Find` 参数；启动或首次遇到 program 时解析成
-  `ShaderParameterInfo*` / 索引再复用（`ForwardLitMeshPassProcessor::ProgramState`）。
+  `ShaderParameterInfo*` / 索引再复用（`StaticBindingRecipe`）。
 - 以 snapshot 索引为键的每帧查找用稠密槽位表而不是 `unordered_map`。
 - 相邻 draw 通常重复相同状态，graph 命令包装与后端 encoder 都以"与当前已绑定状态相同则跳过"去重，
   不依赖上层保证不重复调用。

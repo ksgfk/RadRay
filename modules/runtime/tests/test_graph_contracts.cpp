@@ -136,6 +136,14 @@ VK_BINDING(0, 0) StructuredBuffer<uint> Values : register(t0);
     EXPECT_EQ(graph.GetReport().Passes[2].DataDependencies, (vector<uint32_t>{1}));
     EXPECT_FALSE(graph.GetReport().Passes[3].Live);
     EXPECT_FALSE(graph.GetReport().Passes[3].Executed);
+    EXPECT_EQ(graph.GetReport().CommandCalls.Draw, 2u);
+    EXPECT_EQ(graph.GetReport().CommandCalls.Dispatch, 1u);
+    EXPECT_EQ(graph.GetReport().CommandCalls.SetPipeline, 3u);
+    EXPECT_EQ(graph.GetReport().CommandCalls.SetParameters, 2u);
+    EXPECT_EQ(graph.GetReport().Passes[0].CommandCalls.Draw, 1u);
+    EXPECT_EQ(graph.GetReport().Passes[1].CommandCalls.Dispatch, 1u);
+    EXPECT_EQ(graph.GetReport().Passes[2].CommandCalls.Draw, 1u);
+    EXPECT_EQ(graph.GetReport().Passes[3].CommandCalls.Draw, 0u);
     EXPECT_EQ(graph.GetReport().Resources[3].PhysicalId, 0u);
 }
 
@@ -329,6 +337,12 @@ VK_BINDING(0, 0) RWStructuredBuffer<uint> Counts : register(u0);
         array<uint32_t, 3> actual;
         std::memcpy(actual.data(), bytes.data(), sizeof(actual));
         for (const auto value : actual) EXPECT_EQ(value, count);
+        EXPECT_EQ(graph.GetReport().CommandCalls.DrawIndirect, 1u);
+        EXPECT_EQ(graph.GetReport().CommandCalls.DrawIndexedIndirect, 1u);
+        EXPECT_EQ(graph.GetReport().CommandCalls.IndirectDrawArguments, 2u);
+        EXPECT_EQ(graph.GetReport().CommandCalls.Dispatch, 1u);
+        EXPECT_EQ(graph.GetReport().CommandCalls.DispatchIndirect, 1u);
+        EXPECT_EQ(graph.GetReport().CommandCalls.SetPipeline, 3u);
     }
 }
 

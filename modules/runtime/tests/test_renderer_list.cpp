@@ -422,6 +422,23 @@ TEST(RendererList, DrawRecordsSkipMeshBatchRangeValidation) {
     EXPECT_EQ(list.Commands.size(), 1u);
 }
 
+TEST(RendererList, DynamicFallbackRejectsForeignPrimitiveBeforeCallingTheProcessor) {
+    for (const auto mode : {RenderValidationMode::Off, RenderValidationMode::Full}) {
+        ListFixture data;
+        data.Add(0, 0);
+        data.Add(0, 1);
+        data.Scene.MeshBatches[0].Primitive = 1;
+        auto desc = data.Desc();
+        desc.Validation = mode;
+        RecordingProcessor processor;
+        RendererList list;
+        EXPECT_FALSE(BuildRendererList(desc, processor, list));
+        EXPECT_EQ(processor.Calls, 0u);
+        EXPECT_FALSE(list.Stats.Valid);
+        EXPECT_EQ(list.GetDrawCount(), 0u);
+    }
+}
+
 TEST(RendererList, SharedListCountMustMatchOutputs) {
     ListFixture data;
     data.Add(0, 0);

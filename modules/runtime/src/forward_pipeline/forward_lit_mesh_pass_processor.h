@@ -23,66 +23,23 @@ public:
     void PrepareRecord(const RendererListDesc& desc, const RenderSceneSnapshot& scene,
                        const DrawRecord& record, MeshPassDrawListContext& out) override;
 
-    // Call before reusing this processor for a list whose view differs from the previous one.
-    // Drops view-group preparations. Temporal object slices are view-dependent and cleared;
-    // materials and pass-aware static templates stay for the rest of the frame.
+    // Call at the boundary of a different or updated view. Frame tables keep successful tuples.
     void ResetView() noexcept;
-    uint64_t DuplicateSameFramePreparations() const noexcept { return _duplicatePreparations; }
+    uint64_t DuplicateSameFramePreparations() const noexcept { return _resources.GetStats().SharedGroupHits; }
 
 private:
-    static constexpr uint32_t kNoSlot = std::numeric_limits<uint32_t>::max();
-    // Snapshot index -> slot in a dense group array; kNoSlot means not yet prepared.
-    struct SlotTable {
-        vector<uint32_t> Slots;
-        vector<std::optional<PreparedShaderGroup>> Groups;
-        std::optional<PreparedShaderGroup>* Find(uint32_t index) noexcept {
-            return index < Slots.size() && Slots[index] != kNoSlot ? &Groups[Slots[index]] : nullptr;
-        }
-        std::optional<PreparedShaderGroup>& Insert(uint32_t index) {
-            if (index >= Slots.size()) Slots.resize(size_t{index} + 1, kNoSlot);
-            Slots[index] = static_cast<uint32_t>(Groups.size());
-            return Groups.emplace_back();
-        }
-        void Clear() noexcept {
-            std::fill(Slots.begin(), Slots.end(), kNoSlot);
-            Groups.clear();
-        }
-    };
-    struct CommandTemplate {
-        MeshDrawDescription Description;
-        PreparedShaderGroup Material;
-        RenderPrimitiveIndex Primitive{0};
-    };
-    struct ProgramState {
-        ProgramState(ShaderProgram* program, const ForwardProgramBindings* binding);
-        ShaderProgram* Program;
-        const ForwardProgramBindings* Binding;
-        const ShaderParameterLayout* Layout;
-        bool ViewPrepared{false};
-        std::optional<PreparedShaderGroup> View;
-        SlotTable Materials;
-        SlotTable Objects;
-        unordered_map<uint64_t, CommandTemplate> Templates;
-    };
-    Nullable<ProgramState*> ResolveProgram(ShaderProgram* program);
-    void PrepareCommand(const RendererListDesc& desc, const RenderSceneSnapshot& scene, const MeshBatch& batch,
-                         const MaterialPassRenderData& pass, RenderQueue queue, bool mirrored,
-                         MeshBatchIndex batchIndex, uint32_t passIndex, bool reuseCommand, MeshPassDrawListContext& out);
-
+    FrameDrawBindingId PrepareBindings(const RendererListDesc& desc, const RenderSceneSnapshot& scene,
+                                       uint32_t materialIndex, uint32_t primitiveIndex,
+                                       const MaterialPassRenderData& pass, const StaticBindingRecipe& binding);
     FrameDrawResources& _resources;
     ForwardBindingCache& _bindings;
     bool& _lightOverflowWarned;
-    // Object rows frozen at PrepareFrame, indexed by snapshot primitive. Only the motion fields are
-    // view dependent, so temporal object slices are cleared on ResetView. Pass-aware command templates stay.
     const PackedCBufferTable& _objects;
     Nullable<const RenderPipelineContext*> _temporal;
-    // Consecutive batches usually share a program; the last resolution short-circuits the map lookup.
-    unordered_map<ShaderProgram*, unique_ptr<ProgramState>> _programs;
-    ShaderProgram* _lastProgram{nullptr};
-    ProgramState* _lastState{nullptr};
-    Forward_ViewData _viewScratch{};
+    array<Forward_ViewData, 2> _viewScratch{};
+    array<FrameCBufferIdentity, 2> _viewValues{};
     Forward_ObjectData _objectScratch{};
-    uint64_t _duplicatePreparations{0};
+    uint64_t _viewEpoch{0};
 };
 
 }  // namespace radray::forward_detail

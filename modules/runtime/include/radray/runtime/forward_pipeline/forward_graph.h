@@ -5,6 +5,7 @@
 #include <radray/runtime/render_framework/render_graph.h>
 #include <radray/runtime/render_framework/renderer_list.h>
 #include <radray/runtime/render_framework/renderer_list_pass_sets.h>
+#include <radray/runtime/forward_pipeline/gen_forward_cbuffers.h>
 
 namespace radray {
 
@@ -32,6 +33,15 @@ struct ForwardPassResource {
 std::optional<RgParameterBinding> DeclareForwardPassResource(RenderGraphRasterBuilder& builder, const ForwardPassResource& resource);
 std::optional<RgParameterBinding> DeclareForwardPassResource(RenderGraphComputeBuilder& builder, const ForwardPassResource& resource);
 
+/// Frame-owned inputs are filled by live work before any pass preparation runs.
+struct ForwardGraphPassValues {
+    const Forward_PassData* ShadowValues;
+    const uint32_t* LocalLightCount;
+    RenderExtent Extent;
+    uint32_t MaxLightsPerTile;
+    bool UseTiles, UseAo, Transparent;
+};
+
 struct ForwardGraphView {
     ResolvedRenderView View;
     const RendererList* List{nullptr};
@@ -41,6 +51,10 @@ struct ForwardGraphView {
     /// Graph resources every pass group of this view binds. Declared once while the stage is set up
     /// and appended to every program's rows as the handles those declarations returned.
     std::span<const ForwardPassResource> Resources{};
+    /// Internal stable stage: declarations use Resources, and the live list supplies programs in Prepare.
+    std::optional<ForwardGraphPassValues> PassValues{};
+    RgWorkHandle Work{};
+    uint64_t WorkMask{1};
 };
 
 struct ForwardGraphStageInputs {
@@ -66,12 +80,29 @@ struct ForwardGraphStageOutput {
     bool Success{false};
 };
 
+/// Per-instance view/list inputs and prepared recording data. Static graph rows stay in the
+/// immutable stage recipe; this object owns only the values of the current frame.
+class ForwardGraphFrameData {
+public:
+    struct Impl;
+    ForwardGraphFrameData();
+    ~ForwardGraphFrameData();
+
+private:
+    friend class ForwardGraph;
+    unique_ptr<Impl> _impl;
+};
+
 /// Adds one reusable forward-rendering stage to an existing graph. RendererList pointers are
 /// borrowed until that graph executes; view values are copied into the callback payload.
 class ForwardGraph {
 public:
     static ForwardGraphStageOutput BuildGraph(
         RenderGraph& graph, ForwardGraphStage stage,
+        const ForwardGraphStageInputs& inputs);
+    static shared_ptr<ForwardGraphFrameData> MakeFrame(const ForwardGraphStageInputs& inputs);
+    static ForwardGraphStageOutput DeclareTemplate(
+        RenderGraph& graph, ForwardGraphStage stage, RgTemplateSlot<ForwardGraphFrameData> frame,
         const ForwardGraphStageInputs& inputs);
 };
 

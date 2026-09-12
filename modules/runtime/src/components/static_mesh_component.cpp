@@ -10,7 +10,7 @@ StaticMeshComponent::~StaticMeshComponent() noexcept = default;
 
 void StaticMeshComponent::TickComponent(float deltaTime) {
     PrimitiveComponent::TickComponent(deltaTime);
-    if (IsRegistered() && (GetSceneProxy() != nullptr) != ShouldCreateRenderState()) {
+    if (IsRegistered() && GetSceneProxy() == nullptr && ShouldCreateRenderState()) {
         MarkRenderStateDirty();
     }
 }
@@ -20,7 +20,11 @@ void StaticMeshComponent::SetStaticMesh(StreamingAssetRef<StaticMesh> mesh) {
         return;
     }
     _mesh = std::move(mesh);
-    MarkRenderStateDirty();
+    if (GetSceneProxy() != nullptr && _mesh.IsValid()) {
+        static_cast<StaticMeshSceneProxy*>(GetSceneProxy())->SetStaticMesh(_mesh);
+    } else {
+        MarkRenderStateDirty();
+    }
 }
 
 void StaticMeshComponent::SetMaterial(
@@ -33,7 +37,9 @@ void StaticMeshComponent::SetMaterial(
         return;
     }
     _materials[sectionIndex] = material;
-    MarkRenderStateDirty();
+    if (GetSceneProxy() != nullptr) {
+        static_cast<StaticMeshSceneProxy*>(GetSceneProxy())->SetMaterial(sectionIndex, material);
+    }
 }
 
 Nullable<Material*> StaticMeshComponent::GetMaterial(uint32_t sectionIndex) const noexcept {

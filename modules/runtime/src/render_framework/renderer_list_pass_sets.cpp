@@ -5,6 +5,8 @@
 #include <numeric>
 #include <radray/profiler.h>
 
+#include "renderer_list_validation.h"
+
 namespace radray {
 namespace {
 
@@ -13,20 +15,50 @@ struct GraphGroup {
     uint32_t Group;
 };
 
-// Full only: these scans are per draw. A Performance build leaves a missing or colliding group to
-// the backend validation layer instead of paying for the scan every frame.
-bool ValidateDrawGroups(RenderGraphPrepareContext& ctx, const RendererList& list, std::span<const GraphGroup> groups) {
+struct PassSetsValidation {
+    RendererListValidationSource Source;
+    vector<GraphGroup> Groups;
+};
+
+bool ValidateDrawOrder(RenderGraphPrepareContext& ctx, const RendererList& list) {
+    if (list.Items.empty()) return true;
+    if (list.Items.size() != list.GetDrawCount()) {
+        ctx.Reject("RendererListPreparation", "Draw order must reference every command exactly once");
+        return false;
+    }
+    vector<bool> visited(list.GetDrawCount());
+    for (const auto& item : list.Items) {
+        if (item.CommandIndex >= visited.size() || visited[item.CommandIndex]) {
+            ctx.Reject("RendererListPreparation", "Draw order contains an invalid or duplicate command index");
+            return false;
+        }
+        visited[item.CommandIndex] = true;
+    }
+    return true;
+}
+
+bool ValidateDrawGroups(const void* payload, RenderGraphPrepareContext& ctx) {
     RADRAY_PROFILE_SCOPE_N("ValidatePassSets");
+    const auto& validation = *static_cast<const PassSetsValidation*>(payload);
+    if (!validation.Source.IsCurrent()) {
+        ctx.Reject("RendererListLifetime", "Renderer list changed before ready frame validation");
+        return false;
+    }
+    const auto& list = *validation.Source.List;
+    const auto groups = std::span<const GraphGroup>{validation.Groups};
+    if (!ValidateDrawOrder(ctx, list)) return false;
     const auto fail = [&](std::string_view code, std::string_view message, std::string_view binding) {
         ctx.Reject(code, message, binding);
         return false;
     };
     unordered_map<const ShaderProgram*, vector<std::pair<uint32_t, std::string_view>>> requiredByProgram;
-    for (const auto& draw : list.Commands) {
+    for (size_t drawIndex = 0; drawIndex < list.GetDrawCount(); ++drawIndex) {
+        const auto& draw = list.GetDescription(drawIndex);
+        const auto nativeGroups = list.GetGroups(drawIndex);
         if (!draw.Program) continue;
-        for (size_t index = 0; index < draw.Groups.size(); ++index) {
-            const auto& native = draw.Groups[index];
-            if (!native.Set || (index && draw.Groups[index - 1].Group >= native.Group))
+        for (size_t index = 0; index < nativeGroups.size(); ++index) {
+            const auto& native = nativeGroups[index];
+            if (!native.Set || (index && nativeGroups[index - 1].Group >= native.Group))
                 return fail("RendererListNativeGroup", "Native groups must be valid, sorted and unique",
                             fmt::format("group {}", native.Group));
             for (const auto& group : groups)
@@ -46,8 +78,9 @@ bool ValidateDrawGroups(RenderGraphPrepareContext& ctx, const RendererList& list
             }
         }
         for (const auto& [group, name] : requirements->second) {
-            const bool native = std::any_of(draw.Groups.begin(), draw.Groups.end(),
-                                            [&](const PreparedShaderGroup& value) { return value.Group == group; });
+            bool native = false;
+            for (size_t index = 0; index < nativeGroups.size(); ++index)
+                native |= nativeGroups[index].Group == group;
             const bool graph = std::any_of(groups.begin(), groups.end(), [&](const GraphGroup& value) {
                 return value.Program == draw.Program.Get() && value.Group == group;
             });
@@ -63,6 +96,14 @@ bool ValidateDrawGroups(RenderGraphPrepareContext& ctx, const RendererList& list
 std::optional<RendererListPassSets> RendererListPassSets::Create(
     RenderGraphPrepareContext& ctx, const RendererList& list, std::span<const RendererListProgramParameters> parameters) {
     RADRAY_PROFILE_SCOPE_N("CreatePassSets");
+    if (!list.IsCurrent()) {
+        ctx.Reject("RendererListLifetime", "Renderer list no longer belongs to its published snapshot and frame resources");
+        return std::nullopt;
+    }
+    if (!HasSafeRendererListOrder(list)) {
+        ctx.Reject("RendererListPreparation", "Draw order exceeds its source draw array");
+        return std::nullopt;
+    }
     const auto fail = [&](std::string_view code, std::string_view message, uint32_t group) -> std::optional<RendererListPassSets> {
         ctx.Reject(code, message, fmt::format("group {}", group));
         return std::nullopt;
@@ -73,15 +114,18 @@ std::optional<RendererListPassSets> RendererListPassSets::Create(
     for (size_t index = 0; index < parameters.size(); ++index) {
         const auto& parameter = parameters[index];
         if (!parameter.Program) return fail("RendererListProgram", "Graph group requires a shader program", parameter.Group);
-        if (std::none_of(list.Commands.begin(), list.Commands.end(),
-                         [&](const MeshDrawCommand& draw) { return draw.Program.Get() == parameter.Program; }))
+        const auto programs = list.GetPrograms();
+        bool used = std::any_of(programs.begin(), programs.end(), [&](const RendererListProgramUse& use) { return use.Program.Get() == parameter.Program; });
+        if (programs.empty())
+            for (size_t draw = 0; draw < list.GetDrawCount() && !used; ++draw)
+                used = list.GetDescription(draw).Program.Get() == parameter.Program;
+        if (!used)
             return fail("RendererListProgram", "Parameter program is not used by this renderer list", parameter.Group);
         for (size_t earlier = 0; earlier < index; ++earlier)
             if (parameters[earlier].Program == parameter.Program && parameters[earlier].Group == parameter.Group)
                 return fail("RendererListGroupCollision", "A program group has more than one graph parameter set", parameter.Group);
         groups.push_back({parameter.Program, parameter.Group});
     }
-    if (ctx.IsValidationFull() && !ValidateDrawGroups(ctx, list, groups)) return std::nullopt;
 
     // Sets are created in the caller's order so constant uploads keep a predictable arena order;
     // the lookup index is sorted afterwards.
@@ -109,6 +153,9 @@ std::optional<RendererListPassSets> RendererListPassSets::Create(
             result._programs.push_back({program, static_cast<uint32_t>(result._sets.size()), 0});
         ++result._programs.back().Count;
         result._sets.push_back(created[index]);
+    }
+    if (ctx.IsValidationFull()) {
+        ctx.DeferReadyValidation(make_shared<PassSetsValidation>(PassSetsValidation{RendererListValidationSource{list}, std::move(groups)}), ValidateDrawGroups);
     }
     return result;
 }

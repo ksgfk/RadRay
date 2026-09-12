@@ -49,6 +49,13 @@ struct ViewStateStats {
     vector<uint64_t> RetiredBytesByFlight;
 };
 
+/// History identity within one registry. Reads and primitive preparation leave it unchanged;
+/// successful view commits and invalidation change it. An absent view returns the zero stamp.
+struct PrimitiveHistoryStamp {
+    uint64_t CommittedSerial{0}, InvalidationRevision{0};
+    friend bool operator==(const PrimitiveHistoryStamp&, const PrimitiveHistoryStamp&) = default;
+};
+
 class ViewStateRegistry {
 public:
     ViewStateRegistry(render::Device& device, render::RenderPassRegistry& registry, uint32_t flightCount, uint64_t inactiveFrames = 120);
@@ -64,6 +71,7 @@ public:
     PrimitiveMotionData GetPrimitiveMotion(ViewStateId id, const RenderPrimitiveData& primitive) const noexcept;
     uint64_t GetCommittedSerial(ViewStateId id) const noexcept;
     uint64_t GetPrimitiveCommittedSerial(ViewStateId id) const noexcept;
+    PrimitiveHistoryStamp GetPrimitiveHistoryStamp(ViewStateId id) const noexcept;
     void InvalidateTemporal(ViewStateId id, ViewHistoryInvalidationReason reason = ViewHistoryInvalidationReason::Explicit);
     void Invalidate(ViewStateId id, ViewHistoryInvalidationReason reason = ViewHistoryInvalidationReason::Explicit);
     HistoryTexturePair AcquireHistoryTexture(const ResolvedRenderView& view, const ResolvedRenderViewFamily& family,

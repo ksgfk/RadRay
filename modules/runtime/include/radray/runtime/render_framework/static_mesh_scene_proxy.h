@@ -21,6 +21,11 @@ public:
     void CollectAssetReferences(vector<StreamingAssetRefAny>& out) const override;
     uint64_t GetRenderDataRevision() const noexcept override;
     uint64_t GetTransformRevision() const noexcept override { return GetLocalToWorldRevision(); }
+    bool UsesRenderChangeNotifications() const noexcept override { return true; }
+    bool HasPendingRenderResources() const noexcept override;
+
+    void SetStaticMesh(StreamingAssetRef<StaticMesh> mesh) noexcept;
+    void SetMaterial(uint32_t sectionIndex, Nullable<Material*> material);
 
     AxisAlignedBounds GetLocalBounds() const noexcept override;
     MeshDrawArgs GetDrawArgs(uint32_t sectionIndex) const noexcept override;
@@ -30,6 +35,7 @@ public:
 private:
     StreamingAssetRef<StaticMesh> _mesh;
     vector<Nullable<Material*>> _materials;
+    uint64_t _renderDataRevision{1};
 };
 
 }  // namespace radray

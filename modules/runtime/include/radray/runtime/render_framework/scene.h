@@ -9,11 +9,23 @@
 
 namespace radray {
 
+class SceneRenderState;
+struct ScenePrimitiveChange {
+    SceneObjectId Id{};
+    PrimitiveDirtyFlags Dirty{};
+};
+
+struct SceneCommitStats {
+    uint64_t DirtySlots{0};
+    uint64_t LegacyProxiesObserved{0};
+    uint64_t PendingResourcesObserved{0};
+};
+
 /// Game-thread proxy registry and unique long-term CPU render identity.
 /// Registration transfers ownership; snapshots retain asset owners separately.
 class Scene {
 public:
-    Scene() = default;
+    Scene();
     Scene(const Scene&) = delete;
     Scene(Scene&&) = delete;
     Scene& operator=(const Scene&) = delete;
@@ -29,6 +41,19 @@ public:
     Nullable<PrimitiveSceneProxy*> FindPrimitive(SceneObjectId id) const noexcept;
     SceneObjectId GetLightId(const LightSceneProxy* proxy) const noexcept;
     Nullable<LightSceneProxy*> FindLight(SceneObjectId id) const noexcept;
+
+    void MarkRenderDirty(SceneObjectId id, PrimitiveDirtyFlags flags) noexcept;
+    /// GT cutoff: apply the returned batch to the CPU catalog synchronously before more authoring.
+    /// The same serial returns the same batch; subsequent mutations belong to the next serial.
+    std::span<const ScenePrimitiveChange> BeginRenderCommit(uint64_t serial) const;
+    /// A failed batch is merged into the next epoch; acknowledge only after CPU publication succeeds.
+    bool CompleteRenderCommit(uint64_t serial, bool success) const noexcept;
+    size_t GetPendingRenderChangeCount() const noexcept { return _dirtySlots.size(); }
+    const SceneCommitStats& GetCommitStats() const noexcept { return _commitStats; }
+    /// Registry containers only; draw-store, publication storage and authoring proxy objects are separate.
+    RenderMemoryStats GetMemoryStats() const noexcept;
+    CpuDrawStore& GetDrawStore() const noexcept { return *_draws; }
+    SceneRenderState& GetRenderState() const noexcept { return *_renderState; }
 
     std::span<const unique_ptr<PrimitiveSceneProxy>> Primitives() const noexcept { return _primitiveProxies; }
     std::span<const unique_ptr<LightSceneProxy>> Lights() const noexcept { return _lightProxies; }
@@ -46,6 +71,25 @@ private:
     vector<SceneObjectId> _primitiveIds;
     unordered_map<const PrimitiveSceneProxy*, SceneObjectId> _primitiveByPointer;
     SlotTable _primitiveSlots;
+
+    struct RenderSlot {
+        SceneObjectId PendingId{}, RemovedId{};
+        PrimitiveDirtyFlags Pending{};
+        uint32_t CommittedGeneration{0};
+        uint64_t RenderRevision{0}, TransformRevision{0};
+        bool Enqueued{false}, Observed{false};
+    };
+    void EnqueueRenderSlot(uint32_t slot) const;
+    void ObserveRenderDependencies() const;
+    mutable vector<RenderSlot> _renderSlots;
+    mutable vector<uint32_t> _dirtySlots;
+    mutable vector<SceneObjectId> _renderObservers;
+    mutable vector<ScenePrimitiveChange> _committedChanges;
+    mutable std::optional<uint64_t> _lastCommitSerial;
+    mutable bool _commitComplete{true};
+    mutable SceneCommitStats _commitStats;
+    unique_ptr<CpuDrawStore> _draws;
+    unique_ptr<SceneRenderState> _renderState;
 
     vector<unique_ptr<LightSceneProxy>> _lightProxies;
     vector<SceneObjectId> _lightIds;

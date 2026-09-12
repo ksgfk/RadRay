@@ -91,15 +91,40 @@ version；view/pass/port/program/parameter/indirect handle 具有独立类型和
 访问归一化成 texture mip × layer × aspect 或 Buffer 字节区间。depth 与 stencil 有独立内容有效位。
 未写区间继承前驱，transient 初始无效；external 明确提供初始状态与有效位。即使最终被裁剪，非法
 read/Load/ReadWrite 仍拒绝。Store Discard 产生无效内容，不能随后读取。
-同一 flight 的 compile workspace 可按结构 hash 复用上一张图的 `CompiledRenderGraph`；hash 命中后仍做
-字段级结构比较，冲突的计划不会被复用。`RenderGraphCompileOptions::ReuseCompiledPlan` 关闭时走同一编译入口。
+`RenderGraphPlanCache` 在访问规范化前按结构 key 查找不可变 `CompiledFramePlan`；
+hash 命中后仍逐字段比较，key 包含资源描述符、内容版本与有效位、访问范围、attachment、work mask、
+copy/upload 和导出结构。native 地址、初始状态及 work payload 属于本帧数据。计划保存编译结果、
+物理槽与生命周期、raster groups、live work、屏障模板及输出路由资源槽；命中时借用这些数组，
+只填写本帧实例状态。普通 AddPass 路径在 ports 解析后查找；含模板的组合在解析 ports 前查找，
+命中后借用已解析声明，未命中才物化组合并解析。Forward 的 LDR family、共享阴影、HDR view、
+output overlay 与默认 composer 使用模板入口；动态组件仍逐帧调用 `BuildGraph`，其声明参与组合 key。
+`RenderGraphCompileOptions::ReuseCompiledPlan` 关闭时走同一编译入口。
 `RenderGraph::CompilePlanHit` / `RenderGraph::CompilePlanMiss` 与 report 的 `CompilePlanReused` 区分复用和重编译。
 
-`RenderGraphRuntimeOptions` 按 flight 冻结，不是全局服务。`Application::SetRenderGraphRuntimeOptions` 只影响尚未在 `PrepareFrame` 冻结的后续帧；`RenderSystem` 把该副本写入 `RenderPrepareContext` 与 `RenderPipelineContext`，本帧创建的所有 graph component 共用一份。默认性能路径是 `Validation=Off`、`Report=Minimal`、`GpuMarkers=false`；独立 graph 测试默认 `Full` 校验与完整报告。`Off` 的装配/编译/准备/录制热路径（`RendererListPassSets::Create` / `PrepareRendererList` / `NormalizePasses` / 实际绑定）不读 `Validation`，仍执行 ports/归一化/IR/依赖/barrier/PSO/上传与真实失败处理。`Full` 把契约检查收到阶段边界上的具名函数，仍在 Record 前拒绝负例：list emit 之后的 `ValidateVisibleBatches`（无 draw-record 表时）、归一化之后缓存查找之前的 `ValidateCanonicalInput`（缓存命中也跑）、`PrepareRendererList` 装配之前的 `ValidatePreparedDraws`、prepare 期 `CreateParameterSet` 的缺 binding 与重复数组元素检查（`MissingParameterBinding` / `DuplicateParameterBinding`）、`RendererListPassSets::Create` 的 required-group 覆盖检查。Record 只在 `ResolveView` / `ResolveBuffer` 的 declared-set 扫描检查契约；几何的声明检查前移到 prepare 期的 `ValidateGeometryBuffer`：null buffer 任何等级都拒绝，图内 geometry 缺声明的 `UndeclaredGeometryRead` 只在 `Full` 生效，因为 `NativeBuffers` 仅 Full 登记。缺 attachment、参数类型/尺寸/group 不匹配、PSO/OOM 等无法形成可执行结果的失败留在原算法里。报告等级不改变合法执行计划；`HasFailed()` / `GetFirstErrorCode()` 判定成败，不再用 `Report.Diagnostics.empty()`。`Minimal`/`Counters` 不填充 `Report.Passes` / `Report.Resources` 明细（名字、依赖、Accesses、PhysicalId），只保留聚合计数与首个错误码；完整 pass/resource 表仅 `Report=Full`。GPU marker 独立于校验。编译缓存的字段级 equality 两种模式都保留；Full 在缓存命中后仍验证当前输入。驱动验证层不由该开关热切换。
+`RenderGraphTemplate` 在所属 device 上拥有不可变的 CPU 声明。普通未编译 graph 可通过
+`DeclareTemplateSlot<T>`、`AddTemplateRasterPass` / `AddTemplateComputePass` / `AddTemplateWork`
+描述稳定 recipe 与 typed frame data 的边界，随后 `FreezeTemplate` 转移声明所有权。冻结拒绝
+legacy payload capture、native import、readback、即时 upload bytes 和 frame owner，防止把本帧资源留进模板。
+`Instantiate` 借用模板声明；`RenderGraphTemplateInstance::Bind` 按类型和 builder generation 一次绑定非空数据，
+只为 live work/pass 实例化 callback。被裁剪分支可不绑定 slot。固定大小的 upload slot 借用本帧 `RgUploadData`，
+绑定 payload 按既有提交寿命保留。`Value` 将模板资源、port 与 pass 句柄映射到指定实例；
+typed callback 内的模板 view/buffer/indirect 引用按所属实例映射，不能借另一个实例的索引。
+同一模板最多保留四个位置变体，旧 graph 继续共享其不可变版本。新增版本、端口连接与动态 AddPass
+片段参与组合 key；clear 值由本帧覆盖，资源 native 地址与初始状态在执行准备时填写。
+`TemplatePlacementBuilds`、`TemplateMaterializations` 与资源/pass/ports 声明计数区分冷构建、动态声明和复用。
 
-CPU 阶段在 Tracy 上拆开：`ComposeGraph` 只声明 IR（含 Forward 的剔除与 renderer list 构建），
-`ExecuteGraph` / `RenderGraph::Execute` 才是 Compile、Realize、Prepare、PlanBarriers 与 Record；
-`RenderGraph::Prepare` 内 `PrepareUploads` 之后是 `PreparePasses`，逐个 live pass 运行其 prepare 回调，
+模板的 external texture/buffer slot 只保存描述符；每次实例化通过 `Bind` 提供本帧 native 资源、
+状态、内容有效位与 owner。同一原生资源绑定多个逻辑槽时仍共享物理存储，别名关系与内容访问进入
+组合结构，不能通过逻辑槽分叉同一存储的写版本。Forward 把矩阵、jitter、曝光、AO 半径、阴影距离、
+灯光数据和 history 资源放入 typed frame data；描述符、feature、shader schema、history 分支与输出
+连接决定结构变体。capture/readback 继续追加动态片段，不存入稳定模板。
+
+`RenderGraphRuntimeOptions` 按 flight 冻结，不是全局服务。`Application::SetRenderGraphRuntimeOptions` 只影响尚未在 `PrepareFrame` 冻结的后续帧；`RenderSystem` 把该副本写入 `RenderPrepareContext` 与 `RenderPipelineContext`，本帧创建的所有 graph component 共用一份。默认性能路径是 `Validation=Off`、`Report=Minimal`、`GpuMarkers=false`；独立 graph 测试默认 `Full` 校验与完整报告。`Off` 的 draw/record 内循环不读 `Validation`，准备入口只决定是否登记统一边界的诊断，仍执行必要的 ports/依赖/barrier/PSO/上传与真实失败处理，归一化与 IR 构建在计划未命中时执行。`Full` 把契约检查收到阶段边界上的具名函数，仍在 Record 前拒绝负例：冻结输入边界的 `ValidatePlanInput`（未命中时在归一化后运行，命中时检查借用的 canonical 数据）、所有存活 pass 准备结束后的 `ValidateReadyFrame`（含 `ValidatePreparedDraws`、pass-set 的 required-group/碰撞，以及 `CreateParameterSet` 的缺 binding、重复数组元素和资源访问范围/stage 检查）。Full 的参数准备保留拥有诊断数据的请求与尚未写入的新 set，全部 Ready 检查通过后才执行 Set/Flush，全部写入成功后才发布到 flight cache；失败草稿不会进入缓存。`ResolveView` / `ResolveBuffer` 在所有模式下查询本帧每个 pass 的 native 访问表，错 generation 或无访问权属于不可执行的输入；录制时不扫描声明列表或读取 validation 模式。访问表在 Realize 后建立并复用 flight 容量；几何的声明检查在 Ready 边界通过 `ValidateGeometryBuffer` 执行：null buffer 任何等级都拒绝，图内 geometry 缺声明的 `UndeclaredGeometryRead` 只在 `Full` 生效，因为 `NativeBuffers` 仅 Full 登记。缺 attachment、参数类型/尺寸/group 不匹配、PSO/OOM 等无法形成可执行结果的失败留在原算法里。报告等级不改变合法执行计划；`HasFailed()` / `GetFirstErrorCode()` 判定成败，不再用 `Report.Diagnostics.empty()`。`Minimal`/`Counters` 不填充 `Report.Passes` / `Report.Resources` 明细（名字、依赖、Accesses、PhysicalId），只保留聚合计数与首个错误码；完整 pass/resource 表仅 `Report=Full`。GPU marker 独立于校验。编译缓存的字段级 equality 两种模式都保留；Full 在缓存命中后仍验证当前输入。驱动验证层不由该开关热切换。
+
+CPU 阶段在 Tracy 上拆开：`ComposeGraph` 声明图与轻量工作请求；内置 Forward 的剔除与列表准备
+由 `ExecuteGraph` / `RenderGraph::Execute` 编译后的存活集合驱动。执行顺序是 Compile、Realize、
+Prepare、屏障与输出路由补丁、Record。`RenderGraph::Prepare` 先运行所有 live work，再执行
+`PrepareUploads` 和 `PreparePasses`；后者逐个 live pass 运行其 prepare 回调，
 `PrepareRendererList`、PSO 与参数 set 解析都在这一层的 pass zone 里。
 `Record` 内每个 live pass 用 `RADRAY_PROFILE_SCOPE_DYN(pass.Name)`，CSV/GUI 看到的是 pass 名。
 把 live pass 写入共享 Direct command buffer，或写入该 pass 所写 flip backbuffer 对应的 present command buffer；GPU 实际执行在随后的 `Submit` 与 GPU 时间线。
@@ -141,7 +166,14 @@ copy/resolve 为专用执行节点；区域 texture upload 的部分覆盖需要
 `AddResolveTexturePass` 只接受相同格式、尺寸的 MSAA color → single-sample color，不做格式转换。
 `AddRenderGraphBlit` 提供普通 raster 格式/尺寸与颜色编码转换，内置 artifact 独立于 ImGui 和 JIT。
 
-`UploadBuffer` 复制源 bytes，声明上传执行节点；只有 live upload 才分配、map、写入和 flush。
+`AddWork` 持有 typed CPU payload 与不捕获的 prepare 函数；pass 通过 `RequireWork(handle, mask)`
+声明消费者。编译只合并 live pass 的 mask，每个 work 最多执行一次；被裁剪消费者不触发该 work。
+work 之间不声明依赖，不能依靠注册次序消费另一 work 的结果；全部 work 完成后 pass prepare 才
+消费它们的输出。work 失败时停止准备，不进入录制。
+
+`UploadBuffer` 的即时重载复制源 bytes；deferred 重载声明固定字节数并借用 `RgUploadData`，
+由相应 live work 填充源 span。该容器和源 bytes 必须覆盖上传准备期；短数据在录制前失败。
+只有 live upload 才分配、map、写入和 flush。
 `ReadbackBuffer` / `ReadbackTexture` 创建拥有 readback 存储的 ticket，并添加 copy 与 HostRead export；
 只有匹配 frame serial 的 fence 完成后 `Read` 才复制 bytes。`ExportTexture` / `ExportBuffer` 是明确的
 边界执行节点，声明根与最终状态，无需空 compute pass。Texture readback 当前为一个非 MSAA 2D
@@ -152,8 +184,9 @@ color 子资源；跨帧 history 仍通过专用 registry 导入。
 其状态 span 必须活到 Submit，可通过 `Owner` / `Retain` 保留包装和 GPU owner；owner 随执行收据
 保留到 fence 完成。原生指针仅用于本帧身份匹配，不作为报告或跨帧持久 ID。
 
-执行次序为 setup → ports/freeze → pure compile → storage/attachment plan → realize → prepare →
-barrier plan → record。任何 allocation/参数/PSO 准备失败都发生在图内命令录制前。图只录制，不提交。
+执行次序为 setup → ports/freeze → 选择或编译计划 → realize → live work → upload → pass prepare →
+屏障及输出路由补丁 → record。任何 allocation/参数/PSO 准备失败都发生在图内命令录制前。
+图只录制，不提交；外部最终状态仍沿成功提交路径写回。
 逻辑内容依赖与物理执行访问分开保存：storage plan 确定物理对象后，按 pass/物理 cell 聚合
 state、write 与 shader stages；barrier 规划和录制状态收口消费这一执行计划，不再逐 cell 重扫逻辑访问。
 同 mip/layer 的 depth/stencil 采用共同原生 layout，Buffer 采用整资源原生状态；内容依赖仍保持
@@ -172,7 +205,7 @@ fence 后完成 tickets。未提交的收据析构或取消会取消其操作。
 失败写内容失效，已录 barrier 状态仍作为 host fallback 的起点；整体失败不能推进 view history。
 完整提交和线程边界见 [帧与 GPU](frame-and-gpu.md)。
 
-Graph 独占 setup、编译结果和执行计划，完成收据不再保留整个 Graph 实现。提交阶段只保存最终状态
+Graph 独占 setup 与本帧实例数据，借用不可变编译计划；完成收据不保留整个 Graph 实现。提交阶段只保存最终状态
 与有效位的写回快照，成功 Submit 后释放；完成阶段保存 tickets、显式 retained owners、readback 存储
 以及可能自持 GPU 资源的泛型 pass payload，保留到 fence 完成。Graph 析构不会提前销毁这些 GPU owner。
 
@@ -182,8 +215,10 @@ Graph 独占 setup、编译结果和执行计划，完成收据不再保留整�
 `RenderResourcePool`、Graph parameter sets/cache、`DynamicCBufferArena` 与 CPU 编译工作空间。工作空间
 复用 version/cell 映射、读者和消费者集合、拓扑遍历暂存的容量；编译结果不借用工作空间，下一次编译
 不会改写前一张图的依赖或执行顺序。共享工作空间的调用必须串行，Clear 时释放其容量与计划缓存。
-启用 `ReuseCompiledPlan` 时，工作空间以 IR 输入的 hash 加完整相等比较复用上次依赖编译结果；
-命中后仍复制结果给当前 Graph，每张图仍执行资源校验、访问规范化、IR 构建和物理执行规划。
+`RenderGraphRuntime` 的各 flight 共享有界 `RenderGraphPlanCache`，默认保留四个结构变体。
+启用 `ReuseCompiledPlan` 时，命中跳过访问规范化、IR 构建、物理槽/raster/屏障模板和路由规划，
+仍执行当前资源校验以及 Full 下的 canonical 契约检查。淘汰只移除缓存引用，不改写仍被 Graph
+使用的不可变计划；真实资源、descriptor、初始状态与目标 command buffer 每帧重新实例化。
 安全复用时先清 parameter
 sets/cache，再 reset 上传 arena，最后让 pool BeginFlight trim/复用；Graph 析构不会释放 GPU 仍引用的
 descriptor 或上传页。parameter-set cache key 覆盖 layout/group、完整 binding 身份、数组元素、资源、
@@ -243,32 +278,80 @@ history 统计通过 `ViewStateRegistry::GetStats` 汇总跨 flight 的 generati
 
 ## 场景快照与剔除
 
-`Scene` 是渲染侧唯一长期身份表：`SceneObjectId` 把稀疏 slot 与 generation 和稠密 packed 下标分开，
-删除后复用 slot 必须换 generation，旧 id 不能改到新对象。World/proxy 仍是 authoring 入口；每帧
-`RenderSceneSnapshotBuilder::Build` 只在 game thread 调用一次，与输出和视图数量无关，把当前 epoch
-的热数据发布进该 flight 的 snapshot。
-Forward 持久复用 builder 的去重表、连续 primitive 结构记录、以及 `CpuDrawStore` 的稳定 `DrawRecord`。
-结构记录按场景发布顺序保存，稳定槽位直接比较 generation，只有成员或顺序变化才临时建立索引重排；
-常见一到两个 section 随记录内联存储，更多 section 可溢出。变换与世界包围盒只保留在各 flight 的物化值中。
-primitive 缓存以 generation 标识实例，RenderDataRevision 表示 section/geometry/range/local bounds
-的结构变化，TransformRevision 表示变换变化；稳定结构不重复读取和验证 draw 范围，稳定变换不重算
-世界包围盒。自定义 proxy 默认 revision 为 0，保持逐帧刷新；声明非零版本时必须覆盖相应数据和
-异步几何就绪变化。StaticMesh proxy 的不可变 mesh payload 与基类变换版本满足这一契约。
-一次性调用可使用 `BuildRenderSceneSnapshot`，跨调用结构缓存需持久持有 builder。
-它物化 primitive generation、`SceneObjectId`、MotionRevision、变换、世界 AABB、layer mask、禁用剔除标志、MeshBatch 范围及 light 参数，按首次遇到
-的 Material 去重并生成 pass 值快照。`CpuDrawStore::Sync` 把每个有效 batch×pass 写成 `DrawRecord`：
-几何、program、固定状态和 range 未变则复用，不按 view 复制；镜像仿射只更新手性选择。
-geometry/texture 仅借用指针，几何 owner 必须由 proxy 的
-`CollectAssetReferences` 先追加到宿主 retained refs。快照不保存 game object 或 asset ref；发布后只读。
-缺几何或不可用材质会把对应 `DrawRecord::Status` 标为无效并计入 `RenderSceneSnapshotStats`。
-越界 index range 不在 Sync 插桩，由 `ValidatePreparedDraws` 在 Full 下拒绝。
-索引溢出拒绝整次构建，输出为空。primitive 值由 builder 管理，不得原地修改后继续复用版本；
-`ResetForReuse` 清逻辑内容、DrawRecords 及物化状态，保留 vector 容量及以元素计的容量高水位。
-每个 flight 仍持有独立值快照，builder 缓存只在 game thread 使用。材质按 generation 找回所属 flight 的
-物化值，不依赖场景遍历顺序；未就绪材质暂存于 builder，不覆盖公开快照中的有效材质槽。generation/revision 命中时
-复用该 flight 已物化的 pass 参数，并重新保活当前 ready 资源；新 flight、材质值/状态/资源就绪变化
-重新物化。`MaterialBytesCopied` 只计本次实际复制字节；结构、包围盒、材质与 DrawRecord 另报 rebuilt/reused 计数。
-同帧多次变换写入只在发布时应用最终矩阵。`CpuSceneBytes` / `DrawRecordBytes` 按容量估算长期表，不按 view 放大。
+`Scene` 是 game thread 的唯一长期身份表：`SceneObjectId` 将稀疏 slot/generation 与稠密 packed 下标分开。
+删除后复用 slot 必须换 generation，旧 ID 不能改到新对象。World/proxy 保持 authoring 值的即时可见性；
+内建 proxy 的 setter 合并 dirty 位，同一 slot 每次提交最多入队一次。材质 assignment 原地更新
+StaticMesh proxy，保留注册身份及 MotionRevision；真正替换 mesh 才重置运动连续性。
+
+Scene 拥有 `CpuDrawStore` 与 `SceneRenderState`。后者在 `BeginRenderCommit` 截止点消费变更，
+更新 canonical primitive、batch、material、light 与 draw 表；`RenderSceneSnapshotBuilder` 是发布器 facade，
+不再私有持有另一份场景缓存。临时 builder 与 `BuildRenderSceneSnapshot` 同样复用所属 Scene 的缓存。
+所有 pipeline、overlay 与 composer 先在 `CollectScenePolicies` 中登记 Scene 与本帧活跃 policy，
+`RenderSystem` 随后调用 `FreezeRegisteredScenes`，在任何 `PrepareFrame` 回调之前完成统一截止点。
+`RenderPrepareContext::PrepareScene` 按 Scene/PrepareSerial/flight 共享一份只读 snapshot；PrepareSerial 是
+GT 输入 epoch，与之后 GPU 录制分配的 FrameSerial 分开。多个消费者不得按各自请求次数重复累计实际提交工作。
+同一显式 epoch 属于同一个发布目标与原 retained owner 容器；独立目标需使用新 epoch，不能为旧数据补取已替换资产的新 owner。
+
+primitive 的 RenderDataRevision 覆盖 section/geometry/range/local bounds，TransformRevision 覆盖变换。
+受控 proxy 用通知传播变更；未知自定义 proxy 或零版本数据保守观察，pending mesh readiness 继续检查，
+就绪后退出 pending 集合。世界 bounds 仅在相关输入变化时重算。Material 使用 generation 对应唯一共享值，
+数值变化不向其所有 draw 使用者广播静态重建；结构或有效性变化才沿 material 使用关系更新相关 batch/draw。
+
+包装 `StaticMeshSceneProxy` 的自定义 proxy 必须转发结构、变换版本和 pending readiness；若声明支持变更通知，
+修改时还须由注册在 Scene 的外层 proxy 发送 dirty，未注册的内部 proxy 无法代发。Tidal 的 `DisplayProxy`
+在变换版本实际改变后标记外层 `TransformOrBounds`，等值写入不入队，固定的 mesh/material assignment 保持不变。
+
+`CpuDrawStore::SyncChanged` 在成员与范围不变时只访问已变 primitive；无变化时不遍历整表。
+成员、section 或 pass 数量改变需重新排布范围。记录身份以 primitive generation、section、完整 pass 名与 PassPolicyId 区分，
+hash 仅加速查找；DrawId/generation 与 RecipeRevision 分开，材质数值和 ProgramFrameId 不进入静态失效条件。
+ShaderProgram 的不可复用 generation 与按完整值驻留的 LayoutId 提供稳定身份；实际 native PSO 仍在附件签名已知后解析。
+Scene 的布局驻留由活跃 recipe 的 `Acquire` / `Release` 引用计数管理，替换时先获取新布局再释放旧布局，
+注销后不保留无人使用的历史布局。旧 flight 保留数值 ID 与自身资源引用，释放驻留项不复用这个 ID。
+手工绘制的局部 `PrimitiveVertexLayoutRegistry::Intern` 仍将布局固定到该 registry 的 `Clear` 或析构。
+镜像改变记录当前手性选择，普通变换不重建 geometry/program/state/range recipe。
+缺几何或不可用 pass 由状态与统计说明；IB/VB 范围诊断在 Full 的 `ValidatePreparedDraws` 执行。
+容量、索引和真实资源失败仍走正常错误返回，不依赖诊断开关。
+
+pipeline 用 `PassPolicyId + Revision + PassName + CompileStatic` 声明有限的静态规则，Scene 不依赖 Forward。
+收集器合并同 Scene 的一致注册，拒绝同 ID 的冲突规则和截止点之后的注册；`SetActivePolicies` 接受本 epoch 的
+完整活跃集合，稳定重复注册不重新编译。policy revision 改变沿使用者关系更新相关 draw，新增或移除 policy
+触发范围重排；发布器使用 `ChangedDrawRanges/ChangedBindingRanges`，因此没有 primitive dirty 的 policy 变化也会到达所有 flight。
+
+`StaticBindingRecipe` 是 snapshot 独立拥有的共享 POD 表，缓存身份包含 program generation、LayoutId、policy ID/revision。
+它保存 group、buffer 索引和既定组顺序，不保存上传 offset 或 native set。回调的 binding 结果只能依赖这些身份；
+normal/mirrored state 另可依赖静态 pass state 与 queue。Forward 注册 Lit、只读 depth 的 Lit、DepthOnly、
+DepthNormalsMotion、ShadowCaster 五种 policy；两个 processor 的 record 路径读取已发布 schema 和有效 state。
+没有注册 policy 的快照与 policy=0 的旧消费者仍有 batch fallback。view/material/native 准备由帧内 processor
+执行，语义一致的数值和绑定元组在所属 FrameDrawResources 共享；状态不同的 policy 不制造重复上传。
+
+每个可写 flight 独立拥有 snapshot 容器及 touched-page 去重集合。canonical 改变时标记所有已登记 publication 的
+待同步页；发布只复制该目标尚未收到的最新完整页，成功后只清它自己的 pending，跳过多个 epoch 也能补齐。
+拥有 vector/string 的材质页使用正常对象复制。删除、压缩、扩容和范围移动一并发布相关索引，旧 flight 数据不被覆盖。
+零 dirty 帧不复制静态页，但仍从 proxy 与唯一材质重新获取本帧资产 owner，追加到现有 retained vector，沿原 flight 协议退休。
+CPU catalog 不持有额外长期 StreamingAssetRef；geometry/texture/program 的借用必须受现有 owner 生命周期保证。
+
+`PublicationId` 标识目标存储，`PublicationRevision` 每次成功发布递增，`ChangedFromPublicationRevision`
+标明本次 changed ranges 所基于的成功版本。消费者只有连续消费时才能仅看 ranges；漏过一次发布须通过对象版本补齐。
+复制 snapshot 会脱离 publication 身份，移动则保留。`ResetForReuse` 清逻辑内容和身份，保留容器容量。
+发布开始先置 Valid=false；保活或页复制失败时回滚本次新增 owner、保留 pending 和上次成功版本，不能读取半更新内容。
+页入队成功后才设置去重标记，目标成功登记后才取得 publication 身份；失败不能留下未入队的已标记页或未登记的目标。
+复制阶段的 C++ 分配异常继续向调用方传播，owner 回滚由局部 RAII 执行，不将异常转换成普通成功或空快照。
+待同步页只在所有表及变长字段复制完成后清除，页内中断与材质字段的部分赋值同样允许重试。
+在相同最终 canonical 输入下重试才能发布；不可在冻结同一 epoch 后更换 authoring 资产，再为旧 canonical 获取新 owner。
+
+`MaterialBytesCopied` 计 canonical 材质实际复制字节，`PublishedPages/PublishedBytes/PublishedMaterialBytes` 计目标发布量；
+commit、draw 访问、结构/包围盒更新、legacy 观察与 pending readiness 各自计数。
+`CpuSceneBytes/DrawRecordBytes` 目前是公开表的容量估算，不代表包含全部依赖边、内部缓存及变长 payload 的完整内存账。
+
+显式内存盘点使用 `Scene`、`SceneRenderState`、`CpuDrawStore` 和 `PrimitiveVertexLayoutRegistry` 的
+`GetMemoryStats`，独立 snapshot 使用 `MeasureRenderSceneSnapshot`。查询在串行观察点遍历当前数据，
+不分配存储，也不作为每帧热路径的一部分。`SceneRenderStateMemoryStats` 分开记录 catalog、canonical、
+publication 元数据及 shared flight 存储；dirty、待同步页、依赖边和 owner 引用另计数量。
+`RenderMemoryStats::KnownBytes()` 包含对象、容器容量、字符串堆容量及 map 元素本体，排除 allocator/node
+管理开销、hash bucket 存储、shared_ptr 控制块、借用的 authoring 对象和 GPU 资源；bucket/node 数量独立提供。
+变量 payload 的实际长度和容量与上述存储分类重叠，不能再加进总字节数。发布统计中的
+`PublishedVariablePayloadBytes` 计复制到 snapshot 的嵌套内容；`MaterialPayloadMoves/MovedMaterialPayloadBytes`
+单独计 canonical 材质内容的所有权搬移，不把搬移视作复制字节或测得的耗时。
 
 AABB 由局部中心/半长经过 affine transform 的绝对线性部分变换，支持旋转、非均匀和负缩放。
 非法或非有限 bounds 不参与视锥拒绝，统计并保守保留；mask 仍然有效，Forward 只警告一次。
@@ -316,20 +399,24 @@ Material 的 canonical 数值存储是一段 GPU 布局 `byte[]`（空 anchor �
 `ShaderParameterStorage` 盖在同一块 bytes 上。`Material` 与 `MaterialTechnique` 的头文件不出现
 `Forward_*`，方向是调用方选类型而不是 runtime 依赖 Forward。
 
-Material 实例拥有不可复用的 generation 与单调内容 revision。typed 写入绕过一切通知，所以
-`GetRevision` 的变化检测统一是「bytes 与上次观察到的副本是否不同」，两条写入面因此得到同一个
-语义；纹理/sampler/queue 变化也使快照失效；game-thread `GetRevision` 还观察资源就绪状态以及
-通过可变 `GetPipelineState` 引用写入的状态。`BuildRenderData` 是已物化材质快照的更新入口，消费方
-不得原地修改其值后继续把原 generation/revision 当作有效缓存；手工修改前调用 `Invalidate`，下一次
-Build 完整恢复 authoring 值。ProgramFrameId 由 builder 每帧分配，不影响材质内容版本。已发布 flight 的快照保持只读。
+Material 实例拥有不可复用的 generation，以及内容、结构、数值、binding 四类 revision。
+`SetNumeric`、按名 setter 与 `SetPassPipelineState` 等 tracked 写入在提交时只比较对应输入，等值写不产生变更；
+未逃逸的干净材质不会每 epoch 扫描 numeric/state。`As<T>()`、可写 `NumericBytes` 与非 const
+`GetPipelineState` 一旦返回可写地址，就永久标记 escaped；旧地址可能跨多帧写入，因此每个活跃唯一 escaped
+材质每 epoch 仍观察一次，并单独记录比较字节。pending texture readiness 的必要观察同样不受 validation 控制。
+
+`GetRevisions(epoch)` 冻结该 epoch 的观察结果，晚于截止点的 authoring 编辑进入下一 epoch。
+`BuildRenderData` 是 canonical 材质快照的更新入口，保留各 flight 的独立副本；消费方不得原地修改后
+继续沿用原 generation/revision，手工修改前调用 `Invalidate`。ProgramFrameId 只作 snapshot 内映射，
+不会引起材质内容版本或稳定 recipe 失效。所有已发布 flight 保持只读。
 
 ## Renderer lists 与帧内绘制资源
 
 `RendererListDesc` 指定所需 pass、闭区间 queue 范围、额外 layer mask、view/culling 和排序方式。
 snapshot 含对齐的 `DrawRecord` 表时，通用 builder 按可见 primitive 的记录范围筛选 pass/queue/layer，再交给
-`MeshPassProcessor::PrepareRecord`；缺几何仍以 `CpuDrawStore::Sync` 写入的 `DrawRecord::Status` 为准，IB/VB 范围改在 `ValidatePreparedDraws` 检查，不再在 processor 或 Sync 热路径插桩。没有记录表时仍走 `AddMeshBatch`，`Validation=Full` 时在 emit 成功后跑 `ValidateVisibleBatches`。同一 `CullingResults` 与 view 的多个 desc 可通过 `BuildRendererLists` 一次遍历后按 pass 顺序写出，保持 processor 的 program 局部性；单列表 `BuildRendererList` 是它的薄封装。processor 每 batch 最多输出一条 command，拒绝原因汇总进 `RendererListStats`；无效描述会清空旧 commands。
-`MeshPassDrawListContext::AddCommand` 消费右值候选，`AppendCommandTo` 将其直接移动到最终列表后清空候选；
-重复消费返回 false，消费后也不能再次发布。重复发布或显式拒绝会丢弃未消费候选，不暴露内部 command 引用。
+`MeshPassProcessor::PrepareRecord`；缺几何仍以 `CpuDrawStore::Sync` 写入的 `DrawRecord::Status` 为准，IB/VB 范围改在 Ready 边界的 `ValidatePreparedDraws` 检查，不再在 processor 或 Sync 热路径插桩。没有记录表时仍走 `AddMeshBatch`，遍历时无条件检查将要使用的 primitive、batch 和 material 索引关系，不再追加全量诊断遍历。同一 `CullingResults` 与 view 的多个 desc 可通过 `BuildRendererLists` 一次遍历后按 pass 顺序写出，保持 processor 的 program 局部性；单列表 `BuildRendererList` 是它的薄封装。processor 每 batch 最多输出一条 command，拒绝原因汇总进 `RendererListStats`；无效描述会清空旧 commands。
+`MeshPassDrawListContext::AddRecord` 发布 snapshot 记录与成功的帧绑定 ID；动态 `AddCommand` 消费右值候选。
+`AppendTo` 只消费一次，重复发布或显式拒绝会丢弃未消费候选，不暴露内部 command 引用。
 默认 opaque 范围为 queue < 2500，transparent 为 queue >= 2500。
 `RequireMaterialPass` 使产品必需 pass 的缺失单独计入 `MissingRequiredPass`，与可选 pass 跳过区分。
 `DrawRecord` 不含当前 CB offset 或 graph handle；镜像物体只翻转 `FaceClockwise`，不重建布局。
@@ -337,9 +424,13 @@ snapshot 含对齐的 `DrawRecord` 表时，通用 builder 按可见 primitive �
 排序只使用 queue、按快照首次出现分配的 ProgramFrameId、material 索引、view depth、primitive/batch
 索引。StateThenFrontToBack 按 queue/program/material 聚簇后从近到远；FrontToBack 与 BackToFront 按
 queue 后的深度顺序排列。primitive/batch 为稳定的最终 tie-breaker，不使用资源地址决定绘制顺序。
-`Commands` 保存发布顺序的完整 payload，紧凑 `RendererListItem` 保存排序值与 command 索引；排序仅
-移动 Items。按执行顺序读取使用 `GetCommand`，不得把 Commands 的物理顺序当作绘制顺序。手工装配
-且 Items 为空的列表按发布顺序执行；非空 Items 在 `ValidatePreparedDraws`（`Validation=Full`）时必须完整且唯一地引用所有 commands。所有过滤后的 commands 及其 view/group offsets 必须保存至 graph 执行完毕。
+静态列表仅保存 snapshot draw-record 索引与 `FrameDrawBindingId`，`Commands` 只拥有动态候选或手工装配数据。
+紧凑 `RendererListItem` 保存排序值与发布索引，排序仅移动 Items。按执行顺序使用 `GetDrawCount`、
+`GetDescription`、`GetPipelineState` 与 `GetGroups`；镜像状态由 `GetPipelineState` 选择，不能直接取普通 Description 的 state。
+`GetCommand` 只适用于动态项。Items 为空时按发布顺序执行；Full 在危险索引访问前检查非空 Items 是完整置换。
+列表借用的 snapshot 与帧资源必须保持有效，所有源数据在准备后保持不变直到录制结束。
+列表捕获 PublicationId/SceneEpoch/PublicationRevision 和资源 epoch；reset、追加、赋值使 build revision 前进，
+move 同时使源列表失效。旧列表不能混入新 publication 或新帧的数据。
 
 `FrameDrawResources` 持有每 flight 的 `DynamicCBufferArena` 与 `ShaderParameterSet`。`PrepareGroup`
 在 graph 执行前上传 bytes、按实际 binding number 排列 dynamic offsets，并解析纹理 subview/sampler。
@@ -347,11 +438,10 @@ buffer 排序、dynamic 标志和资源反射形成 `ShaderParameterGroupRecipe`
 按 group 惰性创建并保持到 program 销毁。准备调用仍归 render thread，共享 program 的准备不能并发
 修改其缓存。新 program 自带新 recipe 身份，不通过借用指针维持跨 program 的缓存。
 临时绑定与 set key 复用容量；flight 安全复用仍清理 native sets 并重置 arena，不清 program recipe。
-Forward 在同一 processor 内按 program、primitive 复用对象参数，同一物体多个 section 不重复上传；
-HDR 同一 view 的列表共用一个 lit processor；本帧阴影级联使用单独的非 temporal processor，object 组与 command 模板跨级联保留，只换 view group。带时域的 lit processor 在 `ResetView` 时丢掉
-motion 相关的 object 组。
-processor 的 material/primitive 准备以 snapshot 索引为键，因此一个 processor 只服务
-同一帧、同一 snapshot 的列表。`FrameDrawResourceStats::RecipeBuilds` 计实际首次构建，warm flight 为 0；另报组准备、
+Forward 的多个 processor、view 和 state-only policy 共用本帧元组表，同一对象多个 section 不重复上传。
+阴影使用非 temporal 的 object 值；带时域的 lit view 按各自历史身份准备。processor 不另存完整 command 模板，
+`ResetView` 仅重置其 view 数值槽。processor 的 material/primitive 准备仍以 snapshot 索引为键，
+一个 processor 只服务同一帧、同一 snapshot 的列表。`FrameDrawResourceStats::RecipeBuilds` 计实际首次构建，warm flight 为 0；另报组准备、
 set 命中/创建和常量复制字节数。set 命中不代表本次参数上传被省略。
 set cache 精确 key 为 pipeline layout、group、所有 buffer target/静态 offset/range、解析后的 texture view
 和 sampler（含绑定身份/数组元素）。dynamic offset 不属于 key，相同 backing page 上的切片可复用 set；
@@ -360,28 +450,57 @@ spill 或静态 range/资源变化创建新 set。缓存命中后绝不改写已
 arena block 决定，先检查上一次命中的条目，再回退到线性小表，不构造通用 key；
 所有命中仍比较 layout、group、buffer 与 buffer index，语义与精确 key 缓存一致。
 
+`PrepareGroupId` 按 source/wire ABI/context/generation/revision/history/row 共享同帧上传切片，
+并以 program generation/group 区分原生组；material 的值和资源版本同时参与身份。
+不同 program 可共享 Offset，但 BindingHandle 必须各自匹配真实 layout。失败不发布 group 或 tuple ID；
+已成功上传的切片可供同帧重试复用。`InternBinding` 将有序 group ID 组合驻留成 `FrameDrawBindingId`。
+`FrameShaderGroupId` 是本 flight 当前帧的稠密索引，表扩容不改变 ID；组引用仅能在不再扩容时长期借用。
+`PrepareSharedCBufferGroupId` 保留单 cbuffer 的入口，返回值接口用于旧调用方。
+非 temporal object 使用同一 context；temporal 身份包含 ViewStateId、历史提供者、已提交 serial、失效 revision 和 PreviousViewValid。
+wire 身份由调用方显式保证，
+相同字节数不能代替兼容契约。`SharedBufferUploads/SharedBufferHits` 与 `SharedGroupHits` 分别计上传及原生组复用，
+重复取得同一组不再增加 GroupPreparations。BeginFrame/ClearSets 使旧 ID 失效；开放寻址索引按 epoch 重置，
+owner 表复用容量，不保留历史 key 的无限链条。
+
+
 复用顺序为清空 renderer lists/借用 command → 清 set cache 与 sets → reset/裁减 arena，全部依赖既有
 flight fence 安全边界。`MeshDrawDescription` 保存与视图无关的 program、PSO 输入、geometry 和 draw range；
 `MeshDrawCommand` 加入帧内已准备的 `PreparedShaderGroup`，均不拥有 RHI 资源或资产。
-`PrepareRendererList` 在所属 pass 的 prepare 阶段运行：`Validation=Full` 时先跑 `ValidatePreparedDraws`
-（Items 置换、几何结构/IB 范围、组序），再装配 `PreparedRendererList`；装配循环不读校验开关，`Off` 不
-分配 visited 等校验容器，依赖调用者提供合法输入。每个 `Draw` 保存解析后的
-`render::GraphicsPipelineState*`、command 自带的 native 组与该 program 的 pass sets span，借用原 list 与
-`RendererListPassSets`，二者必须保持不变直到图执行完毕。持久 geometry 不进图，只由
+`PrepareRendererList` 在所属 pass 的 prepare 阶段装配 `PreparedRendererList`。基本索引范围、资源存在性和
+source epoch 在所有模式下提前检查；`Full` 注册拥有诊断数据的 `DeferReadyValidation` 回调，等全部存活
+pass 准备完成后在 `ValidateReadyFrame` 边界执行 `ValidatePreparedDraws`（Items 置换、几何结构/IB 范围、组序）。
+回调先检查列表 revision 与帧资源身份，避免遍历已经失效的来源。临时 pass-set 包装可以在 prepare 返回时
+析构，诊断保有自己的组信息。装配循环不读校验开关，`Off` 不分配或运行这些诊断数据和容器。
+内部封装的 `PreparedRendererList` 只能由准备函数构造，
+每个 Draw 保存最终 PSO、必要 group 绑定范围、geometry 索引和三个 indexed draw 参数，不复制完整稳定描述。
+录制直接从连续 Ready 行读取 IndexCount、FirstIndex 与 VertexOffset，不再为这些标量逐 draw 跳转到源描述。
+`FrameDrawResources` 拥有当前 flight 的准备工作区，复用 recipe/geometry/group 索引和中间数组容量。
+各个存活 Ready 持有独立输出存储的共享 lease；工作区只复用无人借用的存储，因此同帧多列表、池扩容和
+跨 epoch 保留旧 Ready 都不会覆写封存数组。lease 只保护这些数组，来源列表、snapshot 与 native 资源仍受
+原生命周期和 epoch 约束；旧 epoch 或被移动走的 Ready 不能录制。动态 offset 超出 inline 容量时，
+复用外层 group 行和嵌套 offset 容量；`GetCacheCapacityBytes` 包含工作区、索引及各输出存储的容量。
+没有 FrameDrawResources 的旧调用使用本次准备独立拥有的工作区，不引入跨帧缓存。
+已发布的 LayoutId 直接参与准备；只有缺少该身份的旧描述才按本次调用惰性创建布局注册表，不长期保留旧布局。
+静态 group 保留帧表 ID，pass/dynamic group 的唯一原生元组在 Ready 内拥有；录制入口一次取得当前帧表基址，
+因此后续 pass 在同 epoch 扩容组表不使旧 Ready 悬空。持久 geometry 不进图，只由
 `ValidateGeometryBuffer` 按 distinct buffer 检查一次，因此 draw 数不再放大 access 列表与之后每个编译步骤。
-program recipe 以 `(ShaderProgram, MaterialPipelineState, PrimitiveVertexLayout, PrimitiveTopology)` 为完整
-key，相邻快路径之外还可复用非相邻相同 recipe，所以 `GraphicsPipelinePreparations` 统计 prepare 期实际
+静态 program recipe 以 `(ShaderProgram, effective state ID, PrimitiveVertexLayoutId, PrimitiveTopology)` 为完整
+key，动态无状态 ID 时比较完整 MaterialPipelineState。state ID 在 Scene 冷编译时驻留普通与镜像 state，
+不重用已释放 ID；geometry 连续绑定段也在冷路径发布，手工 Commands 仅在 prepare 按唯一 geometry 补齐。
+非相邻相同 recipe 同样复用，所以 `GraphicsPipelinePreparations` 统计 prepare 期实际
 解析 PSO 的次数，可小于 draw 数；实际提交的绘制数量由 `DrawExecutionStats::Draws` 统计。
 `RecordRendererList` 只接受 prepared list，绑定已解析的 native PSO 与已准备的 set 再 draw；record 不回查图、
-不逐 draw 解析 PSO、不分配校验容器也不重建参数。同一 PSO 下逐组比较相邻 draw 的 set 与 dynamic offsets，
-仅绑定变化的组；几何对象相同时跳过 vertex/index 绑定。PSO 切换后重新绑定全部组与几何。跳过仅在一次
-`RecordRendererList` 调用内生效，借用的 prepared 数据与几何保持不变。graph 命令包装不再持有校验状态；
+不逐 draw 解析 PSO、不分配校验容器也不重建参数。prepare 按最终执行顺序合并组并计算必要绑定范围，
+Record 不再做组 merge、offset 深比较或连续顶点段发现。首 draw 与 PSO 切换强制绑定全部组和几何，
+同状态后续 draw 只发必要变化；每次 Record 独立恢复首 draw 状态，外部回调不能污染下一次调用。
+入口检查 pass、列表 revision、资源 owner/epoch 和 publication；公开旧 Commands 的任意原地字段修改仍受不可变契约约束。
+graph 命令包装不再持有校验状态；
 后端 encoder 亦跳过与当前状态完全相同的 vertex/index 重绑定，pso 切换时全量重发。
 
 `RendererListPassSets::Create` 在 pass 的 prepare 阶段按 `RendererListProgramParameters` 为每个
 (program, group) 建一个 `PreparedShaderGroup`，`Find(program)` 返回按 group 升序的 span，供
-`RecordRendererList` 与该 program 的 native per-view/object/material 组合并。按 program 逐 draw 绑定，
-不会沿用上一 program 的组；`Validation=Full` 时检查 required-group 覆盖。set 是本 pass prepare 现场产出的，
+`PrepareRendererList` 与该 program 的 native per-view/object/material 组合并。按 program 逐 draw 绑定，
+不会沿用上一 program 的组；`Validation=Full` 时在 Ready 边界检查 required-group 覆盖与 native/graph 组碰撞。set 是本 pass prepare 现场产出的，
 `Create` 记下 `GetPass()`，`PrepareRendererList` 拒绝属于另一个 pass 的 sets（它们的 view 在那里才有声明）；
 不缓存跨帧 handle，program 与 list 必须活到图执行结束。
 不把 Shadow/AO/light-list 等产品字段写入通用 mesh draw executor。
@@ -459,7 +578,9 @@ HDR 的两个配置组合如下；效果 shader 只属于产品层，基础图/R
 局部灯最多 256、每 tile 默认 64；溢出 tile 回退遍历完整灯列表，不能静默丢灯。Spot 与 Point 通过
 同一固定大小 GPU 记录传输。主方向光启用 CastShadow 时，级联阴影请求可见 opaque 的 ShadowCaster 材质 pass；主相机 cull 与 tile frustum 额外
 覆盖一个像素，避免 jitter 边缘漏物体。history color/depth 用三图环，TAA 只处理 opaque/sky；sky
-按相机旋转重投影，运动只包含刚体变换。effect signature 改变、cut、尺寸/rect/AA 或 Auxiliary 变化先失效。
+按相机旋转重投影，运动只包含刚体变换。effect signature 的结构变化、cut、尺寸/rect/AA 或 Auxiliary
+变化先失效。曝光、AO 半径、阴影距离等普通数值以及 TAA 后的 Bloom/Fireflies 不重置 opaque history；
+它们仍更新当前帧输入或选择相应的后处理图变体。
 
 depth pyramid 是一张带 mip 的 R32_FLOAT texture，pass 按精确 subresource 声明依赖；没有消费者的
 mip 会裁剪。CurrentHdr 在时域和透明之前保留独立副本，避免读写同一附件。SDR 的线性/sRGB 编码
@@ -470,7 +591,8 @@ mip 会裁剪。CurrentHdr 在时域和透明之前保留独立副本，避免�
 motion、AO、tile occupancy/overflow、Bloom、cascade、当前/历史 HDR 和深度金字塔末级。
 
 `ForwardPipeline::GetSceneSnapshot` / `GetStageBStats` 只在所属 flight 的阶段安全点读取；统计包括快照
-构建数、剔除调用/失败、三类 command 数量与执行失败。场景规模统计来自 snapshot，视图筛选来自 Cull，
+构建数、剔除调用/失败、三类 command 数量与执行失败。`TemporalViews` 与 `ValidTemporalHistories`
+分别统计当前时域 view 数、实际具有有效颜色/深度和前帧 view 数据的数量。场景规模统计来自 snapshot，视图筛选来自 Cull，
 候选分类来自 list，避免重复计数。
 
 `RequestCapture` 只申请下一次 prepared frame；readback 由 graph 声明，`CompleteCaptures(flight)`

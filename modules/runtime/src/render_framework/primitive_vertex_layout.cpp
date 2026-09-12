@@ -1,7 +1,13 @@
 #include <radray/runtime/render_framework/primitive_vertex_layout.h>
+#include "render_memory_measure.h"
 
 #include <algorithm>
+#include <atomic>
+#include <tuple>
 #include <utility>
+
+#include <radray/hash.h>
+#include <radray/logger.h>
 
 namespace radray {
 namespace {
@@ -39,6 +45,102 @@ std::optional<render::VertexFormat> GetVertexFormat(
 }
 
 }  // namespace
+
+size_t PrimitiveVertexLayoutHash::operator()(const PrimitiveVertexLayout& layout) const noexcept {
+    HashCode hash;
+    hash.Add(layout.Buffers.size());
+    for (const auto& buffer : layout.Buffers) {
+        hash.Add(buffer.Binding);
+        hash.Add(buffer.ArrayStride);
+        hash.Add(static_cast<uint32_t>(buffer.StepMode));
+    }
+    hash.Add(layout.Attributes.size());
+    for (const auto& attribute : layout.Attributes) {
+        hash.Add(attribute.Semantic);
+        hash.Add(attribute.SemanticIndex);
+        hash.Add(attribute.BufferBinding);
+        hash.Add(attribute.Offset);
+        hash.Add(static_cast<uint32_t>(attribute.Format));
+    }
+    return hash.ToHashCode();
+}
+
+RenderMemoryStats PrimitiveVertexLayoutRegistry::GetMemoryStats() const noexcept {
+    RenderMemoryStats result;
+    result.ObjectBytes = sizeof(*this);
+    result.LiveEntries = _layouts.size();
+    detail::MeasureMap(result, _layouts);
+    detail::MeasureMap(result, _byId);
+    for (const auto& [layout, entry] : _layouts) {
+        detail::MeasureVector(result, layout.Buffers, true);
+        detail::MeasureVector(result, layout.Attributes, true);
+        for (const auto& attribute : layout.Attributes) detail::MeasureString(result, attribute.Semantic);
+        result.DependencyEdges += entry.References;
+    }
+    return result;
+}
+
+PrimitiveVertexLayoutRegistry::PrimitiveVertexLayoutRegistry(const PrimitiveVertexLayoutRegistry& other) : _layouts(other._layouts) {
+    RebuildIndex();
+}
+
+PrimitiveVertexLayoutRegistry& PrimitiveVertexLayoutRegistry::operator=(const PrimitiveVertexLayoutRegistry& other) {
+    if (this == &other) return *this;
+    _layouts = other._layouts;
+    RebuildIndex();
+    return *this;
+}
+
+void PrimitiveVertexLayoutRegistry::RebuildIndex() {
+    _byId.clear();
+    _byId.reserve(_layouts.size());
+    for (const auto& [layout, entry] : _layouts)
+        if (entry.References) _byId.emplace(entry.Id.Value, &layout);
+}
+
+PrimitiveVertexLayoutRegistry::Entry& PrimitiveVertexLayoutRegistry::FindOrAdd(const PrimitiveVertexLayout& layout, bool retain) {
+    PrimitiveVertexLayout normalized = layout;
+    std::sort(normalized.Buffers.begin(), normalized.Buffers.end(), [](const auto& a, const auto& b) {
+        return std::tie(a.Binding, a.ArrayStride, a.StepMode) < std::tie(b.Binding, b.ArrayStride, b.StepMode);
+    });
+    std::sort(normalized.Attributes.begin(), normalized.Attributes.end(), [](const auto& a, const auto& b) {
+        return std::tie(a.Semantic, a.SemanticIndex, a.BufferBinding, a.Offset, a.Format) <
+               std::tie(b.Semantic, b.SemanticIndex, b.BufferBinding, b.Offset, b.Format);
+    });
+    const auto [entry, inserted] = _layouts.try_emplace(std::move(normalized));
+    if (inserted) {
+        static std::atomic<uint64_t> next{1};
+        entry->second.Id.Value = next.fetch_add(1, std::memory_order_relaxed);
+        if (!entry->second.Id.IsValid()) RADRAY_ABORT("Primitive vertex layout identity space exhausted");
+    }
+    if (retain && entry->second.References == 0) _byId.emplace(entry->second.Id.Value, &entry->first);
+    return entry->second;
+}
+
+PrimitiveVertexLayoutId PrimitiveVertexLayoutRegistry::Intern(const PrimitiveVertexLayout& layout) {
+    auto& entry = FindOrAdd(layout, false);
+    entry.Pinned = true;
+    return entry.Id;
+}
+
+PrimitiveVertexLayoutId PrimitiveVertexLayoutRegistry::Acquire(const PrimitiveVertexLayout& layout) {
+    auto& entry = FindOrAdd(layout, true);
+    if (entry.References == SIZE_MAX) RADRAY_ABORT("Primitive vertex layout reference count exhausted");
+    ++entry.References;
+    return entry.Id;
+}
+
+bool PrimitiveVertexLayoutRegistry::Release(PrimitiveVertexLayoutId id) noexcept {
+    const auto indexed = _byId.find(id.Value);
+    if (indexed == _byId.end()) return false;
+    const auto entry = _layouts.find(*indexed->second);
+    if (entry->second.References == 0) return false;
+    if (--entry->second.References == 0) {
+        _byId.erase(indexed);
+        if (!entry->second.Pinned) _layouts.erase(entry);
+    }
+    return true;
+}
 
 std::optional<PrimitiveVertexLayout> PrimitiveVertexLayout::FromMeshPrimitive(
     const MeshPrimitive& primitive) noexcept {

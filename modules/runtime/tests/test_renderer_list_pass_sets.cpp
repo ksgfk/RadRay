@@ -1,10 +1,387 @@
 #include "foundation_graph_fixture.h"
 #include <radray/runtime/render_framework/renderer_list_pass_sets.h>
+#include <radray/runtime/forward_pipeline/forward_graph.h>
+#include "upload_test_support.h"
 
 namespace radray {
 namespace {
 
 class RendererListPassSetsTest : public test::FoundationGraphGpuTest {};
+
+TEST_P(RendererListPassSetsTest, T04ForwardGraphOwnsShortLongAndSharedBindingNames) {
+    auto& device = *Context.Device;
+    auto program = test::CompileFoundationGraphics(device, R"hlsl(
+#include <core/platform.hlsli>
+struct Values { float4 Value; };
+VK_BINDING(0, 0) ConstantBuffer<Values> A : register(b0);
+VK_BINDING(1, 0) ConstantBuffer<Values> ConstantBufferWithANameLongerThanAnySmallStringStorage : register(b1);
+VK_BINDING(2, 0) Texture2D<float> T : register(t0);
+VK_BINDING(3, 0) Texture2D<float> TextureWithANameLongerThanAnySmallStringStorage : register(t1);
+VK_BINDING(4, 0) SamplerState S : register(s0);
+VK_BINDING(5, 0) SamplerState SamplerWithANameLongerThanAnySmallStringStorage : register(s1);
+[shader("vertex")] float4 VSMain(float3 p : POSITION) : SV_Position { return float4(p, 1); }
+[shader("pixel")] float4 PSMain() : SV_Target0 {
+    float v = A.Value.x + ConstantBufferWithANameLongerThanAnySmallStringStorage.Value.x;
+    v += T.SampleLevel(S, float2(.5, .5), 0);
+    v += TextureWithANameLongerThanAnySmallStringStorage.SampleLevel(SamplerWithANameLongerThanAnySmallStringStorage, float2(.5, .5), 0);
+    return float4(v, v, v, 1);
+})hlsl");
+    ASSERT_TRUE(program);
+    const array<float, 9> positions{-1, -1, .5f, 3, -1, .5f, -1, 3, .5f};
+    const array<uint32_t, 3> indices{0, 1, 2};
+    auto vertices = render::test::MakeUploadBuffer(device, std::as_bytes(std::span{positions}), render::BufferUse::Vertex);
+    auto indexBuffer = render::test::MakeUploadBuffer(device, std::as_bytes(std::span{indices}), render::BufferUse::Index);
+    ASSERT_TRUE(vertices);
+    ASSERT_TRUE(indexBuffer);
+    GpuMesh::DrawData geometry;
+    geometry.VertexBuffers = {{0, {vertices.Get(), 0, sizeof(positions)}}};
+    geometry.Ibv = {indexBuffer.Get(), 0, 4};
+    geometry.VertexLayout.Buffers = {{0, 12, render::VertexStepMode::Vertex}};
+    geometry.VertexLayout.Attributes = {{"POSITION", 0, 0, 0, render::VertexFormat::FLOAT32X3}};
+    RendererList list;
+    MeshDrawCommand draw;
+    draw.Program = program.Get();
+    draw.Geometry = &geometry;
+    draw.IndexCount = 3;
+    draw.PipelineState.Primitive.Cull = render::CullMode::None;
+    list.Commands.push_back(std::move(draw));
+    uint64_t serial = 1;
+    for (const auto& options : {kDiagnosticRenderGraphRuntimeOptions, kPerformanceRenderGraphRuntimeOptions}) {
+        SCOPED_TRACE(options.Validation == RenderValidationMode::Full ? "full" : "off");
+        Writes.Reset();
+        Resources->BeginFlight(++serial, Writes);
+        RenderGraph graph{device, *Resources, *Registry, "owned binding names", options};
+        const auto source = [&](float value) {
+            auto texture = graph.CreateTexture({render::TextureDimension::Dim2D, 1, 1, 1, 1, 1, render::TextureFormat::R32_FLOAT, render::MemoryType::Device, render::TextureUse::RenderTarget | render::TextureUse::Resource, {}}, "source");
+            graph.AddRasterPass<test::EmptyGraphPass>("clear source", [&](test::EmptyGraphPass&, RenderGraphRasterBuilder& builder) { builder.SetColorAttachment(0, texture, {.Clear = {value, 0, 0, 0}}); }, +[](const test::EmptyGraphPass&, RenderGraphRasterContext&) {});
+            return texture;
+        };
+        const auto a = source(.125f), b = source(.25f);
+        const auto color = graph.CreateTexture({render::TextureDimension::Dim2D, 4, 4, 1, 1, 1, render::TextureFormat::RGBA8_UNORM, render::MemoryType::Device, render::TextureUse::RenderTarget | render::TextureUse::CopySource, {}}, "color");
+        const auto depth = graph.CreateTexture({render::TextureDimension::Dim2D, 4, 4, 1, 1, 1, render::TextureFormat::D32_FLOAT, render::MemoryType::Device, render::TextureUse::DepthStencilRead | render::TextureUse::DepthStencilWrite, {}}, "depth");
+        DrawExecutionStats stats;
+        const auto output = [&] {
+            vector<string> names{"A", "ConstantBufferWithANameLongerThanAnySmallStringStorage", "S", "SamplerWithANameLongerThanAnySmallStringStorage", "T", "TextureWithANameLongerThanAnySmallStringStorage"};
+            array<float, 4> shortValue{.125f, 0, 0, 0}, longValue{.25f, 0, 0, 0};
+            const RgParameterBinding rows[]{
+                {names[0], 0, RgCBufferParameterBinding{std::as_bytes(std::span{shortValue})}},
+                {names[1], 0, RgCBufferParameterBinding{std::as_bytes(std::span{longValue})}},
+                {names[2], 0, RgSamplerParameterBinding{}},
+                {names[3], 0, RgSamplerParameterBinding{}}};
+            const RendererListProgramParameters parameters{program.Get(), 0, rows};
+            const ForwardPassResource shared[]{
+                {.Declaration = names[4], .Texture = a}, {.Declaration = names[5], .Texture = b}};
+            ForwardGraphView view;
+            view.List = &list;
+            view.View.ViewRect = view.View.ScissorRect = {0, 0, 4, 4};
+            view.Parameters = std::span{&parameters, 1};
+            view.Resources = shared;
+            const array<ForwardGraphView, 3> views{view, view, view};
+            auto built = ForwardGraph::BuildGraph(graph, ForwardGraphStage::Opaque,
+                                                  {.Name = "owned names", .Backend = GetParam(), .Views = views, .Color = color, .Depth = depth, .Execution = &stats});
+            for (auto& name : names) std::fill(name.begin(), name.end(), 'x');
+            shortValue.fill(199);
+            longValue.fill(199);
+            for (uint32_t index = 0; index < 128; ++index) names.push_back(string(128, 'z'));
+            return built;
+        }();
+        ASSERT_TRUE(output.Success);
+        const uint64_t pitch = Align(uint64_t{16}, device.GetDetail().TextureDataPitchAlignment);
+        auto readback = device.CreateBuffer({pitch * 4, render::MemoryType::ReadBack, render::BufferUse::MapRead | render::BufferUse::CopyDestination, {}});
+        ASSERT_TRUE(readback);
+        RenderExternalBuffer external{readback.Get(), readback->GetDesc(), render::BufferState::CopyDestination};
+        const auto host = graph.NextVersion(graph.ImportBuffer(external, "readback", RenderGraphExternalAccess::ObservableOutput));
+        graph.AddCopyTextureToBufferPass("read names result", output.Color, host);
+        HostRead(graph, host);
+        ASSERT_TRUE(Run(graph)) << graph.GetReport().ToText();
+        EXPECT_TRUE(stats.Succeeded());
+        EXPECT_EQ(stats.Draws, 3u);
+        EXPECT_EQ(graph.GetReport().CommandCalls.DrawIndexed, 3u);
+        EXPECT_EQ(graph.GetReport().CommandCalls.SetPipeline, 3u);
+        EXPECT_EQ(graph.GetReport().CommandCalls.SetParameters, 3u);
+        EXPECT_EQ(graph.GetReport().CommandCalls.VertexBuffer, 3u);
+        EXPECT_EQ(graph.GetReport().CommandCalls.IndexBuffer, 3u);
+        const auto bytes = Read(*readback);
+        ASSERT_EQ(bytes.size(), pitch * 4);
+        EXPECT_NEAR(std::to_integer<int>(bytes[pitch * 2 + 8]), 191, 1);
+    }
+}
+
+TEST_P(RendererListPassSetsTest, T21T22LiveListIsPreparedAfterCompileAndVisibilityKeepsClearTopology) {
+    auto& device = *Context.Device;
+    auto program = test::CompileFoundationGraphics(device, R"hlsl(
+[shader("vertex")] float4 VSMain(float3 p : POSITION) : SV_Position { return float4(p, 1); }
+[shader("pixel")] float4 PSMain() : SV_Target0 { return float4(1, 0, 0, 1); }
+)hlsl");
+    ASSERT_TRUE(program);
+    const array<float, 9> positions{-1, -1, .5f, 3, -1, .5f, -1, 3, .5f};
+    const array<uint32_t, 3> indices{0, 1, 2};
+    auto vertices = render::test::MakeUploadBuffer(device, std::as_bytes(std::span{positions}), render::BufferUse::Vertex);
+    auto indexBuffer = render::test::MakeUploadBuffer(device, std::as_bytes(std::span{indices}), render::BufferUse::Index);
+    ASSERT_TRUE(vertices);
+    ASSERT_TRUE(indexBuffer);
+    GpuMesh::DrawData geometry;
+    geometry.VertexBuffers = {{0, {vertices.Get(), 0, sizeof(positions)}}};
+    geometry.Ibv = {indexBuffer.Get(), 0, 4};
+    geometry.VertexLayout.Buffers = {{0, 12, render::VertexStepMode::Vertex}};
+    geometry.VertexLayout.Attributes = {{"POSITION", 0, 0, 0, render::VertexFormat::FLOAT32X3}};
+    MeshDrawCommand command;
+    command.Program = program.Get();
+    command.Geometry = &geometry;
+    command.IndexCount = 3;
+    command.PipelineState.Primitive.Cull = render::CullMode::None;
+    command.PipelineState.DepthStencil.DepthWriteEnable = false;
+    struct ListWork {
+        RendererList* List;
+        const MeshDrawCommand* Command;
+        bool Visible;
+        uint32_t* Calls;
+    };
+    const auto prepare = +[](ListWork& work, uint64_t mask) {
+        ++*work.Calls;
+        EXPECT_EQ(mask, 3u);
+        if (work.Visible) work.List->Commands.push_back(*work.Command);
+        return true;
+    };
+    uint64_t identity = 0;
+    for (uint32_t frame = 0; frame < 6; ++frame) {
+        Writes.Reset();
+        Resources->BeginFlight(frame + 2, Writes);
+        auto graph = MakeGraph("live visibility");
+        RendererList list, dead;
+        DrawExecutionStats stats, deadStats;
+        uint32_t calls = 0, deadCalls = 0;
+        const bool visible = frame % 2 != 0;
+        const auto work = graph.AddWork("live list", ListWork{&list, &command, visible, &calls}, prepare);
+        const auto culled = graph.AddWork("culled list", ListWork{&dead, &command, true, &deadCalls}, prepare);
+        const auto colorDesc = render::TextureDescriptor{render::TextureDimension::Dim2D, 4, 4, 1, 1, 1, render::TextureFormat::RGBA8_UNORM, render::MemoryType::Device, render::TextureUse::RenderTarget | render::TextureUse::CopySource, {}};
+        auto depthDesc = colorDesc;
+        depthDesc.Format = render::TextureFormat::D32_FLOAT;
+        depthDesc.Usage = render::TextureUse::DepthStencilWrite | render::TextureUse::DepthStencilRead;
+        auto color = graph.CreateTexture(colorDesc, "live color");
+        auto depth = graph.CreateTexture(depthDesc, "live depth");
+        ForwardGraphView view;
+        view.View.ViewRect = view.View.ScissorRect = {0, 0, 4, 4};
+        view.List = &list;
+        view.Work = work;
+        const auto first = ForwardGraph::BuildGraph(graph, ForwardGraphStage::Opaque,
+                                                    {.Name = "clear and draw", .Backend = GetParam(), .Views = std::span{&view, 1}, .Color = color, .Depth = depth, .ColorAttachment = {.Clear = {0, 1, 0, 1}}, .Execution = &stats});
+        ASSERT_TRUE(first.Success);
+        view.WorkMask = 2;
+        const auto second = ForwardGraph::BuildGraph(graph, ForwardGraphStage::Transparent,
+                                                     {.Name = "shared draw", .Backend = GetParam(), .Views = std::span{&view, 1}, .Color = first.Color, .Depth = first.Depth, .ColorAttachment = {.Load = render::LoadAction::Load}, .DepthAttachment = {.Load = render::LoadAction::Load, .ReadOnly = true}, .Execution = &stats});
+        ASSERT_TRUE(second.Success);
+        view.List = &dead;
+        view.Work = culled;
+        view.WorkMask = 3;
+        const auto unusedColor = graph.CreateTexture(colorDesc, "unused color");
+        const auto unusedDepth = graph.CreateTexture(depthDesc, "unused depth");
+        ASSERT_TRUE(ForwardGraph::BuildGraph(graph, ForwardGraphStage::Opaque,
+                                             {.Name = "unused draw", .Backend = GetParam(), .Views = std::span{&view, 1}, .Color = unusedColor, .Depth = unusedDepth, .Execution = &deadStats})
+                        .Success);
+        const uint64_t pitch = Align(uint64_t{16}, device.GetDetail().TextureDataPitchAlignment);
+        auto readback = device.CreateBuffer({pitch * 4, render::MemoryType::ReadBack, render::BufferUse::MapRead | render::BufferUse::CopyDestination, {}});
+        ASSERT_TRUE(readback);
+        RenderExternalBuffer external{readback.Get(), readback->GetDesc(), render::BufferState::CopyDestination};
+        const auto host = graph.NextVersion(graph.ImportBuffer(external, "readback", RenderGraphExternalAccess::ObservableOutput));
+        graph.AddCopyTextureToBufferPass("read live result", second.Color, host);
+        HostRead(graph, host);
+        ASSERT_TRUE(graph.Compile()) << graph.GetReport().ToText();
+        EXPECT_EQ(calls + deadCalls, 0u);
+        EXPECT_TRUE(list.Commands.empty());
+        EXPECT_EQ(graph.GetReport().GraphicsPipelinePreparations, 0u);
+        if (frame == 0)
+            identity = graph.GetReport().ExecutionPlanId;
+        else {
+            EXPECT_EQ(graph.GetReport().ExecutionPlanId, identity);
+            EXPECT_TRUE(graph.GetReport().CompilePlanReused);
+        }
+        ASSERT_TRUE(Run(graph)) << graph.GetReport().ToText();
+        EXPECT_EQ(calls, 1u);
+        EXPECT_EQ(deadCalls, 0u);
+        EXPECT_EQ(graph.GetReport().WorkRuns, 1u);
+        EXPECT_EQ(stats.Draws, visible ? 2u : 0u);
+        EXPECT_EQ(deadStats.Commands + deadStats.Draws, 0u);
+        EXPECT_EQ(graph.GetReport().GraphicsPipelinePreparations, visible ? 2u : 0u);
+        const auto bytes = Read(*readback);
+        ASSERT_EQ(bytes.size(), pitch * 4);
+        const auto center = pitch * 2 + 8;
+        EXPECT_EQ(std::to_integer<uint8_t>(bytes[center]), visible ? 255 : 0);
+        EXPECT_EQ(std::to_integer<uint8_t>(bytes[center + 1]), visible ? 0 : 255);
+    }
+}
+
+TEST_P(RendererListPassSetsTest, T05T06DistinctBuffersAndEquivalentLayoutsPrepareLinearly) {
+    auto& device = *Context.Device;
+    auto program = test::CompileFoundationGraphics(device, R"hlsl(
+[shader("vertex")] float4 VSMain(float3 p : POSITION) : SV_Position { return float4(p, 1); }
+[shader("pixel")] float4 PSMain() : SV_Target0 { return 1; }
+)hlsl");
+    ASSERT_TRUE(program);
+    uint64_t serial = 1;
+    for (const auto& options : {kDiagnosticRenderGraphRuntimeOptions, kPerformanceRenderGraphRuntimeOptions}) {
+        for (const uint32_t count : {1000u, 2000u, 4000u}) {
+            SCOPED_TRACE(fmt::format("validation {} geometry {}", uint32_t(options.Validation), count));
+            int live = 0;
+            vector<unique_ptr<test::UploadTestBuffer>> buffers;
+            vector<GpuMesh::DrawData> geometry(count);
+            PrimitiveVertexLayoutRegistry layouts;
+            RendererList list;
+            for (uint32_t index = 0; index < count; ++index) {
+                buffers.push_back(make_unique<test::UploadTestBuffer>(&device, render::BufferDescriptor{36, render::MemoryType::Device, render::BufferUse::Vertex, {}}, live));
+                buffers.push_back(make_unique<test::UploadTestBuffer>(&device, render::BufferDescriptor{12, render::MemoryType::Device, render::BufferUse::Index, {}}, live));
+                auto& value = geometry[index];
+                value.VertexBuffers = {{0, {buffers[buffers.size() - 2].get(), 0, 36}}};
+                value.Ibv = {buffers.back().get(), 0, 4};
+                value.VertexLayout.Buffers = {{0, 12, render::VertexStepMode::Vertex}};
+                value.VertexLayout.Attributes = {{"POSITION", 0, 0, 0, render::VertexFormat::FLOAT32X3}};
+                MeshDrawCommand command;
+                command.Program = program.Get();
+                command.Geometry = &value;
+                command.IndexCount = 3;
+                command.PipelineState.DepthStencil.DepthTestEnable = command.PipelineState.DepthStencil.DepthWriteEnable = false;
+                list.Commands.push_back(std::move(command));
+            }
+            // Exercise legacy mutable inputs and the cold-published identities separately.
+            for (const bool published : {false, true}) {
+                if (published)
+                    for (auto& command : list.Commands) command.LayoutId = layouts.Intern(command.Geometry->VertexLayout);
+                Writes.Reset();
+                Resources->BeginFlight(++serial, Writes);
+                RenderGraph graph{device, *Resources, *Registry, "geometry scaling", options};
+                struct Data {
+                    const RendererList* List;
+                    uint32_t Expected;
+                    std::optional<PreparedRendererList> Prepared;
+                };
+                const auto target = graph.CreateTexture({render::TextureDimension::Dim2D, 4, 4, 1, 1, 1, render::TextureFormat::RGBA8_UNORM, render::MemoryType::Device, render::TextureUse::RenderTarget, {}}, "target");
+                graph.AddRasterPass<Data>("prepare unique geometry", [&](Data& data, RenderGraphRasterBuilder& builder) {
+                    data.List = &list; data.Expected = count;
+                    builder.SetColorAttachment(0, target);
+                    builder.SetSideEffect(); }, +[](Data& data, RenderGraphPrepareContext& ctx) {
+                    data.Prepared = PrepareRendererList(*data.List, ctx);
+                    return data.Prepared.has_value(); }, +[](const Data& data, RenderGraphRasterContext&) {
+                    ASSERT_EQ(RenderGraphTestDriver::DrawCount(*data.Prepared), data.Expected);
+                    for (size_t index = 0; index < data.Expected; ++index)
+                        EXPECT_EQ(RenderGraphTestDriver::Pipeline(*data.Prepared, index), RenderGraphTestDriver::Pipeline(*data.Prepared, 0)); });
+                ASSERT_TRUE(Run(graph)) << graph.GetReport().ToText();
+                EXPECT_EQ(graph.GetReport().GraphicsPipelinePreparations, 1u);
+                EXPECT_EQ(graph.GetReport().GeometryValidationCalls, options.Validation == RenderValidationMode::Full ? uint64_t{count} * 2 : 0);
+                EXPECT_EQ(graph.GetReport().GeometryDeclarationScans, 0u);
+                if (published) EXPECT_EQ(layouts.Size(), 1u);
+            }
+        }
+    }
+}
+
+TEST_P(RendererListPassSetsTest, T07LayoutAttachmentsSamplesAndMirrorSelectAndRecordDistinctPipelines) {
+    auto& device = *Context.Device;
+    auto program = test::CompileFoundationGraphics(device, R"hlsl(
+[shader("vertex")] float4 VSMain(float3 p : POSITION) : SV_Position { return float4(p, 1); }
+[shader("pixel")] float4 PSMain(bool front : SV_IsFrontFace) : SV_Target0 { return float4(front ? .25 : .75, 0, 0, 1); }
+)hlsl");
+    ASSERT_TRUE(program);
+    const array<float, 9> positions{-1, -1, .5f, 3, -1, .5f, -1, 3, .5f};
+    const array<float, 12> padded{-1, -1, .5f, 0, 3, -1, .5f, 0, -1, 3, .5f, 0};
+    const array<uint32_t, 3> indices{0, 1, 2};
+    auto vertices = render::test::MakeUploadBuffer(device, std::as_bytes(std::span{positions}), render::BufferUse::Vertex);
+    auto paddedVertices = render::test::MakeUploadBuffer(device, std::as_bytes(std::span{padded}), render::BufferUse::Vertex);
+    auto indexBuffer = render::test::MakeUploadBuffer(device, std::as_bytes(std::span{indices}), render::BufferUse::Index);
+    ASSERT_TRUE(vertices);
+    ASSERT_TRUE(paddedVertices);
+    ASSERT_TRUE(indexBuffer);
+    array<GpuMesh::DrawData, 2> geometry;
+    PrimitiveVertexLayoutRegistry layouts;
+    for (uint32_t index = 0; index < 2; ++index) {
+        const uint32_t stride = index ? 16 : 12;
+        geometry[index].VertexBuffers = {{0, {index ? paddedVertices.Get() : vertices.Get(), 0, uint64_t{stride} * 3}}};
+        geometry[index].Ibv = {indexBuffer.Get(), 0, 4};
+        geometry[index].VertexLayout.Buffers = {{0, stride, render::VertexStepMode::Vertex}};
+        geometry[index].VertexLayout.Attributes = {{"POSITION", 0, 0, 0, render::VertexFormat::FLOAT32X3}};
+    }
+    uint64_t serial = 1;
+    for (const auto& options : {kDiagnosticRenderGraphRuntimeOptions, kPerformanceRenderGraphRuntimeOptions}) {
+        array<render::GraphicsPipelineState*, 7> pipelines{};
+        int baseline = 0;
+        for (uint32_t scenario = 0; scenario < 7; ++scenario) {
+            SCOPED_TRACE(fmt::format("validation {} scenario {}", uint32_t(options.Validation), scenario));
+            const uint32_t samples = scenario == 4 ? 4 : 1;
+            const auto format = scenario == 2 ? render::TextureFormat::BGRA8_UNORM : render::TextureFormat::RGBA8_UNORM;
+            const auto depthFormat = scenario == 3 ? render::TextureFormat::D16_UNORM : render::TextureFormat::D32_FLOAT;
+            RendererList list;
+            MeshDrawCommand draw;
+            draw.Program = program.Get();
+            draw.Geometry = &geometry[scenario == 1 ? 1 : 0];
+            draw.LayoutId = layouts.Intern(draw.Geometry->VertexLayout);
+            draw.IndexCount = 3;
+            draw.PipelineState.Primitive.Cull = render::CullMode::None;
+            draw.PipelineState.DepthStencil.DepthTestEnable = draw.PipelineState.DepthStencil.DepthWriteEnable = false;
+            if (scenario == 5)
+                draw.PipelineState.Primitive.FaceClockwise = draw.PipelineState.Primitive.FaceClockwise == render::FrontFace::CW ? render::FrontFace::CCW : render::FrontFace::CW;
+            list.Commands.push_back(draw);
+            list.Commands.push_back(draw);
+            Writes.Reset();
+            Resources->BeginFlight(++serial, Writes);
+            RenderGraph graph{device, *Resources, *Registry, "effective recipe variants", options};
+            const auto color = graph.CreateTexture({render::TextureDimension::Dim2D, 4, 4, 1, 1, samples, format, render::MemoryType::Device, render::TextureUse::RenderTarget | render::TextureUse::CopySource, {}}, "color");
+            const auto depth = graph.CreateTexture({render::TextureDimension::Dim2D, 4, 4, 1, 1, samples, depthFormat, render::MemoryType::Device, render::TextureUse::DepthStencilRead | render::TextureUse::DepthStencilWrite, {}}, "depth");
+            DrawExecutionStats stats;
+            struct Data {
+                const RendererList* List;
+                render::RenderBackend Backend;
+                DrawExecutionStats* Stats;
+                render::GraphicsPipelineState** Pipeline;
+                std::optional<PreparedRendererList> Prepared;
+            };
+            graph.AddRasterPass<Data>("record effective recipe", [&](Data& data, RenderGraphRasterBuilder& builder) {
+                data.List = &list; data.Backend = GetParam(); data.Stats = &stats; data.Pipeline = &pipelines[scenario];
+                builder.SetColorAttachment(0, color);
+                builder.SetDepthAttachment(depth); }, +[](Data& data, RenderGraphPrepareContext& ctx) {
+                data.Prepared = PrepareRendererList(*data.List, ctx);
+                if (!data.Prepared) return false;
+                *data.Pipeline = RenderGraphTestDriver::Pipeline(*data.Prepared, 0);
+                return true; }, +[](const Data& data, RenderGraphRasterContext& ctx) {
+                ctx.Encoder().SetViewport(MakeViewport(data.Backend, 0, 0, 4, 4));
+                ctx.Encoder().SetScissor({0, 0, 4, 4});
+                RecordRendererList(*data.Prepared, ctx, *data.Stats); });
+            auto resolved = color;
+            if (samples > 1) {
+                resolved = graph.CreateTexture({render::TextureDimension::Dim2D, 4, 4, 1, 1, 1, format, render::MemoryType::Device, render::TextureUse::CopyDestination | render::TextureUse::CopySource, {}}, "resolved");
+                graph.AddResolveTexturePass("resolve", color, resolved);
+            }
+            const uint64_t pitch = Align(uint64_t{16}, device.GetDetail().TextureDataPitchAlignment);
+            auto readback = device.CreateBuffer({pitch * 4, render::MemoryType::ReadBack, render::BufferUse::MapRead | render::BufferUse::CopyDestination, {}});
+            ASSERT_TRUE(readback);
+            RenderExternalBuffer external{readback.Get(), readback->GetDesc(), render::BufferState::CopyDestination};
+            const auto host = graph.NextVersion(graph.ImportBuffer(external, "readback", RenderGraphExternalAccess::ObservableOutput));
+            graph.AddCopyTextureToBufferPass("read recipe result", resolved, host);
+            HostRead(graph, host);
+            ASSERT_TRUE(Run(graph)) << graph.GetReport().ToText();
+            EXPECT_TRUE(stats.Succeeded());
+            EXPECT_EQ(stats.Draws, 2u);
+            EXPECT_EQ(graph.GetReport().CommandCalls.DrawIndexed, 2u);
+            EXPECT_EQ(graph.GetReport().CommandCalls.SetPipeline, 1u);
+            EXPECT_EQ(graph.GetReport().CommandCalls.VertexBuffer, 1u);
+            EXPECT_EQ(graph.GetReport().CommandCalls.IndexBuffer, 1u);
+            EXPECT_EQ(graph.GetReport().CommandCalls.Resolve, scenario == 4 ? 1u : 0u);
+            EXPECT_EQ(graph.GetReport().GraphicsPipelinePreparations, 1u);
+            const auto bytes = Read(*readback);
+            ASSERT_EQ(bytes.size(), pitch * 4);
+            const int red = std::to_integer<int>(bytes[pitch * 2 + 8 + (scenario == 2 ? 2 : 0)]);
+            if (scenario == 0) {
+                baseline = red;
+                EXPECT_TRUE(std::abs(red - 64) <= 1 || std::abs(red - 191) <= 1);
+            } else {
+                EXPECT_NEAR(red, scenario == 5 ? 255 - baseline : baseline, 1);
+                if (scenario == 6)
+                    EXPECT_EQ(pipelines[scenario], pipelines[0]);
+                else
+                    for (uint32_t earlier = 0; earlier < scenario; ++earlier) EXPECT_NE(pipelines[scenario], pipelines[earlier]);
+            }
+        }
+    }
+    EXPECT_EQ(program->GetGraphicsPipelineStateCount(), 6u);
+}
 
 string BindingProgram(uint32_t group) {
     return fmt::format(R"hlsl(
@@ -284,14 +661,22 @@ TEST_P(RendererListPassSetsTest, InvalidItemIndexDuplicateAndIncompleteOrderFail
             builder.SetColorAttachment(0, color);
             builder.SetSideEffect(); }, +[](Data& data, RenderGraphPrepareContext& ctx) {
             data.Prepared = PrepareRendererList(*data.List, ctx);
-            return data.Prepared.has_value(); }, +[](const Data&, RenderGraphRasterContext&) {
-            ADD_FAILURE() << "An invalid draw order reached recording";
-        });
+            return data.Prepared.has_value(); }, +[](const Data&, RenderGraphRasterContext&) { ADD_FAILURE() << "An invalid draw order reached recording"; });
         EXPECT_FALSE(Run(graph));
         EXPECT_EQ(graph.GetReport().GraphicsPipelinePreparations, 0u);
         EXPECT_EQ(graph.GetFirstErrorCode(), "RendererListPreparation");
         ASSERT_FALSE(graph.GetReport().Diagnostics.empty());
         EXPECT_EQ(graph.GetReport().Diagnostics.front().Code, "RendererListPreparation");
+
+        auto setsGraph = MakeGraph("invalid order before pass sets");
+        const auto setsColor = MakeSmallTarget(setsGraph, "color");
+        setsGraph.AddRasterPass<const RendererList*>("reject order before program lookup", [&](const RendererList*& data, RenderGraphRasterBuilder& builder) {
+            data = &list;
+            builder.SetColorAttachment(0, setsColor);
+            builder.SetSideEffect(); }, +[](const RendererList*& data, RenderGraphPrepareContext& ctx) { return RendererListPassSets::Create(ctx, *data, {}).has_value(); }, +[](const RendererList* const&, RenderGraphRasterContext&) { ADD_FAILURE() << "An invalid draw order reached pass set recording"; });
+        EXPECT_FALSE(Run(setsGraph));
+        EXPECT_EQ(setsGraph.GetFirstErrorCode(), "RendererListPreparation");
+        EXPECT_EQ(setsGraph.GetReport().GraphicsPipelinePreparations, 0u);
     }
 }
 
@@ -355,7 +740,8 @@ VK_BINDING(0, 0) ConstantBuffer<Values> Color : register(b0);
 VK_BINDING(0, 1) ConstantBuffer<Values> Factor : register(b0, space1);
 [shader("vertex")] float4 VSMain(float3 p : POSITION) : SV_Position { return float4(p, 1); }
 [shader("pixel")] float4 PSMain() : SV_Target0 { return Color.Value * Factor.Value; }
-)hlsl", recipe);
+)hlsl",
+                                                   recipe);
     ASSERT_TRUE(program);
     const uint32_t alignment = static_cast<uint32_t>(std::max<uint64_t>(device.GetDetail().CBufferAlignment, 256));
     vector<byte> constants(alignment * 3);
@@ -414,24 +800,20 @@ VK_BINDING(0, 1) ConstantBuffer<Values> Factor : register(b0, space1);
     };
     graph.AddRasterPass<Data>("blue red green", [&](Data& data, RenderGraphRasterBuilder& builder) {
         builder.SetColorAttachment(0, color);
-        data = {&list, &prepared, &stats, GetParam()};
-    }, +[](Data& data, RenderGraphPrepareContext& ctx) {
+        data = {&list, &prepared, &stats, GetParam()}; }, +[](Data& data, RenderGraphPrepareContext& ctx) {
         *data.Prepared = PrepareRendererList(*data.Source, ctx);
         if (!*data.Prepared) return false;
-        const auto& draws = (*data.Prepared)->Draws;
-        EXPECT_EQ(draws.size(), 3u);
-        for (size_t index = 0; index < draws.size(); ++index) {
-            EXPECT_EQ(draws[index].Description, &data.Source->GetCommand(index));
-            EXPECT_EQ(draws[index].Groups.data(), data.Source->GetCommand(index).Groups.data());
-            EXPECT_TRUE(draws[index].PassGroups.empty());
-            EXPECT_NE(draws[index].Pipeline, nullptr);
+        const auto& ready = **data.Prepared;
+        EXPECT_EQ(RenderGraphTestDriver::DrawCount(ready), 3u);
+        for (size_t index = 0; index < RenderGraphTestDriver::DrawCount(ready); ++index) {
+            const auto& description = data.Source->GetDescription(index);
+            EXPECT_EQ(RenderGraphTestDriver::DrawArguments(ready, index), (array<int64_t, 3>{description.IndexCount, description.FirstIndex, description.VertexOffset}));
+            EXPECT_NE(RenderGraphTestDriver::Pipeline(ready, index), nullptr);
         }
-        return true;
-    }, +[](const Data& data, RenderGraphRasterContext& context) {
+        return true; }, +[](const Data& data, RenderGraphRasterContext& context) {
         context.Encoder().SetViewport(MakeViewport(data.Backend, 0, 0, 16, 16));
         context.Encoder().SetScissor({0, 0, 16, 16});
-        RecordRendererList(**data.Prepared, context, *data.Stats);
-    });
+        RecordRendererList(**data.Prepared, context, *data.Stats); });
     const auto pitch = Align(uint64_t{16 * 4}, device.GetDetail().TextureDataPitchAlignment);
     auto readback = device.CreateBuffer({pitch * 16, render::MemoryType::ReadBack, render::BufferUse::MapRead | render::BufferUse::CopyDestination, {}});
     ASSERT_TRUE(readback);
@@ -454,10 +836,7 @@ VK_BINDING(0, 1) ConstantBuffer<Values> Factor : register(b0, space1);
     foreign.AddRasterPass<Data>("reject previous graph", [&](Data& data, RenderGraphRasterBuilder& builder) {
         data = {&list, &prepared, &rejected, GetParam()};
         builder.SetColorAttachment(0, foreignColor);
-        builder.SetSideEffect();
-    }, +[](const Data& data, RenderGraphRasterContext& context) {
-        RecordRendererList(**data.Prepared, context, *data.Stats);
-    });
+        builder.SetSideEffect(); }, +[](const Data& data, RenderGraphRasterContext& context) { RecordRendererList(**data.Prepared, context, *data.Stats); });
     EXPECT_FALSE(Run(foreign));
     EXPECT_EQ(rejected.Draws, 0u);
     EXPECT_EQ(rejected.BindingFailure, 3u);
@@ -683,8 +1062,7 @@ TEST_P(RendererListPassSetsTest, PassSetsFromAnotherPassAreRejected) {
             builder.SetColorAttachment(0, borrowed);
             builder.SetSideEffect(); }, +[](Borrower& data, RenderGraphPrepareContext& ctx) {
             if (!*data.Shared) return false;
-            return PrepareRendererList(*data.List, ctx, &**data.Shared).has_value(); },
-            +[](const Borrower&, RenderGraphRasterContext&) { ADD_FAILURE() << "Sets from another pass reached recording"; });
+            return PrepareRendererList(*data.List, ctx, &**data.Shared).has_value(); }, +[](const Borrower&, RenderGraphRasterContext&) { ADD_FAILURE() << "Sets from another pass reached recording"; });
         EXPECT_FALSE(Run(graph));
         EXPECT_TRUE(graph.HasFailed());
         EXPECT_EQ(graph.GetFirstErrorCode(), "RendererListPassSets");

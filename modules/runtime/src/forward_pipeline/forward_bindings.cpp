@@ -3,8 +3,81 @@
 #include <algorithm>
 
 #include <radray/logger.h>
+#include <radray/runtime/render_framework/render_pipeline.h>
+#include <radray/runtime/render_framework/renderer_list.h>
 
 namespace radray::forward_detail {
+
+namespace {
+constexpr size_t kView = static_cast<size_t>(StaticBindingRole::View);
+constexpr size_t kMaterial = static_cast<size_t>(StaticBindingRole::Material);
+constexpr size_t kObject = static_cast<size_t>(StaticBindingRole::Object);
+constexpr size_t kPass = static_cast<size_t>(StaticBindingRole::Pass);
+
+bool CompileForwardStatic(const StaticPassCompileInput& input, StaticPassCompileResult& result, bool readOnlyDepth) {
+    if (input.Bindings)
+        result.Bindings = *input.Bindings;
+    else if (const auto bindings = ResolveProgramBindings(*input.Pass.Program)) {
+        result.Bindings.Buffers = {bindings->ViewBufferIndex, bindings->MaterialBufferIndex, bindings->ObjectBufferIndex, UINT32_MAX};
+        result.Bindings.Groups = {bindings->ViewGroup, bindings->MaterialGroup, bindings->ObjectGroup, bindings->PassGroup.value_or(UINT32_MAX)};
+        std::copy(bindings->GroupOrder.begin(), bindings->GroupOrder.end(), result.Bindings.GroupOrder.begin());
+        result.Bindings.GroupCount = 3;
+        result.Bindings.Valid = true;
+    }
+    result.NormalState = input.Pass.PipelineState;
+    result.NormalState.DepthStencil.DepthTestEnable = true;
+    result.NormalState.DepthStencil.DepthCompare = render::CompareFunction::LessEqual;
+    result.NormalState.DepthStencil.DepthWriteEnable = !readOnlyDepth && RenderQueueRange::Opaque().Contains(input.Queue);
+    if (!result.NormalState.DepthStencil.DepthWriteEnable && result.NormalState.DepthStencil.Stencil)
+        result.NormalState.DepthStencil.Stencil->WriteMask = 0;
+    result.MirroredState = result.NormalState;
+    result.MirroredState.Primitive.FaceClockwise = OppositeFrontFace(result.NormalState.Primitive.FaceClockwise);
+    return result.Bindings.Valid && input.Pass.ParameterGroup == result.Bindings.Groups[kMaterial];
+}
+
+bool CompileForwardLit(const StaticPassCompileInput& input, StaticPassCompileResult& result) { return CompileForwardStatic(input, result, false); }
+bool CompileForwardReadOnlyDepth(const StaticPassCompileInput& input, StaticPassCompileResult& result) { return CompileForwardStatic(input, result, true); }
+bool CompileDepthOnly(const StaticPassCompileInput& input, StaticPassCompileResult& result) {
+    if (input.Bindings)
+        result.Bindings = *input.Bindings;
+    else if (const auto bindings = ResolveDepthOnlyProgramBindings(*input.Pass.Program)) {
+        result.Bindings.Buffers[kView] = bindings->ViewBufferIndex;
+        result.Bindings.Buffers[kObject] = bindings->ObjectBufferIndex;
+        result.Bindings.Groups[kView] = bindings->ViewGroup;
+        result.Bindings.Groups[kObject] = bindings->ObjectGroup;
+        result.Bindings.GroupOrder[0] = bindings->ViewGroup < bindings->ObjectGroup ? kView : kObject;
+        result.Bindings.GroupOrder[1] = bindings->ViewGroup < bindings->ObjectGroup ? kObject : kView;
+        result.Bindings.GroupCount = 2;
+        result.Bindings.Valid = true;
+    }
+    result.NormalState = input.Pass.PipelineState;
+    result.NormalState.DepthStencil.DepthTestEnable = true;
+    result.NormalState.DepthStencil.DepthWriteEnable = true;
+    result.MirroredState = result.NormalState;
+    result.MirroredState.Primitive.FaceClockwise = OppositeFrontFace(result.NormalState.Primitive.FaceClockwise);
+    return result.Bindings.Valid && !input.Pass.ParameterGroup;
+}
+}  // namespace
+
+bool RegisterForwardPassPolicies(RenderPrepareContext& context, const Scene& scene) {
+    const PassPolicy policies[]{
+        {kForwardLitPolicy, 1, "ForwardLit", CompileForwardLit},
+        {kForwardLitReadOnlyDepthPolicy, 1, "ForwardLit", CompileForwardReadOnlyDepth},
+        {kDepthOnlyPolicy, 1, "DepthOnly", CompileDepthOnly},
+        {kDepthNormalsMotionPolicy, 1, "DepthNormalsMotion", CompileForwardLit},
+        {kShadowCasterPolicy, 1, "ShadowCaster", CompileForwardLit}};
+    bool success = true;
+    for (const auto& policy : policies) success &= context.RegisterScenePolicy(scene, policy);
+    return success;
+}
+
+ForwardProgramBindings ReadForwardStaticBindings(const StaticBindingRecipe& recipe) noexcept {
+    ForwardProgramBindings result{recipe.Buffers[kView], recipe.Buffers[kMaterial], recipe.Buffers[kObject],
+                                  recipe.Groups[kView], recipe.Groups[kMaterial], recipe.Groups[kObject]};
+    if (recipe.Groups[kPass] != UINT32_MAX) result.PassGroup = recipe.Groups[kPass];
+    std::copy_n(recipe.GroupOrder.begin(), result.GroupOrder.size(), result.GroupOrder.begin());
+    return result;
+}
 
 std::optional<ForwardProgramBindings> ResolveProgramBindings(const ShaderProgram& program) {
     const ShaderParameterLayout& layout = program.GetParameterLayout();
@@ -28,7 +101,7 @@ std::optional<ForwardProgramBindings> ResolveProgramBindings(const ShaderProgram
     for (const auto& buffer : layout.Buffers())
         if (buffer.Name == "ForwardPass") passGroup = buffer.Group;
     if (layout.Buffers().size() == 4 && !passGroup) return std::nullopt;
-    const ForwardProgramBindings bindings{
+    ForwardProgramBindings bindings{
         *view, *material, *object,
         layout.Buffers()[*view].Group,
         layout.Buffers()[*material].Group,
@@ -57,19 +130,22 @@ std::optional<ForwardProgramBindings> ResolveProgramBindings(const ShaderProgram
             return std::nullopt;
         }
     }
+    const uint32_t groups[]{bindings.ViewGroup, bindings.MaterialGroup, bindings.ObjectGroup};
+    std::sort(bindings.GroupOrder.begin(), bindings.GroupOrder.end(), [&](uint8_t a, uint8_t b) { return groups[a] < groups[b]; });
     return bindings;
 }
 
 Nullable<const ForwardProgramBindings*> ForwardBindingCache::Resolve(ShaderProgram* program) {
-    auto found = _programs.find(program);
-    if (found == _programs.end()) {
+    auto [found, inserted] = _programs.try_emplace(program);
+    auto& entry = found->second;
+    if (inserted || entry.Generation != program->GetGeneration()) {
         ++_layoutParses;
-        found = _programs.emplace(program, ResolveProgramBindings(*program)).first;
-        if (!found->second.has_value()) {
+        entry = {program->GetGeneration(), ResolveProgramBindings(*program)};
+        if (!entry.Bindings.has_value()) {
             RADRAY_ERR_LOG("forward pipeline rejected an incompatible shader program");
         }
     }
-    return found->second.has_value() ? &*found->second : nullptr;
+    return entry.Bindings.has_value() ? &*entry.Bindings : nullptr;
 }
 
 std::optional<DepthOnlyProgramBindings> ResolveDepthOnlyProgramBindings(const ShaderProgram& program) {
@@ -97,13 +173,14 @@ std::optional<DepthOnlyProgramBindings> ResolveDepthOnlyProgramBindings(const Sh
 }
 
 Nullable<const DepthOnlyProgramBindings*> DepthOnlyBindingCache::Resolve(ShaderProgram* program) {
-    auto found = _programs.find(program);
-    if (found == _programs.end()) {
+    auto [found, inserted] = _programs.try_emplace(program);
+    auto& entry = found->second;
+    if (inserted || entry.Generation != program->GetGeneration()) {
         ++_layoutParses;
-        found = _programs.emplace(program, ResolveDepthOnlyProgramBindings(*program)).first;
-        if (!found->second) RADRAY_ERR_LOG("DepthOnly rejected an incompatible shader program; its depth draws are disabled");
+        entry = {program->GetGeneration(), ResolveDepthOnlyProgramBindings(*program)};
+        if (!entry.Bindings) RADRAY_ERR_LOG("DepthOnly rejected an incompatible shader program; its depth draws are disabled");
     }
-    return found->second ? &*found->second : nullptr;
+    return entry.Bindings ? &*entry.Bindings : nullptr;
 }
 
 }  // namespace radray::forward_detail

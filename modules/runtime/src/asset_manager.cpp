@@ -1,6 +1,7 @@
 #include <radray/runtime/asset_manager.h>
 
 #include <radray/logger.h>
+#include <radray/profiler.h>
 #include <radray/runtime/wait_frame.h>
 
 namespace radray {
@@ -498,6 +499,7 @@ void AssetManager::FlushDeferredBatch() {
 }
 
 void AssetManager::Pump() {
+    RADRAY_PROFILE_SCOPE_N("AssetManager::Pump");
     PumpLoadResults();
     CollectZeroRefSlots();
     FlushDeferredBatch();

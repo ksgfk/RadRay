@@ -2,6 +2,7 @@
 
 #include <bit>
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
 #include <type_traits>
 #include <utility>
@@ -10,6 +11,13 @@
 
 namespace radray {
 namespace {
+
+uint64_t AllocateProgramGeneration() noexcept {
+    static std::atomic<uint64_t> next{1};
+    const auto result = next.fetch_add(1, std::memory_order_relaxed);
+    if (result == 0) RADRAY_ABORT("Shader program identity exhausted");
+    return result;
+}
 
 template <typename T>
 void AddEnum(HashCode& hash, T value) noexcept {
@@ -175,6 +183,7 @@ ShaderProgram::ShaderProgram(
     unique_ptr<render::Shader> computeShader,
     string computeEntry) noexcept
     : _device(device),
+      _generation(AllocateProgramGeneration()),
       _artifact(std::move(artifact)),
       _vertexShader(std::move(vertexShader)),
       _vertexEntry(std::move(vertexEntry)),

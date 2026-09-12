@@ -37,6 +37,7 @@ struct Material::ResourceState {
 
     vector<TextureValue> Textures;
     vector<SamplerValue> Samplers;
+    vector<uint32_t> PendingTextures;
 };
 
 Nullable<unique_ptr<Material>> Material::Create(const MaterialTechnique* technique) {
@@ -60,38 +61,111 @@ Material::Material(const MaterialTechnique* technique)
     _observedNumericBytes = _numericBytes;
 }
 
-Material::~Material() noexcept = default;
-
-void Material::MarkChanged() const noexcept {
-    if (_revision == UINT64_MAX) RADRAY_ABORT("Material revision exhausted");
-    ++_revision;
+Material::~Material() noexcept {
+    NotifyChanged(MaterialDirtyKind::Removed);
 }
 
-uint64_t Material::GetRevision() const noexcept {
-    // Mutable pipeline-state references are part of the authoring API; observe their values on GT.
-    if (_observedPipelineStates != _pipelineStates) {
-        _observedPipelineStates = _pipelineStates;
-        MarkChanged();
+void Material::AddChangeListener(void* context, ChangeCallback callback) {
+    const auto found = std::find_if(_changeListeners.begin(), _changeListeners.end(),
+                                    [context](const auto& listener) { return listener.Context == context; });
+    if (found == _changeListeners.end()) _changeListeners.push_back({context, callback});
+}
+
+void Material::RemoveChangeListener(void* context) noexcept {
+    std::erase_if(_changeListeners, [context](const auto& listener) { return listener.Context == context; });
+}
+
+void Material::NotifyChanged(MaterialDirtyFlags flags) const noexcept {
+    for (const auto& listener : _changeListeners) listener.Callback(listener.Context, const_cast<Material&>(*this), flags);
+}
+
+void Material::MarkEscaped(bool& flag) noexcept {
+    if (flag) return;
+    flag = true;
+    NotifyChanged(MaterialDirtyKind::Observe);
+}
+
+void Material::RetainAssetReferences(vector<StreamingAssetRefAny>& out) const {
+    for (const auto& value : _resources->Textures)
+        if (value.ObservedTexture) out.push_back(value.Texture.AsAny());
+}
+
+void Material::MarkChanged(ChangeKind kind, bool tracked) const noexcept {
+    if (_revisions.Revision == UINT64_MAX) RADRAY_ABORT("Material revision exhausted");
+    ++_revisions.Revision;
+    switch (kind) {
+        case ChangeKind::Values:
+            ++_revisions.ValuesRevision;
+            NotifyChanged(MaterialDirtyKind::Values);
+            break;
+        case ChangeKind::Bindings:
+            ++_revisions.BindingsRevision;
+            NotifyChanged(MaterialDirtyKind::Bindings);
+            break;
+        case ChangeKind::Structure:
+            ++_revisions.StructureRevision;
+            NotifyChanged(MaterialDirtyKind::Structure);
+            break;
     }
-    // Typed As<T>() writes go straight to the bytes, so revision follows the bytes for both paths.
-    if (_observedNumericBytes != _numericBytes) {
-        _observedNumericBytes = _numericBytes;
-        MarkChanged();
+    if (tracked) ++_observationStats.TrackedChanges;
+}
+
+void Material::ObserveChanges() const noexcept {
+    if (HasEscapedWrites()) ++_observationStats.LegacyMaterialsObserved;
+    if (_pipelineStateEscaped) {
+        _observationStats.LegacyBytesCompared += _pipelineStates.size() * sizeof(MaterialPipelineState);
+        if (_observedPipelineStates != _pipelineStates) {
+            _observedPipelineStates = _pipelineStates;
+            MarkChanged(ChangeKind::Structure, false);
+        }
     }
-    for (auto& value : _resources->Textures) {
+    if (_numericEscaped) {
+        _observationStats.LegacyBytesCompared += _numericBytes.size();
+        if (_observedNumericBytes != _numericBytes) {
+            _observedNumericBytes = _numericBytes;
+            MarkChanged(ChangeKind::Values, false);
+        }
+    }
+    auto& pending = _resources->PendingTextures;
+    for (size_t index = 0; index < pending.size();) {
+        auto& value = _resources->Textures[pending[index]];
+        ++_observationStats.PendingResourcesObserved;
         const auto ready = value.Texture.Get();
         if (ready != value.ObservedTexture) {
             value.ObservedTexture = ready;
-            MarkChanged();
+            MarkChanged(ChangeKind::Bindings, false);
+        }
+        if (value.Texture.IsCompleted()) {
+            pending[index] = pending.back();
+            pending.pop_back();
+        } else {
+            ++index;
         }
     }
-    return _revision;
+}
+
+uint64_t Material::GetRevision() const noexcept {
+    ObserveChanges();
+    return _revisions.Revision;
+}
+
+MaterialRevisions Material::GetRevisions(uint64_t epoch) const noexcept {
+    if (_observedEpoch != epoch) {
+        ObserveChanges();
+        _observedEpoch = epoch;
+        _epochRevisions = _revisions;
+    }
+    return _epochRevisions;
+}
+
+bool Material::HasPendingResources() const noexcept {
+    return !_resources->PendingTextures.empty();
 }
 
 void Material::SetRenderQueue(RenderQueue value) noexcept {
     if (_renderQueue == value) return;
     _renderQueue = value;
-    MarkChanged();
+    MarkChanged(ChangeKind::Structure);
 }
 
 string Material::CanonicalName(std::string_view name) const {
@@ -102,7 +176,11 @@ string Material::CanonicalName(std::string_view name) const {
 bool Material::SetPassPipelineState(std::string_view pass, const MaterialPipelineState& state) noexcept {
     const auto layout = _technique->FindPass(pass);
     if (!layout) return false;
-    _pipelineStates[layout.Get() - _technique->Passes().data()] = state;
+    const auto index = layout.Get() - _technique->Passes().data();
+    if (_pipelineStates[index] == state) return true;
+    _pipelineStates[index] = state;
+    _observedPipelineStates[index] = state;
+    MarkChanged(ChangeKind::Structure);
     return true;
 }
 
@@ -163,7 +241,19 @@ bool Material::SetNumericBytes(std::string_view name, ShaderParameterKind kind,
     const uint64_t offset = uint64_t{parameter->ByteOffset} + uint64_t{element} * parameter->Stride;
     if (offset > bytes.size() || value.size() > bytes.size() - offset) return false;
     if (std::memcmp(bytes.data() + offset, value.data(), value.size()) == 0) return true;
-    return _parameters.SetBytes(*parameter, kind, value, element);
+    if (!_parameters.SetBytes(*parameter, kind, value, element)) return false;
+    std::memcpy(_observedNumericBytes.data() + offset, value.data(), value.size());
+    MarkChanged(ChangeKind::Values);
+    return true;
+}
+
+bool Material::SetNumericData(std::span<const byte> value) noexcept {
+    if (value.size() != _numericBytes.size()) return false;
+    if (std::equal(value.begin(), value.end(), _numericBytes.begin())) return true;
+    std::copy(value.begin(), value.end(), _numericBytes.begin());
+    _observedNumericBytes = _numericBytes;
+    MarkChanged(ChangeKind::Values);
+    return true;
 }
 
 bool Material::SetTexture(
@@ -196,8 +286,13 @@ bool Material::SetTexture(
             .Element = element,
             .Texture = std::move(texture),
             .SubView = subView});
+        found = _resources->Textures.end() - 1;
     }
-    MarkChanged();
+    found->ObservedTexture = found->Texture.Get();
+    const auto index = static_cast<uint32_t>(found - _resources->Textures.begin());
+    std::erase(_resources->PendingTextures, index);
+    if (!found->Texture.IsCompleted()) _resources->PendingTextures.push_back(index);
+    MarkChanged(ChangeKind::Bindings);
     return true;
 }
 
@@ -229,14 +324,21 @@ bool Material::SetSampler(
             .Element = element,
             .Sampler = sampler});
     }
-    MarkChanged();
+    MarkChanged(ChangeKind::Bindings);
     return true;
 }
 
 bool Material::BuildRenderData(MaterialRenderData& out, vector<StreamingAssetRefAny>& retainedAssets,
-                               Nullable<uint64_t*> bytesCopied) const {
+                               Nullable<uint64_t*> bytesCopied,
+                               std::optional<uint64_t> observationEpoch) const {
     if (bytesCopied != nullptr) *bytesCopied = 0;
-    const uint64_t revision = GetRevision();
+    if (observationEpoch)
+        GetRevisions(*observationEpoch);
+    else
+        ObserveChanges();
+    const auto revisions = observationEpoch ? _epochRevisions : _revisions;
+    if (revisions.Revision != _revisions.Revision) return false;
+    const uint64_t revision = revisions.Revision;
     const auto retainReadyTextures = [&] {
         for (const auto& value : _resources->Textures)
             if (value.ObservedTexture) retainedAssets.push_back(value.Texture.AsAny());
@@ -258,6 +360,7 @@ bool Material::BuildRenderData(MaterialRenderData& out, vector<StreamingAssetRef
         pass.Samplers.clear();
         pass.PassName = layout.Name;
         pass.Program = layout.Program;
+        pass.ProgramGeneration = layout.Program->GetGeneration();
         pass.ParameterGroup = layout.ParameterGroup;
         pass.PipelineState = _pipelineStates[index];
         pass.Valid = true;
@@ -300,6 +403,9 @@ bool Material::BuildRenderData(MaterialRenderData& out, vector<StreamingAssetRef
     }
     snapshot.Generation = _generation;
     snapshot.Revision = revision;
+    snapshot.StructureRevision = revisions.StructureRevision;
+    snapshot.ValuesRevision = revisions.ValuesRevision;
+    snapshot.BindingsRevision = revisions.BindingsRevision;
     if (anyValid) retainReadyTextures();
     return anyValid;
 }

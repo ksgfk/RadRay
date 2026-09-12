@@ -109,6 +109,7 @@ void ApplicationScheduler::CancelRecord(ApplicationSchedulerRecord* record) noex
 }
 
 void ApplicationScheduler::Pump() {
+    RADRAY_PROFILE_SCOPE_N("ApplicationScheduler::Pump");
     const size_t recordCount = _records.Count();
     for (size_t i = 0; i < recordCount && !_records.Empty(); ++i) {
         ApplicationSchedulerRecord* record = _records.Front();
@@ -719,7 +720,10 @@ public:
 
         const uint64_t frameIndex = gpuSystem->GetFrameIndex();
         const uint32_t flightIndex = static_cast<uint32_t>(frameIndex % gpuSystem->GetFlightDataCount());
-        gpuSystem->BeginUpdateForFlight(flightIndex);
+        {
+            RADRAY_PROFILE_SCOPE_N("Application::GpuBeginUpdateForFlight");
+            gpuSystem->BeginUpdateForFlight(flightIndex);
+        }
 
         const auto now = std::chrono::steady_clock::now();
         const std::chrono::duration<float> deltaTime = now - _lastFrameTime;

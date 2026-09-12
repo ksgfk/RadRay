@@ -79,36 +79,99 @@ ctest --test-dir build_runtime_only -C Debug --output-on-failure
 
 ## Runtime 阶段采样
 
-启用 JIT 时，`test_runtime_profile` 的默认 gtest 回归用 1000 个双 section primitive 验证
-对象参数复用、PSO 预热、普通帧不序列化和空闲 GC 不扫描。扩展采样在同一机器上运行：
+启用 JIT 时，`test_runtime_profile` 提供单视图 micro 与 runtime 内三视图综合 fixture。默认 gtest
+只运行短冒烟；正式采样使用 `modules/runtime/tests/run_runtime_profile.ps1`，默认每轮预热 120 帧、
+采样 1,000 帧、重复 5 轮。两个模式显式配置 RG validation、report、GPU markers、驱动验证与报告
+序列化，日志打印有效值；序列化要求 Full report，但 Full report 不自动启用序列化。
 
 ```powershell
-cmake --build build_debug --config Release --target test_runtime_profile --parallel 24
-$env:RADRAY_RUNTIME_PROFILE = '1'
-& .\build_debug\_build\Release\test_runtime_profile.exe > build_debug/runtime-profile-release.log 2>&1
-Remove-Item Env:RADRAY_RUNTIME_PROFILE
+cmake --build build_release --config Release --target test_runtime_profile --parallel 24
+pwsh -File modules/runtime/tests/run_runtime_profile.ps1 -Executable build_release/_build/Release/test_runtime_profile.exe -OutputDirectory validation/runtime-release -Backend D3D12 -Fixture integrated
 ```
 
-扩展模式包含 1千/1万/10万 primitive、静止/全部移动、普通/JSON+DOT 导出；每组预热 3 帧后
-采样 32 帧，输出 `PROFILE` JSON 行的 p50/p95/p99。相同命令可换 Debug 对照，采样固定关闭 GPU
-validation，16×16 离屏、单 Direct queue，逐帧等待 GPU，用于隔离 CPU 阶段成本，不测实际帧流水并行度。
-该场景只有共享材质和双 section 几何，不代表复杂产品场景或大规模 GPU-driven 能力。
+`-BaselineExecutable` 指向包含同一测量 harness 的旧实现时，runner 每轮交替旧/新顺序。`-LowChange`
+测量 1% 对象变换；`-Fixture micro` 隔离局部阶段，不能替代综合场景。`-Validation full`、
+`-Report full`、`-GpuMarkers`、`-DriverValidation`、`-SerializeReport` 分别控制诊断与输出。
+不通过关闭效果或减少 draw/视图来比较两个版本。需要直接运行可执行文件时，
+`RADRAY_RUNTIME_PROFILE=1` 启用扩展规程，`RADRAY_PROFILE_WARMUP/SAMPLES/ROUNDS/PRIMITIVES`
+可覆盖计数；不设置扩展变量时保留短冒烟。
 
-计时包括 proxy transform、asset Pump、snapshot、Cull、list/参数、graph setup/execute、诊断序列化、
-flush/submit 与 GPU wait。分配计数只覆盖采样线程
-在本测试可执行文件中调用的 C++ new，不包含 DLL/驱动/malloc。flight 重置、完成回调和 graph 析构在计时范围外，阶段耗时之和不代表
-完整 CPU 帧成本；收据缩短 CPU 数据寿命的效果需要另外测量常驻内存。
-`PROFILE_COUNTS` 报告参数与 pool 数量；GroupPreparations 包含 view、
-material 和 object 等所有组，pool 字节是描述符估算。
-`PROFILE_REUSE` 另报 primitive 结构、世界包围盒和材质的 rebuilt/reused 次数。稳定结构与材质在
-预热后应命中缓存，静止物体不重算 bounds；RecipeBuilds 只计 program 第一次解析 group，warm flight
-为 0。移动场景仍需更新变换和 bounds，不能把结构复用解释为整条 snapshot 链路零成本。
-样本数有限，p99 接近最慢样本；不要据此设固定 FPS 门槛或声称有未测量的前后性能增益。
+runner 使用 PowerShell 7.2 或以上，输出目录必须不存在或为空，以保留已有测量证据。
+综合 fixture 使用 Application / ForwardPipeline，960×540 主窗口内两个视图，加一个 320×240 离屏
+观察视图，共一个呈现 output 和一个离屏 output；VSync 关闭、两个 flight。启用
+HDR、阴影、TAA、AO、Bloom 和 output overlay，沿原 flight 协议执行，不逐帧等待 queue。
+它测 pipeline prepare、graph compose/execute，并通过链式保留的 FrameSubmission 回调记录 Submit
+返回后的提交回调、fence 被宿主观察后的完成回调，以及 GT 观察退休的时间。这些都是 CPU 观察时间，
+不能称作 GPU 硬件时间。Scene 在 `FreezeRegisteredScenes` 中提交发布时，工作发生在 pipeline prepare
+包装区间之前；该局部阶段不能与旧路径直接比较，也不能代替完整 GT 准备。尚未计齐的
+PreparationTotal、GT RenderPreparation、DrawWorkBuild 和 worker 费用显式保留 null。
+micro 为 16×16 单视图并逐帧等待 GPU，用于隔离 CPU 阶段；其阶段总和
+不等于完整流水帧延迟，两个 fixture 的数字不能混用。
+
+runner 输出 manifest、各轮原始日志、逐帧 JSONL 和计数 JSONL。二进制编译进 commit、tracked diff
+hash、runtime 生产及测试源码 hash（包含未跟踪的新源码）、共同 harness hash、编译器/配置与 flags；manifest 另保存
+exe SHA256、运行时 HLSL/HLSLI 文件 hash、机器、GPU/驱动与
+有效配置。runner 先以 `RADRAY_PROFILE_IDENTITY_ONLY=1` 查询元数据，不初始化 GPU，再用构建时同一
+CMake 哈希脚本核对实际源码；每轮前后及整个流程结束都复核两侧 exe、源码、shader 与依赖清单。
+两侧必须使用同一 harness、编译器/flags 与有效 fixture 选项；采样期间保持源码冻结，身份变化会失败
+并保留 manifest errors 和日志。每个场景必须有准确的 warmup/steady 行数、连续 sampleIndex 和唯一
+frameSerial；综合 fixture 另核对回调时间线的 frame/flight 归属与时间顺序。
+稳态 P50/P95/P99 从原始帧复算，超过 5% 的轮间 P50 变异系数标为不稳定。旧实现
+没有的 counters 带 known=false，不能以零值当作已验证的零工作。实际 mesh draws 与所有 graph
+命令调用分开报告。分配计数仅覆盖采样线程在本测试可执行文件中的 C++ new，不包含 DLL、驱动或 malloc。
+
+完整 `.tracy`、inclusive/self 与按源文件/行号区分的 pass CSV，以及 CPU sampling 是独立证据。
+`-CaptureEachRun -TracyCaptureTool <path> -TracyExportTool <path>` 为每次实际运行启动独立采集，
+核实本机 TCP 连接属于本次 client 与 capture 进程后才释放测量 gate；随后导出原始 zones/messages 并运行解析器。
+测试宿主恢复自己的主窗口且不激活它，逐帧核对实际三个视图、两个输出和完整效果 pass，避免隐藏窗口导致
+只有离屏观察视图参与测量。收尾时超出请求数量的帧仍留在原始 Tracy 中，但不带采样区间的关联 marker。
+连接、超时、计数或解析失败会保留已有证据并使流程失败；完整 capture 本身不证明总账边界已覆盖。
+`-TracyCapture`、`-CpuSampling`、`-TracyExports` 与 `-TracyExportArguments` 用于关联已有采样文件与命令，
+不代替实际启动采样工具。指定的证据文件必须存在且非空，runner 保存 SHA256 并复核采样期间未变化。
+关联 Tracy 文件时还需传 `-TracyCaptureTool` 和 `-TracyExportTool`；runner 保存工具 SHA256 与
+`--help` 输出，并核对本地 `project_manifest.json` 的 Tracy tag。工具版本通过不证明外部 capture
+来自本轮二进制，采样内容与来源仍需独立核验。保持预热、稳态与 resize/首次资源加载等冷路径分组，
+不能由聚合 CSV 伪造逐帧分位数。
+
+完整场景的阶段总账使用 `runtime_profile_trace.py`。为每次实际 runner invocation 保存独立 `.tracy`，
+再分别用匹配版本的 `tracy-csvexport --unwrap` 和 `tracy-csvexport --messages` 导出 CPU 原始区间与
+消息。不要给区间解析器传 `--self` 导出；self 时间不是区间长度。fixture 消息包含本次 runner 生成的
+run ID、源码/harness hash、sampleIndex、flight 与 RT 接到的真实 FrameSerial，解析器会拒绝错轮 capture。
+
+```powershell
+python -B modules/runtime/tests/runtime_profile_trace.py --manifest validation/runtime-release/manifest.json --label candidate --round 0 --zones validation/traces/candidate-0-zones.csv --messages validation/traces/candidate-0-messages.csv --output-directory validation/accounting/candidate/round-0
+python -B modules/runtime/tests/runtime_profile_compare.py --baseline-directory validation/accounting/baseline --candidate-directory validation/accounting/candidate --output validation/accounting/comparison.json
+```
+
+解析器按 source file/line 与 thread 归属，在同一线程对包含或重叠区间取并集；旧 Shadow 工作还扣除
+嵌套的图声明区间。GT 准备覆盖 authoring、world、完整 `RenderSystem::PrepareFrame`，以及同一
+`TickFrame` 中的 GPU flight 更新、退休与调度 pump、`PrepareFrameUploads`；这些边界必须按实际
+线程、源码和调用顺序唯一匹配。外层 `TickFrame` 中的槽位等待不直接计入准备。Commit/Publish/Object
+子项只用于解释成本，不能把父子再加一次。输出区分已测 GT/RT 准备工作、GT P95、输入到提交的同钟延迟，
+以及未知 worker/全 runtime 覆盖。计量是 CPU 阶段墙钟区间，不是操作系统线程 CPU sampling；完整
+PreparationTotal 未获得覆盖证据时保持 null。对照器从逐帧行重新计算五轮分位数和轮间变异。
+
+总账 schema v3 分别保留 warmup 与 steady 的覆盖审阅和全部帧；阶段仅由 sampleIndex 与请求的
+warmup 数决定。一个阶段的每帧都完成覆盖核验后，才生成该阶段的 PreparationTotal 分位数。
+冷路径未知不会被移入稳态或删除，源码/线程/帧身份错误会使整轮证据无效。提交后的 history 与
+output commit 单列，不加回提交前准备；覆盖审阅也不能代替操作系统 CPU sampling。
+
+`test_runtime_record` 单独对照 runtime recorder 和同图中的手写 RHI 循环，每条路径 1,024 draw，
+验证 fake 有效状态轨迹和两 target 像素。`run_runtime_record.ps1 -Executable
+build_release/_build/Release/test_runtime_record.exe -OutputDirectory validation/runtime-record -Backend D3D12`
+执行正式规程；加 `-Smoke` 只做短检查。逐 pair 的 Queue.Wait 有意隔离 record 成本，不能用于综合帧
+延迟结论。正式证据要求 Release、120 warmup / 1,000 samples / 5 rounds 与两路径 P50 轮间 CV≤5%；
+P50≤直接 RHI 115% 单列判断，P95 仍需查看逐轮和原始分布。入口存在不代表这些验收已执行通过。
 
 所有自有 target 接入 `radray_default_compile_flags`；它私有设置 C++ RTTI，
 不通过 core 向第三方或外部 consumer 传播。对象查询的边界见 [Core](../architecture/core-facilities.md)。
 
 ## 性能采样（Tracy）
+
+`RADRAY_RUNTIME_DETAILED_PROFILING` 默认 OFF，控制 runtime 的高频 `PrepareGroup`
+CPU zones；普通 frame/phase zones 保留。专门分析逐命令调用时，在独立构建目录 configure
+`-DRADRAY_RUNTIME_DETAILED_PROFILING=ON`。这是编译期开关，普通绘制内循环不读取运行期开关；
+manifest 必须记录有效值，同口径性能比较不得把开启明细采样的额外成本计作架构收益。
 
 `RADRAY_ENABLE_PROFILER`（默认 ON）把 `third_party/tracy` 的 `TracyClient` 静态链接进 `radraycore`，并定义
 `TRACY_ENABLE` + `TRACY_ON_DEMAND`：没有 viewer 连接时 zone 只做一次连接状态判断，因此 Release 也保持开启。
@@ -133,7 +196,8 @@ CPU 上 `Render` 分成构图与执行，不要把 `BuildForwardHdrView` 当成 
   `DeclareHdrGraph` / `ForwardGraph::BuildGraph` 才是往图里挂节点。
 - `ExecuteGraph` → `RenderGraph::Execute`：`RenderGraph::Compile`（`Validate`、`BuildIR`、`CompilePlanHit` 或
   `CompilePlanMiss`/`CompileRenderGraph`、`Optimize`）、`RenderGraph::Realize`（transient 分配）、
-  `RenderGraph::Prepare`（`PrepareUploads` / `PreparePasses`；后者每个 live pass 一个 zone，
+  `RenderGraph::Prepare`（`PrepareWork` / `PrepareUploads` / `PreparePasses`，以及统一 Ready 校验和
+  `PublishParameterSets`；`PrepareWork` 覆盖存活工作的数值与列表准备，`PreparePasses` 每个 live pass 一个 zone，
   内含该 pass 的 PSO/参数 set 解析与 `PrepareRendererList`）、`PlanBarriers`、
   `RenderGraph::Record`（CPU 编码；每个 live pass 一个 zone，内含 `RecordRendererList`）。
 - `Submit` / `GpuSystem::SubmitFrame`：结束 command buffer 并提交队列。GPU 时间线才是 GPU 执行。
@@ -218,7 +282,21 @@ FreeType 依赖隔离还应检查生成的 `ftoption.h` 中外部功能宏与 fr
 | `test_render_graph` | `RenderGraphTest` |
 | `test_graph_contracts` | `GraphContractTest`（整数数据链、Clear/Load、layer/mip、间接工作量） |
 | `test_graph_preparation` | `GraphPreparationTest`（分配/参数故障注入与恢复） |
+| `test_graph_ready_access` | `GraphReadyAccessTest`（所有模式的 native 访问边界、逐 mip shader stage） |
 | `test_renderer_list_pass_sets` | `RendererListPassSetsTest`（prepare 阶段的 per-program 参数 set） |
+| `test_renderer_ready` | `RendererReadyTest`（索引式 Ready 状态轨迹、失效拒绝与诊断时序） |
+| `test_scene_scaling` | `SceneScaling`（N=1k/10k/100k、变化率、多视图和两个目标 flight；重复/独立 geometry 描述、独立材质、escaped 写入的 CPU 规模矩阵；geometry 描述共享两个物理 buffer） |
+| `test_scene_memory` | `SceneMemoryTest`（一万帧有限工作集、CPU 容器容量、三个 flight 与资产引用） |
+| `test_scene_pipeline_publication` | `ScenePipelinePublicationTest`（多 pipeline 的全局 Scene 提交点与同帧快照共享） |
+| `test_scene_publication_failure` | `ScenePublicationFailureTest`（Off/Full 的保活、表/页内复制及实际 C++ 分配故障重试，三 flight 隔离与变长材质部分赋值） |
+| `test_scene_incremental_oracle` | `SceneIncrementalOracleTest`（固定种子 authoring 重算参考、三个 flight、三种排序、双 view 历史及 Ready/encoder 参数；资产加载成功/失败/加载中删除与退休；图内 geometry 复制、重叠更新、GPU 回读与读写屏障） |
+| `test_scene_invalidation_storm` | `SceneInvalidationStormTest`（停用输出、批量事件、pending 资源删除与恢复发布） |
+| `test_ready_workspace` | `ReadyWorkspaceTest`（千帧准备容量、多列表 lease、moved-from 与旧 epoch 拒绝） |
+| `test_ready_allocations` | `ReadyAllocationsTest`（静态发布列表预热后的调用线程 C++ new 计数、三个 flight 与像素验证） |
+| `test_graph_allocations` | `GraphAllocationProbeTest`、`GraphAllocationsTest`（无 native 资源模板的构造、实例化、Compile 与 Prepare 分配计数） |
+| `test_frame_graph_templates` | `FrameGraphTemplateTest`（默认装配模板、动态组件顺序与输出读回） |
+| `test_forward_templates` | `ForwardTemplatesTest`（LDR/Temporal/MSAA 产品图、千帧数值变化与历史有效性） |
+| `test_forward_temporal` | `ForwardTemporalTest`（真实提交历史与 Forward view/object 绑定数据） |
 | `test_temporal_feedback` | `TemporalFeedbackTest`（D3D12/Vulkan 跨图反馈） |
 | `test_forward_foundation_probes` | `ForwardFoundationProbe`（底层独立 shader，具体 suite 以 `ctest -N` 为准） |
 | `test_flight_lifetime` | `FlightLifetimeTest`（真实三 flight、history 退休、外部 output） |

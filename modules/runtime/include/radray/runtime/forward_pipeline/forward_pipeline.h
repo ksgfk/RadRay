@@ -7,6 +7,7 @@
 #include <radray/runtime/render_framework/render_pipeline.h>
 #include <radray/runtime/render_framework/render_scene_snapshot.h>
 #include <radray/runtime/render_framework/mesh_draw_command.h>
+#include <radray/runtime/render_framework/frame_draw_resources.h>
 #include <radray/types.h>
 
 namespace radray {
@@ -22,6 +23,8 @@ class Scene;
 
 struct ForwardStageBStats {
     uint64_t SnapshotBuilds{0}, CullCalls{0}, CullFailures{0};
+    uint64_t ObjectValueUpdates{0};
+    uint64_t TemporalViews{0}, ValidTemporalHistories{0};
     uint64_t DepthCommands{0}, OpaqueCommands{0}, TransparentCommands{0};
     DrawExecutionStats Execution;
 };
@@ -81,6 +84,7 @@ public:
         CameraComponent* camera);
     ~ForwardPipeline() noexcept override;
 
+    void CollectScenePolicies(RenderPrepareContext& ctx) override;
     void PrepareFrame(RenderPrepareContext& ctx) override;
     void BuildGraph(RenderPipelineContext& ctx, RenderGraph& graph, std::span<RenderGraphOutputBinding> outputs) override;
     void GraphRecorded(RenderPipelineContext& ctx, const RenderGraph& graph, RenderGraphExecutionResult result) override;
@@ -109,6 +113,7 @@ public:
 
     // Read only at the flight's phase boundary, while its owner is not updating/rendering it.
     const RenderSceneSnapshot& GetSceneSnapshot(uint32_t flightIndex) const noexcept;
+    FrameDrawResourceStats GetFrameDrawResourceStats(uint32_t flightIndex) const noexcept;
     const ForwardStageBStats& GetStageBStats(uint32_t flightIndex) const noexcept;
 
 private:

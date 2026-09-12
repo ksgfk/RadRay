@@ -4,6 +4,7 @@
 #include "presentation_adapter.h"
 
 #include <algorithm>
+#include <atomic>
 #include <optional>
 #include <span>
 #include <utility>
@@ -115,19 +116,30 @@ bool RenderSystem::SetPipeline(unique_ptr<RenderPipeline> pipeline) noexcept {
 }
 
 void RenderSystem::BeginUpdateForFlight(uint32_t flightIndex) {
+    RADRAY_PROFILE_SCOPE_N("RenderSystem::BeginUpdateForFlight");
     RADRAY_ASSERT(flightIndex < _retainedAssets.size());
     _retainedAssets[flightIndex].clear();
     _framePlans[flightIndex].Reset();
 }
 
 void RenderSystem::PrepareFrame(const AppUpdateContext& ctx) {
+    RADRAY_PROFILE_SCOPE_N("RenderSystem::PrepareFrame");
     _pipelineStarted.store(true, std::memory_order_release);
     RADRAY_ASSERT(ctx.FlightIndex < _retainedAssets.size());
     auto& outputs = _frameOutputInfos[ctx.FlightIndex];
     outputs = _presentation->GetOutputInfos(_outputs);
     _flightOptions[ctx.FlightIndex] = _app->GetPendingRenderGraphRuntimeOptions();
     RenderWorkloadBuilder workloads(_framePlans[ctx.FlightIndex], outputs);
-    RenderPrepareContext prepare{ctx, outputs, workloads, _retainedAssets[ctx.FlightIndex], _flightOptions[ctx.FlightIndex]};
+    static std::atomic<uint64_t> nextPrepareSerial{1};
+    const uint64_t serial = nextPrepareSerial.fetch_add(1, std::memory_order_relaxed);
+    RenderPrepareContext prepare{ctx, outputs, workloads, _retainedAssets[ctx.FlightIndex], _flightOptions[ctx.FlightIndex], serial};
+    if (_pipeline) _pipeline->CollectScenePolicies(prepare);
+    for (auto* overlay : _overlays) overlay->CollectScenePolicies(prepare);
+    if (_graphComposer) _graphComposer->CollectScenePolicies(prepare);
+    if (!prepare.FreezeRegisteredScenes()) {
+        RADRAY_ERR_LOG("Scene input publication failed before render preparation");
+        return;
+    }
     if (_pipeline)
         _pipeline->PrepareFrame(prepare);
     else
@@ -146,7 +158,10 @@ void RenderSystem::Render(AppFrameContext& ctx) {
     RenderGraphFrameResources* graphResources = nullptr;
     {
         RADRAY_PROFILE_SCOPE_N("BeginGraphFlight");
-        graphResources = &_graphRuntime->BeginFlight(flight, serial, ctx.GetHostWrites());
+        {
+            RADRAY_PROFILE_SCOPE_N("GraphFlightStorage");
+            graphResources = &_graphRuntime->BeginFlight(flight, serial, ctx.GetHostWrites());
+        }
         _viewStates->BeginFlight(flight, serial);
     }
     auto& report = _graphReports[flight];
@@ -211,9 +226,13 @@ void RenderSystem::Render(AppFrameContext& ctx) {
     }
     const auto prior = submission->OnSubmitted;
     submission->OnSubmitted = [this, prior, outputFrame = std::move(outputFrame)] {
+        RADRAY_PROFILE_SCOPE_N("RenderSystem::SubmittedFrame");
         if (prior) prior();
-        for (const auto& surface : outputFrame.Surfaces) _outputs.CommitExternalState(surface);
-        _presentation->Commit(outputFrame);
+        {
+            RADRAY_PROFILE_SCOPE_N("RenderSystem::PresentCommit");
+            for (const auto& surface : outputFrame.Surfaces) _outputs.CommitExternalState(surface);
+            _presentation->Commit(outputFrame);
+        }
     };
 }
 

@@ -19,16 +19,15 @@ public:
     void ResetView() noexcept;
 
 private:
-    void PrepareCommand(const RendererListDesc& desc, const RenderSceneSnapshot& scene, const MeshBatch& batch,
-                         const MaterialPassRenderData& pass, bool mirrored, MeshPassDrawListContext& out);
+    FrameDrawBindingId PrepareBindings(const RendererListDesc& desc, ShaderProgram& program, uint32_t primitive,
+                                       uint32_t viewGroup, uint32_t objectGroup, bool viewFirst);
 
-private:
-    unordered_map<ShaderProgram*, unordered_map<RenderPrimitiveIndex, std::optional<PreparedShaderGroup>>> _objectGroups;
     FrameDrawResources& _resources;
     DepthOnlyBindingCache& _bindings;
     // Object rows frozen at PrepareFrame. DepthOnly has no temporal context, so rows upload as frozen.
     const PackedCBufferTable& _objects;
-    unordered_map<ShaderProgram*, std::optional<PreparedShaderGroup>> _views;
+    FrameCBufferIdentity _viewValues;
+    uint64_t _viewEpoch{0};
     Forward_ViewData _viewScratch{};
 };
 

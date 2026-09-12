@@ -7,6 +7,7 @@
 #include <radray/shader/shader_artifact.h>
 #include <radray/types.h>
 #include <radray/vertex_data.h>
+#include <radray/runtime/render_framework/render_memory_stats.h>
 
 namespace radray {
 
@@ -31,6 +32,47 @@ public:
         const MeshPrimitive& primitive) noexcept;
 
     friend bool operator==(const PrimitiveVertexLayout&, const PrimitiveVertexLayout&) noexcept = default;
+};
+
+struct PrimitiveVertexLayoutId {
+    uint64_t Value{0};
+    bool IsValid() const noexcept { return Value != 0; }
+    friend bool operator==(const PrimitiveVertexLayoutId&, const PrimitiveVertexLayoutId&) = default;
+};
+
+struct PrimitiveVertexLayoutHash {
+    size_t operator()(const PrimitiveVertexLayout& layout) const noexcept;
+};
+
+/// Cold-path layout identities. Intern pins a normalized layout until Clear; Acquire/Release retain
+/// it only while recipes use it. Released IDs are never reused, including IDs kept in old snapshots.
+class PrimitiveVertexLayoutRegistry {
+public:
+    PrimitiveVertexLayoutRegistry() = default;
+    PrimitiveVertexLayoutRegistry(const PrimitiveVertexLayoutRegistry& other);
+    PrimitiveVertexLayoutRegistry& operator=(const PrimitiveVertexLayoutRegistry& other);
+    PrimitiveVertexLayoutRegistry(PrimitiveVertexLayoutRegistry&&) noexcept = default;
+    PrimitiveVertexLayoutRegistry& operator=(PrimitiveVertexLayoutRegistry&&) noexcept = default;
+    PrimitiveVertexLayoutId Intern(const PrimitiveVertexLayout& layout);
+    PrimitiveVertexLayoutId Acquire(const PrimitiveVertexLayout& layout);
+    bool Release(PrimitiveVertexLayoutId id) noexcept;
+    void Clear() noexcept {
+        _byId.clear();
+        _layouts.clear();
+    }
+    size_t Size() const noexcept { return _layouts.size(); }
+    RenderMemoryStats GetMemoryStats() const noexcept;
+
+private:
+    struct Entry {
+        PrimitiveVertexLayoutId Id;
+        size_t References{0};
+        bool Pinned{false};
+    };
+    Entry& FindOrAdd(const PrimitiveVertexLayout& layout, bool retain);
+    void RebuildIndex();
+    unordered_map<PrimitiveVertexLayout, Entry, PrimitiveVertexLayoutHash> _layouts;
+    unordered_map<uint64_t, const PrimitiveVertexLayout*> _byId;
 };
 
 class ResolvedPrimitiveVertexLayout {

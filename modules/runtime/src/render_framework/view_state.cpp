@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <radray/logger.h>
+#include <radray/profiler.h>
 
 namespace radray {
 
@@ -34,6 +35,7 @@ struct ViewStateRegistry::Impl {
         unordered_map<ViewHistoryKey, unique_ptr<Generation>> Histories;
         PrimitiveHistory Primitives;
         uint64_t PrimitivePreparedFrame{0};
+        uint64_t InvalidationRevision{0};
     };
     render::Device& Device;
     render::RenderPassRegistry& Registry;
@@ -42,6 +44,7 @@ struct ViewStateRegistry::Impl {
     uint32_t Flight{0};
     uint64_t Serial{0}, NextGeneration{1}, InactiveFrames{120}, TexturesCreated{0}, GenerationsDestroyed{0};
     uint64_t EstimatedBytes{0}, PeakEstimatedBytes{0};
+    uint64_t NextInvalidationRevision{1};
     Impl(render::Device& device, render::RenderPassRegistry& registry, uint32_t flights, uint64_t inactive)
         : Device(device), Registry(registry), RetireBins(flights), InactiveFrames(inactive) { RADRAY_ASSERT(flights > 0); }
     void Destroy(Generation& generation) {
@@ -53,7 +56,12 @@ struct ViewStateRegistry::Impl {
         generation.Images.clear();
         ++GenerationsDestroyed;
     }
+    uint64_t AllocateInvalidationRevision() noexcept {
+        if (NextInvalidationRevision == UINT64_MAX) RADRAY_ABORT("View history revision exhausted");
+        return NextInvalidationRevision++;
+    }
     void Invalidate(View& view, ViewHistoryInvalidationReason reason, bool temporalOnly = false) {
+        view.InvalidationRevision = AllocateInvalidationRevision();
         view.PreviousValid = false;
         view.Primitives.Invalidate();
         view.Reason = reason;
@@ -86,6 +94,7 @@ ViewStateRegistry::ViewStateRegistry(render::Device& device, render::RenderPassR
 ViewStateRegistry::~ViewStateRegistry() { Clear(); }
 
 void ViewStateRegistry::BeginFlight(uint32_t flight, uint64_t serial) {
+    RADRAY_PROFILE_SCOPE_N("ViewStateRegistry::BeginFlight");
     auto& impl = *_impl;
     RADRAY_ASSERT(flight < impl.RetireBins.size() && serial > impl.Serial);
     impl.Flight = flight;
@@ -104,7 +113,9 @@ void ViewStateRegistry::BeginFlight(uint32_t flight, uint64_t serial) {
 void ViewStateRegistry::Resolve(ResolvedRenderView& view, const ResolvedRenderViewFamily& family) {
     if (!view.StateId.IsValid()) return;
     auto& impl = *_impl;
-    auto& record = impl.Views[view.StateId];
+    auto [entry, inserted] = impl.Views.try_emplace(view.StateId);
+    auto& record = entry->second;
+    if (inserted) record.InvalidationRevision = impl.AllocateInvalidationRevision();
     RADRAY_ASSERT(record.PendingFrame != impl.Serial);
     if (view.CameraCut)
         impl.Invalidate(record, ViewHistoryInvalidationReason::CameraCut);
@@ -126,6 +137,7 @@ void ViewStateRegistry::Resolve(ResolvedRenderView& view, const ResolvedRenderVi
 }
 
 bool ViewStateRegistry::CommitView(ViewStateId id) {
+    RADRAY_PROFILE_SCOPE_N("ViewStateRegistry::CommitView");
     auto& impl = *_impl;
     const auto found = impl.Views.find(id);
     if (found == impl.Views.end()) return false;
@@ -139,6 +151,7 @@ bool ViewStateRegistry::CommitView(ViewStateId id) {
 }
 
 bool ViewStateRegistry::CommitViewWithHistory(ViewStateId id, std::span<const HistoryWriteToken> tokens) {
+    RADRAY_PROFILE_SCOPE_N("ViewStateRegistry::CommitViewWithHistory");
     auto& impl = *_impl;
     const auto found = impl.Views.find(id);
     if (found == impl.Views.end()) return false;
@@ -190,6 +203,11 @@ uint64_t ViewStateRegistry::GetCommittedSerial(ViewStateId id) const noexcept {
 uint64_t ViewStateRegistry::GetPrimitiveCommittedSerial(ViewStateId id) const noexcept {
     const auto found = _impl->Views.find(id);
     return found == _impl->Views.end() ? 0 : found->second.Primitives.CommittedSerial();
+}
+PrimitiveHistoryStamp ViewStateRegistry::GetPrimitiveHistoryStamp(ViewStateId id) const noexcept {
+    const auto found = _impl->Views.find(id);
+    if (found == _impl->Views.end()) return {};
+    return {found->second.LastCommitted, found->second.InvalidationRevision};
 }
 void ViewStateRegistry::InvalidateTemporal(ViewStateId id, ViewHistoryInvalidationReason reason) {
     const auto found = _impl->Views.find(id);
@@ -283,7 +301,8 @@ ViewStateStats ViewStateRegistry::GetStats() const {
     ViewStateStats result{};
     result.ActiveViews = static_cast<uint32_t>(_impl->Views.size());
     const auto memory = [&](ViewStateId id) -> ViewHistoryMemoryStats& {
-        for (auto& item : result.MemoryByView) if (item.View == id) return item;
+        for (auto& item : result.MemoryByView)
+            if (item.View == id) return item;
         return result.MemoryByView.emplace_back(ViewHistoryMemoryStats{.View = id});
     };
     for (const auto& [key, view] : _impl->Views)

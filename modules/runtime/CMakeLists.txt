@@ -3,6 +3,10 @@ file(GLOB_RECURSE RADRAY_RUNTIME_SRC CONFIGURE_DEPENDS "src/*.cpp")
 
 add_library(radrayruntime STATIC ${RADRAY_RUNTIME_SRC} ${RADRAY_RUNTIME_INC})
 target_include_directories(radrayruntime PUBLIC include)
+option(RADRAY_RUNTIME_DETAILED_PROFILING "Enable per-command and per-group runtime CPU zones for dedicated captures" OFF)
+if (RADRAY_RUNTIME_DETAILED_PROFILING)
+    target_compile_definitions(radrayruntime PUBLIC RADRAY_RUNTIME_DETAILED_PROFILING)
+endif()
 target_link_libraries(radrayruntime PUBLIC
     radraycore
     radrayshader

@@ -94,10 +94,12 @@ TEST(SceneSnapshotCache, StructureTransformAndMotionRevisionsAreIndependentAcros
     ASSERT_EQ(flights[0].Stats.PrimitiveBoundsRebuilt, 1u);
     ASSERT_TRUE(builder.Build(scene, flights[1], retained));
     EXPECT_EQ(flights[1].Stats.PrimitiveStructuresReused, 1u);
-    EXPECT_EQ(flights[1].Stats.PrimitiveBoundsRebuilt, 1u);
+    EXPECT_EQ(flights[1].Stats.PrimitiveBoundsRebuilt, 0u);
+    EXPECT_GT(flights[1].Stats.PublishedBytes, 0u);
+    EXPECT_EQ(flights[1].ChangedPrimitiveRanges.size(), 1u);
     EXPECT_EQ(raw->DrawReads, 1u);
     EXPECT_EQ(raw->BoundsReads, 1u);
-    EXPECT_EQ(raw->TransformReads, 2u);
+    EXPECT_EQ(raw->TransformReads, 1u);
 
     const auto oldGeneration = flights[0].Primitives[0].Generation;
     Eigen::Matrix4f transform = Eigen::Matrix4f::Identity();
@@ -159,7 +161,8 @@ TEST(SceneSnapshotCache, DenseSlotsPreserveUnchangedStructuresAfterRemovalAndIns
     ASSERT_EQ(flights[0].Primitives.size(), 3u);
     EXPECT_EQ(flights[0].Stats.PrimitiveStructuresReused, 2u);
     EXPECT_EQ(flights[0].Stats.PrimitiveStructuresRebuilt, 1u);
-    EXPECT_EQ(flights[0].Stats.PrimitiveBoundsRebuilt, 3u);
+    EXPECT_EQ(flights[0].Stats.PrimitiveBoundsRebuilt, 1u);
+    EXPECT_GT(flights[0].Stats.PublishedBytes, 0u);
     EXPECT_EQ(flights[0].Stats.InputSections, 5u);
     EXPECT_EQ(first->DrawReads, 2u);
     EXPECT_EQ(second->DrawReads, 3u);
@@ -177,7 +180,8 @@ TEST(SceneSnapshotCache, DenseSlotsPreserveUnchangedStructuresAfterRemovalAndIns
     EXPECT_EQ(flights[0].Stats.ScratchEntriesCreated, 0u);
     ASSERT_TRUE(builder.Build(scene, flights[1], retained));
     EXPECT_EQ(flights[1].Stats.PrimitiveStructuresReused, 3u);
-    EXPECT_EQ(flights[1].Stats.PrimitiveBoundsRebuilt, 3u);
+    EXPECT_EQ(flights[1].Stats.PrimitiveBoundsRebuilt, 0u);
+    EXPECT_GT(flights[1].Stats.PublishedBytes, 0u);
 
     second->SectionCount = 1;
     second->Bounds.Max = Eigen::Vector3f::Constant(4);
@@ -189,7 +193,8 @@ TEST(SceneSnapshotCache, DenseSlotsPreserveUnchangedStructuresAfterRemovalAndIns
     EXPECT_TRUE(flights[1].Primitives[1].WorldBounds.Max.isApprox(Eigen::Vector3f{31, 1, 1}));
     ASSERT_TRUE(builder.Build(scene, flights[1], retained));
     EXPECT_EQ(flights[1].Stats.PrimitiveStructuresReused, 3u);
-    EXPECT_EQ(flights[1].Stats.PrimitiveBoundsRebuilt, 1u);
+    EXPECT_EQ(flights[1].Stats.PrimitiveBoundsRebuilt, 0u);
+    EXPECT_GT(flights[1].Stats.PublishedBytes, 0u);
     EXPECT_TRUE(flights[1].Primitives[1].WorldBounds.Max.isApprox(Eigen::Vector3f{34, 4, 4}));
 
     scene.RemovePrimitive(second);
@@ -200,7 +205,8 @@ TEST(SceneSnapshotCache, DenseSlotsPreserveUnchangedStructuresAfterRemovalAndIns
     flights[0].ResetForReuse();
     ASSERT_TRUE(builder.Build(scene, flights[0], retained));
     EXPECT_EQ(flights[0].Stats.PrimitiveStructuresReused, 2u);
-    EXPECT_EQ(flights[0].Stats.PrimitiveBoundsRebuilt, 2u);
+    EXPECT_EQ(flights[0].Stats.PrimitiveBoundsRebuilt, 0u);
+    EXPECT_GT(flights[0].Stats.PublishedBytes, 0u);
 }
 
 TEST(SceneSnapshotCache, UnknownProxyRevisionsRemainConservative) {
@@ -373,15 +379,22 @@ TEST_P(MaterialSnapshotCache, SceneMaterialsReusePerFlightAndReplacementsHaveFre
     RenderSceneSnapshotBuilder builder;
     array<RenderSceneSnapshot, 2> flights;
     vector<StreamingAssetRefAny> retained;
-    for (auto& flight : flights) {
+    for (size_t index = 0; index < flights.size(); ++index) {
+        auto& flight = flights[index];
         ASSERT_TRUE(builder.Build(scene, flight, retained));
-        EXPECT_EQ(flight.Stats.MaterialsRebuilt, 1u);
-        EXPECT_GT(flight.Stats.MaterialBytesCopied, 0u);
+        EXPECT_EQ(flight.Stats.MaterialsRebuilt, index == 0 ? 1u : 0u);
+        EXPECT_EQ(flight.Stats.MaterialsReused, index == 0 ? 0u : 1u);
+        if (index == 0)
+            EXPECT_GT(flight.Stats.MaterialBytesCopied, 0u);
+        else
+            EXPECT_EQ(flight.Stats.MaterialBytesCopied, 0u);
+        EXPECT_GT(flight.Stats.PublishedMaterialBytes, 0u);
     }
     for (auto& flight : flights) {
         ASSERT_TRUE(builder.Build(scene, flight, retained));
         EXPECT_EQ(flight.Stats.MaterialsReused, 1u);
         EXPECT_EQ(flight.Stats.MaterialBytesCopied, 0u);
+        EXPECT_EQ(flight.Stats.PublishedMaterialBytes, 0u);
         EXPECT_EQ(flight.Stats.PrimitiveBoundsReused, 1u);
     }
     const uint64_t generation = material->GetGeneration();
@@ -556,6 +569,16 @@ TEST_P(MaterialSnapshotCache, UnavailableMaterialsAndOrderChangesPreserveOtherFl
     RenderSceneSnapshotBuilder builder;
     array<RenderSceneSnapshot, 2> flights;
     array<vector<StreamingAssetRefAny>, 2> retained;
+    const auto expectBatchMaterials = [&](const RenderSceneSnapshot& snapshot, array<uint64_t, 2> expected) {
+        ASSERT_EQ(snapshot.MeshBatches.size(), 2u);
+        for (const auto& batch : snapshot.MeshBatches) {
+            ASSERT_LT(batch.Primitive, expected.size());
+            ASSERT_LT(batch.Material, snapshot.Materials.size());
+            EXPECT_EQ(snapshot.Materials[batch.Material].Generation, expected[batch.Primitive]);
+            EXPECT_EQ(snapshot.Primitives[batch.Primitive].Id,
+                      scene.GetPrimitiveId(batch.Primitive == 0 ? firstProxy : secondProxy));
+        }
+    };
     for (uint32_t flight = 0; flight < flights.size(); ++flight)
         ASSERT_TRUE(builder.Build(scene, flights[flight], retained[flight]));
     for (uint32_t frame = 0; frame < 6; ++frame) {
@@ -567,6 +590,10 @@ TEST_P(MaterialSnapshotCache, UnavailableMaterialsAndOrderChangesPreserveOtherFl
         EXPECT_EQ(flights[flight].Stats.MaterialUnavailable, 1u);
         ASSERT_EQ(flights[flight].Materials.size(), 1u);
         EXPECT_EQ(flights[flight].Materials[0].Generation, b->GetGeneration());
+        ASSERT_EQ(flights[flight].MeshBatches.size(), 1u);
+        EXPECT_EQ(flights[flight].MeshBatches[0].Primitive, 1u);
+        EXPECT_EQ(flights[flight].MeshBatches[0].Material, 0u);
+        EXPECT_EQ(retained[flight].size(), 1u);
     }
 
     // Change material encounter order while the unavailable candidate remains unpublished.
@@ -576,6 +603,10 @@ TEST_P(MaterialSnapshotCache, UnavailableMaterialsAndOrderChangesPreserveOtherFl
     ASSERT_TRUE(builder.Build(scene, flights[0], retained[0]));
     EXPECT_EQ(flights[0].Stats.MaterialBytesCopied, 0u);
     EXPECT_EQ(flights[0].Stats.MaterialsReused, 2u);
+    EXPECT_EQ(flights[0].Stats.PublishedMaterialBytes, 0u);
+    ASSERT_EQ(flights[0].MeshBatches.size(), 1u);
+    EXPECT_EQ(flights[0].MeshBatches[0].Primitive, 0u);
+    EXPECT_EQ(flights[0].MeshBatches[0].Material, 0u);
     gate.Resume();
     assets.Pump();
     ASSERT_TRUE(pendingTexture.IsReady());
@@ -585,13 +616,16 @@ TEST_P(MaterialSnapshotCache, UnavailableMaterialsAndOrderChangesPreserveOtherFl
         ASSERT_EQ(flights[flight].Materials.size(), 2u);
         EXPECT_EQ(flights[flight].Materials[0].Generation, b->GetGeneration());
         EXPECT_EQ(flights[flight].Materials[1].Generation, a->GetGeneration());
-        EXPECT_EQ(flights[flight].Stats.MaterialsRebuilt, 1u);
-        EXPECT_EQ(flights[flight].Stats.MaterialsReused, 1u);
+        EXPECT_EQ(flights[flight].Stats.MaterialsRebuilt, flight == 0 ? 1u : 0u);
+        EXPECT_EQ(flights[flight].Stats.MaterialsReused, flight == 0 ? 1u : 2u);
+        EXPECT_GT(flights[flight].Stats.PublishedMaterialBytes, 0u);
+        expectBatchMaterials(flights[flight], {b->GetGeneration(), a->GetGeneration()});
+        EXPECT_EQ(retained[flight].size(), 2u);
     }
     EXPECT_NE(flights[0].Materials[1].Passes[0].NumericBytes.data(),
               flights[1].Materials[1].Passes[0].NumericBytes.data());
 
-    // Both previously published materials keep their storage even when their indices exchange.
+    // Assignment exchanges preserve canonical material payloads and update each batch's material index.
     firstProxy->DrawMaterial = a.Get();
     secondProxy->DrawMaterial = b.Get();
     for (uint32_t flight = 0; flight < flights.size(); ++flight) {
@@ -599,8 +633,9 @@ TEST_P(MaterialSnapshotCache, UnavailableMaterialsAndOrderChangesPreserveOtherFl
         ASSERT_TRUE(builder.Build(scene, flights[flight], retained[flight]));
         EXPECT_EQ(flights[flight].Stats.MaterialBytesCopied, 0u);
         EXPECT_EQ(flights[flight].Stats.MaterialsReused, 2u);
-        EXPECT_EQ(flights[flight].Materials[0].Generation, a->GetGeneration());
-        EXPECT_EQ(flights[flight].Materials[1].Generation, b->GetGeneration());
+        EXPECT_EQ(flights[flight].Stats.PublishedMaterialBytes, 0u);
+        expectBatchMaterials(flights[flight], {a->GetGeneration(), b->GetGeneration()});
+        EXPECT_EQ(retained[flight].size(), 2u);
     }
     auto replacement = Material::Create(technique.Get());
     ASSERT_TRUE(replacement->SetTexture("AlbedoTexture", readyTexture));
@@ -610,8 +645,10 @@ TEST_P(MaterialSnapshotCache, UnavailableMaterialsAndOrderChangesPreserveOtherFl
     ASSERT_TRUE(builder.Build(scene, flights[1], retained[1]));
     EXPECT_EQ(flights[1].Stats.MaterialsRebuilt, 1u);
     EXPECT_EQ(flights[1].Stats.MaterialsReused, 1u);
-    EXPECT_EQ(flights[1].Materials[0].Generation, replacement->GetGeneration());
-    EXPECT_EQ(flights[0].Materials[0].Generation, a->GetGeneration());
+    expectBatchMaterials(flights[1], {replacement->GetGeneration(), b->GetGeneration()});
+    expectBatchMaterials(flights[0], {a->GetGeneration(), b->GetGeneration()});
+    EXPECT_GT(flights[1].Stats.PublishedMaterialBytes, 0u);
+    EXPECT_EQ(retained[1].size(), 2u);
 #endif
 }
 

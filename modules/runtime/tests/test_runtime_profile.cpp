@@ -1,6 +1,8 @@
+#include "runtime_profile_integrated.h"
 #include "gpu_test_fixture.h"
 #include "render_graph_test_driver.h"
 #include "stage_b_test_support.h"
+#include "runtime_profile_support.h"
 #include "forward_pipeline/forward_capture.h"
 #include "forward_pipeline/forward_frame.h"
 #include "forward_pipeline/forward_lit_mesh_pass_processor.h"
@@ -9,10 +11,12 @@
 #include <chrono>
 #include <cstdlib>
 #include <new>
+#include <source_location>
 #ifdef _WIN32
 #include <malloc.h>
 #endif
 #include <gtest/gtest.h>
+#include <radray/profiler.h>
 #include <radray/runtime/forward_pipeline/forward_pipeline.h>
 #include <radray/runtime/render_framework/scene.h>
 #include <radray/runtime/render_framework/render_graph_runtime.h>
@@ -71,18 +75,19 @@ namespace {
 using Clock = std::chrono::steady_clock;
 struct Sample {
     uint64_t Ns{0}, Allocations{0}, Bytes{0};
+    std::source_location Source{};
 };
 template <typename F>
-Sample Measure(F&& callback) {
+Sample Measure(F&& callback, std::source_location source = std::source_location::current()) {
     profile_allocations::Count = profile_allocations::Bytes = 0;
     profile_allocations::Enabled = true;
     const auto start = Clock::now();
     callback();
     const auto end = Clock::now();
     profile_allocations::Enabled = false;
-    return {uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count()), profile_allocations::Count, profile_allocations::Bytes};
+    return {uint64_t(std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count()), profile_allocations::Count, profile_allocations::Bytes, source};
 }
-void PrintSamples(std::string_view backend, uint32_t primitives, bool moving, bool diagnostics, std::string_view stage, vector<Sample> samples) {
+void PrintSamples(std::string_view backend, uint32_t primitives, bool moving, bool diagnostics, uint32_t round, std::string_view stage, vector<Sample> samples) {
 #ifdef RADRAY_IS_DEBUG
     constexpr bool isDebug = true;
 #else
@@ -98,8 +103,8 @@ void PrintSamples(std::string_view backend, uint32_t primitives, bool moving, bo
     std::sort(counts.begin(), counts.end());
     std::sort(bytes.begin(), bytes.end());
     const auto quantile = [](const auto& values, uint32_t percentage) { return values[std::min(values.size() - 1, (values.size() * percentage + 99) / 100 - 1)]; };
-    fmt::print("PROFILE {{\"backend\":\"{}\",\"debug\":{},\"primitives\":{},\"moving\":{},\"diagnostics\":{},\"samples\":{},\"stage\":\"{}\",\"p50Ms\":{:.6f},\"p95Ms\":{:.6f},\"p99Ms\":{:.6f},\"p50Allocations\":{},\"p50AllocatedBytes\":{}}}\n",
-               backend, isDebug, primitives, moving, diagnostics, samples.size(), stage,
+    fmt::print("PROFILE {{\"backend\":\"{}\",\"debug\":{},\"primitives\":{},\"moving\":{},\"diagnostics\":{},\"round\":{},\"samples\":{},\"stage\":\"{}\",\"p50Ms\":{:.6f},\"p95Ms\":{:.6f},\"p99Ms\":{:.6f},\"p50Allocations\":{},\"p50AllocatedBytes\":{}}}\n",
+               backend, isDebug, primitives, moving, diagnostics, round, samples.size(), stage,
                double(quantile(times, 50)) / 1e6, double(quantile(times, 95)) / 1e6, double(quantile(times, 99)) / 1e6,
                quantile(counts, 50), quantile(bytes, 50));
 }
@@ -110,10 +115,12 @@ public:
 class RuntimeProfile : public testing::TestWithParam<render::RenderBackend> {};
 
 TEST_P(RuntimeProfile, StageCostsAndWarmResourceCounts) {
-    const bool extended = std::getenv("RADRAY_RUNTIME_PROFILE") != nullptr;
-    const uint32_t sampleCount = extended ? 32 : 3;
+    const profile::Options options;
+    ASSERT_TRUE(options.Valid) << "invalid RADRAY_PROFILE_* option";
+    profile::PrintOptions(options, "shared-mesh-micro", EnumName(GetParam()), 1, 1, 16, 16, false);
+    if (std::getenv("RADRAY_PROFILE_IDENTITY_ONLY")) return;
     render::test::DeviceContext context;
-    if (!render::test::TryCreateDevice(GetParam(), context, false)) GTEST_SKIP() << context.Reason;
+    if (!render::test::TryCreateDevice(GetParam(), context, options.DriverValidation)) GTEST_SKIP() << context.Reason;
     auto& device = *context.Device;
     auto program = test::CompileStageBProgram(device, R"hlsl(
 #include <pipelines/forward/bindings.hlsli>
@@ -149,9 +156,8 @@ TEST_P(RuntimeProfile, StageCostsAndWarmResourceCounts) {
     auto mesh = assets.AddReady<StaticMesh>(AssetId{0x90211, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, make_unique<StaticMesh>(MeshResource{},
                                                                                                                      vector<StaticMeshSection>{{0, 0, 3, 0, 2}, {0, 0, 3, 0, 2}}, Eigen::Vector3f{-.5f, -.5f, .5f}, Eigen::Vector3f{.5f, .5f, .5f}, std::move(geometry)));
     ASSERT_TRUE(mesh.IsReady());
-    const array<uint32_t, 3> scales{1000, 10000, 100000};
+    const array<uint32_t, 1> scales{options.Primitives};
     for (const uint32_t count : scales) {
-        if (!extended && count != 1000) continue;
         Scene scene;
         for (uint32_t i = 0; i < count; ++i) ASSERT_TRUE(scene.AddPrimitive(make_unique<StaticMeshSceneProxy>(mesh, vector<Nullable<Material*>>{material.Get(), material.Get()}, Eigen::Matrix4f::Identity())));
         RenderSceneSnapshotBuilder builder;
@@ -173,11 +179,21 @@ TEST_P(RuntimeProfile, StageCostsAndWarmResourceCounts) {
         ASSERT_TRUE(command);
         bool warned = false;
         uint64_t serial = 0;
-        for (const bool moving : {false, true})
-            for (uint32_t mode = 0; mode < 2u; ++mode) {
-                const bool diagnostics = mode % 2 != 0;
+        for (const bool moving : {false, true}) {
+            array<vector<double>, 10> roundMedians;
+            for (uint32_t round = 0; round < options.Rounds; ++round) {
+                const bool diagnostics = options.SerializeReport;
                 array<vector<Sample>, 10> samples;
-                for (uint32_t frame = 0; frame < 3 + sampleCount; ++frame) {
+                struct FrameRow {
+                    uint64_t Serial, BeginNs, SubmitNs, RetireNs;
+                    uint64_t Draws, GroupPreparations, RecipeBuilds, SetCreations, ConstantBytes, SnapshotMaterialBytes;
+                    array<Sample, 10> Phases;
+                };
+                vector<FrameRow> rows;
+                rows.reserve(options.Samples + options.Warmup);
+                for (auto& phaseSamples : samples) phaseSamples.reserve(options.Samples);
+                for (uint32_t frame = 0; frame < options.Warmup + options.Samples; ++frame) {
+                    const auto frameBegin = profile::TimestampNs();
                     ++serial;
                     owners.clear();
                     list.ResetForReuse();
@@ -198,7 +214,7 @@ TEST_P(RuntimeProfile, StageCostsAndWarmResourceCounts) {
                     EXPECT_EQ(assets.GetCollectionStats().CandidatesVisited, beforeGc);
                     bool valid = false;
                     values[2] = Measure([&] {
-                        valid = builder.Build(scene, snapshot, owners);
+                        valid = builder.Build(scene, snapshot, owners, options.Runtime.Validation);
                         if (valid) forward_detail::FreezeObjectData(snapshot, objects);
                     });
                     ASSERT_TRUE(valid);
@@ -218,7 +234,8 @@ TEST_P(RuntimeProfile, StageCostsAndWarmResourceCounts) {
                     const auto recipesBefore = program->GetParameterGroupRecipeCount();
                     values[4] = Measure([&] {
                         forward_detail::ForwardLitMeshPassProcessor processor{draws, bindings, warned, objects};
-                        valid = BuildRendererList({"profile", "ForwardLit", &culling, &view, RenderQueueRange::Opaque()}, processor, list);
+                        valid = BuildRendererList({.Name = "profile", .MaterialPassName = "ForwardLit", .Culling = &culling, .View = &view,
+                                                   .QueueRange = RenderQueueRange::Opaque(), .Validation = options.Runtime.Validation}, processor, list);
                     });
                     ASSERT_TRUE(valid);
                     ASSERT_EQ(list.Commands.size(), count * 2u);
@@ -228,7 +245,7 @@ TEST_P(RuntimeProfile, StageCostsAndWarmResourceCounts) {
                     DrawExecutionStats stats;
                     unique_ptr<RenderGraph> graph;
                     values[5] = Measure([&] {
-                        graph = make_unique<RenderGraph>(device, graphResources, passes, "runtime profile");
+                        graph = make_unique<RenderGraph>(device, graphResources, passes, "runtime profile", options.Runtime);
                         graph->SetResourceView(view.StateId.Value);
                         const auto color = graph->CreateTexture({render::TextureDimension::Dim2D, 16, 16, 1, 1, 1, render::TextureFormat::RGBA8_UNORM, render::MemoryType::Device, render::TextureUse::RenderTarget, {}}, "color");
                         const auto depth = graph->CreateTexture({render::TextureDimension::Dim2D, 16, 16, 1, 1, 1, render::TextureFormat::D32_FLOAT, render::MemoryType::Device, render::TextureUse::DepthStencilWrite, {}}, "depth");
@@ -251,8 +268,10 @@ TEST_P(RuntimeProfile, StageCostsAndWarmResourceCounts) {
                     values[6] = Measure([&] { execution = RenderGraphTestDriver::Execute(*graph, *command); });
                     ASSERT_TRUE(execution.Success) << graph->GetReport().ToText();
                     EXPECT_EQ(stats.Draws, count * 2u);
-                    EXPECT_EQ(graph->GetReport().GraphicsPipelinePreparations, 1u);
-                    if (serial > 1) EXPECT_EQ(graph->GetReport().GraphicsPipelineCreations, 0u);
+                    if (options.Runtime.Report != RenderGraphReportMode::Minimal) {
+                        EXPECT_EQ(graph->GetReport().GraphicsPipelinePreparations, 1u);
+                        if (serial > 1) EXPECT_EQ(graph->GetReport().GraphicsPipelineCreations, 0u);
+                    }
                     forward_detail::ForwardCapture capture;
                     if (diagnostics) {
                         capture.Name = "profile";
@@ -269,14 +288,33 @@ TEST_P(RuntimeProfile, StageCostsAndWarmResourceCounts) {
                         context.Queue->Submit({.CmdBuffers = std::span{&raw, 1}});
                         RenderGraphTestDriver::Submitted(raw);
                     });
+                    const auto submitNs = profile::TimestampNs();
                     values[9] = Measure([&] { context.Queue->Wait(); });
                     RenderGraphTestDriver::Completed(command.Get());
-                    if (frame >= 3) {
+                    const auto& counters = draws.GetStats();
+                    rows.push_back({serial, frameBegin, submitNs, profile::TimestampNs(), stats.Draws, counters.GroupPreparations, counters.RecipeBuilds, counters.SetCreations, counters.BufferBytesCopied, snapshot.Stats.MaterialBytesCopied, values});
+                    RADRAY_PROFILE_FRAME();
+                    if (frame >= options.Warmup) {
                         for (size_t i = 0; i < values.size(); ++i) samples[i].push_back(values[i]);
                     }
                 }
                 const std::string_view names[]{"proxyTransform", "assetPump", "snapshot", "cull", "listAndParameters", "graphSetup", "graphExecute", "diagnosticSerialization", "flushAndSubmit", "gpuWait"};
-                for (size_t i = 0; i < samples.size(); ++i) PrintSamples(EnumName(GetParam()), count, moving, diagnostics, names[i], std::move(samples[i]));
+                for (size_t i = 0; i < samples.size(); ++i) {
+                    vector<uint64_t> times;
+                    for (const auto& sample : samples[i]) times.push_back(sample.Ns);
+                    roundMedians[i].push_back(profile::QuantileMs(std::move(times), 50));
+                    PrintSamples(EnumName(GetParam()), count, moving, diagnostics, round, names[i], std::move(samples[i]));
+                }
+                for (size_t rowIndex = 0; rowIndex < rows.size(); ++rowIndex) {
+                    const auto& row = rows[rowIndex];
+                    fmt::print("PROFILE_FRAME {{\"fixture\":\"shared-mesh-micro\",\"backend\":{:?},\"primitives\":{},\"moving\":{},\"round\":{},\"sampleIndex\":{},\"warmup\":{},\"frameSerial\":{},\"flightIndex\":0,\"beginNs\":{},\"submitNs\":{},\"retireNs\":{},\"actualDraws\":{},\"uniqueGeometry\":1,\"uniqueMaterials\":1,\"uniqueLayouts\":1,\"uniquePsoRecipes\":1,\"groupPreparations\":{},\"recipeBuilds\":{},\"setCreations\":{},\"constantBytes\":{},\"snapshotMaterialBytes\":{},\"phases\":[",
+                               EnumName(GetParam()), count, moving, round, rowIndex, rowIndex < options.Warmup, row.Serial, row.BeginNs, row.SubmitNs, row.RetireNs, row.Draws, row.GroupPreparations, row.RecipeBuilds, row.SetCreations, row.ConstantBytes, row.SnapshotMaterialBytes);
+                    for (size_t i = 0; i < row.Phases.size(); ++i) {
+                        const auto& phase = row.Phases[i];
+                        fmt::print("{}{{\"name\":{:?},\"src_file\":{:?},\"src_line\":{},\"scopeMode\":\"inclusive\",\"ns\":{},\"allocations\":{},\"allocatedBytes\":{}}}", i ? "," : "", names[i], std::string_view{phase.Source.file_name()}, phase.Source.line(), phase.Ns, phase.Allocations, phase.Bytes);
+                    }
+                    fmt::print("]}}\n");
+                }
                 const auto& resourceStats = draws.GetStats();
                 fmt::print("PROFILE_COUNTS {{\"backend\":\"{}\",\"primitives\":{},\"moving\":{},\"diagnostics\":{},\"groupPreparations\":{},\"recipeBuilds\":{},\"setCreations\":{},\"setCacheHits\":{},\"constantBytes\":{},\"snapshotMaterialBytes\":{},\"poolBytes\":{},\"poolPeakBytes\":{}}}\n",
                            EnumName(GetParam()), count, moving, diagnostics, resourceStats.GroupPreparations, resourceStats.RecipeBuilds, resourceStats.SetCreations,
@@ -288,8 +326,97 @@ TEST_P(RuntimeProfile, StageCostsAndWarmResourceCounts) {
                            snapshotStats.PrimitiveBoundsRebuilt, snapshotStats.PrimitiveBoundsReused,
                            snapshotStats.MaterialsRebuilt, snapshotStats.MaterialsReused);
             }
+            const std::string_view names[]{"proxyTransform", "assetPump", "snapshot", "cull", "listAndParameters", "graphSetup", "graphExecute", "diagnosticSerialization", "flushAndSubmit", "gpuWait"};
+            for (size_t i = 0; i < roundMedians.size(); ++i) {
+                const auto cv = profile::CoefficientOfVariation(roundMedians[i]);
+                fmt::print("PROFILE_STABILITY {{\"backend\":{:?},\"primitives\":{},\"moving\":{},\"stage\":{:?},\"rounds\":{},\"p50Cv\":{},\"stable\":{}}}\n", EnumName(GetParam()), count, moving, names[i], options.Rounds, cv, options.Rounds >= 5 && cv <= .05);
+            }
+        }
     }
 }
+TEST_P(RuntimeProfile, ThreeViewForwardSteadyState) {
+    const profile::Options options;
+    ASSERT_TRUE(options.Valid);
+    profile::PrintOptions(options, "three-view-forward", EnumName(GetParam()), 3, 2, 960, 540, true, profile::IntegratedSnapshotMode<ForwardPipeline>());
+    if (std::getenv("RADRAY_PROFILE_IDENTITY_ONLY")) return;
+    ASSERT_TRUE(profile::AwaitCapturePermit()) << "Capture startup permit is absent, stale, or profiling is disabled";
+    {
+        render::test::DeviceContext context;
+        if (!render::test::TryCreateDevice(GetParam(), context, options.DriverValidation)) GTEST_SKIP() << context.Reason;
+    }
+    test::RuntimeLogCapture logs;
+    profile::IntegratedApp app{options};
+    const std::filesystem::path root{RADRAY_PROJECT_DIR};
+    ASSERT_EQ(app.Run({.Backend = GetParam(), .EnableValidation = options.DriverValidation, .Multithreaded = true,
+                       .AppName = "runtime profile", .ShaderSourceRoot = root, .ShaderIncludePaths = {root / "shaderlib"},
+                       .WindowTitle = "RadRay runtime profile", .WindowWidth = 960, .WindowHeight = 540, .BackBufferCount = 3, .FlightDataCount = 2,
+                       .BackBufferFormat = render::TextureFormat::BGRA8_UNORM, .PresentMode = render::PresentMode::Immediate}), 0);
+    EXPECT_FALSE(app.Failed) << app.Failure;
+    EXPECT_TRUE(logs.Errors().empty()) << logs.Errors();
+    EXPECT_GE(app.Completed, options.Rounds * (options.Warmup + options.Samples));
+    for (const auto& frame : app.Frames) {
+        if (!frame.Complete || frame.Index >= options.Rounds * (options.Warmup + options.Samples)) continue;
+        EXPECT_EQ(frame.ResolvedViews, 3u);
+        EXPECT_EQ(frame.AvailableViews, 3u);
+        EXPECT_EQ(frame.FullViews, 2u);
+        EXPECT_EQ(frame.AuxiliaryViews, 1u);
+        EXPECT_EQ(frame.AvailableOutputs, 2u);
+        EXPECT_EQ(frame.WrittenOutputs, 2u);
+        EXPECT_TRUE(frame.StageCommandsKnown);
+        EXPECT_GT(frame.MeshDraws, 0u);
+        EXPECT_GT(frame.DepthCommands, 0u);
+        EXPECT_GT(frame.OpaqueCommands, 0u);
+        EXPECT_GT(frame.TransparentCommands, 0u);
+        if (frame.Submission.Available) {
+            EXPECT_EQ(frame.Submission.FrameSerial, frame.FrameSerial);
+            EXPECT_EQ(frame.Submission.FlightIndex, frame.FlightIndex);
+            EXPECT_GE(frame.Submission.SubmitCallbackNs, frame.RecordedNs);
+            EXPECT_GE(frame.Submission.CompletionCallbackNs, frame.Submission.SubmitCallbackNs);
+            EXPECT_LE(frame.Submission.CompletionCallbackNs, frame.RetireObservedNs);
+            EXPECT_TRUE(frame.Submission.CompletionSucceeded);
+        }
+    }
+    profile::PrintIntegratedFrames(options, EnumName(GetParam()), app.Frames);
+}
+
+TEST(RuntimeProfileSubmission, PreservesCallbacksAndRejectsStaleRowIdentity) {
+    struct Result { shared_ptr<FrameSubmission> Submission; };
+    uint32_t submitted = 0, completed = 0;
+    bool succeeded = false;
+    Result result{make_shared<FrameSubmission>(7)};
+    result.Submission->OnSubmitted = [&] { ++submitted; };
+    result.Submission->OnCompleted = [&](bool success) { ++completed; succeeded = success; };
+    profile::SubmissionObservation observation;
+    profile::ObserveSubmission(result, 7, 1, observation);
+    ASSERT_TRUE(observation.Available);
+    ASSERT_TRUE(result.Submission->Record());
+    ASSERT_TRUE(result.Submission->Submit(7));
+    ASSERT_TRUE(result.Submission->Complete(7, true));
+    EXPECT_EQ(submitted, 1u);
+    EXPECT_EQ(completed, 1u);
+    EXPECT_TRUE(succeeded);
+    EXPECT_GT(observation.SubmitCallbackNs, 0u);
+    EXPECT_GE(observation.CompletionCallbackNs, observation.SubmitCallbackNs);
+    EXPECT_TRUE(observation.CompletionSucceeded);
+    result.Submission->Cancel();
+    EXPECT_EQ(completed, 1u);
+
+    Result stale{make_shared<FrameSubmission>(8)};
+    stale.Submission->OnCompleted = [&](bool success) { ++completed; succeeded = success; };
+    profile::SubmissionObservation reused;
+    profile::ObserveSubmission(stale, 8, 0, reused);
+    reused.FrameSerial = 10;
+    stale.Submission->Cancel();
+    EXPECT_EQ(completed, 2u);
+    EXPECT_FALSE(succeeded);
+    EXPECT_EQ(reused.CompletionCallbackNs, 0u);
+
+    struct OldResult {} old;
+    profile::SubmissionObservation unavailable;
+    profile::ObserveSubmission(old, 9, 0, unavailable);
+    EXPECT_FALSE(unavailable.Available);
+}
+
 INSTANTIATE_TEST_SUITE_P(Backends, RuntimeProfile, testing::Values(render::RenderBackend::D3D12, render::RenderBackend::Vulkan));
 }  // namespace
 }  // namespace radray

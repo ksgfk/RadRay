@@ -14,6 +14,7 @@ struct RendererList;
 class RenderGraphRasterContext;
 class RenderGraphPrepareContext;
 class RendererListPassSets;
+class FrameDrawResources;
 
 struct DrawSortData {
     RenderQueue Queue{RenderQueue::Geometry};
@@ -30,6 +31,8 @@ struct MeshDrawDescription {
     Nullable<const GpuMesh::DrawData*> Geometry{nullptr};
     uint32_t FirstIndex{0}, IndexCount{0};
     int32_t VertexOffset{0};
+    // Optional identity prepared with the immutable geometry. Legacy mutable layouts leave this empty.
+    PrimitiveVertexLayoutId LayoutId{};
 };
 /// A description and its frame-local bindings. Groups are immutable until the flight retires.
 struct MeshDrawCommand : MeshDrawDescription {
@@ -44,15 +47,51 @@ struct DrawExecutionStats {
 
 /// Built during the prepare stage of its pass: pipeline states and parameter sets are already
 /// resolved, so recording only binds and draws. Immutable until graph execution finishes.
-struct PreparedRendererList {
+class PreparedRendererList {
+public:
+    PreparedRendererList(PreparedRendererList&&) noexcept = default;
+    PreparedRendererList& operator=(PreparedRendererList&&) noexcept = default;
+    PreparedRendererList(const PreparedRendererList&) = delete;
+    PreparedRendererList& operator=(const PreparedRendererList&) = delete;
+
+private:
+    friend class FrameDrawResources;
+    friend std::optional<PreparedRendererList> PrepareRendererList(const RendererList&, RenderGraphPrepareContext&, Nullable<const RendererListPassSets*>);
+    friend void RecordRendererList(const PreparedRendererList&, RenderGraphRasterContext&, DrawExecutionStats&);
+    friend struct RenderGraphTestDriver;
+    friend struct ReadyWorkspaceTestAccess;
+    struct Storage;
+    struct Workspace;
+    PreparedRendererList(RgPassHandle pass, const RendererList* source, shared_ptr<Storage> storage) noexcept;
     struct Draw {
-        const MeshDrawDescription* Description;
-        std::span<const PreparedShaderGroup> Groups;
-        std::span<const PreparedShaderGroup> PassGroups;
         render::GraphicsPipelineState* Pipeline;
+        uint32_t FirstBinding, BindingCount, Geometry;
+        uint32_t IndexCount, FirstIndex;
+        int32_t VertexOffset;
+        bool BindPipeline, BindGeometry;
+    };
+    struct GroupReference {
+        uint32_t Source, Index;
+        friend bool operator==(const GroupReference&, const GroupReference&) = default;
+    };
+    struct Geometry {
+        const GpuMesh::DrawData* Source;
+        uint32_t FirstRun, RunCount;
     };
     RgPassHandle Pass;
-    vector<Draw> Draws;
+    const RendererList* Source;
+    uint64_t SourceRevision;
+    Nullable<const FrameDrawResources*> Resources;
+    uint64_t ResourceEpoch;
+    Nullable<const MeshDrawCommand*> SourceCommands;
+    Nullable<const void*> SourceItems;
+    size_t SourceCommandCount, SourceItemCount;
+    shared_ptr<const Storage> StorageOwner;
+    std::span<const Draw> Draws;
+    std::span<const GroupReference> Groups;
+    std::span<const PreparedShaderGroup> LocalGroups;
+    std::span<const Geometry> Geometries;
+    std::span<const std::span<const render::VertexBufferBinding>> VertexRuns;
 };
 
 bool ValidateMeshGeometry(const GpuMesh::DrawData& geometry, uint32_t firstIndex, uint32_t indexCount) noexcept;

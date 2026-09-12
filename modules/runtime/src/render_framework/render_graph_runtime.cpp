@@ -2,9 +2,10 @@
 #include <radray/logger.h>
 
 namespace radray {
-RenderGraphRuntime::RenderGraphRuntime(render::Device& device, render::RenderPassRegistry& registry, uint32_t flights) {
+RenderGraphRuntime::RenderGraphRuntime(render::Device& device, render::RenderPassRegistry& registry, uint32_t flights)
+    : _plans(make_shared<RenderGraphPlanCache>()) {
     for (uint32_t flight = 0; flight < flights; ++flight) {
-        _flights.push_back(make_unique<RenderGraphFrameResources>(device, registry));
+        _flights.push_back(make_unique<RenderGraphFrameResources>(device, registry, _plans));
     }
 }
 RenderGraphFrameResources& RenderGraphRuntime::BeginFlight(

@@ -189,6 +189,111 @@ void RunHost(render::RenderBackend backend, bool threaded, bool pipeline, bool r
     }
 }
 
+struct TemporalWorkGateResult {
+    uint32_t WorkCalls{0}, PassPrepareCalls{0}, RecordCalls{0}, Frames{0};
+};
+class TemporalWorkGatePipeline final : public RenderPipeline {
+public:
+    explicit TemporalWorkGatePipeline(TemporalWorkGateResult& result) : _result(result) {}
+    void PrepareFrame(RenderPrepareContext& context) override {
+        for (const auto& output : context.Outputs) {
+            if (!output.Active) continue;
+            RenderViewDesc view;
+            view.StateId = _view;
+            context.Workloads.AddViewFamily({"temporal gate", output.Id, 1, {view}});
+            break;
+        }
+    }
+    void BuildGraph(RenderPipelineContext& context, RenderGraph& graph, std::span<RenderGraphOutputBinding> outputs) override {
+        ASSERT_FALSE(context.ViewFamilies().empty());
+        const auto& family = context.ViewFamilies().front();
+        if (!family.OutputAvailable) return;
+        auto state = make_shared<State>();
+        state->Context = &context;
+        state->Graph = &graph;
+        state->Family = &family;
+        state->View = family.Views.front();
+        state->Result = &_result;
+        const auto work = graph.AddWork("temporal inputs", state, +[](shared_ptr<State>& value, uint64_t) {
+            ++value->Result->WorkCalls;
+            EXPECT_TRUE(value->Context->PreparePrimitiveHistory(value->View, value->Snapshot));
+            CheckLocked(*value);
+            return true; });
+        auto* target = FindGraphOutput(outputs, family.OutputId).Get();
+        ASSERT_NE(target, nullptr);
+        target->Texture = graph.NextVersion(target->Texture);
+        const auto pass = graph.AddRasterPass<shared_ptr<State>>("temporal clear", [&](shared_ptr<State>& value, RenderGraphRasterBuilder& builder) {
+            value = state;
+            builder.RequireWork(work);
+            builder.SetColorAttachment(0, target->Texture); }, +[](shared_ptr<State>& value, RenderGraphPrepareContext&) {
+            ++value->Result->PassPrepareCalls;
+            EXPECT_FALSE(value->Context->PreparePrimitiveHistory(value->View, value->Snapshot));
+            CheckLocked(*value);
+            return true; }, +[](const shared_ptr<State>& value, RenderGraphRasterContext&) {
+            ++value->Result->RecordCalls;
+            EXPECT_FALSE(value->Context->PreparePrimitiveHistory(value->View, value->Snapshot));
+            CheckLocked(*value); });
+        _completion = context.RegisterViewCompletion(graph, _view, pass, target->Texture);
+    }
+    void GraphRecorded(RenderPipelineContext& context, const RenderGraph&, RenderGraphExecutionResult result) override {
+        ASSERT_TRUE(result.Success);
+        if (context.ViewFamilies().empty() || !context.ViewFamilies().front().OutputAvailable) return;
+        auto view = context.ViewFamilies().front().Views.front();
+        EXPECT_FALSE(context.PreparePrimitiveHistory(view, {}));
+        EXPECT_TRUE(context.CommitView(_view, _completion, true));
+        ++_result.Frames;
+    }
+
+private:
+    struct State {
+        RenderPipelineContext* Context;
+        RenderGraph* Graph;
+        const ResolvedRenderViewFamily* Family;
+        ResolvedRenderView View;
+        RenderSceneSnapshot Snapshot;
+        TemporalWorkGateResult* Result;
+    };
+    static void CheckLocked(State& state) {
+        EXPECT_FALSE(state.Context->ImportOutputTarget(*state.Graph, state.Family->OutputId).IsValid());
+        string reason;
+        EXPECT_FALSE(state.Context->AcquireHistoryTexture(state.View, *state.Family, {}, reason).Current);
+        EXPECT_FALSE(reason.empty());
+        EXPECT_FALSE(state.Context->ExecuteGraph(*state.Graph).Success);
+    }
+    TemporalWorkGateResult& _result;
+    ViewStateId _view{AllocateViewStateId()};
+    ViewCompletionToken _completion;
+};
+class TemporalWorkGateApp final : public Application {
+public:
+    explicit TemporalWorkGateApp(TemporalWorkGateResult& result) : _result(result) {}
+
+private:
+    void OnInit() override { GetRenderSystem()->SetPipeline(make_unique<TemporalWorkGatePipeline>(_result)); }
+    void OnUpdate(const AppUpdateContext&) override {
+        if (_result.Frames >= 3 || ++_updates >= 8) test::CloseMainWindow(*this);
+    }
+    TemporalWorkGateResult& _result;
+    uint32_t _updates{0};
+};
+void RunTemporalWorkGate(render::RenderBackend backend) {
+    {
+        render::test::DeviceContext device;
+        if (!render::test::TryCreateDevice(backend, device)) GTEST_SKIP() << device.Reason;
+    }
+    TemporalWorkGateResult result;
+    test::RuntimeLogCapture logs;
+    TemporalWorkGateApp app{result};
+    ASSERT_EQ(app.Run({.Backend = backend, .EnableValidation = true, .Multithreaded = false, .WindowTitle = "Temporal work gate", .WindowWidth = 160, .WindowHeight = 120, .FlightDataCount = 2, .BackBufferFormat = render::TextureFormat::BGRA8_UNORM, .PresentMode = render::PresentMode::FIFO}), 0);
+    EXPECT_GE(result.Frames, 2u);
+    EXPECT_EQ(result.WorkCalls, result.Frames);
+    EXPECT_EQ(result.PassPrepareCalls, result.Frames);
+    EXPECT_EQ(result.RecordCalls, result.Frames);
+    EXPECT_TRUE(logs.Errors().empty()) << logs.Errors();
+}
+TEST(RadRayRuntimeRenderPipeline, D3D12TemporalInputsAreAllowedOnlyDuringLiveWork) { RunTemporalWorkGate(render::RenderBackend::D3D12); }
+TEST(RadRayRuntimeRenderPipeline, VulkanTemporalInputsAreAllowedOnlyDuringLiveWork) { RunTemporalWorkGate(render::RenderBackend::Vulkan); }
+
 class OutputSurfaceContractApp final : public Application {
     void OnInit() override {
         auto* actor = GetWorld()->SpawnActor<Actor>();

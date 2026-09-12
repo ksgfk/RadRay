@@ -21,8 +21,6 @@ RenderViewDesc CollectRenderView(const CameraComponent& camera) {
     return view;
 }
 
-// Runs once per visible primitive per frame; written against raw components so unoptimized builds do
-// not pay an out-of-line call per Eigen operator.
 Eigen::Matrix4f MakeNormalToWorld(const Eigen::Matrix4f& localToWorld) {
     Eigen::Matrix4f result = Eigen::Matrix4f::Zero();
     // Column-major: element (r, c) at m[c * 4 + r]. l[c][r] is column c of the linear part.
@@ -81,6 +79,45 @@ void FreezeObjectData(const RenderSceneSnapshot& scene, PackedCBufferTable& out)
         row->PreviousLocalToWorld = localToWorld;
         row->MotionValid = 0;
     }
+}
+
+uint64_t ForwardObjectDataCache::Update(const RenderSceneSnapshot& scene) {
+    RADRAY_PROFILE_SCOPE_N("ObjectValueUpdate");
+    const bool samePublication = scene.Valid && scene.PublicationId != 0 && scene.PublicationRevision != 0 &&
+                                 scene.PublicationId == _publicationId;
+    if (samePublication && scene.PublicationRevision == _publicationRevision) return 0;
+    const size_t previousCount = _versions.size();
+    _rows.Reset(sizeof(Forward_ObjectData), scene.Primitives.size());
+    _versions.resize(scene.Primitives.size());
+    uint64_t updated = 0;
+    const auto updateRow = [&](size_t index) {
+        const auto& primitive = scene.Primitives[index];
+        auto& version = _versions[index];
+        if (index < previousCount && primitive.Generation != 0 && primitive.TransformRevision != 0 &&
+            version.Generation == primitive.Generation && version.TransformRevision == primitive.TransformRevision) return;
+        const auto& transform = primitive.LocalToWorld;
+        auto* row = AsCBuffer<Forward_ObjectData>(_rows.Row(index));
+        *row = {};
+        row->LocalToWorld = transform;
+        row->NormalToWorld = MakeNormalToWorld(transform);
+        row->PreviousLocalToWorld = transform;
+        row->MotionValid = 0;
+        version = {primitive.Generation, primitive.TransformRevision};
+        ++updated;
+    };
+    const bool useRanges = samePublication && scene.ChangedFromPublicationRevision == _publicationRevision &&
+                           std::all_of(scene.ChangedPrimitiveRanges.begin(), scene.ChangedPrimitiveRanges.end(), [&](const SnapshotChangedRange& range) {
+                               return range.First <= scene.Primitives.size() && range.Count <= scene.Primitives.size() - range.First;
+                           });
+    if (useRanges) {
+        for (const auto& range : scene.ChangedPrimitiveRanges)
+            for (size_t index = range.First; index < size_t{range.First} + range.Count; ++index) updateRow(index);
+    } else {
+        for (size_t index = 0; index < scene.Primitives.size(); ++index) updateRow(index);
+    }
+    _publicationId = scene.PublicationId;
+    _publicationRevision = scene.PublicationRevision;
+    return updated;
 }
 
 void FillViewParameters(

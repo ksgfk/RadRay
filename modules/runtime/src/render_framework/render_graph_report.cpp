@@ -1,7 +1,33 @@
 #include <radray/runtime/render_framework/render_graph.h>
 
 namespace radray {
+
+void RenderGraphCommandCalls::Add(const RenderGraphCommandCalls& other) noexcept {
+    Draw += other.Draw;
+    DrawIndexed += other.DrawIndexed;
+    DrawIndirect += other.DrawIndirect;
+    DrawIndexedIndirect += other.DrawIndexedIndirect;
+    Dispatch += other.Dispatch;
+    DispatchIndirect += other.DispatchIndirect;
+    IndirectDrawArguments += other.IndirectDrawArguments;
+    SetPipeline += other.SetPipeline;
+    SetParameters += other.SetParameters;
+    VertexBuffer += other.VertexBuffer;
+    IndexBuffer += other.IndexBuffer;
+    PushConstants += other.PushConstants;
+    Viewport += other.Viewport;
+    Scissor += other.Scissor;
+    Copy += other.Copy;
+    Resolve += other.Resolve;
+}
+
 namespace {
+string CommandCallsJson(const RenderGraphCommandCalls& calls) {
+    return fmt::format("{{\"scope\":\"runtimeToRhi\",\"draw\":{},\"drawIndexed\":{},\"drawIndirect\":{},\"drawIndexedIndirect\":{},\"dispatch\":{},\"dispatchIndirect\":{},\"indirectDrawArguments\":{},\"setPipeline\":{},\"setParameters\":{},\"vertexBuffer\":{},\"indexBuffer\":{},\"pushConstants\":{},\"viewport\":{},\"scissor\":{},\"copy\":{},\"resolve\":{}}}",
+                       calls.Draw, calls.DrawIndexed, calls.DrawIndirect, calls.DrawIndexedIndirect, calls.Dispatch, calls.DispatchIndirect,
+                       calls.IndirectDrawArguments, calls.SetPipeline, calls.SetParameters, calls.VertexBuffer, calls.IndexBuffer, calls.PushConstants,
+                       calls.Viewport, calls.Scissor, calls.Copy, calls.Resolve);
+}
 string Quote(std::string_view value) {
     string result{"\""};
     for (const unsigned char c : value) {
@@ -34,8 +60,10 @@ string Indices(std::span<const uint32_t> values) {
 }  // namespace
 
 string RenderGraphExecutionReport::ToJson() const {
+    const auto validation = fmt::format("\"validation\":{{\"planInputCalls\":{},\"readyFrameCalls\":{},\"readyCallbacks\":{}}},", ValidatePlanInputCalls, ValidateReadyFrameCalls, ReadyValidationCallbacks);
     string result = fmt::format("{{\"name\":{},\"declaredPasses\":{},\"livePasses\":{},\"culledPasses\":{},\"compilePlanReused\":{},\"textures\":{},\"buffers\":{},\"physicalAllocations\":{},\"transitionBarriers\":{},\"uavBarriers\":{},\"passes\":[",
                                 Quote(Name), DeclaredPasses, LivePasses, CulledPasses, CompilePlanReused ? "true" : "false", Textures, Buffers, PhysicalAllocations, TransitionBarriers, UavBarriers);
+    result.insert(1, validation);
     for (size_t i = 0; i < Passes.size(); ++i) {
         const auto& p = Passes[i];
         if (i) result += ',';
@@ -52,16 +80,19 @@ string RenderGraphExecutionReport::ToJson() const {
             const auto& r = access.TextureRange;
             result += fmt::format("{{\"resource\":{},\"version\":{},\"state\":{},\"stages\":{},\"read\":{},\"write\":{},\"textureRange\":[{},{},{},{},{}],\"bufferRange\":[{},{}]}}", access.Resource, access.Version, access.State, access.Stages.value(), access.Read, access.Write, r.BaseArrayLayer, r.ArrayLayerCount, r.BaseMipLevel, r.MipLevelCount, r.Aspects.value(), access.BufferRange.Offset, access.BufferRange.Size);
         }
-        result += "]}";
+        result += fmt::format("],\"commandCalls\":{}}}", CommandCallsJson(p.CommandCalls));
     }
-    result += "],\"resources\":[";
+    result += fmt::format("],\"declarations\":{{\"resources\":{},\"passes\":{},\"resolvePorts\":{},\"templateInstances\":{},\"templatePlacements\":{},\"templateMaterializations\":{}}},\"commandCalls\":{},\"executionPlan\":{{\"id\":{},\"normalizeBuilds\":{},\"irBuilds\":{},\"topologyBuilds\":{},\"storagePlanBuilds\":{},\"rasterPlanBuilds\":{},\"executionPlanBuilds\":{},\"barrierTemplateBuilds\":{},\"routePlanBuilds\":{},\"initialStatePatches\":{},\"commandRoutePatches\":{}}},\"resources\":[",
+                          ResourceDeclarations, PassDeclarations, PortResolveBuilds, TemplateInstances, TemplatePlacementBuilds, TemplateMaterializations,
+                          CommandCallsJson(CommandCalls), ExecutionPlanId, NormalizeBuilds, IrBuilds, TopologyBuilds, StoragePlanBuilds, RasterPlanBuilds, ExecutionPlanBuilds,
+                          BarrierTemplateBuilds, RoutePlanBuilds, InitialStatePatches, CommandRoutePatches);
     for (size_t i = 0; i < Resources.size(); ++i) {
         const auto& r = Resources[i];
         if (i) result += ',';
         result += fmt::format("{{\"name\":{},\"descriptor\":{},\"texture\":{},\"external\":{},\"physicalId\":{},\"firstUse\":{},\"lastUse\":{},\"viewId\":{},\"estimatedBytes\":{},\"physicalSlot\":{},\"port\":{},\"retainedOwner\":{}}}",
                               Quote(r.Name), Quote(r.Descriptor), r.Texture, r.External, r.PhysicalId, r.FirstUse, r.LastUse, r.ViewId, r.EstimatedBytes, r.PhysicalSlot, r.Port, r.RetainedOwner);
     }
-    result += "],\"barriers\":[";
+    result += fmt::format("],\"work\":{{\"declared\":{},\"live\":{},\"runs\":{},\"uploads\":{},\"uploadBytes\":{}}},\"barriers\":[", DeclaredWorks, LiveWorks, WorkRuns, WorkUploads, WorkUploadBytes);
     for (size_t i = 0; i < Barriers.size(); ++i) {
         const auto& b = Barriers[i];
         if (i) result += ',';
@@ -80,8 +111,8 @@ string RenderGraphExecutionReport::ToJson() const {
         result += fmt::format("{{\"code\":{},\"graph\":{},\"pass\":{},\"binding\":{},\"resource\":{},\"message\":{},\"file\":{},\"line\":{}}}",
                               Quote(d.Code), Quote(d.Graph), Quote(d.Pass), Quote(d.Binding), Quote(d.Resource), Quote(d.Message), Quote(d.File), d.Line);
     }
-    result += fmt::format("],\"graphicsPipelines\":{{\"preparations\":{},\"creations\":{}}},\"pool\":{{\"hits\":{},\"misses\":{},\"created\":{},\"trimmed\":{},\"textures\":{},\"buffers\":{},\"views\":{},\"estimatedBytes\":{},\"peakEstimatedBytes\":{},\"memoryByView\":[",
-                          GraphicsPipelinePreparations, GraphicsPipelineCreations,
+    result += fmt::format("],\"graphicsPipelines\":{{\"preparations\":{},\"creations\":{}}},\"geometryValidation\":{{\"calls\":{},\"declarationScans\":{}}},\"pool\":{{\"hits\":{},\"misses\":{},\"created\":{},\"trimmed\":{},\"textures\":{},\"buffers\":{},\"views\":{},\"estimatedBytes\":{},\"peakEstimatedBytes\":{},\"memoryByView\":[",
+                          GraphicsPipelinePreparations, GraphicsPipelineCreations, GeometryValidationCalls, GeometryDeclarationScans,
                           Pool.Hits, Pool.Misses, Pool.Created, Pool.Trimmed, Pool.TextureCount, Pool.BufferCount, Pool.ViewCount, Pool.EstimatedBytes, Pool.PeakEstimatedBytes);
     for (size_t i = 0; i < Pool.MemoryByView.size(); ++i) {
         if (i) result += ',';
@@ -114,6 +145,7 @@ string RenderGraphExecutionReport::ToText() const {
     string result = fmt::format("Graph {}: {} live / {} declared, {} culled, compile plan {}; {} transitions, {} UAV barriers\n",
                                 Name, LivePasses, DeclaredPasses, CulledPasses, CompilePlanReused ? "reused" : "compiled", TransitionBarriers, UavBarriers);
     if (!FirstErrorCode.empty()) result += fmt::format("  FirstErrorCode: {}\n", FirstErrorCode);
+    result += fmt::format("  validation planInput={} readyFrame={} callbacks={}\n", ValidatePlanInputCalls, ValidateReadyFrameCalls, ReadyValidationCallbacks);
     for (size_t p = 0; p < Passes.size(); ++p) {
         const auto& pass = Passes[p];
         result += fmt::format("  [{}] {} {} {} ({}) at {}:{}\n", p, pass.Live ? "live" : "culled", EnumName(pass.Type), pass.Name, pass.LivenessReason, pass.File, pass.Line);

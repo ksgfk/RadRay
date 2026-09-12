@@ -12,6 +12,8 @@
 namespace radray {
 
 struct AppUpdateContext;
+class Scene;
+class FrameGraphTemplateCache;
 
 class ViewCompletionToken {
 public:
@@ -30,6 +32,21 @@ struct RenderPrepareContext {
     RenderWorkloadBuilder& Workloads;
     vector<StreamingAssetRefAny>& RetainedAssets;
     RenderGraphRuntimeOptions RuntimeOptions{kPerformanceRenderGraphRuntimeOptions};
+    /// GT input epoch; GPU recording assigns its independent FrameSerial later.
+    uint64_t PrepareSerial{0};
+    /// Collection precedes the global GT cutoff. Registered Scenes freeze before any PrepareFrame callback.
+    bool RegisterScene(const Scene& scene);
+    bool RegisterScenePolicy(const Scene& scene, const PassPolicy& policy);
+    bool FreezeRegisteredScenes();
+    Nullable<shared_ptr<const RenderSceneSnapshot>> PrepareScene(const Scene& scene) const;
+    vector<const Scene*> RegisteredScenes{};
+    bool ScenesFrozen{false};
+    struct ScenePolicyRegistration {
+        const Scene* Source;
+        PassPolicy Policy;
+    };
+    vector<ScenePolicyRegistration> ScenePolicies{};
+    bool PolicyRegistrationValid{true};
 };
 
 struct RenderGraphOutputBinding {
@@ -54,14 +71,18 @@ public:
     const RenderGraphRuntimeOptions& GetRuntimeOptions() const noexcept { return _runtimeOptions; }
     RenderGraph CreateRenderGraph(std::string_view name);
     RgTextureValue ImportOutputTarget(RenderGraph& graph, RenderOutputId output);
+    RgTextureValue BindOutputTarget(RenderGraph& graph, const RenderGraphTemplateInstance& instance, RgTextureValue slot, RenderOutputId output);
+    FrameGraphTemplateCache& GetDefaultCompositionCache();
     std::span<const RenderSurfaceFrame> OutputSurfaces() const noexcept { return _surfaces; }
     RenderGraphExecutionResult ExecuteGraph(RenderGraph& graph);
     bool CommitView(ViewStateId view);
     ViewCompletionToken RegisterViewCompletion(RenderGraph& graph, ViewStateId view, RgPassHandle pass, RgTextureValue output);
     bool CommitView(ViewStateId view, const ViewCompletionToken& completion, bool requiredDrawsSucceeded);
     void InvalidateView(ViewStateId view);
+    /// Available during declaration and the graph's live-work preparation, before pass preparation.
     bool PreparePrimitiveHistory(ResolvedRenderView& view, const RenderSceneSnapshot& snapshot);
     PrimitiveMotionData GetPrimitiveMotion(ViewStateId view, const RenderPrimitiveData& primitive) const noexcept;
+    PrimitiveHistoryStamp GetPrimitiveHistoryStamp(ViewStateId view) const noexcept;
     HistoryTexturePair AcquireHistoryTexture(const ResolvedRenderView& view, const ResolvedRenderViewFamily& family,
                                              const HistoryTextureRequest& request, string& reason);
 
@@ -77,6 +98,7 @@ private:
     RenderGraphExecutionReport& _report;
     RenderGraphRuntimeOptions _runtimeOptions{kDiagnosticRenderGraphRuntimeOptions};
     vector<shared_ptr<ImportedOutput>> _imports;
+    shared_ptr<FrameGraphTemplateCache>& DefaultCompositionCacheStorage() noexcept;
     shared_ptr<FrameSubmission> _submission;
     vector<HistoryTexturePair> _histories;
     vector<bool> _recordedHistories;
@@ -91,12 +113,14 @@ private:
     vector<ViewStateId> _failedTemporalViews;
     vector<ViewStateId> _queuedViews;
     uint64_t _graphGeneration{0};
+    Nullable<const RenderGraph*> _executingGraph{nullptr};
     bool _executed{false}, _success{false};
 };
 
 class RenderGraphComponent {
 public:
     virtual ~RenderGraphComponent() noexcept = default;
+    virtual void CollectScenePolicies(RenderPrepareContext&) {}
     virtual void PrepareFrame(RenderPrepareContext&) {}
     /// Expand only into the supplied graph. Inputs/outputs are explicit content values.
     virtual void BuildGraph(RenderPipelineContext&, RenderGraph&, std::span<RenderGraphOutputBinding>) = 0;

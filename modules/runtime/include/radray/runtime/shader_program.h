@@ -73,6 +73,8 @@ public:
     // property of one declaration, not of a whole descriptor group.
     bool IsBufferDynamic(std::string_view declarationName) const noexcept;
     const ShaderParameterLayout& GetParameterLayout() const noexcept { return _parameterLayout; }
+    /// Immutable program lifetime identity; replacements at the same address receive a new value.
+    uint64_t GetGeneration() const noexcept { return _generation; }
     // Render-thread preparation. References remain valid until this program is destroyed.
     const ShaderParameterGroupRecipe& GetOrCreateParameterGroupRecipe(uint32_t group);
     size_t GetParameterGroupRecipeCount() const noexcept { return _parameterGroupRecipes.size(); }
@@ -125,6 +127,7 @@ private:
         string computeEntry) noexcept;
 
     render::Device* _device;
+    uint64_t _generation;
     render::BackendShaderArtifact _artifact;
     unique_ptr<render::Shader> _vertexShader;
     string _vertexEntry;

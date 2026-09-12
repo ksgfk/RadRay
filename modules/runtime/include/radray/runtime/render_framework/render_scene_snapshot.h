@@ -12,6 +12,7 @@
 namespace radray {
 
 class Scene;
+struct SceneSnapshotPublication;
 
 struct RenderPrimitiveData {
     SceneObjectId Id{};
@@ -44,71 +45,96 @@ struct RenderSceneSnapshotStats {
     uint64_t MaterialsRebuilt{0}, MaterialsReused{0};
     uint64_t DrawRecordBuilds{0}, DrawRecordsReused{0}, DrawRecordStateSelects{0};
     uint64_t DrawRecordBytes{0}, CpuSceneBytes{0};
+    uint64_t DrawRecordFullSyncs{0}, DrawRecordPrimitivesVisited{0}, DrawRecordCopies{0};
+    uint64_t StaticRecipeCompiles{0}, BindingRecipeCompiles{0};
+    uint64_t PublishedPages{0}, PublishedBytes{0}, PublishedMaterialBytes{0};
+    uint64_t PublishedVariablePayloadBytes{0};
+    /// Ownership transferred by canonical swap-removal; these bytes are not deep copies.
+    uint64_t MaterialPayloadMoves{0}, MovedMaterialPayloadBytes{0};
+    uint64_t LegacyMaterialsObserved{0}, LegacyBytesCompared{0}, PendingResourcesObserved{0};
+    uint64_t SceneCommits{0}, SnapshotPublications{0};
     uint64_t AppliedTransforms{0}, EqualValueIgnored{0};
     // Peak vector capacities, measured in elements across reuse cycles.
     size_t PrimitiveHighWatermark{0}, BatchHighWatermark{0}, MaterialHighWatermark{0}, LightHighWatermark{0};
+};
+
+struct SnapshotChangedRange {
+    uint32_t First{0}, Count{0};
 };
 
 /// Per-flight values. Geometry/texture payloads and programs must outlive flight retirement.
 /// Primitive values are builder-owned; ResetForReuse discards their materialization state.
 /// DrawRecords are the stable catalog for this published epoch; views consume compact indices.
 struct RenderSceneSnapshot {
+    RenderSceneSnapshot() = default;
+    RenderSceneSnapshot(const RenderSceneSnapshot& other);
+    RenderSceneSnapshot& operator=(const RenderSceneSnapshot& other);
+    RenderSceneSnapshot(RenderSceneSnapshot&&) noexcept = default;
+    RenderSceneSnapshot& operator=(RenderSceneSnapshot&&) noexcept = default;
     vector<RenderPrimitiveData> Primitives;
     vector<MeshBatch> MeshBatches;
     vector<MaterialRenderData> Materials;
     vector<RenderLightData> Lights;
     vector<DrawRecord> DrawRecords;
+    vector<StaticBindingRecipe> BindingRecipes;
+    vector<CpuGeometryBindingPlan> GeometryBindingPlans;
     vector<uint32_t> PrimitiveDrawBegin;
+    vector<SnapshotChangedRange> ChangedPrimitiveRanges;
+    uint64_t SceneEpoch{0};
+    uint64_t PublicationId{0};
+    uint64_t PublicationRevision{0}, ChangedFromPublicationRevision{0};
+    bool Valid{false};
+    bool HasPassPolicies{false};
     RenderSceneSnapshotStats Stats;
 
     void ResetForReuse() noexcept;
+
+private:
+    friend class SceneRenderState;
+    shared_ptr<SceneSnapshotPublication> _publication;
 };
 
-/// Game thread only, after acquiring a writable flight. Failure publishes an empty snapshot.
+/// Snapshot-owned table and nested payload storage; pending publication pages are measured by SceneRenderState.
+RenderMemoryStats MeasureRenderSceneSnapshot(const RenderSceneSnapshot& snapshot) noexcept;
+
+/// Game thread only, after acquiring a writable flight. Failure leaves an invalid, unpublished snapshot.
 bool BuildRenderSceneSnapshot(const Scene& scene, RenderSceneSnapshot& out, vector<StreamingAssetRefAny>& retainedAssets,
                               RenderValidationMode validation = RenderValidationMode::Full);
 
-/// Game-thread cache; never published to the renderer. Geometry cache hits require proxy generation
-/// and an explicit nonzero revision. Material values are independently versioned in each flight.
+/// Scene-owned canonical CPU data and each writable snapshot's pending publication pages.
+struct SnapshotPublicationFailure {
+    uint32_t AfterRetainedOwners{UINT32_MAX};
+    uint32_t AfterCopiedTables{UINT32_MAX};
+    uint32_t AfterCopiedEntries{UINT32_MAX};
+};
+
+class SceneRenderState {
+public:
+    SceneRenderState();
+    ~SceneRenderState() noexcept;
+    SceneRenderState(const SceneRenderState&) = delete;
+    SceneRenderState& operator=(const SceneRenderState&) = delete;
+    /// An explicit epoch belongs to one publication target and one frame owner sink. New targets require a new epoch.
+    /// Failed publication retries require unchanged owner sources; advance the epoch after late authoring edits.
+    bool Publish(const Scene& scene, RenderSceneSnapshot& out, vector<StreamingAssetRefAny>& retainedAssets,
+                 RenderValidationMode validation, std::optional<uint64_t> serial = std::nullopt);
+    Nullable<shared_ptr<const RenderSceneSnapshot>> PrepareShared(const Scene& scene, uint64_t serial, uint32_t flight,
+                                                                  vector<StreamingAssetRefAny>& retainedAssets, RenderValidationMode validation);
+    /// Deterministic one-shot failure injection at the publication boundary, for lifecycle tests.
+    void FailNextPublicationForTesting(SnapshotPublicationFailure failure) noexcept;
+    SceneRenderStateMemoryStats GetMemoryStats() const noexcept;
+
+private:
+    struct Impl;
+    unique_ptr<Impl> _impl;
+};
+
+/// GT publisher facade; all compilation state belongs to the supplied Scene.
 class RenderSceneSnapshotBuilder {
 public:
     bool Build(const Scene& scene, RenderSceneSnapshot& out, vector<StreamingAssetRefAny>& retainedAssets,
-               RenderValidationMode validation = RenderValidationMode::Full);
-    CpuDrawStore& DrawStore() noexcept { return _draws; }
-    const CpuDrawStore& DrawStore() const noexcept { return _draws; }
-
-private:
-    struct Entry {
-        uint64_t Epoch{0};
-        std::optional<uint32_t> Index;
-    };
-    struct MaterialEntry {
-        uint64_t Epoch{0}, StorageEpoch{0};
-        std::optional<uint32_t> Index;
-        size_t StorageIndex{0};
-        // No asset ownership or renderer access. Invalid values are rechecked on every GT build.
-        MaterialRenderData Unpublished;
-    };
-    enum class SectionStatus : uint8_t { Valid,
-                                         MissingGeometry,
-                                         EmptyDraw,
-                                         InvalidDrawRange };
-    struct Section {
-        MeshDrawArgs Draw;
-        SectionStatus Status{SectionStatus::MissingGeometry};
-    };
-    struct PrimitiveEntry {
-        uint64_t Generation{0}, Revision{0};
-        uint64_t TransformRevision{0};
-        AxisAlignedBounds LocalBounds;
-        InlineVector<Section, 2> Sections;
-    };
-    vector<PrimitiveEntry> _primitives;
-    unordered_map<uint64_t, MaterialEntry> _materials;
-    vector<MaterialRenderData> _materialScratch;
-    unordered_map<ShaderProgram*, Entry> _programs;
-    CpuDrawStore _draws;
-    uint64_t _epoch{0};
+               RenderValidationMode validation = RenderValidationMode::Full,
+               std::optional<uint64_t> serial = std::nullopt);
 };
 
 }  // namespace radray

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <radray/basic_math.h>
+#include <radray/enum_flags.h>
 #include <radray/nullable.h>
 #include <radray/runtime/gpu_resource.h>
 #include <radray/runtime/render_framework/render_bounds.h>
@@ -12,7 +13,21 @@
 namespace radray {
 
 class Material;
+class Scene;
 class StreamingAssetRefAny;
+
+enum class PrimitiveDirtyKind : uint8_t {
+    Structure = 1,
+    MaterialAssignment = 2,
+    TransformOrBounds = 4,
+    Filter = 8,
+    MotionReset = 16,
+    Removed = 32,
+};
+template <>
+struct is_flags<PrimitiveDirtyKind> : std::true_type {};
+using PrimitiveDirtyFlags = EnumFlags<PrimitiveDirtyKind>;
+inline auto format_as(PrimitiveDirtyKind value) { return EnumFlagsName(value); }
 
 /// 一次索引绘制的参数 (对应 UE5 的 FMeshBatchElement 的索引子集)。
 /// 【Geometry 的保命责任在 proxy】它指进 StaticMesh 持有的 GpuMesh, 所以覆写 GetDrawArgs 的
@@ -49,6 +64,10 @@ public:
     /// include asynchronous geometry readiness. Zero keeps custom proxies conservatively refreshed.
     virtual uint64_t GetRenderDataRevision() const noexcept { return 0; }
     virtual uint64_t GetTransformRevision() const noexcept { return 0; }
+    /// False requires an epoch observation of revisions; zero revisions require a full refresh.
+    virtual bool UsesRenderChangeNotifications() const noexcept { return false; }
+    /// Only notification-aware proxies may stop readiness observation after immutable publication.
+    virtual bool HasPendingRenderResources() const noexcept { return false; }
 
     /// 逐物体 local->world 变换 (对应 UE5 的 GetLocalToWorld / Unity 的 unity_ObjectToWorld)。
     virtual Eigen::Matrix4f GetLocalToWorld() const noexcept { return _localToWorld; }
@@ -68,8 +87,11 @@ public:
 protected:
     /// For proxies whose GetLocalToWorld() uses the base transform storage.
     uint64_t GetLocalToWorldRevision() const noexcept { return _transformRevision; }
+    void MarkRenderDirty(PrimitiveDirtyFlags flags) noexcept;
 
 private:
+    friend class Scene;
+    Nullable<Scene*> _scene{nullptr};
     uint64_t _generation{0};
     uint64_t _motionRevision{0};
     uint64_t _transformRevision{1};

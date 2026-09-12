@@ -119,8 +119,16 @@ public:
     DisplayProxy(StreamingAssetRef<StaticMesh> mesh, vector<Nullable<Material*>> materials, const Eigen::Matrix4f& transform, uint32_t layer)
         : _mesh(std::move(mesh), std::move(materials), transform), _layer(layer) {}
     void CollectAssetReferences(vector<StreamingAssetRefAny>& out) const override { _mesh.CollectAssetReferences(out); }
+    uint64_t GetRenderDataRevision() const noexcept override { return _mesh.GetRenderDataRevision(); }
+    uint64_t GetTransformRevision() const noexcept override { return _mesh.GetTransformRevision(); }
+    bool UsesRenderChangeNotifications() const noexcept override { return true; }
+    bool HasPendingRenderResources() const noexcept override { return _mesh.HasPendingRenderResources(); }
     Eigen::Matrix4f GetLocalToWorld() const noexcept override { return _mesh.GetLocalToWorld(); }
-    void SetLocalToWorld(const Eigen::Matrix4f& value) noexcept override { _mesh.SetLocalToWorld(value); }
+    void SetLocalToWorld(const Eigen::Matrix4f& value) noexcept override {
+        const auto revision = _mesh.GetTransformRevision();
+        _mesh.SetLocalToWorld(value);
+        if (_mesh.GetTransformRevision() != revision) MarkRenderDirty(PrimitiveDirtyKind::TransformOrBounds);
+    }
     AxisAlignedBounds GetLocalBounds() const noexcept override { return _mesh.GetLocalBounds(); }
     uint32_t GetLayerMask() const noexcept override { return _layer; }
     MeshDrawArgs GetDrawArgs(uint32_t section) const noexcept override { return _mesh.GetDrawArgs(section); }

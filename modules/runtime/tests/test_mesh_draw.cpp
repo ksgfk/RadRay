@@ -27,6 +27,95 @@
 namespace radray {
 namespace {
 
+TEST(PrimitiveVertexLayoutIdentity, InternsValuesNormalizesOrderingAndNeverReusesClearedIds) {
+    PrimitiveVertexLayoutRegistry registry;
+    PrimitiveVertexLayout layout;
+    layout.Buffers = {{3, 24, render::VertexStepMode::Vertex}, {1, 8, render::VertexStepMode::Instance}};
+    layout.Attributes = {{"POSITION", 0, 3, 0, render::VertexFormat::FLOAT32X3},
+                         {"NORMAL", 0, 3, 12, render::VertexFormat::FLOAT32X3}};
+    const auto first = registry.Intern(layout);
+    ASSERT_TRUE(first.IsValid());
+    for (uint32_t index = 0; index < 4000; ++index) {
+        auto copy = layout;
+        if (index % 2) {
+            std::reverse(copy.Buffers.begin(), copy.Buffers.end());
+            std::reverse(copy.Attributes.begin(), copy.Attributes.end());
+        }
+        EXPECT_EQ(registry.Intern(copy), first);
+    }
+    EXPECT_EQ(registry.Size(), 1u);
+    auto changed = layout;
+    changed.Attributes[0].Offset = 4;
+    EXPECT_NE(registry.Intern(changed), first);
+    changed = layout;
+    changed.Attributes[0].SemanticIndex = 1;
+    EXPECT_NE(registry.Intern(changed), first);
+    changed = layout;
+    changed.Buffers[0].ArrayStride = 32;
+    EXPECT_NE(registry.Intern(changed), first);
+    PrimitiveVertexLayoutRegistry otherOwner;
+    EXPECT_NE(otherOwner.Intern(layout), first);
+    registry.Clear();
+    EXPECT_EQ(registry.Size(), 0u);
+    EXPECT_NE(registry.Intern(layout), first);
+}
+
+TEST(PrimitiveVertexLayoutIdentity, AcquiredLayoutsReleaseAcrossRehashCopiesAndMoves) {
+    PrimitiveVertexLayoutRegistry registry;
+    PrimitiveVertexLayout layout;
+    layout.Buffers = {{0, 16, render::VertexStepMode::Vertex}};
+    layout.Attributes = {{"POSITION", 0, 0, 0, render::VertexFormat::FLOAT32X3}};
+    const auto pinned = registry.Intern(layout);
+    EXPECT_EQ(registry.Acquire(layout), pinned);
+    EXPECT_TRUE(registry.Release(pinned));
+    EXPECT_EQ(registry.Size(), 1u);
+    EXPECT_FALSE(registry.Release(pinned));
+    vector<PrimitiveVertexLayoutId> ids;
+    for (uint32_t index = 1; index <= 512; ++index) {
+        layout.Attributes[0].SemanticIndex = index;
+        ids.push_back(registry.Acquire(layout));
+        EXPECT_EQ(registry.Acquire(layout), ids.back());
+    }
+    auto copied = registry;
+    PrimitiveVertexLayoutRegistry assigned;
+    assigned = registry;
+    PrimitiveVertexLayoutRegistry moved = std::move(copied);
+    PrimitiveVertexLayoutRegistry moveAssigned;
+    moveAssigned = std::move(assigned);
+    for (auto* owner : {&registry, &moved, &moveAssigned}) {
+        EXPECT_EQ(owner->Size(), 513u);
+        for (const auto id : ids) {
+            EXPECT_TRUE(owner->Release(id));
+            EXPECT_TRUE(owner->Release(id));
+            EXPECT_FALSE(owner->Release(id));
+        }
+        EXPECT_EQ(owner->Size(), 1u);
+        owner->Clear();
+        EXPECT_FALSE(owner->Release(pinned));
+        EXPECT_EQ(owner->Size(), 0u);
+    }
+}
+
+TEST(PrimitiveVertexLayoutIdentity, TenThousandTransientLayoutsDoNotAccumulate) {
+    PrimitiveVertexLayoutRegistry registry;
+    PrimitiveVertexLayout layout;
+    layout.Buffers = {{0, 12, render::VertexStepMode::Vertex}};
+    layout.Attributes = {{"POSITION", 0, 0, 0, render::VertexFormat::FLOAT32X3}};
+    uint64_t previous = 0;
+    for (uint32_t index = 0; index < 10000; ++index) {
+        layout.Attributes[0].SemanticIndex = index;
+        const auto id = registry.Acquire(layout);
+        ASSERT_GT(id.Value, previous);
+        ASSERT_EQ(registry.Acquire(layout), id);
+        ASSERT_EQ(registry.Size(), 1u);
+        ASSERT_TRUE(registry.Release(id));
+        ASSERT_EQ(registry.Size(), 1u);
+        ASSERT_TRUE(registry.Release(id));
+        ASSERT_EQ(registry.Size(), 0u);
+        previous = id.Value;
+    }
+}
+
 constexpr uint32_t kWidth = 64;
 constexpr uint32_t kHeight = 64;
 constexpr render::TextureFormat kFormat = render::TextureFormat::RGBA8_UNORM;
