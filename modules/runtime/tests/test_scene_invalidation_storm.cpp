@@ -316,9 +316,9 @@ public:
         }
         for (const auto& draw : snapshot.DrawRecords) {
             EXPECT_EQ(draw.Status, DrawRecordStatus::Ready);
-            EXPECT_TRUE(draw.Description.LayoutId.IsValid());
-            EXPECT_EQ(draw.Description.Geometry.Get(), &Geometry);
-            EXPECT_EQ(draw.Description.IndexCount, 3u);
+            EXPECT_TRUE(snapshot.ResolveDraw(draw).Description.LayoutId.IsValid());
+            EXPECT_EQ(snapshot.ResolveDraw(draw).Description.Geometry.Get(), &Geometry);
+            EXPECT_EQ(snapshot.ResolveDraw(draw).Description.IndexCount, 3u);
             EXPECT_GE(draw.Policy.Value, 6001u);
             EXPECT_LT(draw.Policy.Value, 6001u + policies);
         }

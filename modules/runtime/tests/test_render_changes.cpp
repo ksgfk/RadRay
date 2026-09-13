@@ -77,6 +77,27 @@ TEST(SceneSnapshotPublication, PolicyRegistrationRejectsConflictingAndLateRules)
     EXPECT_FALSE(scene.GetDrawStore().SetActivePolicies(1, std::span{&conflicting, 1}));
 }
 
+TEST(SceneSnapshotPublication, CompatibleConsumersShareRegistrationAndDifferentConfigurationsCoexist) {
+    Scene scene;
+    AppUpdateContext app;
+    RenderFramePlan plan;
+    RenderWorkloadBuilder workloads{plan, {}};
+    vector<StreamingAssetRefAny> owners;
+    const PassPolicy first{{104}, 1, "CustomSurface", CompileScenePolicy, {}, 0};
+    const PassPolicy other{{104}, 1, "CustomSurface", CompileScenePolicyReplacement, {}, 1};
+    RenderPrepareContext prepare{app, {}, workloads, owners, kPerformanceRenderGraphRuntimeOptions, 1};
+    ASSERT_TRUE(prepare.RegisterScenePolicy(scene, first));
+    ASSERT_TRUE(prepare.RegisterScenePolicy(scene, first));
+    ASSERT_TRUE(prepare.RegisterScenePolicy(scene, other));
+    ASSERT_EQ(prepare.ScenePolicies.size(), 2u);
+    ASSERT_TRUE(prepare.FreezeRegisteredScenes());
+    const auto snapshot = prepare.PrepareScene(scene);
+    ASSERT_TRUE(snapshot && snapshot->PassPolicies);
+    ASSERT_EQ(snapshot->PassPolicies->size(), 2u);
+    EXPECT_EQ((*snapshot->PassPolicies)[0].Configuration, 0u);
+    EXPECT_EQ((*snapshot->PassPolicies)[1].Configuration, 1u);
+}
+
 TEST(SceneSnapshotPublication, DelayedFlightsReceiveTheLatestPagesWithoutIntermediateReplay) {
     Scene scene;
     auto proxy = make_unique<PublishedProxy>();
@@ -186,6 +207,7 @@ TEST(SceneSnapshotPublication, FailedPageCopyKeepsPendingPagesAndTheLastSuccessf
     scene.GetRenderState().FailNextPublicationForTesting({.AfterCopiedTables = 1});
     EXPECT_FALSE(publisher.Build(scene, target, owners, RenderValidationMode::Off, 2));
     EXPECT_FALSE(target.Valid);
+    EXPECT_FALSE(target.Changes.IsValid());
     EXPECT_EQ(target.PublicationRevision, priorRevision);
     EXPECT_TRUE(oldFlight.Primitives[0].LocalToWorld.isIdentity());
     EXPECT_TRUE(owners.empty());
@@ -196,9 +218,55 @@ TEST(SceneSnapshotPublication, FailedPageCopyKeepsPendingPagesAndTheLastSuccessf
     EXPECT_EQ(target.Stats.DrawRecordPrimitivesVisited, 0u);
     EXPECT_EQ(target.ChangedFromPublicationRevision, priorRevision);
     EXPECT_EQ(target.PublicationRevision, priorRevision + 1);
+    ASSERT_TRUE(target.Changes.IsValid());
+    EXPECT_EQ(target.Changes.FromRevision, priorRevision);
+    EXPECT_EQ(target.Changes.Revision, target.PublicationRevision);
+    EXPECT_EQ(target.Changes.PublicationId, target.PublicationId);
+    EXPECT_EQ(target.Changes.Epoch, target.SceneEpoch);
+    EXPECT_EQ(target.Changes.Get(SceneDataTable::Primitives).PreviousCount, 1u);
+    EXPECT_EQ(target.Changes.Get(SceneDataTable::Primitives).Count, 1u);
+    ASSERT_EQ(target.Changes.Get(SceneDataTable::Primitives).Ranges.size(), 1u);
     EXPECT_FLOAT_EQ(target.Primitives[0].LocalToWorld(0, 3), 6);
     ASSERT_TRUE(publisher.Build(scene, target, owners, RenderValidationMode::Off, 3));
     EXPECT_EQ(target.Stats.PublishedPages, 0u);
+    for (const auto& table : target.Changes.Tables) EXPECT_TRUE(table.Ranges.empty());
+}
+
+TEST(SceneSnapshotPublication, ChangeSetsDescribeSkippedDeletesMovesAndSlotReuse) {
+    Scene scene;
+    array<PrimitiveSceneProxy*, 3> proxies;
+    for (auto& proxy : proxies) proxy = scene.AddPrimitive(make_unique<PublishedProxy>()).Get();
+    RenderSceneSnapshotBuilder publisher;
+    RenderSceneSnapshot active, delayed;
+    vector<StreamingAssetRefAny> owners;
+    ASSERT_TRUE(publisher.Build(scene, active, owners, RenderValidationMode::Off, 1));
+    ASSERT_TRUE(publisher.Build(scene, delayed, owners, RenderValidationMode::Off, 2));
+    const auto delayedRevision = delayed.PublicationRevision;
+    const auto removed = scene.GetPrimitiveId(proxies[0]);
+    scene.RemovePrimitive(proxies[0]);
+    ASSERT_TRUE(publisher.Build(scene, active, owners, RenderValidationMode::Off, 3));
+    scene.AddPrimitive(make_unique<PublishedProxy>());
+    scene.RemovePrimitive(proxies[1]);
+    ASSERT_TRUE(publisher.Build(scene, active, owners, RenderValidationMode::Off, 4));
+    const auto previous = delayed.Primitives;
+    ASSERT_TRUE(publisher.Build(scene, delayed, owners, RenderValidationMode::Off, 5));
+    const auto& changes = delayed.Changes.Get(SceneDataTable::Primitives);
+    EXPECT_EQ(delayed.Changes.FromRevision, delayedRevision);
+    EXPECT_EQ(changes.PreviousCount, 3u);
+    EXPECT_EQ(changes.Count, 2u);
+    auto reconstructed = previous;
+    reconstructed.resize(changes.Count);
+    for (const auto range : changes.Ranges) {
+        ASSERT_LE(uint64_t{range.First} + range.Count, delayed.Primitives.size());
+        std::copy_n(delayed.Primitives.begin() + range.First, range.Count, reconstructed.begin() + range.First);
+    }
+    ASSERT_EQ(reconstructed.size(), active.Primitives.size());
+    for (size_t index = 0; index < reconstructed.size(); ++index) {
+        EXPECT_EQ(reconstructed[index].Id, active.Primitives[index].Id);
+        EXPECT_NE(reconstructed[index].Id, removed);
+    }
+    const RenderSceneSnapshot independent = delayed;
+    EXPECT_FALSE(independent.Changes.IsValid());
 }
 
 TEST(SceneSnapshotPublication, FailedPublicationRejectsLateChangesUntilTheNextEpoch) {
@@ -693,7 +761,7 @@ TEST_P(MaterialRenderChanges, PolicyOnlyChangesPublishDrawAndBindingPagesWithout
         ASSERT_TRUE(snapshot);
         flights[flight] = snapshot.Release();
         EXPECT_EQ(flights[flight]->DrawRecords[0].Id, oldId);
-        EXPECT_FALSE(flights[flight]->DrawRecords[0].Description.PipelineState.DepthStencil.DepthWriteEnable);
+        EXPECT_FALSE(flights[flight]->ResolveDraw(flights[flight]->DrawRecords[0]).Description.PipelineState.DepthStencil.DepthWriteEnable);
         EXPECT_TRUE(flights[flight]->ChangedPrimitiveRanges.empty());
         EXPECT_EQ(flights[flight]->Stats.MaterialBytesCopied, 0u);
         EXPECT_EQ(flights[flight]->Stats.StaticRecipeCompiles, serial == 2 ? 1u : 0u);
@@ -701,7 +769,7 @@ TEST_P(MaterialRenderChanges, PolicyOnlyChangesPublishDrawAndBindingPagesWithout
         EXPECT_GT(flights[flight]->Stats.PublishedPages, 0u);
         ASSERT_LT(flights[flight]->DrawRecords[0].BindingRecipe, flights[flight]->BindingRecipes.size());
         EXPECT_TRUE(flights[flight]->BindingRecipes[flights[flight]->DrawRecords[0].BindingRecipe].Valid);
-        if (serial == 2) EXPECT_TRUE(flights[1]->DrawRecords[0].Description.PipelineState.DepthStencil.DepthWriteEnable);
+        if (serial == 2) EXPECT_TRUE(flights[1]->ResolveDraw(flights[1]->DrawRecords[0]).Description.PipelineState.DepthStencil.DepthWriteEnable);
     }
     ASSERT_TRUE(material->SetFloat4("BaseColor", Eigen::Vector4f::Constant(9)));
     AppUpdateContext app{};

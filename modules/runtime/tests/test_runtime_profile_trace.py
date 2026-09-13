@@ -41,6 +41,7 @@ class TraceAccountingTest(unittest.TestCase):
             Zone("Scene.RetainOwners", scene, 6, 1, 135, 145),
             Zone("ObjectValueUpdate", forward, 7, 1, 160, 175),
             Zone("RenderSystem::Render", system, 8, 2, 300, 600),
+            Zone("PresentationAcquire", system, 114, 2, 300, 300),
             Zone("ComposeGraph", system, 9, 2, 300, 430),
             Zone("Forward::DrawWorkBuild.Prepare", forward, 10, 2, 330, 390),
             Zone("RenderGraph::PrepareWork", graph, 21, 2, 330, 390),
@@ -75,12 +76,50 @@ class TraceAccountingTest(unittest.TestCase):
         self.assertEqual(result["gtPreparationOtherNs"], 45)
         self.assertEqual(result["gtRenderPreparationNs"], 135)
         self.assertEqual(result["drawWorkBuildNs"], 110)
-        self.assertEqual(result["measuredPreparationWorkNs"], 245)
+        self.assertEqual(result["measuredPreparationWorkNs"], 385)
         self.assertEqual(result["graphMaintenanceNs"], 110)
         self.assertEqual(result["recordNs"], 30)
         self.assertEqual(result["inputToSubmitNs"], 605)
         self.assertIsNone(result["preparationTotalNs"])
         self.assertIsNone(result["workerActiveNs"])
+
+    def test_change_driven_object_extension_may_skip_unchanged_rows(self):
+        zones, frame, markers = self.fixture()
+        zones = [zone for zone in zones if zone.name != "ObjectValueUpdate"]
+        audit = {"sourceKeys": [key_record(zone) for zone in zones], "waitSourceKeys": []}
+        errors = []
+        result = account_frame(frame, markers, ZoneIndex(zones), "mesh-pass-publication", 1, errors, audit)
+        self.assertEqual(errors, [])
+        self.assertEqual(result["objectValueUpdateNs"], 0)
+        self.assertEqual(result["preparationTotalNs"], 385)
+        self.assertEqual(result["graphMaintenanceNs"], 110)
+
+    def test_draw_preparation_after_record_boundary_is_rejected(self):
+        zones, frame, markers = self.fixture()
+        zones.append(Zone("RenderGraph::PreparePasses", "F:/source/modules/runtime/src/render_framework/render_graph.cpp", 100, 2, 560, 565))
+        errors = []
+        result = account_frame(frame, markers, ZoneIndex(zones), "scene-publication", 1, errors)
+        self.assertIsNone(result)
+        self.assertTrue(any("pre-record boundary" in error for error in errors))
+
+    def test_rt_residual_is_counted_and_external_acquisition_is_separate(self):
+        zones, frame, markers = self.fixture()
+        zones = [Zone(zone.name, zone.file, zone.line, zone.thread,
+                      310 if zone.name == "PresentationAcquire" else zone.begin,
+                      325 if zone.name == "PresentationAcquire" else zone.end) for zone in zones]
+        review = {"sourceKeys": [key_record(zone) for zone in zones], "waitSourceKeys": []}
+        errors = []
+        result = account_frame(frame, markers, ZoneIndex(zones), "scene-publication", 1, errors, review)
+        self.assertEqual(errors, [])
+        self.assertEqual(result["excludedPresentationAcquireNs"], 15)
+        self.assertEqual(result["rtPreparationOtherNs"], 30)
+        self.assertEqual(result["rtPreparationEnvelopeNs"], 235)
+        self.assertEqual(result["graphMaintenanceNs"], 95)
+        self.assertEqual(result["preparationTotalNs"], 370)
+        for missing in ("PresentationAcquire", "RenderGraph::Record"):
+            errors = []
+            self.assertIsNone(account_frame(frame, markers, ZoneIndex([zone for zone in zones if zone.name != missing]), "scene-publication", 1, errors, review))
+            self.assertTrue(errors)
 
     def test_repeated_name_in_another_source_cannot_supply_a_guard(self):
         zones, frame, markers = self.fixture()
@@ -106,7 +145,7 @@ class TraceAccountingTest(unittest.TestCase):
                 self.assertEqual(errors, [])
                 self.assertEqual(result["uploadWorkDataNs"], 20)
                 self.assertEqual(result["drawWorkBuildNs"], 130)
-                self.assertEqual(result["measuredPreparationWorkNs"], 265)
+                self.assertEqual(result["measuredPreparationWorkNs"], 385)
                 self.assertEqual(result["graphMaintenanceNs"], 90)
                 self.assertIsNone(result["preparationTotalNs"])
 
@@ -125,13 +164,13 @@ class TraceAccountingTest(unittest.TestCase):
         result = account_frame(frame, markers, ZoneIndex(zones), "legacy", 1, errors)
         self.assertEqual(errors, [])
         self.assertEqual(result["drawWorkBuildNs"], 100)
-        self.assertEqual(result["measuredPreparationWorkNs"], 235)
+        self.assertEqual(result["measuredPreparationWorkNs"], 385)
         zones.append(Zone("Forward::DrawWorkBuild.PassFrameInputs", "F:/source/modules/runtime/src/forward_pipeline/forward_graph.cpp", 120, 2, 355, 365))
         errors = []
         result = account_frame(frame, markers, ZoneIndex(zones), "legacy", 1, errors)
         self.assertEqual(errors, [])
         self.assertEqual(result["drawWorkBuildNs"], 110)
-        self.assertEqual(result["measuredPreparationWorkNs"], 245)
+        self.assertEqual(result["measuredPreparationWorkNs"], 385)
 
     def test_wrong_flight_or_missing_stage_is_never_a_valid_join(self):
         zones, frame, markers = self.fixture()
@@ -159,9 +198,9 @@ class TraceAccountingTest(unittest.TestCase):
         errors = []
         result = account_frame(frame, markers, ZoneIndex(zones), "scene-publication", 1, errors, audit)
         self.assertEqual(errors, [])
-        self.assertEqual(result["preparationTotalNs"], 215)
+        self.assertEqual(result["preparationTotalNs"], 355)
         self.assertEqual(result["excludedBlockingWaitNs"], 30)
-        self.assertEqual(result["measuredPreparationWorkNs"], 245)
+        self.assertEqual(result["measuredPreparationWorkNs"], 385)
 
     def test_new_worker_scope_keeps_total_unknown_even_with_reviewed_gt_rt(self):
         zones, frame, markers = self.fixture()
@@ -185,7 +224,7 @@ class TraceAccountingTest(unittest.TestCase):
         self.assertEqual(result["liveWorkPreparationNs"], 80)
         self.assertEqual(result["livePassPreparationNs"], 90)
         self.assertEqual(result["graphMaintenanceNs"], 50)
-        self.assertEqual(result["preparationTotalNs"], 305)
+        self.assertEqual(result["preparationTotalNs"], 385)
 
     def test_missing_live_work_boundary_and_unreviewed_source_keep_total_unknown(self):
         zones, frame, markers = self.fixture()
@@ -207,7 +246,7 @@ class TraceAccountingTest(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertEqual(result["excludedHarnessObservationNs"], 15)
         self.assertEqual(result["gtRenderPreparationNs"], 120)
-        self.assertEqual(result["measuredPreparationWorkNs"], 230)
+        self.assertEqual(result["measuredPreparationWorkNs"], 370)
 
     def test_source_digest_and_assertions_alone_do_not_prove_coverage(self):
         metadata = {"build": {"runtimeSourcesSha256": "r", "harnessSha256": "h"}, "phaseContract": {"snapshotMode": "scene-publication"}, "options": {"views": 3}}
@@ -253,6 +292,22 @@ class TraceAccountingTest(unittest.TestCase):
                 errors = []
                 read_markers(path, "build", "harness", run, errors, ZoneIndex(anchors))
                 self.assertTrue(errors)
+
+    def test_csv_accepts_acquisition_and_object_extension_only_from_their_owners(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "zones.csv"
+            header = "name,src_file,src_line,ns_since_start,exec_time_ns,thread,value\n"
+            rows = [("PresentationAcquire", "modules/runtime/src/render_system.cpp"),
+                    ("Scene.ForwardObjectValues", "modules/runtime/src/forward_pipeline/forward_frame.cpp")]
+            path.write_text(header + "".join(f"{name},{file},10,100,20,4,\n" for name, file in rows), encoding="utf-8")
+            errors = []
+            self.assertEqual(len(read_zones(path, errors)), 2)
+            self.assertEqual(errors, [])
+            path.write_text(header + "".join(f"{name},modules/runtime/src/render_framework/render_scene_snapshot.cpp,10,100,20,4,\n" for name, _ in rows), encoding="utf-8")
+            errors = []
+            self.assertEqual(read_zones(path, errors), [])
+            self.assertEqual(len(errors), 2)
+            self.assertTrue(all("Unexpected source" in error for error in errors))
 
     def test_csv_keeps_unknown_runtime_worker_scopes_for_coverage_review(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -347,8 +402,8 @@ class TraceAccountingTest(unittest.TestCase):
         self.assertEqual(result["gtFrameUploadPreparationNs"], 20)
         self.assertEqual(result["rtViewFlightRetirementNs"], 6)
         self.assertEqual(result["graphMaintenanceNs"], 104)
-        self.assertEqual(result["measuredPreparationWorkNs"], 274)
-        self.assertEqual(result["preparationTotalNs"], 269)
+        self.assertEqual(result["measuredPreparationWorkNs"], 408)
+        self.assertEqual(result["preparationTotalNs"], 403)
         self.assertEqual(result["excludedBlockingWaitNs"], 5)
 
     def test_host_update_and_upload_join_rejects_missing_duplicate_wrong_thread_and_cross_tick(self):
@@ -379,9 +434,9 @@ class TraceAccountingTest(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertEqual(result["gtGpuFlightUpdateNs"], 1)
         self.assertEqual(result["gtRenderPreparationNs"], 136)
-        self.assertEqual(result["measuredPreparationWorkNs"], 246)
+        self.assertEqual(result["measuredPreparationWorkNs"], 386)
         self.assertEqual(result["excludedBlockingWaitNs"], 1)
-        self.assertEqual(result["preparationTotalNs"], 245)
+        self.assertEqual(result["preparationTotalNs"], 385)
         self.assertEqual(result["coverage"]["phase"], "steady")
 
     def test_gpu_pre_update_boundary_rejects_missing_duplicate_wrong_source_thread_and_cross_frame(self):
@@ -394,6 +449,33 @@ class TraceAccountingTest(unittest.TestCase):
             changed = [zone for zone in zones if zone != gpu] + replacements
             self.assertIsNone(account_frame(frame, markers, ZoneIndex(changed), "scene-publication", 1, errors))
             self.assertTrue(errors)
+
+    def test_previous_rt_frame_overlap_is_owned_without_hiding_escaped_work(self):
+        zones, frame, markers = self.fixture()
+        owner = Zone("RenderSystem::Render", "modules/runtime/src/render_system.cpp", 153, 2, 0, 240)
+        work = Zone("Forward::DrawWorkBuild.PreviousFrame", "modules/runtime/src/forward_pipeline/forward_effects.cpp", 50, 2, 10, 30)
+        review = {"sourceKeys": [key_record(zone) for zone in zones + [owner, work]], "waitSourceKeys": []}
+        errors, issues = [], []
+        result = account_frame(frame, markers, ZoneIndex(zones + [owner, work]), "scene-publication", 1, errors, review, issues)
+        self.assertEqual(errors, [])
+        self.assertEqual(issues, [])
+        self.assertEqual(result["preparationTotalNs"], 385)
+        invalid_owners = [[], [owner, owner],
+                          [Zone(owner.name, "modules/runtime/src/fake.cpp", owner.line, 2, 0, 240)],
+                          [Zone(owner.name, owner.file, owner.line, 1, 0, 240)],
+                          [Zone(owner.name, owner.file, owner.line, 2, 0, 20)]]
+        for owners in invalid_owners:
+            errors, issues = [], []
+            result = account_frame(frame, markers, ZoneIndex(zones + owners + [work]), "scene-publication", 1, errors, review, issues)
+            self.assertIsNone(result["preparationTotalNs"])
+            self.assertTrue(any("escaped" in issue for issue in issues))
+        # A nested guard after this frame's recording cannot masquerade as a preceding frame.
+        nested = Zone(owner.name, owner.file, owner.line, 2, 615, 630)
+        escaped = Zone(work.name, work.file, work.line, 2, 620, 625)
+        errors, issues = [], []
+        result = account_frame(frame, markers, ZoneIndex(zones + [nested, escaped]), "scene-publication", 1, errors, review, issues)
+        self.assertIsNone(result["preparationTotalNs"])
+        self.assertTrue(any("escaped" in issue for issue in issues))
 
     def test_worker_before_update_in_gpu_flight_window_keeps_total_unknown(self):
         zones, frame, markers = self.fixture()
@@ -419,7 +501,7 @@ class TraceAccountingTest(unittest.TestCase):
         self.assertEqual(result["postSubmitOutputCommitNs"], 4)
         self.assertEqual(result["submittedContinuationNs"], 30)
         self.assertEqual(result["inputToSubmissionContinuationEndNs"], 635)
-        self.assertEqual(result["preparationTotalNs"], 245)
+        self.assertEqual(result["preparationTotalNs"], 385)
         for missing in ("RenderSystem::SubmittedFrame", "ViewStateRegistry::CommitViewWithHistory", "RenderSystem::PresentCommit"):
             errors = []
             self.assertIsNone(account_frame(frame, markers, ZoneIndex([zone for zone in zones if zone.name != missing]), "scene-publication", 1, errors))
@@ -452,9 +534,9 @@ class TraceAccountingTest(unittest.TestCase):
         self.assertTrue(phases["warmup"]["issues"])
         self.assertTrue(phases["steady"]["totalComplete"])
         self.assertIsNone(rows[0]["preparationTotalNs"])
-        self.assertEqual(rows[1]["preparationTotalNs"], 245)
+        self.assertEqual(rows[1]["preparationTotalNs"], 385)
         self.assertIsNone(summarize_metrics(rows)["preparationTotalNs"]["p50Ns"])
-        self.assertEqual(summarize_metrics(rows[1:])["preparationTotalNs"]["p50Ns"], 245)
+        self.assertEqual(summarize_metrics(rows[1:])["preparationTotalNs"]["p50Ns"], 385)
 
     def test_phase_membership_missing_cold_and_run_errors_reject_all_totals(self):
         rows = self.phase_rows()
@@ -523,6 +605,18 @@ class TraceAccountingTest(unittest.TestCase):
         self.assertTrue(report["preparationTotalTargetPassed"])
         self.assertFalse(report["totalComplete"])
         self.assertIsNone(report["warmupMetrics"]["preparationTotalNs"]["candidate"]["p50Ns"])
+        for value, expected in ((104, True), (106, False)):
+            candidate = rounds("candidate", value)
+            self.assertEqual(make_report(baseline, candidate, [])["preparationTotalTargetPassed"], expected)
+        for tail, expected in ((110, True), (111, False)):
+            candidate = rounds("candidate", 100)
+            for run in candidate:
+                for row in run["rows"][900:]: row["preparationTotalNs"] = tail
+            self.assertEqual(make_report(baseline, candidate, [])["preparationTotalTargetPassed"], expected)
+        candidate = rounds("candidate", 100)
+        for row in candidate[4]["rows"]: row["preparationTotalNs"] = 125
+        self.assertIsNone(make_report(baseline, candidate, [])["preparationTotalTargetPassed"])
+        candidate = rounds("candidate", 60)
         candidate[0]["rows"][0]["preparationTotalNs"] = None
         candidate[0]["rows"][0]["coverage"]["totalComplete"] = False
         self.assertFalse(make_report(baseline, candidate, [])["steadyTotalComplete"])

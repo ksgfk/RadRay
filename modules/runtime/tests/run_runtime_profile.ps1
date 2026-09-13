@@ -8,6 +8,7 @@ param(
     [ValidateSet('off', 'full')][string]$Validation = 'off',
     [ValidateSet('minimal', 'counters', 'full')][string]$Report = 'minimal',
     [int]$Primitives = 1000, [int]$Warmup = 120, [int]$Samples = 1000, [int]$Rounds = 5,
+    [ValidateRange(0,100)][int]$ChangePercent = 0,
     [switch]$GpuMarkers, [switch]$DriverValidation, [switch]$SerializeReport, [switch]$LowChange,
     [string]$TracyCapture = '', [string]$CpuSampling = '', [string]$TracyExportArguments = '',
     [string]$TracyCaptureTool = '', [string]$TracyExportTool = '', [string[]]$TracyExports = @(),
@@ -16,6 +17,11 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
+if ($LowChange) {
+    if ($ChangePercent -notin @(0,1)) { Write-Error 'LowChange conflicts with ChangePercent.'; exit 1 }
+    $ChangePercent = 1
+}
+if ($Fixture -eq 'micro' -and $ChangePercent -ne 0) { Write-Error 'ChangePercent applies to the integrated fixture.'; exit 1 }
 . (Join-Path $PSScriptRoot 'runtime_profile_runner_support.ps1')
 . (Join-Path $PSScriptRoot 'runtime_profile_capture_support.ps1')
 if ($Warmup -lt 1 -or $Samples -lt 1 -or $Rounds -lt 1 -or $Primitives -lt 1) { Write-Error 'Counts must be positive.'; exit 1 }
@@ -32,7 +38,7 @@ $profileAuditScript = Join-Path $PSScriptRoot 'profile_build_identity.cmake'
 $profileErrors = [System.Collections.Generic.List[string]]::new()
 $profileRuns = [System.Collections.Generic.List[object]]::new()
 $profileInitial = [ordered]@{}
-$profileEnvironmentNames = @('RADRAY_RUNTIME_PROFILE','RADRAY_PROFILE_WARMUP','RADRAY_PROFILE_SAMPLES','RADRAY_PROFILE_ROUNDS','RADRAY_PROFILE_PRIMITIVES','RADRAY_PROFILE_VALIDATION','RADRAY_PROFILE_REPORT','RADRAY_PROFILE_GPU_MARKERS','RADRAY_PROFILE_DRIVER_VALIDATION','RADRAY_PROFILE_SERIALIZE','RADRAY_PROFILE_LOW_CHANGE','RADRAY_PROFILE_IDENTITY_ONLY','RADRAY_PROFILE_RUN_ID','RADRAY_PROFILE_CAPTURE_GATE')
+$profileEnvironmentNames = @('RADRAY_RUNTIME_PROFILE','RADRAY_PROFILE_WARMUP','RADRAY_PROFILE_SAMPLES','RADRAY_PROFILE_ROUNDS','RADRAY_PROFILE_PRIMITIVES','RADRAY_PROFILE_VALIDATION','RADRAY_PROFILE_REPORT','RADRAY_PROFILE_GPU_MARKERS','RADRAY_PROFILE_DRIVER_VALIDATION','RADRAY_PROFILE_SERIALIZE','RADRAY_PROFILE_LOW_CHANGE','RADRAY_PROFILE_CHANGE_PERCENT','RADRAY_PROFILE_IDENTITY_ONLY','RADRAY_PROFILE_RUN_ID','RADRAY_PROFILE_CAPTURE_GATE')
 $profilePreviousEnvironment = @{}
 foreach ($profileName in $profileEnvironmentNames) { $profilePreviousEnvironment[$profileName] = [Environment]::GetEnvironmentVariable($profileName) }
 $env:RADRAY_RUNTIME_PROFILE = '1'
@@ -46,6 +52,7 @@ $env:RADRAY_PROFILE_REPORT = $Report
 $env:RADRAY_PROFILE_GPU_MARKERS = $(if ($GpuMarkers) { '1' } else { $null })
 $env:RADRAY_PROFILE_DRIVER_VALIDATION = $(if ($DriverValidation) { '1' } else { $null })
 $env:RADRAY_PROFILE_SERIALIZE = $(if ($SerializeReport) { '1' } else { $null })
+$env:RADRAY_PROFILE_CHANGE_PERCENT = "$ChangePercent"
 $env:RADRAY_PROFILE_LOW_CHANGE = $(if ($LowChange) { '1' } else { $null })
 $profileTestName = if ($Fixture -eq 'micro') { 'StageCostsAndWarmResourceCounts' } else { 'ThreeViewForwardSteadyState' }
 $profileBackendIndex = if ($Backend -eq 'D3D12') { '0' } else { '1' }
@@ -71,7 +78,7 @@ foreach ($profileLabel in $profileExecutables.Keys) {
     Test-ProfileSourceMatches $profileMeta.build $null $profileSource $profileErrors $profileLabel
     $profileBinaryAfter = Get-ProfileFileEvidence $profileBinary.path $profileErrors "$profileLabel executable after identity query"
     Compare-ProfileFields $profileBinary $profileBinaryAfter @('sha256') $profileErrors "$profileLabel executable"
-    $profileExpectedOptions = @{warmup=$Warmup; samples=$Samples; rounds=1; primitives=$Primitives; backend=$Backend; rgValidation=$Validation; rgReport=$Report; gpuMarkers=[bool]$GpuMarkers; driverValidation=[bool]$DriverValidation; serializeReport=[bool]$SerializeReport}
+    $profileExpectedOptions = @{warmup=$Warmup; samples=$Samples; rounds=1; primitives=$Primitives; changePercent=$ChangePercent; backend=$Backend; rgValidation=$Validation; rgReport=$Report; gpuMarkers=[bool]$GpuMarkers; driverValidation=[bool]$DriverValidation; serializeReport=[bool]$SerializeReport}
     Compare-ProfileFields $profileExpectedOptions $profileMeta.options $profileExpectedOptions.Keys $profileErrors "$profileLabel effective options"
     if ($profileSource) { $profileInitial[$profileLabel] = [ordered]@{binary=$profileBinary; metadata=$profileMeta; source=$profileSource} }
 }
@@ -134,7 +141,7 @@ for ($profileRound = 0; $profileRound -lt $Rounds -and $profileErrors.Count -eq 
         foreach ($profileSidecar in $profileSidecars.Keys) {
             $profilePrefix = $profileSidecars[$profileSidecar]
             @($profileLines | Where-Object { $_.StartsWith($profilePrefix) } | ForEach-Object { $_.Substring($profilePrefix.Length) }) | Set-Content -LiteralPath "$profileStem.$profileSidecar.jsonl" -Encoding utf8
-            if ($profileSidecar -in @('frames','timeline')) { $profileSidecarEvidence[$profileSidecar] = Get-ProfileFileEvidence "$profileStem.$profileSidecar.jsonl" $profileErrors "Run $profileSidecar sidecar" }
+            if ($profileSidecar -eq 'frames' -or ($profileSidecar -eq 'timeline' -and $Fixture -eq 'integrated')) { $profileSidecarEvidence[$profileSidecar] = Get-ProfileFileEvidence "$profileStem.$profileSidecar.jsonl" $profileErrors "Run $profileSidecar sidecar" }
         }
         $profileSummary = @(Read-ProfileRecords $profileLines 'PROFILE ' $profileErrors)
         if ($profileSummary.Count -eq 0 -or @($profileSummary | Where-Object { $_.samples -ne $Samples }).Count -ne 0) { $profileErrors.Add("$profileLabel round $profileRound has missing or incomplete steady summaries.") }

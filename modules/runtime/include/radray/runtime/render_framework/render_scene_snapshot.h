@@ -1,4 +1,6 @@
 #pragma once
+#include <radray/runtime/render_framework/scene_change_set.h>
+#include <radray/runtime/render_framework/scene_render_extension.h>
 
 #include <radray/inline_vector.h>
 #include <radray/runtime/material.h>
@@ -35,6 +37,7 @@ struct RenderLightData {
 };
 
 struct RenderSceneSnapshotStats {
+    uint64_t VertexInputCompiles{0};
     uint64_t InputPrimitives{0}, InputSections{0}, InputMaterials{0}, InputLights{0};
     uint64_t Primitives{0}, MeshBatches{0}, Materials{0}, Lights{0};
     uint64_t MissingGeometry{0}, EmptyDraw{0}, InvalidDrawRange{0}, MaterialUnavailable{0}, InvalidBounds{0};
@@ -58,10 +61,6 @@ struct RenderSceneSnapshotStats {
     size_t PrimitiveHighWatermark{0}, BatchHighWatermark{0}, MaterialHighWatermark{0}, LightHighWatermark{0};
 };
 
-struct SnapshotChangedRange {
-    uint32_t First{0}, Count{0};
-};
-
 /// Per-flight values. Geometry/texture payloads and programs must outlive flight retirement.
 /// Primitive values are builder-owned; ResetForReuse discards their materialization state.
 /// DrawRecords are the stable catalog for this published epoch; views consume compact indices.
@@ -78,14 +77,41 @@ struct RenderSceneSnapshot {
     vector<DrawRecord> DrawRecords;
     vector<StaticBindingRecipe> BindingRecipes;
     vector<CpuGeometryBindingPlan> GeometryBindingPlans;
+    vector<CpuDrawPlan> DrawPlans;
+    vector<CpuStatePlan> StatePlans;
     vector<uint32_t> PrimitiveDrawBegin;
     vector<SnapshotChangedRange> ChangedPrimitiveRanges;
+    SceneChangeSet Changes;
+    vector<SceneExtensionSnapshot> Extensions;
+    shared_ptr<const vector<PassPolicy>> PassPolicies;
     uint64_t SceneEpoch{0};
     uint64_t PublicationId{0};
     uint64_t PublicationRevision{0}, ChangedFromPublicationRevision{0};
     bool Valid{false};
     bool HasPassPolicies{false};
     RenderSceneSnapshotStats Stats;
+
+    /// The record must belong to this immutable snapshot and have a valid Plan index.
+    ResolvedDrawView ResolveDraw(const DrawRecord& record) const noexcept {
+        const auto& plan = DrawPlans[record.Plan];
+        const auto& geometry = GeometryBindingPlans[plan.Geometry];
+        const MeshGeometryDescription description{plan.Program, geometry.Geometry, geometry.FirstIndex, geometry.IndexCount, geometry.VertexOffset, geometry.LayoutId};
+        return {record, {description, StatePlans[plan.NormalState].State}, StatePlans[plan.MirroredState].State};
+    }
+
+    Nullable<const SceneExtensionSnapshot*> FindExtension(const SceneRenderExtension& contract) const noexcept {
+        if (!Valid) return nullptr;
+        for (const auto& value : Extensions)
+            if (value.Contract == contract && value.Epoch == SceneEpoch) return &value;
+        return nullptr;
+    }
+    template <class T>
+    shared_ptr<const T> GetExtension(const SceneRenderExtension& contract) const noexcept {
+        if (!Valid) return {};
+        for (const auto& value : Extensions)
+            if (value.Contract == contract && value.Epoch == SceneEpoch) return value.Get<T>();
+        return {};
+    }
 
     void ResetForReuse() noexcept;
 
@@ -106,6 +132,7 @@ struct SnapshotPublicationFailure {
     uint32_t AfterRetainedOwners{UINT32_MAX};
     uint32_t AfterCopiedTables{UINT32_MAX};
     uint32_t AfterCopiedEntries{UINT32_MAX};
+    uint32_t AfterPreparedExtensions{UINT32_MAX};
 };
 
 class SceneRenderState {
@@ -114,6 +141,8 @@ public:
     ~SceneRenderState() noexcept;
     SceneRenderState(const SceneRenderState&) = delete;
     SceneRenderState& operator=(const SceneRenderState&) = delete;
+    /// Complete consumer set collected before freezing this epoch; conflicting identities are rejected.
+    bool SetActiveExtensions(uint64_t serial, std::span<const SceneRenderExtension> extensions);
     /// An explicit epoch belongs to one publication target and one frame owner sink. New targets require a new epoch.
     /// Failed publication retries require unchanged owner sources; advance the epoch after late authoring edits.
     bool Publish(const Scene& scene, RenderSceneSnapshot& out, vector<StreamingAssetRefAny>& retainedAssets,
@@ -123,6 +152,7 @@ public:
     /// Deterministic one-shot failure injection at the publication boundary, for lifecycle tests.
     void FailNextPublicationForTesting(SnapshotPublicationFailure failure) noexcept;
     SceneRenderStateMemoryStats GetMemoryStats() const noexcept;
+    RenderMemoryStats GetExtensionMemoryStats(const SceneRenderExtension& contract) const noexcept;
 
 private:
     struct Impl;

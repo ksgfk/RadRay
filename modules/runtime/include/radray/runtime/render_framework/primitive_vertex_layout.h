@@ -85,11 +85,12 @@ public:
     ~ResolvedPrimitiveVertexLayout() noexcept = default;
 
     render::VertexInputState GetState() const noexcept;
+    RenderMemoryStats GetMemoryStats() const noexcept;
 
 private:
     friend std::optional<ResolvedPrimitiveVertexLayout> ResolvePrimitiveVertexLayout(
         const PrimitiveVertexLayout&,
-        const shader::ShaderArtifactView&) noexcept;
+        const shader::ShaderArtifactView&);
 
     void RebindSemantics() noexcept;
 
@@ -100,6 +101,6 @@ private:
 
 std::optional<ResolvedPrimitiveVertexLayout> ResolvePrimitiveVertexLayout(
     const PrimitiveVertexLayout& layout,
-    const shader::ShaderArtifactView& artifact) noexcept;
+    const shader::ShaderArtifactView& artifact);
 
 }  // namespace radray

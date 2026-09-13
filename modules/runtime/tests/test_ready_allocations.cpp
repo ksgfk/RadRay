@@ -199,7 +199,7 @@ VK_BINDING(0, 0) ConstantBuffer<Data> Values : register(b0);
             for (uint32_t row = 0; row < counts[list]; ++row) {
                 const auto& record = flight.Snapshot.DrawRecords[row];
                 ASSERT_EQ(record.Status, DrawRecordStatus::Ready);
-                ASSERT_TRUE(record.Description.LayoutId.IsValid());
+                ASSERT_TRUE(flight.Snapshot.ResolveDraw(record).Description.LayoutId.IsValid());
                 ASSERT_NE(record.NormalStateId, 0u);
                 ASSERT_LT(record.Material, bindings.size());
                 ASSERT_TRUE(flight.Lists[list].AppendStatic(flight.Snapshot, row, flight.Groups, bindings[record.Material]));

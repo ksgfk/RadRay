@@ -3,6 +3,7 @@
 #include <span>
 
 #include <radray/logger.h>
+#include <radray/nullable.h>
 #include <radray/types.h>
 
 namespace radray {
@@ -61,6 +62,37 @@ public:
 private:
     uint32_t _stride{0};
     vector<byte> _bytes;
+};
+
+/// Borrowed immutable row access. Dense legacy tables remain live views; immutable paged sources
+/// freeze count/stride at the batch boundary. The owner must outlive preparation, never just this view.
+class CBufferRows {
+public:
+    CBufferRows() = default;
+    CBufferRows(const PackedCBufferTable& table) noexcept : _packed(&table) {}
+    template <class T>
+    static CBufferRows Borrow(const T& value) noexcept {
+        CBufferRows result;
+        result._source = &value;
+        result._count = value.RowCount();
+        result._stride = value.Stride();
+        result._read = +[](const void* source, size_t row) noexcept { return static_cast<const T*>(source)->Row(row); };
+        return result;
+    }
+    size_t RowCount() const noexcept { return _packed ? _packed->RowCount() : _count; }
+    uint32_t Stride() const noexcept { return _packed ? _packed->Stride() : _stride; }
+    Nullable<const void*> Identity() const noexcept { return _packed ? static_cast<const void*>(_packed.Get()) : _source; }
+    std::span<const byte> Row(size_t index) const noexcept {
+        RADRAY_ASSERT(index < RowCount());
+        return _packed ? _packed->Row(index) : _read(_source.Get(), index);
+    }
+
+private:
+    Nullable<const PackedCBufferTable*> _packed{nullptr};
+    Nullable<const void*> _source{nullptr};
+    size_t _count{0};
+    uint32_t _stride{0};
+    std::span<const byte> (*_read)(const void*, size_t) noexcept {nullptr};
 };
 
 }  // namespace radray

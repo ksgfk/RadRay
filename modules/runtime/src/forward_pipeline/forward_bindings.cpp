@@ -14,10 +14,77 @@ constexpr size_t kMaterial = static_cast<size_t>(StaticBindingRole::Material);
 constexpr size_t kObject = static_cast<size_t>(StaticBindingRole::Object);
 constexpr size_t kPass = static_cast<size_t>(StaticBindingRole::Pass);
 
+bool ResolveForwardContract(const ShaderProgram& program, MeshBindingPlan& plan, bool depthOnly) {
+    if (depthOnly ? !ResolveDepthOnlyProgramBindings(program).has_value() : !ResolveProgramBindings(program).has_value()) return false;
+    const auto& layout = program.GetParameterLayout();
+    for (uint32_t index = 0; index < layout.Buffers().size(); ++index) {
+        const auto& buffer = layout.Buffers()[index];
+        uint32_t role;
+        MeshParameterScope scope;
+        if (buffer.Name == "ForwardView") {
+            role = kView;
+            scope = MeshParameterScope::View;
+        } else if (buffer.Name == "ForwardMaterial") {
+            role = kMaterial;
+            scope = MeshParameterScope::Material;
+        } else if (buffer.Name == "ForwardObject") {
+            role = kObject;
+            scope = MeshParameterScope::Primitive;
+        } else if (buffer.Name == "ForwardPass") {
+            role = kPass;
+            scope = MeshParameterScope::Pass;
+        } else
+            return false;
+        const auto slot = static_cast<uint32_t>(plan.Slots.size());
+        plan.Slots.push_back({role, scope, MeshParameterKind::CBuffer, 0x466f727761726400ull + role, buffer.Size});
+        plan.Bindings.push_back({slot, buffer.Group, buffer.BindingNumber, 0, index});
+    }
+    const auto& artifact = program.GetArtifact().Generic();
+    for (const auto& declaration : artifact.Bindings()) {
+        const auto kind = static_cast<shader::ShaderBindingKind>(declaration.Type);
+        if (kind == shader::ShaderBindingKind::CBuffer) continue;
+        const auto name = artifact.GetName(declaration.Name);
+        const auto info = name ? program.GetArtifact().FindBindingInfo(*name) : std::nullopt;
+        if (!info) return false;
+        if (info->Immutable) continue;
+        const auto slot = static_cast<uint32_t>(plan.Slots.size());
+        const bool material = std::any_of(plan.Bindings.begin(), plan.Bindings.end(), [&](const auto& binding) {
+            return plan.Slots[binding.Slot].Id == kMaterial && binding.Group == info->Group;
+        });
+        const auto resourceKind = kind == shader::ShaderBindingKind::Sampler ? MeshParameterKind::Sampler : shader::IsImageKind(kind) ? (material ? MeshParameterKind::Texture : MeshParameterKind::GraphTexture)
+                                                                                                                                      : MeshParameterKind::GraphBuffer;
+        plan.Slots.push_back({4 + slot, material ? MeshParameterScope::Material : MeshParameterScope::Pass, resourceKind});
+        for (uint32_t element = 0; element < declaration.Count; ++element)
+            plan.Bindings.push_back({slot, declaration.Group, declaration.Binding, element, UINT32_MAX, element});
+    }
+    return true;
+}
+bool ResolveLitContract(const ShaderProgram& program, MeshBindingPlan& plan) { return ResolveForwardContract(program, plan, false); }
+bool ResolveDepthContract(const ShaderProgram& program, MeshBindingPlan& plan) { return ResolveForwardContract(program, plan, true); }
+
+void AdaptContract(const StaticBindingRecipe& source, StaticBindingRecipe& recipe) {
+    recipe.Buffers = source.Buffers;
+    recipe.Groups = source.Groups;
+    recipe.GroupOrder = source.GroupOrder;
+    recipe.GroupCount = source.GroupCount;
+    recipe.Valid = source.Valid;
+    if (!source.Parameters.Valid) return;
+    recipe.GroupCount = 0;
+    for (const auto& binding : source.Parameters.Bindings) {
+        const auto& slot = source.Parameters.Slots[binding.Slot];
+        if (slot.Kind != MeshParameterKind::CBuffer || slot.Id >= 4) continue;
+        recipe.Buffers[slot.Id] = binding.BufferIndex;
+        recipe.Groups[slot.Id] = binding.Group;
+        if (slot.Id != kPass) recipe.GroupOrder[recipe.GroupCount++] = static_cast<uint8_t>(slot.Id);
+    }
+    std::sort(recipe.GroupOrder.begin(), recipe.GroupOrder.begin() + recipe.GroupCount,
+              [&](uint8_t left, uint8_t right) { return recipe.Groups[left] < recipe.Groups[right]; });
+}
+
 bool CompileForwardStatic(const StaticPassCompileInput& input, StaticPassCompileResult& result, bool readOnlyDepth) {
-    if (input.Bindings)
-        result.Bindings = *input.Bindings;
-    else if (const auto bindings = ResolveProgramBindings(*input.Pass.Program)) {
+    if (input.Bindings) {
+        AdaptContract(*input.Bindings, result.Bindings);
+    } else if (const auto bindings = ResolveProgramBindings(*input.Pass.Program)) {
         result.Bindings.Buffers = {bindings->ViewBufferIndex, bindings->MaterialBufferIndex, bindings->ObjectBufferIndex, UINT32_MAX};
         result.Bindings.Groups = {bindings->ViewGroup, bindings->MaterialGroup, bindings->ObjectGroup, bindings->PassGroup.value_or(UINT32_MAX)};
         std::copy(bindings->GroupOrder.begin(), bindings->GroupOrder.end(), result.Bindings.GroupOrder.begin());
@@ -38,9 +105,9 @@ bool CompileForwardStatic(const StaticPassCompileInput& input, StaticPassCompile
 bool CompileForwardLit(const StaticPassCompileInput& input, StaticPassCompileResult& result) { return CompileForwardStatic(input, result, false); }
 bool CompileForwardReadOnlyDepth(const StaticPassCompileInput& input, StaticPassCompileResult& result) { return CompileForwardStatic(input, result, true); }
 bool CompileDepthOnly(const StaticPassCompileInput& input, StaticPassCompileResult& result) {
-    if (input.Bindings)
-        result.Bindings = *input.Bindings;
-    else if (const auto bindings = ResolveDepthOnlyProgramBindings(*input.Pass.Program)) {
+    if (input.Bindings) {
+        AdaptContract(*input.Bindings, result.Bindings);
+    } else if (const auto bindings = ResolveDepthOnlyProgramBindings(*input.Pass.Program)) {
         result.Bindings.Buffers[kView] = bindings->ViewBufferIndex;
         result.Bindings.Buffers[kObject] = bindings->ObjectBufferIndex;
         result.Bindings.Groups[kView] = bindings->ViewGroup;
@@ -60,12 +127,14 @@ bool CompileDepthOnly(const StaticPassCompileInput& input, StaticPassCompileResu
 }  // namespace
 
 bool RegisterForwardPassPolicies(RenderPrepareContext& context, const Scene& scene) {
+    const MeshBindingContract lit{0x466f727761726401ull, 1, 0, ResolveLitContract};
+    const MeshBindingContract depth{0x466f727761726402ull, 1, 0, ResolveDepthContract};
     const PassPolicy policies[]{
-        {kForwardLitPolicy, 1, "ForwardLit", CompileForwardLit},
-        {kForwardLitReadOnlyDepthPolicy, 1, "ForwardLit", CompileForwardReadOnlyDepth},
-        {kDepthOnlyPolicy, 1, "DepthOnly", CompileDepthOnly},
-        {kDepthNormalsMotionPolicy, 1, "DepthNormalsMotion", CompileForwardLit},
-        {kShadowCasterPolicy, 1, "ShadowCaster", CompileForwardLit}};
+        {kForwardLitPolicy, 1, "ForwardLit", CompileForwardLit, lit},
+        {kForwardLitReadOnlyDepthPolicy, 1, "ForwardLit", CompileForwardReadOnlyDepth, lit},
+        {kDepthOnlyPolicy, 1, "DepthOnly", CompileDepthOnly, depth},
+        {kDepthNormalsMotionPolicy, 1, "DepthNormalsMotion", CompileForwardLit, lit},
+        {kShadowCasterPolicy, 1, "ShadowCaster", CompileForwardLit, lit}};
     bool success = true;
     for (const auto& policy : policies) success &= context.RegisterScenePolicy(scene, policy);
     return success;

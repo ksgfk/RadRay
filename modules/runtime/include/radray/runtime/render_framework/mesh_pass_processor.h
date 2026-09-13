@@ -79,10 +79,20 @@ private:
 class MeshPassProcessor {
 public:
     virtual ~MeshPassProcessor() noexcept = default;
+    /// Called once after shared culling/filtering and before any record is emitted. The framework
+    /// supplies compact candidates and unique static requirements; callbacks may prepare all used
+    /// parameter rows/groups here. No candidate or input reference may outlive this build.
+    virtual bool PrepareBatch(std::span<const MeshPassListPreparation>) { return true; }
     virtual void AddMeshBatch(const RendererListDesc& desc, const RenderSceneSnapshot& scene,
                               const MeshBatch& batch, MeshPassDrawListContext& out) = 0;
     virtual void PrepareRecord(const RendererListDesc& desc, const RenderSceneSnapshot& scene,
                                const DrawRecord& record, MeshPassDrawListContext& out);
+    /// The view compiler has selected a ready frozen material pass and geometry. Emit an owning
+    /// dynamic command with these inputs and this view's prepared bindings; never append the anchor record.
+    virtual void PrepareViewRecord(const RendererListDesc&, const RenderSceneSnapshot&,
+                                   const DrawRecord&, const MeshStaticDrawCompileResult&, MeshPassDrawListContext& out) {
+        out.Reject(MeshPassRejectReason::ProcessorRejected);
+    }
 };
 
 }  // namespace radray

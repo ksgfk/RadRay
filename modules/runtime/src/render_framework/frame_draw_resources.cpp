@@ -95,19 +95,24 @@ FrameCBufferIdentity FrameDrawResources::InternValues(const void* wireType, std:
 
 bool FrameDrawResources::HasCBufferValues(FrameCBufferIdentity identity, uint32_t row) const noexcept {
     const auto index = _domainLookup.Find(IdentityHash(identity), [&](uint32_t candidate) { return _sharedBufferDomains[candidate].Identity == identity; });
-    return index != UINT32_MAX && row < _sharedBufferDomains[index].Rows.size() && _sharedBufferDomains[index].Rows[row].Epoch == _bufferEpoch;
+    if (index == UINT32_MAX) return false;
+    const auto slice = _sharedBufferDomains[index].Rows.Find(row);
+    return slice && slice->Epoch == _bufferEpoch;
 }
 
 size_t FrameDrawResources::GetCacheCapacityBytes() const noexcept {
-    size_t bytes = _setLookup.CapacityBytes() + _domainLookup.CapacityBytes() + _nativeLookup.CapacityBytes() + _bindingLookup.CapacityBytes() + _valueLookup.CapacityBytes();
+    size_t bytes = _setLookup.CapacityBytes() + _domainLookup.CapacityBytes() + _bindingLookup.CapacityBytes() + _valueLookup.CapacityBytes();
     bytes += _setCache.capacity() * sizeof(CachedSet) + _sharedBufferDomains.capacity() * sizeof(SharedBufferDomain);
-    bytes += _nativeGroups.capacity() * sizeof(NativeGroup) + _readyGroups.capacity() * sizeof(PreparedShaderGroup);
+    bytes += _indexedGroupLookup.CapacityBytes() + _indexedGroups.capacity() * sizeof(IndexedGroup);
+    for (const auto& group : _indexedGroups) bytes += group.Rows.CapacityBytes();
+    bytes += _readyGroups.capacity() * sizeof(PreparedShaderGroup) + _groupPasses.capacity() * sizeof(GraphGroupOwner);
     bytes += _drawBindings.capacity() * sizeof(InlineVector<FrameShaderGroupId, 3>) + _values.capacity() * sizeof(StoredValues);
     bytes += _dynamicOnlySets.capacity() * sizeof(DynamicOnlySet) + _bindingScratch.capacity() * sizeof(FrameBufferBinding);
     bytes += _sets.capacity() * sizeof(unique_ptr<render::ShaderParameterSet>);
     bytes += _keyScratch.Buffers.capacity() * sizeof(FrameBufferBinding) + _keyScratch.Textures.capacity() * sizeof(TextureBinding) + _keyScratch.Samplers.capacity() * sizeof(SamplerBinding);
     for (const auto& entry : _setCache) bytes += entry.Key.Buffers.capacity() * sizeof(FrameBufferBinding) + entry.Key.Textures.capacity() * sizeof(TextureBinding) + entry.Key.Samplers.capacity() * sizeof(SamplerBinding);
-    for (const auto& domain : _sharedBufferDomains) bytes += domain.Rows.capacity() * sizeof(SharedBufferSlice);
+    for (const auto& domain : _sharedBufferDomains)
+        bytes += domain.Rows.CapacityBytes() + domain.Bindings.CapacityBytes();
     for (const auto& value : _values) bytes += value.Bytes.capacity();
     for (const auto& value : _drawBindings)
         if (value.capacity() > value.inline_capacity) bytes += value.capacity() * sizeof(FrameShaderGroupId);
@@ -115,6 +120,14 @@ size_t FrameDrawResources::GetCacheCapacityBytes() const noexcept {
         if (value.DynamicOffsets.capacity() > value.DynamicOffsets.inline_capacity) bytes += value.DynamicOffsets.capacity() * sizeof(render::ShaderParameterDynamicOffset);
     if (_preparation) bytes += _preparation->CapacityBytes();
     return bytes;
+}
+
+size_t FrameDrawResources::GetParameterRowCount() const noexcept {
+    size_t count = 0;
+    for (size_t index = 0; index < _activeBufferDomains; ++index)
+        count += _sharedBufferDomains[index].Rows.size() + _sharedBufferDomains[index].Bindings.size();
+    for (size_t index = 0; index < _activeIndexedGroups; ++index) count += _indexedGroups[index].Rows.size();
+    return count;
 }
 
 PreparedRendererList::Workspace& FrameDrawResources::GetPreparationWorkspace() const {
@@ -132,13 +145,14 @@ FrameDrawResources::~FrameDrawResources() noexcept = default;
 void FrameDrawResources::ClearSets() noexcept {
     if (_preparation) _preparation->BeginFrame();
     _readyGroups.clear();
+    _groupPasses.clear();
     _activeSets = 0;
     _setLookup.Reset();
     _domainLookup.Reset();
-    _nativeLookup.Reset();
+    _indexedGroupLookup.Reset();
+    _activeIndexedGroups = 0;
     _bindingLookup.Reset();
     _valueLookup.Reset();
-    _nativeGroups.clear();
     _drawBindings.clear();
     _activeValues = 0;
     _dynamicOnlySets.clear();
@@ -147,6 +161,7 @@ void FrameDrawResources::ClearSets() noexcept {
     _activeBufferDomains = 0;
     if (++_bufferEpoch == 0) {
         _sharedBufferDomains.clear();
+        _indexedGroups.clear();
         ++_bufferEpoch;
     }
 }
@@ -227,67 +242,161 @@ FrameShaderGroupId FrameDrawResources::PrepareGroupId(
     std::span<const MaterialTextureFrameData> textures, std::span<const MaterialSamplerFrameData> samplers) {
     if (!_arena || program.GetDevice() != _device || !identity.Source || !identity.WireType ||
         bytes.size() > UINT32_MAX || row == UINT32_MAX) return {};
+    return PrepareGroupId(program, group, RegisterParameterDomain(identity), row, bytes, textures, samplers);
+}
+
+FrameParameterDomain FrameDrawResources::RegisterParameterDomain(FrameCBufferIdentity identity) {
+    if (!_arena || !identity.Source || !identity.WireType) return {};
+    ++_stats.ParameterDomainLookups;
     const auto domainHash = IdentityHash(identity);
     uint32_t domainIndex = _domainLookup.Find(domainHash, [&](uint32_t index) { return _sharedBufferDomains[index].Identity == identity; });
     if (domainIndex == UINT32_MAX) {
         if (_activeBufferDomains >= UINT32_MAX) return {};
         domainIndex = static_cast<uint32_t>(_activeBufferDomains++);
         if (domainIndex == _sharedBufferDomains.size()) _sharedBufferDomains.emplace_back();
-        _sharedBufferDomains[domainIndex].Identity = identity;
+        auto& domain = _sharedBufferDomains[domainIndex];
+        domain.Identity = identity;
+        domain.Rows.Reset();
+        domain.Bindings.Reset();
         _domainLookup.Insert(domainHash, domainIndex);
     }
-    auto& domain = _sharedBufferDomains[domainIndex];
-    const auto nativeHash = NativeHash(domainIndex, row, program.GetGeneration(), group);
-    const auto found = _nativeLookup.Find(nativeHash, [&](uint32_t index) {
-        const auto& entry = _nativeGroups[index];
-        return entry.ProgramGeneration == program.GetGeneration() && entry.Group == group && entry.Domain == domainIndex && entry.Row == row;
-    });
-    if (found != UINT32_MAX) {
-        const auto& native = _nativeGroups[found];
-        if (textures.size() != native.TextureCount || samplers.size() != native.SamplerCount) return {};
-        if (!bytes.empty() && (row >= domain.Rows.size() || domain.Rows[row].Size != bytes.size())) return {};
-        ++_stats.SharedGroupHits;
-        ++_stats.SharedBufferHits;
-        return _nativeGroups[found].Id;
+    return {this, _bufferEpoch, domainIndex};
+}
+
+bool FrameDrawResources::IsValid(FrameParameterDomain domain) const noexcept {
+    return domain.Owner.Get() == this && domain.Epoch == _bufferEpoch && domain.Index < _activeBufferDomains;
+}
+
+FrameDrawBindingId FrameDrawResources::PrepareIndexedBinding(FrameParameterDomain domain, uint32_t row, std::span<const FrameShaderGroupId> groups) {
+    if (!IsValid(domain) || row == UINT32_MAX || groups.empty() || _drawBindings.size() >= UINT32_MAX) return {};
+    for (const auto group : groups)
+        if (group.Value >= _readyGroups.size()) return {};
+    auto& rows = _sharedBufferDomains[domain.Index].Bindings;
+    auto& cached = rows.GetOrAdd(row);
+    if (cached.Epoch == _bufferEpoch) {
+        const auto& previous = _drawBindings[cached.Id.Value];
+        return previous.size() == groups.size() && std::equal(previous.begin(), previous.end(), groups.begin()) ? cached.Id : FrameDrawBindingId{};
     }
-    const auto& recipe = GetRecipe(program, group);
-    if (recipe.Buffers.size() != 1 || textures.size() != recipe.TextureCount || samplers.size() != recipe.SamplerCount) return {};
-    const auto& entry = recipe.Buffers.front();
-    const auto& buffer = program.GetParameterLayout().Buffers()[entry.Index];
-    if ((!bytes.empty() && bytes.size() != buffer.Size) || _readyGroups.size() >= UINT32_MAX) return {};
-    ++_stats.GroupPreparations;
-    if (row >= domain.Rows.size()) domain.Rows.resize(size_t{row} + 1);
-    auto& slice = domain.Rows[row];
+    const FrameDrawBindingId id{static_cast<uint32_t>(_drawBindings.size())};
+    _drawBindings.emplace_back();
+    _drawBindings.back().assign(groups.begin(), groups.end());
+    cached = {_bufferEpoch, id};
+    return id;
+}
+
+bool FrameDrawResources::HasCBufferValues(FrameParameterDomain domain, uint32_t row) const noexcept {
+    if (!IsValid(domain)) return false;
+    const auto value = _sharedBufferDomains[domain.Index].Rows.Find(row);
+    return value && value->Epoch == _bufferEpoch;
+}
+
+FrameParameterGroup FrameDrawResources::RegisterParameterGroup(ShaderProgram& program, uint32_t group, FrameParameterDomain domain) {
+    if (!IsValid(domain) || program.GetDevice() != _device) return {};
+    ++_stats.NativeGroupLookups;
+    const auto hash = NativeHash(domain.Index, 0, program.GetGeneration(), group);
+    auto index = _indexedGroupLookup.Find(hash, [&](uint32_t candidate) {
+        const auto& entry = _indexedGroups[candidate];
+        return entry.ProgramGeneration == program.GetGeneration() && entry.Group == group && entry.Domain == domain.Index;
+    });
+    if (index == UINT32_MAX) {
+        if (_activeIndexedGroups >= UINT32_MAX) return {};
+        index = static_cast<uint32_t>(_activeIndexedGroups++);
+        if (index == _indexedGroups.size()) _indexedGroups.emplace_back();
+        auto& entry = _indexedGroups[index];
+        entry.Program = &program;
+        entry.Recipe = &GetRecipe(program, group);
+        entry.ProgramGeneration = program.GetGeneration();
+        entry.Group = group;
+        entry.Domain = domain.Index;
+        entry.Rows.Reset();
+        _indexedGroupLookup.Insert(hash, index);
+    }
+    return {this, _bufferEpoch, index};
+}
+
+std::optional<render::ShaderBufferBinding> FrameDrawResources::PrepareParameterBuffer(FrameParameterDomain domain, uint32_t row, std::span<const byte> bytes) {
+    if (!IsValid(domain) || row == UINT32_MAX || bytes.size() > UINT32_MAX) return std::nullopt;
+    auto& slice = _sharedBufferDomains[domain.Index].Rows.GetOrAdd(row);
     if (slice.Epoch != _bufferEpoch) {
-        if (bytes.empty()) return {};
+        if (bytes.empty()) return std::nullopt;
         auto reservation = _arena->Reserve(bytes.size());
-        if (!reservation.IsValid()) return {};
+        if (!reservation.IsValid()) return std::nullopt;
         std::memcpy(reservation.Data(), bytes.data(), bytes.size());
-        _stats.BufferBytesCopied += bytes.size();
         const auto allocation = reservation.Commit(bytes.size());
-        if (!allocation.IsValid() || allocation.Offset > UINT32_MAX) return {};
+        if (!allocation.IsValid() || allocation.Offset > UINT32_MAX) return std::nullopt;
         slice = {_bufferEpoch, allocation.Target, static_cast<uint32_t>(allocation.Offset), static_cast<uint32_t>(bytes.size())};
+        _stats.BufferBytesCopied += bytes.size();
         ++_stats.SharedBufferUploads;
     } else {
-        if (slice.Size != buffer.Size) return {};
+        if (!bytes.empty() && bytes.size() != slice.Size) return std::nullopt;
         ++_stats.SharedBufferHits;
     }
+    return render::ShaderBufferBinding{slice.Target.Get(), {slice.Offset, slice.Size}};
+}
+
+FrameShaderGroupId FrameDrawResources::ImportGraphGroup(PreparedShaderGroup&& group, RgPassHandle pass) {
+    if (!pass.IsValid() || !group.IsValid() || !_arena || !_arena->IsValid() || _readyGroups.size() >= UINT32_MAX) return {};
+    const FrameShaderGroupId id{static_cast<uint32_t>(_readyGroups.size())};
+    _readyGroups.push_back(std::move(group));
+    _groupPasses.push_back({id.Value, pass});
+    return id;
+}
+
+bool FrameDrawResources::CanUseBinding(FrameDrawBindingId binding, RgPassHandle pass) const noexcept {
+    if (!IsValid(binding)) return false;
+    if (_groupPasses.empty()) return true;
+    for (const auto group : _drawBindings[binding.Value]) {
+        if (group.Value >= _readyGroups.size()) return false;
+        const auto owner = std::lower_bound(_groupPasses.begin(), _groupPasses.end(), group.Value,
+                                            [](const GraphGroupOwner& candidate, uint32_t value) { return candidate.Group < value; });
+        if (owner != _groupPasses.end() && owner->Group == group.Value && owner->Pass != pass) return false;
+    }
+    return true;
+}
+
+FrameShaderGroupId FrameDrawResources::PrepareIndexedGroup(FrameParameterGroup group, uint32_t row, std::span<const byte> bytes,
+                                                           std::span<const MaterialTextureFrameData> textures, std::span<const MaterialSamplerFrameData> samplers) {
+    if (group.Owner.Get() != this || group.Epoch != _bufferEpoch || group.Index >= _activeIndexedGroups || row == UINT32_MAX) return {};
+    auto& entry = _indexedGroups[group.Index];
+    auto& cached = entry.Rows.GetOrAdd(row);
+    if (cached.Epoch == _bufferEpoch) {
+        if ((!bytes.empty() && bytes.size() != cached.ByteSize) || textures.size() != cached.Textures || samplers.size() != cached.Samplers) return {};
+        ++_stats.IndexedGroupHits;
+        ++_stats.SharedGroupHits;
+        ++_stats.SharedBufferHits;
+        return cached.Id;
+    }
+    auto& program = *entry.Program;
+    const auto groupIndex = entry.Group;
+    const auto& recipe = *entry.Recipe;
+    if (recipe.Buffers.size() != 1 || textures.size() != recipe.TextureCount || samplers.size() != recipe.SamplerCount) return {};
+    const auto& bufferRecipe = recipe.Buffers.front();
+    const auto& buffer = program.GetParameterLayout().Buffers()[bufferRecipe.Index];
+    if ((!bytes.empty() && bytes.size() != buffer.Size) || _readyGroups.size() >= UINT32_MAX) return {};
+    ++_stats.GroupPreparations;
+    const auto slice = PrepareParameterBuffer({this, _bufferEpoch, entry.Domain}, row, bytes);
+    if (!slice || slice->Range.Size != buffer.Size) return {};
     if (_failNextGroup) {
         _failNextGroup = false;
         return {};
     }
     PreparedShaderGroup result;
-    result.Group = group;
-    if (entry.Dynamic) result.DynamicOffsets.push_back({buffer.Binding, slice.Offset});
-    const FrameBufferBinding binding{entry.Index, {slice.Target.Get(), {entry.Dynamic ? 0 : slice.Offset, slice.Size}}};
-    result.Set = PrepareSetForGroup(program, group, recipe, std::span{&binding, 1}, textures, samplers);
+    result.Group = groupIndex;
+    if (bufferRecipe.Dynamic) result.DynamicOffsets.push_back({buffer.Binding, static_cast<uint32_t>(slice->Range.Offset)});
+    const FrameBufferBinding binding{bufferRecipe.Index, {slice->Target, {bufferRecipe.Dynamic ? 0 : slice->Range.Offset, slice->Range.Size}}};
+    result.Set = PrepareSetForGroup(program, groupIndex, recipe, std::span{&binding, 1}, textures, samplers);
     if (!result.Set) return {};
     const FrameShaderGroupId id{static_cast<uint32_t>(_readyGroups.size())};
     _readyGroups.push_back(std::move(result));
-    const auto nativeIndex = static_cast<uint32_t>(_nativeGroups.size());
-    _nativeGroups.push_back({program.GetGeneration(), group, domainIndex, row, id, recipe.TextureCount, recipe.SamplerCount});
-    _nativeLookup.Insert(nativeHash, nativeIndex);
+    cached = {_bufferEpoch, id, static_cast<uint32_t>(slice->Range.Size), textures.size(), samplers.size()};
     return id;
+}
+
+FrameShaderGroupId FrameDrawResources::PrepareGroupId(
+    ShaderProgram& program, uint32_t group, FrameParameterDomain domain, uint32_t row, std::span<const byte> bytes,
+    std::span<const MaterialTextureFrameData> textures, std::span<const MaterialSamplerFrameData> samplers) {
+    if (!_arena || program.GetDevice() != _device || !IsValid(domain) || bytes.size() > UINT32_MAX || row == UINT32_MAX) return {};
+    return PrepareIndexedGroup(RegisterParameterGroup(program, group, domain), row, bytes, textures, samplers);
 }
 
 std::optional<PreparedShaderGroup> FrameDrawResources::PrepareGroup(

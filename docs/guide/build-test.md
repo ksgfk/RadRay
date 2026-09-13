@@ -90,7 +90,7 @@ pwsh -File modules/runtime/tests/run_runtime_profile.ps1 -Executable build_relea
 ```
 
 `-BaselineExecutable` 指向包含同一测量 harness 的旧实现时，runner 每轮交替旧/新顺序。`-LowChange`
-测量 1% 对象变换；`-Fixture micro` 隔离局部阶段，不能替代综合场景。`-Validation full`、
+是 `-ChangePercent 1` 的兼容别名；`-ChangePercent 0/1/100` 分别测静态、低变化和全变化，实际百分比写入两侧有效配置并核验。`-Fixture micro` 隔离局部阶段，不能替代综合场景。`-Validation full`、
 `-Report full`、`-GpuMarkers`、`-DriverValidation`、`-SerializeReport` 分别控制诊断与输出。
 不通过关闭效果或减少 draw/视图来比较两个版本。需要直接运行可执行文件时，
 `RADRAY_RUNTIME_PROFILE=1` 启用扩展规程，`RADRAY_PROFILE_WARMUP/SAMPLES/ROUNDS/PRIMITIVES`
@@ -147,11 +147,12 @@ python -B modules/runtime/tests/runtime_profile_compare.py --baseline-directory 
 嵌套的图声明区间。GT 准备覆盖 authoring、world、完整 `RenderSystem::PrepareFrame`，以及同一
 `TickFrame` 中的 GPU flight 更新、退休与调度 pump、`PrepareFrameUploads`；这些边界必须按实际
 线程、源码和调用顺序唯一匹配。外层 `TickFrame` 中的槽位等待不直接计入准备。Commit/Publish/Object
-子项只用于解释成本，不能把父子再加一次。输出区分已测 GT/RT 准备工作、GT P95、输入到提交的同钟延迟，
+子项只用于解释成本，不能把父子再加一次。输出区分已测 GT/RT 准备工作（含图组合、编译、资源实现、屏障和参数准备的区间并集）、GT P95、输入到提交的同钟延迟，
 以及未知 worker/全 runtime 覆盖。计量是 CPU 阶段墙钟区间，不是操作系统线程 CPU sampling；完整
 PreparationTotal 未获得覆盖证据时保持 null。对照器从逐帧行重新计算五轮分位数和轮间变异。
+静态和低变化场景报告实际收益；准备总账、GT、RT 与输入到提交延迟统一报告 P50 5%、P95 10% 回归保护线。轮间 P50 变异系数超过 5% 时不判定达标。
 
-总账 schema v3 分别保留 warmup 与 steady 的覆盖审阅和全部帧；阶段仅由 sampleIndex 与请求的
+总账保留 phase schema v3，区间边界契约为 `radray.integrated.preparation.v5`；RT 从 `RenderSystem::Render` 到唯一 `RenderGraph::Record` 起点的区间扣除 harness 观察与显式 `PresentationAcquire`，其余全部计入准备。图维护纳入 PreparationTotal，具名子阶段之间的工作单列 `rtPreparationOtherNs`；呈现获取整段（含原生等待和相关宿主工作）单列 `excludedPresentationAcquireNs`，仍保留在 RT/端到端指标中。旧边界结果不能混入新对照。分别保留 warmup 与 steady 的覆盖审阅和全部帧；阶段仅由 sampleIndex 与请求的
 warmup 数决定。一个阶段的每帧都完成覆盖核验后，才生成该阶段的 PreparationTotal 分位数。
 冷路径未知不会被移入稳态或删除，源码/线程/帧身份错误会使整轮证据无效。提交后的 history 与
 output commit 单列，不加回提交前准备；覆盖审阅也不能代替操作系统 CPU sampling。
@@ -263,6 +264,10 @@ FreeType 依赖隔离还应检查生成的 `ftoption.h` 中外部功能宏与 fr
 
 先完成构建再运行 CTest，不并发执行两者。`-R` 匹配注册用例名中的 gtest suite，
 不是 CMake target；以下是常用目标与 suite 的对应关系，可能还包含同一目标内的其他 suite：
+
+`cmake --build build_release --config Release --target radray_runtime_tests --parallel 4`
+构建当前配置启用的全部 runtime 测试可执行文件，共享依赖只调度一次。完成后用
+`ctest --test-dir build_release/modules/runtime/tests -C Release --output-on-failure` 执行该目录的完整回归。
 
 | CMake target | `ctest -R` 示例 |
 |---|---|

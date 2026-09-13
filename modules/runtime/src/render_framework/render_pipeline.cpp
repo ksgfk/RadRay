@@ -22,6 +22,10 @@ bool RenderPrepareContext::FreezeRegisteredScenes() {
         vector<PassPolicy> policies;
         for (const auto& registration : ScenePolicies)
             if (registration.Source == scene) policies.push_back(registration.Policy);
+        vector<SceneRenderExtension> extensions;
+        for (const auto& registration : SceneExtensions)
+            if (registration.Source == scene) extensions.push_back(registration.Extension);
+        if (!scene->GetRenderState().SetActiveExtensions(PrepareSerial, extensions)) return false;
         if (!scene->GetDrawStore().SetActivePolicies(PrepareSerial, policies)) return false;
         if (!scene->GetRenderState().PrepareShared(*scene, PrepareSerial, App.FlightIndex, RetainedAssets, RuntimeOptions.Validation)) return false;
     }
@@ -30,17 +34,32 @@ bool RenderPrepareContext::FreezeRegisteredScenes() {
 }
 
 bool RenderPrepareContext::RegisterScenePolicy(const Scene& scene, const PassPolicy& policy) {
-    if (ScenesFrozen || !policy.Id.IsValid() || policy.Revision == 0 || policy.PassName.empty() || !policy.CompileStatic || !RegisterScene(scene)) {
+    if (ScenesFrozen || !policy.Id.IsValid() || policy.Revision == 0 || policy.PassName.empty() || !policy.HasValidCompiler() || !RegisterScene(scene)) {
         PolicyRegistrationValid = false;
         return false;
     }
     for (const auto& registration : ScenePolicies)
-        if (registration.Source == &scene && registration.Policy.Id == policy.Id) {
+        if (registration.Source == &scene && registration.Policy.Id == policy.Id && registration.Policy.Configuration == policy.Configuration) {
             const bool same = registration.Policy == policy;
             PolicyRegistrationValid &= same;
             return same;
         }
     ScenePolicies.push_back({&scene, policy});
+    return true;
+}
+
+bool RenderPrepareContext::RegisterSceneExtension(const Scene& scene, const SceneRenderExtension& extension) {
+    if (ScenesFrozen || !extension.IsValid() || !RegisterScene(scene)) {
+        PolicyRegistrationValid = false;
+        return false;
+    }
+    for (const auto& registration : SceneExtensions) {
+        if (registration.Source != &scene || !registration.Extension.SameIdentity(extension)) continue;
+        const bool same = registration.Extension == extension;
+        PolicyRegistrationValid &= same;
+        return same;
+    }
+    SceneExtensions.push_back({&scene, extension});
     return true;
 }
 

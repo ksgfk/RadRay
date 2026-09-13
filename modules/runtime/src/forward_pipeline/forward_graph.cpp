@@ -11,10 +11,12 @@ struct ForwardGraphFrameData::Impl {
         const RendererList* List{nullptr};
         // Everything the prepare stage reads is owned here: growing the outer vectors relocates the
         // inner buffers without copying them, so the spans below stay valid.
+        size_t ConstantCount{0}, NameCount{0}, RowCount{0};
         vector<vector<byte>> Constants;
         vector<vector<char>> Names;
         vector<vector<RgParameterBinding>> Rows;
         vector<RendererListProgramParameters> Parameters;
+        vector<ShaderProgram*> Programs;
         vector<RgParameterBinding> SharedRows;
         std::span<const RgParameterBinding> TemplateRows;
         std::optional<ForwardGraphPassValues> PassValues;
@@ -25,10 +27,46 @@ struct ForwardGraphFrameData::Impl {
 
     render::RenderBackend Backend{render::RenderBackend::MAX_COUNT};
     vector<ViewData> Views;
+    size_t ActiveViews{0};
     DrawExecutionStats* Execution{nullptr};
 };
 ForwardGraphFrameData::ForwardGraphFrameData() : _impl(make_unique<Impl>()) {}
 ForwardGraphFrameData::~ForwardGraphFrameData() = default;
+void ForwardGraphFrameData::ResetForReuse() noexcept {
+    auto& data = *_impl;
+    for (auto& view : data.Views) {
+        view.Prepared.reset();
+        if (view.Sets) view.Sets->ResetForReuse();
+        view.List = nullptr;
+        view.View = {};
+        view.TemplateRows = {};
+        view.PassValues.reset();
+        view.Parameters.clear();
+        view.Programs.clear();
+        view.SharedRows.clear();
+        for (auto& row : view.Rows) row.clear();
+        for (auto& value : view.Constants) value.clear();
+        for (auto& name : view.Names) name.clear();
+        view.ConstantCount = view.NameCount = view.RowCount = 0;
+    }
+    data.ActiveViews = 0;
+    data.Execution = nullptr;
+    data.Backend = render::RenderBackend::MAX_COUNT;
+}
+size_t ForwardGraphFrameData::GetViewCount() const noexcept { return _impl->ActiveViews; }
+size_t ForwardGraphFrameData::GetCapacityBytes() const noexcept {
+    size_t bytes = sizeof(*this) + sizeof(Impl) + _impl->Views.capacity() * sizeof(Impl::ViewData);
+    for (const auto& view : _impl->Views) {
+        bytes += view.Constants.capacity() * sizeof(vector<byte>) + view.Names.capacity() * sizeof(vector<char>) +
+                 view.Rows.capacity() * sizeof(vector<RgParameterBinding>) + view.Parameters.capacity() * sizeof(RendererListProgramParameters) +
+                 view.SharedRows.capacity() * sizeof(RgParameterBinding) + view.Programs.capacity() * sizeof(ShaderProgram*);
+        for (const auto& row : view.Rows) bytes += row.capacity() * sizeof(RgParameterBinding);
+        for (const auto& value : view.Constants) bytes += value.capacity();
+        for (const auto& name : view.Names) bytes += name.capacity();
+        if (view.Sets) bytes += view.Sets->GetCapacityBytes();
+    }
+    return bytes;
+}
 
 namespace {
 using ForwardGraphPassData = ForwardGraphFrameData::Impl;
@@ -47,14 +85,20 @@ struct ForwardGraphRecipe {
 void CopyProgramRows(const RendererListProgramParameters& program, std::span<const RgParameterBinding> shared,
                      ForwardGraphPassData::ViewData& view) {
     RADRAY_PROFILE_SCOPE_N("Forward::DrawWorkBuild.CopyProgramRows");
-    auto& rows = view.Rows.emplace_back();
+    if (view.RowCount == view.Rows.size()) view.Rows.emplace_back();
+    auto& rows = view.Rows[view.RowCount++];
+    rows.clear();
     rows.reserve(program.Bindings.size() + shared.size());
     const auto copy = [&](const RgParameterBinding& binding) {
         RgParameterBinding& row = rows.emplace_back(binding);
-        const auto& name = view.Names.emplace_back(binding.Declaration.begin(), binding.Declaration.end());
+        if (view.NameCount == view.Names.size()) view.Names.emplace_back();
+        auto& name = view.Names[view.NameCount++];
+        name.assign(binding.Declaration.begin(), binding.Declaration.end());
         row.Declaration = {name.data(), name.size()};
         if (const auto* bytes = std::get_if<RgCBufferParameterBinding>(&row.Value)) {
-            const auto& owned = view.Constants.emplace_back(bytes->Bytes.begin(), bytes->Bytes.end());
+            if (view.ConstantCount == view.Constants.size()) view.Constants.emplace_back();
+            auto& owned = view.Constants[view.ConstantCount++];
+            owned.assign(bytes->Bytes.begin(), bytes->Bytes.end());
             row.Value = RgCBufferParameterBinding{owned};
         }
     };
@@ -65,7 +109,7 @@ void CopyProgramRows(const RendererListProgramParameters& program, std::span<con
 
 bool PrepareForwardGraphPass(ForwardGraphPassData& data, RenderGraphPrepareContext& context) {
     RADRAY_PROFILE_SCOPE_N("Forward::DrawWorkBuild.Ready");
-    for (ForwardGraphPassData::ViewData& view : data.Views) {
+    for (ForwardGraphPassData::ViewData& view : std::span{data.Views}.first(data.ActiveViews)) {
         if (view.PassValues) {
             const auto& inputs = *view.PassValues;
             Forward_PassData values = *inputs.ShadowValues;
@@ -74,9 +118,11 @@ bool PrepareForwardGraphPass(ForwardGraphPassData& data, RenderGraphPrepareConte
             values.UseTiles = inputs.UseTiles ? 1u : 0u;
             values.UseAo = inputs.UseAo ? 1u : 0u;
             values.Transparent = inputs.Transparent ? 1u : 0u;
-            unordered_set<ShaderProgram*> programs;
+            auto& programs = view.Programs;
+            programs.clear();
             const auto addProgram = [&](ShaderProgram* program, Nullable<const StaticBindingRecipe*> bindings) {
-                if (!programs.insert(program).second) return true;
+                if (std::find(programs.begin(), programs.end(), program) != programs.end()) return true;
+                programs.push_back(program);
                 uint32_t group = UINT32_MAX;
                 if (bindings)
                     group = bindings->Groups[static_cast<size_t>(StaticBindingRole::Pass)];
@@ -109,10 +155,10 @@ bool PrepareForwardGraphPass(ForwardGraphPassData& data, RenderGraphPrepareConte
             }
         }
         if (!view.Parameters.empty()) {
-            view.Sets = RendererListPassSets::Create(context, *view.List, view.Parameters);
-            if (!view.Sets) return false;
+            if (!view.Sets) view.Sets.emplace();
+            if (!view.Sets->Prepare(context, *view.List, view.Parameters)) return false;
         }
-        view.Prepared = PrepareRendererList(*view.List, context, view.Sets ? &*view.Sets : nullptr);
+        view.Prepared = PrepareRendererList(*view.List, context, !view.Parameters.empty() && view.Sets ? &*view.Sets : nullptr);
         if (!view.Prepared) return false;
     }
     return true;
@@ -120,7 +166,7 @@ bool PrepareForwardGraphPass(ForwardGraphPassData& data, RenderGraphPrepareConte
 
 void ExecuteForwardGraphPass(
     const ForwardGraphPassData& data, RenderGraphRasterContext& context) {
-    for (const ForwardGraphPassData::ViewData& view : data.Views) {
+    for (const ForwardGraphPassData::ViewData& view : std::span{data.Views}.first(data.ActiveViews)) {
         if (!view.Prepared) continue;
         context.Encoder().SetViewport(MakeViewport(
             data.Backend, static_cast<float>(view.View.ViewRect.X),
@@ -160,23 +206,38 @@ std::optional<RgParameterBinding> DeclareForwardPassResource(RenderGraphComputeB
                                                : builder.ReadTexture(resource.Texture, resource.TextureView));
 }
 
-shared_ptr<ForwardGraphFrameData> ForwardGraph::MakeFrame(const ForwardGraphStageInputs& inputs) {
-    RADRAY_PROFILE_SCOPE_N("Forward::DrawWorkBuild.PassFrameInputs");
-    if (!EnumContains(inputs.Backend) || inputs.Execution == nullptr) return {};
-    auto frame = make_shared<ForwardGraphFrameData>();
-    auto& data = *frame->_impl;
+namespace {
+bool FillFrame(ForwardGraphFrameData::Impl& data, const ForwardGraphStageInputs& inputs) {
     data.Backend = inputs.Backend;
     data.Execution = inputs.Execution;
-    data.Views.reserve(inputs.Views.size());
-    for (const auto& input : inputs.Views) {
-        if (!input.List) return {};
-        auto& view = data.Views.emplace_back();
+    if (data.Views.size() < inputs.Views.size()) data.Views.resize(inputs.Views.size());
+    data.ActiveViews = inputs.Views.size();
+    for (size_t index = 0; index < inputs.Views.size(); ++index) {
+        const auto& input = inputs.Views[index];
+        if (!input.List) return false;
+        auto& view = data.Views[index];
         view.View = input.View;
         view.List = input.List;
         view.PassValues = input.PassValues;
         for (const auto& program : input.Parameters) CopyProgramRows(program, {}, view);
     }
-    return frame;
+    return true;
+}
+}  // namespace
+
+shared_ptr<ForwardGraphFrameData> ForwardGraph::MakeFrame(const ForwardGraphStageInputs& inputs) {
+    RADRAY_PROFILE_SCOPE_N("Forward::DrawWorkBuild.PassFrameInputs");
+    if (!EnumContains(inputs.Backend) || inputs.Execution == nullptr) return {};
+    auto frame = make_shared<ForwardGraphFrameData>();
+    return FillFrame(*frame->_impl, inputs) ? frame : shared_ptr<ForwardGraphFrameData>{};
+}
+shared_ptr<ForwardGraphFrameData> ForwardGraph::MakeFrame(RenderGraph& graph, const void* owner, uint64_t key,
+                                                          const ForwardGraphStageInputs& inputs) {
+    RADRAY_PROFILE_SCOPE_N("Forward::DrawWorkBuild.PassFrameInputs");
+    if (!EnumContains(inputs.Backend) || inputs.Execution == nullptr) return {};
+    auto frame = graph.AcquireFramePayload<ForwardGraphFrameData>(owner, key);
+    frame->ResetForReuse();
+    return FillFrame(*frame->_impl, inputs) ? frame : shared_ptr<ForwardGraphFrameData>{};
 }
 
 ForwardGraphStageOutput ForwardGraph::DeclareTemplate(
@@ -217,8 +278,8 @@ ForwardGraphStageOutput ForwardGraph::DeclareTemplate(
                 if (!builder.SetColorAttachment(index + 1, inputs.AuxiliaryColors[index]).IsValid()) valid = false;
             if (!builder.SetDepthAttachment(result.Depth, depth).IsValid()) valid = false; }, +[](const ForwardGraphRecipe& recipe, ForwardGraphFrameData& frame, RenderGraphPrepareContext& context) {
             auto& data = *frame._impl;
-            if (data.Views.size() != recipe.Views.size()) return false;
-            for (size_t index = 0; index < data.Views.size(); ++index) {
+            if (data.ActiveViews != recipe.Views.size()) return false;
+            for (size_t index = 0; index < data.ActiveViews; ++index) {
                 if (data.Views[index].PassValues.has_value() != recipe.Views[index].PassValues) return false;
                 data.Views[index].TemplateRows = recipe.Views[index].Rows;
             }
@@ -266,6 +327,7 @@ ForwardGraphStageOutput ForwardGraph::BuildGraph(
             data.Backend = inputs.Backend;
             data.Execution = inputs.Execution;
             data.Views.reserve(inputs.Views.size());
+            data.ActiveViews = inputs.Views.size();
             for (const ForwardGraphView& view : inputs.Views) {
                 ForwardGraphPassData::ViewData next;
                 next.View = view.View;
@@ -295,6 +357,7 @@ ForwardGraphStageOutput ForwardGraph::BuildGraph(
                         next.SharedRows = std::move(shared);
                         for (auto& row : next.SharedRows) {
                             const auto& name = next.Names.emplace_back(row.Declaration.begin(), row.Declaration.end());
+                            ++next.NameCount;
                             row.Declaration = {name.data(), name.size()};
                         }
                     }

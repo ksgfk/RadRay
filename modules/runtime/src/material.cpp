@@ -350,12 +350,14 @@ bool Material::BuildRenderData(MaterialRenderData& out, vector<StreamingAssetRef
         return valid;
     }
     auto& snapshot = out;
+    bool readinessChanged = snapshot.Generation != _generation || snapshot.Passes.size() != _technique->Passes().size();
     snapshot.Queue = _renderQueue;
     snapshot.Passes.resize(_technique->Passes().size());
     bool anyValid = false;
     for (uint32_t index = 0; index < _technique->Passes().size(); ++index) {
         const auto& layout = _technique->Passes()[index];
         auto& pass = snapshot.Passes[index];
+        const bool wasValid = pass.Valid;
         pass.Textures.clear();
         pass.Samplers.clear();
         pass.PassName = layout.Name;
@@ -400,12 +402,14 @@ bool Material::BuildRenderData(MaterialRenderData& out, vector<StreamingAssetRef
             }
         }
         anyValid |= pass.Valid;
+        readinessChanged |= pass.Valid != wasValid;
     }
     snapshot.Generation = _generation;
     snapshot.Revision = revision;
     snapshot.StructureRevision = revisions.StructureRevision;
     snapshot.ValuesRevision = revisions.ValuesRevision;
     snapshot.BindingsRevision = revisions.BindingsRevision;
+    if (readinessChanged) snapshot.ReadinessRevision = revision;
     if (anyValid) retainReadyTextures();
     return anyValid;
 }

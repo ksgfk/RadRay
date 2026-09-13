@@ -120,6 +120,65 @@ uint64_t ForwardObjectDataCache::Update(const RenderSceneSnapshot& scene) {
     return updated;
 }
 
+namespace {
+bool PrepareForwardObjects(SceneExtensionWorkspace& workspace, const RenderSceneSnapshot& scene, const SceneChangeSet& changes, uint64_t,
+                           const shared_ptr<const ForwardObjectExtensionData>& previous,
+                           shared_ptr<const ForwardObjectExtensionData>& result) {
+    RADRAY_PROFILE_SCOPE_N("Scene.ForwardObjectValues");
+    using Data = ForwardObjectExtensionData;
+    auto& headers = workspace.GetStorage<Data>();
+    auto& pages = workspace.GetStorage<Data::Page>();
+    auto next = headers.Acquire(0);
+    if (previous) *next = *previous;
+    next->Count = scene.Primitives.size();
+    next->Pages.resize((next->Count + Data::PageRows - 1) / Data::PageRows);
+    next->UpdatedRows = next->CopiedPages = 0;
+    size_t writableIndex = SIZE_MAX;
+    shared_ptr<Data::Page> writable;
+    const auto update = [&](size_t index) {
+        const auto pageIndex = index / Data::PageRows, rowIndex = index % Data::PageRows;
+        const auto& primitive = scene.Primitives[index];
+        if (previous && index < previous->Count) {
+            const auto& version = previous->Pages[pageIndex]->Versions[rowIndex];
+            if (primitive.Generation != 0 && primitive.TransformRevision != 0 &&
+                version.Generation == primitive.Generation && version.TransformRevision == primitive.TransformRevision) return;
+        }
+        if (writableIndex != pageIndex) {
+            writable = pages.Acquire(pageIndex);
+            if (next->Pages[pageIndex])
+                *writable = *next->Pages[pageIndex];
+            else
+                *writable = {};
+            next->Pages[pageIndex] = writable;
+            writableIndex = pageIndex;
+            ++next->CopiedPages;
+        }
+        auto& row = writable->Values[rowIndex];
+        row = {};
+        row.LocalToWorld = primitive.LocalToWorld;
+        row.NormalToWorld = MakeNormalToWorld(primitive.LocalToWorld);
+        row.PreviousLocalToWorld = primitive.LocalToWorld;
+        row.MotionValid = 0;
+        writable->Versions[rowIndex] = {primitive.Generation, primitive.TransformRevision};
+        ++next->UpdatedRows;
+    };
+    if (!previous) {
+        for (size_t index = 0; index < scene.Primitives.size(); ++index) update(index);
+    } else {
+        for (const auto& range : changes.Get(SceneDataTable::Primitives).Ranges)
+            for (size_t index = range.First; index < size_t{range.First} + range.Count; ++index) update(index);
+    }
+    result = std::move(next);
+    return true;
+}
+}  // namespace
+
+const SceneRenderExtension& ForwardObjectExtension() noexcept {
+    static const auto contract = SceneRenderExtension::Make<ForwardObjectExtensionData, PrepareForwardObjects>(
+        0x464f424a454354ull, 1, 0, {SceneDataTable::Primitives});
+    return contract;
+}
+
 void FillViewParameters(
     Forward_ViewData& out,
     const CullingResults& culling,

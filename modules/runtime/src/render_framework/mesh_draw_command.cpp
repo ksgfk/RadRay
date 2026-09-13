@@ -176,6 +176,10 @@ PreparedRendererList::PreparedRendererList(RgPassHandle pass, const RendererList
       LocalGroups(std::span<const PreparedShaderGroup>{StorageOwner->LocalGroups}.first(StorageOwner->ActiveLocalGroups)),
       Geometries(StorageOwner->Geometries), VertexRuns(StorageOwner->VertexRuns) {}
 
+const RendererListPreparationStats& PreparedRendererList::GetPreparationStats() const noexcept {
+    return StorageOwner->Stats;
+}
+
 std::optional<PreparedRendererList> PrepareRendererList(const RendererList& list, RenderGraphPrepareContext& ctx,
                                                         Nullable<const RendererListPassSets*> passSets) {
     RADRAY_PROFILE_SCOPE_N("PrepareRendererList");
@@ -236,11 +240,24 @@ std::optional<PreparedRendererList> PrepareRendererList(const RendererList& list
             ctx.Reject("RendererListPreparation", "Draw requires a shader program and geometry");
             return std::nullopt;
         }
+        const auto staticRecord = list.GetStaticRecord(index);
+        Nullable<PreparedRendererList::Workspace::StaticPlanEntry*> staticPlan{nullptr};
+        if (staticRecord) {
+            staticPlan = &workspace.ResolveStaticPlan(staticRecord->Plan);
+            ++prepared.Stats.StaticDraws;
+        }
         const auto* geometry = draw.Geometry.Get();
-        const auto geometryHash = std::hash<const GpuMesh::DrawData*>{}(geometry);
-        uint32_t geometryId = previousGeometry != UINT32_MAX && prepared.Geometries[previousGeometry].Source == geometry
-                                  ? previousGeometry
-                                  : geometryIndex.Find(geometryHash, [&](uint32_t at) { return prepared.Geometries[at].Source == geometry; });
+        uint32_t geometryId = staticPlan ? staticPlan->Geometry : UINT32_MAX;
+        size_t geometryHash = 0;
+        if (geometryId == UINT32_MAX) {
+            if (previousGeometry != UINT32_MAX && prepared.Geometries[previousGeometry].Source == geometry)
+                geometryId = previousGeometry;
+            else {
+                ++prepared.Stats.GeometryIdentityLookups;
+                geometryHash = std::hash<const GpuMesh::DrawData*>{}(geometry);
+                geometryId = geometryIndex.Find(geometryHash, [&](uint32_t at) { return prepared.Geometries[at].Source == geometry; });
+            }
+        }
         if (geometryId == UINT32_MAX) {
             for (const auto& vertex : draw.Geometry->VertexBuffers)
                 if (!vertex.View.Target) {
@@ -280,60 +297,40 @@ std::optional<PreparedRendererList> PrepareRendererList(const RendererList& list
             geometryLayouts.push_back(layoutId);
             geometryIndex.Insert(geometryHash, geometryId);
         }
-        const auto& state = list.GetPipelineState(index);
-        const auto stateId = list.GetEffectiveStateId(index);
-        const auto layout = geometryLayouts[geometryId];
-        HashCode stateHash;
-        stateHash.Add(draw.Program.Get());
-        stateHash.Add(stateId);
-        stateHash.Add(layout.Value);
-        stateHash.Add(static_cast<uint32_t>(geometry->Topology));
-        if (stateId == 0) stateHash.Add(PipelineRecipeHash{}({draw.Program.Get(), state, layout, geometry->Topology}));
-        const auto hash = stateHash.ToHashCode();
-        uint32_t pipelineId = pipelineIndex.Find(hash, [&](uint32_t at) {
-            const auto& entry = pipelines[at];
-            return entry.Program == draw.Program.Get() && entry.StateId == stateId && entry.Layout == layout &&
-                   entry.Topology == geometry->Topology && (stateId != 0 || *entry.State == state);
-        });
+        if (staticPlan) staticPlan->Geometry = geometryId;
+        const uint32_t variant = staticRecord && staticRecord->Mirrored ? 1 : 0;
+        uint32_t pipelineId = staticPlan ? staticPlan->Pipelines[variant] : UINT32_MAX;
         if (pipelineId == UINT32_MAX) {
-            const auto resolved = ctx.ResolveGraphicsPipeline(*draw.Program, state, geometry->VertexLayout, geometry->Topology);
-            if (!resolved) return std::nullopt;
-            pipelineId = static_cast<uint32_t>(pipelines.size());
-            pipelines.push_back({draw.Program.Get(), stateId, &state, layout, geometry->Topology, resolved.Get()});
-            pipelineIndex.Insert(hash, pipelineId);
+            ++prepared.Stats.PipelineIdentityLookups;
+            const auto& state = list.GetPipelineState(index);
+            const auto stateId = list.GetEffectiveStateId(index);
+            const auto layout = geometryLayouts[geometryId];
+            HashCode stateHash;
+            stateHash.Add(draw.Program.Get());
+            stateHash.Add(stateId);
+            stateHash.Add(layout.Value);
+            stateHash.Add(static_cast<uint32_t>(geometry->Topology));
+            if (stateId == 0) stateHash.Add(PipelineRecipeHash{}({draw.Program.Get(), state, layout, geometry->Topology}));
+            const auto hash = stateHash.ToHashCode();
+            pipelineId = pipelineIndex.Find(hash, [&](uint32_t at) {
+                const auto& entry = pipelines[at];
+                return entry.Program == draw.Program.Get() && entry.StateId == stateId && entry.Layout == layout &&
+                       entry.Topology == geometry->Topology && (stateId != 0 || *entry.State == state);
+            });
+            if (pipelineId == UINT32_MAX) {
+                const auto resolved = ctx.ResolveGraphicsPipeline(*draw.Program, state, geometry->VertexLayout, geometry->Topology, list.GetVertexInput(index));
+                if (!resolved) return std::nullopt;
+                pipelineId = static_cast<uint32_t>(pipelines.size());
+                pipelines.push_back({draw.Program.Get(), stateId, &state, layout, geometry->Topology, resolved.Get()});
+                pipelineIndex.Insert(hash, pipelineId);
+            }
+            if (staticPlan) staticPlan->Pipelines[variant] = pipelineId;
         }
         auto* pipeline = pipelines[pipelineId].Pipeline;
-        const auto frameBinding = list.GetBindingId(index);
-        HashCode bindingHash;
-        bindingHash.Add(draw.Program.Get());
-        bindingHash.Add(frameBinding.Value);
-        if (!frameBinding.IsValid()) {
-            nativeScratch.clear();
-            const auto groups = list.GetGroups(index);
-            for (size_t at = 0; at < groups.size(); ++at) {
-                if (!groups[at].Set) {
-                    ctx.Reject("RendererListPreparation", "A draw parameter group has no native set");
-                    return std::nullopt;
-                }
-                const auto ref = internGroup(groups[at]);
-                nativeScratch.push_back(ref);
-                bindingHash.Add(ref.Index);
-            }
-        }
-        // Static tuple IDs already include every native group. Pass groups are fixed for each program.
-        const auto tupleHash = bindingHash.ToHashCode();
-        uint32_t bindingId = frameBinding.IsValid()
-                                 ? bindingIndex.Find(tupleHash, [&](uint32_t at) {
-                                       return bindings[at].Program == draw.Program.Get() && bindings[at].FrameBinding == frameBinding;
-                                   })
-                                 : UINT32_MAX;
-        if (bindingId == UINT32_MAX) {
-            if (frameBinding.IsValid()) {
-                nativeScratch.clear();
-                for (const auto id : frameResources->GetBinding(frameBinding)) nativeScratch.push_back({1, id.Value});
-            }
+        uint32_t programId = staticPlan ? staticPlan->Program : UINT32_MAX;
+        if (programId == UINT32_MAX) {
             const auto programHash = std::hash<const ShaderProgram*>{}(draw.Program.Get());
-            uint32_t programId = programIndex.Find(programHash, [&](uint32_t at) { return programs[at].Program == draw.Program.Get(); });
+            programId = programIndex.Find(programHash, [&](uint32_t at) { return programs[at].Program == draw.Program.Get(); });
             if (programId == UINT32_MAX) {
                 programId = static_cast<uint32_t>(programs.size());
                 const auto first = static_cast<uint32_t>(programGroups.size());
@@ -348,6 +345,38 @@ std::optional<PreparedRendererList> PrepareRendererList(const RendererList& list
                 }
                 programs.push_back({draw.Program.Get(), first, static_cast<uint32_t>(programGroups.size()) - first});
                 programIndex.Insert(programHash, programId);
+            }
+            if (staticPlan) staticPlan->Program = programId;
+        }
+        const auto frameBinding = list.GetBindingId(index);
+        Nullable<PreparedRendererList::Workspace::IndexedBinding*> indexedBinding{nullptr};
+        if (frameBinding.IsValid()) indexedBinding = &workspace.ResolveProgramBinding(programId, frameBinding.Value);
+        HashCode bindingHash;
+        if (!indexedBinding) bindingHash.Add(draw.Program.Get());
+        if (!indexedBinding) {
+            ++prepared.Stats.BindingIdentityLookups;
+            nativeScratch.clear();
+            const auto groups = list.GetGroups(index);
+            for (size_t at = 0; at < groups.size(); ++at) {
+                if (!groups[at].Set) {
+                    ctx.Reject("RendererListPreparation", "A draw parameter group has no native set");
+                    return std::nullopt;
+                }
+                const auto ref = internGroup(groups[at]);
+                nativeScratch.push_back(ref);
+                bindingHash.Add(ref.Index);
+            }
+        }
+        const auto tupleHash = indexedBinding ? 0 : bindingHash.ToHashCode();
+        uint32_t bindingId = indexedBinding ? indexedBinding->Value : UINT32_MAX;
+        if (bindingId == UINT32_MAX) {
+            if (frameBinding.IsValid()) {
+                if (!frameResources->CanUseBinding(frameBinding, ctx.GetPassHandle())) {
+                    ctx.Reject("RendererListBindingPass", "Indexed graph parameter bindings belong to another pass");
+                    return std::nullopt;
+                }
+                nativeScratch.clear();
+                for (const auto id : frameResources->GetBinding(frameBinding)) nativeScratch.push_back({1, id.Value});
             }
             const auto& program = programs[programId];
             mergedScratch.clear();
@@ -373,7 +402,10 @@ std::optional<PreparedRendererList> PrepareRendererList(const RendererList& list
                 bindingId = static_cast<uint32_t>(bindings.size());
                 bindings.push_back({draw.Program.Get(), frameBinding, static_cast<uint32_t>(orderedGroups.size()), static_cast<uint32_t>(mergedScratch.size())});
                 orderedGroups.insert(orderedGroups.end(), mergedScratch.begin(), mergedScratch.end());
-                bindingIndex.Insert(tupleHash, bindingId);
+                if (indexedBinding)
+                    indexedBinding->Value = bindingId;
+                else
+                    bindingIndex.Insert(tupleHash, bindingId);
             }
         }
         const bool bindPipeline = previousPipeline.Get() != pipeline;

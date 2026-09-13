@@ -2,11 +2,76 @@
 #include <radray/runtime/render_framework/renderer_list_pass_sets.h>
 #include <radray/runtime/forward_pipeline/forward_graph.h>
 #include "upload_test_support.h"
+#include <radray/scope_guard.h>
 
 namespace radray {
 namespace {
 
 class RendererListPassSetsTest : public test::FoundationGraphGpuTest {};
+
+TEST_P(RendererListPassSetsTest, ReusedPreparationKeepsIndependentPassesAndClearsFailureWithoutDroppingCapacity) {
+    auto program = test::CompileFoundationGraphics(*Context.Device, R"hlsl(
+#include <core/platform.hlsli>
+struct Values { float4 Value; };
+VK_BINDING(0, 0) ConstantBuffer<Values> A : register(b0, space0);
+VK_BINDING(0, 2) ConstantBuffer<Values> B : register(b0, space2);
+VK_BINDING(0, 4) ConstantBuffer<Values> C : register(b0, space4);
+[shader("vertex")] float4 VSMain(uint id : SV_VertexID) : SV_Position { return float4(0, 0, 0, 1); }
+[shader("pixel")] float PSMain() : SV_Target0 { return A.Value.x + B.Value.x + C.Value.x; }
+)hlsl");
+    ASSERT_TRUE(program);
+    RendererList list;
+    list.Commands.emplace_back().Program = program.Get();
+    array<RendererListPassSets, 2> sets;
+    array<size_t, 2> capacities{};
+    auto cleanup = MakeScopeGuard([this]() noexcept { Resources->Clear(); });
+    for (uint32_t frame = 0; frame < 40; ++frame) {
+        for (auto& value : sets) value.ResetForReuse();
+        Resources->BeginFlight(frame + 1, Writes);
+        RenderGraph graph{*Context.Device, *Resources, *Registry, "reused pass sets", {RenderValidationMode::Off, RenderGraphReportMode::Counters, false}};
+        const bool fail = frame == 5;
+        for (uint32_t pass = 0; pass < sets.size(); ++pass) {
+            auto output = graph.CreateTexture({render::TextureDimension::Dim2D, 4, 4, 1, 1, 1, render::TextureFormat::R32_FLOAT, render::MemoryType::Device, render::TextureUse::RenderTarget, {}}, "output");
+            struct Data {
+                RendererListPassSets* Sets;
+                const RendererList* List;
+                ShaderProgram* Program;
+                uint32_t Count;
+                bool Fail;
+                array<float, 4> Values;
+            };
+            graph.AddRasterPass<Data>("prepare", [&](Data& data, RenderGraphRasterBuilder& builder) {
+                data.Sets = &sets[pass]; data.List = &list; data.Program = program.Get();
+                data.Count = frame < 2 || (frame + pass) % 2 == 0 ? 3 : 1;
+                data.Fail = fail && pass == 0; data.Values = {float(frame + pass + 1), 0, 0, 0};
+                builder.SetColorAttachment(0, output); builder.SetSideEffect(); }, +[](Data& data, RenderGraphPrepareContext& ctx) {
+                const array<RgParameterBinding, 3> rows{{{"A", 0, RgCBufferParameterBinding{std::as_bytes(std::span{data.Values})}},
+                                                        {"B", 0, RgCBufferParameterBinding{std::as_bytes(std::span{data.Values})}},
+                                                        {"C", 0, RgCBufferParameterBinding{std::as_bytes(std::span{data.Values})}}}};
+                array<RendererListProgramParameters, 3> parameters{{{data.Program, 0, std::span{&rows[0], 1}},
+                                                                   {data.Program, 2, std::span{&rows[1], 1}},
+                                                                   {data.Program, 4, std::span{&rows[2], 1}}}};
+                if (data.Fail) { data.Count = 3; parameters[1] = parameters[0]; }
+                const bool ready = data.Sets->Prepare(ctx, *data.List, std::span{parameters}.first(data.Count));
+                if (ready) {
+                    EXPECT_EQ(data.Sets->GetPass(), ctx.GetPassHandle());
+                    const auto groups = data.Sets->Find(*data.Program);
+                    EXPECT_EQ(groups.size(), data.Count);
+                    for (uint32_t index = 0; index < groups.size(); ++index) {
+                        EXPECT_EQ(groups[index].Group, index * 2);
+                        EXPECT_TRUE(groups[index].IsValid());
+                    }
+                } else EXPECT_TRUE(data.Sets->Find(*data.Program).empty());
+                return ready; }, +[](const Data& data, RenderGraphRasterContext&) { EXPECT_EQ(data.Sets->Find(*data.Program).size(), data.Count); });
+        }
+        EXPECT_EQ(Run(graph), !fail) << graph.GetReport().ToText();
+        if (fail) EXPECT_TRUE(sets[0].Find(*program).empty());
+        for (uint32_t pass = 0; pass < sets.size(); ++pass) {
+            if (frame == 1) capacities[pass] = sets[pass].GetCapacityBytes();
+            if (frame > 1) EXPECT_EQ(sets[pass].GetCapacityBytes(), capacities[pass]);
+        }
+    }
+}
 
 TEST_P(RendererListPassSetsTest, T04ForwardGraphOwnsShortLongAndSharedBindingNames) {
     auto& device = *Context.Device;

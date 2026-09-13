@@ -170,9 +170,9 @@ void CheckPublicationValues(const RenderSceneSnapshot& snapshot, uint32_t value,
             EXPECT_EQ(draw.PrimitiveId, data.Id);
             EXPECT_EQ(draw.Material, batch.Material);
             EXPECT_EQ(draw.Status, DrawRecordStatus::Ready);
-            EXPECT_EQ(draw.Description.IndexCount, value % 2 ? 6u : 3u);
+            EXPECT_EQ(snapshot.ResolveDraw(draw).Description.IndexCount, value % 2 ? 6u : 3u);
             EXPECT_EQ(draw.PolicyRevision, value + 1);
-            EXPECT_TRUE(draw.Description.LayoutId.IsValid());
+            EXPECT_TRUE(snapshot.ResolveDraw(draw).Description.LayoutId.IsValid());
         }
     }
     for (const auto& material : snapshot.Materials) {
@@ -269,7 +269,7 @@ TEST_P(ScenePublicationFailureTest, RetainAndCopyFailuresRetryAllPendingPagesAnd
         CheckPublicationValues(snapshots[flight], 0, materials, names);
     }
     vector<SnapshotPublicationFailure> failures{{.AfterRetainedOwners = 0}, {.AfterRetainedOwners = 17}, {.AfterRetainedOwners = kFailurePrimitives}};
-    for (uint32_t tables = 0; tables <= 8; ++tables) failures.push_back({.AfterCopiedTables = tables});
+    for (uint32_t tables = 0; tables <= static_cast<uint32_t>(SceneDataTable::Count); ++tables) failures.push_back({.AfterCopiedTables = tables});
     // Every element boundary through primitive, batch, material and draw pages, including
     // material rows that own two long names and differently sized numeric payloads.
     for (uint32_t entries = 0; entries <= kFailurePrimitives * 4 + kFailureMaterials; ++entries)
@@ -390,6 +390,225 @@ TEST_P(ScenePublicationFailureTest, RetainAndCopyFailuresRetryAllPendingPagesAnd
     EXPECT_EQ(assets.GetAssetCount(), 0u);
     EXPECT_EQ(device.ValidationErrors.load(), 0u);
 }
+
+TEST_P(ScenePublicationFailureTest, EveryStaticCompilerAllocationBoundaryCanRetryWithoutPoisoningPlans) {
+    const auto [backend, validation] = GetParam();
+    render::test::DeviceContext device;
+    if (!render::test::TryCreateDevice(backend, device, true)) {
+        if (render::test::SetupMustFail(device.Status, render::test::RequiredBackend(backend))) FAIL() << device.Reason;
+        GTEST_SKIP() << device.Reason;
+    }
+    auto program = test::CompileStageBProgram(*device.Device, test::StageBMaterialSource("float4 BaseColor;"));
+    ASSERT_TRUE(program);
+    GpuMesh::DrawData geometry;
+    geometry.VertexLayout.Buffers = {{0, 12, render::VertexStepMode::Vertex}};
+    geometry.VertexLayout.Attributes = {{"POSITION", 0, 0, 0, render::VertexFormat::FLOAT32X3}};
+    RenderSceneSnapshot source;
+    source.Materials.resize(1);
+    auto& material = source.Materials[0];
+    material.Generation = material.Revision = material.StructureRevision = 1;
+    MaterialPassRenderData pass;
+    pass.PassName = "IndependentCompilationWithVariableLengthPassIdentity";
+    pass.NumericBytes.resize(16);
+    pass.Program = program.Get();
+    pass.ProgramGeneration = program->GetGeneration();
+    pass.Valid = true;
+    material.Passes.push_back(pass);
+    for (uint32_t index = 0; index < 2; ++index) {
+        source.Primitives.push_back({.FirstMeshBatch = index, .MeshBatchCount = 1, .Generation = index + 1ull, .RenderDataRevision = 1, .TransformRevision = 1});
+        source.MeshBatches.push_back({index, 0, &geometry, 0, 3, 0, 0});
+    }
+    MeshBindingContract contract{7001, 1, 0, +[](const ShaderProgram& program, MeshBindingPlan& plan) {
+                                     const auto buffers = program.GetParameterLayout().Buffers();
+                                     for (uint32_t index = 0; index < buffers.size(); ++index) {
+                                         const auto& buffer = buffers[index];
+                                         const auto& artifact = program.GetArtifact().Generic();
+                                         const auto declarations = artifact.Bindings();
+                                         const auto binding = std::find_if(declarations.begin(), declarations.end(), [&](const auto& value) {
+                                             const auto name = artifact.GetName(value.Name);
+                                             return name && *name == buffer.Name;
+                                         });
+                                         if (binding == declarations.end()) return false;
+                                         plan.Slots.push_back({index + 1, MeshParameterScope::Material, MeshParameterKind::CBuffer, 17, buffer.Size});
+                                         plan.Bindings.push_back({index, buffer.Group, binding->Binding, 0, index, 0});
+                                     }
+                                     return true;
+                                 }};
+    PassPolicy original{{7002}, 1, pass.PassName, nullptr, contract};
+    original.Dependencies = MeshPassDependency::MaterialValues;
+    original.CompileMesh = +[](const MeshStaticDrawCompileInput& input, MeshStaticDrawCompileResult& result) {
+        result.NormalState.DepthStencil.DepthWriteEnable = input.Pass.NumericBytes[0] == byte{0};
+        result.MirroredState = result.NormalState;
+        result.FirstIndex = std::to_integer<uint32_t>(input.Pass.NumericBytes[0]);
+        return MeshStaticCompileStatus::Ready;
+    };
+    for (bool warm : {false, true}) {
+        bool completed = false;
+        uint32_t failures = 0;
+        for (size_t boundary = 0; boundary < 2048; ++boundary) {
+            SCOPED_TRACE(fmt::format("warm={} allocation={}", warm, boundary));
+            auto scene = source;
+            CpuDrawStore store;
+            ASSERT_TRUE(store.SetActivePolicies(1, std::span{&original, 1}));
+            RenderSceneSnapshot old;
+            if (warm) {
+                ASSERT_TRUE(store.Sync(scene, validation));
+                old = scene;
+                auto next = original;
+                next.Revision = next.BindingContract.Revision = 2;
+                scene.Materials[0].Passes[0].NumericBytes[0] = byte{1};
+                ++scene.Materials[0].ValuesRevision;
+                ASSERT_TRUE(store.SetActivePolicies(2, std::span{&next, 1}));
+            }
+            bool succeeded = false, failed = false;
+            try {
+                publication_allocations::FailureScope allocation(boundary);
+                succeeded = store.SyncChanged(scene, {}, false, validation);
+            } catch (const std::bad_alloc&) {
+                failed = true;
+            }
+            if (failed) {
+                ++failures;
+                ASSERT_TRUE(store.SyncChanged(scene, {}, false, validation));
+            } else {
+                ASSERT_TRUE(succeeded);
+                completed = true;
+            }
+            ASSERT_EQ(scene.DrawRecords.size(), 2u);
+            ASSERT_EQ(store.GetActiveDrawPlanCount(), 1u);
+            ASSERT_EQ(store.GetActiveVertexInputCount(), 1u);
+            for (uint32_t index = 0; index < 2; ++index) {
+                const auto& record = scene.DrawRecords[index];
+                ASSERT_EQ(record.Status, DrawRecordStatus::Ready);
+                const auto draw = scene.ResolveDraw(record).Description;
+                EXPECT_EQ(draw.Program.Get(), program.Get());
+                EXPECT_EQ(draw.Geometry.Get(), &geometry);
+                EXPECT_EQ(draw.FirstIndex, warm ? 1u : 0u);
+                EXPECT_EQ(draw.IndexCount, 3u);
+                EXPECT_EQ(draw.PipelineState.DepthStencil.DepthWriteEnable, !warm);
+                ASSERT_TRUE(scene.BindingRecipes[record.BindingRecipe].Parameters.Valid);
+                ASSERT_TRUE(scene.GeometryBindingPlans[record.GeometryBindingPlan].VertexInput->Input);
+                if (warm) {
+                    EXPECT_EQ(record.Id, old.DrawRecords[index].Id);
+                    EXPECT_TRUE(old.ResolveDraw(old.DrawRecords[index]).Description.PipelineState.DepthStencil.DepthWriteEnable);
+                }
+            }
+            ASSERT_TRUE(store.SyncChanged(scene, {}, false, validation));
+            EXPECT_EQ(store.GetStats().StaticRecipeCompiles, 0u);
+            if (completed) break;
+        }
+        EXPECT_TRUE(completed);
+        EXPECT_GT(failures, 0u);
+        RecordProperty(warm ? "WarmAllocationBoundaries" : "ColdAllocationBoundaries", failures);
+    }
+}
+
+TEST_P(ScenePublicationFailureTest, CanonicalCommitAllocationFailuresRebuildAndRepublishEveryDelayedFlight) {
+    const auto [backend, validation] = GetParam();
+    render::test::DeviceContext device;
+    if (!render::test::TryCreateDevice(backend, device, true)) {
+        if (render::test::SetupMustFail(device.Status, render::test::RequiredBackend(backend))) FAIL() << device.Reason;
+        GTEST_SKIP() << device.Reason;
+    }
+    auto program = test::CompileStageBProgram(*device.Device, test::StageBMaterialSource("float4 BaseColor;"));
+    ASSERT_TRUE(program);
+    auto technique = MaterialTechnique::Create({{"SnapshotRecovery", program.Get(), "MaterialValues", {}}}, "SnapshotRecovery");
+    ASSERT_TRUE(technique);
+    class Proxy final : public PrimitiveSceneProxy {
+    public:
+        explicit Proxy(Material* material) : Value(material) {
+            Geometry.VertexLayout.Buffers = {{0, 12, render::VertexStepMode::Vertex}};
+            Geometry.VertexLayout.Attributes = {{"POSITION", 0, 0, 0, render::VertexFormat::FLOAT32X3}};
+        }
+        Material* Value;
+        GpuMesh::DrawData Geometry;
+        uint32_t First{0};
+        uint64_t Revision{1};
+        bool UsesRenderChangeNotifications() const noexcept override { return true; }
+        uint64_t GetRenderDataRevision() const noexcept override { return Revision; }
+        uint64_t GetTransformRevision() const noexcept override { return GetLocalToWorldRevision(); }
+        AxisAlignedBounds GetLocalBounds() const noexcept override { return {Eigen::Vector3f::Zero(), Eigen::Vector3f::Ones()}; }
+        uint32_t GetSectionCount() const noexcept override { return 1; }
+        MeshDrawArgs GetDrawArgs(uint32_t) const noexcept override { return {&Geometry, First, 3, 0}; }
+        Nullable<Material*> GetMaterial(uint32_t) const noexcept override { return Value; }
+        void Edit() {
+            First = 1;
+            ++Revision;
+            MarkRenderDirty(PrimitiveDirtyKind::Structure);
+            Eigen::Matrix4f transform = Eigen::Matrix4f::Identity();
+            transform(0, 3) = 5;
+            SetLocalToWorld(transform);
+        }
+    };
+    const PassPolicy policy{{8001}, 1, "SnapshotRecovery", CompilePublicationPolicy};
+    const auto verify = [](const RenderSceneSnapshot& snapshot, bool changed) {
+        ASSERT_TRUE(snapshot.Valid);
+        ASSERT_EQ(snapshot.DrawRecords.size(), 2u);
+        ASSERT_EQ(snapshot.Materials.size(), 1u);
+        ASSERT_EQ(snapshot.Primitives.size(), 2u);
+        for (const auto& record : snapshot.DrawRecords) {
+            ASSERT_EQ(record.Status, DrawRecordStatus::Ready);
+            const auto draw = snapshot.ResolveDraw(record).Description;
+            EXPECT_EQ(draw.FirstIndex, changed ? 1u : 0u);
+            EXPECT_EQ(draw.IndexCount, 3u);
+            EXPECT_FLOAT_EQ(snapshot.Primitives[record.Primitive].LocalToWorld(0, 3), changed ? 5.f : 0.f);
+            EXPECT_FLOAT_EQ(snapshot.Primitives[record.Primitive].WorldBounds.Min.x(), changed ? 5.f : 0.f);
+        }
+        const auto& bytes = snapshot.Materials[0].Passes[0].NumericBytes;
+        ASSERT_GE(bytes.size(), sizeof(float) * 4);
+        array<float, 4> color;
+        std::memcpy(color.data(), bytes.data(), sizeof(color));
+        EXPECT_EQ(color, (array<float, 4>{changed ? 2.f : 1.f, 0, 0, 1}));
+    };
+    for (bool warm : {false, true}) {
+        bool completed = false;
+        uint32_t failures = 0;
+        for (size_t boundary = 0; boundary < 2048; ++boundary) {
+            SCOPED_TRACE(fmt::format("warm={} canonical-allocation={}", warm, boundary));
+            auto material = Material::Create(technique.Get());
+            ASSERT_TRUE(material);
+            ASSERT_TRUE(material->SetFloat4("BaseColor", {1, 0, 0, 1}));
+            Scene scene;
+            array<Proxy*, 2> proxies;
+            for (auto& pointer : proxies) {
+                auto proxy = make_unique<Proxy>(material.Get());
+                pointer = proxy.get();
+                scene.AddPrimitive(std::move(proxy));
+            }
+            ASSERT_TRUE(scene.GetDrawStore().SetActivePolicies(1, std::span{&policy, 1}));
+            array<RenderSceneSnapshot, 3> flights;
+            array<vector<StreamingAssetRefAny>, 3> owners;
+            if (warm) {
+                for (uint64_t flight = 0; flight < 3; ++flight)
+                    ASSERT_TRUE(scene.GetRenderState().Publish(scene, flights[flight], owners[flight], validation, flight + 1));
+                for (auto* proxy : proxies) proxy->Edit();
+                ASSERT_TRUE(material->SetFloat4("BaseColor", {2, 0, 0, 1}));
+            }
+            const auto result = PublishWithAllocationFailure(scene, flights[0], owners[0], validation, 4, boundary);
+            if (result == AllocationPublicationResult::AllocationFailed) {
+                ++failures;
+                if (warm) {
+                    verify(flights[1], false);
+                    verify(flights[2], false);
+                }
+                ASSERT_TRUE(scene.GetRenderState().Publish(scene, flights[0], owners[0], validation, 4));
+            } else {
+                ASSERT_EQ(result, AllocationPublicationResult::Published);
+                completed = true;
+            }
+            verify(flights[0], warm);
+            for (uint64_t flight = 1; flight < 3; ++flight) {
+                ASSERT_TRUE(scene.GetRenderState().Publish(scene, flights[flight], owners[flight], validation, flight + 4));
+                verify(flights[flight], warm);
+            }
+            if (completed) break;
+        }
+        EXPECT_TRUE(completed);
+        EXPECT_GT(failures, 0u);
+        RecordProperty(warm ? "WarmAllocationBoundaries" : "ColdAllocationBoundaries", failures);
+    }
+}
+
 INSTANTIATE_TEST_SUITE_P(Backends, ScenePublicationFailureTest,
                          testing::Combine(testing::Values(render::RenderBackend::D3D12, render::RenderBackend::Vulkan),
                                           testing::Values(RenderValidationMode::Off, RenderValidationMode::Full)));

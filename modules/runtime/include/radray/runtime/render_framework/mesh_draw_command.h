@@ -25,14 +25,25 @@ struct DrawSortData {
     MeshBatchIndex Batch{0};
 };
 /// Pipeline and geometry inputs without frame bindings or graph handles. Referenced objects must outlive use.
-struct MeshDrawDescription {
+struct MeshGeometryDescription {
     Nullable<ShaderProgram*> Program{nullptr};
-    MaterialPipelineState PipelineState;
     Nullable<const GpuMesh::DrawData*> Geometry{nullptr};
     uint32_t FirstIndex{0}, IndexCount{0};
     int32_t VertexOffset{0};
     // Optional identity prepared with the immutable geometry. Legacy mutable layouts leave this empty.
     PrimitiveVertexLayoutId LayoutId{};
+};
+struct MeshDrawDescription : MeshGeometryDescription {
+    MaterialPipelineState PipelineState;
+};
+/// Lightweight resolved input; the referenced state belongs to a snapshot or an owning dynamic command.
+struct MeshDrawDescriptionView : MeshGeometryDescription {
+    const MaterialPipelineState& PipelineState;
+    MeshDrawDescriptionView(const MeshGeometryDescription& geometry, const MaterialPipelineState& state) noexcept
+        : MeshGeometryDescription(geometry), PipelineState(state) {}
+    MeshDrawDescriptionView(const MeshDrawDescription& value) noexcept
+        : MeshGeometryDescription(value), PipelineState(value.PipelineState) {}
+    operator MeshDrawDescription() const { return {static_cast<const MeshGeometryDescription&>(*this), PipelineState}; }
 };
 /// A description and its frame-local bindings. Groups are immutable until the flight retires.
 struct MeshDrawCommand : MeshDrawDescription {
@@ -45,12 +56,17 @@ struct DrawExecutionStats {
     bool Succeeded() const noexcept { return PsoFailure == 0 && BindingFailure == 0 && Skipped == 0; }
 };
 
+struct RendererListPreparationStats {
+    uint64_t StaticDraws{0}, GeometryIdentityLookups{0}, PipelineIdentityLookups{0}, BindingIdentityLookups{0};
+};
+
 /// Built during the prepare stage of its pass: pipeline states and parameter sets are already
 /// resolved, so recording only binds and draws. Immutable until graph execution finishes.
 class PreparedRendererList {
 public:
     PreparedRendererList(PreparedRendererList&&) noexcept = default;
     PreparedRendererList& operator=(PreparedRendererList&&) noexcept = default;
+    const RendererListPreparationStats& GetPreparationStats() const noexcept;
     PreparedRendererList(const PreparedRendererList&) = delete;
     PreparedRendererList& operator=(const PreparedRendererList&) = delete;
 

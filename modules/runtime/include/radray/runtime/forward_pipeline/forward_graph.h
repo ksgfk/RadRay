@@ -87,6 +87,10 @@ public:
     struct Impl;
     ForwardGraphFrameData();
     ~ForwardGraphFrameData();
+    void ResetForReuse() noexcept;
+    /// Frame input and pass-set CPU containers; excludes native sets and the shared prepared-list workspace.
+    size_t GetCapacityBytes() const noexcept;
+    size_t GetViewCount() const noexcept;
 
 private:
     friend class ForwardGraph;
@@ -101,6 +105,8 @@ public:
         RenderGraph& graph, ForwardGraphStage stage,
         const ForwardGraphStageInputs& inputs);
     static shared_ptr<ForwardGraphFrameData> MakeFrame(const ForwardGraphStageInputs& inputs);
+    static shared_ptr<ForwardGraphFrameData> MakeFrame(RenderGraph& graph, const void* owner, uint64_t key,
+                                                       const ForwardGraphStageInputs& inputs);
     static ForwardGraphStageOutput DeclareTemplate(
         RenderGraph& graph, ForwardGraphStage stage, RgTemplateSlot<ForwardGraphFrameData> frame,
         const ForwardGraphStageInputs& inputs);

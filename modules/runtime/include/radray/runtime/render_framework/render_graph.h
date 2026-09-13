@@ -5,13 +5,17 @@
 #include <string_view>
 #include <variant>
 #include <radray/inline_vector.h>
+#include <radray/runtime/render_framework/frame_parameter.h>
+#include <radray/runtime/render_framework/mesh_binding_contract.h>
 #include <radray/runtime/frame_submission.h>
 #include <radray/runtime/render_framework/render_resource_pool.h>
+#include <radray/runtime/render_framework/render_graph_runtime.h>
 #include <radray/runtime/render_framework/render_graph_compiler.h>
 #include <radray/runtime/render_framework/render_graph_runtime_options.h>
 #include <radray/runtime/shader_program.h>
 
 namespace radray {
+struct FrameDrawBindingId;
 
 template <class Tag>
 struct RgHandle {
@@ -117,6 +121,9 @@ struct RgSamplerParameterBinding {
 };
 struct RgCBufferParameterBinding {
     std::span<const byte> Bytes{};
+    /// Optional immutable source row, registered once at the batch boundary.
+    FrameParameterDomain Source{};
+    uint32_t Row{0};
 };
 using RgParameterBindingValue = std::variant<RgCBufferParameterBinding, RgTextureParameterBinding,
                                              RgBufferParameterBinding, RgSamplerParameterBinding>;
@@ -124,6 +131,10 @@ struct RgParameterBinding {
     std::string_view Declaration{};
     uint32_t ArrayElement{0};
     RgParameterBindingValue Value{};
+};
+/// Values in one logical slot, indexed by MeshParameterBinding::SourceElement.
+struct RgMeshParameterSlot {
+    std::span<const RgParameterBindingValue> Elements;
 };
 /// A parameter group with its native set resolved: the only form the recording stage consumes.
 /// Inline capacity covers one dynamic buffer per group; larger counts spill to the heap.
@@ -188,6 +199,8 @@ struct RenderGraphExecutionReport {
     uint32_t ReusedResources{0}, MergedRasterPasses{0}, DiscardedStores{0}, BarrierBatches{0};
     uint32_t GraphicsPipelinePreparations{0}, GraphicsPipelineCreations{0};
     uint64_t GeometryValidationCalls{0}, GeometryDeclarationScans{0};
+    uint64_t ResourceDescriptorValidations{0};
+    uint64_t InstanceStorageId{0};
     RenderGraphCommandCalls CommandCalls{};
     bool CompilePlanReused{false};
     uint64_t ExecutionPlanId{0};
@@ -476,13 +489,20 @@ public:
     render::Buffer* GetBuffer(RgBufferValue handle) const;
     Nullable<render::GraphicsPipelineState*> ResolveGraphicsPipeline(ShaderProgram& program, const MaterialPipelineState& state,
                                                                      const PrimitiveVertexLayout& layout = {},
-                                                                     PrimitiveTopology topology = PrimitiveTopology::TriangleList);
+                                                                     PrimitiveTopology topology = PrimitiveTopology::TriangleList,
+                                                                     Nullable<const ResolvedPrimitiveVertexLayout*> resolvedInput = nullptr);
     Nullable<render::ComputePipelineState*> ResolveComputePipeline(ShaderProgram& program);
     /// Bindings reference view handles and buffer values this pass declared during setup; the access
     /// each one needs is derived from the shader declaration. Full mode retains an owned diagnostic
     /// request and an unwritten set until ValidateReadyFrame accepts all live preparation. The returned
     /// set may only be bound during recording, and is published to the flight cache after native writes succeed.
     PreparedShaderGroup CreateParameterSet(ShaderProgram& program, uint32_t group, std::span<const RgParameterBinding> bindings);
+    /// The plan has already resolved complete groups. Only frame values and graph access are validated here.
+    PreparedShaderGroup CreateMeshParameterSet(ShaderProgram& program, const MeshBindingPlan& plan,
+                                               uint32_t groupIndex, std::span<const RgMeshParameterSlot> slots);
+    /// Prepares all groups in plan order and publishes an indexed tuple owned by this graph pass.
+    FrameDrawBindingId CreateMeshParameterBinding(FrameDrawResources& resources, ShaderProgram& program,
+                                                  const MeshBindingPlan& plan, std::span<const RgMeshParameterSlot> slots);
     /// Accepts persistent read-only assets; rejects graph-owned geometry without a matching
     /// Vertex/Index read declaration in this pass. Full preparation queues the check at ValidateReadyFrame;
     /// its return value accepts the request, while a validation callback receives the actual result.
@@ -543,6 +563,13 @@ public:
                                      render::SubresourceRange range = {0, 1, 0, 1});
     RgReadbackTicket ReadbackBuffer(std::string_view name, RgBufferValue value, render::BufferRange range = render::BufferRange::AllRange());
     void Retain(shared_ptr<void> owner);
+    /// Reusable typed CPU payload; explicit field reset is the caller's responsibility.
+    /// Bind or Retain the result to keep it alive with recorded work. Standalone graphs own fresh values.
+    template <class T, class... Args>
+    shared_ptr<T> AcquireFramePayload(const void* owner, uint64_t key, Args&&... args) {
+        if (const auto resources = GetFrameResources()) return resources->AcquireFramePayload<T>(owner, key, std::forward<Args>(args)...);
+        return make_shared<T>(std::forward<Args>(args)...);
+    }
 
     /// A template builder is an ordinary, uncompiled graph using typed slots and template passes.
     /// Freezing rejects legacy payload captures, native imports, readbacks and immediate uploads.
@@ -681,6 +708,7 @@ private:
     friend class RenderGraphTemplate;
     friend class RenderGraphTemplateInstance;
     friend class RenderPipelineContext;
+    friend class RenderGraphFrameResources;
     friend class RenderGraphPassBuilder;
     friend class RenderGraphRasterBuilder;
     friend class RenderGraphComputeBuilder;
@@ -709,7 +737,7 @@ private:
     inline static byte TemplateType{};
     struct TemplateFactory {
         virtual ~TemplateFactory() = default;
-        virtual unique_ptr<Payload> Instantiate(void* frame) const = 0;
+        virtual shared_ptr<Payload> Instantiate(void* frame, Nullable<RenderGraphFrameResources*> resources, uint64_t key) const = 0;
     };
     template <class Recipe, class Data>
     struct TemplateRasterFactory final : TemplateFactory {
@@ -717,15 +745,23 @@ private:
         bool (*PrepareStage)(const Recipe&, Data&, RenderGraphPrepareContext&){nullptr};
         void (*Execute)(const Recipe&, const Data&, RenderGraphRasterContext&){nullptr};
         struct Instance final : Payload {
-            const TemplateRasterFactory& Factory;
-            Data& Frame;
-            Instance(const TemplateRasterFactory& factory, Data& frame) : Factory(factory), Frame(frame) {}
-            bool Prepare(RenderGraphPrepareContext& context) override { return !Factory.PrepareStage || Factory.PrepareStage(Factory.Value, Frame, context); }
+            Nullable<const TemplateRasterFactory*> Factory{nullptr};
+            Nullable<Data*> Frame{nullptr};
+            void ResetForReuse() noexcept {
+                Factory = nullptr;
+                Frame = nullptr;
+            }
+            bool Prepare(RenderGraphPrepareContext& context) override { return !Factory->PrepareStage || Factory->PrepareStage(Factory->Value, *Frame, context); }
             void Run(RenderGraphRasterContext& context) override {
-                if (Factory.Execute) Factory.Execute(Factory.Value, Frame, context);
+                if (Factory->Execute) Factory->Execute(Factory->Value, *Frame, context);
             }
         };
-        unique_ptr<Payload> Instantiate(void* frame) const override { return make_unique<Instance>(*this, *static_cast<Data*>(frame)); }
+        shared_ptr<Payload> Instantiate(void* frame, Nullable<RenderGraphFrameResources*> resources, uint64_t key) const override {
+            auto instance = resources ? resources->AcquireFramePayload<Instance>(this, key) : make_shared<Instance>();
+            instance->Factory = this;
+            instance->Frame = static_cast<Data*>(frame);
+            return instance;
+        }
     };
     template <class Recipe, class Data>
     struct TemplateComputeFactory final : TemplateFactory {
@@ -733,15 +769,23 @@ private:
         bool (*PrepareStage)(const Recipe&, Data&, RenderGraphPrepareContext&){nullptr};
         void (*Execute)(const Recipe&, const Data&, RenderGraphComputeContext&){nullptr};
         struct Instance final : Payload {
-            const TemplateComputeFactory& Factory;
-            Data& Frame;
-            Instance(const TemplateComputeFactory& factory, Data& frame) : Factory(factory), Frame(frame) {}
-            bool Prepare(RenderGraphPrepareContext& context) override { return !Factory.PrepareStage || Factory.PrepareStage(Factory.Value, Frame, context); }
+            Nullable<const TemplateComputeFactory*> Factory{nullptr};
+            Nullable<Data*> Frame{nullptr};
+            void ResetForReuse() noexcept {
+                Factory = nullptr;
+                Frame = nullptr;
+            }
+            bool Prepare(RenderGraphPrepareContext& context) override { return !Factory->PrepareStage || Factory->PrepareStage(Factory->Value, *Frame, context); }
             void Run(RenderGraphComputeContext& context) override {
-                if (Factory.Execute) Factory.Execute(Factory.Value, Frame, context);
+                if (Factory->Execute) Factory->Execute(Factory->Value, *Frame, context);
             }
         };
-        unique_ptr<Payload> Instantiate(void* frame) const override { return make_unique<Instance>(*this, *static_cast<Data*>(frame)); }
+        shared_ptr<Payload> Instantiate(void* frame, Nullable<RenderGraphFrameResources*> resources, uint64_t key) const override {
+            auto instance = resources ? resources->AcquireFramePayload<Instance>(this, key) : make_shared<Instance>();
+            instance->Factory = this;
+            instance->Frame = static_cast<Data*>(frame);
+            return instance;
+        }
     };
     template <class Data>
     struct RasterPayload final : Payload {
@@ -761,19 +805,27 @@ private:
     };
     struct TemplateWorkFactory {
         virtual ~TemplateWorkFactory() = default;
-        virtual unique_ptr<WorkPayload> Instantiate(void* frame) const = 0;
+        virtual shared_ptr<WorkPayload> Instantiate(void* frame, Nullable<RenderGraphFrameResources*> resources, uint64_t key) const = 0;
     };
     template <class Data>
     struct TypedTemplateWorkFactory final : TemplateWorkFactory {
         bool (*Function)(Data&, uint64_t);
         explicit TypedTemplateWorkFactory(bool (*function)(Data&, uint64_t)) : Function(function) {}
         struct Instance final : WorkPayload {
-            Data& Frame;
-            bool (*Function)(Data&, uint64_t);
-            Instance(Data& frame, bool (*function)(Data&, uint64_t)) : Frame(frame), Function(function) {}
-            bool Prepare(uint64_t mask) override { return Function && Function(Frame, mask); }
+            Nullable<Data*> Frame{nullptr};
+            bool (*Function)(Data&, uint64_t){nullptr};
+            void ResetForReuse() noexcept {
+                Frame = nullptr;
+                Function = nullptr;
+            }
+            bool Prepare(uint64_t mask) override { return Function && Function(*Frame, mask); }
         };
-        unique_ptr<WorkPayload> Instantiate(void* frame) const override { return make_unique<Instance>(*static_cast<Data*>(frame), Function); }
+        shared_ptr<WorkPayload> Instantiate(void* frame, Nullable<RenderGraphFrameResources*> resources, uint64_t key) const override {
+            auto instance = resources ? resources->AcquireFramePayload<Instance>(this, key) : make_shared<Instance>();
+            instance->Frame = static_cast<Data*>(frame);
+            instance->Function = Function;
+            return instance;
+        }
     };
     template <class Data>
     struct TypedWorkPayload final : WorkPayload {
@@ -795,7 +847,11 @@ private:
         }
     };
     struct Impl;
-    unique_ptr<Impl> _impl;
+    shared_ptr<Impl> _impl;
+    Nullable<RenderGraphFrameResources*> GetFrameResources() const noexcept;
+    static shared_ptr<Impl> AcquireInstance(render::Device& device, RenderGraphFrameResources& resources,
+                                            render::RenderPassRegistry& registry, std::string_view name,
+                                            Nullable<RenderGraphExecutionReport*> report, RenderGraphRuntimeOptions runtime);
     RgPassHandle AddPass(std::string_view name, RgPassType type, std::source_location location);
     void SetPayload(RgPassHandle pass, unique_ptr<Payload> payload);
     uint32_t AddTemplateSlot(const void* type);
@@ -817,9 +873,11 @@ private:
                                                    RgIndirectCommand command, uint64_t offset, uint32_t count);
     Nullable<render::ComputePipelineState*> ResolveComputePipeline(uint32_t pass, ShaderProgram& program);
     Nullable<render::GraphicsPipelineState*> ResolveGraphicsPipeline(uint32_t pass, ShaderProgram& program, const MaterialPipelineState& state,
-                                                                     const PrimitiveVertexLayout& layout, PrimitiveTopology topology);
+                                                                     const PrimitiveVertexLayout& layout, PrimitiveTopology topology, Nullable<const ResolvedPrimitiveVertexLayout*> resolvedInput = nullptr);
     PreparedShaderGroup CreateParameterSet(uint32_t pass, ShaderProgram& program, uint32_t group,
-                                           std::span<const RgParameterBinding> bindings);
+                                           std::span<const RgParameterBinding> bindings,
+                                           Nullable<const MeshBindingPlan*> plan = nullptr,
+                                           uint32_t groupIndex = UINT32_MAX, std::span<const RgMeshParameterSlot> slots = {});
     bool ValidateGeometryBuffer(uint32_t pass, Nullable<render::Buffer*> buffer, RgBufferAccess access);
     render::TextureView* ResolveView(uint32_t pass, RgTextureViewHandle handle) const;
     render::Buffer* ResolveBuffer(uint32_t pass, RgBufferValue handle) const;

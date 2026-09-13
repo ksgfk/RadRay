@@ -12,8 +12,10 @@ struct PreparedRendererList::Storage {
     vector<Geometry> Geometries;
     vector<std::span<const render::VertexBufferBinding>> VertexRuns;
     size_t ActiveLocalGroups{0};
+    RendererListPreparationStats Stats;
 
     void Reset() noexcept {
+        Stats = {};
         Draws.clear();
         Groups.clear();
         Geometries.clear();
@@ -88,6 +90,20 @@ struct PreparedRendererList::Workspace {
         uint64_t _epoch{1};
         size_t _count{0};
     };
+    struct StaticPlanEntry {
+        uint64_t Epoch{0};
+        uint32_t Geometry{UINT32_MAX}, Program{UINT32_MAX};
+        array<uint32_t, 2> Pipelines{UINT32_MAX, UINT32_MAX};
+    };
+    StaticPlanEntry& ResolveStaticPlan(uint32_t index) {
+        if (_staticPlans.size() <= index) _staticPlans.resize(size_t{index} + 1);
+        auto& row = _staticPlans[index];
+        if (row.Epoch != _staticEpoch) {
+            row = {};
+            row.Epoch = _staticEpoch;
+        }
+        return row;
+    }
     struct PipelineEntry {
         ShaderProgram* Program;
         uint64_t StateId;
@@ -101,6 +117,22 @@ struct PreparedRendererList::Workspace {
         FrameDrawBindingId FrameBinding;
         uint32_t First, Count;
     };
+    struct IndexedBinding {
+        uint32_t Value{UINT32_MAX};
+    };
+    struct ProgramBindingRows {
+        uint64_t Epoch{0};
+        detail::IndexedParameterRows<IndexedBinding> Rows;
+    };
+    IndexedBinding& ResolveProgramBinding(uint32_t program, uint32_t binding) {
+        if (_programBindings.size() <= program) _programBindings.resize(size_t{program} + 1);
+        auto& rows = _programBindings[program];
+        if (rows.Epoch != _staticEpoch) {
+            rows.Rows.Reset();
+            rows.Epoch = _staticEpoch;
+        }
+        return rows.Rows.GetOrAdd(binding);
+    }
     struct ProgramEntry {
         const ShaderProgram* Program;
         uint32_t First, Count;
@@ -135,17 +167,24 @@ struct PreparedRendererList::Workspace {
         ResetScratch();
     }
     size_t CapacityBytes() const noexcept {
-        size_t bytes = sizeof(Workspace) + _storage.capacity() * sizeof(shared_ptr<Storage>) +
+        size_t bytes = sizeof(Workspace) + _staticPlans.capacity() * sizeof(StaticPlanEntry) + _storage.capacity() * sizeof(shared_ptr<Storage>) +
                        Pipelines.capacity() * sizeof(PipelineEntry) + Bindings.capacity() * sizeof(BindingEntry) +
                        Programs.capacity() * sizeof(ProgramEntry) + GeometryLayouts.capacity() * sizeof(PrimitiveVertexLayoutId) +
                        (OrderedGroups.capacity() + ProgramGroups.capacity() + NativeScratch.capacity() + MergedScratch.capacity()) * sizeof(GroupReference) +
                        PipelineIndex.CapacityBytes() + GeometryIndex.CapacityBytes() + LocalGroupIndex.CapacityBytes() + BindingIndex.CapacityBytes() + ProgramIndex.CapacityBytes();
+        bytes += _programBindings.capacity() * sizeof(ProgramBindingRows);
+        for (const auto& rows : _programBindings) bytes += rows.Rows.CapacityBytes();
         for (const auto& storage : _storage) bytes += sizeof(Storage) + storage->CapacityBytes();
         return bytes;
     }
 
 private:
     void ResetScratch() noexcept {
+        if (++_staticEpoch == 0) {
+            for (auto& row : _staticPlans) row.Epoch = 0;
+            for (auto& row : _programBindings) row.Epoch = 0;
+            ++_staticEpoch;
+        }
         Pipelines.clear();
         Bindings.clear();
         Programs.clear();
@@ -160,6 +199,9 @@ private:
         BindingIndex.Reset();
         ProgramIndex.Reset();
     }
+    vector<ProgramBindingRows> _programBindings;
+    vector<StaticPlanEntry> _staticPlans;
+    uint64_t _staticEpoch{0};
     vector<shared_ptr<Storage>> _storage;
     size_t _next{0};
 };

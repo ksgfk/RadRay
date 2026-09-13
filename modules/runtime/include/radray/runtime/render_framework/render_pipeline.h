@@ -37,6 +37,7 @@ struct RenderPrepareContext {
     /// Collection precedes the global GT cutoff. Registered Scenes freeze before any PrepareFrame callback.
     bool RegisterScene(const Scene& scene);
     bool RegisterScenePolicy(const Scene& scene, const PassPolicy& policy);
+    bool RegisterSceneExtension(const Scene& scene, const SceneRenderExtension& extension);
     bool FreezeRegisteredScenes();
     Nullable<shared_ptr<const RenderSceneSnapshot>> PrepareScene(const Scene& scene) const;
     vector<const Scene*> RegisteredScenes{};
@@ -47,6 +48,11 @@ struct RenderPrepareContext {
     };
     vector<ScenePolicyRegistration> ScenePolicies{};
     bool PolicyRegistrationValid{true};
+    struct SceneExtensionRegistration {
+        const Scene* Source;
+        SceneRenderExtension Extension;
+    };
+    vector<SceneExtensionRegistration> SceneExtensions{};
 };
 
 struct RenderGraphOutputBinding {

@@ -82,8 +82,8 @@ public:
             if (draw.Policy != Policy.Id) continue;
             ++matching;
             EXPECT_EQ(draw.Status, DrawRecordStatus::Ready);
-            EXPECT_EQ(draw.Description.IndexCount, 3u);
-            EXPECT_TRUE(draw.Description.LayoutId.IsValid());
+            EXPECT_EQ(frame->ResolveDraw(draw).Description.IndexCount, 3u);
+            EXPECT_TRUE(frame->ResolveDraw(draw).Description.LayoutId.IsValid());
         }
         EXPECT_EQ(matching, 1u);
     }

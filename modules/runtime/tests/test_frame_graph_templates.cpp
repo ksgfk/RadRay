@@ -114,8 +114,10 @@ private:
                 EXPECT_EQ(report.NormalizeBuilds, 0u);
                 EXPECT_EQ(report.PortResolveBuilds, 0u);
                 EXPECT_EQ(report.TemplateMaterializations, 0u);
+                EXPECT_EQ(report.ResourceDescriptorValidations, 0u);
             } else {
                 planIds[variant] = report.ExecutionPlanId;
+                EXPECT_GT(report.ResourceDescriptorValidations, 0u);
             }
             EXPECT_LE(context.GetDefaultCompositionCache().Size(), 2u);
             EXPECT_LE(context.GetDefaultCompositionCache().BuildCount(), 2u);

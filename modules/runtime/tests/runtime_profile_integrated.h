@@ -52,8 +52,9 @@ void CaptureStageCommands(const Stats& stats, IntegratedFrame& row) noexcept {
     }
 }
 
-template <typename Pipeline>
+template <typename Pipeline, typename Snapshot = RenderSceneSnapshot>
 constexpr std::string_view IntegratedSnapshotMode() {
+    if constexpr (requires(Snapshot& snapshot) { snapshot.Extensions; }) return "mesh-pass-publication";
     if constexpr (requires(Pipeline& pipeline, RenderPrepareContext& context) { pipeline.CollectScenePolicies(context); }) return "scene-publication";
     else return "legacy";
 }
@@ -252,7 +253,7 @@ inline Nullable<unique_ptr<TextureAsset>> MakeProfileWhiteTexture(render::Device
 
 class IntegratedApp final : public Application {
 public:
-    explicit IntegratedApp(const Options& options) : _options(options), _lowChange(std::getenv("RADRAY_PROFILE_LOW_CHANGE") != nullptr) {
+    explicit IntegratedApp(const Options& options) : _options(options) {
         Frames.resize(size_t(options.Warmup + options.Samples) * options.Rounds + 8);
     }
 
@@ -399,8 +400,9 @@ protected:
         if (row.Measured) TraceMarker(row.Index, row.FlightIndex, 0, "authoring_begin");
         {
             RADRAY_PROFILE_SCOPE_N("Profile.Authoring");
-            if (_lowChange) {
-                for (size_t i = 0; i < std::max<size_t>(1, _proxies.size() / 100); ++i) {
+            if (_options.ChangePercent) {
+                const auto changed = std::max<size_t>(1, _proxies.size() * _options.ChangePercent / 100);
+                for (size_t i = 0; i < changed; ++i) {
                     auto transform = _transforms[i];
                     transform(0, 3) += float(row.Index % 16) * .002f;
                     _proxies[i]->SetLocalToWorld(transform);
@@ -447,7 +449,6 @@ private:
     }
 
     Options _options;
-    bool _lowChange{false};
     uint32_t _nextFrame{0};
     array<uint32_t, 2> _flightIndices{};
     Nullable<IntegratedPipeline*> _pipeline{nullptr};

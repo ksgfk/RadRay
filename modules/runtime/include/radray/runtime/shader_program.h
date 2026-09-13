@@ -59,11 +59,13 @@ public:
     ShaderProgram& operator=(ShaderProgram&&) = delete;
     ~ShaderProgram() noexcept;
 
+    /// resolvedInput, when supplied, must have been resolved for this program and vertexLayout.
     Nullable<render::GraphicsPipelineState*> GetOrCreateGraphicsPipelineState(
         const MaterialPipelineState& materialState,
         const PrimitiveVertexLayout& vertexLayout,
         PrimitiveTopology topology,
-        const GraphicsPassState& passState) noexcept;
+        const GraphicsPassState& passState,
+        Nullable<const ResolvedPrimitiveVertexLayout*> resolvedInput = nullptr) noexcept;
     Nullable<render::ComputePipelineState*> GetOrCreateComputePipelineState() noexcept;
 
     const render::BackendShaderArtifact& GetArtifact() const noexcept { return _artifact; }

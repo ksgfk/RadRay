@@ -36,12 +36,18 @@ struct Options {
     uint32_t Samples{EnvironmentCount("RADRAY_PROFILE_SAMPLES", Extended ? 1000u : 3u)};
     uint32_t Rounds{EnvironmentCount("RADRAY_PROFILE_ROUNDS", Extended ? 5u : 1u)};
     uint32_t Primitives{EnvironmentCount("RADRAY_PROFILE_PRIMITIVES", 1000u)};
+    uint32_t ChangePercent{std::getenv("RADRAY_PROFILE_LOW_CHANGE") ? 1u : 0u};
     RenderGraphRuntimeOptions Runtime{kPerformanceRenderGraphRuntimeOptions};
     bool SerializeReport{false};
     bool DriverValidation{false};
     bool Valid{true};
 
     Options() {
+        if (const auto* value = std::getenv("RADRAY_PROFILE_CHANGE_PERCENT")) {
+            const std::string_view input{value};
+            const auto parsed = std::from_chars(input.data(), input.data() + input.size(), ChangePercent);
+            Valid = parsed.ec == std::errc{} && parsed.ptr == input.data() + input.size() && ChangePercent <= 100;
+        }
         if (const auto* mode = std::getenv("RADRAY_PROFILE_VALIDATION")) {
             if (std::string_view{mode} == "full") Runtime.Validation = RenderValidationMode::Full;
             else if (std::string_view{mode} != "off") Valid = false;
@@ -143,10 +149,11 @@ inline void PrintOptions(const Options& options, std::string_view fixture, std::
     fmt::print("PROFILE_INSTRUMENTATION {{\"detailedProfiling\":{},\"frameAndPhaseProfiling\":{},\"cpuSampling\":\"external evidence required\"}}\n", DetailedProfilingEnabled, ProfilerEnabled);
     fmt::print("PROFILE_PHASE_CONTRACT {{\"traceSchema\":2,\"snapshotMode\":{:?},\"gtGuard\":\"RenderSystem::PrepareFrame\",\"workerCoverage\":\"unknown\",\"authoringScope\":\"fixture rendering-proxy setter batch\",\"clock\":\"Tracy inclusive zone/message clock\"}}\n", snapshotMode);
     fmt::print("PROFILE_ASSETS {{\"sourceRoot\":{:?},\"geometry\":\"procedural-runtime-profile-v2\",\"texture\":\"procedural-1x1-white-v1\",\"shaderDirectory\":\"shaderlib\"}}\n", std::string_view{RADRAY_PROJECT_DIR});
-    fmt::print("PROFILE_OPTIONS {{\"fixture\":{:?},\"fixtureVersion\":2,\"backend\":{:?},\"warmup\":{},\"samples\":{},\"rounds\":{},\"primitives\":{},\"rgValidation\":{:?},\"rgReport\":{:?},\"gpuMarkers\":{},\"serializeReport\":{},\"driverValidation\":{},\"views\":{},\"flights\":{},\"width\":{},\"height\":{},\"multithreaded\":{},\"vsync\":false,\"scopeMode\":\"inclusive\",\"quantile\":\"nearest-rank\"}}\n",
-               fixture, backend, options.Warmup, options.Samples, options.Rounds, options.Primitives,
+    fmt::print("PROFILE_OPTIONS {{\"fixture\":{:?},\"fixtureVersion\":3,\"backend\":{:?},\"warmup\":{},\"samples\":{},\"rounds\":{},\"primitives\":{},\"changePercent\":{},\"rgValidation\":{:?},\"rgReport\":{:?},\"gpuMarkers\":{},\"serializeReport\":{},\"driverValidation\":{},\"views\":{},\"flights\":{},\"width\":{},\"height\":{},\"multithreaded\":{},\"vsync\":false,\"scopeMode\":\"inclusive\",\"quantile\":\"nearest-rank\"}}\n",
+               fixture, backend, options.Warmup, options.Samples, options.Rounds, options.Primitives, options.ChangePercent,
                options.Runtime.Validation == RenderValidationMode::Full ? "full" : "off",
-               options.Runtime.Report == RenderGraphReportMode::Full ? "full" : options.Runtime.Report == RenderGraphReportMode::Counters ? "counters" : "minimal",
+               options.Runtime.Report == RenderGraphReportMode::Full ? "full" : options.Runtime.Report == RenderGraphReportMode::Counters ? "counters"
+                                                                                                                                          : "minimal",
                options.Runtime.GpuMarkers, options.SerializeReport, options.DriverValidation, views, flights, width, height, multithreaded);
 }
 

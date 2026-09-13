@@ -50,11 +50,12 @@ struct MaterialRenderData {
     vector<MaterialPassRenderData> Passes;
     uint64_t Generation{0}, Revision{0};
     uint64_t StructureRevision{0}, ValuesRevision{0}, BindingsRevision{0};
+    uint64_t ReadinessRevision{0};
 
     Nullable<const MaterialPassRenderData*> FindPass(std::string_view name) const noexcept;
     /// Call before changing authoring-derived snapshot fields outside BuildRenderData.
     /// ProgramFrameId is builder bookkeeping and does not require invalidation.
-    void Invalidate() noexcept { Generation = Revision = StructureRevision = ValuesRevision = BindingsRevision = 0; }
+    void Invalidate() noexcept { Generation = Revision = StructureRevision = ValuesRevision = BindingsRevision = ReadinessRevision = 0; }
 };
 
 struct MaterialRevisions {

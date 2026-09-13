@@ -203,7 +203,7 @@ void ConsumeScalingSnapshot(render::test::DeviceContext& deviceContext, render::
     for (uint32_t index = 0; index < snapshot.DrawRecords.size(); ++index) {
         const auto& record = snapshot.DrawRecords[index];
         invalidRecords += record.Status != DrawRecordStatus::Ready || record.Primitive >= n ||
-                          record.Description.Geometry.Get() != &geometries[record.Primitive % geometries.size()] || !record.NormalStateId ||
+                          snapshot.ResolveDraw(record).Description.Geometry.Get() != &geometries[record.Primitive % geometries.size()] || !record.NormalStateId ||
                           record.GeometryBindingPlan >= snapshot.GeometryBindingPlans.size();
         if (record.Policy == forward_detail::kForwardLitPolicy && record.Primitive < n) {
             invalidRecords += records[record.Primitive] != UINT32_MAX;
@@ -285,8 +285,15 @@ void ConsumeScalingSnapshot(render::test::DeviceContext& deviceContext, render::
         uint64_t wrongExecutionMappings = 0;
         for (size_t index = 0; index < items.size(); ++index) {
             const auto primitive = items[index].SortData.Primitive;
-            wrongExecutionMappings += primitive >= n ||
-                                      &lists[viewIndex].GetDescription(index) != &snapshot.DrawRecords[records[primitive]].Description;
+            if (primitive >= n) {
+                ++wrongExecutionMappings;
+                continue;
+            }
+            const auto actual = lists[viewIndex].GetDescription(index);
+            const auto expected = snapshot.ResolveDraw(snapshot.DrawRecords[records[primitive]]).Description;
+            wrongExecutionMappings += actual.Program != expected.Program || actual.Geometry != expected.Geometry ||
+                                      actual.FirstIndex != expected.FirstIndex || actual.IndexCount != expected.IndexCount ||
+                                      actual.VertexOffset != expected.VertexOffset || actual.PipelineState != expected.PipelineState;
         }
         EXPECT_EQ(wrongExecutionMappings, 0u);
         EXPECT_TRUE(lists[viewIndex].Commands.empty());
@@ -532,6 +539,9 @@ VK_BINDING(0, 2) ConstantBuffer<Forward_ObjectData> ForwardObject : register(b0,
                 EXPECT_EQ(scene.GetPendingRenderChangeCount(), primitiveChange ? k : 0u);
                 EXPECT_EQ(childNotifications, change == ScalingChange::ParentTransform ? k : 0u);
                 for (uint32_t flight = 0; flight < 2; ++flight) {
+                    const auto previousPlans = flights[flight]->DrawPlans;
+                    const auto previousGeometry = flights[flight]->GeometryBindingPlans;
+                    const auto previousStates = flights[flight]->StatePlans;
                     const auto publishBegin = ScalingClock::now();
                     ASSERT_TRUE(publish(flight));
                     const auto publishNs = ElapsedNs(publishBegin);
@@ -561,10 +571,55 @@ VK_BINDING(0, 2) ConstantBuffer<Forward_ObjectData> ForwardObject : register(b0,
                     const uint64_t drawPages = primitiveChange ? PageCount(2ull * k, 16) : 0;
                     const uint64_t batchPages = change == ScalingChange::IndexRange ? PageCount(k, 64) : 0;
                     const uint64_t materialPages = change == ScalingChange::SharedMaterialValues && k ? 1 : 0;
-                    EXPECT_EQ(counters.PublishedPages, primitivePages + drawPages + batchPages + materialPages);
+                    uint64_t planPages = 0, planRows = 0;
+                    for (size_t first = 0; first < snapshot.DrawPlans.size(); first += 32) {
+                        const auto end = std::min(first + 32, snapshot.DrawPlans.size());
+                        bool changed = previousPlans.size() != snapshot.DrawPlans.size();
+                        for (size_t index = first; !changed && index < end; ++index) {
+                            const auto& before = previousPlans[index];
+                            const auto& after = snapshot.DrawPlans[index];
+                            changed = before.Program != after.Program || before.Geometry != after.Geometry || before.Binding != after.Binding ||
+                                      before.NormalState != after.NormalState || before.MirroredState != after.MirroredState;
+                        }
+                        if (changed) {
+                            ++planPages;
+                            planRows += end - first;
+                        }
+                    }
+                    uint64_t geometryPages = 0, geometryRows = 0;
+                    for (size_t first = 0; first < snapshot.GeometryBindingPlans.size(); first += 32) {
+                        const auto end = std::min(first + 32, snapshot.GeometryBindingPlans.size());
+                        bool changed = previousGeometry.size() != snapshot.GeometryBindingPlans.size();
+                        for (size_t index = first; !changed && index < end; ++index) {
+                            const auto& a = previousGeometry[index];
+                            const auto& b = snapshot.GeometryBindingPlans[index];
+                            changed = a.Geometry != b.Geometry || a.LayoutId != b.LayoutId || a.Runs != b.Runs ||
+                                      a.FirstIndex != b.FirstIndex || a.IndexCount != b.IndexCount || a.VertexOffset != b.VertexOffset ||
+                                      bool(a.VertexInput) != bool(b.VertexInput);
+                            if (!changed && a.VertexInput)
+                                changed = a.VertexInput->ProgramGeneration != b.VertexInput->ProgramGeneration || a.VertexInput->Layout != b.VertexInput->Layout;
+                        }
+                        if (changed) {
+                            ++geometryPages;
+                            geometryRows += end - first;
+                        }
+                    }
+                    uint64_t statePages = 0, stateRows = 0;
+                    for (size_t first = 0; first < snapshot.StatePlans.size(); first += 32) {
+                        const auto end = std::min(first + 32, snapshot.StatePlans.size());
+                        bool changed = previousStates.size() != snapshot.StatePlans.size();
+                        for (size_t index = first; !changed && index < end; ++index)
+                            changed = previousStates[index].Id != snapshot.StatePlans[index].Id ||
+                                      previousStates[index].State != snapshot.StatePlans[index].State;
+                        if (changed) {
+                            ++statePages;
+                            stateRows += end - first;
+                        }
+                    }
+                    EXPECT_EQ(counters.PublishedPages, primitivePages + drawPages + batchPages + materialPages + planPages + statePages + geometryPages);
                     const uint64_t expectedBytes =
                         (primitiveChange ? PublishedRows(k, 32, n) * sizeof(RenderPrimitiveData) + PublishedRows(2ull * k, 16, 2ull * n) * sizeof(DrawRecord) : 0) +
-                        (change == ScalingChange::IndexRange ? PublishedRows(k, 64, n) * sizeof(MeshBatch) : 0) + materialPages * sizeof(MaterialRenderData);
+                        (change == ScalingChange::IndexRange ? PublishedRows(k, 64, n) * sizeof(MeshBatch) : 0) + materialPages * sizeof(MaterialRenderData) + planRows * sizeof(CpuDrawPlan) + stateRows * sizeof(CpuStatePlan) + geometryRows * sizeof(CpuGeometryBindingPlan);
                     EXPECT_EQ(counters.PublishedBytes, expectedBytes);
                     uint64_t materialPayloadBytes = 0;
                     for (const auto& material : snapshot.Materials) {
@@ -586,11 +641,11 @@ VK_BINDING(0, 2) ConstantBuffer<Forward_ObjectData> ForwardObject : register(b0,
                         const bool shared = change == ScalingChange::SharedMaterialValues && record.Primitive < k;
                         const uint64_t generation = shared ? sharedMaterial->GetGeneration() : baselineMaterial(record.Primitive)->GetGeneration();
                         wrongRows += record.Material >= snapshot.Materials.size() || snapshot.Materials[record.Material].Generation != generation ||
-                                     record.Description.IndexCount != (change == ScalingChange::IndexRange && record.Primitive < k ? 6u : 3u);
+                                     snapshot.ResolveDraw(record).Description.IndexCount != (change == ScalingChange::IndexRange && record.Primitive < k ? 6u : 3u);
                     }
                     ASSERT_EQ(wrongRows, 0u);
                     if (flight == 0 && k) {
-                        EXPECT_EQ(flights[1]->DrawRecords[0].Description.IndexCount, 3u);
+                        EXPECT_EQ(flights[1]->ResolveDraw(flights[1]->DrawRecords[0]).Description.IndexCount, 3u);
                         EXPECT_FLOAT_EQ(flights[1]->Primitives[0].LocalToWorld(0, 3), 0);
                         for (const auto& material : flights[1]->Materials) {
                             const auto* values = AsCBuffer<Forward_MaterialData>(material.Passes[0].NumericBytes);

@@ -1,12 +1,21 @@
 #pragma once
 
 #include <array>
+#include <radray/runtime/render_framework/indexed_parameter_rows.h>
 #include <radray/runtime/material.h>
 #include <radray/runtime/render_framework/mesh_draw_command.h>
 
 namespace radray {
 
 struct ShaderParameterGroupRecipe;
+class FrameDrawResources;
+
+struct FrameParameterGroup {
+    Nullable<const FrameDrawResources*> Owner{nullptr};
+    uint64_t Epoch{0};
+    uint32_t Index{UINT32_MAX};
+    bool IsValid() const noexcept { return Owner && Epoch && Index != UINT32_MAX; }
+};
 
 struct FrameBufferBinding {
     uint32_t BufferIndex{0};
@@ -18,6 +27,7 @@ struct FrameDrawResourceStats {
     uint64_t GroupPreparations{0}, RecipeBuilds{0}, SetCacheHits{0}, SetCreations{0}, BufferBytesCopied{0};
     uint64_t SharedBufferUploads{0}, SharedBufferHits{0};
     uint64_t SharedGroupHits{0};
+    uint64_t ParameterDomainLookups{0}, NativeGroupLookups{0}, IndexedGroupHits{0};
 };
 
 struct FrameShaderGroupId {
@@ -53,19 +63,38 @@ public:
     void ClearSets() noexcept;
     size_t GetSetCount() const noexcept { return _sets.size(); }
     const FrameDrawResourceStats& GetStats() const noexcept { return _stats; }
+    render::Device* GetDevice() const noexcept { return _device; }
     uint64_t GetEpoch() const noexcept { return _bufferEpoch; }
     size_t GetGroupCount() const noexcept { return _readyGroups.size(); }
     std::span<const PreparedShaderGroup> GetGroups() const noexcept { return _readyGroups; }
     size_t GetBindingCount() const noexcept { return _drawBindings.size(); }
     /// CPU cache storage high-water mark; excludes driver-owned descriptor allocations and the upload arena.
     size_t GetCacheCapacityBytes() const noexcept;
+    /// Actual demand rows, excluding unused integer addresses and radix nodes.
+    size_t GetParameterRowCount() const noexcept;
     bool IsValid(FrameDrawBindingId id) const noexcept { return id.Value < _drawBindings.size(); }
     /// Immutable group tuples are shared across lists and state-only policies within this epoch.
     FrameDrawBindingId InternBinding(std::span<const FrameShaderGroupId> groups);
+    /// A caller-declared immutable tuple row; no tuple hash is needed on this path.
+    FrameDrawBindingId PrepareIndexedBinding(FrameParameterDomain domain, uint32_t row, std::span<const FrameShaderGroupId> groups);
     std::span<const FrameShaderGroupId> GetBinding(FrameDrawBindingId id) const noexcept { return _drawBindings[id.Value]; }
     /// Intern a small set of packed view values once at each view boundary, with exact byte equality.
     FrameCBufferIdentity InternValues(const void* wireType, std::span<const byte> bytes);
     bool HasCBufferValues(FrameCBufferIdentity identity, uint32_t row) const noexcept;
+    /// Register immutable values once at a batch boundary. Handles are owner- and epoch-specific.
+    FrameParameterDomain RegisterParameterDomain(FrameCBufferIdentity identity);
+    FrameParameterGroup RegisterParameterGroup(ShaderProgram& program, uint32_t group, FrameParameterDomain domain);
+    FrameShaderGroupId PrepareIndexedGroup(
+        FrameParameterGroup group, uint32_t row, std::span<const byte> bytes,
+        std::span<const MaterialTextureFrameData> textures = {}, std::span<const MaterialSamplerFrameData> samplers = {});
+    bool IsValid(FrameParameterDomain domain) const noexcept;
+    /// Shared immutable numeric row; returned range contains the actual arena offset.
+    std::optional<render::ShaderBufferBinding> PrepareParameterBuffer(FrameParameterDomain domain, uint32_t row, std::span<const byte> bytes);
+    bool CanUseBinding(FrameDrawBindingId binding, RgPassHandle pass) const noexcept;
+    bool HasCBufferValues(FrameParameterDomain domain, uint32_t row) const noexcept;
+    FrameShaderGroupId PrepareGroupId(
+        ShaderProgram& program, uint32_t group, FrameParameterDomain domain, uint32_t row, std::span<const byte> bytes,
+        std::span<const MaterialTextureFrameData> textures = {}, std::span<const MaterialSamplerFrameData> samplers = {});
     /// Same single-cbuffer sharing contract, with immutable material textures/samplers included in identity.
     /// Empty bytes may reuse an already uploaded row. Failed native preparation never publishes an ID.
     FrameShaderGroupId PrepareGroupId(
@@ -99,6 +128,8 @@ public:
         std::span<const MaterialTextureFrameData> textures = {}, std::span<const MaterialSamplerFrameData> samplers = {});
 
 private:
+    friend class RenderGraphPrepareContext;
+    FrameShaderGroupId ImportGraphGroup(PreparedShaderGroup&& group, RgPassHandle pass);
     friend std::optional<PreparedRendererList> PrepareRendererList(const RendererList&, RenderGraphPrepareContext&, Nullable<const RendererListPassSets*>);
     PreparedRendererList::Workspace& GetPreparationWorkspace() const;
     /// Open-addressed indices retain bucket storage across epochs; keys live in reusable owner tables.
@@ -175,17 +206,29 @@ private:
     };
     struct SharedBufferDomain {
         FrameCBufferIdentity Identity;
-        vector<SharedBufferSlice> Rows;
-    };
-    struct NativeGroup {
-        uint64_t ProgramGeneration{0};
-        uint32_t Group{0}, Domain{0}, Row{0};
-        FrameShaderGroupId Id;
-        size_t TextureCount{0}, SamplerCount{0};
+        detail::IndexedParameterRows<SharedBufferSlice> Rows;
+        struct BindingRow {
+            uint64_t Epoch{0};
+            FrameDrawBindingId Id;
+        };
+        detail::IndexedParameterRows<BindingRow> Bindings;
     };
     struct StoredValues {
         Nullable<const void*> Wire{nullptr};
         vector<byte> Bytes;
+    };
+    struct IndexedGroup {
+        Nullable<ShaderProgram*> Program{nullptr};
+        Nullable<const ShaderParameterGroupRecipe*> Recipe{nullptr};
+        uint64_t ProgramGeneration{0};
+        uint32_t Group{0}, Domain{0};
+        struct Row {
+            uint64_t Epoch{0};
+            FrameShaderGroupId Id;
+            uint32_t ByteSize{0};
+            size_t Textures{0}, Samplers{0};
+        };
+        detail::IndexedParameterRows<Row> Rows;
     };
 
     render::Device* _device;
@@ -200,7 +243,10 @@ private:
     };
     vector<CachedSet> _setCache;
     size_t _activeSets{0};
-    Lookup _setLookup, _domainLookup, _nativeLookup, _bindingLookup, _valueLookup;
+    Lookup _setLookup, _domainLookup, _bindingLookup, _valueLookup;
+    Lookup _indexedGroupLookup;
+    vector<IndexedGroup> _indexedGroups;
+    size_t _activeIndexedGroups{0};
     vector<DynamicOnlySet> _dynamicOnlySets;
     size_t _lastDynamicOnlySet{0};
     vector<FrameBufferBinding> _bindingScratch;
@@ -209,7 +255,11 @@ private:
     size_t _activeBufferDomains{0};
     uint64_t _bufferEpoch{0};
     vector<PreparedShaderGroup> _readyGroups;
-    vector<NativeGroup> _nativeGroups;
+    struct GraphGroupOwner {
+        uint32_t Group;
+        RgPassHandle Pass;
+    };
+    vector<GraphGroupOwner> _groupPasses;
     vector<InlineVector<FrameShaderGroupId, 3>> _drawBindings;
     vector<StoredValues> _values;
     size_t _activeValues{0};

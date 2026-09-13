@@ -5,24 +5,18 @@
 #include <array>
 #include <atomic>
 #include <limits>
+#include <tuple>
 
 #include <radray/profiler.h>
+#include <radray/scope_guard.h>
 #include <radray/runtime/render_framework/scene.h>
 
 namespace radray {
 namespace {
 
-enum class SnapshotTable : uint8_t { Primitives,
-                                     Batches,
-                                     Materials,
-                                     Lights,
-                                     Draws,
-                                     DrawBegin,
-                                     Bindings,
-                                     GeometryPlans,
-                                     Count };
+using SnapshotTable = SceneDataTable;
 constexpr size_t kTableCount = static_cast<size_t>(SnapshotTable::Count);
-constexpr uint32_t kPageEntries[kTableCount]{32, 64, 1, 16, 16, 256, 32, 32};
+constexpr uint32_t kPageEntries[kTableCount]{32, 64, 1, 16, 16, 256, 32, 32, 32, 32};
 std::atomic<uint64_t> gNextSceneState{1};
 std::atomic<uint64_t> gNextPublication{1};
 std::atomic<uint64_t> gNextLegacyEpoch{uint64_t{1} << 63};
@@ -80,6 +74,8 @@ bool EqualLight(const RenderLightData& left, const RenderLightData& right) noexc
 struct SceneSnapshotPublication {
     uint64_t Owner{0};
     array<PendingPages, kTableCount> Tables;
+    array<uint32_t, kTableCount> PublishedCounts{};
+    vector<SceneExtensionSnapshot> ExtensionScratch;
     bool Initialized{false};
 };
 
@@ -94,10 +90,24 @@ RenderMemoryStats MeasureRenderSceneSnapshot(const RenderSceneSnapshot& snapshot
     detail::MeasureVector(result, snapshot.DrawRecords);
     detail::MeasureVector(result, snapshot.BindingRecipes);
     detail::MeasureVector(result, snapshot.GeometryBindingPlans);
+    detail::MeasureVector(result, snapshot.DrawPlans);
+    for (const auto& plan : snapshot.GeometryBindingPlans) result.OwnerReferences += bool(plan.VertexInput);
+    detail::MeasureVector(result, snapshot.StatePlans);
     detail::MeasureVector(result, snapshot.PrimitiveDrawBegin);
     detail::MeasureVector(result, snapshot.ChangedPrimitiveRanges);
+    detail::MeasureVector(result, snapshot.Extensions);
+    result.OwnerReferences += snapshot.Extensions.size();
+    for (const auto& table : snapshot.Changes.Tables) detail::MeasureVector(result, table.Ranges);
     for (const auto& material : snapshot.Materials) MeasureMaterialPayload(result, material);
     for (const auto& geometry : snapshot.GeometryBindingPlans) detail::MeasureVector(result, geometry.Runs, true);
+    for (const auto& recipe : snapshot.BindingRecipes) {
+        detail::MeasureVector(result, recipe.Parameters.Slots, true);
+        detail::MeasureVector(result, recipe.Parameters.Bindings, true);
+        detail::MeasureVector(result, recipe.Parameters.Groups, true);
+        detail::MeasureVector(result, recipe.Parameters.GroupBegin, true);
+        detail::MeasureVector(result, recipe.Parameters.Resolved, true);
+        for (const auto& binding : recipe.Parameters.Resolved) detail::MeasureString(result, binding.Declaration);
+    }
     return result;
 }
 
@@ -111,8 +121,13 @@ RenderSceneSnapshot& RenderSceneSnapshot::operator=(const RenderSceneSnapshot& o
     DrawRecords = other.DrawRecords;
     BindingRecipes = other.BindingRecipes;
     GeometryBindingPlans = other.GeometryBindingPlans;
+    DrawPlans = other.DrawPlans;
+    StatePlans = other.StatePlans;
     PrimitiveDrawBegin = other.PrimitiveDrawBegin;
     ChangedPrimitiveRanges = other.ChangedPrimitiveRanges;
+    Extensions = other.Extensions;
+    PassPolicies = other.PassPolicies;
+    Changes.ResetForReuse();
     SceneEpoch = other.SceneEpoch;
     PublicationId = 0;
     PublicationRevision = ChangedFromPublicationRevision = 0;
@@ -124,6 +139,8 @@ RenderSceneSnapshot& RenderSceneSnapshot::operator=(const RenderSceneSnapshot& o
 }
 
 void RenderSceneSnapshot::ResetForReuse() noexcept {
+    Extensions.clear();
+    PassPolicies.reset();
     Primitives.clear();
     MeshBatches.clear();
     Materials.clear();
@@ -131,8 +148,11 @@ void RenderSceneSnapshot::ResetForReuse() noexcept {
     DrawRecords.clear();
     BindingRecipes.clear();
     GeometryBindingPlans.clear();
+    DrawPlans.clear();
+    StatePlans.clear();
     PrimitiveDrawBegin.clear();
     ChangedPrimitiveRanges.clear();
+    Changes.ResetForReuse();
     SceneEpoch = 0;
     PublicationId = 0;
     PublicationRevision = ChangedFromPublicationRevision = 0;
@@ -195,6 +215,9 @@ struct SceneRenderState::Impl {
     vector<weak_ptr<SceneSnapshotPublication>> Publications;
     vector<SharedFlight> SharedFlights;
     std::optional<uint64_t> CommittedSerial;
+    std::optional<uint64_t> ExtensionSerial;
+    vector<SceneRenderExtension> Extensions;
+    vector<shared_ptr<SceneExtensionWorkspace>> ExtensionWorkspaces;
     uint64_t EpochPublicationId{0};
     Nullable<vector<StreamingAssetRefAny>*> EpochOwnerSink{nullptr};
     size_t EpochOwnerEnd{0};
@@ -425,7 +448,7 @@ struct SceneRenderState::Impl {
         Canonical.Stats.LegacyBytesCompared += after.LegacyBytesCompared - before.LegacyBytesCompared;
         Canonical.Stats.PendingResourcesObserved += after.PendingResourcesObserved - before.PendingResourcesObserved;
     }
-    void UpdateMaterials(uint64_t serial) {
+    void UpdateMaterials(const Scene& scene, uint64_t serial) {
         {
             RADRAY_PROFILE_SCOPE_N("Scene.ObserveLegacy");
             for (const uint64_t generation : ObservedMaterials) {
@@ -449,6 +472,7 @@ struct SceneRenderState::Impl {
             const bool wasValid = entry.Index.has_value();
             auto& data = wasValid ? Canonical.Materials[*entry.Index] : entry.Unpublished;
             const auto previousStructure = data.StructureRevision, previousRevision = data.Revision;
+            const auto previousReadiness = data.ReadinessRevision;
             const bool structural = entry.Pending.HasFlag(MaterialDirtyKind::Structure);
             if (wasValid && structural) ReleasePrograms(data);
             uint64_t bytesCopied = 0;
@@ -472,8 +496,13 @@ struct SceneRenderState::Impl {
                 RemovePublishedMaterial(entry, false);
             }
             const auto currentStructure = valid ? Canonical.Materials[*entry.Index].StructureRevision : entry.Unpublished.StructureRevision;
+            const auto currentReadiness = valid ? Canonical.Materials[*entry.Index].ReadinessRevision : entry.Unpublished.ReadinessRevision;
             if (valid != wasValid || structural || previousStructure != currentStructure)
                 for (const auto& [slot, count] : entry.Users) QueueWork(slot, true, true);
+            else if (previousReadiness != currentReadiness ||
+                     (entry.Pending.HasFlag(MaterialDirtyKind::Values) && scene.GetDrawStore().UsesMaterialDependency(MeshPassDependency::MaterialValues)) ||
+                     (entry.Pending.HasFlag(MaterialDirtyKind::Bindings) && scene.GetDrawStore().UsesMaterialDependency(MeshPassDependency::MaterialBindings)))
+                for (const auto& [slot, count] : entry.Users) QueueWork(slot, false, true);
             const bool observe = entry.Source && (entry.Source->HasEscapedWrites() || entry.Source->HasPendingResources());
             if (observe && !entry.Observed) {
                 entry.Observed = true;
@@ -558,6 +587,8 @@ struct SceneRenderState::Impl {
         for (const auto range : scene.GetDrawStore().ChangedDrawRanges()) Mark(SnapshotTable::Draws, range.First, range.Count);
         for (const auto range : scene.GetDrawStore().ChangedBindingRanges()) Mark(SnapshotTable::Bindings, range.First, range.Count);
         for (const auto range : scene.GetDrawStore().ChangedGeometryRanges()) Mark(SnapshotTable::GeometryPlans, range.First, range.Count);
+        for (const auto range : scene.GetDrawStore().ChangedPlanRanges()) Mark(SnapshotTable::DrawPlans, range.First, range.Count);
+        for (const auto range : scene.GetDrawStore().ChangedStateRanges()) Mark(SnapshotTable::StatePlans, range.First, range.Count);
         for (const auto slot : WorkSlots) {
             auto& entry = Primitives[slot];
             entry.WorkPending = entry.BatchDirty = entry.DrawDirty = false;
@@ -587,8 +618,37 @@ struct SceneRenderState::Impl {
         }
         Canonical.Lights.resize(index);
     }
+    void InvalidateCanonical() noexcept {
+        for (auto& [id, entry] : Materials)
+            if (entry.Source) entry.Source->RemoveChangeListener(this);
+        Canonical.ResetForReuse();
+        Primitives.clear();
+        PackedIds.clear();
+        Materials.clear();
+        MaterialIds.clear();
+        PendingMaterials.clear();
+        ObservedMaterials.clear();
+        UnusedMaterials.clear();
+        Programs.clear();
+        FreeProgramIds.clear();
+        NextProgramId = 0;
+        WorkSlots.clear();
+        DrawIndices.clear();
+        CommittedSerial.reset();
+        Sections = MissingGeometry = EmptyDraws = InvalidRanges = UnavailableMaterials = InvalidBounds = 0;
+        LayoutChanged = true;
+        for (const auto& weak : Publications)
+            if (const auto publication = weak.lock()) {
+                publication->Initialized = false;
+                for (auto& table : publication->Tables) table.Clear();
+            }
+    }
     bool Commit(const Scene& scene, uint64_t serial, RenderValidationMode validation) {
         if (CommittedSerial == serial) return true;
+        auto failure = MakeScopeGuard([&]() noexcept {
+            scene.CompleteRenderCommit(serial, false);
+            InvalidateCanonical();
+        });
         RADRAY_PROFILE_SCOPE_N("Scene.CommitChanges");
         Canonical.Stats = {};
         std::erase_if(Publications, [](const auto& weak) { return weak.expired(); });
@@ -613,7 +673,7 @@ struct SceneRenderState::Impl {
             }
         }
         RemoveUnusedMaterials();
-        UpdateMaterials(serial);
+        UpdateMaterials(scene, serial);
         if (!UpdateBatches(scene, validation)) {
             scene.CompleteRenderCommit(serial, false);
             return false;
@@ -639,8 +699,10 @@ struct SceneRenderState::Impl {
         stats.MaterialsReused = stats.InputMaterials - stats.MaterialsRebuilt;
         stats.SceneCommits = 1;
         stats.PendingResourcesObserved += scene.GetCommitStats().PendingResourcesObserved;
+        if (!scene.CompleteRenderCommit(serial, true)) return false;
         CommittedSerial = serial;
-        return scene.CompleteRenderCommit(serial, true);
+        failure.Dismiss();
+        return true;
     }
     template <bool InjectFailure, class T>
     bool CopyTableEntries(SnapshotTable table, const vector<T>& source, vector<T>& target, SceneSnapshotPublication& publication, RenderSceneSnapshot& out) {
@@ -652,6 +714,9 @@ struct SceneRenderState::Impl {
         }
         target.resize(source.size());
         const auto kind = static_cast<size_t>(table);
+        auto& changes = out.Changes.Tables[kind];
+        changes.PreviousCount = publication.PublishedCounts[kind];
+        changes.Count = static_cast<uint32_t>(source.size());
         const uint32_t pageEntries = kPageEntries[kind];
         auto& pending = publication.Tables[kind];
         for (const auto page : pending.Pages) {
@@ -670,7 +735,17 @@ struct SceneRenderState::Impl {
                 std::copy_n(source.begin() + first, count, target.begin() + first);
             }
             ++out.Stats.PublishedPages;
+            changes.Ranges.push_back({static_cast<uint32_t>(first), static_cast<uint32_t>(count)});
             out.Stats.PublishedBytes += count * sizeof(T);
+            if constexpr (std::is_same_v<T, StaticBindingRecipe>)
+                for (size_t index = first; index < first + count; ++index) {
+                    const auto& plan = source[index].Parameters;
+                    auto bytes = plan.Slots.size() * sizeof(MeshParameterSlot) + plan.Bindings.size() * sizeof(MeshParameterBinding) +
+                                 (plan.Groups.size() + plan.GroupBegin.size()) * sizeof(uint32_t) + plan.Resolved.size() * sizeof(MeshResolvedParameterBinding);
+                    for (const auto& binding : plan.Resolved) bytes += binding.Declaration.size();
+                    out.Stats.PublishedBytes += bytes;
+                    out.Stats.PublishedVariablePayloadBytes += bytes;
+                }
             if constexpr (std::is_same_v<T, MaterialRenderData>)
                 for (size_t index = first; index < first + count; ++index) {
                     const auto bytes = MaterialPayloadBytes(source[index]);
@@ -743,6 +818,9 @@ SceneRenderStateMemoryStats SceneRenderState::GetMemoryStats() const noexcept {
             ++result.SharedFlights.OwnerReferences;
         }
     }
+    detail::MeasureVector(result.Catalog, impl.Extensions);
+    detail::MeasureVector(result.Catalog, impl.ExtensionWorkspaces);
+    for (const auto& workspace : impl.ExtensionWorkspaces) result.Catalog.Add(workspace->GetMemoryStats());
     result.MaterialEntries = impl.Materials.size();
     result.ProgramEntries = impl.Programs.size();
     result.PrimitiveSlots = impl.Primitives.size();
@@ -751,6 +829,43 @@ SceneRenderStateMemoryStats SceneRenderState::GetMemoryStats() const noexcept {
     result.WorkSlots = impl.WorkSlots.size();
     result.ObservedMaterials = impl.ObservedMaterials.size();
     return result;
+}
+
+RenderMemoryStats SceneRenderState::GetExtensionMemoryStats(const SceneRenderExtension& contract) const noexcept {
+    for (size_t index = 0; index < _impl->Extensions.size(); ++index)
+        if (_impl->Extensions[index] == contract) return _impl->ExtensionWorkspaces[index]->GetMemoryStats();
+    return {};
+}
+
+bool SceneRenderState::SetActiveExtensions(uint64_t serial, std::span<const SceneRenderExtension> extensions) {
+    vector<SceneRenderExtension> next{extensions.begin(), extensions.end()};
+    std::sort(next.begin(), next.end(), [](const auto& a, const auto& b) {
+        return std::tie(a.Id, a.Revision, a.Configuration) < std::tie(b.Id, b.Revision, b.Configuration);
+    });
+    for (size_t index = 0; index < next.size(); ++index) {
+        if (!next[index].IsValid()) return false;
+        if (index && next[index].SameIdentity(next[index - 1]) && next[index] != next[index - 1]) return false;
+        for (const auto& old : _impl->Extensions)
+            if (old.SameIdentity(next[index]) && old != next[index]) return false;
+    }
+    next.erase(std::unique(next.begin(), next.end()), next.end());
+    if (_impl->ExtensionSerial == serial || _impl->CommittedSerial == serial) return next == _impl->Extensions;
+    vector<shared_ptr<SceneExtensionWorkspace>> workspaces;
+    workspaces.reserve(next.size());
+    for (const auto& contract : next) {
+        shared_ptr<SceneExtensionWorkspace> workspace;
+        for (size_t index = 0; index < _impl->Extensions.size(); ++index)
+            if (_impl->Extensions[index] == contract) {
+                workspace = _impl->ExtensionWorkspaces[index];
+                break;
+            }
+        if (!workspace) workspace = make_shared<SceneExtensionWorkspace>();
+        workspaces.push_back(std::move(workspace));
+    }
+    _impl->ExtensionWorkspaces = std::move(workspaces);
+    _impl->Extensions = std::move(next);
+    _impl->ExtensionSerial = serial;
+    return true;
 }
 
 void SceneRenderState::FailNextPublicationForTesting(SnapshotPublicationFailure failure) noexcept {
@@ -773,6 +888,7 @@ bool SceneRenderState::Publish(const Scene& scene, RenderSceneSnapshot& out, vec
             std::any_of(scene.Primitives().begin(), scene.Primitives().end(), [](const auto& proxy) { return proxy && !proxy->UsesRenderChangeNotifications(); })) return false;
     }
     out.Valid = false;
+    out.Changes.ResetForReuse();
     if (!out._publication || out._publication->Owner != _impl->Generation) {
         auto publication = make_shared<SceneSnapshotPublication>();
         publication->Owner = _impl->Generation;
@@ -786,7 +902,7 @@ bool SceneRenderState::Publish(const Scene& scene, RenderSceneSnapshot& out, vec
     _impl->EpochPublicationId = out.PublicationId;
     if (!out._publication->Initialized) {
         const uint32_t sizes[kTableCount]{static_cast<uint32_t>(_impl->Canonical.Primitives.size()), static_cast<uint32_t>(_impl->Canonical.MeshBatches.size()), static_cast<uint32_t>(_impl->Canonical.Materials.size()),
-                                          static_cast<uint32_t>(_impl->Canonical.Lights.size()), static_cast<uint32_t>(_impl->Canonical.DrawRecords.size()), static_cast<uint32_t>(_impl->Canonical.PrimitiveDrawBegin.size()), static_cast<uint32_t>(_impl->Canonical.BindingRecipes.size()), static_cast<uint32_t>(_impl->Canonical.GeometryBindingPlans.size())};
+                                          static_cast<uint32_t>(_impl->Canonical.Lights.size()), static_cast<uint32_t>(_impl->Canonical.DrawRecords.size()), static_cast<uint32_t>(_impl->Canonical.PrimitiveDrawBegin.size()), static_cast<uint32_t>(_impl->Canonical.BindingRecipes.size()), static_cast<uint32_t>(_impl->Canonical.GeometryBindingPlans.size()), static_cast<uint32_t>(_impl->Canonical.DrawPlans.size()), static_cast<uint32_t>(_impl->Canonical.StatePlans.size())};
         for (size_t table = 0; table < kTableCount; ++table) out._publication->Tables[table].Mark(0, sizes[table], kPageEntries[table]);
         out._publication->Initialized = true;
     }
@@ -833,7 +949,7 @@ bool SceneRenderState::Publish(const Scene& scene, RenderSceneSnapshot& out, vec
         out.Stats.MaterialsRebuilt = out.Stats.MaterialsReused = out.Stats.MaterialBytesCopied = 0;
         out.Stats.DrawRecordBuilds = out.Stats.DrawRecordsReused = out.Stats.DrawRecordStateSelects = 0;
         out.Stats.DrawRecordFullSyncs = out.Stats.DrawRecordPrimitivesVisited = out.Stats.DrawRecordCopies = 0;
-        out.Stats.StaticRecipeCompiles = out.Stats.BindingRecipeCompiles = 0;
+        out.Stats.StaticRecipeCompiles = out.Stats.BindingRecipeCompiles = out.Stats.VertexInputCompiles = 0;
         out.Stats.MaterialPayloadMoves = out.Stats.MovedMaterialPayloadBytes = 0;
         out.Stats.AppliedTransforms = out.Stats.EqualValueIgnored = out.Stats.ScratchEntriesCreated = 0;
         out.Stats.LegacyMaterialsObserved = out.Stats.LegacyBytesCompared = out.Stats.PendingResourcesObserved = 0;
@@ -860,14 +976,69 @@ bool SceneRenderState::Publish(const Scene& scene, RenderSceneSnapshot& out, vec
         if (failCopy(7)) return false;
         if (!_impl->CopyTable(SnapshotTable::GeometryPlans, _impl->Canonical.GeometryBindingPlans, out.GeometryBindingPlans, publication, out)) return false;
         if (failCopy(8)) return false;
-        for (auto& table : publication.Tables) table.Clear();
+        if (!_impl->CopyTable(SnapshotTable::DrawPlans, _impl->Canonical.DrawPlans, out.DrawPlans, publication, out)) return false;
+        if (failCopy(9)) return false;
+        if (!_impl->CopyTable(SnapshotTable::StatePlans, _impl->Canonical.StatePlans, out.StatePlans, publication, out)) return false;
+        if (failCopy(10)) return false;
     }
+    auto& publication = *out._publication;
+    publication.ExtensionScratch.clear();
+    struct ExtensionRollback {
+        RenderSceneSnapshot& Snapshot;
+        vector<SceneExtensionSnapshot>& Drafts;
+        bool Published{false};
+        ~ExtensionRollback() {
+            if (!Published) {
+                Snapshot.Changes.ResetForReuse();
+                Drafts.clear();
+            }
+        }
+    } extensionRollback{out, publication.ExtensionScratch};
+    if (out.PublicationRevision == UINT64_MAX) RADRAY_ABORT("Snapshot publication revision exhausted");
+    out.Changes.PublicationId = out.PublicationId;
+    out.Changes.Epoch = epoch;
+    out.Changes.FromRevision = out.PublicationRevision;
+    out.Changes.Revision = out.PublicationRevision + 1;
+    size_t extensionIndex = 0;
+    for (const auto& contract : _impl->Extensions) {
+        auto& workspace = *_impl->ExtensionWorkspaces[extensionIndex++];
+        shared_ptr<const void> previousValue;
+        for (const auto& previous : out.Extensions)
+            if (previous.Contract == contract && previous.PublicationId == out.PublicationId && previous.Revision == out.PublicationRevision) {
+                previousValue = previous.Data;
+                break;
+            }
+        bool changed = !previousValue || contract.EveryEpoch;
+        for (size_t table = 0; table < kTableCount && !changed; ++table) {
+            const auto& delta = out.Changes.Tables[table];
+            if (contract.Dependencies[table] && (delta.Count != delta.PreviousCount || !delta.Ranges.empty())) changed = true;
+        }
+        shared_ptr<const void> value = previousValue;
+        if (changed && !contract.Prepare(workspace, out, out.Changes, contract.Configuration, previousValue, value)) return false;
+        if (!value) return false;
+        publication.ExtensionScratch.push_back({contract, out.PublicationId, epoch, out.PublicationRevision + 1, std::move(value), changed});
+    }
+    if (_impl->PublicationFailure && publication.ExtensionScratch.size() == _impl->PublicationFailure->AfterPreparedExtensions) {
+        _impl->PublicationFailure.reset();
+        return false;
+    }
+    out.Extensions.swap(publication.ExtensionScratch);
+    publication.ExtensionScratch.clear();
+    for (auto& table : publication.Tables) table.Clear();
+    extensionRollback.Published = true;
     out.SceneEpoch = epoch;
     out.HasPassPolicies = _impl->Canonical.HasPassPolicies;
+    out.PassPolicies = _impl->Canonical.PassPolicies;
     out.Valid = true;
     out.ChangedFromPublicationRevision = out.PublicationRevision;
     if (out.PublicationRevision == UINT64_MAX) RADRAY_ABORT("Snapshot publication revision exhausted");
     ++out.PublicationRevision;
+    out.Changes.PublicationId = out.PublicationId;
+    out.Changes.Epoch = out.SceneEpoch;
+    out.Changes.FromRevision = out.ChangedFromPublicationRevision;
+    out.Changes.Revision = out.PublicationRevision;
+    for (size_t table = 0; table < kTableCount; ++table)
+        out._publication->PublishedCounts[table] = out.Changes.Tables[table].Count;
     _impl->EpochOwnerSink = &retainedAssets;
     _impl->EpochOwnerEnd = retainedAssets.size();
     rollback.Published = true;

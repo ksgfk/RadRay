@@ -40,6 +40,172 @@ protected:
     unique_ptr<RenderResourcePool> Pool;
 };
 
+TEST_F(RenderGraphCompileTest, FlightPayloadsReuseStorageWithoutMutatingRetainedVersions) {
+    struct Payload {
+        vector<uint32_t> Rows;
+    };
+    struct OtherPayload {
+        uint32_t Value{0};
+    };
+    HostWriteBatch writes;
+    RenderGraphFrameResources resources{Device, *Registry};
+    resources.BeginFlight(1, writes);
+    auto first = resources.AcquireFramePayload<Payload>(this, 7);
+    first->Rows.assign(256, 42);
+    const auto* original = first.get();
+    const auto* storage = first->Rows.data();
+    // Two graph instances in the same flight retain independent writable payloads.
+    auto concurrent = resources.AcquireFramePayload<Payload>(this, 7);
+    EXPECT_NE(concurrent.get(), original);
+    concurrent->Rows.assign(256, 13);
+    EXPECT_EQ(first->Rows[0], 42u);
+    auto* reused = concurrent.get();
+    auto* reusedStorage = concurrent->Rows.data();
+    concurrent.reset();
+    resources.BeginFlight(2, writes);
+    auto second = resources.AcquireFramePayload<Payload>(this, 7);
+    EXPECT_EQ(second.get(), reused);
+    EXPECT_EQ(second->Rows.data(), reusedStorage);
+    EXPECT_EQ(first->Rows.data(), storage);
+    auto other = resources.AcquireFramePayload<OtherPayload>(this, 7);
+    EXPECT_EQ(other->Value, 0u);
+    for (uint64_t serial = 3; serial <= 10002; ++serial) {
+        second.reset();
+        resources.BeginFlight(serial, writes);
+        second = resources.AcquireFramePayload<Payload>(this, 7);
+        ASSERT_EQ(second.get(), reused);
+        ASSERT_EQ(second->Rows.data(), reusedStorage);
+    }
+    resources.Clear();
+    EXPECT_EQ(first->Rows[0], 42u);
+    EXPECT_EQ(second->Rows[0], 13u);
+}
+
+TEST_F(RenderGraphCompileTest, GraphInstanceStorageIsExclusiveAndConvergesAcrossTenThousandMixedFrames) {
+    auto builder = MakeGraph("instance storage recipe");
+    const auto slot = builder.DeclareTemplateSlot<int>();
+    auto value = builder.CreateTexture(GraphColor(3), "three mips");
+    builder.AddTemplateRasterPass<EmptyPass>("template clear", slot, [=](EmptyPass&, RenderGraphRasterBuilder& pass) { pass.SetColorAttachment(0, value, {.View = {.Range = {0, 1, 0, 1}}}); pass.SetSideEffect(); }, +[](const EmptyPass&, int&, RenderGraphPrepareContext&) { return true; }, +[](const EmptyPass&, const int&, RenderGraphRasterContext&) {});
+    auto recipe = builder.FreezeTemplate();
+    ASSERT_TRUE(recipe) << builder.GetReport().ToText();
+    HostWriteBatch writes;
+    RenderGraphFrameResources resources{Device, *Registry};
+    resources.BeginFlight(1, writes);
+    auto held = make_unique<RenderGraph>(Device, resources, *Registry, "held instance");
+    auto heldColor = held->CreateTexture(GraphColor(), "held color");
+    Clear(*held, heldColor, "held clear", render::LoadAction::Clear, render::StoreAction::Store, true);
+    ASSERT_TRUE(held->Compile());
+    const auto heldId = held->GetReport().InstanceStorageId;
+    const auto heldGeneration = held->GetGeneration();
+    const auto heldReport = held->GetReport().ToJson();
+    RenderGraphInstanceStorageStats stable;
+    uint64_t reusedId = 0, lastGeneration = heldGeneration;
+    weak_ptr<int> oldPayload;
+    for (uint64_t frame = 2; frame < 10012; ++frame) {
+        resources.BeginFlight(frame, writes);
+        EXPECT_TRUE(oldPayload.expired());
+        RenderGraph graph{Device, resources, *Registry, "reused mixed instance"};
+        ASSERT_NE(graph.GetReport().InstanceStorageId, heldId);
+        if (reusedId) ASSERT_EQ(graph.GetReport().InstanceStorageId, reusedId);
+        reusedId = graph.GetReport().InstanceStorageId;
+        ASSERT_GT(graph.GetGeneration(), lastGeneration);
+        lastGeneration = graph.GetGeneration();
+        ASSERT_EQ(graph.GetPassCount(), 0u);
+        ASSERT_FALSE(graph.HasFailed());
+        const auto instance = graph.Instantiate(recipe);
+        auto payload = make_shared<int>(static_cast<int>(frame));
+        oldPayload = payload;
+        ASSERT_TRUE(instance.Bind(slot, payload));
+        auto color = instance.Value(value);
+        Clear(graph, color, "dynamic tail", render::LoadAction::Load, render::StoreAction::Store, true);
+        ASSERT_TRUE(graph.Compile()) << graph.GetReport().ToText();
+        ASSERT_EQ(graph.GetReport().LivePasses, 2u);
+        if (frame > 3) ASSERT_TRUE(graph.GetReport().CompilePlanReused);
+        if (frame == 10) stable = resources.GetInstanceStorageStats();
+        if (frame > 10) ASSERT_EQ(resources.GetInstanceStorageStats(), stable);
+    }
+    EXPECT_TRUE(oldPayload.expired());
+    EXPECT_EQ(resources.GetInstanceStorageStats().Instances, 2u);
+    EXPECT_EQ(resources.GetInstanceStorageStats().ActiveInstances, 1u);
+    EXPECT_EQ(held->GetGeneration(), heldGeneration);
+    EXPECT_EQ(held->GetReport().ToJson(), heldReport);
+    resources.Clear();
+    EXPECT_EQ(resources.GetInstanceStorageStats().Instances, 0u);
+    EXPECT_EQ(held->GetReport().ToJson(), heldReport);
+}
+
+TEST_F(RenderGraphCompileTest, FlightPayloadFactoriesReuseConcurrentVersionsAndResetChildOwners) {
+    struct Child {
+        explicit Child(uint32_t initial) : Value(initial) {}
+        uint32_t Value;
+        vector<uint32_t> Rows;
+    };
+    struct Parent {
+        shared_ptr<Child> Value;
+        void ResetForReuse() noexcept { Value.reset(); }
+    };
+    HostWriteBatch writes;
+    RenderGraphFrameResources resources{Device, *Registry};
+    resources.BeginFlight(1, writes);
+    {
+        RenderGraph graph{Device, resources, *Registry, "payload factories"};
+        auto child = graph.AcquireFramePayload<Child>(this, 0, 12u);
+        EXPECT_EQ(child->Value, 12u);
+        child->Rows.resize(1024);
+        auto parent = graph.AcquireFramePayload<Parent>(this, 0);
+        parent->Value = child;
+        auto second = graph.AcquireFramePayload<Child>(this, 0, 24u);
+        EXPECT_NE(child.get(), second.get());
+        EXPECT_EQ(second->Value, 24u);
+        second->Rows.resize(1024);
+    }
+    const auto created = resources.GetPayloadStats().Creations;
+    EXPECT_EQ(created, 3u);
+    for (uint64_t frame = 2; frame < 10002; ++frame) {
+        resources.BeginFlight(frame, writes);
+        RenderGraph graph{Device, resources, *Registry, "reuse factory versions"};
+        auto first = graph.AcquireFramePayload<Child>(this, 0, 99u);
+        auto second = graph.AcquireFramePayload<Child>(this, 0, 99u);
+        ASSERT_NE(first.get(), second.get());
+        ASSERT_EQ(first->Rows.size(), 1024u);
+        ASSERT_EQ(second->Rows.size(), 1024u);
+        auto parent = graph.AcquireFramePayload<Parent>(this, 0);
+        ASSERT_FALSE(parent->Value);
+        parent->Value = first;
+        ASSERT_EQ(resources.GetPayloadStats().Creations, created);
+        ASSERT_EQ(resources.GetPayloadStats().Entries, 3u);
+    }
+}
+
+TEST_F(RenderGraphCompileTest, RecycledInstancesDropErrorsAndRenewHandleGenerations) {
+    HostWriteBatch writes;
+    RenderGraphFrameResources resources{Device, *Registry};
+    resources.BeginFlight(1, writes);
+    uint64_t id = 0;
+    RgTextureValue stale;
+    {
+        RenderGraph graph{Device, resources, *Registry, "failed instance"};
+        id = graph.GetReport().InstanceStorageId;
+        stale = graph.CreateTexture(GraphColor(), "old resource");
+        graph.AddComputePass<EmptyPass>("read undefined", [=](EmptyPass&, RenderGraphComputeBuilder& b) {
+            b.ReadTexture(stale); b.SetSideEffect(); }, EmptyCompute);
+        EXPECT_FALSE(graph.Compile());
+        EXPECT_TRUE(graph.HasFailed());
+    }
+    {
+        RenderGraph graph{Device, resources, *Registry, "recovered instance"};
+        EXPECT_EQ(graph.GetReport().InstanceStorageId, id);
+        EXPECT_TRUE(graph.GetReport().Diagnostics.empty());
+        EXPECT_TRUE(graph.GetFirstErrorCode().empty());
+        auto color = graph.CreateTexture(GraphColor(), "new resource");
+        EXPECT_NE(color.Generation, stale.Generation);
+        Clear(graph, color, "new root", render::LoadAction::Clear, render::StoreAction::Store, true);
+        ASSERT_TRUE(graph.Compile()) << graph.GetReport().ToText();
+        EXPECT_EQ(graph.GetReport().Textures, 1u);
+        EXPECT_EQ(graph.GetReport().LivePasses, 1u);
+    }
+}
+
 TEST_F(RenderGraphCompileTest, RejectsTextureReadbackOffsetInsideATexelBeforeAllocation) {
     auto graph = MakeGraph();
     auto color = graph.CreateTexture(GraphColor(), "color");
@@ -830,6 +996,62 @@ TEST(RenderGraphLiveWorkTest, PreparationFailureAndInvalidUploadCancelBeforeAnyR
             EXPECT_EQ(ticket.Status(), FrameOperationStatus::GpuCompleted);
         }
     }
+}
+
+TEST(RenderGraphLiveWorkTest, TemplateCallbackStorageConvergesAcrossConcurrentGraphsAndPreparationRetries) {
+    test::UploadTestDevice device;
+    render::RenderPassRegistry registry{&device};
+    RenderResourcePool pool{device, registry};
+    struct Frame {
+        uint64_t Tag{0}, Mask{0}, Observed{0};
+        uint32_t WorkCalls{0}, PrepareCalls{0};
+    };
+    RenderGraph builder{device, pool, registry, "reusable callbacks"};
+    const auto slot = builder.DeclareTemplateSlot<Frame>();
+    const auto work = builder.AddTemplateWork("work", slot, +[](Frame& frame, uint64_t mask) {
+        ++frame.WorkCalls;
+        frame.Mask = mask;
+        return true; });
+    builder.AddTemplateComputePass<EmptyPass>("prepare retry", slot, [=](EmptyPass&, RenderGraphComputeBuilder& pass) {
+        pass.RequireWork(work, 7);
+        pass.SetSideEffect(); }, +[](const EmptyPass&, Frame& frame, RenderGraphPrepareContext&) {
+        ++frame.PrepareCalls;
+        frame.Observed = frame.Tag;
+        return false; }, +[](const EmptyPass&, const Frame&, RenderGraphComputeContext&) { ADD_FAILURE() << "Failed preparation must not record"; });
+    const auto recipe = builder.FreezeTemplate();
+    ASSERT_TRUE(recipe);
+    RenderGraphFrameResources resources{device, registry};
+    HostWriteBatch writes;
+    uint64_t creations = 0;
+    array<weak_ptr<Frame>, 2> previous;
+    for (uint64_t epoch = 1; epoch <= 10010; ++epoch) {
+        resources.BeginFlight(epoch, writes);
+        for (const auto& owner : previous) ASSERT_TRUE(owner.expired());
+        array<unique_ptr<RenderGraph>, 2> graphs;
+        array<shared_ptr<Frame>, 2> frames;
+        for (uint32_t index = 0; index < graphs.size(); ++index) {
+            auto& graph = graphs[index] = make_unique<RenderGraph>(device, resources, registry, "concurrent callback frame");
+            auto& frame = frames[index] = make_shared<Frame>();
+            frame->Tag = epoch * 2 + index;
+            previous[index] = frame;
+            ASSERT_TRUE(graph->Instantiate(recipe).Bind(slot, frame));
+            test::UploadTestCommand command;
+            const auto result = RenderGraphTestDriver::ExecuteWithPresent(*graph, command, {});
+            ASSERT_FALSE(result.Success);
+            ASSERT_FALSE(result.CommandsRecorded);
+            ASSERT_EQ(frame->WorkCalls, 1u);
+            ASSERT_EQ(frame->PrepareCalls, 1u);
+            ASSERT_EQ(frame->Mask, 7u);
+            ASSERT_EQ(frame->Observed, frame->Tag);
+            if (index) ASSERT_EQ(frames[0]->Observed, epoch * 2);
+        }
+        const auto stats = resources.GetPayloadStats();
+        ASSERT_EQ(stats.Entries, 4u);
+        if (epoch == 10) creations = stats.Creations;
+        if (epoch > 10) ASSERT_EQ(stats.Creations, creations);
+    }
+    EXPECT_EQ(creations, 4u);
+    EXPECT_EQ(resources.GetPayloadStats().Reuses, 4u * 10009);
 }
 
 TEST_F(RenderGraphCompileTest, WorkHandleGenerationAndMaskAreValidatedBeforeCompilation) {

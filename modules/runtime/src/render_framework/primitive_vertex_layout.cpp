@@ -243,9 +243,19 @@ void ResolvedPrimitiveVertexLayout::RebindSemantics() noexcept {
     }
 }
 
+RenderMemoryStats ResolvedPrimitiveVertexLayout::GetMemoryStats() const noexcept {
+    RenderMemoryStats result;
+    result.ObjectBytes = sizeof(*this);
+    detail::MeasureVector(result, _buffers);
+    detail::MeasureVector(result, _attributes);
+    detail::MeasureVector(result, _semantics);
+    for (const auto& semantic : _semantics) detail::MeasureString(result, semantic);
+    return result;
+}
+
 std::optional<ResolvedPrimitiveVertexLayout> ResolvePrimitiveVertexLayout(
     const PrimitiveVertexLayout& layout,
-    const shader::ShaderArtifactView& artifact) noexcept {
+    const shader::ShaderArtifactView& artifact) {
     ResolvedPrimitiveVertexLayout result;
     result._semantics.reserve(artifact.VertexInputs().size());
     result._attributes.reserve(artifact.VertexInputs().size());

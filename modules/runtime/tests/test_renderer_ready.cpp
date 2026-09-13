@@ -148,22 +148,29 @@ struct VertexOutput { float4 Position : SV_Position; float4 Color : COLOR0; floa
         if (!aBinding.IsValid() || !bBinding.IsValid()) return false;
         Scene.Valid = Scene.HasPassPolicies = true;
         Scene.PublicationRevision = 1;
-        Scene.GeometryBindingPlans.emplace_back().Runs = {{0, 2}, {2, 1}};
+        Scene.GeometryBindingPlans.resize(3);
+        for (auto& geometryPlan : Scene.GeometryBindingPlans) geometryPlan.Runs = {{0, 2}, {2, 1}};
         for (uint32_t i = 0; i < 3; ++i) {
             auto& record = Scene.DrawRecords.emplace_back();
             record.Id = i;
             record.Status = DrawRecordStatus::Ready;
             record.NormalStateId = 1;
             record.MirroredStateId = 2;
-            record.GeometryBindingPlan = 0;
-            record.Description.Program = Program.get();
-            record.Description.Geometry = &Geometry;
-            record.Description.IndexCount = 3;
-            record.Description.FirstIndex = 2;
-            record.Description.VertexOffset = -1;
-            record.Description.PipelineState.Primitive.Cull = render::CullMode::None;
-            record.Description.PipelineState.DepthStencil.DepthTestEnable = false;
-            record.Description.PipelineState.DepthStencil.DepthWriteEnable = false;
+            record.GeometryBindingPlan = i;
+            record.Plan = static_cast<uint32_t>(Scene.DrawPlans.size());
+            auto& plan = Scene.DrawPlans.emplace_back();
+            plan.NormalState = plan.MirroredState = static_cast<uint32_t>(Scene.StatePlans.size());
+            auto& state = Scene.StatePlans.emplace_back().State;
+            plan.Program = Program.get();
+            plan.Geometry = i;
+            auto& draw = Scene.GeometryBindingPlans[plan.Geometry];
+            draw.Geometry = &Geometry;
+            draw.IndexCount = 3;
+            draw.FirstIndex = 2;
+            draw.VertexOffset = -1;
+            state.Primitive.Cull = render::CullMode::None;
+            state.DepthStencil.DepthTestEnable = false;
+            state.DepthStencil.DepthWriteEnable = false;
         }
         for (uint32_t i = 0; i < 3; ++i)
             if (!List.AppendStatic(Scene, i, Groups, i == 1 ? bBinding : aBinding)) return false;
@@ -248,6 +255,76 @@ TEST_P(RendererReadyTest, AbaOffsetsAndVertexBindingRunsPreserveIndexedArguments
     EXPECT_EQ(graph.GetReport().CommandCalls.DrawIndexed, 3u);
     EXPECT_EQ(graph.GetReport().CommandCalls.VertexBuffer, 2u);
     EXPECT_EQ(graph.GetReport().CommandCalls.SetParameters, 5u);
+}
+
+TEST_P(RendererReadyTest, SharedPlanPreparationMatchesDynamicReferenceAcrossAttachments) {
+    ReadySceneFixture fixture{*Context.Device};
+    ASSERT_TRUE(fixture.Initialize(Writes));
+    fixture.List.ResetForReuse();
+    fixture.Scene.DrawRecords[0].Plan = 0;
+    fixture.Scene.DrawRecords[1].Plan = 0;
+    fixture.Scene.DrawRecords[1].GeometryBindingPlan = 0;
+    fixture.Scene.DrawRecords[1].Mirrored = true;
+    fixture.Scene.DrawRecords[2].Plan = 1;
+    fixture.Scene.DrawRecords[2].GeometryBindingPlan = 1;
+    fixture.Scene.DrawPlans[0].MirroredState = 2;
+    fixture.Scene.StatePlans[2].State.Primitive.FaceClockwise = OppositeFrontFace(fixture.Scene.StatePlans[0].State.Primitive.FaceClockwise);
+    fixture.Scene.GeometryBindingPlans[fixture.Scene.DrawPlans[1].Geometry].FirstIndex = 5;
+    const array<FrameShaderGroupId, 3> groups{fixture.View, fixture.ObjectA, fixture.Material};
+    const auto binding = fixture.Groups.InternBinding(groups);
+    ASSERT_TRUE(binding.IsValid());
+    for (uint32_t draw = 0; draw < 96; ++draw)
+        ASSERT_TRUE(fixture.List.AppendStatic(fixture.Scene, draw % 3, fixture.Groups, binding));
+    RendererList reference;
+    for (size_t draw = 0; draw < fixture.List.GetDrawCount(); ++draw) {
+        MeshDrawCommand command;
+        static_cast<MeshDrawDescription&>(command) = fixture.List.GetDescription(draw);
+        command.PipelineState = fixture.List.GetPipelineState(draw);
+        for (const auto group : groups) command.Groups.push_back(fixture.Groups.GetGroup(group));
+        ASSERT_TRUE(reference.AppendDynamic(std::move(command), &fixture.Groups));
+    }
+    auto graph = MakeGraph("shared plan attachment isolation");
+    struct Payload {
+        RendererList* Cached;
+        RendererList* Reference;
+        std::optional<PreparedRendererList> CachedReady, ReferenceReady;
+    };
+    for (const auto format : {render::TextureFormat::RGBA8_UNORM, render::TextureFormat::RGBA16_FLOAT}) {
+        const auto color = graph.CreateTexture({render::TextureDimension::Dim2D, 16, 16, 1, 1, 1, format, render::MemoryType::Device, render::TextureUse::RenderTarget, {}}, "plan target");
+        graph.AddRasterPass<Payload>("plan comparison", [&](Payload& data, RenderGraphRasterBuilder& builder) {
+            data.Cached = &fixture.List;
+            data.Reference = &reference;
+            builder.SetColorAttachment(0, color);
+            builder.SetSideEffect(); }, +[](Payload& data, RenderGraphPrepareContext& context) {
+            data.CachedReady = PrepareRendererList(*data.Cached, context);
+            data.ReferenceReady = PrepareRendererList(*data.Reference, context);
+            if (!data.CachedReady || !data.ReferenceReady) return false;
+            const auto& cached = data.CachedReady->GetPreparationStats();
+            const auto& referenceStats = data.ReferenceReady->GetPreparationStats();
+            EXPECT_EQ(cached.StaticDraws, 96u);
+            EXPECT_EQ(cached.PipelineIdentityLookups, 3u);
+            EXPECT_EQ(cached.GeometryIdentityLookups, 1u);
+            EXPECT_EQ(cached.BindingIdentityLookups, 0u);
+            EXPECT_EQ(referenceStats.StaticDraws, 0u);
+            EXPECT_EQ(referenceStats.BindingIdentityLookups, 96u);
+            EXPECT_EQ(referenceStats.PipelineIdentityLookups, 96u);
+            return true; }, +[](const Payload& data, RenderGraphRasterContext& context) {
+            auto& command = *RenderGraphTestDriver::NativeEncoder(context).GetCommandBuffer();
+            ReadyTraceEncoder cached{command}, referenceTrace{command};
+            DrawExecutionStats cachedStats, referenceStats;
+            RenderGraphTestDriver::WithEncoder(context, cached, [&](RenderGraphRasterContext& traced) { RecordRendererList(*data.CachedReady, traced, cachedStats); });
+            RenderGraphTestDriver::WithEncoder(context, referenceTrace, [&](RenderGraphRasterContext& traced) { RecordRendererList(*data.ReferenceReady, traced, referenceStats); });
+            EXPECT_TRUE(cachedStats.Succeeded());
+            EXPECT_TRUE(referenceStats.Succeeded());
+            EXPECT_EQ(cached.Draws, referenceTrace.Draws);
+            ASSERT_EQ(cached.Draws.size(), 96u);
+            EXPECT_NE(cached.Draws[0].Pipeline, cached.Draws[1].Pipeline);
+            EXPECT_EQ(cached.Draws[0].Pipeline, cached.Draws[2].Pipeline);
+            EXPECT_EQ(cached.Draws[0].Arguments[2], 2);
+            EXPECT_EQ(cached.Draws[2].Arguments[2], 5); });
+    }
+    ASSERT_TRUE(Run(graph)) << graph.GetReport().ToText();
+    EXPECT_EQ(graph.GetReport().GraphicsPipelinePreparations, 8u);
 }
 
 TEST_P(RendererReadyTest, EveryRecordRebindsItsFirstDrawAfterExternalStateChanges) {
@@ -420,7 +497,7 @@ TEST_P(RendererReadyTest, ReadyValidationRunsAfterAllPreparationAndUsesTheFrameM
 TEST_P(RendererReadyTest, InvalidGeometryIsRejectedAtReadyBoundaryBeforeAnyRecording) {
     ReadySceneFixture fixture{*Context.Device};
     ASSERT_TRUE(fixture.Initialize(Writes));
-    fixture.Scene.DrawRecords[0].Description.IndexCount = 40;
+    fixture.Scene.GeometryBindingPlans[fixture.Scene.DrawPlans[fixture.Scene.DrawRecords[0].Plan].Geometry].IndexCount = 40;
     auto graph = MakeGraph("invalid Ready geometry");
     const auto color = graph.CreateTexture({render::TextureDimension::Dim2D, 16, 16, 1, 1, 1, render::TextureFormat::RGBA8_UNORM, render::MemoryType::Device, render::TextureUse::RenderTarget, {}}, "color");
     uint32_t prepares = 0, records = 0;

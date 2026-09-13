@@ -59,13 +59,13 @@ struct ForwardHdrView {
 };
 
 bool DeclareForwardSharedShadows(RenderGraph& graph, ForwardEffectTemplates& templates, const ForwardPipelineSettings& settings, const ResolvedRenderView& primary,
-                                 const RenderSceneSnapshot& scene, const PackedCBufferTable& objects, FrameDrawResources& draws, ForwardBindingCache& bindings,
+                                 const RenderSceneSnapshot& scene, CBufferRows objects, FrameDrawResources& draws, ForwardBindingCache& bindings,
                                  ForwardHdrView& work, render::RenderBackend backend, bool& warned, ForwardShadowAtlas& out);
 
 bool BuildForwardHdrView(RenderGraph& graph, ForwardEffectTemplates& templates, RenderPipelineContext& context, render::Device& device,
                          const ForwardEffectPrograms& programs, const ForwardPipelineSettings& settings,
                          const ResolvedRenderViewFamily& family, const ResolvedRenderView& sourceView,
-                         const RenderSceneSnapshot& scene, const PackedCBufferTable& objects, FrameDrawResources& draws, ForwardBindingCache& bindings,
+                         const RenderSceneSnapshot& scene, CBufferRows objects, FrameDrawResources& draws, ForwardBindingCache& bindings,
                          ForwardHdrView& work, bool firstOutputView, bool& lightOverflowWarned,
                          std::span<const ForwardOutputSurface> surfaces, std::span<RenderGraphOutputBinding> outputs,
                          const ForwardShadowAtlas& shadows, bool auxiliary, shared_ptr<ForwardLitMeshPassProcessor> sharedLit = {});

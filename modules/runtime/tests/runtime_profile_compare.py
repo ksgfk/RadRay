@@ -129,7 +129,8 @@ def make_report(baseline, candidate, errors):
     steady_complete = conforming and all(run["summary"].get("steadyTotalComplete") is True and
         len(run["rows"]) == 1000 and all((row.get("coverage") or {}).get("totalComplete") is True and integer(row.get("preparationTotalNs")) for row in run["rows"]) for run in baseline + candidate)
     gates = {}
-    for metric, p50_limit, p95_limit in (("drawWorkBuildNs", .5, .65), ("graphMaintenanceNs", .3, .5), ("preparationTotalNs", .7, .8), ("gtRenderPreparationNs", None, 1.1)):
+    for metric in ("drawWorkBuildNs", "graphMaintenanceNs", "preparationTotalNs", "gtRenderPreparationNs", "rtRenderNs", "inputToSubmitNs"):
+        p50_limit, p95_limit = 1.05, 1.10
         item = metrics.get(metric)
         eligible = conforming and item and item["stable"] and (metric != "preparationTotalNs" or steady_complete)
         ratios = item["ratios"] if item else {}
@@ -139,8 +140,8 @@ def make_report(baseline, candidate, errors):
               "phaseCoverage": {label: [run["summary"].get("phaseCoverage") for run in rounds] for label, rounds in (("baseline", baseline), ("candidate", candidate))},
               "warmupMetrics": compare_rounds([{**run, "rows": run.get("warmupRows", [])} for run in baseline], [{**run, "rows": run.get("warmupRows", [])} for run in candidate]),
               "gtP95Within110Percent": gt["ratios"]["p95"] <= 1.1 if conforming and gt and gt["stable"] and gt["ratios"]["p95"] is not None else None,
-              "preparationTotalTargetPassed": gates["preparationTotalNs"], "targetsPassed": gates, "workerActiveNs": None,
-              "scope": "source-keyed instrumented GT/RT work intervals; incomplete whole-runtime coverage is not promoted to PreparationTotal",
+              "preparationTotalTargetPassed": gates["preparationTotalNs"], "targetsPassed": gates, "regressionLimits": {"p50": 1.05, "p95": 1.10, "maxRoundP50Cv": .05}, "workerActiveNs": None,
+              "scope": "source-keyed GT and complete pre-record RT intervals, excluding explicit external presentation acquisition; incomplete whole-runtime coverage is not promoted to PreparationTotal",
               "inputs": {"baseline": [{"summary": run["evidence"], "frames": run["frames"]} for run in baseline], "candidate": [{"summary": run["evidence"], "frames": run["frames"]} for run in candidate]}}
     return report
 

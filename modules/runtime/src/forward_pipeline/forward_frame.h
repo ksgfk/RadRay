@@ -61,6 +61,40 @@ private:
     uint64_t _publicationId{0};
     uint64_t _publicationRevision{0};
 };
+/// Scene extension data. Only changed pages are copied; older snapshots retain immutable pages.
+struct ForwardObjectExtensionData {
+    static constexpr size_t PageRows = 32;
+    struct Version {
+        uint64_t Generation{0}, TransformRevision{0};
+    };
+    struct Page {
+        array<Forward_ObjectData, PageRows> Values;
+        array<Version, PageRows> Versions{};
+    };
+    vector<shared_ptr<const Page>> Pages;
+    size_t Count{0};
+    uint64_t UpdatedRows{0}, CopiedPages{0};
+    void ResetForReuse() noexcept {
+        Pages.clear();
+        Count = 0;
+        UpdatedRows = CopiedPages = 0;
+    }
+    RenderMemoryStats GetMemoryStats() const noexcept {
+        RenderMemoryStats result;
+        result.ObjectBytes = sizeof(*this);
+        result.VectorCapacityBytes = Pages.capacity() * sizeof(shared_ptr<const Page>);
+        result.OwnerReferences = Pages.size();
+        return result;
+    }
+    size_t RowCount() const noexcept { return Count; }
+    uint32_t Stride() const noexcept { return sizeof(Forward_ObjectData); }
+    std::span<const byte> Row(size_t index) const noexcept {
+        RADRAY_ASSERT(index < Count);
+        return AsCBufferBytes(Pages[index / PageRows]->Values[index % PageRows]);
+    }
+};
+const SceneRenderExtension& ForwardObjectExtension() noexcept;
+
 RenderViewDesc CollectRenderView(const CameraComponent& camera);
 /// A positive multiple of the inverse transpose; normalize transformed normals in the shader.
 Eigen::Matrix4f MakeNormalToWorld(const Eigen::Matrix4f& localToWorld);

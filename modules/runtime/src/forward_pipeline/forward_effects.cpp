@@ -61,6 +61,17 @@ struct EffectFrame {
     Forward_EffectsData Base{};
     vector<EffectReady> Ready;
     vector<ForwardOutputSurface> Surfaces;
+    void ResetForReuse() noexcept {
+        Work = nullptr;
+        Settings = {};
+        View = {};
+        OutputViewport = OutputScissor = {};
+        Serial = 0;
+        HistoryValid = false;
+        Base = {};
+        Ready.clear();
+        Surfaces.clear();
+    }
 };
 void PrepareEffectInputs(EffectFrame& frame) {
     auto& values = frame.Base;
@@ -354,6 +365,7 @@ struct HdrDrawWork {
     bool Temporal, ReadOnlyDepth;
     bool* Warned;
     shared_ptr<EffectFrame> Effects;
+    void ResetForReuse() noexcept { *this = {}; }
 };
 bool PrepareHdrDrawWork(HdrDrawWork& request, uint64_t mask) {
     RADRAY_PROFILE_SCOPE_N("Forward::DrawWorkBuild.Prepare");
@@ -406,6 +418,7 @@ struct ShadowDrawWork {
     ResolvedRenderView Main;
     ForwardPipelineSettings Settings;
     RenderValidationMode Validation;
+    void ResetForReuse() noexcept { *this = {}; }
 };
 bool PrepareShadowDrawWork(ShadowDrawWork& request, uint64_t mask) {
     RADRAY_PROFILE_SCOPE_N("Forward::DrawWorkBuild.Prepare");
@@ -616,7 +629,7 @@ void ForwardHdrView::Reset() {
 }
 
 bool DeclareForwardSharedShadows(RenderGraph& graph, ForwardEffectTemplates& templates, const ForwardPipelineSettings& settings, const ResolvedRenderView& primary,
-                                 const RenderSceneSnapshot& scene, const PackedCBufferTable& objects, FrameDrawResources& draws, ForwardBindingCache& bindings,
+                                 const RenderSceneSnapshot& scene, CBufferRows objects, FrameDrawResources& draws, ForwardBindingCache& bindings,
                                  ForwardHdrView& work, render::RenderBackend backend, bool& warned, ForwardShadowAtlas& out) {
     RADRAY_PROFILE_SCOPE_N("DeclareSharedShadows");
     auto& cache = templates.Get();
@@ -655,11 +668,15 @@ bool DeclareForwardSharedShadows(RenderGraph& graph, ForwardEffectTemplates& tem
     const auto instance = graph.Instantiate(recipe.Graph);
     auto processor = [&] {
         RADRAY_PROFILE_SCOPE_N("Forward::DrawWorkBuild.Processor");
-        return make_shared<ForwardLitMeshPassProcessor>(draws, bindings, warned, objects);
+        auto value = graph.AcquireFramePayload<ForwardLitMeshPassProcessor>(&work, 0, draws, bindings, warned, objects);
+        value->ResetFrame(draws, bindings, warned, objects);
+        return value;
     }();
     if (!instance.IsValid() || !instance.Bind(recipe.WorkSlot, [&] {
             RADRAY_PROFILE_SCOPE_N("Forward::DrawWorkBuild.EffectFrameInputs");
-            return make_shared<ShadowDrawWork>(ShadowDrawWork{&work, &scene, std::move(processor), primary, settings, graph.GetRuntimeOptions().Validation});
+            auto value = graph.AcquireFramePayload<ShadowDrawWork>(&work, 0);
+            *value = {&work, &scene, std::move(processor), primary, settings, graph.GetRuntimeOptions().Validation};
+            return value;
         }())) return false;
     for (uint32_t cascade = 0; cascade < recipe.Stages.size(); ++cascade) {
         auto& draw = work.Cascades[cascade];
@@ -673,7 +690,7 @@ bool DeclareForwardSharedShadows(RenderGraph& graph, ForwardEffectTemplates& tem
             RADRAY_PROFILE_SCOPE_N("Forward::DrawWorkBuild.PassViewInputs");
             return ForwardGraphView{.View = draw.View, .List = &draw.DepthOnly};
         }();
-        if (!instance.Bind(recipe.Stages[cascade], ForwardGraph::MakeFrame({.Backend = backend, .Views = std::span{&view, 1}, .Execution = &work.Execution}))) return false;
+        if (!instance.Bind(recipe.Stages[cascade], ForwardGraph::MakeFrame(graph, &work, (uint64_t{1} << 32) | cascade, {.Backend = backend, .Views = std::span{&view, 1}, .Execution = &work.Execution}))) return false;
     }
     work.ContentValid = true;
     out = {instance.Value(recipe.Output), &work.ShadowValues};
@@ -723,7 +740,7 @@ bool BuildOutputSurfaces(EffectGraphBuilder& effects, ShaderProgram& program,
 bool BuildForwardHdrView(RenderGraph& graph, ForwardEffectTemplates& templates, RenderPipelineContext& context, render::Device& device,
                          const ForwardEffectPrograms& programs, const ForwardPipelineSettings& settings,
                          const ResolvedRenderViewFamily& family, const ResolvedRenderView& sourceView,
-                         const RenderSceneSnapshot& scene, const PackedCBufferTable& objects, FrameDrawResources& draws, ForwardBindingCache& bindings,
+                         const RenderSceneSnapshot& scene, CBufferRows objects, FrameDrawResources& draws, ForwardBindingCache& bindings,
                          ForwardHdrView& work, bool firstOutputView, bool& lightOverflowWarned,
                          std::span<const ForwardOutputSurface> surfaces, std::span<RenderGraphOutputBinding> outputs,
                          const ForwardShadowAtlas& shadows, bool auxiliary, shared_ptr<ForwardLitMeshPassProcessor> sharedLit) {
@@ -1087,7 +1104,8 @@ bool BuildForwardHdrView(RenderGraph& graph, ForwardEffectTemplates& templates, 
     }
     auto frame = [&] {
         RADRAY_PROFILE_SCOPE_N("Forward::DrawWorkBuild.EffectFrameInputs");
-        auto value = make_shared<EffectFrame>();
+        auto value = graph.AcquireFramePayload<EffectFrame>(&work, 0);
+        value->ResetForReuse();
         value->Work = &work;
         value->Settings = viewSettings;
         value->View = view;
@@ -1104,13 +1122,16 @@ bool BuildForwardHdrView(RenderGraph& graph, ForwardEffectTemplates& templates, 
     }();
     if (!sharedLit) {
         RADRAY_PROFILE_SCOPE_N("Forward::DrawWorkBuild.Processor");
-        sharedLit = make_shared<ForwardLitMeshPassProcessor>(draws, bindings, lightOverflowWarned, objects, temporal ? &context : nullptr);
+        sharedLit = graph.AcquireFramePayload<ForwardLitMeshPassProcessor>(&work, 0, draws, bindings, lightOverflowWarned, objects, temporal ? &context : nullptr);
+        sharedLit->ResetFrame(draws, bindings, lightOverflowWarned, objects, temporal ? &context : nullptr);
     }
     work.Main.Work = instance.Value(recipe.Work);
     if (!instance.Bind(recipe.WorkSlot, [&] {
             RADRAY_PROFILE_SCOPE_N("Forward::DrawWorkBuild.EffectFrameInputs");
-            return make_shared<HdrDrawWork>(HdrDrawWork{&work, &scene, &context, std::move(sharedLit), settings.MaxLocalLights,
-                                                        graph.GetRuntimeOptions().Validation, temporal, !writeDepthInOpaque, &lightOverflowWarned, frame});
+            auto value = graph.AcquireFramePayload<HdrDrawWork>(&work, 0);
+            *value = {&work, &scene, &context, std::move(sharedLit), settings.MaxLocalLights,
+                      graph.GetRuntimeOptions().Validation, temporal, !writeDepthInOpaque, &lightOverflowWarned, frame};
+            return value;
         }()) ||
         !instance.Bind(recipe.Effects, frame) || !instance.Bind(recipe.LightUpload, shared_ptr<RgUploadData>{frame, &work.LightUpload})) return false;
     const ForwardGraphView stageViews[]{
@@ -1127,7 +1148,7 @@ bool BuildForwardHdrView(RenderGraph& graph, ForwardEffectTemplates& templates, 
             return ForwardGraphView{.View = view, .List = &work.Main.Transparent, .PassValues = ForwardGraphPassValues{shadows.Values.Get(), &work.LightCount, size, settings.MaxLightsPerTile, viewSettings.ForwardPlus, viewSettings.AmbientOcclusion, !writeDepthInOpaque}};
         }()};
     for (size_t index = 0; index < recipe.Stages.size(); ++index)
-        if (!instance.Bind(recipe.Stages[index], ForwardGraph::MakeFrame({.Backend = device.GetBackend(), .Views = std::span{&stageViews[index], 1}, .Execution = &work.Execution}))) return false;
+        if (!instance.Bind(recipe.Stages[index], ForwardGraph::MakeFrame(graph, &work, index, {.Backend = device.GetBackend(), .Views = std::span{&stageViews[index], 1}, .Execution = &work.Execution}))) return false;
     outputBinding->Texture = instance.Value(recipe.Output);
     work.ContentValid = true;
     work.TemporalHistory = temporal;
@@ -1200,7 +1221,8 @@ bool BuildForwardOutputOverlay(RenderGraph& graph, ForwardEffectTemplates& templ
     const auto instance = graph.Instantiate(recipe.Graph);
     auto frame = [&] {
         RADRAY_PROFILE_SCOPE_N("Forward::DrawWorkBuild.ObserverFrameInputs");
-        auto value = make_shared<EffectFrame>();
+        auto value = graph.AcquireFramePayload<EffectFrame>(&templates, recipe.Frame.Index);
+        value->ResetForReuse();
         value->View = source->Views.front();
         value->OutputViewport = value->OutputScissor = rectangle;
         value->Ready.resize(recipe.ReadyCount);

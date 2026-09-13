@@ -189,12 +189,13 @@ ProgramFrameId 仅作帧内映射。光源保存参数和球形界限。发布�
 
 Forward 在 render thread 对每个 resolved view 调用一次 CPU `Cull`，从同一结果生成 DepthOnly、
 Opaque、Transparent 三个 `RendererList`。同一 family 内复用 Depth/Lit processor，view 切换时 `ResetView`；
-HDR 多 view 共用一个 lit processor，主相机的三张列表走 `BuildRendererLists`（按 pass 顺序写出；契约校验仅 `Validation=Full`）。通用 builder 处理 pass/queue/mask、排序与统计；具体
+HDR 多 view 共用一个 lit processor，主相机的三张列表走 `BuildRendererLists`（共享剔除候选的一次遍历，随后各列表独立排序；契约校验仅 `Validation=Full`）。通用 builder 处理 pass/queue/mask、排序与统计；具体
 `ForwardLitMeshPassProcessor` / `DepthOnlyMeshPassProcessor` 读取 snapshot 的静态 binding recipe，准备
 per-view/object/material bytes 与 frame-local groups，再发布 draw-record 索引和 `FrameDrawBindingId`。
 静态列表不创建 `MeshDrawCommand`；未知或 view-dependent batch 由动态适配入口创建一次拥有数据的候选。
-processor 不保留另一套 command 模板、material/object 组缓存；所有列表和 processor 共用所属 flight
-的 `FrameDrawResources` 元组表。`ResetView` 只清当前 view 数值身份，随后重新填充并驻留 view bytes。
+processor 不保留另一套 command 模板或拥有原生组的缓存；所有列表和 processor 共用所属 flight
+的 `FrameDrawResources` 元组表。Lit processor 按共享 binding plan 保存非拥有的参数域/group 句柄，
+`ResetView` 使这些句柄及当前 view 数值身份失效，随后重新填充并驻留 view bytes。
 带时域的 object 身份包含 view、历史提供者、已提交 serial 与失效 revision，不能因对象 clean 而跳过必要的历史更新。
 不跨帧复用 Rg handles 或 arena 切片；完整索引、共享与失效契约见
 [Renderer foundation](renderer-foundation.md#renderer-lists-与帧内绘制资源)。
@@ -204,21 +205,22 @@ render thread 不访问 Scene、proxy、CameraComponent、Material、AssetManage
 
 Forward 的数值 cbuffer 走「PrepareFrame 冻住，cull 后 gather」两段，CPU bytes 与 GPU struct 同构：
 
-- **对象**：`PrepareFrame` 在 game thread 用 `forward_detail::ForwardObjectDataCache` 更新 flight 的
-  `PackedCBufferTable`（`stride == sizeof(Forward_ObjectData)`，行下标就是 primitive 下标）。
-  每行以 primitive generation 与 TransformRevision 判定是否需要重新填写矩阵和 normal；所有 flight
-  预热后，不变对象保留原行。只有连续消费同一发布目标的版本才直接使用 changed ranges；跳过发布版本或
-  切换到独立 snapshot 时扫描行版本，补齐漏过的变更。对象移位、替换或未知 transform revision 的行重新计算。`Clear` 同时清除
-  行版本，失败重试不能误复用旧行。`ObjectValueUpdates` 计实际填写的行数。
+- **对象**：Forward 在冻结前登记 `forward_detail::ForwardObjectExtension`，Scene 与通用快照一起发布
+  不可变的 `ForwardObjectExtensionData`。每页 32 行，primitive 行下标直接寻址；generation 或 TransformRevision
+  改变才重新填写矩阵和 normal。同 Scene 的兼容消费者共享扩展，flight 依据各自累计差分更新，旧快照的页不被覆写。
+  扩展 workspace 按页号保留可复用版本；只有缓存独占的页才可重置，多 flight 或外部读者持有的版本继续保活。
+  `PrepareFrame` 通过通用 `CBufferRows` 借用该结果，不复制另一份对象表。`ObjectValueUpdates` 计实际填写行数。
   冻结行的 motion 默认为无运动（`PreviousLocalToWorld` 等于 `LocalToWorld`，`MotionValid` 为 0）；
   temporal view 仍按自己的已提交历史调用 `GetPrimitiveMotion` 补齐，不能因对象版本未变而省略。
-  一次性工具可用 `FreezeObjectData` 全量填写表；产品路径持久复用上述 cache。
+  `FreezeObjectData` 保留全量填写入口；旧 `ForwardObjectDataCache` 仅供独立适配调用，产品路径使用 Scene 扩展。
 - **材质**：`BuildRenderData` 已经把 authoring bytes 冻进 per-flight 的
   `MaterialPassRenderData::NumericBytes`，processor 直接把这段 span 交给 arena。
 - **view / pass / effects / output**：这些依赖剔除结果（灯光表、tile 数、history 有效性），
   不能在 PrepareFrame 冻死。数据齐了以后填对应的 `Forward_*` POD，再整块上传。
 
-Forward 产品路径使用 `FrameDrawResources::PrepareGroupId`，按值身份共享恰好一个 cbuffer 的 group，
+Forward Lit 与 DepthOnly 的静态路径使用 `FrameDrawResources::PrepareIndexedGroup`，参数域在 view/plan 边界注册，
+随后按 material/primitive 行索引读取；旧接口通过 `PrepareGroupId` 适配。
+它们按值身份共享恰好一个 cbuffer 的 group，
 材质纹理和 sampler 同时参与原生绑定身份。`PrepareGroup` 保留吃 `ShaderParameterStorage` 与
 `std::span<const byte>` 的返回值适配入口；多 buffer group 使用 storage 路径。各入口共用同一个 arena，
 按 `DynamicCBufferArena` 的 `CBufferAlignment`（D3D12 上 256）对齐，字节从冻住的表直接 memcpy
@@ -242,7 +244,10 @@ CPU 不硬编码 0/1/2。resolver 失败按 program 负缓存；不替换成其�
 
 `ForwardGraph` 把 Depth/Opaque/Transparent 抽成可复用的阶段声明：调用方传入 view/list、可选 work、
 attachment handles 与 Load/Clear 策略，模块只向同一张 graph 加 pass，不创建或执行另一张图。
-view 值复制进 callback payload，RendererList 借用至 graph 执行结束。内置 ForwardPipeline 先注册
+view 值复制进 callback payload，RendererList 借用至 graph 执行结束。
+各阶段的 `ForwardGraphFrameData` 通过通用 flight payload 池复用；借用时清除列表、图参数与 prepared
+结果的旧引用，保留 view、常量字节、名字及参数行的嵌套数组容量。有效 view 数与容器高水位分开，
+相机数量缩减不会继续准备旧尾部行，同时存活的 graph 使用独立帧数据版本。内置 ForwardPipeline 先注册
 flight-owned 空列表与 typed work，编译后只为 live work 执行剔除、temporal、灯光与列表准备；
 阴影共用一个 atlas work，合并所有存活 cascade 的 mask。所有 work 完成后，pass prepare 才读取
 本帧阴影数值与灯光数量、创建参数 set 和解析 PSO。空列表保留已声明阶段的 attachment 语义。

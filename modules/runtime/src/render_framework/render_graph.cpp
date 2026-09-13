@@ -1,5 +1,6 @@
 #include <radray/runtime/render_framework/render_graph.h>
 #include <radray/runtime/render_framework/render_graph_runtime.h>
+#include <radray/runtime/render_framework/frame_draw_resources.h>
 
 #include <algorithm>
 #include <atomic>
@@ -128,6 +129,42 @@ render::ShaderStages ProgramStages(const ShaderProgram& program) noexcept {
     return stages;
 }
 
+// Logical rows retain nested capacities after release. Reset drops all frame owners and native
+// pointers before an idle graph instance is returned to its flight pool.
+template <class T>
+class GraphInstanceArray {
+public:
+    template <class... Args>
+    T& emplace_back(Args&&... args) {
+        if (_count == _rows.size()) _rows.emplace_back();
+        auto& row = _rows[_count++];
+        row.Initialize(std::forward<Args>(args)...);
+        return row;
+    }
+    void resize(size_t count) {
+        while (_count > count) _rows[--_count].Reset();
+        while (_count < count) emplace_back();
+    }
+    void clear() noexcept {
+        while (_count) _rows[--_count].Reset();
+    }
+    size_t size() const noexcept { return _count; }
+    size_t capacity() const noexcept { return _rows.capacity(); }
+    bool empty() const noexcept { return _count == 0; }
+    T& operator[](size_t index) noexcept { return _rows[index]; }
+    const T& operator[](size_t index) const noexcept { return _rows[index]; }
+    T& back() noexcept { return _rows[_count - 1]; }
+    auto begin() noexcept { return _rows.begin(); }
+    auto end() noexcept { return _rows.begin() + _count; }
+    auto begin() const noexcept { return _rows.begin(); }
+    auto end() const noexcept { return _rows.begin() + _count; }
+    const vector<T>& Storage() const noexcept { return _rows; }
+
+private:
+    vector<T> _rows;
+    size_t _count{0};
+};
+
 struct GraphCompileWorkspace {
     RenderGraphCompilerWorkspace Compiler;
     vector<RgResourceVersionNode> Versions;
@@ -236,9 +273,20 @@ struct RenderGraphFrameResources::Impl {
     unordered_map<ParameterSetKey, render::ShaderParameterSet*, ParameterSetKeyHash> SetCache;
     // Scratch for the key under construction, reused by every set built in a frame.
     ParameterSetKey KeyScratch;
-    vector<ReadyNativeAccess> NativeAccessTables;
     GraphCompileWorkspace CompileWorkspace;
     shared_ptr<RenderGraphPlanCache> Plans;
+    struct FramePayload {
+        const void* Owner;
+        uint64_t Key;
+        const void* Type;
+        uint64_t Serial;
+        shared_ptr<void> Value;
+        void (*Reset)(void*) noexcept;
+    };
+    vector<FramePayload> Payloads;
+    uint64_t PayloadCreations{0}, PayloadReuses{0};
+    uint64_t Serial{0};
+    vector<shared_ptr<RenderGraph::Impl>> Instances;
 };
 
 RenderGraphFrameResources::RenderGraphFrameResources(
@@ -253,6 +301,10 @@ RenderGraphFrameResources::~RenderGraphFrameResources() noexcept = default;
 
 void RenderGraphFrameResources::BeginFlight(uint64_t serial, HostWriteBatch& hostWrites) {
     auto& impl = *_impl;
+    for (auto& entry : impl.Payloads)
+        if (entry.Value.use_count() == 1) entry.Reset(entry.Value.get());
+    std::erase_if(impl.Payloads, [&](const auto& value) { return value.Serial != impl.Serial; });
+    impl.Serial = serial;
     impl.SetCache.clear();
     impl.Sets.clear();
     if (!impl.Arena || impl.HostWrites.Get() != &hostWrites) {
@@ -274,14 +326,35 @@ shared_ptr<FrameGraphTemplateCache>& RenderGraphFrameResources::DefaultCompositi
 }
 const RenderResourcePoolStats& RenderGraphFrameResources::GetPoolStats() const noexcept { return _impl->Pool.GetStats(); }
 size_t RenderGraphFrameResources::GetParameterSetCount() const noexcept { return _impl->Sets.size(); }
+RenderGraphPayloadStats RenderGraphFrameResources::GetPayloadStats() const noexcept {
+    return {_impl->Payloads.size(), _impl->PayloadCreations, _impl->PayloadReuses};
+}
+
+shared_ptr<void> RenderGraphFrameResources::AcquireFramePayloadStorage(const void* owner, uint64_t key, const void* type, shared_ptr<void> (*create)(void*), void* factory, void (*reset)(void*) noexcept) {
+    auto& impl = *_impl;
+    for (auto& entry : impl.Payloads) {
+        if (entry.Owner != owner || entry.Key != key || entry.Type != type) continue;
+        // Every acquisition is writable, including acquisitions by two simultaneous graphs.
+        if (entry.Value.use_count() != 1) continue;
+        ++impl.PayloadReuses;
+        entry.Serial = impl.Serial;
+        return entry.Value;
+    }
+    auto value = create(factory);
+    impl.Payloads.push_back({owner, key, type, impl.Serial, value, reset});
+    ++impl.PayloadCreations;
+    return value;
+}
 
 void RenderGraphFrameResources::Clear() {
+    _impl->Instances.clear();
+    _impl->Payloads.clear();
+    _impl->PayloadCreations = _impl->PayloadReuses = 0;
     _impl->SetCache.clear();
     _impl->Sets.clear();
     if (_impl->Arena) _impl->Arena->Clear();
     _impl->Pool.Clear();
     _impl->CompileWorkspace = {};
-    _impl->NativeAccessTables.clear();
     _impl->Plans->Clear();
 }
 
@@ -297,6 +370,18 @@ struct RenderGraph::Impl {
         T& Edit() noexcept {
             RADRAY_ASSERT(Owned.has_value() && !Borrowed);
             return *Owned;
+        }
+        void Initialize() {
+            Borrowed = nullptr;
+            if (!Owned) Owned.emplace();
+        }
+        void Initialize(const T& declaration) {
+            Owned.reset();
+            Borrowed = &declaration;
+        }
+        void Reset() noexcept {
+            Borrowed = nullptr;
+            if (Owned) Owned->Reset();
         }
         void Materialize() {
             if (!Borrowed) return;
@@ -318,6 +403,21 @@ struct RenderGraph::Impl {
         render::BufferDescriptor BufferDesc;
         RenderGraphExternalAccess ExternalAccess{RenderGraphExternalAccess::ReadWrite};
         uint64_t ViewId{0};
+        void Reset() noexcept {
+            Name.clear();
+            Location = {};
+            IsTexture = false;
+            VersionParents.clear();
+            BufferBoundaries.clear();
+            Port = ExternalSlot = false;
+            Connection = InvalidIndex;
+            ConnectionVersion = 0;
+            ResolvedValues.clear();
+            TextureDesc = {};
+            BufferDesc = {};
+            ExternalAccess = RenderGraphExternalAccess::ReadWrite;
+            ViewId = 0;
+        }
     };
     struct Resource {
         DeclarationStorage<ResourceDeclaration> Declaration;
@@ -358,6 +458,32 @@ struct RenderGraph::Impl {
         render::Buffer* NativeBuffer() const { return ExternalBuffer ? ExternalBuffer->Buffer : Readback ? Readback->Buffer.get()
                                                                                                          : PoolBuffer->Buffer.get(); }
         bool External() const { return ExternalTexture || ExternalBuffer; }
+        void Initialize() {
+            Declaration.Initialize();
+            Declaration.Edit().VersionParents = {InvalidIndex, 0};
+        }
+        void Initialize(const ResourceDeclaration& declaration) { Declaration.Initialize(declaration); }
+        void Reset() noexcept {
+            Declaration.Reset();
+            TemplateInstance = InvalidIndex;
+            VersionTail.clear();
+            ConnectionPatch.reset();
+            ExternalAccessOverride.reset();
+            ExternalBound = false;
+            Physical = InvalidIndex;
+            PlannedCellCount = 0;
+            ExternalTexture = nullptr;
+            ExternalBuffer = nullptr;
+            TextureImports.clear();
+            BufferImports.clear();
+            PoolTexture = nullptr;
+            PoolBuffer = nullptr;
+            Readback.reset();
+            States.clear();
+            Valid.clear();
+            Written = false;
+            FirstUse = LastUse = -1;
+        }
     };
     struct View {
         uint32_t Resource;
@@ -402,6 +528,15 @@ struct RenderGraph::Impl {
         vector<render::ResourceBarrierDescriptor> Barriers;
         Nullable<render::CommandBuffer*> Commands{nullptr};
         std::span<const PhysicalAccess> GetAccesses() const { return CachedAccesses ? std::span<const PhysicalAccess>{*CachedAccesses} : std::span<const PhysicalAccess>{Accesses}; }
+        void Initialize() noexcept {}
+        void Reset() noexcept {
+            Accesses.clear();
+            CachedAccesses = nullptr;
+            BarrierTemplates.clear();
+            RouteResources.clear();
+            Barriers.clear();
+            Commands = nullptr;
+        }
     };
     struct SubmissionState {
         struct TextureCommit {
@@ -439,13 +574,40 @@ struct RenderGraph::Impl {
             }
         }
     };
+    template <class T>
+    class CallbackOwner {
+    public:
+        CallbackOwner() = default;
+        CallbackOwner(CallbackOwner&&) noexcept = default;
+        CallbackOwner& operator=(CallbackOwner&&) noexcept = default;
+        CallbackOwner& operator=(unique_ptr<T> value) noexcept {
+            _shared.reset();
+            _unique = std::move(value);
+            return *this;
+        }
+        CallbackOwner& operator=(shared_ptr<T> value) noexcept {
+            _unique.reset();
+            _shared = std::move(value);
+            return *this;
+        }
+        explicit operator bool() const noexcept { return bool(_unique) || bool(_shared); }
+        T* operator->() const noexcept { return _unique ? _unique.get() : _shared.get(); }
+        void reset() noexcept {
+            _unique.reset();
+            _shared.reset();
+        }
+
+    private:
+        unique_ptr<T> _unique;
+        shared_ptr<T> _shared;
+    };
     struct SubmissionResources {
         shared_ptr<const CompiledFramePlan> Plan;
         vector<shared_ptr<void>> Owners;
         vector<shared_ptr<RgReadbackTicket::Storage>> Readbacks;
         // Generic payloads may own GPU resources, so their lifetime still extends to completion.
-        vector<unique_ptr<Payload>> Payloads;
-        vector<unique_ptr<WorkPayload>> WorkPayloads;
+        vector<CallbackOwner<Payload>> Payloads;
+        vector<CallbackOwner<WorkPayload>> WorkPayloads;
         vector<shared_ptr<FrameSubmission>> Tickets;
 
         void Submit(uint64_t serial) {
@@ -527,6 +689,24 @@ struct RenderGraph::Impl {
         bool Tracked{false};
         render::ShaderStages UavWriteStages{render::ShaderStage::UNKNOWN};
         bool AllowUavWrites{false};
+        void Reset() noexcept {
+            Location = {};
+            Accesses.clear();
+            DeclaredViews.clear();
+            DeclaredBuffers.clear();
+            Colors.clear();
+            DepthAttachment.reset();
+            CopyOp.reset();
+            SideEffect = false;
+            WorkRequirements.clear();
+            Name.clear();
+            Type = RgPassType::Raster;
+            Factory.reset();
+            Slot = UploadSlot = InvalidIndex;
+            Tracked = false;
+            UavWriteStages = render::ShaderStage::UNKNOWN;
+            AllowUavWrites = false;
+        }
     };
     struct Pass {
         struct ReadyCheck {
@@ -556,7 +736,7 @@ struct RenderGraph::Impl {
             const auto& depth = Declaration.Owned ? Declaration.Owned->DepthAttachment : Def().DepthAttachment;
             return depth ? std::optional{depth->Desc.Clear} : std::nullopt;
         }
-        unique_ptr<Payload> Data;
+        CallbackOwner<Payload> Data;
         vector<ReadyCheck> ReadyChecks;
         vector<GeometryCheck> GeometryChecks;
         Nullable<const ReadyNativeAccess*> NativeAccess{nullptr};
@@ -583,6 +763,36 @@ struct RenderGraph::Impl {
         bool Live{false};
         bool Executed{false};
         uint32_t RasterGroup{InvalidIndex};
+        void Initialize() { Declaration.Initialize(); }
+        void Initialize(const PassDeclaration& declaration) { Declaration.Initialize(declaration); }
+        void Reset() noexcept {
+            Declaration.Reset();
+            TemplateInstance = InvalidIndex;
+            ColorClearOverrides = {};
+            DepthClearOverride.reset();
+            Data.reset();
+            ReadyChecks.clear();
+            GeometryChecks.clear();
+            NativeAccess = nullptr;
+            Cells.clear();
+            GeometryReadStates.clear();
+            GeometryReadStatesBuilt = false;
+            CommandCalls = {};
+            CompiledData = nullptr;
+            MergeTail = InvalidIndex;
+            NativePass = nullptr;
+            Framebuffer = nullptr;
+            PassState.reset();
+            Clears.clear();
+            Width = Height = Layers = Samples = 0;
+            UavWriteStages = render::ShaderStage::UNKNOWN;
+            AllowUavWrites = false;
+            UploadBytes.clear();
+            UploadSource = nullptr;
+            Ticket = {};
+            Live = Executed = false;
+            RasterGroup = InvalidIndex;
+        }
     };
     struct CompiledFramePlan {
         struct ResourceLayout {
@@ -605,18 +815,24 @@ struct RenderGraph::Impl {
     render::RenderPassRegistry& Registry;
     Nullable<RenderGraphFrameResources*> FrameResources{nullptr};
     uint64_t Generation;
+    uint64_t StorageIdentity{0};
     uint64_t GenerationSerial{0};
     uint64_t ResourceView{0};
     bool Frozen{false}, Compiled{false}, Executed{false}, Failed{false}, PreparingWork{false}, ValidatingReady{false};
     RenderGraphRuntimeOptions Runtime{kDiagnosticRenderGraphRuntimeOptions};
     string FirstErrorCode;
-    vector<Resource> Resources;
+    GraphInstanceArray<Resource> Resources;
     vector<View> Views;
-    vector<Pass> Passes;
+    GraphInstanceArray<Pass> Passes;
     struct WorkDeclaration {
         string Name;
         shared_ptr<const TemplateWorkFactory> Factory;
         uint32_t Slot{InvalidIndex};
+        void Reset() noexcept {
+            Name.clear();
+            Factory.reset();
+            Slot = InvalidIndex;
+        }
     };
     struct TemplatePlacement {
         uint32_t ResourceBase{0}, ViewBase{0}, PassBase{0}, IndirectBase{0}, WorkBase{0};
@@ -630,17 +846,34 @@ struct RenderGraph::Impl {
         shared_ptr<const RenderGraphTemplate> Source;
         shared_ptr<const TemplatePlacement> Placement;
         vector<shared_ptr<void>> Slots;
+        void Initialize(shared_ptr<const RenderGraphTemplate> source, shared_ptr<const TemplatePlacement> placement, size_t slots) {
+            Source = std::move(source);
+            Placement = std::move(placement);
+            Slots.resize(slots);
+        }
+        void Reset() noexcept {
+            Slots.clear();
+            Source.reset();
+            Placement.reset();
+        }
     };
     vector<const void*> TemplateSlotTypes;
-    vector<TemplateInstanceData> Templates;
+    GraphInstanceArray<TemplateInstanceData> Templates;
     struct Work {
         DeclarationStorage<WorkDeclaration> Declaration;
         Work() = default;
         explicit Work(const WorkDeclaration& declaration) : Declaration(declaration) {}
         uint32_t TemplateInstance{InvalidIndex};
-        unique_ptr<WorkPayload> Data;
+        CallbackOwner<WorkPayload> Data;
+        void Initialize() { Declaration.Initialize(); }
+        void Initialize(const WorkDeclaration& declaration) { Declaration.Initialize(declaration); }
+        void Reset() noexcept {
+            Data.reset();
+            Declaration.Reset();
+            TemplateInstance = InvalidIndex;
+        }
     };
-    vector<Work> Works;
+    GraphInstanceArray<Work> Works;
     vector<std::pair<uint32_t, uint64_t>> LiveWork;
     vector<IndirectArguments> IndirectArgumentsRecords;
     unordered_map<render::Buffer*, uint32_t> NativeBuffers;
@@ -656,6 +889,7 @@ struct RenderGraph::Impl {
     struct ParameterRequest {
         Nullable<ShaderProgram*> Program{nullptr};
         uint32_t Pass{InvalidIndex};
+        bool CompleteLayout{false};
         RenderGraphFrameResources::Impl::ParameterSetKey Key;
         vector<ParameterUse> Uses;
     };
@@ -671,19 +905,55 @@ struct RenderGraph::Impl {
     RenderGraphCompileOptions Options;
     CompiledRenderGraph CompiledGraph;
     shared_ptr<const CompiledFramePlan> FramePlan;
-    vector<PassExecutionPlan> ExecutionPlan;
+    GraphInstanceArray<PassExecutionPlan> ExecutionPlan;
     const CompiledRenderGraph& GetCompiled() const { return FramePlan ? FramePlan->Graph : CompiledGraph; }
     RenderGraphExecutionReport OwnedReport;
-    RenderGraphExecutionReport& Report;
+    RenderGraphExecutionReport* Report;
 
     Impl(render::Device& device, RenderResourcePool& pool, render::RenderPassRegistry& registry,
          Nullable<RenderGraphFrameResources*> frameResources, std::string_view name, Nullable<RenderGraphExecutionReport*> report = nullptr,
          RenderGraphRuntimeOptions runtime = kDiagnosticRenderGraphRuntimeOptions)
         : Device(device), Pool(pool), Registry(registry), FrameResources(frameResources), Generation(NextGraphGeneration.fetch_add(1, std::memory_order_relaxed)),
-          Runtime(runtime), Report(report ? *report : OwnedReport) {
+          Runtime(runtime), Report(report ? report.Get() : &OwnedReport) {
         if (Generation == 0 || Generation == UINT64_MAX) RADRAY_ABORT("RenderGraph generation exhausted");
         GenerationSerial = Pool.GetFrameSerial();
-        Report.Name = name;
+        StorageIdentity = Generation;
+        Report->InstanceStorageId = StorageIdentity;
+        Report->Name = name;
+    }
+    void Release() noexcept {
+        Resources.clear();
+        Views.clear();
+        Passes.clear();
+        Works.clear();
+        Templates.clear();
+        TemplateSlotTypes.clear();
+        LiveWork.clear();
+        IndirectArgumentsRecords.clear();
+        NativeBuffers.clear();
+        for (auto& table : NativeAccessTables) table.Entries.clear();
+        ParameterRequests.clear();
+        PendingParameterSets.clear();
+        Owners.clear();
+        ExecutionPlan.clear();
+        FramePlan.reset();
+        CompiledGraph = {};
+        Options = {};
+        FirstErrorCode.clear();
+        Frozen = Compiled = Executed = Failed = PreparingWork = ValidatingReady = false;
+        ResourceView = 0;
+        Report = &OwnedReport;
+        OwnedReport = {};
+    }
+    void Borrow(std::string_view name, Nullable<RenderGraphExecutionReport*> report, RenderGraphRuntimeOptions runtime) {
+        Generation = NextGraphGeneration.fetch_add(1, std::memory_order_relaxed);
+        if (Generation == 0 || Generation == UINT64_MAX) RADRAY_ABORT("RenderGraph generation exhausted");
+        GenerationSerial = Pool.GetFrameSerial();
+        Runtime = runtime;
+        Report = report ? report.Get() : &OwnedReport;
+        *Report = {};
+        Report->Name = name;
+        Report->InstanceStorageId = StorageIdentity;
     }
     bool ValidationFull() const noexcept { return IsRenderValidationFull(Runtime.Validation); }
     bool ReportFull() const noexcept { return IsRenderGraphReportFull(Runtime.Report); }
@@ -691,7 +961,7 @@ struct RenderGraph::Impl {
                uint32_t resource = InvalidIndex, std::string_view binding = {}) {
         Failed = true;
         if (FirstErrorCode.empty()) FirstErrorCode = string{code};
-        Report.FirstErrorCode = FirstErrorCode;
+        Report->FirstErrorCode = FirstErrorCode;
         if (!ReportFull()) return;
         auto location = pass < Passes.size() ? Passes[pass].Location() : resource < Resources.size() ? Resources[resource].Location()
                                                                                                      : std::source_location::current();
@@ -705,8 +975,8 @@ struct RenderGraph::Impl {
             } else
                 detail += fmt::format(" [buffer size={}, memory={}, usage={}]", entry.Def().BufferDesc.Size, EnumName(entry.Def().BufferDesc.Memory), entry.Def().BufferDesc.Usage.value());
         }
-        Report.Diagnostics.push_back({string{code}, Report.Name, pass < Passes.size() ? string{Passes[pass].Name()} : string{}, string{binding},
-                                      resource < Resources.size() ? string{Resources[resource].Name()} : string{}, std::move(detail), string{location.file_name()}, location.line()});
+        Report->Diagnostics.push_back({string{code}, Report->Name, pass < Passes.size() ? string{Passes[pass].Name()} : string{}, string{binding},
+                                       resource < Resources.size() ? string{Resources[resource].Name()} : string{}, std::move(detail), string{location.file_name()}, location.line()});
     }
     bool Mutable() {
         if (!Frozen) return true;
@@ -721,7 +991,8 @@ struct RenderGraph::Impl {
         return true;
     }
     SubmissionData DetachSubmissionResources();
-    bool ValidateResources();
+    bool ValidateResourceDescriptors();
+    bool PrepareResourceState();
     bool ValidatePlanInput();
     bool ValidateParameterRequests();
     bool PublishParameterSets();
@@ -746,6 +1017,40 @@ struct RenderGraph::Impl {
     bool PatchCommandRoutes(render::CommandBuffer& command, std::span<const PresentCommandTarget> presentTargets);
     void OptimizeRaster();
 };
+
+RenderGraphInstanceStorageStats RenderGraphFrameResources::GetInstanceStorageStats() const noexcept {
+    RenderGraphInstanceStorageStats result;
+    result.Instances = _impl->Instances.size();
+    const auto bytes = [](const auto& values) { return values.capacity() * sizeof(typename std::decay_t<decltype(values)>::value_type); };
+    for (const auto& instance : _impl->Instances) {
+        result.ActiveInstances += instance.use_count() > 1;
+        result.ResourceCapacity += instance->Resources.capacity();
+        result.PassCapacity += instance->Passes.capacity();
+        result.ViewCapacity += instance->Views.capacity();
+        result.WorkCapacity += instance->Works.capacity();
+        result.TemplateCapacity += instance->Templates.capacity();
+        result.ExecutionCapacity += instance->ExecutionPlan.capacity();
+        for (const auto& resource : instance->Resources.Storage()) {
+            result.NestedBytes += bytes(resource.VersionTail) + bytes(resource.TextureImports) + bytes(resource.BufferImports) + bytes(resource.States) + bytes(resource.Valid);
+            if (resource.Declaration.Owned) {
+                const auto& def = *resource.Declaration.Owned;
+                result.NestedBytes += bytes(def.VersionParents) + bytes(def.BufferBoundaries) + bytes(def.ResolvedValues);
+            }
+        }
+        for (const auto& pass : instance->Passes.Storage()) {
+            result.NestedBytes += bytes(pass.ReadyChecks) + bytes(pass.GeometryChecks) + bytes(pass.Cells) + bytes(pass.Clears) + bytes(pass.UploadBytes);
+            if (pass.Declaration.Owned) {
+                const auto& def = *pass.Declaration.Owned;
+                result.NestedBytes += bytes(def.Accesses) + bytes(def.DeclaredViews) + bytes(def.DeclaredBuffers) + bytes(def.Colors) + bytes(def.WorkRequirements);
+            }
+        }
+        for (const auto& execution : instance->ExecutionPlan.Storage())
+            result.NestedBytes += bytes(execution.Accesses) + bytes(execution.BarrierTemplates) + bytes(execution.RouteResources) + bytes(execution.Barriers);
+        for (const auto& value : instance->Templates.Storage()) result.NestedBytes += bytes(value.Slots);
+        for (const auto& table : instance->NativeAccessTables) result.NestedBytes += bytes(table.Entries);
+    }
+    return result;
+}
 
 struct RenderGraphTemplate::Impl {
     render::Device* Device;
@@ -851,7 +1156,7 @@ RenderGraphTemplateInstance RenderGraph::Instantiate(shared_ptr<const RenderGrap
     }
     if (!placement) {
         RADRAY_PROFILE_SCOPE_N("RenderGraph::PlaceTemplate");
-        ++impl.Report.TemplatePlacementBuilds;
+        ++impl.Report->TemplatePlacementBuilds;
         auto placed = make_shared<Impl::TemplatePlacement>();
         placed->ResourceBase = resourceBase;
         placed->ViewBase = viewBase;
@@ -894,8 +1199,8 @@ RenderGraphTemplateInstance RenderGraph::Instantiate(shared_ptr<const RenderGrap
             *std::min_element(source.Placements.begin(), source.Placements.end(), [](const auto& a, const auto& b) { return a.Used < b.Used; }) = std::move(entry);
     }
     const auto instance = static_cast<uint32_t>(impl.Templates.size());
-    ++impl.Report.TemplateInstances;
-    impl.Templates.push_back({std::move(graphTemplate), placement, vector<shared_ptr<void>>(source.SlotTypes.size())});
+    ++impl.Report->TemplateInstances;
+    impl.Templates.emplace_back(std::move(graphTemplate), placement, source.SlotTypes.size());
     for (const auto& declaration : placement->Resources) {
         auto& resource = impl.Resources.emplace_back(declaration);
         resource.TemplateInstance = instance;
@@ -907,7 +1212,7 @@ RenderGraphTemplateInstance RenderGraph::Instantiate(shared_ptr<const RenderGrap
         pass.UavWriteStages = declaration.UavWriteStages;
         pass.AllowUavWrites = declaration.AllowUavWrites;
         if (declaration.Tracked) pass.Ticket._state = make_shared<FrameSubmission>(impl.GenerationSerial);
-        if (impl.ReportFull()) impl.Report.Passes.push_back({declaration.Name, string{declaration.Location.file_name()}, declaration.Location.line(), declaration.Type});
+        if (impl.ReportFull()) impl.Report->Passes.push_back({declaration.Name, string{declaration.Location.file_name()}, declaration.Location.line(), declaration.Type});
     }
     for (const auto& declaration : placement->Views) {
         auto& view = impl.Views.emplace_back(declaration);
@@ -1009,7 +1314,7 @@ bool RenderGraphTemplateInstance::Bind(RgBufferValue slot, RenderExternalBuffer&
 }
 
 void RenderGraph::Impl::MaterializeTemplates() {
-    ++Report.TemplateMaterializations;
+    ++Report->TemplateMaterializations;
     for (auto& resource : Resources) {
         resource.Declaration.Materialize();
         if (!resource.VersionTail.empty()) {
@@ -1034,7 +1339,7 @@ bool RenderGraph::Impl::InstantiateTemplatePayloads() {
             Error("TemplateSlot", "A live template work has an unbound frame slot");
             return false;
         }
-        work.Data = declaration.Factory->Instantiate(Templates[work.TemplateInstance].Slots[declaration.Slot].get());
+        work.Data = declaration.Factory->Instantiate(Templates[work.TemplateInstance].Slots[declaration.Slot].get(), FrameResources, work.TemplateInstance);
     }
     for (const auto p : GetCompiled().ExecutionOrder) {
         auto& pass = Passes[p];
@@ -1056,7 +1361,7 @@ bool RenderGraph::Impl::InstantiateTemplatePayloads() {
             Error("TemplateSlot", "A live template callback has an unbound frame slot", p);
             return false;
         }
-        pass.Data = pass.Def().Factory->Instantiate(slots[pass.Def().Slot].get());
+        pass.Data = pass.Def().Factory->Instantiate(slots[pass.Def().Slot].get(), FrameResources, pass.TemplateInstance);
     }
     return true;
 }
@@ -1134,15 +1439,30 @@ RenderGraph::Impl::SubmissionData RenderGraph::Impl::DetachSubmissionResources()
 
 RenderGraph::RenderGraph(render::Device& device, RenderResourcePool& pool, render::RenderPassRegistry& registry, std::string_view name,
                          RenderGraphRuntimeOptions runtime)
-    : _impl(make_unique<Impl>(device, pool, registry, nullptr, name, nullptr, runtime)) {}
+    : _impl(make_shared<Impl>(device, pool, registry, nullptr, name, nullptr, runtime)) {}
 RenderGraph::RenderGraph(render::Device& device, RenderGraphFrameResources& resources,
                          render::RenderPassRegistry& registry, std::string_view name, RenderGraphRuntimeOptions runtime)
-    : _impl(make_unique<Impl>(device, resources.GetPool(), registry, &resources, name, nullptr, runtime)) {}
+    : _impl(AcquireInstance(device, resources, registry, name, nullptr, runtime)) {}
 RenderGraph::RenderGraph(render::Device& device, RenderGraphFrameResources& resources,
                          render::RenderPassRegistry& registry, std::string_view name, uint64_t& generation, RenderGraphExecutionReport& report,
                          RenderGraphRuntimeOptions runtime)
-    : _impl(make_unique<Impl>(device, resources.GetPool(), registry, &resources, name, &report, runtime)) { generation = _impl->Generation; }
-RenderGraph::~RenderGraph() = default;
+    : _impl(AcquireInstance(device, resources, registry, name, &report, runtime)) { generation = _impl->Generation; }
+shared_ptr<RenderGraph::Impl> RenderGraph::AcquireInstance(render::Device& device, RenderGraphFrameResources& resources,
+                                                           render::RenderPassRegistry& registry, std::string_view name,
+                                                           Nullable<RenderGraphExecutionReport*> report, RenderGraphRuntimeOptions runtime) {
+    for (auto& instance : resources._impl->Instances) {
+        if (instance.use_count() != 1 || &instance->Device != &device || &instance->Registry != &registry) continue;
+        instance->Borrow(name, report, runtime);
+        return instance;
+    }
+    auto instance = make_shared<Impl>(device, resources.GetPool(), registry, &resources, name, report, runtime);
+    resources._impl->Instances.push_back(instance);
+    return instance;
+}
+RenderGraph::~RenderGraph() {
+    if (_impl) _impl->Release();
+}
+Nullable<RenderGraphFrameResources*> RenderGraph::GetFrameResources() const noexcept { return _impl->FrameResources; }
 uint64_t RenderGraph::GetGeneration() const noexcept { return _impl->Generation; }
 const RenderGraphRuntimeOptions& RenderGraph::GetRuntimeOptions() const noexcept { return _impl->Runtime; }
 bool RenderGraph::IsValidationFull() const noexcept { return _impl->ValidationFull(); }
@@ -1179,33 +1499,31 @@ void RenderGraphPassBuilder::Reject(std::string_view code, std::string_view mess
 }
 
 RgPassHandle RenderGraphRasterContext::GetPassHandle() const noexcept { return {_pass, _graph.GetGeneration()}; }
-const RenderGraphExecutionReport& RenderGraph::GetReport() const noexcept { return _impl->Report; }
+const RenderGraphExecutionReport& RenderGraph::GetReport() const noexcept { return *_impl->Report; }
 
 RgTextureValue RenderGraph::CreateTexture(const render::TextureDescriptor& desc, std::string_view name, std::source_location location) {
     auto& impl = *_impl;
     if (!impl.Mutable()) return {};
-    ++impl.Report.ResourceDeclarations;
+    ++impl.Report->ResourceDeclarations;
     const auto index = static_cast<uint32_t>(impl.Resources.size());
-    Impl::Resource resource{};
+    auto& resource = impl.Resources.emplace_back();
     resource.Edit().Name = name;
     resource.Edit().Location = location;
     resource.Edit().IsTexture = true;
     resource.Edit().TextureDesc = desc;
     resource.Edit().ViewId = impl.ResourceView;
-    impl.Resources.push_back(std::move(resource));
     return {index, impl.Generation, 1};
 }
 RgBufferValue RenderGraph::CreateBuffer(const render::BufferDescriptor& desc, std::string_view name, std::source_location location) {
     auto& impl = *_impl;
     if (!impl.Mutable()) return {};
-    ++impl.Report.ResourceDeclarations;
+    ++impl.Report->ResourceDeclarations;
     const auto index = static_cast<uint32_t>(impl.Resources.size());
-    Impl::Resource resource{};
+    auto& resource = impl.Resources.emplace_back();
     resource.Edit().Name = name;
     resource.Edit().Location = location;
     resource.Edit().BufferDesc = desc;
     resource.Edit().ViewId = impl.ResourceView;
-    impl.Resources.push_back(std::move(resource));
     return {index, impl.Generation, 1};
 }
 RgTextureValue RenderGraph::DeclareExternalTexture(const render::TextureDescriptor& desc, std::string_view name, RenderGraphExternalAccess access) {
@@ -1576,7 +1894,7 @@ bool RenderGraph::Connect(RgBufferPort input, RgBufferValue output) {
 
 bool RenderGraph::Impl::ResolvePorts() {
     RADRAY_PROFILE_SCOPE_N("RenderGraph::ResolvePorts");
-    ++Report.PortResolveBuilds;
+    ++Report->PortResolveBuilds;
     vector<vector<uint8_t>> visiting(Resources.size());
     for (uint32_t r = 0; r < Resources.size(); ++r) {
         auto& resource = Resources[r];
@@ -1697,15 +2015,14 @@ RgBufferValue RenderGraph::NextVersion(RgBufferValue value) {
 RgPassHandle RenderGraph::AddPass(std::string_view name, RgPassType type, std::source_location location) {
     auto& impl = *_impl;
     if (!impl.Mutable()) return {};
-    ++impl.Report.PassDeclarations;
+    ++impl.Report->PassDeclarations;
     const auto index = static_cast<uint32_t>(impl.Passes.size());
-    Impl::Pass pass{};
+    auto& pass = impl.Passes.emplace_back();
     pass.Edit().Location = location;
     pass.Edit().Name = string{name};
     pass.Edit().Type = type;
     pass.RasterGroup = index;
-    impl.Passes.push_back(std::move(pass));
-    if (impl.ReportFull()) impl.Report.Passes.push_back({string{name}, string{location.file_name()}, location.line(), type});
+    if (impl.ReportFull()) impl.Report->Passes.push_back({string{name}, string{location.file_name()}, location.line(), type});
     return {index, impl.Generation};
 }
 void RenderGraph::SetPayload(RgPassHandle pass, unique_ptr<Payload> payload) { _impl->Passes[pass.Index].Data = std::move(payload); }
@@ -1852,7 +2169,7 @@ Nullable<render::ComputePipelineState*> RenderGraph::ResolveComputePipeline(uint
 
 Nullable<render::GraphicsPipelineState*> RenderGraph::ResolveGraphicsPipeline(
     uint32_t pass, ShaderProgram& program, const MaterialPipelineState& state,
-    const PrimitiveVertexLayout& layout, PrimitiveTopology topology) {
+    const PrimitiveVertexLayout& layout, PrimitiveTopology topology, Nullable<const ResolvedPrimitiveVertexLayout*> resolvedInput) {
     auto& impl = *_impl;
     const render::ShaderStages stages = ProgramStages(program);
     if (program.GetDevice() != &impl.Device || !stages.HasFlag(render::ShaderStage::Vertex) ||
@@ -1869,15 +2186,16 @@ Nullable<render::GraphicsPipelineState*> RenderGraph::ResolveGraphicsPipeline(
     }
     const size_t before = program.GetGraphicsPipelineStateCount();
     const Nullable<render::GraphicsPipelineState*> pipeline =
-        program.GetOrCreateGraphicsPipelineState(state, layout, topology, *passState);
-    ++impl.Report.GraphicsPipelinePreparations;
-    impl.Report.GraphicsPipelineCreations += static_cast<uint32_t>(program.GetGraphicsPipelineStateCount() - before);
+        program.GetOrCreateGraphicsPipelineState(state, layout, topology, *passState, resolvedInput);
+    ++impl.Report->GraphicsPipelinePreparations;
+    impl.Report->GraphicsPipelineCreations += static_cast<uint32_t>(program.GetGraphicsPipelineStateCount() - before);
     if (!pipeline) impl.Error("GraphicsPipelineState", "Graphics pipeline state creation failed before recording", pass);
     return pipeline;
 }
 
 PreparedShaderGroup RenderGraph::CreateParameterSet(uint32_t pass, ShaderProgram& program, uint32_t group,
-                                                    std::span<const RgParameterBinding> bindings) {
+                                                    std::span<const RgParameterBinding> bindings, Nullable<const MeshBindingPlan*> plan,
+                                                    uint32_t groupIndex, std::span<const RgMeshParameterSlot> slots) {
     auto& impl = *_impl;
     const auto fail = [&](std::string_view code, std::string_view message,
                           std::string_view declaration = {}, uint32_t resource = InvalidIndex) {
@@ -1888,6 +2206,12 @@ PreparedShaderGroup RenderGraph::CreateParameterSet(uint32_t pass, ShaderProgram
         return fail("ParameterPreparation", "Ready validation cannot create new recording data");
     if (pass >= impl.Passes.size() || program.GetDevice() != &impl.Device)
         return fail("ParameterProgram", "Parameter sets require a ShaderProgram from this graph's device");
+    if (plan && (!plan->Valid || plan->ProgramGeneration != program.GetGeneration() ||
+                 groupIndex >= plan->Groups.size() || plan->GroupBegin.size() != plan->Groups.size() + 1 ||
+                 group != plan->Groups[groupIndex] || slots.size() != plan->Slots.size()))
+        return fail("MeshParameterPlan", "Mesh binding plan must match the program generation, group and slot count");
+    const uint32_t first = plan ? plan->GroupBegin[groupIndex] : 0;
+    const size_t bindingCount = plan ? plan->GroupBegin[groupIndex + 1] - first : bindings.size();
     const RgPassType passType = impl.Passes[pass].Def().Type;
     const render::ShaderStages programStages = ProgramStages(program);
     const bool stageCompatible =
@@ -1908,7 +2232,8 @@ PreparedShaderGroup RenderGraph::CreateParameterSet(uint32_t pass, ShaderProgram
     if (full) {
         request.Program = &program;
         request.Pass = pass;
-        request.Uses.reserve(bindings.size());
+        request.CompleteLayout = bool(plan);
+        request.Uses.reserve(bindingCount);
     }
 
     PreparedShaderGroup result{};
@@ -1919,19 +2244,27 @@ PreparedShaderGroup RenderGraph::CreateParameterSet(uint32_t pass, ShaderProgram
     key.Layout = layout;
     key.Group = group;
     key.Values.clear();
-    key.Values.reserve(bindings.size());
+    key.Values.reserve(bindingCount);
 
     const auto findCBuffer = [&](std::string_view declaration) -> const ShaderParameterBufferLayout* {
         for (const ShaderParameterBufferLayout& buffer : program.GetParameterLayout().Buffers())
             if (buffer.Name == declaration) return &buffer;
         return nullptr;
     };
-    bool groupKnown = false;
-    for (const RgParameterBinding& source : bindings) {
-        const std::string_view declaration = source.Declaration;
+    bool groupKnown = bool(plan);
+    for (size_t index = 0; index < bindingCount; ++index) {
+        const MeshResolvedParameterBinding* resolved = plan ? &plan->Resolved[first + index] : nullptr;
+        const MeshParameterBinding* mapping = resolved ? &plan->Bindings[resolved->Mapping] : nullptr;
+        if (mapping && mapping->SourceElement >= slots[mapping->Slot].Elements.size())
+            return fail("MeshParameterSlot", "A required source slot array element is missing", resolved->Declaration);
+        const auto& sourceValue = mapping ? slots[mapping->Slot].Elements[mapping->SourceElement] : bindings[index].Value;
+        const uint32_t arrayElement = mapping ? mapping->Element : bindings[index].ArrayElement;
+        const std::string_view declaration = resolved ? std::string_view{resolved->Declaration} : bindings[index].Declaration;
         Impl::ParameterUse use;
         if (full) use.Declaration = declaration;
-        const std::optional<render::ShaderBindingInfo> info = program.GetArtifact().FindBindingInfo(declaration);
+        const std::optional<render::ShaderBindingInfo> info = resolved
+                                                                  ? std::optional{render::ShaderBindingInfo{resolved->Kind, group, arrayElement + 1, resolved->Stages, resolved->Dynamic, false}}
+                                                                  : program.GetArtifact().FindBindingInfo(declaration);
         if (declaration.empty() || !info.has_value())
             return fail("ParameterDeclaration", "Binding is not a canonical descriptor declaration in this program", declaration);
         if (info->Group != group)
@@ -1939,28 +2272,42 @@ PreparedShaderGroup RenderGraph::CreateParameterSet(uint32_t pass, ShaderProgram
         groupKnown = true;
         if (info->Immutable)
             return fail("ImmutableBinding", "Static or immutable samplers must not be supplied by the caller", declaration);
-        if (source.ArrayElement >= info->Count)
+        if (arrayElement >= info->Count)
             return fail("ParameterArrayElement", "Binding array element is outside the declaration count", declaration);
-        const render::BindingHandle handle = layout->FindBinding(declaration);
+        const render::BindingHandle handle = resolved ? resolved->Handle : layout->FindBinding(declaration);
         if (!handle.IsValid())
             return fail("ParameterBinding", "Resolved pipeline binding is unavailable during preparation", declaration);
+        const auto cbufferSize = [&]() -> uint32_t {
+            if (resolved) return resolved->BufferSize;
+            const auto* cbuffer = findCBuffer(declaration);
+            return cbuffer && cbuffer->Group == group ? cbuffer->Size : 0;
+        };
         const shader::ShaderBindingKind kind = info->LogicalKind;
         render::ShaderParameterValue value;
-        if (const auto* bytes = std::get_if<RgCBufferParameterBinding>(&source.Value)) {
-            const ShaderParameterBufferLayout* cbuffer = findCBuffer(declaration);
-            if (kind != shader::ShaderBindingKind::CBuffer || source.ArrayElement != 0 || cbuffer == nullptr ||
-                cbuffer->Group != group || bytes->Bytes.size() != cbuffer->Size)
+        if (const auto* bytes = std::get_if<RgCBufferParameterBinding>(&sourceValue)) {
+            const uint32_t size = cbufferSize();
+            if (kind != shader::ShaderBindingKind::CBuffer || arrayElement != 0 || size == 0 || bytes->Bytes.size() != size)
                 return fail("ParameterType", "Copied cbuffer bytes must exactly match a scalar cbuffer declaration", declaration);
-            DynamicCBufferArena::Reservation reservation = frame.Arena->Reserve(bytes->Bytes.size());
-            if (!reservation.IsValid())
-                return fail("ParameterUpload", "Constant upload allocation failed before recording", declaration);
-            std::memcpy(reservation.Data(), bytes->Bytes.data(), bytes->Bytes.size());
-            const DynamicCBufferArena::Allocation allocation = reservation.Commit(bytes->Bytes.size());
-            if (!allocation.IsValid() || (info->Dynamic && allocation.Offset > std::numeric_limits<uint32_t>::max()))
-                return fail("ParameterUpload", "Constant upload commit or dynamic offset conversion failed", declaration);
-            value = render::ShaderBufferBinding{allocation.Target, {info->Dynamic ? 0 : allocation.Offset, allocation.Size}, 0};
-            if (info->Dynamic) result.DynamicOffsets.push_back({handle, static_cast<uint32_t>(allocation.Offset)});
-        } else if (const auto* texture = std::get_if<RgTextureParameterBinding>(&source.Value)) {
+            if (bytes->Source.Owner) {
+                if (bytes->Source.Owner->GetDevice() != &impl.Device)
+                    return fail("ParameterUpload", "Shared parameter rows belong to another device", declaration);
+                const auto slice = bytes->Source.Owner->PrepareParameterBuffer(bytes->Source, bytes->Row, bytes->Bytes);
+                if (!slice || slice->Range.Size != size || (info->Dynamic && slice->Range.Offset > UINT32_MAX))
+                    return fail("ParameterUpload", "Shared parameter row is expired, incompatible or unavailable", declaration);
+                value = render::ShaderBufferBinding{slice->Target, {info->Dynamic ? 0 : slice->Range.Offset, slice->Range.Size}, 0};
+                if (info->Dynamic) result.DynamicOffsets.push_back({handle, static_cast<uint32_t>(slice->Range.Offset)});
+            } else {
+                DynamicCBufferArena::Reservation reservation = frame.Arena->Reserve(bytes->Bytes.size());
+                if (!reservation.IsValid())
+                    return fail("ParameterUpload", "Constant upload allocation failed before recording", declaration);
+                std::memcpy(reservation.Data(), bytes->Bytes.data(), bytes->Bytes.size());
+                const DynamicCBufferArena::Allocation allocation = reservation.Commit(bytes->Bytes.size());
+                if (!allocation.IsValid() || (info->Dynamic && allocation.Offset > std::numeric_limits<uint32_t>::max()))
+                    return fail("ParameterUpload", "Constant upload commit or dynamic offset conversion failed", declaration);
+                value = render::ShaderBufferBinding{allocation.Target, {info->Dynamic ? 0 : allocation.Offset, allocation.Size}, 0};
+                if (info->Dynamic) result.DynamicOffsets.push_back({handle, static_cast<uint32_t>(allocation.Offset)});
+            }
+        } else if (const auto* texture = std::get_if<RgTextureParameterBinding>(&sourceValue)) {
             if (!shader::IsImageKind(kind))
                 return fail("ParameterType", "Texture value does not match the shader declaration", declaration);
             const RgTextureViewHandle view = impl.PatchTemplateView(pass, texture->View);
@@ -1980,7 +2327,7 @@ PreparedShaderGroup RenderGraph::CreateParameterSet(uint32_t pass, ShaderProgram
                 use.Stages = info->Stages;
             }
             value = declared.Native.Get();
-        } else if (const auto* buffer = std::get_if<RgBufferParameterBinding>(&source.Value)) {
+        } else if (const auto* buffer = std::get_if<RgBufferParameterBinding>(&sourceValue)) {
             const bool bufferKind = kind == shader::ShaderBindingKind::CBuffer ||
                                     kind == shader::ShaderBindingKind::TypedBuffer ||
                                     kind == shader::ShaderBindingKind::RWTypedBuffer ||
@@ -2011,10 +2358,10 @@ PreparedShaderGroup RenderGraph::CreateParameterSet(uint32_t pass, ShaderProgram
             const render::BufferRange range{buffer->Range.Offset, size};
             bool representationValid = buffer->Format == render::TextureFormat::UNKNOWN;
             if (kind == shader::ShaderBindingKind::CBuffer) {
-                const ShaderParameterBufferLayout* cbuffer = findCBuffer(declaration);
+                const uint32_t size = cbufferSize();
                 const uint64_t alignment = std::max<uint64_t>(1, impl.Device.GetCapabilities().Limits.CBufferOffsetAlignment);
                 representationValid = representationValid && buffer->StructureByteStride == 0 &&
-                                      cbuffer != nullptr && cbuffer->Group == group && range.Size == cbuffer->Size &&
+                                      size != 0 && range.Size == size &&
                                       range.Offset % alignment == 0;
             } else if (kind == shader::ShaderBindingKind::StructuredBuffer ||
                        kind == shader::ShaderBindingKind::RWStructuredBuffer) {
@@ -2066,7 +2413,7 @@ PreparedShaderGroup RenderGraph::CreateParameterSet(uint32_t pass, ShaderProgram
                 value = render::ShaderBufferBinding{native, {descriptorOffset, range.Size}, buffer->StructureByteStride};
             if (info->Dynamic) result.DynamicOffsets.push_back({handle, static_cast<uint32_t>(range.Offset)});
         } else {
-            const auto& sampler = std::get<RgSamplerParameterBinding>(source.Value);
+            const auto& sampler = std::get<RgSamplerParameterBinding>(sourceValue);
             if (kind != shader::ShaderBindingKind::Sampler)
                 return fail("ParameterType", "Sampler value does not match the shader declaration", declaration);
             const Nullable<render::Sampler*> native = impl.Device.GetOrCreateSampler(sampler.Sampler);
@@ -2074,7 +2421,7 @@ PreparedShaderGroup RenderGraph::CreateParameterSet(uint32_t pass, ShaderProgram
                 return fail("ParameterSampler", "Sampler creation failed before recording", declaration);
             value = native.Get();
         }
-        key.Values.push_back({handle, source.ArrayElement, std::move(value)});
+        key.Values.push_back({handle, arrayElement, std::move(value)});
         if (full) request.Uses.push_back(std::move(use));
     }
 
@@ -2167,6 +2514,7 @@ bool RenderGraph::Impl::ValidateParameterRequests() {
             if (!covered)
                 return fail("ParameterUndeclared", "Resource binding has no declaration covering its access state, range and stages", use.Declaration, use.Resource);
         }
+        if (request.CompleteLayout) continue;
         const auto& program = *request.Program;
         const auto& artifact = program.GetArtifact().Generic();
         for (const shader::WireBindingRecord& record : artifact.Bindings()) {
@@ -2359,22 +2707,41 @@ RgPassHandle RenderGraph::AddCopyBufferToTexturePass(std::string_view name, RgBu
     return pass;
 }
 
-bool RenderGraph::Impl::ValidateResources() {
-    RADRAY_PROFILE_SCOPE_N("RenderGraph::ValidateResources");
+bool RenderGraph::Impl::ValidateResourceDescriptors() {
+    RADRAY_PROFILE_SCOPE_N("RenderGraph::ValidateResourceDescriptors");
+    for (uint32_t index = 0; index < Resources.size(); ++index) {
+        const auto& resource = Resources[index];
+        ++Report->ResourceDescriptorValidations;
+        if (resource.Def().IsTexture) {
+            auto desc = resource.Def().TextureDesc;
+            if (resource.External() || resource.Def().Port) desc.Hints = desc.Hints & render::ResourceHint::Dedicated;
+            const auto validation = render::ValidateTextureDescriptor(desc, Device);
+            if (!validation.Supported) Error("UnsupportedTexture", validation.Reason, InvalidIndex, index);
+        } else {
+            const auto& desc = resource.Def().BufferDesc;
+            constexpr uint32_t knownUses = 2047;
+            if (desc.Size == 0 || desc.Size > Device.GetCapabilities().Limits.MaxBufferSize || !EnumContains(desc.Memory) || !desc.Usage ||
+                (desc.Usage.value() & ~knownUses) != 0 || (desc.Hints.value() & ~uint32_t{7}) != 0 ||
+                (!resource.External() && !resource.Def().Port && desc.Hints.HasFlag(render::ResourceHint::External)) ||
+                (desc.Memory == render::MemoryType::Upload && !desc.Usage.HasFlag(render::BufferUse::MapWrite)) ||
+                (desc.Memory == render::MemoryType::ReadBack && !desc.Usage.HasFlag(render::BufferUse::MapRead)))
+                Error("UnsupportedBuffer", "Invalid buffer size, usage, memory or hints", InvalidIndex, index);
+        }
+    }
+    return !Failed;
+}
+
+bool RenderGraph::Impl::PrepareResourceState() {
+    RADRAY_PROFILE_SCOPE_N("RenderGraph::PrepareResourceState");
     const bool reportFull = ReportFull();
-    if (reportFull) Report.Resources.reserve(Resources.size());
+    if (reportFull) Report->Resources.reserve(Resources.size());
     for (uint32_t index = 0; index < Resources.size(); ++index) {
         auto& resource = Resources[index];
         string descriptor;
         if (resource.Def().IsTexture) {
-            ++Report.Textures;
+            ++Report->Textures;
             auto desc = resource.Def().TextureDesc;
             if (resource.External() || resource.Def().Port) desc.Hints = desc.Hints & render::ResourceHint::Dedicated;
-            const auto validation = render::ValidateTextureDescriptor(desc, Device);
-            if (!validation.Supported) {
-                Error("UnsupportedTexture", validation.Reason, InvalidIndex, index);
-                continue;
-            }
             if (reportFull) descriptor = fmt::format("{} {}x{}x{} mips={} samples={} usage={}", desc.Format, desc.Width, desc.Height, desc.DepthOrArraySize, desc.MipLevels, desc.SampleCount, desc.Usage);
             resource.Valid.assign(resource.CellCount(), 0);
             if (resource.ExternalTexture) {
@@ -2386,17 +2753,8 @@ bool RenderGraph::Impl::ValidateResources() {
                 for (uint32_t cell = 0; cell < resource.CellCount(); ++cell) resource.Valid[cell] = external.ContentValid[cell % external.ContentValid.size()];
             }
         } else {
-            ++Report.Buffers;
+            ++Report->Buffers;
             const auto& desc = resource.Def().BufferDesc;
-            constexpr uint32_t knownUses = 2047;
-            if (desc.Size == 0 || desc.Size > Device.GetCapabilities().Limits.MaxBufferSize || !EnumContains(desc.Memory) || !desc.Usage ||
-                (desc.Usage.value() & ~knownUses) != 0 || (desc.Hints.value() & ~uint32_t{7}) != 0 ||
-                (!resource.External() && !resource.Def().Port && desc.Hints.HasFlag(render::ResourceHint::External)) ||
-                (desc.Memory == render::MemoryType::Upload && !desc.Usage.HasFlag(render::BufferUse::MapWrite)) ||
-                (desc.Memory == render::MemoryType::ReadBack && !desc.Usage.HasFlag(render::BufferUse::MapRead))) {
-                Error("UnsupportedBuffer", "Invalid buffer size, usage, memory or hints", InvalidIndex, index);
-                continue;
-            }
             if (reportFull) descriptor = fmt::format("size={} memory={} usage={}", desc.Size, EnumName(desc.Memory), desc.Usage);
             resource.Valid.assign(resource.CellCount(), resource.ExternalBuffer && resource.ExternalBuffer->ContentValid ? 1 : 0);
             if (resource.ExternalBuffer && resource.Valid[0] &&
@@ -2406,12 +2764,12 @@ bool RenderGraph::Impl::ValidateResources() {
             }
         }
         if (reportFull) {
-            Report.Resources.push_back({string{resource.Name()}, std::move(descriptor), resource.Def().IsTexture, resource.External()});
-            Report.Resources.back().ViewId = resource.ViewId();
-            Report.Resources.back().Port = resource.Def().Port;
-            Report.Resources.back().RetainedOwner = resource.ExternalTexture ? bool(resource.ExternalTexture->Owner) : resource.ExternalBuffer ? bool(resource.ExternalBuffer->Owner)
-                                                                                                                                               : false;
-            Report.Resources.back().EstimatedBytes = resource.Def().IsTexture ? EstimateTextureBytes(resource.Def().TextureDesc) : resource.Def().BufferDesc.Size;
+            Report->Resources.push_back({string{resource.Name()}, std::move(descriptor), resource.Def().IsTexture, resource.External()});
+            Report->Resources.back().ViewId = resource.ViewId();
+            Report->Resources.back().Port = resource.Def().Port;
+            Report->Resources.back().RetainedOwner = resource.ExternalTexture ? bool(resource.ExternalTexture->Owner) : resource.ExternalBuffer ? bool(resource.ExternalBuffer->Owner)
+                                                                                                                                                : false;
+            Report->Resources.back().EstimatedBytes = resource.Def().IsTexture ? EstimateTextureBytes(resource.Def().TextureDesc) : resource.Def().BufferDesc.Size;
         }
     }
     return !Failed;
@@ -2524,7 +2882,7 @@ bool RenderGraph::Impl::NormalizePasses() {
 
 bool RenderGraph::Impl::ValidatePlanInput() {
     RADRAY_PROFILE_SCOPE_N("RenderGraph::ValidatePlanInput");
-    ++Report.ValidatePlanInputCalls;
+    ++Report->ValidatePlanInputCalls;
     for (uint32_t index = 0; index < Resources.size(); ++index) {
         auto& resource = Resources[index];
         if (resource.Def().IsTexture) {
@@ -2567,7 +2925,7 @@ void RenderGraph::Impl::Cull() {
     auto& initialized = workspace.Initialized;
     {
         RADRAY_PROFILE_SCOPE_N("RenderGraph::BuildIR");
-        ++Report.IrBuilds;
+        ++Report->IrBuilds;
         versions.clear();
         nodes.resize(Passes.size());
         for (auto& node : nodes) {
@@ -2635,7 +2993,7 @@ void RenderGraph::Impl::Cull() {
     }
     auto& roots = workspace.Roots;
     RADRAY_PROFILE_SCOPE_N("RenderGraph::CompilePlanMiss");
-    ++Report.TopologyBuilds;
+    ++Report->TopologyBuilds;
     CompiledGraph = CompileRenderGraph(static_cast<uint32_t>(Resources.size()), versions, nodes, roots, Options, workspace.Compiler);
     ApplyCompiledReport();
 }
@@ -2651,7 +3009,7 @@ void RenderGraph::Impl::ApplyCompiledReport() {
             auto& pass = Passes[p];
             pass.Live = compiled.Live;
             if (reportFull) {
-                auto& report = Report.Passes[p];
+                auto& report = Report->Passes[p];
                 report.Live = compiled.Live;
                 report.DataDependencies = compiled.DataDependencies;
                 report.HazardDependencies = compiled.HazardDependencies;
@@ -2663,22 +3021,22 @@ void RenderGraph::Impl::ApplyCompiledReport() {
                     report.Accesses.push_back({access.Resource, access.Version, access.State, access.Range, access.Bytes, access.Stages, access.Read, access.Write});
                 if (FramePlan) report.RasterGroup = pass.RasterGroup;
             }
-            if (compiled.Live) ++Report.LivePasses;
+            if (compiled.Live) ++Report->LivePasses;
         }
         for (uint32_t r = 0; r < Resources.size(); ++r) {
             Resources[r].FirstUse = GetCompiled().Lifetimes[r].FirstUse;
             Resources[r].LastUse = GetCompiled().Lifetimes[r].LastUse;
             if (reportFull) {
-                Report.Resources[r].FirstUse = GetCompiled().Lifetimes[r].FirstUse;
-                Report.Resources[r].LastUse = GetCompiled().Lifetimes[r].LastUse;
-                if (FramePlan) Report.Resources[r].PhysicalSlot = Resources[r].Physical;
+                Report->Resources[r].FirstUse = GetCompiled().Lifetimes[r].FirstUse;
+                Report->Resources[r].LastUse = GetCompiled().Lifetimes[r].LastUse;
+                if (FramePlan) Report->Resources[r].PhysicalSlot = Resources[r].Physical;
             }
         }
         if (ReportFull()) {
-            Report.Versions = GetCompiled().Versions;
-            Report.ExecutionOrder = GetCompiled().ExecutionOrder;
+            Report->Versions = GetCompiled().Versions;
+            Report->ExecutionOrder = GetCompiled().ExecutionOrder;
         }
-        Report.CulledPasses = Report.DeclaredPasses - Report.LivePasses;
+        Report->CulledPasses = Report->DeclaredPasses - Report->LivePasses;
     }
 }
 
@@ -2877,7 +3235,7 @@ bool RenderGraph::Impl::FindFramePlan(std::span<const uint64_t> key) {
         RADRAY_PROFILE_SCOPE_N("RenderGraph::CompilePlanHit");
         entry.Used = ++cache.UseSerial;
         FramePlan = std::static_pointer_cast<const CompiledFramePlan>(entry.Plan);
-        Report.CompilePlanReused = true;
+        Report->CompilePlanReused = true;
         ApplyFramePlan();
         return true;
     }
@@ -2886,11 +3244,11 @@ bool RenderGraph::Impl::FindFramePlan(std::span<const uint64_t> key) {
 
 void RenderGraph::Impl::ApplyFramePlan() {
     const auto& plan = *FramePlan;
-    Report.ExecutionPlanId = plan.Id;
-    Report.ReusedResources = plan.ReusedResources;
-    Report.MergedRasterPasses = plan.MergedRasterPasses;
-    Report.DiscardedStores = plan.DiscardedStores;
-    Report.LiveWorks = static_cast<uint32_t>(plan.LiveWork.size());
+    Report->ExecutionPlanId = plan.Id;
+    Report->ReusedResources = plan.ReusedResources;
+    Report->MergedRasterPasses = plan.MergedRasterPasses;
+    Report->DiscardedStores = plan.DiscardedStores;
+    Report->LiveWorks = static_cast<uint32_t>(plan.LiveWork.size());
     ExecutionPlan.resize(Passes.size());
     for (uint32_t index = 0; index < Passes.size(); ++index) {
         auto& pass = Passes[index];
@@ -2931,9 +3289,9 @@ void RenderGraph::Impl::SaveFramePlan(vector<uint64_t> key) {
     if (plan->Id == 0) RADRAY_ABORT("Render graph execution plan identity space exhausted");
     plan->Graph = std::move(CompiledGraph);
     plan->LiveWork = std::move(LiveWork);
-    plan->ReusedResources = Report.ReusedResources;
-    plan->MergedRasterPasses = Report.MergedRasterPasses;
-    plan->DiscardedStores = Report.DiscardedStores;
+    plan->ReusedResources = Report->ReusedResources;
+    plan->MergedRasterPasses = Report->MergedRasterPasses;
+    plan->DiscardedStores = Report->DiscardedStores;
     plan->Passes.resize(Passes.size());
     for (uint32_t index = 0; index < Passes.size(); ++index) {
         auto& pass = Passes[index];
@@ -2995,11 +3353,11 @@ bool RenderGraph::Compile() {
             impl.Error("TemplateExternal", "Every external resource slot requires a frame binding", InvalidIndex, index);
     if (impl.Failed) return false;
     if (impl.Templates.empty() && !impl.ResolvePorts()) return false;
-    impl.Report.DeclaredPasses = static_cast<uint32_t>(impl.Passes.size());
-    impl.Report.DeclaredWorks = static_cast<uint32_t>(impl.Works.size());
+    impl.Report->DeclaredPasses = static_cast<uint32_t>(impl.Passes.size());
+    impl.Report->DeclaredWorks = static_cast<uint32_t>(impl.Works.size());
     auto planKey = impl.BuildPlanKey();
     if (impl.FindFramePlan(planKey)) {
-        if (!impl.ValidateResources() || (impl.ValidationFull() && !impl.ValidatePlanInput())) return false;
+        if (!impl.PrepareResourceState() || (impl.ValidationFull() && !impl.ValidatePlanInput())) return false;
         impl.ApplyCompiledReport();
         impl.Compiled = !impl.Failed;
         return impl.Compiled;
@@ -3034,13 +3392,13 @@ bool RenderGraph::Compile() {
             std::sort(boundaries.begin(), boundaries.end());
             boundaries.erase(std::unique(boundaries.begin(), boundaries.end()), boundaries.end());
         }
-        ++impl.Report.NormalizeBuilds;
-        if (impl.Failed || !impl.ValidateResources() || !impl.NormalizePasses()) return false;
+        ++impl.Report->NormalizeBuilds;
+        if (impl.Failed || !impl.ValidateResourceDescriptors() || !impl.PrepareResourceState() || !impl.NormalizePasses()) return false;
         if (impl.ValidationFull() && !impl.ValidatePlanInput()) return false;
         if (impl.ReportFull()) {
             for (uint32_t p = 0; p < impl.Passes.size(); ++p)
                 for (const auto& access : impl.Passes[p].Def().Accesses)
-                    impl.Report.Passes[p].Accesses.push_back({access.Resource, access.Version, access.State, access.Range, access.Bytes, access.Stages, access.Read, access.Write});
+                    impl.Report->Passes[p].Accesses.push_back({access.Resource, access.Version, access.State, access.Range, access.Bytes, access.Stages, access.Read, access.Write});
         }
     }
     {
@@ -3060,7 +3418,7 @@ bool RenderGraph::Compile() {
 }
 
 void RenderGraph::Impl::PlanStorage() {
-    ++Report.StoragePlanBuilds;
+    ++Report->StoragePlanBuilds;
     vector<uint32_t> order;
     for (uint32_t r = 0; r < Resources.size(); ++r) {
         Resources[r].Physical = r;
@@ -3085,17 +3443,17 @@ void RenderGraph::Impl::PlanStorage() {
                 if (!matches) continue;
                 resource.Physical = slot.Resource;
                 slot.LastUse = life.LastUse;
-                ++Report.ReusedResources;
+                ++Report->ReusedResources;
                 break;
             }
             if (resource.Physical == r) slots.push_back({r, life.LastUse});
         }
-        if (ReportFull()) Report.Resources[r].PhysicalSlot = resource.Physical;
+        if (ReportFull()) Report->Resources[r].PhysicalSlot = resource.Physical;
     }
 }
 
 void RenderGraph::Impl::OptimizeRaster() {
-    ++Report.RasterPlanBuilds;
+    ++Report->RasterPlanBuilds;
     vector<uint8_t> consumed(GetCompiled().Versions.size(), 0);
     for (const auto p : GetCompiled().ExecutionOrder)
         for (const auto value : GetCompiled().Passes[p].Reads) consumed[value] = 1;
@@ -3109,7 +3467,7 @@ void RenderGraph::Impl::OptimizeRaster() {
         }
         pass.RasterGroup = p;
         pass.MergeTail = p;
-        RenderGraphPassReport* report = reportFull ? &Report.Passes[p] : nullptr;
+        RenderGraphPassReport* report = reportFull ? &Report->Passes[p] : nullptr;
         if (report) report->RasterGroup = p;
         const auto discard = [&](uint32_t view, render::StoreAction& store) {
             const auto resource = Views[view].Resource;
@@ -3120,7 +3478,7 @@ void RenderGraph::Impl::OptimizeRaster() {
             for (auto& cell : pass.Cells)
                 if (cell.Resource == resource && cell.Write) cell.ValidAfter = false;
             if (report) report->Decisions.push_back(fmt::format("Discard store for {}: no live consumer", Resources[resource].Def().Name));
-            ++Report.DiscardedStores;
+            ++Report->DiscardedStores;
         };
         if (Options.OptimizeAttachmentStores) {
             for (auto& color : pass.Edit().Colors) discard(color->View, color->Desc.Store);
@@ -3150,7 +3508,7 @@ void RenderGraph::Impl::OptimizeRaster() {
                 report->RasterGroup = pass.RasterGroup;
                 report->Decisions.push_back("Merged: adjacent raster passes preserve identical attachments and need no non-attachment barriers");
             }
-            ++Report.MergedRasterPasses;
+            ++Report->MergedRasterPasses;
         } else if (report)
             report->Decisions.push_back(Options.MergeRasterPasses ? "Raster boundary: attachment identity, load/store, or non-attachment access requires separation" : "Raster merging disabled");
         previous = p;
@@ -3172,7 +3530,7 @@ bool RenderGraph::Impl::Realize() {
                     Error("TextureAllocation", "Texture allocation failed before recording", InvalidIndex, r);
                     return false;
                 }
-                if (ReportFull()) Report.Resources[r].PhysicalId = resource.PoolTexture->Id;
+                if (ReportFull()) Report->Resources[r].PhysicalId = resource.PoolTexture->Id;
             }
             const auto states = resource.ExternalTexture ? std::span<const render::TextureStates>{resource.ExternalTexture->SubresourceStates} : std::span<const render::TextureStates>{resource.PoolTexture->States};
             for (const auto state : states) resource.States.push_back(state.value());
@@ -3190,7 +3548,7 @@ bool RenderGraph::Impl::Realize() {
                     Error("BufferAllocation", "Buffer allocation failed before recording", InvalidIndex, r);
                     return false;
                 }
-                if (ReportFull()) Report.Resources[r].PhysicalId = resource.PoolBuffer->Id;
+                if (ReportFull()) Report->Resources[r].PhysicalId = resource.PoolBuffer->Id;
             }
             resource.States.assign(1, (resource.ExternalBuffer ? resource.ExternalBuffer->State : resource.Readback ? InitialBufferState(resource.Def().BufferDesc)
                                                                                                                     : resource.PoolBuffer->State)
@@ -3205,7 +3563,7 @@ bool RenderGraph::Impl::Realize() {
         resource.PoolTexture = physical.PoolTexture;
         resource.PoolBuffer = physical.PoolBuffer;
         resource.States = physical.States;
-        if (ReportFull()) Report.Resources[r].PhysicalId = Report.Resources[resource.Physical].PhysicalId;
+        if (ReportFull()) Report->Resources[r].PhysicalId = Report->Resources[resource.Physical].PhysicalId;
     }
     for (const uint32_t p : GetCompiled().ExecutionOrder) {
         auto& pass = Passes[p];
@@ -3287,7 +3645,7 @@ bool RenderGraph::Impl::Realize() {
         pass.PassState.emplace(std::move(formats), depthFormat, pass.Samples, pass.NativePass.Get());
         pass.PassState->DepthReadOnly = pass.Def().DepthAttachment && pass.Def().DepthAttachment->Desc.ReadOnly;
     }
-    auto& accessTables = FrameResources ? FrameResources->_impl->NativeAccessTables : NativeAccessTables;
+    auto& accessTables = NativeAccessTables;
     if (accessTables.size() < Passes.size()) accessTables.resize(Passes.size());
     for (const uint32_t p : GetCompiled().ExecutionOrder) {
         auto& pass = Passes[p];
@@ -3310,7 +3668,7 @@ bool RenderGraph::Impl::Realize() {
         }
         pass.NativeAccess = &table;
     }
-    Report.PhysicalAllocations = static_cast<uint32_t>(Pool.GetStats().Created - createdBefore);
+    Report->PhysicalAllocations = static_cast<uint32_t>(Pool.GetStats().Created - createdBefore);
     return true;
 }
 
@@ -3331,7 +3689,7 @@ bool RenderGraph::Prepare() {
             ~WorkScope() { Active = false; }
         } scope{impl.PreparingWork};
         for (const auto& [index, mask] : impl.FramePlan->LiveWork) {
-            ++impl.Report.WorkRuns;
+            ++impl.Report->WorkRuns;
             if (!impl.Works[index].Data->Prepare(mask)) {
                 impl.Error("WorkPreparation", fmt::format("Live work '{}' failed before recording", impl.Works[index].Declaration.Get().Name));
                 return false;
@@ -3362,8 +3720,8 @@ bool RenderGraph::Prepare() {
             if (pass.UploadSource) {
                 RADRAY_PROFILE_SCOPE_N("RenderGraph::UploadWorkData");
                 if (!upload()) return false;
-                ++impl.Report.WorkUploads;
-                impl.Report.WorkUploadBytes += pass.UploadSource->Bytes.size();
+                ++impl.Report->WorkUploads;
+                impl.Report->WorkUploadBytes += pass.UploadSource->Bytes.size();
             } else if (!upload())
                 return false;
         }
@@ -3391,7 +3749,7 @@ bool RenderGraph::Prepare() {
 bool RenderGraph::ValidateReadyFrame() {
     RADRAY_PROFILE_SCOPE_N("RenderGraph::ValidateReadyFrame");
     auto& impl = *_impl;
-    ++impl.Report.ValidateReadyFrameCalls;
+    ++impl.Report->ValidateReadyFrameCalls;
     impl.ValidatingReady = true;
     auto readyScope = MakeScopeGuard([&impl]() noexcept { impl.ValidatingReady = false; });
     if (!impl.ValidateParameterRequests()) return false;
@@ -3400,7 +3758,7 @@ bool RenderGraph::ValidateReadyFrame() {
         for (const auto& check : impl.Passes[p].GeometryChecks)
             if (!ValidateGeometryBuffer(p, check.Buffer, check.Access)) return false;
         for (const auto& check : impl.Passes[p].ReadyChecks) {
-            ++impl.Report.ReadyValidationCallbacks;
+            ++impl.Report->ReadyValidationCallbacks;
             if (!check.Validate(check.Payload.get(), context)) {
                 if (!impl.Failed) impl.Error("ReadyValidation", "Prepared recording data failed validation before recording", p);
                 return false;
@@ -3412,8 +3770,8 @@ bool RenderGraph::ValidateReadyFrame() {
 }
 
 void RenderGraph::Impl::BuildExecutionPlan() {
-    ++Report.ExecutionPlanBuilds;
-    ++Report.RoutePlanBuilds;
+    ++Report->ExecutionPlanBuilds;
+    ++Report->RoutePlanBuilds;
     ExecutionPlan.resize(Passes.size());
     unordered_map<uint64_t, uint32_t> indices;
     vector<uint32_t> routed(Resources.size(), InvalidIndex);
@@ -3447,7 +3805,7 @@ void RenderGraph::Impl::BuildExecutionPlan() {
 
 void RenderGraph::Impl::BuildBarrierTemplates() {
     RADRAY_PROFILE_SCOPE_N("RenderGraph::BuildBarrierTemplates");
-    ++Report.BarrierTemplateBuilds;
+    ++Report->BarrierTemplateBuilds;
     struct PreviousAccess {
         uint32_t State{0};
         render::ShaderStages Stages{render::ShaderStage::UNKNOWN};
@@ -3504,7 +3862,7 @@ void RenderGraph::Impl::PatchBarriers() {
             uint32_t before = barrier.Before;
             bool memory = barrier.Kind == BarrierKind::Uav;
             if (barrier.Kind == BarrierKind::InitialState) {
-                ++Report.InitialStatePatches;
+                ++Report->InitialStatePatches;
                 before = Resources[barrier.Physical].States[barrier.Cell];
                 // The incoming queue dependency is conservatively a write. Only its native state
                 // varies per instance; all following transitions were resolved by the cold plan.
@@ -3522,10 +3880,10 @@ void RenderGraph::Impl::PatchBarriers() {
             else
                 plan.Barriers.push_back(render::BarrierBufferDescriptor{.Target = resource.NativeBuffer(), .Before = static_cast<render::BufferState>(before), .After = static_cast<render::BufferState>(barrier.After), .BeforeStages = barrier.BeforeStages, .AfterStages = barrier.AfterStages});
             if (ReportFull())
-                Report.Barriers.push_back({p, barrier.Resource, barrier.Cell, before, barrier.After, false,
-                                           !resource.Def().IsTexture ? "Whole-buffer state; content dependencies retain byte ranges" : resource.AspectCount() == 2 ? "Coupled depth/stencil native layout; content dependencies retain aspects"
-                                                                                                                                                                   : "Exact mip/layer"});
-            ++Report.TransitionBarriers;
+                Report->Barriers.push_back({p, barrier.Resource, barrier.Cell, before, barrier.After, false,
+                                            !resource.Def().IsTexture ? "Whole-buffer state; content dependencies retain byte ranges" : resource.AspectCount() == 2 ? "Coupled depth/stencil native layout; content dependencies retain aspects"
+                                                                                                                                                                    : "Exact mip/layer"});
+            ++Report->TransitionBarriers;
         }
         for (const auto r : uavResources) {
             auto& resource = Resources[r];
@@ -3533,9 +3891,9 @@ void RenderGraph::Impl::PatchBarriers() {
             plan.Barriers.push_back(render::BarrierUavDescriptor{native});
             if (ReportFull()) {
                 const auto state = resource.Def().IsTexture ? uint32_t(render::TextureState::UnorderedAccess) : uint32_t(render::BufferState::UnorderedAccess);
-                Report.Barriers.push_back({p, r, 0, state, state, true, "UAV memory dependency"});
+                Report->Barriers.push_back({p, r, 0, state, state, true, "UAV memory dependency"});
             }
-            ++Report.UavBarriers;
+            ++Report->UavBarriers;
         }
     }
 }
@@ -3544,7 +3902,7 @@ bool RenderGraph::Impl::PatchCommandRoutes(render::CommandBuffer& command, std::
     RADRAY_PROFILE_SCOPE_N("RenderGraph::PatchCommandRoutes");
     if (presentTargets.empty()) {
         for (const uint32_t p : GetCompiled().ExecutionOrder) ExecutionPlan[p].Commands = &command;
-        Report.CommandRoutePatches += GetCompiled().ExecutionOrder.size();
+        Report->CommandRoutePatches += GetCompiled().ExecutionOrder.size();
         return true;
     }
     unordered_map<render::Texture*, Nullable<render::CommandBuffer*>> targets;
@@ -3580,7 +3938,7 @@ bool RenderGraph::Impl::PatchCommandRoutes(render::CommandBuffer& command, std::
             Error("PresentCommandSplit", "Raster group spans multiple presentation command buffers", p);
             return false;
         }
-        ++Report.CommandRoutePatches;
+        ++Report->CommandRoutePatches;
     }
     return true;
 }
@@ -3601,8 +3959,8 @@ RenderGraphExecutionResult RenderGraph::Execute(render::CommandBuffer& command, 
         for (auto& pass : impl.Passes)
             if (pass.Ticket._state) pass.Ticket._state->Cancel();
         impl.Pool.EndGraph();
-        impl.Report.Pool = impl.Pool.GetStats();
-        PlotGraphCpuStats(impl.Report);
+        impl.Report->Pool = impl.Pool.GetStats();
+        PlotGraphCpuStats(*impl.Report);
         return {};
     }
     {
@@ -3625,11 +3983,11 @@ RenderGraphExecutionResult RenderGraph::Execute(render::CommandBuffer& command, 
             if (!plan.Barriers.empty()) {
                 if (impl.Options.BatchBarriers) {
                     recording->ResourceBarrier(plan.Barriers);
-                    ++impl.Report.BarrierBatches;
+                    ++impl.Report->BarrierBatches;
                 } else
                     for (const auto& barrier : plan.Barriers) {
                         recording->ResourceBarrier(std::span{&barrier, 1});
-                        ++impl.Report.BarrierBatches;
+                        ++impl.Report->BarrierBatches;
                     }
             }
             for (const auto& access : plan.GetAccesses()) impl.Resources[access.Physical].States[access.Cell] = access.State;
@@ -3686,8 +4044,8 @@ RenderGraphExecutionResult RenderGraph::Execute(render::CommandBuffer& command, 
                     recording->CopyTextureToTexture({.Destination = dst.NativeTexture(), .DestinationMipLevel = copy.DestinationRange.BaseMipLevel, .DestinationArrayLayer = copy.DestinationRange.BaseArrayLayer, .Source = src.NativeTexture(), .SourceMipLevel = copy.SourceRange.BaseMipLevel, .SourceArrayLayer = copy.SourceRange.BaseArrayLayer, .Width = std::max(1u, src.Def().TextureDesc.Width >> copy.SourceRange.BaseMipLevel), .Height = std::max(1u, src.Def().TextureDesc.Height >> copy.SourceRange.BaseMipLevel), .ArrayLayerCount = copy.SourceRange.ArrayLayerCount});
             }
             if (impl.Runtime.GpuMarkers) recording->PopDebugGroup();
-            impl.Report.CommandCalls.Add(pass.CommandCalls);
-            if (impl.ReportFull()) impl.Report.Passes[p].CommandCalls = pass.CommandCalls;
+            impl.Report->CommandCalls.Add(pass.CommandCalls);
+            if (impl.ReportFull()) impl.Report->Passes[p].CommandCalls = pass.CommandCalls;
             if (impl.Failed) result.Success = false;
             if (!result.Success) {
                 for (const auto& access : pass.GetCells())
@@ -3695,7 +4053,7 @@ RenderGraphExecutionResult RenderGraph::Execute(render::CommandBuffer& command, 
                 break;
             }
             pass.Executed = true;
-            if (impl.ReportFull()) impl.Report.Passes[p].Executed = true;
+            if (impl.ReportFull()) impl.Report->Passes[p].Executed = true;
             if (pass.Ticket._state) pass.Ticket._state->Record();
             for (const auto& access : pass.GetCells())
                 if (access.Write) {
@@ -3715,8 +4073,8 @@ RenderGraphExecutionResult RenderGraph::Execute(render::CommandBuffer& command, 
         result.Submission->OnCompleted = [retained = std::move(submission.Retained), serial](bool success) { retained->Complete(serial, success); };
     }
     impl.Pool.EndGraph();
-    impl.Report.Pool = impl.Pool.GetStats();
-    PlotGraphCpuStats(impl.Report);
+    impl.Report->Pool = impl.Pool.GetStats();
+    PlotGraphCpuStats(*impl.Report);
     return result;
 }
 
@@ -3821,7 +4179,7 @@ bool RenderGraph::ValidateGeometryBuffer(uint32_t pass, Nullable<render::Buffer*
         impl.Passes[pass].GeometryChecks.push_back({buffer.Get(), access});
         return true;
     }
-    ++impl.Report.GeometryValidationCalls;
+    ++impl.Report->GeometryValidationCalls;
     // Only graph-managed buffers can carry a planned state; a persistent asset never does, so it
     // needs no declaration and costs one hash lookup per distinct buffer per pass.
     const auto tracked = impl.NativeBuffers.find(buffer.Get());
@@ -3832,7 +4190,7 @@ bool RenderGraph::ValidateGeometryBuffer(uint32_t pass, Nullable<render::Buffer*
     auto& local = impl.Passes[pass];
     if (!local.GeometryReadStatesBuilt) {
         for (const auto& declared : local.GetAccesses()) {
-            ++impl.Report.GeometryDeclarationScans;
+            ++impl.Report->GeometryDeclarationScans;
             const Impl::Resource& resource = impl.Resources[declared.Resource];
             const bool realized = resource.ExternalBuffer || resource.Readback || resource.PoolBuffer;
             if (declared.Read && !resource.Def().IsTexture && realized) local.GeometryReadStates[resource.NativeBuffer()] |= declared.State;
@@ -3887,8 +4245,8 @@ const GraphicsPassState& RenderGraphPrepareContext::PassState() const noexcept {
 render::TextureView* RenderGraphPrepareContext::GetTextureView(RgTextureViewHandle handle) const { return _graph.ResolveView(_pass, handle); }
 render::Buffer* RenderGraphPrepareContext::GetBuffer(RgBufferValue handle) const { return _graph.ResolveBuffer(_pass, handle); }
 Nullable<render::GraphicsPipelineState*> RenderGraphPrepareContext::ResolveGraphicsPipeline(
-    ShaderProgram& program, const MaterialPipelineState& state, const PrimitiveVertexLayout& layout, PrimitiveTopology topology) {
-    return _graph.ResolveGraphicsPipeline(_pass, program, state, layout, topology);
+    ShaderProgram& program, const MaterialPipelineState& state, const PrimitiveVertexLayout& layout, PrimitiveTopology topology, Nullable<const ResolvedPrimitiveVertexLayout*> resolvedInput) {
+    return _graph.ResolveGraphicsPipeline(_pass, program, state, layout, topology, resolvedInput);
 }
 Nullable<render::ComputePipelineState*> RenderGraphPrepareContext::ResolveComputePipeline(ShaderProgram& program) {
     return _graph.ResolveComputePipeline(_pass, program);
@@ -3897,6 +4255,36 @@ PreparedShaderGroup RenderGraphPrepareContext::CreateParameterSet(ShaderProgram&
                                                                   std::span<const RgParameterBinding> bindings) {
     return _graph.CreateParameterSet(_pass, program, group, bindings);
 }
+PreparedShaderGroup RenderGraphPrepareContext::CreateMeshParameterSet(ShaderProgram& program, const MeshBindingPlan& plan,
+                                                                      uint32_t groupIndex, std::span<const RgMeshParameterSlot> slots) {
+    const uint32_t group = groupIndex < plan.Groups.size() ? plan.Groups[groupIndex] : UINT32_MAX;
+    return _graph.CreateParameterSet(_pass, program, group, {}, &plan, groupIndex, slots);
+}
+
+FrameDrawBindingId RenderGraphPrepareContext::CreateMeshParameterBinding(FrameDrawResources& resources, ShaderProgram& program,
+                                                                         const MeshBindingPlan& plan, std::span<const RgMeshParameterSlot> slots) {
+    if (!plan.Valid || plan.ProgramGeneration != program.GetGeneration() || plan.Groups.empty() || resources.GetDevice() != program.GetDevice()) {
+        Reject("MeshParameterPlan", "Indexed mesh binding requires a valid nonempty program plan");
+        return {};
+    }
+    InlineVector<PreparedShaderGroup, 4> prepared;
+    for (uint32_t group = 0; group < plan.Groups.size(); ++group) {
+        auto result = CreateMeshParameterSet(program, plan, group, slots);
+        if (!result.IsValid()) return {};
+        prepared.push_back(std::move(result));
+    }
+    InlineVector<FrameShaderGroupId, 4> groups;
+    for (auto& group : prepared) {
+        const auto id = resources.ImportGraphGroup(std::move(group), GetPassHandle());
+        if (!id.IsValid()) {
+            Reject("MeshParameterStorage", "Indexed mesh bindings require active flight parameter storage");
+            return {};
+        }
+        groups.push_back(id);
+    }
+    return resources.InternBinding(groups);
+}
+
 bool RenderGraphPrepareContext::ValidateGeometryBuffer(Nullable<render::Buffer*> buffer, RgBufferAccess access) {
     return _graph.ValidateGeometryBuffer(_pass, buffer, access);
 }

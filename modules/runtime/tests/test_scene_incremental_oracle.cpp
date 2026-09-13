@@ -709,9 +709,9 @@ public:
                 EXPECT_EQ(record.Status, DrawRecordStatus::Ready);
                 EXPECT_EQ(record.Mirrored, expected.Mirrored);
                 EXPECT_EQ(record.PolicyRevision, policy ? flight.PolicyRevision : 1);
-                CheckDescription(record.Description, expected);
-                EXPECT_EQ(record.Description.PipelineState, ReferenceState(expected, policy, flight.PolicyRevision, false));
-                EXPECT_EQ(record.MirroredState, ReferenceState(expected, policy, flight.PolicyRevision, true));
+                CheckDescription(snapshot.ResolveDraw(record).Description, expected);
+                EXPECT_EQ(snapshot.ResolveDraw(record).Description.PipelineState, ReferenceState(expected, policy, flight.PolicyRevision, false));
+                EXPECT_EQ(snapshot.ResolveDraw(record).MirroredState, ReferenceState(expected, policy, flight.PolicyRevision, true));
                 ASSERT_LT(record.BindingRecipe, snapshot.BindingRecipes.size());
                 const auto& binding = snapshot.BindingRecipes[record.BindingRecipe];
                 EXPECT_TRUE(binding.Valid);
@@ -813,7 +813,7 @@ public:
         EXPECT_TRUE(static_cast<Eigen::Matrix4f>(actual.PreviousLocalToWorld).isApprox(static_cast<Eigen::Matrix4f>(expected.PreviousLocalToWorld), 1e-6f));
     }
 
-    void CheckDescription(const MeshDrawDescription& description, const ReferencePrimitive& expected) const {
+    void CheckDescription(const MeshDrawDescriptionView& description, const ReferencePrimitive& expected) const {
         EXPECT_EQ(description.Program.Get(), Programs[expected.Material.Schema].get());
         EXPECT_EQ(description.Geometry.Get(), ExpectedGeometry(expected));
         ASSERT_TRUE(description.Geometry);

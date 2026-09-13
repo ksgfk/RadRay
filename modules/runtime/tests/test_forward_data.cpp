@@ -14,6 +14,7 @@
 #include <radray/runtime/components/camera_component.h>
 #include <radray/runtime/components/primitive_component.h>
 #include <radray/runtime/forward_pipeline/forward_pipeline.h>
+#include <radray/runtime/forward_pipeline/forward_graph.h>
 #include <radray/runtime/render_framework/scene.h>
 #include <radray/runtime/render_framework/static_mesh_scene_proxy.h>
 #include <radray/runtime/render_framework/frame_draw_resources.h>
@@ -23,6 +24,86 @@ namespace radray {
 namespace {
 
 const std::filesystem::path kProjectRoot{RADRAY_PROJECT_DIR};
+
+TEST(ForwardObjectValues, SceneExtensionMatchesFullPackingAndReusesPagesAcrossTenThousandFrames) {
+    class Proxy final : public PrimitiveSceneProxy {
+    public:
+        bool UsesRenderChangeNotifications() const noexcept override { return true; }
+        uint64_t GetRenderDataRevision() const noexcept override { return 1; }
+        uint64_t GetTransformRevision() const noexcept override { return GetLocalToWorldRevision(); }
+        AxisAlignedBounds GetLocalBounds() const noexcept override { return {Eigen::Vector3f::Zero(), Eigen::Vector3f::Ones()}; }
+    };
+    using Data = forward_detail::ForwardObjectExtensionData;
+    Scene scene;
+    vector<PrimitiveSceneProxy*> proxies;
+    for (uint32_t index = 0; index < 100; ++index) {
+        auto proxy = make_unique<Proxy>();
+        proxies.push_back(proxy.get());
+        scene.AddPrimitive(std::move(proxy));
+    }
+    const auto& contract = forward_detail::ForwardObjectExtension();
+    ASSERT_TRUE(scene.GetRenderState().SetActiveExtensions(0, std::span{&contract, 1}));
+    array<RenderSceneSnapshot, 3> flights;
+    vector<StreamingAssetRefAny> owners;
+    RenderSceneSnapshotBuilder publisher;
+    for (uint64_t flight = 0; flight < 3; ++flight)
+        ASSERT_TRUE(publisher.Build(scene, flights[flight], owners, RenderValidationMode::Off, flight));
+    auto retained = flights[0].GetExtension<Data>(contract);
+    ASSERT_TRUE(retained);
+    PackedCBufferTable original, reference;
+    forward_detail::FreezeObjectData(flights[0], original);
+    uint64_t warmBytes = 0, warmEntries = 0;
+    for (uint64_t frame = 3; frame < 10003; ++frame) {
+        const auto mode = (frame / 20) % 3;
+        const auto change = [&](size_t index) {
+            Eigen::Matrix4f transform = Eigen::Matrix4f::Identity();
+            transform(0, 3) = static_cast<float>(frame + index);
+            transform(0, 0) = index % 7 ? 2.f : -2.f;
+            transform(1, 1) = .5f;
+            transform(1, 0) = .3f;
+            proxies[index]->SetLocalToWorld(transform);
+        };
+        if (mode == 1) change(frame % proxies.size());
+        if (mode == 2)
+            for (size_t index = 0; index < proxies.size(); ++index) change(index);
+        if (frame == 3000) {
+            scene.RemovePrimitive(proxies[7]);
+            proxies.erase(proxies.begin() + 7);
+            auto proxy = make_unique<Proxy>();
+            proxies.push_back(proxy.get());
+            scene.AddPrimitive(std::move(proxy));
+        }
+        auto& snapshot = flights[frame % 3];
+        if (frame == 5000) {
+            scene.GetRenderState().FailNextPublicationForTesting({.AfterPreparedExtensions = 1});
+            EXPECT_FALSE(publisher.Build(scene, snapshot, owners, RenderValidationMode::Off, frame));
+            EXPECT_FALSE(snapshot.Changes.IsValid());
+        }
+        ASSERT_TRUE(publisher.Build(scene, snapshot, owners, RenderValidationMode::Off, frame));
+        const auto data = snapshot.GetExtension<Data>(contract);
+        ASSERT_TRUE(data);
+        forward_detail::FreezeObjectData(snapshot, reference);
+        ASSERT_EQ(data->RowCount(), reference.RowCount());
+        for (size_t row = 0; row < data->RowCount(); ++row)
+            ASSERT_EQ(std::memcmp(data->Row(row).data(), reference.Row(row).data(), reference.Stride()), 0);
+        if (mode == 0 && frame % 20 > 4 && frame != 3000)
+            EXPECT_FALSE(snapshot.FindExtension(contract)->Prepared);
+        const auto memory = scene.GetRenderState().GetExtensionMemoryStats(contract);
+        if (frame == 1000) {
+            warmBytes = memory.KnownBytes();
+            warmEntries = memory.LiveEntries;
+        }
+        if (frame > 1000) {
+            ASSERT_EQ(memory.KnownBytes(), warmBytes);
+            ASSERT_EQ(memory.LiveEntries, warmEntries);
+        }
+    }
+    for (size_t row = 0; row < retained->RowCount(); ++row)
+        EXPECT_EQ(std::memcmp(retained->Row(row).data(), original.Row(row).data(), original.Stride()), 0);
+    ASSERT_TRUE(scene.GetRenderState().SetActiveExtensions(10004, {}));
+    EXPECT_EQ(scene.GetRenderState().GetExtensionMemoryStats(contract).KnownBytes(), 0u);
+    EXPECT_EQ(std::memcmp(retained->Row(0).data(), original.Row(0).data(), original.Stride()), 0);
+}
 
 TEST(ForwardNormalTransform, MatchesInverseTransposeWithScaleShearAndReflection) {
     for (const Eigen::Vector3f& scale : {Eigen::Vector3f{2, 1, .5f}, Eigen::Vector3f{-2, 3, 1}, Eigen::Vector3f{2e-8f, 1e-8f, .5e-8f}}) {
@@ -252,9 +333,54 @@ void WithForwardData(Callback callback) {
     callback(data);
 }
 
+TEST(ForwardFrameInputs, ReusedNestedStorageKeepsConcurrentFramesIndependentAcrossViewCounts) {
+    WithForwardData([](ForwardData& data) {
+        render::RenderPassRegistry registry{data.Device.Device.get()};
+        RenderGraphFrameResources resources{*data.Device.Device, registry};
+        HostWriteBatch writes;
+        RendererList list;
+        DrawExecutionStats execution;
+        array<byte, 64> bytes{};
+        const string name = "AFrameParameterWithAnOwnedNameLongerThanSmallStringStorage";
+        RgParameterBinding binding{name, 0, RgCBufferParameterBinding{bytes}};
+        RendererListProgramParameters parameters{data.Program.get(), 5, std::span{&binding, 1}};
+        array<ForwardGraphView, 3> views;
+        for (auto& view : views) {
+            view.List = &list;
+            view.Parameters = std::span{&parameters, 1};
+        }
+        array<size_t, 2> capacity{};
+        for (uint64_t epoch = 1; epoch <= 10010; ++epoch) {
+            resources.BeginFlight(epoch, writes);
+            RenderGraph graph{*data.Device.Device, resources, registry, "frame inputs"};
+            const size_t firstCount = epoch % 2 ? 3 : 1, secondCount = epoch % 2 ? 1 : 3;
+            auto first = ForwardGraph::MakeFrame(graph, &list, 1, {.Backend = data.Device.Device->GetBackend(), .Views = std::span{views}.first(firstCount), .Execution = &execution});
+            ASSERT_TRUE(first);
+            auto second = ForwardGraph::MakeFrame(graph, &list, 1, {.Backend = data.Device.Device->GetBackend(), .Views = std::span{views}.first(secondCount), .Execution = &execution});
+            ASSERT_TRUE(second);
+            ASSERT_NE(first.get(), second.get());
+            ASSERT_EQ(first->GetViewCount(), firstCount);
+            ASSERT_EQ(second->GetViewCount(), secondCount);
+            if (epoch == 10) capacity = {first->GetCapacityBytes(), second->GetCapacityBytes()};
+            if (epoch > 10) {
+                ASSERT_EQ(first->GetCapacityBytes(), capacity[0]);
+                ASSERT_EQ(second->GetCapacityBytes(), capacity[1]);
+                ASSERT_EQ(resources.GetPayloadStats().Creations, 2u);
+            }
+        }
+        EXPECT_EQ(resources.GetPayloadStats().Entries, 2u);
+    });
+}
+
 class ForwardPolicyProxy final : public PrimitiveSceneProxy {
 public:
-    explicit ForwardPolicyProxy(Material* material) : DrawMaterial(material) {}
+    explicit ForwardPolicyProxy(Material* material) : DrawMaterial(material) {
+        Geometry.VertexLayout.Buffers = {{0, 32, render::VertexStepMode::Vertex}};
+        Geometry.VertexLayout.Attributes = {
+            {"POSITION", 0, 0, 0, render::VertexFormat::FLOAT32X3},
+            {"NORMAL", 0, 0, 12, render::VertexFormat::FLOAT32X3},
+            {"TEXCOORD", 0, 0, 24, render::VertexFormat::FLOAT32X2}};
+    }
     Material* DrawMaterial;
     GpuMesh::DrawData Geometry;
     bool UsesRenderChangeNotifications() const noexcept override { return true; }
@@ -295,7 +421,7 @@ TEST(ForwardStaticPolicies, ProductProcessorsReusePublishedStatesAndBindingSchem
         const auto snapshot = prepare.PrepareScene(scene);
         ASSERT_TRUE(snapshot);
         ASSERT_EQ(snapshot->DrawRecords.size(), 3u);
-        EXPECT_EQ(snapshot->Stats.BindingRecipeCompiles, 3u);
+        EXPECT_EQ(snapshot->Stats.BindingRecipeCompiles, 2u);
         PackedCBufferTable objects;
         forward_detail::FreezeObjectData(*snapshot, objects);
         HostWriteBatch writes;
@@ -345,7 +471,14 @@ TEST(ForwardStaticPolicies, ProductProcessorsReusePublishedStatesAndBindingSchem
             EXPECT_EQ(normal.GetBindingId(0), readOnly.GetBindingId(0));
             EXPECT_NE(normal.GetEffectiveStateId(0), readOnly.GetEffectiveStateId(0));
             EXPECT_EQ(normal.GetEffectiveStateId(0), snapshot->DrawRecords[0].MirroredStateId);
-            EXPECT_EQ(&normal.GetDescription(0), &snapshot->DrawRecords[0].Description);
+            const auto actual = normal.GetDescription(0);
+            const auto expected = snapshot->ResolveDraw(snapshot->DrawRecords[0]).Description;
+            EXPECT_EQ(actual.Program, expected.Program);
+            EXPECT_EQ(actual.Geometry, expected.Geometry);
+            EXPECT_EQ(actual.FirstIndex, expected.FirstIndex);
+            EXPECT_EQ(actual.IndexCount, expected.IndexCount);
+            EXPECT_EQ(actual.VertexOffset, expected.VertexOffset);
+            EXPECT_EQ(actual.PipelineState, expected.PipelineState);
             EXPECT_EQ(normal.GetPrograms().size(), 1u);
             // One material/object plus a distinct Forward/Depth view upload for each actual view.
             EXPECT_EQ(resources.GetStats().SharedBufferUploads, 2u + (viewIndex + 1u) * 2u);
@@ -716,6 +849,54 @@ TEST(MaterialTechnique, MissingTextureLeavesDepthOnlyValidWithoutMaterialBinding
     });
 }
 
+TEST(ForwardStaticPolicies, AlternatePassReadinessInvalidatesDrawsWithoutRebuildingGeometry) {
+    WithForwardData([](ForwardData& data) {
+        const auto source = ReadTextFile(kProjectRoot / "shaderlib/pipelines/forward/depth_only.hlsl");
+        ASSERT_TRUE(source);
+        auto depth = test::CompileStageBProgram(*data.Device.Device, *source, ForwardPipeline::GetDepthOnlyLayoutRecipe());
+        ASSERT_TRUE(depth);
+        auto technique = MaterialTechnique::Create({{"ForwardLit", data.Program.get(), "ForwardMaterial", {}}, {"DepthOnly", depth.Get(), "", {}}}, "ForwardLit");
+        ASSERT_TRUE(technique);
+        auto material = Material::Create(technique.Get());
+        ASSERT_TRUE(material);
+        ASSERT_TRUE(material->SetSampler("LinearSampler", {}));
+        Scene scene;
+        scene.AddPrimitive(make_unique<ForwardPolicyProxy>(material.Get()));
+        AppUpdateContext app{};
+        RenderFramePlan plan;
+        RenderWorkloadBuilder workloads{plan, {}};
+        vector<StreamingAssetRefAny> owners;
+        uint64_t readiness = 0;
+        for (uint64_t epoch = 0; epoch < 3; ++epoch) {
+            if (epoch == 1) ASSERT_TRUE(material->SetTexture("AlbedoTexture", data.TextureA));
+            if (epoch == 2) ASSERT_TRUE(material->SetTexture("AlbedoTexture", data.TextureB));
+            RenderPrepareContext prepare{app, {}, workloads, owners, kPerformanceRenderGraphRuntimeOptions, epoch};
+            ASSERT_TRUE(forward_detail::RegisterForwardPassPolicies(prepare, scene));
+            ASSERT_TRUE(prepare.FreezeRegisteredScenes());
+            const auto snapshot = prepare.PrepareScene(scene);
+            ASSERT_TRUE(snapshot);
+            ASSERT_EQ(snapshot->Materials.size(), 1u);
+            ASSERT_EQ(snapshot->DrawRecords.size(), 3u);
+            const auto& value = snapshot->Materials[0];
+            EXPECT_TRUE(value.FindPass("DepthOnly")->Valid);
+            EXPECT_EQ(value.FindPass("ForwardLit")->Valid, epoch != 0);
+            for (const auto& draw : snapshot->DrawRecords)
+                EXPECT_EQ(draw.Status, epoch || draw.Policy == forward_detail::kDepthOnlyPolicy ? DrawRecordStatus::Ready : DrawRecordStatus::InvalidBindings);
+            if (epoch == 1) {
+                EXPECT_NE(value.ReadinessRevision, readiness);
+                EXPECT_GT(snapshot->Stats.DrawRecordPrimitivesVisited, 0u);
+                EXPECT_EQ(snapshot->Stats.PrimitiveBoundsRebuilt, 0u);
+            }
+            if (epoch == 2) {
+                EXPECT_EQ(value.ReadinessRevision, readiness);
+                EXPECT_EQ(snapshot->Stats.StaticRecipeCompiles, 0u);
+                EXPECT_EQ(snapshot->Stats.DrawRecordPrimitivesVisited, 0u);
+            }
+            readiness = value.ReadinessRevision;
+        }
+    });
+}
+
 TEST(FrameDrawResources, DynamicOffsetsReuseImmutableSetsAndSpillsCreateNewSets) {
     WithForwardData([](ForwardData& data) {
         HostWriteBatch writes;
@@ -900,6 +1081,46 @@ TEST(FrameDrawResources, IndexedTuplesPublishOnlySuccessAndRetryWithoutUploading
             ASSERT_TRUE(next.IsValid());
             EXPECT_NE(resources.GetGroup(next).DynamicOffsets, original);
         }
+        writes.Flush(*data.Device.Device);
+    });
+}
+
+TEST(FrameDrawResources, ParameterHandlesRejectOtherOwnersAndEpochsAndRetryFailedRows) {
+    WithForwardData([](ForwardData& data) {
+        HostWriteBatch writes;
+        FrameDrawResources resources{data.Device.Device.get()}, other{data.Device.Device.get()};
+        ASSERT_TRUE(resources.BeginFrame(writes));
+        ASSERT_TRUE(other.BeginFrame(writes));
+        Forward_ObjectData object{};
+        static constexpr byte wire{};
+        const auto domain = resources.RegisterParameterDomain({&object, &wire});
+        ASSERT_TRUE(resources.IsValid(domain));
+        EXPECT_FALSE(other.IsValid(domain));
+        const auto group = resources.RegisterParameterGroup(*data.Program, data.Bindings.ObjectGroup, domain);
+        ASSERT_TRUE(group.IsValid());
+        resources.FailNextGroupForTesting();
+        EXPECT_FALSE(resources.PrepareIndexedGroup(group, 3, AsCBufferBytes(object)).IsValid());
+        EXPECT_EQ(resources.GetGroupCount(), 0u);
+        const auto ready = resources.PrepareIndexedGroup(group, 3, {});
+        ASSERT_TRUE(ready.IsValid());
+        const auto lookups = resources.GetStats().NativeGroupLookups;
+        EXPECT_EQ(resources.PrepareIndexedGroup(group, 3, {}), ready);
+        EXPECT_EQ(resources.GetStats().NativeGroupLookups, lookups);
+        EXPECT_EQ(resources.GetStats().SharedBufferUploads, 1u);
+        EXPECT_FALSE(other.PrepareIndexedGroup(group, 3, {}).IsValid());
+        const auto binding = resources.PrepareIndexedBinding(domain, 5, array{ready});
+        ASSERT_TRUE(binding.IsValid());
+        EXPECT_EQ(resources.PrepareIndexedBinding(domain, 5, array{ready}), binding);
+        EXPECT_FALSE(resources.PrepareIndexedBinding(domain, 5, array{FrameShaderGroupId{}}).IsValid());
+        writes.Flush(*data.Device.Device);
+        ASSERT_TRUE(resources.BeginFrame(writes));
+        EXPECT_FALSE(resources.IsValid(domain));
+        EXPECT_FALSE(resources.PrepareIndexedGroup(group, 3, {}).IsValid());
+        EXPECT_FALSE(resources.PrepareIndexedBinding(domain, 5, array{ready}).IsValid());
+        const auto nextDomain = resources.RegisterParameterDomain({&object, &wire});
+        const auto nextGroup = resources.RegisterParameterGroup(*data.Program, data.Bindings.ObjectGroup, nextDomain);
+        ASSERT_TRUE(resources.PrepareIndexedGroup(nextGroup, 3, AsCBufferBytes(object)).IsValid());
+        EXPECT_EQ(resources.GetStats().SharedBufferUploads, 1u);
         writes.Flush(*data.Device.Device);
     });
 }

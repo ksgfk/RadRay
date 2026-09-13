@@ -135,8 +135,8 @@ uint64_t SnapshotFingerprint(const RenderSceneSnapshot& snapshot) {
     for (const auto& draw : snapshot.DrawRecords) {
         hash.Add(draw.Id);
         hash.Add(draw.RecipeRevision);
-        hash.Add(draw.Description.LayoutId.Value);
-        hash.Add(reinterpret_cast<uintptr_t>(draw.Description.Geometry.Get()));
+        hash.Add(snapshot.ResolveDraw(draw).Description.LayoutId.Value);
+        hash.Add(reinterpret_cast<uintptr_t>(snapshot.ResolveDraw(draw).Description.Geometry.Get()));
         hash.Add(draw.Material);
         hash.Add(draw.NormalStateId);
         hash.Add(draw.BindingRecipe);

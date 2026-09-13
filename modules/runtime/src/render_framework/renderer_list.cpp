@@ -21,6 +21,14 @@ RendererList& RendererList::operator=(const RendererList& other) {
     _draws = other._draws;
     _dynamicGeometryPlans = other._dynamicGeometryPlans;
     _programs = other._programs;
+    _programMarks = other._programMarks;
+    _candidates = other._candidates;
+    _viewDraws = other._viewDraws;
+    _requiredBindings = other._requiredBindings;
+    _requiredPlans = other._requiredPlans;
+    _bindingMarks = other._bindingMarks;
+    _planMarks = other._planMarks;
+    _programEpoch = other._programEpoch;
     _scene = other._scene;
     _resources = other._resources;
     _frameEpoch = other._frameEpoch;
@@ -39,6 +47,14 @@ RendererList& RendererList::operator=(RendererList&& other) noexcept {
     _draws = std::move(other._draws);
     _dynamicGeometryPlans = std::move(other._dynamicGeometryPlans);
     _programs = std::move(other._programs);
+    _programMarks = std::move(other._programMarks);
+    _candidates = std::move(other._candidates);
+    _viewDraws = std::move(other._viewDraws);
+    _requiredBindings = std::move(other._requiredBindings);
+    _requiredPlans = std::move(other._requiredPlans);
+    _bindingMarks = std::move(other._bindingMarks);
+    _planMarks = std::move(other._planMarks);
+    _programEpoch = other._programEpoch;
     _scene = other._scene;
     _resources = other._resources;
     _frameEpoch = other._frameEpoch;
@@ -56,16 +72,25 @@ void RendererList::AdvanceRevision() noexcept {
 Nullable<const RendererList::Draw*> RendererList::FindDraw(size_t executionIndex) const noexcept {
     return _draws.empty() ? nullptr : &_draws[Items.empty() ? executionIndex : Items[executionIndex].CommandIndex];
 }
-const MeshDrawDescription& RendererList::GetDescription(size_t index) const noexcept {
+Nullable<const ResolvedPrimitiveVertexLayout*> RendererList::GetVertexInput(size_t index) const noexcept {
+    const auto draw = FindDraw(index);
+    if (!draw || draw->Dynamic) return nullptr;
+    const auto& record = _scene->DrawRecords[draw->Source];
+    const auto& plan = _scene->DrawPlans[record.Plan];
+    const auto& input = _scene->GeometryBindingPlans[plan.Geometry].VertexInput;
+    return input && input->Input ? &*input->Input : nullptr;
+}
+MeshDrawDescriptionView RendererList::GetDescription(size_t index) const noexcept {
     const auto draw = FindDraw(index);
     if (!draw) return Commands[Items.empty() ? index : Items[index].CommandIndex];
-    return draw->Dynamic ? static_cast<const MeshDrawDescription&>(Commands[draw->Source]) : _scene->DrawRecords[draw->Source].Description;
+    return draw->Dynamic ? MeshDrawDescriptionView{Commands[draw->Source]} : _scene->ResolveDraw(_scene->DrawRecords[draw->Source]).Description;
 }
 const MaterialPipelineState& RendererList::GetPipelineState(size_t index) const noexcept {
     const auto draw = FindDraw(index);
     if (!draw || draw->Dynamic) return GetDescription(index).PipelineState;
     const auto& record = _scene->DrawRecords[draw->Source];
-    return record.Mirrored ? record.MirroredState : record.Description.PipelineState;
+    const auto resolved = _scene->ResolveDraw(record);
+    return record.Mirrored ? resolved.MirroredState : resolved.Description.PipelineState;
 }
 RendererDrawGroupsView RendererList::GetGroups(size_t index) const noexcept {
     const auto draw = FindDraw(index);
@@ -76,6 +101,10 @@ RendererDrawGroupsView RendererList::GetGroups(size_t index) const noexcept {
 FrameDrawBindingId RendererList::GetBindingId(size_t index) const noexcept {
     const auto draw = FindDraw(index);
     return draw && !draw->Dynamic ? draw->Binding : FrameDrawBindingId{};
+}
+Nullable<const DrawRecord*> RendererList::GetStaticRecord(size_t index) const noexcept {
+    const auto draw = FindDraw(index);
+    return draw && !draw->Dynamic ? &_scene->DrawRecords[draw->Source] : nullptr;
 }
 uint64_t RendererList::GetEffectiveStateId(size_t index) const noexcept {
     const auto draw = FindDraw(index);
@@ -101,11 +130,37 @@ bool RendererList::IsCurrent() const noexcept {
            (!_scene || (_scene->PublicationId == _publicationId && _scene->SceneEpoch == _sceneEpoch &&
                         _scene->PublicationRevision == _publicationRevision && _scene->DrawRecords.size() != 0));
 }
+size_t RendererList::GetCacheCapacityBytes() const noexcept {
+    size_t bytes = Commands.capacity() * sizeof(MeshDrawCommand) + Items.capacity() * sizeof(RendererListItem) +
+                   _draws.capacity() * sizeof(Draw) + _dynamicGeometryPlans.capacity() * sizeof(CpuGeometryBindingPlan) +
+                   _programs.capacity() * sizeof(RendererListProgramUse) + _candidates.capacity() * sizeof(MeshPassCandidate) +
+                   _viewDraws.capacity() * sizeof(MeshStaticDrawCompileResult) +
+                   (_programMarks.capacity() + _bindingMarks.capacity() + _planMarks.capacity()) * sizeof(uint64_t) +
+                   (_requiredBindings.capacity() + _requiredPlans.capacity()) * sizeof(uint32_t);
+    for (const auto& command : Commands) {
+        if (command.Groups.capacity() > command.Groups.inline_capacity) bytes += command.Groups.capacity() * sizeof(PreparedShaderGroup);
+        for (const auto& group : command.Groups)
+            if (group.DynamicOffsets.capacity() > group.DynamicOffsets.inline_capacity) bytes += group.DynamicOffsets.capacity() * sizeof(render::ShaderParameterDynamicOffset);
+    }
+    for (const auto& plan : _dynamicGeometryPlans)
+        if (plan.Runs.capacity() > plan.Runs.inline_capacity) bytes += plan.Runs.capacity() * sizeof(CpuVertexBindingRun);
+    return bytes;
+}
 void RendererList::ResetForReuse() noexcept {
     Items.clear();
     Commands.clear();
     _draws.clear();
     _programs.clear();
+    _candidates.clear();
+    _viewDraws.clear();
+    _requiredBindings.clear();
+    _requiredPlans.clear();
+    if (++_programEpoch == 0) {
+        std::fill(_programMarks.begin(), _programMarks.end(), 0);
+        std::fill(_bindingMarks.begin(), _bindingMarks.end(), 0);
+        std::fill(_planMarks.begin(), _planMarks.end(), 0);
+        ++_programEpoch;
+    }
     _dynamicGeometryPlans.clear();
     Stats = {};
     _scene = nullptr;
@@ -114,7 +169,7 @@ void RendererList::ResetForReuse() noexcept {
     AdvanceRevision();
 }
 bool RendererList::AppendStatic(const RenderSceneSnapshot& scene, uint32_t recordIndex, FrameDrawResources& resources, FrameDrawBindingId binding) {
-    if (!IsCurrent() || recordIndex >= scene.DrawRecords.size() || !resources.IsValid(binding) ||
+    if (!IsCurrent() || recordIndex >= scene.DrawRecords.size() || scene.DrawRecords[recordIndex].Plan >= scene.DrawPlans.size() || !resources.IsValid(binding) ||
         (_scene && _scene.Get() != &scene) || (_resources && (_resources.Get() != &resources || _frameEpoch != resources.GetEpoch()))) return false;
     _scene = &scene;
     _resources = &resources;
@@ -149,6 +204,44 @@ bool RendererList::AppendDynamic(MeshDrawCommand&& command, Nullable<FrameDrawRe
     AdvanceRevision();
     return true;
 }
+void RendererList::BeginProgramCollection(size_t bindingPlans, size_t drawPlans) {
+    if (_bindingMarks.size() < bindingPlans) _bindingMarks.resize(bindingPlans);
+    if (_planMarks.size() < drawPlans) _planMarks.resize(drawPlans);
+    if (_programMarks.size() < bindingPlans) _programMarks.resize(bindingPlans);
+    _programs.reserve(bindingPlans);
+}
+void RendererList::CollectCandidate(const RenderSceneSnapshot& scene, uint32_t record, VisiblePrimitive visible,
+                                    Nullable<const MeshStaticDrawCompileResult*> viewDraw) {
+    uint32_t viewIndex = UINT32_MAX;
+    if (viewDraw) {
+        viewIndex = static_cast<uint32_t>(_viewDraws.size());
+        _viewDraws.push_back(*viewDraw);
+    } else {
+        const auto& draw = scene.DrawRecords[record];
+        if (draw.BindingRecipe < _bindingMarks.size() && _bindingMarks[draw.BindingRecipe] != _programEpoch) {
+            _requiredBindings.push_back(draw.BindingRecipe);
+            _bindingMarks[draw.BindingRecipe] = _programEpoch;
+        }
+        if (draw.Plan < _planMarks.size() && _planMarks[draw.Plan] != _programEpoch) {
+            _requiredPlans.push_back(draw.Plan);
+            _planMarks[draw.Plan] = _programEpoch;
+        }
+    }
+    _candidates.push_back({record, visible, viewIndex});
+}
+MeshPassListPreparation RendererList::GetPreparation(const RendererListDesc& desc, const RenderSceneSnapshot& scene) const noexcept {
+    return {&desc, &scene, _candidates, _viewDraws, _requiredBindings, _requiredPlans};
+}
+void RendererList::AddProgram(RendererListProgramUse use, uint32_t bindingPlan) {
+    if (bindingPlan >= _programMarks.size()) {
+        AddProgram(use);
+        return;
+    }
+    if (_programMarks[bindingPlan] == _programEpoch) return;
+    _programs.push_back(use);
+    _programMarks[bindingPlan] = _programEpoch;
+    AdvanceRevision();
+}
 void RendererList::AddProgram(RendererListProgramUse use) {
     if (std::none_of(_programs.begin(), _programs.end(), [&](const auto& value) { return value.Program == use.Program && value.ProgramGeneration == use.ProgramGeneration && value.Bindings == use.Bindings; })) {
         _programs.push_back(use);
@@ -164,6 +257,8 @@ struct ListTarget {
     const RendererListDesc* Desc;
     RendererList* Out;
     uint32_t PassHash;
+    bool PolicyChecked{false}, PolicyMatches{false};
+    Nullable<const PassPolicy*> Policy{nullptr};
 };
 
 void SortRendererListItems(const RendererListDesc& desc, RendererList& out) {
@@ -226,65 +321,130 @@ void ResetTargets(std::span<ListTarget> targets) {
     for (auto& target : targets) target.Out->ResetForReuse();
 }
 
-bool EmitFromRecords(const ListTarget& target, MeshPassProcessor& processor) {
-    const auto& desc = *target.Desc;
-    const auto& scene = *desc.Culling->Scene.Get();
-    auto& out = *target.Out;
-    out.Stats.VisiblePrimitives = desc.Culling->Primitives.size();
-    for (const auto& visible : desc.Culling->Primitives) {
+bool EmitFromRecords(std::span<ListTarget> targets, MeshPassProcessor& processor) {
+    const auto& culling = *targets.front().Desc->Culling;
+    const auto& scene = *culling.Scene.Get();
+    for (auto& target : targets) target.Out->Stats.VisiblePrimitives = culling.Primitives.size();
+    for (const auto& visible : culling.Primitives) {
         if (visible.Primitive >= scene.Primitives.size() || visible.Primitive + 1 >= scene.PrimitiveDrawBegin.size()) return false;
         const auto& primitive = scene.Primitives[visible.Primitive];
-        if (!(primitive.LayerMask & desc.LayerMask)) {
-            out.Stats.LayerRejected += std::max<uint64_t>(1, primitive.MeshBatchCount);
-            continue;
-        }
         const uint32_t begin = scene.PrimitiveDrawBegin[visible.Primitive];
         const uint32_t end = scene.PrimitiveDrawBegin[visible.Primitive + 1];
         if (begin > end || end > scene.DrawRecords.size()) return false;
-        bool matchedPass = false;
+        array<bool, kMaxSharedRendererLists> eligible{}, matchedPass{};
+        for (size_t index = 0; index < targets.size(); ++index) {
+            const auto& target = targets[index];
+            eligible[index] = bool(primitive.LayerMask & target.Desc->LayerMask);
+            if (!eligible[index]) target.Out->Stats.LayerRejected += std::max<uint64_t>(1, primitive.MeshBatchCount);
+        }
         for (uint32_t index = begin; index < end; ++index) {
             const auto& record = scene.DrawRecords[index];
-            if (record.Policy != desc.Policy || record.PassNameHash != target.PassHash) continue;
-            if (record.Material >= scene.Materials.size() || record.PassIndex >= scene.Materials[record.Material].Passes.size()) return false;
-            if (scene.Materials[record.Material].Passes[record.PassIndex].PassName != desc.MaterialPassName) continue;
-            matchedPass = true;
-            ++out.Stats.ConsideredBatches;
-            if (!desc.QueueRange.Contains(record.Queue)) {
-                ++out.Stats.QueueRejected;
-                continue;
-            }
-            if (record.Status == DrawRecordStatus::MissingPass) {
-                ++out.Stats.MissingPass;
-                if (desc.RequireMaterialPass) ++out.Stats.MissingRequiredPass;
-                continue;
-            }
-            if (record.Status == DrawRecordStatus::InvalidBindings) {
-                ++out.Stats.InvalidBindings;
-                continue;
-            }
-            if (record.Status == DrawRecordStatus::InvalidGeometry) {
-                ++out.Stats.InvalidGeometry;
-                continue;
-            }
-            MeshPassDrawListContext result;
-            processor.PrepareRecord(desc, scene, record, result);
-            const auto previousDraws = out.GetDrawCount();
-            if (!AppendPreparedCommand(desc, visible, record.Batch, record.Queue, record.ProgramFrameId, record.Material, result, out, scene, index)) return false;
-            if (out.GetDrawCount() != previousDraws) {
-                const auto& pass = scene.Materials[record.Material].Passes[record.PassIndex];
-                const auto program = out.GetDescription(previousDraws).Program;
-                const bool indexed = out.GetBindingId(previousDraws).IsValid();
-                out.AddProgram({program, program == pass.Program ? pass.ProgramGeneration : 0,
-                                indexed && record.BindingRecipe < scene.BindingRecipes.size() ? &scene.BindingRecipes[record.BindingRecipe] : nullptr});
+            std::optional<MeshStaticDrawCompileResult> viewDraw;
+            MeshStaticCompileStatus viewStatus{MeshStaticCompileStatus::Ready};
+            for (size_t targetIndex = 0; targetIndex < targets.size(); ++targetIndex) {
+                const auto& target = targets[targetIndex];
+                const auto& desc = *target.Desc;
+                auto& out = *target.Out;
+                if (!eligible[targetIndex] || (target.PolicyChecked && !target.PolicyMatches) ||
+                    record.Policy != desc.Policy || record.PolicyConfiguration != desc.PolicyConfiguration || record.PassNameHash != target.PassHash) continue;
+                if (record.Material >= scene.Materials.size() || record.PassIndex >= scene.Materials[record.Material].Passes.size()) return false;
+                if (!target.PolicyChecked && scene.Materials[record.Material].Passes[record.PassIndex].PassName != desc.MaterialPassName) continue;
+                matchedPass[targetIndex] = true;
+                ++out.Stats.ConsideredBatches;
+                const bool perView = target.Policy && target.Policy->CacheMode == MeshPassCacheMode::PerView;
+                if (!perView && record.Status == DrawRecordStatus::Filtered) {
+                    ++out.Stats.FilteredDraws;
+                    continue;
+                }
+                if (!desc.QueueRange.Contains(record.Queue)) {
+                    ++out.Stats.QueueRejected;
+                    continue;
+                }
+                if (!perView && record.Status == DrawRecordStatus::MissingPass) {
+                    ++out.Stats.MissingPass;
+                    if (desc.RequireMaterialPass) ++out.Stats.MissingRequiredPass;
+                    continue;
+                }
+                if (!perView && record.Status == DrawRecordStatus::InvalidBindings) {
+                    ++out.Stats.InvalidBindings;
+                    continue;
+                }
+                if (!perView && record.Status == DrawRecordStatus::InvalidGeometry) {
+                    ++out.Stats.InvalidGeometry;
+                    continue;
+                }
+                if (perView) {
+                    if (!viewDraw) {
+                        if (record.Batch >= scene.MeshBatches.size()) return false;
+                        const auto& material = scene.Materials[record.Material];
+                        const auto& pass = material.Passes[record.PassIndex];
+                        const auto& batch = scene.MeshBatches[record.Batch];
+                        auto mirrored = pass.PipelineState;
+                        mirrored.Primitive.FaceClockwise = OppositeFrontFace(mirrored.Primitive.FaceClockwise);
+                        viewDraw.emplace(MeshStaticDrawCompileResult{record.PassIndex, batch.Geometry, batch.FirstIndex, batch.IndexCount, batch.VertexOffset,
+                                                                     pass.PipelineState, mirrored});
+                        viewStatus = target.Policy->CompileView({pass, material, batch, primitive, record.PassIndex, target.Policy->Configuration}, *desc.View, *viewDraw);
+                    }
+                    if (viewStatus == MeshStaticCompileStatus::Filtered) {
+                        ++out.Stats.FilteredDraws;
+                        continue;
+                    }
+                    const auto& material = scene.Materials[record.Material];
+                    if (viewStatus == MeshStaticCompileStatus::IncompatibleProgram || viewDraw->ProgramPassIndex >= material.Passes.size() ||
+                        !material.Passes[viewDraw->ProgramPassIndex].Valid || !material.Passes[viewDraw->ProgramPassIndex].Program) {
+                        ++out.Stats.InvalidBindings;
+                        continue;
+                    }
+                    if (viewStatus == MeshStaticCompileStatus::InvalidGeometry || !viewDraw->Geometry) {
+                        ++out.Stats.InvalidGeometry;
+                        continue;
+                    }
+                }
+                out.CollectCandidate(scene, index, visible, perView ? &*viewDraw : nullptr);
             }
         }
-        if (!matchedPass && primitive.MeshBatchCount != 0) {
-            out.Stats.ConsideredBatches += primitive.MeshBatchCount;
-            out.Stats.MissingPass += primitive.MeshBatchCount;
-            if (desc.RequireMaterialPass) out.Stats.MissingRequiredPass += primitive.MeshBatchCount;
+        for (size_t index = 0; index < targets.size(); ++index) {
+            const auto& target = targets[index];
+            if (eligible[index] && !matchedPass[index] && primitive.MeshBatchCount != 0) {
+                target.Out->Stats.ConsideredBatches += primitive.MeshBatchCount;
+                target.Out->Stats.MissingPass += primitive.MeshBatchCount;
+                if (target.Desc->RequireMaterialPass) target.Out->Stats.MissingRequiredPass += primitive.MeshBatchCount;
+            }
         }
     }
-    FinishList(desc, out);
+    array<MeshPassListPreparation, kMaxSharedRendererLists> batches;
+    for (size_t index = 0; index < targets.size(); ++index)
+        batches[index] = targets[index].Out->GetPreparation(*targets[index].Desc, scene);
+    if (!processor.PrepareBatch(std::span{batches.data(), targets.size()})) return false;
+    for (size_t targetIndex = 0; targetIndex < targets.size(); ++targetIndex) {
+        const auto& batch = batches[targetIndex];
+        const auto& desc = *batch.Descriptor;
+        auto& out = *targets[targetIndex].Out;
+        for (const auto& candidate : batch.Candidates) {
+            const auto& record = scene.DrawRecords[candidate.Record];
+            uint32_t selectedPass = record.PassIndex;
+            MeshPassDrawListContext result;
+            if (candidate.ViewDraw != UINT32_MAX) {
+                const auto& compiled = batch.ViewDraws[candidate.ViewDraw];
+                selectedPass = compiled.ProgramPassIndex;
+                processor.PrepareViewRecord(desc, scene, record, compiled, result);
+                if (result.HasDraw() && !result.HasCommand()) result.Reject(MeshPassRejectReason::ProcessorRejected);
+            } else
+                processor.PrepareRecord(desc, scene, record, result);
+            const auto previousDraws = out.GetDrawCount();
+            const auto& pass = scene.Materials[record.Material].Passes[selectedPass];
+            if (!AppendPreparedCommand(desc, candidate.Visible, record.Batch, record.Queue, pass.ProgramFrameId, record.Material, result, out, scene, candidate.Record)) return false;
+            if (out.GetDrawCount() != previousDraws) {
+                const auto program = out.GetDescription(previousDraws).Program;
+                const bool indexed = out.GetBindingId(previousDraws).IsValid();
+                const bool cached = indexed && program == pass.Program && record.BindingRecipe < scene.BindingRecipes.size();
+                out.AddProgram({program, program == pass.Program ? pass.ProgramGeneration : 0,
+                                cached ? &scene.BindingRecipes[record.BindingRecipe] : nullptr},
+                               cached ? record.BindingRecipe : UINT32_MAX);
+            }
+        }
+        FinishList(desc, out);
+    }
     return true;
 }
 
@@ -338,10 +498,13 @@ bool EmitFromBatches(const ListTarget& target, MeshPassProcessor& processor) {
 }
 
 bool EmitTargets(std::span<ListTarget> targets, MeshPassProcessor& processor, bool records) {
+    if (records && std::all_of(targets.begin(), targets.end(), [](const auto& target) {
+            return target.Desc->Culling->Scene->HasPassPolicies == target.Desc->Policy.IsValid();
+        })) return EmitFromRecords(targets, processor);
     for (auto& target : targets) {
         const auto& scene = *target.Desc->Culling->Scene;
         const bool compatibleRecords = records && scene.HasPassPolicies == target.Desc->Policy.IsValid();
-        const bool ok = compatibleRecords ? EmitFromRecords(target, processor) : EmitFromBatches(target, processor);
+        const bool ok = compatibleRecords ? EmitFromRecords(std::span{&target, 1}, processor) : EmitFromBatches(target, processor);
         if (!ok) return false;
     }
     return true;
@@ -360,6 +523,9 @@ bool BuildRendererListsImpl(std::span<const RendererListDesc> descs, MeshPassPro
             return false;
         }
     }
+    for (size_t index = 0; index < outs.size(); ++index)
+        for (size_t previous = 0; previous < index; ++previous)
+            if (outs[index] == outs[previous]) return false;
     const auto& scene = *descs[0].Culling->Scene.Get();
     const bool records = HasDrawRecordTable(scene);
     array<ListTarget, kMaxSharedRendererLists> storage{};
@@ -367,6 +533,16 @@ bool BuildRendererListsImpl(std::span<const RendererListDesc> descs, MeshPassPro
     const size_t visible = descs[0].Culling->Primitives.size();
     for (uint32_t list = 0; list < listCount; ++list) {
         storage[list] = {&descs[list], outs[list], HashPassName(descs[list].MaterialPassName)};
+        if (scene.PassPolicies && descs[list].Policy.IsValid()) {
+            storage[list].PolicyChecked = true;
+            for (const auto& policy : *scene.PassPolicies)
+                if (policy.Id == descs[list].Policy && policy.Configuration == descs[list].PolicyConfiguration && policy.PassName == descs[list].MaterialPassName) {
+                    storage[list].PolicyMatches = true;
+                    storage[list].Policy = &policy;
+                    break;
+                }
+        }
+        outs[list]->BeginProgramCollection(scene.BindingRecipes.size(), scene.DrawPlans.size());
         outs[list]->Items.reserve(visible);
     }
     auto targets = std::span<ListTarget>{storage.data(), listCount};

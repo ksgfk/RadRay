@@ -333,7 +333,7 @@ Nullable<render::GraphicsPipelineState*> ShaderProgram::GetOrCreateGraphicsPipel
     const MaterialPipelineState& materialState,
     const PrimitiveVertexLayout& vertexLayout,
     PrimitiveTopology topology,
-    const GraphicsPassState& passState) noexcept {
+    const GraphicsPassState& passState, Nullable<const ResolvedPrimitiveVertexLayout*> resolvedInput) noexcept {
     if (_device == nullptr || _artifact.Layout == nullptr || _vertexShader == nullptr ||
         !passState.IsValid()) {
         return nullptr;
@@ -352,10 +352,11 @@ Nullable<render::GraphicsPipelineState*> ShaderProgram::GetOrCreateGraphicsPipel
         return existing->second.get();
     }
 
-    std::optional<ResolvedPrimitiveVertexLayout> resolved =
-        ResolvePrimitiveVertexLayout(vertexLayout, _artifact.Generic());
-    if (!resolved.has_value()) {
-        return nullptr;
+    std::optional<ResolvedPrimitiveVertexLayout> resolved;
+    if (!resolvedInput) {
+        resolved = ResolvePrimitiveVertexLayout(vertexLayout, _artifact.Generic());
+        if (!resolved) return nullptr;
+        resolvedInput = &*resolved;
     }
 
     render::PrimitiveState primitive{
@@ -387,7 +388,7 @@ Nullable<render::GraphicsPipelineState*> ShaderProgram::GetOrCreateGraphicsPipel
     render::MultiSampleState multiSample = render::MultiSampleState::Default();
     multiSample.Count = passState.SampleCount;
 
-    const render::VertexInputState vertexInput = resolved->GetState();
+    const render::VertexInputState vertexInput = resolvedInput->GetState();
     Nullable<unique_ptr<render::GraphicsPipelineState>> result =
         _device->CreateGraphicsPipelineState(render::GraphicsPipelineStateDescriptor{
             .PipelineLayout = _artifact.Layout.get(),

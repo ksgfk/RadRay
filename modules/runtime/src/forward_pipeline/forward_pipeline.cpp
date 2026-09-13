@@ -66,9 +66,10 @@ struct ForwardPipeline::Impl {
     struct FlightResources {
         shared_ptr<const RenderSceneSnapshot> Scene{make_shared<RenderSceneSnapshot>()};
         // Object cbuffer rows frozen on the game thread, indexed by snapshot primitive.
-        ForwardObjectDataCache Objects;
+        CBufferRows Objects;
         unique_ptr<FrameDrawResources> DrawResources;
         vector<ForwardFamilyDrawWork> Families;
+        array<vector<ForwardGraphView>, 3> LdrViewScratch;
         vector<unique_ptr<ForwardHdrView>> HdrViews;
         ForwardPipelineSettings Settings;
         vector<ForwardOutputOverlay> Overlays;
@@ -135,6 +136,7 @@ struct ForwardPipeline::Impl {
         shared_ptr<DepthOnlyMeshPassProcessor> Depth;
         shared_ptr<ForwardLitMeshPassProcessor> Lit;
         RenderValidationMode Validation;
+        void ResetForReuse() noexcept { *this = {}; }
     };
     struct LdrFamilyTemplate {
         render::TextureDescriptor ColorDesc, DepthDesc;
@@ -242,20 +244,25 @@ struct ForwardPipeline::Impl {
         auto& flight = Flights[context.FlightIndex()];
         auto& work = flight.Families[family.FrameLocalIndex];
         work.Views.resize(family.Views.size());
-        auto depth = make_shared<DepthOnlyMeshPassProcessor>(*flight.DrawResources, DepthBindings, flight.Objects.Rows());
-        auto lit = make_shared<ForwardLitMeshPassProcessor>(*flight.DrawResources, Bindings, LightOverflowWarned, flight.Objects.Rows());
-        array<vector<ForwardGraphView>, 3> views;
+        auto depth = graph.AcquireFramePayload<DepthOnlyMeshPassProcessor>(this, family.FrameLocalIndex, *flight.DrawResources, DepthBindings, flight.Objects);
+        depth->ResetFrame(*flight.DrawResources, DepthBindings, flight.Objects);
+        auto lit = graph.AcquireFramePayload<ForwardLitMeshPassProcessor>(this, family.FrameLocalIndex, *flight.DrawResources, Bindings, LightOverflowWarned, flight.Objects);
+        lit->ResetFrame(*flight.DrawResources, Bindings, LightOverflowWarned, flight.Objects);
+        auto& views = flight.LdrViewScratch;
+        for (auto& stage : views) stage.clear();
         for (size_t index = 0; index < family.Views.size(); ++index) {
             auto& view = work.Views[index];
             view.View = family.Views[index];
             view.Work = instance.Value(cached->Works[index]);
-            if (!instance.Bind(cached->WorkSlots[index], make_shared<ViewWorkRequest>(ViewWorkRequest{&flight, &view, depth, lit, context.GetRuntimeOptions().Validation}))) return false;
+            auto request = graph.AcquireFramePayload<ViewWorkRequest>(this, (uint64_t{family.FrameLocalIndex} << 32) | index);
+            *request = {&flight, &view, depth, lit, context.GetRuntimeOptions().Validation};
+            if (!instance.Bind(cached->WorkSlots[index], request)) return false;
             views[0].push_back({.View = view.View, .List = &view.DepthOnly});
             views[1].push_back({.View = view.View, .List = &view.Opaque});
             views[2].push_back({.View = view.View, .List = &view.Transparent});
         }
         for (size_t stage = 0; stage < views.size(); ++stage)
-            if (!instance.Bind(cached->StageSlots[stage], ForwardGraph::MakeFrame({.Backend = Device->GetBackend(), .Views = views[stage], .Execution = &flight.Stats.Execution}))) return false;
+            if (!instance.Bind(cached->StageSlots[stage], ForwardGraph::MakeFrame(graph, this, (uint64_t{family.FrameLocalIndex} << 32) | stage, {.Backend = Device->GetBackend(), .Views = views[stage], .Execution = &flight.Stats.Execution}))) return false;
         color = instance.Value(cached->ColorOutput);
         for (const auto& view : work.Views) flight.RenderedViews.push_back(view.View.StateId);
         return true;
@@ -332,7 +339,7 @@ bool ForwardPipeline::SetOutputSurfaces(std::span<const ForwardOutputSurface> su
 }
 
 void ForwardPipeline::CollectScenePolicies(RenderPrepareContext& ctx) {
-    if (!RegisterForwardPassPolicies(ctx, *_impl->RenderScene)) _impl->Error = true;
+    if (!ctx.RegisterSceneExtension(*_impl->RenderScene, ForwardObjectExtension()) || !RegisterForwardPassPolicies(ctx, *_impl->RenderScene)) _impl->Error = true;
 }
 
 void ForwardPipeline::PrepareFrame(RenderPrepareContext& ctx) {
@@ -359,10 +366,18 @@ void ForwardPipeline::PrepareFrame(RenderPrepareContext& ctx) {
     }
     if (!snapshotOk) {
         RADRAY_ERR_LOG("Forward scene snapshot exceeded its frame-local index capacity");
-        flight.Objects.Clear();
+        flight.Objects = {};
         return;
     }
-    flight.Stats.ObjectValueUpdates = flight.Objects.Update(*flight.Scene);
+    const auto extension = flight.Scene->FindExtension(ForwardObjectExtension());
+    const auto objects = extension ? extension->Get<ForwardObjectExtensionData>() : shared_ptr<const ForwardObjectExtensionData>{};
+    if (!objects) {
+        flight.Objects = {};
+        _impl->Error = true;
+        return;
+    }
+    flight.Objects = CBufferRows::Borrow(*objects);
+    flight.Stats.ObjectValueUpdates = extension->Prepared ? objects->UpdatedRows : 0;
     if (flight.Scene->Stats.InvalidBounds && !_impl->InvalidBoundsWarned) {
         RADRAY_WARN_LOG("Forward scene contains invalid bounds; these primitives remain conservatively visible");
         _impl->InvalidBoundsWarned = true;
@@ -460,7 +475,7 @@ void ForwardPipeline::BuildGraph(RenderPipelineContext& ctx, RenderGraph& graph,
         ForwardShadowAtlas atlas{};
         if (primary) {
             if (!flight.SharedShadowView) flight.SharedShadowView = make_unique<ForwardHdrView>();
-            if (!DeclareForwardSharedShadows(graph, _impl->EffectTemplates, flight.Settings, *primary, *flight.Scene, flight.Objects.Rows(), *flight.DrawResources, _impl->Bindings,
+            if (!DeclareForwardSharedShadows(graph, _impl->EffectTemplates, flight.Settings, *primary, *flight.Scene, flight.Objects, *flight.DrawResources, _impl->Bindings,
                                              *flight.SharedShadowView, _impl->Device->GetBackend(), _impl->LightOverflowWarned, atlas)) {
                 _impl->Error = true;
                 return;
@@ -468,7 +483,9 @@ void ForwardPipeline::BuildGraph(RenderPipelineContext& ctx, RenderGraph& graph,
         }
         auto hdrLit = [&] {
             RADRAY_PROFILE_SCOPE_N("Forward::DrawWorkBuild.Processor");
-            return make_shared<ForwardLitMeshPassProcessor>(*flight.DrawResources, _impl->Bindings, _impl->LightOverflowWarned, flight.Objects.Rows(), &ctx);
+            auto value = graph.AcquireFramePayload<ForwardLitMeshPassProcessor>(_impl.get(), UINT64_MAX, *flight.DrawResources, _impl->Bindings, _impl->LightOverflowWarned, flight.Objects, &ctx);
+            value->ResetFrame(*flight.DrawResources, _impl->Bindings, _impl->LightOverflowWarned, flight.Objects, &ctx);
+            return value;
         }();
         for (const auto* familyPointer : families) {
             const auto& family = *familyPointer;
@@ -482,7 +499,7 @@ void ForwardPipeline::BuildGraph(RenderPipelineContext& ctx, RenderGraph& graph,
                 _impl->Signatures.insert_or_assign(view.StateId, signature);
                 if (viewIndex == flight.HdrViews.size()) flight.HdrViews.push_back(make_unique<ForwardHdrView>());
                 auto& work = *flight.HdrViews[viewIndex++];
-                if (BuildForwardHdrView(graph, _impl->EffectTemplates, ctx, *_impl->Device, _impl->Effects, flight.Settings, family, view, *flight.Scene, flight.Objects.Rows(),
+                if (BuildForwardHdrView(graph, _impl->EffectTemplates, ctx, *_impl->Device, _impl->Effects, flight.Settings, family, view, *flight.Scene, flight.Objects,
                                         *flight.DrawResources, _impl->Bindings, work, firstOutput, _impl->LightOverflowWarned, flight.Surfaces, outputs,
                                         atlas, auxiliary, hdrLit))
                     firstOutput = false;

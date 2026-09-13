@@ -13,7 +13,7 @@ from pathlib import Path
 
 MAX_NS = (1 << 63) - 1
 STAGES = ("authoring_begin", "authoring_done", "world_done", "gt_ready", "rt_begin", "rt_recorded", "submit", "complete", "gt_observed")
-BOUNDARY = "radray.integrated.preparation.v3"
+BOUNDARY = "radray.integrated.preparation.v5"
 MARKER_PREFIX = "RRP2|"
 
 
@@ -165,17 +165,18 @@ GRAPH = {"CreateRenderGraph", "ComposeGraph", "GraphFlightStorage", "RenderGraph
 GT_PRE = {"RenderSystem::BeginUpdateForFlight", "AssetManager::Pump", "ApplicationScheduler::Pump"}
 GPU_UPDATE = "Application::GpuBeginUpdateForFlight"
 HISTORY = {"ViewStateRegistry::CommitView", "ViewStateRegistry::CommitViewWithHistory"}
-SELECTED = SCENE | DETAILS | GRAPH | LEGACY_DRAW | GT_PRE | HISTORY | {GPU_UPDATE, GT_GUARD, RT_GUARD, UPLOAD_WORK, PREPARE_WORK, PREPARE_PASSES, PREPARE_UPLOADS, PUBLISH_SETS, VIEW_INPUTS, "ObjectValueUpdate", "FreezeObjectData", "Profile.Authoring", "Profile.PrepareObservation", "Profile.ComposeObservation", "ForwardGraph::BuildGraph", "RenderGraph::Record", "Update", "TickFrame", "PrepareFrameUploads", "ViewStateRegistry::BeginFlight", "ForwardPipeline::GraphRecorded", "RenderSystem::SubmittedFrame", "RenderSystem::PresentCommit", "RenderPipelineContext::QueueViewCommit", "PresentFinalize"}
+SELECTED = SCENE | DETAILS | GRAPH | LEGACY_DRAW | GT_PRE | HISTORY | {GPU_UPDATE, GT_GUARD, RT_GUARD, UPLOAD_WORK, PREPARE_WORK, PREPARE_PASSES, PREPARE_UPLOADS, PUBLISH_SETS, VIEW_INPUTS, "ObjectValueUpdate", "FreezeObjectData", "Profile.Authoring", "Profile.PrepareObservation", "Profile.ComposeObservation", "ForwardGraph::BuildGraph", "RenderGraph::Record", "Update", "TickFrame", "PrepareFrameUploads", "ViewStateRegistry::BeginFlight", "ForwardPipeline::GraphRecorded", "RenderSystem::SubmittedFrame", "RenderSystem::PresentCommit", "RenderPipelineContext::QueueViewCommit", "PresentFinalize", "PresentationAcquire", "Scene.ForwardObjectValues"}
 
 SYSTEM_FILE = "modules/runtime/src/render_system.cpp"
 GRAPH_FILE = "modules/runtime/src/render_framework/render_graph.cpp"
 APPLICATION_FILE = "modules/runtime/src/application.cpp"
 VIEW_STATE_FILE = "modules/runtime/src/render_framework/view_state.cpp"
 SCOPE_FILES = {**{name: APPLICATION_FILE for name in ("TickFrame", "Update", "PrepareFrameUploads", "ApplicationScheduler::Pump", GPU_UPDATE)},
-               **{name: SYSTEM_FILE for name in ("RenderSystem::BeginUpdateForFlight", "BeginGraphFlight", "GraphFlightStorage", "RenderSystem::SubmittedFrame", "RenderSystem::PresentCommit", "PresentFinalize")},
+               **{name: SYSTEM_FILE for name in ("RenderSystem::BeginUpdateForFlight", "BeginGraphFlight", "GraphFlightStorage", "RenderSystem::SubmittedFrame", "RenderSystem::PresentCommit", "PresentFinalize", "PresentationAcquire")},
                **{name: VIEW_STATE_FILE for name in HISTORY | {"ViewStateRegistry::BeginFlight"}},
                "AssetManager::Pump": "modules/runtime/src/asset_manager.cpp", "RenderPipelineContext::QueueViewCommit": "modules/runtime/src/render_framework/render_pipeline.cpp",
-               "ForwardPipeline::GraphRecorded": "modules/runtime/src/forward_pipeline/forward_pipeline.cpp"}
+               "ForwardPipeline::GraphRecorded": "modules/runtime/src/forward_pipeline/forward_pipeline.cpp",
+               "Scene.ForwardObjectValues": "modules/runtime/src/forward_pipeline/forward_frame.cpp"}
 FORWARD_FILES = {"modules/runtime/src/forward_pipeline/" + name for name in ("forward_pipeline.cpp", "forward_effects.cpp", "forward_frame.cpp", "forward_graph.cpp")}
 FIXTURE_VIEWS = {"resolvedViewCount": 3, "viewCount": 3, "fullViewCount": 2, "auxiliaryViewCount": 1, "outputCount": 2, "writtenOutputCount": 2}
 FIXTURE_PASSES = {"Forward.DepthNormalsMotion": 2, "Forward.Opaque": 3, "Forward.Transparent": 3, "Forward.LinearDepth": 2,
@@ -331,7 +332,7 @@ def enclosing(zones, name, time, errors, index):
     return found[0]
 
 
-AUDIT_ASSERTIONS = ("gtGuardCoversRenderPreparation", "fixtureWorldAndAuthoringContainOnlyRenderingWork", "assetsReadyBeforeMeasurement", "noPreparationOutsideGtAndRt", "noUninstrumentedBlockingWaits", "drawScopesCoverAllBindingAndUploadWork", "harnessObservationExcluded", "gtUpdateAndUploadsContainOnlyRenderingWork", "flightRetirementAccountingReviewed", "submittedContinuationSeparated")
+AUDIT_ASSERTIONS = ("gtGuardCoversRenderPreparation", "fixtureWorldAndAuthoringContainOnlyRenderingWork", "assetsReadyBeforeMeasurement", "noPreparationOutsideGtAndRt", "noUninstrumentedBlockingWaits", "drawScopesCoverAllBindingAndUploadWork", "harnessObservationExcluded", "gtUpdateAndUploadsContainOnlyRenderingWork", "flightRetirementAccountingReviewed", "submittedContinuationSeparated", "graphMaintenanceCoversAllGraphPreparation", "rtPreparationEnvelopeAndAcquisitionReviewed")
 PHASES = ("warmup", "steady")
 
 
@@ -521,10 +522,11 @@ def account_frame(frame, marker, zones, mode, period, errors, audit=None, covera
     gt_zones = zones.within(gt.thread, gt.begin, gt.end)
     rt_zones = zones.within(rt.thread, rt.begin, rt.end)
     scene_names = {"SceneSnapshotBuild"} if mode == "legacy" else {"Scene.CommitChanges", "Scene.PublishSnapshot"}
-    object_name = "FreezeObjectData" if mode == "legacy" else "ObjectValueUpdate"
+    object_name = "Scene.ForwardObjectValues" if mode == "mesh-pass-publication" else "FreezeObjectData" if mode == "legacy" else "ObjectValueUpdate"
     scene = intervals(zone for zone in gt_zones if zone.name in scene_names)
     objects = intervals(zone for zone in gt_zones if zone.name == object_name)
-    for expected in scene_names | {object_name}:
+    # Change-driven extensions legitimately do no object packing on unchanged publications.
+    for expected in scene_names | ({object_name} if mode != "mesh-pass-publication" else set()):
         if not any(zone.name == expected for zone in gt_zones):
             errors.append(f"Frame index {index}: missing preparation scope {expected}.")
     authoring = intervals(zone for zone in zones.within(gt.thread, times["authoring_begin"], times["authoring_done"]) if zone.name == "Profile.Authoring")
@@ -560,10 +562,22 @@ def account_frame(frame, marker, zones, mode, period, errors, audit=None, covera
     gt_other = subtract_intervals([(gt.begin, gt.end)], scene + objects + gt_observation)
     # Sum disjoint intervals on each thread. Across threads this is work-span accounting,
     # not a wall-clock critical path or operating-system CPU scheduling measurement.
+    record_zones = [zone for zone in rt_zones if zone.name == "RenderGraph::Record" and normalized_source(zone.file) == GRAPH_FILE]
+    acquisition = [zone for zone in rt_zones if zone.name == "PresentationAcquire" and normalized_source(zone.file) == SYSTEM_FILE]
+    if len(record_zones) != 1 or len(acquisition) != 1 or acquisition[0].end > record_zones[0].begin:
+        errors.append(f"Frame index {index}: missing or ambiguous pre-record/acquisition boundary.")
+        return None
+    if any(end > record_zones[0].begin for _, end in draw):
+        errors.append(f"Frame index {index}: draw preparation extends beyond the pre-record boundary.")
+        return None
+    # Include preparation between named subscopes. Presentation acquisition is a separate
+    # external protocol interval, including any native wait and its associated host work.
+    rt_preparation = subtract_intervals([(rt.begin, record_zones[0].begin)], rt_observation + intervals(acquisition))
+    graph = subtract_intervals(graph, intervals(acquisition))
+    rt_other = subtract_intervals(rt_preparation, draw + graph + intervals([host["retirement"]]))
     work_by_thread = defaultdict(list)
     work_by_thread[gt.thread].extend(gt_work)
-    work_by_thread[rt.thread].extend(draw)
-    work_by_thread[rt.thread].extend(intervals([host["retirement"]]))
+    work_by_thread[rt.thread].extend(rt_preparation)
     measured = sum(duration(spans) for spans in work_by_thread.values())
     submitted_zones = zones.within(rt.thread, host["submitted"].begin, host["submitted"].end)
     selected = [zone for zone in zones.within(gt.thread, host["tick"].begin, host["tick"].end) + rt_zones + submitted_zones if not zone.name.startswith(MARKER_PREFIX)]
@@ -571,7 +585,7 @@ def account_frame(frame, marker, zones, mode, period, errors, audit=None, covera
     total_complete = bool(audit)
     if audit:
         expected = [(PREPARE_PASSES, prepare_passes), (PREPARE_UPLOADS, prepare_uploads)]
-        if mode == "scene-publication":
+        if mode != "legacy":
             expected.append((PREPARE_WORK, prepare_work))
         for name, scopes in expected:
             if len(scopes) != 1:
@@ -586,8 +600,11 @@ def account_frame(frame, marker, zones, mode, period, errors, audit=None, covera
             elif key not in approved:
                 total_complete = False
                 coverage_errors.append(f"Frame index {index}: source key is absent from the reviewed coverage audit: {key}.")
-        # Reject a future migrated work scope outside the guards rather than silently
-        # dropping it. This schema deliberately has no guessed worker attribution.
+        # GT can overlap the preceding frame's RT work. Only a unique, source-keyed
+        # RT guard that finishes before this frame starts recording preparation can
+        # own such work; post-record work and independent workers remain rejected.
+        preceding_rt = [guard for guard in zones.guards[RT_GUARD]
+                        if guard.thread == rt.thread and host["gpuUpdate"].begin <= guard.end <= rt.begin]
         for thread in zones.threads:
             if thread not in (gt.thread, rt.thread) and any(normalized_source(zone.file).startswith("modules/runtime/src/") for zone in zones.overlapping(thread, host["gpuUpdate"].begin, host["submitted"].end)):
                 total_complete = False
@@ -596,6 +613,8 @@ def account_frame(frame, marker, zones, mode, period, errors, audit=None, covera
                 if zone.name.startswith(DRAW_PREFIX) or zone.name == UPLOAD_WORK:
                     if not ((zone.thread == rt.thread and rt.begin <= zone.begin and zone.end <= rt.end) or
                             (zone.thread == gt.thread and any(begin <= zone.begin and zone.end <= end for begin, end in gt_work))):
+                        if zone.thread == rt.thread and sum(guard.begin <= zone.begin and zone.end <= guard.end for guard in preceding_rt) == 1:
+                            continue
                         total_complete = False
                         coverage_errors.append(f"Frame index {index}: preparation work escaped the reviewed GT/RT preparation boundaries.")
     work_active = {thread: subtract_intervals(spans, waits_by_thread[thread]) for thread, spans in work_by_thread.items()}
@@ -631,6 +650,9 @@ def account_frame(frame, marker, zones, mode, period, errors, audit=None, covera
         "submittedContinuationNs": host["submitted"].end - times["submit"],
         "inputToSubmissionContinuationEndNs": host["submitted"].end - times["authoring_begin"],
         "gtPreparationOtherNs": duration(gt_other),
+        "rtPreparationOtherNs": duration(rt_other),
+        "rtPreparationEnvelopeNs": duration(rt_preparation),
+        "excludedPresentationAcquireNs": duration(intervals(acquisition)),
         "excludedHarnessObservationNs": duration(gt_observation),
         "excludedHarnessComposeObservationNs": duration(rt_observation),
         "measuredPreparationWorkNs": measured, "preparationTotalNs": total, "workerActiveNs": None,
@@ -644,6 +666,7 @@ def account_frame(frame, marker, zones, mode, period, errors, audit=None, covera
         "hostBoundaries": {name: {**key_record(zone), "thread": zone.thread, "begin": zone.begin, "end": zone.end} for name, zone in
                            {**{key: value for key, value in host.items() if isinstance(value, Zone)}, **host["pre"]}.items()},
         "intervals": {"gtPreparation": gt_work, "drawWork": union_intervals(draw), "graphMaintenance": graph, "record": union_intervals(record),
+                      "rtPreparation": rt_preparation, "rtPreparationOther": rt_other, "presentationAcquire": intervals(acquisition),
                       "rtViewRetirement": intervals([host["retirement"]]), "postSubmitHistory": union_intervals(intervals(host["history"])),
                       "preparationByThread": {str(thread): spans for thread, spans in work_active.items()}},
         "coverage": {"phase": "warmup" if frame["warmup"] else "steady", "issues": list(coverage_errors),
@@ -846,7 +869,7 @@ def main():
     metadata = run.get("metadata") or {}
     mode = (metadata.get("phaseContract") or {}).get("snapshotMode")
     valid_metadata = all(isinstance(metadata.get(key), dict) for key in ("build", "options", "instrumentation", "phaseContract"))
-    if not valid_metadata or mode not in ("legacy", "scene-publication"):
+    if not valid_metadata or mode not in ("legacy", "scene-publication", "mesh-pass-publication"):
         errors.append("Trace accounting requires complete integrated fixture metadata.")
     if run.get("exitCode") != 0 or manifest.get("errors") or not manifest.get("completed"):
         errors.append("The enclosing benchmark manifest is incomplete or contains evidence errors.")

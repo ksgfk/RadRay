@@ -66,6 +66,83 @@ void FillPolicyScene(RenderSceneSnapshot& scene, const GpuMesh::DrawData& geomet
     }
 }
 
+TEST(CpuRenderer, SharedCandidateTraversalMatchesSeparateListsAndKeepsIndependentOrdering) {
+    RenderSceneSnapshot scene;
+    GpuMesh::DrawData geometry;
+    byte token{};
+    FillPolicyScene(scene, geometry, reinterpret_cast<ShaderProgram*>(&token), 64);
+    for (uint32_t index = 0; index < 64; ++index) scene.Primitives[index].LayerMask = index & 1 ? 2 : 1;
+    CpuDrawStore store;
+    ASSERT_TRUE(store.Sync(scene));
+    ResolvedRenderView view;
+    CullingResults culling;
+    culling.Scene = &scene;
+    culling.View = &view;
+    culling.Stats.Valid = true;
+    for (uint32_t index = 0; index < 64; ++index) culling.Primitives.push_back({index, float(64 - index)});
+    array<RendererListDesc, 4> descs{{{"all", "ForwardLit", &culling, &view},
+                                      {"masked", "ForwardLit", &culling, &view},
+                                      {"missing", "OtherPass", &culling, &view},
+                                      {"queue reject", "ForwardLit", &culling, &view}}};
+    descs[0].Sorting = RendererListSorting::BackToFront;
+    descs[1].LayerMask = 2;
+    descs[1].Sorting = RendererListSorting::FrontToBack;
+    descs[2].RequireMaterialPass = true;
+    descs[3].QueueRange = RenderQueueRange::Transparent();
+    array<RendererList, 4> reference, shared;
+    array<RendererList*, 4> outputs;
+    RecordingProcessor processor;
+    for (uint32_t index = 0; index < 4; ++index) {
+        ASSERT_TRUE(BuildRendererList(descs[index], processor, reference[index]));
+        outputs[index] = &shared[index];
+    }
+    const auto calls = processor.Calls;
+    processor.Calls = 0;
+    ASSERT_TRUE(BuildRendererLists(descs, processor, outputs));
+    EXPECT_EQ(processor.Calls, calls);
+    for (uint32_t index = 0; index < 4; ++index) {
+        const auto& expected = reference[index];
+        const auto& actual = shared[index];
+        ASSERT_EQ(actual.Items.size(), expected.Items.size());
+        EXPECT_EQ(actual.Stats.LayerRejected, expected.Stats.LayerRejected);
+        EXPECT_EQ(actual.Stats.QueueRejected, expected.Stats.QueueRejected);
+        EXPECT_EQ(actual.Stats.MissingRequiredPass, expected.Stats.MissingRequiredPass);
+        EXPECT_EQ(actual.Stats.ConsideredBatches, expected.Stats.ConsideredBatches);
+        for (size_t draw = 0; draw < actual.Items.size(); ++draw) {
+            EXPECT_EQ(actual.Items[draw].SortData.Primitive, expected.Items[draw].SortData.Primitive);
+            EXPECT_EQ(actual.GetDescription(draw).IndexCount,
+                      expected.GetDescription(draw).IndexCount);
+        }
+    }
+}
+
+TEST(CpuRenderer, SharedDrawPlansRemainImmutableAcrossRangeChangesAndSlotReuse) {
+    RenderSceneSnapshot scene;
+    GpuMesh::DrawData geometry;
+    byte token{};
+    FillPolicyScene(scene, geometry, reinterpret_cast<ShaderProgram*>(&token), 1000);
+    CpuDrawStore store;
+    ASSERT_TRUE(store.Sync(scene));
+    ASSERT_EQ(store.GetActiveDrawPlanCount(), 1u);
+    ASSERT_EQ(scene.DrawPlans.size(), 1u);
+    ASSERT_EQ(scene.StatePlans.size(), 2u);
+    EXPECT_LE(sizeof(CpuDrawPlan), sizeof(ShaderProgram*) + 4 * sizeof(uint32_t));
+    EXPECT_LT(sizeof(DrawRecord), sizeof(MeshDrawDescription) + sizeof(MaterialPipelineState));
+    const auto frozen = scene;
+    for (uint64_t epoch = 0; epoch < 100; ++epoch) {
+        scene.MeshBatches[0].IndexCount = epoch % 2 ? 6 : 9;
+        ++scene.Primitives[0].RenderDataRevision;
+        const array<uint32_t, 1> changed{0};
+        ASSERT_TRUE(store.SyncChanged(scene, changed, false));
+        EXPECT_EQ(store.GetActiveDrawPlanCount(), 2u);
+        EXPECT_LE(scene.DrawPlans.size(), 3u);
+        EXPECT_EQ(scene.ResolveDraw(scene.DrawRecords[0]).Description.IndexCount, epoch % 2 ? 6u : 9u);
+        EXPECT_EQ(scene.ResolveDraw(scene.DrawRecords[1]).Description.IndexCount, 3u);
+        EXPECT_EQ(frozen.ResolveDraw(frozen.DrawRecords[0]).Description.IndexCount, 3u);
+        EXPECT_EQ(store.GetStats().DrawRecordBuilds, 1u);
+    }
+}
+
 TEST(CpuRenderer, SameSizeRendererListAssignmentAndMovesInvalidatePreparedRevisions) {
     RendererList first, other;
     MeshDrawCommand a, b;
@@ -149,6 +226,60 @@ TEST(CpuRenderer, EffectiveStatesAndGeometryPlansShareAndReleaseWithoutInvalidat
     EXPECT_EQ(store.GetActiveGeometryPlanCount(), 0u);
 }
 
+TEST(CpuRenderer, GeometryRangesShareAcrossStatePoliciesAndRemainFrozenAfterSlotReuse) {
+    RenderSceneSnapshot scene;
+    GpuMesh::DrawData geometry;
+    geometry.VertexBuffers = {{2, {}}, {3, {}}, {7, {}}};
+    byte token{};
+    FillPolicyScene(scene, geometry, reinterpret_cast<ShaderProgram*>(&token), 16);
+    const array<PassPolicy, 2> policies{{{{71}, 1, "ForwardLit", CompilePolicyWrite},
+                                         {{72}, 1, "ForwardLit", CompilePolicyRead}}};
+    CpuDrawStore store;
+    ASSERT_TRUE(store.SetActivePolicies(1, policies));
+    ASSERT_TRUE(store.Sync(scene));
+    EXPECT_EQ(store.GetActiveDrawPlanCount(), 2u);
+    EXPECT_EQ(store.GetActiveGeometryPlanCount(), 1u);
+    const auto frozen = scene;
+    const auto oldGeometry = scene.DrawRecords[0].GeometryBindingPlan;
+    for (const auto& record : scene.DrawRecords) {
+        EXPECT_EQ(record.GeometryBindingPlan, oldGeometry);
+        EXPECT_EQ(scene.DrawPlans[record.Plan].Geometry, oldGeometry);
+        EXPECT_EQ(scene.ResolveDraw(record).Description.FirstIndex, 0u);
+    }
+    // A range change affects both policies without duplicating their unchanged geometry input.
+    scene.MeshBatches[0].FirstIndex = 7;
+    scene.MeshBatches[0].IndexCount = 9;
+    scene.MeshBatches[0].VertexOffset = -2;
+    ++scene.Primitives[0].RenderDataRevision;
+    ASSERT_TRUE(store.Sync(scene));
+    EXPECT_EQ(store.GetActiveDrawPlanCount(), 4u);
+    EXPECT_EQ(store.GetActiveGeometryPlanCount(), 2u);
+    for (const auto& record : scene.DrawRecords) {
+        const auto draw = scene.ResolveDraw(record).Description;
+        EXPECT_EQ(draw.FirstIndex, record.Primitive == 0 ? 7u : 0u);
+        EXPECT_EQ(draw.IndexCount, record.Primitive == 0 ? 9u : 3u);
+        EXPECT_EQ(draw.VertexOffset, record.Primitive == 0 ? -2 : 0);
+    }
+    scene.Primitives.clear();
+    scene.MeshBatches.clear();
+    ASSERT_TRUE(store.Sync(scene));
+    EXPECT_EQ(store.GetActiveGeometryPlanCount(), 0u);
+    EXPECT_EQ(store.GetActiveDrawPlanCount(), 0u);
+    scene.Primitives.push_back({.FirstMeshBatch = 0, .MeshBatchCount = 1, .Generation = 100, .RenderDataRevision = 1});
+    scene.MeshBatches.push_back({0, 0, &geometry, 12, 6, 4, 0});
+    ASSERT_TRUE(store.Sync(scene));
+    EXPECT_EQ(store.GetActiveGeometryPlanCount(), 1u);
+    EXPECT_EQ(scene.ResolveDraw(scene.DrawRecords[0]).Description.FirstIndex, 12u);
+    for (const auto& record : frozen.DrawRecords) {
+        const auto draw = frozen.ResolveDraw(record).Description;
+        EXPECT_EQ(draw.Geometry.Get(), &geometry);
+        EXPECT_EQ(draw.FirstIndex, 0u);
+        EXPECT_EQ(draw.IndexCount, 3u);
+        EXPECT_EQ(draw.VertexOffset, 0);
+        EXPECT_EQ(frozen.GeometryBindingPlans[record.GeometryBindingPlan].Runs.size(), 2u);
+    }
+}
+
 TEST(CpuRenderer, TenThousandLayoutReplacementsRetainOnlyActiveRecipesAndPreserveOldIds) {
     RenderSceneSnapshot scene;
     GpuMesh::DrawData originalGeometry;
@@ -161,7 +292,7 @@ TEST(CpuRenderer, TenThousandLayoutReplacementsRetainOnlyActiveRecipesAndPreserv
     ASSERT_TRUE(store.Sync(scene));
     ASSERT_EQ(store.GetActiveLayoutCount(), 1u);
     const auto frozen = scene;
-    const auto originalId = frozen.DrawRecords[0].Description.LayoutId;
+    const auto originalId = frozen.ResolveDraw(frozen.DrawRecords[0]).Description.LayoutId;
     auto previous = originalId;
     array<GpuMesh::DrawData, 2> changingGeometry;
     for (uint32_t index = 0; index < 10000; ++index) {
@@ -174,13 +305,13 @@ TEST(CpuRenderer, TenThousandLayoutReplacementsRetainOnlyActiveRecipesAndPreserv
         }
         ASSERT_TRUE(store.Sync(scene));
         ASSERT_EQ(store.GetActiveLayoutCount(), 1u);
-        const auto current = scene.DrawRecords[0].Description.LayoutId;
+        const auto current = scene.ResolveDraw(scene.DrawRecords[0]).Description.LayoutId;
         ASSERT_GT(current.Value, previous.Value);
-        for (const auto& record : scene.DrawRecords) ASSERT_EQ(record.Description.LayoutId, current);
+        for (const auto& record : scene.DrawRecords) ASSERT_EQ(scene.ResolveDraw(record).Description.LayoutId, current);
         previous = current;
     }
-    EXPECT_EQ(frozen.DrawRecords[0].Description.LayoutId, originalId);
-    EXPECT_EQ(frozen.DrawRecords[0].Description.Geometry.Get(), &originalGeometry);
+    EXPECT_EQ(frozen.ResolveDraw(frozen.DrawRecords[0]).Description.LayoutId, originalId);
+    EXPECT_EQ(frozen.ResolveDraw(frozen.DrawRecords[0]).Description.Geometry.Get(), &originalGeometry);
     EXPECT_EQ(originalGeometry.VertexLayout.Buffers[0].ArrayStride, 12u);
     scene.Primitives.clear();
     scene.MeshBatches.clear();
@@ -206,8 +337,8 @@ TEST(CpuRenderer, PoliciesShareBindingsAndPolicyOnlyChangesPublishAffectedRecipe
     const auto before = scene.DrawRecords[0];
     const auto independent = scene.DrawRecords[1];
     EXPECT_NE(before.BindingRecipe, independent.BindingRecipe);
-    EXPECT_TRUE(before.Description.PipelineState.DepthStencil.DepthWriteEnable);
-    EXPECT_FALSE(independent.Description.PipelineState.DepthStencil.DepthWriteEnable);
+    EXPECT_TRUE(scene.ResolveDraw(before).Description.PipelineState.DepthStencil.DepthWriteEnable);
+    EXPECT_FALSE(scene.ResolveDraw(independent).Description.PipelineState.DepthStencil.DepthWriteEnable);
     for (uint32_t index = 0; index < count; ++index) {
         EXPECT_EQ(scene.DrawRecords[index * 2].BindingRecipe, before.BindingRecipe);
         EXPECT_EQ(scene.DrawRecords[index * 2 + 1].BindingRecipe, independent.BindingRecipe);
@@ -229,8 +360,8 @@ TEST(CpuRenderer, PoliciesShareBindingsAndPolicyOnlyChangesPublishAffectedRecipe
     EXPECT_EQ(scene.Stats.BindingRecipeCompiles, 0u);
     EXPECT_EQ(scene.Stats.DrawRecordStateSelects, 2u);
     EXPECT_TRUE(scene.DrawRecords[0].Mirrored);
-    EXPECT_EQ(scene.DrawRecords[0].MirroredState.Primitive.FaceClockwise,
-              OppositeFrontFace(scene.DrawRecords[0].Description.PipelineState.Primitive.FaceClockwise));
+    EXPECT_EQ(scene.ResolveDraw(scene.DrawRecords[0]).MirroredState.Primitive.FaceClockwise,
+              OppositeFrontFace(scene.ResolveDraw(scene.DrawRecords[0]).Description.PipelineState.Primitive.FaceClockwise));
     ++scene.Materials[0].Revision;
     ++scene.Materials[0].ValuesRevision;
     scene.Materials[0].Passes[0].NumericBytes.push_back(byte{8});
@@ -248,7 +379,7 @@ TEST(CpuRenderer, PoliciesShareBindingsAndPolicyOnlyChangesPublishAffectedRecipe
     EXPECT_FALSE(store.ChangedBindingRanges().empty());
     EXPECT_EQ(scene.DrawRecords[0].Id, before.Id);
     EXPECT_GT(scene.DrawRecords[0].RecipeRevision, before.RecipeRevision);
-    EXPECT_FALSE(scene.DrawRecords[0].Description.PipelineState.DepthStencil.DepthWriteEnable);
+    EXPECT_FALSE(scene.ResolveDraw(scene.DrawRecords[0]).Description.PipelineState.DepthStencil.DepthWriteEnable);
     EXPECT_EQ(scene.DrawRecords[1].Id, independent.Id);
     EXPECT_EQ(scene.DrawRecords[1].RecipeRevision, independent.RecipeRevision);
     EXPECT_EQ(scene.DrawRecords[1].BindingRecipe, independent.BindingRecipe);
@@ -412,7 +543,7 @@ TEST(CpuRenderer, T37SharedNumericChangeAndT43FrameRenumberingKeepStaticRecipes)
     EXPECT_EQ(scene.DrawRecords.back().Generation, identity.Generation);
     EXPECT_EQ(scene.DrawRecords.back().RecipeRevision, identity.RecipeRevision);
     EXPECT_EQ(scene.DrawRecords.back().ProgramFrameId, 9u);
-    EXPECT_EQ(scene.DrawRecords.front().Description.LayoutId, scene.DrawRecords.back().Description.LayoutId);
+    EXPECT_EQ(scene.ResolveDraw(scene.DrawRecords.front()).Description.LayoutId, scene.ResolveDraw(scene.DrawRecords.back()).Description.LayoutId);
 }
 
 TEST(CpuRenderer, PassOrderUsesFullNamesAndProgramReplacementChangesOnlyRecipeVersion) {
@@ -462,7 +593,7 @@ TEST(CpuRenderer, GeometryRevisionRefreshesLayoutWhileTransformSelectsMirrorOnce
     scene.MeshBatches.push_back({0, 0, &geometry, 0, 3, 0, 0});
     CpuDrawStore store;
     ASSERT_TRUE(store.Sync(scene));
-    const auto layout = scene.DrawRecords[0].Description.LayoutId;
+    const auto layout = scene.ResolveDraw(scene.DrawRecords[0]).Description.LayoutId;
     scene.Primitives[0].LocalToWorld(0, 0) = -1;
     ++scene.Primitives[0].TransformRevision;
     ASSERT_TRUE(store.Sync(scene));
@@ -474,7 +605,7 @@ TEST(CpuRenderer, GeometryRevisionRefreshesLayoutWhileTransformSelectsMirrorOnce
     ++scene.Primitives[0].RenderDataRevision;
     ASSERT_TRUE(store.Sync(scene));
     EXPECT_EQ(store.GetStats().DrawRecordBuilds, 1u);
-    EXPECT_NE(scene.DrawRecords[0].Description.LayoutId, layout);
+    EXPECT_NE(scene.ResolveDraw(scene.DrawRecords[0]).Description.LayoutId, layout);
 }
 
 TEST(CpuRenderer, IncrementalCatalogTouchesOnlyChangedPrimitiveAndReflowsCountChanges) {
