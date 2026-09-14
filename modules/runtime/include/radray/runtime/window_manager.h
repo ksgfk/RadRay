@@ -2,17 +2,17 @@
 
 #include <atomic>
 #include <optional>
+#include <functional>
+#include <thread>
 
 #include <sigslot/signal.hpp>
 
 #include <radray/nullable.h>
 #include <radray/runtime_type.h>
 #include <radray/types.h>
-// #include <radray/render/rhi.h>
+#include <radray/render/rhi.h>
 #include <radray/window/native_window.h>
 #include <radray/runtime/service_traits.h>
-#include <radray/runtime/window_input_router.h>
-#include <radray/runtime/render_framework/render_output.h>
 
 namespace radray {
 
@@ -46,7 +46,7 @@ public:
         render::TextureStates State{render::TextureState::Undefined};
     };
 
-    AppWindow(WindowManager* manager, unique_ptr<NativeWindow> window, NativeEventPump* pump, bool isMain, RenderOutputUsage usage = RenderOutputUsage::Scene) noexcept;
+    AppWindow(WindowManager* manager, unique_ptr<NativeWindow> window, NativeEventPump* pump, bool isMain) noexcept;
     AppWindow(const AppWindow&) = delete;
     AppWindow(AppWindow&&) = delete;
     AppWindow& operator=(const AppWindow&) = delete;
@@ -61,9 +61,6 @@ public:
     NativeWindow* GetNativeWindow() const noexcept;
     render::SwapChain* GetSwapChain() const noexcept;
     bool IsMainWindow() const noexcept;
-    RenderOutputId GetRenderOutputId() const noexcept { return _outputId; }
-    WindowInputRouter& GetInput() noexcept { return _input; }
-    RenderOutputUsage GetOutputUsage() const noexcept { return _usage; }
     render::TextureView* GetOrCreateBackBufferView(const render::SwapChainFrame& frame) noexcept;
     /// 读 / 写指定 backbuffer 索引的遗留状态(供起始/收尾 barrier 使用)。
     render::TextureStates GetBackBufferState(uint32_t backBufferIndex) const noexcept;
@@ -85,14 +82,11 @@ private:
     WindowManager* _manager;
     unique_ptr<NativeWindow> _window;
     sigslot::scoped_connection _beforeSurfaceChange;
-    WindowInputRouter _input;
-    RenderOutputUsage _usage;
     NativeEventPump* _pump;
     Nullable<unique_ptr<render::SwapChain>> _swapchain;
     vector<BackBufferView> _backBufferViews;
     std::atomic_bool _requestRecreateSwapChain{false};
     bool _isMain{false};
-    RenderOutputId _outputId;
 };
 
 class WindowManager {
@@ -104,7 +98,7 @@ public:
     WindowManager& operator=(WindowManager&&) = delete;
     ~WindowManager() noexcept;
 
-    Nullable<AppWindow*> CreateWindow(const NativeWindowCreateDescriptor& desc, bool isMain, RenderOutputUsage usage = RenderOutputUsage::Scene);
+    Nullable<AppWindow*> CreateWindow(const NativeWindowCreateDescriptor& desc, bool isMain);
     void DestroyWindow(AppWindow* window) noexcept;
     size_t GetWindowCount() const noexcept;
     AppWindow* GetWindow(size_t index) noexcept;
@@ -119,7 +113,6 @@ public:
     void CheckRecreateSwapChains() noexcept;
     void SetPresentMode(render::PresentMode presentMode) noexcept;
     void DispatchEvents() noexcept;
-    void DispatchInput();
     sigslot::signal<NativeWindow*>& EventModalLoopTick() noexcept;
     void SetGpuSystem(Nullable<GpuSystem*> gpuSystem) noexcept { _gpuSystem = gpuSystem.Get(); }
     GpuSystem* GetGpuSystem() const noexcept { return _gpuSystem; }
@@ -127,6 +120,9 @@ public:
     void SetRenderSystem(Nullable<RenderSystem*> renderSystem) noexcept { _renderSystem = renderSystem.Get(); }
     RenderSystem* GetRenderSystem() const noexcept { return _renderSystem; }
     void DetachAllSwapChains() noexcept;
+    /// Runner bridge. Mutations and waiter installation are restricted to the application thread.
+    void SetRenderIdle(bool idle) noexcept;
+    void SetRenderIdleWaiter(std::function<void()> waiter);
     void EnsureRenderIdle() const noexcept;
     NativeWindow* FindMainNativeWindow(NativeWindowType type) const noexcept;
     NativeWindow* FindFirstNativeWindow(NativeWindowType type) const noexcept;
@@ -138,6 +134,9 @@ private:
     vector<unique_ptr<AppWindow>> _windows;
     AppWindow* _mainWindow{nullptr};
     std::optional<render::PresentMode> _desiredPresentMode;
+    const std::thread::id _gameThread{std::this_thread::get_id()};
+    bool _renderIdle{true};
+    std::function<void()> _renderIdleWaiter;
 };
 
 template <>

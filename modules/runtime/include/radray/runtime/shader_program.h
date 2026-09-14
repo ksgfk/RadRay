@@ -2,37 +2,12 @@
 
 #include <optional>
 
-#include <radray/hash.h>
 #include <radray/nullable.h>
 #include <radray/render/backend_shader_artifact.h>
-#include <radray/runtime/material_state.h>
-#include <radray/runtime/render_framework/primitive_vertex_layout.h>
 #include <radray/runtime/shader_parameters.h>
 #include <radray/types.h>
 
 namespace radray {
-
-struct GraphicsPassCompatibilityKey {
-    vector<render::TextureFormat> ColorFormats;
-    std::optional<render::TextureFormat> DepthStencilFormat;
-    uint32_t SampleCount;
-    friend bool operator==(const GraphicsPassCompatibilityKey&, const GraphicsPassCompatibilityKey&) = default;
-};
-
-struct GraphicsPassState : GraphicsPassCompatibilityKey {
-    GraphicsPassState(
-        vector<render::TextureFormat> colorFormats,
-        std::optional<render::TextureFormat> depthStencilFormat,
-        uint32_t sampleCount,
-        render::RenderPass* compatibleRenderPass) noexcept;
-
-    bool IsValid() const noexcept;
-
-    render::RenderPass* CompatibleRenderPass;
-    bool DepthReadOnly{false};
-
-    friend bool operator==(const GraphicsPassState&, const GraphicsPassState&) = default;
-};
 
 struct ShaderParameterGroupRecipe {
     struct Buffer {
@@ -59,15 +34,9 @@ public:
     ShaderProgram& operator=(ShaderProgram&&) = delete;
     ~ShaderProgram() noexcept;
 
-    /// resolvedInput, when supplied, must have been resolved for this program and vertexLayout.
-    Nullable<render::GraphicsPipelineState*> GetOrCreateGraphicsPipelineState(
-        const MaterialPipelineState& materialState,
-        const PrimitiveVertexLayout& vertexLayout,
-        PrimitiveTopology topology,
-        const GraphicsPassState& passState,
-        Nullable<const ResolvedPrimitiveVertexLayout*> resolvedInput = nullptr) noexcept;
-    Nullable<render::ComputePipelineState*> GetOrCreateComputePipelineState() noexcept;
-
+    /// Borrowed stage and entry name; valid for this program's lifetime. Missing stages return nullopt.
+    /// The caller creates and owns pipeline states through the RHI device.
+    std::optional<render::ShaderEntry> GetStage(shader::ShaderStage stage) const noexcept;
     const render::BackendShaderArtifact& GetArtifact() const noexcept { return _artifact; }
     render::PipelineLayout* GetPipelineLayout() const noexcept { return _artifact.Layout.get(); }
     render::Device* GetDevice() const noexcept { return _device; }
@@ -80,43 +49,8 @@ public:
     // Render-thread preparation. References remain valid until this program is destroyed.
     const ShaderParameterGroupRecipe& GetOrCreateParameterGroupRecipe(uint32_t group);
     size_t GetParameterGroupRecipeCount() const noexcept { return _parameterGroupRecipes.size(); }
-    size_t GetGraphicsPipelineStateCount() const noexcept { return _graphicsPipelineStates.size(); }
-    size_t GetComputePipelineStateCount() const noexcept { return _computePipelineState ? 1 : 0; }
 
 private:
-    struct PsoKey {
-        MaterialPipelineState MaterialState;
-        PrimitiveVertexLayout VertexLayout;
-        PrimitiveTopology Topology{PrimitiveTopology::TriangleList};
-        GraphicsPassCompatibilityKey PassState;
-
-        friend bool operator==(const PsoKey&, const PsoKey&) = default;
-    };
-
-    // Borrowed view of a PsoKey used for cache lookups. The draw loop asks for a PSO
-    // once per draw, and an owning PsoKey allocates for its format vector, its vertex
-    // buffer/attribute vectors and every attribute semantic string. Looking up through
-    // this view keeps the hit path allocation free; only a miss materializes a key.
-    struct PsoKeyRef {
-        const MaterialPipelineState* MaterialState;
-        const PrimitiveVertexLayout* VertexLayout;
-        PrimitiveTopology Topology;
-        const GraphicsPassCompatibilityKey* PassState;
-    };
-
-    struct PsoKeyHash {
-        using is_transparent = void;
-        size_t operator()(const PsoKey& value) const noexcept;
-        size_t operator()(const PsoKeyRef& value) const noexcept;
-    };
-
-    struct PsoKeyEqual {
-        using is_transparent = void;
-        bool operator()(const PsoKey& lhs, const PsoKey& rhs) const noexcept;
-        bool operator()(const PsoKeyRef& lhs, const PsoKey& rhs) const noexcept;
-        bool operator()(const PsoKey& lhs, const PsoKeyRef& rhs) const noexcept;
-    };
-
     ShaderProgram(
         render::Device* device,
         render::BackendShaderArtifact artifact,
@@ -139,9 +73,6 @@ private:
     string _computeEntry;
     ShaderParameterLayout _parameterLayout;
     unordered_map<uint32_t, ShaderParameterGroupRecipe> _parameterGroupRecipes;
-    unordered_map<PsoKey, unique_ptr<render::GraphicsPipelineState>, PsoKeyHash, PsoKeyEqual>
-        _graphicsPipelineStates;
-    unique_ptr<render::ComputePipelineState> _computePipelineState;
 };
 
 }  // namespace radray

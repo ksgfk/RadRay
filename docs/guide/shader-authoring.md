@@ -1,6 +1,6 @@
 > - 适用: 新增或修改 HLSL 根 `.hlsl` pass、keyword domain、binding 或 target gate
 > - 权威: 本文是 schema 8 当前 HLSL authoring 契约；wire 与 runtime 边界见 shader pipeline 架构文档
-> - 锚点: `shaderlib/core/platform.hlsli`, `shaderlib/pipelines/forward/cbuffers.hlsli`, `shaderlib/pipelines/forward/bindings.hlsli`, `shaderlib/pipelines/forward/forward.hlsl`, `shaderlib/pipelines/forward/depth_only.hlsl`, `shaderlib/pipelines/forward/layout_owner.hlsl`, `modules/shader_compiler/tests/test_shaderlib_passes.cpp`
+> - 锚点: `shaderlib/core/platform.hlsli`, `modules/shader_compiler/tests/test_shaderlib_passes.cpp`
 
 # HLSL authoring
 
@@ -149,68 +149,29 @@ shader metadata。每个modifier只用“canonical declaration name + expected l
 kind/count、visibility、slot或push range；texture、typed texel buffer、storage image和push没有
 placement modifier。无`[RootSignature]`时使用modifier是正常路径，不是fallback漏洞。
 
-group 的语义属于具体 pipeline，不是 shaderlib 全局规则。当前 forward HLSL 声明为：
-
-| Group | 更新频率 | 当前 binding |
-|---|---|---|
-| 0 | per-view | `ForwardView`：view-projection、eye 与光照数组 |
-| 1 | per-material | `ForwardMaterial`、`AlbedoTexture`、`LinearSampler` |
-| 2 | per-object | `ForwardObject`：local-to-world、normal-to-world 与上一帧 motion |
-
-Forward 按 `ForwardView` / `ForwardMaterial` / `ForwardObject` declaration name 从当前 artifact
-读取 group；上表只是产品 shader 的当前数字，不是 CPU ABI。两 target 的组号可各自变化。
-新增或修改 binding 时核对 Forward 私有 resolver 的 declaration/dynamic/同组资源检查；material
-先用 `MaterialTechnique::Create` 声明 pass 名、program 与 `"ForwardMaterial"` anchor，再调用
-`Material::Create(technique)`。每个 pass 按自己的 anchor 选组，不传 group plan 或写死 0/1/2。
-view/material/object 数值 buffer 使用具名 struct 加 `ConstantBuffer<T>`，让 artifact type tree
-保留完整根结构与成员 offset。
-
-Forward 的全部 cbuffer struct 收在 `shaderlib/pipelines/forward/cbuffers.hlsli`，是 pipeline ABI
-而不是普通局部 struct，因此用 `Forward_ViewData` / `Forward_MaterialData` / `Forward_ObjectData` /
-`Forward_PassData` / `Forward_EffectsData` / `Forward_OutputSurfaceData` 这套类型名；binding
-declaration 名仍是 `ForwardView` / `ForwardMaterial` / `ForwardObject`，因为那是 runtime lookup
-identity。嵌套的 `DirectionalLight` / `PointLight` 属于 lighting 层，留在 `lighting/lights.hlsli`
-且不加前缀。
-
-CPU 侧确实有 mirror struct，但**不是手写的**：`tools/generate_forward_cbuffers.py` 从编译产物的
-type tree 生成 `modules/runtime/include/radray/runtime/forward_pipeline/gen_forward_cbuffers.h`
-并检入。改这些 struct 的字段后必须跑一次 regenerate（见
-[shader pipeline](../architecture/shader-pipeline.md)），否则 `radray_forward_cbuffers_check` 失败。
-生成器只能看到被真正读取的字段，所以每个 Forward cbuffer 都要在
-`shaderlib/pipelines/forward/layout_owner.hlsl` 里被读一次——只声明不使用会被 DXC 剥除，type tree
-里就没有该类型。同一 struct 被多个 pass include 是正常的：`depth_only.hlsl` 只读用到的字段，
-仍然上传同一份胖组件。
+group 的语义属于具体调用方，不是 shaderlib 全局规则；runtime 不硬编码 view/material/object 组号。
+数值 buffer 使用具名 struct 加 ConstantBuffer<T>，让 artifact type tree 保留根结构与成员 offset。
+旧 Forward ABI 与专用 POD 生成器已移除，历史设计见[临时快照](../temp/render-framework-design.md)。
 
 cbuffer 里避开非方阵、`bool` 和元素大小非 16 字节整数倍的 struct 数组：这三类构造两个 lane 的
 type payload 不一致，编译会 fail closed。原因见
 [shader pipeline](../architecture/shader-pipeline.md)。
 
 ShaderParameterStorage 的 canonical 名称从 CBuffer declaration 开始并包含完整成员路径，例如
-`ForwardMaterial.BaseColor` 或 `ForwardView.Lights.Direction`。全 program 唯一的叶名仍可作为简写；
+`MaterialParams.BaseColor`（示例声明名）。全 program 唯一的叶名仍可作为简写；
 两个路径以同名叶子结尾时，仅该简写不可用，必须写 qualified path，program 不会因此拒绝创建。
 struct array 的下标不写进名称，由 setter 的 `element` 参数选择。Texture/Sampler declaration 保持
 顶层 exact name；若它与 CBuffer 叶名相同，资源 exact name 优先，字段仍可用 qualified path 访问。
 
-Forward 产品路径写材质用 `material->As<Forward_MaterialData>()->BaseColor = ...`，即把 canonical
-bytes 当成生成 POD 看；按名 setter 留给 JIT 与测试。secondary pass 的数值布局是否与 primary 相同
-由调用方保证——同一份生成头、同一套 HLSL ABI 即可，runtime 不再逐字段扫描。texture/sampler 可以
-是 primary 声明的子集。DepthOnly 的 material anchor 为空，使用
-`ForwardPipeline::GetDepthOnlyLayoutRecipe()` 配置动态 view/object buffers。它只需 POSITION，可以复用
-含其他属性的几何；使用 `SetPassPipelineState` 单独调整其固定功能状态。
-详见 [材质 technique](../architecture/renderer-foundation.md#材质-technique)。
+ShaderParameterStorage 提供按名 setter；直接写 buffer 字节时，调用方必须保证数据与实际 GPU cbuffer 布局一致。
+固定功能状态由调用方写入 RHI pipeline descriptor。布局和参数契约见
+[Runtime shader](../architecture/render-framework.md#shader-program-与参数)。
 
-## 产品 pass 与测试
+## 编译器测试
 
-| Pass | 用途 | contract facts |
-|---|---|---|
-| `pipelines/forward/forward.hlsl` | 内置 forward vertex + pixel | view/material/object、纹理、sampler、Lambert 光照、`QUALITY` |
-| `pipelines/forward/depth_only.hlsl` | Forward 的 `DepthOnly` pass | 只有 dynamic view/object cbuffer，无材质组，无 keyword |
-
-`RadRayShaderLibPass` 读取这些产品 source 和测试目录中的最小 depth/compute source，执行
-discovery，并同时编译 DXIL/SPIR-V lane。测试 source 分别覆盖 vertex-only topology 与 storage
-buffer compute，以及 `DEPTH_MODE` / `COMPUTE_MODE` keyword domain；具体归属见
-[Shaderlib](../architecture/shaderlib.md)。新增 pass 后应在同一测试中验证 entry 数量、active
-binding、stage visibility 和 target-specific binding facts。
+`RadRayShaderLibPass` 使用 `modules/shader_compiler/tests/data/` 中的独立 depth/compute source，
+执行 discovery 并同时编译 DXIL/SPIR-V。测试覆盖 vertex-only topology、storage buffer、keyword domain、
+entry 数量、active binding、stage visibility 和 target-specific binding facts，不依赖已删除的产品 shader。
 
 ## 验收命令
 

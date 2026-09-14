@@ -1,6 +1,6 @@
 > - 适用: 资产生命周期、引用计数、加载去重或延迟 GPU 销毁
 > - 权威: 本文是 runtime 资产系统的唯一说明；帧边界与上传见 [frame-and-gpu](frame-and-gpu.md)，开发时身份登记与 AssetDatabase 见 [asset-database](asset-database.md)
-> - 锚点: `modules/runtime/include/radray/runtime/asset_manager.h`, `modules/runtime/src/asset_manager.cpp`, `modules/runtime/include/radray/runtime/asset.h`, `modules/runtime/include/radray/runtime/asset_source.h`, `modules/runtime/include/radray/runtime/texture_asset.h`, `modules/runtime/include/radray/runtime/static_mesh.h`, `modules/runtime/src/static_mesh.cpp`, `modules/runtime/include/radray/runtime/render_framework/static_mesh_scene_proxy.h`
+> - 锚点: `modules/runtime/include/radray/runtime/asset_manager.h`, `modules/runtime/src/asset_manager.cpp`, `modules/runtime/include/radray/runtime/asset.h`, `modules/runtime/include/radray/runtime/asset_source.h`, `modules/runtime/include/radray/runtime/texture_asset.h`, `modules/runtime/include/radray/runtime/static_mesh.h`, `modules/runtime/src/static_mesh.cpp`
 
 # 资产系统
 
@@ -24,7 +24,7 @@ Load request / source task → AssetSlot::Loading → AssetManager::Pump → Rea
 引用从非零降至零时，将 slot 放入 manager 的侵入式候选队列；每个 slot 至多排队一次。
 `Pump` 只访问这些候选，不扫描全部常驻资产。弹出时再次检查引用，期间重新取得的引用会阻止销毁，
 以后再次归零仍可入队。先从 ID 表摘除旧 slot，再调用 `OnUnload`，允许重入加载同 ID；依赖链释放
-产生的新候选在同次循环继续处理。`GetCollectionStats` 提供访问、销毁、待处理和峰值计数。
+产生的新候选在同次循环继续处理。
 关停对仍被错误持有的 slot 保留强制卸载诊断路径，它不属于普通帧回收。
 
 加载去重按 `AssetId` 进行。dedup 命中时不会重新执行 loader，因此带 options 的 loader
@@ -65,9 +65,8 @@ namespace prefix 隔离资产类型；同一路径在不同资产类型下必须
 
 AssetId 双轨并存（[asset-database](asset-database.md)）：入库资产以 `AssetDatabase` 登记的
 GUID 为身份（一次分配、永不改变），散文件继续走这里的路径哈希；两轨共用 `AssetManager`
-的单 slot 表，互不迁移。`example_lambert_sphere` 通过 `AssetManager` 消费 GUID 轨，但其运行资产
-属于被忽略的顶层 `assets/`，由源码仓库之外的渠道分发。shaderlib 与显式测试资源继续使用
-路径哈希轨。
+的单 slot 表，互不迁移。本地资产位于被忽略的顶层 `assets/`，通过源码仓库外的渠道分发；
+shaderlib 与显式测试资源可使用路径哈希轨。
 
 ## 延迟销毁
 
@@ -91,17 +90,14 @@ void MyAsset::OnUnload(AssetManager& manager) override {
 | `StaticMesh` | CPU mesh、sections、bounds 和 GPU mesh | `GpuMesh::DrawData*` |
 
 返回资产内部裸指针的 API 必须在文档和调用方中同时说明持有 `StreamingAssetRef` 的要求。
-SceneProxy 保存 mesh ref，Material authoring 保存 texture ref 加描述值。PrepareFrame 通过
-proxy `CollectAssetReferences` 和 Material `BuildRenderData` 把 owners 追加到 RenderSystem 的
-当前 flight retained vector；pipeline input 只保存 geometry/texture raw pointers 和复制值。
-render thread 不访问 refs，TextureAsset 的 GetOrCreateSrv/view cache 由 render thread 串行访问。
-当前 flight GPU 完成且 game thread 取得该 flight 后清理 retained refs，随后 Pump 按原有零引用
-规则回收资产；不引入显式 Unload、release message 或另一套引用计数。
+StaticMeshComponent 保存 mesh ref，Material 保存 texture ref 加描述值。Material::BuildRenderData 可显式收集 owners；
+旧框架的自动 per-flight retained refs 已移除，录制方须自行保存到 GPU 完成且 GT 可以安全释放的时刻。
+render thread 不访问非原子的 refs；TextureAsset 的 GetOrCreateSrv/view cache 由调用方串行访问。
+回收仍使用原有零引用与延迟销毁协议，不引入另一套引用计数。
 
 OBJ `MeshImporter` 在 GPU 上传前为每个 `MeshPrimitive` 建一个覆盖完整 index range 的默认 section，
-并从 `POSITION0` 计算 local bounds；任一步不自洽都使加载失败。`StaticMeshSceneProxy` 自持一份
-`StreamingAssetRef<StaticMesh>`，所以它暴露的 section `MeshDrawArgs::Geometry` 在 proxy 生命周期内
-稳定，组件重建 render state 时旧 proxy 与其引用一起释放。
+并从 `POSITION0` 计算 local bounds；任一步不自洽都使加载失败。资产暴露的
+`GpuMesh::DrawData` 指针在资产存活期内稳定，调用方持有 `StreamingAssetRef<StaticMesh>` 保证其寿命。
 
 ## 关停顺序
 
@@ -109,7 +105,7 @@ OBJ `MeshImporter` 在 GPU 上传前为每个 `MeshPrimitive` 建一个覆盖完
 World → RenderSystem → AssetManager → AssetDatabase → GpuSystem
 ```
 
-World 先拆除 proxy 与 asset ref，RenderSystem 释放 render-side 对象，AssetManager 再处理
+World 先拆除组件与 asset ref，RenderSystem 释放 shader/program 与 RHI 缓存，AssetManager 再处理
 剩余 slot 和延迟 payload；AssetDatabase 必须活过在飞 task，最后 GpuSystem 销毁 device。
 关停时仍有存活引用会记录错误并继续卸载，避免把后续 GPU 资源释放变成悬垂访问。
 

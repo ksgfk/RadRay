@@ -49,21 +49,10 @@ TEST(RadRayShaderLibPass, PassesCompileAsAtomicTwoTargetVariants) {
         std::string_view AssignmentName;
         std::string_view AssignmentValue;
     };
-    constexpr BindingFact forwardBindings[] = {
-        {"ForwardView", 0, 0, 0, 0, 3, "Forward_ViewData"},
-        {"ForwardMaterial", 1, 0, 1, 0, 2, "Forward_MaterialData"},
-        {"AlbedoTexture", 1, 0, 1, 1, 2},
-        {"LinearSampler", 1, 0, 1, 2, 2},
-        {"ForwardObject", 2, 0, 2, 0, 1, "Forward_ObjectData"}};
     constexpr BindingFact computeBindings[] = {
         {"Output", 0, 0, 2, 6, 4}};
-    constexpr BindingFact depthOnlyBindings[] = {
-        {"ForwardView", 0, 0, 0, 0, 1, "Forward_ViewData"},
-        {"ForwardObject", 2, 0, 2, 0, 1, "Forward_ObjectData"}};
     const PassCase cases[] = {
-        {"shaderlib/pipelines/forward/forward.hlsl", shader::ShaderKind::Graphics, 2, forwardBindings, "QUALITY", "low"},
         {"modules/shader_compiler/tests/data/depth.hlsl", shader::ShaderKind::Graphics, 1, {}, "DEPTH_MODE", "regular"},
-        {"shaderlib/pipelines/forward/depth_only.hlsl", shader::ShaderKind::Graphics, 1, depthOnlyBindings, "", ""},
         {"modules/shader_compiler/tests/data/compute.hlsl", shader::ShaderKind::Compute, 1, computeBindings, "COMPUTE_MODE", "clear"}};
 
     Client client;
@@ -164,74 +153,12 @@ TEST(RadRayShaderLibPass, PassesCompileAsAtomicTwoTargetVariants) {
     }
 }
 
-// A keyword group that no code reads compiles to identical bytecode for every value,
-// which makes the declared variant axis a lie. forward.hlsl branches its point light
-// range window on QUALITY, so the two variants must not produce the same bytecode.
-TEST(RadRayShaderLibPass, ForwardQualityKeywordChangesBytecode) {
-    Client client;
-    ASSERT_TRUE(client.IsAvailable());
-    const vector<std::filesystem::path> includePaths{ShaderlibRoot()};
-    constexpr std::string_view sourceName = "pipelines/forward/forward.hlsl";
-    const vector<byte> source = ReadBytes(ShaderlibRoot() / "pipelines/forward/forward.hlsl");
-    ASSERT_FALSE(source.empty());
-    const DiscoveryResult discovery = client.DiscoverSourceContract(
-        shader::SourceContractRequest{
-            .SourceName = string{sourceName},
-            .RootSource = source,
-            .Defines = {},
-            .Targets = shader::ShaderTargetMask::All,
-            .Policy = {}},
-        includePaths);
-    ASSERT_TRUE(discovery.Succeeded())
-        << (discovery.Diagnostics.empty() ? "" : discovery.Diagnostics.back().Message);
-
-    const auto compileQuality = [&](std::string_view value) {
-        return client.CompileVariant(
-            shader::CompileVariantRequest{
-                .SourceName = string{sourceName},
-                .RootSource = source,
-                .Defines = {},
-                .Assignments = {{string{"QUALITY"}, string{value}}},
-                .Targets = shader::ShaderTargetMask::All,
-                .ExpectedContract = discovery.Contract.Hash},
-            includePaths);
-    };
-    const shader::CompileVariantResult low = compileQuality("low");
-    const shader::CompileVariantResult high = compileQuality("high");
-    ASSERT_EQ(low.Status, shader::CompileStatus::Success)
-        << (low.Diagnostics.empty() ? "" : low.Diagnostics.back().Message);
-    ASSERT_EQ(high.Status, shader::CompileStatus::Success)
-        << (high.Diagnostics.empty() ? "" : high.Diagnostics.back().Message);
-    ASSERT_EQ(low.Lanes.size(), 2u);
-    ASSERT_EQ(high.Lanes.size(), 2u);
-
-    for (const shader::ShaderTarget target :
-         {shader::ShaderTarget::DXIL, shader::ShaderTarget::SPIRV}) {
-        const auto findLane = [target](const shader::CompileVariantResult& result) {
-            return std::find_if(
-                result.Lanes.begin(),
-                result.Lanes.end(),
-                [target](const shader::CompileTargetLane& lane) noexcept {
-                    return lane.Target == target;
-                });
-        };
-        const auto lowLane = findLane(low);
-        const auto highLane = findLane(high);
-        ASSERT_NE(lowLane, low.Lanes.end());
-        ASSERT_NE(highLane, high.Lanes.end());
-        EXPECT_NE(lowLane->Bytecode, highLane->Bytecode)
-            << "QUALITY produced identical bytecode for target "
-            << static_cast<uint32_t>(target);
-    }
-}
-
 TEST(RadRayShaderLibPass, PassesDeclareBothTargetBindingsExplicitly) {
     struct BindingCase {
         std::string_view RelativePath;
         bool HasResources;
     };
     constexpr BindingCase cases[] = {
-        {"shaderlib/pipelines/forward/bindings.hlsli", true},
         {"modules/shader_compiler/tests/data/depth.hlsl", false},
         {"modules/shader_compiler/tests/data/compute.hlsl", true}};
 
@@ -248,7 +175,6 @@ TEST(RadRayShaderLibPass, PassesDeclareBothTargetBindingsExplicitly) {
             EXPECT_EQ(text.find("register("), string::npos) << pass.RelativePath;
             EXPECT_EQ(text.find("VK_BINDING("), string::npos) << pass.RelativePath;
         }
-        EXPECT_EQ(text.find("RADRAY_FORWARD_"), string::npos) << pass.RelativePath;
         EXPECT_NE(text.find("#include <core/platform.hlsli>"), string::npos) << pass.RelativePath;
     }
 }

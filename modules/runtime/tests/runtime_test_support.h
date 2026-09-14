@@ -33,29 +33,9 @@ public:
         return _errors;
     }
 
-    std::atomic<uint32_t> ExpectedGraphErrors{0};
-    std::atomic<uint32_t> IncompatiblePrograms{0};
-    std::atomic<uint32_t> DescriptorRewrites{0};
-
 private:
     static void Capture(LogLevel level, std::string_view message, void* userData) {
         auto& self = *static_cast<RuntimeLogCapture*>(userData);
-        if (message.starts_with("Graph Frame:") && self.ExpectedGraphErrors.load() > 0) {
-            --self.ExpectedGraphErrors;
-            return;
-        }
-        if (message.find("forward pipeline rejected an incompatible shader program") != std::string_view::npos) {
-            ++self.IncompatiblePrograms;
-            return;
-        }
-        if (message.find("rewritten with new buffer targets") != std::string_view::npos) {
-            ++self.DescriptorRewrites;
-        }
-        // Deliberate negative program-cache requests in the existing end-to-end fixture.
-        if (message.find("does_not_exist.hlsl") != std::string_view::npos ||
-            message.find("duplicate keyword assignment") != std::string_view::npos) {
-            return;
-        }
         if (level == LogLevel::Err || level == LogLevel::Critical) {
             std::lock_guard lock{self._mutex};
             self._errors.append(message);

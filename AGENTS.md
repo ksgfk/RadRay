@@ -17,7 +17,7 @@ C++20 实时渲染器，D3D12 + Vulkan 后端。
 
 长期知识只放在本文件、`docs/architecture/` 与 `docs/guide/`；README 是项目介绍与入口。
 术语、约束和必要的设计理由就地维护在所属文档，历史由 Git 保存。
-行为变化时同步更新对应文档；会话笔记、实施清单与交接不自动落入仓库。
+行为变化时同步更新对应文档；用户要求保存的临时设计快照、草案和交接放在 `docs/temp/`，注明状态与基线，不作为长期契约；未要求保存的会话笔记不自动落入仓库。
 代码注释写 API 契约与局部约束，设计说明放文档；代码至多保留一处指向所属文档的文件头入口。
 
 ## 硬规则
@@ -29,7 +29,7 @@ C++20 实时渲染器，D3D12 + Vulkan 后端。
 - 不重命名已有枚举成员，它们被 `magic_enum` 与序列化消费；需要改名时新增成员并显式迁移数据。
 - 新增任何 `try`、`catch`、`throw` 前先征得用户同意。优先验证、`std::error_code` 或现有结果类型。
 - 不为保留 `noexcept` 增加捕获；仅捕获具体、可恢复的异常，不用 `catch (...)` 把分配失败、程序错误或不变量破坏转成空值/诊断。
-- 模块基础依赖：shader → core，window → core，render → shader/core，runtime → render/window/shader/core；可选 imgui → runtime，runtime 与渲染框架不引用 ImGui。
+- 模块基础依赖：shader → core，window → core，render → shader/core，runtime → render/window/shader/core。旧 render_framework、Forward 与 ImGui 适配已移除；重构基线见 `docs/temp/`。
 - shader 不依赖 DXC 或 render/runtime；可选 shadercompiler → shader/core。runtime 仅在启用 JIT 时链接该 client，公共 shader/render/runtime 契约不依赖 DXC SDK 头。
 - `third_party/`、`SDKs/` 是脚本填充的只读目录，不编辑。
 - HLSL include 以 `shaderlib/` 为根，使用 `<core/math.hlsli>` 形式；当前不使用文件相对的双引号 include。

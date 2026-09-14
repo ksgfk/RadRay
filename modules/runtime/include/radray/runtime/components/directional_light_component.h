@@ -19,14 +19,12 @@ enum class CascadeSplitMode : uint32_t {
 /// 光照方向取自组件世界旋转的 +Z (与 LightComponent::GetLightDirection 一致), 无位置概念。
 /// 携带级联阴影 (CSM) 配置: 级联数量、阴影距离、划分模式 (自动/手动)、划分混合系数或
 /// 手动划分比例、阴影图分辨率、深度/法线偏移、PCF 模式。
-/// ForwardPipeline 据此在阴影 pass 里逐级联计算正交光锥并渲染深度。
 class DirectionalLightComponent : public LightComponent {
 public:
     DirectionalLightComponent() noexcept = default;
     ~DirectionalLightComponent() noexcept override;
 
     LightType GetLightType() const noexcept override { return LightType::Directional; }
-    unique_ptr<LightSceneProxy> CreateSceneProxy() const override;
 
     /// 级联数量 (1..RADRAY_MAX_CASCADES=4)。
     void SetCascadeCount(uint32_t count) noexcept;

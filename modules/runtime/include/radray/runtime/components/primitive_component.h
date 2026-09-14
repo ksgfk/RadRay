@@ -4,33 +4,11 @@
 
 namespace radray {
 
-class PrimitiveSceneProxy;
-class Scene;
-
+/// Base for components carrying drawable data; owns no renderer state.
 class PrimitiveComponent : public SceneComponent {
 public:
     PrimitiveComponent() noexcept = default;
     ~PrimitiveComponent() noexcept override;
-
-    void OnRegister() override;
-    void OnUnregister() override;
-
-    void MarkRenderStateDirty();
-    PrimitiveSceneProxy* GetSceneProxy() const noexcept { return _sceneProxy; }
-
-    virtual bool ShouldCreateRenderState() const;
-    virtual unique_ptr<PrimitiveSceneProxy> CreateSceneProxy();
-
-protected:
-    void OnTransformChanged() override;
-
-private:
-    Scene* GetScene() const noexcept;
-    void CreateRenderState();
-    void DestroyRenderState() noexcept;
-
-    PrimitiveSceneProxy* _sceneProxy{nullptr};
-    bool _renderStateCreated{false};
 };
 
 template <>

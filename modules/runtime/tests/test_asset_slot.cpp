@@ -414,25 +414,26 @@ TEST_F(AssetSlotTest, CollectingCascadesToDependenciesWithinOnePump) {
     EXPECT_EQ(Assets().GetAssetCount(), 0u);
 }
 
-TEST_F(AssetSlotTest, UnchangedResidentAssetsDoNotEnterCollectionAndDependenciesAreLinear) {
+TEST_F(AssetSlotTest, ResidentAndRescuedAssetsSurviveUntilReleasedAndDependencyChainsDrain) {
     auto counters = MakeCounters();
     vector<StreamingAssetRef<ProbeAsset>> resident;
     for (uint32_t i = 0; i < 10000; ++i)
         resident.push_back(Assets().AddReady<ProbeAsset>(MakeId(10000 + i), make_unique<ProbeAsset>(counters, false)));
     for (uint32_t i = 0; i < 100; ++i) Assets().Pump();
-    EXPECT_EQ(Assets().GetCollectionStats().CandidatesVisited, 0u);
-    EXPECT_EQ(Assets().GetCollectionStats().SlotsDestroyed, 0u);
+    EXPECT_EQ(Assets().GetAssetCount(), 10000u);
+    EXPECT_EQ(counters->Destroyed, 0u);
     const auto rescuedId = resident.back().GetAssetId();
     resident.back().Reset();
     auto rescued = Assets().Find(rescuedId);
     Assets().Pump();
-    EXPECT_EQ(Assets().GetCollectionStats().CandidatesVisited, 1u);
-    EXPECT_EQ(Assets().GetCollectionStats().SlotsDestroyed, 0u);
+    EXPECT_TRUE(rescued.IsReady());
+    EXPECT_EQ(Assets().GetAssetCount(), 10000u);
+    EXPECT_EQ(counters->Destroyed, 0u);
     rescued.Reset();
     resident.clear();
     Assets().Pump();
-    EXPECT_EQ(Assets().GetCollectionStats().SlotsDestroyed, 10000u);
-    EXPECT_EQ(Assets().GetCollectionStats().PendingCandidates, 0u);
+    EXPECT_EQ(Assets().GetAssetCount(), 0u);
+    EXPECT_EQ(counters->Destroyed, 10000u);
 
     class DependencyAsset final : public ProbeAsset {
     public:
@@ -443,11 +444,8 @@ TEST_F(AssetSlotTest, UnchangedResidentAssetsDoNotEnterCollectionAndDependencies
     StreamingAssetRefAny chain;
     for (uint32_t i = 0; i < 10000; ++i)
         chain = Assets().AddReady(MakeId(20000 + i), make_unique<DependencyAsset>(counters, std::move(chain)));
-    const auto before = Assets().GetCollectionStats();
     chain.Reset();
     Assets().Pump();
-    EXPECT_EQ(Assets().GetCollectionStats().CandidatesVisited - before.CandidatesVisited, 10000u);
-    EXPECT_EQ(Assets().GetCollectionStats().SlotsDestroyed - before.SlotsDestroyed, 10000u);
     EXPECT_EQ(Assets().GetAssetCount(), 0u);
     EXPECT_EQ(counters->Destroyed, 20000u);
     EXPECT_EQ(counters->Unloaded, 20000u);

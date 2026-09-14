@@ -112,8 +112,7 @@ RAII 包装类的后缀是 `Scope` / `Scoped` / `Guard`，**没有 `*RAII`**：`
 - 相邻 draw 通常重复相同状态，graph 命令包装与后端 encoder 都以"与当前已绑定状态相同则跳过"去重，
   不依赖上层保证不重复调用。
 
-改动前后用 `test_runtime_profile` 的 `PROFILE` 行对照（见 [构建与测试](build-test.md#runtime-阶段采样)），
-不凭直觉声称收益。
+性能改动使用适用的基准或 Tracy 数据验证，不凭直觉声称收益；旧 runtime_profile harness 已移除。
 
 ## 测试
 

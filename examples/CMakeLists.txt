@@ -1,6 +1,0 @@
-add_subdirectory(example_lambert_sphere)
-add_subdirectory(example_tidal_atrium)
-add_subdirectory(example_pipeline_probe)
-if (RADRAY_ENABLE_IMGUI)
-    add_subdirectory(example_imgui)
-endif()

@@ -1,6 +1,6 @@
 > - 适用: 维护 shader compiler client、metadata wire、artifact decoder 或 runtime JIT
 > - 权威: 本文描述 schema 8 当前 shader pipeline 契约、编译边界与设计理由；HLSL 写法见 authoring 指南
-> - 锚点: `modules/shader/include/radray/shader/shader_compiler_contract.h`, `modules/shader/include/radray/shader/shader_artifact.h`, `modules/render/include/radray/render/backend_shader_artifact.h`, `modules/render/src/backend_shader_artifact.cpp`, `modules/shader_compiler/include/radray/shader_compiler/client.h`, `modules/runtime/include/radray/runtime/shader_jit.h`, `modules/runtime/include/radray/runtime/shader_program.h`, `modules/runtime/include/radray/runtime/shader_parameters.h`, `tools/generate_forward_cbuffers.py`, `tools/CMakeLists.txt`, `CMakePresets.json`
+> - 锚点: `modules/shader/include/radray/shader/shader_compiler_contract.h`, `modules/shader/include/radray/shader/shader_artifact.h`, `modules/render/include/radray/render/backend_shader_artifact.h`, `modules/render/src/backend_shader_artifact.cpp`, `modules/shader_compiler/include/radray/shader_compiler/client.h`, `modules/runtime/include/radray/runtime/shader_jit.h`, `modules/runtime/include/radray/runtime/shader_program.h`, `modules/runtime/include/radray/runtime/shader_parameters.h`, `tools/CMakeLists.txt`, `CMakePresets.json`
 
 # Shader pipeline
 
@@ -141,8 +141,7 @@ kind、duplicate modifier 等是 framework 构造错误。wrong/cross-layout han
 
 `BackendShaderArtifact::FindBindingInfo` 只按 canonical descriptor declaration 查询 current target 的
 logical kind、group、count、actual stages、dynamic 与 immutable 属性；push/unknown 返回空。runtime
-Graph 参数用它验证资源种类、数组、组与 UAV stage，但 caller 不能用查询结果构造或改写 layout，
-wire schema 与 DXC ABI 因此不需要为 Graph 参数扩张。
+参数调用方可查询资源种类、数组、组与 UAV stage，但不能用查询结果构造或改写 layout。
 
 type tree 属于所属 artifact 的 CPU upload schema。`WireTypeRecord` 保留 scalar/vector/matrix 的
 kind，并为 struct/struct-array member 携带 compiler-owned underlying `TypeIndex`；decoder 检查
@@ -160,7 +159,7 @@ schema 8 起每条 record 还携带 `ShaderScalarKind`（float/sint/uint/bool）
 同一 shared struct 在 DXIL 与 SPIR-V lane 上发布的 offset/size/stride/标量种类/矩阵形状必须逐项
 相等，否则整个 batch 以 `CompileStatus::TargetFailure` 失败并在诊断里点名该 struct，而不是发布
 其中一个 lane 的答案——由有争议布局生成的 POD 会静默与 GPU 不符。当前已知的分歧构造有三类，
-Forward cbuffer 因此必须避开：非方阵（`float3x4` 两 lane 的 rows/cols 与 matrix stride 相反）、
+需要跨 lane 一致布局的 cbuffer 必须避开：非方阵（`float3x4` 两 lane 的 rows/cols 与 matrix stride 相反）、
 cbuffer 里的 `bool`（DXIL 报 Bool 且 size 补到寄存器边界，SPIR-V 报 uint 且 size 4）、以及元素
 大小不是 16 字节整数倍的 struct 数组（DXIL 报紧排 stride，SPIR-V 报 cbuffer 规则的 stride）。
 `RadRayDxcMetadata.CBufferTypePayloadPinsScalarKindShapeAndOffsets` 钉住两 lane 一致的部分，
@@ -178,9 +177,9 @@ CPU buffer/parameter 表，pure-push artifact 因而得到合法空 layout。
 `ShaderParameterKind::Vector`、`ElementCount` 为 4，`SetFloat4(name, value, element)` 直接写第
 `element` 项，`SetRaw` 反而被拒绝。
 
-`ShaderParameterStorage` 是按名写 blob 的路径，服务 JIT 与测试。Forward 产品热路径不再经过它：
+`ShaderParameterStorage` 提供按名写 blob 的路径。
 Material 的 canonical storage 是一段 GPU 布局 `byte[]`，长度取自 technique primary declaration anchor
-选中的 cbuffer size，由调用方用 AOT 生成的 POD 覆盖（见 [render-framework](render-framework.md)）。
+选中的 cbuffer size，由调用方按已验证的 GPU 布局写入（见 [render-framework](render-framework.md)）。
 两条路径写的是同一块 bytes，参数查找仍遵守上述完整路径与唯一叶名规则。
 
 ## Target layout resolution
@@ -237,7 +236,7 @@ compiler artifact key 覆盖 source input/identity、structured `Defines`、cano
 toolchain，不含 layout recipe。program/layout key 由 artifact identity 加 current backend 的
 `ResolvedLayoutHash` 组成；非 current backend recipe 字段、modifier 原始顺序和 native handles
 不进入 key。失败结果按同一完整 key 缓存。一个 program 仍拥有一个 concrete Variant 的 artifact、
-resolved/native layout、stage shaders、参数索引与 PSO cache；不增加 global native layout cache。
+resolved/native layout、stage shaders、参数索引与 group recipe；不拥有 PSO cache，也不增加 global native layout cache。
 JIT 关闭时这条源码请求明确返回空，不影响 runtime 构造。
 
 command binding 延续薄公共操作，但 identity 来自 resolved layout：
@@ -250,17 +249,15 @@ number。push 写入为 `SetPushConstants(BindingHandle, bytes)`，只写 `[0,si
 
 PSO builder 在调用 D3D12/Vulkan native pipeline API 前校验 `VertexInputState`：semantic、format、
 buffer slot、attribute location、offset/stride 和重复声明必须自洽。失败不会把坏输入交给 native
-PSO，也不会通过 compiler client 或 runtime reflection 补齐 vertex schema。runtime 的
-`PrimitiveVertexLayout` 提供 geometry-owned stride/slot/format/offset，`ShaderProgram` 再与当前
-artifact 的 `VertexInputs()` 合并；PSO key 由 material 状态、geometry layout/topology 和 pass
-attachment facts 组成，不含 program 自己的 layout、bytecode 或指针。
+PSO，也不会通过 compiler client 或 runtime reflection 补齐 vertex schema。
+调用方直接提供 geometry 的 stride/slot/format/offset 与 shader semantic/location 组成的 RHI VertexInputState。
+旧 runtime PrimitiveVertexLayout/resolver 与材质固定功能状态包装已移除。
 
-compute-only `ShaderProgram` 从 artifact entry record 保存真实 entry name，
-`GetOrCreateComputePipelineState()` 首次成功时创建并缓存一个 PSO；重复请求返回同一对象。graphics
-program 请求返回空，native create 失败也不缓存空值。RenderGraph 不登记借用 program，Compile 保持纯
-CPU；只有 live pass 的 prepare 阶段通过 `RenderGraphPrepareContext::ResolveComputePipeline` /
-`ResolveGraphicsPipeline` 直接命中 `ShaderProgram` 自己的 PSO 缓存，失败以 `ComputePipelineState` /
-`GraphicsPipelineState` 诊断在录制开始前终止整张图。
+ShaderProgram 从 artifact entry record 保存真实 entry name，并通过 `GetStage(shader::ShaderStage)`
+返回借用的 RHI ShaderEntry；不存在的 stage 返回空。调用方将该 entry 和 GetPipelineLayout() 放入
+RHI pipeline descriptor，创建并管理 PSO，保证 program 与 GPU 使用所需资源的寿命。
+ShaderProgram 不提供 graphics/compute PSO 创建入口、兼容性 key 或缓存；native 创建失败由调用方处理。
+graphics draw 与 compute dispatch/readback 的 JIT 测试使用此路径覆盖 D3D12/Vulkan。
 
 ## Build boundary
 
@@ -289,17 +286,8 @@ bytecode 与 metadata envelope；它不生成正式 manifest、
 artifact index 或 publisher 输出，也不代表 stock DXC 已提供 RadRay extension ABI。工具目标
 只链接 `radrayshadercompiler`，可用 map/import 检查确认没有反向引入 render/runtime/backend。
 
-`tools/generate_forward_cbuffers.py` 是 AOT POD 生成器：读若干 schema 8 metadata blob，按 CBuffer
-根 struct 生成 C++ POD 头。它不调用 DXC、不链 compiler，只解析已经编好的产物，因此 compiler-off
-构建也能编译生成结果。输入必须至少包含一对 DXIL + SPIR-V blob；同一 struct 跨 blob 的布局事实
-不一致就生成失败。`--prefix`（默认 `Forward_`）拼出 C++ 标识符，已带该前缀的名字不叠加；对齐空洞
-补 `_padN`；`--check` 只比较不写文件。
-
-生成头检入仓库，CMake 默认不在每次构建时跑生成器。`radray_forward_cbuffers_check` 与
-`radray_forward_cbuffers_regenerate` 两个 custom target 先编译 layout owner
-（`shaderlib/pipelines/forward/layout_owner.hlsl`，见 [shaderlib](shaderlib.md)）再喂给脚本，
-与 `radray_builtin_shaders_check`/`_regenerate` 同一习惯。改 Forward cbuffer ABI 或 wire schema 后
-手动跑 regenerate 并检入。
+旧 Forward cbuffer 与 ImGui/blit artifact 的专用生成器和 custom targets 已随渲染框架移除；
+历史方案见[设计快照](../temp/render-framework-design.md)。raw shader compile CLI 继续保留。
 
 第一阶段仍没有正式 shader artifact publisher、索引或安装导出层；fork SDK autobuild 只发布
 compiler package。runtime-only 的 compiler-free 验证消费版本控制的 raw golden bytecode/metadata

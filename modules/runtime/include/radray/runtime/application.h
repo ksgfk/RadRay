@@ -8,9 +8,7 @@
 #include <radray/coroutine.h>
 #include <radray/nullable.h>
 #include <radray/types.h>
-#include <radray/runtime/application_extension.h>
 #include <radray/runtime/flight_completion.h>
-#include <radray/runtime/render_framework/render_graph_runtime_options.h>
 
 namespace radray {
 
@@ -99,8 +97,7 @@ private:
 
 /// 一站式运行时启动描述。Application::Run(desc) 据此创建 GpuSystem(由其持有 device/factory)、
 /// 窗口系统、主窗口 + swapchain、AssetManager、World,并固化帧序与 shutdown 顺序。
-/// 核心系统都在运行时内部生命周期里创建与驱动；可选参与者通过 Application::AddExtension
-/// 在 OnInit 内安装,不改变固定帧序。
+/// 核心系统都在运行时内部生命周期里创建与驱动。
 struct ApplicationRuntimeDescriptor {
     // —— 后端 / 运行模式 ——
     render::RenderBackend Backend;
@@ -152,22 +149,17 @@ public:
     const ApplicationScheduler& GetScheduler() const noexcept { return _scheduler; }
     World* GetWorld() noexcept { return _world.get(); }
     const World* GetWorld() const noexcept { return _world.get(); }
-    /// Game thread, after the runtime is initialized and before the main loop starts (OnInit).
-    /// Returns null and destroys the rejected extension otherwise. Extensions run in installation order.
-    Nullable<ApplicationExtension*> AddExtension(unique_ptr<ApplicationExtension> extension);
     /// 兼容性便捷入口；device 的所有权与生命周期由 GpuSystem 管理。
     render::Device* GetDevice() noexcept;
     const render::Device* GetDevice() const noexcept;
     const std::filesystem::path& GetShaderSourceRoot() const noexcept { return _shaderSourceRoot; }
     const vector<std::filesystem::path>& GetShaderIncludePaths() const noexcept { return _shaderIncludePaths; }
 
-    /// Game thread. Takes effect on the next flight that has not yet frozen options in PrepareFrame.
-    void SetRenderGraphRuntimeOptions(RenderGraphRuntimeOptions options) noexcept { _pendingRenderGraphOptions = options; }
-    const RenderGraphRuntimeOptions& GetPendingRenderGraphRuntimeOptions() const noexcept { return _pendingRenderGraphOptions; }
-
-    // —— runner / 运行时内部系统调用的框架方法(已固化帧序,非游戏 override 点)——
+    // Runner drives the fixed update, record and submission order.
     AppUpdateResult Update(const AppUpdateContext& ctx);
-    void Render(AppFrameContext& ctx);
+    /// Records application commands on the render thread (or the main thread in single-thread mode).
+    /// Default is empty. The runner owns Begin/End/Submit; resources must survive their flight.
+    virtual void Render(AppFrameContext& ctx);
     int Shutdown(const AppShutdownContext& ctx);
     void OnFlightsComplete(std::span<const FlightCompletion> completions) noexcept override;
 
@@ -204,15 +196,10 @@ private:
     unique_ptr<AssetManager> _assetManager;
     unique_ptr<RenderSystem> _renderSystem;
     unique_ptr<World> _world;
-    // 在 World 之前逆序销毁；见 DestroyRuntime。
-    vector<unique_ptr<ApplicationExtension>> _extensions;
     ApplicationScheduler _scheduler;
     std::filesystem::path _shaderSourceRoot;
     vector<std::filesystem::path> _shaderIncludePaths;
-    RenderGraphRuntimeOptions _pendingRenderGraphOptions{kPerformanceRenderGraphRuntimeOptions};
     bool _multithreaded{false};
-    bool _runtimeInitialized{false};
-    bool _loopStarted{false};
     const std::thread::id _applicationThread{std::this_thread::get_id()};
 };
 

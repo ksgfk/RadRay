@@ -7,7 +7,6 @@ namespace radray {
 class SpotLightComponent : public PointLightComponent {
 public:
     LightType GetLightType() const noexcept override { return LightType::Spot; }
-    unique_ptr<LightSceneProxy> CreateSceneProxy() const override;
     /// Half-angles in radians, 0 <= inner < outer < pi / 2. Invalid input leaves the component unchanged.
     bool SetConeAngles(float inner, float outer) noexcept;
     float GetInnerConeAngle() const noexcept { return _inner; }

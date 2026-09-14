@@ -1,37 +1,21 @@
 #pragma once
 
-#include <span>
-
-#include <radray/nullable.h>
 #include <radray/runtime/asset_manager.h>
 #include <radray/runtime/components/primitive_component.h>
 #include <radray/runtime/static_mesh.h>
-#include <radray/types.h>
 
 namespace radray {
-
-class Material;
 
 class StaticMeshComponent final : public PrimitiveComponent {
 public:
     StaticMeshComponent() noexcept = default;
     ~StaticMeshComponent() noexcept override;
 
-    void TickComponent(float deltaTime) override;
-
     void SetStaticMesh(StreamingAssetRef<StaticMesh> mesh);
     const StreamingAssetRef<StaticMesh>& GetStaticMesh() const noexcept { return _mesh; }
 
-    void SetMaterial(uint32_t sectionIndex, Nullable<Material*> material);
-    Nullable<Material*> GetMaterial(uint32_t sectionIndex) const noexcept;
-    std::span<const Nullable<Material*>> GetMaterials() const noexcept { return _materials; }
-
-    bool ShouldCreateRenderState() const override;
-    unique_ptr<PrimitiveSceneProxy> CreateSceneProxy() override;
-
 private:
     StreamingAssetRef<StaticMesh> _mesh;
-    vector<Nullable<Material*>> _materials;
 };
 
 template <>

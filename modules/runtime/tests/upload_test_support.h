@@ -1,6 +1,6 @@
 #pragma once
 
-#include "graph_compile_device.h"
+#include "runtime_test_device.h"
 #include <radray/runtime/static_mesh.h>
 
 namespace radray::test {
@@ -56,7 +56,7 @@ private:
     render::TextureViewDescriptor _desc;
     int& _live;
 };
-class UploadTestDevice final : public GraphCompileDevice {
+class UploadTestDevice final : public RuntimeTestDevice {
 public:
     int LiveDeviceBuffers{0}, DeviceAllocations{0}, FailDeviceAllocation{0};
     int LiveTextures{0}, LiveTextureViews{0};

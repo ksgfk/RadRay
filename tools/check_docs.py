@@ -3,6 +3,7 @@
 
 AGENTS.md and README.md are entry documents; project skills are also checked.
 Only docs/architecture and docs/guide hold long-lived subsystem documentation.
+User-requested temporary snapshots and drafts belong in docs/temp.
 Code may carry at most one owning-document banner. Web links and Markdown
 section fragments are not validated. Run: python tools/check_docs.py
 """
@@ -18,7 +19,7 @@ sys.dont_write_bytecode = True
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DOCS_ROOT = REPO_ROOT / "docs"
-DOC_SECTIONS = {"architecture", "guide"}
+DOC_SECTIONS = {"architecture", "guide", "temp"}
 SKIP_DIRS = {".git", ".kimix_cache", ".opencode", ".vscode", "SDKs", "third_party", "assets", "__pycache__"}
 SOURCE_SUFFIXES = {".h", ".hpp", ".cpp", ".c", ".mm", ".m", ".hlsl", ".hlsli", ".py", ".cmake", ".txt", ".json", ".md", ".yaml", ".yml"}
 CODE_SUFFIXES = {".h", ".hpp", ".cpp", ".c", ".mm", ".m"}
@@ -93,7 +94,7 @@ def anchor_exists(token: str) -> bool:
 def check_anchors_and_headers(errors: list[str]) -> tuple[int, int]:
     for entry in sorted(DOCS_ROOT.iterdir()):
         if not entry.is_dir() or entry.name not in DOC_SECTIONS:
-            errors.append(f"{entry.relative_to(REPO_ROOT)}: docs only contains architecture/ and guide/")
+            errors.append(f"{entry.relative_to(REPO_ROOT)}: docs only contains architecture/, guide/ and temp/")
     docs = sorted(DOCS_ROOT.rglob("*.md"))
     anchor_count = 0
     for doc in docs:

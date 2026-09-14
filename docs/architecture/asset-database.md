@@ -1,6 +1,6 @@
 > - 适用: 开发时资产身份登记、`assets.json` schema、importer/settings、按路径加载或 `Refresh`
 > - 权威: 本文是当前 JSON `AssetDatabase` 的唯一现状说明；资产 slot 与引用生命周期见 [asset-system](asset-system.md)
-> - 锚点: `modules/runtime/include/radray/runtime/asset_database.h`, `modules/runtime/include/radray/runtime/asset_source.h`, `modules/runtime/include/radray/runtime/texture_asset.h`, `modules/runtime/include/radray/runtime/static_mesh.h`, `modules/runtime/src/asset_database.cpp`, `modules/runtime/src/texture_asset.cpp`, `modules/runtime/src/static_mesh.cpp`, `modules/runtime/src/application.cpp`, `examples/example_lambert_sphere/example_lambert_sphere.cpp`
+> - 锚点: `modules/runtime/include/radray/runtime/asset_database.h`, `modules/runtime/include/radray/runtime/asset_source.h`, `modules/runtime/include/radray/runtime/texture_asset.h`, `modules/runtime/include/radray/runtime/static_mesh.h`, `modules/runtime/src/asset_database.cpp`, `modules/runtime/src/texture_asset.cpp`, `modules/runtime/src/static_mesh.cpp`, `modules/runtime/src/application.cpp`
 
 # 开发时资产数据库
 
@@ -137,13 +137,11 @@ World → RenderSystem → AssetManager → AssetDatabase → GpuSystem
 ```
 
 数据库持有 importer 与 settings，必须活过 manager 对在飞加载 task 的取消和收束；GPU 上传依赖
-又要求 `GpuSystem` 最后销毁。`example_lambert_sphere` 使用装配方提供的资产根，通过 typed path
-load 持有 mesh 与贴图引用；只有外部资产包同时提供匹配的 manifest 与源资产时，这条端到端路径
-才可运行。
+又要求 `GpuSystem` 最后销毁。调用方使用装配方提供的资产根，通过 typed path load 持有 mesh
+与贴图引用；外部资产包须同时提供匹配的 manifest 与源资产。
 
 ## 测试
 
 `AssetDatabaseTest` 覆盖 schema/path 硬失败、GUID 格式、双索引、强类型与原始 settings、排序
 保存、重开一致性和 `Refresh` GUID 稳定性。`AssetSlotTest` 覆盖 `IAssetSource` 的 ID/path 加载、
-source 缺失和 slot 去重；两组均不需要 GPU。example 的 D3D12/Vulkan 运行用于验证真实上传与绑定。
-该手工运行要求外部准备与当前示例版本匹配、且不受源码仓库跟踪的资产包。
+source 缺失和 slot 去重；两组均不需要 GPU。真实 GPU 上传由 FrameUploadTest 和 shader/RHI 测试覆盖。

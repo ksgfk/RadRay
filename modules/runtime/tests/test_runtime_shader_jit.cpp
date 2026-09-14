@@ -6,6 +6,7 @@
 #include <radray/render/backend/pipeline_layout_types.h>
 #include <radray/render/backend_shader_artifact.h>
 #include <radray/runtime/shader_jit.h>
+#include <radray/runtime/shader_program.h>
 
 #include <gtest/gtest.h>
 
@@ -145,25 +146,16 @@ void RunGraphicsJitSmoke(
     ASSERT_TRUE(backendArtifact.has_value())
         << static_cast<uint32_t>(artifactError.Failure) << ":"
         << static_cast<uint32_t>(artifactError.DecodeFailure);
-    const auto vertexBytecode =
-        backendArtifact->Generic().FindStageBytecode(shader::ShaderStage::Vertex);
-    const auto pixelBytecode =
-        backendArtifact->Generic().FindStageBytecode(shader::ShaderStage::Pixel);
-    ASSERT_TRUE(vertexBytecode.has_value());
-    ASSERT_TRUE(pixelBytecode.has_value());
-    unique_ptr<render::PipelineLayout> layout = std::move(backendArtifact->Layout);
-    auto vertexResult = device.CreateShader(render::ShaderDescriptor{
-        .Source = vertexBytecode.value(),
-        .Category = backendArtifact->Category,
-        .Stages = render::ShaderStage::Vertex});
-    auto pixelResult = device.CreateShader(render::ShaderDescriptor{
-        .Source = pixelBytecode.value(),
-        .Category = backendArtifact->Category,
-        .Stages = render::ShaderStage::Pixel});
-    ASSERT_TRUE(vertexResult.HasValue());
-    ASSERT_TRUE(pixelResult.HasValue());
-    unique_ptr<render::Shader> vertexShader = vertexResult.Release();
-    unique_ptr<render::Shader> pixelShader = pixelResult.Release();
+    auto programResult = ShaderProgram::Create(&device, std::move(backendArtifact.value()));
+    ASSERT_TRUE(programResult);
+    auto program = programResult.Release();
+    const auto vertexStage = program->GetStage(shader::ShaderStage::Vertex);
+    const auto pixelStage = program->GetStage(shader::ShaderStage::Pixel);
+    ASSERT_TRUE(vertexStage);
+    ASSERT_TRUE(pixelStage);
+    EXPECT_EQ(vertexStage->EntryPoint, "VSMain");
+    EXPECT_EQ(pixelStage->EntryPoint, "PSMain");
+    EXPECT_FALSE(program->GetStage(shader::ShaderStage::Compute));
 
     auto targetTexture = render::test::MakeRenderTarget(
         &device,
@@ -207,9 +199,9 @@ void RunGraphicsJitSmoke(
     render::PrimitiveState primitive = render::PrimitiveState::Default();
     primitive.Cull = render::CullMode::None;
     auto psoResult = device.CreateGraphicsPipelineState(render::GraphicsPipelineStateDescriptor{
-        .PipelineLayout = layout.get(),
-        .VS = render::ShaderEntry{vertexShader.get(), "VSMain"},
-        .PS = render::ShaderEntry{pixelShader.get(), "PSMain"},
+        .PipelineLayout = program->GetPipelineLayout(),
+        .VS = vertexStage,
+        .PS = pixelStage,
         .VertexInput = vertexInput,
         .Primitive = primitive,
         .DepthStencil = std::nullopt,
@@ -314,22 +306,20 @@ void RunComputeJitSmoke(
     ASSERT_TRUE(backendArtifact.has_value())
         << static_cast<uint32_t>(artifactError.Failure) << ":"
         << static_cast<uint32_t>(artifactError.DecodeFailure);
-    const auto computeBytecode =
-        backendArtifact->Generic().FindStageBytecode(shader::ShaderStage::Compute);
-    ASSERT_TRUE(computeBytecode.has_value());
-    unique_ptr<render::PipelineLayout> layout = std::move(backendArtifact->Layout);
-    const render::BindingHandle outputBinding = layout->FindBinding("Output");
+    auto programResult = ShaderProgram::Create(&device, std::move(backendArtifact.value()));
+    ASSERT_TRUE(programResult);
+    auto program = programResult.Release();
+    const auto computeStage = program->GetStage(shader::ShaderStage::Compute);
+    ASSERT_TRUE(computeStage);
+    EXPECT_EQ(computeStage->EntryPoint, "CSMain");
+    EXPECT_FALSE(program->GetStage(shader::ShaderStage::Vertex));
+    EXPECT_FALSE(program->GetStage(shader::ShaderStage::Pixel));
+    const render::BindingHandle outputBinding = program->GetPipelineLayout()->FindBinding("Output");
     ASSERT_TRUE(outputBinding.IsValid());
 
-    auto shaderResult = device.CreateShader(render::ShaderDescriptor{
-        .Source = computeBytecode.value(),
-        .Category = backendArtifact->Category,
-        .Stages = render::ShaderStage::Compute});
-    ASSERT_TRUE(shaderResult.HasValue());
-    unique_ptr<render::Shader> computeShader = shaderResult.Release();
     auto psoResult = device.CreateComputePipelineState(render::ComputePipelineStateDescriptor{
-        .PipelineLayout = layout.get(),
-        .CS = render::ShaderEntry{computeShader.get(), "CSMain"}});
+        .PipelineLayout = program->GetPipelineLayout(),
+        .CS = computeStage.value()});
     ASSERT_TRUE(psoResult.HasValue());
     unique_ptr<render::ComputePipelineState> pso = psoResult.Release();
 
@@ -341,7 +331,7 @@ void RunComputeJitSmoke(
     ASSERT_TRUE(outputResult.HasValue());
     unique_ptr<render::Buffer> output = outputResult.Release();
     auto parameterSetResult = device.CreateShaderParameterSet(render::ShaderParameterSetDescriptor{
-        .Layout = layout.get(),
+        .Layout = program->GetPipelineLayout(),
         .GroupIndex = 0});
     ASSERT_TRUE(parameterSetResult.HasValue());
     unique_ptr<render::ShaderParameterSet> parameterSet = parameterSetResult.Release();
@@ -464,10 +454,9 @@ TEST(RadRayRuntimeShaderJit, ShaderlibPassMetadataCorruptionFailsClosed) {
     ShaderJit jit{ShaderIncludePaths()};
     ASSERT_TRUE(jit.IsAvailable());
 
-    const std::filesystem::path shaderlibRoot = std::filesystem::path{RADRAY_PROJECT_DIR} / "shaderlib";
-    const vector<byte> source = ReadBytes(shaderlibRoot / "pipelines/forward/forward.hlsl");
+    constexpr std::string_view sourceName = "modules/shader_compiler/tests/data/depth.hlsl";
+    const vector<byte> source = ReadBytes(std::filesystem::path{RADRAY_PROJECT_DIR} / sourceName);
     ASSERT_FALSE(source.empty());
-    constexpr std::string_view sourceName = "pipelines/forward/forward.hlsl";
     const auto contract = jit.DiscoverContractHash(sourceName, source, shader::ShaderTarget::DXIL);
     ASSERT_TRUE(contract.has_value());
 
@@ -475,7 +464,7 @@ TEST(RadRayRuntimeShaderJit, ShaderlibPassMetadataCorruptionFailsClosed) {
         .SourceName = string{sourceName},
         .RootSource = source,
         .Defines = {},
-        .Assignments = {{"QUALITY", "low"}},
+        .Assignments = {{"DEPTH_MODE", "regular"}},
         .Targets = shader::ShaderTargetMask::DXIL,
         .ExpectedContract = contract.value()};
 

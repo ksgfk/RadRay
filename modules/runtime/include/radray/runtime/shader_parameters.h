@@ -96,9 +96,6 @@ public:
     bool SetMatrix4x4(const ShaderParameterInfo& info, const Eigen::Matrix4f& value, uint32_t element = 0) noexcept;
 
 private:
-    friend class Material;
-    // Only MaterialTechnique-validated upload schemas may use this whole-buffer copy.
-    bool CopyCompatibleBufferBytes(uint32_t bufferIndex, std::span<const byte> data) noexcept;
     bool SetBytes(
         std::string_view name,
         ShaderParameterKind expectedKind,

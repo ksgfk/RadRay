@@ -15,6 +15,9 @@ C++20 实时渲染器。D3D12 + Vulkan 后端，Windows 为主平台，macOS 走
 [AGENTS.md](AGENTS.md) 也是长期文档，记录仓库级约束与阅读入口。
 长期知识集中在它与 `docs/architecture/`、`docs/guide/`，历史版本由 Git 保存。
 
+当前分支保留底层与 runtime 基础系统，旧渲染框架、Forward 和 ImGui 已移除。
+重构前设计见[临时设计快照](docs/temp/render-framework-design.md)。
+
 ## 快速开始
 
 ```powershell

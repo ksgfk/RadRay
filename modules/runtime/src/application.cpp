@@ -524,7 +524,7 @@ public:
             deltaTime,
             gpuSystem->GetLastFrameLatency(),
             isInModalLoop);
-        _app->GetRenderSystem()->GetOutputs().SetRenderIdle(false);
+        _app->GetWindowManager()->SetRenderIdle(false);
         {
             RADRAY_PROFILE_SCOPE_N("Render");
             _app->Render(frameCtx);
@@ -533,7 +533,7 @@ public:
             RADRAY_PROFILE_SCOPE_N("Submit");
             gpuSystem->EndFrameRecordAndSubmit(flightIndex);
         }
-        _app->GetRenderSystem()->GetOutputs().SetRenderIdle(true);
+        _app->GetWindowManager()->SetRenderIdle(true);
         gpuSystem->AdvanceFrameIndex();
         RADRAY_PROFILE_FRAME();
     }
@@ -598,7 +598,7 @@ public:
           _readySlotsSemaphore(0),
           _runnerFrameDatas(_app->GetGpuSystem()->GetFlightDataCount()),
           _renderThread(&ThreadedRunner::RenderThread, this) {
-        _app->GetRenderSystem()->GetOutputs().SetRenderIdleWaiter([this] { WaitRenderThreadIdle(); });
+        _app->GetWindowManager()->SetRenderIdleWaiter([this] { WaitRenderThreadIdle(); });
     }
 
     int Run() {
@@ -625,9 +625,9 @@ public:
             _renderThread.join();
         }
 
-        _app->GetRenderSystem()->GetOutputs().SetRenderIdle(true);
+        _app->GetWindowManager()->SetRenderIdle(true);
 
-        _app->GetRenderSystem()->GetOutputs().SetRenderIdleWaiter({});
+        _app->GetWindowManager()->SetRenderIdleWaiter({});
 
         _modalLoopTickConnection.disconnect();
 
@@ -753,7 +753,7 @@ public:
 
         gpuSystem->AdvanceFrameIndex();
         _publishedFrameCount.store(frameIndex + 1, std::memory_order_release);
-        _app->GetRenderSystem()->GetOutputs().SetRenderIdle(false);
+        _app->GetWindowManager()->SetRenderIdle(false);
         _readySlotsSemaphore.release();
         return frameIndex + 1;
     }
@@ -774,7 +774,7 @@ public:
     void WaitRenderThreadIdle() {
         WaitRenderFrameComplete(_app->GetGpuSystem()->GetFrameIndex());
         RetireRenderedFrames(true, false);
-        _app->GetRenderSystem()->GetOutputs().SetRenderIdle(true);
+        _app->GetWindowManager()->SetRenderIdle(true);
     }
 
     void WaitForWritableFlightSlot() {
@@ -866,27 +866,17 @@ void Application::OnFlightsComplete(std::span<const FlightCompletion> completion
 // ════════════════════════════════════════════════════════════════
 
 AppUpdateResult Application::Update(const AppUpdateContext& ctx) {
-    if (_renderSystem != nullptr) {
-        _renderSystem->BeginUpdateForFlight(ctx.FlightIndex);
-    }
-    for (auto& extension : _extensions) extension->OnBeginUpdate(ctx.FlightIndex);
     // 1) 推进资产加载状态机(恢复本帧 GPU 上传已完成的协程 → 启动未启动协程 → reap 终态)。
     if (_assetManager != nullptr) {
         _assetManager->Pump();
     }
     // 恢复需要在应用 update 线程上继续执行的协程。
     _scheduler.Pump();
-    for (auto& extension : _extensions) extension->OnBeforeInput(ctx);
     // 2) 游戏逻辑。
-    if (_windowManager) _windowManager->DispatchInput();
     OnUpdate(ctx);
-    // 3) World Tick(组件解析当帧就绪的资产、建代理)。
+    // 3) World Tick。
     if (_world != nullptr) {
         _world->Tick(ctx.DeltaTime.count());
-    }
-    for (auto& extension : _extensions) extension->OnAfterWorldTick(ctx);
-    if (_renderSystem != nullptr) {
-        _renderSystem->PrepareFrame(ctx);
     }
     return AppUpdateResult{ShouldExit()};
 }
@@ -896,9 +886,7 @@ bool Application::ShouldExit() const noexcept {
 }
 
 void Application::Render(AppFrameContext& ctx) {
-    if (_renderSystem != nullptr) {
-        _renderSystem->Render(ctx);
-    }
+    (void)ctx;
 }
 
 int Application::Shutdown(const AppShutdownContext& ctx) {
@@ -906,9 +894,8 @@ int Application::Shutdown(const AppShutdownContext& ctx) {
     if (_gpuSystem != nullptr) {
         _gpuSystem->WaitAndCleanupCompletedFlights();
     }
-    if (_renderSystem != nullptr) {
-        _renderSystem->GetOutputs().SetRenderIdle(true);
-        _renderSystem->_pipelineShutdownIdle = true;
+    if (_windowManager != nullptr) {
+        _windowManager->SetRenderIdle(true);
     }
     // 游戏侧清理:释放自管 per-flight 资源、置空指向 World 的非 owning 指针。
     OnShutdown();
@@ -918,12 +905,8 @@ int Application::Shutdown(const AppShutdownContext& ctx) {
 }
 
 void Application::DestroyRuntime() noexcept {
-    _runtimeInitialized = false;
-    // 扩展依赖 World / RenderSystem / GpuSystem / WindowManager，先按安装逆序销毁。
-    while (!_extensions.empty()) _extensions.pop_back();
-    // 拆 World:销毁 Actor → 移除 SceneProxy → drop 其持有的 StreamingAssetRef。
+    // 拆 World:销毁 Actor / Component，释放其持有的 StreamingAssetRef。
     _world.reset();
-    // RenderSystem 持有 Scene 对象,生命周期必须长于 World 的拆解。
     // 其 RenderPassRegistry 随之销毁,故须先切断 WindowManager 的非 owning 引用。
     if (_windowManager != nullptr) {
         _windowManager->SetRenderSystem(nullptr);
@@ -1036,23 +1019,7 @@ bool Application::InitializeRuntime(const ApplicationRuntimeDescriptor& desc) {
         DestroyRuntime();
         return false;
     }
-    _runtimeInitialized = true;
     return true;
-}
-
-Nullable<ApplicationExtension*> Application::AddExtension(unique_ptr<ApplicationExtension> extension) {
-    if (!extension) return nullptr;
-    if (std::this_thread::get_id() != _applicationThread) {
-        RADRAY_ERR_LOG("Application extensions must be installed on the application thread");
-        return nullptr;
-    }
-    if (!_runtimeInitialized || _loopStarted) {
-        RADRAY_ERR_LOG("Application extensions must be installed after runtime initialization and before the main loop starts");
-        return nullptr;
-    }
-    ApplicationExtension* raw = extension.get();
-    _extensions.push_back(std::move(extension));
-    return raw;
 }
 
 int Application::Run(const ApplicationRuntimeDescriptor& desc) {
@@ -1062,7 +1029,6 @@ int Application::Run(const ApplicationRuntimeDescriptor& desc) {
 }
 
 int Application::StartLoop() {
-    _loopStarted = true;
     if (_multithreaded) {
         return ThreadedRunner{this}.Run();
     } else {

@@ -16,12 +16,7 @@ struct AssetLoadResult {
     string Error;
     bool Succeeded{false};
 
-    static AssetLoadResult Success(unique_ptr<Asset> object) noexcept {
-        AssetLoadResult result;
-        result.Object = std::move(object);
-        result.Succeeded = true;
-        return result;
-    }
+    static AssetLoadResult Success(unique_ptr<Asset> object) noexcept;
 
     template <class T>
     requires std::derived_from<T, Asset> && (!std::same_as<T, Asset>)
@@ -30,20 +25,16 @@ struct AssetLoadResult {
         return Success(std::move(asset));
     }
 
-    static AssetLoadResult Failure(string error = {}) noexcept {
-        AssetLoadResult result;
-        result.Error = std::move(error);
-        return result;
-    }
+    static AssetLoadResult Failure(string error = {}) noexcept;
 
-    bool IsSuccess() const noexcept { return Succeeded && Object != nullptr; }
+    bool IsSuccess() const noexcept;
 };
 
 /// AssetManager 的可选资产来源。实现必须在 CreateLoadTask 返回前同步取齐加载所需数据；
 /// 返回的惰性 task 启动后不得回查本对象中的可变条目。
 class IAssetSource {
 public:
-    virtual ~IAssetSource() noexcept = default;
+    virtual ~IAssetSource() noexcept;
 
     virtual std::optional<task<AssetLoadResult>> CreateLoadTask(const AssetId& id) = 0;
     virtual std::optional<AssetId> ResolveId(std::string_view relPath) const = 0;

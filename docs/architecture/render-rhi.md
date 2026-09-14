@@ -302,8 +302,8 @@ Vulkan debug-utils label；Vulkan 未启用 debug-utils 时不录标签。
 | Vulkan | 每个 debug group 一个 zone | `vkCmdWriteTimestamp` 在 render pass 内合法；`Begin()` 时回收查询槽 |
 | D3D12 | render pass 外的 group 一个 zone；render pass 内的 push 不开 zone，pop 推迟到 `EndRenderPass` | Tracy 在 zone 结束时调用 `ResolveQueryData`，它在 `BeginRenderPass/EndRenderPass` 内被运行时禁止 |
 
-因此 D3D12 上被 RenderGraph 合并为同一 raster group 的多个 pass 只显示为一个 zone，名字取该组第一个
-pass；`Submit()` 后收集已完成的时间戳。宏入口与开关见 [Core](core-facilities.md#性能采样宏)。
+因此 D3D12 同一原生 render pass 内的嵌套 group 不产生独立 GPU zone；`Submit()` 后收集已完成的时间戳。
+宏入口与开关见 [Core](core-facilities.md#性能采样宏)。
 
 ## 设备能力与纹理支持
 

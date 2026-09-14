@@ -10,9 +10,8 @@ namespace radray {
 
 class Application;
 class Actor;
-class Scene;
 
-/// 顶层容器。管理所有 Actor，持有唯一的 Scene。
+/// 顶层容器。管理所有 Actor 及其组件生命周期。
 /// 对应 UE5 的 UWorld。
 class World {
 public:
@@ -35,16 +34,12 @@ public:
     void DestroyActor(Actor* actor);
     void Tick(float deltaTime);
 
-    Scene* GetScene() const noexcept { return _scene; }
     Application* GetApplication() const noexcept { return _app; }
 
     std::span<const unique_ptr<Actor>> GetActors() const noexcept { return _actors; }
 
 private:
-    void ReleaseScene() noexcept;
-
     Application* _app{nullptr};
-    Scene* _scene{nullptr};
     vector<unique_ptr<Actor>> _actors;
 };
 

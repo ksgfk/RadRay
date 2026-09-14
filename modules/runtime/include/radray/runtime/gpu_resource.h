@@ -8,7 +8,6 @@
 #include <radray/nullable.h>
 #include <radray/render/rhi.h>
 #include <radray/runtime/asset_manager.h>
-#include <radray/runtime/render_framework/primitive_vertex_layout.h>
 #include <radray/types.h>
 
 namespace radray {
@@ -21,7 +20,6 @@ public:
     struct DrawData {
         vector<render::VertexBufferBinding> VertexBuffers;
         render::IndexBufferView Ibv;
-        PrimitiveVertexLayout VertexLayout;
         PrimitiveTopology Topology{PrimitiveTopology::TriangleList};
     };
 

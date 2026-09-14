@@ -10,7 +10,6 @@ public:
     ~PointLightComponent() noexcept override;
 
     LightType GetLightType() const noexcept override { return LightType::Point; }
-    unique_ptr<LightSceneProxy> CreateSceneProxy() const override;
 
     void SetAttenuationRadius(float radius) noexcept;
     float GetAttenuationRadius() const noexcept { return _attenuationRadius; }

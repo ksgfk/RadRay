@@ -1,11 +1,11 @@
 > - 适用: 在 `shaderlib/` 里找现成实现；增加 HLSL 数学、光照、阴影或产品 pass
 > - 权威: 本文是 schema 8 当前 HLSL 共享库边界与 target gate 契约；完整编译契约见 shader pipeline 架构文档
-> - 锚点: `shaderlib/core/math.hlsli`, `shaderlib/core/color.hlsli`, `shaderlib/core/frame.hlsli`, `shaderlib/core/platform.hlsli`, `shaderlib/bsdf/principled.hlsli`, `shaderlib/lighting/lights.hlsli`, `shaderlib/shadow/filtering.hlsli`, `shaderlib/pipelines/forward/cbuffers.hlsli`, `shaderlib/pipelines/forward/bindings.hlsli`, `shaderlib/pipelines/forward/layout_owner.hlsl`, `shaderlib/pipelines/forward/forward.hlsl`, `shaderlib/pipelines/forward/depth_only.hlsl`, `modules/shader_compiler/tests/data/depth.hlsl`, `modules/shader_compiler/tests/data/compute.hlsl`
+> - 锚点: `shaderlib/core/math.hlsli`, `shaderlib/core/color.hlsli`, `shaderlib/core/frame.hlsli`, `shaderlib/core/platform.hlsli`, `shaderlib/bsdf/principled.hlsli`, `shaderlib/lighting/lights.hlsli`, `shaderlib/shadow/filtering.hlsli`, `modules/shader_compiler/tests/data/depth.hlsl`, `modules/shader_compiler/tests/data/compute.hlsl`
 
 # shaderlib
 
 `shaderlib/` 是 HLSL 源码树，也是 compiler include 解析使用的逻辑根目录。共享数学、材质、
-光照和阴影原语位于库层；具体渲染管线的产品 source 位于 `pipelines/`。
+光照和阴影原语位于库层；旧 Forward、UI 与图 blit 产品 shader 已移除。
 compiler discovery 从根 `.hlsl` 推导 entry topology 和 keyword domain；
 作者不维护 sidecar metadata，active binding 与 type tree 随 concrete target lane artifact 生成。
 
@@ -13,9 +13,7 @@ compiler discovery 从根 `.hlsl` 推导 entry topology 和 keyword domain；
 shader compiler 的最小 depth/compute 测试 source 位于 `modules/shader_compiler/tests/data/`；
 测试以仓库相对路径读取它们，共享 include root 仍是 `shaderlib/`。
 
-示例专用 shader 随示例维护，不放入 `shaderlib/`。Tidal Atrium 使用内置 Forward 产品 shader，
-不维护自己的 shader 或管线。原信号反馈 source 位于 `modules/runtime/tests/data/temporal_feedback.hlsl`，
-由 TemporalFeedbackTest 验证。
+旧产品 shader 的归属和设计见[临时快照](../temp/render-framework-design.md)。
 
 ## 分层
 
@@ -27,7 +25,6 @@ shader compiler 的最小 depth/compute 测试 source 位于 `modules/shader_com
 | `bsdf/` | Fresnel、微表面分布、Principled BSDF | 不包含光源和资源绑定 |
 | `lighting/` | 光源布局与辐照度求值 | 不包含 entry pass |
 | `shadow/` | 过滤、级联和 cube shadow 原语 | 不包含 pipeline binding |
-| `pipelines/` | 具体 pipeline 的 binding ABI 与产品 pass | group 语义只在所属 pipeline 内有效 |
 
 ## 文件导航
 
@@ -44,20 +41,6 @@ shader compiler 的最小 depth/compute 测试 source 位于 `modules/shader_com
 | `shadow/cascade.hlsli` | 方向光级联阴影数据与求值 |
 | `shadow/cube.hlsli` | 点光源 cube shadow 数据与面序 |
 | `core/platform.hlsli` | `VK_LOCATION`、`VK_BINDING`、`VK_PUSH_CONSTANT`、`VK_IMAGE_FORMAT` target gate |
-| `pipelines/forward/cbuffers.hlsli` | forward 全部 cbuffer 的 `Forward_*` struct ABI，CPU 生成 POD 的来源 |
-| `pipelines/forward/bindings.hlsli` | forward 的 view/material/object binding declaration |
-| `pipelines/forward/layout_owner.hlsl` | 只为生成器存在：读一遍每个 Forward cbuffer 的每个字段 |
-| `pipelines/forward/forward.hlsl` | 纹理 Lambert 光照与颜色转换产品 pass |
-| `pipelines/forward/output_surface.hlsl` | 本帧 SDR 输出到世界空间屏幕，按深度遮挡并输出线性亮度 |
-| `pipelines/forward/depth_only.hlsl` | Forward 的 depth-only 产品 pass，执行 view/object 变换 |
-| `pipelines/forward/pbr.hlsl`, `pipelines/forward/surface.hlsli` | HDR Forward 材质、GGX 光照与 cutout 契约 |
-| `pipelines/forward/depth_normals_motion.hlsl`, `pipelines/forward/shadow_caster.hlsl` | 深度/法线/刚体 motion 与阴影投影 |
-| `pipelines/forward/tile_lights.hlsl`, `pipelines/forward/local_light.hlsli` | tile 局部灯列表与溢出完整遍历 |
-| `pipelines/forward/linear_depth.hlsl`, `pipelines/forward/depth_pyramid.hlsl` | 线性深度与逐 mip 归约 |
-| `pipelines/forward/ambient_occlusion.hlsl`, `pipelines/forward/ao_blur.hlsl` | 半分辨率 AO 与 bilateral 滤波 |
-| `pipelines/forward/temporal_resolve.hlsl`, `pipelines/forward/sky.hlsl` | opaque/sky 时域重投影 |
-| `pipelines/forward/firefly_update.hlsl`, `pipelines/forward/firefly_draw.hlsl` | Compute 生成间接参数与发光粒子绘制 |
-| `pipelines/forward/bloom.hlsl`, `pipelines/forward/output.hlsl`, `pipelines/forward/debug.hlsl` | Bloom、曝光/tone map、SDR 合成与调试显示 |
 
 ## 编码约定
 
@@ -73,12 +56,6 @@ shader compiler 的最小 depth/compute 测试 source 位于 `modules/shader_com
 打包，不按 type 发射顺序猜测。`shadow/filtering.hlsli` 中的序列化枚举值和 `lights.hlsli` 中的上限
 属于 ABI，不能因为重命名或排版而改变。
 
-Forward 的 cbuffer struct 另有一层约束，因为它们同时是 CPU ABI：结构收在
-`pipelines/forward/cbuffers.hlsli`，`pipelines/forward/layout_owner.hlsl` 读一遍全部字段供
-`tools/generate_forward_cbuffers.py` 生成检入的 POD 头。手写 mirror struct 或 `offsetof` 断言仍然
-不允许——布局由生成器从 type tree 复现。写法与再生成流程见
-[HLSL authoring](../guide/shader-authoring.md)。
-
 `core/platform.hlsli` 只提供 DXIL/SPIR-V target gate：`VK_LOCATION`、`VK_BINDING` 和
 `VK_PUSH_CONSTANT` 在 SPIR-V lane 展开为属性，在 DXIL lane 展开为空。它不分配编号，
 也不提供把 group/slot 打包成单一宏的 numbered wrapper。ordinary resource同时写`register()`与
@@ -93,6 +70,6 @@ SPIR-V metadata保留完整filter/address/LOD/bias/anisotropy/compare/border/red
 immutable bit。
 
 新pass的keyword pragma必须写在根`.hlsl`；每个concrete compile request为每个group提供一个合法
-assignment。`RadRayShaderLibPass`验证forward产品source及测试目录中的depth/compute source的双target
+assignment。`RadRayShaderLibPass` 验证测试目录中的 depth/compute source 的双 target
 compile、active binding和actual stage visibility。DXIL的`tN`、`sN`数字可以相同，但资源与sampler namespace不能
 混淆。

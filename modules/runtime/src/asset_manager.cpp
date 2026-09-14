@@ -245,9 +245,6 @@ void AssetManager::Release(Slot* slot) noexcept {
             if (manager._zeroRefTail) manager._zeroRefTail->NextZeroRef = slot;
             else manager._zeroRefHead = slot;
             manager._zeroRefTail = slot;
-            auto& stats = manager._collectionStats;
-            ++stats.PendingCandidates;
-            if (stats.PendingCandidates > stats.PeakCandidates) stats.PeakCandidates = stats.PendingCandidates;
         }
     }
     // 归零【不】在此销毁。析构路径是 noexcept 且可能正处在资产表的遍历中,
@@ -415,7 +412,6 @@ void AssetManager::DestroySlot(Slot* slot) noexcept {
     auto owner = std::move(found->second);
     _slots.erase(found);
     if (owner->State == AssetState::Ready && owner->Object) owner->Object->OnUnload(*this);
-    ++_collectionStats.SlotsDestroyed;
 }
 
 void AssetManager::CollectZeroRefSlots() {
@@ -430,8 +426,6 @@ void AssetManager::CollectZeroRefSlots() {
         if (!_zeroRefHead) _zeroRefTail = nullptr;
         slot->NextZeroRef = nullptr;
         slot->ZeroRefQueued = false;
-        --_collectionStats.PendingCandidates;
-        ++_collectionStats.CandidatesVisited;
         if (slot->RefCount == 0) DestroySlot(slot);
     }
 

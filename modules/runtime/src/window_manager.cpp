@@ -38,14 +38,11 @@ AppWindow::AppWindow(
     WindowManager* manager,
     unique_ptr<NativeWindow> window,
     NativeEventPump* pump,
-    bool isMain, RenderOutputUsage usage) noexcept
+    bool isMain) noexcept
     : _manager(manager),
       _window(std::move(window)),
-      _input(*_window),
-      _usage(usage),
       _pump(pump),
       _isMain(isMain) {
-    _input.SetApplicationEnabled(usage == RenderOutputUsage::Scene);
     _beforeSurfaceChange = _window->EventBeforeSurfaceChange().connect([this]() {
         if (_swapchain) {
             _manager->EnsureRenderIdle();
@@ -68,17 +65,6 @@ Nullable<render::SwapChain*> AppWindow::AttachSwapChain(const render::SwapChainD
     DetachSwapChain();
     _swapchain = gpuSystem->GetDevice()->CreateSwapChain(swapChainDesc);
     if (!_swapchain) return nullptr;
-    if (auto* renderSystem = _manager->GetRenderSystem()) {
-        const auto actual = _swapchain->GetDesc();
-        _outputId = renderSystem->GetOutputs().RegisterPresentation(_isMain ? "Main Window" : "Window",
-                                                                    {render::TextureDimension::Dim2D, actual.Width, actual.Height, 1, 1, 1, actual.Format,
-                                                                     render::MemoryType::Device, render::TextureUse::RenderTarget, render::ResourceHint::External},
-                                                                    _usage);
-        if (!_outputId.IsValid()) {
-            _swapchain = nullptr;
-            return nullptr;
-        }
-    }
     const uint32_t backBufferCount = _swapchain->GetBackBufferCount();
     _backBufferViews.resize(backBufferCount);
     _requestRecreateSwapChain.store(false, std::memory_order_release);
@@ -87,8 +73,6 @@ Nullable<render::SwapChain*> AppWindow::AttachSwapChain(const render::SwapChainD
 
 unique_ptr<render::SwapChain> AppWindow::ReleaseSwapChain() noexcept {
     _manager->EnsureRenderIdle();
-    if (auto* system = _manager->GetRenderSystem(); system && _outputId.IsValid()) system->GetOutputs().Unregister(_outputId);
-    _outputId = {};
     ReleaseBackBufferViews();
     _requestRecreateSwapChain.store(false, std::memory_order_release);
     return _swapchain.Release();
@@ -96,8 +80,6 @@ unique_ptr<render::SwapChain> AppWindow::ReleaseSwapChain() noexcept {
 
 void AppWindow::DetachSwapChain() noexcept {
     _manager->EnsureRenderIdle();
-    if (auto* system = _manager->GetRenderSystem(); system && _outputId.IsValid()) system->GetOutputs().Unregister(_outputId);
-    _outputId = {};
     if (_swapchain && _manager->GetGpuSystem() != nullptr) {
         auto* gpuSystem = _manager->GetGpuSystem();
         gpuSystem->WaitAndCleanupCompletedFlights();
@@ -210,12 +192,12 @@ WindowManager::~WindowManager() noexcept {
     NativeWindow::GlobalShutdown();
 }
 
-Nullable<AppWindow*> WindowManager::CreateWindow(const NativeWindowCreateDescriptor& desc, bool isMain, RenderOutputUsage usage) {
+Nullable<AppWindow*> WindowManager::CreateWindow(const NativeWindowCreateDescriptor& desc, bool isMain) {
     EnsureRenderIdle();
     auto window = NativeWindow::Create(desc);
     if (!window) return nullptr;
     if (!_eventPump->Register(window.Get())) return nullptr;
-    auto& newWindow = _windows.emplace_back(make_unique<AppWindow>(this, window.Release(), _eventPump.get(), isMain, usage));
+    auto& newWindow = _windows.emplace_back(make_unique<AppWindow>(this, window.Release(), _eventPump.get(), isMain));
     if (isMain) {
         _mainWindow = newWindow.get();
     }
@@ -269,7 +251,6 @@ bool AppWindow::RecreateSwapChain(uint32_t width, uint32_t height, render::Prese
     ReleaseBackBufferViews();
     const render::SwapChainDescriptor desc = _swapchain->GetDesc();
     const bool recreated = _swapchain->Recreate(width, height, desc.Format, presentMode);
-    if (auto* system = _manager->GetRenderSystem()) system->GetOutputs().UpdatePresentation(_outputId, width, height, recreated);
     const uint32_t backBufferCount = _swapchain->GetBackBufferCount();
     _backBufferViews.resize(backBufferCount);
 
@@ -298,7 +279,6 @@ void WindowManager::DestroyWindow(AppWindow* window) noexcept {
         return item.get() == window;
     });
     if (iter != _windows.end()) {
-        (*iter)->GetInput().Cancel();
         if (_mainWindow == iter->get()) {
             _mainWindow = nullptr;
         }
@@ -393,10 +373,6 @@ void WindowManager::DispatchEvents() noexcept {
     }
 }
 
-void WindowManager::DispatchInput() {
-    for (const auto& window : _windows) window->GetInput().Dispatch();
-}
-
 sigslot::signal<NativeWindow*>& WindowManager::EventModalLoopTick() noexcept {
     return _eventPump->EventModalLoopTick();
 }
@@ -407,8 +383,20 @@ void WindowManager::DetachAllSwapChains() noexcept {
     }
 }
 
+void WindowManager::SetRenderIdle(bool idle) noexcept {
+    RADRAY_ASSERT(_gameThread == std::this_thread::get_id());
+    _renderIdle = idle;
+}
+
+void WindowManager::SetRenderIdleWaiter(std::function<void()> waiter) {
+    RADRAY_ASSERT(_gameThread == std::this_thread::get_id());
+    _renderIdleWaiter = std::move(waiter);
+}
+
 void WindowManager::EnsureRenderIdle() const noexcept {
-    if (_renderSystem) _renderSystem->GetOutputs().EnsureRenderIdle();
+    RADRAY_ASSERT(_gameThread == std::this_thread::get_id());
+    if (!_renderIdle && _renderIdleWaiter) _renderIdleWaiter();
+    RADRAY_ASSERT(_renderIdle);
     if (_gpuSystem != nullptr && _gpuSystem->GetMainQueue() != nullptr) {
         _gpuSystem->GetMainQueue()->Wait();
     }

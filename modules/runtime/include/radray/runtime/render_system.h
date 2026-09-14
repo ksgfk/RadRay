@@ -1,37 +1,24 @@
 #pragma once
 
 #include <span>
-#include <atomic>
-#include <thread>
 #include <string_view>
 
 #include <radray/nullable.h>
-#include <radray/render/backend/pipeline_layout_types.h>
-#include <radray/runtime_type.h>
-#include <radray/runtime/gpu_resource.h>
 #include <radray/render/render_pass_registry.h>
-#include <radray/runtime/render_framework/frame_graph.h>
-#include <radray/runtime/render_framework/render_graph_runtime.h>
-#include <radray/runtime/render_framework/render_graph_runtime_options.h>
-#include <radray/runtime/render_framework/scene.h>
-#include <radray/runtime/shader_program_request.h>
 #include <radray/runtime/service_traits.h>
-#include <radray/shader/shader_compiler_contract.h>
+#include <radray/runtime/shader_program_request.h>
+#include <radray/runtime_type.h>
 #include <radray/types.h>
 
 namespace radray {
 
 class Application;
 class GpuSystem;
-class AppFrameContext;
 class ShaderProgram;
 class ShaderProgramCache;
-class PresentationAdapter;
-struct AppFrameTarget;
 
-/// runtime 侧的渲染协调器。【拥有"怎么画", 不拥有帧时序】—— device / queue / flight /
-/// uploader / 延迟销毁都属 GpuSystem, 本类只借用。
-/// 职责划分见 docs/architecture/render-framework.md。
+/// Runtime shader/program and RHI render-pass caches. Device and flight ownership stay in GpuSystem.
+/// Contract: docs/architecture/render-framework.md
 class RenderSystem {
 public:
     explicit RenderSystem(Application* app) noexcept;
@@ -41,79 +28,25 @@ public:
     RenderSystem& operator=(RenderSystem&&) = delete;
     ~RenderSystem() noexcept;
 
-    /// 装配阶段调用并创建 RenderPassRegistry。
     [[nodiscard]] ServiceStatus OnInitialize();
-    /// Requires GPU idle and released World/scene users; also accepts partial initialization.
+    /// Requires GPU idle; also accepts partial initialization.
     void OnShutdown() noexcept;
     void SetGpuSystem(Nullable<GpuSystem*> gpu) noexcept { _gpuSystem = gpu; }
-
-    /// Game thread. First installation after loading drains outstanding fallback frames through the runner.
-    /// An installed pipeline can only be replaced before the first PrepareFrame/Render or at GPU-idle OnShutdown.
-    /// Other replacements fail without releasing the installed pipeline.
-    bool SetPipeline(unique_ptr<RenderPipeline> pipeline) noexcept;
-    bool SetGraphComposer(unique_ptr<FrameGraphComposer> composer) noexcept;
-    /// Non-owning overlay components appended after the scene pipeline by the default composer,
-    /// in registration order. Same installation window as SetGraphComposer. The caller keeps the
-    /// component alive until RemoveOverlay or RenderSystem shutdown.
-    bool AddOverlay(RenderGraphComponent& overlay) noexcept;
-    bool RemoveOverlay(RenderGraphComponent& overlay) noexcept;
-    std::span<RenderGraphComponent* const> GetOverlays() const noexcept { return _overlays; }
-
-    /// Game thread; the runner has made this flight writable after GPU completion.
-    void BeginUpdateForFlight(uint32_t flightIndex);
-    void PrepareFrame(const AppUpdateContext& ctx);
-    void Render(AppFrameContext& ctx);
-
-    Scene* AllocateScene();
-    void ReleaseScene(Scene* scene) noexcept;
-    void ReleaseAllScenes() noexcept;
-
-    RenderPipeline* GetPipeline() const noexcept { return _pipeline.get(); }
-    /// RenderPass / Framebuffer 复用缓存。OnInitialize 之前或 device 缺失时为空。
     render::RenderPassRegistry* GetRenderPassRegistry() const noexcept { return _renderPassRegistry.get(); }
-    RenderOutputRegistry& GetOutputs() noexcept { return _outputs; }
-    const RenderGraphExecutionReport& GetGraphReport(uint32_t flight) const { return _graphReports[flight]; }
-    const RenderFramePlan& GetFramePlan(uint32_t flight) const { return _framePlans[flight]; }
-    const RenderResourcePoolStats& GetPoolStats(uint32_t flight) const { return _graphRuntime->GetPoolStats(flight); }
 
     Nullable<ShaderProgram*> GetOrCreateShaderProgram(const ShaderProgramRequest& request);
     Nullable<ShaderProgram*> GetOrCreateShaderProgram(std::span<const byte> artifact,
                                                       const shader::GpuArtifactHash& expectedIdentity,
                                                       const render::ShaderProgramLayoutRecipe& recipe = {});
-
     size_t GetShaderProgramCacheSize() const noexcept;
-
-    /// 编译产物缓存条目数。与 program 数不同: 同一个 artifact 可以服务多个 layout recipe。
     size_t GetShaderArtifactCacheSize() const noexcept;
-    /// Explicit source revision; old programs stay owned until shutdown.
     bool InvalidateShaderSource(std::string_view sourceName);
 
 private:
-    friend class Application;
-    void TransitionSurface(AppFrameContext& ctx, RenderSurfaceFrame& target, render::TextureStates state);
-    void ClearTarget(AppFrameContext& ctx, RenderSurfaceFrame& target);
-
-    Application* _app{nullptr};
+    Application* _app;
     Nullable<GpuSystem*> _gpuSystem{nullptr};
-    const std::thread::id _gameThread{std::this_thread::get_id()};
     unique_ptr<render::RenderPassRegistry> _renderPassRegistry;
-    RenderOutputRegistry _outputs;
-    vector<RenderFramePlan> _framePlans;
-    vector<vector<RenderOutputInfo>> _frameOutputInfos;
-    vector<RenderGraphExecutionReport> _graphReports;
-    vector<RenderGraphRuntimeOptions> _flightOptions;
-    unique_ptr<RenderGraphRuntime> _graphRuntime;
-    unique_ptr<ViewStateRegistry> _viewStates;
     unique_ptr<ShaderProgramCache> _shaderCache;
-    unique_ptr<PresentationAdapter> _presentation;
-    unique_ptr<RenderPipeline> _pipeline;
-    unique_ptr<FrameGraphComposer> _graphComposer;
-    vector<RenderGraphComponent*> _overlays;
-    std::atomic_bool _pipelineStarted{false};
-    bool _pipelineShutdownIdle{false};
-    vector<unique_ptr<Scene>> _scenes;
-    // Only the game thread touches these refs; shutdown releases them after GPU idle.
-    vector<vector<StreamingAssetRefAny>> _retainedAssets;
 };
 
 template <>

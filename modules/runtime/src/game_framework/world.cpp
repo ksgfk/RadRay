@@ -2,17 +2,14 @@
 
 #include <algorithm>
 
-#include <radray/runtime/application.h>
 #include <radray/runtime/game_framework/actor.h>
-#include <radray/runtime/render_system.h>
 
 namespace radray {
 
 World::World() = default;
 
 World::World(Application* app)
-    : _app(app),
-      _scene(app != nullptr && app->GetRenderSystem() != nullptr ? app->GetRenderSystem()->AllocateScene() : nullptr) {
+    : _app(app) {
 }
 
 World::~World() noexcept {
@@ -20,7 +17,6 @@ World::~World() noexcept {
     while (!_actors.empty()) {
         DestroyActor(_actors.back().get());
     }
-    ReleaseScene();
 }
 
 void World::DestroyActor(Actor* actor) {
@@ -55,11 +51,5 @@ Actor* World::SpawnActor(unique_ptr<Actor> actor) {
     return raw;
 }
 
-void World::ReleaseScene() noexcept {
-    if (_app != nullptr && _app->GetRenderSystem() != nullptr && _scene != nullptr) {
-        _app->GetRenderSystem()->ReleaseScene(_scene);
-    }
-    _scene = nullptr;
-}
 
 }  // namespace radray

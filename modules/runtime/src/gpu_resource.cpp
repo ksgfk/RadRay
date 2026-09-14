@@ -619,8 +619,6 @@ std::optional<GpuMesh> ResourceUploader::UploadMeshResource(
         return std::nullopt;
     }
 
-    vector<PrimitiveVertexLayout> vertexLayouts;
-    vertexLayouts.reserve(meshResource.Primitives.size());
     for (size_t primitiveIndex = 0; primitiveIndex < meshResource.Primitives.size(); ++primitiveIndex) {
         const MeshPrimitive& primitive = meshResource.Primitives[primitiveIndex];
         if (primitive.VertexBuffers.empty()) {
@@ -638,13 +636,22 @@ std::optional<GpuMesh> ResourceUploader::UploadMeshResource(
             RADRAY_ERR_LOG("mesh primitive {} uses multiple vertex streams, which are not supported", primitiveIndex);
             return std::nullopt;
         }
-        std::optional<PrimitiveVertexLayout> layout =
-            PrimitiveVertexLayout::FromMeshPrimitive(primitive);
-        if (!layout.has_value()) {
-            RADRAY_ERR_LOG("mesh primitive {} has an invalid vertex layout", primitiveIndex);
-            return std::nullopt;
+        const uint32_t stride = primitive.VertexBuffers.front().Stride;
+        for (auto current = primitive.VertexBuffers.begin(); current != primitive.VertexBuffers.end(); ++current) {
+            const VertexBufferEntry& entry = *current;
+            const uint32_t elementSize = GetVertexDataSizeInBytes(entry.Type, entry.ComponentCount);
+            const bool duplicateSemantic = std::any_of(
+                primitive.VertexBuffers.begin(), current,
+                [&](const VertexBufferEntry& other) noexcept {
+                    return other.Semantic == entry.Semantic && other.SemanticIndex == entry.SemanticIndex;
+                });
+            if (stride == 0 || entry.Stride != stride || entry.Semantic.empty() ||
+                entry.ComponentCount == 0 || entry.ComponentCount > 4 || elementSize == 0 ||
+                entry.Offset > stride || elementSize > stride - entry.Offset || duplicateSemantic) {
+                RADRAY_ERR_LOG("mesh primitive {} has an invalid vertex layout", primitiveIndex);
+                return std::nullopt;
+            }
         }
-        vertexLayouts.push_back(std::move(layout.value()));
     }
 
     GpuMesh result;
@@ -687,16 +694,15 @@ std::optional<GpuMesh> ResourceUploader::UploadMeshResource(
     for (size_t primIdx = 0; primIdx < meshResource.Primitives.size(); ++primIdx) {
         const MeshPrimitive& prim = meshResource.Primitives[primIdx];
         GpuMesh::DrawData drawData{};
-        drawData.VertexLayout = std::move(vertexLayouts[primIdx]);
         drawData.Topology = prim.Topology;
         if (!prim.VertexBuffers.empty()) {
             const VertexBufferEntry& vbEntry = prim.VertexBuffers[0];
             if (vbEntry.BufferIndex < bufferByBin.size() && bufferByBin[vbEntry.BufferIndex].HasValue()) {
                 const uint64_t vbSize = static_cast<uint64_t>(prim.VertexCount) * vbEntry.Stride;
-                drawData.VertexBuffers.push_back({drawData.VertexLayout.Buffers.front().Binding, render::VertexBufferView{
-                                                                                                     .Target = bufferByBin[vbEntry.BufferIndex].Get(),
-                                                                                                     .Offset = 0,
-                                                                                                     .Size = vbSize}});
+                drawData.VertexBuffers.push_back({0, render::VertexBufferView{
+                                                        .Target = bufferByBin[vbEntry.BufferIndex].Get(),
+                                                        .Offset = 0,
+                                                        .Size = vbSize}});
             }
         }
         if (prim.IndexBuffer.BufferIndex < bufferByBin.size() && bufferByBin[prim.IndexBuffer.BufferIndex].HasValue()) {
