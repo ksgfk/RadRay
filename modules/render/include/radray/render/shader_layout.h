@@ -1,7 +1,6 @@
 #pragma once
 
 #include <optional>
-#include <span>
 
 #include <radray/render/rhi.h>
 #include <radray/shader/shader_artifact.h>

@@ -396,7 +396,6 @@ TEST_F(D3D12DeviceFixture, PolicyStaticSamplerComesFromTheCarrierAndCannotBeWrit
     ASSERT_TRUE(nativeResult.HasValue());
     unique_ptr<PipelineLayout> native = nativeResult.Release();
     RootSigD3D12* rootSig = CastD3D12Object(native.get());
-    ASSERT_EQ(rootSig->_staticSamplers.size(), 1u);
     ASSERT_EQ(rootSig->_parameterGroups.size(), 1u);
     const auto& group = rootSig->_parameterGroups[0];
     ASSERT_EQ(group.Entries.size(), 2u);

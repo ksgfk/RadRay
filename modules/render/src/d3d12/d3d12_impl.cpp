@@ -1066,7 +1066,7 @@ Nullable<unique_ptr<QueryPool>> DeviceD3D12::CreateQueryPool(const QueryPoolDesc
         return nullptr;
     }
 
-    auto result = make_unique<QueryPoolD3D12>(this, std::move(heap), desc);
+    auto result = make_unique<QueryPoolD3D12>(this, std::move(heap), desc.Type, desc.Count);
     if (!desc.DebugName.empty()) {
         result->SetDebugName(desc.DebugName);
     }
@@ -1249,8 +1249,8 @@ void DeviceD3D12::FlushMappedRanges(std::span<const MappedBufferRange>) noexcept
 // == Device: texture 与 texture view ==
 
 Nullable<unique_ptr<Texture>> DeviceD3D12::CreateTexture(const TextureDescriptor& desc_) noexcept {
-    if (const auto validation = ValidateTextureDescriptor(desc_, *this); !validation.Supported) {
-        RADRAY_ERR_LOG("D3D12 texture descriptor rejected: {}", validation.Reason);
+    if (const auto [supported, reason] = ValidateTextureDescriptor(desc_, *this); !supported) {
+        RADRAY_ERR_LOG("D3D12 texture descriptor rejected: {}", reason);
         return nullptr;
     }
     TextureDescriptor desc = desc_;
@@ -1984,10 +1984,12 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateExplicitRootSignatureInter
         return nullptr;
     }
 
+    vector<D3D12_ROOT_PARAMETER1> rootParameters;
+    vector<vector<D3D12_DESCRIPTOR_RANGE1>> descriptorRanges;
+    vector<D3D12_STATIC_SAMPLER_DESC> staticSamplers;
     auto layout = make_unique<RootSigD3D12>();
     layout->_device = this;
-    layout->_bindingGeneration = NextBackendBindingGeneration();
-    layout->_rootFlags = sourceFlags;
+    layout->_bindingGeneration = reinterpret_cast<uintptr_t>(layout.get());
     layout->_bindingNames.reserve(layout_.Bindings.size() + layout_.PushConstants.size());
     for (const ResolvedD3D12Binding& binding : layout_.Bindings) {
         layout->_bindingNames.push_back(BackendBindingName{
@@ -2028,8 +2030,8 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateExplicitRootSignatureInter
             RADRAY_ERR_LOG("d3d12 explicit root signature has invalid parameter metadata");
             return nullptr;
         }
-        layout->_rootParameters.reserve(desc.NumParameters);
-        layout->_descriptorRanges.reserve(desc.NumParameters);
+        rootParameters.reserve(desc.NumParameters);
+        descriptorRanges.reserve(desc.NumParameters);
         for (uint32_t index = 0; index < desc.NumParameters; ++index) {
             const D3D12_ROOT_PARAMETER1& sourceParameter = desc.pParameters[index];
             D3D12_ROOT_PARAMETER1 parameter = sourceParameter;
@@ -2039,21 +2041,21 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateExplicitRootSignatureInter
                     RADRAY_ERR_LOG("d3d12 explicit root signature has an empty descriptor table");
                     return nullptr;
                 }
-                vector<D3D12_DESCRIPTOR_RANGE1>& ranges = layout->_descriptorRanges.emplace_back();
+                vector<D3D12_DESCRIPTOR_RANGE1>& ranges = descriptorRanges.emplace_back();
                 ranges.assign(
                     sourceParameter.DescriptorTable.pDescriptorRanges,
                     sourceParameter.DescriptorTable.pDescriptorRanges +
                         sourceParameter.DescriptorTable.NumDescriptorRanges);
                 parameter.DescriptorTable.pDescriptorRanges = nullptr;
             }
-            layout->_rootParameters.push_back(parameter);
+            rootParameters.push_back(parameter);
         }
         if (desc.NumStaticSamplers != 0 && desc.pStaticSamplers == nullptr) {
             RADRAY_ERR_LOG("d3d12 explicit root signature has invalid static sampler metadata");
             return nullptr;
         }
         if (desc.NumStaticSamplers != 0) {
-            layout->_staticSamplers.assign(
+            staticSamplers.assign(
                 desc.pStaticSamplers,
                 desc.pStaticSamplers + desc.NumStaticSamplers);
         }
@@ -2063,8 +2065,8 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateExplicitRootSignatureInter
             RADRAY_ERR_LOG("d3d12 explicit root signature has invalid parameter metadata");
             return nullptr;
         }
-        layout->_rootParameters.reserve(desc.NumParameters);
-        layout->_descriptorRanges.reserve(desc.NumParameters);
+        rootParameters.reserve(desc.NumParameters);
+        descriptorRanges.reserve(desc.NumParameters);
         for (uint32_t index = 0; index < desc.NumParameters; ++index) {
             const D3D12_ROOT_PARAMETER& sourceParameter = desc.pParameters[index];
             D3D12_ROOT_PARAMETER1 parameter{};
@@ -2076,7 +2078,7 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateExplicitRootSignatureInter
                     RADRAY_ERR_LOG("d3d12 explicit root signature has an empty descriptor table");
                     return nullptr;
                 }
-                vector<D3D12_DESCRIPTOR_RANGE1>& ranges = layout->_descriptorRanges.emplace_back();
+                vector<D3D12_DESCRIPTOR_RANGE1>& ranges = descriptorRanges.emplace_back();
                 ranges.reserve(sourceParameter.DescriptorTable.NumDescriptorRanges);
                 for (uint32_t rangeIndex = 0;
                      rangeIndex < sourceParameter.DescriptorTable.NumDescriptorRanges;
@@ -2101,19 +2103,18 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateExplicitRootSignatureInter
                     sourceParameter.Descriptor.RegisterSpace,
                     D3D12_ROOT_DESCRIPTOR_FLAG_NONE};
             }
-            layout->_rootParameters.push_back(parameter);
+            rootParameters.push_back(parameter);
         }
         if (desc.NumStaticSamplers != 0 && desc.pStaticSamplers == nullptr) {
             RADRAY_ERR_LOG("d3d12 explicit root signature has invalid static sampler metadata");
             return nullptr;
         }
         if (desc.NumStaticSamplers != 0) {
-            layout->_staticSamplers.assign(
+            staticSamplers.assign(
                 desc.pStaticSamplers,
                 desc.pStaticSamplers + desc.NumStaticSamplers);
         }
     }
-    layout->RebindNativePointers();
 
     struct ActiveBinding {
         ShaderParameterGroupLayoutD3D12* Group{nullptr};
@@ -2153,18 +2154,18 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateExplicitRootSignatureInter
     vector<ExplicitTableInfo> tables;
     size_t descriptorTableIndex = 0;
     for (uint32_t rootParameterIndex = 0;
-         rootParameterIndex < layout->_rootParameters.size();
+         rootParameterIndex < rootParameters.size();
          ++rootParameterIndex) {
-        const D3D12_ROOT_PARAMETER1& parameter = layout->_rootParameters[rootParameterIndex];
+        const D3D12_ROOT_PARAMETER1& parameter = rootParameters[rootParameterIndex];
         if (parameter.ParameterType == D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE) {
-            if (descriptorTableIndex >= layout->_descriptorRanges.size()) {
+            if (descriptorTableIndex >= descriptorRanges.size()) {
                 RADRAY_ERR_LOG("d3d12 explicit root signature descriptor table metadata is invalid");
                 return nullptr;
             }
             ExplicitTableInfo table;
             table.RootParameterIndex = rootParameterIndex;
             const vector<D3D12_DESCRIPTOR_RANGE1>& ranges =
-                layout->_descriptorRanges[descriptorTableIndex++];
+                descriptorRanges[descriptorTableIndex++];
             bool hasHeapKind = false;
             uint32_t appendOffset = 0;
             for (const D3D12_DESCRIPTOR_RANGE1& range : ranges) {
@@ -2271,6 +2272,7 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateExplicitRootSignatureInter
                 if (existing == layout->_pushConstantBindings.end()) {
                     PushConstantBindingD3D12 binding;
                     binding.Location = location;
+                    binding.Num32BitValues = parameter.Constants.Num32BitValues;
                     binding.RootParameterIndex = rootParameterIndex;
                     binding.RootParameterIndices.push_back(rootParameterIndex);
                     layout->_pushConstantBindings.push_back(std::move(binding));
@@ -2322,7 +2324,7 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateExplicitRootSignatureInter
         }
         active.Binding->CoveredElements[active.ArrayElement] = 1;
     }
-    if (descriptorTableIndex != layout->_descriptorRanges.size()) {
+    if (descriptorTableIndex != descriptorRanges.size()) {
         RADRAY_ERR_LOG("d3d12 explicit root signature descriptor table metadata is inconsistent");
         return nullptr;
     }
@@ -2363,16 +2365,16 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateExplicitRootSignatureInter
     };
     const auto rootParameterCoversStage = [&](uint32_t rootParameterIndex,
                                               ShaderStage stage) noexcept {
-        return rootParameterIndex < layout->_rootParameters.size() &&
+        return rootParameterIndex < rootParameters.size() &&
                coversStage(
-                   layout->_rootParameters[rootParameterIndex].ShaderVisibility,
+                   rootParameters[rootParameterIndex].ShaderVisibility,
                    stage);
     };
     const auto staticSamplerCoversStage = [&](const ShaderParameterSetLayoutEntryD3D12& entry,
                                               uint32_t groupIndex,
                                               ShaderStage stage) noexcept {
         return std::any_of(
-            layout->_staticSamplers.begin(), layout->_staticSamplers.end(),
+            staticSamplers.begin(), staticSamplers.end(),
             [&](const D3D12_STATIC_SAMPLER_DESC& sampler) noexcept {
                 return sampler.ShaderRegister == entry.Binding &&
                        sampler.RegisterSpace == groupIndex &&
@@ -2475,8 +2477,8 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateExplicitRootSignatureInter
                 found->RootParameterIndices.end(),
                 [&](uint32_t rootParameterIndex) noexcept {
                     return rootParameterCoversStage(rootParameterIndex, stage) &&
-                           rootParameterIndex < layout->_rootParameters.size() &&
-                           layout->_rootParameters[rootParameterIndex].ParameterType ==
+                           rootParameterIndex < rootParameters.size() &&
+                           rootParameters[rootParameterIndex].ParameterType ==
                                D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
                 });
         };
@@ -2706,9 +2708,11 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateRootSignatureInternal(
         }
     }
 
+    vector<D3D12_ROOT_PARAMETER1> rootParameters;
+    vector<vector<D3D12_DESCRIPTOR_RANGE1>> descriptorRanges;
     auto layout = make_unique<RootSigD3D12>();
     layout->_device = this;
-    layout->_bindingGeneration = NextBackendBindingGeneration();
+    layout->_bindingGeneration = reinterpret_cast<uintptr_t>(layout.get());
     layout->_bindingNames.reserve(layout_.Bindings.size() + layout_.PushConstants.size());
     for (const ResolvedD3D12Binding& binding : layout_.Bindings) {
         layout->_bindingNames.push_back(BackendBindingName{
@@ -2768,24 +2772,25 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateRootSignatureInternal(
     }
     for (const ResolvedPushConstantBlock& pushConstant : layout_.PushConstants) {
         const uint32_t rootParameterIndex =
-            static_cast<uint32_t>(layout->_rootParameters.size());
+            static_cast<uint32_t>(rootParameters.size());
         D3D12_ROOT_PARAMETER1 rootParameter{};
         rootParameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
         rootParameter.Constants.ShaderRegister = pushConstant.Register;
         rootParameter.Constants.RegisterSpace = pushConstant.RegisterSpace;
         rootParameter.Constants.Num32BitValues = pushConstant.Size / 4;
         rootParameter.ShaderVisibility = MapShaderStages(pushConstant.Stages);
-        layout->_rootParameters.push_back(rootParameter);
+        rootParameters.push_back(rootParameter);
         PushConstantBindingD3D12 binding{};
         binding.Location = ShaderBindingLocation{pushConstant.RegisterSpace, pushConstant.Register};
+        binding.Num32BitValues = rootParameter.Constants.Num32BitValues;
         binding.RootParameterIndex = rootParameterIndex;
         binding.RootParameterIndices.push_back(rootParameterIndex);
         layout->_pushConstantBindings.push_back(std::move(binding));
     }
 
     auto appendDescriptorTable = [&](const PipelineLayoutGroup& group, bool samplerTable) noexcept {
-        layout->_descriptorRanges.emplace_back();
-        vector<D3D12_DESCRIPTOR_RANGE1>& ranges = layout->_descriptorRanges.back();
+        descriptorRanges.emplace_back();
+        vector<D3D12_DESCRIPTOR_RANGE1>& ranges = descriptorRanges.back();
         ShaderStages tableStages{ShaderStage::UNKNOWN};
         uint32_t descriptorOffset = 0;
         for (const ShaderParameterSetLayoutEntryD3D12& entry : group.Entries) {
@@ -2821,7 +2826,7 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateRootSignatureInternal(
         rootParameter.DescriptorTable.NumDescriptorRanges = static_cast<uint32_t>(ranges.size());
         rootParameter.DescriptorTable.pDescriptorRanges = nullptr;
         rootParameter.ShaderVisibility = MapShaderStages(tableStages);
-        layout->_rootParameters.push_back(rootParameter);
+        rootParameters.push_back(rootParameter);
         return true;
     };
 
@@ -2850,7 +2855,7 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateRootSignatureInternal(
             // second code path.
             parameterGroup.Bindings[entryIndex].RootDescriptorDestinations.push_back(
                 ShaderParameterBindingLayoutD3D12::RootDescriptorDestination{
-                    static_cast<uint32_t>(layout->_rootParameters.size()),
+                    static_cast<uint32_t>(rootParameters.size()),
                     parameterType.value()});
             D3D12_ROOT_PARAMETER1 rootParameter{};
             rootParameter.ParameterType = parameterType.value();
@@ -2858,7 +2863,7 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateRootSignatureInternal(
             rootParameter.Descriptor.RegisterSpace = group.Index;
             rootParameter.Descriptor.Flags = D3D12_ROOT_DESCRIPTOR_FLAG_NONE;
             rootParameter.ShaderVisibility = MapShaderStages(entry.Stages);
-            layout->_rootParameters.push_back(rootParameter);
+            rootParameters.push_back(rootParameter);
         }
 
         const bool hasResourceTable = std::any_of(
@@ -2872,7 +2877,7 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateRootSignatureInternal(
         }
         if (hasResourceTable) {
             parameterGroup.ResourceTableRootParameter =
-                static_cast<uint32_t>(layout->_rootParameters.size() - 1);
+                static_cast<uint32_t>(rootParameters.size() - 1);
             parameterGroup.ResourceTables.push_back({parameterGroup.ResourceTableRootParameter,
                                                      0,
                                                      parameterGroup.ResourceDescriptorCount});
@@ -2896,7 +2901,7 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateRootSignatureInternal(
         }
         if (hasSamplerTable) {
             parameterGroup.SamplerTableRootParameter =
-                static_cast<uint32_t>(layout->_rootParameters.size() - 1);
+                static_cast<uint32_t>(rootParameters.size() - 1);
             parameterGroup.SamplerTables.push_back({parameterGroup.SamplerTableRootParameter,
                                                     0,
                                                     parameterGroup.SamplerDescriptorCount});
@@ -2911,14 +2916,32 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateRootSignatureInternal(
         }
     }
 
-    RADRAY_ASSERT(layout->_rootParameters.size() <= std::numeric_limits<uint32_t>::max());
-    RADRAY_ASSERT(layout->_staticSamplers.size() <= std::numeric_limits<uint32_t>::max());
-    layout->RebindNativePointers();
+    RADRAY_ASSERT(rootParameters.size() <= std::numeric_limits<uint32_t>::max());
+    size_t descriptorTableIndex = 0;
+    for (D3D12_ROOT_PARAMETER1& parameter : rootParameters) {
+        if (parameter.ParameterType != D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE) {
+            continue;
+        }
+        RADRAY_ASSERT(descriptorTableIndex < descriptorRanges.size());
+        const vector<D3D12_DESCRIPTOR_RANGE1>& ranges = descriptorRanges[descriptorTableIndex++];
+        parameter.DescriptorTable.NumDescriptorRanges = static_cast<uint32_t>(ranges.size());
+        parameter.DescriptorTable.pDescriptorRanges = ranges.empty() ? nullptr : ranges.data();
+    }
+    RADRAY_ASSERT(descriptorTableIndex == descriptorRanges.size());
+
+    D3D12_VERSIONED_ROOT_SIGNATURE_DESC desc{};
+    desc.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
+    desc.Desc_1_1.NumParameters = static_cast<uint32_t>(rootParameters.size());
+    desc.Desc_1_1.pParameters = rootParameters.empty() ? nullptr : rootParameters.data();
+    desc.Desc_1_1.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT |
+                         D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS |
+                         D3D12_ROOT_SIGNATURE_FLAG_DENY_DOMAIN_SHADER_ROOT_ACCESS |
+                         D3D12_ROOT_SIGNATURE_FLAG_DENY_GEOMETRY_SHADER_ROOT_ACCESS;
 
     ComPtr<ID3DBlob> rootSigBlob{};
     ComPtr<ID3DBlob> errorBlob{};
     if (HRESULT hr = ::D3D12SerializeVersionedRootSignature(
-            &layout->_desc,
+            &desc,
             rootSigBlob.GetAddressOf(),
             errorBlob.GetAddressOf());
         FAILED(hr)) {
@@ -3524,7 +3547,6 @@ bool ShaderParameterSetD3D12::FlushWrites() noexcept {
         }
     }
     std::fill(_dirty.begin(), _dirty.end(), uint8_t{0});
-    ++_flushGeneration;
     return true;
 }
 
@@ -3804,8 +3826,6 @@ struct CmdListD3D12::ProfilerZoneStack {
     // D3D12ZoneScope is not movable; keep them in a deque so pushes never relocate open zones.
     deque<tracy::D3D12ZoneScope> Zones;
 };
-#else
-struct CmdListD3D12::ProfilerZoneStack {};
 #endif
 
 CmdQueueD3D12::CmdQueueD3D12(
@@ -3957,18 +3977,24 @@ uint64_t FenceD3D12::GetLastSignaledValue() const noexcept {
 
 CmdListD3D12::CmdListD3D12(
     DeviceD3D12* device,
-    CmdQueueD3D12* queue,
+    [[maybe_unused]] CmdQueueD3D12* queue,
     ComPtr<ID3D12CommandAllocator> cmdAlloc,
     ComPtr<ID3D12GraphicsCommandList> cmdList,
     D3D12_COMMAND_LIST_TYPE type,
     ComPtr<ID3D12RootSignature> emptyRootSignature) noexcept
     : _device(device),
+#ifdef RADRAY_ENABLE_PROFILER
       _queue(queue),
+#endif
       _cmdAlloc(std::move(cmdAlloc)),
       _cmdList(std::move(cmdList)),
       _emptyRootSignature(std::move(emptyRootSignature)),
-      _type(type),
-      _profilerZones(make_unique<ProfilerZoneStack>()) {}
+      _type(type)
+#ifdef RADRAY_ENABLE_PROFILER
+      ,
+      _profilerZones(make_unique<ProfilerZoneStack>())
+#endif
+{}
 
 CmdListD3D12::~CmdListD3D12() noexcept {
     Destroy();
@@ -3985,10 +4011,10 @@ void CmdListD3D12::Destroy() noexcept {
         RADRAY_WARN_LOG("d3d12 command list destroyed with {} open profiler zones", _profilerZones->Zones.size());
         _profilerZones->Zones.clear();
     }
-#endif
     _deferredZonePops = 0;
     _suppressedZonePushes = 0;
     _inRenderPass = false;
+#endif
     _keepAliveBuffers.clear();
     _cmdAlloc = nullptr;
     _cmdList = nullptr;
@@ -4064,6 +4090,9 @@ void CmdListD3D12::ResourceBarrier(std::span<const ResourceBarrierDescriptor> ba
             rawBarriers.push_back(raw);
         } else if (const auto* tb = std::get_if<BarrierTextureDescriptor>(&v)) {
             auto tex = CastD3D12Object(tb->Target);
+            const auto textureDesc = tex->GetDesc();
+            const auto range = NormalizeSubresourceRange(textureDesc, tb->Range);
+            if (!range) RADRAY_ABORT("D3D12 texture barrier subresource range is invalid");
             D3D12_RESOURCE_BARRIER raw{};
             if (tb->Before == TextureState::UnorderedAccess && tb->After == TextureState::UnorderedAccess) {
                 raw.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
@@ -4088,11 +4117,10 @@ void CmdListD3D12::ResourceBarrier(std::span<const ResourceBarrierDescriptor> ba
                 if (raw.Transition.StateBefore == raw.Transition.StateAfter) {
                     continue;
                 }
-                if (tb->IsSubresourceBarrier) {
-                    const auto range = NormalizeSubresourceRange(tex->GetDesc(), tb->Range);
-                    if (!range) RADRAY_ABORT("D3D12 texture barrier subresource range is invalid");
+                const uint32_t layers = tex->_dimension == TextureDimension::Dim3D ? 1 : tex->_rawDesc.DepthOrArraySize;
+                const SubresourceRange allRange{0, layers, 0, tex->_rawDesc.MipLevels, GetTextureFormatAspects(textureDesc.Format)};
+                if (*range != allRange) {
                     const uint32_t planes = D3D12GetFormatPlaneCount(_device->_device.Get(), tex->_rawDesc.Format);
-                    const uint32_t layers = tex->_dimension == TextureDimension::Dim3D ? 1 : tex->_rawDesc.DepthOrArraySize;
                     for (uint32_t plane = 0; plane < planes; ++plane) {
                         if (planes == 2 && !(range->Aspects.HasFlag(plane == 0 ? TextureAspect::Depth : TextureAspect::Stencil))) continue;
                         for (uint32_t layer = range->BaseArrayLayer; layer < range->BaseArrayLayer + range->ArrayLayerCount; ++layer) {
@@ -4232,7 +4260,9 @@ Nullable<unique_ptr<GraphicsCommandEncoder>> CmdListD3D12::BeginRenderPass(const
         pDsDesc = &dsDesc;
     }
     cmdList4->BeginRenderPass((UINT32)rtDescs.size(), rtDescs.data(), pDsDesc, passFlags);
+#ifdef RADRAY_ENABLE_PROFILER
     _inRenderPass = true;
+#endif
     return make_unique<CmdRenderPassD3D12>(this);
 }
 
@@ -4244,7 +4274,9 @@ void CmdListD3D12::EndRenderPass(unique_ptr<GraphicsCommandEncoder> encoder) noe
         return;
     }
     cmdList4->EndRenderPass();
+#ifdef RADRAY_ENABLE_PROFILER
     _inRenderPass = false;
+#endif
     // Parameter bindings belong to this encoder. End their static-data lifetime
     // before later compute/copy passes can write the same resources.
     // Keep a valid empty root while GBV injects barrier-validation compute work.
@@ -4277,9 +4309,9 @@ void CmdListD3D12::CopyBufferToBuffer(Buffer* dst_, uint64_t dstOffset, Buffer* 
 
 bool CmdListD3D12::CopyBufferToTextureRegion(const BufferToTextureCopyDescriptor& desc) noexcept {
     if (!desc.Source || !desc.Destination) return false;
-    const auto validation = ValidateBufferTextureCopyRegion(desc.Source->GetDesc(), desc.Destination->GetDesc(), desc.Region, _device->GetDetail());
-    if (!validation.Supported) {
-        RADRAY_ERR_LOG("{}", validation.Reason);
+    const auto [supported, reason] = ValidateBufferTextureCopyRegion(desc.Source->GetDesc(), desc.Destination->GetDesc(), desc.Region, _device->GetDetail());
+    if (!supported) {
+        RADRAY_ERR_LOG("{}", reason);
         return false;
     }
     auto src = CastD3D12Object(desc.Source);
@@ -4577,7 +4609,7 @@ void CmdListD3D12::ResolveTexture(const TextureResolveDescriptor& desc) noexcept
 
 void CmdListD3D12::ResetQueryPool(QueryPool* pool_, uint32_t firstIndex, uint32_t count) noexcept {
     auto pool = CastD3D12Object(pool_);
-    if (pool == nullptr || !pool->IsValid() || count == 0 || firstIndex + count > pool->_desc.Count) {
+    if (pool == nullptr || !pool->IsValid() || count == 0 || firstIndex + count > pool->_count) {
         RADRAY_ERR_LOG("d3d12 ResetQueryPool invalid range (first={}, count={})", firstIndex, count);
         return;
     }
@@ -4586,11 +4618,11 @@ void CmdListD3D12::ResetQueryPool(QueryPool* pool_, uint32_t firstIndex, uint32_
 
 void CmdListD3D12::WriteTimestamp(const QueryTimestampDescriptor& desc) noexcept {
     auto pool = CastD3D12Object(desc.Pool);
-    if (pool == nullptr || !pool->IsValid() || desc.Index >= pool->_desc.Count) {
+    if (pool == nullptr || !pool->IsValid() || desc.Index >= pool->_count) {
         RADRAY_ERR_LOG("d3d12 WriteTimestamp invalid query index {}", desc.Index);
         return;
     }
-    if (pool->_desc.Type != QueryType::Timestamp) {
+    if (pool->_type != QueryType::Timestamp) {
         RADRAY_ERR_LOG("d3d12 WriteTimestamp requires a timestamp query pool");
         return;
     }
@@ -4601,11 +4633,11 @@ void CmdListD3D12::ResolveQueryData(const QueryResolveDescriptor& desc) noexcept
     auto pool = CastD3D12Object(desc.Pool);
     auto dst = CastD3D12Object(desc.Destination);
     if (pool == nullptr || !pool->IsValid() || dst == nullptr || !dst->IsValid() ||
-        desc.Count == 0 || desc.FirstIndex + desc.Count > pool->_desc.Count) {
+        desc.Count == 0 || desc.FirstIndex + desc.Count > pool->_count) {
         RADRAY_ERR_LOG("d3d12 ResolveQueryData invalid descriptor");
         return;
     }
-    if (pool->_desc.Type != QueryType::Timestamp) {
+    if (pool->_type != QueryType::Timestamp) {
         RADRAY_ERR_LOG("d3d12 ResolveQueryData requires a timestamp query pool");
         return;
     }
@@ -4628,11 +4660,6 @@ bool CmdRenderPassD3D12::IsValid() const noexcept {
 }
 
 void CmdRenderPassD3D12::Destroy() noexcept {
-    for (std::optional<VertexBufferView>& view : _boundVbvs) {
-        view.reset();
-    }
-    _boundIbv.reset();
-    _boundGroups.fill({});
     _boundRs = nullptr;
     _boundPso = nullptr;
     _cmdList = nullptr;
@@ -4695,31 +4722,12 @@ static bool ValidateVertexBufferBindingD3D12(const VertexBufferBinding& binding)
     return true;
 }
 
-void CmdRenderPassD3D12::FlushVertexBuffers(uint32_t startSlot, uint32_t slotCount) noexcept {
-    RADRAY_ASSERT(_boundPso != nullptr);
-    RADRAY_ASSERT(slotCount > 0);
-    RADRAY_ASSERT(startSlot + slotCount <= _boundVbvs.size());
-    // 顶点缓冲的 stride 来自 pso, 所以 _boundVbvs 是唯一的状态源, 原生绑定由它派生。
-    // 未绑定或 pso 未声明的 slot 保持清零的 view, 这些 slot 不会被 pso 读取。
-    std::array<D3D12_VERTEX_BUFFER_VIEW, D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT> rawViews{};
-    for (uint32_t i = 0; i < slotCount; ++i) {
-        const uint32_t slot = startSlot + i;
-        const std::optional<VertexBufferView>& view = _boundVbvs[slot];
-        const std::optional<uint32_t>& stride = _boundPso->_vertexStrides[slot];
-        if (!view.has_value() || !stride.has_value()) {
-            continue;
-        }
-        const BufferD3D12* buffer = CastD3D12Object(view->Target);
-        rawViews[i] = D3D12_VERTEX_BUFFER_VIEW{
-            .BufferLocation = buffer->_gpuAddr + view->Offset,
-            .SizeInBytes = static_cast<UINT>(view->Size),
-            .StrideInBytes = stride.value()};
-    }
-    _cmdList->_cmdList->IASetVertexBuffers(startSlot, slotCount, rawViews.data());
-}
-
 void CmdRenderPassD3D12::BindVertexBuffers(std::span<const VertexBufferBinding> bindings) noexcept {
     if (bindings.empty()) {
+        return;
+    }
+    if (_boundPso == nullptr) {
+        RADRAY_ERR_LOG("d3d12 BindVertexBuffers requires a bound graphics pipeline state");
         return;
     }
     uint32_t lowest = std::numeric_limits<uint32_t>::max();
@@ -4748,31 +4756,25 @@ void CmdRenderPassD3D12::BindVertexBuffers(std::span<const VertexBufferBinding> 
         return;
     }
 
-    bool changed = false;
+    std::array<D3D12_VERTEX_BUFFER_VIEW, D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT> rawViews{};
     for (const VertexBufferBinding& binding : bindings) {
-        std::optional<VertexBufferView>& bound = _boundVbvs[binding.Binding];
-        if (!bound.has_value() || bound->Target != binding.View.Target || bound->Offset != binding.View.Offset || bound->Size != binding.View.Size) {
-            bound = binding.View;
-            changed = true;
+        const std::optional<uint32_t>& stride = _boundPso->_vertexStrides[binding.Binding];
+        if (!stride.has_value()) {
+            continue;
         }
+        const VertexBufferView& view = binding.View;
+        const BufferD3D12* buffer = CastD3D12Object(view.Target);
+        rawViews[binding.Binding - lowest] = D3D12_VERTEX_BUFFER_VIEW{
+            .BufferLocation = buffer->_gpuAddr + view.Offset,
+            .SizeInBytes = static_cast<UINT>(view.Size),
+            .StrideInBytes = stride.value()};
     }
-    if (_boundPso == nullptr) {
-        // stride 未知, 等 pso 绑定时再一次性下发。
-        return;
-    }
-    // 同一 pso 下重复绑定相同的 view 无需再下发 (pso 切换时 BindGraphicsPipelineState 会全量重发).
-    if (!changed) {
-        return;
-    }
-    FlushVertexBuffers(lowest, slotCount);
+    _cmdList->_cmdList->IASetVertexBuffers(lowest, slotCount, rawViews.data());
 }
 
 void CmdRenderPassD3D12::BindIndexBuffer(IndexBufferView ibv) noexcept {
     if (ibv.Stride != 2 && ibv.Stride != 4) {
         RADRAY_ERR_LOG("d3d12 index buffer stride must be 2 or 4 bytes, got {}", ibv.Stride);
-        return;
-    }
-    if (_boundIbv.has_value() && _boundIbv->Target == ibv.Target && _boundIbv->Offset == ibv.Offset && _boundIbv->Stride == ibv.Stride) {
         return;
     }
     auto buf = CastD3D12Object(ibv.Target);
@@ -4781,7 +4783,6 @@ void CmdRenderPassD3D12::BindIndexBuffer(IndexBufferView ibv) noexcept {
     view.SizeInBytes = (UINT)buf->_rawDesc.Width - ibv.Offset;
     view.Format = ibv.Stride == 2 ? DXGI_FORMAT_R16_UINT : DXGI_FORMAT_R32_UINT;
     _cmdList->_cmdList->IASetIndexBuffer(&view);
-    _boundIbv = ibv;
 }
 
 void CmdRenderPassD3D12::BindGraphicsPipelineState(GraphicsPipelineState* pso) noexcept {
@@ -4792,13 +4793,10 @@ void CmdRenderPassD3D12::BindGraphicsPipelineState(GraphicsPipelineState* pso) n
     if (_boundRs != ps->_layout) {
         _cmdList->_cmdList->SetGraphicsRootSignature(ps->_layout->_rootSig.Get());
         _boundRs = ps->_layout;
-        _boundGroups.fill({});
     }
     _cmdList->_cmdList->SetPipelineState(ps->_pso.Get());
     _cmdList->_cmdList->IASetPrimitiveTopology(ps->_topo);
     _boundPso = ps;
-    // 新 pso 可能带来不同的 stride, 已绑定的 vertex buffer 需要重新下发。
-    FlushVertexBuffers(0, static_cast<uint32_t>(_boundVbvs.size()));
 }
 
 static bool BindShaderParameterSetD3D12(
@@ -5057,35 +5055,13 @@ void CmdRenderPassD3D12::BindShaderParameterSet(
     uint32_t groupIndex,
     ShaderParameterSet* set,
     std::span<const ShaderParameterDynamicOffset> dynamicOffsets) noexcept {
-    auto* native = CastD3D12Object(set);
-    const bool trackable = groupIndex < _boundGroups.size() && native != nullptr &&
-                           dynamicOffsets.size() <= _boundGroups[groupIndex].Offsets.size();
-    if (trackable) {
-        const BoundParameterGroupD3D12& bound = _boundGroups[groupIndex];
-        if (bound.Set == native && bound.FlushGeneration == native->_flushGeneration &&
-            bound.OffsetCount == dynamicOffsets.size() &&
-            std::equal(dynamicOffsets.begin(), dynamicOffsets.end(), bound.Offsets.begin())) {
-            return;
-        }
-    }
-    const bool ok = BindShaderParameterSetD3D12(
+    BindShaderParameterSetD3D12(
         _cmdList->_cmdList.Get(),
         _boundRs,
         groupIndex,
-        native,
+        CastD3D12Object(set),
         dynamicOffsets,
         true);
-    if (groupIndex < _boundGroups.size()) {
-        BoundParameterGroupD3D12& bound = _boundGroups[groupIndex];
-        if (ok && trackable) {
-            bound.Set = native;
-            bound.FlushGeneration = native->_flushGeneration;
-            bound.OffsetCount = static_cast<uint32_t>(dynamicOffsets.size());
-            std::copy(dynamicOffsets.begin(), dynamicOffsets.end(), bound.Offsets.begin());
-        } else {
-            bound = {};
-        }
-    }
 }
 
 static bool SetPushConstantsD3D12(
@@ -5134,54 +5110,37 @@ static bool SetPushConstantsD3D12(
         return false;
     }
 
+    const size_t expectedSize = static_cast<size_t>(pushConstant->Num32BitValues) * 4;
+    if (data.size() != expectedSize) {
+        RADRAY_ERR_LOG(
+            "d3d12 push constant size mismatch at space {} register {}: expected {}, actual {}",
+            location.Group,
+            location.Binding,
+            expectedSize,
+            data.size());
+        return false;
+    }
+
     const auto setRootConstants = [&](uint32_t rootParameterIndex) noexcept {
-        if (rootParameterIndex >= boundLayout->_rootParameters.size()) {
-            RADRAY_ERR_LOG("d3d12 push constant root parameter metadata is invalid");
-            return false;
-        }
-        const D3D12_ROOT_PARAMETER1& rootParameter =
-            boundLayout->_rootParameters[rootParameterIndex];
-        if (rootParameter.ParameterType != D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS) {
-            RADRAY_ERR_LOG(
-                "d3d12 push constant range at space {} register {} is unavailable",
-                location.Group,
-                location.Binding);
-            return false;
-        }
-
-        const size_t expectedSize =
-            static_cast<size_t>(rootParameter.Constants.Num32BitValues) * 4;
-        if (data.size() != expectedSize) {
-            RADRAY_ERR_LOG(
-                "d3d12 push constant size mismatch at space {} register {}: expected {}, actual {}",
-                location.Group,
-                location.Binding,
-                expectedSize,
-                data.size());
-            return false;
-        }
-
         if (graphics) {
             commandBuffer->_cmdList->SetGraphicsRoot32BitConstants(
                 rootParameterIndex,
-                rootParameter.Constants.Num32BitValues,
+                pushConstant->Num32BitValues,
                 data.data(),
                 0);
         } else {
             commandBuffer->_cmdList->SetComputeRoot32BitConstants(
                 rootParameterIndex,
-                rootParameter.Constants.Num32BitValues,
+                pushConstant->Num32BitValues,
                 data.data(),
                 0);
         }
-        return true;
     };
     if (pushConstant->RootParameterIndices.empty()) {
-        return setRootConstants(pushConstant->RootParameterIndex);
-    }
-    for (const uint32_t rootParameterIndex : pushConstant->RootParameterIndices) {
-        if (!setRootConstants(rootParameterIndex)) {
-            return false;
+        setRootConstants(pushConstant->RootParameterIndex);
+    } else {
+        for (const uint32_t rootParameterIndex : pushConstant->RootParameterIndices) {
+            setRootConstants(rootParameterIndex);
         }
     }
     return true;
@@ -5341,7 +5300,6 @@ SwapChainD3D12::SwapChainD3D12(
 
 SwapChainD3D12::~SwapChainD3D12() noexcept {
     _frames.clear();
-    _hasOutstandingFrame = false;
     _outstandingBackBufferIndex = std::numeric_limits<uint32_t>::max();
     _swapchain = nullptr;
     if (_frameLatencyEvent) {
@@ -5356,7 +5314,6 @@ bool SwapChainD3D12::IsValid() const noexcept {
 
 void SwapChainD3D12::Destroy() noexcept {
     _frames.clear();
-    _hasOutstandingFrame = false;
     _outstandingBackBufferIndex = std::numeric_limits<uint32_t>::max();
     _swapchain = nullptr;
     if (_frameLatencyEvent) {
@@ -5367,8 +5324,8 @@ void SwapChainD3D12::Destroy() noexcept {
 
 SwapChainAcquireResult SwapChainD3D12::AcquireNext(uint64_t timeoutMs) noexcept {
     SwapChainAcquireResult result{};
-    RADRAY_ASSERT(!_hasOutstandingFrame);
-    if (_hasOutstandingFrame) {
+    RADRAY_ASSERT(_outstandingBackBufferIndex == std::numeric_limits<uint32_t>::max());
+    if (_outstandingBackBufferIndex != std::numeric_limits<uint32_t>::max()) {
         RADRAY_ERR_LOG("IDXGISwapChain::AcquireNext called before Present");
         result.Status = SwapChainStatus::Error;
         result.NativeStatusCode = -1;
@@ -5394,7 +5351,6 @@ SwapChainAcquireResult SwapChainD3D12::AcquireNext(uint64_t timeoutMs) noexcept 
     const DWORD waitResult = ::WaitForSingleObjectEx(_frameLatencyEvent, milliseconds, false);
     if (waitResult == WAIT_OBJECT_0) {
         const auto curr = static_cast<uint32_t>(_swapchain->GetCurrentBackBufferIndex());
-        _hasOutstandingFrame = true;
         _outstandingBackBufferIndex = curr;
         ++_outstandingFrameToken;
         SwapChainFrame frame = MakeFrame(
@@ -5423,8 +5379,8 @@ SwapChainPresentResult SwapChainD3D12::Present(SwapChainFrame&& frame) noexcept 
     SwapChainPresentResult result{};
     RADRAY_ASSERT(frame.IsValid());
     RADRAY_ASSERT(ValidateFrame(frame, this, _outstandingFrameToken));
-    RADRAY_ASSERT(_hasOutstandingFrame);
-    if (!ValidateFrame(frame, this, _outstandingFrameToken) || !_hasOutstandingFrame) {
+    RADRAY_ASSERT(_outstandingBackBufferIndex != std::numeric_limits<uint32_t>::max());
+    if (!ValidateFrame(frame, this, _outstandingFrameToken) || _outstandingBackBufferIndex == std::numeric_limits<uint32_t>::max()) {
         RADRAY_ERR_LOG("IDXGISwapChain::Present skipped: invalid or foreign SwapChainFrame");
         InvalidateFrame(frame);
         result.NativeStatusCode = static_cast<int64_t>(E_INVALIDARG);
@@ -5432,7 +5388,6 @@ SwapChainPresentResult SwapChainD3D12::Present(SwapChainFrame&& frame) noexcept 
         return result;
     }
     InvalidateFrame(frame);
-    _hasOutstandingFrame = false;
     _outstandingBackBufferIndex = std::numeric_limits<uint32_t>::max();
     if (_swapchain == nullptr) {
         result.NativeStatusCode = static_cast<int64_t>(E_POINTER);
@@ -5476,7 +5431,7 @@ SwapChainPresentResult SwapChainD3D12::Present(SwapChainFrame&& frame) noexcept 
 }
 
 bool SwapChainD3D12::Recreate(uint32_t width, uint32_t height, TextureFormat format, PresentMode presentMode) noexcept {
-    if (_hasOutstandingFrame) {
+    if (_outstandingBackBufferIndex != std::numeric_limits<uint32_t>::max()) {
         RADRAY_ABORT("IDXGISwapChain::ResizeBuffers skipped: outstanding SwapChainFrame must be presented first");
     }
 
@@ -5598,10 +5553,12 @@ BufferDescriptor BufferD3D12::GetDesc() const noexcept {
 QueryPoolD3D12::QueryPoolD3D12(
     DeviceD3D12* device,
     ComPtr<ID3D12QueryHeap> heap,
-    QueryPoolDescriptor desc) noexcept
+    QueryType type,
+    uint32_t count) noexcept
     : _device(device),
       _heap(std::move(heap)),
-      _desc(std::move(desc)) {}
+      _type(type),
+      _count(count) {}
 
 bool QueryPoolD3D12::IsValid() const noexcept {
     return _heap != nullptr;
@@ -5613,15 +5570,14 @@ void QueryPoolD3D12::Destroy() noexcept {
 
 void QueryPoolD3D12::SetDebugName(std::string_view name) noexcept {
     SetObjectName(name, _heap.Get());
-    _desc.DebugName = string{name};
 }
 
 QueryType QueryPoolD3D12::GetType() const noexcept {
-    return _desc.Type;
+    return _type;
 }
 
 uint32_t QueryPoolD3D12::GetCount() const noexcept {
-    return _desc.Count;
+    return _count;
 }
 
 TimestampQueryCalibration QueryPoolD3D12::GetTimestampCalibration(CommandQueue* queue_) const noexcept {
@@ -5774,45 +5730,15 @@ bool RootSigD3D12::IsValid() const noexcept {
 
 void RootSigD3D12::Destroy() noexcept {
     _rootSig = nullptr;
-    _desc = {};
-    _descriptorRanges.clear();
-    _rootParameters.clear();
-    _staticSamplers.clear();
     _parameterGroups.clear();
     _bindingNames.clear();
     _bindingGeneration = 0;
     _pushConstantBindings.clear();
-    _rootFlags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT |
-                 D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS |
-                 D3D12_ROOT_SIGNATURE_FLAG_DENY_DOMAIN_SHADER_ROOT_ACCESS |
-                 D3D12_ROOT_SIGNATURE_FLAG_DENY_GEOMETRY_SHADER_ROOT_ACCESS;
     _device = nullptr;
 }
 
 void RootSigD3D12::SetDebugName(std::string_view name) noexcept {
     SetObjectName(name, _rootSig.Get());
-}
-
-void RootSigD3D12::RebindNativePointers() noexcept {
-    _desc = {};
-    _desc.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
-    _desc.Desc_1_1.NumParameters = static_cast<uint32_t>(_rootParameters.size());
-    _desc.Desc_1_1.pParameters = _rootParameters.empty() ? nullptr : _rootParameters.data();
-    _desc.Desc_1_1.NumStaticSamplers = static_cast<uint32_t>(_staticSamplers.size());
-    _desc.Desc_1_1.pStaticSamplers = _staticSamplers.empty() ? nullptr : _staticSamplers.data();
-    _desc.Desc_1_1.Flags = _rootFlags;
-
-    size_t descriptorTableIndex = 0;
-    for (D3D12_ROOT_PARAMETER1& parameter : _rootParameters) {
-        if (parameter.ParameterType != D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE) {
-            continue;
-        }
-        RADRAY_ASSERT(descriptorTableIndex < _descriptorRanges.size());
-        vector<D3D12_DESCRIPTOR_RANGE1>& ranges = _descriptorRanges[descriptorTableIndex++];
-        parameter.DescriptorTable.NumDescriptorRanges = static_cast<uint32_t>(ranges.size());
-        parameter.DescriptorTable.pDescriptorRanges = ranges.empty() ? nullptr : ranges.data();
-    }
-    RADRAY_ASSERT(descriptorTableIndex == _descriptorRanges.size());
 }
 
 Nullable<const ShaderParameterGroupLayoutD3D12*> RootSigD3D12::FindParameterGroup(

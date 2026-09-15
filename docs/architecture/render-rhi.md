@@ -7,9 +7,13 @@
 `radrayrender` = 一层后端无关的 RHI（`rhi.h`，1.5k 行纯接口与描述符）+ D3D12 与 Vulkan
 两份实现。它不知道资产、场景、帧节奏，只知道 GPU 对象。
 
+`QueryPoolDescriptor::DebugName` 是非拥有的 `std::string_view`，调用方须保证其引用的字符串
+在 `CreateQueryPool` 调用期间有效；两个后端均即时设置原生对象名称，不保存该 view。
+D3D12 与 Vulkan 查询池仅平铺保存查询类型与数量，不保存创建描述符。
+
 layout 章节以下以 schema 8 contract 为准，并且已经是实现形态：group-wide `ShaderLayoutPolicy`、
 公开 handle 编码、裸 binding dynamic offset 与 default Vulkan immutable sampler 都已删除。
-`BindingHandle` 的内部 token 是 layout generation 加该 layout metadata table 的 record index，
+`BindingHandle` 的内部 token 是 layout 对象地址加该 layout metadata table 的 record index，
 位布局不是 ABI，只有两个后端可以拆开它。
 
 ## D3D12 执行失败
@@ -183,8 +187,8 @@ Implicit 两条路径共用同一份 parameter group 构建，因此整个 rende
 
 descriptor与push declaration的canonical HLSL name都通过`PipelineLayout::FindBinding`解析为
 `BindingHandle`。handle公共面只有default-invalid、validity和equality；caller不能构造或读取group、
-slot、namespace、generation、table index。内部token的位布局不是ABI，且不能跨target、Variant、
-recompile或layout复用。
+slot、namespace、generation、table index。内部 token 的位布局不是 ABI；handle 只能用于发放它的
+layout，切换 target、Variant 或重新编译后创建的新 layout 必须重新查询 handle。
 
 `PipelineLayout`内部metadata table record分两类：
 
@@ -193,12 +197,23 @@ recompile或layout复用。
 
 两类 record 共用同一个 name 表，因此 push declaration 与 descriptor declaration 用同样的方式取
 handle；handle 命名的是 record 而不是 register，record kind 决定它只能走 parameter set write 还是
-只能走 push 提交，写错一侧会被拒绝。handle 还携带发放它的 layout 的 generation，跨 layout 使用
-同样被拒绝。
+只能走 push 提交，写错一侧会被拒绝。handle 的 generation 直接使用发放它的 layout 对象地址，
+以 `uintptr_t` 完整保存并与 record index 分开存储，不使用全局计数器；不同存活 layout 间混用
+handle 会被拒绝。`RootSigD3D12` 是一次性对象：构造至析构期间不复用为另一份 layout，
+`Destroy()` 后不得重新初始化；新 layout 创建新对象。因此对象存活期间地址身份保持稳定，
+不需要递增 generation。调用方必须在 layout 销毁后丢弃它发放的所有 handle。
+`BindingHandle::IsValid()` 只检查身份非零，不检查 layout 是否仍然存活。
+
+`RootSigD3D12` 只保留原生 root signature 对象与运行时绑定 metadata。原生 root signature
+描述、root parameters、descriptor ranges、static samplers 与 flags 仅在创建阶段使用，不随
+layout 保存。push metadata 保存 root parameter 索引及 `Num32BitValues`；创建时完成参数类型、
+索引及大小一致性校验，提交 push constants 时仅按该 metadata 检查传入大小并写入各目标。
 
 一个D3 declaration按visibility-disjoint参数fan-out时仍只有一个handle，一次write/offset提交到全部
 destinations。`BindShaderParameterSet`的group index保留，因为它仍选择D3 register space/Vulkan set；
 这不要求handle公开group。
+
+D3D12 与 Vulkan 的 `BindShaderParameterSet` 每次调用都执行参数校验与 native 绑定，不缓存参数组的上次绑定状态。
 
 `ShaderParameterDynamicOffset`使用`BindingHandle + Offset`，不再携带裸binding number。两个后端都
 按 resolved order 为每个 slot 反查 caller 值：D3 走 group 的 root descriptor order，Vulkan 走
@@ -221,6 +236,13 @@ push提交为`SetPushConstants(BindingHandle, bytes)`，不再传group。每次�
 
 graphics PSO 创建前会做共享 CPU 校验：semantic、format、location、slot、offset/stride 以及
 重复 binding/attribute 必须有效；校验失败时不调用 D3D12/Vulkan native PSO API。
+
+VB 与 PSO 的可移植绑定顺序以 `rhi.h` 的 `GraphicsCommandEncoder::BindVertexBuffers` 契约为准。
+D3D12 不保存 VB 绑定缓存；每次绑定从当前 PSO 取得 stride 并直接下发，未绑定 PSO 时报告错误并返回。
+切换 PSO 时不自动重新下发 VB。
+Vulkan 的 VB 绑定同样不保存去重缓存，每次合法调用都直接下发。
+两个后端的索引缓冲绑定也不保存去重缓存；每次合法的 `BindIndexBuffer` 调用都会下发原生绑定。
+图形编码器仍保留当前 PSO 与 layout 状态，相同 PSO 的重复绑定会跳过原生调用。
 
 ### 描述符分配
 
@@ -268,8 +290,8 @@ Vulkan dynamic render-pass 路径不需要对应 begin flag，写阶段是否合
 
 `ResourceBarrierDescriptor` 是 `variant<BarrierBufferDescriptor, BarrierTextureDescriptor, BarrierUavDescriptor>`，
 调用方给出 before/after 状态。render 层**不做** per-resource 状态跟踪，初始状态在创建时固化
-（buffer 按 memory type 推，texture 一律 `COMMON`）。跨队列经 `OtherQueue` +
-`IsFromOrToOtherQueue` 表达。
+（buffer 按 memory type 推，texture 一律 `COMMON`）。Buffer/Texture barrier 均不支持跨队列
+ownership transfer；Vulkan 的源/目标 queue family 均为 `VK_QUEUE_FAMILY_IGNORED`。
 
 后端各自把状态对翻译成原生形式：D3D12 把 UAV→UAV 变成 UAV barrier，把无变化和
 PRESENT↔COMMON 这类等价转换直接跳过；Vulkan 生成 buffer/image memory barrier，
@@ -284,6 +306,11 @@ D3D12 transition 按选中 plane 展开 mip/layer；stencil SRV 使用对应 pla
 Vulkan 当前采用 coupled depth/stencil layout，转换会扩大至两个 aspects；不启用独立 DS layouts 时
 这是 [Vulkan barrier 规范](https://docs.vulkan.org/refpages/latest/refpages/source/VkImageMemoryBarrier.html) 的要求。
 `NormalizeSubresourceRange` 同时拒绝格式不具备的 aspect、零 count、越界和加法溢出。
+
+`BarrierTextureDescriptor::Range` 是纹理 barrier 范围的唯一来源，默认 `SubresourceRange::AllSub()`
+覆盖整张纹理；count 为 `SubresourceRange::All` 时表示从对应 base 到末尾。两个后端使用归一化后的
+范围，D3D12 全范围 transition 使用整资源 barrier，部分范围按 plane/mip/layer 展开；D3D12 UAV
+barrier 仍作用于整资源。
 
 Buffer barrier 携带 `BufferRange`，Vulkan 映射 offset/size，D3D12 legacy barrier 保守转换整 buffer。
 Texture/Buffer barrier 都携带 BeforeStages/AfterStages，UNKNOWN 保留保守映射；Vulkan 只收窄 shader
@@ -347,8 +374,7 @@ Stage A 的 graph view 限制同 format；RHI 原有的格式 view 能力没有�
 DXGI 的 frame-latency waitable object 达到同一效果。
 
 `Fence` 在 D3D12 是 `ID3D12Fence` + Win32 event（`_fenceValue` 表示"下一个可用值"）；
-在 Vulkan 是 timeline semaphore，**不支持 `timelineSemaphore` 直接 `RADRAY_ABORT`**，
-跨队列 barrier 缺 timeline 同样 abort。这是刻意的"宁可终止，不静默降级"。
+在 Vulkan 是 timeline semaphore，**不支持 `timelineSemaphore` 直接 `RADRAY_ABORT`**。
 
 `SwapChainVulkan` 的两个信号量按 Khronos 推荐拆分，**索引维度刻意不同**：
 

@@ -1,4 +1,4 @@
-#include <radray/render/backend/pipeline_layout_types.h>
+#include <radray/render/pipeline_layout_types.h>
 #include <radray/runtime/shader_parameters.h>
 
 #include "shader_contract_fixtures.h"

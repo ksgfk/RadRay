@@ -1025,7 +1025,7 @@ Nullable<unique_ptr<QueryPool>> DeviceVulkan::CreateQueryPool(const QueryPoolDes
         return nullptr;
     }
 
-    auto result = make_unique<QueryPoolVulkan>(this, pool, desc);
+    auto result = make_unique<QueryPoolVulkan>(this, pool, desc.Type, desc.Count);
     if (!desc.DebugName.empty()) {
         result->SetDebugName(desc.DebugName);
     }
@@ -1286,8 +1286,8 @@ void DeviceVulkan::FlushMappedRanges(std::span<const MappedBufferRange> mappedRa
 }
 
 Nullable<unique_ptr<Texture>> DeviceVulkan::CreateTexture(const TextureDescriptor& desc) noexcept {
-    if (const auto validation = ValidateTextureDescriptor(desc, *this); !validation.Supported) {
-        RADRAY_ERR_LOG("Vulkan texture descriptor rejected: {}", validation.Reason);
+    if (const auto [supported, reason] = ValidateTextureDescriptor(desc, *this); !supported) {
+        RADRAY_ERR_LOG("Vulkan texture descriptor rejected: {}", reason);
         return nullptr;
     }
     VkImageCreateInfo imgInfo{};
@@ -1935,7 +1935,7 @@ Nullable<unique_ptr<PipelineLayoutVulkan>> DeviceVulkan::CreatePipelineLayoutInt
     }
 
     auto result = make_unique<PipelineLayoutVulkan>(this);
-    result->_bindingGeneration = NextBackendBindingGeneration();
+    result->_bindingGeneration = reinterpret_cast<uintptr_t>(result.get());
     result->_bindingNames.reserve(layout.Bindings.size());
     for (const ResolvedVulkanBinding& binding : layout.Bindings) {
         result->_bindingNames.push_back(BackendBindingName{
@@ -2611,7 +2611,6 @@ bool ShaderParameterSetVulkan::FlushWrites() noexcept {
         _texelBufferViews[pending.ValueIndex] = std::move(pending.View);
     }
     std::fill(_dirty.begin(), _dirty.end(), uint8_t{0});
-    ++_flushGeneration;
     return true;
 }
 
@@ -2906,7 +2905,6 @@ Nullable<unique_ptr<SamplerVulkan>> DeviceVulkan::CreateSamplerInternal(
         return nullptr;
     }
     auto result = make_unique<SamplerVulkan>(this, sampler);
-    result->_mdesc = desc;
     return result;
 }
 
@@ -2983,7 +2981,6 @@ Nullable<unique_ptr<BufferViewVulkan>> DeviceVulkan::CreateBufferView(const VkBu
         return nullptr;
     }
     auto result = make_unique<BufferViewVulkan>(this, bufferView);
-    result->_rawInfo = info;
     return result;
 }
 
@@ -3814,8 +3811,6 @@ struct CommandBufferVulkan::ProfilerZoneStack {
     // VkCtxScope is not movable; keep them in a deque so pushes never relocate open zones.
     deque<tracy::VkCtxScope> Zones;
 };
-#else
-struct CommandBufferVulkan::ProfilerZoneStack {};
 #endif
 
 QueueVulkan::QueueVulkan(
@@ -4030,10 +4025,17 @@ CommandBufferVulkan::CommandBufferVulkan(
     unique_ptr<CommandPoolVulkan> cmdPool,
     VkCommandBuffer cmdBuffer) noexcept
     : _device(device),
+#ifdef RADRAY_ENABLE_PROFILER
       _queue(queue),
+#endif
       _cmdPool(std::move(cmdPool)),
-      _cmdBuffer(cmdBuffer),
-      _profilerZones(make_unique<ProfilerZoneStack>()) {}
+      _cmdBuffer(cmdBuffer) {
+#ifdef RADRAY_ENABLE_PROFILER
+    _profilerZones = make_unique<ProfilerZoneStack>();
+#else
+    (void)queue;
+#endif
+}
 
 CommandBufferVulkan::~CommandBufferVulkan() noexcept {
     this->DestroyImpl();
@@ -4124,22 +4126,8 @@ void CommandBufferVulkan::ResourceBarrier(std::span<const ResourceBarrierDescrip
             bufBarrier.pNext = nullptr;
             bufBarrier.srcAccessMask = BufferStateToAccessFlags(bb->Before);
             bufBarrier.dstAccessMask = BufferStateToAccessFlags(bb->After);
-            if (bb->OtherQueue.HasValue()) {
-                if (!_device->_extFeatures.feature12.timelineSemaphore) {
-                    RADRAY_ABORT("cross-queue sync requires timeline semaphore support on Vulkan backend");
-                }
-                auto otherQ = CastVkObject(bb->OtherQueue.Get());
-                if (bb->IsFromOrToOtherQueue) {
-                    bufBarrier.srcQueueFamilyIndex = otherQ->_family.Family;
-                    bufBarrier.dstQueueFamilyIndex = _queue->_family.Family;
-                } else {
-                    bufBarrier.srcQueueFamilyIndex = _queue->_family.Family;
-                    bufBarrier.dstQueueFamilyIndex = otherQ->_family.Family;
-                }
-            } else {
-                bufBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-                bufBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            }
+            bufBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            bufBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
             bufBarrier.buffer = buf->_buffer;
             if (bb->Range.Offset > buf->_reqSize || (bb->Range.Size != BufferRange::All() && bb->Range.Size > buf->_reqSize - bb->Range.Offset)) RADRAY_ABORT("Vulkan buffer barrier range is invalid");
             bufBarrier.offset = bb->Range.Offset;
@@ -4158,31 +4146,17 @@ void CommandBufferVulkan::ResourceBarrier(std::span<const ResourceBarrierDescrip
             imgBarrier.dstAccessMask = TextureStateToAccessFlags(tb->After);
             imgBarrier.oldLayout = TextureStateToLayout(tb->Before, tex->_format);
             imgBarrier.newLayout = TextureStateToLayout(tb->After, tex->_format);
-            if (tb->OtherQueue.HasValue()) {
-                if (!_device->_extFeatures.feature12.timelineSemaphore) {
-                    RADRAY_ABORT("cross-queue sync requires timeline semaphore support on Vulkan backend");
-                }
-                auto otherQ = CastVkObject(tb->OtherQueue.Get());
-                if (tb->IsFromOrToOtherQueue) {
-                    imgBarrier.srcQueueFamilyIndex = otherQ->_family.Family;
-                    imgBarrier.dstQueueFamilyIndex = _queue->_family.Family;
-                } else {
-                    imgBarrier.srcQueueFamilyIndex = _queue->_family.Family;
-                    imgBarrier.dstQueueFamilyIndex = otherQ->_family.Family;
-                }
-            } else {
-                imgBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-                imgBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            }
+            imgBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            imgBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
             imgBarrier.image = tex->_image;
-            const auto normalized = NormalizeSubresourceRange(tex->GetDesc(), tb->IsSubresourceBarrier ? tb->Range : SubresourceRange::AllSub());
+            const auto normalized = NormalizeSubresourceRange(tex->GetDesc(), tb->Range);
             if (!normalized) RADRAY_ABORT("Vulkan texture barrier range is invalid");
             // This backend uses coupled depth/stencil layouts, so transitions cover both aspects.
             imgBarrier.subresourceRange.aspectMask = ImageFormatToAspectFlags(tex->_rawFormat);
-            imgBarrier.subresourceRange.baseMipLevel = tb->IsSubresourceBarrier ? tb->Range.BaseMipLevel : 0;
-            imgBarrier.subresourceRange.levelCount = tb->IsSubresourceBarrier ? tb->Range.MipLevelCount : VK_REMAINING_MIP_LEVELS;
-            imgBarrier.subresourceRange.baseArrayLayer = tb->IsSubresourceBarrier ? tb->Range.BaseArrayLayer : 0;
-            imgBarrier.subresourceRange.layerCount = tb->IsSubresourceBarrier ? tb->Range.ArrayLayerCount : VK_REMAINING_ARRAY_LAYERS;
+            imgBarrier.subresourceRange.baseMipLevel = normalized->BaseMipLevel;
+            imgBarrier.subresourceRange.levelCount = normalized->MipLevelCount;
+            imgBarrier.subresourceRange.baseArrayLayer = normalized->BaseArrayLayer;
+            imgBarrier.subresourceRange.layerCount = normalized->ArrayLayerCount;
 
             auto srcStage = shaderStages(TextureStateToPipelineStageFlags(tb->Before, true), tb->BeforeStages);
             auto dstStage = shaderStages(TextureStateToPipelineStageFlags(tb->After, false), tb->AfterStages);
@@ -4323,9 +4297,9 @@ void CommandBufferVulkan::CopyBufferToBuffer(Buffer* dst_, uint64_t dstOffset, B
 
 bool CommandBufferVulkan::CopyBufferToTextureRegion(const BufferToTextureCopyDescriptor& desc) noexcept {
     if (!desc.Source || !desc.Destination) return false;
-    const auto validation = ValidateBufferTextureCopyRegion(desc.Source->GetDesc(), desc.Destination->GetDesc(), desc.Region, _device->GetDetail());
-    if (!validation.Supported) {
-        RADRAY_ERR_LOG("{}", validation.Reason);
+    const auto [supported, reason] = ValidateBufferTextureCopyRegion(desc.Source->GetDesc(), desc.Destination->GetDesc(), desc.Region, _device->GetDetail());
+    if (!supported) {
+        RADRAY_ERR_LOG("{}", reason);
         return false;
     }
     auto src = CastVkObject(desc.Source);
@@ -4628,7 +4602,7 @@ void CommandBufferVulkan::ResolveTexture(const TextureResolveDescriptor& desc) n
 
 void CommandBufferVulkan::ResetQueryPool(QueryPool* pool_, uint32_t firstIndex, uint32_t count) noexcept {
     auto pool = CastVkObject(pool_);
-    if (pool == nullptr || !pool->IsValid() || count == 0 || firstIndex + count > pool->_desc.Count) {
+    if (pool == nullptr || !pool->IsValid() || count == 0 || firstIndex + count > pool->_count) {
         RADRAY_ERR_LOG("vk ResetQueryPool invalid range (first={}, count={})", firstIndex, count);
         return;
     }
@@ -4637,11 +4611,11 @@ void CommandBufferVulkan::ResetQueryPool(QueryPool* pool_, uint32_t firstIndex, 
 
 void CommandBufferVulkan::WriteTimestamp(const QueryTimestampDescriptor& desc) noexcept {
     auto pool = CastVkObject(desc.Pool);
-    if (pool == nullptr || !pool->IsValid() || desc.Index >= pool->_desc.Count) {
+    if (pool == nullptr || !pool->IsValid() || desc.Index >= pool->_count) {
         RADRAY_ERR_LOG("vk WriteTimestamp invalid query index {}", desc.Index);
         return;
     }
-    if (pool->_desc.Type != QueryType::Timestamp) {
+    if (pool->_type != QueryType::Timestamp) {
         RADRAY_ERR_LOG("vk WriteTimestamp requires a timestamp query pool");
         return;
     }
@@ -4668,11 +4642,11 @@ void CommandBufferVulkan::ResolveQueryData(const QueryResolveDescriptor& desc) n
     auto pool = CastVkObject(desc.Pool);
     auto dst = CastVkObject(desc.Destination);
     if (pool == nullptr || !pool->IsValid() || dst == nullptr || !dst->IsValid() ||
-        desc.Count == 0 || desc.FirstIndex + desc.Count > pool->_desc.Count) {
+        desc.Count == 0 || desc.FirstIndex + desc.Count > pool->_count) {
         RADRAY_ERR_LOG("vk ResolveQueryData invalid descriptor");
         return;
     }
-    if (pool->_desc.Type != QueryType::Timestamp) {
+    if (pool->_type != QueryType::Timestamp) {
         RADRAY_ERR_LOG("vk ResolveQueryData requires a timestamp query pool");
         return;
     }
@@ -4724,9 +4698,6 @@ void SimulateCommandEncoderVulkan::DestroyImpl() noexcept {
     _framebuffer = nullptr;
     _boundLayout = nullptr;
     _boundPso = nullptr;
-    _boundGroups.fill({});
-    for (auto& view : _boundVbvs) view.reset();
-    _boundIbv.reset();
 }
 
 void SimulateCommandEncoderVulkan::SetViewport(Viewport vp) noexcept {
@@ -4789,23 +4760,6 @@ void SimulateCommandEncoderVulkan::BindVertexBuffers(std::span<const VertexBuffe
         return;
     }
 
-    // Skip the native call when every binding already holds this exact view (consecutive draws often
-    // share geometry). Bindings beyond the tracked range always rebind.
-    bool changed = false;
-    for (const VertexBufferBinding& binding : bindings) {
-        if (binding.Binding >= _boundVbvs.size()) {
-            changed = true;
-            continue;
-        }
-        std::optional<VertexBufferView>& bound = _boundVbvs[binding.Binding];
-        if (!bound.has_value() || bound->Target != binding.View.Target || bound->Offset != binding.View.Offset || bound->Size != binding.View.Size) {
-            bound = binding.View;
-            changed = true;
-        }
-    }
-    if (!changed) {
-        return;
-    }
     constexpr uint32_t kInlineBindings = 16;
     std::array<VkBuffer, kInlineBindings> inlineBuffers{};
     std::array<VkDeviceSize, kInlineBindings> inlineOffsets{};
@@ -4839,11 +4793,7 @@ void SimulateCommandEncoderVulkan::BindIndexBuffer(IndexBufferView ibv) noexcept
         RADRAY_ERR_LOG("vk index buffer stride must be 2 or 4 bytes, got {}", ibv.Stride);
         return;
     }
-    if (_boundIbv.has_value() && _boundIbv->Target == ibv.Target && _boundIbv->Offset == ibv.Offset && _boundIbv->Stride == ibv.Stride) {
-        return;
-    }
     _device->_ftb.vkCmdBindIndexBuffer(_cmdBuffer->_cmdBuffer, buffer->_buffer, ibv.Offset, indexType);
-    _boundIbv = ibv;
 }
 
 void SimulateCommandEncoderVulkan::BindGraphicsPipelineState(GraphicsPipelineState* pso) noexcept {
@@ -4853,9 +4803,6 @@ void SimulateCommandEncoderVulkan::BindGraphicsPipelineState(GraphicsPipelineSta
     }
     _device->_ftb.vkCmdBindPipeline(_cmdBuffer->_cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, p->_pipeline);
     _boundPso = p;
-    if (_boundLayout != p->_layout) {
-        _boundGroups.fill({});
-    }
     _boundLayout = p->_layout;
 }
 
@@ -4970,36 +4917,14 @@ void SimulateCommandEncoderVulkan::BindShaderParameterSet(
     uint32_t groupIndex,
     ShaderParameterSet* set,
     std::span<const ShaderParameterDynamicOffset> dynamicOffsets) noexcept {
-    auto* native = CastVkObject(set);
-    const bool trackable = groupIndex < _boundGroups.size() && native != nullptr &&
-                           dynamicOffsets.size() <= _boundGroups[groupIndex].Offsets.size();
-    if (trackable) {
-        const BoundParameterGroupVulkan& bound = _boundGroups[groupIndex];
-        if (bound.Set == native && bound.FlushGeneration == native->_flushGeneration &&
-            bound.OffsetCount == dynamicOffsets.size() &&
-            std::equal(dynamicOffsets.begin(), dynamicOffsets.end(), bound.Offsets.begin())) {
-            return;
-        }
-    }
-    const bool ok = BindShaderParameterSetVulkan(
+    BindShaderParameterSetVulkan(
         _device,
         _cmdBuffer,
         _boundLayout,
         VK_PIPELINE_BIND_POINT_GRAPHICS,
         groupIndex,
-        native,
+        CastVkObject(set),
         dynamicOffsets);
-    if (groupIndex < _boundGroups.size()) {
-        BoundParameterGroupVulkan& bound = _boundGroups[groupIndex];
-        if (ok && trackable) {
-            bound.Set = native;
-            bound.FlushGeneration = native->_flushGeneration;
-            bound.OffsetCount = static_cast<uint32_t>(dynamicOffsets.size());
-            std::copy(dynamicOffsets.begin(), dynamicOffsets.end(), bound.Offsets.begin());
-        } else {
-            bound = {};
-        }
-    }
 }
 
 static bool SetPushConstantsVulkan(
@@ -5783,10 +5708,12 @@ SwapChainDescriptor SwapChainVulkan::GetDesc() const noexcept {
 QueryPoolVulkan::QueryPoolVulkan(
     DeviceVulkan* device,
     VkQueryPool pool,
-    QueryPoolDescriptor desc) noexcept
+    QueryType type,
+    uint32_t count) noexcept
     : _device(device),
       _pool(pool),
-      _desc(std::move(desc)) {}
+      _type(type),
+      _count(count) {}
 
 QueryPoolVulkan::~QueryPoolVulkan() noexcept {
     this->DestroyImpl();
@@ -5808,16 +5735,15 @@ void QueryPoolVulkan::DestroyImpl() noexcept {
 }
 
 void QueryPoolVulkan::SetDebugName(std::string_view name) noexcept {
-    _desc.DebugName = string{name};
     _device->SetObjectName(name, _pool);
 }
 
 QueryType QueryPoolVulkan::GetType() const noexcept {
-    return _desc.Type;
+    return _type;
 }
 
 uint32_t QueryPoolVulkan::GetCount() const noexcept {
-    return _desc.Count;
+    return _count;
 }
 
 TimestampQueryCalibration QueryPoolVulkan::GetTimestampCalibration(CommandQueue* queue_) const noexcept {

@@ -109,8 +109,8 @@ RAII 包装类的后缀是 `Scope` / `Scoped` / `Guard`，**没有 `*RAII`**：`
 - 不在每 draw 路径上构造 `string`、`fmt::format`、按名字 `Find` 参数；启动或首次遇到 program 时解析成
   `ShaderParameterInfo*` / 索引再复用（`StaticBindingRecipe`）。
 - 以 snapshot 索引为键的每帧查找用稠密槽位表而不是 `unordered_map`。
-- 相邻 draw 通常重复相同状态，graph 命令包装与后端 encoder 都以"与当前已绑定状态相同则跳过"去重，
-  不依赖上层保证不重复调用。
+- 后端 encoder 保留 PSO 重复绑定检查；VB、IB 与 shader 参数组每次合法绑定都下发原生命令，
+  不保存去重缓存。具体行为见 [RHI 与后端](../architecture/render-rhi.md)。
 
 性能改动使用适用的基准或 Tracy 数据验证，不凭直觉声称收益；旧 runtime_profile harness 已移除。
 

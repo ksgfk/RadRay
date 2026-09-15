@@ -15,11 +15,11 @@ TEST(TextureDescriptorValidation, RejectsIllegalCombinationsAndNativeLimits) {
     caps.Limits = {.MaxTexture1DDimension = 4096, .MaxTexture2DDimension = 4096, .MaxTexture3DDimension = 256, .MaxTextureArrayLayers = 256};
     TextureSupport support{.Supported = true, .SampleCounts = SampleCount::X1 | SampleCount::X4, .MaxWidth = 2048, .MaxHeight = 2048, .MaxDepth = 256, .MaxArrayLayers = 128, .MaxMipLevels = 12, .MaxResourceSize = uint64_t{1} << 30};
     const auto valid = ColorDesc();
-    ASSERT_TRUE(ValidateTextureDescriptor(valid, caps, support).Supported);
+    ASSERT_TRUE(ValidateTextureDescriptor(valid, caps, support).first);
     const auto reject = [&](TextureDescriptor desc) {
-        const auto result = ValidateTextureDescriptor(desc, caps, support);
-        EXPECT_FALSE(result.Supported);
-        EXPECT_FALSE(result.Reason.empty());
+        const auto [supported, reason] = ValidateTextureDescriptor(desc, caps, support);
+        EXPECT_FALSE(supported);
+        EXPECT_FALSE(reason.empty());
     };
     auto desc = valid;
     desc.Width = 0;
@@ -142,7 +142,7 @@ TEST_P(DeviceCapabilitiesTest, ReportedAttachmentFormatsAndSamplesCreate) {
             SCOPED_TRACE(fmt::format("format={} samples={}", format, samples));
             desc.SampleCount = samples;
             if (!support.SampleCounts.HasFlag(static_cast<SampleCount>(samples))) {
-                EXPECT_FALSE(ValidateTextureDescriptor(desc, *Context.Device).Supported);
+                EXPECT_FALSE(ValidateTextureDescriptor(desc, *Context.Device).first);
                 continue;
             }
             auto texture = Context.Device->CreateTexture(desc);
@@ -196,14 +196,14 @@ TEST_P(DeviceCapabilitiesTest, SubresourceRangeClearReadbackAndNestedLabels) {
     cmd->PushDebugGroup("Texture range");
     cmd->PushDebugGroup("Clear layer 1 mip 1");
     const ResourceBarrierDescriptor toTarget = BarrierTextureDescriptor{
-        .Target = texture.Get(), .Before = TextureState::Undefined, .After = TextureState::RenderTarget, .IsSubresourceBarrier = true, .Range = {0, 2, 1, 2}};
+        .Target = texture.Get(), .Before = TextureState::Undefined, .After = TextureState::RenderTarget, .Range = {0, SubresourceRange::All, 1, SubresourceRange::All}};
     cmd->ResourceBarrier(std::span{&toTarget, 1});
     const ColorClearValue clear{{0.25f, 0.5f, 0.75f, 1.0f}};
     auto encoder = cmd->BeginRenderPass({pass.Get(), framebuffer.Get(), std::span{&clear, 1}, {}});
     ASSERT_TRUE(encoder);
     cmd->EndRenderPass(encoder.Release());
     const ResourceBarrierDescriptor toCopy = BarrierTextureDescriptor{
-        .Target = texture.Get(), .Before = TextureState::RenderTarget, .After = TextureState::CopySource, .IsSubresourceBarrier = true, .Range = {0, 2, 1, 2}};
+        .Target = texture.Get(), .Before = TextureState::RenderTarget, .After = TextureState::CopySource, .Range = {0, 2, 1, 2}};
     cmd->ResourceBarrier(std::span{&toCopy, 1});
     cmd->CopyTextureToBuffer(readback.Get(), 0, texture.Get(), {1, 1, 1, 1});
     cmd->PopDebugGroup();

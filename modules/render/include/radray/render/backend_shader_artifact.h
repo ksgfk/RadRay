@@ -4,7 +4,7 @@
 #include <span>
 #include <variant>
 
-#include <radray/render/backend/pipeline_layout_types.h>
+#include <radray/render/pipeline_layout_types.h>
 #include <radray/render/rhi.h>
 #include <radray/shader/shader_artifact.h>
 

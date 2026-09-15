@@ -7,7 +7,7 @@
 #include <radray/allocator.h>
 #include <radray/intrusive_ptr.h>
 #include <radray/render/backend/vulkan_helper.h>
-#include <radray/render/backend/pipeline_layout_types.h>
+#include <radray/render/pipeline_layout_types.h>
 #include <radray/render/rhi.h>
 #include <radray/render/sampler_cache.h>
 
@@ -378,8 +378,10 @@ public:
     QueueIndexInFamily _family;
     QueueType _type;
     VkQueueFlags _queueFlags{0};
-    // Profiler GPU timestamp context for this queue; null when profiling is disabled or the family has no timestamps.
+#ifdef RADRAY_ENABLE_PROFILER
+    // Profiler GPU timestamp context for this queue; null when unavailable.
     void* _profilerContext{nullptr};
+#endif
 };
 
 class CommandPoolVulkan final : public RenderBase {
@@ -442,6 +444,7 @@ public:
     void CopyBufferToBuffer(Buffer* dst, uint64_t dstOffset, Buffer* src, uint64_t srcOffset, uint64_t size) noexcept override;
 
     void CopyBufferToTexture(Texture* dst, SubresourceRange dstRange, Buffer* src, uint64_t srcOffset) noexcept override;
+
     bool CopyBufferToTextureRegion(const BufferToTextureCopyDescriptor& desc) noexcept override;
 
     void CopyTextureToBuffer(Buffer* dst, uint64_t dstOffset, Texture* src, SubresourceRange srcRange) noexcept override;
@@ -460,24 +463,18 @@ public:
     void DestroyImpl() noexcept;
 
     DeviceVulkan* _device;
+#ifdef RADRAY_ENABLE_PROFILER
     QueueVulkan* _queue;
+#endif
     unique_ptr<CommandPoolVulkan> _cmdPool;
     VkCommandBuffer _cmdBuffer;
     vector<unique_ptr<CommandEncoder>> _endedEncoders;
+#ifdef RADRAY_ENABLE_PROFILER
     // Profiler GPU zones opened by PushDebugGroup; timestamps are legal inside Vulkan render passes,
     // so every debug group maps to one zone.
     struct ProfilerZoneStack;
     unique_ptr<ProfilerZoneStack> _profilerZones;
-};
-
-// Last parameter set bound to one descriptor-set slot on an encoder. Offsets beyond the inline
-// capacity force a rebind rather than a comparison.
-inline constexpr uint32_t kBoundParameterGroupCountVulkan = 8;
-struct BoundParameterGroupVulkan {
-    ShaderParameterSetVulkan* Set{nullptr};
-    uint64_t FlushGeneration{0};
-    uint32_t OffsetCount{0};
-    std::array<ShaderParameterDynamicOffset, 4> Offsets{};
+#endif
 };
 
 class SimulateCommandEncoderVulkan final : public GraphicsCommandEncoder {
@@ -529,11 +526,6 @@ public:
     FrameBufferVulkan* _framebuffer{nullptr};
     GraphicsPipelineVulkan* _boundPso{nullptr};
     PipelineLayoutVulkan* _boundLayout{nullptr};
-    std::array<BoundParameterGroupVulkan, kBoundParameterGroupCountVulkan> _boundGroups{};
-    // Identical vertex/index rebinds are skipped; reset on DestroyImpl. Slots beyond the array force a rebind.
-    static constexpr uint32_t kTrackedVertexBindings = 16;
-    std::array<std::optional<VertexBufferView>, kTrackedVertexBindings> _boundVbvs{};
-    std::optional<IndexBufferView> _boundIbv{};
 };
 
 class SimulateComputeEncoderVulkan final : public ComputeCommandEncoder {
@@ -552,14 +544,9 @@ public:
 
     void BindComputePipelineState(ComputePipelineState* pso) noexcept override;
 
-    void BindShaderParameterSet(
-        uint32_t groupIndex,
-        ShaderParameterSet* set,
-        std::span<const ShaderParameterDynamicOffset> dynamicOffsets) noexcept override;
+    void BindShaderParameterSet(uint32_t groupIndex, ShaderParameterSet* set, std::span<const ShaderParameterDynamicOffset> dynamicOffsets) noexcept override;
 
-    bool SetPushConstants(
-        BindingHandle binding,
-        std::span<const byte> data) noexcept override;
+    bool SetPushConstants(BindingHandle binding, std::span<const byte> data) noexcept override;
 
     void Dispatch(uint32_t groupCountX, uint32_t groupCountY, uint32_t groupCountZ) noexcept override;
 
@@ -850,7 +837,8 @@ public:
     QueryPoolVulkan(
         DeviceVulkan* device,
         VkQueryPool pool,
-        QueryPoolDescriptor desc) noexcept;
+        QueryType type,
+        uint32_t count) noexcept;
     ~QueryPoolVulkan() noexcept override;
 
     bool IsValid() const noexcept override;
@@ -870,7 +858,8 @@ public:
 
     DeviceVulkan* _device;
     VkQueryPool _pool{VK_NULL_HANDLE};
-    QueryPoolDescriptor _desc;
+    QueryType _type;
+    uint32_t _count;
 };
 
 class BufferVulkan final : public Buffer {
@@ -936,7 +925,6 @@ public:
 
     DeviceVulkan* _device;
     VkBufferView _bufferView;
-    VkBufferViewCreateInfo _rawInfo;
 };
 
 class ImageVulkan final : public Texture {
@@ -1058,7 +1046,7 @@ public:
     // Immutable samplers are owned by the layout: VkDescriptorSetLayout only borrows the handles,
     // so they must outlive every set layout and parameter set created from this layout.
     vector<VkSampler> _immutableSamplers;
-    uint32_t _bindingGeneration{0};
+    uintptr_t _bindingGeneration{0};
     std::optional<VkPushConstantRange> _pushConstantRange;
     std::optional<ShaderBindingLocation> _pushConstantLocation;
 };
@@ -1090,8 +1078,6 @@ public:
     vector<std::optional<ShaderParameterValue>> _values;
     vector<uint8_t> _dirty;
     vector<unique_ptr<BufferViewVulkan>> _texelBufferViews;
-    // Incremented by every FlushWrites that reaches the device; encoders compare it to skip redundant binds.
-    uint64_t _flushGeneration{1};
 };
 
 class GraphicsPipelineVulkan final : public GraphicsPipelineState {
@@ -1181,7 +1167,6 @@ public:
 
     DeviceVulkan* _device;
     VkSampler _sampler;
-    SamplerDescriptor _mdesc;
 };
 
 Nullable<shared_ptr<DeviceVulkan>> CreateDeviceVulkan(const VulkanDeviceDescriptor& desc);

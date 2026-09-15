@@ -3,7 +3,7 @@
 #include "shader_program_cache.h"
 #include <radray/file.h>
 
-#include <radray/render/backend/pipeline_layout_types.h>
+#include <radray/render/pipeline_layout_types.h>
 #include <radray/render/backend_shader_artifact.h>
 #include <radray/runtime/shader_jit.h>
 #include <radray/runtime/shader_program.h>

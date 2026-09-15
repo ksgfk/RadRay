@@ -1,4 +1,4 @@
-#include <radray/render/backend/pipeline_layout_types.h>
+#include <radray/render/pipeline_layout_types.h>
 #include <radray/render/backend_shader_artifact.h>
 
 #include "shader_contract_fixtures.h"
@@ -212,6 +212,36 @@ vector<byte> MakeSyntheticArtifact() {
     blob[bytecodeOffset + 2] = byte{0x03};
     blob[bytecodeOffset + 3] = byte{0x04};
     return blob;
+}
+
+TEST(RadRayRenderShaderArtifact, BindingHandleRejectsForeignLayoutAddress) {
+    int firstLayout = 0;
+    int secondLayout = 0;
+    const uintptr_t firstAddress = reinterpret_cast<uintptr_t>(&firstLayout);
+    const uintptr_t secondAddress = reinterpret_cast<uintptr_t>(&secondLayout);
+    const vector<BackendBindingName> records(1);
+    const BindingHandle handle = BindingHandleAccess::Make(0, firstAddress);
+
+    EXPECT_TRUE(handle.IsValid());
+    EXPECT_EQ(FindBackendBindingRecord(records, firstAddress, handle).Get(), &records[0]);
+    EXPECT_FALSE(FindBackendBindingRecord(records, secondAddress, handle).HasValue());
+    EXPECT_FALSE(FindBackendBindingRecord(records, 0, handle).HasValue());
+    EXPECT_FALSE(FindBackendBindingRecord(records, firstAddress, {}).HasValue());
+    EXPECT_FALSE(FindBackendBindingRecord(records, firstAddress, BindingHandleAccess::Make(1, firstAddress)).HasValue());
+    EXPECT_FALSE(BindingHandleAccess::Make(0, 0).IsValid());
+}
+
+TEST(RadRayRenderShaderArtifact, BindingHandlePreservesUpperAddressBits) {
+    if constexpr (sizeof(uintptr_t) > sizeof(uint32_t)) {
+        const uintptr_t firstAddress = static_cast<uintptr_t>(0x0000000112345678ull);
+        const uintptr_t secondAddress = static_cast<uintptr_t>(0x0000000212345678ull);
+        const vector<BackendBindingName> records(1);
+        const BindingHandle handle = BindingHandleAccess::Make(0, firstAddress);
+
+        EXPECT_EQ(BindingHandleAccess::Generation(handle), firstAddress);
+        EXPECT_NE(handle, BindingHandleAccess::Make(0, secondAddress));
+        EXPECT_FALSE(FindBackendBindingRecord(records, secondAddress, handle).HasValue());
+    }
 }
 
 TEST(RadRayRenderShaderArtifact, BackendMappingsRejectUnknownValues) {

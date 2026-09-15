@@ -1,8 +1,6 @@
-#include <radray/render/backend/pipeline_layout_types.h>
+#include <radray/render/pipeline_layout_types.h>
 
 #include <algorithm>
-#include <atomic>
-#include <cstring>
 #include <optional>
 
 namespace radray::render {
@@ -86,9 +84,21 @@ bool GetVertexFormatShape(
 
 }  // namespace
 
+BindingHandle BindingHandleAccess::Make(uint32_t recordIndex, uintptr_t generation) noexcept {
+    return BindingHandle{recordIndex, generation};
+}
+
+uint32_t BindingHandleAccess::RecordIndex(BindingHandle handle) noexcept {
+    return handle._recordIndex;
+}
+
+uintptr_t BindingHandleAccess::Generation(BindingHandle handle) noexcept {
+    return handle._generation;
+}
+
 Nullable<const BackendBindingName*> FindBackendBindingRecord(
     std::span<const BackendBindingName> records,
-    uint32_t generation,
+    uintptr_t generation,
     BindingHandle handle) noexcept {
     if (generation == 0 || !handle.IsValid() ||
         BindingHandleAccess::Generation(handle) != generation) {
@@ -99,15 +109,6 @@ Nullable<const BackendBindingName*> FindBackendBindingRecord(
         return nullptr;
     }
     return &records[index];
-}
-
-uint32_t NextBackendBindingGeneration() noexcept {
-    static std::atomic<uint32_t> nextBindingGeneration{1};
-    uint32_t generation = nextBindingGeneration.fetch_add(1, std::memory_order_relaxed);
-    if (generation == 0) {
-        generation = nextBindingGeneration.fetch_add(1, std::memory_order_relaxed);
-    }
-    return generation;
 }
 
 bool ValidateVertexInputStateAgainstArtifact(

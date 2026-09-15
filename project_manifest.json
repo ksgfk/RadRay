@@ -48,7 +48,7 @@
             "Name": "yyjson",
             "Type": "git",
             "Git": "https://github.com/ibireme/yyjson.git",
-            "Tag": "0.12.0"
+            "Tag": "0.13.0"
         },
         {
             "Name": "sigslot",
@@ -66,7 +66,7 @@
             "Name": "mimalloc",
             "Type": "git",
             "Git": "https://github.com/microsoft/mimalloc.git",
-            "Tag": "v3.5.1"
+            "Tag": "v3.5.2"
         },
         {
             "Name": "pugixml",

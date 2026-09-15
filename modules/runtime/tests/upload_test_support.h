@@ -88,6 +88,10 @@ public:
     void EndComputePass(unique_ptr<render::ComputeCommandEncoder>) noexcept override {}
     void CopyBufferToBuffer(render::Buffer*, uint64_t, render::Buffer*, uint64_t, uint64_t) noexcept override { ++Copies; }
     void CopyBufferToTexture(render::Texture*, render::SubresourceRange, render::Buffer*, uint64_t) noexcept override { ++Copies; }
+    bool CopyBufferToTextureRegion(const render::BufferToTextureCopyDescriptor&) noexcept override {
+        ++Copies;
+        return true;
+    }
     void CopyTextureToBuffer(render::Buffer*, uint64_t, render::Texture*, render::SubresourceRange) noexcept override { ++Copies; }
     void CopyTextureToTexture(const render::TextureCopyDescriptor&) noexcept override { ++Copies; }
     void ResolveTexture(const render::TextureResolveDescriptor&) noexcept override {}

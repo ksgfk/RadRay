@@ -9,7 +9,7 @@
 #include <radray/hash.h>
 
 #include <radray/render/backend/d3d12_helper.h>
-#include <radray/render/backend/pipeline_layout_types.h>
+#include <radray/render/pipeline_layout_types.h>
 #include <radray/render/rhi.h>
 #include <radray/render/sampler_cache.h>
 
@@ -515,12 +515,15 @@ public:
 
 public:
     DeviceD3D12* _device;
+#ifdef RADRAY_ENABLE_PROFILER
     CmdQueueD3D12* _queue;
+#endif
     ComPtr<ID3D12CommandAllocator> _cmdAlloc;
     ComPtr<ID3D12GraphicsCommandList> _cmdList;
     ComPtr<ID3D12RootSignature> _emptyRootSignature;
     D3D12_COMMAND_LIST_TYPE _type;
     vector<unique_ptr<Buffer>> _keepAliveBuffers;
+#ifdef RADRAY_ENABLE_PROFILER
     // Profiler GPU zones opened by PushDebugGroup. D3D12 forbids query resolution inside a render pass, so
     // zones open only outside one, and pops issued while a render pass is recording are deferred to
     // EndRenderPass; a merged raster group therefore reports as a single zone named after its first pass.
@@ -529,16 +532,7 @@ public:
     bool _inRenderPass{false};
     uint32_t _deferredZonePops{0};
     uint32_t _suppressedZonePushes{0};
-};
-
-// Last parameter set bound to one root-signature group on an encoder. Offsets beyond the inline
-// capacity force a rebind rather than a comparison.
-inline constexpr uint32_t kBoundParameterGroupCountD3D12 = 8;
-struct BoundParameterGroupD3D12 {
-    ShaderParameterSetD3D12* Set{nullptr};
-    uint64_t FlushGeneration{0};
-    uint32_t OffsetCount{0};
-    std::array<ShaderParameterDynamicOffset, 4> Offsets{};
+#endif
 };
 
 class CmdRenderPassD3D12 final : public GraphicsCommandEncoder {
@@ -580,19 +574,9 @@ public:
     void DrawIndexedIndirect(Buffer* argumentBuffer, uint64_t argumentOffset, uint32_t drawCount) noexcept override;
 
 public:
-    // 把 [startSlot, startSlot + slotCount) 范围内的 _boundVbvs 一次性下发。
-    // 需要已绑定 pso, stride 从 pso 取。
-    void FlushVertexBuffers(uint32_t startSlot, uint32_t slotCount) noexcept;
-
     CmdListD3D12* _cmdList;
     GraphicsPsoD3D12* _boundPso{nullptr};
     RootSigD3D12* _boundRs{nullptr};
-    std::array<std::optional<VertexBufferView>, D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT> _boundVbvs{};
-    // Identical index-buffer rebinds are skipped; reset on Destroy.
-    std::optional<IndexBufferView> _boundIbv{};
-    // Root parameters persist across draws under one root signature; identical (set, flush generation,
-    // offsets) rebinds of a group are skipped. Cleared whenever the root signature changes.
-    std::array<BoundParameterGroupD3D12, kBoundParameterGroupCountD3D12> _boundGroups{};
 };
 
 class CmdComputePassD3D12 final : public ComputeCommandEncoder {
@@ -662,7 +646,6 @@ public:
     vector<Frame> _frames;
     const void* _nativeHandler{nullptr};
     PresentMode _mode{PresentMode::FIFO};
-    bool _hasOutstandingFrame{false};
     uint64_t _outstandingFrameToken{0};
     uint32_t _outstandingBackBufferIndex{std::numeric_limits<uint32_t>::max()};
     TextureFormat _reqFormat{TextureFormat::UNKNOWN};
@@ -714,7 +697,8 @@ public:
     QueryPoolD3D12(
         DeviceD3D12* device,
         ComPtr<ID3D12QueryHeap> heap,
-        QueryPoolDescriptor desc) noexcept;
+        QueryType type,
+        uint32_t count) noexcept;
     ~QueryPoolD3D12() noexcept override = default;
 
     bool IsValid() const noexcept override;
@@ -732,7 +716,8 @@ public:
 public:
     DeviceD3D12* _device;
     ComPtr<ID3D12QueryHeap> _heap;
-    QueryPoolDescriptor _desc;
+    QueryType _type;
+    uint32_t _count;
 };
 
 class TextureD3D12 final : public Texture {
@@ -927,6 +912,7 @@ struct ShaderParameterGroupLayoutD3D12 {
 
 struct PushConstantBindingD3D12 {
     ShaderBindingLocation Location{};
+    uint32_t Num32BitValues{0};
     uint32_t RootParameterIndex{std::numeric_limits<uint32_t>::max()};
     vector<uint32_t> RootParameterIndices;
 };
@@ -942,29 +928,17 @@ public:
 
     void SetDebugName(std::string_view name) noexcept override;
 
-    void RebindNativePointers() noexcept;
-
-    Nullable<const ShaderParameterGroupLayoutD3D12*> FindParameterGroup(
-        uint32_t groupIndex) const noexcept;
-
     BindingHandle FindBinding(std::string_view name) const noexcept override;
+
+    Nullable<const ShaderParameterGroupLayoutD3D12*> FindParameterGroup(uint32_t groupIndex) const noexcept;
 
 public:
     DeviceD3D12* _device{nullptr};
-    D3D12_VERSIONED_ROOT_SIGNATURE_DESC _desc{};
-    vector<D3D12_ROOT_PARAMETER1> _rootParameters;
-    vector<vector<D3D12_DESCRIPTOR_RANGE1>> _descriptorRanges;
-    vector<D3D12_STATIC_SAMPLER_DESC> _staticSamplers;
     vector<ShaderParameterGroupLayoutD3D12> _parameterGroups;
     vector<BackendBindingName> _bindingNames;
-    uint32_t _bindingGeneration{0};
+    uintptr_t _bindingGeneration{0};
     vector<PushConstantBindingD3D12> _pushConstantBindings;
     ComPtr<ID3D12RootSignature> _rootSig;
-    D3D12_ROOT_SIGNATURE_FLAGS _rootFlags{
-        D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT |
-        D3D12_ROOT_SIGNATURE_FLAG_DENY_HULL_SHADER_ROOT_ACCESS |
-        D3D12_ROOT_SIGNATURE_FLAG_DENY_DOMAIN_SHADER_ROOT_ACCESS |
-        D3D12_ROOT_SIGNATURE_FLAG_DENY_GEOMETRY_SHADER_ROOT_ACCESS};
 };
 
 class ShaderParameterSetD3D12 final : public ShaderParameterSet {
@@ -976,10 +950,7 @@ public:
 
     void Destroy() noexcept override;
 
-    bool Set(
-        BindingHandle binding,
-        uint32_t arrayElement,
-        ShaderParameterValue value) noexcept override;
+    bool Set(BindingHandle binding, uint32_t arrayElement, ShaderParameterValue value) noexcept override;
 
     bool FlushWrites() noexcept override;
 
@@ -987,12 +958,18 @@ public:
     DeviceD3D12* _device{nullptr};
     RootSigD3D12* _layout{nullptr};
     uint32_t _groupIndex{0};
+    // 与所属组的 Entries 一一对应；第 i 项是 Entries[i] 在扁平数组 _values 和 _dirty 中的起始下标，
+    // 等于此前各 entry.Count 的累加值。数组元素下标 = _bindingValueOffsets[i] + arrayElement。
+    // i 是 Entries 的下标；偏移单位是元素个数，不是字节或 GPU descriptor 偏移。
+    // 示例（_values 与 _dirty 使用相同下标）：
+    // | entry 下标 i | Entries[i].Count | _bindingValueOffsets[i] | 占用下标区间 |
+    // |--------------|------------------|-------------------------|--------------|
+    // | 0            | 1                | 0                       | [0]          |
+    // | 1            | 3                | 1                       | [1..3]       |
+    // | 2            | 2                | 4                       | [4..5]       |
     vector<size_t> _bindingValueOffsets;
     vector<std::optional<ShaderParameterValue>> _values;
     vector<uint8_t> _dirty;
-    // Incremented by every FlushWrites that changes descriptors or values; encoders use it to tell a
-    // rewritten set from an identical rebind.
-    uint64_t _flushGeneration{1};
     GpuDescriptorHeapViewRAII _resourceDescriptors;
     GpuDescriptorHeapViewRAII _samplerDescriptors;
 };

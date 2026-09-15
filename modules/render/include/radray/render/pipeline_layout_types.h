@@ -35,37 +35,23 @@ struct BackendBindingName {
 };
 
 // Backend-internal view of a BindingHandle's token. The handle is opaque to callers: it pairs the
-// layout's binding generation with an index into that layout's record table, so one handle names
+// layout's address with an index into that layout's record table, so one handle names
 // exactly one declaration and neither the group nor the register class can be mistaken. The bit
 // layout is not ABI and only the two backends may take it apart.
 struct BindingHandleAccess {
-    static constexpr BindingHandle Make(uint32_t recordIndex, uint32_t generation) noexcept {
-        // generation is never 0 (see NextBackendBindingGeneration) and the stored index is biased by
-        // one, so a valid token can never be the default-invalid value.
-        return BindingHandle{
-            (static_cast<uint64_t>(generation) << 32) | (static_cast<uint64_t>(recordIndex) + 1)};
-    }
+    static BindingHandle Make(uint32_t recordIndex, uintptr_t generation) noexcept;
 
-    static constexpr uint32_t RecordIndex(BindingHandle handle) noexcept {
-        return static_cast<uint32_t>(handle._value & 0xffffffffull) - 1;
-    }
+    static uint32_t RecordIndex(BindingHandle handle) noexcept;
 
-    static constexpr uint32_t Generation(BindingHandle handle) noexcept {
-        return static_cast<uint32_t>(handle._value >> 32);
-    }
+    static uintptr_t Generation(BindingHandle handle) noexcept;
 };
 
-// Resolves a handle against the table it was minted from. A handle from another layout carries a
-// different generation and is rejected here rather than silently resolving to whatever record
-// happens to sit at that index.
+// Resolves a handle against its live layout's table. The generation is the layout address;
+// handles must not outlive their layout.
 Nullable<const BackendBindingName*> FindBackendBindingRecord(
     std::span<const BackendBindingName> records,
-    uint32_t generation,
+    uintptr_t generation,
     BindingHandle handle) noexcept;
-
-// Monotonic generation stamped into every BindingHandle a layout hands out, so a handle taken from
-// one layout cannot be used against another. Never returns 0, which is the invalid-handle value.
-uint32_t NextBackendBindingGeneration() noexcept;
 
 bool ValidateVertexInputStateAgainstArtifact(
     const VertexInputState& state,

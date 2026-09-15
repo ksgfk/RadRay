@@ -1,6 +1,6 @@
 #pragma once
 
-#include <radray/render/backend/pipeline_layout_types.h>
+#include <radray/render/pipeline_layout_types.h>
 #include <radray/shader/shader_compiler_contract.h>
 #include <radray/types.h>
 

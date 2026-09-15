@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <cstdint>
 #include <limits>
 #include <variant>
 #include <optional>
@@ -16,27 +17,8 @@
 
 // 后端无关的 RHI 接口面。所有权模型、后端选择、绑定模型、barrier 与同步的设计说明见
 // docs/architecture/render-rhi.md
-//
-// 章节索引。跳转: Grep "^// ==" 本文件
-//
-//   == 枚举与位标志 ==
-//   == 对象基类 ==
-//   == device / instance 描述符 ==
-//   == 提交与 swapchain 帧 ==
-//   == barrier 描述符 ==
-//   == 资源与 render pass 描述符 ==
-//   == 布局与参数集描述符 ==
-//   == PSO 描述符 ==
-//   == 接口: Device 与 queue ==
-//   == 接口: 命令录制与编码器 ==
-//   == 接口: 同步与 swapchain ==
-//   == 接口: 资源与 view ==
-//   == 接口: pass / shader / layout / PSO ==
-//   == 工具函数 ==
 
 namespace radray::render {
-
-// == 枚举与位标志 ==
 
 enum class ShaderStage : uint32_t {
     UNKNOWN = 0x0,
@@ -532,8 +514,6 @@ struct DepthStencilClearValue {
 
 using ClearValue = std::variant<ColorClearValue, DepthStencilClearValue>;
 
-// == 对象基类 ==
-
 class RenderBase {
 public:
     RenderBase() noexcept = default;
@@ -556,8 +536,6 @@ public:
 
     virtual void SetDebugName(std::string_view name) noexcept = 0;
 };
-
-// == device / instance 描述符 ==
 
 using RenderLogCallback = void (*)(LogLevel level, std::string_view message, void* userData);
 
@@ -639,7 +617,7 @@ public:
 struct QueryPoolDescriptor {
     QueryType Type{QueryType::Timestamp};
     uint32_t Count{0};
-    string DebugName{};
+    std::string_view DebugName{};
 };
 
 struct QueryTimestampDescriptor {
@@ -656,7 +634,6 @@ struct QueryResolveDescriptor {
     uint64_t DestinationOffset{0};
 };
 
-/// One uncompressed, single-sample 2D subresource region. RowPitch includes padding.
 struct BufferTextureCopyRegion {
     uint64_t SourceOffset{0};
     uint32_t RowPitch{0};
@@ -708,8 +685,6 @@ struct TimestampQueryCalibration {
     uint64_t FrequencyHz{0};
     double TickPeriodNs{0.0};
 };
-
-// == 提交与 swapchain 帧 ==
 
 struct CommandQueueSubmitDescriptor {
     std::span<CommandBuffer*> CmdBuffers{};
@@ -784,14 +759,10 @@ struct BufferRange {
     friend bool operator==(const BufferRange&, const BufferRange&) noexcept = default;
 };
 
-// == barrier 描述符 ==
-
 struct BarrierBufferDescriptor {
     Buffer* Target{nullptr};
     BufferStates Before{BufferState::UNKNOWN};
     BufferStates After{BufferState::UNKNOWN};
-    Nullable<CommandQueue*> OtherQueue{nullptr};
-    bool IsFromOrToOtherQueue{false};  // true: from, false: to
     // D3D12 legacy barriers widen this range to the whole buffer.
     BufferRange Range{BufferRange::AllRange()};
     ShaderStages BeforeStages{ShaderStage::UNKNOWN}, AfterStages{ShaderStage::UNKNOWN};
@@ -817,10 +788,7 @@ struct BarrierTextureDescriptor {
     Texture* Target{nullptr};
     TextureStates Before{TextureState::UNKNOWN};
     TextureStates After{TextureState::UNKNOWN};
-    Nullable<CommandQueue*> OtherQueue{nullptr};
-    bool IsFromOrToOtherQueue{false};
-    bool IsSubresourceBarrier{false};
-    SubresourceRange Range{};
+    SubresourceRange Range{SubresourceRange::AllSub()};
     ShaderStages BeforeStages{ShaderStage::UNKNOWN}, AfterStages{ShaderStage::UNKNOWN};
 };
 
@@ -829,8 +797,6 @@ struct BarrierUavDescriptor {
 };
 
 using ResourceBarrierDescriptor = std::variant<BarrierBufferDescriptor, BarrierTextureDescriptor, BarrierUavDescriptor>;
-
-// == 资源与 render pass 描述符 ==
 
 struct RenderPassColorAttachmentDescriptor {
     TextureFormat Format{TextureFormat::UNKNOWN};
@@ -910,8 +876,6 @@ struct MappedBufferRange {
     BufferRange Range{};
 };
 
-// == 布局与参数集描述符 ==
-
 struct SamplerDescriptor {
     AddressMode AddressS{};
     AddressMode AddressT{};
@@ -958,8 +922,6 @@ struct VertexInputState {
     std::span<const VertexAttribute> Attributes{};
 };
 
-bool ValidateVertexInputState(const VertexInputState& state) noexcept;
-
 struct ShaderBufferBinding {
     Buffer* Target{nullptr};
     BufferRange Range{BufferRange::AllRange()};
@@ -988,23 +950,24 @@ struct BindingHandleAccess;
 // Names one binding record in one pipeline layout's metadata table. The public surface is
 // deliberately only default-invalid, validity and equality: a caller takes a handle from
 // PipelineLayout::FindBinding and hands it back, so nothing outside the backends needs the group,
-// the register number or the register class. The internal token pairs the layout's generation with
-// a record index, and its bit layout is not ABI.
+// the register number or the register class. The internal token pairs the layout's address with
+// a record index. Handles must be discarded when their layout is destroyed.
 class BindingHandle {
 public:
     constexpr BindingHandle() noexcept = default;
 
-    constexpr bool IsValid() const noexcept { return _value != 0; }
+    constexpr bool IsValid() const noexcept { return _generation != 0; }
 
     friend bool operator==(const BindingHandle&, const BindingHandle&) noexcept = default;
 
 private:
     friend struct BindingHandleAccess;
 
-    explicit constexpr BindingHandle(uint64_t value) noexcept
-        : _value(value) {}
+    explicit constexpr BindingHandle(uint32_t recordIndex, uintptr_t generation) noexcept
+        : _generation(generation), _recordIndex(recordIndex) {}
 
-    uint64_t _value{0};
+    uintptr_t _generation{0};
+    uint32_t _recordIndex{0};
 };
 
 // The offset applies to the dynamic (Vulkan) or root (D3D12) buffer descriptor the handle names,
@@ -1016,8 +979,6 @@ struct ShaderParameterDynamicOffset {
 
     friend bool operator==(const ShaderParameterDynamicOffset&, const ShaderParameterDynamicOffset&) noexcept = default;
 };
-
-// == PSO 描述符 ==
 
 struct PrimitiveState {
     PrimitiveTopology Topology{};
@@ -1295,13 +1256,6 @@ struct TextureSupport {
     uint64_t MaxResourceSize{0};
 };
 
-struct TextureDescriptorValidationResult {
-    bool Supported{false};
-    string Reason;
-};
-
-// == 接口: Device 与 queue ==
-
 class Device : public enable_shared_from_this<Device>, public RenderBase {
 public:
     virtual ~Device() noexcept = default;
@@ -1366,8 +1320,6 @@ public:
     virtual QueueType GetQueueType() const noexcept = 0;
 };
 
-// == 接口: 命令录制与编码器 ==
-
 class CommandBuffer : public RenderBase, public IDebugName {
 public:
     virtual ~CommandBuffer() noexcept = default;
@@ -1395,8 +1347,8 @@ public:
     virtual void CopyBufferToBuffer(Buffer* dst, uint64_t dstOffset, Buffer* src, uint64_t srcOffset, uint64_t size) noexcept = 0;
 
     virtual void CopyBufferToTexture(Texture* dst, SubresourceRange dstRange, Buffer* src, uint64_t srcOffset) noexcept = 0;
-    /// Returns false without recording commands when unsupported or invalid.
-    virtual bool CopyBufferToTextureRegion(const BufferToTextureCopyDescriptor&) noexcept { return false; }
+
+    virtual bool CopyBufferToTextureRegion(const BufferToTextureCopyDescriptor&) noexcept = 0;
 
     virtual void CopyTextureToBuffer(Buffer* dst, uint64_t dstOffset, Texture* src, SubresourceRange srcRange) noexcept = 0;
 
@@ -1450,10 +1402,13 @@ public:
 
     virtual void SetScissor(Rect rect) noexcept = 0;
 
+    // 先绑定 VB、后绑定 PSO，以及切换 PSO 时由后端自动重新绑定 VB，均依赖 RHI 后端行为，不保证正确性。
+    // 可移植的调用顺序是先绑定 PSO，再绑定其使用的 VB；切换 PSO 后应显式重新绑定 VB。
     virtual void BindVertexBuffers(std::span<const VertexBufferBinding> bindings) noexcept = 0;
 
     virtual void BindIndexBuffer(IndexBufferView ibv) noexcept = 0;
 
+    // 不保证自动更新已有 VB 的绑定；绑定顺序约定见 BindVertexBuffers。
     virtual void BindGraphicsPipelineState(GraphicsPipelineState* pso) noexcept = 0;
 
     virtual void Draw(uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance) noexcept = 0;
@@ -1477,8 +1432,6 @@ public:
 
     virtual void DispatchIndirect(Buffer* argumentBuffer, uint64_t argumentOffset) noexcept = 0;
 };
-
-// == 接口: 同步与 swapchain ==
 
 class Fence : public RenderBase, public IDebugName {
 public:
@@ -1532,8 +1485,6 @@ protected:
     static void InvalidateFrame(SwapChainFrame& frame) noexcept;
 };
 
-// == 接口: 资源与 view ==
-
 class Resource : public RenderBase, public IDebugName {
 public:
     virtual ~Resource() noexcept = default;
@@ -1580,8 +1531,6 @@ public:
 
     virtual TextureViewDescriptor GetDesc() const noexcept = 0;
 };
-
-// == 接口: pass / shader / layout / PSO ==
 
 class RenderPass : public RenderBase, public IDebugName {
 public:
@@ -1685,20 +1634,12 @@ public:
     static Nullable<unique_ptr<DXGIFactory>> Create(const DXGIFactoryDescriptor& desc);
 };
 
-// == 工具函数 ==
-// SamplerCache 在 sampler_cache.h
 bool IsDepthStencilFormat(TextureFormat format) noexcept;
-TextureDescriptorValidationResult ValidateBufferTextureCopyRegion(
-    const BufferDescriptor& source, const TextureDescriptor& destination,
-    const BufferTextureCopyRegion& region, const DeviceDetail& detail);
-
+std::pair<bool, string> ValidateBufferTextureCopyRegion(const BufferDescriptor& source, const TextureDescriptor& destination, const BufferTextureCopyRegion& region, const DeviceDetail& detail);
 bool IsValidTextureSupportQuery(const TextureSupportQuery& query) noexcept;
-
-TextureDescriptorValidationResult ValidateTextureDescriptor(const TextureDescriptor& desc, const Device& device);
-
-TextureDescriptorValidationResult ValidateTextureDescriptor(
-    const TextureDescriptor& desc, const RenderDeviceCapabilities& capabilities, const TextureSupport& support);
-
+std::pair<bool, string> ValidateTextureDescriptor(const TextureDescriptor& desc, const Device& device);
+std::pair<bool, string> ValidateTextureDescriptor(const TextureDescriptor& desc, const RenderDeviceCapabilities& capabilities, const TextureSupport& support);
+bool ValidateVertexInputState(const VertexInputState& state) noexcept;
 TextureAspects GetTextureFormatAspects(TextureFormat format) noexcept;
 std::optional<SubresourceRange> NormalizeSubresourceRange(const TextureDescriptor& desc, SubresourceRange range) noexcept;
 bool IsUintFormat(TextureFormat format) noexcept;
@@ -1708,12 +1649,9 @@ IndexFormat SizeInBytesToIndexFormat(uint32_t size) noexcept;
 uint32_t GetTextureFormatBytesPerPixel(TextureFormat format) noexcept;
 uint32_t GetVertexFormatSizeInBytes(VertexFormat format) noexcept;
 
-// -------------------------------------------------------------------------
-
 std::string_view format_as(RenderBackend v) noexcept;
 std::string_view format_as(TextureFormat v) noexcept;
 std::string_view format_as(QueueType v) noexcept;
-
 std::string_view format_as(SampleCount v) noexcept;
 std::string_view format_as(PolygonMode v) noexcept;
 std::string_view format_as(TextureDimension v) noexcept;

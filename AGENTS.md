@@ -22,14 +22,16 @@ C++20 实时渲染器，D3D12 + Vulkan 后端。
 
 ## 硬规则
 
+- C++ 的 `.h` 与 `.cpp` 默认按同名文件一一对应，头文件声明的非内联函数实现在对应 `.cpp` 中；确需采用不同命名或非一一对应的文件组织时，必须先说明原因、询问用户并获得同意。
 - STL 容器使用 `radray/types.h` 的别名；协程使用 `radray/coroutine.h` 的别名，不直接用 `exec::task` / `stdexec::*`。
 - 可空接口指针使用 `Nullable<T>`，裸指针表示非空；Debug 判断使用 `RADRAY_IS_DEBUG`。
 - 字符串格式化使用 `fmt`，先查已有 formatter；标志枚举使用 `enum_flags.h` 的 `EnumFlags<T>`、`is_flags<T>`、`format_as`。
 - 性能插桩只用 `radray/profiler.h` 的 `RADRAY_PROFILE_*` 宏，不直接 include `tracy/*`；仅 render 后端为 GPU 时间戳例外。
 - 不重命名已有枚举成员，它们被 `magic_enum` 与序列化消费；需要改名时新增成员并显式迁移数据。
+- 新增或引入使用全局变量、全局 `static` 变量或函数内 `static` 共享状态前，必须先询问用户并获得同意，不得直接使用。
 - 新增任何 `try`、`catch`、`throw` 前先征得用户同意。优先验证、`std::error_code` 或现有结果类型。
 - 不为保留 `noexcept` 增加捕获；仅捕获具体、可恢复的异常，不用 `catch (...)` 把分配失败、程序错误或不变量破坏转成空值/诊断。
-- 模块基础依赖：shader → core，window → core，render → shader/core，runtime → render/window/shader/core。旧 render_framework、Forward 与 ImGui 适配已移除；重构基线见 `docs/temp/`。
+- 模块基础依赖：shader → core，window → core，render → shader/core，runtime → render/window/shader/core。
 - shader 不依赖 DXC 或 render/runtime；可选 shadercompiler → shader/core。runtime 仅在启用 JIT 时链接该 client，公共 shader/render/runtime 契约不依赖 DXC SDK 头。
 - `third_party/`、`SDKs/` 是脚本填充的只读目录，不编辑。
 - HLSL include 以 `shaderlib/` 为根，使用 `<core/math.hlsli>` 形式；当前不使用文件相对的双引号 include。
