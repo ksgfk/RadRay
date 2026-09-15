@@ -7,13 +7,13 @@
 #include <span>
 
 #include <radray/types.h>
+#include <radray/channel.h>
 #include <radray/coroutine.h>
 #include <radray/vertex_data.h>
 #include <radray/render/rhi.h>
 #include <radray/runtime/asset.h>
 #include <radray/runtime/gpu_resource.h>
 #include <radray/runtime/wait_frame.h>
-#include <radray/runtime/flight_completion.h>
 #include <radray/runtime/frame_submission.h>
 #include <radray/runtime/service_traits.h>
 
@@ -78,6 +78,12 @@ struct AppFrameTarget {
     render::Texture* BackBuffer{nullptr};
     render::TextureView* BackBufferView{nullptr};
     uint32_t BackBufferIndex{0};
+};
+
+struct FlightCompletion {
+    uint32_t FlightIndex{0};
+    bool GpuWorkCompleted{true};
+    uint64_t FrameSerial{0};
 };
 
 struct GpuFenceSignal {
@@ -339,47 +345,56 @@ private:
 /// - 负责"何时画":BeginFrameRecord / EndFrameRecordAndSubmit 的录制与提交时序、
 ///   flight 回收与 GPU 资源生命周期兜底。
 /// - 不关心"画什么":RenderPass / Framebuffer 缓存、pipeline、Scene 归 RenderSystem。
+/// 线程标签：GT = Application 所在线程；RT = 录制线程，单线程模式下与 GT 相同。
+/// 所有调用都要求对象存活；跨线程访问须在构造/装配发布后、拆除前。
+/// [任意线程] 只保证访问器本身可并发读取，返回对象仍遵循各自的线程契约。
 class GpuSystem : public IWaitFrameProcessor {
 public:
     using FenceSignal = GpuFenceSignal;
     using QueueFrameTrack = GpuQueueFrameTrack;
     using FlightSlot = GpuFlightSlot;
 
+    /// [GT] 创建设备、队列与固定数量的 flight；构造完成后才能交给 RT。
     GpuSystem(const GpuSystemDescriptor& desc);
     GpuSystem(const GpuSystem&) = delete;
     GpuSystem(GpuSystem&&) = delete;
     GpuSystem& operator=(const GpuSystem&) = delete;
     GpuSystem& operator=(GpuSystem&&) = delete;
+    /// [GT，render/GPU idle] 生产者已停止、完成消息已消费；取消等待者后拆除设备。
     ~GpuSystem() noexcept;
 
+    /// [GT] 协程的启动、恢复与取消均在 GT；当前 flight 必须由 GT 持有。
     /// IWaitFrameProcessor。挂进【当前】flight 的等待表 —— 调用点在帧顶 Update 期间,
     /// 此刻"已录制的 work"全属于更早的 flight, 故等当前 flight 的 fence 必然够。
     /// 代价是最多多等一轮, 而口径本就允许多等。
     task<void> Wait() override;
 
-    /// 恢复指定 flight 上已就绪的等待者。
+    /// [GT] 恢复指定 flight 上已就绪的等待者；关停时须先达到 render/GPU idle。
     /// 【只泵一个 flight, 且必须是调用线程当前独占的那个】否则与渲染线程的 CompleteFlight
-    /// 竞争。调用点固定在 BeginUpdateForFlight。
+    /// 竞争。由 BeginUpdateForFlight 或关停的 CleanupCompletedFlights 调用。
     void PumpWaitFrame(uint32_t flightIndex);
 
+    /// [GT/RT，retire 阶段] 调用方须串行化 retire；对应 Submit 已发布，槽位尚未复用。
+    /// ThreadedRunner 持有 _retireMutex；单线程或全局 idle 时可在无并发的前提下直接调用。
+    /// 收据 OnCompleted 在调用线程执行；只发布完成消息，不恢复 GT 协程。
     bool CompleteFlight(uint32_t flightIndex);
-    void WaitAndCleanupCompletedFlights();
+    /// [GT，非录制阶段] 内部等待 render/GPU idle，再退休所有已提交 flight；不恢复 GT 协程。
+    void WaitAndRetireFlights();
+    /// [GT，render/GPU idle] Application 在 WaitAndRetireFlights 后传入批次，恢复全部 flight 的等待者。
+    void CleanupCompletedFlights(std::span<const FlightCompletion> completions);
+    /// [GT/RT，retire 阶段] 同 CompleteFlight 的同步前提；wait=true 只等待已提交的 fence。
     bool CompleteFlightIfReady(uint32_t flightIndex, bool wait);
-    /// 提交态快照。仅在该 flight 已计入 rendered 之后读，与 Submit 的 release 成对。
+    /// [GT/RT，retire 阶段] 读取须与 retire、槽位复用互斥；函数本身不加锁。
+    /// 仅在该 flight 已计入 rendered 之后读，与 Submit 后发布的 release 成对。
     GpuFenceSignal GetFlightGpuSignal(uint32_t flightIndex) const noexcept;
-    /// 任意 retire 线程：只入队，不回调。
-    void NotifyFlightComplete(FlightCompletion completion);
-    /// Game thread：排空一次，扇出给上传调度器与全部观察者。调用点固定在 BeginUpdateForFlight
-    /// 与 WaitAndCleanupCompletedFlights。
-    void PumpFlightCompletions();
-    /// 非拥有。观察者必须在自己析构前注销。注册顺序即调用顺序。
-    void AddFlightCompletionObserver(IFlightCompletionObserver* observer);
-    void RemoveFlightCompletionObserver(IFlightCompletionObserver* observer) noexcept;
-    void BeginUpdateForFlight(uint32_t flightIndex);
-    /// Game thread, after Update and before publishing the flight to the render thread.
-    /// Upload commands and staging pages are owned by this flight until its real submit fence.
+    /// [GT] 当前 flight 已可写且尚未交给 RT；先应用完成批次，再恢复 WaitFrame 与上传协程。
+    void BeginUpdateForFlight(uint32_t flightIndex, std::span<const FlightCompletion> completions);
+    /// [GT] Update 之后、交给 RT 之前调用；会恢复上传协程，不能与其他 GT 调度并发。
+    /// 单线程/手动录制可由同一 GT 的 BeginFrameRecord 补调；上传资源保留到真实 fence 完成。
     void PrepareFrameUploads(uint32_t flightIndex);
 
+    /// [RT] 已接管当前 flight，独占录制至提交；多线程模式下 GT 必须已 PrepareFrameUploads。
+    /// 单线程/手动入口在 GT 同时承担录制职责时，允许补做上传准备。
     /// 一帧开头：取/建该 flight 的共享 CommandBuffer 并 Begin()，清空上帧 acquire 的目标。
     /// Present command buffer 在 AcquireWindow 时 Begin。返回 Render 用的帧上下文。
     AppFrameContext BeginFrameRecord(
@@ -389,39 +404,56 @@ public:
         bool isInModalLoop,
         bool rendered = true);
 
+    /// [RT] 与 BeginFrameRecord 在同一录制线程调用，当前 flight 尚未交给 retire。
     /// 一帧收尾：uploader.EndFlight → 结束共享与 per-HWND CB → 聚合 sync object → Submit
     /// （D3D12 多 HWND 时每窗 Execute 后立刻 Present；其余一次 Submit 再 Present）
     /// （acquired 窗口已不可呈现时只提交上传命令）→ 写 flight.Signal。
     void EndFrameRecordAndSubmit(uint32_t flightIndex);
 
+    /// [GT] 返回仅由 GT 使用的上传调度器。
     FrameUploadScheduler& GetFrameUploadScheduler() noexcept { return *_frameUploadScheduler; }
+    /// [GT] 当前轮的 PumpWaitFrame 之后恢复上传协程；不得在上传录制阶段调用。
     void PumpFrameUploadScheduler();
 
+    /// [任意线程] 只读取构造后稳定的 device 指针。
     render::Device* GetDevice() const noexcept { return _device.get(); }
+    /// [任意线程] 只读取主队列指针；队列操作仍须遵守提交/等待的同步约定。
     render::CommandQueue* GetMainQueue() const noexcept { return _mainQueue; }
+    /// [任意线程] 只读取装配后稳定的窗口系统指针；不得与 SetWindowManager 并发。
     WindowManager* GetWindowManager() const noexcept { return _windowManager; }
-    /// 注入窗口系统(非拥有)。由装配阶段(ServiceRegistry / Application)调用。
+    /// [GT，装配/拆除阶段] 注入非拥有的窗口系统指针；须与所有读者隔离。
     void SetWindowManager(Nullable<WindowManager*> windowManager) noexcept { _windowManager = windowManager.Get(); }
+    /// [任意线程] 构造后不变的 backbuffer 数量。
     uint32_t GetBackBufferCount() const noexcept { return _backBufferCount; }
+    /// [任意线程] 构造后不变的 flight 数量。
     uint32_t GetFlightDataCount() const noexcept { return _flightDataCount; }
+    /// [GT] 非原子的游戏帧号；RT 使用 runner 自己的帧号或 AppFrameContext。
     uint64_t GetFrameIndex() const noexcept { return _nowFrameIndex; }
+    /// [GT] 从非原子的游戏帧号计算当前槽位；RT 使用 AppFrameContext::FlightIndex。
     uint32_t GetCurrentFlightIndex() const noexcept;
+    /// [任意线程] 原子读取最近一次 retire 发布的延迟，不代表当前录制帧。
     std::chrono::duration<float> GetLastFrameLatency() const noexcept { return std::chrono::duration<float>{_lastFrameLatencySeconds.load(std::memory_order_relaxed)}; }
+    /// [GT] runner 推进游戏帧号；不能与 GetFrameIndex/GetCurrentFlightIndex 跨线程并发。
     void AdvanceFrameIndex() noexcept { ++_nowFrameIndex; }
 
-    /// 上一帧 GPU 执行耗时(毫秒)。启用 GpuSystemDescriptor::EnableFrameProfiler 后由
+    /// [任意线程] 原子读取最近一次 resolve 的 GPU 耗时(毫秒)。启用 EnableFrameProfiler 后由
     /// 内置 GpuFrameProfiler 在每帧 resolve 后更新；未启用时返回 0。
     float GetLastGpuTimeMs() const noexcept;
 
 private:
+    friend class Application;
     friend class AppFrameContext;
     friend class WaitFrameAwaitable;
 
+    /// [RT] 当前 flight 的录制线程独占调用；与 BeginFrameRecord/EndFrameRecordAndSubmit 同线程。
     void SubmitFrame(uint32_t flightIndex, const AppFrameSubmitDescriptor& desc);
 
+    /// [GT] 向当前由 GT 持有的 flight 登记等待；包含协程首次挂起路径。
     WaitFrameRecord* RegisterWaitFrame(stop_token stop, std::coroutine_handle<> continuation);
+    /// [GT] 摘除等待记录；协程恢复和取消路径也必须在 GT。
     void EraseWaitFrame(WaitFrameRecord* record) noexcept;
-    /// 取消全部 flight 上的等待者。关停用:挂在未提交 flight 上的记录永远等不到 fence,
+    /// [GT，render/GPU idle] 取消并就地恢复全部 flight 的等待者。
+    /// 关停用:挂在未提交 flight 上的记录永远等不到 fence,
     /// 不取消就是协程帧连同它捕获的 GPU 对象一起泄漏。
     void CancelAllWaitFrames() noexcept;
 
@@ -438,8 +470,8 @@ private:
     /// 搬动槽位会让那些指针指向旧地址。数量构造时定下, 故间接一层无代价。
     vector<unique_ptr<FlightSlot>> _flights;
     unique_ptr<FrameUploadScheduler> _frameUploadScheduler;
-    FlightCompletionQueue _flightCompletions;
-    vector<IFlightCompletionObserver*> _completionObservers;
+    /// Application 是唯一消费者；只在 game thread 读取。
+    UnboundedChannel<FlightCompletion> _flightCompletions;
     unique_ptr<GpuFrameProfiler> _frameProfiler;
     uint64_t _nowFrameIndex{0};
     std::atomic<float> _lastFrameLatencySeconds{0.0f};
@@ -449,7 +481,9 @@ template <>
 struct ServiceTraits<GpuSystem> {
     using Provides = TypeList<IWaitFrameProcessor>;
     using Dependencies = TypeList<Required<WindowManager>>;
+    /// [GT，装配阶段] 在发布给其他线程之前连接窗口系统。
     static void Inject(GpuSystem& self, WindowManager& windows) noexcept;
+    /// [GT，拆除阶段] render/GPU 已 idle，且已停止其他线程访问。
     static void Unwire(GpuSystem& self) noexcept;
 };
 

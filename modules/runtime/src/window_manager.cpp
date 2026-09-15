@@ -82,7 +82,7 @@ void AppWindow::DetachSwapChain() noexcept {
     _manager->EnsureRenderIdle();
     if (_swapchain && _manager->GetGpuSystem() != nullptr) {
         auto* gpuSystem = _manager->GetGpuSystem();
-        gpuSystem->WaitAndCleanupCompletedFlights();
+        gpuSystem->WaitAndRetireFlights();
     }
     ReleaseBackBufferViews();
     _swapchain = nullptr;
@@ -345,7 +345,7 @@ void WindowManager::CheckRecreateSwapChains() noexcept {
 
     EnsureRenderIdle();
 
-    _gpuSystem->WaitAndCleanupCompletedFlights();
+    _gpuSystem->WaitAndRetireFlights();
 
     for (const auto& window : _windows) {
         if (!NeedsRecreateSwapChain(window.get())) {

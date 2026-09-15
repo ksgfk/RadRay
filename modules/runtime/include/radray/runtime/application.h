@@ -2,13 +2,13 @@
 
 #include <chrono>
 #include <filesystem>
+#include <optional>
 #include <string_view>
 #include <thread>
 
 #include <radray/coroutine.h>
 #include <radray/nullable.h>
 #include <radray/types.h>
-#include <radray/runtime/flight_completion.h>
 
 namespace radray {
 
@@ -24,6 +24,7 @@ class AssetManager;
 class RenderSystem;
 class World;
 struct AppFrameTarget;
+struct FlightCompletion;
 
 namespace render {
 class Device;
@@ -125,7 +126,7 @@ struct ApplicationRuntimeDescriptor {
     render::PresentMode PresentMode;
 };
 
-class Application : public IFlightCompletionObserver {
+class Application {
 public:
     Application() noexcept;
     Application(const Application&) = delete;
@@ -149,19 +150,14 @@ public:
     const ApplicationScheduler& GetScheduler() const noexcept { return _scheduler; }
     World* GetWorld() noexcept { return _world.get(); }
     const World* GetWorld() const noexcept { return _world.get(); }
-    /// 兼容性便捷入口；device 的所有权与生命周期由 GpuSystem 管理。
-    render::Device* GetDevice() noexcept;
-    const render::Device* GetDevice() const noexcept;
     const std::filesystem::path& GetShaderSourceRoot() const noexcept { return _shaderSourceRoot; }
     const vector<std::filesystem::path>& GetShaderIncludePaths() const noexcept { return _shaderIncludePaths; }
 
-    // Runner drives the fixed update, record and submission order.
     AppUpdateResult Update(const AppUpdateContext& ctx);
-    /// Records application commands on the render thread (or the main thread in single-thread mode).
-    /// Default is empty. The runner owns Begin/End/Submit; resources must survive their flight.
-    virtual void Render(AppFrameContext& ctx);
+    void Render(AppFrameContext& ctx);
     int Shutdown(const AppShutdownContext& ctx);
-    void OnFlightsComplete(std::span<const FlightCompletion> completions) noexcept override;
+    /// Runner 取得可写槽位后调用；消费 GPU 完成消息并推进本帧的 GT 调度。
+    void BeginUpdateForFlight(uint32_t flightIndex);
 
     int StartLoop();
 
@@ -176,6 +172,10 @@ protected:
     /// 每帧游戏逻辑(World::Tick 之前)。在 AssetManager::Pump 之后调用。
     virtual void OnUpdate(const AppUpdateContext& ctx);
 
+    /// 在渲染线程（或单线程模式下的主线程）上录制应用程序命令。
+    /// runner 调用开始/结束/提交；资源必须在帧处理过程(flight)时保持存活。
+    virtual void OnRender(AppFrameContext& ctx);
+
     /// 关闭前的游戏侧清理(WaitAndCleanupCompletedFlights 之后、World 拆除之前)。
     /// 典型用途:释放游戏自管的 per-flight 资源、置空指向 World 的非 owning 指针。
     virtual void OnShutdown();
@@ -189,6 +189,9 @@ protected:
 private:
     bool InitializeRuntime(const ApplicationRuntimeDescriptor& desc);
     void DestroyRuntime() noexcept;
+    void WaitAndCleanupCompletedFlights();
+    /// 有 flightIndex 时推进该可写槽位；空值仅用于 GPU idle 后的全量清理。
+    void PumpFlightCompletions(std::optional<uint32_t> flightIndex);
 
     unique_ptr<WindowManager> _windowManager;
     unique_ptr<GpuSystem> _gpuSystem;
@@ -200,6 +203,7 @@ private:
     std::filesystem::path _shaderSourceRoot;
     vector<std::filesystem::path> _shaderIncludePaths;
     bool _multithreaded{false};
+    bool _processingFlightCompletions{false};
     const std::thread::id _applicationThread{std::this_thread::get_id()};
 };
 

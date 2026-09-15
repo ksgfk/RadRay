@@ -1,0 +1,3 @@
+[[rules]]
+compile_commands = [".vscode/compile_commands.json"]
+append = ["/std:c++20"]

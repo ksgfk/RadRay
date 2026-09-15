@@ -5,7 +5,6 @@
 #include <thread>
 
 #include <gtest/gtest.h>
-#include <radray/runtime/flight_completion.h>
 #include <radray/runtime/gpu_system.h>
 #include <radray/runtime/texture_asset.h>
 
@@ -17,7 +16,7 @@ protected:
     test::UploadTestDevice Device;
     ResourceUploader Uploader{&Device, 2};
     FrameUploadScheduler Uploads;
-    FlightCompletionQueue Completions;
+    UnboundedChannel<FlightCompletion> Completions;
     AssetManager Assets;
     HostWriteBatch Writes;
     test::UploadTestCommand Command;
@@ -26,8 +25,10 @@ protected:
         return Assets.Load<StaticMesh>({test::kUploadTestId, LoadStaticMesh(Uploads, test::MakeUploadTestMesh()), "upload test"});
     }
     void Apply() {
-        FlightCompletionQueue::Drain drain{Completions};
-        Uploads.ApplyCompletedFlights(drain.Items());
+        vector<FlightCompletion> completions;
+        FlightCompletion completion;
+        while (Completions.TryRead(completion)) completions.push_back(completion);
+        Uploads.ApplyCompletedFlights(completions);
     }
     void Record(uint32_t flight) {
         Apply();
@@ -36,7 +37,7 @@ protected:
         Uploader.EndFlight(flight);
     }
     void Complete(uint32_t flight) {
-        Completions.Push({flight, true});
+        Completions.TryWrite(FlightCompletion{flight, true});
         Apply();
         Uploads.PumpCompletedUploads();
         Assets.Pump();
@@ -65,7 +66,7 @@ TEST_F(FrameUploadTest, CanceledMeshSurvivesUntilItsFlightCompletes) {
     EXPECT_EQ(Device.LiveDeviceBuffers, 2);
     Complete(1);
     EXPECT_EQ(Device.LiveDeviceBuffers, 2);
-    std::thread completion([&] { Completions.Push({0, true}); });
+    std::thread completion([&] { Completions.TryWrite(FlightCompletion{0, true}); });
     completion.join();
     EXPECT_EQ(Device.LiveDeviceBuffers, 2);
     Apply();
@@ -109,7 +110,7 @@ TEST_F(FrameUploadTest, LargeTextureMipPreparationPrecedesUploadAndReadyPublishe
         Record(0);
         EXPECT_EQ(Command.Copies, generateMips ? 11u : 1u);
         EXPECT_FALSE(texture.IsReady());
-        std::thread completion([&] { Completions.Push({0, true}); });
+        std::thread completion([&] { Completions.TryWrite(FlightCompletion{0, true}); });
         completion.join();
         EXPECT_FALSE(texture.IsReady());
         Apply();
@@ -146,7 +147,7 @@ TEST_F(FrameUploadTest, UploadStageAndCompletionHaveExplicitThreadAndPhaseBounda
     EXPECT_TRUE(entered);
     EXPECT_FALSE(completed);
     EXPECT_FALSE(Uploads.IsRecordingUploads());
-    std::thread notify([&] { Completions.Push({0, true}); });
+    std::thread notify([&] { Completions.TryWrite(FlightCompletion{0, true}); });
     notify.join();
     EXPECT_FALSE(completed);
     Apply();
@@ -265,7 +266,7 @@ TEST_F(FrameUploadTest, ReusedFlightDoesNotConsumeItsPreviousCompletion) {
     auto first = LoadMesh();
     Record(0);
     first.Cancel();
-    Completions.Push({0, true});
+    Completions.TryWrite(FlightCompletion{0, true});
     const AssetId secondId{0x1234, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
     auto second = Assets.Load<StaticMesh>({secondId, LoadStaticMesh(Uploads, test::MakeUploadTestMesh()), "second upload"});
     Uploader.CollectFlight(0);
@@ -293,7 +294,7 @@ TEST_F(FrameUploadTest, ConcurrentCompletionsAndGameThreadCancellationDrainExact
     std::thread completion([&] {
         start.acquire();
         while (!done.load(std::memory_order_acquire)) {
-            Completions.Push({0, true});
+            Completions.TryWrite(FlightCompletion{0, true});
             std::this_thread::yield();
         }
     });

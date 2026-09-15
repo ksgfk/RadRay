@@ -206,7 +206,7 @@ AssetManager::~AssetManager() noexcept {
 
     // 4. 刚才 OnUnload 交出的 payload 已无从等待帧边界 (_loadScope 已停)。就地销毁。
     //    【为何安全】: 关停路径在此之前已经 device wait-idle 过 (Application::Shutdown 先
-    //    调 GpuSystem::WaitAndCleanupCompletedFlights), 故 GPU 上没有仍在读这些对象的 work。
+    //    由 Application 等待 GPU 并消费最后一批完成消息), 故 GPU 上没有仍在读这些对象的 work。
     _pendingDeferred.clear();
 }
 

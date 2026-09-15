@@ -283,7 +283,7 @@ template <> struct JsonDeserializer<T> {
   由 `RADRAY_ENABLE_LIBPNG` / `RADRAY_ENABLE_LIBJPEG` 门控。另有
   `CompareImageRGBA8` / `ImageDiffRGBA8` 供测试对比。
 - **`binary_io.h`** — 固定小端。reader 越界返回 false 且不消费输入。
-- **`channel.h`** — `BoundedChannel` / `UnboundedChannel`，`Complete()` 后读写都失败。
+- **`channel.h`** — `BoundedChannel` / `UnboundedChannel`，`Complete()` 后写入失败；已有消息仍可读完，排空后读取失败。
 - **`sparse_set.h`** — 带世代编号的 handle 容器。
 - **`guid.h`** — `NewGuid` / `Parse` / `ToString`，有 `format_as` 与 `std::hash` 特化。
 

@@ -333,7 +333,8 @@ bool GpuSystem::CompleteFlight(uint32_t flightIndex) {
     }
     for (const auto& submission : flight.Submissions) submission->Complete(flight.FrameSerial, flight.Rendered);
     flight.Submissions.clear();
-    NotifyFlightComplete(FlightCompletion{.FlightIndex = flightIndex, .GpuWorkCompleted = flight.Rendered, .FrameSerial = flight.FrameSerial});
+    [[maybe_unused]] const bool published = _flightCompletions.TryWrite(FlightCompletion{.FlightIndex = flightIndex, .GpuWorkCompleted = flight.Rendered, .FrameSerial = flight.FrameSerial});
+    RADRAY_ASSERT(published);
     flight.Uploader->CollectFlight(flightIndex);
     // The coroutine records, including cancellation, remain entirely game-thread owned.
     flight.WaitersCompleted.store(true, std::memory_order_release);
@@ -364,12 +365,12 @@ GpuFenceSignal GpuSystem::GetFlightGpuSignal(uint32_t flightIndex) const noexcep
     return _flights[flightIndex]->Signal;
 }
 
-void GpuSystem::BeginUpdateForFlight(uint32_t flightIndex) {
+void GpuSystem::BeginUpdateForFlight(uint32_t flightIndex, std::span<const FlightCompletion> completions) {
     if (flightIndex >= _flights.size()) {
         return;
     }
 
-    PumpFlightCompletions();
+    _frameUploadScheduler->ApplyCompletedFlights(completions);
     FlightSlot& flight = *_flights[flightIndex];
     flight.HostWrites.Reset();
     flight.FrameStartTime = std::chrono::steady_clock::now();
@@ -558,50 +559,28 @@ uint32_t GpuSystem::GetCurrentFlightIndex() const noexcept {
     return static_cast<uint32_t>(_nowFrameIndex % _flightDataCount);
 }
 
-void GpuSystem::NotifyFlightComplete(FlightCompletion completion) {
-    _flightCompletions.Push(completion);
-}
-
-void GpuSystem::PumpFlightCompletions() {
-    FlightCompletionQueue::Drain drain{_flightCompletions};
-    if (drain.Items().empty()) {
-        return;
-    }
-    if (_frameUploadScheduler) {
-        _frameUploadScheduler->ApplyCompletedFlights(drain.Items());
-    }
-    for (auto* observer : _completionObservers) {
-        observer->OnFlightsComplete(drain.Items());
-    }
-}
-
-void GpuSystem::AddFlightCompletionObserver(IFlightCompletionObserver* observer) {
-    _completionObservers.push_back(observer);
-}
-
-void GpuSystem::RemoveFlightCompletionObserver(IFlightCompletionObserver* observer) noexcept {
-    std::erase(_completionObservers, observer);
-}
-
 void GpuSystem::PumpFrameUploadScheduler() {
     if (_frameUploadScheduler != nullptr) {
         _frameUploadScheduler->PumpCompletedUploads();
     }
 }
 
-void GpuSystem::WaitAndCleanupCompletedFlights() {
+void GpuSystem::WaitAndRetireFlights() {
     if (_windowManager) _windowManager->EnsureRenderIdle();
     _mainQueue->Wait();
 
     for (uint32_t flightIndex = 0; flightIndex < _flights.size(); ++flightIndex) {
         CompleteFlight(flightIndex);
     }
-    PumpFlightCompletions();
+}
+
+void GpuSystem::CleanupCompletedFlights(std::span<const FlightCompletion> completions) {
+    _frameUploadScheduler->ApplyCompletedFlights(completions);
     // 队列已 idle,故所有【已提交】flight 的等待者都已就绪。此处恢复它们,让延迟销毁的
     // GPU 对象在正常路径上归还。挂在未提交 flight 上的记录等不到 fence,留给析构里的
     // CancelAllWaitFrames。
     //
-    // 【调用点在主线程】: Application::Shutdown 早于渲染线程 join 之后的一切,见其顺序。
+    // 调用方已等待 render/GPU idle；所有等待表只在 GT 恢复。
     for (uint32_t flightIndex = 0; flightIndex < _flights.size(); ++flightIndex) {
         PumpWaitFrame(flightIndex);
     }

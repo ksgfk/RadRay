@@ -131,24 +131,20 @@ Application::Application() noexcept = default;
 
 Application::~Application() noexcept {
     if (_gpuSystem != nullptr) {
-        _gpuSystem->WaitAndCleanupCompletedFlights();
+        WaitAndCleanupCompletedFlights();
     }
     _scheduler.CancelAll();
     DestroyRuntime();
-}
-
-render::Device* Application::GetDevice() noexcept {
-    return _gpuSystem != nullptr ? _gpuSystem->GetDevice() : nullptr;
-}
-
-const render::Device* Application::GetDevice() const noexcept {
-    return _gpuSystem != nullptr ? _gpuSystem->GetDevice() : nullptr;
 }
 
 void Application::OnInit() {
 }
 
 void Application::OnUpdate(const AppUpdateContext& ctx) {
+    (void)ctx;
+}
+
+void Application::OnRender(AppFrameContext& ctx) {
     (void)ctx;
 }
 
@@ -496,7 +492,7 @@ public:
         }
         auto* gpuSystem = _app->GetGpuSystem();
         const uint32_t flightIndex = gpuSystem->GetCurrentFlightIndex();
-        gpuSystem->BeginUpdateForFlight(flightIndex);
+        _app->BeginUpdateForFlight(flightIndex);
 
         const auto now = std::chrono::steady_clock::now();
         const std::chrono::duration<float> deltaTime = now - _lastFrameTime;
@@ -722,7 +718,7 @@ public:
         const uint32_t flightIndex = static_cast<uint32_t>(frameIndex % gpuSystem->GetFlightDataCount());
         {
             RADRAY_PROFILE_SCOPE_N("Application::GpuBeginUpdateForFlight");
-            gpuSystem->BeginUpdateForFlight(flightIndex);
+            _app->BeginUpdateForFlight(flightIndex);
         }
 
         const auto now = std::chrono::steady_clock::now();
@@ -845,8 +841,8 @@ public:
     std::atomic<uint64_t> _publishedFrameCount{0};
     std::mutex _retireMutex;
     // 主线程独占
-    bool _ticking{false};
     std::chrono::steady_clock::time_point _lastFrameTime{std::chrono::steady_clock::now()};
+    bool _ticking{false};
     bool _hasModalLoopActivityDuringDispatch{false};
     // 渲染线程独占
     uint64_t _renderFrameIndex{0};
@@ -854,8 +850,31 @@ public:
     std::thread _renderThread;
 };
 
-void Application::OnFlightsComplete(std::span<const FlightCompletion> completions) noexcept {
+void Application::BeginUpdateForFlight(uint32_t flightIndex) {
+    PumpFlightCompletions(flightIndex);
+}
+
+void Application::WaitAndCleanupCompletedFlights() {
+    _gpuSystem->WaitAndRetireFlights();
+    PumpFlightCompletions(std::nullopt);
+}
+
+void Application::PumpFlightCompletions(std::optional<uint32_t> flightIndex) {
     RADRAY_ASSERT(std::this_thread::get_id() == _applicationThread);
+    if (_processingFlightCompletions) return;
+    _processingFlightCompletions = true;
+    auto scope = MakeScopeGuard([this]() noexcept { _processingFlightCompletions = false; });
+
+    vector<FlightCompletion> completions;
+    FlightCompletion completion;
+    while (_gpuSystem->_flightCompletions.TryRead(completion)) {
+        completions.push_back(completion);
+    }
+    if (flightIndex) {
+        _gpuSystem->BeginUpdateForFlight(*flightIndex, completions);
+    } else {
+        _gpuSystem->CleanupCompletedFlights(completions);
+    }
     for (const auto& completion : completions) {
         OnRenderFrameComplete(completion);
     }
@@ -881,18 +900,18 @@ AppUpdateResult Application::Update(const AppUpdateContext& ctx) {
     return AppUpdateResult{ShouldExit()};
 }
 
-bool Application::ShouldExit() const noexcept {
-    return _windowManager != nullptr && _windowManager->ShouldExit();
+void Application::Render(AppFrameContext& ctx) {
+    this->OnRender(ctx);
 }
 
-void Application::Render(AppFrameContext& ctx) {
-    (void)ctx;
+bool Application::ShouldExit() const noexcept {
+    return _windowManager != nullptr && _windowManager->ShouldExit();
 }
 
 int Application::Shutdown(const AppShutdownContext& ctx) {
     (void)ctx;
     if (_gpuSystem != nullptr) {
-        _gpuSystem->WaitAndCleanupCompletedFlights();
+        WaitAndCleanupCompletedFlights();
     }
     if (_windowManager != nullptr) {
         _windowManager->SetRenderIdle(true);
@@ -922,7 +941,6 @@ void Application::DestroyRuntime() noexcept {
     }
     if (_gpuSystem != nullptr) {
         _gpuSystem->SetWindowManager(nullptr);
-        _gpuSystem->RemoveFlightCompletionObserver(this);
     }
     _gpuSystem.reset();
     _windowManager.reset();
@@ -968,7 +986,6 @@ bool Application::InitializeRuntime(const ApplicationRuntimeDescriptor& desc) {
         .BackBufferCount = desc.BackBufferCount,
         .FlightDataCount = desc.FlightDataCount};
     _gpuSystem = make_unique<GpuSystem>(gpuSysDesc);
-    _gpuSystem->AddFlightCompletionObserver(this);
     _renderSystem = make_unique<RenderSystem>(this);
     _assetManager = make_unique<AssetManager>();
     if (!desc.AssetRoot.empty()) {
