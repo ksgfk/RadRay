@@ -164,8 +164,18 @@ directly-indexed heaps不支持。runtime不新增跨artifact/native Root Signat
 - Vulkan规定的dynamic offset packing order（set、binding、array element）；
 - canonical `ResolvedLayoutHash`与name->metadata table映射。
 
-native创建顺序为immutable sampler objects -> descriptor set layouts -> `VkPipelineLayout`；backend
-layout保持sampler/set-layout引用至少覆盖pipeline layout和parameter sets的使用期。descriptor limits、
+native 创建顺序为从 Device 缓存取得 immutable sampler -> descriptor set layouts -> `VkPipelineLayout`。
+Vulkan Device 的 sampler 缓存以完整 `VulkanImmutableSamplerState` 为 key，逐字段比较和哈希；
+浮点正负零视为相同值，非有限 LOD/anisotropy 值在创建前拒绝。普通 `GetOrCreateSampler` 先将
+`SamplerDescriptor` 映射为完整 Vulkan 状态，再与 immutable sampler 共用缓存；独占
+`CreateSampler` 使用相同创建路径但不进入缓存。D3D12 继续使用普通 `SamplerCache`。
+`PipelineLayoutVulkan` 只在创建期间保留局部 sampler 句柄数组，不拥有或销毁 sampler；相同状态
+跨 layout 复用句柄，也让 descriptor set layout cache 可以复用含 immutable sampler 的相同布局。
+Device 在清理 descriptor allocator 和 set layout cache 后销毁缓存 sampler，因此 sampler 的生命周期
+覆盖相关 set layout、descriptor pool/set 的最后使用；这是
+[Vulkan immutable sampler 契约](https://docs.vulkan.org/refpages/latest/refpages/source/VkDescriptorSetLayoutBinding.html)
+的要求。缓存不提前淘汰 sampler，调用方仍须在销毁 Device 前完成 GPU 使用并释放其子对象。
+descriptor limits、
 dynamic-buffer limits、push size/alignment、sampler feature/extension与native create结果在此边界产生
 diagnostic/failure。unsupported sampler state不得用default state静默替换；pipeline可提供明确的
 Vulkan sampler replacement modifier。hash只覆盖sampler semantics，不覆盖`VkSampler` handles。

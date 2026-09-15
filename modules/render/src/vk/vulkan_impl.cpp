@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <cmath>
 #include <limits>
 #include <type_traits>
 
@@ -874,8 +875,7 @@ DeviceVulkan::DeviceVulkan(
       _physicalDevice(physicalDevice),
       _device(device),
       _descriptorSetLayoutCache(this),
-      _descriptorSetAllocator(this),
-      _samplerCache(this) {}
+      _descriptorSetAllocator(this) {}
 
 DeviceVulkan::~DeviceVulkan() noexcept {
     this->DestroyImpl();
@@ -1696,43 +1696,50 @@ static bool ValidatePipelineLayoutStageDescriptorCountsVulkan(
 // straight into the create info: a second mapping table is exactly where a silent state downgrade
 // would hide. Device capability is checked here instead of at resolve time because the resolved
 // layout is device independent.
-static std::optional<VkSampler> CreateImmutableSamplerVulkan(
-    DeviceVulkan* device,
+Nullable<unique_ptr<SamplerVulkan>> DeviceVulkan::CreateSamplerInternal(
     const VulkanImmutableSamplerState& state) noexcept {
-    const VkPhysicalDeviceLimits& limits = device->_properties.limits;
+    if (_device == VK_NULL_HANDLE) {
+        return nullptr;
+    }
+    if (!std::isfinite(state.MipLodBias) || !std::isfinite(state.MaxAnisotropy) ||
+        !std::isfinite(state.MinLod) || !std::isfinite(state.MaxLod)) {
+        RADRAY_ERR_LOG("vk sampler requires finite LOD and anisotropy values");
+        return nullptr;
+    }
+    const VkPhysicalDeviceLimits& limits = this->_properties.limits;
     if (state.AnisotropyEnable != 0) {
-        if (device->_feature.samplerAnisotropy != VK_TRUE) {
-            RADRAY_ERR_LOG("vk immutable sampler needs the samplerAnisotropy feature");
-            return std::nullopt;
+        if (this->_feature.samplerAnisotropy != VK_TRUE) {
+            RADRAY_ERR_LOG("vk sampler needs the samplerAnisotropy feature");
+            return nullptr;
         }
         if (state.MaxAnisotropy > limits.maxSamplerAnisotropy) {
             RADRAY_ERR_LOG(
-                "vk immutable sampler exceeds maxSamplerAnisotropy: {} > {}",
+                "vk sampler exceeds maxSamplerAnisotropy: {} > {}",
                 state.MaxAnisotropy,
                 limits.maxSamplerAnisotropy);
-            return std::nullopt;
+            return nullptr;
         }
     }
     if (std::abs(state.MipLodBias) > limits.maxSamplerLodBias) {
         RADRAY_ERR_LOG(
-            "vk immutable sampler exceeds maxSamplerLodBias: {} > {}",
+            "vk sampler exceeds maxSamplerLodBias: {} > {}",
             state.MipLodBias,
             limits.maxSamplerLodBias);
-        return std::nullopt;
+        return nullptr;
     }
     if (state.ReductionMode != shader::kShaderSamplerReductionModeWeightedAverage &&
-        device->_extFeatures.feature12.samplerFilterMinmax != VK_TRUE) {
-        RADRAY_ERR_LOG("vk immutable sampler needs the samplerFilterMinmax feature");
-        return std::nullopt;
+        this->_extFeatures.feature12.samplerFilterMinmax != VK_TRUE) {
+        RADRAY_ERR_LOG("vk sampler needs the samplerFilterMinmax feature");
+        return nullptr;
     }
     const bool usesMirrorClampToEdge =
         state.AddressModeU == shader::kShaderSamplerAddressModeMirrorClampToEdge ||
         state.AddressModeV == shader::kShaderSamplerAddressModeMirrorClampToEdge ||
         state.AddressModeW == shader::kShaderSamplerAddressModeMirrorClampToEdge;
     if (usesMirrorClampToEdge &&
-        device->_extFeatures.feature12.samplerMirrorClampToEdge != VK_TRUE) {
-        RADRAY_ERR_LOG("vk immutable sampler needs the samplerMirrorClampToEdge feature");
-        return std::nullopt;
+        this->_extFeatures.feature12.samplerMirrorClampToEdge != VK_TRUE) {
+        RADRAY_ERR_LOG("vk sampler needs the samplerMirrorClampToEdge feature");
+        return nullptr;
     }
 
     VkSamplerCreateInfo samplerInfo{};
@@ -1760,15 +1767,16 @@ static std::optional<VkSampler> CreateImmutableSamplerVulkan(
         samplerInfo.pNext = &reductionInfo;
     }
     VkSampler sampler = VK_NULL_HANDLE;
-    if (device->_ftb.vkCreateSampler(
-            device->_device,
+    if (const auto vr = this->_ftb.vkCreateSampler(
+            this->_device,
             &samplerInfo,
-            device->GetAllocationCallbacks(),
-            &sampler) != VK_SUCCESS) {
-        RADRAY_ERR_LOG("vk immutable sampler creation failed");
-        return std::nullopt;
+            this->GetAllocationCallbacks(),
+            &sampler);
+        vr != VK_SUCCESS) {
+        RADRAY_ERR_LOG("vkCreateSampler failed: {}", vr);
+        return nullptr;
     }
-    return sampler;
+    return make_unique<SamplerVulkan>(this, sampler);
 }
 
 Nullable<unique_ptr<PipelineLayoutVulkan>> DeviceVulkan::CreatePipelineLayoutInternal(
@@ -1962,13 +1970,14 @@ Nullable<unique_ptr<PipelineLayoutVulkan>> DeviceVulkan::CreatePipelineLayoutInt
     // Created up front and index aligned with the resolved sampler array, and reserved before the
     // first push because VkDescriptorSetLayoutBinding only borrows a pointer into this vector: a
     // reallocation while filling a later binding would dangle the earlier ones.
-    result->_immutableSamplers.reserve(layout.ImmutableSamplers.size());
+    vector<VkSampler> immutableSamplers;
+    immutableSamplers.reserve(layout.ImmutableSamplers.size());
     for (const VulkanImmutableSamplerState& state : layout.ImmutableSamplers) {
-        const std::optional<VkSampler> sampler = CreateImmutableSamplerVulkan(this, state);
-        if (!sampler.has_value()) {
+        const auto sampler = GetOrCreateSamplerInternal(state);
+        if (!sampler.HasValue()) {
             return nullptr;
         }
-        result->_immutableSamplers.push_back(sampler.value());
+        immutableSamplers.push_back(sampler.Get()->_sampler);
     }
 
     result->_dynamicEntryOrder.resize(layout.SetCount);
@@ -2014,7 +2023,7 @@ Nullable<unique_ptr<PipelineLayoutVulkan>> DeviceVulkan::CreatePipelineLayoutInt
             binding.stageFlags = MapType(entry.Stages);
             if (entry.HasImmutableSampler()) {
                 binding.pImmutableSamplers =
-                    result->_immutableSamplers.data() + entry.ImmutableSamplerIndex;
+                    immutableSamplers.data() + entry.ImmutableSamplerIndex;
             }
             bindings.push_back(binding);
         }
@@ -2872,39 +2881,62 @@ Nullable<unique_ptr<ComputePipelineState>> DeviceVulkan::CreateComputePipelineSt
     return make_unique<ComputePipelineVulkan>(this, rs, pipeline);
 }
 
+static VulkanImmutableSamplerState MakeSamplerStateVulkan(const SamplerDescriptor& desc) noexcept {
+    VulkanImmutableSamplerState state{};
+    state.MagFilter = MapTypeFilter(desc.MagFilter);
+    state.MinFilter = MapTypeFilter(desc.MinFilter);
+    state.MipmapMode = MapTypeMipmapMode(desc.MipmapFilter);
+    state.AddressModeU = MapType(desc.AddressS);
+    state.AddressModeV = MapType(desc.AddressT);
+    state.AddressModeW = MapType(desc.AddressR);
+    state.AnisotropyEnable = desc.AnisotropyClamp > 1 ? VK_TRUE : VK_FALSE;
+    state.MaxAnisotropy = desc.AnisotropyClamp > 1 ? static_cast<float>(desc.AnisotropyClamp) : 1.0f;
+    state.CompareEnable = desc.Compare.has_value() ? VK_TRUE : VK_FALSE;
+    state.CompareOp = desc.Compare.has_value() ? MapType(desc.Compare.value()) : VK_COMPARE_OP_NEVER;
+    state.MinLod = desc.LodMin;
+    state.MaxLod = desc.LodMax;
+    state.BorderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
+    state.ReductionMode = VK_SAMPLER_REDUCTION_MODE_WEIGHTED_AVERAGE;
+    return state;
+}
+
+size_t SamplerStateHashVulkan::operator()(const VulkanImmutableSamplerState& state) const noexcept {
+    HashCode hash;
+    hash.Add(state.MagFilter);
+    hash.Add(state.MinFilter);
+    hash.Add(state.MipmapMode);
+    hash.Add(state.AddressModeU);
+    hash.Add(state.AddressModeV);
+    hash.Add(state.AddressModeW);
+    hash.Add(state.MipLodBias);
+    hash.Add(state.AnisotropyEnable);
+    hash.Add(state.MaxAnisotropy);
+    hash.Add(state.CompareEnable);
+    hash.Add(state.CompareOp);
+    hash.Add(state.MinLod);
+    hash.Add(state.MaxLod);
+    hash.Add(state.BorderColor);
+    hash.Add(state.ReductionMode);
+    hash.Add(state.Flags);
+    return hash.ToHashCode();
+}
+
 Nullable<unique_ptr<SamplerVulkan>> DeviceVulkan::CreateSamplerInternal(
     const SamplerDescriptor& desc) noexcept {
-    VkSamplerCreateInfo createInfo{};
-    createInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-    createInfo.pNext = nullptr;
-    createInfo.flags = 0;
-    createInfo.magFilter = MapTypeFilter(desc.MagFilter);
-    createInfo.minFilter = MapTypeFilter(desc.MinFilter);
-    createInfo.mipmapMode = MapTypeMipmapMode(desc.MipmapFilter);
-    createInfo.addressModeU = MapType(desc.AddressS);
-    createInfo.addressModeV = MapType(desc.AddressT);
-    createInfo.addressModeW = MapType(desc.AddressR);
-    createInfo.mipLodBias = 0;
-    if (desc.AnisotropyClamp > 1.0f) {
-        createInfo.anisotropyEnable = VK_TRUE;
-        createInfo.maxAnisotropy = (float)desc.AnisotropyClamp;
-    } else {
-        createInfo.anisotropyEnable = VK_FALSE;
-        createInfo.maxAnisotropy = 1.0f;
+    return CreateSamplerInternal(MakeSamplerStateVulkan(desc));
+}
+
+Nullable<SamplerVulkan*> DeviceVulkan::GetOrCreateSamplerInternal(
+    const VulkanImmutableSamplerState& state) noexcept {
+    if (const auto it = _samplerCache.find(state); it != _samplerCache.end()) {
+        return it->second.get();
     }
-    createInfo.compareEnable = desc.Compare.has_value() ? VK_TRUE : VK_FALSE;
-    createInfo.compareOp = desc.Compare.has_value() ? MapType(desc.Compare.value()) : VK_COMPARE_OP_NEVER;
-    createInfo.minLod = desc.LodMin;
-    createInfo.maxLod = desc.LodMax;
-    createInfo.borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
-    createInfo.unnormalizedCoordinates = VK_FALSE;
-    VkSampler sampler = VK_NULL_HANDLE;
-    if (auto vr = _ftb.vkCreateSampler(_device, &createInfo, this->GetAllocationCallbacks(), &sampler);
-        vr != VK_SUCCESS) {
-        RADRAY_ERR_LOG("vkCreateSampler failed: {}", vr);
+    auto sampler = CreateSamplerInternal(state);
+    if (!sampler.HasValue()) {
         return nullptr;
     }
-    auto result = make_unique<SamplerVulkan>(this, sampler);
+    SamplerVulkan* result = sampler.Get();
+    _samplerCache.emplace(state, sampler.Release());
     return result;
 }
 
@@ -2919,7 +2951,7 @@ Nullable<unique_ptr<Sampler>> DeviceVulkan::CreateSampler(
 
 Nullable<Sampler*> DeviceVulkan::GetOrCreateSampler(
     const SamplerDescriptor& desc) noexcept {
-    return _samplerCache.GetOrCreate(desc);
+    return GetOrCreateSamplerInternal(MakeSamplerStateVulkan(desc));
 }
 
 Nullable<unique_ptr<LegacyFenceVulkan>> DeviceVulkan::CreateLegacyFence(VkFenceCreateFlags flags) noexcept {
@@ -3157,7 +3189,7 @@ void DeviceVulkan::SetObjectName(std::string_view name, VkObjectType type, void*
 void DeviceVulkan::DestroyImpl() noexcept {
     _descriptorSetAllocator.Clear();
     _descriptorSetLayoutCache.Destroy();
-    _samplerCache.Clear();
+    _samplerCache.clear();
     _vma.reset();
     for (auto&& i : _queues) {
         i.clear();
@@ -6044,16 +6076,7 @@ void PipelineLayoutVulkan::DestroyImpl() noexcept {
                 _layout,
                 _device->GetAllocationCallbacks());
         }
-        for (VkSampler sampler : _immutableSamplers) {
-            if (sampler != VK_NULL_HANDLE) {
-                _device->_ftb.vkDestroySampler(
-                    _device->_device,
-                    sampler,
-                    _device->GetAllocationCallbacks());
-            }
-        }
     }
-    _immutableSamplers.clear();
     _layout = VK_NULL_HANDLE;
     _setLayoutRefs.clear();
     _parameterSetLayouts.clear();

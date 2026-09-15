@@ -35,8 +35,11 @@
 
 ```
 Application::StartLoop
-  ├─ NativeEventPump                 收集原始窗口输入
-  ├─ Application::BeginUpdateForFlight  取得可写槽位后收集完成消息 → GPU 内部调度 → OnRenderFrameComplete
+  ├─ runner::PrepareFrame            等待并取得当前可写 flight；处理已有交换链重建
+  ├─ Application::BeginUpdateForFlight  收集完成批次 → GPU 内部调度 → OnRenderFrameComplete
+  ├─ GpuSystem::BeginFrameTiming     记录逻辑帧开始时间，计算相邻帧 DeltaTime
+  ├─ NativeEventPump::DispatchEvents 排空可取的窗口消息，包含等待与完成回调期间投递的输入
+  ├─ CheckRecreateSwapChains         处理事件期间产生的交换链变化
   ├─ AssetManager::Pump               提交加载结果；销毁零引用资产
   ├─ ApplicationScheduler::Pump
   ├─ Application::OnUpdate            游戏逻辑
@@ -52,15 +55,22 @@ Application::StartLoop
        单窗口与 Vulkan：一次 Submit（含各 present CB）再 Present 全部 target
 ```
 
-`BeginFrameRecord` 为每次录制生成独立 FrameSerial，收据同时校验 serial 与阶段，不能以可复用
-flight index 代替提交身份。`FrameSubmission` 的 Recorded/Submitted/GpuCompleted 分别对应录制、
-void Submit 返回与真实 fence 完成；未提交收据取消不发布资源状态和历史。提交后的收据由 flight
-保留至 fence，调用方登记的完成回调与 owner 随该收据完成。
-成功 Submit 后立即清空 `OnSubmitted`，释放状态快照与提交阶段捕获，不再访问借用的外部资源 wrapper；
-需要活到 GPU 完成的 owner 必须由 `OnCompleted` 保留。已提交收据的 Cancel 不提前释放这些 owner，
-正常完成或失败完成仍由匹配 frame serial 的 fence 路径处理。
+单线程与双线程普通循环都遵循上述顺序。资源边界是当前 flight 上一轮的 fence 已完成、
+runner 已取得槽位使用权；逻辑帧边界是完成批次与应用完成钩子处理结束后的计时点。
+等待可写槽和处理完成批次放在事件派发之前，让紧接着的 Update 使用这些阶段期间到达的输入。
+完成批次处理有明确终点，不会为回调新建的任务或稍后到达的 GPU 消息反复排空整个系统。
 
-`CompleteFlight` 在 fence 完成后 resolve profiler、完成 submission receipts，将
+`DeltaTime` 是相邻逻辑帧开始时间之差，仍包含两个开始点之间的槽位等待与收尾耗时。
+`LastFrameLatency` 从同一个逻辑帧开始时间计算到 CPU 观察到该 flight fence 完成；
+包含事件派发、Update、录制、排队与 GPU 执行，不包含该帧开始前的槽位等待和完成回调。
+手动驱动 GpuSystem 时，在完成调度之后、开始本帧工作之前调用 `BeginFrameTiming`。
+
+`BeginFrameRecord` 为每次录制生成独立 FrameSerial，完成消息保留该 serial，不能以可复用
+flight index 代替提交身份。RHI 的 void Submit 返回只表示 CPU 提交调用结束，真实 GPU 完成
+由 fence 确认。应用通过 `OnRenderFrameComplete` 在游戏线程处理完成结果，自行持有需要活到
+GPU 完成的资源 owner。
+
+`CompleteFlight` 在 fence 完成后 resolve profiler，将
 `FlightCompletion{FlightIndex, GpuWorkCompleted, FrameSerial}` 写入 `GpuSystem` 持有的
 `UnboundedChannel<FlightCompletion>`，回收 staging，并发布原子 `WaitersCompleted`。
 调用点是 `RetireRenderedFrames`（渲染线程在两帧 Record 之间，game thread 在
@@ -70,7 +80,7 @@ void Submit 返回与真实 fence 完成；未提交收据取消不发布资源�
 作为 `GpuSystem` 的 friend，直接通过私有 `_flightCompletions.TryRead` 非阻塞收集一个本地批次，
 传给 `GpuSystem::BeginUpdateForFlight`：
 先应用上传完成状态，再 `PumpWaitFrame`，最后 `PumpFrameUploadScheduler`。
-这些步骤返回后，Application 逐条调用 `OnRenderFrameComplete`，然后进入常规 Update。
+这些步骤返回后，Application 逐条调用 `OnRenderFrameComplete`，随后开始本帧计时、派发窗口事件并进入 Update。
 完成消息保留 FrameSerial，不能仅用可复用的 FlightIndex 识别一帧。
 `GpuWorkCompleted` 仍表示该轮渲染结果有效；false 的跳过帧也已经经过其提交的真实 fence，
 通知不代表画面已显示到屏幕。
@@ -102,7 +112,12 @@ frame fence 之后入队，只等 fence 不够）。已挂 swapchain 的 `Native
 必须先 `EnsureRenderIdle`：在 Win32 钩子里等待会让渲染线程在最小化过程中 Present，同样
 `ACCESS_DENIED`。这个生命周期等待不发生在普通无变更帧。
 
-窗口模态 Tick 在正在进行的帧内拒绝重入，多线程 runner 只在 render idle 时允许窗口事件触发新帧。
+runner 在准备槽位、完成回调、Update 与录制期间拒绝模态 Tick 重入，事件派发期间允许模态 Tick。
+普通循环在 DispatchEvents 前保留一个已准备的逻辑帧；模态 Tick 优先消费它，不重复领取 writable
+信号量、重置 HostWrites、恢复完成批次或采样时间。事件派发期间出现模态活动后，外层跳过普通 Tick，
+不会再提交已被模态路径消费的帧；尚未消费的准备状态保留供后续 Tick 使用。
+同一次系统模态循环中的后续帧自行取得可写槽、收尾并开始计时，沿用系统已派发的输入，
+不递归调用 DispatchEvents。双线程模态路径仍先等待已发布的 CPU 录制结束，槽位不可写时跳过本次 Tick。
 
 ### 窗口输入
 
@@ -174,20 +189,14 @@ scope.Spawn([this, payload = std::move(gpuStuff)]() -> task<void> mutable {
 两条约束：**自己的 `TaskScope` 必须在 `GpuSystem` 之前析构**（否则取消时的析构会碰到已死的
 device），且**恢复点在主线程**，所以析构里可以安全动 GPU 对象。
 
-`IWaitFrameProcessor` 从 `ServiceRegistry` 注入，写法与 `AssetManager` 一样——
-在类上加一个 setter，然后：
+`Application::InitializeRuntime` 直接通过 setter 连接帧等待接口：
 
 ```cpp
-template <> struct ServiceTraits<MyCache> {
-    using Dependencies = TypeList<Required<IWaitFrameProcessor>>;
-    static void Inject(MyCache& self, IWaitFrameProcessor& frames) noexcept {
-        self.SetWaitFrameProcessor(&frames);
-    }
-};
+_assetManager->SetWaitFrameProcessor(_gpuSystem.get());
 ```
 
-`ServiceTraits<GpuSystem>::Provides` 暴露 `IWaitFrameProcessor`，编译期确定唯一提供者并生成
-直接注入调用。装配细节见「服务装配」一节。
+其他需要等待帧的系统也由 Application 显式连接到 GpuSystem 提供的 `IWaitFrameProcessor`，
+并在 `DestroyRuntime` 中安排其先于 GpuSystem 清理。装配细节见「服务装配」一节。
 
 目前仓库里只有资产走这条路，所以没有现成的非资产调用点可参照。
 
@@ -272,7 +281,7 @@ program 的 layout/参数 metadata 活过所有 flight，关停 GPU idle 后才�
 旧框架的自动 per-flight asset refs、pool、descriptor arena 和 history 已移除。应用录制方负责
 让输入数据、原生资源与资产 owners 活到对应工作完成。StreamingAssetRef 的复制和释放仍只在 GT；
 可在 OnUpdate/OnRenderFrameComplete 的安全点处理，或沿既有资产延迟销毁协议回收。
-完成回调可能在 retire 线程执行，不能在那里操作非原子的资产引用计数。FrameSubmission 与 flight 协议保留。
+retire 阶段仅发布帧完成消息；应用完成钩子在 GT 消费消息时执行。
 
 ## 帧 profiler
 
@@ -291,7 +300,8 @@ program 的 layout/参数 metadata 活过所有 flight，关停 GPU idle 后才�
 
 **`AcquireWindow` 不录任何 barrier。** 应用显式取得目标后，负责使用 backbuffer 真实初态、
 录制目标内容并收口到 Present；只有显式 acquire 的窗口参与本次呈现。`AppFrameTarget` 不暴露同步对象。
-写 flip backbuffer 的命令使用 `AppFrameContext::GetCommandBufferForTexture`；提交返回后才发布 backbuffer 状态。
+写 flip backbuffer 的命令使用 `AppFrameContext::GetCommandBufferForTexture`；`GpuSystem` 在对应窗口
+命令提交返回后、Present 前将 backbuffer 状态记为 Present。若本轮跳过窗口 GPU 工作，则保留原状态。
 默认 Application::Render 为空，没有自动 acquire、清屏或离屏输出管理。
 
 交换链尺寸变化时后备缓冲 view 会重建，此时必须调
@@ -329,13 +339,10 @@ channel 生命周期跟随 GpuSystem；关停期间保持可写，直到生产�
 
 ## 服务装配
 
-Application 先创建对象，再把它们绑定到 `ServiceRegistry<...>` 的固定槽位。各系统通过
-`ServiceTraits` 声明接口、依赖和静态钩子；编译期完成接口匹配与启动排序。
-WindowManager 用 `Link` 保存 GPU/Render 引用，GpuSystem 对窗口使用 `Required`，
-所以双向引用不会形成启动环。设备仍由 GpuSystem 构造函数创建，构造顺序不能任意交换。
-
-可选实例、错误回滚、显式 Shutdown 与 Application 的所有权边界统一见
-[ServiceRegistry](render-framework.md#serviceregistry)。GUID 与 RTTI 不参与这条装配路径。
+Application 直接创建对象、连接借用引用并调用初始化函数；依赖关系和拆除顺序均由普通代码明确表达。
+设备由 GpuSystem 构造函数创建，WindowManager 与 GpuSystem 的双向引用在对象就位后连接。
+可选资产来源、失败清理与所有权边界见
+[Application 直接装配](render-framework.md#application-直接装配)。
 
 ## 游戏侧扩展点
 

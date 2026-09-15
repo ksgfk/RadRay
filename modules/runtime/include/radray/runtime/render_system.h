@@ -5,7 +5,6 @@
 
 #include <radray/nullable.h>
 #include <radray/render/render_pass_registry.h>
-#include <radray/runtime/service_traits.h>
 #include <radray/runtime/shader_program_request.h>
 #include <radray/runtime_type.h>
 #include <radray/types.h>
@@ -28,7 +27,7 @@ public:
     RenderSystem& operator=(RenderSystem&&) = delete;
     ~RenderSystem() noexcept;
 
-    [[nodiscard]] ServiceStatus OnInitialize();
+    [[nodiscard]] bool OnInitialize(string& error);
     /// Requires GPU idle; also accepts partial initialization.
     void OnShutdown() noexcept;
     void SetGpuSystem(Nullable<GpuSystem*> gpu) noexcept { _gpuSystem = gpu; }
@@ -47,16 +46,6 @@ private:
     Nullable<GpuSystem*> _gpuSystem{nullptr};
     unique_ptr<render::RenderPassRegistry> _renderPassRegistry;
     unique_ptr<ShaderProgramCache> _shaderCache;
-};
-
-template <>
-struct ServiceTraits<RenderSystem> {
-    static constexpr std::string_view Name{"RenderSystem"};
-    using Dependencies = TypeList<Required<GpuSystem>>;
-    static void Inject(RenderSystem& self, GpuSystem& gpu) noexcept { self.SetGpuSystem(&gpu); }
-    static ServiceStatus Initialize(RenderSystem& self) { return self.OnInitialize(); }
-    static void Shutdown(RenderSystem& self) noexcept { self.OnShutdown(); }
-    static void Unwire(RenderSystem& self) noexcept { self.SetGpuSystem(nullptr); }
 };
 
 template <>

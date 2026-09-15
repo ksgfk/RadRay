@@ -98,7 +98,6 @@ CPU record/Submit 时间与 GPU 时间线分开解读。关闭使用 `-DRADRAY_E
 | `test_flight_completion` | `FlightCompletionTest` |
 | `test_asset_database` | `AssetDatabaseTest` |
 | `test_component_rtti` | `ComponentRttiTest` |
-| `test_service_registry` | `ServiceRegistryTest`（含编译期组合校验） |
 | `test_render_pass_registry` | `RenderPassCacheKeyTest`, `FramebufferCacheKeyTest`, `RenderPassRegistryTest` |
 | `test_device_capabilities` | `TextureDescriptorValidation`, `DeviceCapabilitiesTest` |
 | `test_gpu_test_fixture` | `GpuTestFixture`, `GpuValidationProbe` |
@@ -156,7 +155,7 @@ fence 压力和性能基准独立运行，避免验证层 semaphore 跟踪阻塞
 一条原生回调错误，单独记为 expected probe；普通验收的 unexpected validation errors 必须为零。
 输入校验中的预期拒绝不等同于 native validation 错误。
 
-无 JIT 配置仍运行资产、flight、组件、shader 参数与服务测试；依赖 compiler 的 GPU shader suite 不注册。
+无 JIT 配置仍运行资产、flight、组件与 shader 参数测试；依赖 compiler 的 GPU shader suite 不注册。
 runtime-only 可消费匹配 backend 的已编译 artifact，源码请求不会反向链接 compiler client。
 
 ## 渲染框架重构状态

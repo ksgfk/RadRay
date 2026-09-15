@@ -2,6 +2,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <limits>
 
 #include <radray/render/shader_layout.h>
 #include <radray/shader/shader_artifact.h>
@@ -233,8 +234,8 @@ TEST_F(VulkanDeviceFixture, PolicySamplerBecomesAnImmutableSamplerWithEmptySetHo
     for (uint32_t setIndex = 0; setIndex < 4; ++setIndex) {
         EXPECT_TRUE(native->_parameterSetLayouts[setIndex].empty()) << setIndex;
     }
-    ASSERT_EQ(native->_immutableSamplers.size(), 1u);
-    EXPECT_NE(native->_immutableSamplers[0], VK_NULL_HANDLE);
+    ASSERT_EQ(VkDevice->_samplerCache.size(), 1u);
+    EXPECT_NE(VkDevice->_samplerCache.begin()->second->_sampler, VK_NULL_HANDLE);
 
     const auto& entries = native->_parameterSetLayouts[4];
     const auto sampler = std::find_if(
@@ -277,6 +278,135 @@ TEST_F(VulkanDeviceFixture, PolicySamplerBecomesAnImmutableSamplerWithEmptySetHo
     ASSERT_TRUE(resourceView.HasValue());
     EXPECT_TRUE(parameterSet.Get()->Set(textureHandle, 0, resourceView.Get()));
     EXPECT_TRUE(parameterSet.Get()->FlushWrites());
+}
+
+TEST_F(VulkanDeviceFixture, OrdinaryAndImmutableSamplersShareDeviceCacheInEitherCreationOrder) {
+    if (!Available) {
+        GTEST_SKIP() << "Vulkan is unavailable on this machine";
+    }
+    for (uint32_t immutableFirst = 0; immutableFirst < 2; ++immutableFirst) {
+        SamplerDescriptor desc{};
+        desc.AddressS = desc.AddressT = desc.AddressR = AddressMode::Repeat;
+        desc.LodMax = static_cast<float>(immutableFirst);
+        VulkanImmutableSamplerState state{};
+        state.MaxLod = desc.LodMax;
+        ResolvedVulkanLayout resolved{};
+        resolved.SetCount = 1;
+        resolved.Bindings = {MakeBinding("CachedSampler", shader::ShaderBindingKind::Sampler, 0, 0)};
+        resolved.Bindings[0].ImmutableSamplerIndex = 0;
+        resolved.ImmutableSamplers = {state};
+
+        Nullable<Sampler*> ordinary = nullptr;
+        if (!immutableFirst) {
+            ordinary = VkDevice->GetOrCreateSampler(desc);
+            ASSERT_TRUE(ordinary.HasValue());
+        }
+        auto first = VkDevice->CreatePipelineLayout(resolved);
+        ASSERT_TRUE(first.HasValue());
+        auto second = VkDevice->CreatePipelineLayout(resolved);
+        ASSERT_TRUE(second.HasValue());
+        if (immutableFirst) {
+            ordinary = VkDevice->GetOrCreateSampler(desc);
+            ASSERT_TRUE(ordinary.HasValue());
+        }
+        const auto cached = VkDevice->_samplerCache.find(state);
+        ASSERT_NE(cached, VkDevice->_samplerCache.end());
+        EXPECT_EQ(cached->second.get(), CastVkObject(ordinary.Get()));
+        EXPECT_EQ(VkDevice->_samplerCache.size(), immutableFirst + 1u);
+        EXPECT_EQ(VkDevice->GetOrCreateSampler(desc).Get(), ordinary.Get());
+        auto owned = VkDevice->CreateSampler(desc);
+        ASSERT_TRUE(owned.HasValue());
+        EXPECT_NE(owned.Get(), ordinary.Get());
+        EXPECT_EQ(VkDevice->_samplerCache.size(), immutableFirst + 1u);
+        owned.Get()->Destroy();
+        auto retainedSetLayout = CastVkObject(first.Get())->_setLayoutRefs[0];
+        EXPECT_EQ(retainedSetLayout.Get(), CastVkObject(second.Get())->_setLayoutRefs[0].Get());
+
+        auto parameterSet = VkDevice->CreateShaderParameterSet(
+            ShaderParameterSetDescriptor{.Layout = second.Get(), .GroupIndex = 0});
+        ASSERT_TRUE(parameterSet.HasValue());
+        first.Get()->Destroy();
+        EXPECT_TRUE(parameterSet.Get()->FlushWrites());
+        parameterSet.Get()->Destroy();
+        second.Get()->Destroy();
+        EXPECT_TRUE(ordinary.Get()->IsValid());
+
+        // A retained native set layout must still carry a live sampler after its pipelines are gone.
+        const VkDescriptorPoolSize poolSize{VK_DESCRIPTOR_TYPE_SAMPLER, 1};
+        const auto allocation = VkDevice->_descriptorSetAllocator.Allocate({.Layout = retainedSetLayout->Get(),
+                                                                            .DescriptorCounts = std::span{&poolSize, 1}});
+        ASSERT_TRUE(allocation.has_value());
+        VkDevice->_descriptorSetAllocator.Destroy(allocation.value());
+    }
+    Context.Reset();
+    EXPECT_EQ(Context.ValidationErrors.load(), 0u);
+}
+
+TEST_F(VulkanDeviceFixture, FullSamplerStateStaysDistinctAndSignedZeroReusesCache) {
+    if (!Available) {
+        GTEST_SKIP() << "Vulkan is unavailable on this machine";
+    }
+    {
+        VulkanImmutableSamplerState base{};
+        base.AddressModeU = base.AddressModeV = base.AddressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+        vector<VulkanImmutableSamplerState> states{base};
+        auto changed = base;
+        changed.MipLodBias = 0.25f;
+        states.push_back(changed);
+        changed = base;
+        changed.BorderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
+        states.push_back(changed);
+        changed = base;
+        changed.Flags = shader::kShaderSamplerFlagUnnormalizedCoordinates;
+        states.push_back(changed);
+        if (VkDevice->_extFeatures.feature12.samplerFilterMinmax == VK_TRUE) {
+            changed = base;
+            changed.ReductionMode = VK_SAMPLER_REDUCTION_MODE_MIN;
+            states.push_back(changed);
+            changed.ReductionMode = VK_SAMPLER_REDUCTION_MODE_MAX;
+            states.push_back(changed);
+        }
+        vector<unique_ptr<PipelineLayout>> layouts;
+        for (const auto& state : states) {
+            ResolvedVulkanLayout resolved{};
+            resolved.SetCount = 1;
+            resolved.Bindings = {MakeBinding("Immutable", shader::ShaderBindingKind::Sampler, 0, 0)};
+            resolved.Bindings[0].ImmutableSamplerIndex = 0;
+            resolved.ImmutableSamplers = {state};
+            auto layout = VkDevice->CreatePipelineLayout(resolved);
+            ASSERT_TRUE(layout.HasValue());
+            layouts.push_back(layout.Release());
+            EXPECT_EQ(VkDevice->_samplerCache.size(), layouts.size());
+        }
+        auto negativeZero = base;
+        negativeZero.MipLodBias = -0.0f;
+        negativeZero.MinLod = -0.0f;
+        negativeZero.MaxLod = -0.0f;
+        const auto same = VkDevice->GetOrCreateSamplerInternal(negativeZero);
+        ASSERT_TRUE(same.HasValue());
+        EXPECT_EQ(same.Get(), VkDevice->_samplerCache.find(base)->second.get());
+        EXPECT_EQ(VkDevice->_samplerCache.size(), states.size());
+    }
+    Context.Reset();
+    EXPECT_EQ(Context.ValidationErrors.load(), 0u);
+}
+
+TEST_F(VulkanDeviceFixture, RejectedSamplerDoesNotPopulateDeviceCache) {
+    if (!Available) {
+        GTEST_SKIP() << "Vulkan is unavailable on this machine";
+    }
+    VulkanImmutableSamplerState state{};
+    state.MipLodBias = VkDevice->_properties.limits.maxSamplerLodBias + 1.0f;
+    EXPECT_FALSE(VkDevice->GetOrCreateSamplerInternal(state).HasValue());
+    EXPECT_TRUE(VkDevice->_samplerCache.empty());
+    state.MipLodBias = std::numeric_limits<float>::quiet_NaN();
+    EXPECT_FALSE(VkDevice->GetOrCreateSamplerInternal(state).HasValue());
+    EXPECT_TRUE(VkDevice->_samplerCache.empty());
+    state.MipLodBias = 0.0f;
+    EXPECT_TRUE(VkDevice->GetOrCreateSamplerInternal(state).HasValue());
+    EXPECT_EQ(VkDevice->_samplerCache.size(), 1u);
+    Context.Reset();
+    EXPECT_EQ(Context.ValidationErrors.load(), 0u);
 }
 
 // Push constants reach the native layout through the same handle table as descriptor bindings, and

@@ -9,7 +9,6 @@
 #include <radray/coroutine.h>
 #include <radray/runtime/asset.h>
 #include <radray/runtime/asset_source.h>
-#include <radray/runtime/service_traits.h>
 
 // 资产槽位、引用类型与加载调度。引用语义、销毁时机与关停顺序: docs/architecture/asset-system.md
 
@@ -319,7 +318,7 @@ public:
         EnqueueDeferred(make_unique<DeferredPayloadImpl<std::decay_t<F>>>(std::forward<F>(payload)));
     }
 
-    /// 注入帧边界等待器 (非拥有)。【必须装配】见 ServiceTraits<AssetManager>。
+    /// 注入帧边界等待器 (非拥有)。【必须装配】Application 在启动阶段连接。
     /// 调用方保证它活得比本 AssetManager 更久 (关停顺序里 AssetManager 先于 GpuSystem 死)。
     void SetWaitFrameProcessor(Nullable<IWaitFrameProcessor*> processor) noexcept { _waitFrame = processor.Get(); }
 
@@ -460,13 +459,6 @@ StreamingAssetRef<T> StreamingAssetRefAny::CastTo() const noexcept {
     }
     return StreamingAssetRef<T>{*this};
 }
-
-template <>
-struct ServiceTraits<AssetManager> {
-    using Dependencies = TypeList<Required<IWaitFrameProcessor>, Optional<IAssetSource>>;
-    static void Inject(AssetManager& self, IWaitFrameProcessor& frames, Nullable<IAssetSource*> source) noexcept;
-    static void Unwire(AssetManager& self) noexcept;
-};
 
 template <>
 struct RuntimeTypeTrait<AssetManager> {

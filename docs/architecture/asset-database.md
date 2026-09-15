@@ -125,9 +125,9 @@ importer 时记 error 并返回无效引用，不 abort。原有 `Load(AssetLoad
 ## 装配与关停
 
 `Application` 在 `GpuSystem` 与 `AssetManager` 已创建后构造默认 importer 并调用 `Open`。
-数据库通过 `OptionalService<AssetDatabase>` 进入静态服务集合，trait 暴露 `IAssetSource`；
-`AssetManager` 的 `Optional<IAssetSource>` 自动注入已打开的实例或空值，规则见
-[ServiceRegistry](render-framework.md#serviceregistry)。
+Application 直接调用 `AssetManager::SetAssetSource(_assetDatabase.get())`，将已打开的数据库作为
+`IAssetSource` 连接；未启用或打开失败时传入空值。依赖关系与生命周期见
+[Application 直接装配](render-framework.md#application-直接装配)。
 打开失败只记 error，应用仍保留显式 `AssetLoadRequest` 路径。
 
 关停顺序固定为：

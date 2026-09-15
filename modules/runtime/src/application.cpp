@@ -20,7 +20,6 @@
 #include <radray/runtime/static_mesh.h>
 #include <radray/runtime/texture_asset.h>
 #include <radray/runtime/render_system.h>
-#include <radray/runtime/service_registry.h>
 #include <radray/runtime/game_framework/world.h>
 #include <radray/window/native_window.h>
 
@@ -438,7 +437,7 @@ public:
 #if defined(RADRAY_APP_IMPL_ENABLE_VBLANK_TICK)
             StopWin32ModalVBlank();
 #endif
-            CheckFrameComplete(false);
+            PrepareFrame(false);
             _hasModalLoopActivityDuringDispatch = false;
             _isDispatchingEvents = true;
             _app->GetWindowManager()->DispatchEvents();
@@ -467,36 +466,43 @@ public:
     }
 
     void OnModalLoopTick(NativeWindow* modalWindow) {
+        if (_ticking || _reqExit) return;
         MarkModalLoopActivityDuringDispatch();
 #if defined(RADRAY_APP_IMPL_ENABLE_VBLANK_TICK)
         StartWin32ModalVBlank(modalWindow);
 #endif
-        if (CheckFrameComplete(true)) {
-            TickFrame(true);
-        }
+        TickFrame(true);
     }
 
-    bool CheckFrameComplete(bool isInModalLoop) {
+    bool PrepareFrame(bool isInModalLoop) {
+        if (_ticking || _reqExit) return false;
+        if (_framePrepared) return true;
+        _ticking = true;
+        auto scope = MakeScopeGuard([this]() noexcept { _ticking = false; });
         auto* gpuSystem = _app->GetGpuSystem();
         const uint32_t flightIndex = gpuSystem->GetCurrentFlightIndex();
-        return gpuSystem->CompleteFlightIfReady(flightIndex, !isInModalLoop);
+        if (!gpuSystem->CompleteFlightIfReady(flightIndex, !isInModalLoop)) return false;
+        _app->GetWindowManager()->CheckRecreateSwapChains();
+        _app->BeginUpdateForFlight(flightIndex);
+        const auto now = gpuSystem->BeginFrameTiming(flightIndex);
+        _deltaTime = now - _lastFrameTime;
+        _lastFrameTime = now;
+        _framePrepared = true;
+        return true;
     }
 
     void TickFrame(bool isInModalLoop) {
-        if (_ticking) return;
+        if (!PrepareFrame(isInModalLoop)) return;
         _ticking = true;
         auto scope = MakeScopeGuard([this]() noexcept { _ticking = false; });
+        _framePrepared = false;
         RADRAY_PROFILE_SCOPE_N("TickFrame");
         if (isInModalLoop) {
             MarkModalLoopActivityDuringDispatch();
         }
         auto* gpuSystem = _app->GetGpuSystem();
         const uint32_t flightIndex = gpuSystem->GetCurrentFlightIndex();
-        _app->BeginUpdateForFlight(flightIndex);
-
-        const auto now = std::chrono::steady_clock::now();
-        const std::chrono::duration<float> deltaTime = now - _lastFrameTime;
-        _lastFrameTime = now;
+        const auto deltaTime = _deltaTime;
 
         _app->GetWindowManager()->CheckRecreateSwapChains();
 
@@ -547,6 +553,8 @@ public:
     Application* _app;
     sigslot::scoped_connection _modalLoopTickConnection;
     std::chrono::steady_clock::time_point _lastFrameTime{std::chrono::steady_clock::now()};
+    std::chrono::duration<float> _deltaTime{};
+    bool _framePrepared{false};
     bool _reqExit{false};
     bool _isDispatchingEvents{false};
     bool _ticking{false};
@@ -579,9 +587,7 @@ void Win32ModalLoopVBlankRenderer::OnVBlankRenderTick() {
         return;
     }
 
-    if (_runner->CheckFrameComplete(true)) {
-        _runner->TickFrame(true);
-    }
+    _runner->TickFrame(true);
 }
 #endif
 
@@ -599,6 +605,7 @@ public:
 
     int Run() {
         while (true) {
+            PrepareFrame(true);
             _hasModalLoopActivityDuringDispatch = false;
             _app->GetWindowManager()->DispatchEvents();
 
@@ -673,10 +680,10 @@ public:
     }
 
     void OnModalLoopTick(NativeWindow*) {
-        _hasModalLoopActivityDuringDispatch = true;
-        if (_reqExit) {
+        if (_ticking || _reqExit) {
             return;
         }
+        _hasModalLoopActivityDuringDispatch = true;
 
         const uint64_t frameIndex = _app->GetGpuSystem()->GetFrameIndex();
         _discardNonModalFramesBefore.store(frameIndex, std::memory_order_release);
@@ -696,20 +703,21 @@ public:
         windowManager->CheckRecreateSwapChains();
     }
 
-    std::optional<uint64_t> TickFrame(bool isInModalLoop, bool waitForWritableSlot) {
-        if (_ticking) return std::nullopt;
+    bool PrepareFrame(bool waitForWritableSlot) {
+        if (_ticking || _reqExit) return false;
+        if (_framePrepared) return true;
         _ticking = true;
         auto scope = MakeScopeGuard([this]() noexcept { _ticking = false; });
         auto* gpuSystem = _app->GetGpuSystem();
-        if (!waitForWritableSlot && _renderedFrameCount.load(std::memory_order_acquire) < gpuSystem->GetFrameIndex()) return std::nullopt;
-        RADRAY_PROFILE_SCOPE_N("TickFrame");
+        if (!waitForWritableSlot && _renderedFrameCount.load(std::memory_order_acquire) < gpuSystem->GetFrameIndex()) return false;
+        RADRAY_PROFILE_SCOPE_N("PrepareFrame");
         if (waitForWritableSlot) {
             RetireRenderedFrames(false, false);
             CheckRecreateSwapChains();
             RADRAY_PROFILE_SCOPE_N("WaitWritableSlot");
             WaitForWritableFlightSlot();
         } else if (!_writableSlotsSemaphore.try_acquire()) {
-            return std::nullopt;
+            return false;
         } else {
             CheckRecreateSwapChains();
         }
@@ -721,10 +729,24 @@ public:
             _app->BeginUpdateForFlight(flightIndex);
         }
 
-        const auto now = std::chrono::steady_clock::now();
-        const std::chrono::duration<float> deltaTime = now - _lastFrameTime;
+        const auto now = gpuSystem->BeginFrameTiming(flightIndex);
+        _deltaTime = now - _lastFrameTime;
         _lastFrameTime = now;
+        _framePrepared = true;
+        return true;
+    }
 
+    std::optional<uint64_t> TickFrame(bool isInModalLoop, bool waitForWritableSlot) {
+        if (!PrepareFrame(waitForWritableSlot)) return std::nullopt;
+        _ticking = true;
+        auto scope = MakeScopeGuard([this]() noexcept { _ticking = false; });
+        _framePrepared = false;
+        RADRAY_PROFILE_SCOPE_N("TickFrame");
+        auto* gpuSystem = _app->GetGpuSystem();
+        const uint64_t frameIndex = gpuSystem->GetFrameIndex();
+        const uint32_t flightIndex = static_cast<uint32_t>(frameIndex % gpuSystem->GetFlightDataCount());
+        const auto deltaTime = _deltaTime;
+        CheckRecreateSwapChains();
         _runnerFrameDatas[flightIndex].DeltaTime = deltaTime;
         _runnerFrameDatas[flightIndex].IsInModalLoop = isInModalLoop;
         AppUpdateResult result{};
@@ -842,6 +864,8 @@ public:
     std::mutex _retireMutex;
     // 主线程独占
     std::chrono::steady_clock::time_point _lastFrameTime{std::chrono::steady_clock::now()};
+    std::chrono::duration<float> _deltaTime{};
+    bool _framePrepared{false};
     bool _ticking{false};
     bool _hasModalLoopActivityDuringDispatch{false};
     // 渲染线程独占
@@ -1000,14 +1024,16 @@ bool Application::InitializeRuntime(const ApplicationRuntimeDescriptor& desc) {
     }
     _world = make_unique<World>(this);
 
-    using RuntimeServices = ServiceRegistry<
-        WindowManager, GpuSystem, RenderSystem, AssetManager, World,
-        OptionalService<AssetDatabase>>;
-    RuntimeServices registry{
-        *_windowManager, *_gpuSystem, *_renderSystem, *_assetManager, *_world,
-        Nullable<AssetDatabase*>{_assetDatabase.get()}};
-    if (auto status = registry.Initialize(); !status) {
-        RADRAY_ERR_LOG("initialize service '{}' failed: {}", status.Service, status.Message);
+    _windowManager->SetGpuSystem(_gpuSystem.get());
+    _windowManager->SetRenderSystem(_renderSystem.get());
+    _gpuSystem->SetWindowManager(_windowManager.get());
+    _renderSystem->SetGpuSystem(_gpuSystem.get());
+    _assetManager->SetWaitFrameProcessor(_gpuSystem.get());
+    _assetManager->SetAssetSource(_assetDatabase.get());
+
+    string renderError;
+    if (!_renderSystem->OnInitialize(renderError)) {
+        RADRAY_ERR_LOG("initialize RenderSystem failed: {}", renderError);
         DestroyRuntime();
         return false;
     }

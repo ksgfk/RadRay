@@ -9,7 +9,6 @@
 #include <radray/render/backend/vulkan_helper.h>
 #include <radray/render/pipeline_layout_types.h>
 #include <radray/render/rhi.h>
-#include <radray/render/sampler_cache.h>
 
 namespace radray::render::vulkan {
 
@@ -42,6 +41,10 @@ class ComputePipelineVulkan;
 class ShaderModuleVulkan;
 class SamplerVulkan;
 class QueryPoolVulkan;
+
+struct SamplerStateHashVulkan {
+    size_t operator()(const VulkanImmutableSamplerState& state) const noexcept;
+};
 
 struct QueueIndexInFamily {
     uint32_t Family;
@@ -322,6 +325,10 @@ public:
 
     Nullable<unique_ptr<SamplerVulkan>> CreateSamplerInternal(const SamplerDescriptor& desc) noexcept;
 
+    Nullable<unique_ptr<SamplerVulkan>> CreateSamplerInternal(const VulkanImmutableSamplerState& state) noexcept;
+
+    Nullable<SamplerVulkan*> GetOrCreateSamplerInternal(const VulkanImmutableSamplerState& state) noexcept;
+
     const VkAllocationCallbacks* GetAllocationCallbacks() const noexcept;
 
     void SetObjectName(std::string_view name, VkObjectType type, void* vkObject) const noexcept;
@@ -340,7 +347,7 @@ public:
     DeviceFuncTable _ftb;
     DescriptorSetLayoutCacheVulkan _descriptorSetLayoutCache;
     DescriptorSetAllocatorVulkan _descriptorSetAllocator;
-    SamplerCache _samplerCache;
+    unordered_map<VulkanImmutableSamplerState, unique_ptr<SamplerVulkan>, SamplerStateHashVulkan> _samplerCache;
     VkPhysicalDeviceFeatures _feature;
     ExtFeaturesVulkan _extFeatures;
     VkPhysicalDeviceProperties _properties;
@@ -1005,7 +1012,7 @@ struct ShaderParameterSetLayoutEntryVulkan {
     uint32_t Count{0};
     ShaderStages Stages{ShaderStage::UNKNOWN};
     VkDescriptorType DescriptorType{VK_DESCRIPTOR_TYPE_MAX_ENUM};
-    // Index into `PipelineLayoutVulkan::_immutableSamplers`, or `shader::kShaderNoSampler`.
+    // Index into the creation-time `ResolvedVulkanLayout::ImmutableSamplers`, or `shader::kShaderNoSampler`.
     uint32_t ImmutableSamplerIndex{shader::kShaderNoSampler};
 
     bool IsDynamic() const noexcept {
@@ -1043,9 +1050,6 @@ public:
     // `vkCmdBindDescriptorSets` expects is the resolved order by construction.
     vector<vector<uint32_t>> _dynamicEntryOrder;
     vector<BackendBindingName> _bindingNames;
-    // Immutable samplers are owned by the layout: VkDescriptorSetLayout only borrows the handles,
-    // so they must outlive every set layout and parameter set created from this layout.
-    vector<VkSampler> _immutableSamplers;
     uintptr_t _bindingGeneration{0};
     std::optional<VkPushConstantRange> _pushConstantRange;
     std::optional<ShaderBindingLocation> _pushConstantLocation;

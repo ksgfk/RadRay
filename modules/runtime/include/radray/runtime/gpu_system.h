@@ -9,13 +9,10 @@
 #include <radray/types.h>
 #include <radray/channel.h>
 #include <radray/coroutine.h>
-#include <radray/vertex_data.h>
 #include <radray/render/rhi.h>
 #include <radray/runtime/asset.h>
 #include <radray/runtime/gpu_resource.h>
 #include <radray/runtime/wait_frame.h>
-#include <radray/runtime/frame_submission.h>
-#include <radray/runtime/service_traits.h>
 
 // device / queue / flight / 上传 / 帧边界等待。帧序与关停顺序: docs/architecture/frame-and-gpu.md
 
@@ -130,7 +127,6 @@ struct GpuFlightSlot {
     bool UploadsPrepared{false};
     bool Rendered{true};
     uint64_t FrameSerial{0};
-    vector<shared_ptr<FrameSubmission>> Submissions;
 
     // —— 计时态（游戏线程写）。
     std::chrono::steady_clock::time_point FrameStartTime{};
@@ -302,7 +298,6 @@ public:
 
     uint32_t FlightIndex() const noexcept { return _flightIndex; }
     uint64_t FrameSerial() const noexcept;
-    void TrackSubmission(shared_ptr<FrameSubmission> submission);
     std::chrono::duration<float> DeltaTime() const noexcept { return _deltaTime; }
     std::chrono::duration<float> LastFrameLatency() const noexcept { return _lastFrameLatency; }
     bool IsInModalLoop() const noexcept { return _isInModalLoop; }
@@ -389,6 +384,9 @@ public:
     GpuFenceSignal GetFlightGpuSignal(uint32_t flightIndex) const noexcept;
     /// [GT] 当前 flight 已可写且尚未交给 RT；先应用完成批次，再恢复 WaitFrame 与上传协程。
     void BeginUpdateForFlight(uint32_t flightIndex, std::span<const FlightCompletion> completions);
+    /// [GT] 完成批次与应用完成钩子处理结束后、派发本帧事件前调用；当前 flight 已可写。
+    /// 返回 latency 起点，runner 同时用它计算相邻逻辑帧的 DeltaTime。
+    std::chrono::steady_clock::time_point BeginFrameTiming(uint32_t flightIndex) noexcept;
     /// [GT] Update 之后、交给 RT 之前调用；会恢复上传协程，不能与其他 GT 调度并发。
     /// 单线程/手动录制可由同一 GT 的 BeginFrameRecord 补调；上传资源保留到真实 fence 完成。
     void PrepareFrameUploads(uint32_t flightIndex);
@@ -475,16 +473,6 @@ private:
     unique_ptr<GpuFrameProfiler> _frameProfiler;
     uint64_t _nowFrameIndex{0};
     std::atomic<float> _lastFrameLatencySeconds{0.0f};
-};
-
-template <>
-struct ServiceTraits<GpuSystem> {
-    using Provides = TypeList<IWaitFrameProcessor>;
-    using Dependencies = TypeList<Required<WindowManager>>;
-    /// [GT，装配阶段] 在发布给其他线程之前连接窗口系统。
-    static void Inject(GpuSystem& self, WindowManager& windows) noexcept;
-    /// [GT，拆除阶段] render/GPU 已 idle，且已停止其他线程访问。
-    static void Unwire(GpuSystem& self) noexcept;
 };
 
 template <>

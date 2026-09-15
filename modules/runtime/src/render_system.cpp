@@ -18,15 +18,17 @@ void RenderSystem::OnShutdown() noexcept {
     _renderPassRegistry.reset();
 }
 
-ServiceStatus RenderSystem::OnInitialize() {
+bool RenderSystem::OnInitialize(string& error) {
+    error.clear();
     auto gpu = _gpuSystem;
     if (_app == nullptr || !gpu || gpu->GetDevice() == nullptr) {
-        return ServiceStatus::Failure("Application, GpuSystem or Device is missing");
+        error = "Application, GpuSystem or Device is missing";
+        return false;
     }
     render::Device* device = gpu->GetDevice();
     _renderPassRegistry = make_unique<render::RenderPassRegistry>(device);
     _shaderCache = make_unique<ShaderProgramCache>(*device, _app->GetShaderSourceRoot(), _app->GetShaderIncludePaths());
-    return {};
+    return true;
 }
 
 Nullable<ShaderProgram*> RenderSystem::GetOrCreateShaderProgram(const ShaderProgramRequest& request) {

@@ -12,7 +12,6 @@
 #include <radray/types.h>
 #include <radray/render/rhi.h>
 #include <radray/window/native_window.h>
-#include <radray/runtime/service_traits.h>
 
 namespace radray {
 
@@ -137,13 +136,6 @@ private:
     const std::thread::id _gameThread{std::this_thread::get_id()};
     bool _renderIdle{true};
     std::function<void()> _renderIdleWaiter;
-};
-
-template <>
-struct ServiceTraits<WindowManager> {
-    using Dependencies = TypeList<Link<GpuSystem>, Link<RenderSystem>>;
-    static void Inject(WindowManager& self, GpuSystem& gpu, RenderSystem& render) noexcept;
-    static void Unwire(WindowManager& self) noexcept;
 };
 
 template <>

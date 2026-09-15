@@ -1,6 +1,6 @@
 > - 适用: Application、World/Component、shader cache 与服务装配
 > - 权威: 本文描述当前保留的 runtime 宿主；GPU 帧与上传见 frame-and-gpu，旧渲染框架见临时快照
-> - 锚点: `modules/runtime/include/radray/runtime/application.h`, `modules/runtime/src/application.cpp`, `modules/runtime/include/radray/runtime/render_system.h`, `modules/runtime/src/render_system.cpp`, `modules/runtime/include/radray/runtime/game_framework/world.h`, `modules/runtime/include/radray/runtime/components/`, `modules/runtime/include/radray/runtime/shader_program.h`, `modules/runtime/include/radray/runtime/service_registry.h`
+> - 锚点: `modules/runtime/include/radray/runtime/application.h`, `modules/runtime/src/application.cpp`, `modules/runtime/include/radray/runtime/render_system.h`, `modules/runtime/src/render_system.cpp`, `modules/runtime/include/radray/runtime/game_framework/world.h`, `modules/runtime/include/radray/runtime/components/`, `modules/runtime/include/radray/runtime/shader_program.h`
 
 # Runtime 宿主、组件与 shader
 
@@ -11,8 +11,10 @@ renderer list、output registry 或时域历史系统。
 ## Application 与 runner
 
 `Run(desc)` 创建 WindowManager、GpuSystem、RenderSystem、AssetManager、World 和可选 AssetDatabase，
-通过 ServiceRegistry 注入后建主窗口与 swapchain，调用 OnInit，再进入 StartLoop。
+由 Application 直接连接系统依赖并初始化 RenderSystem，再建主窗口与 swapchain，调用 OnInit，进入 StartLoop。
 Application 继续负责资产 Pump、ApplicationScheduler、World tick 以及固定关停顺序。
+两种 runner 都先取得可写 flight、处理完成批次，再记录帧开始时间、派发窗口事件并执行 Update；
+时间口径和模态循环中的准备帧复用见[帧与 GPU](frame-and-gpu.md#帧序)。
 
 SingleThreadRunner 顺序执行 update/record/submit；ThreadedRunner 保留 game/render 两线程、
 可写/ready slot semaphore 与 fence 退休协议。窗口模态循环使用既有 Win32 vblank 机制。
@@ -59,80 +61,30 @@ GpuMesh 只保存 GPU buffers、vertex/index views 与 topology，不缓存顶�
 ResourceUploader 仍在分配和录制前校验单顶点流、stride、attribute 范围和语义唯一性，顶点流固定绑定到 slot 0。
 primitive_vertex_layout 及其 resolver 已移除；PSO 调用方提供 RHI VertexInputState，由 RHI 对照 artifact 校验。
 
-## ServiceRegistry
+## Application 直接装配
 
-`ServiceRegistry<Entries...>` 是非拥有的静态装配器。系统头文件只包含轻量的
-`service_traits.h` 并声明自己的契约；Application 只列出服务集合。`service_registry.h` 中的
-`detail` 命名空间在编译期匹配提供者、检查签名并计算稳定拓扑序，装配器按类型序列展开直接调用。
-实例里只有固定 tuple 的对象指针、执行进度与状态，没有 RTTI 索引、函数指针表或运行时图。
+底层系统的依赖关系集中在 `Application::InitializeRuntime`，由显式构造和 setter 调用建立。
+系统只保存所需的借用引用；新增依赖时直接修改这里的接线和 `DestroyRuntime` 的拆除顺序。
 
-```cpp
-template <> struct ServiceTraits<AssetManager> {
-    using Dependencies = TypeList<Required<IWaitFrameProcessor>, Optional<IAssetSource>>;
-    static void Inject(AssetManager& self, IWaitFrameProcessor& frames,
-                       Nullable<IAssetSource*> source) noexcept;
-    static void Unwire(AssetManager& self) noexcept;
-};
-```
+| 消费者 | 借用的对象或接口 | 接线方式 |
+|---|---|---|
+| `WindowManager` | `GpuSystem`、`RenderSystem` | `SetGpuSystem`、`SetRenderSystem` |
+| `GpuSystem` | `WindowManager` | `SetWindowManager` |
+| `RenderSystem` | `Application`、`GpuSystem` | 构造参数、`SetGpuSystem` |
+| `AssetManager` | `IWaitFrameProcessor`、可选 `IAssetSource` | `SetWaitFrameProcessor`、`SetAssetSource` |
+| `AssetDatabase` 的默认 importers | `FrameUploadScheduler` | 构造参数 |
+| `World` | `Application` | 构造参数 |
 
-`ServiceTraits<T>::Provides = TypeList<Interfaces...>` 显式暴露接口；具体类型 T 自动可查。
-接口必须能从 T 公开、无歧义地转换，转换在已知类型下使用 `static_cast`，保留多继承指针调整。
-同一实例的多个接口只共享一份生命周期。重复具体类型、重复导出、多个提供者、缺失必需依赖、
-非法钩子签名与生命周期环都会阻止 registry 实例化。`kValidServiceRegistry<...>` 可用于
-静态检查组合，`kInitializationOrder` 是编译期槽位索引数组；无依赖节点按集合声明顺序打破平局。
+Application 先构造 WindowManager 和 GpuSystem（包含 device），再创建 RenderSystem、AssetManager、
+可选 AssetDatabase 与 World。全部对象就位后直接接线：GpuSystem 提供帧等待接口，AssetDatabase
+提供可选资产来源；未配置资产根或数据库打开失败时，资产来源为空。
+WindowManager 与 GpuSystem 的双向引用在启动渲染线程前建立。
 
-依赖列表的顺序也是 `Inject(T&, args...)` 的参数顺序：
+接线完成后直接调用 `RenderSystem::OnInitialize(error)`，创建 shader/program 与 render-pass caches。
+初始化失败时记录错误并调用 `DestroyRuntime`，返回启动失败；窗口或 swapchain 创建失败使用同一清理路径。
+RenderSystem 的析构接受部分初始化状态，通过 `OnShutdown` 幂等释放缓存。
 
-| 声明 | 注入参数 | 存在性 | 生命周期顺序 |
-|---|---|---|---|
-| `Required<T>` | `T&` | 必须是非空槽位 | 提供者先初始化、后 Shutdown |
-| `Optional<T>` | `Nullable<T*>` | 可缺类型或实例 | 存在该类型时建立顺序 |
-| `Link<T>` | `T&` | 必须是非空槽位 | 只接引用，不建立启动边 |
-| `OptionalLink<T>` | `Nullable<T*>` | 可缺类型或实例 | 只接引用，不建立启动边 |
-
-所有对象先存在，再调用注入函数，因此引用环合法。需要对方已初始化的能力必须声明为
-`Required`/`Optional`，不能用 `Link` 隐藏真实的生命周期环。`const T` 依赖注入 const 视图。
-
-普通槽位的构造参数是 `T&`；`OptionalService<T>` 接受 `Nullable<T*>`，绑定时复制存在状态，
-之后不可替换。必需依赖不能由可选槽位满足，即使调用方本次传入非空对象也一样。
-图按所有可能存在的槽位静态校验；空槽位只跳过该对象的钩子，不重新排序。
-已存在的可选服务初始化失败仍然失败，不会悄悄变成缺席。
-
-`Get<T>()` 返回 `T&`，要求编译期存在非可选提供者。`Resolve<T>()` 返回 `Nullable<T*>`，
-未导出的类型或空可选槽位返回空；查询直接访问固定槽位。registry 的 const 不改变借用对象的
-可变性，需要只读视图时显式查询 `const T`。查询表示对象身份，不表示已经初始化。
-
-静态钩子契约：
-
-- `Inject(T&, args...) noexcept` 只连接引用；有依赖时必须提供。没有依赖也可以提供该钩子。
-  参数必须精确匹配依赖列表，不能通过按值复制服务或其他隐式转换接受依赖。
-- `Initialize(T&) -> ServiceStatus` 显式初始化；没有钩子的服务按已就绪处理。
-- 声明 Initialize 时必须提供 `Shutdown(T&) noexcept`，并支持部分初始化；只提供 Shutdown 也合法。
-- `Unwire(T&) noexcept` 可选，在所有 Shutdown 之后解除引用。Shutdown 期间对象与引用仍有效，
-  操作已启动能力必须遵守依赖顺序。绑定对象必须活过整个调用。
-- `Name` 可选，必须引用静态存储期字符串，用来标识运行时失败；不存在时 `ServiceStatus::Service`
-  为空，`Message` 仍保留服务报告的原因。服务自身同名成员不会自动变成钩子。
-
-`Initialize()` 仅允许从 Ready 调用一次：先全部 Inject，再按编译期拓扑顺序启动。进入每个
-Initialize 前记录进度，失败时先 Shutdown 当前部分初始化的服务，再逆序处理此前服务，
-最后按注入的逆序 Unwire 全部已接线对象。错误包含 `Code/Message/Service`；失败后状态为 Failed。
-作用域守卫也在栈展开时执行相同清理，但不捕获、转换异常。注入/清理钩子不得抛异常。
-
-正常 `Shutdown()` 使用相同的反向展开，幂等；生命周期调用中的重入返回 false，重复 Initialize
-返回 InvalidState。Stopped/Failed 不允许重新启动。生命周期操作由调用方串行化；只读查询不修改
-registry，但对象的线程安全仍由对象自己保证。
-
-registry 析构不调用钩子、不释放借用对象。owner 显式选择 Shutdown 时机，负责先使 GPU、任务与
-引用持有者静默。Application 当前只用局部 registry 完成启动事务，正常运行后的对象析构仍由
-上文固定 teardown 执行；`RenderSystem::OnShutdown` 与析构共享幂等资源清理。
-
-当前系统契约：
-
-| 服务 | Provides | Dependencies | 生命周期 |
-|---|---|---|---|
-| `WindowManager` | — | `Link<GpuSystem>`, `Link<RenderSystem>` | Unwire |
-| `GpuSystem` | `IWaitFrameProcessor` | `Required<WindowManager>` | Unwire；设备已由构造创建 |
-| `AssetManager` | — | `Required<IWaitFrameProcessor>`, `Optional<IAssetSource>` | Unwire |
-| `AssetDatabase` | `IAssetSource` | — | 打开成功后作为可选实例绑定 |
-| `RenderSystem` | — | `Required<GpuSystem>` | Initialize / Shutdown / Unwire |
-| `World` | — | — | 当前由 Application 构造与析构 |
+正常关停先停止 runner、等待 GPU idle、消费完成消息并取消应用调度任务，再由 `DestroyRuntime`
+按固定顺序释放对象。WindowManager 借用的 RenderSystem 引用在后者销毁前清空；AssetManager
+销毁并收束加载协程后才销毁 AssetDatabase；交换链释放后才断开窗口与 GPU 的双向引用并销毁 device。
+借用引用的提供者必须活过消费者的清理，完整时序见[帧与 GPU](frame-and-gpu.md#关停顺序)。

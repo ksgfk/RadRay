@@ -156,10 +156,11 @@ public:
     AppUpdateResult Update(const AppUpdateContext& ctx);
     void Render(AppFrameContext& ctx);
     int Shutdown(const AppShutdownContext& ctx);
-    /// Runner 取得可写槽位后调用；消费 GPU 完成消息并推进本帧的 GT 调度。
-    void BeginUpdateForFlight(uint32_t flightIndex);
-
     int StartLoop();
+
+    /// 上一帧完成后，在主线程完成回调，Runner 取得可写槽位后调用；消费 GPU 完成消息并推进本帧的 GT 调度。
+    /// 调用阶段在本帧计时与窗口事件派发之前。
+    void BeginUpdateForFlight(uint32_t flightIndex);
 
 protected:
     // 游戏 override 点 (窄接口)。底层负责"何时 tick、怎么 acquire/render/present",

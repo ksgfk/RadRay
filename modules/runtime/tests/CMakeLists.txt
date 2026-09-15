@@ -1,5 +1,5 @@
 # Runtime foundation tests; graph/Forward/UI tests were removed with the old renderer.
-foreach(topic application asset_database asset_slot component_rtti frame_submission frame_upload shader_parameters service_registry spot_light)
+foreach(topic application asset_database asset_slot component_rtti frame_upload shader_parameters spot_light)
     radray_add_test(test_${topic} SOURCES test_${topic}.cpp LINK_LIBS radrayruntime)
 endforeach()
 target_include_directories(test_application PRIVATE "${CMAKE_SOURCE_DIR}/modules/render/tests")
