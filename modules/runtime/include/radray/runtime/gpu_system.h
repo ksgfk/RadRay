@@ -10,7 +10,6 @@
 #include <radray/channel.h>
 #include <radray/coroutine.h>
 #include <radray/render/rhi.h>
-#include <radray/runtime/asset.h>
 #include <radray/runtime/gpu_resource.h>
 #include <radray/runtime/wait_frame.h>
 
@@ -25,21 +24,9 @@ namespace radray {
 class AppWindow;
 class WindowManager;
 class AppFrameContext;
-class FrameUploadScheduler;
-class BeginFrameUploadAwaitable;
-class FrameUploadScope;
-class WaitFrameUploadGpuAwaitable;
 class WaitFrameAwaitable;
-struct FrameUploadRecord;
 struct WaitFrameRecord;
 class GpuSystem;
-
-enum class FrameUploadStage {
-    AwaitingFrame,
-    InFrame,
-    AwaitingFence,
-    FenceComplete,
-};
 
 struct GpuSystemDescriptor {
     render::VulkanInstanceDescriptor VulkanInstance{};
@@ -49,14 +36,6 @@ struct GpuSystemDescriptor {
     uint32_t BackBufferCount{3};
     uint32_t FlightDataCount{2};
     bool EnableFrameProfiler{true};
-};
-
-/// 一条等待 GpuSystem 上传阶段 / GPU fence 的协程记录。由 FrameUploadScheduler 管理。
-struct FrameUploadRecord : ManualCoroutineRecord {
-    render::CommandBuffer* Cmd{nullptr};
-    ResourceUploader* Uploader{nullptr};
-    uint32_t FlightIndex{std::numeric_limits<uint32_t>::max()};
-    FrameUploadStage CurrentStage{FrameUploadStage::AwaitingFrame};
 };
 
 /// 一条等待帧边界的协程记录(IWaitFrameProcessor::Wait 的挂起点)。挂在某个 flight 上,
@@ -118,13 +97,11 @@ struct GpuFlightSlot {
     //    PresentCommandPool 按 acquire 的窗口复用，Targets 收集本帧窗口。
     unique_ptr<render::CommandBuffer> CmdBuffer;
     vector<unique_ptr<render::CommandBuffer>> PresentCommandPool;
-    unique_ptr<render::CommandBuffer> UploadCommands;
     unique_ptr<ResourceUploader> Uploader;
     HostWriteBatch HostWrites;
     vector<AcquiredTarget> Targets;
     bool Submitted{false};
     bool Recording{false};
-    bool UploadsPrepared{false};
     bool Rendered{true};
     uint64_t FrameSerial{0};
 
@@ -149,69 +126,6 @@ struct AppFrameSubmitDescriptor {
     std::span<uint64_t> WaitValues{};
 };
 
-class WaitFrameUploadGpuAwaitable {
-public:
-    WaitFrameUploadGpuAwaitable(FrameUploadScheduler* scheduler, FrameUploadRecord* record) noexcept
-        : _scheduler(scheduler), _record(record) {}
-
-    bool await_ready() noexcept;
-    bool await_suspend(std::coroutine_handle<> h) noexcept;
-    bool await_resume() noexcept;
-
-private:
-    FrameUploadScheduler* _scheduler;
-    FrameUploadRecord* _record;
-};
-
-class FrameUploadScope {
-public:
-    FrameUploadScope() noexcept = default;
-
-    render::CommandBuffer* GetCommandBuffer() const noexcept;
-    ResourceUploader& GetUploader() const noexcept;
-    uint32_t GetFlightIndex() const noexcept;
-
-    task<void> WaitGpu();
-
-private:
-    friend class BeginFrameUploadAwaitable;
-    FrameUploadScope(FrameUploadScheduler* scheduler, FrameUploadRecord* record) noexcept
-        : _scheduler(scheduler), _record(record) {}
-    FrameUploadScheduler* _scheduler{nullptr};
-    FrameUploadRecord* _record{nullptr};
-};
-
-/// GpuSystem 专属的帧上传协程调度器。负责等待帧顶 upload phase 与 GPU fence。
-class FrameUploadScheduler {
-public:
-    FrameUploadScheduler() noexcept = default;
-    FrameUploadScheduler(const FrameUploadScheduler&) = delete;
-    FrameUploadScheduler(FrameUploadScheduler&&) = delete;
-    FrameUploadScheduler& operator=(const FrameUploadScheduler&) = delete;
-    FrameUploadScheduler& operator=(FrameUploadScheduler&&) = delete;
-    ~FrameUploadScheduler() noexcept;
-
-    task<FrameUploadScope> BeginUpload();
-    /// Run and Pump execute on the game thread.
-    void RunUploadPhase(render::CommandBuffer* cmdBuffer, ResourceUploader& uploader, uint32_t flightIndex);
-    /// Resume completed/canceled loads on the game thread.
-    void PumpCompletedUploads();
-    /// Calling-thread stage marker; CPU file/decode/mip preparation must precede this phase.
-    bool IsRecordingUploads() const noexcept { return _recordingUploads; }
-    void ApplyCompletedFlights(std::span<const FlightCompletion> completions);
-
-    FrameUploadRecord* RegisterUpload(stop_token stop, std::coroutine_handle<> continuation);
-    bool EraseUpload(FrameUploadRecord* record) noexcept;
-
-private:
-    bool IsUploadAlive(FrameUploadRecord* record) const noexcept;
-    void ResumeRecord(FrameUploadRecord* record);
-    void CancelRecord(FrameUploadRecord* record) noexcept;
-
-    ManualCoroutineScheduler<FrameUploadRecord> _uploads;
-    bool _recordingUploads{false};
-};
-
 /// co_await GpuSystem::Wait() 的 awaitable。恢复点在 GpuSystem::PumpWaitFrame(主线程)。
 class WaitFrameAwaitable {
 public:
@@ -228,22 +142,6 @@ private:
     WaitFrameRecord* _record{nullptr};
 };
 
-/// co_await FrameUploadScheduler::BeginUpload() 的 awaitable。恢复点在 GpuSystem 帧顶 upload phase。
-class BeginFrameUploadAwaitable {
-public:
-    BeginFrameUploadAwaitable(FrameUploadScheduler* scheduler, stop_token stop) noexcept
-        : _scheduler(scheduler), _stop(stop) {}
-
-    bool await_ready() const noexcept;
-    bool await_suspend(std::coroutine_handle<> h);
-    std::optional<FrameUploadScope> await_resume() noexcept;
-
-private:
-    FrameUploadScheduler* _scheduler;
-    stop_token _stop;
-    FrameUploadRecord* _record{nullptr};
-};
-
 /// 每帧 GPU 耗时探针。对应 UE5 的 FGPUTiming(最小化):per-flight timestamp pool + readback。
 /// 由 GpuSystem 在 BeginFrameRecord/EndFrameRecordAndSubmit 自动包裹本帧录制,
 /// CompleteFlight 时 resolve。应用只读 GetLastGpuTimeMs()。后端 readback barrier 差异内部隐藏。
@@ -256,7 +154,7 @@ public:
     GpuFrameProfiler& operator=(const GpuFrameProfiler&) = delete;
     GpuFrameProfiler& operator=(GpuFrameProfiler&&) = delete;
 
-    /// 帧顶(upload phase 之后):reset pool + 写 Top timestamp。
+    /// 录制开始时 reset pool + 写 Top timestamp。
     void BeginFrame(render::CommandBuffer* cmdBuffer, uint32_t flightIndex);
     /// 帧尾(提交之前):写 Bottom timestamp + resolve 到 readback(含后端 barrier)。
     void EndFrame(render::CommandBuffer* cmdBuffer, uint32_t flightIndex);
@@ -375,24 +273,19 @@ public:
     bool CompleteFlight(uint32_t flightIndex);
     /// [GT，非录制阶段] 内部等待 render/GPU idle，再退休所有已提交 flight；不恢复 GT 协程。
     void WaitAndRetireFlights();
-    /// [GT，render/GPU idle] Application 在 WaitAndRetireFlights 后传入批次，恢复全部 flight 的等待者。
-    void CleanupCompletedFlights(std::span<const FlightCompletion> completions);
+    /// [GT，render/GPU idle] Application 在 WaitAndRetireFlights 后调用，恢复全部 flight 的等待者。
+    void CleanupCompletedFlights();
     /// [GT/RT，retire 阶段] 同 CompleteFlight 的同步前提；wait=true 只等待已提交的 fence。
     bool CompleteFlightIfReady(uint32_t flightIndex, bool wait);
     /// [GT/RT，retire 阶段] 读取须与 retire、槽位复用互斥；函数本身不加锁。
     /// 仅在该 flight 已计入 rendered 之后读，与 Submit 后发布的 release 成对。
     GpuFenceSignal GetFlightGpuSignal(uint32_t flightIndex) const noexcept;
-    /// [GT] 当前 flight 已可写且尚未交给 RT；先应用完成批次，再恢复 WaitFrame 与上传协程。
-    void BeginUpdateForFlight(uint32_t flightIndex, std::span<const FlightCompletion> completions);
+    /// [GT] 当前 flight 已可写且尚未交给 RT；重置 HostWrites 并恢复该槽位的帧等待者。
+    void BeginUpdateForFlight(uint32_t flightIndex);
     /// [GT] 完成批次与应用完成钩子处理结束后、派发本帧事件前调用；当前 flight 已可写。
     /// 返回 latency 起点，runner 同时用它计算相邻逻辑帧的 DeltaTime。
     std::chrono::steady_clock::time_point BeginFrameTiming(uint32_t flightIndex) noexcept;
-    /// [GT] Update 之后、交给 RT 之前调用；会恢复上传协程，不能与其他 GT 调度并发。
-    /// 单线程/手动录制可由同一 GT 的 BeginFrameRecord 补调；上传资源保留到真实 fence 完成。
-    void PrepareFrameUploads(uint32_t flightIndex);
-
-    /// [RT] 已接管当前 flight，独占录制至提交；多线程模式下 GT 必须已 PrepareFrameUploads。
-    /// 单线程/手动入口在 GT 同时承担录制职责时，允许补做上传准备。
+    /// [RT] 当前 flight 已交给录制线程；同时开始应用显式上传所用的 uploader。
     /// 一帧开头：取/建该 flight 的共享 CommandBuffer 并 Begin()，清空上帧 acquire 的目标。
     /// Present command buffer 在 AcquireWindow 时 Begin。返回 Render 用的帧上下文。
     AppFrameContext BeginFrameRecord(
@@ -405,13 +298,8 @@ public:
     /// [RT] 与 BeginFrameRecord 在同一录制线程调用，当前 flight 尚未交给 retire。
     /// 一帧收尾：uploader.EndFlight → 结束共享与 per-HWND CB → 聚合 sync object → Submit
     /// （D3D12 多 HWND 时每窗 Execute 后立刻 Present；其余一次 Submit 再 Present）
-    /// （acquired 窗口已不可呈现时只提交上传命令）→ 写 flight.Signal。
+    /// （acquired 窗口已不可呈现时跳过本轮命令）→ 写 flight.Signal。
     void EndFrameRecordAndSubmit(uint32_t flightIndex);
-
-    /// [GT] 返回仅由 GT 使用的上传调度器。
-    FrameUploadScheduler& GetFrameUploadScheduler() noexcept { return *_frameUploadScheduler; }
-    /// [GT] 当前轮的 PumpWaitFrame 之后恢复上传协程；不得在上传录制阶段调用。
-    void PumpFrameUploadScheduler();
 
     /// [任意线程] 只读取构造后稳定的 device 指针。
     render::Device* GetDevice() const noexcept { return _device.get(); }
@@ -467,7 +355,6 @@ private:
     /// ManualCoroutineScheduler, 挂起的协程记录里存着回指调度器的指针 (stop callback),
     /// 搬动槽位会让那些指针指向旧地址。数量构造时定下, 故间接一层无代价。
     vector<unique_ptr<FlightSlot>> _flights;
-    unique_ptr<FrameUploadScheduler> _frameUploadScheduler;
     /// Application 是唯一消费者；只在 game thread 读取。
     UnboundedChannel<FlightCompletion> _flightCompletions;
     unique_ptr<GpuFrameProfiler> _frameProfiler;

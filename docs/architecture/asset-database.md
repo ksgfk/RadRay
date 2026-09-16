@@ -101,10 +101,11 @@ const 视图都遵循真实 C++ 继承关系。仅为查询 settings 不需要�
 
 | type | 扩展名 | settings | 加载路径 |
 |---|---|---|---|
-| `texture` | `.png`, `.jpg`, `.jpeg` | `TextureImportSettings{Srgb, GenerateMips}` | 解码 RGBA8；可在 CPU 生成完整 mip 链（sRGB 在 linear 空间过滤）；经 `FrameUploadScheduler` 上传为 `TextureAsset` |
-| `mesh` | `.obj` | 无 | `WavefrontObjReader` → `TriangleMesh` → `MeshResource` → `LoadStaticMesh` |
+| `texture` | `.png`, `.jpg`, `.jpeg` | `TextureImportSettings{Srgb, GenerateMips}` | 暂未实现 GPU 上传；保留 settings，加载明确失败 |
+| `mesh` | `.obj` | 无 | 暂未实现 GPU 上传；加载明确失败 |
 
-OBJ importer 只覆盖当前 reader 能表达的单文件三角面模型；不导入材质、子资产或跨资产引用。
+内置网格、纹理的 GPU 加载路径已移除，不读取或上传源文件；待设计范围见
+[资产 GPU 上传待设计](frame-and-gpu.md#资产-gpu-上传待设计)。CPU ImageAsset 与通用 OBJ reader 不受影响。
 
 ## 加载桥接
 
@@ -136,12 +137,12 @@ Application 直接调用 `AssetManager::SetAssetSource(_assetDatabase.get())`，
 World → RenderSystem → AssetManager → AssetDatabase → GpuSystem
 ```
 
-数据库持有 importer 与 settings，必须活过 manager 对在飞加载 task 的取消和收束；GPU 上传依赖
-又要求 `GpuSystem` 最后销毁。调用方使用装配方提供的资产根，通过 typed path load 持有 mesh
-与贴图引用；外部资产包须同时提供匹配的 manifest 与源资产。
+数据库持有 importer 与 settings，必须活过 manager 对在飞加载 task 的取消和收束。
+GPU 资产的延迟销毁仍要求 GpuSystem 最后销毁。manifest 与扩展名登记不代表当前 importer 已实现 GPU 加载。
 
 ## 测试
 
 `AssetDatabaseTest` 覆盖 schema/path 硬失败、GUID 格式、双索引、强类型与原始 settings、排序
 保存、重开一致性和 `Refresh` GUID 稳定性。`AssetSlotTest` 覆盖 `IAssetSource` 的 ID/path 加载、
-source 缺失和 slot 去重；两组均不需要 GPU。真实 GPU 上传由 FrameUploadTest 和 shader/RHI 测试覆盖。
+source 缺失和 slot 去重；两组均不需要 GPU。内置 GPU importer 的未实现诊断和路径快照由
+`BuiltinGpuImportersReportUnimplementedAndOwnTheirPath` 覆盖；`FrameUploadTest` 保留通用上传工具的校验测试。

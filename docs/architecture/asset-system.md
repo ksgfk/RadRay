@@ -95,9 +95,9 @@ StaticMeshComponent 保存 mesh ref，Material 保存 texture ref 加描述值�
 render thread 不访问非原子的 refs；TextureAsset 的 GetOrCreateSrv/view cache 由调用方串行访问。
 回收仍使用原有零引用与延迟销毁协议，不引入另一套引用计数。
 
-OBJ `MeshImporter` 在 GPU 上传前为每个 `MeshPrimitive` 建一个覆盖完整 index range 的默认 section，
-并从 `POSITION0` 计算 local bounds；任一步不自洽都使加载失败。资产暴露的
-`GpuMesh::DrawData` 指针在资产存活期内稳定，调用方持有 `StreamingAssetRef<StaticMesh>` 保证其寿命。
+`TextureAsset` 与 `StaticMesh` 的资产类型、显式构造和延迟销毁保留；构造方须提供完整数据。
+内置网格/纹理 GPU 加载暂时移除，importer 返回明确失败，后续设计范围见
+[资产 GPU 上传待设计](frame-and-gpu.md#资产-gpu-上传待设计)。
 
 ## 关停顺序
 

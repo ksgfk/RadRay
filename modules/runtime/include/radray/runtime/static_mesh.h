@@ -11,8 +11,6 @@
 
 namespace radray {
 
-class FrameUploadScheduler;
-
 struct StaticMeshSection {
     StaticMeshSection() noexcept;
     StaticMeshSection(
@@ -42,8 +40,7 @@ bool IsStaticMeshDataValid(
 
 /// 静态网格资产。CPU 网格数据 + section/bounds + 已上传的 GPU 渲染数据。
 ///
-/// 【构造即完整】: CPU 数据与 GPU 上传都由加载协程在构造前备齐, 资产一出生即可渲染,
-/// 不再有二段式回填 (从前的 SetSections / SetBounds)。
+/// 构造方必须提供完整 CPU/GPU 数据；内置 GPU 上传加载路径暂未实现。
 class StaticMesh : public Asset {
 public:
     StaticMesh(
@@ -66,7 +63,6 @@ public:
     // ─── GPU 渲染数据 ───
     // 对应 UE5 的 FStaticMeshRenderData: 上传后的 device-local 顶点/索引 buffer。
     // 返回指针在【本资产】存活期内稳定 —— 持有一份 StreamingAssetRef 即保证不悬垂
-    // (SceneProxy 缓存的 DrawData* 正是靠它, 见 primitive_scene_proxy.h)。
 
     const GpuMesh& GetRenderMesh() const noexcept { return _renderMesh; }
 
@@ -78,27 +74,15 @@ private:
     GpuMesh _renderMesh;
 };
 
-/// StaticMesh 的异步加载工厂。参数为已构建好的 CPU 网格数据(MeshResource);
-/// 协程内部完成 GPU 上传(跨帧),上传完成后一次性构造资产。
-/// 加载阶段对 AssetManager 不可见(协程内部事务)。
-task<AssetLoadResult> LoadStaticMesh(
-    FrameUploadScheduler& frameUploads,
-    MeshResource meshResource);
-
 class MeshImporter final : public AssetImporter {
 public:
-    explicit MeshImporter(FrameUploadScheduler& frameUploads) noexcept;
-
     std::string_view GetTypeName() const noexcept override;
     std::span<const std::string_view> GetFileExtensions() const noexcept override;
     task<AssetLoadResult> Load(const AssetLoadContext& ctx) override;
 
 private:
     static task<AssetLoadResult> LoadMesh(
-        FrameUploadScheduler* frameUploads,
         std::filesystem::path path);
-
-    FrameUploadScheduler& _frameUploads;
 };
 
 template <>

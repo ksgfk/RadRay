@@ -3,15 +3,12 @@
 #include <filesystem>
 
 #include <radray/hash.h>
-#include <radray/image_data.h>
 #include <radray/render/rhi.h>
 #include <radray/runtime/asset.h>
 #include <radray/runtime/asset_database.h>
 #include <radray/runtime/asset_manager.h>
 
 namespace radray {
-
-class FrameUploadScheduler;
 
 class TextureImportSettings;
 
@@ -72,7 +69,7 @@ namespace radray {
 /// render::Texture + 默认全量 SRV, 并内建一个按 TextureSubViewDesc 去重的子 view 缓存
 /// (对应 UE5 挂在 texture 上的 FRHITextureViewCache)。
 ///
-/// 构造即完整 (CPU 解码 + GPU 上传由加载协程在构造前完成), 与纯 CPU 的 ImageAsset 解耦。
+/// 构造方必须提供完整 GPU 数据；内置 GPU 上传加载路径暂未实现，与纯 CPU ImageAsset 解耦。
 /// view 所有权归本资产且永生至资产销毁, 故绑定点拿到的 view 指针在持有一份
 /// StreamingAssetRef 期间永不悬垂 —— 材质快照只需存 "ref + 描述值", 零裸指针。
 class TextureAsset : public Asset {
@@ -106,33 +103,8 @@ private:
     unordered_map<TextureSubViewDesc, unique_ptr<render::TextureView>> _viewCache;
 };
 
-struct TextureAssetLoadOptions {
-    /// true 时按 sRGB 解释纹理(GPU 采样时做 sRGB→linear)。base color / emissive 用 true;
-    /// normal / metallic-roughness / occlusion 用 false。
-    bool Srgb{false};
-    /// true 时在 CPU 侧生成完整 RGBA8 mip 链并逐级上传。
-    bool GenerateMips{false};
-    /// 解码失败时的回退像素(CPU)。为空时加载失败。
-    ImageData FallbackImage{};
-};
-
-/// importer 级构造任务：只产出 AssetLoadResult，不创建 AssetManager slot。
-task<AssetLoadResult> CreateTextureAssetFromImage(
-    FrameUploadScheduler& frameUploads,
-    string name,
-    ImageData image,
-    TextureAssetLoadOptions options = {});
-
-task<AssetLoadResult> CreateTextureAssetFromMemory(
-    FrameUploadScheduler& frameUploads,
-    string name,
-    vector<byte> encodedBytes,
-    TextureAssetLoadOptions options = {});
-
 class TextureImporter final : public TypedAssetImporter<TextureImportSettings> {
 public:
-    explicit TextureImporter(FrameUploadScheduler& frameUploads) noexcept;
-
     std::string_view GetTypeName() const noexcept override;
     std::span<const std::string_view> GetFileExtensions() const noexcept override;
 
@@ -140,29 +112,7 @@ protected:
     task<AssetLoadResult> LoadTyped(
         std::filesystem::path path,
         TextureImportSettings settings) override;
-
-private:
-    FrameUploadScheduler& _frameUploads;
 };
-
-/// 从已解码的 CPU 像素(ImageData)创建 GPU 贴图。协程内部 co_await 帧顶 upload phase
-/// 录制上传,再等 GPU fence,完成后一次性构造 TextureAsset。
-StreamingAssetRef<TextureAsset> LoadTextureAssetFromImage(
-    AssetManager& assetManager,
-    FrameUploadScheduler& frameUploads,
-    const AssetId& assetId,
-    string name,
-    ImageData image,
-    const TextureAssetLoadOptions& options = {});
-
-/// 从编码字节(PNG/JPEG)解码后创建 GPU 贴图。
-StreamingAssetRef<TextureAsset> LoadTextureAssetFromMemory(
-    AssetManager& assetManager,
-    FrameUploadScheduler& frameUploads,
-    const AssetId& assetId,
-    string name,
-    vector<byte> encodedBytes,
-    const TextureAssetLoadOptions& options = {});
 
 template <>
 struct RuntimeTypeTrait<TextureAsset> {

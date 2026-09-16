@@ -72,11 +72,10 @@ primitive_vertex_layout 及其 resolver 已移除；PSO 调用方提供 RHI Vert
 | `GpuSystem` | `WindowManager` | `SetWindowManager` |
 | `RenderSystem` | `Application`、`GpuSystem` | 构造参数、`SetGpuSystem` |
 | `AssetManager` | `IWaitFrameProcessor`、可选 `IAssetSource` | `SetWaitFrameProcessor`、`SetAssetSource` |
-| `AssetDatabase` 的默认 importers | `FrameUploadScheduler` | 构造参数 |
 | `World` | `Application` | 构造参数 |
 
 Application 先构造 WindowManager 和 GpuSystem（包含 device），再创建 RenderSystem、AssetManager、
-可选 AssetDatabase 与 World。全部对象就位后直接接线：GpuSystem 提供帧等待接口，AssetDatabase
+可选 AssetDatabase 与 World。默认 importer 只保留登记与明确失败的加载入口，不借用上传调度器。全部对象就位后直接接线：GpuSystem 提供帧等待接口，AssetDatabase
 提供可选资产来源；未配置资产根或数据库打开失败时，资产来源为空。
 WindowManager 与 GpuSystem 的双向引用在启动渲染线程前建立。
 

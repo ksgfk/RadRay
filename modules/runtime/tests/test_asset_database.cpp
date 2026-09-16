@@ -10,7 +10,7 @@
 #include <fmt/format.h>
 
 #include <radray/file.h>
-#include <radray/runtime/gpu_system.h>
+#include <radray/runtime/static_mesh.h>
 #include <radray/runtime/texture_asset.h>
 
 namespace radray {
@@ -315,6 +315,30 @@ TEST_F(AssetDatabaseTest, GuidTextFormsAreAcceptedAndSavedAsLowercaseDFormat) {
     EXPECT_EQ(saved->find("8F3C1A2B"), string::npos);
 }
 
+TEST_F(AssetDatabaseTest, BuiltinGpuImportersReportUnimplementedAndOwnTheirPath) {
+    vector<unique_ptr<AssetImporter>> importers;
+    importers.push_back(make_unique<TextureImporter>());
+    importers.push_back(make_unique<MeshImporter>());
+    for (const auto& importer : importers) {
+        SCOPED_TRACE(importer->GetTypeName());
+        auto settings = importer->CreateSettings();
+        AssetLoadContext context{.AbsolutePath = Root() / "original.asset", .Settings = settings.get()};
+        auto load = importer->Load(context);
+        context.AbsolutePath = Root() / "changed.asset";
+        settings.reset();
+        std::optional<AssetLoadResult> result;
+        TaskScope scope;
+        scope.Spawn(AwaitLoadResult(std::move(load), &result));
+        scope.WaitUntilEmpty();
+        ASSERT_TRUE(result.has_value());
+        EXPECT_FALSE(result->IsSuccess());
+        EXPECT_EQ(result->Object, nullptr);
+        EXPECT_NE(result->Error.find("GPU upload is not implemented"), string::npos);
+        EXPECT_NE(result->Error.find("original.asset"), string::npos);
+        EXPECT_EQ(result->Error.find("changed.asset"), string::npos);
+    }
+}
+
 TEST_F(AssetDatabaseTest, RegisteredSettingsWithUnknownFieldsFallBackToRawText) {
     constexpr std::string_view rawSettings =
         R"({"srgb":true,"generateMips":true,"futureCompression":"new"})";
@@ -327,9 +351,8 @@ TEST_F(AssetDatabaseTest, RegisteredSettingsWithUnknownFieldsFallBackToRawText) 
                                         rawSettings);
     ASSERT_TRUE(WriteManifest(manifest));
 
-    FrameUploadScheduler frameUploads;
     vector<unique_ptr<AssetImporter>> importers;
-    importers.push_back(make_unique<TextureImporter>(frameUploads));
+    importers.push_back(make_unique<TextureImporter>());
     string error;
     unique_ptr<AssetDatabase> database = AssetDatabase::Open(
         Root(),

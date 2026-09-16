@@ -1,17 +1,10 @@
 #include <radray/runtime/static_mesh.h>
 
-#include <algorithm>
 #include <limits>
-#include <cstring>
 #include <utility>
 
 #include <array>
 #include <fmt/format.h>
-
-#include <radray/triangle_mesh.h>
-#include <radray/render/rhi.h>
-#include <radray/runtime/gpu_system.h>
-#include <radray/wavefront_obj.h>
 
 namespace radray {
 namespace {
@@ -106,95 +99,6 @@ bool IsSectionValid(const StaticMeshSection& section, const MeshResource& meshRe
     return section.MaxVertexIndex < primitive.VertexCount;
 }
 
-bool IsObjIndexValid(int32_t index, size_t count, bool optional) noexcept {
-    if (index == 0) {
-        return optional;
-    }
-    if (index > 0) {
-        return static_cast<size_t>(index) <= count;
-    }
-    const int64_t magnitude = -static_cast<int64_t>(index);
-    return magnitude <= static_cast<int64_t>(count);
-}
-
-bool AreObjFaceIndicesValid(const WavefrontObjReader& reader) noexcept {
-    for (const WavefrontObjFace& face : reader.Faces()) {
-        const int32_t positions[]{face.V1, face.V2, face.V3};
-        const int32_t normals[]{face.Vn1, face.Vn2, face.Vn3};
-        const int32_t uvs[]{face.Vt1, face.Vt2, face.Vt3};
-        for (int32_t index : positions) {
-            if (!IsObjIndexValid(index, reader.Positions().size(), false)) {
-                return false;
-            }
-        }
-        for (int32_t index : normals) {
-            if (!IsObjIndexValid(index, reader.Normals().size(), true)) {
-                return false;
-            }
-        }
-        for (int32_t index : uvs) {
-            if (!IsObjIndexValid(index, reader.UVs().size(), true)) {
-                return false;
-            }
-        }
-    }
-    return true;
-}
-
-bool BuildDefaultSectionsAndBounds(
-    const MeshResource& meshResource,
-    vector<StaticMeshSection>& sections,
-    Eigen::Vector3f& boundsMin,
-    Eigen::Vector3f& boundsMax) noexcept {
-    sections.clear();
-    boundsMin = Eigen::Vector3f::Constant(std::numeric_limits<float>::max());
-    boundsMax = Eigen::Vector3f::Constant(std::numeric_limits<float>::lowest());
-    bool hasPosition = false;
-    for (uint32_t primitiveIndex = 0;
-         primitiveIndex < meshResource.Primitives.size();
-         ++primitiveIndex) {
-        const MeshPrimitive& primitive = meshResource.Primitives[primitiveIndex];
-        sections.emplace_back(
-            primitiveIndex,
-            0,
-            primitive.IndexBuffer.IndexCount,
-            0,
-            primitive.VertexCount - 1);
-        const auto position = std::find_if(
-            primitive.VertexBuffers.begin(),
-            primitive.VertexBuffers.end(),
-            [](const VertexBufferEntry& entry) noexcept {
-                return entry.Semantic == VertexSemantics::POSITION &&
-                       entry.SemanticIndex == 0 &&
-                       entry.Type == VertexDataType::FLOAT &&
-                       entry.ComponentCount >= 3;
-            });
-        if (position == primitive.VertexBuffers.end() ||
-            position->BufferIndex >= meshResource.Bins.size()) {
-            return false;
-        }
-        const std::span<const byte> data =
-            meshResource.Bins[position->BufferIndex].GetData();
-        for (uint32_t vertexIndex = 0;
-             vertexIndex < primitive.VertexCount;
-             ++vertexIndex) {
-            const uint64_t offset = static_cast<uint64_t>(position->Offset) +
-                                    static_cast<uint64_t>(vertexIndex) *
-                                        position->Stride;
-            if (offset > data.size() || sizeof(float) * 3 > data.size() - offset) {
-                return false;
-            }
-            float values[3];
-            std::memcpy(values, data.data() + offset, sizeof(values));
-            const Eigen::Vector3f point{values[0], values[1], values[2]};
-            boundsMin = boundsMin.cwiseMin(point);
-            boundsMax = boundsMax.cwiseMax(point);
-            hasPosition = true;
-        }
-    }
-    return hasPosition && IsStaticMeshDataValid(meshResource, sections);
-}
-
 }  // namespace
 
 StaticMeshSection::StaticMeshSection() noexcept
@@ -260,58 +164,9 @@ bool StaticMesh::IsValid() const noexcept {
 }
 
 void StaticMesh::OnUnload(AssetManager& manager) {
-    // 【必须延迟】: SceneProxy 缓存 GpuMesh::DrawData* 并录进命令列表 (见
-    // primitive_scene_proxy.h), 那些 buffer 要活到 fence 之后。
-    //
-    // 【整包交出】: buffer 之间无相互依赖, 但整包交出的形状让"销毁顺序在哪里表达"这件事
-    // 在所有资产上一致, 而不是每种资产各自决定。见 AssetManager::DeferDestroy。
+    // GPU buffer 必须活过已经录制的命令。
     manager.DeferDestroy([mesh = std::move(_renderMesh)]() noexcept {});
     _renderMesh = GpuMesh{};
-}
-
-task<AssetLoadResult> LoadStaticMesh(
-    FrameUploadScheduler& frameUploads,
-    MeshResource meshResource) {
-    // 阶段(均为协程内部事务):
-    //  1) CPU 校验网格数据。
-    //  2) 两阶段 GPU 上传:co_await FrameUploadScheduler::BeginUpload 挂起至帧顶拿 cmd/uploader,
-    //     inline 录制 copy 进当前帧 cmdbuffer,再 co_await WaitGpu 跨帧等 fence。
-    //  3) 一次性构造内容与资产。
-    // 【校验先于上传】: 无效数据不该占用 upload 带宽, 也不该建出半成品内容。
-    if (!IsStaticMeshDataValid(meshResource, {})) {
-        co_return AssetLoadResult::Failure("static mesh resource is invalid");
-    }
-    vector<StaticMeshSection> sections;
-    Eigen::Vector3f boundsMin;
-    Eigen::Vector3f boundsMax;
-    if (!BuildDefaultSectionsAndBounds(
-            meshResource,
-            sections,
-            boundsMin,
-            boundsMax)) {
-        co_return AssetLoadResult::Failure("static mesh sections or bounds are invalid");
-    }
-
-    // GPU 上传:两阶段 await(无 callback)。BeginUpload 挂起至帧顶拿到 cmd/uploader,
-    // 在本协程里 inline 录制 copy,再 co_await WaitGpu 等该 flight 的 fence。
-    FrameUploadScope frame = co_await frameUploads.BeginUpload();
-    std::optional<GpuMesh> renderMesh =
-        frame.GetUploader().UploadMeshResource(frame.GetCommandBuffer(), meshResource);
-    if (!renderMesh.has_value()) {
-        co_return AssetLoadResult::Failure("static mesh upload recording failed");
-    }
-    co_await frame.WaitGpu();
-
-    co_return AssetLoadResult::Success(make_unique<StaticMesh>(
-        std::move(meshResource),
-        std::move(sections),
-        boundsMin,
-        boundsMax,
-        std::move(renderMesh.value())));
-}
-
-MeshImporter::MeshImporter(FrameUploadScheduler& frameUploads) noexcept
-    : _frameUploads(frameUploads) {
 }
 
 std::string_view MeshImporter::GetTypeName() const noexcept {
@@ -324,37 +179,12 @@ std::span<const std::string_view> MeshImporter::GetFileExtensions() const noexce
 }
 
 task<AssetLoadResult> MeshImporter::Load(const AssetLoadContext& ctx) {
-    return LoadMesh(&_frameUploads, ctx.AbsolutePath);
+    return LoadMesh(ctx.AbsolutePath);
 }
 
-task<AssetLoadResult> MeshImporter::LoadMesh(
-    FrameUploadScheduler* frameUploads,
-    std::filesystem::path path) {
-    WavefrontObjReader reader{path};
-    reader.Read();
-    if (reader.HasError()) {
-        co_return AssetLoadResult::Failure(fmt::format(
-            "cannot parse mesh source '{}': {}",
-            path.string(),
-            reader.Error()));
-    }
-    if (reader.Faces().empty() || !AreObjFaceIndicesValid(reader)) {
-        co_return AssetLoadResult::Failure(fmt::format(
-            "mesh source '{}' has no valid triangle faces",
-            path.string()));
-    }
-
-    TriangleMesh triangleMesh;
-    reader.ToTriangleMesh(&triangleMesh);
-    if (!triangleMesh.IsValid()) {
-        co_return AssetLoadResult::Failure(fmt::format(
-            "mesh source '{}' produced inconsistent vertex attributes",
-            path.string()));
-    }
-
-    MeshResource meshResource;
-    triangleMesh.ToSimpleMeshResource(&meshResource);
-    co_return co_await LoadStaticMesh(*frameUploads, std::move(meshResource));
+task<AssetLoadResult> MeshImporter::LoadMesh(std::filesystem::path path) {
+    // TODO: 待上层 GPU 上传调度设计确定后恢复网格加载。
+    co_return AssetLoadResult::Failure(fmt::format("mesh GPU upload is not implemented: '{}'", path.string()));
 }
 
 }  // namespace radray

@@ -1,16 +1,10 @@
 #include <radray/runtime/texture_asset.h>
 
-#include <algorithm>
 #include <array>
-#include <bit>
-#include <cmath>
 
 #include <fmt/format.h>
 
-#include <radray/file.h>
 #include <radray/logger.h>
-#include <radray/runtime/gpu_system.h>
-#include <radray/runtime/image_asset.h>
 
 std::size_t std::hash<radray::TextureSubViewDesc>::operator()(
     const radray::TextureSubViewDesc& desc) const noexcept {
@@ -25,224 +19,6 @@ std::size_t std::hash<radray::TextureSubViewDesc>::operator()(
 }
 
 namespace radray {
-namespace {
-
-render::TextureFormat PickFormat(bool srgb) noexcept {
-    return srgb ? render::TextureFormat::RGBA8_UNORM_SRGB : render::TextureFormat::RGBA8_UNORM;
-}
-
-/// 在 upload phase 内从 RGBA8 CPU 像素建 device-local 贴图 + SRV,录制上传命令。
-/// 不等 fence(由调用方 co_await frame.WaitGpu())。失败返回 nullopt。
-struct UploadedTexture {
-    unique_ptr<render::Texture> Texture;
-    unique_ptr<render::TextureView> Srv;
-};
-
-struct PreparedTextureUpload {
-    uint32_t Width, Height;
-    render::TextureFormat Format;
-    vector<vector<byte>> MipChain;
-};
-
-float SrgbToLinear(uint32_t value) noexcept {
-    const float normalized = static_cast<float>(value) / 255.0f;
-    return normalized <= 0.04045f
-               ? normalized / 12.92f
-               : std::pow((normalized + 0.055f) / 1.055f, 2.4f);
-}
-
-uint32_t LinearToSrgb(float value) noexcept {
-    const float encoded = value <= 0.0031308f
-                              ? value * 12.92f
-                              : 1.055f * std::pow(value, 1.0f / 2.4f) - 0.055f;
-    return static_cast<uint32_t>(std::lround(std::clamp(encoded, 0.0f, 1.0f) * 255.0f));
-}
-
-vector<vector<byte>> BuildRgba8MipChain(const ImageData& rgba8, bool generateMips, bool srgb) {
-    vector<vector<byte>> mipChain;
-    mipChain.emplace_back(rgba8.GetSpan().begin(), rgba8.GetSpan().end());
-    if (!generateMips) {
-        return mipChain;
-    }
-
-    uint32_t sourceWidth = rgba8.Width;
-    uint32_t sourceHeight = rgba8.Height;
-    while (sourceWidth > 1 || sourceHeight > 1) {
-        const uint32_t destinationWidth = std::max(sourceWidth / 2, 1u);
-        const uint32_t destinationHeight = std::max(sourceHeight / 2, 1u);
-        const vector<byte>& source = mipChain.back();
-        vector<byte> destination(static_cast<size_t>(destinationWidth) * destinationHeight * 4);
-
-        for (uint32_t y = 0; y < destinationHeight; ++y) {
-            for (uint32_t x = 0; x < destinationWidth; ++x) {
-                float totals[4]{};
-                uint32_t sampleCount = 0;
-                for (uint32_t offsetY = 0; offsetY < 2; ++offsetY) {
-                    const uint32_t sourceY = y * 2 + offsetY;
-                    if (sourceY >= sourceHeight) {
-                        continue;
-                    }
-                    for (uint32_t offsetX = 0; offsetX < 2; ++offsetX) {
-                        const uint32_t sourceX = x * 2 + offsetX;
-                        if (sourceX >= sourceWidth) {
-                            continue;
-                        }
-                        const size_t sourceOffset =
-                            (static_cast<size_t>(sourceY) * sourceWidth + sourceX) * 4;
-                        for (size_t channel = 0; channel < 4; ++channel) {
-                            const uint32_t sample = std::to_integer<uint32_t>(source[sourceOffset + channel]);
-                            totals[channel] += srgb && channel < 3
-                                                   ? SrgbToLinear(sample)
-                                                   : static_cast<float>(sample);
-                        }
-                        ++sampleCount;
-                    }
-                }
-                const size_t destinationOffset =
-                    (static_cast<size_t>(y) * destinationWidth + x) * 4;
-                for (size_t channel = 0; channel < 4; ++channel) {
-                    const float average = totals[channel] / static_cast<float>(sampleCount);
-                    const uint32_t encoded = srgb && channel < 3
-                                                 ? LinearToSrgb(average)
-                                                 : static_cast<uint32_t>(std::lround(average));
-                    destination[destinationOffset + channel] = static_cast<byte>(encoded);
-                }
-            }
-        }
-
-        mipChain.push_back(std::move(destination));
-        sourceWidth = destinationWidth;
-        sourceHeight = destinationHeight;
-    }
-    return mipChain;
-}
-
-std::optional<UploadedTexture> RecordTextureUpload(
-    const FrameUploadScope& frame,
-    const PreparedTextureUpload& prepared,
-    std::string_view debugName) {
-    render::Device* device = frame.GetUploader().GetDevice();
-    if (device == nullptr || prepared.MipChain.empty() || prepared.Width == 0 || prepared.Height == 0) {
-        return std::nullopt;
-    }
-    const auto format = prepared.Format;
-    const auto& mipChain = prepared.MipChain;
-
-    render::TextureDescriptor texDesc{
-        .Dim = render::TextureDimension::Dim2D,
-        .Width = prepared.Width,
-        .Height = prepared.Height,
-        .DepthOrArraySize = 1,
-        .MipLevels = static_cast<uint32_t>(mipChain.size()),
-        .SampleCount = 1,
-        .Format = format,
-        .Memory = render::MemoryType::Device,
-        .Usage = render::TextureUse::Resource | render::TextureUse::CopyDestination,
-        .Hints = render::ResourceHint::None};
-    auto texOpt = device->CreateTexture(texDesc);
-    if (!texOpt.HasValue()) {
-        RADRAY_ERR_LOG("TextureAsset: CreateTexture failed for '{}'", debugName);
-        return std::nullopt;
-    }
-    auto texture = texOpt.Release();
-    texture->SetDebugName(fmt::format("texasset_{}", debugName));
-
-    render::TextureViewDescriptor viewDesc{
-        .Target = texture.get(),
-        .Dim = render::TextureDimension::Dim2D,
-        .Format = format,
-        .Range = render::SubresourceRange::AllSub(),
-        .Usage = render::TextureViewUsage::Resource};
-    auto srvOpt = device->CreateTextureView(viewDesc);
-    if (!srvOpt.HasValue()) {
-        RADRAY_ERR_LOG("TextureAsset: CreateTextureView failed for '{}'", debugName);
-        return std::nullopt;
-    }
-    auto srv = srvOpt.Release();
-    srv->SetDebugName(fmt::format("texasset_srv_{}", debugName));
-
-    for (uint32_t mipLevel = 0; mipLevel < mipChain.size(); ++mipLevel) {
-        TextureUploadRequest request{};
-        request.SrcData = mipChain[mipLevel];
-        request.DstTexture = texture.get();
-        request.DstRange = render::SubresourceRange{
-            .BaseArrayLayer = 0,
-            .ArrayLayerCount = 1,
-            .BaseMipLevel = mipLevel,
-            .MipLevelCount = 1};
-        request.SrcRowPitch = 0;
-        request.Before = mipLevel == 0
-                             ? render::TextureState::Undefined
-                             : render::TextureState::ShaderRead;
-        request.After = render::TextureState::ShaderRead;
-        frame.GetUploader().UploadTexture(frame.GetCommandBuffer(), request);
-    }
-
-    return UploadedTexture{std::move(texture), std::move(srv)};
-}
-
-task<AssetLoadResult> LoadTextureFromImageTask(
-    FrameUploadScheduler& frameUploads,
-    string name,
-    ImageData image,
-    TextureAssetLoadOptions options) {
-    RADRAY_ASSERT(!frameUploads.IsRecordingUploads());
-    // RGBA8 归一(GPU 仅支持 RGBA8 上传路径)。
-    ImageData rgba8 = ConvertToRGBA8(image);
-    if (rgba8.Data == nullptr || rgba8.Width == 0 || rgba8.Height == 0) {
-        if (options.FallbackImage.Data != nullptr) {
-            rgba8 = ConvertToRGBA8(options.FallbackImage);
-        }
-    }
-    if (rgba8.Data == nullptr || rgba8.Width == 0 || rgba8.Height == 0) {
-        co_return AssetLoadResult::Failure(fmt::format("texture '{}' has no valid pixels", name));
-    }
-
-    PreparedTextureUpload prepared{rgba8.Width, rgba8.Height, PickFormat(options.Srgb),
-                                   BuildRgba8MipChain(rgba8, options.GenerateMips, options.Srgb)};
-    rgba8 = {};
-    image = {};
-    options.FallbackImage = {};
-    FrameUploadScope frame = co_await frameUploads.BeginUpload();
-    std::optional<UploadedTexture> uploaded = RecordTextureUpload(
-        frame,
-        prepared,
-        name);
-    if (!uploaded.has_value()) {
-        co_return AssetLoadResult::Failure(fmt::format("texture '{}' upload recording failed", name));
-    }
-    render::Device* device = frame.GetUploader().GetDevice();
-    co_await frame.WaitGpu();
-
-    co_return AssetLoadResult::Success(
-        make_unique<TextureAsset>(
-            device,
-            std::move(name),
-            std::move(uploaded->Texture),
-            std::move(uploaded->Srv)));
-}
-
-task<AssetLoadResult> LoadTextureFromMemoryTask(
-    FrameUploadScheduler& frameUploads,
-    string name,
-    vector<byte> encodedBytes,
-    TextureAssetLoadOptions options) {
-    RADRAY_ASSERT(!frameUploads.IsRecordingUploads());
-    std::optional<ImageData> decoded = DecodeImageBytes(encodedBytes);
-    ImageData image;
-    if (decoded.has_value()) {
-        image = std::move(decoded.value());
-    } else if (options.FallbackImage.Data != nullptr) {
-        image = options.FallbackImage;
-    } else {
-        co_return AssetLoadResult::Failure(fmt::format("texture '{}' decode failed", name));
-    }
-    // 复用 image 路径(其内部再做 RGBA8 归一与上传)。
-    co_return co_await LoadTextureFromImageTask(
-        frameUploads, std::move(name), std::move(image), std::move(options));
-}
-
-}  // namespace
 
 bool TextureImportSettings::Deserialize(const JsonValue& json) {
     JsonObjectReader object{json};
@@ -270,10 +46,6 @@ bool TextureImportSettings::Serialize(JsonWriteContext& context) const noexcept 
            object.Member("generateMips", GenerateMips);
 }
 
-TextureImporter::TextureImporter(FrameUploadScheduler& frameUploads) noexcept
-    : _frameUploads(frameUploads) {
-}
-
 std::string_view TextureImporter::GetTypeName() const noexcept {
     return "texture";
 }
@@ -286,43 +58,9 @@ std::span<const std::string_view> TextureImporter::GetFileExtensions() const noe
 task<AssetLoadResult> TextureImporter::LoadTyped(
     std::filesystem::path path,
     TextureImportSettings settings) {
-    RADRAY_ASSERT(!_frameUploads.IsRecordingUploads());
-    std::optional<vector<byte>> encoded = ReadBinaryFile(path);
-    if (!encoded.has_value()) {
-        co_return AssetLoadResult::Failure(fmt::format("cannot read texture source '{}'", path.string()));
-    }
-    TextureAssetLoadOptions options{
-        .Srgb = settings.Srgb,
-        .GenerateMips = settings.GenerateMips};
-    co_return co_await CreateTextureAssetFromMemory(
-        _frameUploads,
-        path.filename().string(),
-        std::move(encoded.value()),
-        std::move(options));
-}
-
-task<AssetLoadResult> CreateTextureAssetFromImage(
-    FrameUploadScheduler& frameUploads,
-    string name,
-    ImageData image,
-    TextureAssetLoadOptions options) {
-    return LoadTextureFromImageTask(
-        frameUploads,
-        std::move(name),
-        std::move(image),
-        std::move(options));
-}
-
-task<AssetLoadResult> CreateTextureAssetFromMemory(
-    FrameUploadScheduler& frameUploads,
-    string name,
-    vector<byte> encodedBytes,
-    TextureAssetLoadOptions options) {
-    return LoadTextureFromMemoryTask(
-        frameUploads,
-        std::move(name),
-        std::move(encodedBytes),
-        std::move(options));
+    (void)settings;
+    // TODO: 待上层 GPU 上传调度设计确定后恢复纹理解码、mip 准备与上传加载。
+    co_return AssetLoadResult::Failure(fmt::format("texture GPU upload is not implemented: '{}'", path.string()));
 }
 
 TextureAsset::TextureAsset(
@@ -382,32 +120,6 @@ render::TextureView* TextureAsset::GetOrCreateSrv(const TextureSubViewDesc& sub)
     render::TextureView* raw = view.get();
     _viewCache.emplace(sub, std::move(view));
     return raw;
-}
-
-StreamingAssetRef<TextureAsset> LoadTextureAssetFromImage(
-    AssetManager& assetManager,
-    FrameUploadScheduler& frameUploads,
-    const AssetId& assetId,
-    string name,
-    ImageData image,
-    const TextureAssetLoadOptions& options) {
-    return assetManager.Load<TextureAsset>(AssetLoadRequest{
-        .Id = assetId,
-        .Task = CreateTextureAssetFromImage(frameUploads, name, std::move(image), options),
-        .DebugName = std::move(name)});
-}
-
-StreamingAssetRef<TextureAsset> LoadTextureAssetFromMemory(
-    AssetManager& assetManager,
-    FrameUploadScheduler& frameUploads,
-    const AssetId& assetId,
-    string name,
-    vector<byte> encodedBytes,
-    const TextureAssetLoadOptions& options) {
-    return assetManager.Load<TextureAsset>(AssetLoadRequest{
-        .Id = assetId,
-        .Task = CreateTextureAssetFromMemory(frameUploads, name, std::move(encodedBytes), options),
-        .DebugName = std::move(name)});
 }
 
 }  // namespace radray

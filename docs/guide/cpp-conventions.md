@@ -93,7 +93,7 @@ static Nullable<shared_ptr<Device>> Device::Create(const DeviceDescriptor& desc)
 [RHI 所有权](../architecture/render-rhi.md)。runtime 层不用它，靠析构函数 + 成员声明顺序。
 
 RAII 包装类的后缀是 `Scope` / `Scoped` / `Guard`，**没有 `*RAII`**：`ScopeGuard`、`TaskScope`、
-`ScopedBufferMap`、`FrameUploadScope`。（`d3d12_impl.h` 内部的 `DescriptorHeapViewRAII`
+`ScopedBufferMap`。（`d3d12_impl.h` 内部的 `DescriptorHeapViewRAII`
 是后端私有的例外。）
 
 **成员声明顺序常常有语义**，因为析构是逆序的。这类地方都有注释标出，不要"顺手整理"。

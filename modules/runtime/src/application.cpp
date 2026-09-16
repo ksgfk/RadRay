@@ -40,11 +40,10 @@ namespace radray {
 
 namespace {
 
-vector<unique_ptr<AssetImporter>> MakeDefaultAssetImporters(
-    FrameUploadScheduler& frameUploads) {
+vector<unique_ptr<AssetImporter>> MakeDefaultAssetImporters() {
     vector<unique_ptr<AssetImporter>> importers;
-    importers.push_back(make_unique<TextureImporter>(frameUploads));
-    importers.push_back(make_unique<MeshImporter>(frameUploads));
+    importers.push_back(make_unique<TextureImporter>());
+    importers.push_back(make_unique<MeshImporter>());
     return importers;
 }
 
@@ -764,11 +763,6 @@ public:
 
         CheckRecreateSwapChains();
 
-        {
-            RADRAY_PROFILE_SCOPE_N("PrepareFrameUploads");
-            gpuSystem->PrepareFrameUploads(flightIndex);
-        }
-
         gpuSystem->AdvanceFrameIndex();
         _publishedFrameCount.store(frameIndex + 1, std::memory_order_release);
         _app->GetWindowManager()->SetRenderIdle(false);
@@ -895,9 +889,9 @@ void Application::PumpFlightCompletions(std::optional<uint32_t> flightIndex) {
         completions.push_back(completion);
     }
     if (flightIndex) {
-        _gpuSystem->BeginUpdateForFlight(*flightIndex, completions);
+        _gpuSystem->BeginUpdateForFlight(*flightIndex);
     } else {
-        _gpuSystem->CleanupCompletedFlights(completions);
+        _gpuSystem->CleanupCompletedFlights();
     }
     for (const auto& completion : completions) {
         OnRenderFrameComplete(completion);
@@ -909,7 +903,7 @@ void Application::PumpFlightCompletions(std::optional<uint32_t> flightIndex) {
 // ════════════════════════════════════════════════════════════════
 
 AppUpdateResult Application::Update(const AppUpdateContext& ctx) {
-    // 1) 推进资产加载状态机(恢复本帧 GPU 上传已完成的协程 → 启动未启动协程 → reap 终态)。
+    // 1) 提交资产加载结果并回收零引用资产。
     if (_assetManager != nullptr) {
         _assetManager->Pump();
     }
@@ -1016,7 +1010,7 @@ bool Application::InitializeRuntime(const ApplicationRuntimeDescriptor& desc) {
         string error;
         _assetDatabase = AssetDatabase::Open(
             desc.AssetRoot,
-            MakeDefaultAssetImporters(_gpuSystem->GetFrameUploadScheduler()),
+            MakeDefaultAssetImporters(),
             error);
         if (_assetDatabase == nullptr) {
             RADRAY_ERR_LOG("open asset database failed: {}", error);
