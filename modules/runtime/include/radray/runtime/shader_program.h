@@ -50,7 +50,6 @@ public:
     const ShaderParameterGroupRecipe& GetOrCreateParameterGroupRecipe(uint32_t group);
     size_t GetParameterGroupRecipeCount() const noexcept { return _parameterGroupRecipes.size(); }
 
-private:
     ShaderProgram(
         render::Device* device,
         render::BackendShaderArtifact artifact,
@@ -62,6 +61,7 @@ private:
         unique_ptr<render::Shader> computeShader,
         string computeEntry) noexcept;
 
+private:
     render::Device* _device;
     uint64_t _generation;
     render::BackendShaderArtifact _artifact;

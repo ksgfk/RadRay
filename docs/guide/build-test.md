@@ -95,6 +95,7 @@ CPU record/Submit 时间与 GPU 时间线分开解读。关闭使用 `-DRADRAY_E
 | `test_runtime_type` | `RuntimeTypeIdTest` |
 | `test_asset_slot` | `AssetSlotTest` |
 | `test_frame_upload` | `FrameUploadTest` |
+| `test_gpu_system` | `GpuSystemTest`, `GpuSystemDeathTest` |
 | `test_flight_completion` | `FlightCompletionTest` |
 | `test_asset_database` | `AssetDatabaseTest` |
 | `test_component_rtti` | `ComponentRttiTest` |

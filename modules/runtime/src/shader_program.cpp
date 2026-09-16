@@ -102,7 +102,7 @@ Nullable<unique_ptr<ShaderProgram>> ShaderProgram::Create(
         computeShader = result.Release();
     }
 
-    return unique_ptr<ShaderProgram>{new ShaderProgram(
+    return make_unique<ShaderProgram>(
         device,
         std::move(artifact),
         std::move(parameterLayout.value()),
@@ -111,7 +111,7 @@ Nullable<unique_ptr<ShaderProgram>> ShaderProgram::Create(
         std::move(pixelShader),
         pixel.has_value() ? std::move(pixel->first) : string{},
         std::move(computeShader),
-        compute.has_value() ? std::move(compute->first) : string{})};
+        compute.has_value() ? std::move(compute->first) : string{});
 }
 
 ShaderProgram::ShaderProgram(

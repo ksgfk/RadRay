@@ -207,7 +207,7 @@ WindowCreateResult WindowManager::CreateWindowImmediate(const WindowCreateDescri
     auto window = NativeWindow::Create(nativeDesc);
     if (!window || !_eventPump->Register(window.Get())) return {};
     if (_nextWindowId == UINT64_MAX) RADRAY_ABORT("Window identity exhausted");
-    auto& result = _windows.emplace_back(unique_ptr<AppWindow>{new AppWindow(this, window.Release(), _eventPump.get(), isMain, _nextWindowId++)});
+    auto& result = _windows.emplace_back(make_unique<AppWindow>(this, window.Release(), _eventPump.get(), isMain, _nextWindowId++));
     result->_ownerWindow = desc.OwnerWindow;
     if (isMain) _mainWindow = result.get();
     return {WindowOperationStatus::Completed, result->GetHandle()};

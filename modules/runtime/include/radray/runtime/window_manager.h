@@ -81,6 +81,8 @@ struct WindowReleaseResult {
 
 class AppWindow {
 public:
+    AppWindow(WindowManager* manager, unique_ptr<NativeWindow> window, NativeEventPump* pump, bool isMain, uint64_t id) noexcept;
+
     struct BackBufferView {
         render::Texture* BackBuffer{nullptr};
         unique_ptr<render::TextureView> View;
@@ -114,7 +116,6 @@ public:
 
 private:
     friend class WindowManager;
-    AppWindow(WindowManager* manager, unique_ptr<NativeWindow> window, NativeEventPump* pump, bool isMain, uint64_t id) noexcept;
     WindowOperationStatus AttachSwapChain(const WindowSwapChainDescriptor& desc) noexcept;
     unique_ptr<render::SwapChain> ReleaseSwapChain() noexcept;
     void DetachSwapChain() noexcept;

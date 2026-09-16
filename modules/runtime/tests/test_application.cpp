@@ -42,12 +42,14 @@ protected:
     }
     void OnRender(AppFrameContext& ctx) override {
         ++RecordedFrames;
+        auto* prefix = ctx.AllocateCommandBuffer();
+        ctx.ReturnCommandBuffers({.CmdBuffers = std::span{&prefix, 1}});
         auto* windows = GetWindowManager();
         auto* registry = GetRenderSystem()->GetRenderPassRegistry();
         ASSERT_NE(registry, nullptr);
         for (size_t index = 0; index < windows->GetWindowCount(); ++index) {
             auto* window = windows->GetWindow(index);
-            const auto target = ctx.AcquireWindow(window);
+            auto target = ctx.AcquireWindow(window);
             if (!target) continue;
             const auto desc = target->BackBuffer->GetDesc();
             const render::RenderPassColorAttachmentDescriptor attachment{desc.Format, desc.SampleCount, render::LoadAction::Clear, render::StoreAction::Store};
@@ -56,7 +58,7 @@ protected:
             auto* view = target->BackBufferView;
             auto framebuffer = registry->GetOrCreateFramebuffer({pass.Get(), std::span{&view, 1}, nullptr, desc.Width, desc.Height, 1});
             ASSERT_TRUE(framebuffer);
-            auto* commands = ctx.GetCommandBufferForTexture(target->BackBuffer);
+            auto* commands = ctx.AllocateCommandBuffer();
             const render::ResourceBarrierDescriptor before = render::BarrierTextureDescriptor{
                 .Target = target->BackBuffer, .Before = window->GetBackBufferState(target->BackBufferIndex), .After = render::TextureState::RenderTarget};
             commands->ResourceBarrier(std::span{&before, 1});
@@ -67,9 +69,14 @@ protected:
             const render::ResourceBarrierDescriptor after = render::BarrierTextureDescriptor{
                 .Target = target->BackBuffer, .Before = render::TextureState::RenderTarget, .After = render::TextureState::Present};
             commands->ResourceBarrier(std::span{&after, 1});
+            auto* endCommands = ctx.AllocateCommandBuffer();
+            render::CommandBuffer* batch[]{commands, endCommands};
+            ctx.ReturnCommandBuffers({.CmdBuffers = batch}, std::move(target));
             ++Recorded;
             if (!window->IsMainWindow()) ++AuxiliaryRecorded;
         }
+        auto* suffix = ctx.AllocateCommandBuffer();
+        ctx.ReturnCommandBuffers({.CmdBuffers = std::span{&suffix, 1}});
     }
 
     void OnRenderFrameComplete(const FlightCompletion& completion) override {
@@ -161,6 +168,150 @@ TEST(RuntimeFoundation, VulkanSingleThreadWindowLifecycle) { RunFoundation(rende
 TEST(RuntimeFoundation, VulkanThreadedWindowLifecycle) { RunFoundation(render::RenderBackend::Vulkan, true); }
 
 #if defined(_WIN32)
+class DroppedPresentationApp final : public Application {
+public:
+    bool Dropped{false}, Recovered{false};
+
+protected:
+    void OnInit() override {
+        auto* device = GetGpuSystem()->GetDevice();
+        _vulkan = device->GetBackend() == render::RenderBackend::Vulkan;
+        _upload = device->CreateBuffer({.Size = 8, .Memory = render::MemoryType::Upload, .Usage = render::BufferUse::CopySource | render::BufferUse::MapWrite}).Unwrap();
+        _readback = device->CreateBuffer({.Size = 4, .Memory = render::MemoryType::ReadBack, .Usage = render::BufferUse::CopyDestination | render::BufferUse::MapRead}).Unwrap();
+        ScopedBufferMap map{_upload.get(), {0, 8}};
+        ASSERT_TRUE(map);
+        const uint32_t values[]{7, 99};
+        std::memcpy(map.Data(), values, sizeof(values));
+        _upload->FlushMappedRange({0, 8});
+    }
+    void OnUpdate(const AppUpdateContext&) override {
+        if (++_updates > 20 || Recovered) test::CloseMainWindow(*this);
+    }
+    void OnRender(AppFrameContext& ctx) override {
+        if (_step >= 3) return;
+        auto* window = GetWindowManager()->GetMainWindow();
+        if (_step < 2) {
+            auto* commands = ctx.AllocateCommandBuffer();
+            if (_vulkan) {
+                const render::ResourceBarrierDescriptor before = render::BarrierBufferDescriptor{
+                    .Target = _readback.get(), .Before = _step == 0 ? render::BufferState::Undefined : render::BufferState::HostRead, .After = render::BufferState::CopyDestination};
+                commands->ResourceBarrier(std::span{&before, 1});
+            }
+            commands->CopyBufferToBuffer(_readback.get(), 0, _upload.get(), _step * 4, 4);
+            if (_vulkan) {
+                const render::ResourceBarrierDescriptor after = render::BarrierBufferDescriptor{
+                    .Target = _readback.get(), .Before = render::BufferState::CopyDestination, .After = render::BufferState::HostRead};
+                commands->ResourceBarrier(std::span{&after, 1});
+            }
+            ctx.ReturnCommandBuffers({.CmdBuffers = std::span{&commands, 1}});
+        }
+        if (_step != 0) {
+            auto target = ctx.AcquireWindow(window);
+            ASSERT_TRUE(target);
+            auto* commands = ctx.AllocateCommandBuffer();
+            if (_step == 2) {
+                const render::ResourceBarrierDescriptor present = render::BarrierTextureDescriptor{
+                    .Target = target->BackBuffer, .Before = window->GetBackBufferState(target->BackBufferIndex), .After = render::TextureState::Present};
+                commands->ResourceBarrier(std::span{&present, 1});
+            }
+            ctx.ReturnCommandBuffers({.CmdBuffers = std::span{&commands, 1}}, std::move(target));
+        }
+        if (_step == 1) {
+            _droppedSerial = ctx.FrameSerial();
+            const auto hwnd = static_cast<HWND>(window->GetNativeWindow()->GetNativeHandler());
+            // Single-thread test: reproduce an external hide between acquire and submit.
+            ::ShowWindow(hwnd, SW_HIDE);
+            EXPECT_FALSE(window->IsSwapChainPresentable());
+            ctx.SubmitFrame();
+            ::ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        } else if (_step == 2) {
+            _recoveredSerial = ctx.FrameSerial();
+        }
+        ++_step;
+    }
+    void OnRenderFrameComplete(const FlightCompletion& completion) override {
+        if (completion.FrameSerial == _droppedSerial) {
+            EXPECT_FALSE(completion.GpuWorkCompleted);
+            ScopedBufferMap map{_readback.get(), {0, 4}};
+            ASSERT_TRUE(map);
+            _readback->InvalidateMappedRange({0, 4});
+            uint32_t value{0};
+            std::memcpy(&value, map.Data(), sizeof(value));
+            EXPECT_EQ(value, 7u);
+            Dropped = true;
+        }
+        if (completion.FrameSerial == _recoveredSerial) {
+            EXPECT_TRUE(completion.GpuWorkCompleted);
+            Recovered = true;
+        }
+    }
+    void OnShutdown() override {
+        _readback.reset();
+        _upload.reset();
+    }
+
+private:
+    unique_ptr<render::Buffer> _upload, _readback;
+    bool _vulkan{false};
+    uint32_t _step{0}, _updates{0};
+    uint64_t _droppedSerial{0}, _recoveredSerial{0};
+};
+
+void RunDroppedPresentation(render::RenderBackend backend) {
+    {
+        render::test::DeviceContext probe;
+        if (!render::test::TryCreateDevice(backend, probe)) GTEST_SKIP() << probe.Reason;
+    }
+    test::RuntimeLogCapture logs;
+    DroppedPresentationApp app;
+    ASSERT_EQ(app.Run({.Backend = backend, .EnableValidation = true, .EnableSynchronizationValidation = true, .WindowTitle = "Dropped presentation", .WindowWidth = 80, .WindowHeight = 60, .BackBufferFormat = render::TextureFormat::BGRA8_UNORM, .PresentMode = render::PresentMode::FIFO}), 0);
+    EXPECT_TRUE(app.Dropped);
+    EXPECT_TRUE(app.Recovered);
+    EXPECT_TRUE(logs.Errors().empty()) << logs.Errors();
+}
+
+TEST(RuntimeFoundation, D3D12DroppedPresentationRecovers) { RunDroppedPresentation(render::RenderBackend::D3D12); }
+TEST(RuntimeFoundation, VulkanDroppedPresentationRecovers) { RunDroppedPresentation(render::RenderBackend::Vulkan); }
+
+class TargetContractApp final : public Application {
+protected:
+    void OnUpdate(const AppUpdateContext&) override {
+        if (_done) test::CloseMainWindow(*this);
+    }
+    void OnRender(AppFrameContext& ctx) override {
+        if (_done) return;
+        auto target = ctx.AcquireWindow(GetWindowManager()->GetMainWindow());
+        ASSERT_TRUE(target);
+        EXPECT_DEATH(ctx.SubmitFrame(), "");
+        EXPECT_DEATH(ctx.AcquireWindow(target->Window), "");
+        EXPECT_DEATH(ctx.ReturnCommandBuffers({}, std::move(target)), "");
+        auto* commands = ctx.AllocateCommandBuffer();
+        EXPECT_DEATH(ctx.ReturnCommandBuffers({.CmdBuffers = std::span{&commands, 1}}, AppFrameTarget{}), "");
+        EXPECT_DEATH({
+            auto other = GetGpuSystem()->BeginFrameRecord((ctx.FlightIndex() + 1) % 2, {}, {}, false);
+            auto* foreign = other.AllocateCommandBuffer();
+            other.ReturnCommandBuffers({.CmdBuffers = std::span{&foreign, 1}}, std::move(target)); }, "");
+        const render::ResourceBarrierDescriptor present = render::BarrierTextureDescriptor{
+            .Target = target->BackBuffer, .Before = target->Window->GetBackBufferState(target->BackBufferIndex), .After = render::TextureState::Present};
+        commands->ResourceBarrier(std::span{&present, 1});
+        ctx.ReturnCommandBuffers({.CmdBuffers = std::span{&commands, 1}}, std::move(target));
+        auto* another = ctx.AllocateCommandBuffer();
+        EXPECT_DEATH(ctx.ReturnCommandBuffers({.CmdBuffers = std::span{&another, 1}}, std::move(target)), "");
+        ctx.ReturnCommandBuffers({.CmdBuffers = std::span{&another, 1}});
+        _done = true;
+    }
+    bool _done{false};
+};
+
+TEST(RuntimeFoundationDeathTest, RejectsUnreturnedForeignAndConsumedTargets) {
+    {
+        render::test::DeviceContext probe;
+        if (!render::test::TryCreateDevice(render::RenderBackend::D3D12, probe)) GTEST_SKIP() << probe.Reason;
+    }
+    TargetContractApp app;
+    EXPECT_EQ(app.Run({.Backend = render::RenderBackend::D3D12, .WindowTitle = "Target contract", .WindowWidth = 80, .WindowHeight = 60, .BackBufferFormat = render::TextureFormat::BGRA8_UNORM, .PresentMode = render::PresentMode::FIFO}), 0);
+}
+
 class FrameBoundaryApp final : public Application {
 public:
     explicit FrameBoundaryApp(bool modal) : _modal(modal) {}
@@ -330,7 +481,8 @@ protected:
         render::Fence* waits[]{_gate.get()};
         render::Fence* signals[]{_completedFence.get()};
         uint64_t values[]{1};
-        ctx.SubmitFrame({.SignalFences = signals, .SignalValues = values, .WaitFences = waits, .WaitValues = values});
+        ctx.ReturnCommandBuffers({.SignalFences = signals, .SignalValues = values, .WaitFences = waits, .WaitValues = values});
+        ctx.SubmitFrame();
         _inputThread = std::thread([this] {
             if (_mutateWindow) {
                 const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{2};

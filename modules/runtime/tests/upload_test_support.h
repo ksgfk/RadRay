@@ -62,13 +62,13 @@ public:
     int LiveTextures{0}, LiveTextureViews{0};
     Nullable<unique_ptr<render::Buffer>> CreateBuffer(const render::BufferDescriptor& desc) noexcept override {
         if (desc.Memory == render::MemoryType::Device && ++DeviceAllocations == FailDeviceAllocation) return nullptr;
-        return unique_ptr<render::Buffer>{new UploadTestBuffer(this, desc, LiveDeviceBuffers)};
+        return make_unique<UploadTestBuffer>(this, desc, LiveDeviceBuffers);
     }
     Nullable<unique_ptr<render::Texture>> CreateTexture(const render::TextureDescriptor& desc) noexcept override {
-        return unique_ptr<render::Texture>{new UploadTestTexture(desc, LiveTextures)};
+        return make_unique<UploadTestTexture>(desc, LiveTextures);
     }
     Nullable<unique_ptr<render::TextureView>> CreateTextureView(const render::TextureViewDescriptor& desc) noexcept override {
-        return unique_ptr<render::TextureView>{new UploadTestTextureView(desc, LiveTextureViews)};
+        return make_unique<UploadTestTextureView>(desc, LiveTextureViews);
     }
 };
 class UploadTestCommand final : public render::CommandBuffer {

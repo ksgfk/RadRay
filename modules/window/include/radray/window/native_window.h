@@ -2,9 +2,6 @@
 
 #include <variant>
 #include <string_view>
-#include <functional>
-#include <limits>
-#include <span>
 #include <optional>
 
 #include <radray/types.h>
@@ -14,6 +11,8 @@
 #include <radray/window/input.h>
 
 namespace radray {
+
+class NativeWindow;
 
 enum class NativeWindowType {
     UNKNOWN,
@@ -26,25 +25,27 @@ enum class NativeWindowShowMode {
     NoActivate
 };
 
-class NativeWindow;
+enum class NativeCursor : uint8_t {
+    Arrow,
+    TextInput,
+    ResizeAll,
+    ResizeNS,
+    ResizeEW,
+    ResizeNESW,
+    ResizeNWSE,
+    Hand,
+    NotAllowed,
+    Wait,
+    Progress,
+    Hidden
+};
 
-enum class NativeCursor : uint8_t { Arrow,
-                                    TextInput,
-                                    ResizeAll,
-                                    ResizeNS,
-                                    ResizeEW,
-                                    ResizeNESW,
-                                    ResizeNWSE,
-                                    Hand,
-                                    NotAllowed,
-                                    Wait,
-                                    Progress,
-                                    Hidden };
 struct NativeMonitor {
     Eigen::Vector2i Position{}, Size{}, WorkPosition{}, WorkSize{};
     float DpiScale{1};
     bool Primary{false};
 };
+
 struct NativeDesktopCapabilities {
     bool MouseCursors{false}, MousePosition{false}, Clipboard{false}, Ime{false}, Monitors{false}, HoveredWindow{false};
 };

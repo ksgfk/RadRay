@@ -97,6 +97,10 @@ private:
 /// `<assetRoot>/assets.json` 的内存索引，也是 AssetManager 的可选 IAssetSource。
 class AssetDatabase final : public IAssetSource {
 public:
+    AssetDatabase(
+        std::filesystem::path assetRoot,
+        vector<unique_ptr<AssetImporter>> importers) noexcept;
+
     /// importer 必须在 Open 前全部给出；未注册 type 的 settings 会退化为 RawSettings。
     /// 清单不存在时打开为空库。结构错误返回 nullptr 并填写 outError。
     static unique_ptr<AssetDatabase> Open(
@@ -137,10 +141,6 @@ public:
     std::optional<AssetId> ResolveId(std::string_view relPath) const override;
 
 private:
-    AssetDatabase(
-        std::filesystem::path assetRoot,
-        vector<unique_ptr<AssetImporter>> importers) noexcept;
-
     AssetImporter* FindImporter(std::string_view type) const noexcept;
 
     std::filesystem::path _assetRoot;

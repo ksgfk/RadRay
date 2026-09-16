@@ -22,8 +22,9 @@ GPU/flight、上传与生命周期等待没有交给新的渲染框架，详见[
 
 `Application::Render(AppFrameContext&)` 是录制入口，默认不录制、不 acquire 窗口，也不清屏。
 应用可覆盖它，使用当前 flight 的上下文录制 RHI 命令；Begin/End/Submit/Present 由 runner/GpuSystem 驱动。
-需要呈现时调用 `AcquireWindow`，按 backbuffer 的真实状态录制 barrier，并在提交后发布状态。
-写 flip backbuffer 的工作使用 `GetCommandBufferForTexture`；共享 command buffer 不写 flip backbuffer。
+通过 `AllocateCommandBuffer` 获取命令，使用 `ReturnCommandBuffers` 按序归还命令组及同步信息。
+需要呈现时调用 `AcquireWindow`，按 backbuffer 的真实状态录制 barrier，将目标随命令组移动归还。
+命令池寿命、呈现批次及提交契约见[命令分配与有序批次](frame-and-gpu.md#命令分配与有序批次)。
 调用方负责 GPU owner、asset refs 与 per-flight 数据寿命，默认宿主不再自动保留渲染快照。
 
 ApplicationExtension 及其安装入口、回调槽和销毁接线已移除。

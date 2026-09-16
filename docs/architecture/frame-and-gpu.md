@@ -46,13 +46,14 @@ Application::StartLoop
   ├─ World::Tick
   ├─ runner::MaintainWindows        处理 Update 期间的新请求，再决定是否退出
   ├─ 发布当前 flight；game thread 可以开始下一可写 flight 的 Update
-  ├─ GpuSystem::BeginFrameRecord      render thread Begin 主 CommandBuffer；清 targets、开始 profiler
+  ├─ GpuSystem::BeginFrameRecord      重置已退休 flight 的命令分配器、批次与 acquire 登记
   ├─ Application::Render              应用录制入口；默认空实现
   └─ GpuSystem::EndFrameRecordAndSubmit
-       uploader.EndFlight → 结束共享 CB 与 per-HWND present CB → 聚合 sync object
-       → 共享 CB / 应用附加 CB（窗口已不可呈现时跳过本轮命令）
-       D3D12 且多个 HWND：先 Submit 共享工作，再对每个窗口 Execute(present CB) 后立刻 Present
-       单窗口与 Vulkan：一次 Submit（含各 present CB）再 Present 全部 target
+       检查全部命令与目标已归还 → uploader.EndFlight → HostWrites.Flush
+       → 按归还顺序 Submit 各批次（窗口已不可呈现时跳过全部应用命令）
+       D3D12：带目标的批次 Submit 后立即 Present，再处理下一批次
+       Vulkan：各批次 Submit 后统一逐目标 Present
+       最终收尾 Submit 的内部 fence → flight.Signal
 ```
 
 单线程与双线程普通循环都遵循上述顺序。资源边界是当前 flight 上一轮的 fence 已完成、
@@ -95,18 +96,40 @@ fence，并在等待中 retire，不把 game thread 堵到当前 `Record` 结束
 关闭与模态丢帧仍提交真实 fence，但跳过 OnRender，完成通知的 `GpuWorkCompleted=false`，
 不能据此提交图像历史。当前不再录制或提交自动的资产上传前缀。
 
-`GpuSystem::SubmitFrame` 把不写 flip backbuffer 的工作录在共享 command buffer 上；每个已 acquire
-的窗口有自己的 present command buffer。D3D12 在同一 flight 有多个窗口时，先提交共享工作，再对每个
-HWND `Execute` 该窗的 present CB 并立刻 `Present`，不再等待 graphics queue。这样 DXGI 把每次 Present
-绑到只写该 current backbuffer 的 Execute。应用附加 command buffer 与共享工作一起提交，不得写入
-flip backbuffer。单窗口与 Vulkan 仍一次 Submit 再逐个 Present。同一队列上 present blit 仍排在共享
-工作之后，GPU 可以接着跑；Acquire 的 waitable、FIFO Present 队列满、复用 flight 的 fence，以及
-窗口维护阶段仍会挡住 CPU 或让 GPU 等下一帧工作。窗口生命周期的同步统一由 runner 发起，
-普通无窗口变更且无重建需求的帧不进入维护阶段。
-`AcquireWindow` 与 `SubmitFrame` 保留实时的最小化、隐藏和客户区检查；未挂接交换链、延迟创建或
-重建失败的窗口返回 `RetryLater`。已经 acquire 但提交前变为不可呈现的窗口不执行写入交换链的
-工作，D3D12 同时跳过对应 Present。原始平台 API 不受协程调度器管理，不能绕过 runtime 接口
-在渲染并发期间修改 HWND/NSWindow。
+### 命令分配与有序批次
+
+`GpuFlightSlot::CommandAllocator` 统一拥有本 flight 的 command buffer；没有默认共享命令或
+专门的窗口命令池。`AppFrameContext::AllocateCommandBuffer()` 从池中分配并 Begin，应用完成
+录制后调用 `ReturnCommandBuffers(desc, target)`，由 runtime End 并接管命令。归还不表示可立即
+复用；本轮已经分配的命令都保留到最终 flight fence 完成，下一轮录制才能重置分配器。
+
+`ReturnCommandBuffers` 复用 `render::CommandQueueSubmitDescriptor`，立即复制命令、fence 和
+value 数组，不保留调用方 span。批次按归还顺序执行，项内按 `CmdBuffers` 数组顺序执行，
+与分配顺序无关。仅接受当前 flight 分配且尚未归还的命令；归还后应用不得继续录制。
+应用 wait/signal 作用于当前批次，允许无命令、无目标的纯同步批次。`WaitToExecute` 和
+`ReadyToPresent` 必须为空，交换链同步由 runtime 根据可选呈现目标注入。
+
+一个批次最多关联一个 `AppFrameTarget`，包含该 acquire 的 backbuffer 的全部访问及收口到
+Present 的 barrier；普通批次不得访问本帧 acquire 的 backbuffer。应用自己决定录制落点，
+runtime 不提供按 texture 查找命令的路由。跨批次的资源依赖仍须应用显式录制 barrier。
+
+D3D12 对每个带目标的批次保持 `Submit → Present`，然后才处理下一批次，单窗口与多窗口
+遵循相同规则。Vulkan 保留批次边界，先全部 Submit，再按登记顺序 Present。本阶段不合并批次。
+每次 Submit 都追加递增的内部主队列 fence signal，并放在 signal 数组最后；Vulkan 因此把
+acquire semaphore 的回收关联到 runtime 持有的 fence。最终收尾 Submit 的 fence 值才是
+`flight.Signal`，中间批次完成不能退休 flight。空帧也提交真实完成 fence。
+
+`SubmitFrame()` 封口并执行已经归还的工作。封口时未归还命令、未归还成功 acquire 的目标、
+重复归还、跨 flight/跨录制使用、手填交换链同步或无效 fence 数组均属于不变量错误。
+显式提交后禁止继续分配、acquire 或归还；runner 的自动收尾对已提交帧不再重复 Submit。
+
+`AcquireWindow` 与提交前检查保留实时的最小化、隐藏和客户区判断。任一已 acquire 的窗口
+不可呈现时，整帧应用命令均跳过，完成通知的 `GpuWorkCompleted=false`，但保留各批次的
+wait/signal 及交换链收尾。D3D12 由既有 Present 路径消费 frame；Vulkan 仍消费 acquire
+semaphore、signal present semaphore 并 Present，必要时从统一命令池录制单独的 Present 状态
+转换。只发布实际执行的 backbuffer 状态，不发布被跳过的应用命令预期状态。
+成功 acquire 的帧不能通过析构取消；当前没有通用取消协议。原始平台 API 不受协程调度器
+管理，不能绕过 runtime 接口在渲染并发期间修改 HWND/NSWindow。
 
 runner 在准备槽位、完成回调、Update 与录制期间拒绝模态 Tick 重入，事件派发期间允许模态 Tick。
 普通循环在 DispatchEvents 前保留一个已准备的逻辑帧；模态 Tick 优先消费它，不重复领取 writable
@@ -184,7 +207,7 @@ runtime 的 WindowInputRouter、AppWindow::GetInput、统一 DispatchInput 与 O
 
 | 组 | 成员 | 谁访问 |
 |---|---|---|
-| 录制态 | `CmdBuffer`, `Uploader`, `HostWrites`, `Targets`, `Submitted`, `Recording` | GT 帧顶重置 HostWrites；RT 接管后录制，应用显式上传的 staging 在 fence 后回收 |
+| 录制态 | `CommandAllocator`, `Batches`, `Acquisitions`, `Uploader`, `HostWrites`, `Submitted`, `Recording` | GT 帧顶重置 HostWrites；RT 接管后录制，应用显式上传的 staging 在 fence 后回收 |
 | 计时态 | `FrameStartTime` | 游戏线程在帧开头写 |
 | 提交态 | `Signal` | `EndFrameRecordAndSubmit` 写；retire/`CompleteFlight` 经 `_retireMutex` 读后清 |
 | 等待表 | `WaitFrame` | 见下 |
@@ -316,22 +339,26 @@ retire 阶段仅发布帧完成消息；应用完成钩子在 GT 消费消息时
 `GpuFrameProfiler` 是定义和实现在 `gpu_resource.h/.cpp` 中的可选组件，
 由 `GpuSystemDescriptor::EnableFrameProfiler` 控制创建。它对应 UE5 的 `FGPUTiming`（最小化）：
 per-flight timestamp pool + readback。
-由 `GpuSystem` 在 `BeginFrameRecord`/`EndFrameRecordAndSubmit` 自动包裹本帧录制，
-`CompleteFlight` 时 resolve。应用只读 `GetLastGpuTimeMs()`。后端 readback barrier 差异
-内部隐藏。
+`GpuSystem` 提交时从同一命令分配器取得普通 buffer，在应用批次前后分别录制开始 timestamp
+和结束 timestamp / resolve，不保留独立的计时命令 buffer 成员，也不打断 D3D12 的
+Submit → Present 配对。计时范围覆盖整段应用提交序列，可能包含组间 GPU 等待。
+跳过应用工作的帧不录制计时，不发布旧 query 结果。`CompleteFlight` 时读取实际提交的
+query 结果；应用只读 `GetLastGpuTimeMs()`，后端 readback barrier 差异内部隐藏。
 最近一次 GPU 耗时和 frame latency 通过原子标量发布，允许 game thread 在另一 flight 回收时读取。
 
 ## 呈现
 
 `AppFrameContext::AcquireWindow(window)` 内部 `AcquireNextSwapChainFrame`：
 `RequireRecreate` / `RetryLater` / `Error` / 最小化 → `nullopt`（应用跳过该窗口）。
-成功时把 `SwapChainFrame` 收进本帧 `FlightSlot`，返回 `AppFrameTarget`
-（backbuffer + view + index）。
+成功时返回仅可移动的 `AppFrameTarget`，包含 backbuffer、view、index，以及私有的
+`SwapChainFrame` 和本轮录制的归属信息；flight 登记待归还目标，不创建 command buffer。
+目标必须随本帧一个非空命令批次移动归还一次；成功 acquire 后 view 创建失败属于不可继续的
+错误，不会返回空值并遗留 outstanding frame。
 
-**`AcquireWindow` 不录任何 barrier。** 应用显式取得目标后，负责使用 backbuffer 真实初态、
-录制目标内容并收口到 Present；只有显式 acquire 的窗口参与本次呈现。`AppFrameTarget` 不暴露同步对象。
-写 flip backbuffer 的命令使用 `AppFrameContext::GetCommandBufferForTexture`；`GpuSystem` 在对应窗口
-命令提交返回后、Present 前将 backbuffer 状态记为 Present。若本轮跳过窗口 GPU 工作，则保留原状态。
+**`AcquireWindow` 不录任何 barrier。** 应用通过 `AllocateCommandBuffer` 显式选择录制资源，
+根据 backbuffer 真实初态录制目标内容并收口到 Present，再将命令组和目标一起归还。
+`GpuSystem` 在实际提交对应命令后更新 backbuffer 状态，完成提交与呈现；
+窗口不可呈现的整帧跳过和 Vulkan 收尾规则见前述命令批次契约。
 默认 Application::Render 为空，没有自动 acquire、清屏或离屏输出管理。
 
 交换链尺寸变化时后备缓冲 view 会重建，此时必须调

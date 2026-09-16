@@ -7,6 +7,7 @@
 #include <span>
 
 #include <radray/types.h>
+#include <radray/nullable.h>
 #include <radray/channel.h>
 #include <radray/coroutine.h>
 #include <radray/render/rhi.h>
@@ -46,14 +47,22 @@ struct WaitFrameRecord : ManualCoroutineRecord {
     bool FlightComplete{false};
 };
 
-/// AcquireWindow 成功返回的轻量视图。重量级的 SwapChainFrame / sync object
-/// 留在 runtime 的 per-flight FlightSlot 里，应用只拿到 backbuffer + view。
-/// 【不暴露同步对象】sync object 是提交细节，由 runtime 独占。
+/// AcquireWindow 返回的仅可移动目标；必须在本次录制中随一个非空命令批次归还。
+/// 析构不会取消 acquire。backbuffer 的全部访问及 →Present barrier 必须在关联批次中。
 struct AppFrameTarget {
     AppWindow* Window{nullptr};
     render::Texture* BackBuffer{nullptr};
     render::TextureView* BackBufferView{nullptr};
     uint32_t BackBufferIndex{0};
+
+private:
+    friend class AppFrameContext;
+    friend class GpuSystem;
+    render::SwapChainFrame _frame;
+    Nullable<GpuSystem*> _owner{nullptr};
+    uint64_t _frameSerial{0};
+    uint32_t _flightIndex{0};
+    size_t _registrationIndex{0};
 };
 
 struct FlightCompletion {
@@ -77,11 +86,39 @@ struct GpuQueueFrameTrack {
     std::atomic<uint64_t> NextFenceValue{1};
 };
 
-struct GpuFlightAcquiredTarget {
-    AppWindow* Window{nullptr};
-    render::SwapChainFrame Frame;
-    /// Acquire 时 Begin，只录写该 HWND current backbuffer 的 pass。Submit 时与 Present 成对 Execute。
-    render::CommandBuffer* Commands{nullptr};
+/// 当前 flight 独占的命令池；仅在上一轮退休后重置，同一轮归还的命令不会重新分配。
+class GpuFlightCommandAllocator {
+private:
+    friend class GpuSystem;
+    friend class AppFrameContext;
+    render::CommandBuffer* Allocate(render::Device* device, render::CommandQueue* queue);
+    void Return(std::span<render::CommandBuffer*> commands);
+    void Reset();
+    bool HasOutstanding() const noexcept;
+
+    struct Entry {
+        unique_ptr<render::CommandBuffer> Commands;
+        bool Returned{false};
+    };
+    vector<Entry> _pool;
+    size_t _allocatedCount{0};
+};
+
+struct GpuFlightSubmitBatch {
+    vector<render::CommandBuffer*> CmdBuffers;
+    vector<render::Fence*> SignalFences;
+    vector<uint64_t> SignalValues;
+    vector<render::Fence*> WaitFences;
+    vector<uint64_t> WaitValues;
+    std::optional<AppFrameTarget> Target;
+};
+
+struct GpuFlightAcquireRegistration {
+    AppWindow* Window;
+    render::Texture* BackBuffer;
+    render::TextureView* BackBufferView;
+    uint32_t BackBufferIndex;
+    bool Returned{false};
 };
 
 /// runtime 拥有的 per-flight 槽位。代表流水线一条槽位在不同阶段的完整状态，
@@ -91,15 +128,12 @@ struct GpuFlightAcquiredTarget {
 ///  - 计时态：游戏线程在帧开头写 FrameStartTime；
 ///  - 提交态:Signal 由 EndFrameRecordAndSubmit 写、retire/CompleteFlight 读后清。
 struct GpuFlightSlot {
-    using AcquiredTarget = GpuFlightAcquiredTarget;
-
-    // —— 录制态（渲染线程独占）。CmdBuffer 是共享前缀（不写 flip backbuffer）；
-    //    PresentCommandPool 按 acquire 的窗口复用，Targets 收集本帧窗口。
-    unique_ptr<render::CommandBuffer> CmdBuffer;
-    vector<unique_ptr<render::CommandBuffer>> PresentCommandPool;
+    // —— 录制态（渲染线程独占）。批次顺序由归还顺序决定。
+    GpuFlightCommandAllocator CommandAllocator;
     unique_ptr<ResourceUploader> Uploader;
     HostWriteBatch HostWrites;
-    vector<AcquiredTarget> Targets;
+    vector<GpuFlightSubmitBatch> Batches;
+    vector<GpuFlightAcquireRegistration> Acquisitions;
     uint64_t FrameSerial{0};
     bool Submitted{false};
     bool Recording{false};
@@ -116,14 +150,6 @@ struct GpuFlightSlot {
 
     // —— 提交态（渲染线程写，retire 经 _retireMutex 读后清）。
     GpuFenceSignal Signal;
-};
-
-struct AppFrameSubmitDescriptor {
-    std::span<render::CommandBuffer*> CmdBuffers{};
-    std::span<render::Fence*> SignalFences{};
-    std::span<uint64_t> SignalValues{};
-    std::span<render::Fence*> WaitFences{};
-    std::span<uint64_t> WaitValues{};
 };
 
 /// co_await GpuSystem::Wait() 的 awaitable。恢复点在 GpuSystem::PumpWaitFrame(主线程)。
@@ -151,12 +177,7 @@ public:
         uint32_t flightIndex,
         std::chrono::duration<float> deltaTime,
         std::chrono::duration<float> lastFrameLatency,
-        bool isInModalLoop) noexcept
-        : _gpuSystem(gpuSystem),
-          _flightIndex(flightIndex),
-          _deltaTime(deltaTime),
-          _lastFrameLatency(lastFrameLatency),
-          _isInModalLoop(isInModalLoop) {}
+        bool isInModalLoop) noexcept;
 
     uint32_t FlightIndex() const noexcept { return _flightIndex; }
     uint64_t FrameSerial() const noexcept;
@@ -164,14 +185,16 @@ public:
     std::chrono::duration<float> LastFrameLatency() const noexcept { return _lastFrameLatency; }
     bool IsInModalLoop() const noexcept { return _isInModalLoop; }
 
-    /// runtime 已 Begin() 的共享 command buffer：不写 flip backbuffer 的录制落点。
-    render::CommandBuffer* GetCommandBuffer() const noexcept;
-    /// 若 texture 是本帧已 acquire 的 backbuffer，返回该 HWND 的 present CB；否则共享 CB。
-    render::CommandBuffer* GetCommandBufferForTexture(render::Texture* texture) const noexcept;
+    /// 分配当前 flight 的命令并 Begin；必须归还，调用方不得自行 End。
+    render::CommandBuffer* AllocateCommandBuffer();
+    /// 复制 desc 的数组、End 命令并按调用顺序登记。归还后不得修改或重复归还命令。
+    /// 仅接受当前 flight 分配的命令；WaitToExecute/ReadyToPresent 必须为空。
+    /// target 移交呈现所有权；其 backbuffer 的全部访问必须位于此非空批次中。
+    void ReturnCommandBuffers(const render::CommandQueueSubmitDescriptor& desc, std::optional<AppFrameTarget> target = std::nullopt);
 
     /// 按需获取窗口呈现目标。内部 AcquireNextSwapChainFrame：
     /// RequireRecreate/RetryLater/Error/最小化 → nullopt（应用跳过该窗口）。
-    /// 成功时把 SwapChainFrame 收进本帧 FlightSlot，返回 backbuffer + view。
+    /// 成功时返回持有 SwapChainFrame 的目标，不分配或选择命令。
     /// 【不录任何 barrier】backbuffer 初始翻转与 →Present 收尾全部由应用显式录。
     std::optional<AppFrameTarget> AcquireWindow(AppWindow* window);
 
@@ -184,13 +207,15 @@ public:
     render::Device* GetDevice() const noexcept;
     GpuSystem* GetGpuSystem() const noexcept { return _gpuSystem; }
 
-    /// 提交并呈现当前帧。runtime 始终注入共享 CB、per-HWND present CB、flight batch、内部 fence
-    /// 和 swapchain 同步；描述符中的附加 command buffer 与共享工作一起提交，不得写入 flip backbuffer。
-    void SubmitFrame(const AppFrameSubmitDescriptor& desc = {});
+    /// 封口并提交已归还的批次；全部命令与 acquire 目标必须已归还，之后禁止继续录制。
+    void SubmitFrame();
 
 private:
+    GpuFlightSlot& GetRecordingFlight() const noexcept;
+
     GpuSystem* _gpuSystem;
     uint32_t _flightIndex;
+    uint64_t _frameSerial;
     std::chrono::duration<float> _deltaTime;
     std::chrono::duration<float> _lastFrameLatency;
     bool _isInModalLoop;
@@ -250,8 +275,7 @@ public:
     /// 返回 latency 起点，runner 同时用它计算相邻逻辑帧的 DeltaTime。
     std::chrono::steady_clock::time_point BeginFrameTiming(uint32_t flightIndex) noexcept;
     /// [RT] 当前 flight 已交给录制线程；同时开始应用显式上传所用的 uploader。
-    /// 一帧开头：取/建该 flight 的共享 CommandBuffer 并 Begin()，清空上帧 acquire 的目标。
-    /// Present command buffer 在 AcquireWindow 时 Begin。返回 Render 用的帧上下文。
+    /// 上一轮必须已退休；重置命令分配器、批次与 acquire 登记，返回 Render 用的帧上下文。
     AppFrameContext BeginFrameRecord(
         uint32_t flightIndex,
         std::chrono::duration<float> deltaTime,
@@ -260,9 +284,8 @@ public:
         bool rendered = true);
 
     /// [RT] 与 BeginFrameRecord 在同一录制线程调用，当前 flight 尚未交给 retire。
-    /// 一帧收尾：uploader.EndFlight → 结束共享与 per-HWND CB → 聚合 sync object → Submit
-    /// （D3D12 多 HWND 时每窗 Execute 后立刻 Present；其余一次 Submit 再 Present）
-    /// （acquired 窗口已不可呈现时跳过本轮命令）→ 写 flight.Signal。
+    /// 检查全部归还 → uploader.EndFlight / flush → 按批次 Submit / Present → 写最终 flight.Signal。
+    /// acquired 窗口已不可呈现时跳过全部应用命令，仍完成交换链与 fence 收尾。
     void EndFrameRecordAndSubmit(uint32_t flightIndex);
 
     /// [任意线程] 只读取构造后稳定的 device 指针。
@@ -296,7 +319,7 @@ private:
     friend class WaitFrameAwaitable;
 
     /// [RT] 当前 flight 的录制线程独占调用；与 BeginFrameRecord/EndFrameRecordAndSubmit 同线程。
-    void SubmitFrame(uint32_t flightIndex, const AppFrameSubmitDescriptor& desc);
+    void SubmitFrame(uint32_t flightIndex);
 
     /// [GT] 向当前由 GT 持有的 flight 登记等待；包含协程首次挂起路径。
     WaitFrameRecord* RegisterWaitFrame(stop_token stop, std::coroutine_handle<> continuation);
@@ -311,7 +334,7 @@ private:
 
     WindowManager* _windowManager{nullptr};
     Nullable<render::InstanceVulkan*> _vulkanInstance{nullptr};
-    unique_ptr<render::DXGIFactory> _dxgiFactory;
+    Nullable<unique_ptr<render::DXGIFactory>> _dxgiFactory;
     shared_ptr<render::Device> _device;
     render::CommandQueue* _mainQueue{nullptr};
     const uint32_t _backBufferCount;

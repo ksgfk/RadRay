@@ -653,7 +653,7 @@ unique_ptr<AssetDatabase> AssetDatabase::Open(
         return nullptr;
     }
 
-    unique_ptr<AssetDatabase> database{new AssetDatabase(std::move(absoluteRoot), std::move(importers))};
+    auto database = make_unique<AssetDatabase>(std::move(absoluteRoot), std::move(importers));
     for (const unique_ptr<AssetImporter>& importerOwner : database->_ownedImporters) {
         if (importerOwner == nullptr) {
             outError = "importer list contains a null importer";

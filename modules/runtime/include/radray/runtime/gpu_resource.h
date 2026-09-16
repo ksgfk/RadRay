@@ -16,7 +16,7 @@ namespace radray {
 class MeshResource;
 
 /// 每帧 GPU 耗时探针。对应 UE5 的 FGPUTiming(最小化):per-flight timestamp pool + readback。
-/// 由 GpuSystem 在 BeginFrameRecord/EndFrameRecordAndSubmit 自动包裹本帧录制,
+/// 由 GpuSystem 从 flight 命令池分配前后计时命令，包裹实际提交的应用批次；跳过帧不采样。
 /// CompleteFlight 时 resolve。应用只读 GetLastGpuTimeMs()。后端 readback barrier 差异内部隐藏。
 class GpuFrameProfiler {
 public:
