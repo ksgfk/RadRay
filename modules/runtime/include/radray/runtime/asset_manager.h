@@ -92,7 +92,7 @@ public:
 
     void Cancel() const noexcept;
 
-    const AssetId& GetAssetId() const noexcept;
+    AssetId GetAssetId() const noexcept;
 
     /// 等待本引用离开 Loading 态。`co_await ref` 得到 bool: true = 已到终态,
     /// false = 等待者自己被取消 (不是资产加载失败)。
@@ -158,7 +158,7 @@ public:
 
     void Cancel() const noexcept { _ref.Cancel(); }
 
-    const AssetId& GetAssetId() const noexcept { return _ref.GetAssetId(); }
+    AssetId GetAssetId() const noexcept { return _ref.GetAssetId(); }
 
     /// 见 StreamingAssetRefAny::operator co_await。
     AssetWaitAwaitable operator co_await() const noexcept;

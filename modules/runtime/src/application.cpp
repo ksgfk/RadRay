@@ -893,8 +893,8 @@ void Application::PumpFlightCompletions(std::optional<uint32_t> flightIndex) {
     } else {
         _gpuSystem->CleanupCompletedFlights();
     }
-    for (const auto& completion : completions) {
-        OnRenderFrameComplete(completion);
+    for (const auto& c : completions) {
+        OnRenderFrameComplete(c);
     }
 }
 

@@ -51,6 +51,9 @@ Loading 时最终对象未知，`Load<T>`、`Find<T>`、`Wait<T>` 和 `CastTo<T>
 引用的复制、查询、移动和析构都只在 AssetManager 所在的 game thread 进行，计数不是原子的。
 引用必须在 `AssetManager` 之前销毁；slot 随 manager 释放，之后不能再查询引用状态。
 
+`StreamingAssetRefAny::GetAssetId()` 与 `StreamingAssetRef<T>::GetAssetId()` 按值返回资产 ID；
+无效引用返回 `AssetId{}`。返回值独立于 slot 的生命周期，不借用 slot 或共享静态对象。
+
 ## AssetId
 
 ```cpp

@@ -145,9 +145,8 @@ void StreamingAssetRefAny::Cancel() const noexcept {
     }
 }
 
-const AssetId& StreamingAssetRefAny::GetAssetId() const noexcept {
-    static const AssetId empty{};
-    return _slot != nullptr ? _slot->Id : empty;
+AssetId StreamingAssetRefAny::GetAssetId() const noexcept {
+    return _slot != nullptr ? _slot->Id : AssetId{};
 }
 
 // ════════════════════════════════════════════════════════════

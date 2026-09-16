@@ -100,10 +100,10 @@ struct GpuFlightSlot {
     unique_ptr<ResourceUploader> Uploader;
     HostWriteBatch HostWrites;
     vector<AcquiredTarget> Targets;
+    uint64_t FrameSerial{0};
     bool Submitted{false};
     bool Recording{false};
     bool Rendered{true};
-    uint64_t FrameSerial{0};
 
     // —— 计时态（游戏线程写）。
     std::chrono::steady_clock::time_point FrameStartTime{};
@@ -140,42 +140,6 @@ private:
     GpuSystem* _gpuSystem;
     stop_token _stop;
     WaitFrameRecord* _record{nullptr};
-};
-
-/// 每帧 GPU 耗时探针。对应 UE5 的 FGPUTiming(最小化):per-flight timestamp pool + readback。
-/// 由 GpuSystem 在 BeginFrameRecord/EndFrameRecordAndSubmit 自动包裹本帧录制,
-/// CompleteFlight 时 resolve。应用只读 GetLastGpuTimeMs()。后端 readback barrier 差异内部隐藏。
-class GpuFrameProfiler {
-public:
-    GpuFrameProfiler(render::Device* device, render::CommandQueue* queue, uint32_t flightCount);
-    ~GpuFrameProfiler() noexcept;
-    GpuFrameProfiler(const GpuFrameProfiler&) = delete;
-    GpuFrameProfiler(GpuFrameProfiler&&) = delete;
-    GpuFrameProfiler& operator=(const GpuFrameProfiler&) = delete;
-    GpuFrameProfiler& operator=(GpuFrameProfiler&&) = delete;
-
-    /// 录制开始时 reset pool + 写 Top timestamp。
-    void BeginFrame(render::CommandBuffer* cmdBuffer, uint32_t flightIndex);
-    /// 帧尾(提交之前):写 Bottom timestamp + resolve 到 readback(含后端 barrier)。
-    void EndFrame(render::CommandBuffer* cmdBuffer, uint32_t flightIndex);
-    /// flight fence 完成后:读回并换算耗时。
-    void Resolve(uint32_t flightIndex);
-
-    float GetLastGpuTimeMs() const noexcept { return _lastGpuTimeMs.load(std::memory_order_relaxed); }
-
-private:
-    static constexpr uint32_t TimestampQueryCount = 2;
-
-    struct FrameTiming {
-        unique_ptr<render::QueryPool> Pool;
-        unique_ptr<render::Buffer> Readback;
-        bool Pending{false};
-    };
-
-    render::CommandQueue* _queue;
-    bool _readbackNeedsBarrier{false};
-    vector<FrameTiming> _frames;
-    std::atomic<float> _lastGpuTimeMs{0.0f};
 };
 
 /// Render 回调的唯一入参，封装一帧录制 API。
@@ -359,6 +323,7 @@ private:
     UnboundedChannel<FlightCompletion> _flightCompletions;
     unique_ptr<GpuFrameProfiler> _frameProfiler;
     uint64_t _nowFrameIndex{0};
+    uint64_t _nextFrameSerial{1};
     std::atomic<float> _lastFrameLatencySeconds{0.0f};
 };
 

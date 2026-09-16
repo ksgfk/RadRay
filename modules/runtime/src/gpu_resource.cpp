@@ -10,6 +10,103 @@
 
 namespace radray {
 
+GpuFrameProfiler::GpuFrameProfiler(render::Device* device, render::CommandQueue* queue, uint32_t flightCount)
+    : _queue(queue) {
+    // Vulkan 需要在 readback copy 前后显式 transition;D3D12 READBACK heap 始终处于 COPY_DEST。
+    _readbackNeedsBarrier = device->GetBackend() == render::RenderBackend::Vulkan;
+    _frames.resize(flightCount);
+    for (FrameTiming& frame : _frames) {
+        render::QueryPoolDescriptor poolDesc{
+            .Type = render::QueryType::Timestamp,
+            .Count = TimestampQueryCount,
+            .DebugName = "GpuFrameProfiler Timestamp Pool"};
+        frame.Pool = device->CreateQueryPool(poolDesc).Unwrap();
+
+        render::BufferDescriptor readbackDesc{
+            .Size = sizeof(uint64_t) * TimestampQueryCount,
+            .Memory = render::MemoryType::ReadBack,
+            .Usage = render::BufferUse::CopyDestination | render::BufferUse::MapRead};
+        frame.Readback = device->CreateBuffer(readbackDesc).Unwrap();
+    }
+}
+
+GpuFrameProfiler::~GpuFrameProfiler() noexcept = default;
+
+void GpuFrameProfiler::BeginFrame(render::CommandBuffer* cmdBuffer, uint32_t flightIndex) {
+    if (cmdBuffer == nullptr || flightIndex >= _frames.size()) {
+        return;
+    }
+    FrameTiming& frame = _frames[flightIndex];
+    cmdBuffer->ResetQueryPool(frame.Pool.get(), 0, TimestampQueryCount);
+    cmdBuffer->WriteTimestamp(render::QueryTimestampDescriptor{
+        .Pool = frame.Pool.get(),
+        .Stage = render::QueryPipelineStage::Top,
+        .Index = 0});
+}
+
+void GpuFrameProfiler::EndFrame(render::CommandBuffer* cmdBuffer, uint32_t flightIndex) {
+    if (cmdBuffer == nullptr || flightIndex >= _frames.size()) {
+        return;
+    }
+    FrameTiming& frame = _frames[flightIndex];
+    cmdBuffer->WriteTimestamp(render::QueryTimestampDescriptor{
+        .Pool = frame.Pool.get(),
+        .Stage = render::QueryPipelineStage::Bottom,
+        .Index = 1});
+    if (_readbackNeedsBarrier) {
+        render::ResourceBarrierDescriptor toCopyDst = render::BarrierBufferDescriptor{
+            .Target = frame.Readback.get(),
+            .Before = render::BufferState::Common,
+            .After = render::BufferState::CopyDestination};
+        cmdBuffer->ResourceBarrier(std::span{&toCopyDst, 1});
+    }
+    cmdBuffer->ResolveQueryData(render::QueryResolveDescriptor{
+        .Pool = frame.Pool.get(),
+        .FirstIndex = 0,
+        .Count = TimestampQueryCount,
+        .Destination = frame.Readback.get(),
+        .DestinationOffset = 0});
+    if (_readbackNeedsBarrier) {
+        render::ResourceBarrierDescriptor toHostRead = render::BarrierBufferDescriptor{
+            .Target = frame.Readback.get(),
+            .Before = render::BufferState::CopyDestination,
+            .After = render::BufferState::HostRead};
+        cmdBuffer->ResourceBarrier(std::span{&toHostRead, 1});
+    }
+    frame.Pending = true;
+}
+
+void GpuFrameProfiler::Resolve(uint32_t flightIndex) {
+    if (flightIndex >= _frames.size()) {
+        return;
+    }
+    FrameTiming& frame = _frames[flightIndex];
+    if (!frame.Pending) {
+        return;
+    }
+    frame.Pending = false;
+
+    const uint64_t mappedSize = sizeof(uint64_t) * TimestampQueryCount;
+    ScopedBufferMap mapping{
+        frame.Readback.get(),
+        render::BufferRange{.Offset = 0, .Size = mappedSize}};
+    if (!mapping) {
+        return;
+    }
+    uint64_t ticks[TimestampQueryCount]{};
+    std::memcpy(ticks, mapping.Data(), mappedSize);
+
+    if (ticks[1] <= ticks[0]) {
+        return;
+    }
+    const render::TimestampQueryCalibration calibration = frame.Pool->GetTimestampCalibration(_queue);
+    if (calibration.TickPeriodNs <= 0.0) {
+        return;
+    }
+    const double elapsedNs = static_cast<double>(ticks[1] - ticks[0]) * calibration.TickPeriodNs;
+    _lastGpuTimeMs.store(static_cast<float>(elapsedNs / 1'000'000.0), std::memory_order_relaxed);
+}
+
 HostWriteBatch::HostWriteBatch() {
     _ranges.reserve(64);
 }

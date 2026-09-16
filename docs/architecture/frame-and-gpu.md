@@ -143,6 +143,10 @@ runtime 的 WindowInputRouter、AppWindow::GetInput、统一 DispatchInput 与 O
 完成消息不挂在槽位上。`UnboundedChannel<FlightCompletion>` 属于 `GpuSystem`，由 retire 线程
 写入、Application 在 GT 消费。`WaitFrame` 仍用槽位上的原子位，见下一节。
 
+`FrameSerial` 标识一次帧录制，由 `GpuSystem` 实例的计数器在 `BeginFrameRecord` 中从 1
+递增分配，录制线程独占访问；完成消息保留该编号。编号只在同一 `GpuSystem` 生命周期内唯一，
+不同实例可以重复，不作为进程级身份。`FlightIndex` 则是循环复用的槽位索引。
+
 `_flights` 是 `vector<unique_ptr<FlightSlot>>` 而不是 `vector<FlightSlot>`：`FlightSlot`
 内含 `ManualCoroutineScheduler`，它不可拷贝也不可移动——挂起的协程记录里存着回指调度器的
 指针（stop callback），搬动槽位会让那些指针指向旧地址。数量在构造时定下且此后不变，
@@ -259,7 +263,9 @@ retire 阶段仅发布帧完成消息；应用完成钩子在 GT 消费消息时
 
 ## 帧 profiler
 
-`GpuFrameProfiler` 对应 UE5 的 `FGPUTiming`（最小化）：per-flight timestamp pool + readback。
+`GpuFrameProfiler` 是定义和实现在 `gpu_resource.h/.cpp` 中的可选组件，
+由 `GpuSystemDescriptor::EnableFrameProfiler` 控制创建。它对应 UE5 的 `FGPUTiming`（最小化）：
+per-flight timestamp pool + readback。
 由 `GpuSystem` 在 `BeginFrameRecord`/`EndFrameRecordAndSubmit` 自动包裹本帧录制，
 `CompleteFlight` 时 resolve。应用只读 `GetLastGpuTimeMs()`。后端 readback barrier 差异
 内部隐藏。
