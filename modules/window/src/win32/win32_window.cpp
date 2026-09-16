@@ -218,8 +218,6 @@ static void ApplyWindowStyles(Win32Window* window) noexcept {
         return;
     }
 
-    window->EventBeforeSurfaceChange()();
-
     if (!window->_isFullscreen) {
         ::SetWindowLongPtrW(window->_hwnd, GWL_STYLE, static_cast<LONG_PTR>(style));
         ::SetWindowLongPtrW(window->_hwnd, GWL_EXSTYLE, static_cast<LONG_PTR>(exStyle));
@@ -848,6 +846,7 @@ void Win32Window::Destroy() noexcept {
 
 void Win32Window::DestroyImpl() noexcept {
     if (_hwnd) {
+        EventBeforeSurfaceChange()();
         ::DestroyWindow(_hwnd);
         _hwnd = nullptr;
     }
@@ -1021,6 +1020,7 @@ void Win32Window::SetDecorated(bool value) noexcept {
     if (_decorated == value) {
         return;
     }
+    EventBeforeSurfaceChange()();
     _decorated = value;
     ApplyWindowStyles(this);
 }
@@ -1029,6 +1029,7 @@ void Win32Window::SetShowInTaskbar(bool value) noexcept {
     if (_showInTaskbar == value) {
         return;
     }
+    EventBeforeSurfaceChange()();
     _showInTaskbar = value;
     ApplyWindowStyles(this);
 }
@@ -1037,6 +1038,7 @@ void Win32Window::SetTopMost(bool value) noexcept {
     if (_topMost == value) {
         return;
     }
+    EventBeforeSurfaceChange()();
     _topMost = value;
     ApplyWindowStyles(this);
 }

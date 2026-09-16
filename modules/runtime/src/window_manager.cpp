@@ -2,8 +2,10 @@
 
 #include <algorithm>
 #include <limits>
+#include <utility>
 
 #include <radray/logger.h>
+#include <radray/scope_guard.h>
 #include <radray/render/rhi.h>
 #include <radray/runtime/application.h>
 #include <radray/runtime/gpu_system.h>
@@ -28,61 +30,44 @@ AppWindow::AppWindow(
     WindowManager* manager,
     unique_ptr<NativeWindow> window,
     NativeEventPump* pump,
-    bool isMain) noexcept
+    bool isMain, uint64_t id) noexcept
     : _manager(manager),
+      _id(id),
       _window(std::move(window)),
       _pump(pump),
       _isMain(isMain) {
     _beforeSurfaceChange = _window->EventBeforeSurfaceChange().connect([this]() {
-        if (_swapchain) {
-            _manager->EnsureRenderIdle();
-        }
+        _manager->AssertMutationAllowed();
     });
 }
 
 AppWindow::~AppWindow() noexcept {
     DetachSwapChain();
     _pump->Unregister(_window.get());
+    _window->Destroy();
 }
 
-Nullable<render::SwapChain*> AppWindow::AttachSwapChain(const render::SwapChainDescriptor& desc) noexcept {
-    _manager->EnsureRenderIdle();
-    auto* gpuSystem = _manager->GetGpuSystem();
-    render::SwapChainDescriptor swapChainDesc = desc;
-    swapChainDesc.PresentQueue = gpuSystem->GetMainQueue();
-    swapChainDesc.NativeHandler = _window->GetNativeHandler();
-    swapChainDesc.BackBufferCount = gpuSystem->GetBackBufferCount();
+WindowOperationStatus AppWindow::AttachSwapChain(const WindowSwapChainDescriptor& desc) noexcept {
+    _manager->AssertMutationAllowed();
     DetachSwapChain();
-    _swapchain = gpuSystem->GetDevice()->CreateSwapChain(swapChainDesc);
-    if (!_swapchain) return nullptr;
-    const uint32_t backBufferCount = _swapchain->GetBackBufferCount();
-    _backBufferViews.resize(backBufferCount);
-    _requestRecreateSwapChain.store(false, std::memory_order_release);
-    return _swapchain.Get();
+    _swapChainDescriptor = desc;
+    return UpdateSwapChain({});
 }
 
 unique_ptr<render::SwapChain> AppWindow::ReleaseSwapChain() noexcept {
-    _manager->EnsureRenderIdle();
+    _manager->AssertMutationAllowed();
     ReleaseBackBufferViews();
+    _swapChainDescriptor.reset();
+    _swapChainUsable = false;
     _requestRecreateSwapChain.store(false, std::memory_order_release);
     return _swapchain.Release();
 }
 
 void AppWindow::DetachSwapChain() noexcept {
-    _manager->EnsureRenderIdle();
-    if (_swapchain && _manager->GetGpuSystem() != nullptr) {
-        auto* gpuSystem = _manager->GetGpuSystem();
-        gpuSystem->WaitAndRetireFlights();
-    }
-    ReleaseBackBufferViews();
-    _swapchain = nullptr;
-    _requestRecreateSwapChain.store(false, std::memory_order_release);
+    auto released = ReleaseSwapChain();
 }
 
 render::SwapChainAcquireResult AppWindow::AcquireNextSwapChainFrame(const AppRenderContext& ctx) noexcept {
-    if (!_swapchain) {
-        return render::SwapChainAcquireResult{};
-    }
     if (!IsSwapChainPresentable()) {
         render::SwapChainAcquireResult result{};
         result.Status = render::SwapChainStatus::RetryLater;
@@ -113,7 +98,7 @@ NativeWindow* AppWindow::GetNativeWindow() const noexcept {
 }
 
 render::SwapChain* AppWindow::GetSwapChain() const noexcept {
-    if (!_swapchain) {
+    if (!_swapchain || !_swapChainUsable) {
         return nullptr;
     }
     return _swapchain.Get();
@@ -171,27 +156,69 @@ void AppWindow::SetBackBufferState(uint32_t backBufferIndex, render::TextureStat
     _backBufferViews[backBufferIndex].State = state;
 }
 
-WindowManager::WindowManager(const WindowManagerDescriptor& desc) {
+WindowManager::WindowManager(const WindowManagerDescriptor& desc) : _type(desc.Type) {
     NativeWindow::GlobalInit();
     _eventPump = NativeEventPump::Create(desc.Type).Unwrap();
 }
 
 WindowManager::~WindowManager() noexcept {
+    CloseOperations();
+    _applyingOperations = true;
     _windows.clear();
     _eventPump.reset();
     NativeWindow::GlobalShutdown();
 }
 
-Nullable<AppWindow*> WindowManager::CreateWindow(const NativeWindowCreateDescriptor& desc, bool isMain) {
-    EnsureRenderIdle();
-    auto window = NativeWindow::Create(desc);
-    if (!window) return nullptr;
-    if (!_eventPump->Register(window.Get())) return nullptr;
-    auto& newWindow = _windows.emplace_back(make_unique<AppWindow>(this, window.Release(), _eventPump.get(), isMain));
-    if (isMain) {
-        _mainWindow = newWindow.get();
+WindowCreateResult WindowManager::CreateWindowImmediate(const WindowCreateDescriptor& desc, bool isMain) {
+    AssertMutationAllowed();
+    if (isMain && (_mainWindow != nullptr || _mainWindowClosed)) return {};
+    Nullable<NativeWindow*> owner{nullptr};
+    if (desc.OwnerWindow.Id != 0 || desc.OwnerWindow.Owner) {
+        auto ownerWindow = ResolveWindow(desc.OwnerWindow);
+        if (!ownerWindow) return {WindowOperationStatus::InvalidWindow, {}};
+        owner = ownerWindow->GetNativeWindow();
     }
-    return newWindow.get();
+    NativeWindowCreateDescriptor nativeDesc;
+    if (_type == NativeWindowType::Win32HWND)
+        nativeDesc = Win32WindowCreateDescriptor{};
+    else if (_type == NativeWindowType::CocoaNSWindow)
+        nativeDesc = CocoaWindowCreateDescriptor{};
+    else
+        return {};
+    std::visit([&](auto& native) {
+        native.Title = desc.Title;
+        native.Width = desc.Width;
+        native.Height = desc.Height;
+        native.X = desc.X;
+        native.Y = desc.Y;
+        native.Resizable = desc.Resizable;
+        native.StartMaximized = desc.StartMaximized;
+        native.Fullscreen = desc.Fullscreen;
+        native.StartVisible = desc.StartVisible;
+        native.OwnerWindow = owner;
+        native.Decorated = desc.Decorated;
+        native.ShowInTaskbar = desc.ShowInTaskbar;
+        native.TopMost = desc.TopMost;
+        native.ActivateOnShow = desc.ActivateOnShow;
+        native.FocusOnClick = desc.FocusOnClick;
+        native.InputPassthrough = desc.InputPassthrough;
+    },
+               nativeDesc);
+    auto window = NativeWindow::Create(nativeDesc);
+    if (!window || !_eventPump->Register(window.Get())) return {};
+    if (_nextWindowId == UINT64_MAX) RADRAY_ABORT("Window identity exhausted");
+    auto& result = _windows.emplace_back(unique_ptr<AppWindow>{new AppWindow(this, window.Release(), _eventPump.get(), isMain, _nextWindowId++)});
+    result->_ownerWindow = desc.OwnerWindow;
+    if (isMain) _mainWindow = result.get();
+    return {WindowOperationStatus::Completed, result->GetHandle()};
+}
+
+bool WindowManager::InitializeMainWindow(const WindowCreateDescriptor& desc, const WindowSwapChainDescriptor& swapchain) {
+    _applyingOperations = true;
+    auto phase = MakeScopeGuard([this]() noexcept { _applyingOperations = false; });
+    auto result = CreateWindowImmediate(desc, true);
+    if (result.Status != WindowOperationStatus::Completed) return false;
+    return ResolveWindow(result.Handle)->AttachSwapChain(swapchain) == WindowOperationStatus::Completed;
 }
 
 bool AppWindow::IsMinimized() const noexcept {
@@ -199,7 +226,7 @@ bool AppWindow::IsMinimized() const noexcept {
 }
 
 bool AppWindow::IsSwapChainPresentable() const noexcept {
-    if (_window == nullptr || _swapchain == nullptr || IsMinimized() || !_window->IsVisible()) {
+    if (_window == nullptr || _swapchain == nullptr || !_swapChainUsable || IsMinimized() || !_window->IsVisible()) {
         return false;
     }
     const Eigen::Vector2i size = GetSize();
@@ -211,7 +238,7 @@ Eigen::Vector2i AppWindow::GetSize() const noexcept {
 }
 
 bool AppWindow::NeedsSwapChainRecreate(std::optional<render::PresentMode> desiredPresentMode) const noexcept {
-    if (!_swapchain || IsMinimized()) {
+    if (!_swapChainDescriptor || IsMinimized() || !_window->IsVisible()) {
         return false;
     }
 
@@ -220,6 +247,7 @@ bool AppWindow::NeedsSwapChainRecreate(std::optional<render::PresentMode> desire
         return false;
     }
 
+    if (!_swapchain || !_swapChainUsable) return true;
     const render::SwapChainDescriptor desc = _swapchain->GetDesc();
     const uint32_t width = static_cast<uint32_t>(windowSize.x());
     const uint32_t height = static_cast<uint32_t>(windowSize.y());
@@ -229,27 +257,37 @@ bool AppWindow::NeedsSwapChainRecreate(std::optional<render::PresentMode> desire
     return desc.Width != width || desc.Height != height || _requestRecreateSwapChain.load(std::memory_order_acquire);
 }
 
-void AppWindow::ResetSwapChainRecreateRequest() noexcept {
-    _requestRecreateSwapChain.store(false, std::memory_order_release);
-}
-
-bool AppWindow::RecreateSwapChain(uint32_t width, uint32_t height, render::PresentMode presentMode) noexcept {
-    _manager->EnsureRenderIdle();
-    if (!_swapchain) {
-        return false;
+WindowOperationStatus AppWindow::UpdateSwapChain(std::optional<render::PresentMode> desiredMode) noexcept {
+    _manager->AssertMutationAllowed();
+    if (!_swapChainDescriptor) return WindowOperationStatus::Completed;
+    if (!_window->IsValid()) return WindowOperationStatus::Failed;
+    if (desiredMode) _swapChainDescriptor->PresentMode = *desiredMode;
+    const auto size = GetSize();
+    if (IsMinimized() || !_window->IsVisible() || size.x() <= 0 || size.y() <= 0) {
+        _requestRecreateSwapChain.store(true, std::memory_order_release);
+        return WindowOperationStatus::Deferred;
     }
+    if (!NeedsSwapChainRecreate(_swapChainDescriptor->PresentMode)) return WindowOperationStatus::Completed;
     ReleaseBackBufferViews();
-    const render::SwapChainDescriptor desc = _swapchain->GetDesc();
-    const bool recreated = _swapchain->Recreate(width, height, desc.Format, presentMode);
-    const uint32_t backBufferCount = _swapchain->GetBackBufferCount();
-    _backBufferViews.resize(backBufferCount);
-
-    if (!recreated) {
-        RADRAY_ERR_LOG("failed to recreate window swapchain: {}x{} -> {}x{}", desc.Width, desc.Height, width, height);
-        return false;
+    auto* gpu = _manager->GetGpuSystem();
+    if (gpu == nullptr) return WindowOperationStatus::Failed;
+    _swapChainDescriptor->Width = static_cast<uint32_t>(size.x());
+    _swapChainDescriptor->Height = static_cast<uint32_t>(size.y());
+    const auto& desc = *_swapChainDescriptor;
+    if (!_swapchain) {
+        _swapchain = gpu->GetDevice()->CreateSwapChain(render::SwapChainDescriptor{
+            .PresentQueue = gpu->GetMainQueue(), .NativeHandler = _window->GetNativeHandler(), .Width = desc.Width, .Height = desc.Height, .BackBufferCount = desc.BackBufferCount != 0 ? desc.BackBufferCount : gpu->GetBackBufferCount(), .Format = desc.Format, .PresentMode = desc.PresentMode});
+        _swapChainUsable = _swapchain.HasValue();
+    } else {
+        _swapChainUsable = _swapchain->Recreate(desc.Width, desc.Height, desc.Format, desc.PresentMode);
     }
-    ResetSwapChainRecreateRequest();
-    return true;
+    _requestRecreateSwapChain.store(!_swapChainUsable, std::memory_order_release);
+    if (!_swapChainUsable) {
+        RADRAY_ERR_LOG("failed to create/recreate window swapchain: {}x{}", desc.Width, desc.Height);
+        return WindowOperationStatus::Failed;
+    }
+    _backBufferViews.resize(_swapchain->GetBackBufferCount());
+    return WindowOperationStatus::Completed;
 }
 
 void AppWindow::ReleaseBackBufferViews() noexcept {
@@ -263,17 +301,23 @@ void AppWindow::ReleaseBackBufferViews() noexcept {
     _backBufferViews.clear();
 }
 
-void WindowManager::DestroyWindow(AppWindow* window) noexcept {
-    EnsureRenderIdle();
-    auto iter = std::ranges::find_if(_windows, [window](const unique_ptr<AppWindow>& item) {
-        return item.get() == window;
-    });
-    if (iter != _windows.end()) {
-        if (_mainWindow == iter->get()) {
-            _mainWindow = nullptr;
+WindowOperationStatus WindowManager::DestroyWindowImmediate(WindowHandle handle) noexcept {
+    AssertMutationAllowed();
+    auto window = ResolveWindow(handle);
+    if (!window) return WindowOperationStatus::InvalidWindow;
+    for (const auto& child : _windows) {
+        if (child->_ownerWindow == handle) {
+            child->GetNativeWindow()->SetOwner(nullptr);
+            child->_ownerWindow = {};
         }
-        _windows.erase(iter);
     }
+    auto iter = std::ranges::find_if(_windows, [&](const auto& item) { return item.get() == window.Get(); });
+    if (_mainWindow == window.Get()) {
+        _mainWindow = nullptr;
+        _mainWindowClosed = true;
+    }
+    _windows.erase(iter);
+    return WindowOperationStatus::Completed;
 }
 
 size_t WindowManager::GetWindowCount() const noexcept {
@@ -303,7 +347,7 @@ const AppWindow* WindowManager::GetMainWindow() const noexcept {
 }
 
 bool WindowManager::ShouldExit() const noexcept {
-    return _mainWindow != nullptr && _mainWindow->GetNativeWindow()->ShouldClose();
+    return _mainWindowClosed || (_mainWindow != nullptr && _mainWindow->GetNativeWindow()->ShouldClose());
 }
 
 render::TextureFormat WindowManager::GetMainBackBufferFormat(render::TextureFormat fallback) const noexcept {
@@ -328,33 +372,181 @@ render::PresentMode WindowManager::GetMainPresentMode(render::PresentMode fallba
     return swapChain->GetDesc().PresentMode;
 }
 
-void WindowManager::CheckRecreateSwapChains() noexcept {
-    if (!HasSwapChainToRecreate()) {
-        return;
-    }
-
-    EnsureRenderIdle();
-
-    _gpuSystem->WaitAndRetireFlights();
-
-    for (const auto& window : _windows) {
-        if (!NeedsRecreateSwapChain(window.get())) {
-            continue;
-        }
-
-        const Eigen::Vector2i windowSize = window->GetSize();
-        render::SwapChain* swapChain = window->GetSwapChain();
-        render::SwapChainDescriptor desc = swapChain->GetDesc();
-        const uint32_t width = static_cast<uint32_t>(windowSize.x());
-        const uint32_t height = static_cast<uint32_t>(windowSize.y());
-
-        const render::PresentMode presentMode = _desiredPresentMode.value_or(desc.PresentMode);
-        window->RecreateSwapChain(width, height, presentMode);
-    }
+task<WindowCreateResult> WindowManager::CreateWindow(WindowCreateDescriptor desc, bool isMain) {
+    auto permission = co_await WaitSafe();
+    auto result = CreateWindowImmediate(desc, isMain);
+    if (!co_await FinishOperation(permission)) co_await StopCurrentTask();
+    co_return result;
 }
 
-void WindowManager::SetPresentMode(render::PresentMode presentMode) noexcept {
-    _desiredPresentMode = presentMode;
+task<WindowOperationStatus> WindowManager::DestroyWindow(WindowHandle window) {
+    auto permission = co_await WaitSafe();
+    const auto result = DestroyWindowImmediate(window);
+    if (!co_await FinishOperation(permission)) co_await StopCurrentTask();
+    co_return result;
+}
+
+task<WindowOperationStatus> WindowManager::AttachSwapChain(WindowHandle handle, WindowSwapChainDescriptor desc) {
+    auto permission = co_await WaitSafe();
+    auto result = WindowOperationStatus::InvalidWindow;
+    if (auto window = ResolveWindow(handle)) {
+        desc.PresentMode = _desiredPresentMode.value_or(desc.PresentMode);
+        result = window->AttachSwapChain(desc);
+    }
+    if (!co_await FinishOperation(permission)) co_await StopCurrentTask();
+    co_return result;
+}
+
+task<WindowOperationStatus> WindowManager::DetachSwapChain(WindowHandle handle) {
+    auto permission = co_await WaitSafe();
+    auto result = WindowOperationStatus::InvalidWindow;
+    if (auto window = ResolveWindow(handle)) {
+        window->DetachSwapChain();
+        result = WindowOperationStatus::Completed;
+    }
+    if (!co_await FinishOperation(permission)) co_await StopCurrentTask();
+    co_return result;
+}
+
+task<WindowReleaseResult> WindowManager::ReleaseSwapChain(WindowHandle handle) {
+    auto permission = co_await WaitSafe();
+    WindowReleaseResult result{WindowOperationStatus::InvalidWindow, {}};
+    if (auto window = ResolveWindow(handle)) {
+        result = {WindowOperationStatus::Completed, window->ReleaseSwapChain()};
+    }
+    if (!co_await FinishOperation(permission)) co_await StopCurrentTask();
+    co_return std::move(result);
+}
+
+task<WindowOperationStatus> WindowManager::SetPresentMode(render::PresentMode mode) {
+    auto permission = co_await WaitSafe();
+    _desiredPresentMode = mode;
+    auto result = WindowOperationStatus::Completed;
+    for (const auto& window : _windows) {
+        const auto status = window->UpdateSwapChain(mode);
+        if (status == WindowOperationStatus::Failed)
+            result = status;
+        else if (status == WindowOperationStatus::Deferred && result == WindowOperationStatus::Completed)
+            result = status;
+    }
+    if (!co_await FinishOperation(permission)) co_await StopCurrentTask();
+    co_return result;
+}
+
+task<WindowOperationStatus> WindowManager::SetSize(WindowHandle window, int width, int height) {
+    auto permission = co_await WaitSafe();
+    auto result = WindowOperationStatus::InvalidWindow;
+    if (auto target = ResolveWindow(window)) {
+        result = WindowOperationStatus::Failed;
+        if (width > 0 && height > 0 && target->GetNativeWindow()->IsValid()) {
+            target->GetNativeWindow()->SetSize(width, height);
+            result = target->UpdateSwapChain(_desiredPresentMode);
+        }
+    }
+    if (!co_await FinishOperation(permission)) co_await StopCurrentTask();
+    co_return result;
+}
+
+task<WindowOperationStatus> WindowManager::SetPosition(WindowHandle window, int x, int y) {
+    auto permission = co_await WaitSafe();
+    auto result = WindowOperationStatus::InvalidWindow;
+    if (auto target = ResolveWindow(window)) {
+        target->GetNativeWindow()->SetPosition(x, y);
+        result = target->UpdateSwapChain(_desiredPresentMode);
+    }
+    if (!co_await FinishOperation(permission)) co_await StopCurrentTask();
+    co_return result;
+}
+
+task<WindowOperationStatus> WindowManager::Show(WindowHandle window) {
+    auto permission = co_await WaitSafe();
+    auto result = WindowOperationStatus::InvalidWindow;
+    if (auto target = ResolveWindow(window)) {
+        target->GetNativeWindow()->Show();
+        result = target->UpdateSwapChain(_desiredPresentMode);
+    }
+    if (!co_await FinishOperation(permission)) co_await StopCurrentTask();
+    co_return result;
+}
+
+task<WindowOperationStatus> WindowManager::Show(WindowHandle window, NativeWindowShowMode mode) {
+    auto permission = co_await WaitSafe();
+    auto result = WindowOperationStatus::InvalidWindow;
+    if (auto target = ResolveWindow(window)) {
+        target->GetNativeWindow()->Show(mode);
+        result = target->UpdateSwapChain(_desiredPresentMode);
+    }
+    if (!co_await FinishOperation(permission)) co_await StopCurrentTask();
+    co_return result;
+}
+
+task<WindowOperationStatus> WindowManager::SetAlpha(WindowHandle window, float alpha) {
+    auto permission = co_await WaitSafe();
+    auto result = WindowOperationStatus::InvalidWindow;
+    if (auto target = ResolveWindow(window)) {
+        target->GetNativeWindow()->SetAlpha(alpha);
+        result = target->UpdateSwapChain(_desiredPresentMode);
+    }
+    if (!co_await FinishOperation(permission)) co_await StopCurrentTask();
+    co_return result;
+}
+
+task<WindowOperationStatus> WindowManager::SetOwner(WindowHandle handle, WindowHandle owner) {
+    auto permission = co_await WaitSafe();
+    auto result = WindowOperationStatus::InvalidWindow;
+    if (auto window = ResolveWindow(handle)) {
+        Nullable<NativeWindow*> nativeOwner{nullptr};
+        result = WindowOperationStatus::Completed;
+        if (owner.Id != 0 || owner.Owner) {
+            auto ownerWindow = ResolveWindow(owner);
+            if (!ownerWindow)
+                result = WindowOperationStatus::InvalidWindow;
+            else if (owner == handle)
+                result = WindowOperationStatus::Failed;
+            else
+                nativeOwner = ownerWindow->GetNativeWindow();
+        }
+        if (result == WindowOperationStatus::Completed) {
+            window->GetNativeWindow()->SetOwner(nativeOwner);
+            window->_ownerWindow = owner;
+            result = window->UpdateSwapChain(_desiredPresentMode);
+        }
+    }
+    if (!co_await FinishOperation(permission)) co_await StopCurrentTask();
+    co_return result;
+}
+
+task<WindowOperationStatus> WindowManager::SetDecorated(WindowHandle window, bool value) {
+    auto permission = co_await WaitSafe();
+    auto result = WindowOperationStatus::InvalidWindow;
+    if (auto target = ResolveWindow(window)) {
+        target->GetNativeWindow()->SetDecorated(value);
+        result = target->UpdateSwapChain(_desiredPresentMode);
+    }
+    if (!co_await FinishOperation(permission)) co_await StopCurrentTask();
+    co_return result;
+}
+
+task<WindowOperationStatus> WindowManager::SetShowInTaskbar(WindowHandle window, bool value) {
+    auto permission = co_await WaitSafe();
+    auto result = WindowOperationStatus::InvalidWindow;
+    if (auto target = ResolveWindow(window)) {
+        target->GetNativeWindow()->SetShowInTaskbar(value);
+        result = target->UpdateSwapChain(_desiredPresentMode);
+    }
+    if (!co_await FinishOperation(permission)) co_await StopCurrentTask();
+    co_return result;
+}
+
+task<WindowOperationStatus> WindowManager::SetTopMost(WindowHandle window, bool value) {
+    auto permission = co_await WaitSafe();
+    auto result = WindowOperationStatus::InvalidWindow;
+    if (auto target = ResolveWindow(window)) {
+        target->GetNativeWindow()->SetTopMost(value);
+        result = target->UpdateSwapChain(_desiredPresentMode);
+    }
+    if (!co_await FinishOperation(permission)) co_await StopCurrentTask();
+    co_return result;
 }
 
 void WindowManager::DispatchEvents() noexcept {
@@ -368,28 +560,168 @@ sigslot::signal<NativeWindow*>& WindowManager::EventModalLoopTick() noexcept {
 }
 
 void WindowManager::DetachAllSwapChains() noexcept {
-    for (const unique_ptr<AppWindow>& window : _windows) {
-        window->DetachSwapChain();
+    RADRAY_ASSERT(!_processingOperations);
+    _applyingOperations = true;
+    auto phase = MakeScopeGuard([this]() noexcept { _applyingOperations = false; });
+    for (const auto& window : _windows) window->DetachSwapChain();
+}
+
+void WindowManager::AssertMutationAllowed() const noexcept {
+    if (_gameThread != std::this_thread::get_id() || !_applyingOperations) {
+        RADRAY_ABORT("runtime window mutations require the application-thread maintenance phase");
     }
 }
 
-void WindowManager::SetRenderIdle(bool idle) noexcept {
+Nullable<AppWindow*> WindowManager::ResolveWindow(WindowHandle handle) const noexcept {
     RADRAY_ASSERT(_gameThread == std::this_thread::get_id());
-    _renderIdle = idle;
-}
-
-void WindowManager::SetRenderIdleWaiter(std::function<void()> waiter) {
-    RADRAY_ASSERT(_gameThread == std::this_thread::get_id());
-    _renderIdleWaiter = std::move(waiter);
-}
-
-void WindowManager::EnsureRenderIdle() const noexcept {
-    RADRAY_ASSERT(_gameThread == std::this_thread::get_id());
-    if (!_renderIdle && _renderIdleWaiter) _renderIdleWaiter();
-    RADRAY_ASSERT(_renderIdle);
-    if (_gpuSystem != nullptr && _gpuSystem->GetMainQueue() != nullptr) {
-        _gpuSystem->GetMainQueue()->Wait();
+    if (handle.Owner.Get() != this || handle.Id == 0) return nullptr;
+    for (const auto& window : _windows) {
+        if (window->_id == handle.Id) return window.get();
     }
+    return nullptr;
+}
+
+bool WindowManager::NeedsMaintenance() const noexcept {
+    RADRAY_ASSERT(_gameThread == std::this_thread::get_id());
+    return !_operations.Empty() || HasSwapChainToRecreate();
+}
+
+uint64_t WindowManager::GetOperationBoundary() const noexcept {
+    RADRAY_ASSERT(_gameThread == std::this_thread::get_id());
+    return _nextOperationSequence - 1;
+}
+
+Nullable<WindowManager::WindowOperationRecord*> WindowManager::EnqueueOperation(stop_token stop, std::coroutine_handle<> continuation) {
+    RADRAY_ASSERT(_gameThread == std::this_thread::get_id());
+    if (!_acceptOperations) return nullptr;
+    if (_nextOperationSequence == UINT64_MAX) RADRAY_ABORT("Window operation sequence exhausted");
+    auto* record = _operations.Enqueue(stop, continuation);
+    record->Sequence = _nextOperationSequence++;
+    record->ResumeOnCancel = !_applyingOperations;
+    return record;
+}
+
+void WindowManager::ProcessOperations(uint64_t boundary) {
+    RADRAY_ASSERT(_gameThread == std::this_thread::get_id());
+    RADRAY_ASSERT(!_processingOperations);
+    _processingOperations = true;
+    auto processing = MakeScopeGuard([this]() noexcept { _processingOperations = false; });
+    {
+        _applyingOperations = true;
+        auto phase = MakeScopeGuard([this]() noexcept { _applyingOperations = false; });
+        for (size_t i = 0; i < _operations.Count(); ++i) _operations.At(i)->ResumeOnCancel = false;
+        for (const auto& window : _windows) {
+            if (NeedsRecreateSwapChain(window.get())) window->UpdateSwapChain(_desiredPresentMode);
+        }
+        for (;;) {
+            Nullable<WindowOperationRecord*> next{nullptr};
+            for (size_t i = 0; i < _operations.Count(); ++i) {
+                auto* record = _operations.At(i);
+                if (record->Sequence <= boundary && record->Phase == WindowOperationPhase::WaitingForSafety && !record->Canceled) {
+                    next = record;
+                    break;
+                }
+            }
+            if (!next) break;
+            next->Phase = WindowOperationPhase::Executing;
+            _operations.ResumeRecord(next.Get());
+            // The operation must run synchronously to its delivery barrier, even when canceled.
+            if (next->Phase != WindowOperationPhase::WaitingForDelivery || !next->Continuation) {
+                RADRAY_ABORT("window operation suspended before FinishOperation");
+            }
+        }
+    }
+    for (size_t i = 0; i < _operations.Count(); ++i) _operations.At(i)->ResumeOnCancel = true;
+    for (;;) {
+        Nullable<WindowOperationRecord*> next{nullptr};
+        for (size_t i = 0; i < _operations.Count(); ++i) {
+            auto* record = _operations.At(i);
+            if ((record->Sequence <= boundary && record->Phase == WindowOperationPhase::WaitingForDelivery) || record->Canceled) {
+                next = record;
+                break;
+            }
+        }
+        if (!next) break;
+        _operations.ResumeRecord(next.Get());
+    }
+}
+
+void WindowManager::CloseOperations() noexcept {
+    RADRAY_ASSERT(_gameThread == std::this_thread::get_id());
+    RADRAY_ASSERT(!_processingOperations);
+    _acceptOperations = false;
+    _operations.CancelAll();
+}
+
+WindowManager::WindowOperationPermission::WindowOperationPermission(WindowOperationRecord* record) noexcept
+    : Record(record) {}
+
+WindowManager::WindowOperationPermission::WindowOperationPermission(WindowOperationPermission&& other) noexcept
+    : Record(std::exchange(other.Record, nullptr)) {}
+
+WindowManager::WindowOperationPermission::~WindowOperationPermission() noexcept {
+    if (Record) RADRAY_ABORT("window operation returned or unwound before FinishOperation");
+}
+
+task<WindowManager::WindowOperationPermission> WindowManager::WaitSafe() {
+    RADRAY_ASSERT(_gameThread == std::this_thread::get_id());
+    auto stop = co_await CurrentStopToken();
+    auto record = co_await WaitSafeAwaitable{this, stop};
+    if (!record) co_await StopCurrentTask();
+    co_return WindowOperationPermission{record.Get()};
+}
+
+WindowManager::FinishOperationAwaitable WindowManager::FinishOperation(WindowOperationPermission& permission) noexcept {
+    return {this, &permission};
+}
+
+WindowManager::WaitSafeAwaitable::WaitSafeAwaitable(WindowManager* manager, stop_token stop) noexcept
+    : _manager(manager), _stop(stop) {}
+
+bool WindowManager::WaitSafeAwaitable::await_ready() const noexcept {
+    return _stop.stop_requested() || !_manager->_acceptOperations;
+}
+
+bool WindowManager::WaitSafeAwaitable::await_suspend(std::coroutine_handle<> continuation) {
+    _record = _manager->EnqueueOperation(_stop, continuation);
+    return _record.HasValue();
+}
+
+Nullable<WindowManager::WindowOperationRecord*> WindowManager::WaitSafeAwaitable::await_resume() noexcept {
+    RADRAY_ASSERT(_manager->_gameThread == std::this_thread::get_id());
+    if (!_record) return nullptr;
+    if (_record->Phase == WindowOperationPhase::Executing) {
+        _manager->AssertMutationAllowed();
+        return _record;
+    }
+    RADRAY_ASSERT(!_manager->_applyingOperations && _record->Canceled);
+    _manager->_operations.Erase(_record.Get());
+    _record = nullptr;
+    return nullptr;
+}
+
+WindowManager::FinishOperationAwaitable::FinishOperationAwaitable(WindowManager* manager, WindowOperationPermission* permission) noexcept
+    : _manager(manager), _permission(permission) {}
+
+bool WindowManager::FinishOperationAwaitable::await_ready() const noexcept {
+    return false;
+}
+
+void WindowManager::FinishOperationAwaitable::await_suspend(std::coroutine_handle<> continuation) noexcept {
+    _manager->AssertMutationAllowed();
+    auto record = _permission->Record;
+    RADRAY_ASSERT(record && record->Phase == WindowOperationPhase::Executing && !record->ResumeOnCancel);
+    record->Phase = WindowOperationPhase::WaitingForDelivery;
+    record->Continuation = continuation;
+}
+
+bool WindowManager::FinishOperationAwaitable::await_resume() noexcept {
+    RADRAY_ASSERT(_manager->_gameThread == std::this_thread::get_id() && !_manager->_applyingOperations);
+    auto record = std::exchange(_permission->Record, nullptr);
+    RADRAY_ASSERT(record && record->Phase == WindowOperationPhase::WaitingForDelivery);
+    const bool completed = !record->Canceled && !record->Stop.stop_requested();
+    _manager->_operations.Erase(record.Get());
+    return completed;
 }
 
 NativeWindow* WindowManager::FindMainNativeWindow(NativeWindowType type) const noexcept {

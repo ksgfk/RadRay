@@ -35,8 +35,10 @@ RenderSystem 仅持有 ShaderProgramCache 与 RHI RenderPassRegistry，借用 Ap
 GPU idle 后清理 shader/program，再清理 render pass/framebuffer cache。窗口仍借用该 registry，
 销毁 backbuffer view 前清理关联 framebuffer；RenderSystem 销毁前先断开窗口的借用指针。
 
-窗口变更所需的 `SetRenderIdle` / `SetRenderIdleWaiter` / `EnsureRenderIdle` 由 WindowManager 承接，
-保留原来的 application-thread 限制与 runner 排空协议，不依赖已删除的 output registry。
+运行期窗口变更统一经 WindowManager 的协程接口发起，由 runner 在受控维护阶段排空渲染并执行，
+离开修改阶段后再交付结果；不再由窗口方法传播 idle 状态或反向调用 runner。
+接口、句柄寿命和取消规则见[窗口修改协程](frame-and-gpu.md#窗口修改协程)。
+主窗口启动和最终拆除由 Application 调用私有同步路径；OnInit/OnShutdown 仍为同步钩子。
 
 ## World 与组件
 
@@ -83,7 +85,7 @@ WindowManager 与 GpuSystem 的双向引用在启动渲染线程前建立。
 初始化失败时记录错误并调用 `DestroyRuntime`，返回启动失败；窗口或 swapchain 创建失败使用同一清理路径。
 RenderSystem 的析构接受部分初始化状态，通过 `OnShutdown` 幂等释放缓存。
 
-正常关停先停止 runner、等待 GPU idle、消费完成消息并取消应用调度任务，再由 `DestroyRuntime`
+正常关停先关闭窗口协程入口并取消等待者，再停止 runner、等待 GPU idle、消费完成消息并取消应用调度任务，由 `DestroyRuntime`
 按固定顺序释放对象。WindowManager 借用的 RenderSystem 引用在后者销毁前清空；AssetManager
 销毁并收束加载协程后才销毁 AssetDatabase；交换链释放后才断开窗口与 GPU 的双向引用并销毁 device。
 借用引用的提供者必须活过消费者的清理，完整时序见[帧与 GPU](frame-and-gpu.md#关停顺序)。

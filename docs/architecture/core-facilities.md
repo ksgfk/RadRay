@@ -88,6 +88,8 @@ auto* p = maybe.Unwrap();              // 为空则 throw NullableAccessExceptio
 |---|---|
 | `task<T>` | `exec::task<T>` |
 | `stop_source` / `stop_token` | `stdexec::inplace_stop_source` / `inplace_stop_token` |
+| `when_all` / `when_all_with_variant` | 通过 `using` 引入同名 stdexec 组合接口，保留原有语义 |
+| `when_any` | 通过 `using` 引入 `exec::when_any`，保留原有语义 |
 | `TaskScope` | 包 `exec::async_scope`。`Spawn` / `RequestStop` / `Join` / `WaitUntilEmpty` / `GetStopToken`。**析构自动 RequestStop + 等空** |
 | `ManualCoroutineRecord` | 手写 awaitable 的等待记录基类 |
 | `ManualCoroutineScheduler<TRecord>` | 手动管理待恢复记录，stop 回调自动触发 `CancelRecord` |

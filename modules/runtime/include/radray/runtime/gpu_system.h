@@ -235,7 +235,7 @@ public:
     /// ThreadedRunner 持有 _retireMutex；单线程或全局 idle 时可在无并发的前提下直接调用。
     /// 收据 OnCompleted 在调用线程执行；只发布完成消息，不恢复 GT 协程。
     bool CompleteFlight(uint32_t flightIndex);
-    /// [GT，非录制阶段] 内部等待 render/GPU idle，再退休所有已提交 flight；不恢复 GT 协程。
+    /// [GT，CPU 渲染生产者已停止] 等待主队列 idle，再退休所有已提交 flight；不恢复 GT 协程。
     void WaitAndRetireFlights();
     /// [GT，render/GPU idle] Application 在 WaitAndRetireFlights 后调用，恢复全部 flight 的等待者。
     void CleanupCompletedFlights();
@@ -306,6 +306,8 @@ private:
     /// 关停用:挂在未提交 flight 上的记录永远等不到 fence,
     /// 不取消就是协程帧连同它捕获的 GPU 对象一起泄漏。
     void CancelAllWaitFrames() noexcept;
+    /// [GT，独占对应 flight] 消费完成标记，只标记现有等待记录，不恢复协程。
+    void MarkCompletedWaitFrames(uint32_t flightIndex) noexcept;
 
     WindowManager* _windowManager{nullptr};
     Nullable<render::InstanceVulkan*> _vulkanInstance{nullptr};

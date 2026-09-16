@@ -66,14 +66,19 @@ void GpuSystem::EraseWaitFrame(WaitFrameRecord* record) noexcept {
     _flights[record->FlightIndex]->WaitFrame.Erase(record);
 }
 
+void GpuSystem::MarkCompletedWaitFrames(uint32_t flightIndex) noexcept {
+    auto& flight = *_flights[flightIndex];
+    if (flight.WaitersCompleted.exchange(false, std::memory_order_acquire)) {
+        for (size_t i = 0; i < flight.WaitFrame.Count(); ++i) flight.WaitFrame.At(i)->FlightComplete = true;
+    }
+}
+
 void GpuSystem::PumpWaitFrame(uint32_t flightIndex) {
     if (flightIndex >= _flights.size()) {
         return;
     }
+    MarkCompletedWaitFrames(flightIndex);
     ManualCoroutineScheduler<WaitFrameRecord>& waiters = _flights[flightIndex]->WaitFrame;
-    if (_flights[flightIndex]->WaitersCompleted.exchange(false, std::memory_order_acquire)) {
-        for (size_t i = 0; i < waiters.Count(); ++i) waiters.At(i)->FlightComplete = true;
-    }
     // 每轮从头重扫: 恢复一条记录会跑调用方的代码, 它可能新增或摘除记录。
     bool resumedAny = true;
     while (resumedAny) {
@@ -234,11 +239,11 @@ uint32_t GpuSystem::GetCurrentFlightIndex() const noexcept {
 }
 
 void GpuSystem::WaitAndRetireFlights() {
-    if (_windowManager) _windowManager->EnsureRenderIdle();
     _mainQueue->Wait();
 
     for (uint32_t flightIndex = 0; flightIndex < _flights.size(); ++flightIndex) {
         CompleteFlight(flightIndex);
+        MarkCompletedWaitFrames(flightIndex);
     }
 }
 

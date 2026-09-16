@@ -135,7 +135,7 @@ public:
     sigslot::signal<float, float>& EventScroll() noexcept { return _eventScroll; }
     sigslot::signal<>& EventCaptureLost() noexcept { return _eventCaptureLost; }
     sigslot::signal<>& EventDisplayChanged() noexcept { return _eventDisplayChanged; }
-    /// Fired immediately before an API that mutates HWND/NSWindow geometry, visibility, owner, or alpha.
+    /// Fired before destruction or an API mutates HWND/NSWindow geometry, visibility, styles, owner, or alpha.
     sigslot::signal<>& EventBeforeSurfaceChange() noexcept { return _eventBeforeSurfaceChange; }
 
     virtual sigslot::signal<int, int>& EventResized() noexcept = 0;

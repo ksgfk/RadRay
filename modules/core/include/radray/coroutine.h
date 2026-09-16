@@ -14,6 +14,7 @@
 
 #include <exec/async_scope.hpp>
 #include <exec/task.hpp>
+#include <exec/when_any.hpp>
 #include <stdexec/execution.hpp>
 
 #include <radray/types.h>
@@ -25,6 +26,10 @@ using task = exec::task<T>;
 
 using stop_source = stdexec::inplace_stop_source;
 using stop_token = stdexec::inplace_stop_token;
+
+using stdexec::when_all;
+using stdexec::when_all_with_variant;
+using exec::when_any;
 
 struct ManualCoroutineRecord {
     std::coroutine_handle<> Continuation{};

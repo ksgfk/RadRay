@@ -194,6 +194,7 @@ bool CocoaWindow::IsValid() const noexcept {
 void CocoaWindow::Destroy() noexcept {
     RadrayCocoaWindow* window = CocoaWindowObjC(this);
     if (window != nil) {
+        EventBeforeSurfaceChange()();
         ToObjCDelegate(_objcDelegate).window = nullptr;
         window.delegate = nil;
         [window destroy];
@@ -275,6 +276,11 @@ bool CocoaWindow::IsMinimized() const noexcept {
     return window != nil && [window isMinimized];
 }
 
+bool CocoaWindow::IsVisible() const noexcept {
+    RadrayCocoaWindow* window = CocoaWindowObjC(this);
+    return window != nil && window.nsWindow.visible;
+}
+
 bool CocoaWindow::IsFocused() const noexcept {
     RadrayCocoaWindow* window = CocoaWindowObjC(this);
     return window != nil && [window isFocused];
@@ -330,6 +336,7 @@ void CocoaWindow::SetOwner(Nullable<NativeWindow*> owner) noexcept {
 void CocoaWindow::SetDecorated(bool value) noexcept {
     RadrayCocoaWindow* window = CocoaWindowObjC(this);
     if (window != nil) {
+        EventBeforeSurfaceChange()();
         [window setDecorated:value];
     }
 }
@@ -337,6 +344,7 @@ void CocoaWindow::SetDecorated(bool value) noexcept {
 void CocoaWindow::SetShowInTaskbar(bool value) noexcept {
     RadrayCocoaWindow* window = CocoaWindowObjC(this);
     if (window != nil) {
+        EventBeforeSurfaceChange()();
         [window setShowInTaskbar:value];
     }
 }
@@ -344,6 +352,7 @@ void CocoaWindow::SetShowInTaskbar(bool value) noexcept {
 void CocoaWindow::SetTopMost(bool value) noexcept {
     RadrayCocoaWindow* window = CocoaWindowObjC(this);
     if (window != nil) {
+        EventBeforeSurfaceChange()();
         [window setTopMost:value];
     }
 }

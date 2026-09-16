@@ -30,10 +30,10 @@ D3D12 flip-model 不能对已最小化、已隐藏、已销毁或客户区为 0 
 跳过 DXGI Present，先等待 present queue。同一帧有多个 D3D12 flip HWND 时，每个 HWND 使用独立
 present command buffer：对该窗 `Execute` 后立刻 `Present`，不在 Present 前等待 graphics queue。
 单窗口与 Vulkan 仍一次 Submit 再 Present。
-已挂 swapchain 的窗口走 `NativeWindow` 的
-`SetSize` / `SetPosition` / `Show` / `SetAlpha` / `SetOwner` 时会先 `EnsureRenderIdle`（含 present
-队列等待），避免多线程下 `Update` 改 HWND 与上一帧 Present/DWM 重叠。绕过 NativeWindow 的原始 `ShowWindow`
-仍须由调用方先 `EnsureRenderIdle`；不要在 Win32 钩子或 `WndProc` 里等待渲染线程。
+runtime 窗口通过 WindowManager 的协程接口修改 surface，由 runner 在维护阶段统一排空旧 CPU
+工作及主队列（含排在帧 fence 之后的 Present）。NativeWindow 的修改前通知只检查阶段，不执行等待。
+不得用原始 `ShowWindow` 等 API 绕过此约束，也不要在 Win32 钩子或 `WndProc` 里等待渲染线程。
+接口与完成语义见[窗口修改协程](frame-and-gpu.md#窗口修改协程)。
 
 ## 区域纹理上传
 

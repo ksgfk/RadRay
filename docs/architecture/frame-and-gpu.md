@@ -35,15 +35,16 @@
 
 ```
 Application::StartLoop
-  ├─ runner::PrepareFrame            等待并取得当前可写 flight；处理已有交换链重建
+  ├─ runner::PrepareFrame            按需处理窗口维护批次，再等待并取得当前可写 flight
   ├─ Application::BeginUpdateForFlight  收集完成批次 → GPU 内部调度 → OnRenderFrameComplete
   ├─ GpuSystem::BeginFrameTiming     记录逻辑帧开始时间，计算相邻帧 DeltaTime
   ├─ NativeEventPump::DispatchEvents 排空可取的窗口消息，包含等待与完成回调期间投递的输入
-  ├─ CheckRecreateSwapChains         处理事件期间产生的交换链变化
+  ├─ runner::MaintainWindows        处理事件期间产生的窗口请求与交换链变化
   ├─ AssetManager::Pump               提交加载结果；销毁零引用资产
   ├─ ApplicationScheduler::Pump
   ├─ Application::OnUpdate            游戏逻辑
   ├─ World::Tick
+  ├─ runner::MaintainWindows        处理 Update 期间的新请求，再决定是否退出
   ├─ 发布当前 flight；game thread 可以开始下一可写 flight 的 Update
   ├─ GpuSystem::BeginFrameRecord      render thread Begin 主 CommandBuffer；清 targets、开始 profiler
   ├─ Application::Render              应用录制入口；默认空实现
@@ -100,16 +101,12 @@ HWND `Execute` 该窗的 present CB 并立刻 `Present`，不再等待 graphics 
 绑到只写该 current backbuffer 的 Execute。应用附加 command buffer 与共享工作一起提交，不得写入
 flip backbuffer。单窗口与 Vulkan 仍一次 Submit 再逐个 Present。同一队列上 present blit 仍排在共享
 工作之后，GPU 可以接着跑；Acquire 的 waitable、FIFO Present 队列满、复用 flight 的 fence，以及
-`EnsureRenderIdle` 仍会挡住 CPU 或让 GPU 等下一帧工作。
-创建、销毁或 resize 窗口时，`WindowManager` 调用 runner 的
-`EnsureRenderIdle`，排空已发布工作、GPU 引用，并等待 present 队列（D3D12 的 `Present` 在
-frame fence 之后入队，只等 fence 不够）。已挂 swapchain 的 `NativeWindow`
-`SetSize` / `SetPosition` / `Show` / `SetAlpha` / `SetOwner` 同样先 idle，再改 HWND。
-`AcquireWindow` 与 `SubmitFrame` 会检查活的最小化、隐藏与客户区状态。
-已经 acquire 但提交前被最小化或隐藏的窗口不再执行写入 swapchain 的 GPU 工作；D3D12 在
-不可呈现的 HWND 上跳过 DXGI Present。绕过 NativeWindow 的原始 `ShowWindow(SW_MINIMIZE)`
-必须先 `EnsureRenderIdle`：在 Win32 钩子里等待会让渲染线程在最小化过程中 Present，同样
-`ACCESS_DENIED`。这个生命周期等待不发生在普通无变更帧。
+窗口维护阶段仍会挡住 CPU 或让 GPU 等下一帧工作。窗口生命周期的同步统一由 runner 发起，
+普通无窗口变更且无重建需求的帧不进入维护阶段。
+`AcquireWindow` 与 `SubmitFrame` 保留实时的最小化、隐藏和客户区检查；未挂接交换链、延迟创建或
+重建失败的窗口返回 `RetryLater`。已经 acquire 但提交前变为不可呈现的窗口不执行写入交换链的
+工作，D3D12 同时跳过对应 Present。原始平台 API 不受协程调度器管理，不能绕过 runtime 接口
+在渲染并发期间修改 HWND/NSWindow。
 
 runner 在准备槽位、完成回调、Update 与录制期间拒绝模态 Tick 重入，事件派发期间允许模态 Tick。
 普通循环在 DispatchEvents 前保留一个已准备的逻辑帧；模态 Tick 优先消费它，不重复领取 writable
@@ -117,6 +114,58 @@ runner 在准备槽位、完成回调、Update 与录制期间拒绝模态 Tick 
 不会再提交已被模态路径消费的帧；尚未消费的准备状态保留供后续 Tick 使用。
 同一次系统模态循环中的后续帧自行取得可写槽、收尾并开始计时，沿用系统已派发的输入，
 不递归调用 DispatchEvents。双线程模态路径仍先等待已发布的 CPU 录制结束，槽位不可写时跳过本次 Tick。
+
+### 窗口修改协程
+
+运行期间由 `WindowManager` 提供 `CreateWindow`、`DestroyWindow`、`AttachSwapChain`、
+`DetachSwapChain`、`ReleaseSwapChain`、`SetPresentMode`，以及尺寸、位置、显示、透明度、owner、
+装饰、任务栏和置顶属性的协程接口。调用方在自己的 `TaskScope` 启动任务，通过 `co_await` 等待操作结果。
+所有启动、取消和恢复均在应用线程；任务及其 scope 必须先于 manager 结束。应用线程不能同步等待
+仍需 runner 推进的任务，原生事件回调中也不能阻塞等待正在执行的操作退出。
+
+`WindowCreateDescriptor` 拥有标题字符串，owner 使用 `WindowHandle`。句柄包含所属 manager 和
+实例内不复用的递增编号，不延长窗口或 manager 寿命。`ResolveWindow` 返回借用指针，不得跨挂起点或
+维护阶段保存；操作执行前重新解析目标和 owner。销毁 owner 前解除存活子窗口的 owner 关系，
+销毁主窗口则锁存退出请求。交换链描述不接受原生窗口指针或队列；实际缓冲尺寸跟随当前客户区，
+`BackBufferCount == 0` 使用 GpuSystem 配置。
+
+窗口接口本身是协程：先 `co_await WaitSafe()` 取得执行许可，再顺序执行原生修改和交换链处理，
+最后 `co_await FinishOperation(permission)` 等待结果交付，之后才返回结果或通过停止通道结束。
+这两个调度接口均为 WindowManager 私有接口；获得许可后只允许同步操作，不能提前返回或等待其他任务。
+许可必须经过 FinishOperation 消耗，遗漏交付屏障或执行期间意外挂起属于契约违反。
+
+等待表是 `ManualCoroutineScheduler<WindowOperationRecord>`：参数和结果由操作协程帧拥有，
+记录只保存入队序号、阶段、协程 continuation 和停止状态，不保存操作回调或另一份命令参数。
+同一条记录从等待安全点转为执行，再转为等待交付，保留最初的入队序号与取消注册。
+runner 在等待前截取入队序号上界，再停止发布新帧、等待旧 CPU
+录制/提交/Present 调用结束、退休 flight 并等待主队列 idle。整个批次只在 runtime 层发起一次主队列
+排空，窗口函数不再嵌套等待。D3D12 的帧 fence 在 Present 前入队，不能用它代替最后的队列排空。
+
+先处理已有的 OS/后端重建需求，再按 FIFO 恢复截止序号内等待 WaitSafe 的协程；每条协程完成必要的
+交换链处理和 framebuffer 缓存淘汰后，在 FinishOperation 再次挂起。全部修改结束、退出修改阶段后，
+才恢复等待交付的操作并继续调用者。原生回调和完成
+续体产生的新请求留给下一批；连续 resize 不合并，较早请求返回时可能已经应用了同批的较晚请求。
+批次执行期间的取消只标记记录，离开修改阶段后才允许展开协程帧。执行前取消不产生修改；执行后取消
+不回滚已发生的修改，取消通过停止通道传递，不伪装为 `Completed`。
+FinishOperation 使用直接 awaitable，无论是否已收到取消都必须先挂起到交付阶段；不能替换为普通
+子 task，否则 task 启动时的取消检查可能在修改阶段内提前展开协程。
+
+| 结果 | 契约 |
+|---|---|
+| `Completed` | 原生调用及当前需要的交换链处理结束；不承诺画面已显示，也不保证对象不会被后续操作销毁 |
+| `Deferred` | 原生修改已执行，但窗口隐藏、最小化或客户区为空；保留交换链需求，恢复可呈现后再处理 |
+| `InvalidWindow` | 目标或非空 owner 句柄已经失效或不属于该 manager |
+| `Failed` | 参数被拒绝、窗口/交换链创建或重建失败；不回滚已发生的原生修改 |
+
+交换链重建失败后暂停该窗口呈现，后续维护阶段重试；隐藏/最小化的窗口本身不触发重复排空。
+创建结果额外携带句柄，释放交换链结果携带所有权。未挂接交换链的窗口可以正常存在。
+`NativeWindow` 的同步接口仍供独立 window 模块使用；runtime 管理的窗口通过修改前通知检查阶段，
+该通知只校验契约，不等待线程或 GPU。尺寸、位置、显示、样式、owner、alpha 和直接销毁都受此保护；
+标题、输入和桌面能力接口保持原有语义。
+
+普通循环在取得 flight 前、事件派发后和 Update 后检查维护需求；模态循环复用相同入口。
+维护与结果交付期间拒绝模态 Tick 重入。启动主窗口和最终拆除走宿主私有的立即执行路径；
+`OnInit` 中启动的操作在首个维护阶段执行。关停先关闭请求入口并取消等待者，关闭后新任务直接停止。
 
 ### 窗口输入
 
@@ -220,9 +269,10 @@ retire 阶段观察到 fence 后发布两种通知：
 ThreadedRunner 的 `RetireRenderedFrames` 只在 `CompleteFlightIfReady` 成功后 release writable
 信号量，因而帧顶不需要再次收集当前槽位的完成消息。其他 flight 稍后发布的消息留到下一次消费。
 
-窗口重建、detach 使用 `GpuSystem::WaitAndRetireFlights`：等待 render/GPU idle、退休所有已提交
-flight 并发布消息，不消费 channel、不恢复协程。消息留给下一次 Application 帧顶或关停消费，
-避免窗口操作中途改变应用完成钩子与协程的执行阶段。
+窗口维护由 runner 先排空 CPU 渲染工作，再调用 `GpuSystem::WaitAndRetireFlights` 等待主队列、
+退休已提交 flight 并发布消息；GpuSystem 不再反向请求 WindowManager 等待 runner。
+此 GT 路径同时消费 flight 完成标记，将现有帧等待记录标为完成，但不恢复协程、不消费 channel。
+窗口操作续体随后新建的 `Wait()` 因而不会消费旧完成通知。恢复与应用完成钩子仍留给正常帧顶或关停阶段。
 
 ## 上传
 
@@ -293,6 +343,7 @@ per-flight timestamp pool + readback。
 `Application::Shutdown` 的顺序是固化的，每一步都有理由：
 
 ```cpp
+_windowManager->CloseOperations();            // 关闭窗口请求入口并取消等待任务
 WaitAndCleanupCompletedFlights();             // Application 等 GPU、消费完成消息并恢复协程
 OnShutdown();                                  // 游戏侧释放自管 per-flight 资源
 _scheduler.CancelAll();

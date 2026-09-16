@@ -35,32 +35,9 @@ protected:
     }
     void OnUpdate(const AppUpdateContext&) override {
         ++_updates;
-#if defined(_WIN32)
-        if (_updates == 3) {
-            Win32WindowCreateDescriptor desc{};
-            desc.Title = "Runtime auxiliary";
-            desc.Width = 80;
-            desc.Height = 60;
-            desc.StartVisible = true;
-            _auxiliary = GetWindowManager()->CreateWindow(desc, false);
-            ASSERT_TRUE(_auxiliary);
-            render::SwapChainDescriptor swapchain{};
-            swapchain.Width = 80;
-            swapchain.Height = 60;
-            swapchain.Format = render::TextureFormat::BGRA8_UNORM;
-            swapchain.PresentMode = render::PresentMode::FIFO;
-            ASSERT_TRUE(_auxiliary->AttachSwapChain(swapchain));
-        }
-#endif
-        if (_updates == 5) {
-            GetWindowManager()->GetMainWindow()->GetNativeWindow()->SetSize(192, 144);
-            Resized = true;
-        }
-        if (_updates == 7 && _auxiliary) {
-            GetWindowManager()->DestroyWindow(_auxiliary.Get());
-            _auxiliary = nullptr;
-            AuxiliaryDestroyed = GetWindowManager()->GetWindowCount() == 1;
-        }
+        if (_updates == 3) _windowTasks.Spawn(CreateAuxiliary());
+        if (_updates == 5) _windowTasks.Spawn(ResizeMain());
+        if (_updates == 7 && _auxiliary.Id != 0) _windowTasks.Spawn(DestroyAuxiliary());
         if (_updates >= 10) test::CloseMainWindow(*this);
     }
     void OnRender(AppFrameContext& ctx) override {
@@ -119,6 +96,28 @@ protected:
     }
 
 private:
+    task<void> CreateAuxiliary() {
+        WindowCreateDescriptor desc{};
+        desc.Title = "Runtime auxiliary";
+        desc.Width = 80;
+        desc.Height = 60;
+        auto result = co_await GetWindowManager()->CreateWindow(std::move(desc));
+        EXPECT_EQ(result.Status, WindowOperationStatus::Completed);
+        _auxiliary = result.Handle;
+        WindowSwapChainDescriptor swapchain{};
+        swapchain.Format = render::TextureFormat::BGRA8_UNORM;
+        EXPECT_EQ(co_await GetWindowManager()->AttachSwapChain(_auxiliary, swapchain), WindowOperationStatus::Completed);
+    }
+    task<void> ResizeMain() {
+        EXPECT_EQ(co_await GetWindowManager()->SetSize(GetWindowManager()->GetMainWindow()->GetHandle(), 192, 144), WindowOperationStatus::Completed);
+        Resized = true;
+    }
+    task<void> DestroyAuxiliary() {
+        EXPECT_EQ(co_await GetWindowManager()->DestroyWindow(_auxiliary), WindowOperationStatus::Completed);
+        _auxiliary = {};
+        AuxiliaryDestroyed = GetWindowManager()->GetWindowCount() == 1;
+    }
+
     task<void> WaitFromCompletion() {
         co_await GetGpuSystem()->Wait();
         EXPECT_EQ(std::this_thread::get_id(), _gameThread);
@@ -128,7 +127,8 @@ private:
 
     uint32_t _updates{0};
     weak_ptr<int> _deferredLifetime;
-    Nullable<AppWindow*> _auxiliary{nullptr};
+    WindowHandle _auxiliary{};
+    TaskScope _windowTasks;
     const std::thread::id _gameThread{std::this_thread::get_id()};
     unordered_set<uint64_t> _completedSerials;
     bool _callbackWaitStarted{false};
@@ -258,7 +258,7 @@ TEST(RuntimeFoundation, VulkanThreadedCompletionInputBeforeUpdate) { RunFrameBou
 
 class StalledGpuInputApp final : public Application {
 public:
-    explicit StalledGpuInputApp(render::RenderBackend backend) : _backend(backend) {}
+    explicit StalledGpuInputApp(render::RenderBackend backend, bool mutateWindow = false) : _backend(backend), _mutateWindow(mutateWindow) {}
 
     ~StalledGpuInputApp() noexcept override {
         if (_inputThread.joinable()) _inputThread.join();
@@ -303,6 +303,10 @@ protected:
             return;
         }
         if (update != 2) return;
+        if (_mutateWindow) {
+            _mutationTasks.Spawn(ResizeDuringGpuStall());
+            return;
+        }
         EXPECT_TRUE(_released.load(std::memory_order_acquire));
         EXPECT_GE(_completedFence->GetCompletedValue(), 1u);
         const vector<string> expected{
@@ -328,6 +332,18 @@ protected:
         uint64_t values[]{1};
         ctx.SubmitFrame({.SignalFences = signals, .SignalValues = values, .WaitFences = waits, .WaitValues = values});
         _inputThread = std::thread([this] {
+            if (_mutateWindow) {
+                const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{2};
+                while (!_mutationRequested.load() && std::chrono::steady_clock::now() < deadline) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds{1});
+                }
+                EXPECT_TRUE(_mutationRequested.load());
+                std::this_thread::sleep_for(std::chrono::milliseconds{30});
+                EXPECT_FALSE(_mutationCompleted.load());
+                _released.store(true, std::memory_order_release);
+                EXPECT_TRUE(ReleaseGpu());
+                return;
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds{100});
             for (uint32_t i = 0; i < 3; ++i) {
                 EXPECT_EQ(_updates.load(), 1u);
@@ -353,7 +369,7 @@ protected:
     void OnShutdown() override {
         if (_inputThread.joinable()) _inputThread.join();
         EXPECT_TRUE(_verified);
-        EXPECT_EQ(_events.size(), 18u);
+        EXPECT_EQ(_events.size(), _mutateWindow ? 0u : 18u);
         EXPECT_EQ(_completions, GetGpuSystem()->GetFrameIndex());
         _keyboardConnection.disconnect();
         _textConnection.disconnect();
@@ -364,6 +380,18 @@ protected:
     }
 
 private:
+    task<void> ResizeDuringGpuStall() {
+        _mutationRequested = true;
+        auto* windows = GetWindowManager();
+        const auto status = co_await windows->SetSize(windows->GetMainWindow()->GetHandle(), 360, 240);
+        EXPECT_EQ(status, WindowOperationStatus::Completed);
+        EXPECT_TRUE(_released.load());
+        EXPECT_GE(_completedFence->GetCompletedValue(), 1u);
+        _mutationCompleted = true;
+        _verified = true;
+        test::CloseMainWindow(*this);
+    }
+
     void RecordInput(string event) {
         EXPECT_TRUE(_released.load(std::memory_order_acquire));
         EXPECT_EQ(_updates.load(), 1u);
@@ -389,6 +417,9 @@ private:
     }
 
     render::RenderBackend _backend;
+    bool _mutateWindow;
+    std::atomic_bool _mutationRequested{false}, _mutationCompleted{false};
+    TaskScope _mutationTasks;
     unique_ptr<render::Fence> _gate, _completedFence;
     HWND _hwnd{nullptr};
     sigslot::scoped_connection _keyboardConnection, _textConnection, _touchConnection, _wheelConnection;
@@ -403,15 +434,15 @@ private:
     std::thread _inputThread;
 };
 
-void RunStalledGpuInput(render::RenderBackend backend, bool threaded) {
+void RunStalledGpuInput(render::RenderBackend backend, bool threaded, bool mutateWindow = false) {
     {
         render::test::DeviceContext device;
         if (!render::test::TryCreateDevice(backend, device)) GTEST_SKIP() << device.Reason;
     }
     test::RuntimeLogCapture logs;
-    StalledGpuInputApp app{backend};
+    StalledGpuInputApp app{backend, mutateWindow};
     // Host-signaled queue waits run without validation-layer semaphore tracking.
-    ASSERT_EQ(app.Run({.Backend = backend, .Multithreaded = threaded, .WindowTitle = "Stalled GPU input", .WindowWidth = 80, .WindowHeight = 60, .FlightDataCount = 1, .BackBufferFormat = render::TextureFormat::BGRA8_UNORM, .PresentMode = render::PresentMode::FIFO}), 0);
+    ASSERT_EQ(app.Run({.Backend = backend, .Multithreaded = threaded, .WindowTitle = "Stalled GPU input", .WindowWidth = 80, .WindowHeight = 60, .FlightDataCount = mutateWindow ? 2u : 1u, .BackBufferFormat = render::TextureFormat::BGRA8_UNORM, .PresentMode = render::PresentMode::FIFO}), 0);
     EXPECT_TRUE(logs.Errors().empty()) << logs.Errors();
 }
 
@@ -419,6 +450,128 @@ TEST(RuntimeFoundation, D3D12SingleThreadInputDuringGpuStall) { RunStalledGpuInp
 TEST(RuntimeFoundation, D3D12ThreadedInputDuringGpuStall) { RunStalledGpuInput(render::RenderBackend::D3D12, true); }
 TEST(RuntimeFoundation, VulkanSingleThreadInputDuringGpuStall) { RunStalledGpuInput(render::RenderBackend::Vulkan, false); }
 TEST(RuntimeFoundation, VulkanThreadedInputDuringGpuStall) { RunStalledGpuInput(render::RenderBackend::Vulkan, true); }
+
+TEST(RuntimeFoundation, D3D12SingleThreadWindowMutationWaitsForGpu) { RunStalledGpuInput(render::RenderBackend::D3D12, false, true); }
+TEST(RuntimeFoundation, D3D12ThreadedWindowMutationWaitsForGpu) { RunStalledGpuInput(render::RenderBackend::D3D12, true, true); }
+TEST(RuntimeFoundation, VulkanSingleThreadWindowMutationWaitsForGpu) { RunStalledGpuInput(render::RenderBackend::Vulkan, false, true); }
+TEST(RuntimeFoundation, VulkanThreadedWindowMutationWaitsForGpu) { RunStalledGpuInput(render::RenderBackend::Vulkan, true, true); }
+
+class WindowMutationApp final : public Application {
+public:
+    bool Completed{false}, ShutdownCanceled{false};
+
+protected:
+    void OnInit() override {
+        auto* windows = GetWindowManager();
+        _main = windows->GetMainWindow()->GetHandle();
+        _surface = windows->GetMainWindow()->GetNativeWindow()->EventBeforeSurfaceChange().connect([this] {
+            EXPECT_FALSE(_recording.load());
+            for (uint32_t i = 0; i < GetGpuSystem()->GetFlightDataCount(); ++i) {
+                EXPECT_FALSE(GetGpuSystem()->GetFlightGpuSignal(i).IsValid());
+            }
+            const auto recorded = _recorded.load();
+            auto* native = GetWindowManager()->ResolveWindow(_main)->GetNativeWindow();
+            GetWindowManager()->EventModalLoopTick()(native);
+            EXPECT_EQ(_recorded.load(), recorded);
+        });
+        _tasks.Spawn(Mutate());
+    }
+
+    void OnUpdate(const AppUpdateContext&) override {
+        // Bounded failure exit, so a broken maintenance scheduler cannot hang this test.
+        if (++_updates == 40) test::CloseMainWindow(*this);
+    }
+
+    void OnRender(AppFrameContext&) override {
+        _recording = true;
+        std::this_thread::sleep_for(std::chrono::milliseconds{2});
+        ++_recorded;
+        _recording = false;
+    }
+
+    void OnShutdown() override {
+        EXPECT_TRUE(Completed);
+        EXPECT_TRUE(ShutdownCanceled);
+        EXPECT_GT(_recorded.load(), 0u);
+        _surface.disconnect();
+    }
+
+private:
+    task<void> Mutate() {
+        auto* windows = GetWindowManager();
+        WindowCreateDescriptor desc{};
+        desc.Title = "Deferred swapchain";
+        desc.Width = 320;
+        desc.Height = 200;
+        desc.StartVisible = false;
+        auto created = co_await windows->CreateWindow(desc);
+        EXPECT_EQ(created.Status, WindowOperationStatus::Completed);
+        WindowSwapChainDescriptor swapchain{};
+        swapchain.Format = render::TextureFormat::BGRA8_UNORM;
+        EXPECT_EQ(co_await windows->AttachSwapChain(created.Handle, swapchain), WindowOperationStatus::Deferred);
+        EXPECT_EQ(co_await windows->Show(created.Handle, NativeWindowShowMode::NoActivate), WindowOperationStatus::Completed);
+        EXPECT_NE(windows->ResolveWindow(created.Handle)->GetSwapChain(), nullptr);
+        // Simulate OS-driven minimize/restore, which bypasses runtime mutation APIs.
+        ::ShowWindow(static_cast<HWND>(windows->ResolveWindow(created.Handle)->GetNativeWindow()->GetNativeHandler()), SW_MINIMIZE);
+        EXPECT_TRUE(windows->ResolveWindow(created.Handle)->IsMinimized());
+        EXPECT_EQ(co_await windows->SetPosition(created.Handle, 40, 40), WindowOperationStatus::Deferred);
+        EXPECT_FALSE(windows->ResolveWindow(created.Handle)->IsSwapChainPresentable());
+        ::ShowWindow(static_cast<HWND>(windows->ResolveWindow(created.Handle)->GetNativeWindow()->GetNativeHandler()), SW_RESTORE);
+        EXPECT_EQ(co_await windows->SetSize(created.Handle, 360, 240), WindowOperationStatus::Completed);
+        EXPECT_TRUE(windows->ResolveWindow(created.Handle)->IsSwapChainPresentable());
+        EXPECT_EQ(windows->ResolveWindow(created.Handle)->GetSwapChain()->GetDesc().Width, 360u);
+        EXPECT_EQ(co_await windows->SetSize(_main, 340, 220), WindowOperationStatus::Completed);
+        EXPECT_EQ(windows->ResolveWindow(_main)->GetSwapChain()->GetDesc().Width, 340u);
+        const auto waitFrame = GetGpuSystem()->GetFrameIndex();
+        co_await GetGpuSystem()->Wait();
+        EXPECT_GT(GetGpuSystem()->GetFrameIndex(), waitFrame);
+        EXPECT_EQ(co_await windows->SetOwner(created.Handle, _main), WindowOperationStatus::Completed);
+        EXPECT_EQ(co_await windows->SetPosition(created.Handle, 50, 50), WindowOperationStatus::Completed);
+        EXPECT_EQ(co_await windows->SetAlpha(created.Handle, 1.0f), WindowOperationStatus::Completed);
+        EXPECT_EQ(co_await windows->SetDecorated(created.Handle, false), WindowOperationStatus::Completed);
+        EXPECT_EQ(co_await windows->SetShowInTaskbar(created.Handle, false), WindowOperationStatus::Completed);
+        EXPECT_EQ(co_await windows->SetTopMost(created.Handle, false), WindowOperationStatus::Completed);
+        EXPECT_EQ(co_await windows->SetPresentMode(render::PresentMode::FIFO), WindowOperationStatus::Completed);
+        auto released = co_await windows->ReleaseSwapChain(created.Handle);
+        EXPECT_EQ(released.Status, WindowOperationStatus::Completed);
+        EXPECT_NE(released.SwapChain, nullptr);
+        released.SwapChain.reset();
+        EXPECT_EQ(windows->ResolveWindow(created.Handle)->GetSwapChain(), nullptr);
+        EXPECT_EQ(co_await windows->AttachSwapChain(created.Handle, swapchain), WindowOperationStatus::Completed);
+        EXPECT_EQ(co_await windows->DetachSwapChain(created.Handle), WindowOperationStatus::Completed);
+        EXPECT_EQ(co_await windows->DestroyWindow(created.Handle), WindowOperationStatus::Completed);
+        _surface.disconnect();
+        EXPECT_EQ(co_await windows->DestroyWindow(_main), WindowOperationStatus::Completed);
+        Completed = true;
+        const auto result = co_await AwaitWithStopToken(windows->SetSize(_main, 320, 200), {});
+        ShutdownCanceled = !result.has_value();
+    }
+
+    WindowHandle _main;
+    sigslot::scoped_connection _surface;
+    std::atomic_bool _recording{false};
+    std::atomic<uint32_t> _recorded{0};
+    uint32_t _updates{0};
+    TaskScope _tasks;
+};
+
+void RunWindowMutations(render::RenderBackend backend, bool threaded) {
+    {
+        render::test::DeviceContext device;
+        if (!render::test::TryCreateDevice(backend, device)) GTEST_SKIP() << device.Reason;
+    }
+    test::RuntimeLogCapture logs;
+    WindowMutationApp app;
+    ASSERT_EQ(app.Run({.Backend = backend, .EnableValidation = true, .Multithreaded = threaded, .EnableSynchronizationValidation = true, .WindowTitle = "Window coroutine lifecycle", .WindowWidth = 320, .WindowHeight = 200, .FlightDataCount = 2, .BackBufferFormat = render::TextureFormat::BGRA8_UNORM, .PresentMode = render::PresentMode::FIFO}), 0);
+    EXPECT_TRUE(app.Completed);
+    EXPECT_TRUE(app.ShutdownCanceled);
+    EXPECT_TRUE(logs.Errors().empty()) << logs.Errors();
+}
+
+TEST(RuntimeFoundation, D3D12SingleThreadWindowOperations) { RunWindowMutations(render::RenderBackend::D3D12, false); }
+TEST(RuntimeFoundation, D3D12ThreadedWindowOperations) { RunWindowMutations(render::RenderBackend::D3D12, true); }
+TEST(RuntimeFoundation, VulkanSingleThreadWindowOperations) { RunWindowMutations(render::RenderBackend::Vulkan, false); }
+TEST(RuntimeFoundation, VulkanThreadedWindowOperations) { RunWindowMutations(render::RenderBackend::Vulkan, true); }
 #endif
 
 }  // namespace
