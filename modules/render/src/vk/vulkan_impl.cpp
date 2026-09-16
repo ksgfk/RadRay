@@ -87,8 +87,8 @@ static VkSwapchainKHR _CreateVkSwapChain(
         RADRAY_ERR_LOG("vkGetPhysicalDeviceSurfaceCapabilitiesKHR failed: {}", vr);
         return VK_NULL_HANDLE;
     }
-    if (desc.BackBufferCount < surfaceProperties.minImageCount || desc.BackBufferCount > surfaceProperties.maxImageCount) {
-        auto newValue = radray::Clamp(desc.BackBufferCount, surfaceProperties.minImageCount, surfaceProperties.maxImageCount);
+    const auto newValue = ResolveSwapChainImageCount(desc.BackBufferCount, surfaceProperties);
+    if (desc.BackBufferCount != newValue) {
         RADRAY_WARN_LOG(
             "vk back buffer count {} not in range [{}, {}]. auto clamp to {}",
             desc.BackBufferCount,
@@ -204,7 +204,9 @@ static bool _RefreshSwapChainImages(SwapChainVulkan* swapChain, VkExtent2D swapc
             return false;
         }
         f.readyToPresent = readyToPresentOpt.Release();
-        auto name = fmt::format("SwapChain_Image_{}", frames.size() - 1);
+        auto name = fmt::format("SwapChain_{}/Image_{}", fmt::ptr(swapChain->_swapchain), frames.size() - 1);
+        swapChain->_device->SetObjectName(name, img);
+        swapChain->_device->SetObjectName(fmt::format("{}/PresentSemaphore", name), f.readyToPresent->_semaphore->_semaphore);
         f.image->_name = name;
         f.image->_rawFormat = rawFormat;
         f.image->_dim = TextureDimension::Dim2D;
@@ -3114,6 +3116,7 @@ Nullable<InstanceVulkanImpl*> InitVulkanEnvImpl(const VulkanInstanceDescriptor& 
         vector<string>{needExts.begin(), needExts.end()},
         vector<string>{needLayers.begin(), needLayers.end()});
     result->_logCallback = desc.LogCallback;
+    result->_isSynchronizationValidationEnabled = isValidFeatureExtEnable && desc.IsEnableSynchronizationValidation;
     result->_logUserData = desc.LogUserData;
     if (hasDebugUtilsExt) {
         debugCreateInfo.pUserData = result.get();
@@ -3676,7 +3679,13 @@ void QueueVulkan::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
     submitInfo.signalSemaphoreCount = static_cast<uint32_t>(signalSemaphores.size());
     submitInfo.pSignalSemaphores = signalSemaphores.empty() ? nullptr : signalSemaphores.data();
 
-    if (auto vr = _device->_ftb.vkQueueSubmit(_queue, 1, &submitInfo, submitFence);
+    // Syncval loses present history when a timeline wait resolves the immediately preceding batch.
+    // A separate empty predecessor preserves that history without adding a GPU dependency.
+    VkSubmitInfo submits[2]{};
+    submits[0].sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submits[1] = submitInfo;
+    const bool preserveSyncvalHistory = _device->_instance->_isSynchronizationValidationEnabled && !desc.WaitFences.empty();
+    if (auto vr = _device->_ftb.vkQueueSubmit(_queue, preserveSyncvalHistory ? 2u : 1u, preserveSyncvalHistory ? submits : &submitInfo, submitFence);
         vr != VK_SUCCESS) {
         RADRAY_ABORT("vkQueueSubmit failed: {}", vr);
     }
@@ -4938,7 +4947,9 @@ void LegacyFenceVulkan::Wait() noexcept {
         vr != VK_SUCCESS) {
         RADRAY_ABORT("vkWaitForFences failed: {}", vr);
     }
-    _device->_ftb.vkResetFences(_device->_device, 1, &_fence);
+    if (auto vr = _device->_ftb.vkResetFences(_device->_device, 1, &_fence); vr != VK_SUCCESS) {
+        RADRAY_ABORT("vkResetFences failed: {}", vr);
+    }
 }
 
 void LegacyFenceVulkan::DestroyImpl() noexcept {
@@ -5149,6 +5160,7 @@ SwapChainVulkan::SwapChainVulkan(
       _nativeHandler(desc.NativeHandler),
       _width(desc.Width),
       _height(desc.Height),
+      _backBufferCount(desc.BackBufferCount),
       _reqFormat(desc.Format),
       _mode(desc.PresentMode) {}
 
@@ -5206,6 +5218,11 @@ void SwapChainVulkan::DestroyImpl() noexcept {
 
 SwapChainAcquireResult SwapChainVulkan::AcquireNext(uint64_t timeoutMs) noexcept {
     SwapChainAcquireResult result{};
+    if (_swapchain == VK_NULL_HANDLE) {
+        result.Status = SwapChainStatus::RequireRecreate;
+        result.NativeStatusCode = VK_ERROR_OUT_OF_DATE_KHR;
+        return result;
+    }
     RADRAY_ASSERT(!_outstandingAcquire.IsValid());
     if (_outstandingAcquire.IsValid()) {
         RADRAY_ERR_LOG("vkAcquireNextImageKHR called before Present");
@@ -5336,6 +5353,7 @@ bool SwapChainVulkan::Recreate(uint32_t width, uint32_t height, TextureFormat fo
     }
 
     SwapChainDescriptor desc = this->GetDesc();
+    desc.BackBufferCount = _backBufferCount;
     desc.Width = width;
     desc.Height = height;
     desc.Format = format;
@@ -5344,23 +5362,22 @@ bool SwapChainVulkan::Recreate(uint32_t width, uint32_t height, TextureFormat fo
     VkExtent2D swapchainSize{};
     VkFormat rawFormat = VK_FORMAT_UNDEFINED;
     VkSwapchainKHR oldSwapchain = _swapchain;
-
     VkSwapchainKHR newSwapchain = _CreateVkSwapChain(_device, _surface.get(), desc, oldSwapchain, swapchainSize, rawFormat);
+    // Passing oldSwapchain retires it even when native creation fails.
+    _frames.clear();
+    _swapchain = newSwapchain;
+    if (oldSwapchain != VK_NULL_HANDLE) {
+        _device->_ftb.vkDestroySwapchainKHR(_device->_device, oldSwapchain, _device->GetAllocationCallbacks());
+    }
     if (newSwapchain == VK_NULL_HANDLE) {
         RADRAY_ERR_LOG("vkCreateSwapchainKHR failed during swapchain recreate");
         return false;
     }
 
-    _swapchain = newSwapchain;
     if (!_RefreshSwapChainImages(this, swapchainSize, rawFormat, desc.Format)) {
-        _frames.clear();
-        _swapchain = oldSwapchain;
+        _swapchain = VK_NULL_HANDLE;
         _device->_ftb.vkDestroySwapchainKHR(_device->_device, newSwapchain, _device->GetAllocationCallbacks());
         return false;
-    }
-
-    if (oldSwapchain != VK_NULL_HANDLE) {
-        _device->_ftb.vkDestroySwapchainKHR(_device->_device, oldSwapchain, _device->GetAllocationCallbacks());
     }
 
     _width = desc.Width;

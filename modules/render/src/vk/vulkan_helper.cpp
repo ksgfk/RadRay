@@ -34,6 +34,12 @@
 
 namespace radray::render::vulkan {
 
+uint32_t ResolveSwapChainImageCount(uint32_t requested, const VkSurfaceCapabilitiesKHR& capabilities) noexcept {
+    auto count = std::max(requested, capabilities.minImageCount);
+    if (capabilities.maxImageCount != 0) count = std::min(count, capabilities.maxImageCount);
+    return count;
+}
+
 uint64_t GetPhysicalDeviceMemoryAllSize(const VkPhysicalDeviceMemoryProperties& memory, VkMemoryHeapFlags heapFlags) noexcept {
     uint64_t total = 0;
     for (uint32_t i = 0; i < memory.memoryHeapCount; ++i) {

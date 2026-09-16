@@ -40,6 +40,8 @@
 
 namespace radray::render::vulkan {
 
+uint32_t ResolveSwapChainImageCount(uint32_t requested, const VkSurfaceCapabilitiesKHR& capabilities) noexcept;
+
 template <class T>
 struct VulkanObjectTrait {
     static_assert(false, "unknown vulkan object type");

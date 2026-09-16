@@ -92,6 +92,7 @@ public:
     RenderLogCallback _logCallback{nullptr};
     void* _logUserData{nullptr};
     VkDebugUtilsMessengerEXT _debugMessenger{VK_NULL_HANDLE};
+    bool _isSynchronizationValidationEnabled{false};
 };
 
 class VMA final : public RenderBase {
@@ -764,10 +765,8 @@ public:
     uint64_t _pendingQueueValue{0};
 };
 
-/// 两个信号量的索引维度【刻意不同】: acquire 按 in-flight 帧索引 (受
-/// VUID-vkAcquireNextImageKHR-semaphore-01779 约束), present 按 swapchain image 索引
-/// (核心 Vulkan 的 vkQueuePresentKHR 不给 fence, 只有重新 acquire 到同一 image 能证明
-/// 上一次呈现已停止使用它)。
+/// Acquire 信号量按消费它的队列 fence 回收；present 信号量按 swapchain image 索引。
+/// 重新 acquire 到同一 image 后，才能在后续提交中复用它的 present 信号量。
 class SwapChainVulkan final : public SwapChain {
 public:
     SwapChainVulkan(
@@ -835,6 +834,7 @@ public:
     uint64_t _outstandingFrameToken{0};
     uint32_t _width{0};
     uint32_t _height{0};
+    uint32_t _backBufferCount{0};
     TextureFormat _reqFormat{TextureFormat::UNKNOWN};
     PresentMode _mode{PresentMode::FIFO};
 };

@@ -96,6 +96,7 @@ CPU record/Submit 时间与 GPU 时间线分开解读。关闭使用 `-DRADRAY_E
 | `test_asset_slot` | `AssetSlotTest` |
 | `test_frame_upload` | `FrameUploadTest` |
 | `test_gpu_system` | `GpuSystemTest`, `GpuSystemDeathTest` |
+| `test_multi_window` | `RuntimeMultiWindow`（三窗口交换链、有序提交与生命周期） |
 | `test_flight_completion` | `FlightCompletionTest` |
 | `test_asset_database` | `AssetDatabaseTest` |
 | `test_component_rtti` | `ComponentRttiTest` |
@@ -147,6 +148,41 @@ ctest --test-dir build_debug -C Debug -R AssetSlotTest --output-on-failure
 初始化失败；可选后端不可用时可 `GTEST_SKIP()`，native 初始化、资源、PSO、提交或读回错误必须
 失败。`RADRAY_TEST_REQUIRED_BACKENDS=d3d12,vulkan` 使必测后端缺失也失败。样例资产在被忽略的 `assets/`
 下，通过源码仓库外的渠道准备。新增测试源文件后重新 configure；CTest 不负责构建。
+
+`RuntimeMultiWindow` 在一个 Application 内运行主窗口与两个副窗口，覆盖 D3D12/Vulkan 的
+单线程和双线程模式。用例清屏各交换链，交替正序/逆序归还多命令批次，混合显式与自动提交，
+并通过逐批 fence、纯同步批次和 GPU buffer 读回检查提交顺序及完成通知。
+生命周期用例覆盖副窗口 resize、隐藏创建后的延迟挂接与显示、detach/reattach、release/reattach、
+销毁及重新创建，期间验证其他窗口仍可呈现和提交；最后关闭主窗口，检查 flight 完成消息已排空。
+flight 槽位与交换链 buffer 数量刻意不完全相同。用例要求 Windows 桌面，开启 debug/同步验证，
+CTest 设置串行执行及每例 90 秒超时。
+
+同一目标的 `RuntimeVulkanSwapChain` 覆盖 image 枚举失败、native 创建已退休旧链后失败的恢复，
+以及 CPU 等待提交后 Present、反复立即重建和销毁、等待已完成的旧 timeline 值，以及三交换链
+串联 timeline 提交后统一 Present；`RuntimeVulkanSwapChainLimits` 检查无上限
+surface 的 buffer 数量。故障注入用例只允许精确匹配的预期错误，其他原生验证错误仍失败。
+设置 `RADRAY_TEST_WSI_TRACE=1` 可记录多窗口 phase、serial、flight、窗口、chain、image 和两个
+semaphore，结合验证层中的原生对象名称定位偶发同步错误。
+长期重复使用 CTest 的 `--repeat`，每次启动独立进程；不要在同一进程中对全部 GPU 用例执行
+大量 `--gtest_repeat`，Tracy 的 GPU context id 在进程内累计，超过 256 会触发其断言。
+
+```powershell
+cmake -S . -B build_debug
+cmake --build build_debug --config Debug --target test_multi_window --parallel 4
+$env:RADRAY_TEST_REQUIRED_BACKENDS = "d3d12,vulkan"
+ctest --test-dir build_debug -C Debug -R RuntimeMultiWindow --output-on-failure
+ctest --test-dir build_debug -C Debug -R 'RuntimeMultiWindow|RuntimeVulkanSwapChain' --repeat until-fail:20 --output-on-failure
+```
+
+仅复现 SDK 1.4.350.0 同步验证的 present 历史丢失时，可对最小用例关闭 RadRay 的空批次
+兼容处理；原生验证层保持开启，预期该对照失败并报告 `SYNC-HAZARD-WRITE-AFTER-PRESENT`。
+正常回归前移除此变量：
+
+```powershell
+$env:RADRAY_TEST_REPRO_SYNCVAL_PRESENT = "1"
+ctest --test-dir build_debug -C Debug -R '^RuntimeVulkanSwapChain.MultiSwapChainHostWaitBeforePresent$' --output-on-failure
+Remove-Item Env:RADRAY_TEST_REPRO_SYNCVAL_PRESENT
+```
 
 涉及 RTTI、公共 C++ ABI 或跨静态库对象查询时，Debug 与 Release 都要分别完成全量构建，
 再运行各自配置的测试。其他改动选择相关 suite 验证，不复用旧会话的通过计数。
