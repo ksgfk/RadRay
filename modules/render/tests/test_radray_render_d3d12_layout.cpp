@@ -2,6 +2,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <chrono>
 
 #include <radray/render/shader_layout.h>
 #include <radray/shader/shader_artifact.h>
@@ -295,6 +296,309 @@ std::optional<uint32_t> DispatchComputeAndReadBack(
 
 }  // namespace
 
+TEST(DescriptorDirtyRangesD3D12Test, CoalescesAndNeverCopiesUninitializedGaps) {
+    d3d12::DescriptorDirtyRangesD3D12 dirty;
+    vector<uint8_t> initialized(128, 1);
+    dirty.Add(4, 2);
+    dirty.Add(0, 2);
+    dirty.Add(2, 2);
+    ASSERT_EQ(dirty.Ranges.size(), 1u);
+    EXPECT_EQ(dirty.Ranges[0], (d3d12::DescriptorDirtyRangeD3D12{0, 6}));
+    ASSERT_TRUE(dirty.GetCopySpan(initialized).has_value());
+    dirty.Ranges.clear();
+    dirty.Add(0);
+    dirty.Add(3);
+    ASSERT_TRUE(dirty.GetCopySpan(initialized).has_value());  // Exactly 50%.
+    initialized[1] = 0;
+    EXPECT_FALSE(dirty.GetCopySpan(initialized).has_value());
+    initialized[1] = 1;
+    dirty.Ranges.clear();
+    for (uint32_t i = 0; i < 16; ++i) dirty.Add(i * 7);
+    EXPECT_FALSE(dirty.GetCopySpan(initialized).has_value());
+    dirty.Add(112);
+    EXPECT_TRUE(dirty.GetCopySpan(initialized).has_value());
+    initialized[50] = 0;
+    EXPECT_FALSE(dirty.GetCopySpan(initialized).has_value());
+    dirty.Ranges.clear();
+    dirty.Add(std::numeric_limits<uint32_t>::max() - 1);
+    EXPECT_FALSE(dirty.GetCopySpan(initialized).has_value());
+}
+
+TEST(DescriptorDirtyRangesD3D12Test, DuplicateTableSignaturesMapStablyAndCompareAllStorageFacts) {
+    d3d12::ShaderParameterGroupLayoutD3D12 source;
+    d3d12::DescriptorTableBindingD3D12 table;
+    table.DescriptorCount = 1;
+    table.Ranges.push_back({D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1, 0, std::numeric_limits<uint32_t>::max(), 0, D3D12_DESCRIPTOR_RANGE_FLAG_NONE});
+    table.Slots.push_back({0, 0, 0, 0, shader::ShaderBindingKind::CBuffer, shader::ShaderBindingPlacement::Table});
+    source.Tables = {table, table};
+    auto target = source;
+    target.GroupIndex = 7;
+    target.Tables[0].RootParameterIndex = 13;
+    target.Tables[1].RootParameterIndex = 12;
+    vector<uint32_t> mapping;
+    EXPECT_TRUE(target.MapTablesFrom(source, mapping));
+    EXPECT_EQ(mapping, (vector<uint32_t>{0, 1}));
+    for (uint32_t field = 0; field < 7; ++field) {
+        auto changed = table;
+        switch (field) {
+            case 0: changed.Visibility = D3D12_SHADER_VISIBILITY_VERTEX; break;
+            case 1: changed.HeapType = D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER; break;
+            case 2: changed.DescriptorCount++; break;
+            case 3: changed.Ranges[0].Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE; break;
+            case 4: changed.Ranges[0].Offset++; break;
+            case 5: changed.Slots[0].ArrayElement++; break;
+            case 6: changed.Slots[0].LogicalKind = shader::ShaderBindingKind::RawBuffer; break;
+        }
+        EXPECT_FALSE(table.IsStorageCompatible(changed)) << field;
+    }
+}
+
+TEST_F(D3D12DeviceFixture, TablesSplitByVisibilityAndPackMixedRanges) {
+    if (!Available) GTEST_SKIP() << "no d3d12 device";
+    ResolvedD3D12Layout description;
+    const auto tablePlacement = shader::ShaderBindingPlacement::Table;
+    description.Bindings = {
+        MakeBinding("V", shader::ShaderBindingKind::CBuffer, 0, 0, tablePlacement, ShaderStage::Vertex),
+        MakeBinding("P", shader::ShaderBindingKind::CBuffer, 0, 3, tablePlacement, ShaderStage::Pixel),
+        MakeBinding("Both", shader::ShaderBindingKind::CBuffer, 0, 7, tablePlacement, ShaderStage::Vertex | ShaderStage::Pixel),
+        MakeBinding("Compute", shader::ShaderBindingKind::CBuffer, 0, 9),
+        MakeBinding("T", shader::ShaderBindingKind::Texture, 0, 4, tablePlacement, ShaderStage::Pixel),
+        MakeBinding("U", shader::ShaderBindingKind::RWRawBuffer, 0, 7, tablePlacement, ShaderStage::Pixel),
+        MakeBinding("S", shader::ShaderBindingKind::Sampler, 0, 0, tablePlacement, ShaderStage::Pixel)};
+    description.Bindings[4].Count = 3;
+    auto result = Device->CreatePipelineLayout(description);
+    ASSERT_TRUE(result.HasValue());
+    auto layout = result.Release();
+    const auto& group = CastD3D12Object(layout.get())->_parameterGroups[0];
+    ASSERT_EQ(group.Tables.size(), 4u);
+    EXPECT_EQ(group.Tables[0].Visibility, D3D12_SHADER_VISIBILITY_VERTEX);
+    EXPECT_EQ(group.Tables[1].Visibility, D3D12_SHADER_VISIBILITY_PIXEL);
+    EXPECT_EQ(group.Tables[2].Visibility, D3D12_SHADER_VISIBILITY_ALL);
+    EXPECT_EQ(group.Tables[2].DescriptorCount, 2u);
+    EXPECT_EQ(group.Tables[3].HeapType, D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
+    ASSERT_EQ(group.Tables[1].Ranges.size(), 3u);
+    EXPECT_EQ(group.Tables[1].DescriptorCount, 5u);
+    EXPECT_EQ(group.Tables[1].Ranges[1].Binding, 4u);
+    EXPECT_EQ(group.Tables[1].Ranges[1].Offset, 1u);
+    EXPECT_EQ(group.Tables[1].Ranges[2].Offset, 4u);
+    auto second = Device->CreatePipelineLayout(description);
+    ASSERT_TRUE(second.HasValue());
+    auto reordered = CastD3D12Object(second.Get())->_parameterGroups[0];
+    std::reverse(reordered.Tables.begin(), reordered.Tables.end());
+    for (auto& table : reordered.Tables) table.RootParameterIndex += 10;
+    vector<uint32_t> mapping;
+    EXPECT_TRUE(group.MapTablesFrom(reordered, mapping));
+    EXPECT_EQ(mapping, (vector<uint32_t>{3, 2, 1, 0}));
+    reordered.Tables[0].Slots[0].Binding += 1;
+    EXPECT_FALSE(group.MapTablesFrom(reordered, mapping));
+    EXPECT_TRUE(mapping.empty());
+    auto set = Device->CreateShaderParameterSet({.Layout = layout.get(), .GroupIndex = 0});
+    ASSERT_TRUE(set.HasValue());
+    const auto* native = CastD3D12Object(set.Get());
+    ASSERT_EQ(native->_tables.size(), 4u);
+    for (size_t i = 0; i < native->_tables.size(); ++i) {
+        const auto& storage = native->_tables[i];
+        EXPECT_EQ(storage.Mirror.GetLength(), group.Tables[i].DescriptorCount);
+        EXPECT_EQ(storage.Descriptors.GetLength(), group.Tables[i].DescriptorCount);
+        EXPECT_EQ(storage.Mirror.GetHeap()->Get()->GetDesc().Flags, D3D12_DESCRIPTOR_HEAP_FLAG_NONE);
+        EXPECT_TRUE(storage.Dirty.Ranges.empty());
+    }
+}
+
+TEST_F(D3D12DeviceFixture, VisibilityTablesCountAgainstRootBudget) {
+    if (!Available) GTEST_SKIP() << "no d3d12 device";
+    ResolvedD3D12Layout description;
+    for (uint32_t group = 0; group < 32; ++group) {
+        description.Bindings.push_back(MakeBinding(fmt::format("V{}", group), shader::ShaderBindingKind::CBuffer, group, 0,
+                                                   shader::ShaderBindingPlacement::Table, ShaderStage::Vertex));
+        description.Bindings.push_back(MakeBinding(fmt::format("P{}", group), shader::ShaderBindingKind::CBuffer, group, 1,
+                                                   shader::ShaderBindingPlacement::Table, ShaderStage::Pixel));
+    }
+    auto boundary = Device->CreatePipelineLayout(description);
+    ASSERT_TRUE(boundary.HasValue());
+    description.Bindings.push_back(MakeBinding("Overflow", shader::ShaderBindingKind::CBuffer, 32, 0));
+    EXPECT_FALSE(Device->CreatePipelineLayout(description).HasValue());
+}
+
+TEST_F(D3D12DeviceFixture, SetWritesMirrorAndFlushPublishesSparseRanges) {
+    if (!Available) GTEST_SKIP() << "no d3d12 device";
+    ResolvedD3D12Layout description;
+    description.Bindings = {MakeBinding("A", shader::ShaderBindingKind::CBuffer, 0, 0)};
+    description.Bindings[0].Count = 64;
+    auto created = Device->CreatePipelineLayout(description);
+    ASSERT_TRUE(created.HasValue());
+    auto layout = created.Release();
+    auto bufferResult = Device->CreateBuffer({.Size = 512, .Memory = MemoryType::Upload, .Usage = BufferUse::CBuffer});
+    ASSERT_TRUE(bufferResult.HasValue());
+    auto buffer = bufferResult.Release();
+    auto result = Device->CreateShaderParameterSet({.Layout = layout.get(), .GroupIndex = 0});
+    ASSERT_TRUE(result.HasValue());
+    auto set = result.Release();
+    auto* native = CastD3D12Object(set.get());
+    const auto handle = layout->FindBinding("A");
+    const ShaderBufferBinding valid{buffer.get(), {0, 256}, 0};
+    EXPECT_TRUE(native->_rootBindings.empty());
+    EXPECT_TRUE(native->_tables[0].Dirty.Ranges.empty());
+    EXPECT_FALSE(set->Set(handle, 64, valid));
+    EXPECT_FALSE(set->Set(BindingHandle{}, 0, valid));
+    ASSERT_TRUE(set->Set(handle, 0, valid));
+    EXPECT_EQ(native->_tables[0].InitializedSlots[0], 1);
+    ASSERT_EQ(native->_tables[0].Dirty.Ranges.size(), 1u);
+    EXPECT_EQ(native->_tables[0].Dirty.Ranges[0].Start, 0u);
+    EXPECT_EQ(native->_tables[0].Dirty.Ranges[0].Count, 1u);
+    ASSERT_TRUE(set->Set(handle, 63, valid));
+    EXPECT_EQ(native->_tables[0].InitializedSlots[63], 1);
+    EXPECT_EQ(native->_tables[0].InitializedSlots[1], 0);
+    ASSERT_TRUE(set->FlushWrites());
+    EXPECT_EQ(native->_copyCounts.size(), 2u);
+    EXPECT_TRUE(native->_tables[0].Dirty.Ranges.empty());
+    ASSERT_TRUE(set->Set(handle, 0, valid));
+    EXPECT_FALSE(native->_tables[0].Dirty.Ranges.empty());
+    ASSERT_TRUE(set->Set(handle, 0, ShaderBufferBinding{buffer.get(), {256, 256}, 0}));
+    ASSERT_TRUE(set->Set(handle, 0, valid));
+    ASSERT_TRUE(set->FlushWrites());
+    EXPECT_TRUE(native->_tables[0].Dirty.Ranges.empty());
+    ASSERT_TRUE(set->FlushWrites());
+    set->Destroy();
+    EXPECT_FALSE(set->Set(handle, 0, valid));
+    EXPECT_FALSE(set->FlushWrites());
+    Device->TryDrainValidationMessages();
+    EXPECT_EQ(Context.ValidationErrors.load(), 0u);
+}
+
+TEST_F(D3D12DeviceFixture, RootBindingStoresOnlyResolvedAddress) {
+    if (!Available) GTEST_SKIP() << "no d3d12 device";
+    ResolvedD3D12Layout description;
+    description.Bindings = {MakeBinding("Root", shader::ShaderBindingKind::CBuffer, 0, 0,
+                                       shader::ShaderBindingPlacement::RootDescriptor)};
+    auto layout = Device->CreatePipelineLayout(description);
+    ASSERT_TRUE(layout.HasValue());
+    auto buffer = Device->CreateBuffer({.Size = 1024, .Memory = MemoryType::Upload, .Usage = BufferUse::CBuffer});
+    ASSERT_TRUE(buffer.HasValue());
+    auto set = Device->CreateShaderParameterSet({.Layout = layout.Get(), .GroupIndex = 0});
+    ASSERT_TRUE(set.HasValue());
+    auto* native = CastD3D12Object(set.Get());
+    ASSERT_EQ(native->_rootBindings.size(), 1u);
+    EXPECT_EQ(native->_rootBindings[0], 0u);
+    EXPECT_TRUE(native->_tables.empty());
+    const auto handle = layout->FindBinding("Root");
+    ASSERT_TRUE(set->Set(handle, 0, ShaderBufferBinding{buffer.Get(), {256, 256}, 0}));
+    const auto address = CastD3D12Object(buffer.Get())->_gpuAddr + 256;
+    EXPECT_EQ(native->_rootBindings[0], address);
+    ASSERT_TRUE(set->FlushWrites());
+    ASSERT_TRUE(set->Set(handle, 0, ShaderBufferBinding{buffer.Get(), {512, BufferRange::All()}, 0}));
+    EXPECT_EQ(native->_rootBindings[0], address + 256);
+    Device->TryDrainValidationMessages();
+    EXPECT_EQ(Context.ValidationErrors.load(), 0u);
+}
+
+TEST_F(D3D12DeviceFixture, FailedTableAllocationReturnsEarlierGpuSegments) {
+    if (!Available) GTEST_SKIP() << "no d3d12 device";
+    ResolvedD3D12Layout description;
+    description.Bindings = {
+        MakeBinding("V", shader::ShaderBindingKind::Sampler, 0, 0, shader::ShaderBindingPlacement::Table, ShaderStage::Vertex),
+        MakeBinding("P", shader::ShaderBindingKind::Sampler, 0, 1, shader::ShaderBindingPlacement::Table, ShaderStage::Pixel)};
+    auto layoutResult = Device->CreatePipelineLayout(description);
+    ASSERT_TRUE(layoutResult.HasValue());
+    auto layout = layoutResult.Release();
+    // Reserve all but one GPU sampler slot, so table 0 succeeds and table 1 fails.
+    const auto reservation = Device->_gpuSamplerHeap->Allocate(D3D12_MAX_SHADER_VISIBLE_SAMPLER_HEAP_SIZE - 1);
+    ASSERT_TRUE(reservation.has_value());
+    d3d12::GpuDescriptorHeapViewRAII reserved{Device->_gpuSamplerHeap.get(), reservation.value()};
+    for (uint32_t repeat = 0; repeat < 3; ++repeat) {
+        EXPECT_FALSE(Device->CreateShaderParameterSet({.Layout = layout.get(), .GroupIndex = 0}).HasValue());
+        auto slot = Device->_gpuSamplerHeap->Allocate(1);
+        ASSERT_TRUE(slot.has_value());
+        d3d12::GpuDescriptorHeapViewRAII restored{Device->_gpuSamplerHeap.get(), slot.value()};
+    }
+    // A CPU page whose rounded capacity cannot fit UINT fails before any native allocation.
+    auto& secondTable = CastD3D12Object(layout.get())->_parameterGroups[0].Tables[1];
+    secondTable.DescriptorCount = std::numeric_limits<uint32_t>::max();
+    EXPECT_FALSE(Device->CreateShaderParameterSet({.Layout = layout.get(), .GroupIndex = 0}).HasValue());
+    const auto recovered = Device->_gpuSamplerHeap->Allocate(1);
+    ASSERT_TRUE(recovered.has_value());
+    d3d12::GpuDescriptorHeapViewRAII recoveredSlot{Device->_gpuSamplerHeap.get(), recovered.value()};
+    recoveredSlot.Destroy();
+    secondTable.DescriptorCount = 1;
+    reserved.Destroy();
+    EXPECT_TRUE(Device->CreateShaderParameterSet({.Layout = layout.get(), .GroupIndex = 0}).HasValue());
+}
+
+TEST_F(D3D12DeviceFixture, DISABLED_DescriptorPublishBenchmark) {
+    if (!Available) {
+        GTEST_SKIP() << "no d3d12 device";
+    }
+    auto bufferResult = Device->CreateBuffer({.Size = 512, .Memory = MemoryType::Upload, .Usage = BufferUse::CBuffer});
+    ASSERT_TRUE(bufferResult.HasValue());
+    auto buffer = bufferResult.Release();
+    for (uint32_t scenario = 0; scenario < 6; ++scenario) {
+        ResolvedD3D12Layout description;
+        description.Bindings = {MakeBinding("A", shader::ShaderBindingKind::CBuffer, 0, 0)};
+        description.Bindings[0].Count = scenario == 0 ? 1 : 64;
+        if (scenario == 4) {
+            description.Bindings[0].Count = 32;
+            description.Bindings[0].Stages = ShaderStage::Vertex;
+            description.Bindings.push_back(MakeBinding("B", shader::ShaderBindingKind::CBuffer, 0, 32,
+                                                       shader::ShaderBindingPlacement::Table, ShaderStage::Pixel));
+            description.Bindings[1].Count = 32;
+        }
+        if (scenario == 5) {
+            description.Bindings[0].Stages = ShaderStage::Vertex | ShaderStage::Pixel;
+            D3D12_DESCRIPTOR_RANGE1 range{D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 64, 0, 0, D3D12_DESCRIPTOR_RANGE_FLAG_NONE, 0};
+            D3D12_ROOT_PARAMETER1 parameters[2]{};
+            for (uint32_t i = 0; i < 2; ++i) {
+                parameters[i].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+                parameters[i].DescriptorTable = {1, &range};
+                parameters[i].ShaderVisibility = i == 0 ? D3D12_SHADER_VISIBILITY_VERTEX : D3D12_SHADER_VISIBILITY_PIXEL;
+            }
+            D3D12_VERSIONED_ROOT_SIGNATURE_DESC native{};
+            native.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
+            native.Desc_1_1.NumParameters = 2;
+            native.Desc_1_1.pParameters = parameters;
+            Microsoft::WRL::ComPtr<ID3DBlob> blob;
+            Microsoft::WRL::ComPtr<ID3DBlob> error;
+            ASSERT_TRUE(SUCCEEDED(D3D12SerializeVersionedRootSignature(&native, &blob, &error)));
+            const auto* begin = static_cast<const byte*>(blob->GetBufferPointer());
+            description.SerializedRootSignature.assign(begin, begin + blob->GetBufferSize());
+        }
+        auto layoutResult = Device->CreatePipelineLayout(description);
+        ASSERT_TRUE(layoutResult.HasValue());
+        auto layout = layoutResult.Release();
+        const auto allocationStart = std::chrono::steady_clock::now();
+        for (uint32_t i = 0; i < 1000; ++i) {
+            auto allocated = Device->CreateShaderParameterSet({.Layout = layout.get(), .GroupIndex = 0});
+            ASSERT_TRUE(allocated.HasValue());
+        }
+        const double allocationNs = std::chrono::duration<double, std::nano>(std::chrono::steady_clock::now() - allocationStart).count() / 1000;
+        auto setResult = Device->CreateShaderParameterSet({.Layout = layout.get(), .GroupIndex = 0});
+        ASSERT_TRUE(setResult.HasValue());
+        auto set = setResult.Release();
+        const auto a = layout->FindBinding("A");
+        const auto b = layout->FindBinding("B");
+        double flushNs = 0;
+        const auto start = std::chrono::steady_clock::now();
+        for (uint32_t iteration = 0; iteration < 5000; ++iteration) {
+            const uint32_t count = scenario == 0 ? 1 : 64;
+            const uint32_t step = scenario == 2 ? 7 : 1;
+            for (uint32_t element = 0; element < count; element += step) {
+                const auto handle = scenario == 4 && element >= 32 ? b : a;
+                const auto index = scenario == 4 ? element % 32 : element;
+                const ShaderBufferBinding value{buffer.get(), {uint64_t(iteration % 2) * 256, 256}, 0};
+                ASSERT_TRUE(set->Set(handle, index, value));
+                if (scenario == 3) {
+                    ASSERT_TRUE(set->Set(handle, index, value));
+                    ASSERT_TRUE(set->Set(handle, index, value));
+                }
+            }
+            const auto flushStart = std::chrono::steady_clock::now();
+            ASSERT_TRUE(set->FlushWrites());
+            flushNs += std::chrono::duration<double, std::nano>(std::chrono::steady_clock::now() - flushStart).count();
+        }
+        const double totalNs = std::chrono::duration<double, std::nano>(std::chrono::steady_clock::now() - start).count();
+        fmt::print("descriptor-benchmark scenario={} total_ns={:.1f} flush_ns={:.1f} allocation_ns={:.1f} iterations=5000\n", scenario, totalNs / 5000, flushNs / 5000, allocationNs);
+    }
+}
+
 TEST_F(D3D12DeviceFixture, SamplerDescriptorsSupportMultipleViewFlights) {
     if (!Available) {
         GTEST_SKIP() << "no d3d12 device";
@@ -341,8 +645,9 @@ TEST_F(D3D12DeviceFixture, BufferPlacementDecidesTableVersusRootDescriptor) {
         // Namespace 0 is the CBV register class; it is what every binding handle lookup keys on
         // alongside the register number.
         EXPECT_EQ(group.Entries[0].Namespace, 0u);
-        EXPECT_EQ(group.ResourceDescriptorCount, 1u);
-        EXPECT_EQ(group.SamplerDescriptorCount, 0u);
+        ASSERT_EQ(group.Tables.size(), 1u);
+        EXPECT_EQ(group.Tables[0].DescriptorCount, 1u);
+        EXPECT_EQ(group.Tables[0].HeapType, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     }
     EXPECT_TRUE(tableNative->FindBinding("First").IsValid());
     EXPECT_TRUE(tableNative->FindBinding("Second").IsValid());
@@ -371,15 +676,16 @@ TEST_F(D3D12DeviceFixture, BufferPlacementDecidesTableVersusRootDescriptor) {
     EXPECT_EQ(movedGroup.Entries[0].LogicalKind, shader::ShaderBindingKind::CBuffer);
     EXPECT_EQ(movedGroup.Entries[0].Placement, shader::ShaderBindingPlacement::RootDescriptor);
     // A root descriptor owns no descriptor slot, so the group must stop reserving one.
-    EXPECT_EQ(movedGroup.ResourceDescriptorCount, 0u);
-    EXPECT_EQ(movedGroup.ResourceTableRootParameter, std::numeric_limits<uint32_t>::max());
+    EXPECT_TRUE(movedGroup.Tables.empty());
+
     ASSERT_EQ(movedGroup.Bindings[0].RootDescriptorDestinations.size(), 1u);
     EXPECT_EQ(
         movedGroup.Bindings[0].RootDescriptorDestinations[0].Type,
         D3D12_ROOT_PARAMETER_TYPE_CBV);
     // The untouched group keeps its table.
     EXPECT_TRUE(rootRootSig->_parameterGroups[1].RootDescriptorOrder.empty());
-    EXPECT_EQ(rootRootSig->_parameterGroups[1].ResourceDescriptorCount, 1u);
+    ASSERT_EQ(rootRootSig->_parameterGroups[1].Tables.size(), 1u);
+    EXPECT_EQ(rootRootSig->_parameterGroups[1].Tables[0].DescriptorCount, 1u);
 }
 
 // A policy static sampler exists only inside the carrier. It must reserve no descriptor slot and it
@@ -413,8 +719,10 @@ TEST_F(D3D12DeviceFixture, PolicyStaticSamplerComesFromTheCarrierAndCannotBeWrit
     EXPECT_TRUE(samplerEntry->IsStaticSampler());
     EXPECT_EQ(textureEntry->Placement, shader::ShaderBindingPlacement::Table);
     // The carrier declares the sampler itself, so no sampler descriptor may be reserved for it.
-    EXPECT_EQ(group.SamplerDescriptorCount, 0u);
-    EXPECT_EQ(group.ResourceDescriptorCount, 1u);
+
+    ASSERT_EQ(group.Tables.size(), 1u);
+    EXPECT_EQ(group.Tables[0].DescriptorCount, 1u);
+    EXPECT_EQ(group.Tables[0].HeapType, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 
     const BindingHandle samplerHandle = native->FindBinding("ShadowSampler");
     const BindingHandle textureHandle = native->FindBinding("ShadowTexture");

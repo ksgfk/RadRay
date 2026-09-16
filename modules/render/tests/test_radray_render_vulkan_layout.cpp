@@ -138,6 +138,60 @@ struct VulkanDeviceFixture : ::testing::Test {
 
 }  // namespace
 
+TEST_F(VulkanDeviceFixture, DescriptorWritesRejectInvalidObjectsWithoutCachingValues) {
+    if (!Available) GTEST_SKIP() << "Vulkan is unavailable";
+    ResolvedVulkanLayout description;
+    description.SetCount = 1;
+    description.Bindings = {
+        MakeBinding("Buffer", shader::ShaderBindingKind::CBuffer, 0, 0),
+        MakeBinding("Typed", shader::ShaderBindingKind::TypedBuffer, 0, 1),
+        MakeBinding("Texture", shader::ShaderBindingKind::Texture, 0, 2),
+        MakeBinding("Sampler", shader::ShaderBindingKind::Sampler, 0, 3)};
+    auto layout = VkDevice->CreatePipelineLayout(description);
+    ASSERT_TRUE(layout.HasValue());
+    EXPECT_FALSE(VkDevice->CreateShaderParameterSet({.Layout = layout.Get(), .GroupIndex = 1}).HasValue());
+    auto set = VkDevice->CreateShaderParameterSet({.Layout = layout.Get(), .GroupIndex = 0});
+    ASSERT_TRUE(set.HasValue());
+    auto buffer = VkDevice->CreateBuffer({256, MemoryType::Upload, BufferUse::CBuffer | BufferUse::Resource});
+    auto sampler = VkDevice->CreateSampler({});
+    ASSERT_TRUE(buffer.HasValue());
+    ASSERT_TRUE(sampler.HasValue());
+    const auto bufferHandle = layout->FindBinding("Buffer");
+    const auto typedHandle = layout->FindBinding("Typed");
+    const auto samplerHandle = layout->FindBinding("Sampler");
+    const auto textureHandle = layout->FindBinding("Texture");
+    EXPECT_FALSE(set->Set(bufferHandle, 0, sampler.Get()));
+    EXPECT_FALSE(set->Set(bufferHandle, 0, ShaderBufferBinding{nullptr, {0, 256}, 0}));
+    EXPECT_FALSE(set->Set(typedHandle, 0, ShaderBufferBinding{buffer.Get(), {0, 256}, 0}));
+    EXPECT_FALSE(set->Set(typedHandle, 0, ShaderTexelBufferBinding{nullptr, {0, 4}, TextureFormat::R32_UINT}));
+    EXPECT_FALSE(set->Set(textureHandle, 0, sampler.Get()));
+    EXPECT_FALSE(set->Set(textureHandle, 0, static_cast<TextureView*>(nullptr)));
+    EXPECT_FALSE(set->Set(samplerHandle, 0, ShaderBufferBinding{buffer.Get(), {0, 256}, 0}));
+    EXPECT_FALSE(set->Set(samplerHandle, 0, static_cast<Sampler*>(nullptr)));
+    ASSERT_TRUE(set->Set(bufferHandle, 0, ShaderBufferBinding{buffer.Get(), {0, 256}, 0}));
+    ASSERT_TRUE(set->Set(samplerHandle, 0, sampler.Get()));
+    const VulkanCommandQueueDescriptor foreignQueues[]{{QueueType::Direct, 1}};
+    VulkanDeviceDescriptor foreignDescription{};
+    foreignDescription.Queues = foreignQueues;
+    auto foreign = Device::Create(DeviceDescriptor{foreignDescription});
+    ASSERT_TRUE(foreign.HasValue());
+    auto foreignBuffer = foreign->CreateBuffer({256, MemoryType::Upload, BufferUse::CBuffer});
+    auto foreignSampler = foreign->CreateSampler({});
+    ASSERT_TRUE(foreignBuffer.HasValue());
+    ASSERT_TRUE(foreignSampler.HasValue());
+    EXPECT_FALSE(set->Set(bufferHandle, 0, ShaderBufferBinding{foreignBuffer.Get(), {0, 256}, 0}));
+    EXPECT_FALSE(set->Set(samplerHandle, 0, foreignSampler.Get()));
+    buffer->Destroy();
+    sampler->Destroy();
+    EXPECT_FALSE(set->Set(bufferHandle, 0, ShaderBufferBinding{buffer.Get(), {0, 256}, 0}));
+    EXPECT_FALSE(set->Set(samplerHandle, 0, sampler.Get()));
+    layout->Destroy();
+    EXPECT_FALSE(set->Set(bufferHandle, 0, ShaderBufferBinding{buffer.Get(), {0, 256}, 0}));
+    EXPECT_FALSE(set->FlushWrites());
+    EXPECT_FALSE(VkDevice->CreateShaderParameterSet({.Layout = layout.Get(), .GroupIndex = 0}).HasValue());
+    EXPECT_EQ(Context.ValidationErrors.load(), 0u);
+}
+
 TEST_F(VulkanDeviceFixture, LogicalKindDecidesTheNativeDescriptorType) {
     if (!Available) {
         GTEST_SKIP() << "Vulkan is unavailable on this machine";

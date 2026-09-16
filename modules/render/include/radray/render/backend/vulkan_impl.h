@@ -1001,10 +1001,7 @@ public:
     VkFormat _rawFormat{VK_FORMAT_UNDEFINED};
 };
 
-// Per-set layout entry in Vulkan terms, built only from `ResolvedVulkanLayout`. The logical kind is
-// kept as the authority instead of being fused into a single backend enum: the native descriptor
-// type, the required buffer usage and the value-compatibility rules are all derived from it, and the
-// dynamic placement stays a separate axis so it cannot silently change the resource class.
+// 由 ResolvedVulkanLayout 建立的 set binding metadata；logical kind 与 native placement 独立保存。
 struct ShaderParameterSetLayoutEntryVulkan {
     uint32_t Binding{0};
     shader::ShaderBindingKind LogicalKind{shader::ShaderBindingKind::CBuffer};
@@ -1014,6 +1011,8 @@ struct ShaderParameterSetLayoutEntryVulkan {
     VkDescriptorType DescriptorType{VK_DESCRIPTOR_TYPE_MAX_ENUM};
     // Index into the creation-time `ResolvedVulkanLayout::ImmutableSamplers`, or `shader::kShaderNoSampler`.
     uint32_t ImmutableSamplerIndex{shader::kShaderNoSampler};
+    // 仅用于 typed buffer：本 binding 的数组元素在 parameter set 的 _texelBufferViews 中的起始下标。
+    size_t TexelBufferViewOffset{0};
 
     bool IsDynamic() const noexcept {
         return Placement == VulkanBufferDescriptorPlacement::Dynamic;
@@ -1078,9 +1077,7 @@ public:
     PipelineLayoutVulkan* _layout{nullptr};
     uint32_t _groupIndex{0};
     DescriptorSetAllocatorVulkan::Allocation _allocation;
-    vector<size_t> _bindingValueOffsets;
-    vector<std::optional<ShaderParameterValue>> _values;
-    vector<uint8_t> _dirty;
+    // 仅持有 typed buffer descriptor 引用的原生 view；普通 buffer、texture、sampler 不占此数组。
     vector<unique_ptr<BufferViewVulkan>> _texelBufferViews;
 };
 

@@ -103,6 +103,28 @@ CPU record/Submit 时间与 GPU 时间线分开解读。关闭使用 `-DRADRAY_E
 | `test_gpu_test_fixture` | `GpuTestFixture`, `GpuValidationProbe` |
 | `test_spot_light` | `SpotLight` |
 | `test_shader_parameters` | `RadRayRuntimeShaderParameters` |
+
+D3D12 descriptor table 回归由 `test_radray_render_d3d12_layout` 的 `D3D12DeviceFixture`、
+`DescriptorDirtyRangesD3D12Test` 覆盖；启用 shader compiler 时，`test_radray_render_pso_smoke` 的
+`RadRayRenderPsoSmoke.D3D12VisibilityTablesAndExplicitMirrorsDraw` 和
+`RadRayRenderPsoSmoke.D3D12DirtyArraysTextureAndSamplerDispatch` 检查真实 draw/dispatch 读回。
+`RadRayRenderPsoSmoke.VulkanImmediateDescriptorsAndDynamicOffsets` 检查 Vulkan Set 即时更新、数组部分更新、
+typed buffer view 替换与创建失败恢复，以及乱序 dynamic offsets；省略 Flush 的轮次也必须得到新值。
+GPU 验证可设置 `RADRAY_TEST_GPU_VALIDATION=1`，并以 `RADRAY_TEST_REQUIRED_BACKENDS=d3d12`
+避免缺少设备或验证层时静默跳过。
+
+descriptor 发布微基准默认禁用，不计入普通测试。先构建 Release 的
+`test_radray_render_d3d12_layout`，然后显式运行：
+
+```powershell
+build_release/_build/Release/test_radray_render_d3d12_layout.exe --gtest_filter=*DescriptorPublishBenchmark --gtest_also_run_disabled_tests --gtest_repeat=5
+```
+
+输出 scenario 0–5 分别表示单 CBV、连续 64 元素、64 元素中每隔 7 项更新、重复相同 Set、
+Vertex/Pixel 各 32 元素、显式 Vertex/Pixel 两个目标各 64 元素。
+`total_ns` 是每轮 Set 与 Flush 总耗时，`flush_ns` 单独计时 Flush；`allocation_ns` 是创建并销毁
+一个 set 的平均耗时。比较时固定配置、设备和验证层设置；此基准启用 D3D12 debug layer，GPU-based
+validation 由上述环境变量控制。基准不提交 GPU 命令，不代表 draw/dispatch 或 GPU 执行时间。
 | `test_runtime_shader_jit` | `RadRayRuntimeShaderJit` |
 | `test_application` | `RuntimeFoundation`（双后端、单/双线程窗口与原生录制） |
 | `test_radray_render_shader_artifact` | `RadRayRenderShaderArtifact` |

@@ -868,12 +868,10 @@ struct ShaderParameterSetLayoutEntryD3D12 {
 };
 
 struct ShaderParameterBindingLayoutD3D12 {
-    uint32_t DescriptorOffset{std::numeric_limits<uint32_t>::max()};
     struct DescriptorDestination {
-        uint32_t RootParameterIndex{std::numeric_limits<uint32_t>::max()};
-        uint32_t DescriptorOffset{std::numeric_limits<uint32_t>::max()};
+        uint32_t TableIndex{std::numeric_limits<uint32_t>::max()};
+        uint32_t TableLocalOffset{std::numeric_limits<uint32_t>::max()};
         uint32_t ArrayElement{std::numeric_limits<uint32_t>::max()};
-        uint32_t Reserved{0};
 
         friend bool operator==(const DescriptorDestination&, const DescriptorDestination&) noexcept = default;
     };
@@ -889,9 +887,33 @@ struct ShaderParameterBindingLayoutD3D12 {
 };
 
 struct DescriptorTableBindingD3D12 {
+    struct Range {
+        D3D12_DESCRIPTOR_RANGE_TYPE Type{D3D12_DESCRIPTOR_RANGE_TYPE_SRV};
+        uint32_t Count{0};
+        uint32_t Binding{0};
+        // UINT32_MAX names the owning parameter group; other spaces are literal.
+        uint32_t Space{std::numeric_limits<uint32_t>::max()};
+        uint32_t Offset{0};
+        D3D12_DESCRIPTOR_RANGE_FLAGS Flags{D3D12_DESCRIPTOR_RANGE_FLAG_NONE};
+        friend bool operator==(const Range&, const Range&) noexcept = default;
+    };
+    struct Slot {
+        uint32_t Offset{0};
+        uint32_t Namespace{0};
+        uint32_t Binding{0};
+        uint32_t ArrayElement{0};
+        shader::ShaderBindingKind LogicalKind{shader::ShaderBindingKind::CBuffer};
+        shader::ShaderBindingPlacement Placement{shader::ShaderBindingPlacement::Table};
+        friend bool operator==(const Slot&, const Slot&) noexcept = default;
+    };
+    D3D12_DESCRIPTOR_HEAP_TYPE HeapType{D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV};
+    D3D12_SHADER_VISIBILITY Visibility{D3D12_SHADER_VISIBILITY_ALL};
     uint32_t RootParameterIndex{std::numeric_limits<uint32_t>::max()};
-    uint32_t DescriptorOffset{0};
     uint32_t DescriptorCount{0};
+    vector<Range> Ranges;
+    vector<Slot> Slots;
+
+    bool IsStorageCompatible(const DescriptorTableBindingD3D12& other) const noexcept;
 };
 
 struct ShaderParameterGroupLayoutD3D12 {
@@ -902,12 +924,30 @@ struct ShaderParameterGroupLayoutD3D12 {
     // offsets are matched against exactly this list so a missing or duplicated offset is a reported
     // failure instead of a silent shift onto another binding's root parameter.
     vector<uint32_t> RootDescriptorOrder;
-    uint32_t ResourceDescriptorCount{0};
-    uint32_t SamplerDescriptorCount{0};
-    uint32_t ResourceTableRootParameter{std::numeric_limits<uint32_t>::max()};
-    uint32_t SamplerTableRootParameter{std::numeric_limits<uint32_t>::max()};
-    vector<DescriptorTableBindingD3D12> ResourceTables;
-    vector<DescriptorTableBindingD3D12> SamplerTables;
+    vector<DescriptorTableBindingD3D12> Tables;
+
+    bool MapTablesFrom(const ShaderParameterGroupLayoutD3D12& source, vector<uint32_t>& mapping) const noexcept;
+};
+
+struct DescriptorDirtyRangeD3D12 {
+    uint32_t Start{0};
+    uint32_t Count{0};
+    friend bool operator==(const DescriptorDirtyRangeD3D12&, const DescriptorDirtyRangeD3D12&) noexcept = default;
+};
+
+class DescriptorDirtyRangesD3D12 {
+public:
+    // The caller supplies a nonempty range contained in its table allocation.
+    void Add(uint32_t start, uint32_t count = 1) noexcept;
+    std::optional<DescriptorDirtyRangeD3D12> GetCopySpan(std::span<const uint8_t> initialized) const noexcept;
+    vector<DescriptorDirtyRangeD3D12> Ranges;
+};
+
+struct DescriptorTableStorageD3D12 {
+    CpuDescriptorHeapViewRAII Mirror;
+    GpuDescriptorHeapViewRAII Descriptors;
+    vector<uint8_t> InitializedSlots;
+    DescriptorDirtyRangesD3D12 Dirty;
 };
 
 struct PushConstantBindingD3D12 {
@@ -958,20 +998,25 @@ public:
     DeviceD3D12* _device{nullptr};
     RootSigD3D12* _layout{nullptr};
     uint32_t _groupIndex{0};
-    // 与所属组的 Entries 一一对应；第 i 项是 Entries[i] 在扁平数组 _values 和 _dirty 中的起始下标，
-    // 等于此前各 entry.Count 的累加值。数组元素下标 = _bindingValueOffsets[i] + arrayElement。
-    // i 是 Entries 的下标；偏移单位是元素个数，不是字节或 GPU descriptor 偏移。
-    // 示例（_values 与 _dirty 使用相同下标）：
-    // | entry 下标 i | Entries[i].Count | _bindingValueOffsets[i] | 占用下标区间 |
-    // |--------------|------------------|-------------------------|--------------|
-    // | 0            | 1                | 0                       | [0]          |
-    // | 1            | 3                | 1                       | [1..3]       |
-    // | 2            | 2                | 4                       | [4..5]       |
-    vector<size_t> _bindingValueOffsets;
-    vector<std::optional<ShaderParameterValue>> _values;
-    vector<uint8_t> _dirty;
-    GpuDescriptorHeapViewRAII _resourceDescriptors;
-    GpuDescriptorHeapViewRAII _samplerDescriptors;
+    // root descriptor 的 GPU 地址，与所属组的 RootDescriptorOrder 一一对应：
+    // 第 i 项对应 Entries[RootDescriptorOrder[i]]，不是原生 root parameter 下标。
+    // Set 写入 buffer GPU 地址 + BufferRange.Offset；Bind 时再加本次 dynamic offset。
+    // 创建时为 0，使用前必须 Set；descriptor table 的参数不存放在这里。
+    vector<D3D12_GPU_VIRTUAL_ADDRESS> _rootBindings;
+    vector<DescriptorTableStorageD3D12> _tables;
+    // 以下三个数组是 FlushWrites 稀疏批量复制的临时参数，长度相同，第 i 项对应同一段 dirty range。
+    // 每处理一个需要稀疏复制的 table 时重新填充，保留容量复用；不是持久的 dirty 状态。
+    // 源区间起点：该 table 的 CPU mirror 中，每段 dirty range 第一个 descriptor 的 CPU handle。
+    vector<D3D12_CPU_DESCRIPTOR_HANDLE> _copySources;
+    // 目标区间起点：该 table 的 shader-visible 区间中对应位置的 CPU handle。
+    // CopyDescriptors 的源和目标均使用 CPU handle；命令绑定 table 时才使用 GPU handle。
+    vector<D3D12_CPU_DESCRIPTOR_HANDLE> _copyDestinations;
+    // 每段复制的 descriptor 个数，同时用作源区间和目标区间长度；单位不是字节。
+    vector<UINT> _copyCounts;
+    // 跨 layout/group 绑定时，目标 group 的 table 下标 -> 本 set 的 _tables 下标。
+    // 第 i 个目标 table 使用 _tables[_tableMapping[i]] 的 GPU 区间，并绑定到目标的 root parameter。
+    // 每次跨布局绑定重新生成，容量复用；同 layout、同 group 时直接按相同下标绑定，不使用此数组。
+    vector<uint32_t> _tableMapping;
 };
 
 class GraphicsPsoD3D12 final : public GraphicsPipelineState {

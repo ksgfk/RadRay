@@ -182,8 +182,31 @@ Vulkan sampler replacement modifier。hash只覆盖sampler semantics，不覆盖
 full state 使用 Vulkan target-typed fixed-width recipe；公共 `SamplerDescriptor` 不扩张成
 D3/Vulkan static-sampler policy 的统一副本。
 
-**`Set` 只记脏值，`FlushWrites()` 才写描述符。** D3D12 把值写进预分配的 GPU 堆区间；
-Vulkan 构造 `VkWriteDescriptorSet` 数组，并按需惰性建 `VkBufferView` 承载 texel buffer。
+**D3D12 的 `Set()` 直接更新 CPU mirror，显式 `FlushWrites()` 发布 dirty descriptors，Bind 不发布。**
+set 不保存 `ShaderParameterValue`，也不维护逻辑值 dirty 或相同值缓存。重复 Set 每次都会更新 mirror，
+flush 发布最后写入的 descriptor。Buffer view 在第一个 CPU 目标创建一次，再复制到同一元素的其他
+目标；texture/sampler 从已有 CPU descriptor 复制。root descriptor 只保存 GPU 地址，绑定时加上
+传入的 dynamic offset；static sampler 不允许 Set。
+
+参数热路径信任已创建布局的 destinations，不重复扫描 table 分配与映射边界，也不检查资源的设备归属、
+usage、格式、范围、对齐和有效性。这些是调用方的前置条件；当前尚未新增独立验证层。
+保留 handle 解码、group/数组寻址和跨布局 table 映射所需的检查；`IsValid()` 仍可显式检查存储结构，
+但 Set/Flush/Bind 不调用完整扫描。原生布局创建、分配失败处理不受此简化影响。
+**Vulkan 的 Set 直接调用 `vkUpdateDescriptorSets` 更新一个数组元素。** 不保存参数值、逻辑 dirty
+或相同值缓存，不构造批量发布 scratch。`FlushWrites()` 仅保留接口兼容，合法 set 上为空操作；Bind
+不执行 descriptor 更新。Set 保留 handle/group/数组寻址、immutable sampler 禁写，以及参数值类型、
+资源非空、有效性和设备归属检查。Bind 检查 set/layout 有效性、设备归属，并通过缓存的原生 set layout
+身份确认兼容性，不逐 binding 重扫结构。资源 usage、view 用途、范围、格式、对齐等详细语义仍由调用方
+保证；不增加 required 元素完整性状态或恢复值缓存。
+typed buffer 在 Set 时创建原生 `VkBufferView`，成功更新 descriptor 后替换旧 view；set 只为 typed
+buffer 元素持有这些 view，不为其他参数分配值存储。原生创建失败返回 false，原 descriptor/view
+保持不变。调用方须在 Set 替换或销毁前完成旧 descriptor 和 view 的 GPU 使用；同步边界现在是 Set，
+不能延迟到兼容 Flush。D3D12 的显式发布边界保持不变。
+
+D3D12 每个 table 独立合并相邻或重叠的 dirty ranges。单区间用 `CopyDescriptorsSimple`，稀疏多区间
+用一次 `CopyDescriptors`；覆盖率至少 50% 或超过 16 段时，仅在首尾跨度内所有 CPU 槽位均已初始化
+的条件下复制整个跨度。显式 table 的空洞、未写元素不生成臆测的 null descriptor，也不能作为复制源。
+Set 允许增量初始化，flush 只发布已写入的槽位；调用方必须在 shader 实际访问前写入所需元素。Bind 不隐式 flush。
 
 `ShaderDescriptor` 这类喂给 RHI 的资源描述仍属于 render 层。compiler-owned metadata 不能让 RHI 反向
 依赖 compiler client。schema 8 declaration `TypeIndex` 只连接 CPU payload schema，不进入 resolved
@@ -223,14 +246,19 @@ layout 保存。push metadata 保存 root parameter 索引及 `Num32BitValues`�
 destinations。`BindShaderParameterSet`的group index保留，因为它仍选择D3 register space/Vulkan set；
 这不要求handle公开group。
 
-D3D12 与 Vulkan 的 `BindShaderParameterSet` 每次调用都执行参数校验与 native 绑定，不缓存参数组的上次绑定状态。
+D3D12 与 Vulkan 的 `BindShaderParameterSet` 每次调用都执行 native 绑定，不缓存参数组的上次绑定状态。
+D3D12 完成 table 映射后直接绑定 GPU 区间，再按传入的 dynamic offsets 写 root descriptors；
+不建立临时 root 写入列表，也不保证无效输入下的整次绑定原子性。
+同 layout/group 直接使用 table 对应关系；跨 layout/group 按 heap 类型、visibility、数量、range 布局与
+flags、active 槽位的 namespace/binding/array element/kind/placement 建立一一对应，忽略 root parameter
+index 与所属 group 的 space 数字。table 顺序可以不同，重复签名按出现顺序配对；不兼容时拒绝绑定，
+不自动重新排列 descriptors。非所属 group 的 range space 仍按原值比较。
 
-`ShaderParameterDynamicOffset`使用`BindingHandle + Offset`，不再携带裸binding number。两个后端都
-按 resolved order 为每个 slot 反查 caller 值：D3 走 group 的 root descriptor order，Vulkan 走
-`DynamicOffsetOrder`。错误layout/group/handle、duplicate/missing offset与未对齐offset会被
-报告并失败；缺一个或给重复的都不能变成一次静默移位，否则后面每个 dynamic buffer 都会拿到别人的
-offset。因此一个 group 里每个 root descriptor / dynamic descriptor 都要恰好一个 offset，两个后端
-接受同一组输入。
+`ShaderParameterDynamicOffset` 使用 `BindingHandle + Offset`，不携带裸 binding number。
+D3D12 按传入顺序解析目标声明并查找源 root 地址；不检查 offset 的重复、缺失、范围、对齐或 root 是否
+已经 Set。调用方必须给每个 root descriptor 恰好一个合法 offset，并在使用前 Set。Vulkan 将传入的 offsets 按
+`DynamicOffsetOrder` 排列后交给原生绑定，同样只保留定位目标槽位的检查；调用方负责完整性、唯一性
+和有效范围。合法输入可用于两个后端。
 
 D3 root descriptor 的地址是 buffer GPU VA + bound range offset + dynamic offset，authored root CBV
 与 Implicit modifier 生成的 root descriptor 走同一条路径并记同一种 destination，所以同一个
@@ -262,6 +290,19 @@ D3D12 分两套：`CpuDescriptorAllocator` 是分页堆，每页用 `D3D12MA::Vi
 Sampler 堆使用 D3D12 允许的完整 shader-visible 容量，容纳多视图、多 flight 同时持有的 parameter sets。
 `CmdListD3D12::Begin` 时把两个 GPU 堆 `SetDescriptorHeaps`（copy 队列除外）。
 `DescriptorHeapViewRAII` 负责归还。
+
+D3D12 外层 parameter group 对应 HLSL register space；内部 descriptor table 是存储、发布和绑定单位。
+Implicit 路径在每个 group 内按 `(heap 类型, MapShaderStages(entry.Stages))` 拆表：仅 Vertex/Pixel
+分别映射到 VERTEX/PIXEL，Compute 和合法多阶段组合映射到 ALL；ALL 不拆成多个阶段副本。
+按 canonical entries 首次出现的键决定 table 顺序，内部按 Count 紧密排列，每个 binding 生成一个 range。
+CBV/SRV/UAV 可同表，sampler 单独分表；每个 table 消耗一个 root DWORD，拆表后超出 64 DWORD 则失败。
+显式 carrier 的 table 划分、visibility、range offsets/flags 保持作者原样，不套用 Implicit 分组规则。
+
+parameter set 创建时，每个 table 同时分配等长的连续 CPU mirror 和连续 GPU 区间；不同 table 区间
+不保证相邻。binding destinations 使用 group 内 TableIndex、table 内 offset 和 array element，允许
+一对多映射；root descriptor/static sampler 不占这些区间。分配失败通过 RAII 回收已成功的区间。
+GPU 区间随 set 持有，不为每次绑定生成快照。调用方负责 fence 同步：不得更新或回收仍可能被 GPU
+引用的区间，并需保证资源、layout 与 set 的生命周期覆盖使用期。CPU mirror 本身不解决在途覆盖问题。
 
 Vulkan 侧 `DescriptorSetLayoutCacheVulkan` 按 key 去重 layout，`DescriptorSetAllocatorVulkan`
 按 `{layout, poolSizes}` 在页（= 一个 `VkDescriptorPool`）上分配。

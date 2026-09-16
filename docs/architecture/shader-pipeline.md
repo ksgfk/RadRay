@@ -92,6 +92,9 @@ IA/deny flags 等 D3-only topology 不生成 Vulkan 伪字段。ordinary graphic
 metadata 生成 implicit descriptor tables；SPIR-V 使用 ordinary descriptors。compiler 不生成公共
 默认 policy，也不因 SPIR-V-only request 发布隐藏 DXIL result。无 RS 不禁止后续 Vulkan dynamic
 descriptor 或 D3 implicit root descriptor modifier。
+Implicit D3 table 拓扑由 resolved bindings 的 heap 类型和原生 visibility 确定性派生；显式 carrier
+仍是原生 Root Signature 的唯一权威。分组、CPU mirror 与发布规则见 [RHI 与后端](render-rhi.md#描述符分配)，
+不新增 artifact wire 字段或另一套 resolved layout hash。
 
 ## Artifact wire
 
