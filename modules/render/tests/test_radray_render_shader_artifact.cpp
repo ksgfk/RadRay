@@ -488,19 +488,19 @@ TEST(RadRayRenderShaderArtifact, DecodesEveryRawGoldenLaneWithoutCompiler) {
                                                                                         return value.Kind == test::FixtureResourceKind::RootConstant;
                                                                                     }) -
                                                                                 fixture.Bindings.begin() + rootIndex];
-                    const shader::WireRootConstantRecord& root = artifact->RootConstants()[rootIndex];
+                    const shader::WireRootConstantRecord& rootConstant = artifact->RootConstants()[rootIndex];
                     EXPECT_EQ(
-                        artifact->GetName(root.Name).value_or(std::string_view{}),
+                        artifact->GetName(rootConstant.Name).value_or(std::string_view{}),
                         expected.Name);
-                    EXPECT_EQ(root.RegisterSpace, expected.D3D12Group);
-                    EXPECT_EQ(root.Register, expected.D3D12Binding);
-                    EXPECT_EQ(root.StageMask, expected.StageMask);
-                    EXPECT_NE(root.Size, 0u);
+                    EXPECT_EQ(rootConstant.RegisterSpace, expected.D3D12Group);
+                    EXPECT_EQ(rootConstant.Register, expected.D3D12Binding);
+                    EXPECT_EQ(rootConstant.StageMask, expected.StageMask);
+                    EXPECT_NE(rootConstant.Size, 0u);
                     if (expected.PayloadType.empty()) {
-                        EXPECT_EQ(root.TypeIndex, shader::kShaderNoType);
+                        EXPECT_EQ(rootConstant.TypeIndex, shader::kShaderNoType);
                     } else {
-                        ASSERT_LT(root.TypeIndex, artifact->Types().size());
-                        const shader::WireTypeRecord& payload = artifact->Types()[root.TypeIndex];
+                        ASSERT_LT(rootConstant.TypeIndex, artifact->Types().size());
+                        const shader::WireTypeRecord& payload = artifact->Types()[rootConstant.TypeIndex];
                         EXPECT_EQ(
                             payload.Kind,
                             static_cast<uint32_t>(shader::ShaderTypeKind::Struct));
@@ -510,7 +510,7 @@ TEST(RadRayRenderShaderArtifact, DecodesEveryRawGoldenLaneWithoutCompiler) {
                             expected.PayloadType);
                     }
                     if (fixture.HasSingleSpirvPushBlock) {
-                        EXPECT_EQ(root.Flags & 1u, 1u);
+                        EXPECT_EQ(rootConstant.Flags & 1u, 1u);
                     }
                 }
             }

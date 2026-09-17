@@ -58,7 +58,7 @@ private:
         bool Failed{false};
         uint64_t Identity{0};
         ShaderJitArtifact Artifact{};
-        unordered_map<RecipeKey, render::ResolvedLayoutHash, RecipeKeyHash> ResolvedRecipes;
+        unordered_map<RecipeKey, render::ResolvedLayoutHash, RecipeKeyHash> ResolvedRecipes{};
     };
 
     /// program/layout 身份: artifact 身份 + 当前 backend 的 canonical resolved layout hash。

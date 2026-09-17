@@ -484,7 +484,7 @@ static LRESULT CALLBACK _RadrayWin32WindowProc(HWND hWnd, UINT uMsg, WPARAM wPar
         }
         case WM_MOUSEHWHEEL: {
             auto window = std::bit_cast<Win32Window*>(::GetProp(hWnd, RADRAY_WIN32_WINDOW_PROP));
-            if (window) window->EventScroll()(-float(GET_WHEEL_DELTA_WPARAM(wParam)) / float(WHEEL_DELTA), 0);
+            if (window) window->EventScroll()(-float(GET_WHEEL_DELTA_WPARAM(wParam)) / float(WHEEL_DELTA), 0.0f);
             return 0;
         }
         case WM_MOUSEWHEEL: {
@@ -492,7 +492,7 @@ static LRESULT CALLBACK _RadrayWin32WindowProc(HWND hWnd, UINT uMsg, WPARAM wPar
             if (window) {
                 int delta = GET_WHEEL_DELTA_WPARAM(wParam);
                 window->_eventMouseWheel(delta);
-                window->EventScroll()(0, float(delta) / float(WHEEL_DELTA));
+                window->EventScroll()(0.0f, float(delta) / float(WHEEL_DELTA));
             }
             return 0;
         }

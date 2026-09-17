@@ -715,7 +715,7 @@ void CSMain(uint3 id : SV_DispatchThreadID) { Output[0] = Input[0]; }
     const auto contract = jit.DiscoverContractHash("cache_layout.hlsl", source, target);
     ASSERT_TRUE(contract);
     auto compiled = jit.Compile(shader::CompileVariantRequest{
-                                    .SourceName = "cache_layout.hlsl", .RootSource = source, .Targets = static_cast<shader::ShaderTargetMask>(shader::ToTargetMask(target)), .ExpectedContract = *contract},
+                                    .SourceName = "cache_layout.hlsl", .RootSource = source, .Defines = {}, .Assignments = {}, .Targets = static_cast<shader::ShaderTargetMask>(shader::ToTargetMask(target)), .ExpectedContract = *contract},
                                 target);
     ASSERT_TRUE(compiled);
     ShaderProgramCache cache{*context.Device, {}, ShaderIncludePaths()};
