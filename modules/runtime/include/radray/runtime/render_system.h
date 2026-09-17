@@ -5,7 +5,7 @@
 
 #include <radray/nullable.h>
 #include <radray/render/render_pass_registry.h>
-#include <radray/runtime/shader_program_request.h>
+#include <radray/runtime/shader_program.h>
 #include <radray/runtime_type.h>
 #include <radray/types.h>
 
@@ -13,7 +13,6 @@ namespace radray {
 
 class Application;
 class GpuSystem;
-class ShaderProgram;
 class ShaderProgramCache;
 
 /// Runtime shader/program and RHI render-pass caches. Device and flight ownership stay in GpuSystem.

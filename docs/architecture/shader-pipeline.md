@@ -1,6 +1,6 @@
 > - 适用: 维护 shader compiler client、metadata wire、artifact decoder 或 runtime JIT
 > - 权威: 本文描述 schema 8 当前 shader pipeline 契约、编译边界与设计理由；HLSL 写法见 authoring 指南
-> - 锚点: `modules/shader/include/radray/shader/shader_compiler_contract.h`, `modules/shader/include/radray/shader/shader_artifact.h`, `modules/render/include/radray/render/backend_shader_artifact.h`, `modules/render/src/backend_shader_artifact.cpp`, `modules/shader_compiler/include/radray/shader_compiler/client.h`, `modules/runtime/include/radray/runtime/shader_jit.h`, `modules/runtime/include/radray/runtime/shader_program.h`, `modules/runtime/include/radray/runtime/shader_parameters.h`, `tools/CMakeLists.txt`, `CMakePresets.json`
+> - 锚点: `modules/shader/include/radray/shader/shader_compiler_contract.h`, `modules/shader/include/radray/shader/shader_artifact.h`, `modules/render/include/radray/render/backend_shader_artifact.h`, `modules/render/src/backend_shader_artifact.cpp`, `modules/shader_compiler/include/radray/shader_compiler/client.h`, `modules/runtime/include/radray/runtime/shader_jit.h`, `modules/runtime/include/radray/runtime/shader_program.h`, `tools/CMakeLists.txt`, `CMakePresets.json`
 
 # Shader pipeline
 
@@ -168,22 +168,7 @@ cbuffer 里的 `bool`（DXIL 报 Bool 且 size 补到寄存器边界，SPIR-V �
 `RadRayDxcMetadata.CBufferTypePayloadPinsScalarKindShapeAndOffsets` 钉住两 lane 一致的部分，
 `RadRayDxcMetadata.CrossLaneTypePayloadDisagreementFailsClosed` 钉住分歧必须 fail closed。
 
-runtime 的 `ShaderParameterLayout` 是第一个生产消费者。它逐个读取 CBuffer binding 自带的 owner，
-不再扫描“未被引用的 root”、按数量或发射位置配对。每个 leaf 的 canonical identity 是
-`Binding.Member.Path`；struct array 的 element 仍由 setter 的 `element` 参数选择，不写进 path。
-全 program 唯一的 leaf name 可作简写，重复 leaf 只令简写 ambiguous，不阻止 layout 创建；
-`Find` 先匹配 exact canonical/resource name，再匹配非 ambiguous 简写。push/root constant 不进入
-CPU buffer/parameter 表，pure-push artifact 因而得到合法空 layout。
-
-`ShaderParameterStorage` 的 typed setter 在 kind/size/element 不匹配或 ambiguous lookup 时不修改
-目标 bytes。非 struct 元素的数组（`float4 Foo[4]`）现在按元素类型暴露：layout 记为
-`ShaderParameterKind::Vector`、`ElementCount` 为 4，`SetFloat4(name, value, element)` 直接写第
-`element` 项，`SetRaw` 反而被拒绝。
-
-`ShaderParameterStorage` 提供按名写 blob 的路径。
-Material 的 canonical storage 是一段 GPU 布局 `byte[]`，长度取自 technique primary declaration anchor
-选中的 cbuffer size，由调用方按已验证的 GPU 布局写入（见 [render-framework](render-framework.md)）。
-两条路径写的是同一块 bytes，参数查找仍遵守上述完整路径与唯一叶名规则。
+运行时不再构建按名参数布局或提供参数存储与 setter；调用方负责按实际 GPU 布局准备常量数据。
 
 ## Target layout resolution
 
@@ -206,7 +191,8 @@ sampler recipes、唯一 active push block、actual stage flags 与 Vulkan dynam
 native 创建顺序是 samplers -> descriptor set layouts -> `VkPipelineLayout`，backend layout 保持
 sampler/set-layout 引用。`ResolvedD3D12Layout` 保存 Explicit carrier 或 Implicit canonical topology、
 Table/RootDescriptor destinations、RootConstants/static samplers 与 visibility fan-out。不存在公共
-native layout descriptor 或 global native layout cache。
+native layout descriptor 或进程级 native layout cache。native 布局在设备内复用，
+包装和名称映射仍归各 artifact，详见 [RHI 布局缓存](render-rhi.md#native-pipelinelayout-缓存)。
 
 ## Runtime JIT
 
@@ -222,6 +208,8 @@ include path list 是显式构造参数，无 include 时显式传空数组；JI
 绝对化或存在性检查，相对路径在调用时按进程 CWD 解析。需要切换 include 配置时新建 JIT。
 compiler client 的结果保留 status 与 diagnostics，runtime JIT 提供无状态的 optional convenience
 结果，不保存可变的 LastDiagnostics。这样 const 编译调用不依赖上一请求遗留的错误状态。
+`Client` 构造时探测一次已加载库的 ABI、availability 与 toolchain identity；后续查询只读取保存结果，
+不再创建 compiler 对象。实际 discovery/compile 仍为每次操作获取 compiler；切换库或重试初始化需要新建 client。
 
 JIT 在 request 不包含 target、contract drift、非法 assignment、损坏 metadata 或 toolchain
 identity 不匹配时直接失败，不改请求去尝试另一 lane，也不调用 runtime reflection 或第二套
@@ -229,8 +217,8 @@ identity 不匹配时直接失败，不改请求去尝试另一 lane，也不调
 readback、14 个正式 fixture 的 case report 和 metadata corruption negative path；其中包括
 shared CBuffer payload、direct+nested root owner、多个 DXIL root constants 与 SPIR-V push block。
 
-`RenderSystem` 从 `ApplicationRuntimeDescriptor::ShaderSourceRoot/ShaderIncludePaths` 构造 JIT，并只
-提供 `GetOrCreateShaderProgram(const ShaderProgramRequest&)`。request 显式携带 source compile input
+`RenderSystem` 从 `ApplicationRuntimeDescriptor::ShaderSourceRoot/ShaderIncludePaths` 构造 JIT，
+源码入口为 `GetOrCreateShaderProgram(const ShaderProgramRequest&)`。request 显式携带 source compile input
 （logical source 与 structured `Defines`）、keyword assignments、完整 `CompilePolicy` 与
 `ShaderProgramLayoutRecipe`；discovery 与 compile 从同一 request 获得完整 compile inputs，不能
 一侧使用 default policy。
@@ -241,6 +229,18 @@ toolchain，不含 layout recipe。program/layout key 由 artifact identity 加 
 不进入 key。失败结果按同一完整 key 缓存。一个 program 仍拥有一个 concrete Variant 的 artifact、
 resolved/native layout、stage shaders、参数索引与 group recipe；不拥有 PSO cache，也不增加 global native layout cache。
 JIT 关闭时这条源码请求明确返回空，不影响 runtime 构造。
+
+每个 compiler artifact 保存 current-backend recipe 到 resolved layout hash 的已验证映射。recipe key
+按 selector 排序、完整字段判等，保留 modifier 值及 immutable sampler 的完整 wire 状态；重复 selector
+直接拒绝。相同 recipe、原始顺序变化或仅非当前后端字段变化命中时，不重复解码和解析布局。
+新 recipe 通过 `PrepareBackendShaderArtifact` 完成一次 CPU 校验与解析；若 resolved hash 已存在则复用
+program，否则把 prepared 数据移动给 native 创建入口，避免首次创建时再解码、解析一次。
+source revision 改变产生新的 artifact record，不能沿用旧 revision 的 recipe 映射。
+
+预编译入口接收 bytes、expected GPU artifact identity 和 recipe。快速命中必须同时匹配已验证的完整
+bytes、expected identity 和 current-backend recipe，不能仅信任调用方给出的 hash 或内存地址。
+新字节、身份或 recipe 仍走校验；首次创建也消费 prepared 数据。预编译 program 仍使用独立列表管理。
+
 
 command binding 延续薄公共操作，但 identity 来自 resolved layout：
 `ShaderParameterDynamicOffset` 携带 `BindingHandle + Offset`。D3 root destination 提交 base GPU VA +

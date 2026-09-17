@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 
+#include <type_traits>
+
 #include <filesystem>
 #include <fstream>
 #include <chrono>
@@ -14,6 +16,10 @@
 // 因为 explicit carrier、static sampler 与 root descriptor 的 offset 语义只有在
 // D3D12SerializeVersionedRootSignature / CreateRootSignature / 真 dispatch 之后才算成立。
 #if defined(RADRAY_ENABLE_D3D12)
+#include "d3d12/pipeline_layout_cache_d3d12.h"
+
+static_assert(std::has_virtual_destructor_v<radray::render::d3d12::PipelineLayoutCacheD3D12>);
+static_assert(std::has_virtual_destructor_v<radray::render::d3d12::CachedPipelineLayoutD3D12>);
 
 namespace radray::render {
 namespace {
@@ -1041,6 +1047,88 @@ TEST_F(D3D12DeviceFixture, PushHandleWritesRootConstantsAndRejectsMisuse) {
     readback->InvalidateMappedRange(BufferRange{0, sizeof(uint32_t)});
     EXPECT_EQ(*static_cast<const uint32_t*>(mapped), kComputeWrittenValue);
     readback->Unmap();
+}
+
+TEST_F(D3D12DeviceFixture, NativeLayoutCacheSharesRenamedWrappersAndEvictsLastUser) {
+    if (!Available) GTEST_SKIP() << "no d3d12 device";
+    ResolvedD3D12Layout desc;
+    desc.Bindings = {MakeBinding("First", shader::ShaderBindingKind::CBuffer, 0, 0)};
+    auto firstResult = Device->CreatePipelineLayout(desc);
+    ASSERT_TRUE(firstResult);
+    auto first = firstResult.Release();
+    desc.Bindings[0].Name = "Second";
+    auto secondResult = Device->CreatePipelineLayout(desc);
+    ASSERT_TRUE(secondResult);
+    auto second = secondResult.Release();
+    EXPECT_NE(first.get(), second.get());
+    EXPECT_EQ(CastD3D12Object(first.get())->GetNative(), CastD3D12Object(second.get())->GetNative());
+    EXPECT_EQ(Device->_pipelineLayoutCache->GetEntryCount(), 1u);
+    EXPECT_FALSE(first->FindBinding("Second").IsValid());
+    EXPECT_FALSE(second->FindBinding("First").IsValid());
+    auto set = Device->CreateShaderParameterSet({.Layout = second.get(), .GroupIndex = 0});
+    ASSERT_TRUE(set);
+    auto buffer = Device->CreateBuffer({.Size = 256, .Memory = MemoryType::Upload, .Usage = BufferUse::CBuffer});
+    ASSERT_TRUE(buffer);
+    const ShaderBufferBinding value{.Target = buffer.Get(), .Range = {0, 256}};
+    EXPECT_FALSE(set.Get()->Set(first->FindBinding("First"), 0, value));
+    EXPECT_TRUE(set.Get()->Set(second->FindBinding("Second"), 0, value));
+    first->Destroy();
+    first->Destroy();
+    first.reset();
+    EXPECT_TRUE(second->IsValid());
+    EXPECT_TRUE(set.Get()->FlushWrites());
+    EXPECT_EQ(Device->_pipelineLayoutCache->GetEntryCount(), 1u);
+    set = nullptr;
+    second.reset();
+    EXPECT_EQ(Device->_pipelineLayoutCache->GetEntryCount(), 0u);
+    auto recreated = Device->CreatePipelineLayout(desc);
+    ASSERT_TRUE(recreated);
+    EXPECT_EQ(Device->_pipelineLayoutCache->GetEntryCount(), 1u);
+}
+
+TEST_F(D3D12DeviceFixture, NativeLayoutCacheSeparatesBindingsAndValidatesCarrierOnHits) {
+    if (!Available) GTEST_SKIP() << "no d3d12 device";
+    ResolvedD3D12Layout desc;
+    desc.Bindings = {MakeBinding("Value", shader::ShaderBindingKind::CBuffer, 0, 0)};
+    auto table = Device->CreatePipelineLayout(desc);
+    ASSERT_TRUE(table);
+    desc.Bindings[0].Placement = shader::ShaderBindingPlacement::RootDescriptor;
+    auto root = Device->CreatePipelineLayout(desc);
+    ASSERT_TRUE(root);
+    EXPECT_NE(CastD3D12Object(table.Get())->GetNative(), CastD3D12Object(root.Get())->GetNative());
+    auto explicitDesc = ResolveFixture("shadow_static_sampler");
+    ASSERT_TRUE(explicitDesc);
+    auto authored = Device->CreatePipelineLayout(*explicitDesc);
+    ASSERT_TRUE(authored);
+    for (auto& binding : explicitDesc->Bindings) binding.Name += "Renamed";
+    auto renamed = Device->CreatePipelineLayout(*explicitDesc);
+    ASSERT_TRUE(renamed);
+    EXPECT_EQ(CastD3D12Object(authored.Get())->GetNative(), CastD3D12Object(renamed.Get())->GetNative());
+    const auto count = Device->_pipelineLayoutCache->GetEntryCount();
+    explicitDesc->Bindings[0].Binding = 1000;
+    EXPECT_FALSE(Device->CreatePipelineLayout(*explicitDesc));
+    EXPECT_EQ(Device->_pipelineLayoutCache->GetEntryCount(), count);
+}
+
+TEST_F(D3D12DeviceFixture, NativeLayoutCacheDoesNotShareAcrossDevices) {
+    if (!Available) GTEST_SKIP() << "no d3d12 device";
+    test::DeviceContext otherContext;
+    if (!test::TryCreateDevice(RenderBackend::D3D12, otherContext, true)) GTEST_SKIP() << "second device unavailable";
+    auto* other = static_cast<DeviceD3D12*>(otherContext.Device.get());
+    ResolvedD3D12Layout desc;
+    desc.Bindings = {MakeBinding("Value", shader::ShaderBindingKind::CBuffer, 0, 0)};
+    auto first = Device->CreatePipelineLayout(desc);
+    auto second = other->CreatePipelineLayout(desc);
+    ASSERT_TRUE(first);
+    ASSERT_TRUE(second);
+    EXPECT_NE(Device->_pipelineLayoutCache.get(), other->_pipelineLayoutCache.get());
+    EXPECT_NE(CastD3D12Object(first.Get())->_nativeLayout, CastD3D12Object(second.Get())->_nativeLayout);
+    EXPECT_EQ(Device->_pipelineLayoutCache->GetEntryCount(), 1u);
+    EXPECT_EQ(other->_pipelineLayoutCache->GetEntryCount(), 1u);
+    first = nullptr;
+    EXPECT_EQ(Device->_pipelineLayoutCache->GetEntryCount(), 0u);
+    EXPECT_EQ(other->_pipelineLayoutCache->GetEntryCount(), 1u);
+    EXPECT_TRUE(second.Get()->IsValid());
 }
 
 }  // namespace radray::render

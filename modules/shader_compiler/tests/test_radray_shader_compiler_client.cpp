@@ -1,6 +1,7 @@
 #include <radray/shader_compiler/client.h>
 
 #include <gtest/gtest.h>
+#include <cstring>
 
 #if defined(_WIN32)
 #include <radray/dynamic_library.h>
@@ -24,6 +25,7 @@ TEST(RadRayShaderCompilerClient, LoadsCanonicalLibraryAndRejectsMissingLibrary) 
 
     Client missing{"radray_missing_shader_compiler_probe"};
     EXPECT_FALSE(missing.IsAvailable());
+    EXPECT_FALSE(missing.GetToolchainIdentity());
 }
 
 TEST(RadRayShaderCompilerClient, LoadedPackageExposesMatchingAbi) {
@@ -52,6 +54,12 @@ TEST(RadRayShaderCompilerClient, LoadedPackageExposesMatchingAbi) {
     for (const uint8_t value : info.ToolchainIdentity.Bytes)
         hasToolchainIdentity |= value != 0;
     EXPECT_TRUE(hasToolchainIdentity);
+    Client client;
+    shader::Hash128 expected{};
+    std::memcpy(expected.Bytes.data(), &info.ToolchainIdentity, sizeof(expected.Bytes));
+    EXPECT_EQ(client.GetToolchainIdentity(), expected);
+    EXPECT_TRUE(client.IsAvailable());
+    EXPECT_EQ(client.GetToolchainIdentity(), expected);
 #else
     GTEST_SKIP() << "RadRay DXC fork ABI is only loadable on Windows";
 #endif

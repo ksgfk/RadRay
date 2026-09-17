@@ -104,7 +104,6 @@ CPU record/Submit 时间与 GPU 时间线分开解读。关闭使用 `-DRADRAY_E
 | `test_device_capabilities` | `TextureDescriptorValidation`, `DeviceCapabilitiesTest` |
 | `test_gpu_test_fixture` | `GpuTestFixture`, `GpuValidationProbe` |
 | `test_spot_light` | `SpotLight` |
-| `test_shader_parameters` | `RadRayRuntimeShaderParameters` |
 
 D3D12 descriptor table 回归由 `test_radray_render_d3d12_layout` 的 `D3D12DeviceFixture`、
 `DescriptorDirtyRangesD3D12Test` 覆盖；启用 shader compiler 时，`test_radray_render_pso_smoke` 的

@@ -1,7 +1,5 @@
 #include <radray/runtime/shader_program.h>
 
-#include <algorithm>
-#include <atomic>
 #include <cstdint>
 #include <utility>
 
@@ -9,13 +7,6 @@
 
 namespace radray {
 namespace {
-
-uint64_t AllocateProgramGeneration() noexcept {
-    static std::atomic<uint64_t> next{1};
-    const auto result = next.fetch_add(1, std::memory_order_relaxed);
-    if (result == 0) RADRAY_ABORT("Shader program identity exhausted");
-    return result;
-}
 
 std::optional<std::pair<string, std::span<const byte>>> FindStage(
     const shader::ShaderArtifactView& artifact,
@@ -54,13 +45,6 @@ Nullable<unique_ptr<ShaderProgram>> ShaderProgram::Create(
         RADRAY_ERR_LOG("ShaderProgram::Create requires a device and pipeline layout");
         return nullptr;
     }
-    std::optional<ShaderParameterLayout> parameterLayout =
-        ShaderParameterLayout::Create(artifact);
-    if (!parameterLayout.has_value()) {
-        RADRAY_ERR_LOG("ShaderProgram::Create could not build the parameter type-tree layout");
-        return nullptr;
-    }
-
     const shader::ShaderArtifactView& generic = artifact.Generic();
     const auto vertex = FindStage(generic, shader::ShaderStage::Vertex);
     const auto pixel = FindStage(generic, shader::ShaderStage::Pixel);
@@ -105,7 +89,6 @@ Nullable<unique_ptr<ShaderProgram>> ShaderProgram::Create(
     return make_unique<ShaderProgram>(
         device,
         std::move(artifact),
-        std::move(parameterLayout.value()),
         std::move(vertexShader),
         vertex.has_value() ? std::move(vertex->first) : string{},
         std::move(pixelShader),
@@ -117,7 +100,6 @@ Nullable<unique_ptr<ShaderProgram>> ShaderProgram::Create(
 ShaderProgram::ShaderProgram(
     render::Device* device,
     render::BackendShaderArtifact artifact,
-    ShaderParameterLayout parameterLayout,
     unique_ptr<render::Shader> vertexShader,
     string vertexEntry,
     unique_ptr<render::Shader> pixelShader,
@@ -125,15 +107,13 @@ ShaderProgram::ShaderProgram(
     unique_ptr<render::Shader> computeShader,
     string computeEntry) noexcept
     : _device(device),
-      _generation(AllocateProgramGeneration()),
       _artifact(std::move(artifact)),
       _vertexShader(std::move(vertexShader)),
       _vertexEntry(std::move(vertexEntry)),
       _pixelShader(std::move(pixelShader)),
       _pixelEntry(std::move(pixelEntry)),
       _computeShader(std::move(computeShader)),
-      _computeEntry(std::move(computeEntry)),
-      _parameterLayout(std::move(parameterLayout)) {}
+      _computeEntry(std::move(computeEntry)) {}
 
 ShaderProgram::~ShaderProgram() noexcept = default;
 
@@ -156,32 +136,6 @@ std::optional<render::ShaderEntry> ShaderProgram::GetStage(shader::ShaderStage s
 
 bool ShaderProgram::IsBufferDynamic(std::string_view declarationName) const noexcept {
     return _artifact.IsBindingDynamic(declarationName);
-}
-
-const ShaderParameterGroupRecipe& ShaderProgram::GetOrCreateParameterGroupRecipe(uint32_t group) {
-    const auto [entry, inserted] = _parameterGroupRecipes.try_emplace(group);
-    auto& recipe = entry->second;
-    if (!inserted) return recipe;
-    recipe.Group = group;
-    const auto buffers = _parameterLayout.Buffers();
-    for (uint32_t index = 0; index < buffers.size(); ++index)
-        if (buffers[index].Group == group) recipe.Buffers.push_back({index, IsBufferDynamic(buffers[index].Name)});
-    std::sort(recipe.Buffers.begin(), recipe.Buffers.end(), [&](const auto& a, const auto& b) {
-        return buffers[a.Index].BindingNumber < buffers[b.Index].BindingNumber;
-    });
-    const auto parameters = _parameterLayout.Parameters();
-    for (uint32_t index = 0; index < parameters.size(); ++index) {
-        const auto& parameter = parameters[index].Info;
-        if (parameter.Group != group) continue;
-        if (parameter.Kind == ShaderParameterKind::Texture) {
-            recipe.Textures.push_back(index);
-            recipe.TextureCount += parameter.ElementCount;
-        } else if (parameter.Kind == ShaderParameterKind::Sampler) {
-            recipe.Samplers.push_back(index);
-            recipe.SamplerCount += parameter.ElementCount;
-        }
-    }
-    return recipe;
 }
 
 }  // namespace radray

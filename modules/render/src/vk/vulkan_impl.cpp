@@ -1,4 +1,5 @@
 #include <radray/render/backend/vulkan_impl.h>
+#include "pipeline_layout_cache_vulkan.h"
 #include "../texture_support_cache.h"
 
 #if RADRAY_ENABLE_MIMALLOC
@@ -48,6 +49,17 @@ extern VkSurfaceKHR CreateMacOSMetalSurface(VkInstance instance, void* nativeHan
 #endif
 
 namespace radray::render::vulkan {
+
+void IntrusivePtrAddRef(CachedPipelineLayoutVulkan* layout) noexcept {
+    RADRAY_ASSERT(!layout->_cache->IsClosed());
+    layout->AddRef();
+}
+
+void IntrusivePtrRelease(CachedPipelineLayoutVulkan* layout) noexcept {
+    if (layout->ReleaseRef()) {
+        layout->_cache->Evict(layout);
+    }
+}
 
 static Nullable<unique_ptr<InstanceVulkanImpl>> g_vkInstance = nullptr;
 
@@ -877,6 +889,7 @@ DeviceVulkan::DeviceVulkan(
       _physicalDevice(physicalDevice),
       _device(device),
       _descriptorSetLayoutCache(this),
+      _pipelineLayoutCache(make_unique<PipelineLayoutCacheVulkan>(this)),
       _descriptorSetAllocator(this) {}
 
 DeviceVulkan::~DeviceVulkan() noexcept {
@@ -2012,7 +2025,8 @@ Nullable<unique_ptr<PipelineLayoutVulkan>> DeviceVulkan::CreatePipelineLayoutInt
         result->_dynamicEntryOrder[binding.Set].push_back(entryIndexByBinding[bindingIndex]);
     }
 
-    result->_setLayoutRefs.reserve(layout.SetCount);
+    vector<IntrusivePtr<DescriptorSetLayoutVulkan>> setLayoutRefs;
+    setLayoutRefs.reserve(layout.SetCount);
     for (uint32_t setIndex = 0; setIndex < layout.SetCount; ++setIndex) {
         auto& entries = groupEntries[setIndex];
         size_t texelViewCount = 0;
@@ -2042,34 +2056,15 @@ Nullable<unique_ptr<PipelineLayoutVulkan>> DeviceVulkan::CreatePipelineLayoutInt
             RADRAY_ERR_LOG("vk descriptor set layout cache failed for set {}", setIndex);
             return nullptr;
         }
-        result->_setLayoutRefs.push_back(std::move(setLayout));
+        setLayoutRefs.push_back(std::move(setLayout));
     }
     result->_parameterSetLayouts = std::move(groupEntries);
 
-    vector<VkDescriptorSetLayout> setLayouts;
-    setLayouts.reserve(result->_setLayoutRefs.size());
-    for (const IntrusivePtr<DescriptorSetLayoutVulkan>& setLayout : result->_setLayoutRefs) {
-        setLayouts.push_back(setLayout->Get());
-    }
-
-    VkPipelineLayoutCreateInfo nativeDesc{};
-    nativeDesc.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    nativeDesc.setLayoutCount = static_cast<uint32_t>(setLayouts.size());
-    nativeDesc.pSetLayouts = setLayouts.empty() ? nullptr : setLayouts.data();
-    nativeDesc.pushConstantRangeCount = result->_pushConstantRange.has_value() ? 1 : 0;
-    nativeDesc.pPushConstantRanges = result->_pushConstantRange.has_value()
-                                         ? &result->_pushConstantRange.value()
-                                         : nullptr;
-
-    if (auto vr = _ftb.vkCreatePipelineLayout(
-            _device,
-            &nativeDesc,
-            GetAllocationCallbacks(),
-            &result->_layout);
-        vr != VK_SUCCESS) {
-        RADRAY_ERR_LOG("vkCreatePipelineLayout failed: {}", vr);
-        return nullptr;
-    }
+    const std::span<const VkPushConstantRange> pushRanges = result->_pushConstantRange.has_value()
+                                                                ? std::span<const VkPushConstantRange>{&result->_pushConstantRange.value(), 1}
+                                                                : std::span<const VkPushConstantRange>{};
+    result->_nativeLayout = _pipelineLayoutCache->GetOrCreate(setLayoutRefs, pushRanges);
+    if (!result->_nativeLayout) return nullptr;
     return result;
 }
 
@@ -2136,7 +2131,7 @@ Nullable<unique_ptr<ShaderParameterSet>> DeviceVulkan::CreateShaderParameterSet(
     }
     result->_texelBufferViews.resize(texelViewCount);
 
-    const VkDescriptorSetLayout setLayout = layout->_setLayoutRefs[desc.GroupIndex]->Get();
+    const VkDescriptorSetLayout setLayout = layout->GetSetLayouts()[desc.GroupIndex]->Get();
     const auto allocation = _descriptorSetAllocator.Allocate(
         DescriptorSetAllocatorVulkan::Request{setLayout, poolSizes});
     if (!allocation.has_value()) {
@@ -2541,7 +2536,7 @@ Nullable<unique_ptr<GraphicsPipelineState>> DeviceVulkan::CreateGraphicsPipeline
     createInfo.pDepthStencilState = &depthStencilInfo;
     createInfo.pColorBlendState = &blendInfo;
     createInfo.pDynamicState = &dynStateInfo;
-    createInfo.layout = rs->_layout;
+    createInfo.layout = rs->GetNative();
     createInfo.renderPass = renderPass->_renderPass;
     createInfo.subpass = 0;
     createInfo.basePipelineHandle = VK_NULL_HANDLE;
@@ -2567,7 +2562,7 @@ Nullable<unique_ptr<ComputePipelineState>> DeviceVulkan::CreateComputePipelineSt
     VkComputePipelineCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
     createInfo.stage = stageInfo;
-    createInfo.layout = rs->_layout;
+    createInfo.layout = rs->GetNative();
     VkPipeline pipeline = VK_NULL_HANDLE;
     if (auto vr = _ftb.vkCreateComputePipelines(_device, VK_NULL_HANDLE, 1, &createInfo, this->GetAllocationCallbacks(), &pipeline);
         vr != VK_SUCCESS) {
@@ -2884,6 +2879,7 @@ void DeviceVulkan::SetObjectName(std::string_view name, VkObjectType type, void*
 
 void DeviceVulkan::DestroyImpl() noexcept {
     _descriptorSetAllocator.Clear();
+    _pipelineLayoutCache.reset();
     _descriptorSetLayoutCache.Destroy();
     _samplerCache.clear();
     _vma.reset();
@@ -4548,9 +4544,9 @@ static bool BindShaderParameterSetVulkan(
         RADRAY_ERR_LOG("vk descriptor binding requires a live local layout and parameter set");
         return false;
     }
-    if (groupIndex >= destinationLayout->_setLayoutRefs.size() ||
-        set->_groupIndex >= set->_layout->_setLayoutRefs.size() ||
-        destinationLayout->_setLayoutRefs[groupIndex].Get() != set->_layout->_setLayoutRefs[set->_groupIndex].Get()) {
+    if (groupIndex >= destinationLayout->GetSetLayouts().size() ||
+        set->_groupIndex >= set->_layout->GetSetLayouts().size() ||
+        destinationLayout->GetSetLayouts()[groupIndex].Get() != set->_layout->GetSetLayouts()[set->_groupIndex].Get()) {
         RADRAY_ERR_LOG("vk parameter set layout is incompatible with the target group");
         return false;
     }
@@ -4587,7 +4583,7 @@ static bool BindShaderParameterSetVulkan(
     device->_ftb.vkCmdBindDescriptorSets(
         commandBuffer->_cmdBuffer,
         bindPoint,
-        destinationLayout->_layout,
+        destinationLayout->GetNative(),
         groupIndex,
         1,
         &set->_allocation.Set,
@@ -4663,7 +4659,7 @@ static bool SetPushConstantsVulkan(
 
     device->_ftb.vkCmdPushConstants(
         commandBuffer->_cmdBuffer,
-        boundLayout->_layout,
+        boundLayout->GetNative(),
         range.stageFlags,
         range.offset,
         range.size,
@@ -5697,8 +5693,17 @@ PipelineLayoutVulkan::~PipelineLayoutVulkan() noexcept {
     DestroyImpl();
 }
 
+VkPipelineLayout PipelineLayoutVulkan::GetNative() const noexcept {
+    return _nativeLayout ? _nativeLayout->Layout : VK_NULL_HANDLE;
+}
+
+std::span<const IntrusivePtr<DescriptorSetLayoutVulkan>> PipelineLayoutVulkan::GetSetLayouts() const noexcept {
+    if (!_nativeLayout) return {};
+    return _nativeLayout->SetLayouts;
+}
+
 bool PipelineLayoutVulkan::IsValid() const noexcept {
-    return _device != nullptr && _layout != VK_NULL_HANDLE;
+    return _device != nullptr && _nativeLayout.HasValue();
 }
 
 void PipelineLayoutVulkan::Destroy() noexcept {
@@ -5707,7 +5712,7 @@ void PipelineLayoutVulkan::Destroy() noexcept {
 
 void PipelineLayoutVulkan::SetDebugName(std::string_view name) noexcept {
     if (IsValid()) {
-        _device->SetObjectName(name, _layout);
+        _device->SetObjectName(name, GetNative());
     }
 }
 
@@ -5728,16 +5733,7 @@ BindingHandle PipelineLayoutVulkan::FindBinding(std::string_view name) const noe
 }
 
 void PipelineLayoutVulkan::DestroyImpl() noexcept {
-    if (_device != nullptr) {
-        if (_layout != VK_NULL_HANDLE) {
-            _device->_ftb.vkDestroyPipelineLayout(
-                _device->_device,
-                _layout,
-                _device->GetAllocationCallbacks());
-        }
-    }
-    _layout = VK_NULL_HANDLE;
-    _setLayoutRefs.clear();
+    _nativeLayout.Reset();
     _parameterSetLayouts.clear();
     _dynamicEntryOrder.clear();
     _bindingNames.clear();

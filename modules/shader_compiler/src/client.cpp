@@ -259,32 +259,30 @@ bool CopyForkLane(
 
 }  // namespace
 
-Client::Client(std::string_view compilerLibraryName) noexcept : _compilerLibrary(compilerLibraryName) {}
-
-bool Client::IsAvailable() const noexcept {
+Client::Client(std::string_view compilerLibraryName) noexcept : _compilerLibrary(compilerLibraryName) {
     ComPtr<shader::IRadRayDxcCompiler> compiler;
     vector<CompileDiagnostic> diagnostics;
-    if (!_compilerLibrary.IsValid()) return false;
-    if (AcquireForkCompiler(_compilerLibrary, compiler, &diagnostics)) return true;
-    for (const auto& diagnostic : diagnostics) {
-        RADRAY_ERR_LOG("shader compiler unavailable: {}, {}", diagnostic.Code, diagnostic.Message);
-    }
-    return false;
-}
-
-std::optional<shader::Hash128> Client::GetToolchainIdentity() const noexcept {
-    ComPtr<shader::IRadRayDxcCompiler> compiler;
-    if (!_compilerLibrary.IsValid() || !AcquireForkCompiler(_compilerLibrary, compiler)) {
-        return std::nullopt;
+    if (!_compilerLibrary.IsValid()) return;
+    if (!AcquireForkCompiler(_compilerLibrary, compiler, &diagnostics)) {
+        for (const auto& diagnostic : diagnostics) {
+            RADRAY_ERR_LOG("shader compiler unavailable: {}, {}", diagnostic.Code, diagnostic.Message);
+        }
+        return;
     }
     shader::RadRayDxcAbiInfo info{};
-    if (FAILED(compiler->GetAbiInfo(&info))) {
-        return std::nullopt;
-    }
+    if (FAILED(compiler->GetAbiInfo(&info))) return;
     shader::Hash128 identity{};
     static_assert(sizeof(info.ToolchainIdentity) == sizeof(identity.Bytes));
     std::memcpy(identity.Bytes.data(), &info.ToolchainIdentity, sizeof(identity.Bytes));
-    return identity;
+    _toolchainIdentity = identity;
+}
+
+bool Client::IsAvailable() const noexcept {
+    return _toolchainIdentity.has_value();
+}
+
+std::optional<shader::Hash128> Client::GetToolchainIdentity() const noexcept {
+    return _toolchainIdentity;
 }
 
 DiscoveryResult Client::DiscoverSourceContract(

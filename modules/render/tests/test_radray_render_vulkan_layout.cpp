@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 
+#include <type_traits>
+
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -14,6 +16,10 @@
 // 因为 immutable sampler 与 empty set hole 只有在 vkCreateDescriptorSetLayout /
 // vkCreatePipelineLayout 真正接受之后才算成立。
 #if defined(RADRAY_ENABLE_VULKAN)
+#include "vk/pipeline_layout_cache_vulkan.h"
+
+static_assert(std::has_virtual_destructor_v<radray::render::vulkan::PipelineLayoutCacheVulkan>);
+static_assert(std::has_virtual_destructor_v<radray::render::vulkan::CachedPipelineLayoutVulkan>);
 
 namespace radray::render {
 namespace {
@@ -204,7 +210,7 @@ TEST_F(VulkanDeviceFixture, LogicalKindDecidesTheNativeDescriptorType) {
     // A set hole keeps its index: dropping the empty set would renumber set 2 and silently point the
     // shader's set 2 at a different layout.
     ASSERT_EQ(native->_parameterSetLayouts.size(), 3u);
-    ASSERT_EQ(native->_setLayoutRefs.size(), 3u);
+    ASSERT_EQ(native->GetSetLayouts().size(), 3u);
     EXPECT_TRUE(native->_parameterSetLayouts[1].empty());
     ASSERT_EQ(native->_parameterSetLayouts[0].size(), 4u);
     ASSERT_EQ(native->_parameterSetLayouts[2].size(), 1u);
@@ -284,7 +290,7 @@ TEST_F(VulkanDeviceFixture, PolicySamplerBecomesAnImmutableSamplerWithEmptySetHo
     auto pipelineLayout = VkDevice->CreatePipelineLayout(layout.value());
     ASSERT_TRUE(pipelineLayout.HasValue());
     auto* native = CastVkObject(pipelineLayout.Get());
-    ASSERT_EQ(native->_setLayoutRefs.size(), 5u);
+    ASSERT_EQ(native->GetSetLayouts().size(), 5u);
     for (uint32_t setIndex = 0; setIndex < 4; ++setIndex) {
         EXPECT_TRUE(native->_parameterSetLayouts[setIndex].empty()) << setIndex;
     }
@@ -373,8 +379,8 @@ TEST_F(VulkanDeviceFixture, OrdinaryAndImmutableSamplersShareDeviceCacheInEither
         EXPECT_NE(owned.Get(), ordinary.Get());
         EXPECT_EQ(VkDevice->_samplerCache.size(), immutableFirst + 1u);
         owned.Get()->Destroy();
-        auto retainedSetLayout = CastVkObject(first.Get())->_setLayoutRefs[0];
-        EXPECT_EQ(retainedSetLayout.Get(), CastVkObject(second.Get())->_setLayoutRefs[0].Get());
+        auto retainedSetLayout = CastVkObject(first.Get())->GetSetLayouts()[0];
+        EXPECT_EQ(retainedSetLayout.Get(), CastVkObject(second.Get())->GetSetLayouts()[0].Get());
 
         auto parameterSet = VkDevice->CreateShaderParameterSet(
             ShaderParameterSetDescriptor{.Layout = second.Get(), .GroupIndex = 0});
@@ -629,6 +635,160 @@ TEST_F(VulkanDeviceFixture, PushHandleWritesPushConstantsAndRejectsMisuse) {
     const uint32_t value = *static_cast<const uint32_t*>(mapped);
     readback->Unmap();
     EXPECT_EQ(value, 0x12345678u);
+}
+
+TEST_F(VulkanDeviceFixture, NativeLayoutCacheSharesRenamedWrappersAndEvictsLastUser) {
+    if (!Available) GTEST_SKIP() << "no vulkan device";
+    ResolvedVulkanLayout desc;
+    desc.SetCount = 1;
+    desc.Bindings = {MakeBinding("First", shader::ShaderBindingKind::CBuffer, 0, 0)};
+    auto firstResult = VkDevice->CreatePipelineLayout(desc);
+    ASSERT_TRUE(firstResult);
+    auto first = firstResult.Release();
+    desc.Bindings[0].Name = "Second";
+    auto secondResult = VkDevice->CreatePipelineLayout(desc);
+    ASSERT_TRUE(secondResult);
+    auto second = secondResult.Release();
+    EXPECT_NE(first.get(), second.get());
+    EXPECT_EQ(CastVkObject(first.get())->GetNative(), CastVkObject(second.get())->GetNative());
+    EXPECT_EQ(VkDevice->_pipelineLayoutCache->GetEntryCount(), 1u);
+    auto set = VkDevice->CreateShaderParameterSet({.Layout = second.get(), .GroupIndex = 0});
+    ASSERT_TRUE(set);
+    auto buffer = VkDevice->CreateBuffer({.Size = 256, .Memory = MemoryType::Upload, .Usage = BufferUse::CBuffer});
+    ASSERT_TRUE(buffer);
+    const ShaderBufferBinding value{.Target = buffer.Get(), .Range = {0, 256}};
+    EXPECT_FALSE(set.Get()->Set(first->FindBinding("First"), 0, value));
+    EXPECT_TRUE(set.Get()->Set(second->FindBinding("Second"), 0, value));
+    EXPECT_FALSE(second->FindBinding("First").IsValid());
+    first->Destroy();
+    first->Destroy();
+    first.reset();
+    EXPECT_TRUE(second->IsValid());
+    EXPECT_TRUE(set.Get()->FlushWrites());
+    EXPECT_EQ(VkDevice->_pipelineLayoutCache->GetEntryCount(), 1u);
+    set = nullptr;
+    second.reset();
+    EXPECT_EQ(VkDevice->_pipelineLayoutCache->GetEntryCount(), 0u);
+    EXPECT_EQ(VkDevice->_descriptorSetLayoutCache.GetLayoutCount(), 0u);
+    auto recreated = VkDevice->CreatePipelineLayout(desc);
+    ASSERT_TRUE(recreated);
+}
+
+TEST_F(VulkanDeviceFixture, NativeLayoutCacheKeysNativeFactsAndSharesSetLayouts) {
+    if (!Available) GTEST_SKIP() << "no vulkan device";
+    auto desc = MakeMixedLayout();
+    auto first = VkDevice->CreatePipelineLayout(desc);
+    ASSERT_TRUE(first);
+    auto same = VkDevice->CreatePipelineLayout(desc);
+    ASSERT_TRUE(same);
+    EXPECT_EQ(CastVkObject(first.Get())->GetNative(), CastVkObject(same.Get())->GetNative());
+    auto withPush = desc;
+    withPush.PushBlock = ResolvedPushConstantBlock{.Name = "Push", .Size = 16, .Stages = ShaderStage::Vertex};
+    auto pushed = VkDevice->CreatePipelineLayout(withPush);
+    ASSERT_TRUE(pushed);
+    EXPECT_NE(CastVkObject(first.Get())->GetNative(), CastVkObject(pushed.Get())->GetNative());
+    EXPECT_EQ(CastVkObject(first.Get())->GetSetLayouts()[0], CastVkObject(pushed.Get())->GetSetLayouts()[0]);
+    withPush.PushBlock->Size = 32;
+    auto biggerPush = VkDevice->CreatePipelineLayout(withPush);
+    ASSERT_TRUE(biggerPush);
+    EXPECT_NE(CastVkObject(pushed.Get())->GetNative(), CastVkObject(biggerPush.Get())->GetNative());
+    withPush.PushBlock->Stages = ShaderStage::Pixel;
+    auto otherPushStage = VkDevice->CreatePipelineLayout(withPush);
+    ASSERT_TRUE(otherPushStage);
+    EXPECT_NE(CastVkObject(biggerPush.Get())->GetNative(), CastVkObject(otherPushStage.Get())->GetNative());
+    auto changed = desc;
+    changed.Bindings[0].Stages = ShaderStage::Vertex;
+    auto stage = VkDevice->CreatePipelineLayout(changed);
+    ASSERT_TRUE(stage);
+    EXPECT_NE(CastVkObject(first.Get())->GetNative(), CastVkObject(stage.Get())->GetNative());
+    changed = desc;
+    changed.Bindings[0].Placement = VulkanBufferDescriptorPlacement::Regular;
+    changed.DynamicOffsetOrder = {1};
+    auto regular = VkDevice->CreatePipelineLayout(changed);
+    ASSERT_TRUE(regular);
+    EXPECT_NE(CastVkObject(first.Get())->GetNative(), CastVkObject(regular.Get())->GetNative());
+    changed = desc;
+    ++changed.SetCount;
+    auto extraHole = VkDevice->CreatePipelineLayout(changed);
+    ASSERT_TRUE(extraHole);
+    EXPECT_NE(CastVkObject(first.Get())->GetNative(), CastVkObject(extraHole.Get())->GetNative());
+    const auto count = VkDevice->_pipelineLayoutCache->GetEntryCount();
+    changed = desc;
+    changed.DynamicOffsetOrder = {0};
+    EXPECT_FALSE(VkDevice->CreatePipelineLayout(changed));
+    EXPECT_EQ(VkDevice->_pipelineLayoutCache->GetEntryCount(), count);
+}
+
+TEST_F(VulkanDeviceFixture, NativeLayoutCacheIncludesImmutableSamplerState) {
+    if (!Available) GTEST_SKIP() << "no vulkan device";
+    auto desc = ResolveFixture("shadow_static_sampler");
+    ASSERT_TRUE(desc);
+    ASSERT_FALSE(desc->ImmutableSamplers.empty());
+    auto first = VkDevice->CreatePipelineLayout(*desc);
+    auto second = VkDevice->CreatePipelineLayout(*desc);
+    ASSERT_TRUE(first);
+    ASSERT_TRUE(second);
+    EXPECT_EQ(CastVkObject(first.Get())->GetNative(), CastVkObject(second.Get())->GetNative());
+    desc->ImmutableSamplers[0].MipLodBias += 1.0f;
+    auto changed = VkDevice->CreatePipelineLayout(*desc);
+    ASSERT_TRUE(changed);
+    EXPECT_NE(CastVkObject(first.Get())->GetNative(), CastVkObject(changed.Get())->GetNative());
+}
+
+TEST_F(VulkanDeviceFixture, NativeLayoutCacheRollsBackNativeFailureAndCanRetry) {
+    if (!Available) GTEST_SKIP() << "no vulkan device";
+    auto create = VkDevice->_ftb.vkCreatePipelineLayout;
+    VkDevice->_ftb.vkCreatePipelineLayout = [](::VkDevice, const VkPipelineLayoutCreateInfo*, const VkAllocationCallbacks*, VkPipelineLayout*) -> VkResult {
+        return VK_ERROR_OUT_OF_HOST_MEMORY;
+    };
+    auto failed = VkDevice->CreatePipelineLayout(MakeMixedLayout());
+    VkDevice->_ftb.vkCreatePipelineLayout = create;
+    EXPECT_FALSE(failed);
+    EXPECT_EQ(VkDevice->_pipelineLayoutCache->GetEntryCount(), 0u);
+    EXPECT_EQ(VkDevice->_descriptorSetLayoutCache.GetLayoutCount(), 0u);
+    auto retry = VkDevice->CreatePipelineLayout(MakeMixedLayout());
+    ASSERT_TRUE(retry);
+    EXPECT_EQ(VkDevice->_pipelineLayoutCache->GetEntryCount(), 1u);
+}
+
+TEST_F(VulkanDeviceFixture, NativeLayoutCacheDoesNotShareAcrossDevices) {
+    if (!Available) GTEST_SKIP() << "no vulkan device";
+    const VulkanCommandQueueDescriptor queues[]{{QueueType::Direct, 1}};
+    auto otherResult = Device::Create(DeviceDescriptor{VulkanDeviceDescriptor{.Queues = queues}});
+    ASSERT_TRUE(otherResult);
+    auto other = otherResult.Release();
+    auto* otherVk = static_cast<DeviceVulkan*>(other.get());
+    auto first = VkDevice->CreatePipelineLayout(MakeMixedLayout());
+    auto second = otherVk->CreatePipelineLayout(MakeMixedLayout());
+    ASSERT_TRUE(first);
+    ASSERT_TRUE(second);
+    EXPECT_NE(CastVkObject(first.Get())->_nativeLayout, CastVkObject(second.Get())->_nativeLayout);
+    EXPECT_EQ(VkDevice->_pipelineLayoutCache->GetEntryCount(), 1u);
+    EXPECT_EQ(otherVk->_pipelineLayoutCache->GetEntryCount(), 1u);
+    first = nullptr;
+    EXPECT_EQ(VkDevice->_pipelineLayoutCache->GetEntryCount(), 0u);
+    EXPECT_EQ(otherVk->_pipelineLayoutCache->GetEntryCount(), 1u);
+    EXPECT_TRUE(second.Get()->IsValid());
+}
+
+TEST(PipelineLayoutKeyVulkanTest, FullEqualitySeparatesFlagsAndPushRangesDespiteHashCollisions) {
+    struct CollidingHash {
+        size_t operator()(const vulkan::PipelineLayoutKeyVulkan&) const noexcept { return 0; }
+    };
+    vulkan::PipelineLayoutKeyVulkan base;
+    base.PushRanges.push_back({VK_SHADER_STAGE_VERTEX_BIT, 0, 16});
+    auto offset = base;
+    offset.PushRanges[0].Offset = 4;
+    auto flags = base;
+    flags.Flags = VK_PIPELINE_LAYOUT_CREATE_INDEPENDENT_SETS_BIT_EXT;
+    unordered_map<vulkan::PipelineLayoutKeyVulkan, uint32_t, CollidingHash> map;
+    map.emplace(base, 1);
+    map.emplace(offset, 2);
+    map.emplace(flags, 3);
+    EXPECT_EQ(map.size(), 3u);
+    EXPECT_EQ(map.at(base), 1u);
+    EXPECT_EQ(map.at(offset), 2u);
+    EXPECT_EQ(map.at(flags), 3u);
 }
 
 }  // namespace radray::render

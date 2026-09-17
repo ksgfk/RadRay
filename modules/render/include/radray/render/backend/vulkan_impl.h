@@ -12,6 +12,11 @@
 
 namespace radray::render::vulkan {
 
+class PipelineLayoutCacheVulkan;
+class CachedPipelineLayoutVulkan;
+void IntrusivePtrAddRef(CachedPipelineLayoutVulkan* layout) noexcept;
+void IntrusivePtrRelease(CachedPipelineLayoutVulkan* layout) noexcept;
+
 using DeviceFuncTable = VolkDeviceTable;
 
 class InstanceVulkanImpl;
@@ -346,6 +351,7 @@ public:
     std::array<vector<unique_ptr<QueueVulkan>>, (size_t)QueueType::MAX_COUNT> _queues;
     DeviceFuncTable _ftb;
     DescriptorSetLayoutCacheVulkan _descriptorSetLayoutCache;
+    unique_ptr<PipelineLayoutCacheVulkan> _pipelineLayoutCache;
     DescriptorSetAllocatorVulkan _descriptorSetAllocator;
     unordered_map<VulkanImmutableSamplerState, unique_ptr<SamplerVulkan>, SamplerStateHashVulkan> _samplerCache;
     VkPhysicalDeviceFeatures _feature;
@@ -1025,6 +1031,8 @@ struct ShaderParameterSetLayoutEntryVulkan {
 class PipelineLayoutVulkan final : public PipelineLayout {
 public:
     explicit PipelineLayoutVulkan(DeviceVulkan* device) noexcept;
+    VkPipelineLayout GetNative() const noexcept;
+    std::span<const IntrusivePtr<DescriptorSetLayoutVulkan>> GetSetLayouts() const noexcept;
 
     ~PipelineLayoutVulkan() noexcept override;
 
@@ -1040,8 +1048,7 @@ public:
     void DestroyImpl() noexcept;
 
     DeviceVulkan* _device;
-    VkPipelineLayout _layout{VK_NULL_HANDLE};
-    vector<IntrusivePtr<DescriptorSetLayoutVulkan>> _setLayoutRefs;
+    IntrusivePtr<CachedPipelineLayoutVulkan> _nativeLayout;
     vector<vector<ShaderParameterSetLayoutEntryVulkan>> _parameterSetLayouts;
     // Dynamic descriptor order per set, as indices into `_parameterSetLayouts[set]`. Copied from
     // `ResolvedVulkanLayout::DynamicOffsetOrder` rather than recomputed, so the order

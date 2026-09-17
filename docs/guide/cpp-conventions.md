@@ -80,6 +80,8 @@ std::optional<AppFrameTarget> AcquireWindow(...); // 值类，可能没有
 
 ## 构造与析构
 
+用于继承的基类必须声明虚析构函数，派生类显式声明析构时标记 `override`，避免通过基类销毁时遗漏派生资源。
+
 **RHI 与 window 层用「接口 + 静态 Create 工厂」**，返回 `Nullable<unique_ptr/shared_ptr>`：
 
 ```cpp
@@ -106,8 +108,8 @@ RAII 包装类的后缀是 `Scope` / `Scoped` / `Guard`，**没有 `*RAII`**：`
 
 - 每 primitive 一次的数值代码直接操作 `data()` 分量数组（`render_bounds.cpp`、`culling.cpp`、
   `MakeNormalToWorld`）；Eigen 仍用于接口类型与非热路径。Eigen 是列主序，`(r, c)` 在 `data()[c * 4 + r]`。
-- 不在每 draw 路径上构造 `string`、`fmt::format`、按名字 `Find` 参数；启动或首次遇到 program 时解析成
-  `ShaderParameterInfo*` / 索引再复用（`StaticBindingRecipe`）。
+- 不在每 draw 路径上构造 `string`、`fmt::format`、按名字查找绑定；启动或首次遇到 program 时解析成
+  绑定句柄或索引再复用。
 - 以 snapshot 索引为键的每帧查找用稠密槽位表而不是 `unordered_map`。
 - 后端 encoder 保留 PSO 重复绑定检查；VB、IB 与 shader 参数组每次合法绑定都下发原生命令，
   不保存去重缓存。具体行为见 [RHI 与后端](../architecture/render-rhi.md)。

@@ -21,6 +21,10 @@ size_t ShaderProgramCache::GetArtifactCount() const noexcept {
     std::lock_guard lock(_mutex);
     return _shaderArtifacts.size();
 }
+size_t ShaderProgramCache::GetLayoutPreparationCount() const noexcept {
+    std::lock_guard lock(_mutex);
+    return _layoutPreparationCount;
+}
 bool ShaderProgramCache::InvalidateSource(std::string_view sourceName) {
     if (!shader::IsLogicalSourceName(sourceName)) return false;
     std::lock_guard lock(_mutex);
@@ -72,7 +76,66 @@ void AddValueBytes(HashCode& hash, const T& value) noexcept {
     }
 }
 
+// In-memory key only. Scalar fields and the padding-free wire sampler record are encoded exactly;
+// invalid duplicate selectors cannot alias a previously validated request.
+template <typename T>
+void AppendRecipeValue(vector<byte>& key, const T& value) {
+    static_assert(std::is_trivially_copyable_v<T>);
+    const auto bytes = std::as_bytes(std::span{&value, 1});
+    key.insert(key.end(), bytes.begin(), bytes.end());
+}
+
+template <typename Modifier, typename AppendPayload>
+bool AppendRecipeModifiers(vector<byte>& key, const vector<Modifier>& modifiers, AppendPayload appendPayload) {
+    vector<const Modifier*> sorted;
+    sorted.reserve(modifiers.size());
+    for (const auto& modifier : modifiers) sorted.push_back(&modifier);
+    std::sort(sorted.begin(), sorted.end(), [](const auto* lhs, const auto* rhs) {
+        return lhs->Selector < rhs->Selector;
+    });
+    AppendRecipeValue(key, sorted.size());
+    for (size_t index = 0; index < sorted.size(); ++index) {
+        const auto& modifier = *sorted[index];
+        const auto& selector = modifier.Selector;
+        if (index != 0 && sorted[index - 1]->Selector.DeclarationName == selector.DeclarationName) {
+            RADRAY_ERR_LOG("shader layout recipe has duplicate selector '{}'", selector.DeclarationName);
+            return false;
+        }
+        AppendRecipeValue(key, selector.DeclarationName.size());
+        const auto name = std::as_bytes(std::span{selector.DeclarationName.data(), selector.DeclarationName.size()});
+        key.insert(key.end(), name.begin(), name.end());
+        AppendRecipeValue(key, selector.ExpectedLogicalResourceKind);
+        appendPayload(key, modifier);
+    }
+    return true;
+}
+
+std::optional<vector<byte>> MakeRecipeKey(render::RenderBackend backend, const render::ShaderProgramLayoutRecipe& recipe) {
+    vector<byte> key;
+    const auto placement = [](auto& bytes, const auto& modifier) { AppendRecipeValue(bytes, modifier.Placement); };
+    switch (backend) {
+        case render::RenderBackend::D3D12:
+            if (!AppendRecipeModifiers(key, recipe.D3D12.BufferPlacements, placement)) return std::nullopt;
+            break;
+        case render::RenderBackend::Vulkan:
+            if (!AppendRecipeModifiers(key, recipe.Vulkan.BufferDescriptors, placement) ||
+                !AppendRecipeModifiers(key, recipe.Vulkan.ImmutableSamplers, [](auto& bytes, const auto& modifier) {
+                    static_assert(sizeof(shader::WireSamplerRecord) == 64);
+                    AppendRecipeValue(bytes, modifier.State);
+                })) return std::nullopt;
+            break;
+        default: return std::nullopt;
+    }
+    return key;
+}
+
 }  // namespace
+
+size_t ShaderProgramCache::RecipeKeyHash::operator()(const RecipeKey& value) const noexcept {
+    HashCode hash;
+    for (const auto byteValue : value) hash.Add(static_cast<uint8_t>(byteValue));
+    return hash.ToHashCode();
+}
 
 size_t ShaderProgramCache::ArtifactKeyHash::operator()(const ArtifactKey& value) const noexcept {
     HashCode hash;
@@ -104,7 +167,7 @@ size_t ShaderProgramCache::ProgramKeyHash::operator()(const ProgramKey& value) c
 
 // Compiles once per artifact key and remembers the outcome, success or failure, under that key. The
 // returned record is owned by the cache; it stays valid until the cache is cleared.
-Nullable<const ShaderProgramCache::ArtifactRecord*> ShaderProgramCache::GetOrCompileArtifact(
+Nullable<ShaderProgramCache::ArtifactRecord*> ShaderProgramCache::GetOrCompileArtifact(
     const ShaderProgramRequest& request,
     ArtifactKey key) {
     const auto cached = _shaderArtifacts.find(key);
@@ -112,7 +175,7 @@ Nullable<const ShaderProgramCache::ArtifactRecord*> ShaderProgramCache::GetOrCom
         return cached->second.Failed ? nullptr : &cached->second;
     }
 
-    const auto fail = [&]() -> Nullable<const ArtifactRecord*> {
+    const auto fail = [&]() -> Nullable<ArtifactRecord*> {
         _shaderArtifacts.emplace(std::move(key), ArtifactRecord{.Failed = true});
         return nullptr;
     };
@@ -219,7 +282,7 @@ Nullable<ShaderProgram*> ShaderProgramCache::GetOrCreateShaderProgram(
         return nullptr;
     }
 
-    const Nullable<const ArtifactRecord*> artifactRecord =
+    const Nullable<ArtifactRecord*> artifactRecord =
         GetOrCompileArtifact(request, std::move(artifactKey));
     if (!artifactRecord.HasValue()) {
         return nullptr;
@@ -229,41 +292,32 @@ Nullable<ShaderProgram*> ShaderProgramCache::GetOrCreateShaderProgram(
         .Target = compiled.Target,
         .ExpectedGpuArtifact = compiled.ExpectedGpuArtifact};
 
-    // The program identity is the artifact plus the resolved layout of the active backend only, so a
-    // recipe change that the active backend does not see resolves to the same hash and reuses both
-    // the artifact and the program.
-    render::BackendShaderArtifactError artifactError;
-    const std::optional<render::ResolvedLayoutHash> layoutHash =
-        render::ResolveBackendLayoutHash(
-            _device.GetBackend(),
-            compiled.Metadata,
-            decodeOptions,
-            request.LayoutRecipe,
-            &artifactError);
-    if (!layoutHash.has_value()) {
-        RADRAY_ERR_LOG(
-            "shader program '{}' layout resolve failed: {}:{}",
-            request.SourceName,
-            static_cast<uint32_t>(artifactError.Failure),
-            static_cast<uint32_t>(artifactError.DecodeFailure));
-        return nullptr;
+    auto recipeKey = MakeRecipeKey(_device.GetBackend(), request.LayoutRecipe);
+    if (!recipeKey) return nullptr;
+    auto& recipes = artifactRecord->ResolvedRecipes;
+    if (const auto found = recipes.find(*recipeKey); found != recipes.end()) {
+        const auto cached = _shaderPrograms.find(ProgramKey{artifactRecord->Identity, found->second});
+        RADRAY_ASSERT(cached != _shaderPrograms.end());
+        return cached->second.Failed ? nullptr : cached->second.Program.get();
     }
 
-    const ProgramKey programKey{
-        .ArtifactIdentity = artifactRecord.Get()->Identity,
-        .LayoutHash = layoutHash.value()};
+    render::BackendShaderArtifactError artifactError;
+    ++_layoutPreparationCount;
+    auto prepared = render::PrepareBackendShaderArtifact(
+        _device.GetBackend(), compiled.Metadata, decodeOptions, request.LayoutRecipe, &artifactError);
+    if (!prepared) {
+        RADRAY_ERR_LOG("shader program '{}' layout resolve failed: {}:{}", request.SourceName,
+                       static_cast<uint32_t>(artifactError.Failure), static_cast<uint32_t>(artifactError.DecodeFailure));
+        return nullptr;
+    }
+    const ProgramKey programKey{artifactRecord->Identity, prepared->LayoutHash()};
+    recipes.emplace(std::move(*recipeKey), programKey.LayoutHash);
     const auto cached = _shaderPrograms.find(programKey);
     if (cached != _shaderPrograms.end()) {
         return cached->second.Failed ? nullptr : cached->second.Program.get();
     }
 
-    std::optional<render::BackendShaderArtifact> artifact =
-        render::CreateBackendShaderArtifact(
-            _device,
-            compiled.Metadata,
-            decodeOptions,
-            request.LayoutRecipe,
-            &artifactError);
+    auto artifact = render::CreateBackendShaderArtifact(_device, std::move(*prepared), &artifactError);
     if (!artifact.has_value()) {
         RADRAY_ERR_LOG(
             "shader program '{}' artifact creation failed: {}:{}",
@@ -294,19 +348,34 @@ Nullable<ShaderProgram*> ShaderProgramCache::GetOrCreateShaderProgram(
     const auto target = render::GetShaderTargetForBackend(device.GetBackend());
     if (!target) return nullptr;
     const shader::ShaderArtifactDecodeOptions options{.Target = *target, .ExpectedGpuArtifact = expectedIdentity};
+    auto recipeKey = MakeRecipeKey(device.GetBackend(), recipe);
+    if (!recipeKey) return nullptr;
+    // Caller memory may change in place. Only identical bytes, expected identity and recipe may
+    // reuse prior validation; pointer identity or the caller-supplied digest alone is insufficient.
+    for (auto& value : _precompiledPrograms) {
+        if (value.ExpectedIdentity == expectedIdentity && std::ranges::equal(value.Bytes, bytes) &&
+            std::ranges::find(value.Recipes, *recipeKey) != value.Recipes.end()) return value.Program.get();
+    }
     render::BackendShaderArtifactError error;
-    auto layout = render::ResolveBackendLayoutHash(device.GetBackend(), bytes, options, recipe, &error);
-    if (!layout) {
+    ++_layoutPreparationCount;
+    auto prepared = render::PrepareBackendShaderArtifact(device.GetBackend(), bytes, options, recipe, &error);
+    if (!prepared) {
         RADRAY_ERR_LOG("Precompiled shader layout failed: {}:{}", uint32_t(error.Failure), uint32_t(error.DecodeFailure));
         return nullptr;
     }
     for (auto& value : _precompiledPrograms) {
-        if (value.LayoutHash == *layout && std::ranges::equal(value.Bytes, bytes)) return value.Program.get();
+        if (value.ExpectedIdentity == expectedIdentity && value.LayoutHash == prepared->LayoutHash() &&
+            std::ranges::equal(value.Bytes, bytes)) {
+            value.Recipes.push_back(std::move(*recipeKey));
+            return value.Program.get();
+        }
     }
     PrecompiledProgram value;
     value.Bytes.assign(bytes.begin(), bytes.end());
-    value.LayoutHash = *layout;
-    auto artifact = render::CreateBackendShaderArtifact(device, value.Bytes, options, recipe, &error);
+    value.LayoutHash = prepared->LayoutHash();
+    value.ExpectedIdentity = expectedIdentity;
+    value.Recipes.push_back(std::move(*recipeKey));
+    auto artifact = render::CreateBackendShaderArtifact(device, std::move(*prepared), &error);
     if (!artifact) {
         RADRAY_ERR_LOG("Precompiled shader creation failed: {}:{}", uint32_t(error.Failure), uint32_t(error.DecodeFailure));
         return nullptr;

@@ -51,14 +51,14 @@ Light/Directional/Point/Spot 组件保留类型、颜色、强度、半径、阴
 
 ## Shader program 与参数
 
-ShaderProgram 保留 artifact、native pipeline layout、stage shaders、真实 entry name、参数布局与 group recipe。
+ShaderProgram 保留 artifact、native pipeline layout、stage shaders、真实 entry name。
 `GetStage(shader::ShaderStage)` 返回借用的 RHI ShaderEntry；不存在的 stage 返回空，借用内容随 program 销毁而失效。
 调用方通过 RHI device 创建和持有 graphics/compute PSO；ShaderProgram 不再提供 PSO 创建入口或缓存。
 ShaderProgramCache 的 artifact/program 复用与源码失效机制保留，详见 [Shader pipeline](shader-pipeline.md)。
 
-ShaderParameterLayout/Storage 继续提供 canonical 名称解析、类型树和按名数值写入。
+常量数据由调用方按实际 GPU 布局准备、上传和绑定。
 Material、MaterialTechnique、material_state、render_queue 与 cbuffer_view 已移除；StaticMeshComponent
-不再保存已删除的 Material 指针，参数存储也不保留其专用整块复制入口。
+不再保存已删除的 Material 指针。
 
 GpuMesh 只保存 GPU buffers、vertex/index views 与 topology，不缓存顶点输入布局。
 ResourceUploader 仍在分配和录制前校验单顶点流、stride、attribute 范围和语义唯一性，顶点流固定绑定到 slot 0。

@@ -157,13 +157,7 @@ cbuffer 里避开非方阵、`bool` 和元素大小非 16 字节整数倍的 str
 type payload 不一致，编译会 fail closed。原因见
 [shader pipeline](../architecture/shader-pipeline.md)。
 
-ShaderParameterStorage 的 canonical 名称从 CBuffer declaration 开始并包含完整成员路径，例如
-`MaterialParams.BaseColor`（示例声明名）。全 program 唯一的叶名仍可作为简写；
-两个路径以同名叶子结尾时，仅该简写不可用，必须写 qualified path，program 不会因此拒绝创建。
-struct array 的下标不写进名称，由 setter 的 `element` 参数选择。Texture/Sampler declaration 保持
-顶层 exact name；若它与 CBuffer 叶名相同，资源 exact name 优先，字段仍可用 qualified path 访问。
-
-ShaderParameterStorage 提供按名 setter；直接写 buffer 字节时，调用方必须保证数据与实际 GPU cbuffer 布局一致。
+调用方直接准备并上传常量 buffer 字节，必须保证数据与实际 GPU cbuffer 布局一致。
 固定功能状态由调用方写入 RHI pipeline descriptor。布局和参数契约见
 [Runtime shader](../architecture/render-framework.md#shader-program-与参数)。
 

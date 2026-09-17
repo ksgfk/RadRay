@@ -33,6 +33,33 @@ struct ShaderBindingInfo {
     bool Immutable{false};
 };
 
+class BackendShaderArtifact;
+
+// Owns validated CPU data. Native creation consumes it without decoding or resolving again.
+class PreparedBackendShaderArtifact {
+public:
+    PreparedBackendShaderArtifact(const PreparedBackendShaderArtifact&) = delete;
+    PreparedBackendShaderArtifact& operator=(const PreparedBackendShaderArtifact&) = delete;
+    PreparedBackendShaderArtifact(PreparedBackendShaderArtifact&&) noexcept = default;
+    PreparedBackendShaderArtifact& operator=(PreparedBackendShaderArtifact&&) noexcept = default;
+    ~PreparedBackendShaderArtifact() noexcept = default;
+
+    const ResolvedLayoutHash& LayoutHash() const noexcept;
+    shader::ShaderTarget GetTarget() const noexcept;
+
+private:
+    PreparedBackendShaderArtifact(shader::DxilShaderArtifactView artifact, ResolvedD3D12Layout layout) noexcept;
+    PreparedBackendShaderArtifact(shader::SpirvShaderArtifactView artifact, ResolvedVulkanLayout layout) noexcept;
+    std::variant<shader::DxilShaderArtifactView, shader::SpirvShaderArtifactView> _artifact;
+    std::variant<ResolvedD3D12Layout, ResolvedVulkanLayout> _layout;
+
+    friend std::optional<PreparedBackendShaderArtifact> PrepareBackendShaderArtifact(
+        RenderBackend, std::span<const byte>, const shader::ShaderArtifactDecodeOptions&,
+        const ShaderProgramLayoutRecipe&, Nullable<BackendShaderArtifactError*>) noexcept;
+    friend std::optional<BackendShaderArtifact> CreateBackendShaderArtifact(
+        Device&, PreparedBackendShaderArtifact, Nullable<BackendShaderArtifactError*>) noexcept;
+};
+
 class BackendShaderArtifact {
     using TypedArtifact = std::variant<shader::DxilShaderArtifactView, shader::SpirvShaderArtifactView>;
     using TypedResolvedLayout = std::variant<ResolvedD3D12Layout, ResolvedVulkanLayout>;
@@ -75,6 +102,9 @@ private:
         unique_ptr<PipelineLayout> layout) noexcept;
 
     friend std::optional<BackendShaderArtifact> CreateBackendShaderArtifact(
+        Device&, PreparedBackendShaderArtifact, Nullable<BackendShaderArtifactError*>) noexcept;
+
+    friend std::optional<BackendShaderArtifact> CreateBackendShaderArtifact(
         Device&,
         std::span<const byte>,
         const shader::ShaderArtifactDecodeOptions&,
@@ -88,9 +118,20 @@ std::optional<shader::ShaderTarget> GetShaderTargetForBackend(
 std::optional<ShaderBlobCategory> GetShaderBlobCategory(
     shader::ShaderTarget target) noexcept;
 
-// The canonical resolved-layout hash for one backend, without creating any native object. A program
-// cache keys on it, so it must be computable from the compiled artifact plus the recipe alone:
-// building a pipeline layout only to read its hash would create a native layout per lookup.
+std::optional<PreparedBackendShaderArtifact> PrepareBackendShaderArtifact(
+    RenderBackend backend,
+    std::span<const byte> blob,
+    const shader::ShaderArtifactDecodeOptions& options,
+    const ShaderProgramLayoutRecipe& recipe,
+    Nullable<BackendShaderArtifactError*> error = nullptr) noexcept;
+
+std::optional<BackendShaderArtifact> CreateBackendShaderArtifact(
+    Device& device,
+    PreparedBackendShaderArtifact prepared,
+    Nullable<BackendShaderArtifactError*> error = nullptr) noexcept;
+
+// Standalone hash query, without native creation. A caller that may create a native artifact
+// should use PrepareBackendShaderArtifact and consume its result instead of resolving twice.
 std::optional<ResolvedLayoutHash> ResolveBackendLayoutHash(
     RenderBackend backend,
     std::span<const byte> blob,

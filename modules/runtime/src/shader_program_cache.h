@@ -2,7 +2,6 @@
 
 #include <filesystem>
 #include <mutex>
-#include <radray/runtime/shader_program_request.h>
 #include <radray/runtime/shader_jit.h>
 #include <radray/runtime/shader_program.h>
 
@@ -19,6 +18,8 @@ public:
     size_t GetProgramCount() const noexcept;
     size_t GetArtifactCount() const noexcept;
     bool InvalidateSource(std::string_view sourceName);
+    // CPU preparation attempts, including failures; cache hits do not increment this count.
+    size_t GetLayoutPreparationCount() const noexcept;
 
 private:
     struct ProgramText {
@@ -46,12 +47,18 @@ private:
         size_t operator()(const ArtifactKey& value) const noexcept;
     };
 
+    using RecipeKey = vector<byte>;
+    struct RecipeKeyHash {
+        size_t operator()(const RecipeKey& value) const noexcept;
+    };
+
     /// 失败按完整 key 记成显式失败, 而不是留一个空 program: 空条目分不清"还没编译"和"编译失败",
     /// 会让一次失败永久污染这个 key。
     struct ArtifactRecord {
         bool Failed{false};
         uint64_t Identity{0};
         ShaderJitArtifact Artifact{};
+        unordered_map<RecipeKey, render::ResolvedLayoutHash, RecipeKeyHash> ResolvedRecipes;
     };
 
     /// program/layout 身份: artifact 身份 + 当前 backend 的 canonical resolved layout hash。
@@ -71,7 +78,7 @@ private:
         unique_ptr<ShaderProgram> Program{};
     };
 
-    Nullable<const ArtifactRecord*> GetOrCompileArtifact(
+    Nullable<ArtifactRecord*> GetOrCompileArtifact(
         const ShaderProgramRequest& request,
         ArtifactKey key);
 
@@ -85,10 +92,13 @@ private:
     struct PrecompiledProgram {
         vector<byte> Bytes;
         render::ResolvedLayoutHash LayoutHash{};
+        shader::GpuArtifactHash ExpectedIdentity{};
+        vector<RecipeKey> Recipes;
         unique_ptr<ShaderProgram> Program;
     };
     vector<PrecompiledProgram> _precompiledPrograms;
     uint64_t _nextArtifactIdentity{1};
+    size_t _layoutPreparationCount{0};
 };
 
 }  // namespace radray

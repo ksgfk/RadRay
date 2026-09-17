@@ -1,5 +1,5 @@
 # Runtime foundation tests; graph/Forward/UI tests were removed with the old renderer.
-foreach(topic application asset_database asset_slot component_rtti frame_upload gpu_system shader_parameters spot_light window_operations)
+foreach(topic application asset_database asset_slot component_rtti frame_upload gpu_system spot_light window_operations)
     radray_add_test(test_${topic} SOURCES test_${topic}.cpp LINK_LIBS radrayruntime)
 endforeach()
 target_include_directories(test_application PRIVATE "${CMAKE_SOURCE_DIR}/modules/render/tests")
@@ -8,8 +8,6 @@ target_include_directories(test_gpu_system PRIVATE "${CMAKE_SOURCE_DIR}/modules/
 radray_add_test(test_multi_window SOURCES test_multi_window.cpp LINK_LIBS radrayruntime
     DISCOVER_ARGS PROPERTIES RUN_SERIAL TRUE TIMEOUT 90)
 target_include_directories(test_multi_window PRIVATE "${CMAKE_SOURCE_DIR}/modules/render/tests")
-target_include_directories(test_shader_parameters PRIVATE "${CMAKE_SOURCE_DIR}/modules/render/tests")
-target_compile_definitions(test_shader_parameters PRIVATE RADRAY_PROJECT_DIR="${CMAKE_SOURCE_DIR}")
 
 if (RADRAY_ENABLE_SHADER_JIT)
     radray_add_test(test_runtime_shader_jit SOURCES test_runtime_shader_jit.cpp LINK_LIBS radrayruntime)

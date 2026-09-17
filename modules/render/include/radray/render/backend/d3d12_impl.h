@@ -1,5 +1,7 @@
 #pragma once
 
+#include <radray/intrusive_ptr.h>
+
 #ifdef RADRAY_ENABLE_D3D12
 
 #include <array>
@@ -14,6 +16,11 @@
 #include <radray/render/sampler_cache.h>
 
 namespace radray::render::d3d12 {
+
+class PipelineLayoutCacheD3D12;
+class CachedPipelineLayoutD3D12;
+void IntrusivePtrAddRef(CachedPipelineLayoutD3D12* layout) noexcept;
+void IntrusivePtrRelease(CachedPipelineLayoutD3D12* layout) noexcept;
 
 class DescriptorHeap;
 struct DescriptorHeapView;
@@ -391,6 +398,7 @@ public:
     unique_ptr<CpuDescriptorAllocator> _cpuSamplerAlloc;
     unique_ptr<GpuDescriptorAllocator> _gpuResHeap;
     unique_ptr<GpuDescriptorAllocator> _gpuSamplerHeap;
+    unique_ptr<PipelineLayoutCacheD3D12> _pipelineLayoutCache;
     SamplerCache _samplerCache;
     RenderDeviceCapabilities _capabilities;
     vector<std::pair<TextureSupportQuery, TextureSupport>> _textureSupportCache;
@@ -960,6 +968,7 @@ struct PushConstantBindingD3D12 {
 class RootSigD3D12 final : public PipelineLayout {
 public:
     RootSigD3D12() noexcept = default;
+    ID3D12RootSignature* GetNative() const noexcept;
     ~RootSigD3D12() noexcept override;
 
     bool IsValid() const noexcept override;
@@ -978,7 +987,7 @@ public:
     vector<BackendBindingName> _bindingNames;
     uintptr_t _bindingGeneration{0};
     vector<PushConstantBindingD3D12> _pushConstantBindings;
-    ComPtr<ID3D12RootSignature> _rootSig;
+    IntrusivePtr<CachedPipelineLayoutD3D12> _nativeLayout;
 };
 
 class ShaderParameterSetD3D12 final : public ShaderParameterSet {

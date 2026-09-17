@@ -675,12 +675,14 @@ TEST(RadRayRuntimeShaderJit, CacheUsesDeviceAndConfigurationAndRetainsProgramsAc
     const auto original = cache.GetOrCreateShaderProgram(request);
     ASSERT_TRUE(original);
     EXPECT_EQ(cache.GetOrCreateShaderProgram(request).Get(), original.Get());
+    EXPECT_EQ(cache.GetLayoutPreparationCount(), 1u);
     EXPECT_EQ(cache.GetProgramCount(), 1u);
     EXPECT_EQ(cache.GetArtifactCount(), 1u);
     ASSERT_TRUE(cache.InvalidateSource(request.SourceName));
     const auto replacement = cache.GetOrCreateShaderProgram(request);
     ASSERT_TRUE(replacement);
     EXPECT_NE(replacement.Get(), original.Get());
+    EXPECT_EQ(cache.GetLayoutPreparationCount(), 2u);
     EXPECT_EQ(cache.GetProgramCount(), 2u);
     EXPECT_EQ(cache.GetArtifactCount(), 2u);
     EXPECT_NE(original->GetPipelineLayout(), nullptr);
@@ -692,6 +694,104 @@ TEST(RadRayRuntimeShaderJit, CacheUsesDeviceAndConfigurationAndRetainsProgramsAc
     ASSERT_TRUE(cache.InvalidateSource(request.SourceName));
     EXPECT_TRUE(cache.GetOrCreateShaderProgram(request));
     EXPECT_FALSE(cache.InvalidateSource("../outside.hlsl"));
+}
+
+void RunCachedLayoutPreparationTest(render::RenderBackend backend) {
+    render::test::DeviceContext context;
+    if (!render::test::TryCreateDevice(backend, context)) GTEST_SKIP() << context.Reason;
+    ShaderJit jit{ShaderIncludePaths()};
+    ASSERT_TRUE(jit.IsAvailable());
+    const auto target = *render::GetShaderTargetForBackend(backend);
+    const auto source = CopyBytes(R"hlsl(
+#include <core/platform.hlsli>
+VK_BINDING(0, 0)
+StructuredBuffer<uint> Input : register(t0);
+VK_BINDING(1, 0)
+RWStructuredBuffer<uint> Output : register(u0);
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID) { Output[0] = Input[0]; }
+)hlsl");
+    const auto contract = jit.DiscoverContractHash("cache_layout.hlsl", source, target);
+    ASSERT_TRUE(contract);
+    auto compiled = jit.Compile(shader::CompileVariantRequest{
+                                    .SourceName = "cache_layout.hlsl", .RootSource = source, .Targets = static_cast<shader::ShaderTargetMask>(shader::ToTargetMask(target)), .ExpectedContract = *contract},
+                                target);
+    ASSERT_TRUE(compiled);
+    ShaderProgramCache cache{*context.Device, {}, ShaderIncludePaths()};
+    const auto get = [&](const render::ShaderProgramLayoutRecipe& recipe) {
+        return cache.GetOrCreateShaderProgram(compiled->Metadata, compiled->ExpectedGpuArtifact, recipe);
+    };
+    const auto original = get({});
+    ASSERT_TRUE(original);
+    EXPECT_EQ(get({}).Get(), original.Get());
+    EXPECT_EQ(cache.GetLayoutPreparationCount(), 1u);
+
+    render::ShaderProgramLayoutRecipe recipe;
+    const render::ShaderLayoutSelector input{"Input", shader::ShaderBindingKind::StructuredBuffer};
+    const render::ShaderLayoutSelector output{"Output", shader::ShaderBindingKind::RWStructuredBuffer};
+    if (backend == render::RenderBackend::D3D12) {
+        recipe.D3D12.BufferPlacements = {{input, render::D3D12BufferPlacement::Table}, {output, render::D3D12BufferPlacement::Table}};
+    } else {
+        recipe.Vulkan.BufferDescriptors = {{input, render::VulkanBufferDescriptorPlacement::Regular}, {output, render::VulkanBufferDescriptorPlacement::Regular}};
+    }
+    EXPECT_EQ(get(recipe).Get(), original.Get());
+    EXPECT_EQ(cache.GetLayoutPreparationCount(), 2u);
+    if (backend == render::RenderBackend::D3D12) {
+        std::reverse(recipe.D3D12.BufferPlacements.begin(), recipe.D3D12.BufferPlacements.end());
+        recipe.Vulkan.BufferDescriptors = {{{"Missing", shader::ShaderBindingKind::Texture}, render::VulkanBufferDescriptorPlacement::Dynamic}};
+    } else {
+        std::reverse(recipe.Vulkan.BufferDescriptors.begin(), recipe.Vulkan.BufferDescriptors.end());
+        recipe.D3D12.BufferPlacements = {{{"Missing", shader::ShaderBindingKind::Texture}, render::D3D12BufferPlacement::RootDescriptor}};
+    }
+    EXPECT_EQ(get(recipe).Get(), original.Get());
+    EXPECT_EQ(cache.GetLayoutPreparationCount(), 2u);
+    auto invalid = recipe;
+    if (backend == render::RenderBackend::D3D12) {
+        invalid.D3D12.BufferPlacements.push_back(invalid.D3D12.BufferPlacements.front());
+    } else {
+        invalid.Vulkan.BufferDescriptors.push_back(invalid.Vulkan.BufferDescriptors.front());
+    }
+    EXPECT_FALSE(get(invalid));
+    EXPECT_EQ(cache.GetLayoutPreparationCount(), 2u);
+
+    invalid = recipe;
+    if (backend == render::RenderBackend::D3D12) {
+        invalid.D3D12.BufferPlacements.front().Selector.ExpectedLogicalResourceKind = shader::ShaderBindingKind::Texture;
+        recipe.D3D12.BufferPlacements.back().Placement = render::D3D12BufferPlacement::RootDescriptor;
+    } else {
+        invalid.Vulkan.BufferDescriptors.front().Selector.ExpectedLogicalResourceKind = shader::ShaderBindingKind::Texture;
+        recipe.Vulkan.BufferDescriptors.back().Placement = render::VulkanBufferDescriptorPlacement::Dynamic;
+    }
+    EXPECT_FALSE(get(invalid));
+    const auto dynamic = get(recipe);
+    ASSERT_TRUE(dynamic);
+    EXPECT_NE(dynamic.Get(), original.Get());
+    EXPECT_TRUE(dynamic->IsBufferDynamic("Input"));
+    EXPECT_FALSE(dynamic->IsBufferDynamic("Output"));
+    const auto count = cache.GetLayoutPreparationCount();
+    EXPECT_EQ(get(recipe).Get(), dynamic.Get());
+    EXPECT_EQ(cache.GetLayoutPreparationCount(), count);
+    EXPECT_EQ(cache.GetProgramCount(), 2u);
+
+    auto wrongIdentity = compiled->ExpectedGpuArtifact;
+    wrongIdentity.Bytes[0] ^= 1;
+    EXPECT_FALSE(cache.GetOrCreateShaderProgram(compiled->Metadata, wrongIdentity, recipe));
+    const byte saved = compiled->Metadata[0];
+    compiled->Metadata[0] ^= byte{1};
+    EXPECT_FALSE(get(recipe));
+    compiled->Metadata[0] = saved;
+    const auto afterInvalid = cache.GetLayoutPreparationCount();
+    EXPECT_EQ(get(recipe).Get(), dynamic.Get());
+    EXPECT_EQ(cache.GetLayoutPreparationCount(), afterInvalid);
+}
+
+TEST(RadRayRuntimeShaderJit, CachedLayoutPreparationD3D12) {
+    RunCachedLayoutPreparationTest(render::RenderBackend::D3D12);
+}
+
+TEST(RadRayRuntimeShaderJit, CachedLayoutPreparationVulkan) {
+    RunCachedLayoutPreparationTest(render::RenderBackend::Vulkan);
 }
 
 TEST(RadRayRuntimeShaderJit, ExplicitRootSignatureD3D12) {

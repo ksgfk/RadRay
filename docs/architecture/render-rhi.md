@@ -88,6 +88,11 @@ blob 与显式 `ShaderArtifactDecodeOptions`，先要求 device backend 与 opti
 对应 typed decoder 和 backend typed layout 入口。artifact envelope target 仍由 decoder 核对；
 任一步失败都不尝试另一 target。运行时 caller 因而不包含 backend impl 头，typed concrete 入口与
 反向组合的编译失败边界仍保留。
+需要先查询布局身份时，使用 `PrepareBackendShaderArtifact` 获取拥有 decoded artifact 和 resolved layout
+的 CPU 结果；其字段私有，只能由校验入口建立。`CreateBackendShaderArtifact(Device&, prepared)` 消费
+该结果，重新核对 device target 后调用 typed native layout builder，不重复解码与解析。
+原有 blob 重载依次调用 prepare 和 native 创建；独立 hash 查询仍可使用 `ResolveBackendLayoutHash`。
+
 
 编译期开关在顶层 `CMakeLists.txt`：`RADRAY_ENABLE_D3D12`（需 WIN32）、`RADRAY_ENABLE_VULKAN`。
 `modules/render/CMakeLists.txt` 据此追加 `src/d3d12/` 或
@@ -152,7 +157,7 @@ DXIL artifact 的 serialized Root Signature range 非空时，D3D12 直接把同
 不根据 active metadata 重建作者 RS，也不接受 D3 modifier；D3 static sampler 现有 direct-consumption
 路径本身正确。range 为空时，resolver 按 active facts 生成 Implicit canonical topology，再把精确
 合法 buffer modifiers应用为root descriptors。ordinary global RS 1.0/1.1是范围；Local RS与
-directly-indexed heaps不支持。runtime不新增跨artifact/native Root Signature cache。
+directly-indexed heaps不支持。native Root Signature 由 render 的设备内缓存复用。
 
 `ResolvedVulkanLayout` 是创建 `VkPipelineLayout` 所用数据的完整权威，至少持有：
 
@@ -171,7 +176,7 @@ Vulkan Device 的 sampler 缓存以完整 `VulkanImmutableSamplerState` 为 key�
 `CreateSampler` 使用相同创建路径但不进入缓存。D3D12 继续使用普通 `SamplerCache`。
 `PipelineLayoutVulkan` 只在创建期间保留局部 sampler 句柄数组，不拥有或销毁 sampler；相同状态
 跨 layout 复用句柄，也让 descriptor set layout cache 可以复用含 immutable sampler 的相同布局。
-Device 在清理 descriptor allocator 和 set layout cache 后销毁缓存 sampler，因此 sampler 的生命周期
+Device 在清理 descriptor allocator、pipeline layout cache 和 set layout cache 后销毁缓存 sampler，因此 sampler 的生命周期
 覆盖相关 set layout、descriptor pool/set 的最后使用；这是
 [Vulkan immutable sampler 契约](https://docs.vulkan.org/refpages/latest/refpages/source/VkDescriptorSetLayoutBinding.html)
 的要求。缓存不提前淘汰 sampler，调用方仍须在销毁 Device 前完成 GPU 使用并释放其子对象。
@@ -306,8 +311,40 @@ GPU 区间随 set 持有，不为每次绑定生成快照。调用方负责 fenc
 
 Vulkan 侧 `DescriptorSetLayoutCacheVulkan` 按 key 去重 layout，`DescriptorSetAllocatorVulkan`
 按 `{layout, poolSizes}` 在页（= 一个 `VkDescriptorPool`）上分配。
-`DescriptorSetLayoutVulkan` 是 render 层里**唯一**做引用计数的对象（`IntrusivePtr`），
-被 `PipelineLayoutVulkan` 持有，按 refcount 驱逐。
+`DescriptorSetLayoutVulkan` 由 native pipeline layout 缓存条目持有，使用 `IntrusivePtr`，
+最后一个引用释放时驱逐。
+
+## Native PipelineLayout 缓存
+
+`pipeline_layout_cache.h/.cpp` 提供 `PipelineLayoutCache` 与 `CachedPipelineLayout` 公共基础设施，
+分别保存关闭状态和单线程引用计数，不通过基类指针管理所有权。
+两个后端的缓存、条目、key 和 hasher 仅定义在 `src/d3d12/pipeline_layout_cache_d3d12.h/.cpp`
+与 `src/vk/pipeline_layout_cache_vulkan.h/.cpp`，公共头不包含这些私有头。
+Device 以具体后端缓存类型的 `unique_ptr` 独占缓存，每个 RHI PipelineLayout 包装持有具体后端条目的 `IntrusivePtr`。
+公共后端头只前向声明这些具体类型及 ADL 引用计数函数；类型定义仍位于私有头。
+缓存的 `GetEntryCount`、`Evict` 保留虚接口，两个公共基类均保留虚析构；后端派生类使用 `final` 和 `override`。
+最后一次 `IntrusivePtrRelease` 通过具体后端缓存指针调用虚函数 `Evict`，去虚拟化由编译器根据类型和优化条件完成，
+不通过移除 `virtual` 或限定调用绕过虚派发。
+`BackendShaderArtifact::Layout` 仍是独占包装，名称映射、绑定句柄身份和参数组定位不共享。
+缓存命中也必须完成当前 artifact 的映射与合法性校验；BindingHandle 不可跨包装使用。
+
+D3D12 以最终 serialized Root Signature 完整字节为 key，Explicit 原样使用 carrier，
+Implicit 仍生成并序列化现有拓扑；只在未命中时调用 `CreateRootSignature`。
+不对 descriptor 数量归档，不做 carrier 版本转换或语义归一化，字节不同的等价布局可以不合并。
+Vulkan 以有序 set-layout 缓存对象身份、push ranges（stage/offset/size）和创建 flags 为 key，
+保留 empty set holes。条目持有 set-layout 引用，使 key 中的身份始终有效；immutable sampler
+继续走已有设备 sampler 缓存。两种缓存都以 hash 定位、完整 key 判等，不用 artifact identity 或
+`ResolvedLayoutHash` 代替 native 身份。
+
+缓存表管理条目分配但不占侵入式引用计数；全部操作及引用增减要求单线程，不使用锁或原子计数。
+最后一个使用者释放时从表中移除条目并销毁 native 对象；Vulkan 先销毁 pipeline layout，再释放
+set layouts。创建失败不保留条目，之后允许重试。包装 Destroy 只释放自己的引用，不能销毁其他
+包装共享的 native 对象；共享对象的 debug name 取最近一次设置的名称。
+
+调用方仍须保证 GPU 已完成使用，PSO/参数集不再借用包装，再释放布局；本缓存不实现延迟销毁。
+Device 关闭前所有外部引用必须释放，Debug 检查缓存为空。Vulkan 关闭顺序是 descriptor allocator、
+pipeline layout cache、set-layout cache、sampler cache，最后销毁 device。
+ShaderProgramCache 仍持有旧 program，因此 source invalidation 本身不会触发 native 布局释放。
 
 ## 命令录制
 

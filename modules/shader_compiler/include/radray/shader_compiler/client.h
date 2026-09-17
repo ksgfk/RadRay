@@ -19,7 +19,7 @@ public:
 
     bool IsAvailable() const noexcept;
 
-    // Identity of the loaded compiler toolchain, read from the fork's ABI info. A cache keys compiled
+    // Identity of the loaded compiler toolchain, validated once at construction. A cache keys compiled
     // artifacts on it, so it has to be observable before anything is compiled.
     std::optional<shader::Hash128> GetToolchainIdentity() const noexcept;
 
@@ -39,6 +39,7 @@ public:
 
 private:
     DynamicLibrary _compilerLibrary;
+    std::optional<shader::Hash128> _toolchainIdentity;
 };
 
 }  // namespace radray::shader_compiler

@@ -1,4 +1,5 @@
 #include <radray/render/backend/d3d12_impl.h>
+#include "pipeline_layout_cache_d3d12.h"
 #include "../texture_support_cache.h"
 
 #include <bit>
@@ -32,6 +33,17 @@
 //   == 各对象类实现 ==
 
 namespace radray::render::d3d12 {
+
+void IntrusivePtrAddRef(CachedPipelineLayoutD3D12* layout) noexcept {
+    RADRAY_ASSERT(!layout->_cache->IsClosed());
+    layout->AddRef();
+}
+
+void IntrusivePtrRelease(CachedPipelineLayoutD3D12* layout) noexcept {
+    if (layout->ReleaseRef()) {
+        layout->_cache->Evict(layout);
+    }
+}
 
 static void _CheckD3D12Result(ID3D12Device* device, HRESULT hr, std::string_view operation) noexcept {
     const HRESULT reason = device->GetDeviceRemovedReason();
@@ -661,6 +673,7 @@ DeviceD3D12::DeviceD3D12(
     _gpuResHeap = make_unique<GpuDescriptorAllocator>(_device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 1 << 16);
     _gpuSamplerHeap = make_unique<GpuDescriptorAllocator>(_device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER, D3D12_MAX_SHADER_VISIBLE_SAMPLER_HEAP_SIZE);
     _features.Init(_device.Get());
+    _pipelineLayoutCache = make_unique<PipelineLayoutCacheD3D12>(this);
 }
 
 DeviceD3D12::~DeviceD3D12() noexcept {
@@ -688,6 +701,7 @@ void DeviceD3D12::DestroyImpl() noexcept {
     _logCallback = nullptr;
     _logUserData = nullptr;
 
+    _pipelineLayoutCache.reset();
     _samplerCache.Clear();
     _gpuResHeap = nullptr;
     _gpuSamplerHeap = nullptr;
@@ -2624,20 +2638,8 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateExplicitRootSignatureInter
         BuildDescriptorTableSlotsD3D12(group);
     }
 
-    ComPtr<ID3D12RootSignature> rootSignature;
-    if (HRESULT hr = _device->CreateRootSignature(
-            0,
-            serialized.data(),
-            serialized.size(),
-            IID_PPV_ARGS(rootSignature.GetAddressOf()));
-        FAILED(hr)) {
-        RADRAY_ERR_LOG(
-            "ID3D12Device::CreateRootSignature for explicit blob failed: {} {}",
-            GetErrorName(hr),
-            hr);
-        return nullptr;
-    }
-    layout->_rootSig = std::move(rootSignature);
+    layout->_nativeLayout = _pipelineLayoutCache->GetOrCreate(serialized);
+    if (!layout->_nativeLayout) return nullptr;
     return layout;
 }
 
@@ -2951,17 +2953,8 @@ Nullable<unique_ptr<RootSigD3D12>> DeviceD3D12::CreateRootSignatureInternal(
         return nullptr;
     }
 
-    ComPtr<ID3D12RootSignature> rootSig{};
-    if (HRESULT hr = _device->CreateRootSignature(
-            0,
-            rootSigBlob->GetBufferPointer(),
-            rootSigBlob->GetBufferSize(),
-            IID_PPV_ARGS(rootSig.GetAddressOf()));
-        FAILED(hr)) {
-        RADRAY_ERR_LOG("ID3D12Device::CreateRootSignature failed: {} {}", GetErrorName(hr), hr);
-        return nullptr;
-    }
-    layout->_rootSig = std::move(rootSig);
+    layout->_nativeLayout = _pipelineLayoutCache->GetOrCreate({static_cast<const byte*>(rootSigBlob->GetBufferPointer()), rootSigBlob->GetBufferSize()});
+    if (!layout->_nativeLayout) return nullptr;
     return layout;
 }
 
@@ -3437,7 +3430,7 @@ Nullable<unique_ptr<GraphicsPipelineState>> DeviceD3D12::CreateGraphicsPipelineS
     }
     DXGI_SAMPLE_DESC sampleDesc{desc.MultiSample.Count, 0};
     D3D12_GRAPHICS_PIPELINE_STATE_DESC rawPsoDesc{};
-    rawPsoDesc.pRootSignature = CastD3D12Object(desc.PipelineLayout)->_rootSig.Get();
+    rawPsoDesc.pRootSignature = CastD3D12Object(desc.PipelineLayout)->GetNative();
     rawPsoDesc.VS = desc.VS ? CastD3D12Object(desc.VS->Target)->ToByteCode() : D3D12_SHADER_BYTECODE{};
     rawPsoDesc.PS = desc.PS ? CastD3D12Object(desc.PS->Target)->ToByteCode() : D3D12_SHADER_BYTECODE{};
     rawPsoDesc.DS = D3D12_SHADER_BYTECODE{};
@@ -3475,7 +3468,7 @@ Nullable<unique_ptr<GraphicsPipelineState>> DeviceD3D12::CreateGraphicsPipelineS
 
 Nullable<unique_ptr<ComputePipelineState>> DeviceD3D12::CreateComputePipelineState(const ComputePipelineStateDescriptor& desc) noexcept {
     D3D12_COMPUTE_PIPELINE_STATE_DESC rawPsoDesc{};
-    rawPsoDesc.pRootSignature = CastD3D12Object(desc.PipelineLayout)->_rootSig.Get();
+    rawPsoDesc.pRootSignature = CastD3D12Object(desc.PipelineLayout)->GetNative();
     rawPsoDesc.CS = CastD3D12Object(desc.CS.Target)->ToByteCode();
     rawPsoDesc.NodeMask = 0;
     rawPsoDesc.Flags = D3D12_PIPELINE_STATE_FLAG_NONE;
@@ -4542,7 +4535,7 @@ void CmdRenderPassD3D12::BindGraphicsPipelineState(GraphicsPipelineState* pso) n
         return;
     }
     if (_boundRs != ps->_layout) {
-        _cmdList->_cmdList->SetGraphicsRootSignature(ps->_layout->_rootSig.Get());
+        _cmdList->_cmdList->SetGraphicsRootSignature(ps->_layout->GetNative());
         _boundRs = ps->_layout;
     }
     _cmdList->_cmdList->SetPipelineState(ps->_pso.Get());
@@ -4813,7 +4806,7 @@ void CmdComputePassD3D12::BindComputePipelineState(ComputePipelineState* pso) no
         return;
     }
     if (_boundRs != ps->_layout) {
-        _cmdList->_cmdList->SetComputeRootSignature(ps->_layout->_rootSig.Get());
+        _cmdList->_cmdList->SetComputeRootSignature(ps->_layout->GetNative());
         _boundRs = ps->_layout;
     }
     _cmdList->_cmdList->SetPipelineState(ps->_pso.Get());
@@ -5300,12 +5293,17 @@ RootSigD3D12::~RootSigD3D12() noexcept {
     Destroy();
 }
 
+ID3D12RootSignature* RootSigD3D12::GetNative() const noexcept {
+    RADRAY_ASSERT(IsValid());
+    return _nativeLayout->RootSignature.Get();
+}
+
 bool RootSigD3D12::IsValid() const noexcept {
-    return _rootSig != nullptr;
+    return _nativeLayout.HasValue();
 }
 
 void RootSigD3D12::Destroy() noexcept {
-    _rootSig = nullptr;
+    _nativeLayout.Reset();
     _parameterGroups.clear();
     _bindingNames.clear();
     _bindingGeneration = 0;
@@ -5314,7 +5312,7 @@ void RootSigD3D12::Destroy() noexcept {
 }
 
 void RootSigD3D12::SetDebugName(std::string_view name) noexcept {
-    SetObjectName(name, _rootSig.Get());
+    if (IsValid()) SetObjectName(name, GetNative());
 }
 
 Nullable<const ShaderParameterGroupLayoutD3D12*> RootSigD3D12::FindParameterGroup(
