@@ -150,7 +150,7 @@ ctest --test-dir build_debug -C Debug -R AssetSlotTest --output-on-failure
 下，通过源码仓库外的渠道准备。新增测试源文件后重新 configure；CTest 不负责构建。
 
 `RuntimeMultiWindow` 在一个 Application 内运行主窗口与两个副窗口，覆盖 D3D12/Vulkan 的
-单线程和双线程模式。用例清屏各交换链，交替正序/逆序归还多命令批次，混合显式与自动提交，
+单线程和双线程模式（Vulkan 四例目前暂时注释，见下方已知问题）。用例清屏各交换链，交替正序/逆序归还多命令批次，混合显式与自动提交，
 并通过逐批 fence、纯同步批次和 GPU buffer 读回检查提交顺序及完成通知。
 生命周期用例覆盖副窗口 resize、隐藏创建后的延迟挂接与显示、detach/reattach、release/reattach、
 销毁及重新创建，期间验证其他窗口仍可呈现和提交；最后关闭主窗口，检查 flight 完成消息已排空。
@@ -158,8 +158,8 @@ flight 槽位与交换链 buffer 数量刻意不完全相同。用例要求 Wind
 CTest 设置串行执行及每例 90 秒超时。
 
 同一目标的 `RuntimeVulkanSwapChain` 覆盖 image 枚举失败、native 创建已退休旧链后失败的恢复，
-以及 CPU 等待提交后 Present、反复立即重建和销毁、等待已完成的旧 timeline 值，以及三交换链
-串联 timeline 提交后统一 Present；`RuntimeVulkanSwapChainLimits` 检查无上限
+以及 CPU 等待提交后 Present、反复立即重建和销毁、等待已完成的旧 timeline 值；三交换链
+串联 timeline 提交后统一 Present 的用例目前暂时注释；`RuntimeVulkanSwapChainLimits` 检查无上限
 surface 的 buffer 数量。故障注入用例只允许精确匹配的预期错误，其他原生验证错误仍失败。
 设置 `RADRAY_TEST_WSI_TRACE=1` 可记录多窗口 phase、serial、flight、窗口、chain、image 和两个
 semaphore，结合验证层中的原生对象名称定位偶发同步错误。
@@ -174,15 +174,35 @@ ctest --test-dir build_debug -C Debug -R RuntimeMultiWindow --output-on-failure
 ctest --test-dir build_debug -C Debug -R 'RuntimeMultiWindow|RuntimeVulkanSwapChain' --repeat until-fail:20 --output-on-failure
 ```
 
-仅复现 SDK 1.4.350.0 同步验证的 present 历史丢失时，可对最小用例关闭 RadRay 的空批次
-兼容处理；原生验证层保持开启，预期该对照失败并报告 `SYNC-HAZARD-WRITE-AFTER-PRESENT`。
-正常回归前移除此变量：
+### Vulkan 多交换链同步验证已知问题
 
-```powershell
-$env:RADRAY_TEST_REPRO_SYNCVAL_PRESENT = "1"
-ctest --test-dir build_debug -C Debug -R '^RuntimeVulkanSwapChain.MultiSwapChainHostWaitBeforePresent$' --output-on-failure
-Remove-Item Env:RADRAY_TEST_REPRO_SYNCVAL_PRESENT
-```
+截至 2026-09-17，上游 [Vulkan-ValidationLayers #13117](https://github.com/KhronosGroup/Vulkan-ValidationLayers/issues/13117)
+仍为 Open，问题按疑似同步验证误报跟踪，尚不能将根因视为上游已确认。
+issue 使用 SDK 1.4.357.0，在三交换链、同队列 timeline 串联提交并在 Present 前执行 CPU wait
+时报告 `SYNC-HAZARD-WRITE-AFTER-PRESENT`；完整环境与观察结果以上游 issue 为准。
+
+已撤销 `798bd477` 引入的运行时空批次 workaround：`QueueVulkan::Submit` 恢复单批次提交，
+删除仅为该 workaround 保存的同步验证状态与 `RADRAY_TEST_REPRO_SYNCVAL_PRESENT` 测试开关。
+同步验证仍开启，验证错误仍使测试失败。交换链重建失败恢复、无上限 image count 处理、
+原生对象命名和 fence reset 错误检查保留。
+
+以下五例在 `modules/runtime/tests/test_multi_window.cpp` 中暂时注释，不编译、不进入 GTest/CTest
+发现，因此通过的常规回归不包含 Vulkan 多窗口覆盖：
+
+- `RuntimeMultiWindow.VulkanSingleThreadOrderedSubmissions`
+- `RuntimeMultiWindow.VulkanThreadedOrderedSubmissions`
+- `RuntimeMultiWindow.VulkanSingleThreadSwapChainLifecycle`
+- `RuntimeMultiWindow.VulkanThreadedSwapChainLifecycle`
+- `RuntimeVulkanSwapChain.MultiSwapChainHostWaitBeforePresent`
+
+D3D12 多窗口四例与其余 Vulkan 单交换链、故障恢复和 image count 用例继续执行。
+`2389c3af` 添加的独立原生复现程序及其 `--empty-predecessor` 对照选项保留；该选项只用于
+诊断，不是运行时兼容逻辑，也不加入常规回归。
+
+上游明确修复版本或同步要求后，先用下方原生程序在对应校验层版本上验证默认路径，
+再取消上述五例的注释，重新构建 `test_multi_window` 以刷新 POST_BUILD discovery。
+设置 `RADRAY_TEST_REQUIRED_BACKENDS=d3d12,vulkan`，在 Debug/Release 下分别执行上述
+`RuntimeMultiWindow|RuntimeVulkanSwapChain` 重复回归；不能以关闭验证或过滤该错误作为恢复条件。
 
 原生 Vulkan 对照程序位于
 [`modules/render/tests/vulkan_present_repro/`](../../modules/render/tests/vulkan_present_repro/)。

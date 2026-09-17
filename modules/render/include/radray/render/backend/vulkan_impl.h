@@ -92,7 +92,6 @@ public:
     RenderLogCallback _logCallback{nullptr};
     void* _logUserData{nullptr};
     VkDebugUtilsMessengerEXT _debugMessenger{VK_NULL_HANDLE};
-    bool _isSynchronizationValidationEnabled{false};
 };
 
 class VMA final : public RenderBase {

@@ -441,13 +441,9 @@ DXGI 的 frame-latency waitable object 达到同一效果。
 无可 acquire 的状态；保留 surface 与请求的 buffer 数量，下一次从空链重试。绝不恢复或再次传入
 已退休的 `oldSwapchain`。surface 的 `maxImageCount == 0` 表示没有上限，只应用最小值限制。
 
-同步验证开启时，含 timeline wait 的 Submit 在同一次 `vkQueueSubmit` 中前置一个空批次。
-SDK 1.4.350.0 的 syncval 在 wait 恰好引用紧邻前一批次时会跳过 `ResolveLastBatch`，而
-[`ResolveSubmitSemaphoreWait`](https://github.com/KhronosGroup/Vulkan-ValidationLayers/blob/vulkan-sdk-1.4.350.0/layers/sync/sync_submit.cpp)
-的普通 semaphore 路径未传播 `last_synchronized_present`。多交换链 timeline 串联提交之后，
-CPU 查询/等待完成值可使呈现历史丢失，随后误报 `WRITE_AFTER_PRESENT`。空批次保留该历史的
-传播路径，不添加 GPU 内存依赖；未启用同步验证时保持原提交形态，不过滤验证消息。
-`RuntimeVulkanSwapChain.MultiSwapChainHostWaitBeforePresent` 固定此时序作回归。
+`QueueVulkan::Submit` 始终提交单个 `VkSubmitInfo`，不再为同步验证插入前置空批次。
+多交换链与同队列 timeline 串联的疑似校验层问题、暂时注释的用例和恢复条件见
+[构建与测试](../guide/build-test.md#vulkan-多交换链同步验证已知问题)。
 
 `SwapChainFrame` 是 move-only 句柄，带 owner + token，经 protected 的 `MakeFrame` /
 `ValidateFrame` / `InvalidateFrame` 保证不能伪造也不能用过期帧。

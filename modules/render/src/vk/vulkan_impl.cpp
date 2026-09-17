@@ -3116,7 +3116,6 @@ Nullable<InstanceVulkanImpl*> InitVulkanEnvImpl(const VulkanInstanceDescriptor& 
         vector<string>{needExts.begin(), needExts.end()},
         vector<string>{needLayers.begin(), needLayers.end()});
     result->_logCallback = desc.LogCallback;
-    result->_isSynchronizationValidationEnabled = isValidFeatureExtEnable && desc.IsEnableSynchronizationValidation;
     result->_logUserData = desc.LogUserData;
     if (hasDebugUtilsExt) {
         debugCreateInfo.pUserData = result.get();
@@ -3679,13 +3678,7 @@ void QueueVulkan::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
     submitInfo.signalSemaphoreCount = static_cast<uint32_t>(signalSemaphores.size());
     submitInfo.pSignalSemaphores = signalSemaphores.empty() ? nullptr : signalSemaphores.data();
 
-    // Syncval loses present history when a timeline wait resolves the immediately preceding batch.
-    // A separate empty predecessor preserves that history without adding a GPU dependency.
-    VkSubmitInfo submits[2]{};
-    submits[0].sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    submits[1] = submitInfo;
-    const bool preserveSyncvalHistory = _device->_instance->_isSynchronizationValidationEnabled && !desc.WaitFences.empty();
-    if (auto vr = _device->_ftb.vkQueueSubmit(_queue, preserveSyncvalHistory ? 2u : 1u, preserveSyncvalHistory ? submits : &submitInfo, submitFence);
+    if (auto vr = _device->_ftb.vkQueueSubmit(_queue, 1, &submitInfo, submitFence);
         vr != VK_SUCCESS) {
         RADRAY_ABORT("vkQueueSubmit failed: {}", vr);
     }
