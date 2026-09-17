@@ -88,8 +88,8 @@ protected:
             _callbackWaitFrame = GetGpuSystem()->GetFrameIndex();
             _callbackTasks.Spawn(WaitFromCompletion());
             EXPECT_FALSE(CallbackWaitResumed);
-            // A nested pump must not consume another batch or apply the old completion again.
-            BeginUpdateForFlight(GetGpuSystem()->GetCurrentFlightIndex());
+            // A modal tick during a completion callback must not reenter the runner's frame preparation.
+            GetWindowManager()->EventModalLoopTick()(GetWindowManager()->GetMainWindow()->GetNativeWindow());
             EXPECT_FALSE(CallbackWaitResumed);
         }
     }

@@ -5,6 +5,10 @@ endforeach()
 target_include_directories(test_application PRIVATE "${CMAKE_SOURCE_DIR}/modules/render/tests")
 target_include_directories(test_gpu_system PRIVATE "${CMAKE_SOURCE_DIR}/modules/render/tests")
 
+radray_add_test(test_scene_delivery SOURCES test_scene_delivery.cpp LINK_LIBS radrayruntime
+    DISCOVER_ARGS PROPERTIES RUN_SERIAL TRUE TIMEOUT 90)
+target_include_directories(test_scene_delivery PRIVATE "${CMAKE_SOURCE_DIR}/modules/render/tests")
+
 radray_add_test(test_multi_window SOURCES test_multi_window.cpp LINK_LIBS radrayruntime
     DISCOVER_ARGS PROPERTIES RUN_SERIAL TRUE TIMEOUT 90)
 target_include_directories(test_multi_window PRIVATE "${CMAKE_SOURCE_DIR}/modules/render/tests")

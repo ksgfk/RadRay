@@ -541,6 +541,7 @@ public:
             deltaTime,
             gpuSystem->GetLastFrameLatency(),
             isInModalLoop);
+        _app->ConsumeRenderUpdates(frameCtx);
         {
             RADRAY_PROFILE_SCOPE_N("Render");
             _app->Render(frameCtx);
@@ -673,6 +674,7 @@ public:
                 runnerFrameData.DeltaTime,
                 gpuSystem->GetLastFrameLatency(),
                 runnerFrameData.IsInModalLoop, !discard);
+            _app->ConsumeRenderUpdates(frameCtx);
             if (!discard) {
                 RADRAY_PROFILE_SCOPE_N("Render");
                 _app->Render(frameCtx);
@@ -881,9 +883,14 @@ void Application::BeginUpdateForFlight(uint32_t flightIndex) {
     PumpFlightCompletions(flightIndex);
 }
 
+void Application::ConsumeRenderUpdates(AppFrameContext& ctx) {
+    _renderSystem->ConsumeRenderUpdates(ctx.FlightIndex());
+}
+
 void Application::WaitAndCleanupCompletedFlights() {
     _gpuSystem->WaitAndRetireFlights();
     PumpFlightCompletions(std::nullopt);
+    if (_renderSystem != nullptr) _renderSystem->AbandonUnpublishedFramesGT();
 }
 
 void Application::PumpFlightCompletions(std::optional<uint32_t> flightIndex) {
@@ -903,6 +910,7 @@ void Application::PumpFlightCompletions(std::optional<uint32_t> flightIndex) {
         _gpuSystem->CleanupCompletedFlights();
     }
     for (const auto& c : completions) {
+        if (_renderSystem != nullptr) _renderSystem->OnFlightCompletedGT(c);
         OnRenderFrameComplete(c);
     }
 }
@@ -923,6 +931,9 @@ AppUpdateResult Application::Update(const AppUpdateContext& ctx) {
     // 3) World Tick。
     if (_world != nullptr) {
         _world->Tick(ctx.DeltaTime.count());
+    }
+    if (_renderSystem != nullptr && _world != nullptr) {
+        _renderSystem->PrepareFrameGT(*_world, ctx);
     }
     return AppUpdateResult{ShouldExit()};
 }
@@ -1012,7 +1023,7 @@ bool Application::InitializeRuntime(const ApplicationRuntimeDescriptor& desc) {
         .BackBufferCount = desc.BackBufferCount,
         .FlightDataCount = desc.FlightDataCount};
     _gpuSystem = make_unique<GpuSystem>(gpuSysDesc);
-    _renderSystem = make_unique<RenderSystem>(this);
+    _renderSystem = make_unique<RenderSystem>(this, _gpuSystem->GetFlightDataCount());
     _assetManager = make_unique<AssetManager>();
     if (!desc.AssetRoot.empty()) {
         string error;
@@ -1033,9 +1044,7 @@ bool Application::InitializeRuntime(const ApplicationRuntimeDescriptor& desc) {
     _assetManager->SetWaitFrameProcessor(_gpuSystem.get());
     _assetManager->SetAssetSource(_assetDatabase.get());
 
-    string renderError;
-    if (!_renderSystem->OnInitialize(renderError)) {
-        RADRAY_ERR_LOG("initialize RenderSystem failed: {}", renderError);
+    if (!_renderSystem->OnInitialize()) {
         DestroyRuntime();
         return false;
     }

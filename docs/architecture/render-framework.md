@@ -5,8 +5,9 @@
 # Runtime 宿主、组件与 shader
 
 旧 `render_framework`、Forward 与 ImGui 渲染适配已移除，删除前设计见
-[临时快照](../temp/render-framework-design.md)。当前没有内置渲染管线、RenderGraph、Scene/proxy、
+[临时快照](../temp/render-framework-design.md)。当前没有内置渲染管线、RenderGraph、proxy、
 renderer list、output registry 或时域历史系统。
+World → Scene 的 M0 已建立单份持久 CPU Scene 和 per-flight 增量包交付；组件收集与绘制数据尚未接入。
 
 ## Application 与 runner
 
@@ -31,10 +32,38 @@ ApplicationExtension 及其安装入口、回调槽和销毁接线已移除。
 
 ## RenderSystem 基础服务
 
-RenderSystem 仅持有 ShaderProgramCache 与 RHI RenderPassRegistry，借用 Application 配置和 GpuSystem 的 device。
+RenderSystem 持有一份 Scene、与 GPU flight 等量的 SceneUpdateBatch 槽位，以及 ShaderProgramCache 与
+RHI RenderPassRegistry，借用 Application 配置和 GpuSystem 的 device。
 `GetOrCreateShaderProgram` 保留源码请求与预编译 artifact 两个入口，source invalidation 和失败缓存行为不变。
 GPU idle 后清理 shader/program，再清理 render pass/framebuffer cache。窗口仍借用该 registry，
 销毁 backbuffer view 前清理关联 framebuffer；RenderSystem 销毁前先断开窗口的借用指针。
+
+### Scene 交付（M0）
+
+runner 取得可写 flight、处理旧 completion 后，GT 可以填充当前 batch；`Application::Update`
+在 `World::Tick` 之后调用 `PrepareFrameGT` 收集接点（M0 尚无组件 payload）。runner 确认本帧继续执行后
+按原有协议发布 ready slot，RenderSystem 不另设发布接口或序号。
+
+两种 runner 都在 BeginFrameRecord 后、应用 Render 前调用固定的 `Application::ConsumeRenderUpdates`。
+`Application::BeginUpdateForFlight` 与 `ConsumeRenderUpdates` 均为 private，仅由作为 friend 的
+SingleThreadRunner、ThreadedRunner 驱动，不向应用派生类开放。
+ThreadedRunner 的退出与模态 discard 判断只控制绘制，不能绕过 Scene::Apply。Apply 不访问 World、
+窗口或 GPU，只按发布顺序更新单份 Scene；下一次 Apply 必须等上一帧全部 CPU Scene 读取结束。
+当前 runner 顺序执行这些阶段，尚无额外 Scene 读取任务。
+
+RenderSystem 不维护独立的 flight 状态机；可写、发布和退休时机由 runner/GpuSystem 的现有协议保证。
+每个 flight 仅保存 batch，不额外复制 FrameSerial。Application 消费真实 GPU completion 后，
+RenderSystem 按 FlightIndex 清空对应 batch；GpuWorkCompleted=false 不撤销已应用的 CPU 更新。
+关停先排空已发布帧和真实 completion，再清理未发布 batch，
+不等待或伪造它们的 completion。具体帧序见[帧与 GPU](frame-and-gpu.md)。
+
+Scene 的头文件和实现分别位于 `include/radray/runtime/render_framework/scene.h` 与
+`src/render_framework/scene.cpp`（均相对 `modules/runtime/`）；`SceneUpdateBatch` 与 Scene 同在 `scene.h` 中声明。
+Scene 访问器仅供 RT 或 RT 停止后的检查，不能在 GT 与 Apply 并发读取。
+当前 Scene 与 SceneUpdateBatch 都是空壳，Apply 尚无数据操作；没有诊断探针、统计计数或额外序号。
+mesh/light payload、组件 dirty 队列、资产保活和 GPU 参数上传尚未接入。
+`test_scene_delivery` 覆盖 F=1/2/3 的空包生命周期、flight 边界及真实 runner 退出排空；
+测试仅使用既有 GPU 帧号与 completion，不提供对空 Apply 次数或数据结果的断言。
 
 运行期窗口变更统一经 WindowManager 的协程接口发起，由 runner 在受控维护阶段排空渲染并执行，
 离开修改阶段后再交付结果；不再由窗口方法传播 idle 状态或反向调用 runner。

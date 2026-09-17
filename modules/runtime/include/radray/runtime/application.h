@@ -158,10 +158,6 @@ public:
     int Shutdown(const AppShutdownContext& ctx);
     int StartLoop();
 
-    /// 上一帧完成后，在主线程完成回调，Runner 取得可写槽位后调用；消费 GPU 完成消息并推进本帧的 GT 调度。
-    /// 调用阶段在本帧计时与窗口事件派发之前。
-    void BeginUpdateForFlight(uint32_t flightIndex);
-
 protected:
     // 游戏 override 点 (窄接口)。底层负责"何时 tick、怎么 acquire/render/present",
     // 游戏只负责"这个应用要画什么"。
@@ -188,11 +184,19 @@ protected:
     bool ShouldExit() const noexcept;
 
 private:
+    friend class SingleThreadRunner;
+    friend class ThreadedRunner;
+
     bool InitializeRuntime(const ApplicationRuntimeDescriptor& desc);
     void DestroyRuntime() noexcept;
     void WaitAndCleanupCompletedFlights();
     /// 有 flightIndex 时推进该可写槽位；空值仅用于 GPU idle 后的全量清理。
     void PumpFlightCompletions(std::optional<uint32_t> flightIndex);
+    /// 上一帧完成后，在主线程完成回调，Runner 取得可写槽位后调用；消费 GPU 完成消息并推进本帧的 GT 调度。
+    /// 调用阶段在本帧计时与窗口事件派发之前。
+    void BeginUpdateForFlight(uint32_t flightIndex);
+    /// RT: runner calls once per published frame, before and independently of optional drawing.
+    void ConsumeRenderUpdates(AppFrameContext& ctx);
 
     unique_ptr<WindowManager> _windowManager;
     unique_ptr<GpuSystem> _gpuSystem;
