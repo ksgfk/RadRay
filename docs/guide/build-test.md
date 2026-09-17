@@ -184,6 +184,51 @@ ctest --test-dir build_debug -C Debug -R '^RuntimeVulkanSwapChain.MultiSwapChain
 Remove-Item Env:RADRAY_TEST_REPRO_SYNCVAL_PRESENT
 ```
 
+原生 Vulkan 对照程序位于
+[`modules/render/tests/vulkan_present_repro/`](../../modules/render/tests/vulkan_present_repro/)。
+它是可单独分发的 C 程序，只链接系统 Vulkan loader 与 Win32，不依赖 RadRay、GLFW、GTest、
+shader 或第三方容器。为保留仅 Vulkan API 的复现环境，使用该目录的独立 CMake 工程，
+不加入仓库的常规 GTest discovery；默认路径是预期报错的诊断程序，不作为绿色回归用例。
+
+```powershell
+pwsh -File modules/render/tests/vulkan_present_repro/reproduce.ps1 -Sdk C:/VulkanSDK/1.4.357.0
+```
+
+脚本先构建 Debug/Release，再各启动独立进程运行四组对照，每组默认 5 次；日志与 `results.csv`
+位于 `build_vk_present_repro/`。也可手动构建并仅运行一组：
+
+```powershell
+cmake -S modules/render/tests/vulkan_present_repro -B build_vk_present_repro -G "Visual Studio 18 2026" -A x64 -DVulkan_INCLUDE_DIR=C:/VulkanSDK/1.4.357.0/Include -DVulkan_LIBRARY=C:/VulkanSDK/1.4.357.0/Lib/vulkan-1.lib
+cmake --build build_vk_present_repro --config Debug
+cmake -E env VK_LAYER_PATH=C:/VulkanSDK/1.4.357.0/Bin build_vk_present_repro/Debug/vulkan_present_repro.exe
+cmake -E env VK_LAYER_PATH=C:/VulkanSDK/1.4.357.0/Bin build_vk_present_repro/Debug/vulkan_present_repro.exe --empty-predecessor
+```
+
+默认循环为：Acquire 三个窗口图像 → 交替正反序提交 → 最后一个纯 timeline 同步批次 →
+CPU `vkWaitSemaphores` → 按提交顺序逐个 Present。每个绘制批次等待对应 acquire binary semaphore
+及前一个 timeline 值，执行 `Present/Undefined → TransferDst → Clear → Present`，再 signal
+该图像专属的 present binary semaphore 与下一个 timeline 值。所有 wait 和 barrier 使用
+`ALL_COMMANDS`；CPU 等待后才复用 command buffer 与 acquire semaphore。全程单线程、单队列。
+
+| 参数 | 差异 | SDK 1.4.357.0 / RTX 4080 本机观察 |
+|---|---|---|
+| 无 | 三窗口 timeline 串联，12 轮 | Debug/Release 各 5/5 报 `WRITE_AFTER_PRESENT` |
+| `--empty-predecessor` | 每次 Submit 前附加无命令、无 wait/signal 的空批次 | 各 5/5 无错误 |
+| `--no-timeline-chain` | 移除 GPU timeline wait，保留 signal、CPU wait 及 acquire/present 同步 | 各 5/5 无错误 |
+| `--one-window` | 只运行一个窗口，其余流程相同 | 各 5/5 无错误 |
+
+`--rounds N` 调整轮数。程序打印实际加载的校验层 DLL、GPU、每条诊断的 round/phase，
+分别汇总 LOOP 和 TOTAL；返回 0 表示无 validation error，1 表示有 error，2 表示初始化、
+参数或 Vulkan 调用失败。复现时已开启 synchronization validation，未过滤任何校验错误。
+清理采用未启用 maintenance1 时常见的 `vkDeviceWaitIdle` 路径，其规范保证的局限见
+[Khronos WSI 说明](https://docs.vulkan.org/guide/latest/swapchain_semaphore_reuse.html)；本例报错发生在
+`phase=present`，先于清理，不以清理无报错作为资源生命周期正确性的证明。
+
+原生复现排除了 RadRay 封装作为必要触发条件，但单凭空批次消除报错不能证明校验层根因。
+进一步验证应保持此程序与驱动不变，对比同一 VVL 基线的原版和仅补充
+`ResolveSubmitSemaphoreWait` 普通信号量分支中 `last_synchronized_present` 传播的版本，
+同时运行 VVL 的正、负同步测试，排除补丁只是不再检测错误。本仓库尚未完成该校验层补丁实验。
+
 涉及 RTTI、公共 C++ ABI 或跨静态库对象查询时，Debug 与 Release 都要分别完成全量构建，
 再运行各自配置的测试。其他改动选择相关 suite 验证，不复用旧会话的通过计数。
 
