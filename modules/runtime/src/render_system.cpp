@@ -5,10 +5,11 @@
 #include <radray/logger.h>
 #include <radray/runtime/application.h>
 #include <radray/runtime/gpu_system.h>
+#include <radray/runtime/game_framework/world.h>
 
 namespace radray {
 
-RenderSystem::RenderSystem(Application* app, uint32_t flightCount) : _app(app), _frameUpdates(flightCount) {
+RenderSystem::RenderSystem(Application* app, uint32_t flightCount) : _app(app), _frameUpdates(flightCount), _frameAssetRefs(flightCount) {
     if (flightCount == 0) RADRAY_ABORT("Scene delivery requires at least one flight");
 }
 
@@ -19,6 +20,7 @@ RenderSystem::~RenderSystem() noexcept {
 void RenderSystem::OnShutdown() noexcept {
     AbandonUnpublishedFramesGT();
     _frameUpdates.clear();
+    _frameAssetRefs.clear();
     _scene = Scene{};
     _shaderCache.reset();
     _renderPassRegistry.reset();
@@ -50,8 +52,8 @@ SceneUpdateBatch& RenderSystem::GetFrameUpdateBatchGT(uint32_t flightIndex) {
 }
 
 void RenderSystem::PrepareFrameGT(World& world, const AppUpdateContext& ctx) {
-    (void)world;
-    (void)GetFrameUpdateBatchGT(ctx.FlightIndex);
+    world.FlushRenderUpdates(GetFrameUpdateBatchGT(ctx.FlightIndex));
+    world.RetainRenderAssets(_assetManager, _frameAssetRefs[ctx.FlightIndex]);
 }
 
 void RenderSystem::ConsumeRenderUpdates(uint32_t flightIndex) {
@@ -59,15 +61,18 @@ void RenderSystem::ConsumeRenderUpdates(uint32_t flightIndex) {
 }
 
 void RenderSystem::OnFlightCompletedGT(const FlightCompletion& completion) {
-    GetFrameUpdateBatch(completion.FlightIndex) = {};
+    GetFrameUpdateBatch(completion.FlightIndex).Clear();
+    _frameAssetRefs[completion.FlightIndex].clear();
 }
 
 void RenderSystem::AbandonUnpublishedFrameGT(uint32_t flightIndex) {
-    GetFrameUpdateBatchGT(flightIndex) = {};
+    GetFrameUpdateBatchGT(flightIndex).Clear();
+    _frameAssetRefs[flightIndex].clear();
 }
 
 void RenderSystem::AbandonUnpublishedFramesGT() {
-    for (auto& batch : _frameUpdates) batch = {};
+    for (auto& batch : _frameUpdates) batch.Clear();
+    for (auto& refs : _frameAssetRefs) refs.clear();
 }
 
 Nullable<ShaderProgram*> RenderSystem::GetOrCreateShaderProgram(const ShaderProgramRequest& request) {

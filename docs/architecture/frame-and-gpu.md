@@ -9,7 +9,7 @@
 | 系统 | 负责 | 不负责 |
 |---|---|---|
 | `GpuSystem` | **何时画**。instance/factory/device/主队列/fence、flight 槽位、上传器、帧 profiler、帧边界等待表、flight 完成消息的发布与内部状态应用 | 画什么 |
-| `RenderSystem` | 持久 CPU Scene、per-flight 增量包交付、program/artifact cache、RenderPass/Framebuffer registry | GPU 提交时序 |
+| `RenderSystem` | 持久 CPU Scene、per-flight 增量包与资产保活、program/artifact cache、RenderPass/Framebuffer registry | GPU 提交时序 |
 | `WindowManager` | 窗口创建/销毁、swapchain acquire/present/recreate、事件分发 | — |
 | `Application` | 固化帧序与关停顺序；消费 flight 完成消息；游戏侧的窄扩展点 | — |
 
@@ -44,7 +44,7 @@ Application::StartLoop
   ├─ ApplicationScheduler::Pump
   ├─ Application::OnUpdate            游戏逻辑
   ├─ World::Tick
-  ├─ RenderSystem::PrepareFrameGT       增量收集接点（M0 尚无组件 payload）
+  ├─ RenderSystem::PrepareFrameGT       World::FlushRenderUpdates 收集组件增量，再保活唯一 mesh
   ├─ runner::MaintainWindows        处理 Update 期间的新请求，再决定是否退出
   ├─ runner 发布当前 flight
   │    game thread 可以开始下一可写 flight 的 Update
@@ -84,7 +84,7 @@ GPU 完成的资源 owner。
 作为 `GpuSystem` 的 friend，直接通过私有 `_flightCompletions.TryRead` 非阻塞收集一个本地批次，
 随后调用 `GpuSystem::BeginUpdateForFlight` 重置当前槽位的 HostWrites 并运行 `PumpWaitFrame`。
 完成批次不传给 GPU 内部上传调度器。GPU 调度步骤返回后，Application 对每条消息先调用
-`RenderSystem::OnFlightCompletedGT` 清理该轮 CPU batch，再调用应用 `OnRenderFrameComplete`。
+`RenderSystem::OnFlightCompletedGT` 清理该轮 CPU batch 和资产引用，再调用应用 `OnRenderFrameComplete`。
 此时 runner 已拥有当前可写 flight，GT 可以填充其 batch；随后开始本帧计时、派发窗口事件并进入 Update。
 完成消息保留 FrameSerial，不能仅用可复用的 FlightIndex 识别一帧。
 `GpuWorkCompleted` 仍表示该轮渲染结果有效；false 的跳过帧也已经经过其提交的真实 fence，
@@ -376,12 +376,12 @@ query 结果；应用只读 `GetLastGpuTimeMs()`，后端 readback barrier 差�
 ```cpp
 _windowManager->CloseOperations();            // 关闭窗口请求入口并取消等待任务
 WaitAndCleanupCompletedFlights();             // Application 等 GPU、消费完成消息并恢复协程
-// 上一步也 abandon 未发布的 Scene batch；不为它等待或生成 completion。
+// 上一步也 abandon 未发布的 Scene batch 和资产引用；不为它等待或生成 completion。
 OnShutdown();                                  // 游戏侧释放自管 per-flight 资源
 _scheduler.CancelAll();
 _world.reset();                    // Actor / Component → drop StreamingAssetRef
 _windowManager->SetRenderSystem(nullptr);  // RenderPassRegistry 即将销毁，先断引用
-_renderSystem.reset();             // Scene/batches → shader/program → registry
+_renderSystem.reset();             // Scene/batches/asset refs → shader/program → registry
 _assetManager.reset();             // 放开全部资产，GPU buffer 须在 device 前释放
 _assetDatabase.reset();            // importer/settings 活过 manager 的在飞 task
 _windowManager->DetachAllSwapChains();
@@ -398,7 +398,7 @@ channel 生命周期跟随 GpuSystem；关停期间保持可写，直到生产�
 无需调用 `Complete()`；若使用该操作，它只禁止新写入，积压消息仍能读完。
 
 ThreadedRunner 在 join 前消费全部已发布 Scene batch，即使退出已请求，也只跳过应用绘制。
-没有发布的 batch 在 GT 清理。Scene::Apply 不表示 GPU 完成；CPU 增量交付沿用现有
+没有发布的 batch 及其引用在 GT 清理。Scene::Apply 不表示 GPU 完成；CPU 增量交付沿用现有
 writable semaphore、fence 与 flight 退休语义。
 
 `Application` 析构也复用幂等的内部 teardown，作为正常 `Shutdown` 被异常绕过时的保底；该路径

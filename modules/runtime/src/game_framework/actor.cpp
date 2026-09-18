@@ -4,6 +4,7 @@
 
 #include <radray/runtime/components/actor_component.h>
 #include <radray/runtime/components/scene_component.h>
+#include <radray/runtime/game_framework/world.h>
 
 namespace radray {
 
@@ -12,6 +13,7 @@ Actor::~Actor() noexcept {
 }
 
 ActorComponent* Actor::AddComponent(unique_ptr<ActorComponent> component) {
+    if (_world) _world->CheckCanModify();
     if (component == nullptr) {
         return nullptr;
     }
@@ -21,20 +23,17 @@ ActorComponent* Actor::AddComponent(unique_ptr<ActorComponent> component) {
     _ownedComponents.push_back(std::move(component));
     // 若已在 World 中,立即注册
     if (_world) {
-        raw->_registered = true;
-        raw->OnRegister();
+        RegisterComponent(*raw);
     }
     return raw;
 }
 
 void Actor::RemoveComponent(ActorComponent* component) {
+    if (_world) _world->CheckCanModify();
     if (component->_owner.Get() != this) {
         return;
     }
-    if (component->IsRegistered()) {
-        component->OnUnregister();
-        component->_registered = false;
-    }
+    UnregisterComponent(*component);
     // 若是根组件,清空
     if (_rootComponent.Get() == component) {
         _rootComponent = nullptr;
@@ -54,6 +53,7 @@ void Actor::RemoveComponent(ActorComponent* component) {
 }
 
 void Actor::SetRootComponent(Nullable<SceneComponent*> component) noexcept {
+    if (_world) _world->CheckCanModify();
     if (component && component.Get()->_owner.Get() != this) {
         return;
     }
@@ -66,23 +66,33 @@ void Actor::Tick(float deltaTime) {
     }
 }
 
-void Actor::RegisterAllComponents() {
-    for (auto& comp : _ownedComponents) {
-        if (!comp->_registered) {
-            comp->_registered = true;
-            comp->OnRegister();
-        }
+void Actor::RegisterComponent(ActorComponent& component) {
+    if (component._registered) return;
+    component._registered = true;
+    if (Nullable<SceneComponent*> scene = dynamic_cast<SceneComponent*>(&component); scene) {
+        scene->CreateRenderState(*_world.Get());
     }
+    component.OnRegister();
+}
+
+void Actor::UnregisterComponent(ActorComponent& component) {
+    if (!component._registered) return;
+    component._registered = false;
+    if (Nullable<SceneComponent*> scene = dynamic_cast<SceneComponent*>(&component); scene) {
+        _world->RemoveRenderUpdate(*scene);
+        scene->DestroyRenderState(*_world.Get());
+    }
+    component.OnUnregister();
+}
+
+void Actor::RegisterAllComponents() {
+    for (auto& comp : _ownedComponents) RegisterComponent(*comp);
 }
 
 void Actor::UnregisterAllComponents() {
     // 按逆序反注册
     for (auto it = _ownedComponents.rbegin(); it != _ownedComponents.rend(); ++it) {
-        auto& comp = *it;
-        if (comp->_registered) {
-            comp->OnUnregister();
-            comp->_registered = false;
-        }
+        UnregisterComponent(**it);
     }
 }
 

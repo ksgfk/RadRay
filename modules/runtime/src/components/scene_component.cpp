@@ -2,7 +2,18 @@
 
 #include <algorithm>
 
+#include <radray/runtime/game_framework/world.h>
+
 namespace radray {
+
+void SceneComponent::MarkRenderDirty(RenderDirtyFlag flag) {
+    if (!IsRegistered()) return;
+    GetWorld()->QueueRenderUpdate(*this, flag);
+}
+
+void SceneComponent::MarkRenderStateDirty() { MarkRenderDirty(RenderDirtyFlag::State); }
+void SceneComponent::MarkRenderTransformDirty() { MarkRenderDirty(RenderDirtyFlag::Transform); }
+void SceneComponent::MarkRenderDynamicDataDirty() { MarkRenderDirty(RenderDirtyFlag::DynamicData); }
 
 void SceneComponent::NotifyTransformChanged() {
     OnTransformChanged();
@@ -19,16 +30,19 @@ SceneComponent::~SceneComponent() noexcept {
 }
 
 void SceneComponent::SetRelativeLocation(const Eigen::Vector3f& location) noexcept {
+    CheckCanModify();
     _relativeLocation = location;
     NotifyTransformChanged();
 }
 
 void SceneComponent::SetRelativeRotation(const Eigen::Quaternionf& rotation) noexcept {
+    CheckCanModify();
     _relativeRotation = rotation;
     NotifyTransformChanged();
 }
 
 void SceneComponent::SetRelativeScale(const Eigen::Vector3f& scale) noexcept {
+    CheckCanModify();
     _relativeScale = scale;
     NotifyTransformChanged();
 }
@@ -63,6 +77,7 @@ Eigen::Vector3f SceneComponent::GetWorldScale() const noexcept {
 }
 
 void SceneComponent::SetWorldLocation(const Eigen::Vector3f& location) noexcept {
+    CheckCanModify();
     if (_parent) {
         Eigen::Matrix4f parentInv = _parent.Get()->GetWorldMatrix().inverse();
         Eigen::Vector4f localPos = parentInv * Eigen::Vector4f{location.x(), location.y(), location.z(), 1.0f};
@@ -74,6 +89,7 @@ void SceneComponent::SetWorldLocation(const Eigen::Vector3f& location) noexcept 
 }
 
 void SceneComponent::SetWorldRotation(const Eigen::Quaternionf& rotation) noexcept {
+    CheckCanModify();
     if (_parent) {
         Eigen::Quaternionf parentWorldRot = _parent.Get()->GetWorldRotation();
         _relativeRotation = parentWorldRot.conjugate() * rotation;
@@ -84,6 +100,8 @@ void SceneComponent::SetWorldRotation(const Eigen::Quaternionf& rotation) noexce
 }
 
 void SceneComponent::AttachTo(SceneComponent* parent) noexcept {
+    CheckCanModify();
+    parent->CheckCanModify();
     if (parent == this || parent == _parent.Get()) {
         return;
     }
@@ -99,9 +117,11 @@ void SceneComponent::AttachTo(SceneComponent* parent) noexcept {
 }
 
 void SceneComponent::DetachFromParent() noexcept {
+    CheckCanModify();
     if (!_parent) {
         return;
     }
+    _parent->CheckCanModify();
     auto& siblings = _parent.Get()->_children;
     auto it = std::find(siblings.begin(), siblings.end(), this);
     if (it != siblings.end()) {

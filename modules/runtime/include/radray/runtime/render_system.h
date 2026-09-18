@@ -34,22 +34,23 @@ public:
     /// GT, requires RT stopped, GPU idle and completions consumed; accepts partial initialization.
     void OnShutdown() noexcept;
     void SetGpuSystem(Nullable<GpuSystem*> gpu) noexcept { _gpuSystem = gpu; }
+    void SetAssetManager(Nullable<AssetManager*> assets) noexcept { _assetManager = assets; }
     render::RenderPassRegistry* GetRenderPassRegistry() const noexcept { return _renderPassRegistry.get(); }
 
-    /// GT, borrow only while the runner owns the writable slot, before PrepareFrameGT.
+    /// GT, borrow only while the runner owns the writable slot. PrepareFrameGT requires an empty batch.
     SceneUpdateBatch& GetFrameUpdateBatchGT(uint32_t flightIndex);
     /// GT collection hook after World::Tick.
     void PrepareFrameGT(World& world, const AppUpdateContext& ctx);
     /// RT, every published flight, including skipped draws; no GPU/World access.
     void ConsumeRenderUpdates(uint32_t flightIndex);
-    /// GT, clear the matching batch after real fence completion; slot ownership stays with the runner.
+    /// GT, clear the matching batch and asset pins after real fence completion.
     void OnFlightCompletedGT(const FlightCompletion& completion);
-    /// GT, clear an unpublished batch in a slot owned by the caller.
+    /// GT shutdown only: discard an unpublished batch. Continuing the same World/Scene is unsupported.
     void AbandonUnpublishedFrameGT(uint32_t flightIndex);
     /// GT, after RT stops and real completions have been consumed.
     void AbandonUnpublishedFramesGT();
 
-    /// RT only, or after RT stops. This reference is not a per-flight snapshot.
+    /// RT only, or after RT stops. Asset views require Apply and active pins for the current flight.
     const Scene& GetScene() const noexcept { return _scene; }
 
     Nullable<ShaderProgram*> GetOrCreateShaderProgram(const ShaderProgramRequest& request);
@@ -66,9 +67,11 @@ private:
 
     Application* _app;
     Nullable<GpuSystem*> _gpuSystem{nullptr};
+    Nullable<AssetManager*> _assetManager{nullptr};
     unique_ptr<render::RenderPassRegistry> _renderPassRegistry;
     unique_ptr<ShaderProgramCache> _shaderCache;
     vector<SceneUpdateBatch> _frameUpdates;
+    vector<vector<StreamingAssetRef<StaticMesh>>> _frameAssetRefs;
     Scene _scene;
 };
 

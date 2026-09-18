@@ -88,6 +88,8 @@ protected:
 private:
     friend class World;
 
+    void RegisterComponent(ActorComponent& component);
+    void UnregisterComponent(ActorComponent& component);
     void RegisterAllComponents();
     void UnregisterAllComponents();
 

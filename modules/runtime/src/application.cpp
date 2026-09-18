@@ -1041,6 +1041,7 @@ bool Application::InitializeRuntime(const ApplicationRuntimeDescriptor& desc) {
     _windowManager->SetRenderSystem(_renderSystem.get());
     _gpuSystem->SetWindowManager(_windowManager.get());
     _renderSystem->SetGpuSystem(_gpuSystem.get());
+    _renderSystem->SetAssetManager(_assetManager.get());
     _assetManager->SetWaitFrameProcessor(_gpuSystem.get());
     _assetManager->SetAssetSource(_assetDatabase.get());
 

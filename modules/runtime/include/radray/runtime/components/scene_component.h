@@ -1,12 +1,27 @@
 #pragma once
 
+#include <limits>
 #include <span>
 
 #include <radray/basic_math.h>
+#include <radray/enum_flags.h>
 #include <radray/nullable.h>
 #include <radray/runtime/components/actor_component.h>
 
 namespace radray {
+
+struct SceneUpdateBatch;
+
+enum class RenderDirtyFlag : uint8_t {
+    State = 1,
+    Transform = 2,
+    DynamicData = 4,
+};
+
+template <>
+struct is_flags<RenderDirtyFlag> : std::true_type {};
+using RenderDirtyFlags = EnumFlags<RenderDirtyFlag>;
+inline auto format_as(RenderDirtyFlag value) noexcept { return EnumFlagBitName(value); }
 
 /// 有空间变换的组件。能形成父子 Attach 层级。
 /// 对应 UE5 的 USceneComponent。
@@ -47,11 +62,29 @@ public:
     Nullable<SceneComponent*> GetAttachParent() const noexcept { return _parent; }
     std::span<SceneComponent* const> GetAttachChildren() const noexcept { return _children; }
 
+    /// GT only. Repeated marks merge until collection; unregistered components are ignored.
+    void MarkRenderStateDirty();
+    void MarkRenderTransformDirty();
+    void MarkRenderDynamicDataDirty();
+
 protected:
     /// 本节点或祖先的世界变换变更后调用，派生类可覆写以标记渲染状态脏。
     virtual void OnTransformChanged() {}
+    /// Actor invokes this before OnRegister; the default does not enqueue render updates.
+    virtual void CreateRenderState(World& world) { (void)world; }
+    /// Actor removes queued updates before this hook, then calls OnUnregister.
+    virtual void DestroyRenderState(World& world) { (void)world; }
+    /// Capture owned values or flight-pinned immutable views. Must not mutate World/components or recursively flush.
+    virtual void CollectRenderUpdates(SceneUpdateBatch& batch, RenderDirtyFlags dirty) {
+        (void)batch;
+        (void)dirty;
+    }
 
 private:
+    friend class Actor;
+    friend class World;
+
+    void MarkRenderDirty(RenderDirtyFlag flag);
     Eigen::Matrix4f ComputeLocalMatrix() const noexcept;
     void NotifyTransformChanged();
 
@@ -63,6 +96,8 @@ private:
     // Attach 层级
     Nullable<SceneComponent*> _parent{nullptr};
     vector<SceneComponent*> _children;  // non-owning, 所有权在 Actor::_ownedComponents
+    RenderDirtyFlags _renderDirty;
+    size_t _renderQueueIndex{std::numeric_limits<size_t>::max()};
 };
 
 template <>

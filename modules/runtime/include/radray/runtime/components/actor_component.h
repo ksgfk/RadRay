@@ -22,7 +22,7 @@ public:
     /// 组件注册到 World 时调用（Actor::RegisterAllComponents 触发）
     virtual void OnRegister() {}
 
-    /// 组件从 World 注销时调用（Actor 销毁前）
+    /// IsRegistered() 为 false；不要求派生类调用基类。
     virtual void OnUnregister() {}
 
     /// 每帧逻辑更新
@@ -31,6 +31,9 @@ public:
     Nullable<Actor*> GetOwner() const noexcept { return _owner; }
     Nullable<World*> GetWorld() const noexcept;
     bool IsRegistered() const noexcept { return _registered; }
+
+protected:
+    void CheckCanModify() const noexcept;
 
 private:
     friend class Actor;

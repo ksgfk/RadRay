@@ -1,14 +1,32 @@
 #pragma once
 
 #include <radray/runtime/components/scene_component.h>
+#include <radray/runtime/render_framework/scene.h>
 
 namespace radray {
 
-/// Base for components carrying drawable data; owns no renderer state.
+/// GT component identity; Scene owns the corresponding render-side state.
 class PrimitiveComponent : public SceneComponent {
 public:
     PrimitiveComponent() noexcept = default;
     ~PrimitiveComponent() noexcept override;
+
+    PrimitiveId GetPrimitiveId() const noexcept { return _primitiveId; }
+
+protected:
+    void OnTransformChanged() override;
+    virtual void CollectPrimitiveUpdates(SceneUpdateBatch& batch, RenderDirtyFlags dirty) {
+        (void)batch;
+        (void)dirty;
+    }
+
+private:
+    void CreateRenderState(World& world) final;
+    void DestroyRenderState(World& world) final;
+    void CollectRenderUpdates(SceneUpdateBatch& batch, RenderDirtyFlags dirty) final;
+
+    PrimitiveId _primitiveId;
+    bool _renderStateSent{false};
 };
 
 template <>

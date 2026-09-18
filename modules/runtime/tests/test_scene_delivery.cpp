@@ -4,6 +4,8 @@
 #include <semaphore>
 
 #include <radray/scope_guard.h>
+#include <radray/runtime/components/primitive_component.h>
+#include <radray/runtime/game_framework/actor.h>
 #include <radray/runtime/game_framework/world.h>
 #include <radray/runtime/gpu_system.h>
 #include <radray/runtime/render_system.h>
@@ -32,19 +34,48 @@ TEST(SceneDelivery, EmptyBatchesAcrossFlightsWithoutDrawing) {
 }
 
 TEST(SceneDelivery, AbandonDoesNotPublishOrRequireCompletion) {
-    Application app;
-    World world{&app};
-    RenderSystem render{&app, 3};
-    render.PrepareFrameGT(world, {.FlightIndex = 0});
-    render.PrepareFrameGT(world, {.FlightIndex = 1});
-    render.AbandonUnpublishedFramesGT();
-    render.PrepareFrameGT(world, {.FlightIndex = 0});
-    render.ConsumeRenderUpdates(0);
-    render.OnFlightCompletedGT({.FlightIndex = 0});
-    render.PrepareFrameGT(world, {.FlightIndex = 2});
-    render.AbandonUnpublishedFrameGT(2);
-    render.OnShutdown();
-    render.OnShutdown();
+    for (bool abandonAll : {false, true}) {
+        Application app;
+        World world{&app};
+        RenderSystem render{&app, 3};
+        const PrimitiveId id = world.SpawnActor()->AddComponent<PrimitiveComponent>()->GetPrimitiveId();
+        render.PrepareFrameGT(world, {.FlightIndex = 2});
+        ASSERT_EQ(render.GetFrameUpdateBatchGT(2).CreatePrimitives, vector<PrimitiveId>{id});
+        if (abandonAll)
+            render.AbandonUnpublishedFramesGT();
+        else
+            render.AbandonUnpublishedFrameGT(2);
+        EXPECT_TRUE(render.GetFrameUpdateBatchGT(2).CreatePrimitives.empty());
+        EXPECT_FALSE(render.GetScene().ContainsPrimitive(id));
+        render.OnShutdown();
+        render.OnShutdown();
+    }
+}
+
+TEST(SceneDelivery, PrimitiveUpdatesAcrossFlightsWithoutDrawing) {
+    for (uint32_t count : {1u, 2u, 3u}) {
+        SCOPED_TRACE(count);
+        Application app;
+        World world{&app};
+        RenderSystem render{&app, count};
+        auto* actor = world.SpawnActor();
+        Nullable<PrimitiveComponent*> component{nullptr};
+        vector<PrimitiveId> expected(count);
+        for (uint32_t round = 0; round < 4; ++round) {
+            for (uint32_t flight = 0; flight < count; ++flight) {
+                if (component) actor->RemoveComponent(component.Get());
+                component = actor->AddComponent<PrimitiveComponent>();
+                expected[flight] = component->GetPrimitiveId();
+                render.PrepareFrameGT(world, {.FlightIndex = flight});
+            }
+            for (uint32_t flight = 0; flight < count; ++flight) {
+                render.ConsumeRenderUpdates(flight);
+                EXPECT_TRUE(render.GetScene().ContainsPrimitive(expected[flight]));
+                if (flight > 0) EXPECT_FALSE(render.GetScene().ContainsPrimitive(expected[flight - 1]));
+                render.OnFlightCompletedGT({.FlightIndex = flight, .GpuWorkCompleted = false});
+            }
+        }
+    }
 }
 
 TEST(SceneDeliveryDeathTest, RejectsInvalidFlightIndices) {
@@ -68,11 +99,25 @@ public:
     uint64_t Recorded{0};
 
 protected:
+    void OnInit() override {
+        _actor = GetWorld()->SpawnActor();
+        _component = _actor->AddComponent<PrimitiveComponent>();
+        _initialId = _component->GetPrimitiveId();
+        _latestId = _initialId;
+    }
+
     void OnUpdate(const AppUpdateContext&) override {
         ++_updates;
         const auto count = GetGpuSystem()->GetFlightDataCount();
         const bool exit = _drainOnExit ? _updates == count : _updates == 13;
-        if (!exit) return;
+        if (!exit) {
+            if (_updates == 2) {
+                _actor->RemoveComponent(_component.Get());
+                _component = _actor->AddComponent<PrimitiveComponent>();
+                _latestId = _component->GetPrimitiveId();
+            }
+            return;
+        }
         if (_drainOnExit && count > 1) {
             // Runner closes window operations after setting its exit flag, before joining RT.
             _tasks.Spawn(ReleaseRenderOnCancellation());
@@ -83,6 +128,7 @@ protected:
 
     void OnRender(AppFrameContext& ctx) override {
         ++Recorded;
+        if (ctx.FrameSerial() == 1) EXPECT_TRUE(GetRenderSystem()->GetScene().ContainsPrimitive(_initialId));
         if (_drainOnExit && ctx.FrameSerial() == 1) {
             EXPECT_TRUE(_renderGate.try_acquire_for(std::chrono::seconds{10}));
         }
@@ -97,6 +143,8 @@ protected:
         PublishedFrames = GetGpuSystem()->GetFrameIndex();
         EXPECT_EQ(PublishedFrames, _updates - 1);
         EXPECT_EQ(Completed, PublishedFrames);
+        EXPECT_EQ(GetRenderSystem()->GetScene().ContainsPrimitive(_latestId), PublishedFrames > 0);
+        if (_latestId != _initialId) EXPECT_FALSE(GetRenderSystem()->GetScene().ContainsPrimitive(_initialId));
     }
 
 private:
@@ -107,6 +155,10 @@ private:
     }
 
     bool _drainOnExit;
+    Nullable<Actor*> _actor{nullptr};
+    Nullable<PrimitiveComponent*> _component{nullptr};
+    PrimitiveId _initialId;
+    PrimitiveId _latestId;
     uint64_t _updates{0};
     std::binary_semaphore _renderGate{0};
     TaskScope _tasks;
