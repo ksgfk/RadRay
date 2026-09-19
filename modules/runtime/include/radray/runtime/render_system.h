@@ -6,7 +6,8 @@
 #include <radray/nullable.h>
 #include <radray/render/render_pass_registry.h>
 #include <radray/runtime/shader_program.h>
-#include <radray/runtime/render_framework/scene.h>
+#include <radray/runtime/render_scene/render_scene.h>
+#include <radray/runtime/render_scene/scene_writer.h>
 #include <radray/runtime_type.h>
 #include <radray/types.h>
 
@@ -15,11 +16,10 @@ namespace radray {
 class Application;
 class GpuSystem;
 class ShaderProgramCache;
-class World;
-struct AppUpdateContext;
+class WorldRenderBridge;
 struct FlightCompletion;
 
-/// Persistent scene, per-flight updates and render caches. GPU flight ownership stays in GpuSystem.
+/// Scene delivery and shared render services. GT and RT registries communicate only through sealed flights.
 /// Contract: docs/architecture/render-framework.md
 class RenderSystem {
 public:
@@ -31,27 +31,28 @@ public:
     ~RenderSystem() noexcept;
 
     [[nodiscard]] bool OnInitialize();
-    /// GT, requires RT stopped, GPU idle and completions consumed; accepts partial initialization.
+    /// GT: Worlds disconnected, RT stopped, GPU idle, completions consumed; accepts partial initialization.
     void OnShutdown() noexcept;
     void SetGpuSystem(Nullable<GpuSystem*> gpu) noexcept { _gpuSystem = gpu; }
-    void SetAssetManager(Nullable<AssetManager*> assets) noexcept { _assetManager = assets; }
     render::RenderPassRegistry* GetRenderPassRegistry() const noexcept { return _renderPassRegistry.get(); }
 
-    /// GT, borrow only while the runner owns the writable slot. PrepareFrameGT requires an empty batch.
-    SceneUpdateBatch& GetFrameUpdateBatchGT(uint32_t flightIndex);
-    /// GT collection hook after World::Tick.
-    void PrepareFrameGT(World& world, const AppUpdateContext& ctx);
-    /// RT, every published flight, including skipped draws; no GPU/World access.
+    SceneId CreateSceneGT();
+    /// Empty for stale, closing, or World-owned scenes.
+    Nullable<SceneWriter*> GetSceneWriterGT(SceneId id) noexcept;
+    void DestroySceneGT(SceneId id);
+    /// GT: runner owns the writable flight; collects all writers once before publication.
+    void SealFrameGT(uint32_t flightIndex);
+    /// RT: exactly once per published flight, including skipped draws; no World access.
     void ConsumeRenderUpdates(uint32_t flightIndex);
-    /// GT, clear the matching batch and asset pins after real fence completion.
+    /// GT: releases retired owners and closing identities after a real fence completion.
     void OnFlightCompletedGT(const FlightCompletion& completion);
-    /// GT shutdown only: discard an unpublished batch. Continuing the same World/Scene is unsupported.
+    /// Shutdown only: RT stopped, GPU idle and real completions consumed.
     void AbandonUnpublishedFrameGT(uint32_t flightIndex);
-    /// GT, after RT stops and real completions have been consumed.
     void AbandonUnpublishedFramesGT();
-
-    /// RT only, or after RT stops. Asset views require Apply and active pins for the current flight.
-    const Scene& GetScene() const noexcept { return _scene; }
+    /// RT only, or after RT stops. Borrow ends at the next Apply or scene destruction.
+    Nullable<const RenderScene*> GetSceneRT(SceneId id) const noexcept;
+    /// RT only, or inspection after RT stops. Borrow expires at flight completion.
+    std::span<const SceneFrameUpdate> GetFrameUpdatesRT(uint32_t flightIndex) const;
 
     Nullable<ShaderProgram*> GetOrCreateShaderProgram(const ShaderProgramRequest& request);
     Nullable<ShaderProgram*> GetOrCreateShaderProgram(
@@ -63,16 +64,35 @@ public:
     bool InvalidateShaderSource(std::string_view sourceName);
 
 private:
-    SceneUpdateBatch& GetFrameUpdateBatch(uint32_t flightIndex);
+    friend class WorldRenderBridge;
+    SceneWriter& ClaimSceneWriterGT(SceneId id);
+    void ReleaseSceneWriterGT(SceneId id);
+
+    struct SceneRecord {
+        unique_ptr<SceneWriter> Writer;
+        bool CreatePending{true};
+        bool DestroyPending{false};
+        bool DestroySealed{false};
+    };
+    struct SceneSlotRT {
+        uint32_t Generation{0};
+        unique_ptr<RenderScene> Scene;
+    };
+    struct FrameUpdates {
+        vector<SceneFrameUpdate> Scenes;
+        size_t Count{0};
+        bool Sealed{false};
+    };
+    FrameUpdates& GetFrameUpdates(uint32_t flightIndex);
 
     Application* _app;
     Nullable<GpuSystem*> _gpuSystem{nullptr};
-    Nullable<AssetManager*> _assetManager{nullptr};
     unique_ptr<render::RenderPassRegistry> _renderPassRegistry;
     unique_ptr<ShaderProgramCache> _shaderCache;
-    vector<SceneUpdateBatch> _frameUpdates;
-    vector<vector<StreamingAssetRef<StaticMesh>>> _frameAssetRefs;
-    Scene _scene;
+    vector<FrameUpdates> _frameUpdates;
+    SparseSet<unique_ptr<SceneRecord>> _scenesGT;
+    vector<SceneId> _sceneIdsGT;
+    vector<SceneSlotRT> _scenesRT;
 };
 
 template <>

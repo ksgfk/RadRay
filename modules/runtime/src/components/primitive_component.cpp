@@ -1,31 +1,27 @@
 #include <radray/runtime/components/primitive_component.h>
 
-#include <radray/runtime/game_framework/world.h>
-
 namespace radray {
 
 PrimitiveComponent::~PrimitiveComponent() noexcept = default;
 
-void PrimitiveComponent::CreateRenderState(World& world) {
-    _primitiveId = world.AllocatePrimitiveId();
+void PrimitiveComponent::CreateRenderState(SceneWriter& writer) {
+    _primitiveId = writer.CreatePrimitive();
+    _sceneId = writer.GetSceneId();
     MarkRenderStateDirty();
+    OnRenderStateCreated();
 }
 
-void PrimitiveComponent::DestroyRenderState(World& world) {
-    if (_renderStateSent) world._removedPrimitives.push_back(_primitiveId);
-    world.ReleasePrimitiveId(_primitiveId);
+void PrimitiveComponent::DestroyRenderState(SceneWriter& writer) {
+    OnRenderStateDestroyed();
+    writer.RemovePrimitive(_primitiveId);
     _primitiveId = {};
-    _renderStateSent = false;
+    _sceneId = {};
 }
 
-void PrimitiveComponent::CollectRenderUpdates(SceneUpdateBatch& batch, RenderDirtyFlags dirty) {
-    if (!_renderStateSent) batch.CreatePrimitives.push_back(_primitiveId);
-    CollectPrimitiveUpdates(batch, dirty);
-    _renderStateSent = true;
+void PrimitiveComponent::CollectRenderUpdates(SceneWriter& writer, RenderDirtyFlags dirty) {
+    CollectPrimitiveUpdates(writer, dirty);
 }
 
-void PrimitiveComponent::OnTransformChanged() {
-    MarkRenderTransformDirty();
-}
+void PrimitiveComponent::OnTransformChanged() { MarkRenderTransformDirty(); }
 
 }  // namespace radray

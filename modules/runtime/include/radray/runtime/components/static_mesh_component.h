@@ -15,14 +15,13 @@ public:
     const StreamingAssetRef<StaticMesh>& GetStaticMesh() const noexcept { return _mesh; }
 
 private:
-    void OnRegister() override;
-    void OnUnregister() override;
+    void OnRenderStateCreated() override;
+    void OnRenderStateDestroyed() override;
     void StartMeshReadyWait();
-    task<void> WaitForMeshReady(StreamingAssetRef<StaticMesh> mesh, PrimitiveId registration);
-    void CollectPrimitiveUpdates(SceneUpdateBatch& batch, RenderDirtyFlags dirty) override;
+    task<void> WaitForMeshReady(StreamingAssetRef<StaticMesh> mesh, SceneId scene, PrimitiveId registration);
+    void CollectPrimitiveUpdates(SceneWriter& writer, RenderDirtyFlags dirty) override;
 
     StreamingAssetRef<StaticMesh> _mesh;
-    std::optional<AssetId> _sentMeshAssetId;
     unique_ptr<TaskScope> _readyWait;
 };
 

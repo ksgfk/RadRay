@@ -64,6 +64,15 @@ data/size/capacity，只有 `[0, size)` 中的元素被构造。未溢出时不�
 重定位优先使用不抛异常的移动，否则在可复制时复制。临时存储通过 RAII 清理；不可复制且移动可能失败的
 元素不保证在失败后保留原值。超过 `max_size()` 的容量请求通过 `RADRAY_ABORT` 拒绝。
 
+### SparseSet
+
+`sparse_set.h` 的 `SparseSet<T>` 用稀疏槽位、稠密值数组和空闲链管理可复用句柄。
+新槽 Generation 从 0 开始，Index 为 `UINT32_MAX` 表示无效句柄；Destroy 与 Clear 使被删除的
+存活句柄代次递增。代次不检查溢出，调用方约定同一槽位的代次在程序生命周期内不回绕。
+Get、Destroy 要求句柄存活，前置条件仅使用 Debug assert；可能失效的句柄使用 IsAlive 或 TryGet。
+增删只做必要的局部断言，不运行全表扫描；完整行为一致性校验由 `test_sparse_set.cpp` 的混合操作测试覆盖。
+删除用交换末项保持值数组稠密，可能移动其他值；句柄不因此改变，但值的地址与遍历顺序不稳定。
+
 ## Nullable
 
 三个特化：裸指针类、`unique_ptr`、`shared_ptr`。API：

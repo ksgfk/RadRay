@@ -1,3 +1,4 @@
+#include "scene_test_support.h"
 #include <gtest/gtest.h>
 
 #include <coroutine>
@@ -26,6 +27,23 @@ public:
         : StaticMesh(std::move(cpu), {{0, 0, 3, 0, 2}}, Eigen::Vector3f::Zero(), Eigen::Vector3f::Ones(), std::move(gpu)),
           _life(std::move(life)) {}
     ~TrackedMesh() noexcept override {
+        EXPECT_EQ(std::this_thread::get_id(), _life->GameThread);
+        EXPECT_EQ(_life->Unloaded, 1u);
+        ++_life->Destroyed;
+    }
+    void OnUnload(AssetManager&) override {
+        EXPECT_EQ(std::this_thread::get_id(), _life->GameThread);
+        ++_life->Unloaded;
+    }
+
+private:
+    shared_ptr<Lifetime> _life;
+};
+
+class TrackedAsset final : public Asset {
+public:
+    explicit TrackedAsset(shared_ptr<Lifetime> life) : _life(std::move(life)) {}
+    ~TrackedAsset() noexcept override {
         EXPECT_EQ(std::this_thread::get_id(), _life->GameThread);
         EXPECT_EQ(_life->Unloaded, 1u);
         ++_life->Destroyed;
@@ -100,36 +118,36 @@ protected:
     StreamingAssetRef<StaticMesh> Loading(uint32_t id, Gate* gate, shared_ptr<Lifetime> life) {
         return Assets.Load({.Id = MeshId(id), .Task = LoadMesh(gate, std::move(life), id)}).CastTo<StaticMesh>();
     }
-    void Prepare(uint32_t flight) { Render.PrepareFrameGT(GameWorld, {.FlightIndex = flight}); }
+    void Prepare(uint32_t flight) { test::PrepareScene(GameWorld, Render, flight); }
     void Complete(uint32_t flight) { Render.OnFlightCompletedGT({.FlightIndex = flight, .GpuWorkCompleted = true}); }
     void Flush() {
-        GameWorld.FlushRenderUpdates(Batch);
+        test::CollectScene(GameWorld, Render, Batch);
         Data.Apply(Batch);
         Batch.Clear();
     }
 
     Application App;
     AssetManager Assets;
-    World GameWorld;
+    RenderAssetLifetime AssetLifetime{3};
     RenderSystem Render{&App, 3};
+    World GameWorld;
+    SceneId RenderId{GameWorld.AttachToRendering(Render)};
     Actor* Owner{GameWorld.SpawnActor()};
     SceneUpdateBatch Batch;
-    Scene Data;
-
-    void SetUp() override { Render.SetAssetManager(&Assets); }
+    RenderScene Data;
 };
 
-TEST_F(SceneAssets, StationaryObjectsArePinnedInEveryFlightUntilItsCompletion) {
+TEST_F(SceneAssets, StationaryObjectsStayAliveUntilTheRemovalFlightCompletes) {
     for (uint32_t count : {1u, 2u, 3u}) {
         auto life = make_shared<Lifetime>();
         auto* component = Add(Ready(count, life));
         const auto id = component->GetPrimitiveId();
         for (uint32_t i = 0; i < count; ++i) {
             Prepare(i);
-            if (i != 0) EXPECT_TRUE(Render.GetFrameUpdateBatchGT(i).Empty());
+            if (i != 0) EXPECT_TRUE(test::SceneBatch(Render, RenderId, i).Empty());
             Render.ConsumeRenderUpdates(i);
-            ASSERT_TRUE(Render.GetScene().GetStaticMesh(id)->Mesh.RenderMesh);
-            EXPECT_EQ(Render.GetScene().GetStaticMesh(id)->Mesh.RenderMesh->Draws[0].Ibv.Offset, count);
+            ASSERT_TRUE(Render.GetSceneRT(RenderId)->GetStaticMesh(id)->Mesh.RenderMesh);
+            EXPECT_EQ(Render.GetSceneRT(RenderId)->GetStaticMesh(id)->Mesh.RenderMesh->Draws[0].Ibv.Offset, count);
         }
         Owner->RemoveComponent(component);
         for (uint32_t i = 0; i < count; ++i) {
@@ -138,12 +156,14 @@ TEST_F(SceneAssets, StationaryObjectsArePinnedInEveryFlightUntilItsCompletion) {
             Complete(i);
         }
         Assets.Pump();
-        EXPECT_EQ(life->Destroyed, 1u);
-        // Removal must not dereference the now-retired asset in the persistent Scene.
+        EXPECT_EQ(life->Destroyed, 0u);
+        // The last binding remains owned until its removal is delivered and completed.
         Prepare(0);
         Render.ConsumeRenderUpdates(0);
-        EXPECT_FALSE(Render.GetScene().GetStaticMesh(id));
+        EXPECT_FALSE(Render.GetSceneRT(RenderId)->GetStaticMesh(id));
         Complete(0);
+        Assets.Pump();
+        EXPECT_EQ(life->Destroyed, 1u);
     }
 }
 
@@ -159,12 +179,12 @@ TEST_F(SceneAssets, RenderThreadCanReadOldGeometryWhileGameThreadRebindsAndDelet
         Render.ConsumeRenderUpdates(0);
         applied.release();
         changed.acquire();
-        const auto view = Render.GetScene().GetStaticMesh(id);
+        const auto view = Render.GetSceneRT(RenderId)->GetStaticMesh(id);
         EXPECT_EQ(view->Mesh.RenderMesh->Draws[0].Ibv.Offset, 1u);
         Render.ConsumeRenderUpdates(1);
-        EXPECT_EQ(Render.GetScene().GetStaticMesh(id)->Mesh.RenderMesh->Draws[0].Ibv.Offset, 2u);
+        EXPECT_EQ(Render.GetSceneRT(RenderId)->GetStaticMesh(id)->Mesh.RenderMesh->Draws[0].Ibv.Offset, 2u);
         Render.ConsumeRenderUpdates(2);
-        EXPECT_FALSE(Render.GetScene().GetStaticMesh(id));
+        EXPECT_FALSE(Render.GetSceneRT(RenderId)->GetStaticMesh(id));
     });
     applied.acquire();
     component->SetStaticMesh(Ready(2, newLife));
@@ -176,15 +196,15 @@ TEST_F(SceneAssets, RenderThreadCanReadOldGeometryWhileGameThreadRebindsAndDelet
     EXPECT_EQ(newLife->Destroyed, 0u);
     changed.release();
     rt.join();
-    Complete(2);
+    Complete(0);
     Assets.Pump();
     EXPECT_EQ(oldLife->Destroyed, 0u);
     EXPECT_EQ(newLife->Destroyed, 0u);
-    Complete(0);
+    Complete(1);
     Assets.Pump();
     EXPECT_EQ(oldLife->Destroyed, 1u);
     EXPECT_EQ(newLife->Destroyed, 0u);
-    Complete(1);
+    Complete(2);
     Assets.Pump();
     EXPECT_EQ(newLife->Destroyed, 1u);
 }
@@ -198,27 +218,22 @@ TEST_F(SceneAssets, SharedMeshIsRetainedOnceAndRemovedOnlyAfterItsLastUser) {
     Flush();
     for (auto* component : components) component->MarkRenderStateDirty();
     Flush();
-    vector<StreamingAssetRef<StaticMesh>> refs;
-    GameWorld.RetainRenderAssets(&Assets, refs);
-    ASSERT_EQ(refs.size(), 1u);
-    refs.clear();
+    Assets.Pump();
+    EXPECT_EQ(life->Destroyed, 0u);
     while (components.size() > 1) {
         Owner->RemoveComponent(components.back());
         components.pop_back();
     }
     Flush();
-    GameWorld.RetainRenderAssets(&Assets, refs);
-    ASSERT_EQ(refs.size(), 1u);
-    refs.clear();
+    Assets.Pump();
+    EXPECT_EQ(life->Destroyed, 0u);
     Owner->RemoveComponent(components.back());
     Flush();
-    GameWorld.RetainRenderAssets(&Assets, refs);
-    EXPECT_TRUE(refs.empty());
     Assets.Pump();
     EXPECT_EQ(life->Destroyed, 1u);
 }
 
-TEST_F(SceneAssets, ReplaceDoesNotReadTheRetiredAsset) {
+TEST_F(SceneAssets, ReplacementRetiresOldAssetOnItsOwnCompletion) {
     auto oldLife = make_shared<Lifetime>();
     auto* component = Add(Ready(1, oldLife));
     const auto id = component->GetPrimitiveId();
@@ -227,11 +242,13 @@ TEST_F(SceneAssets, ReplaceDoesNotReadTheRetiredAsset) {
     Complete(0);
     component->SetStaticMesh(Ready(2, make_shared<Lifetime>()));
     Assets.Pump();
-    EXPECT_EQ(oldLife->Destroyed, 1u);
+    EXPECT_EQ(oldLife->Destroyed, 0u);
     Prepare(0);
     Render.ConsumeRenderUpdates(0);
-    EXPECT_EQ(Render.GetScene().GetStaticMesh(id)->Mesh.RenderMesh->Draws[0].Ibv.Offset, 2u);
+    EXPECT_EQ(Render.GetSceneRT(RenderId)->GetStaticMesh(id)->Mesh.RenderMesh->Draws[0].Ibv.Offset, 2u);
     Complete(0);
+    Assets.Pump();
+    EXPECT_EQ(oldLife->Destroyed, 1u);
 }
 
 TEST_F(SceneAssets, RemovingOneWaiterDoesNotCancelTheSharedLoad) {
@@ -249,7 +266,7 @@ TEST_F(SceneAssets, RemovingOneWaiterDoesNotCancelTheSharedLoad) {
     Assets.Pump();
     EXPECT_TRUE(loading.IsReady());
     remaining->SetRelativeLocation({7, 8, 9});
-    GameWorld.FlushRenderUpdates(Batch);
+    test::CollectScene(GameWorld, Render, Batch);
     ASSERT_EQ(Batch.MeshStates.size(), 1u);
     EXPECT_EQ(Batch.MeshStates[0].Id, id);
     EXPECT_FLOAT_EQ(Batch.MeshStates[0].LocalToWorld(0, 3), 7);
@@ -268,7 +285,7 @@ TEST_F(SceneAssets, OldRequestCompletionCannotDirtyOrReplaceTheNewBinding) {
     gate.Resume();
     Assets.Pump();
     ASSERT_TRUE(loading.IsReady());
-    GameWorld.FlushRenderUpdates(Batch);
+    test::CollectScene(GameWorld, Render, Batch);
     EXPECT_TRUE(Batch.Empty());
     EXPECT_EQ(Data.GetStaticMesh(id)->Mesh.RenderMesh->Draws[0].Ibv.Offset, 2u);
 }
@@ -286,7 +303,7 @@ TEST_F(SceneAssets, ReusedPrimitiveSlotNotifiesOnlyItsCurrentRegistration) {
     Flush();
     gate.Resume();
     Assets.Pump();
-    GameWorld.FlushRenderUpdates(Batch);
+    test::CollectScene(GameWorld, Render, Batch);
     ASSERT_EQ(Batch.MeshStates.size(), 1u);
     EXPECT_EQ(Batch.MeshStates[0].Id, id);
 }
@@ -300,7 +317,7 @@ TEST_F(SceneAssets, ReturningToTheSameLoadingRequestArmsANewWaiter) {
     Flush();
     gate.Resume();
     Assets.Pump();
-    GameWorld.FlushRenderUpdates(Batch);
+    test::CollectScene(GameWorld, Render, Batch);
     ASSERT_EQ(Batch.MeshStates.size(), 1u);
     EXPECT_TRUE(Batch.MeshStates[0].Mesh.RenderMesh);
 }
@@ -316,7 +333,7 @@ TEST_F(SceneAssets, CancelingSharedLoadLeavesNoGeometryAndReleasesWaiters) {
     gate.Resume();
     Assets.Pump();
     EXPECT_TRUE(loading.IsCanceled());
-    GameWorld.FlushRenderUpdates(Batch);
+    test::CollectScene(GameWorld, Render, Batch);
     EXPECT_TRUE(Batch.Empty());
     EXPECT_FALSE(Data.GetStaticMesh(id)->Mesh.RenderMesh);
     Owner->RemoveComponent(component);
@@ -338,7 +355,7 @@ TEST_F(SceneAssets, FailedLoadLeavesNoGeometryAndReleasesWaiters) {
     gate.Resume();
     Assets.Pump();
     EXPECT_TRUE(loading.IsFaulted());
-    GameWorld.FlushRenderUpdates(Batch);
+    test::CollectScene(GameWorld, Render, Batch);
     EXPECT_TRUE(Batch.Empty());
     EXPECT_FALSE(Data.GetStaticMesh(id)->Mesh.RenderMesh);
     Owner->RemoveComponent(component);
@@ -368,15 +385,17 @@ TEST_F(SceneAssets, ShutdownReleasesUnpublishedPinsAfterPublishedCompletion) {
     auto* component = Add(Ready(1, life));
     Prepare(0);
     Render.ConsumeRenderUpdates(0);
-    Prepare(1);
     Owner->RemoveComponent(component);
+    Prepare(1);
     Complete(0);
     Assets.Pump();
     EXPECT_EQ(life->Destroyed, 0u);
     Render.AbandonUnpublishedFrameGT(1);
     Assets.Pump();
     EXPECT_EQ(life->Destroyed, 1u);
+    GameWorld.DetachFromRendering();
     Render.OnShutdown();
+    GameWorld.DetachFromRendering();
     Render.OnShutdown();
 }
 
@@ -389,23 +408,257 @@ TEST_F(SceneAssets, EmptyAssetIdCanStillBeAReadyBinding) {
     EXPECT_EQ(life->Destroyed, 0u);
     Render.ConsumeRenderUpdates(0);
     Complete(0);
+    Prepare(1);
+    Render.ConsumeRenderUpdates(1);
+    Complete(1);
     Assets.Pump();
     EXPECT_EQ(life->Destroyed, 1u);
 }
 
-TEST(SceneAssetsDeathTest, MissingOrDifferentReadyObjectCannotPinAPublishedView) {
-    AssetManager source;
-    AssetManager wrong;
-    World world;
+TEST_F(SceneAssets, SameFrameRemovalAndNewBindingKeepTheSharedAssetResident) {
     auto life = make_shared<Lifetime>();
-    world.SpawnActor()->AddComponent<StaticMeshComponent>()->SetStaticMesh(source.AddReady<StaticMesh>(MeshId(1), MakeMesh(life, 1)));
-    SceneUpdateBatch batch;
-    world.FlushRenderUpdates(batch);
-    vector<StreamingAssetRef<StaticMesh>> refs;
-    EXPECT_DEATH(world.RetainRenderAssets(nullptr, refs), "");
-    EXPECT_DEATH(world.RetainRenderAssets(&wrong, refs), "");
-    auto other = wrong.AddReady<StaticMesh>(MeshId(1), MakeMesh(make_shared<Lifetime>(), 2));
-    EXPECT_DEATH(world.RetainRenderAssets(&wrong, refs), "");
+    auto asset = Ready(1, life);
+    auto* old = Add(asset);
+    Prepare(0);
+    Render.ConsumeRenderUpdates(0);
+    Complete(0);
+    Owner->RemoveComponent(old);
+    auto* replacement = Add(asset);
+    asset.Reset();
+    Prepare(0);
+    Render.ConsumeRenderUpdates(0);
+    Complete(0);
+    Assets.Pump();
+    EXPECT_EQ(life->Destroyed, 0u);
+    EXPECT_TRUE(Render.GetSceneRT(RenderId)->GetStaticMesh(replacement->GetPrimitiveId())->Mesh.RenderMesh);
+    Owner->RemoveComponent(replacement);
+    Prepare(1);
+    Render.ConsumeRenderUpdates(1);
+    Assets.Pump();
+    EXPECT_EQ(life->Destroyed, 0u);
+    Render.OnFlightCompletedGT({.FlightIndex = 1, .GpuWorkCompleted = false});
+    Assets.Pump();
+    EXPECT_EQ(life->Destroyed, 1u);
+}
+
+TEST_F(SceneAssets, WorldDestructionLeavesPublishedViewsOwnedUntilQuiescentShutdown) {
+    auto life = make_shared<Lifetime>();
+    auto world = make_unique<World>();
+    const auto otherScene = world->AttachToRendering(Render);
+    auto* component = world->SpawnActor()->AddComponent<StaticMeshComponent>();
+    component->SetStaticMesh(Ready(1, life));
+    const auto id = component->GetPrimitiveId();
+    test::PrepareScene(*world, Render, 0);
+    world.reset();
+    Assets.Pump();
+    EXPECT_EQ(life->Destroyed, 0u);
+    Render.ConsumeRenderUpdates(0);
+    EXPECT_EQ(Render.GetSceneRT(otherScene)->GetStaticMesh(id)->Mesh.RenderMesh->Draws[0].Ibv.Offset, 1u);
+    Complete(0);
+    Assets.Pump();
+    EXPECT_EQ(life->Destroyed, 0u);
+    GameWorld.DetachFromRendering();
+    Render.OnShutdown();
+    Assets.Pump();
+    EXPECT_EQ(life->Destroyed, 1u);
+}
+
+TEST_F(SceneAssets, LifetimeAcceptsDifferentAssetTypesAndRetiresOnlyTheLastUse) {
+    auto meshLife = make_shared<Lifetime>();
+    auto otherLife = make_shared<Lifetime>();
+    auto mesh = Ready(1, meshLife);
+    auto other = Assets.AddReady<TrackedAsset>(MeshId(2), make_unique<TrackedAsset>(otherLife));
+    for (int i = 0; i < 1000; ++i) AssetLifetime.AddUse(mesh.AsAny());
+    AssetLifetime.AddUse(other.AsAny());
+    mesh.Reset();
+    other.Reset();
+    for (int i = 0; i < 999; ++i) AssetLifetime.RemoveUse(MeshId(1));
+    AssetLifetime.RemoveUse(MeshId(2));
+    AssetLifetime.SealRetirements(0);
+    Assets.Pump();
+    EXPECT_EQ(meshLife->Destroyed, 0u);
+    EXPECT_EQ(otherLife->Destroyed, 0u);
+    AssetLifetime.ReleaseFlight(0);
+    Assets.Pump();
+    EXPECT_EQ(meshLife->Destroyed, 0u);
+    EXPECT_EQ(otherLife->Destroyed, 1u);
+    AssetLifetime.RemoveUse(MeshId(1));
+    AssetLifetime.SealRetirements(1);
+    AssetLifetime.ReleaseFlight(1);
+    Assets.Pump();
+    EXPECT_EQ(meshLife->Destroyed, 1u);
+}
+
+TEST_F(SceneAssets, RepeatedZeroUseTransitionsMergeBeforeSealAndCanRetireAgainLater) {
+    auto life = make_shared<Lifetime>();
+    auto asset = Ready(1, life);
+    AssetLifetime.AddUse(asset.AsAny());
+    for (int i = 0; i < 1000; ++i) {
+        AssetLifetime.RemoveUse(MeshId(1));
+        AssetLifetime.AddUse(asset.AsAny());
+    }
+    asset.Reset();
+    AssetLifetime.SealRetirements(0);
+    AssetLifetime.ReleaseFlight(0);
+    Assets.Pump();
+    EXPECT_EQ(life->Destroyed, 0u);
+    AssetLifetime.RemoveUse(MeshId(1));
+    AssetLifetime.SealRetirements(1);
+    AssetLifetime.ReleaseFlight(1);
+    Assets.Pump();
+    EXPECT_EQ(life->Destroyed, 1u);
+}
+
+TEST_F(SceneAssets, RebindingAfterSealSurvivesTheOldRetirementCompletion) {
+    auto life = make_shared<Lifetime>();
+    auto asset = Ready(1, life);
+    AssetLifetime.AddUse(asset.AsAny());
+    AssetLifetime.RemoveUse(MeshId(1));
+    AssetLifetime.SealRetirements(0);
+    AssetLifetime.AddUse(asset.AsAny());
+    asset.Reset();
+    AssetLifetime.SealRetirements(1);
+    AssetLifetime.ReleaseFlight(0);
+    Assets.Pump();
+    EXPECT_EQ(life->Destroyed, 0u);
+    AssetLifetime.ReleaseFlight(1);
+    AssetLifetime.RemoveUse(MeshId(1));
+    AssetLifetime.SealRetirements(2);
+    AssetLifetime.ReleaseFlight(2);
+    Assets.Pump();
+    EXPECT_EQ(life->Destroyed, 1u);
+}
+
+TEST_F(SceneAssets, DestroyingOneSceneRetainsSharedAssetUntilLastSceneCompletes) {
+    auto life = make_shared<Lifetime>();
+    auto asset = Ready(31, life);
+    auto* firstMesh = Add(asset);
+    const auto firstPrimitive = firstMesh->GetPrimitiveId();
+    World other;
+    const auto otherScene = other.AttachToRendering(Render);
+    auto* secondMesh = other.SpawnActor()->AddComponent<StaticMeshComponent>();
+    secondMesh->SetStaticMesh(asset);
+    const auto secondPrimitive = secondMesh->GetPrimitiveId();
+    asset.Reset();
+    GameWorld.CollectRenderUpdates();
+    other.CollectRenderUpdates();
+    Render.SealFrameGT(0);
+    // Destroy the source before RT has applied its creation.
+    GameWorld.DestroyActor(Owner);
+    Owner = nullptr;
+    GameWorld.DetachFromRendering();
+    Render.SealFrameGT(1);
+    Render.ConsumeRenderUpdates(0);
+    EXPECT_TRUE(Render.GetSceneRT(RenderId)->GetStaticMesh(firstPrimitive)->Mesh.RenderMesh);
+    Render.ConsumeRenderUpdates(1);
+    EXPECT_FALSE(Render.GetSceneRT(RenderId));
+    EXPECT_TRUE(Render.GetSceneRT(otherScene)->GetStaticMesh(secondPrimitive)->Mesh.RenderMesh);
+    Complete(0);
+    Complete(1);
+    Assets.Pump();
+    EXPECT_EQ(life->Destroyed, 0u);
+    other.DestroyActor(other.GetActors().front().get());
+    other.DetachFromRendering();
+    Render.SealFrameGT(2);
+    Render.ConsumeRenderUpdates(2);
+    Assets.Pump();
+    EXPECT_EQ(life->Destroyed, 0u);
+    Complete(2);
+    Assets.Pump();
+    EXPECT_EQ(life->Destroyed, 1u);
+}
+
+TEST_F(SceneAssets, ReconnectRejectsOldReadyRequestAndPublishesWhilePaused) {
+    Gate oldGate;
+    Gate newGate;
+    auto oldLife = make_shared<Lifetime>();
+    auto newLife = make_shared<Lifetime>();
+    auto oldRequest = Loading(41, &oldGate, oldLife);
+    auto newRequest = Loading(42, &newGate, newLife);
+    auto* component = Add(oldRequest);
+    Prepare(0);
+    Render.ConsumeRenderUpdates(0);
+    Complete(0);
+    const auto oldScene = RenderId;
+    const auto oldPrimitive = component->GetPrimitiveId();
+    GameWorld.DetachFromRendering();
+    component->SetStaticMesh(newRequest);
+    GameWorld.SetTickEnabled(false);
+    RenderId = GameWorld.AttachToRendering(Render);
+    EXPECT_NE(RenderId, oldScene);
+    EXPECT_EQ(component->GetPrimitiveId(), oldPrimitive);
+    Prepare(0);
+    Render.ConsumeRenderUpdates(0);
+    Complete(0);
+    oldGate.Resume();
+    Assets.Pump();
+    Prepare(0);
+    EXPECT_TRUE(test::SceneBatch(Render, RenderId, 0).Empty());
+    Render.ConsumeRenderUpdates(0);
+    Complete(0);
+    component->SetRelativeLocation({71, 0, 0});
+    newGate.Resume();
+    Assets.Pump();
+    Prepare(0);
+    Render.ConsumeRenderUpdates(0);
+    auto view = Render.GetSceneRT(RenderId)->GetStaticMesh(component->GetPrimitiveId());
+    ASSERT_TRUE(view);
+    ASSERT_TRUE(view->Mesh.RenderMesh);
+    EXPECT_EQ(view->Mesh.RenderMesh->Draws[0].Ibv.Offset, 42u);
+    EXPECT_FLOAT_EQ(view->LocalToWorld(0, 3), 71);
+    Complete(0);
+}
+
+TEST_F(SceneAssets, StandaloneWriterCoalescesReplacementAndRetainsFinalBinding) {
+    auto firstLife = make_shared<Lifetime>();
+    auto secondLife = make_shared<Lifetime>();
+    auto first = Ready(51, firstLife);
+    auto second = Ready(52, secondLife);
+    const auto scene = Render.CreateSceneGT();
+    auto writer = Render.GetSceneWriterGT(scene);
+    const auto primitive = writer->CreatePrimitive();
+    writer->SetStaticMesh(primitive, first, Eigen::Matrix4f::Identity());
+    writer->SetStaticMesh(primitive, second, Eigen::Matrix4f::Identity());
+    first.Reset();
+    second.Reset();
+    Render.SealFrameGT(0);
+    EXPECT_EQ(test::SceneBatch(Render, scene, 0).MeshStates.size(), 1u);
+    Render.ConsumeRenderUpdates(0);
+    EXPECT_EQ(Render.GetSceneRT(scene)->GetStaticMesh(primitive)->Mesh.RenderMesh->Draws[0].Ibv.Offset, 52u);
+    Complete(0);
+    Assets.Pump();
+    EXPECT_EQ(firstLife->Destroyed, 1u);
+    EXPECT_EQ(secondLife->Destroyed, 0u);
+    Render.DestroySceneGT(scene);
+    Render.SealFrameGT(1);
+    Render.ConsumeRenderUpdates(1);
+    Assets.Pump();
+    EXPECT_EQ(secondLife->Destroyed, 0u);
+    Complete(1);
+    Assets.Pump();
+    EXPECT_EQ(secondLife->Destroyed, 1u);
+}
+
+TEST(SceneAssetsDeathTest, RejectsConflictingAssetIdentity) {
+    AssetManager source;
+    AssetManager otherManager;
+    RenderAssetLifetime lifetime{2};
+    World world;
+    auto asset = source.AddReady<StaticMesh>(MeshId(1), MakeMesh(make_shared<Lifetime>(), 1));
+    world.SpawnActor()->AddComponent<StaticMeshComponent>()->SetStaticMesh(asset);
+    world.CollectRenderUpdates();
+    EXPECT_FALSE(world.GetRenderSceneId());
+    lifetime.AddUse(asset.AsAny());
+    auto other = otherManager.AddReady<StaticMesh>(MeshId(1), MakeMesh(make_shared<Lifetime>(), 2));
+    EXPECT_DEATH(lifetime.AddUse(other.AsAny()), "");
+    EXPECT_DEATH(lifetime.AddUse({}), "");
+    EXPECT_DEATH(lifetime.RemoveUse(MeshId(2)), "");
+    EXPECT_DEATH(lifetime.SealRetirements(2), "");
+    EXPECT_DEATH(lifetime.ReleaseFlight(2), "");
+    lifetime.RemoveUse(MeshId(1));
+    EXPECT_DEATH(lifetime.RemoveUse(MeshId(1)), "");
+    lifetime.SealRetirements(0);
+    EXPECT_DEATH(lifetime.SealRetirements(0), "");
 }
 
 }  // namespace

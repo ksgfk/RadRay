@@ -20,7 +20,7 @@
 #include <radray/runtime/static_mesh.h>
 #include <radray/runtime/texture_asset.h>
 #include <radray/runtime/render_system.h>
-#include <radray/runtime/game_framework/world.h>
+#include <radray/runtime/world_manager.h>
 #include <radray/window/native_window.h>
 
 #if defined(RADRAY_PLATFORM_WINDOWS) && (defined(RADRAY_ENABLE_D3D12) || defined(RADRAY_ENABLE_VULKAN))
@@ -928,13 +928,12 @@ AppUpdateResult Application::Update(const AppUpdateContext& ctx) {
     _scheduler.Pump();
     // 2) 游戏逻辑。
     OnUpdate(ctx);
-    // 3) World Tick。
-    if (_world != nullptr) {
-        _world->Tick(ctx.DeltaTime.count());
+    // 3) World Tick、延迟销毁与渲染收集。
+    if (_worldManager != nullptr) {
+        _worldManager->Tick(ctx.DeltaTime.count());
+        _worldManager->CollectRenderUpdates();
     }
-    if (_renderSystem != nullptr && _world != nullptr) {
-        _renderSystem->PrepareFrameGT(*_world, ctx);
-    }
+    if (_renderSystem != nullptr) _renderSystem->SealFrameGT(ctx.FlightIndex);
     return AppUpdateResult{ShouldExit()};
 }
 
@@ -962,7 +961,7 @@ int Application::Shutdown(const AppShutdownContext& ctx) {
 void Application::DestroyRuntime() noexcept {
     if (_windowManager != nullptr) _windowManager->CloseOperations();
     // 拆 World:销毁 Actor / Component，释放其持有的 StreamingAssetRef。
-    _world.reset();
+    _worldManager.reset();
     // 其 RenderPassRegistry 随之销毁,故须先切断 WindowManager 的非 owning 引用。
     if (_windowManager != nullptr) {
         _windowManager->SetRenderSystem(nullptr);
@@ -1024,6 +1023,7 @@ bool Application::InitializeRuntime(const ApplicationRuntimeDescriptor& desc) {
         .FlightDataCount = desc.FlightDataCount};
     _gpuSystem = make_unique<GpuSystem>(gpuSysDesc);
     _renderSystem = make_unique<RenderSystem>(this, _gpuSystem->GetFlightDataCount());
+    _worldManager = make_unique<WorldManager>(this, _renderSystem.get());
     _assetManager = make_unique<AssetManager>();
     if (!desc.AssetRoot.empty()) {
         string error;
@@ -1035,13 +1035,11 @@ bool Application::InitializeRuntime(const ApplicationRuntimeDescriptor& desc) {
             RADRAY_ERR_LOG("open asset database failed: {}", error);
         }
     }
-    _world = make_unique<World>(this);
 
     _windowManager->SetGpuSystem(_gpuSystem.get());
     _windowManager->SetRenderSystem(_renderSystem.get());
     _gpuSystem->SetWindowManager(_windowManager.get());
     _renderSystem->SetGpuSystem(_gpuSystem.get());
-    _renderSystem->SetAssetManager(_assetManager.get());
     _assetManager->SetWaitFrameProcessor(_gpuSystem.get());
     _assetManager->SetAssetSource(_assetDatabase.get());
 

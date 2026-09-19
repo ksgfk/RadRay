@@ -96,9 +96,10 @@ CPU record/Submit 时间与 GPU 时间线分开解读。关闭使用 `-DRADRAY_E
 | `test_asset_slot` | `AssetSlotTest` |
 | `test_frame_upload` | `FrameUploadTest` |
 | `test_gpu_system` | `GpuSystemTest`, `GpuSystemDeathTest` |
-| `test_scene_delivery` | `SceneDelivery`（含 CPU 交付契约与 D3D12/Vulkan runner，F=1/2/3） |
+| `test_scene_delivery` | `SceneDelivery`, `MultiWorldSceneRunner`（含单/多场景 CPU 交付与 D3D12/Vulkan runner，F=1/2/3） |
+| `test_world_scenes` | `WorldManager`, `WorldScenes`（多 World 所有权、暂停、独立场景写入、连接与退休） |
 | `test_scene_updates` | `SceneUpdates`（组件标脏合并、生命周期、代次与收集约束；纯 CPU） |
-| `test_scene_assets` | `SceneAssets`（flight 资产保活、Ready 通知、共享等待取消与 GT 释放；纯 CPU） |
+| `test_scene_assets` | `SceneAssets`（类型无关的资产常驻/退休、Ready 通知、共享等待取消与 GT 释放；纯 CPU） |
 | `test_static_mesh_scene` | `StaticMeshScene`（CPU mesh 描述、变换/bounds、替换/删除与持久描述；无 GPU 资源） |
 | `test_multi_window` | `RuntimeMultiWindow`（三窗口交换链、有序提交与生命周期） |
 | `test_flight_completion` | `FlightCompletionTest` |

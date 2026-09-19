@@ -1,6 +1,6 @@
 #pragma once
 
-#include <radray/runtime/render_framework/scene.h>
+#include <radray/runtime/render_scene/render_scene.h>
 
 namespace radray {
 

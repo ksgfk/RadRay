@@ -6,6 +6,7 @@
 #include <radray/runtime/asset_manager.h>
 #include <radray/runtime/game_framework/actor.h>
 #include <radray/runtime/game_framework/world.h>
+#include <radray/runtime/world_manager.h>
 #include <radray/runtime/gpu_system.h>
 #include <radray/runtime/render_system.h>
 
@@ -25,9 +26,10 @@ public:
 
 protected:
     void OnInit() override {
-        ASSERT_NE(GetWorld(), nullptr);
-        ASSERT_NE(GetWorld()->SpawnActor(), nullptr);
-        WorldAvailable = GetWorld()->GetActors().size() == 1;
+        const auto worldId = GetWorldManager()->CreateWorld();
+        ASSERT_TRUE(GetWorldManager()->GetWorld(worldId));
+        ASSERT_NE(GetWorldManager()->GetWorld(worldId)->SpawnActor(), nullptr);
+        WorldAvailable = GetWorldManager()->GetWorld(worldId)->GetActors().size() == 1;
         auto deferred = make_shared<int>(1);
         _deferredLifetime = deferred;
         GetAssetManager()->DeferDestroy(std::move(deferred));

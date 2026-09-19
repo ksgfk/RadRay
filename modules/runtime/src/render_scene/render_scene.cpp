@@ -1,4 +1,4 @@
-#include <radray/runtime/render_framework/scene.h>
+#include <radray/runtime/render_scene/render_scene.h>
 
 #include "static_mesh_proxy.h"
 
@@ -6,19 +6,12 @@
 
 namespace radray {
 
-void SceneUpdateBatch::Clear() noexcept {
-    RemovePrimitives.clear();
-    CreatePrimitives.clear();
-    MeshStates.clear();
-    Transforms.clear();
-}
+RenderScene::RenderScene() noexcept = default;
+RenderScene::~RenderScene() noexcept = default;
+RenderScene::RenderScene(RenderScene&&) noexcept = default;
+RenderScene& RenderScene::operator=(RenderScene&&) noexcept = default;
 
-Scene::Scene() noexcept = default;
-Scene::~Scene() noexcept = default;
-Scene::Scene(Scene&&) noexcept = default;
-Scene& Scene::operator=(Scene&&) noexcept = default;
-
-void Scene::Apply(const SceneUpdateBatch& batch) noexcept {
+void RenderScene::Apply(const SceneUpdateBatch& batch) noexcept {
     for (PrimitiveId id : batch.RemovePrimitives) {
         if (!ContainsPrimitive(id)) RADRAY_ABORT("Invalid primitive removal");
         auto& slot = _primitives[id.Index];
@@ -31,12 +24,13 @@ void Scene::Apply(const SceneUpdateBatch& batch) noexcept {
             slot.MeshIndex = std::numeric_limits<size_t>::max();
         }
         slot.Alive = false;
+        ++slot.Generation;
     }
     for (PrimitiveId id : batch.CreatePrimitives) {
         if (!id.IsValid()) RADRAY_ABORT("Invalid primitive creation");
         if (id.Index >= _primitives.size()) _primitives.resize(static_cast<size_t>(id.Index) + 1);
         auto& slot = _primitives[id.Index];
-        if (slot.Alive || id.Generation <= slot.Generation) RADRAY_ABORT("Stale primitive creation");
+        if (slot.Alive || id.Generation < slot.Generation) RADRAY_ABORT("Stale primitive creation");
         slot.Generation = id.Generation;
         slot.Alive = true;
     }
@@ -57,12 +51,12 @@ void Scene::Apply(const SceneUpdateBatch& batch) noexcept {
     }
 }
 
-bool Scene::ContainsPrimitive(PrimitiveId id) const noexcept {
+bool RenderScene::ContainsPrimitive(PrimitiveId id) const noexcept {
     return id.IsValid() && id.Index < _primitives.size() &&
            _primitives[id.Index].Alive && _primitives[id.Index].Generation == id.Generation;
 }
 
-std::optional<StaticMeshSceneView> Scene::GetStaticMesh(PrimitiveId id) const noexcept {
+std::optional<StaticMeshSceneView> RenderScene::GetStaticMesh(PrimitiveId id) const noexcept {
     if (!ContainsPrimitive(id) || !_primitives[id.Index].Mesh) return std::nullopt;
     return _primitives[id.Index].Mesh->GetView();
 }

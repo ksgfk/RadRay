@@ -1,17 +1,20 @@
 #pragma once
 
 #include <concepts>
+#include <optional>
 #include <span>
 
 #include <radray/runtime_type.h>
 #include <radray/types.h>
 #include <radray/runtime/components/scene_component.h>
-#include <radray/runtime/render_framework/scene.h>
+#include <radray/runtime/render_scene/scene_id.h>
 
 namespace radray {
 
 class Application;
 class Actor;
+class RenderSystem;
+class WorldRenderBridge;
 
 /// 顶层容器。管理所有 Actor 及其组件生命周期。
 /// 对应 UE5 的 UWorld。
@@ -30,48 +33,41 @@ public:
     template <class T = Actor, class... Args>
     requires std::derived_from<T, Actor>
     T* SpawnActor(Args&&... args) {
-        return static_cast<T*>(SpawnActor(make_unique<T>(std::forward<Args>(args)...)));
+        unique_ptr<Actor> actor = make_unique<T>(std::forward<Args>(args)...);
+        return static_cast<T*>(SpawnActor(std::move(actor)));
     }
 
     void DestroyActor(Actor* actor);
     void Tick(float deltaTime);
 
-    /// GT only, after Tick. The batch must be empty and must be delivered in order.
-    void FlushRenderUpdates(SceneUpdateBatch& batch);
-    /// GT, after Flush and before publish. Finds each used asset once; never starts loads.
-    void RetainRenderAssets(Nullable<AssetManager*> assets, vector<StreamingAssetRef<StaticMesh>>& refs) const;
-    /// Collection callbacks may read the World but must not mutate it.
+    void SetTickEnabled(bool enabled) noexcept {
+        CheckCanModify();
+        _tickEnabled = enabled;
+    }
+    bool IsTickEnabled() const noexcept { return _tickEnabled; }
     void CheckCanModify() const noexcept;
-
-    Application* GetApplication() const noexcept { return _app; }
+    Nullable<Application*> GetApplication() const noexcept { return _app; }
+    std::optional<SceneId> GetRenderSceneId() const noexcept;
+    /// GT only. Connection changes do not invoke game registration callbacks.
+    SceneId AttachToRendering(RenderSystem& renderer);
+    void DetachFromRendering();
+    void CollectRenderUpdates();
 
     std::span<const unique_ptr<Actor>> GetActors() const noexcept { return _actors; }
 
 private:
     friend class Actor;
     friend class SceneComponent;
-    friend class PrimitiveComponent;
-    friend class StaticMeshComponent;
+    friend class WorldRenderBridge;
 
+    void CreateComponentRenderState(SceneComponent& component);
+    void DestroyComponentRenderState(SceneComponent& component);
     void QueueRenderUpdate(SceneComponent& component, RenderDirtyFlag flag);
-    void RemoveRenderUpdate(SceneComponent& component) noexcept;
-    PrimitiveId AllocatePrimitiveId();
-    void ReleasePrimitiveId(PrimitiveId id);
-    void UpdateRenderAssetUse(std::optional<AssetId> previous, Nullable<const StaticMesh*> next);
 
-    struct RenderAssetUse {
-        size_t Count;
-        const StaticMesh* Mesh;
-    };
-
-    Application* _app{nullptr};
+    Nullable<Application*> _app{nullptr};
     vector<unique_ptr<Actor>> _actors;
-    vector<SceneComponent*> _renderUpdates;
-    vector<PrimitiveId> _removedPrimitives;
-    vector<uint32_t> _primitiveGenerations;
-    vector<uint32_t> _freePrimitiveIndices;
-    unordered_map<AssetId, RenderAssetUse> _renderAssetUses;
-    bool _isFlushingRenderUpdates{false};
+    unique_ptr<WorldRenderBridge> _renderBridge;
+    bool _tickEnabled{true};
 };
 
 template <>

@@ -70,7 +70,7 @@ void Actor::RegisterComponent(ActorComponent& component) {
     if (component._registered) return;
     component._registered = true;
     if (Nullable<SceneComponent*> scene = dynamic_cast<SceneComponent*>(&component); scene) {
-        scene->CreateRenderState(*_world.Get());
+        _world->CreateComponentRenderState(*scene.Get());
     }
     component.OnRegister();
 }
@@ -79,8 +79,7 @@ void Actor::UnregisterComponent(ActorComponent& component) {
     if (!component._registered) return;
     component._registered = false;
     if (Nullable<SceneComponent*> scene = dynamic_cast<SceneComponent*>(&component); scene) {
-        _world->RemoveRenderUpdate(*scene);
-        scene->DestroyRenderState(*_world.Get());
+        _world->DestroyComponentRenderState(*scene.Get());
     }
     component.OnUnregister();
 }

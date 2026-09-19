@@ -55,6 +55,8 @@ public:
 
         if (reuseSparseSlot) {
             sparseIndex = _freeHead;
+            RADRAY_ASSERT(sparseIndex < _sparse.size());
+            RADRAY_ASSERT(!_sparse[sparseIndex].Alive);
             nextFree = _sparse[sparseIndex].NextFree;
         } else {
             RADRAY_ASSERT(_sparse.size() < InvalidIndex);
@@ -75,10 +77,6 @@ public:
         node.NextFree = InvalidIndex;
         node.Alive = true;
 
-#ifdef RADRAY_IS_DEBUG
-        this->DebugVerifyIntegrity();
-#endif
-
         return SparseSetHandle{sparseIndex, node.Generation};
     }
 
@@ -87,6 +85,8 @@ public:
 
         auto& node = _sparse[handle.Index];
         const uint32_t denseIndex = node.DenseIndex;
+        RADRAY_ASSERT(node.DenseIndex < _denseValues.size());
+        RADRAY_ASSERT(_sparseIndices[denseIndex] == handle.Index);
         const uint32_t lastDenseIndex = static_cast<uint32_t>(_denseValues.size() - 1);
 
         if (denseIndex != lastDenseIndex) {
@@ -104,26 +104,16 @@ public:
         ++node.Generation;
         node.NextFree = _freeHead;
         _freeHead = handle.Index;
-
-#ifdef RADRAY_IS_DEBUG
-        this->DebugVerifyIntegrity();
-#endif
     }
 
     T& Get(SparseSetHandle handle) {
-        T* value = this->TryGet(handle);
-        if (value == nullptr) {
-            RADRAY_ABORT("SparseSet::Get invalid handle {}", handle);
-        }
-        return *value;
+        RADRAY_ASSERT(this->IsAlive(handle));
+        return _denseValues[_sparse[handle.Index].DenseIndex];
     }
 
     const T& Get(SparseSetHandle handle) const {
-        const T* value = this->TryGet(handle);
-        if (value == nullptr) {
-            RADRAY_ABORT("SparseSet::Get invalid handle {}", handle);
-        }
-        return *value;
+        RADRAY_ASSERT(this->IsAlive(handle));
+        return _denseValues[_sparse[handle.Index].DenseIndex];
     }
 
     T* TryGet(SparseSetHandle handle) noexcept {
@@ -184,10 +174,6 @@ public:
             node.NextFree = _freeHead;
             _freeHead = static_cast<uint32_t>(i - 1);
         }
-
-#ifdef RADRAY_IS_DEBUG
-        this->DebugVerifyIntegrity();
-#endif
     }
 
 private:
@@ -199,48 +185,6 @@ private:
         uint32_t NextFree{InvalidIndex};
         bool Alive{false};
     };
-
-#ifdef RADRAY_IS_DEBUG
-    void DebugVerifyIntegrity() const {
-        RADRAY_ASSERT(_denseValues.size() == _sparseIndices.size());
-
-        size_t aliveCount = 0;
-        for (size_t denseIndex = 0; denseIndex < _denseValues.size(); ++denseIndex) {
-            const uint32_t sparseIndex = _sparseIndices[denseIndex];
-            RADRAY_ASSERT(sparseIndex < _sparse.size());
-
-            const auto& node = _sparse[sparseIndex];
-            RADRAY_ASSERT(node.Alive);
-            RADRAY_ASSERT(node.DenseIndex == denseIndex);
-        }
-
-        vector<uint8_t> freeMarks(_sparse.size(), 0);
-        size_t freeCount = 0;
-        for (uint32_t freeIndex = _freeHead; freeIndex != InvalidIndex; freeIndex = _sparse[freeIndex].NextFree) {
-            RADRAY_ASSERT(freeIndex < _sparse.size());
-            RADRAY_ASSERT(!freeMarks[freeIndex]);
-            freeMarks[freeIndex] = 1;
-
-            const auto& node = _sparse[freeIndex];
-            RADRAY_ASSERT(!node.Alive);
-            ++freeCount;
-        }
-
-        for (size_t sparseIndex = 0; sparseIndex < _sparse.size(); ++sparseIndex) {
-            const auto& node = _sparse[sparseIndex];
-            if (node.Alive) {
-                ++aliveCount;
-                RADRAY_ASSERT(!freeMarks[sparseIndex]);
-                RADRAY_ASSERT(node.DenseIndex < _denseValues.size());
-            } else {
-                RADRAY_ASSERT(freeMarks[sparseIndex]);
-            }
-        }
-
-        RADRAY_ASSERT(aliveCount == _denseValues.size());
-        RADRAY_ASSERT(aliveCount + freeCount == _sparse.size());
-    }
-#endif
 
     vector<SparseNode> _sparse{};
     vector<T> _denseValues{};

@@ -1,3 +1,4 @@
+#include "scene_test_support.h"
 #include <gtest/gtest.h>
 
 #include <limits>
@@ -68,14 +69,17 @@ protected:
     }
 
     void Flush() {
-        GameWorld.FlushRenderUpdates(Batch);
+        test::CollectScene(GameWorld, Render, Batch);
         Data.Apply(Batch);
         Batch.Clear();
     }
 
+    Application App;
     AssetManager Assets;
+    RenderSystem Render{&App, 3};
     World GameWorld;
-    Scene Data;
+    SceneId RenderId{GameWorld.AttachToRendering(Render)};
+    RenderScene Data;
     SceneUpdateBatch Batch;
     Actor* Owner{GameWorld.SpawnActor()};
 };
@@ -87,7 +91,7 @@ TEST_F(StaticMeshScene, CreateCombinesStateAndFinalTransform) {
         component->MarkRenderStateDirty();
     }
     const PrimitiveId id = component->GetPrimitiveId();
-    GameWorld.FlushRenderUpdates(Batch);
+    test::CollectScene(GameWorld, Render, Batch);
     ASSERT_EQ(Batch.CreatePrimitives.size(), 1u);
     ASSERT_EQ(Batch.MeshStates.size(), 1u);
     EXPECT_TRUE(Batch.Transforms.empty());
@@ -119,7 +123,7 @@ TEST_F(StaticMeshScene, MovingOneObjectPreservesMeshDescriptionAndOtherObjects) 
     const Eigen::Matrix4f otherTransform = Data.GetStaticMesh(stationaryId)->LocalToWorld;
     const Eigen::Vector3f otherBounds = Data.GetStaticMesh(stationaryId)->WorldBoundsMin;
     for (int i = 0; i < 100; ++i) moving->SetRelativeLocation({static_cast<float>(i), 0, 0});
-    GameWorld.FlushRenderUpdates(Batch);
+    test::CollectScene(GameWorld, Render, Batch);
     EXPECT_TRUE(Batch.MeshStates.empty());
     ASSERT_EQ(Batch.Transforms.size(), 1u);
     EXPECT_EQ(Batch.Transforms[0].Id, movingId);
@@ -130,7 +134,7 @@ TEST_F(StaticMeshScene, MovingOneObjectPreservesMeshDescriptionAndOtherObjects) 
     EXPECT_TRUE(Data.GetStaticMesh(stationaryId)->LocalToWorld.isApprox(otherTransform));
     EXPECT_TRUE(Data.GetStaticMesh(stationaryId)->WorldBoundsMin.isApprox(otherBounds));
     ExpectBounds(*Data.GetStaticMesh(movingId), {-1, -2, -3}, {2, 3, 4}, moving->GetWorldMatrix());
-    GameWorld.FlushRenderUpdates(Batch);
+    test::CollectScene(GameWorld, Render, Batch);
     EXPECT_TRUE(Batch.Empty());
 }
 
@@ -141,7 +145,7 @@ TEST_F(StaticMeshScene, ReplacementUsesNewBoundsAndFinalTransformWithoutChanging
     component->SetStaticMesh(Mesh(2, {-10, -20, -30}, {30, 40, 50}, {{0, 0, 1, 0, 0}, {0, 1, 2, 1, 2}}));
     component->SetRelativeScale({-2, 3, 4});
     component->SetRelativeLocation({30, 50, 70});
-    GameWorld.FlushRenderUpdates(Batch);
+    test::CollectScene(GameWorld, Render, Batch);
     EXPECT_TRUE(Batch.CreatePrimitives.empty());
     EXPECT_TRUE(Batch.Transforms.empty());
     ASSERT_EQ(Batch.MeshStates.size(), 1u);
@@ -170,7 +174,7 @@ TEST_F(StaticMeshScene, ParentRotationNonuniformScaleAndReflectionsUpdateBoundsA
     const auto id = component->GetPrimitiveId();
     for (const Eigen::Vector3f scale : {Eigen::Vector3f{-1, 2, 3}, Eigen::Vector3f{-1, -2, 3}, Eigen::Vector3f{0, 2, 3}, Eigen::Vector3f{-1e-20f, 1e-20f, 1e-20f}}) {
         component->SetRelativeScale(scale);
-        GameWorld.FlushRenderUpdates(Batch);
+        test::CollectScene(GameWorld, Render, Batch);
         EXPECT_TRUE(Batch.MeshStates.empty());
         ASSERT_EQ(Batch.Transforms.size(), 1u);
         Data.Apply(Batch);
@@ -244,7 +248,7 @@ TEST_F(StaticMeshScene, DestroyingUnsentMeshLeavesNoTypedPayload) {
     auto* component = Add(Mesh(1));
     component->SetRelativeLocation({100, 0, 0});
     Owner->RemoveComponent(component);
-    GameWorld.FlushRenderUpdates(Batch);
+    test::CollectScene(GameWorld, Render, Batch);
     EXPECT_TRUE(Batch.Empty());
     Data.Apply(Batch);
     EXPECT_TRUE(Data.GetStaticMeshes().empty());
@@ -254,14 +258,14 @@ TEST_F(StaticMeshScene, FlightRetainsAssetAfterSourceDiesBeforeApplyOnAnotherThr
     auto* component = Add(Mesh(1));
     const auto id = component->GetPrimitiveId();
     SceneUpdateBatch create;
-    GameWorld.FlushRenderUpdates(create);
-    vector<StreamingAssetRef<StaticMesh>> refs;
-    GameWorld.RetainRenderAssets(&Assets, refs);
+    test::PrepareScene(GameWorld, Render, 0);
+    create = test::SceneBatch(Render, RenderId, 0);
     Owner->RemoveComponent(component);
     Assets.Pump();
     EXPECT_EQ(Assets.GetAssetCount(), 1u);
     SceneUpdateBatch remove;
-    GameWorld.FlushRenderUpdates(remove);
+    test::PrepareScene(GameWorld, Render, 1);
+    remove = test::SceneBatch(Render, RenderId, 1);
     EXPECT_TRUE(remove.MeshStates.empty());
     EXPECT_TRUE(remove.Transforms.empty());
     std::thread render([&]() {
@@ -278,7 +282,10 @@ TEST_F(StaticMeshScene, FlightRetainsAssetAfterSourceDiesBeforeApplyOnAnotherThr
         EXPECT_TRUE(Data.GetStaticMeshes().empty());
     });
     render.join();
-    refs.clear();
+    Render.ConsumeRenderUpdates(0);
+    Render.ConsumeRenderUpdates(1);
+    Render.OnFlightCompletedGT({.FlightIndex = 0});
+    Render.OnFlightCompletedGT({.FlightIndex = 1});
     Assets.Pump();
     EXPECT_EQ(Assets.GetAssetCount(), 0u);
 }
@@ -314,7 +321,7 @@ TEST_F(StaticMeshScene, ReadOnlyViewsAndEmptyFramesPreservePersistentDescription
     const auto* description = &Data.GetStaticMesh(id)->Mesh;
     const auto* sections = description->Sections.data();
     for (int frame = 0; frame < 8; ++frame) {
-        GameWorld.FlushRenderUpdates(Batch);
+        test::CollectScene(GameWorld, Render, Batch);
         EXPECT_TRUE(Batch.Empty());
         Data.Apply(Batch);
         for (int viewIndex = 0; viewIndex < 3; ++viewIndex) {
@@ -329,18 +336,18 @@ TEST_F(StaticMeshScene, ReadOnlyViewsAndEmptyFramesPreservePersistentDescription
 TEST_F(StaticMeshScene, ReusedFlightsNeverRestoreAnOlderTransform) {
     Application app;
     for (uint32_t count : {1u, 2u, 3u}) {
-        World world;
         RenderSystem render{&app, count};
-        render.SetAssetManager(&Assets);
+        World world;
+        const auto sceneId = world.AttachToRendering(render);
         auto* component = world.SpawnActor()->AddComponent<StaticMeshComponent>();
         component->SetStaticMesh(Mesh(1));
         const auto id = component->GetPrimitiveId();
         for (uint32_t frame = 0; frame < count * 4; ++frame) {
             if (frame == 1) component->SetRelativeLocation({15, 0, 0});
             const uint32_t flight = frame % count;
-            render.PrepareFrameGT(world, {.FlightIndex = flight});
+            test::PrepareScene(world, render, flight);
             render.ConsumeRenderUpdates(flight);
-            const auto view = render.GetScene().GetStaticMesh(id);
+            const auto view = render.GetSceneRT(sceneId)->GetStaticMesh(id);
             ASSERT_TRUE(view);
             EXPECT_FLOAT_EQ(view->LocalToWorld(0, 3), frame == 0 ? 0 : 15);
             render.OnFlightCompletedGT({.FlightIndex = flight, .GpuWorkCompleted = false});
@@ -352,14 +359,14 @@ TEST_F(StaticMeshScene, TransformBatchReusesStorageAfterWarmup) {
     auto* component = Add(Mesh(1));
     Flush();
     component->SetRelativeLocation({1, 0, 0});
-    GameWorld.FlushRenderUpdates(Batch);
+    test::CollectScene(GameWorld, Render, Batch);
     const auto* storage = Batch.Transforms.data();
     const auto capacity = Batch.Transforms.capacity();
     Data.Apply(Batch);
     Batch.Clear();
     for (int frame = 0; frame < 8; ++frame) {
         component->SetRelativeLocation({static_cast<float>(frame), 0, 0});
-        GameWorld.FlushRenderUpdates(Batch);
+        test::CollectScene(GameWorld, Render, Batch);
         EXPECT_TRUE(Batch.MeshStates.empty());
         EXPECT_EQ(Batch.Transforms.data(), storage);
         EXPECT_EQ(Batch.Transforms.capacity(), capacity);
@@ -369,7 +376,7 @@ TEST_F(StaticMeshScene, TransformBatchReusesStorageAfterWarmup) {
 }
 
 TEST(StaticMeshSceneDeathTest, RejectsStaleStateTransformAndTransformWithoutMesh) {
-    Scene scene;
+    RenderScene scene;
     SceneUpdateBatch batch;
     batch.CreatePrimitives.push_back({0, 1});
     batch.MeshStates.push_back({.Id = {0, 1}});
@@ -394,7 +401,7 @@ TEST(StaticMeshSceneDeathTest, RejectsStaleStateTransformAndTransformWithoutMesh
 }
 
 TEST(StaticMeshSceneDeathTest, RejectsInvalidBoundsAndNonAffineTransforms) {
-    Scene scene;
+    RenderScene scene;
     SceneUpdateBatch batch;
     batch.CreatePrimitives.push_back({0, 1});
     batch.MeshStates.push_back({.Id = {0, 1}});
@@ -409,16 +416,6 @@ TEST(StaticMeshSceneDeathTest, RejectsInvalidBoundsAndNonAffineTransforms) {
     EXPECT_DEATH(scene.Apply(batch), "");
     batch.Transforms[0].LocalToWorld(3, 0) = std::numeric_limits<float>::quiet_NaN();
     EXPECT_DEATH(scene.Apply(batch), "");
-}
-
-TEST(StaticMeshSceneDeathTest, FlushRejectsExistingTypedPayload) {
-    World world;
-    SceneUpdateBatch batch;
-    batch.MeshStates.push_back({});
-    EXPECT_DEATH(world.FlushRenderUpdates(batch), "");
-    batch.Clear();
-    batch.Transforms.push_back({});
-    EXPECT_DEATH(world.FlushRenderUpdates(batch), "");
 }
 
 }  // namespace

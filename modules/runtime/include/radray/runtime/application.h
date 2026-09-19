@@ -22,7 +22,7 @@ class AppFrameContext;
 class AssetDatabase;
 class AssetManager;
 class RenderSystem;
-class World;
+class WorldManager;
 struct AppFrameTarget;
 struct FlightCompletion;
 
@@ -97,7 +97,7 @@ private:
 };
 
 /// 一站式运行时启动描述。Application::Run(desc) 据此创建 GpuSystem(由其持有 device/factory)、
-/// 窗口系统、主窗口 + swapchain、AssetManager、World,并固化帧序与 shutdown 顺序。
+/// 窗口系统、主窗口 + swapchain、AssetManager,并固化帧序与 shutdown 顺序。
 /// 核心系统都在运行时内部生命周期里创建与驱动。
 struct ApplicationRuntimeDescriptor {
     // —— 后端 / 运行模式 ——
@@ -148,8 +148,9 @@ public:
     const RenderSystem* GetRenderSystem() const noexcept { return _renderSystem.get(); }
     ApplicationScheduler& GetScheduler() noexcept { return _scheduler; }
     const ApplicationScheduler& GetScheduler() const noexcept { return _scheduler; }
-    World* GetWorld() noexcept { return _world.get(); }
-    const World* GetWorld() const noexcept { return _world.get(); }
+    /// Available from OnInit through OnShutdown; null outside the runtime lifetime.
+    Nullable<WorldManager*> GetWorldManager() noexcept { return _worldManager.get(); }
+    Nullable<const WorldManager*> GetWorldManager() const noexcept { return _worldManager.get(); }
     const std::filesystem::path& GetShaderSourceRoot() const noexcept { return _shaderSourceRoot; }
     const vector<std::filesystem::path>& GetShaderIncludePaths() const noexcept { return _shaderIncludePaths; }
 
@@ -162,7 +163,7 @@ protected:
     // 游戏 override 点 (窄接口)。底层负责"何时 tick、怎么 acquire/render/present",
     // 游戏只负责"这个应用要画什么"。
 
-    /// 运行时全部内部系统就绪后(device/window/gpu/render/asset/world 全部建好)的一次性初始化。
+    /// 运行时全部内部系统就绪后(device/window/gpu/render/asset 全部建好，World 由应用显式创建)的一次性初始化。
     /// 典型用途:加载资产、Spawn Actor、建相机。
     virtual void OnInit();
 
@@ -203,7 +204,7 @@ private:
     unique_ptr<AssetDatabase> _assetDatabase;
     unique_ptr<AssetManager> _assetManager;
     unique_ptr<RenderSystem> _renderSystem;
-    unique_ptr<World> _world;
+    unique_ptr<WorldManager> _worldManager;
     ApplicationScheduler _scheduler;
     std::filesystem::path _shaderSourceRoot;
     vector<std::filesystem::path> _shaderIncludePaths;

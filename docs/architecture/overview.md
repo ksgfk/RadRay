@@ -59,7 +59,7 @@ artifact 不需要 compiler，开发期 JIT 通过配置开关接入 client。
 | 帧序、flight、上传与关停 | [帧与 GPU](frame-and-gpu.md) |
 | ImGui 移除状态及旧设计 | [Runtime ImGui](runtime-imgui.md) |
 | RHI、后端、barrier 与同步 | [RHI 与后端](render-rhi.md) |
-| Application、World/组件、shader 与基础渲染服务 | [Runtime 宿主](render-framework.md) |
+| Application、多 World、场景同步、shader 与渲染服务 | [Runtime 宿主](render-framework.md) |
 | Renderer foundation 移除状态 | [Renderer foundation](renderer-foundation.md) |
 | 重构前设计、依赖边界与历史附件 | [临时设计快照](../temp/render-framework-design.md) |
 
@@ -72,6 +72,8 @@ artifact 不需要 compiler，开发期 JIT 通过配置开关接入 client。
 | flight 与提交 | `GpuSystem::BeginFrameRecord` / `EndFrameRecordAndSubmit` | `modules/runtime/src/gpu_system.cpp` |
 | 资产加载与回收 | `AssetManager::Load` / `Pump` | `modules/runtime/src/asset_manager.cpp` |
 | 身份登记与 path 反查 | `AssetDatabase::Open` / `Refresh` / `Save` | `modules/runtime/src/asset_database.cpp` |
+| 多 World 管理 | `WorldManager::CreateWorld` / `DestroyWorld` | `modules/runtime/src/world_manager.cpp` |
+| 场景交付 | `RenderSystem::SealFrameGT` / `ConsumeRenderUpdates` | `modules/runtime/src/render_system.cpp` |
 | 场景 tick | `World::Tick` | `modules/runtime/src/game_framework/world.cpp` |
 
 旧 render_framework、Forward 和 ImGui 渲染实现已移除；基础模块、runtime 宿主与游戏组件保留。

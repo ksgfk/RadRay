@@ -10,7 +10,8 @@
 
 namespace radray {
 
-struct SceneUpdateBatch;
+class SceneWriter;
+class WorldRenderBridge;
 
 enum class RenderDirtyFlag : uint8_t {
     State = 1,
@@ -70,19 +71,20 @@ public:
 protected:
     /// 本节点或祖先的世界变换变更后调用，派生类可覆写以标记渲染状态脏。
     virtual void OnTransformChanged() {}
-    /// Actor invokes this before OnRegister; the default does not enqueue render updates.
-    virtual void CreateRenderState(World& world) { (void)world; }
-    /// Actor removes queued updates before this hook, then calls OnUnregister.
-    virtual void DestroyRenderState(World& world) { (void)world; }
-    /// Capture owned values or flight-pinned immutable views. Must not mutate World/components or recursively flush.
-    virtual void CollectRenderUpdates(SceneUpdateBatch& batch, RenderDirtyFlags dirty) {
-        (void)batch;
+    /// Invoked when a registered component connects to a scene; default does not enqueue.
+    virtual void CreateRenderState(SceneWriter& writer) { (void)writer; }
+    /// Invoked after removing queued updates; independent of game registration.
+    virtual void DestroyRenderState(SceneWriter& writer) { (void)writer; }
+    /// Capture owned values or retained immutable asset views. Must not mutate World/components or recursively flush.
+    virtual void CollectRenderUpdates(SceneWriter& writer, RenderDirtyFlags dirty) {
+        (void)writer;
         (void)dirty;
     }
 
 private:
     friend class Actor;
     friend class World;
+    friend class WorldRenderBridge;
 
     void MarkRenderDirty(RenderDirtyFlag flag);
     Eigen::Matrix4f ComputeLocalMatrix() const noexcept;

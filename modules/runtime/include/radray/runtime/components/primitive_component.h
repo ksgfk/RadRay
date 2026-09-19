@@ -1,7 +1,7 @@
 #pragma once
 
 #include <radray/runtime/components/scene_component.h>
-#include <radray/runtime/render_framework/scene.h>
+#include <radray/runtime/render_scene/scene_writer.h>
 
 namespace radray {
 
@@ -15,18 +15,22 @@ public:
 
 protected:
     void OnTransformChanged() override;
-    virtual void CollectPrimitiveUpdates(SceneUpdateBatch& batch, RenderDirtyFlags dirty) {
-        (void)batch;
+    virtual void CollectPrimitiveUpdates(SceneWriter& writer, RenderDirtyFlags dirty) {
+        (void)writer;
         (void)dirty;
     }
 
+    virtual void OnRenderStateCreated() {}
+    virtual void OnRenderStateDestroyed() {}
+    SceneId GetRenderSceneId() const noexcept { return _sceneId; }
+
 private:
-    void CreateRenderState(World& world) final;
-    void DestroyRenderState(World& world) final;
-    void CollectRenderUpdates(SceneUpdateBatch& batch, RenderDirtyFlags dirty) final;
+    void CreateRenderState(SceneWriter& writer) final;
+    void DestroyRenderState(SceneWriter& writer) final;
+    void CollectRenderUpdates(SceneWriter& writer, RenderDirtyFlags dirty) final;
 
     PrimitiveId _primitiveId;
-    bool _renderStateSent{false};
+    SceneId _sceneId;
 };
 
 template <>
