@@ -54,6 +54,7 @@ struct AppUpdateResult {
 };
 
 struct ApplicationSchedulerRecord : ManualCoroutineRecord {
+    uint64_t Sequence{0};
 };
 
 class SwitchToApplicationSchedulerAwaitable {
@@ -82,10 +83,13 @@ public:
 
     task<void> SwitchTo();
     void Pump();
+    void BeginStopping() noexcept { _stopping = true; }
+    bool IsStopping() const noexcept { return _stopping; }
     void CancelAll() noexcept;
 
 private:
     friend class SwitchToApplicationSchedulerAwaitable;
+    friend class Application;
 
     ApplicationSchedulerRecord* Enqueue(stop_token stop, std::coroutine_handle<> continuation);
     bool Erase(ApplicationSchedulerRecord* record) noexcept;
@@ -94,6 +98,10 @@ private:
     void CancelRecord(ApplicationSchedulerRecord* record) noexcept;
 
     ManualCoroutineScheduler<ApplicationSchedulerRecord> _records;
+    uint64_t _nextSequence{1};
+    bool _pumping{false};
+    bool _collecting{false};
+    bool _stopping{false};
 };
 
 /// 一站式运行时启动描述。Application::Run(desc) 据此创建 GpuSystem(由其持有 device/factory)、
@@ -187,6 +195,8 @@ protected:
 private:
     friend class SingleThreadRunner;
     friend class ThreadedRunner;
+    friend class RenderSystem;
+    void SetCollecting(bool collecting);
 
     bool InitializeRuntime(const ApplicationRuntimeDescriptor& desc);
     void DestroyRuntime() noexcept;
@@ -195,9 +205,10 @@ private:
     void PumpFlightCompletions(std::optional<uint32_t> flightIndex);
     /// 上一帧完成后，在主线程完成回调，Runner 取得可写槽位后调用；消费 GPU 完成消息并推进本帧的 GT 调度。
     /// 调用阶段在本帧计时与窗口事件派发之前。
-    void BeginUpdateForFlight(uint32_t flightIndex);
+    void ServiceFrameBoundaryGT(uint32_t flightIndex);
+    void FinalizeWorldAndSealGT(uint32_t flightIndex);
     /// RT: runner calls once per published frame, before and independently of optional drawing.
-    void ConsumeRenderUpdates(AppFrameContext& ctx);
+    void ApplySceneUpdatesRT(AppFrameContext& ctx);
 
     unique_ptr<WindowManager> _windowManager;
     unique_ptr<GpuSystem> _gpuSystem;

@@ -17,22 +17,22 @@ namespace radray {
 namespace {
 
 TEST(SceneDelivery, EmptyBatchesAcrossFlightsWithoutDrawing) {
-    for (uint32_t count : {1u, 2u, 3u}) {
+    for (uint32_t count : {1u, 2u, 3u, 8u}) {
         SCOPED_TRACE(count);
         Application app;
         RenderSystem render{&app, count};
-        World world{&app};
-        const auto sceneId = world.AttachToRendering(render);
+        test::ScopedWorld world{&app};
+        const auto sceneId = test::ConnectWorld(world, render);
         Nullable<const RenderScene*> scene{nullptr};
         for (uint32_t round = 0; round < 8; ++round) {
             for (uint32_t flight = 0; flight < count; ++flight) {
                 test::PrepareScene(world, render, flight);
             }
             for (uint32_t flight = 0; flight < count; ++flight) {
-                render.ConsumeRenderUpdates(flight);
+                test::ConsumeFrame(render, flight);
                 if (!scene) scene = render.GetSceneRT(sceneId);
                 EXPECT_EQ(render.GetSceneRT(sceneId), scene);
-                render.OnFlightCompletedGT({.FlightIndex = flight, .GpuWorkCompleted = false});
+                test::CompleteFrame(render, flight, false);
             }
         }
     }
@@ -42,31 +42,32 @@ TEST(SceneDelivery, AbandonDoesNotPublishOrRequireCompletion) {
     for (bool abandonAll : {false, true}) {
         Application app;
         RenderSystem render{&app, 3};
-        World world{&app};
-        const auto sceneId = world.AttachToRendering(render);
+        test::ScopedWorld world{&app};
+        const auto sceneId = test::ConnectWorld(world, render);
         const PrimitiveId id = world.SpawnActor()->AddComponent<PrimitiveComponent>()->GetPrimitiveId();
         test::PrepareScene(world, render, 2);
         ASSERT_EQ(test::SceneBatch(render, sceneId, 2).CreatePrimitives, vector<PrimitiveId>{id});
+        render.BeginStoppingGT();
         if (abandonAll)
             render.AbandonUnpublishedFramesGT();
         else
             render.AbandonUnpublishedFrameGT(2);
         EXPECT_TRUE(render.GetFrameUpdatesRT(2).empty());
         EXPECT_FALSE(render.GetSceneRT(sceneId));
-        world.DetachFromRendering();
+        test::DisconnectWorld(world);
         render.OnShutdown();
-        world.DetachFromRendering();
+        test::DisconnectWorld(world);
         render.OnShutdown();
     }
 }
 
 TEST(SceneDelivery, PrimitiveUpdatesAcrossFlightsWithoutDrawing) {
-    for (uint32_t count : {1u, 2u, 3u}) {
+    for (uint32_t count : {1u, 2u, 3u, 8u}) {
         SCOPED_TRACE(count);
         Application app;
         RenderSystem render{&app, count};
-        World world{&app};
-        const auto sceneId = world.AttachToRendering(render);
+        test::ScopedWorld world{&app};
+        const auto sceneId = test::ConnectWorld(world, render);
         auto* actor = world.SpawnActor();
         Nullable<PrimitiveComponent*> component{nullptr};
         vector<PrimitiveId> expected(count);
@@ -78,10 +79,10 @@ TEST(SceneDelivery, PrimitiveUpdatesAcrossFlightsWithoutDrawing) {
                 test::PrepareScene(world, render, flight);
             }
             for (uint32_t flight = 0; flight < count; ++flight) {
-                render.ConsumeRenderUpdates(flight);
+                test::ConsumeFrame(render, flight);
                 EXPECT_TRUE(render.GetSceneRT(sceneId)->ContainsPrimitive(expected[flight]));
                 if (flight > 0) EXPECT_FALSE(render.GetSceneRT(sceneId)->ContainsPrimitive(expected[flight - 1]));
-                render.OnFlightCompletedGT({.FlightIndex = flight, .GpuWorkCompleted = false});
+                test::CompleteFrame(render, flight, false);
             }
         }
     }
@@ -89,13 +90,71 @@ TEST(SceneDelivery, PrimitiveUpdatesAcrossFlightsWithoutDrawing) {
 
 TEST(SceneDeliveryDeathTest, RejectsInvalidFlightIndices) {
     Application app;
-    World world{&app};
+    test::ScopedWorld world{&app};
     RenderSystem render{&app, 1};
     EXPECT_DEATH(render.GetFrameUpdatesRT(1), "");
     EXPECT_DEATH(test::PrepareScene(world, render, 1), "");
-    EXPECT_DEATH(render.ConsumeRenderUpdates(1), "");
-    EXPECT_DEATH(render.OnFlightCompletedGT({.FlightIndex = 1}), "");
+    EXPECT_DEATH(test::ConsumeFrame(render, 1), "");
+    EXPECT_DEATH(test::CompleteFrame(render, 1), "");
     EXPECT_DEATH(render.AbandonUnpublishedFrameGT(1), "");
+}
+
+TEST(SceneDeliveryDeathTest, DuplicateAndOutOfOrderPacketsAreRejectedBeforeApply) {
+    Application app;
+    RenderSystem renderer{&app, 2};
+    const auto id = renderer.CreateSceneGT();
+    auto* writer = renderer.GetSceneWriterGT(id).Get();
+    const auto primitive = writer->CreatePrimitive();
+    writer->SetStaticMesh(primitive, {}, Eigen::Matrix4f::Identity());
+    renderer.SealFrameGT(0);
+    test::ConsumeFrame(renderer, 0);
+    EXPECT_DEATH(renderer.ConsumeRenderUpdates(0, 1), "");
+    test::CompleteFrame(renderer, 0);
+    auto transform = Eigen::Matrix4f::Identity().eval();
+    transform(0, 3) = 1;
+    writer->SetTransform(primitive, transform);
+    renderer.SealFrameGT(0);
+    renderer.PublishFrameGT(0);
+    transform(0, 3) = 2;
+    writer->SetTransform(primitive, transform);
+    renderer.SealFrameGT(1);
+    renderer.PublishFrameGT(1);
+    EXPECT_DEATH(renderer.ConsumeRenderUpdates(1, 3), "");
+    EXPECT_FLOAT_EQ(renderer.GetSceneRT(id)->GetStaticMesh(primitive)->LocalToWorld(0, 3), 0);
+    renderer.ConsumeRenderUpdates(0, 2);
+    renderer.ConsumeRenderUpdates(1, 3);
+    EXPECT_FLOAT_EQ(renderer.GetSceneRT(id)->GetStaticMesh(primitive)->LocalToWorld(0, 3), 2);
+    EXPECT_DEATH(renderer.OnFlightCompletedGT({.FlightIndex = 0, .FrameSerial = 1}), "");
+    test::CompleteFrame(renderer, 0);
+    test::CompleteFrame(renderer, 1);
+    EXPECT_DEATH(renderer.AbandonUnpublishedFramesGT(), "");
+    renderer.BeginStoppingGT();
+    renderer.AbandonUnpublishedFramesGT();
+    EXPECT_DEATH(renderer.SealFrameGT(0), "");
+}
+
+TEST(SceneDelivery, ApplyWaitsForThePreviousCpuReader) {
+    RenderScene scene;
+    SceneUpdateBatch create;
+    const PrimitiveId id{0, 0};
+    create.CreatePrimitives.push_back(id);
+    scene.Apply(create);
+    std::binary_semaphore borrowed{0}, releaseReader{0}, applied{0};
+    std::thread reader{[&, lease = scene.AcquireRead()] {
+        borrowed.release();
+        releaseReader.acquire();
+        EXPECT_TRUE(scene.ContainsPrimitive(id));
+    }};
+    borrowed.acquire();
+    SceneUpdateBatch remove;
+    remove.RemovePrimitives.push_back(id);
+    std::thread apply{[&] { scene.Apply(remove); applied.release(); }};
+    EXPECT_FALSE(applied.try_acquire_for(std::chrono::milliseconds{30}));
+    releaseReader.release();
+    reader.join();
+    apply.join();
+    EXPECT_TRUE(applied.try_acquire());
+    EXPECT_FALSE(scene.ContainsPrimitive(id));
 }
 
 #if defined(_WIN32)
@@ -110,15 +169,18 @@ public:
 protected:
     void OnInit() override {
         _worldId = GetWorldManager()->CreateWorld();
-        _sceneId = GetWorldManager()->AttachWorldToRendering(_worldId);
+        GetWorldManager()->RequestRenderConnection(_worldId, true);
         _actor = GetWorldManager()->GetWorld(_worldId)->SpawnActor();
         _component = _actor->AddComponent<PrimitiveComponent>();
-        _initialId = _component->GetPrimitiveId();
-        _latestId = _initialId;
     }
 
     void OnUpdate(const AppUpdateContext&) override {
         ++_updates;
+        if (_updates == 1) {
+            _sceneId = *GetWorldManager()->GetWorld(_worldId)->GetRenderSceneId();
+            _initialId = _component->GetPrimitiveId();
+            _latestId = _initialId;
+        }
         const auto count = GetGpuSystem()->GetFlightDataCount();
         const bool exit = _drainOnExit ? _updates == count : _updates == 13;
         if (!exit) {
@@ -183,7 +245,7 @@ void RunSceneDelivery(render::RenderBackend backend, bool threaded, bool drainOn
         render::test::DeviceContext probe;
         if (!render::test::TryCreateDevice(backend, probe)) GTEST_SKIP() << probe.Reason;
     }
-    for (uint32_t count : {1u, 2u, 3u}) {
+    for (uint32_t count : {1u, 2u, 3u, 8u}) {
         SCOPED_TRACE(count);
         test::RuntimeLogCapture logs;
         SceneDeliveryApp app{drainOnExit};
@@ -202,16 +264,20 @@ public:
 protected:
     void OnInit() override {
         _firstWorld = GetWorldManager()->CreateWorld();
-        _firstScene = GetWorldManager()->AttachWorldToRendering(_firstWorld);
+        GetWorldManager()->RequestRenderConnection(_firstWorld, true);
         _mesh = GetWorldManager()->GetWorld(_firstWorld)->SpawnActor()->AddComponent<StaticMeshComponent>();
         GetWorldManager()->GetWorld(_firstWorld)->SetTickEnabled(false);
         _secondWorld = GetWorldManager()->CreateWorld();
-        _secondScene = GetWorldManager()->AttachWorldToRendering(_secondWorld);
+        GetWorldManager()->RequestRenderConnection(_secondWorld, true);
         GetWorldManager()->GetWorld(_secondWorld)->SpawnActor()->AddComponent<StaticMeshComponent>();
     }
 
     void OnUpdate(const AppUpdateContext&) override {
         ++_updates;
+        if (_updates == 1) {
+            _firstScene = *GetWorldManager()->GetWorld(_firstWorld)->GetRenderSceneId();
+            _secondScene = *GetWorldManager()->GetWorld(_secondWorld)->GetRenderSceneId();
+        }
         _mesh->SetRelativeLocation({static_cast<float>(_updates), 0, 0});
         if (_updates == 2) {
             GetWorldManager()->DestroyWorld(_secondWorld);
@@ -219,14 +285,14 @@ protected:
         }
         if (_updates == 3) {
             const auto replacement = GetWorldManager()->CreateWorld();
+            _replacementWorld = replacement;
             EXPECT_EQ(replacement.Index, _secondWorld.Index);
             EXPECT_GT(replacement.Generation, _secondWorld.Generation);
-            _replacementScene = GetWorldManager()->AttachWorldToRendering(replacement);
+            GetWorldManager()->RequestRenderConnection(replacement, true);
             GetWorldManager()->GetWorld(replacement)->SpawnActor()->AddComponent<StaticMeshComponent>();
         }
         if (_updates == 5) {
-            GetWorldManager()->DetachWorldFromRendering(_firstWorld);
-            _reattachedScene = GetWorldManager()->AttachWorldToRendering(_firstWorld);
+            GetWorldManager()->RequestReconnect(_firstWorld);
         }
         if (_updates == 9) {
             auto* native = GetWindowManager()->GetMainWindow()->GetNativeWindow();
@@ -236,6 +302,10 @@ protected:
 
     void OnRender(AppFrameContext& ctx) override {
         const auto frame = ctx.FrameSerial();
+        for (const auto& update : GetRenderSystem()->GetFrameUpdatesRT(ctx.FlightIndex())) {
+            if (update.Create && frame == 3) _replacementScene = update.Id;
+            if (update.Create && frame == 5) _reattachedScene = update.Id;
+        }
         const auto scene = GetRenderSystem()->GetSceneRT(frame < 5 ? _firstScene : _reattachedScene);
         ASSERT_TRUE(scene);
         ASSERT_EQ(scene->GetStaticMeshes().size(), 1u);
@@ -253,8 +323,8 @@ protected:
         EXPECT_EQ(Completed, 8u);
         EXPECT_FALSE(GetRenderSystem()->GetSceneRT(_firstScene));
         EXPECT_FALSE(GetRenderSystem()->GetSceneRT(_secondScene));
-        EXPECT_TRUE(GetRenderSystem()->GetSceneRT(_replacementScene));
-        const auto scene = GetRenderSystem()->GetSceneRT(_reattachedScene);
+        EXPECT_TRUE(GetRenderSystem()->GetSceneRT(*GetWorldManager()->GetWorld(_replacementWorld)->GetRenderSceneId()));
+        const auto scene = GetRenderSystem()->GetSceneRT(*GetWorldManager()->GetWorld(_firstWorld)->GetRenderSceneId());
         ASSERT_TRUE(scene);
         EXPECT_FLOAT_EQ(scene->GetStaticMesh(scene->GetStaticMeshes()[0])->LocalToWorld(0, 3), 8);
     }
@@ -262,6 +332,7 @@ protected:
 private:
     WorldId _firstWorld;
     WorldId _secondWorld;
+    WorldId _replacementWorld;
     SceneId _firstScene;
     SceneId _secondScene;
     SceneId _replacementScene;
@@ -275,7 +346,7 @@ void RunMultiWorldDelivery(render::RenderBackend backend, bool threaded) {
         render::test::DeviceContext probe;
         if (!render::test::TryCreateDevice(backend, probe)) GTEST_SKIP() << probe.Reason;
     }
-    for (uint32_t count : {1u, 2u, 3u}) {
+    for (uint32_t count : {1u, 2u, 3u, 8u}) {
         SCOPED_TRACE(count);
         test::RuntimeLogCapture logs;
         MultiWorldDeliveryApp app;

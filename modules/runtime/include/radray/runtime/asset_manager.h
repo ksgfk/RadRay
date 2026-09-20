@@ -45,6 +45,7 @@ enum class AssetState {
 };
 
 struct AssetWaitRecord : ManualCoroutineRecord {
+    uint64_t Sequence{0};
     /// 等待目标。由等待者持有的 ref 保住, 故在记录存活期内有效。
     /// 【只用于比较, 不解引用】AssetSlot 在此是不完整类型。
     const AssetSlot* Slot{nullptr};
@@ -307,12 +308,12 @@ public:
 
     /// 资产内部数据的延迟销毁入口。由 Asset::OnUnload 调用。
     ///
-    /// 【整包交出, 不逐个交】payload 是一个可移动的可调用对象 (通常是捕获了整组 GPU 对象
-    /// 的 lambda), 在一个帧边界之后被销毁。销毁顺序由 payload 内部的捕获/成员声明顺序
+    /// 【整包交出, 不逐个交】payload 是一个可移动的 owner，在等待器确认实际完成后销毁。
+    /// 销毁顺序由 payload 内部的捕获/成员声明顺序
     /// 显式表达, 不要依赖多次调用的先后。
     ///
     /// 同一次 Pump 内的全部 payload 攒成一批共用一个协程帧。
-    /// wait processor 未装配时立即销毁 payload 并记 error log。
+    /// wait processor 未装配时保存 payload，直至装配后提交等待或终止清理。
     template <class F>
     void DeferDestroy(F&& payload) {
         EnqueueDeferred(make_unique<DeferredPayloadImpl<std::decay_t<F>>>(std::forward<F>(payload)));
@@ -326,10 +327,12 @@ public:
     void SetAssetSource(Nullable<IAssetSource*> source) noexcept { _assetSource = source; }
 
     uint32_t GetAssetCount() const noexcept;
+    void BeginStopping() noexcept;
 
 private:
     friend class AssetWaitAwaitable;
     friend class StreamingAssetRefAny;
+    friend class Application;
 
     using Slot = AssetSlot;
 
@@ -373,7 +376,12 @@ private:
     IWaitFrameProcessor* _waitFrame{nullptr};
     Nullable<IAssetSource*> _assetSource{nullptr};
     TaskScope _loadScope;
+    TaskScope _retirementScope;
     ManualCoroutineScheduler<AssetWaitRecord> _waiters;
+    uint64_t _nextWaitSequence{1};
+    bool _pumping{false};
+    bool _collectingScene{false};
+    bool _stopping{false};
     unordered_map<AssetId, unique_ptr<Slot>> _slots;
     Nullable<Slot*> _zeroRefHead{nullptr}, _zeroRefTail{nullptr};
     /// 在飞加载的 slot。manager 自持一份引用 —— 加载期间外部引用可能全部消失, 但槽位要

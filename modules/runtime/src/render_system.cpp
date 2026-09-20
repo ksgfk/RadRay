@@ -14,10 +14,20 @@ RenderSystem::RenderSystem(Application* app, uint32_t flightCount) : _app(app), 
 }
 RenderSystem::~RenderSystem() noexcept { OnShutdown(); }
 
+void RenderSystem::CheckCanModifyGT() const {
+    if (std::this_thread::get_id() != _ownerThread || _collecting) RADRAY_ABORT("Scene mutation requires GT outside collection");
+}
+void RenderSystem::SetCollecting(bool collecting) {
+    if (collecting) CheckCanModifyGT();
+    _collecting = collecting;
+    _app->SetCollecting(collecting);
+}
+
 void RenderSystem::OnShutdown() noexcept {
     for (const auto& record : _scenesGT.Values()) {
         if (record->Writer->_claimed) RADRAY_ABORT("Disconnect all Worlds before shutting down RenderSystem");
     }
+    BeginStoppingGT();
     AbandonUnpublishedFramesGT();
     _scenesRT.clear();
     _scenesGT.Clear();
@@ -44,7 +54,8 @@ bool RenderSystem::OnInitialize() {
 }
 
 SceneId RenderSystem::CreateSceneGT() {
-    if (_frameUpdates.empty()) RADRAY_ABORT("RenderSystem is shut down");
+    CheckCanModifyGT();
+    if (_frameUpdates.empty() || _stopping) RADRAY_ABORT("RenderSystem is stopping or shut down");
     const auto handle = _scenesGT.Emplace(make_unique<SceneRecord>());
     const SceneId id{handle.Index, handle.Generation};
     _scenesGT.Get(handle)->Writer = make_unique<SceneWriter>(id, static_cast<uint32_t>(_frameUpdates.size()));
@@ -72,6 +83,7 @@ void RenderSystem::ReleaseSceneWriterGT(SceneId id) {
 }
 
 void RenderSystem::DestroySceneGT(SceneId id) {
+    CheckCanModifyGT();
     auto record = _scenesGT.TryGet({id.Index, id.Generation});
     if (!record || (*record)->Writer->_closing || (*record)->Writer->_claimed) RADRAY_ABORT("Invalid scene destruction");
     (*record)->Writer->_closing = true;
@@ -90,8 +102,11 @@ std::span<const SceneFrameUpdate> RenderSystem::GetFrameUpdatesRT(uint32_t fligh
 }
 
 void RenderSystem::SealFrameGT(uint32_t flightIndex) {
+    CheckCanModifyGT();
+    if (_stopping || _terminalAbandoned) RADRAY_ABORT("Cannot seal after stopping scene delivery");
     auto& frame = GetFrameUpdates(flightIndex);
-    if (frame.Sealed) RADRAY_ABORT("Scene flight is still occupied");
+    if (frame.Phase != FrameUpdates::State::Writable) RADRAY_ABORT("Scene flight is still occupied");
+    if (_nextUpdateSequence == std::numeric_limits<uint64_t>::max()) RADRAY_ABORT("Scene update sequence exhausted");
     for (const SceneId id : _sceneIdsGT) {
         auto& record = *_scenesGT.Get({id.Index, id.Generation});
         if (record.DestroySealed) continue;
@@ -104,10 +119,35 @@ void RenderSystem::SealFrameGT(uint32_t flightIndex) {
         record.CreatePending = false;
         if (record.DestroyPending) record.DestroySealed = true;
     }
-    frame.Sealed = true;
+    frame.UpdateSequence = _nextUpdateSequence++;
+    frame.FrameSerial = 0;
+    frame.Phase = FrameUpdates::State::Sealed;
 }
 
-void RenderSystem::ConsumeRenderUpdates(uint32_t flightIndex) {
+void RenderSystem::PublishFrameGT(uint32_t flightIndex) {
+    CheckCanModifyGT();
+    auto& frame = GetFrameUpdates(flightIndex);
+    if (_stopping || frame.Phase != FrameUpdates::State::Sealed || frame.UpdateSequence != _lastPublishedSequence + 1) RADRAY_ABORT("Invalid scene publication order");
+    frame.Phase = FrameUpdates::State::Published;
+    _lastPublishedSequence = frame.UpdateSequence;
+}
+
+uint64_t RenderSystem::GetUpdateSequence(uint32_t flightIndex) const {
+    if (flightIndex >= _frameUpdates.size()) RADRAY_ABORT("Invalid scene flight index");
+    return _frameUpdates[flightIndex].UpdateSequence;
+}
+uint64_t RenderSystem::GetFrameSerial(uint32_t flightIndex) const {
+    if (flightIndex >= _frameUpdates.size()) RADRAY_ABORT("Invalid scene flight index");
+    return _frameUpdates[flightIndex].FrameSerial;
+}
+void RenderSystem::BeginStoppingGT() noexcept {
+    CheckCanModifyGT();
+    _stopping = true;
+}
+
+void RenderSystem::ConsumeRenderUpdates(uint32_t flightIndex, uint64_t frameSerial) {
+    auto& frame = GetFrameUpdates(flightIndex);
+    if (frame.Phase != FrameUpdates::State::Published || frame.UpdateSequence != _lastConsumedSequence + 1 || frameSerial == 0 || frameSerial <= _lastFrameSerial) RADRAY_ABORT("Duplicate or out-of-order scene consumption");
     for (const auto& entry : GetFrameUpdatesRT(flightIndex)) {
         const auto id = entry.Id;
         if (entry.Create) {
@@ -123,9 +163,14 @@ void RenderSystem::ConsumeRenderUpdates(uint32_t flightIndex) {
         slot.Scene->Apply(entry.Updates);
         if (entry.Destroy) {
             slot.Scene.reset();
+            if (slot.Generation == std::numeric_limits<uint32_t>::max()) RADRAY_ABORT("Scene generation exhausted");
             ++slot.Generation;
         }
     }
+    frame.FrameSerial = frameSerial;
+    frame.Phase = FrameUpdates::State::Consumed;
+    _lastConsumedSequence = frame.UpdateSequence;
+    _lastFrameSerial = frameSerial;
 }
 
 Nullable<const RenderScene*> RenderSystem::GetSceneRT(SceneId id) const noexcept {
@@ -135,27 +180,33 @@ Nullable<const RenderScene*> RenderSystem::GetSceneRT(SceneId id) const noexcept
 }
 
 void RenderSystem::OnFlightCompletedGT(const FlightCompletion& completion) {
+    CheckCanModifyGT();
     auto& frame = GetFrameUpdates(completion.FlightIndex);
+    if (frame.Phase != FrameUpdates::State::Consumed || frame.FrameSerial != completion.FrameSerial) RADRAY_ABORT("Stale or unconsumed scene completion");
     for (size_t i = 0; i < frame.Count; ++i) {
         auto& entry = frame.Scenes[i];
         auto record = _scenesGT.TryGet({entry.Id.Index, entry.Id.Generation});
         if (record) (*record)->Writer->_assets.ReleaseFlight(completion.FlightIndex);
         if (entry.Destroy && record) {
+            if (entry.Id.Generation == std::numeric_limits<uint32_t>::max()) RADRAY_ABORT("Scene generation exhausted");
             _scenesGT.Destroy({entry.Id.Index, entry.Id.Generation});
             std::erase(_sceneIdsGT, entry.Id);
         }
         entry.Updates.Clear();
     }
     frame.Count = 0;
-    frame.Sealed = false;
+    frame.Phase = FrameUpdates::State::Writable;
 }
 
 void RenderSystem::AbandonUnpublishedFrameGT(uint32_t flightIndex) {
+    CheckCanModifyGT();
     auto& frame = GetFrameUpdates(flightIndex);
+    if (!_stopping || frame.Phase == FrameUpdates::State::Published || frame.Phase == FrameUpdates::State::Consumed) RADRAY_ABORT("Terminal abandon requires stopping and completed published frames");
+    _terminalAbandoned = true;
     for (size_t i = 0; i < frame.Count; ++i) frame.Scenes[i].Updates.Clear();
     for (auto& record : _scenesGT.Values()) record->Writer->_assets.ReleaseFlight(flightIndex);
     frame.Count = 0;
-    frame.Sealed = false;
+    frame.Phase = FrameUpdates::State::Writable;
 }
 
 void RenderSystem::AbandonUnpublishedFramesGT() {

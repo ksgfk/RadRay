@@ -1,7 +1,7 @@
 #include <radray/runtime/components/light_component.h>
 
 #include <algorithm>
-
+#include <radray/runtime/render_scene/scene_writer.h>
 
 namespace radray {
 
@@ -21,19 +21,54 @@ Eigen::Vector3f LightComponent::GetLightDirection() const noexcept {
 }
 
 void LightComponent::SetIntensity(float intensity) noexcept {
+    CheckCanModify();
+    if (_intensity == std::max(intensity, 0.0f)) return;
     _intensity = std::max(intensity, 0.0f);
+    MarkRenderDynamicDataDirty();
 }
 
 void LightComponent::SetLightColor(const Eigen::Vector3f& color) noexcept {
+    CheckCanModify();
+    if (_lightColor == color.cwiseMax(Eigen::Vector3f::Zero())) return;
     _lightColor = color.cwiseMax(Eigen::Vector3f::Zero());
+    MarkRenderDynamicDataDirty();
 }
 
 void LightComponent::SetAffectsWorld(bool affectsWorld) noexcept {
+    CheckCanModify();
+    if (_affectsWorld == affectsWorld) return;
     _affectsWorld = affectsWorld;
+    MarkRenderDynamicDataDirty();
 }
 
 void LightComponent::SetCastShadow(bool castShadow) noexcept {
+    CheckCanModify();
+    if (_castShadow == castShadow) return;
     _castShadow = castShadow;
+    MarkRenderDynamicDataDirty();
+}
+
+void LightComponent::CreateRenderState(SceneWriter& writer) {
+    _lightId = writer.CreatePrimitive();
+    MarkRenderStateDirty();
+}
+void LightComponent::DestroyRenderState(SceneWriter& writer) {
+    writer.RemovePrimitive(_lightId);
+    _lightId = {};
+}
+void LightComponent::CollectRenderUpdates(SceneWriter& writer, RenderDirtyFlags) { writer.SetLight(CaptureLightState()); }
+void LightComponent::OnTransformChanged() { MarkRenderTransformDirty(); }
+LightStateUpdate LightComponent::CaptureLightState() const noexcept {
+    LightStateUpdate result;
+    result.Id = _lightId;
+    result.Type = GetLightType();
+    result.Color = _lightColor;
+    result.Intensity = _intensity;
+    result.Position = GetLightPosition();
+    result.Direction = GetLightDirection();
+    result.AffectsWorld = _affectsWorld;
+    result.CastShadow = _castShadow;
+    return result;
 }
 
 }  // namespace radray

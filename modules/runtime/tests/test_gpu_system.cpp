@@ -102,6 +102,7 @@ void RunCommandBatches(render::RenderBackend backend, bool profiler) {
         EXPECT_EQ(gpu->GetFlightGpuSignal(flight).Value, submitted.Value);
         EXPECT_TRUE(gpu->CompleteFlightIfReady(flight, true));
         EXPECT_FALSE(gpu->GetFlightGpuSignal(flight).IsValid());
+        gpu->ReleaseFrameResourcesGT({.FlightIndex = flight, .FrameSerial = context.FrameSerial()});
         EXPECT_GE(signaled->GetCompletedValue(), round + 1u);
         ScopedBufferMap map{readback.get(), {0, 8}};
         ASSERT_TRUE(map);
@@ -116,6 +117,7 @@ void RunCommandBatches(render::RenderBackend backend, bool profiler) {
     empty.SubmitFrame();
     EXPECT_TRUE(gpu->GetFlightGpuSignal(0).IsValid());
     EXPECT_TRUE(gpu->CompleteFlightIfReady(0, true));
+    gpu->ReleaseFrameResourcesGT({.FlightIndex = 0, .FrameSerial = empty.FrameSerial()});
     gpu->WaitAndRetireFlights();
     EXPECT_GE(gpu->GetLastGpuTimeMs(), 0.0f);
     EXPECT_TRUE(logs.Errors().empty()) << logs.Errors();
@@ -175,6 +177,7 @@ void RunFinalFence(render::RenderBackend backend) {
     EXPECT_FALSE(resumed);
     EXPECT_TRUE(ReleaseFence(gate.get(), backend, 1));
     EXPECT_TRUE(gpu->CompleteFlightIfReady(0, true));
+    gpu->ReleaseFrameResourcesGT({.FlightIndex = 0, .FrameSerial = context.FrameSerial()});
     gpu->PumpWaitFrame(0);
     EXPECT_TRUE(resumed);
     gpu->WaitAndRetireFlights();
@@ -225,11 +228,55 @@ TEST_F(GpuSystemDeathTest, RejectsInvalidCommandReturnsAndUnsealedFrames) {
     EXPECT_DEATH(context.SubmitFrame(), "");
     EXPECT_DEATH(Gpu->BeginFrameRecord(0, {}, {}, false), "");
     EXPECT_TRUE(Gpu->CompleteFlightIfReady(0, true));
+    Gpu->ReleaseFrameResourcesGT({.FlightIndex = 0, .FrameSerial = context.FrameSerial()});
     auto next = Gpu->BeginFrameRecord(0, {}, {}, false);
     EXPECT_DEATH(context.AllocateCommandBuffer(), "");
     next.SubmitFrame();
     other.SubmitFrame();
     Gpu->WaitAndRetireFlights();
+    Gpu->ReleaseFrameResourcesGT({.FlightIndex = 0, .FrameSerial = next.FrameSerial()});
+    Gpu->ReleaseFrameResourcesGT({.FlightIndex = 1, .FrameSerial = other.FrameSerial()});
+}
+
+TEST_F(GpuSystemDeathTest, EnforcesFrameResourceRetirementBeforeSlotReuse) {
+    auto first = Gpu->BeginFrameRecord(0, {}, {}, false);
+    const FlightCompletion firstCompletion{.FlightIndex = 0, .FrameSerial = first.FrameSerial()};
+    EXPECT_DEATH(Gpu->ReleaseFrameResourcesGT(firstCompletion), "");
+    first.SubmitFrame();
+    ASSERT_TRUE(Gpu->CompleteFlightIfReady(0, true));
+    // An empty frame still owns its serial until GT consumes the completion.
+    EXPECT_DEATH(Gpu->BeginUpdateForFlight(0), "");
+    EXPECT_DEATH(Gpu->BeginFrameRecord(0, {}, {}, false), "");
+    EXPECT_DEATH(Gpu->RetainForFrameGT(0, 42u), "");
+    EXPECT_DEATH(Gpu->AbandonUnpublishedResourcesTerminalGT(), "");
+    Gpu->ReleaseFrameResourcesGT(firstCompletion);
+    EXPECT_EQ(first.FrameSerial(), firstCompletion.FrameSerial);
+    EXPECT_DEATH(Gpu->ReleaseFrameResourcesGT(firstCompletion), "");
+
+    Gpu->BeginUpdateForFlight(0);
+    auto payload = make_shared<uint32_t>(42);
+    weak_ptr<uint32_t> retained = payload;
+    Gpu->RetainForFrameGT(0, std::move(payload));
+    EXPECT_DEATH(Gpu->ReleaseFrameResourcesGT(firstCompletion), "");
+    auto next = Gpu->BeginFrameRecord(0, {}, {}, false);
+    EXPECT_GT(next.FrameSerial(), firstCompletion.FrameSerial);
+    EXPECT_FALSE(retained.expired());
+    EXPECT_DEATH(Gpu->ReleaseFrameResourcesGT(firstCompletion), "");
+    next.SubmitFrame();
+    ASSERT_TRUE(Gpu->CompleteFlightIfReady(0, true));
+    EXPECT_FALSE(retained.expired());
+    EXPECT_DEATH(Gpu->ReleaseFrameResourcesGT(firstCompletion), "");
+    Gpu->ReleaseFrameResourcesGT({.FlightIndex = 0, .FrameSerial = next.FrameSerial()});
+    EXPECT_TRUE(retained.expired());
+
+    Gpu->BeginUpdateForFlight(0);
+    payload = make_shared<uint32_t>(84);
+    retained = payload;
+    Gpu->RetainForFrameGT(0, std::move(payload));
+    EXPECT_FALSE(retained.expired());
+    Gpu->AbandonUnpublishedResourcesTerminalGT();
+    EXPECT_TRUE(retained.expired());
+    EXPECT_DEATH(Gpu->RetainForFrameGT(0, 84u), "");
 }
 
 }  // namespace

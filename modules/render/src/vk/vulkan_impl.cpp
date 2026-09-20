@@ -2593,19 +2593,24 @@ static VulkanImmutableSamplerState MakeSamplerStateVulkan(const SamplerDescripto
 
 size_t SamplerStateHashVulkan::operator()(const VulkanImmutableSamplerState& state) const noexcept {
     HashCode hash;
+    const auto addFloat = [&hash](float value) {
+        // Numeric equality treats both zeros as equal; normalize their bits before hashing.
+        const auto bits = std::bit_cast<uint32_t>(value);
+        hash.Add((bits & 0x7fffffffu) == 0 ? 0u : bits);
+    };
     hash.Add(state.MagFilter);
     hash.Add(state.MinFilter);
     hash.Add(state.MipmapMode);
     hash.Add(state.AddressModeU);
     hash.Add(state.AddressModeV);
     hash.Add(state.AddressModeW);
-    hash.Add(state.MipLodBias);
+    addFloat(state.MipLodBias);
     hash.Add(state.AnisotropyEnable);
-    hash.Add(state.MaxAnisotropy);
+    addFloat(state.MaxAnisotropy);
     hash.Add(state.CompareEnable);
     hash.Add(state.CompareOp);
-    hash.Add(state.MinLod);
-    hash.Add(state.MaxLod);
+    addFloat(state.MinLod);
+    addFloat(state.MaxLod);
     hash.Add(state.BorderColor);
     hash.Add(state.ReductionMode);
     hash.Add(state.Flags);

@@ -96,7 +96,7 @@ CPU record/Submit 时间与 GPU 时间线分开解读。关闭使用 `-DRADRAY_E
 | `test_asset_slot` | `AssetSlotTest` |
 | `test_frame_upload` | `FrameUploadTest` |
 | `test_gpu_system` | `GpuSystemTest`, `GpuSystemDeathTest` |
-| `test_scene_delivery` | `SceneDelivery`, `MultiWorldSceneRunner`（含单/多场景 CPU 交付与 D3D12/Vulkan runner，F=1/2/3） |
+| `test_scene_delivery` | `SceneDelivery`, `MultiWorldSceneRunner`（含单/多场景 CPU 交付与 D3D12/Vulkan runner，F=1/2/3/8） |
 | `test_world_scenes` | `WorldManager`, `WorldScenes`（多 World 所有权、暂停、独立场景写入、连接与退休） |
 | `test_scene_updates` | `SceneUpdates`（组件标脏合并、生命周期、代次与收集约束；纯 CPU） |
 | `test_scene_assets` | `SceneAssets`（类型无关的资产常驻/退休、Ready 通知、共享等待取消与 GT 释放；纯 CPU） |
@@ -291,6 +291,46 @@ runtime-only 可消费匹配 backend 的已编译 artifact，源码请求不会�
 旧 RenderGraph、Forward、ImGui 及其样例和专用测试已移除，相应 CMake 选项不再提供。
 基线设计、历史能力与依赖边界见[临时设计快照](../temp/render-framework-design.md)。
 通用 CTest 验证脚本、shader CLI、依赖恢复和编译数据库工具保留。
+
+## 生命周期与增量渲染验收
+
+`WorldLifecycle` 覆盖立即创建、统一 epoch、延迟销毁、连接重入、层级和 typed Light；
+`SceneDelivery` / `SceneDeliveryRunner` 覆盖 packet/serial、CPU reader lease 和 F=1/2/3/8。
+`GpuSceneLifetime`（启用 JIT）执行 D3D12/Vulkan 三角形 draw/readback、慢 fence、手工 owner、取消与失败的上传；
+其中 host-signaled fence 压力与 native validation 数值测试分开运行。
+
+```powershell
+cmake --build build_debug --target radray_runtime_tests --parallel 12
+ctest --test-dir build_debug -R "WorldLifecycle|SceneDelivery|GpuSceneLifetime|LifecycleScale" --output-on-failure
+```
+
+`LifecycleScale` 正常运行 10k/100k 共享 mesh 断言。较慢的 `LifecyclePerformance.Matrix` 默认跳过，
+显式设置环境变量后在 Release 中运行 384 组配置，输出 LIFECYCLE_PERF / DELETE / SETUP CSV 行。
+每配置各 flight 预热后采样 7 次，报告中位数和观测尾部（7 次样本的 nearest-rank p95 即最大值）。
+其 View 阶段是 CPU AABB 读取基准，GPU 多视图实际 draw 由 GpuSceneLifetime 另行覆盖，不合称渲染 FPS。
+
+```powershell
+cmake -S . -B build_lifecycle_perf -G Ninja -DCMAKE_BUILD_TYPE=Release `
+  -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded -DMI_STATS=FULL `
+  -DRADRAY_ENABLE_PROFILER=OFF -DRADRAY_BUILD_SHADER_COMPILER=OFF `
+  -DRADRAY_ENABLE_D3D12=OFF -DRADRAY_ENABLE_VULKAN=OFF `
+  -DRADRAY_BUILD_BENCHMARKS=OFF -DRADRAY_ENABLE_ZLIB=OFF -DRADRAY_ENABLE_LIBJPEG=OFF
+cmake --build build_lifecycle_perf --target test_lifecycle_performance --parallel 12
+$env:RADRAY_RUN_LIFECYCLE_BENCHMARK = '1'
+ctest --test-dir build_lifecycle_perf -R '^LifecyclePerformance.Matrix$' -V
+Remove-Item Env:RADRAY_RUN_LIFECYCLE_BENCHMARK
+```
+
+分配统计读取现有 mimalloc 的完整统计；没有引入全局 new 钩子。Windows `/MD` 下现有静态 mimalloc
+不接管 CRT/STL 分配，因此使用上述独立 `/MT` 配置；创建阶段未观测到分配时 CSV 输出 `-1`，不能把它视为零分配。
+双线程统计在交接处合并 RT 的 allocator 数据。字节为 allocator 记录的分配字节；对象静态大小单独列出。
+CSV 表头由对应的 `LIFECYCLE_*_HEADER` 行给出。PERF 的 `transform_updates` / `transform_bytes` 来自
+测试读取的实际更新包，只累计 7 个正式样本；DELETE 报告删除前后 Actor 数和实际 remove 数，并验证幸存者顺序。
+测试不依赖运行时累计计数，也不把更新包数量当作内部 Gather、矩阵求值或容器搬移次数。
+完整测试前移除该环境变量。Sanitizer 使用独立 RelWithDebInfo 构建并关闭 mimalloc/profiler；
+MSVC ASan 添加 `/fsanitize=address`，不与 `/RTC1` 混用。ClangCL 可以同时启用 ASan/UBSan；
+CMake compiler probe 同样指定 RelWithDebInfo 和非 Debug CRT，并显式连接其 sanitizer runtime。
+本机配置、原始 CSV 与已运行/未运行范围见[生命周期 v2 验收](../temp/lifecycle-v2-validation.md)。
 
 ## 编译数据库与文档检查
 

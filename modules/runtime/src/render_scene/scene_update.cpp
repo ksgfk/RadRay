@@ -7,6 +7,7 @@ void SceneUpdateBatch::Clear() noexcept {
     CreatePrimitives.clear();
     MeshStates.clear();
     Transforms.clear();
+    Lights.clear();
 }
 
 }  // namespace radray

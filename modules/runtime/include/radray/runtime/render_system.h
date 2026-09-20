@@ -2,6 +2,7 @@
 
 #include <span>
 #include <string_view>
+#include <thread>
 
 #include <radray/nullable.h>
 #include <radray/render/render_pass_registry.h>
@@ -42,8 +43,12 @@ public:
     void DestroySceneGT(SceneId id);
     /// GT: runner owns the writable flight; collects all writers once before publication.
     void SealFrameGT(uint32_t flightIndex);
+    void PublishFrameGT(uint32_t flightIndex);
     /// RT: exactly once per published flight, including skipped draws; no World access.
-    void ConsumeRenderUpdates(uint32_t flightIndex);
+    void ConsumeRenderUpdates(uint32_t flightIndex, uint64_t frameSerial);
+    uint64_t GetUpdateSequence(uint32_t flightIndex) const;
+    uint64_t GetFrameSerial(uint32_t flightIndex) const;
+    void BeginStoppingGT() noexcept;
     /// GT: releases retired owners and closing identities after a real fence completion.
     void OnFlightCompletedGT(const FlightCompletion& completion);
     /// Shutdown only: RT stopped, GPU idle and real completions consumed.
@@ -65,6 +70,8 @@ public:
 
 private:
     friend class WorldRenderBridge;
+    void CheckCanModifyGT() const;
+    void SetCollecting(bool collecting);
     SceneWriter& ClaimSceneWriterGT(SceneId id);
     void ReleaseSceneWriterGT(SceneId id);
 
@@ -81,7 +88,13 @@ private:
     struct FrameUpdates {
         vector<SceneFrameUpdate> Scenes;
         size_t Count{0};
-        bool Sealed{false};
+        enum class State : uint8_t { Writable,
+                                     Sealed,
+                                     Published,
+                                     Consumed };
+        State Phase{State::Writable};
+        uint64_t UpdateSequence{0};
+        uint64_t FrameSerial{0};
     };
     FrameUpdates& GetFrameUpdates(uint32_t flightIndex);
 
@@ -93,6 +106,14 @@ private:
     SparseSet<unique_ptr<SceneRecord>> _scenesGT;
     vector<SceneId> _sceneIdsGT;
     vector<SceneSlotRT> _scenesRT;
+    uint64_t _nextUpdateSequence{1};
+    uint64_t _lastPublishedSequence{0};
+    uint64_t _lastConsumedSequence{0};
+    uint64_t _lastFrameSerial{0};
+    bool _stopping{false};
+    bool _terminalAbandoned{false};
+    bool _collecting{false};
+    std::thread::id _ownerThread{std::this_thread::get_id()};
 };
 
 template <>

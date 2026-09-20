@@ -21,18 +21,22 @@ public:
     void SetStaticMesh(PrimitiveId id, const StreamingAssetRef<StaticMesh>& mesh, const Eigen::Matrix4f& localToWorld);
     /// Requires a prior SetStaticMesh, including an explicitly empty mesh binding.
     void SetTransform(PrimitiveId id, const Eigen::Matrix4f& localToWorld);
+    void SetLight(const LightStateUpdate& light);
 
 private:
     friend class RenderSystem;
+    friend class PrimitiveComponent;
 
     struct PrimitiveState {
         PrimitiveId Id;
         bool Sent{false};
         bool HasMesh{false};
+        bool HasLight{false};
         size_t DirtyIndex{std::numeric_limits<size_t>::max()};
         std::optional<AssetId> Asset;
         std::optional<StaticMeshStateUpdate> Mesh;
         std::optional<Eigen::Matrix4f> Transform;
+        std::optional<LightStateUpdate> Light;
     };
 
     PrimitiveState& GetPrimitive(PrimitiveId id);

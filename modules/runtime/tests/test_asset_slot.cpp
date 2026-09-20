@@ -378,9 +378,8 @@ TEST_F(AssetSlotTest, PayloadsFromOnePumpShareOneFrameWait) {
     EXPECT_EQ(c->PayloadDestroyed, 1u);
 }
 
-/// 一个资产持有别的资产引用时, 前者被回收会令后者归零。收集要循环到不动点, 否则被依赖
-/// 的那个要多等一次 Pump 才死。
-TEST_F(AssetSlotTest, CollectingCascadesToDependenciesWithinOnePump) {
+/// Cascading releases beyond the entry cutoff wait for the next explicit Pump.
+TEST_F(AssetSlotTest, CascadedDependenciesWaitForTheNextPump) {
     shared_ptr<Counters> ownerCounters = MakeCounters();
     shared_ptr<Counters> heldCounters = MakeCounters();
     const AssetId heldId = MakeId(9);
@@ -410,7 +409,9 @@ TEST_F(AssetSlotTest, CollectingCascadesToDependenciesWithinOnePump) {
 
     Assets().Pump();
     EXPECT_EQ(ownerCounters->Destroyed, 1u);
-    EXPECT_EQ(heldCounters->Destroyed, 1u) << "collection must iterate to a fixed point";
+    EXPECT_EQ(heldCounters->Destroyed, 0u);
+    Assets().Pump();
+    EXPECT_EQ(heldCounters->Destroyed, 1u);
     EXPECT_EQ(Assets().GetAssetCount(), 0u);
 }
 
@@ -445,7 +446,10 @@ TEST_F(AssetSlotTest, ResidentAndRescuedAssetsSurviveUntilReleasedAndDependencyC
     for (uint32_t i = 0; i < 10000; ++i)
         chain = Assets().AddReady(MakeId(20000 + i), make_unique<DependencyAsset>(counters, std::move(chain)));
     chain.Reset();
-    Assets().Pump();
+    for (uint32_t remaining = 10000; remaining > 0; --remaining) {
+        EXPECT_EQ(Assets().GetAssetCount(), remaining);
+        Assets().Pump();
+    }
     EXPECT_EQ(Assets().GetAssetCount(), 0u);
     EXPECT_EQ(counters->Destroyed, 20000u);
     EXPECT_EQ(counters->Unloaded, 20000u);
@@ -462,7 +466,7 @@ TEST_F(AssetSlotTest, ReentrantUnloadCanReloadItsIdentityWithoutRevivingTheDying
             ProbeAsset::OnUnload(manager);
             EXPECT_FALSE(manager.Find(MakeId(40000)).IsValid());
             Replacement = manager.AddReady(MakeId(40000), make_unique<ProbeAsset>(Counts, false));
-            manager.Pump();
+            EXPECT_DEATH(manager.Pump(), "");
         }
         shared_ptr<Counters> Counts;
         StreamingAssetRefAny& Replacement;
@@ -998,23 +1002,25 @@ TEST_F(AssetSlotTest, CancelingAWaiterDoesNotCancelTheLoad) {
 TEST_F(AssetSlotTest, ManagerDestructionUnloadsEverySlotEvenWhenStillReferenced) {
     shared_ptr<Counters> counters = MakeCounters();
     CountingWaitFrame waitFrame;
-    StreamingAssetRef<ProbeAsset> leaked;
+    using Ref = StreamingAssetRef<ProbeAsset>;
+    alignas(Ref) array<byte, sizeof(Ref)> leakedStorage;
+    // This negative test deliberately leaves an outstanding reference. Ending its storage
+    // lifetime must not call Reset or a destructor after the manager invalidates the slot.
+    auto* leaked = std::construct_at(reinterpret_cast<Ref*>(leakedStorage.data()));
 
     {
         AssetManager assets;
         assets.SetWaitFrameProcessor(&waitFrame);
-        leaked = assets.AddReady<ProbeAsset>(MakeId(25), make_unique<ProbeAsset>(counters, true));
-        ASSERT_TRUE(leaked.IsReady());
+        *leaked = assets.AddReady<ProbeAsset>(MakeId(25), make_unique<ProbeAsset>(counters, true));
+        ASSERT_TRUE(leaked->IsReady());
     }
 
     EXPECT_EQ(counters->Unloaded, 1u);
     EXPECT_EQ(counters->Destroyed, 1u);
-    // payload 交出后已无从等待帧边界 (关停时 _loadScope 已停), 故就地销毁 —— 关停路径
+    // payload 交出后已无从等待帧边界 (关停时 _retirementScope 已停), 故就地销毁 —— 关停路径
     // 在此之前已 device wait-idle 过。
     EXPECT_EQ(counters->PayloadDestroyed, 1u) << "payloads must not leak past the device";
-    // 残留引用此时是悬垂的。放掉它不得崩 —— 计数减到 0 后没有任何后续动作 (销毁对齐到
-    // Pump, 而 manager 已经没了)。
-    leaked.Reset();
+    // The reference is now invalid: even Reset would access a released slot.
 }
 
 /// 关停时【已写好但还没 Pump 的结果】仍会落地, 那个资产照样走 OnUnload。

@@ -33,32 +33,19 @@
 
 ## 帧序
 
+```text
+S0 runner::PrepareFrame：固定窗口维护批次 → writable 背压
+  Application::ServiceFrameBoundaryGT
+    完成消息批次 → 释放 RenderSystem/GpuSystem owner → 帧等待通知
+    → OnRenderFrameComplete → AssetManager::Pump → ApplicationScheduler::Pump
+BeginFrameTiming → DispatchEvents → OnUpdate → WorldManager::Tick（统一 epoch）
+S1 Application::FinalizeWorldAndSealGT
+  FinalizeWorldsGT → CollectRenderUpdates → SealFrameGT → PublishFrameGT → ready
+RT BeginFrameRecord → S2 ApplySceneUpdatesRT → 可选 OnRender
+  EndFrameRecordAndSubmit：检查归还 → 上传 EndFlight → HostWrites.Flush
+  → 有序 Submit/Present → 最终主队列 fence
 ```
-Application::StartLoop
-  ├─ runner::PrepareFrame            按需处理窗口维护批次，再等待并取得当前可写 flight
-  ├─ Application::BeginUpdateForFlight  收集完成批次 → GPU 内部调度 → OnRenderFrameComplete
-  ├─ GpuSystem::BeginFrameTiming     记录逻辑帧开始时间，计算相邻帧 DeltaTime
-  ├─ NativeEventPump::DispatchEvents 排空可取的窗口消息，包含等待与完成回调期间投递的输入
-  ├─ runner::MaintainWindows        处理事件期间产生的窗口请求与交换链变化
-  ├─ AssetManager::Pump               提交加载结果；销毁零引用资产
-  ├─ ApplicationScheduler::Pump
-  ├─ Application::OnUpdate            游戏逻辑
-  ├─ WorldManager::Tick                按身份快照驱动各 World，跳过暂停或待销毁 World；结束后清理待销毁 World
-  ├─ WorldManager::CollectRenderUpdates  收集所有连接，包括暂停的 World；同步桥写入 SceneWriter
-  ├─ RenderSystem::SealFrameGT         封口场景创建/更新/销毁及资产退休列表
-  ├─ runner::MaintainWindows        处理 Update 期间的新请求，再决定是否退出
-  ├─ runner 发布当前 flight
-  │    game thread 可以开始下一可写 flight 的 Update
-  ├─ GpuSystem::BeginFrameRecord      重置已退休 flight 的命令分配器、批次与 acquire 登记
-  ├─ Application::ConsumeRenderUpdates  顺序 Apply；跳过绘制和退出排空也必须执行
-  ├─ Application::Render              应用录制入口；默认空实现，可由 runner 跳过
-  └─ GpuSystem::EndFrameRecordAndSubmit
-       检查全部命令与目标已归还 → uploader.EndFlight → HostWrites.Flush
-       → 按归还顺序 Submit 各批次（窗口已不可呈现时跳过全部应用命令）
-       D3D12：带目标的批次 Submit 后立即 Present，再处理下一批次
-       Vulkan：各批次 Submit 后统一逐目标 Present
-       最终收尾 Submit 的内部 fence → flight.Signal
-```
+
 
 单线程与双线程普通循环都遵循上述顺序。资源边界是当前 flight 上一轮的 fence 已完成、
 runner 已取得槽位使用权；逻辑帧边界是完成批次与应用完成钩子处理结束后的计时点。
@@ -81,12 +68,12 @@ GPU 完成的资源 owner。
 调用点是 `RetireRenderedFrames`（渲染线程在两帧 Record 之间，game thread 在
 `WaitWritableSlot` 等已提交 fence 之后）；不访问协程等待表，也不调用应用钩子。
 
-`Application` 是 channel 的唯一消费者。帧顶取得可写槽位后，`Application::BeginUpdateForFlight`
+`Application` 是 channel 的唯一消费者。帧顶取得可写槽位后，`Application::ServiceFrameBoundaryGT`
 作为 `GpuSystem` 的 friend，直接通过私有 `_flightCompletions.TryRead` 非阻塞收集一个本地批次，
-随后调用 `GpuSystem::BeginUpdateForFlight` 重置当前槽位的 HostWrites 并运行 `PumpWaitFrame`。
-完成批次不传给 GPU 内部上传调度器。GPU 调度步骤返回后，Application 对每条消息先调用
-`RenderSystem::OnFlightCompletedGT` 清理该轮 CPU batch 和退休资产引用，再调用应用 `OnRenderFrameComplete`。
-此时 runner 已拥有当前可写 flight，GT 可以填充其 batch；随后开始本帧计时、派发窗口事件并进入 Update。
+先对全部完成消息调用 RenderSystem::OnFlightCompletedGT 和 GpuSystem::ReleaseFrameResourcesGT，
+验证 serial 并释放框架 owner，再调用 GpuSystem::BeginUpdateForFlight 重置槽位和派发等待者，最后通知应用。
+不得先复用槽位再校验旧 owner。各通知服务在入口冻结本批工作，回调新建的同类通知留到下一 S0；
+等待者以地址和不复用序号联合验证，前一个回调取消后一个 waiter 不会产生悬垂派发。
 完成消息保留 FrameSerial，不能仅用可复用的 FlightIndex 识别一帧。
 `GpuWorkCompleted` 仍表示该轮渲染结果有效；false 的跳过帧也已经经过其提交的真实 fence，
 通知不代表画面已显示到屏幕。
@@ -191,7 +178,8 @@ FinishOperation 使用直接 awaitable，无论是否已收到取消都必须先
 该通知只校验契约，不等待线程或 GPU。尺寸、位置、显示、样式、owner、alpha 和直接销毁都受此保护；
 标题、输入和桌面能力接口保持原有语义。
 
-普通循环在取得 flight 前、事件派发后和 Update 后检查维护需求；模态循环复用相同入口。
+窗口维护只在 S0 PrepareFrame 检查一次；事件或 Update 提出的请求等下一 S0，模态循环复用相同入口。
+维护只等待 last-published packet 的 CPU 边界，绝不等待 GT 正持有的未发布包；实时 acquire/present 防御仍保留。
 维护与结果交付期间拒绝模态 Tick 重入。启动主窗口和最终拆除走宿主私有的立即执行路径；
 `OnInit` 中启动的操作在首个维护阶段执行。关停先关闭请求入口并取消等待者，关闭后新任务直接停止。
 
@@ -208,12 +196,13 @@ runtime 的 WindowInputRouter、AppWindow::GetInput、统一 DispatchInput 与 O
 
 ## Flight 槽位
 
-`GpuFlightSlot` 按所有权/阶段分三组，跨阶段的访问时序由 runner 的信号量 + retire 锁保证：
+`GpuFlightSlot` 按所有权/阶段分组，跨阶段的访问时序由 runner 的信号量 + retire 锁保证：
 
 | 组 | 成员 | 谁访问 |
 |---|---|---|
 | 录制态 | `CommandAllocator`, `Batches`, `Acquisitions`, `Uploader`, `HostWrites`, `Submitted`, `Recording` | GT 帧顶重置 HostWrites；RT 接管后录制，应用显式上传的 staging 在 fence 后回收 |
 | 计时态 | `FrameStartTime` | 游戏线程在帧开头写 |
+| 保活态 | `Payloads`, `FrameSerial` | GT 登记/释放 payload；RT 在 BeginFrameRecord 分配编号，GT 匹配真实完成后清零 |
 | 提交态 | `Signal` | `EndFrameRecordAndSubmit` 写；retire/`CompleteFlight` 经 `_retireMutex` 读后清 |
 | 等待表 | `WaitFrame` | 见下 |
 
@@ -221,8 +210,11 @@ runtime 的 WindowInputRouter、AppWindow::GetInput、统一 DispatchInput 与 O
 写入、Application 在 GT 消费。`WaitFrame` 仍用槽位上的原子位，见下一节。
 
 `FrameSerial` 标识一次帧录制，由 `GpuSystem` 实例的计数器在 `BeginFrameRecord` 中从 1
-递增分配，录制线程独占访问；完成消息保留该编号。编号只在同一 `GpuSystem` 生命周期内唯一，
-不同实例可以重复，不作为进程级身份。`FlightIndex` 则是循环复用的槽位索引。
+递增分配，同时标识槽位上保活资源所属的帧。非零表示该帧尚未由 GT 清理；
+GT 在 `ReleaseFrameResourcesGT` 匹配真实完成、释放 Payloads 后清零，随后槽位才可复用。
+空帧同样要完成此步骤。`AppFrameContext` 和完成消息各自保存分配时的编号，不受清零影响。
+编号只在同一 `GpuSystem` 生命周期内唯一，不同实例可以重复，不作为进程级身份。
+`FlightIndex` 则是循环复用的槽位索引。
 
 `_flights` 是 `vector<unique_ptr<FlightSlot>>` 而不是 `vector<FlightSlot>`：`FlightSlot`
 内含 `ManualCoroutineScheduler`，它不可拷贝也不可移动——挂起的协程记录里存着回指调度器的
@@ -231,53 +223,22 @@ runtime 的 WindowInputRouter、AppWindow::GetInput、统一 DispatchInput 与 O
 
 ## 帧边界等待
 
-这是 GPU 资源延迟销毁的机制：持有者等待帧边界，在恢复后的作用域内析构整包 payload，
-使资源依赖通过包内成员声明顺序表达，不依赖逐对象回收队列的入队顺序。
-资产侧入口见[资产系统](asset-system.md)。实现约束如下：
+`IWaitFrameProcessor::Wait()` 提供 GT 通知，等待表属于当前 flight。CompleteFlight 只发布原子完成事实；
+GT PumpWaitFrame 冻结已就绪等待记录，再按地址和序号验证后恢复。正常只泵当前 writable flight，终止排空时处理全部 flight。
+Wait 以调用时的当前 flight 为保守覆盖点，可能多等一轮；取消经停止通道结束任务，不继续执行正常完成续体。
+取消不是 GPU 完成证据，不能用普通可取消协程的捕获变量作为唯一在途资源 owner。
 
-**等待表挂在 per-flight 槽位上**（`GpuFlightSlot::WaitFrame`），不是全局表。flight 的
-fence 就是完成条件，记在槽位上便无需另存 fence 值再逐个比较。
+### 不可取消的框架 owner
 
-**两段式恢复。** `CompleteFlight` 只发布槽位完成的原子标记；主线程的 `PumpWaitFrame`
-消费标记，更新该 flight 的等待记录并 resume。
+GT 拥有 writable flight 时调用 `GpuSystem::RetainForFrameGT(flight, payload)`，payload 可为资产 ref 或 raw RHI owner。
+记录直接保存在对应 `GpuFlightSlot::Payloads` 中，与录制共用槽位的 FrameSerial。
+真实完成的 serial 与槽位 FrameSerial 和 CompletedFrameSerial 原子值都匹配后，
+S0 ReleaseFrameResourcesGT 才在 GT 析构 payload。即使通知被取消或 GpuWorkCompleted=false，记录也不能提前释放。
 
-**`Wait()` 挂进当前 flight，不是"上一次提交的 fence 值"。** 调用点在帧顶 Update 期间，
-此刻当前 flight 还没开始录制，故"已录制的 work"全都属于更早的 flight——等当前 flight 的
-fence 必然晚于它们完成。这样就不必记录并比较 fence 值，代价是最多多等一轮
-（口径本就允许多等）。
-
-**`PumpWaitFrame` 只泵当前可写 flight。** 调用点固定在 `BeginUpdateForFlight`，关停时则在
-排空工作后逐 flight 泵送。等待表始终由 game thread 修改，render thread 只写原子完成标记。
-
-**关停必须 `CancelAllWaitFrames`。** 挂在未提交 flight 上的记录永远等不到 fence，
-不取消就是协程帧连同它捕获的 GPU 对象一起泄漏。
-
-### 非资产的持有者怎么延迟销毁
-
-`AssetManager::DeferDestroy` 是给 `Asset::OnUnload` 用的，不要在别处调它。
-非资产的持有者直接 `co_await` `IWaitFrameProcessor::Wait()`（实现方是 `GpuSystem`）：
-
-```cpp
-// 在自己的 TaskScope 里
-scope.Spawn([this, payload = std::move(gpuStuff)]() -> task<void> mutable {
-    co_await _waitFrame->Wait();
-    // payload 在此处析构，声明顺序即销毁顺序
-}());
-```
-
-两条约束：**自己的 `TaskScope` 必须在 `GpuSystem` 之前析构**（否则取消时的析构会碰到已死的
-device），且**恢复点在主线程**，所以析构里可以安全动 GPU 对象。
-
-`Application::InitializeRuntime` 直接通过 setter 连接帧等待接口：
-
-```cpp
-_assetManager->SetWaitFrameProcessor(_gpuSystem.get());
-```
-
-其他需要等待帧的系统也由 Application 显式连接到 GpuSystem 提供的 `IWaitFrameProcessor`，
-并在 `DestroyRuntime` 中安排其先于 GpuSystem 清理。装配细节见「服务装配」一节。
-
-目前仓库里只有资产走这条路，所以没有现成的非资产调用点可参照。
+没有对应提交的 owner 只可在 RT 停止、GPU 排空后的 AbandonUnpublishedResourcesTerminalGT 释放，
+之后拒绝新 retain。GpuSystem 析构发现尚存 owner 会诊断，不能借析构隐藏完成义务。
+Scene 绑定使用自己的长期 owner 与最后解绑 flight，细节见[场景交付](render-framework.md#交付退出与资产保活)。
+原有 TextureAsset 保守 DeferDestroy 保留到其外部使用者全部迁移，见[资产系统](asset-system.md)。
 
 ## 完成通知与帧等待恢复
 
@@ -288,7 +249,7 @@ retire 阶段观察到 fence 后发布两种通知：
 | 应用完成钩子 | `UnboundedChannel<FlightCompletion>` 的本地批次 | Application 在主线程逐条调用 `OnRenderFrameComplete` |
 | 帧边界等待 | per-flight 原子 `WaitersCompleted` | `PumpWaitFrame` 只泵当前独占 flight |
 
-普通帧顺序固定为：收集消息 → `PumpWaitFrame` → 逐条清理 RenderSystem flight 并调用 `OnRenderFrameComplete`。
+普通帧顺序固定为：收集消息 → 清理匹配的 RenderSystem/GpuSystem owner → `PumpWaitFrame` → `OnRenderFrameComplete`。
 先消费旧 WaitersCompleted，再调用应用钩子，避免钩子新建的 Wait 被误认为已经完成。
 `PumpWaitFrame` 在恢复现有等待者前统一标记旧等待记录，恢复期间新建的等待同样不会提前完成。
 上传专用的等待表、状态机和恢复路径已删除，帧等待协议保留。
@@ -327,7 +288,7 @@ TODO：待后续上层 GPU 调度设计确定后恢复资产上传，包括复�
 `ResourceUploader`、staging pool、动态常量缓冲和映射写入工具仍可显式使用。
 `AppFrameContext::GetUploader` 提供当前录制 flight 的上传器，其 Begin/End/Collect 由 GpuSystem
 按录制和 fence 生命周期驱动。复制命令的位置由应用录制方决定；现有低层 helper 的 barrier 行为
-未在此次删除中修改。`IWaitFrameProcessor::Wait` 继续负责帧边界等待与延迟销毁。
+未在此次删除中修改。`IWaitFrameProcessor::Wait` 负责通知；已提交上传的目标 owner 使用不可取消的框架保活。
 
 ## 渲染资源的帧寿命
 
@@ -336,7 +297,7 @@ program 的 layout/参数 metadata 活过所有 flight，关停 GPU idle 后才�
 
 旧框架的自动 per-flight asset refs、pool、descriptor arena 和 history 已移除。应用录制方负责
 让输入数据、原生资源与资产 owners 活到对应工作完成。StreamingAssetRef 的复制和释放仍只在 GT；
-可在 OnUpdate/OnRenderFrameComplete 的安全点处理，或沿既有资产延迟销毁协议回收。
+在 OnUpdate 的 writable 阶段以 RetainForFrameGT 交给框架；场景绑定由 RenderAssetLifetime 管理。
 retire 阶段仅发布帧完成消息；应用完成钩子在 GT 消费消息时执行。
 
 ## 帧 profiler
@@ -374,23 +335,18 @@ query 结果；应用只读 `GetLastGpuTimeMs()`，后端 readback barrier 差�
 
 `Application::Shutdown` 的顺序是固化的，每一步都有理由：
 
-```cpp
-_windowManager->CloseOperations();            // 关闭窗口请求入口并取消等待任务
-WaitAndCleanupCompletedFlights();             // Application 等 GPU、消费完成消息并恢复协程
-// 上一步也 abandon 未发布的 Scene batch 和退休资产引用；不为它等待或生成 completion。
-OnShutdown();                                  // 游戏侧释放自管 per-flight 资源
-_scheduler.CancelAll();
-_worldManager.reset();             // 全部 World → Actor / Component → drop StreamingAssetRef
-_windowManager->SetRenderSystem(nullptr);  // RenderPassRegistry 即将销毁，先断引用
-_renderSystem.reset();             // Scene/batches/asset refs → shader/program → registry
-_assetManager.reset();             // 放开全部资产，GPU buffer 须在 device 前释放
-_assetDatabase.reset();            // importer/settings 活过 manager 的在飞 task
-_windowManager->DetachAllSwapChains();
-_windowManager->SetGpuSystem(nullptr);
-_gpuSystem->SetWindowManager(nullptr);
-_gpuSystem.reset();                // device 最后死
-_windowManager.reset();
+```text
+进入 Stopping：停止 World/Scene 新业务和 scheduler 新任务，请求加载生产者停止
+关闭窗口操作 → 停止新帧，runner 消费并 join 已发布包
+WaitAndCleanupCompletedFlights：真实 GPU drain → 按 FrameSerial 发布完成 → S0 释放 owner
+terminal abandon：仅释放未发布 Scene 包和 raw frame owner，不生成成功 completion
+OnShutdown → 取消剩余通知 → WorldManager 显式 Shutdown
+RenderSystem → AssetManager → AssetDatabase → GpuSystem → WindowManager
 ```
+
+加载任务与保守退休任务使用独立 scope；取消加载不会取消退休。AssetManager 的退休 scope 只在 GPU drain 后终止。
+普通窗口维护调用 WaitAndCleanupCompletedFlights 时不 abandon writer 状态；abandon 后不能恢复正常发布。
+
 
 关键约束：**`AssetManager` 必须在 `AssetDatabase` 之前销毁**（在飞 task 可能持有 importer），
 且两者都必须在 `GpuSystem` 之前销毁（GPU 资源必须在 device 之前交出）。

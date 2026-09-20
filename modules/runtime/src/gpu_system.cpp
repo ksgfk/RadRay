@@ -5,6 +5,7 @@
 #include <radray/hash.h>
 #include <radray/logger.h>
 #include <radray/profiler.h>
+#include <radray/scope_guard.h>
 #include <radray/render/rhi.h>
 #include <radray/runtime/gpu_resource.h>
 #include <radray/vertex_data.h>
@@ -60,30 +61,30 @@ void GpuFlightCommandAllocator::Reset() {
 // ═══════════════════════════════════════════════════════════════
 
 bool WaitFrameAwaitable::await_ready() const noexcept {
-    return _gpuSystem == nullptr || _stop.stop_requested();
+    return _gpuSystem == nullptr || _gpuSystem->_retirementStopping || _stop.stop_requested();
 }
 
 bool WaitFrameAwaitable::await_suspend(std::coroutine_handle<> h) {
-    if (_gpuSystem == nullptr || _stop.stop_requested()) {
+    if (_gpuSystem == nullptr || _gpuSystem->_retirementStopping || _stop.stop_requested()) {
         return false;
     }
     _record = _gpuSystem->RegisterWaitFrame(_stop, h);
     return _record != nullptr;
 }
 
-void WaitFrameAwaitable::await_resume() noexcept {
-    // 【取消与正常完成走同一条出口】: 两种情况下调用方要做的事完全相同 —— 销毁它捕获的
-    // 数据。取消发生在关停路径上, 那时 device 尚未销毁 (见 IWaitFrameProcessor 的取消说明),
-    // 故不需要区分。Wait() 因此不必返回 bool。
+bool WaitFrameAwaitable::await_resume() noexcept {
+    const bool completed = !_stop.stop_requested() && (_record == nullptr || !_record->Canceled) &&
+                           (_gpuSystem == nullptr || !_gpuSystem->_retirementStopping);
     if (_record != nullptr && _gpuSystem != nullptr) {
         _gpuSystem->EraseWaitFrame(_record);
     }
     _record = nullptr;
+    return completed;
 }
 
 task<void> GpuSystem::Wait() {
     stop_token stop = co_await CurrentStopToken();
-    co_await WaitFrameAwaitable{this, stop};
+    if (!co_await WaitFrameAwaitable{this, stop}) co_await StopCurrentTask();
 }
 
 WaitFrameRecord* GpuSystem::RegisterWaitFrame(stop_token stop, std::coroutine_handle<> continuation) {
@@ -92,6 +93,8 @@ WaitFrameRecord* GpuSystem::RegisterWaitFrame(stop_token stop, std::coroutine_ha
         return nullptr;
     }
     WaitFrameRecord* record = _flights[flightIndex]->WaitFrame.Enqueue(stop, continuation);
+    if (_nextWaitSequence == std::numeric_limits<uint64_t>::max()) RADRAY_ABORT("Frame waiter sequence exhausted");
+    record->Sequence = _nextWaitSequence++;
     record->FlightIndex = flightIndex;
     record->FlightComplete = false;
     return record;
@@ -115,27 +118,22 @@ void GpuSystem::PumpWaitFrame(uint32_t flightIndex) {
     if (flightIndex >= _flights.size()) {
         return;
     }
+    if (_pumpingWaiters) RADRAY_ABORT("Cannot reenter frame waiter dispatch");
+    _pumpingWaiters = true;
+    auto guard = MakeScopeGuard([this]() noexcept { _pumpingWaiters = false; });
     MarkCompletedWaitFrames(flightIndex);
     ManualCoroutineScheduler<WaitFrameRecord>& waiters = _flights[flightIndex]->WaitFrame;
-    // 每轮从头重扫: 恢复一条记录会跑调用方的代码, 它可能新增或摘除记录。
-    bool resumedAny = true;
-    while (resumedAny) {
-        resumedAny = false;
-        for (size_t i = 0; i < waiters.Count();) {
-            WaitFrameRecord* rec = waiters.At(i);
-            if (rec->Stop.stop_requested()) {
-                rec->Canceled = true;
-            }
-            if (rec->Canceled || rec->FlightComplete) {
-                waiters.ResumeRecord(rec);
-                if (waiters.IsAlive(rec)) {
-                    waiters.Erase(rec);
-                }
-                resumedAny = true;
-                break;
-            }
-            ++i;
-        }
+    vector<std::pair<WaitFrameRecord*, uint64_t>> ready;
+    const auto boundary = _waitDispatchBoundary.value_or(_nextWaitSequence);
+    for (size_t i = 0; i < waiters.Count(); ++i) {
+        auto* record = waiters.At(i);
+        if (record->Stop.stop_requested()) record->Canceled = true;
+        if (record->Sequence < boundary && (record->Canceled || record->FlightComplete)) ready.emplace_back(record, record->Sequence);
+    }
+    for (auto [record, sequence] : ready) {
+        if (!waiters.IsAlive(record) || record->Sequence != sequence) continue;
+        waiters.ResumeRecord(record);
+        if (waiters.IsAlive(record) && record->Sequence == sequence) waiters.Erase(record);
     }
 }
 
@@ -157,6 +155,7 @@ bool GpuSystem::CompleteFlight(uint32_t flightIndex) {
     if (_frameProfiler != nullptr) {
         _frameProfiler->Resolve(flightIndex);
     }
+    flight.CompletedFrameSerial.store(flight.FrameSerial, std::memory_order_release);
     [[maybe_unused]] const bool published = _flightCompletions.TryWrite(FlightCompletion{.FlightIndex = flightIndex, .GpuWorkCompleted = flight.Rendered, .FrameSerial = flight.FrameSerial});
     RADRAY_ASSERT(published);
     flight.Uploader->CollectFlight(flightIndex);
@@ -195,6 +194,7 @@ void GpuSystem::BeginUpdateForFlight(uint32_t flightIndex) {
     }
 
     FlightSlot& flight = *_flights[flightIndex];
+    if (flight.FrameSerial != 0 || !flight.Payloads.empty()) RADRAY_ABORT("Release completed frame owners before reusing the flight");
     flight.HostWrites.Reset();
     // 此刻本 flight 上一轮的 fence 已完成 (runner 拿到可写槽位的前提), 等待者已被
     // CompleteFlight 标记, 且此后到下一次进入本函数之间只有本线程访问该 flight。
@@ -215,6 +215,7 @@ std::chrono::steady_clock::time_point GpuSystem::BeginFrameTiming(uint32_t fligh
 GpuSystem::GpuSystem(const GpuSystemDescriptor& desc)
     : _backBufferCount(desc.BackBufferCount),
       _flightDataCount(desc.FlightDataCount) {
+    if (_flightDataCount == 0) RADRAY_ABORT("GpuSystem requires at least one flight");
     render::DeviceDescriptor deviceDesc = desc.Device;
     std::visit(
         [this, &desc](auto& backendDesc) {
@@ -248,6 +249,9 @@ GpuSystem::GpuSystem(const GpuSystemDescriptor& desc)
 }
 
 GpuSystem::~GpuSystem() noexcept {
+    for (const auto& flight : _flights) {
+        if (!flight->Payloads.empty()) RADRAY_ABORT("GpuSystem requires explicit resource retirement before destruction");
+    }
     // 挂在未提交 flight 上的等待者永远等不到 fence, 必须显式取消 —— 取消会就地恢复它们,
     // 让它们在自己的作用域里析构所持有的 GPU 对象。
     //
@@ -278,14 +282,19 @@ uint32_t GpuSystem::GetCurrentFlightIndex() const noexcept {
 
 void GpuSystem::WaitAndRetireFlights() {
     _mainQueue->Wait();
-
-    for (uint32_t flightIndex = 0; flightIndex < _flights.size(); ++flightIndex) {
+    vector<uint32_t> order;
+    for (uint32_t i = 0; i < _flights.size(); ++i) order.push_back(i);
+    std::sort(order.begin(), order.end(), [this](uint32_t a, uint32_t b) { return _flights[a]->FrameSerial < _flights[b]->FrameSerial; });
+    for (uint32_t flightIndex : order) {
         CompleteFlight(flightIndex);
         MarkCompletedWaitFrames(flightIndex);
     }
 }
 
 void GpuSystem::CleanupCompletedFlights() {
+    if (_waitDispatchBoundary || _pumpingWaiters) RADRAY_ABORT("Cannot reenter completion notification batch");
+    _waitDispatchBoundary = _nextWaitSequence;
+    auto boundaryGuard = MakeScopeGuard([this]() noexcept { _waitDispatchBoundary.reset(); });
     // 队列已 idle,故所有【已提交】flight 的等待者都已就绪。此处恢复它们,让延迟销毁的
     // GPU 对象在正常路径上归还。挂在未提交 flight 上的记录等不到 fence,留给析构里的
     // CancelAllWaitFrames。
@@ -302,8 +311,9 @@ AppFrameContext GpuSystem::BeginFrameRecord(
     std::chrono::duration<float> lastFrameLatency,
     bool isInModalLoop,
     bool rendered) {
+    if (_retirementStopping) RADRAY_ABORT("Cannot record after terminal retirement");
     FlightSlot& record = *_flights.at(flightIndex);
-    if (record.Recording || record.Signal.IsValid()) {
+    if (record.FrameSerial != 0 || record.Recording || record.Signal.IsValid()) {
         RADRAY_ABORT("cannot begin a flight before its previous recording has retired");
     }
     record.CommandAllocator.Reset();
@@ -317,6 +327,30 @@ AppFrameContext GpuSystem::BeginFrameRecord(
     record.Recording = true;
     record.Rendered = rendered;
     return AppFrameContext{this, flightIndex, deltaTime, lastFrameLatency, isInModalLoop};
+}
+
+void GpuSystem::CheckCanRetainForFrame(uint32_t flightIndex) const {
+    if (std::this_thread::get_id() != _ownerThread || _retirementStopping || flightIndex >= _flights.size()) RADRAY_ABORT("Invalid frame retention owner or phase");
+    const auto& flight = *_flights[flightIndex];
+    if (flight.FrameSerial != 0 || flight.Recording || flight.Signal.IsValid()) RADRAY_ABORT("Frame retention requires a writable flight");
+}
+
+void GpuSystem::ReleaseFrameResourcesGT(const FlightCompletion& completion) {
+    if (std::this_thread::get_id() != _ownerThread || completion.FlightIndex >= _flights.size()) RADRAY_ABORT("Invalid frame retirement thread or flight");
+    auto& flight = *_flights[completion.FlightIndex];
+    if (completion.FrameSerial == 0 || flight.FrameSerial != completion.FrameSerial ||
+        flight.CompletedFrameSerial.load(std::memory_order_acquire) != completion.FrameSerial) RADRAY_ABORT("Frame owners require matching real completion");
+    flight.Payloads.clear();
+    flight.FrameSerial = 0;
+}
+
+void GpuSystem::AbandonUnpublishedResourcesTerminalGT() {
+    if (std::this_thread::get_id() != _ownerThread) RADRAY_ABORT("Terminal retirement requires GT");
+    for (const auto& flight : _flights) {
+        if (flight->FrameSerial != 0 || flight->Recording || flight->Signal.IsValid()) RADRAY_ABORT("Complete published resource owners before terminal abandon");
+    }
+    _retirementStopping = true;
+    for (auto& flight : _flights) flight->Payloads.clear();
 }
 
 void GpuSystem::EndFrameRecordAndSubmit(uint32_t flightIndex) {

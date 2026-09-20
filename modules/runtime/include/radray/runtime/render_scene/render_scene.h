@@ -4,6 +4,8 @@
 #include <limits>
 #include <optional>
 #include <span>
+#include <condition_variable>
+#include <mutex>
 
 #include <radray/types.h>
 #include <radray/runtime/static_mesh.h>
@@ -29,13 +31,32 @@ public:
     ~RenderScene() noexcept;
     RenderScene(const RenderScene&) = delete;
     RenderScene& operator=(const RenderScene&) = delete;
-    RenderScene(RenderScene&&) noexcept;
-    RenderScene& operator=(RenderScene&&) noexcept;
+    RenderScene(RenderScene&&) = delete;
+    RenderScene& operator=(RenderScene&&) = delete;
+
+    class ReadLease {
+    public:
+        ReadLease(const ReadLease&) = delete;
+        ReadLease& operator=(const ReadLease&) = delete;
+        ReadLease(ReadLease&& other) noexcept;
+        ReadLease& operator=(ReadLease&& other) noexcept;
+        ~ReadLease() noexcept;
+
+    private:
+        friend class RenderScene;
+        explicit ReadLease(const RenderScene* scene) noexcept;
+        void Release() noexcept;
+        Nullable<const RenderScene*> _scene;
+    };
+    /// Acquire on RT before dispatch; this lease may be moved to and released by the worker.
+    ReadLease AcquireRead() const;
 
     /// Must run once per published batch, in order, after all preceding CPU scene readers finish.
     void Apply(const SceneUpdateBatch& batch) noexcept;
     bool ContainsPrimitive(PrimitiveId id) const noexcept;
     std::optional<StaticMeshSceneView> GetStaticMesh(PrimitiveId id) const noexcept;
+    Nullable<const LightStateUpdate*> GetLight(PrimitiveId id) const noexcept;
+    std::span<const PrimitiveId> GetLights() const noexcept { return _lights; }
     /// Dense registered mesh identities, including meshes whose geometry is not ready.
     std::span<const PrimitiveId> GetStaticMeshes() const noexcept { return _staticMeshes; }
 
@@ -46,9 +67,15 @@ private:
         bool Alive{false};
         unique_ptr<StaticMeshProxy> Mesh;
         size_t MeshIndex{std::numeric_limits<size_t>::max()};
+        std::optional<LightStateUpdate> Light;
+        size_t LightIndex{std::numeric_limits<size_t>::max()};
     };
     vector<PrimitiveSlot> _primitives;
     vector<PrimitiveId> _staticMeshes;
+    vector<PrimitiveId> _lights;
+    mutable std::mutex _readers;
+    mutable std::condition_variable _readersDone;
+    mutable size_t _activeReaders{0};
 };
 
 }  // namespace radray

@@ -24,7 +24,7 @@ Load request / source task → AssetSlot::Loading → AssetManager::Pump → Rea
 引用从非零降至零时，将 slot 放入 manager 的侵入式候选队列；每个 slot 至多排队一次。
 `Pump` 只访问这些候选，不扫描全部常驻资产。弹出时再次检查引用，期间重新取得的引用会阻止销毁，
 以后再次归零仍可入队。先从 ID 表摘除旧 slot，再调用 `OnUnload`，允许重入加载同 ID；依赖链释放
-产生的新候选在同次循环继续处理。
+产生的新候选超过入口尾部截止时留到下一次 Pump；不递归清库。加载结果也先冻结 ready owner，再派发等待者；回调取消其他等待者后，以记录身份和序号重新验证。
 关停对仍被错误持有的 slot 保留强制卸载诊断路径，它不属于普通帧回收。
 
 加载去重按 `AssetId` 进行。dedup 命中时不会重新执行 loader，因此带 options 的 loader
@@ -71,18 +71,21 @@ GUID 为身份（一次分配、永不改变），散文件继续走这里的路
 的单 slot 表，互不迁移。本地资产位于被忽略的顶层 `assets/`，通过源码仓库外的渠道分发；
 shaderlib 与显式测试资源可使用路径哈希轨。
 
-## 延迟销毁
+## GPU 使用者保活与保守迁移
 
-资产的 `OnUnload` 只负责把仍可能被 GPU 使用的对象交给 `AssetManager::DeferDestroy`：
+零引用只在 S0 的候选批次卸载，Release 不就地调用任意 OnUnload。
+StaticMesh 的合法 GPU 使用由 SceneWriter 绑定/退休 owner 或 GpuSystem::RetainForFrameGT 覆盖；
+零引用后 OnUnload 直接释放 GpuMesh，不额外等一个无关 flight。sections 与 GPU view 共享同一个 owner。
+独立 SceneWriter 同样遵守绑定协议；手工 draw 在 GT writable 阶段提交 keep-alive，RT 不访问非原子 ref。
 
-```cpp
-void MyAsset::OnUnload(AssetManager& manager) override {
-    manager.DeferDestroy([resource = std::move(_resource)]() mutable {});
-}
-```
+已提交上传即使加载失败、请求取消或等待协程停止，资源也必须由框架 per-flight owner 保持到真实 completion。
+用户 Wait 只提供完成通知，取消不代表 GPU 完成。原始 RHI 资源可以直接作为 RetainForFrameGT payload，
+不必包装为 Asset。终止前必须 drain 已发布使用，未发布 owner 只能 terminal abandon。
 
-纯 CPU 资产不需要延迟销毁。GPU payload 整包交出，成员声明或捕获顺序表达销毁顺序；
-非资产持有者应等待 `IWaitFrameProcessor` 的帧边界，而不是调用资产回收接口。
+TextureAsset 的外部 SRV 使用目前没有完整 producer 契约，保留 DeferDestroy 的保守等待作为明确迁移项。
+新 GPU 资产应优先建立全部使用者 owner；未完成审计的旧类型继续整包 DeferDestroy，不用 AlreadySafe 标志跳过等待。
+DeferDestroy 缺少 IWaitFrameProcessor 时保存 payload，等设施安装并 Pump 后再调度，绝不 log 后立即释放。
+该保守路径只有 AssetManager 终止时才能取消内部等待，调用者必须事先完成 GPU drain。
 
 ## 现有资产
 
@@ -97,9 +100,9 @@ StaticMeshComponent 保存 mesh ref，RenderSystem 中每个 SceneWriter 在 GT 
 最后解绑后转入删除/改绑帧的退休列表，直到该帧真实 GPU completion 才释放；生命周期与借用规则见 [render-framework](render-framework.md#交付退出与资产保活)。
 其他录制方须自行保存 owners 到 GPU 完成且 GT 可以安全释放的时刻。
 render thread 不访问非原子的 refs；TextureAsset 的 GetOrCreateSrv/view cache 由调用方串行访问。
-回收仍使用原有零引用与延迟销毁协议，不引入另一套引用计数。
+回收沿用零引用队列，不引入另一套资产引用计数。
 
-`TextureAsset` 与 `StaticMesh` 的资产类型、显式构造和延迟销毁保留；构造方须提供完整数据。
+`TextureAsset` 与 `StaticMesh` 均由构造方提供完整数据；两者的退休差异见上文。
 内置网格/纹理 GPU 加载暂时移除，importer 返回明确失败，后续设计范围见
 [资产 GPU 上传待设计](frame-and-gpu.md#资产-gpu-上传待设计)。
 
@@ -119,7 +122,7 @@ WorldManager 先销毁各 World，拆除组件与 asset ref，RenderSystem 释�
 2. 只有其他协议确实需要独立稳定类型标识时，才为 `RuntimeTypeTrait<T>` 生成新 GUID；对象查询
    不需要 GUID，也不声明基类图。
 3. 散文件写独占 namespace 的 `Make...AssetId`；入库类型实现 `AssetImporter` 并使用 manifest GUID。
-4. GPU 对象在 `OnUnload` 中整包交给 `DeferDestroy`；纯 CPU 数据留给析构。
+4. 为每个 GPU 使用者建立完整 owner/fence 覆盖；未迁移的保守路径整包 `DeferDestroy`；纯 CPU 数据留给析构。
 5. 在 `modules/runtime/tests/` 增加生命周期和 RTTI 视图测试，能不用 GPU 就不要创建 GPU。
 
 ## 测试

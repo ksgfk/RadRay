@@ -155,17 +155,27 @@ StaticMesh::StaticMesh(
       _boundsMin(boundsMin),
       _boundsMax(boundsMax),
       _renderMesh(std::move(renderMesh)) {
+    _valid = IsStaticMeshDataValid(_meshResource, _sections) && _boundsMin.allFinite() && _boundsMax.allFinite() &&
+             (_boundsMin.array() <= _boundsMax.array()).all();
+    if (_valid) {
+        if (_sections.empty()) {
+            _sections.reserve(_meshResource.Primitives.size());
+            for (size_t i = 0; i < _meshResource.Primitives.size(); ++i) {
+                const auto& primitive = _meshResource.Primitives[i];
+                _sections.emplace_back(static_cast<uint32_t>(i), 0, primitive.IndexBuffer.IndexCount, 0, primitive.VertexCount - 1);
+            }
+        }
+    }
 }
 
 StaticMesh::~StaticMesh() noexcept = default;
 
 bool StaticMesh::IsValid() const noexcept {
-    return IsStaticMeshDataValid(_meshResource, _sections);
+    return _valid;
 }
 
 void StaticMesh::OnUnload(AssetManager& manager) {
-    // GPU buffer 必须活过已经录制的命令。
-    manager.DeferDestroy([mesh = std::move(_renderMesh)]() noexcept {});
+    (void)manager;
     _renderMesh = GpuMesh{};
 }
 

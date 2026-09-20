@@ -31,7 +31,7 @@ private:
 
 TEST(WorldManager, ExplicitOwnershipPauseAndDeferredDestruction) {
     uint32_t ticksA = 0, ticksB = 0, destroyedA = 0, destroyedB = 0;
-    WorldManager manager;
+    test::ScopedWorldManager manager;
     EXPECT_FALSE(manager.GetWorld({}));
     const auto a = manager.CreateWorld();
     const auto b = manager.CreateWorld();
@@ -39,6 +39,7 @@ TEST(WorldManager, ExplicitOwnershipPauseAndDeferredDestruction) {
     manager.GetWorld(b)->SpawnActor<CountingActor>(ticksB, destroyedB);
     manager.GetWorld(a)->SetTickEnabled(false);
     manager.Tick(0);
+    manager.FinalizeWorldsGT();
     EXPECT_EQ(ticksA, 0u);
     EXPECT_EQ(ticksB, 1u);
     manager.GetWorld(a)->SetTickEnabled(true);
@@ -46,6 +47,7 @@ TEST(WorldManager, ExplicitOwnershipPauseAndDeferredDestruction) {
     EXPECT_FALSE(manager.GetWorld(b));
     EXPECT_EQ(destroyedB, 0u);
     manager.Tick(0);
+    manager.FinalizeWorldsGT();
     EXPECT_EQ(destroyedB, 1u);
     EXPECT_EQ(ticksA, 1u);
     EXPECT_EQ(ticksB, 1u);
@@ -57,7 +59,7 @@ TEST(WorldManager, ExplicitOwnershipPauseAndDeferredDestruction) {
 
 TEST(WorldManager, TickSnapshotSurvivesCreationAndSelfDestruction) {
     uint32_t ticksA = 0, ticksB = 0, destroyedA = 0, destroyedB = 0;
-    WorldManager manager;
+    test::ScopedWorldManager manager;
     const auto a = manager.CreateWorld();
     WorldId b;
     auto actor = manager.GetWorld(a)->SpawnActor<CountingActor>(ticksA, destroyedA);
@@ -68,17 +70,19 @@ TEST(WorldManager, TickSnapshotSurvivesCreationAndSelfDestruction) {
         EXPECT_EQ(destroyedA, 0u);
     };
     manager.Tick(0);
+    manager.FinalizeWorldsGT();
     EXPECT_EQ(ticksA, 1u);
     EXPECT_EQ(ticksB, 0u);
     EXPECT_EQ(destroyedA, 1u);
     EXPECT_FALSE(manager.GetWorld(a));
     manager.Tick(0);
+    manager.FinalizeWorldsGT();
     EXPECT_EQ(ticksB, 1u);
 }
 
 TEST(WorldManager, DestroyedWorldIsSkippedBeforeItsScheduledTick) {
     uint32_t ticksA = 0, ticksB = 0, destroyedA = 0, destroyedB = 0;
-    WorldManager manager;
+    test::ScopedWorldManager manager;
     const auto a = manager.CreateWorld();
     const auto b = manager.CreateWorld();
     auto* actorA = manager.GetWorld(a)->SpawnActor<CountingActor>(ticksA, destroyedA);
@@ -90,6 +94,7 @@ TEST(WorldManager, DestroyedWorldIsSkippedBeforeItsScheduledTick) {
         EXPECT_TRUE(manager.GetWorld(a));
     };
     manager.Tick(0);
+    manager.FinalizeWorldsGT();
     EXPECT_EQ(ticksA, 1u);
     EXPECT_EQ(ticksB, 0u);
     EXPECT_EQ(destroyedB, 1u);
@@ -97,7 +102,7 @@ TEST(WorldManager, DestroyedWorldIsSkippedBeforeItsScheduledTick) {
 
 TEST(WorldManager, ClearHidesAllWorldsDuringCallbacksAndInvalidatesIds) {
     uint32_t ticks = 0, destroyed = 0;
-    WorldManager manager;
+    test::ScopedWorldManager manager;
     const WorldManager& readOnly = manager;
     const auto a = manager.CreateWorld();
     const auto b = manager.CreateWorld();
@@ -123,7 +128,7 @@ TEST(WorldManager, CreatedDuringTickCollectsImmediatelyAndClearRetiresScenes) {
     uint32_t ticks = 0, destroyed = 0;
     Application app;
     RenderSystem renderer{&app, 2};
-    WorldManager manager{&app, &renderer};
+    test::ScopedWorldManager manager{&app, &renderer};
     const auto parent = manager.CreateWorld();
     EXPECT_EQ(manager.GetWorld(parent)->GetApplication().Get(), &app);
     auto* actor = manager.GetWorld(parent)->SpawnActor<CountingActor>(ticks, destroyed);
@@ -132,7 +137,7 @@ TEST(WorldManager, CreatedDuringTickCollectsImmediatelyAndClearRetiresScenes) {
     PrimitiveId primitive;
     actor->Action = [&]() {
         child = manager.CreateWorld();
-        scene = manager.AttachWorldToRendering(child);
+        manager.RequestRenderConnection(child, true);
         auto world = manager.GetWorld(child);
         world->SetTickEnabled(false);
         auto* mesh = world->SpawnActor()->AddComponent<StaticMeshComponent>();
@@ -140,22 +145,25 @@ TEST(WorldManager, CreatedDuringTickCollectsImmediatelyAndClearRetiresScenes) {
         primitive = mesh->GetPrimitiveId();
     };
     manager.Tick(0);
+    manager.FinalizeWorldsGT();
+    scene = *manager.GetWorld(child)->GetRenderSceneId();
+    primitive = manager.GetWorld(child)->GetActors()[0]->FindComponent<StaticMeshComponent>()->GetPrimitiveId();
     manager.CollectRenderUpdates();
     renderer.SealFrameGT(0);
     manager.Clear();
     EXPECT_FALSE(manager.GetWorld(child));
     EXPECT_EQ(destroyed, 1u);
     renderer.SealFrameGT(1);
-    renderer.ConsumeRenderUpdates(0);
+    test::ConsumeFrame(renderer, 0);
     ASSERT_TRUE(renderer.GetSceneRT(scene));
     ASSERT_TRUE(renderer.GetSceneRT(scene)->GetStaticMesh(primitive));
     EXPECT_FLOAT_EQ(renderer.GetSceneRT(scene)->GetStaticMesh(primitive)->LocalToWorld(0, 3), 12);
-    renderer.ConsumeRenderUpdates(1);
+    test::ConsumeFrame(renderer, 1);
     EXPECT_FALSE(renderer.GetSceneRT(scene));
     const auto beforeCompletion = renderer.CreateSceneGT();
     EXPECT_NE(beforeCompletion.Index, scene.Index);
-    renderer.OnFlightCompletedGT({.FlightIndex = 0});
-    renderer.OnFlightCompletedGT({.FlightIndex = 1});
+    test::CompleteFrame(renderer, 0);
+    test::CompleteFrame(renderer, 1);
     const auto afterCompletion = renderer.CreateSceneGT();
     EXPECT_EQ(afterCompletion.Index, scene.Index);
     EXPECT_GT(afterCompletion.Generation, scene.Generation);
@@ -163,7 +171,7 @@ TEST(WorldManager, CreatedDuringTickCollectsImmediatelyAndClearRetiresScenes) {
 
 TEST(WorldManagerDeathTest, RejectsReentrantTickCollectionAndClear) {
     uint32_t ticks = 0, destroyed = 0;
-    WorldManager manager;
+    test::ScopedWorldManager manager;
     const auto id = manager.CreateWorld();
     auto* actor = manager.GetWorld(id)->SpawnActor<CountingActor>(ticks, destroyed);
     actor->Action = [&]() { manager.Tick(0); };
@@ -190,19 +198,20 @@ private:
 };
 
 TEST(WorldManagerDeathTest, RejectsCollectionMutationAndMissingRenderService) {
-    WorldManager cpuOnly;
+    test::ScopedWorldManager cpuOnly;
     const auto cpuWorld = cpuOnly.CreateWorld();
-    EXPECT_DEATH(cpuOnly.AttachWorldToRendering(cpuWorld), "");
+    EXPECT_EQ(cpuOnly.RequestRenderConnection(cpuWorld, true), LifecycleRequestResult::Invalid);
     Application app;
     RenderSystem renderer{&app, 1};
-    WorldManager manager{&app, &renderer};
+    test::ScopedWorldManager manager{&app, &renderer};
     const auto id = manager.CreateWorld();
-    manager.AttachWorldToRendering(id);
+    manager.RequestRenderConnection(id, true);
+    manager.FinalizeWorldsGT();
     auto* actor = manager.GetWorld(id)->SpawnActor();
     auto* probe = actor->AddComponent<ManagerCollectionProbe>([&]() { manager.DestroyWorld(id); });
     EXPECT_DEATH(manager.CollectRenderUpdates(), "");
     actor->RemoveComponent(probe);
-    actor->AddComponent<ManagerCollectionProbe>([&]() { manager.DetachWorldFromRendering(id); });
+    actor->AddComponent<ManagerCollectionProbe>([&]() { manager.RequestRenderConnection(id, false); });
     EXPECT_DEATH(manager.CollectRenderUpdates(), "");
 }
 
@@ -221,7 +230,7 @@ TEST(WorldScenes, AttachExistingPausedWorldAndReconnectWithoutGameCallbacks) {
     uint32_t registrations = 0, unregistrations = 0;
     Application app;
     RenderSystem renderer{&app, 3};
-    World world;
+    test::ScopedWorld world;
     auto* actor = world.SpawnActor();
     actor->AddComponent<RegistrationProbe>(registrations, unregistrations);
     auto* mesh = actor->AddComponent<StaticMeshComponent>();
@@ -229,27 +238,28 @@ TEST(WorldScenes, AttachExistingPausedWorldAndReconnectWithoutGameCallbacks) {
     EXPECT_FALSE(mesh->GetPrimitiveId().IsValid());
     world.SetTickEnabled(false);
     world.CollectRenderUpdates();
-    const auto first = world.AttachToRendering(renderer);
+    const auto first = test::ConnectWorld(world, renderer);
     const auto oldPrimitive = mesh->GetPrimitiveId();
     test::PrepareScene(world, renderer, 0);
-    world.DetachFromRendering();
+    test::DisconnectWorld(world);
     EXPECT_FALSE(world.GetRenderSceneId());
     EXPECT_FALSE(mesh->GetPrimitiveId().IsValid());
     mesh->SetRelativeLocation({19, 0, 0});
-    const auto second = world.AttachToRendering(renderer);
+    const auto second = test::ConnectWorld(world, renderer);
     EXPECT_NE(first, second);
     const auto newPrimitive = mesh->GetPrimitiveId();
     test::PrepareScene(world, renderer, 1);
-    renderer.ConsumeRenderUpdates(0);
+    test::ConsumeFrame(renderer, 0);
     EXPECT_FLOAT_EQ(renderer.GetSceneRT(first)->GetStaticMesh(oldPrimitive)->LocalToWorld(0, 3), 7);
-    renderer.ConsumeRenderUpdates(1);
+    test::ConsumeFrame(renderer, 1);
     EXPECT_FALSE(renderer.GetSceneRT(first));
     EXPECT_FLOAT_EQ(renderer.GetSceneRT(second)->GetStaticMesh(newPrimitive)->LocalToWorld(0, 3), 19);
     EXPECT_EQ(registrations, 1u);
     EXPECT_EQ(unregistrations, 0u);
-    renderer.OnFlightCompletedGT({.FlightIndex = 0});
-    renderer.OnFlightCompletedGT({.FlightIndex = 1});
+    test::CompleteFrame(renderer, 0);
+    test::CompleteFrame(renderer, 1);
     world.DestroyActor(actor);
+    world.FinalizeWorldGT();
     EXPECT_EQ(unregistrations, 1u);
 }
 
@@ -275,21 +285,21 @@ TEST(WorldScenes, StandaloneWritersIsolateIdentitiesAndCoalesceUpdates) {
     EXPECT_EQ(batch.CreatePrimitives.size(), 1u);
     EXPECT_EQ(batch.MeshStates.size(), 1u);
     EXPECT_TRUE(batch.Transforms.empty());
-    renderer.ConsumeRenderUpdates(0);
+    test::ConsumeFrame(renderer, 0);
     EXPECT_FLOAT_EQ(renderer.GetSceneRT(a)->GetStaticMesh(pa)->LocalToWorld(0, 3), 19);
     EXPECT_FLOAT_EQ(renderer.GetSceneRT(b)->GetStaticMesh(pb)->LocalToWorld(0, 3), 0);
-    renderer.OnFlightCompletedGT({.FlightIndex = 0});
+    test::CompleteFrame(renderer, 0);
     renderer.DestroySceneGT(a);
     EXPECT_FALSE(renderer.GetSceneWriterGT(a));
     transform(0, 3) = 37;
     wb->SetTransform(pb, transform);
     renderer.SealFrameGT(1);
-    renderer.ConsumeRenderUpdates(1);
+    test::ConsumeFrame(renderer, 1);
     EXPECT_FALSE(renderer.GetSceneRT(a));
     EXPECT_FLOAT_EQ(renderer.GetSceneRT(b)->GetStaticMesh(pb)->LocalToWorld(0, 3), 37);
     const auto beforeCompletion = renderer.CreateSceneGT();
     EXPECT_NE(beforeCompletion.Index, a.Index);
-    renderer.OnFlightCompletedGT({.FlightIndex = 1});
+    test::CompleteFrame(renderer, 1);
     const auto afterCompletion = renderer.CreateSceneGT();
     EXPECT_EQ(afterCompletion.Index, a.Index);
     EXPECT_GT(afterCompletion.Generation, a.Generation);
@@ -312,10 +322,10 @@ TEST(WorldScenes, SameFrameCreateAndDestroyAndRetirementAcrossFlights) {
                 renderer.SealFrameGT(flight);
             }
             for (uint32_t flight = 0; flight < count; ++flight) {
-                renderer.ConsumeRenderUpdates(flight);
+                test::ConsumeFrame(renderer, flight);
                 EXPECT_FALSE(renderer.GetSceneRT(removed[flight]));
                 EXPECT_TRUE(renderer.GetSceneRT(stable));
-                renderer.OnFlightCompletedGT({.FlightIndex = flight});
+                test::CompleteFrame(renderer, flight);
                 EXPECT_FALSE(renderer.GetSceneWriterGT(removed[flight]));
             }
         }
@@ -325,12 +335,12 @@ TEST(WorldScenes, SameFrameCreateAndDestroyAndRetirementAcrossFlights) {
 TEST(WorldScenesDeathTest, ClaimedAndClosingScenesRejectExternalWrites) {
     Application app;
     RenderSystem renderer{&app, 1};
-    World world;
-    const auto attached = world.AttachToRendering(renderer);
+    test::ScopedWorld world;
+    const auto attached = test::ConnectWorld(world, renderer);
     EXPECT_FALSE(renderer.GetSceneWriterGT(attached));
     EXPECT_DEATH(renderer.DestroySceneGT(attached), "");
     EXPECT_DEATH(renderer.OnShutdown(), "");
-    EXPECT_DEATH(world.AttachToRendering(renderer), "");
+    EXPECT_EQ(test::ConnectWorld(world, renderer), attached);
     const auto standalone = renderer.CreateSceneGT();
     auto writer = renderer.GetSceneWriterGT(standalone);
     const auto primitive = writer->CreatePrimitive();

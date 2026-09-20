@@ -36,7 +36,7 @@ void StaticMeshComponent::StartMeshReadyWait() {
 
 task<void> StaticMeshComponent::WaitForMeshReady(StreamingAssetRef<StaticMesh> mesh, SceneId scene, PrimitiveId registration) {
     if (co_await mesh) {
-        if (IsRegistered() && GetRenderSceneId() == scene && GetPrimitiveId() == registration && _mesh == mesh && mesh.IsReady()) {
+        if (IsLive() && IsRegistered() && GetRenderSceneId() == scene && GetPrimitiveId() == registration && _mesh == mesh && mesh.IsReady()) {
             MarkRenderStateDirty();
         }
     }

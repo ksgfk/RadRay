@@ -5,6 +5,7 @@
 #include <limits>
 #include <optional>
 #include <span>
+#include <thread>
 
 #include <radray/types.h>
 #include <radray/nullable.h>
@@ -42,6 +43,7 @@ struct GpuSystemDescriptor {
 /// 一条等待帧边界的协程记录(IWaitFrameProcessor::Wait 的挂起点)。挂在某个 flight 上,
 /// 该 flight 的 fence 完成后被标记 ready,再由主线程的 PumpWaitFrame 恢复。
 struct WaitFrameRecord : ManualCoroutineRecord {
+    uint64_t Sequence{0};
     /// 记录所属的 flight。记录存在期内不变 —— 摘除时要靠它定位所在的表。
     uint32_t FlightIndex{std::numeric_limits<uint32_t>::max()};
     bool FlightComplete{false};
@@ -122,18 +124,30 @@ struct GpuFlightAcquireRegistration {
 };
 
 /// runtime 拥有的 per-flight 槽位。代表流水线一条槽位在不同阶段的完整状态，
-/// 按所有权/阶段分三组，跨阶段的访问时序由 runner 的信号量 + retire 锁保证：
+/// 按所有权/阶段分组，跨阶段的访问时序由 runner 的信号量 + retire 锁保证：
 ///  - 录制态：渲染线程（单线程模式即主线程）在 BeginFrameRecord→Render→
 ///    EndFrameRecordAndSubmit 期间独占；
 ///  - 计时态：游戏线程在帧开头写 FrameStartTime；
+///  - 保活态：GT 登记和释放 Payloads，RT 分配 FrameSerial，GT 匹配真实完成后清零；
 ///  - 提交态:Signal 由 EndFrameRecordAndSubmit 写、retire/CompleteFlight 读后清。
 struct GpuFlightSlot {
-    // —— 录制态（渲染线程独占）。批次顺序由归还顺序决定。
+    struct FramePayload {
+        virtual ~FramePayload() noexcept = default;
+    };
+    template <class T>
+    struct FramePayloadValue final : FramePayload {
+        template <class U>
+        explicit FramePayloadValue(U&& value) : Value(std::forward<U>(value)) {}
+        T Value;
+    };
+
+    // —— 录制态（录制阶段由渲染线程独占）。批次顺序由归还顺序决定。
     GpuFlightCommandAllocator CommandAllocator;
     unique_ptr<ResourceUploader> Uploader;
     HostWriteBatch HostWrites;
     vector<GpuFlightSubmitBatch> Batches;
     vector<GpuFlightAcquireRegistration> Acquisitions;
+    /// BeginFrameRecord 分配；GT 匹配完成并释放 Payloads 后清零，清零前不得复用槽位。
     uint64_t FrameSerial{0};
     bool Submitted{false};
     bool Recording{false};
@@ -147,9 +161,13 @@ struct GpuFlightSlot {
     /// CompleteFlight 只发布 WaitersCompleted；主线程 PumpWaitFrame 标记并恢复记录。
     ManualCoroutineScheduler<WaitFrameRecord> WaitFrame;
     std::atomic_bool WaitersCompleted{false};
+    std::atomic<uint64_t> CompletedFrameSerial{0};
 
     // —— 提交态（渲染线程写，retire 经 _retireMutex 读后清）。
     GpuFenceSignal Signal;
+
+    /// 仅由 GT 登记和释放，绑定到本槽位的 FrameSerial。
+    vector<unique_ptr<FramePayload>> Payloads;
 };
 
 /// co_await GpuSystem::Wait() 的 awaitable。恢复点在 GpuSystem::PumpWaitFrame(主线程)。
@@ -160,7 +178,7 @@ public:
 
     bool await_ready() const noexcept;
     bool await_suspend(std::coroutine_handle<> h);
-    void await_resume() noexcept;
+    bool await_resume() noexcept;
 
 private:
     GpuSystem* _gpuSystem;
@@ -269,8 +287,21 @@ public:
     /// [GT/RT，retire 阶段] 读取须与 retire、槽位复用互斥；函数本身不加锁。
     /// 仅在该 flight 已计入 rendered 之后读，与 Submit 后发布的 release 成对。
     GpuFenceSignal GetFlightGpuSignal(uint32_t flightIndex) const noexcept;
-    /// [GT] 当前 flight 已可写且尚未交给 RT；重置 HostWrites 并恢复该槽位的帧等待者。
+    /// [GT] 当前 flight 已可写且尚未交给 RT；上一帧须先调用 ReleaseFrameResourcesGT。
+    /// 重置 HostWrites 并恢复该槽位的帧等待者。
     void BeginUpdateForFlight(uint32_t flightIndex);
+    /// GT: retain an asset owner or raw RHI payload in the writable flight before publication.
+    /// Cancellation of a user task never releases this framework-owned record.
+    template <class T>
+    void RetainForFrameGT(uint32_t flightIndex, T&& payload) {
+        CheckCanRetainForFrame(flightIndex);
+        using Value = std::remove_cvref_t<T>;
+        _flights[flightIndex]->Payloads.push_back(make_unique<FlightSlot::FramePayloadValue<Value>>(std::forward<T>(payload)));
+    }
+    /// [GT] 匹配真实完成，释放 Payloads 并清零 FrameSerial；空帧也须退休，且每帧只能调用一次。
+    void ReleaseFrameResourcesGT(const FlightCompletion& completion);
+    /// Terminal only: CPU producers stopped, submitted work completed; forbids future retention.
+    void AbandonUnpublishedResourcesTerminalGT();
     /// [GT] 完成批次与应用完成钩子处理结束后、派发本帧事件前调用；当前 flight 已可写。
     /// 返回 latency 起点，runner 同时用它计算相邻逻辑帧的 DeltaTime。
     std::chrono::steady_clock::time_point BeginFrameTiming(uint32_t flightIndex) noexcept;
@@ -331,6 +362,7 @@ private:
     void CancelAllWaitFrames() noexcept;
     /// [GT，独占对应 flight] 消费完成标记，只标记现有等待记录，不恢复协程。
     void MarkCompletedWaitFrames(uint32_t flightIndex) noexcept;
+    void CheckCanRetainForFrame(uint32_t flightIndex) const;
 
     WindowManager* _windowManager{nullptr};
     Nullable<render::InstanceVulkan*> _vulkanInstance{nullptr};
@@ -344,11 +376,16 @@ private:
     /// ManualCoroutineScheduler, 挂起的协程记录里存着回指调度器的指针 (stop callback),
     /// 搬动槽位会让那些指针指向旧地址。数量构造时定下, 故间接一层无代价。
     vector<unique_ptr<FlightSlot>> _flights;
+    const std::thread::id _ownerThread{std::this_thread::get_id()};
+    bool _retirementStopping{false};
     /// Application 是唯一消费者；只在 game thread 读取。
     UnboundedChannel<FlightCompletion> _flightCompletions;
     unique_ptr<GpuFrameProfiler> _frameProfiler;
     uint64_t _nowFrameIndex{0};
     uint64_t _nextFrameSerial{1};
+    uint64_t _nextWaitSequence{1};
+    bool _pumpingWaiters{false};
+    std::optional<uint64_t> _waitDispatchBoundary;
     std::atomic<float> _lastFrameLatencySeconds{0.0f};
 };
 

@@ -2,6 +2,7 @@
 
 #include <radray/nullable.h>
 #include <radray/runtime_type.h>
+#include <radray/runtime/game_framework/world_id.h>
 
 namespace radray {
 
@@ -30,16 +31,25 @@ public:
 
     Nullable<Actor*> GetOwner() const noexcept { return _owner; }
     Nullable<World*> GetWorld() const noexcept;
-    bool IsRegistered() const noexcept { return _registered; }
+    bool IsRegistered() const noexcept { return _registration == ComponentRegistration::Registered; }
+    ComponentRegistration GetRegistrationState() const noexcept { return _registration; }
+    ObjectLifecycle GetLifecycle() const noexcept { return _lifecycle; }
+    bool IsLive() const noexcept;
+    ComponentId GetId() const noexcept { return _id; }
+    uint64_t GetFirstTickEpoch() const noexcept { return _firstTickEpoch; }
 
 protected:
     void CheckCanModify() const noexcept;
 
 private:
     friend class Actor;
+    friend class World;
 
     Nullable<Actor*> _owner{nullptr};
-    bool _registered{false};
+    ComponentRegistration _registration{ComponentRegistration::Unregistered};
+    ObjectLifecycle _lifecycle{ObjectLifecycle::Initializing};
+    ComponentId _id;
+    uint64_t _firstTickEpoch{0};
 };
 
 template <>

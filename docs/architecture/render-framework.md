@@ -4,137 +4,138 @@
 
 # Runtime 宿主、World 与渲染场景
 
-旧 Forward 与 ImGui 渲染适配已移除，删除前设计见[临时快照](../temp/render-framework-design.md)。
-当前支持多个 World、独立 RenderScene、per-flight 增量交付和 StaticMesh 的 CPU 持久描述、变换、bounds、
-不可变 GPU 几何借用及资产保活。没有内置绘制管线、RenderGraph、renderer list、output registry 或时域历史系统。
+runtime 采用立即创建、延迟销毁、统一 Tick 轮次与类型化增量交付。每个 Scene 只有一份 RT CPU 数据；
+flight 保存更新包和必要 owner。没有内置 Forward/RenderGraph、视图执行 API 或完整场景快照。
+旧渲染器设计见[历史快照](../temp/render-framework-design.md)。
 
-## Application 与 runner
+## Application 与驱动边界
 
-`Run(desc)` 创建 WindowManager、GpuSystem、RenderSystem、WorldManager、AssetManager 和可选 AssetDatabase，
-直接连接依赖、初始化服务并创建主窗口和 swapchain，再调用 OnInit。启动不创建默认 World。
-应用通过 `GetWorldManager()` 访问 WorldManager；该入口从 OnInit 到 OnShutdown 有效，运行时初始化前和拆除后返回空。
-WorldManager 的 `CreateWorld` 返回带代次的 WorldId；`GetWorld(id)` 对无效、旧代次或待销毁身份返回空，
-`DestroyWorld` 立即禁止后续调度，实际释放在本轮全部 World Tick 后、渲染收集前执行。
-WorldId 与 SceneId 是不同的类型；同一槽位的代次约定不在程序生命周期内回绕。
+`Application::Run` 创建服务、初始化窗口并调用 OnInit，不创建默认 World。OnInit 返回后以 bootstrap S1
+收束连接和销毁请求；初始数据等首个 writable flight 封包，不伪造发布或 GPU 完成。
 
-Application 拥有 WorldManager，只负责服务装配与帧序；WorldManager 拥有 World 集合，
-提供 `AttachWorldToRendering` / `DetachWorldFromRendering` 装配连接。
-WorldManager 可独立构造，不传宿主和渲染服务时支持纯 CPU 使用；借用的 Application、RenderSystem 必须活过 manager。
-也可直接构造 World，并调用 `AttachToRendering` / `DetachFromRendering`；RenderSystem 必须活过连接它的 World。
-World 借用不跨越其销毁安全点，WorldId 只在所属 WorldManager 内有效。
-World Tick 使用身份快照；Tick 中新建的 World 下一帧开始 Tick，但可在本帧收集初始渲染状态。
-Tick 中销毁当前 World 不会释放正在执行的回调对象；标记待销毁的其他 World 不再被本轮调度。
-WorldManager::Tick 在全部 Tick 回调返回后清理待销毁 World；CollectRenderUpdates 单独执行，包含暂停的 World。
-收集和 World 析构期间不能通过 WorldManager 改变集合或连接关系；Tick、收集和 Clear 不能重入。
-Clear 在 manager 空闲时立即隐藏并销毁全部 World、使旧身份失效；此后可创建新 World。
-Clear 和 manager 析构仅请求场景退出，资产退休与真实完成通知仍由 RenderSystem 管理，不等待全局 GPU idle。
-
-`SetTickEnabled(false)` 只暂停该 World 的模拟；编辑修改、资产 Ready 通知和场景同步继续执行。
-Actor/Component 的所有权、RTTI、空间层级与变换传播仍由 World/Actor 管理。
-CameraComponent 提供 LH 视图和投影计算，不自动选择活动相机；未来绘制调用方显式提供
-SceneId、相机值快照和输出目标，RT 不读取 CameraComponent。本阶段未增加视图执行 API。
-
-SingleThreadRunner 顺序 update/record/submit；ThreadedRunner 保留 GT/RT 两线程和现有
-writable/ready semaphore、fence 退休协议。两者取得可写 flight、处理 completion 后才开始本帧更新。
-`Application::Render` 默认不录制、不 acquire 窗口、不清屏；应用的 OnRender 可通过 AppFrameContext
-分配和归还命令批次。Begin/End/Submit/Present 仍由 runner/GpuSystem 驱动，详见[帧与 GPU](frame-and-gpu.md)。
-
-## 场景职责与目录
-
-| 对象 | 所有权与职责 |
+| 正常入口 | 责任 |
 |---|---|
-| Application | 拥有各系统及 WorldManager；装配依赖、驱动帧序与关停 |
-| WorldManager | World 集合、身份、Tick 快照、延迟销毁及渲染连接装配 |
-| World | Actor/Component 与可选 WorldRenderBridge；不持有 RT 场景、flight 或资产退休列表 |
-| WorldRenderBridge | World 内部 GT 适配器；组件渲染生命周期、脏队列与最终值收集 |
-| SceneWriter | 每个 Scene 的 GT 身份分配、更新合并、资产绑定及 RenderAssetLifetime |
-| RenderScene | 每个 Scene 的单份 RT 持久 CPU 数据；Apply 和只读查询 |
-| RenderSystem | GT 写入端登记表、RT 场景登记表、per-flight 交付包和共享 shader/render-pass 缓存 |
+| S0 `ServiceFrameBoundaryGT` | 完成事实、框架 owner 释放、等待通知、资产结果与 scheduler；runner 的 PrepareFrame 同阶段执行窗口维护与 writable 背压 |
+| S1 `FinalizeWorldAndSealGT` | Tick/World CPU 借用结束后，冻结生命周期请求、注销和连接，再 Collect 最终值并 Seal |
+| S2 `ApplySceneUpdatesRT` | BeginFrameRecord 后、OnRender 前，有序 Apply；先结束上一轮 CPU Scene 读者 |
 
-`world_manager.h/.cpp` 是顶层 World 管理服务；`game_framework/` 放 World 与同步桥；WorldRenderBridge 的头文件和实现在 `src/game_framework/`，不作为公共入口；`render_scene/` 放 SceneId、PrimitiveId、SceneUpdateBatch、
-SceneWriter、RenderScene、StaticMeshProxy 和资产保活。渲染侧不包含 World/组件头文件、不保存组件指针。
-PrimitiveId 位于 `scene_id.h`，在一个 SceneId 内有效；跨场景引用必须同时携带 SceneId。
-`scene_update.h/.cpp` 定义拥有 CPU 数据的更新协议；`render_scene.h/.cpp` 只负责持久状态和查询。
+输入与 OnUpdate 后，WorldManager 开始全局 TickEpoch。S1 不等待 GPU。RT 跳过绘制仍消费已发布包。
+两个 runner 共用这些协议；writable/ready、主队列 fence 仍是实际同步权威，没有第二套提交体系。
+普通组件不得自行驱动这些入口或调用 WaitIdle；CPU-only 测试显式调用 World 的
+`Tick`、`FinalizeWorldGT`、`CollectRenderUpdates`、`ShutdownWorld`，或对应 WorldManager 驱动。
+托管 World 不能自行 Tick/Finalize。析构只做末端资源释放，已注册对象必须先显式 teardown。
 
-RenderSystem 的 `CreateSceneGT` 创建一个独立数据生产者的场景；`GetSceneWriterGT` 对旧身份、
-正在关闭或由 World 独占的场景返回空。WorldRenderBridge 声明独占写入端后，外部不能销毁该 Scene，
-必须通过 World 或 WorldManager 的断开入口释放连接。独立场景通过 `DestroySceneGT` 请求销毁。
-SceneWriter 借用只在 GT 使用，不跨越销毁请求；请求后保留的旧借用不能继续写入。
+## 立即创建与 Tick
 
-ShaderProgramCache 与 RHI RenderPassRegistry 在所有场景之间共享。窗口借用 registry，
-销毁 backbuffer view 前清理关联 framebuffer；RenderSystem 销毁前先断开窗口引用。
-GPU idle 后清理 program 和 render-pass/framebuffer cache，设备最后销毁。
+`SpawnActor`、`AddComponent` 返回已经存在的对象。顺序为验证目标 → 分配身份/owner → 容器追加 →
+同步注册/创建通知；回调前所有权和查询已成立。独占 draft 可以先配置，加入 World 时才获得 Tick 资格。
 
-## 组件连接、标脏与写入
+WorldManager 维护唯一 TickEpoch；独立 World 的显式驱动维护自己的轮次。World/Actor/Component 加入调度域时
+记录 `FirstTickEpoch = CurrentTickEpoch + 1`。输入和 OnUpdate 创建者可以参加紧接着的轮次；Tick 中创建者
+从下一轮开始，与目标 World/Actor 是否已经遍历无关。暂停不阻止 S1、Ready 或渲染同步，恢复不补跑历史 Tick。
 
-组件游戏注册与渲染连接是两套生命周期。未连接的 World 正常注册和 Tick，PrimitiveId 无效，
-标脏不排队。连接时遍历已有注册组件调用 CreateRenderState，首次收集发送完整状态；
-断开时调用 DestroyRenderState、清队列和身份，但不调用游戏 OnRegister/OnUnregister。
-重连创建新的 SceneId，从组件当前值重建；旧场景可以同时处于退休阶段。
+WorldManager 保留 WorldId 快照，因为 SparseSet 的物理 storage 可能移动。Actor/Component 的 owner 数组
+采用固定入口长度和按索引取对象地址，回调后不保留数组元素引用。回调只允许追加，既有 owner 不移动/删除。
+`Actor::Tick` 是业务 hook；框架 dispatcher 在其返回后仍负责组件 Tick，派生不需要调用基类来驱动组件。
+每个 hook 返回和下一组件派发前都检查 Live/epoch。递归 Tick、提交或跨线程修改会诊断。
+公开 span 是只读借用，调用者持有期间不能触发导致数组扩容的创建。
 
-Actor 中央注册先设置 registered；若已有连接，则建立渲染状态，再调用 OnRegister。
-中央注销先清 registered，再销毁渲染状态，最后调用 OnUnregister；安全性不依赖派生回调调用基类。
-普通 SceneComponent 不自动排队，渲染派生类型显式标记 State/Transform/DynamicData。
-WorldRenderBridge 用 `vector<SceneComponent*>` 排队，首次标脏记录索引，后续 OR flags；
-删除用 swap-remove 修正移动元素索引，没有变化时不扫描全部 Actor/Component。
+## 身份、注册与延迟销毁
 
-Create/Destroy/CollectRenderUpdates 接口接收 SceneWriter。PrimitiveComponent 的中央实现为 final，
-派生类型通过 OnRenderStateCreated/OnRenderStateDestroyed 和 CollectPrimitiveUpdates 扩展。
-OnTransformChanged 标记 TransformDirty，派生覆写需要调用基类。
-收集期间禁止修改所属 World/组件及递归收集；派生 setter 也应先调用 CheckCanModify。
-State 与其他 dirty flags 一起传给派生收集函数，由其决定覆盖字段。本阶段不提供收集失败后的事务回滚。
+WorldId 在所属 manager 内有效；ActorId 包含 WorldId，ComponentId 包含 ActorId，均含槽位和 generation。
+独立 World 的 ActorId 只在该 World 内有效。跨 S1 保存非拥有引用使用身份；裸指针不保证跨 S1 有效。
+槽位 generation、TickEpoch 和交付序号耗尽时拒绝回绕。
 
-SceneWriter 使用 SparseSet 管理 Primitive 身份、已发送状态与脏项。它的 CreatePrimitive、
-RemovePrimitive、SetStaticMesh、SetTransform 同时供 World 桥与独立工具使用。
-未发送创建后立即删除不产生生命周期项；已封口的创建后删除必须在后续包交付删除。
-同轮重复写入合并为最终值，State 包含最终变换，单独 Transform 不重新提取 mesh 描述；SetTransform 要求此前设置过 StaticMesh 状态，允许空 mesh 绑定。
-Primitive 删除释放槽位并增加代次；完整身份校验拒绝旧 ID，RT 不借用 GT 登记表。
+对象寿命为 Initializing / Live / PendingDestroy / Destroying。组件另有
+Unregistered / Registering / Registered / Unregistering，不与渲染连接混成一套状态。
+注册前写 Registering，建立渲染关联，再 OnRegister，返回后写 Registered；OnRegister 中 IsRegistered 为 false。
+新加兄弟组件由 Add 自己注册，外层固定长度遍历不重复注册。初始化期间自销毁仍完成当前注册序列，
+随后停止尚未开始的注册和 OnSpawned；创建函数可能返回仍占有内存的 Pending 对象。
+只有实际进入过 OnSpawned 的 Actor 才派发配对 OnDestroyed。
 
-StaticMeshComponent 保留当前 mesh ref；描述提取、最后绑定资产身份与计数统一位于 SceneWriter。
-Ready 且 CPU mesh 有效时，描述拥有 AssetId、sections、local bounds，并借用只读 GpuMesh。
-无显式 sections 时按 primitive 生成完整范围；空、Loading、失败或无效 CPU mesh 产生空几何。
-独立调用方负责在资产 Ready 后再次提交；组件使用已有 co_await 路径自动标脏，不逐帧轮询。
-组件等待随渲染连接建立和取消，Ready 回调同时检查 SceneId、PrimitiveId 和资产请求身份；
-改绑或断开只取消本组件等待者，不取消共享资产加载。
+Destroy/Remove 首次返回 Accepted，重复返回 AlreadyPending，无效目标返回 Invalid。请求立即影响 Live 查询
+和后续 Tick，但不当场注销、取消任务、解除层级或释放引用。父 Pending 自动使子对象不可调度，不必扫描全部子对象。
+Pending 不可取消或复活，且不能向 Pending/Destroying/Stopping owner 新增对象。
 
-RenderScene 的 Apply 按删除、创建、mesh state、transform 更新槽位；重复创建或旧代次更新是契约错误。
-StaticMeshProxy 持有每实例 CPU 描述。Replace 更新 bounds 和变换但不改变身份；Transform 只更新
-矩阵、world AABB 与 ReverseCulling，支持旋转、非均匀缩放、shear 和负 scale；非法 bounds、
-非有限或非仿射矩阵属于契约错误。GetStaticMeshes 返回含空几何的登记身份，GetStaticMesh 对旧 ID 返回空。
-列表与视图只能在 RT 或 RT 停止后读取，借用不跨越下一次 Apply 或场景销毁。
+S1 先冻结所有 World 的本批销毁、层级和连接请求，再处理父覆盖子、身份失效与受影响 owner 数组的稳定压缩，
+最后派发注销/销毁通知。幸存对象顺序保持；没有请求时不扫描 Actor 寻找 pending。有删除时成本包含受影响容器
+的线性压缩及请求排序，不能当成 O(删除数)。OnUnregister 时 owner/world 上下文仍有效；清理后才释放内存。
+
+销毁回调可以立即向其他存活 Actor 或存活 World 新增对象。本次通知新提交的销毁/重挂接/连接请求留下一次 S1，
+但 Pending 立即生效；新建后立即 Pending 的源不会发布空 primitive。Stopping 阶段禁止新业务创建。
+`Clear` 是空闲 manager 的显式批量关闭，之后仍可创建；`Shutdown` 进入不可恢复的 Stopping。
+
+## 层级与渲染连接
+
+未注册 draft 的 AttachTo、DetachFromParent、SetRootComponent 立即生效。AddSceneComponent 的初始 parent 在
+对外注册通知前建立，仅新增节点和边。已注册节点改用 RequestReparent / RequestSetRootComponent，S1 前查询仍见旧关系。
+KeepLocal 保留局部 TRS；KeepWorld 要求新局部矩阵可以精确表达为 TRS，自身/后代、跨 World、奇异矩阵和 shear
+在修改前拒绝，提交时重新验证。删除父组件会解除其他 Actor 的幸存 child，采用 KeepLocal，不误删别人的 owner。
+变换 setter 对完全相同的值短路；通知遍历后代，世界矩阵沿 parent chain 递归计算，目前不缓存世界矩阵。
+
+World/manager 通过 `RequestRenderConnection` 请求连接，显式 `RequestReconnect` 强制新连接。
+请求目标与已提交 SceneId 可分别查询，不能把请求 Accepted 当作连接已完成。
+WorldRenderBridge 的 Disconnected / Connecting / Connected / Disconnecting 状态独立于游戏注册。
+连接回调请求切换只排队，不能 reset 执行中的 bridge。Connecting 中立即创建者接入一次；Disconnecting 中创建
+游戏对象仍成功，但不接回正在拆除的 Scene。重连从最终游戏值建立新 SceneId，旧 Scene 可以继续退休。
+注销先写 Unregistering，再拆 render state，最后 OnUnregister；不依赖派生 hook 调基类。
+
+## 增量捕获与 RT 数据
+
+| 对象 | 职责 |
+|---|---|
+| WorldManager / World | GT 游戏对象、身份、统一调度、生命周期请求 |
+| WorldRenderBridge | GT 内部适配器、连接、组件 dirty 去重；不进入公共 API |
+| SceneWriter | Scene 唯一 GT producer、PrimitiveId、最终值合并、资产 owner |
+| RenderScene | 单份 RT 数据、Apply、只读借用与 CPU reader lease |
+| RenderSystem | GT/RT 分离的登记表、flight 交付协议、shader/render-pass 服务 |
+
+组件分类 State/Transform/DynamicData dirty；同组件只排队一次。Collect 跳过 Pending，且禁止游戏修改、
+生命周期请求、重入封包和所属 Application 的 asset/scheduler Pump。派生 setter 必须先 CheckCanModify。
+PrimitiveComponent 的 final 入口负责身份创建/注销，CollectPrimitiveUpdates 捕获派生值。
+LightComponent 直接生成 LightStateUpdate；RenderScene 的 light 数据不经过假 StaticMesh。
+
+独立工具由 CreateSceneGT/GetSceneWriterGT 获得 writer，遵守同样的绑定和交付契约。
+World 独占的 writer 不向外提供；独立 writer 在 DestroySceneGT 后不可继续使用。
+未发布 Create/Remove 可以相消，已 Seal 的创建只能由后续 Remove 有序退出。
+State 覆盖最终 transform，transform-only 更新不重建 mesh。更新数组复用容量，工作与唯一 dirty 源有关。
+
+StaticMesh 在构造时验证 CPU mesh/bounds 并补全默认 sections 一次，之后数据不可变。
+StaticMeshDescription 持有 AssetId、bounds 并借用 `span<const StaticMeshSection>` 与 `const GpuMesh`；
+这些借用由同一资产 owner 保护，实例不复制 sections。Loading、失败或无效 mesh 产生空几何。
+组件 Ready 通知检查 Live、注册、SceneId、PrimitiveId 和 mesh 请求身份；改绑/注销停止旧等待而不取消共享加载。
+
+RenderScene 按 Remove → Create → Mesh → Transform → Light 应用。GetStaticMeshes/GetLights 返回类型专属稠密身份。
+StaticMeshProxy 更新 matrix、world bounds、ReverseCulling，支持负缩放和仿射 shear。
+RT 或停止后的检查可借用数据，普通借用截止到下一 Apply。并行 CPU 读者在 RT 派发前获取 AcquireRead lease，
+在任务结束时释放；Apply 和 Scene 析构等待已有 lease，不等 GPU。RT 必须先停止派发旧 Scene 的新读者。
+RenderScene 不可复制/移动；不能把 reader lease 持到依赖下一次 Apply 才能结束的工作中。
 
 ## 交付、退出与资产保活
 
-GT 帧序为 completion → asset/scheduler Pump → OnUpdate → 各 World Tick → 待销毁 World 清理
-→ 各 WorldRenderBridge 收集 → RenderSystem::SealFrameGT → runner 发布。
-SealFrameGT 为每个未封口销毁的 Scene 生成带 SceneId 的条目，含 Create/Destroy 标记及 SceneUpdateBatch，
-并封口该 flight 的资产退休列表。空场景内容也可有条目；同帧建删按 create → apply → destroy 消费。
-同一 flight 封口后不能重复封口，必须等真实 completion 清理；更新数组保留容量供 flight 复用。
+flight 严格经过 Writable → Sealed → Published → Consumed → completion 后 Writable。
+Seal 分配单调 UpdateSequence，Publish 验证顺序；Consume 在 Apply 前验证 Published、下一序号与新的 FrameSerial。
+即使同 generation 的合法 transform 也不能乱序或重复消费。completion 必须匹配当前 Consumed 包的 FrameSerial。
+F 与 backbuffer count 无关；功能测试覆盖 F=1/2/3/8 的单/双线程 runner。
 
-GT 与 RT 各有独立登记表；RT 仅从封口包创建、更新、删除 RenderScene。
-两个 runner 在 BeginFrameRecord 后、应用 OnRender 前执行 ConsumeRenderUpdates；
-退出或模态 discard 只跳过绘制，不跳过已发布场景操作。下一次 Apply 必须等此前全部 CPU 场景读取结束。
-RenderSystem 不增加 GPU 提交或第二套发布协议；FrameSerial 和完成通知沿用 runner/GpuSystem。
-GetSceneRT 对不存在或旧代次身份返回空，不能在 GT 与 RT Apply 并发查询。
+SceneWriter 的 RenderAssetLifetime 在 GT 以 AssetId 去重持有绑定 owner。最后解绑进入候选，封包前重新绑定可以
+撤销候选；最终零使用 owner 转入承载改绑/删除的 flight，真实 completion 后释放。没有每帧全资产重新 pin。
+多 Scene 各有 owner；RT 仅借用，不复制或析构 StreamingAssetRef。Scene 删除在 RT Apply 后移除 CPU 记录，
+GT SceneId 与 writer 保留到删除包完成。Actor 在 S1 析构，不受 GPU 在途影响。
 
-每个 SceneWriter 拥有一个 GT 专用 RenderAssetLifetime，以 AssetId 去重持有当前绑定的 Ready 资产。
-计数统计该 Scene 的绑定使用；不同 Scene 各持有独立 owner，底层资产由 AssetManager 共享。
-引用创建、复制与释放都在 GT。RemoveUse 降为零时记录退休候选，同轮重新绑定可复用 owner；
-SealRetirements 把最终零使用的 owner 放到承载改绑/删除的 flight，真实 completion 后 ReleaseFlight。
-RT 只借用不可变视图，删除和替换 CPU 描述不解引用旧资源。
+手工 draw 或 raw RHI owner 在 writable 阶段交给 `GpuSystem::RetainForFrameGT`，独立于用户任务取消。
+真实完成通过匹配 FrameSerial 释放；未发布 owner 只允许终止模式 abandon。覆盖当前有序主队列，增加独立队列前
+需要扩展完成依赖。StaticMesh 已走使用者保活后零引用直接卸载；Texture 的保守迁移边界见[资产系统](asset-system.md)。
 
-断开 World 后停止生产该连接的更新，已有包继续消费，后续有序包带场景销毁标记。
-RT 应用销毁后删除 RenderScene；GT 写入端与剩余 owner 活到该销毁 flight 完成，随后释放并复用 SceneId 槽位。
-普通退出不等待全局 GPU idle，其他世界继续工作；重新连接无需等待旧场景退休。
-这一保证依赖当前全部资产 GPU 使用由同一有序主队列覆盖，增加异步队列前需要补齐跨队列完成依赖。
+关停先进入 Stopping，排空已发布包和 CPU/GPU 使用，消费真实 completion，再 terminal abandon 未发布包。
+普通窗口维护 drain 不执行 abandon。终止后禁止恢复发布。显式拆除顺序为
+WorldManager → RenderSystem → AssetManager → AssetDatabase → GpuSystem；OnShutdown 也处于 Stopping。
+初始化失败使用同一显式 teardown，但没有提交时不等不存在的 fence。
 
-关停先排空已发布帧和真实 completion，再于 RT 停止、GPU idle 后 abandon 未发布包。
-Abandon 仅用于终止交付，不能丢包后继续同一场景；此后不再读取 RT 的资产借用，
-只能检查自持 CPU 元数据。最终拆除顺序为 WorldManager（全部 World）→ RenderSystem → AssetManager → AssetDatabase → GpuSystem。
-
-测试由 SceneUpdates、StaticMeshScene、SceneAssets、WorldManager/WorldScenes 覆盖组件、
-独立写入、身份隔离、重连、Ready 与退休；SceneDeliveryRunner/MultiWorldSceneRunner 验证
-D3D12/Vulkan、单/双线程、F=1/2/3、跳过绘制和关停排空。真实 mesh 上传和绘制仍未接入。
+生命周期与变换通知的验收计数由测试 probe 持有；场景更新量直接检查已封存的更新包，资产准备检查
+共享描述和实际内容。World、SceneWriter、RenderSystem、StaticMesh 与 AssetManager 不保存专供测试的累计统计。
+性能测试自行记录阶段耗时、分配器统计和更新包大小；内部遍历与 owner 搬移次数不由运行时维护。
+真实 GPU 验收见 GpuSceneLifetime，CPU/runner 验收见 WorldLifecycle、SceneDelivery、SceneAssets、StaticMeshScene。
 
 ## Shader program 与参数
 

@@ -1,7 +1,11 @@
 #include <radray/runtime/asset_manager.h>
 
+#include <algorithm>
+#include <limits>
+
 #include <radray/logger.h>
 #include <radray/profiler.h>
+#include <radray/scope_guard.h>
 #include <radray/runtime/wait_frame.h>
 
 namespace radray {
@@ -155,15 +159,25 @@ AssetId StreamingAssetRefAny::GetAssetId() const noexcept {
 
 AssetManager::AssetManager() noexcept = default;
 
-AssetManager::~AssetManager() noexcept {
-    // 1. 停掉在飞加载并等协程退出。
+void AssetManager::BeginStopping() noexcept {
+    if (_stopping) return;
+    if (_pumping || _collectingScene) RADRAY_ABORT("Cannot stop assets during dispatch or collection");
+    _stopping = true;
+    _pumping = true;
+    auto guard = MakeScopeGuard([this]() noexcept { _pumping = false; });
     for (auto& [id, slot] : _slots) {
         if (slot && slot->State == AssetState::Loading) {
             slot->Stop.request_stop();
         }
     }
     _loadScope.RequestStop();
+}
+
+AssetManager::~AssetManager() noexcept {
+    BeginStopping();
     _loadScope.WaitUntilEmpty();
+    _retirementScope.RequestStop();
+    _retirementScope.WaitUntilEmpty();
 
     // 2. 提交残留结果, 再放开 _activeLoads 里那些引用, 然后回收已归零的资产。
     //
@@ -231,8 +245,10 @@ void AssetManager::Release(Slot* slot) noexcept {
             auto& manager = slot->Manager;
             slot->ZeroRefQueued = true;
             slot->NextZeroRef = nullptr;
-            if (manager._zeroRefTail) manager._zeroRefTail->NextZeroRef = slot;
-            else manager._zeroRefHead = slot;
+            if (manager._zeroRefTail)
+                manager._zeroRefTail->NextZeroRef = slot;
+            else
+                manager._zeroRefHead = slot;
             manager._zeroRefTail = slot;
         }
     }
@@ -242,6 +258,7 @@ void AssetManager::Release(Slot* slot) noexcept {
 }
 
 StreamingAssetRefAny AssetManager::Load(AssetLoadRequest request) {
+    if (_stopping || _collectingScene) RADRAY_ABORT("Cannot start asset loading in this phase");
     if (Slot* existing = FindSlot(request.Id); existing != nullptr) {
         return MakeRef(existing);
     }
@@ -258,6 +275,7 @@ StreamingAssetRefAny AssetManager::Load(AssetLoadRequest request) {
 }
 
 StreamingAssetRefAny AssetManager::Load(const AssetId& id) {
+    if (_stopping || _collectingScene) RADRAY_ABORT("Cannot start asset loading in this phase");
     if (Slot* existing = FindSlot(id); existing != nullptr) {
         return MakeRef(existing);
     }
@@ -300,6 +318,7 @@ task<void> AssetManager::Wait(StreamingAssetRefAny ref) {
 StreamingAssetRefAny AssetManager::AddReady(
     const AssetId& id,
     unique_ptr<Asset> object) {
+    if (_stopping || _collectingScene) RADRAY_ABORT("Cannot create assets in this phase");
     if (Slot* existing = FindSlot(id); existing != nullptr) {
         return MakeRef(existing);
     }
@@ -367,16 +386,16 @@ void AssetManager::CommitLoadResult(Slot* slot, AssetLoadResult result) noexcept
 
 void AssetManager::ResumeWaiters(Slot* slot) noexcept {
     // 先收集再恢复: 恢复会让等待者从 _waiters 里摘掉自己的记录, 边遍历边恢复会失效。
-    vector<AssetWaitRecord*> targets;
+    vector<std::pair<AssetWaitRecord*, uint64_t>> targets;
     const size_t count = _waiters.Count();
     for (size_t i = 0; i < count; ++i) {
         AssetWaitRecord* waiter = _waiters.At(i);
         if (waiter != nullptr && waiter->Slot == slot) {
-            targets.push_back(waiter);
+            targets.emplace_back(waiter, waiter->Sequence);
         }
     }
-    for (AssetWaitRecord* waiter : targets) {
-        if (_waiters.IsAlive(waiter)) {
+    for (auto [waiter, sequence] : targets) {
+        if (_waiters.IsAlive(waiter) && waiter->Sequence == sequence) {
             _waiters.ResumeRecord(waiter);
         }
     }
@@ -390,6 +409,8 @@ AssetWaitRecord* AssetManager::RegisterWait(
         return nullptr;
     }
     AssetWaitRecord* record = _waiters.Enqueue(stop, continuation);
+    if (_nextWaitSequence == std::numeric_limits<uint64_t>::max()) RADRAY_ABORT("Asset waiter sequence exhausted");
+    record->Sequence = _nextWaitSequence++;
     record->Slot = slot;
     return record;
 }
@@ -409,13 +430,16 @@ void AssetManager::CollectZeroRefSlots() {
     }
     _collecting = true;
 
+    const auto boundary = _zeroRefTail;
     while (_zeroRefHead) {
         Slot* slot = _zeroRefHead.Get();
+        const bool last = slot == boundary.Get();
         _zeroRefHead = slot->NextZeroRef;
         if (!_zeroRefHead) _zeroRefTail = nullptr;
         slot->NextZeroRef = nullptr;
         slot->ZeroRefQueued = false;
         if (slot->RefCount == 0) DestroySlot(slot);
+        if (last) break;
     }
 
     _collecting = false;
@@ -423,16 +447,6 @@ void AssetManager::CollectZeroRefSlots() {
 
 void AssetManager::EnqueueDeferred(unique_ptr<DeferredPayload> payload) {
     if (payload == nullptr) {
-        return;
-    }
-    if (_waitFrame == nullptr) {
-        // 【为何是 error log + 立即销毁, 而不是 abort】: 走到这里时 payload 已经被移交,
-        // 唯一的替代动作是泄漏。而漏装配 wait processor 在【纯 CPU 资产】的场景下并不导致
-        // 错误 —— 那类资产的 OnUnload 交出的东西本就可以立即销毁 (测试用的 AssetManager
-        // 便不装配)。故这里不 abort, 但把它记成 error: 若交出的是 GPU 对象, 立即销毁就是
-        // 绕过 fence 等待, 必须被看见。
-        RADRAY_ERR_LOG("AssetManager: wait frame processor not wired; destroying deferred payload immediately (see SetWaitFrameProcessor)");
-        payload.reset();
         return;
     }
     _pendingDeferred.push_back(std::move(payload));
@@ -446,16 +460,15 @@ task<void> AssetManager::RunDeferredDestroy(vector<unique_ptr<DeferredPayload>> 
 }
 
 void AssetManager::PumpLoadResults() {
-    for (size_t i = 0; i < _activeLoads.size();) {
-        Slot* slot = _activeLoads[i]._slot;
-        if (slot == nullptr) {
-            _activeLoads.erase(_activeLoads.begin() + static_cast<ptrdiff_t>(i));
-            continue;
-        }
-        if (!slot->PendingCanceled && !slot->PendingResult.has_value()) {
-            ++i;
-            continue;
-        }
+    vector<StreamingAssetRefAny> ready;
+    const auto count = _activeLoads.size();
+    for (size_t i = 0; i < count; ++i) {
+        auto* slot = _activeLoads[i]._slot;
+        if (slot && (slot->PendingCanceled || slot->PendingResult)) ready.push_back(std::move(_activeLoads[i]));
+    }
+    std::erase_if(_activeLoads, [](const auto& ref) { return !ref.IsValid(); });
+    for (auto& ref : ready) {
+        Slot* slot = ref._slot;
 
         if (slot->PendingCanceled) {
             slot->State = AssetState::Canceled;
@@ -467,22 +480,25 @@ void AssetManager::PumpLoadResults() {
         ResumeWaiters(slot);
 
         // 放开 manager 自持的那份引用。可能就此归零, 由 CollectZeroRefSlots 处理。
-        _activeLoads.erase(_activeLoads.begin() + static_cast<ptrdiff_t>(i));
+        ref.Reset();
     }
 }
 
 void AssetManager::FlushDeferredBatch() {
     // 【一帧一个协程帧】: 本帧攒下的 payload 整批交给一个等待协程, 而不是每个 payload 一个。
-    if (_pendingDeferred.empty()) {
+    if (_pendingDeferred.empty() || _waitFrame == nullptr) {
         return;
     }
     vector<unique_ptr<DeferredPayload>> batch = std::move(_pendingDeferred);
     _pendingDeferred.clear();
-    _loadScope.Spawn(RunDeferredDestroy(std::move(batch)));
+    _retirementScope.Spawn(RunDeferredDestroy(std::move(batch)));
 }
 
 void AssetManager::Pump() {
     RADRAY_PROFILE_SCOPE_N("AssetManager::Pump");
+    if (_pumping || _collectingScene) RADRAY_ABORT("Cannot pump assets during dispatch or collection");
+    _pumping = true;
+    auto guard = MakeScopeGuard([this]() noexcept { _pumping = false; });
     PumpLoadResults();
     CollectZeroRefSlots();
     FlushDeferredBatch();

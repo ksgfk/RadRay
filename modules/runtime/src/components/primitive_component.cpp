@@ -19,6 +19,7 @@ void PrimitiveComponent::DestroyRenderState(SceneWriter& writer) {
 }
 
 void PrimitiveComponent::CollectRenderUpdates(SceneWriter& writer, RenderDirtyFlags dirty) {
+    writer.Queue(writer.GetPrimitive(_primitiveId));
     CollectPrimitiveUpdates(writer, dirty);
 }
 

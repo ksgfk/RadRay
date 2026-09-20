@@ -50,11 +50,11 @@ vector<unique_ptr<AssetImporter>> MakeDefaultAssetImporters() {
 }  // namespace
 
 bool SwitchToApplicationSchedulerAwaitable::await_ready() const noexcept {
-    return _scheduler == nullptr || _stop.stop_requested();
+    return _scheduler == nullptr || _scheduler->IsStopping() || _stop.stop_requested();
 }
 
 bool SwitchToApplicationSchedulerAwaitable::await_suspend(std::coroutine_handle<> continuation) {
-    if (_scheduler == nullptr || _stop.stop_requested()) {
+    if (_scheduler == nullptr || _scheduler->IsStopping() || _stop.stop_requested()) {
         return false;
     }
     _record = _scheduler->Enqueue(_stop, continuation);
@@ -63,7 +63,7 @@ bool SwitchToApplicationSchedulerAwaitable::await_suspend(std::coroutine_handle<
 
 bool SwitchToApplicationSchedulerAwaitable::await_resume() noexcept {
     if (_record == nullptr) {
-        return !_stop.stop_requested();
+        return !_stop.stop_requested() && (_scheduler == nullptr || !_scheduler->IsStopping());
     }
 
     const bool completed = !_record->Canceled && !_record->Stop.stop_requested();
@@ -75,6 +75,7 @@ bool SwitchToApplicationSchedulerAwaitable::await_resume() noexcept {
 }
 
 ApplicationScheduler::~ApplicationScheduler() noexcept {
+    BeginStopping();
     CancelAll();
 }
 
@@ -87,7 +88,10 @@ task<void> ApplicationScheduler::SwitchTo() {
 }
 
 ApplicationSchedulerRecord* ApplicationScheduler::Enqueue(stop_token stop, std::coroutine_handle<> continuation) {
-    return _records.Enqueue(stop, continuation);
+    if (_nextSequence == std::numeric_limits<uint64_t>::max()) RADRAY_ABORT("Scheduler sequence exhausted");
+    auto* record = _records.Enqueue(stop, continuation);
+    record->Sequence = _nextSequence++;
+    return record;
 }
 
 bool ApplicationScheduler::Erase(ApplicationSchedulerRecord* record) noexcept {
@@ -108,14 +112,18 @@ void ApplicationScheduler::CancelRecord(ApplicationSchedulerRecord* record) noex
 
 void ApplicationScheduler::Pump() {
     RADRAY_PROFILE_SCOPE_N("ApplicationScheduler::Pump");
-    const size_t recordCount = _records.Count();
-    for (size_t i = 0; i < recordCount && !_records.Empty(); ++i) {
+    if (_pumping || _collecting) RADRAY_ABORT("Cannot pump scheduler during dispatch or collection");
+    _pumping = true;
+    auto guard = MakeScopeGuard([this]() noexcept { _pumping = false; });
+    const auto boundary = _nextSequence;
+    while (!_records.Empty() && _records.Front()->Sequence < boundary) {
         ApplicationSchedulerRecord* record = _records.Front();
+        const auto sequence = record->Sequence;
         if (record->Stop.stop_requested()) {
             record->Canceled = true;
         }
         ResumeRecord(record);
-        if (IsAlive(record)) {
+        if (IsAlive(record) && record->Sequence == sequence) {
             Erase(record);
         }
     }
@@ -128,10 +136,16 @@ void ApplicationScheduler::CancelAll() noexcept {
 Application::Application() noexcept = default;
 
 Application::~Application() noexcept {
+    _scheduler.BeginStopping();
+    if (_worldManager) _worldManager->BeginStopping();
+    if (_renderSystem) _renderSystem->BeginStoppingGT();
+    if (_assetManager) _assetManager->BeginStopping();
     if (_windowManager != nullptr) _windowManager->CloseOperations();
     if (_gpuSystem != nullptr) {
         WaitAndCleanupCompletedFlights();
     }
+    if (_renderSystem) _renderSystem->AbandonUnpublishedFramesGT();
+    if (_gpuSystem) _gpuSystem->AbandonUnpublishedResourcesTerminalGT();
     _scheduler.CancelAll();
     DestroyRuntime();
 }
@@ -493,7 +507,7 @@ public:
         if (_reqExit) return false;
         const uint32_t flightIndex = gpuSystem->GetCurrentFlightIndex();
         if (!gpuSystem->CompleteFlightIfReady(flightIndex, !isInModalLoop)) return false;
-        _app->BeginUpdateForFlight(flightIndex);
+        _app->ServiceFrameBoundaryGT(flightIndex);
         const auto now = gpuSystem->BeginFrameTiming(flightIndex);
         _deltaTime = now - _lastFrameTime;
         _lastFrameTime = now;
@@ -514,9 +528,6 @@ public:
         const uint32_t flightIndex = gpuSystem->GetCurrentFlightIndex();
         const auto deltaTime = _deltaTime;
 
-        MaintainWindows();
-        if (_reqExit) return;
-
         AppUpdateResult result{};
         {
             RADRAY_PROFILE_SCOPE_N("Update");
@@ -530,18 +541,18 @@ public:
             return;
         }
 
-        MaintainWindows();
         if (_app->GetWindowManager()->ShouldExit()) {
             _reqExit = true;
             return;
         }
 
+        _app->GetRenderSystem()->PublishFrameGT(flightIndex);
         AppFrameContext frameCtx = gpuSystem->BeginFrameRecord(
             flightIndex,
             deltaTime,
             gpuSystem->GetLastFrameLatency(),
             isInModalLoop);
-        _app->ConsumeRenderUpdates(frameCtx);
+        _app->ApplySceneUpdatesRT(frameCtx);
         {
             RADRAY_PROFILE_SCOPE_N("Render");
             _app->Render(frameCtx);
@@ -674,7 +685,7 @@ public:
                 runnerFrameData.DeltaTime,
                 gpuSystem->GetLastFrameLatency(),
                 runnerFrameData.IsInModalLoop, !discard);
-            _app->ConsumeRenderUpdates(frameCtx);
+            _app->ApplySceneUpdatesRT(frameCtx);
             if (!discard) {
                 RADRAY_PROFILE_SCOPE_N("Render");
                 _app->Render(frameCtx);
@@ -738,7 +749,7 @@ public:
         const uint32_t flightIndex = static_cast<uint32_t>(frameIndex % gpuSystem->GetFlightDataCount());
         {
             RADRAY_PROFILE_SCOPE_N("Application::GpuBeginUpdateForFlight");
-            _app->BeginUpdateForFlight(flightIndex);
+            _app->ServiceFrameBoundaryGT(flightIndex);
         }
 
         const auto now = gpuSystem->BeginFrameTiming(flightIndex);
@@ -758,8 +769,6 @@ public:
         const uint64_t frameIndex = gpuSystem->GetFrameIndex();
         const uint32_t flightIndex = static_cast<uint32_t>(frameIndex % gpuSystem->GetFlightDataCount());
         const auto deltaTime = _deltaTime;
-        MaintainWindows();
-        if (_reqExit) return std::nullopt;
         _runnerFrameDatas[flightIndex].DeltaTime = deltaTime;
         _runnerFrameDatas[flightIndex].IsInModalLoop = isInModalLoop;
         AppUpdateResult result{};
@@ -775,12 +784,12 @@ public:
             return std::nullopt;
         }
 
-        MaintainWindows();
         if (_app->GetWindowManager()->ShouldExit()) {
             _reqExit = true;
             return std::nullopt;
         }
 
+        _app->GetRenderSystem()->PublishFrameGT(flightIndex);
         gpuSystem->AdvanceFrameIndex();
         _publishedFrameCount.store(frameIndex + 1, std::memory_order_release);
         _readySlotsSemaphore.release();
@@ -879,18 +888,24 @@ public:
     std::thread _renderThread;
 };
 
-void Application::BeginUpdateForFlight(uint32_t flightIndex) {
+void Application::ServiceFrameBoundaryGT(uint32_t flightIndex) {
     PumpFlightCompletions(flightIndex);
+    if (_assetManager) _assetManager->Pump();
+    _scheduler.Pump();
 }
 
-void Application::ConsumeRenderUpdates(AppFrameContext& ctx) {
-    _renderSystem->ConsumeRenderUpdates(ctx.FlightIndex());
+void Application::SetCollecting(bool collecting) {
+    _scheduler._collecting = collecting;
+    if (_assetManager) _assetManager->_collectingScene = collecting;
+}
+
+void Application::ApplySceneUpdatesRT(AppFrameContext& ctx) {
+    _renderSystem->ConsumeRenderUpdates(ctx.FlightIndex(), ctx.FrameSerial());
 }
 
 void Application::WaitAndCleanupCompletedFlights() {
     _gpuSystem->WaitAndRetireFlights();
     PumpFlightCompletions(std::nullopt);
-    if (_renderSystem != nullptr) _renderSystem->AbandonUnpublishedFramesGT();
 }
 
 void Application::PumpFlightCompletions(std::optional<uint32_t> flightIndex) {
@@ -904,13 +919,16 @@ void Application::PumpFlightCompletions(std::optional<uint32_t> flightIndex) {
     while (_gpuSystem->_flightCompletions.TryRead(completion)) {
         completions.push_back(completion);
     }
+    for (const auto& c : completions) {
+        if (_renderSystem != nullptr) _renderSystem->OnFlightCompletedGT(c);
+        _gpuSystem->ReleaseFrameResourcesGT(c);
+    }
     if (flightIndex) {
         _gpuSystem->BeginUpdateForFlight(*flightIndex);
     } else {
         _gpuSystem->CleanupCompletedFlights();
     }
     for (const auto& c : completions) {
-        if (_renderSystem != nullptr) _renderSystem->OnFlightCompletedGT(c);
         OnRenderFrameComplete(c);
     }
 }
@@ -920,21 +938,22 @@ void Application::PumpFlightCompletions(std::optional<uint32_t> flightIndex) {
 // ════════════════════════════════════════════════════════════════
 
 AppUpdateResult Application::Update(const AppUpdateContext& ctx) {
-    // 1) 提交资产加载结果并回收零引用资产。
-    if (_assetManager != nullptr) {
-        _assetManager->Pump();
-    }
-    // 恢复需要在应用 update 线程上继续执行的协程。
-    _scheduler.Pump();
     // 2) 游戏逻辑。
     OnUpdate(ctx);
     // 3) World Tick、延迟销毁与渲染收集。
     if (_worldManager != nullptr) {
         _worldManager->Tick(ctx.DeltaTime.count());
+    }
+    FinalizeWorldAndSealGT(ctx.FlightIndex);
+    return AppUpdateResult{ShouldExit()};
+}
+
+void Application::FinalizeWorldAndSealGT(uint32_t flightIndex) {
+    if (_worldManager) {
+        _worldManager->FinalizeWorldsGT();
         _worldManager->CollectRenderUpdates();
     }
-    if (_renderSystem != nullptr) _renderSystem->SealFrameGT(ctx.FlightIndex);
-    return AppUpdateResult{ShouldExit()};
+    if (_renderSystem) _renderSystem->SealFrameGT(flightIndex);
 }
 
 void Application::Render(AppFrameContext& ctx) {
@@ -947,10 +966,16 @@ bool Application::ShouldExit() const noexcept {
 
 int Application::Shutdown(const AppShutdownContext& ctx) {
     (void)ctx;
+    _scheduler.BeginStopping();
+    if (_worldManager != nullptr) _worldManager->BeginStopping();
+    if (_renderSystem != nullptr) _renderSystem->BeginStoppingGT();
+    if (_assetManager) _assetManager->BeginStopping();
     if (_windowManager != nullptr) _windowManager->CloseOperations();
     if (_gpuSystem != nullptr) {
         WaitAndCleanupCompletedFlights();
     }
+    if (_renderSystem) _renderSystem->AbandonUnpublishedFramesGT();
+    if (_gpuSystem) _gpuSystem->AbandonUnpublishedResourcesTerminalGT();
     // 游戏侧清理:释放自管 per-flight 资源、置空指向 World 的非 owning 指针。
     OnShutdown();
     _scheduler.CancelAll();
@@ -961,6 +986,7 @@ int Application::Shutdown(const AppShutdownContext& ctx) {
 void Application::DestroyRuntime() noexcept {
     if (_windowManager != nullptr) _windowManager->CloseOperations();
     // 拆 World:销毁 Actor / Component，释放其持有的 StreamingAssetRef。
+    if (_worldManager != nullptr) _worldManager->Shutdown();
     _worldManager.reset();
     // 其 RenderPassRegistry 随之销毁,故须先切断 WindowManager 的非 owning 引用。
     if (_windowManager != nullptr) {
@@ -1073,6 +1099,7 @@ bool Application::InitializeRuntime(const ApplicationRuntimeDescriptor& desc) {
 int Application::Run(const ApplicationRuntimeDescriptor& desc) {
     if (!InitializeRuntime(desc)) return 1;
     OnInit();
+    _worldManager->FinalizeWorldsGT();
     return StartLoop();
 }
 

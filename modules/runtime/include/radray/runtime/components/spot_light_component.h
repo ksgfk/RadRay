@@ -12,6 +12,9 @@ public:
     float GetInnerConeAngle() const noexcept { return _inner; }
     float GetOuterConeAngle() const noexcept { return _outer; }
 
+protected:
+    LightStateUpdate CaptureLightState() const noexcept override;
+
 private:
     float _inner{0.34906585f}, _outer{0.52359878f};
 };

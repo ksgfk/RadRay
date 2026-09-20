@@ -30,7 +30,7 @@ PrimitiveId SceneWriter::CreatePrimitive() {
     const auto id = _primitives.Emplace();
     auto& state = _primitives.Get(id);
     state.Id = id;
-    Queue(state);
+    if (!_claimed) Queue(state);
     return id;
 }
 
@@ -39,11 +39,13 @@ void SceneWriter::RemovePrimitive(PrimitiveId id) {
     if (state.Sent) _removed.push_back(id);
     if (state.Asset) _assets.RemoveUse(*state.Asset);
     Unqueue(state);
+    if (id.Generation == std::numeric_limits<uint32_t>::max()) RADRAY_ABORT("Primitive generation exhausted");
     _primitives.Destroy(id);
 }
 
 void SceneWriter::SetStaticMesh(PrimitiveId id, const StreamingAssetRef<StaticMesh>& mesh, const Eigen::Matrix4f& localToWorld) {
     auto& state = GetPrimitive(id);
+    if (state.HasLight) RADRAY_ABORT("Cannot change primitive type");
     StaticMeshStateUpdate update;
     update.Id = id;
     update.LocalToWorld = localToWorld;
@@ -54,14 +56,6 @@ void SceneWriter::SetStaticMesh(PrimitiveId id, const StreamingAssetRef<StaticMe
         update.Mesh.LocalBoundsMin = asset->GetBoundsMin();
         update.Mesh.LocalBoundsMax = asset->GetBoundsMax();
         update.Mesh.Sections = asset->GetSections();
-        if (update.Mesh.Sections.empty()) {
-            const auto& primitives = asset->GetMeshResource().Primitives;
-            update.Mesh.Sections.reserve(primitives.size());
-            for (size_t i = 0; i < primitives.size(); ++i) {
-                const auto& primitive = primitives[i];
-                update.Mesh.Sections.emplace_back(static_cast<uint32_t>(i), 0, primitive.IndexBuffer.IndexCount, 0, primitive.VertexCount - 1);
-            }
-        }
         _assets.AddUse(mesh.AsAny());
         next = mesh.GetAssetId();
     }
@@ -83,6 +77,14 @@ void SceneWriter::SetTransform(PrimitiveId id, const Eigen::Matrix4f& localToWor
     Queue(state);
 }
 
+void SceneWriter::SetLight(const LightStateUpdate& light) {
+    auto& state = GetPrimitive(light.Id);
+    if (state.HasMesh) RADRAY_ABORT("Cannot change primitive type");
+    state.Light = light;
+    state.HasLight = true;
+    Queue(state);
+}
+
 void SceneWriter::Flush(SceneUpdateBatch& batch, uint32_t flightIndex) {
     if (!batch.Empty()) RADRAY_ABORT("Scene batch must be empty before collection");
     batch.RemovePrimitives.insert(batch.RemovePrimitives.end(), _removed.begin(), _removed.end());
@@ -94,8 +96,10 @@ void SceneWriter::Flush(SceneUpdateBatch& batch, uint32_t flightIndex) {
             batch.MeshStates.push_back(std::move(*state.Mesh));
         else if (state.Transform)
             batch.Transforms.push_back({state.Id, *state.Transform});
+        if (state.Light) batch.Lights.push_back(*state.Light);
         state.Mesh.reset();
         state.Transform.reset();
+        state.Light.reset();
         state.Sent = true;
         Unqueue(state);
     }

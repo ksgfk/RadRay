@@ -1,12 +1,14 @@
 #pragma once
 
 #include <limits>
+#include <optional>
 #include <span>
 
 #include <radray/basic_math.h>
 #include <radray/enum_flags.h>
 #include <radray/nullable.h>
 #include <radray/runtime/components/actor_component.h>
+#include <radray/runtime/render_scene/scene_id.h>
 
 namespace radray {
 
@@ -59,6 +61,7 @@ public:
 
     /// 从父组件脱离
     void DetachFromParent() noexcept;
+    LifecycleRequestResult RequestReparent(Nullable<SceneComponent*> parent, AttachmentRule rule = AttachmentRule::KeepLocal);
 
     Nullable<SceneComponent*> GetAttachParent() const noexcept { return _parent; }
     std::span<SceneComponent* const> GetAttachChildren() const noexcept { return _children; }
@@ -86,6 +89,11 @@ private:
     friend class World;
     friend class WorldRenderBridge;
 
+    bool ReparentNow(Nullable<SceneComponent*> parent, AttachmentRule rule) noexcept;
+    bool CanJoinWorld(const Actor& owner, const World& world) const noexcept;
+    bool ComputeAttachmentTransform(Nullable<SceneComponent*> parent, AttachmentRule rule, Eigen::Vector3f& location, Eigen::Quaternionf& rotation, Eigen::Vector3f& scale) const noexcept;
+    void UnlinkHierarchy(Nullable<vector<SceneComponent*>*> detachedChildren) noexcept;
+
     void MarkRenderDirty(RenderDirtyFlag flag);
     Eigen::Matrix4f ComputeLocalMatrix() const noexcept;
     void NotifyTransformChanged();
@@ -100,6 +108,7 @@ private:
     vector<SceneComponent*> _children;  // non-owning, 所有权在 Actor::_ownedComponents
     RenderDirtyFlags _renderDirty;
     size_t _renderQueueIndex{std::numeric_limits<size_t>::max()};
+    std::optional<SceneId> _renderConnection;
 };
 
 template <>

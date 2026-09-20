@@ -24,6 +24,7 @@ public:
     void Collect();
     void CheckCanModify() const noexcept;
     SceneId GetSceneId() const noexcept { return _writer.GetSceneId(); }
+    RenderConnectionState GetState() const noexcept { return _state; }
 
 private:
     void Remove(SceneComponent& component) noexcept;
@@ -33,7 +34,7 @@ private:
     SceneWriter& _writer;
     vector<SceneComponent*> _updates;
     bool _collecting{false};
-    bool _connected{true};
+    RenderConnectionState _state{RenderConnectionState::Connecting};
 };
 
 }  // namespace radray

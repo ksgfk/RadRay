@@ -64,6 +64,7 @@ public:
     // 对应 UE5 的 FStaticMeshRenderData: 上传后的 device-local 顶点/索引 buffer。
     // 返回指针在【本资产】存活期内稳定 —— 持有一份 StreamingAssetRef 即保证不悬垂
 
+    /// 借用资源；Scene 外的提交者须用 GpuSystem::RetainForFrameGT 保持资产至实际完成。
     const GpuMesh& GetRenderMesh() const noexcept { return _renderMesh; }
 
 private:
@@ -72,6 +73,7 @@ private:
     Eigen::Vector3f _boundsMin;
     Eigen::Vector3f _boundsMax;
     GpuMesh _renderMesh;
+    bool _valid{false};
 };
 
 class MeshImporter final : public AssetImporter {

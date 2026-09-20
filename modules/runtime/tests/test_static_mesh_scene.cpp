@@ -77,8 +77,8 @@ protected:
     Application App;
     AssetManager Assets;
     RenderSystem Render{&App, 3};
-    World GameWorld;
-    SceneId RenderId{GameWorld.AttachToRendering(Render)};
+    test::ScopedWorld GameWorld;
+    SceneId RenderId{test::ConnectWorld(GameWorld, Render)};
     RenderScene Data;
     SceneUpdateBatch Batch;
     Actor* Owner{GameWorld.SpawnActor()};
@@ -167,7 +167,7 @@ TEST_F(StaticMeshScene, ParentRotationNonuniformScaleAndReflectionsUpdateBoundsA
     parent->SetRelativeScale({2, 3, 4});
     parent->SetRelativeRotation(Eigen::Quaternionf{Eigen::AngleAxisf{0.7f, Eigen::Vector3f::UnitY()}});
     auto* component = Add(Mesh(1));
-    component->AttachTo(parent);
+    component->RequestReparent(parent);
     component->SetRelativeRotation(Eigen::Quaternionf{Eigen::AngleAxisf{0.3f, Eigen::Vector3f::UnitZ()}});
     component->SetRelativeLocation({3, 4, 5});
     Flush();
@@ -282,10 +282,10 @@ TEST_F(StaticMeshScene, FlightRetainsAssetAfterSourceDiesBeforeApplyOnAnotherThr
         EXPECT_TRUE(Data.GetStaticMeshes().empty());
     });
     render.join();
-    Render.ConsumeRenderUpdates(0);
-    Render.ConsumeRenderUpdates(1);
-    Render.OnFlightCompletedGT({.FlightIndex = 0});
-    Render.OnFlightCompletedGT({.FlightIndex = 1});
+    test::ConsumeFrame(Render, 0);
+    test::ConsumeFrame(Render, 1);
+    test::CompleteFrame(Render, 0);
+    test::CompleteFrame(Render, 1);
     Assets.Pump();
     EXPECT_EQ(Assets.GetAssetCount(), 0u);
 }
@@ -296,6 +296,7 @@ TEST_F(StaticMeshScene, RemovalRepairsDenseListAndReuseCannotExposeOldMesh) {
     Flush();
     const auto oldId = components[1]->GetPrimitiveId();
     Owner->RemoveComponent(components[1]);
+    GameWorld.FinalizeWorldGT();
     auto* replacement = Add(Mesh(2));
     const auto newId = replacement->GetPrimitiveId();
     EXPECT_EQ(oldId.Index, newId.Index);
@@ -337,8 +338,8 @@ TEST_F(StaticMeshScene, ReusedFlightsNeverRestoreAnOlderTransform) {
     Application app;
     for (uint32_t count : {1u, 2u, 3u}) {
         RenderSystem render{&app, count};
-        World world;
-        const auto sceneId = world.AttachToRendering(render);
+        test::ScopedWorld world;
+        const auto sceneId = test::ConnectWorld(world, render);
         auto* component = world.SpawnActor()->AddComponent<StaticMeshComponent>();
         component->SetStaticMesh(Mesh(1));
         const auto id = component->GetPrimitiveId();
@@ -346,11 +347,11 @@ TEST_F(StaticMeshScene, ReusedFlightsNeverRestoreAnOlderTransform) {
             if (frame == 1) component->SetRelativeLocation({15, 0, 0});
             const uint32_t flight = frame % count;
             test::PrepareScene(world, render, flight);
-            render.ConsumeRenderUpdates(flight);
+            test::ConsumeFrame(render, flight);
             const auto view = render.GetSceneRT(sceneId)->GetStaticMesh(id);
             ASSERT_TRUE(view);
             EXPECT_FLOAT_EQ(view->LocalToWorld(0, 3), frame == 0 ? 0 : 15);
-            render.OnFlightCompletedGT({.FlightIndex = flight, .GpuWorkCompleted = false});
+            test::CompleteFrame(render, flight, false);
         }
     }
 }

@@ -92,7 +92,8 @@ static Nullable<shared_ptr<Device>> Device::Create(const DeviceDescriptor& desc)
 `World`）。区别的理由是前者可能创建失败，后者不会。
 
 **两段式析构（`Destroy()` + `DestroyImpl()`）集中在 render 后端实现类**，理由见
-[RHI 所有权](../architecture/render-rhi.md)。runtime 层不用它，靠析构函数 + 成员声明顺序。
+[RHI 所有权](../architecture/render-rhi.md)。runtime 的 World/Actor/Component 先由显式驱动器注销与 teardown，
+再析构成员；析构不恢复业务 hook 或隐式推进 S1。普通资源包装仍使用析构函数与成员声明顺序。
 
 RAII 包装类的后缀是 `Scope` / `Scoped` / `Guard`，**没有 `*RAII`**：`ScopeGuard`、`TaskScope`、
 `ScopedBufferMap`。（`d3d12_impl.h` 内部的 `DescriptorHeapViewRAII`
@@ -119,6 +120,9 @@ RAII 包装类的后缀是 `Scope` / `Scoped` / `Guard`，**没有 `*RAII`**：`
 ## 测试
 
 测试源码放 `modules/<module>/tests/test_<topic>.cpp`，目标名 = 文件名。
+
+测试观测遵守 [AGENTS.md](../../AGENTS.md) 的字段限制，优先通过生命周期回调、实际输出和对象状态验证，
+不增加专用计数接口；运行时性能插桩沿用 `RADRAY_PROFILE_*`。
 
 ```cmake
 radray_add_test(test_foo SOURCES test_foo.cpp LINK_LIBS radrayruntime)

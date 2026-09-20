@@ -1,16 +1,10 @@
 #pragma once
 
 #include <radray/runtime/components/scene_component.h>
+#include <radray/runtime/render_scene/scene_update.h>
 #include <radray/types.h>
 
 namespace radray {
-
-enum class LightType : uint8_t {
-    Directional,
-    Point,
-    Spot,
-    Rect,
-};
 
 class LightComponent : public SceneComponent {
 public:
@@ -33,8 +27,17 @@ public:
 
     void SetCastShadow(bool castShadow) noexcept;
     bool CastShadow() const noexcept { return _castShadow; }
+    PrimitiveId GetLightId() const noexcept { return _lightId; }
+
+protected:
+    void CreateRenderState(SceneWriter& writer) override;
+    void DestroyRenderState(SceneWriter& writer) override;
+    void CollectRenderUpdates(SceneWriter& writer, RenderDirtyFlags dirty) override;
+    void OnTransformChanged() override;
+    virtual LightStateUpdate CaptureLightState() const noexcept;
 
 private:
+    PrimitiveId _lightId;
     float _intensity{1.0f};
     Eigen::Vector3f _lightColor{Eigen::Vector3f::Ones()};
     bool _affectsWorld{true};

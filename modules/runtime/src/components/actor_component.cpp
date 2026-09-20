@@ -5,6 +5,10 @@
 
 namespace radray {
 
+bool ActorComponent::IsLive() const noexcept {
+    return (_lifecycle == ObjectLifecycle::Live || _lifecycle == ObjectLifecycle::Initializing) && (!_owner || _owner->IsLive());
+}
+
 void ActorComponent::CheckCanModify() const noexcept {
     if (auto world = GetWorld()) world->CheckCanModify();
 }

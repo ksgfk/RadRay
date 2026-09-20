@@ -1,7 +1,6 @@
 #include <radray/runtime/world_manager.h>
 
 #include <algorithm>
-
 #include <radray/logger.h>
 #include <radray/scope_guard.h>
 #include <radray/runtime/game_framework/world.h>
@@ -10,108 +9,131 @@ namespace radray {
 
 WorldManager::WorldManager(Nullable<Application*> app, Nullable<RenderSystem*> renderer)
     : _app(app), _renderSystem(renderer) {}
-
 WorldManager::~WorldManager() noexcept {
-    Clear();
+    if (!_worlds.Empty()) RADRAY_ABORT("WorldManager requires explicit Shutdown");
 }
 
 WorldId WorldManager::CreateWorld() {
     CheckCanModify();
+    if (_stopping) RADRAY_ABORT("Cannot create World while stopping");
+    if (_tickEpoch == std::numeric_limits<uint64_t>::max()) RADRAY_ABORT("Tick epoch exhausted");
     auto world = _app ? make_unique<World>(_app.Get()) : make_unique<World>();
-    const auto handle = _worlds.Emplace(WorldRecord{std::move(world), false});
+    auto* object = world.get();
+    const auto handle = _worlds.Emplace(WorldRecord{std::move(world)});
     const WorldId id{handle.Index, handle.Generation};
+    object->_manager = this;
+    object->_id = id;
+    object->_firstTickEpoch = _tickEpoch + 1;
     _worldIds.push_back(id);
     return id;
 }
-
 Nullable<World*> WorldManager::GetWorld(WorldId id) noexcept {
     auto record = _worlds.TryGet({id.Index, id.Generation});
-    return record && !record->PendingDestroy ? record->Value.get() : nullptr;
+    return record && record->Value->IsLive() ? record->Value.get() : nullptr;
 }
-
 Nullable<const World*> WorldManager::GetWorld(WorldId id) const noexcept {
     auto record = _worlds.TryGet({id.Index, id.Generation});
-    return record && !record->PendingDestroy ? record->Value.get() : nullptr;
+    return record && record->Value->IsLive() ? record->Value.get() : nullptr;
 }
-
-void WorldManager::DestroyWorld(WorldId id) {
+LifecycleRequestResult WorldManager::DestroyWorld(WorldId id) {
     CheckCanModify();
     auto record = _worlds.TryGet({id.Index, id.Generation});
-    if (!record || record->PendingDestroy) RADRAY_ABORT("Invalid World destruction");
-    record->Value->CheckCanModify();
-    record->PendingDestroy = true;
+    if (!record) return LifecycleRequestResult::Invalid;
+    if (record->Value->_lifecycle == ObjectLifecycle::PendingDestroy) return LifecycleRequestResult::AlreadyPending;
+    if (!record->Value->IsLive()) return LifecycleRequestResult::Invalid;
+    record->Value->_lifecycle = ObjectLifecycle::PendingDestroy;
+    _pendingDestroy.push_back(id);
+    return LifecycleRequestResult::Accepted;
 }
-
-SceneId WorldManager::AttachWorldToRendering(WorldId id) {
+LifecycleRequestResult WorldManager::RequestRenderConnection(WorldId id, bool connected) {
     CheckCanModify();
     auto world = GetWorld(id);
-    if (!world || !_renderSystem) RADRAY_ABORT("Cannot attach World");
-    return world->AttachToRendering(*_renderSystem);
+    if (!world || (connected && !_renderSystem)) return LifecycleRequestResult::Invalid;
+    return world->RequestRenderConnection(connected ? _renderSystem : Nullable<RenderSystem*>{nullptr});
 }
-
-void WorldManager::DetachWorldFromRendering(WorldId id) {
+LifecycleRequestResult WorldManager::RequestReconnect(WorldId id) {
     CheckCanModify();
     auto world = GetWorld(id);
-    if (!world) RADRAY_ABORT("Cannot detach World");
-    world->DetachFromRendering();
+    return world ? world->RequestReconnect() : LifecycleRequestResult::Invalid;
 }
-
 void WorldManager::Tick(float deltaTime) {
     CheckIdle();
+    if (_stopping) return;
+    if (_tickEpoch == std::numeric_limits<uint64_t>::max()) RADRAY_ABORT("Tick epoch exhausted");
+    ++_tickEpoch;
     _ticking = true;
-    {
-        auto guard = MakeScopeGuard([this]() noexcept { _ticking = false; });
-        _tickWorldIds = _worldIds;
-        for (const auto id : _tickWorldIds) {
-            if (auto world = GetWorld(id)) world->Tick(deltaTime);
-        }
+    auto guard = MakeScopeGuard([this]() noexcept { _ticking = false; });
+    // SparseSet's dense storage can move. Snapshot only identities, never records.
+    _tickWorldIds = _worldIds;
+    for (const auto id : _tickWorldIds) {
+        if (auto world = GetWorld(id)) world->DispatchTick(deltaTime, _tickEpoch);
     }
-    CleanupDestroyedWorlds();
 }
-
+void WorldManager::FinalizeWorldsGT() {
+    CheckIdle();
+    _committing = true;
+    auto guard = MakeScopeGuard([this]() noexcept { _committing = false; });
+    _executingDestroy.swap(_pendingDestroy);
+    for (const auto id : _executingDestroy) {
+        auto record = _worlds.TryGet({id.Index, id.Generation});
+        if (!record) continue;
+        if (id.Generation == std::numeric_limits<uint32_t>::max()) RADRAY_ABORT("World generation exhausted");
+        record->Value->_lifecycle = ObjectLifecycle::Destroying;
+        record->Value->_stopping = true;
+        _retiredWorlds.push_back(std::move(record->Value));
+        _worlds.Destroy({id.Index, id.Generation});
+    }
+    if (!_executingDestroy.empty()) {
+        std::erase_if(_worldIds, [this](WorldId id) { return !_worlds.IsAlive({id.Index, id.Generation}); });
+    }
+    _commitWorlds.clear();
+    for (const auto id : _worldIds) {
+        auto* world = _worlds.Get({id.Index, id.Generation}).Value.get();
+        if (!world->_pending.Empty()) _commitWorlds.push_back(world);
+    }
+    for (const auto& world : _retiredWorlds) _commitWorlds.push_back(world.get());
+    for (auto* world : _commitWorlds) world->FreezeLifecycle();
+    for (auto* world : _commitWorlds) world->PrepareLifecycle();
+    for (auto* world : _commitWorlds) world->ExecuteLifecycle();
+    for (const auto& world : _retiredWorlds) world->DisconnectNow();
+    _retiredWorlds.clear();
+    _executingDestroy.clear();
+    _commitWorlds.clear();
+}
 void WorldManager::CollectRenderUpdates() {
     CheckIdle();
     _collecting = true;
     auto guard = MakeScopeGuard([this]() noexcept { _collecting = false; });
     for (const auto id : _worldIds) {
-        if (auto world = GetWorld(id)) world->CollectRenderUpdates();
+        if (auto world = GetWorld(id)) world->Collect();
     }
 }
-
 void WorldManager::Clear() {
     CheckIdle();
-    for (const auto& record : _worlds.Values()) record.Value->CheckCanModify();
-    _destroying = true;
-    auto guard = MakeScopeGuard([this]() noexcept { _destroying = false; });
-    for (auto& record : _worlds.Values()) record.PendingDestroy = true;
-    // Run callbacks while the identity registry is stable, with every World hidden.
-    for (auto& record : _worlds.Values()) record.Value.reset();
+    const bool stopping = _stopping;
+    BeginStopping();
+    for (const auto id : _worldIds) DestroyWorld(id);
+    FinalizeWorldsGT();
     _worlds.Clear();
-    _worldIds.clear();
     _tickWorldIds.clear();
+    _stopping = stopping;
 }
-
-void WorldManager::CleanupDestroyedWorlds() {
-    _destroying = true;
-    auto guard = MakeScopeGuard([this]() noexcept { _destroying = false; });
-    std::erase_if(_worldIds, [this](WorldId id) {
-        auto& record = _worlds.Get({id.Index, id.Generation});
-        if (!record.PendingDestroy) return false;
-        // Destroy callbacks must not observe a registry mid swap-remove.
-        auto world = std::move(record.Value);
-        _worlds.Destroy({id.Index, id.Generation});
-        world.reset();
-        return true;
-    });
+void WorldManager::BeginStopping() {
+    CheckIdle();
+    _stopping = true;
+    for (const auto& record : _worlds.Values()) record.Value->_stopping = true;
 }
-
+void WorldManager::Shutdown() {
+    BeginStopping();
+    Clear();
+}
 void WorldManager::CheckCanModify() const noexcept {
-    if (_collecting || _destroying) RADRAY_ABORT("Cannot modify WorldManager during collection or destruction");
+    if (std::this_thread::get_id() != _ownerThread) RADRAY_ABORT("WorldManager requires its owning thread");
+    if (_collecting) RADRAY_ABORT("Cannot modify WorldManager during collection");
 }
-
 void WorldManager::CheckIdle() const noexcept {
     CheckCanModify();
-    if (_ticking) RADRAY_ABORT("Cannot reenter WorldManager during Tick");
+    if (_ticking || _committing || _callbackDepth) RADRAY_ABORT("Cannot reenter WorldManager driver");
 }
 
 }  // namespace radray

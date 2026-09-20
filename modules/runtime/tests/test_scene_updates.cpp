@@ -12,7 +12,7 @@ class LifecycleComponent final : public ActorComponent {
 public:
     explicit LifecycleComponent(vector<string>& events) : _events(events) {}
     void OnRegister() override {
-        EXPECT_TRUE(IsRegistered());
+        EXPECT_TRUE(IsRegistered() || GetRegistrationState() == ComponentRegistration::Registering);
         _events.push_back("register");
     }
     void TickComponent(float) override { _events.push_back("tick"); }
@@ -41,8 +41,8 @@ TEST(SceneUpdates, OrdinaryComponentsKeepTheirLifecycleWithoutAutomaticRenderUpd
     uint32_t collections = 0;
     Application app;
     RenderSystem render{&app, 1};
-    World world;
-    world.AttachToRendering(render);
+    test::ScopedWorld world;
+    test::ConnectWorld(world, render);
     auto* actor = world.SpawnActor();
     actor->AddComponent<LifecycleComponent>(events);
     auto* scene = actor->AddComponent<QuietSceneComponent>(collections);
@@ -70,7 +70,7 @@ public:
 
 protected:
     void CreateRenderState(SceneWriter&) override {
-        EXPECT_TRUE(IsRegistered());
+        EXPECT_TRUE(IsRegistered() || GetRegistrationState() == ComponentRegistration::Registering);
         _events.push_back("create");
         MarkRenderStateDirty();
     }
@@ -95,8 +95,8 @@ TEST(SceneUpdates, SceneDerivedComponentsUseRenderLifecycleWithoutPrimitiveIdent
     vector<string> events;
     Application app;
     RenderSystem render{&app, 1};
-    World world;
-    world.AttachToRendering(render);
+    test::ScopedWorld world;
+    test::ConnectWorld(world, render);
     auto* actor = world.SpawnActor();
     auto* component = actor->AddComponent<RenderSceneComponent>(events);
     component->SetRelativeLocation({9, 0, 0});
@@ -122,7 +122,7 @@ public:
     explicit ProbePrimitive(vector<Collection>& collected) : _collected(collected) {}
 
     void OnRegister() override {
-        EXPECT_TRUE(IsRegistered());
+        EXPECT_TRUE(IsRegistered() || GetRegistrationState() == ComponentRegistration::Registering);
         EXPECT_TRUE(GetPrimitiveId().IsValid());
         MarkRenderStateDirty();
     }
@@ -149,8 +149,8 @@ TEST(SceneUpdates, RepeatedMarksCollectFinalValuesOnceAndKeepIdentity) {
     vector<Collection> collected;
     Application app;
     RenderSystem render{&app, 1};
-    World world;
-    world.AttachToRendering(render);
+    test::ScopedWorld world;
+    test::ConnectWorld(world, render);
     auto* component = world.SpawnActor()->AddComponent<ProbePrimitive>(collected);
     const PrimitiveId id = component->GetPrimitiveId();
     EXPECT_EQ(id.Generation, 0u);
@@ -197,8 +197,8 @@ TEST(SceneUpdates, RegistrationCapturesPreexistingAndLatestState) {
     vector<Collection> collected;
     Application app;
     RenderSystem render{&app, 1};
-    World world;
-    world.AttachToRendering(render);
+    test::ScopedWorld world;
+    test::ConnectWorld(world, render);
     auto actor = make_unique<Actor>();
     auto* component = actor->AddComponent<ProbePrimitive>(collected);
     component->SetRelativeLocation({7, 0, 0});
@@ -220,8 +220,8 @@ TEST(SceneUpdates, DestroyBeforeCollectionCancelsCreateAndAllowsGenerationGap) {
     vector<Collection> collected;
     Application app;
     RenderSystem render{&app, 1};
-    World world;
-    world.AttachToRendering(render);
+    test::ScopedWorld world;
+    test::ConnectWorld(world, render);
     Actor* actor = world.SpawnActor();
     auto* component = actor->AddComponent<ProbePrimitive>(collected);
     const PrimitiveId canceled = component->GetPrimitiveId();
@@ -248,8 +248,8 @@ TEST(SceneUpdates, RemovingQueuedEntriesRepairsSwappedIndex) {
         vector<Collection> collected;
         Application app;
         RenderSystem render{&app, 1};
-        World world;
-        world.AttachToRendering(render);
+        test::ScopedWorld world;
+        test::ConnectWorld(world, render);
         Actor* actor = world.SpawnActor();
         vector<ProbePrimitive*> components;
         for (int i = 0; i < 3; ++i) components.push_back(actor->AddComponent<ProbePrimitive>(collected));
@@ -278,8 +278,8 @@ TEST(SceneUpdates, SealedCreateSurvivesSourceDestructionUntilOrderedRemoval) {
     vector<Collection> collected;
     Application app;
     RenderSystem render{&app, 1};
-    World world;
-    world.AttachToRendering(render);
+    test::ScopedWorld world;
+    test::ConnectWorld(world, render);
     Actor* actor = world.SpawnActor();
     auto* component = actor->AddComponent<ProbePrimitive>(collected);
     const PrimitiveId id = component->GetPrimitiveId();
@@ -303,8 +303,8 @@ TEST(SceneUpdates, SealedCreateSurvivesSourceDestructionUntilOrderedRemoval) {
 TEST(SceneUpdates, SameBatchRemovesOldGenerationBeforeCreatingReplacement) {
     Application app;
     RenderSystem render{&app, 1};
-    World world;
-    world.AttachToRendering(render);
+    test::ScopedWorld world;
+    test::ConnectWorld(world, render);
     auto* actor = world.SpawnActor();
     auto* first = actor->AddComponent<PrimitiveComponent>();
     const PrimitiveId oldId = first->GetPrimitiveId();
@@ -314,8 +314,10 @@ TEST(SceneUpdates, SameBatchRemovesOldGenerationBeforeCreatingReplacement) {
     scene.Apply(batch);
     batch.Clear();
     actor->RemoveComponent(first);
+    world.FinalizeWorldGT();
     auto* canceled = actor->AddComponent<PrimitiveComponent>();
     actor->RemoveComponent(canceled);
+    world.FinalizeWorldGT();
     const PrimitiveId newId = actor->AddComponent<PrimitiveComponent>()->GetPrimitiveId();
     EXPECT_EQ(newId.Index, oldId.Index);
     EXPECT_GT(newId.Generation, oldId.Generation + 1);
@@ -331,13 +333,13 @@ TEST(SceneUpdates, ParentChangesReparentAndRemovalCollectLatestChildTransform) {
     vector<Collection> collected;
     Application app;
     RenderSystem render{&app, 1};
-    World world;
-    world.AttachToRendering(render);
+    test::ScopedWorld world;
+    test::ConnectWorld(world, render);
     auto* actor = world.SpawnActor();
     auto* parent = actor->AddComponent<SceneComponent>();
     auto* other = actor->AddComponent<SceneComponent>();
     auto* child = actor->AddComponent<ProbePrimitive>(collected);
-    child->AttachTo(parent);
+    child->RequestReparent(parent);
     SceneUpdateBatch batch;
     test::CollectScene(world, render, batch);
     batch.Clear();
@@ -351,7 +353,7 @@ TEST(SceneUpdates, ParentChangesReparentAndRemovalCollectLatestChildTransform) {
     EXPECT_FLOAT_EQ(collected.back().WorldMatrix(0, 3), 100);
     EXPECT_EQ(collected.back().Dirty, RenderDirtyFlags{RenderDirtyFlag::Transform});
     other->SetRelativeLocation({200, 0, 0});
-    child->AttachTo(other);
+    child->RequestReparent(other);
     test::CollectScene(world, render, batch);
     ASSERT_EQ(collected.size(), 2u);
     EXPECT_FLOAT_EQ(collected.back().WorldMatrix(0, 3), 201);
@@ -456,8 +458,8 @@ TEST(SceneUpdatesDeathTest, CollectionRejectsMutationAndRecursion) {
                         MutatingPrimitive::Action::Remove, MutatingPrimitive::Action::Spawn, MutatingPrimitive::Action::Flush}) {
         Application app;
         RenderSystem render{&app, 1};
-        World world;
-        world.AttachToRendering(render);
+        test::ScopedWorld world;
+        test::ConnectWorld(world, render);
         world.SpawnActor()->AddComponent<MutatingPrimitive>(action);
         SceneUpdateBatch batch;
         EXPECT_DEATH(test::CollectScene(world, render, batch), "");
