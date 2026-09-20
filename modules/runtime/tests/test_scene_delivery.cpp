@@ -44,9 +44,9 @@ TEST(SceneDelivery, AbandonDoesNotPublishOrRequireCompletion) {
         RenderSystem render{&app, 3};
         test::ScopedWorld world{&app};
         const auto sceneId = test::ConnectWorld(world, render);
-        const PrimitiveId id = world.SpawnActor()->AddComponent<PrimitiveComponent>()->GetPrimitiveId();
+        const ShapeId id = world.SpawnActor()->AddComponent<PrimitiveComponent>()->GetShapeId();
         test::PrepareScene(world, render, 2);
-        ASSERT_EQ(test::SceneBatch(render, sceneId, 2).CreatePrimitives, vector<PrimitiveId>{id});
+        ASSERT_EQ(test::SceneBatch(render, sceneId, 2).CreateShapes, vector<ShapeId>{id});
         render.BeginStoppingGT();
         if (abandonAll)
             render.AbandonUnpublishedFramesGT();
@@ -70,18 +70,18 @@ TEST(SceneDelivery, PrimitiveUpdatesAcrossFlightsWithoutDrawing) {
         const auto sceneId = test::ConnectWorld(world, render);
         auto* actor = world.SpawnActor();
         Nullable<PrimitiveComponent*> component{nullptr};
-        vector<PrimitiveId> expected(count);
+        vector<ShapeId> expected(count);
         for (uint32_t round = 0; round < 4; ++round) {
             for (uint32_t flight = 0; flight < count; ++flight) {
                 if (component) actor->RemoveComponent(component.Get());
                 component = actor->AddComponent<PrimitiveComponent>();
-                expected[flight] = component->GetPrimitiveId();
+                expected[flight] = component->GetShapeId();
                 test::PrepareScene(world, render, flight);
             }
             for (uint32_t flight = 0; flight < count; ++flight) {
                 test::ConsumeFrame(render, flight);
-                EXPECT_TRUE(render.GetSceneRT(sceneId)->ContainsPrimitive(expected[flight]));
-                if (flight > 0) EXPECT_FALSE(render.GetSceneRT(sceneId)->ContainsPrimitive(expected[flight - 1]));
+                EXPECT_TRUE(render.GetSceneRT(sceneId)->ContainsShape(expected[flight]));
+                if (flight > 0) EXPECT_FALSE(render.GetSceneRT(sceneId)->ContainsShape(expected[flight - 1]));
                 test::CompleteFrame(render, flight, false);
             }
         }
@@ -104,7 +104,7 @@ TEST(SceneDeliveryDeathTest, DuplicateAndOutOfOrderPacketsAreRejectedBeforeApply
     RenderSystem renderer{&app, 2};
     const auto id = renderer.CreateSceneGT();
     auto* writer = renderer.GetSceneWriterGT(id).Get();
-    const auto primitive = writer->CreatePrimitive();
+    const auto primitive = writer->CreateShape();
     writer->SetStaticMesh(primitive, {}, Eigen::Matrix4f::Identity());
     renderer.SealFrameGT(0);
     test::ConsumeFrame(renderer, 0);
@@ -136,25 +136,25 @@ TEST(SceneDeliveryDeathTest, DuplicateAndOutOfOrderPacketsAreRejectedBeforeApply
 TEST(SceneDelivery, ApplyWaitsForThePreviousCpuReader) {
     RenderScene scene;
     SceneUpdateBatch create;
-    const PrimitiveId id{0, 0};
-    create.CreatePrimitives.push_back(id);
+    const ShapeId id{0, 0};
+    create.CreateShapes.push_back(id);
     scene.Apply(create);
     std::binary_semaphore borrowed{0}, releaseReader{0}, applied{0};
     std::thread reader{[&, lease = scene.AcquireRead()] {
         borrowed.release();
         releaseReader.acquire();
-        EXPECT_TRUE(scene.ContainsPrimitive(id));
+        EXPECT_TRUE(scene.ContainsShape(id));
     }};
     borrowed.acquire();
     SceneUpdateBatch remove;
-    remove.RemovePrimitives.push_back(id);
+    remove.RemoveShapes.push_back(id);
     std::thread apply{[&] { scene.Apply(remove); applied.release(); }};
     EXPECT_FALSE(applied.try_acquire_for(std::chrono::milliseconds{30}));
     releaseReader.release();
     reader.join();
     apply.join();
     EXPECT_TRUE(applied.try_acquire());
-    EXPECT_FALSE(scene.ContainsPrimitive(id));
+    EXPECT_FALSE(scene.ContainsShape(id));
 }
 
 #if defined(_WIN32)
@@ -178,7 +178,7 @@ protected:
         ++_updates;
         if (_updates == 1) {
             _sceneId = *GetWorldManager()->GetWorld(_worldId)->GetRenderSceneId();
-            _initialId = _component->GetPrimitiveId();
+            _initialId = _component->GetShapeId();
             _latestId = _initialId;
         }
         const auto count = GetGpuSystem()->GetFlightDataCount();
@@ -187,7 +187,7 @@ protected:
             if (_updates == 2) {
                 _actor->RemoveComponent(_component.Get());
                 _component = _actor->AddComponent<PrimitiveComponent>();
-                _latestId = _component->GetPrimitiveId();
+                _latestId = _component->GetShapeId();
             }
             return;
         }
@@ -201,7 +201,7 @@ protected:
 
     void OnRender(AppFrameContext& ctx) override {
         ++Recorded;
-        if (ctx.FrameSerial() == 1) EXPECT_TRUE(GetRenderSystem()->GetSceneRT(_sceneId)->ContainsPrimitive(_initialId));
+        if (ctx.FrameSerial() == 1) EXPECT_TRUE(GetRenderSystem()->GetSceneRT(_sceneId)->ContainsShape(_initialId));
         if (_drainOnExit && ctx.FrameSerial() == 1) {
             EXPECT_TRUE(_renderGate.try_acquire_for(std::chrono::seconds{10}));
         }
@@ -217,8 +217,8 @@ protected:
         EXPECT_EQ(PublishedFrames, _updates - 1);
         EXPECT_EQ(Completed, PublishedFrames);
         const auto scene = GetRenderSystem()->GetSceneRT(_sceneId);
-        EXPECT_EQ(scene && scene->ContainsPrimitive(_latestId), PublishedFrames > 0);
-        if (scene && _latestId != _initialId) EXPECT_FALSE(scene->ContainsPrimitive(_initialId));
+        EXPECT_EQ(scene && scene->ContainsShape(_latestId), PublishedFrames > 0);
+        if (scene && _latestId != _initialId) EXPECT_FALSE(scene->ContainsShape(_initialId));
     }
 
 private:
@@ -233,8 +233,8 @@ private:
     Nullable<PrimitiveComponent*> _component{nullptr};
     WorldId _worldId;
     SceneId _sceneId;
-    PrimitiveId _initialId;
-    PrimitiveId _latestId;
+    ShapeId _initialId;
+    ShapeId _latestId;
     uint64_t _updates{0};
     std::binary_semaphore _renderGate{0};
     TaskScope _tasks;

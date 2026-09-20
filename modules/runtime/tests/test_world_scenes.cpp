@@ -134,7 +134,7 @@ TEST(WorldManager, CreatedDuringTickCollectsImmediatelyAndClearRetiresScenes) {
     auto* actor = manager.GetWorld(parent)->SpawnActor<CountingActor>(ticks, destroyed);
     WorldId child;
     SceneId scene;
-    PrimitiveId primitive;
+    ShapeId primitive;
     actor->Action = [&]() {
         child = manager.CreateWorld();
         manager.RequestRenderConnection(child, true);
@@ -142,12 +142,12 @@ TEST(WorldManager, CreatedDuringTickCollectsImmediatelyAndClearRetiresScenes) {
         world->SetTickEnabled(false);
         auto* mesh = world->SpawnActor()->AddComponent<StaticMeshComponent>();
         mesh->SetRelativeLocation({12, 0, 0});
-        primitive = mesh->GetPrimitiveId();
+        primitive = mesh->GetShapeId();
     };
     manager.Tick(0);
     manager.FinalizeWorldsGT();
     scene = *manager.GetWorld(child)->GetRenderSceneId();
-    primitive = manager.GetWorld(child)->GetActors()[0]->FindComponent<StaticMeshComponent>()->GetPrimitiveId();
+    primitive = manager.GetWorld(child)->GetActors()[0]->FindComponent<StaticMeshComponent>()->GetShapeId();
     manager.CollectRenderUpdates();
     renderer.SealFrameGT(0);
     manager.Clear();
@@ -235,19 +235,19 @@ TEST(WorldScenes, AttachExistingPausedWorldAndReconnectWithoutGameCallbacks) {
     actor->AddComponent<RegistrationProbe>(registrations, unregistrations);
     auto* mesh = actor->AddComponent<StaticMeshComponent>();
     mesh->SetRelativeLocation({7, 0, 0});
-    EXPECT_FALSE(mesh->GetPrimitiveId().IsValid());
+    EXPECT_FALSE(mesh->GetShapeId().IsValid());
     world.SetTickEnabled(false);
     world.CollectRenderUpdates();
     const auto first = test::ConnectWorld(world, renderer);
-    const auto oldPrimitive = mesh->GetPrimitiveId();
+    const auto oldPrimitive = mesh->GetShapeId();
     test::PrepareScene(world, renderer, 0);
     test::DisconnectWorld(world);
     EXPECT_FALSE(world.GetRenderSceneId());
-    EXPECT_FALSE(mesh->GetPrimitiveId().IsValid());
+    EXPECT_FALSE(mesh->GetShapeId().IsValid());
     mesh->SetRelativeLocation({19, 0, 0});
     const auto second = test::ConnectWorld(world, renderer);
     EXPECT_NE(first, second);
-    const auto newPrimitive = mesh->GetPrimitiveId();
+    const auto newPrimitive = mesh->GetShapeId();
     test::PrepareScene(world, renderer, 1);
     test::ConsumeFrame(renderer, 0);
     EXPECT_FLOAT_EQ(renderer.GetSceneRT(first)->GetStaticMesh(oldPrimitive)->LocalToWorld(0, 3), 7);
@@ -270,8 +270,8 @@ TEST(WorldScenes, StandaloneWritersIsolateIdentitiesAndCoalesceUpdates) {
     const auto b = renderer.CreateSceneGT();
     auto wa = renderer.GetSceneWriterGT(a);
     auto wb = renderer.GetSceneWriterGT(b);
-    const auto pa = wa->CreatePrimitive();
-    const auto pb = wb->CreatePrimitive();
+    const auto pa = wa->CreateShape();
+    const auto pb = wb->CreateShape();
     EXPECT_EQ(pa, pb);
     wa->SetStaticMesh(pa, {}, Eigen::Matrix4f::Identity());
     wb->SetStaticMesh(pb, {}, Eigen::Matrix4f::Identity());
@@ -282,7 +282,7 @@ TEST(WorldScenes, StandaloneWritersIsolateIdentitiesAndCoalesceUpdates) {
     }
     renderer.SealFrameGT(0);
     const auto& batch = test::SceneBatch(renderer, a, 0);
-    EXPECT_EQ(batch.CreatePrimitives.size(), 1u);
+    EXPECT_EQ(batch.CreateShapes.size(), 1u);
     EXPECT_EQ(batch.MeshStates.size(), 1u);
     EXPECT_TRUE(batch.Transforms.empty());
     test::ConsumeFrame(renderer, 0);
@@ -316,7 +316,7 @@ TEST(WorldScenes, SameFrameCreateAndDestroyAndRetirementAcrossFlights) {
             vector<SceneId> removed;
             for (uint32_t flight = 0; flight < count; ++flight) {
                 const auto scene = renderer.CreateSceneGT();
-                renderer.GetSceneWriterGT(scene)->CreatePrimitive();
+                renderer.GetSceneWriterGT(scene)->CreateShape();
                 renderer.DestroySceneGT(scene);
                 removed.push_back(scene);
                 renderer.SealFrameGT(flight);
@@ -343,11 +343,11 @@ TEST(WorldScenesDeathTest, ClaimedAndClosingScenesRejectExternalWrites) {
     EXPECT_EQ(test::ConnectWorld(world, renderer), attached);
     const auto standalone = renderer.CreateSceneGT();
     auto writer = renderer.GetSceneWriterGT(standalone);
-    const auto primitive = writer->CreatePrimitive();
+    const auto primitive = writer->CreateShape();
     EXPECT_DEATH(writer->SetTransform(primitive, Eigen::Matrix4f::Identity()), "");
     renderer.DestroySceneGT(standalone);
-    EXPECT_DEATH(writer->RemovePrimitive(primitive), "");
-    EXPECT_DEATH(writer->CreatePrimitive(), "");
+    EXPECT_DEATH(writer->RemoveShape(primitive), "");
+    EXPECT_DEATH(writer->CreateShape(), "");
 }
 
 }  // namespace

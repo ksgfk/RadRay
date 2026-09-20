@@ -38,41 +38,32 @@ RenderScene::ReadLease RenderScene::AcquireRead() const {
 void RenderScene::Apply(const SceneUpdateBatch& batch) noexcept {
     std::unique_lock lock{_readers};
     _readersDone.wait(lock, [this] { return _activeReaders == 0; });
-    for (PrimitiveId id : batch.RemovePrimitives) {
-        if (!ContainsPrimitive(id)) RADRAY_ABORT("Invalid primitive removal");
-        auto& slot = _primitives[id.Index];
+    for (ShapeId id : batch.RemoveShapes) {
+        if (!ContainsShape(id)) RADRAY_ABORT("Invalid shape removal");
+        auto& slot = _shapes[id.Index];
         if (slot.Mesh) {
-            const PrimitiveId moved = _staticMeshes.back();
+            const ShapeId moved = _staticMeshes.back();
             _staticMeshes[slot.MeshIndex] = moved;
-            _primitives[moved.Index].MeshIndex = slot.MeshIndex;
+            _shapes[moved.Index].MeshIndex = slot.MeshIndex;
             _staticMeshes.pop_back();
             slot.Mesh.reset();
             slot.MeshIndex = std::numeric_limits<size_t>::max();
         }
-        if (slot.Light) {
-            const auto moved = _lights.back();
-            _lights[slot.LightIndex] = moved;
-            _primitives[moved.Index].LightIndex = slot.LightIndex;
-            _lights.pop_back();
-            slot.Light.reset();
-            slot.LightIndex = std::numeric_limits<size_t>::max();
-        }
         slot.Alive = false;
-        if (slot.Generation == std::numeric_limits<uint32_t>::max()) RADRAY_ABORT("Primitive generation exhausted");
+        if (slot.Generation == std::numeric_limits<uint32_t>::max()) RADRAY_ABORT("Shape generation exhausted");
         ++slot.Generation;
     }
-    for (PrimitiveId id : batch.CreatePrimitives) {
-        if (!id.IsValid()) RADRAY_ABORT("Invalid primitive creation");
-        if (id.Index >= _primitives.size()) _primitives.resize(static_cast<size_t>(id.Index) + 1);
-        auto& slot = _primitives[id.Index];
-        if (slot.Alive || id.Generation < slot.Generation) RADRAY_ABORT("Stale primitive creation");
+    for (ShapeId id : batch.CreateShapes) {
+        if (!id.IsValid()) RADRAY_ABORT("Invalid shape creation");
+        if (id.Index >= _shapes.size()) _shapes.resize(static_cast<size_t>(id.Index) + 1);
+        auto& slot = _shapes[id.Index];
+        if (slot.Alive || id.Generation < slot.Generation) RADRAY_ABORT("Stale shape creation");
         slot.Generation = id.Generation;
         slot.Alive = true;
     }
     for (const auto& update : batch.MeshStates) {
-        if (!ContainsPrimitive(update.Id)) RADRAY_ABORT("Invalid static mesh state update");
-        auto& slot = _primitives[update.Id.Index];
-        if (slot.Light) RADRAY_ABORT("Cannot change primitive type");
+        if (!ContainsShape(update.Id)) RADRAY_ABORT("Invalid static mesh state update");
+        auto& slot = _shapes[update.Id.Index];
         if (slot.Mesh) {
             slot.Mesh->Replace(update);
         } else {
@@ -82,34 +73,22 @@ void RenderScene::Apply(const SceneUpdateBatch& batch) noexcept {
         }
     }
     for (const auto& update : batch.Transforms) {
-        if (!ContainsPrimitive(update.Id) || !_primitives[update.Id.Index].Mesh) RADRAY_ABORT("Invalid primitive transform update");
-        _primitives[update.Id.Index].Mesh->SetTransform(update.LocalToWorld);
+        if (!ContainsShape(update.Id) || !_shapes[update.Id.Index].Mesh) RADRAY_ABORT("Invalid shape transform update");
+        _shapes[update.Id.Index].Mesh->SetTransform(update.LocalToWorld);
     }
-    for (const auto& light : batch.Lights) {
-        if (!ContainsPrimitive(light.Id)) RADRAY_ABORT("Invalid light update");
-        auto& slot = _primitives[light.Id.Index];
-        if (slot.Mesh) RADRAY_ABORT("Cannot change primitive type");
-        if (!slot.Light) {
-            slot.LightIndex = _lights.size();
-            _lights.push_back(light.Id);
-        }
-        slot.Light = light;
-    }
+    if (batch.LightsChanged)
+        _lights.Assign(batch.Lights);
+    else if (!batch.Lights.Empty())
+        RADRAY_ABORT("Light snapshot requires LightsChanged");
 }
 
-bool RenderScene::ContainsPrimitive(PrimitiveId id) const noexcept {
-    return id.IsValid() && id.Index < _primitives.size() &&
-           _primitives[id.Index].Alive && _primitives[id.Index].Generation == id.Generation;
+bool RenderScene::ContainsShape(ShapeId id) const noexcept {
+    return id.IsValid() && id.Index < _shapes.size() &&
+           _shapes[id.Index].Alive && _shapes[id.Index].Generation == id.Generation;
 }
 
-std::optional<StaticMeshSceneView> RenderScene::GetStaticMesh(PrimitiveId id) const noexcept {
-    if (!ContainsPrimitive(id) || !_primitives[id.Index].Mesh) return std::nullopt;
-    return _primitives[id.Index].Mesh->GetView();
+std::optional<StaticMeshSceneView> RenderScene::GetStaticMesh(ShapeId id) const noexcept {
+    if (!ContainsShape(id) || !_shapes[id.Index].Mesh) return std::nullopt;
+    return _shapes[id.Index].Mesh->GetView();
 }
-
-Nullable<const LightStateUpdate*> RenderScene::GetLight(PrimitiveId id) const noexcept {
-    if (!ContainsPrimitive(id) || !_primitives[id.Index].Light) return nullptr;
-    return &*_primitives[id.Index].Light;
-}
-
 }  // namespace radray

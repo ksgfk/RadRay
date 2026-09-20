@@ -51,9 +51,9 @@ protected:
     void CollectPrimitiveUpdates(SceneWriter& writer, RenderDirtyFlags dirty) override {
         ++Trace.Gathered;
         if (dirty.HasFlag(RenderDirtyFlag::State))
-            writer.SetStaticMesh(GetPrimitiveId(), {}, GetWorldMatrix());
+            writer.SetStaticMesh(GetShapeId(), {}, GetWorldMatrix());
         else if (dirty.HasFlag(RenderDirtyFlag::Transform))
-            writer.SetTransform(GetPrimitiveId(), GetWorldMatrix());
+            writer.SetTransform(GetShapeId(), GetWorldMatrix());
     }
     void OnTransformChanged() override {
         ++Trace.TransformNotified;
@@ -508,15 +508,16 @@ TEST(WorldLifecycle, LightUsesOneTypedUpdateAndNoMeshState) {
     }
     test::PrepareScene(world, renderer, 0);
     const auto& batch = test::SceneBatch(renderer, sceneId, 0);
-    ASSERT_EQ(batch.Lights.size(), 1u);
+    ASSERT_EQ(batch.Lights.Count(), 1u);
+    ASSERT_EQ(batch.Lights.SpotLights.size(), 1u);
     EXPECT_TRUE(batch.MeshStates.empty());
     EXPECT_TRUE(batch.Transforms.empty());
-    EXPECT_FLOAT_EQ(batch.Lights[0].Intensity, 99);
-    EXPECT_FLOAT_EQ(batch.Lights[0].Position.x(), 99);
-    const auto id = batch.Lights[0].Id;
+    EXPECT_FLOAT_EQ(batch.Lights.SpotLights[0].Common.Intensity, 99);
+    EXPECT_FLOAT_EQ(batch.Lights.SpotLights[0].Point.Position.x(), 99);
+    const auto id = batch.Lights.SpotLights[0].Common.Id;
     test::ConsumeFrame(renderer, 0);
-    EXPECT_EQ(renderer.GetSceneRT(sceneId)->GetLight(id)->Type, LightType::Spot);
-    EXPECT_EQ(renderer.GetSceneRT(sceneId)->GetLights().size(), 1u);
+    EXPECT_TRUE(renderer.GetSceneRT(sceneId)->GetLights().GetSpotLight(id));
+    EXPECT_EQ(renderer.GetSceneRT(sceneId)->GetLights().SpotLights.size(), 1u);
     test::CompleteFrame(renderer, 0);
     light->SetIntensity(99);
     light->SetRelativeLocation({99, 2, 3});
@@ -527,7 +528,7 @@ TEST(WorldLifecycle, LightUsesOneTypedUpdateAndNoMeshState) {
     actor->RemoveComponent(light);
     test::PrepareScene(world, renderer, 0);
     test::ConsumeFrame(renderer, 0);
-    EXPECT_TRUE(renderer.GetSceneRT(sceneId)->GetLights().empty());
+    EXPECT_TRUE(renderer.GetSceneRT(sceneId)->GetLights().SpotLights.empty());
     test::CompleteFrame(renderer, 0);
 }
 
@@ -661,7 +662,7 @@ TEST(WorldLifecycle, RandomizedSceneDeliveryMatchesLogicalValuesAcrossDelayedCom
         bool Pending;
     };
     struct Expected {
-        PrimitiveId Id;
+        ShapeId Id;
         Eigen::Vector3f Position;
     };
     struct Packet {
@@ -729,7 +730,7 @@ TEST(WorldLifecycle, RandomizedSceneDeliveryMatchesLogicalValuesAcrossDelayedCom
         if (connected) {
             for (const auto& object : model) {
                 auto* component = dynamic_cast<StaticMeshComponent*>(world.FindLive(object.Component).Get());
-                packet.Values.push_back({component->GetPrimitiveId(), object.Position});
+                packet.Values.push_back({component->GetShapeId(), object.Position});
             }
         }
         world.CollectRenderUpdates();

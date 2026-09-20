@@ -1,5 +1,6 @@
 #pragma once
 
+#include <radray/sparse_set.h>
 #include <radray/runtime/render_scene/scene_update.h>
 #include <radray/runtime/render_scene/render_asset_lifetime.h>
 
@@ -16,38 +17,42 @@ public:
     SceneWriter& operator=(const SceneWriter&) = delete;
 
     SceneId GetSceneId() const noexcept { return _id; }
-    PrimitiveId CreatePrimitive();
-    void RemovePrimitive(PrimitiveId id);
-    void SetStaticMesh(PrimitiveId id, const StreamingAssetRef<StaticMesh>& mesh, const Eigen::Matrix4f& localToWorld);
+    ShapeId CreateShape();
+    void RemoveShape(ShapeId id);
+    void SetStaticMesh(ShapeId id, const StreamingAssetRef<StaticMesh>& mesh, const Eigen::Matrix4f& localToWorld);
     /// Requires a prior SetStaticMesh, including an explicitly empty mesh binding.
-    void SetTransform(PrimitiveId id, const Eigen::Matrix4f& localToWorld);
-    void SetLight(const LightStateUpdate& light);
+    void SetTransform(ShapeId id, const Eigen::Matrix4f& localToWorld);
+    /// Reserves an identity; the light enters snapshots after its first SetLight.
+    LightId CreateLight();
+    void RemoveLight(LightId id);
+    void SetLight(const LightData& light);
 
 private:
     friend class RenderSystem;
     friend class PrimitiveComponent;
 
-    struct PrimitiveState {
-        PrimitiveId Id;
+    struct ShapeState {
+        ShapeId Id;
         bool Sent{false};
         bool HasMesh{false};
-        bool HasLight{false};
         size_t DirtyIndex{std::numeric_limits<size_t>::max()};
         std::optional<AssetId> Asset;
         std::optional<StaticMeshStateUpdate> Mesh;
         std::optional<Eigen::Matrix4f> Transform;
-        std::optional<LightStateUpdate> Light;
     };
 
-    PrimitiveState& GetPrimitive(PrimitiveId id);
-    void Queue(PrimitiveState& state);
-    void Unqueue(PrimitiveState& state);
+    ShapeState& GetShape(ShapeId id);
+    void Queue(ShapeState& state);
+    void Unqueue(ShapeState& state);
     void Flush(SceneUpdateBatch& batch, uint32_t flightIndex);
 
     SceneId _id;
-    SparseSet<PrimitiveState> _primitives;
-    vector<PrimitiveId> _dirty;
-    vector<PrimitiveId> _removed;
+    SparseSet<ShapeState> _shapes;
+    vector<ShapeId> _dirtyShapes;
+    vector<ShapeId> _removedShapes;
+    SparseSet<std::monostate> _lightIds;
+    LightSceneData _lights;
+    bool _lightsDirty{false};
     RenderAssetLifetime _assets;
     bool _closing{false};
     bool _claimed{false};

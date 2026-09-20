@@ -16,10 +16,11 @@ bool SpotLightComponent::SetConeAngles(float inner, float outer) noexcept {
     return true;
 }
 
-LightStateUpdate SpotLightComponent::CaptureLightState() const noexcept {
+LightData SpotLightComponent::CaptureLightState() const noexcept {
     auto result = PointLightComponent::CaptureLightState();
-    result.InnerConeAngle = _inner;
-    result.OuterConeAngle = _outer;
+    auto& light = std::get<SpotLightData>(result);
+    light.InnerConeAngle = _inner;
+    light.OuterConeAngle = _outer;
     return result;
 }
 

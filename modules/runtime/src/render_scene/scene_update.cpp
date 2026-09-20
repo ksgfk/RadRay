@@ -3,11 +3,12 @@
 namespace radray {
 
 void SceneUpdateBatch::Clear() noexcept {
-    RemovePrimitives.clear();
-    CreatePrimitives.clear();
+    RemoveShapes.clear();
+    CreateShapes.clear();
     MeshStates.clear();
     Transforms.clear();
-    Lights.clear();
+    LightsChanged = false;
+    Lights.Clear();
 }
 
 }  // namespace radray

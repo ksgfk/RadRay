@@ -28,15 +28,15 @@ void StaticMeshComponent::OnRenderStateDestroyed() {
 }
 
 void StaticMeshComponent::StartMeshReadyWait() {
-    if (GetPrimitiveId().IsValid() && _mesh.IsValid() && !_mesh.IsCompleted()) {
+    if (GetShapeId().IsValid() && _mesh.IsValid() && !_mesh.IsCompleted()) {
         _readyWait = make_unique<TaskScope>();
-        _readyWait->Spawn(WaitForMeshReady(_mesh, GetRenderSceneId(), GetPrimitiveId()));
+        _readyWait->Spawn(WaitForMeshReady(_mesh, GetRenderSceneId(), GetShapeId()));
     }
 }
 
-task<void> StaticMeshComponent::WaitForMeshReady(StreamingAssetRef<StaticMesh> mesh, SceneId scene, PrimitiveId registration) {
+task<void> StaticMeshComponent::WaitForMeshReady(StreamingAssetRef<StaticMesh> mesh, SceneId scene, ShapeId registration) {
     if (co_await mesh) {
-        if (IsLive() && IsRegistered() && GetRenderSceneId() == scene && GetPrimitiveId() == registration && _mesh == mesh && mesh.IsReady()) {
+        if (IsLive() && IsRegistered() && GetRenderSceneId() == scene && GetShapeId() == registration && _mesh == mesh && mesh.IsReady()) {
             MarkRenderStateDirty();
         }
     }
@@ -44,9 +44,9 @@ task<void> StaticMeshComponent::WaitForMeshReady(StreamingAssetRef<StaticMesh> m
 
 void StaticMeshComponent::CollectPrimitiveUpdates(SceneWriter& writer, RenderDirtyFlags dirty) {
     if (dirty.HasFlag(RenderDirtyFlag::State)) {
-        writer.SetStaticMesh(GetPrimitiveId(), _mesh, GetWorldMatrix());
+        writer.SetStaticMesh(GetShapeId(), _mesh, GetWorldMatrix());
     } else if (dirty.HasFlag(RenderDirtyFlag::Transform)) {
-        writer.SetTransform(GetPrimitiveId(), GetWorldMatrix());
+        writer.SetTransform(GetShapeId(), GetWorldMatrix());
     }
 }
 

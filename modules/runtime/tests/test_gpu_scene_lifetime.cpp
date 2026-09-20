@@ -146,7 +146,7 @@ float4 PSMain() : SV_Target0 { return float4(1, 0, 1, 1); }
     auto* actor = world.SpawnActor<DrawActor>(lifetime);
     auto* component = actor->AddComponent<StaticMeshComponent>();
     if (!direct) component->SetStaticMesh(mesh);
-    const auto id = component->GetPrimitiveId();
+    const auto id = component->GetShapeId();
     gpu.BeginUpdateForFlight(0);
     if (direct) gpu.RetainForFrameGT(0, mesh);
     const auto* borrowedMesh = &mesh->GetRenderMesh();

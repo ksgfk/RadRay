@@ -101,6 +101,8 @@ CPU record/Submit 时间与 GPU 时间线分开解读。关闭使用 `-DRADRAY_E
 | `test_scene_updates` | `SceneUpdates`（组件标脏合并、生命周期、代次与收集约束；纯 CPU） |
 | `test_scene_assets` | `SceneAssets`（类型无关的资产常驻/退休、Ready 通知、共享等待取消与 GT 释放；纯 CPU） |
 | `test_static_mesh_scene` | `StaticMeshScene`（CPU mesh 描述、变换/bounds、替换/删除与持久描述；无 GPU 资源） |
+| `test_light_scene` | `LightScene`（独立身份、分类紧凑数据、组件捕获、dirty 全量光源快照、空集合、多 flight、重连与读者借用；纯 CPU） |
+| `test_scene_storage_performance` | `SceneStoragePerformance`（光源记录大小、分类遍历与全量更新基准；设置 `RADRAY_RUN_SCENE_STORAGE_BENCHMARK=1` 后运行） |
 | `test_multi_window` | `RuntimeMultiWindow`（三窗口交换链、有序提交与生命周期） |
 | `test_flight_completion` | `FlightCompletionTest` |
 | `test_asset_database` | `AssetDatabaseTest` |

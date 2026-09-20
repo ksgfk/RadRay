@@ -18,7 +18,7 @@ private:
     void OnRenderStateCreated() override;
     void OnRenderStateDestroyed() override;
     void StartMeshReadyWait();
-    task<void> WaitForMeshReady(StreamingAssetRef<StaticMesh> mesh, SceneId scene, PrimitiveId registration);
+    task<void> WaitForMeshReady(StreamingAssetRef<StaticMesh> mesh, SceneId scene, ShapeId registration);
     void CollectPrimitiveUpdates(SceneWriter& writer, RenderDirtyFlags dirty) override;
 
     StreamingAssetRef<StaticMesh> _mesh;

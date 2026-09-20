@@ -39,7 +39,7 @@ public:
     float GetShadowNormalBias() const noexcept { return _shadowNormalBias; }
 
 protected:
-    LightStateUpdate CaptureLightState() const noexcept override;
+    LightData CaptureLightState() const noexcept override;
 
 private:
     float _attenuationRadius{1000.0f};

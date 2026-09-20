@@ -5,13 +5,13 @@
 
 namespace radray {
 
-/// GT component identity; Scene owns the corresponding render-side state.
+/// GT geometry identity; Scene owns the corresponding render-side shape state.
 class PrimitiveComponent : public SceneComponent {
 public:
     PrimitiveComponent() noexcept = default;
     ~PrimitiveComponent() noexcept override;
 
-    PrimitiveId GetPrimitiveId() const noexcept { return _primitiveId; }
+    ShapeId GetShapeId() const noexcept { return _shapeId; }
 
 protected:
     void OnTransformChanged() override;
@@ -29,7 +29,7 @@ private:
     void DestroyRenderState(SceneWriter& writer) final;
     void CollectRenderUpdates(SceneWriter& writer, RenderDirtyFlags dirty) final;
 
-    PrimitiveId _primitiveId;
+    ShapeId _shapeId;
     SceneId _sceneId;
 };
 

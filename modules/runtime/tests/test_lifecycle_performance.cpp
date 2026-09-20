@@ -131,8 +131,8 @@ void MeasureCase(uint32_t count, uint32_t flights, uint32_t depth, bool uniqueAs
                 const auto capture = ElapsedMs(phase);
                 const auto& batch = test::SceneBatch(renderer, sceneId, flight);
                 const auto updates = batch.Transforms.size();
-                const bool onlyTransforms = batch.CreatePrimitives.empty() && batch.RemovePrimitives.empty() &&
-                                            batch.MeshStates.empty() && batch.Lights.empty();
+                const bool onlyTransforms = batch.CreateShapes.empty() && batch.RemoveShapes.empty() &&
+                                            batch.MeshStates.empty() && !batch.LightsChanged;
                 consume();
                 phase = std::chrono::steady_clock::now();
                 test::CompleteFrame(renderer, flight);
@@ -158,7 +158,7 @@ void MeasureCase(uint32_t count, uint32_t flights, uint32_t depth, bool uniqueAs
                 times += fmt::format(",{:.6f},{:.6f}", sample[3], sample[6]);
             }
             fmt::print("LIFECYCLE_PERF,{},{},{},{},{},{},{}{},{},{},{},{}\n", count, flights, depth, uniqueAssets, threaded, changes, views,
-                       times, allocations, allocationBytes, transformUpdates, transformUpdates * sizeof(PrimitiveTransformUpdate));
+                       times, allocations, allocationBytes, transformUpdates, transformUpdates * sizeof(ShapeTransformUpdate));
         }
     }
     if (threaded) {
@@ -183,7 +183,7 @@ void MeasureCase(uint32_t count, uint32_t flights, uint32_t depth, bool uniqueAs
         }
         world.CollectRenderUpdates();
         renderer.SealFrameGT(flight);
-        const auto removedPrimitives = test::SceneBatch(renderer, sceneId, flight).RemovePrimitives.size();
+        const auto removedPrimitives = test::SceneBatch(renderer, sceneId, flight).RemoveShapes.size();
         EXPECT_EQ(removedPrimitives, removedCount);
         renderer.PublishFrameGT(flight);
         renderer.ConsumeRenderUpdates(flight, renderer.GetUpdateSequence(flight));

@@ -86,27 +86,58 @@ WorldRenderBridge 的 Disconnected / Connecting / Connected / Disconnecting 状�
 |---|---|
 | WorldManager / World | GT 游戏对象、身份、统一调度、生命周期请求 |
 | WorldRenderBridge | GT 内部适配器、连接、组件 dirty 去重；不进入公共 API |
-| SceneWriter | Scene 唯一 GT producer、PrimitiveId、最终值合并、资产 owner |
+| SceneWriter | Scene 唯一 GT producer、ShapeId/LightId、几何增量与光源全量捕获、资产 owner |
 | RenderScene | 单份 RT 数据、Apply、只读借用与 CPU reader lease |
 | RenderSystem | GT/RT 分离的登记表、flight 交付协议、shader/render-pass 服务 |
 
 组件分类 State/Transform/DynamicData dirty；同组件只排队一次。Collect 跳过 Pending，且禁止游戏修改、
 生命周期请求、重入封包和所属 Application 的 asset/scheduler Pump。派生 setter 必须先 CheckCanModify。
-PrimitiveComponent 的 final 入口负责身份创建/注销，CollectPrimitiveUpdates 捕获派生值。
-LightComponent 直接生成 LightStateUpdate；RenderScene 的 light 数据不经过假 StaticMesh。
+PrimitiveComponent 的 final 入口负责 ShapeId 创建/注销，CollectPrimitiveUpdates 捕获派生值。
+LightComponent 捕获类型化光源值，使用独立的 LightId。两种 ID 是不可隐式互转的强类型，均包含
+Index/Generation，只在所属 SceneId 内有效；独立身份池允许 Shape 和 Light 使用相同数值的槽位与代次。
 
 独立工具由 CreateSceneGT/GetSceneWriterGT 获得 writer，遵守同样的绑定和交付契约。
 World 独占的 writer 不向外提供；独立 writer 在 DestroySceneGT 后不可继续使用。
-未发布 Create/Remove 可以相消，已 Seal 的创建只能由后续 Remove 有序退出。
-State 覆盖最终 transform，transform-only 更新不重建 mesh。更新数组复用容量，工作与唯一 dirty 源有关。
+Shape 的未发布 Create/Remove 可以相消，已 Seal 的创建只能由后续 Remove 有序退出。
+State 覆盖最终 transform，transform-only 更新不重建 mesh。Shape 更新数组复用容量，工作与唯一 dirty 源有关。
+
+SceneWriter 分别维护 Shape 状态、Light 身份池与 LightSceneData 最终值；身份池不存光源参数，
+Light 没有逐项 dirty/删除队列。CreateLight 只保留 GT 身份，首次 SetLight 后才进入光源集合。
+任一 SetLight 或已有数据的 RemoveLight 将集合标脏，Flush 把完整的四类光源数组按值封存到 flight；
+未改变的光源也包含在内，但不重新调用其组件捕获。
+未捕获便删除的组件不会发布默认光源；独立 writer 在同次封包前 SetLight 再 RemoveLight，允许交付最终空集合。
+SceneUpdateBatch 的 LightsChanged=false 表示保留 RT 光源，true 表示全量替换，空列表明确清除所有光源。
+无 dirty 时不遍历或复制光源；已 Seal 的列表不受后续修改、删除、身份复用影响。
 
 StaticMesh 在构造时验证 CPU mesh/bounds 并补全默认 sections 一次，之后数据不可变。
 StaticMeshDescription 持有 AssetId、bounds 并借用 `span<const StaticMeshSection>` 与 `const GpuMesh`；
 这些借用由同一资产 owner 保护，实例不复制 sections。Loading、失败或无效 mesh 产生空几何。
-组件 Ready 通知检查 Live、注册、SceneId、PrimitiveId 和 mesh 请求身份；改绑/注销停止旧等待而不取消共享加载。
+组件 Ready 通知检查 Live、注册、SceneId、ShapeId 和 mesh 请求身份；改绑/注销停止旧等待而不取消共享加载。
 
-RenderScene 按 Remove → Create → Mesh → Transform → Light 应用。GetStaticMeshes/GetLights 返回类型专属稠密身份。
+RenderScene 按 Shape Remove → Create → Mesh → Transform → Light 全量替换应用。ShapeSlot 只保存几何身份、
+StaticMeshProxy 与稠密身份位置；GetStaticMeshes 返回 ShapeId，包含资产未就绪的已登记 Mesh。
 StaticMeshProxy 更新 matrix、world bounds、ReverseCulling，支持负缩放和仿射 shear。
+LightSceneData 直接拥有四种类型的稠密数组，GT 最终值、flight 快照与 RT 数据均使用同一紧凑布局：
+
+| 数组元素 | 保存的数据 |
+|---|---|
+| DirectionalLightData | Common、世界方向 |
+| PointLightData | Common、PointLightParameters |
+| SpotLightData | Common、PointLightParameters、内外半锥角 |
+| RectLightData | Common、世界位置/方向、衰减半径与衰减模式/指数 |
+
+Common 包含 LightId、颜色/强度、阴影 bias 与影响世界/投影开关。PointLightParameters 保存世界位置/方向、
+衰减参数和光源半径/软半径/长度；Point 的方向仍用于非零长度光源。位置使用 Vector3f，不保存恒为 1 的齐次分量。
+这些是 CPU 数据，不与 GPU buffer 的对齐和 packing 绑定。Rect 仍是预留数据能力，尚无 RectLightComponent
+和面积几何参数，不代表已实现完整面积光渲染。
+
+数组类型决定光源类型，每条记录不再保存 Type 标签或其他类型专属字段。LightData 是只在单灯捕获与 SetLight
+调用时使用的 variant；不保存 vector<variant>，因此持久数据不按最大光源记录尺寸占位。SetLight 在线性查找后
+原位替换，类型改变时从旧数组移除并加入新数组；RemoveLight 交换末项填补空位。类型变化保留 LightId，
+数组位置与顺序不表示身份。GetLights 返回只读分类数据及类型化查找；GetLight 仅借用 Common 参数。
+LightsChanged 时复制完整分类数组并复用容量，RT 不再逐条按 Type 分组。快照中的身份必须有效且唯一。
+RT 不维护 Light 槽位映射或代次墓碑；GetLight/ContainsLight 线性扫描少量光源并匹配完整 LightId，
+仅在 GT 保留但没有参数的身份在 RT 不可见。旧 ID 更新由 writer 校验拒绝，旧快照由交付序号阻止重复/乱序消费。
 RT 或停止后的检查可借用数据，普通借用截止到下一 Apply。并行 CPU 读者在 RT 派发前获取 AcquireRead lease，
 在任务结束时释放；Apply 和 Scene 析构等待已有 lease，不等 GPU。RT 必须先停止派发旧 Scene 的新读者。
 RenderScene 不可复制/移动；不能把 reader lease 持到依赖下一次 Apply 才能结束的工作中。
@@ -135,7 +166,7 @@ WorldManager → RenderSystem → AssetManager → AssetDatabase → GpuSystem�
 生命周期与变换通知的验收计数由测试 probe 持有；场景更新量直接检查已封存的更新包，资产准备检查
 共享描述和实际内容。World、SceneWriter、RenderSystem、StaticMesh 与 AssetManager 不保存专供测试的累计统计。
 性能测试自行记录阶段耗时、分配器统计和更新包大小；内部遍历与 owner 搬移次数不由运行时维护。
-真实 GPU 验收见 GpuSceneLifetime，CPU/runner 验收见 WorldLifecycle、SceneDelivery、SceneAssets、StaticMeshScene。
+真实 GPU 验收见 GpuSceneLifetime，CPU/runner 验收见 WorldLifecycle、SceneDelivery、SceneAssets、StaticMeshScene、LightScene。
 
 ## Shader program 与参数
 

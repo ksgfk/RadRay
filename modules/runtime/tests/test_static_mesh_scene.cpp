@@ -90,9 +90,9 @@ TEST_F(StaticMeshScene, CreateCombinesStateAndFinalTransform) {
         component->SetRelativeLocation({static_cast<float>(i), 10, 20});
         component->MarkRenderStateDirty();
     }
-    const PrimitiveId id = component->GetPrimitiveId();
+    const ShapeId id = component->GetShapeId();
     test::CollectScene(GameWorld, Render, Batch);
-    ASSERT_EQ(Batch.CreatePrimitives.size(), 1u);
+    ASSERT_EQ(Batch.CreateShapes.size(), 1u);
     ASSERT_EQ(Batch.MeshStates.size(), 1u);
     EXPECT_TRUE(Batch.Transforms.empty());
     EXPECT_EQ(Batch.MeshStates[0].Id, id);
@@ -116,8 +116,8 @@ TEST_F(StaticMeshScene, MovingOneObjectPreservesMeshDescriptionAndOtherObjects) 
     auto* stationary = Add(mesh);
     stationary->SetRelativeLocation({500, 0, 0});
     Flush();
-    const auto movingId = moving->GetPrimitiveId();
-    const auto stationaryId = stationary->GetPrimitiveId();
+    const auto movingId = moving->GetShapeId();
+    const auto stationaryId = stationary->GetShapeId();
     const auto* sections = Data.GetStaticMesh(movingId)->Mesh.Sections.data();
     const auto* otherSections = Data.GetStaticMesh(stationaryId)->Mesh.Sections.data();
     const Eigen::Matrix4f otherTransform = Data.GetStaticMesh(stationaryId)->LocalToWorld;
@@ -141,12 +141,12 @@ TEST_F(StaticMeshScene, MovingOneObjectPreservesMeshDescriptionAndOtherObjects) 
 TEST_F(StaticMeshScene, ReplacementUsesNewBoundsAndFinalTransformWithoutChangingId) {
     auto* component = Add(Mesh(1));
     Flush();
-    const auto id = component->GetPrimitiveId();
+    const auto id = component->GetShapeId();
     component->SetStaticMesh(Mesh(2, {-10, -20, -30}, {30, 40, 50}, {{0, 0, 1, 0, 0}, {0, 1, 2, 1, 2}}));
     component->SetRelativeScale({-2, 3, 4});
     component->SetRelativeLocation({30, 50, 70});
     test::CollectScene(GameWorld, Render, Batch);
-    EXPECT_TRUE(Batch.CreatePrimitives.empty());
+    EXPECT_TRUE(Batch.CreateShapes.empty());
     EXPECT_TRUE(Batch.Transforms.empty());
     ASSERT_EQ(Batch.MeshStates.size(), 1u);
     EXPECT_EQ(Batch.MeshStates[0].Id, id);
@@ -159,7 +159,7 @@ TEST_F(StaticMeshScene, ReplacementUsesNewBoundsAndFinalTransformWithoutChanging
     EXPECT_EQ(view->Mesh.Sections[1].FirstIndex, 1u);
     ExpectBounds(*view, {-10, -20, -30}, {30, 40, 50}, component->GetWorldMatrix());
     EXPECT_TRUE(view->ReverseCulling);
-    EXPECT_EQ(component->GetPrimitiveId(), id);
+    EXPECT_EQ(component->GetShapeId(), id);
 }
 
 TEST_F(StaticMeshScene, ParentRotationNonuniformScaleAndReflectionsUpdateBoundsAndWinding) {
@@ -171,7 +171,7 @@ TEST_F(StaticMeshScene, ParentRotationNonuniformScaleAndReflectionsUpdateBoundsA
     component->SetRelativeRotation(Eigen::Quaternionf{Eigen::AngleAxisf{0.3f, Eigen::Vector3f::UnitZ()}});
     component->SetRelativeLocation({3, 4, 5});
     Flush();
-    const auto id = component->GetPrimitiveId();
+    const auto id = component->GetShapeId();
     for (const Eigen::Vector3f scale : {Eigen::Vector3f{-1, 2, 3}, Eigen::Vector3f{-1, -2, 3}, Eigen::Vector3f{0, 2, 3}, Eigen::Vector3f{-1e-20f, 1e-20f, 1e-20f}}) {
         component->SetRelativeScale(scale);
         test::CollectScene(GameWorld, Render, Batch);
@@ -190,7 +190,7 @@ TEST_F(StaticMeshScene, ParentRotationNonuniformScaleAndReflectionsUpdateBoundsA
 TEST_F(StaticMeshScene, EmptyBindingAndInvalidCpuMeshClearPreviousGeometry) {
     auto* component = Add(Mesh(1));
     Flush();
-    const auto id = component->GetPrimitiveId();
+    const auto id = component->GetShapeId();
     component->SetStaticMesh({});
     component->SetRelativeLocation({5, 6, 7});
     Flush();
@@ -208,13 +208,13 @@ TEST_F(StaticMeshScene, EmptyBindingAndInvalidCpuMeshClearPreviousGeometry) {
     component->SetStaticMesh(Mesh(3));
     Flush();
     EXPECT_EQ(Data.GetStaticMesh(id)->Mesh.Sections.size(), 1u);
-    EXPECT_EQ(component->GetPrimitiveId(), id);
+    EXPECT_EQ(component->GetShapeId(), id);
 }
 
 TEST_F(StaticMeshScene, MeshWithoutSectionsProducesFullPrimitiveDescription) {
     auto* component = Add(Mesh(1, {-1, -1, -1}, {1, 1, 1}, {}));
     Flush();
-    const auto& sections = Data.GetStaticMesh(component->GetPrimitiveId())->Mesh.Sections;
+    const auto& sections = Data.GetStaticMesh(component->GetShapeId())->Mesh.Sections;
     ASSERT_EQ(sections.size(), 1u);
     EXPECT_EQ(sections[0].PrimitiveIndex, 0u);
     EXPECT_EQ(sections[0].FirstIndex, 0u);
@@ -230,7 +230,7 @@ TEST_F(StaticMeshScene, ReadyAutomaticallyPublishesTheLatestTransform) {
                                 }()})
                        .CastTo<StaticMesh>();
     ASSERT_FALSE(loading.IsReady());
-    const auto id = component->GetPrimitiveId();
+    const auto id = component->GetShapeId();
     component->SetStaticMesh(loading);
     component->SetRelativeLocation({20, 0, 0});
     Flush();
@@ -256,7 +256,7 @@ TEST_F(StaticMeshScene, DestroyingUnsentMeshLeavesNoTypedPayload) {
 
 TEST_F(StaticMeshScene, FlightRetainsAssetAfterSourceDiesBeforeApplyOnAnotherThread) {
     auto* component = Add(Mesh(1));
-    const auto id = component->GetPrimitiveId();
+    const auto id = component->GetShapeId();
     SceneUpdateBatch create;
     test::PrepareScene(GameWorld, Render, 0);
     create = test::SceneBatch(Render, RenderId, 0);
@@ -294,11 +294,11 @@ TEST_F(StaticMeshScene, RemovalRepairsDenseListAndReuseCannotExposeOldMesh) {
     vector<StaticMeshComponent*> components;
     for (int i = 0; i < 3; ++i) components.push_back(Add(Mesh(1)));
     Flush();
-    const auto oldId = components[1]->GetPrimitiveId();
+    const auto oldId = components[1]->GetShapeId();
     Owner->RemoveComponent(components[1]);
     GameWorld.FinalizeWorldGT();
     auto* replacement = Add(Mesh(2));
-    const auto newId = replacement->GetPrimitiveId();
+    const auto newId = replacement->GetShapeId();
     EXPECT_EQ(oldId.Index, newId.Index);
     Flush();
     EXPECT_FALSE(Data.GetStaticMesh(oldId));
@@ -318,7 +318,7 @@ TEST_F(StaticMeshScene, RemovalRepairsDenseListAndReuseCannotExposeOldMesh) {
 TEST_F(StaticMeshScene, ReadOnlyViewsAndEmptyFramesPreservePersistentDescription) {
     auto* component = Add(Mesh(1));
     Flush();
-    const auto id = component->GetPrimitiveId();
+    const auto id = component->GetShapeId();
     const auto* description = &Data.GetStaticMesh(id)->Mesh;
     const auto* sections = description->Sections.data();
     for (int frame = 0; frame < 8; ++frame) {
@@ -342,7 +342,7 @@ TEST_F(StaticMeshScene, ReusedFlightsNeverRestoreAnOlderTransform) {
         const auto sceneId = test::ConnectWorld(world, render);
         auto* component = world.SpawnActor()->AddComponent<StaticMeshComponent>();
         component->SetStaticMesh(Mesh(1));
-        const auto id = component->GetPrimitiveId();
+        const auto id = component->GetShapeId();
         for (uint32_t frame = 0; frame < count * 4; ++frame) {
             if (frame == 1) component->SetRelativeLocation({15, 0, 0});
             const uint32_t flight = frame % count;
@@ -379,12 +379,12 @@ TEST_F(StaticMeshScene, TransformBatchReusesStorageAfterWarmup) {
 TEST(StaticMeshSceneDeathTest, RejectsStaleStateTransformAndTransformWithoutMesh) {
     RenderScene scene;
     SceneUpdateBatch batch;
-    batch.CreatePrimitives.push_back({0, 1});
+    batch.CreateShapes.push_back({0, 1});
     batch.MeshStates.push_back({.Id = {0, 1}});
     scene.Apply(batch);
     batch.Clear();
-    batch.RemovePrimitives.push_back({0, 1});
-    batch.CreatePrimitives.push_back({0, 2});
+    batch.RemoveShapes.push_back({0, 1});
+    batch.CreateShapes.push_back({0, 2});
     batch.MeshStates.push_back({.Id = {0, 2}});
     scene.Apply(batch);
     batch.Clear();
@@ -394,7 +394,7 @@ TEST(StaticMeshSceneDeathTest, RejectsStaleStateTransformAndTransformWithoutMesh
     batch.Transforms.push_back({.Id = {0, 1}});
     EXPECT_DEATH(scene.Apply(batch), "");
     batch.Clear();
-    batch.CreatePrimitives.push_back({1, 1});
+    batch.CreateShapes.push_back({1, 1});
     scene.Apply(batch);
     batch.Clear();
     batch.Transforms.push_back({.Id = {1, 1}});
@@ -404,7 +404,7 @@ TEST(StaticMeshSceneDeathTest, RejectsStaleStateTransformAndTransformWithoutMesh
 TEST(StaticMeshSceneDeathTest, RejectsInvalidBoundsAndNonAffineTransforms) {
     RenderScene scene;
     SceneUpdateBatch batch;
-    batch.CreatePrimitives.push_back({0, 1});
+    batch.CreateShapes.push_back({0, 1});
     batch.MeshStates.push_back({.Id = {0, 1}});
     scene.Apply(batch);
     batch.Clear();

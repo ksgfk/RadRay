@@ -91,7 +91,7 @@ private:
     vector<string>& _events;
 };
 
-TEST(SceneUpdates, SceneDerivedComponentsUseRenderLifecycleWithoutPrimitiveIdentity) {
+TEST(SceneUpdates, SceneDerivedComponentsUseRenderLifecycleWithoutShapeIdentity) {
     vector<string> events;
     Application app;
     RenderSystem render{&app, 1};
@@ -112,7 +112,7 @@ TEST(SceneUpdates, SceneDerivedComponentsUseRenderLifecycleWithoutPrimitiveIdent
 }
 
 struct Collection {
-    PrimitiveId Id;
+    ShapeId Id;
     RenderDirtyFlags Dirty;
     Eigen::Matrix4f WorldMatrix;
 };
@@ -123,13 +123,13 @@ public:
 
     void OnRegister() override {
         EXPECT_TRUE(IsRegistered() || GetRegistrationState() == ComponentRegistration::Registering);
-        EXPECT_TRUE(GetPrimitiveId().IsValid());
+        EXPECT_TRUE(GetShapeId().IsValid());
         MarkRenderStateDirty();
     }
 
     void OnUnregister() override {
         EXPECT_FALSE(IsRegistered());
-        EXPECT_FALSE(GetPrimitiveId().IsValid());
+        EXPECT_FALSE(GetShapeId().IsValid());
         // Deliberately omit a base call and attempt to requeue the dying component.
         MarkRenderStateDirty();
         MarkRenderTransformDirty();
@@ -138,7 +138,7 @@ public:
 
 protected:
     void CollectPrimitiveUpdates(SceneWriter&, RenderDirtyFlags dirty) override {
-        _collected.push_back({GetPrimitiveId(), dirty, GetWorldMatrix()});
+        _collected.push_back({GetShapeId(), dirty, GetWorldMatrix()});
     }
 
 private:
@@ -152,7 +152,7 @@ TEST(SceneUpdates, RepeatedMarksCollectFinalValuesOnceAndKeepIdentity) {
     test::ScopedWorld world;
     test::ConnectWorld(world, render);
     auto* component = world.SpawnActor()->AddComponent<ProbePrimitive>(collected);
-    const PrimitiveId id = component->GetPrimitiveId();
+    const ShapeId id = component->GetShapeId();
     EXPECT_EQ(id.Generation, 0u);
     RenderScene scene;
     SceneUpdateBatch batch;
@@ -163,34 +163,34 @@ TEST(SceneUpdates, RepeatedMarksCollectFinalValuesOnceAndKeepIdentity) {
     }
     test::CollectScene(world, render, batch);
     ASSERT_EQ(collected.size(), 1u);
-    ASSERT_EQ(batch.CreatePrimitives, vector<PrimitiveId>{id});
-    EXPECT_TRUE(batch.RemovePrimitives.empty());
+    ASSERT_EQ(batch.CreateShapes, vector<ShapeId>{id});
+    EXPECT_TRUE(batch.RemoveShapes.empty());
     EXPECT_TRUE(collected.back().Dirty.HasFlag(RenderDirtyFlag::State));
     EXPECT_TRUE(collected.back().Dirty.HasFlag(RenderDirtyFlag::Transform));
     EXPECT_TRUE(collected.back().Dirty.HasFlag(RenderDirtyFlag::DynamicData));
     EXPECT_FLOAT_EQ(collected.back().WorldMatrix(0, 3), 99);
     scene.Apply(batch);
-    EXPECT_TRUE(scene.ContainsPrimitive(id));
+    EXPECT_TRUE(scene.ContainsShape(id));
 
     batch.Clear();
     test::CollectScene(world, render, batch);
     EXPECT_EQ(collected.size(), 1u);
-    EXPECT_TRUE(batch.CreatePrimitives.empty());
+    EXPECT_TRUE(batch.CreateShapes.empty());
 
     component->SetRelativeLocation({101, 0, 0});
     test::CollectScene(world, render, batch);
     ASSERT_EQ(collected.size(), 2u);
     EXPECT_EQ(collected.back().Dirty, RenderDirtyFlags{RenderDirtyFlag::Transform});
     EXPECT_FLOAT_EQ(collected.back().WorldMatrix(0, 3), 101);
-    EXPECT_TRUE(batch.CreatePrimitives.empty());
+    EXPECT_TRUE(batch.CreateShapes.empty());
     component->MarkRenderStateDirty();
     component->MarkRenderDynamicDataDirty();
     test::CollectScene(world, render, batch);
     ASSERT_EQ(collected.size(), 3u);
     EXPECT_EQ(collected.back().Id, id);
     EXPECT_FALSE(collected.back().Dirty.HasFlag(RenderDirtyFlag::Transform));
-    EXPECT_TRUE(batch.CreatePrimitives.empty());
-    EXPECT_TRUE(scene.ContainsPrimitive(id));
+    EXPECT_TRUE(batch.CreateShapes.empty());
+    EXPECT_TRUE(scene.ContainsShape(id));
 }
 
 TEST(SceneUpdates, RegistrationCapturesPreexistingAndLatestState) {
@@ -203,7 +203,7 @@ TEST(SceneUpdates, RegistrationCapturesPreexistingAndLatestState) {
     auto* component = actor->AddComponent<ProbePrimitive>(collected);
     component->SetRelativeLocation({7, 0, 0});
     component->MarkRenderStateDirty();
-    EXPECT_FALSE(component->GetPrimitiveId().IsValid());
+    EXPECT_FALSE(component->GetShapeId().IsValid());
     SceneUpdateBatch batch;
     test::CollectScene(world, render, batch);
     EXPECT_TRUE(collected.empty());
@@ -211,8 +211,8 @@ TEST(SceneUpdates, RegistrationCapturesPreexistingAndLatestState) {
     component->SetRelativeLocation({9, 0, 0});
     test::CollectScene(world, render, batch);
     ASSERT_EQ(collected.size(), 1u);
-    ASSERT_EQ(batch.CreatePrimitives.size(), 1u);
-    EXPECT_EQ(batch.CreatePrimitives[0], component->GetPrimitiveId());
+    ASSERT_EQ(batch.CreateShapes.size(), 1u);
+    EXPECT_EQ(batch.CreateShapes[0], component->GetShapeId());
     EXPECT_FLOAT_EQ(collected[0].WorldMatrix(0, 3), 9);
 }
 
@@ -224,22 +224,22 @@ TEST(SceneUpdates, DestroyBeforeCollectionCancelsCreateAndAllowsGenerationGap) {
     test::ConnectWorld(world, render);
     Actor* actor = world.SpawnActor();
     auto* component = actor->AddComponent<ProbePrimitive>(collected);
-    const PrimitiveId canceled = component->GetPrimitiveId();
+    const ShapeId canceled = component->GetShapeId();
     actor->RemoveComponent(component);
     SceneUpdateBatch batch;
     test::CollectScene(world, render, batch);
-    EXPECT_TRUE(batch.CreatePrimitives.empty());
-    EXPECT_TRUE(batch.RemovePrimitives.empty());
+    EXPECT_TRUE(batch.CreateShapes.empty());
+    EXPECT_TRUE(batch.RemoveShapes.empty());
     EXPECT_TRUE(collected.empty());
     auto* replacement = actor->AddComponent<ProbePrimitive>(collected);
-    const PrimitiveId id = replacement->GetPrimitiveId();
+    const ShapeId id = replacement->GetShapeId();
     EXPECT_EQ(id.Index, canceled.Index);
     EXPECT_GT(id.Generation, canceled.Generation);
     test::CollectScene(world, render, batch);
     RenderScene scene;
     scene.Apply(batch);
-    EXPECT_TRUE(scene.ContainsPrimitive(id));
-    EXPECT_FALSE(scene.ContainsPrimitive(canceled));
+    EXPECT_TRUE(scene.ContainsShape(id));
+    EXPECT_FALSE(scene.ContainsShape(canceled));
 }
 
 TEST(SceneUpdates, RemovingQueuedEntriesRepairsSwappedIndex) {
@@ -261,16 +261,16 @@ TEST(SceneUpdates, RemovingQueuedEntriesRepairsSwappedIndex) {
         SceneUpdateBatch batch;
         test::CollectScene(world, render, batch);
         ASSERT_EQ(collected.size(), 2u);
-        ASSERT_EQ(batch.CreatePrimitives.size(), 2u);
+        ASSERT_EQ(batch.CreateShapes.size(), 2u);
         EXPECT_NE(collected[0].Id, collected[1].Id);
-        EXPECT_TRUE(batch.RemovePrimitives.empty());
+        EXPECT_TRUE(batch.RemoveShapes.empty());
         batch.Clear();
         for (auto* component : components) component->MarkRenderStateDirty();
         world.DestroyActor(actor);
         test::CollectScene(world, render, batch);
         EXPECT_EQ(collected.size(), 2u);
-        EXPECT_EQ(batch.RemovePrimitives.size(), 2u);
-        EXPECT_TRUE(batch.CreatePrimitives.empty());
+        EXPECT_EQ(batch.RemoveShapes.size(), 2u);
+        EXPECT_TRUE(batch.CreateShapes.empty());
     }
 }
 
@@ -282,7 +282,7 @@ TEST(SceneUpdates, SealedCreateSurvivesSourceDestructionUntilOrderedRemoval) {
     test::ConnectWorld(world, render);
     Actor* actor = world.SpawnActor();
     auto* component = actor->AddComponent<ProbePrimitive>(collected);
-    const PrimitiveId id = component->GetPrimitiveId();
+    const ShapeId id = component->GetShapeId();
     SceneUpdateBatch create;
     test::CollectScene(world, render, create);
     component->MarkRenderStateDirty();
@@ -291,13 +291,13 @@ TEST(SceneUpdates, SealedCreateSurvivesSourceDestructionUntilOrderedRemoval) {
     SceneUpdateBatch remove;
     test::CollectScene(world, render, remove);
     EXPECT_EQ(collected.size(), 1u);
-    EXPECT_TRUE(remove.CreatePrimitives.empty());
-    ASSERT_EQ(remove.RemovePrimitives, vector<PrimitiveId>{id});
+    EXPECT_TRUE(remove.CreateShapes.empty());
+    ASSERT_EQ(remove.RemoveShapes, vector<ShapeId>{id});
     RenderScene scene;
     scene.Apply(create);
-    EXPECT_TRUE(scene.ContainsPrimitive(id));
+    EXPECT_TRUE(scene.ContainsShape(id));
     scene.Apply(remove);
-    EXPECT_FALSE(scene.ContainsPrimitive(id));
+    EXPECT_FALSE(scene.ContainsShape(id));
 }
 
 TEST(SceneUpdates, SameBatchRemovesOldGenerationBeforeCreatingReplacement) {
@@ -307,7 +307,7 @@ TEST(SceneUpdates, SameBatchRemovesOldGenerationBeforeCreatingReplacement) {
     test::ConnectWorld(world, render);
     auto* actor = world.SpawnActor();
     auto* first = actor->AddComponent<PrimitiveComponent>();
-    const PrimitiveId oldId = first->GetPrimitiveId();
+    const ShapeId oldId = first->GetShapeId();
     SceneUpdateBatch batch;
     test::CollectScene(world, render, batch);
     RenderScene scene;
@@ -318,15 +318,15 @@ TEST(SceneUpdates, SameBatchRemovesOldGenerationBeforeCreatingReplacement) {
     auto* canceled = actor->AddComponent<PrimitiveComponent>();
     actor->RemoveComponent(canceled);
     world.FinalizeWorldGT();
-    const PrimitiveId newId = actor->AddComponent<PrimitiveComponent>()->GetPrimitiveId();
+    const ShapeId newId = actor->AddComponent<PrimitiveComponent>()->GetShapeId();
     EXPECT_EQ(newId.Index, oldId.Index);
     EXPECT_GT(newId.Generation, oldId.Generation + 1);
     test::CollectScene(world, render, batch);
-    ASSERT_EQ(batch.RemovePrimitives, vector<PrimitiveId>{oldId});
-    ASSERT_EQ(batch.CreatePrimitives, vector<PrimitiveId>{newId});
+    ASSERT_EQ(batch.RemoveShapes, vector<ShapeId>{oldId});
+    ASSERT_EQ(batch.CreateShapes, vector<ShapeId>{newId});
     scene.Apply(batch);
-    EXPECT_FALSE(scene.ContainsPrimitive(oldId));
-    EXPECT_TRUE(scene.ContainsPrimitive(newId));
+    EXPECT_FALSE(scene.ContainsShape(oldId));
+    EXPECT_TRUE(scene.ContainsShape(newId));
 }
 
 TEST(SceneUpdates, ParentChangesReparentAndRemovalCollectLatestChildTransform) {
@@ -366,63 +366,63 @@ TEST(SceneUpdates, ParentChangesReparentAndRemovalCollectLatestChildTransform) {
 
 TEST(SceneUpdates, ClearRetainsBatchCapacity) {
     SceneUpdateBatch batch;
-    batch.CreatePrimitives.push_back({0, 1});
-    batch.RemovePrimitives.push_back({1, 1});
-    const auto createCapacity = batch.CreatePrimitives.capacity();
-    const auto removeCapacity = batch.RemovePrimitives.capacity();
+    batch.CreateShapes.push_back({0, 1});
+    batch.RemoveShapes.push_back({1, 1});
+    const auto createCapacity = batch.CreateShapes.capacity();
+    const auto removeCapacity = batch.RemoveShapes.capacity();
     batch.Clear();
-    EXPECT_TRUE(batch.CreatePrimitives.empty());
-    EXPECT_TRUE(batch.RemovePrimitives.empty());
-    EXPECT_EQ(batch.CreatePrimitives.capacity(), createCapacity);
-    EXPECT_EQ(batch.RemovePrimitives.capacity(), removeCapacity);
+    EXPECT_TRUE(batch.CreateShapes.empty());
+    EXPECT_TRUE(batch.RemoveShapes.empty());
+    EXPECT_EQ(batch.CreateShapes.capacity(), createCapacity);
+    EXPECT_EQ(batch.RemoveShapes.capacity(), removeCapacity);
 }
 
 TEST(SceneUpdates, GenerationZeroWorksForNewSlotsAndEarlierSparseHoles) {
-    EXPECT_FALSE(PrimitiveId{}.IsValid());
-    EXPECT_TRUE((PrimitiveId{0, 0}.IsValid()));
+    EXPECT_FALSE(ShapeId{}.IsValid());
+    EXPECT_TRUE((ShapeId{0, 0}.IsValid()));
     RenderScene scene;
     SceneUpdateBatch batch;
-    batch.CreatePrimitives.push_back({4, 0});
+    batch.CreateShapes.push_back({4, 0});
     scene.Apply(batch);
-    EXPECT_TRUE(scene.ContainsPrimitive({4, 0}));
-    EXPECT_FALSE(scene.ContainsPrimitive({0, 0}));
+    EXPECT_TRUE(scene.ContainsShape({4, 0}));
+    EXPECT_FALSE(scene.ContainsShape({0, 0}));
     batch.Clear();
-    batch.CreatePrimitives.push_back({0, 0});
+    batch.CreateShapes.push_back({0, 0});
     scene.Apply(batch);
-    EXPECT_TRUE(scene.ContainsPrimitive({0, 0}));
+    EXPECT_TRUE(scene.ContainsShape({0, 0}));
     batch.Clear();
-    batch.RemovePrimitives.push_back({0, 0});
+    batch.RemoveShapes.push_back({0, 0});
     scene.Apply(batch);
-    EXPECT_FALSE(scene.ContainsPrimitive({0, 0}));
+    EXPECT_FALSE(scene.ContainsShape({0, 0}));
     batch.Clear();
-    batch.CreatePrimitives.push_back({0, 1});
+    batch.CreateShapes.push_back({0, 1});
     scene.Apply(batch);
-    EXPECT_TRUE(scene.ContainsPrimitive({0, 1}));
-    EXPECT_TRUE(scene.ContainsPrimitive({4, 0}));
+    EXPECT_TRUE(scene.ContainsShape({0, 1}));
+    EXPECT_TRUE(scene.ContainsShape({4, 0}));
 }
 
 TEST(SceneUpdatesDeathTest, RejectsStaleIdsAndDuplicateCreation) {
     RenderScene scene;
     SceneUpdateBatch batch;
-    batch.CreatePrimitives.push_back({0, 0});
+    batch.CreateShapes.push_back({0, 0});
     scene.Apply(batch);
     EXPECT_DEATH(scene.Apply(batch), "");
     batch.Clear();
-    batch.RemovePrimitives.push_back({0, 0});
-    batch.CreatePrimitives.push_back({0, 1});
+    batch.RemoveShapes.push_back({0, 0});
+    batch.CreateShapes.push_back({0, 1});
     scene.Apply(batch);
     batch.Clear();
-    batch.RemovePrimitives.push_back({0, 0});
+    batch.RemoveShapes.push_back({0, 0});
     EXPECT_DEATH(scene.Apply(batch), "");
-    EXPECT_TRUE(scene.ContainsPrimitive({0, 1}));
-    batch.RemovePrimitives[0] = {0, 1};
+    EXPECT_TRUE(scene.ContainsShape({0, 1}));
+    batch.RemoveShapes[0] = {0, 1};
     scene.Apply(batch);
     batch.Clear();
-    batch.CreatePrimitives.push_back({0, 1});
+    batch.CreateShapes.push_back({0, 1});
     EXPECT_DEATH(scene.Apply(batch), "");
-    batch.CreatePrimitives[0] = {0, 0};
+    batch.CreateShapes[0] = {0, 0};
     EXPECT_DEATH(scene.Apply(batch), "");
-    batch.CreatePrimitives[0] = {};
+    batch.CreateShapes[0] = {};
     EXPECT_DEATH(scene.Apply(batch), "");
 }
 
@@ -471,8 +471,8 @@ TEST(SceneUpdatesDeathTest, WriterRejectsStaleIdentityAndOccupiedFlight) {
     RenderSystem render{&app, 1};
     const auto scene = render.CreateSceneGT();
     auto writer = render.GetSceneWriterGT(scene);
-    auto id = writer->CreatePrimitive();
-    writer->RemovePrimitive(id);
+    auto id = writer->CreateShape();
+    writer->RemoveShape(id);
     EXPECT_DEATH(writer->SetTransform(id, Eigen::Matrix4f::Identity()), "");
     render.SealFrameGT(0);
     EXPECT_DEATH(render.SealFrameGT(0), "");
