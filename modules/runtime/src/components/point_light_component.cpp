@@ -2,31 +2,28 @@
 
 #include <algorithm>
 #include <cmath>
-#include <type_traits>
 
 namespace radray {
 
 PointLightComponent::~PointLightComponent() noexcept = default;
 
 LightData PointLightComponent::CaptureLightState() const noexcept {
-    auto result = LightComponent::CaptureLightState();
-    std::visit([this](auto& light) {
-        using T = std::decay_t<decltype(light)>;
-        if constexpr (std::is_same_v<T, PointLightData> || std::is_same_v<T, SpotLightData>) {
-            light.Point.AttenuationRadius = _attenuationRadius;
-            light.Point.FalloffExponent = _lightFalloffExponent;
-            light.Point.SourceRadius = _sourceRadius;
-            light.Point.SoftSourceRadius = _softSourceRadius;
-            light.Point.SourceLength = _sourceLength;
-            light.Point.InverseSquaredFalloff = _useInverseSquaredFalloff;
-            light.Common.ShadowDepthBias = _shadowDepthBias;
-            light.Common.ShadowNormalBias = _shadowNormalBias;
-        } else {
-            RADRAY_ABORT("Point light component requires Point or Spot data");
-        }
-    },
-               result);
-    return result;
+    return PointLightData{CaptureCommon(), CapturePointParameters()};
+}
+
+PointLightParameters PointLightComponent::CapturePointParameters() const noexcept {
+    PointLightParameters point;
+    point.Position = GetLightPosition().head<3>();
+    point.Direction = GetLightDirection();
+    point.AttenuationRadius = _attenuationRadius;
+    point.FalloffExponent = _lightFalloffExponent;
+    point.SourceRadius = _sourceRadius;
+    point.SoftSourceRadius = _softSourceRadius;
+    point.SourceLength = _sourceLength;
+    point.ShadowDepthBias = _shadowDepthBias;
+    point.ShadowNormalBias = _shadowNormalBias;
+    point.InverseSquaredFalloff = _useInverseSquaredFalloff;
+    return point;
 }
 
 void PointLightComponent::SetAttenuationRadius(float radius) noexcept {

@@ -15,11 +15,11 @@ enum class LightType : uint8_t { Directional,
                                  Spot,
                                  Rect };
 
+/// Type-independent parameters only; identity lives in the table's id column and shadow bias in the
+/// types that capture it.
 struct LightCommonData {
-    LightId Id;
     Eigen::Vector3f Color{Eigen::Vector3f::Ones()};
     float Intensity{1};
-    float ShadowDepthBias{0}, ShadowNormalBias{0};
     bool AffectsWorld{true}, CastShadow{true};
 };
 
@@ -35,6 +35,7 @@ struct PointLightParameters {
     float AttenuationRadius{0};
     float FalloffExponent{0};
     float SourceRadius{0}, SoftSourceRadius{0}, SourceLength{0};
+    float ShadowDepthBias{0}, ShadowNormalBias{0};
     bool InverseSquaredFalloff{true};
 };
 
@@ -59,23 +60,35 @@ struct RectLightData {
     bool InverseSquaredFalloff{true};
 };
 
-/// Transient single-light capture. Persistent storage uses the typed arrays below.
+/// Transient single-light capture, paired with its identity by the caller. Persistent storage uses
+/// the typed tables below.
 using LightData = std::variant<DirectionalLightData, PointLightData, SpotLightData, RectLightData>;
 
-/// Owned world-space CPU values. Mutations may invalidate array positions and borrows.
+/// One light type's dense table: Ids[row] owns Data[row]. Removal swaps in the last entry, so a row
+/// is not an identity. Both columns always have the same length.
+template <class T>
+struct LightTable {
+    vector<LightId> Ids;
+    vector<T> Data;
+
+    size_t Size() const noexcept { return Data.size(); }
+    bool Empty() const noexcept { return Data.empty(); }
+};
+
+/// Owned world-space CPU values. Mutations may invalidate rows and borrows.
 struct LightSceneData {
-    vector<DirectionalLightData> DirectionalLights;
-    vector<PointLightData> PointLights;
-    vector<SpotLightData> SpotLights;
-    vector<RectLightData> RectLights;
+    LightTable<DirectionalLightData> DirectionalLights;
+    LightTable<PointLightData> PointLights;
+    LightTable<SpotLightData> SpotLights;
+    LightTable<RectLightData> RectLights;
 
     void Clear() noexcept;
-    size_t Count() const noexcept { return DirectionalLights.size() + PointLights.size() + SpotLights.size() + RectLights.size(); }
+    size_t Count() const noexcept { return DirectionalLights.Size() + PointLights.Size() + SpotLights.Size() + RectLights.Size(); }
     bool Empty() const noexcept { return Count() == 0; }
     /// Replaces all lights from a complete snapshot with unique, valid identities; retains capacity.
     void Assign(const LightSceneData& lights) noexcept;
     /// Inserts or replaces one light, including changing its type while preserving its identity.
-    void Set(const LightData& light) noexcept;
+    void Set(LightId id, const LightData& light) noexcept;
     bool Remove(LightId id) noexcept;
     Nullable<const LightCommonData*> GetLight(LightId id) const noexcept;
     Nullable<const DirectionalLightData*> GetDirectionalLight(LightId id) const noexcept;

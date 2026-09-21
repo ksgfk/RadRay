@@ -17,11 +17,7 @@ bool SpotLightComponent::SetConeAngles(float inner, float outer) noexcept {
 }
 
 LightData SpotLightComponent::CaptureLightState() const noexcept {
-    auto result = PointLightComponent::CaptureLightState();
-    auto& light = std::get<SpotLightData>(result);
-    light.InnerConeAngle = _inner;
-    light.OuterConeAngle = _outer;
-    return result;
+    return SpotLightData{CaptureCommon(), CapturePointParameters(), _inner, _outer};
 }
 
 }  // namespace radray

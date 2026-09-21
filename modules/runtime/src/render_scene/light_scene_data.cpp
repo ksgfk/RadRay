@@ -1,45 +1,68 @@
 #include <radray/runtime/render_scene/light_scene_data.h>
 
 #include <algorithm>
+#include <limits>
 #include <type_traits>
+#include <utility>
+
 #include <radray/logger.h>
 
 namespace radray {
 namespace {
 
+constexpr size_t kNoRow = std::numeric_limits<size_t>::max();
+
+/// Scans the id column only; payload columns are never touched by a lookup.
 template <class T>
-Nullable<const T*> FindLight(const vector<T>& lights, LightId id) noexcept {
-    if (!id.IsValid()) return nullptr;
-    for (const auto& light : lights) {
-        if (light.Common.Id == id) return &light;
-    }
-    return nullptr;
+size_t FindRow(const LightTable<T>& table, LightId id) noexcept {
+    const auto found = std::find(table.Ids.begin(), table.Ids.end(), id);
+    return found == table.Ids.end() ? kNoRow : static_cast<size_t>(found - table.Ids.begin());
 }
 
 template <class T>
-bool RemoveLight(vector<T>& lights, LightId id) noexcept {
-    const auto found = std::find_if(lights.begin(), lights.end(), [id](const T& light) { return light.Common.Id == id; });
-    if (found == lights.end()) return false;
-    if (found != lights.end() - 1) *found = std::move(lights.back());
-    lights.pop_back();
+Nullable<const T*> FindLight(const LightTable<T>& table, LightId id) noexcept {
+    if (!id.IsValid()) return nullptr;
+    const auto row = FindRow(table, id);
+    return row == kNoRow ? nullptr : &table.Data[row];
+}
+
+template <class T>
+bool RemoveLight(LightTable<T>& table, LightId id) noexcept {
+    const auto row = FindRow(table, id);
+    if (row == kNoRow) return false;
+    const auto last = table.Ids.size() - 1;
+    if (row != last) {
+        table.Ids[row] = table.Ids[last];
+        table.Data[row] = std::move(table.Data[last]);
+    }
+    table.Ids.pop_back();
+    table.Data.pop_back();
     return true;
 }
 
 template <class T>
-void AssignLights(vector<T>& target, const vector<T>& source) noexcept {
-    for (const auto& light : source) {
-        if (!light.Common.Id.IsValid()) RADRAY_ABORT("Invalid light identity");
+void AssignLights(LightTable<T>& target, const LightTable<T>& source) noexcept {
+    if (source.Ids.size() != source.Data.size()) RADRAY_ABORT("Light table columns must match");
+    for (LightId id : source.Ids) {
+        if (!id.IsValid()) RADRAY_ABORT("Invalid light identity");
     }
-    target.assign(source.begin(), source.end());
+    target.Ids.assign(source.Ids.begin(), source.Ids.end());
+    target.Data.assign(source.Data.begin(), source.Data.end());
+}
+
+template <class T>
+void ClearLights(LightTable<T>& table) noexcept {
+    table.Ids.clear();
+    table.Data.clear();
 }
 
 }  // namespace
 
 void LightSceneData::Clear() noexcept {
-    DirectionalLights.clear();
-    PointLights.clear();
-    SpotLights.clear();
-    RectLights.clear();
+    ClearLights(DirectionalLights);
+    ClearLights(PointLights);
+    ClearLights(SpotLights);
+    ClearLights(RectLights);
 }
 
 void LightSceneData::Assign(const LightSceneData& lights) noexcept {
@@ -50,12 +73,11 @@ void LightSceneData::Assign(const LightSceneData& lights) noexcept {
     AssignLights(RectLights, lights.RectLights);
 }
 
-void LightSceneData::Set(const LightData& light) noexcept {
-    std::visit([this](const auto& value) {
-        const auto id = value.Common.Id;
-        if (!id.IsValid()) RADRAY_ABORT("Invalid light identity");
+void LightSceneData::Set(LightId id, const LightData& light) noexcept {
+    if (!id.IsValid()) RADRAY_ABORT("Invalid light identity");
+    std::visit([this, id](const auto& value) {
         using T = std::decay_t<decltype(value)>;
-        auto& lights = [this]() -> vector<T>& {
+        auto& table = [this]() -> LightTable<T>& {
             if constexpr (std::is_same_v<T, DirectionalLightData>)
                 return DirectionalLights;
             else if constexpr (std::is_same_v<T, PointLightData>)
@@ -65,12 +87,13 @@ void LightSceneData::Set(const LightData& light) noexcept {
             else
                 return RectLights;
         }();
-        const auto found = std::find_if(lights.begin(), lights.end(), [id](const T& item) { return item.Common.Id == id; });
-        if (found != lights.end()) {
-            *found = value;
+        const auto row = FindRow(table, id);
+        if (row != kNoRow) {
+            table.Data[row] = value;
         } else {
             Remove(id);
-            lights.push_back(value);
+            table.Ids.push_back(id);
+            table.Data.push_back(value);
         }
     },
                light);

@@ -42,14 +42,48 @@ enum class Workload { Transform,
                       Churn,
                       Burst,
                       Reparent,
-                      Mixed };
+                      Mixed,
+                      Level };
 
 struct Scenario {
     string Name;
     Workload Kind{Workload::Transform};
     uint32_t Shapes{10000}, Changes{100}, Lights{0}, LightChanges{0}, Repeats{1}, Depth{1};
     bool Wide{false}, Sequential{false};
+    /// Workload::Level only. Changes moves, RebindCount rebinds and StreamCount replacements draw
+    /// disjoint selection offsets, so their sum must stay within the selection.
+    uint32_t StreamCount{0}, StreamPeriod{1}, RebindCount{0};
 };
+
+/// Realistic frame mixes. These compose the single-axis mechanisms above at ratios taken from typical
+/// frames instead of extremes; no scenario here exercises a mechanism the other workloads do not.
+void AppendRealistic(vector<Scenario>& result, bool small) {
+    const auto share = [](uint32_t total, uint32_t divisor) { return std::max(1u, total / divisor); };
+    const uint32_t level = small ? 256u : 100000u;
+    const uint32_t open = small ? 256u : 20000u;
+    const uint32_t stage = small ? 256u : 10000u;
+    const uint32_t crowd = small ? 96u : 2000u;
+    // 巡游：关卡已加载，相机在动但相机不是 Shape；只有机关/少数 NPC 移动，一盏灯在闪。
+    result.push_back({.Name = "level_walkthrough", .Kind = Workload::Level, .Shapes = level,
+                      .Changes = share(level, 1000), .Lights = 64, .LightChanges = 1});
+    // 交火：1% 物体在动，多盏灯跟着变，少量 LOD 改绑，每 16 帧轮换一批 chunk。
+    result.push_back({.Name = "level_firefight", .Kind = Workload::Level, .Shapes = level,
+                      .Changes = share(level, 100), .Lights = 64, .LightChanges = 8,
+                      .StreamCount = share(level, 500), .StreamPeriod = 16, .RebindCount = share(level, 2000)});
+    // 开放世界流式：持续少量移动，每 8 帧成批换入换出 2.5% 的物体。
+    result.push_back({.Name = "open_world_streaming", .Kind = Workload::Level, .Shapes = open,
+                      .Changes = share(open, 100), .Lights = 32, .LightChanges = 2,
+                      .StreamCount = share(open, 40), .StreamPeriod = 8});
+    // 群体：每个角色是 1 根 + 2 挂件的宽树，每帧所有根移动，变换沿层级传播。
+    result.push_back({.Name = "crowd_animation", .Kind = Workload::Level, .Shapes = crowd,
+                      .Changes = share(crowd, 3), .Lights = 16, .LightChanges = 2, .Depth = 3, .Wide = true});
+    // 过场：物体动得不多，但全部灯每帧重新捕获。
+    result.push_back({.Name = "cinematic_lights", .Kind = Workload::Level, .Shapes = stage,
+                      .Changes = share(stage, 50), .Lights = 256, .LightChanges = 256});
+    // 编辑器空闲：只有一个物体被拖动，灯不变；用来看每帧的固定开销地板。
+    result.push_back({.Name = "editor_idle", .Kind = Workload::Level, .Shapes = open,
+                      .Changes = 1, .Lights = 8, .LightChanges = 0});
+}
 
 vector<Scenario> Scenarios(bool small) {
     vector<Scenario> result;
@@ -80,6 +114,7 @@ vector<Scenario> Scenarios(bool small) {
     result.push_back({"burst_replace_10pct", Workload::Burst, n, n / 10});
     result.push_back({"reparent", Workload::Reparent, n, changes});
     result.push_back({"mixed", Workload::Mixed, n, changes, 64, 4});
+    AppendRealistic(result, small);
     return result;
 }
 
@@ -143,8 +178,7 @@ struct ExpectedScene {
 };
 
 bool SameCommon(const LightCommonData& a, const LightCommonData& b) {
-    return a.Id == b.Id && a.Color.isApprox(b.Color) && a.Intensity == b.Intensity &&
-           a.ShadowDepthBias == b.ShadowDepthBias && a.ShadowNormalBias == b.ShadowNormalBias &&
+    return a.Color.isApprox(b.Color) && a.Intensity == b.Intensity &&
            a.AffectsWorld == b.AffectsWorld && a.CastShadow == b.CastShadow;
 }
 
@@ -152,7 +186,8 @@ bool SamePoint(const PointLightParameters& a, const PointLightParameters& b) {
     return a.Position.isApprox(b.Position) && a.Direction.isApprox(b.Direction) &&
            a.AttenuationRadius == b.AttenuationRadius && a.FalloffExponent == b.FalloffExponent &&
            a.SourceRadius == b.SourceRadius && a.SoftSourceRadius == b.SoftSourceRadius &&
-           a.SourceLength == b.SourceLength && a.InverseSquaredFalloff == b.InverseSquaredFalloff;
+           a.SourceLength == b.SourceLength && a.ShadowDepthBias == b.ShadowDepthBias &&
+           a.ShadowNormalBias == b.ShadowNormalBias && a.InverseSquaredFalloff == b.InverseSquaredFalloff;
 }
 
 bool Validate(const RenderScene& scene, const ExpectedScene& expected) {
@@ -168,19 +203,25 @@ bool Validate(const RenderScene& scene, const ExpectedScene& expected) {
     for (const auto id : expected.Removed)
         if (scene.ContainsShape(id)) return false;
     const auto& lights = scene.GetLights();
-    if (lights.DirectionalLights.size() != expected.Lights.DirectionalLights.size() ||
-        lights.PointLights.size() != expected.Lights.PointLights.size() ||
-        lights.SpotLights.size() != expected.Lights.SpotLights.size() || !lights.RectLights.empty()) return false;
-    for (const auto& e : expected.Lights.DirectionalLights) {
-        const auto light = lights.GetDirectionalLight(e.Common.Id);
+    if (lights.DirectionalLights.Size() != expected.Lights.DirectionalLights.Size() ||
+        lights.PointLights.Size() != expected.Lights.PointLights.Size() ||
+        lights.SpotLights.Size() != expected.Lights.SpotLights.Size() || !lights.RectLights.Empty()) return false;
+    const auto& expectedDirectional = expected.Lights.DirectionalLights;
+    for (size_t row = 0; row < expectedDirectional.Size(); ++row) {
+        const auto& e = expectedDirectional.Data[row];
+        const auto light = lights.GetDirectionalLight(expectedDirectional.Ids[row]);
         if (!light || !SameCommon(light->Common, e.Common) || !light->Direction.isApprox(e.Direction)) return false;
     }
-    for (const auto& e : expected.Lights.PointLights) {
-        const auto light = lights.GetPointLight(e.Common.Id);
+    const auto& expectedPoint = expected.Lights.PointLights;
+    for (size_t row = 0; row < expectedPoint.Size(); ++row) {
+        const auto& e = expectedPoint.Data[row];
+        const auto light = lights.GetPointLight(expectedPoint.Ids[row]);
         if (!light || !SameCommon(light->Common, e.Common) || !SamePoint(light->Point, e.Point)) return false;
     }
-    for (const auto& e : expected.Lights.SpotLights) {
-        const auto light = lights.GetSpotLight(e.Common.Id);
+    const auto& expectedSpot = expected.Lights.SpotLights;
+    for (size_t row = 0; row < expectedSpot.Size(); ++row) {
+        const auto& e = expectedSpot.Data[row];
+        const auto light = lights.GetSpotLight(expectedSpot.Ids[row]);
         if (!light || !SameCommon(light->Common, e.Common) || !SamePoint(light->Point, e.Point) ||
             light->InnerConeAngle != e.InnerConeAngle || light->OuterConeAngle != e.OuterConeAngle) return false;
     }
@@ -252,7 +293,7 @@ public:
         _setupBytes = _allocationTracking ? after[1] - allocations[1] : -1;
         for (uint32_t i = 0; i < _scenario.Shapes; ++i) {
             if (_scenario.Kind == Workload::HierarchyLeaf && (i + 1) % _scenario.Depth != 0 && i + 1 != _scenario.Shapes) continue;
-            if (_scenario.Kind == Workload::HierarchyRoot && i % _scenario.Depth != 0) continue;
+            if ((_scenario.Kind == Workload::HierarchyRoot || _scenario.Kind == Workload::Level) && i % _scenario.Depth != 0) continue;
             _selection.push_back(i);
         }
         std::mt19937 generator{0x5CE1u};
@@ -350,9 +391,10 @@ public:
                                r.Transforms, r.MeshStates, r.Creates, r.Removes, r.LightRecords, r.PayloadBytes);
         }
         const double span = Microseconds(_gt[begin].Start, _rt[begin + count - 1].End);
-        cases << fmt::format("{},{},{},{},{},{},{},{},{},{},{:.3f},{:.3f},{},{},{},{},{:.3f},{:.6f}\n",
+        cases << fmt::format("{},{},{},{},{},{},{},{},{},{},{},{},{},{:.3f},{:.3f},{},{},{},{},{:.3f},{:.6f}\n",
                              _scenario.Name, mode, _flights, _scenario.Shapes, _scenario.Changes, _scenario.Lights, _scenario.LightChanges,
-                             _scenario.Repeats, _scenario.Depth, _scenario.Wide, _setupUs, _initialSyncUs, _setupAllocations, _setupBytes,
+                             _scenario.Repeats, _scenario.Depth, _scenario.Wide, _scenario.StreamCount, _scenario.StreamPeriod,
+                             _scenario.RebindCount, _setupUs, _initialSyncUs, _setupAllocations, _setupBytes,
                              allocations[0], allocations[1], span, double(count) * 1e6 / span);
         fmt::print("SCENE_SYNC {} {} F={} {:.1f} us/frame, {} frames\n", _scenario.Name, mode, _flights, span / double(count), count);
         std::fflush(stdout);
@@ -374,9 +416,9 @@ private:
         return _selection[(frame * 131 + offset) % _selection.size()];
     }
 
-    void Move(size_t frame, uint32_t count) {
+    void Move(size_t frame, uint32_t base, uint32_t count) {
         for (uint32_t i = 0; i < count; ++i) {
-            auto* component = _components[Selected(frame, i)];
+            auto* component = _components[Selected(frame, base + i)];
             for (uint32_t repeat = 0; repeat < _scenario.Repeats; ++repeat) {
                 if (_scenario.Kind == Workload::SameValue)
                     component->SetRelativeLocation(component->GetRelativeLocation());
@@ -386,12 +428,19 @@ private:
         }
     }
 
-    void Replace(size_t frame, uint32_t count) {
+    void Replace(size_t frame, uint32_t base, uint32_t count) {
         for (uint32_t i = 0; i < count; ++i) {
-            const auto index = Selected(frame, i);
+            const auto index = Selected(frame, base + i);
             _removedShapes.push_back(_components[index]->GetShapeId());
             _world.DestroyActor(_components[index]->GetOwner().Get());
             _components[index] = SpawnMesh(index);
+        }
+    }
+
+    void Rebind(size_t frame, uint32_t base, uint32_t count) {
+        for (uint32_t i = 0; i < count; ++i) {
+            auto* component = _components[Selected(frame, base + i)];
+            component->SetStaticMesh(_meshes[component->GetStaticMesh().GetAssetId() == _meshes[0].GetAssetId() ? 1 : 0]);
         }
     }
 
@@ -402,16 +451,11 @@ private:
             case Workload::Transform:
             case Workload::SameValue:
             case Workload::HierarchyLeaf:
-            case Workload::HierarchyRoot: Move(frame, count); break;
-            case Workload::Rebind:
-                for (uint32_t i = 0; i < count; ++i) {
-                    auto* component = _components[Selected(frame, i)];
-                    component->SetStaticMesh(_meshes[component->GetStaticMesh().GetAssetId() == _meshes[0].GetAssetId() ? 1 : 0]);
-                }
-                break;
-            case Workload::Churn: Replace(frame, count); break;
+            case Workload::HierarchyRoot: Move(frame, 0, count); break;
+            case Workload::Rebind: Rebind(frame, 0, count); break;
+            case Workload::Churn: Replace(frame, 0, count); break;
             case Workload::Burst:
-                if (frame % 32 == 0) Replace(frame, count);
+                if (frame % 32 == 0) Replace(frame, 0, count);
                 break;
             case Workload::Reparent:
                 for (uint32_t i = 0; i < count; ++i) {
@@ -420,8 +464,13 @@ private:
                 }
                 break;
             case Workload::Mixed:
-                Move(frame, frame % 32 == 0 ? _scenario.Shapes : count);
-                Replace(frame, std::min(10u, _scenario.Shapes));
+                Move(frame, 0, frame % 32 == 0 ? _scenario.Shapes : count);
+                Replace(frame, 0, std::min(10u, _scenario.Shapes));
+                break;
+            case Workload::Level:
+                Move(frame, 0, count);
+                Rebind(frame, count, _scenario.RebindCount);
+                if (frame % _scenario.StreamPeriod == 0) Replace(frame, count + _scenario.RebindCount, _scenario.StreamCount);
                 break;
             case Workload::Lights: break;
         }
@@ -455,26 +504,35 @@ private:
         }
         for (auto* component : _lights) {
             LightCommonData common;
-            common.Id = component->GetLightId();
             common.Color = component->GetLightColor();
             common.Intensity = component->GetIntensity();
             common.AffectsWorld = component->AffectsWorld();
             common.CastShadow = component->CastShadow();
+            const auto id = component->GetLightId();
             if (component->GetLightType() == LightType::Directional) {
-                expected.Lights.DirectionalLights.push_back({common, component->GetLightDirection()});
+                expected.Lights.DirectionalLights.Ids.push_back(id);
+                expected.Lights.DirectionalLights.Data.push_back({common, component->GetLightDirection()});
                 continue;
             }
             auto* point = static_cast<PointLightComponent*>(component);
-            common.ShadowDepthBias = point->GetShadowDepthBias();
-            common.ShadowNormalBias = point->GetShadowNormalBias();
-            PointLightParameters params{point->GetWorldLocation(), point->GetLightDirection(), point->GetAttenuationRadius(),
-                                        point->GetLightFalloffExponent(), point->GetSourceRadius(), point->GetSoftSourceRadius(),
-                                        point->GetSourceLength(), point->UseInverseSquaredFalloff()};
-            if (component->GetLightType() == LightType::Point)
-                expected.Lights.PointLights.push_back({common, params});
-            else {
+            PointLightParameters params;
+            params.Position = point->GetWorldLocation();
+            params.Direction = point->GetLightDirection();
+            params.AttenuationRadius = point->GetAttenuationRadius();
+            params.FalloffExponent = point->GetLightFalloffExponent();
+            params.SourceRadius = point->GetSourceRadius();
+            params.SoftSourceRadius = point->GetSoftSourceRadius();
+            params.SourceLength = point->GetSourceLength();
+            params.ShadowDepthBias = point->GetShadowDepthBias();
+            params.ShadowNormalBias = point->GetShadowNormalBias();
+            params.InverseSquaredFalloff = point->UseInverseSquaredFalloff();
+            if (component->GetLightType() == LightType::Point) {
+                expected.Lights.PointLights.Ids.push_back(id);
+                expected.Lights.PointLights.Data.push_back({common, params});
+            } else {
                 auto* spot = static_cast<SpotLightComponent*>(point);
-                expected.Lights.SpotLights.push_back({common, params, spot->GetInnerConeAngle(), spot->GetOuterConeAngle()});
+                expected.Lights.SpotLights.Ids.push_back(id);
+                expected.Lights.SpotLights.Data.push_back({common, params, spot->GetInnerConeAngle(), spot->GetOuterConeAngle()});
             }
         }
     }
@@ -495,6 +553,14 @@ private:
             EXPECT_EQ(batch.RemoveShapes.size(), count);
         }
         if (_scenario.Kind == Workload::Rebind) EXPECT_EQ(batch.MeshStates.size(), _scenario.Changes);
+        if (_scenario.Kind == Workload::Level) {
+            const size_t streamed = frame % _scenario.StreamPeriod == 0 ? _scenario.StreamCount : 0;
+            EXPECT_EQ(batch.CreateShapes.size(), streamed);
+            EXPECT_EQ(batch.RemoveShapes.size(), streamed);
+            EXPECT_EQ(batch.MeshStates.size(), streamed + _scenario.RebindCount);
+            // 层级传播会把一次根移动放大成整棵子树的变换记录，只在扁平场景下断言精确条数。
+            if (_scenario.Depth == 1) EXPECT_EQ(batch.Transforms.size(), std::min<size_t>(_scenario.Changes, _selection.size()));
+        }
     }
 
     void Apply(uint32_t flight, const FlightSlot& slot) {
@@ -507,9 +573,10 @@ private:
         frame.LightRecords = batch.Lights.Count();
         frame.PayloadBytes = frame.Transforms * sizeof(ShapeTransformUpdate) + frame.MeshStates * sizeof(StaticMeshStateUpdate) +
                              (frame.Creates + frame.Removes) * sizeof(ShapeId) +
-                             batch.Lights.DirectionalLights.size() * sizeof(DirectionalLightData) +
-                             batch.Lights.PointLights.size() * sizeof(PointLightData) + batch.Lights.SpotLights.size() * sizeof(SpotLightData) +
-                             batch.Lights.RectLights.size() * sizeof(RectLightData);
+                             frame.LightRecords * sizeof(LightId) +
+                             batch.Lights.DirectionalLights.Size() * sizeof(DirectionalLightData) +
+                             batch.Lights.PointLights.Size() * sizeof(PointLightData) + batch.Lights.SpotLights.Size() * sizeof(SpotLightData) +
+                             batch.Lights.RectLights.Size() * sizeof(RectLightData);
         frame.Begin = Now();
         _renderer.ConsumeRenderUpdates(flight, slot.Sequence);
         frame.End = Now();
@@ -693,7 +760,7 @@ TEST(SceneSyncPerformance, Matrix) {
     std::ofstream cases{fmt::format("{}.cases.csv", path.Get())};
     ASSERT_TRUE(raw.is_open() && cases.is_open());
     raw << "scenario,mode,flights,frame,sequence,start_ns,end_ns,mutation_us,tick_us,lifecycle_us,collect_us,seal_us,publish_us,apply_us,queue_us,e2e_us,flight_wait_us,completion_us,gt_work_us,work_us,transforms,mesh_states,creates,removes,light_records,payload_bytes\n";
-    cases << "scenario,mode,flights,shapes,changes,lights,light_changes,repeats,depth,wide,setup_us,initial_sync_us,setup_allocations,setup_bytes,allocations,allocation_bytes,span_us,frames_per_second\n";
+    cases << "scenario,mode,flights,shapes,changes,lights,light_changes,repeats,depth,wide,stream_count,stream_period,rebind_count,setup_us,initial_sync_us,setup_allocations,setup_bytes,allocations,allocation_bytes,span_us,frames_per_second\n";
     size_t executed = 0;
     vector<uint32_t> flights{1u, 2u, 3u};
     vector<char> threaded{0, 1};

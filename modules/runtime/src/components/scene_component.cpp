@@ -89,12 +89,30 @@ void SceneComponent::SetRelativeScale(const Eigen::Vector3f& scale) noexcept {
 Eigen::Matrix4f SceneComponent::ComputeLocalMatrix() const noexcept {
     return ComposeTransform<float>(_relativeLocation, _relativeRotation, _relativeScale);
 }
-Eigen::Matrix4f SceneComponent::GetWorldMatrix() const noexcept {
-    if (_worldDirty) {
-        const Eigen::Matrix4f local = ComputeLocalMatrix();
-        _worldMatrix = _parent ? _parent->GetWorldMatrix() * local : local;
-        _worldDirty = false;
+void SceneComponent::RefreshWorldMatrix() const noexcept {
+    // 窗口固定，超过窗口的链分多轮从顶部收敛：深层级不会按深度消耗栈，也不做堆分配。
+    constexpr size_t window = 32;
+    const SceneComponent* chain[window];
+    while (_worldDirty) {
+        size_t height = 0;
+        for (auto node = this; node != nullptr && node->_worldDirty; node = node->_parent.Get()) {
+            chain[height % window] = node;
+            ++height;
+        }
+        // 本轮只处理链上最高的 window 个节点，自上而下 compose；每个节点的 parent 此时已干净或为空。
+        for (size_t index = height, bottom = height - std::min(height, window); index-- > bottom;) {
+            const SceneComponent* node = chain[index % window];
+            const Eigen::Matrix4f local = node->ComputeLocalMatrix();
+            if (node->_parent)
+                node->_worldMatrix = node->_parent->_worldMatrix * local;
+            else
+                node->_worldMatrix = local;
+            node->_worldDirty = false;
+        }
     }
+}
+Eigen::Matrix4f SceneComponent::GetWorldMatrix() const noexcept {
+    if (_worldDirty) RefreshWorldMatrix();
     return _worldMatrix;
 }
 Eigen::Vector3f SceneComponent::GetWorldLocation() const noexcept { return GetWorldMatrix().block<3, 1>(0, 3); }

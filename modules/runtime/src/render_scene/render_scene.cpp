@@ -1,10 +1,10 @@
 #include <radray/runtime/render_scene/render_scene.h>
 
-#include "static_mesh_proxy.h"
+#include <mutex>
+#include <utility>
 
 #include <radray/logger.h>
 #include <radray/profiler.h>
-#include <mutex>
 
 namespace radray {
 
@@ -43,13 +43,18 @@ void RenderScene::Apply(const SceneUpdateBatch& batch) noexcept {
     for (ShapeId id : batch.RemoveShapes) {
         if (!ContainsShape(id)) RADRAY_ABORT("Invalid shape removal");
         auto& slot = _shapes[id.Index];
-        if (slot.Mesh) {
-            const ShapeId moved = _staticMeshes.back();
-            _staticMeshes[slot.MeshIndex] = moved;
-            _shapes[moved.Index].MeshIndex = slot.MeshIndex;
+        if (slot.MeshIndex != kNoMesh) {
+            const uint32_t removed = slot.MeshIndex;
+            const uint32_t last = static_cast<uint32_t>(_staticMeshes.size() - 1);
+            if (removed != last) {
+                const ShapeId moved = _staticMeshes[last];
+                _staticMeshes[removed] = moved;
+                _staticMeshProxies[removed] = std::move(_staticMeshProxies[last]);
+                _shapes[moved.Index].MeshIndex = removed;
+            }
             _staticMeshes.pop_back();
-            slot.Mesh.reset();
-            slot.MeshIndex = std::numeric_limits<size_t>::max();
+            _staticMeshProxies.pop_back();
+            slot.MeshIndex = kNoMesh;
         }
         slot.Alive = false;
         if (slot.Generation == std::numeric_limits<uint32_t>::max()) RADRAY_ABORT("Shape generation exhausted");
@@ -66,17 +71,17 @@ void RenderScene::Apply(const SceneUpdateBatch& batch) noexcept {
     for (const auto& update : batch.MeshStates) {
         if (!ContainsShape(update.Id)) RADRAY_ABORT("Invalid static mesh state update");
         auto& slot = _shapes[update.Id.Index];
-        if (slot.Mesh) {
-            slot.Mesh->Replace(update);
+        if (slot.MeshIndex != kNoMesh) {
+            _staticMeshProxies[slot.MeshIndex].Replace(update);
         } else {
-            slot.Mesh = make_unique<StaticMeshProxy>(update);
-            slot.MeshIndex = _staticMeshes.size();
+            slot.MeshIndex = static_cast<uint32_t>(_staticMeshes.size());
             _staticMeshes.push_back(update.Id);
+            _staticMeshProxies.emplace_back(update);
         }
     }
     for (const auto& update : batch.Transforms) {
-        if (!ContainsShape(update.Id) || !_shapes[update.Id.Index].Mesh) RADRAY_ABORT("Invalid shape transform update");
-        _shapes[update.Id.Index].Mesh->SetTransform(update.LocalToWorld);
+        if (!ContainsShape(update.Id) || _shapes[update.Id.Index].MeshIndex == kNoMesh) RADRAY_ABORT("Invalid shape transform update");
+        _staticMeshProxies[_shapes[update.Id.Index].MeshIndex].SetTransform(update.LocalToWorld);
     }
     if (batch.LightsChanged)
         _lights.Assign(batch.Lights);
@@ -90,7 +95,7 @@ bool RenderScene::ContainsShape(ShapeId id) const noexcept {
 }
 
 std::optional<StaticMeshSceneView> RenderScene::GetStaticMesh(ShapeId id) const noexcept {
-    if (!ContainsShape(id) || !_shapes[id.Index].Mesh) return std::nullopt;
-    return _shapes[id.Index].Mesh->GetView();
+    if (!ContainsShape(id) || _shapes[id.Index].MeshIndex == kNoMesh) return std::nullopt;
+    return _staticMeshProxies[_shapes[id.Index].MeshIndex].GetView();
 }
 }  // namespace radray

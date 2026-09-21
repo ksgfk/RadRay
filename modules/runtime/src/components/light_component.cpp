@@ -56,20 +56,24 @@ void LightComponent::DestroyRenderState(SceneWriter& writer) {
     writer.RemoveLight(_lightId);
     _lightId = {};
 }
-void LightComponent::CollectRenderUpdates(SceneWriter& writer, RenderDirtyFlags) { writer.SetLight(CaptureLightState()); }
-LightData LightComponent::CaptureLightState() const noexcept {
+void LightComponent::CollectRenderUpdates(SceneWriter& writer, RenderDirtyFlags) { writer.SetLight(_lightId, CaptureLightState()); }
+
+LightCommonData LightComponent::CaptureCommon() const noexcept {
     LightCommonData common;
-    common.Id = _lightId;
     common.Color = _lightColor;
     common.Intensity = _intensity;
     common.AffectsWorld = _affectsWorld;
     common.CastShadow = _castShadow;
+    return common;
+}
+
+LightData LightComponent::CaptureLightState() const noexcept {
     const auto direction = GetLightDirection();
     switch (GetLightType()) {
-        case LightType::Directional: return DirectionalLightData{common, direction};
-        case LightType::Point: return PointLightData{common, {GetLightPosition().head<3>(), direction}};
-        case LightType::Spot: return SpotLightData{common, {GetLightPosition().head<3>(), direction}};
-        case LightType::Rect: return RectLightData{common, GetLightPosition().head<3>(), direction};
+        case LightType::Directional: return DirectionalLightData{CaptureCommon(), direction};
+        case LightType::Point: return PointLightData{CaptureCommon(), {GetLightPosition().head<3>(), direction}};
+        case LightType::Spot: return SpotLightData{CaptureCommon(), {GetLightPosition().head<3>(), direction}};
+        case LightType::Rect: return RectLightData{CaptureCommon(), GetLightPosition().head<3>(), direction};
         default: RADRAY_ABORT("Invalid light type");
     }
 }

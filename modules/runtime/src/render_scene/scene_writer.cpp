@@ -115,10 +115,9 @@ void SceneWriter::RemoveLight(LightId id) {
     _lightIds.Destroy(handle);
 }
 
-void SceneWriter::SetLight(const LightData& light) {
-    const auto id = std::visit([](const auto& value) { return value.Common.Id; }, light);
+void SceneWriter::SetLight(LightId id, const LightData& light) {
     if (_closing || !_lightIds.IsAlive({id.Index, id.Generation})) RADRAY_ABORT("Invalid scene writer light");
-    _lights.Set(light);
+    _lights.Set(id, light);
     _lightsDirty = true;
 }
 

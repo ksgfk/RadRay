@@ -80,6 +80,9 @@ KeepLocal 保留局部 TRS；KeepWorld 要求新局部矩阵可以精确表达�
 框架在 Primitive/Light 上自动入队 Transform dirty；普通 SceneComponent 改变换不产生渲染更新。
 `OnTransformChanged` 只保留业务副作用。`GetWorld` 在注册时缓存 World 指针，不再经 Actor 跳转。`GetWorldMatrix` 在缓存脏时沿 parent chain 重算
 （compose local 一次，链上每个祖先只算一次后缓存），干净时直接返回缓存；返回值始终等价于当场递归求值。
+重算走迭代实现：先自下而上收集脏链，再自上而下 compose，链长超过固定窗口时分多轮从顶部收敛，
+栈消耗与层级深度无关。不要改回按 parent 递归，Debug 下单帧因 Eigen 乘法展开可达约 10 KB，
+几百层即耗尽默认 1 MB 栈。
 解除层级会把幸存子树标脏，由懒重建刷新。缓存代价是每个 SceneComponent 64 B 矩阵；该矩阵排在 TRS/入队热数据之后，
 避免 Mutate 写下脏标志时连带加载。静态场景因此多付的 Tick 成本由跳过空闲派发回收，不作为保留缓存的理由。
 派生 `OnTransformChanged` 走内部 `MarkRenderDirty` 时不再重复做线程检查；公开 `MarkRender*Dirty` 仍
@@ -115,7 +118,7 @@ State 覆盖最终 transform，transform-only 更新不重建 mesh。Shape 更�
 
 SceneWriter 分别维护 Shape 状态、Light 身份池与 LightSceneData 最终值；身份池不存光源参数，
 Light 没有逐项 dirty/删除队列。CreateLight 只保留 GT 身份，首次 SetLight 后才进入光源集合。
-任一 SetLight 或已有数据的 RemoveLight 将集合标脏，Flush 把完整的四类光源数组按值封存到 flight；
+任一 SetLight 或已有数据的 RemoveLight 将集合标脏，Flush 把完整的四类光源表按值封存到 flight；
 未改变的光源也包含在内，但不重新调用其组件捕获。
 未捕获便删除的组件不会发布默认光源；独立 writer 在同次封包前 SetLight 再 RemoveLight，允许交付最终空集合。
 SceneUpdateBatch 的 LightsChanged=false 表示保留 RT 光源，true 表示全量替换，空列表明确清除所有光源。
@@ -126,29 +129,35 @@ StaticMeshDescription 持有 AssetId、bounds 并借用 `span<const StaticMeshSe
 这些借用由同一资产 owner 保护，实例不复制 sections。Loading、失败或无效 mesh 产生空几何。
 组件 Ready 通知检查 Live、注册、SceneId、ShapeId 和 mesh 请求身份；改绑/注销停止旧等待而不取消共享加载。
 
-RenderScene 按 Shape Remove → Create → Mesh → Transform → Light 全量替换应用。ShapeSlot 只保存几何身份、
-StaticMeshProxy 与稠密身份位置；GetStaticMeshes 返回 ShapeId，包含资产未就绪的已登记 Mesh。
+RenderScene 按 Shape Remove → Create → Mesh → Transform → Light 全量替换应用。ShapeSlot 只保存几何身份
+与稠密下标，不持有几何数据；StaticMeshProxy 按值存放在与 ShapeId 平行的稠密数组，逐 shape 不做堆分配，
+移除交换末项填补空位，因此 Apply 可能移动记录。GetStaticMeshes 返回 ShapeId，包含资产未就绪的已登记 Mesh。
 StaticMeshProxy 更新 matrix、world bounds、ReverseCulling，支持负缩放和仿射 shear。齐次行与 isfinite 的
 逐条契约校验只在 Debug 执行（`RADRAY_IS_DEBUG`）；Release 信任 writer 封包内容，直接写矩阵并计算 AABB 与行列式。
-LightSceneData 直接拥有四种类型的稠密数组，GT 最终值、flight 快照与 RT 数据均使用同一紧凑布局：
+LightSceneData 直接拥有四种类型的 LightTable，GT 最终值、flight 快照与 RT 数据均使用同一紧凑布局。
+每张表是 Ids 与 Data 两列，Ids[row] 拥有 Data[row]，两列长度始终相等：
 
-| 数组元素 | 保存的数据 |
+| 表的 Data 元素 | 保存的数据 |
 |---|---|
 | DirectionalLightData | Common、世界方向 |
 | PointLightData | Common、PointLightParameters |
 | SpotLightData | Common、PointLightParameters、内外半锥角 |
 | RectLightData | Common、世界位置/方向、衰减半径与衰减模式/指数 |
 
-Common 包含 LightId、颜色/强度、阴影 bias 与影响世界/投影开关。PointLightParameters 保存世界位置/方向、
-衰减参数和光源半径/软半径/长度；Point 的方向仍用于非零长度光源。位置使用 Vector3f，不保存恒为 1 的齐次分量。
-这些是 CPU 数据，不与 GPU buffer 的对齐和 packing 绑定。Rect 仍是预留数据能力，尚无 RectLightComponent
-和面积几何参数，不代表已实现完整面积光渲染。
+Common 只保存种类无关参数：颜色/强度与影响世界/投影开关。身份在 Ids 列，不嵌在记录里，因此按身份查找只
+扫描 8 字节连续的 id 列，不跨步走过整条记录。阴影 bias 归产出它的类型：PointLightParameters 保存世界位置/
+方向、衰减参数、光源半径/软半径/长度与阴影 depth/normal bias，Point 的方向仍用于非零长度光源；
+DirectionalLightComponent 的 CSM 配置（级联、阴影距离/分辨率、bias、PCF 模式）尚未接入 scene，
+方向光记录当前不携带阴影参数。位置使用 Vector3f，不保存恒为 1 的齐次分量。这些是 CPU 数据，不与 GPU buffer
+的对齐和 packing 绑定。Rect 仍是预留数据能力，尚无 RectLightComponent 和面积几何参数，不代表已实现完整
+面积光渲染。
 
-数组类型决定光源类型，每条记录不再保存 Type 标签或其他类型专属字段。LightData 是只在单灯捕获与 SetLight
-调用时使用的 variant；不保存 vector<variant>，因此持久数据不按最大光源记录尺寸占位。SetLight 在线性查找后
-原位替换，类型改变时从旧数组移除并加入新数组；RemoveLight 交换末项填补空位。类型变化保留 LightId，
-数组位置与顺序不表示身份。GetLights 返回只读分类数据及类型化查找；GetLight 仅借用 Common 参数。
-LightsChanged 时复制完整分类数组并复用容量，RT 不再逐条按 Type 分组。快照中的身份必须有效且唯一。
+表的类型决定光源类型，每条记录不再保存 Type 标签、身份或其他类型专属字段。LightData 是只在单灯捕获与
+SetLight 调用时使用的 variant，身份由调用方另行传入；不保存 vector<variant>，因此持久数据不按最大光源记录
+尺寸占位。组件侧由叶子直接构造自己的类型化记录，不再基类造 variant 再逐层 visit 改写。SetLight 在 id 列
+线性查找后原位替换，类型改变时从旧表移除并加入新表；RemoveLight 两列一起交换末项填补空位。类型变化保留
+LightId，行号与顺序不表示身份。GetLights 返回只读分类数据及类型化查找；GetLight 仅借用 Common 参数。
+LightsChanged 时复制完整分类表并复用容量，RT 不再逐条按 Type 分组。快照中的身份必须有效且唯一，两列长度必须一致。
 RT 不维护 Light 槽位映射或代次墓碑；GetLight/ContainsLight 线性扫描少量光源并匹配完整 LightId，
 仅在 GT 保留但没有参数的身份在 RT 不可见。旧 ID 更新由 writer 校验拒绝，旧快照由交付序号阻止重复/乱序消费。
 RT 或停止后的检查可借用数据，普通借用截止到下一 Apply。并行 CPU 读者在 RT 派发前获取 AcquireRead lease，

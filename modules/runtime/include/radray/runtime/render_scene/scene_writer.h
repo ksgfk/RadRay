@@ -25,7 +25,7 @@ public:
     /// Reserves an identity; the light enters snapshots after its first SetLight.
     LightId CreateLight();
     void RemoveLight(LightId id);
-    void SetLight(const LightData& light);
+    void SetLight(LightId id, const LightData& light);
 
 private:
     friend class RenderSystem;

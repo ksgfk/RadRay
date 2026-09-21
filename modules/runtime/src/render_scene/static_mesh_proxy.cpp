@@ -1,4 +1,4 @@
-#include "static_mesh_proxy.h"
+#include <radray/runtime/render_scene/static_mesh_proxy.h>
 
 #include <algorithm>
 #include <cmath>

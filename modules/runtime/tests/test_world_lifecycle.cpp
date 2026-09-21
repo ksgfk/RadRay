@@ -509,15 +509,15 @@ TEST(WorldLifecycle, LightUsesOneTypedUpdateAndNoMeshState) {
     test::PrepareScene(world, renderer, 0);
     const auto& batch = test::SceneBatch(renderer, sceneId, 0);
     ASSERT_EQ(batch.Lights.Count(), 1u);
-    ASSERT_EQ(batch.Lights.SpotLights.size(), 1u);
+    ASSERT_EQ(batch.Lights.SpotLights.Size(), 1u);
     EXPECT_TRUE(batch.MeshStates.empty());
     EXPECT_TRUE(batch.Transforms.empty());
-    EXPECT_FLOAT_EQ(batch.Lights.SpotLights[0].Common.Intensity, 99);
-    EXPECT_FLOAT_EQ(batch.Lights.SpotLights[0].Point.Position.x(), 99);
-    const auto id = batch.Lights.SpotLights[0].Common.Id;
+    EXPECT_FLOAT_EQ(batch.Lights.SpotLights.Data[0].Common.Intensity, 99);
+    EXPECT_FLOAT_EQ(batch.Lights.SpotLights.Data[0].Point.Position.x(), 99);
+    const auto id = batch.Lights.SpotLights.Ids[0];
     test::ConsumeFrame(renderer, 0);
     EXPECT_TRUE(renderer.GetSceneRT(sceneId)->GetLights().GetSpotLight(id));
-    EXPECT_EQ(renderer.GetSceneRT(sceneId)->GetLights().SpotLights.size(), 1u);
+    EXPECT_EQ(renderer.GetSceneRT(sceneId)->GetLights().SpotLights.Size(), 1u);
     test::CompleteFrame(renderer, 0);
     light->SetIntensity(99);
     light->SetRelativeLocation({99, 2, 3});
@@ -528,7 +528,7 @@ TEST(WorldLifecycle, LightUsesOneTypedUpdateAndNoMeshState) {
     actor->RemoveComponent(light);
     test::PrepareScene(world, renderer, 0);
     test::ConsumeFrame(renderer, 0);
-    EXPECT_TRUE(renderer.GetSceneRT(sceneId)->GetLights().SpotLights.empty());
+    EXPECT_TRUE(renderer.GetSceneRT(sceneId)->GetLights().SpotLights.Empty());
     test::CompleteFrame(renderer, 0);
 }
 

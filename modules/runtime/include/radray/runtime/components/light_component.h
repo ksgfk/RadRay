@@ -33,6 +33,8 @@ protected:
     void CreateRenderState(SceneWriter& writer) override;
     void DestroyRenderState(SceneWriter& writer) override;
     void CollectRenderUpdates(SceneWriter& writer, RenderDirtyFlags dirty) override;
+    /// Type-independent parameters; each leaf builds its own typed record around these.
+    LightCommonData CaptureCommon() const noexcept;
     virtual LightData CaptureLightState() const noexcept;
 
 private:

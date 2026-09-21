@@ -10,19 +10,9 @@
 #include <radray/types.h>
 #include <radray/runtime/static_mesh.h>
 #include <radray/runtime/render_scene/scene_update.h>
+#include <radray/runtime/render_scene/static_mesh_proxy.h>
 
 namespace radray {
-
-/// RT borrow until the next Apply or RenderScene destruction; asset reads require the RenderScene's GT lifetime owner.
-struct StaticMeshSceneView {
-    const StaticMeshDescription& Mesh;
-    const Eigen::Matrix4f& LocalToWorld;
-    const Eigen::Vector3f& WorldBoundsMin;
-    const Eigen::Vector3f& WorldBoundsMax;
-    bool ReverseCulling;
-};
-
-class StaticMeshProxy;
 
 /// A single persistent CPU scene. RT owns Apply and reads; GT may inspect only after RT stops.
 class RenderScene {
@@ -63,15 +53,21 @@ public:
     std::span<const ShapeId> GetStaticMeshes() const noexcept { return _staticMeshes; }
 
 private:
+    static constexpr uint32_t kNoMesh = std::numeric_limits<uint32_t>::max();
+
+    /// Identity and routing only; geometry lives in the dense arrays below. Randomly accessed by
+    /// every transform update, so keep it small.
     struct ShapeSlot {
         // Live identity, or the minimum generation accepted by the next creation.
         uint32_t Generation{0};
+        // Position in _staticMeshes / _staticMeshProxies, or kNoMesh when no geometry is registered.
+        uint32_t MeshIndex{kNoMesh};
         bool Alive{false};
-        unique_ptr<StaticMeshProxy> Mesh;
-        size_t MeshIndex{std::numeric_limits<size_t>::max()};
     };
     vector<ShapeSlot> _shapes;
+    /// Parallel dense arrays: _staticMeshes[i] owns _staticMeshProxies[i]. Removal swaps in the last entry.
     vector<ShapeId> _staticMeshes;
+    vector<StaticMeshProxy> _staticMeshProxies;
     LightSceneData _lights;
     mutable std::mutex _readers;
     mutable std::condition_variable _readersDone;

@@ -40,6 +40,8 @@ public:
 
 protected:
     LightData CaptureLightState() const noexcept override;
+    /// World-space placement plus the point/spot shared parameters, including shadow bias.
+    PointLightParameters CapturePointParameters() const noexcept;
 
 private:
     float _attenuationRadius{1000.0f};

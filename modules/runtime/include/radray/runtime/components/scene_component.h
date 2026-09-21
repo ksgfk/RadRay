@@ -97,6 +97,9 @@ private:
     void UnlinkHierarchy(Nullable<vector<SceneComponent*>*> detachedChildren) noexcept;
 
     Eigen::Matrix4f ComputeLocalMatrix() const noexcept;
+    /// 重建本节点的世界矩阵缓存：自下而上收集脏的 parent chain，再自上而下 compose。
+    /// 迭代实现，栈消耗与层级深度无关；只在 `_worldDirty` 为真时调用。
+    void RefreshWorldMatrix() const noexcept;
     void NotifyTransformChanged();
     /// 渲染脏标记的子树遍历：由 NotifyTransformChanged 在唯一一层 callback scope 内调用。
     /// 不做缓存标脏（入口已整树标脏），也不重复开 callback scope。
@@ -119,7 +122,7 @@ private:
 
     // 变换缓存（memo）：无子节点的 TRS 由 NotifyTransformChanged 直接置 _worldDirty；
     // 有后代时 InvalidateWorldSubtree 整树标脏。GetWorldMatrix 脏则 compose local
-    // 并沿 parent chain 求值后缓存，干净时直接返回。契约见 docs/architecture/render-framework.md。
+    // 并沿 parent chain 迭代求值后缓存，干净时直接返回。契约见 docs/architecture/render-framework.md。
     mutable Eigen::Matrix4f _worldMatrix{Eigen::Matrix4f::Identity()};
 };
 
