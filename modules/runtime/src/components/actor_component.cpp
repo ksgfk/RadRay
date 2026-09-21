@@ -13,11 +13,13 @@ void ActorComponent::CheckCanModify() const noexcept {
     if (auto world = GetWorld()) world->CheckCanModify();
 }
 
-Nullable<World*> ActorComponent::GetWorld() const noexcept {
-    if (_owner) {
-        return _owner.Get()->GetWorld();
+void ActorComponent::SetTickEnabled(bool enabled) noexcept {
+    CheckCanModify();
+    if (_tickEnabled == enabled) return;
+    _tickEnabled = enabled;
+    if (auto* owner = _owner.Get(); owner && _registration == ComponentRegistration::Registered) {
+        owner->NoteTickingComponent(enabled ? 1 : -1);
     }
-    return nullptr;
 }
 
 }  // namespace radray

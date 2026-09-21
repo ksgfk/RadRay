@@ -161,9 +161,45 @@ Eigen::Matrix<T, 3, 3> LookRotation(const Eigen::Vector<T, 3>& forward, const Ei
 template <class T>
 requires(std::is_floating_point_v<T>)
 Eigen::Matrix<T, 4, 4> ComposeTransform(const Eigen::Vector<T, 3>& translation, const Eigen::Quaternion<T>& rotation, const Eigen::Vector<T, 3>& scale) noexcept {
-    Eigen::Matrix<T, 4, 4> m = Eigen::Matrix<T, 4, 4>::Identity();
-    m.template block<3, 3>(0, 0) = rotation.toRotationMatrix() * Eigen::Scaling(scale).toDenseMatrix();
-    m.template block<3, 1>(0, 3) = translation;
+    // 手写展开代替 Eigen 表达式模板（toRotationMatrix * Scaling）：场景同步对每个 dirty 组件调用一次，
+    // 表达式模板的临时对象在热路径上是主要成本。对有限输入与旧实现逐位一致（列主序 data()[c * 4 + r]）。
+    const T qx = rotation.x();
+    const T qy = rotation.y();
+    const T qz = rotation.z();
+    const T qw = rotation.w();
+    const T tx = T(2) * qx;
+    const T ty = T(2) * qy;
+    const T tz = T(2) * qz;
+    const T twx = tx * qw;
+    const T twy = ty * qw;
+    const T twz = tz * qw;
+    const T txx = tx * qx;
+    const T txy = ty * qx;
+    const T txz = tz * qx;
+    const T tyy = ty * qy;
+    const T tyz = tz * qy;
+    const T tzz = tz * qz;
+    const T sx = scale.x();
+    const T sy = scale.y();
+    const T sz = scale.z();
+    Eigen::Matrix<T, 4, 4> m;
+    T* d = m.data();
+    d[0] = (T(1) - (tyy + tzz)) * sx;
+    d[1] = (txy + twz) * sx;
+    d[2] = (txz - twy) * sx;
+    d[3] = T(0);
+    d[4] = (txy - twz) * sy;
+    d[5] = (T(1) - (txx + tzz)) * sy;
+    d[6] = (tyz + twx) * sy;
+    d[7] = T(0);
+    d[8] = (txz + twy) * sz;
+    d[9] = (tyz - twx) * sz;
+    d[10] = (T(1) - (txx + tyy)) * sz;
+    d[11] = T(0);
+    d[12] = translation.x();
+    d[13] = translation.y();
+    d[14] = translation.z();
+    d[15] = T(1);
     return m;
 }
 

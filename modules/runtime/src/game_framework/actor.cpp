@@ -37,6 +37,7 @@ ActorComponent* Actor::AddComponent(unique_ptr<ActorComponent> component, Nullab
     const auto handle = _componentIds.Emplace(raw);
     raw->_id = {_id, handle.Index, handle.Generation};
     raw->_owner = this;
+    raw->_world = _world;
     _ownedComponents.push_back(std::move(component));
     if (parent && !scene->ReparentNow(parent, rule)) RADRAY_ABORT("Initial attachment cannot preserve the requested transform");
     if (_world) RegisterComponent(*raw);
@@ -71,6 +72,7 @@ LifecycleRequestResult Actor::RemoveComponent(ActorComponent* component) {
         if (id.Generation == std::numeric_limits<uint32_t>::max()) RADRAY_ABORT("Component generation exhausted");
         _componentIds.Destroy({id.Index, id.Generation});
         component->_owner = nullptr;
+        component->_world = nullptr;
         std::erase_if(_ownedComponents, [component](const auto& value) { return value.get() == component; });
     }
     return LifecycleRequestResult::Accepted;
@@ -90,15 +92,35 @@ LifecycleRequestResult Actor::RequestSetRootComponent(Nullable<SceneComponent*> 
     return LifecycleRequestResult::Accepted;
 }
 
+void Actor::SetTickEnabled(bool enabled) noexcept {
+    if (_world) _world->CheckCanModify();
+    if (_tickEnabled == enabled) return;
+    _tickEnabled = enabled;
+    if (_world) _world->RefreshTicking(*this);
+}
+
+void Actor::NoteTickingComponent(int32_t delta) noexcept {
+    if (delta > 0) {
+        _tickingComponents += static_cast<uint32_t>(delta);
+    } else {
+        const auto sub = static_cast<uint32_t>(-delta);
+        if (_tickingComponents < sub) RADRAY_ABORT("Ticking component count underflow");
+        _tickingComponents -= sub;
+    }
+    if (_world) _world->RefreshTicking(*this);
+}
+
 void Actor::DispatchTick(float deltaTime, uint64_t epoch) {
     if (!IsLive() || _firstTickEpoch > epoch) return;
+    if (!_tickEnabled && _tickingComponents == 0) return;
     const size_t count = _ownedComponents.size();
     _world->BeginCallback();
     auto guard = MakeScopeGuard([this]() noexcept { _world->EndCallback(); });
-    Tick(deltaTime);
+    if (_tickEnabled) Tick(deltaTime);
+    if (_tickingComponents == 0) return;
     for (size_t i = 0; i < count && IsLive(); ++i) {
         auto* component = _ownedComponents[i].get();
-        if (component->IsLive() && component->_firstTickEpoch <= epoch && component->IsRegistered()) {
+        if (component->_tickEnabled && component->IsLive() && component->_firstTickEpoch <= epoch && component->IsRegistered()) {
             component->TickComponent(deltaTime);
         }
     }
@@ -107,6 +129,7 @@ void Actor::DispatchTick(float deltaTime, uint64_t epoch) {
 void Actor::RegisterComponent(ActorComponent& component) {
     if (!IsLive() || !component.IsLive() || component._registration != ComponentRegistration::Unregistered) return;
     if (_world->GetCurrentTickEpoch() == std::numeric_limits<uint64_t>::max()) RADRAY_ABORT("Tick epoch exhausted");
+    component._world = _world;
     component._firstTickEpoch = _world->GetCurrentTickEpoch() + 1;
     component._registration = ComponentRegistration::Registering;
     _world->BeginCallback();
@@ -114,17 +137,20 @@ void Actor::RegisterComponent(ActorComponent& component) {
     if (auto scene = dynamic_cast<SceneComponent*>(&component)) _world->CreateComponentRenderState(*scene);
     component.OnRegister();
     component._registration = ComponentRegistration::Registered;
+    if (component._tickEnabled) NoteTickingComponent(1);
 }
 
 void Actor::UnregisterComponent(ActorComponent& component) {
     if (component._registration == ComponentRegistration::Unregistered) return;
     if (component._registration != ComponentRegistration::Registered) RADRAY_ABORT("Reentrant component unregistration");
+    if (component._tickEnabled) NoteTickingComponent(-1);
     component._registration = ComponentRegistration::Unregistering;
     _world->BeginCallback();
     auto guard = MakeScopeGuard([this]() noexcept { _world->EndCallback(); });
     if (auto scene = dynamic_cast<SceneComponent*>(&component)) _world->DestroyComponentRenderState(*scene);
     component.OnUnregister();
     component._registration = ComponentRegistration::Unregistered;
+    component._world = nullptr;
 }
 
 void Actor::RegisterAllComponents() {
@@ -152,7 +178,10 @@ void Actor::Teardown() {
         auto guard = MakeScopeGuard([this]() noexcept { _world->EndCallback(); });
         OnDestroyed();
     }
-    for (const auto& component : _ownedComponents) component->_owner = nullptr;
+    for (const auto& component : _ownedComponents) {
+        component->_owner = nullptr;
+        component->_world = nullptr;
+    }
     _ownedComponents.clear();
     _world = nullptr;
 }

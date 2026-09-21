@@ -1,5 +1,6 @@
 #include "world_render_bridge.h"
 
+#include <algorithm>
 #include <radray/profiler.h>
 #include <radray/scope_guard.h>
 #include <radray/runtime/game_framework/world.h>
@@ -53,8 +54,8 @@ void WorldRenderBridge::Disconnect() {
 void WorldRenderBridge::Create(SceneComponent& component) {
     CheckCanModify();
     if ((_state != RenderConnectionState::Connecting && _state != RenderConnectionState::Connected) || !component.IsLive()) return;
-    if (component._renderConnection) {
-        if (*component._renderConnection != GetSceneId()) RADRAY_ABORT("Component has another render connection");
+    if (component._renderConnection.IsValid()) {
+        if (component._renderConnection != GetSceneId()) RADRAY_ABORT("Component has another render connection");
         return;
     }
     component._renderConnection = GetSceneId();
@@ -65,9 +66,9 @@ void WorldRenderBridge::Create(SceneComponent& component) {
 
 void WorldRenderBridge::Destroy(SceneComponent& component) {
     CheckCanModify();
-    if (!component._renderConnection) return;
-    if (*component._renderConnection != GetSceneId()) RADRAY_ABORT("Stale component render connection");
-    component._renderConnection.reset();
+    if (!component._renderConnection.IsValid()) return;
+    if (component._renderConnection != GetSceneId()) RADRAY_ABORT("Stale component render connection");
+    component._renderConnection = {};
     Remove(component);
     _world.BeginCallback();
     auto guard = MakeScopeGuard([this]() noexcept { _world.EndCallback(); });
@@ -76,8 +77,6 @@ void WorldRenderBridge::Destroy(SceneComponent& component) {
 }
 
 void WorldRenderBridge::Queue(SceneComponent& component, RenderDirtyFlag flag) {
-    CheckCanModify();
-    if ((_state != RenderConnectionState::Connecting && _state != RenderConnectionState::Connected) || !component.IsLive() || !component._renderConnection) return;
     if (component._renderQueueIndex == std::numeric_limits<size_t>::max()) {
         component._renderQueueIndex = _updates.size();
         _updates.push_back(&component);
@@ -103,13 +102,22 @@ void WorldRenderBridge::Collect() {
     _collecting = true;
     _renderer.SetCollecting(true);
     auto guard = MakeScopeGuard([this]() noexcept { _renderer.SetCollecting(false); _collecting = false; });
-    while (!_updates.empty()) {
-        auto& component = *_updates.back();
-        if (component.IsLive()) {
-            component.CollectRenderUpdates(_writer, component._renderDirty);
-        }
-        Remove(component);
+    // 队列较大时按组件地址排序后顺序处理：Mutate 的入队顺序是随机的，排序把对组件与 writer 热状态的
+    // 随机访问变成近似按分配顺序的连续访问。小队的工作集仍在缓存内，排序只是纯成本，故设阈值。
+    // Collect 期间禁止入队/出队（CheckCanModify），队列稳定，可以安全整体排序。
+    if (_updates.size() >= kCollectSortThreshold) {
+        std::sort(_updates.begin(), _updates.end(), [](const SceneComponent* lhs, const SceneComponent* rhs) noexcept {
+            return reinterpret_cast<uintptr_t>(lhs) < reinterpret_cast<uintptr_t>(rhs);
+        });
     }
+    for (auto* component : _updates) {
+        if (component->IsLive()) {
+            component->CollectRenderUpdates(_writer, component->_renderDirty);
+        }
+        component->_renderQueueIndex = std::numeric_limits<size_t>::max();
+        component->_renderDirty = {};
+    }
+    _updates.clear();
 }
 
 }  // namespace radray

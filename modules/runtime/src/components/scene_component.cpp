@@ -10,28 +10,61 @@ namespace radray {
 
 void SceneComponent::MarkRenderDirty(RenderDirtyFlag flag) {
     const auto registration = GetRegistrationState();
-    if (!IsLive() || !_renderConnection || (registration != ComponentRegistration::Registering && registration != ComponentRegistration::Registered)) return;
-    GetWorld()->QueueRenderUpdate(*this, flag);
+    const auto lifecycle = GetLifecycle();
+    if (!_renderConnection.IsValid() || (registration != ComponentRegistration::Registering && registration != ComponentRegistration::Registered)) return;
+    if (lifecycle != ObjectLifecycle::Live && lifecycle != ObjectLifecycle::Initializing) return;
+    if (auto world = GetWorld()) world->EnqueueRenderDirty(*this, flag);
 }
-void SceneComponent::MarkRenderStateDirty() { MarkRenderDirty(RenderDirtyFlag::State); }
-void SceneComponent::MarkRenderTransformDirty() { MarkRenderDirty(RenderDirtyFlag::Transform); }
-void SceneComponent::MarkRenderDynamicDataDirty() { MarkRenderDirty(RenderDirtyFlag::DynamicData); }
+void SceneComponent::MarkRenderStateDirty() {
+    CheckCanModify();
+    MarkRenderDirty(RenderDirtyFlag::State);
+}
+void SceneComponent::MarkRenderTransformDirty() {
+    CheckCanModify();
+    MarkRenderDirty(RenderDirtyFlag::Transform);
+}
+void SceneComponent::MarkRenderDynamicDataDirty() {
+    CheckCanModify();
+    MarkRenderDirty(RenderDirtyFlag::DynamicData);
+}
 
 void SceneComponent::NotifyTransformChanged() {
-    if (!IsLive()) return;
-    const size_t count = _children.size();
+    const bool leaf = _children.empty();
+    if (leaf) {
+        _worldDirty = true;
+    } else {
+        InvalidateWorldSubtree();
+    }
     auto world = GetWorld();
     if (world) world->BeginCallback();
     auto guard = MakeScopeGuard([world]() noexcept { if (world) world->EndCallback(); });
+    if (leaf) {
+        if (_autoMarkTransformDirty) MarkRenderDirty(RenderDirtyFlag::Transform);
+        OnTransformChanged();
+    } else {
+        NotifySubtree();
+    }
+}
+
+void SceneComponent::NotifySubtree() {
+    if (!IsLive()) return;
+    const size_t count = _children.size();
+    if (_autoMarkTransformDirty) MarkRenderDirty(RenderDirtyFlag::Transform);
     OnTransformChanged();
     for (size_t i = 0; i < count && IsLive(); ++i) {
-        auto* child = _children[i];
-        child->NotifyTransformChanged();
+        _children[i]->NotifySubtree();
+    }
+}
+
+void SceneComponent::InvalidateWorldSubtree() noexcept {
+    _worldDirty = true;
+    for (auto* child : _children) {
+        child->InvalidateWorldSubtree();
     }
 }
 
 SceneComponent::~SceneComponent() noexcept {
-    if (_renderConnection) RADRAY_ABORT("SceneComponent requires explicit render disconnection");
+    if (_renderConnection.IsValid()) RADRAY_ABORT("SceneComponent requires explicit render disconnection");
     UnlinkHierarchy(nullptr);
 }
 
@@ -57,8 +90,12 @@ Eigen::Matrix4f SceneComponent::ComputeLocalMatrix() const noexcept {
     return ComposeTransform<float>(_relativeLocation, _relativeRotation, _relativeScale);
 }
 Eigen::Matrix4f SceneComponent::GetWorldMatrix() const noexcept {
-    const Eigen::Matrix4f local = ComputeLocalMatrix();
-    return _parent ? (_parent->GetWorldMatrix() * local).eval() : local;
+    if (_worldDirty) {
+        const Eigen::Matrix4f local = ComputeLocalMatrix();
+        _worldMatrix = _parent ? _parent->GetWorldMatrix() * local : local;
+        _worldDirty = false;
+    }
+    return _worldMatrix;
 }
 Eigen::Vector3f SceneComponent::GetWorldLocation() const noexcept { return GetWorldMatrix().block<3, 1>(0, 3); }
 Eigen::Quaternionf SceneComponent::GetWorldRotation() const noexcept {
@@ -162,8 +199,10 @@ void SceneComponent::UnlinkHierarchy(Nullable<vector<SceneComponent*>*> detached
         std::erase(_parent->_children, this);
         _parent = nullptr;
     }
+    _worldDirty = true;
     for (auto* child : _children) {
         child->_parent = nullptr;
+        child->InvalidateWorldSubtree();
         if (detachedChildren) detachedChildren->push_back(child);
     }
     _children.clear();

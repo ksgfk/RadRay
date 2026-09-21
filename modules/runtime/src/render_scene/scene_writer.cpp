@@ -8,8 +8,21 @@ SceneWriter::SceneWriter(SceneId id, uint32_t flightCount) : _id(id), _assets(fl
 SceneWriter::~SceneWriter() noexcept = default;
 
 SceneWriter::ShapeState& SceneWriter::GetShape(ShapeId id) {
-    if (_closing || !_shapes.IsAlive({id.Index, id.Generation})) RADRAY_ABORT("Invalid scene writer shape");
-    return _shapes.Get({id.Index, id.Generation});
+    // 单次 sparse 探测（IsAlive + Get 合并）：Collect 对每个 dirty 形状至少走一次这里。
+    if (auto* state = _shapes.TryGet({id.Index, id.Generation}); state != nullptr && !_closing) {
+        return *state;
+    }
+    RADRAY_ABORT("Invalid scene writer shape");
+}
+
+uint32_t SceneWriter::AllocateColdSlot() noexcept {
+    if (!_freeColdSlots.empty()) {
+        const uint32_t index = _freeColdSlots.back();
+        _freeColdSlots.pop_back();
+        return index;
+    }
+    _shapeAssets.emplace_back();
+    return static_cast<uint32_t>(_shapeAssets.size() - 1);
 }
 
 void SceneWriter::Queue(ShapeState& state) {
@@ -39,7 +52,12 @@ ShapeId SceneWriter::CreateShape() {
 void SceneWriter::RemoveShape(ShapeId id) {
     auto& state = GetShape(id);
     if (state.Sent) _removedShapes.push_back(id);
-    if (state.Asset) _assets.RemoveUse(*state.Asset);
+    if (state.ColdIndex != kNoColdSlot) {
+        auto& cold = _shapeAssets[state.ColdIndex];
+        if (cold.Asset) _assets.RemoveUse(*cold.Asset);
+        cold = {};
+        _freeColdSlots.push_back(state.ColdIndex);
+    }
     Unqueue(state);
     if (id.Generation == std::numeric_limits<uint32_t>::max()) RADRAY_ABORT("Shape generation exhausted");
     _shapes.Destroy({id.Index, id.Generation});
@@ -47,6 +65,8 @@ void SceneWriter::RemoveShape(ShapeId id) {
 
 void SceneWriter::SetStaticMesh(ShapeId id, const StreamingAssetRef<StaticMesh>& mesh, const Eigen::Matrix4f& localToWorld) {
     auto& state = GetShape(id);
+    if (state.ColdIndex == kNoColdSlot) state.ColdIndex = AllocateColdSlot();
+    auto& cold = _shapeAssets[state.ColdIndex];
     StaticMeshStateUpdate update;
     update.Id = id;
     update.LocalToWorld = localToWorld;
@@ -60,21 +80,24 @@ void SceneWriter::SetStaticMesh(ShapeId id, const StreamingAssetRef<StaticMesh>&
         _assets.AddUse(mesh.AsAny());
         next = mesh.GetAssetId();
     }
-    if (state.Asset) _assets.RemoveUse(*state.Asset);
-    state.Asset = next;
-    state.Mesh = std::move(update);
-    state.Transform.reset();
+    if (cold.Asset) _assets.RemoveUse(*cold.Asset);
+    cold.Asset = next;
+    cold.Mesh = std::move(update);
     state.HasMesh = true;
+    state.PendingMesh = true;
+    state.Transform.reset();
     Queue(state);
 }
 
 void SceneWriter::SetTransform(ShapeId id, const Eigen::Matrix4f& localToWorld) {
     auto& state = GetShape(id);
     if (!state.HasMesh) RADRAY_ABORT("Transform requires a static mesh state");
-    if (state.Mesh)
-        state.Mesh->LocalToWorld = localToWorld;
-    else
+    if (state.PendingMesh) {
+        // 同帧已有 mesh 记录：transform 合并进去，封包时只发一条 MeshState。
+        _shapeAssets[state.ColdIndex].Mesh->LocalToWorld = localToWorld;
+    } else {
         state.Transform = localToWorld;
+    }
     Queue(state);
 }
 
@@ -108,11 +131,14 @@ void SceneWriter::Flush(SceneUpdateBatch& batch, uint32_t flightIndex) {
         const auto id = _dirtyShapes.back();
         auto& state = _shapes.Get({id.Index, id.Generation});
         if (!state.Sent) batch.CreateShapes.push_back(state.Id);
-        if (state.Mesh)
-            batch.MeshStates.push_back(std::move(*state.Mesh));
-        else if (state.Transform)
+        if (state.PendingMesh) {
+            auto& cold = _shapeAssets[state.ColdIndex];
+            batch.MeshStates.push_back(std::move(*cold.Mesh));
+            cold.Mesh.reset();
+            state.PendingMesh = false;
+        } else if (state.Transform) {
             batch.Transforms.push_back({state.Id, *state.Transform});
-        state.Mesh.reset();
+        }
         state.Transform.reset();
         state.Sent = true;
         Unqueue(state);

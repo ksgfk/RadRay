@@ -37,6 +37,9 @@ WorldManager 维护唯一 TickEpoch；独立 World 的显式驱动维护自己�
 WorldManager 保留 WorldId 快照，因为 SparseSet 的物理 storage 可能移动。Actor/Component 的 owner 数组
 采用固定入口长度和按索引取对象地址，回调后不保留数组元素引用。回调只允许追加，既有 owner 不移动/删除。
 `Actor::Tick` 是业务 hook；框架 dispatcher 在其返回后仍负责组件 Tick，派生不需要调用基类来驱动组件。
+`Actor::Tick` 与 `ActorComponent::TickComponent` 默认不进入调度。`SetTickEnabled(true)` 后才加入 World 的 ticking 列表；
+空闲 World 的 Tick 只遍历该列表，不扫描全部 Actor。覆盖 Tick / TickComponent 的派生必须自行启用。
+组件启用不等于调用未启用的 `Actor::Tick`。`World::SetTickEnabled` 仍是整 World 暂停。
 每个 hook 返回和下一组件派发前都检查 Live/epoch。递归 Tick、提交或跨线程修改会诊断。
 公开 span 是只读借用，调用者持有期间不能触发导致数组扩容的创建。
 
@@ -71,7 +74,16 @@ S1 先冻结所有 World 的本批销毁、层级和连接请求，再处理父�
 对外注册通知前建立，仅新增节点和边。已注册节点改用 RequestReparent / RequestSetRootComponent，S1 前查询仍见旧关系。
 KeepLocal 保留局部 TRS；KeepWorld 要求新局部矩阵可以精确表达为 TRS，自身/后代、跨 World、奇异矩阵和 shear
 在修改前拒绝，提交时重新验证。删除父组件会解除其他 Actor 的幸存 child，采用 KeepLocal，不误删别人的 owner。
-变换 setter 对完全相同的值短路；通知遍历后代，世界矩阵沿 parent chain 递归计算，目前不缓存世界矩阵。
+变换 setter 对完全相同的值短路；通知遍历后代并标记本子树缓存脏。TRS 变更经 `NotifyTransformChanged`
+统一入口：只做脏标记与渲染脏入队，不做矩阵运算。无子节点时只标脏自身并通知，避免第二次空遍历；
+有后代时仍先 `InvalidateWorldSubtree` 再 `NotifySubtree`，保证回调中读取后代世界矩阵不会落到过期缓存。
+框架在 Primitive/Light 上自动入队 Transform dirty；普通 SceneComponent 改变换不产生渲染更新。
+`OnTransformChanged` 只保留业务副作用。`GetWorld` 在注册时缓存 World 指针，不再经 Actor 跳转。`GetWorldMatrix` 在缓存脏时沿 parent chain 重算
+（compose local 一次，链上每个祖先只算一次后缓存），干净时直接返回缓存；返回值始终等价于当场递归求值。
+解除层级会把幸存子树标脏，由懒重建刷新。缓存代价是每个 SceneComponent 64 B 矩阵；该矩阵排在 TRS/入队热数据之后，
+避免 Mutate 写下脏标志时连带加载。静态场景因此多付的 Tick 成本由跳过空闲派发回收，不作为保留缓存的理由。
+派生 `OnTransformChanged` 走内部 `MarkRenderDirty` 时不再重复做线程检查；公开 `MarkRender*Dirty` 仍
+`CheckCanModify`。`World::CheckCanModify` 的拥有线程检查只在 Debug 执行；Release 仍拒绝 Collect 期间的修改。
 
 World/manager 通过 `RequestRenderConnection` 请求连接，显式 `RequestReconnect` 强制新连接。
 请求目标与已提交 SceneId 可分别查询，不能把请求 Accepted 当作连接已完成。
@@ -116,7 +128,8 @@ StaticMeshDescription 持有 AssetId、bounds 并借用 `span<const StaticMeshSe
 
 RenderScene 按 Shape Remove → Create → Mesh → Transform → Light 全量替换应用。ShapeSlot 只保存几何身份、
 StaticMeshProxy 与稠密身份位置；GetStaticMeshes 返回 ShapeId，包含资产未就绪的已登记 Mesh。
-StaticMeshProxy 更新 matrix、world bounds、ReverseCulling，支持负缩放和仿射 shear。
+StaticMeshProxy 更新 matrix、world bounds、ReverseCulling，支持负缩放和仿射 shear。齐次行与 isfinite 的
+逐条契约校验只在 Debug 执行（`RADRAY_IS_DEBUG`）；Release 信任 writer 封包内容，直接写矩阵并计算 AABB 与行列式。
 LightSceneData 直接拥有四种类型的稠密数组，GT 最终值、flight 快照与 RT 数据均使用同一紧凑布局：
 
 | 数组元素 | 保存的数据 |

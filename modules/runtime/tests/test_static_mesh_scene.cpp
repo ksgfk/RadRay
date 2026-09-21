@@ -411,12 +411,14 @@ TEST(StaticMeshSceneDeathTest, RejectsInvalidBoundsAndNonAffineTransforms) {
     batch.MeshStates.push_back({.Id = {0, 1}});
     batch.MeshStates[0].Mesh.LocalBoundsMin.x() = 1;
     EXPECT_DEATH(scene.Apply(batch), "");
+#ifdef RADRAY_IS_DEBUG
     batch.Clear();
     batch.Transforms.push_back({.Id = {0, 1}});
     batch.Transforms[0].LocalToWorld(3, 0) = 1;
     EXPECT_DEATH(scene.Apply(batch), "");
     batch.Transforms[0].LocalToWorld(3, 0) = std::numeric_limits<float>::quiet_NaN();
     EXPECT_DEATH(scene.Apply(batch), "");
+#endif
 }
 
 }  // namespace

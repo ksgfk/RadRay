@@ -1,6 +1,7 @@
 #pragma once
 
 #include <concepts>
+#include <limits>
 #include <span>
 #include <type_traits>
 
@@ -88,7 +89,11 @@ public:
     // ─── 生命周期 ───
 
     /// User hook. Component dispatch is owned by World and follows this hook.
+    /// Default is not scheduled; overrides must `SetTickEnabled(true)`.
     virtual void Tick(float deltaTime) { (void)deltaTime; }
+
+    void SetTickEnabled(bool enabled) noexcept;
+    bool IsTickEnabled() const noexcept { return _tickEnabled; }
 
     ActorId GetId() const noexcept { return _id; }
     ObjectLifecycle GetLifecycle() const noexcept { return _lifecycle; }
@@ -105,12 +110,14 @@ protected:
 private:
     friend class World;
     friend class WorldManager;
+    friend class ActorComponent;
 
     void RegisterComponent(ActorComponent& component);
     void UnregisterComponent(ActorComponent& component);
     void RegisterAllComponents();
     void UnregisterAllComponents();
     void DispatchTick(float deltaTime, uint64_t epoch);
+    void NoteTickingComponent(int32_t delta) noexcept;
     void Teardown();
     Nullable<ActorComponent*> ResolveIncludingPending(ComponentId id) const noexcept;
 
@@ -121,7 +128,10 @@ private:
     ActorId _id;
     ObjectLifecycle _lifecycle{ObjectLifecycle::Initializing};
     uint64_t _firstTickEpoch{0};
+    size_t _tickingIndex{std::numeric_limits<size_t>::max()};
+    uint32_t _tickingComponents{0};
     bool _spawned{false};
+    bool _tickEnabled{false};
 };
 
 }  // namespace radray

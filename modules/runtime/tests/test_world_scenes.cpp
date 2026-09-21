@@ -12,7 +12,7 @@ namespace {
 
 class CountingActor final : public Actor {
 public:
-    CountingActor(uint32_t& ticks, uint32_t& destroyed) : _ticks(ticks), _destroyed(destroyed) {}
+    CountingActor(uint32_t& ticks, uint32_t& destroyed) : _ticks(ticks), _destroyed(destroyed) { SetTickEnabled(true); }
     ~CountingActor() noexcept override { ++_destroyed; }
     void Tick(float) override {
         ++_ticks;

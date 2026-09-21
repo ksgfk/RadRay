@@ -18,7 +18,7 @@ struct LifecycleTrace {
 
 class LifecycleProbe final : public PrimitiveComponent {
 public:
-    explicit LifecycleProbe(LifecycleTrace& trace) : Trace(trace) {}
+    explicit LifecycleProbe(LifecycleTrace& trace) : Trace(trace) { SetTickEnabled(true); }
     ~LifecycleProbe() noexcept override { ++Trace.Freed; }
     void OnRegister() override {
         EXPECT_EQ(GetRegistrationState(), ComponentRegistration::Registering);
@@ -64,7 +64,7 @@ protected:
 
 class LifecycleActor final : public Actor {
 public:
-    explicit LifecycleActor(LifecycleTrace& trace) : Trace(trace) {}
+    explicit LifecycleActor(LifecycleTrace& trace) : Trace(trace) { SetTickEnabled(true); }
     ~LifecycleActor() noexcept override { ++Trace.Freed; }
     void Tick(float) override {
         ++Trace.Ticks;

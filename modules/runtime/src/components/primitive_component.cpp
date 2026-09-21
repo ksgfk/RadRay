@@ -23,6 +23,6 @@ void PrimitiveComponent::CollectRenderUpdates(SceneWriter& writer, RenderDirtyFl
     CollectPrimitiveUpdates(writer, dirty);
 }
 
-void PrimitiveComponent::OnTransformChanged() { MarkRenderTransformDirty(); }
+void PrimitiveComponent::OnTransformChanged() {}
 
 }  // namespace radray

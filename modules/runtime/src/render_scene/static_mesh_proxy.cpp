@@ -23,12 +23,18 @@ void StaticMeshProxy::Replace(const StaticMeshStateUpdate& update) {
 
 void StaticMeshProxy::SetTransform(const Eigen::Matrix4f& localToWorld) noexcept {
     const float* m = localToWorld.data();
+#ifdef RADRAY_IS_DEBUG
+    // writer→flight 的契约校验：每 transform 一次的 isfinite/仿射检查只留在 Debug；
+    // Release 直接写矩阵，AABB 与行列式照算（渲染需要）。契约见 docs/architecture/render-framework.md。
     if (m[3] != 0 || m[7] != 0 || m[11] != 0 || m[15] != 1) {
         RADRAY_ABORT("Static mesh transform must be finite and affine");
     }
-    float* storedTransform = _localToWorld.data();
     for (int i = 0; i < 16; ++i) {
         if (!std::isfinite(m[i])) RADRAY_ABORT("Static mesh transform must be finite and affine");
+    }
+#endif
+    float* storedTransform = _localToWorld.data();
+    for (int i = 0; i < 16; ++i) {
         storedTransform[i] = m[i];
     }
     const float* localMin = _mesh.LocalBoundsMin.data();

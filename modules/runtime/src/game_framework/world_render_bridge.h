@@ -27,6 +27,10 @@ public:
     RenderConnectionState GetState() const noexcept { return _state; }
 
 private:
+    /// Collect 前按地址排序 dirty 队列的最小尺寸：低于此值工作集仍在缓存内，排序是纯成本。
+    /// 约 16k 个组件超出典型 LLC；顺序处理把对组件与 writer 热状态的随机访问变成连续访问。
+    static constexpr size_t kCollectSortThreshold = 16384;
+
     void Remove(SceneComponent& component) noexcept;
 
     World& _world;

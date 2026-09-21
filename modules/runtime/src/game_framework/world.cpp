@@ -1,6 +1,7 @@
 #include <radray/runtime/game_framework/world.h>
 
 #include <algorithm>
+#include <limits>
 #include <radray/logger.h>
 #include <radray/scope_guard.h>
 #include <radray/profiler.h>
@@ -19,7 +20,9 @@ World::~World() noexcept {
 uint64_t World::GetCurrentTickEpoch() const noexcept { return _manager ? _manager->GetCurrentTickEpoch() : _tickEpoch; }
 
 void World::CheckCanModify() const noexcept {
+#ifdef RADRAY_IS_DEBUG
     if (std::this_thread::get_id() != _ownerThread) RADRAY_ABORT("World mutation requires its owning thread");
+#endif
     if (_collecting || (_manager && _manager->_collecting)) RADRAY_ABORT("Cannot mutate World during render collection");
 }
 
@@ -59,6 +62,7 @@ Actor* World::SpawnActor(unique_ptr<Actor> actor) {
         raw->OnSpawned();
     }
     if (raw->_lifecycle == ObjectLifecycle::Initializing) raw->_lifecycle = ObjectLifecycle::Live;
+    RefreshTicking(*raw);
     return raw;
 }
 
@@ -88,6 +92,7 @@ LifecycleRequestResult World::DestroyActor(ActorId id) {
     if (actor->_lifecycle == ObjectLifecycle::PendingDestroy) return LifecycleRequestResult::AlreadyPending;
     if (!actor->IsLive()) return LifecycleRequestResult::Invalid;
     actor->_lifecycle = ObjectLifecycle::PendingDestroy;
+    RefreshTicking(*actor);
     _pending.Actors.push_back(id);
     return LifecycleRequestResult::Accepted;
 }
@@ -97,11 +102,16 @@ void World::DispatchTick(float deltaTime, uint64_t epoch) {
     if (!IsLive() || !_tickEnabled || _firstTickEpoch > epoch || _stopping) return;
     RADRAY_PROFILE_SCOPE_N("World::Tick");
     _ticking = true;
-    auto guard = MakeScopeGuard([this]() noexcept { _ticking = false; });
-    const size_t count = _actors.size();
+    auto guard = MakeScopeGuard([this]() noexcept {
+        _ticking = false;
+        if (_tickingStale) {
+            CompactTicking();
+            _tickingStale = false;
+        }
+    });
+    const size_t count = _tickingActors.size();
     for (size_t i = 0; i < count && IsLive(); ++i) {
-        auto* actor = _actors[i].get();
-        actor->DispatchTick(deltaTime, epoch);
+        _tickingActors[i]->DispatchTick(deltaTime, epoch);
     }
 }
 void World::Tick(float deltaTime) {
@@ -127,6 +137,7 @@ void World::PrepareLifecycle() {
     if (!_executing.Actors.empty() || _lifecycle == ObjectLifecycle::Destroying) {
         std::erase_if(_actors, [this](auto& owner) {
             if (owner->_lifecycle != ObjectLifecycle::Destroying) return false;
+            RemoveTicking(*owner);
             const auto id = owner->GetId();
             if (id.Generation == std::numeric_limits<uint32_t>::max()) RADRAY_ABORT("Actor generation exhausted");
             _actorIds.Destroy({id.Index, id.Generation});
@@ -229,6 +240,7 @@ void World::Teardown() {
     PrepareLifecycle();
     ExecuteLifecycle();
     DisconnectNow();
+    _tickingActors.clear();
     _pending.Clear();
 }
 void World::ShutdownWorld() {
@@ -297,7 +309,53 @@ void World::DestroyComponentRenderState(SceneComponent& component) {
 }
 void World::QueueRenderUpdate(SceneComponent& component, RenderDirtyFlag flag) {
     CheckCanModify();
+    EnqueueRenderDirty(component, flag);
+}
+void World::EnqueueRenderDirty(SceneComponent& component, RenderDirtyFlag flag) {
     if (_renderBridge) _renderBridge->Queue(component, flag);
+}
+
+bool World::ShouldBeOnTickingList(const Actor& actor) const noexcept {
+    const auto life = actor._lifecycle;
+    if (life == ObjectLifecycle::PendingDestroy || life == ObjectLifecycle::Destroying) return false;
+    return actor._tickEnabled || actor._tickingComponents != 0;
+}
+void World::AddTicking(Actor& actor) {
+    if (actor._tickingIndex != std::numeric_limits<size_t>::max()) return;
+    actor._tickingIndex = _tickingActors.size();
+    _tickingActors.push_back(&actor);
+}
+void World::RemoveTicking(Actor& actor) {
+    const size_t index = actor._tickingIndex;
+    if (index == std::numeric_limits<size_t>::max()) return;
+    Actor* moved = _tickingActors.back();
+    _tickingActors[index] = moved;
+    moved->_tickingIndex = index;
+    _tickingActors.pop_back();
+    actor._tickingIndex = std::numeric_limits<size_t>::max();
+}
+void World::RefreshTicking(Actor& actor) {
+    if (ShouldBeOnTickingList(actor)) {
+        AddTicking(actor);
+    } else if (_ticking) {
+        _tickingStale = true;
+    } else {
+        RemoveTicking(actor);
+    }
+}
+void World::CompactTicking() {
+    size_t write = 0;
+    for (size_t read = 0; read < _tickingActors.size(); ++read) {
+        Actor* actor = _tickingActors[read];
+        if (!ShouldBeOnTickingList(*actor)) {
+            actor->_tickingIndex = std::numeric_limits<size_t>::max();
+            continue;
+        }
+        _tickingActors[write] = actor;
+        actor->_tickingIndex = write;
+        ++write;
+    }
+    _tickingActors.resize(write);
 }
 
 }  // namespace radray

@@ -10,7 +10,7 @@ namespace {
 
 class LifecycleComponent final : public ActorComponent {
 public:
-    explicit LifecycleComponent(vector<string>& events) : _events(events) {}
+    explicit LifecycleComponent(vector<string>& events) : _events(events) { SetTickEnabled(true); }
     void OnRegister() override {
         EXPECT_TRUE(IsRegistered() || GetRegistrationState() == ComponentRegistration::Registering);
         _events.push_back("register");

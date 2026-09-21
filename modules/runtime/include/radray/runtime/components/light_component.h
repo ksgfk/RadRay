@@ -8,7 +8,7 @@ namespace radray {
 
 class LightComponent : public SceneComponent {
 public:
-    LightComponent() noexcept = default;
+    LightComponent() noexcept { EnableTransformRenderDirty(); }
     ~LightComponent() noexcept override;
 
     virtual LightType GetLightType() const noexcept { return LightType::Point; }
@@ -33,7 +33,6 @@ protected:
     void CreateRenderState(SceneWriter& writer) override;
     void DestroyRenderState(SceneWriter& writer) override;
     void CollectRenderUpdates(SceneWriter& writer, RenderDirtyFlags dirty) override;
-    void OnTransformChanged() override;
     virtual LightData CaptureLightState() const noexcept;
 
 private:

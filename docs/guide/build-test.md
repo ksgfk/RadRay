@@ -296,8 +296,8 @@ runtime-only 可消费匹配 backend 的已编译 artifact，源码请求不会�
 ## World → RenderScene 状态同步基准
 
 `test_scene_sync_performance` 使用真实 Actor、StaticMeshComponent、Directional/Point/SpotLightComponent、
-World 与 RenderSystem。每个 Shape 对应一个 Actor 和一个 Mesh 组件，Mesh 资产已 Ready；Tick 运行实际
-调度和空业务 hook。该基准截止于 CPU `ConsumeRenderUpdates/Apply`，不含可见性、draw 准备、命令录制、
+World 与 RenderSystem。每个 Shape 对应一个 Actor 和一个 Mesh 组件，Mesh 资产已 Ready；未启用 Tick 的
+对象不进入 World ticking 列表，空闲帧只付列表遍历（默认为空）。该基准截止于 CPU `ConsumeRenderUpdates/Apply`，不含可见性、draw 准备、命令录制、
 GPU、资产 IO 或真实游戏逻辑。没有 RectLightComponent，故不模拟 Rect 组件。
 
 同一负载均运行单线程和 GT/RT 双线程，flight 数分别为 1/2/3。双线程按顺序消费有界 flight，GT 只在

@@ -26,11 +26,14 @@ public:
     /// IsRegistered() 为 false；不要求派生类调用基类。
     virtual void OnUnregister() {}
 
-    /// 每帧逻辑更新
+    /// 每帧逻辑更新。默认不调度；覆盖后须 `SetTickEnabled(true)`。
     virtual void TickComponent(float deltaTime) { (void)deltaTime; }
 
+    void SetTickEnabled(bool enabled) noexcept;
+    bool IsTickEnabled() const noexcept { return _tickEnabled; }
+
     Nullable<Actor*> GetOwner() const noexcept { return _owner; }
-    Nullable<World*> GetWorld() const noexcept;
+    Nullable<World*> GetWorld() const noexcept { return _world; }
     bool IsRegistered() const noexcept { return _registration == ComponentRegistration::Registered; }
     ComponentRegistration GetRegistrationState() const noexcept { return _registration; }
     ObjectLifecycle GetLifecycle() const noexcept { return _lifecycle; }
@@ -46,10 +49,12 @@ private:
     friend class World;
 
     Nullable<Actor*> _owner{nullptr};
+    Nullable<World*> _world{nullptr};
     ComponentRegistration _registration{ComponentRegistration::Unregistered};
     ObjectLifecycle _lifecycle{ObjectLifecycle::Initializing};
     ComponentId _id;
     uint64_t _firstTickEpoch{0};
+    bool _tickEnabled{false};
 };
 
 template <>

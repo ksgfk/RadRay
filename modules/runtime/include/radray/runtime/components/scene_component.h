@@ -1,7 +1,6 @@
 #pragma once
 
 #include <limits>
-#include <optional>
 #include <span>
 
 #include <radray/basic_math.h>
@@ -44,7 +43,7 @@ public:
     void SetRelativeRotation(const Eigen::Quaternionf& rotation) noexcept;
     void SetRelativeScale(const Eigen::Vector3f& scale) noexcept;
 
-    /// 世界空间变换（递归计算 parent chain）
+    /// 世界空间变换（读缓存；缓存脏时沿 parent chain 重建后再读）
     Eigen::Vector3f GetWorldLocation() const noexcept;
     Eigen::Quaternionf GetWorldRotation() const noexcept;
     Eigen::Vector3f GetWorldScale() const noexcept;
@@ -72,8 +71,11 @@ public:
     void MarkRenderDynamicDataDirty();
 
 protected:
-    /// 本节点或祖先的世界变换变更后调用，派生类可覆写以标记渲染状态脏。
+    /// 本节点或祖先的世界变换变更后调用。打开 `_autoMarkTransformDirty` 的类型由框架入队 Transform dirty。
     virtual void OnTransformChanged() {}
+    /// GT only. Does not re-check the owning thread; public Mark* wrappers do.
+    void MarkRenderDirty(RenderDirtyFlag flag);
+    void EnableTransformRenderDirty() noexcept { _autoMarkTransformDirty = true; }
     /// Invoked when a registered component connects to a scene; default does not enqueue.
     virtual void CreateRenderState(SceneWriter& writer) { (void)writer; }
     /// Invoked after removing queued updates; independent of game registration.
@@ -94,21 +96,31 @@ private:
     bool ComputeAttachmentTransform(Nullable<SceneComponent*> parent, AttachmentRule rule, Eigen::Vector3f& location, Eigen::Quaternionf& rotation, Eigen::Vector3f& scale) const noexcept;
     void UnlinkHierarchy(Nullable<vector<SceneComponent*>*> detachedChildren) noexcept;
 
-    void MarkRenderDirty(RenderDirtyFlag flag);
     Eigen::Matrix4f ComputeLocalMatrix() const noexcept;
     void NotifyTransformChanged();
+    /// 渲染脏标记的子树遍历：由 NotifyTransformChanged 在唯一一层 callback scope 内调用。
+    /// 不做缓存标脏（入口已整树标脏），也不重复开 callback scope。
+    void NotifySubtree();
+    /// 把本子树（含自身）的世界矩阵缓存标记为脏；有后代的 TRS 变更与解除层级时调用。
+    /// 遍历不被 Live 门禁截断：否则活着的后代会保留已失效的世界矩阵缓存。
+    void InvalidateWorldSubtree() noexcept;
 
-    // Relative transform（相对于 parent）
+    // Relative transform 与入队热数据放在矩阵缓存之前，避免 Mutate 写下脏标志时带上 64 B 矩阵行。
     Eigen::Quaternionf _relativeRotation{Eigen::Quaternionf::Identity()};
     Eigen::Vector3f _relativeLocation{Eigen::Vector3f::Zero()};
     Eigen::Vector3f _relativeScale{Eigen::Vector3f::Ones()};
-
-    // Attach 层级
-    Nullable<SceneComponent*> _parent{nullptr};
-    vector<SceneComponent*> _children;  // non-owning, 所有权在 Actor::_ownedComponents
+    mutable bool _worldDirty{false};
+    bool _autoMarkTransformDirty{false};
     RenderDirtyFlags _renderDirty;
     size_t _renderQueueIndex{std::numeric_limits<size_t>::max()};
-    std::optional<SceneId> _renderConnection;
+    SceneId _renderConnection{};
+    Nullable<SceneComponent*> _parent{nullptr};
+    vector<SceneComponent*> _children;  // non-owning, 所有权在 Actor::_ownedComponents
+
+    // 变换缓存（memo）：无子节点的 TRS 由 NotifyTransformChanged 直接置 _worldDirty；
+    // 有后代时 InvalidateWorldSubtree 整树标脏。GetWorldMatrix 脏则 compose local
+    // 并沿 parent chain 求值后缓存，干净时直接返回。契约见 docs/architecture/render-framework.md。
+    mutable Eigen::Matrix4f _worldMatrix{Eigen::Matrix4f::Identity()};
 };
 
 template <>

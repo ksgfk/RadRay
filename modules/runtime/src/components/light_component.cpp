@@ -57,7 +57,6 @@ void LightComponent::DestroyRenderState(SceneWriter& writer) {
     _lightId = {};
 }
 void LightComponent::CollectRenderUpdates(SceneWriter& writer, RenderDirtyFlags) { writer.SetLight(CaptureLightState()); }
-void LightComponent::OnTransformChanged() { MarkRenderTransformDirty(); }
 LightData LightComponent::CaptureLightState() const noexcept {
     LightCommonData common;
     common.Id = _lightId;

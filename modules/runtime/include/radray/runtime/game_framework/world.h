@@ -123,11 +123,18 @@ private:
     void CreateComponentRenderState(SceneComponent& component);
     void DestroyComponentRenderState(SceneComponent& component);
     void QueueRenderUpdate(SceneComponent& component, RenderDirtyFlag flag);
+    void EnqueueRenderDirty(SceneComponent& component, RenderDirtyFlag flag);
+    void AddTicking(Actor& actor);
+    void RemoveTicking(Actor& actor);
+    void RefreshTicking(Actor& actor);
+    void CompactTicking();
+    bool ShouldBeOnTickingList(const Actor& actor) const noexcept;
 
     Nullable<Application*> _app{nullptr};
     Nullable<WorldManager*> _manager{nullptr};
     WorldId _id;
     vector<unique_ptr<Actor>> _actors;
+    vector<Actor*> _tickingActors;
     SparseSet<Actor*> _actorIds;
     unique_ptr<WorldRenderBridge> _renderBridge;
     Nullable<RenderSystem*> _renderer{nullptr};
@@ -146,6 +153,7 @@ private:
     bool _collecting{false};
     bool _stopping{false};
     bool _tickEnabled{true};
+    bool _tickingStale{false};
 };
 
 template <>

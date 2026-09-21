@@ -31,23 +31,36 @@ private:
     friend class RenderSystem;
     friend class PrimitiveComponent;
 
+    static constexpr uint32_t kNoColdSlot = std::numeric_limits<uint32_t>::max();
+
+    /// 热数据：transform-only 更新与 dirty 队列每帧随机访问，保持小巧。
+    /// 成员顺序按对齐排布（Matrix4f 前是 8 字节字段，避免填充浪费）。
     struct ShapeState {
         ShapeId Id;
+        size_t DirtyIndex{std::numeric_limits<size_t>::max()};
+        std::optional<Eigen::Matrix4f> Transform;
+        uint32_t ColdIndex{kNoColdSlot};
         bool Sent{false};
         bool HasMesh{false};
-        size_t DirtyIndex{std::numeric_limits<size_t>::max()};
+        bool PendingMesh{false};  // 冷槽持有待封包的 StaticMeshStateUpdate
+    };
+
+    /// 冷数据：只在 SetStaticMesh / RemoveShape / 封包 mesh 记录时访问。
+    struct ShapeAsset {
         std::optional<AssetId> Asset;
         std::optional<StaticMeshStateUpdate> Mesh;
-        std::optional<Eigen::Matrix4f> Transform;
     };
 
     ShapeState& GetShape(ShapeId id);
+    uint32_t AllocateColdSlot() noexcept;
     void Queue(ShapeState& state);
     void Unqueue(ShapeState& state);
     void Flush(SceneUpdateBatch& batch, uint32_t flightIndex);
 
     SceneId _id;
     SparseSet<ShapeState> _shapes;
+    vector<ShapeAsset> _shapeAssets;
+    vector<uint32_t> _freeColdSlots;
     vector<ShapeId> _dirtyShapes;
     vector<ShapeId> _removedShapes;
     SparseSet<std::monostate> _lightIds;

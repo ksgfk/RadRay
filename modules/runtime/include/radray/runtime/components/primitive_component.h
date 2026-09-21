@@ -8,7 +8,7 @@ namespace radray {
 /// GT geometry identity; Scene owns the corresponding render-side shape state.
 class PrimitiveComponent : public SceneComponent {
 public:
-    PrimitiveComponent() noexcept = default;
+    PrimitiveComponent() noexcept { EnableTransformRenderDirty(); }
     ~PrimitiveComponent() noexcept override;
 
     ShapeId GetShapeId() const noexcept { return _shapeId; }
