@@ -101,8 +101,7 @@ CPU record/Submit 时间与 GPU 时间线分开解读。关闭使用 `-DRADRAY_E
 | `test_scene_updates` | `SceneUpdates`（组件标脏合并、生命周期、代次与收集约束；纯 CPU） |
 | `test_scene_assets` | `SceneAssets`（类型无关的资产常驻/退休、Ready 通知、共享等待取消与 GT 释放；纯 CPU） |
 | `test_static_mesh_scene` | `StaticMeshScene`（CPU mesh 描述、变换/bounds、替换/删除与持久描述；无 GPU 资源） |
-| `test_light_scene` | `LightScene`（独立身份、分类紧凑数据、组件捕获、dirty 全量光源快照、空集合、多 flight、重连与读者借用；纯 CPU） |
-| `test_scene_storage_performance` | `SceneStoragePerformance`（光源记录大小、分类遍历与全量更新基准；设置 `RADRAY_RUN_SCENE_STORAGE_BENCHMARK=1` 后运行） |
+| `test_scene_sync_performance` | `SceneSyncCorrectness`、`SceneSyncPerformance`（World → RenderScene，单/双线程，F=1/2/3；性能矩阵显式运行） |
 | `test_multi_window` | `RuntimeMultiWindow`（三窗口交换链、有序提交与生命周期） |
 | `test_flight_completion` | `FlightCompletionTest` |
 | `test_asset_database` | `AssetDatabaseTest` |
@@ -293,6 +292,81 @@ runtime-only 可消费匹配 backend 的已编译 artifact，源码请求不会�
 旧 RenderGraph、Forward、ImGui 及其样例和专用测试已移除，相应 CMake 选项不再提供。
 基线设计、历史能力与依赖边界见[临时设计快照](../temp/render-framework-design.md)。
 通用 CTest 验证脚本、shader CLI、依赖恢复和编译数据库工具保留。
+
+## World → RenderScene 状态同步基准
+
+`test_scene_sync_performance` 使用真实 Actor、StaticMeshComponent、Directional/Point/SpotLightComponent、
+World 与 RenderSystem。每个 Shape 对应一个 Actor 和一个 Mesh 组件，Mesh 资产已 Ready；Tick 运行实际
+调度和空业务 hook。该基准截止于 CPU `ConsumeRenderUpdates/Apply`，不含可见性、draw 准备、命令录制、
+GPU、资产 IO 或真实游戏逻辑。没有 RectLightComponent，故不模拟 Rect 组件。
+
+同一负载均运行单线程和 GT/RT 双线程，flight 数分别为 1/2/3。双线程按顺序消费有界 flight，GT 只在
+复用占用的槽位时等待，F=2/3 允许 GT/RT 重叠。CPU 测试在 Consume 和读者结束后回传
+`GpuWorkCompleted=false` 的完成通知；不把这个通知当作真实 GPU fence。
+
+| 负载 | 参数 |
+|---|---|
+| 独立 Shape 变换 | 1k/10k/100k；每帧 dirty 为 0、1、1%、10%、100% |
+| 顺序访问对照 | 10k/100k 全量变换，按创建顺序访问；其余变换场景使用随机排列 |
+| 重复 setter | 10k Shape 的 1%；分别写 1/10/100 个不同值；另测 100 次同值短路 |
+| 层级 | 10k Shape；链长 1/4/16，改叶子或根；每组 4/16 节点的宽树改根 |
+| Ready mesh 改绑 | 10k Shape 的 1%，在两个 Ready 资产之间切换 |
+| 分类光源 | 1/16/64/256；无 dirty、每帧改单灯、改全部；Directional/Point/Spot 轮流创建 |
+| 生命周期 | 10k 常驻，每帧等量创建/删除 10；另测每 32 帧替换 10% |
+| Reparent | 10k Shape 的 1%，在两个无几何父节点间 KeepLocal 重挂接 |
+| 混合 | 10k Shape、64 灯；1% 变换、4 灯变化、10 创建/删除；每 32 帧全量变换 |
+
+随机选择序列使用固定种子，在计时前生成；单/双线程使用相同序列。常规 `SceneSyncCorrectness` 将 Shape
+缩到 256，40 帧逐帧核对身份、mesh、矩阵、bounds、光源参数和删除结果，覆盖 burst；另用消费闸门
+验证 GT 可以先发布全部 F 个 flight。正式每个配置先做 8 帧全量正确性预检，至少预热 64 帧，最后
+排空并核对最终场景；采样区间只读取更新包的 O(1) 大小，不做全场景扫描、随机生成或文件输出。
+
+Windows CPU 专用构建示例（同时提供 Debug 正确性目标）：
+
+```powershell
+cmake -S . -B build_scene_sync_perf -G "Visual Studio 18 2026" -T ClangCL -A x64 `
+  -DCMAKE_MSVC_RUNTIME_LIBRARY='MultiThreaded$<$<CONFIG:Debug>:DebugDLL>' -DMI_STATS=OFF -DMI_PROFILE=OFF `
+  -DRADRAY_ENABLE_PROFILER=OFF -DRADRAY_BUILD_SHADER_COMPILER=OFF `
+  -DRADRAY_ENABLE_D3D12=OFF -DRADRAY_ENABLE_VULKAN=OFF `
+  -DRADRAY_BUILD_BENCHMARKS=OFF -DRADRAY_ENABLE_ZLIB=OFF -DRADRAY_ENABLE_LIBJPEG=OFF
+cmake --build build_scene_sync_perf --config Debug --target test_scene_sync_performance --parallel 4
+ctest --test-dir build_scene_sync_perf -C Debug -R '^SceneSyncCorrectness\.' --output-on-failure
+cmake --build build_scene_sync_perf --config Release --target test_scene_sync_performance --parallel 4
+python tools/run_scene_sync_benchmark.py --frames 512 --output build_scene_sync_perf/results/sweep
+python tools/run_scene_sync_benchmark.py --frames 4096 --runs 3 `
+  --cases shape_10000_dirty_100,shape_10000_dirty_10000,chain_16_root,light_256_one,light_256_all,mixed `
+  --output build_scene_sync_perf/results/repeated
+```
+
+脚本只运行已构建目标；先跑正确性，再顺序启动各独立采样进程。输出目录必须为空，避免覆盖已有
+数据。正式性能结论取 Release；Debug 只用于正确性。吞吐量受操作系统调度影响，默认不绑定 CPU 核心。
+
+每次保存原始逐帧 CSV、配置/冷启动 CSV、各阶段 mean/median/P95/P99/max、单/双线程比较和元数据。
+元数据包含源码/二进制 hash、Git HEAD/工作树补丁、实际依赖提交、CPU、编译器、CRT、profiler 和 allocator
+开关。脚本检查全部六种模式、帧/sequence 连续性以及逐帧更新量一致，未知 case 名或缺失配置直接失败。
+
+时间单位为微秒：Mutation（setter/通知）、Tick、Lifecycle、Collect、Seal、Publish、RT Apply 分开计时。
+`gt_work_us` 为 GT 六段之和；`work_us` 再加 Apply。`e2e_us` 按相同 update sequence 从首次 mutation
+到 Apply 结束，含发布和排队；`queue_us` 从发布后到 RT 开始，含唤醒/调度。flight 复用等待发生在下一次
+mutation 前，单独列为 `flight_wait_us`；completion/AssetManager::Pump 单列。吞吐量取首帧 mutation
+到末帧 Apply 的墙钟区间，包含中间等待和 completion。各百分位从逐帧总值计算，不相加阶段百分位。
+端到端不代表真实玩家输入延迟；没有帧率限制或模拟 GPU/绘制压力。冷构建对象和初次同步单列，不混入稳态。
+
+分配单独用相同编译选项、`MI_STATS=FULL`、`MI_PROFILE=OFF` 配置到 `build_scene_sync_alloc`，构建其
+Release 目标后运行：
+
+```powershell
+python tools/run_scene_sync_benchmark.py --build-dir build_scene_sync_alloc --allocations --frames 512 `
+  --output build_scene_sync_alloc/results/allocations
+```
+
+分配轮先校准 STL vector 与 GT/RT 合计的已知 33 次分配，校准失败立即停止。随后在预热/采样边界排空
+flight，在各所属线程调用 mimalloc collect 以更新延迟页计数，再合并统计；包含 fixture 热循环的分配，不能将
+该轮时间混入普通延迟统计。分配字节采用 mimalloc normal/huge block 总量，含尺寸类别取整，不是精确请求字节。
+Windows Release 使用 `/MT`；Debug 正确性用 `/MDd`，避免静态 Debug CRT
+与 mimalloc 的 `_expand` 重复定义。缺少有效计数时输出 `-1`，不解释成零。
+`payload_bytes` 只计算已交付 vector 元素字节数，含灯光全量包，不等于容量、总内存占用或 GPU 上传大小。
+512 帧用于初筛，重要场景的 P99 使用至少 4096 帧、3 次独立运行。
 
 ## 生命周期与增量渲染验收
 
