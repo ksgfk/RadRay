@@ -14,6 +14,7 @@
 #include <semaphore>
 #include <thread>
 #include <fmt/format.h>
+#include <radray/profiler.h>
 #include <radray/runtime/components/directional_light_component.h>
 #include <radray/runtime/components/point_light_component.h>
 #include <radray/runtime/components/spot_light_component.h>
@@ -243,6 +244,8 @@ public:
             _lights.push_back(light);
         }
         _setupUs = Microseconds(start, Now());
+        const auto label = fmt::format("SceneSync {} F={} {}", _scenario.Name, flights, threaded ? "threaded" : "single");
+        RADRAY_PROFILE_MESSAGE(label);
         const auto after = AllocationTotals();
         _allocationTracking = after[0] > allocations[0] && TracksContainerAllocations();
         _setupAllocations = _allocationTracking ? after[0] - allocations[0] : -1;
@@ -261,6 +264,7 @@ public:
         test::CompleteFrame(_renderer, 0, false);
         _initialSyncUs = Microseconds(initial, Now());
         if (_threaded) _worker = std::thread{[this] { Worker(); }};
+        RADRAY_PROFILE_THREAD("RadRay GT");
     }
 
     ~SyncBenchmark() { Stop(); }
@@ -272,7 +276,10 @@ public:
             auto& frame = _gt[sample];
             frame.Wait = Reclaim(flight);
             frame.Start = Now();
-            Mutate(sample);
+            {
+                RADRAY_PROFILE_SCOPE_N("SceneSync.Mutate");
+                Mutate(sample);
+            }
             auto phase = Now();
             frame.Mutation = Microseconds(frame.Start, phase);
             _world.Tick(1.0f / 60.0f);
@@ -309,6 +316,7 @@ public:
                 }
             } else
                 Apply(flight, slot);
+            RADRAY_PROFILE_FRAME();
         }
         Drain();
     }
@@ -538,6 +546,7 @@ private:
     }
 
     void Worker() {
+        RADRAY_PROFILE_THREAD("RadRay RT");
         if (_gate && !_initialGate.try_acquire_for(std::chrono::seconds(10))) _gateTimedOut = true;
         for (uint64_t ticket = 0;;) {
             _ready.acquire();
@@ -686,12 +695,19 @@ TEST(SceneSyncPerformance, Matrix) {
     raw << "scenario,mode,flights,frame,sequence,start_ns,end_ns,mutation_us,tick_us,lifecycle_us,collect_us,seal_us,publish_us,apply_us,queue_us,e2e_us,flight_wait_us,completion_us,gt_work_us,work_us,transforms,mesh_states,creates,removes,light_records,payload_bytes\n";
     cases << "scenario,mode,flights,shapes,changes,lights,light_changes,repeats,depth,wide,setup_us,initial_sync_us,setup_allocations,setup_bytes,allocations,allocation_bytes,span_us,frames_per_second\n";
     size_t executed = 0;
+    vector<uint32_t> flights{1u, 2u, 3u};
+    vector<char> threaded{0, 1};
+    if (std::getenv("RADRAY_SCENE_SYNC_FLIGHTS") != nullptr) flights = {EnvironmentCount("RADRAY_SCENE_SYNC_FLIGHTS", 2)};
+    if (Nullable<const char*> mode{std::getenv("RADRAY_SCENE_SYNC_THREADED")}) {
+        const std::string_view value{mode.Get()};
+        threaded = {value != "0" && value != "false"};
+    }
     for (const auto& scenario : Scenarios(false)) {
         if (!SelectedScenario(scenario.Name)) continue;
-        for (uint32_t flights : {1u, 2u, 3u})
-            for (bool threaded : {false, true}) {
-                SCOPED_TRACE(fmt::format("{} F={} threaded={}", scenario.Name, flights, threaded));
-                SyncBenchmark benchmark{scenario, flights, threaded, first + count};
+        for (uint32_t flightCount : flights)
+            for (char isThreaded : threaded) {
+                SCOPED_TRACE(fmt::format("{} F={} threaded={}", scenario.Name, flightCount, bool(isThreaded)));
+                SyncBenchmark benchmark{scenario, flightCount, bool(isThreaded), first + count};
                 benchmark.Run(0, 8, true);
                 benchmark.Run(8, warmup, false);
                 const auto before = allocationPass ? benchmark.Allocations() : array<int64_t, 2>{-1, -1};

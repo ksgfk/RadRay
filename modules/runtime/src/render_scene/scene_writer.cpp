@@ -1,5 +1,7 @@
 #include <radray/runtime/render_scene/scene_writer.h>
 
+#include <radray/profiler.h>
+
 namespace radray {
 
 SceneWriter::SceneWriter(SceneId id, uint32_t flightCount) : _id(id), _assets(flightCount) {}
@@ -98,6 +100,7 @@ void SceneWriter::SetLight(const LightData& light) {
 }
 
 void SceneWriter::Flush(SceneUpdateBatch& batch, uint32_t flightIndex) {
+    RADRAY_PROFILE_SCOPE_N("SceneWriter::Flush");
     if (!batch.Empty()) RADRAY_ABORT("Scene batch must be empty before collection");
     batch.RemoveShapes.insert(batch.RemoveShapes.end(), _removedShapes.begin(), _removedShapes.end());
     _removedShapes.clear();
@@ -120,6 +123,8 @@ void SceneWriter::Flush(SceneUpdateBatch& batch, uint32_t flightIndex) {
         _lightsDirty = false;
     }
     _assets.SealRetirements(flightIndex);
+    RADRAY_PROFILE_PLOT("SceneTransforms", static_cast<int64_t>(batch.Transforms.size()));
+    RADRAY_PROFILE_PLOT("SceneMeshStates", static_cast<int64_t>(batch.MeshStates.size()));
 }
 
 }  // namespace radray

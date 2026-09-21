@@ -95,6 +95,7 @@ void World::QueueComponentDestruction(ActorComponent& component) { _pending.Comp
 
 void World::DispatchTick(float deltaTime, uint64_t epoch) {
     if (!IsLive() || !_tickEnabled || _firstTickEpoch > epoch || _stopping) return;
+    RADRAY_PROFILE_SCOPE_N("World::Tick");
     _ticking = true;
     auto guard = MakeScopeGuard([this]() noexcept { _ticking = false; });
     const size_t count = _actors.size();
@@ -214,6 +215,7 @@ void World::ExecuteLifecycle() {
 }
 
 void World::FinalizeWorldGT() {
+    RADRAY_PROFILE_SCOPE_N("World::FinalizeWorldGT");
     CheckDriverIdle();
     FreezeLifecycle();
     PrepareLifecycle();
@@ -278,6 +280,7 @@ LifecycleRequestResult World::QueueReparent(SceneComponent& child, Nullable<Scen
 }
 
 void World::Collect() {
+    RADRAY_PROFILE_SCOPE_N("World::Collect");
     _collecting = true;
     auto guard = MakeScopeGuard([this]() noexcept { _collecting = false; });
     if (_renderBridge) _renderBridge->Collect();

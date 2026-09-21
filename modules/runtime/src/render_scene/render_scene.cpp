@@ -3,6 +3,7 @@
 #include "static_mesh_proxy.h"
 
 #include <radray/logger.h>
+#include <radray/profiler.h>
 #include <mutex>
 
 namespace radray {
@@ -36,6 +37,7 @@ RenderScene::ReadLease RenderScene::AcquireRead() const {
 }
 
 void RenderScene::Apply(const SceneUpdateBatch& batch) noexcept {
+    RADRAY_PROFILE_SCOPE_N("RenderScene::Apply");
     std::unique_lock lock{_readers};
     _readersDone.wait(lock, [this] { return _activeReaders == 0; });
     for (ShapeId id : batch.RemoveShapes) {

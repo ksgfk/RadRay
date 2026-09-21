@@ -1,5 +1,6 @@
 #include "world_render_bridge.h"
 
+#include <radray/profiler.h>
 #include <radray/scope_guard.h>
 #include <radray/runtime/game_framework/world.h>
 #include <radray/runtime/game_framework/actor.h>
@@ -97,6 +98,7 @@ void WorldRenderBridge::Remove(SceneComponent& component) noexcept {
 }
 
 void WorldRenderBridge::Collect() {
+    RADRAY_PROFILE_SCOPE_N("WorldRenderBridge::Collect");
     CheckCanModify();
     _collecting = true;
     _renderer.SetCollecting(true);

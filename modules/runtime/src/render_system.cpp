@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <radray/logger.h>
+#include <radray/profiler.h>
 #include <radray/runtime/application.h>
 #include <radray/runtime/gpu_system.h>
 
@@ -102,6 +103,7 @@ std::span<const SceneFrameUpdate> RenderSystem::GetFrameUpdatesRT(uint32_t fligh
 }
 
 void RenderSystem::SealFrameGT(uint32_t flightIndex) {
+    RADRAY_PROFILE_SCOPE_N("RenderSystem::SealFrameGT");
     CheckCanModifyGT();
     if (_stopping || _terminalAbandoned) RADRAY_ABORT("Cannot seal after stopping scene delivery");
     auto& frame = GetFrameUpdates(flightIndex);
@@ -146,6 +148,7 @@ void RenderSystem::BeginStoppingGT() noexcept {
 }
 
 void RenderSystem::ConsumeRenderUpdates(uint32_t flightIndex, uint64_t frameSerial) {
+    RADRAY_PROFILE_SCOPE_N("RenderSystem::ConsumeRenderUpdates");
     auto& frame = GetFrameUpdates(flightIndex);
     if (frame.Phase != FrameUpdates::State::Published || frame.UpdateSequence != _lastConsumedSequence + 1 || frameSerial == 0 || frameSerial <= _lastFrameSerial) RADRAY_ABORT("Duplicate or out-of-order scene consumption");
     for (const auto& entry : GetFrameUpdatesRT(flightIndex)) {
