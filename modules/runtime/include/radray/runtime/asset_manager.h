@@ -45,7 +45,6 @@ enum class AssetState {
 };
 
 struct AssetWaitRecord : ManualCoroutineRecord {
-    uint64_t Sequence{0};
     /// 等待目标。由等待者持有的 ref 保住, 故在记录存活期内有效。
     /// 【只用于比较, 不解引用】AssetSlot 在此是不完整类型。
     const AssetSlot* Slot{nullptr};
@@ -378,7 +377,6 @@ private:
     TaskScope _loadScope;
     TaskScope _retirementScope;
     ManualCoroutineScheduler<AssetWaitRecord> _waiters;
-    uint64_t _nextWaitSequence{1};
     bool _pumping{false};
     bool _collectingScene{false};
     bool _stopping{false};

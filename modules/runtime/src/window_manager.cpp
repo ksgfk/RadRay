@@ -588,15 +588,13 @@ bool WindowManager::NeedsMaintenance() const noexcept {
 
 uint64_t WindowManager::GetOperationBoundary() const noexcept {
     RADRAY_ASSERT(_gameThread == std::this_thread::get_id());
-    return _nextOperationSequence - 1;
+    return _operations.GetSequenceBoundary() - 1;
 }
 
 Nullable<WindowManager::WindowOperationRecord*> WindowManager::EnqueueOperation(stop_token stop, std::coroutine_handle<> continuation) {
     RADRAY_ASSERT(_gameThread == std::this_thread::get_id());
     if (!_acceptOperations) return nullptr;
-    if (_nextOperationSequence == UINT64_MAX) RADRAY_ABORT("Window operation sequence exhausted");
     auto* record = _operations.Enqueue(stop, continuation);
-    record->Sequence = _nextOperationSequence++;
     record->ResumeOnCancel = !_applyingOperations;
     return record;
 }

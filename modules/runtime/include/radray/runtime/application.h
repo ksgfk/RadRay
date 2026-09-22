@@ -54,7 +54,6 @@ struct AppUpdateResult {
 };
 
 struct ApplicationSchedulerRecord : ManualCoroutineRecord {
-    uint64_t Sequence{0};
 };
 
 class SwitchToApplicationSchedulerAwaitable {
@@ -93,12 +92,8 @@ private:
 
     ApplicationSchedulerRecord* Enqueue(stop_token stop, std::coroutine_handle<> continuation);
     bool Erase(ApplicationSchedulerRecord* record) noexcept;
-    bool IsAlive(ApplicationSchedulerRecord* record) const noexcept;
-    void ResumeRecord(ApplicationSchedulerRecord* record) noexcept;
-    void CancelRecord(ApplicationSchedulerRecord* record) noexcept;
 
     ManualCoroutineScheduler<ApplicationSchedulerRecord> _records;
-    uint64_t _nextSequence{1};
     bool _pumping{false};
     bool _collecting{false};
     bool _stopping{false};
@@ -199,6 +194,7 @@ private:
     void SetCollecting(bool collecting);
 
     bool InitializeRuntime(const ApplicationRuntimeDescriptor& desc);
+    void StopAndDrainRuntime();
     void DestroyRuntime() noexcept;
     void WaitAndCleanupCompletedFlights();
     /// 有 flightIndex 时推进该可写槽位；空值仅用于 GPU idle 后的全量清理。

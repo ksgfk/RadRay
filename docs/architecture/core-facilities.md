@@ -119,6 +119,12 @@ auto* p = maybe.Unwrap();              // 为空则 throw NullableAccessExceptio
 `ResumeOnCancel=false`：stop callback 仍标记 `Canceled`，由记录拥有者在操作安全完成后恢复。
 `CancelAll` 是最终清理，仍会强制恢复全部记录；调用前必须先结束这些外部操作。
 
+记录的 `Sequence` 由所属 ManualCoroutineScheduler 分配，在该实例内单调递增且不回绕。
+`DispatchReady` 先按无副作用的谓词冻结就绪记录的地址与序号，再恢复续体；回调取消其他记录或
+新建记录时，旧地址不会误派发给新的等待。恢复后仍存活的原记录由调度器摘除。
+跨多个等待表派发时，先分别捕获 `GetSequenceBoundary()` 的排他截止，再逐表派发；
+ApplicationScheduler、GPU 帧等待和资产 Ready 通知共用此派发实现。窗口操作仍保留自己的安全点与交付阶段。
+
 `TaskScope` 不可拷贝不可移动，且析构会阻塞。它必须在它所依赖的系统（例如 `GpuSystem`）
 之前析构，否则取消时的析构会碰到已死的 device。
 

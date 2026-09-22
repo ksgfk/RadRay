@@ -43,7 +43,6 @@ struct GpuSystemDescriptor {
 /// 一条等待帧边界的协程记录(IWaitFrameProcessor::Wait 的挂起点)。挂在某个 flight 上,
 /// 该 flight 的 fence 完成后被标记 ready,再由主线程的 PumpWaitFrame 恢复。
 struct WaitFrameRecord : ManualCoroutineRecord {
-    uint64_t Sequence{0};
     /// 记录所属的 flight。记录存在期内不变 —— 摘除时要靠它定位所在的表。
     uint32_t FlightIndex{std::numeric_limits<uint32_t>::max()};
     bool FlightComplete{false};
@@ -124,7 +123,7 @@ struct GpuFlightAcquireRegistration {
 };
 
 /// runtime 拥有的 per-flight 槽位。代表流水线一条槽位在不同阶段的完整状态，
-/// 按所有权/阶段分组，跨阶段的访问时序由 runner 的信号量 + retire 锁保证：
+/// 按所有权/阶段分组，跨阶段的访问时序由 ready 信号量、CPU 提交完成计数与 GPU fence 保证：
 ///  - 录制态：渲染线程（单线程模式即主线程）在 BeginFrameRecord→Render→
 ///    EndFrameRecordAndSubmit 期间独占；
 ///  - 计时态：游戏线程在帧开头写 FrameStartTime；
@@ -163,7 +162,7 @@ struct GpuFlightSlot {
     std::atomic_bool WaitersCompleted{false};
     std::atomic<uint64_t> CompletedFrameSerial{0};
 
-    // —— 提交态（渲染线程写，retire 经 _retireMutex 读后清）。
+    // —— 提交态（RT 写；runner 的 GT 观察 CPU 提交完成后，在 retire 读后清）。
     GpuFenceSignal Signal;
 
     /// 仅由 GT 登记和释放，绑定到本槽位的 FrameSerial。
@@ -275,7 +274,7 @@ public:
     void PumpWaitFrame(uint32_t flightIndex);
 
     /// [GT/RT，retire 阶段] 调用方须串行化 retire；对应 Submit 已发布，槽位尚未复用。
-    /// ThreadedRunner 持有 _retireMutex；单线程或全局 idle 时可在无并发的前提下直接调用。
+    /// Application runner 由 GT 独占 retire；独立驱动须自行隔离 Submit、其他 retire 与槽位复用。
     /// 收据 OnCompleted 在调用线程执行；只发布完成消息，不恢复 GT 协程。
     bool CompleteFlight(uint32_t flightIndex);
     /// [GT，CPU 渲染生产者已停止] 等待主队列 idle，再退休所有已提交 flight；不恢复 GT 协程。
@@ -383,9 +382,8 @@ private:
     unique_ptr<GpuFrameProfiler> _frameProfiler;
     uint64_t _nowFrameIndex{0};
     uint64_t _nextFrameSerial{1};
-    uint64_t _nextWaitSequence{1};
     bool _pumpingWaiters{false};
-    std::optional<uint64_t> _waitDispatchBoundary;
+    vector<uint64_t> _waitDispatchBoundaries;
     std::atomic<float> _lastFrameLatencySeconds{0.0f};
 };
 

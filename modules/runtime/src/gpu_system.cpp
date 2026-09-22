@@ -93,8 +93,6 @@ WaitFrameRecord* GpuSystem::RegisterWaitFrame(stop_token stop, std::coroutine_ha
         return nullptr;
     }
     WaitFrameRecord* record = _flights[flightIndex]->WaitFrame.Enqueue(stop, continuation);
-    if (_nextWaitSequence == std::numeric_limits<uint64_t>::max()) RADRAY_ABORT("Frame waiter sequence exhausted");
-    record->Sequence = _nextWaitSequence++;
     record->FlightIndex = flightIndex;
     record->FlightComplete = false;
     return record;
@@ -123,18 +121,8 @@ void GpuSystem::PumpWaitFrame(uint32_t flightIndex) {
     auto guard = MakeScopeGuard([this]() noexcept { _pumpingWaiters = false; });
     MarkCompletedWaitFrames(flightIndex);
     ManualCoroutineScheduler<WaitFrameRecord>& waiters = _flights[flightIndex]->WaitFrame;
-    vector<std::pair<WaitFrameRecord*, uint64_t>> ready;
-    const auto boundary = _waitDispatchBoundary.value_or(_nextWaitSequence);
-    for (size_t i = 0; i < waiters.Count(); ++i) {
-        auto* record = waiters.At(i);
-        if (record->Stop.stop_requested()) record->Canceled = true;
-        if (record->Sequence < boundary && (record->Canceled || record->FlightComplete)) ready.emplace_back(record, record->Sequence);
-    }
-    for (auto [record, sequence] : ready) {
-        if (!waiters.IsAlive(record) || record->Sequence != sequence) continue;
-        waiters.ResumeRecord(record);
-        if (waiters.IsAlive(record) && record->Sequence == sequence) waiters.Erase(record);
-    }
+    const auto boundary = _waitDispatchBoundaries.empty() ? waiters.GetSequenceBoundary() : _waitDispatchBoundaries[flightIndex];
+    waiters.DispatchReady([](const auto& record) { return record.Canceled || record.FlightComplete; }, boundary);
 }
 
 void GpuSystem::CancelAllWaitFrames() noexcept {
@@ -292,9 +280,9 @@ void GpuSystem::WaitAndRetireFlights() {
 }
 
 void GpuSystem::CleanupCompletedFlights() {
-    if (_waitDispatchBoundary || _pumpingWaiters) RADRAY_ABORT("Cannot reenter completion notification batch");
-    _waitDispatchBoundary = _nextWaitSequence;
-    auto boundaryGuard = MakeScopeGuard([this]() noexcept { _waitDispatchBoundary.reset(); });
+    if (!_waitDispatchBoundaries.empty() || _pumpingWaiters) RADRAY_ABORT("Cannot reenter completion notification batch");
+    for (const auto& flight : _flights) _waitDispatchBoundaries.push_back(flight->WaitFrame.GetSequenceBoundary());
+    auto boundaryGuard = MakeScopeGuard([this]() noexcept { _waitDispatchBoundaries.clear(); });
     // 队列已 idle,故所有【已提交】flight 的等待者都已就绪。此处恢复它们,让延迟销毁的
     // GPU 对象在正常路径上归还。挂在未提交 flight 上的记录等不到 fence,留给析构里的
     // CancelAllWaitFrames。

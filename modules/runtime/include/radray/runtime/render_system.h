@@ -9,7 +9,6 @@
 #include <radray/runtime/shader_program.h>
 #include <radray/runtime/render_scene/render_scene.h>
 #include <radray/runtime/render_scene/scene_writer.h>
-#include <radray/runtime/render_scene/scene_delivery_state.h>
 #include <radray/runtime_type.h>
 #include <radray/types.h>
 
@@ -86,10 +85,18 @@ private:
         uint32_t Generation{0};
         unique_ptr<RenderScene> Scene;
     };
+    enum class SceneFlightPhase : uint8_t {
+        Writable,
+        Sealed,
+        Published,
+        Consumed
+    };
     struct FrameUpdates {
         vector<SceneFrameUpdate> Scenes;
         size_t Count{0};
-        SceneFlightState Delivery;
+        SceneFlightPhase Phase{SceneFlightPhase::Writable};
+        uint64_t UpdateSequence{0};
+        uint64_t FrameSerial{0};
     };
     FrameUpdates& GetFrameUpdates(uint32_t flightIndex);
 
@@ -101,7 +108,12 @@ private:
     SparseSet<unique_ptr<SceneRecord>> _scenesGT;
     vector<SceneId> _sceneIdsGT;
     vector<SceneSlotRT> _scenesRT;
-    SceneDeliveryState _delivery;
+    // GT owns seal, publish, completion and stopping; RT owns consumption.
+    uint64_t _nextUpdateSequence{1};
+    uint64_t _lastPublishedSequence{0};
+    uint64_t _lastConsumedSequence{0};
+    uint64_t _lastFrameSerial{0};
+    bool _stopping{false};
     bool _collecting{false};
     std::thread::id _ownerThread{std::this_thread::get_id()};
 };

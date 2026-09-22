@@ -1,208 +1,143 @@
 #include <gtest/gtest.h>
 
+#include <cstdio>
 #include <limits>
 #include <random>
 
-#include <radray/runtime/render_scene/scene_delivery_state.h>
-#include <radray/types.h>
+#include <radray/logger.h>
+#include <radray/runtime/application.h>
+#include <radray/runtime/gpu_system.h>
+#include <radray/runtime/render_system.h>
 
 namespace radray {
 namespace {
 
-void ExpectSameFlight(const SceneFlightState& actual, const SceneFlightState& expected) {
-    EXPECT_EQ(actual.Phase, expected.Phase);
-    EXPECT_EQ(actual.UpdateSequence, expected.UpdateSequence);
-    EXPECT_EQ(actual.FrameSerial, expected.FrameSerial);
+class SceneDeliveryState : public ::testing::Test {
+protected:
+    Application App;
+    RenderSystem Renderer{&App, 3};
+};
+
+class SceneDeliveryStateDeathTest : public SceneDeliveryState {
+protected:
+    void SetUp() override {
+        SetLogCallback([](LogLevel, std::string_view message, void*) { fmt::print(stderr, "{}\n", message); }, nullptr);
+    }
+
+    void TearDown() override { ClearLogCallback(); }
+};
+
+TEST_F(SceneDeliveryState, PublicationAndCompletionFollowFrameIdentityRatherThanSlotOrder) {
+    EXPECT_EQ(Renderer.GetUpdateSequence(0), 0u);
+    EXPECT_EQ(Renderer.GetFrameSerial(0), 0u);
+    Renderer.SealFrameGT(2);
+    Renderer.SealFrameGT(0);
+    EXPECT_EQ(Renderer.GetUpdateSequence(2), 1u);
+    EXPECT_EQ(Renderer.GetUpdateSequence(0), 2u);
+    Renderer.PublishFrameGT(2);
+    Renderer.PublishFrameGT(0);
+    Renderer.ConsumeRenderUpdates(2, 10);
+    Renderer.ConsumeRenderUpdates(0, 20);
+    Renderer.OnFlightCompletedGT({.FlightIndex = 0, .FrameSerial = 20});
+    Renderer.OnFlightCompletedGT({.FlightIndex = 2, .FrameSerial = 10});
+    Renderer.SealFrameGT(2);
+    EXPECT_EQ(Renderer.GetUpdateSequence(2), 3u);
+    EXPECT_EQ(Renderer.GetFrameSerial(2), 0u);
 }
 
-TEST(SceneDeliveryState, InitialStateAndFullCycle) {
-    SceneDeliveryState delivery;
-    SceneFlightState frame;
-    EXPECT_TRUE(delivery.IsRunningGT());
-    EXPECT_EQ(frame.Phase, SceneFlightPhase::Writable);
-    EXPECT_EQ(frame.UpdateSequence, 0u);
-    EXPECT_EQ(frame.FrameSerial, 0u);
-
-    ASSERT_EQ(delivery.TrySeal(frame), SceneDeliveryError::None);
-    EXPECT_EQ(frame.UpdateSequence, 1u);
-    ASSERT_EQ(delivery.TryPublish(frame), SceneDeliveryError::None);
-    ASSERT_EQ(delivery.TryConsume(frame, 7), SceneDeliveryError::None);
-    ASSERT_EQ(delivery.TryComplete(frame, 7), SceneDeliveryError::None);
-    EXPECT_EQ(frame.Phase, SceneFlightPhase::Writable);
-    EXPECT_EQ(frame.FrameSerial, 7u);
-    ASSERT_EQ(delivery.TrySeal(frame), SceneDeliveryError::None);
-    EXPECT_EQ(frame.UpdateSequence, 2u);
-    EXPECT_EQ(frame.FrameSerial, 0u);
+TEST_F(SceneDeliveryStateDeathTest, RejectsUnconsumedCompletionAndOccupiedSeal) {
+    EXPECT_DEATH(Renderer.OnFlightCompletedGT({.FlightIndex = 0}), "Stale or unconsumed");
+    Renderer.SealFrameGT(0);
+    EXPECT_DEATH(Renderer.SealFrameGT(0), "still occupied");
+    EXPECT_DEATH(Renderer.OnFlightCompletedGT({.FlightIndex = 0}), "Stale or unconsumed");
+    Renderer.PublishFrameGT(0);
+    EXPECT_DEATH(Renderer.SealFrameGT(0), "still occupied");
+    EXPECT_DEATH(Renderer.OnFlightCompletedGT({.FlightIndex = 0, .FrameSerial = 1}), "Stale or unconsumed");
+    Renderer.ConsumeRenderUpdates(0, 1);
+    EXPECT_DEATH(Renderer.SealFrameGT(0), "still occupied");
+    Renderer.OnFlightCompletedGT({.FlightIndex = 0, .FrameSerial = 1});
+    EXPECT_DEATH(Renderer.OnFlightCompletedGT({.FlightIndex = 0, .FrameSerial = 1}), "Stale or unconsumed");
 }
 
-TEST(SceneDeliveryState, ValidationDoesNotCommitBeforePayloadWork) {
-    SceneDeliveryState delivery;
-    SceneFlightState frame;
-    auto before = frame;
-    ASSERT_EQ(delivery.ValidateSeal(frame), SceneDeliveryError::None);
-    ExpectSameFlight(frame, before);
-    ASSERT_EQ(delivery.TrySeal(frame), SceneDeliveryError::None);
-    ASSERT_EQ(delivery.TryPublish(frame), SceneDeliveryError::None);
-    before = frame;
-    ASSERT_EQ(delivery.ValidateConsume(frame, 1), SceneDeliveryError::None);
-    ExpectSameFlight(frame, before);
-    ASSERT_EQ(delivery.TryConsume(frame, 1), SceneDeliveryError::None);
-    before = frame;
-    ASSERT_EQ(delivery.ValidateComplete(frame, 1), SceneDeliveryError::None);
-    ExpectSameFlight(frame, before);
+TEST_F(SceneDeliveryStateDeathTest, RejectsOutOfOrderAndDuplicatePublication) {
+    Renderer.SealFrameGT(2);
+    Renderer.SealFrameGT(0);
+    EXPECT_DEATH(Renderer.PublishFrameGT(0), "publication order");
+    Renderer.PublishFrameGT(2);
+    EXPECT_DEATH(Renderer.PublishFrameGT(2), "publication order");
+    Renderer.PublishFrameGT(0);
+    EXPECT_DEATH(Renderer.ConsumeRenderUpdates(0, 2), "out-of-order");
+    Renderer.ConsumeRenderUpdates(2, 1);
+    EXPECT_DEATH(Renderer.ConsumeRenderUpdates(2, 2), "out-of-order");
+    Renderer.ConsumeRenderUpdates(0, 2);
+    Renderer.OnFlightCompletedGT({.FlightIndex = 2, .FrameSerial = 1});
+    Renderer.OnFlightCompletedGT({.FlightIndex = 0, .FrameSerial = 2});
 }
 
-TEST(SceneDeliveryState, RejectedSealDoesNotAdvanceSequence) {
-    SceneDeliveryState delivery;
-    SceneFlightState first, second;
-    ASSERT_EQ(delivery.TrySeal(first), SceneDeliveryError::None);
-    const auto before = first;
-    EXPECT_EQ(delivery.TrySeal(first), SceneDeliveryError::Occupied);
-    ExpectSameFlight(first, before);
-    ASSERT_EQ(delivery.TrySeal(second), SceneDeliveryError::None);
-    EXPECT_EQ(second.UpdateSequence, 2u);
+TEST_F(SceneDeliveryStateDeathTest, SerialMaySkipButMustNotRepeatOrWrap) {
+    Renderer.SealFrameGT(0);
+    Renderer.PublishFrameGT(0);
+    EXPECT_DEATH(Renderer.ConsumeRenderUpdates(0, 0), "out-of-order");
+    Renderer.ConsumeRenderUpdates(0, 100);
+    Renderer.OnFlightCompletedGT({.FlightIndex = 0, .FrameSerial = 100});
+    Renderer.SealFrameGT(0);
+    Renderer.PublishFrameGT(0);
+    EXPECT_DEATH(Renderer.ConsumeRenderUpdates(0, 99), "out-of-order");
+    EXPECT_DEATH(Renderer.ConsumeRenderUpdates(0, 100), "out-of-order");
+    const auto serial = std::numeric_limits<uint64_t>::max();
+    Renderer.ConsumeRenderUpdates(0, serial);
+    EXPECT_DEATH(Renderer.OnFlightCompletedGT({.FlightIndex = 0, .FrameSerial = 100}), "Stale or unconsumed");
+    EXPECT_EQ(Renderer.GetFrameSerial(0), serial);
+    Renderer.OnFlightCompletedGT({.FlightIndex = 0, .FrameSerial = serial});
+    EXPECT_DEATH({
+        Renderer.SealFrameGT(0);
+        Renderer.PublishFrameGT(0);
+        Renderer.ConsumeRenderUpdates(0, 1); }, "out-of-order");
 }
 
-TEST(SceneDeliveryState, PublicationFollowsSequenceNotSlotIndex) {
-    SceneDeliveryState delivery;
-    SceneFlightState first, second;
-    ASSERT_EQ(delivery.TrySeal(second), SceneDeliveryError::None);
-    ASSERT_EQ(delivery.TrySeal(first), SceneDeliveryError::None);
-    const auto before = first;
-    EXPECT_EQ(delivery.TryPublish(first), SceneDeliveryError::PublicationOrder);
-    ExpectSameFlight(first, before);
-    ASSERT_EQ(delivery.TryPublish(second), SceneDeliveryError::None);
-    ASSERT_EQ(delivery.TryPublish(first), SceneDeliveryError::None);
-    EXPECT_EQ(delivery.TryPublish(first), SceneDeliveryError::PublicationOrder);
+TEST_F(SceneDeliveryStateDeathTest, StoppingDrainsPublishedFramesAndAbandonsOnlyUnpublishedFrames) {
+    Renderer.SealFrameGT(0);
+    Renderer.PublishFrameGT(0);
+    Renderer.SealFrameGT(1);
+    EXPECT_DEATH(Renderer.AbandonUnpublishedFrameGT(1), "Terminal abandon");
+    Renderer.BeginStoppingGT();
+    EXPECT_DEATH(Renderer.SealFrameGT(2), "after stopping");
+    EXPECT_DEATH(Renderer.PublishFrameGT(1), "publication order");
+    EXPECT_DEATH(Renderer.AbandonUnpublishedFrameGT(0), "Terminal abandon");
+    Renderer.ConsumeRenderUpdates(0, 1);
+    EXPECT_DEATH(Renderer.AbandonUnpublishedFrameGT(0), "Terminal abandon");
+    Renderer.OnFlightCompletedGT({.FlightIndex = 0, .FrameSerial = 1});
+    Renderer.AbandonUnpublishedFramesGT();
+    Renderer.BeginStoppingGT();
+    EXPECT_DEATH(Renderer.SealFrameGT(1), "after stopping");
 }
 
-TEST(SceneDeliveryState, ConsumptionRejectsOutOfOrderAndDuplicateFrames) {
-    SceneDeliveryState delivery;
-    SceneFlightState first, second;
-    ASSERT_EQ(delivery.TrySeal(first), SceneDeliveryError::None);
-    ASSERT_EQ(delivery.TryPublish(first), SceneDeliveryError::None);
-    ASSERT_EQ(delivery.TrySeal(second), SceneDeliveryError::None);
-    ASSERT_EQ(delivery.TryPublish(second), SceneDeliveryError::None);
-    const auto before = second;
-    EXPECT_EQ(delivery.TryConsume(second, 1), SceneDeliveryError::ConsumptionOrder);
-    ExpectSameFlight(second, before);
-    ASSERT_EQ(delivery.TryConsume(first, 1), SceneDeliveryError::None);
-    EXPECT_EQ(delivery.TryConsume(first, 2), SceneDeliveryError::ConsumptionOrder);
-    ASSERT_EQ(delivery.TryConsume(second, 2), SceneDeliveryError::None);
-}
-
-TEST(SceneDeliveryState, SerialMaySkipButMustNotRepeatOrWrap) {
-    SceneDeliveryState delivery;
-    SceneFlightState frame;
-    ASSERT_EQ(delivery.TrySeal(frame), SceneDeliveryError::None);
-    ASSERT_EQ(delivery.TryPublish(frame), SceneDeliveryError::None);
-    EXPECT_EQ(delivery.TryConsume(frame, 0), SceneDeliveryError::ConsumptionOrder);
-    ASSERT_EQ(delivery.TryConsume(frame, 100), SceneDeliveryError::None);
-    ASSERT_EQ(delivery.TryComplete(frame, 100), SceneDeliveryError::None);
-    ASSERT_EQ(delivery.TrySeal(frame), SceneDeliveryError::None);
-    ASSERT_EQ(delivery.TryPublish(frame), SceneDeliveryError::None);
-    EXPECT_EQ(delivery.TryConsume(frame, 99), SceneDeliveryError::ConsumptionOrder);
-    EXPECT_EQ(delivery.TryConsume(frame, 100), SceneDeliveryError::ConsumptionOrder);
-    const auto maxSerial = std::numeric_limits<uint64_t>::max();
-    ASSERT_EQ(delivery.TryConsume(frame, maxSerial), SceneDeliveryError::None);
-    ASSERT_EQ(delivery.TryComplete(frame, maxSerial), SceneDeliveryError::None);
-    ASSERT_EQ(delivery.TrySeal(frame), SceneDeliveryError::None);
-    ASSERT_EQ(delivery.TryPublish(frame), SceneDeliveryError::None);
-    EXPECT_EQ(delivery.TryConsume(frame, 1), SceneDeliveryError::ConsumptionOrder);
-}
-
-TEST(SceneDeliveryState, CompletionRejectsEveryUnconsumedPhase) {
-    SceneDeliveryState delivery;
-    SceneFlightState frame;
-    EXPECT_EQ(delivery.TryComplete(frame, 0), SceneDeliveryError::CompletionMismatch);
-    ASSERT_EQ(delivery.TrySeal(frame), SceneDeliveryError::None);
-    EXPECT_EQ(delivery.TryComplete(frame, 0), SceneDeliveryError::CompletionMismatch);
-    ASSERT_EQ(delivery.TryPublish(frame), SceneDeliveryError::None);
-    EXPECT_EQ(delivery.TryComplete(frame, 1), SceneDeliveryError::CompletionMismatch);
-}
-
-TEST(SceneDeliveryState, StaleCompletionCannotReleaseReusedSlot) {
-    SceneDeliveryState delivery;
-    SceneFlightState frame;
-    ASSERT_EQ(delivery.TrySeal(frame), SceneDeliveryError::None);
-    ASSERT_EQ(delivery.TryPublish(frame), SceneDeliveryError::None);
-    ASSERT_EQ(delivery.TryConsume(frame, 1), SceneDeliveryError::None);
-    ASSERT_EQ(delivery.TryComplete(frame, 1), SceneDeliveryError::None);
-    EXPECT_EQ(delivery.TryComplete(frame, 1), SceneDeliveryError::CompletionMismatch);
-    ASSERT_EQ(delivery.TrySeal(frame), SceneDeliveryError::None);
-    ASSERT_EQ(delivery.TryPublish(frame), SceneDeliveryError::None);
-    ASSERT_EQ(delivery.TryConsume(frame, 2), SceneDeliveryError::None);
-    const auto before = frame;
-    EXPECT_EQ(delivery.TryComplete(frame, 1), SceneDeliveryError::CompletionMismatch);
-    ExpectSameFlight(frame, before);
-    ASSERT_EQ(delivery.TryComplete(frame, 2), SceneDeliveryError::None);
-}
-
-TEST(SceneDeliveryState, CompletionUsesItsOwnFlightNotLatestConsumedSerial) {
-    SceneDeliveryState delivery;
-    SceneFlightState first, second;
-    ASSERT_EQ(delivery.TrySeal(first), SceneDeliveryError::None);
-    ASSERT_EQ(delivery.TryPublish(first), SceneDeliveryError::None);
-    ASSERT_EQ(delivery.TrySeal(second), SceneDeliveryError::None);
-    ASSERT_EQ(delivery.TryPublish(second), SceneDeliveryError::None);
-    ASSERT_EQ(delivery.TryConsume(first, 10), SceneDeliveryError::None);
-    ASSERT_EQ(delivery.TryConsume(second, 20), SceneDeliveryError::None);
-    ASSERT_EQ(delivery.TryComplete(second, 20), SceneDeliveryError::None);
-    ASSERT_EQ(delivery.TryComplete(first, 10), SceneDeliveryError::None);
-}
-
-TEST(SceneDeliveryState, StoppingStillDrainsPublishedWork) {
-    SceneDeliveryState delivery;
-    SceneFlightState frame, empty;
-    ASSERT_EQ(delivery.TrySeal(frame), SceneDeliveryError::None);
-    ASSERT_EQ(delivery.TryPublish(frame), SceneDeliveryError::None);
-    delivery.BeginStoppingGT();
-    EXPECT_FALSE(delivery.IsRunningGT());
-    EXPECT_EQ(delivery.TrySeal(empty), SceneDeliveryError::Stopping);
-    EXPECT_EQ(delivery.TryAbandon(frame), SceneDeliveryError::InvalidAbandon);
-    ASSERT_EQ(delivery.TryConsume(frame, 1), SceneDeliveryError::None);
-    EXPECT_EQ(delivery.TryAbandon(frame), SceneDeliveryError::InvalidAbandon);
-    ASSERT_EQ(delivery.TryComplete(frame, 1), SceneDeliveryError::None);
-    ASSERT_EQ(delivery.TryAbandon(frame), SceneDeliveryError::None);
-}
-
-TEST(SceneDeliveryState, TerminalAbandonCannotRestartPublication) {
-    SceneDeliveryState delivery;
-    SceneFlightState frame, empty;
-    ASSERT_EQ(delivery.TrySeal(frame), SceneDeliveryError::None);
-    const auto before = frame;
-    EXPECT_EQ(delivery.TryAbandon(frame), SceneDeliveryError::InvalidAbandon);
-    ExpectSameFlight(frame, before);
-    delivery.BeginStoppingGT();
-    EXPECT_EQ(delivery.TryPublish(frame), SceneDeliveryError::PublicationOrder);
-    ASSERT_EQ(delivery.ValidateAbandon(frame), SceneDeliveryError::None);
-    ExpectSameFlight(frame, before);
-    ASSERT_EQ(delivery.TryAbandon(frame), SceneDeliveryError::None);
-    delivery.BeginStoppingGT();
-    EXPECT_FALSE(delivery.IsRunningGT());
-    EXPECT_EQ(delivery.TrySeal(frame), SceneDeliveryError::Stopping);
-    ASSERT_EQ(delivery.TryAbandon(empty), SceneDeliveryError::None);
-}
-
-TEST(SceneDeliveryState, RandomizedFlightReuseKeepsIdentitiesDistinct) {
+TEST_F(SceneDeliveryState, RandomizedFlightReusePreservesPayloadAndSubmissionIdentity) {
     std::mt19937 rng(0x5146u);
-    for (uint32_t flightCount : {1u, 2u, 3u, 8u}) {
-        SceneDeliveryState delivery;
-        array<SceneFlightState, 8> frames{};
-        uint64_t lastSerial = 0;
+    for (uint32_t count : {1u, 2u, 3u, 8u}) {
+        Application app;
+        RenderSystem renderer{&app, count};
+        const auto scene = renderer.CreateSceneGT();
+        auto* writer = renderer.GetSceneWriterGT(scene).Get();
+        const auto shape = writer->CreateShape();
+        writer->SetStaticMesh(shape, {}, Eigen::Matrix4f::Identity());
+        uint64_t serial = 0;
         for (uint64_t sequence = 1; sequence <= 10000; ++sequence) {
-            auto& frame = frames[rng() % flightCount];
-            const auto oldSerial = frame.FrameSerial;
-            ASSERT_EQ(delivery.TrySeal(frame), SceneDeliveryError::None);
-            ASSERT_EQ(frame.UpdateSequence, sequence);
-            ASSERT_EQ(delivery.TryPublish(frame), SceneDeliveryError::None);
-            const auto serial = lastSerial + 1 + rng() % 7;
-            ASSERT_EQ(delivery.TryConsume(frame, serial), SceneDeliveryError::None);
-            const auto before = frame;
-            EXPECT_EQ(delivery.TryComplete(frame, oldSerial), SceneDeliveryError::CompletionMismatch);
-            ExpectSameFlight(frame, before);
-            ASSERT_EQ(delivery.TryComplete(frame, serial), SceneDeliveryError::None);
-            lastSerial = serial;
+            const uint32_t flight = rng() % count;
+            auto matrix = Eigen::Matrix4f::Identity().eval();
+            matrix(0, 3) = static_cast<float>(sequence);
+            writer->SetTransform(shape, matrix);
+            renderer.SealFrameGT(flight);
+            ASSERT_EQ(renderer.GetUpdateSequence(flight), sequence);
+            renderer.PublishFrameGT(flight);
+            serial += 1 + rng() % 7;
+            renderer.ConsumeRenderUpdates(flight, serial);
+            ASSERT_EQ(renderer.GetFrameSerial(flight), serial);
+            const auto mesh = renderer.GetSceneRT(scene)->GetStaticMesh(shape);
+            ASSERT_TRUE(mesh);
+            ASSERT_FLOAT_EQ(mesh->LocalToWorld(0, 3), static_cast<float>(sequence));
+            renderer.OnFlightCompletedGT({.FlightIndex = flight, .FrameSerial = serial});
+            ASSERT_TRUE(renderer.GetFrameUpdatesRT(flight).empty());
         }
     }
 }

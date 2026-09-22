@@ -20,7 +20,7 @@ flight 保存更新包和必要 owner。没有内置 Forward/RenderGraph、视�
 | S2 `ApplySceneUpdatesRT` | BeginFrameRecord 后、OnRender 前，有序 Apply；先结束上一轮 CPU Scene 读者 |
 
 输入与 OnUpdate 后，WorldManager 开始全局 TickEpoch。S1 不等待 GPU。RT 跳过绘制仍消费已发布包。
-两个 runner 共用这些协议；writable/ready、主队列 fence 仍是实际同步权威，没有第二套提交体系。
+两个 runner 共用这些协议；ready 交接、CPU 提交完成计数与主队列 fence 是实际同步权威，没有第二套提交体系。
 普通组件不得自行驱动这些入口或调用 WaitIdle；CPU-only 测试显式调用 World 的
 `Tick`、`FinalizeWorldGT`、`CollectRenderUpdates`、`ShutdownWorld`，或对应 WorldManager 驱动。
 托管 World 不能自行 Tick/Finalize。析构只做末端资源释放，已注册对象必须先显式 teardown。
@@ -167,6 +167,8 @@ RenderScene 不可复制/移动；不能把 reader lease 持到依赖下一次 A
 ## 交付、退出与资产保活
 
 flight 严格经过 Writable → Sealed → Published → Consumed → completion 后 Writable。
+这些状态直接属于 RenderSystem 的 flight 包；每个入口在修改 payload/owner 前校验一次，处理成功后提交状态，
+不另设返回错误码的交付状态机或重复验证层。非法次序仍按不变量违反诊断。
 Seal 分配单调 UpdateSequence，Publish 验证顺序；Consume 在 Apply 前验证 Published、下一序号与新的 FrameSerial。
 即使同 generation 的合法 transform 也不能乱序或重复消费。completion 必须匹配当前 Consumed 包的 FrameSerial。
 F 与 backbuffer count 无关；功能测试覆盖 F=1/2/3/8 的单/双线程 runner。

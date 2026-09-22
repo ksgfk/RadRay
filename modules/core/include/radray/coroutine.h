@@ -8,6 +8,7 @@
 
 #include <concepts>
 #include <coroutine>
+#include <limits>
 #include <optional>
 #include <type_traits>
 #include <utility>
@@ -18,6 +19,7 @@
 #include <stdexec/execution.hpp>
 
 #include <radray/types.h>
+#include <radray/logger.h>
 
 namespace radray {
 
@@ -32,6 +34,7 @@ using stdexec::when_all_with_variant;
 using exec::when_any;
 
 struct ManualCoroutineRecord {
+    uint64_t Sequence{0};
     std::coroutine_handle<> Continuation{};
     stop_token Stop;
     bool Canceled{false};
@@ -56,8 +59,10 @@ public:
 
     template <class... Args>
     TRecord* Enqueue(stop_token stop, std::coroutine_handle<> continuation, Args&&... args) {
+        if (_nextSequence == std::numeric_limits<uint64_t>::max()) RADRAY_ABORT("Coroutine record sequence exhausted");
         auto entry = make_unique<Entry>(std::forward<Args>(args)...);
         TRecord* record = &entry->Record;
+        record->Sequence = _nextSequence++;
         record->Continuation = continuation;
         record->Stop = stop;
         record->Canceled = false;
@@ -89,6 +94,30 @@ public:
             }
         }
         return false;
+    }
+
+    bool IsAlive(TRecord* record, uint64_t sequence) const noexcept {
+        return IsAlive(record) && record->Sequence == sequence;
+    }
+
+    /// Capture one exclusive boundary per scheduler before dispatching across instances.
+    uint64_t GetSequenceBoundary() const noexcept { return _nextSequence; }
+
+    /// Predicate must not mutate this scheduler. Freeze ready identities before resuming
+    /// any continuation; new records wait for a later dispatch. Survivors are erased.
+    template <class TPredicate>
+    void DispatchReady(TPredicate&& ready, uint64_t boundary = std::numeric_limits<uint64_t>::max()) {
+        vector<std::pair<TRecord*, uint64_t>> batch;
+        for (const auto& entry : _records) {
+            auto* record = &entry->Record;
+            if (record->Stop.stop_requested()) record->Canceled = true;
+            if (record->Sequence < boundary && ready(*record)) batch.emplace_back(record, record->Sequence);
+        }
+        for (auto [record, sequence] : batch) {
+            if (!IsAlive(record, sequence)) continue;
+            ResumeRecord(record);
+            if (IsAlive(record, sequence)) Erase(record);
+        }
     }
 
     TRecord* At(size_t index) noexcept {
@@ -139,9 +168,10 @@ public:
     void CancelAll() noexcept {
         while (!_records.empty()) {
             TRecord* record = Back();
+            const auto sequence = record->Sequence;
             record->Canceled = true;
             ResumeRecord(record);
-            if (IsAlive(record)) {
+            if (IsAlive(record, sequence)) {
                 Erase(record);
             }
         }
@@ -171,6 +201,7 @@ private:
     };
 
     vector<unique_ptr<Entry>> _records;
+    uint64_t _nextSequence{1};
 };
 
 class TaskScope {

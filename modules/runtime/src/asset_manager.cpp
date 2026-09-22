@@ -385,20 +385,7 @@ void AssetManager::CommitLoadResult(Slot* slot, AssetLoadResult result) noexcept
 }
 
 void AssetManager::ResumeWaiters(Slot* slot) noexcept {
-    // 先收集再恢复: 恢复会让等待者从 _waiters 里摘掉自己的记录, 边遍历边恢复会失效。
-    vector<std::pair<AssetWaitRecord*, uint64_t>> targets;
-    const size_t count = _waiters.Count();
-    for (size_t i = 0; i < count; ++i) {
-        AssetWaitRecord* waiter = _waiters.At(i);
-        if (waiter != nullptr && waiter->Slot == slot) {
-            targets.emplace_back(waiter, waiter->Sequence);
-        }
-    }
-    for (auto [waiter, sequence] : targets) {
-        if (_waiters.IsAlive(waiter) && waiter->Sequence == sequence) {
-            _waiters.ResumeRecord(waiter);
-        }
-    }
+    _waiters.DispatchReady([slot](const auto& waiter) { return waiter.Slot == slot; });
 }
 
 AssetWaitRecord* AssetManager::RegisterWait(
@@ -409,8 +396,6 @@ AssetWaitRecord* AssetManager::RegisterWait(
         return nullptr;
     }
     AssetWaitRecord* record = _waiters.Enqueue(stop, continuation);
-    if (_nextWaitSequence == std::numeric_limits<uint64_t>::max()) RADRAY_ABORT("Asset waiter sequence exhausted");
-    record->Sequence = _nextWaitSequence++;
     record->Slot = slot;
     return record;
 }

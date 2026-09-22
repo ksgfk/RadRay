@@ -3,6 +3,8 @@
 
 #include <gtest/gtest.h>
 
+#include <semaphore>
+
 #include <radray/runtime/asset_manager.h>
 #include <radray/runtime/game_framework/actor.h>
 #include <radray/runtime/game_framework/world.h>
@@ -168,6 +170,61 @@ TEST(RuntimeFoundation, D3D12SingleThreadWindowLifecycle) { RunFoundation(render
 TEST(RuntimeFoundation, D3D12ThreadedWindowLifecycle) { RunFoundation(render::RenderBackend::D3D12, true); }
 TEST(RuntimeFoundation, VulkanSingleThreadWindowLifecycle) { RunFoundation(render::RenderBackend::Vulkan, false); }
 TEST(RuntimeFoundation, VulkanThreadedWindowLifecycle) { RunFoundation(render::RenderBackend::Vulkan, true); }
+
+class FlightReuseOverlapApp final : public Application {
+protected:
+    void OnUpdate(const AppUpdateContext&) override {
+        ++_updates;
+        if (_updates == 2) {
+            EXPECT_TRUE(_firstRecording.try_acquire_for(std::chrono::seconds{5}));
+            _secondUpdate.release();
+        } else if (_updates == 3) {
+            EXPECT_TRUE(_secondRecording.try_acquire_for(std::chrono::seconds{5}));
+            _thirdUpdate.release();
+        }
+        if (_updates >= 3) test::CloseMainWindow(*this);
+    }
+
+    void OnRender(AppFrameContext& ctx) override {
+        if (ctx.FrameSerial() == 1) {
+            _firstRecording.release();
+            _firstOverlap = _secondUpdate.try_acquire_for(std::chrono::seconds{5});
+        } else if (ctx.FrameSerial() == 2) {
+            _secondRecording.release();
+            _reuseOverlap = _thirdUpdate.try_acquire_for(std::chrono::seconds{5});
+        }
+    }
+
+    void OnRenderFrameComplete(const FlightCompletion& completion) override {
+        EXPECT_TRUE(_completed.insert(completion.FrameSerial).second);
+    }
+
+    void OnShutdown() override {
+        EXPECT_TRUE(_firstOverlap);
+        EXPECT_TRUE(_reuseOverlap);
+        EXPECT_EQ(_completed.size(), GetGpuSystem()->GetFrameIndex());
+    }
+
+private:
+    std::binary_semaphore _firstRecording{0}, _secondRecording{0}, _secondUpdate{0}, _thirdUpdate{0};
+    uint32_t _updates{0};
+    bool _firstOverlap{false}, _reuseOverlap{false};
+    unordered_set<uint64_t> _completed;
+};
+
+void RunFlightReuseOverlap(render::RenderBackend backend) {
+    {
+        render::test::DeviceContext device;
+        if (!render::test::TryCreateDevice(backend, device)) GTEST_SKIP() << device.Reason;
+    }
+    test::RuntimeLogCapture logs;
+    FlightReuseOverlapApp app;
+    ASSERT_EQ(app.Run({.Backend = backend, .EnableValidation = true, .Multithreaded = true, .EnableSynchronizationValidation = true, .WindowTitle = "Flight reuse overlap", .WindowWidth = 80, .WindowHeight = 60, .FlightDataCount = 2, .BackBufferFormat = render::TextureFormat::BGRA8_UNORM, .PresentMode = render::PresentMode::FIFO}), 0);
+    EXPECT_TRUE(logs.Errors().empty()) << logs.Errors();
+}
+
+TEST(RuntimeFoundation, D3D12SlotReuseOverlapsTheNextRecording) { RunFlightReuseOverlap(render::RenderBackend::D3D12); }
+TEST(RuntimeFoundation, VulkanSlotReuseOverlapsTheNextRecording) { RunFlightReuseOverlap(render::RenderBackend::Vulkan); }
 
 #if defined(_WIN32)
 class DroppedPresentationApp final : public Application {

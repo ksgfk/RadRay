@@ -203,7 +203,6 @@ private:
     };
 
     struct WindowOperationRecord : ManualCoroutineRecord {
-        uint64_t Sequence{0};
         WindowOperationPhase Phase{WindowOperationPhase::WaitingForSafety};
     };
 
@@ -263,7 +262,6 @@ private:
     const std::thread::id _gameThread{std::this_thread::get_id()};
     NativeWindowType _type;
     ManualCoroutineScheduler<WindowOperationRecord> _operations;
-    uint64_t _nextOperationSequence{1};
     uint64_t _nextWindowId{1};
     bool _acceptOperations{true};
     bool _applyingOperations{false};

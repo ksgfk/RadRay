@@ -3,7 +3,6 @@
 #include <chrono>
 
 #include <atomic>
-#include <mutex>
 #include <optional>
 #include <semaphore>
 #include <span>
@@ -88,26 +87,11 @@ task<void> ApplicationScheduler::SwitchTo() {
 }
 
 ApplicationSchedulerRecord* ApplicationScheduler::Enqueue(stop_token stop, std::coroutine_handle<> continuation) {
-    if (_nextSequence == std::numeric_limits<uint64_t>::max()) RADRAY_ABORT("Scheduler sequence exhausted");
-    auto* record = _records.Enqueue(stop, continuation);
-    record->Sequence = _nextSequence++;
-    return record;
+    return _records.Enqueue(stop, continuation);
 }
 
 bool ApplicationScheduler::Erase(ApplicationSchedulerRecord* record) noexcept {
     return _records.Erase(record);
-}
-
-bool ApplicationScheduler::IsAlive(ApplicationSchedulerRecord* record) const noexcept {
-    return _records.IsAlive(record);
-}
-
-void ApplicationScheduler::ResumeRecord(ApplicationSchedulerRecord* record) noexcept {
-    _records.ResumeRecord(record);
-}
-
-void ApplicationScheduler::CancelRecord(ApplicationSchedulerRecord* record) noexcept {
-    _records.CancelRecord(record);
 }
 
 void ApplicationScheduler::Pump() {
@@ -115,18 +99,7 @@ void ApplicationScheduler::Pump() {
     if (_pumping || _collecting) RADRAY_ABORT("Cannot pump scheduler during dispatch or collection");
     _pumping = true;
     auto guard = MakeScopeGuard([this]() noexcept { _pumping = false; });
-    const auto boundary = _nextSequence;
-    while (!_records.Empty() && _records.Front()->Sequence < boundary) {
-        ApplicationSchedulerRecord* record = _records.Front();
-        const auto sequence = record->Sequence;
-        if (record->Stop.stop_requested()) {
-            record->Canceled = true;
-        }
-        ResumeRecord(record);
-        if (IsAlive(record) && record->Sequence == sequence) {
-            Erase(record);
-        }
-    }
+    _records.DispatchReady([](const auto&) { return true; });
 }
 
 void ApplicationScheduler::CancelAll() noexcept {
@@ -136,16 +109,7 @@ void ApplicationScheduler::CancelAll() noexcept {
 Application::Application() noexcept = default;
 
 Application::~Application() noexcept {
-    _scheduler.BeginStopping();
-    if (_worldManager) _worldManager->BeginStopping();
-    if (_renderSystem) _renderSystem->BeginStoppingGT();
-    if (_assetManager) _assetManager->BeginStopping();
-    if (_windowManager != nullptr) _windowManager->CloseOperations();
-    if (_gpuSystem != nullptr) {
-        WaitAndCleanupCompletedFlights();
-    }
-    if (_renderSystem) _renderSystem->AbandonUnpublishedFramesGT();
-    if (_gpuSystem) _gpuSystem->AbandonUnpublishedResourcesTerminalGT();
+    StopAndDrainRuntime();
     _scheduler.CancelAll();
     DestroyRuntime();
 }
@@ -621,7 +585,6 @@ public:
     explicit ThreadedRunner(Application* app)
         : _app(app),
           _modalLoopTickConnection(_app->GetWindowManager()->EventModalLoopTick().connect(&ThreadedRunner::OnModalLoopTick, this)),
-          _writableSlotsSemaphore(_app->GetGpuSystem()->GetFlightDataCount()),
           _readySlotsSemaphore(0),
           _runnerFrameDatas(_app->GetGpuSystem()->GetFlightDataCount()),
           _renderThread(&ThreadedRunner::RenderThread, this) {
@@ -646,7 +609,6 @@ public:
         }
 
         _app->GetWindowManager()->CloseOperations();
-        _writableSlotsSemaphore.release();
         _readySlotsSemaphore.release();
 
         if (_renderThread.joinable()) {
@@ -662,8 +624,6 @@ public:
     void RenderThread() {
         RADRAY_PROFILE_THREAD("RadRay Render");
         while (true) {
-            RetireRenderedFrames(false, true);
-
             auto* gpuSystem = _app->GetGpuSystem();
             {
                 RADRAY_PROFILE_SCOPE_N("WaitReadySlot");
@@ -671,7 +631,6 @@ public:
             }
 
             if (_reqExit && _renderFrameIndex == _publishedFrameCount.load(std::memory_order_acquire)) {
-                RetireRenderedFrames(true, false);
                 break;
             }
 
@@ -710,7 +669,7 @@ public:
         const uint64_t frameIndex = _app->GetGpuSystem()->GetFrameIndex();
         _discardNonModalFramesBefore.store(frameIndex, std::memory_order_release);
         WaitRenderFrameComplete(frameIndex);
-        RetireRenderedFrames(false, false);
+        RetireRenderedFrames(false);
         if (auto renderedFrameCount = TickFrame(true, false)) {
             WaitRenderFrameComplete(renderedFrameCount.value());
         }
@@ -721,7 +680,7 @@ public:
         if (!windows->NeedsMaintenance()) return;
         const uint64_t boundary = windows->GetOperationBoundary();
         WaitRenderFrameComplete(_publishedFrameCount.load(std::memory_order_acquire));
-        RetireRenderedFrames(true, false);
+        RetireRenderedFrames(true);
         _app->GetGpuSystem()->WaitAndRetireFlights();
         windows->ProcessOperations(boundary);
         if (windows->ShouldExit()) _reqExit = true;
@@ -737,13 +696,7 @@ public:
         if (_reqExit) return false;
         if (!waitForWritableSlot && _renderedFrameCount.load(std::memory_order_acquire) < gpuSystem->GetFrameIndex()) return false;
         RADRAY_PROFILE_SCOPE_N("PrepareFrame");
-        if (waitForWritableSlot) {
-            RetireRenderedFrames(false, false);
-            RADRAY_PROFILE_SCOPE_N("WaitWritableSlot");
-            WaitForWritableFlightSlot();
-        } else if (!_writableSlotsSemaphore.try_acquire()) {
-            return false;
-        }
+        if (!PrepareFlightSlot(waitForWritableSlot)) return false;
 
         const uint64_t frameIndex = gpuSystem->GetFrameIndex();
         const uint32_t flightIndex = static_cast<uint32_t>(frameIndex % gpuSystem->GetFlightDataCount());
@@ -809,54 +762,29 @@ public:
         }
     }
 
-    void WaitForWritableFlightSlot() {
-        for (;;) {
-            if (_writableSlotsSemaphore.try_acquire()) {
-                return;
-            }
-            RetireRenderedFrames(false, false);
-            if (_writableSlotsSemaphore.try_acquire()) {
-                return;
-            }
-
-            GpuFenceSignal submitted{};
-            uint64_t waitRendered = 0;
-            {
-                std::lock_guard lock(_retireMutex);
-                auto* gpuSystem = _app->GetGpuSystem();
-                const uint64_t renderedFrameCount = _renderedFrameCount.load(std::memory_order_acquire);
-                if (_retireFrameIndex < renderedFrameCount) {
-                    const uint32_t flightIndex = static_cast<uint32_t>(_retireFrameIndex % gpuSystem->GetFlightDataCount());
-                    submitted = gpuSystem->GetFlightGpuSignal(flightIndex);
-                } else {
-                    waitRendered = _retireFrameIndex + 1;
-                }
-            }
-            if (submitted.IsValid()) {
-                RADRAY_PROFILE_SCOPE_N("WaitSubmittedFlight");
-                submitted.Fence->Wait(submitted.Value);
-            } else if (waitRendered != 0) {
-                WaitRenderFrameComplete(waitRendered);
-            }
-        }
+    bool PrepareFlightSlot(bool wait) {
+        RADRAY_PROFILE_SCOPE_N("WaitWritableSlot");
+        auto* gpuSystem = _app->GetGpuSystem();
+        RetireRenderedFrames(false);
+        if (gpuSystem->GetFrameIndex() - _retireFrameIndex < gpuSystem->GetFlightDataCount()) return true;
+        if (!wait) return false;
+        // Wait only for the oldest slot's submission, never for the newest recording.
+        WaitRenderFrameComplete(_retireFrameIndex + 1);
+        const auto flightIndex = static_cast<uint32_t>(_retireFrameIndex % gpuSystem->GetFlightDataCount());
+        gpuSystem->CompleteFlightIfReady(flightIndex, true);
+        ++_retireFrameIndex;
+        return true;
     }
 
-    void RetireRenderedFrames(bool waitForPendingFrames, bool waitWhenFrameSlotsFull) {
-        std::lock_guard lock(_retireMutex);
+    void RetireRenderedFrames(bool waitForPendingFrames) {
         auto* gpuSystem = _app->GetGpuSystem();
         const uint64_t renderedFrameCount = _renderedFrameCount.load(std::memory_order_acquire);
         while (_retireFrameIndex < renderedFrameCount) {
-            const uint64_t inFlightFrameCount = renderedFrameCount - _retireFrameIndex;
             const uint32_t flightIndex = static_cast<uint32_t>(_retireFrameIndex % gpuSystem->GetFlightDataCount());
-            bool wait = waitForPendingFrames;
-            if (!wait && waitWhenFrameSlotsFull && inFlightFrameCount >= gpuSystem->GetFlightDataCount()) {
-                wait = true;
-            }
-            if (!gpuSystem->CompleteFlightIfReady(flightIndex, wait)) {
+            if (!gpuSystem->CompleteFlightIfReady(flightIndex, waitForPendingFrames)) {
                 break;
             }
             _retireFrameIndex++;
-            _writableSlotsSemaphore.release();
         }
     }
 
@@ -867,7 +795,6 @@ public:
 
     Application* _app;
     sigslot::scoped_connection _modalLoopTickConnection;
-    std::counting_semaphore<> _writableSlotsSemaphore;
     std::counting_semaphore<> _readySlotsSemaphore;
     // 共享数据
     vector<FrameData> _runnerFrameDatas;
@@ -875,8 +802,8 @@ public:
     std::atomic<uint64_t> _discardNonModalFramesBefore{0};
     std::atomic<uint64_t> _renderedFrameCount{0};
     std::atomic<uint64_t> _publishedFrameCount{0};
-    std::mutex _retireMutex;
     // 主线程独占
+    uint64_t _retireFrameIndex{0};
     std::chrono::steady_clock::time_point _lastFrameTime{std::chrono::steady_clock::now()};
     std::chrono::duration<float> _deltaTime{};
     bool _framePrepared{false};
@@ -884,7 +811,6 @@ public:
     bool _hasModalLoopActivityDuringDispatch{false};
     // 渲染线程独占
     uint64_t _renderFrameIndex{0};
-    uint64_t _retireFrameIndex{0};
     std::thread _renderThread;
 };
 
@@ -964,8 +890,7 @@ bool Application::ShouldExit() const noexcept {
     return _windowManager != nullptr && _windowManager->ShouldExit();
 }
 
-int Application::Shutdown(const AppShutdownContext& ctx) {
-    (void)ctx;
+void Application::StopAndDrainRuntime() {
     _scheduler.BeginStopping();
     if (_worldManager != nullptr) _worldManager->BeginStopping();
     if (_renderSystem != nullptr) _renderSystem->BeginStoppingGT();
@@ -976,6 +901,11 @@ int Application::Shutdown(const AppShutdownContext& ctx) {
     }
     if (_renderSystem) _renderSystem->AbandonUnpublishedFramesGT();
     if (_gpuSystem) _gpuSystem->AbandonUnpublishedResourcesTerminalGT();
+}
+
+int Application::Shutdown(const AppShutdownContext& ctx) {
+    (void)ctx;
+    StopAndDrainRuntime();
     // 游戏侧清理:释放自管 per-flight 资源、置空指向 World 的非 owning 指针。
     OnShutdown();
     _scheduler.CancelAll();

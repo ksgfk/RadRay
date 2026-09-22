@@ -93,10 +93,12 @@ CPU record/Submit 时间与 GPU 时间线分开解读。关闭使用 `-DRADRAY_E
 | CMake target | `ctest -R` 示例 |
 |---|---|
 | `test_runtime_type` | `RuntimeTypeIdTest` |
+| `test_manual_coroutine_scheduler` | `ManualCoroutineScheduler`（冻结派发、取消其他等待者、跨等待表截止与延迟取消） |
 | `test_asset_slot` | `AssetSlotTest` |
 | `test_frame_upload` | `FrameUploadTest` |
 | `test_gpu_system` | `GpuSystemTest`, `GpuSystemDeathTest` |
 | `test_scene_delivery` | `SceneDelivery`, `MultiWorldSceneRunner`（含单/多场景 CPU 交付与 D3D12/Vulkan runner，F=1/2/3/8） |
+| `test_scene_delivery_state` | `SceneDeliveryState`（直接通过 RenderSystem 验证发布次序、serial、停止排空和随机槽位复用） |
 | `test_world_scenes` | `WorldManager`, `WorldScenes`（多 World 所有权、暂停、独立场景写入、连接与退休） |
 | `test_scene_updates` | `SceneUpdates`（组件标脏合并、生命周期、代次与收集约束；纯 CPU） |
 | `test_scene_assets` | `SceneAssets`（类型无关的资产常驻/退休、Ready 通知、共享等待取消与 GT 释放；纯 CPU） |
@@ -134,7 +136,7 @@ Vertex/Pixel 各 32 元素、显式 Vertex/Pixel 两个目标各 64 元素。
 一个 set 的平均耗时。比较时固定配置、设备和验证层设置；此基准启用 D3D12 debug layer，GPU-based
 validation 由上述环境变量控制。基准不提交 GPU 命令，不代表 draw/dispatch 或 GPU 执行时间。
 | `test_runtime_shader_jit` | `RadRayRuntimeShaderJit` |
-| `test_application` | `RuntimeFoundation`（双后端、单/双线程窗口与原生录制） |
+| `test_application` | `RuntimeFoundation`（双后端、单/双线程窗口与原生录制，旧槽位复用与后一帧 CPU 录制重叠） |
 | `test_radray_render_shader_artifact` | `RadRayRenderShaderArtifact` |
 | `test_radray_shader_contract` | `RadRayShaderContract` |
 | `test_radray_render_shader_layout` | `RadRayRenderShaderLayout` |
