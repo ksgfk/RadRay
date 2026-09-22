@@ -167,10 +167,29 @@ void Actor::UnregisterAllComponents() {
     for (size_t i = count; i > 0; --i) UnregisterComponent(*_ownedComponents[i - 1]);
 }
 
-void Actor::Teardown() {
-    _lifecycle = ObjectLifecycle::Destroying;
+void Actor::PrepareComponentDestruction(std::span<const ComponentId> ids, vector<unique_ptr<ActorComponent>>& retired) {
+    for (const auto id : ids) {
+        if (auto component = ResolveIncludingPending(id)) component->_lifecycle = ObjectLifecycle::Destroying;
+    }
+    std::erase_if(_ownedComponents, [this, &retired](auto& owner) {
+        if (owner->_lifecycle != ObjectLifecycle::Destroying) return false;
+        const auto id = owner->GetId();
+        if (id.Generation == std::numeric_limits<uint32_t>::max()) RADRAY_ABORT("Component generation exhausted");
+        _componentIds.Destroy({id.Index, id.Generation});
+        if (_rootComponent.Get() == owner.get()) _rootComponent = nullptr;
+        retired.push_back(std::move(owner));
+        return true;
+    });
+}
+
+void Actor::PrepareComponentTeardown() noexcept {
     _rootComponent = nullptr;
     for (const auto& component : _ownedComponents) component->_lifecycle = ObjectLifecycle::Destroying;
+}
+
+void Actor::Teardown() {
+    _lifecycle = ObjectLifecycle::Destroying;
+    PrepareComponentTeardown();
     UnregisterAllComponents();
     if (_spawned) {
         _spawned = false;

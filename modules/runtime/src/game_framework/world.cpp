@@ -152,27 +152,15 @@ void World::PrepareLifecycle() {
         while (end < _executing.Components.size() && _executing.Components[end].Actor == actorId) ++end;
         auto actor = ResolveIncludingPending(actorId);
         if (actor) {
-            for (size_t i = first; i < end; ++i) {
-                if (auto component = actor->ResolveIncludingPending(_executing.Components[i])) component->_lifecycle = ObjectLifecycle::Destroying;
-            }
-            std::erase_if(actor->_ownedComponents, [this, actor](auto& owner) {
-                if (owner->_lifecycle != ObjectLifecycle::Destroying) return false;
-                const auto id = owner->GetId();
-                if (id.Generation == std::numeric_limits<uint32_t>::max()) RADRAY_ABORT("Component generation exhausted");
-                actor->_componentIds.Destroy({id.Index, id.Generation});
-                if (actor->_rootComponent.Get() == owner.get()) actor->_rootComponent = nullptr;
-                _retiredComponents.push_back(std::move(owner));
-                return true;
-            });
+            actor->PrepareComponentDestruction({_executing.Components.data() + first, end - first}, _retiredComponents);
         }
         first = end;
     }
     for (const auto& actor : _retiredActors) {
-        actor->_rootComponent = nullptr;
-        for (const auto& component : actor->_ownedComponents) component->_lifecycle = ObjectLifecycle::Destroying;
+        actor->PrepareComponentTeardown();
     }
     for (const auto& actor : _retiredActors) {
-        for (const auto& component : actor->_ownedComponents) {
+        for (const auto& component : actor->GetOwnedComponents()) {
             if (auto scene = dynamic_cast<SceneComponent*>(component.get())) scene->UnlinkHierarchy(&_detachedChildren);
         }
     }

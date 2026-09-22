@@ -9,6 +9,7 @@
 #include <radray/runtime/shader_program.h>
 #include <radray/runtime/render_scene/render_scene.h>
 #include <radray/runtime/render_scene/scene_writer.h>
+#include <radray/runtime/render_scene/scene_delivery_state.h>
 #include <radray/runtime_type.h>
 #include <radray/types.h>
 
@@ -88,13 +89,7 @@ private:
     struct FrameUpdates {
         vector<SceneFrameUpdate> Scenes;
         size_t Count{0};
-        enum class State : uint8_t { Writable,
-                                     Sealed,
-                                     Published,
-                                     Consumed };
-        State Phase{State::Writable};
-        uint64_t UpdateSequence{0};
-        uint64_t FrameSerial{0};
+        SceneFlightState Delivery;
     };
     FrameUpdates& GetFrameUpdates(uint32_t flightIndex);
 
@@ -106,12 +101,7 @@ private:
     SparseSet<unique_ptr<SceneRecord>> _scenesGT;
     vector<SceneId> _sceneIdsGT;
     vector<SceneSlotRT> _scenesRT;
-    uint64_t _nextUpdateSequence{1};
-    uint64_t _lastPublishedSequence{0};
-    uint64_t _lastConsumedSequence{0};
-    uint64_t _lastFrameSerial{0};
-    bool _stopping{false};
-    bool _terminalAbandoned{false};
+    SceneDeliveryState _delivery;
     bool _collecting{false};
     std::thread::id _ownerThread{std::this_thread::get_id()};
 };
