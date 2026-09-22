@@ -102,6 +102,7 @@ CPU record/Submit 时间与 GPU 时间线分开解读。关闭使用 `-DRADRAY_E
 | `test_scene_assets` | `SceneAssets`（类型无关的资产常驻/退休、Ready 通知、共享等待取消与 GT 释放；纯 CPU） |
 | `test_static_mesh_scene` | `StaticMeshScene`（CPU mesh 描述、变换/bounds、替换/删除与持久描述；无 GPU 资源） |
 | `test_scene_sync_performance` | `SceneSyncCorrectness`、`SceneSyncPerformance`（World → RenderScene，单/双线程，F=1/2/3；性能矩阵显式运行） |
+| `test_frame_scenarios` | `FrameScenarios`（Tick 驱动的巡游、交火、流式、群体、暂停、过场灯光与编辑器拖拽；F=2） |
 | `test_multi_window` | `RuntimeMultiWindow`（三窗口交换链、有序提交与生命周期） |
 | `test_flight_completion` | `FlightCompletionTest` |
 | `test_asset_database` | `AssetDatabaseTest` |
@@ -324,7 +325,8 @@ GPU、资产 IO 或真实游戏逻辑。没有 RectLightComponent，故不模拟
 
 后六项是真实用例负载：按典型帧的比例组合上面的单轴机制，不引入新机制。同一帧内的移动、改绑与
 替换取互不重叠的选择偏移，因此更新包条数可精确断言；带层级的负载不参与替换，避免销毁带跨 Actor
-子节点的父 Actor。
+子节点的父 Actor。这些负载从测试循环直接写组件，用来测吞吐。由 Actor 与 Component Tick 推动的
+巡游、交火、流式换块、群体、暂停、过场灯光和编辑器拖拽在 `FrameScenarios` 里逐帧核对场景内容。
 
 随机选择序列使用固定种子，在计时前生成；单/双线程使用相同序列。常规 `SceneSyncCorrectness` 将 Shape
 缩到 256，40 帧逐帧核对身份、mesh、矩阵、bounds、光源参数和删除结果，覆盖 burst；另用消费闸门
@@ -382,12 +384,13 @@ Windows Release 使用 `/MT`；Debug 正确性用 `/MDd`，避免静态 Debug CR
 
 `WorldLifecycle` 覆盖立即创建、统一 epoch、延迟销毁、连接重入、层级和 typed Light；
 `SceneDelivery` / `SceneDeliveryRunner` 覆盖 packet/serial、CPU reader lease 和 F=1/2/3/8。
+`FrameScenarios` 用玩家、抛射物、流式块、群体挂件、暂停和编辑器拖拽走 Tick、S1 与 F=2 交付，核对渲染场景里的网格、矩阵、bounds 与光源表。
 `GpuSceneLifetime`（启用 JIT）执行 D3D12/Vulkan 三角形 draw/readback、慢 fence、手工 owner、取消与失败的上传；
 其中 host-signaled fence 压力与 native validation 数值测试分开运行。
 
 ```powershell
 cmake --build build_debug --target radray_runtime_tests --parallel 12
-ctest --test-dir build_debug -R "WorldLifecycle|SceneDelivery|GpuSceneLifetime|LifecycleScale" --output-on-failure
+ctest --test-dir build_debug -R "WorldLifecycle|SceneDelivery|FrameScenarios|GpuSceneLifetime|LifecycleScale" --output-on-failure
 ```
 
 `LifecycleScale` 正常运行 10k/100k 共享 mesh 断言。较慢的 `LifecyclePerformance.Matrix` 默认跳过，

@@ -1,5 +1,5 @@
 # Runtime foundation tests; graph/Forward/UI tests were removed with the old renderer.
-foreach(topic actor_component_retirement application asset_database asset_slot component_rtti frame_upload gpu_system scene_delivery_state scene_assets scene_updates static_mesh_scene spot_light window_operations world_scenes world_lifecycle lifecycle_performance)
+foreach(topic actor_component_retirement application asset_database asset_slot component_rtti frame_scenarios frame_upload gpu_system scene_delivery_state scene_assets scene_updates static_mesh_scene spot_light window_operations world_scenes world_lifecycle lifecycle_performance)
     radray_add_test(test_${topic} SOURCES test_${topic}.cpp LINK_LIBS radrayruntime)
 endforeach()
 radray_add_test(test_scene_sync_performance SOURCES test_scene_sync_performance.cpp LINK_LIBS radrayruntime

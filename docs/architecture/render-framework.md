@@ -188,7 +188,7 @@ WorldManager → RenderSystem → AssetManager → AssetDatabase → GpuSystem�
 生命周期与变换通知的验收计数由测试 probe 持有；场景更新量直接检查已封存的更新包，资产准备检查
 共享描述和实际内容。World、SceneWriter、RenderSystem、StaticMesh 与 AssetManager 不保存专供测试的累计统计。
 性能测试自行记录阶段耗时、分配器统计和更新包大小；内部遍历与 owner 搬移次数不由运行时维护。
-真实 GPU 验收见 GpuSceneLifetime，CPU/runner 验收见 WorldLifecycle、SceneDelivery、SceneAssets、StaticMeshScene、LightScene。
+真实 GPU 验收见 GpuSceneLifetime，CPU/runner 验收见 WorldLifecycle、SceneDelivery、FrameScenarios、SceneAssets、StaticMeshScene、LightScene。
 
 ## Shader program 与参数
 
