@@ -56,7 +56,7 @@ void LightComponent::DestroyRenderState(SceneWriter& writer) {
     writer.RemoveLight(_lightId);
     _lightId = {};
 }
-void LightComponent::CollectRenderUpdates(SceneWriter& writer, RenderDirtyFlags) { writer.SetLight(_lightId, CaptureLightState()); }
+void LightComponent::CollectRenderUpdates(SceneCapture& capture, RenderDirtyFlags) { capture.SetLight(_lightId, CaptureLightState()); }
 
 LightCommonData LightComponent::CaptureCommon() const noexcept {
     LightCommonData common;

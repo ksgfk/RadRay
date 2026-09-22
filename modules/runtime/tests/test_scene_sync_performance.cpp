@@ -64,25 +64,17 @@ void AppendRealistic(vector<Scenario>& result, bool small) {
     const uint32_t stage = small ? 256u : 10000u;
     const uint32_t crowd = small ? 96u : 2000u;
     // 巡游：关卡已加载，相机在动但相机不是 Shape；只有机关/少数 NPC 移动，一盏灯在闪。
-    result.push_back({.Name = "level_walkthrough", .Kind = Workload::Level, .Shapes = level,
-                      .Changes = share(level, 1000), .Lights = 64, .LightChanges = 1});
+    result.push_back({.Name = "level_walkthrough", .Kind = Workload::Level, .Shapes = level, .Changes = share(level, 1000), .Lights = 64, .LightChanges = 1});
     // 交火：1% 物体在动，多盏灯跟着变，少量 LOD 改绑，每 16 帧轮换一批 chunk。
-    result.push_back({.Name = "level_firefight", .Kind = Workload::Level, .Shapes = level,
-                      .Changes = share(level, 100), .Lights = 64, .LightChanges = 8,
-                      .StreamCount = share(level, 500), .StreamPeriod = 16, .RebindCount = share(level, 2000)});
+    result.push_back({.Name = "level_firefight", .Kind = Workload::Level, .Shapes = level, .Changes = share(level, 100), .Lights = 64, .LightChanges = 8, .StreamCount = share(level, 500), .StreamPeriod = 16, .RebindCount = share(level, 2000)});
     // 开放世界流式：持续少量移动，每 8 帧成批换入换出 2.5% 的物体。
-    result.push_back({.Name = "open_world_streaming", .Kind = Workload::Level, .Shapes = open,
-                      .Changes = share(open, 100), .Lights = 32, .LightChanges = 2,
-                      .StreamCount = share(open, 40), .StreamPeriod = 8});
+    result.push_back({.Name = "open_world_streaming", .Kind = Workload::Level, .Shapes = open, .Changes = share(open, 100), .Lights = 32, .LightChanges = 2, .StreamCount = share(open, 40), .StreamPeriod = 8});
     // 群体：每个角色是 1 根 + 2 挂件的宽树，每帧所有根移动，变换沿层级传播。
-    result.push_back({.Name = "crowd_animation", .Kind = Workload::Level, .Shapes = crowd,
-                      .Changes = share(crowd, 3), .Lights = 16, .LightChanges = 2, .Depth = 3, .Wide = true});
+    result.push_back({.Name = "crowd_animation", .Kind = Workload::Level, .Shapes = crowd, .Changes = share(crowd, 3), .Lights = 16, .LightChanges = 2, .Depth = 3, .Wide = true});
     // 过场：物体动得不多，但全部灯每帧重新捕获。
-    result.push_back({.Name = "cinematic_lights", .Kind = Workload::Level, .Shapes = stage,
-                      .Changes = share(stage, 50), .Lights = 256, .LightChanges = 256});
+    result.push_back({.Name = "cinematic_lights", .Kind = Workload::Level, .Shapes = stage, .Changes = share(stage, 50), .Lights = 256, .LightChanges = 256});
     // 编辑器空闲：只有一个物体被拖动，灯不变；用来看每帧的固定开销地板。
-    result.push_back({.Name = "editor_idle", .Kind = Workload::Level, .Shapes = open,
-                      .Changes = 1, .Lights = 8, .LightChanges = 0});
+    result.push_back({.Name = "editor_idle", .Kind = Workload::Level, .Shapes = open, .Changes = 1, .Lights = 8, .LightChanges = 0});
 }
 
 vector<Scenario> Scenarios(bool small) {
@@ -195,8 +187,8 @@ bool Validate(const RenderScene& scene, const ExpectedScene& expected) {
     if (scene.GetStaticMeshes().size() != expected.Shapes.size() || scene.GetLights().Count() != expected.Lights.Count()) return false;
     for (const auto& e : expected.Shapes) {
         const auto mesh = scene.GetStaticMesh(e.Id);
-        if (!mesh || mesh->Mesh.MeshAssetId != e.Asset || mesh->Mesh.RenderMesh.Get() != e.Mesh ||
-            mesh->Mesh.Sections.size() != 1 || mesh->Mesh.Sections[0].IndexCount != 3 ||
+        if (!mesh || mesh->Mesh.MeshAssetId != e.Asset || mesh->Mesh.GetRenderMesh().Get() != e.Mesh ||
+            mesh->Mesh.GetSections().size() != 1 || mesh->Mesh.GetSections()[0].IndexCount != 3 ||
             !mesh->LocalToWorld.isApprox(e.Matrix) || !mesh->WorldBoundsMin.isApprox(e.BoundsMin) ||
             !mesh->WorldBoundsMax.isApprox(e.BoundsMax) || mesh->ReverseCulling != e.ReverseCulling) return false;
     }

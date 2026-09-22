@@ -49,16 +49,11 @@ private:
     void CheckCanModify() const noexcept;
     void CheckIdle() const noexcept;
 
-    struct WorldRecord {
-        unique_ptr<World> Value;
-    };
     Nullable<Application*> _app;
     Nullable<RenderSystem*> _renderSystem;
-    SparseSet<WorldRecord> _worlds;
+    SparseSet<unique_ptr<World>> _worlds;
     vector<WorldId> _worldIds;
-    vector<WorldId> _tickWorldIds;
     vector<WorldId> _pendingDestroy;
-    vector<WorldId> _executingDestroy;
     vector<World*> _commitWorlds;
     vector<unique_ptr<World>> _retiredWorlds;
     std::thread::id _ownerThread{std::this_thread::get_id()};

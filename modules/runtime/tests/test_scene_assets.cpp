@@ -146,8 +146,8 @@ TEST_F(SceneAssets, StationaryObjectsStayAliveUntilTheRemovalFlightCompletes) {
             Prepare(i);
             if (i != 0) EXPECT_TRUE(test::SceneBatch(Render, RenderId, i).Empty());
             test::ConsumeFrame(Render, i);
-            ASSERT_TRUE(Render.GetSceneRT(RenderId)->GetStaticMesh(id)->Mesh.RenderMesh);
-            EXPECT_EQ(Render.GetSceneRT(RenderId)->GetStaticMesh(id)->Mesh.RenderMesh->Draws[0].Ibv.Offset, count);
+            ASSERT_TRUE(Render.GetSceneRT(RenderId)->GetStaticMesh(id)->Mesh.GetRenderMesh());
+            EXPECT_EQ(Render.GetSceneRT(RenderId)->GetStaticMesh(id)->Mesh.GetRenderMesh()->Draws[0].Ibv.Offset, count);
         }
         Owner->RemoveComponent(component);
         for (uint32_t i = 0; i < count; ++i) {
@@ -181,9 +181,9 @@ TEST_F(SceneAssets, RenderThreadCanReadOldGeometryWhileGameThreadRebindsAndDelet
         applied.release();
         changed.acquire();
         const auto view = Render.GetSceneRT(RenderId)->GetStaticMesh(id);
-        EXPECT_EQ(view->Mesh.RenderMesh->Draws[0].Ibv.Offset, 1u);
+        EXPECT_EQ(view->Mesh.GetRenderMesh()->Draws[0].Ibv.Offset, 1u);
         Render.ConsumeRenderUpdates(1, 2);
-        EXPECT_EQ(Render.GetSceneRT(RenderId)->GetStaticMesh(id)->Mesh.RenderMesh->Draws[0].Ibv.Offset, 2u);
+        EXPECT_EQ(Render.GetSceneRT(RenderId)->GetStaticMesh(id)->Mesh.GetRenderMesh()->Draws[0].Ibv.Offset, 2u);
         Render.ConsumeRenderUpdates(2, 3);
         EXPECT_FALSE(Render.GetSceneRT(RenderId)->GetStaticMesh(id));
     });
@@ -248,7 +248,7 @@ TEST_F(SceneAssets, ReplacementRetiresOldAssetOnItsOwnCompletion) {
     EXPECT_EQ(oldLife->Destroyed, 0u);
     Prepare(0);
     test::ConsumeFrame(Render, 0);
-    EXPECT_EQ(Render.GetSceneRT(RenderId)->GetStaticMesh(id)->Mesh.RenderMesh->Draws[0].Ibv.Offset, 2u);
+    EXPECT_EQ(Render.GetSceneRT(RenderId)->GetStaticMesh(id)->Mesh.GetRenderMesh()->Draws[0].Ibv.Offset, 2u);
     Complete(0);
     Assets.Pump();
     EXPECT_EQ(oldLife->Destroyed, 1u);
@@ -262,7 +262,7 @@ TEST_F(SceneAssets, RemovingOneWaiterDoesNotCancelTheSharedLoad) {
     auto* remaining = Add(loading);
     const auto id = remaining->GetShapeId();
     Flush();
-    EXPECT_FALSE(Data.GetStaticMesh(id)->Mesh.RenderMesh);
+    EXPECT_FALSE(Data.GetStaticMesh(id)->Mesh.GetRenderMesh());
     Owner->RemoveComponent(removed);
     Flush();
     gate.Resume();
@@ -274,7 +274,7 @@ TEST_F(SceneAssets, RemovingOneWaiterDoesNotCancelTheSharedLoad) {
     EXPECT_EQ(Batch.MeshStates[0].Id, id);
     EXPECT_FLOAT_EQ(Batch.MeshStates[0].LocalToWorld(0, 3), 7);
     EXPECT_TRUE(Batch.Transforms.empty());
-    EXPECT_TRUE(Batch.MeshStates[0].Mesh.RenderMesh);
+    EXPECT_TRUE(Batch.MeshStates[0].Mesh.GetRenderMesh());
 }
 
 TEST_F(SceneAssets, OldRequestCompletionCannotDirtyOrReplaceTheNewBinding) {
@@ -290,7 +290,7 @@ TEST_F(SceneAssets, OldRequestCompletionCannotDirtyOrReplaceTheNewBinding) {
     ASSERT_TRUE(loading.IsReady());
     test::CollectScene(GameWorld, Render, Batch);
     EXPECT_TRUE(Batch.Empty());
-    EXPECT_EQ(Data.GetStaticMesh(id)->Mesh.RenderMesh->Draws[0].Ibv.Offset, 2u);
+    EXPECT_EQ(Data.GetStaticMesh(id)->Mesh.GetRenderMesh()->Draws[0].Ibv.Offset, 2u);
 }
 
 TEST_F(SceneAssets, ReusedPrimitiveSlotNotifiesOnlyItsCurrentRegistration) {
@@ -322,7 +322,7 @@ TEST_F(SceneAssets, ReturningToTheSameLoadingRequestArmsANewWaiter) {
     Assets.Pump();
     test::CollectScene(GameWorld, Render, Batch);
     ASSERT_EQ(Batch.MeshStates.size(), 1u);
-    EXPECT_TRUE(Batch.MeshStates[0].Mesh.RenderMesh);
+    EXPECT_TRUE(Batch.MeshStates[0].Mesh.GetRenderMesh());
 }
 
 TEST_F(SceneAssets, CancelingSharedLoadLeavesNoGeometryAndReleasesWaiters) {
@@ -338,7 +338,7 @@ TEST_F(SceneAssets, CancelingSharedLoadLeavesNoGeometryAndReleasesWaiters) {
     EXPECT_TRUE(loading.IsCanceled());
     test::CollectScene(GameWorld, Render, Batch);
     EXPECT_TRUE(Batch.Empty());
-    EXPECT_FALSE(Data.GetStaticMesh(id)->Mesh.RenderMesh);
+    EXPECT_FALSE(Data.GetStaticMesh(id)->Mesh.GetRenderMesh());
     Owner->RemoveComponent(component);
     GameWorld.FinalizeWorldGT();
     loading.Reset();
@@ -361,7 +361,7 @@ TEST_F(SceneAssets, FailedLoadLeavesNoGeometryAndReleasesWaiters) {
     EXPECT_TRUE(loading.IsFaulted());
     test::CollectScene(GameWorld, Render, Batch);
     EXPECT_TRUE(Batch.Empty());
-    EXPECT_FALSE(Data.GetStaticMesh(id)->Mesh.RenderMesh);
+    EXPECT_FALSE(Data.GetStaticMesh(id)->Mesh.GetRenderMesh());
     Owner->RemoveComponent(component);
     GameWorld.FinalizeWorldGT();
     loading.Reset();
@@ -436,7 +436,7 @@ TEST_F(SceneAssets, SameFrameRemovalAndNewBindingKeepTheSharedAssetResident) {
     Complete(0);
     Assets.Pump();
     EXPECT_EQ(life->Destroyed, 0u);
-    EXPECT_TRUE(Render.GetSceneRT(RenderId)->GetStaticMesh(replacement->GetShapeId())->Mesh.RenderMesh);
+    EXPECT_TRUE(Render.GetSceneRT(RenderId)->GetStaticMesh(replacement->GetShapeId())->Mesh.GetRenderMesh());
     Owner->RemoveComponent(replacement);
     Prepare(1);
     test::ConsumeFrame(Render, 1);
@@ -459,7 +459,7 @@ TEST_F(SceneAssets, WorldDestructionLeavesPublishedViewsOwnedUntilQuiescentShutd
     Assets.Pump();
     EXPECT_EQ(life->Destroyed, 0u);
     test::ConsumeFrame(Render, 0);
-    EXPECT_EQ(Render.GetSceneRT(otherScene)->GetStaticMesh(id)->Mesh.RenderMesh->Draws[0].Ibv.Offset, 1u);
+    EXPECT_EQ(Render.GetSceneRT(otherScene)->GetStaticMesh(id)->Mesh.GetRenderMesh()->Draws[0].Ibv.Offset, 1u);
     Complete(0);
     Assets.Pump();
     EXPECT_EQ(life->Destroyed, 0u);
@@ -555,10 +555,10 @@ TEST_F(SceneAssets, DestroyingOneSceneRetainsSharedAssetUntilLastSceneCompletes)
     test::DisconnectWorld(GameWorld);
     Render.SealFrameGT(1);
     test::ConsumeFrame(Render, 0);
-    EXPECT_TRUE(Render.GetSceneRT(RenderId)->GetStaticMesh(firstPrimitive)->Mesh.RenderMesh);
+    EXPECT_TRUE(Render.GetSceneRT(RenderId)->GetStaticMesh(firstPrimitive)->Mesh.GetRenderMesh());
     test::ConsumeFrame(Render, 1);
     EXPECT_FALSE(Render.GetSceneRT(RenderId));
-    EXPECT_TRUE(Render.GetSceneRT(otherScene)->GetStaticMesh(secondPrimitive)->Mesh.RenderMesh);
+    EXPECT_TRUE(Render.GetSceneRT(otherScene)->GetStaticMesh(secondPrimitive)->Mesh.GetRenderMesh());
     Complete(0);
     Complete(1);
     Assets.Pump();
@@ -609,8 +609,8 @@ TEST_F(SceneAssets, ReconnectRejectsOldReadyRequestAndPublishesWhilePaused) {
     test::ConsumeFrame(Render, 0);
     auto view = Render.GetSceneRT(RenderId)->GetStaticMesh(component->GetShapeId());
     ASSERT_TRUE(view);
-    ASSERT_TRUE(view->Mesh.RenderMesh);
-    EXPECT_EQ(view->Mesh.RenderMesh->Draws[0].Ibv.Offset, 42u);
+    ASSERT_TRUE(view->Mesh.GetRenderMesh());
+    EXPECT_EQ(view->Mesh.GetRenderMesh()->Draws[0].Ibv.Offset, 42u);
     EXPECT_FLOAT_EQ(view->LocalToWorld(0, 3), 71);
     Complete(0);
 }
@@ -630,7 +630,7 @@ TEST_F(SceneAssets, StandaloneWriterCoalescesReplacementAndRetainsFinalBinding) 
     Render.SealFrameGT(0);
     EXPECT_EQ(test::SceneBatch(Render, scene, 0).MeshStates.size(), 1u);
     test::ConsumeFrame(Render, 0);
-    EXPECT_EQ(Render.GetSceneRT(scene)->GetStaticMesh(primitive)->Mesh.RenderMesh->Draws[0].Ibv.Offset, 52u);
+    EXPECT_EQ(Render.GetSceneRT(scene)->GetStaticMesh(primitive)->Mesh.GetRenderMesh()->Draws[0].Ibv.Offset, 52u);
     Complete(0);
     Assets.Pump();
     EXPECT_EQ(firstLife->Destroyed, 1u);

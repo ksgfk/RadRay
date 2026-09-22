@@ -115,12 +115,12 @@ private:
     void RegisterComponent(ActorComponent& component);
     void UnregisterComponent(ActorComponent& component);
     void RegisterAllComponents();
-    void UnregisterAllComponents();
     void DispatchTick(float deltaTime, uint64_t epoch);
     void NoteTickingComponent(int32_t delta) noexcept;
     /// S1 preparation only: invalidate identities and transfer owners; no hooks or hierarchy changes.
     void PrepareComponentDestruction(std::span<const ComponentId> ids, vector<unique_ptr<ActorComponent>>& retired);
     void PrepareComponentTeardown() noexcept;
+    /// Called only after World has marked this Actor and its components Destroying.
     void Teardown();
     Nullable<ActorComponent*> ResolveIncludingPending(ComponentId id) const noexcept;
 

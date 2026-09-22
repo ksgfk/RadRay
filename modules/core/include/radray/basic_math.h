@@ -37,6 +37,20 @@ struct IsEigenDiagonalMatrix : std::false_type {};
 template <class Scalar, int Dim>
 struct IsEigenDiagonalMatrix<Eigen::DiagonalMatrix<Scalar, Dim>> : std::true_type {};
 
+/// Transfer representation: column-major affine 3x4, implicit last row (0, 0, 0, 1), no SIMD padding.
+struct AffineTransform {
+    float Values[12]{1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0};
+
+    AffineTransform() noexcept = default;
+    AffineTransform(const Eigen::Matrix4f& matrix) noexcept;
+    template <class Derived>
+    AffineTransform(const Eigen::MatrixBase<Derived>& matrix) noexcept : AffineTransform(Eigen::Matrix4f{matrix}) {}
+    Eigen::Matrix4f ToMatrix() const noexcept;
+    float operator()(size_t row, size_t column) const noexcept { return row == 3 ? (column == 3 ? 1.0f : 0.0f) : Values[column * 3 + row]; }
+};
+
+static_assert(sizeof(AffineTransform) == 48);
+
 struct Viewport {
     float X;
     float Y;
@@ -161,8 +175,6 @@ Eigen::Matrix<T, 3, 3> LookRotation(const Eigen::Vector<T, 3>& forward, const Ei
 template <class T>
 requires(std::is_floating_point_v<T>)
 Eigen::Matrix<T, 4, 4> ComposeTransform(const Eigen::Vector<T, 3>& translation, const Eigen::Quaternion<T>& rotation, const Eigen::Vector<T, 3>& scale) noexcept {
-    // 手写展开代替 Eigen 表达式模板（toRotationMatrix * Scaling）：场景同步对每个 dirty 组件调用一次，
-    // 表达式模板的临时对象在热路径上是主要成本。对有限输入与旧实现逐位一致（列主序 data()[c * 4 + r]）。
     const T qx = rotation.x();
     const T qy = rotation.y();
     const T qz = rotation.z();

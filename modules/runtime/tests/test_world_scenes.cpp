@@ -1,3 +1,4 @@
+#include <radray/runtime/components/render_component.h>
 #include "scene_test_support.h"
 
 #include <gtest/gtest.h>
@@ -100,6 +101,59 @@ TEST(WorldManager, DestroyedWorldIsSkippedBeforeItsScheduledTick) {
     EXPECT_EQ(destroyedB, 1u);
 }
 
+TEST(WorldManager, TickIterationSurvivesGrowthAndDefersNewWorlds) {
+    uint32_t firstTicks = 0, lastTicks = 0, newTicks = 0, destroyed = 0;
+    test::ScopedWorldManager manager;
+    const auto first = manager.CreateWorld();
+    const auto last = manager.CreateWorld();
+    auto* actor = manager.GetWorld(first)->SpawnActor<CountingActor>(firstTicks, destroyed);
+    manager.GetWorld(last)->SpawnActor<CountingActor>(lastTicks, destroyed);
+    actor->Action = [&] {
+        if (firstTicks != 1) return;
+        for (uint32_t i = 0; i < 128; ++i) {
+            const auto added = manager.CreateWorld();
+            manager.GetWorld(added)->SpawnActor<CountingActor>(newTicks, destroyed);
+        }
+    };
+    manager.Tick(0);
+    EXPECT_EQ(firstTicks, 1u);
+    EXPECT_EQ(lastTicks, 1u);
+    EXPECT_EQ(newTicks, 0u);
+    manager.Tick(0);
+    EXPECT_EQ(firstTicks, 2u);
+    EXPECT_EQ(lastTicks, 2u);
+    EXPECT_EQ(newTicks, 128u);
+}
+
+TEST(WorldManager, DestructionCallbacksQueueTheNextBatchAfterIdentityReuse) {
+    uint32_t ticks = 0, firstDestroyed = 0, secondDestroyed = 0, addedDestroyed = 0;
+    test::ScopedWorldManager manager;
+    const auto first = manager.CreateWorld();
+    const auto second = manager.CreateWorld();
+    auto* actor = manager.GetWorld(first)->SpawnActor<CountingActor>(ticks, firstDestroyed);
+    manager.GetWorld(second)->SpawnActor<CountingActor>(ticks, secondDestroyed);
+    WorldId added;
+    actor->DestroyAction = [&] {
+        added = manager.CreateWorld();
+        EXPECT_EQ(added.Index, first.Index);
+        EXPECT_GT(added.Generation, first.Generation);
+        manager.GetWorld(added)->SpawnActor<CountingActor>(ticks, addedDestroyed);
+        EXPECT_EQ(manager.DestroyWorld(second), LifecycleRequestResult::Accepted);
+        EXPECT_EQ(manager.DestroyWorld(added), LifecycleRequestResult::Accepted);
+    };
+    manager.DestroyWorld(first);
+    manager.FinalizeWorldsGT();
+    EXPECT_EQ(firstDestroyed, 1u);
+    EXPECT_EQ(secondDestroyed, 0u);
+    EXPECT_EQ(addedDestroyed, 0u);
+    EXPECT_FALSE(manager.GetWorld(first));
+    EXPECT_FALSE(manager.GetWorld(second));
+    EXPECT_FALSE(manager.GetWorld(added));
+    manager.FinalizeWorldsGT();
+    EXPECT_EQ(secondDestroyed, 1u);
+    EXPECT_EQ(addedDestroyed, 1u);
+}
+
 TEST(WorldManager, ClearHidesAllWorldsDuringCallbacksAndInvalidatesIds) {
     uint32_t ticks = 0, destroyed = 0;
     test::ScopedWorldManager manager;
@@ -185,13 +239,13 @@ TEST(WorldManagerDeathTest, RejectsReentrantTickCollectionAndClear) {
     actor->DestroyAction = {};
 }
 
-class ManagerCollectionProbe final : public SceneComponent {
+class ManagerCollectionProbe final : public RenderComponent {
 public:
     explicit ManagerCollectionProbe(std::function<void()> action) : _action(std::move(action)) {}
 
 protected:
     void CreateRenderState(SceneWriter&) override { MarkRenderStateDirty(); }
-    void CollectRenderUpdates(SceneWriter&, RenderDirtyFlags) override { _action(); }
+    void CollectRenderUpdates(SceneCapture&, RenderDirtyFlags) override { _action(); }
 
 private:
     std::function<void()> _action;
@@ -305,6 +359,44 @@ TEST(WorldScenes, StandaloneWritersIsolateIdentitiesAndCoalesceUpdates) {
     EXPECT_GT(afterCompletion.Generation, a.Generation);
     EXPECT_FALSE(renderer.GetSceneRT(a));
     EXPECT_FALSE(renderer.GetSceneWriterGT(a));
+}
+
+TEST(WorldScenes, WritersSurviveRegistryCompactionAndIdentityReuse) {
+    Application app;
+    RenderSystem renderer{&app, 2};
+    const auto removed = renderer.CreateSceneGT();
+    const auto survivor = renderer.CreateSceneGT();
+    auto* writer = renderer.GetSceneWriterGT(survivor).Get();
+    const auto shape = writer->CreateShape();
+    writer->SetStaticMesh(shape, {}, Eigen::Matrix4f::Identity());
+    renderer.SealFrameGT(0);
+    test::ConsumeFrame(renderer, 0);
+    test::CompleteFrame(renderer, 0);
+
+    renderer.DestroySceneGT(removed);
+    renderer.SealFrameGT(0);
+    renderer.SealFrameGT(1);
+    EXPECT_EQ(renderer.GetFrameUpdatesRT(0).size(), 2u);
+    EXPECT_EQ(renderer.GetFrameUpdatesRT(1).size(), 1u);
+    test::ConsumeFrame(renderer, 0);
+    test::CompleteFrame(renderer, 0);
+    const auto replacement = renderer.CreateSceneGT();
+    EXPECT_EQ(replacement.Index, removed.Index);
+    EXPECT_GT(replacement.Generation, removed.Generation);
+    EXPECT_EQ(renderer.GetSceneWriterGT(survivor).Get(), writer);
+    test::ConsumeFrame(renderer, 1);
+    test::CompleteFrame(renderer, 1);
+
+    Eigen::Matrix4f transform = Eigen::Matrix4f::Identity();
+    transform(0, 3) = 17;
+    writer->SetTransform(shape, transform);
+    renderer.SealFrameGT(0);
+    EXPECT_EQ(renderer.GetFrameUpdatesRT(0).size(), 2u);
+    test::ConsumeFrame(renderer, 0);
+    EXPECT_FALSE(renderer.GetSceneRT(removed));
+    EXPECT_TRUE(renderer.GetSceneRT(replacement));
+    EXPECT_FLOAT_EQ(renderer.GetSceneRT(survivor)->GetStaticMesh(shape)->LocalToWorld(0, 3), 17);
+    test::CompleteFrame(renderer, 0);
 }
 
 TEST(WorldScenes, SameFrameCreateAndDestroyAndRetirementAcrossFlights) {

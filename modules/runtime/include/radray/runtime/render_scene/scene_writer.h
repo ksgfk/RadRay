@@ -29,46 +29,55 @@ public:
 
 private:
     friend class RenderSystem;
-    friend class PrimitiveComponent;
+    friend class SceneCapture;
+    friend class ShapeCapture;
 
-    static constexpr uint32_t kNoColdSlot = std::numeric_limits<uint32_t>::max();
+    static constexpr size_t kNotQueued = std::numeric_limits<size_t>::max();
+    static constexpr uint32_t kNoLightRow = std::numeric_limits<uint32_t>::max();
 
-    /// 热数据：transform-only 更新与 dirty 队列每帧随机访问，保持小巧。
-    /// 成员顺序按对齐排布（Matrix4f 前是 8 字节字段，避免填充浪费）。
     struct ShapeState {
-        ShapeId Id;
-        size_t DirtyIndex{std::numeric_limits<size_t>::max()};
-        std::optional<Eigen::Matrix4f> Transform;
-        uint32_t ColdIndex{kNoColdSlot};
+        /// An engaged value owns one use in _assets, including an empty AssetId.
+        std::optional<AssetId> BoundAsset;
         bool Sent{false};
         bool HasMesh{false};
-        bool PendingMesh{false};  // 冷槽持有待封包的 StaticMeshStateUpdate
     };
 
-    /// 冷数据：只在 SetStaticMesh / RemoveShape / 封包 mesh 记录时访问。
-    struct ShapeAsset {
-        std::optional<AssetId> Asset;
-        std::optional<StaticMeshStateUpdate> Mesh;
+    struct ShapeEdit {
+        size_t CreateIndex{kNotQueued};
+        size_t UpdateIndex{kNotQueued};
+        bool PendingMesh{false};
+    };
+
+    struct LightSlot {
+        uint32_t Row{kNoLightRow};
+        uint32_t Type{0};
     };
 
     ShapeState& GetShape(ShapeId id);
-    uint32_t AllocateColdSlot() noexcept;
-    void Queue(ShapeState& state);
-    void Unqueue(ShapeState& state);
+    ShapeEdit& GetEdit(ShapeId id);
+    void EnableEditing();
+    void BeginCapture();
+    void QueueCreate(ShapeId id, ShapeState& state);
+    void CancelCreate(ShapeEdit& edit);
+    template <class T>
+    void CancelUpdate(vector<T>& updates, ShapeEdit& edit);
+    void WriteStaticMesh(ShapeId id, ShapeState& state, const StreamingAssetRef<StaticMesh>& mesh, const AffineTransform& localToWorld);
+    void WriteTransform(ShapeId id, ShapeState& state, const AffineTransform& localToWorld);
     void Flush(SceneUpdateBatch& batch, uint32_t flightIndex);
+    void RemoveLightData(LightSlot& slot);
 
     SceneId _id;
     SparseSet<ShapeState> _shapes;
-    vector<ShapeAsset> _shapeAssets;
-    vector<uint32_t> _freeColdSlots;
-    vector<ShapeId> _dirtyShapes;
-    vector<ShapeId> _removedShapes;
-    SparseSet<std::monostate> _lightIds;
+    /// Only independent editing or repeated captures before Seal need update locators.
+    vector<ShapeEdit> _edits;
+    SceneUpdateBatch _pending;
+    SparseSet<LightSlot> _lightIds;
     LightSceneData _lights;
-    bool _lightsDirty{false};
     RenderAssetLifetime _assets;
     bool _closing{false};
     bool _claimed{false};
+    bool _editing{false};
+    bool _captured{false};
 };
 
 }  // namespace radray

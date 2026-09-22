@@ -18,6 +18,8 @@ class Actor;
 class RenderSystem;
 class WorldRenderBridge;
 class WorldManager;
+class RenderComponent;
+enum class RenderDirtyFlag : uint8_t;
 
 /// 顶层容器。管理所有 Actor 及其组件生命周期。
 /// 对应 UE5 的 UWorld。
@@ -73,6 +75,7 @@ public:
 private:
     friend class Actor;
     friend class SceneComponent;
+    friend class RenderComponent;
     friend class WorldRenderBridge;
     friend class WorldManager;
     friend class ActorComponent;
@@ -115,15 +118,17 @@ private:
     void ExecuteLifecycle();
     void Teardown();
     void Collect();
+    void DispatchTransforms(bool notify);
+    void QueueTransform(SceneComponent& component);
+    void RemoveTransform(SceneComponent& component) noexcept;
     void DisconnectNow();
     void QueueComponentDestruction(ActorComponent& component);
     LifecycleRequestResult QueueReparent(SceneComponent& child, Nullable<SceneComponent*> parent, AttachmentRule rule);
     Nullable<Actor*> ResolveIncludingPending(ActorId id) const noexcept;
 
-    void CreateComponentRenderState(SceneComponent& component);
-    void DestroyComponentRenderState(SceneComponent& component);
-    void QueueRenderUpdate(SceneComponent& component, RenderDirtyFlag flag);
-    void EnqueueRenderDirty(SceneComponent& component, RenderDirtyFlag flag);
+    void CreateComponentRenderState(RenderComponent& component);
+    void DestroyComponentRenderState(RenderComponent& component);
+    void EnqueueRenderDirty(RenderComponent& component, RenderDirtyFlag flag);
     void AddTicking(Actor& actor);
     void RemoveTicking(Actor& actor);
     void RefreshTicking(Actor& actor);
@@ -137,15 +142,18 @@ private:
     vector<Actor*> _tickingActors;
     SparseSet<Actor*> _actorIds;
     unique_ptr<WorldRenderBridge> _renderBridge;
-    Nullable<RenderSystem*> _renderer{nullptr};
     LifecycleBatch _pending;
     LifecycleBatch _executing;
     vector<unique_ptr<Actor>> _retiredActors;
     vector<unique_ptr<ActorComponent>> _retiredComponents;
-    vector<SceneComponent*> _detachedChildren;
+    vector<SceneComponent*> _transformChanges;
+    vector<SceneComponent*> _transformRoots;
+    mutable vector<const SceneComponent*> _transformChain;
     ObjectLifecycle _lifecycle{ObjectLifecycle::Live};
     std::thread::id _ownerThread{std::this_thread::get_id()};
     uint64_t _tickEpoch{0};
+    uint64_t _transformRevision{1};
+    uint64_t _renderTransformRevision{0};
     uint64_t _firstTickEpoch{1};
     uint32_t _callbackDepth{0};
     bool _ticking{false};

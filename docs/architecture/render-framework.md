@@ -34,8 +34,9 @@ WorldManager 维护唯一 TickEpoch；独立 World 的显式驱动维护自己�
 记录 `FirstTickEpoch = CurrentTickEpoch + 1`。输入和 OnUpdate 创建者可以参加紧接着的轮次；Tick 中创建者
 从下一轮开始，与目标 World/Actor 是否已经遍历无关。暂停不阻止 S1、Ready 或渲染同步，恢复不补跑历史 Tick。
 
-WorldManager 保留 WorldId 快照，因为 SparseSet 的物理 storage 可能移动。Actor/Component 的 owner 数组
-采用固定入口长度和按索引取对象地址，回调后不保留数组元素引用。回调只允许追加，既有 owner 不移动/删除。
+WorldManager、Actor/Component 的调度数组均固定入口长度，按索引逐项取 ID 或对象地址，
+回调后不保留数组元素引用。Tick 回调只允许追加，既有条目到 S1 才能移除；因此 WorldManager 不复制 WorldId 列表，
+SparseSet 或数组扩容也不会使已取得的独立 World/Actor/Component 对象地址失效。
 `Actor::Tick` 是业务 hook；框架 dispatcher 在其返回后仍负责组件 Tick，派生不需要调用基类来驱动组件。
 `Actor::Tick` 与 `ActorComponent::TickComponent` 默认不进入调度。`SetTickEnabled(true)` 后才加入 World 的 ticking 列表；
 空闲 World 的 Tick 只遍历该列表，不扫描全部 Actor。覆盖 Tick / TickComponent 的派生必须自行启用。
@@ -63,6 +64,8 @@ Pending 不可取消或复活，且不能向 Pending/Destroying/Stopping owner �
 S1 先冻结所有 World 的本批销毁、层级和连接请求，再处理父覆盖子、身份失效与受影响 owner 数组的稳定压缩，
 最后派发注销/销毁通知。幸存对象顺序保持；没有请求时不扫描 Actor 寻找 pending。有删除时成本包含受影响容器
 的线性压缩及请求排序，不能当成 O(删除数)。OnUnregister 时 owner/world 上下文仍有效；清理后才释放内存。
+WorldManager 在任何回调前移交本批 World owner、失效身份并清空销毁请求，后续回调只追加下一批请求，
+无需另存执行中的 WorldId 列表。Actor/Component 的 Destroying 标记在准备阶段写一次，通知阶段不重复遍历标记。
 
 销毁回调可以立即向其他存活 Actor 或存活 World 新增对象。本次通知新提交的销毁/重挂接/连接请求留下一次 S1，
 但 Pending 立即生效；新建后立即 Pending 的源不会发布空 primitive。Stopping 阶段禁止新业务创建。
@@ -74,22 +77,30 @@ S1 先冻结所有 World 的本批销毁、层级和连接请求，再处理父�
 对外注册通知前建立，仅新增节点和边。已注册节点改用 RequestReparent / RequestSetRootComponent，S1 前查询仍见旧关系。
 KeepLocal 保留局部 TRS；KeepWorld 要求新局部矩阵可以精确表达为 TRS，自身/后代、跨 World、奇异矩阵和 shear
 在修改前拒绝，提交时重新验证。删除父组件会解除其他 Actor 的幸存 child，采用 KeepLocal，不误删别人的 owner。
-变换 setter 对完全相同的值短路；通知遍历后代并标记本子树缓存脏。TRS 变更经 `NotifyTransformChanged`
-统一入口：只做脏标记与渲染脏入队，不做矩阵运算。无子节点时只标脏自身并通知，避免第二次空遍历；
-有后代时仍先 `InvalidateWorldSubtree` 再 `NotifySubtree`，保证回调中读取后代世界矩阵不会落到过期缓存。
-框架在 Primitive/Light 上自动入队 Transform dirty；普通 SceneComponent 改变换不产生渲染更新。
-`OnTransformChanged` 只保留业务副作用。`GetWorld` 在注册时缓存 World 指针，不再经 Actor 跳转。`GetWorldMatrix` 在缓存脏时沿 parent chain 重算
-（compose local 一次，链上每个祖先只算一次后缓存），干净时直接返回缓存；返回值始终等价于当场递归求值。
-重算走迭代实现：先自下而上收集脏链，再自上而下 compose，链长超过固定窗口时分多轮从顶部收敛，
-栈消耗与层级深度无关。不要改回按 parent 递归，Debug 下单帧因 Eigen 乘法展开可达约 10 KB，
-几百层即耗尽默认 1 MB 栈。
-解除层级会把幸存子树标脏，由懒重建刷新。缓存代价是每个 SceneComponent 64 B 矩阵；该矩阵排在 TRS/入队热数据之后，
-避免 Mutate 写下脏标志时连带加载。静态场景因此多付的 Tick 成本由跳过空闲派发回收，不作为保留缓存的理由。
-派生 `OnTransformChanged` 走内部 `MarkRenderDirty` 时不再重复做线程检查；公开 `MarkRender*Dirty` 仍
-`CheckCanModify`。`World::CheckCanModify` 的拥有线程检查只在 Debug 执行；Release 仍拒绝 Collect 期间的修改。
+变换 setter 对完全相同的值短路；有变化时只记录本节点、递增 World 的变换版本，不立即遍历后代。
+World 在 `FinalizeWorldGT`（托管时由 manager 统一驱动）处理完生命周期后，合并被祖先覆盖的脏根，
+迭代遍历受影响子树，标记渲染变化并派发 `OnTransformChanged`。同一批的重叠子树只通知一次；无 renderer
+的 World 同样派发。draft 的通知仍立即执行。已注册组件的业务代码不能再依赖 setter 内同步通知。
+
+本 World 的通知批在回调前摘下；回调再次修改产生下一批通知。Collect 前还会传播这些新变化的渲染 dirty，
+不再派发业务通知，因此本次封包仍捕获最终值。仅调用 `CollectRenderUpdates` 也能捕获最新变换，但业务通知
+等下次 Finalize。回调中新增 child 不加入当前节点已冻结的 child 范围；Pending 来源跳过通知和捕获。
+World 记录已传播到渲染的变换版本；随后补发业务通知不会重复发送同一变换增量。
+
+`GetWorldMatrix` 始终等价于当场沿父链求值：World 版本变化后迭代检查祖先，只有局部值变脏或父矩阵版本
+更新才重新 compose；同一版本的重复查询直接返回缓存。父链工作区由 World 复用，栈消耗与深度无关，
+不递归调用矩阵求值。draft 使用局部工作区。解除层级同样使查询立即看到新关系，不要求先派发通知。
+World 指针在组件加入 World 时缓存；draft Actor 加入时在任何注册回调前给其全部组件写入上下文，
+因此子组件先注册时也能观察到尚未注册的祖先变化。
+
+普通 SceneComponent 只负责空间层级与变换。需要渲染连接的组件继承 `RenderComponent`；Primitive 和 Light
+均继承它。框架的 final 通知入口负责渲染 Transform dirty，派生 `OnTransformChanged` 只处理业务副作用，
+不需要调基类。公开 MarkRender* 仍先 CheckCanModify；内部标记只更新 bridge 登记表。
+`World::CheckCanModify` 的拥有线程检查只在 Debug 执行；Release 仍拒绝 Collect 期间的修改。
 
 World/manager 通过 `RequestRenderConnection` 请求连接，显式 `RequestReconnect` 强制新连接。
 请求目标与已提交 SceneId 可分别查询，不能把请求 Accepted 当作连接已完成。
+已连接的 renderer 由 WorldRenderBridge 持有，World 从 bridge 查询，不保存第二份连接指针。
 WorldRenderBridge 的 Disconnected / Connecting / Connected / Disconnecting 状态独立于游戏注册。
 连接回调请求切换只排队，不能 reset 执行中的 bridge。Connecting 中立即创建者接入一次；Disconnecting 中创建
 游戏对象仍成功，但不接回正在拆除的 Scene。重连从最终游戏值建立新 SceneId，旧 Scene 可以继续退休。
@@ -100,40 +111,69 @@ WorldRenderBridge 的 Disconnected / Connecting / Connected / Disconnecting 状�
 | 对象 | 职责 |
 |---|---|
 | WorldManager / World | GT 游戏对象、身份、统一调度、生命周期请求 |
-| WorldRenderBridge | GT 内部适配器、连接、组件 dirty 去重；不进入公共 API |
+| WorldRenderBridge | GT 内部适配器、渲染源登记与 dirty 队列的唯一管理者 |
 | SceneWriter | Scene 唯一 GT producer、ShapeId/LightId、几何增量与光源全量捕获、资产 owner |
 | RenderScene | 单份 RT 数据、Apply、只读借用与 CPU reader lease |
 | RenderSystem | GT/RT 分离的登记表、flight 交付协议、shader/render-pass 服务 |
 
-组件分类 State/Transform/DynamicData dirty；同组件只排队一次。Collect 跳过 Pending，且禁止游戏修改、
+RenderComponent 分类 State/Transform/DynamicData dirty；同来源只排队一次。bridge 维护来源上的登记下标、
+dirty 队列下标与 dirty 位，连接身份从 World 查询；普通 SceneComponent 不保存这些字段。
+登记表和 dirty 队列直接存来源指针，收集不再间接查登记表。dirty 位为空同时表示未排队，Collect 只清空 dirty 位，
+不另写排队标志或无效下标；删除时交换末项并修复移动来源的下标。断开连接只遍历已登记来源。Collect 跳过 Pending，且禁止游戏修改、
 生命周期请求、重入封包和所属 Application 的 asset/scheduler Pump。派生 setter 必须先 CheckCanModify。
-PrimitiveComponent 的 final 入口负责 ShapeId 创建/注销，CollectPrimitiveUpdates 捕获派生值。
+World/WorldManager 负责游戏侧 Collect 禁令，RenderSystem 负责封包及 Application 调度禁令；bridge 不另存同一阶段标志。
+PrimitiveComponent 的 final 入口负责 ShapeId 创建/注销，CollectPrimitiveUpdates 接收 ShapeCapture，
+只输出自身最终的 mesh 状态或 transform（至多一条，也可以不输出以保留 bare shape）。
+一般 RenderComponent 接收 SceneCapture，可以登记和捕获多个 ShapeId/LightId；一个身份在同轮 Collect 中
+由其来源捕获一次。捕获接口不提供创建/删除身份或修改 World 的操作。
 LightComponent 捕获类型化光源值，使用独立的 LightId。两种 ID 是不可隐式互转的强类型，均包含
 Index/Generation，只在所属 SceneId 内有效；独立身份池允许 Shape 和 Light 使用相同数值的槽位与代次。
 
 独立工具由 CreateSceneGT/GetSceneWriterGT 获得 writer，遵守同样的绑定和交付契约。
 World 独占的 writer 不向外提供；独立 writer 在 DestroySceneGT 后不可继续使用。
-Shape 的未发布 Create/Remove 可以相消，已 Seal 的创建只能由后续 Remove 有序退出。
+Shape 在 Seal 前的 Create/Remove 可以相消，已 Seal 的创建只能由后续 Remove 有序退出。
 State 覆盖最终 transform，transform-only 更新不重建 mesh。Shape 更新数组复用容量，工作与唯一 dirty 源有关。
+SceneWriter 直接构建本批 SceneUpdateBatch。存活 Shape 只保存资产使用身份、是否已发布与是否有 mesh 状态；
+不常驻矩阵、mesh 描述或更新下标。World 通过 SceneCapture/ShapeCapture 将去重后的最终值直接追加到变化包；
+常规 Flush 只标记创建已发送，再把变化包与 flight 的空包交换，不遍历 mesh/transform 记录重置下标或重组矩阵。
 
-SceneWriter 分别维护 Shape 状态、Light 身份池与 LightSceneData 最终值；身份池不存光源参数，
+独立 writer 的反复编辑使用单独的 ShapeEdit 槽，保存创建/更新下标与更新种类。SetTransform 覆盖已有记录；
+SetStaticMesh 吸收同一身份的 Transform，取消时交换末项并修复下标。World 在同次 Seal 前再次 Collect、
+捕获后删除身份，或通过生命周期入口直接编辑 writer 时，也按需建立这些定位信息，继续保证最终值合并；
+World 的下一批恢复直接提取。编辑槽按 ShapeId.Index 索引，代次仍由 ShapeState 的身份池验证。
+独立 writer 在 CreateShape 时入队创建；World 先保留身份，最终 CaptureShape 才入队，未捕获便删除的源
+不会发布默认几何。显式空 mesh 也满足后续 SetTransform 的前置条件。
+Shape 的可选资产使用身份对应 RenderAssetLifetime 中一次计数；是否持有使用与 AssetId 是否为空无关。
+
+World 的变换缓存与 RT 的矩阵列均使用 Eigen::Matrix4f，局部 TRS 合成与父子相乘直接生成 4×4 矩阵。
+GetWorldTransform 返回 GT 缓存的只读借用，变换或层级修改后的查询可能更新其内容；GetWorldMatrix 仍返回按值快照。
+变化包使用 core 的 AffineTransform：列主序 3×4、12 个 float，隐含齐次行 (0,0,0,1)，保留负缩放和仿射 shear。
+组件捕获与独立 writer 在输入边界压缩一次，RT Apply 展开一次到矩阵列并计算 bounds，游戏侧查询不需要展开。
+单条 ShapeTransformUpdate 为 56 B，不受 Eigen SIMD 对齐配置影响；AffineTransform 只负责传输，不实现 TRS 合成或矩阵运算。
+非仿射输入在转换时、非有限渲染变换在 RT Apply 时做 Debug 校验。
+
+SceneWriter 分别维护 Shape 状态、Light 身份池与 LightSceneData 最终值；Light 槽只存当前表种类和行号，
 Light 没有逐项 dirty/删除队列。CreateLight 只保留 GT 身份，首次 SetLight 后才进入光源集合。
-任一 SetLight 或已有数据的 RemoveLight 将集合标脏，Flush 把完整的四类光源表按值封存到 flight；
+任一 SetLight 或已有数据的 RemoveLight 直接设置待提交包的 LightsChanged，不另存 dirty 标志；
+Flush 按此标志把完整的四类光源表按值封存到 flight，交换空包后自然恢复未变更状态；
 未改变的光源也包含在内，但不重新调用其组件捕获。
 未捕获便删除的组件不会发布默认光源；独立 writer 在同次封包前 SetLight 再 RemoveLight，允许交付最终空集合。
 SceneUpdateBatch 的 LightsChanged=false 表示保留 RT 光源，true 表示全量替换，空列表明确清除所有光源。
 无 dirty 时不遍历或复制光源；已 Seal 的列表不受后续修改、删除、身份复用影响。
 
 StaticMesh 在构造时验证 CPU mesh/bounds 并补全默认 sections 一次，之后数据不可变。
-StaticMeshDescription 持有 AssetId、bounds 并借用 `span<const StaticMeshSection>` 与 `const GpuMesh`；
-这些借用由同一资产 owner 保护，实例不复制 sections。Loading、失败或无效 mesh 产生空几何。
+StaticMesh 拥有一份 StaticMeshRenderData，集中存放 GPU mesh、sections 与局部 bounds。
+StaticMeshDescription 只保存 AssetId 和指向该渲染数据的只读借用；所有实例与 Scene 共享资产中的同一份数据，
+每个实例只保存自己的绑定、矩阵、世界 bounds 与 ReverseCulling。借用由 GT 资产 owner 保护，RT 不参与引用计数。
+Loading、失败或无效 mesh 产生空几何，空几何的世界 bounds 退化到变换原点。
 组件 Ready 通知检查 Live、注册、SceneId、ShapeId 和 mesh 请求身份；改绑/注销停止旧等待而不取消共享加载。
 
-RenderScene 按 Shape Remove → Create → Mesh → Transform → Light 全量替换应用。ShapeSlot 只保存几何身份
-与稠密下标，不持有几何数据；StaticMeshProxy 按值存放在与 ShapeId 平行的稠密数组，逐 shape 不做堆分配，
-移除交换末项填补空位，因此 Apply 可能移动记录。GetStaticMeshes 返回 ShapeId，包含资产未就绪的已登记 Mesh。
-StaticMeshProxy 更新 matrix、world bounds、ReverseCulling，支持负缩放和仿射 shear。齐次行与 isfinite 的
-逐条契约校验只在 Debug 执行（`RADRAY_IS_DEBUG`）；Release 信任 writer 封包内容，直接写矩阵并计算 AABB 与行列式。
+RenderScene 按 Shape Remove → Create → Mesh → Transform → Light 全量替换应用。ShapeSlot 只保存身份
+与稠密下标；StaticMeshTable 拥有身份、几何绑定、Matrix4f、bounds 四列，bounds 包含 ReverseCulling。
+所有列按同一行对应，删除时一起交换末项并修复 ShapeSlot；实例不逐个堆分配。GetStaticMesh 提供身份查找，
+GetStaticMeshColumns 提供只读连续列，剔除可以只读 Bounds，批量绘制不必经过 ShapeId 再查槽位。
+GetStaticMeshes 保留身份枚举，包含资产未就绪的已登记 mesh。行号不表示身份，所有列与单项借用在下次 Apply
+或销毁时失效，跨线程 CPU 读取需要相同的 reader lease。CPU 列布局不等同于 GPU buffer packing。
 LightSceneData 直接拥有四种类型的 LightTable，GT 最终值、flight 快照与 RT 数据均使用同一紧凑布局。
 每张表是 Ids 与 Data 两列，Ids[row] 拥有 Data[row]，两列长度始终相等：
 
@@ -154,10 +194,11 @@ DirectionalLightComponent 的 CSM 配置（级联、阴影距离/分辨率、bia
 
 表的类型决定光源类型，每条记录不再保存 Type 标签、身份或其他类型专属字段。LightData 是只在单灯捕获与
 SetLight 调用时使用的 variant，身份由调用方另行传入；不保存 vector<variant>，因此持久数据不按最大光源记录
-尺寸占位。组件侧由叶子直接构造自己的类型化记录，不再基类造 variant 再逐层 visit 改写。SetLight 在 id 列
-线性查找后原位替换，类型改变时从旧表移除并加入新表；RemoveLight 两列一起交换末项填补空位。类型变化保留
+尺寸占位。组件侧由叶子直接构造自己的类型化记录，不再基类造 variant 再逐层 visit 改写。SceneWriter::SetLight 通过身份槽直接定位类型和行号，O(1) 原位替换；类型改变时从旧表移除并加入新表。
+RemoveLight 两列一起交换末项填补空位，并修复被移动身份的行号。类型变化保留
 LightId，行号与顺序不表示身份。GetLights 返回只读分类数据及类型化查找；GetLight 仅借用 Common 参数。
 LightsChanged 时复制完整分类表并复用容量，RT 不再逐条按 Type 分组。快照中的身份必须有效且唯一，两列长度必须一致。
+LightSceneData 自身的 Set/Remove 保留线性查找便利接口，不用于 SceneWriter 的逐灯热更新。
 RT 不维护 Light 槽位映射或代次墓碑；GetLight/ContainsLight 线性扫描少量光源并匹配完整 LightId，
 仅在 GT 保留但没有参数的身份在 RT 不可见。旧 ID 更新由 writer 校验拒绝，旧快照由交付序号阻止重复/乱序消费。
 RT 或停止后的检查可借用数据，普通借用截止到下一 Apply。并行 CPU 读者在 RT 派发前获取 AcquireRead lease，
@@ -172,6 +213,10 @@ flight 严格经过 Writable → Sealed → Published → Consumed → completio
 Seal 分配单调 UpdateSequence，Publish 验证顺序；Consume 在 Apply 前验证 Published、下一序号与新的 FrameSerial。
 即使同 generation 的合法 transform 也不能乱序或重复消费。completion 必须匹配当前 Consumed 包的 FrameSerial。
 F 与 backbuffer count 无关；功能测试覆盖 F=1/2/3/8 的单/双线程 runner。
+
+GT 场景记录按值保存在 SparseSet 中，只有对外借用的 SceneWriter 独立分配以保持地址稳定。
+封包直接遍历场景记录，从 writer 取得 SceneId；不维护另一份 ID 列表，场景间不依赖封包中的排列顺序。
+writer 的 closing 状态同时表示待封包的 Scene 删除，不再维护另一份 DestroyPending。
 
 SceneWriter 的 RenderAssetLifetime 在 GT 以 AssetId 去重持有绑定 owner。最后解绑进入候选，封包前重新绑定可以
 撤销候选；最终零使用 owner 转入承载改绑/删除的 flight，真实 completion 后释放。没有每帧全资产重新 pin。

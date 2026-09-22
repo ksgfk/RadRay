@@ -203,11 +203,14 @@ runtime 的 WindowInputRouter、AppWindow::GetInput、统一 DispatchInput 与 O
 
 | 组 | 成员 | 谁访问 |
 |---|---|---|
-| 录制态 | `CommandAllocator`, `Batches`, `Acquisitions`, `Uploader`, `HostWrites`, `Submitted`, `Recording` | GT 帧顶重置 HostWrites；RT 接管后录制，应用显式上传的 staging 在 fence 后回收 |
+| 录制态 | `CommandAllocator`, `Batches`, `Acquisitions`, `Uploader`, `HostWrites`, `Recording` | GT 帧顶重置 HostWrites；RT 接管后录制，应用显式上传的 staging 在 fence 后回收 |
 | 计时态 | `FrameStartTime` | 游戏线程在帧开头写 |
 | 保活态 | `Payloads`, `FrameSerial` | GT 登记/释放 payload；RT 在 BeginFrameRecord 分配编号，GT 匹配真实完成后清零 |
 | 提交态 | `Signal` | RT 在 `EndFrameRecordAndSubmit` 写；GT 观察 CPU 提交完成后在 retire/`CompleteFlight` 读后清 |
 | 等待表 | `WaitFrame` | 见下 |
+
+`Recording` 从 BeginFrameRecord 到提交封口前为 true；AppFrameContext 同时校验保存的 FrameSerial。
+封口后禁止继续录制，runner 的 EndFrameRecordAndSubmit 可重复收尾，不另存 Submitted 标志。
 
 完成消息不挂在槽位上。`UnboundedChannel<FlightCompletion>` 属于 `GpuSystem`，由 retire 线程
 写入、Application 在 GT 消费。`WaitFrame` 仍用槽位上的原子位，见下一节。
@@ -265,6 +268,7 @@ ThreadedRunner 只在 `CompleteFlightIfReady` 成功后推进 GT 独占的退休
 
 窗口维护由 runner 先排空 CPU 渲染工作，再调用 `GpuSystem::WaitAndRetireFlights` 等待主队列、
 退休已提交 flight 并发布消息；GpuSystem 不再反向请求 WindowManager 等待 runner。
+ThreadedRunner 在这次全量退休后直接推进退休游标，不再先逐 flight 等待一次 fence。
 此 GT 路径同时消费 flight 完成标记，将现有帧等待记录标为完成，但不恢复协程、不消费 channel。
 窗口操作续体随后新建的 `Wait()` 因而不会消费旧完成通知。恢复与应用完成钩子仍留给正常帧顶或关停阶段。
 

@@ -80,9 +80,8 @@ void MeasureCase(uint32_t count, uint32_t flights, uint32_t depth, bool uniqueAs
         auto lease = scene->AcquireRead();
         visible = 0;
         for (uint32_t view = 0; view < views; ++view) {
-            for (const auto id : scene->GetStaticMeshes()) {
-                const auto mesh = scene->GetStaticMesh(id);
-                if (mesh->WorldBoundsMax.x() >= -float(view + 1)) ++visible;
+            for (const auto& bounds : scene->GetStaticMeshColumns().Bounds) {
+                if (bounds.Max.x() >= -float(view + 1)) ++visible;
             }
         }
         viewMs = ElapsedMs(start);
@@ -226,8 +225,8 @@ TEST(LifecycleScale, SharedMeshViewsAndTransformCapture) {
         test::PrepareScene(world, renderer, 0);
         EXPECT_EQ(test::SceneBatch(renderer, scene, 0).MeshStates.size(), count);
         for (const auto& state : test::SceneBatch(renderer, scene, 0).MeshStates) {
-            EXPECT_EQ(state.Mesh.Sections.data(), sections);
-            EXPECT_EQ(state.Mesh.RenderMesh.Get(), &mesh->GetRenderMesh());
+            EXPECT_EQ(state.Mesh.GetSections().data(), sections);
+            EXPECT_EQ(state.Mesh.GetRenderMesh().Get(), &mesh->GetRenderMesh());
         }
         test::ConsumeFrame(renderer, 0);
         test::CompleteFrame(renderer, 0);

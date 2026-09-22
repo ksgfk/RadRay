@@ -40,6 +40,7 @@ unique_ptr<StaticMesh> MakeMesh() {
 }
 
 Vector3f Translation(const Matrix4f& matrix) { return matrix.col(3).head<3>(); }
+Vector3f Translation(const AffineTransform& transform) { return Translation(transform.ToMatrix()); }
 
 bool ContainsId(const vector<ShapeId>& ids, ShapeId id) {
     return std::find(ids.begin(), ids.end(), id) != ids.end();

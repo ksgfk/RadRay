@@ -102,12 +102,195 @@ TEST_F(StaticMeshScene, CreateCombinesStateAndFinalTransform) {
     auto view = Data.GetStaticMesh(id);
     ASSERT_TRUE(view);
     EXPECT_EQ(view->Mesh.MeshAssetId, MeshId(1));
-    ASSERT_EQ(view->Mesh.Sections.size(), 1u);
-    EXPECT_EQ(view->Mesh.Sections[0].IndexCount, 3u);
+    ASSERT_EQ(view->Mesh.GetSections().size(), 1u);
+    EXPECT_EQ(view->Mesh.GetSections()[0].IndexCount, 3u);
     ExpectBounds(*view, {-1, -2, -3}, {2, 3, 4}, component->GetWorldMatrix());
     EXPECT_FALSE(view->ReverseCulling);
     ASSERT_EQ(Data.GetStaticMeshes().size(), 1u);
     EXPECT_EQ(Data.GetStaticMeshes()[0], id);
+}
+
+TEST_F(StaticMeshScene, WriterCoalescesInterleavedUpdatesAcrossFlightsAndSlotReuse) {
+    const auto sceneId = Render.CreateSceneGT();
+    auto* writer = Render.GetSceneWriterGT(sceneId).Get();
+    const auto original = writer->CreateShape();
+    const auto survivor = writer->CreateShape();
+    auto mesh = Mesh(1);
+    Eigen::Matrix4f transform = Eigen::Matrix4f::Identity();
+    writer->SetStaticMesh(original, mesh, transform);
+    writer->SetStaticMesh(survivor, mesh, transform);
+    Render.SealFrameGT(0);
+
+    transform(0, 3) = 10;
+    writer->SetTransform(original, transform);
+    writer->SetStaticMesh(original, {}, Eigen::Matrix4f::Identity());
+    transform(0, 3) = 20;
+    writer->SetTransform(original, transform);
+    Render.SealFrameGT(1);
+    const auto& replaced = test::SceneBatch(Render, sceneId, 1);
+    ASSERT_EQ(replaced.MeshStates.size(), 1u);
+    EXPECT_TRUE(replaced.Transforms.empty());
+    EXPECT_TRUE(replaced.MeshStates[0].Mesh.MeshAssetId.IsEmpty());
+    EXPECT_FLOAT_EQ(replaced.MeshStates[0].LocalToWorld(0, 3), 20);
+
+    writer->SetTransform(original, transform);
+    transform(0, 3) = 30;
+    writer->SetTransform(survivor, transform);
+    writer->RemoveShape(original);
+    const auto replacement = writer->CreateShape();
+    EXPECT_EQ(replacement.Index, original.Index);
+    EXPECT_GT(replacement.Generation, original.Generation);
+    transform(0, 3) = 40;
+    writer->SetStaticMesh(replacement, mesh, transform);
+    transform(0, 3) = 50;
+    writer->SetTransform(replacement, transform);
+    Render.SealFrameGT(2);
+    const auto& reused = test::SceneBatch(Render, sceneId, 2);
+    EXPECT_EQ(reused.RemoveShapes, vector<ShapeId>{original});
+    EXPECT_EQ(reused.CreateShapes, vector<ShapeId>{replacement});
+    ASSERT_EQ(reused.MeshStates.size(), 1u);
+    ASSERT_EQ(reused.Transforms.size(), 1u);
+
+    test::ConsumeFrame(Render, 0);
+    EXPECT_EQ(Render.GetSceneRT(sceneId)->GetStaticMesh(original)->Mesh.MeshAssetId, mesh.GetAssetId());
+    EXPECT_FLOAT_EQ(Render.GetSceneRT(sceneId)->GetStaticMesh(original)->LocalToWorld(0, 3), 0);
+    test::ConsumeFrame(Render, 1);
+    EXPECT_FALSE(Render.GetSceneRT(sceneId)->GetStaticMesh(original)->Mesh.GetRenderMesh());
+    EXPECT_FLOAT_EQ(Render.GetSceneRT(sceneId)->GetStaticMesh(original)->LocalToWorld(0, 3), 20);
+    test::ConsumeFrame(Render, 2);
+    EXPECT_FALSE(Render.GetSceneRT(sceneId)->ContainsShape(original));
+    EXPECT_EQ(Render.GetSceneRT(sceneId)->GetStaticMesh(replacement)->Mesh.MeshAssetId, mesh.GetAssetId());
+    EXPECT_FLOAT_EQ(Render.GetSceneRT(sceneId)->GetStaticMesh(replacement)->LocalToWorld(0, 3), 50);
+    EXPECT_FLOAT_EQ(Render.GetSceneRT(sceneId)->GetStaticMesh(survivor)->LocalToWorld(0, 3), 30);
+    for (uint32_t flight = 0; flight < 3; ++flight) test::CompleteFrame(Render, flight);
+}
+
+TEST_F(StaticMeshScene, WriterCancelsPendingCreatesAndMeshStatesWithoutLosingSurvivors) {
+    auto firstMesh = Mesh(1);
+    auto finalMesh = Mesh(2);
+    for (size_t removed = 0; removed < 3; ++removed) {
+        SCOPED_TRACE(removed);
+        const auto sceneId = Render.CreateSceneGT();
+        auto* writer = Render.GetSceneWriterGT(sceneId).Get();
+        array<ShapeId, 3> ids;
+        Eigen::Matrix4f transform = Eigen::Matrix4f::Identity();
+        for (auto& id : ids) {
+            id = writer->CreateShape();
+            writer->SetStaticMesh(id, firstMesh, transform);
+        }
+        const auto canceled = ids[removed];
+        writer->RemoveShape(canceled);
+        for (size_t i = 0; i < ids.size(); ++i) {
+            if (i == removed) continue;
+            writer->SetStaticMesh(ids[i], finalMesh, transform);
+            transform(0, 3) = static_cast<float>(i + 10);
+            writer->SetTransform(ids[i], transform);
+        }
+        ids[removed] = writer->CreateShape();
+        EXPECT_EQ(ids[removed].Index, canceled.Index);
+        EXPECT_GT(ids[removed].Generation, canceled.Generation);
+        writer->SetStaticMesh(ids[removed], {}, Eigen::Matrix4f::Identity());
+        Render.SealFrameGT(0);
+        const auto& batch = test::SceneBatch(Render, sceneId, 0);
+        EXPECT_EQ(batch.CreateShapes.size(), 3u);
+        EXPECT_EQ(batch.MeshStates.size(), 3u);
+        EXPECT_TRUE(batch.Transforms.empty());
+        EXPECT_TRUE(batch.RemoveShapes.empty());
+        test::ConsumeFrame(Render, 0);
+        const auto scene = Render.GetSceneRT(sceneId);
+        EXPECT_FALSE(scene->ContainsShape(canceled));
+        EXPECT_EQ(scene->GetStaticMeshes().size(), 3u);
+        for (size_t i = 0; i < ids.size(); ++i) {
+            const auto view = scene->GetStaticMesh(ids[i]);
+            ASSERT_TRUE(view);
+            EXPECT_EQ(view->Mesh.RenderData.Get(), i == removed ? nullptr : &finalMesh->GetRenderData());
+            EXPECT_FLOAT_EQ(view->LocalToWorld(0, 3), i == removed ? 0 : static_cast<float>(i + 10));
+        }
+        test::CompleteFrame(Render, 0);
+    }
+}
+
+TEST_F(StaticMeshScene, WriterMergesMeshChangesIntoPendingTransformsAndCancelsRemoval) {
+    auto mesh = Mesh(1);
+    for (size_t removed = 0; removed < 3; ++removed) {
+        SCOPED_TRACE(removed);
+        const auto sceneId = Render.CreateSceneGT();
+        auto* writer = Render.GetSceneWriterGT(sceneId).Get();
+        array<ShapeId, 3> ids;
+        Eigen::Matrix4f transform = Eigen::Matrix4f::Identity();
+        for (auto& id : ids) {
+            id = writer->CreateShape();
+            writer->SetStaticMesh(id, mesh, transform);
+        }
+        Render.SealFrameGT(0);
+        for (const auto id : ids) writer->SetTransform(id, transform);
+        writer->RemoveShape(ids[removed]);
+        const size_t rebound = (removed + 1) % ids.size();
+        writer->SetStaticMesh(ids[rebound], {}, transform);
+        writer->SetStaticMesh(ids[rebound], mesh, transform);
+        for (size_t i = 0; i < ids.size(); ++i) {
+            if (i == removed) continue;
+            transform(0, 3) = static_cast<float>(i + 20);
+            writer->SetTransform(ids[i], transform);
+        }
+        Render.SealFrameGT(1);
+        const auto& batch = test::SceneBatch(Render, sceneId, 1);
+        EXPECT_EQ(batch.RemoveShapes, vector<ShapeId>{ids[removed]});
+        EXPECT_TRUE(batch.CreateShapes.empty());
+        ASSERT_EQ(batch.MeshStates.size(), 1u);
+        EXPECT_EQ(batch.MeshStates[0].Id, ids[rebound]);
+        EXPECT_EQ(batch.Transforms.size(), 1u);
+        test::ConsumeFrame(Render, 0);
+        for (const auto id : ids) {
+            EXPECT_FLOAT_EQ(Render.GetSceneRT(sceneId)->GetStaticMesh(id)->LocalToWorld(0, 3), 0);
+        }
+        test::ConsumeFrame(Render, 1);
+        EXPECT_FALSE(Render.GetSceneRT(sceneId)->ContainsShape(ids[removed]));
+        for (size_t i = 0; i < ids.size(); ++i) {
+            if (i == removed) continue;
+            EXPECT_FLOAT_EQ(Render.GetSceneRT(sceneId)->GetStaticMesh(ids[i])->LocalToWorld(0, 3), static_cast<float>(i + 20));
+        }
+        test::CompleteFrame(Render, 0);
+        test::CompleteFrame(Render, 1);
+    }
+}
+
+TEST_F(StaticMeshScene, InstancesAcrossScenesShareAssetRenderDataThroughRebindAndRetirement) {
+    auto mesh = Mesh(1);
+    auto replacementMesh = Mesh(2, {-10, -20, -30}, {30, 40, 50});
+    const auto* sharedData = &mesh->GetRenderData();
+    const auto firstScene = Render.CreateSceneGT();
+    const auto secondScene = Render.CreateSceneGT();
+    auto* first = Render.GetSceneWriterGT(firstScene).Get();
+    auto* second = Render.GetSceneWriterGT(secondScene).Get();
+    const auto moving = first->CreateShape();
+    const auto stationary = first->CreateShape();
+    const auto other = second->CreateShape();
+    Eigen::Matrix4f transform = Eigen::Matrix4f::Identity();
+    first->SetStaticMesh(moving, mesh, transform);
+    first->SetStaticMesh(stationary, mesh, transform);
+    second->SetStaticMesh(other, mesh, transform);
+    Render.SealFrameGT(0);
+    test::ConsumeFrame(Render, 0);
+    EXPECT_EQ(Render.GetSceneRT(firstScene)->GetStaticMesh(moving)->Mesh.RenderData.Get(), sharedData);
+    EXPECT_EQ(Render.GetSceneRT(firstScene)->GetStaticMesh(stationary)->Mesh.RenderData.Get(), sharedData);
+    EXPECT_EQ(Render.GetSceneRT(secondScene)->GetStaticMesh(other)->Mesh.RenderData.Get(), sharedData);
+
+    transform(0, 3) = 15;
+    first->SetTransform(stationary, transform);
+    first->SetStaticMesh(moving, replacementMesh, transform);
+    second->RemoveShape(other);
+    mesh = {};
+    Render.SealFrameGT(1);
+    Assets.Pump();
+    EXPECT_EQ(Render.GetSceneRT(secondScene)->GetStaticMesh(other)->Mesh.RenderData.Get(), sharedData);
+    test::ConsumeFrame(Render, 1);
+    EXPECT_EQ(Render.GetSceneRT(firstScene)->GetStaticMesh(moving)->Mesh.RenderData.Get(), &replacementMesh->GetRenderData());
+    EXPECT_EQ(Render.GetSceneRT(firstScene)->GetStaticMesh(stationary)->Mesh.RenderData.Get(), sharedData);
+    ExpectBounds(*Render.GetSceneRT(firstScene)->GetStaticMesh(stationary), {-1, -2, -3}, {2, 3, 4}, transform);
+    for (uint32_t flight = 0; flight < 2; ++flight) test::CompleteFrame(Render, flight);
+    Assets.Pump();
+    EXPECT_EQ(Render.GetSceneRT(firstScene)->GetStaticMesh(stationary)->Mesh.GetSections().size(), 1u);
 }
 
 TEST_F(StaticMeshScene, MovingOneObjectPreservesMeshDescriptionAndOtherObjects) {
@@ -118,8 +301,8 @@ TEST_F(StaticMeshScene, MovingOneObjectPreservesMeshDescriptionAndOtherObjects) 
     Flush();
     const auto movingId = moving->GetShapeId();
     const auto stationaryId = stationary->GetShapeId();
-    const auto* sections = Data.GetStaticMesh(movingId)->Mesh.Sections.data();
-    const auto* otherSections = Data.GetStaticMesh(stationaryId)->Mesh.Sections.data();
+    const auto* sections = Data.GetStaticMesh(movingId)->Mesh.GetSections().data();
+    const auto* otherSections = Data.GetStaticMesh(stationaryId)->Mesh.GetSections().data();
     const Eigen::Matrix4f otherTransform = Data.GetStaticMesh(stationaryId)->LocalToWorld;
     const Eigen::Vector3f otherBounds = Data.GetStaticMesh(stationaryId)->WorldBoundsMin;
     for (int i = 0; i < 100; ++i) moving->SetRelativeLocation({static_cast<float>(i), 0, 0});
@@ -129,8 +312,8 @@ TEST_F(StaticMeshScene, MovingOneObjectPreservesMeshDescriptionAndOtherObjects) 
     EXPECT_EQ(Batch.Transforms[0].Id, movingId);
     Data.Apply(Batch);
     Batch.Clear();
-    EXPECT_EQ(Data.GetStaticMesh(movingId)->Mesh.Sections.data(), sections);
-    EXPECT_EQ(Data.GetStaticMesh(stationaryId)->Mesh.Sections.data(), otherSections);
+    EXPECT_EQ(Data.GetStaticMesh(movingId)->Mesh.GetSections().data(), sections);
+    EXPECT_EQ(Data.GetStaticMesh(stationaryId)->Mesh.GetSections().data(), otherSections);
     EXPECT_TRUE(Data.GetStaticMesh(stationaryId)->LocalToWorld.isApprox(otherTransform));
     EXPECT_TRUE(Data.GetStaticMesh(stationaryId)->WorldBoundsMin.isApprox(otherBounds));
     ExpectBounds(*Data.GetStaticMesh(movingId), {-1, -2, -3}, {2, 3, 4}, moving->GetWorldMatrix());
@@ -155,8 +338,8 @@ TEST_F(StaticMeshScene, ReplacementUsesNewBoundsAndFinalTransformWithoutChanging
     auto view = Data.GetStaticMesh(id);
     ASSERT_TRUE(view);
     EXPECT_EQ(view->Mesh.MeshAssetId, MeshId(2));
-    ASSERT_EQ(view->Mesh.Sections.size(), 2u);
-    EXPECT_EQ(view->Mesh.Sections[1].FirstIndex, 1u);
+    ASSERT_EQ(view->Mesh.GetSections().size(), 2u);
+    EXPECT_EQ(view->Mesh.GetSections()[1].FirstIndex, 1u);
     ExpectBounds(*view, {-10, -20, -30}, {30, 40, 50}, component->GetWorldMatrix());
     EXPECT_TRUE(view->ReverseCulling);
     EXPECT_EQ(component->GetShapeId(), id);
@@ -197,24 +380,24 @@ TEST_F(StaticMeshScene, EmptyBindingAndInvalidCpuMeshClearPreviousGeometry) {
     auto view = Data.GetStaticMesh(id);
     ASSERT_TRUE(view);
     EXPECT_TRUE(view->Mesh.MeshAssetId.IsEmpty());
-    EXPECT_TRUE(view->Mesh.Sections.empty());
+    EXPECT_TRUE(view->Mesh.GetSections().empty());
     EXPECT_FLOAT_EQ(view->LocalToWorld(0, 3), 5);
     auto invalid = Assets.AddReady<StaticMesh>(MeshId(2), make_unique<CpuMesh>(MeshResource{}, vector<StaticMeshSection>{},
                                                                                Eigen::Vector3f::Zero(), Eigen::Vector3f::Zero(), GpuMesh{}));
     component->SetStaticMesh(invalid);
     Flush();
-    EXPECT_TRUE(Data.GetStaticMesh(id)->Mesh.Sections.empty());
+    EXPECT_TRUE(Data.GetStaticMesh(id)->Mesh.GetSections().empty());
     EXPECT_EQ(Data.GetStaticMesh(id)->Mesh.MeshAssetId, MeshId(2));
     component->SetStaticMesh(Mesh(3));
     Flush();
-    EXPECT_EQ(Data.GetStaticMesh(id)->Mesh.Sections.size(), 1u);
+    EXPECT_EQ(Data.GetStaticMesh(id)->Mesh.GetSections().size(), 1u);
     EXPECT_EQ(component->GetShapeId(), id);
 }
 
 TEST_F(StaticMeshScene, MeshWithoutSectionsProducesFullPrimitiveDescription) {
     auto* component = Add(Mesh(1, {-1, -1, -1}, {1, 1, 1}, {}));
     Flush();
-    const auto& sections = Data.GetStaticMesh(component->GetShapeId())->Mesh.Sections;
+    const auto& sections = Data.GetStaticMesh(component->GetShapeId())->Mesh.GetSections();
     ASSERT_EQ(sections.size(), 1u);
     EXPECT_EQ(sections[0].PrimitiveIndex, 0u);
     EXPECT_EQ(sections[0].FirstIndex, 0u);
@@ -234,13 +417,13 @@ TEST_F(StaticMeshScene, ReadyAutomaticallyPublishesTheLatestTransform) {
     component->SetStaticMesh(loading);
     component->SetRelativeLocation({20, 0, 0});
     Flush();
-    EXPECT_TRUE(Data.GetStaticMesh(id)->Mesh.Sections.empty());
+    EXPECT_TRUE(Data.GetStaticMesh(id)->Mesh.GetSections().empty());
     EXPECT_EQ(Data.GetStaticMesh(id)->Mesh.MeshAssetId, MeshId(2));
     Assets.Pump();
     ASSERT_TRUE(loading.IsReady());
     component->SetRelativeLocation({50, 0, 0});
     Flush();
-    ASSERT_EQ(Data.GetStaticMesh(id)->Mesh.Sections.size(), 1u);
+    ASSERT_EQ(Data.GetStaticMesh(id)->Mesh.GetSections().size(), 1u);
     ExpectBounds(*Data.GetStaticMesh(id), {-2, -3, -4}, {3, 4, 5}, component->GetWorldMatrix());
 }
 
@@ -273,10 +456,10 @@ TEST_F(StaticMeshScene, FlightRetainsAssetAfterSourceDiesBeforeApplyOnAnotherThr
         auto view = Data.GetStaticMesh(id);
         ASSERT_TRUE(view);
         EXPECT_EQ(view->Mesh.MeshAssetId, MeshId(1));
-        ASSERT_EQ(view->Mesh.Sections.size(), 1u);
-        EXPECT_EQ(view->Mesh.Sections[0].IndexCount, 3u);
-        ASSERT_TRUE(view->Mesh.RenderMesh);
-        EXPECT_TRUE(view->Mesh.RenderMesh->Draws.empty());
+        ASSERT_EQ(view->Mesh.GetSections().size(), 1u);
+        EXPECT_EQ(view->Mesh.GetSections()[0].IndexCount, 3u);
+        ASSERT_TRUE(view->Mesh.GetRenderMesh());
+        EXPECT_TRUE(view->Mesh.GetRenderMesh()->Draws.empty());
         Data.Apply(remove);
         EXPECT_FALSE(Data.GetStaticMesh(id));
         EXPECT_TRUE(Data.GetStaticMeshes().empty());
@@ -320,7 +503,7 @@ TEST_F(StaticMeshScene, ReadOnlyViewsAndEmptyFramesPreservePersistentDescription
     Flush();
     const auto id = component->GetShapeId();
     const auto* description = &Data.GetStaticMesh(id)->Mesh;
-    const auto* sections = description->Sections.data();
+    const auto* sections = description->GetSections().data();
     for (int frame = 0; frame < 8; ++frame) {
         test::CollectScene(GameWorld, Render, Batch);
         EXPECT_TRUE(Batch.Empty());
@@ -329,7 +512,7 @@ TEST_F(StaticMeshScene, ReadOnlyViewsAndEmptyFramesPreservePersistentDescription
             const auto view = Data.GetStaticMesh(id);
             ASSERT_TRUE(view);
             EXPECT_EQ(&view->Mesh, description);
-            EXPECT_EQ(view->Mesh.Sections.data(), sections);
+            EXPECT_EQ(view->Mesh.GetSections().data(), sections);
         }
     }
 }
@@ -350,7 +533,7 @@ TEST_F(StaticMeshScene, ReusedFlightsNeverRestoreAnOlderTransform) {
             test::ConsumeFrame(render, flight);
             const auto view = render.GetSceneRT(sceneId)->GetStaticMesh(id);
             ASSERT_TRUE(view);
-            EXPECT_FLOAT_EQ(view->LocalToWorld(0, 3), frame == 0 ? 0 : 15);
+            EXPECT_FLOAT_EQ(view->LocalToWorld(0, 3), frame == 0 ? 0.0f : 15.0f);
             test::CompleteFrame(render, flight, false);
         }
     }
@@ -401,6 +584,59 @@ TEST(StaticMeshSceneDeathTest, RejectsStaleStateTransformAndTransformWithoutMesh
     EXPECT_DEATH(scene.Apply(batch), "");
 }
 
+TEST(StaticMeshColumns, DenseColumnsPreserveAffineDataAcrossRemovalAndRebinding) {
+    RenderScene scene;
+    SceneUpdateBatch batch;
+    StaticMeshRenderData geometry;
+    geometry.LocalBoundsMin = {-1, -2, -3};
+    geometry.LocalBoundsMax = {1, 2, 3};
+    Eigen::Matrix4f affine = Eigen::Matrix4f::Identity();
+    affine(0, 0) = -2;
+    affine(0, 1) = 0.75f;
+    affine(2, 3) = 11;
+    const AffineTransform packed{affine};
+    EXPECT_EQ(sizeof(ShapeTransformUpdate), 56u);
+    EXPECT_TRUE(packed.ToMatrix().isApprox(affine));
+    for (uint32_t i = 0; i < 3; ++i) {
+        const ShapeId id{i, 1};
+        batch.CreateShapes.push_back(id);
+        auto matrix = affine;
+        matrix(0, 3) = float(i * 10);
+        batch.MeshStates.push_back({id, {{}, &geometry}, matrix});
+    }
+    scene.Apply(batch);
+    batch.Clear();
+    batch.RemoveShapes.push_back({0, 1});
+    affine(1, 3) = 17;
+    batch.Transforms.push_back({{2, 1}, affine});
+    scene.Apply(batch);
+    const auto columns = scene.GetStaticMeshColumns();
+    ASSERT_EQ(columns.Size(), 2u);
+    EXPECT_EQ(columns.Bindings.size(), columns.Size());
+    EXPECT_EQ(columns.Transforms.size(), columns.Size());
+    EXPECT_EQ(columns.Bounds.size(), columns.Size());
+    EXPECT_EQ(columns.Ids[0], (ShapeId{2, 1}));
+    EXPECT_TRUE(columns.Transforms[0].isApprox(affine));
+    EXPECT_EQ(columns.Bindings[0].RenderData.Get(), &geometry);
+    EXPECT_TRUE(columns.Bounds[0].ReverseCulling);
+    EXPECT_TRUE(columns.Bounds[0].Min.isApprox(Eigen::Vector3f{-3.5f, 15, 8}));
+    EXPECT_TRUE(columns.Bounds[0].Max.isApprox(Eigen::Vector3f{3.5f, 19, 14}));
+    for (size_t row = 0; row < columns.Size(); ++row) {
+        const auto routed = scene.GetStaticMesh(columns.Ids[row]);
+        const auto direct = columns.Get(row);
+        EXPECT_EQ(&routed->LocalToWorld, &direct.LocalToWorld);
+        EXPECT_EQ(&routed->Mesh, &columns.Bindings[row]);
+    }
+    batch.Clear();
+    batch.MeshStates.push_back({{2, 1}, {}, Eigen::Matrix4f::Identity()});
+    scene.Apply(batch);
+    const auto rebound = scene.GetStaticMeshColumns();
+    EXPECT_FALSE(rebound.Bindings[0].RenderData);
+    EXPECT_FALSE(rebound.Bounds[0].ReverseCulling);
+    EXPECT_TRUE(rebound.Bounds[0].Min.isZero());
+    EXPECT_TRUE(rebound.Bounds[0].Max.isZero());
+}
+
 TEST(StaticMeshSceneDeathTest, RejectsInvalidBoundsAndNonAffineTransforms) {
     RenderScene scene;
     SceneUpdateBatch batch;
@@ -409,14 +645,17 @@ TEST(StaticMeshSceneDeathTest, RejectsInvalidBoundsAndNonAffineTransforms) {
     scene.Apply(batch);
     batch.Clear();
     batch.MeshStates.push_back({.Id = {0, 1}});
-    batch.MeshStates[0].Mesh.LocalBoundsMin.x() = 1;
+    StaticMeshRenderData invalid;
+    invalid.LocalBoundsMin.x() = 1;
+    batch.MeshStates[0].Mesh.RenderData = &invalid;
     EXPECT_DEATH(scene.Apply(batch), "");
 #ifdef RADRAY_IS_DEBUG
     batch.Clear();
     batch.Transforms.push_back({.Id = {0, 1}});
-    batch.Transforms[0].LocalToWorld(3, 0) = 1;
-    EXPECT_DEATH(scene.Apply(batch), "");
-    batch.Transforms[0].LocalToWorld(3, 0) = std::numeric_limits<float>::quiet_NaN();
+    Eigen::Matrix4f nonAffine = Eigen::Matrix4f::Identity();
+    nonAffine(3, 0) = 1;
+    EXPECT_DEATH((void)AffineTransform{nonAffine}, "");
+    batch.Transforms[0].LocalToWorld.Values[0] = std::numeric_limits<float>::quiet_NaN();
     EXPECT_DEATH(scene.Apply(batch), "");
 #endif
 }

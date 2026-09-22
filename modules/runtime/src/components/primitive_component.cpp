@@ -6,7 +6,6 @@ PrimitiveComponent::~PrimitiveComponent() noexcept = default;
 
 void PrimitiveComponent::CreateRenderState(SceneWriter& writer) {
     _shapeId = writer.CreateShape();
-    _sceneId = writer.GetSceneId();
     MarkRenderStateDirty();
     OnRenderStateCreated();
 }
@@ -15,14 +14,11 @@ void PrimitiveComponent::DestroyRenderState(SceneWriter& writer) {
     OnRenderStateDestroyed();
     writer.RemoveShape(_shapeId);
     _shapeId = {};
-    _sceneId = {};
 }
 
-void PrimitiveComponent::CollectRenderUpdates(SceneWriter& writer, RenderDirtyFlags dirty) {
-    writer.Queue(writer.GetShape(_shapeId));
-    CollectPrimitiveUpdates(writer, dirty);
+void PrimitiveComponent::CollectRenderUpdates(SceneCapture& capture, RenderDirtyFlags dirty) {
+    auto shape = capture.CaptureShape(_shapeId);
+    CollectPrimitiveUpdates(shape, dirty);
 }
-
-void PrimitiveComponent::OnTransformChanged() {}
 
 }  // namespace radray

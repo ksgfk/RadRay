@@ -163,8 +163,6 @@ bool GpuSystem::CompleteFlightIfReady(uint32_t flightIndex, bool wait) {
     }
     if (wait) {
         flight.Signal.Fence->Wait(flight.Signal.Value);
-    } else if (flight.Signal.Fence->GetCompletedValue() < flight.Signal.Value) {
-        return false;
     }
     return CompleteFlight(flightIndex);
 }
@@ -305,11 +303,8 @@ AppFrameContext GpuSystem::BeginFrameRecord(
         RADRAY_ABORT("cannot begin a flight before its previous recording has retired");
     }
     record.CommandAllocator.Reset();
-    record.Batches.clear();
-    record.Acquisitions.clear();
     if (!record.Uploader) record.Uploader = make_unique<ResourceUploader>(_device.get(), _flightDataCount);
     record.Uploader->BeginFlight(flightIndex, record.HostWrites);
-    record.Submitted = false;
     record.FrameSerial = _nextFrameSerial++;
     if (record.FrameSerial == 0 || record.FrameSerial == UINT64_MAX) RADRAY_ABORT("Frame serial exhausted");
     record.Recording = true;
@@ -343,7 +338,7 @@ void GpuSystem::AbandonUnpublishedResourcesTerminalGT() {
 
 void GpuSystem::EndFrameRecordAndSubmit(uint32_t flightIndex) {
     FlightSlot& record = *_flights[flightIndex];
-    if (record.Submitted || !record.Recording) {
+    if (!record.Recording) {
         return;
     }
     SubmitFrame(flightIndex);
@@ -352,7 +347,7 @@ void GpuSystem::EndFrameRecordAndSubmit(uint32_t flightIndex) {
 void GpuSystem::SubmitFrame(uint32_t flightIndex) {
     RADRAY_PROFILE_SCOPE_N("GpuSystem::SubmitFrame");
     FlightSlot& record = *_flights.at(flightIndex);
-    if (!record.Recording || record.Submitted) {
+    if (!record.Recording) {
         RADRAY_ABORT("GpuSystem::SubmitFrame called outside an active frame");
     }
     if (record.CommandAllocator.HasOutstanding()) {
@@ -473,7 +468,6 @@ void GpuSystem::SubmitFrame(uint32_t flightIndex) {
     record.Signal = finalSignal;
     record.Batches.clear();
     record.Acquisitions.clear();
-    record.Submitted = true;
 }
 
 // ══════════════════════════════════════════════
@@ -497,7 +491,7 @@ uint64_t AppFrameContext::FrameSerial() const noexcept { return _frameSerial; }
 
 GpuFlightSlot& AppFrameContext::GetRecordingFlight() const noexcept {
     auto& flight = *_gpuSystem->_flights[_flightIndex];
-    if (!flight.Recording || flight.Submitted || flight.FrameSerial != _frameSerial) {
+    if (!flight.Recording || flight.FrameSerial != _frameSerial) {
         RADRAY_ABORT("AppFrameContext used outside its active recording");
     }
     return flight;

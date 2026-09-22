@@ -77,16 +77,7 @@ void LightSceneData::Set(LightId id, const LightData& light) noexcept {
     if (!id.IsValid()) RADRAY_ABORT("Invalid light identity");
     std::visit([this, id](const auto& value) {
         using T = std::decay_t<decltype(value)>;
-        auto& table = [this]() -> LightTable<T>& {
-            if constexpr (std::is_same_v<T, DirectionalLightData>)
-                return DirectionalLights;
-            else if constexpr (std::is_same_v<T, PointLightData>)
-                return PointLights;
-            else if constexpr (std::is_same_v<T, SpotLightData>)
-                return SpotLights;
-            else
-                return RectLights;
-        }();
+        auto& table = GetTable<T>();
         const auto row = FindRow(table, id);
         if (row != kNoRow) {
             table.Data[row] = value;

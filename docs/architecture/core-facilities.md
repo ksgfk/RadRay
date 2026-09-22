@@ -1,6 +1,6 @@
 > - 适用: 需要某个基础设施但不确定仓库里已有什么；踩到 core 的坑
 > - 权威: 本文是 `radraycore` 提供什么、以及怎么正确用它的唯一说明
-> - 锚点: `modules/core/include/radray/types.h`, `modules/core/include/radray/inline_vector.h`, `modules/core/include/radray/nullable.h`, `modules/core/include/radray/coroutine.h`, `modules/core/include/radray/enum_flags.h`, `modules/core/include/radray/runtime_type.h`, `cmake/Utility.cmake`
+> - 锚点: `modules/core/include/radray/types.h`, `modules/core/include/radray/inline_vector.h`, `modules/core/include/radray/nullable.h`, `modules/core/include/radray/coroutine.h`, `modules/core/include/radray/enum_flags.h`, `modules/core/include/radray/basic_math.h`, `modules/core/include/radray/runtime_type.h`, `cmake/Utility.cmake`
 
 # core 基础设施
 
@@ -16,7 +16,7 @@
 | `logger.h` | 日志宏、`RADRAY_ABORT`、`RADRAY_ASSERT` |
 | `nullable.h` | `Nullable<T>` |
 | `enum_flags.h` | `EnumFlags<T>` + `magic_enum` 的唯一出口 |
-| `basic_math.h` | Eigen 封装 + 视图/投影辅助 |
+| `basic_math.h` | Eigen 封装 + 视图/投影辅助；48 B 列主序 `AffineTransform` 传输表示 |
 | `hash.h` | `HashCode` 增量哈希、`StringHash`、`PodHasher` |
 | `coroutine.h` | `task`、`TaskScope`、`ManualCoroutineScheduler` |
 | `utility.h` | `StaticCastUniquePtr`、`Unreachable`、`RADRAY_UNUSED` |
@@ -273,6 +273,9 @@ template <> struct JsonDeserializer<T> {
 辅助：`Align`、`Degree` / `Radian`、`Lerp`、`Clamp`、`AbsDot`、`ComposeTransform` /
 `DecomposeTransform`。另有 `Viewport`、`Rect`。Eigen 的向量/矩阵/四元数都有 fmt formatter，
 可以直接 `fmt::format("{}", mat)`。
+
+`AffineTransform` 是 48 B 列主序 affine 3×4 传输表示，默认隐含齐次行 `(0, 0, 0, 1)`；
+它与 `Eigen::Matrix4f` 相互转换并保留 shear/负缩放，计算和缓存仍使用 `Matrix4f`。
 
 ## 其他
 

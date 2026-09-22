@@ -19,7 +19,7 @@ private:
     void OnRenderStateDestroyed() override;
     void StartMeshReadyWait();
     task<void> WaitForMeshReady(StreamingAssetRef<StaticMesh> mesh, SceneId scene, ShapeId registration);
-    void CollectPrimitiveUpdates(SceneWriter& writer, RenderDirtyFlags dirty) override;
+    void CollectPrimitiveUpdates(ShapeCapture& capture, RenderDirtyFlags dirty) override;
 
     StreamingAssetRef<StaticMesh> _mesh;
     unique_ptr<TaskScope> _readyWait;

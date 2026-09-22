@@ -18,6 +18,32 @@ Eigen::Matrix4f ReferenceCompose(const Eigen::Vector3f& translation, const Eigen
 
 }  // namespace
 
+TEST(BasicMathTest, AffineTransformRoundTripPreservesArbitraryAffineMatrices) {
+    std::mt19937 generator{20260922u};
+    std::uniform_real_distribution<float> uniform{-4.0f, 4.0f};
+    for (size_t iteration = 0; iteration < 2048; ++iteration) {
+        Eigen::Matrix4f matrix = Eigen::Matrix4f::Identity();
+        for (int column = 0; column < 4; ++column) {
+            for (int row = 0; row < 3; ++row) {
+                matrix(row, column) = uniform(generator);
+            }
+        }
+        const AffineTransform packed{matrix};
+        EXPECT_TRUE(packed.ToMatrix().isApprox(matrix, 0.0f)) << iteration;
+    }
+}
+
+TEST(BasicMathTest, AffineTransformIdentityAndSingularScaleRemainRepresentable) {
+    EXPECT_TRUE(AffineTransform{}.ToMatrix().isIdentity());
+    Eigen::Matrix4f singular = Eigen::Matrix4f::Identity();
+    singular(0, 0) = 0;
+    singular(1, 1) = -2;
+    singular(0, 1) = 3;
+    singular(2, 3) = 7;
+    const AffineTransform value{singular};
+    EXPECT_TRUE(value.ToMatrix().isApprox(singular, 0.0f));
+}
+
 TEST(BasicMathTest, ComposeTransformMatchesReferenceForRandomInputs) {
     std::mt19937 generator{20260921u};
     std::uniform_real_distribution<float> uniform{-4.0f, 4.0f};

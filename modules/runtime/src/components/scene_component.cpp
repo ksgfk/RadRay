@@ -3,70 +3,27 @@
 #include <algorithm>
 #include <cmath>
 #include <radray/logger.h>
-#include <radray/scope_guard.h>
 #include <radray/runtime/game_framework/world.h>
 
 namespace radray {
 
-void SceneComponent::MarkRenderDirty(RenderDirtyFlag flag) {
-    const auto registration = GetRegistrationState();
-    const auto lifecycle = GetLifecycle();
-    if (!_renderConnection.IsValid() || (registration != ComponentRegistration::Registering && registration != ComponentRegistration::Registered)) return;
-    if (lifecycle != ObjectLifecycle::Live && lifecycle != ObjectLifecycle::Initializing) return;
-    if (auto world = GetWorld()) world->EnqueueRenderDirty(*this, flag);
-}
-void SceneComponent::MarkRenderStateDirty() {
-    CheckCanModify();
-    MarkRenderDirty(RenderDirtyFlag::State);
-}
-void SceneComponent::MarkRenderTransformDirty() {
-    CheckCanModify();
-    MarkRenderDirty(RenderDirtyFlag::Transform);
-}
-void SceneComponent::MarkRenderDynamicDataDirty() {
-    CheckCanModify();
-    MarkRenderDirty(RenderDirtyFlag::DynamicData);
-}
-
 void SceneComponent::NotifyTransformChanged() {
-    const bool leaf = _children.empty();
-    if (leaf) {
-        _worldDirty = true;
-    } else {
-        InvalidateWorldSubtree();
-    }
-    auto world = GetWorld();
-    if (world) world->BeginCallback();
-    auto guard = MakeScopeGuard([world]() noexcept { if (world) world->EndCallback(); });
-    if (leaf) {
-        if (_autoMarkTransformDirty) MarkRenderDirty(RenderDirtyFlag::Transform);
-        OnTransformChanged();
-    } else {
-        NotifySubtree();
-    }
-}
-
-void SceneComponent::NotifySubtree() {
-    if (!IsLive()) return;
-    const size_t count = _children.size();
-    if (_autoMarkTransformDirty) MarkRenderDirty(RenderDirtyFlag::Transform);
-    OnTransformChanged();
-    for (size_t i = 0; i < count && IsLive(); ++i) {
-        _children[i]->NotifySubtree();
-    }
-}
-
-void SceneComponent::InvalidateWorldSubtree() noexcept {
     _worldDirty = true;
-    for (auto* child : _children) {
-        child->InvalidateWorldSubtree();
+    if (const auto world = GetWorld()) {
+        world->QueueTransform(*this);
+    } else {
+        vector<SceneComponent*> pending{this};
+        while (!pending.empty()) {
+            auto* node = pending.back();
+            pending.pop_back();
+            const auto count = node->_children.size();
+            node->NotifyWorldTransformChanged(true, false);
+            for (size_t i = count; i > 0; --i) pending.push_back(node->_children[i - 1]);
+        }
     }
 }
 
-SceneComponent::~SceneComponent() noexcept {
-    if (_renderConnection.IsValid()) RADRAY_ABORT("SceneComponent requires explicit render disconnection");
-    UnlinkHierarchy(nullptr);
-}
+SceneComponent::~SceneComponent() noexcept { UnlinkHierarchy(); }
 
 void SceneComponent::SetRelativeLocation(const Eigen::Vector3f& location) noexcept {
     CheckCanModify();
@@ -86,42 +43,51 @@ void SceneComponent::SetRelativeScale(const Eigen::Vector3f& scale) noexcept {
     _relativeScale = scale;
     NotifyTransformChanged();
 }
-Eigen::Matrix4f SceneComponent::ComputeLocalMatrix() const noexcept {
-    return ComposeTransform<float>(_relativeLocation, _relativeRotation, _relativeScale);
-}
 void SceneComponent::RefreshWorldMatrix() const noexcept {
-    // 窗口固定，超过窗口的链分多轮从顶部收敛：深层级不会按深度消耗栈，也不做堆分配。
-    constexpr size_t window = 32;
-    const SceneComponent* chain[window];
-    while (_worldDirty) {
-        size_t height = 0;
-        for (auto node = this; node != nullptr && node->_worldDirty; node = node->_parent.Get()) {
-            chain[height % window] = node;
-            ++height;
-        }
-        // 本轮只处理链上最高的 window 个节点，自上而下 compose；每个节点的 parent 此时已干净或为空。
-        for (size_t index = height, bottom = height - std::min(height, window); index-- > bottom;) {
-            const SceneComponent* node = chain[index % window];
-            const Eigen::Matrix4f local = node->ComputeLocalMatrix();
+    const auto world = GetWorld();
+    const uint64_t revision = world ? world->_transformRevision : 0;
+    vector<const SceneComponent*> draftChain;
+    auto& chain = world ? world->_transformChain : draftChain;
+    chain.clear();
+    auto* node = this;
+    while (node->_parent && (!world || node->_parent->_validatedRevision != revision)) {
+        chain.push_back(node);
+        node = node->_parent.Get();
+    }
+    for (;;) {
+        if (!world || node->_worldDirty || (node->_parent && node->_parent->_worldRevision > node->_worldRevision)) {
+            const Eigen::Matrix4f local = ComposeTransform(node->_relativeLocation, node->_relativeRotation, node->_relativeScale);
             if (node->_parent)
-                node->_worldMatrix = node->_parent->_worldMatrix * local;
+                node->_worldTransform.noalias() = node->_parent->_worldTransform * local;
             else
-                node->_worldMatrix = local;
-            node->_worldDirty = false;
+                node->_worldTransform = local;
+            node->_worldRevision = revision;
+            // Draft queries have no revision domain; revalidate when joining a World.
+            node->_worldDirty = !world;
         }
+        node->_validatedRevision = revision;
+        if (chain.empty()) break;
+        node = chain.back();
+        chain.pop_back();
     }
 }
-Eigen::Matrix4f SceneComponent::GetWorldMatrix() const noexcept {
-    if (_worldDirty) RefreshWorldMatrix();
-    return _worldMatrix;
+const Eigen::Matrix4f& SceneComponent::GetWorldTransform() const noexcept {
+    if (!_parent && !_worldDirty) return _worldTransform;
+    const auto world = GetWorld();
+    if (!world || _validatedRevision != world->_transformRevision) RefreshWorldMatrix();
+    return _worldTransform;
 }
-Eigen::Vector3f SceneComponent::GetWorldLocation() const noexcept { return GetWorldMatrix().block<3, 1>(0, 3); }
+Eigen::Matrix4f SceneComponent::GetWorldMatrix() const noexcept { return GetWorldTransform(); }
+Eigen::Vector3f SceneComponent::GetWorldLocation() const noexcept {
+    const float* transform = GetWorldTransform().data();
+    return {transform[12], transform[13], transform[14]};
+}
 Eigen::Quaternionf SceneComponent::GetWorldRotation() const noexcept {
-    const Eigen::Affine3f aff{GetWorldMatrix()};
+    const Eigen::Affine3f aff{GetWorldTransform()};
     return Eigen::Quaternionf{aff.rotation()};
 }
 Eigen::Vector3f SceneComponent::GetWorldScale() const noexcept {
-    const Eigen::Matrix4f matrix = GetWorldMatrix();
+    const Eigen::Matrix4f& matrix = GetWorldTransform();
     return {matrix.block<3, 1>(0, 0).norm(), matrix.block<3, 1>(0, 1).norm(), matrix.block<3, 1>(0, 2).norm()};
 }
 void SceneComponent::SetWorldLocation(const Eigen::Vector3f& location) noexcept {
@@ -212,16 +178,17 @@ LifecycleRequestResult SceneComponent::RequestReparent(Nullable<SceneComponent*>
     if (!ComputeAttachmentTransform(parent, rule, location, rotation, scale)) return LifecycleRequestResult::Invalid;
     return world->QueueReparent(*this, parent, rule);
 }
-void SceneComponent::UnlinkHierarchy(Nullable<vector<SceneComponent*>*> detachedChildren) noexcept {
+void SceneComponent::UnlinkHierarchy() noexcept {
     if (_parent) {
         std::erase(_parent->_children, this);
         _parent = nullptr;
     }
     _worldDirty = true;
+    if (const auto world = GetWorld()) world->QueueTransform(*this);
     for (auto* child : _children) {
         child->_parent = nullptr;
-        child->InvalidateWorldSubtree();
-        if (detachedChildren) detachedChildren->push_back(child);
+        child->_worldDirty = true;
+        if (const auto world = child->GetWorld()) world->QueueTransform(*child);
     }
     _children.clear();
 }

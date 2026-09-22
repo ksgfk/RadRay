@@ -29,6 +29,14 @@ struct StaticMeshSection {
     int32_t VertexOffset;
 };
 
+/// Shared, immutable geometry while its owning StaticMesh asset is retained.
+struct StaticMeshRenderData {
+    GpuMesh Mesh;
+    vector<StaticMeshSection> Sections;
+    Eigen::Vector3f LocalBoundsMin{Eigen::Vector3f::Zero()};
+    Eigen::Vector3f LocalBoundsMax{Eigen::Vector3f::Zero()};
+};
+
 /// CPU 网格数据的自洽性校验。section 为空时只校验 primitive。
 ///
 /// 【为何是自由函数】: 上传前就要校验, 那时还没有任何资产对象。从前的写法是构造一个空
@@ -54,25 +62,19 @@ public:
     void OnUnload(AssetManager& manager) override;
 
     const MeshResource& GetMeshResource() const noexcept { return _meshResource; }
-    const vector<StaticMeshSection>& GetSections() const noexcept { return _sections; }
-    const Eigen::Vector3f& GetBoundsMin() const noexcept { return _boundsMin; }
-    const Eigen::Vector3f& GetBoundsMax() const noexcept { return _boundsMax; }
+    const vector<StaticMeshSection>& GetSections() const noexcept { return _renderData.Sections; }
+    const Eigen::Vector3f& GetBoundsMin() const noexcept { return _renderData.LocalBoundsMin; }
+    const Eigen::Vector3f& GetBoundsMax() const noexcept { return _renderData.LocalBoundsMax; }
 
     bool IsValid() const noexcept;
 
-    // ─── GPU 渲染数据 ───
-    // 对应 UE5 的 FStaticMeshRenderData: 上传后的 device-local 顶点/索引 buffer。
-    // 返回指针在【本资产】存活期内稳定 —— 持有一份 StreamingAssetRef 即保证不悬垂
-
     /// 借用资源；Scene 外的提交者须用 GpuSystem::RetainForFrameGT 保持资产至实际完成。
-    const GpuMesh& GetRenderMesh() const noexcept { return _renderMesh; }
+    const StaticMeshRenderData& GetRenderData() const noexcept { return _renderData; }
+    const GpuMesh& GetRenderMesh() const noexcept { return _renderData.Mesh; }
 
 private:
     MeshResource _meshResource;
-    vector<StaticMeshSection> _sections;
-    Eigen::Vector3f _boundsMin;
-    Eigen::Vector3f _boundsMax;
-    GpuMesh _renderMesh;
+    StaticMeshRenderData _renderData;
     bool _valid{false};
 };
 

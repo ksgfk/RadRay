@@ -78,7 +78,6 @@ private:
     struct SceneRecord {
         unique_ptr<SceneWriter> Writer;
         bool CreatePending{true};
-        bool DestroyPending{false};
         bool DestroySealed{false};
     };
     struct SceneSlotRT {
@@ -105,8 +104,7 @@ private:
     unique_ptr<render::RenderPassRegistry> _renderPassRegistry;
     unique_ptr<ShaderProgramCache> _shaderCache;
     vector<FrameUpdates> _frameUpdates;
-    SparseSet<unique_ptr<SceneRecord>> _scenesGT;
-    vector<SceneId> _sceneIdsGT;
+    SparseSet<SceneRecord> _scenesGT;
     vector<SceneSlotRT> _scenesRT;
     // GT owns seal, publish, completion and stopping; RT owns consumption.
     uint64_t _nextUpdateSequence{1};

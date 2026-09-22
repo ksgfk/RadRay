@@ -16,10 +16,6 @@ WorldRenderBridge::~WorldRenderBridge() noexcept {
     if (_state != RenderConnectionState::Disconnected) RADRAY_ABORT("Bridge requires explicit Disconnect");
 }
 
-void WorldRenderBridge::CheckCanModify() const noexcept {
-    if (_collecting) RADRAY_ABORT("Cannot mutate World during render collection");
-}
-
 void WorldRenderBridge::Initialize() {
     const size_t actors = _world.GetActors().size();
     for (size_t i = 0; i < actors; ++i) {
@@ -27,7 +23,7 @@ void WorldRenderBridge::Initialize() {
         const size_t components = actor->GetOwnedComponents().size();
         for (size_t j = 0; j < components && actor->IsLive(); ++j) {
             auto* component = actor->GetOwnedComponents()[j].get();
-            if (auto scene = dynamic_cast<SceneComponent*>(component); scene && scene->IsRegistered() && scene->IsLive()) Create(*scene);
+            if (auto source = dynamic_cast<RenderComponent*>(component); source && source->IsRegistered() && source->IsLive()) Create(*source);
         }
     }
     _state = RenderConnectionState::Connected;
@@ -35,86 +31,71 @@ void WorldRenderBridge::Initialize() {
 
 void WorldRenderBridge::Disconnect() {
     if (_state == RenderConnectionState::Disconnected) return;
-    CheckCanModify();
     _state = RenderConnectionState::Disconnecting;
-    const size_t actors = _world.GetActors().size();
-    for (size_t i = 0; i < actors; ++i) {
-        auto* actor = _world.GetActors()[i].get();
-        const size_t components = actor->GetOwnedComponents().size();
-        for (size_t j = 0; j < components; ++j) {
-            auto* component = actor->GetOwnedComponents()[j].get();
-            if (auto scene = dynamic_cast<SceneComponent*>(component)) Destroy(*scene);
-        }
-    }
+    while (!_sources.empty()) Destroy(*_sources.back());
     _renderer.ReleaseSceneWriterGT(GetSceneId());
     _renderer.DestroySceneGT(GetSceneId());
     _state = RenderConnectionState::Disconnected;
 }
 
-void WorldRenderBridge::Create(SceneComponent& component) {
-    CheckCanModify();
+void WorldRenderBridge::Create(RenderComponent& component) {
     if ((_state != RenderConnectionState::Connecting && _state != RenderConnectionState::Connected) || !component.IsLive()) return;
-    if (component._renderConnection.IsValid()) {
-        if (component._renderConnection != GetSceneId()) RADRAY_ABORT("Component has another render connection");
-        return;
-    }
-    component._renderConnection = GetSceneId();
+    if (component._renderIndex != kNotQueued) return;
+    if (_sources.size() == kNotQueued) RADRAY_ABORT("Too many render sources");
+    component._renderIndex = static_cast<uint32_t>(_sources.size());
+    _sources.push_back(&component);
     _world.BeginCallback();
     auto guard = MakeScopeGuard([this]() noexcept { _world.EndCallback(); });
     component.CreateRenderState(_writer);
 }
 
-void WorldRenderBridge::Destroy(SceneComponent& component) {
-    CheckCanModify();
-    if (!component._renderConnection.IsValid()) return;
-    if (component._renderConnection != GetSceneId()) RADRAY_ABORT("Stale component render connection");
-    component._renderConnection = {};
-    Remove(component);
+void WorldRenderBridge::Destroy(RenderComponent& component) {
+    const auto index = component._renderIndex;
+    if (index == kNotQueued) return;
+    RemoveUpdate(component);
+    _sources[index] = _sources.back();
+    _sources[index]->_renderIndex = index;
+    _sources.pop_back();
+    component._renderIndex = kNotQueued;
     _world.BeginCallback();
     auto guard = MakeScopeGuard([this]() noexcept { _world.EndCallback(); });
     component.DestroyRenderState(_writer);
-    Remove(component);
 }
 
-void WorldRenderBridge::Queue(SceneComponent& component, RenderDirtyFlag flag) {
-    if (component._renderQueueIndex == std::numeric_limits<size_t>::max()) {
-        component._renderQueueIndex = _updates.size();
+void WorldRenderBridge::Queue(RenderComponent& component, RenderDirtyFlag flag) {
+    if (!component._renderDirty) {
+        component._renderQueueIndex = static_cast<uint32_t>(_updates.size());
         _updates.push_back(&component);
     }
     component._renderDirty |= flag;
 }
 
-void WorldRenderBridge::Remove(SceneComponent& component) noexcept {
-    const auto index = component._renderQueueIndex;
-    if (index != std::numeric_limits<size_t>::max()) {
-        auto moved = _updates.back();
+void WorldRenderBridge::RemoveUpdate(RenderComponent& component) noexcept {
+    if (component._renderDirty) {
+        const auto index = component._renderQueueIndex;
+        auto* moved = _updates.back();
         _updates[index] = moved;
         moved->_renderQueueIndex = index;
         _updates.pop_back();
     }
-    component._renderQueueIndex = std::numeric_limits<size_t>::max();
     component._renderDirty = {};
 }
 
 void WorldRenderBridge::Collect() {
     RADRAY_PROFILE_SCOPE_N("WorldRenderBridge::Collect");
-    CheckCanModify();
-    _collecting = true;
+    if (_updates.empty()) return;
     _renderer.SetCollecting(true);
-    auto guard = MakeScopeGuard([this]() noexcept { _renderer.SetCollecting(false); _collecting = false; });
-    // 队列较大时按组件地址排序后顺序处理：Mutate 的入队顺序是随机的，排序把对组件与 writer 热状态的
-    // 随机访问变成近似按分配顺序的连续访问。小队的工作集仍在缓存内，排序只是纯成本，故设阈值。
-    // Collect 期间禁止入队/出队（CheckCanModify），队列稳定，可以安全整体排序。
+    auto guard = MakeScopeGuard([this]() noexcept { _renderer.SetCollecting(false); });
     if (_updates.size() >= kCollectSortThreshold) {
-        std::sort(_updates.begin(), _updates.end(), [](const SceneComponent* lhs, const SceneComponent* rhs) noexcept {
+        std::sort(_updates.begin(), _updates.end(), [](const RenderComponent* lhs, const RenderComponent* rhs) noexcept {
             return reinterpret_cast<uintptr_t>(lhs) < reinterpret_cast<uintptr_t>(rhs);
         });
     }
+    SceneCapture capture{_writer};
     for (auto* component : _updates) {
         if (component->IsLive()) {
-            component->CollectRenderUpdates(_writer, component->_renderDirty);
+            component->CollectRenderUpdates(capture, component->_renderDirty);
         }
-        component->_renderQueueIndex = std::numeric_limits<size_t>::max();
         component->_renderDirty = {};
     }
     _updates.clear();

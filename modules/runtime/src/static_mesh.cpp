@@ -151,18 +151,15 @@ StaticMesh::StaticMesh(
     const Eigen::Vector3f& boundsMax,
     GpuMesh renderMesh) noexcept
     : _meshResource(std::move(meshResource)),
-      _sections(std::move(sections)),
-      _boundsMin(boundsMin),
-      _boundsMax(boundsMax),
-      _renderMesh(std::move(renderMesh)) {
-    _valid = IsStaticMeshDataValid(_meshResource, _sections) && _boundsMin.allFinite() && _boundsMax.allFinite() &&
-             (_boundsMin.array() <= _boundsMax.array()).all();
+      _renderData{std::move(renderMesh), std::move(sections), boundsMin, boundsMax} {
+    _valid = IsStaticMeshDataValid(_meshResource, _renderData.Sections) && boundsMin.allFinite() && boundsMax.allFinite() &&
+             (boundsMin.array() <= boundsMax.array()).all();
     if (_valid) {
-        if (_sections.empty()) {
-            _sections.reserve(_meshResource.Primitives.size());
+        if (_renderData.Sections.empty()) {
+            _renderData.Sections.reserve(_meshResource.Primitives.size());
             for (size_t i = 0; i < _meshResource.Primitives.size(); ++i) {
                 const auto& primitive = _meshResource.Primitives[i];
-                _sections.emplace_back(static_cast<uint32_t>(i), 0, primitive.IndexBuffer.IndexCount, 0, primitive.VertexCount - 1);
+                _renderData.Sections.emplace_back(static_cast<uint32_t>(i), 0, primitive.IndexBuffer.IndexCount, 0, primitive.VertexCount - 1);
             }
         }
     }
@@ -176,7 +173,7 @@ bool StaticMesh::IsValid() const noexcept {
 
 void StaticMesh::OnUnload(AssetManager& manager) {
     (void)manager;
-    _renderMesh = GpuMesh{};
+    _renderData.Mesh = GpuMesh{};
 }
 
 std::string_view MeshImporter::GetTypeName() const noexcept {

@@ -93,7 +93,7 @@ DeferDestroy 缺少 IWaitFrameProcessor 时保存 payload，等设施安装并 P
 |---|---|---|
 | `ImageAsset` | CPU 像素数据 | 无 |
 | `TextureAsset` | device-local texture、默认 SRV 和子 view 缓存 | `TextureView*` |
-| `StaticMesh` | CPU mesh、sections、bounds 和 GPU mesh | `const GpuMesh&` |
+| `StaticMesh` | CPU mesh，以及共享的 `StaticMeshRenderData`（GPU mesh、sections、局部 bounds） | `const StaticMeshRenderData&`、`const GpuMesh&` |
 
 返回资产内部裸指针的 API 必须在文档和调用方中同时说明持有 `StreamingAssetRef` 的要求。
 StaticMeshComponent 保存 mesh ref，RenderSystem 中每个 SceneWriter 在 GT 为场景活跃资产持续持有类型无关的引用，

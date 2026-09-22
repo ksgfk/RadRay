@@ -505,11 +505,6 @@ public:
             return;
         }
 
-        if (_app->GetWindowManager()->ShouldExit()) {
-            _reqExit = true;
-            return;
-        }
-
         _app->GetRenderSystem()->PublishFrameGT(flightIndex);
         AppFrameContext frameCtx = gpuSystem->BeginFrameRecord(
             flightIndex,
@@ -669,7 +664,7 @@ public:
         const uint64_t frameIndex = _app->GetGpuSystem()->GetFrameIndex();
         _discardNonModalFramesBefore.store(frameIndex, std::memory_order_release);
         WaitRenderFrameComplete(frameIndex);
-        RetireRenderedFrames(false);
+        RetireRenderedFrames();
         if (auto renderedFrameCount = TickFrame(true, false)) {
             WaitRenderFrameComplete(renderedFrameCount.value());
         }
@@ -679,9 +674,10 @@ public:
         auto* windows = _app->GetWindowManager();
         if (!windows->NeedsMaintenance()) return;
         const uint64_t boundary = windows->GetOperationBoundary();
-        WaitRenderFrameComplete(_publishedFrameCount.load(std::memory_order_acquire));
-        RetireRenderedFrames(true);
+        const uint64_t published = _app->GetGpuSystem()->GetFrameIndex();
+        WaitRenderFrameComplete(published);
         _app->GetGpuSystem()->WaitAndRetireFlights();
+        _retireFrameIndex = published;
         windows->ProcessOperations(boundary);
         if (windows->ShouldExit()) _reqExit = true;
     }
@@ -737,11 +733,6 @@ public:
             return std::nullopt;
         }
 
-        if (_app->GetWindowManager()->ShouldExit()) {
-            _reqExit = true;
-            return std::nullopt;
-        }
-
         _app->GetRenderSystem()->PublishFrameGT(flightIndex);
         gpuSystem->AdvanceFrameIndex();
         _publishedFrameCount.store(frameIndex + 1, std::memory_order_release);
@@ -765,7 +756,7 @@ public:
     bool PrepareFlightSlot(bool wait) {
         RADRAY_PROFILE_SCOPE_N("WaitWritableSlot");
         auto* gpuSystem = _app->GetGpuSystem();
-        RetireRenderedFrames(false);
+        RetireRenderedFrames();
         if (gpuSystem->GetFrameIndex() - _retireFrameIndex < gpuSystem->GetFlightDataCount()) return true;
         if (!wait) return false;
         // Wait only for the oldest slot's submission, never for the newest recording.
@@ -776,12 +767,12 @@ public:
         return true;
     }
 
-    void RetireRenderedFrames(bool waitForPendingFrames) {
+    void RetireRenderedFrames() {
         auto* gpuSystem = _app->GetGpuSystem();
         const uint64_t renderedFrameCount = _renderedFrameCount.load(std::memory_order_acquire);
         while (_retireFrameIndex < renderedFrameCount) {
             const uint32_t flightIndex = static_cast<uint32_t>(_retireFrameIndex % gpuSystem->GetFlightDataCount());
-            if (!gpuSystem->CompleteFlightIfReady(flightIndex, waitForPendingFrames)) {
+            if (!gpuSystem->CompleteFlightIfReady(flightIndex, false)) {
                 break;
             }
             _retireFrameIndex++;

@@ -19,7 +19,7 @@ WorldId WorldManager::CreateWorld() {
     if (_tickEpoch == std::numeric_limits<uint64_t>::max()) RADRAY_ABORT("Tick epoch exhausted");
     auto world = _app ? make_unique<World>(_app.Get()) : make_unique<World>();
     auto* object = world.get();
-    const auto handle = _worlds.Emplace(WorldRecord{std::move(world)});
+    const auto handle = _worlds.Emplace(std::move(world));
     const WorldId id{handle.Index, handle.Generation};
     object->_manager = this;
     object->_id = id;
@@ -29,19 +29,19 @@ WorldId WorldManager::CreateWorld() {
 }
 Nullable<World*> WorldManager::GetWorld(WorldId id) noexcept {
     auto record = _worlds.TryGet({id.Index, id.Generation});
-    return record && record->Value->IsLive() ? record->Value.get() : nullptr;
+    return record && (*record)->IsLive() ? record->get() : nullptr;
 }
 Nullable<const World*> WorldManager::GetWorld(WorldId id) const noexcept {
     auto record = _worlds.TryGet({id.Index, id.Generation});
-    return record && record->Value->IsLive() ? record->Value.get() : nullptr;
+    return record && (*record)->IsLive() ? record->get() : nullptr;
 }
 LifecycleRequestResult WorldManager::DestroyWorld(WorldId id) {
     CheckCanModify();
     auto record = _worlds.TryGet({id.Index, id.Generation});
     if (!record) return LifecycleRequestResult::Invalid;
-    if (record->Value->_lifecycle == ObjectLifecycle::PendingDestroy) return LifecycleRequestResult::AlreadyPending;
-    if (!record->Value->IsLive()) return LifecycleRequestResult::Invalid;
-    record->Value->_lifecycle = ObjectLifecycle::PendingDestroy;
+    if ((*record)->_lifecycle == ObjectLifecycle::PendingDestroy) return LifecycleRequestResult::AlreadyPending;
+    if (!(*record)->IsLive()) return LifecycleRequestResult::Invalid;
+    (*record)->_lifecycle = ObjectLifecycle::PendingDestroy;
     _pendingDestroy.push_back(id);
     return LifecycleRequestResult::Accepted;
 }
@@ -63,9 +63,10 @@ void WorldManager::Tick(float deltaTime) {
     ++_tickEpoch;
     _ticking = true;
     auto guard = MakeScopeGuard([this]() noexcept { _ticking = false; });
-    // SparseSet's dense storage can move. Snapshot only identities, never records.
-    _tickWorldIds = _worldIds;
-    for (const auto id : _tickWorldIds) {
+    // Callbacks may append; deletion waits for S1. Copy each ID before calling out.
+    const size_t count = _worldIds.size();
+    for (size_t i = 0; i < count; ++i) {
+        const auto id = _worldIds[i];
         if (auto world = GetWorld(id)) world->DispatchTick(deltaTime, _tickEpoch);
     }
 }
@@ -73,22 +74,22 @@ void WorldManager::FinalizeWorldsGT() {
     CheckIdle();
     _committing = true;
     auto guard = MakeScopeGuard([this]() noexcept { _committing = false; });
-    _executingDestroy.swap(_pendingDestroy);
-    for (const auto id : _executingDestroy) {
+    for (const auto id : _pendingDestroy) {
         auto record = _worlds.TryGet({id.Index, id.Generation});
         if (!record) continue;
         if (id.Generation == std::numeric_limits<uint32_t>::max()) RADRAY_ABORT("World generation exhausted");
-        record->Value->_lifecycle = ObjectLifecycle::Destroying;
-        record->Value->_stopping = true;
-        _retiredWorlds.push_back(std::move(record->Value));
+        (*record)->_lifecycle = ObjectLifecycle::Destroying;
+        (*record)->_stopping = true;
+        _retiredWorlds.push_back(std::move(*record));
         _worlds.Destroy({id.Index, id.Generation});
     }
-    if (!_executingDestroy.empty()) {
+    if (!_pendingDestroy.empty()) {
         std::erase_if(_worldIds, [this](WorldId id) { return !_worlds.IsAlive({id.Index, id.Generation}); });
     }
-    _commitWorlds.clear();
+    // No callbacks have run yet; requests made by the following hooks stay pending.
+    _pendingDestroy.clear();
     for (const auto id : _worldIds) {
-        auto* world = _worlds.Get({id.Index, id.Generation}).Value.get();
+        auto* world = _worlds.Get({id.Index, id.Generation}).get();
         if (!world->_pending.Empty()) _commitWorlds.push_back(world);
     }
     for (const auto& world : _retiredWorlds) _commitWorlds.push_back(world.get());
@@ -97,8 +98,11 @@ void WorldManager::FinalizeWorldsGT() {
     for (auto* world : _commitWorlds) world->ExecuteLifecycle();
     for (const auto& world : _retiredWorlds) world->DisconnectNow();
     _retiredWorlds.clear();
-    _executingDestroy.clear();
     _commitWorlds.clear();
+    const auto count = _worldIds.size();
+    for (size_t i = 0; i < count; ++i) {
+        if (auto world = GetWorld(_worldIds[i])) world->DispatchTransforms(true);
+    }
 }
 void WorldManager::CollectRenderUpdates() {
     CheckIdle();
@@ -115,13 +119,12 @@ void WorldManager::Clear() {
     for (const auto id : _worldIds) DestroyWorld(id);
     FinalizeWorldsGT();
     _worlds.Clear();
-    _tickWorldIds.clear();
     _stopping = stopping;
 }
 void WorldManager::BeginStopping() {
     CheckIdle();
     _stopping = true;
-    for (const auto& record : _worlds.Values()) record.Value->_stopping = true;
+    for (const auto& world : _worlds.Values()) world->_stopping = true;
 }
 void WorldManager::Shutdown() {
     BeginStopping();

@@ -1,30 +1,33 @@
 #pragma once
 
+#include <radray/basic_math.h>
 #include <radray/runtime/render_scene/scene_id.h>
 #include <radray/runtime/render_scene/light_scene_data.h>
 #include <radray/runtime/static_mesh.h>
 
 namespace radray {
 
-/// Immutable metadata and GPU views borrowed from GT-owned scene assets.
+/// Instance binding; geometry is shared and borrowed from a GT-owned scene asset.
 struct StaticMeshDescription {
     AssetId MeshAssetId;
-    Nullable<const GpuMesh*> RenderMesh{nullptr};
-    std::span<const StaticMeshSection> Sections;
-    Eigen::Vector3f LocalBoundsMin{Eigen::Vector3f::Zero()};
-    Eigen::Vector3f LocalBoundsMax{Eigen::Vector3f::Zero()};
+    Nullable<const StaticMeshRenderData*> RenderData{nullptr};
+
+    Nullable<const GpuMesh*> GetRenderMesh() const noexcept { return RenderData ? &RenderData->Mesh : nullptr; }
+    std::span<const StaticMeshSection> GetSections() const noexcept { return RenderData ? std::span<const StaticMeshSection>{RenderData->Sections} : std::span<const StaticMeshSection>{}; }
 };
 
 struct StaticMeshStateUpdate {
     ShapeId Id;
     StaticMeshDescription Mesh{};
-    Eigen::Matrix4f LocalToWorld{Eigen::Matrix4f::Identity()};
+    AffineTransform LocalToWorld;
 };
 
 struct ShapeTransformUpdate {
     ShapeId Id;
-    Eigen::Matrix4f LocalToWorld{Eigen::Matrix4f::Identity()};
+    AffineTransform LocalToWorld;
 };
+
+static_assert(sizeof(ShapeTransformUpdate) == 56);
 
 /// Sealed on GT together with asset retirements before the runner publishes the flight to RT.
 struct SceneUpdateBatch {

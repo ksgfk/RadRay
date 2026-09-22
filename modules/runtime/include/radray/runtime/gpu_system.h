@@ -148,7 +148,6 @@ struct GpuFlightSlot {
     vector<GpuFlightAcquireRegistration> Acquisitions;
     /// BeginFrameRecord 分配；GT 匹配完成并释放 Payloads 后清零，清零前不得复用槽位。
     uint64_t FrameSerial{0};
-    bool Submitted{false};
     bool Recording{false};
     bool Rendered{true};
 

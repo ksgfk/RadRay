@@ -1,36 +1,32 @@
 #pragma once
 
-#include <radray/runtime/components/scene_component.h>
-#include <radray/runtime/render_scene/scene_writer.h>
+#include <radray/runtime/components/render_component.h>
 
 namespace radray {
 
 /// GT geometry identity; Scene owns the corresponding render-side shape state.
-class PrimitiveComponent : public SceneComponent {
+class PrimitiveComponent : public RenderComponent {
 public:
-    PrimitiveComponent() noexcept { EnableTransformRenderDirty(); }
+    PrimitiveComponent() noexcept = default;
     ~PrimitiveComponent() noexcept override;
 
     ShapeId GetShapeId() const noexcept { return _shapeId; }
 
 protected:
-    void OnTransformChanged() override;
-    virtual void CollectPrimitiveUpdates(SceneWriter& writer, RenderDirtyFlags dirty) {
+    virtual void CollectPrimitiveUpdates(ShapeCapture& writer, RenderDirtyFlags dirty) {
         (void)writer;
         (void)dirty;
     }
 
     virtual void OnRenderStateCreated() {}
     virtual void OnRenderStateDestroyed() {}
-    SceneId GetRenderSceneId() const noexcept { return _sceneId; }
 
 private:
     void CreateRenderState(SceneWriter& writer) final;
     void DestroyRenderState(SceneWriter& writer) final;
-    void CollectRenderUpdates(SceneWriter& writer, RenderDirtyFlags dirty) final;
+    void CollectRenderUpdates(SceneCapture& capture, RenderDirtyFlags dirty) final;
 
     ShapeId _shapeId;
-    SceneId _sceneId;
 };
 
 template <>

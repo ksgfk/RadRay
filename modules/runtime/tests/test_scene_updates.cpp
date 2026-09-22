@@ -2,6 +2,7 @@
 #include <gtest/gtest.h>
 
 #include <radray/runtime/components/primitive_component.h>
+#include <radray/runtime/components/static_mesh_component.h>
 #include <radray/runtime/game_framework/actor.h>
 #include <radray/runtime/game_framework/world.h>
 
@@ -25,40 +26,27 @@ private:
     vector<string>& _events;
 };
 
-class QuietSceneComponent final : public SceneComponent {
-public:
-    explicit QuietSceneComponent(uint32_t& collections) : _collections(collections) {}
-
-protected:
-    void CollectRenderUpdates(SceneWriter&, RenderDirtyFlags) override { ++_collections; }
-
-private:
-    uint32_t& _collections;
-};
-
 TEST(SceneUpdates, OrdinaryComponentsKeepTheirLifecycleWithoutAutomaticRenderUpdates) {
     vector<string> events;
-    uint32_t collections = 0;
     Application app;
     RenderSystem render{&app, 1};
     test::ScopedWorld world;
     test::ConnectWorld(world, render);
     auto* actor = world.SpawnActor();
     actor->AddComponent<LifecycleComponent>(events);
-    auto* scene = actor->AddComponent<QuietSceneComponent>(collections);
+    auto* scene = actor->AddComponent<SceneComponent>();
     scene->SetRelativeLocation({1, 2, 3});
     world.Tick(0.01f);
     SceneUpdateBatch batch;
     test::CollectScene(world, render, batch);
     EXPECT_TRUE(batch.Empty());
-    EXPECT_EQ(collections, 0u);
     world.DestroyActor(actor);
     test::CollectScene(world, render, batch);
     EXPECT_TRUE(batch.Empty());
     EXPECT_EQ(events, (vector<string>{"register", "tick", "unregister"}));
 }
 
-class RenderSceneComponent final : public SceneComponent {
+class RenderSceneComponent final : public RenderComponent {
 public:
     explicit RenderSceneComponent(vector<string>& events) : _events(events) {}
     void OnRegister() override { _events.push_back("register"); }
@@ -79,7 +67,7 @@ protected:
         _events.push_back("destroy");
     }
     void OnTransformChanged() override { MarkRenderTransformDirty(); }
-    void CollectRenderUpdates(SceneWriter&, RenderDirtyFlags dirty) override {
+    void CollectRenderUpdates(SceneCapture&, RenderDirtyFlags dirty) override {
         _events.push_back("collect");
         EXPECT_TRUE(dirty.HasFlag(RenderDirtyFlag::State));
         EXPECT_TRUE(dirty.HasFlag(RenderDirtyFlag::Transform));
@@ -117,6 +105,223 @@ struct Collection {
     Eigen::Matrix4f WorldMatrix;
 };
 
+class MultiEntrySource final : public RenderComponent {
+public:
+    ShapeId First, Second;
+    LightId Light;
+    void SetValue(float value) {
+        Value = value;
+        MarkRenderStateDirty();
+    }
+
+protected:
+    void CreateRenderState(SceneWriter& writer) override {
+        First = writer.CreateShape();
+        Second = writer.CreateShape();
+        Light = writer.CreateLight();
+        MarkRenderStateDirty();
+    }
+    void DestroyRenderState(SceneWriter& writer) override {
+        writer.RemoveShape(First);
+        writer.RemoveShape(Second);
+        writer.RemoveLight(Light);
+    }
+    void CollectRenderUpdates(SceneCapture& capture, RenderDirtyFlags) override {
+        Eigen::Matrix4f matrix = GetWorldMatrix();
+        matrix(0, 3) += Value;
+        capture.CaptureShape(First).SetStaticMesh({}, matrix);
+        matrix(0, 3) += 100;
+        capture.CaptureShape(Second).SetStaticMesh({}, matrix);
+        PointLightData light;
+        light.Common.Intensity = Value;
+        capture.SetLight(Light, light);
+    }
+
+private:
+    float Value{1};
+};
+
+TEST(SceneUpdates, OneSourceCapturesMultipleEntriesAndDirtySourcesSurviveCompaction) {
+    Application app;
+    RenderSystem renderer{&app, 1};
+    test::ScopedWorld world;
+    const auto sceneId = test::ConnectWorld(world, renderer);
+    auto* actor = world.SpawnActor();
+    auto* first = actor->AddComponent<MultiEntrySource>();
+    auto* removed = actor->AddComponent<MultiEntrySource>();
+    auto* moved = actor->AddComponent<MultiEntrySource>();
+    SceneUpdateBatch batch;
+    test::CollectScene(world, renderer, batch);
+    ASSERT_EQ(batch.MeshStates.size(), 6u);
+    first->SetValue(3);
+    moved->SetValue(7);
+    actor->RemoveComponent(removed);
+    test::CollectScene(world, renderer, batch);
+    EXPECT_EQ(batch.MeshStates.size(), 4u);
+    EXPECT_EQ(batch.RemoveShapes.size(), 2u);
+    EXPECT_EQ(batch.Lights.Count(), 2u);
+    const auto scene = renderer.GetSceneRT(sceneId);
+    EXPECT_FLOAT_EQ(scene->GetStaticMesh(first->First)->LocalToWorld(0, 3), 3);
+    EXPECT_FLOAT_EQ(scene->GetStaticMesh(moved->Second)->LocalToWorld(0, 3), 107);
+    EXPECT_FLOAT_EQ(scene->GetLight(moved->Light)->Intensity, 7);
+}
+
+TEST(SceneUpdates, RepeatedWorldCapturesAndRemovalBeforeSealKeepOnlyFinalValues) {
+    Application app;
+    RenderSystem renderer{&app, 1};
+    test::ScopedWorld world;
+    const auto sceneId = test::ConnectWorld(world, renderer);
+    auto* actor = world.SpawnActor();
+    auto* component = actor->AddComponent<StaticMeshComponent>();
+    const auto canceled = component->GetShapeId();
+    component->SetRelativeLocation({1, 0, 0});
+    world.FinalizeWorldGT();
+    world.CollectRenderUpdates();
+    component->SetRelativeLocation({2, 0, 0});
+    world.FinalizeWorldGT();
+    world.CollectRenderUpdates();
+    actor->RemoveComponent(component);
+    world.FinalizeWorldGT();
+    component = actor->AddComponent<StaticMeshComponent>();
+    EXPECT_EQ(component->GetShapeId().Index, canceled.Index);
+    EXPECT_GT(component->GetShapeId().Generation, canceled.Generation);
+    component->SetRelativeLocation({3, 0, 0});
+    test::PrepareScene(world, renderer, 0);
+    const auto& first = test::SceneBatch(renderer, sceneId, 0);
+    ASSERT_EQ(first.CreateShapes.size(), 1u);
+    ASSERT_EQ(first.MeshStates.size(), 1u);
+    EXPECT_TRUE(first.RemoveShapes.empty());
+    EXPECT_TRUE(first.Transforms.empty());
+    EXPECT_FLOAT_EQ(first.MeshStates[0].LocalToWorld(0, 3), 3);
+    test::ConsumeFrame(renderer, 0);
+    test::CompleteFrame(renderer, 0);
+
+    component->SetRelativeLocation({4, 0, 0});
+    world.FinalizeWorldGT();
+    world.CollectRenderUpdates();
+    component->SetRelativeLocation({5, 0, 0});
+    component->MarkRenderStateDirty();
+    world.FinalizeWorldGT();
+    world.CollectRenderUpdates();
+    component->SetRelativeLocation({6, 0, 0});
+    test::PrepareScene(world, renderer, 0);
+    const auto& second = test::SceneBatch(renderer, sceneId, 0);
+    EXPECT_TRUE(second.CreateShapes.empty());
+    EXPECT_TRUE(second.Transforms.empty());
+    ASSERT_EQ(second.MeshStates.size(), 1u);
+    EXPECT_FLOAT_EQ(second.MeshStates[0].LocalToWorld(0, 3), 6);
+    test::ConsumeFrame(renderer, 0);
+    EXPECT_FLOAT_EQ(renderer.GetSceneRT(sceneId)->GetStaticMesh(component->GetShapeId())->LocalToWorld(0, 3), 6);
+    test::CompleteFrame(renderer, 0);
+}
+
+TEST(SceneUpdates, IndexedLightRowsSurviveTypeChangesSwapRemovalAndSlotReuse) {
+    Application app;
+    RenderSystem renderer{&app, 2};
+    const auto sceneId = renderer.CreateSceneGT();
+    auto writer = renderer.GetSceneWriterGT(sceneId);
+    vector<LightId> ids;
+    LightSceneData expected;
+    for (size_t i = 0; i < 96; ++i) ids.push_back(writer->CreateLight());
+    uint32_t random = 193;
+    for (uint32_t round = 0; round < 32; ++round) {
+        for (uint32_t change = 0; change < 31; ++change) {
+            random = random * 1664525u + 1013904223u;
+            auto& id = ids[(random >> 8) % ids.size()];
+            if ((random & 7) == 0) {
+                expected.Remove(id);
+                writer->RemoveLight(id);
+                id = writer->CreateLight();
+            } else {
+                LightCommonData common;
+                common.Intensity = float(round * 31 + change);
+                LightData value;
+                switch ((random >> 16) % 4) {
+                    case 0: value = DirectionalLightData{common}; break;
+                    case 1: value = PointLightData{common}; break;
+                    case 2: value = SpotLightData{common}; break;
+                    default: value = RectLightData{common}; break;
+                }
+                expected.Set(id, value);
+                writer->SetLight(id, value);
+            }
+        }
+        const auto flight = round % 2;
+        renderer.SealFrameGT(flight);
+        test::ConsumeFrame(renderer, flight);
+        const auto& actual = renderer.GetSceneRT(sceneId)->GetLights();
+        EXPECT_EQ(actual.Count(), expected.Count());
+        for (const auto id : ids) {
+            const auto target = expected.GetLight(id);
+            const auto light = actual.GetLight(id);
+            ASSERT_EQ(bool(light), bool(target));
+            if (light) EXPECT_FLOAT_EQ(light->Intensity, target->Intensity);
+            EXPECT_EQ(bool(actual.GetDirectionalLight(id)), bool(expected.GetDirectionalLight(id)));
+            EXPECT_EQ(bool(actual.GetPointLight(id)), bool(expected.GetPointLight(id)));
+            EXPECT_EQ(bool(actual.GetSpotLight(id)), bool(expected.GetSpotLight(id)));
+            EXPECT_EQ(bool(actual.GetRectLight(id)), bool(expected.GetRectLight(id)));
+        }
+        test::CompleteFrame(renderer, flight);
+    }
+}
+
+TEST(SceneUpdates, WriterLightSnapshotsSurviveTypeChangesRemovalAndIdentityReuse) {
+    Application app;
+    RenderSystem renderer{&app, 3};
+    const auto sceneId = renderer.CreateSceneGT();
+    auto writer = renderer.GetSceneWriterGT(sceneId);
+    const auto original = writer->CreateLight();
+    DirectionalLightData directional;
+    directional.Common.Intensity = 10;
+    writer->SetLight(original, directional);
+    renderer.SealFrameGT(0);
+
+    PointLightData point;
+    point.Common.Intensity = 20;
+    writer->SetLight(original, point);
+    renderer.SealFrameGT(1);
+
+    writer->RemoveLight(original);
+    const auto replacement = writer->CreateLight();
+    EXPECT_EQ(replacement.Index, original.Index);
+    EXPECT_GT(replacement.Generation, original.Generation);
+    SpotLightData spot;
+    spot.Common.Intensity = 30;
+    writer->SetLight(replacement, spot);
+    renderer.SealFrameGT(2);
+
+    const auto& first = test::SceneBatch(renderer, sceneId, 0);
+    EXPECT_TRUE(first.LightsChanged);
+    ASSERT_EQ(first.Lights.DirectionalLights.Size(), 1u);
+    EXPECT_FLOAT_EQ(first.Lights.GetDirectionalLight(original)->Common.Intensity, 10);
+    EXPECT_FLOAT_EQ(test::SceneBatch(renderer, sceneId, 1).Lights.GetPointLight(original)->Common.Intensity, 20);
+    for (uint32_t flight = 0; flight < 3; ++flight) {
+        test::ConsumeFrame(renderer, flight);
+        const auto scene = renderer.GetSceneRT(sceneId);
+        ASSERT_EQ(scene->GetLights().Count(), 1u);
+        const auto id = flight == 2 ? replacement : original;
+        EXPECT_FLOAT_EQ(scene->GetLight(id)->Intensity, static_cast<float>((flight + 1) * 10));
+        if (flight == 2) EXPECT_FALSE(scene->ContainsLight(original));
+        test::CompleteFrame(renderer, flight);
+    }
+
+    writer->RemoveLight(replacement);
+    renderer.SealFrameGT(0);
+    EXPECT_TRUE(test::SceneBatch(renderer, sceneId, 0).LightsChanged);
+    EXPECT_TRUE(test::SceneBatch(renderer, sceneId, 0).Lights.Empty());
+    test::ConsumeFrame(renderer, 0);
+    EXPECT_TRUE(renderer.GetSceneRT(sceneId)->GetLights().Empty());
+    test::CompleteFrame(renderer, 0);
+
+    const auto reserved = writer->CreateLight();
+    writer->RemoveLight(reserved);
+    renderer.SealFrameGT(1);
+    EXPECT_TRUE(test::SceneBatch(renderer, sceneId, 1).Empty());
+    test::ConsumeFrame(renderer, 1);
+    EXPECT_TRUE(renderer.GetSceneRT(sceneId)->GetLights().Empty());
+    test::CompleteFrame(renderer, 1);
+}
+
 class ProbePrimitive final : public PrimitiveComponent {
 public:
     explicit ProbePrimitive(vector<Collection>& collected) : _collected(collected) {}
@@ -137,7 +342,7 @@ public:
     }
 
 protected:
-    void CollectPrimitiveUpdates(SceneWriter&, RenderDirtyFlags dirty) override {
+    void CollectPrimitiveUpdates(ShapeCapture&, RenderDirtyFlags dirty) override {
         _collected.push_back({GetShapeId(), dirty, GetWorldMatrix()});
     }
 
@@ -436,7 +641,7 @@ public:
     explicit MutatingPrimitive(Action action) : _action(action) {}
 
 protected:
-    void CollectPrimitiveUpdates(SceneWriter&, RenderDirtyFlags) override {
+    void CollectPrimitiveUpdates(ShapeCapture&, RenderDirtyFlags) override {
         switch (_action) {
             case Action::Mark: MarkRenderStateDirty(); break;
             case Action::Transform: SetRelativeLocation({1, 0, 0}); break;

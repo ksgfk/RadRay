@@ -42,11 +42,11 @@ task<void> StaticMeshComponent::WaitForMeshReady(StreamingAssetRef<StaticMesh> m
     }
 }
 
-void StaticMeshComponent::CollectPrimitiveUpdates(SceneWriter& writer, RenderDirtyFlags dirty) {
+void StaticMeshComponent::CollectPrimitiveUpdates(ShapeCapture& capture, RenderDirtyFlags dirty) {
     if (dirty.HasFlag(RenderDirtyFlag::State)) {
-        writer.SetStaticMesh(GetShapeId(), _mesh, GetWorldMatrix());
+        capture.SetStaticMesh(_mesh, GetWorldTransform());
     } else if (dirty.HasFlag(RenderDirtyFlag::Transform)) {
-        writer.SetTransform(GetShapeId(), GetWorldMatrix());
+        capture.SetTransform(GetWorldTransform());
     }
 }
 

@@ -1,6 +1,6 @@
 #pragma once
 
-#include <radray/runtime/components/scene_component.h>
+#include <radray/runtime/components/render_component.h>
 #include <radray/runtime/render_scene/scene_writer.h>
 
 namespace radray {
@@ -18,26 +18,24 @@ public:
 
     void Initialize();
     void Disconnect();
-    void Create(SceneComponent& component);
-    void Destroy(SceneComponent& component);
-    void Queue(SceneComponent& component, RenderDirtyFlag flag);
+    void Create(RenderComponent& component);
+    void Destroy(RenderComponent& component);
+    void Queue(RenderComponent& component, RenderDirtyFlag flag);
     void Collect();
-    void CheckCanModify() const noexcept;
     SceneId GetSceneId() const noexcept { return _writer.GetSceneId(); }
+    RenderSystem* GetRenderer() const noexcept { return &_renderer; }
     RenderConnectionState GetState() const noexcept { return _state; }
 
 private:
-    /// Collect 前按地址排序 dirty 队列的最小尺寸：低于此值工作集仍在缓存内，排序是纯成本。
-    /// 约 16k 个组件超出典型 LLC；顺序处理把对组件与 writer 热状态的随机访问变成连续访问。
     static constexpr size_t kCollectSortThreshold = 16384;
-
-    void Remove(SceneComponent& component) noexcept;
+    static constexpr uint32_t kNotQueued = std::numeric_limits<uint32_t>::max();
+    void RemoveUpdate(RenderComponent& component) noexcept;
 
     World& _world;
     RenderSystem& _renderer;
     SceneWriter& _writer;
-    vector<SceneComponent*> _updates;
-    bool _collecting{false};
+    vector<RenderComponent*> _sources;
+    vector<RenderComponent*> _updates;
     RenderConnectionState _state{RenderConnectionState::Connecting};
 };
 

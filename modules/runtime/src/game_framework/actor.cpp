@@ -1,4 +1,5 @@
 #include <radray/runtime/game_framework/actor.h>
+#include <radray/runtime/components/render_component.h>
 
 #include <algorithm>
 
@@ -67,7 +68,7 @@ LifecycleRequestResult Actor::RemoveComponent(ActorComponent* component) {
     } else {
         // Unregistered drafts have no user lifecycle to dispatch.
         if (_rootComponent.Get() == component) _rootComponent = nullptr;
-        if (auto scene = dynamic_cast<SceneComponent*>(component)) scene->UnlinkHierarchy(nullptr);
+        if (auto scene = dynamic_cast<SceneComponent*>(component)) scene->UnlinkHierarchy();
         const auto id = component->_id;
         if (id.Generation == std::numeric_limits<uint32_t>::max()) RADRAY_ABORT("Component generation exhausted");
         _componentIds.Destroy({id.Index, id.Generation});
@@ -129,25 +130,28 @@ void Actor::DispatchTick(float deltaTime, uint64_t epoch) {
 void Actor::RegisterComponent(ActorComponent& component) {
     if (!IsLive() || !component.IsLive() || component._registration != ComponentRegistration::Unregistered) return;
     if (_world->GetCurrentTickEpoch() == std::numeric_limits<uint64_t>::max()) RADRAY_ABORT("Tick epoch exhausted");
-    component._world = _world;
     component._firstTickEpoch = _world->GetCurrentTickEpoch() + 1;
     component._registration = ComponentRegistration::Registering;
     _world->BeginCallback();
     auto guard = MakeScopeGuard([this]() noexcept { _world->EndCallback(); });
-    if (auto scene = dynamic_cast<SceneComponent*>(&component)) _world->CreateComponentRenderState(*scene);
+    if (auto source = dynamic_cast<RenderComponent*>(&component)) _world->CreateComponentRenderState(*source);
     component.OnRegister();
     component._registration = ComponentRegistration::Registered;
     if (component._tickEnabled) NoteTickingComponent(1);
 }
 
 void Actor::UnregisterComponent(ActorComponent& component) {
-    if (component._registration == ComponentRegistration::Unregistered) return;
+    if (auto scene = dynamic_cast<SceneComponent*>(&component)) _world->RemoveTransform(*scene);
+    if (component._registration == ComponentRegistration::Unregistered) {
+        component._world = nullptr;
+        return;
+    }
     if (component._registration != ComponentRegistration::Registered) RADRAY_ABORT("Reentrant component unregistration");
     if (component._tickEnabled) NoteTickingComponent(-1);
     component._registration = ComponentRegistration::Unregistering;
     _world->BeginCallback();
     auto guard = MakeScopeGuard([this]() noexcept { _world->EndCallback(); });
-    if (auto scene = dynamic_cast<SceneComponent*>(&component)) _world->DestroyComponentRenderState(*scene);
+    if (auto source = dynamic_cast<RenderComponent*>(&component)) _world->DestroyComponentRenderState(*source);
     component.OnUnregister();
     component._registration = ComponentRegistration::Unregistered;
     component._world = nullptr;
@@ -157,14 +161,8 @@ void Actor::RegisterAllComponents() {
     const size_t count = _ownedComponents.size();
     for (size_t i = 0; i < count && IsLive(); ++i) {
         auto* component = _ownedComponents[i].get();
-        component->_id.Actor = _id;
         RegisterComponent(*component);
     }
-}
-
-void Actor::UnregisterAllComponents() {
-    const size_t count = _ownedComponents.size();
-    for (size_t i = count; i > 0; --i) UnregisterComponent(*_ownedComponents[i - 1]);
 }
 
 void Actor::PrepareComponentDestruction(std::span<const ComponentId> ids, vector<unique_ptr<ActorComponent>>& retired) {
@@ -188,9 +186,7 @@ void Actor::PrepareComponentTeardown() noexcept {
 }
 
 void Actor::Teardown() {
-    _lifecycle = ObjectLifecycle::Destroying;
-    PrepareComponentTeardown();
-    UnregisterAllComponents();
+    for (size_t i = _ownedComponents.size(); i > 0; --i) UnregisterComponent(*_ownedComponents[i - 1]);
     if (_spawned) {
         _spawned = false;
         _world->BeginCallback();

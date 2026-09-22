@@ -1,6 +1,7 @@
 #pragma once
 
 #include <variant>
+#include <type_traits>
 
 #include <Eigen/Core>
 
@@ -81,6 +82,20 @@ struct LightSceneData {
     LightTable<PointLightData> PointLights;
     LightTable<SpotLightData> SpotLights;
     LightTable<RectLightData> RectLights;
+
+    template <class T>
+    LightTable<T>& GetTable() noexcept {
+        if constexpr (std::is_same_v<T, DirectionalLightData>)
+            return DirectionalLights;
+        else if constexpr (std::is_same_v<T, PointLightData>)
+            return PointLights;
+        else if constexpr (std::is_same_v<T, SpotLightData>)
+            return SpotLights;
+        else {
+            static_assert(std::is_same_v<T, RectLightData>);
+            return RectLights;
+        }
+    }
 
     void Clear() noexcept;
     size_t Count() const noexcept { return DirectionalLights.Size() + PointLights.Size() + SpotLights.Size() + RectLights.Size(); }

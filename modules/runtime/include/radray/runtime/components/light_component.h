@@ -1,14 +1,14 @@
 #pragma once
 
-#include <radray/runtime/components/scene_component.h>
+#include <radray/runtime/components/render_component.h>
 #include <radray/runtime/render_scene/light_scene_data.h>
 #include <radray/types.h>
 
 namespace radray {
 
-class LightComponent : public SceneComponent {
+class LightComponent : public RenderComponent {
 public:
-    LightComponent() noexcept { EnableTransformRenderDirty(); }
+    LightComponent() noexcept = default;
     ~LightComponent() noexcept override;
 
     virtual LightType GetLightType() const noexcept { return LightType::Point; }
@@ -32,7 +32,7 @@ public:
 protected:
     void CreateRenderState(SceneWriter& writer) override;
     void DestroyRenderState(SceneWriter& writer) override;
-    void CollectRenderUpdates(SceneWriter& writer, RenderDirtyFlags dirty) override;
+    void CollectRenderUpdates(SceneCapture& capture, RenderDirtyFlags dirty) override;
     /// Type-independent parameters; each leaf builds its own typed record around these.
     LightCommonData CaptureCommon() const noexcept;
     virtual LightData CaptureLightState() const noexcept;

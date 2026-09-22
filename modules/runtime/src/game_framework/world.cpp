@@ -53,7 +53,10 @@ Actor* World::SpawnActor(unique_ptr<Actor> actor) {
     raw->_firstTickEpoch = GetCurrentTickEpoch() + 1;
     raw->_world = this;
     _actors.push_back(std::move(actor));
-    for (const auto& component : raw->_ownedComponents) component->_id.Actor = raw->_id;
+    for (const auto& component : raw->_ownedComponents) {
+        component->_id.Actor = raw->_id;
+        component->_world = this;
+    }
     BeginCallback();
     auto guard = MakeScopeGuard([this]() noexcept { EndCallback(); });
     raw->RegisterAllComponents();
@@ -141,6 +144,7 @@ void World::PrepareLifecycle() {
             const auto id = owner->GetId();
             if (id.Generation == std::numeric_limits<uint32_t>::max()) RADRAY_ABORT("Actor generation exhausted");
             _actorIds.Destroy({id.Index, id.Generation});
+            owner->PrepareComponentTeardown();
             _retiredActors.push_back(std::move(owner));
             return true;
         });
@@ -157,24 +161,17 @@ void World::PrepareLifecycle() {
         first = end;
     }
     for (const auto& actor : _retiredActors) {
-        actor->PrepareComponentTeardown();
-    }
-    for (const auto& actor : _retiredActors) {
         for (const auto& component : actor->GetOwnedComponents()) {
-            if (auto scene = dynamic_cast<SceneComponent*>(component.get())) scene->UnlinkHierarchy(&_detachedChildren);
+            if (auto scene = dynamic_cast<SceneComponent*>(component.get())) scene->UnlinkHierarchy();
         }
     }
     for (const auto& component : _retiredComponents) {
-        if (auto scene = dynamic_cast<SceneComponent*>(component.get())) scene->UnlinkHierarchy(&_detachedChildren);
+        if (auto scene = dynamic_cast<SceneComponent*>(component.get())) scene->UnlinkHierarchy();
     }
 }
 
 void World::ExecuteLifecycle() {
     RADRAY_PROFILE_SCOPE_N("World::ExecuteLifecycle");
-    for (auto* child : _detachedChildren) {
-        if (child->IsLive()) child->NotifyTransformChanged();
-    }
-    _detachedChildren.clear();
     for (size_t i = _retiredComponents.size(); i > 0; --i) {
         auto& component = *_retiredComponents[i - 1];
         component._owner->UnregisterComponent(component);
@@ -198,10 +195,9 @@ void World::ExecuteLifecycle() {
     }
     if (_executing.Connection && IsLive() && !_stopping) {
         const auto request = *_executing.Connection;
-        if (request.Reconnect || request.Target != _renderer) {
+        if (request.Reconnect || request.Target.Get() != (_renderBridge ? _renderBridge->GetRenderer() : nullptr)) {
             DisconnectNow();
             if (request.Target && IsLive()) {
-                _renderer = request.Target;
                 _renderBridge = make_unique<WorldRenderBridge>(*this, *request.Target.Get());
                 _renderBridge->Initialize();
             }
@@ -219,6 +215,7 @@ void World::FinalizeWorldGT() {
     FreezeLifecycle();
     PrepareLifecycle();
     ExecuteLifecycle();
+    DispatchTransforms(true);
 }
 
 void World::Teardown() {
@@ -253,7 +250,8 @@ LifecycleRequestResult World::RequestReconnect() {
     return LifecycleRequestResult::Accepted;
 }
 Nullable<RenderSystem*> World::GetRequestedRenderConnection() const noexcept {
-    return _pending.Connection ? _pending.Connection->Target : _renderer;
+    if (_pending.Connection) return _pending.Connection->Target;
+    return _renderBridge ? _renderBridge->GetRenderer() : nullptr;
 }
 RenderConnectionState World::GetRenderConnectionState() const noexcept {
     return _renderBridge ? _renderBridge->GetState() : RenderConnectionState::Disconnected;
@@ -263,7 +261,6 @@ void World::DisconnectNow() {
         _renderBridge->Disconnect();
         _renderBridge.reset();
     }
-    _renderer = nullptr;
 }
 std::optional<SceneId> World::GetRenderSceneId() const noexcept {
     return _renderBridge ? std::optional{_renderBridge->GetSceneId()} : std::nullopt;
@@ -281,6 +278,7 @@ LifecycleRequestResult World::QueueReparent(SceneComponent& child, Nullable<Scen
 
 void World::Collect() {
     RADRAY_PROFILE_SCOPE_N("World::Collect");
+    DispatchTransforms(false);
     _collecting = true;
     auto guard = MakeScopeGuard([this]() noexcept { _collecting = false; });
     if (_renderBridge) _renderBridge->Collect();
@@ -289,17 +287,62 @@ void World::CollectRenderUpdates() {
     CheckDriverIdle();
     Collect();
 }
-void World::CreateComponentRenderState(SceneComponent& component) {
+
+void World::QueueTransform(SceneComponent& component) {
+    if (_transformRevision == std::numeric_limits<uint64_t>::max()) RADRAY_ABORT("Transform revision exhausted");
+    ++_transformRevision;
+    const auto life = component.GetLifecycle();
+    if ((life != ObjectLifecycle::Live && life != ObjectLifecycle::Initializing) || component._transformQueueIndex != std::numeric_limits<uint32_t>::max()) return;
+    if (_transformChanges.size() == std::numeric_limits<uint32_t>::max()) RADRAY_ABORT("Too many transform changes");
+    component._transformQueueIndex = static_cast<uint32_t>(_transformChanges.size());
+    _transformChanges.push_back(&component);
+}
+
+void World::RemoveTransform(SceneComponent& component) noexcept {
+    const auto index = component._transformQueueIndex;
+    if (index == std::numeric_limits<uint32_t>::max()) return;
+    auto* moved = _transformChanges.back();
+    _transformChanges[index] = moved;
+    moved->_transformQueueIndex = index;
+    _transformChanges.pop_back();
+    component._transformQueueIndex = std::numeric_limits<uint32_t>::max();
+}
+
+void World::DispatchTransforms(bool notify) {
+    if (_transformChanges.empty()) return;
+    RADRAY_PROFILE_SCOPE_N("World::DispatchTransforms");
+    const bool renderDirty = _renderTransformRevision != _transformRevision;
+    _renderTransformRevision = _transformRevision;
+    for (auto* node : _transformChanges) {
+        if (!node->IsLive()) continue;
+        auto parent = node->_parent;
+        while (parent && (parent->_transformQueueIndex == std::numeric_limits<uint32_t>::max() || !parent->IsLive())) parent = parent->_parent;
+        if (!parent) _transformRoots.push_back(node);
+    }
+    if (notify) {
+        for (auto* node : _transformChanges) node->_transformQueueIndex = std::numeric_limits<uint32_t>::max();
+        _transformChanges.clear();
+    }
+    BeginCallback();
+    auto guard = MakeScopeGuard([this]() noexcept { EndCallback(); });
+    while (!_transformRoots.empty()) {
+        auto* node = _transformRoots.back();
+        _transformRoots.pop_back();
+        if (!node->IsLive()) continue;
+        const auto count = node->_children.size();
+        node->NotifyWorldTransformChanged(notify, renderDirty);
+        if (count != 0 && node->IsLive()) {
+            for (size_t i = count; i > 0; --i) _transformRoots.push_back(node->_children[i - 1]);
+        }
+    }
+}
+void World::CreateComponentRenderState(RenderComponent& component) {
     if (_renderBridge) _renderBridge->Create(component);
 }
-void World::DestroyComponentRenderState(SceneComponent& component) {
+void World::DestroyComponentRenderState(RenderComponent& component) {
     if (_renderBridge) _renderBridge->Destroy(component);
 }
-void World::QueueRenderUpdate(SceneComponent& component, RenderDirtyFlag flag) {
-    CheckCanModify();
-    EnqueueRenderDirty(component, flag);
-}
-void World::EnqueueRenderDirty(SceneComponent& component, RenderDirtyFlag flag) {
+void World::EnqueueRenderDirty(RenderComponent& component, RenderDirtyFlag flag) {
     if (_renderBridge) _renderBridge->Queue(component, flag);
 }
 

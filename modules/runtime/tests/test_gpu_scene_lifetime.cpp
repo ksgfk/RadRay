@@ -166,7 +166,7 @@ float4 PSMain() : SV_Target0 { return float4(1, 0, 1, 1); }
         auto frame = gpu.BeginFrameRecord(0, {}, {}, false);
         drawSerial = frame.FrameSerial();
         renderer.ConsumeRenderUpdates(0, drawSerial);
-        const auto* geometryView = direct ? borrowedMesh : renderer.GetSceneRT(sceneId)->GetStaticMesh(id)->Mesh.RenderMesh.Get();
+        const auto* geometryView = direct ? borrowedMesh : renderer.GetSceneRT(sceneId)->GetStaticMesh(id)->Mesh.GetRenderMesh().Get();
         if (delayed) {
             render::Fence* fences[]{gate.get()};
             uint64_t values[]{1};

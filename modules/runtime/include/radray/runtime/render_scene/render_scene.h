@@ -10,7 +10,7 @@
 #include <radray/types.h>
 #include <radray/runtime/static_mesh.h>
 #include <radray/runtime/render_scene/scene_update.h>
-#include <radray/runtime/render_scene/static_mesh_proxy.h>
+#include <radray/runtime/render_scene/static_mesh_table.h>
 
 namespace radray {
 
@@ -50,7 +50,9 @@ public:
     Nullable<const LightCommonData*> GetLight(LightId id) const noexcept { return _lights.GetLight(id); }
     const LightSceneData& GetLights() const noexcept { return _lights; }
     /// Dense registered mesh identities, including meshes whose geometry is not ready.
-    std::span<const ShapeId> GetStaticMeshes() const noexcept { return _staticMeshes; }
+    std::span<const ShapeId> GetStaticMeshes() const noexcept { return _staticMeshes.GetColumns().Ids; }
+    /// Dense column access for culling and drawing without identity lookups. Same borrow lifetime as GetStaticMesh.
+    StaticMeshSceneColumns GetStaticMeshColumns() const noexcept { return _staticMeshes.GetColumns(); }
 
 private:
     static constexpr uint32_t kNoMesh = std::numeric_limits<uint32_t>::max();
@@ -60,14 +62,12 @@ private:
     struct ShapeSlot {
         // Live identity, or the minimum generation accepted by the next creation.
         uint32_t Generation{0};
-        // Position in _staticMeshes / _staticMeshProxies, or kNoMesh when no geometry is registered.
+        // Dense table row, or kNoMesh when no geometry is registered.
         uint32_t MeshIndex{kNoMesh};
         bool Alive{false};
     };
     vector<ShapeSlot> _shapes;
-    /// Parallel dense arrays: _staticMeshes[i] owns _staticMeshProxies[i]. Removal swaps in the last entry.
-    vector<ShapeId> _staticMeshes;
-    vector<StaticMeshProxy> _staticMeshProxies;
+    StaticMeshTable _staticMeshes;
     LightSceneData _lights;
     mutable std::mutex _readers;
     mutable std::condition_variable _readersDone;

@@ -48,12 +48,12 @@ protected:
         PrimitiveComponent::OnRenderStateDestroyed();
         if (DestroyRender) DestroyRender(*this);
     }
-    void CollectPrimitiveUpdates(SceneWriter& writer, RenderDirtyFlags dirty) override {
+    void CollectPrimitiveUpdates(ShapeCapture& writer, RenderDirtyFlags dirty) override {
         ++Trace.Gathered;
         if (dirty.HasFlag(RenderDirtyFlag::State))
-            writer.SetStaticMesh(GetShapeId(), {}, GetWorldMatrix());
+            writer.SetStaticMesh({}, GetWorldMatrix());
         else if (dirty.HasFlag(RenderDirtyFlag::Transform))
-            writer.SetTransform(GetShapeId(), GetWorldMatrix());
+            writer.SetTransform(GetWorldMatrix());
     }
     void OnTransformChanged() override {
         ++Trace.TransformNotified;
@@ -348,6 +348,7 @@ TEST(WorldLifecycle, InitialParentIsVisibleDuringRegistrationAndAppendSafeDuring
         for (int i = 0; i < 128; ++i) actor->AddSceneComponent<LifecycleProbe>(parent, AttachmentRule::KeepLocal, trace);
     };
     parent->SetRelativeLocation({3, 0, 0});
+    world.FinalizeWorldGT();
     EXPECT_EQ(parent->GetAttachChildren().size(), 129u);
     for (auto* value : parent->GetAttachChildren()) EXPECT_FLOAT_EQ(value->GetWorldLocation().x(), 3);
 }
@@ -399,7 +400,9 @@ TEST(WorldLifecycle, ConnectingCallbacksAppendExactlyOnceAndRequestNextBatchDisc
     auto* first = actor->AddComponent<LifecycleProbe>(trace);
     first->CreateRender = [&](auto&) {
         EXPECT_EQ(world.GetRenderConnectionState(), RenderConnectionState::Connecting);
+        EXPECT_EQ(world.GetRequestedRenderConnection().Get(), &render);
         world.RequestRenderConnection(nullptr);
+        EXPECT_FALSE(world.GetRequestedRenderConnection());
         for (int i = 0; i < 64; ++i) world.SpawnActor()->AddComponent<LifecycleProbe>(trace);
         for (int i = 0; i < 64; ++i) actor->AddComponent<LifecycleProbe>(trace);
     };
@@ -422,6 +425,7 @@ TEST(WorldLifecycle, DisconnectCallbacksCanCreateButCannotRejoinTheDyingScene) {
     first->DestroyRender = [&](auto&) {
         if (world.GetLifecycle() != ObjectLifecycle::Live) return;
         EXPECT_EQ(world.GetRenderConnectionState(), RenderConnectionState::Disconnecting);
+        EXPECT_EQ(world.GetRequestedRenderConnection().Get(), &render);
         world.SpawnActor()->AddComponent<LifecycleProbe>(added);
         world.RequestRenderConnection(&render);
     };
@@ -430,6 +434,7 @@ TEST(WorldLifecycle, DisconnectCallbacksCanCreateButCannotRejoinTheDyingScene) {
     EXPECT_EQ(added.Registered, 1u);
     EXPECT_EQ(added.CreatedRender, 0u);
     EXPECT_FALSE(world.GetRenderSceneId());
+    EXPECT_EQ(world.GetRequestedRenderConnection().Get(), &render);
     world.FinalizeWorldGT();
     EXPECT_EQ(added.CreatedRender, 1u);
     EXPECT_NE(*world.GetRenderSceneId(), previous);
@@ -535,7 +540,7 @@ TEST(WorldLifecycle, LightUsesOneTypedUpdateAndNoMeshState) {
 class IllegalCollect final : public PrimitiveComponent {
 public:
     std::function<void()> SideEffect;
-    void CollectPrimitiveUpdates(SceneWriter&, RenderDirtyFlags) override { SideEffect(); }
+    void CollectPrimitiveUpdates(ShapeCapture&, RenderDirtyFlags) override { SideEffect(); }
 };
 TEST(WorldLifecycleDeathTest, CollectionRejectsFlushAndSchedulerSideEffects) {
     Application app;
@@ -552,6 +557,10 @@ TEST(WorldLifecycleDeathTest, CollectionRejectsFlushAndSchedulerSideEffects) {
     component->SideEffect = [&] { world.DestroyActor(component->GetOwner().Get()); };
     EXPECT_DEATH(world.CollectRenderUpdates(), "");
     component->SideEffect = [&] { component->SetRelativeLocation({1, 0, 0}); };
+    EXPECT_DEATH(world.CollectRenderUpdates(), "");
+    component->SideEffect = [&] { component->MarkRenderStateDirty(); };
+    EXPECT_DEATH(world.CollectRenderUpdates(), "");
+    component->SideEffect = [&] { world.CollectRenderUpdates(); };
     EXPECT_DEATH(world.CollectRenderUpdates(), "");
 }
 
@@ -765,12 +774,170 @@ TEST(WorldLifecycle, DeepHierarchyKeepsImmediateValuesAndSeparatesNotificationFr
         root->SetRelativeLocation({float(i), 0, 0});
         EXPECT_FLOAT_EQ(leaf->GetWorldMatrix()(0, 3), float(i));
     }
-    EXPECT_EQ(trace.TransformNotified - notificationsBefore, 25600u);
+    EXPECT_EQ(trace.TransformNotified, notificationsBefore);
     EXPECT_EQ(trace.Gathered, gatheredBefore);
     test::PrepareScene(world, renderer, 0);
+    EXPECT_EQ(trace.TransformNotified - notificationsBefore, 256u);
     EXPECT_EQ(trace.Gathered - gatheredBefore, 256u);
     EXPECT_EQ(test::SceneBatch(renderer, scene, 0).Transforms.size(), 256u);
     EXPECT_TRUE(test::SceneBatch(renderer, scene, 0).MeshStates.empty());
+}
+
+TEST(WorldLifecycle, MatrixCacheAndPackedDeliveryPreserveAffineHierarchyAndSnapshots) {
+    Application app;
+    RenderSystem renderer{&app, 1};
+    test::ScopedWorld world;
+    const auto scene = test::ConnectWorld(world, renderer);
+    auto* actor = world.SpawnActor();
+    auto* root = actor->AddComponent<SceneComponent>();
+    auto* child = actor->AddSceneComponent<SceneComponent>(root, AttachmentRule::KeepLocal);
+    auto* leaf = actor->AddSceneComponent<StaticMeshComponent>(child, AttachmentRule::KeepLocal);
+    root->SetRelativeRotation(Eigen::Quaternionf{Eigen::AngleAxisf{0.3f, Eigen::Vector3f::UnitY()}});
+    root->SetRelativeScale({-2, 3, 0.5f});
+    child->SetRelativeRotation(Eigen::Quaternionf{Eigen::AngleAxisf{0.7f, Eigen::Vector3f::UnitZ()}});
+    child->SetRelativeLocation({1, -2, 3});
+    leaf->SetRelativeLocation({4, 5, -6});
+    leaf->SetRelativeScale({1, 2, 1});
+    const auto referenceLocal = [](const SceneComponent& component) -> Eigen::Matrix4f {
+        return (Eigen::Translation3f{component.GetRelativeLocation()} * component.GetRelativeRotation() * Eigen::Scaling(component.GetRelativeScale())).matrix();
+    };
+    const auto reference = [&]() -> Eigen::Matrix4f {
+        return referenceLocal(*root) * referenceLocal(*child) * referenceLocal(*leaf);
+    };
+    const Eigen::Matrix4f initial = reference();
+    const auto snapshot = leaf->GetWorldMatrix();
+    EXPECT_TRUE(snapshot.isApprox(initial, 1e-5f));
+    SceneUpdateBatch batch;
+    test::CollectScene(world, renderer, batch);
+    for (int i = 1; i <= 4; ++i) {
+        root->SetRelativeLocation({float(i), float(-i), float(2 * i)});
+        if (i == 4) leaf->SetRelativeScale({0, 2, -1});
+        const Eigen::Matrix4f expected = reference();
+        const Eigen::Matrix4f& cached = leaf->GetWorldTransform();
+        EXPECT_TRUE(cached.isApprox(expected, 1e-5f));
+        EXPECT_TRUE(leaf->GetWorldLocation().isApprox(expected.block<3, 1>(0, 3), 1e-5f));
+        EXPECT_TRUE(snapshot.isApprox(initial, 1e-5f));
+        test::CollectScene(world, renderer, batch);
+        ASSERT_EQ(batch.Transforms.size(), 1u);
+        EXPECT_TRUE(batch.Transforms[0].LocalToWorld.ToMatrix().isApprox(expected, 1e-5f));
+        const auto mesh = renderer.GetSceneRT(scene)->GetStaticMesh(leaf->GetShapeId());
+        ASSERT_TRUE(mesh);
+        EXPECT_TRUE(mesh->LocalToWorld.isApprox(expected, 1e-5f));
+    }
+}
+
+TEST(WorldLifecycle, TransformRootsCoalesceAndCallbackMutationsNotifyNextBatch) {
+    LifecycleTrace rootTrace, childTrace, otherTrace;
+    test::ScopedWorld world;
+    auto* actor = world.SpawnActor();
+    auto* root = actor->AddComponent<LifecycleProbe>(rootTrace);
+    auto* child = actor->AddSceneComponent<LifecycleProbe>(root, AttachmentRule::KeepLocal, childTrace);
+    auto* other = actor->AddComponent<LifecycleProbe>(otherTrace);
+    world.FinalizeWorldGT();
+    rootTrace.TransformNotified = childTrace.TransformNotified = otherTrace.TransformNotified = 0;
+    root->Transform = [&](auto&) {
+        EXPECT_FLOAT_EQ(child->GetWorldLocation().x(), 123);
+        other->SetRelativeLocation({77, 0, 0});
+    };
+    child->SetRelativeLocation({23, 0, 0});
+    for (int i = 1; i <= 100; ++i) root->SetRelativeLocation({float(i), 0, 0});
+    EXPECT_FLOAT_EQ(child->GetWorldLocation().x(), 123);
+    EXPECT_EQ(rootTrace.TransformNotified, 0u);
+    EXPECT_EQ(childTrace.TransformNotified, 0u);
+    world.FinalizeWorldGT();
+    EXPECT_EQ(rootTrace.TransformNotified, 1u);
+    EXPECT_EQ(childTrace.TransformNotified, 1u);
+    EXPECT_EQ(otherTrace.TransformNotified, 0u);
+    EXPECT_FLOAT_EQ(other->GetWorldLocation().x(), 77);
+    world.CollectRenderUpdates();
+    EXPECT_EQ(otherTrace.TransformNotified, 0u);
+    world.FinalizeWorldGT();
+    EXPECT_EQ(otherTrace.TransformNotified, 1u);
+    world.FinalizeWorldGT();
+    EXPECT_EQ(otherTrace.TransformNotified, 1u);
+}
+
+TEST(WorldLifecycle, RegistrationOrderCannotHideAncestorTransformChanges) {
+    LifecycleTrace trace;
+    test::ScopedWorld world;
+    auto draft = make_unique<Actor>();
+    auto* child = draft->AddComponent<LifecycleProbe>(trace);
+    auto* parent = draft->AddComponent<LifecycleProbe>(trace);
+    child->AttachTo(parent);
+    EXPECT_FLOAT_EQ(child->GetWorldLocation().x(), 0);
+    child->Register = [&](auto&) {
+        EXPECT_FLOAT_EQ(child->GetWorldLocation().x(), 0);
+        parent->SetRelativeLocation({9, 0, 0});
+        EXPECT_FLOAT_EQ(child->GetWorldLocation().x(), 9);
+    };
+    world.SpawnActor(std::move(draft));
+    world.FinalizeWorldGT();
+    EXPECT_FLOAT_EQ(child->GetWorldLocation().x(), 9);
+}
+
+TEST(WorldLifecycle, QueriedDraftHierarchyRevalidatesWhenJoiningWorld) {
+    LifecycleTrace trace;
+    Application app;
+    RenderSystem renderer{&app, 1};
+    test::ScopedWorld world;
+    const auto sceneId = test::ConnectWorld(world, renderer);
+    auto draft = make_unique<Actor>();
+    auto* child = draft->AddComponent<LifecycleProbe>(trace);
+    auto* parent = draft->AddComponent<SceneComponent>();
+    child->AttachTo(parent);
+    child->SetRelativeLocation({3, 0, 0});
+    EXPECT_FLOAT_EQ(child->GetWorldLocation().x(), 3);
+    parent->SetRelativeLocation({9, 0, 0});
+    EXPECT_FLOAT_EQ(parent->GetWorldLocation().x(), 9);
+    world.SpawnActor(std::move(draft));
+    EXPECT_FLOAT_EQ(child->GetWorldLocation().x(), 12);
+    SceneUpdateBatch batch;
+    test::CollectScene(world, renderer, batch);
+    EXPECT_FLOAT_EQ(renderer.GetSceneRT(sceneId)->GetStaticMesh(child->GetShapeId())->LocalToWorld(0, 3), 12);
+}
+
+TEST(WorldLifecycle, CallbackTransformChangesRenderNowWithoutRepeatingTheNextFrameDelta) {
+    LifecycleTrace triggerTrace, targetTrace;
+    Application app;
+    RenderSystem renderer{&app, 1};
+    test::ScopedWorld world;
+    const auto sceneId = test::ConnectWorld(world, renderer);
+    auto* actor = world.SpawnActor();
+    auto* trigger = actor->AddComponent<LifecycleProbe>(triggerTrace);
+    auto* target = actor->AddComponent<LifecycleProbe>(targetTrace);
+    SceneUpdateBatch batch;
+    test::CollectScene(world, renderer, batch);
+    trigger->Transform = [&](auto&) { target->SetRelativeLocation({31, 0, 0}); };
+    trigger->SetRelativeLocation({7, 0, 0});
+    test::CollectScene(world, renderer, batch);
+    EXPECT_EQ(batch.Transforms.size(), 2u);
+    EXPECT_EQ(targetTrace.TransformNotified, 0u);
+    EXPECT_FLOAT_EQ(renderer.GetSceneRT(sceneId)->GetStaticMesh(target->GetShapeId())->LocalToWorld(0, 3), 31);
+    test::CollectScene(world, renderer, batch);
+    EXPECT_EQ(targetTrace.TransformNotified, 1u);
+    EXPECT_TRUE(batch.Empty());
+}
+
+TEST(WorldLifecycle, RemovingQueuedTransformsAndReusingComponentSlotsKeepsSurvivorsFresh) {
+    LifecycleTrace deadTrace, liveTrace;
+    test::ScopedWorld world;
+    auto* actor = world.SpawnActor();
+    auto* dead = actor->AddComponent<LifecycleProbe>(deadTrace);
+    auto* live = actor->AddComponent<LifecycleProbe>(liveTrace);
+    dead->SetRelativeLocation({5, 0, 0});
+    live->SetRelativeLocation({6, 0, 0});
+    actor->RemoveComponent(dead);
+    world.FinalizeWorldGT();
+    EXPECT_EQ(deadTrace.TransformNotified, 0u);
+    EXPECT_EQ(deadTrace.Freed, 1u);
+    EXPECT_EQ(liveTrace.TransformNotified, 1u);
+    auto* replacement = actor->AddComponent<LifecycleProbe>(liveTrace);
+    replacement->SetRelativeLocation({8, 0, 0});
+    live->SetRelativeLocation({7, 0, 0});
+    world.FinalizeWorldGT();
+    EXPECT_EQ(liveTrace.TransformNotified, 3u);
+    EXPECT_FLOAT_EQ(live->GetWorldLocation().x(), 7);
+    EXPECT_FLOAT_EQ(replacement->GetWorldLocation().x(), 8);
 }
 
 TEST(WorldLifecycle, RandomizedIdentityAndPendingStateMatchesReference) {
