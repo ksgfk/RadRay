@@ -12,6 +12,16 @@ namespace radray {
 
 GpuFrameProfiler::GpuFrameProfiler(render::Device* device, render::CommandQueue* queue, uint32_t flightCount)
     : _queue(queue) {
+    if (!Initialize(device, flightCount)) RADRAY_ABORT("GpuFrameProfiler initialization failed");
+}
+
+unique_ptr<GpuFrameProfiler> GpuFrameProfiler::TryCreate(render::Device* device, render::CommandQueue* queue, uint32_t flightCount) {
+    auto result = unique_ptr<GpuFrameProfiler>{new GpuFrameProfiler(queue)};
+    if (!result->Initialize(device, flightCount)) return nullptr;
+    return result;
+}
+
+bool GpuFrameProfiler::Initialize(render::Device* device, uint32_t flightCount) {
     // Vulkan 需要在 readback copy 前后显式 transition;D3D12 READBACK heap 始终处于 COPY_DEST。
     _readbackNeedsBarrier = device->GetBackend() == render::RenderBackend::Vulkan;
     _frames.resize(flightCount);
@@ -20,14 +30,19 @@ GpuFrameProfiler::GpuFrameProfiler(render::Device* device, render::CommandQueue*
             .Type = render::QueryType::Timestamp,
             .Count = TimestampQueryCount,
             .DebugName = "GpuFrameProfiler Timestamp Pool"};
-        frame.Pool = device->CreateQueryPool(poolDesc).Unwrap();
+        auto pool = device->CreateQueryPool(poolDesc);
+        if (!pool) return false;
+        frame.Pool = pool.Release();
 
         render::BufferDescriptor readbackDesc{
             .Size = sizeof(uint64_t) * TimestampQueryCount,
             .Memory = render::MemoryType::ReadBack,
             .Usage = render::BufferUse::CopyDestination | render::BufferUse::MapRead};
-        frame.Readback = device->CreateBuffer(readbackDesc).Unwrap();
+        auto readback = device->CreateBuffer(readbackDesc);
+        if (!readback) return false;
+        frame.Readback = readback.Release();
     }
+    return true;
 }
 
 GpuFrameProfiler::~GpuFrameProfiler() noexcept = default;

@@ -19,6 +19,7 @@
 #include <radray/runtime/static_mesh.h>
 #include <radray/runtime/texture_asset.h>
 #include <radray/runtime/render_system.h>
+#include <radray/runtime/wait_frame.h>
 #include <radray/runtime/world_manager.h>
 #include <radray/window/native_window.h>
 
@@ -45,6 +46,11 @@ vector<unique_ptr<AssetImporter>> MakeDefaultAssetImporters() {
     importers.push_back(make_unique<MeshImporter>());
     return importers;
 }
+
+class CpuWaitFrameProcessor final : public IWaitFrameProcessor {
+public:
+    task<void> Wait() override { co_return; }
+};
 
 }  // namespace
 
@@ -154,7 +160,7 @@ public:
     }
 
     static bool IsSupported(const Application* app) noexcept {
-        const GpuSystem* gpuSystem = app->GetGpuSystem();
+        const GpuSystem* gpuSystem = app->GetGpuSystem().Get();
         if (gpuSystem == nullptr || gpuSystem->GetDevice() == nullptr) {
             return false;
         }
@@ -296,7 +302,7 @@ public:
             return _modalHwnd;
         }
 
-        const WindowManager* windowManager = _app->GetWindowManager();
+        const WindowManager* windowManager = _app->GetWindowManager().Get();
         if (windowManager == nullptr) {
             return nullptr;
         }
@@ -407,8 +413,10 @@ public:
 class SingleThreadRunner {
 public:
     explicit SingleThreadRunner(Application* app)
-        : _app(app),
-          _modalLoopTickConnection(_app->GetWindowManager()->EventModalLoopTick().connect(&SingleThreadRunner::OnModalLoopTick, this)) {}
+        : _app(app) {
+        if (auto windows = _app->GetWindowManager())
+            _modalLoopTickConnection = windows->EventModalLoopTick().connect(&SingleThreadRunner::OnModalLoopTick, this);
+    }
 
     int Run() {
         while (true) {
@@ -418,7 +426,7 @@ public:
             PrepareFrame(false);
             _hasModalLoopActivityDuringDispatch = false;
             _isDispatchingEvents = true;
-            _app->GetWindowManager()->DispatchEvents();
+            if (auto windows = _app->GetWindowManager()) windows->DispatchEvents();
             _isDispatchingEvents = false;
             if (_reqExit) {
                 break;
@@ -453,7 +461,8 @@ public:
     }
 
     void MaintainWindows() {
-        auto* windows = _app->GetWindowManager();
+        auto* windows = _app->GetWindowManager().Get();
+        if (windows == nullptr) return;
         if (!windows->NeedsMaintenance()) return;
         const uint64_t boundary = windows->GetOperationBoundary();
         _app->GetGpuSystem()->WaitAndRetireFlights();
@@ -466,7 +475,7 @@ public:
         if (_framePrepared) return true;
         _ticking = true;
         auto scope = MakeScopeGuard([this]() noexcept { _ticking = false; });
-        auto* gpuSystem = _app->GetGpuSystem();
+        auto* gpuSystem = _app->GetGpuSystem().Get();
         MaintainWindows();
         if (_reqExit) return false;
         const uint32_t flightIndex = gpuSystem->GetCurrentFlightIndex();
@@ -488,7 +497,7 @@ public:
         if (isInModalLoop) {
             MarkModalLoopActivityDuringDispatch();
         }
-        auto* gpuSystem = _app->GetGpuSystem();
+        auto* gpuSystem = _app->GetGpuSystem().Get();
         const uint32_t flightIndex = gpuSystem->GetCurrentFlightIndex();
         const auto deltaTime = _deltaTime;
 
@@ -505,7 +514,7 @@ public:
             return;
         }
 
-        _app->GetRenderSystem()->PublishFrameGT(flightIndex);
+        if (auto renderSystem = _app->GetRenderSystem()) renderSystem->PublishFrameGT(flightIndex);
         AppFrameContext frameCtx = gpuSystem->BeginFrameRecord(
             flightIndex,
             deltaTime,
@@ -579,17 +588,18 @@ class ThreadedRunner {
 public:
     explicit ThreadedRunner(Application* app)
         : _app(app),
-          _modalLoopTickConnection(_app->GetWindowManager()->EventModalLoopTick().connect(&ThreadedRunner::OnModalLoopTick, this)),
           _readySlotsSemaphore(0),
           _runnerFrameDatas(_app->GetGpuSystem()->GetFlightDataCount()),
           _renderThread(&ThreadedRunner::RenderThread, this) {
+        if (auto windows = _app->GetWindowManager())
+            _modalLoopTickConnection = windows->EventModalLoopTick().connect(&ThreadedRunner::OnModalLoopTick, this);
     }
 
     int Run() {
         while (true) {
             PrepareFrame(true);
             _hasModalLoopActivityDuringDispatch = false;
-            _app->GetWindowManager()->DispatchEvents();
+            if (auto windows = _app->GetWindowManager()) windows->DispatchEvents();
 
             if (_reqExit) {
                 break;
@@ -603,7 +613,7 @@ public:
             }
         }
 
-        _app->GetWindowManager()->CloseOperations();
+        if (auto windows = _app->GetWindowManager()) windows->CloseOperations();
         _readySlotsSemaphore.release();
 
         if (_renderThread.joinable()) {
@@ -619,7 +629,7 @@ public:
     void RenderThread() {
         RADRAY_PROFILE_THREAD("RadRay Render");
         while (true) {
-            auto* gpuSystem = _app->GetGpuSystem();
+            auto* gpuSystem = _app->GetGpuSystem().Get();
             {
                 RADRAY_PROFILE_SCOPE_N("WaitReadySlot");
                 _readySlotsSemaphore.acquire();
@@ -671,7 +681,8 @@ public:
     }
 
     void MaintainWindows() {
-        auto* windows = _app->GetWindowManager();
+        auto* windows = _app->GetWindowManager().Get();
+        if (windows == nullptr) return;
         if (!windows->NeedsMaintenance()) return;
         const uint64_t boundary = windows->GetOperationBoundary();
         const uint64_t published = _app->GetGpuSystem()->GetFrameIndex();
@@ -687,7 +698,7 @@ public:
         if (_framePrepared) return true;
         _ticking = true;
         auto scope = MakeScopeGuard([this]() noexcept { _ticking = false; });
-        auto* gpuSystem = _app->GetGpuSystem();
+        auto* gpuSystem = _app->GetGpuSystem().Get();
         MaintainWindows();
         if (_reqExit) return false;
         if (!waitForWritableSlot && _renderedFrameCount.load(std::memory_order_acquire) < gpuSystem->GetFrameIndex()) return false;
@@ -714,7 +725,7 @@ public:
         auto scope = MakeScopeGuard([this]() noexcept { _ticking = false; });
         _framePrepared = false;
         RADRAY_PROFILE_SCOPE_N("TickFrame");
-        auto* gpuSystem = _app->GetGpuSystem();
+        auto* gpuSystem = _app->GetGpuSystem().Get();
         const uint64_t frameIndex = gpuSystem->GetFrameIndex();
         const uint32_t flightIndex = static_cast<uint32_t>(frameIndex % gpuSystem->GetFlightDataCount());
         const auto deltaTime = _deltaTime;
@@ -733,7 +744,7 @@ public:
             return std::nullopt;
         }
 
-        _app->GetRenderSystem()->PublishFrameGT(flightIndex);
+        if (auto renderSystem = _app->GetRenderSystem()) renderSystem->PublishFrameGT(flightIndex);
         gpuSystem->AdvanceFrameIndex();
         _publishedFrameCount.store(frameIndex + 1, std::memory_order_release);
         _readySlotsSemaphore.release();
@@ -755,7 +766,7 @@ public:
 
     bool PrepareFlightSlot(bool wait) {
         RADRAY_PROFILE_SCOPE_N("WaitWritableSlot");
-        auto* gpuSystem = _app->GetGpuSystem();
+        auto* gpuSystem = _app->GetGpuSystem().Get();
         RetireRenderedFrames();
         if (gpuSystem->GetFrameIndex() - _retireFrameIndex < gpuSystem->GetFlightDataCount()) return true;
         if (!wait) return false;
@@ -768,7 +779,7 @@ public:
     }
 
     void RetireRenderedFrames() {
-        auto* gpuSystem = _app->GetGpuSystem();
+        auto* gpuSystem = _app->GetGpuSystem().Get();
         const uint64_t renderedFrameCount = _renderedFrameCount.load(std::memory_order_acquire);
         while (_retireFrameIndex < renderedFrameCount) {
             const uint32_t flightIndex = static_cast<uint32_t>(_retireFrameIndex % gpuSystem->GetFlightDataCount());
@@ -805,8 +816,56 @@ public:
     std::thread _renderThread;
 };
 
+class CpuRunner {
+public:
+    explicit CpuRunner(Application* app) noexcept : _app(app) {}
+
+    int Run() {
+        uint64_t frameSerial = 0;
+        uint64_t pendingSerial = 0;
+        uint32_t pendingFlight = 0;
+        auto lastFrameTime = std::chrono::steady_clock::now();
+        while (!_app->ShouldExit()) {
+            auto* windows = _app->GetWindowManager().Get();
+            if (windows != nullptr && windows->NeedsMaintenance()) {
+                const uint64_t boundary = windows->GetOperationBoundary();
+                windows->ProcessOperations(boundary);
+            }
+            if (pendingSerial != 0) {
+                _app->GetRenderSystem()->OnFlightCompletedGT(FlightCompletion{pendingFlight, true, pendingSerial});
+                pendingSerial = 0;
+            }
+            const uint32_t flightIndex = static_cast<uint32_t>(frameSerial % _app->_flightDataCount);
+            _app->ServiceFrameBoundaryGT(flightIndex);
+            if (windows != nullptr) windows->DispatchEvents();
+            if (_app->ShouldExit()) break;
+
+            const auto now = std::chrono::steady_clock::now();
+            const std::chrono::duration<float> deltaTime = now - lastFrameTime;
+            lastFrameTime = now;
+            const auto result = _app->Update(AppUpdateContext{flightIndex, deltaTime, {}});
+            if (result.ShouldExit) break;
+            if (auto renderSystem = _app->GetRenderSystem()) {
+                renderSystem->PublishFrameGT(flightIndex);
+                renderSystem->ConsumeRenderUpdates(flightIndex, frameSerial + 1);
+                pendingSerial = frameSerial + 1;
+                pendingFlight = flightIndex;
+            }
+            ++frameSerial;
+            RADRAY_PROFILE_FRAME();
+        }
+        if (pendingSerial != 0) {
+            _app->GetRenderSystem()->OnFlightCompletedGT(FlightCompletion{pendingFlight, true, pendingSerial});
+        }
+        return _app->Shutdown(AppShutdownContext{});
+    }
+
+private:
+    Application* _app;
+};
+
 void Application::ServiceFrameBoundaryGT(uint32_t flightIndex) {
-    PumpFlightCompletions(flightIndex);
+    if (_gpuSystem != nullptr) PumpFlightCompletions(flightIndex);
     if (_assetManager) _assetManager->Pump();
     _scheduler.Pump();
 }
@@ -817,7 +876,7 @@ void Application::SetCollecting(bool collecting) {
 }
 
 void Application::ApplySceneUpdatesRT(AppFrameContext& ctx) {
-    _renderSystem->ConsumeRenderUpdates(ctx.FlightIndex(), ctx.FrameSerial());
+    if (_renderSystem != nullptr) _renderSystem->ConsumeRenderUpdates(ctx.FlightIndex(), ctx.FrameSerial());
 }
 
 void Application::WaitAndCleanupCompletedFlights() {
@@ -878,7 +937,7 @@ void Application::Render(AppFrameContext& ctx) {
 }
 
 bool Application::ShouldExit() const noexcept {
-    return _windowManager != nullptr && _windowManager->ShouldExit();
+    return _exitRequested.load(std::memory_order_relaxed) || (_windowManager != nullptr && _windowManager->ShouldExit());
 }
 
 void Application::StopAndDrainRuntime() {
@@ -916,6 +975,7 @@ void Application::DestroyRuntime() noexcept {
     _renderSystem.reset();
     // AssetManager 析构会 force-unload 全部资产,释放 GPU buffer(须在 device 销毁前)。
     _assetManager.reset();
+    _cpuWaitFrameProcessor.reset();
     // importer 与 settings 必须活到全部在飞加载协程被 AssetManager 收束之后。
     _assetDatabase.reset();
     if (_windowManager != nullptr) {
@@ -929,50 +989,86 @@ void Application::DestroyRuntime() noexcept {
     _windowManager.reset();
 }
 
-bool Application::InitializeRuntime(const ApplicationRuntimeDescriptor& desc) {
+bool Application::InitializeRuntime(const ApplicationRuntimeDescriptor& desc, RuntimeStartupResult& startup) {
+    startup = {};
+    const auto fail = [&startup](RuntimeStartupStatus status, std::string_view reason) {
+        startup.Status = status;
+        startup.Reason = reason;
+        RADRAY_ERR_LOG("Application startup failed: {}", reason);
+        return false;
+    };
+    constexpr uint8_t knownSystems = 31;
+    if ((desc.Systems.value() & ~knownSystems) != 0)
+        return fail(RuntimeStartupStatus::InvalidDescriptor, "Unknown ApplicationSystem flag");
+    if (desc.FlightDataCount == 0)
+        return fail(RuntimeStartupStatus::InvalidDescriptor, "FlightDataCount must be positive");
+    if (desc.Multithreaded && !desc.Systems.HasFlag(ApplicationSystem::Gpu))
+        return fail(RuntimeStartupStatus::InvalidDescriptor, "Multithreaded mode requires Gpu");
+    if (!desc.AssetRoot.empty() && !desc.Systems.HasFlag(ApplicationSystem::Asset))
+        return fail(RuntimeStartupStatus::InvalidDescriptor, "AssetRoot requires Asset");
+
     _multithreaded = desc.Multithreaded;
+    _flightDataCount = desc.FlightDataCount;
+    _exitRequested.store(false, std::memory_order_relaxed);
     _shaderSourceRoot = desc.ShaderSourceRoot;
     _shaderIncludePaths = desc.ShaderIncludePaths;
 
-    WindowManagerDescriptor windowManagerDesc{};
+    if (desc.Systems.HasFlag(ApplicationSystem::Window)) {
+        WindowManagerDescriptor windowManagerDesc{};
 #ifdef RADRAY_PLATFORM_WINDOWS
-    windowManagerDesc.Type = NativeWindowType::Win32HWND;
+        windowManagerDesc.Type = NativeWindowType::Win32HWND;
 #endif
-    _windowManager = make_unique<WindowManager>(windowManagerDesc);
+        _windowManager = make_unique<WindowManager>(windowManagerDesc);
+    }
 
-    render::VulkanInstanceDescriptor instanceDesc{
+    if (desc.Systems.HasFlag(ApplicationSystem::Gpu)) {
+        render::VulkanInstanceDescriptor instanceDesc{
         .AppName = desc.AppName,
         .EngineName = desc.EngineName,
         .IsEnableDebugLayer = desc.EnableValidation,
         .IsEnableGpuBasedValid = false,
         .IsEnableSynchronizationValidation = desc.EnableSynchronizationValidation};
-    render::DXGIFactoryDescriptor factoryDesc{
+        render::DXGIFactoryDescriptor factoryDesc{
         .IsEnableDebugLayer = desc.EnableValidation,
         .IsEnableGpuBasedValid = false};
-    render::VulkanCommandQueueDescriptor queueDesc{render::QueueType::Direct, 1};
-    render::DeviceDescriptor deviceDesc{};
-    if (desc.Backend == render::RenderBackend::Vulkan) {
-        render::VulkanDeviceDescriptor vulkanDeviceDesc{};
-        vulkanDeviceDesc.Queues = std::span{&queueDesc, 1};
-        deviceDesc = vulkanDeviceDesc;
-    } else if (desc.Backend == render::RenderBackend::D3D12) {
-        deviceDesc = render::D3D12DeviceDescriptor{};
-    } else {
-        RADRAY_ABORT("unsupported render backend");
-    }
+        render::VulkanCommandQueueDescriptor queueDesc{render::QueueType::Direct, 1};
+        render::DeviceDescriptor deviceDesc{};
+        if (desc.Backend == render::RenderBackend::Vulkan) {
+            render::VulkanDeviceDescriptor vulkanDeviceDesc{};
+            vulkanDeviceDesc.Queues = std::span{&queueDesc, 1};
+            deviceDesc = vulkanDeviceDesc;
+        } else if (desc.Backend == render::RenderBackend::D3D12) {
+            deviceDesc = render::D3D12DeviceDescriptor{};
+        } else {
+            DestroyRuntime();
+            return fail(RuntimeStartupStatus::InvalidDescriptor, "Unsupported render backend");
+        }
 
-    GpuSystemDescriptor gpuSysDesc{
+        GpuSystemDescriptor gpuSysDesc{
         .VulkanInstance = instanceDesc,
         .DXGIFactory = factoryDesc,
         .Device = deviceDesc,
         .MainQueueIndex = 0,
         .BackBufferCount = desc.BackBufferCount,
-        .FlightDataCount = desc.FlightDataCount};
-    _gpuSystem = make_unique<GpuSystem>(gpuSysDesc);
-    _renderSystem = make_unique<RenderSystem>(this, _gpuSystem->GetFlightDataCount());
-    _worldManager = make_unique<WorldManager>(this, _renderSystem.get());
-    _assetManager = make_unique<AssetManager>();
-    if (!desc.AssetRoot.empty()) {
+        .FlightDataCount = desc.FlightDataCount,
+        .EnableFrameProfiler = desc.EnableGpuFrameProfiler};
+        _gpuSystem = GpuSystem::TryCreate(gpuSysDesc, startup);
+        if (_gpuSystem == nullptr) {
+            DestroyRuntime();
+            return false;
+        }
+    }
+    if (desc.Systems.HasFlag(ApplicationSystem::Render)) {
+        _renderSystem = make_unique<RenderSystem>(this, desc.FlightDataCount);
+    }
+    if (desc.Systems.HasFlag(ApplicationSystem::World)) {
+        _worldManager = make_unique<WorldManager>(this, _renderSystem.get());
+    }
+    if (desc.Systems.HasFlag(ApplicationSystem::Asset)) {
+        _assetManager = make_unique<AssetManager>();
+        if (_gpuSystem == nullptr) _cpuWaitFrameProcessor = make_unique<CpuWaitFrameProcessor>();
+    }
+    if (_assetManager != nullptr && !desc.AssetRoot.empty()) {
         string error;
         _assetDatabase = AssetDatabase::Open(
             desc.AssetRoot,
@@ -983,48 +1079,67 @@ bool Application::InitializeRuntime(const ApplicationRuntimeDescriptor& desc) {
         }
     }
 
-    _windowManager->SetGpuSystem(_gpuSystem.get());
-    _windowManager->SetRenderSystem(_renderSystem.get());
-    _gpuSystem->SetWindowManager(_windowManager.get());
-    _renderSystem->SetGpuSystem(_gpuSystem.get());
-    _assetManager->SetWaitFrameProcessor(_gpuSystem.get());
-    _assetManager->SetAssetSource(_assetDatabase.get());
-
-    if (!_renderSystem->OnInitialize()) {
-        DestroyRuntime();
-        return false;
+    if (_windowManager != nullptr) {
+        _windowManager->SetGpuSystem(_gpuSystem.get());
+        _windowManager->SetRenderSystem(_renderSystem.get());
+    }
+    if (_gpuSystem != nullptr) _gpuSystem->SetWindowManager(_windowManager.get());
+    if (_renderSystem != nullptr) _renderSystem->SetGpuSystem(_gpuSystem.get());
+    if (_assetManager != nullptr) {
+        _assetManager->SetWaitFrameProcessor(_gpuSystem != nullptr ? static_cast<IWaitFrameProcessor*>(_gpuSystem.get()) : _cpuWaitFrameProcessor.get());
+        _assetManager->SetAssetSource(_assetDatabase.get());
     }
 
-    WindowCreateDescriptor wndDesc{};
+    if (_renderSystem != nullptr && _gpuSystem != nullptr && !_renderSystem->OnInitialize()) {
+        DestroyRuntime();
+        return fail(RuntimeStartupStatus::InitializationFailed, "RenderSystem initialization failed");
+    }
+
+    if (_windowManager != nullptr) {
+        WindowCreateDescriptor wndDesc{};
 #ifdef RADRAY_PLATFORM_WINDOWS
-    wndDesc.Title = desc.WindowTitle;
-    wndDesc.Width = desc.WindowWidth;
-    wndDesc.Height = desc.WindowHeight;
-    wndDesc.Resizable = true;
-    wndDesc.StartVisible = true;
+        wndDesc.Title = desc.WindowTitle;
+        wndDesc.Width = desc.WindowWidth;
+        wndDesc.Height = desc.WindowHeight;
+        wndDesc.Resizable = true;
+        wndDesc.StartVisible = true;
 #else
-    RADRAY_ABORT("unsupported platform");
-#endif
-    WindowSwapChainDescriptor swapchainDesc{};
-    swapchainDesc.Width = static_cast<uint32_t>(desc.WindowWidth);
-    swapchainDesc.Height = static_cast<uint32_t>(desc.WindowHeight);
-    swapchainDesc.Format = desc.BackBufferFormat;
-    swapchainDesc.PresentMode = desc.PresentMode;
-    if (!_windowManager->InitializeMainWindow(wndDesc, swapchainDesc)) {
         DestroyRuntime();
-        return false;
+        return fail(RuntimeStartupStatus::InitializationFailed, "Unsupported window platform");
+#endif
+        std::optional<WindowSwapChainDescriptor> swapchainDesc;
+        if (_gpuSystem != nullptr) {
+            swapchainDesc = WindowSwapChainDescriptor{};
+            swapchainDesc->Width = static_cast<uint32_t>(desc.WindowWidth);
+            swapchainDesc->Height = static_cast<uint32_t>(desc.WindowHeight);
+            swapchainDesc->Format = desc.BackBufferFormat;
+            swapchainDesc->PresentMode = desc.PresentMode;
+        }
+        if (!_windowManager->InitializeMainWindow(wndDesc, swapchainDesc)) {
+            DestroyRuntime();
+            return fail(RuntimeStartupStatus::InitializationFailed, "Main window or swapchain initialization failed");
+        }
     }
+    startup.Status = RuntimeStartupStatus::Started;
+    startup.Reason.clear();
     return true;
 }
 
 int Application::Run(const ApplicationRuntimeDescriptor& desc) {
-    if (!InitializeRuntime(desc)) return 1;
+    RuntimeStartupResult startup;
+    return Run(desc, startup);
+}
+
+int Application::Run(const ApplicationRuntimeDescriptor& desc, RuntimeStartupResult& startup) {
+    if (!InitializeRuntime(desc, startup)) return 1;
     OnInit();
-    _worldManager->FinalizeWorldsGT();
+    if (_worldManager != nullptr) _worldManager->FinalizeWorldsGT();
+    if (ShouldExit()) return Shutdown(AppShutdownContext{});
     return StartLoop();
 }
 
 int Application::StartLoop() {
+    if (_gpuSystem == nullptr) return CpuRunner{this}.Run();
     if (_multithreaded) {
         return ThreadedRunner{this}.Run();
     } else {

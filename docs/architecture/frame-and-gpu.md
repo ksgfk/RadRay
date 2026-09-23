@@ -53,6 +53,11 @@ runner 已取得槽位使用权；逻辑帧边界是完成批次与应用完成�
 等待可写槽和处理完成批次放在事件派发之前，让紧接着的 Update 使用这些阶段期间到达的输入。
 完成批次处理有明确终点，不会为回调新建的任务或稍后到达的 GPU 消息反复排空整个系统。
 
+未启用 Gpu 时，单线程 CPU runner 按配置的 flight 数轮转索引，帧首完成上一帧已消费的
+RenderSystem 包，再泵可选 AssetManager、scheduler 和窗口事件。Update 后若启用 RenderSystem，
+同步 Publish/Consume；退出时完成最后已发布包，未发布的退出帧在 Shutdown 中 abandon。
+该路径的 `LastFrameLatency` 为零，不创建 `AppFrameContext`、不调用 OnRender 或 GPU 完成钩子。
+
 `DeltaTime` 是相邻逻辑帧开始时间之差，仍包含两个开始点之间的槽位等待与收尾耗时。
 `LastFrameLatency` 从同一个逻辑帧开始时间计算到 CPU 观察到该 flight fence 完成；
 包含事件派发、Update、录制、排队与 GPU 执行，不包含该帧开始前的槽位等待和完成回调。
@@ -350,10 +355,10 @@ runner 停止新帧、关闭窗口操作 → 消费并 join 已发布包
 WaitAndCleanupCompletedFlights：真实 GPU drain → 按 FrameSerial 发布完成 → S0 释放 owner
 terminal abandon：仅释放未发布 Scene 包和 raw frame owner，不生成成功 completion
 OnShutdown → 取消剩余通知 → WorldManager 显式 Shutdown
-RenderSystem → AssetManager → AssetDatabase → GpuSystem → WindowManager
+RenderSystem → AssetManager → CPU 等待器 → AssetDatabase → GpuSystem → WindowManager
 ```
 
-加载任务与保守退休任务使用独立 scope；取消加载不会取消退休。AssetManager 的退休 scope 只在 GPU drain 后终止。
+加载任务与保守退休任务使用独立 scope；取消加载不会取消退休。GPU 模式下 AssetManager 的退休 scope 只在 GPU drain 后终止；CPU 模式的等待器无需等待 GPU。
 普通窗口维护通过 WaitAndRetireFlights 等待 GPU 并发布完成，随后在帧边界释放 owner，
 不 abandon writer 状态；abandon 后不能恢复正常发布。
 
@@ -375,7 +380,7 @@ ready 交接、fence 与 flight 退休语义。
 ## 服务装配
 
 Application 直接创建对象、连接借用引用并调用初始化函数；依赖关系和拆除顺序均由普通代码明确表达。
-设备由 GpuSystem 构造函数创建，WindowManager 与 GpuSystem 的双向引用在对象就位后连接。
+设备由 GpuSystem 创建，WindowManager 与 GpuSystem 同时启用时才建立双向引用。
 可选资产来源、失败清理与所有权边界见
 [Application 直接装配](render-framework.md#application-直接装配)。
 
@@ -385,10 +390,10 @@ Application 直接创建对象、连接借用引用并调用初始化函数；�
 
 | 钩子 | 时机 |
 |---|---|
-| `OnInit` | 全部内部系统就绪后一次。加载资产、Spawn Actor、建相机 |
-| `OnRender` | 在 runner 开始录制后由 Render 调用；默认空，可覆盖以记录 RHI 命令 |
+| `OnInit` | 所选系统就绪后一次。加载资产、Spawn Actor、建相机 |
+| `OnRender` | GPU runner 开始录制后由 Render 调用；默认空，可覆盖以记录 RHI 命令 |
 | `OnUpdate` | 每帧，`AssetManager::Pump` 之后、`World::Tick` 之前 |
-| `OnRenderFrameComplete` | game thread 消费 `FlightCompletion`，包括跳过和 shutdown；允许释放 GT 资产引用 |
+| `OnRenderFrameComplete` | GPU 模式下 game thread 消费 `FlightCompletion`，包括跳过和 shutdown；允许释放 GT 资产引用 |
 | `OnShutdown` | 关停，游戏侧清理 |
 
 `Application::Update` / `Shutdown` 固化宿主时序；Render 只负责应用命令内容，不接管 runner 的提交协议。

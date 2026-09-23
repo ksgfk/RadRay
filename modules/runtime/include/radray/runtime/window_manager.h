@@ -245,7 +245,7 @@ private:
 
     WindowCreateResult CreateWindowImmediate(const WindowCreateDescriptor& desc, bool isMain);
     WindowOperationStatus DestroyWindowImmediate(WindowHandle window) noexcept;
-    bool InitializeMainWindow(const WindowCreateDescriptor& desc, const WindowSwapChainDescriptor& swapchain);
+    bool InitializeMainWindow(const WindowCreateDescriptor& desc, std::optional<WindowSwapChainDescriptor> swapchain);
     void DetachAllSwapChains() noexcept;
     Nullable<WindowOperationRecord*> EnqueueOperation(stop_token stop, std::coroutine_handle<> continuation);
     /// [GT] Grants execution in the runner's mutation phase; no further suspension until FinishOperation.

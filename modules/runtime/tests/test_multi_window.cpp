@@ -1,6 +1,7 @@
 // Test coverage and temporary exclusions: docs/guide/build-test.md
 #include "runtime_test_support.h"
 #include "gpu_test_fixture.h"
+#include "gpu_runtime_test_support.h"
 
 #include <radray/runtime/gpu_system.h>
 #include <radray/runtime/render_system.h>
@@ -58,7 +59,7 @@ protected:
             probe->Upload->FlushMappedRange({0, 16});
         }
 
-        auto* windows = GetWindowManager();
+        auto* windows = GetWindowManager().Get();
         EXPECT_EQ(windows->GetWindowCount(), phase == 9 ? 2u : 3u);
         vector<AppFrameTarget> targets;
         vector<uint32_t> identities;
@@ -249,7 +250,7 @@ private:
     }
 
     task<void> RunScenario() {
-        auto* windows = GetWindowManager();
+        auto* windows = GetWindowManager().Get();
         WindowSwapChainDescriptor swapchain{};
         swapchain.Format = render::TextureFormat::BGRA8_UNORM;
         swapchain.BackBufferCount = 2;
@@ -344,14 +345,10 @@ void RunMultiWindow(render::RenderBackend backend, bool threaded, bool lifecycle
 #if !defined(RADRAY_PLATFORM_WINDOWS)
     GTEST_SKIP() << "Application window initialization currently requires Windows";
 #endif
-    {
-        render::test::DeviceContext probe;
-        if (!render::test::TryCreateDevice(backend, probe, true)) GTEST_SKIP() << probe.Reason;
-    }
     test::RuntimeLogCapture logs;
     {
         MultiWindowApp app{lifecycle};
-        ASSERT_EQ(app.Run({.Backend = backend,
+        auto run = test::RunApplication(app, {.Backend = backend,
                            .EnableValidation = true,
                            .Multithreaded = threaded,
                            .EnableSynchronizationValidation = true,
@@ -361,8 +358,12 @@ void RunMultiWindow(render::RenderBackend backend, bool threaded, bool lifecycle
                            .BackBufferCount = 3,
                            .FlightDataCount = lifecycle ? 3u : 2u,
                            .BackBufferFormat = render::TextureFormat::BGRA8_UNORM,
-                           .PresentMode = render::PresentMode::FIFO}),
-                  0);
+                           .PresentMode = render::PresentMode::FIFO,
+                           .Systems = ApplicationSystem::Window | ApplicationSystem::Gpu | ApplicationSystem::Render,
+                           .EnableGpuFrameProfiler = false});
+        if (test::CanSkipRuntimeStartup(backend, run.Startup)) GTEST_SKIP() << run.Startup.Reason;
+        ASSERT_EQ(run.Startup.Status, RuntimeStartupStatus::Started) << run.Startup.Reason;
+        ASSERT_EQ(run.ExitCode, 0);
         EXPECT_TRUE(app.Completed);
     }
     EXPECT_TRUE(logs.Errors().empty()) << logs.Errors();

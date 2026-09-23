@@ -291,7 +291,8 @@ class DXGIFactoryImpl final : public DXGIFactory {
 public:
     DXGIFactoryImpl(
         ComPtr<IDXGIFactory4> factory,
-        const DXGIFactoryDescriptor& desc) noexcept;
+        const DXGIFactoryDescriptor& desc,
+        bool validationEnabled) noexcept;
 
     ~DXGIFactoryImpl() noexcept override;
 
@@ -302,12 +303,14 @@ public:
     vector<DXGIAdapterInfo> GetAdapters() const noexcept override;
 
     std::optional<uint32_t> SelectHighPerformanceAdapter() const noexcept override;
+    bool IsValidationEnabled() const noexcept override { return _validationEnabled; }
 
 public:
     void DestroyImpl() noexcept;
 
     ComPtr<IDXGIFactory4> _factory;
     DXGIFactoryDescriptor _desc;
+    bool _validationEnabled{false};
 };
 
 class DeviceD3D12 final : public Device {

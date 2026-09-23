@@ -201,37 +201,85 @@ std::chrono::steady_clock::time_point GpuSystem::BeginFrameTiming(uint32_t fligh
 GpuSystem::GpuSystem(const GpuSystemDescriptor& desc)
     : _backBufferCount(desc.BackBufferCount),
       _flightDataCount(desc.FlightDataCount) {
-    if (_flightDataCount == 0) RADRAY_ABORT("GpuSystem requires at least one flight");
-    render::DeviceDescriptor deviceDesc = desc.Device;
-    std::visit(
-        [this, &desc](auto& backendDesc) {
-            using BackendDescriptor = std::remove_cvref_t<decltype(backendDesc)>;
-            if constexpr (std::is_same_v<BackendDescriptor, render::VulkanDeviceDescriptor>) {
-                _vulkanInstance = render::InstanceVulkan::InitEnv(desc.VulkanInstance).Unwrap();
-            } else if constexpr (std::is_same_v<BackendDescriptor, render::D3D12DeviceDescriptor>) {
-                if (backendDesc.Factory != nullptr) {
-                    RADRAY_ABORT("GpuSystem owns the DXGI factory; D3D12DeviceDescriptor::Factory must be null");
-                }
-                _dxgiFactory = render::DXGIFactory::Create(desc.DXGIFactory).Unwrap();
-                backendDesc.Factory = _dxgiFactory.Get();
-            } else {
-                RADRAY_ABORT("unsupported render backend");
-            }
-        },
-        deviceDesc);
-    _device = render::Device::Create(deviceDesc).Unwrap();
+    RuntimeStartupResult startup;
+    if (!Initialize(desc, startup)) {
+        RADRAY_ERR_LOG("GpuSystem initialization failed: {}", startup.Reason);
+        RADRAY_ABORT("GpuSystem initialization failed");
+    }
+}
 
-    _mainQueue = _device->GetCommandQueue(render::QueueType::Direct, desc.MainQueueIndex).Unwrap();
+GpuSystem::GpuSystem(uint32_t backBufferCount, uint32_t flightDataCount) noexcept
+    : _backBufferCount(backBufferCount),
+      _flightDataCount(flightDataCount) {}
+
+unique_ptr<GpuSystem> GpuSystem::TryCreate(const GpuSystemDescriptor& desc, RuntimeStartupResult& startup) {
+    auto result = unique_ptr<GpuSystem>{new GpuSystem(desc.BackBufferCount, desc.FlightDataCount)};
+    if (!result->Initialize(desc, startup)) return nullptr;
+    return result;
+}
+
+bool GpuSystem::Initialize(const GpuSystemDescriptor& desc, RuntimeStartupResult& startup) {
+    startup = {};
+    const auto fail = [&startup](RuntimeStartupStatus status, std::string_view reason) {
+        startup.Status = status;
+        startup.Reason = reason;
+        return false;
+    };
+    if (_flightDataCount == 0) return fail(RuntimeStartupStatus::InvalidDescriptor, "GpuSystem requires at least one flight");
+    render::DeviceDescriptor deviceDesc = desc.Device;
+    if (auto* vk = std::get_if<render::VulkanDeviceDescriptor>(&deviceDesc)) {
+#if defined(RADRAY_ENABLE_VULKAN)
+        auto instance = render::InstanceVulkan::InitEnv(desc.VulkanInstance);
+        if (!instance) return fail(RuntimeStartupStatus::InitializationFailed, "Vulkan instance initialization failed");
+        _vulkanInstance = instance.Get();
+        if (desc.VulkanInstance.IsEnableDebugLayer && !_vulkanInstance->IsValidationEnabled())
+            return fail(RuntimeStartupStatus::ValidationUnavailable, "Vulkan validation layer or debug messenger is unavailable");
+        const auto adapter = _vulkanInstance->SelectHighPerformancePhysicalDevice();
+        if (!adapter) return fail(RuntimeStartupStatus::NoAdapter, "No Vulkan physical device is available");
+        vk->PhysicalDeviceIndex = adapter;
+#else
+        return fail(RuntimeStartupStatus::BackendNotBuilt, "Vulkan backend was not built");
+#endif
+    } else if (auto* d3d12 = std::get_if<render::D3D12DeviceDescriptor>(&deviceDesc)) {
+#if defined(RADRAY_ENABLE_D3D12)
+        if (d3d12->Factory != nullptr)
+            return fail(RuntimeStartupStatus::InvalidDescriptor, "GpuSystem owns the DXGI factory");
+        auto factory = render::DXGIFactory::Create(desc.DXGIFactory);
+        if (!factory) return fail(RuntimeStartupStatus::InitializationFailed, "DXGI factory creation failed");
+        _dxgiFactory = factory.Release();
+        if (desc.DXGIFactory.IsEnableDebugLayer && !_dxgiFactory->IsValidationEnabled())
+            return fail(RuntimeStartupStatus::ValidationUnavailable, "D3D12 debug layer is unavailable");
+        const auto adapter = _dxgiFactory->SelectHighPerformanceAdapter();
+        if (!adapter) return fail(RuntimeStartupStatus::NoAdapter, "No D3D12 adapter is available");
+        d3d12->Factory = _dxgiFactory.Get();
+        d3d12->AdapterIndex = adapter;
+#else
+        return fail(RuntimeStartupStatus::BackendNotBuilt, "D3D12 backend was not built");
+#endif
+    } else {
+        return fail(RuntimeStartupStatus::InvalidDescriptor, "Unsupported render backend");
+    }
+    auto device = render::Device::Create(deviceDesc);
+    if (!device) return fail(RuntimeStartupStatus::InitializationFailed, "GPU device creation failed for an available adapter");
+    _device = device.Release();
+    auto queue = _device->GetCommandQueue(render::QueueType::Direct, desc.MainQueueIndex);
+    if (!queue) return fail(RuntimeStartupStatus::InitializationFailed, "Direct queue acquisition failed");
+    _mainQueue = queue.Get();
     _mainQueueTrack.Queue = _mainQueue;
-    _mainQueueTrack.Fence = _device->CreateFence().Unwrap();
+    auto fence = _device->CreateFence();
+    if (!fence) return fail(RuntimeStartupStatus::InitializationFailed, "Main queue fence creation failed");
+    _mainQueueTrack.Fence = fence.Release();
     _mainQueueTrack.Fence->SetDebugName("AppMainQueue");
     _flights.reserve(_flightDataCount);
     for (uint32_t i = 0; i < _flightDataCount; ++i) {
         _flights.push_back(make_unique<FlightSlot>());
     }
     if (desc.EnableFrameProfiler) {
-        _frameProfiler = make_unique<GpuFrameProfiler>(_device.get(), _mainQueue, _flightDataCount);
+        _frameProfiler = GpuFrameProfiler::TryCreate(_device.get(), _mainQueue, _flightDataCount);
+        if (!_frameProfiler) return fail(RuntimeStartupStatus::InitializationFailed, "GPU frame profiler creation failed");
     }
+    startup.Status = RuntimeStartupStatus::Started;
+    return true;
 }
 
 GpuSystem::~GpuSystem() noexcept {

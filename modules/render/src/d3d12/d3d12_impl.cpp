@@ -584,9 +584,11 @@ void GpuDescriptorAllocator::Destroy(GpuDescriptorAllocator::Allocation allocati
 
 DXGIFactoryImpl::DXGIFactoryImpl(
     ComPtr<IDXGIFactory4> factory,
-    const DXGIFactoryDescriptor& desc) noexcept
+    const DXGIFactoryDescriptor& desc,
+    bool validationEnabled) noexcept
     : _factory(std::move(factory)),
-      _desc(desc) {}
+      _desc(desc),
+      _validationEnabled(validationEnabled) {}
 
 DXGIFactoryImpl::~DXGIFactoryImpl() noexcept {
     DestroyImpl();
@@ -623,10 +625,12 @@ std::optional<uint32_t> DXGIFactoryImpl::SelectHighPerformanceAdapter() const no
 
 Nullable<unique_ptr<DXGIFactory>> CreateDXGIFactory(const DXGIFactoryDescriptor& desc) {
     uint32_t dxgiFactoryFlags = 0;
+    bool validationEnabled = false;
     if (desc.IsEnableDebugLayer) {
         ComPtr<ID3D12Debug> debugController;
         if (SUCCEEDED(::D3D12GetDebugInterface(IID_PPV_ARGS(&debugController)))) {
             debugController->EnableDebugLayer();
+            validationEnabled = true;
             dxgiFactoryFlags |= DXGI_CREATE_FACTORY_DEBUG;
             if (desc.IsEnableGpuBasedValid) {
                 ComPtr<ID3D12Debug1> debug1;
@@ -647,7 +651,7 @@ Nullable<unique_ptr<DXGIFactory>> CreateDXGIFactory(const DXGIFactoryDescriptor&
         RADRAY_ERR_LOG("CreateDXGIFactory2 failed: {} {}", GetErrorName(hr), hr);
         return nullptr;
     }
-    return make_unique<DXGIFactoryImpl>(factory, desc);
+    return make_unique<DXGIFactoryImpl>(factory, desc, validationEnabled);
 }
 
 DeviceD3D12::DeviceD3D12(

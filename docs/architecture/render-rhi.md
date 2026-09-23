@@ -103,6 +103,8 @@ blob 与显式 `ShaderArtifactDecodeOptions`，先要求 device backend 与 opti
 
 Vulkan 还有一个进程级全局：`VkInstance` 存在 `g_vkInstance`，经 `InstanceVulkan::InitEnv` /
 `ShutdownEnv` 管理，独立于 `Device`。D3D12 的对应物是 `DXGIFactory::Create`。
+`InstanceVulkan::IsValidationEnabled()` 与 `DXGIFactory::IsValidationEnabled()` 报告实际启用的验证状态；
+运行时据此区分验证不可用和后续设备初始化失败。
 
 ## 绑定模型
 

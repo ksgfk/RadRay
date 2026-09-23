@@ -96,8 +96,9 @@ CPU record/Submit 时间与 GPU 时间线分开解读。关闭使用 `-DRADRAY_E
 | `test_manual_coroutine_scheduler` | `ManualCoroutineScheduler`（冻结派发、取消其他等待者、跨等待表截止与延迟取消） |
 | `test_asset_slot` | `AssetSlotTest` |
 | `test_frame_upload` | `FrameUploadTest` |
+| `test_application_systems` | `ApplicationSystems`（零系统、单系统、CPU 帧循环、非法配置） |
 | `test_gpu_system` | `GpuSystemTest`, `GpuSystemDeathTest` |
-| `test_scene_delivery` | `SceneDelivery`, `MultiWorldSceneRunner`（含单/多场景 CPU 交付与 D3D12/Vulkan runner，F=1/2/3/8） |
+| `test_scene_delivery` | `SceneDelivery`, `SceneDeliveryRunner`, `MultiWorldSceneRunner`（CPU 场景帧循环与双后端 GPU runner，F=1/2/3/8） |
 | `test_scene_delivery_state` | `SceneDeliveryState`（直接通过 RenderSystem 验证发布次序、serial、停止排空和随机槽位复用） |
 | `test_world_scenes` | `WorldManager`, `WorldScenes`（多 World 所有权、暂停、独立场景写入、连接与退休） |
 | `test_scene_updates` | `SceneUpdates`（组件标脏合并、生命周期、代次与收集约束；纯 CPU） |
@@ -156,6 +157,8 @@ ctest --test-dir build_debug -C Debug -R AssetSlotTest --output-on-failure
 初始化失败；可选后端不可用时可 `GTEST_SKIP()`，native 初始化、资源、PSO、提交或读回错误必须
 失败。`RADRAY_TEST_REQUIRED_BACKENDS=d3d12,vulkan` 使必测后端缺失也失败。样例资产在被忽略的 `assets/`
 下，通过源码仓库外的渠道准备。新增测试源文件后重新 configure；CTest 不负责构建。
+Application/GpuSystem 测试直接读取启动状态，仅在后端未编译、无 adapter 或缺验证层且后端未被指定为必测时跳过；
+不再为测试先创建探测 device。CPU 用例只启用所需系统；需要 GPU 但不检查 GPU 耗时的用例关闭帧计时器。
 
 `RuntimeMultiWindow` 在一个 Application 内运行主窗口与两个副窗口，覆盖 D3D12/Vulkan 的
 单线程和双线程模式（Vulkan 四例目前暂时注释，见下方已知问题）。用例清屏各交换链，交替正序/逆序归还多命令批次，混合显式与自动提交，

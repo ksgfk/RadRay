@@ -1616,6 +1616,7 @@ public:
     virtual vector<VulkanPhysicalDeviceInfo> GetPhysicalDevices() const noexcept = 0;
 
     virtual std::optional<uint32_t> SelectHighPerformancePhysicalDevice() const noexcept = 0;
+    virtual bool IsValidationEnabled() const noexcept = 0;
 
     static Nullable<InstanceVulkan*> InitEnv(const VulkanInstanceDescriptor& desc);
     static void ShutdownEnv() noexcept;
@@ -1630,6 +1631,7 @@ public:
     virtual vector<DXGIAdapterInfo> GetAdapters() const noexcept = 0;
 
     virtual std::optional<uint32_t> SelectHighPerformanceAdapter() const noexcept = 0;
+    virtual bool IsValidationEnabled() const noexcept = 0;
 
     static Nullable<unique_ptr<DXGIFactory>> Create(const DXGIFactoryDescriptor& desc);
 };

@@ -213,12 +213,12 @@ WindowCreateResult WindowManager::CreateWindowImmediate(const WindowCreateDescri
     return {WindowOperationStatus::Completed, result->GetHandle()};
 }
 
-bool WindowManager::InitializeMainWindow(const WindowCreateDescriptor& desc, const WindowSwapChainDescriptor& swapchain) {
+bool WindowManager::InitializeMainWindow(const WindowCreateDescriptor& desc, std::optional<WindowSwapChainDescriptor> swapchain) {
     _applyingOperations = true;
     auto phase = MakeScopeGuard([this]() noexcept { _applyingOperations = false; });
     auto result = CreateWindowImmediate(desc, true);
     if (result.Status != WindowOperationStatus::Completed) return false;
-    return ResolveWindow(result.Handle)->AttachSwapChain(swapchain) == WindowOperationStatus::Completed;
+    return !swapchain || ResolveWindow(result.Handle)->AttachSwapChain(*swapchain) == WindowOperationStatus::Completed;
 }
 
 bool AppWindow::IsMinimized() const noexcept {

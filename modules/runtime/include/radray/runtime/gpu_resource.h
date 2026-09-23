@@ -21,6 +21,7 @@ class MeshResource;
 class GpuFrameProfiler {
 public:
     GpuFrameProfiler(render::Device* device, render::CommandQueue* queue, uint32_t flightCount);
+    static unique_ptr<GpuFrameProfiler> TryCreate(render::Device* device, render::CommandQueue* queue, uint32_t flightCount);
     ~GpuFrameProfiler() noexcept;
     GpuFrameProfiler(const GpuFrameProfiler&) = delete;
     GpuFrameProfiler(GpuFrameProfiler&&) = delete;
@@ -37,6 +38,8 @@ public:
     float GetLastGpuTimeMs() const noexcept { return _lastGpuTimeMs.load(std::memory_order_relaxed); }
 
 private:
+    explicit GpuFrameProfiler(render::CommandQueue* queue) noexcept : _queue(queue) {}
+    bool Initialize(render::Device* device, uint32_t flightCount);
     static constexpr uint32_t TimestampQueryCount = 2;
 
     struct FrameTiming {

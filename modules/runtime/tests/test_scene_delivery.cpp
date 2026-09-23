@@ -1,6 +1,7 @@
 #include "scene_test_support.h"
 #include "runtime_test_support.h"
 #include "gpu_test_fixture.h"
+#include "gpu_runtime_test_support.h"
 
 #include <semaphore>
 
@@ -157,6 +158,79 @@ TEST(SceneDelivery, ApplyWaitsForThePreviousCpuReader) {
     EXPECT_FALSE(scene.ContainsShape(id));
 }
 
+class CpuSceneDeliveryApp final : public Application {
+public:
+    explicit CpuSceneDeliveryApp(uint32_t flightCount) : _flightCount(flightCount) {}
+
+protected:
+    void OnInit() override {
+        EXPECT_FALSE(GetWindowManager());
+        EXPECT_FALSE(GetGpuSystem());
+        EXPECT_FALSE(GetAssetManager());
+        ASSERT_TRUE(GetRenderSystem());
+        ASSERT_TRUE(GetWorldManager());
+        _firstWorld = GetWorldManager()->CreateWorld();
+        _secondWorld = GetWorldManager()->CreateWorld();
+        GetWorldManager()->RequestRenderConnection(_firstWorld, true);
+        GetWorldManager()->RequestRenderConnection(_secondWorld, true);
+        _firstActor = GetWorldManager()->GetWorld(_firstWorld)->SpawnActor();
+        _firstComponent = _firstActor->AddComponent<PrimitiveComponent>();
+        GetWorldManager()->GetWorld(_secondWorld)->SpawnActor()->AddComponent<PrimitiveComponent>();
+    }
+
+    void OnUpdate(const AppUpdateContext& ctx) override {
+        EXPECT_EQ(ctx.FlightIndex, _updates % _flightCount);
+        EXPECT_EQ(ctx.LastFrameLatency.count(), 0.0f);
+        ++_updates;
+        if (_updates == 1) {
+            _firstScene = *GetWorldManager()->GetWorld(_firstWorld)->GetRenderSceneId();
+            _secondScene = *GetWorldManager()->GetWorld(_secondWorld)->GetRenderSceneId();
+            _firstShape = _firstComponent->GetShapeId();
+        } else if (_updates == 2) {
+            ASSERT_TRUE(GetRenderSystem()->GetSceneRT(_firstScene));
+            EXPECT_TRUE(GetRenderSystem()->GetSceneRT(_firstScene)->ContainsShape(_firstShape));
+            EXPECT_TRUE(GetRenderSystem()->GetSceneRT(_secondScene));
+            GetWorldManager()->DestroyWorld(_secondWorld);
+        } else if (_updates == 3) {
+            EXPECT_FALSE(GetRenderSystem()->GetSceneRT(_secondScene));
+            EXPECT_TRUE(GetRenderSystem()->GetSceneRT(_firstScene)->ContainsShape(_firstShape));
+        } else if (_updates == 4) {
+            RequestExit();
+        }
+    }
+
+    void OnRender(AppFrameContext&) override { ADD_FAILURE() << "CPU frame loop must not record GPU work"; }
+    void OnRenderFrameComplete(const FlightCompletion&) override { ADD_FAILURE() << "CPU frame loop has no GPU completion"; }
+    void OnShutdown() override {
+        EXPECT_EQ(_updates, 4u);
+        EXPECT_TRUE(GetRenderSystem()->GetSceneRT(_firstScene)->ContainsShape(_firstShape));
+        EXPECT_FALSE(GetRenderSystem()->GetSceneRT(_secondScene));
+    }
+
+private:
+    uint32_t _flightCount;
+    uint32_t _updates{0};
+    WorldId _firstWorld;
+    WorldId _secondWorld;
+    SceneId _firstScene;
+    SceneId _secondScene;
+    ShapeId _firstShape;
+    Nullable<Actor*> _firstActor{nullptr};
+    Nullable<PrimitiveComponent*> _firstComponent{nullptr};
+};
+
+TEST(SceneDeliveryRunner, CpuOnlyWorldSceneFrames) {
+    for (uint32_t flightCount : {1u, 2u, 3u, 8u}) {
+        SCOPED_TRACE(flightCount);
+        CpuSceneDeliveryApp app{flightCount};
+        RuntimeStartupResult startup;
+        EXPECT_EQ(app.Run({.Backend = render::RenderBackend::D3D12,
+                           .FlightDataCount = flightCount,
+                           .Systems = ApplicationSystem::Render | ApplicationSystem::World}, startup), 0);
+        EXPECT_EQ(startup.Status, RuntimeStartupStatus::Started) << startup.Reason;
+    }
+}
+
 #if defined(_WIN32)
 class SceneDeliveryApp final : public Application {
 public:
@@ -195,8 +269,12 @@ protected:
             // Runner closes window operations after setting its exit flag, before joining RT.
             _tasks.Spawn(ReleaseRenderOnCancellation());
         }
-        auto* native = GetWindowManager()->GetMainWindow()->GetNativeWindow();
-        ::SendMessageW(static_cast<HWND>(native->GetNativeHandler()), WM_CLOSE, 0, 0);
+        if (_drainOnExit) {
+            auto* native = GetWindowManager()->GetMainWindow()->GetNativeWindow();
+            ::SendMessageW(static_cast<HWND>(native->GetNativeHandler()), WM_CLOSE, 0, 0);
+        } else {
+            RequestExit();
+        }
     }
 
     void OnRender(AppFrameContext& ctx) override {
@@ -241,15 +319,17 @@ private:
 };
 
 void RunSceneDelivery(render::RenderBackend backend, bool threaded, bool drainOnExit) {
-    {
-        render::test::DeviceContext probe;
-        if (!render::test::TryCreateDevice(backend, probe)) GTEST_SKIP() << probe.Reason;
-    }
     for (uint32_t count : {1u, 2u, 3u, 8u}) {
         SCOPED_TRACE(count);
         test::RuntimeLogCapture logs;
         SceneDeliveryApp app{drainOnExit};
-        ASSERT_EQ(app.Run({.Backend = backend, .EnableValidation = true, .Multithreaded = threaded, .EnableSynchronizationValidation = true, .WindowTitle = "RenderScene delivery", .WindowWidth = 80, .WindowHeight = 60, .FlightDataCount = count, .BackBufferFormat = render::TextureFormat::BGRA8_UNORM, .PresentMode = render::PresentMode::FIFO}), 0);
+        const ApplicationSystems systems = drainOnExit
+            ? ApplicationSystem::Window | ApplicationSystem::Gpu | ApplicationSystem::Render | ApplicationSystem::World
+            : ApplicationSystem::Gpu | ApplicationSystem::Render | ApplicationSystem::World;
+        auto run = test::RunApplication(app, {.Backend = backend, .EnableValidation = true, .Multithreaded = threaded, .EnableSynchronizationValidation = true, .WindowTitle = "RenderScene delivery", .WindowWidth = 80, .WindowHeight = 60, .FlightDataCount = count, .BackBufferFormat = render::TextureFormat::BGRA8_UNORM, .PresentMode = render::PresentMode::FIFO, .Systems = systems, .EnableGpuFrameProfiler = false});
+        if (test::CanSkipRuntimeStartup(backend, run.Startup)) GTEST_SKIP() << run.Startup.Reason;
+        ASSERT_EQ(run.Startup.Status, RuntimeStartupStatus::Started) << run.Startup.Reason;
+        ASSERT_EQ(run.ExitCode, 0);
         EXPECT_EQ(app.PublishedFrames, drainOnExit ? count - 1 : 12u);
         if (drainOnExit && count == 3) EXPECT_GE(app.Dropped, 1u);
         if (!drainOnExit) EXPECT_EQ(app.Recorded + app.Dropped, app.PublishedFrames);
@@ -295,8 +375,7 @@ protected:
             GetWorldManager()->RequestReconnect(_firstWorld);
         }
         if (_updates == 9) {
-            auto* native = GetWindowManager()->GetMainWindow()->GetNativeWindow();
-            ::SendMessageW(static_cast<HWND>(native->GetNativeHandler()), WM_CLOSE, 0, 0);
+            RequestExit();
         }
     }
 
@@ -342,15 +421,14 @@ private:
 };
 
 void RunMultiWorldDelivery(render::RenderBackend backend, bool threaded) {
-    {
-        render::test::DeviceContext probe;
-        if (!render::test::TryCreateDevice(backend, probe)) GTEST_SKIP() << probe.Reason;
-    }
     for (uint32_t count : {1u, 2u, 3u, 8u}) {
         SCOPED_TRACE(count);
         test::RuntimeLogCapture logs;
         MultiWorldDeliveryApp app;
-        ASSERT_EQ(app.Run({.Backend = backend, .EnableValidation = true, .Multithreaded = threaded, .EnableSynchronizationValidation = true, .WindowTitle = "Multiple world delivery", .WindowWidth = 80, .WindowHeight = 60, .FlightDataCount = count, .BackBufferFormat = render::TextureFormat::BGRA8_UNORM, .PresentMode = render::PresentMode::FIFO}), 0);
+        auto run = test::RunApplication(app, {.Backend = backend, .EnableValidation = true, .Multithreaded = threaded, .EnableSynchronizationValidation = true, .FlightDataCount = count, .Systems = ApplicationSystem::Gpu | ApplicationSystem::Render | ApplicationSystem::World, .EnableGpuFrameProfiler = false});
+        if (test::CanSkipRuntimeStartup(backend, run.Startup)) GTEST_SKIP() << run.Startup.Reason;
+        ASSERT_EQ(run.Startup.Status, RuntimeStartupStatus::Started) << run.Startup.Reason;
+        ASSERT_EQ(run.ExitCode, 0);
         EXPECT_EQ(app.Completed, 8u);
         EXPECT_TRUE(logs.Errors().empty()) << logs.Errors();
     }

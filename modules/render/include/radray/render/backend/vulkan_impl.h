@@ -83,6 +83,7 @@ public:
     vector<VulkanPhysicalDeviceInfo> GetPhysicalDevices() const noexcept override;
 
     std::optional<uint32_t> SelectHighPerformancePhysicalDevice() const noexcept override;
+    bool IsValidationEnabled() const noexcept override;
 
     const VkAllocationCallbacks* GetAllocationCallbacks() const noexcept;
 

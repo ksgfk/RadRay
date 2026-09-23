@@ -526,6 +526,11 @@ std::optional<uint32_t> InstanceVulkanImpl::SelectHighPerformancePhysicalDevice(
     return physicalDevices.value()[selectedIndex.value()].publicInfo.Index;
 }
 
+bool InstanceVulkanImpl::IsValidationEnabled() const noexcept {
+    return _debugMessenger != VK_NULL_HANDLE &&
+           std::find(_layers.begin(), _layers.end(), "VK_LAYER_KHRONOS_validation") != _layers.end();
+}
+
 const VkAllocationCallbacks* InstanceVulkanImpl::GetAllocationCallbacks() const noexcept {
     return _allocCb.has_value() ? &_allocCb.value() : nullptr;
 }

@@ -13,6 +13,7 @@
 #include <radray/coroutine.h>
 #include <radray/render/rhi.h>
 #include <radray/runtime/gpu_resource.h>
+#include <radray/runtime/startup_result.h>
 #include <radray/runtime/wait_frame.h>
 
 // device / queue / flight / 上传 / 帧边界等待。帧序与关停顺序: docs/architecture/frame-and-gpu.md
@@ -254,6 +255,7 @@ public:
 
     /// [GT] 创建设备、队列与固定数量的 flight；构造完成后才能交给 RT。
     GpuSystem(const GpuSystemDescriptor& desc);
+    static unique_ptr<GpuSystem> TryCreate(const GpuSystemDescriptor& desc, RuntimeStartupResult& startup);
     GpuSystem(const GpuSystem&) = delete;
     GpuSystem(GpuSystem&&) = delete;
     GpuSystem& operator=(const GpuSystem&) = delete;
@@ -346,6 +348,9 @@ private:
     friend class Application;
     friend class AppFrameContext;
     friend class WaitFrameAwaitable;
+
+    GpuSystem(uint32_t backBufferCount, uint32_t flightDataCount) noexcept;
+    bool Initialize(const GpuSystemDescriptor& desc, RuntimeStartupResult& startup);
 
     /// [RT] 当前 flight 的录制线程独占调用；与 BeginFrameRecord/EndFrameRecordAndSubmit 同线程。
     void SubmitFrame(uint32_t flightIndex);

@@ -1,12 +1,13 @@
 #include "runtime_test_support.h"
 #include "gpu_test_fixture.h"
+#include "gpu_runtime_test_support.h"
 
 #include <radray/runtime/gpu_system.h>
 
 namespace radray {
 namespace {
 
-unique_ptr<GpuSystem> CreateGpuSystem(render::RenderBackend backend, bool profiler, bool validation = true) {
+unique_ptr<GpuSystem> CreateGpuSystem(render::RenderBackend backend, bool profiler, RuntimeStartupResult& startup, bool validation = true) {
     const render::VulkanCommandQueueDescriptor queue{render::QueueType::Direct, 1};
     GpuSystemDescriptor desc{
         .VulkanInstance = {.IsEnableDebugLayer = validation, .IsEnableSynchronizationValidation = validation},
@@ -18,7 +19,7 @@ unique_ptr<GpuSystem> CreateGpuSystem(render::RenderBackend backend, bool profil
         device.Queues = std::span{&queue, 1};
         desc.Device = device;
     }
-    return make_unique<GpuSystem>(desc);
+    return GpuSystem::TryCreate(desc, startup);
 }
 
 void BufferBarrier(render::CommandBuffer* commands, render::Buffer* buffer, render::BufferStates before, render::BufferStates after) {
@@ -27,12 +28,11 @@ void BufferBarrier(render::CommandBuffer* commands, render::Buffer* buffer, rend
 }
 
 void RunCommandBatches(render::RenderBackend backend, bool profiler) {
-    {
-        render::test::DeviceContext probe;
-        if (!render::test::TryCreateDevice(backend, probe)) GTEST_SKIP() << probe.Reason;
-    }
     test::RuntimeLogCapture logs;
-    auto gpu = CreateGpuSystem(backend, profiler);
+    RuntimeStartupResult startup;
+    auto gpu = CreateGpuSystem(backend, profiler, startup);
+    if (test::CanSkipRuntimeStartup(backend, startup)) GTEST_SKIP() << startup.Reason;
+    ASSERT_NE(gpu, nullptr) << startup.Reason;
     auto* device = gpu->GetDevice();
     const bool vulkan = backend == render::RenderBackend::Vulkan;
     vector<render::CommandBuffer*> previous[2];
@@ -150,12 +150,11 @@ task<void> ObserveFlightCompletion(GpuSystem* gpu, bool& resumed) {
 }
 
 void RunFinalFence(render::RenderBackend backend) {
-    {
-        render::test::DeviceContext probe;
-        if (!render::test::TryCreateDevice(backend, probe)) GTEST_SKIP() << probe.Reason;
-    }
     // Native host-signaled waits avoid validation-layer semaphore tracking.
-    auto gpu = CreateGpuSystem(backend, false, false);
+    RuntimeStartupResult startup;
+    auto gpu = CreateGpuSystem(backend, false, startup, false);
+    if (test::CanSkipRuntimeStartup(backend, startup)) GTEST_SKIP() << startup.Reason;
+    ASSERT_NE(gpu, nullptr) << startup.Reason;
     bool resumed = false;
     TaskScope waiting;
     waiting.Spawn(ObserveFlightCompletion(gpu.get(), resumed));
@@ -189,11 +188,10 @@ TEST(GpuSystemTest, VulkanOnlyFinalFenceRetiresFlight) { RunFinalFence(render::R
 class GpuSystemDeathTest : public testing::Test {
 protected:
     void SetUp() override {
-        {
-            render::test::DeviceContext probe;
-            if (!render::test::TryCreateDevice(render::RenderBackend::D3D12, probe)) GTEST_SKIP() << probe.Reason;
-        }
-        Gpu = CreateGpuSystem(render::RenderBackend::D3D12, false, false);
+        RuntimeStartupResult startup;
+        Gpu = CreateGpuSystem(render::RenderBackend::D3D12, false, startup, false);
+        if (test::CanSkipRuntimeStartup(render::RenderBackend::D3D12, startup)) GTEST_SKIP() << startup.Reason;
+        ASSERT_NE(Gpu, nullptr) << startup.Reason;
     }
     unique_ptr<GpuSystem> Gpu;
 };

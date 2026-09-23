@@ -1,5 +1,6 @@
 #include "runtime_test_support.h"
 #include "gpu_test_fixture.h"
+#include "gpu_runtime_test_support.h"
 
 #include <gtest/gtest.h>
 
@@ -48,7 +49,7 @@ protected:
         ++RecordedFrames;
         auto* prefix = ctx.AllocateCommandBuffer();
         ctx.ReturnCommandBuffers({.CmdBuffers = std::span{&prefix, 1}});
-        auto* windows = GetWindowManager();
+        auto* windows = GetWindowManager().Get();
         auto* registry = GetRenderSystem()->GetRenderPassRegistry();
         ASSERT_NE(registry, nullptr);
         for (size_t index = 0; index < windows->GetWindowCount(); ++index) {
@@ -148,13 +149,12 @@ private:
 };
 
 void RunFoundation(render::RenderBackend backend, bool threaded) {
-    {
-        render::test::DeviceContext device;
-        if (!render::test::TryCreateDevice(backend, device)) GTEST_SKIP() << device.Reason;
-    }
     test::RuntimeLogCapture logs;
     FoundationApp app;
-    ASSERT_EQ(app.Run({.Backend = backend, .EnableValidation = true, .Multithreaded = threaded, .EnableSynchronizationValidation = true, .WindowTitle = "Runtime foundation", .WindowWidth = 160, .WindowHeight = 120, .FlightDataCount = 2, .BackBufferFormat = render::TextureFormat::BGRA8_UNORM, .PresentMode = render::PresentMode::FIFO}), 0);
+    auto run = test::RunApplication(app, {.Backend = backend, .EnableValidation = true, .Multithreaded = threaded, .EnableSynchronizationValidation = true, .WindowTitle = "Runtime foundation", .WindowWidth = 160, .WindowHeight = 120, .FlightDataCount = 2, .BackBufferFormat = render::TextureFormat::BGRA8_UNORM, .PresentMode = render::PresentMode::FIFO, .EnableGpuFrameProfiler = false});
+    if (test::CanSkipRuntimeStartup(backend, run.Startup)) GTEST_SKIP() << run.Startup.Reason;
+    ASSERT_EQ(run.Startup.Status, RuntimeStartupStatus::Started) << run.Startup.Reason;
+    ASSERT_EQ(run.ExitCode, 0);
     EXPECT_TRUE(app.WorldAvailable);
     EXPECT_TRUE(app.Resized);
     EXPECT_TRUE(app.AuxiliaryDestroyed);
@@ -182,7 +182,7 @@ protected:
             EXPECT_TRUE(_secondRecording.try_acquire_for(std::chrono::seconds{5}));
             _thirdUpdate.release();
         }
-        if (_updates >= 3) test::CloseMainWindow(*this);
+        if (_updates >= 3) RequestExit();
     }
 
     void OnRender(AppFrameContext& ctx) override {
@@ -213,13 +213,12 @@ private:
 };
 
 void RunFlightReuseOverlap(render::RenderBackend backend) {
-    {
-        render::test::DeviceContext device;
-        if (!render::test::TryCreateDevice(backend, device)) GTEST_SKIP() << device.Reason;
-    }
     test::RuntimeLogCapture logs;
     FlightReuseOverlapApp app;
-    ASSERT_EQ(app.Run({.Backend = backend, .EnableValidation = true, .Multithreaded = true, .EnableSynchronizationValidation = true, .WindowTitle = "Flight reuse overlap", .WindowWidth = 80, .WindowHeight = 60, .FlightDataCount = 2, .BackBufferFormat = render::TextureFormat::BGRA8_UNORM, .PresentMode = render::PresentMode::FIFO}), 0);
+    auto run = test::RunApplication(app, {.Backend = backend, .EnableValidation = true, .Multithreaded = true, .EnableSynchronizationValidation = true, .FlightDataCount = 2, .Systems = ApplicationSystem::Gpu, .EnableGpuFrameProfiler = false});
+    if (test::CanSkipRuntimeStartup(backend, run.Startup)) GTEST_SKIP() << run.Startup.Reason;
+    ASSERT_EQ(run.Startup.Status, RuntimeStartupStatus::Started) << run.Startup.Reason;
+    ASSERT_EQ(run.ExitCode, 0);
     EXPECT_TRUE(logs.Errors().empty()) << logs.Errors();
 }
 
@@ -317,13 +316,12 @@ private:
 };
 
 void RunDroppedPresentation(render::RenderBackend backend) {
-    {
-        render::test::DeviceContext probe;
-        if (!render::test::TryCreateDevice(backend, probe)) GTEST_SKIP() << probe.Reason;
-    }
     test::RuntimeLogCapture logs;
     DroppedPresentationApp app;
-    ASSERT_EQ(app.Run({.Backend = backend, .EnableValidation = true, .EnableSynchronizationValidation = true, .WindowTitle = "Dropped presentation", .WindowWidth = 80, .WindowHeight = 60, .BackBufferFormat = render::TextureFormat::BGRA8_UNORM, .PresentMode = render::PresentMode::FIFO}), 0);
+    auto run = test::RunApplication(app, {.Backend = backend, .EnableValidation = true, .EnableSynchronizationValidation = true, .WindowTitle = "Dropped presentation", .WindowWidth = 80, .WindowHeight = 60, .BackBufferFormat = render::TextureFormat::BGRA8_UNORM, .PresentMode = render::PresentMode::FIFO, .Systems = ApplicationSystem::Window | ApplicationSystem::Gpu, .EnableGpuFrameProfiler = false});
+    if (test::CanSkipRuntimeStartup(backend, run.Startup)) GTEST_SKIP() << run.Startup.Reason;
+    ASSERT_EQ(run.Startup.Status, RuntimeStartupStatus::Started) << run.Startup.Reason;
+    ASSERT_EQ(run.ExitCode, 0);
     EXPECT_TRUE(app.Dropped);
     EXPECT_TRUE(app.Recovered);
     EXPECT_TRUE(logs.Errors().empty()) << logs.Errors();
@@ -363,12 +361,11 @@ protected:
 };
 
 TEST(RuntimeFoundationDeathTest, RejectsUnreturnedForeignAndConsumedTargets) {
-    {
-        render::test::DeviceContext probe;
-        if (!render::test::TryCreateDevice(render::RenderBackend::D3D12, probe)) GTEST_SKIP() << probe.Reason;
-    }
     TargetContractApp app;
-    EXPECT_EQ(app.Run({.Backend = render::RenderBackend::D3D12, .WindowTitle = "Target contract", .WindowWidth = 80, .WindowHeight = 60, .BackBufferFormat = render::TextureFormat::BGRA8_UNORM, .PresentMode = render::PresentMode::FIFO}), 0);
+    auto run = test::RunApplication(app, {.Backend = render::RenderBackend::D3D12, .WindowTitle = "Target contract", .WindowWidth = 80, .WindowHeight = 60, .BackBufferFormat = render::TextureFormat::BGRA8_UNORM, .PresentMode = render::PresentMode::FIFO, .Systems = ApplicationSystem::Window | ApplicationSystem::Gpu, .EnableGpuFrameProfiler = false});
+    if (test::CanSkipRuntimeStartup(render::RenderBackend::D3D12, run.Startup)) GTEST_SKIP() << run.Startup.Reason;
+    ASSERT_EQ(run.Startup.Status, RuntimeStartupStatus::Started) << run.Startup.Reason;
+    EXPECT_EQ(run.ExitCode, 0);
 }
 
 class FrameBoundaryApp final : public Application {
@@ -448,15 +445,14 @@ private:
 };
 
 void RunFrameBoundary(render::RenderBackend backend, bool threaded) {
-    {
-        render::test::DeviceContext device;
-        if (!render::test::TryCreateDevice(backend, device)) GTEST_SKIP() << device.Reason;
-    }
     for (bool modal : {false, true}) {
         SCOPED_TRACE(modal ? "modal dispatch" : "normal dispatch");
         test::RuntimeLogCapture logs;
         FrameBoundaryApp app{modal};
-        ASSERT_EQ(app.Run({.Backend = backend, .EnableValidation = true, .Multithreaded = threaded, .EnableSynchronizationValidation = true, .WindowTitle = "Frame boundary", .WindowWidth = 80, .WindowHeight = 60, .FlightDataCount = 1, .BackBufferFormat = render::TextureFormat::BGRA8_UNORM, .PresentMode = render::PresentMode::FIFO}), 0);
+        auto run = test::RunApplication(app, {.Backend = backend, .EnableValidation = true, .Multithreaded = threaded, .EnableSynchronizationValidation = true, .WindowTitle = "Frame boundary", .WindowWidth = 80, .WindowHeight = 60, .FlightDataCount = 1, .BackBufferFormat = render::TextureFormat::BGRA8_UNORM, .PresentMode = render::PresentMode::FIFO, .Systems = ApplicationSystem::Window | ApplicationSystem::Gpu, .EnableGpuFrameProfiler = false});
+        if (test::CanSkipRuntimeStartup(backend, run.Startup)) GTEST_SKIP() << run.Startup.Reason;
+        ASSERT_EQ(run.Startup.Status, RuntimeStartupStatus::Started) << run.Startup.Reason;
+        ASSERT_EQ(run.ExitCode, 0);
         EXPECT_TRUE(logs.Errors().empty()) << logs.Errors();
     }
 }
@@ -593,7 +589,7 @@ protected:
 private:
     task<void> ResizeDuringGpuStall() {
         _mutationRequested = true;
-        auto* windows = GetWindowManager();
+        auto* windows = GetWindowManager().Get();
         const auto status = co_await windows->SetSize(windows->GetMainWindow()->GetHandle(), 360, 240);
         EXPECT_EQ(status, WindowOperationStatus::Completed);
         EXPECT_TRUE(_released.load());
@@ -646,14 +642,13 @@ private:
 };
 
 void RunStalledGpuInput(render::RenderBackend backend, bool threaded, bool mutateWindow = false) {
-    {
-        render::test::DeviceContext device;
-        if (!render::test::TryCreateDevice(backend, device)) GTEST_SKIP() << device.Reason;
-    }
     test::RuntimeLogCapture logs;
     StalledGpuInputApp app{backend, mutateWindow};
     // Host-signaled queue waits run without validation-layer semaphore tracking.
-    ASSERT_EQ(app.Run({.Backend = backend, .Multithreaded = threaded, .WindowTitle = "Stalled GPU input", .WindowWidth = 80, .WindowHeight = 60, .FlightDataCount = mutateWindow ? 2u : 1u, .BackBufferFormat = render::TextureFormat::BGRA8_UNORM, .PresentMode = render::PresentMode::FIFO}), 0);
+    auto run = test::RunApplication(app, {.Backend = backend, .Multithreaded = threaded, .WindowTitle = "Stalled GPU input", .WindowWidth = 80, .WindowHeight = 60, .FlightDataCount = mutateWindow ? 2u : 1u, .BackBufferFormat = render::TextureFormat::BGRA8_UNORM, .PresentMode = render::PresentMode::FIFO, .Systems = ApplicationSystem::Window | ApplicationSystem::Gpu, .EnableGpuFrameProfiler = false});
+    if (test::CanSkipRuntimeStartup(backend, run.Startup)) GTEST_SKIP() << run.Startup.Reason;
+    ASSERT_EQ(run.Startup.Status, RuntimeStartupStatus::Started) << run.Startup.Reason;
+    ASSERT_EQ(run.ExitCode, 0);
     EXPECT_TRUE(logs.Errors().empty()) << logs.Errors();
 }
 
@@ -673,7 +668,7 @@ public:
 
 protected:
     void OnInit() override {
-        auto* windows = GetWindowManager();
+        auto* windows = GetWindowManager().Get();
         _main = windows->GetMainWindow()->GetHandle();
         _surface = windows->GetMainWindow()->GetNativeWindow()->EventBeforeSurfaceChange().connect([this] {
             EXPECT_FALSE(_recording.load());
@@ -709,7 +704,7 @@ protected:
 
 private:
     task<void> Mutate() {
-        auto* windows = GetWindowManager();
+        auto* windows = GetWindowManager().Get();
         WindowCreateDescriptor desc{};
         desc.Title = "Deferred swapchain";
         desc.Width = 320;
@@ -767,13 +762,12 @@ private:
 };
 
 void RunWindowMutations(render::RenderBackend backend, bool threaded) {
-    {
-        render::test::DeviceContext device;
-        if (!render::test::TryCreateDevice(backend, device)) GTEST_SKIP() << device.Reason;
-    }
     test::RuntimeLogCapture logs;
     WindowMutationApp app;
-    ASSERT_EQ(app.Run({.Backend = backend, .EnableValidation = true, .Multithreaded = threaded, .EnableSynchronizationValidation = true, .WindowTitle = "Window coroutine lifecycle", .WindowWidth = 320, .WindowHeight = 200, .FlightDataCount = 2, .BackBufferFormat = render::TextureFormat::BGRA8_UNORM, .PresentMode = render::PresentMode::FIFO}), 0);
+    auto run = test::RunApplication(app, {.Backend = backend, .EnableValidation = true, .Multithreaded = threaded, .EnableSynchronizationValidation = true, .WindowTitle = "Window coroutine lifecycle", .WindowWidth = 320, .WindowHeight = 200, .FlightDataCount = 2, .BackBufferFormat = render::TextureFormat::BGRA8_UNORM, .PresentMode = render::PresentMode::FIFO, .Systems = ApplicationSystem::Window | ApplicationSystem::Gpu, .EnableGpuFrameProfiler = false});
+    if (test::CanSkipRuntimeStartup(backend, run.Startup)) GTEST_SKIP() << run.Startup.Reason;
+    ASSERT_EQ(run.Startup.Status, RuntimeStartupStatus::Started) << run.Startup.Reason;
+    ASSERT_EQ(run.ExitCode, 0);
     EXPECT_TRUE(app.Completed);
     EXPECT_TRUE(app.ShutdownCanceled);
     EXPECT_TRUE(logs.Errors().empty()) << logs.Errors();

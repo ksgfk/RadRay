@@ -52,6 +52,7 @@ public:
     void Destroy() noexcept override {}
     vector<DXGIAdapterInfo> GetAdapters() const noexcept override { return {}; }
     std::optional<uint32_t> SelectHighPerformanceAdapter() const noexcept override { return std::nullopt; }
+    bool IsValidationEnabled() const noexcept override { return false; }
     uint32_t& Destroys;
 };
 }  // namespace

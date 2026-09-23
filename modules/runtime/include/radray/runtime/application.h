@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <filesystem>
 #include <optional>
@@ -7,7 +8,9 @@
 #include <thread>
 
 #include <radray/coroutine.h>
+#include <radray/enum_flags.h>
 #include <radray/nullable.h>
+#include <radray/runtime/startup_result.h>
 #include <radray/types.h>
 
 namespace radray {
@@ -23,6 +26,7 @@ class AssetDatabase;
 class AssetManager;
 class RenderSystem;
 class WorldManager;
+class IWaitFrameProcessor;
 struct AppFrameTarget;
 struct FlightCompletion;
 
@@ -99,9 +103,21 @@ private:
     bool _stopping{false};
 };
 
-/// 一站式运行时启动描述。Application::Run(desc) 据此创建 GpuSystem(由其持有 device/factory)、
-/// 窗口系统、主窗口 + swapchain、AssetManager,并固化帧序与 shutdown 顺序。
-/// 核心系统都在运行时内部生命周期里创建与驱动。
+enum class ApplicationSystem : uint8_t {
+    Window = 1,
+    Gpu = 2,
+    Render = 4,
+    World = 8,
+    Asset = 16,
+};
+
+template <>
+struct is_flags<ApplicationSystem> : std::true_type {};
+
+using ApplicationSystems = EnumFlags<ApplicationSystem>;
+
+/// 一站式运行时启动描述。Systems 默认启用全部系统；未启用 GPU 时 Backend 与
+/// EnableGpuFrameProfiler 不参与初始化。
 struct ApplicationRuntimeDescriptor {
     // —— 后端 / 运行模式 ——
     render::RenderBackend Backend;
@@ -127,6 +143,8 @@ struct ApplicationRuntimeDescriptor {
     uint32_t FlightDataCount{2};
     render::TextureFormat BackBufferFormat;
     render::PresentMode PresentMode;
+    ApplicationSystems Systems{ApplicationSystem::Window | ApplicationSystem::Gpu | ApplicationSystem::Render | ApplicationSystem::World | ApplicationSystem::Asset};
+    bool EnableGpuFrameProfiler{true};
 };
 
 class Application {
@@ -140,15 +158,19 @@ public:
 
     /// 一行启动:创建运行时 → OnInit → 进主循环 → 退出后固化 Shutdown。返回进程退出码。
     int Run(const ApplicationRuntimeDescriptor& desc);
+    int Run(const ApplicationRuntimeDescriptor& desc, RuntimeStartupResult& startup);
 
-    WindowManager* GetWindowManager() noexcept { return _windowManager.get(); }
-    const WindowManager* GetWindowManager() const noexcept { return _windowManager.get(); }
-    GpuSystem* GetGpuSystem() noexcept { return _gpuSystem.get(); }
-    const GpuSystem* GetGpuSystem() const noexcept { return _gpuSystem.get(); }
-    AssetManager* GetAssetManager() noexcept { return _assetManager.get(); }
-    const AssetManager* GetAssetManager() const noexcept { return _assetManager.get(); }
-    RenderSystem* GetRenderSystem() noexcept { return _renderSystem.get(); }
-    const RenderSystem* GetRenderSystem() const noexcept { return _renderSystem.get(); }
+    /// 可从 OnInit/OnUpdate 请求结束；无窗口时也是正常退出入口。
+    void RequestExit() noexcept { _exitRequested = true; }
+
+    Nullable<WindowManager*> GetWindowManager() noexcept { return _windowManager.get(); }
+    Nullable<const WindowManager*> GetWindowManager() const noexcept { return _windowManager.get(); }
+    Nullable<GpuSystem*> GetGpuSystem() noexcept { return _gpuSystem.get(); }
+    Nullable<const GpuSystem*> GetGpuSystem() const noexcept { return _gpuSystem.get(); }
+    Nullable<AssetManager*> GetAssetManager() noexcept { return _assetManager.get(); }
+    Nullable<const AssetManager*> GetAssetManager() const noexcept { return _assetManager.get(); }
+    Nullable<RenderSystem*> GetRenderSystem() noexcept { return _renderSystem.get(); }
+    Nullable<const RenderSystem*> GetRenderSystem() const noexcept { return _renderSystem.get(); }
     ApplicationScheduler& GetScheduler() noexcept { return _scheduler; }
     const ApplicationScheduler& GetScheduler() const noexcept { return _scheduler; }
     /// Available from OnInit through OnShutdown; null outside the runtime lifetime.
@@ -166,14 +188,14 @@ protected:
     // 游戏 override 点 (窄接口)。底层负责"何时 tick、怎么 acquire/render/present",
     // 游戏只负责"这个应用要画什么"。
 
-    /// 运行时全部内部系统就绪后(device/window/gpu/render/asset 全部建好，World 由应用显式创建)的一次性初始化。
+    /// 所选系统就绪后的一次性初始化；World 由应用显式创建。
     /// 典型用途:加载资产、Spawn Actor、建相机。
     virtual void OnInit();
 
     /// 每帧游戏逻辑(World::Tick 之前)。在 AssetManager::Pump 之后调用。
     virtual void OnUpdate(const AppUpdateContext& ctx);
 
-    /// 在渲染线程（或单线程模式下的主线程）上录制应用程序命令。
+    /// GPU 模式下在渲染线程（或单线程模式下的主线程）上录制应用程序命令。
     /// runner 调用开始/结束/提交；资源必须在帧处理过程(flight)时保持存活。
     virtual void OnRender(AppFrameContext& ctx);
 
@@ -181,7 +203,7 @@ protected:
     /// 典型用途:释放游戏自管的 per-flight 资源、置空指向 World 的非 owning 指针。
     virtual void OnShutdown();
 
-    /// 主线程, 帧 flight 重用或销毁时调用. 丢弃的帧用 GpuWorkCompleted 检查.
+    /// GPU 模式下主线程在 flight 重用或销毁时调用；丢弃的帧用 GpuWorkCompleted 检查。
     virtual void OnRenderFrameComplete(const FlightCompletion& ctx);
 
     /// 是否请求退出。默认:主窗口被关闭。
@@ -190,10 +212,11 @@ protected:
 private:
     friend class SingleThreadRunner;
     friend class ThreadedRunner;
+    friend class CpuRunner;
     friend class RenderSystem;
     void SetCollecting(bool collecting);
 
-    bool InitializeRuntime(const ApplicationRuntimeDescriptor& desc);
+    bool InitializeRuntime(const ApplicationRuntimeDescriptor& desc, RuntimeStartupResult& startup);
     void StopAndDrainRuntime();
     void DestroyRuntime() noexcept;
     void WaitAndCleanupCompletedFlights();
@@ -210,12 +233,15 @@ private:
     unique_ptr<GpuSystem> _gpuSystem;
     unique_ptr<AssetDatabase> _assetDatabase;
     unique_ptr<AssetManager> _assetManager;
+    unique_ptr<IWaitFrameProcessor> _cpuWaitFrameProcessor;
     unique_ptr<RenderSystem> _renderSystem;
     unique_ptr<WorldManager> _worldManager;
     ApplicationScheduler _scheduler;
     std::filesystem::path _shaderSourceRoot;
     vector<std::filesystem::path> _shaderIncludePaths;
     bool _multithreaded{false};
+    std::atomic_bool _exitRequested{false};
+    uint32_t _flightDataCount{2};
     bool _processingFlightCompletions{false};
     const std::thread::id _applicationThread{std::this_thread::get_id()};
 };

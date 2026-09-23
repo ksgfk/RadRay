@@ -1,6 +1,7 @@
 #include "scene_test_support.h"
 #include "runtime_test_support.h"
 #include "gpu_test_fixture.h"
+#include "gpu_runtime_test_support.h"
 
 #include <radray/scope_guard.h>
 #include <radray/runtime/shader_jit.h>
@@ -69,10 +70,6 @@ task<void> WaitForDraw(GpuSystem& gpu, bool& notified) {
 }
 
 void RunMeshLifetime(render::RenderBackend backend, bool delayed, bool direct, bool threaded = false, uint32_t viewsToDraw = 1) {
-    {
-        render::test::DeviceContext probe;
-        if (!render::test::TryCreateDevice(backend, probe)) GTEST_SKIP() << probe.Reason;
-    }
     test::RuntimeLogCapture logs;
     MeshLifetime lifetime;
     const render::VulkanCommandQueueDescriptor queue{render::QueueType::Direct, 1};
@@ -86,7 +83,11 @@ void RunMeshLifetime(render::RenderBackend backend, bool delayed, bool direct, b
         vk.Queues = std::span{&queue, 1};
         descriptor.Device = vk;
     }
-    GpuSystem gpu{descriptor};
+    RuntimeStartupResult startup;
+    auto gpuOwner = GpuSystem::TryCreate(descriptor, startup);
+    if (test::CanSkipRuntimeStartup(backend, startup)) GTEST_SKIP() << startup.Reason;
+    ASSERT_NE(gpuOwner, nullptr) << startup.Reason;
+    GpuSystem& gpu = *gpuOwner;
     FrameWaitProbe assetWaits{gpu};
     AssetManager assets;
     assets.SetWaitFrameProcessor(&assetWaits);
@@ -262,10 +263,6 @@ task<AssetLoadResult> UploadNotification(GpuSystem& gpu, bool fail) {
 }
 
 void RunUploadCancellation(render::RenderBackend backend) {
-    {
-        render::test::DeviceContext probe;
-        if (!render::test::TryCreateDevice(backend, probe)) GTEST_SKIP() << probe.Reason;
-    }
     test::RuntimeLogCapture logs;
     const render::VulkanCommandQueueDescriptor queue{render::QueueType::Direct, 1};
     GpuSystemDescriptor descriptor{.FlightDataCount = 2, .EnableFrameProfiler = false};
@@ -274,7 +271,11 @@ void RunUploadCancellation(render::RenderBackend backend) {
         vk.Queues = std::span{&queue, 1};
         descriptor.Device = vk;
     }
-    GpuSystem gpu{descriptor};
+    RuntimeStartupResult startup;
+    auto gpuOwner = GpuSystem::TryCreate(descriptor, startup);
+    if (test::CanSkipRuntimeStartup(backend, startup)) GTEST_SKIP() << startup.Reason;
+    ASSERT_NE(gpuOwner, nullptr) << startup.Reason;
+    GpuSystem& gpu = *gpuOwner;
     AssetManager assets;
     auto* device = gpu.GetDevice();
     for (bool fail : {false, true}) {
