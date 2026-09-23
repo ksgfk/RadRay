@@ -4,7 +4,6 @@
 
 #include <filesystem>
 #include <fstream>
-#include <chrono>
 
 #include <radray/render/shader_layout.h>
 #include <radray/shader/shader_artifact.h>
@@ -528,81 +527,6 @@ TEST_F(D3D12DeviceFixture, FailedTableAllocationReturnsEarlierGpuSegments) {
     secondTable.DescriptorCount = 1;
     reserved.Destroy();
     EXPECT_TRUE(Device->CreateShaderParameterSet({.Layout = layout.get(), .GroupIndex = 0}).HasValue());
-}
-
-TEST_F(D3D12DeviceFixture, DISABLED_DescriptorPublishBenchmark) {
-    if (!Available) {
-        GTEST_SKIP() << "no d3d12 device";
-    }
-    auto bufferResult = Device->CreateBuffer({.Size = 512, .Memory = MemoryType::Upload, .Usage = BufferUse::CBuffer});
-    ASSERT_TRUE(bufferResult.HasValue());
-    auto buffer = bufferResult.Release();
-    for (uint32_t scenario = 0; scenario < 6; ++scenario) {
-        ResolvedD3D12Layout description;
-        description.Bindings = {MakeBinding("A", shader::ShaderBindingKind::CBuffer, 0, 0)};
-        description.Bindings[0].Count = scenario == 0 ? 1 : 64;
-        if (scenario == 4) {
-            description.Bindings[0].Count = 32;
-            description.Bindings[0].Stages = ShaderStage::Vertex;
-            description.Bindings.push_back(MakeBinding("B", shader::ShaderBindingKind::CBuffer, 0, 32,
-                                                       shader::ShaderBindingPlacement::Table, ShaderStage::Pixel));
-            description.Bindings[1].Count = 32;
-        }
-        if (scenario == 5) {
-            description.Bindings[0].Stages = ShaderStage::Vertex | ShaderStage::Pixel;
-            D3D12_DESCRIPTOR_RANGE1 range{D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 64, 0, 0, D3D12_DESCRIPTOR_RANGE_FLAG_NONE, 0};
-            D3D12_ROOT_PARAMETER1 parameters[2]{};
-            for (uint32_t i = 0; i < 2; ++i) {
-                parameters[i].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-                parameters[i].DescriptorTable = {1, &range};
-                parameters[i].ShaderVisibility = i == 0 ? D3D12_SHADER_VISIBILITY_VERTEX : D3D12_SHADER_VISIBILITY_PIXEL;
-            }
-            D3D12_VERSIONED_ROOT_SIGNATURE_DESC native{};
-            native.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
-            native.Desc_1_1.NumParameters = 2;
-            native.Desc_1_1.pParameters = parameters;
-            Microsoft::WRL::ComPtr<ID3DBlob> blob;
-            Microsoft::WRL::ComPtr<ID3DBlob> error;
-            ASSERT_TRUE(SUCCEEDED(D3D12SerializeVersionedRootSignature(&native, &blob, &error)));
-            const auto* begin = static_cast<const byte*>(blob->GetBufferPointer());
-            description.SerializedRootSignature.assign(begin, begin + blob->GetBufferSize());
-        }
-        auto layoutResult = Device->CreatePipelineLayout(description);
-        ASSERT_TRUE(layoutResult.HasValue());
-        auto layout = layoutResult.Release();
-        const auto allocationStart = std::chrono::steady_clock::now();
-        for (uint32_t i = 0; i < 1000; ++i) {
-            auto allocated = Device->CreateShaderParameterSet({.Layout = layout.get(), .GroupIndex = 0});
-            ASSERT_TRUE(allocated.HasValue());
-        }
-        const double allocationNs = std::chrono::duration<double, std::nano>(std::chrono::steady_clock::now() - allocationStart).count() / 1000;
-        auto setResult = Device->CreateShaderParameterSet({.Layout = layout.get(), .GroupIndex = 0});
-        ASSERT_TRUE(setResult.HasValue());
-        auto set = setResult.Release();
-        const auto a = layout->FindBinding("A");
-        const auto b = layout->FindBinding("B");
-        double flushNs = 0;
-        const auto start = std::chrono::steady_clock::now();
-        for (uint32_t iteration = 0; iteration < 5000; ++iteration) {
-            const uint32_t count = scenario == 0 ? 1 : 64;
-            const uint32_t step = scenario == 2 ? 7 : 1;
-            for (uint32_t element = 0; element < count; element += step) {
-                const auto handle = scenario == 4 && element >= 32 ? b : a;
-                const auto index = scenario == 4 ? element % 32 : element;
-                const ShaderBufferBinding value{buffer.get(), {uint64_t(iteration % 2) * 256, 256}, 0};
-                ASSERT_TRUE(set->Set(handle, index, value));
-                if (scenario == 3) {
-                    ASSERT_TRUE(set->Set(handle, index, value));
-                    ASSERT_TRUE(set->Set(handle, index, value));
-                }
-            }
-            const auto flushStart = std::chrono::steady_clock::now();
-            ASSERT_TRUE(set->FlushWrites());
-            flushNs += std::chrono::duration<double, std::nano>(std::chrono::steady_clock::now() - flushStart).count();
-        }
-        const double totalNs = std::chrono::duration<double, std::nano>(std::chrono::steady_clock::now() - start).count();
-        fmt::print("descriptor-benchmark scenario={} total_ns={:.1f} flush_ns={:.1f} allocation_ns={:.1f} iterations=5000\n", scenario, totalNs / 5000, flushNs / 5000, allocationNs);
-    }
 }
 
 TEST_F(D3D12DeviceFixture, SamplerDescriptorsSupportMultipleViewFlights) {

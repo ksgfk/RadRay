@@ -1,6 +1,10 @@
 #include "scene_test_support.h"
 
+#ifdef RADRAY_LIFECYCLE_BENCHMARK
+#include <benchmark/benchmark.h>
+#else
 #include <gtest/gtest.h>
+#endif
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
@@ -30,6 +34,7 @@ unique_ptr<StaticMesh> MakeBenchmarkMesh() {
     return make_unique<StaticMesh>(std::move(mesh), vector<StaticMeshSection>{}, Eigen::Vector3f::Zero(), Eigen::Vector3f::Ones(), GpuMesh{});
 }
 
+#ifdef RADRAY_LIFECYCLE_BENCHMARK
 array<int64_t, 2> AllocationTotals() {
 #ifdef RADRAY_ENABLE_MIMALLOC
     mi_stats_t stats;
@@ -44,7 +49,8 @@ double ElapsedMs(std::chrono::steady_clock::time_point begin) {
     return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count();
 }
 
-void MeasureCase(uint32_t count, uint32_t flights, uint32_t depth, bool uniqueAssets, bool threaded) {
+bool MeasureCase(uint32_t count, uint32_t flights, uint32_t depth, bool uniqueAssets, bool threaded) {
+    bool valid = true;
     Application app;
     AssetManager assets;
     RenderSystem renderer{&app, flights};
@@ -111,8 +117,8 @@ void MeasureCase(uint32_t count, uint32_t flights, uint32_t depth, bool uniqueAs
             array<vector<double>, 6> samples;
             for (auto& sample : samples) sample.reserve(7);
             int64_t allocations = allocationsTracked ? 0 : -1, allocationBytes = allocationsTracked ? 0 : -1;
-            uint64_t transformUpdates = 0;
-            const uint32_t expectedTransforms = std::min(count, ((changes + depth - 1) / depth) * depth);
+            uint64_t transformUpdates = 0, transformBytes = 0;
+            const uint32_t expectedTransforms = changes;
             const uint32_t warmup = flights + 1;
             for (uint32_t sample = 0; sample < warmup + 7; ++sample) {
                 flight = iteration++ % flights;
@@ -129,7 +135,9 @@ void MeasureCase(uint32_t count, uint32_t flights, uint32_t depth, bool uniqueAs
                 renderer.SealFrameGT(flight);
                 const auto capture = ElapsedMs(phase);
                 const auto& batch = test::SceneBatch(renderer, sceneId, flight);
-                const auto updates = batch.Transforms.size();
+                const auto localUpdates = batch.LocalTransforms.size();
+                const auto derivedUpdates = batch.Transforms.size();
+                const auto updates = localUpdates + derivedUpdates;
                 const bool onlyTransforms = batch.CreateShapes.empty() && batch.RemoveShapes.empty() &&
                                             batch.MeshStates.empty() && !batch.LightsChanged;
                 consume();
@@ -140,6 +148,7 @@ void MeasureCase(uint32_t count, uint32_t flights, uint32_t depth, bool uniqueAs
                 const auto allocAfter = AllocationTotals();
                 if (sample >= warmup) {
                     transformUpdates += updates;
+                    transformBytes += localUpdates * sizeof(LocalTransformUpdate) + derivedUpdates * sizeof(ShapeTransformUpdate);
                     const array values{tick, lifecycle, capture, applyMs, viewMs, retirement};
                     for (size_t k = 0; k < values.size(); ++k) samples[k].push_back(values[k]);
                     if (allocationsTracked) {
@@ -147,9 +156,12 @@ void MeasureCase(uint32_t count, uint32_t flights, uint32_t depth, bool uniqueAs
                         allocationBytes += allocAfter[1] - allocBefore[1];
                     }
                 }
-                EXPECT_EQ(visible, uint64_t{count} * views);
-                EXPECT_TRUE(onlyTransforms);
-                EXPECT_EQ(updates, expectedTransforms);
+                const bool sampleValid = visible == uint64_t{count} * views && onlyTransforms && updates == expectedTransforms;
+                if (valid && !sampleValid) {
+                    fmt::print(stderr, "Lifecycle sample mismatch: count={} F={} depth={} unique={} threaded={} changes={} views={} sample={} visible={} expected_visible={} updates={} expected_updates={} only_transforms={}\n",
+                               count, flights, depth, uniqueAssets, threaded, changes, views, sample, visible, uint64_t{count} * views, updates, expectedTransforms, onlyTransforms);
+                }
+                valid &= sampleValid;
             }
             string times;
             for (auto& sample : samples) {
@@ -157,7 +169,7 @@ void MeasureCase(uint32_t count, uint32_t flights, uint32_t depth, bool uniqueAs
                 times += fmt::format(",{:.6f},{:.6f}", sample[3], sample[6]);
             }
             fmt::print("LIFECYCLE_PERF,{},{},{},{},{},{},{}{},{},{},{},{}\n", count, flights, depth, uniqueAssets, threaded, changes, views,
-                       times, allocations, allocationBytes, transformUpdates, transformUpdates * sizeof(ShapeTransformUpdate));
+                       times, allocations, allocationBytes, transformUpdates, transformBytes);
         }
     }
     if (threaded) {
@@ -176,14 +188,14 @@ void MeasureCase(uint32_t count, uint32_t flights, uint32_t depth, bool uniqueAs
         const auto start = std::chrono::steady_clock::now();
         world.FinalizeWorldGT();
         const auto lifecycleMs = ElapsedMs(start);
-        EXPECT_EQ(world.GetActors().size(), survivors.size());
+        valid &= world.GetActors().size() == survivors.size();
         for (size_t i = 0; i < std::min(survivors.size(), world.GetActors().size()); ++i) {
-            EXPECT_EQ(world.GetActors()[i]->GetId(), survivors[i]);
+            valid &= world.GetActors()[i]->GetId() == survivors[i];
         }
         world.CollectRenderUpdates();
         renderer.SealFrameGT(flight);
         const auto removedPrimitives = test::SceneBatch(renderer, sceneId, flight).RemoveShapes.size();
-        EXPECT_EQ(removedPrimitives, removedCount);
+        valid &= removedPrimitives == removedCount;
         renderer.PublishFrameGT(flight);
         renderer.ConsumeRenderUpdates(flight, renderer.GetUpdateSequence(flight));
         const auto retirementStart = std::chrono::steady_clock::now();
@@ -195,20 +207,17 @@ void MeasureCase(uint32_t count, uint32_t flights, uint32_t depth, bool uniqueAs
     fmt::print("LIFECYCLE_SETUP,{},{},{},{},{},{:.6f},{},{},{}\n", count, flights, depth, uniqueAssets, threaded, setupMs,
                allocationsTracked ? afterSetupAllocations[0] - setupAllocations[0] : -1,
                allocationsTracked ? afterSetupAllocations[1] - setupAllocations[1] : -1, sizeof(Actor) + sizeof(StaticMeshComponent));
+    return valid;
 }
 
-TEST(LifecyclePerformance, Matrix) {
-    if (std::getenv("RADRAY_RUN_LIFECYCLE_BENCHMARK") == nullptr) GTEST_SKIP() << "Set RADRAY_RUN_LIFECYCLE_BENCHMARK=1 for the measured matrix";
+void PrintHeaders() {
     fmt::print("LIFECYCLE_PERF_HEADER,count,flights,depth,unique_assets,threaded,changes,views,tick_median_ms,tick_p95_ms,lifecycle_median_ms,lifecycle_p95_ms,capture_median_ms,capture_p95_ms,apply_median_ms,apply_p95_ms,view_median_ms,view_p95_ms,retirement_median_ms,retirement_p95_ms,allocations,allocation_bytes,transform_updates,transform_bytes\n");
     fmt::print("LIFECYCLE_DELETE_HEADER,count,flights,depth,unique_assets,threaded,removals,lifecycle_ms,retirement_ms,actors_before,actors_after,removed_primitives\n");
     fmt::print("LIFECYCLE_SETUP_HEADER,count,flights,depth,unique_assets,threaded,setup_ms,allocations,allocation_bytes,actor_component_bytes\n");
-    for (uint32_t count : {10000u, 100000u})
-        for (uint32_t flights : {1u, 2u, 3u})
-            for (uint32_t depth : {1u, 8u})
-                for (bool unique : {false, true})
-                    for (bool threaded : {false, true}) MeasureCase(count, flights, depth, unique, threaded);
 }
+#endif
 
+#ifndef RADRAY_LIFECYCLE_BENCHMARK
 TEST(LifecycleScale, SharedMeshViewsAndTransformCapture) {
     for (uint32_t count : {10000u, 100000u}) {
         Application app;
@@ -239,6 +248,39 @@ TEST(LifecycleScale, SharedMeshViewsAndTransformCapture) {
         EXPECT_FLOAT_EQ(test::SceneBatch(renderer, scene, 0).LocalTransforms[0].Local.Translation[0], 99);
     }
 }
+#endif
 
 }  // namespace
+
+#ifdef RADRAY_LIFECYCLE_BENCHMARK
+int RunLifecycleBenchmarks(int argc, char** argv) {
+    PrintHeaders();
+    bool failed = false;
+    for (uint32_t count : {10000u, 100000u})
+        for (uint32_t flights : {1u, 2u, 3u})
+            for (uint32_t depth : {1u, 8u})
+                for (bool unique : {false, true})
+                    for (bool threaded : {false, true}) {
+                        const auto name = fmt::format("Lifecycle/count:{}/F:{}/depth:{}/unique:{}/threaded:{}", count, flights, depth, unique, threaded);
+                        benchmark::RegisterBenchmark(name.c_str(), [=, &failed](benchmark::State& state) {
+                            for (auto _ : state) {
+                                if (!MeasureCase(count, flights, depth, unique, threaded)) {
+                                    failed = true;
+                                    state.SkipWithError("lifecycle validation failed");
+                                    return;
+                                }
+                            }
+                        })->Iterations(1);
+                    }
+    benchmark::Initialize(&argc, argv);
+    if (benchmark::ReportUnrecognizedArguments(argc, argv)) return 1;
+    benchmark::RunSpecifiedBenchmarks();
+    benchmark::Shutdown();
+    return failed ? 1 : 0;
+}
+#endif
 }  // namespace radray
+
+#ifdef RADRAY_LIFECYCLE_BENCHMARK
+int main(int argc, char** argv) { return radray::RunLifecycleBenchmarks(argc, argv); }
+#endif

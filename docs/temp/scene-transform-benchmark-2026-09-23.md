@@ -1,6 +1,6 @@
 > - 适用: World 无世界矩阵缓存、Scene 层级变换实验，以及本机 CPU 场景同步性能对照
-> - 权威: 2026-09-22 至 2026-09-23 的未提交实现与测量快照；长期接口以 render-framework 为准，不保证其他机器或业务负载得到相同比例
-> - 锚点: `modules/runtime/src/components/scene_component.cpp`, `modules/runtime/src/game_framework/world_render_bridge.cpp`, `modules/runtime/src/render_scene/scene_transform.cpp`, `modules/runtime/src/render_scene/render_scene.cpp`, `modules/runtime/tests/test_scene_sync_performance.cpp`, `tools/run_scene_sync_benchmark.py`
+> - 权威: 2026-09-22 至 2026-09-23 的历史配对测量，以及 2026-09-23 基于 Google Benchmark 的当前实现复测；长期接口以 render-framework 为准，不保证其他机器或业务负载得到相同比例
+> - 锚点: `modules/runtime/src/components/scene_component.cpp`, `modules/runtime/src/game_framework/world_render_bridge.cpp`, `modules/runtime/src/render_scene/scene_transform.cpp`, `modules/runtime/src/render_scene/render_scene.cpp`, `modules/runtime/tests/test_scene_sync_performance.cpp`, `benchmarks/bench_scene_sync/CMakeLists.txt`, `tools/run_scene_sync_benchmark.py`
 
 # World 无世界矩阵缓存：Scene 变换实验与性能报告
 
@@ -8,6 +8,9 @@
 
 已实现并完成旧版对照。World 不保存世界矩阵，也不保存任何世界坐标查询结果；查询每次从当前节点一路算到根。
 内置 StaticMesh 和 Light 的世界变换由 Scene 维护。**收益集中在层级传播、重挂接，以及 GT/RT 分工后的流水吞吐；并非所有负载都更快。**
+迁移到 Google Benchmark 后，当前实现又完成一次全场景覆盖和三轮正式复测。层级改根、重挂接和 1 万平级节点全量移动的绝对耗时接近历史新版记录；开放世界流式加载与 10 万节点场景的复测耗时更高，仍需优先优化和进一步配对验证。
+
+下面的旧 → 新百分比来自首次实验的两版配对数据；**本次只重测当前实现，没有重新测旧版，不能把它们当作本次复测的加速比。**本次数据与范围见[Google Benchmark 复测](#google-benchmark-复测2026-09-23)。
 
 - 单线程 F=2：16 层链改根 77.42 → 49.46 μs/帧，耗时降低 **36.1%**；群体动画 69.77 → 46.22 μs，降低 **33.8%**。
 - 双线程 F=2：上述两项分别降低 **69.9%**、**47.2%**。矩阵工作转移到 RT 后，GT 不再逐个捕获后代，两个线程的负载更均衡。
@@ -19,11 +22,12 @@
 
 ## 比较的到底是哪两版
 
-旧版是本次开始时工作区已有的“最高脏根”实现，保留了 World 世界矩阵缓存。它基于
+历史配对中的旧版是实验开始时工作区已有的“最高脏根”实现，保留了 World 世界矩阵缓存。它基于
 `f74cdb3ee857eb5d4a4ef2a21a56279f2e7a37e6`，还包含当时的未提交修改，**不是该提交的纯净代码**。
 修改前已保存源码差异和旧版可执行文件。旧版也加入了相同的全量重挂接、子树重挂接和父子混合修改负载，再独立编译留存。
 
-新版是当前工作区实验实现，尚未提交。两版使用同一编译配置、负载生成和计时边界；新增协议的计数在 Apply 计时区间外记录。
+历史配对中的新版当时是工作区未提交实现，之后纳入 `e22f29e`。当时两版使用同一编译配置、负载生成和计时边界；新增协议的计数在 Apply 计时区间外记录。
+这次复测基于 `e22f29e` 加未提交的 Google Benchmark 迁移，仍读取同一负载的逐帧计时与 CSV；旧版归档可执行文件仍是 GTest 性能矩阵。
 旧报告的绝对数字仅作背景，本报告的百分比均来自本轮重新测量，未与旧报告跨轮拼接。
 
 ## 数据结构与算法
@@ -49,7 +53,7 @@ GT 的直接更新达到 16384 时按组件地址排序，额外付出 O(k log k
 业务 `OnTransformChanged` 语义仍然保留：World 在通知阶段沿父链筛选候选根，再访问受影响后代。
 因此 GT 仍可能有 O(k×深度+a) 的通知工作；“渲染不再提取后代矩阵”不等于“World 完全不用访问后代”。
 
-## 测量方法
+## 历史配对测量方法
 
 - Windows 11、Intel Core i7-13700K，ClangCL **22.1.3**，Release `/O2`、AVX2、FMA、LTO；Tracy 与 mimalloc 分配统计关闭。
 - 两版进程均继承 CPU 亲和性 `0x5555`，即逻辑 CPU 0、2、4、6、8、10、12、14。未宣称操作系统完全隔离或无后台活动。
@@ -61,9 +65,39 @@ GT 的直接更新达到 16384 时按组件地址排序，额外付出 O(k log k
 - 正百分比表示耗时减少，负值表示退化。逐帧 P50/P95/P99 单独统计，不把各阶段百分位相加。
 - 范围只含 CPU setter → World/Collect → Consume/Apply，不含 GPU、剔除、draw 准备、命令录制、资产 IO 或真实游戏逻辑，不能据此换算游戏 FPS。
 
-## 三轮配对结果，F=2
+## Google Benchmark 复测（2026-09-23）
 
-所有数字为本轮实测。最后三项是较短采样的压力组；其他项属于常规组。全部 F=1/2/3、每轮结果与范围见 CSV。
+这轮只测当前实现：`e22f29e09d1bcf55e8b3844a2f0bc953da6d674b` 加本次未提交的 benchmark 迁移。使用同一台 Windows 11 / i7-13700K、ClangCL 22.1.3、Release `/O2`、AVX2/FMA/LTO、静态 CRT；Tracy 与 mimalloc 统计关闭，进程继承 `0x5555` 亲和性。Google Benchmark 负责逐场景注册和运行；`Time` 表示整个正式采样窗口，下面的 μs/帧继续取逐帧 CSV 的吞吐墙钟区间除以帧数。
+
+- 全场景覆盖：55 场景 × 6 模式 = **330 配置**，各测 512 帧、预热 64 帧。
+- 正式复测：与历史配对相同的 23 个常规场景，各测 2048 帧、预热 128 帧；3 个压力场景各测 256 帧、预热 64 帧。每组独立运行 3 轮，共 **156 配置 × 3 轮**，取三轮中位数。
+- 7 次脚本运行均先通过 `SceneSyncCorrectness`；benchmark 的 8 帧预检、结束时完整场景校验，以及帧数、sequence、载荷和配置核对均通过。全场景覆盖与三轮正式复测合计 1,030,656 个计时帧。330 配置覆盖结果与 156 个正式配置的原始 CSV、日志和 metadata 均保留。
+- 所有正式配置的新旧**当前实现**载荷均相同；复测二进制 SHA-256 为 `efe9cd045a941c80b99aa70706104956451be562cdbe79e04b87adae9b4ccf24`，各轮一致。这里的“旧记录”指历史报告中的新版实现数据，并非旧版基线。
+
+F=2 的三轮吞吐中位数如下。表内仅比较**同一实现的两次测量**，不是新的旧版 → 新版加速比；其他 F=1/3 和三轮范围见[完整复测对照 CSV](<C:/Users/ksgfk/Documents/Codex/2026-09-22/scene-transform-experiment/google-benchmark-rerun/rerun-comparison.csv>)。
+
+| 场景 | 单线程：历史新版 → 本次 μs/帧 | 双线程：历史新版 → 本次 μs/帧 |
+|---|---:|---:|
+| 1 万平级节点，全量随机移动 | 528.01 → 527.00 | 354.77 → 345.53 |
+| 10 万平级节点，1% 移动 | 87.24 → 107.21 | 38.58 → 46.49 |
+| 16 层链，改 100 个根节点 | 49.46 → 49.33 | 24.16 → 24.64 |
+| 每帧重挂接 100 个节点 | 13.68 → 14.88 | 10.14 → 11.34 |
+| 每帧重挂接全部 1 万节点 | 1,364.04 → 1,482.34 | 1,127.98 → 1,202.45 |
+| 关卡巡游（10 万对象） | 17.29 → 21.01 | 9.45 → 10.97 |
+| 关卡交火（10 万对象） | 156.34 → 186.13 | 96.86 → 110.84 |
+| 开放世界流式加载（2 万对象） | 45.34 → 52.83 | 47.86 → 49.70 |
+| 群体动画（2000 节点） | 46.22 → 51.01 | 31.40 → 30.92 |
+| 过场灯光 | 39.05 → 43.00 | 27.29 → 28.87 |
+| 10 万平级节点，全量随机移动 | 16,813.59 → 18,511.31 | 15,177.25 → 16,337.84 |
+| 10 万平级节点，全量顺序移动 | 9,137.28 → 9,914.40 | 7,108.79 → 7,969.57 |
+
+156 个正式配置相对历史新版记录的绝对变化中位数为 **8.1%**；98 个配置落在 ±10% 内，143 个落在 ±20% 内。16 层链改根与 1 万节点全量移动几乎重现原绝对耗时，重挂接仍在同一量级。流式加载、关卡交火和 10 万节点全量移动在本轮更慢，其中部分差异超过 10%；亚微秒场景和少数微秒场景的相对百分比尤其不稳定。负载载荷一致不能解释这些耗时差异，也不能仅凭跨轮比较把它们归因于 Google Benchmark 或算法回退。
+
+因此，**大幅层级传播和重挂接收益仍是合理的历史配对结论；具体加速百分比没有经过这轮重新配对确认。** 对流式增删、灯光与大规模全量更新应继续使用当前绝对耗时作为优化线索；若要更新“旧版相比当前版”的精确增益，须在同一次测量中重新运行旧版基线。
+
+## 三轮配对结果，F=2（首次实验的历史数据）
+
+以下数字来自首次实验的两版配对测量，并非上节 Google Benchmark 复测。最后三项是较短采样的压力组；其他项属于常规组。全部 F=1/2/3、每轮结果与范围见 CSV。
 
 | 场景 | 单线程：旧 → 新 μs | 耗时减少 | 双线程：旧 → 新 μs | 耗时减少 |
 |---|---:|---:|---:|---:|
@@ -131,7 +165,7 @@ GT 的直接更新达到 16384 时按组件地址排序，额外付出 O(k log k
 频繁创建、删除增加了 Transform 身份、局部记录、拓扑和空行维护，创建/删除载荷也变大。
 开放世界流式加载在两种执行方式下都退化，是本版最明确的后续优化目标；不能用层级运动收益掩盖它。
 
-## 阶段耗时，单线程 F=2
+## 阶段耗时，单线程 F=2（首次实验）
 
 各格为三轮“逐帧阶段平均值”的中位数，单位 μs。它们各自取中位数，不能要求相加严格等于总耗时。
 
@@ -146,7 +180,7 @@ GT 的直接更新达到 16384 时按组件地址排序，额外付出 O(k log k
 | 开放世界流式加载（2 万对象） | 13.32 → 15.54 | 12.18 → 14.87 | 6.34 → 3.19 | 0.24 → 0.63 | 4.60 → 10.89 |
 | 过场灯光 | 5.71 → 5.07 | 2.34 → 2.48 | 23.43 → 5.33 | 0.44 → 0.89 | 3.01 → 24.91 |
 
-## 载荷变化
+## 载荷变化（首次实验）
 
 按更新数组元素的实际 `sizeof` 计数，不含容器头、capacity、共享资产数据和 allocator 元数据。
 以下为平均 B/帧；与其他模式的载荷一致。
@@ -165,7 +199,7 @@ GT 的直接更新达到 16384 时按组件地址排序，额外付出 O(k log k
 取消 World 的世界矩阵并不意味着总内存一定减少：Scene 增加了局部矩阵、拓扑和身份元数据；普通空间节点也进入镜像。
 本轮没有测进程峰值内存或分配次数，不能声称内存占用更低或每帧零分配。
 
-## 波动与解释范围
+## 波动与解释范围（首次实验）
 
 存在偶发约 6–12 ms 的长尾，不能把这些墙钟尖峰直接归因于变换算法。本报告不删除样本、不从多轮中挑最好成绩。
 下表保留三轮均摊耗时的最小/最大值，并列出三轮逐帧端到端 P50 的中位数；完整 P95/P99 和六模式范围在 CSV 中。
@@ -182,7 +216,7 @@ GT 的直接更新达到 16384 时按组件地址排序，额外付出 O(k log k
 几个百分点的差异应结合范围看，尤其是亚微秒的编辑器空闲和短压力组。关卡巡游的新实现有一轮均摊达到 159.93 μs，
 其逐帧中位数仍约 19 μs；三轮中位数为 17.29 μs，报告完整保留了这次长尾。
 
-## 正确性与接口变化
+## 正确性与接口变化（首次实验）
 
 - Release runtime：**216 通过、50 跳过、0 失败**。Debug runtime：**216 通过、50 跳过、0 失败**。跳过项是未开启的 GPU、性能或分配测试，不算通过。
 - 新增随机 Scene 森林校验：512 节点、400 轮，覆盖局部写入、重叠祖先/后代、重挂接、删除与同槽位复用，使用独立矩阵乘积参考，并检查每轮求值列表不重复。
@@ -202,11 +236,19 @@ Pending 节点在真正注销前保留并同步 Scene 拓扑依赖；仍跳过�
 
 这次实验支持“少量父节点驱动大量子节点”采用 Scene 变换森林，也支持稳定整数链接用于频繁重挂接。
 下一步应优先降低 RT bounds 路由与矩阵读取、增删批次和灯光快照的维护成本；暂不引入每次重挂接都要重排子树的布局。
+Google Benchmark 复测没有改变这一优化优先级；10 万节点场景和流式加载的绝对耗时比历史新版记录更高，应在改动后重新测量。若要用精确的旧版 → 当前版加速比做发布决策，先把旧版基线放进同轮配对测量。
 当前代码可继续做业务场景验证，不能称作所有负载下的最快实现。
 
 长期设计说明见 [Runtime 宿主、World 与渲染场景](../architecture/render-framework.md)。
 
 ## 原始数据与复测
+
+本次 Google Benchmark 复测保存在 `C:/Users/ksgfk/Documents/Codex/2026-09-22/scene-transform-experiment/google-benchmark-rerun/`：
+
+- [复测完整对照 CSV](<C:/Users/ksgfk/Documents/Codex/2026-09-22/scene-transform-experiment/google-benchmark-rerun/rerun-comparison.csv>)、[覆盖 sweep CSV](<C:/Users/ksgfk/Documents/Codex/2026-09-22/scene-transform-experiment/google-benchmark-rerun/sweep/summary.csv>)、[校验摘要](<C:/Users/ksgfk/Documents/Codex/2026-09-22/scene-transform-experiment/google-benchmark-rerun/validation-summary.json>)。
+- [复测分析脚本](<C:/Users/ksgfk/Documents/Codex/2026-09-22/scene-transform-experiment/google-benchmark-rerun/analyze_rerun.py>)；`sweep/`、`main-1..3/`、`stress-1..3/` 分别保存原始逐帧 CSV、case CSV、运行日志、构建配置、源码指纹和二进制校验和。
+
+以下是首次旧版/新版配对实验的历史归档：
 
 - [三轮完整比较 CSV（包含范围、阶段、延迟、载荷）](<C:/Users/ksgfk/Documents/Codex/2026-09-22/scene-transform-experiment/comparison.csv>)
 - [330 配置覆盖比较](<C:/Users/ksgfk/Documents/Codex/2026-09-22/scene-transform-experiment/sweep-comparison.csv>)
@@ -223,17 +265,17 @@ Pending 节点在真正注销前保留并同步 Scene 拓扑依赖；仍跳过�
 `baseline-sweep`、`final-sweep`、`paired-main`、`paired-stress` 中。`scene-sweep` 和 `locality-check` 是调优阶段数据，未混入正式配对结论。
 基线 metadata 中的 `git_status` 描述测量时工作目录；实际基线源码以 `source_snapshot`、归档补丁与基线二进制 SHA-256 为准。
 
-复测当前代码，在仓库根的 PowerShell 中执行：
+再次复测当前代码，在仓库根的 PowerShell 中执行；下面是全场景 512 帧覆盖示例。三轮正式场景的分组与参数见上节，本次数据目录的 metadata 记录了每轮实际命令参数。
 
 ```powershell
-cmake --build build_scene_sync_perf --config Release --target radray_runtime_tests --parallel 12
+cmake -S . -B build_scene_sync_perf -DRADRAY_BUILD_BENCHMARKS=ON
+cmake --build build_scene_sync_perf --config Release --target bench_scene_sync test_scene_sync_performance --parallel 12
 $benchmarkPreviousAffinity = (Get-Process -Id $PID).ProcessorAffinity
 (Get-Process -Id $PID).ProcessorAffinity = 0x5555
 $env:RADRAY_BENCHMARK_AFFINITY = 'Inherited mask 0x5555: logical CPUs 0,2,4,6,8,10,12,14'
 $benchmarkOutput = Join-Path $env:TEMP ('scene-transform-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
-python tools/run_scene_sync_benchmark.py --frames 2048 --warmup 128 --runs 3 --output $benchmarkOutput
+python tools/run_scene_sync_benchmark.py --build-dir build_scene_sync_perf --frames 512 --warmup 64 --output $benchmarkOutput
 (Get-Process -Id $PID).ProcessorAffinity = $benchmarkPreviousAffinity
 ```
 
-若复用保存的旧版，指定 `--build-dir` 为 `baseline-build`，并用 `--source-snapshot` 指向 `baseline-source`，
-避免把当前工作区指纹误认为旧版源码。正式配对的场景分组、帧数及交替顺序以已保存的 `run_comparison.py` 为准；输出目录必须为空。
+归档旧版仍通过 GTest 性能矩阵执行，不能直接交给当前只调用 `bench_scene_sync` 的脚本。历史配对的场景分组、帧数及交替顺序可查保存的 `run_comparison.py`；输出目录必须为空。

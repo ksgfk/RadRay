@@ -103,7 +103,7 @@ CPU record/Submit 时间与 GPU 时间线分开解读。关闭使用 `-DRADRAY_E
 | `test_scene_updates` | `SceneUpdates`（组件标脏合并、生命周期、代次与收集约束；纯 CPU） |
 | `test_scene_assets` | `SceneAssets`（类型无关的资产常驻/退休、Ready 通知、共享等待取消与 GT 释放；纯 CPU） |
 | `test_static_mesh_scene` | `StaticMeshScene`（CPU mesh 描述、变换/bounds、替换/删除与持久描述；无 GPU 资源） |
-| `test_scene_sync_performance` | `SceneSyncCorrectness`、`SceneSyncPerformance`（World → RenderScene，单/双线程，F=1/2/3；性能矩阵显式运行） |
+| `test_scene_sync_performance` | `SceneSyncCorrectness`、`SceneSyncAllocation`（World → RenderScene 正确性与分配校准） |
 | `test_frame_scenarios` | `FrameScenarios`（Tick 驱动的巡游、交火、流式、群体、暂停、过场灯光与编辑器拖拽；F=2） |
 | `test_multi_window` | `RuntimeMultiWindow`（三窗口交换链、有序提交与生命周期） |
 | `test_flight_completion` | `FlightCompletionTest` |
@@ -123,17 +123,17 @@ typed buffer view 替换与创建失败恢复，以及乱序 dynamic offsets；�
 GPU 验证可设置 `RADRAY_TEST_GPU_VALIDATION=1`，并以 `RADRAY_TEST_REQUIRED_BACKENDS=d3d12`
 避免缺少设备或验证层时静默跳过。
 
-descriptor 发布微基准默认禁用，不计入普通测试。先构建 Release 的
-`test_radray_render_d3d12_layout`，然后显式运行：
+descriptor 发布微基准在 Google Benchmark 的 `bench_d3d12_descriptor` 中，不计入普通测试。先构建 Release 目标，然后显式运行：
 
 ```powershell
-build_release/_build/Release/test_radray_render_d3d12_layout.exe --gtest_filter=*DescriptorPublishBenchmark --gtest_also_run_disabled_tests --gtest_repeat=5
+cmake --build build_release --config Release --target bench_d3d12_descriptor --parallel 4
+build_release/_build/Release/bench_d3d12_descriptor.exe --benchmark_repetitions=5
 ```
 
 输出 scenario 0–5 分别表示单 CBV、连续 64 元素、64 元素中每隔 7 项更新、重复相同 Set、
 Vertex/Pixel 各 32 元素、显式 Vertex/Pixel 两个目标各 64 元素。
-`total_ns` 是每轮 Set 与 Flush 总耗时，`flush_ns` 单独计时 Flush；`allocation_ns` 是创建并销毁
-一个 set 的平均耗时。比较时固定配置、设备和验证层设置；此基准启用 D3D12 debug layer，GPU-based
+`D3D12Descriptor/Publish` 是每轮 Set 与 Flush 总耗时；`D3D12Descriptor/Allocation` 是创建并销毁
+一个 set 的耗时。比较时固定配置、设备和验证层设置；此基准启用 D3D12 debug layer，GPU-based
 validation 由上述环境变量控制。基准不提交 GPU 命令，不代表 draw/dispatch 或 GPU 执行时间。
 | `test_runtime_shader_jit` | `RadRayRuntimeShaderJit` |
 | `test_application` | `RuntimeFoundation`（双后端、单/双线程窗口与原生录制，旧槽位复用与后一帧 CPU 录制重叠） |
@@ -298,7 +298,7 @@ runtime-only 可消费匹配 backend 的已编译 artifact，源码请求不会�
 
 ## World → RenderScene 状态同步基准
 
-`test_scene_sync_performance` 使用真实 Actor、StaticMeshComponent、Directional/Point/SpotLightComponent、
+`bench_scene_sync` 使用真实 Actor、StaticMeshComponent、Directional/Point/SpotLightComponent、
 World 与 RenderSystem。每个 Shape 对应一个 Actor 和一个 Mesh 组件，Mesh 资产已 Ready；未启用 Tick 的
 对象不进入 World ticking 列表，空闲帧只付列表遍历（默认为空）。该基准截止于 CPU `ConsumeRenderUpdates/Apply`，不含可见性、draw 准备、命令录制、
 GPU、资产 IO 或真实游戏逻辑。没有 RectLightComponent，故不模拟 Rect 组件。
@@ -342,17 +342,17 @@ cmake -S . -B build_scene_sync_perf -G "Visual Studio 18 2026" -T ClangCL -A x64
   -DCMAKE_MSVC_RUNTIME_LIBRARY='MultiThreaded$<$<CONFIG:Debug>:DebugDLL>' -DMI_STATS=OFF -DMI_PROFILE=OFF `
   -DRADRAY_ENABLE_PROFILER=OFF -DRADRAY_BUILD_SHADER_COMPILER=OFF `
   -DRADRAY_ENABLE_D3D12=OFF -DRADRAY_ENABLE_VULKAN=OFF `
-  -DRADRAY_BUILD_BENCHMARKS=OFF -DRADRAY_ENABLE_ZLIB=OFF -DRADRAY_ENABLE_LIBJPEG=OFF
+  -DRADRAY_BUILD_BENCHMARKS=ON -DRADRAY_ENABLE_ZLIB=OFF -DRADRAY_ENABLE_LIBJPEG=OFF
 cmake --build build_scene_sync_perf --config Debug --target test_scene_sync_performance --parallel 4
 ctest --test-dir build_scene_sync_perf -C Debug -R '^SceneSyncCorrectness\.' --output-on-failure
-cmake --build build_scene_sync_perf --config Release --target test_scene_sync_performance --parallel 4
+cmake --build build_scene_sync_perf --config Release --target test_scene_sync_performance bench_scene_sync --parallel 4
 python tools/run_scene_sync_benchmark.py --frames 512 --output build_scene_sync_perf/results/sweep
 python tools/run_scene_sync_benchmark.py --frames 4096 --runs 3 `
   --cases shape_10000_dirty_100,shape_10000_dirty_10000,chain_16_root,light_256_one,light_256_all,mixed `
   --output build_scene_sync_perf/results/repeated
 ```
 
-脚本只运行已构建目标；先跑正确性，再顺序启动各独立采样进程。输出目录必须为空，避免覆盖已有
+脚本只运行已构建目标；先跑 GTest 正确性，再顺序启动各独立 Google Benchmark 采样进程。每个场景、flight 和线程模式是独立 benchmark，固定运行一轮；Google Benchmark 的 `Time` 是正式采样窗口总时长，`items_per_second` 是帧吞吐量，逐帧 CSV 仍由负载代码记录。输出目录必须为空，避免覆盖已有
 数据。正式性能结论取 Release；Debug 只用于正确性。吞吐量受操作系统调度影响，默认不绑定 CPU 核心。
 
 每次保存原始逐帧 CSV、配置/冷启动 CSV、各阶段 mean/median/P95/P99/max、单/双线程比较和元数据。
@@ -395,9 +395,10 @@ cmake --build build_debug --target radray_runtime_tests --parallel 12
 ctest --test-dir build_debug -R "WorldLifecycle|SceneDelivery|FrameScenarios|GpuSceneLifetime|LifecycleScale" --output-on-failure
 ```
 
-`LifecycleScale` 正常运行 10k/100k 共享 mesh 断言。较慢的 `LifecyclePerformance.Matrix` 默认跳过，
-显式设置环境变量后在 Release 中运行 384 组配置，输出 LIFECYCLE_PERF / DELETE / SETUP CSV 行。
+`LifecycleScale` 正常运行 10k/100k 共享 mesh 断言。较慢的矩阵由 `bench_lifecycle` 的 Google Benchmark 显式运行，
+共 48 个独立配置、384 组采样，输出 LIFECYCLE_PERF / DELETE / SETUP CSV 行。
 每配置各 flight 预热后采样 7 次，报告中位数和观测尾部（7 次样本的 nearest-rank p95 即最大值）。
+Google Benchmark 的 `Time` 包含该配置的创建、预热、采样与删除；各阶段耗时以 CSV 行为准。
 其 View 阶段是 CPU AABB 读取基准，GPU 多视图实际 draw 由 GpuSceneLifetime 另行覆盖，不合称渲染 FPS。
 
 ```powershell
@@ -405,20 +406,18 @@ cmake -S . -B build_lifecycle_perf -G Ninja -DCMAKE_BUILD_TYPE=Release `
   -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded -DMI_STATS=FULL `
   -DRADRAY_ENABLE_PROFILER=OFF -DRADRAY_BUILD_SHADER_COMPILER=OFF `
   -DRADRAY_ENABLE_D3D12=OFF -DRADRAY_ENABLE_VULKAN=OFF `
-  -DRADRAY_BUILD_BENCHMARKS=OFF -DRADRAY_ENABLE_ZLIB=OFF -DRADRAY_ENABLE_LIBJPEG=OFF
-cmake --build build_lifecycle_perf --target test_lifecycle_performance --parallel 12
-$env:RADRAY_RUN_LIFECYCLE_BENCHMARK = '1'
-ctest --test-dir build_lifecycle_perf -R '^LifecyclePerformance.Matrix$' -V
-Remove-Item Env:RADRAY_RUN_LIFECYCLE_BENCHMARK
+  -DRADRAY_BUILD_BENCHMARKS=ON -DRADRAY_ENABLE_ZLIB=OFF -DRADRAY_ENABLE_LIBJPEG=OFF
+cmake --build build_lifecycle_perf --target bench_lifecycle --parallel 12
+build_lifecycle_perf/_build/Release/bench_lifecycle.exe
 ```
 
 分配统计读取现有 mimalloc 的完整统计；没有引入全局 new 钩子。Windows `/MD` 下现有静态 mimalloc
 不接管 CRT/STL 分配，因此使用上述独立 `/MT` 配置；创建阶段未观测到分配时 CSV 输出 `-1`，不能把它视为零分配。
 双线程统计在交接处合并 RT 的 allocator 数据。字节为 allocator 记录的分配字节；对象静态大小单独列出。
 CSV 表头由对应的 `LIFECYCLE_*_HEADER` 行给出。PERF 的 `transform_updates` / `transform_bytes` 来自
-测试读取的实际更新包，只累计 7 个正式样本；DELETE 报告删除前后 Actor 数和实际 remove 数，并验证幸存者顺序。
-测试不依赖运行时累计计数，也不把更新包数量当作内部 Gather、矩阵求值或容器搬移次数。
-完整测试前移除该环境变量。Sanitizer 使用独立 RelWithDebInfo 构建并关闭 mimalloc/profiler；
+基准读取的实际更新包，只累计 7 个正式样本；DELETE 报告删除前后 Actor 数和实际 remove 数，并验证幸存者顺序。
+基准不依赖运行时累计计数，也不把更新包数量当作内部 Gather、矩阵求值或容器搬移次数。
+Sanitizer 使用独立 RelWithDebInfo 构建并关闭 mimalloc/profiler；
 MSVC ASan 添加 `/fsanitize=address`，不与 `/RTC1` 混用。ClangCL 可以同时启用 ASan/UBSan；
 CMake compiler probe 同样指定 RelWithDebInfo 和非 Debug CRT，并显式连接其 sanitizer runtime。
 本机配置、原始 CSV 与已运行/未运行范围见[生命周期 v2 验收](../temp/lifecycle-v2-validation.md)。

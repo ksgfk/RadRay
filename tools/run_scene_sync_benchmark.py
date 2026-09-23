@@ -36,7 +36,7 @@ def run_logged(args: list[str], env: dict[str, str], log: Path, cwd: Path) -> No
 
 
 def fingerprint(root: Path) -> str:
-    files = set(command_output(["git", "ls-files", "--cached", "--others", "--exclude-standard", "--", "modules", "cmake", "CMakeLists.txt", "project_manifest.json"], root).splitlines())
+    files = set(command_output(["git", "ls-files", "--cached", "--others", "--exclude-standard", "--", "modules", "benchmarks", "cmake", "CMakeLists.txt", "project_manifest.json"], root).splitlines())
     files.update(["modules/runtime/tests/test_scene_sync_performance.cpp", "tools/run_scene_sync_benchmark.py"])
     digest = hashlib.sha256()
     for name in sorted(files):
@@ -46,7 +46,7 @@ def fingerprint(root: Path) -> str:
     return digest.hexdigest()
 
 
-def metadata(root: Path, build: Path, executable: Path, args: argparse.Namespace) -> dict:
+def metadata(root: Path, build: Path, executable: Path, test_executable: Path, args: argparse.Namespace) -> dict:
     cache = (build / "CMakeCache.txt").read_text(encoding="utf-8")
     options = [line for line in cache.splitlines() if not line.startswith(("#", "//")) and
                line.startswith(("CMAKE_CXX_", "CMAKE_GENERATOR", "CMAKE_MSVC_RUNTIME", "CMAKE_BUILD_TYPE", "MI_", "RADRAY_"))]
@@ -66,7 +66,8 @@ def metadata(root: Path, build: Path, executable: Path, args: argparse.Namespace
         "git_status": command_output(["git", "status", "--short"], root),
         "source_sha256": None if args.source_snapshot else fingerprint(root),
         "source_snapshot": str(args.source_snapshot.resolve()) if args.source_snapshot else None, "binary_sha256": hashlib.sha256(executable.read_bytes()).hexdigest(),
-        "executable": str(executable), "platform": platform.platform(), "cpu": cpu,
+        "executable": str(executable), "test_binary_sha256": hashlib.sha256(test_executable.read_bytes()).hexdigest(),
+        "test_executable": str(test_executable), "platform": platform.platform(), "cpu": cpu,
         "logical_cpus": os.cpu_count(), "affinity": os.environ.get("RADRAY_BENCHMARK_AFFINITY", "OS default; no explicit pinning"),
         "build_options": options, "compiler": compiler, "dependencies": dependencies,
         "frames": args.frames, "warmup": args.warmup, "preflight": 8, "runs": args.runs,
@@ -154,14 +155,16 @@ def main() -> int:
         parser.error("frames must be 1..1000000; warmup 64..1000000; runs >= 1")
     root = Path(__file__).resolve().parents[1]
     build = args.build_dir.resolve()
-    executable = build / "_build" / args.config / ("test_scene_sync_performance.exe" if os.name == "nt" else "test_scene_sync_performance")
-    if not executable.is_file():
-        parser.error(f"Build test_scene_sync_performance first: {executable}")
+    suffix = ".exe" if os.name == "nt" else ""
+    executable = build / "_build" / args.config / f"bench_scene_sync{suffix}"
+    test_executable = build / "_build" / args.config / f"test_scene_sync_performance{suffix}"
+    if not executable.is_file() or not test_executable.is_file():
+        parser.error(f"Build bench_scene_sync and test_scene_sync_performance first: {executable}, {test_executable}")
     output = (args.output or build / "results" / datetime.now().strftime("%Y%m%d-%H%M%S")).resolve()
     if output.exists() and any(output.iterdir()):
         parser.error(f"Output directory must be empty: {output}")
     output.mkdir(parents=True, exist_ok=True)
-    info = metadata(root, build, executable, args)
+    info = metadata(root, build, executable, test_executable, args)
     metadata_path = output / "metadata.json"
     metadata_path.write_text(json.dumps(info, ensure_ascii=False, indent=2), encoding="utf-8")
     diff = subprocess.run(["git", "diff", "HEAD", "--binary"], cwd=root, capture_output=True, check=True).stdout
@@ -172,7 +175,7 @@ def main() -> int:
         info["source_snapshot_patch_sha256"] = hashlib.sha256((output / "tracked.patch").read_bytes()).hexdigest()
     else:
         (output / "tracked.patch").write_bytes(diff)
-        for name in command_output(["git", "ls-files", "--others", "--exclude-standard", "--", "modules"], root).splitlines():
+        for name in command_output(["git", "ls-files", "--others", "--exclude-standard", "--", "modules", "benchmarks"], root).splitlines():
             destination = output / "untracked-source" / name
             destination.parent.mkdir(parents=True, exist_ok=True)
             destination.write_bytes((root / name).read_bytes())
@@ -180,17 +183,16 @@ def main() -> int:
         source = args.source_snapshot / Path(name).name if args.source_snapshot and name.endswith(".cpp") else root / name
         (output / Path(name).name).write_bytes(source.read_bytes())
     env = {key: value for key, value in os.environ.items() if not key.startswith(("RADRAY_SCENE_SYNC_", "RADRAY_RUN_SCENE_SYNC_"))}
-    run_logged([str(executable), "--gtest_filter=SceneSyncCorrectness.*"], env, output / "correctness.log", root)
-    env.update(RADRAY_RUN_SCENE_SYNC_BENCHMARK="1", RADRAY_SCENE_SYNC_FRAMES=str(args.frames),
-               RADRAY_SCENE_SYNC_WARMUP=str(args.warmup), RADRAY_SCENE_SYNC_CASES=args.cases)
+    run_logged([str(test_executable), "--gtest_filter=SceneSyncCorrectness.*"], env, output / "correctness.log", root)
+    env.update(RADRAY_SCENE_SYNC_FRAMES=str(args.frames), RADRAY_SCENE_SYNC_WARMUP=str(args.warmup), RADRAY_SCENE_SYNC_CASES=args.cases)
     if args.allocations:
         env["RADRAY_SCENE_SYNC_ALLOCATIONS"] = "1"
-        run_logged([str(executable), "--gtest_filter=SceneSyncAllocation.*"], env, output / "allocation-calibration.log", root)
+        run_logged([str(test_executable), "--gtest_filter=SceneSyncAllocation.*"], env, output / "allocation-calibration.log", root)
     summaries = []
     for run in range(1, args.runs + 1):
         prefix = output / f"run-{run}"
         env["RADRAY_SCENE_SYNC_OUTPUT"] = str(prefix)
-        run_logged([str(executable), "--gtest_filter=SceneSyncPerformance.Matrix"], env, output / f"run-{run}.log", root)
+        run_logged([str(executable)], env, output / f"run-{run}.log", root)
         summaries.extend(summarize(prefix, args.frames, set(args.cases.split(",")) if args.cases else set(), run))
     write_csv(output / "summary.csv", summaries)
     comparisons = []

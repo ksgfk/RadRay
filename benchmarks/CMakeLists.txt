@@ -1,1 +1,8 @@
 add_subdirectory(bench_read_obj)
+if (RADRAY_BUILD_RUNTIME)
+    add_subdirectory(bench_scene_sync)
+    add_subdirectory(bench_lifecycle)
+endif()
+if (RADRAY_ENABLE_D3D12)
+    add_subdirectory(bench_d3d12_descriptor)
+endif()
