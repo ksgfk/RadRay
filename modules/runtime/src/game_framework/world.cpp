@@ -289,6 +289,23 @@ void World::CollectRenderUpdates() {
     Collect();
 }
 
+bool World::SetLocalTransforms(std::span<const WorldTransformUpdate> updates) {
+    CheckCanModify();
+    for (const auto& update : updates) {
+        auto component = _transforms.Find(update.Id);
+        if (!component || !component->IsLive()) return false;
+    }
+    for (const auto& update : updates) {
+        auto& value = _transforms.GetLocal(update.Id.Index);
+        if (std::equal(std::begin(value.Translation), std::end(value.Translation), update.Local.Translation) &&
+            std::equal(std::begin(value.Rotation), std::end(value.Rotation), update.Local.Rotation) &&
+            std::equal(std::begin(value.Scale), std::end(value.Scale), update.Local.Scale)) continue;
+        value = update.Local;
+        QueueTransform(*_transforms._slots[update.Id.Index].Component.Get());
+    }
+    return true;
+}
+
 void World::RemoveTransformRoot(SceneComponent& component) noexcept {
     auto& dirty = component._transformDirty;
     if (dirty.Epoch != _transformQueue.Epoch || dirty.Index == SceneComponent::TransformDirtyState::kNotQueued) return;
@@ -300,14 +317,6 @@ void World::RemoveTransformRoot(SceneComponent& component) noexcept {
 }
 
 void World::RemoveTransform(SceneComponent& component) noexcept {
-    const auto localIndex = component._localTransformQueueIndex;
-    if (localIndex != std::numeric_limits<uint32_t>::max()) {
-        auto* moved = _localTransformChanges.back();
-        _localTransformChanges[localIndex] = moved;
-        moved->_localTransformQueueIndex = localIndex;
-        _localTransformChanges.pop_back();
-        component._localTransformQueueIndex = std::numeric_limits<uint32_t>::max();
-    }
     RemoveTransformRoot(component);
     component._transformDirty.Epoch = 0;
     const auto index = component._renderTransformRootIndex;
@@ -352,11 +361,14 @@ void World::DispatchTransforms() {
     while (!_transformRoots.empty()) {
         auto* node = _transformRoots.back();
         _transformRoots.pop_back();
-        if (!node->IsLive()) continue;
+        if (!node->IsLive() || node->_transformSubscribers == 0) continue;
         const auto count = node->_children.size();
-        node->OnTransformChanged();
+        if (node->_transformNotificationEnabled) node->OnTransformChanged();
         if (count != 0 && node->IsLive()) {
-            for (size_t i = count; i > 0; --i) _transformRoots.push_back(node->_children[i - 1]);
+            for (size_t i = count; i > 0; --i) {
+                auto* child = node->_children[i - 1];
+                if (child->_transformSubscribers != 0) _transformRoots.push_back(child);
+            }
         }
     }
 }
@@ -395,10 +407,27 @@ void World::CollectTransforms(SceneCapture& capture) {
 }
 
 void World::CreateComponentTransformState(SceneComponent& component) {
+    for (Nullable<SceneComponent*> node{&component}; node && !node->_worldTransformId.IsValid(); node = node->_parent)
+        _transformCreationChain.push_back(node.Get());
+    while (!_transformCreationChain.empty()) {
+        auto* node = _transformCreationChain.back();
+        _transformCreationChain.pop_back();
+        node->_worldTransformId = _transforms.Allocate(node, node->_draftLocal);
+        node->_local = &_transforms.GetLocal(node->_worldTransformId.Index);
+    }
     if (_renderBridge) _renderBridge->CreateTransform(component);
 }
 void World::DestroyComponentTransformState(SceneComponent& component) {
     if (_renderBridge) _renderBridge->DestroyTransform(component);
+    if (component._worldTransformId.IsValid()) {
+        component._draftLocal = component.LocalValue();
+        component._local = &component._draftLocal;
+        _transforms.Release(component._worldTransformId);
+        component._worldTransformId = {};
+    }
+}
+void World::UpdateComponentTransformParent(SceneComponent& component) {
+    if (_renderBridge) _renderBridge->ReparentTransform(component);
 }
 
 void World::CreateComponentRenderState(RenderComponent& component) {

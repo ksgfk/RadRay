@@ -142,8 +142,8 @@ struct ApplicationRuntimeDescriptor {
     // —— GPU / 呈现 ——
     uint32_t BackBufferCount{3};
     uint32_t FlightDataCount{2};
-    render::TextureFormat BackBufferFormat;
-    render::PresentMode PresentMode;
+    render::TextureFormat BackBufferFormat{};
+    render::PresentMode PresentMode{};
     ApplicationSystems Systems{ApplicationSystem::Window | ApplicationSystem::Gpu | ApplicationSystem::Render | ApplicationSystem::World | ApplicationSystem::Asset};
     bool EnableGpuFrameProfiler{true};
 };

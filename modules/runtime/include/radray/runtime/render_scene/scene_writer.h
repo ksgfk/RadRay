@@ -56,12 +56,22 @@ private:
 
     struct TransformState {
         size_t CreateIndex{kNotQueued}, LocalIndex{kNotQueued}, ParentIndex{kNotQueued};
+        uint64_t EditEpoch{0};
         TransformId Parent;
         bool Sent{false};
     };
     TransformId CreateTransform(TransformId parent, const LocalTransform& local);
     void RemoveTransform(TransformId id);
-    void SetLocalTransform(TransformId id, TransformId parent, const LocalTransform& local);
+    void SetLocalTransforms(std::span<const LocalTransformUpdate> updates);
+    void GatherLocalTransforms(std::span<const LocalTransformUpdate> values, std::span<const uint32_t> indices);
+    void WriteLocalTransform(const LocalTransformUpdate& update);
+    void ReserveLocalTransforms(size_t count);
+    void SetTransformParent(TransformId id, TransformId parent);
+    void BeginTransformEdit(TransformState& state) noexcept {
+        if (state.EditEpoch == _transformEditEpoch) return;
+        state.EditEpoch = _transformEditEpoch;
+        state.LocalIndex = state.ParentIndex = kNotQueued;
+    }
 
     ShapeState& GetShape(ShapeId id);
     ShapeEdit& GetEdit(ShapeId id);
@@ -79,6 +89,7 @@ private:
     SceneId _id;
     SparseSet<ShapeState> _shapes;
     SparseSet<TransformState> _transforms;
+    uint64_t _transformEditEpoch{1};
     /// Only independent editing or repeated captures before Seal need update locators.
     vector<ShapeEdit> _edits;
     SceneUpdateBatch _pending;

@@ -10,14 +10,17 @@ namespace radray {
 void SceneComponent::NotifyTransformChanged() {
     if (const auto world = GetWorld()) {
         world->QueueTransform(*this);
-    } else {
+    } else if (_transformSubscribers != 0) {
         vector<SceneComponent*> pending{this};
         while (!pending.empty()) {
             auto* node = pending.back();
             pending.pop_back();
             const auto count = node->_children.size();
-            node->OnTransformChanged();
-            for (size_t i = count; i > 0; --i) pending.push_back(node->_children[i - 1]);
+            if (node->_transformNotificationEnabled) node->OnTransformChanged();
+            for (size_t i = count; i > 0; --i) {
+                auto* child = node->_children[i - 1];
+                if (child->_transformSubscribers != 0) pending.push_back(child);
+            }
         }
     }
 }
@@ -26,26 +29,52 @@ SceneComponent::~SceneComponent() noexcept { UnlinkHierarchy(); }
 
 void SceneComponent::SetRelativeLocation(const Eigen::Vector3f& location) noexcept {
     CheckCanModify();
-    if (_relativeLocation == location) return;
-    _relativeLocation = location;
+    auto& value = LocalValue();
+    if (std::equal(std::begin(value.Translation), std::end(value.Translation), location.data())) return;
+    std::copy_n(location.data(), 3, value.Translation);
     NotifyTransformChanged();
 }
 void SceneComponent::SetRelativeRotation(const Eigen::Quaternionf& rotation) noexcept {
     CheckCanModify();
-    if (_relativeRotation.coeffs() == rotation.coeffs()) return;
-    _relativeRotation = rotation;
+    auto& value = LocalValue();
+    if (std::equal(std::begin(value.Rotation), std::end(value.Rotation), rotation.coeffs().data())) return;
+    std::copy_n(rotation.coeffs().data(), 4, value.Rotation);
     NotifyTransformChanged();
 }
 void SceneComponent::SetRelativeScale(const Eigen::Vector3f& scale) noexcept {
     CheckCanModify();
-    if (_relativeScale == scale) return;
-    _relativeScale = scale;
+    auto& value = LocalValue();
+    if (std::equal(std::begin(value.Scale), std::end(value.Scale), scale.data())) return;
+    std::copy_n(scale.data(), 3, value.Scale);
     NotifyTransformChanged();
 }
+void SceneComponent::SetRelativeTransform(const LocalTransform& local) noexcept {
+    CheckCanModify();
+    auto& value = LocalValue();
+    if (std::equal(std::begin(value.Translation), std::end(value.Translation), local.Translation) &&
+        std::equal(std::begin(value.Rotation), std::end(value.Rotation), local.Rotation) &&
+        std::equal(std::begin(value.Scale), std::end(value.Scale), local.Scale)) return;
+    value = local;
+    NotifyTransformChanged();
+}
+void SceneComponent::AdjustTransformSubscribers(int64_t delta) noexcept {
+    if (delta == 0) return;
+    for (Nullable<SceneComponent*> node{this}; node; node = node->_parent) {
+        const int64_t count = static_cast<int64_t>(node->_transformSubscribers) + delta;
+        if (count < 0 || count > std::numeric_limits<uint32_t>::max()) RADRAY_ABORT("Invalid transform subscriber count");
+        node->_transformSubscribers = static_cast<uint32_t>(count);
+    }
+}
+void SceneComponent::SetTransformNotificationEnabled(bool enabled) noexcept {
+    CheckCanModify();
+    if (_transformNotificationEnabled == enabled) return;
+    _transformNotificationEnabled = enabled;
+    AdjustTransformSubscribers(enabled ? 1 : -1);
+}
 Eigen::Matrix4f SceneComponent::GetWorldTransform() const noexcept {
-    Eigen::Matrix4f result = ComposeTransform(_relativeLocation, _relativeRotation, _relativeScale);
+    Eigen::Matrix4f result = LocalValue().ToMatrix();
     for (auto parent = _parent; parent; parent = parent->_parent) {
-        const Eigen::Matrix4f local = ComposeTransform(parent->_relativeLocation, parent->_relativeRotation, parent->_relativeScale);
+        const Eigen::Matrix4f local = parent->LocalValue().ToMatrix();
         result = (local * result).eval();
     }
     return result;
@@ -82,9 +111,9 @@ bool SceneComponent::ComputeAttachmentTransform(Nullable<SceneComponent*> parent
     for (auto ancestor = parent; ancestor; ancestor = ancestor->_parent) {
         if (ancestor.Get() == this || !ancestor->IsLive()) return false;
     }
-    location = _relativeLocation;
-    rotation = _relativeRotation;
-    scale = _relativeScale;
+    location = GetRelativeLocation();
+    rotation = GetRelativeRotation();
+    scale = GetRelativeScale();
     if (rule == AttachmentRule::KeepLocal) return true;
     Eigen::Matrix4f local = GetWorldMatrix();
     if (parent) {
@@ -121,10 +150,10 @@ bool SceneComponent::ReparentNow(Nullable<SceneComponent*> parent, AttachmentRul
         if (parent->_children.size() == std::numeric_limits<uint32_t>::max()) RADRAY_ABORT("Too many attached children");
         _childIndex = static_cast<uint32_t>(parent->_children.size());
         parent->_children.push_back(this);
+        parent->AdjustTransformSubscribers(_transformSubscribers);
     }
-    _relativeLocation = location;
-    _relativeRotation = rotation;
-    _relativeScale = scale;
+    LocalValue() = LocalTransform{location, rotation, scale};
+    if (const auto world = GetWorld()) world->UpdateComponentTransformParent(*this);
     NotifyTransformChanged();
     return true;
 }
@@ -160,18 +189,25 @@ LifecycleRequestResult SceneComponent::RequestReparent(Nullable<SceneComponent*>
 void SceneComponent::UnlinkHierarchy() noexcept {
     if (const auto world = GetWorld()) world->RemoveTransform(*this);
     UnlinkParent();
-    if (const auto world = GetWorld()) world->QueueTransform(*this);
-    for (auto* child : _children) {
+    if (const auto world = GetWorld()) {
+        world->UpdateComponentTransformParent(*this);
+        world->QueueTransform(*this);
+    }
+    while (!_children.empty()) {
+        auto* child = _children.back();
         if (const auto world = child->GetWorld()) world->RemoveTransform(*child);
-        child->_parent = nullptr;
-        child->_childIndex = std::numeric_limits<uint32_t>::max();
-        if (const auto world = child->GetWorld()) world->QueueTransform(*child);
+        child->UnlinkParent();
+        if (const auto world = child->GetWorld()) {
+            world->UpdateComponentTransformParent(*child);
+            world->QueueTransform(*child);
+        }
     }
     _children.clear();
 }
 
 void SceneComponent::UnlinkParent() noexcept {
     if (!_parent) return;
+    _parent->AdjustTransformSubscribers(-static_cast<int64_t>(_transformSubscribers));
     auto& siblings = _parent->_children;
     auto* moved = siblings.back();
     siblings[_childIndex] = moved;

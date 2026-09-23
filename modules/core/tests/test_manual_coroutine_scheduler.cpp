@@ -13,22 +13,27 @@ struct ProbeRecord : ManualCoroutineRecord {
 
 using Scheduler = ManualCoroutineScheduler<ProbeRecord>;
 
-struct WaitForDispatch {
-    Scheduler& Records;
-    stop_token Stop;
-    int Key;
-    Nullable<ProbeRecord*> Record{nullptr};
+class WaitForDispatch {
+public:
+    WaitForDispatch(Scheduler& records, stop_token stop, int key) noexcept
+        : _records(records), _stop(stop), _key(key) {}
 
     bool await_ready() const noexcept { return false; }
     void await_suspend(std::coroutine_handle<> continuation) {
-        Record = Records.Enqueue(Stop, continuation, Key);
+        _record = _records.Enqueue(_stop, continuation, _key);
     }
     bool await_resume() noexcept {
-        const bool completed = !Record->Canceled && !Stop.stop_requested();
-        Records.Erase(Record.Get());
-        Record = nullptr;
+        const bool completed = !_record->Canceled && !_stop.stop_requested();
+        _records.Erase(_record.Get());
+        _record = nullptr;
         return completed;
     }
+
+private:
+    Scheduler& _records;
+    stop_token _stop;
+    int _key;
+    Nullable<ProbeRecord*> _record{nullptr};
 };
 
 template <class F>

@@ -32,7 +32,7 @@ void SceneSyncApp::OnInit() {
         object->SetStaticMesh(mesh);
         if (i % 3 == 0) object->RequestReparent(_parent.Get());
         object->SetRelativeLocation({(float(i % side) - float(side - 1) * 0.5f) * 1.6f,
-                                     (float(i / side) - float(side - 1) * 0.5f) * 1.6f, 0});
+                                     (float(i) / side - float(side - 1) * 0.5f) * 1.6f, 0});
         if (i % 7 == 0) object->SetRelativeScale({-1, 1, 1});
     }
 }
@@ -100,16 +100,16 @@ void SceneSyncApp::OnShutdown() {
 int main(int argc, char** argv) {
     using namespace radray;
     example::SceneSyncApp app;
-    ApplicationRuntimeDescriptor descriptor{.Backend = render::RenderBackend::D3D12, .Multithreaded = true, .ShaderSourceRoot = RADRAY_SCENE_EXAMPLE_DIR, .ShaderIncludePaths = {RADRAY_SHADERLIB_DIR}, .WindowTitle = "RadRay Scene Sync", .FlightDataCount = 2, .BackBufferFormat = render::TextureFormat::BGRA8_UNORM, .PresentMode = render::PresentMode::FIFO};
+    ApplicationRuntimeDescriptor descriptor{.Backend = render::RenderBackend::D3D12, .Multithreaded = false, .ShaderSourceRoot = RADRAY_SCENE_EXAMPLE_DIR, .ShaderIncludePaths = {RADRAY_SHADERLIB_DIR}, .WindowTitle = "RadRay Scene Sync", .FlightDataCount = 2, .BackBufferFormat = render::TextureFormat::BGRA8_UNORM, .PresentMode = render::PresentMode::FIFO};
     for (int i = 1; i < argc; ++i) {
         const std::string_view argument{argv[i]};
         if (argument == "--vulkan")
             descriptor.Backend = render::RenderBackend::Vulkan;
         else if (argument == "--d3d12")
             descriptor.Backend = render::RenderBackend::D3D12;
-        else if (argument == "--single-thread")
-            descriptor.Multithreaded = false;
-        else if (argument == "--validation") {
+        else if (argument == "--multithread")
+            descriptor.Multithreaded = true;
+        else if (argument == "--valid-layer") {
             descriptor.EnableValidation = true;
             descriptor.EnableSynchronizationValidation = true;
         } else {

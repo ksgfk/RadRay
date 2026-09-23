@@ -70,6 +70,8 @@ public:
     Nullable<RenderSystem*> GetRequestedRenderConnection() const noexcept;
     /// Explicit CPU-only collection; managed Worlds collect through their driver.
     void CollectRenderUpdates();
+    /// All handles must belong to this World and name live components. Invalid batches change nothing.
+    bool SetLocalTransforms(std::span<const WorldTransformUpdate> updates);
 
     std::span<const unique_ptr<Actor>> GetActors() const noexcept { return _actors; }
 
@@ -134,11 +136,9 @@ private:
         const auto life = component.GetLifecycle();
         if (life != ObjectLifecycle::Live && life != ObjectLifecycle::Initializing &&
             !(life == ObjectLifecycle::PendingDestroy && component._sceneTransformId.IsValid())) return;
-        if (component._localTransformQueueIndex == std::numeric_limits<uint32_t>::max()) {
-            component._localTransformQueueIndex = static_cast<uint32_t>(_localTransformChanges.size());
-            _localTransformChanges.push_back(&component);
-        }
+        if (component._worldTransformId.IsValid()) _transforms.MarkChanged(component._worldTransformId.Index);
         if ((life == ObjectLifecycle::Live || life == ObjectLifecycle::Initializing) &&
+            (component._transformSubscribers != 0 || _legacyRenderSources != 0) &&
             component._transformDirty.Epoch != _transformQueue.Epoch) AppendTransformRoot(component);
     }
     void AppendTransformRoot(SceneComponent& component) {
@@ -152,6 +152,7 @@ private:
     void DisconnectNow();
     void CreateComponentTransformState(SceneComponent& component);
     void DestroyComponentTransformState(SceneComponent& component);
+    void UpdateComponentTransformParent(SceneComponent& component);
     void QueueComponentDestruction(ActorComponent& component);
     LifecycleRequestResult QueueReparent(SceneComponent& child, Nullable<SceneComponent*> parent, AttachmentRule rule);
     Nullable<Actor*> ResolveIncludingPending(ActorId id) const noexcept;
@@ -179,7 +180,8 @@ private:
     TransformQueue _transformQueue;
     vector<SceneComponent*> _renderTransformRoots;
     vector<SceneComponent*> _transformRoots;
-    vector<SceneComponent*> _localTransformChanges;
+    WorldTransformStore _transforms;
+    vector<SceneComponent*> _transformCreationChain;
     ObjectLifecycle _lifecycle{ObjectLifecycle::Live};
     std::thread::id _ownerThread{std::this_thread::get_id()};
     uint64_t _tickEpoch{0};

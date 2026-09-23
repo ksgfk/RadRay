@@ -82,6 +82,83 @@ viewer 版本应与 project_manifest.json 的 Tracy tag 匹配；client 只监�
 CPU record/Submit 时间与 GPU 时间线分开解读。关闭使用 `-DRADRAY_ENABLE_PROFILER=OFF`。
 旧 RenderGraph/Forward 的 profile/record harness、逐命令采样开关及 RG plots 已移除。
 
+### 基础框架 Tracy 压测样例
+
+`example_framework_stress` 使用真实 Application GPU runner、World/Actor/StaticMeshComponent 和共享 Ready
+立方体资产，复用 `scene_sync` 的绘制实现。它是持续运行的抓取样例，性能数字的正式对比仍使用 Google Benchmark。
+默认 D3D12、双线程、F=2、10,000 对象、每帧修改 100 个对象、单视图；先预热 120 帧，再运行 60 秒。
+默认没有窗口和交换链，draw 档绘制到每 flight 独立的 1280×720 离屏目标，避免 Present/vsync 限制吞吐。
+
+示例与 runtime 一样通过 `radray_optimize_flags_binary` / `radray_optimize_flags_library` 使用 Release SIMD 配置，
+保证跨 target 传递的 Eigen 矩阵及 `SceneViewRequest` 对齐和数组步长一致。
+
+Windows 可用独立 Release 目录构建；已有多配置目录也可直接构建 Release 目标：
+
+```powershell
+cmake --preset win-x64-release-clangcl -B build_profile -DRADRAY_BUILD_EXAMPLES=ON -DRADRAY_ENABLE_PROFILER=ON
+cmake --build build_profile --config Release --target example_framework_stress --parallel 12
+build_profile/_build/Release/example_framework_stress.exe --mode=upload --workload=move --objects=10000 --changes=100 --seconds=120
+```
+
+在匹配版本的 Tracy viewer 中手动连接 `127.0.0.1`；本项目关闭自动广播。`--seconds=0` 持续运行，
+`--frames=N` 改为预热后运行 N 个 GT 负载帧，优先于 seconds；`--warmup=N` 调整预热帧数。
+退出沿用 runner 的关停协议，双线程末尾少量已发布帧可能只消费同步包而不再调用绘制；日志分别报告 GT 更新与渲染回调次数。
+GT/RT 分别发出 warmup complete 消息，`Stress/Warmup` plot 为 0 的渲染帧属于正式运行。
+连接晚于预热仍可抓取后续稳态；预热不足时应排除首次同步、shader 编译、PSO 创建和 buffer 扩容。
+
+| `--mode` | 执行范围 |
+|---|---|
+| `world` | 创建并更新对象，但 World 不连接 renderer；仍运行相同 GPU runner 和空场景交付，作为无场景连接的参照 |
+| `sync` | 再连接 World，捕获视图并交付/应用 CPU RenderScene 更新，不准备对象 GPU buffer |
+| `upload` | 在 sync 上调用 `PrepareSceneGpuRT`，录制和提交对象参数上传，不发出 geometry draw |
+| `draw` | 在 upload 上执行完整无光照逐对象绘制；每视图每对象一次 indexed draw，仍无深度测试和剔除 |
+
+| `--workload` | 每帧负载 |
+|---|---|
+| `idle` | 对象与相机完全静止，无 Actor Tick；观察随常驻对象数增长的空闲成本 |
+| `move` | 修改均匀分布的 `--changes=N` 个对象，选择随帧轮转；每次翻转局部 Z，保证值发生变化 |
+| `parent` | 全部对象挂到同一个父节点，每帧只改父节点一次；观察通知、层级求值和上传的传播成本；忽略 changes |
+| `tick` | 为前 `--changes=N` 个 Actor 开启空 Tick hook，对象保持静止；与 idle 比较调度成本 |
+| `churn` | 每帧请求销毁并创建 `--changes=N` 个对象，保持存活总数；新对象仍使用同一 Ready 资产 |
+
+`--changes` 上限为 objects，允许 0；`--objects=0 --workload=idle` 是空场景参照，仍含一个 World 和相机。
+其他配置包括 `--d3d12`/`--vulkan`、`--single-thread`/`--multithread`、`--flights=1|2|3`、`--views=1|3`。
+`--window` 增加窗口与 Immediate 呈现；world/sync/upload 档仅清屏，draw 档显示对象，窗口维护和呈现成本也会进入捕获。
+`--validation` 仅用于正确性排查，正式抓取默认关闭；`--no-gpu-profiler` 可关闭帧 GPU 时间戳，CPU zones 保留。
+完整参数见 `--help`。启动日志记录实际配置，热路径不逐帧打印，也不做逐对象校验或逐对象 Tracy 插桩。
+
+建议固定后端、线程、flight、viewer 连接状态和 profiler 开关，分别抓取以下配置；每次只启动一个进程：
+
+```powershell
+$stress = 'build_profile/_build/Release/example_framework_stress.exe'
+& $stress --mode=sync --workload=idle --objects=0 --seconds=120
+& $stress --mode=sync --workload=idle --objects=100000 --seconds=120
+& $stress --mode=world --workload=move --objects=100000 --changes=100 --seconds=120
+& $stress --mode=sync --workload=move --objects=100000 --changes=100 --seconds=120
+& $stress --mode=upload --workload=move --objects=100000 --changes=100 --seconds=120
+& $stress --mode=upload --workload=parent --objects=100000 --seconds=120
+& $stress --mode=sync --workload=tick --objects=100000 --changes=100000 --seconds=120
+& $stress --mode=upload --workload=churn --objects=100000 --changes=100 --seconds=120
+& $stress --mode=draw --workload=move --objects=10000 --changes=100 --window --seconds=120
+```
+
+Tracy 中从 `Stress::Update`（样例制造负载）与 `World::Tick` 开始，继续看
+`Application::FinalizeWorldAndSealGT` 内的生命周期、通知、Collect 和 Seal，
+RT 看 `RenderSystem::ConsumeRenderUpdates` / `RenderScene::Apply`、`Stress::PrepareObjects` /
+`SceneGpuData::Prepare`、`Stress::DrawObjects`，提交看 `GpuSystem::SubmitFrame`。
+`Application::ServiceFrameBoundaryGT` 包含完成回收、资产和 scheduler 泵。
+`PrepareFrame`、`WaitWritableSlot`、`WaitReadySlot`、`GpuSystem::WaitFlightFence` 是帧准备或等待区域，
+应展开查看，不能将整个等待时间归因于框架执行成本。
+
+`Stress/Objects`、`Stress/ObjectUploadBytes`、`Stress/DrawCalls` 分别表示配置对象数、当次对象准备的实际 host
+写入字节和配置要求的 draw 数；上传统计不包含 ViewProjection 常量。多个视图共享对象 buffer，物理 flight
+则分别追赶自上次使用以来的变化，因此每帧上传对象数不必等于本次 GT changes。静止负载在各 flight 初始化后应为零上传。
+GT 的 `Stress/LastCompletedFrameLatencyMs` 和 `Stress/LastResolvedGpuMs` 分别记录最近完成帧的延迟及最近 resolve 的
+GPU 时间（毫秒），不是当前 GT 帧的即时耗时；关闭 GPU profiler 时不输出后者。
+在对象规模不变时对比不同变化量，再固定变化量对比规模；双线程的等待和吞吐会相互影响，不能直接用两次总帧时间相减
+作为精确的某层 overhead。优先比较相应 CPU zone 的执行时间，并用单线程捕获辅助确认。
+此样例也不代表真实资产流式加载、多材质或完整游戏帧率。
+
 ## 测试
 
 先完成构建再运行 CTest，不并发执行两者。`-R` 匹配注册用例名中的 gtest suite，
@@ -377,6 +454,8 @@ fixture 构造、初始场景同步、随机排列生成和销毁在计时循环
 分配统计不混入延迟测量；当前 benchmark 不再提供自制 mimalloc 分配轮。
 正式性能结论使用 Release，并固定编译器、allocator、profiler、机器负载与电源状态。
 旧手工采样结果不能与新基准的数值直接比较。
+World 紧凑变换存储的同机交替对照见[2026-09-24 实验报告](../temp/world-transform-store-benchmark-2026-09-24.md)，
+其中保留基线、最终二进制 hash、每轮结果与回退项；报告中的 CPU 同步吞吐不能当作实际 GPU 帧率。
 
 ## 生命周期与增量渲染验收
 
@@ -387,7 +466,7 @@ SceneDraw 读取真实非对称图像和正面颜色，覆盖对象/相机移动
 SceneGpuLifetime 用延迟主队列 fence 验证 Scene 删除的退休覆盖；host-signaled fence 压力不与 native validation 混跑。
 缺少后端按既有 startup 规则跳过；正式验收设置 `RADRAY_TEST_REQUIRED_BACKENDS=d3d12,vulkan`，JIT 初始化后的失败不跳过。
 
-窗口示例默认 1,000 实例、F=2、双线程、单视图，shader 源码位于 `examples/scene_sync`：
+窗口示例默认 1,000 实例、F=2、单线程、单视图，shader 源码位于 `examples/scene_sync`：
 
 ```powershell
 cmake -S . -B build_debug -DRADRAY_BUILD_EXAMPLES=ON
@@ -396,8 +475,8 @@ ctest --test-dir build_debug/modules/runtime/tests --output-on-failure
 build_debug/_build/Debug/example_scene_sync.exe --vulkan --flights=3 --views=3 --instances=1000
 ```
 
-`--d3d12`/`--vulkan` 选择后端，`--single-thread` 改为单线程，`--flights=1/2/3`、`--views=1/3` 调整配置；
-`--validation` 开启验证，`--frames=N` 限定运行帧数。示例沿用原生窗口的 resize、最小化与恢复入口。
+`--d3d12`/`--vulkan` 选择后端，`--multithread` 改为双线程，`--flights=1/2/3`、`--views=1/3` 调整配置；
+`--valid-layer` 开启验证，`--frames=N` 限定运行帧数。示例沿用原生窗口的 resize、最小化与恢复入口。
 
 `bench_scene_gpu` 是独立 Google Benchmark 目标，不依赖 JIT。固定 10k mesh 参数条目，变化量为 0/1/100/10000，
 稀疏修改按均匀步长分布到槽位，100 个变化对应 100 个不相邻范围；全量变化合并为一个范围。

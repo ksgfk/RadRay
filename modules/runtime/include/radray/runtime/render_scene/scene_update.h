@@ -20,13 +20,13 @@ struct StaticMeshDescription {
 struct StaticMeshStateUpdate {
     ShapeId Id;
     StaticMeshDescription Mesh{};
-    AffineTransform LocalToWorld;
-    TransformId Transform;
+    AffineTransform LocalToWorld{};
+    TransformId Transform{};
 };
 
 struct ShapeTransformUpdate {
     ShapeId Id;
-    AffineTransform LocalToWorld;
+    AffineTransform LocalToWorld{};
 };
 
 static_assert(sizeof(ShapeTransformUpdate) == 56);

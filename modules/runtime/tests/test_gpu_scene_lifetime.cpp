@@ -111,7 +111,7 @@ float4 PSMain() : SV_Target0 { return float4(1, 0, 1, 1); }
     const auto bytes = std::as_bytes(std::span{source.data(), source.size()});
     auto contract = jit.DiscoverContractHash("lifecycle/triangle.hlsl", bytes, target);
     ASSERT_TRUE(contract);
-    auto compiled = jit.Compile({.SourceName = "lifecycle/triangle.hlsl", .RootSource = vector<byte>{bytes.begin(), bytes.end()}, .Targets = static_cast<shader::ShaderTargetMask>(shader::ToTargetMask(target)), .ExpectedContract = *contract}, target);
+    auto compiled = jit.Compile({.SourceName = "lifecycle/triangle.hlsl", .RootSource = vector<byte>{bytes.begin(), bytes.end()}, .Defines = {}, .Assignments = {}, .Targets = static_cast<shader::ShaderTargetMask>(shader::ToTargetMask(target)), .ExpectedContract = *contract}, target);
     ASSERT_TRUE(compiled);
     auto artifact = render::CreateBackendShaderArtifact(*device, compiled->Metadata, {.Target = target, .ExpectedGpuArtifact = compiled->ExpectedGpuArtifact});
     ASSERT_TRUE(artifact);

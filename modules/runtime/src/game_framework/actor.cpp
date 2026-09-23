@@ -144,6 +144,7 @@ void Actor::RegisterComponent(ActorComponent& component) {
 void Actor::UnregisterComponent(ActorComponent& component) {
     if (auto scene = dynamic_cast<SceneComponent*>(&component)) _world->RemoveTransform(*scene);
     if (component._registration == ComponentRegistration::Unregistered) {
+        if (auto scene = dynamic_cast<SceneComponent*>(&component)) _world->DestroyComponentTransformState(*scene);
         component._world = nullptr;
         return;
     }

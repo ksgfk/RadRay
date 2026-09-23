@@ -1,6 +1,7 @@
 #include "world_render_bridge.h"
 
 #include <algorithm>
+#include <bit>
 #include <radray/profiler.h>
 #include <radray/scope_guard.h>
 #include <radray/runtime/game_framework/world.h>
@@ -87,22 +88,26 @@ void WorldRenderBridge::RemoveUpdate(RenderComponent& component) noexcept {
 
 void WorldRenderBridge::Collect() {
     RADRAY_PROFILE_SCOPE_N("WorldRenderBridge::Collect");
-    if (_updates.empty() && _world._localTransformChanges.empty() && _world._renderTransformRoots.empty() && _world._renderTransformRevision == _world._transformRevision) return;
+    if (_updates.empty() && _world._transforms._dirtyBlocks.empty() && _world._renderTransformRoots.empty() && _world._renderTransformRevision == _world._transformRevision) return;
     _renderer.SetCollecting(true);
     auto guard = MakeScopeGuard([this]() noexcept { _renderer.SetCollecting(false); });
-    if (_world._localTransformChanges.size() >= kCollectSortThreshold) {
-        std::sort(_world._localTransformChanges.begin(), _world._localTransformChanges.end(), [](const SceneComponent* lhs, const SceneComponent* rhs) noexcept {
-            return reinterpret_cast<uintptr_t>(lhs) < reinterpret_cast<uintptr_t>(rhs);
-        });
+    auto& transforms = _world._transforms;
+    if (transforms._dirtyRows.size() < transforms._values.size() / 16) {
+        _writer.GatherLocalTransforms(transforms._values, transforms._dirtyRows);
+    } else {
+        if (transforms._dirtyBlocks.size() >= 256) std::sort(transforms._dirtyBlocks.begin(), transforms._dirtyBlocks.end());
+        for (const auto block : transforms._dirtyBlocks) {
+            uint64_t bits = transforms._dirtyBits[block];
+            while (bits != 0) {
+                const auto first = std::countr_zero(bits);
+                const auto count = std::countr_one(bits >> first);
+                _writer.SetLocalTransforms({transforms._values.data() + block * 64 + first, static_cast<size_t>(count)});
+                const auto end = first + count;
+                bits = end == 64 ? 0 : bits & (~uint64_t{0} << end);
+            }
+        }
     }
-    for (auto* component : _world._localTransformChanges) {
-        component->_localTransformQueueIndex = kNotQueued;
-        if (!component->_sceneTransformId.IsValid()) continue;
-        const auto parent = component->_parent ? component->_parent->_sceneTransformId : TransformId{};
-        _writer.SetLocalTransform(component->_sceneTransformId, parent,
-                                  {component->_relativeLocation, component->_relativeRotation, component->_relativeScale});
-    }
-    _world._localTransformChanges.clear();
+    transforms.ClearChanges();
     SceneCapture capture{_writer};
     _world.CollectTransforms(capture);
     if (_updates.size() >= kCollectSortThreshold) {
@@ -127,7 +132,8 @@ void WorldRenderBridge::CreateTransform(SceneComponent& component) {
         auto* node = _creationChain.back();
         _creationChain.pop_back();
         const auto parent = node->_parent ? node->_parent->_sceneTransformId : TransformId{};
-        node->_sceneTransformId = _writer.CreateTransform(parent, {node->_relativeLocation, node->_relativeRotation, node->_relativeScale});
+        node->_sceneTransformId = _writer.CreateTransform(parent, node->LocalValue());
+        _world._transforms._values[node->_worldTransformId.Index].Id = node->_sceneTransformId;
         node->_sceneTransformIndex = static_cast<uint32_t>(_transformSources.size());
         _transformSources.push_back(node);
     }
@@ -141,6 +147,11 @@ void WorldRenderBridge::DestroyTransform(SceneComponent& component) {
     _transformSources.pop_back();
     component._sceneTransformIndex = kNotQueued;
     component._sceneTransformId = {};
+    _world._transforms._values[component._worldTransformId.Index].Id = {};
+}
+void WorldRenderBridge::ReparentTransform(SceneComponent& component) {
+    if (!component._sceneTransformId.IsValid()) return;
+    _writer.SetTransformParent(component._sceneTransformId, component._parent ? component._parent->_sceneTransformId : TransformId{});
 }
 
 }  // namespace radray

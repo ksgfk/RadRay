@@ -162,6 +162,7 @@ bool GpuSystem::CompleteFlightIfReady(uint32_t flightIndex, bool wait) {
         return true;
     }
     if (wait) {
+        RADRAY_PROFILE_SCOPE_N("GpuSystem::WaitFlightFence");
         flight.Signal.Fence->Wait(flight.Signal.Value);
     }
     return CompleteFlight(flightIndex);

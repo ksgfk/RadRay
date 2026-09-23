@@ -5,4 +5,13 @@ add_executable(example_scene_sync scene_sync/example_scene_sync.cpp scene_sync/e
 target_link_libraries(example_scene_sync PRIVATE radrayruntime)
 target_compile_definitions(example_scene_sync PRIVATE RADRAY_SCENE_EXAMPLE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/scene_sync" RADRAY_SHADERLIB_DIR="${CMAKE_SOURCE_DIR}/shaderlib")
 radray_default_compile_flags(example_scene_sync)
+radray_optimize_flags_binary(example_scene_sync)
 radray_set_build_path(example_scene_sync)
+
+add_executable(example_framework_stress framework_stress/example_framework_stress.cpp framework_stress/example_framework_stress.h scene_sync/scene_draw.cpp scene_sync/scene_draw.h)
+target_link_libraries(example_framework_stress PRIVATE radrayruntime)
+target_include_directories(example_framework_stress PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/scene_sync")
+target_compile_definitions(example_framework_stress PRIVATE RADRAY_SCENE_EXAMPLE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/scene_sync" RADRAY_SHADERLIB_DIR="${CMAKE_SOURCE_DIR}/shaderlib")
+radray_default_compile_flags(example_framework_stress)
+radray_optimize_flags_binary(example_framework_stress)
+radray_set_build_path(example_framework_stress)

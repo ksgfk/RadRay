@@ -83,23 +83,37 @@ WorldManager 在任何回调前移交本批 World owner、失效身份并清空�
 对外注册通知前建立，仅新增节点和边。已注册节点改用 RequestReparent / RequestSetRootComponent，S1 前查询仍见旧关系。
 KeepLocal 保留局部 TRS；KeepWorld 要求新局部矩阵可以精确表达为 TRS，自身/后代、跨 World、奇异矩阵和 shear
 在修改前拒绝，提交时重新验证。删除父组件会解除其他 Actor 的幸存 child，采用 KeepLocal，不误删别人的 owner。
-变换 setter 对完全相同的值短路；有变化时立即更新本地 TRS、递增 World 的变换版本，并把直接修改的
-节点加入局部更新队列。同一节点通过队列下标去重，写入不检查祖先、不访问后代、不合成矩阵。
+注册组件的 local TRS 存在 WorldTransformStore 的连续紧凑数组中，组件缓存内部数据指针，数组扩容时
+由存储修正全部存活组件的缓存指针；该修正只发生在容量增长时，成本为 O(槽位数)。draft 与注销后的
+组件使用自身的 local 值。WorldTransformId 只在所属 World 内有效，注销递增 generation，重连不改变身份。
+GetRelativeLocation/Rotation/Scale 与 GetRelativeTransform 返回按值快照，不提供跨存储扩容的引用。
+变换 setter 对完全相同的值短路；有变化时立即更新本地 TRS、递增 World 的变换版本，并在连接存在时
+登记所属 64 槽位块的 dirty bit 与紧凑变化槽位索引。同一槽位和块只登记一次，写入不检查祖先、不访问后代、不合成矩阵。
+World::SetLocalTransforms 批量写入同一存储；先验证整批句柄仍指向存活组件，再依次合并最终值。
+无效批次不产生部分修改；句柄必须来自调用的 World，跨 World 传递不属于接口契约。
 World 不保留 local-to-world 矩阵，也不缓存查询结果；`GetWorldTransform` 与 `GetWorldMatrix` 均返回按值
 快照，每次从当前节点向根迭代合成局部 TRS 并相乘。查询为 O(深度)，额外空间 O(1)，不要求先 Collect
 或派发通知；解除层级后的查询立即看到新关系。该接口适合查询较少的业务。
 
-业务通知独立于渲染局部更新队列。`FinalizeWorldGT` 在处理完生命周期后，从本批直接修改的候选节点中
+业务通知通过 SetTransformNotificationEnabled 显式启用，默认关闭；覆盖 OnTransformChanged 的派生也必须启用。
+开关本身不补发历史变化。组件维护子树订阅数量，切换开关或重挂接时沿祖先更新；没有订阅者且没有兼容
+渲染来源的修改不登记通知根。`FinalizeWorldGT` 在处理完生命周期后，从本批直接修改的候选节点中
 排除有存活脏祖先的节点，再迭代遍历受影响子树派发 `OnTransformChanged`。候选过滤可能沿父链检查，
-成本移到通知阶段；通知必须访问实际受影响的后代。没有 renderer 的 World 同样派发，draft 仍立即通知。
+无订阅者子树不入遍历栈；有订阅者的父节点仍需枚举直接孩子筛选分支。只有启用通知的组件执行回调。
+没有 renderer 的 World 同样派发订阅者，draft 的订阅者仍立即通知。
 通知批在回调前摘下并推进 epoch，使旧登记整体失效，无需逐节点重置队列下标；
 回调再次修改产生下一批通知，但本帧 Collect 读取修改后的最终局部值。
 重挂接和解除层级在改变 parent 前移除原队列登记，再重新登记该节点。World 的 child 数组使用下标和
 交换末项实现 O(1) 摘链，不保证 child 枚举顺序；父链防环校验和业务通知的遍历成本仍然存在。
 
 连接中的 World 为 SceneComponent 建立独立 TransformId，包含普通空间节点和中间祖先。
-Collect 仅读取直接变化节点的最终局部 TRS 与 parent，SceneWriter 合并同次 Seal 前的重复更新。
-直接更新数达到 16384 时先按组件地址排序，以改善大批量读取局部值的访问顺序，额外成本为 O(k log k)。
+变化数少于槽位池的 1/16 时，Collect 按紧凑变化索引一次性提取 local；更密集时遍历变化块内的连续范围，
+其中实际变化块至少为 256 时先排序块索引。两种路径都直接将紧凑 local 数据交给 SceneWriter；
+不再排序或解引用变化组件来提取 TRS，也不扫描没有变化的块。SceneWriter 合并同次 Seal 前的重复更新。
+设变化槽位数为 k、变化块数为 b，提取成本为 O(k + b log b)，不随静止槽位总数线性增长。
+parent 仅在重挂接与解除层级时单独更新，创建仍带初始 parent；RT 按值接收独立更新包，不借用 World 存储。
+该布局减少密集更新的组件访问、排序与空通知遍历，但不减少实际变化条数；稀疏写入、同值读写与生命周期
+负载不保证加速。本机对照、接口迁移项和回退场景见[变换存储实验](../temp/world-transform-store-benchmark-2026-09-24.md)。
 内置 StaticMesh/Light 绑定 TransformId；祖先移动不需要捕获后代渲染组件。自定义 RenderComponent 默认保留
 显式世界矩阵捕获，可通过 `UsesSceneTransform` 选择层级绑定；仅存在这类兼容来源时，World 才维护渲染脏根
 并遍历捕获其最终值。捕获 epoch 保证重叠子树只输出一次，独立 Collect 不提前派发业务通知。
@@ -158,7 +172,8 @@ Shape 在 Seal 前的 Create/Remove 可以相消，已 Seal 的创建只能由�
 SceneWriter 直接构建本批 SceneUpdateBatch。存活 Shape 只保存资产使用身份、是否已发布与是否有 mesh 状态；
 不常驻矩阵、mesh 描述或更新下标。World 通过 SceneCapture/ShapeCapture 将去重后的最终值直接追加到变化包；
 常规 Shape Flush 只标记创建已发送，不遍历 mesh/显式 transform 记录重组矩阵。Transform 状态另外保存 parent、
-创建/局部/重挂接记录的下标，Flush 清理实际发送记录的下标，再把变化包与 flight 的空包交换。
+创建/局部/重挂接记录的下标。局部与重挂接下标按 writer epoch 懒失效，Flush 无需逐个清理变换更新，
+只完成创建状态并推进 epoch，再把变化包与 flight 的空包交换。
 
 独立 writer 的反复编辑使用单独的 ShapeEdit 槽，保存创建/更新下标与更新种类。SetTransform 覆盖已有记录；
 SetStaticMesh 吸收同一身份的 Transform，取消时交换末项并修复下标。World 在同次 Seal 前再次 Collect、
@@ -287,6 +302,10 @@ Vulkan 使用负 viewport 高度处理 Y 方向。非法参数、零尺寸和舍
 PSO 跨帧复用，按 sections 发出 draw。每 view 上传 ViewProjection，每 draw 只传对象槽位。
 仅 acquire 成功后准备对象并绘制；窗口维护与提交继续由 Application/GpuSystem 处理。
 光照、材质、importer、剔除、间接绘制与完整 renderer 不在此接口内。
+
+`examples/framework_stress` 复用该固定 draw loop，提供不连接 World、仅 CPU 场景同步、对象 GPU 上传和完整绘制
+四档连续负载，使用相同 Application GPU runner 定位基础框架开销；运行和 Tracy 解读见
+[基础框架压测](../guide/build-test.md#基础框架-tracy-压测样例)。
 
 ## 交付、退出与资产保活
 

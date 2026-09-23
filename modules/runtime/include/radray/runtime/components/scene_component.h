@@ -6,7 +6,7 @@
 #include <radray/basic_math.h>
 #include <radray/nullable.h>
 #include <radray/runtime/components/actor_component.h>
-#include <radray/runtime/render_scene/scene_transform.h>
+#include <radray/runtime/game_framework/world_transform_store.h>
 
 namespace radray {
 
@@ -22,13 +22,27 @@ public:
     // ─── 变换 ───
 
     /// 相对于父组件的变换
-    const Eigen::Vector3f& GetRelativeLocation() const noexcept { return _relativeLocation; }
-    const Eigen::Quaternionf& GetRelativeRotation() const noexcept { return _relativeRotation; }
-    const Eigen::Vector3f& GetRelativeScale() const noexcept { return _relativeScale; }
+    Eigen::Vector3f GetRelativeLocation() const noexcept {
+        const auto& value = LocalValue();
+        return {value.Translation[0], value.Translation[1], value.Translation[2]};
+    }
+    Eigen::Quaternionf GetRelativeRotation() const noexcept {
+        const auto& value = LocalValue();
+        return {value.Rotation[3], value.Rotation[0], value.Rotation[1], value.Rotation[2]};
+    }
+    Eigen::Vector3f GetRelativeScale() const noexcept {
+        const auto& value = LocalValue();
+        return {value.Scale[0], value.Scale[1], value.Scale[2]};
+    }
+    LocalTransform GetRelativeTransform() const noexcept { return LocalValue(); }
 
     void SetRelativeLocation(const Eigen::Vector3f& location) noexcept;
     void SetRelativeRotation(const Eigen::Quaternionf& rotation) noexcept;
     void SetRelativeScale(const Eigen::Vector3f& scale) noexcept;
+    void SetRelativeTransform(const LocalTransform& local) noexcept;
+    WorldTransformId GetWorldTransformId() const noexcept { return _worldTransformId; }
+    void SetTransformNotificationEnabled(bool enabled) noexcept;
+    bool IsTransformNotificationEnabled() const noexcept { return _transformNotificationEnabled; }
 
     /// Immediate GT value, evaluated from this node to the root without a persistent cache.
     Eigen::Vector3f GetWorldLocation() const noexcept;
@@ -56,7 +70,7 @@ public:
     std::span<SceneComponent* const> GetAttachChildren() const noexcept { return _children; }
 
 protected:
-    /// Registered components receive one notification per affected subtree in the next transform dispatch.
+    /// Opt in with SetTransformNotificationEnabled. Registered changes dispatch at the next boundary.
     virtual void OnTransformChanged() {}
     virtual void CollectRenderTransform(SceneCapture& capture) { (void)capture; }
 
@@ -64,6 +78,7 @@ private:
     friend class Actor;
     friend class World;
     friend class WorldRenderBridge;
+    friend class WorldTransformStore;
 
     struct TransformDirtyState {
         static constexpr uint32_t kNotQueued = 0x7fffffffu;
@@ -78,13 +93,17 @@ private:
     void UnlinkParent() noexcept;
 
     void NotifyTransformChanged();
+    void AdjustTransformSubscribers(int64_t delta) noexcept;
+    LocalTransform& LocalValue() noexcept { return *_local; }
+    const LocalTransform& LocalValue() const noexcept { return *_local; }
 
-    Eigen::Quaternionf _relativeRotation{Eigen::Quaternionf::Identity()};
-    Eigen::Vector3f _relativeLocation{Eigen::Vector3f::Zero()};
-    Eigen::Vector3f _relativeScale{Eigen::Vector3f::Ones()};
+    LocalTransform _draftLocal;
+    LocalTransform* _local{&_draftLocal};
+    WorldTransformId _worldTransformId;
+    uint32_t _transformSubscribers{0};
+    bool _transformNotificationEnabled{false};
     TransformId _sceneTransformId;
     uint32_t _sceneTransformIndex{std::numeric_limits<uint32_t>::max()};
-    uint32_t _localTransformQueueIndex{std::numeric_limits<uint32_t>::max()};
     TransformDirtyState _transformDirty;
     uint32_t _renderTransformRootIndex{std::numeric_limits<uint32_t>::max()};
     uint32_t _renderTransformCaptureEpoch{0};

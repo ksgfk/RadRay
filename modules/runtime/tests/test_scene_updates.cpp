@@ -9,6 +9,93 @@
 namespace radray {
 namespace {
 
+TEST(SceneUpdates, PackedTransformsSurviveGrowthAndBulkChangesPublishFinalValues) {
+    Application app;
+    RenderSystem render{&app, 2};
+    test::ScopedWorld world;
+    const auto scene = test::ConnectWorld(world, render);
+    auto* actor = world.SpawnActor();
+    vector<SceneComponent*> components;
+    vector<WorldTransformUpdate> updates;
+    for (uint32_t i = 0; i < 257; ++i) {
+        auto* component = actor->AddComponent<SceneComponent>();
+        component->SetRelativeLocation({float(i), 1, 2});
+        components.push_back(component);
+        updates.push_back({component->GetWorldTransformId(), {{float(i + 10), 3, 4}, Eigen::Quaternionf::Identity(), Eigen::Vector3f::Ones()}});
+    }
+    for (uint32_t i = 0; i < components.size(); ++i)
+        EXPECT_FLOAT_EQ(components[i]->GetWorldLocation().x(), float(i));
+    SceneUpdateBatch batch;
+    test::CollectScene(world, render, batch);
+    ASSERT_EQ(batch.CreateTransforms.size(), components.size());
+    updates[128].Local = {{2, 3, 4}, Eigen::Quaternionf{Eigen::AngleAxisf{0.7f, Eigen::Vector3f::UnitY()}}, {-2, 3, 0.5f}};
+    ASSERT_TRUE(world.SetLocalTransforms(updates));
+    const Eigen::Matrix4f expected = (Eigen::Translation3f{2, 3, 4} * Eigen::AngleAxisf{0.7f, Eigen::Vector3f::UnitY()} * Eigen::Scaling(-2.0f, 3.0f, 0.5f)).matrix();
+    EXPECT_TRUE(components[128]->GetWorldMatrix().isApprox(expected, 1e-5f));
+    components[127]->SetRelativeTransform(updates[128].Local);
+    EXPECT_TRUE(components[127]->GetWorldMatrix().isApprox(expected, 1e-5f));
+    components[64]->SetRelativeLocation({999, 3, 4});
+    EXPECT_FLOAT_EQ(components[64]->GetWorldLocation().x(), 999);
+    world.CollectRenderUpdates();
+    components[64]->SetRelativeLocation({1000, 3, 4});
+    world.CollectRenderUpdates();
+    render.SealFrameGT(0);
+    const auto& sealed = test::SceneBatch(render, scene, 0);
+    ASSERT_EQ(sealed.LocalTransforms.size(), components.size());
+    for (const auto& update : sealed.LocalTransforms) {
+        auto it = std::find_if(components.begin(), components.end(), [&](auto* value) { return value->GetSceneTransformId() == update.Id; });
+        ASSERT_NE(it, components.end());
+        EXPECT_TRUE(update.Local.ToMatrix().isApprox((*it)->GetWorldMatrix(), 1e-5f));
+    }
+    components[64]->SetRelativeLocation({2000, 3, 4});
+    const auto frozen = std::find_if(sealed.LocalTransforms.begin(), sealed.LocalTransforms.end(), [&](const auto& value) { return value.Id == components[64]->GetSceneTransformId(); });
+    ASSERT_NE(frozen, sealed.LocalTransforms.end());
+    EXPECT_FLOAT_EQ(frozen->Local.Translation[0], 1000);
+    test::ConsumeFrame(render, 0);
+    test::CompleteFrame(render, 0);
+    test::CollectScene(world, render, batch);
+    ASSERT_EQ(batch.LocalTransforms.size(), 1u);
+    EXPECT_FLOAT_EQ(batch.LocalTransforms[0].Local.Translation[0], 2000);
+    test::CollectScene(world, render, batch);
+    EXPECT_TRUE(batch.Empty());
+}
+
+TEST(SceneUpdates, BulkTransformHandlesRejectRetiredGenerationsAndSurviveReconnect) {
+    Application app;
+    RenderSystem render{&app, 1};
+    test::ScopedWorld world;
+    test::ConnectWorld(world, render);
+    auto* actor = world.SpawnActor();
+    auto* removed = actor->AddComponent<SceneComponent>();
+    const auto stale = removed->GetWorldTransformId();
+    auto* survivor = actor->AddComponent<SceneComponent>();
+    const auto stable = survivor->GetWorldTransformId();
+    SceneUpdateBatch batch;
+    test::CollectScene(world, render, batch);
+    removed->SetRelativeLocation({4, 0, 0});
+    actor->RemoveComponent(removed);
+    world.FinalizeWorldGT();
+    auto* replacement = actor->AddComponent<SceneComponent>();
+    EXPECT_EQ(replacement->GetWorldTransformId().Index, stale.Index);
+    EXPECT_NE(replacement->GetWorldTransformId().Generation, stale.Generation);
+    const vector<WorldTransformUpdate> invalid{{stable, {{7, 0, 0}, Eigen::Quaternionf::Identity(), Eigen::Vector3f::Ones()}}, {stale, {}}};
+    EXPECT_FALSE(world.SetLocalTransforms(invalid));
+    EXPECT_FLOAT_EQ(survivor->GetRelativeLocation().x(), 0);
+    replacement->SetRelativeLocation({8, 0, 0});
+    test::CollectScene(world, render, batch);
+    ASSERT_EQ(batch.CreateTransforms.size(), 1u);
+    EXPECT_FLOAT_EQ(batch.CreateTransforms[0].Local.Translation[0], 8);
+    EXPECT_EQ(batch.RemoveTransforms.size(), 1u);
+    world.RequestReconnect();
+    test::CollectScene(world, render, batch);
+    EXPECT_EQ(survivor->GetWorldTransformId(), stable);
+    ASSERT_TRUE(world.SetLocalTransforms({invalid.data(), 1}));
+    test::CollectScene(world, render, batch);
+    ASSERT_EQ(batch.LocalTransforms.size(), 1u);
+    EXPECT_EQ(batch.LocalTransforms[0].Id, survivor->GetSceneTransformId());
+    EXPECT_FLOAT_EQ(batch.LocalTransforms[0].Local.Translation[0], 7);
+}
+
 class LifecycleComponent final : public ActorComponent {
 public:
     explicit LifecycleComponent(vector<string>& events) : _events(events) { SetTickEnabled(true); }
@@ -51,7 +138,7 @@ TEST(SceneUpdates, OrdinaryComponentsKeepTheirLifecycleAndMirrorOnlySceneHierarc
 
 class RenderSceneComponent final : public RenderComponent {
 public:
-    explicit RenderSceneComponent(vector<string>& events) : _events(events) {}
+    explicit RenderSceneComponent(vector<string>& events) : _events(events) { SetTransformNotificationEnabled(true); }
     void OnRegister() override { _events.push_back("register"); }
     void OnUnregister() override {
         EXPECT_FALSE(IsRegistered());
@@ -247,8 +334,8 @@ TEST(SceneUpdates, IndexedLightRowsSurviveTypeChangesSwapRemovalAndSlotReuse) {
                 LightData value;
                 switch ((random >> 16) % 4) {
                     case 0: value = DirectionalLightData{common}; break;
-                    case 1: value = PointLightData{common}; break;
-                    case 2: value = SpotLightData{common}; break;
+                    case 1: value = PointLightData{common, {}}; break;
+                    case 2: value = SpotLightData{common, {}}; break;
                     default: value = RectLightData{common}; break;
                 }
                 expected.Set(id, value);

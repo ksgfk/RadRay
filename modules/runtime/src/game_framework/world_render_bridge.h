@@ -22,6 +22,7 @@ public:
     void Destroy(RenderComponent& component);
     void CreateTransform(SceneComponent& component);
     void DestroyTransform(SceneComponent& component);
+    void ReparentTransform(SceneComponent& component);
     void Queue(RenderComponent& component, RenderDirtyFlag flag);
     void Collect();
     SceneId GetSceneId() const noexcept { return _writer.GetSceneId(); }

@@ -473,6 +473,7 @@ public:
     bool PrepareFrame(bool isInModalLoop) {
         if (_ticking || _reqExit) return false;
         if (_framePrepared) return true;
+        RADRAY_PROFILE_SCOPE_N("PrepareFrame");
         _ticking = true;
         auto scope = MakeScopeGuard([this]() noexcept { _ticking = false; });
         auto* gpuSystem = _app->GetGpuSystem().Get();
@@ -865,6 +866,7 @@ private:
 };
 
 void Application::ServiceFrameBoundaryGT(uint32_t flightIndex) {
+    RADRAY_PROFILE_SCOPE_N("Application::ServiceFrameBoundaryGT");
     if (_gpuSystem != nullptr) PumpFlightCompletions(flightIndex);
     if (_assetManager) _assetManager->Pump();
     _scheduler.Pump();
@@ -925,6 +927,7 @@ AppUpdateResult Application::Update(const AppUpdateContext& ctx) {
 }
 
 void Application::FinalizeWorldAndSealGT(uint32_t flightIndex) {
+    RADRAY_PROFILE_SCOPE_N("Application::FinalizeWorldAndSealGT");
     if (_worldManager) {
         _worldManager->FinalizeWorldsGT();
         _worldManager->CollectRenderUpdates();

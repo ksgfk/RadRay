@@ -219,8 +219,8 @@ void SceneWriter::Flush(SceneUpdateBatch& batch, uint32_t flightIndex) {
         state.Sent = true;
         state.CreateIndex = kNotQueued;
     }
-    for (const auto& value : _pending.LocalTransforms) _transforms.Get({value.Id.Index, value.Id.Generation}).LocalIndex = kNotQueued;
-    for (const auto& value : _pending.TransformParents) _transforms.Get({value.Id.Index, value.Id.Generation}).ParentIndex = kNotQueued;
+    if (_transformEditEpoch == std::numeric_limits<uint64_t>::max()) RADRAY_ABORT("Transform edit epoch exhausted");
+    ++_transformEditEpoch;
     for (const auto id : _pending.CreateShapes) {
         auto& state = _shapes.Get({id.Index, id.Generation});
         state.Sent = true;
@@ -251,6 +251,7 @@ TransformId SceneWriter::CreateTransform(TransformId parent, const LocalTransfor
 }
 void SceneWriter::RemoveTransform(TransformId id) {
     auto& state = _transforms.Get({id.Index, id.Generation});
+    BeginTransformEdit(state);
     const auto cancel = [&](auto& values, size_t TransformState::* member) {
         const auto index = state.*member;
         if (index == kNotQueued) return;
@@ -268,24 +269,46 @@ void SceneWriter::RemoveTransform(TransformId id) {
     if (id.Generation == std::numeric_limits<uint32_t>::max()) RADRAY_ABORT("Transform generation exhausted");
     _transforms.Destroy({id.Index, id.Generation});
 }
-void SceneWriter::SetLocalTransform(TransformId id, TransformId parent, const LocalTransform& local) {
-    auto& state = _transforms.Get({id.Index, id.Generation});
+void SceneWriter::ReserveLocalTransforms(size_t count) {
+    const size_t required = _pending.LocalTransforms.size() + count;
+    if (required > _pending.LocalTransforms.capacity())
+        _pending.LocalTransforms.reserve(std::max(required, _pending.LocalTransforms.capacity() * 2));
+}
+void SceneWriter::WriteLocalTransform(const LocalTransformUpdate& update) {
+    if (!update.Id.IsValid()) return;
+    auto& state = _transforms.Get({update.Id.Index, update.Id.Generation});
     if (!state.Sent) {
-        _pending.CreateTransforms[state.CreateIndex] = {id, parent, local};
+        _pending.CreateTransforms[state.CreateIndex].Local = update.Local;
+        return;
+    }
+    BeginTransformEdit(state);
+    if (state.LocalIndex == kNotQueued) {
+        state.LocalIndex = _pending.LocalTransforms.size();
+        _pending.LocalTransforms.push_back(update);
     } else {
-        if (state.LocalIndex == kNotQueued) {
-            state.LocalIndex = _pending.LocalTransforms.size();
-            _pending.LocalTransforms.push_back({id, local});
+        _pending.LocalTransforms[state.LocalIndex].Local = update.Local;
+    }
+}
+void SceneWriter::SetLocalTransforms(std::span<const LocalTransformUpdate> updates) {
+    ReserveLocalTransforms(updates.size());
+    for (const auto& update : updates) WriteLocalTransform(update);
+}
+void SceneWriter::GatherLocalTransforms(std::span<const LocalTransformUpdate> values, std::span<const uint32_t> indices) {
+    ReserveLocalTransforms(indices.size());
+    for (const auto index : indices) WriteLocalTransform(values[index]);
+}
+void SceneWriter::SetTransformParent(TransformId id, TransformId parent) {
+    auto& state = _transforms.Get({id.Index, id.Generation});
+    if (state.Parent == parent) return;
+    if (!state.Sent) {
+        _pending.CreateTransforms[state.CreateIndex].Parent = parent;
+    } else {
+        BeginTransformEdit(state);
+        if (state.ParentIndex == kNotQueued) {
+            state.ParentIndex = _pending.TransformParents.size();
+            _pending.TransformParents.push_back({id, parent});
         } else {
-            _pending.LocalTransforms[state.LocalIndex].Local = local;
-        }
-        if (state.Parent != parent) {
-            if (state.ParentIndex == kNotQueued) {
-                state.ParentIndex = _pending.TransformParents.size();
-                _pending.TransformParents.push_back({id, parent});
-            } else {
-                _pending.TransformParents[state.ParentIndex].Parent = parent;
-            }
+            _pending.TransformParents[state.ParentIndex].Parent = parent;
         }
     }
     state.Parent = parent;

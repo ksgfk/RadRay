@@ -19,7 +19,10 @@ struct LifecycleTrace {
 
 class LifecycleProbe final : public PrimitiveComponent {
 public:
-    explicit LifecycleProbe(LifecycleTrace& trace) : Trace(trace) { SetTickEnabled(true); }
+    explicit LifecycleProbe(LifecycleTrace& trace) : Trace(trace) {
+        SetTickEnabled(true);
+        SetTransformNotificationEnabled(true);
+    }
     ~LifecycleProbe() noexcept override { ++Trace.Freed; }
     void OnRegister() override {
         EXPECT_EQ(GetRegistrationState(), ComponentRegistration::Registering);
@@ -897,6 +900,54 @@ TEST(WorldLifecycle, SceneLightPoseFollowsAncestorsWithoutRecapturingLightState)
     ASSERT_TRUE(compacted);
     EXPECT_TRUE(compacted->Point.Position.isApprox(survivor->GetWorldLocation(), 1e-5f));
     EXPECT_TRUE(compacted->Point.Direction.isApprox(survivor->GetLightDirection(), 1e-5f));
+}
+
+class TransformSubscriber final : public SceneComponent {
+public:
+    explicit TransformSubscriber(uint32_t& count) : _count(count) {}
+
+protected:
+    void OnTransformChanged() override { ++_count; }
+
+private:
+    uint32_t& _count;
+};
+
+TEST(WorldLifecycle, TransformSubscriptionsFollowEnableReparentAndParentRemoval) {
+    uint32_t notifications = 0;
+    test::ScopedWorld world;
+    auto* actor = world.SpawnActor();
+    auto* first = actor->AddComponent<SceneComponent>();
+    auto* second = actor->AddComponent<SceneComponent>();
+    auto* child = actor->AddSceneComponent<TransformSubscriber>(first, AttachmentRule::KeepLocal, notifications);
+    first->SetRelativeLocation({1, 0, 0});
+    world.FinalizeWorldGT();
+    EXPECT_EQ(notifications, 0u);
+    child->SetTransformNotificationEnabled(true);
+    first->SetRelativeLocation({2, 0, 0});
+    world.FinalizeWorldGT();
+    EXPECT_EQ(notifications, 1u);
+    child->RequestReparent(second);
+    world.FinalizeWorldGT();
+    EXPECT_EQ(notifications, 2u);
+    first->SetRelativeLocation({3, 0, 0});
+    world.FinalizeWorldGT();
+    EXPECT_EQ(notifications, 2u);
+    second->SetRelativeLocation({4, 0, 0});
+    world.FinalizeWorldGT();
+    EXPECT_EQ(notifications, 3u);
+    child->SetTransformNotificationEnabled(false);
+    second->SetRelativeLocation({5, 0, 0});
+    world.FinalizeWorldGT();
+    EXPECT_EQ(notifications, 3u);
+    child->SetTransformNotificationEnabled(true);
+    actor->RemoveComponent(second);
+    world.FinalizeWorldGT();
+    EXPECT_EQ(notifications, 4u);
+    EXPECT_FALSE(child->GetAttachParent());
+    child->SetRelativeLocation({9, 0, 0});
+    world.FinalizeWorldGT();
+    EXPECT_EQ(notifications, 5u);
 }
 
 TEST(WorldLifecycle, TransformRootsCoalesceAndCallbackMutationsNotifyNextBatch) {

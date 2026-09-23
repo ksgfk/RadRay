@@ -72,6 +72,7 @@ cmake_dependent_option(RADRAY_ENABLE_VULKAN "Enable Vulkan backend" ON "RADRAY_B
 option(RADRAY_BUILD_SHADER_COMPILER "Enable RadRay DXC fork compiler capability" ON)
 cmake_dependent_option(RADRAY_ENABLE_SHADER_JIT "Enable runtime shader JIT orchestration" ON "RADRAY_BUILD_SHADER_COMPILER" OFF)
 cmake_dependent_option(RADRAY_BUILD_SHADER_TOOLS "Build RadRay shader command line tools" ON "RADRAY_BUILD_SHADER_COMPILER" OFF)
+option(RADRAY_BUILD_EXAMPLES "Build runnable runtime examples" ON)
 
 set(RADRAY_THIRDPARTY_ROOT "${CMAKE_SOURCE_DIR}/third_party")
 
@@ -349,7 +350,7 @@ if (RADRAY_BUILD_TESTS)
     enable_testing()
     include(GoogleTest)
 endif()
-option(RADRAY_BUILD_EXAMPLES "Build runnable runtime examples" OFF)
+
 add_subdirectory(modules)
 if (RADRAY_BUILD_EXAMPLES)
     add_subdirectory(examples)
