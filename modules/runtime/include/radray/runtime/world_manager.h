@@ -45,6 +45,7 @@ public:
     void Shutdown();
 
 private:
+    friend class Application;
     friend class World;
     void CheckCanModify() const noexcept;
     void CheckIdle() const noexcept;

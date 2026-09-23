@@ -3,6 +3,7 @@
 namespace radray {
 
 void CameraComponent::SetPerspective(float fovYRadians, float nearZ, float farZ) noexcept {
+    CheckCanModify();
     _fovY = fovYRadians;
     _nearZ = nearZ;
     _farZ = farZ;

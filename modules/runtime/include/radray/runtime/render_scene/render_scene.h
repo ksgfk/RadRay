@@ -14,6 +14,11 @@
 
 namespace radray {
 
+struct SceneApplyChanges {
+    vector<ShapeId> Updated;
+    vector<ShapeId> Removed;
+};
+
 /// A single persistent CPU scene. RT owns Apply and reads; GT may inspect only after RT stops.
 class RenderScene {
 public:
@@ -42,7 +47,7 @@ public:
     ReadLease AcquireRead() const;
 
     /// Must run once per published batch, in order, after all preceding CPU scene readers finish.
-    void Apply(const SceneUpdateBatch& batch) noexcept;
+    void Apply(const SceneUpdateBatch& batch, Nullable<SceneApplyChanges*> changes = nullptr) noexcept;
     bool ContainsShape(ShapeId id) const noexcept;
     std::optional<StaticMeshSceneView> GetStaticMesh(ShapeId id) const noexcept;
     bool ContainsLight(LightId id) const noexcept { return static_cast<bool>(_lights.GetLight(id)); }

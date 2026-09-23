@@ -1,0 +1,8 @@
+if (NOT RADRAY_BUILD_RUNTIME OR NOT RADRAY_ENABLE_SHADER_JIT)
+    message(FATAL_ERROR "RADRAY_BUILD_EXAMPLES requires runtime and shader JIT")
+endif()
+add_executable(example_scene_sync scene_sync/example_scene_sync.cpp scene_sync/example_scene_sync.h scene_sync/scene_draw.cpp scene_sync/scene_draw.h)
+target_link_libraries(example_scene_sync PRIVATE radrayruntime)
+target_compile_definitions(example_scene_sync PRIVATE RADRAY_SCENE_EXAMPLE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/scene_sync" RADRAY_SHADERLIB_DIR="${CMAKE_SOURCE_DIR}/shaderlib")
+radray_default_compile_flags(example_scene_sync)
+radray_set_build_path(example_scene_sync)

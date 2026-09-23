@@ -59,9 +59,11 @@ private:
 class UploadTestDevice final : public RuntimeTestDevice {
 public:
     int LiveDeviceBuffers{0}, DeviceAllocations{0}, FailDeviceAllocation{0};
+    int UploadAllocations{0}, FailUploadAllocation{0};
     int LiveTextures{0}, LiveTextureViews{0};
     Nullable<unique_ptr<render::Buffer>> CreateBuffer(const render::BufferDescriptor& desc) noexcept override {
         if (desc.Memory == render::MemoryType::Device && ++DeviceAllocations == FailDeviceAllocation) return nullptr;
+        if (desc.Memory == render::MemoryType::Upload && ++UploadAllocations == FailUploadAllocation) return nullptr;
         return make_unique<UploadTestBuffer>(this, desc, LiveDeviceBuffers);
     }
     Nullable<unique_ptr<render::Texture>> CreateTexture(const render::TextureDescriptor& desc) noexcept override {
@@ -74,6 +76,7 @@ public:
 class UploadTestCommand final : public render::CommandBuffer {
 public:
     uint32_t Copies{0};
+    uint32_t BarrierCalls{0};
     bool IsValid() const noexcept override { return true; }
     void Destroy() noexcept override {}
     void SetDebugName(std::string_view) noexcept override {}
@@ -81,7 +84,7 @@ public:
     void End() noexcept override {}
     void PushDebugGroup(std::string_view) noexcept override {}
     void PopDebugGroup() noexcept override {}
-    void ResourceBarrier(std::span<const render::ResourceBarrierDescriptor>) noexcept override {}
+    void ResourceBarrier(std::span<const render::ResourceBarrierDescriptor>) noexcept override { ++BarrierCalls; }
     Nullable<unique_ptr<render::GraphicsCommandEncoder>> BeginRenderPass(const render::RenderPassBeginDescriptor&) noexcept override { return nullptr; }
     void EndRenderPass(unique_ptr<render::GraphicsCommandEncoder>) noexcept override {}
     Nullable<unique_ptr<render::ComputeCommandEncoder>> BeginComputePass() noexcept override { return nullptr; }

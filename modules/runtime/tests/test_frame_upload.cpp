@@ -26,6 +26,58 @@ TEST_F(FrameUploadTest, AllocationFailureLeavesNoRecordedMeshCopies) {
     }
 }
 
+TEST_F(FrameUploadTest, TransactionalBufferUploadDoesNotRecordAPrefixOnStagingFailure) {
+    // Two requests exceed a standard staging page so failure occurs after the first staged range.
+    vector<byte> bytes(5 * 1024 * 1024);
+    auto destination = Device.CreateBuffer({.Size = bytes.size() * 2, .Memory = render::MemoryType::Device, .Usage = render::BufferUse::CopyDestination}).Unwrap();
+    const array<BufferUploadRequest, 2> requests{{{.SrcData = bytes, .DstBuffer = destination.get()},
+                                                  {.SrcData = bytes, .DstBuffer = destination.get(), .DstOffset = bytes.size()}}};
+    Device.FailUploadAllocation = 2;
+    Uploader.BeginFlight(0, Writes);
+    EXPECT_FALSE(Uploader.TryUploadBufferRanges(&Command, requests));
+    EXPECT_EQ(Command.Copies, 0u);
+    EXPECT_EQ(Command.BarrierCalls, 0u);
+    Uploader.EndFlight(0);
+    Uploader.CollectFlight(0);
+    Writes.Reset();
+    Device.FailUploadAllocation = 0;
+    Uploader.BeginFlight(0, Writes);
+    EXPECT_TRUE(Uploader.TryUploadBufferRanges(&Command, requests));
+    EXPECT_EQ(Command.Copies, 2u);
+    EXPECT_EQ(Command.BarrierCalls, 2u);
+    Uploader.EndFlight(0);
+    Uploader.CollectFlight(0);
+}
+
+TEST_F(FrameUploadTest, SparseBufferRangesUseOneBarrierPairAndRejectOverlap) {
+    array<byte, 64> bytes{};
+    auto destination = Device.CreateBuffer({.Size = 12800, .Memory = render::MemoryType::Device, .Usage = render::BufferUse::CopyDestination}).Unwrap();
+    array<BufferUploadRequest, 100> requests;
+    for (uint32_t i = 0; i < requests.size(); ++i) {
+        requests[i] = {.SrcData = bytes, .DstBuffer = destination.get(), .DstOffset = i * 128u,
+                       .Before = render::BufferState::ShaderRead, .After = render::BufferState::ShaderRead};
+    }
+    for (uint32_t flight = 0; flight < 2; ++flight) {
+        Uploader.BeginFlight(flight, Writes);
+        EXPECT_TRUE(Uploader.TryUploadBufferRanges(&Command, requests));
+        EXPECT_EQ(Command.Copies, (flight + 1) * 100u);
+        EXPECT_EQ(Command.BarrierCalls, (flight + 1) * 2u);
+        Uploader.EndFlight(flight);
+        Uploader.CollectFlight(flight);
+        Writes.Reset();
+    }
+    Uploader.BeginFlight(0, Writes);
+    requests[1].DstOffset = 0;
+    EXPECT_FALSE(Uploader.TryUploadBufferRanges(&Command, requests));
+    requests[1].DstOffset = 128;
+    requests[1].Before = render::BufferState::Common;
+    EXPECT_FALSE(Uploader.TryUploadBufferRanges(&Command, requests));
+    EXPECT_EQ(Command.Copies, 200u);
+    EXPECT_EQ(Command.BarrierCalls, 4u);
+    Uploader.EndFlight(0);
+    Uploader.CollectFlight(0);
+}
+
 TEST_F(FrameUploadTest, InvalidMeshAttributesFailBeforeAllocatingOrRecording) {
     for (uint32_t invalidCase = 0; invalidCase < 8; ++invalidCase) {
         SCOPED_TRACE(invalidCase);

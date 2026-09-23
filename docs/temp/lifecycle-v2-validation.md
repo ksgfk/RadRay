@@ -5,6 +5,8 @@
 # 生命周期与增量渲染 v2 验收
 
 状态：v2 实施阶段的历史验收记录；已运行、静态检查及未覆盖项分别记录，不视为 T01–T74 全部通过。
+本文及引用的仓库外旧实施计划只作为历史基线；Scene 对象 GPU 参数与视图交付的当前接口以
+[runtime 契约](../architecture/render-framework.md#对象-gpu-参数与当帧视图)为准。
 以下测试结果与 CSV 采集于移除运行时测试统计之前。当前实现已删除相关累计字段，测试改用自身 probe、
 实际更新包与对象状态；旧 CSV 的 Gather、矩阵求值、owner 搬移计数及性能数值仅保留为历史数据，不能视为当前版本的测量。
 基线：`88942aa8a6cad2e7f0d0973d91d2f95ea5ceaee1`，分支 `refactor/render-framework-reset`；开始时工作树干净。

@@ -425,7 +425,7 @@ StagingBufferPool::Page StagingBufferPool::CreatePage(uint64_t capacity, bool ca
         .Hints = render::ResourceHint::PersistentMap};
     auto bufferOpt = _device->CreateBuffer(desc);
     if (!bufferOpt.HasValue()) {
-        RADRAY_ABORT("StagingBufferPool failed to create upload buffer of size {}", capacity);
+        return {};
     }
     auto buffer = bufferOpt.Release();
     const std::string_view namePrefix = cacheable ? "staging_page" : "staging_large";
@@ -435,19 +435,27 @@ StagingBufferPool::Page StagingBufferPool::CreatePage(uint64_t capacity, bool ca
         .Cacheable = cacheable};
 }
 
-StagingBufferPool::Page& StagingBufferPool::AcquireStandardPage() {
+Nullable<StagingBufferPool::Page*> StagingBufferPool::AcquireStandardPage() {
     if (!_freeList.empty()) {
         Page page = std::move(_freeList.back());
         _freeList.pop_back();
         page.Upload->Reset();
         _active.emplace_back(std::move(page));
     } else {
-        _active.emplace_back(CreatePage(_desc.PageSize, true));
+        auto page = CreatePage(_desc.PageSize, true);
+        if (!page.Upload) return nullptr;
+        _active.emplace_back(std::move(page));
     }
-    return _active.back();
+    return &_active.back();
 }
 
 StagingBufferPool::Reservation StagingBufferPool::Reserve(uint64_t size, uint64_t alignment) {
+    auto reservation = TryReserve(size, alignment);
+    if (size != 0 && !reservation.IsValid()) RADRAY_ABORT("StagingBufferPool failed to allocate {} bytes", size);
+    return reservation;
+}
+
+StagingBufferPool::Reservation StagingBufferPool::TryReserve(uint64_t size, uint64_t alignment) {
     if (size == 0) {
         return {};
     }
@@ -471,17 +479,20 @@ StagingBufferPool::Reservation StagingBufferPool::Reserve(uint64_t size, uint64_
         }
     }
 
-    Page* page = nullptr;
+    Nullable<Page*> page{nullptr};
     if (size <= _desc.PageSize) {
-        page = &AcquireStandardPage();
+        page = AcquireStandardPage();
     } else {
         if (size > std::numeric_limits<uint64_t>::max() - (alignment - 1)) {
             RADRAY_ABORT("StagingBufferPool allocation size {} overflows alignment {}", size, alignment);
         }
         const uint64_t capacity = Align(size, alignment);
-        _active.emplace_back(CreatePage(capacity, false));
+        auto created = CreatePage(capacity, false);
+        if (!created.Upload) return {};
+        _active.emplace_back(std::move(created));
         page = &_active.back();
     }
+    if (!page) return {};
     Reservation reservation = page->Upload->Reserve(size, alignment, *_hostWrites);
     if (!reservation.IsValid()) {
         RADRAY_ABORT(
@@ -571,33 +582,59 @@ void ResourceUploader::UploadBuffer(
         return;
     }
 
+    if (!TryUploadBufferRanges(cmdBuffer, std::span{&request, 1})) RADRAY_ABORT("Buffer upload staging allocation failed");
+}
+
+bool ResourceUploader::TryUploadBufferRanges(render::CommandBuffer* cmdBuffer, std::span<const BufferUploadRequest> requests) {
+    if (requests.empty()) return true;
+    const auto& first = requests.front();
+    uint64_t previousEnd = 0;
+    _bufferUploads.clear();
+    _bufferUploadBarriers.clear();
     const uint64_t copyAlignment = std::max<uint64_t>(
         1,
         _device->GetDetail().BufferCopyOffsetAlignment);
-    auto reservation = _stagingPool.Reserve(size, copyAlignment);
-    std::memcpy(reservation.Data(), request.SrcData.data(), size);
-    const auto alloc = reservation.Commit(size);
-
-    vector<render::ResourceBarrierDescriptor> barriersBefore;
-    barriersBefore.emplace_back(render::BarrierBufferDescriptor{
-        .Target = alloc.Target,
-        .Before = render::BufferState::HostWrite,
-        .After = render::BufferState::CopySource});
-    barriersBefore.emplace_back(render::BarrierBufferDescriptor{
-        .Target = request.DstBuffer,
-        .Before = request.Before,
+    for (const auto& request : requests) {
+        if (request.SrcData.empty() || request.DstBuffer == nullptr) return false;
+        if (request.DstBuffer != first.DstBuffer || request.Before != first.Before || request.After != first.After || request.DstOffset < previousEnd) return false;
+        const auto size = request.SrcData.size();
+        const auto capacity = request.DstBuffer->GetDesc().Size;
+        if (request.DstOffset > capacity || size > capacity - request.DstOffset) return false;
+        previousEnd = request.DstOffset + size;
+        auto reservation = _stagingPool.TryReserve(size, copyAlignment);
+        if (!reservation.IsValid()) return false;
+        std::memcpy(reservation.Data(), request.SrcData.data(), size);
+        const auto allocation = reservation.Commit(size);
+        _bufferUploads.push_back(allocation);
+        const auto source = std::find_if(_bufferUploadBarriers.begin(), _bufferUploadBarriers.end(), [&](const auto& barrier) {
+            return std::get<render::BarrierBufferDescriptor>(barrier).Target == allocation.Target;
+        });
+        if (source == _bufferUploadBarriers.end()) {
+            _bufferUploadBarriers.emplace_back(render::BarrierBufferDescriptor{
+                .Target = allocation.Target,
+                .Before = render::BufferState::HostWrite,
+                .After = render::BufferState::CopySource});
+        }
+    }
+    _bufferUploadBarriers.emplace_back(render::BarrierBufferDescriptor{
+        .Target = first.DstBuffer,
+        .Before = first.Before,
         .After = render::BufferState::CopyDestination});
-    cmdBuffer->ResourceBarrier(barriersBefore);
-    cmdBuffer->CopyBufferToBuffer(
-        request.DstBuffer, request.DstOffset,
-        alloc.Target, alloc.Offset,
-        size);
-
-    render::ResourceBarrierDescriptor barrierAfter = render::BarrierBufferDescriptor{
-        .Target = request.DstBuffer,
+    cmdBuffer->ResourceBarrier(_bufferUploadBarriers);
+    for (size_t i = 0; i < requests.size(); ++i) {
+        const auto& request = requests[i];
+        const auto& alloc = _bufferUploads[i];
+        cmdBuffer->CopyBufferToBuffer(
+            request.DstBuffer, request.DstOffset,
+            alloc.Target, alloc.Offset,
+            request.SrcData.size());
+    }
+    const render::ResourceBarrierDescriptor barrierAfter = render::BarrierBufferDescriptor{
+        .Target = first.DstBuffer,
         .Before = render::BufferState::CopyDestination,
-        .After = request.After};
+        .After = first.After};
     cmdBuffer->ResourceBarrier(std::span{&barrierAfter, 1});
+    return true;
 }
 
 namespace {

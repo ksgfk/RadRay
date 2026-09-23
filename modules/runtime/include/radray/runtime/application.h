@@ -25,6 +25,7 @@ class AppFrameContext;
 class AssetDatabase;
 class AssetManager;
 class RenderSystem;
+class SceneViewCollector;
 class WorldManager;
 class IWaitFrameProcessor;
 struct AppFrameTarget;
@@ -194,6 +195,8 @@ protected:
 
     /// 每帧游戏逻辑(World::Tick 之前)。在 AssetManager::Pump 之后调用。
     virtual void OnUpdate(const AppUpdateContext& ctx);
+    /// GT, after S1 and scene collection. World mutation and scheduler pumping are forbidden.
+    virtual void OnCollectRenderViews(SceneViewCollector& collector);
 
     /// GPU 模式下在渲染线程（或单线程模式下的主线程）上录制应用程序命令。
     /// runner 调用开始/结束/提交；资源必须在帧处理过程(flight)时保持存活。

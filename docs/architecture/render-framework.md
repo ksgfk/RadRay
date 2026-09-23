@@ -5,7 +5,8 @@
 # Runtime 宿主、World 与渲染场景
 
 runtime 采用立即创建、延迟销毁、统一 Tick 轮次与类型化增量交付。每个 Scene 只有一份 RT CPU 数据；
-flight 保存更新包和必要 owner。没有内置 Forward/RenderGraph、视图执行 API 或完整场景快照。
+flight 保存更新包、按值视图请求和必要 owner。RenderSystem 按需提供对象 GPU buffer，
+shader、PSO、渲染目标和 draw loop 由调用方持有。没有内置 Forward/RenderGraph 或完整场景快照。
 旧渲染器设计见[历史快照](../temp/render-framework-design.md)。
 
 ## Application 与驱动边界
@@ -18,7 +19,7 @@ flight 保存更新包和必要 owner。没有内置 Forward/RenderGraph、视�
 | 正常入口 | 责任 |
 |---|---|
 | S0 `ServiceFrameBoundaryGT` | 完成事实、框架 owner 释放、等待通知、资产结果与 scheduler；runner 的 PrepareFrame 同阶段执行窗口维护与 writable 背压 |
-| S1 `FinalizeWorldAndSealGT` | Tick/World CPU 借用结束后，冻结生命周期请求、注销和连接，再 Collect 最终值并 Seal |
+| S1 `FinalizeWorldAndSealGT` | Tick/World CPU 借用结束后，冻结生命周期请求、注销和连接，Collect 场景最终值、OnCollectRenderViews，再 Seal |
 | S2 `ApplySceneUpdatesRT` | BeginFrameRecord 后、OnRender 前，有序 Apply；先结束上一轮 CPU Scene 读者 |
 
 输入与 OnUpdate 后，WorldManager 开始全局 TickEpoch。S1 不等待 GPU。RT 跳过绘制仍消费已发布包。
@@ -256,6 +257,36 @@ RT 不维护 Light 槽位映射或代次墓碑；GetLight/ContainsLight 线性�
 RT 或停止后的检查可借用数据，普通借用截止到下一 Apply。并行 CPU 读者在 RT 派发前获取 AcquireRead lease，
 在任务结束时释放；Apply 和 Scene 析构等待已有 lease，不等 GPU。RT 必须先停止派发旧 Scene 的新读者。
 RenderScene 不可复制/移动；不能把 reader lease 持到依赖下一次 Apply 才能结束的工作中。
+
+## 对象 GPU 参数与当帧视图
+
+`RenderScene::Apply(batch, changes)` 可选输出 `SceneApplyChanges::Updated/Removed`，每次调用清空长度并复用容量。
+Updated 是求值和 bounds 更新后最终受影响的完整 ShapeId：祖先移动、共享 Transform、重挂接、显式世界矩阵
+和 mesh 改绑均进入集合，同一身份只出现一次。Removed 保留删除前的 generation。bare Shape 不产生对象参数；
+登记 mesh 后，即使资产尚未 Ready，也有矩阵记录，绘制仍必须跳过空几何。稠密行 swap-remove 不标脏被搬移对象。
+不传 changes 的纯 CPU 路径不创建 GPU dirty 集合，也不增加全 Scene 扫描。
+
+`RenderSystem::PrepareSceneGpuRT(sceneId, frame)` 要求已消费当前 flight 的更新，返回可空 `SceneGpuView`。
+首次调用才在 RT Scene 记录建立 `SceneGpuData`；RenderScene 继续只拥有 CPU 数据。
+每 Scene、每 flight 各有一个持久 device-local object buffer，记录为 64 字节列主序 `SceneObjectGpuData::LocalToWorld`。
+槽位为 `ShapeId.Index`，与 CPU mesh/Transform 行无关；CPU 查询与重试始终验证完整 generation。
+空槽不清零、不绘制。buffer 只按最高所需槽位几何扩容，不缩容；当帧准备后不会更换，多个 view 复用相同绑定。
+device-local buffer 分配失败返回空并保留变化，本帧跳过该 Scene；下一 flight 轮次可以重试。
+返回绑定借用截至该 flight 完成，消费者必须将资源留在 ShaderRead 状态。
+Pending、Attempt、执行状态与退休协议见[帧与 GPU](frame-and-gpu.md#对象参数上传与完成反馈)。
+
+`Application::OnCollectRenderViews(SceneViewCollector&)` 在 World S1 与场景收集后、Seal 前运行。
+该阶段禁止修改 World/WorldManager 或 Pump scheduler/asset；CameraComponent 的透视 setter 同样检查。
+collector 可接收已构造的 `SceneViewRequest`，或从存活 CameraComponent 捕获当前 SceneId、View 和透视参数。
+请求包含相对于目标的归一化 viewport，按值存入当前 flight。每帧重新提交，零请求明确表示零视图。
+Camera 销毁或 World 重连不改变已封存请求；RT 只通过 `GetFrameViewsRT` 读请求，不访问组件。
+`ResolveSceneView` 用实际目标及视口像素尺寸计算后端无关的 Projection，并统一生成 D3D12/Vulkan viewport/scissor；
+Vulkan 使用负 viewport 高度处理 Y 方向。非法参数、零尺寸和舍入后的空视口返回空。
+
+`examples/scene_sync` 提供固定无光照立方体窗口闭环：Ready StaticMesh/GpuMesh 一次创建，shader/绑定句柄/正反绕序
+PSO 跨帧复用，按 sections 发出 draw。每 view 上传 ViewProjection，每 draw 只传对象槽位。
+仅 acquire 成功后准备对象并绘制；窗口维护与提交继续由 Application/GpuSystem 处理。
+光照、材质、importer、剔除、间接绘制与完整 renderer 不在此接口内。
 
 ## 交付、退出与资产保活
 

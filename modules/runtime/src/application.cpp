@@ -929,8 +929,25 @@ void Application::FinalizeWorldAndSealGT(uint32_t flightIndex) {
         _worldManager->FinalizeWorldsGT();
         _worldManager->CollectRenderUpdates();
     }
-    if (_renderSystem) _renderSystem->SealFrameGT(flightIndex);
+    if (_renderSystem) {
+        auto& frame = _renderSystem->GetFrameUpdates(flightIndex);
+        if (frame.Phase != RenderSystem::SceneFlightPhase::Writable) RADRAY_ABORT("View collection requires writable flight");
+        frame.Views.clear();
+        {
+            _renderSystem->SetCollecting(true);
+            if (_worldManager) _worldManager->_collecting = true;
+            auto guard = MakeScopeGuard([this]() noexcept {
+                if (_worldManager) _worldManager->_collecting = false;
+                _renderSystem->SetCollecting(false);
+            });
+            SceneViewCollector collector{frame.Views};
+            OnCollectRenderViews(collector);
+        }
+        _renderSystem->SealFrameGT(flightIndex);
+    }
 }
+
+void Application::OnCollectRenderViews(SceneViewCollector& collector) { (void)collector; }
 
 void Application::Render(AppFrameContext& ctx) {
     this->OnRender(ctx);

@@ -1,6 +1,7 @@
 #include <radray/runtime/render_scene/render_scene.h>
 
 #include <mutex>
+#include <algorithm>
 #include <utility>
 
 #include <radray/logger.h>
@@ -36,14 +37,19 @@ RenderScene::ReadLease RenderScene::AcquireRead() const {
     return ReadLease{this};
 }
 
-void RenderScene::Apply(const SceneUpdateBatch& batch) noexcept {
+void RenderScene::Apply(const SceneUpdateBatch& batch, Nullable<SceneApplyChanges*> changes) noexcept {
     RADRAY_PROFILE_SCOPE_N("RenderScene::Apply");
     std::unique_lock lock{_readers};
     _readersDone.wait(lock, [this] { return _activeReaders == 0; });
+    if (changes) {
+        changes->Updated.clear();
+        changes->Removed.clear();
+    }
     _transforms.BeginApply();
     for (ShapeId id : batch.RemoveShapes) {
         if (!ContainsShape(id)) RADRAY_ABORT("Invalid shape removal");
         auto& slot = _shapes[id.Index];
+        if (changes) changes->Removed.push_back(id);
         UnbindShape(id.Index);
         if (slot.MeshIndex != kNoMesh) {
             const uint32_t removed = slot.MeshIndex;
@@ -103,12 +109,22 @@ void RenderScene::Apply(const SceneUpdateBatch& batch) noexcept {
     }
     const auto changed = _transforms.Evaluate();
     for (auto row : changed) {
-        for (auto shape = _transforms.GetFirstShape(row); shape != kNoMesh; shape = _shapes[shape].NextShape)
+        for (auto shape = _transforms.GetFirstShape(row); shape != kNoMesh; shape = _shapes[shape].NextShape) {
             _staticMeshes.UpdateBounds(_shapes[shape].MeshIndex, _transforms.GetWorld(row));
+            if (changes) changes->Updated.push_back({shape, _shapes[shape].Generation});
+        }
     }
     for (const auto& update : batch.MeshStates) {
         const auto& slot = _shapes[update.Id.Index];
-        if (!_transforms.WasUpdated(slot.TransformRow)) _staticMeshes.UpdateBounds(slot.MeshIndex, _transforms.GetWorld(slot.TransformRow));
+        if (!_transforms.WasUpdated(slot.TransformRow)) {
+            _staticMeshes.UpdateBounds(slot.MeshIndex, _transforms.GetWorld(slot.TransformRow));
+            if (changes) changes->Updated.push_back(update.Id);
+        }
+    }
+    if (changes) {
+        auto& ids = changes->Updated;
+        std::sort(ids.begin(), ids.end(), [](ShapeId a, ShapeId b) { return a.Index < b.Index; });
+        ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
     }
     if (!batch.LightsChanged && !batch.Lights.Empty()) RADRAY_ABORT("Light snapshot requires LightsChanged");
     if (batch.LightsChanged || !changed.empty()) UpdateLights(batch);

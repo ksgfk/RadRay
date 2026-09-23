@@ -235,6 +235,8 @@ public:
 
     /// 从上传页中预留暂存内存；大于标准页的请求会使用一次性缓冲区。
     Reservation Reserve(uint64_t size, uint64_t alignment = 1);
+    /// Returns an invalid reservation on allocation failure; existing active pages remain owned.
+    Reservation TryReserve(uint64_t size, uint64_t alignment = 1);
 
     /// 将所有活跃暂存页移入指定 flight 的待回收列表。
     void RetireToFlight(uint32_t flightIndex);
@@ -249,7 +251,7 @@ private:
     };
 
     Page CreatePage(uint64_t capacity, bool cacheable);
-    Page& AcquireStandardPage();
+    Nullable<Page*> AcquireStandardPage();
     void TrimFreeList() noexcept;
 
     render::Device* _device;
@@ -271,6 +273,9 @@ public:
 
     void BeginFlight(uint32_t flightIndex, HostWriteBatch& hostWrites);
     void UploadBuffer(render::CommandBuffer* cmdBuffer, const BufferUploadRequest& request);
+    /// Stages every range before recording any command. Failure leaves destination resources untouched.
+    /// Ranges must be ordered, non-overlapping and share one destination and Before/After states.
+    bool TryUploadBufferRanges(render::CommandBuffer* cmdBuffer, std::span<const BufferUploadRequest> requests);
     void UploadTexture(render::CommandBuffer* cmdBuffer, const TextureUploadRequest& request);
     std::optional<GpuMesh> UploadMeshResource(
         render::CommandBuffer* cmdBuffer,
@@ -283,6 +288,8 @@ public:
 private:
     render::Device* _device;
     StagingBufferPool _stagingPool;
+    vector<StagingBufferPool::Allocation> _bufferUploads;
+    vector<render::ResourceBarrierDescriptor> _bufferUploadBarriers;
     uint32_t _flightCount{0};
     uint32_t _activeFlightIndex{std::numeric_limits<uint32_t>::max()};
 };

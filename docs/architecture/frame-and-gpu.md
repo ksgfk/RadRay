@@ -9,9 +9,33 @@
 | 系统 | 负责 | 不负责 |
 |---|---|---|
 | `GpuSystem` | **何时画**。instance/factory/device/主队列/fence、flight 槽位、上传器、帧 profiler、帧边界等待表、flight 完成消息的发布与内部状态应用 | 画什么 |
-| `RenderSystem` | 多个持久 CPU RenderScene、per-flight 场景操作包、资产常驻与退休、program/artifact cache、RenderPass/Framebuffer registry | GPU 提交时序 |
+| `RenderSystem` | 多个持久 CPU RenderScene、按需对象 GPU 镜像、per-flight 场景操作包与视图、资产常驻与退休、program/artifact cache、RenderPass/Framebuffer registry | GPU 提交时序 |
 | `WindowManager` | 窗口创建/销毁、swapchain acquire/present/recreate、事件分发 | — |
 | `Application` | 固化帧序与关停顺序；消费 flight 完成消息；游戏侧的窄扩展点 | — |
+
+## 对象参数上传与完成反馈
+
+RenderSystem 的 RT 场景记录按需拥有 `SceneGpuData`，每个物理 flight buffer 独立维护去重 Pending、
+已录制的 Attempt 和执行状态。Scene Apply 的最终变化登记到所有 flight 的 Pending，删除按完整 ShapeId 移除。
+首次准备和扩容枚举当前全部存活 mesh，后续只访问 Pending；按槽位排序并将相邻记录合并为上传范围。
+矩阵直接从 CPU Scene 打包到复用 scratch，不保存每 flight 的 CPU 世界矩阵副本。
+
+同一 FrameSerial 最多准备一次，包括空场景和分配失败。成功录制后把此次身份移入 Attempt，记录 FrameSerial
+与 BufferGeneration，清空本次 Pending；尚未提交的资源状态不视为已执行。
+GT completion 只写该 flight 的 CompletedSerial/CompletedExecuted 交接字段，不修改活场景 GPU dirty 数据。
+RT 下次 Consume 该 flight 时，先处理旧反馈再 Apply：成功清除对应 Attempt 并提交初始化状态；失败仅将仍有效的
+完整身份合回 Pending，保留其他 flight 在此期间产生的新变化，重试读取 Scene 最新值。
+未录制无需 Attempt；首次初始化被丢弃后，下轮仍完整初始化。扩容只发生在已退休 flight 的首次准备阶段，
+其他 flight 的 buffer 保持独立。对象资源始终归还 ShaderRead 状态。
+
+Scene 删除立即销毁 CPU Scene，将 GPU owner 转入删除批次的 RetiredGpu。当前有序主队列的删除批次真实 fence
+覆盖先前全部使用，即使应用命令被丢弃仍可在 completion 释放；旧 scene generation 的反馈不进入新 Scene。
+关停在 RT 停止、GPU drain 和真实 completion 消费之后释放剩余镜像。对象上传使用
+`ResourceUploader::TryUploadBufferRanges`：先分配并写入所有暂存范围，再录制全部复制命令；对象 buffer 或暂存页
+分配失败均返回空、保留 Pending，不录制部分目的资源更新。已分配暂存页仍随当前 flight 退休。
+既有单范围 `UploadBuffer` 与暂存池 `Reserve` 保留失败即中止契约，需要恢复的调用方使用 Try 接口。
+多范围接口要求同一目标、相同前后状态、递增且不重叠的范围。runtime 去重暂存页 barrier，整批仅录制一次前置和一次后置 barrier；
+范围与 barrier 描述复用容量，RHI 的临时分配次数不随稀疏对象范围数增长。
 
 ## GpuSystem 的线程约定
 
@@ -41,7 +65,7 @@ S0 runner::PrepareFrame：固定窗口维护批次 → writable 背压
     → OnRenderFrameComplete → AssetManager::Pump → ApplicationScheduler::Pump
 BeginFrameTiming → DispatchEvents → OnUpdate → WorldManager::Tick（统一 epoch）
 S1 Application::FinalizeWorldAndSealGT
-  FinalizeWorldsGT → CollectRenderUpdates → SealFrameGT → PublishFrameGT → ready
+  FinalizeWorldsGT → CollectRenderUpdates → OnCollectRenderViews → SealFrameGT → PublishFrameGT → ready
 RT BeginFrameRecord → S2 ApplySceneUpdatesRT → 可选 OnRender
   EndFrameRecordAndSubmit：检查归还 → 上传 EndFlight → HostWrites.Flush
   → 有序 Submit/Present → 最终主队列 fence

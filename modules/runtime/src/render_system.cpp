@@ -3,6 +3,7 @@
 #include "shader_program_cache.h"
 
 #include <limits>
+#include <algorithm>
 #include <radray/logger.h>
 #include <radray/profiler.h>
 #include <radray/runtime/application.h>
@@ -98,6 +99,11 @@ std::span<const SceneFrameUpdate> RenderSystem::GetFrameUpdatesRT(uint32_t fligh
     return {frame.Scenes.data(), frame.Count};
 }
 
+std::span<const SceneViewRequest> RenderSystem::GetFrameViewsRT(uint32_t flightIndex) const {
+    if (flightIndex >= _frameUpdates.size()) RADRAY_ABORT("Invalid view flight index");
+    return _frameUpdates[flightIndex].Views;
+}
+
 void RenderSystem::SealFrameGT(uint32_t flightIndex) {
     RADRAY_PROFILE_SCOPE_N("RenderSystem::SealFrameGT");
     CheckCanModifyGT();
@@ -146,6 +152,14 @@ void RenderSystem::ConsumeRenderUpdates(uint32_t flightIndex, uint64_t frameSeri
     RADRAY_PROFILE_SCOPE_N("RenderSystem::ConsumeRenderUpdates");
     auto& frame = GetFrameUpdates(flightIndex);
     if (frame.Phase != SceneFlightPhase::Published || frame.UpdateSequence != _lastConsumedSequence + 1 || frameSerial == 0 || frameSerial <= _lastFrameSerial) RADRAY_ABORT("Duplicate or out-of-order scene consumption");
+    for (auto id : frame.PreparedScenes) {
+        if (id.Index >= _scenesRT.size()) continue;
+        auto& slot = _scenesRT[id.Index];
+        if (slot.Generation == id.Generation && slot.Scene && slot.Gpu)
+            slot.Gpu->Complete(flightIndex, frame.CompletedSerial, frame.CompletedExecuted, *slot.Scene);
+    }
+    frame.PreparedScenes.clear();
+    frame.CompletedSerial = 0;
     for (const auto& entry : GetFrameUpdatesRT(flightIndex)) {
         const auto id = entry.Id;
         if (entry.Create) {
@@ -158,9 +172,11 @@ void RenderSystem::ConsumeRenderUpdates(uint32_t flightIndex, uint64_t frameSeri
         if (id.Index >= _scenesRT.size()) RADRAY_ABORT("Missing scene");
         auto& slot = _scenesRT[id.Index];
         if (!slot.Scene || slot.Generation != id.Generation) RADRAY_ABORT("Stale scene update");
-        slot.Scene->Apply(entry.Updates);
+        slot.Scene->Apply(entry.Updates, slot.Gpu ? &_applyChanges : Nullable<SceneApplyChanges*>{nullptr});
+        if (slot.Gpu) slot.Gpu->ApplyChanges(_applyChanges);
         if (entry.Destroy) {
             slot.Scene.reset();
+            if (slot.Gpu) frame.RetiredGpu.push_back(std::move(slot.Gpu));
             if (slot.Generation == std::numeric_limits<uint32_t>::max()) RADRAY_ABORT("Scene generation exhausted");
             ++slot.Generation;
         }
@@ -177,10 +193,24 @@ Nullable<const RenderScene*> RenderSystem::GetSceneRT(SceneId id) const noexcept
     return slot.Generation == id.Generation ? slot.Scene.get() : nullptr;
 }
 
+std::optional<SceneGpuView> RenderSystem::PrepareSceneGpuRT(SceneId id, AppFrameContext& context) {
+    auto& frame = GetFrameUpdates(context.FlightIndex());
+    if (frame.Phase != SceneFlightPhase::Consumed || frame.FrameSerial != context.FrameSerial()) RADRAY_ABORT("Prepare requires this frame's consumed scene");
+    if (!GetSceneRT(id)) return std::nullopt;
+    auto& slot = _scenesRT[id.Index];
+    if (!slot.Gpu) slot.Gpu = make_unique<SceneGpuData>(context.GetDevice(), static_cast<uint32_t>(_frameUpdates.size()));
+    if (std::find(frame.PreparedScenes.begin(), frame.PreparedScenes.end(), id) == frame.PreparedScenes.end()) frame.PreparedScenes.push_back(id);
+    return slot.Gpu->Prepare(*slot.Scene, context);
+}
+
 void RenderSystem::OnFlightCompletedGT(const FlightCompletion& completion) {
     CheckCanModifyGT();
     auto& frame = GetFrameUpdates(completion.FlightIndex);
     if (frame.Phase != SceneFlightPhase::Consumed || frame.FrameSerial != completion.FrameSerial) RADRAY_ABORT("Stale or unconsumed scene completion");
+    frame.CompletedSerial = completion.FrameSerial;
+    frame.CompletedExecuted = completion.GpuWorkCompleted;
+    frame.RetiredGpu.clear();
+    frame.Views.clear();
     for (size_t i = 0; i < frame.Count; ++i) {
         auto& entry = frame.Scenes[i];
         auto record = _scenesGT.TryGet({entry.Id.Index, entry.Id.Generation});
@@ -202,6 +232,7 @@ void RenderSystem::AbandonUnpublishedFrameGT(uint32_t flightIndex) {
     for (size_t i = 0; i < frame.Count; ++i) frame.Scenes[i].Updates.Clear();
     for (auto& record : _scenesGT.Values()) record.Writer->_assets.ReleaseFlight(flightIndex);
     frame.Count = 0;
+    frame.Views.clear();
     frame.Phase = SceneFlightPhase::Writable;
 }
 

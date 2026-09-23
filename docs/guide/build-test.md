@@ -52,6 +52,7 @@ cmake --build build_clangcl --config Debug --parallel 24
 | 开关 | 默认与依赖 |
 |---|---|
 | `RADRAY_BUILD_TESTS` | ON |
+| `RADRAY_BUILD_EXAMPLES` | OFF；开启要求 runtime 与 shader JIT |
 | `RADRAY_BUILD_BENCHMARKS` | 单配置 Release 或包含 Release 的多配置 generator 默认 ON |
 | `RADRAY_BUILD_WINDOW`、`RADRAY_BUILD_RENDER` | ON |
 | `RADRAY_BUILD_RUNTIME` | 默认 ON，要求 render 和 window |
@@ -378,6 +379,41 @@ fixture 构造、初始场景同步、随机排列生成和销毁在计时循环
 旧手工采样结果不能与新基准的数值直接比较。
 
 ## 生命周期与增量渲染验收
+
+Scene GPU 闭环新增 `SceneApplyChanges`、`SceneViews`/`SceneViewsDeathTest`、`Backends/SceneGpu`、
+`SceneGpuAllocation`、`SceneGpuLifetime` 与 `SceneDraw`（关闭 JIT 时明确报告跳过）。前者覆盖最终变化集合、视图捕获与修改禁令；GPU 测试覆盖
+双后端矩阵读回、F=1/2/3、单/双线程录制、槽位 generation、多 Scene、零上传静止帧、分配失败、扩容和稀疏范围。
+SceneDraw 读取真实非对称图像和正面颜色，覆盖对象/相机移动、负缩放绕序、1/3 view、相机销毁、Scene 重连、late-drop 重试与窗口最小化/恢复/resize。
+SceneGpuLifetime 用延迟主队列 fence 验证 Scene 删除的退休覆盖；host-signaled fence 压力不与 native validation 混跑。
+缺少后端按既有 startup 规则跳过；正式验收设置 `RADRAY_TEST_REQUIRED_BACKENDS=d3d12,vulkan`，JIT 初始化后的失败不跳过。
+
+窗口示例默认 1,000 实例、F=2、双线程、单视图，shader 源码位于 `examples/scene_sync`：
+
+```powershell
+cmake -S . -B build_debug -DRADRAY_BUILD_EXAMPLES=ON
+cmake --build build_debug --target example_scene_sync radray_runtime_tests --parallel 12
+ctest --test-dir build_debug/modules/runtime/tests --output-on-failure
+build_debug/_build/Debug/example_scene_sync.exe --vulkan --flights=3 --views=3 --instances=1000
+```
+
+`--d3d12`/`--vulkan` 选择后端，`--single-thread` 改为单线程，`--flights=1/2/3`、`--views=1/3` 调整配置；
+`--validation` 开启验证，`--frames=N` 限定运行帧数。示例沿用原生窗口的 resize、最小化与恢复入口。
+
+`bench_scene_gpu` 是独立 Google Benchmark 目标，不依赖 JIT。固定 10k mesh 参数条目，变化量为 0/1/100/10000，
+稀疏修改按均匀步长分布到槽位，100 个变化对应 100 个不相邻范围；全量变化合并为一个范围。
+另含父节点驱动 10k 子对象、每帧增删 10 对象；F=1/2/3，1/3 次视图准备。`PrepareAndRecord` 只计对象参数准备及上传命令录制，排除 GT 修改、Apply、提交与等待；
+`SubmitFrame` 计 GT 修改、Apply、准备、真实主队列提交及 flight 重用等待。该基准不录制 geometry draw，
+不能解释为完整渲染帧率。设备 profiler 的 `gpu_ms/frame` 是提交的 GPU 命令时间，上传字节/范围是每帧统计差值。
+`CpuSync` 单独计修改、Collect、Seal 和 Apply，通过原生 PauseTiming 排除 GPU flight 等待与 BeginFrameRecord；打包与上传命令录制仍按组合成本报告。
+初始化和预热不混入稳态结果；`first_use` 单独测首次准备 10k 条目，`growth` 先把各物理 buffer 初始化为 8192 条目，再测扩到 10k 条目的重新初始化。
+冷启动两类仅计 `PrepareAndRecord`，场景创建与初始同步不计入该时间。双线程 CPU 同步继续由 `bench_scene_sync`/`bench_lifecycle` 测量。
+
+```powershell
+cmake --build build_release --target bench_scene_gpu bench_scene_sync --parallel 12
+build_release/_build/Release/bench_scene_gpu.exe --benchmark_filter='SceneGpu/.*/.*/F2/' --benchmark_min_time=0.2s --benchmark_min_warmup_time=0.1 --benchmark_repetitions=3 --benchmark_out=build_release/scene_gpu.json
+```
+
+必须先完成构建和正确性测试，再独立采样。CPU 基线与新增 GPU 成本分别报告，不把历史约 500 μs 当作跨配置绝对门槛。
 
 `WorldLifecycle` 覆盖立即创建、统一 epoch、延迟销毁、连接重入、层级和 typed Light；
 `SceneDelivery` / `SceneDeliveryRunner` 覆盖 packet/serial、CPU reader lease 和 F=1/2/3/8。

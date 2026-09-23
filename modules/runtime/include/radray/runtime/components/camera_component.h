@@ -10,7 +10,7 @@ class CameraComponent;
 /// 相机组件 (对应 UE5 的 UCameraComponent)。View = 自身世界变换的逆, Proj = 左手透视,
 /// aspect 由视口在填充时给出, 故相机不感知具体窗口。
 ///
-/// 相机不产出 viewport；后端 Y 方向由 runtime 的 MakeViewport 唯一处理，投影矩阵保持后端无关。
+/// 相机不产出 viewport；后端 Y 方向由 runtime 的 ResolveSceneView 处理，投影矩阵保持后端无关。
 class CameraComponent : public SceneComponent {
 public:
     CameraComponent() noexcept = default;

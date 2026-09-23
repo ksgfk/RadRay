@@ -8,6 +8,8 @@
 #include <radray/render/render_pass_registry.h>
 #include <radray/runtime/shader_program.h>
 #include <radray/runtime/render_scene/render_scene.h>
+#include <radray/runtime/render_scene/scene_gpu.h>
+#include <radray/runtime/scene_view.h>
 #include <radray/runtime/render_scene/scene_writer.h>
 #include <radray/runtime_type.h>
 #include <radray/types.h>
@@ -56,6 +58,8 @@ public:
     void AbandonUnpublishedFramesGT();
     /// RT only, or after RT stops. Borrow ends at the next Apply or scene destruction.
     Nullable<const RenderScene*> GetSceneRT(SceneId id) const noexcept;
+    std::optional<SceneGpuView> PrepareSceneGpuRT(SceneId id, AppFrameContext& frame);
+    std::span<const SceneViewRequest> GetFrameViewsRT(uint32_t flightIndex) const;
     /// RT only, or inspection after RT stops. Borrow expires at flight completion.
     std::span<const SceneFrameUpdate> GetFrameUpdatesRT(uint32_t flightIndex) const;
 
@@ -69,6 +73,7 @@ public:
     bool InvalidateShaderSource(std::string_view sourceName);
 
 private:
+    friend class Application;
     friend class WorldRenderBridge;
     void CheckCanModifyGT() const;
     void SetCollecting(bool collecting);
@@ -83,6 +88,7 @@ private:
     struct SceneSlotRT {
         uint32_t Generation{0};
         unique_ptr<RenderScene> Scene;
+        unique_ptr<SceneGpuData> Gpu;
     };
     enum class SceneFlightPhase : uint8_t {
         Writable,
@@ -96,6 +102,11 @@ private:
         SceneFlightPhase Phase{SceneFlightPhase::Writable};
         uint64_t UpdateSequence{0};
         uint64_t FrameSerial{0};
+        vector<SceneId> PreparedScenes;
+        vector<SceneViewRequest> Views;
+        vector<unique_ptr<SceneGpuData>> RetiredGpu;
+        uint64_t CompletedSerial{0};
+        bool CompletedExecuted{false};
     };
     FrameUpdates& GetFrameUpdates(uint32_t flightIndex);
 
@@ -106,6 +117,7 @@ private:
     vector<FrameUpdates> _frameUpdates;
     SparseSet<SceneRecord> _scenesGT;
     vector<SceneSlotRT> _scenesRT;
+    SceneApplyChanges _applyChanges;
     // GT owns seal, publish, completion and stopping; RT owns consumption.
     uint64_t _nextUpdateSequence{1};
     uint64_t _lastPublishedSequence{0};
