@@ -1,63 +1,18 @@
-// Measurement boundaries and invocation: docs/guide/build-test.md
+#include "scene_sync_workload.h"
 #include "scene_test_support.h"
 
-#ifdef RADRAY_SCENE_SYNC_BENCHMARK
-#include <benchmark/benchmark.h>
-#else
-#include <gtest/gtest.h>
-#endif
 #include <algorithm>
-#include <charconv>
 #include <chrono>
-#include <cmath>
-#include <cstdio>
-#include <cstdlib>
-#include <fstream>
-#include <numeric>
 #include <random>
 #include <semaphore>
 #include <thread>
-#include <fmt/format.h>
-#include <radray/profiler.h>
 #include <radray/runtime/components/directional_light_component.h>
 #include <radray/runtime/components/point_light_component.h>
 #include <radray/runtime/components/spot_light_component.h>
 #include <radray/runtime/components/static_mesh_component.h>
 #include <radray/runtime/game_framework/actor.h>
-#ifdef RADRAY_ENABLE_MIMALLOC
-#include <mimalloc.h>
-#include <mimalloc-stats.h>
-#endif
 
-namespace radray {
-namespace {
-
-using Clock = std::chrono::steady_clock;
-
-int64_t Now() { return std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch()).count(); }
-double Microseconds(int64_t begin, int64_t end) { return double(end - begin) / 1000.0; }
-
-enum class Workload { Transform,
-                      SameValue,
-                      HierarchyLeaf,
-                      HierarchyRoot,
-                      Rebind,
-                      Lights,
-                      Churn,
-                      Burst,
-                      Reparent,
-                      Mixed,
-                      Level };
-
-struct Scenario {
-    string Name;
-    Workload Kind{Workload::Transform};
-    uint32_t Shapes{10000}, Changes{100}, Lights{0}, LightChanges{0}, Repeats{1}, Depth{1};
-    bool Wide{false}, Sequential{false};
-    /// Workload::Level only. Changes moves, RebindCount rebinds and StreamCount replacements draw
-    /// disjoint selection offsets, so their sum must stay within the selection.
-    uint32_t StreamCount{0}, StreamPeriod{1}, RebindCount{0};
-};
+namespace radray::test {
 
 /// Realistic frame mixes. These compose the single-axis mechanisms above at ratios taken from typical
 /// frames instead of extremes; no scenario here exercises a mechanism the other workloads do not.
@@ -81,7 +36,7 @@ void AppendRealistic(vector<Scenario>& result, bool small) {
     result.push_back({.Name = "editor_idle", .Kind = Workload::Level, .Shapes = open, .Changes = 1, .Lights = 8, .LightChanges = 0});
 }
 
-vector<Scenario> Scenarios(bool small) {
+vector<Scenario> SceneSyncScenarios(bool small) {
     vector<Scenario> result;
     for (uint32_t n : (small ? vector<uint32_t>{256} : vector<uint32_t>{1000, 10000, 100000})) {
         for (uint32_t changes : {0u, 1u, std::max(1u, n / 100), n / 10, n})
@@ -131,36 +86,7 @@ unique_ptr<StaticMesh> MakeMesh(float extent) {
     return make_unique<StaticMesh>(std::move(mesh), vector<StaticMeshSection>{}, Eigen::Vector3f::Zero(), Eigen::Vector3f::Constant(extent), GpuMesh{});
 }
 
-array<int64_t, 2> AllocationTotals() {
-#ifdef RADRAY_ENABLE_MIMALLOC
-    if (std::getenv("RADRAY_SCENE_SYNC_ALLOCATIONS") == nullptr) return {-1, -1};
-    mi_collect(true);
-    mi_stats_t stats;
-    mi_stats_init(&stats);
-    if (mi_stats_get(&stats)) return {stats.malloc_normal_count.total + stats.malloc_huge_count.total,
-                                      stats.malloc_normal.total + stats.malloc_huge.total};
-#endif
-    return {-1, -1};
-}
-
-void MergeThreadAllocations() {
-#ifdef RADRAY_ENABLE_MIMALLOC
-    mi_collect(true);
-    mi_theap_stats_merge_to_heap(mi_theap_get_default());
-#endif
-}
-
-bool TracksContainerAllocations() {
-#ifdef RADRAY_ENABLE_MIMALLOC
-    const auto before = AllocationTotals();
-    vector<byte> probe(16384);
-    const auto after = AllocationTotals();
-    return mi_is_in_heap_region(probe.data()) && after[0] > before[0] && after[1] > before[1];
-#else
-    return false;
-#endif
-}
-
+namespace {
 struct ExpectedShape {
     ShapeId Id;
     AssetId Asset;
@@ -227,40 +153,21 @@ bool Validate(const RenderScene& scene, const ExpectedScene& expected) {
     return true;
 }
 
-struct GTFrame {
-    int64_t Start{0}, Published{0};
-    double Mutation{0}, Tick{0}, Lifecycle{0}, Collect{0}, Seal{0}, Publish{0}, Wait{0}, Completion{0};
-    uint64_t Sequence{0};
-};
-
-struct RTFrame {
-    int64_t Begin{0}, End{0};
-    uint64_t Transforms{0}, MeshStates{0}, Creates{0}, Removes{0}, LightRecords{0}, PayloadBytes{0};
-    uint64_t Locals{0}, Parents{0}, TransformCreates{0}, TransformRemoves{0};
-    bool Valid{true};
-};
-
-enum class Command { Frame,
-                     MergeAllocations,
-                     Stop };
-
 struct alignas(64) FlightSlot {
     std::binary_semaphore Done{0};
-    Command Job{Command::Frame};
-    size_t Sample{0};
+    size_t Frame{0};
     uint64_t Sequence{0};
-    bool Pending{false}, Verify{false};
+    bool Pending{false}, Stop{false};
     ExpectedScene Expected;
 };
+}  // namespace
 
-class SyncBenchmark {
+class SceneSyncWorkload::Impl {
 public:
-    SyncBenchmark(Scenario scenario, uint32_t flights, bool threaded, size_t sampleCount, bool gate = false)
-        : _scenario(std::move(scenario)), _flights(flights), _threaded(threaded), _gate(gate),
-          _renderer(&_app, flights), _gt(sampleCount), _rt(sampleCount) {
+    Impl(Scenario scenario, uint32_t flights, bool threaded, bool verify, bool gate)
+        : _scenario(std::move(scenario)), _flights(flights), _threaded(threaded), _verify(verify), _gate(gate),
+          _renderer(&_app, flights) {
         for (uint32_t i = 0; i < flights; ++i) _slots.push_back(make_unique<FlightSlot>());
-        const auto allocations = AllocationTotals();
-        const auto start = Now();
         _sceneId = test::ConnectWorld(_world, _renderer);
         _meshes[0] = _assets.AddReady<StaticMesh>(AssetId{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}, MakeMesh(1));
         _meshes[1] = _assets.AddReady<StaticMesh>(AssetId{2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}, MakeMesh(2));
@@ -284,13 +191,6 @@ public:
             light->SetLightColor({0.25f, 0.5f, 0.75f});
             _lights.push_back(light);
         }
-        _setupUs = Microseconds(start, Now());
-        const auto label = fmt::format("SceneSync {} F={} {}", _scenario.Name, flights, threaded ? "threaded" : "single");
-        RADRAY_PROFILE_MESSAGE(label);
-        const auto after = AllocationTotals();
-        _allocationTracking = after[0] > allocations[0] && TracksContainerAllocations();
-        _setupAllocations = _allocationTracking ? after[0] - allocations[0] : -1;
-        _setupBytes = _allocationTracking ? after[1] - allocations[1] : -1;
         for (uint32_t i = 0; i < _scenario.Shapes; ++i) {
             if (_scenario.Kind == Workload::HierarchyLeaf && (i + 1) % _scenario.Depth != 0 && i + 1 != _scenario.Shapes) continue;
             if ((_scenario.Kind == Workload::HierarchyRoot || _scenario.Kind == Workload::Level || _scenario.Kind == Workload::Reparent) && i % _scenario.Depth != 0) continue;
@@ -299,54 +199,29 @@ public:
         std::mt19937 generator{0x5CE1u};
         if (!_scenario.Sequential) std::shuffle(_selection.begin(), _selection.end(), generator);
         _removedShapes.reserve(_scenario.Shapes);
-        const auto initial = Now();
         test::PrepareScene(_world, _renderer, 0);
         test::ConsumeFrame(_renderer, 0);
         test::CompleteFrame(_renderer, 0, false);
-        _initialSyncUs = Microseconds(initial, Now());
         if (_threaded) _worker = std::thread{[this] { Worker(); }};
-        RADRAY_PROFILE_THREAD("RadRay GT");
     }
 
-    ~SyncBenchmark() { Stop(); }
+    ~Impl() { Stop(); }
 
-    void Run(size_t begin, size_t count, bool verify) {
-        for (size_t sample = begin; sample < begin + count; ++sample) {
-            const uint32_t flight = uint32_t(_ticket % _flights);
+    void RunFrames(size_t count) {
+        for (size_t i = 0; i < count; ++i) {
+            const auto flight = uint32_t(_ticket % _flights);
             auto& slot = *_slots[flight];
-            auto& frame = _gt[sample];
-            frame.Wait = Reclaim(flight);
-            frame.Start = Now();
-            {
-                RADRAY_PROFILE_SCOPE_N("SceneSync.Mutate");
-                Mutate(sample);
-            }
-            auto phase = Now();
-            frame.Mutation = Microseconds(frame.Start, phase);
+            Reclaim(flight);
+            // Bound float-valued setters while preserving all periodic workloads.
+            slot.Frame = size_t(_ticket % 65536);
+            Mutate(slot.Frame);
             _world.Tick(1.0f / 60.0f);
-            auto end = Now();
-            frame.Tick = Microseconds(phase, end);
-            phase = end;
             _world.FinalizeWorldGT();
-            end = Now();
-            frame.Lifecycle = Microseconds(phase, end);
-            phase = end;
             _world.CollectRenderUpdates();
-            end = Now();
-            frame.Collect = Microseconds(phase, end);
-            phase = end;
             _renderer.SealFrameGT(flight);
-            end = Now();
-            frame.Seal = Microseconds(phase, end);
-            if (verify) CaptureExpected(slot.Expected);
-            slot.Job = Command::Frame;
-            slot.Sample = sample;
-            slot.Verify = verify;
-            slot.Sequence = frame.Sequence = _renderer.GetUpdateSequence(flight);
-            phase = Now();
+            if (_verify) CaptureExpected(slot.Expected);
+            slot.Sequence = _renderer.GetUpdateSequence(flight);
             _renderer.PublishFrameGT(flight);
-            frame.Published = Now();
-            frame.Publish = Microseconds(phase, frame.Published);
             slot.Pending = true;
             ++_ticket;
             if (_threaded) {
@@ -355,17 +230,11 @@ public:
                     _publishedWhileGated = uint32_t(_ticket);
                     _initialGate.release();
                 }
-            } else
+            } else {
                 Apply(flight, slot);
-            RADRAY_PROFILE_FRAME();
+            }
         }
         Drain();
-    }
-
-    array<int64_t, 2> Allocations() {
-        if (!_allocationTracking) return {-1, -1};
-        if (_threaded) Control(Command::MergeAllocations);
-        return AllocationTotals();
     }
 
     bool FinishAndValidate() {
@@ -373,41 +242,19 @@ public:
         ExpectedScene expected;
         CaptureExpected(expected);
         const auto scene = _renderer.GetSceneRT(_sceneId);
-        return scene && Validate(*scene, expected) && !_gateTimedOut &&
-               std::all_of(_rt.begin(), _rt.end(), [](const auto& frame) { return frame.Valid; });
-    }
-
-    double Write(std::ostream& raw, std::ostream& cases, size_t begin, size_t count, array<int64_t, 2> allocations) const {
-        const string mode = _threaded ? "threaded" : "single";
-        for (size_t sample = begin; sample < begin + count; ++sample) {
-            const auto& g = _gt[sample];
-            const auto& r = _rt[sample];
-            const double apply = Microseconds(r.Begin, r.End);
-            const double gt = g.Mutation + g.Tick + g.Lifecycle + g.Collect + g.Seal + g.Publish;
-            raw << fmt::format("{},{},{},{},{},{},{},{:.3f},{:.3f},{:.3f},{:.3f},{:.3f},{:.3f},{:.3f},{:.3f},{:.3f},{:.3f},{:.3f},{:.3f},{:.3f},{},{},{},{},{},{},{},{},{},{}\n",
-                               _scenario.Name, mode, _flights, sample - begin, g.Sequence, g.Start, r.End,
-                               g.Mutation, g.Tick, g.Lifecycle, g.Collect, g.Seal, g.Publish, apply,
-                               Microseconds(g.Published, r.Begin), Microseconds(g.Start, r.End), g.Wait, g.Completion, gt, gt + apply,
-                               r.Transforms, r.MeshStates, r.Creates, r.Removes, r.LightRecords, r.PayloadBytes,
-                               r.Locals, r.Parents, r.TransformCreates, r.TransformRemoves);
-        }
-        const double span = Microseconds(_gt[begin].Start, _rt[begin + count - 1].End);
-        cases << fmt::format("{},{},{},{},{},{},{},{},{},{},{},{},{},{:.3f},{:.3f},{},{},{},{},{:.3f},{:.6f}\n",
-                             _scenario.Name, mode, _flights, _scenario.Shapes, _scenario.Changes, _scenario.Lights, _scenario.LightChanges,
-                             _scenario.Repeats, _scenario.Depth, _scenario.Wide, _scenario.StreamCount, _scenario.StreamPeriod,
-                             _scenario.RebindCount, _setupUs, _initialSyncUs, _setupAllocations, _setupBytes,
-                             allocations[0], allocations[1], span, double(count) * 1e6 / span);
-        fmt::print("SCENE_SYNC {} {} F={} {:.1f} us/frame, {} frames\n", _scenario.Name, mode, _flights, span / double(count), count);
-        std::fflush(stdout);
-        return span;
+        return scene && Validate(*scene, expected) && !_gateTimedOut && _valid;
     }
 
     uint32_t PublishedWhileGated() const { return _publishedWhileGated; }
+    uint64_t Visible() const { return _visible; }
 
 private:
     StaticMeshComponent* SpawnMesh(uint32_t index, Nullable<SceneComponent*> parent = nullptr) {
         auto* component = _world.SpawnActor()->AddSceneComponent<StaticMeshComponent>(parent, AttachmentRule::KeepLocal);
-        component->SetStaticMesh(_meshes[0]);
+        if (_scenario.UniqueAssets)
+            component->SetStaticMesh(_assets.AddReady<StaticMesh>(AssetId{index + 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}, MakeMesh(1)));
+        else
+            component->SetStaticMesh(_meshes[0]);
         component->SetRelativeLocation({float(index % 97), 1, 0});
         component->SetRelativeScale({index % 7 == 0 ? -1.0f : 1.0f, 1, 1});
         return component;
@@ -433,7 +280,7 @@ private:
     void Replace(size_t frame, uint32_t base, uint32_t count) {
         for (uint32_t i = 0; i < count; ++i) {
             const auto index = Selected(frame, base + i);
-            _removedShapes.push_back(_components[index]->GetShapeId());
+            if (_verify) _removedShapes.push_back(_components[index]->GetShapeId());
             _world.DestroyActor(_components[index]->GetOwner().Get());
             _components[index] = SpawnMesh(index);
         }
@@ -563,93 +410,68 @@ private:
     }
 
     void Apply(uint32_t flight, const FlightSlot& slot) {
-        auto& frame = _rt[slot.Sample];
-        const auto& batch = test::SceneBatch(_renderer, _sceneId, flight);
-        frame.Transforms = batch.Transforms.size();
-        frame.MeshStates = batch.MeshStates.size();
-        frame.Creates = batch.CreateShapes.size();
-        frame.Removes = batch.RemoveShapes.size();
-        frame.LightRecords = batch.Lights.Count();
-        frame.Locals = batch.LocalTransforms.size();
-        frame.Parents = batch.TransformParents.size();
-        frame.TransformCreates = batch.CreateTransforms.size();
-        frame.TransformRemoves = batch.RemoveTransforms.size();
-        frame.PayloadBytes = frame.Transforms * sizeof(ShapeTransformUpdate) + frame.MeshStates * sizeof(StaticMeshStateUpdate) +
-                             batch.LocalTransforms.size() * sizeof(LocalTransformUpdate) + batch.TransformParents.size() * sizeof(TransformParentUpdate) +
-                             batch.CreateTransforms.size() * sizeof(TransformCreate) + batch.RemoveTransforms.size() * sizeof(TransformId) +
-                             (frame.Creates + frame.Removes) * sizeof(ShapeId) +
-                             frame.LightRecords * sizeof(LightId) +
-                             batch.Lights.DirectionalLights.Size() * sizeof(DirectionalLightData) +
-                             batch.Lights.PointLights.Size() * sizeof(PointLightData) + batch.Lights.SpotLights.Size() * sizeof(SpotLightData) +
-                             batch.Lights.RectLights.Size() * sizeof(RectLightData);
-        frame.Begin = Now();
         _renderer.ConsumeRenderUpdates(flight, slot.Sequence);
-        frame.End = Now();
-        if (slot.Verify) {
-            frame.Valid = CheckPayload(batch, slot.Sample);
+        uint64_t visible = 0;
+        if (_scenario.Views != 0) {
             const auto scene = _renderer.GetSceneRT(_sceneId);
-            frame.Valid = frame.Valid && scene && Validate(*scene, slot.Expected);
+            const auto lease = scene->AcquireRead();
+            const auto bounds = scene->GetStaticMeshColumns().Bounds;
+            for (uint32_t view = 0; view < _scenario.Views; ++view)
+                for (const auto& bound : bounds)
+                    visible += bound.Max.data()[0] >= -float(view + 1);
+            _visible += visible;
+        }
+        if (_verify) {
+            const auto& batch = test::SceneBatch(_renderer, _sceneId, flight);
+            const auto scene = _renderer.GetSceneRT(_sceneId);
+            _valid = _valid && CheckPayload(batch, slot.Frame) && scene && Validate(*scene, slot.Expected);
+            uint64_t expectedVisible = 0;
+            for (uint32_t view = 0; view < _scenario.Views; ++view)
+                for (const auto& shape : slot.Expected.Shapes)
+                    expectedVisible += shape.BoundsMax.x() >= -float(view + 1);
+            _valid = _valid && visible == expectedVisible;
         }
     }
 
-    double Reclaim(uint32_t flight) {
+    void Reclaim(uint32_t flight) {
         auto& slot = *_slots[flight];
-        if (!slot.Pending) return 0;
-        const auto begin = Now();
+        if (!slot.Pending) return;
         if (_threaded) slot.Done.acquire();
-        const auto completed = Now();
         test::CompleteFrame(_renderer, flight, false);
         _assets.Pump();
-        _gt[slot.Sample].Completion = Microseconds(completed, Now());
         slot.Pending = false;
-        return Microseconds(begin, completed);
     }
 
     void Drain() {
         for (uint32_t flight = 0; flight < _flights; ++flight) Reclaim(flight);
     }
 
-    void Control(Command command) {
-        const uint32_t flight = uint32_t(_ticket % _flights);
-        auto& slot = *_slots[flight];
-        slot.Job = command;
-        _ready.release();
-        slot.Done.acquire();
-    }
-
     void Worker() {
-        RADRAY_PROFILE_THREAD("RadRay RT");
         if (_gate && !_initialGate.try_acquire_for(std::chrono::seconds(10))) _gateTimedOut = true;
-        for (uint64_t ticket = 0;;) {
+        for (uint64_t ticket = 0;; ++ticket) {
             _ready.acquire();
-            const uint32_t flight = uint32_t(ticket % _flights);
+            const auto flight = uint32_t(ticket % _flights);
             auto& slot = *_slots[flight];
-            const auto command = slot.Job;
-            if (command == Command::Frame) {
-                Apply(flight, slot);
-                ++ticket;
-            } else if (command == Command::MergeAllocations)
-                MergeThreadAllocations();
+            if (slot.Stop) break;
+            Apply(flight, slot);
             slot.Done.release();
-            if (command == Command::Stop) break;
         }
     }
 
     void Stop() {
         Drain();
         if (_worker.joinable()) {
-            Control(Command::Stop);
+            _slots[_ticket % _flights]->Stop = true;
+            _ready.release();
             _worker.join();
         }
     }
 
     Scenario _scenario;
     uint32_t _flights;
-    bool _threaded, _gate, _gateTimedOut{false}, _allocationTracking{false};
+    bool _threaded, _verify, _gate, _gateTimedOut{false}, _valid{true};
     uint32_t _publishedWhileGated{0};
-    uint64_t _ticket{0};
-    double _setupUs{0}, _initialSyncUs{0};
-    int64_t _setupAllocations{-1}, _setupBytes{-1};
+    uint64_t _ticket{0}, _visible{0};
     Application _app;
     AssetManager _assets;
     RenderSystem _renderer;
@@ -661,187 +483,18 @@ private:
     vector<SceneComponent*> _parents;
     vector<uint32_t> _selection;
     vector<ShapeId> _removedShapes;
-    vector<GTFrame> _gt;
-    vector<RTFrame> _rt;
     vector<unique_ptr<FlightSlot>> _slots;
     std::counting_semaphore<8> _ready{0};
     std::binary_semaphore _initialGate{0};
     std::thread _worker;
 };
 
-#ifdef RADRAY_SCENE_SYNC_BENCHMARK
-uint32_t EnvironmentCount(const char* name, uint32_t fallback, bool& valid) {
-    Nullable<const char*> value{std::getenv(name)};
-    if (!value) return fallback;
-    uint32_t result = 0;
-    const std::string_view input{value.Get()};
-    const auto parsed = std::from_chars(input.data(), input.data() + input.size(), result);
-    if (parsed.ec != std::errc{} || parsed.ptr != input.data() + input.size() || result == 0 || result > 1000000) {
-        fmt::print(stderr, "Invalid {}\n", name);
-        valid = false;
-        return fallback;
-    }
-    return result;
-}
+SceneSyncWorkload::SceneSyncWorkload(Scenario scenario, uint32_t flights, bool threaded, bool verify, bool gate)
+    : _impl(make_unique<Impl>(std::move(scenario), flights, threaded, verify, gate)) {}
+SceneSyncWorkload::~SceneSyncWorkload() = default;
+void SceneSyncWorkload::RunFrames(size_t count) { _impl->RunFrames(count); }
+bool SceneSyncWorkload::FinishAndValidate() { return _impl->FinishAndValidate(); }
+uint32_t SceneSyncWorkload::PublishedWhileGated() const { return _impl->PublishedWhileGated(); }
+uint64_t SceneSyncWorkload::Visible() const { return _impl->Visible(); }
 
-bool SelectedScenario(std::string_view name) {
-    Nullable<const char*> value{std::getenv("RADRAY_SCENE_SYNC_CASES")};
-    if (!value || *value.Get() == '\0') return true;
-    std::string_view filter{value.Get()};
-    while (!filter.empty()) {
-        const auto comma = filter.find(',');
-        if (filter.substr(0, comma) == name) return true;
-        if (comma == std::string_view::npos) break;
-        filter.remove_prefix(comma + 1);
-    }
-    return false;
-}
-#endif
-
-#ifndef RADRAY_SCENE_SYNC_BENCHMARK
-TEST(SceneSyncCorrectness, AllWorkloadsAndFlights) {
-    for (const auto& scenario : Scenarios(true))
-        for (uint32_t flights : {1u, 2u, 3u})
-            for (bool threaded : {false, true}) {
-                SCOPED_TRACE(fmt::format("{} F={} threaded={}", scenario.Name, flights, threaded));
-                SyncBenchmark benchmark{scenario, flights, threaded, 40};
-                benchmark.Run(0, 40, true);
-                EXPECT_TRUE(benchmark.FinishAndValidate());
-            }
-}
-
-TEST(SceneSyncCorrectness, ProducerFillsAllFlightsBeforeConsumerStarts) {
-    for (uint32_t flights : {1u, 2u, 3u}) {
-        SyncBenchmark benchmark{{"pipeline_gate", Workload::Transform, 128, 32}, flights, true, 12, true};
-        benchmark.Run(0, 12, true);
-        EXPECT_TRUE(benchmark.FinishAndValidate());
-        EXPECT_EQ(benchmark.PublishedWhileGated(), flights);
-    }
-}
-
-TEST(SceneSyncAllocation, CountsIncludeGTAndRT) {
-    if (std::getenv("RADRAY_SCENE_SYNC_ALLOCATIONS") == nullptr) GTEST_SKIP() << "Separate allocation pass only";
-    ASSERT_TRUE(TracksContainerAllocations()) << "Container allocations are not observed; use /MT and MI_STATS=FULL";
-    std::binary_semaphore ready{0}, start{0}, done{0}, finish{0};
-    bool workerOwned = true;
-    std::thread worker{[&] {
-        {
-            vector<byte> warmup(16384);
-#ifdef RADRAY_ENABLE_MIMALLOC
-            workerOwned = mi_is_in_heap_region(warmup.data());
-#endif
-        }
-        MergeThreadAllocations();
-        ready.release();
-        start.acquire();
-        for (uint32_t i = 0; i < 32; ++i) {
-            vector<byte> probe(16384);
-#ifdef RADRAY_ENABLE_MIMALLOC
-            workerOwned = workerOwned && mi_is_in_heap_region(probe.data());
-#endif
-        }
-        MergeThreadAllocations();
-        done.release();
-        finish.acquire();
-    }};
-    ready.acquire();
-    const auto before = AllocationTotals();
-    start.release();
-    vector<byte> probe(16384);
-    done.acquire();
-    const auto after = AllocationTotals();
-    finish.release();
-    worker.join();
-    EXPECT_TRUE(workerOwned);
-    EXPECT_EQ(after[0] - before[0], 33);
-    EXPECT_GE(after[1] - before[1], 33 * 16384);
-}
-
-#endif
-
-}  // namespace
-
-#ifdef RADRAY_SCENE_SYNC_BENCHMARK
-int RunSceneSyncBenchmarks(int argc, char** argv) {
-    bool valid = true;
-    const uint32_t warmup = std::max(64u, EnvironmentCount("RADRAY_SCENE_SYNC_WARMUP", 64, valid));
-    const uint32_t count = EnvironmentCount("RADRAY_SCENE_SYNC_FRAMES", 512, valid);
-    const bool allocationPass = std::getenv("RADRAY_SCENE_SYNC_ALLOCATIONS") != nullptr;
-    const size_t first = 8 + warmup;
-    Nullable<const char*> path{std::getenv("RADRAY_SCENE_SYNC_OUTPUT")};
-    std::ofstream raw, cases;
-    if (path) {
-        raw.open(fmt::format("{}.frames.csv", path.Get()));
-        cases.open(fmt::format("{}.cases.csv", path.Get()));
-        if (!raw || !cases) {
-            fmt::print(stderr, "Cannot open scene sync CSV output\n");
-            return 1;
-        }
-        raw << "scenario,mode,flights,frame,sequence,start_ns,end_ns,mutation_us,tick_us,lifecycle_us,collect_us,seal_us,publish_us,apply_us,queue_us,e2e_us,flight_wait_us,completion_us,gt_work_us,work_us,transforms,mesh_states,creates,removes,light_records,payload_bytes,local_transforms,transform_parents,transform_creates,transform_removes\n";
-        cases << "scenario,mode,flights,shapes,changes,lights,light_changes,repeats,depth,wide,stream_count,stream_period,rebind_count,setup_us,initial_sync_us,setup_allocations,setup_bytes,allocations,allocation_bytes,span_us,frames_per_second\n";
-    }
-    struct NullBuffer : std::streambuf {
-        int_type overflow(int_type value) override { return traits_type::not_eof(value); }
-    } nullBuffer;
-    std::ostream discard{&nullBuffer};
-    std::ostream& rawOutput = path ? static_cast<std::ostream&>(raw) : discard;
-    std::ostream& caseOutput = path ? static_cast<std::ostream&>(cases) : discard;
-    vector<uint32_t> flights{1u, 2u, 3u};
-    vector<char> threaded{0, 1};
-    if (std::getenv("RADRAY_SCENE_SYNC_FLIGHTS") != nullptr) flights = {EnvironmentCount("RADRAY_SCENE_SYNC_FLIGHTS", 2, valid)};
-    if (Nullable<const char*> mode{std::getenv("RADRAY_SCENE_SYNC_THREADED")}) {
-        const std::string_view value{mode.Get()};
-        threaded = {value != "0" && value != "false"};
-    }
-    if (!valid) return 1;
-    size_t registered = 0;
-    bool failed = false;
-    for (const auto& scenario : Scenarios(false)) {
-        if (!SelectedScenario(scenario.Name)) continue;
-        for (uint32_t flightCount : flights)
-            for (char isThreaded : threaded) {
-                const auto name = fmt::format("SceneSync/{}/F{}/{}", scenario.Name, flightCount, isThreaded ? "threaded" : "single");
-                benchmark::RegisterBenchmark(name.c_str(), [&, scenario, flightCount, isThreaded](benchmark::State& state) {
-                    for (auto _ : state) {
-                        state.PauseTiming();
-                        SyncBenchmark sync{scenario, flightCount, bool(isThreaded), first + count};
-                        sync.Run(0, 8, true);
-                        sync.Run(8, warmup, false);
-                        const auto before = allocationPass ? sync.Allocations() : array<int64_t, 2>{-1, -1};
-                        state.ResumeTiming();
-                        sync.Run(first, count, false);
-                        state.PauseTiming();
-                        const auto after = allocationPass ? sync.Allocations() : array<int64_t, 2>{-1, -1};
-                        if (!sync.FinishAndValidate()) {
-                            failed = true;
-                            state.SkipWithError("scene sync validation failed");
-                            return;
-                        }
-                        const array<int64_t, 2> delta = before[0] < 0 || after[0] < 0 ? array<int64_t, 2>{-1, -1} : array<int64_t, 2>{after[0] - before[0], after[1] - before[1]};
-                        const double spanUs = sync.Write(rawOutput, caseOutput, first, count, delta);
-                        state.SetIterationTime(spanUs / 1e6);
-                        state.SetItemsProcessed(int64_t(count));
-                        state.ResumeTiming();
-                    }
-                })->UseManualTime()->Iterations(1);
-                ++registered;
-            }
-    }
-    if (registered == 0) {
-        fmt::print(stderr, "No scene sync benchmarks selected\n");
-        return 1;
-    }
-    benchmark::Initialize(&argc, argv);
-    if (benchmark::ReportUnrecognizedArguments(argc, argv)) return 1;
-    benchmark::RunSpecifiedBenchmarks();
-    benchmark::Shutdown();
-    raw.flush();
-    cases.flush();
-    return !failed && (!path || (raw.good() && cases.good())) ? 0 : 1;
-}
-#endif
-}  // namespace radray
-
-#ifdef RADRAY_SCENE_SYNC_BENCHMARK
-int main(int argc, char** argv) { return radray::RunSceneSyncBenchmarks(argc, argv); }
-#endif
+}  // namespace radray::test

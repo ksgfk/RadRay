@@ -329,7 +329,6 @@ void World::TakeTransformRoots(bool consume) {
         if (!parent) _transformRoots.push_back(node);
     }
     if (consume) {
-        for (auto* root : _transformQueue.Roots) root->_transformDirty.Index = SceneComponent::TransformDirtyState::kNotQueued;
         _transformQueue.Roots.clear();
         if (_transformQueue.Epoch == std::numeric_limits<uint32_t>::max()) RADRAY_ABORT("Transform batch epoch exhausted");
         ++_transformQueue.Epoch;

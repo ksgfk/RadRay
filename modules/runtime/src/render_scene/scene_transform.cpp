@@ -126,10 +126,8 @@ void SceneTransform::SetStandalone(uint32_t row, const AffineTransform& matrix) 
     Seed(row);
 }
 void SceneTransform::EvaluateSubtree(uint32_t row) {
-    _work.push_back(row);
-    while (!_work.empty()) {
-        const auto node = _work.back();
-        _work.pop_back();
+    auto node = row;
+    for (;;) {
         if (_parent[node] == kNoRow)
             _world[node] = _local[node];
         else
@@ -137,6 +135,9 @@ void SceneTransform::EvaluateSubtree(uint32_t row) {
         _affected[node] = _epoch;
         _changed.push_back(node);
         for (auto child = _children[node].First; child != kNoRow; child = _children[child].Next) _work.push_back(child);
+        if (_work.empty()) break;
+        node = _work.back();
+        _work.pop_back();
     }
 }
 std::span<const uint32_t> SceneTransform::Evaluate() {

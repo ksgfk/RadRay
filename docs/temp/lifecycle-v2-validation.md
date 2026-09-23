@@ -1,6 +1,6 @@
 > - 适用: 生命周期 v2 实施结果与本机验收，2026-09-20
 > - 权威: 临时验收记录，不替代长期接口契约；未执行项不计为通过
-> - 锚点: `modules/runtime/tests/test_world_lifecycle.cpp`, `modules/runtime/tests/test_gpu_scene_lifetime.cpp`, `modules/runtime/tests/test_lifecycle_performance.cpp`
+> - 锚点: `modules/runtime/tests/test_world_lifecycle.cpp`, `modules/runtime/tests/test_gpu_scene_lifetime.cpp`, `benchmarks/bench_lifecycle/bench_lifecycle.cpp`
 
 # 生命周期与增量渲染 v2 验收
 

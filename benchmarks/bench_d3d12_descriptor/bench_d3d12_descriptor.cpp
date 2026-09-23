@@ -1,6 +1,5 @@
 #include <benchmark/benchmark.h>
 
-#include <cstdlib>
 #include <string_view>
 
 #include <radray/render/backend/d3d12_impl.h>
@@ -56,10 +55,9 @@ struct DescriptorFixture {
     unique_ptr<Buffer> UploadBuffer;
 
     bool Initialize(uint32_t scenario) {
-        const char* gpuValidation = std::getenv("RADRAY_TEST_GPU_VALIDATION");
         DXGIFactoryDescriptor factoryDesc{};
-        factoryDesc.IsEnableDebugLayer = true;
-        factoryDesc.IsEnableGpuBasedValid = gpuValidation && std::string_view{gpuValidation} == "1";
+        factoryDesc.IsEnableDebugLayer = false;
+        factoryDesc.IsEnableGpuBasedValid = false;
         auto factory = DXGIFactory::Create(factoryDesc);
         if (!factory) return false;
         Factory = factory.Release();
@@ -99,6 +97,7 @@ void BM_DescriptorAllocation(benchmark::State& state, bool& failed) {
         }
         benchmark::DoNotOptimize(allocated.Get());
     }
+    state.SetItemsProcessed(state.iterations());
 }
 
 void BM_DescriptorPublish(benchmark::State& state, bool& failed) {
@@ -144,18 +143,17 @@ void BM_DescriptorPublish(benchmark::State& state, bool& failed) {
         }
         ++iteration;
     }
+    state.SetItemsProcessed(state.iterations());
 }
 
 }  // namespace
 
 int RunDescriptorBenchmarks(int argc, char** argv) {
     bool failed = false;
-    for (int scenario = 0; scenario < 6; ++scenario) {
-        benchmark::RegisterBenchmark("D3D12Descriptor/Allocation", [&failed](benchmark::State& state) { BM_DescriptorAllocation(state, failed); })->Arg(scenario)->Iterations(1000);
-        benchmark::RegisterBenchmark("D3D12Descriptor/Publish", [&failed](benchmark::State& state) { BM_DescriptorPublish(state, failed); })->Arg(scenario)->Iterations(5000);
-    }
     benchmark::Initialize(&argc, argv);
     if (benchmark::ReportUnrecognizedArguments(argc, argv)) return 1;
+    benchmark::RegisterBenchmark("D3D12Descriptor/Allocation", [&failed](benchmark::State& state) { BM_DescriptorAllocation(state, failed); })->DenseRange(0, 5);
+    benchmark::RegisterBenchmark("D3D12Descriptor/Publish", [&failed](benchmark::State& state) { BM_DescriptorPublish(state, failed); })->DenseRange(0, 5);
     benchmark::RunSpecifiedBenchmarks();
     benchmark::Shutdown();
     return failed ? 1 : 0;

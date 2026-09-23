@@ -562,6 +562,74 @@ TEST_F(StaticMeshScene, TransformBatchReusesStorageAfterWarmup) {
     }
 }
 
+TEST_F(StaticMeshScene, TransformLocatorsSurviveBatchReorderingRepeatedCollectAndRemoval) {
+    auto* parent = Owner->AddComponent<SceneComponent>();
+    parent->SetRelativeLocation({100, 0, 0});
+    auto* first = Add(Mesh(1));
+    auto* second = Add(Mesh(1));
+    auto* third = Add(Mesh(1));
+    const auto removedShape = first->GetShapeId();
+    const auto removedTransform = first->GetSceneTransformId();
+    Flush();
+
+    for (auto* component : {first, second, third}) {
+        component->SetRelativeLocation({1, 0, 0});
+        component->RequestReparent(parent, AttachmentRule::KeepLocal);
+    }
+    Flush();
+
+    // The previous batch's first/second locators now point at different identities.
+    for (auto* component : {second, third}) {
+        component->SetRelativeLocation({2, 0, 0});
+        component->RequestReparent(nullptr, AttachmentRule::KeepLocal);
+    }
+    GameWorld.FinalizeWorldGT();
+    GameWorld.CollectRenderUpdates();
+    Owner->RemoveComponent(first);
+    GameWorld.FinalizeWorldGT();
+    auto* replacement = Add(Mesh(1));
+    EXPECT_EQ(replacement->GetSceneTransformId().Index, removedTransform.Index);
+    EXPECT_NE(replacement->GetSceneTransformId().Generation, removedTransform.Generation);
+    replacement->SetRelativeLocation({7, 0, 0});
+    second->SetRelativeLocation({3, 0, 0});
+    third->RequestReparent(parent, AttachmentRule::KeepLocal);
+    test::CollectScene(GameWorld, Render, Batch);
+    ASSERT_EQ(Batch.LocalTransforms.size(), 2u);
+    ASSERT_EQ(Batch.TransformParents.size(), 2u);
+    ASSERT_EQ(Batch.CreateTransforms.size(), 1u);
+    ASSERT_EQ(Batch.RemoveTransforms.size(), 1u);
+    Data.Apply(Batch);
+    Batch.Clear();
+
+    EXPECT_FALSE(Data.ContainsShape(removedShape));
+    for (auto* component : {second, third, replacement}) {
+        auto view = Data.GetStaticMesh(component->GetShapeId());
+        ASSERT_TRUE(view);
+        ExpectBounds(*view, {-1, -2, -3}, {2, 3, 4}, component->GetWorldMatrix());
+    }
+
+    // Cancelling a current record swaps the last record; repeated capture must find it.
+    second->SetRelativeLocation({4, 0, 0});
+    third->SetRelativeLocation({5, 0, 0});
+    second->RequestReparent(parent, AttachmentRule::KeepLocal);
+    third->RequestReparent(nullptr, AttachmentRule::KeepLocal);
+    GameWorld.FinalizeWorldGT();
+    GameWorld.CollectRenderUpdates();
+    Owner->RemoveComponent(second);
+    GameWorld.FinalizeWorldGT();
+    third->SetRelativeLocation({6, 0, 0});
+    third->RequestReparent(parent, AttachmentRule::KeepLocal);
+    test::CollectScene(GameWorld, Render, Batch);
+    ASSERT_EQ(Batch.LocalTransforms.size(), 1u);
+    ASSERT_EQ(Batch.TransformParents.size(), 1u);
+    EXPECT_EQ(Batch.LocalTransforms[0].Id, third->GetSceneTransformId());
+    Data.Apply(Batch);
+    Batch.Clear();
+    auto view = Data.GetStaticMesh(third->GetShapeId());
+    ASSERT_TRUE(view);
+    ExpectBounds(*view, {-1, -2, -3}, {2, 3, 4}, third->GetWorldMatrix());
+}
+
 TEST(SceneTransform, RandomizedEditsReparentingAndSlotReuseMatchReference) {
     constexpr uint32_t count = 512;
     SceneTransform scene;

@@ -1,6 +1,6 @@
 > - 适用: 已回退的 World 变化 local 直接导入 Scene、独立全量求值实验及其测量结论
 > - 权威: 2026-09-23 历史实验与回退记录，不代表当前实现；长期接口以 render-framework 为准，不保证其他机器或实际游戏得到相同比例
-> - 锚点: `modules/runtime/src/game_framework/world_render_bridge.cpp`, `modules/runtime/src/render_system.cpp`, `modules/runtime/src/render_scene/scene_transform.cpp`, `modules/runtime/tests/test_scene_sync_performance.cpp`, `tools/run_scene_sync_benchmark.py`
+> - 锚点: `modules/runtime/src/game_framework/world_render_bridge.cpp`, `modules/runtime/src/render_system.cpp`, `modules/runtime/src/render_scene/scene_transform.cpp`, `benchmarks/bench_scene_sync/bench_scene_sync.cpp`, `tools/run_scene_sync_benchmark.py`
 
 # Scene 直接导入实验：未采纳，已回退
 
