@@ -26,7 +26,7 @@ private:
     vector<string>& _events;
 };
 
-TEST(SceneUpdates, OrdinaryComponentsKeepTheirLifecycleWithoutAutomaticRenderUpdates) {
+TEST(SceneUpdates, OrdinaryComponentsKeepTheirLifecycleAndMirrorOnlySceneHierarchy) {
     vector<string> events;
     Application app;
     RenderSystem render{&app, 1};
@@ -39,10 +39,13 @@ TEST(SceneUpdates, OrdinaryComponentsKeepTheirLifecycleWithoutAutomaticRenderUpd
     world.Tick(0.01f);
     SceneUpdateBatch batch;
     test::CollectScene(world, render, batch);
-    EXPECT_TRUE(batch.Empty());
+    EXPECT_TRUE(batch.CreateShapes.empty());
+    ASSERT_EQ(batch.CreateTransforms.size(), 1u);
+    EXPECT_EQ(batch.CreateTransforms[0].Id, scene->GetSceneTransformId());
     world.DestroyActor(actor);
     test::CollectScene(world, render, batch);
-    EXPECT_TRUE(batch.Empty());
+    EXPECT_TRUE(batch.RemoveShapes.empty());
+    EXPECT_EQ(batch.RemoveTransforms.size(), 1u);
     EXPECT_EQ(events, (vector<string>{"register", "tick", "unregister"}));
 }
 
@@ -91,11 +94,13 @@ TEST(SceneUpdates, SceneDerivedComponentsUseRenderLifecycleWithoutShapeIdentity)
     component->MarkRenderDynamicDataDirty();
     SceneUpdateBatch batch;
     test::CollectScene(world, render, batch);
-    EXPECT_TRUE(batch.Empty());
+    EXPECT_TRUE(batch.CreateShapes.empty());
+    EXPECT_EQ(batch.CreateTransforms.size(), 1u);
     component->MarkRenderStateDirty();
     actor->RemoveComponent(component);
     test::CollectScene(world, render, batch);
-    EXPECT_TRUE(batch.Empty());
+    EXPECT_TRUE(batch.RemoveShapes.empty());
+    EXPECT_EQ(batch.RemoveTransforms.size(), 1u);
     EXPECT_EQ(events, (vector<string>{"create", "register", "collect", "destroy", "unregister"}));
 }
 
@@ -192,7 +197,9 @@ TEST(SceneUpdates, RepeatedWorldCapturesAndRemovalBeforeSealKeepOnlyFinalValues)
     ASSERT_EQ(first.MeshStates.size(), 1u);
     EXPECT_TRUE(first.RemoveShapes.empty());
     EXPECT_TRUE(first.Transforms.empty());
-    EXPECT_FLOAT_EQ(first.MeshStates[0].LocalToWorld(0, 3), 3);
+    ASSERT_EQ(first.CreateTransforms.size(), 1u);
+    EXPECT_EQ(first.MeshStates[0].Transform, first.CreateTransforms[0].Id);
+    EXPECT_FLOAT_EQ(first.CreateTransforms[0].Local.Translation[0], 3);
     test::ConsumeFrame(renderer, 0);
     test::CompleteFrame(renderer, 0);
 
@@ -209,7 +216,9 @@ TEST(SceneUpdates, RepeatedWorldCapturesAndRemovalBeforeSealKeepOnlyFinalValues)
     EXPECT_TRUE(second.CreateShapes.empty());
     EXPECT_TRUE(second.Transforms.empty());
     ASSERT_EQ(second.MeshStates.size(), 1u);
-    EXPECT_FLOAT_EQ(second.MeshStates[0].LocalToWorld(0, 3), 6);
+    ASSERT_EQ(second.LocalTransforms.size(), 1u);
+    EXPECT_EQ(second.MeshStates[0].Transform, second.LocalTransforms[0].Id);
+    EXPECT_FLOAT_EQ(second.LocalTransforms[0].Local.Translation[0], 6);
     test::ConsumeFrame(renderer, 0);
     EXPECT_FLOAT_EQ(renderer.GetSceneRT(sceneId)->GetStaticMesh(component->GetShapeId())->LocalToWorld(0, 3), 6);
     test::CompleteFrame(renderer, 0);

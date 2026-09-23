@@ -17,6 +17,11 @@ void ShapeCapture::SetTransform(const AffineTransform& transform) {
     CheckUnwritten();
     _writer.WriteTransform(_id, _state, transform);
 }
+void ShapeCapture::SetStaticMesh(const StreamingAssetRef<StaticMesh>& mesh, TransformId transform) {
+    CheckUnwritten();
+    if (!transform.IsValid()) RADRAY_ABORT("A bound mesh requires a scene transform");
+    _writer.WriteStaticMesh(_id, _state, mesh, AffineTransform{}, transform);
+}
 
 SceneCapture::SceneCapture(SceneWriter& writer) : _writer(writer) { writer.BeginCapture(); }
 void SceneCapture::SetLight(LightId id, const LightData& light) { _writer.SetLight(id, light); }

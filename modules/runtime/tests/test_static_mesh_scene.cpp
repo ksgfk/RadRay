@@ -2,6 +2,7 @@
 #include <gtest/gtest.h>
 
 #include <limits>
+#include <random>
 #include <thread>
 
 #include <radray/runtime/application.h>
@@ -96,7 +97,9 @@ TEST_F(StaticMeshScene, CreateCombinesStateAndFinalTransform) {
     ASSERT_EQ(Batch.MeshStates.size(), 1u);
     EXPECT_TRUE(Batch.Transforms.empty());
     EXPECT_EQ(Batch.MeshStates[0].Id, id);
-    EXPECT_FLOAT_EQ(Batch.MeshStates[0].LocalToWorld(0, 3), 99);
+    EXPECT_EQ(Batch.MeshStates[0].Transform, component->GetSceneTransformId());
+    ASSERT_EQ(Batch.CreateTransforms.size(), 1u);
+    EXPECT_FLOAT_EQ(Batch.CreateTransforms[0].Local.Translation[0], 99);
     Data.Apply(Batch);
     Batch.Clear();
     auto view = Data.GetStaticMesh(id);
@@ -308,8 +311,8 @@ TEST_F(StaticMeshScene, MovingOneObjectPreservesMeshDescriptionAndOtherObjects) 
     for (int i = 0; i < 100; ++i) moving->SetRelativeLocation({static_cast<float>(i), 0, 0});
     test::CollectScene(GameWorld, Render, Batch);
     EXPECT_TRUE(Batch.MeshStates.empty());
-    ASSERT_EQ(Batch.Transforms.size(), 1u);
-    EXPECT_EQ(Batch.Transforms[0].Id, movingId);
+    ASSERT_EQ(Batch.LocalTransforms.size(), 1u);
+    EXPECT_EQ(Batch.LocalTransforms[0].Id, moving->GetSceneTransformId());
     Data.Apply(Batch);
     Batch.Clear();
     EXPECT_EQ(Data.GetStaticMesh(movingId)->Mesh.GetSections().data(), sections);
@@ -359,7 +362,7 @@ TEST_F(StaticMeshScene, ParentRotationNonuniformScaleAndReflectionsUpdateBoundsA
         component->SetRelativeScale(scale);
         test::CollectScene(GameWorld, Render, Batch);
         EXPECT_TRUE(Batch.MeshStates.empty());
-        ASSERT_EQ(Batch.Transforms.size(), 1u);
+        ASSERT_EQ(Batch.LocalTransforms.size(), 1u);
         Data.Apply(Batch);
         Batch.Clear();
         auto view = Data.GetStaticMesh(id);
@@ -544,19 +547,74 @@ TEST_F(StaticMeshScene, TransformBatchReusesStorageAfterWarmup) {
     Flush();
     component->SetRelativeLocation({1, 0, 0});
     test::CollectScene(GameWorld, Render, Batch);
-    const auto* storage = Batch.Transforms.data();
-    const auto capacity = Batch.Transforms.capacity();
+    const auto* storage = Batch.LocalTransforms.data();
+    const auto capacity = Batch.LocalTransforms.capacity();
     Data.Apply(Batch);
     Batch.Clear();
     for (int frame = 0; frame < 8; ++frame) {
         component->SetRelativeLocation({static_cast<float>(frame), 0, 0});
         test::CollectScene(GameWorld, Render, Batch);
         EXPECT_TRUE(Batch.MeshStates.empty());
-        EXPECT_EQ(Batch.Transforms.data(), storage);
-        EXPECT_EQ(Batch.Transforms.capacity(), capacity);
+        EXPECT_EQ(Batch.LocalTransforms.data(), storage);
+        EXPECT_EQ(Batch.LocalTransforms.capacity(), capacity);
         Data.Apply(Batch);
         Batch.Clear();
     }
+}
+
+TEST(SceneTransform, RandomizedEditsReparentingAndSlotReuseMatchReference) {
+    constexpr uint32_t count = 512;
+    SceneTransform scene;
+    vector<TransformId> ids;
+    vector<uint32_t> parents(count, SceneTransform::kNoRow);
+    vector<LocalTransform> locals(count);
+    vector<Eigen::Matrix4f> expected(count);
+    std::mt19937 random{0x51CEu};
+    scene.BeginApply();
+    for (uint32_t i = 0; i < count; ++i) {
+        ids.push_back({i, 1});
+        locals[i] = {{float(i), 1, -2}, Eigen::Quaternionf{Eigen::AngleAxisf{float(i) * .03f, Eigen::Vector3f::UnitY()}}, {1, 2, -1}};
+        scene.Create(ids[i], locals[i]);
+        if (i) {
+            parents[i] = (i - 1) / 3;
+            scene.SetParent(ids[i], ids[parents[i]]);
+        }
+    }
+    for (uint32_t frame = 0; frame < 400; ++frame) {
+        SCOPED_TRACE(frame);
+        if (frame) {
+            scene.BeginApply();
+            for (uint32_t change = 0; change < (frame % 23 == 0 ? count : 20u); ++change) {
+                const uint32_t node = random() % count;
+                locals[node].Translation[0] = float(random() % 100) * .01f;
+                scene.SetLocal(ids[node], locals[node]);
+            }
+            for (uint32_t change = 0; change < 4; ++change) {
+                const uint32_t node = 1 + random() % (count - 1);
+                parents[node] = (random() % 3) ? random() % node : SceneTransform::kNoRow;
+                scene.SetParent(ids[node], parents[node] == SceneTransform::kNoRow ? TransformId{} : ids[parents[node]]);
+            }
+            const uint32_t recycled = random() % count;
+            scene.Remove(ids[recycled]);
+            for (auto& parent : parents) {
+                if (parent == recycled) parent = SceneTransform::kNoRow;
+            }
+            parents[recycled] = SceneTransform::kNoRow;
+            ++ids[recycled].Generation;
+            scene.Create(ids[recycled], locals[recycled]);
+        }
+        const auto changed = scene.Evaluate();
+        vector<uint32_t> unique(changed.begin(), changed.end());
+        std::sort(unique.begin(), unique.end());
+        EXPECT_EQ(std::unique(unique.begin(), unique.end()), unique.end());
+        for (uint32_t i = 0; i < count; ++i) {
+            expected[i] = locals[i].ToMatrix();
+            if (parents[i] != SceneTransform::kNoRow) expected[i] = (expected[parents[i]] * expected[i]).eval();
+            EXPECT_TRUE(scene.GetWorld(scene.GetRow(ids[i])).isApprox(expected[i], 1e-4f)) << i;
+        }
+    }
+    scene.BeginApply();
+    EXPECT_TRUE(scene.Evaluate().empty());
 }
 
 TEST(StaticMeshSceneDeathTest, RejectsStaleStateTransformAndTransformWithoutMesh) {
@@ -613,10 +671,10 @@ TEST(StaticMeshColumns, DenseColumnsPreserveAffineDataAcrossRemovalAndRebinding)
     const auto columns = scene.GetStaticMeshColumns();
     ASSERT_EQ(columns.Size(), 2u);
     EXPECT_EQ(columns.Bindings.size(), columns.Size());
-    EXPECT_EQ(columns.Transforms.size(), columns.Size());
+    EXPECT_EQ(columns.TransformRows.size(), columns.Size());
     EXPECT_EQ(columns.Bounds.size(), columns.Size());
     EXPECT_EQ(columns.Ids[0], (ShapeId{2, 1}));
-    EXPECT_TRUE(columns.Transforms[0].isApprox(affine));
+    EXPECT_TRUE(columns.Get(0).LocalToWorld.isApprox(affine));
     EXPECT_EQ(columns.Bindings[0].RenderData.Get(), &geometry);
     EXPECT_TRUE(columns.Bounds[0].ReverseCulling);
     EXPECT_TRUE(columns.Bounds[0].Min.isApprox(Eigen::Vector3f{-3.5f, 15, 8}));

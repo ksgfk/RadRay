@@ -52,7 +52,7 @@ public:
     /// Dense registered mesh identities, including meshes whose geometry is not ready.
     std::span<const ShapeId> GetStaticMeshes() const noexcept { return _staticMeshes.GetColumns().Ids; }
     /// Dense column access for culling and drawing without identity lookups. Same borrow lifetime as GetStaticMesh.
-    StaticMeshSceneColumns GetStaticMeshColumns() const noexcept { return _staticMeshes.GetColumns(); }
+    StaticMeshSceneColumns GetStaticMeshColumns() const noexcept { return _staticMeshes.GetColumns(_transforms.GetWorldMatrices()); }
 
 private:
     static constexpr uint32_t kNoMesh = std::numeric_limits<uint32_t>::max();
@@ -64,9 +64,15 @@ private:
         uint32_t Generation{0};
         // Dense table row, or kNoMesh when no geometry is registered.
         uint32_t MeshIndex{kNoMesh};
+        uint32_t TransformRow{kNoMesh}, NextShape{kNoMesh}, PreviousShape{kNoMesh};
         bool Alive{false};
+        bool OwnTransform{false};
     };
+    void UnbindShape(uint32_t index);
+    void BindShape(uint32_t index, uint32_t row, bool own);
+    void UpdateLights(const SceneUpdateBatch& batch);
     vector<ShapeSlot> _shapes;
+    SceneTransform _transforms;
     StaticMeshTable _staticMeshes;
     LightSceneData _lights;
     mutable std::mutex _readers;

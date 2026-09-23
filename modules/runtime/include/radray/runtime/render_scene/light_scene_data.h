@@ -19,6 +19,8 @@ enum class LightType : uint8_t { Directional,
 /// Type-independent parameters only; identity lives in the table's id column and shadow bias in the
 /// types that capture it.
 struct LightCommonData {
+    /// When valid, Scene derives world position/direction from this transform.
+    TransformId Transform;
     Eigen::Vector3f Color{Eigen::Vector3f::Ones()};
     float Intensity{1};
     bool AffectsWorld{true}, CastShadow{true};

@@ -19,11 +19,12 @@ struct StaticMeshSceneView {
     bool ReverseCulling;
 };
 
-/// Parallel dense columns. Row numbers are transient, ShapeId is the persistent identity.
+/// Dense mesh columns reference the shared matrix pool through TransformRows. Borrows expire at Apply.
 struct StaticMeshSceneColumns {
     std::span<const ShapeId> Ids;
     std::span<const StaticMeshDescription> Bindings;
     std::span<const Eigen::Matrix4f> Transforms;
+    std::span<const uint32_t> TransformRows;
     std::span<const StaticMeshBounds> Bounds;
 
     size_t Size() const noexcept { return Ids.size(); }
@@ -32,16 +33,16 @@ struct StaticMeshSceneColumns {
 
 class StaticMeshTable {
 public:
-    StaticMeshSceneColumns GetColumns() const noexcept { return {_ids, _bindings, _transforms, _bounds}; }
-    void Add(const StaticMeshStateUpdate& update);
+    StaticMeshSceneColumns GetColumns(std::span<const Eigen::Matrix4f> transforms = {}) const noexcept { return {_ids, _bindings, transforms, _transformRows, _bounds}; }
+    void Add(const StaticMeshStateUpdate& update, uint32_t transformRow);
     void Remove(size_t row) noexcept;
-    void Replace(size_t row, const StaticMeshStateUpdate& update);
-    void SetTransform(size_t row, const AffineTransform& transform) noexcept;
+    void Replace(size_t row, const StaticMeshStateUpdate& update, uint32_t transformRow);
+    void UpdateBounds(size_t row, const Eigen::Matrix4f& transform) noexcept;
 
 private:
     vector<ShapeId> _ids;
     vector<StaticMeshDescription> _bindings;
-    vector<Eigen::Matrix4f> _transforms;
+    vector<uint32_t> _transformRows;
     vector<StaticMeshBounds> _bounds;
 };
 

@@ -2,6 +2,7 @@
 
 #include <radray/basic_math.h>
 #include <radray/runtime/render_scene/scene_id.h>
+#include <radray/runtime/render_scene/scene_transform.h>
 #include <radray/runtime/render_scene/light_scene_data.h>
 #include <radray/runtime/static_mesh.h>
 
@@ -20,6 +21,7 @@ struct StaticMeshStateUpdate {
     ShapeId Id;
     StaticMeshDescription Mesh{};
     AffineTransform LocalToWorld;
+    TransformId Transform;
 };
 
 struct ShapeTransformUpdate {
@@ -31,6 +33,10 @@ static_assert(sizeof(ShapeTransformUpdate) == 56);
 
 /// Sealed on GT together with asset retirements before the runner publishes the flight to RT.
 struct SceneUpdateBatch {
+    vector<TransformId> RemoveTransforms;
+    vector<TransformCreate> CreateTransforms;
+    vector<TransformParentUpdate> TransformParents;
+    vector<LocalTransformUpdate> LocalTransforms;
     vector<ShapeId> RemoveShapes;
     vector<ShapeId> CreateShapes;
     vector<StaticMeshStateUpdate> MeshStates;
@@ -40,7 +46,7 @@ struct SceneUpdateBatch {
     LightSceneData Lights;
 
     void Clear() noexcept;
-    bool Empty() const noexcept { return RemoveShapes.empty() && CreateShapes.empty() && MeshStates.empty() && Transforms.empty() && !LightsChanged && Lights.Empty(); }
+    bool Empty() const noexcept { return RemoveTransforms.empty() && CreateTransforms.empty() && TransformParents.empty() && LocalTransforms.empty() && RemoveShapes.empty() && CreateShapes.empty() && MeshStates.empty() && Transforms.empty() && !LightsChanged && Lights.Empty(); }
 };
 
 struct SceneFrameUpdate {

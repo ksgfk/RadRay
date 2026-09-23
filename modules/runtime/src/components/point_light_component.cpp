@@ -13,8 +13,10 @@ LightData PointLightComponent::CaptureLightState() const noexcept {
 
 PointLightParameters PointLightComponent::CapturePointParameters() const noexcept {
     PointLightParameters point;
-    point.Position = GetLightPosition().head<3>();
-    point.Direction = GetLightDirection();
+    if (!UsesSceneTransform()) {
+        point.Position = GetLightPosition().head<3>();
+        point.Direction = GetLightDirection();
+    }
     point.AttenuationRadius = _attenuationRadius;
     point.FalloffExponent = _lightFalloffExponent;
     point.SourceRadius = _sourceRadius;

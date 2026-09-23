@@ -8,7 +8,6 @@
 namespace radray {
 
 void SceneComponent::NotifyTransformChanged() {
-    _worldDirty = true;
     if (const auto world = GetWorld()) {
         world->QueueTransform(*this);
     } else {
@@ -17,7 +16,7 @@ void SceneComponent::NotifyTransformChanged() {
             auto* node = pending.back();
             pending.pop_back();
             const auto count = node->_children.size();
-            node->NotifyWorldTransformChanged(true, false);
+            node->OnTransformChanged();
             for (size_t i = count; i > 0; --i) pending.push_back(node->_children[i - 1]);
         }
     }
@@ -43,43 +42,18 @@ void SceneComponent::SetRelativeScale(const Eigen::Vector3f& scale) noexcept {
     _relativeScale = scale;
     NotifyTransformChanged();
 }
-void SceneComponent::RefreshWorldMatrix() const noexcept {
-    const auto world = GetWorld();
-    const uint64_t revision = world ? world->_transformRevision : 0;
-    vector<const SceneComponent*> draftChain;
-    auto& chain = world ? world->_transformChain : draftChain;
-    chain.clear();
-    auto* node = this;
-    while (node->_parent && (!world || node->_parent->_validatedRevision != revision)) {
-        chain.push_back(node);
-        node = node->_parent.Get();
+Eigen::Matrix4f SceneComponent::GetWorldTransform() const noexcept {
+    Eigen::Matrix4f result = ComposeTransform(_relativeLocation, _relativeRotation, _relativeScale);
+    for (auto parent = _parent; parent; parent = parent->_parent) {
+        const Eigen::Matrix4f local = ComposeTransform(parent->_relativeLocation, parent->_relativeRotation, parent->_relativeScale);
+        result = (local * result).eval();
     }
-    for (;;) {
-        if (!world || node->_worldDirty || (node->_parent && node->_parent->_worldRevision > node->_worldRevision)) {
-            const Eigen::Matrix4f local = ComposeTransform(node->_relativeLocation, node->_relativeRotation, node->_relativeScale);
-            if (node->_parent)
-                node->_worldTransform.noalias() = node->_parent->_worldTransform * local;
-            else
-                node->_worldTransform = local;
-            node->_worldRevision = revision;
-            // Draft queries have no revision domain; revalidate when joining a World.
-            node->_worldDirty = !world;
-        }
-        node->_validatedRevision = revision;
-        if (chain.empty()) break;
-        node = chain.back();
-        chain.pop_back();
-    }
-}
-const Eigen::Matrix4f& SceneComponent::GetWorldTransform() const noexcept {
-    if (!_parent && !_worldDirty) return _worldTransform;
-    const auto world = GetWorld();
-    if (!world || _validatedRevision != world->_transformRevision) RefreshWorldMatrix();
-    return _worldTransform;
+    return result;
 }
 Eigen::Matrix4f SceneComponent::GetWorldMatrix() const noexcept { return GetWorldTransform(); }
 Eigen::Vector3f SceneComponent::GetWorldLocation() const noexcept {
-    const float* transform = GetWorldTransform().data();
+    const Eigen::Matrix4f matrix = GetWorldTransform();
+    const float* transform = matrix.data();
     return {transform[12], transform[13], transform[14]};
 }
 Eigen::Quaternionf SceneComponent::GetWorldRotation() const noexcept {
@@ -140,9 +114,14 @@ bool SceneComponent::ReparentNow(Nullable<SceneComponent*> parent, AttachmentRul
     Eigen::Quaternionf rotation;
     if (!ComputeAttachmentTransform(parent, rule, location, rotation, scale)) return false;
     if (_parent == parent) return true;
-    if (_parent) std::erase(_parent->_children, this);
+    if (const auto world = GetWorld()) world->RemoveTransform(*this);
+    UnlinkParent();
     _parent = parent;
-    if (parent) parent->_children.push_back(this);
+    if (parent) {
+        if (parent->_children.size() == std::numeric_limits<uint32_t>::max()) RADRAY_ABORT("Too many attached children");
+        _childIndex = static_cast<uint32_t>(parent->_children.size());
+        parent->_children.push_back(this);
+    }
     _relativeLocation = location;
     _relativeRotation = rotation;
     _relativeScale = scale;
@@ -179,18 +158,27 @@ LifecycleRequestResult SceneComponent::RequestReparent(Nullable<SceneComponent*>
     return world->QueueReparent(*this, parent, rule);
 }
 void SceneComponent::UnlinkHierarchy() noexcept {
-    if (_parent) {
-        std::erase(_parent->_children, this);
-        _parent = nullptr;
-    }
-    _worldDirty = true;
+    if (const auto world = GetWorld()) world->RemoveTransform(*this);
+    UnlinkParent();
     if (const auto world = GetWorld()) world->QueueTransform(*this);
     for (auto* child : _children) {
+        if (const auto world = child->GetWorld()) world->RemoveTransform(*child);
         child->_parent = nullptr;
-        child->_worldDirty = true;
+        child->_childIndex = std::numeric_limits<uint32_t>::max();
         if (const auto world = child->GetWorld()) world->QueueTransform(*child);
     }
     _children.clear();
+}
+
+void SceneComponent::UnlinkParent() noexcept {
+    if (!_parent) return;
+    auto& siblings = _parent->_children;
+    auto* moved = siblings.back();
+    siblings[_childIndex] = moved;
+    moved->_childIndex = _childIndex;
+    siblings.pop_back();
+    _parent = nullptr;
+    _childIndex = std::numeric_limits<uint32_t>::max();
 }
 
 }  // namespace radray

@@ -105,6 +105,9 @@ vector<Scenario> Scenarios(bool small) {
     result.push_back({"churn_10", Workload::Churn, n, std::min(10u, n)});
     result.push_back({"burst_replace_10pct", Workload::Burst, n, n / 10});
     result.push_back({"reparent", Workload::Reparent, n, changes});
+    result.push_back({"reparent_all", Workload::Reparent, n, n});
+    result.push_back({"reparent_subtrees", Workload::Reparent, n, changes, 0, 0, 1, 16});
+    result.push_back({"chain_16_mixed", Workload::Transform, n, n / 10, 0, 0, 1, 16});
     result.push_back({"mixed", Workload::Mixed, n, changes, 64, 4});
     AppendRealistic(result, small);
     return result;
@@ -229,6 +232,7 @@ struct GTFrame {
 struct RTFrame {
     int64_t Begin{0}, End{0};
     uint64_t Transforms{0}, MeshStates{0}, Creates{0}, Removes{0}, LightRecords{0}, PayloadBytes{0};
+    uint64_t Locals{0}, Parents{0}, TransformCreates{0}, TransformRemoves{0};
     bool Valid{true};
 };
 
@@ -285,7 +289,7 @@ public:
         _setupBytes = _allocationTracking ? after[1] - allocations[1] : -1;
         for (uint32_t i = 0; i < _scenario.Shapes; ++i) {
             if (_scenario.Kind == Workload::HierarchyLeaf && (i + 1) % _scenario.Depth != 0 && i + 1 != _scenario.Shapes) continue;
-            if ((_scenario.Kind == Workload::HierarchyRoot || _scenario.Kind == Workload::Level) && i % _scenario.Depth != 0) continue;
+            if ((_scenario.Kind == Workload::HierarchyRoot || _scenario.Kind == Workload::Level || _scenario.Kind == Workload::Reparent) && i % _scenario.Depth != 0) continue;
             _selection.push_back(i);
         }
         std::mt19937 generator{0x5CE1u};
@@ -376,11 +380,12 @@ public:
             const auto& r = _rt[sample];
             const double apply = Microseconds(r.Begin, r.End);
             const double gt = g.Mutation + g.Tick + g.Lifecycle + g.Collect + g.Seal + g.Publish;
-            raw << fmt::format("{},{},{},{},{},{},{},{:.3f},{:.3f},{:.3f},{:.3f},{:.3f},{:.3f},{:.3f},{:.3f},{:.3f},{:.3f},{:.3f},{:.3f},{:.3f},{},{},{},{},{},{}\n",
+            raw << fmt::format("{},{},{},{},{},{},{},{:.3f},{:.3f},{:.3f},{:.3f},{:.3f},{:.3f},{:.3f},{:.3f},{:.3f},{:.3f},{:.3f},{:.3f},{:.3f},{},{},{},{},{},{},{},{},{},{}\n",
                                _scenario.Name, mode, _flights, sample - begin, g.Sequence, g.Start, r.End,
                                g.Mutation, g.Tick, g.Lifecycle, g.Collect, g.Seal, g.Publish, apply,
                                Microseconds(g.Published, r.Begin), Microseconds(g.Start, r.End), g.Wait, g.Completion, gt, gt + apply,
-                               r.Transforms, r.MeshStates, r.Creates, r.Removes, r.LightRecords, r.PayloadBytes);
+                               r.Transforms, r.MeshStates, r.Creates, r.Removes, r.LightRecords, r.PayloadBytes,
+                               r.Locals, r.Parents, r.TransformCreates, r.TransformRemoves);
         }
         const double span = Microseconds(_gt[begin].Start, _rt[begin + count - 1].End);
         cases << fmt::format("{},{},{},{},{},{},{},{},{},{},{},{},{},{:.3f},{:.3f},{},{},{},{},{:.3f},{:.6f}\n",
@@ -533,7 +538,8 @@ private:
         EXPECT_EQ(batch.LightsChanged, _scenario.LightChanges != 0);
         EXPECT_EQ(batch.Lights.Count(), _scenario.LightChanges ? _scenario.Lights : 0u);
         if (_scenario.Kind == Workload::Transform || _scenario.Kind == Workload::SameValue || _scenario.Kind == Workload::HierarchyLeaf) {
-            EXPECT_EQ(batch.Transforms.size(), _scenario.Kind == Workload::SameValue ? 0u : std::min<size_t>(_scenario.Changes, _selection.size()));
+            if (_scenario.Depth == 1 || _scenario.Kind != Workload::Transform)
+                EXPECT_EQ(batch.LocalTransforms.size(), _scenario.Kind == Workload::SameValue ? 0u : std::min<size_t>(_scenario.Changes, _selection.size()));
             EXPECT_TRUE(batch.MeshStates.empty());
             EXPECT_TRUE(batch.CreateShapes.empty());
             EXPECT_TRUE(batch.RemoveShapes.empty());
@@ -550,8 +556,7 @@ private:
             EXPECT_EQ(batch.CreateShapes.size(), streamed);
             EXPECT_EQ(batch.RemoveShapes.size(), streamed);
             EXPECT_EQ(batch.MeshStates.size(), streamed + _scenario.RebindCount);
-            // 层级传播会把一次根移动放大成整棵子树的变换记录，只在扁平场景下断言精确条数。
-            if (_scenario.Depth == 1) EXPECT_EQ(batch.Transforms.size(), std::min<size_t>(_scenario.Changes, _selection.size()));
+            EXPECT_EQ(batch.LocalTransforms.size(), std::min<size_t>(_scenario.Changes, _selection.size()) + _scenario.LightChanges);
         }
     }
 
@@ -563,7 +568,13 @@ private:
         frame.Creates = batch.CreateShapes.size();
         frame.Removes = batch.RemoveShapes.size();
         frame.LightRecords = batch.Lights.Count();
+        frame.Locals = batch.LocalTransforms.size();
+        frame.Parents = batch.TransformParents.size();
+        frame.TransformCreates = batch.CreateTransforms.size();
+        frame.TransformRemoves = batch.RemoveTransforms.size();
         frame.PayloadBytes = frame.Transforms * sizeof(ShapeTransformUpdate) + frame.MeshStates * sizeof(StaticMeshStateUpdate) +
+                             batch.LocalTransforms.size() * sizeof(LocalTransformUpdate) + batch.TransformParents.size() * sizeof(TransformParentUpdate) +
+                             batch.CreateTransforms.size() * sizeof(TransformCreate) + batch.RemoveTransforms.size() * sizeof(TransformId) +
                              (frame.Creates + frame.Removes) * sizeof(ShapeId) +
                              frame.LightRecords * sizeof(LightId) +
                              batch.Lights.DirectionalLights.Size() * sizeof(DirectionalLightData) +
@@ -751,7 +762,7 @@ TEST(SceneSyncPerformance, Matrix) {
     std::ofstream raw{fmt::format("{}.frames.csv", path.Get())};
     std::ofstream cases{fmt::format("{}.cases.csv", path.Get())};
     ASSERT_TRUE(raw.is_open() && cases.is_open());
-    raw << "scenario,mode,flights,frame,sequence,start_ns,end_ns,mutation_us,tick_us,lifecycle_us,collect_us,seal_us,publish_us,apply_us,queue_us,e2e_us,flight_wait_us,completion_us,gt_work_us,work_us,transforms,mesh_states,creates,removes,light_records,payload_bytes\n";
+    raw << "scenario,mode,flights,frame,sequence,start_ns,end_ns,mutation_us,tick_us,lifecycle_us,collect_us,seal_us,publish_us,apply_us,queue_us,e2e_us,flight_wait_us,completion_us,gt_work_us,work_us,transforms,mesh_states,creates,removes,light_records,payload_bytes,local_transforms,transform_parents,transform_creates,transform_removes\n";
     cases << "scenario,mode,flights,shapes,changes,lights,light_changes,repeats,depth,wide,stream_count,stream_period,rebind_count,setup_us,initial_sync_us,setup_allocations,setup_bytes,allocations,allocation_bytes,span_us,frames_per_second\n";
     size_t executed = 0;
     vector<uint32_t> flights{1u, 2u, 3u};

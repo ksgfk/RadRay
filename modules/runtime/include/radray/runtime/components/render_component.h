@@ -25,6 +25,8 @@ public:
     void MarkRenderDynamicDataDirty();
 
 protected:
+    /// Stable for the connection lifetime. True opts out of world-matrix recapture after ancestor changes.
+    virtual bool UsesSceneTransform() const noexcept { return false; }
     void MarkRenderDirty(RenderDirtyFlag flag);
     SceneId GetRenderSceneId() const noexcept;
     virtual void CreateRenderState(SceneWriter& writer) { (void)writer; }
@@ -36,7 +38,7 @@ protected:
 
 private:
     friend class WorldRenderBridge;
-    void NotifyWorldTransformChanged(bool notify, bool renderDirty) final;
+    void CollectRenderTransform(SceneCapture& capture) final;
     uint32_t _renderIndex{std::numeric_limits<uint32_t>::max()};
     uint32_t _renderQueueIndex{0};
     RenderDirtyFlags _renderDirty;

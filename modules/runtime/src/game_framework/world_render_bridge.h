@@ -20,6 +20,8 @@ public:
     void Disconnect();
     void Create(RenderComponent& component);
     void Destroy(RenderComponent& component);
+    void CreateTransform(SceneComponent& component);
+    void DestroyTransform(SceneComponent& component);
     void Queue(RenderComponent& component, RenderDirtyFlag flag);
     void Collect();
     SceneId GetSceneId() const noexcept { return _writer.GetSceneId(); }
@@ -35,6 +37,8 @@ private:
     RenderSystem& _renderer;
     SceneWriter& _writer;
     vector<RenderComponent*> _sources;
+    vector<SceneComponent*> _transformSources;
+    vector<SceneComponent*> _creationChain;
     vector<RenderComponent*> _updates;
     RenderConnectionState _state{RenderConnectionState::Connecting};
 };

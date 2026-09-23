@@ -6,6 +6,7 @@
 #include <thread>
 
 #include <radray/runtime_type.h>
+#include <radray/logger.h>
 #include <radray/types.h>
 #include <radray/sparse_set.h>
 #include <radray/runtime/components/scene_component.h>
@@ -118,10 +119,39 @@ private:
     void ExecuteLifecycle();
     void Teardown();
     void Collect();
-    void DispatchTransforms(bool notify);
-    void QueueTransform(SceneComponent& component);
+    struct TransformQueue {
+        vector<SceneComponent*> Roots;
+        uint32_t Epoch{1};
+    };
+
+    void DispatchTransforms();
+    void CollectTransforms(SceneCapture& capture);
+    void CaptureTransformRoots(SceneCapture& capture);
+    void TakeTransformRoots(bool consume);
+    void QueueTransform(SceneComponent& component) {
+        if (_transformRevision == std::numeric_limits<uint64_t>::max()) RADRAY_ABORT("Transform revision exhausted");
+        ++_transformRevision;
+        const auto life = component.GetLifecycle();
+        if (life != ObjectLifecycle::Live && life != ObjectLifecycle::Initializing &&
+            !(life == ObjectLifecycle::PendingDestroy && component._sceneTransformId.IsValid())) return;
+        if (component._localTransformQueueIndex == std::numeric_limits<uint32_t>::max()) {
+            component._localTransformQueueIndex = static_cast<uint32_t>(_localTransformChanges.size());
+            _localTransformChanges.push_back(&component);
+        }
+        if ((life == ObjectLifecycle::Live || life == ObjectLifecycle::Initializing) &&
+            component._transformDirty.Epoch != _transformQueue.Epoch) AppendTransformRoot(component);
+    }
+    void AppendTransformRoot(SceneComponent& component) {
+        if (_transformQueue.Roots.size() == SceneComponent::TransformDirtyState::kNotQueued) RADRAY_ABORT("Too many transform roots");
+        auto& dirty = component._transformDirty;
+        dirty = {.Epoch = _transformQueue.Epoch, .Index = static_cast<uint32_t>(_transformQueue.Roots.size())};
+        _transformQueue.Roots.push_back(&component);
+    }
+    void RemoveTransformRoot(SceneComponent& component) noexcept;
     void RemoveTransform(SceneComponent& component) noexcept;
     void DisconnectNow();
+    void CreateComponentTransformState(SceneComponent& component);
+    void DestroyComponentTransformState(SceneComponent& component);
     void QueueComponentDestruction(ActorComponent& component);
     LifecycleRequestResult QueueReparent(SceneComponent& child, Nullable<SceneComponent*> parent, AttachmentRule rule);
     Nullable<Actor*> ResolveIncludingPending(ActorId id) const noexcept;
@@ -146,14 +176,17 @@ private:
     LifecycleBatch _executing;
     vector<unique_ptr<Actor>> _retiredActors;
     vector<unique_ptr<ActorComponent>> _retiredComponents;
-    vector<SceneComponent*> _transformChanges;
+    TransformQueue _transformQueue;
+    vector<SceneComponent*> _renderTransformRoots;
     vector<SceneComponent*> _transformRoots;
-    mutable vector<const SceneComponent*> _transformChain;
+    vector<SceneComponent*> _localTransformChanges;
     ObjectLifecycle _lifecycle{ObjectLifecycle::Live};
     std::thread::id _ownerThread{std::this_thread::get_id()};
     uint64_t _tickEpoch{0};
     uint64_t _transformRevision{1};
     uint64_t _renderTransformRevision{0};
+    uint32_t _transformCaptureEpoch{0};
+    uint32_t _legacyRenderSources{0};
     uint64_t _firstTickEpoch{1};
     uint32_t _callbackDepth{0};
     bool _ticking{false};

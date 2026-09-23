@@ -46,13 +46,14 @@ bool ContainsId(const vector<ShapeId>& ids, ShapeId id) {
     return std::find(ids.begin(), ids.end(), id) != ids.end();
 }
 
-bool ContainsTransform(const SceneUpdateBatch& batch, ShapeId id) {
-    return std::any_of(batch.Transforms.begin(), batch.Transforms.end(), [&](const ShapeTransformUpdate& update) { return update.Id == id; });
+bool ContainsTransform(const SceneUpdateBatch& batch, TransformId id) {
+    return std::any_of(batch.LocalTransforms.begin(), batch.LocalTransforms.end(), [&](const LocalTransformUpdate& update) { return update.Id == id; });
 }
 
-void ExpectMotionOnly(const SceneUpdateBatch& batch, std::initializer_list<ShapeId> ids) {
-    EXPECT_EQ(batch.Transforms.size(), ids.size());
-    for (const ShapeId id : ids) EXPECT_TRUE(ContainsTransform(batch, id));
+void ExpectMotionOnly(const SceneUpdateBatch& batch, std::initializer_list<TransformId> ids) {
+    EXPECT_TRUE(batch.Transforms.empty());
+    EXPECT_EQ(batch.LocalTransforms.size(), ids.size());
+    for (const TransformId id : ids) EXPECT_TRUE(ContainsTransform(batch, id));
     EXPECT_TRUE(batch.CreateShapes.empty());
     EXPECT_TRUE(batch.RemoveShapes.empty());
     EXPECT_TRUE(batch.MeshStates.empty());
@@ -203,6 +204,7 @@ public:
 
 struct Shot {
     ShapeId Id{};
+    TransformId Transform{};
     vector<float> Samples;
     bool Spawned{false};
 };
@@ -250,6 +252,7 @@ private:
         auto* mesh = actor->AddComponent<StaticMeshComponent>();
         mesh->SetStaticMesh(_fight->Mesh);
         shot->Id = mesh->GetShapeId();
+        shot->Transform = mesh->GetSceneTransformId();
         shot->Spawned = true;
     }
 
@@ -356,7 +359,7 @@ TEST(FrameScenarios, PatrolPublishesOnlyTheMovingCharacter) {
     for (int frame = 1; frame <= 3; ++frame) {
         SCOPED_TRACE(frame);
         const auto batch = session.Advance(true);
-        ExpectMotionOnly(batch, {body->GetShapeId(), weapon->GetShapeId()});
+        ExpectMotionOnly(batch, {root->GetSceneTransformId()});
         EXPECT_EQ(player->Ticks, frame);
         EXPECT_EQ(dormant->Ticks, 0);
         const Vector3f expectedBody{float(frame), 0, 0};
@@ -385,7 +388,7 @@ TEST(FrameScenarios, PatrolPublishesOnlyTheMovingCharacter) {
     EXPECT_TRUE(camera->GetEyePosition().isApprox(Vector3f{3, 1.5f, 0.25f}));
 
     player->SetTickEnabled(true);
-    ExpectMotionOnly(session.Advance(true), {body->GetShapeId(), weapon->GetShapeId()});
+    ExpectMotionOnly(session.Advance(true), {root->GetSceneTransformId()});
     EXPECT_EQ(player->Ticks, 4);
     EXPECT_TRUE(body->GetWorldLocation().isApprox(Vector3f{4, 0, 0}));
     EXPECT_EQ(MeshCount(session.Scene()), 10u);
@@ -406,9 +409,9 @@ TEST(FrameScenarios, FirefightProjectilesTickNextFrameAndCancelSameFramePuffs) {
         covers.push_back(session.AddMesh(*actor, nullptr, {10.0f + float(i), 0, 0})->GetShapeId());
     }
     auto* gunner = session.GetWorld().SpawnActor<Gunner>(&fight);
-    const auto gunnerShape = session.AddMesh(*gunner, nullptr, Vector3f::Zero())->GetShapeId();
+    const auto gunnerTransform = session.AddMesh(*gunner, nullptr, Vector3f::Zero())->GetSceneTransformId();
     auto* lamp = session.GetWorld().SpawnActor<CountingActor>();
-    const auto lampShape = session.AddMesh(*lamp, nullptr, {0, 3, 0})->GetShapeId();
+    const auto lampTransform = session.AddMesh(*lamp, nullptr, {0, 3, 0})->GetSceneTransformId();
     auto* flash = lamp->AddComponent<PulsingLight>();
     flash->SetRelativeLocation({0, 3, 1});
     auto* sun = session.GetWorld().SpawnActor()->AddComponent<DirectionalLightComponent>();
@@ -446,28 +449,28 @@ TEST(FrameScenarios, FirefightProjectilesTickNextFrameAndCancelSameFramePuffs) {
     ASSERT_TRUE(fight.Shots[1].Spawned);
     EXPECT_TRUE(fight.Shots[1].Samples.empty());
     EXPECT_EQ(second.CreateShapes, (vector<ShapeId>{fight.Shots[1].Id}));
-    EXPECT_EQ(second.Transforms.size(), 1u);
-    EXPECT_EQ(second.Transforms[0].Id, fight.Shots[0].Id);
-    EXPECT_TRUE(Translation(second.Transforms[0].LocalToWorld).isApprox(Vector3f{0, 0, 1}));
+    ASSERT_EQ(second.LocalTransforms.size(), 1u);
+    EXPECT_EQ(second.LocalTransforms[0].Id, fight.Shots[0].Transform);
+    EXPECT_TRUE(Translation(second.LocalTransforms[0].Local.ToMatrix()).isApprox(Vector3f{0, 0, 1}));
     ASSERT_EQ(second.MeshStates.size(), 1u);
     EXPECT_TRUE(Translation(second.MeshStates[0].LocalToWorld).isApprox(Vector3f::Zero()));
-    EXPECT_FALSE(ContainsTransform(second, gunnerShape));
-    EXPECT_FALSE(ContainsTransform(second, lampShape));
+    EXPECT_FALSE(ContainsTransform(second, gunnerTransform));
+    EXPECT_FALSE(ContainsTransform(second, lampTransform));
 
     const auto third = session.Advance(true);
     EXPECT_EQ(fight.Shots[0].Samples, (vector<float>{1, 2}));
     EXPECT_EQ(fight.Shots[1].Samples, (vector<float>{1}));
     EXPECT_TRUE(third.CreateShapes.empty());
     EXPECT_TRUE(third.RemoveShapes.empty());
-    EXPECT_EQ(third.Transforms.size(), 2u);
+    EXPECT_EQ(third.LocalTransforms.size(), 2u);
 
     const auto fourth = session.Advance(true);
     EXPECT_EQ(fight.Shots[0].Samples, (vector<float>{1, 2, 3}));
     EXPECT_EQ(fight.Shots[1].Samples, (vector<float>{1, 2}));
     EXPECT_EQ(fourth.RemoveShapes, (vector<ShapeId>{fight.Shots[0].Id}));
-    EXPECT_FALSE(ContainsTransform(fourth, fight.Shots[0].Id));
-    EXPECT_EQ(fourth.Transforms.size(), 1u);
-    EXPECT_EQ(fourth.Transforms[0].Id, fight.Shots[1].Id);
+    EXPECT_FALSE(ContainsTransform(fourth, fight.Shots[0].Transform));
+    ASSERT_EQ(fourth.LocalTransforms.size(), 1u);
+    EXPECT_EQ(fourth.LocalTransforms[0].Id, fight.Shots[1].Transform);
     EXPECT_FALSE(SampleMesh(session.Scene(), fight.Shots[0].Id).Found);
     EXPECT_TRUE(Translation(SampleMesh(session.Scene(), fight.Shots[1].Id).Matrix).isApprox(Vector3f{0, 0, 2}));
 
@@ -475,6 +478,7 @@ TEST(FrameScenarios, FirefightProjectilesTickNextFrameAndCancelSameFramePuffs) {
     EXPECT_EQ(fight.Shots[1].Samples, (vector<float>{1, 2, 3}));
     EXPECT_EQ(fifth.RemoveShapes, (vector<ShapeId>{fight.Shots[1].Id}));
     EXPECT_TRUE(fifth.Transforms.empty());
+    EXPECT_TRUE(fifth.LocalTransforms.empty());
     EXPECT_FALSE(SampleMesh(session.Scene(), fight.Shots[1].Id).Found);
     EXPECT_EQ(MeshCount(session.Scene()), 6u);
     EXPECT_EQ(lamp->Ticks, 0);
@@ -511,7 +515,7 @@ TEST(FrameScenarios, StreamingSwapReplacesChunksWithoutResendingLights) {
     for (int frame = 1; frame <= 3; ++frame) {
         SCOPED_TRACE(frame);
         const auto batch = session.Advance(true);
-        ExpectMotionOnly(batch, {streamer->Body->GetShapeId()});
+        ExpectMotionOnly(batch, {streamer->Body->GetSceneTransformId()});
         EXPECT_TRUE(streamer->Body->GetWorldLocation().isApprox(Vector3f{0, 0, float(frame)}));
     }
 
@@ -521,8 +525,8 @@ TEST(FrameScenarios, StreamingSwapReplacesChunksWithoutResendingLights) {
     EXPECT_EQ(swapped.RemoveShapes.size(), 2u);
     EXPECT_EQ(swapped.CreateShapes.size(), 2u);
     EXPECT_EQ(swapped.MeshStates.size(), 2u);
-    EXPECT_EQ(swapped.Transforms.size(), 1u);
-    EXPECT_EQ(swapped.Transforms[0].Id, streamer->Body->GetShapeId());
+    ASSERT_EQ(swapped.LocalTransforms.size(), 1u);
+    EXPECT_EQ(swapped.LocalTransforms[0].Id, streamer->Body->GetSceneTransformId());
     EXPECT_FALSE(swapped.LightsChanged);
     for (int i = 0; i < 2; ++i) {
         EXPECT_TRUE(ContainsId(swapped.RemoveShapes, event.Removed[static_cast<size_t>(i)]));
@@ -532,7 +536,7 @@ TEST(FrameScenarios, StreamingSwapReplacesChunksWithoutResendingLights) {
         ASSERT_TRUE(created.Found);
         EXPECT_TRUE(Translation(created.Matrix).isApprox(Vector3f{100.0f + float(i), 0, 0}));
     }
-    EXPECT_FALSE(ContainsTransform(swapped, survivor));
+    EXPECT_FALSE(ContainsTransform(swapped, log.Props[4]->GetSceneTransformId()));
     EXPECT_FALSE(ContainsId(swapped.RemoveShapes, survivor));
     const auto survivorSample = SampleMesh(session.Scene(), survivor);
     ASSERT_TRUE(survivorSample.Found);
@@ -570,13 +574,13 @@ TEST(FrameScenarios, CrowdRootMotionPublishesAttachments) {
     for (int frame = 1; frame <= 2; ++frame) {
         SCOPED_TRACE(frame);
         const auto batch = session.Advance(true);
-        EXPECT_EQ(batch.Transforms.size(), 8u);
+        EXPECT_TRUE(batch.Transforms.empty());
+        EXPECT_EQ(batch.LocalTransforms.size(), 4u);
         EXPECT_TRUE(batch.MeshStates.empty());
         EXPECT_FALSE(batch.LightsChanged);
         for (const Member& member : crowd) {
             EXPECT_EQ(member.Actor->Ticks, frame);
-            EXPECT_TRUE(ContainsTransform(batch, member.Body));
-            EXPECT_TRUE(ContainsTransform(batch, member.Hat));
+            EXPECT_TRUE(ContainsTransform(batch, member.Actor->Root->GetSceneTransformId()));
             const Vector3f body{member.Origin + float(frame), 0, 0};
             const Vector3f hat{member.Origin + float(frame), 2, 0};
             const auto bodySample = SampleMesh(session.Scene(), member.Body);
@@ -624,13 +628,13 @@ TEST(FrameScenarios, PauseStillDeliversDestructionAndExternalEdits) {
 
     propB->SetRelativeLocation({8, 0, 0});
     const auto edit = session.Advance(true);
-    ExpectMotionOnly(edit, {edited});
+    ExpectMotionOnly(edit, {propB->GetSceneTransformId()});
     EXPECT_EQ(player->Ticks, 2);
     EXPECT_TRUE(Translation(SampleMesh(session.Scene(), edited).Matrix).isApprox(Vector3f{8, 0, 0}));
     EXPECT_TRUE(SampleMesh(session.Scene(), body->GetShapeId()).Matrix.isApprox(parked));
 
     session.GetWorld().SetTickEnabled(true);
-    ExpectMotionOnly(session.Advance(true), {body->GetShapeId()});
+    ExpectMotionOnly(session.Advance(true), {root->GetSceneTransformId()});
     EXPECT_EQ(player->Ticks, 3);
     EXPECT_TRUE(body->GetWorldLocation().isApprox(Vector3f{3, 0, 0}));
     EXPECT_TRUE(Translation(SampleMesh(session.Scene(), edited).Matrix).isApprox(Vector3f{8, 0, 0}));
@@ -671,7 +675,10 @@ TEST(FrameScenarios, CinematicReplacesTheFullLightTable) {
         ASSERT_TRUE(directional && point && spot);
         EXPECT_FLOAT_EQ(directional->Common.Intensity, 1.5f);
         EXPECT_FLOAT_EQ(point->Common.Intensity, 2.0f + float(frame));
-        EXPECT_TRUE(point->Point.Position.isApprox(Vector3f{float(frame), 4, 1}));
+        {
+            auto lease = session.Scene().AcquireRead();
+            EXPECT_TRUE(session.Scene().GetLights().GetPointLight(gaffer->Key->GetLightId())->Point.Position.isApprox(Vector3f{float(frame), 4, 1}));
+        }
         EXPECT_FLOAT_EQ(spot->Common.Intensity, 0.25f);
         EXPECT_FLOAT_EQ(spot->InnerConeAngle, gaffer->Rim->GetInnerConeAngle());
         EXPECT_FLOAT_EQ(spot->OuterConeAngle, gaffer->Rim->GetOuterConeAngle());
@@ -702,7 +709,7 @@ TEST(FrameScenarios, EditorDragSkipsIdenticalWritesAndIdleTicks) {
 
     dragged->SetRelativeLocation({2, 3, 4});
     const auto drag = session.Advance(false);
-    ExpectMotionOnly(drag, {dragged->GetShapeId()});
+    ExpectMotionOnly(drag, {dragged->GetSceneTransformId()});
     EXPECT_EQ(dormant->Ticks, 0);
     EXPECT_TRUE(Translation(SampleMesh(session.Scene(), dragged->GetShapeId()).Matrix).isApprox(Vector3f{2, 3, 4}));
 
@@ -713,7 +720,7 @@ TEST(FrameScenarios, EditorDragSkipsIdenticalWritesAndIdleTicks) {
 
     dragged->SetRelativeScale({-1, 1, 1});
     const auto mirror = session.Advance(false);
-    ExpectMotionOnly(mirror, {dragged->GetShapeId()});
+    ExpectMotionOnly(mirror, {dragged->GetSceneTransformId()});
     const auto mirrored = SampleMesh(session.Scene(), dragged->GetShapeId());
     ASSERT_TRUE(mirrored.Found);
     EXPECT_TRUE(mirrored.ReverseCulling);
@@ -734,7 +741,10 @@ TEST(FrameScenarios, EditorDragSkipsIdenticalWritesAndIdleTicks) {
     EXPECT_FLOAT_EQ(relight.Lights.GetDirectionalLight(sun->GetLightId())->Common.Intensity, 1.1f);
     ASSERT_TRUE(relight.Lights.GetPointLight(practical->GetLightId()));
     EXPECT_FLOAT_EQ(relight.Lights.GetPointLight(practical->GetLightId())->Common.Intensity, 3.0f);
-    EXPECT_TRUE(relight.Lights.GetPointLight(practical->GetLightId())->Point.Position.isApprox(Vector3f{5, 6, 7}));
+    {
+        auto lease = session.Scene().AcquireRead();
+        EXPECT_TRUE(session.Scene().GetLights().GetPointLight(practical->GetLightId())->Point.Position.isApprox(Vector3f{5, 6, 7}));
+    }
     EXPECT_TRUE(SampleMesh(session.Scene(), dragged->GetShapeId()).ReverseCulling);
     EXPECT_TRUE(SampleMesh(session.Scene(), meshes[7]->GetShapeId()).Matrix.isApprox(untouched));
 

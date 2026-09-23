@@ -134,6 +134,7 @@ void Actor::RegisterComponent(ActorComponent& component) {
     component._registration = ComponentRegistration::Registering;
     _world->BeginCallback();
     auto guard = MakeScopeGuard([this]() noexcept { _world->EndCallback(); });
+    if (auto scene = dynamic_cast<SceneComponent*>(&component)) _world->CreateComponentTransformState(*scene);
     if (auto source = dynamic_cast<RenderComponent*>(&component)) _world->CreateComponentRenderState(*source);
     component.OnRegister();
     component._registration = ComponentRegistration::Registered;
@@ -152,6 +153,7 @@ void Actor::UnregisterComponent(ActorComponent& component) {
     _world->BeginCallback();
     auto guard = MakeScopeGuard([this]() noexcept { _world->EndCallback(); });
     if (auto source = dynamic_cast<RenderComponent*>(&component)) _world->DestroyComponentRenderState(*source);
+    if (auto scene = dynamic_cast<SceneComponent*>(&component)) _world->DestroyComponentTransformState(*scene);
     component.OnUnregister();
     component._registration = ComponentRegistration::Unregistered;
     component._world = nullptr;

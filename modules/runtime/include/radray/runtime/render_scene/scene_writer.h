@@ -31,6 +31,7 @@ private:
     friend class RenderSystem;
     friend class SceneCapture;
     friend class ShapeCapture;
+    friend class WorldRenderBridge;
 
     static constexpr size_t kNotQueued = std::numeric_limits<size_t>::max();
     static constexpr uint32_t kNoLightRow = std::numeric_limits<uint32_t>::max();
@@ -53,6 +54,15 @@ private:
         uint32_t Type{0};
     };
 
+    struct TransformState {
+        size_t CreateIndex{kNotQueued}, LocalIndex{kNotQueued}, ParentIndex{kNotQueued};
+        TransformId Parent;
+        bool Sent{false};
+    };
+    TransformId CreateTransform(TransformId parent, const LocalTransform& local);
+    void RemoveTransform(TransformId id);
+    void SetLocalTransform(TransformId id, TransformId parent, const LocalTransform& local);
+
     ShapeState& GetShape(ShapeId id);
     ShapeEdit& GetEdit(ShapeId id);
     void EnableEditing();
@@ -61,13 +71,14 @@ private:
     void CancelCreate(ShapeEdit& edit);
     template <class T>
     void CancelUpdate(vector<T>& updates, ShapeEdit& edit);
-    void WriteStaticMesh(ShapeId id, ShapeState& state, const StreamingAssetRef<StaticMesh>& mesh, const AffineTransform& localToWorld);
+    void WriteStaticMesh(ShapeId id, ShapeState& state, const StreamingAssetRef<StaticMesh>& mesh, const AffineTransform& localToWorld, TransformId transform = {});
     void WriteTransform(ShapeId id, ShapeState& state, const AffineTransform& localToWorld);
     void Flush(SceneUpdateBatch& batch, uint32_t flightIndex);
     void RemoveLightData(LightSlot& slot);
 
     SceneId _id;
     SparseSet<ShapeState> _shapes;
+    SparseSet<TransformState> _transforms;
     /// Only independent editing or repeated captures before Seal need update locators.
     vector<ShapeEdit> _edits;
     SceneUpdateBatch _pending;

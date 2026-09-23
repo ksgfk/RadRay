@@ -3,6 +3,10 @@
 namespace radray {
 
 void SceneUpdateBatch::Clear() noexcept {
+    RemoveTransforms.clear();
+    CreateTransforms.clear();
+    TransformParents.clear();
+    LocalTransforms.clear();
     RemoveShapes.clear();
     CreateShapes.clear();
     MeshStates.clear();

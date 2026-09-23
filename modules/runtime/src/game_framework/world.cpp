@@ -215,7 +215,7 @@ void World::FinalizeWorldGT() {
     FreezeLifecycle();
     PrepareLifecycle();
     ExecuteLifecycle();
-    DispatchTransforms(true);
+    DispatchTransforms();
 }
 
 void World::Teardown() {
@@ -261,6 +261,8 @@ void World::DisconnectNow() {
         _renderBridge->Disconnect();
         _renderBridge.reset();
     }
+    for (auto* root : _renderTransformRoots) root->_renderTransformRootIndex = std::numeric_limits<uint32_t>::max();
+    _renderTransformRoots.clear();
 }
 std::optional<SceneId> World::GetRenderSceneId() const noexcept {
     return _renderBridge ? std::optional{_renderBridge->GetSceneId()} : std::nullopt;
@@ -278,7 +280,6 @@ LifecycleRequestResult World::QueueReparent(SceneComponent& child, Nullable<Scen
 
 void World::Collect() {
     RADRAY_PROFILE_SCOPE_N("World::Collect");
-    DispatchTransforms(false);
     _collecting = true;
     auto guard = MakeScopeGuard([this]() noexcept { _collecting = false; });
     if (_renderBridge) _renderBridge->Collect();
@@ -288,40 +289,64 @@ void World::CollectRenderUpdates() {
     Collect();
 }
 
-void World::QueueTransform(SceneComponent& component) {
-    if (_transformRevision == std::numeric_limits<uint64_t>::max()) RADRAY_ABORT("Transform revision exhausted");
-    ++_transformRevision;
-    const auto life = component.GetLifecycle();
-    if ((life != ObjectLifecycle::Live && life != ObjectLifecycle::Initializing) || component._transformQueueIndex != std::numeric_limits<uint32_t>::max()) return;
-    if (_transformChanges.size() == std::numeric_limits<uint32_t>::max()) RADRAY_ABORT("Too many transform changes");
-    component._transformQueueIndex = static_cast<uint32_t>(_transformChanges.size());
-    _transformChanges.push_back(&component);
+void World::RemoveTransformRoot(SceneComponent& component) noexcept {
+    auto& dirty = component._transformDirty;
+    if (dirty.Epoch != _transformQueue.Epoch || dirty.Index == SceneComponent::TransformDirtyState::kNotQueued) return;
+    auto* moved = _transformQueue.Roots.back();
+    _transformQueue.Roots[dirty.Index] = moved;
+    moved->_transformDirty.Index = dirty.Index;
+    _transformQueue.Roots.pop_back();
+    dirty.Index = SceneComponent::TransformDirtyState::kNotQueued;
 }
 
 void World::RemoveTransform(SceneComponent& component) noexcept {
-    const auto index = component._transformQueueIndex;
-    if (index == std::numeric_limits<uint32_t>::max()) return;
-    auto* moved = _transformChanges.back();
-    _transformChanges[index] = moved;
-    moved->_transformQueueIndex = index;
-    _transformChanges.pop_back();
-    component._transformQueueIndex = std::numeric_limits<uint32_t>::max();
+    const auto localIndex = component._localTransformQueueIndex;
+    if (localIndex != std::numeric_limits<uint32_t>::max()) {
+        auto* moved = _localTransformChanges.back();
+        _localTransformChanges[localIndex] = moved;
+        moved->_localTransformQueueIndex = localIndex;
+        _localTransformChanges.pop_back();
+        component._localTransformQueueIndex = std::numeric_limits<uint32_t>::max();
+    }
+    RemoveTransformRoot(component);
+    component._transformDirty.Epoch = 0;
+    const auto index = component._renderTransformRootIndex;
+    if (index != std::numeric_limits<uint32_t>::max()) {
+        auto* moved = _renderTransformRoots.back();
+        _renderTransformRoots[index] = moved;
+        moved->_renderTransformRootIndex = index;
+        _renderTransformRoots.pop_back();
+        component._renderTransformRootIndex = std::numeric_limits<uint32_t>::max();
+    }
 }
 
-void World::DispatchTransforms(bool notify) {
-    if (_transformChanges.empty()) return;
-    RADRAY_PROFILE_SCOPE_N("World::DispatchTransforms");
-    const bool renderDirty = _renderTransformRevision != _transformRevision;
-    _renderTransformRevision = _transformRevision;
-    for (auto* node : _transformChanges) {
+void World::TakeTransformRoots(bool consume) {
+    for (auto* node : _transformQueue.Roots) {
         if (!node->IsLive()) continue;
         auto parent = node->_parent;
-        while (parent && (parent->_transformQueueIndex == std::numeric_limits<uint32_t>::max() || !parent->IsLive())) parent = parent->_parent;
+        while (parent && !(parent->_transformDirty.Epoch == _transformQueue.Epoch &&
+                           parent->_transformDirty.Index != SceneComponent::TransformDirtyState::kNotQueued && parent->IsLive())) parent = parent->_parent;
         if (!parent) _transformRoots.push_back(node);
     }
-    if (notify) {
-        for (auto* node : _transformChanges) node->_transformQueueIndex = std::numeric_limits<uint32_t>::max();
-        _transformChanges.clear();
+    if (consume) {
+        for (auto* root : _transformQueue.Roots) root->_transformDirty.Index = SceneComponent::TransformDirtyState::kNotQueued;
+        _transformQueue.Roots.clear();
+        if (_transformQueue.Epoch == std::numeric_limits<uint32_t>::max()) RADRAY_ABORT("Transform batch epoch exhausted");
+        ++_transformQueue.Epoch;
+    }
+}
+
+void World::DispatchTransforms() {
+    if (_transformQueue.Roots.empty()) return;
+    RADRAY_PROFILE_SCOPE_N("World::DispatchTransforms");
+    TakeTransformRoots(true);
+    if (_legacyRenderSources != 0 && _renderBridge && _renderTransformRevision != _transformRevision) {
+        for (auto* root : _transformRoots) {
+            if (root->_renderTransformRootIndex != std::numeric_limits<uint32_t>::max()) continue;
+            if (_renderTransformRoots.size() == std::numeric_limits<uint32_t>::max()) RADRAY_ABORT("Too many render transform roots");
+            root->_renderTransformRootIndex = static_cast<uint32_t>(_renderTransformRoots.size());
+            _renderTransformRoots.push_back(root);
+        }
     }
     BeginCallback();
     auto guard = MakeScopeGuard([this]() noexcept { EndCallback(); });
@@ -330,12 +355,53 @@ void World::DispatchTransforms(bool notify) {
         _transformRoots.pop_back();
         if (!node->IsLive()) continue;
         const auto count = node->_children.size();
-        node->NotifyWorldTransformChanged(notify, renderDirty);
+        node->OnTransformChanged();
         if (count != 0 && node->IsLive()) {
             for (size_t i = count; i > 0; --i) _transformRoots.push_back(node->_children[i - 1]);
         }
     }
 }
+
+void World::CaptureTransformRoots(SceneCapture& capture) {
+    while (!_transformRoots.empty()) {
+        auto* node = _transformRoots.back();
+        _transformRoots.pop_back();
+        if (!node->IsLive() || node->_renderTransformCaptureEpoch == _transformCaptureEpoch) continue;
+        node->_renderTransformCaptureEpoch = _transformCaptureEpoch;
+        node->CollectRenderTransform(capture);
+        for (size_t i = node->_children.size(); i > 0; --i) _transformRoots.push_back(node->_children[i - 1]);
+    }
+}
+
+void World::CollectTransforms(SceneCapture& capture) {
+    if (_legacyRenderSources == 0) {
+        _renderTransformRevision = _transformRevision;
+        return;
+    }
+    if (_renderTransformRoots.empty() && _renderTransformRevision == _transformRevision) return;
+    RADRAY_PROFILE_SCOPE_N("World::CollectTransforms");
+    _renderTransformRevision = _transformRevision;
+    if (_transformCaptureEpoch == std::numeric_limits<uint32_t>::max()) RADRAY_ABORT("Transform capture epoch exhausted");
+    ++_transformCaptureEpoch;
+    std::swap(_transformRoots, _renderTransformRoots);
+    for (auto* root : _transformRoots) root->_renderTransformRootIndex = std::numeric_limits<uint32_t>::max();
+    if (_transformRoots.size() >= 16384) {
+        std::sort(_transformRoots.begin(), _transformRoots.end(), [](const SceneComponent* lhs, const SceneComponent* rhs) noexcept {
+            return reinterpret_cast<uintptr_t>(lhs) > reinterpret_cast<uintptr_t>(rhs);
+        });
+    }
+    CaptureTransformRoots(capture);
+    TakeTransformRoots(false);
+    CaptureTransformRoots(capture);
+}
+
+void World::CreateComponentTransformState(SceneComponent& component) {
+    if (_renderBridge) _renderBridge->CreateTransform(component);
+}
+void World::DestroyComponentTransformState(SceneComponent& component) {
+    if (_renderBridge) _renderBridge->DestroyTransform(component);
+}
+
 void World::CreateComponentRenderState(RenderComponent& component) {
     if (_renderBridge) _renderBridge->Create(component);
 }

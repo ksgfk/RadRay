@@ -233,10 +233,10 @@ TEST(LifecycleScale, SharedMeshViewsAndTransformCapture) {
         auto component = world.GetActors()[0]->FindComponent<StaticMeshComponent>();
         for (int i = 0; i < 100; ++i) component->SetRelativeLocation({float(i), 0, 0});
         test::PrepareScene(world, renderer, 0);
-        ASSERT_EQ(test::SceneBatch(renderer, scene, 0).Transforms.size(), 1u);
+        ASSERT_EQ(test::SceneBatch(renderer, scene, 0).LocalTransforms.size(), 1u);
         EXPECT_TRUE(test::SceneBatch(renderer, scene, 0).MeshStates.empty());
         EXPECT_EQ(mesh->GetSections().data(), sections);
-        EXPECT_FLOAT_EQ(test::SceneBatch(renderer, scene, 0).Transforms[0].LocalToWorld(0, 3), 99);
+        EXPECT_FLOAT_EQ(test::SceneBatch(renderer, scene, 0).LocalTransforms[0].Local.Translation[0], 99);
     }
 }
 

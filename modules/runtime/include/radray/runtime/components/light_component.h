@@ -30,6 +30,7 @@ public:
     LightId GetLightId() const noexcept { return _lightId; }
 
 protected:
+    bool UsesSceneTransform() const noexcept override { return true; }
     void CreateRenderState(SceneWriter& writer) override;
     void DestroyRenderState(SceneWriter& writer) override;
     void CollectRenderUpdates(SceneCapture& capture, RenderDirtyFlags dirty) override;

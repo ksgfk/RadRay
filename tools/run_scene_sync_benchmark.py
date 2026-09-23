@@ -36,7 +36,7 @@ def run_logged(args: list[str], env: dict[str, str], log: Path, cwd: Path) -> No
 
 
 def fingerprint(root: Path) -> str:
-    files = set(command_output(["git", "ls-files", "modules", "cmake", "CMakeLists.txt", "project_manifest.json"], root).splitlines())
+    files = set(command_output(["git", "ls-files", "--cached", "--others", "--exclude-standard", "--", "modules", "cmake", "CMakeLists.txt", "project_manifest.json"], root).splitlines())
     files.update(["modules/runtime/tests/test_scene_sync_performance.cpp", "tools/run_scene_sync_benchmark.py"])
     digest = hashlib.sha256()
     for name in sorted(files):
@@ -64,9 +64,10 @@ def metadata(root: Path, build: Path, executable: Path, args: argparse.Namespace
         "started_at": datetime.now().astimezone().isoformat(),
         "git_head": command_output(["git", "rev-parse", "HEAD"], root),
         "git_status": command_output(["git", "status", "--short"], root),
-        "source_sha256": fingerprint(root), "binary_sha256": hashlib.sha256(executable.read_bytes()).hexdigest(),
+        "source_sha256": None if args.source_snapshot else fingerprint(root),
+        "source_snapshot": str(args.source_snapshot.resolve()) if args.source_snapshot else None, "binary_sha256": hashlib.sha256(executable.read_bytes()).hexdigest(),
         "executable": str(executable), "platform": platform.platform(), "cpu": cpu,
-        "logical_cpus": os.cpu_count(), "affinity": "OS default; no explicit pinning",
+        "logical_cpus": os.cpu_count(), "affinity": os.environ.get("RADRAY_BENCHMARK_AFFINITY", "OS default; no explicit pinning"),
         "build_options": options, "compiler": compiler, "dependencies": dependencies,
         "frames": args.frames, "warmup": args.warmup, "preflight": 8, "runs": args.runs,
         "cases": args.cases or "all", "allocation_pass": args.allocations,
@@ -98,7 +99,9 @@ def summarize(prefix: Path, frame_count: int, requested: set[str], run: int) -> 
                     sys.exit(f"Frame/sequence mismatch for {identity}, frame {frame}")
                 if int(row["end_ns"]) < int(row["start_ns"]) or float(row["queue_us"]) < 0:
                     sys.exit(f"Invalid timestamps for {identity}")
-            payload = tuple(tuple(r[k] for k in ("transforms", "mesh_states", "creates", "removes", "light_records", "payload_bytes")) for r in rows)
+            payload_fields = ("transforms", "mesh_states", "creates", "removes", "light_records", "payload_bytes",
+                              "local_transforms", "transform_parents", "transform_creates", "transform_removes")
+            payload = tuple(tuple(r.get(k, "0") for k in payload_fields) for r in rows)
             previous = payloads.setdefault(identity[0], payload)
             if previous != payload:
                 sys.exit(f"Single/multithread workloads differ: {identity}")
@@ -114,9 +117,9 @@ def summarize(prefix: Path, frame_count: int, requested: set[str], run: int) -> 
                 summary[f"{field}_p95"] = numbers[math.ceil(len(numbers) * .95) - 1]
                 summary[f"{field}_p99"] = numbers[math.ceil(len(numbers) * .99) - 1]
                 summary[f"{field}_max"] = numbers[-1]
-            for field in ("transforms", "mesh_states", "creates", "removes", "light_records", "payload_bytes"):
-                summary[f"{field}_mean"] = statistics.fmean(int(r[field]) for r in rows)
-                summary[f"{field}_max"] = max(int(r[field]) for r in rows)
+            for field in payload_fields:
+                summary[f"{field}_mean"] = statistics.fmean(int(r.get(field, "0")) for r in rows)
+                summary[f"{field}_max"] = max(int(r.get(field, "0")) for r in rows)
             summaries.append(summary)
     expected = {(mode, str(flight)) for mode in ("single", "threaded") for flight in (1, 2, 3)}
     if not configurations or any(value != expected for value in configurations.values()):
@@ -138,6 +141,7 @@ def write_csv(path: Path, rows: list[dict]) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--build-dir", type=Path, default=Path("build_scene_sync_perf"))
+    parser.add_argument("--source-snapshot", type=Path, help="Archived source directory for a preserved baseline binary; never fingerprint the current tree as its source")
     parser.add_argument("--config", choices=["Debug", "Release", "RelWithDebInfo"], default="Release")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--frames", type=int, default=512)
@@ -161,9 +165,20 @@ def main() -> int:
     metadata_path = output / "metadata.json"
     metadata_path.write_text(json.dumps(info, ensure_ascii=False, indent=2), encoding="utf-8")
     diff = subprocess.run(["git", "diff", "HEAD", "--binary"], cwd=root, capture_output=True, check=True).stdout
-    (output / "tracked.patch").write_bytes(diff)
+    if args.source_snapshot:
+        snapshot = args.source_snapshot.resolve()
+        (output / "tracked.patch").write_bytes((snapshot / "benchmark-baseline.patch").read_bytes())
+        (output / "source-metadata.json").write_bytes((snapshot / "metadata.json").read_bytes())
+        info["source_snapshot_patch_sha256"] = hashlib.sha256((output / "tracked.patch").read_bytes()).hexdigest()
+    else:
+        (output / "tracked.patch").write_bytes(diff)
+        for name in command_output(["git", "ls-files", "--others", "--exclude-standard", "--", "modules"], root).splitlines():
+            destination = output / "untracked-source" / name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes((root / name).read_bytes())
     for name in ("modules/runtime/tests/test_scene_sync_performance.cpp", "tools/run_scene_sync_benchmark.py"):
-        (output / Path(name).name).write_bytes((root / name).read_bytes())
+        source = args.source_snapshot / Path(name).name if args.source_snapshot and name.endswith(".cpp") else root / name
+        (output / Path(name).name).write_bytes(source.read_bytes())
     env = {key: value for key, value in os.environ.items() if not key.startswith(("RADRAY_SCENE_SYNC_", "RADRAY_RUN_SCENE_SYNC_"))}
     run_logged([str(executable), "--gtest_filter=SceneSyncCorrectness.*"], env, output / "correctness.log", root)
     env.update(RADRAY_RUN_SCENE_SYNC_BENCHMARK="1", RADRAY_SCENE_SYNC_FRAMES=str(args.frames),

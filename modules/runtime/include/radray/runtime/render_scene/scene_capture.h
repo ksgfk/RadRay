@@ -10,6 +10,7 @@ public:
     ShapeCapture(const ShapeCapture&) = delete;
     ShapeCapture& operator=(const ShapeCapture&) = delete;
     void SetStaticMesh(const StreamingAssetRef<StaticMesh>& mesh, const AffineTransform& transform);
+    void SetStaticMesh(const StreamingAssetRef<StaticMesh>& mesh, TransformId transform);
     void SetTransform(const AffineTransform& transform);
 
 private:

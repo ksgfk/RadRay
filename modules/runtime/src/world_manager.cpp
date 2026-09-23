@@ -101,7 +101,7 @@ void WorldManager::FinalizeWorldsGT() {
     _commitWorlds.clear();
     const auto count = _worldIds.size();
     for (size_t i = 0; i < count; ++i) {
-        if (auto world = GetWorld(_worldIds[i])) world->DispatchTransforms(true);
+        if (auto world = GetWorld(_worldIds[i])) world->DispatchTransforms();
     }
 }
 void WorldManager::CollectRenderUpdates() {

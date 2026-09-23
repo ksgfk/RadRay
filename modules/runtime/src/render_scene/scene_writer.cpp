@@ -106,7 +106,7 @@ void SceneWriter::SetStaticMesh(ShapeId id, const StreamingAssetRef<StaticMesh>&
     QueueCreate(id, state);
 }
 
-void SceneWriter::WriteStaticMesh(ShapeId id, ShapeState& state, const StreamingAssetRef<StaticMesh>& mesh, const AffineTransform& localToWorld) {
+void SceneWriter::WriteStaticMesh(ShapeId id, ShapeState& state, const StreamingAssetRef<StaticMesh>& mesh, const AffineTransform& localToWorld, TransformId transform) {
     StaticMeshDescription next;
     next.MeshAssetId = mesh.GetAssetId();
     if (auto asset = mesh.Get(); asset && asset->IsValid()) {
@@ -120,13 +120,13 @@ void SceneWriter::WriteStaticMesh(ShapeId id, ShapeState& state, const Streaming
         if (!edit.PendingMesh) CancelUpdate(_pending.Transforms, edit);
         if (edit.UpdateIndex == kNotQueued) {
             edit.UpdateIndex = _pending.MeshStates.size();
-            _pending.MeshStates.push_back({id, next, localToWorld});
+            _pending.MeshStates.push_back({id, next, localToWorld, transform});
         } else {
-            _pending.MeshStates[edit.UpdateIndex] = {id, next, localToWorld};
+            _pending.MeshStates[edit.UpdateIndex] = {id, next, localToWorld, transform};
         }
         edit.PendingMesh = true;
     } else {
-        _pending.MeshStates.push_back({id, next, localToWorld});
+        _pending.MeshStates.push_back({id, next, localToWorld, transform});
     }
     state.HasMesh = true;
 }
@@ -214,6 +214,13 @@ void SceneWriter::SetLight(LightId id, const LightData& light) {
 void SceneWriter::Flush(SceneUpdateBatch& batch, uint32_t flightIndex) {
     RADRAY_PROFILE_SCOPE_N("SceneWriter::Flush");
     if (!batch.Empty()) RADRAY_ABORT("Scene batch must be empty before collection");
+    for (const auto& value : _pending.CreateTransforms) {
+        auto& state = _transforms.Get({value.Id.Index, value.Id.Generation});
+        state.Sent = true;
+        state.CreateIndex = kNotQueued;
+    }
+    for (const auto& value : _pending.LocalTransforms) _transforms.Get({value.Id.Index, value.Id.Generation}).LocalIndex = kNotQueued;
+    for (const auto& value : _pending.TransformParents) _transforms.Get({value.Id.Index, value.Id.Generation}).ParentIndex = kNotQueued;
     for (const auto id : _pending.CreateShapes) {
         auto& state = _shapes.Get({id.Index, id.Generation});
         state.Sent = true;
@@ -230,6 +237,58 @@ void SceneWriter::Flush(SceneUpdateBatch& batch, uint32_t flightIndex) {
     _assets.SealRetirements(flightIndex);
     RADRAY_PROFILE_PLOT("SceneTransforms", static_cast<int64_t>(batch.Transforms.size()));
     RADRAY_PROFILE_PLOT("SceneMeshStates", static_cast<int64_t>(batch.MeshStates.size()));
+}
+
+TransformId SceneWriter::CreateTransform(TransformId parent, const LocalTransform& local) {
+    if (_closing) RADRAY_ABORT("Scene writer is closing");
+    const auto handle = _transforms.Emplace();
+    const TransformId id{handle.Index, handle.Generation};
+    auto& state = _transforms.Get(handle);
+    state.CreateIndex = _pending.CreateTransforms.size();
+    state.Parent = parent;
+    _pending.CreateTransforms.push_back({id, parent, local});
+    return id;
+}
+void SceneWriter::RemoveTransform(TransformId id) {
+    auto& state = _transforms.Get({id.Index, id.Generation});
+    const auto cancel = [&](auto& values, size_t TransformState::* member) {
+        const auto index = state.*member;
+        if (index == kNotQueued) return;
+        if (index != values.size() - 1) {
+            values[index] = std::move(values.back());
+            const auto moved = values[index].Id;
+            _transforms.Get({moved.Index, moved.Generation}).*member = index;
+        }
+        values.pop_back();
+    };
+    cancel(_pending.CreateTransforms, &TransformState::CreateIndex);
+    cancel(_pending.LocalTransforms, &TransformState::LocalIndex);
+    cancel(_pending.TransformParents, &TransformState::ParentIndex);
+    if (state.Sent) _pending.RemoveTransforms.push_back(id);
+    if (id.Generation == std::numeric_limits<uint32_t>::max()) RADRAY_ABORT("Transform generation exhausted");
+    _transforms.Destroy({id.Index, id.Generation});
+}
+void SceneWriter::SetLocalTransform(TransformId id, TransformId parent, const LocalTransform& local) {
+    auto& state = _transforms.Get({id.Index, id.Generation});
+    if (!state.Sent) {
+        _pending.CreateTransforms[state.CreateIndex] = {id, parent, local};
+    } else {
+        if (state.LocalIndex == kNotQueued) {
+            state.LocalIndex = _pending.LocalTransforms.size();
+            _pending.LocalTransforms.push_back({id, local});
+        } else {
+            _pending.LocalTransforms[state.LocalIndex].Local = local;
+        }
+        if (state.Parent != parent) {
+            if (state.ParentIndex == kNotQueued) {
+                state.ParentIndex = _pending.TransformParents.size();
+                _pending.TransformParents.push_back({id, parent});
+            } else {
+                _pending.TransformParents[state.ParentIndex].Parent = parent;
+            }
+        }
+    }
+    state.Parent = parent;
 }
 
 }  // namespace radray

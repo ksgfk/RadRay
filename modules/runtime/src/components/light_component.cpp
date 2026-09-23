@@ -60,6 +60,7 @@ void LightComponent::CollectRenderUpdates(SceneCapture& capture, RenderDirtyFlag
 
 LightCommonData LightComponent::CaptureCommon() const noexcept {
     LightCommonData common;
+    common.Transform = UsesSceneTransform() ? GetSceneTransformId() : TransformId{};
     common.Color = _lightColor;
     common.Intensity = _intensity;
     common.AffectsWorld = _affectsWorld;
@@ -68,12 +69,13 @@ LightCommonData LightComponent::CaptureCommon() const noexcept {
 }
 
 LightData LightComponent::CaptureLightState() const noexcept {
-    const auto direction = GetLightDirection();
+    const Eigen::Vector3f direction = UsesSceneTransform() ? Eigen::Vector3f::UnitZ().eval() : GetLightDirection();
+    const Eigen::Vector3f position = UsesSceneTransform() ? Eigen::Vector3f::Zero().eval() : GetLightPosition().head<3>().eval();
     switch (GetLightType()) {
         case LightType::Directional: return DirectionalLightData{CaptureCommon(), direction};
-        case LightType::Point: return PointLightData{CaptureCommon(), {GetLightPosition().head<3>(), direction}};
-        case LightType::Spot: return SpotLightData{CaptureCommon(), {GetLightPosition().head<3>(), direction}};
-        case LightType::Rect: return RectLightData{CaptureCommon(), GetLightPosition().head<3>(), direction};
+        case LightType::Point: return PointLightData{CaptureCommon(), {position, direction}};
+        case LightType::Spot: return SpotLightData{CaptureCommon(), {position, direction}};
+        case LightType::Rect: return RectLightData{CaptureCommon(), position, direction};
         default: RADRAY_ABORT("Invalid light type");
     }
 }

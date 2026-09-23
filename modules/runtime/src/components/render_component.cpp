@@ -33,9 +33,12 @@ void RenderComponent::MarkRenderDynamicDataDirty() {
     CheckCanModify();
     MarkRenderDirty(RenderDirtyFlag::DynamicData);
 }
-void RenderComponent::NotifyWorldTransformChanged(bool notify, bool renderDirty) {
-    if (renderDirty) MarkRenderDirty(RenderDirtyFlag::Transform);
-    if (notify) OnTransformChanged();
+void RenderComponent::CollectRenderTransform(SceneCapture& capture) {
+    if (UsesSceneTransform()) return;
+    if (_renderIndex == std::numeric_limits<uint32_t>::max()) return;
+    const auto dirty = _renderDirty | RenderDirtyFlag::Transform;
+    _renderDirty = {};
+    CollectRenderUpdates(capture, dirty);
 }
 
 }  // namespace radray

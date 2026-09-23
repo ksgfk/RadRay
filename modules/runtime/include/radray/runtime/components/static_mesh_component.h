@@ -15,6 +15,7 @@ public:
     const StreamingAssetRef<StaticMesh>& GetStaticMesh() const noexcept { return _mesh; }
 
 private:
+    bool UsesSceneTransform() const noexcept override { return true; }
     void OnRenderStateCreated() override;
     void OnRenderStateDestroyed() override;
     void StartMeshReadyWait();

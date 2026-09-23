@@ -44,9 +44,7 @@ task<void> StaticMeshComponent::WaitForMeshReady(StreamingAssetRef<StaticMesh> m
 
 void StaticMeshComponent::CollectPrimitiveUpdates(ShapeCapture& capture, RenderDirtyFlags dirty) {
     if (dirty.HasFlag(RenderDirtyFlag::State)) {
-        capture.SetStaticMesh(_mesh, GetWorldTransform());
-    } else if (dirty.HasFlag(RenderDirtyFlag::Transform)) {
-        capture.SetTransform(GetWorldTransform());
+        capture.SetStaticMesh(_mesh, GetSceneTransformId());
     }
 }
 

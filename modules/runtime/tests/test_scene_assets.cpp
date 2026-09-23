@@ -272,7 +272,8 @@ TEST_F(SceneAssets, RemovingOneWaiterDoesNotCancelTheSharedLoad) {
     test::CollectScene(GameWorld, Render, Batch);
     ASSERT_EQ(Batch.MeshStates.size(), 1u);
     EXPECT_EQ(Batch.MeshStates[0].Id, id);
-    EXPECT_FLOAT_EQ(Batch.MeshStates[0].LocalToWorld(0, 3), 7);
+    EXPECT_EQ(Batch.MeshStates[0].Transform, remaining->GetSceneTransformId());
+    EXPECT_FLOAT_EQ(Render.GetSceneRT(RenderId)->GetStaticMesh(id)->LocalToWorld(0, 3), 7);
     EXPECT_TRUE(Batch.Transforms.empty());
     EXPECT_TRUE(Batch.MeshStates[0].Mesh.GetRenderMesh());
 }

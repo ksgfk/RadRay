@@ -6,8 +6,11 @@
 #include <radray/basic_math.h>
 #include <radray/nullable.h>
 #include <radray/runtime/components/actor_component.h>
+#include <radray/runtime/render_scene/scene_transform.h>
 
 namespace radray {
+
+class SceneCapture;
 
 /// 有空间变换的组件。能形成父子 Attach 层级。
 /// 对应 UE5 的 USceneComponent。
@@ -27,13 +30,13 @@ public:
     void SetRelativeRotation(const Eigen::Quaternionf& rotation) noexcept;
     void SetRelativeScale(const Eigen::Vector3f& scale) noexcept;
 
-    /// 世界空间变换（读缓存；缓存脏时沿 parent chain 重建后再读）
+    /// Immediate GT value, evaluated from this node to the root without a persistent cache.
     Eigen::Vector3f GetWorldLocation() const noexcept;
     Eigen::Quaternionf GetWorldRotation() const noexcept;
     Eigen::Vector3f GetWorldScale() const noexcept;
     Eigen::Matrix4f GetWorldMatrix() const noexcept;
-    /// GT borrow; querying after any hierarchy/transform mutation may replace the cached value.
-    const Eigen::Matrix4f& GetWorldTransform() const noexcept;
+    Eigen::Matrix4f GetWorldTransform() const noexcept;
+    TransformId GetSceneTransformId() const noexcept { return _sceneTransformId; }
 
     /// 直接设置世界位置（反算出 relative）
     void SetWorldLocation(const Eigen::Vector3f& location) noexcept;
@@ -49,40 +52,45 @@ public:
     LifecycleRequestResult RequestReparent(Nullable<SceneComponent*> parent, AttachmentRule rule = AttachmentRule::KeepLocal);
 
     Nullable<SceneComponent*> GetAttachParent() const noexcept { return _parent; }
+    /// Unordered children; detach swaps in the last child. The borrow expires on hierarchy mutation.
     std::span<SceneComponent* const> GetAttachChildren() const noexcept { return _children; }
 
 protected:
     /// Registered components receive one notification per affected subtree in the next transform dispatch.
     virtual void OnTransformChanged() {}
-    virtual void NotifyWorldTransformChanged(bool notify, bool renderDirty) {
-        (void)renderDirty;
-        if (notify) OnTransformChanged();
-    }
+    virtual void CollectRenderTransform(SceneCapture& capture) { (void)capture; }
 
 private:
     friend class Actor;
     friend class World;
+    friend class WorldRenderBridge;
+
+    struct TransformDirtyState {
+        static constexpr uint32_t kNotQueued = 0x7fffffffu;
+        uint32_t Epoch{0};
+        uint32_t Index{kNotQueued};
+    };
 
     bool ReparentNow(Nullable<SceneComponent*> parent, AttachmentRule rule) noexcept;
     bool CanJoinWorld(const Actor& owner, const World& world) const noexcept;
     bool ComputeAttachmentTransform(Nullable<SceneComponent*> parent, AttachmentRule rule, Eigen::Vector3f& location, Eigen::Quaternionf& rotation, Eigen::Vector3f& scale) const noexcept;
     void UnlinkHierarchy() noexcept;
+    void UnlinkParent() noexcept;
 
-    /// Validates the parent chain iteratively; no stack growth with hierarchy depth.
-    void RefreshWorldMatrix() const noexcept;
     void NotifyTransformChanged();
 
     Eigen::Quaternionf _relativeRotation{Eigen::Quaternionf::Identity()};
     Eigen::Vector3f _relativeLocation{Eigen::Vector3f::Zero()};
     Eigen::Vector3f _relativeScale{Eigen::Vector3f::Ones()};
-    mutable uint64_t _validatedRevision{0};
-    mutable uint64_t _worldRevision{0};
-    uint32_t _transformQueueIndex{std::numeric_limits<uint32_t>::max()};
-    mutable bool _worldDirty{true};
+    TransformId _sceneTransformId;
+    uint32_t _sceneTransformIndex{std::numeric_limits<uint32_t>::max()};
+    uint32_t _localTransformQueueIndex{std::numeric_limits<uint32_t>::max()};
+    TransformDirtyState _transformDirty;
+    uint32_t _renderTransformRootIndex{std::numeric_limits<uint32_t>::max()};
+    uint32_t _renderTransformCaptureEpoch{0};
     Nullable<SceneComponent*> _parent{nullptr};
+    uint32_t _childIndex{std::numeric_limits<uint32_t>::max()};
     vector<SceneComponent*> _children;  // non-owning, 所有权在 Actor::_ownedComponents
-
-    mutable Eigen::Matrix4f _worldTransform{Eigen::Matrix4f::Identity()};
 };
 
 template <>

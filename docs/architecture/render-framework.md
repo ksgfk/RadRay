@@ -77,24 +77,36 @@ WorldManager 在任何回调前移交本批 World owner、失效身份并清空�
 对外注册通知前建立，仅新增节点和边。已注册节点改用 RequestReparent / RequestSetRootComponent，S1 前查询仍见旧关系。
 KeepLocal 保留局部 TRS；KeepWorld 要求新局部矩阵可以精确表达为 TRS，自身/后代、跨 World、奇异矩阵和 shear
 在修改前拒绝，提交时重新验证。删除父组件会解除其他 Actor 的幸存 child，采用 KeepLocal，不误删别人的 owner。
-变换 setter 对完全相同的值短路；有变化时只记录本节点、递增 World 的变换版本，不立即遍历后代。
-World 在 `FinalizeWorldGT`（托管时由 manager 统一驱动）处理完生命周期后，合并被祖先覆盖的脏根，
-迭代遍历受影响子树，标记渲染变化并派发 `OnTransformChanged`。同一批的重叠子树只通知一次；无 renderer
-的 World 同样派发。draft 的通知仍立即执行。已注册组件的业务代码不能再依赖 setter 内同步通知。
+变换 setter 对完全相同的值短路；有变化时立即更新本地 TRS、递增 World 的变换版本，并把直接修改的
+节点加入局部更新队列。同一节点通过队列下标去重，写入不检查祖先、不访问后代、不合成矩阵。
+World 不保留 local-to-world 矩阵，也不缓存查询结果；`GetWorldTransform` 与 `GetWorldMatrix` 均返回按值
+快照，每次从当前节点向根迭代合成局部 TRS 并相乘。查询为 O(深度)，额外空间 O(1)，不要求先 Collect
+或派发通知；解除层级后的查询立即看到新关系。该接口适合查询较少的业务。
 
-本 World 的通知批在回调前摘下；回调再次修改产生下一批通知。Collect 前还会传播这些新变化的渲染 dirty，
-不再派发业务通知，因此本次封包仍捕获最终值。仅调用 `CollectRenderUpdates` 也能捕获最新变换，但业务通知
-等下次 Finalize。回调中新增 child 不加入当前节点已冻结的 child 范围；Pending 来源跳过通知和捕获。
-World 记录已传播到渲染的变换版本；随后补发业务通知不会重复发送同一变换增量。
+业务通知独立于渲染局部更新队列。`FinalizeWorldGT` 在处理完生命周期后，从本批直接修改的候选节点中
+排除有存活脏祖先的节点，再迭代遍历受影响子树派发 `OnTransformChanged`。候选过滤可能沿父链检查，
+成本移到通知阶段；通知必须访问实际受影响的后代。没有 renderer 的 World 同样派发，draft 仍立即通知。
+通知批在回调前摘下；回调再次修改产生下一批通知，但本帧 Collect 读取修改后的最终局部值。
+重挂接和解除层级在改变 parent 前移除原队列登记，再重新登记该节点。World 的 child 数组使用下标和
+交换末项实现 O(1) 摘链，不保证 child 枚举顺序；父链防环校验和业务通知的遍历成本仍然存在。
 
-`GetWorldMatrix` 始终等价于当场沿父链求值：World 版本变化后迭代检查祖先，只有局部值变脏或父矩阵版本
-更新才重新 compose；同一版本的重复查询直接返回缓存。父链工作区由 World 复用，栈消耗与深度无关，
-不递归调用矩阵求值。draft 使用局部工作区。解除层级同样使查询立即看到新关系，不要求先派发通知。
+连接中的 World 为 SceneComponent 建立独立 TransformId，包含普通空间节点和中间祖先。
+Collect 仅读取直接变化节点的最终局部 TRS 与 parent，SceneWriter 合并同次 Seal 前的重复更新。
+直接更新数达到 16384 时先按组件地址排序，以改善大批量读取局部值的访问顺序，额外成本为 O(k log k)。
+内置 StaticMesh/Light 绑定 TransformId；祖先移动不需要捕获后代渲染组件。自定义 RenderComponent 默认保留
+显式世界矩阵捕获，可通过 `UsesSceneTransform` 选择层级绑定；仅存在这类兼容来源时，World 才维护渲染脏根
+并遍历捕获其最终值。捕获 epoch 保证重叠子树只输出一次，独立 Collect 不提前派发业务通知。
+
+Pending 来源不执行通知或业务捕获。Scene 的层级依赖保留到实际注销，期间已排队的局部值继续同步，
+保证跨 Actor 的存活子节点与即时世界坐标查询一致。注销父节点后，幸存子节点按 KeepLocal 脱离。
+新建后立即 Pending 的来源不会发布空 primitive，但可能先发布没有 Shape 的 Transform 节点，下一次 S1
+真正注销时删除。未 Seal 的 Transform 创建和删除可以相消。
+
 World 指针在组件加入 World 时缓存；draft Actor 加入时在任何注册回调前给其全部组件写入上下文，
 因此子组件先注册时也能观察到尚未注册的祖先变化。
 
 普通 SceneComponent 只负责空间层级与变换。需要渲染连接的组件继承 `RenderComponent`；Primitive 和 Light
-均继承它。框架的 final 通知入口负责渲染 Transform dirty，派生 `OnTransformChanged` 只处理业务副作用，
+均继承它。框架的 final 变换捕获入口合并 Transform 与其他渲染 dirty，派生 `OnTransformChanged` 只处理业务副作用，
 不需要调基类。公开 MarkRender* 仍先 CheckCanModify；内部标记只更新 bridge 登记表。
 `World::CheckCanModify` 的拥有线程检查只在 Debug 执行；Release 仍拒绝 Collect 期间的修改。
 
@@ -112,30 +124,34 @@ WorldRenderBridge 的 Disconnected / Connecting / Connected / Disconnecting 状�
 |---|---|
 | WorldManager / World | GT 游戏对象、身份、统一调度、生命周期请求 |
 | WorldRenderBridge | GT 内部适配器、渲染源登记与 dirty 队列的唯一管理者 |
-| SceneWriter | Scene 唯一 GT producer、ShapeId/LightId、几何增量与光源全量捕获、资产 owner |
+| SceneWriter | Scene 唯一 GT producer、Shape/Light/Transform 身份、局部变换与几何增量、光源参数快照、资产 owner |
 | RenderScene | 单份 RT 数据、Apply、只读借用与 CPU reader lease |
 | RenderSystem | GT/RT 分离的登记表、flight 交付协议、shader/render-pass 服务 |
 
 RenderComponent 分类 State/Transform/DynamicData dirty；同来源只排队一次。bridge 维护来源上的登记下标、
 dirty 队列下标与 dirty 位，连接身份从 World 查询；普通 SceneComponent 不保存这些字段。
-登记表和 dirty 队列直接存来源指针，收集不再间接查登记表。dirty 位为空同时表示未排队，Collect 只清空 dirty 位，
-不另写排队标志或无效下标；删除时交换末项并修复移动来源的下标。断开连接只遍历已登记来源。Collect 跳过 Pending，且禁止游戏修改、
+登记表和 dirty 队列直接存来源指针。Collect 先提交局部变换，再处理兼容来源的世界矩阵捕获与其他
+State/DynamicData/显式 Transform dirty。内置 StaticMesh 的 State 只更新几何绑定及 TransformId，
+空间变化无需重新输出 MeshState。Collect 外 dirty 位为空表示未排队；删除时交换末项并修复下标。
+断开连接遍历已登记的来源和 Transform。Collect 跳过 Pending 来源的业务捕获，且禁止游戏修改、
 生命周期请求、重入封包和所属 Application 的 asset/scheduler Pump。派生 setter 必须先 CheckCanModify。
 World/WorldManager 负责游戏侧 Collect 禁令，RenderSystem 负责封包及 Application 调度禁令；bridge 不另存同一阶段标志。
 PrimitiveComponent 的 final 入口负责 ShapeId 创建/注销，CollectPrimitiveUpdates 接收 ShapeCapture，
 只输出自身最终的 mesh 状态或 transform（至多一条，也可以不输出以保留 bare shape）。
 一般 RenderComponent 接收 SceneCapture，可以登记和捕获多个 ShapeId/LightId；一个身份在同轮 Collect 中
 由其来源捕获一次。捕获接口不提供创建/删除身份或修改 World 的操作。
-LightComponent 捕获类型化光源值，使用独立的 LightId。两种 ID 是不可隐式互转的强类型，均包含
-Index/Generation，只在所属 SceneId 内有效；独立身份池允许 Shape 和 Light 使用相同数值的槽位与代次。
+LightComponent 捕获类型化光源值，使用独立的 LightId。ShapeId、LightId、TransformId 是不可隐式互转的强类型，
+均包含 Index/Generation，只在所属 SceneId 内有效；三种独立身份池允许使用相同数值的槽位与代次。
 
 独立工具由 CreateSceneGT/GetSceneWriterGT 获得 writer，遵守同样的绑定和交付契约。
 World 独占的 writer 不向外提供；独立 writer 在 DestroySceneGT 后不可继续使用。
 Shape 在 Seal 前的 Create/Remove 可以相消，已 Seal 的创建只能由后续 Remove 有序退出。
-State 覆盖最终 transform，transform-only 更新不重建 mesh。Shape 更新数组复用容量，工作与唯一 dirty 源有关。
+独立 writer 的 State 覆盖最终世界矩阵，transform-only 更新不重建 mesh。绑定层级的 State 与局部变换独立合并。
+更新数组复用容量，工作与唯一 dirty 源有关。
 SceneWriter 直接构建本批 SceneUpdateBatch。存活 Shape 只保存资产使用身份、是否已发布与是否有 mesh 状态；
 不常驻矩阵、mesh 描述或更新下标。World 通过 SceneCapture/ShapeCapture 将去重后的最终值直接追加到变化包；
-常规 Flush 只标记创建已发送，再把变化包与 flight 的空包交换，不遍历 mesh/transform 记录重置下标或重组矩阵。
+常规 Shape Flush 只标记创建已发送，不遍历 mesh/显式 transform 记录重组矩阵。Transform 状态另外保存 parent、
+创建/局部/重挂接记录的下标，Flush 清理实际发送记录的下标，再把变化包与 flight 的空包交换。
 
 独立 writer 的反复编辑使用单独的 ShapeEdit 槽，保存创建/更新下标与更新种类。SetTransform 覆盖已有记录；
 SetStaticMesh 吸收同一身份的 Transform，取消时交换末项并修复下标。World 在同次 Seal 前再次 Collect、
@@ -145,12 +161,27 @@ World 的下一批恢复直接提取。编辑槽按 ShapeId.Index 索引，代�
 不会发布默认几何。显式空 mesh 也满足后续 SetTransform 的前置条件。
 Shape 的可选资产使用身份对应 RenderAssetLifetime 中一次计数；是否持有使用与 AssetId 是否为空无关。
 
-World 的变换缓存与 RT 的矩阵列均使用 Eigen::Matrix4f，局部 TRS 合成与父子相乘直接生成 4×4 矩阵。
-GetWorldTransform 返回 GT 缓存的只读借用，变换或层级修改后的查询可能更新其内容；GetWorldMatrix 仍返回按值快照。
-变化包使用 core 的 AffineTransform：列主序 3×4、12 个 float，隐含齐次行 (0,0,0,1)，保留负缩放和仿射 shear。
-组件捕获与独立 writer 在输入边界压缩一次，RT Apply 展开一次到矩阵列并计算 bounds，游戏侧查询不需要展开。
-单条 ShapeTransformUpdate 为 56 B，不受 Eigen SIMD 对齐配置影响；AffineTransform 只负责传输，不实现 TRS 合成或矩阵运算。
-非仿射输入在转换时、非有限渲染变换在 RT Apply 时做 Debug 校验。
+内置层级变换协议为 `LocalTransformUpdate`：8 B TransformId + 40 B 紧凑 TRS，共 48 B。
+创建记录另带 Parent，共 56 B；重挂接只增发 16 B 的身份对；删除为 8 B 身份。TRS 的 quaternion 顺序为
+x/y/z/w，不受 Eigen SIMD 对齐配置影响。新节点在首次 Seal 前的局部编辑直接并入创建记录。
+
+RT 的 `SceneTransform` 用整数行索引维护 parent/first-child/next/previous，并分列保存局部 Matrix4f、
+世界 Matrix4f 与状态。局部 TRS 只在收到修改时 compose，祖先移动重算后代时复用局部矩阵。
+物理行在存活期间不移动，删除行由 free-list 复用；重挂接只改整数链接，无须重排整片子树。
+连续矩阵列有利于相邻节点访问，但频繁复用后不保证子树连续，也没有后台重排或分页压缩。
+
+Apply 先应用本批全部局部值与拓扑，再计算变换。修改节点按 epoch 去重；当 seed 至少为 256 且占行池
+至少 1/8 时，顺序扫描行池重建 seed 顺序，扫描行数有 8k 的上界，避免密集随机访问；稀疏更新不扫描行池。
+单个 seed 或所有 seed 均无父节点时
+直接遍历。其他情况先按 epoch 标记受影响子树，从 seed 中筛出没有受影响父节点的根，再按父先子后顺序计算。
+每个受影响世界矩阵只乘一次，一般路径会额外访问一遍受影响节点的整数元数据；不会扫描全部 Scene。
+设直接变化节点为 k，最终受影响节点为 a，稳态标记与求值为 O(k+a)，重挂接本身 O(1)，删除还需访问直接子节点。
+临时数组复用容量；空间随节点数及历史容量峰值增长，当前实现不主动收缩。
+
+兼容捕获与独立 writer 仍可发送 `ShapeTransformUpdate`：8 B ShapeId + 列主序 3×4 AffineTransform，共 56 B，
+隐含齐次行 (0,0,0,1)，保留负缩放和仿射 shear。RT 为这类 Shape 分配无父节点的变换行。
+绑定 TransformId 的 Shape 不接受显式世界矩阵更新，必须修改对应局部节点。非仿射输入在压缩时、
+非有限渲染变换在更新 bounds 时做 Debug 校验。
 
 SceneWriter 分别维护 Shape 状态、Light 身份池与 LightSceneData 最终值；Light 槽只存当前表种类和行号，
 Light 没有逐项 dirty/删除队列。CreateLight 只保留 GT 身份，首次 SetLight 后才进入光源集合。
@@ -159,7 +190,12 @@ Flush 按此标志把完整的四类光源表按值封存到 flight，交换空�
 未改变的光源也包含在内，但不重新调用其组件捕获。
 未捕获便删除的组件不会发布默认光源；独立 writer 在同次封包前 SetLight 再 RemoveLight，允许交付最终空集合。
 SceneUpdateBatch 的 LightsChanged=false 表示保留 RT 光源，true 表示全量替换，空列表明确清除所有光源。
-无 dirty 时不遍历或复制光源；已 Seal 的列表不受后续修改、删除、身份复用影响。
+无参数 dirty 时不复制光源快照。内置光源的 Common 带 TransformId，GT/flight 中的位置与方向为占位值，
+RT Apply 后的类型化表提供最终世界位置与方向。祖先移动只发送局部变换，无需重新捕获光源参数。
+当前 RT 在参数替换或任意变换更新后扫描光源表。参数替换时，同一行的身份及 Transform 不变、矩阵未更新的
+光源保留 RT 姿态；其他行重新求值。纯变换帧只为实际受影响的光源求位置与旋转，没有逐节点光源链表。
+自定义光源可覆盖 UsesSceneTransform 返回 false，继续由 GetLightPosition/GetLightDirection 捕获显式世界姿态。
+已 Seal 的列表不受后续修改、删除、身份复用影响。
 
 StaticMesh 在构造时验证 CPU mesh/bounds 并补全默认 sections 一次，之后数据不可变。
 StaticMesh 拥有一份 StaticMeshRenderData，集中存放 GPU mesh、sections 与局部 bounds。
@@ -168,10 +204,13 @@ StaticMeshDescription 只保存 AssetId 和指向该渲染数据的只读借用�
 Loading、失败或无效 mesh 产生空几何，空几何的世界 bounds 退化到变换原点。
 组件 Ready 通知检查 Live、注册、SceneId、ShapeId 和 mesh 请求身份；改绑/注销停止旧等待而不取消共享加载。
 
-RenderScene 按 Shape Remove → Create → Mesh → Transform → Light 全量替换应用。ShapeSlot 只保存身份
-与稠密下标；StaticMeshTable 拥有身份、几何绑定、Matrix4f、bounds 四列，bounds 包含 ReverseCulling。
-所有列按同一行对应，删除时一起交换末项并修复 ShapeSlot；实例不逐个堆分配。GetStaticMesh 提供身份查找，
-GetStaticMeshColumns 提供只读连续列，剔除可以只读 Bounds，批量绘制不必经过 ShapeId 再查槽位。
+RenderScene 按 Shape 删除 → Transform 删除/创建/改父/局部值 → Shape 创建/绑定 → 显式世界矩阵
+→ 层级求值/bounds → 光源参数与姿态的顺序应用。ShapeSlot 保存身份、稠密 mesh 行号、Transform 行号
+以及同一 Transform 上的 Shape 双向链。受影响 Transform 只更新其绑定 Shape 的 bounds；纯几何改绑也会刷新 bounds。
+StaticMeshTable 拥有身份、几何绑定、TransformRows、bounds 四个稠密列，bounds 包含 ReverseCulling。
+删除一起交换末项并修复 ShapeSlot；实例不逐个堆分配。Matrix4f 只由 SceneTransform 持有，多个 Shape 可以绑定同一节点。
+`GetStaticMeshColumns().Transforms` 是整个变换行池，必须以 `TransformRows[meshRow]` 索引，不能用 meshRow
+直接索引，也不保证长度等于 Shape 数；`Columns::Get` 已做此映射。剔除仍可只顺序读取稠密 Bounds 列。
 GetStaticMeshes 保留身份枚举，包含资产未就绪的已登记 mesh。行号不表示身份，所有列与单项借用在下次 Apply
 或销毁时失效，跨线程 CPU 读取需要相同的 reader lease。CPU 列布局不等同于 GPU buffer packing。
 LightSceneData 直接拥有四种类型的 LightTable，GT 最终值、flight 快照与 RT 数据均使用同一紧凑布局。
