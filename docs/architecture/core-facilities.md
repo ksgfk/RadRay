@@ -299,7 +299,7 @@ template <> struct JsonDeserializer<T> {
   `SetValue` 是旧接口。
 - **`text_encoding.h`** — UTF-8 ⇄ wchar。Windows 走 `MultiByteToWideChar`，
   其他平台走 `mbsrtowcs`（依赖 locale，行为可能不一致，有 TODO）。
-- **`image_data.h`** — `ImageData` + PNG/JPEG 读写，底层 **libpng / libjpeg**（不是 stb），
+- **`image_data.h`** — `ImageData` + PNG/JPEG 读写，底层 **libpng / IJG libjpeg**（不是 stb），
   由 `RADRAY_ENABLE_LIBPNG` / `RADRAY_ENABLE_LIBJPEG` 门控。另有
   `CompareImageRGBA8` / `ImageDiffRGBA8` 供测试对比。
 - **`binary_io.h`** — 固定小端。reader 越界返回 false 且不消费输入。
@@ -308,6 +308,9 @@ template <> struct JsonDeserializer<T> {
 - **`guid.h`** — `NewGuid` / `Parse` / `ToString`，有 `format_as` 与 `std::hash` 特化。
 
 ## 测试
+
+除 `test_inline_vector.cpp` 外，下表源文件链进 `test_radray_core`。该文件替换全局 `operator new`，单独成 exe。
+`ctest -R` 使用套件名。
 
 | 文件 | 套件名 |
 |---|---|

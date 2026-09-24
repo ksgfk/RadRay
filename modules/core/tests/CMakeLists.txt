@@ -1,21 +1,29 @@
-radray_add_test(test_buddy_alloc SOURCES test_buddy_alloc.cpp LINK_LIBS radraycore)
-radray_add_test(test_basic_math SOURCES test_basic_math.cpp LINK_LIBS radraycore)
-radray_add_test(test_first_fit_alloc SOURCES test_first_fit_alloc.cpp LINK_LIBS radraycore)
-radray_add_test(test_wavefront_obj SOURCES test_wavefront_obj.cpp LINK_LIBS radraycore)
-radray_add_test(test_str_convert SOURCES test_str_convert.cpp LINK_LIBS radraycore)
+# test_inline_vector.cpp 替换全局 operator new/delete，不能和其它用例共享进程映像。
+set(radray_core_test_sources
+    test_buddy_alloc.cpp
+    test_basic_math.cpp
+    test_first_fit_alloc.cpp
+    test_wavefront_obj.cpp
+    test_str_convert.cpp
+    test_nullable.cpp
+    test_intrusive_ptr.cpp
+    test_enum_flags.cpp
+    test_sparse_set.cpp
+    test_manual_coroutine_scheduler.cpp
+    test_structured_buffer.cpp
+    test_pod_hash.cpp
+    test_runtime_type.cpp
+    test_binary_io.cpp
+    test_json.cpp
+    test_json_serializer.cpp
+    test_json_deserializer.cpp)
 if (RADRAY_ENABLE_LIBPNG)
-    radray_add_test(test_img_rw SOURCES test_img_rw.cpp LINK_LIBS radraycore DISCOVER_ARGS PROPERTIES ENVIRONMENT "RADRAY_ASSETS_DIR=${CMAKE_SOURCE_DIR}/assets")
+    list(APPEND radray_core_test_sources test_img_rw.cpp)
 endif()
-radray_add_test(test_nullable SOURCES test_nullable.cpp LINK_LIBS radraycore)
+
+radray_add_test(test_radray_core
+    SOURCES ${radray_core_test_sources}
+    LINK_LIBS radraycore
+    DISCOVER_ARGS PROPERTIES ENVIRONMENT "RADRAY_ASSETS_DIR=${CMAKE_SOURCE_DIR}/assets")
+
 radray_add_test(test_inline_vector SOURCES test_inline_vector.cpp LINK_LIBS radraycore)
-radray_add_test(test_intrusive_ptr SOURCES test_intrusive_ptr.cpp LINK_LIBS radraycore)
-radray_add_test(test_enum_flags SOURCES test_enum_flags.cpp LINK_LIBS radraycore)
-radray_add_test(test_sparse_set SOURCES test_sparse_set.cpp LINK_LIBS radraycore)
-radray_add_test(test_manual_coroutine_scheduler SOURCES test_manual_coroutine_scheduler.cpp LINK_LIBS radraycore)
-radray_add_test(test_structured_buffer SOURCES test_structured_buffer.cpp LINK_LIBS radraycore)
-radray_add_test(test_pod_hash SOURCES test_pod_hash.cpp LINK_LIBS radraycore)
-radray_add_test(test_runtime_type SOURCES test_runtime_type.cpp LINK_LIBS radraycore)
-radray_add_test(test_binary_io SOURCES test_binary_io.cpp LINK_LIBS radraycore)
-radray_add_test(test_json SOURCES test_json.cpp LINK_LIBS radraycore)
-radray_add_test(test_json_serializer SOURCES test_json_serializer.cpp LINK_LIBS radraycore)
-radray_add_test(test_json_deserializer SOURCES test_json_deserializer.cpp LINK_LIBS radraycore)

@@ -1,6 +1,6 @@
 > - 适用: 恢复依赖、配置与构建 RadRay、运行测试或生成编译数据库
 > - 权威: 本文说明仓库构建操作；选项与预设以锚点中的 CMake 文件为准
-> - 锚点: `CMakeLists.txt`, `CMakePresets.json`, `cmake/Utility.cmake`, `project_manifest.json`, `tools/fetch_third_party.py`, `tools/fetch_sdks.py`, `tools/win_gen_compile_commands.py`, `modules/*/tests/CMakeLists.txt`
+> - 锚点: `CMakeLists.txt`, `CMakePresets.json`, `cmake/Utility.cmake`, `cmake/libjpeg.cmake`, `project_manifest.json`, `tools/fetch_third_party.py`, `tools/fetch_sdks.py`, `tools/win_gen_compile_commands.py`, `modules/*/tests/CMakeLists.txt`
 
 # 构建与测试
 
@@ -18,7 +18,8 @@ cmake --build build_debug --config Debug --parallel 24
 ```
 
 恢复脚本读取 `project_manifest.json`。第三方源码进入 `third_party/`，RadRay DXC package
-进入 `SDKs/radray_dxc/extracted`；不手改这些目录。shader compiler 开启时需要匹配的 fork
+进入 `SDKs/radray_dxc/extracted`；不手改这些目录。IJG libjpeg 由 `cmake/libjpeg.cmake`
+在本工程内编译。shader compiler 开启时需要匹配的 fork
 package，stock DXC 不能替代。包的 ABI 与部署边界见 [Shader pipeline](../architecture/shader-pipeline.md)。
 
 `win-x64-debug` / `win-x64-release` 使用 Ninja，分别输出到 `build_debug` / `build_release`。
@@ -44,7 +45,7 @@ cmake --build build_clangcl --config Debug --parallel 24
 | `_ITERATOR_DEBUG_LEVEL=1`（仅 MSVC） | 关闭 STL 迭代器 owner 追踪与加锁 | 越界、失效迭代器解引用 |
 
 `_ITERATOR_DEBUG_LEVEL` 影响 STL 对象布局，必须在同一二进制的所有 C++ TU 一致，所以在此全局设置，
-第三方库随工程编译时自动继承；预编译的 DXC package 与 libjpeg-turbo 是 C 接口，不受影响。
+第三方库随工程编译时自动继承；预编译的 DXC package 不经本工程编译，不受影响。
 不在单个 target 上改写它。`RelWithDebInfo`/`MinSizeRel` 不受此配置影响。
 
 ## 常用配置边界
@@ -164,37 +165,39 @@ GPU 时间（毫秒），不是当前 GT 帧的即时耗时；关闭 GPU profile
 先完成构建再运行 CTest，不并发执行两者。`-R` 匹配注册用例名中的 gtest suite，
 不是 CMake target；以下是常用目标与 suite 的对应关系，可能还包含同一目标内的其他 suite：
 
-`cmake --build build_release --config Release --target radray_runtime_tests --parallel 4`
-构建当前配置启用的全部 runtime 测试可执行文件，共享依赖只调度一次。完成后用
-`ctest --test-dir build_release/modules/runtime/tests -C Release --output-on-failure` 执行该目录的完整回归。
+`cmake --build build_release --config Release --target test_radray_runtime --parallel 4`
+构建 runtime 测试可执行文件。同一模块的 GTest 源文件链进一个 exe：`test_radray_core`、
+`test_radray_render`、`test_radray_runtime`、`test_radray_shader_compiler`。`test_inline_vector`
+替换全局 `operator new`，单独成 exe。`radray_runtime_tests` 只依赖 `test_radray_runtime`。
+完成后用 `ctest --test-dir build_release/modules/runtime/tests -C Release --output-on-failure`
+执行该目录的完整回归。CTest 仍是每个 `TEST()` 一个进程；直接运行合并后的 exe 会在同一进程跑该模块全部用例。
 
-| CMake target | `ctest -R` 示例 |
+| 源文件 | `ctest -R` 示例 |
 |---|---|
-| `test_runtime_type` | `RuntimeTypeIdTest` |
-| `test_manual_coroutine_scheduler` | `ManualCoroutineScheduler`（冻结派发、取消其他等待者、跨等待表截止与延迟取消） |
-| `test_asset_slot` | `AssetSlotTest` |
-| `test_frame_upload` | `FrameUploadTest` |
-| `test_application_systems` | `ApplicationSystems`（零系统、单系统、CPU 帧循环的完成、等待与延迟、非法 `FlightDataCount`） |
-| `test_gpu_system` | `GpuSystemTest`, `GpuSystemDeathTest` |
-| `test_scene_delivery` | `SceneDelivery`, `SceneDeliveryRunner`, `MultiWorldSceneRunner`（CPU 场景帧循环与双后端 GPU runner，F=1/2/3/8） |
-| `test_scene_delivery_state` | `SceneDeliveryState`（直接通过 RenderSystem 验证发布次序、serial、停止排空和随机槽位复用） |
-| `test_world_scenes` | `WorldManager`, `WorldScenes`（多 World 所有权、暂停、独立场景写入、连接与退休） |
-| `test_scene_updates` | `SceneUpdates`（组件标脏合并、生命周期、代次与收集约束；纯 CPU） |
-| `test_scene_assets` | `SceneAssets`（类型无关的资产常驻/退休、Ready 通知、共享等待取消与 GT 释放；纯 CPU） |
-| `test_static_mesh_scene` | `StaticMeshScene`（CPU mesh 描述、变换/bounds、替换/删除与持久描述；无 GPU 资源） |
-| `test_scene_sync` | `SceneSyncCorrectness`（World → RenderScene 正确性） |
-| `test_frame_scenarios` | `FrameScenarios`（Tick 驱动的巡游、交火、流式、群体、暂停、过场灯光与编辑器拖拽；F=2） |
-| `test_multi_window` | `RuntimeMultiWindow`（三窗口交换链、有序提交与生命周期） |
-| `test_flight_completion` | `FlightCompletionTest` |
-| `test_asset_database` | `AssetDatabaseTest` |
-| `test_component_rtti` | `ComponentRttiTest` |
-| `test_render_pass_registry` | `RenderPassCacheKeyTest`, `FramebufferCacheKeyTest`, `RenderPassRegistryTest` |
-| `test_device_capabilities` | `TextureDescriptorValidation`, `DeviceCapabilitiesTest` |
-| `test_gpu_test_fixture` | `GpuTestFixture`, `GpuValidationProbe` |
-| `test_spot_light` | `SpotLight` |
+| `test_runtime_type.cpp` | `RuntimeTypeIdTest` |
+| `test_manual_coroutine_scheduler.cpp` | `ManualCoroutineScheduler`（冻结派发、取消其他等待者、跨等待表截止与延迟取消） |
+| `test_asset_slot.cpp` | `AssetSlotTest` |
+| `test_frame_upload.cpp` | `FrameUploadTest` |
+| `test_application_systems.cpp` | `ApplicationSystems`（零系统、单系统、CPU 帧循环的完成、等待与延迟、非法 `FlightDataCount`） |
+| `test_gpu_system.cpp` | `GpuSystemTest`, `GpuSystemDeathTest` |
+| `test_scene_delivery.cpp` | `SceneDelivery`, `SceneDeliveryRunner`, `MultiWorldSceneRunner`（CPU 场景帧循环与双后端 GPU runner，F=1/2/3/8） |
+| `test_scene_delivery_state.cpp` | `SceneDeliveryState`（直接通过 RenderSystem 验证发布次序、serial、停止排空和随机槽位复用） |
+| `test_world_scenes.cpp` | `WorldManager`, `WorldScenes`（多 World 所有权、暂停、独立场景写入、连接与退休） |
+| `test_scene_updates.cpp` | `SceneUpdates`（组件标脏合并、生命周期、代次与收集约束；纯 CPU） |
+| `test_scene_assets.cpp` | `SceneAssets`（类型无关的资产常驻/退休、Ready 通知、共享等待取消与 GT 释放；纯 CPU） |
+| `test_static_mesh_scene.cpp` | `StaticMeshScene`（CPU mesh 描述、变换/bounds、替换/删除与持久描述；无 GPU 资源） |
+| `test_scene_sync.cpp` | `SceneSyncCorrectness`（World → RenderScene 正确性） |
+| `test_frame_scenarios.cpp` | `FrameScenarios`（Tick 驱动的巡游、交火、流式、群体、暂停、过场灯光与编辑器拖拽；F=2） |
+| `test_multi_window.cpp` | `RuntimeMultiWindow`（三窗口交换链、有序提交与生命周期） |
+| `test_asset_database.cpp` | `AssetDatabaseTest` |
+| `test_component_rtti.cpp` | `ComponentRttiTest` |
+| `test_render_pass_registry.cpp` | `RenderPassCacheKeyTest`, `FramebufferCacheKeyTest`, `RenderPassRegistryTest` |
+| `test_device_capabilities.cpp` | `TextureDescriptorValidation`, `DeviceCapabilitiesTest` |
+| `test_gpu_test_fixture.cpp` | `GpuTestFixture`, `GpuValidationProbe` |
+| `test_spot_light.cpp` | `SpotLight` |
 
-D3D12 descriptor table 回归由 `test_radray_render_d3d12_layout` 的 `D3D12DeviceFixture`、
-`DescriptorDirtyRangesD3D12Test` 覆盖；启用 shader compiler 时，`test_radray_render_pso_smoke` 的
+D3D12 descriptor table 回归在 `test_radray_render` 中，由 `D3D12DeviceFixture`、
+`DescriptorDirtyRangesD3D12Test` 覆盖；启用 shader compiler 时，同一可执行文件的
 `RadRayRenderPsoSmoke.D3D12VisibilityTablesAndExplicitMirrorsDraw` 和
 `RadRayRenderPsoSmoke.D3D12DirtyArraysTextureAndSamplerDispatch` 检查真实 draw/dispatch 读回。
 `RadRayRenderPsoSmoke.VulkanImmediateDescriptorsAndDynamicOffsets` 检查 Vulkan Set 即时更新、数组部分更新、
@@ -213,20 +216,23 @@ build_release/_build/Release/bench_d3d12_descriptor.exe --benchmark_repetitions=
 Vertex/Pixel 各 32 元素、显式 Vertex/Pixel 两个目标各 64 元素。
 `D3D12Descriptor/Publish` 是每轮 Set 与 Flush 总耗时；`D3D12Descriptor/Allocation` 是创建并销毁
 一个 set 的耗时。性能基准关闭 D3D12 debug layer 与 GPU-based validation；正确性与验证层诊断由对应 GTest 负责。基准不提交 GPU 命令，不代表 draw/dispatch 或 GPU 执行时间。
-| `test_runtime_shader_jit` | `RadRayRuntimeShaderJit` |
-| `test_application` | `RuntimeFoundation`（双后端、单/双线程窗口与原生录制，旧槽位复用与后一帧 CPU 录制重叠） |
-| `test_radray_render_shader_artifact` | `RadRayRenderShaderArtifact` |
-| `test_radray_shader_contract` | `RadRayShaderContract` |
-| `test_radray_render_shader_layout` | `RadRayRenderShaderLayout` |
-| `test_radray_render_d3d12_layout` | `D3D12DeviceFixture` |
-| `test_radray_render_vulkan_layout` | `VulkanDeviceFixture` |
-| `test_radray_render_pso_smoke` | `RadRayRenderPsoSmoke` |
-| `test_radray_shader_compiler_client` | `RadRayShaderCompilerClient` |
-| `test_radray_dxc_metadata` | `RadRayDxcMetadata` |
-| `test_shaderlib_passes` | `RadRayShaderLibPass` |
+
+| 源文件 | `ctest -R` 示例 |
+|---|---|
+| `test_runtime_shader_jit.cpp` | `RadRayRuntimeShaderJit` |
+| `test_application.cpp` | `RuntimeFoundation`（双后端、单/双线程窗口与原生录制，旧槽位复用与后一帧 CPU 录制重叠） |
+| `test_radray_render_shader_artifact.cpp` | `RadRayRenderShaderArtifact` |
+| `test_radray_shader_contract.cpp` | `RadRayShaderContract` |
+| `test_radray_render_shader_layout.cpp` | `RadRayRenderShaderLayout` |
+| `test_radray_render_d3d12_layout.cpp` | `D3D12DeviceFixture` |
+| `test_radray_render_vulkan_layout.cpp` | `VulkanDeviceFixture` |
+| `test_radray_render_pso_smoke.cpp` | `RadRayRenderPsoSmoke` |
+| `test_radray_shader_compiler_client.cpp` | `RadRayShaderCompilerClient` |
+| `test_radray_dxc_metadata.cpp` | `RadRayDxcMetadata` |
+| `test_shaderlib_passes.cpp` | `RadRayShaderLibPass` |
 
 ```powershell
-cmake --build build_debug --config Debug --target test_asset_slot --parallel 24
+cmake --build build_debug --config Debug --target test_radray_runtime --parallel 24
 ctest --test-dir build_debug -C Debug -R AssetSlotTest --output-on-failure
 ```
 
@@ -256,7 +262,7 @@ semaphore，结合验证层中的原生对象名称定位偶发同步错误。
 
 ```powershell
 cmake -S . -B build_debug
-cmake --build build_debug --config Debug --target test_multi_window --parallel 4
+cmake --build build_debug --config Debug --target test_radray_runtime --parallel 4
 $env:RADRAY_TEST_REQUIRED_BACKENDS = "d3d12,vulkan"
 ctest --test-dir build_debug -C Debug -R RuntimeMultiWindow --output-on-failure
 ctest --test-dir build_debug -C Debug -R 'RuntimeMultiWindow|RuntimeVulkanSwapChain' --repeat until-fail:20 --output-on-failure
@@ -288,7 +294,7 @@ D3D12 多窗口四例与其余 Vulkan 单交换链、故障恢复和 image count
 诊断，不是运行时兼容逻辑，也不加入常规回归。
 
 上游明确修复版本或同步要求后，先用下方原生程序在对应校验层版本上验证默认路径，
-再取消上述五例的注释，重新构建 `test_multi_window` 以刷新 POST_BUILD discovery。
+再取消上述五例的注释，重新构建 `test_radray_runtime` 以刷新 POST_BUILD discovery。
 设置 `RADRAY_TEST_REQUIRED_BACKENDS=d3d12,vulkan`，在 Debug/Release 下分别执行上述
 `RuntimeMultiWindow|RuntimeVulkanSwapChain` 重复回归；不能以关闭验证或过滤该错误作为恢复条件。
 
@@ -340,13 +346,15 @@ CPU `vkWaitSemaphores` → 按提交顺序逐个 Present。每个绘制批次等
 涉及 RTTI、公共 C++ ABI 或跨静态库对象查询时，Debug 与 Release 都要分别完成全量构建，
 再运行各自配置的测试。其他改动选择相关 suite 验证，不复用旧会话的通过计数。
 
-`radray_add_test` 在链接后做 POST_BUILD discovery（`radray_gtest_discover_tests`），把每个
-`TEST()` 写成独立 CTest 用例；JSON 输出目录按 target 隔离，避免 CMake 4.4 同目录并行
-POST_BUILD 争用 `cmake_test_discovery_<hash>.json`。不要改回 `DISCOVERY_MODE PRE_TEST`：
-CMake 4.4 的 PRE_TEST 每次启动 CTest 都对全部测试 exe 跑 `--gtest_list_tests` 且不缓存，
-VSCode CMake 插件点一项也会先付这整笔发现时间。新增或改名 `TEST()` 后要重新链接对应
-target，CTest 不负责发现。修改注册逻辑时，比较各 exe 的 `--gtest_list_tests` 与 CTest
-列表及实际命令，不能仅凭 `ctest -N` 的总数判断正确性。注册写法见 [C++ 约定](cpp-conventions.md)。
+`radray_add_test` 调用 CMake 的 `gtest_discover_tests`（默认 `POST_BUILD`），在链接后把每个
+`TEST()` 写成独立 CTest 用例。`test_radray_runtime` 对需要 `RUN_SERIAL` 和 90 秒超时的 suite 再发现一次，
+用 `TEST_FILTER` 与其余用例分开。这要求 CMake 4.4.1 及以上：4.2 至 4.4.0 的 POST_BUILD 不传
+`TEST_TARGET`，同目录并行发现会争用 `cmake_test_discovery_e3b0c44298.json`。不要传
+`DISCOVERY_MODE PRE_TEST`：CMake 4.4 的 PRE_TEST 每次启动 CTest 都对全部测试 exe 跑
+`--gtest_list_tests` 且不缓存，VS Code CMake 插件点一项也会先付这整笔发现时间。新增或改名
+`TEST()` 后要重新链接对应 target，CTest 不负责发现。修改注册逻辑时，比较各 exe 的
+`--gtest_list_tests` 与 CTest 列表及实际命令，不能仅凭 `ctest -N` 的总数判断正确性。注册写法见
+[C++ 约定](cpp-conventions.md)。
 
 `tools/run_render_validation.py` 对已构建配置串行运行 CTest，保存每用例 gtest XML、CTest JUnit、日志
 和汇总 JSON。每份结果记录 SHA、未提交改动摘要、配置开关、OS/驱动以及 fixture 提供的 backend、
@@ -425,9 +433,9 @@ cmake -S . -B build_scene_sync_perf -G "Visual Studio 18 2026" -T ClangCL -A x64
   -DRADRAY_ENABLE_PROFILER=OFF -DRADRAY_BUILD_SHADER_COMPILER=OFF `
   -DRADRAY_ENABLE_D3D12=OFF -DRADRAY_ENABLE_VULKAN=OFF `
   -DRADRAY_BUILD_BENCHMARKS=ON -DRADRAY_ENABLE_ZLIB=OFF -DRADRAY_ENABLE_LIBJPEG=OFF
-cmake --build build_scene_sync_perf --config Debug --target test_scene_sync --parallel 4
+cmake --build build_scene_sync_perf --config Debug --target test_radray_runtime --parallel 4
 ctest --test-dir build_scene_sync_perf -C Debug -R '^SceneSyncCorrectness\.' --output-on-failure
-cmake --build build_scene_sync_perf --config Release --target test_scene_sync bench_scene_sync --parallel 4
+cmake --build build_scene_sync_perf --config Release --target test_radray_runtime bench_scene_sync --parallel 4
 build_scene_sync_perf/_build/Release/bench_scene_sync.exe --benchmark_list_tests=true
 python tools/run_scene_sync_benchmark.py --build-dir build_scene_sync_perf --output build_scene_sync_perf/results/native `
   --benchmark_filter='SceneSync/(shape_10000_dirty_100|chain_16_root)/' `

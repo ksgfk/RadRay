@@ -603,7 +603,7 @@ std::optional<ImageData> ImageData::LoadJPEG(std::istream& stream, JPEGLoadSetti
         jpeg_mem_src(
             &cinfo,
             reinterpret_cast<const unsigned char*>(encoded.data()),
-            static_cast<unsigned long>(encoded.size()));
+            encoded.size());
         jpeg_read_header(&cinfo, TRUE);
         cinfo.out_color_space = JCS_RGB;
         jpeg_start_decompress(&cinfo);

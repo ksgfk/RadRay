@@ -1,28 +1,23 @@
 # RenderPassCacheKey / FramebufferCacheKey 的纯 CPU 行为 (相等性、哈希、descriptor 回读),
 # 不需要 device。RenderPassRegistry 本身要真设备, 由 runtime 侧的集成测试覆盖。
-radray_add_test(test_render_pass_registry SOURCES test_render_pass_registry.cpp LINK_LIBS radrayrender)
-radray_add_test(test_pipeline_layout_cache SOURCES test_pipeline_layout_cache.cpp LINK_LIBS radrayrender)
-radray_add_test(test_device_capabilities SOURCES test_device_capabilities.cpp LINK_LIBS radrayrender)
-radray_add_test(test_gpu_test_fixture SOURCES test_gpu_test_fixture.cpp LINK_LIBS radrayrender)
-radray_add_test(test_radray_render_shader_artifact SOURCES test_radray_render_shader_artifact.cpp LINK_LIBS radrayrender)
-target_compile_definitions(test_radray_render_shader_artifact PRIVATE RADRAY_PROJECT_DIR="${CMAKE_SOURCE_DIR}")
-radray_add_test(test_radray_shader_contract SOURCES test_radray_shader_contract.cpp LINK_LIBS radraycore radrayshader)
-target_compile_definitions(test_radray_shader_contract PRIVATE RADRAY_PROJECT_DIR="${CMAKE_SOURCE_DIR}")
-# Target layout resolution is pure CPU work on decoded artifacts: no device, no native layout.
-radray_add_test(test_radray_render_shader_layout SOURCES test_radray_render_shader_layout.cpp LINK_LIBS radrayrender)
-target_compile_definitions(test_radray_render_shader_layout PRIVATE RADRAY_PROJECT_DIR="${CMAKE_SOURCE_DIR}")
+# D3D12 device loss 用 EXPECT_EXIT，RemoveDevice 发生在子进程，可以和其它 render 用例链在一起。
+set(radray_render_test_sources
+    test_render_pass_registry.cpp
+    test_pipeline_layout_cache.cpp
+    test_device_capabilities.cpp
+    test_gpu_test_fixture.cpp
+    test_radray_render_shader_artifact.cpp
+    test_radray_shader_contract.cpp
+    test_radray_render_shader_layout.cpp
+    test_radray_render_vulkan_layout.cpp
+    test_radray_render_d3d12_layout.cpp
+    test_d3d12_device_loss.cpp)
 
-# 需要真 Vulkan device: immutable sampler 与 empty set hole 只有在 native 创建接受之后才算成立。
-radray_add_test(test_radray_render_vulkan_layout SOURCES test_radray_render_vulkan_layout.cpp LINK_LIBS radrayrender)
-target_include_directories(test_radray_render_vulkan_layout PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
-
-target_compile_definitions(test_radray_render_vulkan_layout PRIVATE RADRAY_PROJECT_DIR="${CMAKE_SOURCE_DIR}")
-
-# 需要真 D3D12 device: explicit carrier、static sampler 与 root descriptor offset 只有在
-# CreateRootSignature 接受并真 dispatch 之后才算成立。
-radray_add_test(test_radray_render_d3d12_layout SOURCES test_radray_render_d3d12_layout.cpp LINK_LIBS radrayrender)
-target_include_directories(test_radray_render_d3d12_layout PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
-target_compile_definitions(test_radray_render_d3d12_layout PRIVATE RADRAY_PROJECT_DIR="${CMAKE_SOURCE_DIR}")
+radray_add_test(test_radray_render
+    SOURCES ${radray_render_test_sources}
+    LINK_LIBS radrayrender radrayshader)
+target_include_directories(test_radray_render PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../src")
+target_compile_definitions(test_radray_render PRIVATE RADRAY_PROJECT_DIR="${CMAKE_SOURCE_DIR}")
 
 if (RADRAY_BUILD_SHADER_COMPILER)
     add_executable(radray_shader_fixture_generator shader_fixture_generator.cpp)
@@ -32,9 +27,7 @@ if (RADRAY_BUILD_SHADER_COMPILER)
     radray_set_build_path(radray_shader_fixture_generator)
     radray_deploy_dxc_runtime(radray_shader_fixture_generator)
 
-    radray_add_test(test_radray_render_pso_smoke SOURCES test_radray_render_pso_smoke.cpp LINK_LIBS radrayrender)
-    target_link_libraries(test_radray_render_pso_smoke PRIVATE RadRayDXC::Headers)
-    radray_deploy_dxc_runtime(test_radray_render_pso_smoke)
+    target_sources(test_radray_render PRIVATE test_radray_render_pso_smoke.cpp)
+    target_link_libraries(test_radray_render PRIVATE RadRayDXC::Headers)
+    radray_deploy_dxc_runtime(test_radray_render)
 endif()
-
-radray_add_test(test_d3d12_device_loss SOURCES test_d3d12_device_loss.cpp LINK_LIBS radrayrender)

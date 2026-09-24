@@ -87,10 +87,10 @@
             "Tag": "v1.6.58"
         },
         {
-            "Name": "libjpeg-turbo",
+            "Name": "libjpeg",
             "Type": "git",
-            "Git": "https://github.com/libjpeg-turbo/libjpeg-turbo.git",
-            "Tag": "3.2.0"
+            "Git": "https://github.com/libjpeg-turbo/ijg.git",
+            "Tag": "jpeg-10"
         },
         {
             "Name": "cgltf",

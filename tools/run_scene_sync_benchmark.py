@@ -40,9 +40,9 @@ def main() -> int:
     output = args.output.resolve()
     suffix = ".exe" if os.name == "nt" else ""
     executable = build / "_build" / args.config / f"bench_scene_sync{suffix}"
-    correctness = build / "_build" / args.config / f"test_scene_sync{suffix}"
+    correctness = build / "_build" / args.config / f"test_radray_runtime{suffix}"
     if not executable.is_file() or not correctness.is_file():
-        parser.error("Build bench_scene_sync and test_scene_sync before running")
+        parser.error("Build bench_scene_sync and test_radray_runtime before running")
     if output.exists() and any(output.iterdir()):
         parser.error(f"Output directory must be empty: {output}")
     output.mkdir(parents=True, exist_ok=True)

@@ -11,7 +11,6 @@ if (APPLE)
 endif()
 
 include(cmake/Utility.cmake)
-include(ExternalProject)
 
 list(PREPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 
@@ -63,7 +62,7 @@ option(RADRAY_ENABLE_MIMALLOC "Enable mimalloc as allocator" ON)
 option(RADRAY_ENABLE_PROFILER "Build with the Tracy profiler client (on-demand; idle until a viewer connects)" ON)
 option(RADRAY_ENABLE_ZLIB "Enable zlib support" ON)
 cmake_dependent_option(RADRAY_ENABLE_LIBPNG "Enable libpng support" ON "RADRAY_ENABLE_ZLIB" OFF)
-option(RADRAY_ENABLE_LIBJPEG "Enable libjpeg-turbo support" ON)
+option(RADRAY_ENABLE_LIBJPEG "Enable IJG libjpeg support" ON)
 option(RADRAY_BUILD_WINDOW "Build the RadRay window" ON)
 option(RADRAY_BUILD_RENDER "Build the RadRay render" ON)
 cmake_dependent_option(RADRAY_BUILD_RUNTIME "Build the RadRay runtime" ON "RADRAY_BUILD_RENDER AND RADRAY_BUILD_WINDOW" OFF)
@@ -241,37 +240,7 @@ if (RADRAY_ENABLE_LIBPNG)
 endif()
 
 if (RADRAY_ENABLE_LIBJPEG)
-    set(RADRAY_LIBJPEG_INSTALL_DIR "${CMAKE_BINARY_DIR}/third_party/libjpeg-turbo-install")
-    set(RADRAY_LIBJPEG_BUILD_DIR "${CMAKE_BINARY_DIR}/third_party/libjpeg-turbo-build")
-    if (WIN32)
-        set(RADRAY_LIBJPEG_LIB "${RADRAY_LIBJPEG_INSTALL_DIR}/lib/jpeg-static.lib")
-    else()
-        set(RADRAY_LIBJPEG_LIB "${RADRAY_LIBJPEG_INSTALL_DIR}/lib/libjpeg.a")
-    endif()
-    ExternalProject_Add(radray_libjpeg_turbo_ep
-        SOURCE_DIR "${RADRAY_THIRDPARTY_ROOT}/libjpeg-turbo"
-        BINARY_DIR "${RADRAY_LIBJPEG_BUILD_DIR}"
-        INSTALL_DIR "${RADRAY_LIBJPEG_INSTALL_DIR}"
-        CMAKE_ARGS
-            "-DCMAKE_INSTALL_PREFIX=<INSTALL_DIR>"
-            "-DCMAKE_BUILD_TYPE=$<CONFIG>"
-            "-DWITH_CRT_DLL=ON"
-            "-DENABLE_SHARED=OFF"
-            "-DENABLE_STATIC=ON"
-            "-DWITH_JPEG8=ON"
-            "-DWITH_TURBOJPEG=OFF"
-            "-DWITH_TOOLS=OFF"
-            "-DWITH_TESTS=OFF"
-            "-DWITH_FUZZ=OFF"
-            "-DWITH_JAVA=OFF"
-            "-DWITH_DOCS=OFF"
-        BUILD_BYPRODUCTS "${RADRAY_LIBJPEG_LIB}")
-    file(MAKE_DIRECTORY "${RADRAY_LIBJPEG_INSTALL_DIR}/include")
-    add_library(jpeg-static STATIC IMPORTED GLOBAL)
-    add_dependencies(jpeg-static radray_libjpeg_turbo_ep)
-    set_target_properties(jpeg-static PROPERTIES
-        IMPORTED_LOCATION "${RADRAY_LIBJPEG_LIB}"
-        INTERFACE_INCLUDE_DIRECTORIES "${RADRAY_LIBJPEG_INSTALL_DIR}/include")
+    include(libjpeg)
 endif()
 
 if (RADRAY_ENABLE_VULKAN)

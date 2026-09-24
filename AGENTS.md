@@ -37,7 +37,7 @@ C++20 实时渲染器，D3D12 + Vulkan 后端。
 - HLSL include 以 `shaderlib/` 为根，使用 `<core/math.hlsli>` 形式；当前不使用文件相对的双引号 include。
 - `.hlsl` 是 entry source，`.hlsli` 是带 include guard 的库；entry 通过标准 `[shader("...")]` 声明。
 - `shaderlib/core/platform.hlsli` 是唯一 target gate，`VK_BINDING(binding, set)` 直接使用 binding 数字；不新增平行 metadata 或编号包装。
-- 测试放在 `modules/<module>/tests/`，使用 `radray_add_test` 或 `radray_add_radray_gtest_case` 注册；discovery 走构建期 POST_BUILD 且每目标独立 JSON 目录，不要改回 `PRE_TEST`。
+- 测试放在 `modules/<module>/tests/`，使用 `radray_add_test` 或 `radray_add_radray_gtest_case` 注册。同一模块的 GTest 源文件链进一个可执行文件；只有必须独占进程映像的测试（例如替换全局 `operator new`）单独成 exe。discovery 使用 `gtest_discover_tests` 的默认 POST_BUILD，需要 CMake >= 4.4.1，不要改成 `PRE_TEST`。
 - 正确性测试使用 Google Test（GTest）；性能测试使用 Google Benchmark，不用 `TEST` / `TEST_F` 承载基准测量。
 - 禁止为了测试在生产代码中添加仅供测试使用的字段，包括统计计数、事件轨迹和观测状态；这些数据由测试 fixture/probe 自行持有和记录。
 - `ctest -R` 匹配测试名中的 gtest suite，不是 CMake target。构建完成后再运行测试，不并发执行构建与测试。

@@ -119,18 +119,23 @@ RAII 包装类的后缀是 `Scope` / `Scoped` / `Guard`，**没有 `*RAII`**：`
 
 ## 测试
 
-测试源码放 `modules/<module>/tests/test_<topic>.cpp`，目标名 = 文件名。
+测试源码放 `modules/<module>/tests/test_<topic>.cpp`。同一模块的这些源文件链进一个可执行文件
+（`test_radray_core`、`test_radray_render`、`test_radray_runtime`、`test_radray_shader_compiler`），
+`gtest_main` 和被测库只链接一次。CTest 仍按每个 `TEST()` 启动进程。只有不能和其它用例共享进程映像的测试另开 exe：
+目前是 `test_inline_vector`，它替换全局 `operator new` / `operator delete`。`EXPECT_DEATH` / `EXPECT_EXIT`
+已经在子进程里跑断言，不因此再拆可执行文件。
 
 测试观测遵守 [AGENTS.md](../../AGENTS.md) 的字段限制，优先通过生命周期回调、实际输出和对象状态验证，
 不增加专用计数接口；运行时性能插桩沿用 `RADRAY_PROFILE_*`。
 
 ```cmake
-radray_add_test(test_foo SOURCES test_foo.cpp LINK_LIBS radrayruntime)
+radray_add_test(test_radray_runtime SOURCES test_foo.cpp test_bar.cpp LINK_LIBS radrayruntime)
 ```
 
-`radray_add_test` 建独立可执行目标，链接 `GTest::gtest_main`，并用
-`radray_gtest_discover_tests` 在链接后把每个 `TEST()` 注册成 CTest 用例。不要给它传
-`DISCOVERY_MODE PRE_TEST`，原因见[构建与测试](build-test.md)。
+`radray_add_test` 链接 `GTest::gtest_main`，并用 CMake `gtest_discover_tests` 在链接后把每个
+`TEST()` 注册成 CTest 用例。同一可执行文件需要不同 CTest 属性时，再调用一次 `gtest_discover_tests`
+并用 `TEST_FILTER` 把 suite 分开；不要通过 `DISCOVER_ARGS` 传 `DISCOVERY_MODE`，原因见
+[构建与测试](build-test.md)。
 
 `radray_add_radray_gtest_case` 是在**已有**目标上按 `--gtest_filter` 注册单个 ctest 用例，
 并自动注入 `RADRAY_PROJECT_DIR` / `RADRAY_ASSETS_DIR` 等环境变量。目前仓库里还没有调用方。
