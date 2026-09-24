@@ -48,6 +48,14 @@ cmake --build build_clangcl --config Debug --parallel 24
 第三方库随工程编译时自动继承；预编译的 DXC package 不经本工程编译，不受影响。
 不在单个 target 上改写它。`RelWithDebInfo`/`MinSizeRel` 不受此配置影响。
 
+### 预编译头与 Unity Build
+
+不设置全局 `CMAKE_UNITY_BUILD`。core 与 `test_inline_vector` 都不参与。
+
+`radrayrender` 和 `test_radray_render` 只预编译 `<radray/render/rhi.h>`。D3D12 与 Vulkan 头不放进这份预编译头，因为一个目标只能有一份。
+
+`radrayruntime` 和 `test_radray_runtime` 用 `radray_enable_unity_build` 把 `.cpp` 按每批 8 个合成编译，MSVC 加 `/bigobj`。预编译头是 `<Eigen/Dense>`、`<radray/coroutine.h>`、`<radray/render/rhi.h>`；测试目标再加 `<gtest/gtest.h>`。改其中一个 `.cpp` 会重编它所在的整批。同名 `static` 或匿名命名空间符号冲突时，给该文件设置 `SKIP_UNITY_BUILD_INCLUSION`。同一批里前面的文件引入的宏会作用到后面的文件。Windows SDK 把 `small` 定义成 `char`；`win32_headers.h` 会取消它，但之后再包含 COM 或 D3D 头可能再次定义，所以不要用 `small` 当标识符。
+
 ## 常用配置边界
 
 | 开关 | 默认与依赖 |

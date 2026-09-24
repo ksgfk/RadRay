@@ -31,3 +31,5 @@ if (RADRAY_BUILD_SHADER_COMPILER)
     target_link_libraries(test_radray_render PRIVATE RadRayDXC::Headers)
     radray_deploy_dxc_runtime(test_radray_render)
 endif()
+
+target_precompile_headers(test_radray_render PRIVATE <radray/render/rhi.h>)

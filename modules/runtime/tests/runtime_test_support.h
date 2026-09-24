@@ -9,7 +9,7 @@
 #include <radray/window/native_window.h>
 
 #if defined(_WIN32)
-#include <windows.h>
+#include <radray/platform/win32_headers.h>
 #endif
 
 namespace radray::test {

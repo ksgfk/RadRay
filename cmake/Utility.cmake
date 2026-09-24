@@ -139,6 +139,16 @@ function(radray_optimize_flags_binary target)
     radray_link_flag_lto(${target})
 endfunction()
 
+# 把多个 .cpp 合成一批编译。不要全局设置 CMAKE_UNITY_BUILD。
+function(radray_enable_unity_build target)
+    set_target_properties(${target} PROPERTIES
+        UNITY_BUILD ON
+        UNITY_BUILD_BATCH_SIZE 8)
+    if (MSVC)
+        target_compile_options(${target} PRIVATE /bigobj)
+    endif()
+endfunction()
+
 # radray_add_test(<target> SOURCES <src...> [LINK_LIBS <libs...>] [DISCOVER_ARGS <args...>] [COMPILE_OPTIONS <opts...>] [NO_DISCOVER])
 # 一次调用产生一个可执行文件。同一模块的 GTest 源文件应放进同一次调用；只有必须独占进程映像的测试另开目标。
 function(radray_add_test target)

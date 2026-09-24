@@ -40,6 +40,10 @@ target_compile_definitions(radrayrender PUBLIC
 radray_default_compile_flags(radrayrender)
 radray_optimize_flags_library(radrayrender)
 radray_set_build_path(radrayrender)
+if (APPLE AND RADRAY_ENABLE_VULKAN)
+    set_source_files_properties(${_VK_MM_SRC} PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
+endif()
+target_precompile_headers(radrayrender PRIVATE <radray/render/rhi.h>)
 
 if (RADRAY_BUILD_SHADER_COMPILER)
     radray_deploy_dxc_runtime(radrayrender)

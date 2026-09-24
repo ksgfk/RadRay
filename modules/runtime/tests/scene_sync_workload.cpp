@@ -16,12 +16,12 @@ namespace radray::test {
 
 /// Realistic frame mixes. These compose the single-axis mechanisms above at ratios taken from typical
 /// frames instead of extremes; no scenario here exercises a mechanism the other workloads do not.
-void AppendRealistic(vector<Scenario>& result, bool small) {
+void AppendRealistic(vector<Scenario>& result, bool reduced) {
     const auto share = [](uint32_t total, uint32_t divisor) { return std::max(1u, total / divisor); };
-    const uint32_t level = small ? 256u : 100000u;
-    const uint32_t open = small ? 256u : 20000u;
-    const uint32_t stage = small ? 256u : 10000u;
-    const uint32_t crowd = small ? 96u : 2000u;
+    const uint32_t level = reduced ? 256u : 100000u;
+    const uint32_t open = reduced ? 256u : 20000u;
+    const uint32_t stage = reduced ? 256u : 10000u;
+    const uint32_t crowd = reduced ? 96u : 2000u;
     // 巡游：关卡已加载，相机在动但相机不是 Shape；只有机关/少数 NPC 移动，一盏灯在闪。
     result.push_back({.Name = "level_walkthrough", .Kind = Workload::Level, .Shapes = level, .Changes = share(level, 1000), .Lights = 64, .LightChanges = 1});
     // 交火：1% 物体在动，多盏灯跟着变，少量 LOD 改绑，每 16 帧轮换一批 chunk。
@@ -36,15 +36,15 @@ void AppendRealistic(vector<Scenario>& result, bool small) {
     result.push_back({.Name = "editor_idle", .Kind = Workload::Level, .Shapes = open, .Changes = 1, .Lights = 8, .LightChanges = 0});
 }
 
-vector<Scenario> SceneSyncScenarios(bool small) {
+vector<Scenario> SceneSyncScenarios(bool reduced) {
     vector<Scenario> result;
-    for (uint32_t n : (small ? vector<uint32_t>{256} : vector<uint32_t>{1000, 10000, 100000})) {
+    for (uint32_t n : (reduced ? vector<uint32_t>{256} : vector<uint32_t>{1000, 10000, 100000})) {
         for (uint32_t changes : {0u, 1u, std::max(1u, n / 100), n / 10, n})
             result.push_back({fmt::format("shape_{}_dirty_{}", n, changes), Workload::Transform, n, changes});
     }
-    for (uint32_t n : (small ? vector<uint32_t>{256} : vector<uint32_t>{10000, 100000}))
+    for (uint32_t n : (reduced ? vector<uint32_t>{256} : vector<uint32_t>{10000, 100000}))
         result.push_back({fmt::format("shape_{}_sequential_all", n), Workload::Transform, n, n, 0, 0, 1, 1, false, true});
-    const uint32_t n = small ? 256 : 10000;
+    const uint32_t n = reduced ? 256 : 10000;
     const uint32_t changes = std::max(1u, n / 100);
     for (uint32_t repeats : {1u, 10u, 100u})
         result.push_back({fmt::format("repeat_{}", repeats), Workload::Transform, n, changes, 0, 0, repeats});
@@ -68,7 +68,7 @@ vector<Scenario> SceneSyncScenarios(bool small) {
     result.push_back({"reparent_subtrees", Workload::Reparent, n, changes, 0, 0, 1, 16});
     result.push_back({"chain_16_mixed", Workload::Transform, n, n / 10, 0, 0, 1, 16});
     result.push_back({"mixed", Workload::Mixed, n, changes, 64, 4});
-    AppendRealistic(result, small);
+    AppendRealistic(result, reduced);
     return result;
 }
 

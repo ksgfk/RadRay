@@ -19,6 +19,11 @@ endif()
 radray_default_compile_flags(radrayruntime)
 radray_optimize_flags_library(radrayruntime)
 radray_set_build_path(radrayruntime)
+radray_enable_unity_build(radrayruntime)
+target_precompile_headers(radrayruntime PRIVATE
+    <Eigen/Dense>
+    <radray/coroutine.h>
+    <radray/render/rhi.h>)
 
 if (RADRAY_BUILD_TESTS)
     add_subdirectory(tests)

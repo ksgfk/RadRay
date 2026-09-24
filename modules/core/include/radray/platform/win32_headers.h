@@ -10,5 +10,9 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+// rpcndr.h 把 small 定义成 char。Unity Build 会把这个宏带进同一批后面的 .cpp。
+#ifdef small
+#undef small
+#endif
 
 namespace radray {}

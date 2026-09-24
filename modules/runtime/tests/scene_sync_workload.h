@@ -29,7 +29,7 @@ struct Scenario {
     uint32_t Views{0};
 };
 
-vector<Scenario> SceneSyncScenarios(bool small);
+vector<Scenario> SceneSyncScenarios(bool reduced);
 
 /// Shared workload and bounded GT/RT transport; contains no timers or sample collection.
 class SceneSyncWorkload {

@@ -214,7 +214,7 @@ void RunAllocationRecovery(render::RenderBackend backend) {
     AllocationProbe allocator{gpu->GetDevice()};
     SceneGpuData mirror{&allocator, 1};
     RenderScene scene;
-    SceneApplyChanges changes;
+    radray::SceneApplyChanges changes;
     SceneUpdateBatch batch;
     const ShapeId first{0, 0}, high{17, 0};
     batch.CreateShapes = {first};
