@@ -7,7 +7,6 @@
 #include <radray/types.h>
 #include <radray/logger.h>
 #include <radray/utility.h>
-#include <radray/basic_math.h>
 #include <radray/render/rhi.h>
 
 #ifdef RADRAY_PLATFORM_WINDOWS

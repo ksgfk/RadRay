@@ -1,4 +1,4 @@
-#include <radray/vertex_data.h>
+#include <radray/runtime/vertex_data.h>
 
 #include <cstring>
 #include <memory>

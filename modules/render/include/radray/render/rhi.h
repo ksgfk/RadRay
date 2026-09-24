@@ -12,8 +12,8 @@
 #include <radray/types.h>
 #include <radray/nullable.h>
 #include <radray/enum_flags.h>
-#include <radray/basic_math.h>
-#include <radray/vertex_data.h>
+#include <radray/logger.h>
+#include <radray/viewport.h>
 
 // 后端无关的 RHI 接口面。所有权模型、后端选择、绑定模型、barrier 与同步的设计说明见
 // docs/architecture/render-rhi.md
@@ -197,7 +197,13 @@ enum class SampleCount : uint32_t {
     X16 = 16,
 };
 
-using PrimitiveTopology = radray::PrimitiveTopology;
+enum class PrimitiveTopology : int32_t {
+    PointList,
+    LineList,
+    LineStrip,
+    TriangleList,
+    TriangleStrip
+};
 
 enum class IndexFormat : int32_t {
     UINT16,

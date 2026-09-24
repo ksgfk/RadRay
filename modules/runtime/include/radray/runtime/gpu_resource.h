@@ -60,7 +60,7 @@ public:
     struct DrawData {
         vector<render::VertexBufferBinding> VertexBuffers;
         render::IndexBufferView Ibv;
-        PrimitiveTopology Topology{PrimitiveTopology::TriangleList};
+        render::PrimitiveTopology Topology{render::PrimitiveTopology::TriangleList};
     };
 
     vector<unique_ptr<render::Buffer>> Buffers;

@@ -1,6 +1,7 @@
 #include "gpu_test_fixture.h"
 #include "shader_contract_fixtures.h"
 #include "shader_program_cache.h"
+#include <radray/basic_math.h>
 #include <radray/file.h>
 
 #include <radray/render/pipeline_layout_types.h>

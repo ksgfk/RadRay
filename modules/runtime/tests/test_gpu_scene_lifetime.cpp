@@ -3,6 +3,7 @@
 #include "gpu_test_fixture.h"
 #include "gpu_runtime_test_support.h"
 
+#include <radray/basic_math.h>
 #include <radray/scope_guard.h>
 #include <radray/runtime/shader_jit.h>
 #include <radray/runtime/components/static_mesh_component.h>

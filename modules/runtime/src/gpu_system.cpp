@@ -8,7 +8,7 @@
 #include <radray/scope_guard.h>
 #include <radray/render/rhi.h>
 #include <radray/runtime/gpu_resource.h>
-#include <radray/vertex_data.h>
+#include <radray/runtime/vertex_data.h>
 #include <radray/runtime/application.h>
 #include <radray/runtime/window_manager.h>
 

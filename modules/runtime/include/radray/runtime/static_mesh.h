@@ -3,7 +3,8 @@
 #include <filesystem>
 #include <span>
 
-#include <radray/vertex_data.h>
+#include <radray/basic_math.h>
+#include <radray/runtime/vertex_data.h>
 #include <radray/runtime/asset.h>
 #include <radray/runtime/asset_database.h>
 #include <radray/runtime/asset_manager.h>

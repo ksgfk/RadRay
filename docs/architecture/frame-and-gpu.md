@@ -1,6 +1,6 @@
 > - 适用: 改帧节奏、提交时序、GPU 上传；排查"GPU 对象被提前销毁"或帧同步问题
 > - 权威: 本文是帧节奏与 GPU 资源上传的唯一说明。资产侧的延迟销毁契约见 [asset-system](asset-system.md)；RHI 本身见 [render-rhi](render-rhi.md)
-> - 锚点: `modules/runtime/include/radray/runtime/frame_timeline.h`, `modules/runtime/src/frame_timeline.cpp`, `modules/runtime/include/radray/runtime/gpu_system.h`, `modules/runtime/include/radray/runtime/gpu_resource.h`, `modules/runtime/include/radray/runtime/wait_frame.h`, `modules/runtime/include/radray/runtime/render_system.h`, `modules/runtime/src/gpu_system.cpp`
+> - 锚点: `modules/runtime/include/radray/runtime/frame_timeline.h`, `modules/runtime/src/frame_timeline.cpp`, `modules/runtime/include/radray/runtime/gpu_system.h`, `modules/runtime/include/radray/runtime/gpu_resource.h`, `modules/runtime/include/radray/runtime/vertex_data.h`, `modules/runtime/include/radray/runtime/wait_frame.h`, `modules/runtime/include/radray/runtime/render_system.h`, `modules/runtime/src/gpu_system.cpp`
 
 # 帧节奏与 GPU 上传
 
@@ -303,7 +303,7 @@ ThreadedRunner 在这次全量退休后直接推进退休游标，不再先逐 f
 
 | 设施 | 用途 |
 |---|---|
-| `ResourceUploader` | 经 staging buffer 上传到 device-local 资源。`UploadBuffer` / `UploadTexture` / `UploadMeshResource` |
+| `ResourceUploader` | 经 staging buffer 上传到 device-local 资源。`UploadBuffer` / `UploadTexture` / `UploadMeshResource`。CPU 网格输入是 `vertex_data.h` 的 `MeshResource` |
 | `DynamicCBufferArena` | 帧内常量缓冲切片。从映射上传页线性子分配，按 flight reset |
 | `HostWriteBatch` + `ScopedBufferMap` | 直接写持久映射缓冲，收集写入范围后统一 flush |
 

@@ -12,6 +12,7 @@
 #include <limits>
 #include <type_traits>
 
+#include <radray/basic_math.h>
 #include <radray/hash.h>
 #include <radray/scope_guard.h>
 

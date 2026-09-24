@@ -4,8 +4,6 @@
 
 namespace radray {
 
-class MeshResource;
-
 class TriangleMesh {
 public:
     vector<uint32_t> Indices;
@@ -16,7 +14,6 @@ public:
     vector<Eigen::Vector4f> Color0;
 
     bool IsValid() const noexcept;
-    void ToSimpleMeshResource(MeshResource* outResource) const noexcept;
 
     void InitAsCube(float halfExtend) noexcept;
     void InitAsUVSphere(float radius, uint32_t numberSlices) noexcept;

@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <limits>
 
+#include <radray/basic_math.h>
 #include <radray/scope_guard.h>
 #include <radray/text_encoding.h>
 #ifdef RADRAY_ENABLE_PROFILER

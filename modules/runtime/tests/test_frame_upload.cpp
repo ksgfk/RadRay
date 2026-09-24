@@ -126,7 +126,7 @@ TEST_F(FrameUploadTest, MeshUploadPreservesVertexBindingAndIndexView) {
     EXPECT_EQ(draw.Ibv.Target, mesh->Buffers[0].get());
     EXPECT_EQ(draw.Ibv.Offset, 0u);
     EXPECT_EQ(draw.Ibv.Stride, 4u);
-    EXPECT_EQ(draw.Topology, PrimitiveTopology::TriangleList);
+    EXPECT_EQ(draw.Topology, render::PrimitiveTopology::TriangleList);
     EXPECT_EQ(Command.Copies, 2u);
 }
 

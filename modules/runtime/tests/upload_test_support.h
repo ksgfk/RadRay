@@ -111,7 +111,7 @@ inline MeshResource MakeUploadTestMesh() {
     mesh.Bins.emplace_back(std::as_bytes(std::span{indices}));
     MeshPrimitive primitive;
     primitive.VertexCount = 3;
-    primitive.Topology = PrimitiveTopology::TriangleList;
+    primitive.Topology = render::PrimitiveTopology::TriangleList;
     primitive.VertexBuffers.push_back({string{VertexSemantics::POSITION}, 0, 0, VertexDataType::FLOAT, 3, 0, 12});
     primitive.IndexBuffer = {1, 3, 0, 4};
     mesh.Primitives.push_back(std::move(primitive));

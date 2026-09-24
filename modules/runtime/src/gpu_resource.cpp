@@ -5,8 +5,9 @@
 #include <string_view>
 #include <utility>
 
+#include <radray/basic_math.h>
 #include <radray/logger.h>
-#include <radray/vertex_data.h>
+#include <radray/runtime/vertex_data.h>
 
 namespace radray {
 

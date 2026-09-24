@@ -1,6 +1,6 @@
 > - 适用: 需要某个基础设施但不确定仓库里已有什么；踩到 core 的坑
 > - 权威: 本文是 `radraycore` 提供什么、以及怎么正确用它的唯一说明
-> - 锚点: `modules/core/include/radray/types.h`, `modules/core/include/radray/inline_vector.h`, `modules/core/include/radray/nullable.h`, `modules/core/include/radray/coroutine.h`, `modules/core/include/radray/enum_flags.h`, `modules/core/include/radray/basic_math.h`, `modules/core/include/radray/runtime_type.h`, `cmake/Utility.cmake`
+> - 锚点: `modules/core/include/radray/types.h`, `modules/core/include/radray/inline_vector.h`, `modules/core/include/radray/nullable.h`, `modules/core/include/radray/coroutine.h`, `modules/core/include/radray/enum_flags.h`, `modules/core/include/radray/basic_math.h`, `modules/core/include/radray/viewport.h`, `modules/core/include/radray/runtime_type.h`, `cmake/Utility.cmake`
 
 # core 基础设施
 
@@ -25,7 +25,7 @@
 专用的：`json.h`（yyjson）、`xml.h`（pugixml）、`binary_io.h`（小端读写）、`file.h`、`environment.h`、
 `dynamic_library.h`、`guid.h`、`text_encoding.h`、`runtime_type.h`、
 `allocator.h`（GPU 子分配器，与堆无关）、`memory.h`、`sparse_set.h`、`channel.h`、
-`intrusive_ptr.h`、`structured_buffer.h`、`image_data.h`、`vertex_data.h`、
+`intrusive_ptr.h`、`structured_buffer.h`、`image_data.h`、`viewport.h`、
 `triangle_mesh.h`、`wavefront_obj.h`、`camera_control.h`、`platform/win32_headers.h`。
 
 ## 容器别名
@@ -271,8 +271,11 @@ template <> struct JsonDeserializer<T> {
 见 [render-rhi](render-rhi.md) 的「视口」一节。
 
 辅助：`Align`、`Degree` / `Radian`、`Lerp`、`Clamp`、`AbsDot`、`ComposeTransform` /
-`DecomposeTransform`。另有 `Viewport`、`Rect`。Eigen 的向量/矩阵/四元数都有 fmt formatter，
+`DecomposeTransform`。Eigen 的向量/矩阵/四元数都有 fmt formatter，
 可以直接 `fmt::format("{}", mat)`。
+
+`viewport.h` 提供 `Viewport` 和 `Rect`。它们是给 RHI 的 POD，不包含 Eigen，因此 `rhi.h` 不必包含本头。
+`basic_math.h` 会包含 `viewport.h`，已有数学调用方仍能看见这两个类型。
 
 `AffineTransform` 是 48 B 列主序 affine 3×4 传输表示，默认隐含齐次行 `(0, 0, 0, 1)`；
 它与 `Eigen::Matrix4f` 相互转换并保留 shear/负缩放，计算和缓存仍使用 `Matrix4f`。

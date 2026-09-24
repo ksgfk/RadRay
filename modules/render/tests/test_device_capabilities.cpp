@@ -1,6 +1,7 @@
 #include "gpu_test_fixture.h"
 
 #include <gtest/gtest.h>
+#include <radray/basic_math.h>
 #include <radray/utility.h>
 
 namespace radray::render {

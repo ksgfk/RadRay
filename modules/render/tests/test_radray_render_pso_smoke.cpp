@@ -1,5 +1,6 @@
 #include "gpu_test_fixture.h"
 
+#include <radray/basic_math.h>
 #include <radray/dynamic_library.h>
 #include <radray/render/backend_shader_artifact.h>
 #include <radray/utility.h>

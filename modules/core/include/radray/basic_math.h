@@ -9,6 +9,7 @@
 
 #include <radray/types.h>
 #include <radray/logger.h>
+#include <radray/viewport.h>
 
 namespace radray {
 
@@ -50,22 +51,6 @@ struct AffineTransform {
 };
 
 static_assert(sizeof(AffineTransform) == 48);
-
-struct Viewport {
-    float X;
-    float Y;
-    float Width;
-    float Height;
-    float MinDepth;
-    float MaxDepth;
-};
-
-struct Rect {
-    int32_t X;
-    int32_t Y;
-    uint32_t Width;
-    uint32_t Height;
-};
 
 constexpr uint64_t Align(uint64_t value, uint64_t align) noexcept {
     return (value + (align - 1)) & ~(align - 1);

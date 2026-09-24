@@ -491,6 +491,9 @@ DXGI 的 frame-latency waitable object 达到同一效果。
 
 `SetViewport(Viewport)` 在 D3D12 直填 `D3D12_VIEWPORT`，在 Vulkan 直填 `VkViewport`，
 **两边都不做 Y 翻转**。所以 `Viewport` 的语义是"原点在左上"，与 D3D 一致。
+`Viewport` 与裁剪用的 `Rect` 定义在 `modules/core/include/radray/viewport.h`。
+`PrimitiveTopology` 定义在 `rhi.h` 的枚举区，成员名和 `int32_t` 底层类型保持稳定；runtime 的
+`MeshPrimitive` 使用同一枚举。
 
 Vulkan 的 NDC Y 轴朝下，要得到与 D3D12 一致的画面，处理它是**调用方的责任**——在投影矩阵里
 翻，或者传一个负 `Height` 的 viewport。RHI 刻意不替你决定，因为这两种做法对
