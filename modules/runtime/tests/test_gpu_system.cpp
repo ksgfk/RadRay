@@ -2,24 +2,25 @@
 #include "gpu_test_fixture.h"
 #include "gpu_runtime_test_support.h"
 
+#include <radray/runtime/frame_timeline.h>
 #include <radray/runtime/gpu_system.h>
 
 namespace radray {
 namespace {
 
-unique_ptr<GpuSystem> CreateGpuSystem(render::RenderBackend backend, bool profiler, RuntimeStartupResult& startup, bool validation = true) {
+unique_ptr<GpuSystem> CreateGpuSystem(render::RenderBackend backend, bool profiler, FrameTimeline& timeline, RuntimeStartupResult& startup, bool validation = true) {
     const render::VulkanCommandQueueDescriptor queue{render::QueueType::Direct, 1};
     GpuSystemDescriptor desc{
         .VulkanInstance = {.IsEnableDebugLayer = validation, .IsEnableSynchronizationValidation = validation},
         .DXGIFactory = {.IsEnableDebugLayer = validation},
-        .FlightDataCount = 2,
+        .FlightDataCount = timeline.GetFlightDataCount(),
         .EnableFrameProfiler = profiler};
     if (backend == render::RenderBackend::Vulkan) {
         render::VulkanDeviceDescriptor device;
         device.Queues = std::span{&queue, 1};
         desc.Device = device;
     }
-    return GpuSystem::TryCreate(desc, startup);
+    return GpuSystem::TryCreate(desc, timeline, startup);
 }
 
 void BufferBarrier(render::CommandBuffer* commands, render::Buffer* buffer, render::BufferStates before, render::BufferStates after) {
@@ -30,7 +31,8 @@ void BufferBarrier(render::CommandBuffer* commands, render::Buffer* buffer, rend
 void RunCommandBatches(render::RenderBackend backend, bool profiler) {
     test::RuntimeLogCapture logs;
     RuntimeStartupResult startup;
-    auto gpu = CreateGpuSystem(backend, profiler, startup);
+    FrameTimeline timeline{2};
+    auto gpu = CreateGpuSystem(backend, profiler, timeline, startup);
     if (test::CanSkipRuntimeStartup(backend, startup)) GTEST_SKIP() << startup.Reason;
     ASSERT_NE(gpu, nullptr) << startup.Reason;
     auto* device = gpu->GetDevice();
@@ -144,20 +146,21 @@ bool ReleaseFence(render::Fence* fence, render::RenderBackend backend, uint64_t 
     return false;
 }
 
-task<void> ObserveFlightCompletion(GpuSystem* gpu, bool& resumed) {
-    co_await gpu->Wait();
+task<void> ObserveFlightCompletion(FrameTimeline& timeline, bool& resumed) {
+    co_await timeline.Wait();
     resumed = true;
 }
 
 void RunFinalFence(render::RenderBackend backend) {
     // Native host-signaled waits avoid validation-layer semaphore tracking.
     RuntimeStartupResult startup;
-    auto gpu = CreateGpuSystem(backend, false, startup, false);
+    FrameTimeline timeline{2};
+    auto gpu = CreateGpuSystem(backend, false, timeline, startup, false);
     if (test::CanSkipRuntimeStartup(backend, startup)) GTEST_SKIP() << startup.Reason;
     ASSERT_NE(gpu, nullptr) << startup.Reason;
     bool resumed = false;
     TaskScope waiting;
-    waiting.Spawn(ObserveFlightCompletion(gpu.get(), resumed));
+    waiting.Spawn(ObserveFlightCompletion(timeline, resumed));
     auto gate = gpu->GetDevice()->CreateFence().Unwrap();
     auto intermediate = gpu->GetDevice()->CreateFence().Unwrap();
     auto context = gpu->BeginFrameRecord(0, {}, {}, false);
@@ -172,12 +175,12 @@ void RunFinalFence(render::RenderBackend backend) {
     intermediate->Wait(1);
     EXPECT_FALSE(gpu->CompleteFlightIfReady(0, false));
     EXPECT_LT(gpu->GetFlightGpuSignal(0).Fence->GetCompletedValue(), gpu->GetFlightGpuSignal(0).Value);
-    gpu->PumpWaitFrame(0);
+    timeline.PumpWaitFrame(0);
     EXPECT_FALSE(resumed);
     EXPECT_TRUE(ReleaseFence(gate.get(), backend, 1));
     EXPECT_TRUE(gpu->CompleteFlightIfReady(0, true));
     gpu->ReleaseFrameResourcesGT({.FlightIndex = 0, .FrameSerial = context.FrameSerial()});
-    gpu->PumpWaitFrame(0);
+    timeline.PumpWaitFrame(0);
     EXPECT_TRUE(resumed);
     gpu->WaitAndRetireFlights();
 }
@@ -189,10 +192,11 @@ class GpuSystemDeathTest : public testing::Test {
 protected:
     void SetUp() override {
         RuntimeStartupResult startup;
-        Gpu = CreateGpuSystem(render::RenderBackend::D3D12, false, startup, false);
+        Gpu = CreateGpuSystem(render::RenderBackend::D3D12, false, Timeline, startup, false);
         if (test::CanSkipRuntimeStartup(render::RenderBackend::D3D12, startup)) GTEST_SKIP() << startup.Reason;
         ASSERT_NE(Gpu, nullptr) << startup.Reason;
     }
+    FrameTimeline Timeline{2};
     unique_ptr<GpuSystem> Gpu;
 };
 

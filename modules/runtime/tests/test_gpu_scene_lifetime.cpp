@@ -41,12 +41,12 @@ public:
 
 class FrameWaitProbe final : public IWaitFrameProcessor {
 public:
-    explicit FrameWaitProbe(GpuSystem& gpu) : Gpu(gpu) {}
+    explicit FrameWaitProbe(FrameTimeline& timeline) : Timeline(timeline) {}
     task<void> Wait() override {
         ++Calls;
-        co_await Gpu.Wait();
+        co_await Timeline.Wait();
     }
-    GpuSystem& Gpu;
+    FrameTimeline& Timeline;
     uint32_t Calls{0};
 };
 
@@ -64,8 +64,8 @@ bool SignalGate(render::Fence& fence, render::RenderBackend backend) {
     return false;
 }
 
-task<void> WaitForDraw(GpuSystem& gpu, bool& notified) {
-    co_await gpu.Wait();
+task<void> WaitForDraw(FrameTimeline& timeline, bool& notified) {
+    co_await timeline.Wait();
     notified = true;
 }
 
@@ -84,11 +84,12 @@ void RunMeshLifetime(render::RenderBackend backend, bool delayed, bool direct, b
         descriptor.Device = vk;
     }
     RuntimeStartupResult startup;
-    auto gpuOwner = GpuSystem::TryCreate(descriptor, startup);
+    FrameTimeline timeline{2};
+    auto gpuOwner = GpuSystem::TryCreate(descriptor, timeline, startup);
     if (test::CanSkipRuntimeStartup(backend, startup)) GTEST_SKIP() << startup.Reason;
     ASSERT_NE(gpuOwner, nullptr) << startup.Reason;
     GpuSystem& gpu = *gpuOwner;
-    FrameWaitProbe assetWaits{gpu};
+    FrameWaitProbe assetWaits{timeline};
     AssetManager assets;
     assets.SetWaitFrameProcessor(&assetWaits);
     Application app;
@@ -161,7 +162,7 @@ float4 PSMain() : SV_Target0 { return float4(1, 0, 1, 1); }
     auto release = MakeScopeGuard([&]() noexcept { if (!released) SignalGate(*gate, backend); });
     bool notified = false;
     TaskScope notification;
-    notification.Spawn(WaitForDraw(gpu, notified));
+    notification.Spawn(WaitForDraw(timeline, notified));
     uint64_t drawSerial = 0;
     const auto record = [&] {
         auto frame = gpu.BeginFrameRecord(0, {}, {}, false);
@@ -246,7 +247,7 @@ float4 PSMain() : SV_Target0 { return float4(1, 0, 1, 1); }
     renderer.BeginStoppingGT();
     renderer.AbandonUnpublishedFramesGT();
     gpu.WaitAndRetireFlights();
-    gpu.CleanupCompletedFlights();
+    timeline.CleanupCompletedFlights();
     gpu.AbandonUnpublishedResourcesTerminalGT();
     EXPECT_TRUE(logs.Errors().empty()) << logs.Errors();
 }
@@ -257,8 +258,8 @@ struct UploadOwner {
     ~UploadOwner() noexcept { ++*Destroyed; }
 };
 
-task<AssetLoadResult> UploadNotification(GpuSystem& gpu, bool fail) {
-    if (!fail) co_await gpu.Wait();
+task<AssetLoadResult> UploadNotification(FrameTimeline& timeline, bool fail) {
+    if (!fail) co_await timeline.Wait();
     co_return AssetLoadResult::Failure();
 }
 
@@ -272,7 +273,8 @@ void RunUploadCancellation(render::RenderBackend backend) {
         descriptor.Device = vk;
     }
     RuntimeStartupResult startup;
-    auto gpuOwner = GpuSystem::TryCreate(descriptor, startup);
+    FrameTimeline timeline{2};
+    auto gpuOwner = GpuSystem::TryCreate(descriptor, timeline, startup);
     if (test::CanSkipRuntimeStartup(backend, startup)) GTEST_SKIP() << startup.Reason;
     ASSERT_NE(gpuOwner, nullptr) << startup.Reason;
     GpuSystem& gpu = *gpuOwner;
@@ -307,7 +309,7 @@ void RunUploadCancellation(render::RenderBackend backend) {
         commands->CopyBufferToBuffer(readback.get(), 0, target, 0, 4);
         frame.ReturnCommandBuffers({.CmdBuffers = std::span{&commands, 1}});
         gpu.EndFrameRecordAndSubmit(0);
-        auto loading = assets.Load({.Id = AssetId{uint32_t(fail) + 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}, .Task = UploadNotification(gpu, fail)});
+        auto loading = assets.Load({.Id = AssetId{uint32_t(fail) + 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}, .Task = UploadNotification(timeline, fail)});
         if (!fail) loading.Cancel();
         assets.Pump();
         EXPECT_TRUE(fail ? loading.IsFaulted() : loading.IsCanceled());

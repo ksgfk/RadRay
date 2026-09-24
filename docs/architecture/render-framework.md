@@ -11,9 +11,8 @@ shader、PSO、渲染目标和 draw loop 由调用方持有。没有内置 Forwa
 
 ## Application 与驱动边界
 
-`Application::Run` 按 `ApplicationRuntimeDescriptor::Systems` 创建所选服务，必要时初始化窗口，然后调用 OnInit；
-默认启用 Window、Gpu、Render、World、Asset，但不创建默认 World。各 getter 对未启用的系统返回空。
-`RequestExit()` 可在没有窗口时结束循环。OnInit 返回后以 bootstrap S1
+`Application::Run` 按 `ApplicationRuntimeDescriptor` 的可选系统创建服务。Window、Gpu、Render、World、Asset 默认都启用；某个 `std::optional` 设为 `nullopt` 即关闭该系统。字段只放在所属选项里：后端、验证、多线程、交换链和帧 profiler 属于 `GpuOptions`，shader 根属于 `RenderOptions`，资产根属于 `AssetOptions`。`FlightDataCount` 是时间线槽位数，必须大于 0。必要时初始化窗口，然后调用 OnInit；默认不创建默认 World。各 getter 对未启用的系统返回空。`GetFrameTimeline()` 在初始化成功后始终有效。
+`RequestExit()` 可在没有窗口时结束循环。启动失败写在 `GetStartupResult()`，OnInit 之前返回。OnInit 返回后以 bootstrap S1
 收束连接和销毁请求；初始数据等首个 writable flight 封包，不伪造发布或 GPU 完成。
 
 | 正常入口 | 责任 |
@@ -24,9 +23,7 @@ shader、PSO、渲染目标和 draw loop 由调用方持有。没有内置 Forwa
 
 输入与 OnUpdate 后，WorldManager 开始全局 TickEpoch。S1 不等待 GPU。RT 跳过绘制仍消费已发布包。
 GPU 的单线程和双线程 runner 共用这些协议；ready 交接、CPU 提交完成计数与主队列 fence 是实际同步权威。
-不启用 Gpu 时使用单线程 CPU runner：按 `FlightDataCount` 轮转槽位，泵可选资产和 scheduler，
-如有 RenderSystem 则在 Update 后同步发布、消费场景包，并于下一帧边界或退出时完成退休。
-该模式不调用 OnRender 或 OnRenderFrameComplete；多线程模式要求 Gpu。
+不启用 Gpu 时使用单线程 CPU runner，与 GPU runner 共用 FrameTimeline 和同一条完成路径。它按 `FlightDataCount` 轮转槽位，泵可选资产和 scheduler，如有 RenderSystem 则在 Update 后同步发布并消费场景包，再发布 `GpuWorkCompleted` 为 false 的完成。该模式不调用 OnRender，但会调用 `OnRenderFrameComplete`。等待恢复时机与延迟见[帧序](frame-and-gpu.md#帧序)。多线程模式要求 Gpu。
 普通组件不得自行驱动这些入口或调用 WaitIdle；未使用 Application runner 的 CPU 测试显式调用 World 的
 `Tick`、`FinalizeWorldGT`、`CollectRenderUpdates`、`ShutdownWorld`，或对应 WorldManager 驱动。
 托管 World 不能自行 Tick/Finalize。析构只做末端资源释放，已注册对象必须先显式 teardown。
@@ -362,22 +359,22 @@ primitive_vertex_layout 及其 resolver 已移除；PSO 调用方提供 RHI Vert
 | 消费者 | 借用的对象或接口 | 接线方式 |
 |---|---|---|
 | `WindowManager` | `GpuSystem`、`RenderSystem` | `SetGpuSystem`、`SetRenderSystem` |
-| `GpuSystem` | `WindowManager` | `SetWindowManager` |
+| `GpuSystem` | `FrameTimeline`、`WindowManager` | `TryCreate` 借用、`SetWindowManager` |
 | `RenderSystem` | `Application`、`GpuSystem` | 构造参数、`SetGpuSystem` |
-| `AssetManager` | `IWaitFrameProcessor`、可选 `IAssetSource` | `SetWaitFrameProcessor`、`SetAssetSource` |
+| `AssetManager` | `FrameTimeline`（`IWaitFrameProcessor`）、可选 `IAssetSource` | `SetWaitFrameProcessor`、`SetAssetSource` |
 | `WorldManager` | 可空 `Application`、可空 `RenderSystem` | 构造参数 |
 | `World` | 可空 `Application`；连接期间借用 `RenderSystem` 的 SceneWriter | 构造参数与 `WorldRenderBridge` |
 
-Application 依次按选项构造 WindowManager、GpuSystem（包含 device）、RenderSystem、WorldManager、AssetManager 和
+Application 先创建 FrameTimeline，再按选项构造 WindowManager、GpuSystem（包含 device）、RenderSystem、WorldManager、AssetManager 和
 可选 AssetDatabase；World 由应用在 `OnInit` 或后续 GT 更新阶段通过 WorldManager 显式创建。
 Window 单独启用时只有原生主窗口，Window 与 Gpu 同时启用时再挂接主交换链；Render 单独启用可交付 CPU Scene。
-默认 importer 只保留登记与明确失败的加载入口，不借用上传调度器。全部对象就位后直接接线：GpuSystem 提供帧等待接口；无 Gpu 的 AssetManager 使用即时完成的 CPU 帧等待器。AssetDatabase
+默认 importer 只保留登记与明确失败的加载入口，不借用上传调度器。全部对象就位后直接接线：AssetManager 始终接到 FrameTimeline。AssetDatabase
 提供可选资产来源；未配置资产根或数据库打开失败时，资产来源为空。
 WindowManager 与 GpuSystem 的双向引用在启动渲染线程前建立。
 
 RenderSystem 与 Gpu 同时启用时才调用 `RenderSystem::OnInitialize()` 创建 shader/program 与 render-pass caches。
-`GpuSystem::TryCreate` 逐步检查后端、adapter、验证层、device、队列及 profiler；`Run(desc, startup)`
-报告启动状态，未编译后端、无 adapter、缺验证层与真实初始化失败可区分。配置错误在 OnInit 前失败；
+`GpuSystem::TryCreate` 是唯一创建路径，借用已有的 FrameTimeline，并逐步检查后端、adapter、验证层、device、队列及 profiler。
+`GetStartupResult()` 报告启动状态，未编译后端、无 adapter、缺验证层与真实初始化失败可区分。`FlightDataCount` 为 0 在构造前失败；
 初始化失败和窗口或交换链创建失败均走 `DestroyRuntime` 清理路径。
 RenderSystem 的析构接受部分初始化状态，通过 `OnShutdown` 幂等释放缓存。
 

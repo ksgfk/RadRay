@@ -70,6 +70,7 @@ artifact 不需要 compiler，开发期 JIT 通过配置开关接入 client。
 |---|---|---|
 | 主循环 | `Application::Run` / `StartLoop` | `modules/runtime/src/application.cpp` |
 | GPU 设备 | `Device::Create` | `modules/render/src/rhi.cpp` |
+| 帧时间线 | `FrameTimeline` | `modules/runtime/src/frame_timeline.cpp` |
 | flight 与提交 | `GpuSystem::BeginFrameRecord` / `EndFrameRecordAndSubmit` | `modules/runtime/src/gpu_system.cpp` |
 | 资产加载与回收 | `AssetManager::Load` / `Pump` | `modules/runtime/src/asset_manager.cpp` |
 | 身份登记与 path 反查 | `AssetDatabase::Open` / `Refresh` / `Save` | `modules/runtime/src/asset_database.cpp` |

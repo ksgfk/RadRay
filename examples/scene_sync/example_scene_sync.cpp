@@ -100,18 +100,27 @@ void SceneSyncApp::OnShutdown() {
 int main(int argc, char** argv) {
     using namespace radray;
     example::SceneSyncApp app;
-    ApplicationRuntimeDescriptor descriptor{.Backend = render::RenderBackend::D3D12, .Multithreaded = false, .ShaderSourceRoot = RADRAY_SCENE_EXAMPLE_DIR, .ShaderIncludePaths = {RADRAY_SHADERLIB_DIR}, .WindowTitle = "RadRay Scene Sync", .FlightDataCount = 2, .BackBufferFormat = render::TextureFormat::BGRA8_UNORM, .PresentMode = render::PresentMode::FIFO};
+    ApplicationRuntimeDescriptor descriptor{
+        .FlightDataCount = 2,
+        .Window = WindowOptions{.Title = "RadRay Scene Sync"},
+        .Gpu = GpuOptions{
+            .Backend = render::RenderBackend::D3D12,
+            .BackBufferFormat = render::TextureFormat::BGRA8_UNORM,
+            .PresentMode = render::PresentMode::FIFO,
+        },
+        .Render = RenderOptions{.ShaderSourceRoot = RADRAY_SCENE_EXAMPLE_DIR, .ShaderIncludePaths = {RADRAY_SHADERLIB_DIR}},
+    };
     for (int i = 1; i < argc; ++i) {
         const std::string_view argument{argv[i]};
         if (argument == "--vulkan")
-            descriptor.Backend = render::RenderBackend::Vulkan;
+            descriptor.Gpu->Backend = render::RenderBackend::Vulkan;
         else if (argument == "--d3d12")
-            descriptor.Backend = render::RenderBackend::D3D12;
+            descriptor.Gpu->Backend = render::RenderBackend::D3D12;
         else if (argument == "--multithread")
-            descriptor.Multithreaded = true;
+            descriptor.Gpu->Multithreaded = true;
         else if (argument == "--valid-layer") {
-            descriptor.EnableValidation = true;
-            descriptor.EnableSynchronizationValidation = true;
+            descriptor.Gpu->EnableValidation = true;
+            descriptor.Gpu->EnableSynchronizationValidation = true;
         } else {
             const auto equal = argument.find('=');
             if (equal == std::string_view::npos) return 2;

@@ -174,7 +174,7 @@ GPU 时间（毫秒），不是当前 GT 帧的即时耗时；关闭 GPU profile
 | `test_manual_coroutine_scheduler` | `ManualCoroutineScheduler`（冻结派发、取消其他等待者、跨等待表截止与延迟取消） |
 | `test_asset_slot` | `AssetSlotTest` |
 | `test_frame_upload` | `FrameUploadTest` |
-| `test_application_systems` | `ApplicationSystems`（零系统、单系统、CPU 帧循环、非法配置） |
+| `test_application_systems` | `ApplicationSystems`（零系统、单系统、CPU 帧循环的完成、等待与延迟、非法 `FlightDataCount`） |
 | `test_gpu_system` | `GpuSystemTest`, `GpuSystemDeathTest` |
 | `test_scene_delivery` | `SceneDelivery`, `SceneDeliveryRunner`, `MultiWorldSceneRunner`（CPU 场景帧循环与双后端 GPU runner，F=1/2/3/8） |
 | `test_scene_delivery_state` | `SceneDeliveryState`（直接通过 RenderSystem 验证发布次序、serial、停止排空和随机槽位复用） |

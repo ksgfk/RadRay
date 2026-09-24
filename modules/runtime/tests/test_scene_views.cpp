@@ -64,7 +64,7 @@ private:
 uint32_t RunViewCollection(int violation) {
     ViewCollectionApp app;
     app.Violation = violation;
-    EXPECT_EQ(app.Run({.Backend = render::RenderBackend::D3D12, .FlightDataCount = 3, .Systems = ApplicationSystem::World | ApplicationSystem::Render}), 0);
+    EXPECT_EQ(app.Run({.FlightDataCount = 3, .Window = std::nullopt, .Gpu = std::nullopt, .Asset = std::nullopt}), 0);
     return app.Collected;
 }
 

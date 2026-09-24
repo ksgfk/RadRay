@@ -85,6 +85,7 @@ StaticMesh 的合法 GPU 使用由 SceneWriter 绑定/退休 owner 或 GpuSystem
 TextureAsset 的外部 SRV 使用目前没有完整 producer 契约，保留 DeferDestroy 的保守等待作为明确迁移项。
 新 GPU 资产应优先建立全部使用者 owner；未完成审计的旧类型继续整包 DeferDestroy，不用 AlreadySafe 标志跳过等待。
 DeferDestroy 缺少 IWaitFrameProcessor 时保存 payload，等设施安装并 Pump 后再调度，绝不 log 后立即释放。
+Application 始终把 FrameTimeline 接到 AssetManager。等待何时恢复见[帧边界等待](frame-and-gpu.md#帧边界等待)。
 该保守路径只有 AssetManager 终止时才能取消内部等待，调用者必须事先完成 GPU drain。
 
 ## 现有资产
@@ -109,11 +110,12 @@ render thread 不访问非原子的 refs；TextureAsset 的 GetOrCreateSrv/view 
 ## 关停顺序
 
 ```text
-WorldManager（全部 World）→ RenderSystem → AssetManager → AssetDatabase → GpuSystem
+WorldManager（全部 World）→ RenderSystem → AssetManager → FrameTimeline → AssetDatabase → GpuSystem
 ```
 
 WorldManager 先销毁各 World，拆除组件与 asset ref，RenderSystem 释放常驻及退休资产引用、shader/program 与 RHI 缓存，AssetManager 再处理
-剩余 slot 和延迟 payload；AssetDatabase 必须活过在飞 task，最后 GpuSystem 销毁 device。
+剩余 slot 和延迟 payload。FrameTimeline 在 AssetManager 之后销毁，使在飞等待先收束。AssetDatabase 必须活过在飞 task，最后 GpuSystem 销毁 device。
+完整时序见[关停顺序](frame-and-gpu.md#关停顺序)。
 关停时仍有存活引用会记录错误并继续卸载，避免把后续 GPU 资源释放变成悬垂访问。
 
 ## 新增资产类型

@@ -1,5 +1,8 @@
 #include <gtest/gtest.h>
 
+#include <chrono>
+#include <thread>
+
 #include <radray/render/rhi.h>
 #include <radray/runtime/application.h>
 #include <radray/runtime/asset_manager.h>
@@ -11,11 +14,23 @@
 namespace radray {
 namespace {
 
+ApplicationRuntimeDescriptor CpuOnly(std::optional<RenderOptions> render, std::optional<WorldOptions> world, std::optional<AssetOptions> asset, uint32_t flights = 2) {
+    return {
+        .FlightDataCount = flights,
+        .Window = std::nullopt,
+        .Gpu = std::nullopt,
+        .Render = std::move(render),
+        .World = std::move(world),
+        .Asset = std::move(asset),
+    };
+}
+
 class MinimalApplication final : public Application {
 public:
     explicit MinimalApplication(bool exitInInit = false) : ExitInInit(exitInInit) {}
     bool ExitInInit;
     uint32_t Updates{0};
+    uint32_t Completions{0};
     uint32_t Shutdowns{0};
 
 protected:
@@ -29,21 +44,24 @@ protected:
     }
     void OnUpdate(const AppUpdateContext& ctx) override {
         EXPECT_EQ(ctx.FlightIndex, Updates % 2);
-        EXPECT_EQ(ctx.LastFrameLatency.count(), 0.0f);
+        if (Updates == 0) EXPECT_EQ(ctx.LastFrameLatency.count(), 0.0f);
         if (++Updates == 3) RequestExit();
     }
     void OnRender(AppFrameContext&) override { ADD_FAILURE() << "GPU callback in CPU loop"; }
-    void OnRenderFrameComplete(const FlightCompletion&) override { ADD_FAILURE() << "GPU completion in CPU loop"; }
+    void OnRenderFrameComplete(const FlightCompletion& completion) override {
+        EXPECT_FALSE(completion.GpuWorkCompleted);
+        EXPECT_EQ(completion.FrameSerial, ++Completions);
+    }
     void OnShutdown() override { ++Shutdowns; }
 };
 
 void CheckEmptyFrameLoopAndExitFromInit() {
     for (bool exitInInit : {false, true}) {
         MinimalApplication app{exitInInit};
-        RuntimeStartupResult startup;
-        ASSERT_EQ(app.Run({.Backend = render::RenderBackend::D3D12, .Systems = {}}, startup), 0);
-        EXPECT_EQ(startup.Status, RuntimeStartupStatus::Started) << startup.Reason;
+        ASSERT_EQ(app.Run(CpuOnly(std::nullopt, std::nullopt, std::nullopt)), 0);
+        EXPECT_EQ(app.GetStartupResult().Status, RuntimeStartupStatus::Started) << app.GetStartupResult().Reason;
         EXPECT_EQ(app.Updates, exitInInit ? 0u : 3u);
+        EXPECT_EQ(app.Completions, exitInInit ? 0u : 2u);
         EXPECT_EQ(app.Shutdowns, 1u);
     }
 }
@@ -65,9 +83,8 @@ private:
 
 void CheckWorldOnly() {
     WorldOnlyApplication app;
-    RuntimeStartupResult startup;
-    EXPECT_EQ(app.Run({.Backend = render::RenderBackend::D3D12, .Systems = ApplicationSystem::World}, startup), 0);
-    EXPECT_EQ(startup.Status, RuntimeStartupStatus::Started) << startup.Reason;
+    EXPECT_EQ(app.Run(CpuOnly(std::nullopt, WorldOptions{}, std::nullopt)), 0);
+    EXPECT_EQ(app.GetStartupResult().Status, RuntimeStartupStatus::Started) << app.GetStartupResult().Reason;
 }
 
 class RenderOnlyApplication final : public Application {
@@ -92,12 +109,11 @@ private:
 
 void CheckRenderOnlyUsesCpuSceneDelivery() {
     RenderOnlyApplication app;
-    RuntimeStartupResult startup;
-    EXPECT_EQ(app.Run({.Backend = render::RenderBackend::D3D12, .Systems = ApplicationSystem::Render}, startup), 0);
-    EXPECT_EQ(startup.Status, RuntimeStartupStatus::Started) << startup.Reason;
+    EXPECT_EQ(app.Run(CpuOnly(RenderOptions{}, std::nullopt, std::nullopt)), 0);
+    EXPECT_EQ(app.GetStartupResult().Status, RuntimeStartupStatus::Started) << app.GetStartupResult().Reason;
 }
 
-class AssetOnlyApplication final : public Application {
+class CpuFrameContractApplication final : public Application {
 public:
     weak_ptr<int> Deferred;
 
@@ -109,17 +125,37 @@ protected:
         Deferred = payload;
         GetAssetManager()->DeferDestroy(std::move(payload));
     }
-    void OnUpdate(const AppUpdateContext&) override {
-        EXPECT_TRUE(Deferred.expired());
-        RequestExit();
+    void OnUpdate(const AppUpdateContext& ctx) override {
+        if (_updates == 0) {
+            EXPECT_FALSE(Deferred.expired());
+            EXPECT_EQ(ctx.LastFrameLatency.count(), 0.0f);
+            std::this_thread::sleep_for(std::chrono::milliseconds{2});
+        } else {
+            EXPECT_TRUE(Deferred.expired());
+            EXPECT_EQ(_completions, 1u);
+            EXPECT_GE(ctx.LastFrameLatency, std::chrono::milliseconds{1});
+            EXPECT_EQ(ctx.LastFrameLatency, GetFrameTimeline().GetLastFrameLatency());
+            RequestExit();
+        }
+        ++_updates;
     }
+    void OnRender(AppFrameContext&) override { ADD_FAILURE() << "GPU callback in CPU loop"; }
+    void OnRenderFrameComplete(const FlightCompletion& completion) override {
+        EXPECT_FALSE(completion.GpuWorkCompleted);
+        EXPECT_EQ(completion.FlightIndex, 0u);
+        EXPECT_EQ(completion.FrameSerial, ++_completions);
+    }
+
+private:
+    uint32_t _updates{0};
+    uint64_t _completions{0};
 };
 
-void CheckAssetOnlyRetiresWithoutGpu() {
-    AssetOnlyApplication app;
-    RuntimeStartupResult startup;
-    EXPECT_EQ(app.Run({.Backend = render::RenderBackend::D3D12, .Systems = ApplicationSystem::Asset}, startup), 0);
-    EXPECT_EQ(startup.Status, RuntimeStartupStatus::Started) << startup.Reason;
+void CheckAssetWaitMatchesFrameBoundary() {
+    CpuFrameContractApplication app;
+    EXPECT_EQ(app.Run(CpuOnly(std::nullopt, std::nullopt, AssetOptions{}, 1)), 0);
+    EXPECT_EQ(app.GetStartupResult().Status, RuntimeStartupStatus::Started) << app.GetStartupResult().Reason;
+    EXPECT_TRUE(app.Deferred.expired());
 }
 
 #if defined(RADRAY_PLATFORM_WINDOWS)
@@ -136,9 +172,14 @@ protected:
 
 void CheckWindowOnlyHasNoSwapChain() {
     WindowOnlyApplication app;
-    RuntimeStartupResult startup;
-    EXPECT_EQ(app.Run({.Backend = render::RenderBackend::D3D12, .Systems = ApplicationSystem::Window}, startup), 0);
-    EXPECT_EQ(startup.Status, RuntimeStartupStatus::Started) << startup.Reason;
+    const ApplicationRuntimeDescriptor desc{
+        .Gpu = std::nullopt,
+        .Render = std::nullopt,
+        .World = std::nullopt,
+        .Asset = std::nullopt,
+    };
+    EXPECT_EQ(app.Run(desc), 0);
+    EXPECT_EQ(app.GetStartupResult().Status, RuntimeStartupStatus::Started) << app.GetStartupResult().Reason;
 }
 #endif
 
@@ -146,7 +187,7 @@ TEST(ApplicationSystems, SelectedSystemsUseOnlyTheirDependencies) {
     { SCOPED_TRACE("empty"); CheckEmptyFrameLoopAndExitFromInit(); }
     { SCOPED_TRACE("world"); CheckWorldOnly(); }
     { SCOPED_TRACE("render"); CheckRenderOnlyUsesCpuSceneDelivery(); }
-    { SCOPED_TRACE("asset"); CheckAssetOnlyRetiresWithoutGpu(); }
+    { SCOPED_TRACE("asset"); CheckAssetWaitMatchesFrameBoundary(); }
 #if defined(RADRAY_PLATFORM_WINDOWS)
     { SCOPED_TRACE("window"); CheckWindowOnlyHasNoSwapChain(); }
 #endif
@@ -160,19 +201,10 @@ protected:
 };
 
 TEST(ApplicationSystems, InvalidDescriptorsFailBeforeOnInit) {
-    ApplicationRuntimeDescriptor descriptors[]{
-        {.Backend = render::RenderBackend::D3D12, .FlightDataCount = 0, .Systems = {}},
-        {.Backend = render::RenderBackend::D3D12, .Multithreaded = true, .Systems = {}},
-        {.Backend = render::RenderBackend::D3D12, .AssetRoot = "unused", .Systems = {}},
-        {.Backend = render::RenderBackend::D3D12, .Systems = ApplicationSystems{uint8_t{0x80}}},
-    };
-    for (const auto& desc : descriptors) {
-        InvalidStartupApplication app;
-        RuntimeStartupResult startup;
-        EXPECT_NE(app.Run(desc, startup), 0);
-        EXPECT_EQ(startup.Status, RuntimeStartupStatus::InvalidDescriptor) << startup.Reason;
-        EXPECT_EQ(app.InitCalls, 0u);
-    }
+    InvalidStartupApplication app;
+    EXPECT_NE(app.Run({.FlightDataCount = 0}), 0);
+    EXPECT_EQ(app.GetStartupResult().Status, RuntimeStartupStatus::InvalidDescriptor) << app.GetStartupResult().Reason;
+    EXPECT_EQ(app.InitCalls, 0u);
 }
 
 }  // namespace

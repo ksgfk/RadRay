@@ -229,7 +229,20 @@ void RunDraw(render::RenderBackend backend, uint32_t views, bool threaded, bool 
     SceneDrawApp app;
     app.Views = views;
     app.Drop = drop;
-    auto result = test::RunApplication(app, {.Backend = backend, .EnableValidation = true, .Multithreaded = threaded, .EnableSynchronizationValidation = true, .ShaderSourceRoot = RADRAY_SCENE_EXAMPLE_DIR, .ShaderIncludePaths = {RADRAY_SHADERLIB_DIR}, .WindowWidth = 192, .WindowHeight = 96, .FlightDataCount = 2, .BackBufferFormat = render::TextureFormat::BGRA8_UNORM, .PresentMode = render::PresentMode::FIFO, .Systems = (drop ? ApplicationSystems{ApplicationSystem::Window} : ApplicationSystems{}) | ApplicationSystem::Gpu | ApplicationSystem::Render | ApplicationSystem::World | ApplicationSystem::Asset, .EnableGpuFrameProfiler = false});
+    auto result = test::RunApplication(app, {
+        .FlightDataCount = 2,
+        .Window = drop ? std::optional<WindowOptions>{WindowOptions{.Width = 192, .Height = 96}} : std::nullopt,
+        .Gpu = GpuOptions{
+            .Backend = backend,
+            .EnableValidation = true,
+            .EnableSynchronizationValidation = true,
+            .Multithreaded = threaded,
+            .EnableFrameProfiler = false,
+            .BackBufferFormat = render::TextureFormat::BGRA8_UNORM,
+            .PresentMode = render::PresentMode::FIFO,
+        },
+        .Render = RenderOptions{.ShaderSourceRoot = RADRAY_SCENE_EXAMPLE_DIR, .ShaderIncludePaths = {RADRAY_SHADERLIB_DIR}},
+    });
     if (test::CanSkipRuntimeStartup(backend, result.Startup)) GTEST_SKIP() << result.Startup.Reason;
     ASSERT_EQ(result.Startup.Status, RuntimeStartupStatus::Started) << result.Startup.Reason;
     EXPECT_EQ(result.ExitCode, 0);

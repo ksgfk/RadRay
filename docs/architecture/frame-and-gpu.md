@@ -1,6 +1,6 @@
 > - 适用: 改帧节奏、提交时序、GPU 上传；排查"GPU 对象被提前销毁"或帧同步问题
 > - 权威: 本文是帧节奏与 GPU 资源上传的唯一说明。资产侧的延迟销毁契约见 [asset-system](asset-system.md)；RHI 本身见 [render-rhi](render-rhi.md)
-> - 锚点: `modules/runtime/include/radray/runtime/gpu_system.h`, `modules/runtime/include/radray/runtime/gpu_resource.h`, `modules/runtime/include/radray/runtime/wait_frame.h`, `modules/runtime/include/radray/runtime/render_system.h`, `modules/runtime/src/gpu_system.cpp`
+> - 锚点: `modules/runtime/include/radray/runtime/frame_timeline.h`, `modules/runtime/src/frame_timeline.cpp`, `modules/runtime/include/radray/runtime/gpu_system.h`, `modules/runtime/include/radray/runtime/gpu_resource.h`, `modules/runtime/include/radray/runtime/wait_frame.h`, `modules/runtime/include/radray/runtime/render_system.h`, `modules/runtime/src/gpu_system.cpp`
 
 # 帧节奏与 GPU 上传
 
@@ -8,10 +8,11 @@
 
 | 系统 | 负责 | 不负责 |
 |---|---|---|
-| `GpuSystem` | **何时画**。instance/factory/device/主队列/fence、flight 槽位、上传器、帧 profiler、帧边界等待表、flight 完成消息的发布与内部状态应用 | 画什么 |
+| `FrameTimeline` | 游戏帧号、FrameSerial、完成通道、每 flight 等待表、帧延迟。有无 GPU 都在 | 设备、命令提交、画什么 |
+| `GpuSystem` | **何时画**。instance/factory/device/主队列/fence、flight 槽位、上传器、帧 profiler。fence 完成后调用 `FrameTimeline::PublishCompletion` | 帧号、等待表、完成通道、画什么 |
 | `RenderSystem` | 多个持久 CPU RenderScene、按需对象 GPU 镜像、per-flight 场景操作包与视图、资产常驻与退休、program/artifact cache、RenderPass/Framebuffer registry | GPU 提交时序 |
 | `WindowManager` | 窗口创建/销毁、swapchain acquire/present/recreate、事件分发 | — |
-| `Application` | 固化帧序与关停顺序；消费 flight 完成消息；游戏侧的窄扩展点 | — |
+| `Application` | 固化帧序与关停顺序；消费 FrameTimeline 的完成通道；游戏侧的窄扩展点 | — |
 
 ## 对象参数上传与完成反馈
 
@@ -41,8 +42,8 @@ Scene 删除立即销毁 CPU Scene，将 GPU owner 转入删除批次的 Retired
 
 `gpu_system.h` 在可调用的 `GpuSystem` 函数声明上标记线程与阶段，私有函数也遵循同一约定：
 
-- **GT** 是 Application 所在线程，拥有游戏帧号与帧等待表。协程的启动、恢复和
-  取消都必须在 GT；`GetFrameIndex` / `GetCurrentFlightIndex` 读取非原子状态，不能作为 RT 的帧号来源。
+- **GT** 是 Application 所在线程，拥有 `FrameTimeline` 上的游戏帧号与帧等待表。协程的启动、恢复和
+  取消都必须在 GT；`FrameTimeline::GetFrameIndex` / `GetCurrentFlightIndex` 读取非原子状态，不能作为 RT 的帧号来源。
 - **RT** 是当前 flight 的录制线程。GT 完成 Update 并交出槽位后，RT 独占录制与提交。
   单线程模式中 RT 与 GT 是同一线程。应用显式调用 uploader 的录制也发生在 RT。
 - **GT/RT，retire 阶段** 表示两种线程都可能回收 flight，不表示函数内部提供互斥。
@@ -53,8 +54,8 @@ Scene 删除立即销毁 CPU Scene，将 GPU owner 转入删除批次的 Retired
   且尚未开始拆除；取得指针不会改变 device、queue、WindowManager 自身的线程约束。
 
 生命周期操作仍归 GT：装配与拆除必须隔离其他读者，销毁前先停止生产者、等待 render/GPU idle，
-并消费完成消息。`WaitAndRetireFlights` 自己等待 idle；`CleanupCompletedFlights` 与析构则要求
-调用前已经 idle。逐函数的具体前提以头文件中的 API 契约为准。
+并消费完成消息。`GpuSystem::WaitAndRetireFlights` 自己等待 idle；`FrameTimeline::CleanupCompletedFlights`
+与 GpuSystem 析构则要求调用前已经 idle、完成消息已经消费。逐函数的具体前提以头文件中的 API 契约为准。
 
 ## 帧序
 
@@ -77,36 +78,34 @@ runner 已取得槽位使用权；逻辑帧边界是完成批次与应用完成�
 等待可写槽和处理完成批次放在事件派发之前，让紧接着的 Update 使用这些阶段期间到达的输入。
 完成批次处理有明确终点，不会为回调新建的任务或稍后到达的 GPU 消息反复排空整个系统。
 
-未启用 Gpu 时，单线程 CPU runner 按配置的 flight 数轮转索引，帧首完成上一帧已消费的
-RenderSystem 包，再泵可选 AssetManager、scheduler 和窗口事件。Update 后若启用 RenderSystem，
-同步 Publish/Consume；退出时完成最后已发布包，未发布的退出帧在 Shutdown 中 abandon。
-该路径的 `LastFrameLatency` 为零，不创建 `AppFrameContext`、不调用 OnRender 或 GPU 完成钩子。
+未启用 Gpu 时，单线程 CPU runner 与 GPU runner 共用同一条完成路径。帧首先把各 flight 已发布的等待标为完成，再做窗口维护，然后 `ServiceFrameBoundaryGT` 消费完成通道。`FrameTimeline::BeginFrameTiming` 之后派发事件并 Update。Update 后 `AllocateFrameSerial`；如有 RenderSystem 则同步 Publish/Consume，再 `PublishCompletion`，`GpuWorkCompleted` 为 false。该模式不创建 `AppFrameContext`、不调用 OnRender，但会调用 `OnRenderFrameComplete`。退出发生在发布之前时，这一帧不补发；最后一条已发布完成在 Shutdown 中排空。`IWaitFrameProcessor::Wait` 在该 flight 下一次成为当前槽位时恢复，与 GPU 模式相同，不再在同一次 Pump 内立即完成。
 
 `DeltaTime` 是相邻逻辑帧开始时间之差，仍包含两个开始点之间的槽位等待与收尾耗时。
-`LastFrameLatency` 从同一个逻辑帧开始时间计算到 CPU 观察到该 flight fence 完成；
-包含事件派发、Update、录制、排队与 GPU 执行，不包含该帧开始前的槽位等待和完成回调。
-手动驱动 GpuSystem 时，在完成调度之后、开始本帧工作之前调用 `BeginFrameTiming`。
+`LastFrameLatency` 从同一个逻辑帧的 `BeginFrameTiming` 计算到 `PublishCompletion`。GPU 路径在观察到该 flight fence 完成时发布，包含事件派发、Update、录制、排队与 GPU 执行，不包含该帧开始前的槽位等待和完成回调。CPU 路径在同一帧场景消费之后发布，因此是该帧开始到完成发布的真实间隔。
+手动驱动 GpuSystem 时，在完成调度之后、开始本帧工作之前调用 `GpuSystem::BeginFrameTiming`；它要求当前槽位没有未完成的 fence，再转给 FrameTimeline。
 
-`BeginFrameRecord` 为每次录制生成独立 FrameSerial，完成消息保留该 serial，不能以可复用
+`BeginFrameRecord` 经 `FrameTimeline::AllocateFrameSerial` 为每次录制生成独立 FrameSerial，完成消息保留该 serial，不能以可复用
 flight index 代替提交身份。RHI 的 void Submit 返回只表示 CPU 提交调用结束，真实 GPU 完成
 由 fence 确认。应用通过 `OnRenderFrameComplete` 在游戏线程处理完成结果，自行持有需要活到
 GPU 完成的资源 owner。
 
-`CompleteFlight` 在 fence 完成后 resolve profiler，将
-`FlightCompletion{FlightIndex, GpuWorkCompleted, FrameSerial}` 写入 `GpuSystem` 持有的
-`UnboundedChannel<FlightCompletion>`，回收 staging，并发布原子 `WaitersCompleted`。
+`GpuSystem::CompleteFlight` 在 fence 完成后 resolve profiler，写入 `CompletedFrameSerial`，再调用 `FrameTimeline::PublishCompletion`。
+后者把 `FlightCompletion{FlightIndex, GpuWorkCompleted, FrameSerial}` 写入 FrameTimeline 持有的
+`UnboundedChannel<FlightCompletion>`，更新延迟，发布原子 `WaitersCompleted`，然后 GpuSystem 回收 staging。
 ThreadedRunner 在 GT 帧首用 `RetireRenderedFrames` 非阻塞检查已提交 flight；需要复用的槽位仍占用时，
 `PrepareFlightSlot` 只等待该槽位的 CPU 提交和 fence。不访问协程等待表，也不调用应用钩子。
 RT 不再回收 flight，staging 回收与 profiler resolve 发生在下一次 GT 回收边界或最终 drain。
 
-`Application` 是 channel 的唯一消费者。帧顶取得可写槽位后，`Application::ServiceFrameBoundaryGT`
-作为 `GpuSystem` 的 friend，直接通过私有 `_flightCompletions.TryRead` 非阻塞收集一个本地批次，
-先对全部完成消息调用 RenderSystem::OnFlightCompletedGT 和 GpuSystem::ReleaseFrameResourcesGT，
-验证 serial 并释放框架 owner，再调用 GpuSystem::BeginUpdateForFlight 重置槽位和派发等待者，最后通知应用。
+`Application` 是完成通道的唯一消费者。帧顶取得可写槽位后，`Application::ServiceFrameBoundaryGT`
+通过 `FrameTimeline::TryReadCompletion` 非阻塞收集一个本地批次，
+先对全部完成消息调用可选的 RenderSystem::OnFlightCompletedGT 和 GpuSystem::ReleaseFrameResourcesGT，
+验证 serial 并释放框架 owner，再 `PumpWaitFrame`；有 GPU 时 `BeginUpdateForFlight` 只重置 HostWrites。
+关停排空不指定 flight，改为 `CleanupCompletedFlights`。最后通知应用。
 不得先复用槽位再校验旧 owner。各通知服务在入口冻结本批工作，回调新建的同类通知留到下一 S0；
 等待者以地址和不复用序号联合验证，前一个回调取消后一个 waiter 不会产生悬垂派发。
 完成消息保留 FrameSerial，不能仅用可复用的 FlightIndex 识别一帧。
-`GpuWorkCompleted` 仍表示该轮渲染结果有效；false 的跳过帧也已经经过其提交的真实 fence，
+GPU 路径的 `GpuWorkCompleted` 表示该轮渲染结果有效；false 的跳过帧也已经经过其提交的真实 fence。
+CPU 路径的完成进入同一通道，但 `GpuWorkCompleted` 恒为 false，没有 fence。
 通知不代表画面已显示到屏幕。
 
 `Application::PumpFlightCompletions` 包含 GT 线程断言与覆盖内部调度、应用钩子的重入保护。
@@ -233,33 +232,30 @@ runtime 的 WindowInputRouter、AppWindow::GetInput、统一 DispatchInput 与 O
 | 组 | 成员 | 谁访问 |
 |---|---|---|
 | 录制态 | `CommandAllocator`, `Batches`, `Acquisitions`, `Uploader`, `HostWrites`, `Recording` | GT 帧顶重置 HostWrites；RT 接管后录制，应用显式上传的 staging 在 fence 后回收 |
-| 计时态 | `FrameStartTime` | 游戏线程在帧开头写 |
-| 保活态 | `Payloads`, `FrameSerial` | GT 登记/释放 payload；RT 在 BeginFrameRecord 分配编号，GT 匹配真实完成后清零 |
+| 保活态 | `Payloads`, `FrameSerial` | GT 登记/释放 payload；RT 经 FrameTimeline 分配编号，GT 匹配真实完成后清零 |
 | 提交态 | `Signal` | RT 在 `EndFrameRecordAndSubmit` 写；GT 观察 CPU 提交完成后在 retire/`CompleteFlight` 读后清 |
-| 等待表 | `WaitFrame` | 见下 |
 
 `Recording` 从 BeginFrameRecord 到提交封口前为 true；AppFrameContext 同时校验保存的 FrameSerial。
 封口后禁止继续录制，runner 的 EndFrameRecordAndSubmit 可重复收尾，不另存 Submitted 标志。
 
-完成消息不挂在槽位上。`UnboundedChannel<FlightCompletion>` 属于 `GpuSystem`，由 retire 线程
-写入、Application 在 GT 消费。`WaitFrame` 仍用槽位上的原子位，见下一节。
+完成消息、帧开始时间和等待表都不挂在槽位上，它们属于 `FrameTimeline`。完成通道由 retire 阶段的 `PublishCompletion` 写入、Application 在 GT 消费。
 
-`FrameSerial` 标识一次帧录制，由 `GpuSystem` 实例的计数器在 `BeginFrameRecord` 中从 1
-递增分配，同时标识槽位上保活资源所属的帧。非零表示该帧尚未由 GT 清理；
+`FrameSerial` 标识一次帧录制，由 `FrameTimeline::AllocateFrameSerial` 在录制线程从 1 递增分配。
+GPU 的 `BeginFrameRecord` 与 CPU runner 共用这一计数，同时标识槽位上保活资源所属的帧。非零表示该帧尚未由 GT 清理；
 GT 在 `ReleaseFrameResourcesGT` 匹配真实完成、释放 Payloads 后清零，随后槽位才可复用。
 空帧同样要完成此步骤。`AppFrameContext` 和完成消息各自保存分配时的编号，不受清零影响。
-编号只在同一 `GpuSystem` 生命周期内唯一，不同实例可以重复，不作为进程级身份。
+编号只在同一 `FrameTimeline` 生命周期内唯一，不同实例可以重复，不作为进程级身份。
 `FlightIndex` 则是循环复用的槽位索引。
 
-`_flights` 是 `vector<unique_ptr<FlightSlot>>` 而不是 `vector<FlightSlot>`：`FlightSlot`
-内含 `ManualCoroutineScheduler`，它不可拷贝也不可移动——挂起的协程记录里存着回指调度器的
-指针（stop callback），搬动槽位会让那些指针指向旧地址。数量在构造时定下且此后不变，
-故间接一层不带来任何代价。
+`_flights` 是 `vector<unique_ptr<FlightSlot>>` 而不是 `vector<FlightSlot>`：`CompletedFrameSerial` 是原子量，
+槽位地址在录制期间保持稳定。帧等待表在 FrameTimeline，不在槽位里。数量在构造时定下且此后不变。
 
 ## 帧边界等待
 
-`IWaitFrameProcessor::Wait()` 提供 GT 通知，等待表属于当前 flight。CompleteFlight 只发布原子完成事实；
+`IWaitFrameProcessor::Wait()` 由 `FrameTimeline` 实现，GpuSystem 不再提供该接口。等待表属于调用时的当前 flight。
+`PublishCompletion` 只发布原子完成事实，GPU 的 CompleteFlight 与 CPU runner 都走这里；
 GT PumpWaitFrame 通过 ManualCoroutineScheduler 冻结已就绪等待记录，再按地址和序号验证后恢复。
+等待表是 `vector<unique_ptr<Flight>>`：调度器不可移动，挂起记录的 stop callback 回指调度器。
 正常只泵当前 writable flight；终止排空先捕获每个 flight 等待表的序号截止，再处理全部 flight，
 前一个 flight 的回调为后一个 flight 新建的等待不会混入本批。
 Wait 以调用时的当前 flight 为保守覆盖点，可能多等一轮；取消经停止通道结束任务，不继续执行正常完成续体。
@@ -348,7 +344,7 @@ per-flight timestamp pool + readback。
 Submit → Present 配对。计时范围覆盖整段应用提交序列，可能包含组间 GPU 等待。
 跳过应用工作的帧不录制计时，不发布旧 query 结果。`CompleteFlight` 时读取实际提交的
 query 结果；应用只读 `GetLastGpuTimeMs()`，后端 readback barrier 差异内部隐藏。
-最近一次 GPU 耗时和 frame latency 通过原子标量发布，允许 game thread 在另一 flight 回收时读取。
+最近一次 GPU 耗时通过原子标量发布，允许 game thread 在另一 flight 回收时读取。帧延迟由 FrameTimeline 在 `PublishCompletion` 时发布。
 
 ## 呈现
 
@@ -379,10 +375,11 @@ runner 停止新帧、关闭窗口操作 → 消费并 join 已发布包
 WaitAndCleanupCompletedFlights：真实 GPU drain → 按 FrameSerial 发布完成 → S0 释放 owner
 terminal abandon：仅释放未发布 Scene 包和 raw frame owner，不生成成功 completion
 OnShutdown → 取消剩余通知 → WorldManager 显式 Shutdown
-RenderSystem → AssetManager → CPU 等待器 → AssetDatabase → GpuSystem → WindowManager
+RenderSystem → AssetManager → FrameTimeline → AssetDatabase → GpuSystem → WindowManager
 ```
 
-加载任务与保守退休任务使用独立 scope；取消加载不会取消退休。GPU 模式下 AssetManager 的退休 scope 只在 GPU drain 后终止；CPU 模式的等待器无需等待 GPU。
+加载任务与保守退休任务使用独立 scope；取消加载不会取消退休。AssetManager 的退休 scope 在完成排空后终止。
+FrameTimeline 在 AssetManager 之后、GpuSystem 之前销毁：在飞退休任务先在时间线仍存活时收束，剩余等待者取消时 device 仍在。
 普通窗口维护通过 WaitAndRetireFlights 等待 GPU 并发布完成，随后在帧边界释放 owner，
 不 abandon writer 状态；abandon 后不能恢复正常发布。
 
@@ -390,7 +387,7 @@ RenderSystem → AssetManager → CPU 等待器 → AssetDatabase → GpuSystem 
 关键约束：**`AssetManager` 必须在 `AssetDatabase` 之前销毁**（在飞 task 可能持有 importer），
 且两者都必须在 `GpuSystem` 之前销毁（GPU 资源必须在 device 之前交出）。
 
-channel 生命周期跟随 GpuSystem；关停期间保持可写，直到生产者停止且最终消息已消费后随宿主销毁。
+完成通道的生命周期跟随 FrameTimeline；关停期间保持可写，直到生产者停止且最终消息已消费后随时间线销毁。
 无需调用 `Complete()`；若使用该操作，它只禁止新写入，积压消息仍能读完。
 
 ThreadedRunner 在 join 前消费全部已发布 Scene batch，即使退出已请求，也只跳过应用绘制。
@@ -403,7 +400,7 @@ ready 交接、fence 与 flight 退休语义。
 
 ## 服务装配
 
-Application 直接创建对象、连接借用引用并调用初始化函数；依赖关系和拆除顺序均由普通代码明确表达。
+Application 先创建 FrameTimeline，再按可选配置创建其余对象、连接借用引用并调用初始化函数。GpuSystem 借用这条时间线发布完成和分配 FrameSerial。依赖关系和拆除顺序均由普通代码明确表达。
 设备由 GpuSystem 创建，WindowManager 与 GpuSystem 同时启用时才建立双向引用。
 可选资产来源、失败清理与所有权边界见
 [Application 直接装配](render-framework.md#application-直接装配)。
@@ -417,7 +414,7 @@ Application 直接创建对象、连接借用引用并调用初始化函数；�
 | `OnInit` | 所选系统就绪后一次。加载资产、Spawn Actor、建相机 |
 | `OnRender` | GPU runner 开始录制后由 Render 调用；默认空，可覆盖以记录 RHI 命令 |
 | `OnUpdate` | 每帧，`AssetManager::Pump` 之后、`World::Tick` 之前 |
-| `OnRenderFrameComplete` | GPU 模式下 game thread 消费 `FlightCompletion`，包括跳过和 shutdown；允许释放 GT 资产引用 |
+| `OnRenderFrameComplete` | game thread 消费 `FlightCompletion`，包括 GPU 跳过帧、无 GPU 的完成（`GpuWorkCompleted` 为 false）和 shutdown；允许释放 GT 资产引用 |
 | `OnShutdown` | 关停，游戏侧清理 |
 
 `Application::Update` / `Shutdown` 固化宿主时序；Render 只负责应用命令内容，不接管 runner 的提交协议。

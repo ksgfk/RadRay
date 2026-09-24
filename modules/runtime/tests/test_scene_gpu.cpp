@@ -36,7 +36,8 @@ void RunObjectBuffers(render::RenderBackend backend, uint32_t flights, bool thre
         descriptor.Device = vk;
     }
     RuntimeStartupResult startup;
-    auto gpu = GpuSystem::TryCreate(descriptor, startup);
+    FrameTimeline timeline{flights};
+    auto gpu = GpuSystem::TryCreate(descriptor, timeline, startup);
     if (test::CanSkipRuntimeStartup(backend, startup)) GTEST_SKIP() << startup.Reason;
     ASSERT_NE(gpu, nullptr) << startup.Reason;
     Application app;
@@ -168,7 +169,7 @@ void RunObjectBuffers(render::RenderBackend backend, uint32_t flights, bool thre
     renderer.BeginStoppingGT();
     renderer.AbandonUnpublishedFramesGT();
     gpu->WaitAndRetireFlights();
-    gpu->CleanupCompletedFlights();
+    timeline.CleanupCompletedFlights();
     gpu->AbandonUnpublishedResourcesTerminalGT();
     EXPECT_TRUE(logs.Errors().empty()) << logs.Errors();
 }
@@ -206,7 +207,8 @@ void RunAllocationRecovery(render::RenderBackend backend) {
         descriptor.Device = vk;
     }
     RuntimeStartupResult startup;
-    auto gpu = GpuSystem::TryCreate(descriptor, startup);
+    FrameTimeline timeline{1};
+    auto gpu = GpuSystem::TryCreate(descriptor, timeline, startup);
     if (test::CanSkipRuntimeStartup(backend, startup)) GTEST_SKIP() << startup.Reason;
     ASSERT_TRUE(gpu) << startup.Reason;
     AllocationProbe allocator{gpu->GetDevice()};
@@ -272,7 +274,7 @@ void RunAllocationRecovery(render::RenderBackend backend) {
         }
     }
     gpu->WaitAndRetireFlights();
-    gpu->CleanupCompletedFlights();
+    timeline.CleanupCompletedFlights();
     gpu->AbandonUnpublishedResourcesTerminalGT();
     EXPECT_TRUE(logs.Errors().empty()) << logs.Errors();
 }

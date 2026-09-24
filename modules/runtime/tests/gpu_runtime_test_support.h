@@ -21,7 +21,8 @@ struct RuntimeRunResult {
 
 inline RuntimeRunResult RunApplication(Application& app, const ApplicationRuntimeDescriptor& desc) {
     RuntimeRunResult result{};
-    result.ExitCode = app.Run(desc, result.Startup);
+    result.ExitCode = app.Run(desc);
+    result.Startup = app.GetStartupResult();
     return result;
 }
 

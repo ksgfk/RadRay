@@ -366,20 +366,20 @@ int main(int argc, char** argv) {
     }
     example::FrameworkStressApp app{options};
     const ApplicationRuntimeDescriptor descriptor{
-        .Backend = options.Backend,
-        .EnableValidation = options.Validation,
-        .Multithreaded = options.Multithreaded,
-        .EnableSynchronizationValidation = options.Validation,
         .AppName = "RadRay Framework Stress",
-        .ShaderSourceRoot = RADRAY_SCENE_EXAMPLE_DIR,
-        .ShaderIncludePaths = {RADRAY_SHADERLIB_DIR},
-        .WindowTitle = "RadRay Framework Stress",
         .FlightDataCount = options.Flights,
-        .BackBufferFormat = render::TextureFormat::BGRA8_UNORM,
-        .PresentMode = render::PresentMode::Immediate,
-        .Systems = (options.Window ? ApplicationSystems{ApplicationSystem::Window} : ApplicationSystems{}) |
-                   ApplicationSystem::Gpu | ApplicationSystem::Render | ApplicationSystem::World | ApplicationSystem::Asset,
-        .EnableGpuFrameProfiler = options.GpuProfiler};
+        .Window = options.Window ? std::optional<WindowOptions>{WindowOptions{.Title = "RadRay Framework Stress"}} : std::nullopt,
+        .Gpu = GpuOptions{
+            .Backend = options.Backend,
+            .EnableValidation = options.Validation,
+            .EnableSynchronizationValidation = options.Validation,
+            .Multithreaded = options.Multithreaded,
+            .EnableFrameProfiler = options.GpuProfiler,
+            .BackBufferFormat = render::TextureFormat::BGRA8_UNORM,
+            .PresentMode = render::PresentMode::Immediate,
+        },
+        .Render = RenderOptions{.ShaderSourceRoot = RADRAY_SCENE_EXAMPLE_DIR, .ShaderIncludePaths = {RADRAY_SHADERLIB_DIR}},
+    };
     const int result = app.Run(descriptor);
     return result != 0 ? result : app.Failed() ? 1
                                                : 0;

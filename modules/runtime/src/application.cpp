@@ -19,7 +19,6 @@
 #include <radray/runtime/static_mesh.h>
 #include <radray/runtime/texture_asset.h>
 #include <radray/runtime/render_system.h>
-#include <radray/runtime/wait_frame.h>
 #include <radray/runtime/world_manager.h>
 #include <radray/window/native_window.h>
 
@@ -46,11 +45,6 @@ vector<unique_ptr<AssetImporter>> MakeDefaultAssetImporters() {
     importers.push_back(make_unique<MeshImporter>());
     return importers;
 }
-
-class CpuWaitFrameProcessor final : public IWaitFrameProcessor {
-public:
-    task<void> Wait() override { co_return; }
-};
 
 }  // namespace
 
@@ -479,7 +473,7 @@ public:
         auto* gpuSystem = _app->GetGpuSystem().Get();
         MaintainWindows();
         if (_reqExit) return false;
-        const uint32_t flightIndex = gpuSystem->GetCurrentFlightIndex();
+        const uint32_t flightIndex = _app->GetFrameTimeline().GetCurrentFlightIndex();
         if (!gpuSystem->CompleteFlightIfReady(flightIndex, !isInModalLoop)) return false;
         _app->ServiceFrameBoundaryGT(flightIndex);
         const auto now = gpuSystem->BeginFrameTiming(flightIndex);
@@ -499,7 +493,7 @@ public:
             MarkModalLoopActivityDuringDispatch();
         }
         auto* gpuSystem = _app->GetGpuSystem().Get();
-        const uint32_t flightIndex = gpuSystem->GetCurrentFlightIndex();
+        const uint32_t flightIndex = _app->GetFrameTimeline().GetCurrentFlightIndex();
         const auto deltaTime = _deltaTime;
 
         AppUpdateResult result{};
@@ -508,7 +502,7 @@ public:
             result = _app->Update(AppUpdateContext{
                 .FlightIndex = flightIndex,
                 .DeltaTime = deltaTime,
-                .LastFrameLatency = gpuSystem->GetLastFrameLatency()});
+                .LastFrameLatency = _app->GetFrameTimeline().GetLastFrameLatency()});
         }
         _reqExit = result.ShouldExit;
         if (_reqExit) {
@@ -519,7 +513,7 @@ public:
         AppFrameContext frameCtx = gpuSystem->BeginFrameRecord(
             flightIndex,
             deltaTime,
-            gpuSystem->GetLastFrameLatency(),
+            _app->GetFrameTimeline().GetLastFrameLatency(),
             isInModalLoop);
         _app->ApplySceneUpdatesRT(frameCtx);
         {
@@ -530,7 +524,7 @@ public:
             RADRAY_PROFILE_SCOPE_N("Submit");
             gpuSystem->EndFrameRecordAndSubmit(flightIndex);
         }
-        gpuSystem->AdvanceFrameIndex();
+        _app->GetFrameTimeline().AdvanceFrameIndex();
         RADRAY_PROFILE_FRAME();
     }
 
@@ -648,7 +642,7 @@ public:
             AppFrameContext frameCtx = gpuSystem->BeginFrameRecord(
                 flightIndex,
                 runnerFrameData.DeltaTime,
-                gpuSystem->GetLastFrameLatency(),
+                _app->GetFrameTimeline().GetLastFrameLatency(),
                 runnerFrameData.IsInModalLoop, !discard);
             _app->ApplySceneUpdatesRT(frameCtx);
             if (!discard) {
@@ -672,7 +666,7 @@ public:
         }
         _hasModalLoopActivityDuringDispatch = true;
 
-        const uint64_t frameIndex = _app->GetGpuSystem()->GetFrameIndex();
+        const uint64_t frameIndex = _app->GetFrameTimeline().GetFrameIndex();
         _discardNonModalFramesBefore.store(frameIndex, std::memory_order_release);
         WaitRenderFrameComplete(frameIndex);
         RetireRenderedFrames();
@@ -686,7 +680,7 @@ public:
         if (windows == nullptr) return;
         if (!windows->NeedsMaintenance()) return;
         const uint64_t boundary = windows->GetOperationBoundary();
-        const uint64_t published = _app->GetGpuSystem()->GetFrameIndex();
+        const uint64_t published = _app->GetFrameTimeline().GetFrameIndex();
         WaitRenderFrameComplete(published);
         _app->GetGpuSystem()->WaitAndRetireFlights();
         _retireFrameIndex = published;
@@ -702,11 +696,11 @@ public:
         auto* gpuSystem = _app->GetGpuSystem().Get();
         MaintainWindows();
         if (_reqExit) return false;
-        if (!waitForWritableSlot && _renderedFrameCount.load(std::memory_order_acquire) < gpuSystem->GetFrameIndex()) return false;
+        if (!waitForWritableSlot && _renderedFrameCount.load(std::memory_order_acquire) < _app->GetFrameTimeline().GetFrameIndex()) return false;
         RADRAY_PROFILE_SCOPE_N("PrepareFrame");
         if (!PrepareFlightSlot(waitForWritableSlot)) return false;
 
-        const uint64_t frameIndex = gpuSystem->GetFrameIndex();
+        const uint64_t frameIndex = _app->GetFrameTimeline().GetFrameIndex();
         const uint32_t flightIndex = static_cast<uint32_t>(frameIndex % gpuSystem->GetFlightDataCount());
         {
             RADRAY_PROFILE_SCOPE_N("Application::GpuBeginUpdateForFlight");
@@ -727,7 +721,7 @@ public:
         _framePrepared = false;
         RADRAY_PROFILE_SCOPE_N("TickFrame");
         auto* gpuSystem = _app->GetGpuSystem().Get();
-        const uint64_t frameIndex = gpuSystem->GetFrameIndex();
+        const uint64_t frameIndex = _app->GetFrameTimeline().GetFrameIndex();
         const uint32_t flightIndex = static_cast<uint32_t>(frameIndex % gpuSystem->GetFlightDataCount());
         const auto deltaTime = _deltaTime;
         _runnerFrameDatas[flightIndex].DeltaTime = deltaTime;
@@ -738,7 +732,7 @@ public:
             result = _app->Update(AppUpdateContext{
                 .FlightIndex = flightIndex,
                 .DeltaTime = deltaTime,
-                .LastFrameLatency = gpuSystem->GetLastFrameLatency()});
+                .LastFrameLatency = _app->GetFrameTimeline().GetLastFrameLatency()});
         }
         _reqExit = result.ShouldExit;
         if (_reqExit) {
@@ -746,7 +740,7 @@ public:
         }
 
         if (auto renderSystem = _app->GetRenderSystem()) renderSystem->PublishFrameGT(flightIndex);
-        gpuSystem->AdvanceFrameIndex();
+        _app->GetFrameTimeline().AdvanceFrameIndex();
         _publishedFrameCount.store(frameIndex + 1, std::memory_order_release);
         _readySlotsSemaphore.release();
         return frameIndex + 1;
@@ -769,7 +763,7 @@ public:
         RADRAY_PROFILE_SCOPE_N("WaitWritableSlot");
         auto* gpuSystem = _app->GetGpuSystem().Get();
         RetireRenderedFrames();
-        if (gpuSystem->GetFrameIndex() - _retireFrameIndex < gpuSystem->GetFlightDataCount()) return true;
+        if (_app->GetFrameTimeline().GetFrameIndex() - _retireFrameIndex < gpuSystem->GetFlightDataCount()) return true;
         if (!wait) return false;
         // Wait only for the oldest slot's submission, never for the newest recording.
         WaitRenderFrameComplete(_retireFrameIndex + 1);
@@ -822,41 +816,35 @@ public:
     explicit CpuRunner(Application* app) noexcept : _app(app) {}
 
     int Run() {
-        uint64_t frameSerial = 0;
-        uint64_t pendingSerial = 0;
-        uint32_t pendingFlight = 0;
+        auto& timeline = _app->GetFrameTimeline();
         auto lastFrameTime = std::chrono::steady_clock::now();
         while (!_app->ShouldExit()) {
+            for (uint32_t flight = 0; flight < timeline.GetFlightDataCount(); ++flight) {
+                timeline.MarkCompletedWaitFrames(flight);
+            }
             auto* windows = _app->GetWindowManager().Get();
             if (windows != nullptr && windows->NeedsMaintenance()) {
                 const uint64_t boundary = windows->GetOperationBoundary();
                 windows->ProcessOperations(boundary);
             }
-            if (pendingSerial != 0) {
-                _app->GetRenderSystem()->OnFlightCompletedGT(FlightCompletion{pendingFlight, true, pendingSerial});
-                pendingSerial = 0;
-            }
-            const uint32_t flightIndex = static_cast<uint32_t>(frameSerial % _app->_flightDataCount);
+            const uint32_t flightIndex = timeline.GetCurrentFlightIndex();
             _app->ServiceFrameBoundaryGT(flightIndex);
+            const auto now = timeline.BeginFrameTiming(flightIndex);
             if (windows != nullptr) windows->DispatchEvents();
             if (_app->ShouldExit()) break;
 
-            const auto now = std::chrono::steady_clock::now();
             const std::chrono::duration<float> deltaTime = now - lastFrameTime;
             lastFrameTime = now;
-            const auto result = _app->Update(AppUpdateContext{flightIndex, deltaTime, {}});
+            const auto result = _app->Update(AppUpdateContext{flightIndex, deltaTime, timeline.GetLastFrameLatency()});
             if (result.ShouldExit) break;
+            const uint64_t serial = timeline.AllocateFrameSerial();
             if (auto renderSystem = _app->GetRenderSystem()) {
                 renderSystem->PublishFrameGT(flightIndex);
-                renderSystem->ConsumeRenderUpdates(flightIndex, frameSerial + 1);
-                pendingSerial = frameSerial + 1;
-                pendingFlight = flightIndex;
+                renderSystem->ConsumeRenderUpdates(flightIndex, serial);
             }
-            ++frameSerial;
+            timeline.PublishCompletion(FlightCompletion{flightIndex, false, serial});
+            timeline.AdvanceFrameIndex();
             RADRAY_PROFILE_FRAME();
-        }
-        if (pendingSerial != 0) {
-            _app->GetRenderSystem()->OnFlightCompletedGT(FlightCompletion{pendingFlight, true, pendingSerial});
         }
         return _app->Shutdown(AppShutdownContext{});
     }
@@ -867,7 +855,7 @@ private:
 
 void Application::ServiceFrameBoundaryGT(uint32_t flightIndex) {
     RADRAY_PROFILE_SCOPE_N("Application::ServiceFrameBoundaryGT");
-    if (_gpuSystem != nullptr) PumpFlightCompletions(flightIndex);
+    PumpFlightCompletions(flightIndex);
     if (_assetManager) _assetManager->Pump();
     _scheduler.Pump();
 }
@@ -882,29 +870,30 @@ void Application::ApplySceneUpdatesRT(AppFrameContext& ctx) {
 }
 
 void Application::WaitAndCleanupCompletedFlights() {
-    _gpuSystem->WaitAndRetireFlights();
+    if (_gpuSystem != nullptr) _gpuSystem->WaitAndRetireFlights();
     PumpFlightCompletions(std::nullopt);
 }
 
 void Application::PumpFlightCompletions(std::optional<uint32_t> flightIndex) {
     RADRAY_ASSERT(std::this_thread::get_id() == _applicationThread);
-    if (_processingFlightCompletions) return;
+    if (_frameTimeline == nullptr || _processingFlightCompletions) return;
     _processingFlightCompletions = true;
     auto scope = MakeScopeGuard([this]() noexcept { _processingFlightCompletions = false; });
 
     vector<FlightCompletion> completions;
     FlightCompletion completion;
-    while (_gpuSystem->_flightCompletions.TryRead(completion)) {
+    while (_frameTimeline->TryReadCompletion(completion)) {
         completions.push_back(completion);
     }
     for (const auto& c : completions) {
         if (_renderSystem != nullptr) _renderSystem->OnFlightCompletedGT(c);
-        _gpuSystem->ReleaseFrameResourcesGT(c);
+        if (_gpuSystem != nullptr) _gpuSystem->ReleaseFrameResourcesGT(c);
     }
     if (flightIndex) {
-        _gpuSystem->BeginUpdateForFlight(*flightIndex);
+        _frameTimeline->PumpWaitFrame(*flightIndex);
+        if (_gpuSystem != nullptr) _gpuSystem->BeginUpdateForFlight(*flightIndex);
     } else {
-        _gpuSystem->CleanupCompletedFlights();
+        _frameTimeline->CleanupCompletedFlights();
     }
     for (const auto& c : completions) {
         OnRenderFrameComplete(c);
@@ -962,13 +951,12 @@ bool Application::ShouldExit() const noexcept {
 
 void Application::StopAndDrainRuntime() {
     _scheduler.BeginStopping();
+    if (_frameTimeline != nullptr) _frameTimeline->BeginStopping();
     if (_worldManager != nullptr) _worldManager->BeginStopping();
     if (_renderSystem != nullptr) _renderSystem->BeginStoppingGT();
     if (_assetManager) _assetManager->BeginStopping();
     if (_windowManager != nullptr) _windowManager->CloseOperations();
-    if (_gpuSystem != nullptr) {
-        WaitAndCleanupCompletedFlights();
-    }
+    if (_frameTimeline != nullptr) WaitAndCleanupCompletedFlights();
     if (_renderSystem) _renderSystem->AbandonUnpublishedFramesGT();
     if (_gpuSystem) _gpuSystem->AbandonUnpublishedResourcesTerminalGT();
 }
@@ -995,7 +983,8 @@ void Application::DestroyRuntime() noexcept {
     _renderSystem.reset();
     // AssetManager 析构会 force-unload 全部资产,释放 GPU buffer(须在 device 销毁前)。
     _assetManager.reset();
-    _cpuWaitFrameProcessor.reset();
+    // 先取消帧等待，再拆 device。等待者恢复时 device 仍在。
+    _frameTimeline.reset();
     // importer 与 settings 必须活到全部在飞加载协程被 AssetManager 收束之后。
     _assetDatabase.reset();
     if (_windowManager != nullptr) {
@@ -1009,31 +998,29 @@ void Application::DestroyRuntime() noexcept {
     _windowManager.reset();
 }
 
-bool Application::InitializeRuntime(const ApplicationRuntimeDescriptor& desc, RuntimeStartupResult& startup) {
-    startup = {};
-    const auto fail = [&startup](RuntimeStartupStatus status, std::string_view reason) {
-        startup.Status = status;
-        startup.Reason = reason;
+bool Application::InitializeRuntime(const ApplicationRuntimeDescriptor& desc) {
+    _startup = {};
+    const auto fail = [this](RuntimeStartupStatus status, std::string_view reason) {
+        _startup.Status = status;
+        _startup.Reason = reason;
         RADRAY_ERR_LOG("Application startup failed: {}", reason);
         return false;
     };
-    constexpr uint8_t knownSystems = 31;
-    if ((desc.Systems.value() & ~knownSystems) != 0)
-        return fail(RuntimeStartupStatus::InvalidDescriptor, "Unknown ApplicationSystem flag");
     if (desc.FlightDataCount == 0)
         return fail(RuntimeStartupStatus::InvalidDescriptor, "FlightDataCount must be positive");
-    if (desc.Multithreaded && !desc.Systems.HasFlag(ApplicationSystem::Gpu))
-        return fail(RuntimeStartupStatus::InvalidDescriptor, "Multithreaded mode requires Gpu");
-    if (!desc.AssetRoot.empty() && !desc.Systems.HasFlag(ApplicationSystem::Asset))
-        return fail(RuntimeStartupStatus::InvalidDescriptor, "AssetRoot requires Asset");
 
-    _multithreaded = desc.Multithreaded;
-    _flightDataCount = desc.FlightDataCount;
+    _multithreaded = desc.Gpu && desc.Gpu->Multithreaded;
     _exitRequested.store(false, std::memory_order_relaxed);
-    _shaderSourceRoot = desc.ShaderSourceRoot;
-    _shaderIncludePaths = desc.ShaderIncludePaths;
+    if (desc.Render) {
+        _shaderSourceRoot = desc.Render->ShaderSourceRoot;
+        _shaderIncludePaths = desc.Render->ShaderIncludePaths;
+    } else {
+        _shaderSourceRoot.clear();
+        _shaderIncludePaths.clear();
+    }
+    _frameTimeline = make_unique<FrameTimeline>(desc.FlightDataCount);
 
-    if (desc.Systems.HasFlag(ApplicationSystem::Window)) {
+    if (desc.Window) {
         WindowManagerDescriptor windowManagerDesc{};
 #ifdef RADRAY_PLATFORM_WINDOWS
         windowManagerDesc.Type = NativeWindowType::Win32HWND;
@@ -1041,23 +1028,24 @@ bool Application::InitializeRuntime(const ApplicationRuntimeDescriptor& desc, Ru
         _windowManager = make_unique<WindowManager>(windowManagerDesc);
     }
 
-    if (desc.Systems.HasFlag(ApplicationSystem::Gpu)) {
+    if (desc.Gpu) {
+        const GpuOptions& gpu = *desc.Gpu;
         render::VulkanInstanceDescriptor instanceDesc{
-        .AppName = desc.AppName,
-        .EngineName = desc.EngineName,
-        .IsEnableDebugLayer = desc.EnableValidation,
-        .IsEnableGpuBasedValid = false,
-        .IsEnableSynchronizationValidation = desc.EnableSynchronizationValidation};
+            .AppName = desc.AppName,
+            .EngineName = desc.EngineName,
+            .IsEnableDebugLayer = gpu.EnableValidation,
+            .IsEnableGpuBasedValid = false,
+            .IsEnableSynchronizationValidation = gpu.EnableSynchronizationValidation};
         render::DXGIFactoryDescriptor factoryDesc{
-        .IsEnableDebugLayer = desc.EnableValidation,
-        .IsEnableGpuBasedValid = false};
+            .IsEnableDebugLayer = gpu.EnableValidation,
+            .IsEnableGpuBasedValid = false};
         render::VulkanCommandQueueDescriptor queueDesc{render::QueueType::Direct, 1};
         render::DeviceDescriptor deviceDesc{};
-        if (desc.Backend == render::RenderBackend::Vulkan) {
+        if (gpu.Backend == render::RenderBackend::Vulkan) {
             render::VulkanDeviceDescriptor vulkanDeviceDesc{};
             vulkanDeviceDesc.Queues = std::span{&queueDesc, 1};
             deviceDesc = vulkanDeviceDesc;
-        } else if (desc.Backend == render::RenderBackend::D3D12) {
+        } else if (gpu.Backend == render::RenderBackend::D3D12) {
             deviceDesc = render::D3D12DeviceDescriptor{};
         } else {
             DestroyRuntime();
@@ -1065,37 +1053,37 @@ bool Application::InitializeRuntime(const ApplicationRuntimeDescriptor& desc, Ru
         }
 
         GpuSystemDescriptor gpuSysDesc{
-        .VulkanInstance = instanceDesc,
-        .DXGIFactory = factoryDesc,
-        .Device = deviceDesc,
-        .MainQueueIndex = 0,
-        .BackBufferCount = desc.BackBufferCount,
-        .FlightDataCount = desc.FlightDataCount,
-        .EnableFrameProfiler = desc.EnableGpuFrameProfiler};
-        _gpuSystem = GpuSystem::TryCreate(gpuSysDesc, startup);
+            .VulkanInstance = instanceDesc,
+            .DXGIFactory = factoryDesc,
+            .Device = deviceDesc,
+            .MainQueueIndex = 0,
+            .BackBufferCount = gpu.BackBufferCount,
+            .FlightDataCount = desc.FlightDataCount,
+            .EnableFrameProfiler = gpu.EnableFrameProfiler};
+        _gpuSystem = GpuSystem::TryCreate(gpuSysDesc, *_frameTimeline, _startup);
         if (_gpuSystem == nullptr) {
+            RADRAY_ERR_LOG("Application startup failed: {}", _startup.Reason);
             DestroyRuntime();
             return false;
         }
     }
-    if (desc.Systems.HasFlag(ApplicationSystem::Render)) {
+    if (desc.Render) {
         _renderSystem = make_unique<RenderSystem>(this, desc.FlightDataCount);
     }
-    if (desc.Systems.HasFlag(ApplicationSystem::World)) {
+    if (desc.World) {
         _worldManager = make_unique<WorldManager>(this, _renderSystem.get());
     }
-    if (desc.Systems.HasFlag(ApplicationSystem::Asset)) {
+    if (desc.Asset) {
         _assetManager = make_unique<AssetManager>();
-        if (_gpuSystem == nullptr) _cpuWaitFrameProcessor = make_unique<CpuWaitFrameProcessor>();
-    }
-    if (_assetManager != nullptr && !desc.AssetRoot.empty()) {
-        string error;
-        _assetDatabase = AssetDatabase::Open(
-            desc.AssetRoot,
-            MakeDefaultAssetImporters(),
-            error);
-        if (_assetDatabase == nullptr) {
-            RADRAY_ERR_LOG("open asset database failed: {}", error);
+        if (!desc.Asset->AssetRoot.empty()) {
+            string error;
+            _assetDatabase = AssetDatabase::Open(
+                desc.Asset->AssetRoot,
+                MakeDefaultAssetImporters(),
+                error);
+            if (_assetDatabase == nullptr) {
+                RADRAY_ERR_LOG("open asset database failed: {}", error);
+            }
         }
     }
 
@@ -1106,7 +1094,7 @@ bool Application::InitializeRuntime(const ApplicationRuntimeDescriptor& desc, Ru
     if (_gpuSystem != nullptr) _gpuSystem->SetWindowManager(_windowManager.get());
     if (_renderSystem != nullptr) _renderSystem->SetGpuSystem(_gpuSystem.get());
     if (_assetManager != nullptr) {
-        _assetManager->SetWaitFrameProcessor(_gpuSystem != nullptr ? static_cast<IWaitFrameProcessor*>(_gpuSystem.get()) : _cpuWaitFrameProcessor.get());
+        _assetManager->SetWaitFrameProcessor(_frameTimeline.get());
         _assetManager->SetAssetSource(_assetDatabase.get());
     }
 
@@ -1118,9 +1106,9 @@ bool Application::InitializeRuntime(const ApplicationRuntimeDescriptor& desc, Ru
     if (_windowManager != nullptr) {
         WindowCreateDescriptor wndDesc{};
 #ifdef RADRAY_PLATFORM_WINDOWS
-        wndDesc.Title = desc.WindowTitle;
-        wndDesc.Width = desc.WindowWidth;
-        wndDesc.Height = desc.WindowHeight;
+        wndDesc.Title = desc.Window->Title;
+        wndDesc.Width = desc.Window->Width;
+        wndDesc.Height = desc.Window->Height;
         wndDesc.Resizable = true;
         wndDesc.StartVisible = true;
 #else
@@ -1130,28 +1118,23 @@ bool Application::InitializeRuntime(const ApplicationRuntimeDescriptor& desc, Ru
         std::optional<WindowSwapChainDescriptor> swapchainDesc;
         if (_gpuSystem != nullptr) {
             swapchainDesc = WindowSwapChainDescriptor{};
-            swapchainDesc->Width = static_cast<uint32_t>(desc.WindowWidth);
-            swapchainDesc->Height = static_cast<uint32_t>(desc.WindowHeight);
-            swapchainDesc->Format = desc.BackBufferFormat;
-            swapchainDesc->PresentMode = desc.PresentMode;
+            swapchainDesc->Width = static_cast<uint32_t>(desc.Window->Width);
+            swapchainDesc->Height = static_cast<uint32_t>(desc.Window->Height);
+            swapchainDesc->Format = desc.Gpu->BackBufferFormat;
+            swapchainDesc->PresentMode = desc.Gpu->PresentMode;
         }
         if (!_windowManager->InitializeMainWindow(wndDesc, swapchainDesc)) {
             DestroyRuntime();
             return fail(RuntimeStartupStatus::InitializationFailed, "Main window or swapchain initialization failed");
         }
     }
-    startup.Status = RuntimeStartupStatus::Started;
-    startup.Reason.clear();
+    _startup.Status = RuntimeStartupStatus::Started;
+    _startup.Reason.clear();
     return true;
 }
 
 int Application::Run(const ApplicationRuntimeDescriptor& desc) {
-    RuntimeStartupResult startup;
-    return Run(desc, startup);
-}
-
-int Application::Run(const ApplicationRuntimeDescriptor& desc, RuntimeStartupResult& startup) {
-    if (!InitializeRuntime(desc, startup)) return 1;
+    if (!InitializeRuntime(desc)) return 1;
     OnInit();
     if (_worldManager != nullptr) _worldManager->FinalizeWorldsGT();
     if (ShouldExit()) return Shutdown(AppShutdownContext{});

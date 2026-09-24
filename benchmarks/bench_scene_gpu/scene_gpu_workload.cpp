@@ -6,7 +6,7 @@
 namespace radray::benchmarking {
 
 SceneGpuWorkload::SceneGpuWorkload(render::RenderBackend backend, uint32_t flights, uint32_t changes, uint32_t views, SceneGpuLoad load)
-    : _load(load), _serials(flights, 0), _changes(changes), _views(views) {
+    : _timeline(flights), _load(load), _serials(flights, 0), _changes(changes), _views(views) {
     const render::VulkanCommandQueueDescriptor queue{render::QueueType::Direct, 1};
     GpuSystemDescriptor descriptor{.FlightDataCount = flights, .EnableFrameProfiler = true};
     if (backend == render::RenderBackend::Vulkan) {
@@ -15,7 +15,7 @@ SceneGpuWorkload::SceneGpuWorkload(render::RenderBackend backend, uint32_t fligh
         descriptor.Device = vk;
     }
     RuntimeStartupResult startup;
-    _gpu = GpuSystem::TryCreate(descriptor, startup);
+    _gpu = GpuSystem::TryCreate(descriptor, _timeline, startup);
     if (!_gpu) {
         _error = startup.Reason;
         return;
@@ -82,7 +82,7 @@ SceneGpuWorkload::~SceneGpuWorkload() {
     if (_world) _world->ShutdownWorld();
     _renderer->BeginStoppingGT();
     _renderer->AbandonUnpublishedFramesGT();
-    _gpu->CleanupCompletedFlights();
+    _timeline.CleanupCompletedFlights();
     _gpu->AbandonUnpublishedResourcesTerminalGT();
     _renderer.reset();
 }

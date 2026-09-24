@@ -180,7 +180,7 @@ protected:
 
     void OnUpdate(const AppUpdateContext& ctx) override {
         EXPECT_EQ(ctx.FlightIndex, _updates % _flightCount);
-        EXPECT_EQ(ctx.LastFrameLatency.count(), 0.0f);
+        if (_updates == 0) EXPECT_EQ(ctx.LastFrameLatency.count(), 0.0f);
         ++_updates;
         if (_updates == 1) {
             _firstScene = *GetWorldManager()->GetWorld(_firstWorld)->GetRenderSceneId();
@@ -200,7 +200,10 @@ protected:
     }
 
     void OnRender(AppFrameContext&) override { ADD_FAILURE() << "CPU frame loop must not record GPU work"; }
-    void OnRenderFrameComplete(const FlightCompletion&) override { ADD_FAILURE() << "CPU frame loop has no GPU completion"; }
+    void OnRenderFrameComplete(const FlightCompletion& completion) override {
+        EXPECT_FALSE(completion.GpuWorkCompleted);
+        EXPECT_GT(completion.FrameSerial, 0u);
+    }
     void OnShutdown() override {
         EXPECT_EQ(_updates, 4u);
         EXPECT_TRUE(GetRenderSystem()->GetSceneRT(_firstScene)->ContainsShape(_firstShape));
@@ -223,11 +226,8 @@ TEST(SceneDeliveryRunner, CpuOnlyWorldSceneFrames) {
     for (uint32_t flightCount : {1u, 2u, 3u, 8u}) {
         SCOPED_TRACE(flightCount);
         CpuSceneDeliveryApp app{flightCount};
-        RuntimeStartupResult startup;
-        EXPECT_EQ(app.Run({.Backend = render::RenderBackend::D3D12,
-                           .FlightDataCount = flightCount,
-                           .Systems = ApplicationSystem::Render | ApplicationSystem::World}, startup), 0);
-        EXPECT_EQ(startup.Status, RuntimeStartupStatus::Started) << startup.Reason;
+        EXPECT_EQ(app.Run({.FlightDataCount = flightCount, .Window = std::nullopt, .Gpu = std::nullopt, .Asset = std::nullopt}), 0);
+        EXPECT_EQ(app.GetStartupResult().Status, RuntimeStartupStatus::Started) << app.GetStartupResult().Reason;
     }
 }
 
@@ -291,7 +291,7 @@ protected:
     }
 
     void OnShutdown() override {
-        PublishedFrames = GetGpuSystem()->GetFrameIndex();
+        PublishedFrames = GetFrameTimeline().GetFrameIndex();
         EXPECT_EQ(PublishedFrames, _updates - 1);
         EXPECT_EQ(Completed, PublishedFrames);
         const auto scene = GetRenderSystem()->GetSceneRT(_sceneId);
@@ -323,10 +323,20 @@ void RunSceneDelivery(render::RenderBackend backend, bool threaded, bool drainOn
         SCOPED_TRACE(count);
         test::RuntimeLogCapture logs;
         SceneDeliveryApp app{drainOnExit};
-        const ApplicationSystems systems = drainOnExit
-            ? ApplicationSystem::Window | ApplicationSystem::Gpu | ApplicationSystem::Render | ApplicationSystem::World
-            : ApplicationSystem::Gpu | ApplicationSystem::Render | ApplicationSystem::World;
-        auto run = test::RunApplication(app, {.Backend = backend, .EnableValidation = true, .Multithreaded = threaded, .EnableSynchronizationValidation = true, .WindowTitle = "RenderScene delivery", .WindowWidth = 80, .WindowHeight = 60, .FlightDataCount = count, .BackBufferFormat = render::TextureFormat::BGRA8_UNORM, .PresentMode = render::PresentMode::FIFO, .Systems = systems, .EnableGpuFrameProfiler = false});
+        auto run = test::RunApplication(app, {
+            .FlightDataCount = count,
+            .Window = drainOnExit ? std::optional<WindowOptions>{WindowOptions{.Title = "RenderScene delivery", .Width = 80, .Height = 60}} : std::nullopt,
+            .Gpu = GpuOptions{
+                .Backend = backend,
+                .EnableValidation = true,
+                .EnableSynchronizationValidation = true,
+                .Multithreaded = threaded,
+                .EnableFrameProfiler = false,
+                .BackBufferFormat = render::TextureFormat::BGRA8_UNORM,
+                .PresentMode = render::PresentMode::FIFO,
+            },
+            .Asset = std::nullopt,
+        });
         if (test::CanSkipRuntimeStartup(backend, run.Startup)) GTEST_SKIP() << run.Startup.Reason;
         ASSERT_EQ(run.Startup.Status, RuntimeStartupStatus::Started) << run.Startup.Reason;
         ASSERT_EQ(run.ExitCode, 0);
@@ -425,7 +435,18 @@ void RunMultiWorldDelivery(render::RenderBackend backend, bool threaded) {
         SCOPED_TRACE(count);
         test::RuntimeLogCapture logs;
         MultiWorldDeliveryApp app;
-        auto run = test::RunApplication(app, {.Backend = backend, .EnableValidation = true, .Multithreaded = threaded, .EnableSynchronizationValidation = true, .FlightDataCount = count, .Systems = ApplicationSystem::Gpu | ApplicationSystem::Render | ApplicationSystem::World, .EnableGpuFrameProfiler = false});
+        auto run = test::RunApplication(app, {
+            .FlightDataCount = count,
+            .Window = std::nullopt,
+            .Gpu = GpuOptions{
+                .Backend = backend,
+                .EnableValidation = true,
+                .EnableSynchronizationValidation = true,
+                .Multithreaded = threaded,
+                .EnableFrameProfiler = false,
+            },
+            .Asset = std::nullopt,
+        });
         if (test::CanSkipRuntimeStartup(backend, run.Startup)) GTEST_SKIP() << run.Startup.Reason;
         ASSERT_EQ(run.Startup.Status, RuntimeStartupStatus::Started) << run.Startup.Reason;
         ASSERT_EQ(run.ExitCode, 0);

@@ -186,7 +186,7 @@ protected:
         _tasks.RequestStop();
         EXPECT_TRUE(Completed);
         EXPECT_EQ(_verified, _recorded.load());
-        EXPECT_EQ(_completedSerials.size(), GetGpuSystem()->GetFrameIndex());
+        EXPECT_EQ(_completedSerials.size(), GetFrameTimeline().GetFrameIndex());
         EXPECT_EQ(_flights.size(), GetGpuSystem()->GetFlightDataCount());
         EXPECT_GT(_explicitSubmissions.load(), 0u);
         EXPECT_GT(_automaticSubmissions.load(), 0u);
@@ -242,7 +242,7 @@ private:
         _phase = phase;
         const uint32_t required = _lifecycle ? 4 : 12;
         while (_completedPhases[phase] < required) {
-            co_await GetGpuSystem()->Wait();
+            co_await GetFrameTimeline().Wait();
             // Inspect completion counts in Update, after the completion callback batch.
             co_await GetScheduler().SwitchTo();
         }
@@ -348,19 +348,22 @@ void RunMultiWindow(render::RenderBackend backend, bool threaded, bool lifecycle
     test::RuntimeLogCapture logs;
     {
         MultiWindowApp app{lifecycle};
-        auto run = test::RunApplication(app, {.Backend = backend,
-                           .EnableValidation = true,
-                           .Multithreaded = threaded,
-                           .EnableSynchronizationValidation = true,
-                           .WindowTitle = "Multi-window main",
-                           .WindowWidth = 280,
-                           .WindowHeight = 200,
-                           .BackBufferCount = 3,
-                           .FlightDataCount = lifecycle ? 3u : 2u,
-                           .BackBufferFormat = render::TextureFormat::BGRA8_UNORM,
-                           .PresentMode = render::PresentMode::FIFO,
-                           .Systems = ApplicationSystem::Window | ApplicationSystem::Gpu | ApplicationSystem::Render,
-                           .EnableGpuFrameProfiler = false});
+        auto run = test::RunApplication(app, {
+            .FlightDataCount = lifecycle ? 3u : 2u,
+            .Window = WindowOptions{.Title = "Multi-window main", .Width = 280, .Height = 200},
+            .Gpu = GpuOptions{
+                .Backend = backend,
+                .EnableValidation = true,
+                .EnableSynchronizationValidation = true,
+                .Multithreaded = threaded,
+                .EnableFrameProfiler = false,
+                .BackBufferCount = 3,
+                .BackBufferFormat = render::TextureFormat::BGRA8_UNORM,
+                .PresentMode = render::PresentMode::FIFO,
+            },
+            .World = std::nullopt,
+            .Asset = std::nullopt,
+        });
         if (test::CanSkipRuntimeStartup(backend, run.Startup)) GTEST_SKIP() << run.Startup.Reason;
         ASSERT_EQ(run.Startup.Status, RuntimeStartupStatus::Started) << run.Startup.Reason;
         ASSERT_EQ(run.ExitCode, 0);
