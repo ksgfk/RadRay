@@ -159,7 +159,7 @@ private:
     bool _pending[kFlights]{};
 };
 
-class CountingActor : public Actor {
+class ScenarioCountingActor : public Actor {
 public:
     int Ticks{0};
     void Tick(float) override { ++Ticks; }
@@ -322,7 +322,7 @@ public:
 
 TEST(FrameScenarios, PatrolPublishesOnlyTheMovingCharacter) {
     Session session;
-    auto* dormant = session.GetWorld().SpawnActor<CountingActor>();
+    auto* dormant = session.GetWorld().SpawnActor<ScenarioCountingActor>();
     auto* dormantMesh = session.AddMesh(*dormant, nullptr, {0, 2, 5});
     vector<StaticMeshComponent*> scenery;
     for (int i = 0; i < 7; ++i) {
@@ -405,12 +405,12 @@ TEST(FrameScenarios, FirefightProjectilesTickNextFrameAndCancelSameFramePuffs) {
     fight.Mesh = session.Mesh();
     vector<ShapeId> covers;
     for (int i = 0; i < 4; ++i) {
-        auto* actor = session.GetWorld().SpawnActor<CountingActor>();
+        auto* actor = session.GetWorld().SpawnActor<ScenarioCountingActor>();
         covers.push_back(session.AddMesh(*actor, nullptr, {10.0f + float(i), 0, 0})->GetShapeId());
     }
     auto* gunner = session.GetWorld().SpawnActor<Gunner>(&fight);
     const auto gunnerTransform = session.AddMesh(*gunner, nullptr, Vector3f::Zero())->GetSceneTransformId();
-    auto* lamp = session.GetWorld().SpawnActor<CountingActor>();
+    auto* lamp = session.GetWorld().SpawnActor<ScenarioCountingActor>();
     const auto lampTransform = session.AddMesh(*lamp, nullptr, {0, 3, 0})->GetSceneTransformId();
     auto* flash = lamp->AddComponent<PulsingLight>();
     flash->SetRelativeLocation({0, 3, 1});
@@ -484,7 +484,7 @@ TEST(FrameScenarios, FirefightProjectilesTickNextFrameAndCancelSameFramePuffs) {
     EXPECT_EQ(lamp->Ticks, 0);
     EXPECT_EQ(flash->Pulses, 5);
     for (const auto& actor : session.GetWorld().GetActors()) {
-        if (const auto* cover = dynamic_cast<const CountingActor*>(actor.get()); cover && cover != lamp)
+        if (const auto* cover = dynamic_cast<const ScenarioCountingActor*>(actor.get()); cover && cover != lamp)
             EXPECT_EQ(cover->Ticks, 0);
     }
     for (const ShapeId cover : covers) EXPECT_TRUE(SampleMesh(session.Scene(), cover).Found);
@@ -695,7 +695,7 @@ TEST(FrameScenarios, CinematicReplacesTheFullLightTable) {
 
 TEST(FrameScenarios, EditorDragSkipsIdenticalWritesAndIdleTicks) {
     Session session;
-    auto* dormant = session.GetWorld().SpawnActor<CountingActor>();
+    auto* dormant = session.GetWorld().SpawnActor<ScenarioCountingActor>();
     vector<StaticMeshComponent*> meshes;
     meshes.push_back(session.AddMesh(*dormant, nullptr, {0, 0, 0}));
     for (int i = 1; i < 12; ++i) meshes.push_back(session.AddMesh(*session.GetWorld().SpawnActor(), nullptr, {float(i), 0, 0}));

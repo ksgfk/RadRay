@@ -21,7 +21,7 @@ public:
     void OnUnload(AssetManager&) override {}
 };
 
-AssetId MeshId(uint32_t value) {
+AssetId CpuMeshId(uint32_t value) {
     return AssetId{value, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
 }
 
@@ -60,7 +60,7 @@ class StaticMeshScene : public testing::Test {
 protected:
     StreamingAssetRef<StaticMesh> Mesh(uint32_t id, Eigen::Vector3f lower = {-1, -2, -3}, Eigen::Vector3f upper = {2, 3, 4},
                                        vector<StaticMeshSection> sections = {{0, 0, 3, 0, 2}}) {
-        return Assets.AddReady<StaticMesh>(MeshId(id), MakeCpuMesh(lower, upper, std::move(sections)));
+        return Assets.AddReady<StaticMesh>(CpuMeshId(id), MakeCpuMesh(lower, upper, std::move(sections)));
     }
 
     StaticMeshComponent* Add(StreamingAssetRef<StaticMesh> mesh) {
@@ -104,7 +104,7 @@ TEST_F(StaticMeshScene, CreateCombinesStateAndFinalTransform) {
     Batch.Clear();
     auto view = Data.GetStaticMesh(id);
     ASSERT_TRUE(view);
-    EXPECT_EQ(view->Mesh.MeshAssetId, MeshId(1));
+    EXPECT_EQ(view->Mesh.MeshAssetId, CpuMeshId(1));
     ASSERT_EQ(view->Mesh.GetSections().size(), 1u);
     EXPECT_EQ(view->Mesh.GetSections()[0].IndexCount, 3u);
     ExpectBounds(*view, {-1, -2, -3}, {2, 3, 4}, component->GetWorldMatrix());
@@ -340,7 +340,7 @@ TEST_F(StaticMeshScene, ReplacementUsesNewBoundsAndFinalTransformWithoutChanging
     Batch.Clear();
     auto view = Data.GetStaticMesh(id);
     ASSERT_TRUE(view);
-    EXPECT_EQ(view->Mesh.MeshAssetId, MeshId(2));
+    EXPECT_EQ(view->Mesh.MeshAssetId, CpuMeshId(2));
     ASSERT_EQ(view->Mesh.GetSections().size(), 2u);
     EXPECT_EQ(view->Mesh.GetSections()[1].FirstIndex, 1u);
     ExpectBounds(*view, {-10, -20, -30}, {30, 40, 50}, component->GetWorldMatrix());
@@ -385,12 +385,12 @@ TEST_F(StaticMeshScene, EmptyBindingAndInvalidCpuMeshClearPreviousGeometry) {
     EXPECT_TRUE(view->Mesh.MeshAssetId.IsEmpty());
     EXPECT_TRUE(view->Mesh.GetSections().empty());
     EXPECT_FLOAT_EQ(view->LocalToWorld(0, 3), 5);
-    auto invalid = Assets.AddReady<StaticMesh>(MeshId(2), make_unique<CpuMesh>(MeshResource{}, vector<StaticMeshSection>{},
+    auto invalid = Assets.AddReady<StaticMesh>(CpuMeshId(2), make_unique<CpuMesh>(MeshResource{}, vector<StaticMeshSection>{},
                                                                                Eigen::Vector3f::Zero(), Eigen::Vector3f::Zero(), GpuMesh{}));
     component->SetStaticMesh(invalid);
     Flush();
     EXPECT_TRUE(Data.GetStaticMesh(id)->Mesh.GetSections().empty());
-    EXPECT_EQ(Data.GetStaticMesh(id)->Mesh.MeshAssetId, MeshId(2));
+    EXPECT_EQ(Data.GetStaticMesh(id)->Mesh.MeshAssetId, CpuMeshId(2));
     component->SetStaticMesh(Mesh(3));
     Flush();
     EXPECT_EQ(Data.GetStaticMesh(id)->Mesh.GetSections().size(), 1u);
@@ -411,7 +411,7 @@ TEST_F(StaticMeshScene, MeshWithoutSectionsProducesFullPrimitiveDescription) {
 TEST_F(StaticMeshScene, ReadyAutomaticallyPublishesTheLatestTransform) {
     auto* component = Add(Mesh(1));
     Flush();
-    auto loading = Assets.Load({.Id = MeshId(2), .Task = []() -> task<AssetLoadResult> {
+    auto loading = Assets.Load({.Id = CpuMeshId(2), .Task = []() -> task<AssetLoadResult> {
                                     co_return AssetLoadResult::Success(MakeCpuMesh({-2, -3, -4}, {3, 4, 5}, {{0, 0, 3, 0, 2}}));
                                 }()})
                        .CastTo<StaticMesh>();
@@ -421,7 +421,7 @@ TEST_F(StaticMeshScene, ReadyAutomaticallyPublishesTheLatestTransform) {
     component->SetRelativeLocation({20, 0, 0});
     Flush();
     EXPECT_TRUE(Data.GetStaticMesh(id)->Mesh.GetSections().empty());
-    EXPECT_EQ(Data.GetStaticMesh(id)->Mesh.MeshAssetId, MeshId(2));
+    EXPECT_EQ(Data.GetStaticMesh(id)->Mesh.MeshAssetId, CpuMeshId(2));
     Assets.Pump();
     ASSERT_TRUE(loading.IsReady());
     component->SetRelativeLocation({50, 0, 0});
@@ -458,7 +458,7 @@ TEST_F(StaticMeshScene, FlightRetainsAssetAfterSourceDiesBeforeApplyOnAnotherThr
         Data.Apply(create);
         auto view = Data.GetStaticMesh(id);
         ASSERT_TRUE(view);
-        EXPECT_EQ(view->Mesh.MeshAssetId, MeshId(1));
+        EXPECT_EQ(view->Mesh.MeshAssetId, CpuMeshId(1));
         ASSERT_EQ(view->Mesh.GetSections().size(), 1u);
         EXPECT_EQ(view->Mesh.GetSections()[0].IndexCount, 3u);
         ASSERT_TRUE(view->Mesh.GetRenderMesh());
@@ -489,7 +489,7 @@ TEST_F(StaticMeshScene, RemovalRepairsDenseListAndReuseCannotExposeOldMesh) {
     Flush();
     EXPECT_FALSE(Data.GetStaticMesh(oldId));
     ASSERT_TRUE(Data.GetStaticMesh(newId));
-    EXPECT_EQ(Data.GetStaticMesh(newId)->Mesh.MeshAssetId, MeshId(2));
+    EXPECT_EQ(Data.GetStaticMesh(newId)->Mesh.MeshAssetId, CpuMeshId(2));
     EXPECT_EQ(Data.GetStaticMeshes().size(), 3u);
     Owner->RemoveComponent(components[2]);
     Owner->RemoveComponent(components[0]);

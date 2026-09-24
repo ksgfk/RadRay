@@ -54,7 +54,7 @@ cmake --build build_clangcl --config Debug --parallel 24
 
 `radrayrender` 和 `test_radray_render` 只预编译 `<radray/render/rhi.h>`。D3D12 与 Vulkan 头不放进这份预编译头，因为一个目标只能有一份。
 
-`radrayruntime` 和 `test_radray_runtime` 用 `radray_enable_unity_build` 把 `.cpp` 按每批 8 个合成编译，MSVC 加 `/bigobj`。预编译头是 `<Eigen/Dense>`、`<radray/coroutine.h>`、`<radray/render/rhi.h>`；测试目标再加 `<gtest/gtest.h>`。改其中一个 `.cpp` 会重编它所在的整批。同名 `static` 或匿名命名空间符号冲突时，给该文件设置 `SKIP_UNITY_BUILD_INCLUSION`。同一批里前面的文件引入的宏会作用到后面的文件。Windows SDK 把 `small` 定义成 `char`；`win32_headers.h` 会取消它，但之后再包含 COM 或 D3D 头可能再次定义，所以不要用 `small` 当标识符。
+`radrayruntime` 和 `test_radray_runtime` 用 `radray_enable_unity_build` 把 `.cpp` 按每批 32 个合成编译，MSVC 加 `/bigobj`。`radrayruntime` 的预编译头是 PUBLIC。链上它的测试、example 和 benchmark 会继承这份头列表，并各自再编一份。列表收录 runtime 会包含的 core 公开头，以及 core 以 PUBLIC 依赖暴露的第三方头：Eigen、fmt、magic_enum、sigslot；并保留 `<radray/render/rhi.h>`。不包含 `<radray/coroutine.h>`：stdexec 用泛型 lambda 作模板参数，clang-cl 的预编译头会把该 lambda 和翻译单元里的当成不同类型。测试目标再加 `<gtest/gtest.h>`。`radray/platform/win32_headers.h` 不进入这份预编译头。改其中一个 `.cpp` 会重编它所在的整批。同名 `static` 或匿名命名空间符号冲突时，给该文件设置 `SKIP_UNITY_BUILD_INCLUSION`。同一批里前面的文件引入的宏会作用到后面的文件。Windows SDK 把 `small` 定义成 `char`；`win32_headers.h` 会取消它，但之后再包含 COM 或 D3D 头可能再次定义，所以不要用 `small` 当标识符。
 
 ## 常用配置边界
 

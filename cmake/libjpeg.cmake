@@ -79,6 +79,8 @@ typedef int16_t INT16;
     target_include_directories(jpeg-static PUBLIC
         "${generated_dir}"
         "${source_dir}")
+    # clang-cl 会把 MSVC 的 CRT 弃用标成警告。宏去掉弃用属性，不改 third_party。
+    target_compile_definitions(jpeg-static PRIVATE _CRT_SECURE_NO_WARNINGS)
     radray_optimize_flags_library(jpeg-static)
     radray_set_build_path(jpeg-static)
 endfunction()

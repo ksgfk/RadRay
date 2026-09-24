@@ -11,10 +11,10 @@
 namespace radray {
 namespace {
 
-class CountingActor final : public Actor {
+class WorldCountingActor final : public Actor {
 public:
-    CountingActor(uint32_t& ticks, uint32_t& destroyed) : _ticks(ticks), _destroyed(destroyed) { SetTickEnabled(true); }
-    ~CountingActor() noexcept override { ++_destroyed; }
+    WorldCountingActor(uint32_t& ticks, uint32_t& destroyed) : _ticks(ticks), _destroyed(destroyed) { SetTickEnabled(true); }
+    ~WorldCountingActor() noexcept override { ++_destroyed; }
     void Tick(float) override {
         ++_ticks;
         if (Action) Action();
@@ -36,8 +36,8 @@ TEST(WorldManager, ExplicitOwnershipPauseAndDeferredDestruction) {
     EXPECT_FALSE(manager.GetWorld({}));
     const auto a = manager.CreateWorld();
     const auto b = manager.CreateWorld();
-    manager.GetWorld(a)->SpawnActor<CountingActor>(ticksA, destroyedA);
-    manager.GetWorld(b)->SpawnActor<CountingActor>(ticksB, destroyedB);
+    manager.GetWorld(a)->SpawnActor<WorldCountingActor>(ticksA, destroyedA);
+    manager.GetWorld(b)->SpawnActor<WorldCountingActor>(ticksB, destroyedB);
     manager.GetWorld(a)->SetTickEnabled(false);
     manager.Tick(0);
     manager.FinalizeWorldsGT();
@@ -63,10 +63,10 @@ TEST(WorldManager, TickSnapshotSurvivesCreationAndSelfDestruction) {
     test::ScopedWorldManager manager;
     const auto a = manager.CreateWorld();
     WorldId b;
-    auto actor = manager.GetWorld(a)->SpawnActor<CountingActor>(ticksA, destroyedA);
+    auto actor = manager.GetWorld(a)->SpawnActor<WorldCountingActor>(ticksA, destroyedA);
     actor->Action = [&]() {
         b = manager.CreateWorld();
-        manager.GetWorld(b)->SpawnActor<CountingActor>(ticksB, destroyedB);
+        manager.GetWorld(b)->SpawnActor<WorldCountingActor>(ticksB, destroyedB);
         manager.DestroyWorld(a);
         EXPECT_EQ(destroyedA, 0u);
     };
@@ -86,8 +86,8 @@ TEST(WorldManager, DestroyedWorldIsSkippedBeforeItsScheduledTick) {
     test::ScopedWorldManager manager;
     const auto a = manager.CreateWorld();
     const auto b = manager.CreateWorld();
-    auto* actorA = manager.GetWorld(a)->SpawnActor<CountingActor>(ticksA, destroyedA);
-    auto* actorB = manager.GetWorld(b)->SpawnActor<CountingActor>(ticksB, destroyedB);
+    auto* actorA = manager.GetWorld(a)->SpawnActor<WorldCountingActor>(ticksA, destroyedA);
+    auto* actorB = manager.GetWorld(b)->SpawnActor<WorldCountingActor>(ticksB, destroyedB);
     EXPECT_FALSE(manager.GetWorld(a)->GetApplication());
     actorA->Action = [&]() { manager.DestroyWorld(b); };
     actorB->DestroyAction = [&]() {
@@ -106,13 +106,13 @@ TEST(WorldManager, TickIterationSurvivesGrowthAndDefersNewWorlds) {
     test::ScopedWorldManager manager;
     const auto first = manager.CreateWorld();
     const auto last = manager.CreateWorld();
-    auto* actor = manager.GetWorld(first)->SpawnActor<CountingActor>(firstTicks, destroyed);
-    manager.GetWorld(last)->SpawnActor<CountingActor>(lastTicks, destroyed);
+    auto* actor = manager.GetWorld(first)->SpawnActor<WorldCountingActor>(firstTicks, destroyed);
+    manager.GetWorld(last)->SpawnActor<WorldCountingActor>(lastTicks, destroyed);
     actor->Action = [&] {
         if (firstTicks != 1) return;
         for (uint32_t i = 0; i < 128; ++i) {
             const auto added = manager.CreateWorld();
-            manager.GetWorld(added)->SpawnActor<CountingActor>(newTicks, destroyed);
+            manager.GetWorld(added)->SpawnActor<WorldCountingActor>(newTicks, destroyed);
         }
     };
     manager.Tick(0);
@@ -130,14 +130,14 @@ TEST(WorldManager, DestructionCallbacksQueueTheNextBatchAfterIdentityReuse) {
     test::ScopedWorldManager manager;
     const auto first = manager.CreateWorld();
     const auto second = manager.CreateWorld();
-    auto* actor = manager.GetWorld(first)->SpawnActor<CountingActor>(ticks, firstDestroyed);
-    manager.GetWorld(second)->SpawnActor<CountingActor>(ticks, secondDestroyed);
+    auto* actor = manager.GetWorld(first)->SpawnActor<WorldCountingActor>(ticks, firstDestroyed);
+    manager.GetWorld(second)->SpawnActor<WorldCountingActor>(ticks, secondDestroyed);
     WorldId added;
     actor->DestroyAction = [&] {
         added = manager.CreateWorld();
         EXPECT_EQ(added.Index, first.Index);
         EXPECT_GT(added.Generation, first.Generation);
-        manager.GetWorld(added)->SpawnActor<CountingActor>(ticks, addedDestroyed);
+        manager.GetWorld(added)->SpawnActor<WorldCountingActor>(ticks, addedDestroyed);
         EXPECT_EQ(manager.DestroyWorld(second), LifecycleRequestResult::Accepted);
         EXPECT_EQ(manager.DestroyWorld(added), LifecycleRequestResult::Accepted);
     };
@@ -161,7 +161,7 @@ TEST(WorldManager, ClearHidesAllWorldsDuringCallbacksAndInvalidatesIds) {
     const auto a = manager.CreateWorld();
     const auto b = manager.CreateWorld();
     for (const auto id : {a, b}) {
-        manager.GetWorld(id)->SpawnActor<CountingActor>(ticks, destroyed)->DestroyAction = [&]() {
+        manager.GetWorld(id)->SpawnActor<WorldCountingActor>(ticks, destroyed)->DestroyAction = [&]() {
             EXPECT_FALSE(readOnly.GetWorld(a));
             EXPECT_FALSE(readOnly.GetWorld(b));
         };
@@ -185,7 +185,7 @@ TEST(WorldManager, CreatedDuringTickCollectsImmediatelyAndClearRetiresScenes) {
     test::ScopedWorldManager manager{&app, &renderer};
     const auto parent = manager.CreateWorld();
     EXPECT_EQ(manager.GetWorld(parent)->GetApplication().Get(), &app);
-    auto* actor = manager.GetWorld(parent)->SpawnActor<CountingActor>(ticks, destroyed);
+    auto* actor = manager.GetWorld(parent)->SpawnActor<WorldCountingActor>(ticks, destroyed);
     WorldId child;
     SceneId scene;
     ShapeId primitive;
@@ -227,7 +227,7 @@ TEST(WorldManagerDeathTest, RejectsReentrantTickCollectionAndClear) {
     uint32_t ticks = 0, destroyed = 0;
     test::ScopedWorldManager manager;
     const auto id = manager.CreateWorld();
-    auto* actor = manager.GetWorld(id)->SpawnActor<CountingActor>(ticks, destroyed);
+    auto* actor = manager.GetWorld(id)->SpawnActor<WorldCountingActor>(ticks, destroyed);
     actor->Action = [&]() { manager.Tick(0); };
     EXPECT_DEATH(manager.Tick(0), "");
     actor->Action = [&]() { manager.CollectRenderUpdates(); };

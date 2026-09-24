@@ -23,7 +23,7 @@ unique_ptr<GpuSystem> CreateGpuSystem(render::RenderBackend backend, bool profil
     return GpuSystem::TryCreate(desc, timeline, startup);
 }
 
-void BufferBarrier(render::CommandBuffer* commands, render::Buffer* buffer, render::BufferStates before, render::BufferStates after) {
+void GpuSystemBufferBarrier(render::CommandBuffer* commands, render::Buffer* buffer, render::BufferStates before, render::BufferStates after) {
     const render::ResourceBarrierDescriptor barrier = render::BarrierBufferDescriptor{.Target = buffer, .Before = before, .After = after};
     commands->ResourceBarrier(std::span{&barrier, 1});
 }
@@ -66,18 +66,18 @@ void RunCommandBatches(render::RenderBackend backend, bool profiler) {
         }
         previous[flight] = {second, first, third};
         if (vulkan) {
-            BufferBarrier(first, upload.get(), render::BufferState::HostWrite, render::BufferState::CopySource);
-            BufferBarrier(first, readback.get(), render::BufferState::Undefined, render::BufferState::CopyDestination);
+            GpuSystemBufferBarrier(first, upload.get(), render::BufferState::HostWrite, render::BufferState::CopySource);
+            GpuSystemBufferBarrier(first, readback.get(), render::BufferState::Undefined, render::BufferState::CopyDestination);
         }
-        BufferBarrier(first, work.get(), render::BufferState::Undefined, render::BufferState::CopyDestination);
+        GpuSystemBufferBarrier(first, work.get(), render::BufferState::Undefined, render::BufferState::CopyDestination);
         first->CopyBufferToBuffer(work.get(), 0, upload.get(), 0, 4);
-        BufferBarrier(second, work.get(), vulkan ? render::BufferState::CopyDestination : render::BufferState::Common, render::BufferState::CopySource);
+        GpuSystemBufferBarrier(second, work.get(), vulkan ? render::BufferState::CopyDestination : render::BufferState::Common, render::BufferState::CopySource);
         second->CopyBufferToBuffer(readback.get(), 0, work.get(), 0, 4);
-        BufferBarrier(third, work.get(), render::BufferState::CopySource, render::BufferState::CopyDestination);
+        GpuSystemBufferBarrier(third, work.get(), render::BufferState::CopySource, render::BufferState::CopyDestination);
         third->CopyBufferToBuffer(work.get(), 0, upload.get(), 4, 4);
-        BufferBarrier(third, work.get(), render::BufferState::CopyDestination, render::BufferState::CopySource);
+        GpuSystemBufferBarrier(third, work.get(), render::BufferState::CopyDestination, render::BufferState::CopySource);
         third->CopyBufferToBuffer(readback.get(), 4, work.get(), 0, 4);
-        if (vulkan) BufferBarrier(third, readback.get(), render::BufferState::CopyDestination, render::BufferState::HostRead);
+        if (vulkan) GpuSystemBufferBarrier(third, readback.get(), render::BufferState::CopyDestination, render::BufferState::HostRead);
         {
             render::CommandBuffer* buffers[]{first};
             context.ReturnCommandBuffers({.CmdBuffers = buffers});

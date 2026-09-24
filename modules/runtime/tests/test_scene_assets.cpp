@@ -57,9 +57,9 @@ private:
     shared_ptr<Lifetime> _life;
 };
 
-AssetId MeshId(uint32_t value) { return AssetId{value, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}; }
+AssetId SceneMeshId(uint32_t value) { return AssetId{value, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}; }
 
-unique_ptr<StaticMesh> MakeMesh(shared_ptr<Lifetime> life, uint32_t tag) {
+unique_ptr<StaticMesh> MakeLifetimeMesh(shared_ptr<Lifetime> life, uint32_t tag) {
     const array<float, 9> vertices{0, 0, 0, 1, 0, 0, 0, 1, 0};
     const array<uint32_t, 3> indices{0, 1, 2};
     MeshResource cpu;
@@ -102,7 +102,7 @@ task<AssetLoadResult> LoadMesh(Gate* gate, shared_ptr<Lifetime> life, uint32_t t
     co_await gate->Wait();
     const auto stop = co_await CurrentStopToken();
     if (stop.stop_requested()) co_await StopCurrentTask();
-    co_return AssetLoadResult::Success(MakeMesh(std::move(life), tag));
+    co_return AssetLoadResult::Success(MakeLifetimeMesh(std::move(life), tag));
 }
 
 class SceneAssets : public testing::Test {
@@ -113,10 +113,10 @@ protected:
         return component;
     }
     StreamingAssetRef<StaticMesh> Ready(uint32_t id, shared_ptr<Lifetime> life) {
-        return Assets.AddReady<StaticMesh>(MeshId(id), MakeMesh(std::move(life), id));
+        return Assets.AddReady<StaticMesh>(SceneMeshId(id), MakeLifetimeMesh(std::move(life), id));
     }
     StreamingAssetRef<StaticMesh> Loading(uint32_t id, Gate* gate, shared_ptr<Lifetime> life) {
-        return Assets.Load({.Id = MeshId(id), .Task = LoadMesh(gate, std::move(life), id)}).CastTo<StaticMesh>();
+        return Assets.Load({.Id = SceneMeshId(id), .Task = LoadMesh(gate, std::move(life), id)}).CastTo<StaticMesh>();
     }
     void Prepare(uint32_t flight) { test::PrepareScene(GameWorld, Render, flight); }
     void Complete(uint32_t flight) { test::CompleteFrame(Render, flight, true); }
@@ -349,7 +349,7 @@ TEST_F(SceneAssets, CancelingSharedLoadLeavesNoGeometryAndReleasesWaiters) {
 
 TEST_F(SceneAssets, FailedLoadLeavesNoGeometryAndReleasesWaiters) {
     Gate gate;
-    auto loading = Assets.Load({.Id = MeshId(1), .Task = [](Gate* pending) -> task<AssetLoadResult> {
+    auto loading = Assets.Load({.Id = SceneMeshId(1), .Task = [](Gate* pending) -> task<AssetLoadResult> {
                                     co_await pending->Wait();
                                     co_return AssetLoadResult::Failure();
                                 }(&gate)})
@@ -408,7 +408,7 @@ TEST_F(SceneAssets, ShutdownReleasesUnpublishedPinsAfterPublishedCompletion) {
 
 TEST_F(SceneAssets, EmptyAssetIdCanStillBeAReadyBinding) {
     auto life = make_shared<Lifetime>();
-    auto* component = Add(Assets.AddReady<StaticMesh>({}, MakeMesh(life, 1)));
+    auto* component = Add(Assets.AddReady<StaticMesh>({}, MakeLifetimeMesh(life, 1)));
     Prepare(0);
     Owner->RemoveComponent(component);
     Assets.Pump();
@@ -474,13 +474,13 @@ TEST_F(SceneAssets, LifetimeAcceptsDifferentAssetTypesAndRetiresOnlyTheLastUse) 
     auto meshLife = make_shared<Lifetime>();
     auto otherLife = make_shared<Lifetime>();
     auto mesh = Ready(1, meshLife);
-    auto other = Assets.AddReady<TrackedAsset>(MeshId(2), make_unique<TrackedAsset>(otherLife));
+    auto other = Assets.AddReady<TrackedAsset>(SceneMeshId(2), make_unique<TrackedAsset>(otherLife));
     for (int i = 0; i < 1000; ++i) AssetLifetime.AddUse(mesh.AsAny());
     AssetLifetime.AddUse(other.AsAny());
     mesh.Reset();
     other.Reset();
-    for (int i = 0; i < 999; ++i) AssetLifetime.RemoveUse(MeshId(1));
-    AssetLifetime.RemoveUse(MeshId(2));
+    for (int i = 0; i < 999; ++i) AssetLifetime.RemoveUse(SceneMeshId(1));
+    AssetLifetime.RemoveUse(SceneMeshId(2));
     AssetLifetime.SealRetirements(0);
     Assets.Pump();
     EXPECT_EQ(meshLife->Destroyed, 0u);
@@ -489,7 +489,7 @@ TEST_F(SceneAssets, LifetimeAcceptsDifferentAssetTypesAndRetiresOnlyTheLastUse) 
     Assets.Pump();
     EXPECT_EQ(meshLife->Destroyed, 0u);
     EXPECT_EQ(otherLife->Destroyed, 1u);
-    AssetLifetime.RemoveUse(MeshId(1));
+    AssetLifetime.RemoveUse(SceneMeshId(1));
     AssetLifetime.SealRetirements(1);
     AssetLifetime.ReleaseFlight(1);
     Assets.Pump();
@@ -501,7 +501,7 @@ TEST_F(SceneAssets, RepeatedZeroUseTransitionsMergeBeforeSealAndCanRetireAgainLa
     auto asset = Ready(1, life);
     AssetLifetime.AddUse(asset.AsAny());
     for (int i = 0; i < 1000; ++i) {
-        AssetLifetime.RemoveUse(MeshId(1));
+        AssetLifetime.RemoveUse(SceneMeshId(1));
         AssetLifetime.AddUse(asset.AsAny());
     }
     asset.Reset();
@@ -509,7 +509,7 @@ TEST_F(SceneAssets, RepeatedZeroUseTransitionsMergeBeforeSealAndCanRetireAgainLa
     AssetLifetime.ReleaseFlight(0);
     Assets.Pump();
     EXPECT_EQ(life->Destroyed, 0u);
-    AssetLifetime.RemoveUse(MeshId(1));
+    AssetLifetime.RemoveUse(SceneMeshId(1));
     AssetLifetime.SealRetirements(1);
     AssetLifetime.ReleaseFlight(1);
     Assets.Pump();
@@ -520,7 +520,7 @@ TEST_F(SceneAssets, RebindingAfterSealSurvivesTheOldRetirementCompletion) {
     auto life = make_shared<Lifetime>();
     auto asset = Ready(1, life);
     AssetLifetime.AddUse(asset.AsAny());
-    AssetLifetime.RemoveUse(MeshId(1));
+    AssetLifetime.RemoveUse(SceneMeshId(1));
     AssetLifetime.SealRetirements(0);
     AssetLifetime.AddUse(asset.AsAny());
     asset.Reset();
@@ -529,7 +529,7 @@ TEST_F(SceneAssets, RebindingAfterSealSurvivesTheOldRetirementCompletion) {
     Assets.Pump();
     EXPECT_EQ(life->Destroyed, 0u);
     AssetLifetime.ReleaseFlight(1);
-    AssetLifetime.RemoveUse(MeshId(1));
+    AssetLifetime.RemoveUse(SceneMeshId(1));
     AssetLifetime.SealRetirements(2);
     AssetLifetime.ReleaseFlight(2);
     Assets.Pump();
@@ -651,19 +651,19 @@ TEST(SceneAssetsDeathTest, RejectsConflictingAssetIdentity) {
     AssetManager otherManager;
     RenderAssetLifetime lifetime{2};
     test::ScopedWorld world;
-    auto asset = source.AddReady<StaticMesh>(MeshId(1), MakeMesh(make_shared<Lifetime>(), 1));
+    auto asset = source.AddReady<StaticMesh>(SceneMeshId(1), MakeLifetimeMesh(make_shared<Lifetime>(), 1));
     world.SpawnActor()->AddComponent<StaticMeshComponent>()->SetStaticMesh(asset);
     world.CollectRenderUpdates();
     EXPECT_FALSE(world.GetRenderSceneId());
     lifetime.AddUse(asset.AsAny());
-    auto other = otherManager.AddReady<StaticMesh>(MeshId(1), MakeMesh(make_shared<Lifetime>(), 2));
+    auto other = otherManager.AddReady<StaticMesh>(SceneMeshId(1), MakeLifetimeMesh(make_shared<Lifetime>(), 2));
     EXPECT_DEATH(lifetime.AddUse(other.AsAny()), "");
     EXPECT_DEATH(lifetime.AddUse({}), "");
-    EXPECT_DEATH(lifetime.RemoveUse(MeshId(2)), "");
+    EXPECT_DEATH(lifetime.RemoveUse(SceneMeshId(2)), "");
     EXPECT_DEATH(lifetime.SealRetirements(2), "");
     EXPECT_DEATH(lifetime.ReleaseFlight(2), "");
-    lifetime.RemoveUse(MeshId(1));
-    EXPECT_DEATH(lifetime.RemoveUse(MeshId(1)), "");
+    lifetime.RemoveUse(SceneMeshId(1));
+    EXPECT_DEATH(lifetime.RemoveUse(SceneMeshId(1)), "");
     lifetime.SealRetirements(0);
     EXPECT_DEATH(lifetime.SealRetirements(0), "");
 }

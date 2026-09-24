@@ -13,7 +13,7 @@
 namespace radray {
 namespace {
 
-void BufferBarrier(render::CommandBuffer* commands, render::Buffer* buffer, render::BufferStates before, render::BufferStates after) {
+void MultiWindowBufferBarrier(render::CommandBuffer* commands, render::Buffer* buffer, render::BufferStates before, render::BufferStates after) {
     const render::ResourceBarrierDescriptor barrier = render::BarrierBufferDescriptor{.Target = buffer, .Before = before, .After = after};
     commands->ResourceBarrier(std::span{&barrier, 1});
 }
@@ -117,8 +117,8 @@ protected:
         }
         auto* prefix = ctx.AllocateCommandBuffer();
         if (_vulkan) {
-            BufferBarrier(prefix, probe->Upload.get(), render::BufferState::HostWrite, render::BufferState::CopySource);
-            BufferBarrier(prefix, probe->Readback.get(), render::BufferState::Undefined, render::BufferState::CopyDestination);
+            MultiWindowBufferBarrier(prefix, probe->Upload.get(), render::BufferState::HostWrite, render::BufferState::CopySource);
+            MultiWindowBufferBarrier(prefix, probe->Readback.get(), render::BufferState::Undefined, render::BufferState::CopyDestination);
         }
         for (uint64_t offset = 0; offset < 16; offset += 4) {
             prefix->CopyBufferToBuffer(probe->Readback.get(), offset, probe->Upload.get(), 0, 4);
@@ -129,7 +129,7 @@ protected:
             const uint32_t identity = identities[index];
             RecordClear(drawCommands[index], targets[index], identity);
             auto* copy = copyCommands[index];
-            if (_vulkan) BufferBarrier(copy, probe->Readback.get(), render::BufferState::CopyDestination, render::BufferState::CopyDestination);
+            if (_vulkan) MultiWindowBufferBarrier(copy, probe->Readback.get(), render::BufferState::CopyDestination, render::BufferState::CopyDestination);
             const uint64_t offset = (identity + 1) * 4;
             copy->CopyBufferToBuffer(probe->Readback.get(), offset, probe->Upload.get(), offset, 4);
             copy->CopyBufferToBuffer(probe->Readback.get(), 0, probe->Upload.get(), offset, 4);
@@ -141,7 +141,7 @@ protected:
             ReturnBatch(ctx, *probe, {});
         }
         auto* suffix = ctx.AllocateCommandBuffer();
-        if (_vulkan) BufferBarrier(suffix, probe->Readback.get(), render::BufferState::CopyDestination, render::BufferState::HostRead);
+        if (_vulkan) MultiWindowBufferBarrier(suffix, probe->Readback.get(), render::BufferState::CopyDestination, render::BufferState::HostRead);
         ReturnBatch(ctx, *probe, std::span{&suffix, 1});
         {
             std::lock_guard lock{_probeMutex};

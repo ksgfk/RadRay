@@ -143,7 +143,7 @@ endfunction()
 function(radray_enable_unity_build target)
     set_target_properties(${target} PROPERTIES
         UNITY_BUILD ON
-        UNITY_BUILD_BATCH_SIZE 8)
+        UNITY_BUILD_BATCH_SIZE 32)
     if (MSVC)
         target_compile_options(${target} PRIVATE /bigobj)
     endif()

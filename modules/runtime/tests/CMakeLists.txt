@@ -68,10 +68,6 @@ gtest_discover_tests(test_radray_runtime
     TEST_FILTER "${radray_runtime_serial_filter}"
     PROPERTIES RUN_SERIAL TRUE TIMEOUT 90)
 radray_enable_unity_build(test_radray_runtime)
-target_precompile_headers(test_radray_runtime PRIVATE
-    <Eigen/Dense>
-    <radray/coroutine.h>
-    <radray/render/rhi.h>
-    <gtest/gtest.h>)
+target_precompile_headers(test_radray_runtime PRIVATE <gtest/gtest.h>)
 
 add_custom_target(radray_runtime_tests DEPENDS test_radray_runtime)
