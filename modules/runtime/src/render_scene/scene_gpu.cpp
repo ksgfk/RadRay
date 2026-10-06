@@ -86,6 +86,8 @@ std::optional<SceneGpuView> SceneGpuData::Prepare(const RenderScene& scene, AppF
         _sorted.assign(ids.begin(), ids.end());
         std::sort(_sorted.begin(), _sorted.end(), [](ShapeId a, ShapeId b) { return a.Index < b.Index; });
     }
+    RADRAY_PROFILE_PLOT("SceneGpu/UploadObjects", static_cast<int64_t>(_sorted.size()));
+    if (_sorted.empty()) RADRAY_PROFILE_PLOT("SceneGpu/UploadRanges", int64_t{0});
     if (!_sorted.empty()) {
         _packed.resize(_sorted.size());
         _uploads.clear();
@@ -102,6 +104,7 @@ std::optional<SceneGpuView> SceneGpuData::Prepare(const RenderScene& scene, AppF
             begin = end;
         }
         auto* commands = frame.AllocateCommandBuffer();
+        RADRAY_PROFILE_PLOT("SceneGpu/UploadRanges", static_cast<int64_t>(_uploads.size()));
         const bool recorded = frame.GetUploader().TryUploadBufferRanges(commands, _uploads);
         frame.ReturnCommandBuffers({.CmdBuffers = std::span{&commands, 1}});
         if (!recorded) return std::nullopt;

@@ -493,6 +493,21 @@ build_debug/_build/Debug/example_scene_sync.exe --vulkan --flights=3 --views=3 -
 
 `--d3d12`/`--vulkan` 选择后端，`--multithread` 改为双线程，`--flights=1/2/3`、`--views=1/3` 调整配置；
 `--valid-layer` 开启验证，`--frames=N` 限定运行帧数。示例沿用原生窗口的 resize、最小化与恢复入口。
+窗口标题每 0.5 秒更新一次 FPS，按该时间段内成功 acquire 并完成绘制录制的帧数除以墙钟时间计算，
+单线程与双线程均适用；跳过绘制的帧不计数。相机通过 `CameraControl` 控制：左键拖动环绕原点，
+右键或中键拖动平移，滚轮向上拉近、向下拉远；失焦或丢失鼠标捕获时清除输入状态。
+
+采样 `scene_sync` 时，`SceneDraw::Draw` 是每视图的 CPU 绘制录制区间，
+`SceneGpuData::Prepare` 下的 `ResourceUploader::TryUploadBufferRanges` 分为
+`ResourceUploader::StageBufferRanges`（staging 预留、拷贝与 barrier 收集）和
+`ResourceUploader::RecordBufferCopies`（逐范围 copy 命令录制）。GPU debug groups
+`ObjectUploadsGPU` 与 `SceneSyncDrawGPU` 分别覆盖上传命令及窗口 render pass；
+它们由后端 Tracy GPU 时间戳消费。`SceneSync/LastResolvedGpuMs` 是最近一次 flight 完成后
+解析的 GPU 帧时间，双线程下可能重复读取同一个值，不能与当前 CPU 帧逐项配对。
+`SceneGpu/UploadObjects`、`SceneGpu/UploadRanges` 报告本次物理 flight buffer 的上传量；
+同一 Scene 同帧多视图复用已准备的 buffer，不重复发出这两项采样。
+默认每帧移动父节点，约三分之一对象跟随；对象槽位每隔三个分布，可能产生大量小上传范围。
+`--instances` 控制对象数量，当前每视图每对象一次 indexed draw。
 
 `bench_scene_gpu` 是独立 Google Benchmark 目标，不依赖 JIT。固定 10k mesh 参数条目，变化量为 0/1/100/10000，
 稀疏修改按均匀步长分布到槽位，100 个变化对应 100 个不相邻范围；全量变化合并为一个范围。

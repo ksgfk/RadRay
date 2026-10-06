@@ -3,6 +3,7 @@
 #include <charconv>
 #include <cmath>
 #include <radray/logger.h>
+#include <radray/profiler.h>
 #include <radray/runtime/world_manager.h>
 #include <radray/runtime/window_manager.h>
 #include <radray/runtime/game_framework/world.h>
@@ -27,6 +28,10 @@ void SceneSyncApp::OnInit() {
     const uint32_t side = static_cast<uint32_t>(std::ceil(std::sqrt(float(InstanceCount))));
     _distance = std::max(8.0f, float(side) * 2.8f);
     _camera->SetPerspective(Radian(60.0f), 0.1f, _distance * 4);
+    _camera->SetRelativeLocation({0, 0, -_distance});
+    _cameraControl.MaxDistance = _distance * 2;
+    _cameraControl.SetOrbitTarget(Eigen::Vector3f::Zero());
+    _cameraControl.UpdateDistance(_camera->GetRelativeLocation());
     for (uint32_t i = 0; i < InstanceCount; ++i) {
         auto* object = world->SpawnActor()->AddComponent<StaticMeshComponent>();
         object->SetStaticMesh(mesh);
@@ -35,12 +40,53 @@ void SceneSyncApp::OnInit() {
                                      (float(i) / side - float(side - 1) * 0.5f) * 1.6f, 0});
         if (i % 7 == 0) object->SetRelativeScale({-1, 1, 1});
     }
+    auto* window = GetWindowManager()->GetMainWindow()->GetNativeWindow();
+    _inputConnections[0] = window->EventTouch().connect([this](int x, int y, MouseButton button, Action action) {
+        _cameraControl.CurrentMousePos = {float(x), float(y)};
+        if (action == Action::PRESSED || action == Action::RELEASED) {
+            const bool pressed = action == Action::PRESSED;
+            if (button == MouseButton::BUTTON_LEFT) _cameraControl.IsOrbiting = pressed;
+            if (button == MouseButton::BUTTON_RIGHT) _rightMouseDown = pressed;
+            if (button == MouseButton::BUTTON_MIDDLE) _middleMouseDown = pressed;
+            _cameraControl.IsPanning = _rightMouseDown || _middleMouseDown;
+            _cameraControl.LastMousePos = _cameraControl.CurrentMousePos;
+        }
+    });
+    _inputConnections[1] = window->EventScroll().connect([this](float, float vertical) {
+        _cameraControl.WheelDelta += vertical;
+    });
+    _inputConnections[2] = window->EventFocused().connect([this](bool focused) {
+        if (!focused) ResetCameraInput();
+    });
+    _inputConnections[3] = window->EventCaptureLost().connect([this]() { ResetCameraInput(); });
+    _fpsFrames.store(0, std::memory_order_relaxed);
+    _fpsSampleStart = std::chrono::steady_clock::now();
 }
 void SceneSyncApp::OnUpdate(const AppUpdateContext& context) {
+    RADRAY_PROFILE_PLOT("SceneSync/LastResolvedGpuMs", double(GetGpuSystem()->GetLastGpuTimeMs()));
     if (!_camera) return;
     _time += context.DeltaTime.count();
     _parent->SetRelativeLocation({std::sin(_time) * 0.6f, std::cos(_time) * 0.3f, 0});
-    _camera->SetRelativeLocation({std::sin(_time * 0.25f) * 2, 0, -_distance});
+    auto position = _camera->GetRelativeLocation();
+    auto rotation = _camera->GetRelativeRotation();
+    if (_cameraControl.IsOrbiting)
+        _cameraControl.Orbit(position, rotation);
+    else
+        _cameraControl.Pan(position, rotation);
+    // CameraComponent faces +Z; CameraControl::Dolly uses -Z. Rotate its local forward by 180 degrees around Y.
+    _cameraControl.Dolly(position, rotation * Eigen::Quaternionf{0, 0, 1, 0});
+    _cameraControl.LastMousePos = _cameraControl.CurrentMousePos;
+    _camera->SetRelativeLocation(position);
+    _camera->SetRelativeRotation(rotation);
+
+    const auto now = std::chrono::steady_clock::now();
+    const double elapsed = std::chrono::duration<double>(now - _fpsSampleStart).count();
+    constexpr double kFpsUpdateInterval = 0.5;
+    if (elapsed >= kFpsUpdateInterval) {
+        const auto frames = _fpsFrames.exchange(0, std::memory_order_relaxed);
+        GetWindowManager()->GetMainWindow()->GetNativeWindow()->SetTitle(fmt::format("RadRay Scene Sync | FPS: {:.1f}", frames / elapsed));
+        _fpsSampleStart = now;
+    }
     if (FrameLimit && ++_updates >= FrameLimit) RequestExit();
 }
 void SceneSyncApp::OnCollectRenderViews(SceneViewCollector& collector) {
@@ -75,6 +121,7 @@ void SceneSyncApp::OnRender(AppFrameContext& frame) {
                                                                                       .After = render::TextureState::RenderTarget};
     commands->ResourceBarrier(std::span{&before, 1});
     const render::ColorClearValue clear{{0.025f, 0.035f, 0.055f, 1}};
+    commands->PushDebugGroup("SceneSyncDrawGPU");
     auto encoder = commands->BeginRenderPass({pass.Get(), framebuffer.Get(), std::span{&clear, 1}}).Unwrap();
     for (uint32_t i = 0; i < views.size() && i < objects.size(); ++i) {
         if (objects[i] && !_draw->Draw(*renderer, frame, encoder.get(), views[i], *objects[i], i, desc.Width, desc.Height)) {
@@ -83,16 +130,26 @@ void SceneSyncApp::OnRender(AppFrameContext& frame) {
         }
     }
     commands->EndRenderPass(std::move(encoder));
+    commands->PopDebugGroup();
     const render::ResourceBarrierDescriptor after = render::BarrierTextureDescriptor{.Target = target->BackBuffer,
                                                                                      .Before = render::TextureState::RenderTarget,
                                                                                      .After = render::TextureState::Present};
     commands->ResourceBarrier(std::span{&after, 1});
     frame.ReturnCommandBuffers({.CmdBuffers = std::span{&commands, 1}}, std::move(target));
+    if (!Failed) _fpsFrames.fetch_add(1, std::memory_order_relaxed);
 }
 void SceneSyncApp::OnShutdown() {
+    for (auto& connection : _inputConnections) connection.disconnect();
+    ResetCameraInput();
     _draw.reset();
     _camera = nullptr;
     _parent = nullptr;
+}
+
+void SceneSyncApp::ResetCameraInput() noexcept {
+    _cameraControl.Reset();
+    _rightMouseDown = false;
+    _middleMouseDown = false;
 }
 
 }  // namespace radray::example
@@ -106,7 +163,7 @@ int main(int argc, char** argv) {
         .Gpu = GpuOptions{
             .Backend = render::RenderBackend::D3D12,
             .BackBufferFormat = render::TextureFormat::BGRA8_UNORM,
-            .PresentMode = render::PresentMode::FIFO,
+            .PresentMode = render::PresentMode::Immediate,
         },
         .Render = RenderOptions{.ShaderSourceRoot = RADRAY_SCENE_EXAMPLE_DIR, .ShaderIncludePaths = {RADRAY_SHADERLIB_DIR}},
     };

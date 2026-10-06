@@ -7,6 +7,7 @@
 
 #include <radray/basic_math.h>
 #include <radray/logger.h>
+#include <radray/profiler.h>
 #include <radray/runtime/vertex_data.h>
 
 namespace radray {
@@ -587,6 +588,7 @@ void ResourceUploader::UploadBuffer(
 }
 
 bool ResourceUploader::TryUploadBufferRanges(render::CommandBuffer* cmdBuffer, std::span<const BufferUploadRequest> requests) {
+    RADRAY_PROFILE_SCOPE_N("ResourceUploader::TryUploadBufferRanges");
     if (requests.empty()) return true;
     const auto& first = requests.front();
     uint64_t previousEnd = 0;
@@ -595,46 +597,54 @@ bool ResourceUploader::TryUploadBufferRanges(render::CommandBuffer* cmdBuffer, s
     const uint64_t copyAlignment = std::max<uint64_t>(
         1,
         _device->GetDetail().BufferCopyOffsetAlignment);
-    for (const auto& request : requests) {
-        if (request.SrcData.empty() || request.DstBuffer == nullptr) return false;
-        if (request.DstBuffer != first.DstBuffer || request.Before != first.Before || request.After != first.After || request.DstOffset < previousEnd) return false;
-        const auto size = request.SrcData.size();
-        const auto capacity = request.DstBuffer->GetDesc().Size;
-        if (request.DstOffset > capacity || size > capacity - request.DstOffset) return false;
-        previousEnd = request.DstOffset + size;
-        auto reservation = _stagingPool.TryReserve(size, copyAlignment);
-        if (!reservation.IsValid()) return false;
-        std::memcpy(reservation.Data(), request.SrcData.data(), size);
-        const auto allocation = reservation.Commit(size);
-        _bufferUploads.push_back(allocation);
-        const auto source = std::find_if(_bufferUploadBarriers.begin(), _bufferUploadBarriers.end(), [&](const auto& barrier) {
-            return std::get<render::BarrierBufferDescriptor>(barrier).Target == allocation.Target;
-        });
-        if (source == _bufferUploadBarriers.end()) {
-            _bufferUploadBarriers.emplace_back(render::BarrierBufferDescriptor{
-                .Target = allocation.Target,
-                .Before = render::BufferState::HostWrite,
-                .After = render::BufferState::CopySource});
+    {
+        RADRAY_PROFILE_SCOPE_N("ResourceUploader::StageBufferRanges");
+        for (const auto& request : requests) {
+            if (request.SrcData.empty() || request.DstBuffer == nullptr) return false;
+            if (request.DstBuffer != first.DstBuffer || request.Before != first.Before || request.After != first.After || request.DstOffset < previousEnd) return false;
+            const auto size = request.SrcData.size();
+            const auto capacity = request.DstBuffer->GetDesc().Size;
+            if (request.DstOffset > capacity || size > capacity - request.DstOffset) return false;
+            previousEnd = request.DstOffset + size;
+            auto reservation = _stagingPool.TryReserve(size, copyAlignment);
+            if (!reservation.IsValid()) return false;
+            std::memcpy(reservation.Data(), request.SrcData.data(), size);
+            const auto allocation = reservation.Commit(size);
+            _bufferUploads.push_back(allocation);
+            const auto source = std::find_if(_bufferUploadBarriers.begin(), _bufferUploadBarriers.end(), [&](const auto& barrier) {
+                return std::get<render::BarrierBufferDescriptor>(barrier).Target == allocation.Target;
+            });
+            if (source == _bufferUploadBarriers.end()) {
+                _bufferUploadBarriers.emplace_back(render::BarrierBufferDescriptor{
+                    .Target = allocation.Target,
+                    .Before = render::BufferState::HostWrite,
+                    .After = render::BufferState::CopySource});
+            }
         }
     }
     _bufferUploadBarriers.emplace_back(render::BarrierBufferDescriptor{
         .Target = first.DstBuffer,
         .Before = first.Before,
         .After = render::BufferState::CopyDestination});
+    cmdBuffer->PushDebugGroup("ObjectUploadsGPU");
     cmdBuffer->ResourceBarrier(_bufferUploadBarriers);
-    for (size_t i = 0; i < requests.size(); ++i) {
-        const auto& request = requests[i];
-        const auto& alloc = _bufferUploads[i];
-        cmdBuffer->CopyBufferToBuffer(
-            request.DstBuffer, request.DstOffset,
-            alloc.Target, alloc.Offset,
-            request.SrcData.size());
+    {
+        RADRAY_PROFILE_SCOPE_N("ResourceUploader::RecordBufferCopies");
+        for (size_t i = 0; i < requests.size(); ++i) {
+            const auto& request = requests[i];
+            const auto& alloc = _bufferUploads[i];
+            cmdBuffer->CopyBufferToBuffer(
+                request.DstBuffer, request.DstOffset,
+                alloc.Target, alloc.Offset,
+                request.SrcData.size());
+        }
     }
     const render::ResourceBarrierDescriptor barrierAfter = render::BarrierBufferDescriptor{
         .Target = first.DstBuffer,
         .Before = render::BufferState::CopyDestination,
         .After = first.After};
     cmdBuffer->ResourceBarrier(std::span{&barrierAfter, 1});
+    cmdBuffer->PopDebugGroup();
     return true;
 }
 

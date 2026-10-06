@@ -1,6 +1,7 @@
 #include "scene_draw.h"
 
 #include <cstring>
+#include <radray/profiler.h>
 
 namespace radray::example {
 
@@ -49,6 +50,7 @@ bool SceneDraw::Initialize(RenderSystem& renderer, render::Device* device, rende
 
 bool SceneDraw::Draw(RenderSystem& renderer, AppFrameContext& frame, render::GraphicsCommandEncoder* encoder,
                      const SceneViewRequest& request, const SceneGpuView& objects, uint32_t viewIndex, uint32_t width, uint32_t height) {
+    RADRAY_PROFILE_SCOPE_N("SceneDraw::Draw");
     const auto resolved = ResolveSceneView(request, width, height, frame.GetDevice()->GetBackend());
     auto scene = renderer.GetSceneRT(request.Scene);
     if (!resolved || !scene || viewIndex >= 3) return false;
