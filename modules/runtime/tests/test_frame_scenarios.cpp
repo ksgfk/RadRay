@@ -97,7 +97,7 @@ class Session {
 public:
     static constexpr uint32_t kFlights = 2;
 
-    Session() : _renderer(&_app, kFlights) {
+    Session() : _renderer(kFlights) {
         _sceneId = test::ConnectWorld(_world, _renderer);
         _mesh = _assets.AddReady<StaticMesh>(AssetId{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}, MakeMesh());
     }
@@ -150,7 +150,7 @@ public:
 private:
     Application _app;
     AssetManager _assets;
-    RenderSystem _renderer;
+    SceneManager _renderer;
     test::ScopedWorld _world;
     SceneId _sceneId{};
     StreamingAssetRef<StaticMesh> _mesh;

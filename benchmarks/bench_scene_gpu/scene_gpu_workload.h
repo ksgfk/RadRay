@@ -1,9 +1,8 @@
 #pragma once
 
-#include <radray/runtime/application.h>
 #include <radray/runtime/frame_timeline.h>
 #include <radray/runtime/gpu_system.h>
-#include <radray/runtime/render_system.h>
+#include <radray/runtime/render_framework/scene_manager.h>
 
 namespace radray {
 class World;
@@ -39,10 +38,9 @@ public:
 private:
     void Complete(uint32_t flight);
     void CreateObjects(uint32_t count);
-    Application _app;
     FrameTimeline _timeline;
     unique_ptr<GpuSystem> _gpu;
-    unique_ptr<RenderSystem> _renderer;
+    unique_ptr<SceneManager> _renderer;
     unique_ptr<World> _world;
     Nullable<SceneComponent*> _parent{nullptr};
     SceneGpuLoad _load;

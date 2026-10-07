@@ -12,6 +12,8 @@ public:
     ~StaticMeshComponent() noexcept override;
 
     void SetStaticMesh(StreamingAssetRef<StaticMesh> mesh);
+    void SetMaterials(vector<StreamingAssetRef<Material>> materials);
+    std::span<const StreamingAssetRef<Material>> GetMaterials() const noexcept { return _materials; }
     const StreamingAssetRef<StaticMesh>& GetStaticMesh() const noexcept { return _mesh; }
 
 private:
@@ -19,11 +21,15 @@ private:
     void OnRenderStateCreated() override;
     void OnRenderStateDestroyed() override;
     void StartMeshReadyWait();
+    void StartMaterialReadyWaits();
+    task<void> WaitForMaterialReady(StreamingAssetRef<Material> material, SceneId scene, ShapeId registration);
     task<void> WaitForMeshReady(StreamingAssetRef<StaticMesh> mesh, SceneId scene, ShapeId registration);
     void CollectPrimitiveUpdates(ShapeCapture& capture, RenderDirtyFlags dirty) override;
 
     StreamingAssetRef<StaticMesh> _mesh;
+    vector<StreamingAssetRef<Material>> _materials;
     unique_ptr<TaskScope> _readyWait;
+    unique_ptr<TaskScope> _materialReadyWait;
 };
 
 template <>

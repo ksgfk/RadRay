@@ -250,8 +250,7 @@ void RunPsoSmoke(test::DeviceContext& context, RenderBackend backend) {
         kHeight,
         TextureUse::RenderTarget | TextureUse::CopySource | TextureUse::Resource);
     ASSERT_TRUE(renderTarget.has_value()) << "CreateTexture/TextureView failed";
-    auto resourceView = device.CreateTextureView({renderTarget->Tex.get(), TextureDimension::Dim2D,
-                                                  kFormat, {0, 1, 0, 1}, TextureViewUsage::Resource});
+    auto resourceView = device.CreateTextureView({renderTarget->Tex.get(), TextureDimension::Dim2D, kFormat, {0, 1, 0, 1}, TextureViewUsage::Resource});
     ASSERT_TRUE(resourceView.HasValue());
 
     auto parameterSetResult = device.CreateShaderParameterSet(ShaderParameterSetDescriptor{
@@ -387,7 +386,9 @@ void RunPsoSmoke(test::DeviceContext& context, RenderBackend backend) {
     ASSERT_TRUE(readbackResult.HasValue()) << "Create readback buffer failed";
     unique_ptr<Buffer> readback = readbackResult.Release();
 
-    auto commandResult = device.CreateCommandBuffer(context.Queue);
+    auto commandResultStorage = device.CreateCommandAllocator(context.Queue).Unwrap();
+
+    auto commandResult = device.CreateCommandBuffer(commandResultStorage.get());
     ASSERT_TRUE(commandResult.HasValue()) << "CreateCommandBuffer failed";
     unique_ptr<CommandBuffer> command = commandResult.Release();
     command->Begin();
@@ -587,7 +588,8 @@ float4 PSMain() : SV_Target0 { return P.Data + Shared.Data; }
         const auto pitch = Align(uint64_t{kWidth * 4}, device->GetDetail().TextureDataPitchAlignment);
         auto readback = device->CreateBuffer({pitch * kHeight, MemoryType::ReadBack, BufferUse::CopyDestination | BufferUse::MapRead});
         ASSERT_TRUE(readback.HasValue());
-        auto command = device->CreateCommandBuffer(context.Queue);
+        auto commandStorage = device->CreateCommandAllocator(context.Queue).Unwrap();
+        auto command = device->CreateCommandBuffer(commandStorage.get());
         ASSERT_TRUE(command.HasValue());
         command->Begin();
         const ResourceBarrierDescriptor toTarget = BarrierTextureDescriptor{target->Tex.get(), TextureState::Undefined, TextureState::RenderTarget};
@@ -715,7 +717,8 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
         // Round 3 changes only the mirror; binding must keep the previously published values.
         // Round 4 publishes those pending writes without another Set.
         if (round != 3) ASSERT_TRUE(set->FlushWrites());
-        auto command = device->CreateCommandBuffer(context.Queue);
+        auto commandStorage = device->CreateCommandAllocator(context.Queue).Unwrap();
+        auto command = device->CreateCommandBuffer(commandStorage.get());
         ASSERT_TRUE(command.HasValue());
         command->Begin();
         if (round == 0) {
@@ -797,7 +800,8 @@ void CSMain() {
         binding.Name = names[i];
         binding.LogicalKind = kinds[i];
         binding.Binding = i;
-        binding.Count = i == 0 ? 4 : i == 4 ? 2 : 1;
+        binding.Count = i == 0 ? 4 : i == 4 ? 2
+                                            : 1;
         binding.Stages = ShaderStage::Compute;
         if (i >= 6) binding.Placement = VulkanBufferDescriptorPlacement::Dynamic;
         description.Bindings.push_back(binding);
@@ -852,8 +856,14 @@ void CSMain() {
         {compatibleLayout->FindBinding("DynamicItems"), 768}, {compatibleLayout->FindBinding("DynamicView"), 512}};
     uint32_t expected[4]{0, 1, 2, 3};
     for (uint32_t round = 0; round < 3; ++round) {
-        if (round == 1) { expected[0] = 4; expected[3] = 7; }
-        if (round == 2) { expected[1] = 5; expected[2] = 6; }
+        if (round == 1) {
+            expected[0] = 4;
+            expected[3] = 7;
+        }
+        if (round == 2) {
+            expected[1] = 5;
+            expected[2] = 6;
+        }
         for (uint32_t i = 0; i < 4; ++i) {
             if (round == 1 && i != 0 && i != 3) continue;
             if (round == 2 && i != 1 && i != 2) continue;
@@ -881,7 +891,8 @@ void CSMain() {
         }
         // Set 已更新原生 descriptor；只有中间一轮调用兼容 Flush，其余直接绑定。
         if (round == 1) ASSERT_TRUE(set->FlushWrites());
-        auto command = device->CreateCommandBuffer(context.Queue);
+        auto commandStorage = device->CreateCommandAllocator(context.Queue).Unwrap();
+        auto command = device->CreateCommandBuffer(commandStorage.get());
         ASSERT_TRUE(command.HasValue());
         command->Begin();
         if (round == 0) {

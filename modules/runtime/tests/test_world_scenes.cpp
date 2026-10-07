@@ -181,7 +181,7 @@ TEST(WorldManager, ClearHidesAllWorldsDuringCallbacksAndInvalidatesIds) {
 TEST(WorldManager, CreatedDuringTickCollectsImmediatelyAndClearRetiresScenes) {
     uint32_t ticks = 0, destroyed = 0;
     Application app;
-    RenderSystem renderer{&app, 2};
+    SceneManager renderer{2};
     test::ScopedWorldManager manager{&app, &renderer};
     const auto parent = manager.CreateWorld();
     EXPECT_EQ(manager.GetWorld(parent)->GetApplication().Get(), &app);
@@ -256,7 +256,7 @@ TEST(WorldManagerDeathTest, RejectsCollectionMutationAndMissingRenderService) {
     const auto cpuWorld = cpuOnly.CreateWorld();
     EXPECT_EQ(cpuOnly.RequestRenderConnection(cpuWorld, true), LifecycleRequestResult::Invalid);
     Application app;
-    RenderSystem renderer{&app, 1};
+    SceneManager renderer{1};
     test::ScopedWorldManager manager{&app, &renderer};
     const auto id = manager.CreateWorld();
     manager.RequestRenderConnection(id, true);
@@ -283,7 +283,7 @@ private:
 TEST(WorldScenes, AttachExistingPausedWorldAndReconnectWithoutGameCallbacks) {
     uint32_t registrations = 0, unregistrations = 0;
     Application app;
-    RenderSystem renderer{&app, 3};
+    SceneManager renderer{3};
     test::ScopedWorld world;
     auto* actor = world.SpawnActor();
     actor->AddComponent<RegistrationProbe>(registrations, unregistrations);
@@ -319,7 +319,7 @@ TEST(WorldScenes, AttachExistingPausedWorldAndReconnectWithoutGameCallbacks) {
 
 TEST(WorldScenes, StandaloneWritersIsolateIdentitiesAndCoalesceUpdates) {
     Application app;
-    RenderSystem renderer{&app, 2};
+    SceneManager renderer{2};
     const auto a = renderer.CreateSceneGT();
     const auto b = renderer.CreateSceneGT();
     auto wa = renderer.GetSceneWriterGT(a);
@@ -363,7 +363,7 @@ TEST(WorldScenes, StandaloneWritersIsolateIdentitiesAndCoalesceUpdates) {
 
 TEST(WorldScenes, WritersSurviveRegistryCompactionAndIdentityReuse) {
     Application app;
-    RenderSystem renderer{&app, 2};
+    SceneManager renderer{2};
     const auto removed = renderer.CreateSceneGT();
     const auto survivor = renderer.CreateSceneGT();
     auto* writer = renderer.GetSceneWriterGT(survivor).Get();
@@ -402,7 +402,7 @@ TEST(WorldScenes, WritersSurviveRegistryCompactionAndIdentityReuse) {
 TEST(WorldScenes, SameFrameCreateAndDestroyAndRetirementAcrossFlights) {
     for (uint32_t count : {1u, 2u, 3u}) {
         Application app;
-        RenderSystem renderer{&app, count};
+        SceneManager renderer{count};
         const auto stable = renderer.CreateSceneGT();
         for (uint32_t round = 0; round < 3; ++round) {
             vector<SceneId> removed;
@@ -426,7 +426,7 @@ TEST(WorldScenes, SameFrameCreateAndDestroyAndRetirementAcrossFlights) {
 
 TEST(WorldScenesDeathTest, ClaimedAndClosingScenesRejectExternalWrites) {
     Application app;
-    RenderSystem renderer{&app, 1};
+    SceneManager renderer{1};
     test::ScopedWorld world;
     const auto attached = test::ConnectWorld(world, renderer);
     EXPECT_FALSE(renderer.GetSceneWriterGT(attached));

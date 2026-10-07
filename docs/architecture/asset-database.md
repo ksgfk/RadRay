@@ -134,7 +134,7 @@ Application 直接调用 `AssetManager::SetAssetSource(_assetDatabase.get())`，
 关停顺序固定为：
 
 ```text
-World → RenderSystem → AssetManager → AssetDatabase → GpuSystem
+World → SceneManager → GPU 帧参数资源 → RenderSystem → AssetManager → FrameTimeline → AssetDatabase → GpuSystem
 ```
 
 数据库持有 importer 与 settings，必须活过 manager 对在飞加载 task 的取消和收束。

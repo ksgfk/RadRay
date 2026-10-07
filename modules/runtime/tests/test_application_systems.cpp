@@ -7,19 +7,21 @@
 #include <radray/runtime/application.h>
 #include <radray/runtime/asset_manager.h>
 #include <radray/runtime/render_system.h>
-#include <radray/runtime/render_scene/scene_writer.h>
+#include <radray/runtime/render_framework/scene_manager.h>
+#include <radray/runtime/render_framework/scene_writer.h>
 #include <radray/runtime/window_manager.h>
 #include <radray/runtime/world_manager.h>
 
 namespace radray {
 namespace {
 
-ApplicationRuntimeDescriptor CpuOnly(std::optional<RenderOptions> render, std::optional<WorldOptions> world, std::optional<AssetOptions> asset, uint32_t flights = 2) {
+ApplicationRuntimeDescriptor CpuOnly(std::optional<SceneOptions> scene, std::optional<WorldOptions> world, std::optional<AssetOptions> asset, uint32_t flights = 2) {
     return {
         .FlightDataCount = flights,
         .Window = std::nullopt,
         .Gpu = std::nullopt,
-        .Render = std::move(render),
+        .Render = std::nullopt,
+        .Scene = std::move(scene),
         .World = std::move(world),
         .Asset = std::move(asset),
     };
@@ -38,6 +40,7 @@ protected:
         EXPECT_FALSE(GetWindowManager());
         EXPECT_FALSE(GetGpuSystem());
         EXPECT_FALSE(GetRenderSystem());
+        EXPECT_FALSE(GetSceneManager());
         EXPECT_FALSE(GetWorldManager());
         EXPECT_FALSE(GetAssetManager());
         if (ExitInInit) RequestExit();
@@ -77,6 +80,7 @@ protected:
         EXPECT_TRUE(GetWorldManager()->GetWorld(_world));
         RequestExit();
     }
+
 private:
     WorldId _world;
 };
@@ -87,29 +91,35 @@ void CheckWorldOnly() {
     EXPECT_EQ(app.GetStartupResult().Status, RuntimeStartupStatus::Started) << app.GetStartupResult().Reason;
 }
 
-class RenderOnlyApplication final : public Application {
+class SceneOnlyApplication final : public Application {
 protected:
     void OnInit() override {
-        ASSERT_TRUE(GetRenderSystem());
+        ASSERT_TRUE(GetSceneManager());
+        EXPECT_FALSE(GetRenderSystem());
+        EXPECT_FALSE(GetGpuSystem());
         EXPECT_FALSE(GetWorldManager());
-        _scene = GetRenderSystem()->CreateSceneGT();
-        _shape = GetRenderSystem()->GetSceneWriterGT(_scene)->CreateShape();
+        _scene = GetSceneManager()->CreateSceneGT();
+        _shape = GetSceneManager()->GetSceneWriterGT(_scene)->CreateShape();
     }
     void OnUpdate(const AppUpdateContext&) override {
         if (++_updates == 2) {
-            EXPECT_TRUE(GetRenderSystem()->GetSceneRT(_scene)->ContainsShape(_shape));
+            EXPECT_TRUE(GetSceneManager()->GetSceneRT(_scene)->ContainsShape(_shape));
+            GetSceneManager()->DestroySceneGT(_scene);
+        } else if (_updates == 3) {
+            EXPECT_FALSE(GetSceneManager()->GetSceneRT(_scene));
             RequestExit();
         }
     }
+
 private:
     uint32_t _updates{0};
     SceneId _scene;
     ShapeId _shape;
 };
 
-void CheckRenderOnlyUsesCpuSceneDelivery() {
-    RenderOnlyApplication app;
-    EXPECT_EQ(app.Run(CpuOnly(RenderOptions{}, std::nullopt, std::nullopt)), 0);
+void CheckSceneOnlyUsesCpuSceneDelivery() {
+    SceneOnlyApplication app;
+    EXPECT_EQ(app.Run(CpuOnly(SceneOptions{}, std::nullopt, std::nullopt)), 0);
     EXPECT_EQ(app.GetStartupResult().Status, RuntimeStartupStatus::Started) << app.GetStartupResult().Reason;
 }
 
@@ -175,6 +185,7 @@ void CheckWindowOnlyHasNoSwapChain() {
     const ApplicationRuntimeDescriptor desc{
         .Gpu = std::nullopt,
         .Render = std::nullopt,
+        .Scene = std::nullopt,
         .World = std::nullopt,
         .Asset = std::nullopt,
     };
@@ -184,18 +195,34 @@ void CheckWindowOnlyHasNoSwapChain() {
 #endif
 
 TEST(ApplicationSystems, SelectedSystemsUseOnlyTheirDependencies) {
-    { SCOPED_TRACE("empty"); CheckEmptyFrameLoopAndExitFromInit(); }
-    { SCOPED_TRACE("world"); CheckWorldOnly(); }
-    { SCOPED_TRACE("render"); CheckRenderOnlyUsesCpuSceneDelivery(); }
-    { SCOPED_TRACE("asset"); CheckAssetWaitMatchesFrameBoundary(); }
+    {
+        SCOPED_TRACE("empty");
+        CheckEmptyFrameLoopAndExitFromInit();
+    }
+    {
+        SCOPED_TRACE("world");
+        CheckWorldOnly();
+    }
+    {
+        SCOPED_TRACE("scene");
+        CheckSceneOnlyUsesCpuSceneDelivery();
+    }
+    {
+        SCOPED_TRACE("asset");
+        CheckAssetWaitMatchesFrameBoundary();
+    }
 #if defined(RADRAY_PLATFORM_WINDOWS)
-    { SCOPED_TRACE("window"); CheckWindowOnlyHasNoSwapChain(); }
+    {
+        SCOPED_TRACE("window");
+        CheckWindowOnlyHasNoSwapChain();
+    }
 #endif
 }
 
 class InvalidStartupApplication final : public Application {
 public:
     uint32_t InitCalls{0};
+
 protected:
     void OnInit() override { ++InitCalls; }
 };
@@ -204,6 +231,9 @@ TEST(ApplicationSystems, InvalidDescriptorsFailBeforeOnInit) {
     InvalidStartupApplication app;
     EXPECT_NE(app.Run({.FlightDataCount = 0}), 0);
     EXPECT_EQ(app.GetStartupResult().Status, RuntimeStartupStatus::InvalidDescriptor) << app.GetStartupResult().Reason;
+    EXPECT_EQ(app.InitCalls, 0u);
+    EXPECT_NE(app.Run({.Window = std::nullopt, .Gpu = std::nullopt}), 0);
+    EXPECT_EQ(app.GetStartupResult().Status, RuntimeStartupStatus::InvalidDescriptor);
     EXPECT_EQ(app.InitCalls, 0u);
 }
 

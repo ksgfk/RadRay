@@ -1,3 +1,5 @@
+#include <radray/runtime/components/scene_view_capture.h>
+#include <radray/runtime/render_framework/scene_manager.h>
 #include "example_scene_sync.h"
 
 #include <charconv>
@@ -92,56 +94,38 @@ void SceneSyncApp::OnUpdate(const AppUpdateContext& context) {
 void SceneSyncApp::OnCollectRenderViews(SceneViewCollector& collector) {
     if (!_camera) return;
     for (uint32_t i = 0; i < ViewCount; ++i)
-        collector.Add(*_camera.Get(), {float(i) / ViewCount, 0, 1.0f / ViewCount, 1});
+        if (auto view = CaptureSceneView(*_camera.Get(), {float(i) / ViewCount, 0, 1.0f / ViewCount, 1})) collector.Add(*view);
 }
 void SceneSyncApp::OnRender(AppFrameContext& frame) {
     auto* window = GetWindowManager()->GetMainWindow();
     auto target = frame.AcquireWindow(window);
     if (!target) return;
     auto* renderer = GetRenderSystem().Get();
-    const auto desc = target->BackBuffer->GetDesc();
-    const render::RenderPassColorAttachmentDescriptor attachment{desc.Format, desc.SampleCount, render::LoadAction::Clear, render::StoreAction::Store};
-    auto pass = renderer->GetRenderPassRegistry()->GetOrCreateRenderPass({std::span{&attachment, 1}, {}});
-    auto* targetView = target->BackBufferView;
-    auto framebuffer = renderer->GetRenderPassRegistry()->GetOrCreateFramebuffer({pass.Get(), std::span{&targetView, 1}, nullptr, desc.Width, desc.Height, 1});
-    if (!_draw) {
-        _draw = make_unique<SceneDraw>();
-        if (!_draw->Initialize(*renderer, frame.GetDevice(), pass.Get(), desc.Format, GetGpuSystem()->GetFlightDataCount())) {
-            Failed = true;
-            RequestExit();
-        }
+    if (!_pipeline) {
+        MaterialPass materialPass;
+        materialPass.Name = "Unlit";
+        materialPass.Program.SourceName = "scene_sync.hlsl";
+        materialPass.Inputs = {{"Objects", MaterialInputSource::SceneObjects}, {"ViewData", MaterialInputSource::ViewConstants}};
+        materialPass.ObjectIndexPushConstant = "DrawData";
+        MaterialRenderData fallback;
+        fallback.Passes.push_back(std::move(materialPass));
+        _pipeline = make_unique<UnlitRenderPipeline>(ScenePipelineDescriptor{.Fallback = std::move(fallback)});
     }
-    const auto views = renderer->GetFrameViewsRT(frame.FlightIndex());
-    array<std::optional<SceneGpuView>, 3> objects;
-    if (!Failed)
-        for (size_t i = 0; i < views.size() && i < objects.size(); ++i) objects[i] = renderer->PrepareSceneGpuRT(views[i].Scene, frame);
-    auto* commands = frame.AllocateCommandBuffer();
-    const render::ResourceBarrierDescriptor before = render::BarrierTextureDescriptor{.Target = target->BackBuffer,
-                                                                                      .Before = window->GetBackBufferState(target->BackBufferIndex),
-                                                                                      .After = render::TextureState::RenderTarget};
-    commands->ResourceBarrier(std::span{&before, 1});
-    const render::ColorClearValue clear{{0.025f, 0.035f, 0.055f, 1}};
-    commands->PushDebugGroup("SceneSyncDrawGPU");
-    auto encoder = commands->BeginRenderPass({pass.Get(), framebuffer.Get(), std::span{&clear, 1}}).Unwrap();
-    for (uint32_t i = 0; i < views.size() && i < objects.size(); ++i) {
-        if (objects[i] && !_draw->Draw(*renderer, frame, encoder.get(), views[i], *objects[i], i, desc.Width, desc.Height)) {
-            Failed = true;
-            RequestExit();
-        }
+    auto context = MakePipelineContext(*renderer, frame, GetSceneManager());
+    RenderOutput output;
+    output.Colors.push_back({target->BackBufferView, window->GetBackBufferState(target->BackBufferIndex), render::TextureState::Present});
+    auto result = RecordRenderPipeline(*_pipeline, context, {GetSceneManager()->GetFrameViewsRT(frame.FlightIndex()), std::move(output)});
+    frame.RegisterClosedCommandBuffers({.CmdBuffers = result.Commands}, std::move(target));
+    if (result.Status == PipelineRecordStatus::RecoverableFailure) {
+        Failed = true;
+        RequestExit();
     }
-    commands->EndRenderPass(std::move(encoder));
-    commands->PopDebugGroup();
-    const render::ResourceBarrierDescriptor after = render::BarrierTextureDescriptor{.Target = target->BackBuffer,
-                                                                                     .Before = render::TextureState::RenderTarget,
-                                                                                     .After = render::TextureState::Present};
-    commands->ResourceBarrier(std::span{&after, 1});
-    frame.ReturnCommandBuffers({.CmdBuffers = std::span{&commands, 1}}, std::move(target));
     if (!Failed) _fpsFrames.fetch_add(1, std::memory_order_relaxed);
 }
 void SceneSyncApp::OnShutdown() {
     for (auto& connection : _inputConnections) connection.disconnect();
     ResetCameraInput();
-    _draw.reset();
+    _pipeline.reset();
     _camera = nullptr;
     _parent = nullptr;
 }
@@ -188,7 +172,7 @@ int main(int argc, char** argv) {
             const auto name = argument.substr(0, equal);
             if (name == "--flights" && value >= 1 && value <= 3)
                 descriptor.FlightDataCount = value;
-            else if (name == "--views" && (value == 1 || value == 3))
+            else if (name == "--views" && value > 0)
                 app.ViewCount = value;
             else if (name == "--instances" && value > 0)
                 app.InstanceCount = value;

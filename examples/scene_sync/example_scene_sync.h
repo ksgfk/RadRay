@@ -5,6 +5,7 @@
 #include <sigslot/signal.hpp>
 
 #include "scene_draw.h"
+#include <radray/runtime/render_framework/scene_draw.h>
 #include <radray/camera_control.h>
 #include <radray/runtime/application.h>
 #include <radray/runtime/components/camera_component.h>
@@ -31,7 +32,7 @@ private:
 
     Nullable<CameraComponent*> _camera{nullptr};
     Nullable<SceneComponent*> _parent{nullptr};
-    unique_ptr<SceneDraw> _draw;
+    unique_ptr<UnlitRenderPipeline> _pipeline;
     CameraControl _cameraControl;
     array<sigslot::scoped_connection, 4> _inputConnections;
     bool _rightMouseDown{false};

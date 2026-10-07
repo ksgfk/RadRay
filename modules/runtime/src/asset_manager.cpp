@@ -161,7 +161,7 @@ AssetManager::AssetManager() noexcept = default;
 
 void AssetManager::BeginStopping() noexcept {
     if (_stopping) return;
-    if (_pumping || _collectingScene) RADRAY_ABORT("Cannot stop assets during dispatch or collection");
+    if (_pumping || _operationsBlocked) RADRAY_ABORT("Cannot stop assets during dispatch or collection");
     _stopping = true;
     _pumping = true;
     auto guard = MakeScopeGuard([this]() noexcept { _pumping = false; });
@@ -258,7 +258,7 @@ void AssetManager::Release(Slot* slot) noexcept {
 }
 
 StreamingAssetRefAny AssetManager::Load(AssetLoadRequest request) {
-    if (_stopping || _collectingScene) RADRAY_ABORT("Cannot start asset loading in this phase");
+    if (_stopping || _operationsBlocked) RADRAY_ABORT("Cannot start asset loading in this phase");
     if (Slot* existing = FindSlot(request.Id); existing != nullptr) {
         return MakeRef(existing);
     }
@@ -275,7 +275,7 @@ StreamingAssetRefAny AssetManager::Load(AssetLoadRequest request) {
 }
 
 StreamingAssetRefAny AssetManager::Load(const AssetId& id) {
-    if (_stopping || _collectingScene) RADRAY_ABORT("Cannot start asset loading in this phase");
+    if (_stopping || _operationsBlocked) RADRAY_ABORT("Cannot start asset loading in this phase");
     if (Slot* existing = FindSlot(id); existing != nullptr) {
         return MakeRef(existing);
     }
@@ -318,7 +318,7 @@ task<void> AssetManager::Wait(StreamingAssetRefAny ref) {
 StreamingAssetRefAny AssetManager::AddReady(
     const AssetId& id,
     unique_ptr<Asset> object) {
-    if (_stopping || _collectingScene) RADRAY_ABORT("Cannot create assets in this phase");
+    if (_stopping || _operationsBlocked) RADRAY_ABORT("Cannot create assets in this phase");
     if (Slot* existing = FindSlot(id); existing != nullptr) {
         return MakeRef(existing);
     }
@@ -481,7 +481,7 @@ void AssetManager::FlushDeferredBatch() {
 
 void AssetManager::Pump() {
     RADRAY_PROFILE_SCOPE_N("AssetManager::Pump");
-    if (_pumping || _collectingScene) RADRAY_ABORT("Cannot pump assets during dispatch or collection");
+    if (_pumping || _operationsBlocked) RADRAY_ABORT("Cannot pump assets during dispatch or collection");
     _pumping = true;
     auto guard = MakeScopeGuard([this]() noexcept { _pumping = false; });
     PumpLoadResults();

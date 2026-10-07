@@ -23,7 +23,7 @@ class InstanceVulkanImpl;
 class VMA;
 class DeviceVulkan;
 class QueueVulkan;
-class CommandPoolVulkan;
+class CommandAllocatorVulkan;
 class CommandBufferVulkan;
 class SimulateCommandEncoderVulkan;
 class RenderPassVulkan;
@@ -280,7 +280,8 @@ public:
 
     Nullable<CommandQueue*> GetCommandQueue(QueueType type, uint32_t slot) noexcept override;
 
-    Nullable<unique_ptr<CommandBuffer>> CreateCommandBuffer(CommandQueue* queue) noexcept override;
+    Nullable<unique_ptr<CommandAllocator>> CreateCommandAllocator(CommandQueue* queue) noexcept override;
+    Nullable<unique_ptr<CommandBuffer>> CreateCommandBuffer(CommandAllocator* allocator) noexcept override;
 
     Nullable<unique_ptr<Fence>> CreateFence() noexcept override;
 
@@ -398,27 +399,30 @@ public:
 #endif
 };
 
-class CommandPoolVulkan final : public RenderBase {
+class CommandAllocatorVulkan final : public CommandAllocator {
 public:
-    CommandPoolVulkan(
+    CommandAllocatorVulkan(
         DeviceVulkan* device,
+        QueueVulkan* queue,
         VkCommandPool cmdPool) noexcept;
 
-    ~CommandPoolVulkan() noexcept override;
-
-    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::UNKNOWN; }
+    ~CommandAllocatorVulkan() noexcept override;
 
     bool IsValid() const noexcept override;
 
     void Destroy() noexcept override;
 
-    void Reset() const noexcept;
+    void Reset() noexcept override;
+    void SetDebugName(std::string_view name) noexcept override;
 
 public:
     void DestroyImpl() noexcept;
 
     DeviceVulkan* _device;
+    QueueVulkan* _queue;
     VkCommandPool _cmdPool;
+    vector<CommandBufferVulkan*> _children;
+    bool _used{false};
 };
 
 class CommandBufferVulkan final : public CommandBuffer {
@@ -426,7 +430,7 @@ public:
     CommandBufferVulkan(
         DeviceVulkan* device,
         QueueVulkan* queue,
-        unique_ptr<CommandPoolVulkan> cmdPool,
+        CommandAllocatorVulkan* cmdPool,
         VkCommandBuffer cmdBuffer) noexcept;
 
     ~CommandBufferVulkan() noexcept override;
@@ -480,7 +484,11 @@ public:
 #ifdef RADRAY_ENABLE_PROFILER
     QueueVulkan* _queue;
 #endif
-    unique_ptr<CommandPoolVulkan> _cmdPool;
+    CommandAllocatorVulkan* _cmdPool;
+    bool _recording{false};
+    bool _used{false};
+    bool _executable{false};
+    Nullable<CommandEncoder*> _activeEncoder{nullptr};
     VkCommandBuffer _cmdBuffer;
     vector<unique_ptr<CommandEncoder>> _endedEncoders;
 #ifdef RADRAY_ENABLE_PROFILER
@@ -1184,6 +1192,7 @@ Nullable<InstanceVulkanImpl*> InitVulkanEnvImpl(const VulkanInstanceDescriptor& 
 void ShutdownVulkanEnvImpl() noexcept;
 
 constexpr auto CastVkObject(CommandQueue* p) noexcept { return static_cast<QueueVulkan*>(p); }
+constexpr auto CastVkObject(CommandAllocator* p) noexcept { return static_cast<CommandAllocatorVulkan*>(p); }
 constexpr auto CastVkObject(CommandBuffer* p) noexcept { return static_cast<CommandBufferVulkan*>(p); }
 constexpr auto CastVkObject(SwapChain* p) noexcept { return static_cast<SwapChainVulkan*>(p); }
 constexpr auto CastVkObject(Fence* p) noexcept { return static_cast<FenceVulkan*>(p); }

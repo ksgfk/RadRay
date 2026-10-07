@@ -1,3 +1,5 @@
+#include <radray/runtime/components/scene_view_capture.h>
+#include <radray/runtime/render_framework/scene_manager.h>
 // Profiling workloads and interpretation: docs/guide/build-test.md
 #include "example_framework_stress.h"
 
@@ -21,13 +23,13 @@ void PrintUsage() {
         "  --mode=world|sync|upload|draw  [upload]\n"
         "  --workload=idle|move|parent|tick|churn  [move]\n"
         "  --objects=N  [10000]  --changes=N  [100, clamped to objects]\n"
-        "  --flights=1|2|3  [2]  --views=1|3  [1]\n"
+        "  --flights=1|2|3  [2]  --views=N  [1]\n"
         "  --warmup=N  [120 frames]  --seconds=N  [60; 0 = unlimited]\n"
         "  --frames=N  [0; nonzero overrides seconds, excludes warmup]\n"
         "  --d3d12 | --vulkan  [d3d12]\n"
         "  --multithread | --single-thread  [multithread]\n"
         "  --window  [otherwise offscreen, no swapchain or vsync]\n"
-        "  --no-gpu-profiler  --validation  --help\n"
+        "  --no-gpu-profiler  --validation  --legacy-draw  --help\n"
         "All modes use the same Application GPU runner and Ready cube asset.\n"
         "World leaves the World disconnected; sync adds CPU scene delivery;\n"
         "upload adds object buffers; draw adds the scene_sync unlit draw loop.\n"
@@ -50,6 +52,8 @@ bool ParseArguments(int argc, char** argv, FrameworkStressOptions& options) {
             options.Window = true;
         else if (argument == "--validation")
             options.Validation = true;
+        else if (argument == "--legacy-draw")
+            options.LegacyDraw = true;
         else if (argument == "--no-gpu-profiler")
             options.GpuProfiler = false;
         else {
@@ -97,7 +101,7 @@ bool ParseArguments(int argc, char** argv, FrameworkStressOptions& options) {
                     options.Seconds = number;
                 else if (name == "--flights" && number >= 1 && number <= 3)
                     options.Flights = number;
-                else if (name == "--views" && (number == 1 || number == 3))
+                else if (name == "--views" && number > 0)
                     options.Views = number;
                 else
                     return false;
@@ -186,7 +190,17 @@ bool FrameworkStressApp::InitializeDrawing() {
     auto pass = GetRenderSystem()->GetRenderPassRegistry()->GetOrCreateRenderPass({std::span{&attachment, 1}, {}});
     if (!pass) return false;
     _pass = pass;
-    if (_options.Mode == StressMode::Draw) {
+    if (_options.Mode == StressMode::Draw && !_options.LegacyDraw) {
+        MaterialPass material;
+        material.Name = "Unlit";
+        material.Program.SourceName = "scene_sync.hlsl";
+        material.Inputs = {{"Objects", MaterialInputSource::SceneObjects}, {"ViewData", MaterialInputSource::ViewConstants}};
+        material.ObjectIndexPushConstant = "DrawData";
+        MaterialRenderData fallback;
+        fallback.Passes.push_back(std::move(material));
+        _pipeline = make_unique<UnlitRenderPipeline>(ScenePipelineDescriptor{.Fallback = std::move(fallback)});
+    }
+    if (_options.Mode == StressMode::Draw && _options.LegacyDraw) {
         _draw = make_unique<SceneDraw>();
         if (!_draw->Initialize(*GetRenderSystem().Get(), device, _pass.Get(), attachment.Format, _options.Flights)) return false;
     }
@@ -264,7 +278,8 @@ void FrameworkStressApp::OnCollectRenderViews(SceneViewCollector& collector) {
     RADRAY_PROFILE_SCOPE_N("Stress::CollectViews");
     if (_options.Mode == StressMode::World || !_camera) return;
     for (uint32_t i = 0; i < _options.Views; ++i) {
-        if (!collector.Add(*_camera.Get(), {float(i) / _options.Views, 0, 1.0f / _options.Views, 1})) Fail("invalid scene view");
+        const auto view = CaptureSceneView(*_camera.Get(), {float(i) / _options.Views, 0, 1.0f / _options.Views, 1});
+        if (!view || !collector.Add(*view)) Fail("invalid scene view");
     }
 }
 
@@ -281,15 +296,25 @@ void FrameworkStressApp::OnRender(AppFrameContext& frame) {
         if (!target) return;
     }
     auto* renderer = GetRenderSystem().Get();
-    const auto views = renderer->GetFrameViewsRT(frame.FlightIndex());
-    array<std::optional<SceneGpuView>, 3> objects;
+    const auto views = GetSceneManager()->GetFrameViewsRT(frame.FlightIndex());
+    if (_pipeline) {
+        auto context = MakePipelineContext(*renderer, frame, GetSceneManager());
+        RenderOutput output;
+        output.Colors.push_back({target ? target->BackBufferView : resources.View.get(), target ? target->Window->GetBackBufferState(target->BackBufferIndex) : resources.State, target ? render::TextureStates{render::TextureState::Present} : render::TextureStates{render::TextureState::RenderTarget}});
+        auto result = RecordRenderPipeline(*_pipeline, context, {views, std::move(output)});
+        if (!target) resources.State = render::TextureState::RenderTarget;
+        frame.RegisterClosedCommandBuffers({.CmdBuffers = result.Commands}, std::move(target));
+        if (result.Status == PipelineRecordStatus::RecoverableFailure) Fail("pipeline recording failed");
+        return;
+    }
+    vector<std::optional<SceneGpuView>> objects(views.size());
     const auto bytesBefore = frame.GetHostWrites().GetStats().CommittedBytes;
     if (_options.Mode == StressMode::Upload || _options.Mode == StressMode::Draw) {
         RADRAY_PROFILE_SCOPE_N("Stress::PrepareObjects");
         for (size_t i = 0; i < views.size(); ++i) {
-            objects[i] = renderer->PrepareSceneGpuRT(views[i].Scene, frame);
+            objects[i] = GetSceneManager()->PrepareSceneGpuRT(views[i].Scene, frame);
             if (!objects[i] && _options.Objects) {
-                const auto scene = renderer->GetSceneRT(views[i].Scene);
+                const auto scene = GetSceneManager()->GetSceneRT(views[i].Scene);
                 Fail(fmt::format("object buffer preparation failed: serial={} view={}/{} scene={}:{} meshes={}", frame.FrameSerial(), i, views.size(), views[i].Scene.Index, views[i].Scene.Generation, scene ? scene->GetStaticMeshes().size() : 0));
             }
         }
@@ -319,7 +344,7 @@ void FrameworkStressApp::OnRender(AppFrameContext& frame) {
             if (_draw) {
                 RADRAY_PROFILE_SCOPE_N("Stress::DrawObjects");
                 for (uint32_t i = 0; i < views.size(); ++i) {
-                    if (objects[i] && !_draw->Draw(*renderer, frame, encoder.Get(), views[i], *objects[i], i, desc.Width, desc.Height)) Fail("draw recording failed");
+                    if (objects[i] && !_draw->Draw(*GetSceneManager().Get(), frame, encoder.Get(), views[i], *objects[i], i, desc.Width, desc.Height)) Fail("draw recording failed");
                 }
             }
             commands->EndRenderPass(encoder.Release());
@@ -339,6 +364,9 @@ void FrameworkStressApp::OnShutdown() {
     RADRAY_PROFILE_SCOPE_N("Stress::Shutdown");
     RADRAY_INFO_LOG("Framework stress finished: {} workload updates, {} render callbacks, failed={}", _updates, _renderCallbacks, Failed());
     _draw.reset();
+    _pipeline.reset();
+    for (const auto& frame : _frames)
+        if (frame.View) GetRenderSystem()->GetRenderPassRegistry()->RemoveFramebuffersUsing(frame.View.get());
     _frames.clear();
     _pass = nullptr;
     _objects.clear();

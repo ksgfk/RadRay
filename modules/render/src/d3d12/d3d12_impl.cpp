@@ -1021,42 +1021,49 @@ TextureSupport DeviceD3D12::QueryTextureSupport(const TextureSupportQuery& query
     return result;
 }
 
-Nullable<unique_ptr<CommandBuffer>> DeviceD3D12::CreateCommandBuffer(CommandQueue* queue_) noexcept {
-    auto queue = CastD3D12Object(queue_);
+Nullable<unique_ptr<CommandAllocator>> DeviceD3D12::CreateCommandAllocator(CommandQueue* queue_) noexcept {
+    Nullable<CmdQueueD3D12*> queue = dynamic_cast<CmdQueueD3D12*>(queue_);
+    if (!queue || queue->_device != this || !queue->IsValid()) {
+        RADRAY_ERR_LOG("command allocator requires a valid queue from this device");
+        return nullptr;
+    }
+    return make_unique<CommandAllocatorD3D12>(this, queue.Get());
+}
+
+Nullable<unique_ptr<CommandBuffer>> DeviceD3D12::CreateCommandBuffer(CommandAllocator* allocator_) noexcept {
+    Nullable<CommandAllocatorD3D12*> allocator = dynamic_cast<CommandAllocatorD3D12*>(allocator_);
+    if (!allocator || allocator->_device != this || !allocator->IsValid()) {
+        RADRAY_ERR_LOG("command buffer requires a valid allocator from this device");
+        return nullptr;
+    }
+    auto* queue = allocator->_queue;
     D3D12_VERSIONED_ROOT_SIGNATURE_DESC emptyDesc{};
     emptyDesc.Version = D3D_ROOT_SIGNATURE_VERSION_1_0;
     ComPtr<ID3DBlob> emptyBlob;
     ComPtr<ID3D12RootSignature> emptyRoot;
-    HRESULT emptyResult = ::D3D12SerializeVersionedRootSignature(&emptyDesc, emptyBlob.GetAddressOf(), nullptr);
-    if (SUCCEEDED(emptyResult)) emptyResult = _device->CreateRootSignature(0, emptyBlob->GetBufferPointer(), emptyBlob->GetBufferSize(), IID_PPV_ARGS(emptyRoot.GetAddressOf()));
-    if (FAILED(emptyResult)) {
-        RADRAY_ERR_LOG("D3D12 empty pass root signature creation failed: {} {}", GetErrorName(emptyResult), emptyResult);
-        return nullptr;
-    }
-    ComPtr<ID3D12CommandAllocator> alloc;
-    if (HRESULT hr = _device->CreateCommandAllocator(queue->_type, IID_PPV_ARGS(alloc.GetAddressOf()));
-        FAILED(hr)) {
-        RADRAY_ERR_LOG("ID3D12Device::CreateCommandAllocator failed: {} {}", GetErrorName(hr), hr);
+    HRESULT hr = ::D3D12SerializeVersionedRootSignature(&emptyDesc, emptyBlob.GetAddressOf(), nullptr);
+    if (SUCCEEDED(hr)) hr = _device->CreateRootSignature(0, emptyBlob->GetBufferPointer(), emptyBlob->GetBufferSize(), IID_PPV_ARGS(emptyRoot.GetAddressOf()));
+    if (FAILED(hr)) {
+        RADRAY_ERR_LOG("D3D12 empty pass root signature creation failed: {} {}", GetErrorName(hr), hr);
         return nullptr;
     }
     ComPtr<ID3D12GraphicsCommandList> list;
-    if (HRESULT hr = _device->CreateCommandList(0, queue->_type, alloc.Get(), nullptr, IID_PPV_ARGS(list.GetAddressOf()));
-        SUCCEEDED(hr)) {
-        if (FAILED(list->Close())) {
-            RADRAY_ERR_LOG("ID3D12GraphicsCommandList::Close failed: {} {}", GetErrorName(hr), hr);
-            return nullptr;
-        }
-        return make_unique<CmdListD3D12>(
-            this,
-            queue,
-            std::move(alloc),
-            std::move(list),
-            queue->_type,
-            std::move(emptyRoot));
+    ComPtr<ID3D12Device4> device4;
+    if (SUCCEEDED(_device.As(&device4))) {
+        hr = device4->CreateCommandList1(0, queue->_type, D3D12_COMMAND_LIST_FLAG_NONE, IID_PPV_ARGS(list.GetAddressOf()));
     } else {
-        RADRAY_ERR_LOG("ID3D12Device::CreateCommandList failed: {} {}", GetErrorName(hr), hr);
+        const auto index = allocator->AcquireNative();
+        if (!index) return nullptr;
+        auto& native = allocator->_native[*index];
+        hr = _device->CreateCommandList(0, queue->_type, native.Allocator.Get(), nullptr, IID_PPV_ARGS(list.GetAddressOf()));
+        if (SUCCEEDED(hr)) _CheckD3D12Result(_device.Get(), list->Close(), "ID3D12GraphicsCommandList::Close");
+        native.Recording = false;
+    }
+    if (FAILED(hr)) {
+        RADRAY_ERR_LOG("D3D12 command list creation failed: {} {}", GetErrorName(hr), hr);
         return nullptr;
     }
+    return make_unique<CmdListD3D12>(this, queue, allocator.Get(), std::move(list), queue->_type, std::move(emptyRoot));
 }
 
 Nullable<unique_ptr<Fence>> DeviceD3D12::CreateFence() noexcept {
@@ -3624,7 +3631,10 @@ void CmdQueueD3D12::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
     vector<ID3D12CommandList*> submits;
     submits.reserve(desc.CmdBuffers.size());
     for (auto& i : desc.CmdBuffers) {
-        auto cmdList = CastD3D12Object(i);
+        Nullable<CmdListD3D12*> cmdList = dynamic_cast<CmdListD3D12*>(i);
+        if (!cmdList || !cmdList->IsValid() || !cmdList->_executable || cmdList->_allocator->_queue != this)
+            RADRAY_ABORT("submit requires closed, current recordings from this queue");
+        cmdList->_executable = false;
         submits.emplace_back(cmdList->_cmdList.Get());
     }
     if (!submits.empty()) {
@@ -3723,10 +3733,62 @@ uint64_t FenceD3D12::GetLastSignaledValue() const noexcept {
     return _fenceValue - 1;
 }
 
+CommandAllocatorD3D12::CommandAllocatorD3D12(DeviceD3D12* device, CmdQueueD3D12* queue) noexcept
+    : _device(device), _queue(queue) {}
+
+CommandAllocatorD3D12::~CommandAllocatorD3D12() noexcept { Destroy(); }
+
+bool CommandAllocatorD3D12::IsValid() const noexcept { return _valid; }
+
+void CommandAllocatorD3D12::Destroy() noexcept {
+    if (!_children.empty()) RADRAY_ABORT("destroy command buffers before their allocator");
+    _native.clear();
+    _valid = false;
+}
+
+void CommandAllocatorD3D12::SetDebugName(std::string_view name) noexcept {
+    _name = name;
+    for (auto& native : _native) SetObjectName(_name, native.Allocator.Get());
+}
+
+std::optional<size_t> CommandAllocatorD3D12::AcquireNative() noexcept {
+    if (!_valid) RADRAY_ABORT("invalid command allocator");
+    size_t index = 0;
+    while (index < _native.size() && _native[index].Recording) ++index;
+    if (index == _native.size()) {
+        ComPtr<ID3D12CommandAllocator> allocator;
+        const HRESULT hr = _device->_device->CreateCommandAllocator(_queue->_type, IID_PPV_ARGS(allocator.GetAddressOf()));
+        if (FAILED(hr)) {
+            RADRAY_ERR_LOG("ID3D12Device::CreateCommandAllocator failed: {} {}", GetErrorName(hr), hr);
+            return std::nullopt;
+        }
+        if (!_name.empty()) SetObjectName(_name, allocator.Get());
+        _native.push_back({std::move(allocator)});
+    }
+    _native[index].Recording = true;
+    _native[index].Used = true;
+    return index;
+}
+
+void CommandAllocatorD3D12::Reset() noexcept {
+    if (!_valid) RADRAY_ABORT("invalid command allocator");
+    for (const auto& native : _native)
+        if (native.Recording) RADRAY_ABORT("cannot reset command allocator while recording");
+    for (auto& native : _native) {
+        if (native.Used) _CheckD3D12Result(_device->_device.Get(), native.Allocator->Reset(), "ID3D12CommandAllocator::Reset");
+        native.Used = false;
+    }
+    for (auto* child : _children) {
+        child->_keepAliveBuffers.clear();
+        child->_used = false;
+        child->_executable = false;
+    }
+}
+
 CmdListD3D12::CmdListD3D12(
     DeviceD3D12* device,
     [[maybe_unused]] CmdQueueD3D12* queue,
-    ComPtr<ID3D12CommandAllocator> cmdAlloc,
+    CommandAllocatorD3D12* allocator,
     ComPtr<ID3D12GraphicsCommandList> cmdList,
     D3D12_COMMAND_LIST_TYPE type,
     ComPtr<ID3D12RootSignature> emptyRootSignature) noexcept
@@ -3734,7 +3796,7 @@ CmdListD3D12::CmdListD3D12(
 #ifdef RADRAY_ENABLE_PROFILER
       _queue(queue),
 #endif
-      _cmdAlloc(std::move(cmdAlloc)),
+      _allocator(allocator),
       _cmdList(std::move(cmdList)),
       _emptyRootSignature(std::move(emptyRootSignature)),
       _type(type)
@@ -3743,6 +3805,7 @@ CmdListD3D12::CmdListD3D12(
       _profilerZones(make_unique<ProfilerZoneStack>())
 #endif
 {
+    _allocator->_children.push_back(this);
 }
 
 CmdListD3D12::~CmdListD3D12() noexcept {
@@ -3750,10 +3813,13 @@ CmdListD3D12::~CmdListD3D12() noexcept {
 }
 
 bool CmdListD3D12::IsValid() const noexcept {
-    return _cmdAlloc != nullptr && _cmdList != nullptr;
+    return _cmdList != nullptr;
 }
 
 void CmdListD3D12::Destroy() noexcept {
+    if (_recording) RADRAY_ABORT("cannot destroy a recording command buffer");
+    if (!_cmdList) return;
+    std::erase(_allocator->_children, this);
 #ifdef RADRAY_ENABLE_PROFILER
     // Open zones would record end queries into a list that is being destroyed; drop them.
     if (_profilerZones && !_profilerZones->Zones.empty()) {
@@ -3765,28 +3831,22 @@ void CmdListD3D12::Destroy() noexcept {
     _inRenderPass = false;
 #endif
     _keepAliveBuffers.clear();
-    _cmdAlloc = nullptr;
     _cmdList = nullptr;
     _emptyRootSignature = nullptr;
 }
 
 void CmdListD3D12::SetDebugName(std::string_view name) noexcept {
-    auto listName = fmt::format("CmdList_{}", name);
-    auto allocName = fmt::format("CmdAlloc_{}", name);
     SetObjectName(name, _cmdList.Get());
-    SetObjectName(name, _cmdAlloc.Get());
 }
 
 void CmdListD3D12::Begin() noexcept {
-    _keepAliveBuffers.clear();
-    if (HRESULT hr = _cmdAlloc->Reset();
-        FAILED(hr)) {
-        RADRAY_ABORT("ID3D12CommandAllocator::Reset failed: {} {}", GetErrorName(hr), hr);
-    }
-    if (HRESULT hr = _cmdList->Reset(_cmdAlloc.Get(), nullptr);
-        FAILED(hr)) {
-        RADRAY_ABORT("ID3D12GraphicsCommandList::Reset failed: {} {}", GetErrorName(hr), hr);
-    }
+    if (!IsValid() || _used) RADRAY_ABORT("command buffer Begin requires creation or allocator Reset");
+    const auto index = _allocator->AcquireNative();
+    if (!index) RADRAY_ABORT("cannot allocate command recording storage");
+    _nativeIndex = *index;
+    _CheckD3D12Result(_device->_device.Get(), _cmdList->Reset(_allocator->_native[_nativeIndex].Allocator.Get(), nullptr), "ID3D12GraphicsCommandList::Reset");
+    _recording = true;
+    _used = true;
     if (_type != D3D12_COMMAND_LIST_TYPE_COPY) {
         ID3D12DescriptorHeap* descriptorHeaps[] = {
             _device->_gpuResHeap->GetNative(),
@@ -3799,6 +3859,7 @@ void CmdListD3D12::Begin() noexcept {
 }
 
 void CmdListD3D12::End() noexcept {
+    if (!_recording || _activeEncoder) RADRAY_ABORT("command End requires recording with all encoders ended");
 #ifdef RADRAY_ENABLE_PROFILER
     // Zone end queries must be recorded before Close(); unbalanced groups are closed here.
     _profilerZones->Zones.clear();
@@ -3806,9 +3867,13 @@ void CmdListD3D12::End() noexcept {
     _suppressedZonePushes = 0;
 #endif
     _CheckD3D12Result(_device->_device.Get(), _cmdList->Close(), "ID3D12GraphicsCommandList::Close");
+    _allocator->_native[_nativeIndex].Recording = false;
+    _recording = false;
+    _executable = true;
 }
 
 void CmdListD3D12::ResourceBarrier(std::span<const ResourceBarrierDescriptor> barriers) noexcept {
+    if (!_recording) RADRAY_ABORT("command modification requires recording");
     vector<D3D12_RESOURCE_BARRIER> rawBarriers;
     rawBarriers.reserve(barriers.size());
     for (const auto& v : barriers) {
@@ -3902,6 +3967,7 @@ void CmdListD3D12::ResourceBarrier(std::span<const ResourceBarrierDescriptor> ba
 }
 
 void CmdListD3D12::PushDebugGroup(std::string_view name) noexcept {
+    if (!_recording) RADRAY_ABORT("command modification requires recording");
     const auto wide = ToWideChar(name).value_or(L"RenderGraph");
     _cmdList->BeginEvent(0, wide.c_str(), static_cast<UINT>((wide.size() + 1) * sizeof(wchar_t)));
 #ifdef RADRAY_ENABLE_PROFILER
@@ -3919,6 +3985,7 @@ void CmdListD3D12::PushDebugGroup(std::string_view name) noexcept {
 }
 
 void CmdListD3D12::PopDebugGroup() noexcept {
+    if (!_recording) RADRAY_ABORT("command modification requires recording");
     _cmdList->EndEvent();
 #ifdef RADRAY_ENABLE_PROFILER
     if (_suppressedZonePushes > 0) {
@@ -3934,6 +4001,7 @@ void CmdListD3D12::PopDebugGroup() noexcept {
 }
 
 Nullable<unique_ptr<GraphicsCommandEncoder>> CmdListD3D12::BeginRenderPass(const RenderPassBeginDescriptor& desc) noexcept {
+    if (!_recording || _activeEncoder) RADRAY_ABORT("begin pass requires recording outside an encoder");
     if (desc.Pass == nullptr || desc.Target == nullptr) {
         RADRAY_ERR_LOG("d3d12 BeginRenderPass requires an explicit render pass and framebuffer");
         return nullptr;
@@ -4012,10 +4080,14 @@ Nullable<unique_ptr<GraphicsCommandEncoder>> CmdListD3D12::BeginRenderPass(const
 #ifdef RADRAY_ENABLE_PROFILER
     _inRenderPass = true;
 #endif
-    return make_unique<CmdRenderPassD3D12>(this);
+    auto encoder = make_unique<CmdRenderPassD3D12>(this);
+    _activeEncoder = encoder.get();
+    return encoder;
 }
 
 void CmdListD3D12::EndRenderPass(unique_ptr<GraphicsCommandEncoder> encoder) noexcept {
+    if (!_recording || !encoder || _activeEncoder.Get() != encoder.get()) RADRAY_ABORT("end pass requires its active encoder");
+    _activeEncoder = nullptr;
     ComPtr<ID3D12GraphicsCommandList4> cmdList4;
     if (HRESULT hr = _cmdList->QueryInterface(IID_PPV_ARGS(cmdList4.GetAddressOf()));
         FAILED(hr)) {
@@ -4040,10 +4112,15 @@ void CmdListD3D12::EndRenderPass(unique_ptr<GraphicsCommandEncoder> encoder) noe
 }
 
 Nullable<unique_ptr<ComputeCommandEncoder>> CmdListD3D12::BeginComputePass() noexcept {
-    return make_unique<CmdComputePassD3D12>(this);
+    if (!_recording || _activeEncoder) RADRAY_ABORT("begin pass requires recording outside an encoder");
+    auto encoder = make_unique<CmdComputePassD3D12>(this);
+    _activeEncoder = encoder.get();
+    return encoder;
 }
 
 void CmdListD3D12::EndComputePass(unique_ptr<ComputeCommandEncoder> encoder) noexcept {
+    if (!_recording || !encoder || _activeEncoder.Get() != encoder.get()) RADRAY_ABORT("end pass requires its active encoder");
+    _activeEncoder = nullptr;
     _cmdList->SetComputeRootSignature(_emptyRootSignature.Get());
     encoder->Destroy();
 }
@@ -4051,12 +4128,14 @@ void CmdListD3D12::EndComputePass(unique_ptr<ComputeCommandEncoder> encoder) noe
 // == CmdList: 拷贝与 query ==
 
 void CmdListD3D12::CopyBufferToBuffer(Buffer* dst_, uint64_t dstOffset, Buffer* src_, uint64_t srcOffset, uint64_t size) noexcept {
+    if (!_recording) RADRAY_ABORT("command modification requires recording");
     auto src = CastD3D12Object(src_);
     auto dst = CastD3D12Object(dst_);
     _cmdList->CopyBufferRegion(dst->_buf.Get(), dstOffset, src->_buf.Get(), srcOffset, size);
 }
 
 bool CmdListD3D12::CopyBufferToTextureRegion(const BufferToTextureCopyDescriptor& desc) noexcept {
+    if (!_recording) RADRAY_ABORT("command modification requires recording");
     if (!desc.Source || !desc.Destination) return false;
     const auto [supported, reason] = ValidateBufferTextureCopyRegion(desc.Source->GetDesc(), desc.Destination->GetDesc(), desc.Region, _device->GetDetail());
     if (!supported) {
@@ -4080,6 +4159,7 @@ bool CmdListD3D12::CopyBufferToTextureRegion(const BufferToTextureCopyDescriptor
 }
 
 void CmdListD3D12::CopyBufferToTexture(Texture* dst_, SubresourceRange dstRange, Buffer* src_, uint64_t srcOffset) noexcept {
+    if (!_recording) RADRAY_ABORT("command modification requires recording");
     auto src = CastD3D12Object(src_);
     auto dst = CastD3D12Object(dst_);
     const D3D12_RESOURCE_DESC& dstDesc = dst->_rawDesc;
@@ -4138,6 +4218,7 @@ void CmdListD3D12::CopyBufferToTexture(Texture* dst_, SubresourceRange dstRange,
 }
 
 void CmdListD3D12::CopyTextureToBuffer(Buffer* dst_, uint64_t dstOffset, Texture* src_, SubresourceRange srcRange) noexcept {
+    if (!_recording) RADRAY_ABORT("command modification requires recording");
     auto dst = CastD3D12Object(dst_);
     auto src = CastD3D12Object(src_);
     const D3D12_RESOURCE_DESC& srcDesc = src->_rawDesc;
@@ -4196,6 +4277,7 @@ void CmdListD3D12::CopyTextureToBuffer(Buffer* dst_, uint64_t dstOffset, Texture
 }
 
 void CmdListD3D12::CopyTextureToTexture(const TextureCopyDescriptor& desc) noexcept {
+    if (!_recording) RADRAY_ABORT("command modification requires recording");
     if (desc.Source == nullptr || desc.Destination == nullptr) {
         RADRAY_ERR_LOG("d3d12 CopyTextureToTexture source or destination is null");
         return;
@@ -4305,6 +4387,7 @@ void CmdListD3D12::CopyTextureToTexture(const TextureCopyDescriptor& desc) noexc
 }
 
 void CmdListD3D12::ResolveTexture(const TextureResolveDescriptor& desc) noexcept {
+    if (!_recording) RADRAY_ABORT("command modification requires recording");
     if (desc.Source == nullptr || desc.Destination == nullptr) {
         RADRAY_ERR_LOG("d3d12 ResolveTexture source or destination is null");
         return;
@@ -4357,6 +4440,7 @@ void CmdListD3D12::ResolveTexture(const TextureResolveDescriptor& desc) noexcept
 }
 
 void CmdListD3D12::ResetQueryPool(QueryPool* pool_, uint32_t firstIndex, uint32_t count) noexcept {
+    if (!_recording) RADRAY_ABORT("command modification requires recording");
     auto pool = CastD3D12Object(pool_);
     if (pool == nullptr || !pool->IsValid() || count == 0 || firstIndex + count > pool->_count) {
         RADRAY_ERR_LOG("d3d12 ResetQueryPool invalid range (first={}, count={})", firstIndex, count);
@@ -4366,6 +4450,7 @@ void CmdListD3D12::ResetQueryPool(QueryPool* pool_, uint32_t firstIndex, uint32_
 }
 
 void CmdListD3D12::WriteTimestamp(const QueryTimestampDescriptor& desc) noexcept {
+    if (!_recording) RADRAY_ABORT("command modification requires recording");
     auto pool = CastD3D12Object(desc.Pool);
     if (pool == nullptr || !pool->IsValid() || desc.Index >= pool->_count) {
         RADRAY_ERR_LOG("d3d12 WriteTimestamp invalid query index {}", desc.Index);
@@ -4379,6 +4464,7 @@ void CmdListD3D12::WriteTimestamp(const QueryTimestampDescriptor& desc) noexcept
 }
 
 void CmdListD3D12::ResolveQueryData(const QueryResolveDescriptor& desc) noexcept {
+    if (!_recording) RADRAY_ABORT("command modification requires recording");
     auto pool = CastD3D12Object(desc.Pool);
     auto dst = CastD3D12Object(desc.Destination);
     if (pool == nullptr || !pool->IsValid() || dst == nullptr || !dst->IsValid() ||

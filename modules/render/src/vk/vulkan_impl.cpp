@@ -979,8 +979,12 @@ Nullable<CommandQueue*> DeviceVulkan::GetCommandQueue(QueueType type, uint32_t s
     return queues[slot].get();
 }
 
-Nullable<unique_ptr<CommandBuffer>> DeviceVulkan::CreateCommandBuffer(CommandQueue* queue_) noexcept {
-    auto queue = CastVkObject(queue_);
+Nullable<unique_ptr<CommandAllocator>> DeviceVulkan::CreateCommandAllocator(CommandQueue* queue_) noexcept {
+    Nullable<QueueVulkan*> queue = dynamic_cast<QueueVulkan*>(queue_);
+    if (!queue || queue->_device != this || !queue->IsValid()) {
+        RADRAY_ERR_LOG("command allocator requires a valid queue from this device");
+        return nullptr;
+    }
     VkCommandPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
     poolInfo.pNext = nullptr;
@@ -992,7 +996,15 @@ Nullable<unique_ptr<CommandBuffer>> DeviceVulkan::CreateCommandBuffer(CommandQue
         RADRAY_ERR_LOG("vkCreateCommandPool failed: {}", vr);
         return nullptr;
     }
-    auto cmdPool = make_unique<CommandPoolVulkan>(this, pool);
+    return make_unique<CommandAllocatorVulkan>(this, queue.Get(), pool);
+}
+
+Nullable<unique_ptr<CommandBuffer>> DeviceVulkan::CreateCommandBuffer(CommandAllocator* allocator) noexcept {
+    Nullable<CommandAllocatorVulkan*> cmdPool = dynamic_cast<CommandAllocatorVulkan*>(allocator);
+    if (!cmdPool || cmdPool->_device != this || !cmdPool->IsValid()) {
+        RADRAY_ERR_LOG("command buffer requires a valid allocator from this device");
+        return nullptr;
+    }
     VkCommandBufferAllocateInfo bufferInfo{};
     bufferInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
     bufferInfo.pNext = nullptr;
@@ -1005,7 +1017,7 @@ Nullable<unique_ptr<CommandBuffer>> DeviceVulkan::CreateCommandBuffer(CommandQue
         RADRAY_ERR_LOG("vkAllocateCommandBuffers failed: {}", vr);
         return nullptr;
     }
-    return make_unique<CommandBufferVulkan>(this, queue, std::move(cmdPool), cmdBuf);
+    return make_unique<CommandBufferVulkan>(this, cmdPool->_queue, cmdPool.Get(), cmdBuf);
 }
 
 Nullable<unique_ptr<Fence>> DeviceVulkan::CreateFence() noexcept {
@@ -3601,7 +3613,10 @@ void QueueVulkan::Submit(const CommandQueueSubmitDescriptor& desc) noexcept {
     vector<VkCommandBuffer> cmdBufs;
     cmdBufs.reserve(desc.CmdBuffers.size());
     for (auto i : desc.CmdBuffers) {
-        auto cmdBuffer = CastVkObject(i);
+        Nullable<CommandBufferVulkan*> cmdBuffer = dynamic_cast<CommandBufferVulkan*>(i);
+        if (!cmdBuffer || !cmdBuffer->IsValid() || !cmdBuffer->_executable || cmdBuffer->_cmdPool->_queue != this)
+            RADRAY_ABORT("submit requires closed, current recordings from this queue");
+        cmdBuffer->_executable = false;
         cmdBufs.emplace_back(cmdBuffer->_cmdBuffer);
     }
 
@@ -3722,32 +3737,47 @@ void QueueVulkan::DestroyImpl() noexcept {
     }
 }
 
-CommandPoolVulkan::CommandPoolVulkan(
+CommandAllocatorVulkan::CommandAllocatorVulkan(
     DeviceVulkan* device,
+    QueueVulkan* queue,
     VkCommandPool cmdPool) noexcept
-    : _device(device),
+    : _device(device), _queue(queue),
       _cmdPool(cmdPool) {}
 
-CommandPoolVulkan::~CommandPoolVulkan() noexcept {
+CommandAllocatorVulkan::~CommandAllocatorVulkan() noexcept {
     this->DestroyImpl();
 }
 
-bool CommandPoolVulkan::IsValid() const noexcept {
+bool CommandAllocatorVulkan::IsValid() const noexcept {
     return _cmdPool != VK_NULL_HANDLE;
 }
 
-void CommandPoolVulkan::Destroy() noexcept {
+void CommandAllocatorVulkan::Destroy() noexcept {
     this->DestroyImpl();
 }
 
-void CommandPoolVulkan::Reset() const noexcept {
-    if (auto vr = _device->_ftb.vkResetCommandPool(_device->_device, _cmdPool, 0);
-        vr != VK_SUCCESS) {
-        RADRAY_ABORT("vkResetCommandPool failed: {}", vr);
+void CommandAllocatorVulkan::SetDebugName(std::string_view name) noexcept {
+    _device->SetObjectName(name, _cmdPool);
+}
+
+void CommandAllocatorVulkan::Reset() noexcept {
+    if (!IsValid()) RADRAY_ABORT("invalid command allocator");
+    for (auto* child : _children)
+        if (child->_recording) RADRAY_ABORT("cannot reset command allocator while recording");
+    if (_used) {
+        if (auto vr = _device->_ftb.vkResetCommandPool(_device->_device, _cmdPool, 0); vr != VK_SUCCESS)
+            RADRAY_ABORT("vkResetCommandPool failed: {}", vr);
+    }
+    _used = false;
+    for (auto* child : _children) {
+        child->_endedEncoders.clear();
+        child->_used = false;
+        child->_executable = false;
     }
 }
 
-void CommandPoolVulkan::DestroyImpl() noexcept {
+void CommandAllocatorVulkan::DestroyImpl() noexcept {
+    if (!_children.empty()) RADRAY_ABORT("destroy command buffers before their allocator");
     if (_cmdPool != VK_NULL_HANDLE) {
         _device->_ftb.vkDestroyCommandPool(_device->_device, _cmdPool, _device->GetAllocationCallbacks());
         _cmdPool = VK_NULL_HANDLE;
@@ -3757,14 +3787,15 @@ void CommandPoolVulkan::DestroyImpl() noexcept {
 CommandBufferVulkan::CommandBufferVulkan(
     DeviceVulkan* device,
     QueueVulkan* queue,
-    unique_ptr<CommandPoolVulkan> cmdPool,
+    CommandAllocatorVulkan* cmdPool,
     VkCommandBuffer cmdBuffer) noexcept
     : _device(device),
 #ifdef RADRAY_ENABLE_PROFILER
       _queue(queue),
 #endif
-      _cmdPool(std::move(cmdPool)),
+      _cmdPool(cmdPool),
       _cmdBuffer(cmdBuffer) {
+    _cmdPool->_children.push_back(this);
 #ifdef RADRAY_ENABLE_PROFILER
     _profilerZones = make_unique<ProfilerZoneStack>();
 #else
@@ -3777,7 +3808,7 @@ CommandBufferVulkan::~CommandBufferVulkan() noexcept {
 }
 
 bool CommandBufferVulkan::IsValid() const noexcept {
-    return _cmdPool != nullptr && _cmdBuffer != VK_NULL_HANDLE;
+    return _cmdBuffer != VK_NULL_HANDLE;
 }
 
 void CommandBufferVulkan::Destroy() noexcept {
@@ -3785,13 +3816,13 @@ void CommandBufferVulkan::Destroy() noexcept {
 }
 
 void CommandBufferVulkan::SetDebugName(std::string_view name) noexcept {
-    auto listName = fmt::format("CmdBuffer_{}", name);
-    auto allocName = fmt::format("CmdPool_{}", name);
-    _device->SetObjectName(listName, _cmdBuffer);
-    _device->SetObjectName(allocName, _cmdPool->_cmdPool);
+    _device->SetObjectName(name, _cmdBuffer);
 }
 
 void CommandBufferVulkan::DestroyImpl() noexcept {
+    if (_recording) RADRAY_ABORT("cannot destroy a recording command buffer");
+    if (_cmdBuffer == VK_NULL_HANDLE) return;
+    std::erase(_cmdPool->_children, this);
 #ifdef RADRAY_ENABLE_PROFILER
     // Open zones would record end timestamps into a buffer that is being freed; drop them.
     if (_profilerZones && !_profilerZones->Zones.empty()) {
@@ -3804,12 +3835,13 @@ void CommandBufferVulkan::DestroyImpl() noexcept {
         _device->_ftb.vkFreeCommandBuffers(_device->_device, _cmdPool->_cmdPool, 1, &_cmdBuffer);
         _cmdBuffer = VK_NULL_HANDLE;
     }
-    _cmdPool.reset();
 }
 
 void CommandBufferVulkan::Begin() noexcept {
-    _endedEncoders.clear();
-    _cmdPool->Reset();
+    if (!IsValid() || _used) RADRAY_ABORT("command buffer Begin requires creation or allocator Reset");
+    _cmdPool->_used = true;
+    _used = true;
+    _recording = true;
     VkCommandBufferBeginInfo beginInfo{};
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     beginInfo.pNext = nullptr;
@@ -3826,6 +3858,7 @@ void CommandBufferVulkan::Begin() noexcept {
 }
 
 void CommandBufferVulkan::End() noexcept {
+    if (!_recording || _activeEncoder) RADRAY_ABORT("command End requires recording with all encoders ended");
 #ifdef RADRAY_ENABLE_PROFILER
     // Zone end timestamps must be recorded before vkEndCommandBuffer; unbalanced groups are closed here.
     _profilerZones->Zones.clear();
@@ -3834,9 +3867,12 @@ void CommandBufferVulkan::End() noexcept {
         vr != VK_SUCCESS) {
         RADRAY_ABORT("vkEndCommandBuffer failed: {}", vr);
     }
+    _recording = false;
+    _executable = true;
 }
 
 void CommandBufferVulkan::ResourceBarrier(std::span<const ResourceBarrierDescriptor> barriers) noexcept {
+    if (!_recording) RADRAY_ABORT("command modification requires recording");
     const auto shaderStages = [](VkPipelineStageFlags native, ShaderStages stages) {
         constexpr VkPipelineStageFlags mask = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
         if (!stages || !(native & mask)) return native;
@@ -3923,6 +3959,7 @@ void CommandBufferVulkan::ResourceBarrier(std::span<const ResourceBarrierDescrip
 }
 
 void CommandBufferVulkan::PushDebugGroup(std::string_view name) noexcept {
+    if (!_recording) RADRAY_ABORT("command modification requires recording");
 #ifdef RADRAY_ENABLE_PROFILER
     if (_queue->_profilerContext != nullptr) {
         _profilerZones->Zones.emplace_back(
@@ -3939,6 +3976,7 @@ void CommandBufferVulkan::PushDebugGroup(std::string_view name) noexcept {
 }
 
 void CommandBufferVulkan::PopDebugGroup() noexcept {
+    if (!_recording) RADRAY_ABORT("command modification requires recording");
 #ifdef RADRAY_ENABLE_PROFILER
     if (!_profilerZones->Zones.empty()) _profilerZones->Zones.pop_back();
 #endif
@@ -3951,6 +3989,7 @@ void CommandBufferVulkan::PopDebugGroup() noexcept {
 // == 编码器 / RenderPass / Framebuffer ==
 
 Nullable<unique_ptr<GraphicsCommandEncoder>> CommandBufferVulkan::BeginRenderPass(const RenderPassBeginDescriptor& desc) noexcept {
+    if (!_recording || _activeEncoder) RADRAY_ABORT("begin pass requires recording outside an encoder");
     if (desc.Pass == nullptr || desc.Target == nullptr) {
         RADRAY_ERR_LOG("vk BeginRenderPass requires an explicit render pass and framebuffer");
         return nullptr;
@@ -4004,23 +4043,32 @@ Nullable<unique_ptr<GraphicsCommandEncoder>> CommandBufferVulkan::BeginRenderPas
     _device->_ftb.vkCmdBeginRenderPass(_cmdBuffer, &beginInfo, VK_SUBPASS_CONTENTS_INLINE);
     auto encoder = make_unique<SimulateCommandEncoderVulkan>(_device, this);
     encoder->_framebuffer = framebuffer;
+    _activeEncoder = encoder.get();
     return encoder;
 }
 
 void CommandBufferVulkan::EndRenderPass(unique_ptr<GraphicsCommandEncoder> encoder) noexcept {
+    if (!_recording || !encoder || _activeEncoder.Get() != encoder.get()) RADRAY_ABORT("end pass requires its active encoder");
+    _activeEncoder = nullptr;
     _device->_ftb.vkCmdEndRenderPass(_cmdBuffer);
     _endedEncoders.emplace_back(std::move(encoder));
 }
 
 Nullable<unique_ptr<ComputeCommandEncoder>> CommandBufferVulkan::BeginComputePass() noexcept {
-    return make_unique<SimulateComputeEncoderVulkan>(_device, this);
+    if (!_recording || _activeEncoder) RADRAY_ABORT("begin pass requires recording outside an encoder");
+    auto encoder = make_unique<SimulateComputeEncoderVulkan>(_device, this);
+    _activeEncoder = encoder.get();
+    return encoder;
 }
 
 void CommandBufferVulkan::EndComputePass(unique_ptr<ComputeCommandEncoder> encoder) noexcept {
+    if (!_recording || !encoder || _activeEncoder.Get() != encoder.get()) RADRAY_ABORT("end pass requires its active encoder");
+    _activeEncoder = nullptr;
     _endedEncoders.emplace_back(std::move(encoder));
 }
 
 void CommandBufferVulkan::CopyBufferToBuffer(Buffer* dst_, uint64_t dstOffset, Buffer* src_, uint64_t srcOffset, uint64_t size) noexcept {
+    if (!_recording) RADRAY_ABORT("command modification requires recording");
     auto dst = CastVkObject(dst_);
     auto src = CastVkObject(src_);
     VkBufferCopy copyInfo{};
@@ -4031,6 +4079,7 @@ void CommandBufferVulkan::CopyBufferToBuffer(Buffer* dst_, uint64_t dstOffset, B
 }
 
 bool CommandBufferVulkan::CopyBufferToTextureRegion(const BufferToTextureCopyDescriptor& desc) noexcept {
+    if (!_recording) RADRAY_ABORT("command modification requires recording");
     if (!desc.Source || !desc.Destination) return false;
     const auto [supported, reason] = ValidateBufferTextureCopyRegion(desc.Source->GetDesc(), desc.Destination->GetDesc(), desc.Region, _device->GetDetail());
     if (!supported) {
@@ -4052,6 +4101,7 @@ bool CommandBufferVulkan::CopyBufferToTextureRegion(const BufferToTextureCopyDes
 }
 
 void CommandBufferVulkan::CopyBufferToTexture(Texture* dst_, SubresourceRange dstRange, Buffer* src_, uint64_t srcOffset) noexcept {
+    if (!_recording) RADRAY_ABORT("command modification requires recording");
     auto dst = CastVkObject(dst_);
     auto src = CastVkObject(src_);
     const uint32_t bpp = GetTextureFormatBytesPerPixel(dst->_format);
@@ -4119,6 +4169,7 @@ void CommandBufferVulkan::CopyBufferToTexture(Texture* dst_, SubresourceRange ds
 }
 
 void CommandBufferVulkan::CopyTextureToBuffer(Buffer* dst_, uint64_t dstOffset, Texture* src_, SubresourceRange srcRange) noexcept {
+    if (!_recording) RADRAY_ABORT("command modification requires recording");
     auto dst = CastVkObject(dst_);
     auto src = CastVkObject(src_);
     const uint32_t bpp = GetTextureFormatBytesPerPixel(src->_format);
@@ -4186,6 +4237,7 @@ void CommandBufferVulkan::CopyTextureToBuffer(Buffer* dst_, uint64_t dstOffset, 
 }
 
 void CommandBufferVulkan::CopyTextureToTexture(const TextureCopyDescriptor& desc) noexcept {
+    if (!_recording) RADRAY_ABORT("command modification requires recording");
     if (desc.Source == nullptr || desc.Destination == nullptr) {
         RADRAY_ERR_LOG("vk CopyTextureToTexture source or destination is null");
         return;
@@ -4279,6 +4331,7 @@ void CommandBufferVulkan::CopyTextureToTexture(const TextureCopyDescriptor& desc
 }
 
 void CommandBufferVulkan::ResolveTexture(const TextureResolveDescriptor& desc) noexcept {
+    if (!_recording) RADRAY_ABORT("command modification requires recording");
     if (desc.Source == nullptr || desc.Destination == nullptr) {
         RADRAY_ERR_LOG("vk ResolveTexture source or destination is null");
         return;
@@ -4336,6 +4389,7 @@ void CommandBufferVulkan::ResolveTexture(const TextureResolveDescriptor& desc) n
 }
 
 void CommandBufferVulkan::ResetQueryPool(QueryPool* pool_, uint32_t firstIndex, uint32_t count) noexcept {
+    if (!_recording) RADRAY_ABORT("command modification requires recording");
     auto pool = CastVkObject(pool_);
     if (pool == nullptr || !pool->IsValid() || count == 0 || firstIndex + count > pool->_count) {
         RADRAY_ERR_LOG("vk ResetQueryPool invalid range (first={}, count={})", firstIndex, count);
@@ -4345,6 +4399,7 @@ void CommandBufferVulkan::ResetQueryPool(QueryPool* pool_, uint32_t firstIndex, 
 }
 
 void CommandBufferVulkan::WriteTimestamp(const QueryTimestampDescriptor& desc) noexcept {
+    if (!_recording) RADRAY_ABORT("command modification requires recording");
     auto pool = CastVkObject(desc.Pool);
     if (pool == nullptr || !pool->IsValid() || desc.Index >= pool->_count) {
         RADRAY_ERR_LOG("vk WriteTimestamp invalid query index {}", desc.Index);
@@ -4374,6 +4429,7 @@ void CommandBufferVulkan::WriteTimestamp(const QueryTimestampDescriptor& desc) n
 }
 
 void CommandBufferVulkan::ResolveQueryData(const QueryResolveDescriptor& desc) noexcept {
+    if (!_recording) RADRAY_ABORT("command modification requires recording");
     auto pool = CastVkObject(desc.Pool);
     auto dst = CastVkObject(desc.Destination);
     if (pool == nullptr || !pool->IsValid() || dst == nullptr || !dst->IsValid() ||

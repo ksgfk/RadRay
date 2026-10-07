@@ -97,7 +97,7 @@ Application 始终把 FrameTimeline 接到 AssetManager。等待何时恢复见[
 | `StaticMesh` | CPU mesh，以及共享的 `StaticMeshRenderData`（GPU mesh、sections、局部 bounds） | `const StaticMeshRenderData&`、`const GpuMesh&` |
 
 返回资产内部裸指针的 API 必须在文档和调用方中同时说明持有 `StreamingAssetRef` 的要求。
-StaticMeshComponent 保存 mesh ref，RenderSystem 中每个 SceneWriter 在 GT 为场景活跃资产持续持有类型无关的引用，
+StaticMeshComponent 保存 mesh ref，SceneManager 中每个 SceneWriter 在 GT 为场景活跃资产持续持有类型无关的引用，
 最后解绑后转入删除/改绑帧的退休列表，直到该帧真实 GPU completion 才释放；生命周期与借用规则见 [render-framework](render-framework.md#交付退出与资产保活)。
 其他录制方须自行保存 owners 到 GPU 完成且 GT 可以安全释放的时刻。
 render thread 不访问非原子的 refs；TextureAsset 的 GetOrCreateSrv/view cache 由调用方串行访问。
@@ -110,10 +110,10 @@ render thread 不访问非原子的 refs；TextureAsset 的 GetOrCreateSrv/view 
 ## 关停顺序
 
 ```text
-WorldManager（全部 World）→ RenderSystem → AssetManager → FrameTimeline → AssetDatabase → GpuSystem
+WorldManager（全部 World）→ SceneManager → GPU 帧参数资源 → RenderSystem → AssetManager → FrameTimeline → AssetDatabase → GpuSystem
 ```
 
-WorldManager 先销毁各 World，拆除组件与 asset ref，RenderSystem 释放常驻及退休资产引用、shader/program 与 RHI 缓存，AssetManager 再处理
+WorldManager 先销毁各 World，拆除组件与 asset ref，SceneManager 释放常驻及退休资产引用；GpuSystem 清理借用 shader layout 的帧参数资源后，RenderSystem 释放 shader/program 与 RHI 缓存，AssetManager 再处理
 剩余 slot 和延迟 payload。FrameTimeline 在 AssetManager 之后销毁，使在飞等待先收束。AssetDatabase 必须活过在飞 task，最后 GpuSystem 销毁 device。
 完整时序见[关停顺序](frame-and-gpu.md#关停顺序)。
 关停时仍有存活引用会记录错误并继续卸载，避免把后续 GPU 资源释放变成悬垂访问。

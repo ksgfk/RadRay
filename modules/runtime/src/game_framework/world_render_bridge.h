@@ -1,17 +1,17 @@
 #pragma once
 
 #include <radray/runtime/components/render_component.h>
-#include <radray/runtime/render_scene/scene_writer.h>
+#include <radray/runtime/render_framework/scene_writer.h>
 
 namespace radray {
 
 class World;
-class RenderSystem;
+class SceneManager;
 
 /// World-owned GT adapter. It never owns flights, assets, or RT scene state.
 class WorldRenderBridge {
 public:
-    WorldRenderBridge(World& world, RenderSystem& renderer);
+    WorldRenderBridge(World& world, SceneManager& scenes);
     ~WorldRenderBridge() noexcept;
     WorldRenderBridge(const WorldRenderBridge&) = delete;
     WorldRenderBridge& operator=(const WorldRenderBridge&) = delete;
@@ -26,7 +26,7 @@ public:
     void Queue(RenderComponent& component, RenderDirtyFlag flag);
     void Collect();
     SceneId GetSceneId() const noexcept { return _writer.GetSceneId(); }
-    RenderSystem* GetRenderer() const noexcept { return &_renderer; }
+    SceneManager* GetSceneManager() const noexcept { return &_scenes; }
     RenderConnectionState GetState() const noexcept { return _state; }
 
 private:
@@ -35,7 +35,7 @@ private:
     void RemoveUpdate(RenderComponent& component) noexcept;
 
     World& _world;
-    RenderSystem& _renderer;
+    SceneManager& _scenes;
     SceneWriter& _writer;
     vector<RenderComponent*> _sources;
     vector<SceneComponent*> _transformSources;

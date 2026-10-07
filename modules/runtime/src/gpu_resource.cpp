@@ -785,18 +785,6 @@ std::optional<GpuMesh> ResourceUploader::UploadMeshResource(
             RADRAY_ERR_LOG("mesh primitive {} has no vertex attributes", primitiveIndex);
             return std::nullopt;
         }
-        const uint32_t sourceBuffer = primitive.VertexBuffers.front().BufferIndex;
-        const bool hasMultipleStreams = std::any_of(
-            primitive.VertexBuffers.begin(),
-            primitive.VertexBuffers.end(),
-            [sourceBuffer](const VertexBufferEntry& entry) noexcept {
-                return entry.BufferIndex != sourceBuffer;
-            });
-        if (hasMultipleStreams) {
-            RADRAY_ERR_LOG("mesh primitive {} uses multiple vertex streams, which are not supported", primitiveIndex);
-            return std::nullopt;
-        }
-        const uint32_t stride = primitive.VertexBuffers.front().Stride;
         for (auto current = primitive.VertexBuffers.begin(); current != primitive.VertexBuffers.end(); ++current) {
             const VertexBufferEntry& entry = *current;
             const uint32_t elementSize = GetVertexDataSizeInBytes(entry.Type, entry.ComponentCount);
@@ -805,7 +793,11 @@ std::optional<GpuMesh> ResourceUploader::UploadMeshResource(
                 [&](const VertexBufferEntry& other) noexcept {
                     return other.Semantic == entry.Semantic && other.SemanticIndex == entry.SemanticIndex;
                 });
-            if (stride == 0 || entry.Stride != stride || entry.Semantic.empty() ||
+            const uint32_t stride = entry.Stride;
+            const bool invalidStream = std::any_of(primitive.VertexBuffers.begin(), current, [&](const auto& other) { return other.BufferIndex == entry.BufferIndex && other.Stride != stride; });
+            const bool invalidRange = entry.BufferIndex >= meshResource.Bins.size() || primitive.VertexCount == 0 ||
+                                      uint64_t{primitive.VertexCount} * stride > meshResource.Bins[entry.BufferIndex].GetSize();
+            if (stride == 0 || invalidStream || invalidRange || entry.Semantic.empty() ||
                 entry.ComponentCount == 0 || entry.ComponentCount > 4 || elementSize == 0 ||
                 entry.Offset > stride || elementSize > stride - entry.Offset || duplicateSemantic) {
                 RADRAY_ERR_LOG("mesh primitive {} has an invalid vertex layout", primitiveIndex);
@@ -855,15 +847,21 @@ std::optional<GpuMesh> ResourceUploader::UploadMeshResource(
         const MeshPrimitive& prim = meshResource.Primitives[primIdx];
         GpuMesh::DrawData drawData{};
         drawData.Topology = prim.Topology;
-        if (!prim.VertexBuffers.empty()) {
-            const VertexBufferEntry& vbEntry = prim.VertexBuffers[0];
-            if (vbEntry.BufferIndex < bufferByBin.size() && bufferByBin[vbEntry.BufferIndex].HasValue()) {
-                const uint64_t vbSize = static_cast<uint64_t>(prim.VertexCount) * vbEntry.Stride;
-                drawData.VertexBuffers.push_back({0, render::VertexBufferView{
-                                                        .Target = bufferByBin[vbEntry.BufferIndex].Get(),
-                                                        .Offset = 0,
-                                                        .Size = vbSize}});
+        vector<uint32_t> sourceBins;
+        for (const auto& entry : prim.VertexBuffers) {
+            const auto found = std::find(sourceBins.begin(), sourceBins.end(), entry.BufferIndex);
+            const uint32_t binding = static_cast<uint32_t>(found - sourceBins.begin());
+            if (found == sourceBins.end()) {
+                sourceBins.push_back(entry.BufferIndex);
+                drawData.Layout.Streams.push_back({binding, entry.Stride, render::VertexStepMode::Vertex});
+                drawData.VertexBuffers.push_back({binding, {bufferByBin[entry.BufferIndex].Get(), 0, uint64_t{prim.VertexCount} * entry.Stride}});
             }
+            const render::VertexFormat floats[]{render::VertexFormat::FLOAT32, render::VertexFormat::FLOAT32X2, render::VertexFormat::FLOAT32X3, render::VertexFormat::FLOAT32X4};
+            const render::VertexFormat uints[]{render::VertexFormat::UINT32, render::VertexFormat::UINT32X2, render::VertexFormat::UINT32X3, render::VertexFormat::UINT32X4};
+            const render::VertexFormat ints[]{render::VertexFormat::SINT32, render::VertexFormat::SINT32X2, render::VertexFormat::SINT32X3, render::VertexFormat::SINT32X4};
+            const auto format = entry.Type == VertexDataType::FLOAT ? floats[entry.ComponentCount - 1] : entry.Type == VertexDataType::UINT ? uints[entry.ComponentCount - 1]
+                                                                                                                                            : ints[entry.ComponentCount - 1];
+            drawData.Layout.Attributes.push_back({entry.Semantic, entry.SemanticIndex, format, binding, entry.Offset});
         }
         if (prim.IndexBuffer.BufferIndex < bufferByBin.size() && bufferByBin[prim.IndexBuffer.BufferIndex].HasValue()) {
             drawData.Ibv = render::IndexBufferView{
@@ -871,7 +869,7 @@ std::optional<GpuMesh> ResourceUploader::UploadMeshResource(
                 .Offset = prim.IndexBuffer.Offset,
                 .Stride = prim.IndexBuffer.Stride};
         }
-        result.Draws.emplace_back(drawData);
+        result.Draws.emplace_back(std::move(drawData));
     }
 
     return result;

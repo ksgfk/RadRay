@@ -424,7 +424,8 @@ enum class RenderObjectTag : uint32_t {
     RenderPass = QueryPool << 1,
     Framebuffer = RenderPass << 1,
     VkInstance = Framebuffer << 1,
-    DXGIFactory = VkInstance << 1
+    DXGIFactory = VkInstance << 1,
+    CmdAllocator = DXGIFactory << 1
 };
 
 }  // namespace radray::render
@@ -484,6 +485,7 @@ namespace radray::render {
 class Device;
 class CommandQueue;
 class CommandBuffer;
+class CommandAllocator;
 class CommandEncoder;
 class GraphicsCommandEncoder;
 class ComputeCommandEncoder;
@@ -1278,7 +1280,9 @@ public:
 
     virtual Nullable<CommandQueue*> GetCommandQueue(QueueType type, uint32_t slot = 0) noexcept = 0;
 
-    virtual Nullable<unique_ptr<CommandBuffer>> CreateCommandBuffer(CommandQueue* queue) noexcept = 0;
+    virtual Nullable<unique_ptr<CommandAllocator>> CreateCommandAllocator(CommandQueue* queue) noexcept = 0;
+
+    virtual Nullable<unique_ptr<CommandBuffer>> CreateCommandBuffer(CommandAllocator* allocator) noexcept = 0;
 
     virtual Nullable<unique_ptr<Fence>> CreateFence() noexcept = 0;
 
@@ -1326,12 +1330,24 @@ public:
     virtual QueueType GetQueueType() const noexcept = 0;
 };
 
+/// Single recording thread, one queue. Children must be destroyed before their allocator.
+class CommandAllocator : public RenderBase, public IDebugName {
+public:
+    virtual ~CommandAllocator() noexcept = default;
+    RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::CmdAllocator; }
+
+    /// Caller must finish all recording and GPU use, and discard unsubmitted old recordings.
+    /// Invalidates every child's recording and releases its temporary CPU/GPU references; never waits.
+    virtual void Reset() noexcept = 0;
+};
+
 class CommandBuffer : public RenderBase, public IDebugName {
 public:
     virtual ~CommandBuffer() noexcept = default;
 
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::CmdBuffer; }
 
+    /// Begin once after creation or parent Reset. Never resets shared recording storage.
     virtual void Begin() noexcept = 0;
 
     virtual void End() noexcept = 0;

@@ -10,13 +10,13 @@
 #include <radray/types.h>
 #include <radray/sparse_set.h>
 #include <radray/runtime/components/scene_component.h>
-#include <radray/runtime/render_scene/scene_id.h>
+#include <radray/runtime/render_framework/scene_id.h>
 
 namespace radray {
 
 class Application;
 class Actor;
-class RenderSystem;
+class SceneManager;
 class WorldRenderBridge;
 class WorldManager;
 class RenderComponent;
@@ -64,10 +64,10 @@ public:
     void CheckCanModify() const noexcept;
     Nullable<Application*> GetApplication() const noexcept { return _app; }
     std::optional<SceneId> GetRenderSceneId() const noexcept;
-    LifecycleRequestResult RequestRenderConnection(Nullable<RenderSystem*> renderer);
+    LifecycleRequestResult RequestRenderConnection(Nullable<SceneManager*> scenes);
     LifecycleRequestResult RequestReconnect();
     RenderConnectionState GetRenderConnectionState() const noexcept;
-    Nullable<RenderSystem*> GetRequestedRenderConnection() const noexcept;
+    Nullable<SceneManager*> GetRequestedRenderConnection() const noexcept;
     /// Explicit CPU-only collection; managed Worlds collect through their driver.
     void CollectRenderUpdates();
     /// All handles must belong to this World and name live components. Invalid batches change nothing.
@@ -93,7 +93,7 @@ private:
         std::optional<ComponentId> Root;
     };
     struct ConnectionRequest {
-        Nullable<RenderSystem*> Target{nullptr};
+        Nullable<SceneManager*> Target{nullptr};
         bool Reconnect{false};
     };
     struct LifecycleBatch {

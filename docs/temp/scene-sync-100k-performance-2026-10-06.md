@@ -1,6 +1,6 @@
 > - 适用: 诊断 `examples/scene_sync` 在 `--instances=100000` 时的稳态性能瓶颈与优化顺序
 > - 权威: 2026-10-06 本机实测快照；诊断已完成，优化未实施，不作为跨机器性能契约
-> - 锚点: `examples/scene_sync/example_scene_sync.cpp`, `examples/scene_sync/scene_draw.cpp`, `modules/runtime/src/render_scene/scene_gpu.cpp`, `modules/runtime/src/gpu_resource.cpp`, `modules/render/src/d3d12/d3d12_impl.cpp`, `benchmarks/bench_scene_gpu/bench_scene_gpu.cpp`
+> - 锚点: `examples/scene_sync/example_scene_sync.cpp`, `examples/scene_sync/scene_draw.cpp`, `modules/runtime/src/render_framework/scene_gpu.cpp`, `modules/runtime/src/gpu_resource.cpp`, `modules/render/src/d3d12/d3d12_impl.cpp`, `benchmarks/bench_scene_gpu/bench_scene_gpu.cpp`
 
 # scene_sync：100,000 对象性能诊断
 

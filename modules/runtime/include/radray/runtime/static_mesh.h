@@ -8,7 +8,7 @@
 #include <radray/runtime/asset.h>
 #include <radray/runtime/asset_database.h>
 #include <radray/runtime/asset_manager.h>
-#include <radray/runtime/gpu_resource.h>
+#include <radray/runtime/gpu_mesh.h>
 
 namespace radray {
 
@@ -28,6 +28,7 @@ struct StaticMeshSection {
     uint32_t MinVertexIndex;
     uint32_t MaxVertexIndex;
     int32_t VertexOffset;
+    uint32_t MaterialSlot{0};
 };
 
 /// Shared, immutable geometry while its owning StaticMesh asset is retained.

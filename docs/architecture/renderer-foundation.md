@@ -9,4 +9,5 @@
 [历史附件](../temp/renderer-foundation-legacy.md)。这些接口当前不可调用。
 
 保留的宿主、组件与 shader 服务见 [Runtime 宿主](render-framework.md)，
-GPU/flight、上传和提交完成协议见[帧与 GPU](frame-and-gpu.md)。新渲染框架尚未实现。
+GPU/flight、上传和提交完成协议见[帧与 GPU](frame-and-gpu.md)。当前公共 pipeline、材质与场景绘制
+已在 runtime 的 `render_framework/` 中实现，契约见 [Runtime 宿主](render-framework.md)；未恢复旧 RenderGraph。

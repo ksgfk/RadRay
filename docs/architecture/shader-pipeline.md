@@ -217,7 +217,7 @@ identity 不匹配时直接失败，不改请求去尝试另一 lane，也不调
 readback、14 个正式 fixture 的 case report 和 metadata corruption negative path；其中包括
 shared CBuffer payload、direct+nested root owner、多个 DXIL root constants 与 SPIR-V push block。
 
-`RenderSystem` 从 `ApplicationRuntimeDescriptor::ShaderSourceRoot/ShaderIncludePaths` 构造 JIT，
+`RenderSystem` 从构造参数中的 Device、shader source root/include paths 构造 JIT；Application 将 `RenderOptions::ShaderSourceRoot/ShaderIncludePaths` 显式传入，
 源码入口为 `GetOrCreateShaderProgram(const ShaderProgramRequest&)`。request 显式携带 source compile input
 （logical source 与 structured `Defines`）、keyword assignments、完整 `CompilePolicy` 与
 `ShaderProgramLayoutRecipe`；discovery 与 compile 从同一 request 获得完整 compile inputs，不能

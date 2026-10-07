@@ -1,7 +1,7 @@
 #pragma once
 
 #include <gtest/gtest.h>
-#include <radray/runtime/render_scene/render_scene.h>
+#include <radray/runtime/render_framework/render_scene.h>
 
 namespace radray::test {
 

@@ -1,7 +1,7 @@
 #pragma once
 
 #include <radray/runtime/components/render_component.h>
-#include <radray/runtime/render_scene/light_scene_data.h>
+#include <radray/runtime/render_framework/light_scene_data.h>
 #include <radray/types.h>
 
 namespace radray {

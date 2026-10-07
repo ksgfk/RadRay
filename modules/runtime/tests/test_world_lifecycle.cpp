@@ -399,7 +399,7 @@ TEST(WorldLifecycle, ParentRemovalDetachesOtherActorsChildrenWithKeepLocal) {
 TEST(WorldLifecycle, ConnectingCallbacksAppendExactlyOnceAndRequestNextBatchDisconnect) {
     LifecycleTrace trace;
     Application app;
-    RenderSystem render{&app, 2};
+    SceneManager render{2};
     test::ScopedWorld world;
     auto* actor = world.SpawnActor();
     auto* first = actor->AddComponent<LifecycleProbe>(trace);
@@ -424,7 +424,7 @@ TEST(WorldLifecycle, ConnectingCallbacksAppendExactlyOnceAndRequestNextBatchDisc
 TEST(WorldLifecycle, DisconnectCallbacksCanCreateButCannotRejoinTheDyingScene) {
     LifecycleTrace original, added;
     Application app;
-    RenderSystem render{&app, 2};
+    SceneManager render{2};
     test::ScopedWorld world;
     auto* first = world.SpawnActor()->AddComponent<LifecycleProbe>(original);
     first->DestroyRender = [&](auto&) {
@@ -448,7 +448,7 @@ TEST(WorldLifecycle, DisconnectCallbacksCanCreateButCannotRejoinTheDyingScene) {
 TEST(WorldLifecycle, ReconnectSurvivesCoalescingAndPendingSourcesAreNotCollected) {
     LifecycleTrace trace;
     Application app;
-    RenderSystem render{&app, 2};
+    SceneManager render{2};
     test::ScopedWorld world;
     auto* component = world.SpawnActor()->AddComponent<LifecycleProbe>(trace);
     const auto first = test::ConnectWorld(world, render);
@@ -482,7 +482,7 @@ TEST(WorldLifecycleDeathTest, RejectsCreationAndDriversDuringInvalidPhases) {
 TEST(WorldLifecycle, CreatedThenPendingInADestroyHookNeverPublishesAnEmptyPrimitive) {
     LifecycleTrace oldTrace, newTrace;
     Application app;
-    RenderSystem renderer{&app, 2};
+    SceneManager renderer{2};
     test::ScopedWorld world;
     const auto sceneId = test::ConnectWorld(world, renderer);
     auto* old = world.SpawnActor<LifecycleActor>(oldTrace);
@@ -509,7 +509,7 @@ TEST(WorldLifecycle, CreatedThenPendingInADestroyHookNeverPublishesAnEmptyPrimit
 
 TEST(WorldLifecycle, LightUsesOneTypedUpdateAndNoMeshState) {
     Application app;
-    RenderSystem renderer{&app, 1};
+    SceneManager renderer{1};
     test::ScopedWorld world;
     const auto sceneId = test::ConnectWorld(world, renderer);
     auto* actor = world.SpawnActor();
@@ -553,8 +553,8 @@ public:
 };
 TEST(WorldLifecycleDeathTest, CollectionRejectsFlushAndSchedulerSideEffects) {
     Application app;
-    RenderSystem renderer{&app, 1};
-    test::ScopedWorld world;
+    SceneManager renderer{1};
+    test::ScopedWorld world{&app};
     test::ConnectWorld(world, renderer);
     auto* component = world.SpawnActor()->AddComponent<IllegalCollect>();
     component->SideEffect = [&] { renderer.SealFrameGT(0); };
@@ -562,6 +562,16 @@ TEST(WorldLifecycleDeathTest, CollectionRejectsFlushAndSchedulerSideEffects) {
     component->SideEffect = [&] { renderer.CreateSceneGT(); };
     EXPECT_DEATH(world.CollectRenderUpdates(), "");
     component->SideEffect = [&] { app.GetScheduler().Pump(); };
+    EXPECT_DEATH(world.CollectRenderUpdates(), "");
+    SceneManager nestedScenes{1};
+    test::ScopedWorld nestedWorld{&app};
+    test::ConnectWorld(nestedWorld, nestedScenes);
+    auto* nestedComponent = nestedWorld.SpawnActor()->AddComponent<IllegalCollect>();
+    nestedComponent->SideEffect = [] {};
+    component->SideEffect = [&] {
+        nestedWorld.CollectRenderUpdates();
+        app.GetScheduler().Pump();
+    };
     EXPECT_DEATH(world.CollectRenderUpdates(), "");
     component->SideEffect = [&] { world.DestroyActor(component->GetOwner().Get()); };
     EXPECT_DEATH(world.CollectRenderUpdates(), "");
@@ -571,6 +581,9 @@ TEST(WorldLifecycleDeathTest, CollectionRejectsFlushAndSchedulerSideEffects) {
     EXPECT_DEATH(world.CollectRenderUpdates(), "");
     component->SideEffect = [&] { world.CollectRenderUpdates(); };
     EXPECT_DEATH(world.CollectRenderUpdates(), "");
+    component->SideEffect = [] {};
+    world.CollectRenderUpdates();
+    app.GetScheduler().Pump();
 }
 
 TEST(WorldLifecycle, SchedulerFreezesItsBatchAndRevalidatesCanceledWaiters) {
@@ -652,7 +665,7 @@ TEST(WorldLifecycle, DraftGetsItsFirstTickEpochWhenItJoinsDuringTick) {
 TEST(WorldLifecycle, PartialBootstrapShutsDownWithoutAPublishedFlight) {
     LifecycleTrace trace;
     Application app;
-    RenderSystem renderer{&app, 1};
+    SceneManager renderer{1};
     test::ScopedWorldManager manager{&app, &renderer};
     const auto id = manager.CreateWorld();
     manager.GetWorld(id)->SpawnActor<LifecycleActor>(trace)->AddComponent<PrimitiveComponent>();
@@ -670,7 +683,7 @@ TEST(WorldLifecycle, PartialBootstrapShutsDownWithoutAPublishedFlight) {
 
 TEST(WorldLifecycle, RandomizedSceneDeliveryMatchesLogicalValuesAcrossDelayedCompletions) {
     Application app;
-    RenderSystem renderer{&app, 3};
+    SceneManager renderer{3};
     test::ScopedWorld world;
     std::mt19937 random{0x74c620u};
     struct Model {
@@ -767,7 +780,7 @@ TEST(WorldLifecycle, RandomizedSceneDeliveryMatchesLogicalValuesAcrossDelayedCom
 TEST(WorldLifecycle, DeepHierarchyKeepsImmediateValuesAndSeparatesNotificationFromCapture) {
     LifecycleTrace trace;
     Application app;
-    RenderSystem renderer{&app, 1};
+    SceneManager renderer{1};
     test::ScopedWorld world;
     const auto scene = test::ConnectWorld(world, renderer);
     auto* actor = world.SpawnActor();
@@ -794,7 +807,7 @@ TEST(WorldLifecycle, DeepHierarchyKeepsImmediateValuesAndSeparatesNotificationFr
 
 TEST(WorldLifecycle, UncachedQueriesAndLocalDeliveryPreserveAffineHierarchyAndSnapshots) {
     Application app;
-    RenderSystem renderer{&app, 1};
+    SceneManager renderer{1};
     test::ScopedWorld world;
     const auto scene = test::ConnectWorld(world, renderer);
     auto* actor = world.SpawnActor();
@@ -838,7 +851,7 @@ TEST(WorldLifecycle, UncachedQueriesAndLocalDeliveryPreserveAffineHierarchyAndSn
 
 TEST(WorldLifecycle, SceneHierarchyKeepsPendingDependenciesUntilRetirement) {
     Application app;
-    RenderSystem renderer{&app, 1};
+    SceneManager renderer{1};
     test::ScopedWorld world;
     const auto scene = test::ConnectWorld(world, renderer);
     auto* parentActor = world.SpawnActor();
@@ -864,7 +877,7 @@ TEST(WorldLifecycle, SceneHierarchyKeepsPendingDependenciesUntilRetirement) {
 
 TEST(WorldLifecycle, SceneLightPoseFollowsAncestorsWithoutRecapturingLightState) {
     Application app;
-    RenderSystem renderer{&app, 1};
+    SceneManager renderer{1};
     test::ScopedWorld world;
     const auto scene = test::ConnectWorld(world, renderer);
     auto* actor = world.SpawnActor();
@@ -1002,7 +1015,7 @@ TEST(WorldLifecycle, RegistrationOrderCannotHideAncestorTransformChanges) {
 TEST(WorldLifecycle, QueriedDraftHierarchyRevalidatesWhenJoiningWorld) {
     LifecycleTrace trace;
     Application app;
-    RenderSystem renderer{&app, 1};
+    SceneManager renderer{1};
     test::ScopedWorld world;
     const auto sceneId = test::ConnectWorld(world, renderer);
     auto draft = make_unique<Actor>();
@@ -1023,7 +1036,7 @@ TEST(WorldLifecycle, QueriedDraftHierarchyRevalidatesWhenJoiningWorld) {
 TEST(WorldLifecycle, CallbackTransformChangesRenderNowWithoutRepeatingTheNextFrameDelta) {
     LifecycleTrace triggerTrace, targetTrace;
     Application app;
-    RenderSystem renderer{&app, 1};
+    SceneManager renderer{1};
     test::ScopedWorld world;
     const auto sceneId = test::ConnectWorld(world, renderer);
     auto* actor = world.SpawnActor();
@@ -1069,7 +1082,7 @@ TEST(WorldLifecycle, OverlappingTransformWritesMergeStateAndCaptureEachSourceOnc
         SCOPED_TRACE(parentFirst);
         LifecycleTrace rootTrace, childTrace, leafTrace;
         Application app;
-        RenderSystem renderer{&app, 1};
+        SceneManager renderer{1};
         test::ScopedWorld world;
         const auto scene = test::ConnectWorld(world, renderer);
         auto* actor = world.SpawnActor();
@@ -1108,7 +1121,7 @@ TEST(WorldLifecycle, OverlappingTransformWritesMergeStateAndCaptureEachSourceOnc
 TEST(WorldLifecycle, CollectionAndNotificationKeepIndependentTransformBatches) {
     LifecycleTrace trace;
     Application app;
-    RenderSystem renderer{&app, 1};
+    SceneManager renderer{1};
     test::ScopedWorld world;
     const auto scene = test::ConnectWorld(world, renderer);
     auto* node = world.SpawnActor()->AddComponent<LifecycleProbe>(trace);
@@ -1150,7 +1163,7 @@ TEST(WorldLifecycle, ReparentingCoveredSubtreesPreservesBothDirtyBranches) {
         SCOPED_TRACE(dirtyDestination);
         LifecycleTrace firstTrace, secondTrace, childTrace, leafTrace;
         Application app;
-        RenderSystem renderer{&app, 1};
+        SceneManager renderer{1};
         test::ScopedWorld world;
         const auto scene = test::ConnectWorld(world, renderer);
         auto* actor = world.SpawnActor();
@@ -1181,7 +1194,7 @@ TEST(WorldLifecycle, ReparentingCoveredSubtreesPreservesBothDirtyBranches) {
 TEST(WorldLifecycle, PendingTransformRootKeepsExplicitLiveDescendantWrites) {
     LifecycleTrace rootTrace, childTrace, untouchedTrace;
     Application app;
-    RenderSystem renderer{&app, 1};
+    SceneManager renderer{1};
     test::ScopedWorld world;
     const auto scene = test::ConnectWorld(world, renderer);
     auto* parentActor = world.SpawnActor();
@@ -1213,7 +1226,7 @@ TEST(WorldLifecycle, PendingTransformRootKeepsExplicitLiveDescendantWrites) {
 TEST(WorldLifecycle, PendingAncestorKeepsOverlappingLiveDescendantsCoalesced) {
     LifecycleTrace rootTrace, childTrace, leafTrace, triggerTrace;
     Application app;
-    RenderSystem renderer{&app, 1};
+    SceneManager renderer{1};
     test::ScopedWorld world;
     const auto scene = test::ConnectWorld(world, renderer);
     auto* parentActor = world.SpawnActor();
@@ -1248,7 +1261,7 @@ TEST(WorldLifecycle, RandomizedOverlappingBranchesCaptureExactlyTheirFinalValues
     vector<LifecycleProbe*> nodes;
     vector<float> positions(traces.size(), 0);
     Application app;
-    RenderSystem renderer{&app, 1};
+    SceneManager renderer{1};
     test::ScopedWorld world;
     const auto scene = test::ConnectWorld(world, renderer);
     auto* actor = world.SpawnActor();
@@ -1293,7 +1306,7 @@ TEST(WorldLifecycle, CallbackOverlapCapturesFinalValuesOnceAndNotifiesNextBatch)
         SCOPED_TRACE(changeAncestor);
         LifecycleTrace rootTrace, childTrace;
         Application app;
-        RenderSystem renderer{&app, 1};
+        SceneManager renderer{1};
         test::ScopedWorld world;
         const auto scene = test::ConnectWorld(world, renderer);
         auto* actor = world.SpawnActor();

@@ -6,18 +6,18 @@
 #include <radray/sparse_set.h>
 #include <radray/types.h>
 #include <radray/runtime/game_framework/world_id.h>
-#include <radray/runtime/render_scene/scene_id.h>
+#include <radray/runtime/render_framework/scene_id.h>
 
 namespace radray {
 
 class Application;
-class RenderSystem;
+class SceneManager;
 class World;
 
 /// GT-only World ownership and scheduling. Borrowed services must outlive this manager.
 class WorldManager {
 public:
-    explicit WorldManager(Nullable<Application*> app = nullptr, Nullable<RenderSystem*> renderer = nullptr);
+    explicit WorldManager(Nullable<Application*> app = nullptr, Nullable<SceneManager*> scenes = nullptr);
     WorldManager(const WorldManager&) = delete;
     WorldManager(WorldManager&&) = delete;
     WorldManager& operator=(const WorldManager&) = delete;
@@ -39,7 +39,7 @@ public:
     /// Collects connected worlds, including paused worlds. Call after Tick and before sealing.
     void CollectRenderUpdates();
     /// Immediately destroys all worlds and invalidates their IDs; forbidden inside callbacks.
-    /// Scene retirement remains the RenderSystem's responsibility.
+    /// Scene retirement remains the SceneManager's responsibility.
     void Clear();
     void BeginStopping();
     void Shutdown();
@@ -51,7 +51,7 @@ private:
     void CheckIdle() const noexcept;
 
     Nullable<Application*> _app;
-    Nullable<RenderSystem*> _renderSystem;
+    Nullable<SceneManager*> _sceneManager;
     SparseSet<unique_ptr<World>> _worlds;
     vector<WorldId> _worldIds;
     vector<WorldId> _pendingDestroy;

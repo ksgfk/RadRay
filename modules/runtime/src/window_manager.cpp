@@ -7,7 +7,7 @@
 #include <radray/logger.h>
 #include <radray/scope_guard.h>
 #include <radray/render/rhi.h>
-#include <radray/runtime/application.h>
+#include <radray/runtime/app_render_context.h>
 #include <radray/runtime/gpu_system.h>
 #include <radray/runtime/render_system.h>
 

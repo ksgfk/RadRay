@@ -1,7 +1,9 @@
+#include <radray/runtime/components/scene_view_capture.h>
+#include <radray/runtime/render_framework/scene_manager.h>
 #include "test_scene_views.h"
 #include <gtest/gtest.h>
 #include <radray/runtime/application.h>
-#include <radray/runtime/render_system.h>
+#include <radray/runtime/render_framework/scene_manager.h>
 #include <radray/runtime/world_manager.h>
 #include <radray/runtime/game_framework/world.h>
 #include <radray/runtime/game_framework/actor.h>
@@ -41,10 +43,11 @@ protected:
         if (Violation == 2) _camera->SetRelativeLocation({});
         if (Violation == 3) GetScheduler().Pump();
         if (Violation == 4) GetWorldManager()->CreateWorld();
-        auto* renderer = GetRenderSystem().Get();
-        EXPECT_TRUE(renderer->GetFrameViewsRT(_flight).empty());
-        ASSERT_TRUE(collector.Add(*_camera.Get()));
-        auto views = renderer->GetFrameViewsRT(_flight);
+        EXPECT_TRUE(GetSceneManager()->GetFrameViewsRT(_flight).empty());
+        const auto view = CaptureSceneView(*_camera.Get());
+        ASSERT_TRUE(view);
+        ASSERT_TRUE(collector.Add(*view));
+        auto views = GetSceneManager()->GetFrameViewsRT(_flight);
         ASSERT_EQ(views.size(), 1u);
         EXPECT_FLOAT_EQ(views[0].View(0, 3), -52 - float(_camera->Ticks));
         EXPECT_FLOAT_EQ(views[0].View(1, 3), -3);
@@ -52,7 +55,7 @@ protected:
         SceneViewRequest copy = views[0];
         ASSERT_TRUE(collector.Add(copy));
         copy.View.setZero();
-        EXPECT_FLOAT_EQ(renderer->GetFrameViewsRT(_flight)[1].View(0, 3), -52 - float(_camera->Ticks));
+        EXPECT_FLOAT_EQ(GetSceneManager()->GetFrameViewsRT(_flight)[1].View(0, 3), -52 - float(_camera->Ticks));
         ++Collected;
     }
 
@@ -64,7 +67,7 @@ private:
 uint32_t RunViewCollection(int violation) {
     ViewCollectionApp app;
     app.Violation = violation;
-    EXPECT_EQ(app.Run({.FlightDataCount = 3, .Window = std::nullopt, .Gpu = std::nullopt, .Asset = std::nullopt}), 0);
+    EXPECT_EQ(app.Run({.FlightDataCount = 3, .Window = std::nullopt, .Gpu = std::nullopt, .Render = std::nullopt, .Asset = std::nullopt}), 0);
     return app.Collected;
 }
 
@@ -87,6 +90,19 @@ TEST(SceneViews, ViewportAndProjectionAreBackendIndependent) {
     request.NearZ = -1;
     EXPECT_FALSE(IsValidSceneView(request));
 }
+TEST(SceneViews, OrthographicUsesActualOutputExtent) {
+    SceneViewRequest request{.Scene = {0, 0}, .Projection = SceneProjection::Orthographic, .OrthographicHeight = 8};
+    auto wide = ResolveSceneView(request, 200, 100, render::RenderBackend::D3D12);
+    auto square = ResolveSceneView(request, 100, 100, render::RenderBackend::Vulkan);
+    ASSERT_TRUE(wide);
+    ASSERT_TRUE(square);
+    EXPECT_FLOAT_EQ(wide->Projection(0, 0), 0.125f);
+    EXPECT_FLOAT_EQ(square->Projection(0, 0), 0.25f);
+    EXPECT_FLOAT_EQ(wide->Projection(1, 1), square->Projection(1, 1));
+    request.OrthographicHeight = 0;
+    EXPECT_FALSE(IsValidSceneView(request));
+}
+
 TEST(SceneViewsDeathTest, CollectionRejectsCameraWorldAndSchedulerMutation) {
     for (int violation = 1; violation <= 4; ++violation) {
         EXPECT_DEATH(RunViewCollection(violation), "");

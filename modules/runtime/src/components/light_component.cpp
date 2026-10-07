@@ -1,7 +1,7 @@
 #include <radray/runtime/components/light_component.h>
 
 #include <algorithm>
-#include <radray/runtime/render_scene/scene_writer.h>
+#include <radray/runtime/render_framework/scene_writer.h>
 
 namespace radray {
 

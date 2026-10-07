@@ -30,6 +30,7 @@ class DeviceD3D12;
 class CmdQueueD3D12;
 class FenceD3D12;
 class CmdListD3D12;
+class CommandAllocatorD3D12;
 class CmdRenderPassD3D12;
 class SwapChainD3D12;
 class BufferD3D12;
@@ -337,7 +338,8 @@ public:
 
     Nullable<CommandQueue*> GetCommandQueue(QueueType type, uint32_t slot) noexcept override;
 
-    Nullable<unique_ptr<CommandBuffer>> CreateCommandBuffer(CommandQueue* queue) noexcept override;
+    Nullable<unique_ptr<CommandAllocator>> CreateCommandAllocator(CommandQueue* queue) noexcept override;
+    Nullable<unique_ptr<CommandBuffer>> CreateCommandBuffer(CommandAllocator* allocator) noexcept override;
 
     Nullable<unique_ptr<Fence>> CreateFence() noexcept override;
 
@@ -472,12 +474,35 @@ public:
     Win32Event _event{};
 };
 
+class CommandAllocatorD3D12 final : public CommandAllocator {
+public:
+    CommandAllocatorD3D12(DeviceD3D12* device, CmdQueueD3D12* queue) noexcept;
+    ~CommandAllocatorD3D12() noexcept override;
+    bool IsValid() const noexcept override;
+    void Destroy() noexcept override;
+    void Reset() noexcept override;
+    void SetDebugName(std::string_view name) noexcept override;
+    std::optional<size_t> AcquireNative() noexcept;
+
+    struct NativeStorage {
+        ComPtr<ID3D12CommandAllocator> Allocator;
+        bool Recording{false};
+        bool Used{false};
+    };
+    DeviceD3D12* _device;
+    CmdQueueD3D12* _queue;
+    vector<NativeStorage> _native;
+    vector<CmdListD3D12*> _children;
+    string _name;
+    bool _valid{true};
+};
+
 class CmdListD3D12 final : public CommandBuffer {
 public:
     CmdListD3D12(
         DeviceD3D12* _device,
         CmdQueueD3D12* queue,
-        ComPtr<ID3D12CommandAllocator> cmdAlloc,
+        CommandAllocatorD3D12* allocator,
         ComPtr<ID3D12GraphicsCommandList> cmdList,
         D3D12_COMMAND_LIST_TYPE type,
         ComPtr<ID3D12RootSignature> emptyRootSignature) noexcept;
@@ -529,7 +554,12 @@ public:
 #ifdef RADRAY_ENABLE_PROFILER
     CmdQueueD3D12* _queue;
 #endif
-    ComPtr<ID3D12CommandAllocator> _cmdAlloc;
+    CommandAllocatorD3D12* _allocator;
+    size_t _nativeIndex{0};
+    bool _recording{false};
+    bool _used{false};
+    bool _executable{false};
+    Nullable<CommandEncoder*> _activeEncoder{nullptr};
     ComPtr<ID3D12GraphicsCommandList> _cmdList;
     ComPtr<ID3D12RootSignature> _emptyRootSignature;
     D3D12_COMMAND_LIST_TYPE _type;
@@ -1107,6 +1137,7 @@ constexpr auto CastD3D12Object(Texture* v) noexcept { return static_cast<Texture
 constexpr auto CastD3D12Object(RenderPass* v) noexcept { return static_cast<RenderPassD3D12*>(v); }
 constexpr auto CastD3D12Object(Framebuffer* v) noexcept { return static_cast<FramebufferD3D12*>(v); }
 constexpr auto CastD3D12Object(Fence* v) noexcept { return static_cast<FenceD3D12*>(v); }
+constexpr auto CastD3D12Object(CommandAllocator* v) noexcept { return static_cast<CommandAllocatorD3D12*>(v); }
 constexpr auto CastD3D12Object(CommandBuffer* v) noexcept { return static_cast<CmdListD3D12*>(v); }
 constexpr auto CastD3D12Object(PipelineLayout* v) noexcept { return static_cast<RootSigD3D12*>(v); }
 constexpr auto CastD3D12Object(ShaderParameterSet* v) noexcept { return static_cast<ShaderParameterSetD3D12*>(v); }

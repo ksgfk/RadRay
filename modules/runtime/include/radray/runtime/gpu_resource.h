@@ -8,7 +8,7 @@
 #include <radray/intrusive_ptr.h>
 #include <radray/nullable.h>
 #include <radray/render/rhi.h>
-#include <radray/runtime/asset_manager.h>
+#include <radray/runtime/gpu_mesh.h>
 #include <radray/types.h>
 
 namespace radray {
@@ -52,19 +52,6 @@ private:
     bool _readbackNeedsBarrier{false};
     vector<FrameTiming> _frames;
     std::atomic<float> _lastGpuTimeMs{0.0f};
-};
-
-/// 持有由网格资源创建的 GPU 缓冲区及绘制视图。
-class GpuMesh {
-public:
-    struct DrawData {
-        vector<render::VertexBufferBinding> VertexBuffers;
-        render::IndexBufferView Ibv;
-        render::PrimitiveTopology Topology{render::PrimitiveTopology::TriangleList};
-    };
-
-    vector<unique_ptr<render::Buffer>> Buffers;
-    vector<DrawData> Draws;
 };
 
 struct UploadMemoryStats {

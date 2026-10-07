@@ -10,6 +10,7 @@
 #include <radray/coroutine.h>
 #include <radray/nullable.h>
 #include <radray/runtime/frame_timeline.h>
+#include <radray/runtime/app_render_context.h>
 #include <radray/runtime/startup_result.h>
 #include <radray/types.h>
 
@@ -25,6 +26,7 @@ class AppFrameContext;
 class AssetDatabase;
 class AssetManager;
 class RenderSystem;
+class SceneManager;
 class SceneViewCollector;
 class WorldManager;
 struct AppFrameTarget;
@@ -43,13 +45,6 @@ struct AppUpdateContext {
 };
 
 struct AppShutdownContext {
-};
-
-struct AppRenderContext {
-    uint32_t FlightIndex{0};
-    std::chrono::duration<float> DeltaTime{};
-    std::chrono::duration<float> LastFrameLatency{};
-    bool IsInModalLoop{false};
 };
 
 struct AppUpdateResult {
@@ -127,6 +122,8 @@ struct RenderOptions {
     vector<std::filesystem::path> ShaderIncludePaths{};
 };
 
+struct SceneOptions {};
+
 struct WorldOptions {};
 
 struct AssetOptions {
@@ -134,7 +131,7 @@ struct AssetOptions {
     std::filesystem::path AssetRoot{};
 };
 
-/// 一站式运行时启动描述。五个系统默认都启用；用 std::nullopt 关掉其中一个。
+/// 一站式运行时启动描述。六个系统默认都启用；用 std::nullopt 关掉其中一个。
 /// 只在所属系统的选项里出现的字段不会在该系统关闭时被读取。
 struct ApplicationRuntimeDescriptor {
     std::string_view AppName{"RadRay Application"};
@@ -143,6 +140,7 @@ struct ApplicationRuntimeDescriptor {
     std::optional<WindowOptions> Window{std::in_place};
     std::optional<GpuOptions> Gpu{std::in_place};
     std::optional<RenderOptions> Render{std::in_place};
+    std::optional<SceneOptions> Scene{std::in_place};
     std::optional<WorldOptions> World{std::in_place};
     std::optional<AssetOptions> Asset{std::in_place};
 };
@@ -176,6 +174,8 @@ public:
     Nullable<const AssetManager*> GetAssetManager() const noexcept { return _assetManager.get(); }
     Nullable<RenderSystem*> GetRenderSystem() noexcept { return _renderSystem.get(); }
     Nullable<const RenderSystem*> GetRenderSystem() const noexcept { return _renderSystem.get(); }
+    Nullable<SceneManager*> GetSceneManager() noexcept { return _sceneManager.get(); }
+    Nullable<const SceneManager*> GetSceneManager() const noexcept { return _sceneManager.get(); }
     ApplicationScheduler& GetScheduler() noexcept { return _scheduler; }
     const ApplicationScheduler& GetScheduler() const noexcept { return _scheduler; }
     /// Available from OnInit through OnShutdown; null outside the runtime lifetime.
@@ -221,8 +221,8 @@ private:
     friend class SingleThreadRunner;
     friend class ThreadedRunner;
     friend class CpuRunner;
-    friend class RenderSystem;
-    void SetCollecting(bool collecting);
+    friend class WorldRenderBridge;
+    bool SetCollecting(bool collecting);
 
     bool InitializeRuntime(const ApplicationRuntimeDescriptor& desc);
     void StopAndDrainRuntime();
@@ -243,6 +243,7 @@ private:
     unique_ptr<AssetDatabase> _assetDatabase;
     unique_ptr<AssetManager> _assetManager;
     unique_ptr<RenderSystem> _renderSystem;
+    unique_ptr<SceneManager> _sceneManager;
     unique_ptr<WorldManager> _worldManager;
     ApplicationScheduler _scheduler;
     std::filesystem::path _shaderSourceRoot;

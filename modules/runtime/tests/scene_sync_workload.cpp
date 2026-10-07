@@ -166,7 +166,7 @@ class SceneSyncWorkload::Impl {
 public:
     Impl(Scenario scenario, uint32_t flights, bool threaded, bool verify, bool gate)
         : _scenario(std::move(scenario)), _flights(flights), _threaded(threaded), _verify(verify), _gate(gate),
-          _renderer(&_app, flights) {
+          _renderer(flights) {
         for (uint32_t i = 0; i < flights; ++i) _slots.push_back(make_unique<FlightSlot>());
         _sceneId = test::ConnectWorld(_world, _renderer);
         _meshes[0] = _assets.AddReady<StaticMesh>(AssetId{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}, MakeMesh(1));
@@ -474,7 +474,7 @@ private:
     uint64_t _ticket{0}, _visible{0};
     Application _app;
     AssetManager _assets;
-    RenderSystem _renderer;
+    SceneManager _renderer;
     test::ScopedWorld _world;
     SceneId _sceneId;
     array<StreamingAssetRef<StaticMesh>, 2> _meshes;

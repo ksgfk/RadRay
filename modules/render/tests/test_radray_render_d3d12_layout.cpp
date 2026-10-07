@@ -252,7 +252,9 @@ std::optional<uint32_t> DispatchComputeAndReadBack(
         return std::nullopt;
     }
 
-    auto commandResult = device.CreateCommandBuffer(context.Queue);
+    auto commandResultStorage = device.CreateCommandAllocator(context.Queue).Unwrap();
+
+    auto commandResult = device.CreateCommandBuffer(commandResultStorage.get());
     if (!commandResult.HasValue()) {
         return std::nullopt;
     }
@@ -475,7 +477,7 @@ TEST_F(D3D12DeviceFixture, RootBindingStoresOnlyResolvedAddress) {
     if (!Available) GTEST_SKIP() << "no d3d12 device";
     ResolvedD3D12Layout description;
     description.Bindings = {MakeBinding("Root", shader::ShaderBindingKind::CBuffer, 0, 0,
-                                       shader::ShaderBindingPlacement::RootDescriptor)};
+                                        shader::ShaderBindingPlacement::RootDescriptor)};
     auto layout = Device->CreatePipelineLayout(description);
     ASSERT_TRUE(layout.HasValue());
     auto buffer = Device->CreateBuffer({.Size = 1024, .Memory = MemoryType::Upload, .Usage = BufferUse::CBuffer});
@@ -925,7 +927,9 @@ TEST_F(D3D12DeviceFixture, PushHandleWritesRootConstantsAndRejectsMisuse) {
     ASSERT_TRUE(parameterSet->Set(output, 0, outputValue));
     ASSERT_TRUE(parameterSet->FlushWrites());
 
-    auto commandResult = device->CreateCommandBuffer(Context.Queue);
+    auto commandResultStorage = device->CreateCommandAllocator(Context.Queue).Unwrap();
+
+    auto commandResult = device->CreateCommandBuffer(commandResultStorage.get());
     ASSERT_TRUE(commandResult.HasValue());
     unique_ptr<CommandBuffer> command = commandResult.Release();
     command->Begin();

@@ -19,6 +19,7 @@
 #include <radray/runtime/static_mesh.h>
 #include <radray/runtime/texture_asset.h>
 #include <radray/runtime/render_system.h>
+#include <radray/runtime/render_framework/scene_manager.h>
 #include <radray/runtime/world_manager.h>
 #include <radray/window/native_window.h>
 
@@ -509,7 +510,7 @@ public:
             return;
         }
 
-        if (auto renderSystem = _app->GetRenderSystem()) renderSystem->PublishFrameGT(flightIndex);
+        if (auto scenes = _app->GetSceneManager()) scenes->PublishFrameGT(flightIndex);
         AppFrameContext frameCtx = gpuSystem->BeginFrameRecord(
             flightIndex,
             deltaTime,
@@ -739,7 +740,7 @@ public:
             return std::nullopt;
         }
 
-        if (auto renderSystem = _app->GetRenderSystem()) renderSystem->PublishFrameGT(flightIndex);
+        if (auto scenes = _app->GetSceneManager()) scenes->PublishFrameGT(flightIndex);
         _app->GetFrameTimeline().AdvanceFrameIndex();
         _publishedFrameCount.store(frameIndex + 1, std::memory_order_release);
         _readySlotsSemaphore.release();
@@ -838,9 +839,9 @@ public:
             const auto result = _app->Update(AppUpdateContext{flightIndex, deltaTime, timeline.GetLastFrameLatency()});
             if (result.ShouldExit) break;
             const uint64_t serial = timeline.AllocateFrameSerial();
-            if (auto renderSystem = _app->GetRenderSystem()) {
-                renderSystem->PublishFrameGT(flightIndex);
-                renderSystem->ConsumeRenderUpdates(flightIndex, serial);
+            if (auto scenes = _app->GetSceneManager()) {
+                scenes->PublishFrameGT(flightIndex);
+                scenes->ConsumeRenderUpdates(flightIndex, serial);
             }
             timeline.PublishCompletion(FlightCompletion{flightIndex, false, serial});
             timeline.AdvanceFrameIndex();
@@ -860,13 +861,15 @@ void Application::ServiceFrameBoundaryGT(uint32_t flightIndex) {
     _scheduler.Pump();
 }
 
-void Application::SetCollecting(bool collecting) {
+bool Application::SetCollecting(bool collecting) {
+    const bool previous = _scheduler._collecting;
     _scheduler._collecting = collecting;
-    if (_assetManager) _assetManager->_collectingScene = collecting;
+    if (_assetManager) _assetManager->_operationsBlocked = collecting;
+    return previous;
 }
 
 void Application::ApplySceneUpdatesRT(AppFrameContext& ctx) {
-    if (_renderSystem != nullptr) _renderSystem->ConsumeRenderUpdates(ctx.FlightIndex(), ctx.FrameSerial());
+    if (_sceneManager != nullptr) _sceneManager->ConsumeRenderUpdates(ctx.FlightIndex(), ctx.FrameSerial());
 }
 
 void Application::WaitAndCleanupCompletedFlights() {
@@ -886,7 +889,7 @@ void Application::PumpFlightCompletions(std::optional<uint32_t> flightIndex) {
         completions.push_back(completion);
     }
     for (const auto& c : completions) {
-        if (_renderSystem != nullptr) _renderSystem->OnFlightCompletedGT(c);
+        if (_sceneManager != nullptr) _sceneManager->OnFlightCompletedGT(c);
         if (_gpuSystem != nullptr) _gpuSystem->ReleaseFrameResourcesGT(c);
     }
     if (flightIndex) {
@@ -921,21 +924,24 @@ void Application::FinalizeWorldAndSealGT(uint32_t flightIndex) {
         _worldManager->FinalizeWorldsGT();
         _worldManager->CollectRenderUpdates();
     }
-    if (_renderSystem) {
-        auto& frame = _renderSystem->GetFrameUpdates(flightIndex);
-        if (frame.Phase != RenderSystem::SceneFlightPhase::Writable) RADRAY_ABORT("View collection requires writable flight");
+    if (_sceneManager) {
+        auto& frame = _sceneManager->GetFrameUpdates(flightIndex);
+        if (frame.Phase != SceneManager::SceneFlightPhase::Writable) RADRAY_ABORT("View collection requires writable flight");
         frame.Views.clear();
         {
-            _renderSystem->SetCollecting(true);
+            _sceneManager->SetCollecting(true);
+            const bool wasCollecting = SetCollecting(true);
+            const bool worldsWereCollecting = _worldManager && _worldManager->_collecting;
             if (_worldManager) _worldManager->_collecting = true;
-            auto guard = MakeScopeGuard([this]() noexcept {
-                if (_worldManager) _worldManager->_collecting = false;
-                _renderSystem->SetCollecting(false);
+            auto guard = MakeScopeGuard([this, wasCollecting, worldsWereCollecting]() noexcept {
+                SetCollecting(wasCollecting);
+                if (_worldManager) _worldManager->_collecting = worldsWereCollecting;
+                _sceneManager->SetCollecting(false);
             });
             SceneViewCollector collector{frame.Views};
             OnCollectRenderViews(collector);
         }
-        _renderSystem->SealFrameGT(flightIndex);
+        _sceneManager->SealFrameGT(flightIndex);
     }
 }
 
@@ -953,12 +959,11 @@ void Application::StopAndDrainRuntime() {
     _scheduler.BeginStopping();
     if (_frameTimeline != nullptr) _frameTimeline->BeginStopping();
     if (_worldManager != nullptr) _worldManager->BeginStopping();
-    if (_renderSystem != nullptr) _renderSystem->BeginStoppingGT();
+    if (_sceneManager != nullptr) _sceneManager->BeginStoppingGT();
     if (_assetManager) _assetManager->BeginStopping();
     if (_windowManager != nullptr) _windowManager->CloseOperations();
     if (_frameTimeline != nullptr) WaitAndCleanupCompletedFlights();
-    if (_renderSystem) _renderSystem->AbandonUnpublishedFramesGT();
-    if (_gpuSystem) _gpuSystem->AbandonUnpublishedResourcesTerminalGT();
+    if (_sceneManager) _sceneManager->AbandonUnpublishedFramesGT();
 }
 
 int Application::Shutdown(const AppShutdownContext& ctx) {
@@ -976,6 +981,8 @@ void Application::DestroyRuntime() noexcept {
     // 拆 World:销毁 Actor / Component，释放其持有的 StreamingAssetRef。
     if (_worldManager != nullptr) _worldManager->Shutdown();
     _worldManager.reset();
+    _sceneManager.reset();
+    if (_gpuSystem) _gpuSystem->AbandonUnpublishedResourcesTerminalGT();
     // 其 RenderPassRegistry 随之销毁,故须先切断 WindowManager 的非 owning 引用。
     if (_windowManager != nullptr) {
         _windowManager->SetRenderSystem(nullptr);
@@ -1008,6 +1015,9 @@ bool Application::InitializeRuntime(const ApplicationRuntimeDescriptor& desc) {
     };
     if (desc.FlightDataCount == 0)
         return fail(RuntimeStartupStatus::InvalidDescriptor, "FlightDataCount must be positive");
+
+    if (desc.Render && !desc.Gpu)
+        return fail(RuntimeStartupStatus::InvalidDescriptor, "Render requires Gpu; use Scene for CPU scene delivery");
 
     _multithreaded = desc.Gpu && desc.Gpu->Multithreaded;
     _exitRequested.store(false, std::memory_order_relaxed);
@@ -1068,10 +1078,13 @@ bool Application::InitializeRuntime(const ApplicationRuntimeDescriptor& desc) {
         }
     }
     if (desc.Render) {
-        _renderSystem = make_unique<RenderSystem>(this, desc.FlightDataCount);
+        _renderSystem = make_unique<RenderSystem>(_gpuSystem->GetDevice(), _shaderSourceRoot, _shaderIncludePaths);
+    }
+    if (desc.Scene) {
+        _sceneManager = make_unique<SceneManager>(desc.FlightDataCount);
     }
     if (desc.World) {
-        _worldManager = make_unique<WorldManager>(this, _renderSystem.get());
+        _worldManager = make_unique<WorldManager>(this, _sceneManager.get());
     }
     if (desc.Asset) {
         _assetManager = make_unique<AssetManager>();
@@ -1092,13 +1105,12 @@ bool Application::InitializeRuntime(const ApplicationRuntimeDescriptor& desc) {
         _windowManager->SetRenderSystem(_renderSystem.get());
     }
     if (_gpuSystem != nullptr) _gpuSystem->SetWindowManager(_windowManager.get());
-    if (_renderSystem != nullptr) _renderSystem->SetGpuSystem(_gpuSystem.get());
     if (_assetManager != nullptr) {
         _assetManager->SetWaitFrameProcessor(_frameTimeline.get());
         _assetManager->SetAssetSource(_assetDatabase.get());
     }
 
-    if (_renderSystem != nullptr && _gpuSystem != nullptr && !_renderSystem->OnInitialize()) {
+    if (_renderSystem != nullptr && !_renderSystem->OnInitialize()) {
         DestroyRuntime();
         return fail(RuntimeStartupStatus::InitializationFailed, "RenderSystem initialization failed");
     }

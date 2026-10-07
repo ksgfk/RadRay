@@ -54,8 +54,7 @@ TEST_F(FrameUploadTest, SparseBufferRangesUseOneBarrierPairAndRejectOverlap) {
     auto destination = Device.CreateBuffer({.Size = 12800, .Memory = render::MemoryType::Device, .Usage = render::BufferUse::CopyDestination}).Unwrap();
     array<BufferUploadRequest, 100> requests;
     for (uint32_t i = 0; i < requests.size(); ++i) {
-        requests[i] = {.SrcData = bytes, .DstBuffer = destination.get(), .DstOffset = i * 128u,
-                       .Before = render::BufferState::ShaderRead, .After = render::BufferState::ShaderRead};
+        requests[i] = {.SrcData = bytes, .DstBuffer = destination.get(), .DstOffset = i * 128u, .Before = render::BufferState::ShaderRead, .After = render::BufferState::ShaderRead};
     }
     for (uint32_t flight = 0; flight < 2; ++flight) {
         Uploader.BeginFlight(flight, Writes);
@@ -128,6 +127,22 @@ TEST_F(FrameUploadTest, MeshUploadPreservesVertexBindingAndIndexView) {
     EXPECT_EQ(draw.Ibv.Stride, 4u);
     EXPECT_EQ(draw.Topology, render::PrimitiveTopology::TriangleList);
     EXPECT_EQ(Command.Copies, 2u);
+}
+
+TEST_F(FrameUploadTest, MultipleStreamsOwnTheUploadedVertexLayout) {
+    auto source = test::MakeUploadTestMesh();
+    source.Bins.push_back(source.Bins.front());
+    source.Primitives[0].VertexBuffers.push_back({"NORMAL", 0, 2, VertexDataType::FLOAT, 3, 0, 12});
+    Uploader.BeginFlight(0, Writes);
+    auto mesh = Uploader.UploadMeshResource(&Command, source);
+    Uploader.EndFlight(0);
+    ASSERT_TRUE(mesh);
+    ASSERT_EQ(mesh->Draws[0].VertexBuffers.size(), 2u);
+    EXPECT_EQ(mesh->Draws[0].VertexBuffers[1].Binding, 1u);
+    EXPECT_EQ(mesh->Draws[0].VertexBuffers[1].View.Target, mesh->Buffers[2].get());
+    EXPECT_EQ(mesh->Draws[0].Layout.Attributes[1].Binding, 1u);
+    EXPECT_TRUE(ValidateGeometryVertexLayout(mesh->Draws[0].Layout));
+    Uploader.CollectFlight(0);
 }
 
 }  // namespace

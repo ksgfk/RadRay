@@ -37,7 +37,8 @@ public:
                 render::SampleCount::X1 | render::SampleCount::X4, true, true, 16384, 16384, 2048, 2048, 15, UINT64_MAX};
     }
     Nullable<render::CommandQueue*> GetCommandQueue(render::QueueType, uint32_t = 0) noexcept override { return nullptr; }
-    Nullable<unique_ptr<render::CommandBuffer>> CreateCommandBuffer(render::CommandQueue*) noexcept override {
+    Nullable<unique_ptr<render::CommandAllocator>> CreateCommandAllocator(render::CommandQueue*) noexcept override { return nullptr; }
+    Nullable<unique_ptr<render::CommandBuffer>> CreateCommandBuffer(render::CommandAllocator*) noexcept override {
         ++NativeCreates;
         return nullptr;
     }

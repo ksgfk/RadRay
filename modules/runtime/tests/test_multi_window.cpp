@@ -349,21 +349,21 @@ void RunMultiWindow(render::RenderBackend backend, bool threaded, bool lifecycle
     {
         MultiWindowApp app{lifecycle};
         auto run = test::RunApplication(app, {
-            .FlightDataCount = lifecycle ? 3u : 2u,
-            .Window = WindowOptions{.Title = "Multi-window main", .Width = 280, .Height = 200},
-            .Gpu = GpuOptions{
-                .Backend = backend,
-                .EnableValidation = true,
-                .EnableSynchronizationValidation = true,
-                .Multithreaded = threaded,
-                .EnableFrameProfiler = false,
-                .BackBufferCount = 3,
-                .BackBufferFormat = render::TextureFormat::BGRA8_UNORM,
-                .PresentMode = render::PresentMode::FIFO,
-            },
-            .World = std::nullopt,
-            .Asset = std::nullopt,
-        });
+                                                 .FlightDataCount = lifecycle ? 3u : 2u,
+                                                 .Window = WindowOptions{.Title = "Multi-window main", .Width = 280, .Height = 200},
+                                                 .Gpu = GpuOptions{
+                                                     .Backend = backend,
+                                                     .EnableValidation = true,
+                                                     .EnableSynchronizationValidation = true,
+                                                     .Multithreaded = threaded,
+                                                     .EnableFrameProfiler = false,
+                                                     .BackBufferCount = 3,
+                                                     .BackBufferFormat = render::TextureFormat::BGRA8_UNORM,
+                                                     .PresentMode = render::PresentMode::FIFO,
+                                                 },
+                                                 .World = std::nullopt,
+                                                 .Asset = std::nullopt,
+                                             });
         if (test::CanSkipRuntimeStartup(backend, run.Startup)) GTEST_SKIP() << run.Startup.Reason;
         ASSERT_EQ(run.Startup.Status, RuntimeStartupStatus::Started) << run.Startup.Reason;
         ASSERT_EQ(run.ExitCode, 0);
@@ -437,7 +437,8 @@ protected:
         ASSERT_EQ(acquired.Status, render::SwapChainStatus::Success);
         ASSERT_TRUE(acquired.Frame);
         auto& frame = *acquired.Frame;
-        auto commands = _device->CreateCommandBuffer(_context.Queue).Unwrap();
+        auto commandsStorage = _device->CreateCommandAllocator(_context.Queue).Unwrap();
+        auto commands = _device->CreateCommandBuffer(commandsStorage.get()).Unwrap();
         commands->Begin();
         const render::ResourceBarrierDescriptor barrier = render::BarrierTextureDescriptor{
             .Target = frame.GetBackBuffer(), .Before = render::TextureState::Undefined, .After = render::TextureState::Present};
@@ -559,6 +560,7 @@ TEST_F(RuntimeVulkanSwapChain, MultiSwapChainHostWaitBeforePresent) {
     for (uint32_t round = 0; round < 12; ++round) {
         SCOPED_TRACE(round);
         vector<render::SwapChainFrame> frames;
+        auto storage = _device->CreateCommandAllocator(_context.Queue).Unwrap();
         vector<unique_ptr<render::CommandBuffer>> commands;
         vector<unique_ptr<render::TextureView>> views;
         vector<unique_ptr<render::Framebuffer>> framebuffers;
@@ -570,7 +572,7 @@ TEST_F(RuntimeVulkanSwapChain, MultiSwapChainHostWaitBeforePresent) {
         for (size_t step = 0; step < frames.size(); ++step) {
             const size_t index = round % 2 == 0 ? step : frames.size() - 1 - step;
             auto& frame = frames[index];
-            commands.push_back(_device->CreateCommandBuffer(_context.Queue).Unwrap());
+            commands.push_back(_device->CreateCommandBuffer(storage.get()).Unwrap());
             auto* command = commands.back().get();
             command->Begin();
             const render::ResourceBarrierDescriptor before = render::BarrierTextureDescriptor{

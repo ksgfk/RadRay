@@ -237,7 +237,7 @@ public:
     AssetManager& operator=(const AssetManager&) = delete;
     AssetManager& operator=(AssetManager&&) = delete;
 
-    /// 【存活引用必须先于本对象消失】关停顺序是 World → RenderSystem → AssetManager →
+    /// 【存活引用必须先于本对象消失】资产使用者及其退休引用先清理，然后 AssetManager →
     /// GpuSystem。违反时记 error log 并照样卸载, 不 abort (关停期 abort 会掩盖真正的首因)。
     ~AssetManager() noexcept;
 
@@ -378,7 +378,7 @@ private:
     TaskScope _retirementScope;
     ManualCoroutineScheduler<AssetWaitRecord> _waiters;
     bool _pumping{false};
-    bool _collectingScene{false};
+    bool _operationsBlocked{false};
     bool _stopping{false};
     unordered_map<AssetId, unique_ptr<Slot>> _slots;
     Nullable<Slot*> _zeroRefHead{nullptr}, _zeroRefTail{nullptr};

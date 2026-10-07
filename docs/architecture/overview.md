@@ -12,6 +12,8 @@ RadRay 是 C++20 实时渲染器，提供 D3D12 与 Vulkan 后端。仓库工作
 | 目录 | 内容 |
 |---|---|
 | `modules/` | core、shader、window、render、runtime，以及可选 shader compiler client |
+| `modules/runtime/{include/radray/runtime,src}/` | 底层 GPU/上传、shader/PSO 服务、通用资产及 Application 装配 |
+| `modules/runtime/{include/radray/runtime,src}/render_framework/` | 可选的场景管理与交付、材质、视图、pipeline 与绘制 |
 | `shaderlib/` | HLSL 数学、BSDF、光照、阴影共享库，目录本身是 include 根 |
 | `tools/` | 依赖恢复、文档检查、编译数据库脚本和 raw shader compile CLI |
 | `benchmarks/` | 性能测量程序 |
@@ -59,7 +61,7 @@ artifact 不需要 compiler，开发期 JIT 通过配置开关接入 client。
 | 帧序、flight、上传与关停 | [帧与 GPU](frame-and-gpu.md) |
 | ImGui 移除状态及旧设计 | [Runtime ImGui](runtime-imgui.md) |
 | RHI、后端、barrier 与同步 | [RHI 与后端](render-rhi.md) |
-| Application、多 World、场景同步、shader 与渲染服务 | [Runtime 宿主](render-framework.md) |
+| Application、多 World、场景同步、材质、Pipeline 与 shader 服务 | [Runtime 宿主](render-framework.md) |
 | Renderer foundation 移除状态 | [Renderer foundation](renderer-foundation.md) |
 | 重构前设计、依赖边界与历史附件 | [临时设计快照](../temp/render-framework-design.md) |
 | World 变换存储原型、性能对照与迁移代价 | [2026-09-24 实验快照](../temp/world-transform-store-benchmark-2026-09-24.md) |
@@ -75,8 +77,8 @@ artifact 不需要 compiler，开发期 JIT 通过配置开关接入 client。
 | 资产加载与回收 | `AssetManager::Load` / `Pump` | `modules/runtime/src/asset_manager.cpp` |
 | 身份登记与 path 反查 | `AssetDatabase::Open` / `Refresh` / `Save` | `modules/runtime/src/asset_database.cpp` |
 | 多 World 管理 | `WorldManager::CreateWorld` / `DestroyWorld` | `modules/runtime/src/world_manager.cpp` |
-| 场景交付 | `RenderSystem::SealFrameGT` / `ConsumeRenderUpdates` | `modules/runtime/src/render_system.cpp` |
+| 场景交付 | `SceneManager::SealFrameGT` / `ConsumeRenderUpdates` | `modules/runtime/src/render_framework/scene_manager.cpp` |
 | 场景 tick | `World::Tick` | `modules/runtime/src/game_framework/world.cpp` |
 
-旧 render_framework、Forward 和 ImGui 渲染实现已移除；基础模块、runtime 宿主与游戏组件保留。
+旧 RenderGraph、Forward 和 ImGui 渲染实现已移除；当前 `render_framework/` 组织依赖底层服务的公共渲染框架。
 当前能力与未实现边界在各子系统页面说明，不在地图中维护另一份进度或决策清单。

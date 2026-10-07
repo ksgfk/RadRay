@@ -71,6 +71,28 @@ D3D12 flip swapchain 的 sRGB 请求使用 UNORM DXGI 存储格式，并保留�
 `RenderObjectTag` 是位标志形式的类型标签，子类位或合成父类位
 （`GraphicsCmdEncoder = CmdEncoder | (CmdEncoder<<1)`），目前只被日志的 `format_as` 消费。
 
+## 命令录制存储
+
+`Device::CreateCommandAllocator(queue)` 创建独占的 RHI recording storage，绑定同 device 的实际 queue。
+`CreateCommandBuffer(allocator)` 创建独占 wrapper/native list，借用 allocator；旧 queue 工厂已移除。
+allocator 必须晚于全部 children 销毁。销毁 child 只注销并释放自身，不销毁共享 storage。
+创建时校验 backend、device、有效性与实际 queue；提交校验录制状态及绑定 queue。
+
+一个 epoch 内每个 child 只 Begin/End 一次。Begin 不重置 storage；End 只关闭当前录制。
+`CommandAllocator::Reset()` 由调用方在全部 GPU 使用完成、且没有打开的录制后调用，不等待 GPU。
+Reset 使旧录制失效，并清理所有 child 的 keepalive、结束的 encoder 与缓存状态，包括本轮不再使用的 child。
+违反 Begin/End、encoder、Reset、父子销毁顺序或提交已失效录制的契约会立即诊断；创建仍返回可空结果。
+可检测状态不等于完整 ABA 防护：裸指针重新录制后不能识别调用方保留的旧逻辑引用。
+
+D3D12 storage 持有 native allocator 数组：仅在所有 block 都有 open list 时扩容，按同时录制高水位 K 复用。
+顺序录制 M 条 list 通常只需一个 native allocator；每条 list 仍单独 Reset/Close。安全复用时仅 Reset 用过的 block。
+Vulkan 一个 storage 持有一个未开启逐 buffer reset 的 command pool，绑定真实 queue family；安全复用时整池 Reset。
+同线程交错录制不增加 pool。共享 allocator 的全部操作由调用方串行化；独立 storage 可以由独立 worker 录制。
+共享录制内存不提供 GPU 数据同步，barrier 和 Submit 数组顺序仍由调用方负责。
+
+名称分别作用于 allocator 与 child，child 命名不会改写共享 pool 的名称。
+`Backends/CommandAllocatorTest` 验证共享、高水位、组复用、读回和临时 encoder 清理；非法状态在驱动调用前拒绝。
+
 ## 后端选择：descriptor visit + artifact 动态桥
 
 选后端**不是**运行期能力探测，而是"你传了哪个 descriptor"：

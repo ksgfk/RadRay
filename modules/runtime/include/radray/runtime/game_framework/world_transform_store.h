@@ -1,7 +1,7 @@
 #pragma once
 
 #include <radray/nullable.h>
-#include <radray/runtime/render_scene/scene_transform.h>
+#include <radray/runtime/render_framework/scene_transform.h>
 
 namespace radray {
 

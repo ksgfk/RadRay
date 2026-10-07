@@ -1,6 +1,6 @@
 > - 适用: World 无世界矩阵缓存、Scene 层级变换实验，以及本机 CPU 场景同步性能对照
 > - 权威: 2026-09-22 至 2026-09-23 的历史配对测量与复测；长期接口以 render-framework 为准，不保证其他机器或业务负载得到相同比例
-> - 锚点: `modules/runtime/src/components/scene_component.cpp`, `modules/runtime/src/game_framework/world_render_bridge.cpp`, `modules/runtime/src/render_scene/scene_transform.cpp`, `modules/runtime/src/render_scene/render_scene.cpp`, `benchmarks/bench_scene_sync/bench_scene_sync.cpp`, `benchmarks/bench_scene_sync/CMakeLists.txt`, `tools/run_scene_sync_benchmark.py`
+> - 锚点: `modules/runtime/src/components/scene_component.cpp`, `modules/runtime/src/game_framework/world_render_bridge.cpp`, `modules/runtime/src/render_framework/scene_transform.cpp`, `modules/runtime/src/render_framework/render_scene.cpp`, `benchmarks/bench_scene_sync/bench_scene_sync.cpp`, `benchmarks/bench_scene_sync/CMakeLists.txt`, `tools/run_scene_sync_benchmark.py`
 
 # World 无世界矩阵缓存：Scene 变换实验与性能报告
 

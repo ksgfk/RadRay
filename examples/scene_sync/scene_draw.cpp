@@ -9,6 +9,7 @@ bool SceneDraw::Initialize(RenderSystem& renderer, render::Device* device, rende
     auto program = renderer.GetOrCreateShaderProgram({.SourceName = "scene_sync.hlsl"});
     if (!program) return false;
     auto* layout = program->GetPipelineLayout();
+    _layout = layout;
     _objects = layout->FindBinding("Objects");
     _view = layout->FindBinding("ViewData");
     _draw = layout->FindBinding("DrawData");
@@ -36,25 +37,30 @@ bool SceneDraw::Initialize(RenderSystem& renderer, render::Device* device, rende
         _pipelines[reverse] = pipeline.Release();
     }
     _flights.resize(flights);
-    for (auto& flight : _flights)
-        for (auto& view : flight) {
-            auto bufferResult = device->CreateBuffer({.Size = 256, .Memory = render::MemoryType::Upload, .Usage = render::BufferUse::CBuffer | render::BufferUse::MapWrite, .Hints = render::ResourceHint::PersistentMap});
-            auto parameters = device->CreateShaderParameterSet({layout, _group});
-            if (!bufferResult || !parameters) return false;
-            view.Constants = make_unique<MappedUploadPage>(bufferResult.Release());
-            view.Parameters = parameters.Release();
-            if (!view.Parameters->Set(_view, 0, render::ShaderBufferBinding{view.Constants->GetBuffer(), {0, 64}, 0})) return false;
-        }
     return true;
 }
 
-bool SceneDraw::Draw(RenderSystem& renderer, AppFrameContext& frame, render::GraphicsCommandEncoder* encoder,
+bool SceneDraw::Draw(SceneManager& scenes, AppFrameContext& frame, render::GraphicsCommandEncoder* encoder,
                      const SceneViewRequest& request, const SceneGpuView& objects, uint32_t viewIndex, uint32_t width, uint32_t height) {
     RADRAY_PROFILE_SCOPE_N("SceneDraw::Draw");
     const auto resolved = ResolveSceneView(request, width, height, frame.GetDevice()->GetBackend());
-    auto scene = renderer.GetSceneRT(request.Scene);
-    if (!resolved || !scene || viewIndex >= 3) return false;
-    auto& view = _flights[frame.FlightIndex()][viewIndex];
+    auto scene = scenes.GetSceneRT(request.Scene);
+    if (!resolved || !scene) return false;
+    (void)viewIndex;
+    auto& flight = _flights[frame.FlightIndex()];
+    if (flight.Serial != frame.FrameSerial()) {
+        flight.Serial = frame.FrameSerial();
+        flight.Used = 0;
+    }
+    if (flight.Used == flight.Views.size()) {
+        auto buffer = frame.GetDevice()->CreateBuffer({.Size = std::max(64u, frame.GetDevice()->GetDetail().CBufferAlignment), .Memory = render::MemoryType::Upload, .Usage = render::BufferUse::CBuffer | render::BufferUse::MapWrite, .Hints = render::ResourceHint::PersistentMap});
+        auto parameters = frame.GetDevice()->CreateShaderParameterSet({_layout.Get(), _group});
+        if (!buffer || !parameters) return false;
+        ViewResources next{make_unique<MappedUploadPage>(buffer.Release()), parameters.Release()};
+        if (!next.Parameters->Set(_view, 0, render::ShaderBufferBinding{next.Constants->GetBuffer(), {0, 64}, 0})) return false;
+        flight.Views.push_back(std::move(next));
+    }
+    auto& view = flight.Views[flight.Used++];
     auto constants = view.Constants->ReserveAt(0, 64, frame.GetHostWrites());
     if (!constants.IsValid()) return false;
     std::memcpy(constants.Data(), resolved->ViewProjection.data(), 64);
@@ -96,7 +102,9 @@ unique_ptr<StaticMesh> CreateCube(GpuSystem& gpu) {
     primitive.IndexBuffer = {1, 36, 0, 4};
     cpu.Primitives.push_back(std::move(primitive));
     auto* device = gpu.GetDevice();
-    auto commands = device->CreateCommandBuffer(gpu.GetMainQueue());
+    auto commandsStorage = device->CreateCommandAllocator(gpu.GetMainQueue());
+    if (!commandsStorage) return nullptr;
+    auto commands = device->CreateCommandBuffer(commandsStorage.Get());
     auto fence = device->CreateFence();
     if (!commands || !fence) return nullptr;
     ResourceUploader uploader{device, 1};

@@ -26,7 +26,7 @@ unique_ptr<StaticMesh> MakeMesh() {
 
 class LifecycleWorkload {
 public:
-    LifecycleWorkload() : Renderer(&App, 1) { test::ConnectWorld(World, Renderer); }
+    LifecycleWorkload() : Renderer(1) { test::ConnectWorld(World, Renderer); }
 
     void Populate(uint32_t count, uint32_t depth, bool unique) {
         Nullable<SceneComponent*> previous;
@@ -55,7 +55,7 @@ public:
 
     Application App;
     AssetManager Assets;
-    RenderSystem Renderer;
+    SceneManager Renderer;
     test::ScopedWorld World;
 };
 
@@ -106,7 +106,9 @@ void RegisterLifecycleBenchmarks() {
                                     while (state.KeepRunningBatch(batchFrames)) workload.RunFrames(batchFrames);
                                     benchmark::DoNotOptimize(workload.Visible());
                                     state.SetItemsProcessed(state.iterations());
-                                })->MeasureProcessCPUTime()->UseRealTime()->Unit(benchmark::kMicrosecond);
+                                })->MeasureProcessCPUTime()
+                                    ->UseRealTime()
+                                    ->Unit(benchmark::kMicrosecond);
                             }
                         }
                     }

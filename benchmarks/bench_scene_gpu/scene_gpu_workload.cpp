@@ -20,7 +20,7 @@ SceneGpuWorkload::SceneGpuWorkload(render::RenderBackend backend, uint32_t fligh
         _error = startup.Reason;
         return;
     }
-    _renderer = make_unique<RenderSystem>(&_app, flights);
+    _renderer = make_unique<SceneManager>(flights);
     if (load == SceneGpuLoad::Parent) {
         _world = make_unique<World>();
         _world->RequestRenderConnection(_renderer.get());

@@ -2,7 +2,7 @@
 
 #include <radray/enum_flags.h>
 #include <radray/runtime/components/scene_component.h>
-#include <radray/runtime/render_scene/scene_capture.h>
+#include <radray/runtime/render_framework/scene_capture.h>
 
 namespace radray {
 

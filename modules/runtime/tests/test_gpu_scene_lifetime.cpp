@@ -94,7 +94,7 @@ void RunMeshLifetime(render::RenderBackend backend, bool delayed, bool direct, b
     AssetManager assets;
     assets.SetWaitFrameProcessor(&assetWaits);
     Application app;
-    RenderSystem renderer{&app, 2};
+    SceneManager renderer{2};
     test::ScopedWorld world;
     const auto sceneId = test::ConnectWorld(world, renderer);
     auto* device = gpu.GetDevice();

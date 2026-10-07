@@ -78,16 +78,20 @@ void RunCommandBatches(render::RenderBackend backend, bool profiler) {
         GpuSystemBufferBarrier(third, work.get(), render::BufferState::CopyDestination, render::BufferState::CopySource);
         third->CopyBufferToBuffer(readback.get(), 4, work.get(), 0, 4);
         if (vulkan) GpuSystemBufferBarrier(third, readback.get(), render::BufferState::CopyDestination, render::BufferState::HostRead);
+        auto& allocator = context.GetCmdAllocator();
+        allocator.Return(std::span{&third, 1});
+        allocator.Return(std::span{&second, 1});
+        allocator.Return(std::span{&first, 1});
         {
             render::CommandBuffer* buffers[]{first};
-            context.ReturnCommandBuffers({.CmdBuffers = buffers});
+            context.RegisterClosedCommandBuffers({.CmdBuffers = buffers});
             buffers[0] = nullptr;
         }
         {
             render::CommandBuffer* buffers[]{second, third};
             render::Fence* signals[]{signaled.get()};
             uint64_t values[]{round + 1ull};
-            context.ReturnCommandBuffers({.CmdBuffers = buffers, .SignalFences = signals, .SignalValues = values});
+            context.RegisterClosedCommandBuffers({.CmdBuffers = buffers, .SignalFences = signals, .SignalValues = values});
             buffers[0] = nullptr;
             signals[0] = nullptr;
             values[0] = 0;
@@ -203,7 +207,8 @@ protected:
 TEST_F(GpuSystemDeathTest, RejectsInvalidCommandReturnsAndUnsealedFrames) {
     auto context = Gpu->BeginFrameRecord(0, {}, {}, false);
     auto* commands = context.AllocateCommandBuffer();
-    auto foreign = Gpu->GetDevice()->CreateCommandBuffer(Gpu->GetMainQueue()).Unwrap();
+    auto foreignStorage = Gpu->GetDevice()->CreateCommandAllocator(Gpu->GetMainQueue()).Unwrap();
+    auto foreign = Gpu->GetDevice()->CreateCommandBuffer(foreignStorage.get()).Unwrap();
     render::CommandBuffer* external[]{foreign.get()};
     EXPECT_DEATH(context.ReturnCommandBuffers({.CmdBuffers = external}), "");
     render::CommandBuffer* duplicate[]{commands, commands};
@@ -238,6 +243,25 @@ TEST_F(GpuSystemDeathTest, RejectsInvalidCommandReturnsAndUnsealedFrames) {
     Gpu->WaitAndRetireFlights();
     Gpu->ReleaseFrameResourcesGT({.FlightIndex = 0, .FrameSerial = next.FrameSerial()});
     Gpu->ReleaseFrameResourcesGT({.FlightIndex = 1, .FrameSerial = other.FrameSerial()});
+}
+
+TEST_F(GpuSystemDeathTest, ClosedCommandRegistrationRequiresCompleteUniqueResults) {
+    auto context = Gpu->BeginFrameRecord(0, {}, {}, false);
+    auto& allocator = context.GetCmdAllocator();
+    auto* commands = allocator.Allocate();
+    EXPECT_DEATH(context.RegisterClosedCommandBuffers({.CmdBuffers = std::span{&commands, 1}}), "");
+    allocator.Return(std::span{&commands, 1});
+    EXPECT_DEATH(context.SubmitFrame(), "");
+    EXPECT_DEATH(allocator.Return(std::span{&commands, 1}), "");
+    render::CommandBuffer* duplicate[]{commands, commands};
+    EXPECT_DEATH(context.RegisterClosedCommandBuffers({.CmdBuffers = duplicate}), "");
+    context.RegisterClosedCommandBuffers({.CmdBuffers = std::span{&commands, 1}});
+    EXPECT_DEATH(context.RegisterClosedCommandBuffers({.CmdBuffers = std::span{&commands, 1}}), "");
+    context.SubmitFrame();
+    EXPECT_DEATH((void)allocator.Allocate(), "");
+    EXPECT_DEATH(allocator.Return({}), "");
+    Gpu->WaitAndRetireFlights();
+    Gpu->ReleaseFrameResourcesGT({.FlightIndex = 0, .FrameSerial = context.FrameSerial()});
 }
 
 TEST_F(GpuSystemDeathTest, EnforcesFrameResourceRetirementBeforeSlotReuse) {

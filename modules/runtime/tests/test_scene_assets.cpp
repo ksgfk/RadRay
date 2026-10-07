@@ -10,7 +10,7 @@
 #include <radray/runtime/game_framework/actor.h>
 #include <radray/runtime/game_framework/world.h>
 #include <radray/runtime/gpu_system.h>
-#include <radray/runtime/render_system.h>
+#include <radray/runtime/render_framework/scene_manager.h>
 
 namespace radray {
 namespace {
@@ -129,7 +129,7 @@ protected:
     Application App;
     AssetManager Assets;
     RenderAssetLifetime AssetLifetime{3};
-    RenderSystem Render{&App, 3};
+    SceneManager Render{3};
     test::ScopedWorld GameWorld;
     SceneId RenderId{test::ConnectWorld(GameWorld, Render)};
     Actor* Owner{GameWorld.SpawnActor()};

@@ -131,7 +131,7 @@ GT/RT 分别发出 warmup complete 消息，`Stress/Warmup` plot 为 0 的渲染
 | `churn` | 每帧请求销毁并创建 `--changes=N` 个对象，保持存活总数；新对象仍使用同一 Ready 资产 |
 
 `--changes` 上限为 objects，允许 0；`--objects=0 --workload=idle` 是空场景参照，仍含一个 World 和相机。
-其他配置包括 `--d3d12`/`--vulkan`、`--single-thread`/`--multithread`、`--flights=1|2|3`、`--views=1|3`。
+其他配置包括 `--d3d12`/`--vulkan`、`--single-thread`/`--multithread`、`--flights=1|2|3`、`--views=N`（正整数）。
 `--window` 增加窗口与 Immediate 呈现；world/sync/upload 档仅清屏，draw 档显示对象，窗口维护和呈现成本也会进入捕获。
 `--validation` 仅用于正确性排查，正式抓取默认关闭；`--no-gpu-profiler` 可关闭帧 GPU 时间戳，CPU zones 保留。
 完整参数见 `--help`。启动日志记录实际配置，热路径不逐帧打印，也不做逐对象校验或逐对象 Tracy 插桩。
@@ -153,7 +153,7 @@ $stress = 'build_profile/_build/Release/example_framework_stress.exe'
 
 Tracy 中从 `Stress::Update`（样例制造负载）与 `World::Tick` 开始，继续看
 `Application::FinalizeWorldAndSealGT` 内的生命周期、通知、Collect 和 Seal，
-RT 看 `RenderSystem::ConsumeRenderUpdates` / `RenderScene::Apply`、`Stress::PrepareObjects` /
+RT 看 `SceneManager::ConsumeRenderUpdates` / `RenderScene::Apply`、`Stress::PrepareObjects` /
 `SceneGpuData::Prepare`、`Stress::DrawObjects`，提交看 `GpuSystem::SubmitFrame`。
 `Application::ServiceFrameBoundaryGT` 包含完成回收、资产和 scheduler 泵。
 `PrepareFrame`、`WaitWritableSlot`、`WaitReadySlot`、`GpuSystem::WaitFlightFence` 是帧准备或等待区域，
@@ -186,10 +186,11 @@ GPU 时间（毫秒），不是当前 GT 帧的即时耗时；关闭 GPU profile
 | `test_manual_coroutine_scheduler.cpp` | `ManualCoroutineScheduler`（冻结派发、取消其他等待者、跨等待表截止与延迟取消） |
 | `test_asset_slot.cpp` | `AssetSlotTest` |
 | `test_frame_upload.cpp` | `FrameUploadTest` |
-| `test_application_systems.cpp` | `ApplicationSystems`（零系统、单系统、CPU 帧循环的完成、等待与延迟、非法 `FlightDataCount`） |
+| `test_runtime_services.cpp` | `RuntimeServices`（关闭 Scene/World，双后端单/双线程 shader 与原生命令读回） |
+| `test_application_systems.cpp` | `ApplicationSystems`（零系统、单系统、CPU 帧循环的完成、等待与延迟、非法 `FlightDataCount` 与 Render/Gpu 配置） |
 | `test_gpu_system.cpp` | `GpuSystemTest`, `GpuSystemDeathTest` |
 | `test_scene_delivery.cpp` | `SceneDelivery`, `SceneDeliveryRunner`, `MultiWorldSceneRunner`（CPU 场景帧循环与双后端 GPU runner，F=1/2/3/8） |
-| `test_scene_delivery_state.cpp` | `SceneDeliveryState`（直接通过 RenderSystem 验证发布次序、serial、停止排空和随机槽位复用） |
+| `test_scene_delivery_state.cpp` | `SceneDeliveryState`（直接通过 SceneManager 验证发布次序、serial、停止排空和随机槽位复用） |
 | `test_world_scenes.cpp` | `WorldManager`, `WorldScenes`（多 World 所有权、暂停、独立场景写入、连接与退休） |
 | `test_scene_updates.cpp` | `SceneUpdates`（组件标脏合并、生命周期、代次与收集约束；纯 CPU） |
 | `test_scene_assets.cpp` | `SceneAssets`（类型无关的资产常驻/退休、Ready 通知、共享等待取消与 GT 释放；纯 CPU） |
@@ -395,7 +396,7 @@ runtime-only 可消费匹配 backend 的已编译 artifact，源码请求不会�
 ## World → RenderScene 状态同步基准
 
 `bench_scene_sync` 使用真实 Actor、StaticMeshComponent、Directional/Point/SpotLightComponent、
-World 与 RenderSystem。每个 Shape 对应一个 Actor 和一个 Mesh 组件，Mesh 资产已 Ready；未启用 Tick 的
+World 与 SceneManager。每个 Shape 对应一个 Actor 和一个 Mesh 组件，Mesh 资产已 Ready；未启用 Tick 的
 对象不进入 World ticking 列表，空闲帧只付列表遍历（默认为空）。该基准截止于 CPU `ConsumeRenderUpdates/Apply`，不含可见性、draw 准备、命令录制、
 GPU、资产 IO 或真实游戏逻辑。没有 RectLightComponent，故不模拟 Rect 组件。
 
@@ -491,7 +492,7 @@ ctest --test-dir build_debug/modules/runtime/tests --output-on-failure
 build_debug/_build/Debug/example_scene_sync.exe --vulkan --flights=3 --views=3 --instances=1000
 ```
 
-`--d3d12`/`--vulkan` 选择后端，`--multithread` 改为双线程，`--flights=1/2/3`、`--views=1/3` 调整配置；
+`--d3d12`/`--vulkan` 选择后端，`--multithread` 改为双线程，`--flights=1/2/3`、`--views=N` 调整配置；
 `--valid-layer` 开启验证，`--frames=N` 限定运行帧数。示例沿用原生窗口的 resize、最小化与恢复入口。
 窗口标题每 0.5 秒更新一次 FPS，按该时间段内成功 acquire 并完成绘制录制的帧数除以墙钟时间计算，
 单线程与双线程均适用；跳过绘制的帧不计数。相机通过 `CameraControl` 控制：左键拖动环绕原点，
@@ -564,6 +565,25 @@ build_scene_sync_perf/_build/Release/bench_lifecycle.exe --benchmark_filter='Lif
 Sanitizer 使用独立 RelWithDebInfo 构建并关闭 mimalloc/profiler；MSVC ASan 添加 `/fsanitize=address`，
 不与 `/RTC1` 混用。ClangCL 可以同时启用 ASan/UBSan，compiler probe 同样指定 RelWithDebInfo 与非 Debug CRT。
 历史生命周期验收范围见[生命周期 v2 验收](../temp/lifecycle-v2-validation.md)，其中旧 CSV 不代表当前基准协议。
+
+## Pipeline 与命令存储验证
+
+```powershell
+cmake --build build_debug --config Debug --parallel 12
+$env:RADRAY_TEST_REQUIRED_BACKENDS = 'd3d12,vulkan'
+ctest --test-dir build_debug -C Debug -R 'CommandAllocator|GpuSystem|Pipeline|SceneDraw|FrameUploadTest|SceneViews' --output-on-failure
+cmake --build build_release --config Release --parallel 12
+build_release/_build/Release/bench_command_allocator.exe --benchmark_min_time=0.1s --benchmark_repetitions=5 --benchmark_out=build_release/command-allocator.json --benchmark_out_format=json
+```
+
+`bench_command_allocator` 用相同 copy 录制比较一个共享 RHI storage 与每 command 独立 storage，
+覆盖 M=1/8/32/128、K=1/2/4。初始化与第一次 native 扩容在计时外，输出 native capacity、Reset 与 Record 微秒数。
+该合成基准不 Submit，因而没有 GPU 时间、运行中的存储占用或帧等待成本，不能当作帧率。
+真实窗口/离屏负载使用 `framework_stress --mode=draw`；`--legacy-draw` 切回固定 shader 基线，其他参数保持一致。
+两条路径都使用当前 RHI allocator；这组 A/B 衡量公共 pipeline 的接入成本，不代表旧提交的 allocator 性能。
+用 `--no-gpu-profiler` 对照运行时 GPU profiler 开关；`--views=N` 不再限制为 1 或 3。
+native storage 字节数由驱动持有，无法直接测得；进程 working set 不能直接等同命令存储占用。
+本次配置、原始数据、结果和未覆盖项见[第一阶段验收记录](../temp/phase1-rhi-command-allocator-validation.md)。
 
 ## 编译数据库与文档检查
 

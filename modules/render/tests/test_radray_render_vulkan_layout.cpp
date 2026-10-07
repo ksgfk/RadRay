@@ -587,7 +587,9 @@ TEST_F(VulkanDeviceFixture, PushHandleWritesPushConstantsAndRejectsMisuse) {
     ASSERT_TRUE(parameterSet->Set(output, 0, outputValue));
     ASSERT_TRUE(parameterSet->FlushWrites());
 
-    auto commandResult = device->CreateCommandBuffer(Context.Queue);
+    auto commandResultStorage = device->CreateCommandAllocator(Context.Queue).Unwrap();
+
+    auto commandResult = device->CreateCommandBuffer(commandResultStorage.get());
     ASSERT_TRUE(commandResult.HasValue());
     unique_ptr<CommandBuffer> command = commandResult.Release();
     command->Begin();

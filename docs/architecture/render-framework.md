@@ -1,17 +1,32 @@
 > - 适用: Application、多 World、组件渲染连接、场景交付与共享渲染服务
 > - 权威: 本文描述 runtime 宿主与场景边界；GPU 帧与上传见 frame-and-gpu
-> - 锚点: `modules/runtime/include/radray/runtime/application.h`, `modules/runtime/src/application.cpp`, `modules/runtime/include/radray/runtime/world_manager.h`, `modules/runtime/src/world_manager.cpp`, `modules/runtime/include/radray/runtime/render_system.h`, `modules/runtime/src/render_system.cpp`, `modules/runtime/include/radray/runtime/game_framework/`, `modules/runtime/include/radray/runtime/components/`, `modules/runtime/include/radray/runtime/render_scene/`
+> - 锚点: `modules/runtime/include/radray/runtime/application.h`, `modules/runtime/src/application.cpp`, `modules/runtime/include/radray/runtime/world_manager.h`, `modules/runtime/src/world_manager.cpp`, `modules/runtime/include/radray/runtime/render_system.h`, `modules/runtime/src/render_system.cpp`, `modules/runtime/include/radray/runtime/render_framework/scene_manager.h`, `modules/runtime/src/render_framework/scene_manager.cpp`, `modules/runtime/include/radray/runtime/components/scene_view_capture.h`, `modules/runtime/include/radray/runtime/game_framework/`, `modules/runtime/include/radray/runtime/components/`, `modules/runtime/include/radray/runtime/render_framework/`
 
 # Runtime 宿主、World 与渲染场景
 
 runtime 采用立即创建、延迟销毁、统一 Tick 轮次与类型化增量交付。每个 Scene 只有一份 RT CPU 数据；
-flight 保存更新包、按值视图请求和必要 owner。RenderSystem 按需提供对象 GPU buffer，
-shader、PSO、渲染目标和 draw loop 由调用方持有。没有内置 Forward/RenderGraph 或完整场景快照。
+flight 保存更新包、按值视图请求和必要 owner。SceneManager 按需提供对象 GPU buffer，RenderSystem 提供 shader program 与 PSO 缓存，
+应用持有具体 pipeline 和输出资源，公共 SceneDraw 完成准备与基础绘制。没有完整 Forward/RenderGraph 或完整场景快照。
 旧渲染器设计见[历史快照](../temp/render-framework-design.md)。
+
+runtime 按职责区分底层服务、通用资产与可选渲染框架，框架依赖底层服务。
+
+| 归属 | 文件与职责 |
+|---|---|
+| runtime 根目录：底层渲染服务 | `gpu_system`、`render_system`、`cmd_allocator`、`gpu_resource`、`gpu_frame_resources`、`shader_jit`、`shader_program`、`graphics_pipeline_cache`、`vertex_layout`；不依赖场景、Material 或 Pipeline |
+| runtime 根目录：通用资产与数据 | `image_asset`、`texture_asset`、`static_mesh`、`vertex_data`、`gpu_mesh`、`local_transform`；持有 GPU 资源不等于属于渲染框架 |
+| `render_framework/` | SceneManager、SceneWriter/RenderScene、场景 GPU 镜像、场景交付与资产退休、视图、Material、输出、Pipeline 与 SceneDraw |
+| 上层装配 | Application 组合可选服务；`game_framework/` 保存 Actor/World 与 WorldRenderBridge，`components/` 保存组件及相机捕获适配 |
+
+公共头通过 `<radray/runtime/...>` 引用，框架头使用 `<radray/runtime/render_framework/...>`。
+同名 `.h/.cpp` 保持对应，仍使用一个 `radrayruntime` 构建目标。
+应用可以关闭 Scene 和 World，直接使用底层服务录制 RHI。
+`GpuMesh` 是独立几何数据，`LocalTransform` 是通用 TRS 值；更新包、TransformId 和 SceneTransform 属于框架。
+`AppRenderContext` 是独立帧值类型，GpuSystem 与 WindowManager 不需要包含 Application 头。
 
 ## Application 与驱动边界
 
-`Application::Run` 按 `ApplicationRuntimeDescriptor` 的可选系统创建服务。Window、Gpu、Render、World、Asset 默认都启用；某个 `std::optional` 设为 `nullopt` 即关闭该系统。字段只放在所属选项里：后端、验证、多线程、交换链和帧 profiler 属于 `GpuOptions`，shader 根属于 `RenderOptions`，资产根属于 `AssetOptions`。`FlightDataCount` 是时间线槽位数，必须大于 0。必要时初始化窗口，然后调用 OnInit；默认不创建默认 World。各 getter 对未启用的系统返回空。`GetFrameTimeline()` 在初始化成功后始终有效。
+`Application::Run` 按 `ApplicationRuntimeDescriptor` 的可选系统创建服务。Window、Gpu、Render、Scene、World、Asset 默认都启用；某个 `std::optional` 设为 `nullopt` 即关闭该系统。字段只放在所属选项里：后端、验证、多线程、交换链和帧 profiler 属于 `GpuOptions`，shader 根属于 `RenderOptions`，`SceneOptions` 控制场景服务，资产根属于 `AssetOptions`。`FlightDataCount` 是时间线槽位数，必须大于 0。必要时初始化窗口，然后调用 OnInit；默认不创建默认 World。各 getter 对未启用的系统返回空。`GetFrameTimeline()` 在初始化成功后始终有效。
 `RequestExit()` 可在没有窗口时结束循环。启动失败写在 `GetStartupResult()`，OnInit 之前返回。OnInit 返回后以 bootstrap S1
 收束连接和销毁请求；初始数据等首个 writable flight 封包，不伪造发布或 GPU 完成。
 
@@ -23,7 +38,7 @@ shader、PSO、渲染目标和 draw loop 由调用方持有。没有内置 Forwa
 
 输入与 OnUpdate 后，WorldManager 开始全局 TickEpoch。S1 不等待 GPU。RT 跳过绘制仍消费已发布包。
 GPU 的单线程和双线程 runner 共用这些协议；ready 交接、CPU 提交完成计数与主队列 fence 是实际同步权威。
-不启用 Gpu 时使用单线程 CPU runner，与 GPU runner 共用 FrameTimeline 和同一条完成路径。它按 `FlightDataCount` 轮转槽位，泵可选资产和 scheduler，如有 RenderSystem 则在 Update 后同步发布并消费场景包，再发布 `GpuWorkCompleted` 为 false 的完成。该模式不调用 OnRender，但会调用 `OnRenderFrameComplete`。等待恢复时机与延迟见[帧序](frame-and-gpu.md#帧序)。多线程模式要求 Gpu。
+不启用 Gpu 时使用单线程 CPU runner，与 GPU runner 共用 FrameTimeline 和同一条完成路径。它按 `FlightDataCount` 轮转槽位，泵可选资产和 scheduler，如有 SceneManager 则在 Update 后同步发布并消费场景包，再发布 `GpuWorkCompleted` 为 false 的完成。该模式不调用 OnRender，但会调用 `OnRenderFrameComplete`。等待恢复时机与延迟见[帧序](frame-and-gpu.md#帧序)。多线程模式要求 Gpu。
 普通组件不得自行驱动这些入口或调用 WaitIdle；未使用 Application runner 的 CPU 测试显式调用 World 的
 `Tick`、`FinalizeWorldGT`、`CollectRenderUpdates`、`ShutdownWorld`，或对应 WorldManager 驱动。
 托管 World 不能自行 Tick/Finalize。析构只做末端资源释放，已注册对象必须先显式 teardown。
@@ -144,7 +159,8 @@ WorldRenderBridge 的 Disconnected / Connecting / Connected / Disconnecting 状�
 | WorldRenderBridge | GT 内部适配器、渲染源登记与 dirty 队列的唯一管理者 |
 | SceneWriter | Scene 唯一 GT producer、Shape/Light/Transform 身份、局部变换与几何增量、光源参数快照、资产 owner |
 | RenderScene | 单份 RT 数据、Apply、只读借用与 CPU reader lease |
-| RenderSystem | GT/RT 分离的登记表、flight 交付协议、shader/render-pass 服务 |
+| SceneManager | GT/RT 分离的登记表、flight 交付协议、场景 GPU 数据及退休 |
+| RenderSystem | 独立于场景的 shader/PSO/render-pass 服务 |
 
 RenderComponent 分类 State/Transform/DynamicData dirty；同来源只排队一次。bridge 维护来源上的登记下标、
 dirty 队列下标与 dirty 位，连接身份从 World 查询；普通 SceneComponent 不保存这些字段。
@@ -153,7 +169,7 @@ State/DynamicData/显式 Transform dirty。内置 StaticMesh 的 State 只更新
 空间变化无需重新输出 MeshState。Collect 外 dirty 位为空表示未排队；删除时交换末项并修复下标。
 断开连接遍历已登记的来源和 Transform。Collect 跳过 Pending 来源的业务捕获，且禁止游戏修改、
 生命周期请求、重入封包和所属 Application 的 asset/scheduler Pump。派生 setter 必须先 CheckCanModify。
-World/WorldManager 负责游戏侧 Collect 禁令，RenderSystem 负责封包及 Application 调度禁令；bridge 不另存同一阶段标志。
+World/WorldManager 负责游戏侧 Collect 禁令，SceneManager 维护自身收集与封包状态。Application 和 WorldRenderBridge 控制宿主 scheduler 与资产操作保护，退出收集时恢复进入前的状态；SceneManager 不回调 Application，AssetManager 只保存通用操作禁用状态。
 PrimitiveComponent 的 final 入口负责 ShapeId 创建/注销，CollectPrimitiveUpdates 接收 ShapeCapture，
 只输出自身最终的 mesh 状态或 transform（至多一条，也可以不输出以保留 bare shape）。
 一般 RenderComponent 接收 SceneCapture，可以登记和捕获多个 ShapeId/LightId；一个身份在同轮 Collect 中
@@ -278,7 +294,7 @@ Updated 是求值和 bounds 更新后最终受影响的完整 ShapeId：祖先�
 登记 mesh 后，即使资产尚未 Ready，也有矩阵记录，绘制仍必须跳过空几何。稠密行 swap-remove 不标脏被搬移对象。
 不传 changes 的纯 CPU 路径不创建 GPU dirty 集合，也不增加全 Scene 扫描。
 
-`RenderSystem::PrepareSceneGpuRT(sceneId, frame)` 要求已消费当前 flight 的更新，返回可空 `SceneGpuView`。
+`SceneManager::PrepareSceneGpuRT(sceneId, frame)` 要求已消费当前 flight 的更新，返回可空 `SceneGpuView`。
 首次调用才在 RT Scene 记录建立 `SceneGpuData`；RenderScene 继续只拥有 CPU 数据。
 每 Scene、每 flight 各有一个持久 device-local object buffer，记录为 64 字节列主序 `SceneObjectGpuData::LocalToWorld`。
 槽位为 `ShapeId.Index`，与 CPU mesh/Transform 行无关；CPU 查询与重试始终验证完整 generation。
@@ -288,26 +304,60 @@ device-local buffer 分配失败返回空并保留变化，本帧跳过该 Scene
 Pending、Attempt、执行状态与退休协议见[帧与 GPU](frame-and-gpu.md#对象参数上传与完成反馈)。
 
 `Application::OnCollectRenderViews(SceneViewCollector&)` 在 World S1 与场景收集后、Seal 前运行。
-该阶段禁止修改 World/WorldManager 或 Pump scheduler/asset；CameraComponent 的透视 setter 同样检查。
-collector 可接收已构造的 `SceneViewRequest`，或从存活 CameraComponent 捕获当前 SceneId、View 和透视参数。
-请求包含相对于目标的归一化 viewport，按值存入当前 flight。每帧重新提交，零请求明确表示零视图。
+该阶段禁止修改 World/WorldManager 或 Pump scheduler/asset；CameraComponent 的投影 setter 同样检查。
+collector 接收已构造的 `SceneViewRequest`；组件侧 `CaptureSceneView` 从存活 CameraComponent 捕获当前 SceneId、View、透视或正交参数。
+捕获返回可空请求，框架不读取 CameraComponent 或 World。请求包含相对于目标的归一化 viewport，按值存入当前 flight。每帧重新提交，零请求明确表示零视图。
 Camera 销毁或 World 重连不改变已封存请求；RT 只通过 `GetFrameViewsRT` 读请求，不访问组件。
 `ResolveSceneView` 用实际目标及视口像素尺寸计算后端无关的 Projection，并统一生成 D3D12/Vulkan viewport/scissor；
-Vulkan 使用负 viewport 高度处理 Y 方向。非法参数、零尺寸和舍入后的空视口返回空。
+Vulkan 使用负 viewport 高度处理 Y 方向。正交高度与实际 viewport aspect 决定宽度。非法参数、零尺寸和舍入后的空视口返回空。
 
-`examples/scene_sync` 提供固定无光照立方体窗口闭环：Ready StaticMesh/GpuMesh 一次创建，shader/绑定句柄/正反绕序
-PSO 跨帧复用，按 sections 发出 draw。每 view 上传 ViewProjection，每 draw 只传对象槽位。
-仅 acquire 成功后准备对象并绘制；窗口维护与提交继续由 Application/GpuSystem 处理。
-光照、材质、importer、剔除、间接绘制与完整 renderer 不在此接口内。
+## Pipeline、材质与绘制
 
-`examples/framework_stress` 复用该固定 draw loop，提供不连接 World、仅 CPU 场景同步、对象 GPU 上传和完整绘制
-四档连续负载，使用相同 Application GPU runner 定位基础框架开销；运行和 Tracy 解读见
+`PipelineContext` 提供底层 RenderSystem、按值 frame 信息、`ICmdAllocator`、当前 flight 的 `GpuFrameResources` 和可空的 SceneManager。
+`MakePipelineContext(renderer, frame, scenes)` 显式接入场景服务；省略 scenes 可用于无场景的自定义 pipeline。
+GpuFrameResources 由 GpuSystem 按 flight 持有，提供通用常量与参数分配，不认识框架类型。
+它没有预先分配的 cmd，也没有 Submit/Present/WaitIdle 入口。pipeline 自行分段录制，Return 后把普通指针数组
+按依赖顺序放进 `PipelineRecordResult`。Scene GPU 上传使用相同 allocator，显式追加到该数组；旧 frame 重载保留适配。
+共享 Scene 的多个 view 在同一 FrameSerial 内只准备一次，Pending/Attempt/completion 规则不变。
+
+`RenderOutput` 是有序 color views、可选 depth view 和每个 attachment 的 Enter/Exit 状态。
+尺寸、格式、采样从真实 view 的单 mip/layer 推导；当前要求尺寸和采样一致，拒绝同子资源别名、空附件及未知状态。
+`RenderOutputState` 只表示本次录制的预期状态，不发布 GPU 完成事实。pipeline 必须报告自己录制的转换；
+`RecordRenderPipeline` 在 NoWork、可恢复失败或未收尾时保留已有命令并补齐 exit transition。
+没有 Scene、只有 view、没有输出的自定义 pipeline 都可使用入口；无效 output 在录制前拒绝。
+成功 acquire 的窗口必须把全部访问结果合并为同一批次，交给 `RegisterClosedCommandBuffers`，外层仍负责 Present。
+
+`Material` 是框架专用的不可变资产，持有命名 passes、program request、输入契约、常量 bytes、纹理 owners 和 sampler 描述。
+构建时纹理须已 Ready，常量 bytes 必须符合 shader 的 GPU 布局；更新参数创建新资产版本。
+`StaticMeshSection::MaterialSlot` 索引组件材质列表。`SetMaterials` 经独立 `ShapeMaterialUpdate` 交付，
+不携带矩阵；transform-only 不复制材质列表，material-only 不触发对象 GPU 矩阵上传。
+SceneWriter 为 Ready 材质登记资产 use，替换、删除和断连沿原 RenderAssetLifetime 按真实 flight 完成退休，
+RT 只读不可变数据。组件等待未完成材质，完成时核验当前 Scene/Shape generation 和绑定再标记 DynamicData。
+材质拥有其纹理依赖，不能因 GT 提前释放引用而使在途 draw 悬空。
+
+`SceneDraw::Prepare` 解析每个实际 program 的绑定结构，支持 Scene、View、Material 常量、texture 与 sampler
+处于不同或混合 physical groups。所有 active 非 immutable bindings 必须由契约覆盖。数组按 ValueIndex 连续取值。
+准备阶段填满整组，每次调用分配当前 flight 内独立 parameter set 和满足设备对齐的常量切片；不会覆盖此前引用的值。
+常量页和参数集在安全 flight reset 后复用，固定负载容量收敛。参数集借用 program layout，缓存随 GPU idle 后拆除。
+
+RenderSystem 拥有 `GraphicsPipelineCache`。key 包含 program 身份、拥有字符串的完整顶点布局、primitive、
+depth/stencil、blend/write mask、有序格式、采样与 pass 身份；哈希相等后仍比较完整内容。
+不包含纹理尺寸、矩阵或普通材质参数。program 显式失效产生新身份；旧 program/PSO 保留到 idle。
+顶点匹配和材质结构解释缓存按 program 与内容复用。实际 Draw 只绑定准备结果，不反射、不建 PSO、
+不操作资产引用计数，使用 `ShapeId.Index` 读取对象矩阵，并为负行列式选择反绕序 PSO。
+
+`UnlitRenderPipeline` 使用公共 SceneDraw；选择 `DepthOnly` pass 和 depth 输出可运行独立深度路径。
+缺失槽或 pass 默认诊断并跳过，调用方可显式提供兼容 fallback；不隐式替换未知 shader。
+参考 shader 位于 `examples/scene_sync/material_unlit.hlsl`（多组、混合组、纹理）与 `material_depth.hlsl`。
+`scene_sync` 和 `framework_stress` 默认走公共入口，没有三视图上限。
+压测的 `--legacy-draw` 保留固定 shader 的历史绘制循环用于同机 A/B；运行见
 [基础框架压测](../guide/build-test.md#基础框架-tracy-压测样例)。
+本阶段仍不包含光照、剔除、合批、间接绘制、材质编辑器或资源状态跟踪系统。
 
 ## 交付、退出与资产保活
 
 flight 严格经过 Writable → Sealed → Published → Consumed → completion 后 Writable。
-这些状态直接属于 RenderSystem 的 flight 包；每个入口在修改 payload/owner 前校验一次，处理成功后提交状态，
+这些状态直接属于 SceneManager 的 flight 包；每个入口在修改 payload/owner 前校验一次，处理成功后提交状态，
 不另设返回错误码的交付状态机或重复验证层。非法次序仍按不变量违反诊断。
 Seal 分配单调 UpdateSequence，Publish 验证顺序；Consume 在 Apply 前验证 Published、下一序号与新的 FrameSerial。
 即使同 generation 的合法 transform 也不能乱序或重复消费。completion 必须匹配当前 Consumed 包的 FrameSerial。
@@ -328,11 +378,11 @@ GT SceneId 与 writer 保留到删除包完成。Actor 在 S1 析构，不受 GP
 
 关停先进入 Stopping，排空已发布包和 CPU/GPU 使用，消费真实 completion，再 terminal abandon 未发布包。
 普通窗口维护 drain 不执行 abandon。终止后禁止恢复发布。显式拆除顺序为
-WorldManager → RenderSystem → AssetManager → AssetDatabase → GpuSystem；OnShutdown 也处于 Stopping。
+WorldManager → SceneManager → GPU 帧参数资源 → RenderSystem → AssetManager → FrameTimeline → AssetDatabase → GpuSystem；OnShutdown 也处于 Stopping。
 初始化失败使用同一显式 teardown，但没有提交时不等不存在的 fence。
 
 生命周期与变换通知的验收计数由测试 probe 持有；场景更新量直接检查已封存的更新包，资产准备检查
-共享描述和实际内容。World、SceneWriter、RenderSystem、StaticMesh 与 AssetManager 不保存专供测试的累计统计。
+共享描述和实际内容。World、SceneWriter、SceneManager、StaticMesh 与 AssetManager 不保存专供测试的累计统计。
 性能测试自行记录阶段耗时、分配器统计和更新包大小；内部遍历与 owner 搬移次数不由运行时维护。
 真实 GPU 验收见 GpuSceneLifetime，CPU/runner 验收见 WorldLifecycle、SceneDelivery、FrameScenarios、SceneAssets、StaticMeshScene、LightScene。
 
@@ -343,13 +393,10 @@ ShaderProgram 保留 artifact、native pipeline layout、stage shaders、真实 
 调用方通过 RHI device 创建和持有 graphics/compute PSO；ShaderProgram 不再提供 PSO 创建入口或缓存。
 ShaderProgramCache 的 artifact/program 复用与源码失效机制保留，详见 [Shader pipeline](shader-pipeline.md)。
 
-常量数据由调用方按实际 GPU 布局准备、上传和绑定。
-Material、MaterialTechnique、material_state、render_queue 与 cbuffer_view 已移除；StaticMeshComponent
-不再保存已删除的 Material 指针。
-
-GpuMesh 只保存 GPU buffers、vertex/index views 与 topology，不缓存顶点输入布局。
-ResourceUploader 仍在分配和录制前校验单顶点流、stride、attribute 范围和语义唯一性，顶点流固定绑定到 slot 0。
-primitive_vertex_layout 及其 resolver 已移除；PSO 调用方提供 RHI VertexInputState，由 RHI 对照 artifact 校验。
+`GpuMesh::DrawData` 保留实际上传的多流 vertex/index views、topology 与拥有 semantic 字符串的
+`GeometryVertexLayout`。上传前校验 stride、offset、范围、语义唯一性，同一源 bin 映射到一致的连续 binding。
+匹配按 shader artifact 的 semantic、semantic index、component type/count 和 location 完成，不能猜 POSITION/12B。
+当前上传与匹配支持 32 位 float/sint/uint 1–4 分量；不兼容输入在准备阶段拒绝。
 
 ## Application 直接装配
 
@@ -360,19 +407,21 @@ primitive_vertex_layout 及其 resolver 已移除；PSO 调用方提供 RHI Vert
 |---|---|---|
 | `WindowManager` | `GpuSystem`、`RenderSystem` | `SetGpuSystem`、`SetRenderSystem` |
 | `GpuSystem` | `FrameTimeline`、`WindowManager` | `TryCreate` 借用、`SetWindowManager` |
-| `RenderSystem` | `Application`、`GpuSystem` | 构造参数、`SetGpuSystem` |
+| `RenderSystem` | `Device` 与 shader 配置 | 显式构造参数 |
+| `SceneManager` | flight 数量；GPU 准备时借用传入的底层服务 | 构造参数与 PipelineContext |
 | `AssetManager` | `FrameTimeline`（`IWaitFrameProcessor`）、可选 `IAssetSource` | `SetWaitFrameProcessor`、`SetAssetSource` |
-| `WorldManager` | 可空 `Application`、可空 `RenderSystem` | 构造参数 |
-| `World` | 可空 `Application`；连接期间借用 `RenderSystem` 的 SceneWriter | 构造参数与 `WorldRenderBridge` |
+| `WorldManager` | 可空 `Application`、可空 `SceneManager` | 构造参数 |
+| `World` | 可空 `Application`；连接期间借用 `SceneManager` 的 SceneWriter | 构造参数与 `WorldRenderBridge` |
 
-Application 先创建 FrameTimeline，再按选项构造 WindowManager、GpuSystem（包含 device）、RenderSystem、WorldManager、AssetManager 和
+Application 先创建 FrameTimeline，再按选项构造 WindowManager、GpuSystem（包含 device）、RenderSystem、SceneManager、WorldManager、AssetManager 和
 可选 AssetDatabase；World 由应用在 `OnInit` 或后续 GT 更新阶段通过 WorldManager 显式创建。
-Window 单独启用时只有原生主窗口，Window 与 Gpu 同时启用时再挂接主交换链；Render 单独启用可交付 CPU Scene。
+Window 单独启用时只有原生主窗口，Window 与 Gpu 同时启用时再挂接主交换链；Scene 可独立交付 CPU 场景；Render 启用时必须同时启用 Gpu，缺失时在创建设备前返回 InvalidDescriptor。
 默认 importer 只保留登记与明确失败的加载入口，不借用上传调度器。全部对象就位后直接接线：AssetManager 始终接到 FrameTimeline。AssetDatabase
 提供可选资产来源；未配置资产根或数据库打开失败时，资产来源为空。
 WindowManager 与 GpuSystem 的双向引用在启动渲染线程前建立。
 
-RenderSystem 与 Gpu 同时启用时才调用 `RenderSystem::OnInitialize()` 创建 shader/program 与 render-pass caches。
+启用 Render 时调用 `RenderSystem::OnInitialize()` 创建 shader/program、graphics pipeline 与 render-pass caches。
+SceneManager 只接收 flight 数量，不依赖 Device、RenderSystem 或 Application 的存在。
 `GpuSystem::TryCreate` 是唯一创建路径，借用已有的 FrameTimeline，并逐步检查后端、adapter、验证层、device、队列及 profiler。
 `GetStartupResult()` 报告启动状态，未编译后端、无 adapter、缺验证层与真实初始化失败可区分。`FlightDataCount` 为 0 在构造前失败；
 初始化失败和窗口或交换链创建失败均走 `DestroyRuntime` 清理路径。

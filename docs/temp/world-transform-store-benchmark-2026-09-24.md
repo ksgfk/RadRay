@@ -1,6 +1,6 @@
 > - 适用: World 紧凑 local TRS 存储原型的 CPU 场景同步对照与接口迁移评估
 > - 权威: 2026-09-24 本机实验快照，不是跨机器性能承诺；当前接口以 render-framework 为准
-> - 锚点: `modules/runtime/include/radray/runtime/game_framework/world_transform_store.h`, `modules/runtime/src/game_framework/world_transform_store.cpp`, `modules/runtime/src/game_framework/world_render_bridge.cpp`, `modules/runtime/src/render_scene/scene_writer.cpp`, `benchmarks/bench_scene_sync/bench_scene_sync.cpp`, `modules/runtime/tests/scene_sync_workload.cpp`
+> - 锚点: `modules/runtime/include/radray/runtime/game_framework/world_transform_store.h`, `modules/runtime/src/game_framework/world_transform_store.cpp`, `modules/runtime/src/game_framework/world_render_bridge.cpp`, `modules/runtime/src/render_framework/scene_writer.cpp`, `benchmarks/bench_scene_sync/bench_scene_sync.cpp`, `modules/runtime/tests/scene_sync_workload.cpp`
 
 # World → Scene 变换存储原型测量
 

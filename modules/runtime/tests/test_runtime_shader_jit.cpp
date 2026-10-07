@@ -233,7 +233,8 @@ void RunGraphicsJitSmoke(
         .Usage = render::BufferUse::CopyDestination | render::BufferUse::MapRead});
     ASSERT_TRUE(readbackResult.HasValue());
     unique_ptr<render::Buffer> readback = readbackResult.Release();
-    auto commandResult = device.CreateCommandBuffer(context.Queue);
+    auto commandResultStorage = device.CreateCommandAllocator(context.Queue).Unwrap();
+    auto commandResult = device.CreateCommandBuffer(commandResultStorage.get());
     ASSERT_TRUE(commandResult.HasValue());
     unique_ptr<render::CommandBuffer> command = commandResult.Release();
     command->Begin();
@@ -352,7 +353,8 @@ void RunComputeJitSmoke(
         .Hints = render::ResourceHint::None});
     ASSERT_TRUE(readbackResult.HasValue());
     unique_ptr<render::Buffer> readback = readbackResult.Release();
-    auto commandResult = device.CreateCommandBuffer(context.Queue);
+    auto commandResultStorage = device.CreateCommandAllocator(context.Queue).Unwrap();
+    auto commandResult = device.CreateCommandBuffer(commandResultStorage.get());
     ASSERT_TRUE(commandResult.HasValue());
     unique_ptr<render::CommandBuffer> command = commandResult.Release();
     command->Begin();

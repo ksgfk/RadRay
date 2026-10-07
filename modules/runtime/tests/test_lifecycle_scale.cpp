@@ -23,7 +23,7 @@ TEST(LifecycleScale, SharedMeshViewsAndTransformCapture) {
     for (uint32_t count : {10000u, 100000u}) {
         Application app;
         AssetManager assets;
-        RenderSystem renderer{&app, 1};
+        SceneManager renderer{1};
         test::ScopedWorld world;
         const auto scene = test::ConnectWorld(world, renderer);
         const auto mesh = assets.AddReady<StaticMesh>(AssetId{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}, MakeTestMesh());

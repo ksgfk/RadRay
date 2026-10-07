@@ -11,7 +11,7 @@ namespace {
 
 TEST(SceneUpdates, PackedTransformsSurviveGrowthAndBulkChangesPublishFinalValues) {
     Application app;
-    RenderSystem render{&app, 2};
+    SceneManager render{2};
     test::ScopedWorld world;
     const auto scene = test::ConnectWorld(world, render);
     auto* actor = world.SpawnActor();
@@ -62,7 +62,7 @@ TEST(SceneUpdates, PackedTransformsSurviveGrowthAndBulkChangesPublishFinalValues
 
 TEST(SceneUpdates, BulkTransformHandlesRejectRetiredGenerationsAndSurviveReconnect) {
     Application app;
-    RenderSystem render{&app, 1};
+    SceneManager render{1};
     test::ScopedWorld world;
     test::ConnectWorld(world, render);
     auto* actor = world.SpawnActor();
@@ -116,7 +116,7 @@ private:
 TEST(SceneUpdates, OrdinaryComponentsKeepTheirLifecycleAndMirrorOnlySceneHierarchy) {
     vector<string> events;
     Application app;
-    RenderSystem render{&app, 1};
+    SceneManager render{1};
     test::ScopedWorld world;
     test::ConnectWorld(world, render);
     auto* actor = world.SpawnActor();
@@ -172,7 +172,7 @@ private:
 TEST(SceneUpdates, SceneDerivedComponentsUseRenderLifecycleWithoutShapeIdentity) {
     vector<string> events;
     Application app;
-    RenderSystem render{&app, 1};
+    SceneManager render{1};
     test::ScopedWorld world;
     test::ConnectWorld(world, render);
     auto* actor = world.SpawnActor();
@@ -235,7 +235,7 @@ private:
 
 TEST(SceneUpdates, OneSourceCapturesMultipleEntriesAndDirtySourcesSurviveCompaction) {
     Application app;
-    RenderSystem renderer{&app, 1};
+    SceneManager renderer{1};
     test::ScopedWorld world;
     const auto sceneId = test::ConnectWorld(world, renderer);
     auto* actor = world.SpawnActor();
@@ -260,7 +260,7 @@ TEST(SceneUpdates, OneSourceCapturesMultipleEntriesAndDirtySourcesSurviveCompact
 
 TEST(SceneUpdates, RepeatedWorldCapturesAndRemovalBeforeSealKeepOnlyFinalValues) {
     Application app;
-    RenderSystem renderer{&app, 1};
+    SceneManager renderer{1};
     test::ScopedWorld world;
     const auto sceneId = test::ConnectWorld(world, renderer);
     auto* actor = world.SpawnActor();
@@ -313,7 +313,7 @@ TEST(SceneUpdates, RepeatedWorldCapturesAndRemovalBeforeSealKeepOnlyFinalValues)
 
 TEST(SceneUpdates, IndexedLightRowsSurviveTypeChangesSwapRemovalAndSlotReuse) {
     Application app;
-    RenderSystem renderer{&app, 2};
+    SceneManager renderer{2};
     const auto sceneId = renderer.CreateSceneGT();
     auto writer = renderer.GetSceneWriterGT(sceneId);
     vector<LightId> ids;
@@ -363,7 +363,7 @@ TEST(SceneUpdates, IndexedLightRowsSurviveTypeChangesSwapRemovalAndSlotReuse) {
 
 TEST(SceneUpdates, WriterLightSnapshotsSurviveTypeChangesRemovalAndIdentityReuse) {
     Application app;
-    RenderSystem renderer{&app, 3};
+    SceneManager renderer{3};
     const auto sceneId = renderer.CreateSceneGT();
     auto writer = renderer.GetSceneWriterGT(sceneId);
     const auto original = writer->CreateLight();
@@ -449,7 +449,7 @@ private:
 TEST(SceneUpdates, RepeatedMarksCollectFinalValuesOnceAndKeepIdentity) {
     vector<Collection> collected;
     Application app;
-    RenderSystem render{&app, 1};
+    SceneManager render{1};
     test::ScopedWorld world;
     test::ConnectWorld(world, render);
     auto* component = world.SpawnActor()->AddComponent<ProbePrimitive>(collected);
@@ -497,7 +497,7 @@ TEST(SceneUpdates, RepeatedMarksCollectFinalValuesOnceAndKeepIdentity) {
 TEST(SceneUpdates, RegistrationCapturesPreexistingAndLatestState) {
     vector<Collection> collected;
     Application app;
-    RenderSystem render{&app, 1};
+    SceneManager render{1};
     test::ScopedWorld world;
     test::ConnectWorld(world, render);
     auto actor = make_unique<Actor>();
@@ -520,7 +520,7 @@ TEST(SceneUpdates, RegistrationCapturesPreexistingAndLatestState) {
 TEST(SceneUpdates, DestroyBeforeCollectionCancelsCreateAndAllowsGenerationGap) {
     vector<Collection> collected;
     Application app;
-    RenderSystem render{&app, 1};
+    SceneManager render{1};
     test::ScopedWorld world;
     test::ConnectWorld(world, render);
     Actor* actor = world.SpawnActor();
@@ -548,7 +548,7 @@ TEST(SceneUpdates, RemovingQueuedEntriesRepairsSwappedIndex) {
         SCOPED_TRACE(removed);
         vector<Collection> collected;
         Application app;
-        RenderSystem render{&app, 1};
+        SceneManager render{1};
         test::ScopedWorld world;
         test::ConnectWorld(world, render);
         Actor* actor = world.SpawnActor();
@@ -578,7 +578,7 @@ TEST(SceneUpdates, RemovingQueuedEntriesRepairsSwappedIndex) {
 TEST(SceneUpdates, SealedCreateSurvivesSourceDestructionUntilOrderedRemoval) {
     vector<Collection> collected;
     Application app;
-    RenderSystem render{&app, 1};
+    SceneManager render{1};
     test::ScopedWorld world;
     test::ConnectWorld(world, render);
     Actor* actor = world.SpawnActor();
@@ -603,7 +603,7 @@ TEST(SceneUpdates, SealedCreateSurvivesSourceDestructionUntilOrderedRemoval) {
 
 TEST(SceneUpdates, SameBatchRemovesOldGenerationBeforeCreatingReplacement) {
     Application app;
-    RenderSystem render{&app, 1};
+    SceneManager render{1};
     test::ScopedWorld world;
     test::ConnectWorld(world, render);
     auto* actor = world.SpawnActor();
@@ -633,7 +633,7 @@ TEST(SceneUpdates, SameBatchRemovesOldGenerationBeforeCreatingReplacement) {
 TEST(SceneUpdates, ParentChangesReparentAndRemovalCollectLatestChildTransform) {
     vector<Collection> collected;
     Application app;
-    RenderSystem render{&app, 1};
+    SceneManager render{1};
     test::ScopedWorld world;
     test::ConnectWorld(world, render);
     auto* actor = world.SpawnActor();
@@ -758,7 +758,7 @@ TEST(SceneUpdatesDeathTest, CollectionRejectsMutationAndRecursion) {
     for (auto action : {MutatingPrimitive::Action::Mark, MutatingPrimitive::Action::Transform,
                         MutatingPrimitive::Action::Remove, MutatingPrimitive::Action::Spawn, MutatingPrimitive::Action::Flush}) {
         Application app;
-        RenderSystem render{&app, 1};
+        SceneManager render{1};
         test::ScopedWorld world;
         test::ConnectWorld(world, render);
         world.SpawnActor()->AddComponent<MutatingPrimitive>(action);
@@ -769,7 +769,7 @@ TEST(SceneUpdatesDeathTest, CollectionRejectsMutationAndRecursion) {
 
 TEST(SceneUpdatesDeathTest, WriterRejectsStaleIdentityAndOccupiedFlight) {
     Application app;
-    RenderSystem render{&app, 1};
+    SceneManager render{1};
     const auto scene = render.CreateSceneGT();
     auto writer = render.GetSceneWriterGT(scene);
     auto id = writer->CreateShape();

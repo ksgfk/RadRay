@@ -190,7 +190,8 @@ TEST_P(DeviceCapabilitiesTest, SubresourceRangeClearReadbackAndNestedLabels) {
     TextureView* rawView = view.Get();
     auto framebuffer = device.CreateFramebuffer({pass.Get(), std::span{&rawView, 1}, nullptr, 16, 16, 1});
     ASSERT_TRUE(framebuffer);
-    auto cmd = device.CreateCommandBuffer(Context.Queue);
+    auto cmdStorage = device.CreateCommandAllocator(Context.Queue).Unwrap();
+    auto cmd = device.CreateCommandBuffer(cmdStorage.get());
     ASSERT_TRUE(cmd);
     cmd->Begin();
     cmd->PushDebugGroup("Capabilities");

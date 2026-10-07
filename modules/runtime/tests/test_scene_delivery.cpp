@@ -12,7 +12,7 @@
 #include <radray/runtime/game_framework/world.h>
 #include <radray/runtime/world_manager.h>
 #include <radray/runtime/gpu_system.h>
-#include <radray/runtime/render_system.h>
+#include <radray/runtime/render_framework/scene_manager.h>
 
 namespace radray {
 namespace {
@@ -21,7 +21,7 @@ TEST(SceneDelivery, EmptyBatchesAcrossFlightsWithoutDrawing) {
     for (uint32_t count : {1u, 2u, 3u, 8u}) {
         SCOPED_TRACE(count);
         Application app;
-        RenderSystem render{&app, count};
+        SceneManager render{count};
         test::ScopedWorld world{&app};
         const auto sceneId = test::ConnectWorld(world, render);
         Nullable<const RenderScene*> scene{nullptr};
@@ -42,7 +42,7 @@ TEST(SceneDelivery, EmptyBatchesAcrossFlightsWithoutDrawing) {
 TEST(SceneDelivery, AbandonDoesNotPublishOrRequireCompletion) {
     for (bool abandonAll : {false, true}) {
         Application app;
-        RenderSystem render{&app, 3};
+        SceneManager render{3};
         test::ScopedWorld world{&app};
         const auto sceneId = test::ConnectWorld(world, render);
         const ShapeId id = world.SpawnActor()->AddComponent<PrimitiveComponent>()->GetShapeId();
@@ -66,7 +66,7 @@ TEST(SceneDelivery, PrimitiveUpdatesAcrossFlightsWithoutDrawing) {
     for (uint32_t count : {1u, 2u, 3u, 8u}) {
         SCOPED_TRACE(count);
         Application app;
-        RenderSystem render{&app, count};
+        SceneManager render{count};
         test::ScopedWorld world{&app};
         const auto sceneId = test::ConnectWorld(world, render);
         auto* actor = world.SpawnActor();
@@ -92,7 +92,7 @@ TEST(SceneDelivery, PrimitiveUpdatesAcrossFlightsWithoutDrawing) {
 TEST(SceneDeliveryDeathTest, RejectsInvalidFlightIndices) {
     Application app;
     test::ScopedWorld world{&app};
-    RenderSystem render{&app, 1};
+    SceneManager render{1};
     EXPECT_DEATH(render.GetFrameUpdatesRT(1), "");
     EXPECT_DEATH(test::PrepareScene(world, render, 1), "");
     EXPECT_DEATH(test::ConsumeFrame(render, 1), "");
@@ -102,7 +102,7 @@ TEST(SceneDeliveryDeathTest, RejectsInvalidFlightIndices) {
 
 TEST(SceneDeliveryDeathTest, DuplicateAndOutOfOrderPacketsAreRejectedBeforeApply) {
     Application app;
-    RenderSystem renderer{&app, 2};
+    SceneManager renderer{2};
     const auto id = renderer.CreateSceneGT();
     auto* writer = renderer.GetSceneWriterGT(id).Get();
     const auto primitive = writer->CreateShape();
@@ -167,7 +167,7 @@ protected:
         EXPECT_FALSE(GetWindowManager());
         EXPECT_FALSE(GetGpuSystem());
         EXPECT_FALSE(GetAssetManager());
-        ASSERT_TRUE(GetRenderSystem());
+        ASSERT_TRUE(GetSceneManager());
         ASSERT_TRUE(GetWorldManager());
         _firstWorld = GetWorldManager()->CreateWorld();
         _secondWorld = GetWorldManager()->CreateWorld();
@@ -187,13 +187,13 @@ protected:
             _secondScene = *GetWorldManager()->GetWorld(_secondWorld)->GetRenderSceneId();
             _firstShape = _firstComponent->GetShapeId();
         } else if (_updates == 2) {
-            ASSERT_TRUE(GetRenderSystem()->GetSceneRT(_firstScene));
-            EXPECT_TRUE(GetRenderSystem()->GetSceneRT(_firstScene)->ContainsShape(_firstShape));
-            EXPECT_TRUE(GetRenderSystem()->GetSceneRT(_secondScene));
+            ASSERT_TRUE(GetSceneManager()->GetSceneRT(_firstScene));
+            EXPECT_TRUE(GetSceneManager()->GetSceneRT(_firstScene)->ContainsShape(_firstShape));
+            EXPECT_TRUE(GetSceneManager()->GetSceneRT(_secondScene));
             GetWorldManager()->DestroyWorld(_secondWorld);
         } else if (_updates == 3) {
-            EXPECT_FALSE(GetRenderSystem()->GetSceneRT(_secondScene));
-            EXPECT_TRUE(GetRenderSystem()->GetSceneRT(_firstScene)->ContainsShape(_firstShape));
+            EXPECT_FALSE(GetSceneManager()->GetSceneRT(_secondScene));
+            EXPECT_TRUE(GetSceneManager()->GetSceneRT(_firstScene)->ContainsShape(_firstShape));
         } else if (_updates == 4) {
             RequestExit();
         }
@@ -206,8 +206,8 @@ protected:
     }
     void OnShutdown() override {
         EXPECT_EQ(_updates, 4u);
-        EXPECT_TRUE(GetRenderSystem()->GetSceneRT(_firstScene)->ContainsShape(_firstShape));
-        EXPECT_FALSE(GetRenderSystem()->GetSceneRT(_secondScene));
+        EXPECT_TRUE(GetSceneManager()->GetSceneRT(_firstScene)->ContainsShape(_firstShape));
+        EXPECT_FALSE(GetSceneManager()->GetSceneRT(_secondScene));
     }
 
 private:
@@ -226,7 +226,7 @@ TEST(SceneDeliveryRunner, CpuOnlyWorldSceneFrames) {
     for (uint32_t flightCount : {1u, 2u, 3u, 8u}) {
         SCOPED_TRACE(flightCount);
         CpuSceneDeliveryApp app{flightCount};
-        EXPECT_EQ(app.Run({.FlightDataCount = flightCount, .Window = std::nullopt, .Gpu = std::nullopt, .Asset = std::nullopt}), 0);
+        EXPECT_EQ(app.Run({.FlightDataCount = flightCount, .Window = std::nullopt, .Gpu = std::nullopt, .Render = std::nullopt, .Asset = std::nullopt}), 0);
         EXPECT_EQ(app.GetStartupResult().Status, RuntimeStartupStatus::Started) << app.GetStartupResult().Reason;
     }
 }
@@ -279,7 +279,7 @@ protected:
 
     void OnRender(AppFrameContext& ctx) override {
         ++Recorded;
-        if (ctx.FrameSerial() == 1) EXPECT_TRUE(GetRenderSystem()->GetSceneRT(_sceneId)->ContainsShape(_initialId));
+        if (ctx.FrameSerial() == 1) EXPECT_TRUE(GetSceneManager()->GetSceneRT(_sceneId)->ContainsShape(_initialId));
         if (_drainOnExit && ctx.FrameSerial() == 1) {
             EXPECT_TRUE(_renderGate.try_acquire_for(std::chrono::seconds{10}));
         }
@@ -294,7 +294,7 @@ protected:
         PublishedFrames = GetFrameTimeline().GetFrameIndex();
         EXPECT_EQ(PublishedFrames, _updates - 1);
         EXPECT_EQ(Completed, PublishedFrames);
-        const auto scene = GetRenderSystem()->GetSceneRT(_sceneId);
+        const auto scene = GetSceneManager()->GetSceneRT(_sceneId);
         EXPECT_EQ(scene && scene->ContainsShape(_latestId), PublishedFrames > 0);
         if (scene && _latestId != _initialId) EXPECT_FALSE(scene->ContainsShape(_initialId));
     }
@@ -324,19 +324,19 @@ void RunSceneDelivery(render::RenderBackend backend, bool threaded, bool drainOn
         test::RuntimeLogCapture logs;
         SceneDeliveryApp app{drainOnExit};
         auto run = test::RunApplication(app, {
-            .FlightDataCount = count,
-            .Window = drainOnExit ? std::optional<WindowOptions>{WindowOptions{.Title = "RenderScene delivery", .Width = 80, .Height = 60}} : std::nullopt,
-            .Gpu = GpuOptions{
-                .Backend = backend,
-                .EnableValidation = true,
-                .EnableSynchronizationValidation = true,
-                .Multithreaded = threaded,
-                .EnableFrameProfiler = false,
-                .BackBufferFormat = render::TextureFormat::BGRA8_UNORM,
-                .PresentMode = render::PresentMode::FIFO,
-            },
-            .Asset = std::nullopt,
-        });
+                                                 .FlightDataCount = count,
+                                                 .Window = drainOnExit ? std::optional<WindowOptions>{WindowOptions{.Title = "RenderScene delivery", .Width = 80, .Height = 60}} : std::nullopt,
+                                                 .Gpu = GpuOptions{
+                                                     .Backend = backend,
+                                                     .EnableValidation = true,
+                                                     .EnableSynchronizationValidation = true,
+                                                     .Multithreaded = threaded,
+                                                     .EnableFrameProfiler = false,
+                                                     .BackBufferFormat = render::TextureFormat::BGRA8_UNORM,
+                                                     .PresentMode = render::PresentMode::FIFO,
+                                                 },
+                                                 .Asset = std::nullopt,
+                                             });
         if (test::CanSkipRuntimeStartup(backend, run.Startup)) GTEST_SKIP() << run.Startup.Reason;
         ASSERT_EQ(run.Startup.Status, RuntimeStartupStatus::Started) << run.Startup.Reason;
         ASSERT_EQ(run.ExitCode, 0);
@@ -391,17 +391,17 @@ protected:
 
     void OnRender(AppFrameContext& ctx) override {
         const auto frame = ctx.FrameSerial();
-        for (const auto& update : GetRenderSystem()->GetFrameUpdatesRT(ctx.FlightIndex())) {
+        for (const auto& update : GetSceneManager()->GetFrameUpdatesRT(ctx.FlightIndex())) {
             if (update.Create && frame == 3) _replacementScene = update.Id;
             if (update.Create && frame == 5) _reattachedScene = update.Id;
         }
-        const auto scene = GetRenderSystem()->GetSceneRT(frame < 5 ? _firstScene : _reattachedScene);
+        const auto scene = GetSceneManager()->GetSceneRT(frame < 5 ? _firstScene : _reattachedScene);
         ASSERT_TRUE(scene);
         ASSERT_EQ(scene->GetStaticMeshes().size(), 1u);
         EXPECT_FLOAT_EQ(scene->GetStaticMesh(scene->GetStaticMeshes()[0])->LocalToWorld(0, 3), static_cast<float>(frame));
-        EXPECT_EQ(static_cast<bool>(GetRenderSystem()->GetSceneRT(_secondScene)), frame < 2);
-        if (frame >= 3) EXPECT_TRUE(GetRenderSystem()->GetSceneRT(_replacementScene));
-        if (frame >= 5) EXPECT_FALSE(GetRenderSystem()->GetSceneRT(_firstScene));
+        EXPECT_EQ(static_cast<bool>(GetSceneManager()->GetSceneRT(_secondScene)), frame < 2);
+        if (frame >= 3) EXPECT_TRUE(GetSceneManager()->GetSceneRT(_replacementScene));
+        if (frame >= 5) EXPECT_FALSE(GetSceneManager()->GetSceneRT(_firstScene));
     }
 
     void OnRenderFrameComplete(const FlightCompletion& completion) override {
@@ -410,10 +410,10 @@ protected:
 
     void OnShutdown() override {
         EXPECT_EQ(Completed, 8u);
-        EXPECT_FALSE(GetRenderSystem()->GetSceneRT(_firstScene));
-        EXPECT_FALSE(GetRenderSystem()->GetSceneRT(_secondScene));
-        EXPECT_TRUE(GetRenderSystem()->GetSceneRT(*GetWorldManager()->GetWorld(_replacementWorld)->GetRenderSceneId()));
-        const auto scene = GetRenderSystem()->GetSceneRT(*GetWorldManager()->GetWorld(_firstWorld)->GetRenderSceneId());
+        EXPECT_FALSE(GetSceneManager()->GetSceneRT(_firstScene));
+        EXPECT_FALSE(GetSceneManager()->GetSceneRT(_secondScene));
+        EXPECT_TRUE(GetSceneManager()->GetSceneRT(*GetWorldManager()->GetWorld(_replacementWorld)->GetRenderSceneId()));
+        const auto scene = GetSceneManager()->GetSceneRT(*GetWorldManager()->GetWorld(_firstWorld)->GetRenderSceneId());
         ASSERT_TRUE(scene);
         EXPECT_FLOAT_EQ(scene->GetStaticMesh(scene->GetStaticMeshes()[0])->LocalToWorld(0, 3), 8);
     }
@@ -436,17 +436,17 @@ void RunMultiWorldDelivery(render::RenderBackend backend, bool threaded) {
         test::RuntimeLogCapture logs;
         MultiWorldDeliveryApp app;
         auto run = test::RunApplication(app, {
-            .FlightDataCount = count,
-            .Window = std::nullopt,
-            .Gpu = GpuOptions{
-                .Backend = backend,
-                .EnableValidation = true,
-                .EnableSynchronizationValidation = true,
-                .Multithreaded = threaded,
-                .EnableFrameProfiler = false,
-            },
-            .Asset = std::nullopt,
-        });
+                                                 .FlightDataCount = count,
+                                                 .Window = std::nullopt,
+                                                 .Gpu = GpuOptions{
+                                                     .Backend = backend,
+                                                     .EnableValidation = true,
+                                                     .EnableSynchronizationValidation = true,
+                                                     .Multithreaded = threaded,
+                                                     .EnableFrameProfiler = false,
+                                                 },
+                                                 .Asset = std::nullopt,
+                                             });
         if (test::CanSkipRuntimeStartup(backend, run.Startup)) GTEST_SKIP() << run.Startup.Reason;
         ASSERT_EQ(run.Startup.Status, RuntimeStartupStatus::Started) << run.Startup.Reason;
         ASSERT_EQ(run.ExitCode, 0);

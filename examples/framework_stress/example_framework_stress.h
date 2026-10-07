@@ -1,6 +1,7 @@
 #pragma once
 
 #include "scene_draw.h"
+#include <radray/runtime/render_framework/scene_draw.h>
 #include <radray/runtime/application.h>
 #include <radray/runtime/components/camera_component.h>
 #include <radray/runtime/components/static_mesh_component.h>
@@ -31,6 +32,7 @@ struct FrameworkStressOptions {
     bool Multithreaded{true};
     bool Validation{false};
     bool GpuProfiler{true};
+    bool LegacyDraw{false};
     render::RenderBackend Backend{render::RenderBackend::D3D12};
 };
 
@@ -69,6 +71,7 @@ private:
     vector<StaticMeshComponent*> _objects;
     Nullable<render::RenderPass*> _pass{nullptr};
     unique_ptr<SceneDraw> _draw;
+    unique_ptr<UnlitRenderPipeline> _pipeline;
     vector<FrameResources> _frames;
     std::chrono::steady_clock::time_point _captureStart{};
     uint64_t _updates{0};

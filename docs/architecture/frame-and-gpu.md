@@ -10,13 +10,14 @@
 |---|---|---|
 | `FrameTimeline` | 游戏帧号、FrameSerial、完成通道、每 flight 等待表、帧延迟。有无 GPU 都在 | 设备、命令提交、画什么 |
 | `GpuSystem` | **何时画**。instance/factory/device/主队列/fence、flight 槽位、上传器、帧 profiler。fence 完成后调用 `FrameTimeline::PublishCompletion` | 帧号、等待表、完成通道、画什么 |
-| `RenderSystem` | 多个持久 CPU RenderScene、按需对象 GPU 镜像、per-flight 场景操作包与视图、资产常驻与退休、program/artifact cache、RenderPass/Framebuffer registry | GPU 提交时序 |
+| `SceneManager` | 多个持久 CPU RenderScene、按需对象 GPU 镜像、per-flight 场景操作包与视图、资产常驻与退休 | 底层 shader 缓存与 GPU 提交时序 |
+| `RenderSystem` | program/artifact cache、GraphicsPipelineCache、RenderPass/Framebuffer registry | 场景、World、Pipeline 与 GPU 提交时序 |
 | `WindowManager` | 窗口创建/销毁、swapchain acquire/present/recreate、事件分发 | — |
 | `Application` | 固化帧序与关停顺序；消费 FrameTimeline 的完成通道；游戏侧的窄扩展点 | — |
 
 ## 对象参数上传与完成反馈
 
-RenderSystem 的 RT 场景记录按需拥有 `SceneGpuData`，每个物理 flight buffer 独立维护去重 Pending、
+SceneManager 的 RT 场景记录按需拥有 `SceneGpuData`，每个物理 flight buffer 独立维护去重 Pending、
 已录制的 Attempt 和执行状态。Scene Apply 的最终变化登记到所有 flight 的 Pending，删除按完整 ShapeId 移除。
 首次准备和扩容枚举当前全部存活 mesh，后续只访问 Pending；按槽位排序并将相邻记录合并为上传范围。
 矩阵直接从 CPU Scene 打包到复用 scratch，不保存每 flight 的 CPU 世界矩阵副本。
@@ -62,7 +63,7 @@ Scene 删除立即销毁 CPU Scene，将 GPU owner 转入删除批次的 Retired
 ```text
 S0 runner::PrepareFrame：固定窗口维护批次 → writable 背压
   Application::ServiceFrameBoundaryGT
-    完成消息批次 → 释放 RenderSystem/GpuSystem owner → 帧等待通知
+    完成消息批次 → 释放 SceneManager/GpuSystem owner → 帧等待通知
     → OnRenderFrameComplete → AssetManager::Pump → ApplicationScheduler::Pump
 BeginFrameTiming → DispatchEvents → OnUpdate → WorldManager::Tick（统一 epoch）
 S1 Application::FinalizeWorldAndSealGT
@@ -78,7 +79,7 @@ runner 已取得槽位使用权；逻辑帧边界是完成批次与应用完成�
 等待可写槽和处理完成批次放在事件派发之前，让紧接着的 Update 使用这些阶段期间到达的输入。
 完成批次处理有明确终点，不会为回调新建的任务或稍后到达的 GPU 消息反复排空整个系统。
 
-未启用 Gpu 时，单线程 CPU runner 与 GPU runner 共用同一条完成路径。帧首先把各 flight 已发布的等待标为完成，再做窗口维护，然后 `ServiceFrameBoundaryGT` 消费完成通道。`FrameTimeline::BeginFrameTiming` 之后派发事件并 Update。Update 后 `AllocateFrameSerial`；如有 RenderSystem 则同步 Publish/Consume，再 `PublishCompletion`，`GpuWorkCompleted` 为 false。该模式不创建 `AppFrameContext`、不调用 OnRender，但会调用 `OnRenderFrameComplete`。退出发生在发布之前时，这一帧不补发；最后一条已发布完成在 Shutdown 中排空。`IWaitFrameProcessor::Wait` 在该 flight 下一次成为当前槽位时恢复，与 GPU 模式相同，不再在同一次 Pump 内立即完成。
+未启用 Gpu 时，单线程 CPU runner 与 GPU runner 共用同一条完成路径。帧首先把各 flight 已发布的等待标为完成，再做窗口维护，然后 `ServiceFrameBoundaryGT` 消费完成通道。`FrameTimeline::BeginFrameTiming` 之后派发事件并 Update。Update 后 `AllocateFrameSerial`；如有 SceneManager 则同步 Publish/Consume，再 `PublishCompletion`，`GpuWorkCompleted` 为 false。该模式不创建 `AppFrameContext`、不调用 OnRender，但会调用 `OnRenderFrameComplete`。退出发生在发布之前时，这一帧不补发；最后一条已发布完成在 Shutdown 中排空。`IWaitFrameProcessor::Wait` 在该 flight 下一次成为当前槽位时恢复，与 GPU 模式相同，不再在同一次 Pump 内立即完成。
 
 `DeltaTime` 是相邻逻辑帧开始时间之差，仍包含两个开始点之间的槽位等待与收尾耗时。
 `LastFrameLatency` 从同一个逻辑帧的 `BeginFrameTiming` 计算到 `PublishCompletion`。GPU 路径在观察到该 flight fence 完成时发布，包含事件派发、Update、录制、排队与 GPU 执行，不包含该帧开始前的槽位等待和完成回调。CPU 路径在同一帧场景消费之后发布，因此是该帧开始到完成发布的真实间隔。
@@ -98,7 +99,7 @@ RT 不再回收 flight，staging 回收与 profiler resolve 发生在下一次 G
 
 `Application` 是完成通道的唯一消费者。帧顶取得可写槽位后，`Application::ServiceFrameBoundaryGT`
 通过 `FrameTimeline::TryReadCompletion` 非阻塞收集一个本地批次，
-先对全部完成消息调用可选的 RenderSystem::OnFlightCompletedGT 和 GpuSystem::ReleaseFrameResourcesGT，
+先对全部完成消息调用可选的 SceneManager::OnFlightCompletedGT 和 GpuSystem::ReleaseFrameResourcesGT，
 验证 serial 并释放框架 owner，再 `PumpWaitFrame`；有 GPU 时 `BeginUpdateForFlight` 只重置 HostWrites。
 关停排空不指定 flight，改为 `CleanupCompletedFlights`。最后通知应用。
 不得先复用槽位再校验旧 owner。各通知服务在入口冻结本批工作，回调新建的同类通知留到下一 S0；
@@ -121,14 +122,19 @@ channel 不拥有回调或资产引用，没有观察者注册、注销与跨线
 
 ### 命令分配与有序批次
 
-`GpuFlightSlot::CommandAllocator` 统一拥有本 flight 的 command buffer；没有默认共享命令或
-专门的窗口命令池。`AppFrameContext::AllocateCommandBuffer()` 从池中分配并 Begin，应用完成
-录制后调用 `ReturnCommandBuffers(desc, target)`，由 runtime End 并接管命令。归还不表示可立即
-复用；本轮已经分配的命令都保留到最终 flight fence 完成，下一轮录制才能重置分配器。
+`GpuFlightSlot::CommandAllocator` 实现窄接口 `ICmdAllocator`，拥有当前 flight/main queue 的一个 RHI
+CommandAllocator 以及独占 command wrappers。`Allocate()` Begin 一个本 epoch 尚未使用的 wrapper；
+`Return(span)` 只 End 并关闭借用，不登记、不提交、不重用 wrapper，也不决定执行顺序。
+`RegisterClosedCommandBuffers(desc, target)` 登记已归还命令，复制数组，批次按登记顺序、项内按数组顺序执行。
+同一个 command 必须归还并登记一次；封口拒绝未处理命令。结果数组可以与 Allocate、Return 的顺序不同。
 
-`ReturnCommandBuffers` 复用 `render::CommandQueueSubmitDescriptor`，立即复制命令、fence 和
-value 数组，不保留调用方 span。批次按归还顺序执行，项内按 `CmdBuffers` 数组顺序执行，
-与分配顺序无关。仅接受当前 flight 分配且尚未归还的命令；归还后应用不得继续录制。
+旧 `AppFrameContext::AllocateCommandBuffer/ReturnCommandBuffers` 保留；后者是 Return + Register 的适配入口。
+内部 profiler 与 late-drop cleanup 通过同一 allocator 的私有续录入口追加命令；公开录制封口后不能再调用。
+所有提交及内部续录仍由原 final flight fence 覆盖。GPU 完成、GT completion 交接后，下一次 BeginFrameRecord
+才统一 Reset storage、清理所有 child 临时状态、重置参数/常量资源 cursor，不在 Allocate/Return/Submit 中 Reset。
+终止清理会先释放借用 program layout 的 GpuFrameResources，再拆 RenderSystem caches。
+Reset 不新增 GPU 等待；native 容量按高水位保留。D3D12 按同时 open 数增长，Vulkan 每 flight 一个 pool。
+
 应用 wait/signal 作用于当前批次，允许无命令、无目标的纯同步批次。`WaitToExecute` 和
 `ReadyToPresent` 必须为空，交换链同步由 runtime 根据可选呈现目标注入。
 
@@ -142,7 +148,7 @@ D3D12 对每个带目标的批次保持 `Submit → Present`，然后才处理�
 acquire semaphore 的回收关联到 runtime 持有的 fence。最终收尾 Submit 的 fence 值才是
 `flight.Signal`，中间批次完成不能退休 flight。空帧也提交真实完成 fence。
 
-`SubmitFrame()` 封口并执行已经归还的工作。封口时未归还命令、未归还成功 acquire 的目标、
+`SubmitFrame()` 封口并执行已经归还的工作。封口时未归还或未登记命令、未归还成功 acquire 的目标、
 重复归还、跨 flight/跨录制使用、手填交换链同步或无效 fence 数组均属于不变量错误。
 显式提交后禁止继续分配、acquire 或归还；runner 的自动收尾对已提交帧不再重复 Submit。
 
@@ -282,7 +288,7 @@ retire 阶段观察到 fence 后发布两种通知：
 | 应用完成钩子 | `UnboundedChannel<FlightCompletion>` 的本地批次 | Application 在主线程逐条调用 `OnRenderFrameComplete` |
 | 帧边界等待 | per-flight 原子 `WaitersCompleted` | `PumpWaitFrame` 只泵当前独占 flight |
 
-普通帧顺序固定为：收集消息 → 清理匹配的 RenderSystem/GpuSystem owner → `PumpWaitFrame` → `OnRenderFrameComplete`。
+普通帧顺序固定为：收集消息 → 清理匹配的 SceneManager/GpuSystem owner → `PumpWaitFrame` → `OnRenderFrameComplete`。
 先消费旧 WaitersCompleted，再调用应用钩子，避免钩子新建的 Wait 被误认为已经完成。
 `PumpWaitFrame` 在恢复现有等待者前统一标记旧等待记录，恢复期间新建的等待同样不会提前完成。
 上传专用的等待表、状态机和恢复路径已删除，帧等待协议保留。
@@ -326,7 +332,7 @@ TODO：待后续上层 GPU 调度设计确定后恢复资产上传，包括复�
 
 ## 渲染资源的帧寿命
 
-RenderSystem 通过私有 ShaderProgramCache 拥有 JIT、artifact/program cache；PSO 由调用方通过 RHI 创建和持有。
+RenderSystem 通过私有 ShaderProgramCache 拥有 JIT、artifact/program cache，并提供通用 GraphicsPipelineCache；调用方也可直接通过 RHI 创建和持有 PSO。
 program 的 layout/参数 metadata 活过所有 flight，关停 GPU idle 后才销毁。
 
 旧框架的自动 per-flight asset refs、pool、descriptor arena 和 history 已移除。应用录制方负责
@@ -373,9 +379,9 @@ query 结果；应用只读 `GetLastGpuTimeMs()`，后端 readback barrier 差�
 runner 停止新帧、关闭窗口操作 → 消费并 join 已发布包
 进入 Shutdown / Stopping：停止 World/Scene 新业务和 scheduler 新任务，请求加载生产者停止
 WaitAndCleanupCompletedFlights：真实 GPU drain → 按 FrameSerial 发布完成 → S0 释放 owner
-terminal abandon：仅释放未发布 Scene 包和 raw frame owner，不生成成功 completion
-OnShutdown → 取消剩余通知 → WorldManager 显式 Shutdown
-RenderSystem → AssetManager → FrameTimeline → AssetDatabase → GpuSystem → WindowManager
+terminal abandon：释放未发布 Scene 包，不生成成功 completion
+OnShutdown → 取消剩余通知 → WorldManager 显式 Shutdown → SceneManager
+释放 GPU 帧参数资源和未发布 raw frame owner → RenderSystem → AssetManager → FrameTimeline → AssetDatabase → GpuSystem → WindowManager
 ```
 
 加载任务与保守退休任务使用独立 scope；取消加载不会取消退休。AssetManager 的退休 scope 在完成排空后终止。

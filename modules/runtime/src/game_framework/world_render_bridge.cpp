@@ -5,13 +5,14 @@
 #include <radray/profiler.h>
 #include <radray/scope_guard.h>
 #include <radray/runtime/game_framework/world.h>
+#include <radray/runtime/application.h>
 #include <radray/runtime/game_framework/actor.h>
-#include <radray/runtime/render_system.h>
+#include <radray/runtime/render_framework/scene_manager.h>
 
 namespace radray {
 
-WorldRenderBridge::WorldRenderBridge(World& world, RenderSystem& renderer)
-    : _world(world), _renderer(renderer), _writer(renderer.ClaimSceneWriterGT(renderer.CreateSceneGT())) {}
+WorldRenderBridge::WorldRenderBridge(World& world, SceneManager& scenes)
+    : _world(world), _scenes(scenes), _writer(scenes.ClaimSceneWriterGT(scenes.CreateSceneGT())) {}
 
 WorldRenderBridge::~WorldRenderBridge() noexcept {
     if (_state != RenderConnectionState::Disconnected) RADRAY_ABORT("Bridge requires explicit Disconnect");
@@ -36,8 +37,8 @@ void WorldRenderBridge::Disconnect() {
     _state = RenderConnectionState::Disconnecting;
     while (!_sources.empty()) Destroy(*_sources.back());
     while (!_transformSources.empty()) DestroyTransform(*_transformSources.back());
-    _renderer.ReleaseSceneWriterGT(GetSceneId());
-    _renderer.DestroySceneGT(GetSceneId());
+    _scenes.ReleaseSceneWriterGT(GetSceneId());
+    _scenes.DestroySceneGT(GetSceneId());
     _state = RenderConnectionState::Disconnected;
 }
 
@@ -89,8 +90,13 @@ void WorldRenderBridge::RemoveUpdate(RenderComponent& component) noexcept {
 void WorldRenderBridge::Collect() {
     RADRAY_PROFILE_SCOPE_N("WorldRenderBridge::Collect");
     if (_updates.empty() && _world._transforms._dirtyBlocks.empty() && _world._renderTransformRoots.empty() && _world._renderTransformRevision == _world._transformRevision) return;
-    _renderer.SetCollecting(true);
-    auto guard = MakeScopeGuard([this]() noexcept { _renderer.SetCollecting(false); });
+    _scenes.SetCollecting(true);
+    const auto app = _world.GetApplication();
+    const bool wasCollecting = app && app->SetCollecting(true);
+    auto guard = MakeScopeGuard([this, app, wasCollecting]() noexcept {
+        if (app) app->SetCollecting(wasCollecting);
+        _scenes.SetCollecting(false);
+    });
     auto& transforms = _world._transforms;
     if (transforms._dirtyRows.size() < transforms._values.size() / 16) {
         _writer.GatherLocalTransforms(transforms._values, transforms._dirtyRows);

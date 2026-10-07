@@ -24,7 +24,8 @@ public:
     const RenderDeviceCapabilities& GetCapabilities() const noexcept override { return Caps; }
     TextureSupport QueryTextureSupport(const TextureSupportQuery&) const noexcept override { return {}; }
     Nullable<CommandQueue*> GetCommandQueue(QueueType, uint32_t) noexcept override { return &Queue; }
-    Nullable<unique_ptr<CommandBuffer>> CreateCommandBuffer(CommandQueue*) noexcept override { return nullptr; }
+    Nullable<unique_ptr<CommandAllocator>> CreateCommandAllocator(CommandQueue*) noexcept override { return nullptr; }
+    Nullable<unique_ptr<CommandBuffer>> CreateCommandBuffer(CommandAllocator*) noexcept override { return nullptr; }
     Nullable<unique_ptr<Fence>> CreateFence() noexcept override { return nullptr; }
     Nullable<unique_ptr<QueryPool>> CreateQueryPool(const QueryPoolDescriptor&) noexcept override { return nullptr; }
     Nullable<unique_ptr<SwapChain>> CreateSwapChain(const SwapChainDescriptor&) noexcept override { return nullptr; }

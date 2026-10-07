@@ -10,7 +10,7 @@
 #include <radray/runtime/game_framework/actor.h>
 #include <radray/runtime/game_framework/world.h>
 #include <radray/runtime/gpu_system.h>
-#include <radray/runtime/render_system.h>
+#include <radray/runtime/render_framework/scene_manager.h>
 
 namespace radray {
 namespace {
@@ -77,7 +77,7 @@ protected:
 
     Application App;
     AssetManager Assets;
-    RenderSystem Render{&App, 3};
+    SceneManager Render{3};
     test::ScopedWorld GameWorld;
     SceneId RenderId{test::ConnectWorld(GameWorld, Render)};
     RenderScene Data;
@@ -386,7 +386,7 @@ TEST_F(StaticMeshScene, EmptyBindingAndInvalidCpuMeshClearPreviousGeometry) {
     EXPECT_TRUE(view->Mesh.GetSections().empty());
     EXPECT_FLOAT_EQ(view->LocalToWorld(0, 3), 5);
     auto invalid = Assets.AddReady<StaticMesh>(CpuMeshId(2), make_unique<CpuMesh>(MeshResource{}, vector<StaticMeshSection>{},
-                                                                               Eigen::Vector3f::Zero(), Eigen::Vector3f::Zero(), GpuMesh{}));
+                                                                                  Eigen::Vector3f::Zero(), Eigen::Vector3f::Zero(), GpuMesh{}));
     component->SetStaticMesh(invalid);
     Flush();
     EXPECT_TRUE(Data.GetStaticMesh(id)->Mesh.GetSections().empty());
@@ -523,7 +523,7 @@ TEST_F(StaticMeshScene, ReadOnlyViewsAndEmptyFramesPreservePersistentDescription
 TEST_F(StaticMeshScene, ReusedFlightsNeverRestoreAnOlderTransform) {
     Application app;
     for (uint32_t count : {1u, 2u, 3u}) {
-        RenderSystem render{&app, count};
+        SceneManager render{count};
         test::ScopedWorld world;
         const auto sceneId = test::ConnectWorld(world, render);
         auto* component = world.SpawnActor()->AddComponent<StaticMeshComponent>();

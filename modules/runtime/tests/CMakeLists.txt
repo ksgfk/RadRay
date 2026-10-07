@@ -23,6 +23,7 @@ set(radray_runtime_test_sources
     test_frame_scenarios.cpp
     test_frame_upload.cpp
     test_gpu_system.cpp
+    test_pipeline.cpp
     test_lifecycle_scale.cpp
     test_scene_apply_changes.cpp
     test_scene_assets.cpp
@@ -44,6 +45,7 @@ set(radray_runtime_test_sources
 if (RADRAY_ENABLE_SHADER_JIT)
     list(APPEND radray_runtime_test_sources
         test_gpu_scene_lifetime.cpp
+        test_runtime_services.cpp
         test_runtime_shader_jit.cpp)
 endif()
 

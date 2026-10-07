@@ -10,6 +10,8 @@
 #include <radray/nullable.h>
 #include <radray/render/rhi.h>
 #include <radray/runtime/frame_timeline.h>
+#include <radray/runtime/cmd_allocator.h>
+#include <radray/runtime/gpu_frame_resources.h>
 #include <radray/runtime/gpu_resource.h>
 #include <radray/runtime/startup_result.h>
 
@@ -71,20 +73,32 @@ struct GpuQueueFrameTrack {
 };
 
 /// 当前 flight 独占的命令池；仅在上一轮退休后重置，同一轮归还的命令不会重新分配。
-class GpuFlightCommandAllocator {
+class GpuFlightCommandAllocator final : public ICmdAllocator {
+public:
+    render::CommandBuffer* Allocate() override;
+    void Return(std::span<render::CommandBuffer*> commands) override;
+
 private:
     friend class GpuSystem;
     friend class AppFrameContext;
-    render::CommandBuffer* Allocate(render::Device* device, render::CommandQueue* queue);
-    void Return(std::span<render::CommandBuffer*> commands);
-    void Reset();
+    bool Initialize(render::Device* device, render::CommandQueue* queue);
+    render::CommandBuffer* AllocateInternal();
+    void ReturnInternal(std::span<render::CommandBuffer*> commands);
+    void Register(std::span<render::CommandBuffer*> commands);
+    void ResetForReuse();
+    bool HasUnregistered() const noexcept;
     bool HasOutstanding() const noexcept;
 
     struct Entry {
         unique_ptr<render::CommandBuffer> Commands;
         bool Returned{false};
+        bool Registered{false};
     };
+    Nullable<render::Device*> _device;
+    // Commands are destroyed before their borrowed native storage.
+    unique_ptr<render::CommandAllocator> _storage;
     vector<Entry> _pool;
+    bool _applicationRecording{false};
     size_t _allocatedCount{0};
 };
 
@@ -122,10 +136,11 @@ struct GpuFlightSlot {
         T Value;
     };
 
-    // —— 录制态（录制阶段由渲染线程独占）。批次顺序由归还顺序决定。
+    // —— 录制态（录制阶段由渲染线程独占）。批次顺序由登记顺序决定。
     GpuFlightCommandAllocator CommandAllocator;
     unique_ptr<ResourceUploader> Uploader;
     HostWriteBatch HostWrites;
+    unique_ptr<GpuFrameResources> FrameResources;
     vector<GpuFlightSubmitBatch> Batches;
     vector<GpuFlightAcquireRegistration> Acquisitions;
     /// BeginFrameRecord 分配；GT 匹配完成并释放 Payloads 后清零，清零前不得复用槽位。
@@ -165,6 +180,10 @@ public:
     /// 仅接受当前 flight 分配的命令；WaitToExecute/ReadyToPresent 必须为空。
     /// target 移交呈现所有权；其 backbuffer 的全部访问必须位于此非空批次中。
     void ReturnCommandBuffers(const render::CommandQueueSubmitDescriptor& desc, std::optional<AppFrameTarget> target = std::nullopt);
+    ICmdAllocator& GetCmdAllocator() const noexcept;
+    GpuFrameResources& GetGpuFrameResources() const noexcept;
+    /// Registers an ordered array already closed through ICmdAllocator::Return; never ends it again.
+    void RegisterClosedCommandBuffers(const render::CommandQueueSubmitDescriptor& desc, std::optional<AppFrameTarget> target = std::nullopt);
 
     /// 按需获取窗口呈现目标。内部 AcquireNextSwapChainFrame：
     /// RequireRecreate/RetryLater/Error/最小化 → nullopt（应用跳过该窗口）。
@@ -186,6 +205,7 @@ public:
 
 private:
     GpuFlightSlot& GetRecordingFlight() const noexcept;
+    void RegisterBatch(const render::CommandQueueSubmitDescriptor& desc, std::optional<AppFrameTarget> target, bool closeCommands);
 
     GpuSystem* _gpuSystem;
     uint32_t _flightIndex;
@@ -200,7 +220,7 @@ private:
 ///   帧号、完成通道和帧边界等待表属于借用的 FrameTimeline。
 /// - 负责"何时画":BeginFrameRecord / EndFrameRecordAndSubmit 的录制与提交时序、
 ///   flight 回收与 GPU 资源生命周期兜底。
-/// - 不关心"画什么":RenderPass / Framebuffer 缓存、pipeline、Scene 归 RenderSystem。
+/// - 提供命令、上传与帧资源，调用方决定绘制内容。
 /// 线程标签：GT = Application 所在线程；RT = 录制线程，单线程模式下与 GT 相同。
 /// 所有调用都要求对象存活；跨线程访问须在构造/装配发布后、拆除前。
 /// [任意线程] 只保证访问器本身可并发读取，返回对象仍遵循各自的线程契约。

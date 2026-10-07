@@ -7,7 +7,7 @@
 #include <radray/logger.h>
 #include <radray/runtime/application.h>
 #include <radray/runtime/gpu_system.h>
-#include <radray/runtime/render_system.h>
+#include <radray/runtime/render_framework/scene_manager.h>
 
 namespace radray {
 namespace {
@@ -15,7 +15,7 @@ namespace {
 class SceneDeliveryState : public ::testing::Test {
 protected:
     Application App;
-    RenderSystem Renderer{&App, 3};
+    SceneManager Renderer{3};
 };
 
 class SceneDeliveryStateDeathTest : public SceneDeliveryState {
@@ -116,7 +116,7 @@ TEST_F(SceneDeliveryState, RandomizedFlightReusePreservesPayloadAndSubmissionIde
     std::mt19937 rng(0x5146u);
     for (uint32_t count : {1u, 2u, 3u, 8u}) {
         Application app;
-        RenderSystem renderer{&app, count};
+        SceneManager renderer{count};
         const auto scene = renderer.CreateSceneGT();
         auto* writer = renderer.GetSceneWriterGT(scene).Get();
         const auto shape = writer->CreateShape();

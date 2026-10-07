@@ -4,7 +4,7 @@
 #include "runtime_test_device.h"
 #include <gtest/gtest.h>
 #include <radray/runtime/gpu_system.h>
-#include <radray/runtime/render_system.h>
+#include <radray/runtime/render_framework/scene_manager.h>
 #include <radray/scope_guard.h>
 
 namespace radray::test {
@@ -40,8 +40,7 @@ void RunObjectBuffers(render::RenderBackend backend, uint32_t flights, bool thre
     auto gpu = GpuSystem::TryCreate(descriptor, timeline, startup);
     if (test::CanSkipRuntimeStartup(backend, startup)) GTEST_SKIP() << startup.Reason;
     ASSERT_NE(gpu, nullptr) << startup.Reason;
-    Application app;
-    RenderSystem renderer{&app, flights};
+    SceneManager renderer{flights};
     auto scene = renderer.CreateSceneGT();
     auto* writer = renderer.GetSceneWriterGT(scene).Get();
     auto id = writer->CreateShape();

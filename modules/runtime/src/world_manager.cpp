@@ -7,8 +7,8 @@
 
 namespace radray {
 
-WorldManager::WorldManager(Nullable<Application*> app, Nullable<RenderSystem*> renderer)
-    : _app(app), _renderSystem(renderer) {}
+WorldManager::WorldManager(Nullable<Application*> app, Nullable<SceneManager*> scenes)
+    : _app(app), _sceneManager(scenes) {}
 WorldManager::~WorldManager() noexcept {
     if (!_worlds.Empty()) RADRAY_ABORT("WorldManager requires explicit Shutdown");
 }
@@ -48,8 +48,8 @@ LifecycleRequestResult WorldManager::DestroyWorld(WorldId id) {
 LifecycleRequestResult WorldManager::RequestRenderConnection(WorldId id, bool connected) {
     CheckCanModify();
     auto world = GetWorld(id);
-    if (!world || (connected && !_renderSystem)) return LifecycleRequestResult::Invalid;
-    return world->RequestRenderConnection(connected ? _renderSystem : Nullable<RenderSystem*>{nullptr});
+    if (!world || (connected && !_sceneManager)) return LifecycleRequestResult::Invalid;
+    return world->RequestRenderConnection(connected ? _sceneManager : Nullable<SceneManager*>{nullptr});
 }
 LifecycleRequestResult WorldManager::RequestReconnect(WorldId id) {
     CheckCanModify();

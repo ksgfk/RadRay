@@ -9,7 +9,7 @@
 #include <radray/render/rhi.h>
 #include <radray/runtime/gpu_resource.h>
 #include <radray/runtime/vertex_data.h>
-#include <radray/runtime/application.h>
+#include <radray/runtime/app_render_context.h>
 #include <radray/runtime/window_manager.h>
 
 #include <algorithm>
@@ -18,17 +18,38 @@
 
 namespace radray {
 
-render::CommandBuffer* GpuFlightCommandAllocator::Allocate(render::Device* device, render::CommandQueue* queue) {
+bool GpuFlightCommandAllocator::Initialize(render::Device* device, render::CommandQueue* queue) {
+    auto storage = device->CreateCommandAllocator(queue);
+    if (!storage) return false;
+    _storage = storage.Release();
+    _device = device;
+    return true;
+}
+
+render::CommandBuffer* GpuFlightCommandAllocator::Allocate() {
+    if (!_applicationRecording) RADRAY_ABORT("command allocation outside an active frame");
+    return AllocateInternal();
+}
+
+void GpuFlightCommandAllocator::Return(std::span<render::CommandBuffer*> commands) {
+    if (!_applicationRecording) RADRAY_ABORT("command return outside an active frame");
+    ReturnInternal(commands);
+}
+
+render::CommandBuffer* GpuFlightCommandAllocator::AllocateInternal() {
     if (_allocatedCount == _pool.size()) {
-        _pool.push_back({device->CreateCommandBuffer(queue).Unwrap()});
+        auto commands = _device->CreateCommandBuffer(_storage.get());
+        if (!commands) RADRAY_ABORT("command buffer creation failed");
+        _pool.push_back({commands.Release()});
     }
     auto& entry = _pool[_allocatedCount++];
     entry.Returned = false;
+    entry.Registered = false;
     entry.Commands->Begin();
     return entry.Commands.get();
 }
 
-void GpuFlightCommandAllocator::Return(std::span<render::CommandBuffer*> commands) {
+void GpuFlightCommandAllocator::ReturnInternal(std::span<render::CommandBuffer*> commands) {
     for (size_t i = 0; i < commands.size(); ++i) {
         const auto end = _pool.begin() + _allocatedCount;
         const auto found = std::find_if(_pool.begin(), end, [&](const auto& entry) { return entry.Commands.get() == commands[i]; });
@@ -51,9 +72,29 @@ bool GpuFlightCommandAllocator::HasOutstanding() const noexcept {
     return std::any_of(_pool.begin(), _pool.begin() + _allocatedCount, [](const auto& entry) { return !entry.Returned; });
 }
 
-void GpuFlightCommandAllocator::Reset() {
-    if (HasOutstanding()) RADRAY_ABORT("cannot reset command allocator with unreturned commands");
+bool GpuFlightCommandAllocator::HasUnregistered() const noexcept {
+    return std::any_of(_pool.begin(), _pool.begin() + _allocatedCount, [](const auto& entry) { return !entry.Registered; });
+}
+
+void GpuFlightCommandAllocator::Register(std::span<render::CommandBuffer*> commands) {
+    const auto end = _pool.begin() + _allocatedCount;
+    for (size_t i = 0; i < commands.size(); ++i) {
+        const auto found = std::find_if(_pool.begin(), end, [&](const auto& entry) { return entry.Commands.get() == commands[i]; });
+        if (found == end || !found->Returned || found->Registered)
+            RADRAY_ABORT("registration requires returned, unregistered commands from this flight");
+        if (std::find(commands.begin(), commands.begin() + i, commands[i]) != commands.begin() + i)
+            RADRAY_ABORT("command batch contains a duplicate command buffer");
+    }
+    for (auto* command : commands) {
+        std::find_if(_pool.begin(), end, [&](const auto& entry) { return entry.Commands.get() == command; })->Registered = true;
+    }
+}
+
+void GpuFlightCommandAllocator::ResetForReuse() {
+    if (HasOutstanding() || HasUnregistered()) RADRAY_ABORT("cannot reset command allocator with unhandled commands");
+    _storage->Reset();
     _allocatedCount = 0;
+    _applicationRecording = true;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -188,7 +229,10 @@ bool GpuSystem::Initialize(const GpuSystemDescriptor& desc, RuntimeStartupResult
     _mainQueueTrack.Fence->SetDebugName("AppMainQueue");
     _flights.reserve(_flightDataCount);
     for (uint32_t i = 0; i < _flightDataCount; ++i) {
-        _flights.push_back(make_unique<FlightSlot>());
+        auto flight = make_unique<FlightSlot>();
+        if (!flight->CommandAllocator.Initialize(_device.get(), _mainQueue))
+            return fail(RuntimeStartupStatus::InitializationFailed, "Flight command allocator creation failed");
+        _flights.push_back(std::move(flight));
     }
     if (desc.EnableFrameProfiler) {
         _frameProfiler = GpuFrameProfiler::TryCreate(_device.get(), _mainQueue, _flightDataCount);
@@ -241,9 +285,11 @@ AppFrameContext GpuSystem::BeginFrameRecord(
     if (record.FrameSerial != 0 || record.Recording || record.Signal.IsValid()) {
         RADRAY_ABORT("cannot begin a flight before its previous recording has retired");
     }
-    record.CommandAllocator.Reset();
+    record.CommandAllocator.ResetForReuse();
     if (!record.Uploader) record.Uploader = make_unique<ResourceUploader>(_device.get(), _flightDataCount);
     record.Uploader->BeginFlight(flightIndex, record.HostWrites);
+    if (!record.FrameResources) record.FrameResources = make_unique<GpuFrameResources>(_device.get(), *record.Uploader, record.HostWrites);
+    record.FrameResources->ResetForReuse();
     record.FrameSerial = _timeline->AllocateFrameSerial();
     record.Recording = true;
     record.Rendered = rendered;
@@ -271,7 +317,10 @@ void GpuSystem::AbandonUnpublishedResourcesTerminalGT() {
         if (flight->FrameSerial != 0 || flight->Recording || flight->Signal.IsValid()) RADRAY_ABORT("Complete published resource owners before terminal abandon");
     }
     _timeline->BeginStopping();
-    for (auto& flight : _flights) flight->Payloads.clear();
+    for (auto& flight : _flights) {
+        flight->FrameResources.reset();
+        flight->Payloads.clear();
+    }
 }
 
 void GpuSystem::EndFrameRecordAndSubmit(uint32_t flightIndex) {
@@ -296,6 +345,8 @@ void GpuSystem::SubmitFrame(uint32_t flightIndex) {
             RADRAY_ABORT("cannot submit a flight with an unreturned acquired target");
         }
     }
+    if (record.CommandAllocator.HasUnregistered()) RADRAY_ABORT("cannot submit a flight with unregistered command buffers");
+    record.CommandAllocator._applicationRecording = false;
     record.Recording = false;
     record.Uploader->EndFlight(flightIndex);
     record.HostWrites.Flush(*_device);
@@ -325,7 +376,8 @@ void GpuSystem::SubmitFrame(uint32_t flightIndex) {
         finalSignal = {.Fence = frameFence, .Value = value};
     };
     const auto closeCommands = [&](render::CommandBuffer* commands) {
-        record.CommandAllocator.Return(std::span{&commands, 1});
+        record.CommandAllocator.ReturnInternal(std::span{&commands, 1});
+        record.CommandAllocator.Register(std::span{&commands, 1});
     };
     const auto presentTarget = [](AppFrameTarget& target) {
         const auto result = target.Window->PresentSwapChainFrame(std::move(target._frame));
@@ -336,7 +388,7 @@ void GpuSystem::SubmitFrame(uint32_t flightIndex) {
 
     const bool profileFrame = _frameProfiler != nullptr && record.Rendered;
     if (profileFrame) {
-        auto* commands = record.CommandAllocator.Allocate(_device.get(), _mainQueue);
+        auto* commands = record.CommandAllocator.AllocateInternal();
         _frameProfiler->BeginFrame(commands, flightIndex);
         closeCommands(commands);
         submitQueue({.CmdBuffers = std::span{&commands, 1}});
@@ -367,7 +419,7 @@ void GpuSystem::SubmitFrame(uint32_t flightIndex) {
             }
             const auto before = target.Window->GetBackBufferState(target.BackBufferIndex);
             if (dropApplicationWork && !isD3D12 && before != render::TextureState::Present) {
-                cleanup = record.CommandAllocator.Allocate(_device.get(), _mainQueue);
+                cleanup = record.CommandAllocator.AllocateInternal();
                 const render::ResourceBarrierDescriptor barrier = render::BarrierTextureDescriptor{
                     .Target = target.BackBuffer, .Before = before, .After = render::TextureState::Present};
                 cleanup->ResourceBarrier(std::span{&barrier, 1});
@@ -390,7 +442,7 @@ void GpuSystem::SubmitFrame(uint32_t flightIndex) {
 
     // A final submission covers all application batches, even for an empty or skipped flight.
     if (profileFrame) {
-        auto* commands = record.CommandAllocator.Allocate(_device.get(), _mainQueue);
+        auto* commands = record.CommandAllocator.AllocateInternal();
         _frameProfiler->EndFrame(commands, flightIndex);
         closeCommands(commands);
         submitQueue({.CmdBuffers = std::span{&commands, 1}});
@@ -436,12 +488,28 @@ GpuFlightSlot& AppFrameContext::GetRecordingFlight() const noexcept {
 }
 
 render::CommandBuffer* AppFrameContext::AllocateCommandBuffer() {
-    return GetRecordingFlight().CommandAllocator.Allocate(_gpuSystem->_device.get(), _gpuSystem->_mainQueue);
+    return GetRecordingFlight().CommandAllocator.Allocate();
 }
 
-void AppFrameContext::ReturnCommandBuffers(
+GpuFrameResources& AppFrameContext::GetGpuFrameResources() const noexcept {
+    return *GetRecordingFlight().FrameResources;
+}
+
+ICmdAllocator& AppFrameContext::GetCmdAllocator() const noexcept {
+    return GetRecordingFlight().CommandAllocator;
+}
+
+void AppFrameContext::ReturnCommandBuffers(const render::CommandQueueSubmitDescriptor& desc, std::optional<AppFrameTarget> target) {
+    RegisterBatch(desc, std::move(target), true);
+}
+
+void AppFrameContext::RegisterClosedCommandBuffers(const render::CommandQueueSubmitDescriptor& desc, std::optional<AppFrameTarget> target) {
+    RegisterBatch(desc, std::move(target), false);
+}
+
+void AppFrameContext::RegisterBatch(
     const render::CommandQueueSubmitDescriptor& desc,
-    std::optional<AppFrameTarget> target) {
+    std::optional<AppFrameTarget> target, bool closeCommands) {
     auto& flight = GetRecordingFlight();
     if (!desc.WaitToExecute.empty() || !desc.ReadyToPresent.empty()) {
         RADRAY_ABORT("swapchain synchronization must be supplied through an acquired target");
@@ -480,7 +548,8 @@ void AppFrameContext::ReturnCommandBuffers(
         .WaitFences = {desc.WaitFences.begin(), desc.WaitFences.end()},
         .WaitValues = {desc.WaitValues.begin(), desc.WaitValues.end()},
         .Target = std::move(target)};
-    flight.CommandAllocator.Return(batch.CmdBuffers);
+    if (closeCommands) flight.CommandAllocator.Return(batch.CmdBuffers);
+    flight.CommandAllocator.Register(batch.CmdBuffers);
     if (batch.Target) flight.Acquisitions[batch.Target->_registrationIndex].Returned = true;
     flight.Batches.emplace_back(std::move(batch));
 }

@@ -195,7 +195,7 @@ void World::ExecuteLifecycle() {
     }
     if (_executing.Connection && IsLive() && !_stopping) {
         const auto request = *_executing.Connection;
-        if (request.Reconnect || request.Target.Get() != (_renderBridge ? _renderBridge->GetRenderer() : nullptr)) {
+        if (request.Reconnect || request.Target.Get() != (_renderBridge ? _renderBridge->GetSceneManager() : nullptr)) {
             DisconnectNow();
             if (request.Target && IsLive()) {
                 _renderBridge = make_unique<WorldRenderBridge>(*this, *request.Target.Get());
@@ -233,12 +233,12 @@ void World::ShutdownWorld() {
     Teardown();
 }
 
-LifecycleRequestResult World::RequestRenderConnection(Nullable<RenderSystem*> renderer) {
+LifecycleRequestResult World::RequestRenderConnection(Nullable<SceneManager*> scenes) {
     CheckCanModify();
     if (!IsLive() || _stopping) return LifecycleRequestResult::Invalid;
-    if (_pending.Connection && _pending.Connection->Target == renderer) return LifecycleRequestResult::AlreadyPending;
+    if (_pending.Connection && _pending.Connection->Target == scenes) return LifecycleRequestResult::AlreadyPending;
     const bool reconnect = _pending.Connection && _pending.Connection->Reconnect;
-    _pending.Connection = ConnectionRequest{renderer, reconnect};
+    _pending.Connection = ConnectionRequest{scenes, reconnect};
     return LifecycleRequestResult::Accepted;
 }
 LifecycleRequestResult World::RequestReconnect() {
@@ -249,9 +249,9 @@ LifecycleRequestResult World::RequestReconnect() {
     _pending.Connection = ConnectionRequest{target, true};
     return LifecycleRequestResult::Accepted;
 }
-Nullable<RenderSystem*> World::GetRequestedRenderConnection() const noexcept {
+Nullable<SceneManager*> World::GetRequestedRenderConnection() const noexcept {
     if (_pending.Connection) return _pending.Connection->Target;
-    return _renderBridge ? _renderBridge->GetRenderer() : nullptr;
+    return _renderBridge ? _renderBridge->GetSceneManager() : nullptr;
 }
 RenderConnectionState World::GetRenderConnectionState() const noexcept {
     return _renderBridge ? _renderBridge->GetState() : RenderConnectionState::Disconnected;

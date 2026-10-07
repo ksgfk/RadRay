@@ -544,6 +544,7 @@ std::string_view format_as(RenderObjectTag v) noexcept {
         case RenderObjectTag::Device: return "Device";
         case RenderObjectTag::CmdQueue: return "CmdQueue";
         case RenderObjectTag::CmdBuffer: return "CmdBuffer";
+        case RenderObjectTag::CmdAllocator: return "CmdAllocator";
         case RenderObjectTag::CmdEncoder: return "CmdEncoder";
         case RenderObjectTag::GraphicsCmdEncoder: return "GraphicsCmdEncoder";
         case RenderObjectTag::ComputeCmdEncoder: return "ComputeCmdEncoder";

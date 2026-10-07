@@ -1,0 +1,4 @@
+add_executable(bench_command_allocator bench_command_allocator.cpp bench_command_allocator.h)
+target_link_libraries(bench_command_allocator PRIVATE radrayruntime benchmark::benchmark)
+radray_default_compile_flags(bench_command_allocator)
+radray_set_build_path(bench_command_allocator)
