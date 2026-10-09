@@ -29,7 +29,7 @@ if (RADRAY_BUILD_SHADER_COMPILER)
     radray_deploy_dxc_runtime(radray_shader_fixture_generator)
 
     target_sources(test_radray_render PRIVATE test_radray_render_pso_smoke.cpp)
-    target_link_libraries(test_radray_render PRIVATE RadRayDXC::Headers)
+    target_link_libraries(test_radray_render PRIVATE RadRayDXC::Headers radrayshadercompiler)
     radray_deploy_dxc_runtime(test_radray_render)
 endif()
 

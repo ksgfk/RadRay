@@ -3679,6 +3679,31 @@ QueueType CmdQueueD3D12::GetQueueType() const noexcept {
     }
 }
 
+TimestampClockCalibrationResult CmdQueueD3D12::GetTimestampClockCalibration() const noexcept {
+    using Status = TimestampClockCalibrationStatus;
+    if (_queue == nullptr) return {.Status = Status::InvalidQueue};
+    uint64_t frequency{}, gpu{}, cpu{};
+    const HRESULT frequencyResult = _queue->GetTimestampFrequency(&frequency);
+    if (FAILED(frequencyResult)) return {.Status = Status::ApiFailure, .NativeError = frequencyResult};
+    LARGE_INTEGER cpuFrequency{}, before{}, after{};
+    if (!QueryPerformanceFrequency(&cpuFrequency) || !QueryPerformanceCounter(&before))
+        return {.Status = Status::ApiFailure, .NativeError = static_cast<int64_t>(GetLastError())};
+    const HRESULT calibrationResult = _queue->GetClockCalibration(&gpu, &cpu);
+    if (FAILED(calibrationResult)) return {.Status = Status::ApiFailure, .NativeError = calibrationResult};
+    if (!QueryPerformanceCounter(&after))
+        return {.Status = Status::ApiFailure, .NativeError = static_cast<int64_t>(GetLastError())};
+    if (frequency == 0 || cpuFrequency.QuadPart <= 0 || before.QuadPart < 0 || after.QuadPart < before.QuadPart)
+        return {.Status = Status::InvalidSample};
+    return {.Status = Status::Success,
+            .CpuDomain = TimestampCpuClockDomain::QueryPerformanceCounter,
+            .GpuTick = gpu,
+            .GpuFrequencyHz = frequency,
+            .CpuTick = cpu,
+            .CpuFrequencyHz = static_cast<uint64_t>(cpuFrequency.QuadPart),
+            .CpuCallBeginTick = static_cast<uint64_t>(before.QuadPart),
+            .CpuCallEndTick = static_cast<uint64_t>(after.QuadPart)};
+}
+
 FenceD3D12::FenceD3D12(
     ComPtr<ID3D12Fence> fence,
     Win32Event event) noexcept

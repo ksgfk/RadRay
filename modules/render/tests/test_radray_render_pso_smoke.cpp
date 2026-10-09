@@ -3,6 +3,7 @@
 #include <radray/basic_math.h>
 #include <radray/dynamic_library.h>
 #include <radray/render/backend_shader_artifact.h>
+#include <radray/shader_compiler/client.h>
 #include <radray/utility.h>
 
 #include <gtest/gtest.h>
@@ -11,7 +12,10 @@
 #include <wrl/client.h>
 
 #include <array>
+#include <bit>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <optional>
 #include <span>
 #include <type_traits>
@@ -933,6 +937,135 @@ void CSMain() {
 }
 
 #endif
+
+TEST(RadRayRenderShaderPadding, Float3RecordsReadTwoDistinctGpuParameterSets) {
+#if defined(RADRAY_ENABLE_D3D12)
+    test::DeviceContext context;
+    if (!test::TryCreateDevice(RenderBackend::D3D12, context, true)) GTEST_SKIP() << context.Reason;
+    shader_compiler::Client compiler;
+    ASSERT_TRUE(compiler.IsAvailable());
+    for (uint32_t secondRegister : {1u, 2u}) {
+        const string source = fmt::format(R"hlsl(
+cbuffer Lighting : register(b0) {{
+    float3 Direction0 : packoffset(c0);
+    float3 Direction1 : packoffset(c{});
+}};
+RWStructuredBuffer<uint> Output : register(u0);
+[shader("compute")][numthreads(1,1,1)]
+void CSMain() {{
+    Output[0]=asuint(Direction0.x); Output[1]=asuint(Direction0.y); Output[2]=asuint(Direction0.z);
+    Output[3]=asuint(Direction1.x); Output[4]=asuint(Direction1.y); Output[5]=asuint(Direction1.z);
+}}
+)hlsl",
+                                          secondRegister);
+        const auto bytes = std::as_bytes(std::span{source.data(), source.size()});
+        shader::CompileVariantRequest request;
+        request.SourceName = "fixtures/padded_gpu.hlsl";
+        request.RootSource.assign(bytes.begin(), bytes.end());
+        request.Targets = shader::ShaderTargetMask::DXIL;
+        const auto contract = compiler.DiscoverSourceContract(request.SourceName, request.RootSource, shader::ShaderTarget::DXIL, {});
+        ASSERT_TRUE(contract.Succeeded());
+        request.ExpectedContract = contract.Contract.Hash;
+        const auto result = compiler.CompileVariant(request, {});
+        ASSERT_EQ(result.Status, shader::CompileStatus::Success);
+        ASSERT_EQ(result.Lanes.size(), 1u);
+        if (const char* directory = std::getenv("RADRAY_TEST_EVIDENCE_DIR")) {
+            const auto destination = std::filesystem::path{directory} / fmt::format("padded-gap{}", secondRegister);
+            std::error_code error;
+            std::filesystem::create_directories(destination, error);
+            ASSERT_FALSE(error);
+            std::ofstream hlsl{destination / "source.hlsl", std::ios::binary};
+            hlsl.write(source.data(), source.size());
+            ASSERT_TRUE(hlsl.good());
+            const auto& lane = result.Lanes[0];
+            std::ofstream metadata{destination / "artifact.bin", std::ios::binary};
+            metadata.write(reinterpret_cast<const char*>(lane.Metadata.data()), lane.Metadata.size());
+            ASSERT_TRUE(metadata.good());
+            std::ofstream dxil{destination / "bytecode.dxil", std::ios::binary};
+            dxil.write(reinterpret_cast<const char*>(lane.Bytecode.data()), lane.Bytecode.size());
+            ASSERT_TRUE(dxil.good());
+        }
+        shader::WireMetadataEnvelope envelope{};
+        const auto& metadata = result.Lanes[0].Metadata;
+        ASSERT_GE(metadata.size(), sizeof(envelope));
+        std::memcpy(&envelope, metadata.data(), sizeof(envelope));
+        auto artifact = CreateBackendShaderArtifact(*context.Device, metadata,
+                                                    {.Target = shader::ShaderTarget::DXIL, .ExpectedGpuArtifact = envelope.GpuArtifact, .ExpectedToolchainIdentity = shader::kShaderToolchainIdentity});
+        ASSERT_TRUE(artifact);
+        const auto& generic = artifact->Generic();
+        const auto first = std::find_if(generic.Types().begin(), generic.Types().end(), [&](const auto& type) { return generic.GetName(type.Name) == "Direction0"; });
+        ASSERT_NE(first, generic.Types().end());
+        EXPECT_EQ(first->Size, secondRegister * 16);
+        EXPECT_EQ(first->Stride, 12u);
+        auto csBytes = generic.FindStageBytecode(shader::ShaderStage::Compute);
+        ASSERT_TRUE(csBytes);
+        auto cs = context.Device->CreateShader({*csBytes, artifact->Category, ShaderStage::Compute});
+        ASSERT_TRUE(cs);
+        auto pso = context.Device->CreateComputePipelineState({artifact->Layout.get(), {cs.Get(), "CSMain"}});
+        ASSERT_TRUE(pso);
+        for (uint32_t round = 0; round < 2; ++round) {
+            const std::array<float, 6> values = round == 0 ? std::array<float, 6>{.125f, .25f, .5f, .75f, 1.f, 1.25f}
+                                                           : std::array<float, 6>{1.5f, 1.75f, 2.f, 2.25f, 2.5f, 2.75f};
+            auto upload = context.Device->CreateBuffer({256, MemoryType::Upload, BufferUse::CopySource | BufferUse::MapWrite});
+            ASSERT_TRUE(upload);
+            auto uniform = context.Device->CreateBuffer({256, MemoryType::Device, BufferUse::CopyDestination | BufferUse::CBuffer});
+            ASSERT_TRUE(uniform);
+            auto output = context.Device->CreateBuffer({24, MemoryType::Device, BufferUse::UnorderedAccess | BufferUse::CopySource});
+            ASSERT_TRUE(output);
+            auto readback = context.Device->CreateBuffer({24, MemoryType::ReadBack, BufferUse::CopyDestination | BufferUse::MapRead});
+            ASSERT_TRUE(readback);
+            auto* mapped = static_cast<byte*>(upload->Map(0, 256));
+            ASSERT_NE(mapped, nullptr);
+            std::memset(mapped, round ? 0xa5 : 0x5a, 256);
+            std::memcpy(mapped, values.data(), 12);
+            std::memcpy(mapped + secondRegister * 16, values.data() + 3, 12);
+            context.Device->FlushMappedRanges(std::array{MappedBufferRange{upload.Get(), {0, 256}}});
+            upload->Unmap();
+            auto set = context.Device->CreateShaderParameterSet({artifact->Layout.get(), 0});
+            ASSERT_TRUE(set);
+            ASSERT_TRUE(set->Set(artifact->Layout->FindBinding("Lighting"), 0, ShaderBufferBinding{uniform.Get(), {0, 256}}));
+            ASSERT_TRUE(set->Set(artifact->Layout->FindBinding("Output"), 0, ShaderBufferBinding{output.Get(), {0, 24}, 4}));
+            ASSERT_TRUE(set->FlushWrites());
+            auto allocator = context.Device->CreateCommandAllocator(context.Queue);
+            ASSERT_TRUE(allocator);
+            auto command = context.Device->CreateCommandBuffer(allocator.Get());
+            ASSERT_TRUE(command);
+            command->Begin();
+            const ResourceBarrierDescriptor initial[]{BarrierBufferDescriptor{uniform.Get(), BufferState::Undefined, BufferState::CopyDestination},
+                                                      BarrierBufferDescriptor{output.Get(), BufferState::Undefined, BufferState::UnorderedAccess},
+                                                      BarrierBufferDescriptor{readback.Get(), BufferState::Undefined, BufferState::CopyDestination}};
+            command->ResourceBarrier(initial);
+            command->CopyBufferToBuffer(uniform.Get(), 0, upload.Get(), 0, 256);
+            const ResourceBarrierDescriptor ready = BarrierBufferDescriptor{uniform.Get(), BufferState::CopyDestination, BufferState::CBuffer};
+            command->ResourceBarrier(std::span{&ready, 1});
+            auto encoder = command->BeginComputePass();
+            ASSERT_TRUE(encoder);
+            encoder->BindComputePipelineState(pso.Get());
+            encoder->BindShaderParameterSet(0, set.Get());
+            encoder->Dispatch(1, 1, 1);
+            command->EndComputePass(encoder.Release());
+            const ResourceBarrierDescriptor copied = BarrierBufferDescriptor{output.Get(), BufferState::UnorderedAccess, BufferState::CopySource};
+            command->ResourceBarrier(std::span{&copied, 1});
+            command->CopyBufferToBuffer(readback.Get(), 0, output.Get(), 0, 24);
+            command->End();
+            CommandBuffer* commands[]{command.Get()};
+            context.Queue->Submit({.CmdBuffers = commands});
+            context.Queue->Wait();
+            const auto* actual = static_cast<const uint32_t*>(readback->Map(0, 24));
+            ASSERT_NE(actual, nullptr);
+            readback->InvalidateMappedRange({0, 24});
+            for (size_t i = 0; i < values.size(); ++i) EXPECT_EQ(actual[i], std::bit_cast<uint32_t>(values[i])) << secondRegister << ":" << round << ":" << i;
+            for (size_t i = 0; i < values.size(); ++i)
+                RecordProperty(fmt::format("gap{}_round{}_component{}", secondRegister, round, i), fmt::format("{}", actual[i]));
+            readback->Unmap();
+        }
+    }
+    context.Reset();
+    EXPECT_EQ(context.ValidationErrors.load(), 0u);
+#else
+    GTEST_SKIP() << "D3D12 is disabled";
+#endif
+}
 
 TEST(RadRayRenderPsoSmoke, Vulkan) {
 #if defined(RADRAY_ENABLE_VULKAN)

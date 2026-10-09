@@ -385,6 +385,8 @@ public:
 
     QueueType GetQueueType() const noexcept override;
 
+    TimestampClockCalibrationResult GetTimestampClockCalibration() const noexcept override;
+
 public:
     void DestroyImpl() noexcept;
 

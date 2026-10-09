@@ -694,6 +694,21 @@ struct TimestampQueryCalibration {
     double TickPeriodNs{0.0};
 };
 
+enum class TimestampClockCalibrationStatus : uint32_t {
+    Success, Unsupported, InvalidQueue, ApiFailure, InvalidSample
+};
+
+enum class TimestampCpuClockDomain : uint32_t { Unknown, QueryPerformanceCounter };
+
+struct TimestampClockCalibrationResult {
+    TimestampClockCalibrationStatus Status{TimestampClockCalibrationStatus::Unsupported};
+    TimestampCpuClockDomain CpuDomain{TimestampCpuClockDomain::Unknown};
+    uint64_t GpuTick{0}, GpuFrequencyHz{0};
+    uint64_t CpuTick{0}, CpuFrequencyHz{0};
+    uint64_t CpuCallBeginTick{0}, CpuCallEndTick{0};
+    int64_t NativeError{0};
+};
+
 struct CommandQueueSubmitDescriptor {
     std::span<CommandBuffer*> CmdBuffers{};
     std::span<Fence*> SignalFences{};
@@ -1328,6 +1343,10 @@ public:
     virtual void Wait() noexcept = 0;
 
     virtual QueueType GetQueueType() const noexcept = 0;
+
+    /// Success associates this queue's GPU clock with CpuDomain. Call interval is
+    /// observation latency, not a bound on hardware error. Never submits or waits.
+    virtual TimestampClockCalibrationResult GetTimestampClockCalibration() const noexcept;
 };
 
 /// Single recording thread, one queue. Children must be destroyed before their allocator.

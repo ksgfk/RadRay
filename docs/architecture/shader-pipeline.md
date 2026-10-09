@@ -154,6 +154,19 @@ range、已知 record kind、element count、offset/size/stride、type reference
 `Struct`，且 payload size 不得超过可写 root range。type tree 没有独立 schema hash，也不参与
 GPU artifact identity。
 
+DXIL 仅对有父结构、没有 underlying `TypeIndex` 的 float3 vector 叶子成员允许尾部填充：
+`RowCount=1`、`ColumnCount=3`、`Stride=12`、`Flags=0`、`ElementCount=1`。
+固定 schema 8 编译器为两个分别位于 `packoffset(c0)` 与 `packoffset(c1)` 的 `float3`
+发布首成员 size/stride 16/12；位于 c0 与 c2 时为 32/12。`Size` 包含到下一字段的占位间隙，
+`Stride` 是 float3 的 12 字节有效载荷。decoder 保留原始记录，要求 size 不小于 stride。
+成员占位范围不能越过父结构或与同父成员重叠；scalar、matrix、其他 vector、聚合及根记录
+仍要求 size 等于 stride，数组仍要求 size 等于 stride 乘元素数。SPIR-V 不使用这个例外。
+matrix 保持严格校验；合法 float4x4 形状增加 16 字节占位的负例覆盖该边界。
+真实 DXC 及损坏元数据回归见
+`RadRayDxcMetadata.PaddedDxilCbufferLeavesDecodeWithoutChangingCompilerMetadata`，目标隔离见
+`RadRayRenderShaderArtifact.LeafPaddingIsDxilOnly`；不同间隙与两组参数的真实 GPU 回读见
+`RadRayRenderShaderPadding.Float3RecordsReadTwoDistinctGpuParameterSets`。
+
 schema 8 起每条 record 还携带 `ShaderScalarKind`（float/sint/uint/bool）与 `RowCount`/`ColumnCount`，
 `Flags` bit 0 表示 HLSL `row_major`，其余位保留为零。非 struct 元素的数组同样带上元素的标量种类
 与分量数，所以 `float4 Foo[4]` 在 wire 上是完整类型而不是不透明字节区间。这些事实存在的唯一原因

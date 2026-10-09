@@ -81,8 +81,19 @@ bool ValidateTypeRecords(const ShaderArtifactView& artifact) noexcept {
             if (expectedSize != type.Size) {
                 return false;
             }
-        } else if (type.ElementCount != 1 || type.Size != type.Stride) {
-            return false;
+        } else {
+            // The supported DXIL float3 record has a 12-byte payload but Size also
+            // includes the gap to the next field. Other padded shapes remain strict.
+            const bool paddedDxilLeaf = artifact.Envelope().Target == static_cast<uint8_t>(ShaderTarget::DXIL) &&
+                                        type.ParentIndex != kNoParent && type.TypeIndex == kShaderNoType &&
+                                        type.Kind == static_cast<uint32_t>(ShaderTypeKind::Vector) &&
+                                        type.ScalarKind == static_cast<uint32_t>(ShaderScalarKind::Float) &&
+                                        type.RowCount == 1 && type.ColumnCount == 3 &&
+                                        type.Stride == 12 && type.Flags == 0;
+            if (type.ElementCount != 1 || type.Size < type.Stride ||
+                (!paddedDxilLeaf && type.Size != type.Stride)) {
+                return false;
+            }
         }
 
         if (type.ParentIndex == kNoParent) {
@@ -127,6 +138,11 @@ bool ValidateTypeRecords(const ShaderArtifactView& artifact) noexcept {
         for (size_t previous = 0; previous < index; ++previous) {
             if (types[previous].ParentIndex != type.ParentIndex) {
                 continue;
+            }
+            if (type.ParentIndex != kNoParent &&
+                static_cast<uint64_t>(type.Offset) < static_cast<uint64_t>(types[previous].Offset) + types[previous].Size &&
+                static_cast<uint64_t>(types[previous].Offset) < static_cast<uint64_t>(type.Offset) + type.Size) {
+                return false;
             }
             const std::optional<std::string_view> previousName = artifact.GetName(types[previous].Name);
             const std::optional<std::string_view> currentName = artifact.GetName(type.Name);

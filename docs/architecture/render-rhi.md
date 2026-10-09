@@ -16,6 +16,20 @@ layout 章节以下以 schema 8 contract 为准，并且已经是实现形态：
 `BindingHandle` 的内部 token 是 layout 对象地址加该 layout metadata table 的 record index，
 位布局不是 ABI，只有两个后端可以拆开它。
 
+## Timestamp 时钟关联
+
+`QueryPool::GetTimestampCalibration` 只提供查询 tick 的频率/周期，不能关联 CPU 与 GPU 时钟。
+`CommandQueue::GetTimestampClockCalibration` 返回真实 GPU/CPU 原始 tick、各自 Hz 频率、CPU
+时钟域和校时调用前后的 CPU tick。D3D12 使用 queue 的 `GetClockCalibration` 与
+`GetTimestampFrequency`，CPU 域为 QPC，CPU 频率来自 `QueryPerformanceFrequency`。
+调用不提交命令、不等待队列；调用方按需要采样，不在每次 query 写入或取值时调用。
+调用区间是观测耗时，不能作为硬件校时精度上限。上层自行把明确的 CPU 域映射到其时钟。
+
+默认实现与 Vulkan 明确返回 `Unsupported`；D3D12 的无效队列、API 失败和无效频率/区间分别
+返回 `InvalidQueue`、`ApiFailure`、`InvalidSample`，原生错误在 `NativeError`。只有 `Success`
+结果的 tick 与频率可用于转换，失败不以 CPU 时间或零值伪造 GPU 样本。已有 query 的 GPU
+write/resolve/availability 语义不变。测试见 `RadRayTimestampClock`。
+
 ## D3D12 执行失败
 
 D3D12 命令列表 Close、队列 Wait/Signal、Present 与 ResizeBuffers 的失败立即终止进程，

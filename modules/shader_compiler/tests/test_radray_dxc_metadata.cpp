@@ -1,4 +1,5 @@
 #include <radray/shader_compiler/client.h>
+#include <radray/shader/shader_artifact.h>
 
 #include <gtest/gtest.h>
 
@@ -2068,6 +2069,77 @@ float4 VSMain(float3 position : POSITION) : SV_Position {
     EXPECT_EQ(result.Status, shader::CompileStatus::InvalidRequest);
     EXPECT_TRUE(result.Lanes.empty());
     EXPECT_FALSE(result.Diagnostics.empty());
+}
+
+TEST(RadRayDxcMetadata, PaddedDxilCbufferLeavesDecodeWithoutChangingCompilerMetadata) {
+    const std::string_view source = R"hlsl(
+cbuffer Lighting : register(b0) {
+    float3 Direction0 : packoffset(c0);
+    float3 Direction1 : packoffset(c1);
+};
+[shader("vertex")]
+float4 VSMain(float3 position : POSITION) : SV_Position {
+    return float4(position + Direction0 + Direction1, 1);
+}
+)hlsl";
+    Client client;
+    ASSERT_TRUE(client.IsAvailable());
+    const auto discovery = client.DiscoverSourceContract(
+        "fixtures/padded_cbuffer.hlsl", CopyBytes(source), shader::ShaderTarget::DXIL, {});
+    ASSERT_TRUE(discovery.Succeeded());
+    shader::CompileVariantRequest request;
+    request.SourceName = "fixtures/padded_cbuffer.hlsl";
+    request.RootSource = CopyBytes(source);
+    request.Targets = shader::ShaderTargetMask::DXIL;
+    request.ExpectedContract = discovery.Contract.Hash;
+    const auto compiled = client.CompileVariant(request, {});
+    ASSERT_EQ(compiled.Status, shader::CompileStatus::Success);
+    ASSERT_EQ(compiled.Lanes.size(), 1u);
+    const auto& original = compiled.Lanes.front().Metadata;
+    shader::WireMetadataEnvelope envelope{};
+    ASSERT_GE(original.size(), sizeof(envelope));
+    std::memcpy(&envelope, original.data(), sizeof(envelope));
+    ASSERT_EQ(envelope.TypeRecords.Size, 3u * sizeof(shader::WireTypeRecord));
+    ASSERT_TRUE(envelope.TypeRecords.IsWithin(static_cast<uint32_t>(original.size())));
+    vector<shader::WireTypeRecord> types(3);
+    std::memcpy(types.data(), original.data() + envelope.TypeRecords.Offset, envelope.TypeRecords.Size);
+    EXPECT_EQ(types[0].Size, 28u);
+    EXPECT_EQ(types[1].Offset, 0u);
+    EXPECT_EQ(types[1].Size, 16u);
+    EXPECT_EQ(types[1].Stride, 12u);
+    EXPECT_EQ(types[2].Offset, 16u);
+    EXPECT_EQ(types[2].Size, 12u);
+    EXPECT_EQ(types[2].Stride, 12u);
+    const shader::ShaderArtifactDecodeOptions options{
+        .Target = shader::ShaderTarget::DXIL,
+        .ExpectedGpuArtifact = envelope.GpuArtifact,
+        .ExpectedToolchainIdentity = shader::kShaderToolchainIdentity};
+    shader::ShaderArtifactDecodeError error{};
+    const auto artifact = shader::DecodeShaderArtifact(original, options, &error);
+    ASSERT_TRUE(artifact.has_value()) << static_cast<uint32_t>(error);
+    EXPECT_EQ(artifact->Types()[1].Size, 16u);
+    EXPECT_EQ(artifact->Types()[1].Stride, 12u);
+    const auto reject = [&](auto&& mutate) {
+        auto changedTypes = types;
+        mutate(changedTypes);
+        auto changed = original;
+        std::memcpy(changed.data() + envelope.TypeRecords.Offset, changedTypes.data(), envelope.TypeRecords.Size);
+        shader::ShaderArtifactDecodeError failure{};
+        EXPECT_FALSE(shader::DecodeShaderArtifact(changed, options, &failure).has_value());
+        EXPECT_EQ(failure, shader::ShaderArtifactDecodeError::InvalidTypeRecord);
+    };
+    reject([](auto& records) { records[0].Stride = 24; }); // Root cannot carry a leaf padding allowance.
+    reject([](auto& records) { records[1].Size = 8; }); // Payload does not fit its occupied range.
+    reject([](auto& records) { records[1].Size = 20; }); // Overlaps the next member.
+    reject([](auto& records) { records[2].Size = 16; }); // Exceeds the parent's occupied range.
+    reject([](auto& records) { records[1].TypeIndex = 0; }); // Typed/aggregate records retain exact stride.
+    reject([](auto& records) { records[1].Kind = static_cast<uint32_t>(shader::ShaderTypeKind::Array); });
+    reject([](auto& records) { records[1].Kind = static_cast<uint32_t>(shader::ShaderTypeKind::Matrix); });
+    reject([](auto& records) { records[1].Kind = static_cast<uint32_t>(shader::ShaderTypeKind::Scalar); });
+    reject([](auto& records) { records[1].ColumnCount = 2; records[1].Stride = 8; });
+    reject([](auto& records) { records[1].ScalarKind = static_cast<uint32_t>(shader::ShaderScalarKind::UnsignedInteger); });
+    reject([](auto& records) { records[1].Flags = 1; });
+    reject([](auto& records) { records[1].RowCount = 3; });
 }
 
 }  // namespace

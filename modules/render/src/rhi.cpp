@@ -16,6 +16,10 @@
 
 namespace radray::render {
 
+TimestampClockCalibrationResult CommandQueue::GetTimestampClockCalibration() const noexcept {
+    return {};
+}
+
 uint32_t GetVertexFormatSizeInBytes(VertexFormat format) noexcept {
     switch (format) {
         case VertexFormat::UINT8X2:

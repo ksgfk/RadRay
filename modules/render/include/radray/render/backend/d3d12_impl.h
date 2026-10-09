@@ -435,6 +435,8 @@ public:
 
     QueueType GetQueueType() const noexcept override;
 
+    TimestampClockCalibrationResult GetTimestampClockCalibration() const noexcept override;
+
 public:
     DeviceD3D12* _device;
     ComPtr<ID3D12CommandQueue> _queue;

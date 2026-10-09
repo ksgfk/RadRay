@@ -58,6 +58,44 @@ public:
 };
 }  // namespace
 
+TEST(RadRayTimestampClock, DefaultQueueReturnsExplicitUnsupported) {
+    uint32_t waits = 0;
+    CleanupQueue queue(waits);
+    const auto result = queue.GetTimestampClockCalibration();
+    EXPECT_EQ(result.Status, TimestampClockCalibrationStatus::Unsupported);
+    EXPECT_EQ(result.CpuDomain, TimestampCpuClockDomain::Unknown);
+    EXPECT_EQ(waits, 0u);
+}
+
+TEST(RadRayTimestampClock, DirectQueueReturnsRealClockPairAndObservationInterval) {
+    DeviceContext context;
+    if (!TryCreateDevice(RenderBackend::D3D12, context, true)) GTEST_SKIP() << context.Reason;
+#if defined(RADRAY_ENABLE_D3D12)
+    d3d12::CmdQueueD3D12 invalid(static_cast<d3d12::DeviceD3D12*>(context.Device.get()), nullptr, D3D12_COMMAND_LIST_TYPE_DIRECT, nullptr);
+    EXPECT_EQ(invalid.GetTimestampClockCalibration().Status, TimestampClockCalibrationStatus::InvalidQueue);
+#endif
+    uint64_t previousCpu = 0, previousGpu = 0;
+    for (unsigned i = 0; i < 3; ++i) {
+        const auto result = context.Queue->GetTimestampClockCalibration();
+        ASSERT_EQ(result.Status, TimestampClockCalibrationStatus::Success);
+        EXPECT_EQ(result.CpuDomain, TimestampCpuClockDomain::QueryPerformanceCounter);
+        EXPECT_GT(result.GpuFrequencyHz, 0u);
+        EXPECT_GT(result.CpuFrequencyHz, 0u);
+        EXPECT_GE(result.CpuCallEndTick, result.CpuCallBeginTick);
+        EXPECT_GE(result.CpuTick, previousCpu);
+        EXPECT_GE(result.GpuTick, previousGpu);
+        previousCpu = result.CpuTick;
+        previousGpu = result.GpuTick;
+        RecordProperty("gpu_frequency_hz", fmt::format("{}", result.GpuFrequencyHz));
+        RecordProperty("cpu_frequency_hz", fmt::format("{}", result.CpuFrequencyHz));
+        RecordProperty("gpu_tick", fmt::format("{}", result.GpuTick));
+        RecordProperty("cpu_tick", fmt::format("{}", result.CpuTick));
+        RecordProperty("cpu_call_interval_ticks", fmt::format("{}", result.CpuCallEndTick - result.CpuCallBeginTick));
+    }
+    context.Reset();
+    EXPECT_EQ(context.ValidationErrors.load(), 0u);
+}
+
 TEST(GpuTestFixture, H01PartialInitializationCleanupIsIdempotent) {
     for (const auto backend : {RenderBackend::D3D12, RenderBackend::Vulkan})
         for (const auto stage : {DeviceSetupStage::Factory, DeviceSetupStage::Instance, DeviceSetupStage::Device, DeviceSetupStage::Queue, DeviceSetupStage::Complete}) {

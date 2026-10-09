@@ -214,6 +214,56 @@ vector<byte> MakeSyntheticArtifact() {
     return blob;
 }
 
+TEST(RadRayRenderShaderArtifact, LeafPaddingIsDxilOnly) {
+    for (auto target : {shader::ShaderTarget::DXIL, shader::ShaderTarget::SPIRV}) {
+        auto blob = MakeSyntheticArtifact();
+        shader::WireMetadataEnvelope envelope{};
+        std::memcpy(&envelope, blob.data(), sizeof(envelope));
+        envelope.Target = static_cast<uint8_t>(target);
+        envelope.ToolchainIdentity = kFixtureToolchainIdentity;
+        std::memcpy(blob.data(), &envelope, sizeof(envelope));
+        const ShaderArtifactDecodeOptions options{
+            .Target = target, .ExpectedGpuArtifact = envelope.GpuArtifact, .ExpectedToolchainIdentity = kFixtureToolchainIdentity};
+        ASSERT_TRUE(DecodeShaderArtifact(blob, options).has_value());
+        shader::WireTypeRecord leaf{};
+        const auto offset = envelope.TypeRecords.Offset + sizeof(shader::WireTypeRecord);
+        std::memcpy(&leaf, blob.data() + offset, sizeof(leaf));
+        leaf.Stride = 12;
+        leaf.ScalarKind = static_cast<uint32_t>(shader::ShaderScalarKind::Float);
+        leaf.RowCount = 1;
+        leaf.ColumnCount = 3;
+        std::memcpy(blob.data() + offset, &leaf, sizeof(leaf));
+        ShaderArtifactDecodeError error{};
+        const auto padded = DecodeShaderArtifact(blob, options, &error);
+        EXPECT_EQ(padded.has_value(), target == shader::ShaderTarget::DXIL);
+        EXPECT_EQ(error, target == shader::ShaderTarget::DXIL
+                             ? ShaderArtifactDecodeError::None
+                             : ShaderArtifactDecodeError::InvalidTypeRecord);
+        auto matrixBlob = MakeSyntheticArtifact();
+        std::memcpy(&envelope, matrixBlob.data(), sizeof(envelope));
+        envelope.Target = static_cast<uint8_t>(target);
+        envelope.ToolchainIdentity = kFixtureToolchainIdentity;
+        std::memcpy(matrixBlob.data(), &envelope, sizeof(envelope));
+        shader::WireTypeRecord root{};
+        std::memcpy(&root, matrixBlob.data() + envelope.TypeRecords.Offset, sizeof(root));
+        std::memcpy(&leaf, matrixBlob.data() + offset, sizeof(leaf));
+        root.Size = root.Stride = 64;
+        leaf.Kind = static_cast<uint32_t>(shader::ShaderTypeKind::Matrix);
+        leaf.Size = leaf.Stride = 64;
+        leaf.ScalarKind = static_cast<uint32_t>(shader::ShaderScalarKind::Float);
+        leaf.RowCount = leaf.ColumnCount = 4;
+        std::memcpy(matrixBlob.data() + envelope.TypeRecords.Offset, &root, sizeof(root));
+        std::memcpy(matrixBlob.data() + offset, &leaf, sizeof(leaf));
+        ASSERT_TRUE(DecodeShaderArtifact(matrixBlob, options).has_value());
+        root.Size = root.Stride = 80;
+        leaf.Size = 80;
+        std::memcpy(matrixBlob.data() + envelope.TypeRecords.Offset, &root, sizeof(root));
+        std::memcpy(matrixBlob.data() + offset, &leaf, sizeof(leaf));
+        EXPECT_FALSE(DecodeShaderArtifact(matrixBlob, options, &error).has_value());
+        EXPECT_EQ(error, ShaderArtifactDecodeError::InvalidTypeRecord);
+    }
+}
+
 TEST(RadRayRenderShaderArtifact, BindingHandleRejectsForeignLayoutAddress) {
     int firstLayout = 0;
     int secondLayout = 0;
@@ -731,7 +781,10 @@ TEST(RadRayRenderShaderArtifact, TypeTreeMutationDoesNotChangeGpuArtifactIdentit
     ASSERT_EQ(envelope.TypeRecords.Size, 8u * sizeof(shader::WireTypeRecord));
     vector<shader::WireTypeRecord> types(8);
     std::memcpy(types.data(), original.data() + envelope.TypeRecords.Offset, envelope.TypeRecords.Size);
-    types[6].Offset = 16;
+    // Reorder the two occupied ranges without overlap: the type tree may change
+    // independently of GPU identity, but must still describe a valid layout.
+    types[6].Offset = 32;
+    types[7].Offset = 0;
     vector<byte> mutated = original;
     std::memcpy(mutated.data() + envelope.TypeRecords.Offset, types.data(), envelope.TypeRecords.Size);
 
@@ -748,6 +801,20 @@ TEST(RadRayRenderShaderArtifact, TypeTreeMutationDoesNotChangeGpuArtifactIdentit
     EXPECT_EQ(
         artifact->Generic().Envelope().GpuArtifact,
         test::ExpectedGpuArtifact(fixtureIndex.value(), shader::ShaderTarget::DXIL));
+    // The former mutation placed Transform at [16,80) over Data at [64,96).
+    types[6].Offset = 16;
+    types[7].Offset = 64;
+    std::memcpy(mutated.data() + envelope.TypeRecords.Offset, types.data(), envelope.TypeRecords.Size);
+    EXPECT_FALSE(DecodeDxilShaderArtifact(
+                     mutated,
+                     ShaderArtifactDecodeOptions{
+                         .Target = shader::ShaderTarget::DXIL,
+                         .ExpectedGpuArtifact = test::ExpectedGpuArtifact(
+                             fixtureIndex.value(), shader::ShaderTarget::DXIL),
+                         .ExpectedToolchainIdentity = kFixtureToolchainIdentity},
+                     &error)
+                     .has_value());
+    EXPECT_EQ(error, ShaderArtifactDecodeError::InvalidTypeRecord);
 }
 
 TEST(RadRayRenderShaderArtifact, FailsClosedForIdentityAndWireCorruption) {

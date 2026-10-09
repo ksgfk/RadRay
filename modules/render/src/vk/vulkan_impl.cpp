@@ -3725,6 +3725,10 @@ QueueType QueueVulkan::GetQueueType() const noexcept {
     return _type;
 }
 
+TimestampClockCalibrationResult QueueVulkan::GetTimestampClockCalibration() const noexcept {
+    return {.Status = TimestampClockCalibrationStatus::Unsupported};
+}
+
 void QueueVulkan::DestroyImpl() noexcept {
 #ifdef RADRAY_ENABLE_PROFILER
     if (_profilerContext != nullptr) {
