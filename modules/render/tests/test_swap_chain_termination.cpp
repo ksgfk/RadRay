@@ -45,6 +45,14 @@ TEST(RadRaySwapChainTermination, DiscardPreservesForeignTokenAndRequiresRecreate
     ASSERT_TRUE(a.Get()->Recreate(128, 128, TextureFormat::RGBA8_UNORM, PresentMode::FIFO));
     auto next = a.Get()->AcquireNext(1000);
     ASSERT_EQ(next.Status, SwapChainStatus::Success); ASSERT_TRUE(next.Frame);
+    for (int i = 0; i < 4; ++i) {
+        context.Queue->Wait();
+        ASSERT_EQ(a.Get()->DiscardAcquiredFrame(std::move(*next.Frame)).Status, SwapChainStatus::Success);
+        EXPECT_FALSE(next.Frame->IsValid());
+        ASSERT_TRUE(a.Get()->Recreate(128, 128, TextureFormat::RGBA8_UNORM, PresentMode::FIFO));
+        next = a.Get()->AcquireNext(1000);
+        ASSERT_EQ(next.Status, SwapChainStatus::Success); ASSERT_TRUE(next.Frame);
+    }
     const auto presented = a.Get()->Present(std::move(*next.Frame));
     EXPECT_TRUE(presented.Status == SwapChainStatus::Success || presented.Status == SwapChainStatus::RetryLater);
     if (presented.Status == SwapChainStatus::RetryLater)
@@ -72,6 +80,15 @@ TEST(RadRaySwapChainTermination, HiddenPresentConsumesTokenAndReportsRetry) {
     EXPECT_FALSE(acquired.Frame->IsValid());
     EXPECT_EQ(chain.Get()->AcquireNext(0).Status, SwapChainStatus::RetryLater);
     context.Queue->Wait();
+    for (int i = 0; i < 3; ++i) {
+        ShowWindow(window.Handle, SW_SHOW);
+        auto resumed = chain.Get()->AcquireNext(1000);
+        ASSERT_EQ(resumed.Status, SwapChainStatus::Success); ASSERT_TRUE(resumed.Frame);
+        ShowWindow(window.Handle, SW_HIDE);
+        EXPECT_EQ(chain.Get()->Present(std::move(*resumed.Frame)).Status, SwapChainStatus::RetryLater);
+        EXPECT_FALSE(resumed.Frame->IsValid());
+        context.Queue->Wait();
+    }
 #else
     GTEST_SKIP() << "D3D12 backend not built";
 #endif

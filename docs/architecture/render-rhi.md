@@ -533,6 +533,11 @@ Recreate 或关闭；错误和默认不支持实现返回 Error 且保留原 fra
 D3D12 Present 的不可呈现 HWND/实际 DXGI_STATUS_OCCLUDED 分支返回 RetryLater，并已消费该帧，
 不能把它统计成实际可见呈现；错误的外来 frame 保留给真正 owner 终结。
 
+D3D12 记录已经取得但尚未通过实际 Present 使用的 frame-latency readiness。
+显式撤销、ResizeBuffers 或隐藏窗口跳过 Present 不会消费这个 readiness；下一次合法
+acquire 复用它，实际 Present 成功后才重新等待。否则连续撤销/重配会重复消耗 waitable
+object 的信号并永久 RetryLater。调用方仍须在撤销/重配前排空 GPU，不能借此绕过在途资源维护。
+
 ## 视口：两个后端都原样透传
 
 `SetViewport(Viewport)` 在 D3D12 直填 `D3D12_VIEWPORT`，在 Vulkan 直填 `VkViewport`，

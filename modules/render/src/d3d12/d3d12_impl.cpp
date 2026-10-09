@@ -5037,8 +5037,11 @@ SwapChainAcquireResult SwapChainD3D12::AcquireNext(uint64_t timeoutMs) noexcept 
     } else {
         milliseconds = static_cast<DWORD>(timeoutMs);
     }
-    const DWORD waitResult = ::WaitForSingleObjectEx(_frameLatencyEvent, milliseconds, false);
+    // A discarded/skipped frame did not enqueue DXGI Present. Keep its acquired
+    // readiness until a real Present, rather than consuming another wait slot.
+    const DWORD waitResult = _frameLatencyReady ? WAIT_OBJECT_0 : ::WaitForSingleObjectEx(_frameLatencyEvent, milliseconds, false);
     if (waitResult == WAIT_OBJECT_0) {
+        _frameLatencyReady = true;
         const auto curr = static_cast<uint32_t>(_swapchain->GetCurrentBackBufferIndex());
         _outstandingBackBufferIndex = curr;
         ++_outstandingFrameToken;
@@ -5112,6 +5115,7 @@ SwapChainPresentResult SwapChainD3D12::Present(SwapChainFrame&& frame) noexcept 
     _CheckD3D12Result(_device->_device.Get(), hr, "IDXGISwapChain::Present");
     result.NativeStatusCode = static_cast<int64_t>(hr);
     result.Status = hr == DXGI_STATUS_OCCLUDED ? SwapChainStatus::RetryLater : SwapChainStatus::Success;
+    if (hr != DXGI_STATUS_OCCLUDED) _frameLatencyReady = false;
     return result;
 }
 

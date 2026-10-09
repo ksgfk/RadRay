@@ -694,6 +694,7 @@ public:
     uint64_t _outstandingFrameToken{0};
     uint32_t _outstandingBackBufferIndex{std::numeric_limits<uint32_t>::max()};
     bool _requiresRecreateAfterDiscard{false};
+    bool _frameLatencyReady{false};
     TextureFormat _reqFormat{TextureFormat::UNKNOWN};
 };
 
