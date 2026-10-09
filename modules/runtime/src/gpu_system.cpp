@@ -381,7 +381,7 @@ void GpuSystem::SubmitFrame(uint32_t flightIndex) {
     };
     const auto presentTarget = [](AppFrameTarget& target) {
         const auto result = target.Window->PresentSwapChainFrame(std::move(target._frame));
-        if (result.Status != render::SwapChainStatus::Success && result.Status != render::SwapChainStatus::RequireRecreate) {
+        if (result.Status != render::SwapChainStatus::Success && result.Status != render::SwapChainStatus::RequireRecreate && result.Status != render::SwapChainStatus::RetryLater) {
             RADRAY_ERR_LOG("failed to present swapchain frame: status={}, native={}", result.Status, result.NativeStatusCode);
         }
     };

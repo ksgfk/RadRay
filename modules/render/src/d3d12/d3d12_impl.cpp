@@ -5009,6 +5009,10 @@ void SwapChainD3D12::Destroy() noexcept {
 
 SwapChainAcquireResult SwapChainD3D12::AcquireNext(uint64_t timeoutMs) noexcept {
     SwapChainAcquireResult result{};
+    if (_requiresRecreateAfterDiscard) {
+        result.Status = SwapChainStatus::RequireRecreate;
+        return result;
+    }
     RADRAY_ASSERT(_outstandingBackBufferIndex == std::numeric_limits<uint32_t>::max());
     if (_outstandingBackBufferIndex != std::numeric_limits<uint32_t>::max()) {
         RADRAY_ERR_LOG("IDXGISwapChain::AcquireNext called before Present");
@@ -5062,12 +5066,8 @@ SwapChainAcquireResult SwapChainD3D12::AcquireNext(uint64_t timeoutMs) noexcept 
 
 SwapChainPresentResult SwapChainD3D12::Present(SwapChainFrame&& frame) noexcept {
     SwapChainPresentResult result{};
-    RADRAY_ASSERT(frame.IsValid());
-    RADRAY_ASSERT(ValidateFrame(frame, this, _outstandingFrameToken));
-    RADRAY_ASSERT(_outstandingBackBufferIndex != std::numeric_limits<uint32_t>::max());
     if (!ValidateFrame(frame, this, _outstandingFrameToken) || _outstandingBackBufferIndex == std::numeric_limits<uint32_t>::max()) {
         RADRAY_ERR_LOG("IDXGISwapChain::Present skipped: invalid or foreign SwapChainFrame");
-        InvalidateFrame(frame);
         result.NativeStatusCode = static_cast<int64_t>(E_INVALIDARG);
         result.Status = SwapChainStatus::Error;
         return result;
@@ -5086,7 +5086,7 @@ SwapChainPresentResult SwapChainD3D12::Present(SwapChainFrame&& frame) noexcept 
             _presentQueue->Wait();
         }
         result.NativeStatusCode = static_cast<int64_t>(DXGI_STATUS_OCCLUDED);
-        result.Status = SwapChainStatus::Success;
+        result.Status = SwapChainStatus::RetryLater;
         return result;
     }
     UINT syncInterval = 0;
@@ -5111,8 +5111,19 @@ SwapChainPresentResult SwapChainD3D12::Present(SwapChainFrame&& frame) noexcept 
     const HRESULT hr = _swapchain->Present(syncInterval, presentFlags);
     _CheckD3D12Result(_device->_device.Get(), hr, "IDXGISwapChain::Present");
     result.NativeStatusCode = static_cast<int64_t>(hr);
-    result.Status = SwapChainStatus::Success;
+    result.Status = hr == DXGI_STATUS_OCCLUDED ? SwapChainStatus::RetryLater : SwapChainStatus::Success;
     return result;
+}
+
+SwapChainPresentResult SwapChainD3D12::DiscardAcquiredFrame(SwapChainFrame&& frame) noexcept {
+    if (!ValidateFrame(frame, this, _outstandingFrameToken) ||
+        _outstandingBackBufferIndex == std::numeric_limits<uint32_t>::max()) {
+        return {.NativeStatusCode = static_cast<int64_t>(E_INVALIDARG), .Status = SwapChainStatus::Error};
+    }
+    InvalidateFrame(frame);
+    _outstandingBackBufferIndex = std::numeric_limits<uint32_t>::max();
+    _requiresRecreateAfterDiscard = true;
+    return {.NativeStatusCode = 0, .Status = SwapChainStatus::Success};
 }
 
 bool SwapChainD3D12::Recreate(uint32_t width, uint32_t height, TextureFormat format, PresentMode presentMode) noexcept {
@@ -5136,6 +5147,7 @@ bool SwapChainD3D12::Recreate(uint32_t width, uint32_t height, TextureFormat for
         return false;
     }
     _outstandingBackBufferIndex = std::numeric_limits<uint32_t>::max();
+    _requiresRecreateAfterDiscard = false;
     return true;
 }
 

@@ -1506,6 +1506,12 @@ public:
 
     virtual SwapChainPresentResult Present(SwapChainFrame&& frame) noexcept = 0;
 
+    // Explicit non-presenting termination. The caller must discard unsubmitted
+    // backbuffer commands and wait all submitted work before calling. Success
+    // consumes only this chain's outstanding token and requires recreate/close;
+    // Error leaves frame untouched (including unsupported backends).
+    virtual SwapChainPresentResult DiscardAcquiredFrame(SwapChainFrame&& frame) noexcept;
+
     virtual bool Recreate(uint32_t width, uint32_t height, TextureFormat format, PresentMode presentMode) noexcept = 0;
 
     virtual uint32_t GetBackBufferCount() const noexcept = 0;

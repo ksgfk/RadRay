@@ -191,6 +191,10 @@ void SwapChain::InvalidateFrame(SwapChainFrame& frame) noexcept {
     frame = SwapChainFrame{};
 }
 
+SwapChainPresentResult SwapChain::DiscardAcquiredFrame(SwapChainFrame&&) noexcept {
+    return {.NativeStatusCode = -1, .Status = SwapChainStatus::Error};
+}
+
 Nullable<shared_ptr<Device>> Device::Create(const DeviceDescriptor& desc) {
     return std::visit(
         [](auto&& arg) -> Nullable<shared_ptr<Device>> {

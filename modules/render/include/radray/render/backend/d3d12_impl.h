@@ -670,6 +670,8 @@ public:
 
     SwapChainPresentResult Present(SwapChainFrame&& frame) noexcept override;
 
+    SwapChainPresentResult DiscardAcquiredFrame(SwapChainFrame&& frame) noexcept override;
+
     bool Recreate(uint32_t width, uint32_t height, TextureFormat format, PresentMode presentMode) noexcept override;
 
     uint32_t GetBackBufferCount() const noexcept override;
@@ -691,6 +693,7 @@ public:
     PresentMode _mode{PresentMode::FIFO};
     uint64_t _outstandingFrameToken{0};
     uint32_t _outstandingBackBufferIndex{std::numeric_limits<uint32_t>::max()};
+    bool _requiresRecreateAfterDiscard{false};
     TextureFormat _reqFormat{TextureFormat::UNKNOWN};
 };
 

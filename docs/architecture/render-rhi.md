@@ -527,6 +527,12 @@ DXGI 的 frame-latency waitable object 达到同一效果。
 `SwapChainFrame` 是 move-only 句柄，带 owner + token，经 protected 的 `MakeFrame` /
 `ValidateFrame` / `InvalidateFrame` 保证不能伪造也不能用过期帧。
 
+`DiscardAcquiredFrame` 是显式的非呈现终结：调用者先丢弃未提交的 backbuffer 命令并等待已提交工作。
+D3D12 仅在 owner/token 匹配时消费 outstanding frame，返回既有 result 的 Success，之后必须
+Recreate 或关闭；错误和默认不支持实现返回 Error 且保留原 frame。析构不是 token 取消。
+D3D12 Present 的不可呈现 HWND/实际 DXGI_STATUS_OCCLUDED 分支返回 RetryLater，并已消费该帧，
+不能把它统计成实际可见呈现；错误的外来 frame 保留给真正 owner 终结。
+
 ## 视口：两个后端都原样透传
 
 `SetViewport(Viewport)` 在 D3D12 直填 `D3D12_VIEWPORT`，在 Vulkan 直填 `VkViewport`，
