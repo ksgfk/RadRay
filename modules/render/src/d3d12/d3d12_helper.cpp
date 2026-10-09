@@ -490,6 +490,7 @@ D3D12_BLEND MapBlendAlpha(BlendFactor v) noexcept {
 }
 
 std::optional<D3D12_COLOR_WRITE_ENABLE> MapColorWrites(ColorWrites v) noexcept {
+    if (v == ColorWrites{}) return static_cast<D3D12_COLOR_WRITE_ENABLE>(0);
     if (v == ColorWrite::Red) return D3D12_COLOR_WRITE_ENABLE_RED;
     if (v == ColorWrite::Green) return D3D12_COLOR_WRITE_ENABLE_GREEN;
     if (v == ColorWrite::Blue) return D3D12_COLOR_WRITE_ENABLE_BLUE;

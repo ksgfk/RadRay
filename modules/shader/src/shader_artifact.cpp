@@ -82,14 +82,14 @@ bool ValidateTypeRecords(const ShaderArtifactView& artifact) noexcept {
                 return false;
             }
         } else {
-            // The supported DXIL float3 record has a 12-byte payload but Size also
-            // includes the gap to the next field. Other padded shapes remain strict.
+            // DXIL float/float3 leaf Size includes the gap to the next field.
+            // Stride remains payload size; parent bounds and sibling ranges still apply.
             const bool paddedDxilLeaf = artifact.Envelope().Target == static_cast<uint8_t>(ShaderTarget::DXIL) &&
                                         type.ParentIndex != kNoParent && type.TypeIndex == kShaderNoType &&
-                                        type.Kind == static_cast<uint32_t>(ShaderTypeKind::Vector) &&
                                         type.ScalarKind == static_cast<uint32_t>(ShaderScalarKind::Float) &&
-                                        type.RowCount == 1 && type.ColumnCount == 3 &&
-                                        type.Stride == 12 && type.Flags == 0;
+                                        type.RowCount == 1 && type.Flags == 0 &&
+                                        ((type.Kind == kScalar && type.ColumnCount == 1 && type.Stride == 4) ||
+                                         (type.Kind == static_cast<uint32_t>(ShaderTypeKind::Vector) && type.ColumnCount == 3 && type.Stride == 12));
             if (type.ElementCount != 1 || type.Size < type.Stride ||
                 (!paddedDxilLeaf && type.Size != type.Stride)) {
                 return false;

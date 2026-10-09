@@ -32,6 +32,10 @@ write/resolve/availability 语义不变。测试见 `RadRayTimestampClock`。
 
 ## D3D12 执行失败
 
+D3D12 的 `ColorTargetState::WriteMask={}` 是合法零写掩码：颜色附件仍存在，draw 不写颜色，
+depth test/write 按原 depth state 执行。它不等同于没有颜色附件；未知掩码位仍拒绝。
+真实 GPU 回归见 `RadRayRenderPsoSmoke.D3D12ZeroColorMaskPreservesColorAndWritesDepth`。
+
 D3D12 命令列表 Close、队列 Wait/Signal、Present 与 ResizeBuffers 的失败立即终止进程，
 诊断同时保留调用 HRESULT 和 `GetDeviceRemovedReason()`；执行提交边界也检查设备状态，
 因为设备移除后部分队列调用仍可能返回成功。创建接口原有的可空结果契约不变。

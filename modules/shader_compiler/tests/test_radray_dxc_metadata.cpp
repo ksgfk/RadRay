@@ -2,6 +2,7 @@
 #include <radray/shader/shader_artifact.h>
 
 #include <gtest/gtest.h>
+#include <fmt/format.h>
 
 #include <algorithm>
 #include <cstring>
@@ -2140,6 +2141,93 @@ float4 VSMain(float3 position : POSITION) : SV_Position {
     reject([](auto& records) { records[1].ScalarKind = static_cast<uint32_t>(shader::ShaderScalarKind::UnsignedInteger); });
     reject([](auto& records) { records[1].Flags = 1; });
     reject([](auto& records) { records[1].RowCount = 3; });
+}
+
+TEST(RadRayDxcMetadata, PaddedDxilScalarLeavesPreserveOccupiedRanges) {
+    Client client;
+    ASSERT_TRUE(client.IsAvailable());
+    for (uint32_t firstRegister : {0u, 1u}) {
+        const string source = fmt::format(R"hlsl(
+cbuffer Lighting : register(b0) {{
+    float Anchor : packoffset(c{}.x);
+    float BrightnessFactor : packoffset(c{}.y);
+    float3 BlockLightTint : packoffset(c{});
+    float Neighbor : packoffset(c{}.w);
+}};
+[shader("vertex")]
+float4 VSMain(float3 position : POSITION) : SV_Position {{
+    return float4(position + BlockLightTint + float3(Anchor, BrightnessFactor, Neighbor), 1);
+}}
+)hlsl",
+                                          firstRegister, firstRegister, firstRegister + 1, firstRegister + 1);
+        shader::CompileVariantRequest request;
+        request.SourceName = "fixtures/padded_scalar.hlsl";
+        request.RootSource = CopyBytes(source);
+        request.Targets = shader::ShaderTargetMask::DXIL;
+        const auto contract = client.DiscoverSourceContract(request.SourceName, request.RootSource, shader::ShaderTarget::DXIL, {});
+        ASSERT_TRUE(contract.Succeeded());
+        request.ExpectedContract = contract.Contract.Hash;
+        const auto compiled = client.CompileVariant(request, {});
+        ASSERT_EQ(compiled.Status, shader::CompileStatus::Success);
+        ASSERT_EQ(compiled.Lanes.size(), 1u);
+        const auto& original = compiled.Lanes.front().Metadata;
+        shader::WireMetadataEnvelope envelope{};
+        ASSERT_GE(original.size(), sizeof(envelope));
+        std::memcpy(&envelope, original.data(), sizeof(envelope));
+        ASSERT_EQ(envelope.TypeRecords.Size, 5u * sizeof(shader::WireTypeRecord));
+        vector<shader::WireTypeRecord> types(5);
+        std::memcpy(types.data(), original.data() + envelope.TypeRecords.Offset, envelope.TypeRecords.Size);
+        EXPECT_EQ(types[1].Offset, firstRegister * 16);
+        EXPECT_EQ(types[1].Size, 4u);  // Adjacent, unpadded scalar.
+        EXPECT_EQ(types[2].Offset, firstRegister * 16 + 4);
+        EXPECT_EQ(types[2].Size, 12u);
+        EXPECT_EQ(types[2].Stride, 4u);
+        EXPECT_EQ(types[3].Offset, (firstRegister + 1) * 16);
+        EXPECT_EQ(types[3].Size, 12u);
+        EXPECT_EQ(types[4].Offset, (firstRegister + 1) * 16 + 12);
+        EXPECT_EQ(types[4].Size, 4u);
+        const shader::ShaderArtifactDecodeOptions options{
+            .Target = shader::ShaderTarget::DXIL, .ExpectedGpuArtifact = envelope.GpuArtifact, .ExpectedToolchainIdentity = shader::kShaderToolchainIdentity};
+        shader::ShaderArtifactDecodeError error{};
+        auto artifact = shader::DecodeShaderArtifact(original, options, &error);
+        ASSERT_TRUE(artifact.has_value()) << static_cast<uint32_t>(error);
+        EXPECT_EQ(artifact->Types()[2].Size, 12u);
+        EXPECT_EQ(artifact->Types()[2].Stride, 4u);
+        const auto reject = [&](auto&& mutate) {
+            auto changedTypes = types;
+            mutate(changedTypes);
+            auto changed = original;
+            std::memcpy(changed.data() + envelope.TypeRecords.Offset, changedTypes.data(), envelope.TypeRecords.Size);
+            shader::ShaderArtifactDecodeError failure{};
+            EXPECT_FALSE(shader::DecodeShaderArtifact(changed, options, &failure).has_value());
+            EXPECT_EQ(failure, shader::ShaderArtifactDecodeError::InvalidTypeRecord);
+        };
+        reject([](auto& t) { t[2].Kind = static_cast<uint32_t>(shader::ShaderTypeKind::Vector); });
+        reject([](auto& t) { t[2].Kind = static_cast<uint32_t>(shader::ShaderTypeKind::Array); });
+        reject([](auto& t) { t[2].Kind = static_cast<uint32_t>(shader::ShaderTypeKind::Matrix); });
+        reject([](auto& t) { t[2].ScalarKind = static_cast<uint32_t>(shader::ShaderScalarKind::UnsignedInteger); });
+        reject([](auto& t) { t[2].RowCount = 2; });
+        reject([](auto& t) { t[2].ColumnCount = 2; });
+        reject([](auto& t) { t[2].Stride = 8; });
+        reject([](auto& t) { t[2].Size = 3; });
+        reject([](auto& t) { t[2].Size = 13; });  // Overlaps BlockLightTint.
+        reject([](auto& t) { t[2].Offset = t[1].Offset; });
+        reject([](auto& t) { t[2].Offset = t[0].Size; });
+        reject([](auto& t) { t[2].TypeIndex = 0; });
+        reject([](auto& t) { t[2].Flags = 1; });
+        reject([](auto& t) { t[2].ElementCount = 2; });
+        reject([](auto& t) { t[2].ParentIndex = shader::kShaderNoType; });
+        reject([](auto& t) { t[0].Kind = static_cast<uint32_t>(shader::ShaderTypeKind::Scalar); });
+        auto wrongTarget = original;
+        auto spirvEnvelope = envelope;
+        spirvEnvelope.Target = static_cast<uint8_t>(shader::ShaderTarget::SPIRV);
+        spirvEnvelope.RootSignature = {};
+        std::memcpy(wrongTarget.data(), &spirvEnvelope, sizeof(spirvEnvelope));
+        auto spirvOptions = options;
+        spirvOptions.Target = shader::ShaderTarget::SPIRV;
+        EXPECT_FALSE(shader::DecodeShaderArtifact(wrongTarget, spirvOptions, &error).has_value());
+        EXPECT_EQ(error, shader::ShaderArtifactDecodeError::InvalidTypeRecord);
+    }
 }
 
 }  // namespace

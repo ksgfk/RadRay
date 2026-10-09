@@ -1067,6 +1067,260 @@ void CSMain() {{
 #endif
 }
 
+TEST(RadRayRenderShaderPadding, ScalarFloatReadsPayloadAndAdjacentFieldsAcrossGaps) {
+#if defined(RADRAY_ENABLE_D3D12)
+    test::DeviceContext context;
+    if (!test::TryCreateDevice(RenderBackend::D3D12, context, true)) GTEST_SKIP() << context.Reason;
+    shader_compiler::Client compiler;
+    ASSERT_TRUE(compiler.IsAvailable());
+    for (uint32_t firstRegister : {0u, 1u}) {
+        const string source = fmt::format(R"hlsl(
+cbuffer Lighting : register(b0) {{
+    float Anchor : packoffset(c{}.x);
+    float BrightnessFactor : packoffset(c{}.y);
+    float3 BlockLightTint : packoffset(c{});
+    float Neighbor : packoffset(c{}.w);
+}};
+RWStructuredBuffer<uint> Output : register(u0);
+[shader("compute")][numthreads(1,1,1)]
+void CSMain() {{
+    Output[0]=asuint(Anchor); Output[1]=asuint(BrightnessFactor);
+    Output[2]=asuint(BlockLightTint.x); Output[3]=asuint(BlockLightTint.y); Output[4]=asuint(BlockLightTint.z);
+    Output[5]=asuint(Neighbor);
+}}
+)hlsl",
+                                          firstRegister, firstRegister, firstRegister + 1, firstRegister + 1);
+        shader::CompileVariantRequest request;
+        request.SourceName = "fixtures/padded_scalar_gpu.hlsl";
+        auto bytes = std::as_bytes(std::span{source.data(), source.size()});
+        request.RootSource.assign(bytes.begin(), bytes.end());
+        request.Targets = shader::ShaderTargetMask::DXIL;
+        auto contract = compiler.DiscoverSourceContract(request.SourceName, request.RootSource, shader::ShaderTarget::DXIL, {});
+        ASSERT_TRUE(contract.Succeeded());
+        request.ExpectedContract = contract.Contract.Hash;
+        auto result = compiler.CompileVariant(request, {});
+        ASSERT_EQ(result.Status, shader::CompileStatus::Success);
+        ASSERT_EQ(result.Lanes.size(), 1u);
+        auto& metadata = result.Lanes.front().Metadata;
+        shader::WireMetadataEnvelope envelope{};
+        ASSERT_GE(metadata.size(), sizeof(envelope));
+        std::memcpy(&envelope, metadata.data(), sizeof(envelope));
+        auto artifact = CreateBackendShaderArtifact(*context.Device, metadata,
+                                                    {.Target = shader::ShaderTarget::DXIL, .ExpectedGpuArtifact = envelope.GpuArtifact, .ExpectedToolchainIdentity = shader::kShaderToolchainIdentity});
+        ASSERT_TRUE(artifact);
+        const auto& generic = artifact->Generic();
+        auto scalar = std::find_if(generic.Types().begin(), generic.Types().end(), [&](const auto& t) { return generic.GetName(t.Name) == "BrightnessFactor"; });
+        ASSERT_NE(scalar, generic.Types().end());
+        EXPECT_EQ(scalar->Offset, firstRegister * 16 + 4);
+        EXPECT_EQ(scalar->Size, 12u);
+        EXPECT_EQ(scalar->Stride, 4u);
+        auto code = generic.FindStageBytecode(shader::ShaderStage::Compute);
+        ASSERT_TRUE(code);
+        auto shader = context.Device->CreateShader({*code, artifact->Category, ShaderStage::Compute});
+        ASSERT_TRUE(shader);
+        auto pso = context.Device->CreateComputePipelineState({artifact->Layout.get(), {shader.Get(), "CSMain"}});
+        ASSERT_TRUE(pso);
+        if (const char* directory = std::getenv("RADRAY_TEST_EVIDENCE_DIR")) {
+            const auto destination = std::filesystem::path{directory} / fmt::format("scalar-offset{}", firstRegister * 16 + 4);
+            std::error_code error;
+            std::filesystem::create_directories(destination, error);
+            ASSERT_FALSE(error);
+            std::ofstream hlsl{destination / "source.hlsl", std::ios::binary};
+            hlsl.write(source.data(), source.size());
+            ASSERT_TRUE(hlsl.good());
+            std::ofstream file{destination / "artifact.bin", std::ios::binary};
+            file.write(reinterpret_cast<const char*>(metadata.data()), metadata.size());
+            ASSERT_TRUE(file.good());
+        }
+        for (uint32_t round = 0; round < 2; ++round) {
+            const std::array<float, 6> values = round == 0 ? std::array<float, 6>{.125f, .25f, .5f, .75f, 1.f, 1.25f}
+                                                           : std::array<float, 6>{2.75f, 2.5f, 2.25f, 2.f, 1.75f, 1.5f};
+            auto uniform = context.Device->CreateBuffer({256, MemoryType::Upload, BufferUse::CBuffer | BufferUse::MapWrite});
+            auto output = context.Device->CreateBuffer({24, MemoryType::Device, BufferUse::UnorderedAccess | BufferUse::CopySource});
+            auto readback = context.Device->CreateBuffer({24, MemoryType::ReadBack, BufferUse::CopyDestination | BufferUse::MapRead});
+            ASSERT_TRUE(uniform);
+            ASSERT_TRUE(output);
+            ASSERT_TRUE(readback);
+            auto* mapped = static_cast<byte*>(uniform->Map(0, 256));
+            ASSERT_NE(mapped, nullptr);
+            std::memset(mapped, round ? 0xa5 : 0x5a, 256);
+            std::memcpy(mapped + firstRegister * 16, values.data(), 8);
+            std::memcpy(mapped + (firstRegister + 1) * 16, values.data() + 2, 16);
+            uniform->FlushMappedRange({0, 256});
+            uniform->Unmap();
+            auto set = context.Device->CreateShaderParameterSet({artifact->Layout.get(), 0});
+            ASSERT_TRUE(set);
+            ASSERT_TRUE(set->Set(artifact->Layout->FindBinding("Lighting"), 0, ShaderBufferBinding{uniform.Get(), {0, 256}}));
+            ASSERT_TRUE(set->Set(artifact->Layout->FindBinding("Output"), 0, ShaderBufferBinding{output.Get(), {0, 24}, 4}));
+            ASSERT_TRUE(set->FlushWrites());
+            auto allocator = context.Device->CreateCommandAllocator(context.Queue);
+            ASSERT_TRUE(allocator);
+            auto command = context.Device->CreateCommandBuffer(allocator.Get());
+            ASSERT_TRUE(command);
+            command->Begin();
+            const ResourceBarrierDescriptor initial[]{BarrierBufferDescriptor{output.Get(), BufferState::Undefined, BufferState::UnorderedAccess},
+                                                      BarrierBufferDescriptor{readback.Get(), BufferState::Undefined, BufferState::CopyDestination}};
+            command->ResourceBarrier(initial);
+            auto encoder = command->BeginComputePass();
+            ASSERT_TRUE(encoder);
+            encoder->BindComputePipelineState(pso.Get());
+            encoder->BindShaderParameterSet(0, set.Get());
+            encoder->Dispatch(1, 1, 1);
+            command->EndComputePass(encoder.Release());
+            const ResourceBarrierDescriptor copied = BarrierBufferDescriptor{output.Get(), BufferState::UnorderedAccess, BufferState::CopySource};
+            command->ResourceBarrier(std::span{&copied, 1});
+            command->CopyBufferToBuffer(readback.Get(), 0, output.Get(), 0, 24);
+            command->End();
+            CommandBuffer* commands[]{command.Get()};
+            context.Queue->Submit({.CmdBuffers = commands});
+            context.Queue->Wait();
+            const auto* actual = static_cast<const uint32_t*>(readback->Map(0, 24));
+            ASSERT_NE(actual, nullptr);
+            readback->InvalidateMappedRange({0, 24});
+            for (size_t i = 0; i < values.size(); ++i) {
+                EXPECT_EQ(actual[i], std::bit_cast<uint32_t>(values[i])) << firstRegister << ":" << round << ":" << i;
+                RecordProperty(fmt::format("offset{}_round{}_component{}", firstRegister * 16 + 4, round, i), fmt::format("{}", actual[i]));
+            }
+            readback->Unmap();
+        }
+    }
+    context.Reset();
+    EXPECT_EQ(context.ValidationErrors.load(), 0u);
+#else
+    GTEST_SKIP() << "D3D12 is disabled";
+#endif
+}
+
+TEST(RadRayRenderPsoSmoke, D3D12ZeroColorMaskPreservesColorAndWritesDepth) {
+#if defined(RADRAY_ENABLE_D3D12)
+    test::DeviceContext context;
+    if (!test::TryCreateDevice(RenderBackend::D3D12, context, true)) GTEST_SKIP() << context.Reason;
+    {
+        auto& device = *context.Device;
+        ASSERT_TRUE(d3d12::MapColorWrites(ColorWrites{}).has_value());
+        EXPECT_EQ(static_cast<uint32_t>(*d3d12::MapColorWrites(ColorWrites{})), 0u);
+        EXPECT_FALSE(d3d12::MapColorWrites(ColorWrites{16u}).has_value());
+        EXPECT_FALSE(d3d12::MapColorWrites(ColorWrites{17u}).has_value());
+        DynamicLibrary compiler{"dxcompiler"};
+        ASSERT_TRUE(compiler.IsValid());
+        const std::string_view source = R"hlsl(
+float4 VSMain(uint id : SV_VertexID) : SV_Position {
+    return float4(float2((id << 1) & 2, id & 2) * 2.0 - 1.0, .5, 1);
+}
+struct DepthOutput { float4 Color : SV_Target0; float Depth : SV_Depth; };
+DepthOutput PSDepth() { DepthOutput output; output.Color=float4(1,0,1,1); output.Depth=.25; return output; }
+float4 PSMain() : SV_Target0 { return float4(1,0,0,1); }
+)hlsl";
+        const auto vertexCode = CompileWithStockDxc(compiler, "VSMain", "vs_6_0", false, source);
+        const auto depthCode = CompileWithStockDxc(compiler, "PSDepth", "ps_6_0", false, source);
+        const auto colorCode = CompileWithStockDxc(compiler, "PSMain", "ps_6_0", false, source);
+        ASSERT_TRUE(vertexCode);
+        ASSERT_TRUE(depthCode);
+        ASSERT_TRUE(colorCode);
+        auto vertex = device.CreateShader({*vertexCode, ShaderBlobCategory::DXIL, ShaderStage::Vertex});
+        auto pixelDepth = device.CreateShader({*depthCode, ShaderBlobCategory::DXIL, ShaderStage::Pixel});
+        auto pixelColor = device.CreateShader({*colorCode, ShaderBlobCategory::DXIL, ShaderStage::Pixel});
+        ASSERT_TRUE(vertex);
+        ASSERT_TRUE(pixelDepth);
+        ASSERT_TRUE(pixelColor);
+        auto layout = static_cast<d3d12::DeviceD3D12&>(device).CreatePipelineLayout(ResolvedD3D12Layout{});
+        ASSERT_TRUE(layout);
+        auto color = test::MakeRenderTarget(&device, TextureFormat::RGBA32_FLOAT, 8, 6, TextureUse::RenderTarget | TextureUse::CopySource);
+        ASSERT_TRUE(color);
+        auto depth = device.CreateTexture({TextureDimension::Dim2D, 8, 6, 1, 1, 1, TextureFormat::D32_FLOAT, MemoryType::Device, TextureUse::DepthStencilWrite});
+        ASSERT_TRUE(depth);
+        auto depthView = device.CreateTextureView({depth.Get(), TextureDimension::Dim2D, TextureFormat::D32_FLOAT, {0, 1, 0, 1}, TextureViewUsage::DepthWrite});
+        ASSERT_TRUE(depthView);
+        const RenderPassColorAttachmentDescriptor clearColor{TextureFormat::RGBA32_FLOAT, 1, LoadAction::Clear, StoreAction::Store};
+        const RenderPassColorAttachmentDescriptor loadColor{TextureFormat::RGBA32_FLOAT, 1, LoadAction::Load, StoreAction::Store};
+        const RenderPassDepthStencilAttachmentDescriptor clearDepth{TextureFormat::D32_FLOAT, 1, LoadAction::Clear, StoreAction::Store, LoadAction::DontCare, StoreAction::Discard, false};
+        const RenderPassDepthStencilAttachmentDescriptor loadDepth{TextureFormat::D32_FLOAT, 1, LoadAction::Load, StoreAction::Store, LoadAction::DontCare, StoreAction::Discard, false};
+        auto clearPass = device.CreateRenderPass({std::span{&clearColor, 1}, clearDepth});
+        auto loadPass = device.CreateRenderPass({std::span{&loadColor, 1}, loadDepth});
+        ASSERT_TRUE(clearPass);
+        ASSERT_TRUE(loadPass);
+        TextureView* colorView = color->View.get();
+        auto clearFramebuffer = device.CreateFramebuffer({clearPass.Get(), std::span{&colorView, 1}, depthView.Get(), 8, 6, 1});
+        auto loadFramebuffer = device.CreateFramebuffer({loadPass.Get(), std::span{&colorView, 1}, depthView.Get(), 8, 6, 1});
+        ASSERT_TRUE(clearFramebuffer);
+        ASSERT_TRUE(loadFramebuffer);
+        auto primitive = PrimitiveState::Default();
+        primitive.Cull = CullMode::None;
+        auto colorState = ColorTargetState::Default(TextureFormat::RGBA32_FLOAT);
+        colorState.WriteMask = ColorWrites{};
+        auto depthState = DepthStencilState::Default();
+        depthState.DepthCompare = CompareFunction::Always;
+        depthState.DepthWriteEnable = true;
+        const auto create = [&](Shader* pixel, std::string_view entry) {
+            return device.CreateGraphicsPipelineState({.PipelineLayout = layout.Get(), .VS = ShaderEntry{vertex.Get(), "VSMain"}, .PS = ShaderEntry{pixel, entry}, .Primitive = primitive, .DepthStencil = depthState, .MultiSample = MultiSampleState::Default(), .ColorTargets = std::span{&colorState, 1}, .CompatibleRenderPass = clearPass.Get()});
+        };
+        auto zero = create(pixelDepth.Get(), "PSDepth");
+        ASSERT_TRUE(zero);
+        colorState.WriteMask = ColorWrite::All;
+        depthState.DepthWriteEnable = false;
+        depthState.DepthCompare = CompareFunction::Less;
+        auto less = create(pixelColor.Get(), "PSMain");
+        ASSERT_TRUE(less);
+        depthState.DepthCompare = CompareFunction::Greater;
+        auto greater = create(pixelColor.Get(), "PSMain");
+        ASSERT_TRUE(greater);
+        const auto pitch = Align(uint64_t{8 * 16}, device.GetDetail().TextureDataPitchAlignment);
+        const auto snapshotSize = pitch * 6;
+        auto readback = device.CreateBuffer({snapshotSize * 3, MemoryType::ReadBack, BufferUse::CopyDestination | BufferUse::MapRead});
+        ASSERT_TRUE(readback);
+        auto allocator = device.CreateCommandAllocator(context.Queue);
+        ASSERT_TRUE(allocator);
+        auto command = device.CreateCommandBuffer(allocator.Get());
+        ASSERT_TRUE(command);
+        command->Begin();
+        const ResourceBarrierDescriptor initial[]{BarrierTextureDescriptor{color->Tex.get(), TextureState::Undefined, TextureState::RenderTarget},
+                                                  BarrierTextureDescriptor{depth.Get(), TextureState::Undefined, TextureState::DepthWrite},
+                                                  BarrierBufferDescriptor{readback.Get(), BufferState::Undefined, BufferState::CopyDestination}};
+        command->ResourceBarrier(initial);
+        const ColorClearValue oldColor{{.125f, .375f, .625f, .875f}};
+        for (uint32_t step = 0; step < 3; ++step) {
+            const ColorClearValue placeholder{};
+            auto encoder = command->BeginRenderPass({step == 0 ? clearPass.Get() : loadPass.Get(), step == 0 ? clearFramebuffer.Get() : loadFramebuffer.Get(),
+                                                     step == 0 ? std::span{&oldColor, 1} : std::span{&placeholder, 1}, DepthStencilClearValue{.75f, 0}});
+            ASSERT_TRUE(encoder);
+            encoder->SetViewport({0, 0, 8, 6, 0, 1});
+            encoder->SetScissor({0, 0, 8, 6});
+            encoder->BindGraphicsPipelineState(step == 0 ? zero.Get() : step == 1 ? less.Get()
+                                                                                  : greater.Get());
+            encoder->Draw(3, 1, 0, 0);
+            command->EndRenderPass(encoder.Release());
+            const ResourceBarrierDescriptor toCopy = BarrierTextureDescriptor{color->Tex.get(), TextureState::RenderTarget, TextureState::CopySource};
+            command->ResourceBarrier(std::span{&toCopy, 1});
+            command->CopyTextureToBuffer(readback.Get(), step * snapshotSize, color->Tex.get(), {0, 1, 0, 1});
+            const ResourceBarrierDescriptor toTarget = BarrierTextureDescriptor{color->Tex.get(), TextureState::CopySource, TextureState::RenderTarget};
+            command->ResourceBarrier(std::span{&toTarget, 1});
+        }
+        command->End();
+        CommandBuffer* commands[]{command.Get()};
+        context.Queue->Submit({.CmdBuffers = commands});
+        context.Queue->Wait();
+        const auto* mapped = static_cast<const byte*>(readback->Map(0, snapshotSize * 3));
+        ASSERT_NE(mapped, nullptr);
+        readback->InvalidateMappedRange({0, snapshotSize * 3});
+        for (uint32_t step = 0; step < 3; ++step)
+            for (uint32_t y = 0; y < 6; ++y)
+                for (uint32_t x = 0; x < 8; ++x) {
+                    std::array<float, 4> actual{};
+                    std::memcpy(actual.data(), mapped + step * snapshotSize + y * pitch + x * 16, 16);
+                    EXPECT_EQ(actual, (step < 2 ? oldColor.Value : std::array<float, 4>{1, 0, 0, 1})) << step << ":" << x << ":" << y;
+                }
+        readback->Unmap();
+        RecordProperty("color_attachment_count", 1);
+        RecordProperty("zero_mask_depth", "Always/write=true/.25");
+        RecordProperty("depth_oracles", "Less(.5)=reject;Greater(.5)=pass");
+    }
+    context.Reset();
+    EXPECT_EQ(context.ValidationErrors.load(), 0u);
+#else
+    GTEST_SKIP() << "D3D12 is disabled";
+#endif
+}
+
 TEST(RadRayRenderPsoSmoke, Vulkan) {
 #if defined(RADRAY_ENABLE_VULKAN)
     test::DeviceContext context;
