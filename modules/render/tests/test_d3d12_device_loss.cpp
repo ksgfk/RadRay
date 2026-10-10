@@ -27,6 +27,7 @@ TEST_P(D3D12DeviceLossDeathTest, StopsBeforeReportingCompletion) {
             case 2: fence->Wait(1); break;
             case 3: context.Queue->Wait(); break;
             case 4: context.Queue->Submit({}); break;
+            case 5: (void)fence->WaitFor(1, 1); break;
         }
         std::_Exit(0);
     }, testing::ExitedWithCode(3), "");
@@ -35,6 +36,6 @@ TEST_P(D3D12DeviceLossDeathTest, StopsBeforeReportingCompletion) {
 #endif
 }
 
-INSTANTIATE_TEST_SUITE_P(D3D12, D3D12DeviceLossDeathTest, testing::Range(0, 5));
+INSTANTIATE_TEST_SUITE_P(D3D12, D3D12DeviceLossDeathTest, testing::Range(0, 6));
 
 }  // namespace radray::render::test

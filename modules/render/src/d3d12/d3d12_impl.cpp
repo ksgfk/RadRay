@@ -3728,22 +3728,29 @@ void FenceD3D12::Wait() noexcept {
 }
 
 void FenceD3D12::Wait(uint64_t value) noexcept {
-    if (GetCompletedValue() < value) {
-        const HRESULT hr = _fence->SetEventOnCompletion(value, _event.Get());
-        if (FAILED(hr)) {
-            _CheckD3D12FenceResult(_fence.Get(), hr, "ID3D12Fence::SetEventOnCompletion");
-        }
-        const DWORD waitResult = ::WaitForSingleObject(_event.Get(), INFINITE);
+    if (!WaitFor(value, 30000)) RADRAY_ABORT("D3D12 fence value {} did not complete within 30 seconds", value);
+}
+
+bool FenceD3D12::WaitFor(uint64_t value, uint64_t timeoutMs) noexcept {
+    if (GetCompletedValue() >= value) return true;
+    if (timeoutMs == 0) return false;
+    const DWORD duration = static_cast<DWORD>(std::min<uint64_t>(timeoutMs, INFINITE - 1));
+    const uint64_t start = ::GetTickCount64();
+    const HRESULT hr = _fence->SetEventOnCompletion(value, _event.Get());
+    if (FAILED(hr)) _CheckD3D12FenceResult(_fence.Get(), hr, "ID3D12Fence::SetEventOnCompletion");
+    while (GetCompletedValue() < value) {
+        const uint64_t elapsed = ::GetTickCount64() - start;
+        if (elapsed >= duration) return GetCompletedValue() >= value;
+        const DWORD waitResult = ::WaitForSingleObject(_event.Get(), duration - static_cast<DWORD>(elapsed));
+        if (waitResult == WAIT_TIMEOUT) return GetCompletedValue() >= value;
         if (waitResult != WAIT_OBJECT_0) {
             const DWORD error = waitResult == WAIT_FAILED ? ::GetLastError() : ERROR_GEN_FAILURE;
             _CheckD3D12FenceResult(_fence.Get(), HRESULT_FROM_WIN32(error), "Fence::WaitForSingleObject");
             RADRAY_ABORT("Fence::WaitForSingleObject returned unexpected status: {}", waitResult);
         }
-        // Device removal also wakes fence events; waking alone does not prove GPU completion.
-        if (GetCompletedValue() < value) {
-            RADRAY_ABORT("D3D12 fence event woke before requested value {} completed", value);
-        }
+        // An earlier timed-out registration or device removal can also wake it.
     }
+    return true;
 }
 
 uint64_t FenceD3D12::GetCompletedValue() const noexcept {
@@ -5085,33 +5092,33 @@ SwapChainPresentResult SwapChainD3D12::Present(SwapChainFrame&& frame) noexcept 
     const HWND hwnd = std::bit_cast<HWND>(_nativeHandler);
     if (!_IsPresentableHwnd(hwnd)) {
         RADRAY_WARN_LOG("IDXGISwapChain::Present skipped: hwnd is not presentable");
-        if (_presentQueue != nullptr) {
-            _presentQueue->Wait();
-        }
         result.NativeStatusCode = static_cast<int64_t>(DXGI_STATUS_OCCLUDED);
         result.Status = SwapChainStatus::RetryLater;
         return result;
     }
     UINT syncInterval = 0;
-    UINT presentFlags = 0;
+    UINT presentFlags = DXGI_PRESENT_DO_NOT_WAIT;
     switch (_mode) {
         case PresentMode::FIFO: {
             syncInterval = 1;
-            presentFlags = 0;
             break;
         }
         case PresentMode::Mailbox: {
             syncInterval = 0;
-            presentFlags = 0;
             break;
         }
         case PresentMode::Immediate: {
             syncInterval = 0;
-            presentFlags = _device->_isAllowTearing ? DXGI_PRESENT_ALLOW_TEARING : 0;
+            if (_device->_isAllowTearing) presentFlags |= DXGI_PRESENT_ALLOW_TEARING;
             break;
         }
     }
     const HRESULT hr = _swapchain->Present(syncInterval, presentFlags);
+    if (hr == DXGI_ERROR_WAS_STILL_DRAWING) {
+        result.NativeStatusCode = static_cast<int64_t>(hr);
+        result.Status = SwapChainStatus::RetryLater;
+        return result;
+    }
     _CheckD3D12Result(_device->_device.Get(), hr, "IDXGISwapChain::Present");
     result.NativeStatusCode = static_cast<int64_t>(hr);
     result.Status = hr == DXGI_STATUS_OCCLUDED ? SwapChainStatus::RetryLater : SwapChainStatus::Success;

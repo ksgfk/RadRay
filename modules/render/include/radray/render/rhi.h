@@ -1487,6 +1487,10 @@ public:
     virtual void Wait() noexcept = 0;
 
     virtual void Wait(uint64_t value) noexcept = 0;
+
+    // Finite CPU wait. False means timeout, never GPU completion; 0 only polls.
+    // The caller serializes waits on this fence. Even UINT64_MAX is finite.
+    virtual bool WaitFor(uint64_t value, uint64_t timeoutMs) noexcept = 0;
 };
 
 class SwapChainSyncObject : public RenderBase {

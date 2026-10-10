@@ -707,6 +707,8 @@ public:
 
     void Wait(uint64_t value) noexcept override;
 
+    bool WaitFor(uint64_t value, uint64_t timeoutMs) noexcept override;
+
 public:
     void DestroyImpl() noexcept;
 

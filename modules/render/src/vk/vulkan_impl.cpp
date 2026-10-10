@@ -5081,27 +5081,15 @@ uint64_t FenceVulkan::GetLastSignaledValue() const noexcept {
 }
 
 void FenceVulkan::Wait() noexcept {
-    uint64_t completedValue = _fence->GetCompletedValue();
-    uint64_t signaledValue = _fenceValue - 1;
-    if (completedValue < signaledValue) {
-        VkSemaphore waitSemaphore = _fence->_semaphore;
-        VkSemaphoreWaitInfo waitInfo{};
-        waitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
-        waitInfo.pNext = nullptr;
-        waitInfo.flags = 0;
-        waitInfo.semaphoreCount = 1;
-        waitInfo.pSemaphores = &waitSemaphore;
-        waitInfo.pValues = &signaledValue;
-        if (auto vr = _device->_ftb.vkWaitSemaphores(_device->_device, &waitInfo, UINT64_MAX);
-            vr != VK_SUCCESS) {
-            RADRAY_ABORT("vkWaitSemaphores failed: {}", vr);
-        }
-    }
+    Wait(_fenceValue - 1);
 }
 
 void FenceVulkan::Wait(uint64_t value) noexcept {
-    uint64_t completedValue = _fence->GetCompletedValue();
-    if (completedValue < value) {
+    if (!WaitFor(value, 30000)) RADRAY_ABORT("Vulkan fence value {} did not complete within 30 seconds", value);
+}
+
+bool FenceVulkan::WaitFor(uint64_t value, uint64_t timeoutMs) noexcept {
+    if (_fence->GetCompletedValue() < value) {
         VkSemaphore waitSemaphore = _fence->_semaphore;
         VkSemaphoreWaitInfo waitInfo{};
         waitInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
@@ -5110,11 +5098,13 @@ void FenceVulkan::Wait(uint64_t value) noexcept {
         waitInfo.semaphoreCount = 1;
         waitInfo.pSemaphores = &waitSemaphore;
         waitInfo.pValues = &value;
-        if (auto vr = _device->_ftb.vkWaitSemaphores(_device->_device, &waitInfo, UINT64_MAX);
-            vr != VK_SUCCESS) {
+        const uint64_t duration = std::min(timeoutMs, (UINT64_MAX - 1) / 1000000) * 1000000;
+        if (auto vr = _device->_ftb.vkWaitSemaphores(_device->_device, &waitInfo, duration); vr != VK_SUCCESS) {
+            if (vr == VK_TIMEOUT) return _fence->GetCompletedValue() >= value;
             RADRAY_ABORT("vkWaitSemaphores failed: {}", vr);
         }
     }
+    return _fence->GetCompletedValue() >= value;
 }
 
 TimelineSemaphoreVulkan::TimelineSemaphoreVulkan(

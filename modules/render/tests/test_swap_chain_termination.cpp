@@ -1,4 +1,8 @@
 #include "gpu_test_fixture.h"
+#include <chrono>
+#include <condition_variable>
+#include <mutex>
+#include <thread>
 
 namespace radray::render::test {
 
@@ -89,6 +93,74 @@ TEST(RadRaySwapChainTermination, HiddenPresentConsumesTokenAndReportsRetry) {
         EXPECT_FALSE(resumed.Frame->IsValid());
         context.Queue->Wait();
     }
+#else
+    GTEST_SKIP() << "D3D12 backend not built";
+#endif
+}
+
+TEST(RadRayFenceWait, TimeoutAndEarlierEventDoNotReportCompletion) {
+#if defined(RADRAY_ENABLE_D3D12)
+    DeviceContext context;
+    if (!TryCreateDevice(RenderBackend::D3D12, context, true)) GTEST_SKIP() << context.Reason;
+    auto created = context.Device->CreateFence(); ASSERT_TRUE(created);
+    auto fence = created.Release();
+    auto* native = d3d12::CastD3D12Object(fence.get());
+    EXPECT_FALSE(fence->WaitFor(1, 0));
+    EXPECT_FALSE(fence->WaitFor(1, 1));
+    EXPECT_EQ(fence->GetCompletedValue(), 0);
+    ASSERT_EQ(native->_fence->Signal(1), S_OK);
+    EXPECT_FALSE(fence->WaitFor(2, 2));
+    EXPECT_EQ(fence->GetCompletedValue(), 1);
+    ASSERT_EQ(native->_fence->Signal(2), S_OK);
+    EXPECT_TRUE(fence->WaitFor(2, 0));
+    EXPECT_TRUE(fence->WaitFor(2, UINT64_MAX));
+    Fence* signals[]{fence.get()}; uint64_t values[]{3};
+    context.Queue->Submit({.SignalFences = signals, .SignalValues = values});
+    EXPECT_TRUE(fence->WaitFor(3, 5000));
+    EXPECT_EQ(fence->GetCompletedValue(), 3);
+    EXPECT_EQ(context.ValidationErrors.load(), 0);
+#else
+    GTEST_SKIP() << "D3D12 backend not built";
+#endif
+}
+
+TEST(RadRaySwapChainTermination, PresentReturnsWhileQueueIsBlocked) {
+#if defined(RADRAY_ENABLE_D3D12)
+    DeviceContext context;
+    if (!TryCreateDevice(RenderBackend::D3D12, context, true)) GTEST_SKIP() << context.Reason;
+    FixtureWindow window(*context.Queue); ASSERT_NE(window.Handle, nullptr);
+    auto chain = CreateFixtureChain(context, window.Handle); ASSERT_TRUE(chain);
+    for (bool hidden : {false, true}) {
+        ShowWindow(window.Handle, SW_SHOW);
+        auto acquired = chain.Get()->AcquireNext(1000);
+        ASSERT_EQ(acquired.Status, SwapChainStatus::Success); ASSERT_TRUE(acquired.Frame);
+        auto created = context.Device->CreateFence(); ASSERT_TRUE(created);
+        auto blocker = created.Release();
+        auto* nativeFence = d3d12::CastD3D12Object(blocker.get());
+        auto* nativeQueue = d3d12::CastD3D12Object(context.Queue);
+        ASSERT_EQ(nativeQueue->_queue->Wait(nativeFence->_fence.Get(), 1), S_OK);
+        std::mutex mutex;
+        std::condition_variable condition;
+        bool returned = false, neededWatchdog = false;
+        std::jthread watchdog([&] {
+            std::unique_lock lock(mutex);
+            neededWatchdog = !condition.wait_for(lock, std::chrono::seconds(2), [&] { return returned; });
+            EXPECT_EQ(nativeFence->_fence->Signal(1), S_OK);
+        });
+        if (hidden) ShowWindow(window.Handle, SW_HIDE);
+        const auto result = chain.Get()->Present(std::move(*acquired.Frame));
+        {
+            std::lock_guard lock(mutex);
+            returned = true;
+        }
+        condition.notify_one(); watchdog.join();
+        EXPECT_FALSE(neededWatchdog) << "Present drained or blocked on the queue";
+        EXPECT_FALSE(acquired.Frame->IsValid());
+        EXPECT_TRUE(result.Status == SwapChainStatus::Success || result.Status == SwapChainStatus::RetryLater);
+        if (hidden) EXPECT_EQ(result.NativeStatusCode, static_cast<int64_t>(DXGI_STATUS_OCCLUDED));
+        context.Queue->Wait();
+    }
+    EXPECT_EQ(context.ValidationErrors.load(), 0);
 #else
     GTEST_SKIP() << "D3D12 backend not built";
 #endif

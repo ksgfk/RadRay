@@ -40,12 +40,19 @@ D3D12 命令列表 Close、队列 Wait/Signal、Present 与 ResizeBuffers 的失
 诊断同时保留调用 HRESULT 和 `GetDeviceRemovedReason()`；执行提交边界也检查设备状态，
 因为设备移除后部分队列调用仍可能返回成功。创建接口原有的可空结果契约不变。
 Fence 查询把 `UINT64_MAX` 视为设备移除，禁止上层将其比较为成功完成。
-CPU fence 等待检查事件注册、系统等待结果，并在唤醒后重新核验完成值；设备移除也能唤醒事件。
+`Fence::WaitFor(value, timeoutMs)` 是有限 CPU 等待，0 只查询；false 表示超时，不能作为完成。
+即使 timeoutMs 为 UINT64_MAX，也钳制到后端可表达的有限时长。调用方串行等待同一 fence。
+D3D12 检查事件注册、系统等待结果，并在唤醒后重新核验完成值；设备移除和较早超时的事件
+注册也能唤醒事件。Vulkan 使用有限 vkWaitSemaphores。兼容 Wait() / Wait(value) 的期限为
+30 秒；超时明确终止，不在 GPU 仍可能使用资源时继续销毁。上层可用 WaitFor/poll 做可取消关闭。
 这些检查在检测到错误的边界终止，避免继续发布成功的 flight 完成通知；不提供设备恢复。
 D3D12 flip-model 不能对已最小化、已隐藏、已销毁或客户区为 0 的 HWND 提交 GPU 写入，也不能
 对其调用 `Present`：驱动会以 `DXGI_ERROR_ACCESS_DENIED` 移除设备。Acquire 在这种 HWND 上
 返回 `RetryLater`。已经 acquire 的帧在 submit 时若窗口已不可呈现，则只提交上传命令；Present
-跳过 DXGI Present，先等待 present queue。同一帧有多个 D3D12 flip HWND 时，每个 HWND 使用独立
+跳过 DXGI Present 并消费 token，返回 RetryLater，不等待 present queue；提交完成仍须实际 fence
+证明。正常 Present 使用 [DXGI_PRESENT_DO_NOT_WAIT](https://learn.microsoft.com/en-us/windows/win32/direct3ddxgi/dxgi-present)，
+DXGI_ERROR_WAS_STILL_DRAWING 返回 RetryLater，保留未排入呈现的 readiness；不会当成 device loss。
+同一帧有多个 D3D12 flip HWND 时，每个 HWND 使用独立
 present command buffer：对该窗 `Execute` 后立刻 `Present`，不在 Present 前等待 graphics queue。
 单窗口与 Vulkan 仍一次 Submit 再 Present。
 runtime 窗口通过 WindowManager 的协程接口修改 surface，由 runner 在维护阶段统一排空旧 CPU

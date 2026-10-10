@@ -470,6 +470,8 @@ public:
 
     void Wait(uint64_t value) noexcept override;
 
+    bool WaitFor(uint64_t value, uint64_t timeoutMs) noexcept override;
+
 public:
     ComPtr<ID3D12Fence> _fence;
     uint64_t _fenceValue{0};
