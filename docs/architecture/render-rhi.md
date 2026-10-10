@@ -70,6 +70,11 @@ runtime 窗口通过 WindowManager 的协程接口修改 surface，由 runner �
 映射到 VkBufferImageCopy + vkCmdCopyBufferToImage。不支持的 command buffer 实现返回 false。
 Graph 对应 typed Pass 见 [Renderer foundation](renderer-foundation.md)。
 
+`CopyTextureToTexture` 校验原生图像维度，而非采样 view 的逻辑类型；等格式、等采样数的
+2D / 2D array / cube layer 可以互相复制，mip、layer、区域、copy usage 仍逐项检查。
+D3D12 backbuffer 描述提供 CopySource / CopyDestination，并按原生 DENY_SHADER_RESOURCE
+标志报告 Resource；不会因其为外部纹理而丢失实际支持的复制用途。
+
 D3D12 flip swapchain 的 sRGB 请求使用 UNORM DXGI 存储格式，并保留逻辑 sRGB 格式创建 RTV；
 创建与 resize 使用同一映射。编码发生在 RTV 写入，符合
 [DXGI 色彩空间契约](https://learn.microsoft.com/en-us/windows/win32/direct3ddxgi/converting-data-color-space)。

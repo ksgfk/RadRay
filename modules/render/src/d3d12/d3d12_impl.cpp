@@ -204,11 +204,11 @@ static bool _RefreshSwapChainBackBuffers(SwapChainD3D12* swapChain) noexcept {
         frame.image->_dimension = TextureDimension::Dim2D;
         frame.image->_format = swapChain->_reqFormat;
         frame.image->_memory = MemoryType::Device;
-        frame.image->_usage = TextureUse::UNKNOWN | TextureUse::CopySource;
+        frame.image->_usage = TextureUse::CopySource | TextureUse::CopyDestination;
         if (frame.image->_rawDesc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) {
             frame.image->_usage |= TextureUse::RenderTarget;
         }
-        if (frame.image->_rawDesc.Flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE) {
+        if (!(frame.image->_rawDesc.Flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE)) {
             frame.image->_usage |= TextureUse::Resource;
         }
         frame.image->_hints = ResourceHint::External;
@@ -4320,7 +4320,7 @@ void CmdListD3D12::CopyTextureToTexture(const TextureCopyDescriptor& desc) noexc
         !src->_usage.HasFlag(TextureUse::CopySource) ||
         !dst->_usage.HasFlag(TextureUse::CopyDestination) ||
         src->_format != dst->_format ||
-        src->_dimension != dst->_dimension ||
+        src->_rawDesc.Dimension != dst->_rawDesc.Dimension ||
         src->_rawDesc.SampleDesc.Count != dst->_rawDesc.SampleDesc.Count ||
         IsDepthStencilFormat(src->_format)) {
         RADRAY_ERR_LOG("d3d12 CopyTextureToTexture requires valid, matching non-depth textures with copy usage");

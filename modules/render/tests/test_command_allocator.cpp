@@ -12,6 +12,38 @@ protected:
     DeviceContext Context;
 };
 
+TEST_P(CommandAllocatorTest, Copies2dTextureIntoCubeFaceAndReadsThatLayer) {
+    auto& device = *Context.Device;
+    auto source = device.CreateTexture({TextureDimension::Dim2D, 2, 2, 1, 1, 1, TextureFormat::RGBA8_UNORM,
+        MemoryType::Device, TextureUse::CopySource | TextureUse::CopyDestination});
+    auto cube = device.CreateTexture({TextureDimension::Cube, 2, 2, 6, 1, 1, TextureFormat::RGBA8_UNORM,
+        MemoryType::Device, TextureUse::CopySource | TextureUse::CopyDestination | TextureUse::Resource});
+    auto upload = device.CreateBuffer({512, MemoryType::Upload, BufferUse::CopySource | BufferUse::MapWrite});
+    auto readback = device.CreateBuffer({512, MemoryType::ReadBack, BufferUse::CopyDestination | BufferUse::MapRead});
+    auto storage = device.CreateCommandAllocator(Context.Queue);
+    ASSERT_TRUE(source); ASSERT_TRUE(cube); ASSERT_TRUE(upload); ASSERT_TRUE(readback); ASSERT_TRUE(storage);
+    auto command = device.CreateCommandBuffer(storage.Get()); auto fence = device.CreateFence(); ASSERT_TRUE(command); ASSERT_TRUE(fence);
+    auto* pixels = static_cast<uint32_t*>(upload->Map(0, 512)); ASSERT_NE(pixels, nullptr);
+    pixels[0] = 0x80402010; pixels[1] = 0x12345678; pixels[64] = 0xff010203; pixels[65] = 0xffffffff;
+    upload->FlushMappedRange({0, 512}); upload->Unmap(); command->Begin();
+    const ResourceBarrierDescriptor initial[]{BarrierTextureDescriptor{source.Get(), TextureState::Undefined, TextureState::CopyDestination},
+        BarrierTextureDescriptor{cube.Get(), TextureState::Undefined, TextureState::CopyDestination}};
+    command->ResourceBarrier(initial);
+    ASSERT_TRUE(command->CopyBufferToTextureRegion({upload.Get(), source.Get(), {.RowPitch = 256, .Width = 2, .Height = 2}}));
+    ResourceBarrierDescriptor barrier = BarrierTextureDescriptor{source.Get(), TextureState::CopyDestination, TextureState::CopySource};
+    command->ResourceBarrier(std::span{&barrier, 1});
+    command->CopyTextureToTexture({.Destination = cube.Get(), .DestinationArrayLayer = 5, .Source = source.Get(), .Width = 2, .Height = 2});
+    barrier = BarrierTextureDescriptor{cube.Get(), TextureState::CopyDestination, TextureState::CopySource}; command->ResourceBarrier(std::span{&barrier, 1});
+    command->CopyTextureToBuffer(readback.Get(), 0, cube.Get(), {5, 1, 0, 1}); command->End();
+    CommandBuffer* commands[]{command.Get()}; Fence* fences[]{fence.Get()}; uint64_t values[]{1};
+    Context.Queue->Submit({.CmdBuffers = commands, .SignalFences = fences, .SignalValues = values});
+    ASSERT_TRUE(fence->WaitFor(1, 5000));
+    auto* observed = static_cast<const uint32_t*>(readback->Map(0, 512)); ASSERT_NE(observed, nullptr);
+    readback->InvalidateMappedRange({0, 512});
+    EXPECT_EQ(observed[0], 0x80402010u); EXPECT_EQ(observed[1], 0x12345678u);
+    EXPECT_EQ(observed[64], 0xff010203u); EXPECT_EQ(observed[65], 0xffffffffu); readback->Unmap();
+}
+
 TEST_P(CommandAllocatorTest, SharesStorageAtRecordingHighWaterAndReusesAfterCompletion) {
     auto& device = *Context.Device;
     auto storage = device.CreateCommandAllocator(Context.Queue).Unwrap();

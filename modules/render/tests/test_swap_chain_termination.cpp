@@ -124,6 +124,47 @@ TEST(RadRayFenceWait, TimeoutAndEarlierEventDoNotReportCompletion) {
 #endif
 }
 
+TEST(RadRaySwapChainTermination, BackbufferCopyUsageAndShaderVisibilityMatchNativeResource) {
+#if defined(RADRAY_ENABLE_D3D12)
+    DeviceContext context;
+    if (!TryCreateDevice(RenderBackend::D3D12, context, true)) GTEST_SKIP() << context.Reason;
+    FixtureWindow window(*context.Queue); ASSERT_NE(window.Handle, nullptr);
+    auto chain = CreateFixtureChain(context, window.Handle); ASSERT_TRUE(chain);
+    auto acquired = chain.Get()->AcquireNext(1000); ASSERT_TRUE(acquired.Frame);
+    auto* texture = acquired.Frame->GetBackBuffer(); auto desc = texture->GetDesc();
+    ASSERT_TRUE(desc.Usage.HasFlag(TextureUse::CopyDestination));
+    auto* native = d3d12::CastD3D12Object(texture);
+    EXPECT_EQ(desc.Usage.HasFlag(TextureUse::Resource), !(native->_rawDesc.Flags & D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE));
+    auto upload = context.Device->CreateBuffer({1024, MemoryType::Upload, BufferUse::CopySource | BufferUse::MapWrite});
+    auto readback = context.Device->CreateBuffer({128 * 512, MemoryType::ReadBack, BufferUse::CopyDestination | BufferUse::MapRead});
+    auto storage = context.Device->CreateCommandAllocator(context.Queue);
+    ASSERT_TRUE(upload); ASSERT_TRUE(readback); ASSERT_TRUE(storage);
+    auto command = context.Device->CreateCommandBuffer(storage.Get()); auto fence = context.Device->CreateFence();
+    ASSERT_TRUE(command); ASSERT_TRUE(fence);
+    auto* data = static_cast<uint32_t*>(upload->Map(0, 1024)); ASSERT_NE(data, nullptr);
+    for (uint32_t y = 0; y < 4; y++) for (uint32_t x = 0; x < 4; x++) data[y * 64 + x] = 0xff402010 + x + y * 4;
+    upload->FlushMappedRange({0, 1024}); upload->Unmap(); command->Begin();
+    ResourceBarrierDescriptor barrier = BarrierTextureDescriptor{texture, TextureState::Present, TextureState::CopyDestination};
+    command->ResourceBarrier(std::span{&barrier, 1});
+    ASSERT_TRUE(command->CopyBufferToTextureRegion({upload.Get(), texture, {.RowPitch = 256, .Width = 4, .Height = 4}}));
+    barrier = BarrierTextureDescriptor{texture, TextureState::CopyDestination, TextureState::CopySource}; command->ResourceBarrier(std::span{&barrier, 1});
+    command->CopyTextureToBuffer(readback.Get(), 0, texture, {0, 1, 0, 1});
+    barrier = BarrierTextureDescriptor{texture, TextureState::CopySource, TextureState::Present}; command->ResourceBarrier(std::span{&barrier, 1}); command->End();
+    CommandBuffer* commands[]{command.Get()}; Fence* fences[]{fence.Get()}; uint64_t values[]{1};
+    context.Queue->Submit({.CmdBuffers = commands, .SignalFences = fences, .SignalValues = values});
+    ASSERT_TRUE(fence->WaitFor(1, 5000));
+    auto* observed = static_cast<const uint32_t*>(readback->Map(0, 128 * 512)); ASSERT_NE(observed, nullptr);
+    readback->InvalidateMappedRange({0, 128 * 512});
+    for (uint32_t y = 0; y < 4; y++) for (uint32_t x = 0; x < 4; x++) EXPECT_EQ(observed[y * 128 + x], 0xff402010 + x + y * 4);
+    readback->Unmap();
+    EXPECT_NE(chain.Get()->Present(std::move(*acquired.Frame)).Status, SwapChainStatus::Error);
+    context.Queue->Wait();
+    EXPECT_EQ(context.ValidationErrors.load(), 0);
+#else
+    GTEST_SKIP() << "D3D12 backend not built";
+#endif
+}
+
 TEST(RadRaySwapChainTermination, PresentReturnsWhileQueueIsBlocked) {
 #if defined(RADRAY_ENABLE_D3D12)
     DeviceContext context;

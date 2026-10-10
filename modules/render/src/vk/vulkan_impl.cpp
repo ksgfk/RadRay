@@ -4251,7 +4251,8 @@ void CommandBufferVulkan::CopyTextureToTexture(const TextureCopyDescriptor& desc
     if (!src->IsValid() || !dst->IsValid() ||
         !src->_usage.HasFlag(TextureUse::CopySource) ||
         !dst->_usage.HasFlag(TextureUse::CopyDestination) ||
-        src->_format != dst->_format || src->_dim != dst->_dim ||
+        src->_format != dst->_format ||
+        MapType(src->_dim) != MapType(dst->_dim) ||
         src->_sampleCount != dst->_sampleCount || IsDepthStencilFormat(src->_format)) {
         RADRAY_ERR_LOG("vk CopyTextureToTexture requires valid, matching non-depth textures with copy usage");
         return;
