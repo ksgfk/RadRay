@@ -39,6 +39,16 @@ struct GpuSystemDescriptor {
     bool EnableFrameProfiler{true};
 };
 
+/// External device owner keeps its factory/environment alive through this host's destruction.
+/// The same physical queue may serve other consumers, with serialized submission and retirement.
+struct GpuSystemAttachmentDescriptor {
+    shared_ptr<render::Device> Device;
+    uint32_t MainQueueIndex{0};
+    uint32_t BackBufferCount{3};
+    uint32_t FlightDataCount{2};
+    bool EnableFrameProfiler{false};
+};
+
 /// AcquireWindow 返回的仅可移动目标；必须在本次录制中随一个非空命令批次归还。
 /// 析构不会取消 acquire。backbuffer 的全部访问及 →Present barrier 必须在关联批次中。
 struct AppFrameTarget {
@@ -233,6 +243,9 @@ public:
     /// [GT] 创建设备、队列与固定数量的 flight。flight 数必须与 timeline 一致。
     /// timeline 不是本对象拥有的；等待者要在本对象销毁前取消。
     static unique_ptr<GpuSystem> TryCreate(const GpuSystemDescriptor& desc, FrameTimeline& timeline, RuntimeStartupResult& startup);
+    /// [GT] Shares an existing device; owns its own flights/fence and never creates another device or environment.
+    /// External factory/environment must outlive this object; caller serializes access to the shared queue.
+    static unique_ptr<GpuSystem> TryAttachDevice(const GpuSystemAttachmentDescriptor& desc, FrameTimeline& timeline, RuntimeStartupResult& startup);
     GpuSystem(const GpuSystem&) = delete;
     GpuSystem(GpuSystem&&) = delete;
     GpuSystem& operator=(const GpuSystem&) = delete;
@@ -307,6 +320,7 @@ private:
 
     GpuSystem(FrameTimeline& timeline, uint32_t backBufferCount, uint32_t flightDataCount) noexcept;
     bool Initialize(const GpuSystemDescriptor& desc, RuntimeStartupResult& startup);
+    bool InitializeDevice(shared_ptr<render::Device> device, uint32_t queueIndex, bool enableProfiler, RuntimeStartupResult& startup);
 
     /// [RT] 当前 flight 的录制线程独占调用；与 BeginFrameRecord/EndFrameRecordAndSubmit 同线程。
     void SubmitFrame(uint32_t flightIndex);

@@ -175,6 +175,18 @@ unique_ptr<GpuSystem> GpuSystem::TryCreate(const GpuSystemDescriptor& desc, Fram
     return result;
 }
 
+unique_ptr<GpuSystem> GpuSystem::TryAttachDevice(const GpuSystemAttachmentDescriptor& desc, FrameTimeline& timeline, RuntimeStartupResult& startup) {
+    startup = {};
+    if (!desc.Device || desc.FlightDataCount == 0 || desc.FlightDataCount != timeline.GetFlightDataCount()) {
+        startup.Status = RuntimeStartupStatus::InvalidDescriptor;
+        startup.Reason = "GpuSystem attachment requires a device and matching nonzero flight count";
+        return nullptr;
+    }
+    auto result = unique_ptr<GpuSystem>{new GpuSystem(timeline, desc.BackBufferCount, desc.FlightDataCount)};
+    if (!result->InitializeDevice(desc.Device, desc.MainQueueIndex, desc.EnableFrameProfiler, startup)) return nullptr;
+    return result;
+}
+
 bool GpuSystem::Initialize(const GpuSystemDescriptor& desc, RuntimeStartupResult& startup) {
     startup = {};
     const auto fail = [&startup](RuntimeStartupStatus status, std::string_view reason) {
@@ -218,8 +230,17 @@ bool GpuSystem::Initialize(const GpuSystemDescriptor& desc, RuntimeStartupResult
     }
     auto device = render::Device::Create(deviceDesc);
     if (!device) return fail(RuntimeStartupStatus::InitializationFailed, "GPU device creation failed for an available adapter");
-    _device = device.Release();
-    auto queue = _device->GetCommandQueue(render::QueueType::Direct, desc.MainQueueIndex);
+    return InitializeDevice(device.Release(), desc.MainQueueIndex, desc.EnableFrameProfiler, startup);
+}
+
+bool GpuSystem::InitializeDevice(shared_ptr<render::Device> device, uint32_t queueIndex, bool enableProfiler, RuntimeStartupResult& startup) {
+    const auto fail = [&startup](RuntimeStartupStatus status, std::string_view reason) {
+        startup.Status = status;
+        startup.Reason = reason;
+        return false;
+    };
+    _device = std::move(device);
+    auto queue = _device->GetCommandQueue(render::QueueType::Direct, queueIndex);
     if (!queue) return fail(RuntimeStartupStatus::InitializationFailed, "Direct queue acquisition failed");
     _mainQueue = queue.Get();
     _mainQueueTrack.Queue = _mainQueue;
@@ -234,7 +255,7 @@ bool GpuSystem::Initialize(const GpuSystemDescriptor& desc, RuntimeStartupResult
             return fail(RuntimeStartupStatus::InitializationFailed, "Flight command allocator creation failed");
         _flights.push_back(std::move(flight));
     }
-    if (desc.EnableFrameProfiler) {
+    if (enableProfiler) {
         _frameProfiler = GpuFrameProfiler::TryCreate(_device.get(), _mainQueue, _flightDataCount);
         if (!_frameProfiler) return fail(RuntimeStartupStatus::InitializationFailed, "GPU frame profiler creation failed");
     }

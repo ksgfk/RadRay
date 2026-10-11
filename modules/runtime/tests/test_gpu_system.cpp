@@ -4,6 +4,8 @@
 
 #include <radray/runtime/frame_timeline.h>
 #include <radray/runtime/gpu_system.h>
+#include <radray/scope_guard.h>
+#include <radray/runtime/render_framework/scene_manager.h>
 
 namespace radray {
 namespace {
@@ -191,6 +193,179 @@ void RunFinalFence(render::RenderBackend backend) {
 
 TEST(GpuSystemTest, D3D12OnlyFinalFenceRetiresFlight) { RunFinalFence(render::RenderBackend::D3D12); }
 TEST(GpuSystemTest, VulkanOnlyFinalFenceRetiresFlight) { RunFinalFence(render::RenderBackend::Vulkan); }
+
+TEST(GpuSystemAttachment, RejectsMissingDeviceAndMismatchedFlightCount) {
+    FrameTimeline timeline{2};
+    RuntimeStartupResult startup;
+    EXPECT_EQ(GpuSystem::TryAttachDevice({}, timeline, startup), nullptr);
+    EXPECT_EQ(startup.Status, RuntimeStartupStatus::InvalidDescriptor);
+    render::test::DeviceContext device;
+    if (!render::test::TryCreateDevice(render::RenderBackend::D3D12, device)) GTEST_SKIP() << device.Reason;
+    EXPECT_EQ(GpuSystem::TryAttachDevice({.Device = device.Device, .FlightDataCount = 1}, timeline, startup), nullptr);
+    EXPECT_EQ(startup.Status, RuntimeStartupStatus::InvalidDescriptor);
+    EXPECT_EQ(GpuSystem::TryAttachDevice({.Device = device.Device, .MainQueueIndex = UINT32_MAX}, timeline, startup), nullptr);
+    EXPECT_EQ(startup.Status, RuntimeStartupStatus::InitializationFailed);
+    EXPECT_NE(device.Device->GetCommandQueue(render::QueueType::Direct), nullptr);
+}
+
+class AttachedMesh final : public StaticMesh {
+public:
+    AttachedMesh(MeshResource cpu, GpuMesh gpu, uint32_t& destroyed)
+        : StaticMesh(std::move(cpu), {}, {-1, -1, 0}, {1, 1, 0}, std::move(gpu)), Destroyed(destroyed) {}
+    ~AttachedMesh() noexcept override { ++Destroyed; }
+    uint32_t& Destroyed;
+};
+
+TEST(GpuSystemAttachment, SameThreadSceneAssetAndGpuPhasesRetainOwnersUntilTheCoveringFence) {
+    render::test::DeviceContext external;
+    if (!render::test::TryCreateDevice(render::RenderBackend::D3D12, external)) GTEST_SKIP() << external.Reason;
+    FrameTimeline timeline{2};
+    RuntimeStartupResult startup;
+    auto gpu = GpuSystem::TryAttachDevice({.Device = external.Device}, timeline, startup);
+    ASSERT_NE(gpu, nullptr) << startup.Reason;
+    EXPECT_EQ(gpu->GetDevice(), external.Device.get());
+    EXPECT_EQ(gpu->GetMainQueue(), external.Queue);
+    AssetManager assets;
+    assets.SetWaitFrameProcessor(&timeline);
+    SceneManager scenes{2};
+    uint32_t destroyed = 0;
+    auto source = array<float, 9>{0, 0.8f, 0, -0.8f, -0.8f, 0, 0.8f, -0.8f, 0};
+    const array<uint32_t, 3> indices{0, 1, 2};
+    MeshResource cpu;
+    cpu.Bins.emplace_back(std::as_bytes(std::span{source}));
+    cpu.Bins.emplace_back(std::as_bytes(std::span{indices}));
+    MeshPrimitive primitive;
+    primitive.VertexCount = 3;
+    primitive.VertexBuffers.push_back({"POSITION", 0, 0, VertexDataType::FLOAT, 3, 0, 12});
+    primitive.IndexBuffer = {1, 3, 0, 4};
+    cpu.Primitives.push_back(std::move(primitive));
+    GpuMesh geometry;
+    auto vertexBuffer = render::test::MakeUploadBuffer(*external.Device, std::as_bytes(std::span{source}), render::BufferUse::Vertex | render::BufferUse::CopySource);
+    ASSERT_TRUE(vertexBuffer);
+    geometry.Buffers.push_back(vertexBuffer.Release());
+    geometry.Draws.emplace_back();
+    geometry.Draws[0].VertexBuffers.push_back({.Binding = 0, .View = {.Target = geometry.Buffers[0].get(), .Size = sizeof(source)}});
+    auto mesh = assets.AddReady<StaticMesh>(AssetId{19, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}, make_unique<AttachedMesh>(std::move(cpu), std::move(geometry), destroyed));
+    ASSERT_TRUE(mesh.IsReady());
+    ASSERT_TRUE(mesh->IsValid());
+    const auto scene = scenes.CreateSceneGT();
+    auto writer = scenes.GetSceneWriterGT(scene);
+    ASSERT_TRUE(writer);
+    const auto shape = writer->CreateShape();
+    Eigen::Matrix4f transform = Eigen::Matrix4f::Identity();
+    transform(0, 3) = 17.25f;
+    writer->SetStaticMesh(shape, mesh, transform);
+    auto* borrowed = mesh->GetRenderMesh().Buffers[0].get();
+    mesh.Reset();
+    source.fill(99);
+    auto gate = external.Device->CreateFence().Unwrap();
+    auto readback = external.Device->CreateBuffer({.Size = 80, .Memory = render::MemoryType::ReadBack,
+        .Usage = render::BufferUse::CopyDestination | render::BufferUse::MapRead}).Unwrap();
+    array<uint64_t, 2> serials{};
+    bool gateReleased = false;
+    const auto retire = [&] {
+        FlightCompletion completion;
+        while (timeline.TryReadCompletion(completion)) {
+            scenes.OnFlightCompletedGT(completion);
+            gpu->ReleaseFrameResourcesGT(completion);
+            serials[completion.FlightIndex] = 0;
+        }
+    };
+    auto cleanup = MakeScopeGuard([&]() noexcept {
+        if (!gateReleased) ReleaseFence(gate.get(), render::RenderBackend::D3D12, 1);
+        for (uint32_t flight = 0; flight < 2; ++flight) if (serials[flight]) {
+            gpu->EndFrameRecordAndSubmit(flight);
+            gpu->CompleteFlightIfReady(flight, true);
+        }
+        retire();
+        scenes.OnShutdown();
+        assets.Pump();
+        timeline.CleanupCompletedFlights();
+        gpu->AbandonUnpublishedResourcesTerminalGT();
+    });
+    gpu->BeginUpdateForFlight(0);
+    scenes.SealFrameGT(0);
+    scenes.PublishFrameGT(0);
+    auto frame = gpu->BeginFrameRecord(0, {}, {}, false);
+    scenes.ConsumeRenderUpdates(0, frame.FrameSerial());
+    serials[0] = frame.FrameSerial();
+    auto sampled = scenes.GetSceneRT(scene)->GetStaticMesh(shape);
+    ASSERT_TRUE(sampled);
+    auto objects = scenes.PrepareSceneGpuRT(scene, frame);
+    ASSERT_TRUE(objects);
+    render::Fence* waits[]{gate.get()};
+    uint64_t values[]{1};
+    frame.ReturnCommandBuffers({.WaitFences = waits, .WaitValues = values});
+    auto* commands = frame.AllocateCommandBuffer();
+    commands->CopyBufferToBuffer(readback.get(), 0, borrowed, 4, 4);
+    GpuSystemBufferBarrier(commands, objects->Objects.Target, render::BufferState::ShaderRead, render::BufferState::CopySource);
+    commands->CopyBufferToBuffer(readback.get(), 16, objects->Objects.Target, uint64_t{shape.Index} * sizeof(SceneObjectGpuData), sizeof(SceneObjectGpuData));
+    GpuSystemBufferBarrier(commands, objects->Objects.Target, render::BufferState::CopySource, render::BufferState::ShaderRead);
+    frame.ReturnCommandBuffers({.CmdBuffers = std::span{&commands, 1}});
+    gpu->EndFrameRecordAndSubmit(0);
+    const auto covering = gpu->GetFlightGpuSignal(0);
+    EXPECT_TRUE(covering.IsValid());
+    EXPECT_FALSE(gpu->CompleteFlightIfReady(0, false));
+    scenes.DestroySceneGT(scene);
+    gpu->BeginUpdateForFlight(1);
+    scenes.SealFrameGT(1);
+    scenes.PublishFrameGT(1);
+    auto removal = gpu->BeginFrameRecord(1, {}, {}, false, false);
+    scenes.ConsumeRenderUpdates(1, removal.FrameSerial());
+    serials[1] = removal.FrameSerial();
+    gpu->EndFrameRecordAndSubmit(1);
+    EXPECT_EQ(scenes.GetSceneRT(scene), nullptr);
+    assets.Pump();
+    EXPECT_EQ(destroyed, 0u);
+    EXPECT_FALSE(gpu->CompleteFlightIfReady(1, false));
+    const auto replacement = scenes.CreateSceneGT();
+    EXPECT_NE(replacement, scene);
+    gateReleased = ReleaseFence(gate.get(), render::RenderBackend::D3D12, 1);
+    ASSERT_TRUE(gateReleased);
+    ASSERT_TRUE(gpu->CompleteFlightIfReady(0, true));
+    retire();
+    assets.Pump();
+    EXPECT_EQ(destroyed, 0u);
+    ASSERT_TRUE(gpu->CompleteFlightIfReady(1, true));
+    retire();
+    assets.Pump();
+    EXPECT_EQ(destroyed, 1u);
+    EXPECT_EQ(assets.GetAssetCount(), 0u);
+    ScopedBufferMap map{readback.get(), {0, 80}};
+    ASSERT_TRUE(map);
+    readback->InvalidateMappedRange({0, 80});
+    float observed{};
+    std::memcpy(&observed, map.Data(), 4);
+    EXPECT_FLOAT_EQ(observed, 0.8f);
+    SceneObjectGpuData observedObject;
+    std::memcpy(&observedObject, map.DataAs<byte>() + 16, sizeof(observedObject));
+    for (size_t i = 0; i < observedObject.LocalToWorld.size(); ++i) EXPECT_FLOAT_EQ(observedObject.LocalToWorld[i], transform.data()[i]);
+    EXPECT_GE(covering.Fence->GetCompletedValue(), covering.Value);
+    EXPECT_EQ(external.ValidationErrors.load(), 0u);
+}
+
+TEST(GpuSystemAttachment, DestroyingAnAttachedHostLeavesTheExternalDeviceAndQueueUsable) {
+    render::test::DeviceContext external;
+    if (!render::test::TryCreateDevice(render::RenderBackend::D3D12, external)) GTEST_SKIP() << external.Reason;
+    const auto* original = external.Device.get();
+    const auto owners = external.Device.use_count();
+    {
+        FrameTimeline timeline{2};
+        RuntimeStartupResult startup;
+        auto gpu = GpuSystem::TryAttachDevice({.Device = external.Device}, timeline, startup);
+        ASSERT_NE(gpu, nullptr);
+        EXPECT_EQ(external.Device.use_count(), owners + 1);
+        gpu->AbandonUnpublishedResourcesTerminalGT();
+    }
+    EXPECT_EQ(external.Device.get(), original);
+    EXPECT_EQ(external.Device.use_count(), owners);
+    auto fence = external.Device->CreateFence().Unwrap();
+    render::Fence* signals[]{fence.get()};
+    uint64_t values[]{7};
+    external.Queue->Submit({.SignalFences = signals, .SignalValues = values});
+    EXPECT_TRUE(fence->WaitFor(7, 10000));
+    EXPECT_EQ(fence->GetCompletedValue(), 7u);
+}
 
 class GpuSystemDeathTest : public testing::Test {
 protected:

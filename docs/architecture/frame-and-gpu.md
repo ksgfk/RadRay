@@ -41,6 +41,19 @@ Scene 删除立即销毁 CPU Scene，将 GPU owner 转入删除批次的 Retired
 
 ## GpuSystem 的线程约定
 
+独立宿主可用 `GpuSystem::TryAttachDevice` 共享已创建的 RHI device，保留独立的 flight、上传器、
+主队列 fence 与 FrameTimeline 完成通道，不再创建 instance/factory/device。attachment descriptor
+要求非空 shared device 和与 timeline 一致的非零 flight 数；主 direct queue 不存在时明确失败。
+原 device owner 的 factory/environment 必须存活到 attached host 销毁之后。共享队列的 submit、
+retire 和复用由调用方串行化；device 的 shared ownership 不提供这些操作的并发同步。
+attached host 不关闭外部 Vulkan environment，也不取得外部窗口或主循环的所有权。
+
+外部逻辑 producer 和 RT 可以在同一物理线程依次运行：SceneWriter 修改完成后 Seal/Publish，
+BeginFrameRecord 分配真实 serial，再 Consume/Prepare/Record/Submit；使用资产的封闭 flight
+在真实覆盖 fence 完成之前保活，Scene 删除、更新的 scene generation 或新的逻辑世界不会提前释放
+旧 flight 的 owner。完成消息仍须先交给 SceneManager 和 GpuSystem，再复用对应 flight。
+无需构造 Application、World 或 Actor 即可使用这组公共接口。
+
 `gpu_system.h` 在可调用的 `GpuSystem` 函数声明上标记线程与阶段，私有函数也遵循同一约定：
 
 - **GT** 是 Application 所在线程，拥有 `FrameTimeline` 上的游戏帧号与帧等待表。协程的启动、恢复和
