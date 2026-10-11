@@ -104,6 +104,11 @@ render thread 不访问非原子的 refs；TextureAsset 的 GetOrCreateSrv/view 
 回收沿用零引用队列，不引入另一套资产引用计数。
 
 `TextureAsset` 与 `StaticMesh` 均由构造方提供完整数据；两者的退休差异见上文。
+TextureAsset 支持接管 unique texture，也支持共享外部 immutable GPU texture；后一种方式仍由本资产
+独立拥有默认 SRV 与子 view 缓存。IsValid 核对 SRV 指向所持 texture，外部设备及 factory/environment
+须覆盖全部 shared owner 的寿命。共享实际 GPU 存储不复制像素，也不使 StreamingAssetRef 可跨线程。
+OnUnload 将 texture、默认 SRV 与缓存组成具有明确成员销毁顺序的延期 payload，先释放所有 views，
+再放开本资产的 texture shared owner；原外部 owner 可以独立释放或继续使用同一不可变资源。
 内置网格/纹理 GPU 加载暂时移除，importer 返回明确失败，后续设计范围见
 [资产 GPU 上传待设计](frame-and-gpu.md#资产-gpu-上传待设计)。
 

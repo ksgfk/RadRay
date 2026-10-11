@@ -68,6 +68,14 @@ TextureAsset::TextureAsset(
     string name,
     unique_ptr<render::Texture> texture,
     unique_ptr<render::TextureView> srv) noexcept
+    : TextureAsset(device, std::move(name), shared_ptr<render::Texture>{std::move(texture)}, std::move(srv)) {
+}
+
+TextureAsset::TextureAsset(
+    render::Device* device,
+    string name,
+    shared_ptr<render::Texture> texture,
+    unique_ptr<render::TextureView> srv) noexcept
     : _device(device),
       _name(std::move(name)),
       _texture(std::move(texture)),
@@ -77,16 +85,13 @@ TextureAsset::TextureAsset(
 TextureAsset::~TextureAsset() noexcept = default;
 
 void TextureAsset::OnUnload(AssetManager& manager) {
-    // 【整包交出, 销毁顺序由 lambda 的成员声明顺序表达】: view 引用 texture, 故 view 必须
-    // 先死。捕获列表里 views / srv 声明在 texture 之前, 而 lambda 的捕获成员按声明顺序
-    // 构造、逆序析构 —— 这就是全部保证, 不依赖任何队列语义。
-    //
-    // 【为何要延迟】: 写进描述符堆的 view 会被 GPU 用到 fence 之后, 而本函数发生在引用
-    // 归零的那一帧。见 asset.h 与 AssetManager::DeferDestroy。
-    manager.DeferDestroy(
-        [views = std::move(_viewCache),
-         srv = std::move(_srv),
-         texture = std::move(_texture)]() noexcept {});
+    // Explicit member order keeps all views ahead of their final texture owner on destruction.
+    struct TextureRetirement {
+        shared_ptr<render::Texture> Texture;
+        unique_ptr<render::TextureView> Srv;
+        unordered_map<TextureSubViewDesc, unique_ptr<render::TextureView>> Views;
+    };
+    manager.DeferDestroy(TextureRetirement{std::move(_texture), std::move(_srv), std::move(_viewCache)});
     _viewCache.clear();
     _name.clear();
 }

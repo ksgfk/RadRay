@@ -367,6 +367,93 @@ TEST(GpuSystemAttachment, DestroyingAnAttachedHostLeavesTheExternalDeviceAndQueu
     EXPECT_EQ(fence->GetCompletedValue(), 7u);
 }
 
+TEST(GpuSystemAttachment, SharedTextureStorageAndDistinctViewsSurviveSourceReleaseUntilTheRealFence) {
+    render::test::DeviceContext external;
+    if (!render::test::TryCreateDevice(render::RenderBackend::D3D12, external)) GTEST_SKIP() << external.Reason;
+    FrameTimeline timeline{2};
+    RuntimeStartupResult startup;
+    auto gpu = GpuSystem::TryAttachDevice({.Device = external.Device}, timeline, startup);
+    ASSERT_NE(gpu, nullptr);
+    AssetManager assets;
+    assets.SetWaitFrameProcessor(&timeline);
+    auto created = external.Device->CreateTexture({.Dim = render::TextureDimension::Dim2D, .Width = 2, .Height = 1,
+        .DepthOrArraySize = 1, .MipLevels = 1, .SampleCount = 1, .Format = render::TextureFormat::RGBA8_UNORM,
+        .Memory = render::MemoryType::Device, .Usage = render::TextureUse::Resource | render::TextureUse::CopySource | render::TextureUse::CopyDestination});
+    ASSERT_TRUE(created);
+    shared_ptr<render::Texture> storage = created.Release();
+    weak_ptr<render::Texture> retained = storage;
+    auto originalView = external.Device->CreateTextureView({storage.get(), render::TextureDimension::Dim2D,
+        render::TextureFormat::RGBA8_UNORM, {0, 1, 0, 1}, render::TextureViewUsage::Resource}).Unwrap();
+    auto assetView = external.Device->CreateTextureView(originalView->GetDesc()).Unwrap();
+    EXPECT_NE(originalView.get(), assetView.get());
+    auto image = assets.AddReady<TextureAsset>(AssetId{20, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
+        make_unique<TextureAsset>(external.Device.get(), "shared atlas", storage, std::move(assetView)));
+    ASSERT_TRUE(image.IsReady());
+    ASSERT_TRUE(image->IsValid());
+    EXPECT_EQ(image->GetTexture(), storage.get());
+    EXPECT_EQ(image->GetSrv()->GetDesc().Target, storage.get());
+    const TextureSubViewDesc sub{.Dim = render::TextureDimension::Dim2D, .Format = render::TextureFormat::RGBA8_UNORM, .Range = {0, 1, 0, 1}};
+    auto* cached = image->GetOrCreateSrv(sub);
+    ASSERT_NE(cached, nullptr);
+    EXPECT_EQ(image->GetOrCreateSrv(sub), cached);
+    auto* borrowed = image->GetTexture();
+    auto gate = external.Device->CreateFence().Unwrap();
+    auto readback = external.Device->CreateBuffer({.Size = external.Device->GetDetail().TextureDataPitchAlignment,
+        .Memory = render::MemoryType::ReadBack, .Usage = render::BufferUse::CopyDestination | render::BufferUse::MapRead}).Unwrap();
+    bool gateReleased = false;
+    uint64_t outstanding = 0;
+    auto cleanup = MakeScopeGuard([&]() noexcept {
+        if (!gateReleased) ReleaseFence(gate.get(), render::RenderBackend::D3D12, 1);
+        if (outstanding) {
+            gpu->EndFrameRecordAndSubmit(0);
+            gpu->CompleteFlightIfReady(0, true);
+            FlightCompletion completion;
+            while (timeline.TryReadCompletion(completion)) gpu->ReleaseFrameResourcesGT(completion);
+        }
+        timeline.CleanupCompletedFlights();
+        gpu->AbandonUnpublishedResourcesTerminalGT();
+    });
+    gpu->BeginUpdateForFlight(0);
+    auto frame = gpu->BeginFrameRecord(0, {}, {}, false);
+    outstanding = frame.FrameSerial();
+    render::Fence* waits[]{gate.get()};
+    uint64_t values[]{1};
+    frame.ReturnCommandBuffers({.WaitFences = waits, .WaitValues = values});
+    auto pixels = array<uint32_t, 2>{0xff332211, 0xff665544};
+    auto* commands = frame.AllocateCommandBuffer();
+    frame.GetUploader().UploadTexture(commands, {.SrcData = std::as_bytes(std::span{pixels}), .DstTexture = borrowed,
+        .DstRange = {0, 1, 0, 1}, .SrcRowPitch = 8, .Before = render::TextureState::Undefined, .After = render::TextureState::CopySource});
+    commands->CopyTextureToBuffer(readback.get(), 0, borrowed, {0, 1, 0, 1});
+    frame.ReturnCommandBuffers({.CmdBuffers = std::span{&commands, 1}});
+    pixels.fill(0);
+    gpu->EndFrameRecordAndSubmit(0);
+    originalView.reset();
+    storage.reset();
+    image.Reset();
+    assets.Pump();
+    EXPECT_EQ(assets.GetAssetCount(), 0u);
+    EXPECT_FALSE(retained.expired());
+    EXPECT_FALSE(gpu->CompleteFlightIfReady(0, false));
+    gateReleased = ReleaseFence(gate.get(), render::RenderBackend::D3D12, 1);
+    ASSERT_TRUE(gateReleased);
+    ASSERT_TRUE(gpu->CompleteFlightIfReady(0, true));
+    FlightCompletion completion;
+    ASSERT_TRUE(timeline.TryReadCompletion(completion));
+    EXPECT_EQ(completion.FrameSerial, outstanding);
+    gpu->ReleaseFrameResourcesGT(completion);
+    outstanding = 0;
+    EXPECT_FALSE(retained.expired());
+    timeline.PumpWaitFrame(0);
+    EXPECT_TRUE(retained.expired());
+    ScopedBufferMap map{readback.get(), {0, 8}};
+    ASSERT_TRUE(map);
+    readback->InvalidateMappedRange({0, 8});
+    array<uint32_t, 2> observed{};
+    std::memcpy(observed.data(), map.Data(), 8);
+    EXPECT_EQ(observed[0], 0xff332211u);
+    EXPECT_EQ(observed[1], 0xff665544u);
+}
+
 class GpuSystemDeathTest : public testing::Test {
 protected:
     void SetUp() override {

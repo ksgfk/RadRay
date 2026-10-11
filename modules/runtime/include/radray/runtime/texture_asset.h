@@ -79,11 +79,18 @@ public:
         string name,
         unique_ptr<render::Texture> texture,
         unique_ptr<render::TextureView> srv) noexcept;
+    /// Shares immutable GPU storage with an external asset; this asset owns its distinct SRV/cache.
+    /// Device/factory must outlive all shared owners. In-flight views retain this asset through real completion.
+    TextureAsset(
+        render::Device* device,
+        string name,
+        shared_ptr<render::Texture> texture,
+        unique_ptr<render::TextureView> srv) noexcept;
     ~TextureAsset() noexcept override;
 
     void OnUnload(AssetManager& manager) override;
 
-    bool IsValid() const noexcept { return _texture != nullptr && _srv != nullptr; }
+    bool IsValid() const noexcept { return _texture != nullptr && _srv != nullptr && _srv->GetDesc().Target == _texture.get(); }
 
     const string& GetName() const noexcept { return _name; }
     render::Texture* GetTexture() const noexcept { return _texture.get(); }
@@ -98,7 +105,7 @@ public:
 private:
     render::Device* _device{nullptr};
     string _name;
-    unique_ptr<render::Texture> _texture;
+    shared_ptr<render::Texture> _texture;
     unique_ptr<render::TextureView> _srv;
     unordered_map<TextureSubViewDesc, unique_ptr<render::TextureView>> _viewCache;
 };
