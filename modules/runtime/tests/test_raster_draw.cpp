@@ -62,7 +62,7 @@ protected:
         if (Gpu) Gpu->AbandonUnpublishedResourcesTerminalGT();
         if (Window) DestroyWindow(Window);
     }
-    Nullable<ShaderProgram*> Program(bool textures) {
+    Nullable<ShaderProgram*> Program(bool textures, bool arrays = false) {
         string source = R"(
 #ifdef __spirv__
 #define BINDING(b,s) [[vk::binding(b,s)]]
@@ -90,6 +90,14 @@ BINDING(1,1) SamplerState SampleB : register(s1, space1);
 }
 )";
         else source += R"([shader("pixel")] float4 PSMain(Vertex v) : SV_Target { return Tint.Color; })";
+        if (arrays) {
+            const auto replace = [&](std::string_view from, std::string_view to) {
+                const auto at = source.find(from); if (at != string::npos) source.replace(at, from.size(), to);
+            };
+            replace("Texture2D<float4> ImageA : register(t0);", "Texture2D<float4> Images[2] : register(t0);");
+            replace("BINDING(3,0) Texture2D<float4> ImageB : register(t1);", "");
+            replace("ImageA.Sample", "Images[0].Sample"); replace("ImageB.Sample", "Images[1].Sample");
+        }
         shader_compiler::Client compiler{RADRAY_RASTER_COMPILER_PATH};
         shader::SourceContractRequest discovery;
         discovery.SourceName = "native-raster.hlsl";
@@ -111,13 +119,16 @@ BINDING(1,1) SamplerState SampleB : register(s1, space1);
         EXPECT_FALSE(Renderer->GetOrCreateShaderProgram(bytes, wrong));
         return Renderer->GetOrCreateShaderProgram(bytes, envelope.GpuArtifact);
     }
-    MaterialRenderData Material(ShaderProgram* program, bool textures) {
+    MaterialRenderData Material(ShaderProgram* program, bool textures, bool arrays = false) {
         MaterialPass pass; pass.Name = "Raster"; pass.RegisteredProgram = program;
         pass.Primitive.Cull = render::CullMode::None;
         pass.Inputs = {{"ViewData", MaterialInputSource::ViewConstants}, {"Tint", MaterialInputSource::MaterialConstants}};
         if (textures) {
-            pass.Inputs.push_back({"ImageA", MaterialInputSource::Texture, 0});
-            pass.Inputs.push_back({"ImageB", MaterialInputSource::Texture, 1});
+            if (arrays) pass.Inputs.push_back({"Images", MaterialInputSource::Texture, 0});
+            else {
+                pass.Inputs.push_back({"ImageA", MaterialInputSource::Texture, 0});
+                pass.Inputs.push_back({"ImageB", MaterialInputSource::Texture, 1});
+            }
             pass.Inputs.push_back({"SampleA", MaterialInputSource::Sampler, 0});
             pass.Inputs.push_back({"SampleB", MaterialInputSource::Sampler, 1});
         }
@@ -177,8 +188,8 @@ BINDING(1,1) SamplerState SampleB : register(s1, space1);
         PreparedRasterDraw draw; draw.Pipeline = pipeline; draw.Count = 3;
         draw.Viewport = {0, 0, 16, 16, 0, 1}; draw.Scissor = {0, 0, 16, 16}; return draw;
     }
-    void Mixed();
-    void DepthStates();
+    void Mixed(bool arrays = false);
+    void DepthStates(bool reverse = false);
     void Regions();
     void PresentExternal(bool hide) {
         Window = CreateWindowExW(0, L"STATIC", L"RadRay raster producer", WS_OVERLAPPEDWINDOW,
@@ -223,9 +234,9 @@ BINDING(1,1) SamplerState SampleB : register(s1, space1);
 TEST_F(RasterDraw, ExternalSurfacePresentsOnceAndRetiresOnTheFinalFence) { PresentExternal(false); }
 TEST_F(RasterDraw, HiddenExternalSurfacePreservesIndependentApplicationWork) { PresentExternal(true); }
 
-void RasterDraw::Mixed() {
-    auto program = Program(true); ASSERT_TRUE(program);
-    auto material = Material(program.Get(), true);
+void RasterDraw::Mixed(bool arrays) {
+    auto program = Program(true, arrays); ASSERT_TRUE(program);
+    auto material = Material(program.Get(), true, arrays);
     auto& pass = material.Passes[0];
     auto plan = Core.ResolveMaterial(*Renderer, pass); ASSERT_TRUE(plan);
     auto missing = pass; missing.Inputs.pop_back(); EXPECT_FALSE(Core.ResolveMaterial(*Renderer, missing));
@@ -254,6 +265,9 @@ void RasterDraw::Mixed() {
     RasterMaterialValues values{.Constants = constants, .Textures = textures, .Samplers = samplers, .Views = views};
     const std::span<const byte> tooSmall[]{std::as_bytes(std::span{view, size_t{1}})};
     auto invalid = values; invalid.Views = tooSmall; EXPECT_FALSE(Core.PrepareMaterial(context, *plan.Get(), material, invalid));
+    auto badIndex = pass; badIndex.Inputs[2].ValueIndex = 2;
+    auto badPlan = Core.ResolveMaterial(*Renderer, badIndex); ASSERT_TRUE(badPlan);
+    EXPECT_FALSE(Core.PrepareMaterial(context, *badPlan.Get(), material, values));
     auto parameters = Core.PrepareMaterial(context, *plan.Get(), material, values); ASSERT_TRUE(parameters);
     auto nativePass = Pass(false);
     const RenderOutputInfo output{16, 16, 1, {render::TextureFormat::RGBA8_UNORM}, {}};
@@ -274,17 +288,18 @@ void RasterDraw::Mixed() {
     EXPECT_NEAR(pixels[right + 1], 89, 1); EXPECT_NEAR(pixels[right + 2], 38, 1);
 }
 
-void RasterDraw::DepthStates() {
+void RasterDraw::DepthStates(bool reverse) {
     auto program = Program(false); ASSERT_TRUE(program);
     auto material = Material(program.Get(), false); auto& pass = material.Passes[0];
     pass.DepthStencil = render::DepthStencilState::Default(); pass.DepthStencil->DepthWriteEnable = false;
+    pass.DepthStencil->DepthCompare = reverse ? render::CompareFunction::Greater : render::CompareFunction::Less;
     auto plan = Core.ResolveMaterial(*Renderer, pass); ASSERT_TRUE(plan);
     Begin(); auto context = MakePipelineContext(*Renderer, *Frame); auto nativePass = Pass(true);
-    auto* commands = Frame->AllocateCommandBuffer(); auto* encoder = Start(commands, nativePass, true);
+    auto* commands = Frame->AllocateCommandBuffer(); auto* encoder = Start(commands, nativePass, true, reverse ? 0.0f : 1.0f);
     const RenderOutputInfo output{16, 16, 1, {render::TextureFormat::RGBA8_UNORM}, render::TextureFormat::D32_FLOAT};
     for (uint32_t i = 0; i < 4; ++i) {
         pass.DepthStencil->DepthWriteEnable = i >= 2;
-        float view[]{i % 2 ? 0.8f : 0.2f, 0, 0, 0}, tint[]{i == 0 || i == 3 ? 1.0f : 0, i == 1 ? 1.0f : 0, i == 2 ? 1.0f : 0, 1};
+        float view[]{(i % 2 != 0) == reverse ? 0.2f : 0.8f, 0, 0, 0}, tint[]{i == 0 || i == 3 ? 1.0f : 0, i == 1 ? 1.0f : 0, i == 2 ? 1.0f : 0, 1};
         const std::span<const byte> views[]{std::as_bytes(std::span{view})}, constants[]{std::as_bytes(std::span{tint})};
         auto parameters = Core.PrepareMaterial(context, *plan.Get(), material, {.Constants = constants, .Views = views}); ASSERT_TRUE(parameters);
         auto pipeline = Core.PreparePipeline(context, *plan.Get(), pass, {}, render::PrimitiveTopology::TriangleList, nativePass, output); ASSERT_TRUE(pipeline);
@@ -326,6 +341,20 @@ TEST_F(RasterDraw, IndependentDepthWriteAndCompareDriveTheExistingPipelineCache)
 TEST_F(VulkanRasterDraw, IndependentDepthWriteAndCompareDriveTheExistingPipelineCache) { DepthStates(); }
 TEST_F(RasterDraw, TextureRegionsValidateWholeBatchAndPreservePixelsOutsidePaddedMipLayerPatch) { Regions(); }
 TEST_F(VulkanRasterDraw, TextureRegionsValidateWholeBatchAndPreservePixelsOutsidePaddedMipLayerPatch) { Regions(); }
+TEST_F(RasterDraw, ReflectedTextureArrayUsesEveryValueAndRejectsAnOutOfRangeIndex) { Mixed(true); }
+TEST_F(VulkanRasterDraw, ReflectedTextureArrayUsesEveryValueAndRejectsAnOutOfRangeIndex) { Mixed(true); }
+TEST_F(RasterDraw, ReversedDepthUsesGreaterCompareAndZeroClearWithIndependentWrite) { DepthStates(true); }
+TEST_F(VulkanRasterDraw, ReversedDepthUsesGreaterCompareAndZeroClearWithIndependentWrite) { DepthStates(true); }
+TEST_F(RasterDraw, MaterialAcceptsRegisteredProgramAndRejectsAmbiguousSourceOwnership) {
+    auto program = Program(false); ASSERT_TRUE(program);
+    auto descriptor = Material(program.Get(), false);
+    radray::Material registered{descriptor.Passes, descriptor.Constants}; EXPECT_TRUE(registered.IsValid());
+    descriptor.Passes[0].Program.SourceName = "ambiguous.hlsl";
+    radray::Material ambiguous{descriptor.Passes, descriptor.Constants}; EXPECT_FALSE(ambiguous.IsValid());
+    EXPECT_FALSE(Core.ResolveMaterial(*Renderer, descriptor.Passes[0]));
+    descriptor.Passes[0].Program.SourceName.clear(); descriptor.Passes[0].RegisteredProgram = nullptr;
+    radray::Material missing{descriptor.Passes, descriptor.Constants}; EXPECT_FALSE(missing.IsValid());
+}
 }  // namespace
 }  // namespace radray::test
 #endif
