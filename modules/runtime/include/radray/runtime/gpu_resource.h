@@ -129,6 +129,15 @@ struct TextureUploadRequest {
     render::TextureStates Before{render::TextureState::Undefined};
     render::TextureStates After{render::TextureState::ShaderRead};
 };
+struct TextureRegionUploadRequest {
+    std::span<const byte> SrcData;
+    render::Texture* DstTexture;
+    /// Runtime supplies staging SourceOffset/RowPitch; the remaining fields describe the destination.
+    render::BufferTextureCopyRegion Region;
+    uint64_t SrcRowPitch{0};
+    render::TextureStates Before{render::TextureState::Undefined};
+    render::TextureStates After{render::TextureState::ShaderRead};
+};
 
 /// 持有持久映射的上传缓冲区，并提供线性子分配。
 class MappedUploadPage {
@@ -264,6 +273,9 @@ public:
     /// Ranges must be ordered, non-overlapping and share one destination and Before/After states.
     bool TryUploadBufferRanges(render::CommandBuffer* cmdBuffer, std::span<const BufferUploadRequest> requests);
     void UploadTexture(render::CommandBuffer* cmdBuffer, const TextureUploadRequest& request);
+    /// Validates and stages the whole batch before recording destination changes.
+    /// Barriers affect exactly one mip/layer per request. Caller retains retry data for skipped flights.
+    bool TryUploadTextureRegions(render::CommandBuffer* cmdBuffer, std::span<const TextureRegionUploadRequest> requests);
     std::optional<GpuMesh> UploadMeshResource(
         render::CommandBuffer* cmdBuffer,
         const MeshResource& meshResource);

@@ -54,6 +54,21 @@ BeginFrameRecord 分配真实 serial，再 Consume/Prepare/Record/Submit；使�
 旧 flight 的 owner。完成消息仍须先交给 SceneManager 和 GpuSystem，再复用对应 flight。
 无需构造 Application、World 或 Actor 即可使用这组公共接口。
 
+`AppFrameContext::AdoptSwapChainFrame` 接收外部 SwapChain 的真实 acquire token；表面、设备和回调
+由调用方拥有：surface/device 存活到最终 GPU signal 完成，回调至少存活到 SubmitFrame 返回。
+期间不得 recreate；token 必须属于传入的 SwapChain，PresentQueue 必须是宿主的主队列。
+外部目标的 backbuffer 访问独占一个非空 batch，runtime 统一执行同步、Present 和最终主队列 fence。
+IsPresentable 回调在提交时重新检查输出；仅外部目标不可呈现时，跳过其 backbuffer batch，独立的资源和
+离屏 batch 仍执行，completion 仍表示这些应用工作完成。AppWindow 路径保留原来的整帧跳过和补传语义。
+外部宿主消费真实 completion 后先 ReleaseFrameResourcesGT，再泵 FrameTimeline/AssetManager 的等待器；
+不能用 CPU Return、Present 返回或中间 batch fence 代替最后的 flight signal。
+
+`ResourceUploader::TryUploadTextureRegions` 复用 staging pool 与 RHI region copy，先校验、暂存整批，再录制
+目标修改。支持单采样的非压缩 2D/2DArray color 格式，检查 mip/layer、offset/extent、row pitch、整数溢出
+和源长度；失败不录制部分目标修改。每条 barrier 只作用于该 mip/layer；调用方提供真实 Before/After。
+SrcData 仅借用到暂存完成，staging 随真实 flight 完成回收。AppWindow 整帧丢弃时调用方仍须持有重试来源；
+外部输出不得把必须执行的资源更新放进可跳过的 backbuffer batch。
+
 `gpu_system.h` 在可调用的 `GpuSystem` 函数声明上标记线程与阶段，私有函数也遵循同一约定：
 
 - **GT** 是 Application 所在线程，拥有 `FrameTimeline` 上的游戏帧号与帧等待表。协程的启动、恢复和

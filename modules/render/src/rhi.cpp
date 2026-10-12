@@ -261,7 +261,7 @@ std::pair<bool, string> ValidateBufferTextureCopyRegion(
     const BufferDescriptor& source, const TextureDescriptor& destination,
     const BufferTextureCopyRegion& r, const DeviceDetail& detail) {
     const auto bpp = GetTextureFormatBytesPerPixel(destination.Format);
-    if (destination.Dim != TextureDimension::Dim2D || destination.SampleCount != 1 || bpp == 0 ||
+    if ((destination.Dim != TextureDimension::Dim2D && destination.Dim != TextureDimension::Dim2DArray) || destination.SampleCount != 1 || bpp == 0 ||
         IsDepthStencilFormat(destination.Format) || !source.Usage.HasFlag(BufferUse::CopySource) ||
         !destination.Usage.HasFlag(TextureUse::CopyDestination))
         return {false, "Region upload requires an uncompressed color 2D texture, single sample and copy usages"};

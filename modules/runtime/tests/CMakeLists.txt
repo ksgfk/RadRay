@@ -8,6 +8,7 @@ set(radray_runtime_serial_suites
     "SceneDeliveryRunner.*"
     "MultiWorldSceneRunner.*"
     "SceneDraw.*"
+    "*RasterDraw.*"
     "GpuSceneLifetime.*"
     "RuntimeMultiWindow.*"
     "RuntimeVulkanSwapChain*")
@@ -24,6 +25,7 @@ set(radray_runtime_test_sources
     test_frame_upload.cpp
     test_gpu_system.cpp
     test_pipeline.cpp
+    test_raster_draw.cpp
     test_lifecycle_scale.cpp
     test_scene_apply_changes.cpp
     test_scene_assets.cpp
@@ -71,5 +73,10 @@ gtest_discover_tests(test_radray_runtime
     PROPERTIES RUN_SERIAL TRUE TIMEOUT 90)
 radray_enable_unity_build(test_radray_runtime)
 target_precompile_headers(test_radray_runtime PRIVATE <gtest/gtest.h>)
+if (TARGET radrayshadercompiler)
+    target_link_libraries(test_radray_runtime PRIVATE radrayshadercompiler)
+    target_compile_definitions(test_radray_runtime PRIVATE
+        RADRAY_RASTER_COMPILER_PATH="$<TARGET_FILE:RadRayDXC::Compiler>")
+endif()
 
 add_custom_target(radray_runtime_tests DEPENDS test_radray_runtime)

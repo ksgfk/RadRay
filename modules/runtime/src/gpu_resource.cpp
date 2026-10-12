@@ -756,6 +756,65 @@ void ResourceUploader::UploadTexture(
     cmdBuffer->ResourceBarrier(std::span{&barrierAfter, 1});
 }
 
+bool ResourceUploader::TryUploadTextureRegions(render::CommandBuffer* commands, std::span<const TextureRegionUploadRequest> requests) {
+    struct PreparedRegion {
+        const TextureRegionUploadRequest* Request;
+        render::BufferTextureCopyRegion Region;
+        uint64_t SourcePitch, RowBytes, Size;
+        StagingBufferPool::Allocation Allocation;
+    };
+    vector<PreparedRegion> prepared;
+    const auto& detail = _device->GetDetail();
+    for (const auto& request : requests) {
+        if (!request.DstTexture || request.SrcData.empty()) return false;
+        const auto desc = request.DstTexture->GetDesc();
+        const auto bpp = render::GetTextureFormatBytesPerPixel(desc.Format);
+        if (!bpp) return false;
+        auto region = request.Region;
+        const uint64_t rowBytes = uint64_t{region.Width} * bpp;
+        const uint64_t sourcePitch = request.SrcRowPitch ? request.SrcRowPitch : rowBytes;
+        if (!region.Height || sourcePitch < rowBytes ||
+            (region.Height > 1 && sourcePitch > (UINT64_MAX - rowBytes) / (region.Height - 1))) return false;
+        const uint64_t sourceBytes = sourcePitch * (region.Height - 1) + rowBytes;
+        if (sourceBytes > request.SrcData.size()) return false;
+        const uint64_t alignment = std::max<uint64_t>(1, detail.TextureDataPitchAlignment);
+        const uint64_t pitch = Align(rowBytes, alignment);
+        if (pitch > UINT32_MAX || pitch > UINT64_MAX / region.Height) return false;
+        region.SourceOffset = 0;
+        region.RowPitch = static_cast<uint32_t>(pitch);
+        const uint64_t size = pitch * region.Height;
+        const render::BufferDescriptor source{.Size = size, .Memory = render::MemoryType::Upload, .Usage = render::BufferUse::CopySource};
+        if (!render::ValidateBufferTextureCopyRegion(source, desc, region, detail).first) return false;
+        prepared.push_back({&request, region, sourcePitch, rowBytes, size, {}});
+    }
+    for (auto& item : prepared) {
+        const uint64_t placement = std::max<uint64_t>(1, detail.TextureDataPlacementAlignment);
+        auto reservation = _stagingPool.TryReserve(item.Size, placement);
+        if (!reservation.IsValid()) return false;
+        auto* destination = static_cast<byte*>(reservation.Data());
+        std::memset(destination, 0, item.Size);
+        for (uint32_t row = 0; row < item.Region.Height; ++row)
+            std::memcpy(destination + uint64_t{row} * item.Region.RowPitch,
+                item.Request->SrcData.data() + uint64_t{row} * item.SourcePitch, item.RowBytes);
+        item.Allocation = reservation.Commit(item.Size);
+        item.Region.SourceOffset = item.Allocation.Offset;
+    }
+    for (const auto& item : prepared) {
+        const auto& request = *item.Request;
+        const render::SubresourceRange range{item.Region.ArrayLayer, 1, item.Region.MipLevel, 1};
+        const render::ResourceBarrierDescriptor before[]{
+            render::BarrierBufferDescriptor{.Target = item.Allocation.Target, .Before = render::BufferState::HostWrite, .After = render::BufferState::CopySource},
+            render::BarrierTextureDescriptor{.Target = request.DstTexture, .Before = request.Before, .After = render::TextureState::CopyDestination, .Range = range}};
+        commands->ResourceBarrier(before);
+        if (!commands->CopyBufferToTextureRegion({item.Allocation.Target, request.DstTexture, item.Region}))
+            RADRAY_ABORT("validated texture region was rejected by the backend");
+        const render::ResourceBarrierDescriptor after = render::BarrierTextureDescriptor{
+            .Target = request.DstTexture, .Before = render::TextureState::CopyDestination, .After = request.After, .Range = range};
+        commands->ResourceBarrier(std::span{&after, 1});
+    }
+    return true;
+}
+
 void ResourceUploader::EndFlight(uint32_t flightIndex) {
     if (_activeFlightIndex != flightIndex) {
         RADRAY_ABORT(
