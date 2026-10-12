@@ -165,6 +165,7 @@ uint32_t SwapChainFrame::GetBackBufferIndex() const noexcept { return _backBuffe
 SwapChainSyncObject* SwapChainFrame::GetWaitToDraw() const noexcept { return _waitToDraw; }
 SwapChainSyncObject* SwapChainFrame::GetReadyToPresent() const noexcept { return _readyToPresent; }
 bool SwapChainFrame::IsValid() const noexcept { return _owner != nullptr; }
+bool SwapChainFrame::IsFrom(const SwapChain* owner) const noexcept { return IsValid() && _owner == owner; }
 
 SwapChainFrame SwapChain::MakeFrame(
     SwapChain* owner,

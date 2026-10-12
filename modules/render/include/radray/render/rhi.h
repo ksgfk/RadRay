@@ -735,6 +735,7 @@ public:
     SwapChainSyncObject* GetWaitToDraw() const noexcept;
     SwapChainSyncObject* GetReadyToPresent() const noexcept;
     bool IsValid() const noexcept;
+    bool IsFrom(const SwapChain* owner) const noexcept;
 
     friend constexpr void swap(SwapChainFrame& a, SwapChainFrame& b) noexcept {
         std::swap(a._owner, b._owner);

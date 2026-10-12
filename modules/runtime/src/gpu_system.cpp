@@ -374,7 +374,7 @@ void GpuSystem::SubmitFrame(uint32_t flightIndex) {
 
     const bool isD3D12 = _device->GetBackend() == render::RenderBackend::D3D12;
     const bool dropApplicationWork = std::any_of(record.Batches.begin(), record.Batches.end(), [](const auto& batch) {
-        return batch.Target && !batch.Target->Window->IsSwapChainPresentable();
+        return batch.Target && batch.Target->Window && !batch.Target->Window->IsSwapChainPresentable();
     });
     if (dropApplicationWork) {
         RADRAY_WARN_LOG("skip frame GPU work: an acquired window became unpresentable before submit");
@@ -401,7 +401,9 @@ void GpuSystem::SubmitFrame(uint32_t flightIndex) {
         record.CommandAllocator.Register(std::span{&commands, 1});
     };
     const auto presentTarget = [](AppFrameTarget& target) {
-        const auto result = target.Window->PresentSwapChainFrame(std::move(target._frame));
+        const auto result = target.ExternalSwapChain ? target.ExternalSwapChain->Present(std::move(target._frame)) :
+            target.Window->PresentSwapChainFrame(std::move(target._frame));
+        if (target.OnPresent) target.OnPresent(result);
         if (result.Status != render::SwapChainStatus::Success && result.Status != render::SwapChainStatus::RequireRecreate && result.Status != render::SwapChainStatus::RetryLater) {
             RADRAY_ERR_LOG("failed to present swapchain frame: status={}, native={}", result.Status, result.NativeStatusCode);
         }
@@ -416,8 +418,9 @@ void GpuSystem::SubmitFrame(uint32_t flightIndex) {
     }
 
     for (auto& batch : record.Batches) {
+        const bool dropTarget = batch.Target && batch.Target->ExternalSwapChain && !batch.Target->IsPresentable();
         render::CommandQueueSubmitDescriptor desc{
-            .CmdBuffers = dropApplicationWork ? std::span<render::CommandBuffer*>{} : std::span{batch.CmdBuffers},
+            .CmdBuffers = dropApplicationWork || dropTarget ? std::span<render::CommandBuffer*>{} : std::span{batch.CmdBuffers},
             .SignalFences = batch.SignalFences,
             .SignalValues = batch.SignalValues,
             .WaitFences = batch.WaitFences,
@@ -438,7 +441,7 @@ void GpuSystem::SubmitFrame(uint32_t flightIndex) {
                 readySync[0] = ready;
                 desc.ReadyToPresent = readySync;
             }
-            const auto before = target.Window->GetBackBufferState(target.BackBufferIndex);
+            const auto before = target.Window ? target.Window->GetBackBufferState(target.BackBufferIndex) : render::TextureStates{render::TextureState::Present};
             if (dropApplicationWork && !isD3D12 && before != render::TextureState::Present) {
                 cleanup = record.CommandAllocator.AllocateInternal();
                 const render::ResourceBarrierDescriptor barrier = render::BarrierTextureDescriptor{
@@ -452,7 +455,7 @@ void GpuSystem::SubmitFrame(uint32_t flightIndex) {
         submitQueue(desc);
         if (batch.Target) {
             auto& target = *batch.Target;
-            if (!dropApplicationWork || cleanup) {
+            if (target.Window && (!dropApplicationWork || cleanup)) {
                 target.Window->SetBackBufferState(target.BackBufferIndex, render::TextureState::Present);
             }
             if (isD3D12) {
@@ -461,7 +464,12 @@ void GpuSystem::SubmitFrame(uint32_t flightIndex) {
         }
     }
 
-    // A final submission covers all application batches, even for an empty or skipped flight.
+    if (!isD3D12) {
+        for (auto& batch : record.Batches) {
+            if (batch.Target) presentTarget(*batch.Target);
+        }
+    }
+    // The final signal covers application commands and the presentation tail on the same queue.
     if (profileFrame) {
         auto* commands = record.CommandAllocator.AllocateInternal();
         _frameProfiler->EndFrame(commands, flightIndex);
@@ -469,11 +477,6 @@ void GpuSystem::SubmitFrame(uint32_t flightIndex) {
         submitQueue({.CmdBuffers = std::span{&commands, 1}});
     } else {
         submitQueue({});
-    }
-    if (!isD3D12) {
-        for (auto& batch : record.Batches) {
-            if (batch.Target) presentTarget(*batch.Target);
-        }
     }
     record.HostWrites.Seal();
     record.Signal = finalSignal;
@@ -556,6 +559,7 @@ void AppFrameContext::RegisterBatch(
         }
         const auto& registration = flight.Acquisitions[target->_registrationIndex];
         if (registration.Returned || target->Window != registration.Window ||
+            target->ExternalSwapChain.Get() != registration.ExternalSwapChain.Get() ||
             target->BackBuffer != registration.BackBuffer || target->BackBufferView != registration.BackBufferView ||
             target->BackBufferIndex != registration.BackBufferIndex ||
             target->_frame.GetBackBuffer() != registration.BackBuffer || target->_frame.GetBackBufferIndex() != registration.BackBufferIndex) {
@@ -610,6 +614,28 @@ std::optional<AppFrameTarget> AppFrameContext::AcquireWindow(AppWindow* window) 
     target._frameSerial = _frameSerial;
     target._registrationIndex = flight.Acquisitions.size();
     flight.Acquisitions.push_back({target.Window, target.BackBuffer, target.BackBufferView, target.BackBufferIndex});
+    return target;
+}
+
+AppFrameTarget AppFrameContext::AdoptSwapChainFrame(render::SwapChain* chain, render::SwapChainFrame frame,
+    std::function<bool()> isPresentable, std::function<void(render::SwapChainPresentResult)> onPresent) {
+    auto& flight = GetRecordingFlight();
+    if (!chain || !frame.IsFrom(chain) || !isPresentable || chain->GetDesc().PresentQueue != _gpuSystem->GetMainQueue())
+        RADRAY_ABORT("external output requires its main-queue surface's real acquire token and presentability query");
+    for (const auto& registration : flight.Acquisitions)
+        if (registration.ExternalSwapChain.Get() == chain) RADRAY_ABORT("external surface already acquired in this flight");
+    AppFrameTarget target;
+    target.ExternalSwapChain = chain;
+    target.IsPresentable = std::move(isPresentable);
+    target.OnPresent = std::move(onPresent);
+    target._frame = std::move(frame);
+    target.BackBuffer = target._frame.GetBackBuffer();
+    target.BackBufferIndex = target._frame.GetBackBufferIndex();
+    target._owner = _gpuSystem;
+    target._flightIndex = _flightIndex;
+    target._frameSerial = _frameSerial;
+    target._registrationIndex = flight.Acquisitions.size();
+    flight.Acquisitions.push_back({nullptr, target.BackBuffer, nullptr, target.BackBufferIndex, false, chain});
     return target;
 }
 

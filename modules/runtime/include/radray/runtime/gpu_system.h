@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <functional>
 #include <optional>
 #include <span>
 #include <thread>
@@ -56,6 +57,10 @@ struct AppFrameTarget {
     render::Texture* BackBuffer{nullptr};
     render::TextureView* BackBufferView{nullptr};
     uint32_t BackBufferIndex{0};
+    /// Borrowed external surface. Independent batches still execute if only this output is hidden.
+    Nullable<render::SwapChain*> ExternalSwapChain{nullptr};
+    std::function<bool()> IsPresentable;
+    std::function<void(render::SwapChainPresentResult)> OnPresent;
 
 private:
     friend class AppFrameContext;
@@ -127,6 +132,7 @@ struct GpuFlightAcquireRegistration {
     render::TextureView* BackBufferView;
     uint32_t BackBufferIndex;
     bool Returned{false};
+    Nullable<render::SwapChain*> ExternalSwapChain{nullptr};
 };
 
 /// runtime 拥有的 per-flight 槽位。代表流水线一条槽位在不同阶段的完整状态，
@@ -200,6 +206,11 @@ public:
     /// 成功时返回持有 SwapChainFrame 的目标，不分配或选择命令。
     /// 【不录任何 barrier】backbuffer 初始翻转与 →Present 收尾全部由应用显式录。
     std::optional<AppFrameTarget> AcquireWindow(AppWindow* window);
+    /// Transfers a real acquire token on the main queue. Surface/device survive the final GPU signal;
+    /// callbacks survive SubmitFrame. The surface cannot be recreated while its token is owned here.
+    /// Backbuffer commands belong only to this target's batch; independent resource batches are preserved.
+    AppFrameTarget AdoptSwapChainFrame(render::SwapChain* chain, render::SwapChainFrame frame,
+        std::function<bool()> isPresentable, std::function<void(render::SwapChainPresentResult)> onPresent);
 
     /// 绑定当前 flight 的上传器；EndFlight/CollectFlight 完全由 runtime 掌管。
     ResourceUploader& GetUploader() const noexcept;
@@ -300,6 +311,7 @@ public:
     render::Device* GetDevice() const noexcept { return _device.get(); }
     /// [任意线程] 只读取主队列指针；队列操作仍须遵守提交/等待的同步约定。
     render::CommandQueue* GetMainQueue() const noexcept { return _mainQueue; }
+    render::Fence* GetMainFence() const noexcept { return _mainQueueTrack.Fence.get(); }
     /// [任意线程] 只读取装配后稳定的窗口系统指针；不得与 SetWindowManager 并发。
     WindowManager* GetWindowManager() const noexcept { return _windowManager; }
     /// [GT，装配/拆除阶段] 注入非拥有的窗口系统指针；须与所有读者隔离。
