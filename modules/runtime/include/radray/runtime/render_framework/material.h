@@ -3,11 +3,13 @@
 #include <radray/runtime/texture_asset.h>
 
 namespace radray {
+class RenderSystem;
 enum class MaterialInputSource : uint8_t { SceneObjects,
                                            ViewConstants,
                                            MaterialConstants,
                                            Texture,
-                                           Sampler };
+                                           Sampler,
+                                           FrameConstants };
 struct MaterialInput {
     string Name;
     MaterialInputSource Source;
@@ -22,6 +24,14 @@ struct MaterialPass {
     render::PrimitiveState Primitive{render::PrimitiveState::Default()};
     std::optional<render::BlendState> Blend;
     render::ColorWrites WriteMask{render::ColorWrite::All};
+    /// Validated, device-scoped program registered through RenderSystem's artifact API.
+    /// Its service generation must outlive this material and all prepared draws.
+    Nullable<ShaderProgram*> RegisteredProgram{nullptr};
+    std::optional<render::DepthStencilState> DepthStencil;
+    render::MultiSampleState Samples{render::MultiSampleState::Default()};
+    /// General reflected push block. Mutually exclusive with ObjectIndexPushConstant.
+    string PushConstant;
+    Nullable<ShaderProgram*> ResolveProgram(RenderSystem& renderer) const;
 };
 struct MaterialRenderData {
     vector<MaterialPass> Passes;

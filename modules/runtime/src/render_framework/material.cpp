@@ -1,7 +1,12 @@
 #include <radray/runtime/render_framework/material.h>
+#include <radray/runtime/render_system.h>
 #include <algorithm>
 
 namespace radray {
+Nullable<ShaderProgram*> MaterialPass::ResolveProgram(RenderSystem& renderer) const {
+    if (RegisteredProgram) return Program.SourceName.empty() ? RegisteredProgram : nullptr;
+    return Program.SourceName.empty() ? nullptr : renderer.GetOrCreateShaderProgram(Program);
+}
 Material::Material(vector<MaterialPass> passes, vector<vector<byte>> constants,
                    vector<StreamingAssetRef<TextureAsset>> textures, vector<render::SamplerDescriptor> samplers)
     : _textures(std::move(textures)), _data{std::move(passes), std::move(constants), {}, std::move(samplers)} {
@@ -12,7 +17,7 @@ Material::Material(vector<MaterialPass> passes, vector<vector<byte>> constants,
     }
     for (size_t i = 0; i < _data.Passes.size(); ++i) {
         const auto& pass = _data.Passes[i];
-        if (pass.Name.empty() || pass.Program.SourceName.empty()) return;
+        if (pass.Name.empty() || (pass.Program.SourceName.empty() == !pass.RegisteredProgram)) return;
         for (size_t j = 0; j < i; ++j)
             if (pass.Name == _data.Passes[j].Name) return;
         for (size_t j = 0; j < pass.Inputs.size(); ++j) {
@@ -31,7 +36,8 @@ Material::Material(vector<MaterialPass> passes, vector<vector<byte>> constants,
                     if (input.ValueIndex >= _data.Samplers.size()) return;
                     break;
                 case MaterialInputSource::SceneObjects:
-                case MaterialInputSource::ViewConstants: break;
+                case MaterialInputSource::ViewConstants:
+                case MaterialInputSource::FrameConstants: break;
                 default: return;
             }
         }
