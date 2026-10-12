@@ -10,6 +10,7 @@ struct InstanceParameterLayout {
     struct Field {
         string Name;
         uint32_t Offset, Size, Kind, ScalarKind, Rows, Columns;
+        uint32_t ElementCount{0}, Stride{0}, Flags{0};
         friend bool operator==(const Field&, const Field&) = default;
     };
     string Name;
@@ -21,19 +22,25 @@ struct InstanceParameterLayout {
 /// Reflects a compiler-published constant payload. Structured declarations must share this
 /// exact padded element layout; bindings without element reflection require this explicit schema.
 std::optional<InstanceParameterLayout> ReflectInstanceParameterLayout(const shader::ShaderArtifactView& artifact,
-                                                                     std::string_view declaration, string streamName);
+                                                                      std::string_view declaration, string streamName);
 struct ShapeParameterUpdate {
     ShapeId Id;
     InstanceParameterLayout Layout;
     vector<byte> Values;
 };
-struct SceneParameterChange { ShapeId Id; string Stream; };
+struct SceneParameterChange {
+    ShapeId Id;
+    string Stream;
+};
 struct InstanceParameterBuffer {
     const InstanceParameterLayout* Layout;
     render::ShaderBufferBinding Values;
 };
 struct SceneParameterStream {
-    struct Row { ShapeId Id; vector<byte> Values; };
+    struct Row {
+        ShapeId Id;
+        vector<byte> Values;
+    };
     InstanceParameterLayout Layout;
     vector<std::optional<Row>> Rows;
 };

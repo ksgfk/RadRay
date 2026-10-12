@@ -18,6 +18,8 @@ bool SortRasterIndices(std::span<const uint32_t> source, std::span<const RasterS
                        const Eigen::Matrix4d& transform, const Eigen::Vector3d& camera,
                        bool preserveOrder, std::span<uint32_t> destination);
 /// Split double positions once; subtract high and low pairs per view before adding local float geometry.
-struct RasterSplitPosition { array<float, 4> High{}, Low{}; };
+struct RasterSplitPosition {
+    array<float, 4> High{}, Low{};
+};
 std::optional<RasterSplitPosition> SplitRasterPosition(const Eigen::Vector3d& position) noexcept;
 }  // namespace radray

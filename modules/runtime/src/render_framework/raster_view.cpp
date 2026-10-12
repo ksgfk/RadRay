@@ -4,8 +4,9 @@
 
 namespace radray {
 std::optional<ResolvedRasterView> ResolveRasterView(const RasterView& view, uint32_t width, uint32_t height,
-                                                  render::RenderBackend backend) noexcept {
+                                                    render::RenderBackend backend) noexcept {
     const auto& v = view.Viewport;
+    if (view.Depth != RasterDepthConvention::ZeroToOne && view.Depth != RasterDepthConvention::MinusOneToOne && view.Depth != RasterDepthConvention::ReverseZeroToOne) return std::nullopt;
     if (!width || !height || !view.View.allFinite() || !view.Projection.allFinite() ||
         !std::isfinite(v.X) || !std::isfinite(v.Y) || !std::isfinite(v.Width) || !std::isfinite(v.Height) ||
         v.X < 0 || v.Y < 0 || v.Width <= 0 || v.Height <= 0 || v.X + v.Width > width || v.Y + v.Height > height ||
@@ -17,7 +18,10 @@ std::optional<ResolvedRasterView> ResolveRasterView(const RasterView& view, uint
         result.Projection.row(2) = (view.Projection.row(2) + view.Projection.row(3)) * 0.5f;
     }
     result.ViewProjection = result.Projection * result.View;
-    if (backend == render::RenderBackend::Vulkan) { result.Viewport.Y += v.Height; result.Viewport.Height = -v.Height; }
+    if (backend == render::RenderBackend::Vulkan) {
+        result.Viewport.Y += v.Height;
+        result.Viewport.Height = -v.Height;
+    }
     return result;
 }
 }  // namespace radray

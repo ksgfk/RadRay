@@ -346,6 +346,7 @@ RT 只读不可变数据。组件等待未完成材质，完成时核验当前 S
 `RasterDraw::ResolveMaterial` 在冷路径解析 program 的绑定结构，支持 SceneObjects、任意长度 View/Frame/Material 常量、texture 与 sampler
 处于不同或混合 physical groups。所有 active 非 immutable bindings 必须由契约覆盖。数组按 ValueIndex 连续取值。
 准备阶段核对反射的常量长度，填满整组，并分配当前 flight 内独立 parameter set 和满足设备对齐的常量切片；不会覆盖此前引用的值。
+RasterMaterialValues 可提供 ConstantBuffers/ViewBuffers/FrameBuffers 覆盖对应 CPU bytes；这些已提交切片须满足反射大小并存活至当前 flight 完成。调用方可复用相同 view/style 的 arena 切片，避免每 draw 重复常量 copy，不另建上传 cache。
 纯 sampler group 按 plan 和完整 sampler 描述缓存，其余组按 flight 复用；同一 physical group 可混合不同逻辑来源。
 常量页和参数集在安全 flight reset 后复用，固定负载容量收敛。参数集借用 program layout，缓存随 GPU idle 后拆除。
 

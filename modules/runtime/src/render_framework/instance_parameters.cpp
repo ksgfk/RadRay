@@ -12,7 +12,7 @@ bool InstanceParameterLayout::IsValid() const noexcept {
     return true;
 }
 std::optional<InstanceParameterLayout> ReflectInstanceParameterLayout(const shader::ShaderArtifactView& artifact,
-                                                                     std::string_view declaration, string streamName) {
+                                                                      std::string_view declaration, string streamName) {
     const auto binding = artifact.FindBinding(declaration);
     if (!binding || binding->Record.Type != uint32_t(shader::ShaderBindingKind::CBuffer) || binding->Record.TypeIndex >= artifact.Types().size()) return std::nullopt;
     const auto root = binding->Record.TypeIndex;
@@ -21,7 +21,7 @@ std::optional<InstanceParameterLayout> ReflectInstanceParameterLayout(const shad
         if (type.ParentIndex != root) continue;
         const auto name = artifact.GetName(type.Name);
         if (!name) return std::nullopt;
-        result.Fields.push_back({string{*name}, type.Offset, type.Size, type.Kind, type.ScalarKind, type.RowCount, type.ColumnCount});
+        result.Fields.push_back({string{*name}, type.Offset, type.Size, type.Kind, type.ScalarKind, type.RowCount, type.ColumnCount, type.ElementCount, type.Stride, type.Flags});
     }
     if (!result.IsValid()) return std::nullopt;
     return result;

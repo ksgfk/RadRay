@@ -5,8 +5,13 @@
 
 namespace radray {
 
-enum class RasterNodeKind : uint8_t { Raster, Fullscreen, Copy, Clear };
-enum class RasterAccess : uint8_t { Read, Write, ReadWrite };
+enum class RasterNodeKind : uint8_t { Raster,
+                                      Fullscreen,
+                                      Copy,
+                                      Clear };
+enum class RasterAccess : uint8_t { Read,
+                                    Write,
+                                    ReadWrite };
 using RasterResourceId = uint32_t;
 using RasterNodeId = uint32_t;
 

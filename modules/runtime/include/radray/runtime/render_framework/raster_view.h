@@ -4,7 +4,9 @@
 #include <radray/render/rhi.h>
 
 namespace radray {
-enum class RasterDepthConvention : uint8_t { ZeroToOne, MinusOneToOne, ReverseZeroToOne };
+enum class RasterDepthConvention : uint8_t { ZeroToOne,
+                                             MinusOneToOne,
+                                             ReverseZeroToOne };
 /// Already evaluated application matrices. Viewport/scissor use top-left pixel coordinates.
 struct RasterView {
     Eigen::Matrix4f View{Eigen::Matrix4f::Identity()};
@@ -20,5 +22,5 @@ struct ResolvedRasterView {
     bool ReverseDepth{false};
 };
 std::optional<ResolvedRasterView> ResolveRasterView(const RasterView& view, uint32_t width, uint32_t height,
-                                                  render::RenderBackend backend) noexcept;
+                                                    render::RenderBackend backend) noexcept;
 }  // namespace radray

@@ -25,6 +25,9 @@ struct RasterMaterialValues {
     std::span<const std::span<const byte>> Frames;
     std::optional<render::ShaderBufferBinding> Objects;
     std::span<const InstanceParameterBuffer> Parameters;
+    /// Already committed constant slices, borrowed through this flight's completion.
+    /// A nonempty source overrides its corresponding CPU byte source.
+    std::span<const render::ShaderBufferBinding> ConstantBuffers, ViewBuffers, FrameBuffers;
 };
 struct PreparedRasterMaterial {
     struct Group {
@@ -52,10 +55,10 @@ class RasterDraw {
 public:
     Nullable<const RasterMaterialPlan*> ResolveMaterial(RenderSystem& renderer, const MaterialPass& pass);
     std::optional<PreparedRasterMaterial> PrepareMaterial(PipelineContext& context, const RasterMaterialPlan& plan,
-        const MaterialRenderData& material, const RasterMaterialValues& values = {});
+                                                          const MaterialRenderData& material, const RasterMaterialValues& values = {});
     Nullable<render::GraphicsPipelineState*> PreparePipeline(PipelineContext& context, const RasterMaterialPlan& plan,
-        const MaterialPass& material, const GeometryVertexLayout& geometry, render::PrimitiveTopology topology,
-        render::RenderPass* pass, const RenderOutputInfo& output, bool reverseCulling = false);
+                                                             const MaterialPass& material, const GeometryVertexLayout& geometry, render::PrimitiveTopology topology,
+                                                             render::RenderPass* pass, const RenderOutputInfo& output, bool reverseCulling = false);
 
 private:
     struct SamplerGroup {

@@ -603,3 +603,5 @@ python tools/win_gen_compile_commands.py --build-dir build_clangcl --configurati
 
 默认输出 `.vscode/compile_commands.json`。IDE 设置见 [开发环境](dev-env.md)。
 文档或技能修改运行 `python tools/check_docs.py` 与 `git diff --check`，详见[文档维护](documentation.md)。
+
+`bench_raster_prepare` 分别测纯 CPU graph 构造/编译、double bounds 与通用 primitive/group 排序；它不创建 command 或提交 GPU。使用 Release target、`--benchmark_min_time=0.05s --benchmark_repetitions=3 --benchmark_out=results.json --benchmark_out_format=json` 保存结果。Scene 的同步、PrepareAndRecord 与 SubmitFrame 分解沿用 `bench_scene_gpu`；`changed:0/1` 与多个 view 可分别观察 warm 零上传和单对象更新。shader/材质 draw、Present、游戏 producer 成本必须另由实际应用 fixture 测量，不能用这些微基准冒充整帧成本。

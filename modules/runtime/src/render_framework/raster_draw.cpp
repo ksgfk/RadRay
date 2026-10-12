@@ -11,7 +11,7 @@ Nullable<const RasterMaterialPlan*> RasterDraw::ResolveMaterial(RenderSystem& re
     const auto pushName = pass.PushConstant.empty() ? pass.ObjectIndexPushConstant : pass.PushConstant;
     const auto requiresConstant = [](const render::BlendComponent& blend) {
         return blend.Src == render::BlendFactor::Constant || blend.Src == render::BlendFactor::OneMinusConstant ||
-            blend.Dst == render::BlendFactor::Constant || blend.Dst == render::BlendFactor::OneMinusConstant;
+               blend.Dst == render::BlendFactor::Constant || blend.Dst == render::BlendFactor::OneMinusConstant;
     };
     if (pass.Blend && (requiresConstant(pass.Blend->Color) || requiresConstant(pass.Blend->Alpha))) return nullptr;
     if (pass.DepthStencil && pass.DepthStencil->Stencil) return nullptr;
@@ -31,24 +31,34 @@ Nullable<const RasterMaterialPlan*> RasterDraw::ResolveMaterial(RenderSystem& re
         if (!plan->Push.IsValid() || push == artifact.RootConstants().end() ||
             (!pass.ObjectIndexPushConstant.empty() && push->Size != sizeof(uint32_t))) return nullptr;
         plan->PushSize = push->Size;
-    } else if (!artifact.RootConstants().empty()) return nullptr;
+    } else if (!artifact.RootConstants().empty())
+        return nullptr;
     for (size_t i = 0; i < pass.Inputs.size(); ++i) {
         const auto& input = pass.Inputs[i];
-        for (size_t j = 0; j < i; ++j) if (pass.Inputs[j].Name == input.Name) return nullptr;
+        for (size_t j = 0; j < i; ++j)
+            if (pass.Inputs[j].Name == input.Name) return nullptr;
         const auto binding = program->GetArtifact().FindBindingInfo(input.Name);
         if (!binding) return nullptr;
         using Kind = shader::ShaderBindingKind;
         const auto kind = binding->LogicalKind;
         switch (input.Source) {
-            case MaterialInputSource::SceneObjects: if (kind != Kind::StructuredBuffer || binding->Count != 1) return nullptr; break;
+            case MaterialInputSource::SceneObjects:
+                if (kind != Kind::StructuredBuffer || binding->Count != 1) return nullptr;
+                break;
             case MaterialInputSource::InstanceParameters:
                 if (kind != Kind::StructuredBuffer || binding->Count != 1 || input.ValueIndex >= pass.ParameterLayouts.size() || !pass.ParameterLayouts[input.ValueIndex].IsValid()) return nullptr;
                 break;
             case MaterialInputSource::ViewConstants:
             case MaterialInputSource::FrameConstants:
-            case MaterialInputSource::MaterialConstants: if (kind != Kind::CBuffer) return nullptr; break;
-            case MaterialInputSource::Texture: if (kind != Kind::Texture) return nullptr; break;
-            case MaterialInputSource::Sampler: if (kind != Kind::Sampler) return nullptr; break;
+            case MaterialInputSource::MaterialConstants:
+                if (kind != Kind::CBuffer) return nullptr;
+                break;
+            case MaterialInputSource::Texture:
+                if (kind != Kind::Texture) return nullptr;
+                break;
+            case MaterialInputSource::Sampler:
+                if (kind != Kind::Sampler) return nullptr;
+                break;
             default: return nullptr;
         }
         auto handle = program->GetPipelineLayout()->FindBinding(input.Name);
@@ -76,7 +86,7 @@ Nullable<const RasterMaterialPlan*> RasterDraw::ResolveMaterial(RenderSystem& re
 }
 
 std::optional<PreparedRasterMaterial> RasterDraw::PrepareMaterial(PipelineContext& context, const RasterMaterialPlan& plan,
-    const MaterialRenderData& material, const RasterMaterialValues& values) {
+                                                                  const MaterialRenderData& material, const RasterMaterialValues& values) {
     if (plan.Program->GetDevice() != context.Resources.GetDevice()) return std::nullopt;
     PreparedRasterMaterial result;
     result.Push = plan.Push;
@@ -134,24 +144,33 @@ std::optional<PreparedRasterMaterial> RasterDraw::PrepareMaterial(PipelineContex
             switch (input.Source) {
                 case MaterialInputSource::SceneObjects:
                     if (!values.Objects) return std::nullopt;
-                    value = *values.Objects; break;
+                    value = *values.Objects;
+                    break;
                 case MaterialInputSource::InstanceParameters: {
                     if (index >= plan.ParameterLayouts.size()) return std::nullopt;
                     const auto& layout = plan.ParameterLayouts[index];
                     const auto found = std::find_if(values.Parameters.begin(), values.Parameters.end(), [&](const auto& p) { return p.Layout && *p.Layout == layout; });
                     if (found == values.Parameters.end() || found->Values.StructureByteStride != layout.Stride) return std::nullopt;
-                    value = found->Values; break;
+                    value = found->Values;
+                    break;
                 }
                 case MaterialInputSource::MaterialConstants:
                 case MaterialInputSource::ViewConstants:
                 case MaterialInputSource::FrameConstants: {
+                    const auto buffers = input.Source == MaterialInputSource::ViewConstants ? values.ViewBuffers : input.Source == MaterialInputSource::FrameConstants ? values.FrameBuffers
+                                                                                                                                                                       : values.ConstantBuffers;
+                    if (!buffers.empty()) {
+                        if (index >= buffers.size() || !buffers[index].Target || buffers[index].Range.Size < plan.BufferSizes[i]) return std::nullopt;
+                        value = buffers[index];
+                        break;
+                    }
                     std::span<const byte> bytes;
                     if (input.Source == MaterialInputSource::MaterialConstants && values.Constants.empty()) {
                         if (index >= material.Constants.size()) return std::nullopt;
                         bytes = material.Constants[index];
                     } else {
-                        const auto source = input.Source == MaterialInputSource::ViewConstants ? values.Views :
-                            input.Source == MaterialInputSource::FrameConstants ? values.Frames : values.Constants;
+                        const auto source = input.Source == MaterialInputSource::ViewConstants ? values.Views : input.Source == MaterialInputSource::FrameConstants ? values.Frames
+                                                                                                                                                                    : values.Constants;
                         if (index >= source.size()) return std::nullopt;
                         bytes = source[index];
                     }
@@ -166,14 +185,16 @@ std::optional<PreparedRasterMaterial> RasterDraw::PrepareMaterial(PipelineContex
                 case MaterialInputSource::Texture: {
                     const std::span<render::TextureView* const> textures = values.Textures.empty() ? std::span{material.Textures} : values.Textures;
                     if (index >= textures.size()) return std::nullopt;
-                    value = textures[index]; break;
+                    value = textures[index];
+                    break;
                 }
                 case MaterialInputSource::Sampler: {
                     const std::span<const render::SamplerDescriptor> samplers = values.Samplers.empty() ? std::span{material.Samplers} : values.Samplers;
                     if (index >= samplers.size()) return std::nullopt;
                     auto sampler = context.Resources.GetDevice()->GetOrCreateSampler(samplers[index]);
                     if (!sampler) return std::nullopt;
-                    value = sampler.Get(); break;
+                    value = sampler.Get();
+                    break;
                 }
                 default: return std::nullopt;
             }
@@ -181,13 +202,14 @@ std::optional<PreparedRasterMaterial> RasterDraw::PrepareMaterial(PipelineContex
         }
         if (binding.Dynamic) group->Offsets.push_back({plan.Handles[i], 0});
     }
-    for (auto& group : result.Groups) if (!group.Parameters->FlushWrites()) return std::nullopt;
+    for (auto& group : result.Groups)
+        if (!group.Parameters->FlushWrites()) return std::nullopt;
     return result;
 }
 
 Nullable<render::GraphicsPipelineState*> RasterDraw::PreparePipeline(PipelineContext& context, const RasterMaterialPlan& plan,
-    const MaterialPass& material, const GeometryVertexLayout& geometry, render::PrimitiveTopology topology,
-    render::RenderPass* pass, const RenderOutputInfo& output, bool reverseCulling) {
+                                                                     const MaterialPass& material, const GeometryVertexLayout& geometry, render::PrimitiveTopology topology,
+                                                                     render::RenderPass* pass, const RenderOutputInfo& output, bool reverseCulling) {
     if (plan.Program->GetDevice() != context.Resources.GetDevice() || (material.DepthStencil && !output.Depth)) return nullptr;
     auto& cache = context.Renderer.GetGraphicsPipelineCache();
     const auto layout = cache.Match(geometry, plan.Program);
@@ -215,6 +237,7 @@ void PreparedRasterDraw::Record(render::GraphicsCommandEncoder* encoder, const P
     if (Indices) {
         encoder->BindIndexBuffer(*Indices);
         encoder->DrawIndexed(Count, Instances, First, VertexOffset, FirstInstance);
-    } else encoder->Draw(Count, Instances, First, FirstInstance);
+    } else
+        encoder->Draw(Count, Instances, First, FirstInstance);
 }
 }  // namespace radray
