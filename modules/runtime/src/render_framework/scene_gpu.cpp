@@ -157,6 +157,7 @@ std::optional<SceneGpuView> SceneGpuData::Prepare(const RenderScene& scene, uint
         if (!parameters.Initialized) {
             for (const auto& row : stream.Rows) if (row) dirty.push_back(row->Id);
         } else dirty = parameters.Pending.Ids;
+        std::sort(dirty.begin(), dirty.end(), [](ShapeId a, ShapeId b) { return a.Index < b.Index; });
         vector<BufferUploadRequest> uploads;
         for (auto id : dirty) {
             if (id.Index >= stream.Rows.size() || !stream.Rows[id.Index] || stream.Rows[id.Index]->Id != id) continue;
