@@ -28,6 +28,9 @@ void ShapeCapture::SetMaterials(std::span<const StreamingAssetRef<Material>> mat
     _materialsWritten = true;
     _writer.SetMaterials(_id, materials);
 }
+bool ShapeCapture::SetInstanceParameters(const InstanceParameterLayout& layout, std::span<const byte> values) {
+    return _writer.SetInstanceParameters(_id, layout, values);
+}
 
 SceneCapture::SceneCapture(SceneWriter& writer) : _writer(writer) { writer.BeginCapture(); }
 void SceneCapture::SetLight(LightId id, const LightData& light) { _writer.SetLight(id, light); }

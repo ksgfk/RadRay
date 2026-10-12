@@ -1,6 +1,7 @@
 #pragma once
 #include <radray/runtime/shader_program.h>
 #include <radray/runtime/texture_asset.h>
+#include <radray/runtime/render_framework/instance_parameters.h>
 
 namespace radray {
 class RenderSystem;
@@ -9,7 +10,8 @@ enum class MaterialInputSource : uint8_t { SceneObjects,
                                            MaterialConstants,
                                            Texture,
                                            Sampler,
-                                           FrameConstants };
+                                           FrameConstants,
+                                           InstanceParameters };
 struct MaterialInput {
     string Name;
     MaterialInputSource Source;
@@ -31,6 +33,7 @@ struct MaterialPass {
     render::MultiSampleState Samples{render::MultiSampleState::Default()};
     /// General reflected push block. Mutually exclusive with ObjectIndexPushConstant.
     string PushConstant;
+    vector<InstanceParameterLayout> ParameterLayouts;
     Nullable<ShaderProgram*> ResolveProgram(RenderSystem& renderer) const;
 };
 struct MaterialRenderData {

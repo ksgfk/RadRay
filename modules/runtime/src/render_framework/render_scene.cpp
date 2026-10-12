@@ -44,11 +44,13 @@ void RenderScene::Apply(const SceneUpdateBatch& batch, Nullable<SceneApplyChange
     if (changes) {
         changes->Updated.clear();
         changes->Removed.clear();
+        changes->Parameters.clear();
     }
     _transforms.BeginApply();
     for (ShapeId id : batch.RemoveShapes) {
         if (!ContainsShape(id)) RADRAY_ABORT("Invalid shape removal");
         auto& slot = _shapes[id.Index];
+        for (auto& [name, stream] : _parameters) if (id.Index < stream.Rows.size()) stream.Rows[id.Index].reset();
         if (changes) changes->Removed.push_back(id);
         UnbindShape(id.Index);
         if (slot.MeshIndex != kNoMesh) {
@@ -110,6 +112,19 @@ void RenderScene::Apply(const SceneUpdateBatch& batch, Nullable<SceneApplyChange
     for (const auto& update : batch.Materials) {
         if (!ContainsShape(update.Id) || _shapes[update.Id.Index].MeshIndex == kNoMesh) RADRAY_ABORT("Invalid shape material update");
         _staticMeshes.SetMaterials(_shapes[update.Id.Index].MeshIndex, update.Materials);
+    }
+    for (const auto& update : batch.Parameters) {
+        if (!ContainsShape(update.Id) || !update.Layout.IsValid() || update.Values.size() != update.Layout.Stride) RADRAY_ABORT("Invalid instance parameter update");
+        auto [it, inserted] = _parameters.try_emplace(update.Layout.Name);
+        auto& stream = it->second;
+        if (inserted) stream.Layout = update.Layout;
+        else if (stream.Layout != update.Layout) RADRAY_ABORT("Instance schema changed within a scene generation");
+        if (update.Id.Index >= stream.Rows.size()) stream.Rows.resize(size_t{update.Id.Index} + 1);
+        auto& row = stream.Rows[update.Id.Index];
+        if (!row || row->Id != update.Id || row->Values != update.Values) {
+            row = SceneParameterStream::Row{update.Id, update.Values};
+            if (changes) changes->Parameters.push_back({update.Id, update.Layout.Name});
+        }
     }
     const auto changed = _transforms.Evaluate();
     for (auto row : changed) {

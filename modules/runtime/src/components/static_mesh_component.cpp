@@ -25,8 +25,22 @@ void StaticMeshComponent::SetMaterials(vector<StreamingAssetRef<Material>> mater
     if (_materials == materials) return;
     _materialReadyWait.reset();
     _materials = std::move(materials);
+    _materialsDirty = true;
     MarkRenderDynamicDataDirty();
     StartMaterialReadyWaits();
+}
+
+bool StaticMeshComponent::SetInstanceParameters(const InstanceParameterLayout& layout, std::span<const byte> values) {
+    CheckCanModify();
+    if (!layout.IsValid() || values.size() != layout.Stride) return false;
+    auto found = std::find_if(_parameters.begin(), _parameters.end(), [&](const auto& p) { return p.Layout.Name == layout.Name; });
+    if (found == _parameters.end()) _parameters.push_back({layout, vector<byte>{values.begin(), values.end()}, true});
+    else {
+        if (found->Layout != layout) return false;
+        if (std::equal(values.begin(), values.end(), found->Values.begin())) return true;
+        found->Values.assign(values.begin(), values.end()); found->Dirty = true;
+    }
+    MarkRenderDynamicDataDirty(); return true;
 }
 
 void StaticMeshComponent::OnRenderStateCreated() {
@@ -75,7 +89,11 @@ void StaticMeshComponent::CollectPrimitiveUpdates(ShapeCapture& capture, RenderD
     if (dirty.HasFlag(RenderDirtyFlag::State)) {
         capture.SetStaticMesh(_mesh, GetSceneTransformId());
     }
-    if (dirty.HasFlag(RenderDirtyFlag::State) || dirty.HasFlag(RenderDirtyFlag::DynamicData)) capture.SetMaterials(_materials);
+    if (dirty.HasFlag(RenderDirtyFlag::State) || _materialsDirty) { capture.SetMaterials(_materials); _materialsDirty = false; }
+    for (auto& parameters : _parameters) if (dirty.HasFlag(RenderDirtyFlag::State) || parameters.Dirty) {
+        if (!capture.SetInstanceParameters(parameters.Layout, parameters.Values)) RADRAY_ABORT("Invalid captured instance parameters");
+        parameters.Dirty = false;
+    }
 }
 
 }  // namespace radray

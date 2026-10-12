@@ -13,6 +13,7 @@ public:
 
     void SetStaticMesh(StreamingAssetRef<StaticMesh> mesh);
     void SetMaterials(vector<StreamingAssetRef<Material>> materials);
+    bool SetInstanceParameters(const InstanceParameterLayout& layout, std::span<const byte> values);
     std::span<const StreamingAssetRef<Material>> GetMaterials() const noexcept { return _materials; }
     const StreamingAssetRef<StaticMesh>& GetStaticMesh() const noexcept { return _mesh; }
 
@@ -28,6 +29,9 @@ private:
 
     StreamingAssetRef<StaticMesh> _mesh;
     vector<StreamingAssetRef<Material>> _materials;
+    struct Parameters { InstanceParameterLayout Layout; vector<byte> Values; bool Dirty{true}; };
+    vector<Parameters> _parameters;
+    bool _materialsDirty{true};
     unique_ptr<TaskScope> _readyWait;
     unique_ptr<TaskScope> _materialReadyWait;
 };

@@ -280,4 +280,38 @@ void RunAllocationRecovery(render::RenderBackend backend) {
 TEST(SceneGpuAllocation, D3D12FailureGrowthAndSparseRanges) { RunAllocationRecovery(render::RenderBackend::D3D12); }
 TEST(SceneGpuAllocation, VulkanFailureGrowthAndSparseRanges) { RunAllocationRecovery(render::RenderBackend::Vulkan); }
 
+
+namespace {
+void RunInstanceParameters(render::RenderBackend backend) {
+    FrameTimeline timeline{1}; GpuSystemDescriptor descriptor{.FlightDataCount=1,.EnableFrameProfiler=false};
+    const render::VulkanCommandQueueDescriptor queue{render::QueueType::Direct,1};
+    if(backend==render::RenderBackend::Vulkan){render::VulkanDeviceDescriptor vk;vk.Queues=std::span{&queue,1};descriptor.Device=vk;}
+    RuntimeStartupResult startup;auto gpu=GpuSystem::TryCreate(descriptor,timeline,startup);
+    if(test::CanSkipRuntimeStartup(backend,startup))GTEST_SKIP()<<startup.Reason;
+    ASSERT_TRUE(gpu);RenderScene scene;SceneGpuData mirror{gpu->GetDevice(),1};radray::SceneApplyChanges changes;
+    InstanceParameterLayout layout{"Tint",16,{{"Color",0,16,0,1,1,4}}};
+    SceneUpdateBatch update;ShapeId id{3,0};update.CreateShapes={id};update.MeshStates={{.Id=id}};
+    update.Parameters={{id,layout,vector<byte>(16,byte{7})}};scene.Apply(update,&changes);mirror.ApplyChanges(changes);
+    for(uint32_t step=0;step<6;++step){
+        if(step==2){update.Clear();update.Parameters={{id,layout,vector<byte>(16,byte{9})}};scene.Apply(update,&changes);EXPECT_TRUE(changes.Updated.empty());mirror.ApplyChanges(changes);}
+        if(step==4){update.Clear();update.RemoveShapes={id};id.Generation=1;update.CreateShapes={id};update.MeshStates={{.Id=id}};
+            update.Parameters={{id,layout,vector<byte>(16,byte{12})}};scene.Apply(update,&changes);mirror.ApplyChanges(changes);}
+        gpu->BeginUpdateForFlight(0);auto frame=gpu->BeginFrameRecord(0,{}, {},false);
+        const auto before=frame.GetHostWrites().GetStats().CommittedBytes;
+        auto first=mirror.Prepare(scene,frame);ASSERT_TRUE(first);ASSERT_EQ(first->Parameters.size(),1u);
+        const auto after=frame.GetHostWrites().GetStats().CommittedBytes;
+        EXPECT_EQ(after-before,step==0||step==4?80u:step==2||step==3?16u:0u);
+        auto second=mirror.Prepare(scene,frame);ASSERT_TRUE(second);EXPECT_EQ(first->Parameters[0].Values,second->Parameters[0].Values);
+        EXPECT_EQ(frame.GetHostWrites().GetStats().CommittedBytes,after);
+        gpu->EndFrameRecordAndSubmit(0);ASSERT_TRUE(gpu->CompleteFlightIfReady(0,true));
+        mirror.Complete(0,frame.FrameSerial(),step!=2,scene);
+        FlightCompletion completed;ASSERT_TRUE(timeline.TryReadCompletion(completed));gpu->ReleaseFrameResourcesGT(completed);
+        timeline.MarkCompletedWaitFrames(0);timeline.CleanupCompletedFlights();
+    }
+    gpu->AbandonUnpublishedResourcesTerminalGT();
+}
+}
+TEST(SceneGpuParameters, D3D12IndependentDirtyWarmZeroSkipRetryAndSlotGeneration){RunInstanceParameters(render::RenderBackend::D3D12);}
+TEST(SceneGpuParameters, VulkanIndependentDirtyWarmZeroSkipRetryAndSlotGeneration){RunInstanceParameters(render::RenderBackend::Vulkan);}
+
 }  // namespace radray::test

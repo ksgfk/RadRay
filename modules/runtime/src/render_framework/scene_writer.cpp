@@ -83,6 +83,15 @@ ShapeId SceneWriter::CreateShape() {
 
 void SceneWriter::RemoveShape(ShapeId id) {
     auto& state = GetShape(id);
+    while (!state.ParameterUpdateIndices.empty()) {
+        auto it = state.ParameterUpdateIndices.begin(); const auto index = it->second;
+        if (index + 1 != _pending.Parameters.size()) {
+            _pending.Parameters[index] = std::move(_pending.Parameters.back());
+            auto& moved = _pending.Parameters[index];
+            GetShape(moved.Id).ParameterUpdateIndices[moved.Layout.Name] = index;
+        }
+        _pending.Parameters.pop_back(); state.ParameterUpdateIndices.erase(it);
+    }
     if (state.Sent) _pending.RemoveShapes.push_back(id);
     if (state.BoundAsset) _assets.RemoveUse(*state.BoundAsset);
     for (auto id : state.BoundMaterials) _assets.RemoveUse(id);
@@ -169,6 +178,18 @@ void SceneWriter::SetTransform(ShapeId id, const Eigen::Matrix4f& localToWorld) 
     auto& state = GetShape(id);
     EnableEditing();
     WriteTransform(id, state, localToWorld);
+}
+
+bool SceneWriter::SetInstanceParameters(ShapeId id, const InstanceParameterLayout& layout, std::span<const byte> values) {
+    auto& state = GetShape(id);
+    if (!state.HasMesh || !layout.IsValid() || values.size() != layout.Stride) return false;
+    ShapeParameterUpdate update{id, layout, vector<byte>{values.begin(), values.end()}};
+    const auto found = state.ParameterUpdateIndices.find(layout.Name);
+    if (found == state.ParameterUpdateIndices.end()) {
+        state.ParameterUpdateIndices.emplace(layout.Name, _pending.Parameters.size());
+        _pending.Parameters.push_back(std::move(update));
+    } else _pending.Parameters[found->second] = std::move(update);
+    return true;
 }
 
 void SceneWriter::WriteTransform(ShapeId id, ShapeState& state, const AffineTransform& localToWorld) {
@@ -265,6 +286,7 @@ void SceneWriter::Flush(SceneUpdateBatch& batch, uint32_t flightIndex) {
         for (const auto& update : _pending.Transforms) _edits[update.Id.Index] = {};
     }
     for (const auto& update : _pending.Materials) GetShape(update.Id).MaterialUpdateIndex = kNotQueued;
+    for (const auto& update : _pending.Parameters) GetShape(update.Id).ParameterUpdateIndices.clear();
     if (_claimed) _editing = false;
     _captured = false;
     if (_pending.LightsChanged) _pending.Lights.Assign(_lights);

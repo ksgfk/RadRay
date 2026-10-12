@@ -17,6 +17,7 @@ namespace radray {
 struct SceneApplyChanges {
     vector<ShapeId> Updated;
     vector<ShapeId> Removed;
+    vector<SceneParameterChange> Parameters;
 };
 
 /// A single persistent CPU scene. RT owns Apply and reads; GT may inspect only after RT stops.
@@ -58,6 +59,7 @@ public:
     std::span<const ShapeId> GetStaticMeshes() const noexcept { return _staticMeshes.GetColumns().Ids; }
     /// Dense column access for culling and drawing without identity lookups. Same borrow lifetime as GetStaticMesh.
     StaticMeshSceneColumns GetStaticMeshColumns() const noexcept { return _staticMeshes.GetColumns(_transforms.GetWorldMatrices()); }
+    const unordered_map<string, SceneParameterStream>& GetParameterStreams() const noexcept { return _parameters; }
 
 private:
     static constexpr uint32_t kNoMesh = std::numeric_limits<uint32_t>::max();
@@ -80,6 +82,7 @@ private:
     SceneTransform _transforms;
     StaticMeshTable _staticMeshes;
     LightSceneData _lights;
+    unordered_map<string, SceneParameterStream> _parameters;
     mutable std::mutex _readers;
     mutable std::condition_variable _readersDone;
     mutable size_t _activeReaders{0};

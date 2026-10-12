@@ -23,7 +23,7 @@ std::optional<PreparedSceneDraw> SceneDraw::Prepare(PipelineContext& context, co
     PreparedSceneDraw result{*resolved, {}, {}};
     const std::span<const byte> viewBytes = std::as_bytes(std::span{resolved->ViewProjection.data(), size_t{16}});
     const std::span<const byte> views[]{viewBytes};
-    RasterMaterialValues values{.Views = views, .Objects = objects.Objects};
+    RasterMaterialValues values{.Views = views, .Objects = objects.Objects, .Parameters = objects.Parameters};
     struct PreparedMaterial { size_t Index; const RasterMaterialPlan* Plan; const MaterialPass* Pass; };
     unordered_map<const MaterialRenderData*, PreparedMaterial> materials;
     struct Geometry { array<render::GraphicsPipelineState*, 2> Pipelines; size_t Material; };

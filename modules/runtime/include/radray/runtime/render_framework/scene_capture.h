@@ -13,6 +13,7 @@ public:
     void SetStaticMesh(const StreamingAssetRef<StaticMesh>& mesh, TransformId transform);
     void SetTransform(const AffineTransform& transform);
     void SetMaterials(std::span<const StreamingAssetRef<Material>> materials);
+    bool SetInstanceParameters(const InstanceParameterLayout& layout, std::span<const byte> values);
 
 private:
     friend class SceneCapture;

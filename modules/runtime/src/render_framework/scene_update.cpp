@@ -12,6 +12,7 @@ void SceneUpdateBatch::Clear() noexcept {
     MeshStates.clear();
     Transforms.clear();
     Materials.clear();
+    Parameters.clear();
     LightsChanged = false;
     Lights.Clear();
 }

@@ -18,6 +18,19 @@ MaterialPass TestMaterialPass() {
     pass.ObjectIndexPushConstant = "DrawData";
     return pass;
 }
+TEST(PipelineMaterial, InstanceUpdatesCoalesceAndCancelOnRemoveWithoutDirtyingMatrices) {
+    SceneManager manager{1};auto scene=manager.CreateSceneGT();auto writer=manager.GetSceneWriterGT(scene);
+    auto id=writer->CreateShape();writer->SetStaticMesh(id,{},Eigen::Matrix4f::Identity());
+    InstanceParameterLayout layout{"Color",16,{{"RGBA",0,16,0,1,1,4}}};array<byte,16> values{};
+    ASSERT_TRUE(writer->SetInstanceParameters(id,layout,values));values[0]=byte{7};ASSERT_TRUE(writer->SetInstanceParameters(id,layout,values));
+    EXPECT_FALSE(writer->SetInstanceParameters(id,layout,std::span{values}.first(15)));
+    manager.SealFrameGT(0);EXPECT_EQ(SceneBatch(manager,scene,0).Parameters.size(),1u);ConsumeFrame(manager,0);CompleteFrame(manager,0);
+    values[0]=byte{9};ASSERT_TRUE(writer->SetInstanceParameters(id,layout,values));manager.SealFrameGT(0);
+    EXPECT_TRUE(SceneBatch(manager,scene,0).Transforms.empty());EXPECT_TRUE(SceneBatch(manager,scene,0).MeshStates.empty());ConsumeFrame(manager,0);CompleteFrame(manager,0);
+    ASSERT_TRUE(writer->SetInstanceParameters(id,layout,values));writer->RemoveShape(id);auto replacement=writer->CreateShape();
+    EXPECT_EQ(id.Index,replacement.Index);EXPECT_NE(id.Generation,replacement.Generation);writer->SetStaticMesh(replacement,{},Eigen::Matrix4f::Identity());
+    manager.SealFrameGT(0);EXPECT_TRUE(SceneBatch(manager,scene,0).Parameters.empty());ConsumeFrame(manager,0);CompleteFrame(manager,0);manager.OnShutdown();
+}
 TEST(PipelineMaterial, TypedUpdatesCoalesceAndDoNotDirtyObjectMatrices) {
     Application app;
     AssetManager assets;
@@ -91,6 +104,14 @@ TEST(PipelineMaterial, ComponentMaterialChangeUsesItsOwnTypedUpdate) {
     ASSERT_EQ(batch.Materials.size(), 1u);
     ConsumeFrame(renderer, 0);
     CompleteFrame(renderer, 0);
+}
+TEST(PipelineMaterial, NativeWorldComponentUsesTheSameInstanceUpdateWithoutTransformOrMaterialCopies) {
+    Application app; SceneManager manager{1};ScopedWorld world;const auto scene=ConnectWorld(world,manager);
+    auto* mesh=world.SpawnActor()->AddComponent<StaticMeshComponent>();SceneUpdateBatch initial;CollectScene(world,manager,initial);
+    InstanceParameterLayout layout{"Tint",16,{{"Color",0,16,0,1,1,4}}};array<byte,16> values{};
+    ASSERT_TRUE(mesh->SetInstanceParameters(layout,values));PrepareScene(world,manager,0);const auto& batch=SceneBatch(manager,scene,0);
+    EXPECT_TRUE(batch.Transforms.empty());EXPECT_TRUE(batch.LocalTransforms.empty());EXPECT_TRUE(batch.Materials.empty());ASSERT_EQ(batch.Parameters.size(),1u);
+    ConsumeFrame(manager,0);CompleteFrame(manager,0);
 }
 TEST(PipelineVertexLayout, OwnsSemanticsAndRejectsAmbiguousOrOutOfBoundsInputs) {
     GeometryVertexLayout layout{{{0, 24, render::VertexStepMode::Vertex}, {1, 8, render::VertexStepMode::Vertex}},

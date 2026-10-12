@@ -19,6 +19,7 @@ static_assert(sizeof(SceneObjectGpuData) == 64);
 struct SceneGpuView {
     render::ShaderBufferBinding Objects;
     uint64_t BufferGeneration;
+    vector<InstanceParameterBuffer> Parameters;
 };
 
 /// RT-owned mirror; each physical flight buffer commits state only after completion feedback.
@@ -49,6 +50,15 @@ private:
         bool PreparedValid{false};
         ObjectSet Pending;
         vector<ShapeId> Attempt;
+        struct ParameterFlight {
+            unique_ptr<render::Buffer> Buffer;
+            uint64_t Generation{0}, AttemptSerial{0};
+            bool Initialized{false};
+            ObjectSet Pending;
+            vector<ShapeId> Attempt;
+        };
+        unordered_map<string, ParameterFlight> Parameters;
+        vector<InstanceParameterBuffer> ParameterViews;
     };
     render::Device* _device;
     vector<Flight> _flights;

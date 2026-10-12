@@ -40,10 +40,23 @@ void SceneGpuData::ApplyChanges(const SceneApplyChanges& changes) {
     for (auto& flight : _flights) {
         for (auto id : changes.Removed) flight.Pending.Remove(id);
         for (auto id : changes.Updated) flight.Pending.Add(id);
+        for (auto& [name, parameters] : flight.Parameters)
+            for (auto id : changes.Removed) parameters.Pending.Remove(id);
+        for (const auto& change : changes.Parameters) flight.Parameters[change.Stream].Pending.Add(change.Id);
     }
 }
 void SceneGpuData::Complete(uint32_t flightIndex, uint64_t serial, bool executed, const RenderScene& scene) {
     auto& flight = _flights.at(flightIndex);
+    for (auto& [name, parameters] : flight.Parameters) {
+        if (parameters.AttemptSerial != serial) continue;
+        if (executed) parameters.Initialized = true;
+        else {
+            const auto stream = scene.GetParameterStreams().find(name);
+            if (stream != scene.GetParameterStreams().end()) for (auto id : parameters.Attempt)
+                if (id.Index < stream->second.Rows.size() && stream->second.Rows[id.Index] && stream->second.Rows[id.Index]->Id == id) parameters.Pending.Add(id);
+        }
+        parameters.Attempt.clear(); parameters.AttemptSerial = 0;
+    }
     if (flight.AttemptSerial != serial || flight.AttemptGeneration != flight.Generation) return;
     if (executed) {
         flight.Initialized = true;
@@ -71,12 +84,13 @@ std::optional<SceneGpuView> SceneGpuData::Prepare(const RenderScene& scene, uint
     auto& flight = _flights.at(flightIndex);
     const auto view = [&]() -> std::optional<SceneGpuView> {
         if (!flight.PreparedValid) return std::nullopt;
-        return SceneGpuView{{flight.Buffer.get(), {0, flight.Buffer->GetDesc().Size}, sizeof(SceneObjectGpuData)}, flight.Generation};
+        return SceneGpuView{{flight.Buffer.get(), {0, flight.Buffer->GetDesc().Size}, sizeof(SceneObjectGpuData)}, flight.Generation, flight.ParameterViews};
     };
     if (flight.PreparedSerial == frameSerial) return view();
     if (flight.AttemptSerial != 0) RADRAY_ABORT("Object buffer reused before completion feedback");
     flight.PreparedSerial = frameSerial;
     flight.PreparedValid = false;
+    flight.ParameterViews.clear();
     _sorted.clear();
     if (!flight.Initialized) {
         const auto ids = scene.GetStaticMeshes();
@@ -126,6 +140,37 @@ std::optional<SceneGpuView> SceneGpuData::Prepare(const RenderScene& scene, uint
         flight.AttemptSerial = frameSerial;
         flight.AttemptGeneration = flight.Generation;
         flight.Pending.Clear();
+    }
+    for (const auto& [name, stream] : scene.GetParameterStreams()) {
+        auto& parameters = flight.Parameters[name];
+        if (parameters.AttemptSerial) RADRAY_ABORT("Instance buffer reused before completion feedback");
+        const uint64_t bytes = uint64_t{stream.Rows.size()} * stream.Layout.Stride;
+        if (bytes > 64 * 1024 * 1024) return std::nullopt;
+        if (!parameters.Buffer || parameters.Buffer->GetDesc().Size < bytes) {
+            uint64_t capacity = parameters.Buffer ? parameters.Buffer->GetDesc().Size : stream.Layout.Stride;
+            while (capacity < bytes) capacity *= 2;
+            auto buffer = _device->CreateBuffer({capacity, render::MemoryType::Device, render::BufferUse::Resource | render::BufferUse::CopySource | render::BufferUse::CopyDestination});
+            if (!buffer) return std::nullopt;
+            parameters.Buffer = buffer.Release(); ++parameters.Generation; parameters.Initialized = false;
+        }
+        vector<ShapeId> dirty;
+        if (!parameters.Initialized) {
+            for (const auto& row : stream.Rows) if (row) dirty.push_back(row->Id);
+        } else dirty = parameters.Pending.Ids;
+        vector<BufferUploadRequest> uploads;
+        for (auto id : dirty) {
+            if (id.Index >= stream.Rows.size() || !stream.Rows[id.Index] || stream.Rows[id.Index]->Id != id) continue;
+            uploads.push_back({stream.Rows[id.Index]->Values, parameters.Buffer.get(), uint64_t{id.Index} * stream.Layout.Stride,
+                parameters.Initialized ? render::BufferState::ShaderRead : render::BufferState::Common, render::BufferState::ShaderRead});
+        }
+        if (!uploads.empty()) {
+            auto* command = allocator.Allocate();
+            const bool recorded = uploader.TryUploadBufferRanges(command, uploads);
+            allocator.Return(std::span{&command, 1}); outCommands.push_back(command);
+            if (!recorded) return std::nullopt;
+            parameters.Attempt = std::move(dirty); parameters.AttemptSerial = frameSerial; parameters.Pending.Clear();
+        }
+        flight.ParameterViews.push_back({&stream.Layout, {parameters.Buffer.get(), {0, parameters.Buffer->GetDesc().Size}, stream.Layout.Stride}});
     }
     flight.PreparedValid = flight.Initialized || !flight.Attempt.empty();
     return view();

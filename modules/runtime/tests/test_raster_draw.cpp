@@ -355,6 +355,14 @@ TEST_F(RasterDraw, MaterialAcceptsRegisteredProgramAndRejectsAmbiguousSourceOwne
     descriptor.Passes[0].Program.SourceName.clear(); descriptor.Passes[0].RegisteredProgram = nullptr;
     radray::Material missing{descriptor.Passes, descriptor.Constants}; EXPECT_FALSE(missing.IsValid());
 }
+TEST_F(RasterDraw, InstanceSchemaComesFromCompilerPayloadAndRejectsMissingOrOverlappingFields) {
+    auto program = Program(false); ASSERT_TRUE(program);
+    auto layout = ReflectInstanceParameterLayout(program->GetArtifact().Generic(), "Tint", "InstanceTint");
+    ASSERT_TRUE(layout); EXPECT_EQ(layout->Stride, 16u); ASSERT_EQ(layout->Fields.size(), 1u);
+    EXPECT_EQ(layout->Fields[0].Name, "Color"); EXPECT_EQ(layout->Fields[0].Offset, 0u);
+    EXPECT_FALSE(ReflectInstanceParameterLayout(program->GetArtifact().Generic(), "Missing", "Bad"));
+    layout->Fields.push_back(layout->Fields[0]); EXPECT_FALSE(layout->IsValid());
+}
 }  // namespace
 }  // namespace radray::test
 #endif

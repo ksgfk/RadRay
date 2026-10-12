@@ -6,6 +6,7 @@
 #include <radray/runtime/render_framework/light_scene_data.h>
 #include <radray/runtime/static_mesh.h>
 #include <radray/runtime/render_framework/material.h>
+#include <radray/runtime/render_framework/instance_parameters.h>
 
 namespace radray {
 
@@ -48,12 +49,13 @@ struct SceneUpdateBatch {
     vector<StaticMeshStateUpdate> MeshStates;
     vector<ShapeTransformUpdate> Transforms;
     vector<ShapeMaterialUpdate> Materials;
+    vector<ShapeParameterUpdate> Parameters;
     /// False preserves the RT light set; true replaces it, including with an empty list.
     bool LightsChanged{false};
     LightSceneData Lights;
 
     void Clear() noexcept;
-    bool Empty() const noexcept { return RemoveTransforms.empty() && CreateTransforms.empty() && TransformParents.empty() && LocalTransforms.empty() && RemoveShapes.empty() && CreateShapes.empty() && MeshStates.empty() && Transforms.empty() && Materials.empty() && !LightsChanged && Lights.Empty(); }
+    bool Empty() const noexcept { return RemoveTransforms.empty() && CreateTransforms.empty() && TransformParents.empty() && LocalTransforms.empty() && RemoveShapes.empty() && CreateShapes.empty() && MeshStates.empty() && Transforms.empty() && Materials.empty() && Parameters.empty() && !LightsChanged && Lights.Empty(); }
 };
 
 struct SceneFrameUpdate {

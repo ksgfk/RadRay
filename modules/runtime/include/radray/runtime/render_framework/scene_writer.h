@@ -23,6 +23,7 @@ public:
     /// Requires a prior SetStaticMesh, including an explicitly empty mesh binding.
     void SetMaterials(ShapeId id, std::span<const StreamingAssetRef<Material>> materials);
     void SetTransform(ShapeId id, const Eigen::Matrix4f& localToWorld);
+    bool SetInstanceParameters(ShapeId id, const InstanceParameterLayout& layout, std::span<const byte> values);
     /// Reserves an identity; the light enters snapshots after its first SetLight.
     LightId CreateLight();
     void RemoveLight(LightId id);
@@ -44,6 +45,7 @@ private:
         bool HasMesh{false};
         vector<AssetId> BoundMaterials;
         size_t MaterialUpdateIndex{kNotQueued};
+        unordered_map<string, size_t> ParameterUpdateIndices;
     };
 
     struct ShapeEdit {

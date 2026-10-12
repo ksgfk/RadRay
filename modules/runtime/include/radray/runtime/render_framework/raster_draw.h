@@ -11,6 +11,7 @@ struct RasterMaterialPlan {
     vector<render::BindingHandle> Handles;
     vector<render::ShaderBindingInfo> Bindings;
     vector<uint32_t> BufferSizes;
+    vector<InstanceParameterLayout> ParameterLayouts;
     string PushName;
     render::BindingHandle Push;
     uint32_t PushSize{0};
@@ -23,6 +24,7 @@ struct RasterMaterialValues {
     std::span<const std::span<const byte>> Views;
     std::span<const std::span<const byte>> Frames;
     std::optional<render::ShaderBufferBinding> Objects;
+    std::span<const InstanceParameterBuffer> Parameters;
 };
 struct PreparedRasterMaterial {
     struct Group {

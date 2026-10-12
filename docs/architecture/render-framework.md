@@ -451,3 +451,9 @@ RenderSystem 的析构接受部分初始化状态，通过 `OnShutdown` 幂等�
 按固定顺序释放对象。WindowManager 借用的 RenderSystem 引用在后者销毁前清空；AssetManager
 销毁并收束加载协程后才销毁 AssetDatabase；交换链释放后才断开窗口与 GPU 的双向引用并销毁 device。
 借用引用的提供者必须活过消费者的清理，完整时序见[帧与 GPU](frame-and-gpu.md#关停顺序)。
+
+## 独立实例参数
+
+InstanceParameterLayout 持有流名称、stride 与字段名称/类型/offset/size，ReflectInstanceParameterLayout 从 compiler-published 常量 payload 提取 schema。structured element 没有类型反射的绑定必须显式提供同一共享 HLSL 声明生成的 padded schema；作者负责 CB 与 structured 布局相同，不能将任意 cbuffer packing 当成 structured packing。材料 InstanceParameters 输入引用完整 schema，准备时核验 schema 与 StructureByteStride，拒绝大小/字段/绑定种类不符。
+SceneWriter::SetInstanceParameters 与 StaticMeshComponent::SetInstanceParameters 共用 typed update，ShapeCapture 同样交付。更新按 ShapeId+流 coalesce，删除取消尚未发布的值。RenderScene 持有每流各自 schema 和有 generation 的 slot，值变化走 SceneApplyChanges::Parameters，不进入矩阵 Updated。
+SceneGpuData 使用已有 ResourceUploader，按每 flight、每流跟踪 Pending/Attempt。上传录制成功后暂存 attempt；真实 completion executed 后才 commit，跳帧重新加入当前 generation 的 pending。容量增长重新补全活跃行，稀疏 slot 不假定连续；未初始化或未声明的行不能供材质读取。warm-up 后静止矩阵与参数零上传，多 view 同 FrameSerial 复用同一 SceneGpuView。

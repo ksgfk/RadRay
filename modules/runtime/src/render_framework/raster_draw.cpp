@@ -16,10 +16,11 @@ Nullable<const RasterMaterialPlan*> RasterDraw::ResolveMaterial(RenderSystem& re
     if (pass.Blend && (requiresConstant(pass.Blend->Color) || requiresConstant(pass.Blend->Alpha))) return nullptr;
     if (pass.DepthStencil && pass.DepthStencil->Stencil) return nullptr;
     for (const auto& plan : _plans)
-        if (plan->Program == program.Get() && plan->Inputs == pass.Inputs && plan->PushName == pushName) return plan.get();
+        if (plan->Program == program.Get() && plan->Inputs == pass.Inputs && plan->PushName == pushName && plan->ParameterLayouts == pass.ParameterLayouts) return plan.get();
     auto plan = make_unique<RasterMaterialPlan>();
     plan->Program = program.Get();
     plan->Inputs = pass.Inputs;
+    plan->ParameterLayouts = pass.ParameterLayouts;
     plan->PushName = pushName;
     const auto& artifact = program->GetArtifact().Generic();
     if (!pushName.empty()) {
@@ -40,6 +41,9 @@ Nullable<const RasterMaterialPlan*> RasterDraw::ResolveMaterial(RenderSystem& re
         const auto kind = binding->LogicalKind;
         switch (input.Source) {
             case MaterialInputSource::SceneObjects: if (kind != Kind::StructuredBuffer || binding->Count != 1) return nullptr; break;
+            case MaterialInputSource::InstanceParameters:
+                if (kind != Kind::StructuredBuffer || binding->Count != 1 || input.ValueIndex >= pass.ParameterLayouts.size() || !pass.ParameterLayouts[input.ValueIndex].IsValid()) return nullptr;
+                break;
             case MaterialInputSource::ViewConstants:
             case MaterialInputSource::FrameConstants:
             case MaterialInputSource::MaterialConstants: if (kind != Kind::CBuffer) return nullptr; break;
@@ -131,6 +135,13 @@ std::optional<PreparedRasterMaterial> RasterDraw::PrepareMaterial(PipelineContex
                 case MaterialInputSource::SceneObjects:
                     if (!values.Objects) return std::nullopt;
                     value = *values.Objects; break;
+                case MaterialInputSource::InstanceParameters: {
+                    if (index >= plan.ParameterLayouts.size()) return std::nullopt;
+                    const auto& layout = plan.ParameterLayouts[index];
+                    const auto found = std::find_if(values.Parameters.begin(), values.Parameters.end(), [&](const auto& p) { return p.Layout && *p.Layout == layout; });
+                    if (found == values.Parameters.end() || found->Values.StructureByteStride != layout.Stride) return std::nullopt;
+                    value = found->Values; break;
+                }
                 case MaterialInputSource::MaterialConstants:
                 case MaterialInputSource::ViewConstants:
                 case MaterialInputSource::FrameConstants: {

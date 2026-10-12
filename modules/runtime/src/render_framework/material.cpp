@@ -35,6 +35,9 @@ Material::Material(vector<MaterialPass> passes, vector<vector<byte>> constants,
                 case MaterialInputSource::Sampler:
                     if (input.ValueIndex >= _data.Samplers.size()) return;
                     break;
+                case MaterialInputSource::InstanceParameters:
+                    if (input.ValueIndex >= pass.ParameterLayouts.size() || !pass.ParameterLayouts[input.ValueIndex].IsValid()) return;
+                    break;
                 case MaterialInputSource::SceneObjects:
                 case MaterialInputSource::ViewConstants:
                 case MaterialInputSource::FrameConstants: break;
