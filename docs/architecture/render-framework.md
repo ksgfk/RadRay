@@ -6,7 +6,7 @@
 
 runtime 采用立即创建、延迟销毁、统一 Tick 轮次与类型化增量交付。每个 Scene 只有一份 RT CPU 数据；
 flight 保存更新包、按值视图请求和必要 owner。SceneManager 按需提供对象 GPU buffer，RenderSystem 提供 shader program 与 PSO 缓存，
-应用持有具体 pipeline 和输出资源，公共 RasterDraw 完成材质准备、PSO 解析与录制，SceneDraw 提供场景适配。没有完整 Forward/RenderGraph 或完整场景快照。
+应用持有具体 pipeline 和输出资源，公共 RasterDraw 完成材质准备、PSO 解析与录制，SceneDraw 提供场景适配。RasterGraph 提供单 graphics queue 的显式资源合成，没有完整 Forward 或完整场景快照。
 旧渲染器设计见[历史快照](../temp/render-framework-design.md)。
 
 runtime 按职责区分底层服务、通用资产与可选渲染框架，框架依赖底层服务。
@@ -310,6 +310,14 @@ collector 接收已构造的 `SceneViewRequest`；组件侧 `CaptureSceneView` �
 Camera 销毁或 World 重连不改变已封存请求；RT 只通过 `GetFrameViewsRT` 读请求，不访问组件。
 `ResolveSceneView` 用实际目标及视口像素尺寸计算后端无关的 Projection，并统一生成 D3D12/Vulkan viewport/scissor；
 Vulkan 使用负 viewport 高度处理 Y 方向。正交高度与实际 viewport aspect 决定宽度。非法参数、零尺寸和舍入后的空视口返回空。
+SceneViewRequest 可携带 EvaluatedProjection；此时不读取 lens 参数。RasterView 接受已求值矩阵、像素 viewport/scissor 与 depth convention，
+ResolveRasterView 是唯一后端 viewport 转换入口。MinusOneToOne 转为零到一深度，ReverseZeroToOne 保持矩阵并返回反深度标记；材质仍显式声明 compare/write。
+
+RasterGraph 的 Raster/Fullscreen/Copy/Clear 节点声明 whole-texture Read/Write/ReadWrite 与所需状态。
+Compile 只排序 RAW/WAR/WAW 与显式 After 依赖，拒绝 cycle、同节点反馈、同 texture 重复资源和未初始化读取，不分配或录制 GPU 命令。
+CompiledRasterGraph::Record 使用调用方已经分配的 command，执行每节点状态转换、body 和最终 Exit。
+节点 body 不管理图内 texture 状态；RenderOutput 只用于图外入口/出口，不能对同附件再次负责内部转换。
+暂不支持 alias、自动裁剪和跨队列。中间 target 由每 flight 的调用方拥有，直到最终 GPU fence；其 view 退出前先从 RenderPassRegistry 同步清退 framebuffer。
 
 ## Pipeline、材质与绘制
 

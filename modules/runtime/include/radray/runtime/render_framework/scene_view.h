@@ -3,6 +3,7 @@
 #include <radray/basic_math.h>
 #include <radray/render/rhi.h>
 #include <radray/runtime/render_framework/scene_id.h>
+#include <radray/runtime/render_framework/raster_view.h>
 
 namespace radray {
 
@@ -21,6 +22,9 @@ struct SceneViewRequest {
     Eigen::Vector4f Viewport{0, 0, 1, 1};
     SceneProjection Projection{SceneProjection::Perspective};
     float OrthographicHeight{10.0f};
+    /// When provided, this evaluated projection replaces the lens parameters above.
+    std::optional<Eigen::Matrix4f> EvaluatedProjection;
+    RasterDepthConvention Depth{RasterDepthConvention::ZeroToOne};
 };
 
 struct SceneViewData {
