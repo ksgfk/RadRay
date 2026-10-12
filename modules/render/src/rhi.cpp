@@ -16,10 +16,6 @@
 
 namespace radray::render {
 
-TimestampClockCalibrationResult CommandQueue::GetTimestampClockCalibration() const noexcept {
-    return {};
-}
-
 uint32_t GetVertexFormatSizeInBytes(VertexFormat format) noexcept {
     switch (format) {
         case VertexFormat::UINT8X2:
@@ -190,10 +186,6 @@ bool SwapChain::ValidateFrame(const SwapChainFrame& frame, const SwapChain* expe
 
 void SwapChain::InvalidateFrame(SwapChainFrame& frame) noexcept {
     frame = SwapChainFrame{};
-}
-
-SwapChainPresentResult SwapChain::DiscardAcquiredFrame(SwapChainFrame&&) noexcept {
-    return {.NativeStatusCode = -1, .Status = SwapChainStatus::Error};
 }
 
 Nullable<shared_ptr<Device>> Device::Create(const DeviceDescriptor& desc) {

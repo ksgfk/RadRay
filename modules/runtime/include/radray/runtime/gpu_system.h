@@ -11,7 +11,7 @@
 #include <radray/nullable.h>
 #include <radray/render/rhi.h>
 #include <radray/runtime/frame_timeline.h>
-#include <radray/runtime/cmd_allocator.h>
+#include <radray/runtime/gpu_cmd_allocator.h>
 #include <radray/runtime/gpu_frame_resources.h>
 #include <radray/runtime/gpu_resource.h>
 #include <radray/runtime/startup_result.h>
@@ -88,7 +88,7 @@ struct GpuQueueFrameTrack {
 };
 
 /// 当前 flight 独占的命令池；仅在上一轮退休后重置，同一轮归还的命令不会重新分配。
-class GpuFlightCommandAllocator final : public ICmdAllocator {
+class GpuFlightCommandAllocator final : public IGpuCmdAllocator {
 public:
     render::CommandBuffer* Allocate() override;
     void Return(std::span<render::CommandBuffer*> commands) override;
@@ -196,9 +196,9 @@ public:
     /// 仅接受当前 flight 分配的命令；WaitToExecute/ReadyToPresent 必须为空。
     /// target 移交呈现所有权；其 backbuffer 的全部访问必须位于此非空批次中。
     void ReturnCommandBuffers(const render::CommandQueueSubmitDescriptor& desc, std::optional<AppFrameTarget> target = std::nullopt);
-    ICmdAllocator& GetCmdAllocator() const noexcept;
+    IGpuCmdAllocator& GetCmdAllocator() const noexcept;
     GpuFrameResources& GetGpuFrameResources() const noexcept;
-    /// Registers an ordered array already closed through ICmdAllocator::Return; never ends it again.
+    /// Registers an ordered array already closed through IGpuCmdAllocator::Return; never ends it again.
     void RegisterClosedCommandBuffers(const render::CommandQueueSubmitDescriptor& desc, std::optional<AppFrameTarget> target = std::nullopt);
 
     /// 按需获取窗口呈现目标。内部 AcquireNextSwapChainFrame：

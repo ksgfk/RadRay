@@ -13,7 +13,7 @@
 - RHI 显式 `CommandAllocator` 绑定实际 queue；删除旧 queue 参数的 CommandBuffer 工厂。
   D3D12 按同时打开的 command list 高水位共享 native allocator；Vulkan 同域共用一个 flags=0 的 pool。
   Begin 不重置共享存储，Reset 清理全部 child 的旧录制与附属状态。child 先于父 allocator 销毁。
-- `GpuFlightCommandAllocator` 直接实现 `ICmdAllocator`；Return 仅关闭，结果数组规定顺序，
+- `GpuFlightCommandAllocator` 直接实现 `IGpuCmdAllocator`；Return 仅关闭，结果数组规定顺序，
   `RegisterClosedCommandBuffers` 登记批次。旧 AppFrameContext Return 入口仍适配关闭与登记。
   profiler 和 late-drop cleanup 继续在同一 flight storage 续录，由既有 final fence 覆盖。
 - `PipelineContext`、`RenderPipelineRequest/Result`、实际附件驱动的 RenderOutput 和失败收尾已接入。

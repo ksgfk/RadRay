@@ -804,6 +804,8 @@ public:
 
     SwapChainPresentResult Present(SwapChainFrame&& frame) noexcept override;
 
+    SwapChainPresentResult DiscardAcquiredFrame(SwapChainFrame&& frame) noexcept override;
+
     bool Recreate(uint32_t width, uint32_t height, TextureFormat format, PresentMode presentMode) noexcept override;
 
     uint32_t GetBackBufferCount() const noexcept override;

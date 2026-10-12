@@ -79,7 +79,7 @@ std::optional<SceneGpuView> SceneGpuData::Prepare(const RenderScene& scene, Pipe
     return Prepare(scene, context.Frame.FlightIndex, context.Frame.FrameSerial, context.Commands, context.Resources.GetUploader(), outCommands);
 }
 
-std::optional<SceneGpuView> SceneGpuData::Prepare(const RenderScene& scene, uint32_t flightIndex, uint64_t frameSerial, ICmdAllocator& allocator, ResourceUploader& uploader, vector<render::CommandBuffer*>& outCommands) {
+std::optional<SceneGpuView> SceneGpuData::Prepare(const RenderScene& scene, uint32_t flightIndex, uint64_t frameSerial, IGpuCmdAllocator& allocator, ResourceUploader& uploader, vector<render::CommandBuffer*>& outCommands) {
     RADRAY_PROFILE_SCOPE_N("SceneGpuData::Prepare");
     auto& flight = _flights.at(flightIndex);
     const auto view = [&]() -> std::optional<SceneGpuView> {

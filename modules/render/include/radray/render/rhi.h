@@ -390,6 +390,19 @@ enum class QueryPipelineStage : int32_t {
     Compute
 };
 
+enum class TimestampClockCalibrationStatus : uint32_t {
+    Success,
+    Unsupported,
+    InvalidQueue,
+    ApiFailure,
+    InvalidSample
+};
+
+enum class TimestampCpuClockDomain : uint32_t {
+    Unknown,
+    QueryPerformanceCounter
+};
+
 enum class PhysicalDeviceType : int32_t {
     Other,
     IntegratedGpu,
@@ -693,12 +706,6 @@ struct TimestampQueryCalibration {
     uint64_t FrequencyHz{0};
     double TickPeriodNs{0.0};
 };
-
-enum class TimestampClockCalibrationStatus : uint32_t {
-    Success, Unsupported, InvalidQueue, ApiFailure, InvalidSample
-};
-
-enum class TimestampCpuClockDomain : uint32_t { Unknown, QueryPerformanceCounter };
 
 struct TimestampClockCalibrationResult {
     TimestampClockCalibrationStatus Status{TimestampClockCalibrationStatus::Unsupported};
@@ -1347,13 +1354,14 @@ public:
 
     /// Success associates this queue's GPU clock with CpuDomain. Call interval is
     /// observation latency, not a bound on hardware error. Never submits or waits.
-    virtual TimestampClockCalibrationResult GetTimestampClockCalibration() const noexcept;
+    virtual TimestampClockCalibrationResult GetTimestampClockCalibration() const noexcept = 0;
 };
 
 /// Single recording thread, one queue. Children must be destroyed before their allocator.
 class CommandAllocator : public RenderBase, public IDebugName {
 public:
     virtual ~CommandAllocator() noexcept = default;
+
     RenderObjectTags GetTag() const noexcept final { return RenderObjectTag::CmdAllocator; }
 
     /// Caller must finish all recording and GPU use, and discard unsubmitted old recordings.
@@ -1515,7 +1523,7 @@ public:
     // backbuffer commands and wait all submitted work before calling. Success
     // consumes only this chain's outstanding token and requires recreate/close;
     // Error leaves frame untouched (including unsupported backends).
-    virtual SwapChainPresentResult DiscardAcquiredFrame(SwapChainFrame&& frame) noexcept;
+    virtual SwapChainPresentResult DiscardAcquiredFrame(SwapChainFrame&& frame) noexcept = 0;
 
     virtual bool Recreate(uint32_t width, uint32_t height, TextureFormat format, PresentMode presentMode) noexcept = 0;
 

@@ -18,16 +18,16 @@ struct RasterMaterialPlan {
 };
 /// Values are borrowed only through PrepareMaterial. Empty overrides use material defaults.
 struct RasterMaterialValues {
-    std::span<const std::span<const byte>> Constants;
-    std::span<render::TextureView* const> Textures;
-    std::span<const render::SamplerDescriptor> Samplers;
-    std::span<const std::span<const byte>> Views;
-    std::span<const std::span<const byte>> Frames;
-    std::optional<render::ShaderBufferBinding> Objects;
-    std::span<const InstanceParameterBuffer> Parameters;
+    std::span<const std::span<const byte>> Constants{};
+    std::span<render::TextureView* const> Textures{};
+    std::span<const render::SamplerDescriptor> Samplers{};
+    std::span<const std::span<const byte>> Views{};
+    std::span<const std::span<const byte>> Frames{};
+    std::optional<render::ShaderBufferBinding> Objects{};
+    std::span<const InstanceParameterBuffer> Parameters{};
     /// Already committed constant slices, borrowed through this flight's completion.
     /// A nonempty source overrides its corresponding CPU byte source.
-    std::span<const render::ShaderBufferBinding> ConstantBuffers, ViewBuffers, FrameBuffers;
+    std::span<const render::ShaderBufferBinding> ConstantBuffers{}, ViewBuffers{}, FrameBuffers{};
 };
 struct PreparedRasterMaterial {
     struct Group {

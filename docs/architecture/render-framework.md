@@ -13,7 +13,7 @@ runtime 按职责区分底层服务、通用资产与可选渲染框架，框架
 
 | 归属 | 文件与职责 |
 |---|---|
-| runtime 根目录：底层渲染服务 | `gpu_system`、`render_system`、`cmd_allocator`、`gpu_resource`、`gpu_frame_resources`、`shader_jit`、`shader_program`、`graphics_pipeline_cache`、`vertex_layout`；不依赖场景、Material 或 Pipeline |
+| runtime 根目录：底层渲染服务 | `gpu_system`、`render_system`、`gpu_cmd_allocator`、`gpu_resource`、`gpu_frame_resources`、`shader_jit`、`shader_program`、`graphics_pipeline_cache`、`vertex_layout`；不依赖场景、Material 或 Pipeline |
 | runtime 根目录：通用资产与数据 | `image_asset`、`texture_asset`、`static_mesh`、`vertex_data`、`gpu_mesh`、`local_transform`；持有 GPU 资源不等于属于渲染框架 |
 | `render_framework/` | SceneManager、SceneWriter/RenderScene、场景 GPU 镜像、场景交付与资产退休、视图、Material、输出、Pipeline 与 SceneDraw |
 | 上层装配 | Application 组合可选服务；`game_framework/` 保存 Actor/World 与 WorldRenderBridge，`components/` 保存组件及相机捕获适配 |
@@ -321,7 +321,7 @@ CompiledRasterGraph::Record 使用调用方已经分配的 command，执行每�
 
 ## Pipeline、材质与绘制
 
-`PipelineContext` 提供底层 RenderSystem、按值 frame 信息、`ICmdAllocator`、当前 flight 的 `GpuFrameResources` 和可空的 SceneManager。
+`PipelineContext` 提供底层 RenderSystem、按值 frame 信息、`IGpuCmdAllocator`、当前 flight 的 `GpuFrameResources` 和可空的 SceneManager。
 `MakePipelineContext(renderer, frame, scenes)` 显式接入场景服务；省略 scenes 可用于无场景的自定义 pipeline。
 GpuFrameResources 由 GpuSystem 按 flight 持有，提供通用常量与参数分配，不认识框架类型。
 它没有预先分配的 cmd，也没有 Submit/Present/WaitIdle 入口。pipeline 自行分段录制，Return 后把普通指针数组

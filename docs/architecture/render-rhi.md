@@ -25,7 +25,8 @@ layout 章节以下以 schema 8 contract 为准，并且已经是实现形态：
 调用不提交命令、不等待队列；调用方按需要采样，不在每次 query 写入或取值时调用。
 调用区间是观测耗时，不能作为硬件校时精度上限。上层自行把明确的 CPU 域映射到其时钟。
 
-默认实现与 Vulkan 明确返回 `Unsupported`；D3D12 的无效队列、API 失败和无效频率/区间分别
+`GetTimestampClockCalibration` 是纯虚接口，各后端必须显式实现；Vulkan 明确返回 `Unsupported`。
+D3D12 的无效队列、API 失败和无效频率/区间分别
 返回 `InvalidQueue`、`ApiFailure`、`InvalidSample`，原生错误在 `NativeError`。只有 `Success`
 结果的 tick 与频率可用于转换，失败不以 CPU 时间或零值伪造 GPU 样本。已有 query 的 GPU
 write/resolve/availability 语义不变。测试见 `RadRayTimestampClock`。
@@ -541,7 +542,8 @@ DXGI 的 frame-latency waitable object 达到同一效果。
 
 `DiscardAcquiredFrame` 是显式的非呈现终结：调用者先丢弃未提交的 backbuffer 命令并等待已提交工作。
 D3D12 仅在 owner/token 匹配时消费 outstanding frame，返回既有 result 的 Success，之后必须
-Recreate 或关闭；错误和默认不支持实现返回 Error 且保留原 frame。析构不是 token 取消。
+Recreate 或关闭；`DiscardAcquiredFrame` 是纯虚接口，Vulkan 当前显式返回 Error 且保留原 frame，
+D3D12 的错误同样保留原 frame。析构不是 token 取消。
 D3D12 Present 的不可呈现 HWND/实际 DXGI_STATUS_OCCLUDED 分支返回 RetryLater，并已消费该帧，
 不能把它统计成实际可见呈现；错误的外来 frame 保留给真正 owner 终结。
 

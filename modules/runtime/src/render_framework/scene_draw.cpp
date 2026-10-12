@@ -42,8 +42,23 @@ std::span<const SceneDraw::PrimitiveRecord> SceneDraw::GetObjectRecords(SceneId 
     }
     return record->Items;
 }
-std::optional<PreparedSceneDraw> SceneDraw::Prepare(PipelineContext& context, const SceneViewRequest& view, const SceneGpuView& objects,
-                                                    render::RenderPass* pass, const RenderOutputInfo& output, std::string_view passName, Nullable<const MaterialRenderData*> fallback, bool depthTest) {
+std::optional<PreparedSceneDraw> SceneDraw::Prepare(
+    PipelineContext& context,
+    const SceneViewRequest& view,
+    const SceneGpuView& objects,
+    render::RenderPass* pass,
+    const RenderOutputInfo& output,
+    std::string_view passName,
+    Nullable<const MaterialRenderData*> fallback,
+    bool depthTest) {
+    /**
+     * 1.检查对象与视图的 visibility mask。
+     * 2.检查 GPU 几何是否可用。
+     * 3.遍历网格 section。
+     * 4.用 section.MaterialSlot 找到对应材质。
+     * 5.从材质中选择 pipeline 要求的 pass，例如 "Unlit"。
+     * 6.为该 section 生成一个绘制项。
+     */
     RADRAY_PROFILE_SCOPE_N("SceneDraw::Prepare");
     const auto resolved = ResolveSceneView(view, output.Width, output.Height, context.Resources.GetDevice()->GetBackend());
     auto scene = context.Scenes ? context.Scenes->GetSceneRT(view.Scene) : nullptr;

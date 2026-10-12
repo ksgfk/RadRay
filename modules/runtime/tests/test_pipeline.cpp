@@ -229,7 +229,7 @@ TEST(PipelineMaterialDeathTest, StaleMaterialGenerationCannotOverwriteReusedShap
     EXPECT_EQ(object->Materials[0].Id, current.Id);
 }
 
-class PipelineTestAllocator final : public ICmdAllocator {
+class PipelineTestAllocator final : public IGpuCmdAllocator {
 public:
     vector<unique_ptr<UploadTestCommand>> Commands;
     vector<render::CommandBuffer*> Returned;

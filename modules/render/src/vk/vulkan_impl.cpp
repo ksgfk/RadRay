@@ -5398,6 +5398,11 @@ SwapChainPresentResult SwapChainVulkan::Present(SwapChainFrame&& frame) noexcept
     return result;
 }
 
+SwapChainPresentResult SwapChainVulkan::DiscardAcquiredFrame(SwapChainFrame&& frame) noexcept {
+    RADRAY_UNUSED(frame);
+    return {.NativeStatusCode = -1, .Status = SwapChainStatus::Error};
+}
+
 bool SwapChainVulkan::Recreate(uint32_t width, uint32_t height, TextureFormat format, PresentMode presentMode) noexcept {
     if (_outstandingAcquire.IsValid()) {
         RADRAY_ABORT("vkCreateSwapchainKHR skipped: outstanding SwapChainFrame must be presented first");

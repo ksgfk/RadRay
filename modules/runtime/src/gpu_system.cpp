@@ -519,7 +519,7 @@ GpuFrameResources& AppFrameContext::GetGpuFrameResources() const noexcept {
     return *GetRecordingFlight().FrameResources;
 }
 
-ICmdAllocator& AppFrameContext::GetCmdAllocator() const noexcept {
+IGpuCmdAllocator& AppFrameContext::GetCmdAllocator() const noexcept {
     return GetRecordingFlight().CommandAllocator;
 }
 

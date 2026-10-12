@@ -150,7 +150,7 @@ channel 不拥有回调或资产引用，没有观察者注册、注销与跨线
 
 ### 命令分配与有序批次
 
-`GpuFlightSlot::CommandAllocator` 实现窄接口 `ICmdAllocator`，拥有当前 flight/main queue 的一个 RHI
+`GpuFlightSlot::CommandAllocator` 实现窄接口 `IGpuCmdAllocator`，拥有当前 flight/main queue 的一个 RHI
 CommandAllocator 以及独占 command wrappers。`Allocate()` Begin 一个本 epoch 尚未使用的 wrapper；
 `Return(span)` 只 End 并关闭借用，不登记、不提交、不重用 wrapper，也不决定执行顺序。
 `RegisterClosedCommandBuffers(desc, target)` 登记已归还命令，复制数组，批次按登记顺序、项内按数组顺序执行。

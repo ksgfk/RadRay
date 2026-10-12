@@ -11,6 +11,9 @@ public:
     void Submit(const CommandQueueSubmitDescriptor&) noexcept override {}
     void Wait() noexcept override { ++Waits; }
     QueueType GetQueueType() const noexcept override { return QueueType::Direct; }
+    TimestampClockCalibrationResult GetTimestampClockCalibration() const noexcept override {
+        return {.Status = TimestampClockCalibrationStatus::Unsupported};
+    }
     uint32_t& Waits;
 };
 class CleanupDevice final : public Device {
@@ -58,13 +61,16 @@ public:
 };
 }  // namespace
 
-TEST(RadRayTimestampClock, DefaultQueueReturnsExplicitUnsupported) {
-    uint32_t waits = 0;
-    CleanupQueue queue(waits);
-    const auto result = queue.GetTimestampClockCalibration();
+TEST(RadRayTimestampClock, VulkanQueueReturnsExplicitUnsupported) {
+    DeviceContext context;
+    if (!TryCreateDevice(RenderBackend::Vulkan, context, true)) GTEST_SKIP() << context.Reason;
+    const auto result = context.Queue->GetTimestampClockCalibration();
     EXPECT_EQ(result.Status, TimestampClockCalibrationStatus::Unsupported);
     EXPECT_EQ(result.CpuDomain, TimestampCpuClockDomain::Unknown);
-    EXPECT_EQ(waits, 0u);
+    EXPECT_EQ(result.GpuTick, 0u);
+    EXPECT_EQ(result.CpuTick, 0u);
+    context.Reset();
+    EXPECT_EQ(context.ValidationErrors.load(), 0u);
 }
 
 TEST(RadRayTimestampClock, DirectQueueReturnsRealClockPairAndObservationInterval) {

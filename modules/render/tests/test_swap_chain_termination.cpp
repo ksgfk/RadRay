@@ -35,8 +35,6 @@ TEST(RadRaySwapChainTermination, DiscardPreservesForeignTokenAndRequiresRecreate
     auto acquired = a.Get()->AcquireNext(1000);
     ASSERT_EQ(acquired.Status, SwapChainStatus::Success); ASSERT_TRUE(acquired.Frame);
     auto& frame = *acquired.Frame;
-    EXPECT_EQ(a.Get()->SwapChain::DiscardAcquiredFrame(std::move(frame)).Status, SwapChainStatus::Error);
-    EXPECT_TRUE(frame.IsValid());
     EXPECT_EQ(b.Get()->DiscardAcquiredFrame(std::move(frame)).Status, SwapChainStatus::Error);
     EXPECT_TRUE(frame.IsValid());
     EXPECT_EQ(b.Get()->Present(std::move(frame)).Status, SwapChainStatus::Error);

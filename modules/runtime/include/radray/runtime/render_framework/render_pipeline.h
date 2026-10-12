@@ -1,7 +1,7 @@
 #pragma once
 
 #include <chrono>
-#include <radray/runtime/cmd_allocator.h>
+#include <radray/runtime/gpu_cmd_allocator.h>
 #include <radray/runtime/gpu_frame_resources.h>
 #include <radray/runtime/render_framework/scene_view.h>
 #include <radray/runtime/render_framework/render_output.h>
@@ -19,7 +19,7 @@ struct PipelineFrameInfo {
 struct PipelineContext {
     RenderSystem& Renderer;
     PipelineFrameInfo Frame;
-    ICmdAllocator& Commands;
+    IGpuCmdAllocator& Commands;
     GpuFrameResources& Resources;
     Nullable<SceneManager*> Scenes{nullptr};
 };

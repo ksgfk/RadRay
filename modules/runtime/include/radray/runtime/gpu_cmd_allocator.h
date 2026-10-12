@@ -6,10 +6,12 @@
 namespace radray {
 
 /// Borrowed only during the current application recording phase, on its recording thread.
-class ICmdAllocator {
+class IGpuCmdAllocator {
 public:
-    virtual ~ICmdAllocator() noexcept = default;
+    virtual ~IGpuCmdAllocator() noexcept = default;
+
     [[nodiscard]] virtual render::CommandBuffer* Allocate() = 0;
+
     /// Ends CPU recording. Does not register, submit, or make commands reusable.
     virtual void Return(std::span<render::CommandBuffer*> commands) = 0;
 };

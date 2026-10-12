@@ -7,7 +7,7 @@
 namespace radray {
 
 class AppFrameContext;
-class ICmdAllocator;
+class IGpuCmdAllocator;
 struct PipelineContext;
 
 struct SceneObjectGpuData {
@@ -32,7 +32,7 @@ public:
     std::optional<SceneGpuView> Prepare(const RenderScene& scene, PipelineContext& context, vector<render::CommandBuffer*>& outCommands);
 
 private:
-    std::optional<SceneGpuView> Prepare(const RenderScene& scene, uint32_t flightIndex, uint64_t frameSerial, ICmdAllocator& allocator, ResourceUploader& uploader, vector<render::CommandBuffer*>& outCommands);
+    std::optional<SceneGpuView> Prepare(const RenderScene& scene, uint32_t flightIndex, uint64_t frameSerial, IGpuCmdAllocator& allocator, ResourceUploader& uploader, vector<render::CommandBuffer*>& outCommands);
     struct ObjectSet {
         vector<ShapeId> Ids;
         vector<uint32_t> Positions;

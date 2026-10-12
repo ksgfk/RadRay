@@ -28,13 +28,18 @@ struct PreparedSceneDraw {
 };
 class SceneDraw {
 public:
-    struct PrimitiveRecord { const GpuMesh::DrawData* Draw; const StaticMeshSection* Section; MaterialBinding Binding; };
+    struct PrimitiveRecord {
+        const GpuMesh::DrawData* Draw;
+        const StaticMeshSection* Section;
+        MaterialBinding Binding;
+    };
     /// Derived persistent records. Borrow expires at Apply; refresh checks shape generation and
     /// geometry/material revisions before touching old asset addresses.
     std::span<const PrimitiveRecord> GetObjectRecords(SceneId sceneId, const RenderScene& scene, ShapeId id);
-    std::optional<PreparedSceneDraw> Prepare(PipelineContext& context, const SceneViewRequest& view, const SceneGpuView& objects,
-                                             render::RenderPass* pass, const RenderOutputInfo& output, std::string_view passName,
-                                             Nullable<const MaterialRenderData*> fallback, bool depthTest);
+    std::optional<PreparedSceneDraw> Prepare(
+        PipelineContext& context, const SceneViewRequest& view, const SceneGpuView& objects,
+        render::RenderPass* pass, const RenderOutputInfo& output, std::string_view passName,
+        Nullable<const MaterialRenderData*> fallback, bool depthTest);
 
 private:
     RasterDraw _draw;

@@ -30,11 +30,11 @@ struct RasterGraphUse {
 };
 struct RasterGraphNode {
     RasterNodeKind Kind{RasterNodeKind::Raster};
-    vector<RasterGraphUse> Uses;
-    vector<RasterNodeId> After;
+    vector<RasterGraphUse> Uses{};
+    vector<RasterNodeId> After{};
     /// Records only the node body. Graph owns texture transitions, including entry/exit.
     /// Borrowed inputs and callback captures must survive synchronous Record.
-    std::function<bool(render::CommandBuffer&)> Record;
+    std::function<bool(render::CommandBuffer&)> Record{};
 };
 struct CompiledRasterGraph {
     struct Step {
