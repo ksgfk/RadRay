@@ -14,6 +14,23 @@ size_t SceneDrawKeyHash::operator()(const SceneDrawKey& key) const noexcept {
     hash.Add(key.Material);
     return hash.ToHashCode();
 }
+std::span<const SceneDraw::PrimitiveRecord> SceneDraw::GetObjectRecords(SceneId sceneId, const RenderScene& scene, ShapeId id) {
+    if (_scene != sceneId) { _records.clear(); _scene = sceneId; }
+    const auto object = scene.GetStaticMesh(id); const auto revision = scene.GetDrawRevision(id);
+    if (!object || !revision) { if (id.Index < _records.size()) _records[id.Index].reset(); return {}; }
+    if (id.Index >= _records.size()) _records.resize(size_t{id.Index} + 1);
+    auto& record = _records[id.Index];
+    if (!record || record->Id != id || record->Geometry != revision->Geometry || record->Materials != revision->Materials) {
+        record = make_unique<ObjectRecord>(); record->Id = id; record->Geometry = revision->Geometry; record->Materials = revision->Materials;
+        const auto mesh = object->Mesh.GetRenderMesh();
+        if (mesh) for (const auto& section : object->Mesh.GetSections()) {
+            if (!section.IndexCount || section.PrimitiveIndex >= mesh->Draws.size()) continue;
+            record->Items.push_back({&mesh->Draws[section.PrimitiveIndex], &section,
+                section.MaterialSlot < object->Materials.size() ? object->Materials[section.MaterialSlot] : MaterialBinding{{}, nullptr}});
+        }
+    }
+    return record->Items;
+}
 std::optional<PreparedSceneDraw> SceneDraw::Prepare(PipelineContext& context, const SceneViewRequest& view, const SceneGpuView& objects,
     render::RenderPass* pass, const RenderOutputInfo& output, std::string_view passName, Nullable<const MaterialRenderData*> fallback, bool depthTest) {
     RADRAY_PROFILE_SCOPE_N("SceneDraw::Prepare");
@@ -29,13 +46,16 @@ std::optional<PreparedSceneDraw> SceneDraw::Prepare(PipelineContext& context, co
     struct Geometry { array<render::GraphicsPipelineState*, 2> Pipelines; size_t Material; };
     unordered_map<SceneDrawKey, Geometry, SceneDrawKeyHash> geometryBindings;
     const auto columns = scene->GetStaticMeshColumns();
+    if (_scene == view.Scene) for (auto& record : _records) if (record && !scene->ContainsShape(record->Id)) record.reset();
     for (size_t row = 0; row < columns.Size(); ++row) {
         const auto object = columns.Get(row);
+        const auto state = scene->GetDrawState(columns.Ids[row]);
+        if (!state || !(state->VisibilityMask & view.VisibilityMask)) continue;
         const auto mesh = object.Mesh.GetRenderMesh();
         if (!mesh) continue;
-        for (const auto& section : object.Mesh.GetSections()) {
-            if (!section.IndexCount || section.PrimitiveIndex >= mesh->Draws.size()) continue;
-            const auto data = section.MaterialSlot < object.Materials.size() ? object.Materials[section.MaterialSlot].Data : fallback;
+        for (const auto& record : GetObjectRecords(view.Scene, *scene.Get(), columns.Ids[row])) {
+            const auto& section = *record.Section;
+            const auto data = record.Binding.Data ? record.Binding.Data : fallback;
             if (!data) { RADRAY_ERR_LOG("missing material slot {}", section.MaterialSlot); continue; }
             const auto& draw = mesh->Draws[section.PrimitiveIndex];
             const SceneDrawKey key{&draw, data.Get()};
@@ -66,6 +86,13 @@ std::optional<PreparedSceneDraw> SceneDraw::Prepare(PipelineContext& context, co
                     binding.Pipelines[reverse] = pipeline.Get();
                 }
                 geometry = geometryBindings.emplace(key, binding).first;
+            }
+            for (const auto& input : data->Passes) for (const auto& binding : input.Inputs) {
+                if (binding.Source != MaterialInputSource::InstanceParameters) continue;
+                if (binding.ValueIndex >= input.ParameterLayouts.size()) return std::nullopt;
+                const auto stream = scene->GetParameterStreams().find(input.ParameterLayouts[binding.ValueIndex].Name);
+                const auto id = columns.Ids[row];
+                if (stream == scene->GetParameterStreams().end() || id.Index >= stream->second.Rows.size() || !stream->second.Rows[id.Index] || stream->second.Rows[id.Index]->Id != id) return std::nullopt;
             }
             PreparedRasterDraw prepared;
             prepared.Pipeline = geometry->second.Pipelines[object.ReverseCulling ? 1 : 0];

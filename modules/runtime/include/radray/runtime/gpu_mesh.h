@@ -1,6 +1,7 @@
 #pragma once
 
 #include <radray/runtime/vertex_layout.h>
+#include <radray/runtime/vertex_data.h>
 
 namespace radray {
 
@@ -16,6 +17,11 @@ public:
 
     vector<unique_ptr<render::Buffer>> Buffers;
     vector<DrawData> Draws;
+    /// Runtime construction packs CPU bins into Buffers[0], without changing their byte layout.
+    vector<render::BufferRange> BinRanges;
 };
+class ResourceUploader;
+Nullable<unique_ptr<GpuMesh>> AllocateRuntimeMesh(render::Device& device, const MeshResource& source, uint64_t byteLimit = 64 * 1024 * 1024);
+bool TryUploadRuntimeMesh(ResourceUploader& uploader, render::CommandBuffer* command, const MeshResource& source, const GpuMesh& mesh);
 
 }  // namespace radray

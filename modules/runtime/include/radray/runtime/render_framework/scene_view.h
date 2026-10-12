@@ -25,6 +25,7 @@ struct SceneViewRequest {
     /// When provided, this evaluated projection replaces the lens parameters above.
     std::optional<Eigen::Matrix4f> EvaluatedProjection;
     RasterDepthConvention Depth{RasterDepthConvention::ZeroToOne};
+    uint32_t VisibilityMask{UINT32_MAX};
 };
 
 struct SceneViewData {

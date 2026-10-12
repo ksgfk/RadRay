@@ -457,3 +457,11 @@ RenderSystem 的析构接受部分初始化状态，通过 `OnShutdown` 幂等�
 InstanceParameterLayout 持有流名称、stride 与字段名称/类型/offset/size，ReflectInstanceParameterLayout 从 compiler-published 常量 payload 提取 schema。structured element 没有类型反射的绑定必须显式提供同一共享 HLSL 声明生成的 padded schema；作者负责 CB 与 structured 布局相同，不能将任意 cbuffer packing 当成 structured packing。材料 InstanceParameters 输入引用完整 schema，准备时核验 schema 与 StructureByteStride，拒绝大小/字段/绑定种类不符。
 SceneWriter::SetInstanceParameters 与 StaticMeshComponent::SetInstanceParameters 共用 typed update，ShapeCapture 同样交付。更新按 ShapeId+流 coalesce，删除取消尚未发布的值。RenderScene 持有每流各自 schema 和有 generation 的 slot，值变化走 SceneApplyChanges::Parameters，不进入矩阵 Updated。
 SceneGpuData 使用已有 ResourceUploader，按每 flight、每流跟踪 Pending/Attempt。上传录制成功后暂存 attempt；真实 completion executed 后才 commit，跳帧重新加入当前 generation 的 pending。容量增长重新补全活跃行，稀疏 slot 不假定连续；未初始化或未声明的行不能供材质读取。warm-up 后静止矩阵与参数零上传，多 view 同 FrameSerial 复用同一 SceneGpuView。
+
+## Runtime geometry、候选与持久记录
+
+AllocateRuntimeMesh 校验 MeshResource，按原 CPU bin 字节布局在已有 RHI buffer 中建立通用 DrawData。TryUploadRuntimeMesh 通过同一 ResourceUploader staging/flight 服务上传，不另建 importer 或 submitter；AddReady 本身不表示 GPU 上传执行或完成。
+StaticMeshSection::SortGroups 声明不可拆 primitive/group 的 index range、double center 和排序域，SortRasterIndices 在连续域内按距离稳定排序并完整保留每组索引，不读取顶点布局。不解决任意全场景相交透明。
+RasterBoundsVisible 先在 double 中减 camera，再测试零到一 clip 的六面。SplitRasterPosition 生成独立 high/low float4 流，应用 shader 在每 view 减对应 camera high/low 后再加局部几何；矩阵主路径仍是 float，不能把接入 Scene 当成自动的大坐标支持。
+ShapeDrawState 独立交付 view visibility mask、sort group 与 order，不进入 GPU 矩阵 dirty。RenderScene 为 geometry/material/transform/parameter/order 分别保存 revision。
+SceneDraw::GetObjectRecords 的派生 primitive 记录以 SceneId、ShapeId generation 与 geometry/material revision 刷新，先验证当前身份再使用旧资产地址；transform、参数、order 与每 view 可见性独立读取。shader/pass/output/布局的 PSO 仍由公共 cache 按完整内容和 program generation 解析，不把 texture、常量或 view 写死在持久记录。MC 与原生 SceneDraw 都消费这个记录服务及同一 RasterDraw。

@@ -2,6 +2,7 @@
 #include <radray/runtime/gpu_system.h>
 #include <radray/runtime/render_system.h>
 #include <radray/runtime/render_framework/raster_draw.h>
+#include <radray/runtime/gpu_mesh.h>
 #include <cstring>
 #if defined(RADRAY_RASTER_COMPILER_PATH) && defined(_WIN32)
 #include <radray/shader_compiler/client.h>
@@ -354,6 +355,17 @@ TEST_F(RasterDraw, MaterialAcceptsRegisteredProgramAndRejectsAmbiguousSourceOwne
     EXPECT_FALSE(Core.ResolveMaterial(*Renderer, descriptor.Passes[0]));
     descriptor.Passes[0].Program.SourceName.clear(); descriptor.Passes[0].RegisteredProgram = nullptr;
     radray::Material missing{descriptor.Passes, descriptor.Constants}; EXPECT_FALSE(missing.IsValid());
+}
+TEST_F(RasterDraw, RuntimeMeshUsesExistingUploaderAndPreservesPackedBinsAfterProducerRelease) {
+    MeshResource source;float vertices[]{0,0,0,1,0,0,0,1,0};uint32_t indices[]{0,1,2};
+    source.Bins.emplace_back(std::as_bytes(std::span{vertices}));source.Bins.emplace_back(std::as_bytes(std::span{indices}));
+    MeshPrimitive primitive;primitive.VertexCount=3;primitive.VertexBuffers={{"POSITION",0,0,VertexDataType::FLOAT,3,0,12}};primitive.IndexBuffer={1,3,0,4};source.Primitives.push_back(primitive);
+    EXPECT_FALSE(AllocateRuntimeMesh(*Gpu->GetDevice(),source,32));auto mesh=AllocateRuntimeMesh(*Gpu->GetDevice(),source);ASSERT_TRUE(mesh);EXPECT_EQ(mesh->Draws[0].Ibv.Offset,36u);
+    Begin();auto* command=Frame->AllocateCommandBuffer();ASSERT_TRUE(TryUploadRuntimeMesh(Frame->GetUploader(),command,source,*mesh.Get()));
+    source.Bins[0]=MeshBuffer(std::span<const byte>{});
+    render::ResourceBarrierDescriptor barrier=render::BarrierBufferDescriptor{.Target=mesh->Buffers[0].get(),.Before=render::BufferState::Vertex|render::BufferState::Index,.After=render::BufferState::CopySource};command->ResourceBarrier(std::span{&barrier,1});
+    command->CopyBufferToBuffer(Readback.get(),0,mesh->Buffers[0].get(),0,48);ReadbackBarrier(command);Frame->ReturnCommandBuffers({.CmdBuffers=std::span{&command,1}});Complete();
+    const auto* data=Readback->Map(0,48);Readback->InvalidateMappedRange({0,48});EXPECT_EQ(std::memcmp(data,vertices,36),0);EXPECT_EQ(std::memcmp(static_cast<const byte*>(data)+36,indices,12),0);Readback->Unmap();
 }
 TEST_F(RasterDraw, InstanceSchemaComesFromCompilerPayloadAndRejectsMissingOrOverlappingFields) {
     auto program = Program(false); ASSERT_TRUE(program);

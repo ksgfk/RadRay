@@ -35,6 +35,12 @@ struct ShapeTransformUpdate {
     ShapeId Id;
     AffineTransform LocalToWorld{};
 };
+struct ShapeDrawState {
+    uint32_t VisibilityMask{UINT32_MAX}, SortGroup{1}, Order{0};
+    friend bool operator==(const ShapeDrawState&, const ShapeDrawState&) = default;
+};
+struct ShapeDrawUpdate { ShapeId Id; ShapeDrawState State; };
+struct ShapeDrawRevision { uint64_t Geometry{0}, Materials{0}, Transform{0}, Parameters{0}, Order{0}; };
 
 static_assert(sizeof(ShapeTransformUpdate) == 56);
 
@@ -50,12 +56,13 @@ struct SceneUpdateBatch {
     vector<ShapeTransformUpdate> Transforms;
     vector<ShapeMaterialUpdate> Materials;
     vector<ShapeParameterUpdate> Parameters;
+    vector<ShapeDrawUpdate> DrawStates;
     /// False preserves the RT light set; true replaces it, including with an empty list.
     bool LightsChanged{false};
     LightSceneData Lights;
 
     void Clear() noexcept;
-    bool Empty() const noexcept { return RemoveTransforms.empty() && CreateTransforms.empty() && TransformParents.empty() && LocalTransforms.empty() && RemoveShapes.empty() && CreateShapes.empty() && MeshStates.empty() && Transforms.empty() && Materials.empty() && Parameters.empty() && !LightsChanged && Lights.Empty(); }
+    bool Empty() const noexcept { return RemoveTransforms.empty() && CreateTransforms.empty() && TransformParents.empty() && LocalTransforms.empty() && RemoveShapes.empty() && CreateShapes.empty() && MeshStates.empty() && Transforms.empty() && Materials.empty() && Parameters.empty() && DrawStates.empty() && !LightsChanged && Lights.Empty(); }
 };
 
 struct SceneFrameUpdate {

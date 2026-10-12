@@ -60,6 +60,8 @@ public:
     /// Dense column access for culling and drawing without identity lookups. Same borrow lifetime as GetStaticMesh.
     StaticMeshSceneColumns GetStaticMeshColumns() const noexcept { return _staticMeshes.GetColumns(_transforms.GetWorldMatrices()); }
     const unordered_map<string, SceneParameterStream>& GetParameterStreams() const noexcept { return _parameters; }
+    std::optional<ShapeDrawRevision> GetDrawRevision(ShapeId id) const noexcept;
+    std::optional<ShapeDrawState> GetDrawState(ShapeId id) const noexcept;
 
 private:
     static constexpr uint32_t kNoMesh = std::numeric_limits<uint32_t>::max();
@@ -74,6 +76,8 @@ private:
         uint32_t TransformRow{kNoMesh}, NextShape{kNoMesh}, PreviousShape{kNoMesh};
         bool Alive{false};
         bool OwnTransform{false};
+        ShapeDrawRevision Revision;
+        ShapeDrawState Draw;
     };
     void UnbindShape(uint32_t index);
     void BindShape(uint32_t index, uint32_t row, bool own);

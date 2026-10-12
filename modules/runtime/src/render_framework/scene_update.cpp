@@ -13,6 +13,7 @@ void SceneUpdateBatch::Clear() noexcept {
     Transforms.clear();
     Materials.clear();
     Parameters.clear();
+    DrawStates.clear();
     LightsChanged = false;
     Lights.Clear();
 }

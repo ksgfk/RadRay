@@ -83,6 +83,14 @@ ShapeId SceneWriter::CreateShape() {
 
 void SceneWriter::RemoveShape(ShapeId id) {
     auto& state = GetShape(id);
+    if (state.DrawUpdateIndex != kNotQueued) {
+        const auto index = state.DrawUpdateIndex;
+        if (index + 1 != _pending.DrawStates.size()) {
+            _pending.DrawStates[index] = _pending.DrawStates.back();
+            GetShape(_pending.DrawStates[index].Id).DrawUpdateIndex = index;
+        }
+        _pending.DrawStates.pop_back();
+    }
     while (!state.ParameterUpdateIndices.empty()) {
         auto it = state.ParameterUpdateIndices.begin(); const auto index = it->second;
         if (index + 1 != _pending.Parameters.size()) {
@@ -191,6 +199,12 @@ bool SceneWriter::SetInstanceParameters(ShapeId id, const InstanceParameterLayou
     } else _pending.Parameters[found->second] = std::move(update);
     return true;
 }
+void SceneWriter::SetDrawState(ShapeId id, ShapeDrawState value) {
+    auto& state = GetShape(id);
+    if (state.DrawUpdateIndex == kNotQueued) {
+        state.DrawUpdateIndex = _pending.DrawStates.size(); _pending.DrawStates.push_back({id, value});
+    } else _pending.DrawStates[state.DrawUpdateIndex] = {id, value};
+}
 
 void SceneWriter::WriteTransform(ShapeId id, ShapeState& state, const AffineTransform& localToWorld) {
     if (!state.HasMesh) RADRAY_ABORT("Transform requires a static mesh state");
@@ -287,6 +301,7 @@ void SceneWriter::Flush(SceneUpdateBatch& batch, uint32_t flightIndex) {
     }
     for (const auto& update : _pending.Materials) GetShape(update.Id).MaterialUpdateIndex = kNotQueued;
     for (const auto& update : _pending.Parameters) GetShape(update.Id).ParameterUpdateIndices.clear();
+    for (const auto& update : _pending.DrawStates) GetShape(update.Id).DrawUpdateIndex = kNotQueued;
     if (_claimed) _editing = false;
     _captured = false;
     if (_pending.LightsChanged) _pending.Lights.Assign(_lights);

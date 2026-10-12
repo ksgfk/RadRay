@@ -80,10 +80,12 @@ void RenderScene::Apply(const SceneUpdateBatch& batch, Nullable<SceneApplyChange
         if (slot.Alive || id.Generation < slot.Generation) RADRAY_ABORT("Stale shape creation");
         slot.Generation = id.Generation;
         slot.Alive = true;
+        slot.Revision = {}; slot.Draw = {};
     }
     for (const auto& update : batch.MeshStates) {
         if (!ContainsShape(update.Id)) RADRAY_ABORT("Invalid static mesh state update");
         auto& slot = _shapes[update.Id.Index];
+        ++slot.Revision.Geometry;
         if (update.Transform.IsValid()) {
             const auto row = _transforms.GetRow(update.Transform);
             if (slot.TransformRow != row || slot.OwnTransform) {
@@ -112,6 +114,7 @@ void RenderScene::Apply(const SceneUpdateBatch& batch, Nullable<SceneApplyChange
     for (const auto& update : batch.Materials) {
         if (!ContainsShape(update.Id) || _shapes[update.Id.Index].MeshIndex == kNoMesh) RADRAY_ABORT("Invalid shape material update");
         _staticMeshes.SetMaterials(_shapes[update.Id.Index].MeshIndex, update.Materials);
+        ++_shapes[update.Id.Index].Revision.Materials;
     }
     for (const auto& update : batch.Parameters) {
         if (!ContainsShape(update.Id) || !update.Layout.IsValid() || update.Values.size() != update.Layout.Stride) RADRAY_ABORT("Invalid instance parameter update");
@@ -123,13 +126,20 @@ void RenderScene::Apply(const SceneUpdateBatch& batch, Nullable<SceneApplyChange
         auto& row = stream.Rows[update.Id.Index];
         if (!row || row->Id != update.Id || row->Values != update.Values) {
             row = SceneParameterStream::Row{update.Id, update.Values};
+            ++_shapes[update.Id.Index].Revision.Parameters;
             if (changes) changes->Parameters.push_back({update.Id, update.Layout.Name});
         }
+    }
+    for (const auto& update : batch.DrawStates) {
+        if (!ContainsShape(update.Id)) RADRAY_ABORT("Invalid shape draw state");
+        auto& slot = _shapes[update.Id.Index];
+        if (slot.Draw != update.State) { slot.Draw = update.State; ++slot.Revision.Order; }
     }
     const auto changed = _transforms.Evaluate();
     for (auto row : changed) {
         for (auto shape = _transforms.GetFirstShape(row); shape != kNoMesh; shape = _shapes[shape].NextShape) {
             _staticMeshes.UpdateBounds(_shapes[shape].MeshIndex, _transforms.GetWorld(row));
+            ++_shapes[shape].Revision.Transform;
             if (changes) changes->Updated.push_back({shape, _shapes[shape].Generation});
         }
     }
@@ -157,6 +167,12 @@ bool RenderScene::ContainsShape(ShapeId id) const noexcept {
 std::optional<StaticMeshSceneView> RenderScene::GetStaticMesh(ShapeId id) const noexcept {
     if (!ContainsShape(id) || _shapes[id.Index].MeshIndex == kNoMesh) return std::nullopt;
     return GetStaticMeshColumns().Get(_shapes[id.Index].MeshIndex);
+}
+std::optional<ShapeDrawRevision> RenderScene::GetDrawRevision(ShapeId id) const noexcept {
+    return ContainsShape(id) ? std::optional{_shapes[id.Index].Revision} : std::nullopt;
+}
+std::optional<ShapeDrawState> RenderScene::GetDrawState(ShapeId id) const noexcept {
+    return ContainsShape(id) ? std::optional{_shapes[id.Index].Draw} : std::nullopt;
 }
 
 void RenderScene::UnbindShape(uint32_t index) {

@@ -1,6 +1,8 @@
 #include <gtest/gtest.h>
 #include <radray/runtime/render_framework/raster_graph.h>
 #include <radray/runtime/render_framework/raster_view.h>
+#include <radray/runtime/render_framework/raster_scene.h>
+#include <radray/runtime/render_framework/scene_draw.h>
 
 namespace radray::test {
 TEST(RasterGraph, CompilationSchedulesHazardsWithoutRecordingCallbacks) {
@@ -38,5 +40,30 @@ TEST(RasterView, EvaluatedProjectionPreservesReverseDepthAndConvertsBackendViewp
     auto gl = ResolveRasterView(view, 100, 80, render::RenderBackend::D3D12); ASSERT_TRUE(gl);
     Eigen::Vector4f sampleNear{0, 0, -1, 1}; EXPECT_FLOAT_EQ((gl->Projection * sampleNear).z(), 0);
     view.Scissor.Width = 101; EXPECT_FALSE(ResolveRasterView(view, 100, 80, render::RenderBackend::D3D12));
+}
+TEST(RasterScene, DoubleBoundsSplitPositionAndIndivisibleDomainsAreIndependentOfVertexLayout) {
+    const Eigen::Vector3d camera{30000000.125,-30000000.25,0};
+    auto split=SplitRasterPosition(camera);ASSERT_TRUE(split);EXPECT_DOUBLE_EQ(double(split->High[0])+split->Low[0],camera.x());
+    EXPECT_TRUE(RasterBoundsVisible(camera+Eigen::Vector3d{-.25,-.25,.1},camera+Eigen::Vector3d{.25,.25,.9},camera,Eigen::Matrix4f::Identity()));
+    EXPECT_FALSE(RasterBoundsVisible(camera+Eigen::Vector3d{2,0,0},camera+Eigen::Vector3d{3,1,1},camera,Eigen::Matrix4f::Identity()));
+    const uint32_t source[]{1,2,3,4,5,6,7,8,9};array<uint32_t,9> target{};
+    vector<RasterSortGroup> groups{{0,3,{0,0,1},0},{3,3,{0,0,8},0},{6,3,{0,0,20},1}};
+    ASSERT_TRUE(SortRasterIndices(source,groups,Eigen::Matrix4d::Identity(),Eigen::Vector3d::Zero(),false,target));
+    EXPECT_EQ(target[0],4u);EXPECT_EQ(target[3],1u);EXPECT_EQ(target[6],7u);
+    ASSERT_TRUE(SortRasterIndices(source,groups,Eigen::Matrix4d::Identity(),Eigen::Vector3d::Zero(),true,target));EXPECT_EQ(target[0],1u);
+    groups[1].FirstIndex=2;EXPECT_FALSE(SortRasterIndices(source,groups,Eigen::Matrix4d::Identity(),Eigen::Vector3d::Zero(),false,target));
+}
+TEST(RasterScene, PersistentRecordsRefreshMaterialGeometryAndGenerationWhileParametersAndOrderStayIndependent) {
+    RenderScene scene;SceneDraw draw;SceneUpdateBatch update;StaticMeshRenderData first,second;
+    first.Mesh.Draws.resize(1);first.Sections.emplace_back(0,0,3,0,2);second.Mesh.Draws.resize(2);second.Sections.emplace_back(1,3,6,0,3);
+    MaterialRenderData red,blue;ShapeId id{4,0};update.CreateShapes={id};update.MeshStates={{.Id=id,.Mesh={{},&first}}};update.Materials={{id,{{{},&red}}}};scene.Apply(update);
+    auto records=draw.GetObjectRecords({0,0},scene,id);ASSERT_EQ(records.size(),1u);EXPECT_EQ(records[0].Binding.Data.Get(),&red);
+    const auto before=*scene.GetDrawRevision(id);update.Clear();update.Materials={{id,{{{},&blue}}}};scene.Apply(update);
+    records=draw.GetObjectRecords({0,0},scene,id);ASSERT_EQ(records.size(),1u);EXPECT_EQ(records[0].Binding.Data.Get(),&blue);EXPECT_EQ(scene.GetDrawRevision(id)->Geometry,before.Geometry);
+    update.Clear();update.DrawStates={{id,{2,3,7}}};InstanceParameterLayout layout{"Tint",16,{{"Color",0,16,0,1,1,4}}};update.Parameters={{id,layout,vector<byte>(16)}};scene.Apply(update);
+    EXPECT_EQ(scene.GetDrawRevision(id)->Geometry,before.Geometry);EXPECT_EQ(scene.GetDrawState(id)->Order,7u);EXPECT_EQ(draw.GetObjectRecords({0,0},scene,id)[0].Section,&first.Sections[0]);
+    update.Clear();update.MeshStates={{.Id=id,.Mesh={{},&second}}};scene.Apply(update);records=draw.GetObjectRecords({0,0},scene,id);ASSERT_EQ(records.size(),1u);EXPECT_EQ(records[0].Draw,&second.Mesh.Draws[1]);
+    update.Clear();update.RemoveShapes={id};auto replacement=id;replacement.Generation=1;update.CreateShapes={replacement};update.MeshStates={{.Id=replacement,.Mesh={{},&first}}};scene.Apply(update);
+    EXPECT_TRUE(draw.GetObjectRecords({0,0},scene,id).empty());EXPECT_EQ(draw.GetObjectRecords({0,0},scene,replacement)[0].Section,&first.Sections[0]);
 }
 }  // namespace radray::test
