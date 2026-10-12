@@ -46,7 +46,9 @@ std::optional<GeometryVertexLayout> MatchVertexLayout(const GeometryVertexLayout
             input.ComponentType != uint32_t(shader::ShaderVertexComponentType::SignedInteger)) return std::nullopt;
         const auto expected = input.ComponentType == uint32_t(shader::ShaderVertexComponentType::Float) ? floats[input.ComponentCount - 1] : input.ComponentType == uint32_t(shader::ShaderVertexComponentType::UnsignedInteger) ? uints[input.ComponentCount - 1]
                                                                                                                                                                                                                                  : ints[input.ComponentCount - 1];
-        if (found->Format != expected) {
+        const bool normalizedColor = input.ComponentType == uint32_t(shader::ShaderVertexComponentType::Float) &&
+            input.ComponentCount == 4 && (found->Format == render::VertexFormat::UNORM8X4 || found->Format == render::VertexFormat::SNORM8X4);
+        if (found->Format != expected && !normalizedColor) {
             RADRAY_ERR_LOG("incompatible geometry vertex input {}{}", *name, input.SemanticIndex);
             return std::nullopt;
         }

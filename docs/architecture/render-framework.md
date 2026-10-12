@@ -6,7 +6,7 @@
 
 runtime 采用立即创建、延迟销毁、统一 Tick 轮次与类型化增量交付。每个 Scene 只有一份 RT CPU 数据；
 flight 保存更新包、按值视图请求和必要 owner。SceneManager 按需提供对象 GPU buffer，RenderSystem 提供 shader program 与 PSO 缓存，
-应用持有具体 pipeline 和输出资源，公共 SceneDraw 完成准备与基础绘制。没有完整 Forward/RenderGraph 或完整场景快照。
+应用持有具体 pipeline 和输出资源，公共 RasterDraw 完成材质准备、PSO 解析与录制，SceneDraw 提供场景适配。没有完整 Forward/RenderGraph 或完整场景快照。
 旧渲染器设计见[历史快照](../temp/render-framework-design.md)。
 
 runtime 按职责区分底层服务、通用资产与可选渲染框架，框架依赖底层服务。
@@ -327,7 +327,7 @@ GpuFrameResources 由 GpuSystem 按 flight 持有，提供通用常量与参数�
 没有 Scene、只有 view、没有输出的自定义 pipeline 都可使用入口；无效 output 在录制前拒绝。
 成功 acquire 的窗口必须把全部访问结果合并为同一批次，交给 `RegisterClosedCommandBuffers`，外层仍负责 Present。
 
-`Material` 是框架专用的不可变资产，持有命名 passes、program request、输入契约、常量 bytes、纹理 owners 和 sampler 描述。
+`Material` 是框架专用的不可变资产，持有命名 passes、源码 program request 或已登记 program、输入契约、常量 bytes、纹理 owners 和 sampler 描述。
 构建时纹理须已 Ready，常量 bytes 必须符合 shader 的 GPU 布局；更新参数创建新资产版本。
 `StaticMeshSection::MaterialSlot` 索引组件材质列表。`SetMaterials` 经独立 `ShapeMaterialUpdate` 交付，
 不携带矩阵；transform-only 不复制材质列表，material-only 不触发对象 GPU 矩阵上传。
@@ -335,10 +335,22 @@ SceneWriter 为 Ready 材质登记资产 use，替换、删除和断连沿原 Re
 RT 只读不可变数据。组件等待未完成材质，完成时核验当前 Scene/Shape generation 和绑定再标记 DynamicData。
 材质拥有其纹理依赖，不能因 GT 提前释放引用而使在途 draw 悬空。
 
-`SceneDraw::Prepare` 解析每个实际 program 的绑定结构，支持 Scene、View、Material 常量、texture 与 sampler
+`RasterDraw::ResolveMaterial` 在冷路径解析 program 的绑定结构，支持 SceneObjects、任意长度 View/Frame/Material 常量、texture 与 sampler
 处于不同或混合 physical groups。所有 active 非 immutable bindings 必须由契约覆盖。数组按 ValueIndex 连续取值。
-准备阶段填满整组，每次调用分配当前 flight 内独立 parameter set 和满足设备对齐的常量切片；不会覆盖此前引用的值。
+准备阶段核对反射的常量长度，填满整组，并分配当前 flight 内独立 parameter set 和满足设备对齐的常量切片；不会覆盖此前引用的值。
+纯 sampler group 按 plan 和完整 sampler 描述缓存，其余组按 flight 复用；同一 physical group 可混合不同逻辑来源。
 常量页和参数集在安全 flight reset 后复用，固定负载容量收敛。参数集借用 program layout，缓存随 GPU idle 后拆除。
+
+MaterialPass 的 RegisteredProgram 来自 RenderSystem 已验证的 artifact 创建路径，源码请求与已登记 program
+互斥。program/cache 代次须存活到材质、prepared draw 和 GPU 最后使用结束；应用只能在安全点重建这些派生服务。
+ObjectIndexPushConstant 可省略；通用 PushConstant 按反射大小录制，二者互斥。独立 depth test/compare/write、
+bias、primitive、blend/write mask 与采样参数进入既有 GraphicsPipelineKey，format/samples 由实际输出决定。
+当前公共核心拒绝 stencil 和需要动态 blend constant 的配置，RHI 尚无相应 setter；不会静默采用 reference/constant 0。
+
+PreparedRasterDraw 接收 indexed 或 non-indexed 几何、已解析参数、viewport/scissor 和可选 push；无 Scene
+同样使用此内核。每次绑定 PSO 后重新绑定 VB。零面积 scissor 不录制 draw；矩阵和参数由 producer 求值，
+公共内核不重新生成投影。顶点匹配支持现有 32 位格式及 UNORM8X4/SNORM8X4 到 float4 的正规化输入。
+SceneDraw 准备阶段只遍历一次场景，并生成实际执行项；Record 不再读取或搜索场景列。
 
 RenderSystem 拥有 `GraphicsPipelineCache`。key 包含 program 身份、拥有字符串的完整顶点布局、primitive、
 depth/stencil、blend/write mask、有序格式、采样与 pass 身份；哈希相等后仍比较完整内容。

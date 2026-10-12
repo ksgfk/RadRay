@@ -3,17 +3,10 @@
 #include <radray/runtime/render_framework/render_pipeline.h>
 #include <radray/runtime/render_framework/render_scene.h>
 #include <radray/runtime/render_framework/scene_gpu.h>
+#include <radray/runtime/render_framework/raster_draw.h>
 
 namespace radray {
-struct PreparedSceneMaterial {
-    struct Group {
-        uint32_t Index;
-        render::ShaderParameterSet* Parameters;
-        vector<render::ShaderParameterDynamicOffset> Offsets;
-    };
-    vector<Group> Groups;
-    render::BindingHandle ObjectIndex;
-};
+using PreparedSceneMaterial = PreparedRasterMaterial;
 struct SceneDrawKey {
     const GpuMesh::DrawData* Geometry;
     const MaterialRenderData* Material;
@@ -24,15 +17,13 @@ struct SceneDrawKeyHash {
 };
 /// Transient preparation borrows the scene until its next Apply; no asset ownership on RT.
 struct PreparedSceneDraw {
-    struct Geometry {
-        array<render::GraphicsPipelineState*, 2> Pipelines;
+    struct Item {
+        PreparedRasterDraw Draw;
         size_t Material;
     };
-    const RenderScene* Scene;
     SceneViewData View;
-    Nullable<const MaterialRenderData*> Fallback;
     vector<PreparedSceneMaterial> Materials;
-    unordered_map<SceneDrawKey, Geometry, SceneDrawKeyHash> GeometryBindings;
+    vector<Item> Draws;
     void Record(render::GraphicsCommandEncoder* encoder) const;
 };
 class SceneDraw {
@@ -42,16 +33,7 @@ public:
                                              Nullable<const MaterialRenderData*> fallback, bool depthTest);
 
 private:
-    struct InputPlan {
-        ShaderProgram* Program;
-        vector<MaterialInput> Inputs;
-        string PushName;
-        vector<render::BindingHandle> Handles;
-        vector<render::ShaderBindingInfo> Bindings;
-        render::BindingHandle Push;
-    };
-    Nullable<const InputPlan*> ResolveInputs(ShaderProgram* program, const MaterialPass& pass);
-    vector<unique_ptr<InputPlan>> _plans;
+    RasterDraw _draw;
 };
 
 struct ScenePipelineDescriptor {
