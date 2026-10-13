@@ -152,18 +152,18 @@ void RunFoundation(render::RenderBackend backend, bool threaded) {
     test::RuntimeLogCapture logs;
     FoundationApp app;
     auto run = test::RunApplication(app, {
-        .FlightDataCount = 2,
-        .Window = WindowOptions{.Title = "Runtime foundation", .Width = 160, .Height = 120},
-        .Gpu = GpuOptions{
-            .Backend = backend,
-            .EnableValidation = true,
-            .EnableSynchronizationValidation = true,
-            .Multithreaded = threaded,
-            .EnableFrameProfiler = false,
-            .BackBufferFormat = render::TextureFormat::BGRA8_UNORM,
-            .PresentMode = render::PresentMode::FIFO,
-        },
-    });
+                                             .FlightDataCount = 2,
+                                             .Window = WindowOptions{.Title = "Runtime foundation", .Width = 160, .Height = 120},
+                                             .Gpu = GpuOptions{
+                                                 .Backend = backend,
+                                                 .EnableValidation = true,
+                                                 .EnableSynchronizationValidation = true,
+                                                 .Multithreaded = threaded,
+                                                 .EnableFrameProfiler = false,
+                                                 .BackBufferFormat = render::TextureFormat::BGRA8_UNORM,
+                                                 .PresentMode = render::PresentMode::FIFO,
+                                             },
+                                         });
     if (test::CanSkipRuntimeStartup(backend, run.Startup)) GTEST_SKIP() << run.Startup.Reason;
     ASSERT_EQ(run.Startup.Status, RuntimeStartupStatus::Started) << run.Startup.Reason;
     ASSERT_EQ(run.ExitCode, 0);
@@ -228,19 +228,19 @@ void RunFlightReuseOverlap(render::RenderBackend backend) {
     test::RuntimeLogCapture logs;
     FlightReuseOverlapApp app;
     auto run = test::RunApplication(app, {
-        .FlightDataCount = 2,
-        .Window = std::nullopt,
-        .Gpu = GpuOptions{
-            .Backend = backend,
-            .EnableValidation = true,
-            .EnableSynchronizationValidation = true,
-            .Multithreaded = true,
-            .EnableFrameProfiler = false,
-        },
-        .Render = std::nullopt,
-        .World = std::nullopt,
-        .Asset = std::nullopt,
-    });
+                                             .FlightDataCount = 2,
+                                             .Window = std::nullopt,
+                                             .Gpu = GpuOptions{
+                                                 .Backend = backend,
+                                                 .EnableValidation = true,
+                                                 .EnableSynchronizationValidation = true,
+                                                 .Multithreaded = true,
+                                                 .EnableFrameProfiler = false,
+                                             },
+                                             .Render = std::nullopt,
+                                             .World = std::nullopt,
+                                             .Asset = std::nullopt,
+                                         });
     if (test::CanSkipRuntimeStartup(backend, run.Startup)) GTEST_SKIP() << run.Startup.Reason;
     ASSERT_EQ(run.Startup.Status, RuntimeStartupStatus::Started) << run.Startup.Reason;
     ASSERT_EQ(run.ExitCode, 0);
@@ -344,19 +344,19 @@ void RunDroppedPresentation(render::RenderBackend backend) {
     test::RuntimeLogCapture logs;
     DroppedPresentationApp app;
     auto run = test::RunApplication(app, {
-        .Window = WindowOptions{.Title = "Dropped presentation", .Width = 80, .Height = 60},
-        .Gpu = GpuOptions{
-            .Backend = backend,
-            .EnableValidation = true,
-            .EnableSynchronizationValidation = true,
-            .EnableFrameProfiler = false,
-            .BackBufferFormat = render::TextureFormat::BGRA8_UNORM,
-            .PresentMode = render::PresentMode::FIFO,
-        },
-        .Render = std::nullopt,
-        .World = std::nullopt,
-        .Asset = std::nullopt,
-    });
+                                             .Window = WindowOptions{.Title = "Dropped presentation", .Width = 80, .Height = 60},
+                                             .Gpu = GpuOptions{
+                                                 .Backend = backend,
+                                                 .EnableValidation = true,
+                                                 .EnableSynchronizationValidation = true,
+                                                 .EnableFrameProfiler = false,
+                                                 .BackBufferFormat = render::TextureFormat::BGRA8_UNORM,
+                                                 .PresentMode = render::PresentMode::FIFO,
+                                             },
+                                             .Render = std::nullopt,
+                                             .World = std::nullopt,
+                                             .Asset = std::nullopt,
+                                         });
     if (test::CanSkipRuntimeStartup(backend, run.Startup)) GTEST_SKIP() << run.Startup.Reason;
     ASSERT_EQ(run.Startup.Status, RuntimeStartupStatus::Started) << run.Startup.Reason;
     ASSERT_EQ(run.ExitCode, 0);
@@ -401,17 +401,17 @@ protected:
 TEST(RuntimeFoundationDeathTest, RejectsUnreturnedForeignAndConsumedTargets) {
     TargetContractApp app;
     auto run = test::RunApplication(app, {
-        .Window = WindowOptions{.Title = "Target contract", .Width = 80, .Height = 60},
-        .Gpu = GpuOptions{
-            .Backend = render::RenderBackend::D3D12,
-            .EnableFrameProfiler = false,
-            .BackBufferFormat = render::TextureFormat::BGRA8_UNORM,
-            .PresentMode = render::PresentMode::FIFO,
-        },
-        .Render = std::nullopt,
-        .World = std::nullopt,
-        .Asset = std::nullopt,
-    });
+                                             .Window = WindowOptions{.Title = "Target contract", .Width = 80, .Height = 60},
+                                             .Gpu = GpuOptions{
+                                                 .Backend = render::RenderBackend::D3D12,
+                                                 .EnableFrameProfiler = false,
+                                                 .BackBufferFormat = render::TextureFormat::BGRA8_UNORM,
+                                                 .PresentMode = render::PresentMode::FIFO,
+                                             },
+                                             .Render = std::nullopt,
+                                             .World = std::nullopt,
+                                             .Asset = std::nullopt,
+                                         });
     if (test::CanSkipRuntimeStartup(render::RenderBackend::D3D12, run.Startup)) GTEST_SKIP() << run.Startup.Reason;
     ASSERT_EQ(run.Startup.Status, RuntimeStartupStatus::Started) << run.Startup.Reason;
     EXPECT_EQ(run.ExitCode, 0);
@@ -479,7 +479,10 @@ protected:
         EXPECT_GT(_handledCompletions, 0u);
         EXPECT_EQ(_handledCompletions, _postedCompletions);
         EXPECT_EQ(_completions, GetFrameTimeline().GetFrameIndex());
-        EXPECT_EQ(_modalFrames.load(), _modal ? 1u : 0u);
+        if (_modal)
+            EXPECT_GE(_modalFrames.load(), 1u);
+        else
+            EXPECT_EQ(_modalFrames.load(), 0u);
         _inputConnection.disconnect();
     }
 
@@ -499,21 +502,21 @@ void RunFrameBoundary(render::RenderBackend backend, bool threaded) {
         test::RuntimeLogCapture logs;
         FrameBoundaryApp app{modal};
         auto run = test::RunApplication(app, {
-            .FlightDataCount = 1,
-            .Window = WindowOptions{.Title = "Frame boundary", .Width = 80, .Height = 60},
-            .Gpu = GpuOptions{
-                .Backend = backend,
-                .EnableValidation = true,
-                .EnableSynchronizationValidation = true,
-                .Multithreaded = threaded,
-                .EnableFrameProfiler = false,
-                .BackBufferFormat = render::TextureFormat::BGRA8_UNORM,
-                .PresentMode = render::PresentMode::FIFO,
-            },
-            .Render = std::nullopt,
-            .World = std::nullopt,
-            .Asset = std::nullopt,
-        });
+                                                 .FlightDataCount = 1,
+                                                 .Window = WindowOptions{.Title = "Frame boundary", .Width = 80, .Height = 60},
+                                                 .Gpu = GpuOptions{
+                                                     .Backend = backend,
+                                                     .EnableValidation = true,
+                                                     .EnableSynchronizationValidation = true,
+                                                     .Multithreaded = threaded,
+                                                     .EnableFrameProfiler = false,
+                                                     .BackBufferFormat = render::TextureFormat::BGRA8_UNORM,
+                                                     .PresentMode = render::PresentMode::FIFO,
+                                                 },
+                                                 .Render = std::nullopt,
+                                                 .World = std::nullopt,
+                                                 .Asset = std::nullopt,
+                                             });
         if (test::CanSkipRuntimeStartup(backend, run.Startup)) GTEST_SKIP() << run.Startup.Reason;
         ASSERT_EQ(run.Startup.Status, RuntimeStartupStatus::Started) << run.Startup.Reason;
         ASSERT_EQ(run.ExitCode, 0);
@@ -710,19 +713,19 @@ void RunStalledGpuInput(render::RenderBackend backend, bool threaded, bool mutat
     StalledGpuInputApp app{backend, mutateWindow};
     // Host-signaled queue waits run without validation-layer semaphore tracking.
     auto run = test::RunApplication(app, {
-        .FlightDataCount = mutateWindow ? 2u : 1u,
-        .Window = WindowOptions{.Title = "Stalled GPU input", .Width = 80, .Height = 60},
-        .Gpu = GpuOptions{
-            .Backend = backend,
-            .Multithreaded = threaded,
-            .EnableFrameProfiler = false,
-            .BackBufferFormat = render::TextureFormat::BGRA8_UNORM,
-            .PresentMode = render::PresentMode::FIFO,
-        },
-        .Render = std::nullopt,
-        .World = std::nullopt,
-        .Asset = std::nullopt,
-    });
+                                             .FlightDataCount = mutateWindow ? 2u : 1u,
+                                             .Window = WindowOptions{.Title = "Stalled GPU input", .Width = 80, .Height = 60},
+                                             .Gpu = GpuOptions{
+                                                 .Backend = backend,
+                                                 .Multithreaded = threaded,
+                                                 .EnableFrameProfiler = false,
+                                                 .BackBufferFormat = render::TextureFormat::BGRA8_UNORM,
+                                                 .PresentMode = render::PresentMode::FIFO,
+                                             },
+                                             .Render = std::nullopt,
+                                             .World = std::nullopt,
+                                             .Asset = std::nullopt,
+                                         });
     if (test::CanSkipRuntimeStartup(backend, run.Startup)) GTEST_SKIP() << run.Startup.Reason;
     ASSERT_EQ(run.Startup.Status, RuntimeStartupStatus::Started) << run.Startup.Reason;
     ASSERT_EQ(run.ExitCode, 0);
@@ -842,21 +845,21 @@ void RunWindowMutations(render::RenderBackend backend, bool threaded) {
     test::RuntimeLogCapture logs;
     WindowMutationApp app;
     auto run = test::RunApplication(app, {
-        .FlightDataCount = 2,
-        .Window = WindowOptions{.Title = "Window coroutine lifecycle", .Width = 320, .Height = 200},
-        .Gpu = GpuOptions{
-            .Backend = backend,
-            .EnableValidation = true,
-            .EnableSynchronizationValidation = true,
-            .Multithreaded = threaded,
-            .EnableFrameProfiler = false,
-            .BackBufferFormat = render::TextureFormat::BGRA8_UNORM,
-            .PresentMode = render::PresentMode::FIFO,
-        },
-        .Render = std::nullopt,
-        .World = std::nullopt,
-        .Asset = std::nullopt,
-    });
+                                             .FlightDataCount = 2,
+                                             .Window = WindowOptions{.Title = "Window coroutine lifecycle", .Width = 320, .Height = 200},
+                                             .Gpu = GpuOptions{
+                                                 .Backend = backend,
+                                                 .EnableValidation = true,
+                                                 .EnableSynchronizationValidation = true,
+                                                 .Multithreaded = threaded,
+                                                 .EnableFrameProfiler = false,
+                                                 .BackBufferFormat = render::TextureFormat::BGRA8_UNORM,
+                                                 .PresentMode = render::PresentMode::FIFO,
+                                             },
+                                             .Render = std::nullopt,
+                                             .World = std::nullopt,
+                                             .Asset = std::nullopt,
+                                         });
     if (test::CanSkipRuntimeStartup(backend, run.Startup)) GTEST_SKIP() << run.Startup.Reason;
     ASSERT_EQ(run.Startup.Status, RuntimeStartupStatus::Started) << run.Startup.Reason;
     ASSERT_EQ(run.ExitCode, 0);

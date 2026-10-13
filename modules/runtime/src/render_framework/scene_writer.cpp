@@ -1,9 +1,22 @@
 #include <radray/runtime/render_framework/scene_writer.h>
 
 #include <radray/profiler.h>
+#include <algorithm>
+#include <bit>
 #include <cstdlib>
+#include <radray/hash.h>
+#include <cstring>
 
 namespace radray {
+namespace {
+template <class T>
+void ReserveAppend(vector<T>& values, size_t additions) {
+    if (additions <= values.capacity() - values.size()) return;
+    if (additions > values.max_size() - values.size()) RADRAY_ABORT("Scene pending capacity exhausted");
+    const auto growth = values.capacity() + std::min(values.capacity(), values.max_size() - values.capacity());
+    values.reserve(std::max(values.size() + additions, growth));
+}
+}  // namespace
 
 SceneWriter::SceneWriter(SceneId id, uint32_t flightCount) : _id(id), _assets(flightCount) {}
 SceneWriter::~SceneWriter() noexcept = default;
@@ -83,6 +96,10 @@ ShapeId SceneWriter::CreateShape() {
 
 void SceneWriter::RemoveShape(ShapeId id) {
     auto& state = GetShape(id);
+    if (_captured) EnableEditing();
+    RemoveShapeState(id, state);
+}
+void SceneWriter::RemoveShapeState(ShapeId id, ShapeState& state) {
     if (state.DrawUpdateIndex != kNotQueued) {
         const auto index = state.DrawUpdateIndex;
         if (index + 1 != _pending.DrawStates.size()) {
@@ -92,17 +109,21 @@ void SceneWriter::RemoveShape(ShapeId id) {
         _pending.DrawStates.pop_back();
     }
     while (!state.ParameterUpdateIndices.empty()) {
-        auto it = state.ParameterUpdateIndices.begin(); const auto index = it->second;
+        const auto index = state.ParameterUpdateIndices.back().Index;
+        ReclaimParameter(_pending.Parameters[index]);
         if (index + 1 != _pending.Parameters.size()) {
             _pending.Parameters[index] = std::move(_pending.Parameters.back());
             auto& moved = _pending.Parameters[index];
-            GetShape(moved.Id).ParameterUpdateIndices[moved.Layout.Name] = index;
+            auto& indices = GetShape(moved.Id).ParameterUpdateIndices;
+            const auto found = std::find_if(indices.begin(), indices.end(), [&](const auto& value) { return value.Layout == moved.Layout.get(); });
+            found->Index = index;
         }
-        _pending.Parameters.pop_back(); state.ParameterUpdateIndices.erase(it);
+        _pending.Parameters.pop_back();
+        state.ParameterUpdateIndices.pop_back();
     }
     if (state.Sent) _pending.RemoveShapes.push_back(id);
     if (state.BoundAsset) _assets.RemoveUse(*state.BoundAsset);
-    for (auto id : state.BoundMaterials) _assets.RemoveUse(id);
+    ReleaseMaterials(state);
     if (state.MaterialUpdateIndex != kNotQueued) {
         const auto index = state.MaterialUpdateIndex;
         if (index + 1 != _pending.Materials.size()) {
@@ -111,7 +132,6 @@ void SceneWriter::RemoveShape(ShapeId id) {
         }
         _pending.Materials.pop_back();
     }
-    if (_captured) EnableEditing();
     if (_editing) {
         auto& edit = GetEdit(id);
         CancelCreate(edit);
@@ -137,10 +157,15 @@ void SceneWriter::WriteStaticMesh(ShapeId id, ShapeState& state, const Streaming
     next.MeshAssetId = mesh.GetAssetId();
     if (auto asset = mesh.Get(); asset && asset->IsValid()) {
         next.RenderData = &asset->GetRenderData();
-        _assets.AddUse(mesh.AsAny());
     }
-    if (state.BoundAsset) _assets.RemoveUse(*state.BoundAsset);
+    if (state.BoundAsset != (next.RenderData ? std::optional{next.MeshAssetId} : std::nullopt)) {
+        if (next.RenderData) _assets.AddUse(mesh.AsAny());
+        if (state.BoundAsset) _assets.RemoveUse(*state.BoundAsset);
+    }
     state.BoundAsset = next.RenderData ? std::optional{next.MeshAssetId} : std::nullopt;
+    WriteMeshState(id, state, next, localToWorld, transform);
+}
+void SceneWriter::WriteMeshState(ShapeId id, ShapeState& state, StaticMeshDescription next, const AffineTransform& localToWorld, TransformId transform) {
     if (_editing) {
         auto& edit = GetEdit(id);
         if (!edit.PendingMesh) CancelUpdate(_pending.Transforms, edit);
@@ -157,29 +182,141 @@ void SceneWriter::WriteStaticMesh(ShapeId id, ShapeState& state, const Streaming
     state.HasMesh = true;
 }
 
-void SceneWriter::SetMaterials(ShapeId id, std::span<const StreamingAssetRef<Material>> materials) {
-    auto& state = GetShape(id);
-    if (!state.HasMesh) RADRAY_ABORT("materials require a static mesh state");
-    ShapeMaterialUpdate update{id, {}};
-    vector<AssetId> owners;
-    update.Materials.reserve(materials.size());
-    for (const auto& material : materials) {
-        auto asset = material.Get();
-        MaterialBinding binding{material.GetAssetId(), nullptr};
-        if (asset && asset->IsValid()) {
-            _assets.AddUse(material.AsAny());
-            owners.push_back(binding.Id);
-            binding.Data = &asset->GetRenderData();
-        }
-        update.Materials.push_back(binding);
+void SceneWriter::SetStaticMeshes(std::span<const ShapeId> ids, const StreamingAssetRef<StaticMesh>& mesh, std::span<const Eigen::Matrix4f> transforms) {
+    EnableEditing();
+    GatherStaticMeshes(ids, mesh, transforms);
+}
+void SceneWriter::GatherStaticMeshes(std::span<const ShapeId> ids, const StreamingAssetRef<StaticMesh>& mesh, std::span<const Eigen::Matrix4f> transforms) {
+    if (ids.size() != transforms.size()) RADRAY_ABORT("Batch mesh transforms require one matrix per shape");
+    StaticMeshDescription next{mesh.GetAssetId(), nullptr};
+    const auto asset = mesh.Get();
+    if (asset && asset->IsValid()) next.RenderData = &asset->GetRenderData();
+    const auto bound = next.RenderData ? std::optional{next.MeshAssetId} : std::nullopt;
+    size_t additions = 0;
+    for (auto id : ids) {
+        auto& state = GetShape(id);
+        if (state.BoundAsset == bound) continue;
+        if (state.BoundAsset) _assets.RemoveUse(*state.BoundAsset);
+        state.BoundAsset = bound;
+        ++additions;
     }
-    for (auto owner : state.BoundMaterials) _assets.RemoveUse(owner);
-    state.BoundMaterials = std::move(owners);
-    if (state.MaterialUpdateIndex == kNotQueued) {
-        state.MaterialUpdateIndex = _pending.Materials.size();
-        _pending.Materials.push_back(std::move(update));
-    } else
-        _pending.Materials[state.MaterialUpdateIndex] = std::move(update);
+    if (next.RenderData) _assets.AddUses(mesh.AsAny(), additions);
+    ReserveAppend(_pending.MeshStates, ids.size());
+    for (size_t i = 0; i < ids.size(); ++i) {
+        auto& state = GetShape(ids[i]);
+        QueueCreate(ids[i], state);
+        WriteMeshState(ids[i], state, next, AffineTransform{transforms[i]}, {});
+    }
+}
+
+void SceneWriter::ReleaseMaterials(ShapeState& state) {
+    auto use = state.BoundMaterials;
+    state.BoundMaterials = nullptr;
+    if (!use || --use->Count) return;
+    for (const auto& binding : use->Bindings)
+        if (binding.Data) _assets.RemoveUse(binding.Id);
+    auto it = _materialBindings.find(use->Hash);
+    std::erase_if(it->second, [&](const auto& entry) { return entry.get() == use.Get(); });
+    if (it->second.empty()) _materialBindings.erase(it);
+}
+void SceneWriter::SetMaterials(ShapeId id, std::span<const StreamingAssetRef<Material>> materials) {
+    SetMaterials(std::span{&id, 1}, materials);
+}
+void SceneWriter::SetMaterials(std::span<const ShapeId> ids, std::span<const StreamingAssetRef<Material>> materials) {
+    if (ids.empty()) return;
+    const auto bindingAt = [&](size_t index) {
+        const auto& reference = materials[index];
+        const auto asset = reference.Get();
+        const bool ready = asset && asset->IsValid();
+        return MaterialBinding{reference.GetAssetId(), ready ? &asset->GetRenderData() : nullptr, ready ? &asset->GetGpuState() : nullptr};
+    };
+    const auto same = [&](const MaterialBindings& bindings) {
+        if (bindings.size() != materials.size()) return false;
+        for (size_t i = 0; i < materials.size(); ++i)
+            if (bindings[i] != bindingAt(i)) return false;
+        return true;
+    };
+    bool unchanged = true;
+    for (auto id : ids) {
+        auto& state = GetShape(id);
+        if (!state.HasMesh) RADRAY_ABORT("materials require a static mesh state");
+        unchanged &= state.BoundMaterials && same(state.BoundMaterials->Bindings);
+    }
+    if (unchanged) return;
+    HashCode hash;
+    for (size_t i = 0; i < materials.size(); ++i) {
+        const auto binding = bindingAt(i);
+        hash.Add(binding.Id);
+        hash.Add(binding.Data.Get());
+        hash.Add(binding.Gpu.Get());
+    }
+    const auto code = hash.ToHashCode();
+    auto& bucket = _materialBindings[code];
+    Nullable<MaterialUse*> use{nullptr};
+    for (const auto& entry : bucket)
+        if (same(entry->Bindings)) {
+            use = entry.get();
+            break;
+        }
+    if (!use) {
+        vector<MaterialBinding> bindings;
+        bindings.reserve(materials.size());
+        for (size_t i = 0; i < materials.size(); ++i) {
+            const auto binding = bindingAt(i);
+            if (binding.Data) _assets.AddUse(materials[i].AsAny());
+            bindings.push_back(binding);
+        }
+        auto created = make_unique<MaterialUse>();
+        created->Bindings = MaterialBindings{std::move(bindings)};
+        created->Hash = code;
+        use = created.get();
+        bucket.push_back(std::move(created));
+    }
+    // Protect the destination while old groups are released, including equal hash buckets.
+    use->Count += ids.size();
+    ReserveAppend(_pending.Materials, ids.size());
+    for (auto id : ids) {
+        auto& state = GetShape(id);
+        ReleaseMaterials(state);
+        state.BoundMaterials = use;
+        ShapeMaterialUpdate update{id, use->Bindings};
+        if (state.MaterialUpdateIndex == kNotQueued) {
+            state.MaterialUpdateIndex = _pending.Materials.size();
+            _pending.Materials.push_back(std::move(update));
+        } else
+            _pending.Materials[state.MaterialUpdateIndex] = std::move(update);
+    }
+}
+bool SceneWriter::CreateShapes(std::span<ShapeId> result) {
+    if (_closing || result.size() > UINT32_MAX - _shapes.Count()) return false;
+    const auto capacity = std::min(std::bit_ceil(uint64_t{_shapes.Count()} + result.size()), uint64_t{UINT32_MAX});
+    _shapes.Reserve(static_cast<uint32_t>(capacity));
+    ReserveAppend(_pending.CreateShapes, result.size());
+    if (!_claimed) EnableEditing();
+    for (auto& id : result) {
+        const auto handle = _shapes.Emplace();
+        id = {handle.Index, handle.Generation};
+        if (!_claimed) {
+            GetEdit(id).CreateIndex = _pending.CreateShapes.size();
+            _pending.CreateShapes.push_back(id);
+        }
+    }
+    return true;
+}
+void SceneWriter::RemoveShapes(std::span<const ShapeId> ids) {
+    if (ids.empty()) return;
+    if (_captured) EnableEditing();
+    ReserveAppend(_pending.RemoveShapes, ids.size());
+    for (auto id : ids) RemoveShapeState(id, GetShape(id));
+}
+void SceneWriter::SetTransforms(std::span<const ShapeTransformUpdate> values) {
+    if (values.empty()) return;
+    EnableEditing();
+    GatherTransforms(values);
+}
+void SceneWriter::GatherTransforms(std::span<const ShapeTransformUpdate> values) {
+    ReserveAppend(_pending.Transforms, values.size());
+    for (const auto& value : values) WriteTransform(value.Id, GetShape(value.Id), value.LocalToWorld);
 }
 
 void SceneWriter::SetTransform(ShapeId id, const Eigen::Matrix4f& localToWorld) {
@@ -188,22 +325,72 @@ void SceneWriter::SetTransform(ShapeId id, const Eigen::Matrix4f& localToWorld) 
     WriteTransform(id, state, localToWorld);
 }
 
+void SceneWriter::ReclaimParameter(const ShapeParameterUpdate& update) {
+    auto& payload = _parameterPayloads.at(update.Layout.get());
+    if (size_t{update.Offset} + update.Layout->Stride == payload.Bytes->size())
+        payload.Bytes->resize(update.Offset);
+    else
+        payload.Free.push_back(update.Offset);
+}
 bool SceneWriter::SetInstanceParameters(ShapeId id, const InstanceParameterLayout& layout, std::span<const byte> values) {
-    auto& state = GetShape(id);
-    if (!state.HasMesh || !layout.IsValid() || values.size() != layout.Stride) return false;
-    ShapeParameterUpdate update{id, layout, vector<byte>{values.begin(), values.end()}};
-    const auto found = state.ParameterUpdateIndices.find(layout.Name);
-    if (found == state.ParameterUpdateIndices.end()) {
-        state.ParameterUpdateIndices.emplace(layout.Name, _pending.Parameters.size());
-        _pending.Parameters.push_back(std::move(update));
-    } else _pending.Parameters[found->second] = std::move(update);
+    return SetInstanceParameters(std::span{&id, 1}, layout, values);
+}
+bool SceneWriter::SetInstanceParameters(std::span<const ShapeId> ids, const InstanceParameterLayout& layout, std::span<const byte> values) {
+    if (!layout.IsValid() || ids.size() > UINT32_MAX / layout.Stride || values.size() != ids.size() * layout.Stride) return false;
+    for (auto id : ids)
+        if (!GetShape(id).HasMesh) return false;
+    auto [it, inserted] = _parameterSchemas.try_emplace(layout.Name);
+    if (inserted)
+        it->second = make_shared<const InstanceParameterLayout>(layout);
+    else if (*it->second != layout)
+        return false;
+    const auto schema = it->second;
+    auto& payload = _parameterPayloads[schema.get()];
+    if (!payload.Bytes) payload.Bytes = make_shared<vector<byte>>();
+    if (values.size() > UINT32_MAX - payload.Bytes->size()) return false;
+    ReserveAppend(*payload.Bytes, values.size());
+    ReserveAppend(_pending.Parameters, ids.size());
+    size_t source = 0;
+    for (auto id : ids) {
+        auto& indices = GetShape(id).ParameterUpdateIndices;
+        const auto found = std::find_if(indices.begin(), indices.end(), [&](const auto& value) { return value.Layout == schema.get(); });
+        uint32_t offset;
+        if (found == indices.end()) {
+            if (payload.Free.empty()) {
+                offset = static_cast<uint32_t>(payload.Bytes->size());
+                payload.Bytes->resize(size_t{offset} + layout.Stride);
+            } else {
+                offset = payload.Free.back();
+                payload.Free.pop_back();
+            }
+            indices.push_back({schema.get(), _pending.Parameters.size()});
+            _pending.Parameters.emplace_back(id, schema, payload.Bytes, offset);
+        } else
+            offset = _pending.Parameters[found->Index].Offset;
+        std::memcpy(payload.Bytes->data() + offset, values.data() + source, layout.Stride);
+        source += layout.Stride;
+    }
     return true;
 }
+
 void SceneWriter::SetDrawState(ShapeId id, ShapeDrawState value) {
-    auto& state = GetShape(id);
+    WriteDrawState({id, value});
+}
+uint64_t SceneWriter::CreateBatchDomain() {
+    if (_closing || _nextBatchDomain == UINT64_MAX) RADRAY_ABORT("Scene batch domain exhausted");
+    return _nextBatchDomain++;
+}
+void SceneWriter::SetDrawStates(std::span<const ShapeDrawUpdate> values) {
+    ReserveAppend(_pending.DrawStates, values.size());
+    for (const auto& value : values) WriteDrawState(value);
+}
+void SceneWriter::WriteDrawState(const ShapeDrawUpdate& update) {
+    auto& state = GetShape(update.Id);
     if (state.DrawUpdateIndex == kNotQueued) {
-        state.DrawUpdateIndex = _pending.DrawStates.size(); _pending.DrawStates.push_back({id, value});
-    } else _pending.DrawStates[state.DrawUpdateIndex] = {id, value};
+        state.DrawUpdateIndex = _pending.DrawStates.size();
+        _pending.DrawStates.push_back(update);
+    } else
+        _pending.DrawStates[state.DrawUpdateIndex] = update;
 }
 
 void SceneWriter::WriteTransform(ShapeId id, ShapeState& state, const AffineTransform& localToWorld) {
@@ -306,6 +493,7 @@ void SceneWriter::Flush(SceneUpdateBatch& batch, uint32_t flightIndex) {
     _captured = false;
     if (_pending.LightsChanged) _pending.Lights.Assign(_lights);
     std::swap(batch, _pending);
+    _parameterPayloads.clear();
     _assets.SealRetirements(flightIndex);
     RADRAY_PROFILE_PLOT("SceneTransforms", static_cast<int64_t>(batch.Transforms.size()));
     RADRAY_PROFILE_PLOT("SceneMeshStates", static_cast<int64_t>(batch.MeshStates.size()));

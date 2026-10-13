@@ -62,6 +62,7 @@ public:
     const unordered_map<string, SceneParameterStream>& GetParameterStreams() const noexcept { return _parameters; }
     std::optional<ShapeDrawRevision> GetDrawRevision(ShapeId id) const noexcept;
     std::optional<ShapeDrawState> GetDrawState(ShapeId id) const noexcept;
+    uint64_t GetStructureRevision() const noexcept { return _structureRevision; }
 
 private:
     static constexpr uint32_t kNoMesh = std::numeric_limits<uint32_t>::max();
@@ -87,6 +88,7 @@ private:
     StaticMeshTable _staticMeshes;
     LightSceneData _lights;
     unordered_map<string, SceneParameterStream> _parameters;
+    uint64_t _structureRevision{0};
     mutable std::mutex _readers;
     mutable std::condition_variable _readersDone;
     mutable size_t _activeReaders{0};

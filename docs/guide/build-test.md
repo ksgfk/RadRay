@@ -120,7 +120,7 @@ GT/RT 分别发出 warmup complete 消息，`Stress/Warmup` plot 为 0 的渲染
 | `world` | 创建并更新对象，但 World 不连接 renderer；仍运行相同 GPU runner 和空场景交付，作为无场景连接的参照 |
 | `sync` | 再连接 World，捕获视图并交付/应用 CPU RenderScene 更新，不准备对象 GPU buffer |
 | `upload` | 在 sync 上调用 `PrepareSceneGpuRT`，录制和提交对象参数上传，不发出 geometry draw |
-| `draw` | 在 upload 上执行完整无光照逐对象绘制；每视图每对象一次 indexed draw，仍无深度测试和剔除 |
+| `draw` | 通过 UnlitRenderPipeline/SceneDraw 剔除、合批并录制无光照绘制；负缩放按 winding 拆批，无深度测试。`--legacy-draw` 使用原逐对象 indexed draw 路径 |
 
 | `--workload` | 每帧负载 |
 |---|---|
@@ -159,8 +159,10 @@ RT 看 `SceneManager::ConsumeRenderUpdates` / `RenderScene::Apply`、`Stress::Pr
 `PrepareFrame`、`WaitWritableSlot`、`WaitReadySlot`、`GpuSystem::WaitFlightFence` 是帧准备或等待区域，
 应展开查看，不能将整个等待时间归因于框架执行成本。
 
-`Stress/Objects`、`Stress/ObjectUploadBytes`、`Stress/DrawCalls` 分别表示配置对象数、当次对象准备的实际 host
-写入字节和配置要求的 draw 数；上传统计不包含 ViewProjection 常量。多个视图共享对象 buffer，物理 flight
+`Stress/Objects` 表示配置对象数。upload 与 `--legacy-draw` 路径的 `Stress/ObjectUploadBytes`、`Stress/DrawCalls`
+分别表示当次对象准备的实际 host 写入字节和配置要求的逐对象 draw 数；上传统计不包含 ViewProjection 常量。
+默认 draw 路径使用 `SceneDraw::CullAndSelect`、`BuildBatches`、`PrepareBindings`、`Draw` zones 和 `SceneGpu/UploadObjects` 观察。
+多个视图共享对象 buffer，物理 flight
 则分别追赶自上次使用以来的变化，因此每帧上传对象数不必等于本次 GT changes。静止负载在各 flight 初始化后应为零上传。
 GT 的 `Stress/LastCompletedFrameLatencyMs` 和 `Stress/LastResolvedGpuMs` 分别记录最近完成帧的延迟及最近 resolve 的
 GPU 时间（毫秒），不是当前 GT 帧的即时耗时；关闭 GPU profiler 时不输出后者。
@@ -487,8 +489,8 @@ SceneGpuLifetime 用延迟主队列 fence 验证 Scene 删除的退休覆盖；h
 
 ```powershell
 cmake -S . -B build_debug -DRADRAY_BUILD_EXAMPLES=ON
-cmake --build build_debug --target example_scene_sync radray_runtime_tests --parallel 12
-ctest --test-dir build_debug/modules/runtime/tests --output-on-failure
+cmake --build build_debug --config Debug --target example_scene_sync test_radray_runtime --parallel 12
+ctest --test-dir build_debug -C Debug --output-on-failure
 build_debug/_build/Debug/example_scene_sync.exe --vulkan --flights=3 --views=3 --instances=1000
 ```
 
@@ -502,13 +504,12 @@ build_debug/_build/Debug/example_scene_sync.exe --vulkan --flights=3 --views=3 -
 `SceneGpuData::Prepare` 下的 `ResourceUploader::TryUploadBufferRanges` 分为
 `ResourceUploader::StageBufferRanges`（staging 预留、拷贝与 barrier 收集）和
 `ResourceUploader::RecordBufferCopies`（逐范围 copy 命令录制）。GPU debug groups
-`ObjectUploadsGPU` 与 `SceneSyncDrawGPU` 分别覆盖上传命令及窗口 render pass；
-它们由后端 Tracy GPU 时间戳消费。`SceneSync/LastResolvedGpuMs` 是最近一次 flight 完成后
+GPU 时间使用后端帧时间戳。`SceneSync/LastResolvedGpuMs` 是最近一次 flight 完成后
 解析的 GPU 帧时间，双线程下可能重复读取同一个值，不能与当前 CPU 帧逐项配对。
 `SceneGpu/UploadObjects`、`SceneGpu/UploadRanges` 报告本次物理 flight buffer 的上传量；
 同一 Scene 同帧多视图复用已准备的 buffer，不重复发出这两项采样。
 默认每帧移动父节点，约三分之一对象跟随；对象槽位每隔三个分布，可能产生大量小上传范围。
-`--instances` 控制对象数量，当前每视图每对象一次 indexed draw。
+`--instances` 控制对象数量；当前通过 VisibleSlots 自动实例化，按可见性、section 和 winding 分批。
 
 `bench_scene_gpu` 是独立 Google Benchmark 目标，不依赖 JIT。固定 10k mesh 参数条目，变化量为 0/1/100/10000，
 稀疏修改按均匀步长分布到槽位，100 个变化对应 100 个不相邻范围；全量变化合并为一个范围。
@@ -604,4 +605,25 @@ python tools/win_gen_compile_commands.py --build-dir build_clangcl --configurati
 默认输出 `.vscode/compile_commands.json`。IDE 设置见 [开发环境](dev-env.md)。
 文档或技能修改运行 `python tools/check_docs.py` 与 `git diff --check`，详见[文档维护](documentation.md)。
 
-`bench_raster_prepare` 分别测纯 CPU graph 构造/编译、double bounds 与通用 primitive/group 排序；它不创建 command 或提交 GPU。使用 Release target、`--benchmark_min_time=0.05s --benchmark_repetitions=3 --benchmark_out=results.json --benchmark_out_format=json` 保存结果。Scene 的同步、PrepareAndRecord 与 SubmitFrame 分解沿用 `bench_scene_gpu`；`changed:0/1` 与多个 view 可分别观察 warm 零上传和单对象更新。shader/材质 draw、Present、游戏 producer 成本必须另由实际应用 fixture 测量，不能用这些微基准冒充整帧成本。
+`bench_raster_prepare` 分别测纯 CPU graph 构造/编译、double bounds 与通用 primitive/group 排序；它不创建 command 或提交 GPU。使用 Release target、`--benchmark_min_time=0.05s --benchmark_repetitions=3 --benchmark_out=results.json --benchmark_out_format=json` 保存结果。Scene 的同步、PrepareAndRecord 与 SubmitFrame 分解沿用 `bench_scene_gpu`；`changed:0/1` 与多个 view 可分别观察 warm 零上传和单对象更新。
+
+## 真实材质和实例化压测
+
+开启 RADRAY_BUILD_BENCHMARKS、RADRAY_ENABLE_SHADER_JIT 与 RADRAY_ENABLE_PROFILER，构建后串行运行：
+
+```powershell
+cmake --build build_release --config Release --target bench_material_scene --parallel
+python tools/run_material_scene_benchmark.py --exe build_release/_build/Release/bench_material_scene.exe --output build_release/perf/final --tracy F:/program/tracy
+```
+
+脚本固定三次重复、0.1s 最小计时，保存 Google Benchmark JSON、Tracy 原始 trace 和 CPU zones CSV。
+默认矩阵覆盖两个后端 N=1k/10k/100k、M=1/100、V=1/3、dirty=0/1%，--filter 可以补独立材质、密集 dirty、Direct/Manual/ManualTint 与 churn。
+变换与参数压力固定更新所选实例，并交替写入不同值，保持长采样中的实际脏比例；Manual/ManualTint 使用一个共享材质的显式集合。
+每个 fixture 先预热八帧；PrepareRecord 排除 GT/Apply/等待/Submit，包含 SceneGpu、SceneDraw 准备和真实 record；
+FullFrame 包含各阶段及 flight 等待，256×256 离屏 GPU 时间另用 timestamp 统计。GPU/CPU 时间不能相加为 FPS。
+Tracy trace 包含初始化，统计时使用 warmup complete message 排除预热事件；不使用整段 capture 平均值替代稳态。
+三种 churn 分别发生在 capture 前、capture 后未 Seal、Seal 后；UniqueAssetChurn 每轮新建 mesh/material，不能与静态独立材质分布混同。
+独立材质压力受后端 descriptor 容量约束；D3D12 默认 shader-visible resource heap 为 65,536 个，
+benchmark 初始化前检查所需容量，超预算样例报告不支持，不输出成功计时。
+用 --memory-case 保存独立进程 working set/private bytes 曲线；它是进程内存观测，不等于原生显存或 descriptor pool 字节。
+程序、测试与其他 GPU 负载串行运行。实例用法和本轮验收见[实例绘制](instancing.md)与[性能报告](../temp/material-instancing-performance-2026-10-13.md)。

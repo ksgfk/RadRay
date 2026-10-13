@@ -173,7 +173,7 @@ World/WorldManager 负责游戏侧 Collect 禁令，SceneManager 维护自身收
 PrimitiveComponent 的 final 入口负责 ShapeId 创建/注销，CollectPrimitiveUpdates 接收 ShapeCapture，
 只输出自身最终的 mesh 状态或 transform（至多一条，也可以不输出以保留 bare shape）。
 一般 RenderComponent 接收 SceneCapture，可以登记和捕获多个 ShapeId/LightId；一个身份在同轮 Collect 中
-由其来源捕获一次。捕获接口不提供创建/删除身份或修改 World 的操作。
+由其来源捕获一次。SceneCapture 可为当前来源批量创建/移除 Shape；只登记当前来源拥有的身份，不提供修改 World 的操作。
 LightComponent 捕获类型化光源值，使用独立的 LightId。ShapeId、LightId、TransformId 是不可隐式互转的强类型，
 均包含 Index/Generation，只在所属 SceneId 内有效；三种独立身份池允许使用相同数值的槽位与代次。
 
@@ -340,15 +340,26 @@ GpuFrameResources 由 GpuSystem 按 flight 持有，提供通用常量与参数�
 `StaticMeshSection::MaterialSlot` 索引组件材质列表。`SetMaterials` 经独立 `ShapeMaterialUpdate` 交付，
 不携带矩阵；transform-only 不复制材质列表，material-only 不触发对象 GPU 矩阵上传。
 SceneWriter 为 Ready 材质登记资产 use，替换、删除和断连沿原 RenderAssetLifetime 按真实 flight 完成退休，
-RT 只读不可变数据。组件等待未完成材质，完成时核验当前 Scene/Shape generation 和绑定再标记 DynamicData。
+RT 只读不可变数据。组件等待未完成材质，完成时核验当前 Scene/Shape generation 和绑定，置 materials dirty 后再标记 DynamicData。
 材质拥有其纹理依赖，不能因 GT 提前释放引用而使在途 draw 悬空。
 
 `RasterDraw::ResolveMaterial` 在冷路径解析 program 的绑定结构，支持 SceneObjects、任意长度 View/Frame/Material 常量、texture 与 sampler
 处于不同或混合 physical groups。所有 active 非 immutable bindings 必须由契约覆盖。数组按 ValueIndex 连续取值。
-准备阶段核对反射的常量长度，填满整组，并分配当前 flight 内独立 parameter set 和满足设备对齐的常量切片；不会覆盖此前引用的值。
+准备阶段核对反射的常量长度并填满实际 group。冷路径按输入来源分类，组号不表示生命周期。
+Material 拥有 `MaterialGpuState`；独立 producer 通过 `MaterialBindingView` 显式借用不可变 CPU 数据及其 GPU owner。
+纯材质常量、默认纹理与默认 sampler 组持久准备一次，后续不 Set/FlushWrites。默认常量从 RenderSystem 的
+`PersistentCBufferArena` 分配对齐、只初始化一次的 host-visible 页切片，并立即 flush，不依赖帧 copy 的执行。
+allocation owner 随材质按 RenderAssetLifetime 的真实完成边界释放；同页回收与 RT 分配用页锁同步。
+arena 在 RT Prepare/Allocate 时释放没有 allocation owner 的页，保留至多一页 64 KiB 的闲置容量；live allocation 不移动。
+场景/视图/帧组及混合生命周期组使用 flight 版本；混合组引用持久常量。override 只使受影响组准备临时版本，不改默认缓存。
+同一次 SceneDraw Prepare 中，纯场景/视图/帧 buffer 组按共享 plan 与实际 buffer 切片复用；混合材质组不参与此复用。
+每个 view 的矩阵只复制一次。GPU state 按 CPU pass 地址区分 pass/layout，同一不可变 pass 的 program 变化要求新的材质版本。
 RasterMaterialValues 可提供 ConstantBuffers/ViewBuffers/FrameBuffers 覆盖对应 CPU bytes；这些已提交切片须满足反射大小并存活至当前 flight 完成。调用方可复用相同 view/style 的 arena 切片，避免每 draw 重复常量 copy，不另建上传 cache。
-纯 sampler group 按 plan 和完整 sampler 描述缓存，其余组按 flight 复用；同一 physical group 可混合不同逻辑来源。
-常量页和参数集在安全 flight reset 后复用，固定负载容量收敛。参数集借用 program layout，缓存随 GPU idle 后拆除。
+RasterDraw 不再拥有 sampler 参数集长期缓存；Device 的 sampler 对象复用保留。
+帧参数池在安全 flight reset 时移除已失效 service generation，并在连续 60 次低使用量复用后裁剪闲置容量。
+同一 layout 在当前 flight 已借出临时集时，切换其他 service generation 返回失败，保留原结果；只在完成后的复用边界替换池。
+MaterialGpuState 首版接受一个活跃 RenderSystem generation；同一 owner 在活跃服务间切换明确失败。
+旧服务 idle shutdown 后可重建状态。应用在 GPU drain 后先拆资产，再拆 shader/PSO 服务和 device。
 
 MaterialPass 的 RegisteredProgram 来自 RenderSystem 已验证的 artifact 创建路径，源码请求与已登记 program
 互斥。program/cache 代次须存活到材质、prepared draw 和 GPU 最后使用结束；应用只能在安全点重建这些派生服务。
@@ -359,21 +370,38 @@ bias、primitive、blend/write mask 与采样参数进入既有 GraphicsPipeline
 PreparedRasterDraw 接收 indexed 或 non-indexed 几何、已解析参数、viewport/scissor 和可选 push；无 Scene
 同样使用此内核。每次绑定 PSO 后重新绑定 VB。零面积 scissor 不录制 draw；矩阵和参数由 producer 求值，
 公共内核不重新生成投影。顶点匹配支持现有 32 位格式及 UNORM8X4/SNORM8X4 到 float4 的正规化输入。
-SceneDraw 准备阶段只遍历一次场景，并生成实际执行项；Record 不再读取或搜索场景列。
+SceneDraw 按 mask、world bounds 与当前 pass 筛选轻量候选，形成兼容批次和可见槽位后，才分配 PreparedRasterDraw。
+Record 不读取或搜索场景列；准备结果只借用到对应 flight 完成。
 
 RenderSystem 拥有 `GraphicsPipelineCache`。key 包含 program 身份、拥有字符串的完整顶点布局、primitive、
 depth/stencil、blend/write mask、有序格式、采样与 pass 身份；哈希相等后仍比较完整内容。
 不包含纹理尺寸、矩阵或普通材质参数。program 显式失效产生新身份；旧 program/PSO 保留到 idle。
 顶点匹配和材质结构解释缓存按 program 与内容复用。实际 Draw 只绑定准备结果，不反射、不建 PSO、
-不操作资产引用计数，使用 `ShapeId.Index` 读取对象矩阵，并为负行列式选择反绕序 PSO。
+不操作资产引用计数。内部以 `ShapeId.Index` 寻址矩阵/参数；业务 InstanceHandle 或 CPU dense row 不等于 GPU slot。
+负行列式选择反绕序 PSO，只创建当前批次需要的 winding 版本。
+
+MaterialPass 默认 `DirectObject`，保持单实例绘制；`VisibleSlots` 必须提供 VisibleInstanceSlots structured buffer
+及显式映射的 uint push 字段。`AllowAutomaticInstancing` 独立控制自动合批，关闭仍允许显式集合。
+每 view/pass 生成独立的 uint32 可见槽位列表；shader 用 `VisibleBase + SV_InstanceID` 读取 slot，所有 draw 的 FirstInstance 为 0。
+通用 PushConstant 保留其完整字节布局；SceneDraw 只有在 SceneIndexField 或旧四字节 ObjectIndexPushConstant 契约存在时才写槽位。
+共享 reflection plan 区分旧 ObjectIndexPushConstant 模式与通用 PushConstant；相同四字节 block 不能从已有 cache 隐式继承槽位映射。
+ScenePushValues 给出其余 draw-uniform 字段，大小必须与整个 push block 相同，未提供时归零。
+
+兼容域固定 scene/view/pass、输出、viewport/scissor 和当前 pass 的 program/layout/schema/非实例 push 值；
+BatchKey 区分不可变几何流、材质版本、IndexCount/FirstIndex/VertexOffset、winding、SortGroup/Order、显式 domain。
+仅 opt-in 且无 Blend/PreserveOrder 的 pass 自动重排合并。SortGroup、Order 按升序稳定排序，同值保留原顺序；
+顺序 draw 构成屏障，透明 A/B/A 不跨 B 合并。显式集合只能合并兼容项，严格顺序 pass 仅合并相邻项。
+缺失材质/pass 可诊断跳过；选中 pass 缺参数、无映射 push、容量或绑定错误导致 Prepare 失败。
+显式集合使用 DirectObject 时报告 ExplicitUnsupported，UnlitRenderPipeline 返回 RecoverableFailure，避免绘制重叠副本。
 
 `UnlitRenderPipeline` 使用公共 SceneDraw；选择 `DepthOnly` pass 和 depth 输出可运行独立深度路径。
 缺失槽或 pass 默认诊断并跳过，调用方可显式提供兼容 fallback；不隐式替换未知 shader。
-参考 shader 位于 `examples/scene_sync/material_unlit.hlsl`（多组、混合组、纹理）与 `material_depth.hlsl`。
+参考 shader 位于 `examples/scene_sync/material_unlit_instanced.hlsl` 与 `material_depth_instanced.hlsl`。
+材质常量/texture/sampler 按更新频率与 scene/view 分组；旧 direct shader 及 mixed-group 回归仍可使用。
 `scene_sync` 和 `framework_stress` 默认走公共入口，没有三视图上限。
 压测的 `--legacy-draw` 保留固定 shader 的历史绘制循环用于同机 A/B；运行见
 [基础框架压测](../guide/build-test.md#基础框架-tracy-压测样例)。
-本阶段仍不包含光照、剔除、合批、间接绘制、材质编辑器或资源状态跟踪系统。
+业务集合与 native 用法见[实例绘制](../guide/instancing.md)。本阶段不包含光照、空间树、GPU culling/LOD、间接命令生成、材质编辑器或资源状态跟踪系统。
 
 ## 交付、退出与资产保活
 
@@ -399,7 +427,7 @@ GT SceneId 与 writer 保留到删除包完成。Actor 在 S1 析构，不受 GP
 
 关停先进入 Stopping，排空已发布包和 CPU/GPU 使用，消费真实 completion，再 terminal abandon 未发布包。
 普通窗口维护 drain 不执行 abandon。终止后禁止恢复发布。显式拆除顺序为
-WorldManager → SceneManager → GPU 帧参数资源 → RenderSystem → AssetManager → FrameTimeline → AssetDatabase → GpuSystem；OnShutdown 也处于 Stopping。
+WorldManager → SceneManager → GPU 帧参数资源 → AssetManager → RenderSystem → FrameTimeline → AssetDatabase → GpuSystem；OnShutdown 也处于 Stopping。
 初始化失败使用同一显式 teardown，但没有提交时不等不存在的 fence。
 
 生命周期与变换通知的验收计数由测试 probe 持有；场景更新量直接检查已封存的更新包，资产准备检查
@@ -456,13 +484,41 @@ RenderSystem 的析构接受部分初始化状态，通过 `OnShutdown` 幂等�
 ## 独立实例参数
 
 InstanceParameterLayout 持有流名称、stride 与字段名称/类型/offset/size，ReflectInstanceParameterLayout 从 compiler-published 常量 payload 提取 schema。structured element 没有类型反射的绑定必须显式提供同一共享 HLSL 声明生成的 padded schema；作者负责 CB 与 structured 布局相同，不能将任意 cbuffer packing 当成 structured packing。材料 InstanceParameters 输入引用完整 schema，准备时核验 schema 与 StructureByteStride，拒绝大小/字段/绑定种类不符。
-SceneWriter::SetInstanceParameters 与 StaticMeshComponent::SetInstanceParameters 共用 typed update，ShapeCapture 同样交付。更新按 ShapeId+流 coalesce，删除取消尚未发布的值。RenderScene 持有每流各自 schema 和有 generation 的 slot，值变化走 SceneApplyChanges::Parameters，不进入矩阵 Updated。
+SceneWriter::SetInstanceParameters 与 StaticMeshComponent::SetInstanceParameters 共用 typed update，ShapeCapture 同样交付。
+writer 在所属 scene generation 内只登记一次 schema；pending batch 共用 packed bytes，重复更新覆盖原位置，Flush 后字节冻结。
+更新按 ShapeId+流 coalesce，删除取消尚未发布的值。RenderScene 每流保存一份 schema、含 generation 的 slot 元数据及按需 16 KiB CPU 字节页；空页可回收，不为每行创建 vector。
+值变化走 SceneApplyChanges::Parameters，不进入矩阵 Updated。SceneGpuData 复用排序/打包 scratch，将相邻 global slot 合并为上传范围。
 SceneGpuData 使用已有 ResourceUploader，按每 flight、每流跟踪 Pending/Attempt。上传录制成功后暂存 attempt；真实 completion executed 后才 commit，跳帧重新加入当前 generation 的 pending。容量增长重新补全活跃行，稀疏 slot 不假定连续；未初始化或未声明的行不能供材质读取。warm-up 后静止矩阵与参数零上传，多 view 同 FrameSerial 复用同一 SceneGpuView。
+GPU 参数容量仍按最高 global slot 和 stride 分配；每流请求上限为 64 MiB，超限诊断并返回失败，实际分配还受 device 限制。
+CPU 分页没有压缩 GPU 寻址。可见列表总长度上限为 UINT32_MAX，超限明确失败。
+
+## 批量生产者与手动实例集合
+
+SceneWriter/SceneCapture 提供 span 创建、删除、mesh、transform、material、draw state 与参数更新。
+批量路径一次解析共享资产、按最终变化追加，保留未 Seal 的净变化和 generation 协议；不是公开单对象 setter 的循环包装。
+pending 数组与集合容量按几何增长，单对象调用批量入口也保持摊销追加成本；不以精确 reserve(size+count) 让普通 capture 反复搬移已有 payload。
+同一不可变材质数组通过 MaterialBindings 共享，writer 按 binding/version 比较后才构造 payload；mesh/material 的资产 use 批量计数。
+第一次使用登记 owner，最后一个 use 沿原退休协议退出；尚未发布的短命资产也保守保活到已有完成点。
+
+InstancedStaticMeshComponent 继承 RenderComponent，一份 mesh/material、一组连续 local 矩阵/参数和 dirty handle 队列。
+AddInstances 立即返回组件局部的代际 InstanceHandle；删除可压缩 dense row，存活 handle 不变。
+ShapeId 在 capture 时为存活实例批量建立；capture 前删除者不创建 Shape。断连仅拆 Shape 映射，重连以旧业务 handle 连接新 Shape。
+只改一个实例输出该实例 delta；父变换变化需要重算集合全部最终矩阵，仍只有一个业务 Actor/Component。
+每次连接从 writer 获取独立非零 batch domain；默认不跨集合或与普通组件合并，内部照常按 section/winding/顺序/可见性拆批。
+
+不使用 World 的持久 producer 可直接使用同一 writer 批量接口。帧内 producer 用 PrepareRasterInstances：
+CPU 矩阵、参数与 slot 在 Prepare 内复制到 flight 的 Resource storage，返回 schema 为值副本；外部 GPU buffer 则借用到真实完成点。
+调用方仍拥有 mesh/material/外部 buffer 并使用现有 frame/asset 保活。helper 显式返回 Prepared/NoWork/Unsupported/InvalidData/AllocationFailure。
+slot 范围、stride、alignment、device、用途、选中 pass schema 均验证；DirectObject 不支持显式请求。
 
 ## Runtime geometry、候选与持久记录
 
 AllocateRuntimeMesh 校验 MeshResource，按原 CPU bin 字节布局在已有 RHI buffer 中建立通用 DrawData。TryUploadRuntimeMesh 通过同一 ResourceUploader staging/flight 服务上传，不另建 importer 或 submitter；AddReady 本身不表示 GPU 上传执行或完成。
 StaticMeshSection::SortGroups 声明不可拆 primitive/group 的 index range、double center 和排序域，SortRasterIndices 在连续域内按距离稳定排序并完整保留每组索引，不读取顶点布局。不解决任意全场景相交透明。
-RasterBoundsVisible 先在 double 中减 camera，再测试零到一 clip 的六面。SplitRasterPosition 生成独立 high/low float4 流，应用 shader 在每 view 减对应 camera high/low 后再加局部几何；矩阵主路径仍是 float，不能把接入 Scene 当成自动的大坐标支持。
+SceneDraw 从 ResolveSceneView 已归一化的完整 world-to-clip 矩阵提取零到一深度的六个平面，直接测试 world bounds。
+独立 double/camera-relative RasterBoundsVisible 重载先减 camera，调用方须提供相应 view rotation；不能在完整 view 矩阵路径重复减 camera。
+SplitRasterPosition 生成独立 high/low float4 流，应用 shader 在每 view 减对应 camera high/low 后再加局部几何；矩阵主路径仍是 float，不能把接入 Scene 当成自动的大坐标支持。
 ShapeDrawState 独立交付 view visibility mask、sort group 与 order，不进入 GPU 矩阵 dirty。RenderScene 为 geometry/material/transform/parameter/order 分别保存 revision。
 SceneDraw::GetObjectRecords 的派生 primitive 记录以 SceneId、ShapeId generation 与 geometry/material revision 刷新，先验证当前身份再使用旧资产地址；transform、参数、order 与每 view 可见性独立读取。shader/pass/output/布局的 PSO 仍由公共 cache 按完整内容和 program generation 解析，不把 texture、常量或 view 写死在持久记录。MC 与原生 SceneDraw 都消费这个记录服务及同一 RasterDraw。
+每个 SceneId 有独立缓存；section/material template 按不可变 mesh 与共享 binding 复用。结构 revision 变化时只校验已缓存活跃记录，稳定帧不做全容量清扫。
+PruneScenes 在 pipeline Record（包括零 view）清退已销毁场景；场景切换不清空其他存活场景缓存。

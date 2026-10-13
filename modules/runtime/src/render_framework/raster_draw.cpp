@@ -2,13 +2,101 @@
 #include <algorithm>
 #include <cstring>
 #include <radray/runtime/render_system.h>
+#include <radray/profiler.h>
+#include <radray/logger.h>
 
 namespace radray {
+RasterInstanceData::RasterInstanceData(const RasterInstanceData& other)
+    : Objects(other.Objects), VisibleSlots(other.VisibleSlots), Layouts(other.Layouts), Parameters(other.Parameters), Visible(other.Visible) {
+    RADRAY_ASSERT(Layouts.size() == Parameters.size());
+    for (size_t i = 0; i < Parameters.size(); ++i) Parameters[i].Layout = &Layouts[i];
+}
+RasterInstanceData& RasterInstanceData::operator=(const RasterInstanceData& other) {
+    if (this != &other) {
+        RasterInstanceData copy{other};
+        *this = std::move(copy);
+    }
+    return *this;
+}
+RasterInstancePreparation PrepareRasterInstances(PipelineContext& context, const RasterMaterialPlan& plan,
+                                                 render::ShaderBufferBinding objects, std::span<const uint32_t> slots, std::span<const InstanceParameterBuffer> parameters) {
+    using Status = RasterInstancePrepareStatus;
+    if (plan.InstanceAddressing != MaterialInstanceAddressing::VisibleSlots) return {Status::Unsupported, {}};
+    if (slots.empty()) return {Status::NoWork, {}};
+    if (!plan.Generation->Alive || plan.Generation != context.Renderer.GetGeneration()) return {Status::InvalidData, {}};
+    const auto validBuffer = [&](const render::ShaderBufferBinding& binding, uint32_t stride) {
+        if (!binding.Target || binding.Target->GetDevice() != context.Resources.GetDevice() || binding.StructureByteStride != stride ||
+            !binding.Range.Size || binding.Range.Size % stride || binding.Range.Offset % stride) return false;
+        const auto desc = binding.Target->GetDesc();
+        const auto alignment = std::max(uint64_t{1}, context.Resources.GetDevice()->GetCapabilities().Limits.StorageBufferOffsetAlignment);
+        return desc.Usage.HasFlag(render::BufferUse::Resource) && binding.Range.Offset % alignment == 0 &&
+               binding.Range.Offset <= desc.Size && binding.Range.Size <= desc.Size - binding.Range.Offset;
+    };
+    if (!validBuffer(objects, 64) || slots.size() > UINT32_MAX) return {Status::InvalidData, {}};
+    for (auto slot : slots)
+        if (slot >= objects.Range.Size / 64) return {Status::InvalidData, {}};
+    for (const auto& input : plan.Inputs) {
+        if (input.Source != MaterialInputSource::InstanceParameters) continue;
+        const auto& layout = plan.ParameterLayouts[input.ValueIndex];
+        const auto found = std::find_if(parameters.begin(), parameters.end(), [&](const auto& value) { return value.Layout && *value.Layout == layout; });
+        if (found == parameters.end() || !validBuffer(found->Values, layout.Stride)) return {Status::InvalidData, {}};
+        for (auto slot : slots)
+            if (slot >= found->Values.Range.Size / layout.Stride) return {Status::InvalidData, {}};
+    }
+    auto allocation = context.Resources.AllocateStorage(slots.size_bytes());
+    if (!allocation.IsValid()) return {Status::AllocationFailure, {}};
+    std::memcpy(allocation.Data(), slots.data(), slots.size_bytes());
+    const auto slice = allocation.Commit(slots.size_bytes());
+    RasterInstanceData data;
+    data.Objects = objects;
+    data.VisibleSlots = {slice.Target, {slice.Offset, slice.Size}, 4};
+    data.Visible = {0, static_cast<uint32_t>(slots.size())};
+    data.Layouts.reserve(parameters.size());
+    data.Parameters.reserve(parameters.size());
+    for (const auto& value : parameters) {
+        if (!value.Layout) return {Status::InvalidData, {}};
+        data.Layouts.push_back(*value.Layout);
+        data.Parameters.push_back({&data.Layouts.back(), value.Values});
+    }
+    return {Status::Prepared, std::move(data)};
+}
+RasterInstancePreparation PrepareRasterInstances(PipelineContext& context, const RasterMaterialPlan& plan,
+                                                 std::span<const Eigen::Matrix4f> matrices, std::span<const uint32_t> slots, std::span<const RasterFrameParameters> parameters) {
+    using Status = RasterInstancePrepareStatus;
+    if (plan.InstanceAddressing != MaterialInstanceAddressing::VisibleSlots) return {Status::Unsupported, {}};
+    if (slots.empty()) return {Status::NoWork, {}};
+    if (matrices.empty()) return {Status::InvalidData, {}};
+    for (const auto& matrix : matrices)
+        if (!matrix.allFinite() || matrix(3, 0) != 0 || matrix(3, 1) != 0 || matrix(3, 2) != 0 || matrix(3, 3) != 1) return {Status::InvalidData, {}};
+    for (auto slot : slots)
+        if (slot >= matrices.size()) return {Status::InvalidData, {}};
+    for (const auto& value : parameters)
+        if (!value.Layout.IsValid() || value.Values.size() != matrices.size() * value.Layout.Stride) return {Status::InvalidData, {}};
+    auto allocation = context.Resources.AllocateStorage(matrices.size_bytes(), 64);
+    if (!allocation.IsValid()) return {Status::AllocationFailure, {}};
+    std::memcpy(allocation.Data(), matrices.data(), matrices.size_bytes());
+    const auto slice = allocation.Commit(matrices.size_bytes());
+    vector<InstanceParameterBuffer> bindings;
+    for (const auto& value : parameters) {
+        auto bytes = context.Resources.AllocateStorage(value.Values.size(), value.Layout.Stride);
+        if (!bytes.IsValid()) return {Status::AllocationFailure, {}};
+        std::memcpy(bytes.Data(), value.Values.data(), value.Values.size());
+        const auto uploaded = bytes.Commit(value.Values.size());
+        bindings.push_back({&value.Layout, {uploaded.Target, {uploaded.Offset, uploaded.Size}, value.Layout.Stride}});
+    }
+    return PrepareRasterInstances(context, plan, render::ShaderBufferBinding{slice.Target, {slice.Offset, slice.Size}, 64}, slots, bindings);
+}
 Nullable<const RasterMaterialPlan*> RasterDraw::ResolveMaterial(RenderSystem& renderer, const MaterialPass& pass) {
+    std::erase_if(_plans, [](const auto& plan) { return !plan->Generation->Alive; });
     auto program = pass.ResolveProgram(renderer);
     if (!program) return nullptr;
     if (!pass.ObjectIndexPushConstant.empty() && !pass.PushConstant.empty()) return nullptr;
     const auto pushName = pass.PushConstant.empty() ? pass.ObjectIndexPushConstant : pass.PushConstant;
+    if (!pass.ScenePushValues.empty()) {
+        const auto& artifact = program->GetArtifact().Generic();
+        const auto push = std::find_if(artifact.RootConstants().begin(), artifact.RootConstants().end(), [&](const auto& block) { return artifact.GetName(block.Name) == pushName; });
+        if (push == artifact.RootConstants().end() || pass.ScenePushValues.size() != push->Size) return nullptr;
+    }
     const auto requiresConstant = [](const render::BlendComponent& blend) {
         return blend.Src == render::BlendFactor::Constant || blend.Src == render::BlendFactor::OneMinusConstant ||
                blend.Dst == render::BlendFactor::Constant || blend.Dst == render::BlendFactor::OneMinusConstant;
@@ -16,12 +104,18 @@ Nullable<const RasterMaterialPlan*> RasterDraw::ResolveMaterial(RenderSystem& re
     if (pass.Blend && (requiresConstant(pass.Blend->Color) || requiresConstant(pass.Blend->Alpha))) return nullptr;
     if (pass.DepthStencil && pass.DepthStencil->Stencil) return nullptr;
     for (const auto& plan : _plans)
-        if (plan->Program == program.Get() && plan->Inputs == pass.Inputs && plan->PushName == pushName && plan->ParameterLayouts == pass.ParameterLayouts) return plan.get();
-    auto plan = make_unique<RasterMaterialPlan>();
+        if (plan->Generation == renderer.GetGeneration() && plan->Program == program.Get() && plan->Inputs == pass.Inputs && plan->PushName == pushName &&
+            plan->LegacyObjectIndexPush == !pass.ObjectIndexPushConstant.empty() && plan->ParameterLayouts == pass.ParameterLayouts &&
+            plan->InstanceAddressing == pass.InstanceAddressing && plan->SceneIndexField == pass.SceneIndexField) return plan.get();
+    auto plan = make_shared<RasterMaterialPlan>();
+    plan->Generation = renderer.GetGeneration();
     plan->Program = program.Get();
     plan->Inputs = pass.Inputs;
     plan->ParameterLayouts = pass.ParameterLayouts;
     plan->PushName = pushName;
+    plan->LegacyObjectIndexPush = !pass.ObjectIndexPushConstant.empty();
+    plan->InstanceAddressing = pass.InstanceAddressing;
+    plan->SceneIndexField = pass.SceneIndexField;
     const auto& artifact = program->GetArtifact().Generic();
     if (!pushName.empty()) {
         plan->Push = program->GetPipelineLayout()->FindBinding(pushName);
@@ -31,6 +125,18 @@ Nullable<const RasterMaterialPlan*> RasterDraw::ResolveMaterial(RenderSystem& re
         if (!plan->Push.IsValid() || push == artifact.RootConstants().end() ||
             (!pass.ObjectIndexPushConstant.empty() && push->Size != sizeof(uint32_t))) return nullptr;
         plan->PushSize = push->Size;
+        if (!pass.ObjectIndexPushConstant.empty()) {
+            if (pass.InstanceAddressing != MaterialInstanceAddressing::DirectObject || !pass.SceneIndexField.empty()) return nullptr;
+            plan->SceneIndexOffset = 0;
+        } else if (!pass.SceneIndexField.empty()) {
+            const auto field = std::find_if(artifact.Types().begin(), artifact.Types().end(), [&](const auto& type) {
+                return type.ParentIndex == push->TypeIndex && artifact.GetName(type.Name) == pass.SceneIndexField;
+            });
+            if (field == artifact.Types().end() || field->Size != 4 || field->ScalarKind != uint32_t(shader::ShaderScalarKind::UnsignedInteger) ||
+                field->RowCount != 1 || field->ColumnCount != 1 || field->Offset > push->Size || 4 > push->Size - field->Offset) return nullptr;
+            plan->SceneIndexOffset = field->Offset;
+        }
+        if (!pass.ScenePushValues.empty() && pass.ScenePushValues.size() != push->Size) return nullptr;
     } else if (!artifact.RootConstants().empty())
         return nullptr;
     for (size_t i = 0; i < pass.Inputs.size(); ++i) {
@@ -43,6 +149,7 @@ Nullable<const RasterMaterialPlan*> RasterDraw::ResolveMaterial(RenderSystem& re
         const auto kind = binding->LogicalKind;
         switch (input.Source) {
             case MaterialInputSource::SceneObjects:
+            case MaterialInputSource::VisibleInstanceSlots:
                 if (kind != Kind::StructuredBuffer || binding->Count != 1) return nullptr;
                 break;
             case MaterialInputSource::InstanceParameters:
@@ -72,7 +179,18 @@ Nullable<const RasterMaterialPlan*> RasterDraw::ResolveMaterial(RenderSystem& re
             bufferSize = artifact.Types()[declaration->Record.TypeIndex].Size;
         }
         plan->BufferSizes.push_back(bufferSize);
+        if (!binding->Immutable) {
+            auto group = std::find_if(plan->Groups.begin(), plan->Groups.end(), [&](const auto& entry) { return entry.Index == binding->Group; });
+            if (group == plan->Groups.end()) {
+                plan->Groups.push_back({binding->Group, true, {}});
+                group = plan->Groups.end() - 1;
+            }
+            group->Inputs.push_back(i);
+            group->Static &= input.Source == MaterialInputSource::MaterialConstants || input.Source == MaterialInputSource::Texture || input.Source == MaterialInputSource::Sampler;
+        }
     }
+    if (pass.InstanceAddressing == MaterialInstanceAddressing::VisibleSlots &&
+        (!plan->SceneIndexOffset || std::none_of(pass.Inputs.begin(), pass.Inputs.end(), [](const auto& input) { return input.Source == MaterialInputSource::VisibleInstanceSlots; }))) return nullptr;
     for (const auto& binding : artifact.Bindings()) {
         const auto name = artifact.GetName(binding.Name);
         if (!name) return nullptr;
@@ -86,131 +204,187 @@ Nullable<const RasterMaterialPlan*> RasterDraw::ResolveMaterial(RenderSystem& re
 }
 
 std::optional<PreparedRasterMaterial> RasterDraw::PrepareMaterial(PipelineContext& context, const RasterMaterialPlan& plan,
-                                                                  const MaterialRenderData& material, const RasterMaterialValues& values) {
-    if (plan.Program->GetDevice() != context.Resources.GetDevice()) return std::nullopt;
+                                                                  MaterialBindingView binding, const RasterMaterialValues& values) {
+    return PrepareMaterial(context, plan, binding.Data, values, &binding.Gpu);
+}
+std::optional<PreparedRasterMaterial> RasterDraw::PrepareMaterial(PipelineContext& context, const RasterMaterialPlan& plan,
+                                                                  const MaterialRenderData& material, const RasterMaterialValues& values, Nullable<MaterialGpuState*> gpu, Nullable<const MaterialPass*> source) {
+    RADRAY_PROFILE_SCOPE_N("RasterDraw::PrepareMaterial");
+    if (!plan.Generation->Alive || plan.Generation != context.Renderer.GetGeneration() || plan.Program->GetDevice() != context.Resources.GetDevice()) return std::nullopt;
+    Nullable<MaterialGpuState::Pass*> cachedPass{nullptr};
+    if (gpu) {
+        if (gpu->_data && gpu->_data.Get() != &material) return std::nullopt;
+        gpu->_data = &material;
+        if (gpu->_generation != plan.Generation) {
+            if (gpu->_generation && gpu->_generation->Alive) return std::nullopt;
+            gpu->_passes.clear();
+            gpu->_constants.clear();
+            gpu->_generation = plan.Generation;
+        }
+        gpu->_constants.resize(material.Constants.size());
+        if (!source && material.Passes.size() == 1) source = &material.Passes[0];
+        if (source && std::none_of(material.Passes.begin(), material.Passes.end(), [&](const auto& pass) { return &pass == source.Get(); })) return std::nullopt;
+        for (auto& pass : gpu->_passes)
+            if ((source && pass.Source.Get() == source.Get()) || (!source && pass.Plan.get() == &plan)) {
+                if (pass.Plan->Program != plan.Program) {
+                    RADRAY_ERR_LOG("A changed shader program requires a new immutable material GPU owner");
+                    return std::nullopt;
+                }
+                cachedPass = &pass;
+                break;
+            }
+        if (!cachedPass) {
+            const auto owner = std::find_if(_plans.begin(), _plans.end(), [&](const auto& item) { return item.get() == &plan; });
+            if (owner == _plans.end()) return std::nullopt;
+            gpu->_passes.push_back({source.Get(), *owner, {}});
+            cachedPass = &gpu->_passes.back();
+        }
+    }
     PreparedRasterMaterial result;
     result.Push = plan.Push;
     result.PushSize = plan.PushSize;
-    for (size_t i = 0; i < plan.Inputs.size(); ++i) {
-        const auto& input = plan.Inputs[i];
-        const auto& binding = plan.Bindings[i];
-        if (binding.Immutable) continue;
-        auto group = std::find_if(result.Groups.begin(), result.Groups.end(), [&](const auto& g) { return g.Index == binding.Group; });
-        if (group == result.Groups.end()) {
-            const bool samplersOnly = std::all_of(plan.Bindings.begin(), plan.Bindings.end(), [&](const auto& b) {
-                return b.Group != binding.Group || b.Immutable || b.LogicalKind == shader::ShaderBindingKind::Sampler;
-            });
-            if (samplersOnly) {
-                vector<render::SamplerDescriptor> descriptors;
-                const std::span<const render::SamplerDescriptor> source = values.Samplers.empty() ? std::span{material.Samplers} : values.Samplers;
-                for (size_t entry = 0; entry < plan.Inputs.size(); ++entry) {
-                    const auto& b = plan.Bindings[entry];
-                    if (b.Group != binding.Group || b.Immutable) continue;
-                    const auto first = plan.Inputs[entry].ValueIndex;
-                    if (first > source.size() || b.Count > source.size() - first) return std::nullopt;
-                    descriptors.insert(descriptors.end(), source.begin() + first, source.begin() + first + b.Count);
-                }
-                auto cached = std::find_if(_samplerGroups.begin(), _samplerGroups.end(), [&](const auto& cachedGroup) {
-                    return cachedGroup.Plan == &plan && cachedGroup.Index == binding.Group && cachedGroup.Descriptors == descriptors;
-                });
-                if (cached == _samplerGroups.end()) {
-                    auto parameters = context.Resources.GetDevice()->CreateShaderParameterSet({plan.Program->GetPipelineLayout(), binding.Group});
-                    if (!parameters) return std::nullopt;
-                    size_t valueIndex = 0;
-                    for (size_t entry = 0; entry < plan.Inputs.size(); ++entry) {
-                        const auto& b = plan.Bindings[entry];
-                        if (b.Group != binding.Group || b.Immutable) continue;
-                        for (uint32_t element = 0; element < b.Count; ++element) {
-                            auto sampler = context.Resources.GetDevice()->GetOrCreateSampler(descriptors[valueIndex++]);
-                            if (!sampler || !parameters->Set(plan.Handles[entry], element, sampler.Get())) return std::nullopt;
-                        }
-                    }
-                    if (!parameters->FlushWrites()) return std::nullopt;
-                    _samplerGroups.push_back({&plan, binding.Group, std::move(descriptors), parameters.Release()});
-                    cached = _samplerGroups.end() - 1;
-                }
-                result.Groups.push_back({binding.Group, cached->Parameters.get(), {}});
+    result.Groups.reserve(plan.Groups.size());
+    for (const auto& groupPlan : plan.Groups) {
+        const bool overridden = std::any_of(groupPlan.Inputs.begin(), groupPlan.Inputs.end(), [&](size_t i) {
+            switch (plan.Inputs[i].Source) {
+                case MaterialInputSource::MaterialConstants: return !values.Constants.empty() || !values.ConstantBuffers.empty();
+                case MaterialInputSource::Texture: return !values.Textures.empty();
+                case MaterialInputSource::Sampler: return !values.Samplers.empty();
+                default: return false;
+            }
+        });
+        const bool persistent = cachedPass && groupPlan.Static && !overridden;
+        if (persistent) {
+            const auto found = std::find_if(cachedPass->Groups.begin(), cachedPass->Groups.end(), [&](const auto& group) { return group.Index == groupPlan.Index; });
+            if (found != cachedPass->Groups.end()) {
+                result.Groups.push_back({found->Index, found->Parameters.get(), found->Offsets});
                 continue;
             }
-            auto parameters = context.Resources.AllocateParameters(plan.Program->GetPipelineLayout(), binding.Group);
-            if (!parameters) return std::nullopt;
-            result.Groups.push_back({binding.Group, parameters.Get(), {}});
-            group = result.Groups.end() - 1;
         }
-        if (std::any_of(_samplerGroups.begin(), _samplerGroups.end(), [&](const auto& cached) { return cached.Parameters.get() == group->Parameters; })) continue;
-        for (uint32_t element = 0; element < binding.Count; ++element) {
-            const size_t index = size_t{input.ValueIndex} + element;
-            render::ShaderParameterValue value;
-            switch (input.Source) {
-                case MaterialInputSource::SceneObjects:
-                    if (!values.Objects) return std::nullopt;
-                    value = *values.Objects;
-                    break;
-                case MaterialInputSource::InstanceParameters: {
-                    if (index >= plan.ParameterLayouts.size()) return std::nullopt;
-                    const auto& layout = plan.ParameterLayouts[index];
-                    const auto found = std::find_if(values.Parameters.begin(), values.Parameters.end(), [&](const auto& p) { return p.Layout && *p.Layout == layout; });
-                    if (found == values.Parameters.end() || found->Values.StructureByteStride != layout.Stride) return std::nullopt;
-                    value = found->Values;
-                    break;
-                }
-                case MaterialInputSource::MaterialConstants:
-                case MaterialInputSource::ViewConstants:
-                case MaterialInputSource::FrameConstants: {
-                    const auto buffers = input.Source == MaterialInputSource::ViewConstants ? values.ViewBuffers : input.Source == MaterialInputSource::FrameConstants ? values.FrameBuffers
-                                                                                                                                                                       : values.ConstantBuffers;
-                    if (!buffers.empty()) {
-                        if (index >= buffers.size() || !buffers[index].Target || buffers[index].Range.Size < plan.BufferSizes[i]) return std::nullopt;
-                        value = buffers[index];
+        vector<render::ShaderParameterValue> writes;
+        vector<render::ShaderBufferBinding> buffers;
+        const bool shared = values.SharedGroups && std::none_of(groupPlan.Inputs.begin(), groupPlan.Inputs.end(), [&](size_t i) {
+                                const auto source = plan.Inputs[i].Source;
+                                return source == MaterialInputSource::MaterialConstants || source == MaterialInputSource::Texture || source == MaterialInputSource::Sampler;
+                            });
+        for (const auto i : groupPlan.Inputs) {
+            const auto& input = plan.Inputs[i];
+            const auto& binding = plan.Bindings[i];
+            for (uint32_t element = 0; element < binding.Count; ++element) {
+                const size_t index = size_t{input.ValueIndex} + element;
+                render::ShaderParameterValue value;
+                switch (input.Source) {
+                    case MaterialInputSource::SceneObjects:
+                        if (!values.Objects) return std::nullopt;
+                        value = *values.Objects;
+                        break;
+                    case MaterialInputSource::VisibleInstanceSlots:
+                        if (!values.VisibleSlots || values.VisibleSlots->StructureByteStride != 4 || !values.VisibleSlots->Range.Size || values.VisibleSlots->Range.Size % 4) return std::nullopt;
+                        value = *values.VisibleSlots;
+                        break;
+                    case MaterialInputSource::InstanceParameters: {
+                        if (index >= plan.ParameterLayouts.size()) return std::nullopt;
+                        const auto& layout = plan.ParameterLayouts[index];
+                        const auto found = std::find_if(values.Parameters.begin(), values.Parameters.end(), [&](const auto& p) { return p.Layout && *p.Layout == layout; });
+                        if (found == values.Parameters.end() || found->Values.StructureByteStride != layout.Stride) return std::nullopt;
+                        value = found->Values;
                         break;
                     }
-                    std::span<const byte> bytes;
-                    if (input.Source == MaterialInputSource::MaterialConstants && values.Constants.empty()) {
-                        if (index >= material.Constants.size()) return std::nullopt;
-                        bytes = material.Constants[index];
-                    } else {
-                        const auto source = input.Source == MaterialInputSource::ViewConstants ? values.Views : input.Source == MaterialInputSource::FrameConstants ? values.Frames
-                                                                                                                                                                    : values.Constants;
-                        if (index >= source.size()) return std::nullopt;
-                        bytes = source[index];
+                    case MaterialInputSource::MaterialConstants:
+                    case MaterialInputSource::ViewConstants:
+                    case MaterialInputSource::FrameConstants: {
+                        const auto buffers = input.Source == MaterialInputSource::ViewConstants ? values.ViewBuffers : input.Source == MaterialInputSource::FrameConstants ? values.FrameBuffers
+                                                                                                                                                                           : values.ConstantBuffers;
+                        if (!buffers.empty()) {
+                            if (index >= buffers.size() || !buffers[index].Target || buffers[index].Range.Size < plan.BufferSizes[i]) return std::nullopt;
+                            value = buffers[index];
+                            break;
+                        }
+                        const bool defaults = input.Source == MaterialInputSource::MaterialConstants && values.Constants.empty();
+                        std::span<const byte> bytes;
+                        if (defaults) {
+                            if (index >= material.Constants.size()) return std::nullopt;
+                            bytes = material.Constants[index];
+                        } else {
+                            const auto source = input.Source == MaterialInputSource::ViewConstants ? values.Views : input.Source == MaterialInputSource::FrameConstants ? values.Frames
+                                                                                                                                                                        : values.Constants;
+                            if (index >= source.size()) return std::nullopt;
+                            bytes = source[index];
+                        }
+                        if (bytes.empty() || bytes.size() < plan.BufferSizes[i]) return std::nullopt;
+                        if (defaults && gpu) {
+                            auto& allocation = gpu->_constants[index];
+                            if (!allocation) allocation = context.Renderer.GetPersistentConstants().Allocate(bytes);
+                            if (!allocation) return std::nullopt;
+                            value = allocation->Binding;
+                        } else {
+                            auto allocation = context.Resources.AllocateConstants(bytes.size());
+                            if (!allocation.IsValid()) return std::nullopt;
+                            std::memcpy(allocation.Data(), bytes.data(), bytes.size());
+                            const auto slice = allocation.Commit(bytes.size());
+                            value = render::ShaderBufferBinding{slice.Target, {slice.Offset, slice.Size}, 0};
+                        }
+                        break;
                     }
-                    if (bytes.empty() || bytes.size() < plan.BufferSizes[i]) return std::nullopt;
-                    auto allocation = context.Resources.AllocateConstants(bytes.size());
-                    if (!allocation.IsValid()) return std::nullopt;
-                    std::memcpy(allocation.Data(), bytes.data(), bytes.size());
-                    const auto slice = allocation.Commit(bytes.size());
-                    value = render::ShaderBufferBinding{slice.Target, {slice.Offset, slice.Size}, 0};
-                    break;
+                    case MaterialInputSource::Texture: {
+                        const std::span<render::TextureView* const> source = values.Textures.empty() ? std::span{material.Textures} : values.Textures;
+                        if (index >= source.size()) return std::nullopt;
+                        value = source[index];
+                        break;
+                    }
+                    case MaterialInputSource::Sampler: {
+                        const std::span<const render::SamplerDescriptor> source = values.Samplers.empty() ? std::span{material.Samplers} : values.Samplers;
+                        if (index >= source.size()) return std::nullopt;
+                        auto sampler = context.Resources.GetDevice()->GetOrCreateSampler(source[index]);
+                        if (!sampler) return std::nullopt;
+                        value = sampler.Get();
+                        break;
+                    }
+                    default: return std::nullopt;
                 }
-                case MaterialInputSource::Texture: {
-                    const std::span<render::TextureView* const> textures = values.Textures.empty() ? std::span{material.Textures} : values.Textures;
-                    if (index >= textures.size()) return std::nullopt;
-                    value = textures[index];
-                    break;
-                }
-                case MaterialInputSource::Sampler: {
-                    const std::span<const render::SamplerDescriptor> samplers = values.Samplers.empty() ? std::span{material.Samplers} : values.Samplers;
-                    if (index >= samplers.size()) return std::nullopt;
-                    auto sampler = context.Resources.GetDevice()->GetOrCreateSampler(samplers[index]);
-                    if (!sampler) return std::nullopt;
-                    value = sampler.Get();
-                    break;
-                }
-                default: return std::nullopt;
+                if (shared) buffers.push_back(std::get<render::ShaderBufferBinding>(value));
+                writes.push_back(value);
             }
-            if (!group->Parameters->Set(plan.Handles[i], element, value)) return std::nullopt;
         }
-        if (binding.Dynamic) group->Offsets.push_back({plan.Handles[i], 0});
+        if (shared) {
+            const auto& entries = values.SharedGroups->Groups[&plan][groupPlan.Index];
+            const auto found = std::find_if(entries.begin(), entries.end(), [&](const auto& entry) { return entry.Values == buffers; });
+            if (found != entries.end()) {
+                result.Groups.push_back(found->Group);
+                continue;
+            }
+        }
+        unique_ptr<render::ShaderParameterSet> owned;
+        RADRAY_PROFILE_SCOPE_DYN(persistent ? std::string_view{"RasterDraw::InitializeStaticGroup"} : std::string_view{"RasterDraw::WriteFrameGroup"});
+        Nullable<render::ShaderParameterSet*> parameters;
+        if (persistent) {
+            auto created = context.Resources.GetDevice()->CreateShaderParameterSet({plan.Program->GetPipelineLayout(), groupPlan.Index});
+            if (!created) return std::nullopt;
+            owned = created.Release();
+            parameters = owned.get();
+        } else
+            parameters = context.Resources.AllocateParameters(plan.Program->GetPipelineLayout(), groupPlan.Index, plan.Generation);
+        if (!parameters) return std::nullopt;
+        PreparedRasterMaterial::Group group{groupPlan.Index, parameters.Get(), {}};
+        size_t next = 0;
+        for (const auto i : groupPlan.Inputs) {
+            for (uint32_t element = 0; element < plan.Bindings[i].Count; ++element)
+                if (!parameters->Set(plan.Handles[i], element, writes[next++])) return std::nullopt;
+            if (plan.Bindings[i].Dynamic) group.Offsets.push_back({plan.Handles[i], 0});
+        }
+        if (!parameters->FlushWrites()) return std::nullopt;
+        if (persistent) cachedPass->Groups.push_back({group.Index, std::move(owned), group.Offsets});
+        if (shared) values.SharedGroups->Groups[&plan][groupPlan.Index].push_back({std::move(buffers), group});
+        result.Groups.push_back(std::move(group));
     }
-    for (auto& group : result.Groups)
-        if (!group.Parameters->FlushWrites()) return std::nullopt;
     return result;
 }
 
 Nullable<render::GraphicsPipelineState*> RasterDraw::PreparePipeline(PipelineContext& context, const RasterMaterialPlan& plan,
                                                                      const MaterialPass& material, const GeometryVertexLayout& geometry, render::PrimitiveTopology topology,
                                                                      render::RenderPass* pass, const RenderOutputInfo& output, bool reverseCulling) {
-    if (plan.Program->GetDevice() != context.Resources.GetDevice() || (material.DepthStencil && !output.Depth)) return nullptr;
+    if (!plan.Generation->Alive || plan.Generation != context.Renderer.GetGeneration() ||
+        plan.Program->GetDevice() != context.Resources.GetDevice() || (material.DepthStencil && !output.Depth)) return nullptr;
     auto& cache = context.Renderer.GetGraphicsPipelineCache();
     const auto layout = cache.Match(geometry, plan.Program);
     if (!layout) return nullptr;

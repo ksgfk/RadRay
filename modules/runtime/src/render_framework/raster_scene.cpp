@@ -4,6 +4,20 @@
 #include <cstring>
 
 namespace radray {
+array<Eigen::Vector4f, 6> RasterFrustumPlanes(const Eigen::Matrix4f& clip) noexcept {
+    return {Eigen::Vector4f{clip.row(3) + clip.row(0)}, Eigen::Vector4f{clip.row(3) - clip.row(0)},
+            Eigen::Vector4f{clip.row(3) + clip.row(1)}, Eigen::Vector4f{clip.row(3) - clip.row(1)},
+            Eigen::Vector4f{clip.row(2)}, Eigen::Vector4f{clip.row(3) - clip.row(2)}};
+}
+bool RasterBoundsVisible(const Eigen::Vector3f& min, const Eigen::Vector3f& max,
+                         const array<Eigen::Vector4f, 6>& planes) noexcept {
+    for (const auto& p : planes) {
+        const float distance = p[3] + p[0] * (p[0] >= 0 ? max[0] : min[0]) +
+                               p[1] * (p[1] >= 0 ? max[1] : min[1]) + p[2] * (p[2] >= 0 ? max[2] : min[2]);
+        if (distance < 0) return false;
+    }
+    return true;
+}
 bool RasterBoundsVisible(const Eigen::Vector3d& min, const Eigen::Vector3d& max,
                          const Eigen::Vector3d& camera, const Eigen::Matrix4f& clip) noexcept {
     if (!min.allFinite() || !max.allFinite() || !camera.allFinite() || !clip.allFinite() || (min.array() > max.array()).any()) return false;

@@ -492,6 +492,7 @@ public:
         RADRAY_PROFILE_SCOPE_N("TickFrame");
         if (isInModalLoop) {
             MarkModalLoopActivityDuringDispatch();
+            if (auto windows = _app->GetWindowManager()) windows->DispatchEvents();
         }
         auto* gpuSystem = _app->GetGpuSystem().Get();
         const uint32_t flightIndex = _app->GetFrameTimeline().GetCurrentFlightIndex();
@@ -987,9 +988,9 @@ void Application::DestroyRuntime() noexcept {
     if (_windowManager != nullptr) {
         _windowManager->SetRenderSystem(nullptr);
     }
-    _renderSystem.reset();
     // AssetManager 析构会 force-unload 全部资产,释放 GPU buffer(须在 device 销毁前)。
     _assetManager.reset();
+    _renderSystem.reset();
     // 先取消帧等待，再拆 device。等待者恢复时 device 仍在。
     _frameTimeline.reset();
     // importer 与 settings 必须活到全部在飞加载协程被 AssetManager 收束之后。

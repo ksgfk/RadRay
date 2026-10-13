@@ -27,7 +27,7 @@ struct StaticMeshSceneColumns {
     std::span<const Eigen::Matrix4f> Transforms;
     std::span<const uint32_t> TransformRows;
     std::span<const StaticMeshBounds> Bounds;
-    std::span<const vector<MaterialBinding>> Materials;
+    std::span<const MaterialBindings> Materials;
 
     size_t Size() const noexcept { return Ids.size(); }
     StaticMeshSceneView Get(size_t row) const noexcept;
@@ -39,7 +39,7 @@ public:
     void Add(const StaticMeshStateUpdate& update, uint32_t transformRow);
     void Remove(size_t row) noexcept;
     void Replace(size_t row, const StaticMeshStateUpdate& update, uint32_t transformRow);
-    void SetMaterials(size_t row, std::span<const MaterialBinding> materials);
+    void SetMaterials(size_t row, const MaterialBindings& materials);
     void UpdateBounds(size_t row, const Eigen::Matrix4f& transform) noexcept;
 
 private:
@@ -47,7 +47,7 @@ private:
     vector<StaticMeshDescription> _bindings;
     vector<uint32_t> _transformRows;
     vector<StaticMeshBounds> _bounds;
-    vector<vector<MaterialBinding>> _materials;
+    vector<MaterialBindings> _materials;
 };
 
 }  // namespace radray

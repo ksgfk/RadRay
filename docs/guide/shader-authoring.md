@@ -150,6 +150,10 @@ kind/count、visibility、slot或push range；texture、typed texel buffer、sto
 placement modifier。无`[RootSignature]`时使用modifier是正常路径，不是fallback漏洞。
 
 group 的语义属于具体调用方，不是 shaderlib 全局规则；runtime 不硬编码 view/material/object 组号。
+SceneDraw 的实例寻址契约由 MaterialPass 显式声明：VisibleInstanceSlots 是 uint structured buffer，
+VisibleBase 映射到反射中的 uint push 字段，shader 用 VisibleBase+SV_InstanceID 读取实际对象 slot，draw 的 FirstInstance 为 0。
+按 slot 读取的矩阵 stride 为 64；自定义参数 stride/字段须与 InstanceParameterLayout 完全一致，
+像素阶段通过 nointerpolation varying 接收 slot。DirectObject 与自动合批许可独立；详见[实例绘制](instancing.md)。
 数值 buffer 使用具名 struct 加 ConstantBuffer<T>，让 artifact type tree 保留根结构与成员 offset。
 旧 Forward ABI 与专用 POD 生成器已移除，历史设计见[临时快照](../temp/render-framework-design.md)。
 

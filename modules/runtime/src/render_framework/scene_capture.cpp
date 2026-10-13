@@ -34,5 +34,16 @@ bool ShapeCapture::SetInstanceParameters(const InstanceParameterLayout& layout, 
 
 SceneCapture::SceneCapture(SceneWriter& writer) : _writer(writer) { writer.BeginCapture(); }
 void SceneCapture::SetLight(LightId id, const LightData& light) { _writer.SetLight(id, light); }
+bool SceneCapture::CreateShapes(std::span<ShapeId> ids) { return _writer.CreateShapes(ids); }
+void SceneCapture::RemoveShapes(std::span<const ShapeId> ids) { _writer.RemoveShapes(ids); }
+void SceneCapture::SetStaticMeshes(std::span<const ShapeId> ids, const StreamingAssetRef<StaticMesh>& mesh, std::span<const Eigen::Matrix4f> transforms) {
+    _writer.GatherStaticMeshes(ids, mesh, transforms);
+}
+void SceneCapture::SetTransforms(std::span<const ShapeTransformUpdate> values) { _writer.GatherTransforms(values); }
+void SceneCapture::SetMaterials(std::span<const ShapeId> ids, std::span<const StreamingAssetRef<Material>> materials) { _writer.SetMaterials(ids, materials); }
+void SceneCapture::SetDrawStates(std::span<const ShapeDrawUpdate> values) { _writer.SetDrawStates(values); }
+bool SceneCapture::SetInstanceParameters(std::span<const ShapeId> ids, const InstanceParameterLayout& layout, std::span<const byte> values) {
+    return _writer.SetInstanceParameters(ids, layout, values);
+}
 
 }  // namespace radray

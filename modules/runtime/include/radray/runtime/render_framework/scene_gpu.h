@@ -56,6 +56,9 @@ private:
             bool Initialized{false};
             ObjectSet Pending;
             vector<ShapeId> Attempt;
+            vector<ShapeId> Sorted;
+            vector<byte> Packed;
+            vector<BufferUploadRequest> Uploads;
         };
         unordered_map<string, ParameterFlight> Parameters;
         vector<InstanceParameterBuffer> ParameterViews;

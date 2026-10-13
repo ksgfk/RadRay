@@ -20,11 +20,19 @@ public:
     ShapeId CreateShape();
     void RemoveShape(ShapeId id);
     void SetStaticMesh(ShapeId id, const StreamingAssetRef<StaticMesh>& mesh, const Eigen::Matrix4f& localToWorld);
+    void SetStaticMeshes(std::span<const ShapeId> ids, const StreamingAssetRef<StaticMesh>& mesh, std::span<const Eigen::Matrix4f> transforms);
     /// Requires a prior SetStaticMesh, including an explicitly empty mesh binding.
     void SetMaterials(ShapeId id, std::span<const StreamingAssetRef<Material>> materials);
+    void SetMaterials(std::span<const ShapeId> ids, std::span<const StreamingAssetRef<Material>> materials);
+    bool CreateShapes(std::span<ShapeId> result);
+    void RemoveShapes(std::span<const ShapeId> ids);
+    void SetTransforms(std::span<const ShapeTransformUpdate> values);
     void SetTransform(ShapeId id, const Eigen::Matrix4f& localToWorld);
     bool SetInstanceParameters(ShapeId id, const InstanceParameterLayout& layout, std::span<const byte> values);
+    bool SetInstanceParameters(std::span<const ShapeId> ids, const InstanceParameterLayout& layout, std::span<const byte> values);
     void SetDrawState(ShapeId id, ShapeDrawState state);
+    void SetDrawStates(std::span<const ShapeDrawUpdate> values);
+    uint64_t CreateBatchDomain();
     /// Reserves an identity; the light enters snapshots after its first SetLight.
     LightId CreateLight();
     void RemoveLight(LightId id);
@@ -39,14 +47,22 @@ private:
     static constexpr size_t kNotQueued = std::numeric_limits<size_t>::max();
     static constexpr uint32_t kNoLightRow = std::numeric_limits<uint32_t>::max();
 
+    struct MaterialUse {
+        MaterialBindings Bindings;
+        size_t Hash, Count{0};
+    };
     struct ShapeState {
         /// An engaged value owns one use in _assets, including an empty AssetId.
         std::optional<AssetId> BoundAsset;
         bool Sent{false};
         bool HasMesh{false};
-        vector<AssetId> BoundMaterials;
+        Nullable<MaterialUse*> BoundMaterials{nullptr};
         size_t MaterialUpdateIndex{kNotQueued};
-        unordered_map<string, size_t> ParameterUpdateIndices;
+        struct ParameterIndex {
+            const InstanceParameterLayout* Layout;
+            size_t Index;
+        };
+        vector<ParameterIndex> ParameterUpdateIndices;
         size_t DrawUpdateIndex{kNotQueued};
     };
 
@@ -81,14 +97,25 @@ private:
     }
 
     ShapeState& GetShape(ShapeId id);
+    void RemoveShapeState(ShapeId id, ShapeState& state);
     ShapeEdit& GetEdit(ShapeId id);
     void EnableEditing();
+    void ReleaseMaterials(ShapeState& state);
+    struct ParameterPayload {
+        shared_ptr<vector<byte>> Bytes;
+        vector<uint32_t> Free;
+    };
+    void ReclaimParameter(const ShapeParameterUpdate& update);
+    void WriteDrawState(const ShapeDrawUpdate& value);
     void BeginCapture();
     void QueueCreate(ShapeId id, ShapeState& state);
     void CancelCreate(ShapeEdit& edit);
     template <class T>
     void CancelUpdate(vector<T>& updates, ShapeEdit& edit);
     void WriteStaticMesh(ShapeId id, ShapeState& state, const StreamingAssetRef<StaticMesh>& mesh, const AffineTransform& localToWorld, TransformId transform = {});
+    void WriteMeshState(ShapeId id, ShapeState& state, StaticMeshDescription mesh, const AffineTransform& localToWorld, TransformId transform);
+    void GatherStaticMeshes(std::span<const ShapeId> ids, const StreamingAssetRef<StaticMesh>& mesh, std::span<const Eigen::Matrix4f> transforms);
+    void GatherTransforms(std::span<const ShapeTransformUpdate> values);
     void WriteTransform(ShapeId id, ShapeState& state, const AffineTransform& localToWorld);
     void Flush(SceneUpdateBatch& batch, uint32_t flightIndex);
     void RemoveLightData(LightSlot& slot);
@@ -103,10 +130,14 @@ private:
     SparseSet<LightSlot> _lightIds;
     LightSceneData _lights;
     RenderAssetLifetime _assets;
+    unordered_map<size_t, vector<unique_ptr<MaterialUse>>> _materialBindings;
+    unordered_map<string, shared_ptr<const InstanceParameterLayout>> _parameterSchemas;
+    unordered_map<const InstanceParameterLayout*, ParameterPayload> _parameterPayloads;
     bool _closing{false};
     bool _claimed{false};
     bool _editing{false};
     bool _captured{false};
+    uint64_t _nextBatchDomain{1};
 };
 
 }  // namespace radray

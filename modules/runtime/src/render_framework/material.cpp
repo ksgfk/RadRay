@@ -41,6 +41,7 @@ Material::Material(vector<MaterialPass> passes, vector<vector<byte>> constants,
                 case MaterialInputSource::SceneObjects:
                 case MaterialInputSource::ViewConstants:
                 case MaterialInputSource::FrameConstants: break;
+                case MaterialInputSource::VisibleInstanceSlots: break;
                 default: return;
             }
         }
@@ -49,4 +50,8 @@ Material::Material(vector<MaterialPass> passes, vector<vector<byte>> constants,
 }
 Material::~Material() noexcept = default;
 void Material::OnUnload(AssetManager&) {}
+MaterialBindings::MaterialBindings(vector<MaterialBinding> values)
+    : _values(make_shared<const vector<MaterialBinding>>(std::move(values))) {}
+MaterialBindings::MaterialBindings(std::initializer_list<MaterialBinding> values)
+    : MaterialBindings(vector<MaterialBinding>{values}) {}
 }  // namespace radray

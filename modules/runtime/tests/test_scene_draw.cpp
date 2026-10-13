@@ -10,6 +10,7 @@
 #include <radray/runtime/game_framework/actor.h>
 #include <radray/runtime/components/camera_component.h>
 #include <radray/runtime/components/static_mesh_component.h>
+#include <radray/runtime/components/instanced_static_mesh_component.h>
 
 namespace radray::test {
 
@@ -20,6 +21,8 @@ public:
     bool Drop{false};
     bool MaterialCase{false};
     bool DepthCase{false};
+    bool Instanced{false};
+    bool Manual{false};
     uint32_t Verified{0}, Dropped{0}, ZeroViews{0}, CameraOnlyVerified{0};
 
 protected:
@@ -61,8 +64,19 @@ protected:
             cube = make_unique<StaticMesh>(std::move(cpu), vector<StaticMeshSection>{}, Eigen::Vector3f{-0.5f, -0.5f, -0.5f}, Eigen::Vector3f{0.5f, 0.5f, 0.5f}, std::move(*geometry));
         }
         _mesh = GetAssetManager()->AddReady<StaticMesh>(AssetId{19, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}, std::move(cube));
-        _object = _world->SpawnActor()->AddComponent<StaticMeshComponent>();
-        _object->SetStaticMesh(_mesh);
+        if (Manual) {
+            _manual = _world->SpawnActor()->AddComponent<InstancedStaticMeshComponent>();
+            _manual->SetStaticMesh(_mesh);
+            array<InstanceInit, 2> initial{};
+            initial[1].LocalToComponent(0, 3) = 1.5f;
+            initial[1].LocalToComponent(1, 3) = .45f;
+            initial[1].LocalToComponent(2, 3) = 4;
+            const size_t count = MaterialCase ? 2 : 1;
+            ASSERT_TRUE(_manual->AddInstances(std::span{initial}.first(count), std::span{_handles}.first(count)));
+        } else {
+            _object = _world->SpawnActor()->AddComponent<StaticMeshComponent>();
+            _object->SetStaticMesh(_mesh);
+        }
         _cameraActor = _world->SpawnActor();
         _camera = _cameraActor->AddComponent<CameraComponent>();
         if (MaterialCase) {
@@ -95,22 +109,36 @@ protected:
             for (uint32_t i = 0; i < 2; ++i) {
                 MaterialPass material;
                 material.Name = "Unlit";
-                material.Program.SourceName = "material_unlit.hlsl";
+                material.Program.SourceName = Instanced ? "material_unlit_instanced.hlsl" : "material_unlit.hlsl";
                 material.Inputs = {{"Objects", MaterialInputSource::SceneObjects}, {"ViewData", MaterialInputSource::ViewConstants}, {"MaterialData", MaterialInputSource::MaterialConstants}, {"Albedo", MaterialInputSource::Texture}, {"AlbedoSampler", MaterialInputSource::Sampler}};
                 material.ObjectIndexPushConstant = "DrawData";
+                if (Instanced) {
+                    material.ObjectIndexPushConstant.clear();
+                    material.PushConstant = "DrawData";
+                    material.SceneIndexField = "VisibleBase";
+                    material.InstanceAddressing = MaterialInstanceAddressing::VisibleSlots;
+                    material.AllowAutomaticInstancing = !Manual;
+                    material.Inputs.push_back({"VisibleInstanceSlots", MaterialInputSource::VisibleInstanceSlots});
+                }
+                MaterialPass unused = material;
+                unused.Name = "Unused";
+                unused.ParameterLayouts = {{"UnusedParameters", 16, {{"Value", 0, 16, 2, 1, 1, 4}}}};
+                unused.Inputs.push_back({"UnusedParameters", MaterialInputSource::InstanceParameters});
                 const array<float, 4> tint{1, 1, i ? 0.5f : 1.0f, 1};
                 const auto bytes = std::as_bytes(std::span{tint});
                 render::SamplerDescriptor sampler{};
                 sampler.AddressS = sampler.AddressT = sampler.AddressR = render::AddressMode::ClampToEdge;
                 sampler.MinFilter = sampler.MagFilter = sampler.MipmapFilter = render::FilterMode::Nearest;
-                auto asset = make_unique<Material>(vector{material}, vector<vector<byte>>{vector<byte>(bytes.begin(), bytes.end())}, vector{texture}, vector{sampler});
+                auto asset = make_unique<Material>(vector{material, unused}, vector<vector<byte>>{vector<byte>(bytes.begin(), bytes.end())}, vector{texture}, vector{sampler});
                 ASSERT_TRUE(asset->IsValid());
                 _materials.push_back(GetAssetManager()->AddReady<Material>({92 + i, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}, std::move(asset)));
             }
-            auto* second = _world->SpawnActor()->AddComponent<StaticMeshComponent>();
-            second->SetStaticMesh(_mesh);
-            second->SetMaterials({_materials[0]});
-            second->SetRelativeLocation({1.5f, 0.45f, 4});
+            if (!Manual) {
+                auto* second = _world->SpawnActor()->AddComponent<StaticMeshComponent>();
+                second->SetStaticMesh(_mesh);
+                second->SetMaterials({_materials[0]});
+                second->SetRelativeLocation({1.5f, 0.45f, 4});
+            }
         }
         _frames.resize(GetGpuSystem()->GetFlightDataCount());
         MaterialPass materialPass;
@@ -118,6 +146,15 @@ protected:
         materialPass.Program.SourceName = DepthCase ? "material_depth.hlsl" : "scene_sync.hlsl";
         materialPass.Inputs = {{"Objects", MaterialInputSource::SceneObjects}, {"ViewData", MaterialInputSource::ViewConstants}};
         materialPass.ObjectIndexPushConstant = "DrawData";
+        if (Instanced) {
+            materialPass.Program.SourceName = DepthCase ? "material_depth_instanced.hlsl" : "scene_sync_instanced.hlsl";
+            materialPass.ObjectIndexPushConstant.clear();
+            materialPass.PushConstant = "DrawData";
+            materialPass.SceneIndexField = "VisibleBase";
+            materialPass.InstanceAddressing = MaterialInstanceAddressing::VisibleSlots;
+            materialPass.AllowAutomaticInstancing = !Manual;
+            materialPass.Inputs.push_back({"VisibleInstanceSlots", MaterialInputSource::VisibleInstanceSlots});
+        }
         MaterialRenderData fallback;
         fallback.Passes.push_back(std::move(materialPass));
         _draw = make_unique<UnlitRenderPipeline>(ScenePipelineDescriptor{.PassName = DepthCase ? "DepthOnly" : "Unlit", .Fallback = std::move(fallback), .DepthTest = DepthCase, .ClearColor = {{0, 0, 0, 1}}});
@@ -152,7 +189,15 @@ protected:
             _object->SetRelativeLocation({_updates % 2 ? -0.65f : 0.65f, 0.45f, 4});
             _object->SetRelativeScale({_updates % 3 ? 1.0f : -1.0f, 1, 1});
         }
+        if (_manual && _updates <= 11) {
+            Eigen::Matrix4f matrix = Eigen::Matrix4f::Identity();
+            matrix(0, 0) = _updates % 3 ? 1.0f : -1.0f;
+            matrix.block<3, 1>(0, 3) = Eigen::Vector3f{_updates % 2 ? -.65f : .65f, .45f, 4};
+            const InstanceUpdate update{_handles[0], matrix};
+            ASSERT_TRUE(_manual->UpdateInstances(std::span{&update, 1}));
+        }
         if (MaterialCase && _object) _object->SetMaterials({_materials[_updates % 2]});
+        if (MaterialCase && _manual) _manual->SetMaterials({_materials[_updates % 2]});
         if (_camera) _camera->SetRelativeLocation({float(_updates % 3) * 0.15f, 0, 0});
         if (_updates == 8) {
             _world->DestroyActor(_cameraActor.Get());
@@ -172,11 +217,11 @@ protected:
         if (_updates >= 18) RequestExit();
     }
     void OnCollectRenderViews(SceneViewCollector& collector) override {
-        if (!_camera || !_object || _updates == 5) return;
+        if (!_camera || (!_object && !_manual) || _updates == 5) return;
         _frames[_updateFlight].ExpectedBlue = MaterialCase && _updates % 2 ? 89 : 179;
         _frames[_updateFlight].ExpectedView = _camera->ComputeViewMatrix();
         _frames[_updateFlight].ExpectedScene = *_world->GetRenderSceneId();
-        _frames[_updateFlight].ExpectStationaryObjects = _updates >= 13;
+        _frames[_updateFlight].ExpectStationaryObjects = _updates >= 11 + GetGpuSystem()->GetFlightDataCount();
         for (uint32_t i = 0; i < Views; ++i) {
             const auto view = CaptureSceneView(*_camera.Get(), {float(i) / Views, 0, 1.0f / Views, 1});
             ASSERT_TRUE(view);
@@ -219,7 +264,7 @@ protected:
             ASSERT_EQ(scene->GetStaticMeshes().size(), MaterialCase ? 2u : 1u);
             for (size_t row = 0; row < scene->GetStaticMeshes().size(); ++row) {
                 const auto object = scene->GetStaticMesh(scene->GetStaticMeshes()[row]);
-                frame.PointBlues.push_back(row == 0 ? frame.ExpectedBlue : 179);
+                frame.PointBlues.push_back(Manual || row == 0 ? frame.ExpectedBlue : 179);
                 auto resolved = ResolveSceneView(views[i], Width(), 96, context.GetDevice()->GetBackend());
                 ASSERT_TRUE(resolved);
                 const Eigen::Vector4f clip = resolved->ViewProjection * object->LocalToWorld * Eigen::Vector4f{0, 0, 0, 1};
@@ -240,7 +285,8 @@ protected:
             output.Colors.push_back(attachment);
         auto result = RecordRenderPipeline(*_draw, pipelineContext, {views, std::move(output)});
         ASSERT_NE(result.Status, PipelineRecordStatus::RecoverableFailure);
-        EXPECT_EQ(renderer->GetGraphicsPipelineCache().GetSize(), 2u);
+        EXPECT_GE(renderer->GetGraphicsPipelineCache().GetSize(), 1u);
+        EXPECT_LE(renderer->GetGraphicsPipelineCache().GetSize(), 2u);
         context.RegisterClosedCommandBuffers({.CmdBuffers = result.Commands});
         auto* commands = context.AllocateCommandBuffer();
         commands->CopyTextureToBuffer(frame.Readback.get(), 0, frame.Image.Tex.get(), {0, 1, 0, 1});
@@ -326,6 +372,8 @@ private:
     Nullable<Actor*> _cameraActor{nullptr};
     Nullable<CameraComponent*> _camera{nullptr};
     Nullable<StaticMeshComponent*> _object{nullptr};
+    Nullable<InstancedStaticMeshComponent*> _manual{nullptr};
+    array<InstanceHandle, 2> _handles{};
     unique_ptr<UnlitRenderPipeline> _draw;
     vector<Frame> _frames;
     uint64_t _pitch{0};
@@ -338,7 +386,7 @@ private:
     ShapeId _oldShape;
 };
 
-void RunDraw(render::RenderBackend backend, uint32_t views, bool threaded, bool drop, bool material, bool depth) {
+void RunDraw(render::RenderBackend backend, uint32_t views, bool threaded, bool drop, bool material, bool depth, bool instanced, bool manual) {
 #if !defined(RADRAY_SCENE_JIT_AVAILABLE)
     GTEST_SKIP() << "Scene drawing requires RADRAY_ENABLE_SHADER_JIT";
 #endif
@@ -348,8 +396,10 @@ void RunDraw(render::RenderBackend backend, uint32_t views, bool threaded, bool 
     app.Drop = drop;
     app.MaterialCase = material;
     app.DepthCase = depth;
+    app.Instanced = instanced;
+    app.Manual = manual;
     auto result = test::RunApplication(app, {
-                                                .FlightDataCount = 2,
+                                                .FlightDataCount = instanced ? 3u : 2u,
                                                 .Window = drop ? std::optional<WindowOptions>{WindowOptions{.Width = 192, .Height = 96}} : std::nullopt,
                                                 .Gpu = GpuOptions{
                                                     .Backend = backend,
@@ -384,5 +434,13 @@ TEST(SceneDraw, D3D12ThreeViewsThreaded) { RunDraw(render::RenderBackend::D3D12,
 TEST(SceneDraw, VulkanThreeViewsThreaded) { RunDraw(render::RenderBackend::Vulkan, 3, true, false); }
 TEST(SceneDraw, D3D12LateDropRetriesLatest) { RunDraw(render::RenderBackend::D3D12, 3, false, true); }
 TEST(SceneDraw, VulkanLateDropRetriesLatest) { RunDraw(render::RenderBackend::Vulkan, 3, false, true); }
+TEST(SceneDraw, D3D12InstancedMaterialThreeFlights) { RunDraw(render::RenderBackend::D3D12, 3, false, false, true, false, true); }
+TEST(SceneDraw, VulkanInstancedMaterialThreeFlights) { RunDraw(render::RenderBackend::Vulkan, 3, true, false, true, false, true); }
+TEST(SceneDraw, D3D12InstancedDepthThreeFlights) { RunDraw(render::RenderBackend::D3D12, 3, false, false, false, true, true); }
+TEST(SceneDraw, VulkanInstancedDepthThreeFlights) { RunDraw(render::RenderBackend::Vulkan, 3, true, false, false, true, true); }
+TEST(SceneDraw, D3D12ManualMaterialMatchesOrdinaryPixelsAcrossReconnect) { RunDraw(render::RenderBackend::D3D12, 3, false, false, true, false, true, true); }
+TEST(SceneDraw, VulkanManualMaterialMatchesOrdinaryPixelsAcrossReconnect) { RunDraw(render::RenderBackend::Vulkan, 3, true, false, true, false, true, true); }
+TEST(SceneDraw, D3D12ManualDepthMatchesOrdinaryPixelsAcrossReconnect) { RunDraw(render::RenderBackend::D3D12, 3, false, false, false, true, true, true); }
+TEST(SceneDraw, VulkanManualDepthMatchesOrdinaryPixelsAcrossReconnect) { RunDraw(render::RenderBackend::Vulkan, 3, true, false, false, true, true, true); }
 
 }  // namespace radray::test

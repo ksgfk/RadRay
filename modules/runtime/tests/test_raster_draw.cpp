@@ -4,6 +4,9 @@
 #include <radray/runtime/render_framework/raster_draw.h>
 #include <radray/runtime/gpu_mesh.h>
 #include <radray/runtime/render_framework/scene_gpu.h>
+#include <radray/runtime/render_framework/scene_draw.h>
+#include "scene_test_support.h"
+#include "runtime_test_device.h"
 #include <cstring>
 #if defined(RADRAY_RASTER_COMPILER_PATH) && defined(_WIN32)
 #include <radray/shader_compiler/client.h>
@@ -11,9 +14,55 @@
 
 namespace radray::test {
 namespace {
+struct MaterialBindingProbe {
+    struct Counts {
+        uint32_t Created{0}, Set{0}, Flush{0}, Live{0};
+    };
+    unordered_map<uint32_t, Counts> Groups;
+};
+class MaterialProbeSet final : public render::ShaderParameterSet {
+public:
+    MaterialProbeSet(unique_ptr<render::ShaderParameterSet> native, MaterialBindingProbe::Counts& counts) : _native(std::move(native)), _counts(counts) {
+        ++_counts.Created;
+        ++_counts.Live;
+    }
+    ~MaterialProbeSet() noexcept override { --_counts.Live; }
+    bool IsValid() const noexcept override { return _native->IsValid(); }
+    void Destroy() noexcept override { _native->Destroy(); }
+    bool Set(render::BindingHandle binding, uint32_t element, render::ShaderParameterValue value) noexcept override {
+        ++_counts.Set;
+        return _native->Set(binding, element, value);
+    }
+    bool FlushWrites() noexcept override {
+        ++_counts.Flush;
+        return _native->FlushWrites();
+    }
+
+private:
+    unique_ptr<render::ShaderParameterSet> _native;
+    MaterialBindingProbe::Counts& _counts;
+};
+class MaterialProbeDevice final : public RuntimeTestDevice {
+public:
+    MaterialProbeDevice(render::Device* native, MaterialBindingProbe& probe) : _native(native), _probe(probe) {}
+    render::RenderBackend GetBackend() noexcept override { return _native->GetBackend(); }
+    render::DeviceDetail GetDetail() const noexcept override { return _native->GetDetail(); }
+    const render::RenderDeviceCapabilities& GetCapabilities() const noexcept override { return _native->GetCapabilities(); }
+    Nullable<unique_ptr<render::Buffer>> CreateBuffer(const render::BufferDescriptor& desc) noexcept override { return _native->CreateBuffer(desc); }
+    void FlushMappedRanges(std::span<const render::MappedBufferRange> ranges) noexcept override { _native->FlushMappedRanges(ranges); }
+    Nullable<unique_ptr<render::ShaderParameterSet>> CreateShaderParameterSet(const render::ShaderParameterSetDescriptor& desc) noexcept override {
+        auto native = _native->CreateShaderParameterSet(desc);
+        if (!native) return nullptr;
+        return make_unique<MaterialProbeSet>(native.Release(), _probe.Groups[desc.GroupIndex]);
+    }
+
+private:
+    render::Device* _native;
+    MaterialBindingProbe& _probe;
+};
 class RasterDraw : public ::testing::Test {
 protected:
-    FrameTimeline Timeline{2};
+    FrameTimeline Timeline{3};
     unique_ptr<GpuSystem> Gpu;
     unique_ptr<RenderSystem> Renderer;
     radray::RasterDraw Core;
@@ -22,6 +71,7 @@ protected:
     unique_ptr<render::Buffer> Readback;
     std::optional<AppFrameContext> Frame;
     HWND Window{};
+    vector<byte> Metadata;
     uint32_t Pitch(uint32_t width) const {
         const uint32_t alignment = std::max(1u, Gpu->GetDevice()->GetDetail().TextureDataPitchAlignment);
         return (width * 4 + alignment - 1) / alignment * alignment;
@@ -30,6 +80,7 @@ protected:
     void SetUp() override {
         RuntimeStartupResult startup;
         GpuSystemDescriptor descriptor;
+        descriptor.FlightDataCount = 3;
         descriptor.EnableFrameProfiler = false;
         descriptor.DXGIFactory.IsEnableDebugLayer = false;
         descriptor.VulkanInstance.IsEnableDebugLayer = false;
@@ -66,7 +117,7 @@ protected:
         if (Gpu) Gpu->AbandonUnpublishedResourcesTerminalGT();
         if (Window) DestroyWindow(Window);
     }
-    Nullable<ShaderProgram*> Program(bool textures, bool arrays = false, bool instances = false) {
+    Nullable<ShaderProgram*> Program(bool textures, bool arrays = false, bool instances = false, bool pure = false, bool visible = false, bool scene = false, bool objectPush = false) {
         string source = R"(
 #ifdef __spirv__
 #define BINDING(b,s) [[vk::binding(b,s)]]
@@ -111,13 +162,60 @@ BINDING(2,0) StructuredBuffer<MaterialValues> InstanceData : register(t0);
             replace("ImageA.Sample", "Images[0].Sample");
             replace("ImageB.Sample", "Images[1].Sample");
         }
+        if (pure) {
+            const auto at = source.find("BINDING(1,0) ConstantBuffer<MaterialValues> Tint : register(b1);");
+            source.replace(at, string{"BINDING(1,0) ConstantBuffer<MaterialValues> Tint : register(b1);"}.size(),
+                           "BINDING(0,1) ConstantBuffer<MaterialValues> Tint : register(b1, space1);");
+        }
+        if (visible) source = R"hlsl(
+#include <core/platform.hlsli>
+struct ViewValues { float4 Data; };
+struct MaterialValues { float4 Color; };
+struct ObjectValues { column_major float4x4 LocalToWorld; };
+struct DrawValues { uint Tag; uint VisibleBase; };
+VK_BINDING(0,0) ConstantBuffer<ViewValues> ViewData : register(b0);
+VK_BINDING(1,0) ConstantBuffer<MaterialValues> Tint : register(b1);
+VK_BINDING(2,0) StructuredBuffer<ObjectValues> Objects : register(t0);
+VK_BINDING(3,0) StructuredBuffer<uint> VisibleInstanceSlots : register(t1);
+VK_BINDING(4,0) StructuredBuffer<MaterialValues> InstanceData : register(t2);
+VK_PUSH_CONSTANT ConstantBuffer<DrawValues> DrawData : register(b2);
+#define VISIBLE_RS "DescriptorTable(CBV(b0),CBV(b1),SRV(t0,numDescriptors=3)),RootConstants(num32BitConstants=2,b2)"
+struct Vertex { float4 Position : SV_Position; nointerpolation uint Slot : TEXCOORD0; };
+[RootSignature(VISIBLE_RS)]
+[shader("vertex")] Vertex VSMain(uint vertex : SV_VertexID, uint instance : SV_InstanceID) {
+    const float2 positions[3] = {float2(-1,-1),float2(-1,3),float2(3,-1)};
+    Vertex v; v.Slot = VisibleInstanceSlots[DrawData.VisibleBase + instance];
+    v.Position = mul(Objects[v.Slot].LocalToWorld, float4(positions[vertex], ViewData.Data.x, 1));
+    return v;
+}
+[RootSignature(VISIBLE_RS)]
+[shader("pixel")] float4 PSMain(Vertex v) : SV_Target {
+    return DrawData.Tag == 7 ? InstanceData[v.Slot].Color * Tint.Color : float4(1,0,1,1);
+}
+)hlsl";
+        if (scene) {
+            const auto replace = [&](std::string_view from, std::string_view to) { const auto at = source.find(from); if (at != string::npos) source.replace(at, from.size(), to); };
+            replace("struct ViewValues { float4 Data; };", "struct ViewValues { column_major float4x4 ViewProjection; };");
+            replace("ViewData.Data.x", "0.5");
+            replace("return v;", "v.Position = mul(ViewData.ViewProjection, v.Position); return v;");
+        }
+        if (objectPush) {
+            source.insert(0, "#include <core/platform.hlsli>\nstruct DrawValues { uint ObjectSlot; };\nVK_PUSH_CONSTANT ConstantBuffer<DrawValues> DrawData : register(b2);\n#define PROBE_RS \"DescriptorTable(CBV(b0),CBV(b1)),RootConstants(num32BitConstants=1,b2)\"\n");
+            const auto depth = source.find("ViewData.Data.x");
+            source.replace(depth, string{"ViewData.Data.x"}.size(), "ViewData.Data.x + DrawData.ObjectSlot * 0.00001");
+            for (std::string_view stage : {"vertex", "pixel"}) {
+                const auto marker = fmt::format("[shader(\"{}\")]", stage);
+                source.insert(source.find(marker), "[RootSignature(PROBE_RS)]\n");
+            }
+        }
+        const vector<std::filesystem::path> includes{RADRAY_SHADERLIB_DIR};
         shader_compiler::Client compiler{RADRAY_RASTER_COMPILER_PATH};
         shader::SourceContractRequest discovery;
         discovery.SourceName = "native-raster.hlsl";
         const auto input = std::as_bytes(std::span{source.data(), source.size()});
         discovery.RootSource.assign(input.begin(), input.end());
         discovery.Targets = static_cast<shader::ShaderTargetMask>(shader::ToTargetMask(Backend() == render::RenderBackend::Vulkan ? shader::ShaderTarget::SPIRV : shader::ShaderTarget::DXIL));
-        const auto contract = compiler.DiscoverSourceContract(discovery, {});
+        const auto contract = compiler.DiscoverSourceContract(discovery, includes);
         EXPECT_TRUE(contract.Succeeded());
         if (!contract.Succeeded()) return nullptr;
         shader::CompileVariantRequest request;
@@ -125,10 +223,11 @@ BINDING(2,0) StructuredBuffer<MaterialValues> InstanceData : register(t0);
         request.RootSource = discovery.RootSource;
         request.Targets = discovery.Targets;
         request.ExpectedContract = contract.Contract.Hash;
-        const auto compiled = compiler.CompileVariant(request, {});
+        const auto compiled = compiler.CompileVariant(request, includes);
         EXPECT_EQ(compiled.Status, shader::CompileStatus::Success);
         if (compiled.Lanes.size() != 1) return nullptr;
         const auto& bytes = compiled.Lanes[0].Metadata;
+        Metadata = bytes;
         shader::WireMetadataEnvelope envelope{};
         std::memcpy(&envelope, bytes.data(), sizeof(envelope));
         auto wrong = envelope.GpuArtifact;
@@ -154,9 +253,9 @@ BINDING(2,0) StructuredBuffer<MaterialValues> InstanceData : register(t0);
         }
         return {{std::move(pass)}, {vector<byte>(16)}, {}, {}};
     }
-    void Begin() {
-        Gpu->BeginUpdateForFlight(0);
-        Frame = Gpu->BeginFrameRecord(0, {}, {}, false);
+    void Begin(uint32_t flight = 0) {
+        Gpu->BeginUpdateForFlight(flight);
+        Frame = Gpu->BeginFrameRecord(flight, {}, {}, false);
         if (Backend() == render::RenderBackend::Vulkan) {
             auto* commands = Frame->AllocateCommandBuffer();
             const render::ResourceBarrierDescriptor barrier = render::BarrierBufferDescriptor{.Target = Readback.get(), .Before = render::BufferState::Undefined, .After = render::BufferState::CopyDestination};
@@ -171,10 +270,11 @@ BINDING(2,0) StructuredBuffer<MaterialValues> InstanceData : register(t0);
         }
     }
     void Complete() {
+        const auto flight = Frame->FlightIndex();
         Frame->SubmitFrame();
-        const auto signal = Gpu->GetFlightGpuSignal(0);
+        const auto signal = Gpu->GetFlightGpuSignal(flight);
         ASSERT_TRUE(signal.Fence->WaitFor(signal.Value, 10000));
-        ASSERT_TRUE(Gpu->CompleteFlightIfReady(0, false));
+        ASSERT_TRUE(Gpu->CompleteFlightIfReady(flight, false));
         FlightCompletion completion;
         ASSERT_TRUE(Timeline.TryReadCompletion(completion));
         EXPECT_TRUE(completion.GpuWorkCompleted);
@@ -224,6 +324,12 @@ BINDING(2,0) StructuredBuffer<MaterialValues> InstanceData : register(t0);
     void DepthStates(bool reverse = false);
     void Regions();
     void Instances();
+    void PersistentDefaults(bool pure);
+    void VisibleInstances();
+    void Batching();
+    void ProbePersistentGroups();
+    void RetainedMaterial();
+    void PushModes();
     void PresentExternal(bool hide) {
         Window = CreateWindowExW(0, L"STATIC", L"RadRay raster producer", WS_OVERLAPPEDWINDOW,
                                  40, 40, 160, 120, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
@@ -338,7 +444,7 @@ void RasterDraw::Mixed(bool arrays) {
     tint[0] = 0.25f;
     auto second = Core.PrepareMaterial(context, *plan.Get(), material, values);
     ASSERT_TRUE(second);
-    EXPECT_EQ(second->Groups.back().Parameters, parameters->Groups.back().Parameters);
+    EXPECT_NE(second->Groups.back().Parameters, parameters->Groups.back().Parameters);
     EXPECT_EQ(Core.PreparePipeline(context, *plan.Get(), pass, {}, render::PrimitiveTopology::TriangleList, nativePass, output).Get(), pipeline.Get());
     EXPECT_EQ(Renderer->GetGraphicsPipelineCache().GetSize(), 1u);
     auto indices = Gpu->GetDevice()->CreateBuffer({12, render::MemoryType::Upload, render::BufferUse::Index | render::BufferUse::MapWrite}).Unwrap();
@@ -356,6 +462,49 @@ void RasterDraw::Mixed(bool arrays) {
     EXPECT_NEAR(pixels[right], 128, 1);
     EXPECT_NEAR(pixels[right + 1], 89, 1);
     EXPECT_NEAR(pixels[right + 2], 38, 1);
+    auto defaults = material;
+    defaults.Textures.assign(textures, textures + 2);
+    defaults.Samplers = {nearest, nearest};
+    const array<float, 4> black{0, 0, 0, 1};
+    const auto defaultBytes = std::as_bytes(std::span{black});
+    defaults.Constants[0].assign(defaultBytes.begin(), defaultBytes.end());
+    MaterialGpuState defaultGpu;
+    Begin();
+    auto nextContext = MakePipelineContext(*Renderer, *Frame);
+    RasterMaterialValues defaultValues{.Views = views};
+    auto original = Core.PrepareMaterial(nextContext, *plan.Get(), MaterialBindingView{defaults, defaultGpu}, defaultValues);
+    ASSERT_TRUE(original);
+    render::TextureView* greenImages[]{imageViews[1].get(), imageViews[1].get()};
+    auto textureValues = defaultValues;
+    textureValues.Textures = greenImages;
+    auto textureOverride = Core.PrepareMaterial(nextContext, *plan.Get(), MaterialBindingView{defaults, defaultGpu}, textureValues);
+    ASSERT_TRUE(textureOverride);
+    const render::SamplerDescriptor temporarySamplers[]{linear, nearest};
+    auto samplerValues = defaultValues;
+    samplerValues.Samplers = temporarySamplers;
+    auto samplerOverride = Core.PrepareMaterial(nextContext, *plan.Get(), MaterialBindingView{defaults, defaultGpu}, samplerValues);
+    ASSERT_TRUE(samplerOverride);
+    auto restored = Core.PrepareMaterial(nextContext, *plan.Get(), MaterialBindingView{defaults, defaultGpu}, defaultValues);
+    ASSERT_TRUE(restored);
+    EXPECT_EQ(original->Groups.back().Parameters, restored->Groups.back().Parameters);
+    EXPECT_NE(original->Groups.back().Parameters, samplerOverride->Groups.back().Parameters);
+    commands = Frame->AllocateCommandBuffer();
+    encoder = Start(commands, nativePass, false);
+    draw.Indices.reset();
+    draw.Scissor = {0, 0, 5, 16};
+    draw.Record(encoder, *textureOverride);
+    draw.Scissor = {5, 0, 5, 16};
+    draw.Record(encoder, *samplerOverride);
+    draw.Scissor = {10, 0, 6, 16};
+    draw.Record(encoder, *restored);
+    const auto defaultsPixels = Read(commands, encoder);
+    EXPECT_EQ(defaultsPixels[Pitch(16) * 8 + 2 * 4], 0);
+    EXPECT_EQ(defaultsPixels[Pitch(16) * 8 + 2 * 4 + 1], 255);
+    EXPECT_NEAR(defaultsPixels[Pitch(16) * 8 + 7 * 4], 89, 1);
+    EXPECT_NEAR(defaultsPixels[Pitch(16) * 8 + 7 * 4 + 2], 38, 1);
+    EXPECT_NEAR(defaultsPixels[Pitch(16) * 8 + 13 * 4], 128, 1);
+    EXPECT_NEAR(defaultsPixels[Pitch(16) * 8 + 13 * 4 + 1], 128, 1);
+    EXPECT_EQ(defaultsPixels[Pitch(16) * 8 + 13 * 4 + 2], 0);
 }
 
 void RasterDraw::DepthStates(bool reverse) {
@@ -492,6 +641,588 @@ TEST_F(RasterDraw, ReversedDepthUsesGreaterCompareAndZeroClearWithIndependentWri
 TEST_F(VulkanRasterDraw, ReversedDepthUsesGreaterCompareAndZeroClearWithIndependentWrite) { DepthStates(true); }
 TEST_F(RasterDraw, IndependentNativeProducerReadsTypedSparseInstanceParametersOnTheGpu) { Instances(); }
 TEST_F(VulkanRasterDraw, IndependentNativeProducerReadsTypedSparseInstanceParametersOnTheGpu) { Instances(); }
+void RasterDraw::PersistentDefaults(bool pure) {
+    auto program = Program(false, false, false, pure);
+    ASSERT_TRUE(program);
+    auto material = Material(program.Get(), false);
+    const array<float, 4> red{1, 0, 0, 1}, green{0, 1, 0, 1};
+    const auto redBytes = std::as_bytes(std::span{red});
+    material.Constants[0].assign(redBytes.begin(), redBytes.end());
+    MaterialGpuState gpu;
+    auto plan = Core.ResolveMaterial(*Renderer, material.Passes[0]);
+    ASSERT_TRUE(plan);
+    Nullable<render::ShaderParameterSet*> fixed{nullptr};
+    const auto tintGroup = program->GetArtifact().FindBindingInfo("Tint")->Group;
+    for (uint32_t frame = 0; frame < 100; ++frame) {
+        Begin(frame % 2);
+        auto context = MakePipelineContext(*Renderer, *Frame);
+        for (uint32_t view = 0; view < 3; ++view) {
+            const array<float, 4> camera{.5f, float(view), 0, 0};
+            const std::span<const byte> views[]{std::as_bytes(std::span{camera})};
+            const auto before = Frame->GetHostWrites().GetStats().CommittedBytes;
+            auto prepared = Core.PrepareMaterial(context, *plan.Get(), MaterialBindingView{material, gpu}, {.Views = views});
+            ASSERT_TRUE(prepared);
+            EXPECT_EQ(Frame->GetHostWrites().GetStats().CommittedBytes - before, 16u);
+            const auto group = std::find_if(prepared->Groups.begin(), prepared->Groups.end(), [&](const auto& g) { return g.Index == tintGroup; });
+            ASSERT_NE(group, prepared->Groups.end());
+            if (pure) {
+                if (fixed)
+                    EXPECT_EQ(group->Parameters, fixed.Get());
+                else
+                    fixed = group->Parameters;
+            }
+            if (frame == 99 && view == 2) {
+                const std::span<const byte> overrides[]{std::as_bytes(std::span{green})};
+                auto changed = Core.PrepareMaterial(context, *plan.Get(), MaterialBindingView{material, gpu}, {.Constants = overrides, .Views = views});
+                ASSERT_TRUE(changed);
+                auto restored = Core.PrepareMaterial(context, *plan.Get(), MaterialBindingView{material, gpu}, {.Views = views});
+                ASSERT_TRUE(restored);
+                const auto output = RenderOutputInfo{16, 16, 1, {render::TextureFormat::RGBA8_UNORM}, {}};
+                auto* pass = Pass(false);
+                auto pipeline = Core.PreparePipeline(context, *plan.Get(), material.Passes[0], {}, render::PrimitiveTopology::TriangleList, pass, output);
+                ASSERT_TRUE(pipeline);
+                auto* commands = Frame->AllocateCommandBuffer();
+                auto* encoder = Start(commands, pass, false);
+                auto draw = Draw(pipeline.Get());
+                draw.Scissor.Width = 8;
+                draw.Record(encoder, *changed);
+                draw.Scissor.X = 8;
+                draw.Record(encoder, *restored);
+                auto pixels = Read(commands, encoder);
+                EXPECT_EQ(pixels[Pitch(16) * 8 + 4 * 4], 0);
+                EXPECT_EQ(pixels[Pitch(16) * 8 + 4 * 4 + 1], 255);
+                EXPECT_EQ(pixels[Pitch(16) * 8 + 12 * 4], 255);
+                EXPECT_EQ(pixels[Pitch(16) * 8 + 12 * 4 + 1], 0);
+            }
+        }
+        if (Frame) Complete();
+    }
+}
+TEST_F(RasterDraw, PersistentPureDefaultsSurviveViewsFlightsAndTemporaryOverride) { PersistentDefaults(true); }
+TEST_F(VulkanRasterDraw, PersistentPureDefaultsSurviveViewsFlightsAndTemporaryOverride) { PersistentDefaults(true); }
+TEST_F(RasterDraw, PersistentConstantsInMixedGroupsSurviveViewsFlightsAndTemporaryOverride) { PersistentDefaults(false); }
+TEST_F(VulkanRasterDraw, PersistentConstantsInMixedGroupsSurviveViewsFlightsAndTemporaryOverride) { PersistentDefaults(false); }
+void RasterDraw::ProbePersistentGroups() {
+    ASSERT_TRUE(Program(false, false, false, true));
+    shader::WireMetadataEnvelope envelope{};
+    std::memcpy(&envelope, Metadata.data(), sizeof(envelope));
+    const shader::ShaderArtifactDecodeOptions options{Backend() == render::RenderBackend::Vulkan ? shader::ShaderTarget::SPIRV : shader::ShaderTarget::DXIL, envelope.GpuArtifact};
+    auto artifact = render::CreateBackendShaderArtifact(*Gpu->GetDevice(), Metadata, options);
+    ASSERT_TRUE(artifact);
+    MaterialBindingProbe counts;
+    MaterialProbeDevice device{Gpu->GetDevice(), counts};
+    RenderSystem renderer{&device};
+    ASSERT_TRUE(renderer.OnInitialize());
+    ShaderProgram program{&device, std::move(*artifact), nullptr, {}, nullptr, {}, nullptr, {}};
+    auto data = Material(&program, false);
+    radray::RasterDraw core;
+    auto owner = make_unique<MaterialGpuState>();
+    auto plan = core.ResolveMaterial(renderer, data.Passes[0]);
+    ASSERT_TRUE(plan);
+    for (uint32_t frame = 0; frame < 100; ++frame) {
+        Begin(frame % 3);
+        GpuFrameResources resources{&device, Frame->GetUploader(), Frame->GetHostWrites()};
+        auto native = MakePipelineContext(renderer, *Frame);
+        PipelineContext context{renderer, native.Frame, native.Commands, resources};
+        for (uint32_t view = 0; view < 3; ++view) {
+            const array<float, 4> camera{.5f, float(frame), float(view), 0};
+            const std::span<const byte> views[]{std::as_bytes(std::span{camera})};
+            ASSERT_TRUE(core.PrepareMaterial(context, *plan.Get(), data, {.Views = views}, owner.get()));
+        }
+        Complete();
+        EXPECT_EQ(counts.Groups[1].Created, 1u);
+        EXPECT_EQ(counts.Groups[1].Set, 1u);
+        EXPECT_EQ(counts.Groups[1].Flush, 1u);
+    }
+    EXPECT_EQ(counts.Groups[1].Live, 1u);
+    {
+        ASSERT_TRUE(Program(false));
+        shader::WireMetadataEnvelope secondEnvelope{};
+        std::memcpy(&secondEnvelope, Metadata.data(), sizeof(secondEnvelope));
+        auto mixedArtifact = render::CreateBackendShaderArtifact(*Gpu->GetDevice(), Metadata, {options.Target, secondEnvelope.GpuArtifact});
+        ASSERT_TRUE(mixedArtifact);
+        ShaderProgram mixed{&device, std::move(*mixedArtifact), nullptr, {}, nullptr, {}, nullptr, {}};
+        auto multi = data;
+        multi.Passes.push_back(multi.Passes[0]);
+        multi.Passes[1].Name = "Mixed";
+        multi.Passes[1].RegisteredProgram = &mixed;
+        MaterialGpuState multiOwner;
+        auto purePlan = core.ResolveMaterial(renderer, multi.Passes[0]);
+        auto mixedPlan = core.ResolveMaterial(renderer, multi.Passes[1]);
+        ASSERT_TRUE(purePlan);
+        ASSERT_TRUE(mixedPlan);
+        Begin();
+        auto nativeContext = MakePipelineContext(renderer, *Frame);
+        GpuFrameResources multiResources{&device, Frame->GetUploader(), Frame->GetHostWrites()};
+        PipelineContext multiContext{renderer, nativeContext.Frame, nativeContext.Commands, multiResources};
+        const array<float, 4> camera{.5f, 0, 0, 0};
+        const std::span<const byte> views[]{std::as_bytes(std::span{camera})};
+        auto pureBinding = core.PrepareMaterial(multiContext, *purePlan.Get(), multi, {.Views = views}, &multiOwner, &multi.Passes[0]);
+        auto mixedBinding = core.PrepareMaterial(multiContext, *mixedPlan.Get(), multi, {.Views = views}, &multiOwner, &multi.Passes[1]);
+        ASSERT_TRUE(pureBinding);
+        ASSERT_TRUE(mixedBinding);
+        EXPECT_EQ(pureBinding->Groups.size(), 2u);
+        EXPECT_EQ(mixedBinding->Groups.size(), 1u);
+        EXPECT_NE(purePlan->Program->GetPipelineLayout(), mixedPlan->Program->GetPipelineLayout());
+        Complete();
+    }
+    const auto createdBeforeReplacement = counts.Groups[1].Created;
+    RenderSystem other{&device};
+    ASSERT_TRUE(other.OnInitialize());
+    radray::RasterDraw otherCore;
+    auto foreign = otherCore.ResolveMaterial(other, data.Passes[0]);
+    ASSERT_TRUE(foreign);
+    Begin();
+    GpuFrameResources resources{&device, Frame->GetUploader(), Frame->GetHostWrites()};
+    auto native = MakePipelineContext(other, *Frame);
+    PipelineContext context{other, native.Frame, native.Commands, resources};
+    const array<float, 4> camera{.5f, 0, 0, 0};
+    const std::span<const byte> views[]{std::as_bytes(std::span{camera})};
+    EXPECT_FALSE(otherCore.PrepareMaterial(context, *foreign.Get(), data, {.Views = views}, owner.get()));
+    PipelineContext oldContext{renderer, native.Frame, native.Commands, resources};
+    auto preserved = core.PrepareMaterial(oldContext, *plan.Get(), data, {.Views = views}, owner.get());
+    ASSERT_TRUE(preserved);
+    const auto frameSetsCreated = counts.Groups[0].Created;
+    const auto frameSetsLive = counts.Groups[0].Live;
+    EXPECT_FALSE(otherCore.PrepareMaterial(context, *foreign.Get(), data, {.Views = views}));
+    ASSERT_EQ(counts.Groups[0].Created, frameSetsCreated);
+    ASSERT_EQ(counts.Groups[0].Live, frameSetsLive);
+    EXPECT_TRUE(preserved->Groups[0].Parameters->FlushWrites());
+    Complete();
+    renderer.OnShutdown();
+    Begin();
+    auto nextNative = MakePipelineContext(other, *Frame);
+    GpuFrameResources nextResources{&device, Frame->GetUploader(), Frame->GetHostWrites()};
+    PipelineContext nextContext{other, nextNative.Frame, nextNative.Commands, nextResources};
+    ASSERT_TRUE(otherCore.PrepareMaterial(nextContext, *foreign.Get(), data, {.Views = views}, owner.get()));
+    EXPECT_EQ(counts.Groups[1].Created, createdBeforeReplacement + 1);
+    EXPECT_EQ(counts.Groups[1].Live, 1u);
+    Complete();
+    owner.reset();
+    EXPECT_EQ(counts.Groups[1].Live, 0u);
+}
+TEST_F(RasterDraw, ProbeShowsNoStaticGroupWritesAfterWarmupAndSafeServiceReplacement) { ProbePersistentGroups(); }
+TEST_F(VulkanRasterDraw, ProbeShowsNoStaticGroupWritesAfterWarmupAndSafeServiceReplacement) { ProbePersistentGroups(); }
+void RasterDraw::RetainedMaterial() {
+    auto program = Program(false, false, false, true);
+    ASSERT_TRUE(program);
+    auto data = Material(program.Get(), false);
+    const array<float, 4> red{1, 0, 0, 1};
+    const auto bytes = std::as_bytes(std::span{red});
+    data.Constants[0].assign(bytes.begin(), bytes.end());
+    AssetManager assets;
+    const AssetId id{920, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
+    auto material = assets.AddReady<radray::Material>(id, make_unique<radray::Material>(data.Passes, data.Constants));
+    Gpu->BeginUpdateForFlight(0);
+    Gpu->RetainForFrameGT(0, material);
+    Frame = Gpu->BeginFrameRecord(0, {}, {}, false);
+    auto context = MakePipelineContext(*Renderer, *Frame);
+    auto plan = Core.ResolveMaterial(*Renderer, material->GetRenderData().Passes[0]);
+    ASSERT_TRUE(plan);
+    const array<float, 4> camera{.5f, 0, 0, 0};
+    const std::span<const byte> views[]{std::as_bytes(std::span{camera})};
+    auto binding = Core.PrepareMaterial(context, *plan.Get(), MaterialBindingView{material->GetRenderData(), material->GetGpuState()}, {.Views = views});
+    ASSERT_TRUE(binding);
+    auto* pass = Pass(false);
+    auto pipeline = Core.PreparePipeline(context, *plan.Get(), material->GetRenderData().Passes[0], {}, render::PrimitiveTopology::TriangleList, pass,
+                                         {16, 16, 1, {render::TextureFormat::RGBA8_UNORM}, {}});
+    ASSERT_TRUE(pipeline);
+    material.Reset();
+    assets.Pump();
+    EXPECT_TRUE(assets.Find<radray::Material>(id));
+    auto* commands = Frame->AllocateCommandBuffer();
+    if (Backend() == render::RenderBackend::Vulkan) {
+        const render::ResourceBarrierDescriptor before = render::BarrierBufferDescriptor{.Target = Readback.get(), .Before = render::BufferState::Undefined, .After = render::BufferState::CopyDestination};
+        commands->ResourceBarrier(std::span{&before, 1});
+    }
+    auto* encoder = Start(commands, pass, false);
+    Draw(pipeline.Get()).Record(encoder, *binding);
+    const auto pixels = Read(commands, encoder);
+    EXPECT_EQ(pixels[Pitch(16) * 8 + 8 * 4], 255);
+    assets.Pump();
+    EXPECT_FALSE(assets.Find<radray::Material>(id));
+}
+TEST_F(RasterDraw, LastNativeMaterialReferenceRetiresAfterItsRealGpuUse) { RetainedMaterial(); }
+TEST_F(VulkanRasterDraw, LastNativeMaterialReferenceRetiresAfterItsRealGpuUse) { RetainedMaterial(); }
+void RasterDraw::PushModes() {
+    auto program = Program(false, false, false, false, false, false, true);
+    ASSERT_TRUE(program);
+    auto data = Material(program.Get(), false);
+    auto legacy = data.Passes[0];
+    legacy.ObjectIndexPushConstant = "DrawData";
+    auto general = legacy;
+    general.ObjectIndexPushConstant.clear();
+    general.PushConstant = "DrawData";
+    auto oldPlan = Core.ResolveMaterial(*Renderer, legacy);
+    auto nativePlan = Core.ResolveMaterial(*Renderer, general);
+    ASSERT_TRUE(oldPlan);
+    ASSERT_TRUE(nativePlan);
+    EXPECT_NE(oldPlan.Get(), nativePlan.Get());
+    EXPECT_EQ(oldPlan->SceneIndexOffset, 0u);
+    EXPECT_FALSE(nativePlan->SceneIndexOffset);
+    radray::RasterDraw reverse;
+    auto first = reverse.ResolveMaterial(*Renderer, general);
+    auto second = reverse.ResolveMaterial(*Renderer, legacy);
+    ASSERT_TRUE(first);
+    ASSERT_TRUE(second);
+    EXPECT_FALSE(first->SceneIndexOffset);
+    EXPECT_EQ(second->SceneIndexOffset, 0u);
+    general.SceneIndexField = "ObjectSlot";
+    auto explicitPlan = Core.ResolveMaterial(*Renderer, general);
+    ASSERT_TRUE(explicitPlan);
+    EXPECT_EQ(explicitPlan->SceneIndexOffset, 0u);
+}
+TEST_F(RasterDraw, GeneralPushDoesNotInheritTheCachedLegacyObjectSlotMapping) { PushModes(); }
+TEST_F(VulkanRasterDraw, GeneralPushDoesNotInheritTheCachedLegacyObjectSlotMapping) { PushModes(); }
+void RasterDraw::VisibleInstances() {
+    auto program = Program(false, false, false, false, true);
+    ASSERT_TRUE(program);
+    auto material = Material(program.Get(), false);
+    const auto layout = ReflectInstanceParameterLayout(program->GetArtifact().Generic(), "Tint", "TintStream");
+    ASSERT_TRUE(layout);
+    auto& pass = material.Passes[0];
+    pass.Inputs.push_back({"Objects", MaterialInputSource::SceneObjects});
+    pass.Inputs.push_back({"VisibleInstanceSlots", MaterialInputSource::VisibleInstanceSlots});
+    pass.Inputs.push_back({"InstanceData", MaterialInputSource::InstanceParameters});
+    pass.ParameterLayouts = {*layout};
+    pass.InstanceAddressing = MaterialInstanceAddressing::VisibleSlots;
+    pass.PushConstant = "DrawData";
+    pass.SceneIndexField = "VisibleBase";
+    pass.ScenePushValues.resize(8);
+    const uint32_t tag = 7;
+    std::memcpy(pass.ScenePushValues.data(), &tag, 4);
+    auto plan = Core.ResolveMaterial(*Renderer, pass);
+    ASSERT_TRUE(plan);
+    ASSERT_EQ(plan->SceneIndexOffset, 4u);
+    auto invalid = pass;
+    invalid.SceneIndexField = "Missing";
+    EXPECT_FALSE(Core.ResolveMaterial(*Renderer, invalid));
+    vector<Eigen::Matrix4f> matrices(208, Eigen::Matrix4f::Identity());
+    vector<byte> tints(208 * 16);
+    const array<uint32_t, 3> used{8, 41, 207};
+    for (size_t i = 0; i < used.size(); ++i) {
+        auto& matrix = matrices[used[i]];
+        matrix(0, 0) = matrix(1, 1) = 0.2f;
+        matrix(0, 3) = -0.6f + float(i) * 0.6f;
+        array<float, 4> tint{};
+        tint[i] = tint[3] = 1;
+        std::memcpy(tints.data() + used[i] * 16, tint.data(), 16);
+    }
+    const array<float, 4> white{1, 1, 1, 1};
+    auto whiteBytes = std::as_bytes(std::span{white});
+    material.Constants[0].assign(whiteBytes.begin(), whiteBytes.end());
+    Begin();
+    auto context = MakePipelineContext(*Renderer, *Frame);
+    const array<uint32_t, 5> slots{207, 8, 41, 207, 41};
+    const RasterFrameParameters parameters{*layout, tints};
+    auto data = PrepareRasterInstances(context, *plan.Get(), matrices, slots, std::span{&parameters, 1});
+    ASSERT_EQ(data.Status, RasterInstancePrepareStatus::Prepared);
+    ASSERT_TRUE(data.Data);
+    data = PrepareRasterInstances(context, *plan.Get(), matrices, slots, std::span{&parameters, 1});
+    ASSERT_EQ(data.Status, RasterInstancePrepareStatus::Prepared);
+    ASSERT_EQ(data.Data->Objects.Range.Offset % 64, 0u);
+    RasterInstanceData copied{*data.Data};
+    EXPECT_EQ(copied.Parameters[0].Layout, &copied.Layouts[0]);
+    data.Data.reset();
+    data.Data = std::move(copied);
+    auto oddStride = context.Resources.AllocateStorage(144, 48);
+    ASSERT_TRUE(oddStride.IsValid());
+    EXPECT_EQ(oddStride.Offset() % 48, 0u);
+    oddStride.Commit(0);
+    matrices.clear();
+    matrices.shrink_to_fit();
+    tints.clear();
+    tints.shrink_to_fit();
+    const array<float, 4> view{.5f, 0, 0, 0};
+    const std::span<const byte> views[]{std::as_bytes(std::span{view})};
+    MaterialGpuState gpu;
+    auto prepared = Core.PrepareMaterial(context, *plan.Get(), MaterialBindingView{material, gpu},
+                                         {.Views = views, .Objects = data.Data->Objects, .VisibleSlots = data.Data->VisibleSlots, .Parameters = data.Data->Parameters});
+    ASSERT_TRUE(prepared);
+    auto* renderPass = Pass(false);
+    const RenderOutputInfo output{16, 16, 1, {render::TextureFormat::RGBA8_UNORM}, {}};
+    auto pipeline = Core.PreparePipeline(context, *plan.Get(), pass, {}, render::PrimitiveTopology::TriangleList, renderPass, output);
+    ASSERT_TRUE(pipeline);
+    auto* commands = Frame->AllocateCommandBuffer();
+    auto* encoder = Start(commands, renderPass, false);
+    auto draw = Draw(pipeline.Get());
+    draw.Push = pass.ScenePushValues;
+    const uint32_t base = 1;
+    std::memcpy(draw.Push.data() + *plan->SceneIndexOffset, &base, 4);
+    draw.Instances = 2;
+    draw.Record(encoder, *prepared);
+    const uint32_t secondBase = 3;
+    std::memcpy(draw.Push.data() + *plan->SceneIndexOffset, &secondBase, 4);
+    draw.Instances = 1;
+    draw.Record(encoder, *prepared);
+    auto pixels = Read(commands, encoder);
+    const array<uint32_t, 3> columns{3, 8, 13};
+    for (size_t i = 0; i < columns.size(); ++i) {
+        const auto pixel = Pitch(16) * 8 + columns[i] * 4;
+        for (size_t color = 0; color < 3; ++color) EXPECT_EQ(pixels[pixel + color], i == color ? 255 : 0);
+    }
+}
+TEST_F(RasterDraw, SparseVisibleSlotsUseNonzeroMappedBaseAfterSourceArraysAreReleased) { VisibleInstances(); }
+TEST_F(VulkanRasterDraw, SparseVisibleSlotsUseNonzeroMappedBaseAfterSourceArraysAreReleased) { VisibleInstances(); }
+void RasterDraw::Batching() {
+    auto program = Program(false, false, false, false, true, true);
+    ASSERT_TRUE(program);
+    auto material = Material(program.Get(), false);
+    auto& contract = material.Passes[0];
+    contract.Inputs.push_back({"Objects", MaterialInputSource::SceneObjects});
+    contract.Inputs.push_back({"VisibleInstanceSlots", MaterialInputSource::VisibleInstanceSlots});
+    contract.Inputs.push_back({"InstanceData", MaterialInputSource::InstanceParameters});
+    auto layout = ReflectInstanceParameterLayout(program->GetArtifact().Generic(), "Tint", "TintStream");
+    ASSERT_TRUE(layout);
+    contract.ParameterLayouts = {*layout};
+    contract.InstanceAddressing = MaterialInstanceAddressing::VisibleSlots;
+    contract.AllowAutomaticInstancing = true;
+    contract.PushConstant = "DrawData";
+    contract.SceneIndexField = "VisibleBase";
+    contract.ScenePushValues.resize(8);
+    const uint32_t tag = 7;
+    std::memcpy(contract.ScenePushValues.data(), &tag, 4);
+    const array<float, 4> white{1, 1, 1, 1};
+    const auto whiteBytes = std::as_bytes(std::span{white});
+    material.Constants[0].assign(whiteBytes.begin(), whiteBytes.end());
+    AssetManager assets;
+    SceneManager scenes{2};
+    auto meshFactory = [&](uint32_t assetId, vector<StaticMeshSection> sections) {
+        MeshResource cpu;
+        const array<float, 9> vertices{-1, -1, .5f, -1, 3, .5f, 3, -1, .5f};
+        const array<uint32_t, 9> indices{0, 1, 2, 0, 1, 2, 0, 1, 2};
+        cpu.Bins.emplace_back(std::as_bytes(std::span{vertices}));
+        cpu.Bins.emplace_back(std::as_bytes(std::span{indices}));
+        MeshPrimitive primitive;
+        primitive.VertexCount = 3;
+        primitive.VertexBuffers.push_back({"POSITION", 0, 0, VertexDataType::FLOAT, 3, 0, 12});
+        primitive.IndexBuffer = {1, 9, 0, 4};
+        cpu.Primitives.push_back(primitive);
+        GpuMesh gpu;
+        gpu.Buffers.push_back(Gpu->GetDevice()->CreateBuffer({36, render::MemoryType::Upload, render::BufferUse::Index | render::BufferUse::MapWrite}).Unwrap());
+        auto mapped = gpu.Buffers[0]->Map(0, 36);
+        std::memcpy(mapped, indices.data(), 36);
+        gpu.Buffers[0]->FlushMappedRange({0, 36});
+        gpu.Buffers[0]->Unmap();
+        GpuMesh::DrawData draw;
+        draw.Ibv = {gpu.Buffers[0].get(), 0, 4};
+        gpu.Draws.push_back(std::move(draw));
+        return assets.AddReady<StaticMesh>({assetId, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1},
+                                           make_unique<StaticMesh>(std::move(cpu), std::move(sections), Eigen::Vector3f{-1, -1, .5f}, Eigen::Vector3f{3, 3, .5f}, std::move(gpu)));
+    };
+    auto mesh = meshFactory(900, {{0, 0, 3, 0, 2}});
+    const auto sceneId = scenes.CreateSceneGT();
+    auto writer = scenes.GetSceneWriterGT(sceneId);
+    vector<ShapeId> ids(10000);
+    ASSERT_TRUE(writer->CreateShapes(ids));
+    vector<Eigen::Matrix4f> transforms(ids.size(), Eigen::Matrix4f::Identity());
+    for (auto& transform : transforms) {
+        transform(0, 0) = .2f;
+        transform(1, 1) = .2f;
+    }
+    writer->SetStaticMeshes(ids, mesh, transforms);
+    vector<byte> tints(ids.size() * 16);
+    for (size_t i = 0; i < ids.size(); ++i) std::memcpy(tints.data() + i * 16, white.data(), 16);
+    ASSERT_TRUE(writer->SetInstanceParameters(ids, *layout, tints));
+    radray::SceneDraw builder;
+    MaterialGpuState gpuState;
+    auto start = [&](uint32_t flight) {
+        scenes.SealFrameGT(flight);
+        scenes.PublishFrameGT(flight);
+        Begin(flight);
+        scenes.ConsumeRenderUpdates(flight, Frame->FrameSerial());
+    };
+    auto finish = [&] {
+        const auto flight = Frame->FlightIndex();
+        const auto serial = Frame->FrameSerial();
+        Complete();
+        scenes.OnFlightCompletedGT({.FlightIndex = flight, .GpuWorkCompleted = true, .FrameSerial = serial});
+    };
+    SceneViewRequest view;
+    view.Scene = sceneId;
+    view.EvaluatedProjection = Eigen::Matrix4f::Identity();
+    const RenderOutputInfo output{16, 16, 1, {render::TextureFormat::RGBA8_UNORM}, {}};
+    start(0);
+    auto objects = scenes.PrepareSceneGpuRT(sceneId, *Frame);
+    ASSERT_TRUE(objects);
+    auto context = MakePipelineContext(*Renderer, *Frame, &scenes);
+    auto* nativePass = Pass(false);
+    auto first = builder.Prepare(context, view, *objects, nativePass, output, "Raster", &material, false, &gpuState);
+    ASSERT_TRUE(first);
+    ASSERT_EQ(first->Draws.size(), 1u);
+    EXPECT_EQ(first->Draws[0].Draw.Instances, 10000u);
+    EXPECT_EQ(first->Draws[0].Draw.FirstInstance, 0u);
+    const auto* templateAddress = builder.GetObjectRecords(sceneId, *scenes.GetSceneRT(sceneId).Get(), ids[0]).data();
+    for (uint32_t i = 1; i < 3; ++i) {
+        auto other = view;
+        other.View(0, 3) = float(i) * .05f;
+        const auto next = builder.Prepare(context, other, *objects, nativePass, output, "Raster", &material, false, &gpuState);
+        ASSERT_TRUE(next);
+        EXPECT_EQ(next->Draws.size(), 1u);
+        EXPECT_NE(next->Materials[0].Groups[0].Parameters, first->Materials[0].Groups[0].Parameters);
+    }
+    const auto serial = Frame->FrameSerial();
+    auto* commands = Frame->AllocateCommandBuffer();
+    auto* encoder = Start(commands, nativePass, false);
+    first->Record(encoder);
+    const auto pixels = Read(commands, encoder);
+    EXPECT_EQ(pixels[Pitch(16) * 8 + 8 * 4], 255);
+    scenes.OnFlightCompletedGT({.FlightIndex = 0, .GpuWorkCompleted = true, .FrameSerial = serial});
+    vector<ShapeTransformUpdate> updates;
+    for (size_t i = 0; i < 5000; ++i) {
+        transforms[i](0, 0) *= -1;
+        updates.push_back({ids[i], transforms[i]});
+    }
+    writer->SetTransforms(updates);
+    start(1);
+    objects = scenes.PrepareSceneGpuRT(sceneId, *Frame);
+    ASSERT_TRUE(objects);
+    auto splitContext = MakePipelineContext(*Renderer, *Frame, &scenes);
+    EXPECT_EQ(builder.GetObjectRecords(sceneId, *scenes.GetSceneRT(sceneId).Get(), ids[0]).data(), templateAddress);
+    auto split = builder.Prepare(splitContext, view, *objects, nativePass, output, "Raster", &material, false, &gpuState);
+    ASSERT_TRUE(split);
+    ASSERT_EQ(split->Draws.size(), 2u);
+    EXPECT_EQ(split->Draws[0].Draw.Instances, 5000u);
+    EXPECT_EQ(split->Draws[1].Draw.Instances, 5000u);
+    EXPECT_NE(split->Draws[0].Draw.Pipeline, split->Draws[1].Draw.Pipeline);
+    finish();
+    transforms[0](0, 3) = 50;
+    writer->SetTransform(ids[0], transforms[0]);
+    writer->SetDrawState(ids[1], {.VisibilityMask = 0});
+    auto disabled = material;
+    disabled.Passes[0].AllowAutomaticInstancing = false;
+    MaterialGpuState disabledGpu;
+    start(0);
+    objects = scenes.PrepareSceneGpuRT(sceneId, *Frame);
+    ASSERT_TRUE(objects);
+    auto unmergedContext = MakePipelineContext(*Renderer, *Frame, &scenes);
+    auto unmerged = builder.Prepare(unmergedContext, view, *objects, nativePass, output, "Raster", &disabled, false, &disabledGpu);
+    ASSERT_TRUE(unmerged);
+    EXPECT_EQ(unmerged->Draws.size(), 9998u);
+    EXPECT_EQ(unmerged->Stats.MaskCulled, 1u);
+    EXPECT_EQ(unmerged->Stats.BoundsCulled, 1u);
+    EXPECT_EQ(unmerged->Stats.AutomaticDisabled, 9998u);
+    finish();
+    auto sections = meshFactory(901, {{0, 0, 3, 0, 2}, {0, 3, 6, 0, 2}, {0, 0, 3, 0, 2, 1}});
+    writer->SetStaticMeshes(ids, sections, transforms);
+    start(1);
+    objects = scenes.PrepareSceneGpuRT(sceneId, *Frame);
+    ASSERT_TRUE(objects);
+    auto rangedContext = MakePipelineContext(*Renderer, *Frame, &scenes);
+    auto ranged = builder.Prepare(rangedContext, view, *objects, nativePass, output, "Raster", &material, false, &gpuState);
+    ASSERT_TRUE(ranged);
+    EXPECT_EQ(ranged->Draws.size(), 6u);
+    finish();
+    vector<ShapeDrawUpdate> explicitStates;
+    for (size_t i = 0; i < ids.size(); ++i) explicitStates.push_back({ids[i], {.VisibilityMask = i == 1 ? 0u : UINT32_MAX, .BatchDomain = 1u + i % 2, .ExplicitInstancing = true}});
+    writer->SetDrawStates(explicitStates);
+    start(0);
+    objects = scenes.PrepareSceneGpuRT(sceneId, *Frame);
+    ASSERT_TRUE(objects);
+    auto explicitContext = MakePipelineContext(*Renderer, *Frame, &scenes);
+    auto explicitBatches = builder.Prepare(explicitContext, view, *objects, nativePass, output, "Raster", &disabled, false, &disabledGpu);
+    ASSERT_TRUE(explicitBatches);
+    EXPECT_EQ(explicitBatches->Draws.size(), 12u);
+    EXPECT_EQ(explicitBatches->Stats.AutomaticDisabled, 0u);
+    finish();
+    auto directProgram = Program(false, false, false, true);
+    ASSERT_TRUE(directProgram);
+    auto direct = Material(directProgram.Get(), false);
+    MaterialGpuState directGpu;
+    start(1);
+    objects = scenes.PrepareSceneGpuRT(sceneId, *Frame);
+    ASSERT_TRUE(objects);
+    auto directContext = MakePipelineContext(*Renderer, *Frame, &scenes);
+    auto unsupported = builder.Prepare(directContext, view, *objects, nativePass, output, "Raster", &direct, false, &directGpu);
+    ASSERT_TRUE(unsupported);
+    EXPECT_TRUE(unsupported->Draws.empty());
+    EXPECT_EQ(unsupported->Stats.ExplicitUnsupported, 29994u);
+    auto directPlan = Core.ResolveMaterial(*Renderer, direct.Passes[0]);
+    ASSERT_TRUE(directPlan);
+    const uint32_t visible = 0;
+    EXPECT_EQ(PrepareRasterInstances(directContext, *directPlan.Get(), std::span{transforms}.first(1), std::span{&visible, 1}).Status, RasterInstancePrepareStatus::Unsupported);
+    finish();
+    const auto otherScene = scenes.CreateSceneGT();
+    auto otherWriter = scenes.GetSceneWriterGT(otherScene);
+    const auto otherId = otherWriter->CreateShape();
+    otherWriter->SetStaticMesh(otherId, mesh, transforms[2]);
+    ASSERT_TRUE(otherWriter->SetInstanceParameters(otherId, *layout, whiteBytes));
+    start(0);
+    const auto* originalTemplate = builder.GetObjectRecords(sceneId, *scenes.GetSceneRT(sceneId).Get(), ids[2]).data();
+    auto alternateView = view;
+    alternateView.Scene = otherScene;
+    auto alternateObjects = scenes.PrepareSceneGpuRT(otherScene, *Frame);
+    ASSERT_TRUE(alternateObjects);
+    auto alternateContext = MakePipelineContext(*Renderer, *Frame, &scenes);
+    auto alternate = builder.Prepare(alternateContext, alternateView, *alternateObjects, nativePass, output, "Raster", &material, false, &gpuState);
+    ASSERT_TRUE(alternate);
+    ASSERT_EQ(alternate->Draws.size(), 1u);
+    EXPECT_EQ(alternate->Draws[0].Draw.Instances, 1u);
+    EXPECT_EQ(builder.GetObjectRecords(sceneId, *scenes.GetSceneRT(sceneId).Get(), ids[2]).data(), originalTemplate);
+    finish();
+    scenes.DestroySceneGT(otherScene);
+    start(1);
+    builder.PruneScenes(scenes);
+    EXPECT_FALSE(scenes.GetSceneRT(otherScene));
+    auto emptyContext = MakePipelineContext(*Renderer, *Frame, &scenes);
+    UnlitRenderPipeline emptyPipeline;
+    EXPECT_EQ(emptyPipeline.Record(emptyContext, {}).Status, PipelineRecordStatus::NoWork);
+    finish();
+    const auto reconnected = scenes.CreateSceneGT();
+    EXPECT_EQ(reconnected.Index, otherScene.Index);
+    EXPECT_NE(reconnected.Generation, otherScene.Generation);
+    auto replacementWriter = scenes.GetSceneWriterGT(reconnected);
+    const auto replacementId = replacementWriter->CreateShape();
+    replacementWriter->SetStaticMesh(replacementId, sections, transforms[2]);
+    ASSERT_TRUE(replacementWriter->SetInstanceParameters(replacementId, *layout, whiteBytes));
+    start(0);
+    alternateView.Scene = reconnected;
+    alternateObjects = scenes.PrepareSceneGpuRT(reconnected, *Frame);
+    ASSERT_TRUE(alternateObjects);
+    auto replacedContext = MakePipelineContext(*Renderer, *Frame, &scenes);
+    auto replaced = builder.Prepare(replacedContext, alternateView, *alternateObjects, nativePass, output, "Raster", &material, false, &gpuState);
+    ASSERT_TRUE(replaced);
+    EXPECT_EQ(replaced->Draws.size(), 3u);
+    finish();
+    writer->RemoveShapes(std::span{ids}.subspan(3));
+    writer->SetStaticMeshes(std::span{ids}.first(3), mesh, std::span{transforms}.first(3));
+    transforms[0](0, 3) = 0;
+    writer->SetTransform(ids[0], transforms[0]);
+    for (size_t i = 0; i < 3; ++i) writer->SetDrawState(ids[i], {});
+    auto ordered = material;
+    ordered.Passes[0].Blend = render::BlendState::Default();
+    auto a = assets.AddReady<radray::Material>({902, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}, make_unique<radray::Material>(ordered.Passes, ordered.Constants));
+    auto b = assets.AddReady<radray::Material>({903, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}, make_unique<radray::Material>(ordered.Passes, ordered.Constants));
+    writer->SetMaterials(ids[0], std::span{&a, 1});
+    writer->SetMaterials(ids[1], std::span{&b, 1});
+    writer->SetMaterials(ids[2], std::span{&a, 1});
+    start(0);
+    objects = scenes.PrepareSceneGpuRT(sceneId, *Frame);
+    ASSERT_TRUE(objects);
+    auto transparentContext = MakePipelineContext(*Renderer, *Frame, &scenes);
+    auto transparent = builder.Prepare(transparentContext, view, *objects, nativePass, output, "Raster", nullptr, false);
+    ASSERT_TRUE(transparent);
+    ASSERT_EQ(transparent->Draws.size(), 3u);
+    EXPECT_EQ(transparent->Draws[0].Material, transparent->Draws[2].Material);
+    EXPECT_NE(transparent->Draws[0].Material, transparent->Draws[1].Material);
+    EXPECT_EQ(transparent->Draws[0].Draw.Instances, 1u);
+    finish();
+    writer->SetDrawState(ids[0], {.SortGroup = 2});
+    writer->SetDrawState(ids[1], {.SortGroup = 1});
+    writer->SetDrawState(ids[2], {.SortGroup = 2, .Order = 1});
+    start(1);
+    objects = scenes.PrepareSceneGpuRT(sceneId, *Frame);
+    ASSERT_TRUE(objects);
+    auto sortedContext = MakePipelineContext(*Renderer, *Frame, &scenes);
+    auto sorted = builder.Prepare(sortedContext, view, *objects, nativePass, output, "Raster", nullptr, false);
+    ASSERT_TRUE(sorted);
+    ASSERT_EQ(sorted->Draws.size(), 3u);
+    EXPECT_EQ(sorted->Draws[0].Material, transparent->Draws[1].Material);
+    finish();
+    scenes.OnShutdown();
+}
+TEST_F(RasterDraw, CompatibleBatchesRespectSectionsWindingCullingAndTransparentOrder) { Batching(); }
+TEST_F(VulkanRasterDraw, CompatibleBatchesRespectSectionsWindingCullingAndTransparentOrder) { Batching(); }
 TEST_F(RasterDraw, MaterialAcceptsRegisteredProgramAndRejectsAmbiguousSourceOwnership) {
     auto program = Program(false);
     ASSERT_TRUE(program);

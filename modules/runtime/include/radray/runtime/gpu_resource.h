@@ -350,4 +350,25 @@ private:
     uint64_t _allocatedThisFrame{};
 };
 
+/// Device-scoped immutable slices, retained by their owner through actual GPU completion.
+class PersistentCBufferArena {
+public:
+    struct Allocation {
+        render::ShaderBufferBinding Binding;
+        shared_ptr<void> Owner;
+    };
+    explicit PersistentCBufferArena(render::Device* device);
+    ~PersistentCBufferArena() noexcept;
+    std::optional<Allocation> Allocate(std::span<const byte> bytes);
+    /// RT; only unowned pages are released. Material/frame ownership already enforces completion.
+    void Trim();
+
+private:
+    struct Page;
+    struct Block;
+    render::Device* _device;
+    uint64_t _alignment;
+    vector<shared_ptr<Page>> _pages;
+};
+
 }  // namespace radray

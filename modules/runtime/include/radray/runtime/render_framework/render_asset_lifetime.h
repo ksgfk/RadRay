@@ -16,6 +16,7 @@ public:
     RenderAssetLifetime& operator=(RenderAssetLifetime&&) = delete;
 
     void AddUse(const StreamingAssetRefAny& asset);
+    void AddUses(const StreamingAssetRefAny& asset, size_t count);
     void RemoveUse(AssetId id);
     /// After all binding changes for this flight; only visits candidates whose use count reached zero.
     void SealRetirements(uint32_t flightIndex);

@@ -1,6 +1,41 @@
 #include <radray/runtime/render_framework/instance_parameters.h>
+#include <algorithm>
+#include <cstring>
 
 namespace radray {
+ShapeParameterUpdate::ShapeParameterUpdate(ShapeId id, const InstanceParameterLayout& layout, vector<byte> values)
+    : Id(id), Layout(make_shared<const InstanceParameterLayout>(layout)), Storage(make_shared<const vector<byte>>(std::move(values))), Size(static_cast<uint32_t>(Storage->size())) {}
+ShapeParameterUpdate::ShapeParameterUpdate(ShapeId id, shared_ptr<const InstanceParameterLayout> layout, shared_ptr<const vector<byte>> storage, uint32_t offset)
+    : Id(id), Layout(std::move(layout)), Storage(std::move(storage)), Offset(offset), Size(Layout->Stride) {}
+std::span<const byte> ShapeParameterUpdate::GetValues() const noexcept {
+    if (!Layout || !Storage || Offset > Storage->size() || Size > Storage->size() - Offset) return {};
+    return {Storage->data() + Offset, Size};
+}
+uint32_t SceneParameterStream::RowsPerPage() const noexcept { return std::max(1u, 16384u / Layout.Stride); }
+std::span<const byte> SceneParameterStream::GetValues(uint32_t slot) const noexcept {
+    if (slot >= Rows.size() || !Rows[slot]) return {};
+    const auto count = RowsPerPage();
+    return {_pages[slot / count].get() + size_t{slot % count} * Layout.Stride, Layout.Stride};
+}
+void SceneParameterStream::Set(ShapeId id, std::span<const byte> values) {
+    if (id.Index >= Rows.size()) Rows.resize(size_t{id.Index} + 1);
+    const auto count = RowsPerPage();
+    const auto page = id.Index / count;
+    if (page >= _pages.size()) {
+        _pages.resize(size_t{page} + 1);
+        _live.resize(_pages.size());
+    }
+    if (!_pages[page]) _pages[page] = make_unique<byte[]>(size_t{count} * Layout.Stride);
+    if (!Rows[id.Index]) ++_live[page];
+    Rows[id.Index] = Row{id};
+    std::memcpy(_pages[page].get() + size_t{id.Index % count} * Layout.Stride, values.data(), Layout.Stride);
+}
+void SceneParameterStream::Remove(uint32_t slot) {
+    if (slot >= Rows.size() || !Rows[slot]) return;
+    Rows[slot].reset();
+    const auto page = slot / RowsPerPage();
+    if (!--_live[page]) _pages[page].reset();
+}
 bool InstanceParameterLayout::IsValid() const noexcept {
     if (Name.empty() || !Stride || Stride > 65536 || Stride % 4 || Fields.empty()) return false;
     for (size_t i = 0; i < Fields.size(); ++i) {

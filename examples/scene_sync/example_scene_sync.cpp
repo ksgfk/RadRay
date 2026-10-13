@@ -104,9 +104,12 @@ void SceneSyncApp::OnRender(AppFrameContext& frame) {
     if (!_pipeline) {
         MaterialPass materialPass;
         materialPass.Name = "Unlit";
-        materialPass.Program.SourceName = "scene_sync.hlsl";
-        materialPass.Inputs = {{"Objects", MaterialInputSource::SceneObjects}, {"ViewData", MaterialInputSource::ViewConstants}};
-        materialPass.ObjectIndexPushConstant = "DrawData";
+        materialPass.Program.SourceName = "scene_sync_instanced.hlsl";
+        materialPass.Inputs = {{"Objects", MaterialInputSource::SceneObjects}, {"ViewData", MaterialInputSource::ViewConstants}, {"VisibleInstanceSlots", MaterialInputSource::VisibleInstanceSlots}};
+        materialPass.PushConstant = "DrawData";
+        materialPass.SceneIndexField = "VisibleBase";
+        materialPass.InstanceAddressing = MaterialInstanceAddressing::VisibleSlots;
+        materialPass.AllowAutomaticInstancing = true;
         MaterialRenderData fallback;
         fallback.Passes.push_back(std::move(materialPass));
         _pipeline = make_unique<UnlitRenderPipeline>(ScenePipelineDescriptor{.Fallback = std::move(fallback)});

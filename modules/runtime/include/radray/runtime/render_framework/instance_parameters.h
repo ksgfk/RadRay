@@ -25,8 +25,12 @@ std::optional<InstanceParameterLayout> ReflectInstanceParameterLayout(const shad
                                                                       std::string_view declaration, string streamName);
 struct ShapeParameterUpdate {
     ShapeId Id;
-    InstanceParameterLayout Layout;
-    vector<byte> Values;
+    shared_ptr<const InstanceParameterLayout> Layout;
+    shared_ptr<const vector<byte>> Storage;
+    uint32_t Offset{0}, Size{0};
+    ShapeParameterUpdate(ShapeId id, const InstanceParameterLayout& layout, vector<byte> values);
+    ShapeParameterUpdate(ShapeId id, shared_ptr<const InstanceParameterLayout> layout, shared_ptr<const vector<byte>> storage, uint32_t offset);
+    std::span<const byte> GetValues() const noexcept;
 };
 struct SceneParameterChange {
     ShapeId Id;
@@ -39,9 +43,16 @@ struct InstanceParameterBuffer {
 struct SceneParameterStream {
     struct Row {
         ShapeId Id;
-        vector<byte> Values;
     };
     InstanceParameterLayout Layout;
     vector<std::optional<Row>> Rows;
+    std::span<const byte> GetValues(uint32_t slot) const noexcept;
+    void Set(ShapeId id, std::span<const byte> values);
+    void Remove(uint32_t slot);
+
+private:
+    uint32_t RowsPerPage() const noexcept;
+    vector<unique_ptr<byte[]>> _pages;
+    vector<uint32_t> _live;
 };
 }  // namespace radray

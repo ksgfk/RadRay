@@ -19,17 +19,80 @@ MaterialPass TestMaterialPass() {
     return pass;
 }
 TEST(PipelineMaterial, InstanceUpdatesCoalesceAndCancelOnRemoveWithoutDirtyingMatrices) {
-    SceneManager manager{1};auto scene=manager.CreateSceneGT();auto writer=manager.GetSceneWriterGT(scene);
-    auto id=writer->CreateShape();writer->SetStaticMesh(id,{},Eigen::Matrix4f::Identity());
-    InstanceParameterLayout layout{"Color",16,{{"RGBA",0,16,0,1,1,4}}};array<byte,16> values{};
-    ASSERT_TRUE(writer->SetInstanceParameters(id,layout,values));values[0]=byte{7};ASSERT_TRUE(writer->SetInstanceParameters(id,layout,values));
-    EXPECT_FALSE(writer->SetInstanceParameters(id,layout,std::span{values}.first(15)));
-    manager.SealFrameGT(0);EXPECT_EQ(SceneBatch(manager,scene,0).Parameters.size(),1u);ConsumeFrame(manager,0);CompleteFrame(manager,0);
-    values[0]=byte{9};ASSERT_TRUE(writer->SetInstanceParameters(id,layout,values));manager.SealFrameGT(0);
-    EXPECT_TRUE(SceneBatch(manager,scene,0).Transforms.empty());EXPECT_TRUE(SceneBatch(manager,scene,0).MeshStates.empty());ConsumeFrame(manager,0);CompleteFrame(manager,0);
-    ASSERT_TRUE(writer->SetInstanceParameters(id,layout,values));writer->RemoveShape(id);auto replacement=writer->CreateShape();
-    EXPECT_EQ(id.Index,replacement.Index);EXPECT_NE(id.Generation,replacement.Generation);writer->SetStaticMesh(replacement,{},Eigen::Matrix4f::Identity());
-    manager.SealFrameGT(0);EXPECT_TRUE(SceneBatch(manager,scene,0).Parameters.empty());ConsumeFrame(manager,0);CompleteFrame(manager,0);manager.OnShutdown();
+    SceneManager manager{1};
+    auto scene = manager.CreateSceneGT();
+    auto writer = manager.GetSceneWriterGT(scene);
+    auto id = writer->CreateShape();
+    writer->SetStaticMesh(id, {}, Eigen::Matrix4f::Identity());
+    InstanceParameterLayout layout{"Color", 16, {{"RGBA", 0, 16, 0, 1, 1, 4}}};
+    array<byte, 16> values{};
+    ASSERT_TRUE(writer->SetInstanceParameters(id, layout, values));
+    values[0] = byte{7};
+    ASSERT_TRUE(writer->SetInstanceParameters(id, layout, values));
+    EXPECT_FALSE(writer->SetInstanceParameters(id, layout, std::span{values}.first(15)));
+    manager.SealFrameGT(0);
+    EXPECT_EQ(SceneBatch(manager, scene, 0).Parameters.size(), 1u);
+    ConsumeFrame(manager, 0);
+    CompleteFrame(manager, 0);
+    values[0] = byte{9};
+    ASSERT_TRUE(writer->SetInstanceParameters(id, layout, values));
+    manager.SealFrameGT(0);
+    EXPECT_TRUE(SceneBatch(manager, scene, 0).Transforms.empty());
+    EXPECT_TRUE(SceneBatch(manager, scene, 0).MeshStates.empty());
+    ConsumeFrame(manager, 0);
+    CompleteFrame(manager, 0);
+    ASSERT_TRUE(writer->SetInstanceParameters(id, layout, values));
+    writer->RemoveShape(id);
+    auto replacement = writer->CreateShape();
+    EXPECT_EQ(id.Index, replacement.Index);
+    EXPECT_NE(id.Generation, replacement.Generation);
+    writer->SetStaticMesh(replacement, {}, Eigen::Matrix4f::Identity());
+    manager.SealFrameGT(0);
+    EXPECT_TRUE(SceneBatch(manager, scene, 0).Parameters.empty());
+    ConsumeFrame(manager, 0);
+    CompleteFrame(manager, 0);
+    manager.OnShutdown();
+}
+TEST(PipelineMaterial, BulkBindingsAndPackedParametersKeepOnlyFinalValuesAndFreezeAtSeal) {
+    AssetManager assets;
+    SceneManager manager{2};
+    const auto scene = manager.CreateSceneGT();
+    auto writer = manager.GetSceneWriterGT(scene);
+    vector<ShapeId> ids(257);
+    ASSERT_TRUE(writer->CreateShapes(ids));
+    vector<Eigen::Matrix4f> matrices(ids.size(), Eigen::Matrix4f::Identity());
+    writer->SetStaticMeshes(ids, {}, matrices);
+    auto material = assets.AddReady<Material>({600, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}, make_unique<Material>(vector{TestMaterialPass()}, vector<vector<byte>>{vector<byte>(16)}));
+    writer->SetMaterials(ids, std::span{&material, 1});
+    InstanceParameterLayout layout{"Color", 16, {{"RGBA", 0, 16, 0, 1, 1, 4}}};
+    vector<byte> bytes(ids.size() * 16, byte{1});
+    ASSERT_TRUE(writer->SetInstanceParameters(ids, layout, bytes));
+    array<byte, 16> final{};
+    for (uint32_t i = 0; i < 10000; ++i) {
+        final[0] = byte(i % 256);
+        ASSERT_TRUE(writer->SetInstanceParameters(ids[128], layout, final));
+        writer->SetMaterials(ids[128], std::span{&material, 1});
+    }
+    manager.SealFrameGT(0);
+    const auto& sealed = SceneBatch(manager, scene, 0);
+    ASSERT_EQ(sealed.Materials.size(), ids.size());
+    ASSERT_EQ(sealed.Parameters.size(), ids.size());
+    EXPECT_EQ(sealed.Materials[0].Materials.data(), sealed.Materials[128].Materials.data());
+    EXPECT_EQ(sealed.Parameters[0].Layout.get(), sealed.Parameters[128].Layout.get());
+    EXPECT_EQ(sealed.Parameters[0].Storage.get(), sealed.Parameters[128].Storage.get());
+    EXPECT_EQ(sealed.Parameters[128].GetValues()[0], byte{15});
+    final[0] = byte{7};
+    ASSERT_TRUE(writer->SetInstanceParameters(ids[128], layout, final));
+    EXPECT_EQ(sealed.Parameters[128].GetValues()[0], byte{15});
+    ConsumeFrame(manager, 0);
+    CompleteFrame(manager, 0);
+    writer->RemoveShapes(std::span{ids}.subspan(10, 10));
+    manager.SealFrameGT(1);
+    ASSERT_EQ(SceneBatch(manager, scene, 1).Parameters.size(), 1u);
+    ConsumeFrame(manager, 1);
+    EXPECT_EQ(manager.GetSceneRT(scene)->GetParameterStreams().at("Color").GetValues(ids[128].Index)[0], byte{7});
+    CompleteFrame(manager, 1);
+    manager.OnShutdown();
 }
 TEST(PipelineMaterial, TypedUpdatesCoalesceAndDoNotDirtyObjectMatrices) {
     Application app;
@@ -106,12 +169,24 @@ TEST(PipelineMaterial, ComponentMaterialChangeUsesItsOwnTypedUpdate) {
     CompleteFrame(renderer, 0);
 }
 TEST(PipelineMaterial, NativeWorldComponentUsesTheSameInstanceUpdateWithoutTransformOrMaterialCopies) {
-    Application app; SceneManager manager{1};ScopedWorld world;const auto scene=ConnectWorld(world,manager);
-    auto* mesh=world.SpawnActor()->AddComponent<StaticMeshComponent>();SceneUpdateBatch initial;CollectScene(world,manager,initial);
-    InstanceParameterLayout layout{"Tint",16,{{"Color",0,16,0,1,1,4}}};array<byte,16> values{};
-    ASSERT_TRUE(mesh->SetInstanceParameters(layout,values));PrepareScene(world,manager,0);const auto& batch=SceneBatch(manager,scene,0);
-    EXPECT_TRUE(batch.Transforms.empty());EXPECT_TRUE(batch.LocalTransforms.empty());EXPECT_TRUE(batch.Materials.empty());ASSERT_EQ(batch.Parameters.size(),1u);
-    ConsumeFrame(manager,0);CompleteFrame(manager,0);
+    Application app;
+    SceneManager manager{1};
+    ScopedWorld world;
+    const auto scene = ConnectWorld(world, manager);
+    auto* mesh = world.SpawnActor()->AddComponent<StaticMeshComponent>();
+    SceneUpdateBatch initial;
+    CollectScene(world, manager, initial);
+    InstanceParameterLayout layout{"Tint", 16, {{"Color", 0, 16, 0, 1, 1, 4}}};
+    array<byte, 16> values{};
+    ASSERT_TRUE(mesh->SetInstanceParameters(layout, values));
+    PrepareScene(world, manager, 0);
+    const auto& batch = SceneBatch(manager, scene, 0);
+    EXPECT_TRUE(batch.Transforms.empty());
+    EXPECT_TRUE(batch.LocalTransforms.empty());
+    EXPECT_TRUE(batch.Materials.empty());
+    ASSERT_EQ(batch.Parameters.size(), 1u);
+    ConsumeFrame(manager, 0);
+    CompleteFrame(manager, 0);
 }
 TEST(PipelineVertexLayout, OwnsSemanticsAndRejectsAmbiguousOrOutOfBoundsInputs) {
     GeometryVertexLayout layout{{{0, 24, render::VertexStepMode::Vertex}, {1, 8, render::VertexStepMode::Vertex}},

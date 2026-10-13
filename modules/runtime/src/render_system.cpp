@@ -10,11 +10,16 @@ RenderSystem::RenderSystem(render::Device* device, std::filesystem::path shaderS
 }
 RenderSystem::~RenderSystem() noexcept { OnShutdown(); }
 void RenderSystem::OnShutdown() noexcept {
+    if (_generation) _generation->Alive = false;
+    _persistentConstants.reset();
     _graphicsPipelines.reset();
     _shaderCache.reset();
     _renderPassRegistry.reset();
 }
 bool RenderSystem::OnInitialize() {
+    if (_generation && _generation->Alive) return false;
+    _generation = make_shared<RenderServiceGeneration>();
+    _persistentConstants = make_unique<PersistentCBufferArena>(_device);
     _graphicsPipelines = make_unique<GraphicsPipelineCache>(_device);
     _renderPassRegistry = make_unique<render::RenderPassRegistry>(_device);
     _shaderCache = make_unique<ShaderProgramCache>(*_device, _shaderSourceRoot, _shaderIncludePaths);

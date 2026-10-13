@@ -6,6 +6,7 @@
 #include <radray/profiler.h>
 #include <radray/runtime/render_system.h>
 #include <radray/runtime/render_framework/scene_manager.h>
+#include <radray/runtime/render_framework/raster_scene.h>
 
 namespace radray {
 size_t SceneDrawKeyHash::operator()(const SceneDrawKey& key) const noexcept {
@@ -14,143 +15,314 @@ size_t SceneDrawKeyHash::operator()(const SceneDrawKey& key) const noexcept {
     hash.Add(key.Material);
     return hash.ToHashCode();
 }
+size_t SceneDraw::TemplateHash::operator()(const TemplateKey& key) const noexcept {
+    HashCode hash;
+    hash.Add(key.Mesh);
+    hash.Add(key.Materials);
+    hash.Add(key.Count);
+    return hash.ToHashCode();
+}
+void SceneDraw::PruneScenes(const SceneManager& scenes) {
+    for (auto it = _scenes.begin(); it != _scenes.end();) {
+        const SceneId id{uint32_t(it->first), uint32_t(it->first >> 32)};
+        if (!scenes.GetSceneRT(id))
+            it = _scenes.erase(it);
+        else
+            ++it;
+    }
+}
 std::span<const SceneDraw::PrimitiveRecord> SceneDraw::GetObjectRecords(SceneId sceneId, const RenderScene& scene, ShapeId id) {
-    if (_scene != sceneId) {
-        _records.clear();
-        _scene = sceneId;
+    auto& cache = _scenes[(uint64_t{sceneId.Generation} << 32) | sceneId.Index];
+    if (cache.Revision != scene.GetStructureRevision()) {
+        cache.Templates.clear();
+        size_t live = 0;
+        for (const auto index : cache.Active) {
+            auto& record = cache.Records[index];
+            const auto revision = scene.GetDrawRevision(record.Id);
+            if (!revision) {
+                record = {};
+                continue;
+            }
+            if (record.Geometry != revision->Geometry || record.Materials != revision->Materials) record.Items.reset();
+            cache.Active[live++] = index;
+        }
+        cache.Active.resize(live);
+        cache.Revision = scene.GetStructureRevision();
     }
     const auto object = scene.GetStaticMesh(id);
     const auto revision = scene.GetDrawRevision(id);
-    if (!object || !revision) {
-        if (id.Index < _records.size()) _records[id.Index].reset();
-        return {};
+    if (!object || !revision) return {};
+    if (id.Index >= cache.Records.size()) cache.Records.resize(size_t{id.Index} + 1);
+    auto& record = cache.Records[id.Index];
+    if (!record.Id.IsValid()) cache.Active.push_back(id.Index);
+    if (!record.Items || record.Id != id || record.Geometry != revision->Geometry || record.Materials != revision->Materials) {
+        const TemplateKey key{object->Mesh.RenderData.Get(), object->Materials.data(), object->Materials.size()};
+        auto item = cache.Templates.find(key);
+        if (item == cache.Templates.end()) {
+            auto items = make_shared<vector<PrimitiveRecord>>();
+            const auto mesh = object->Mesh.GetRenderMesh();
+            if (mesh)
+                for (const auto& section : object->Mesh.GetSections()) {
+                    if (!section.IndexCount || section.PrimitiveIndex >= mesh->Draws.size()) continue;
+                    items->push_back({&mesh->Draws[section.PrimitiveIndex], &section,
+                                      section.MaterialSlot < object->Materials.size() ? object->Materials[section.MaterialSlot] : MaterialBinding{{}, nullptr}});
+                }
+            item = cache.Templates.emplace(key, std::move(items)).first;
+        }
+        record = {id, revision->Geometry, revision->Materials, item->second};
     }
-    if (id.Index >= _records.size()) _records.resize(size_t{id.Index} + 1);
-    auto& record = _records[id.Index];
-    if (!record || record->Id != id || record->Geometry != revision->Geometry || record->Materials != revision->Materials) {
-        record = make_unique<ObjectRecord>();
-        record->Id = id;
-        record->Geometry = revision->Geometry;
-        record->Materials = revision->Materials;
-        const auto mesh = object->Mesh.GetRenderMesh();
-        if (mesh)
-            for (const auto& section : object->Mesh.GetSections()) {
-                if (!section.IndexCount || section.PrimitiveIndex >= mesh->Draws.size()) continue;
-                record->Items.push_back({&mesh->Draws[section.PrimitiveIndex], &section,
-                                         section.MaterialSlot < object->Materials.size() ? object->Materials[section.MaterialSlot] : MaterialBinding{{}, nullptr}});
-            }
-    }
-    return record->Items;
+    return *record.Items;
 }
+
 std::optional<PreparedSceneDraw> SceneDraw::Prepare(
-    PipelineContext& context,
-    const SceneViewRequest& view,
-    const SceneGpuView& objects,
-    render::RenderPass* pass,
-    const RenderOutputInfo& output,
-    std::string_view passName,
-    Nullable<const MaterialRenderData*> fallback,
-    bool depthTest) {
-    /**
-     * 1.检查对象与视图的 visibility mask。
-     * 2.检查 GPU 几何是否可用。
-     * 3.遍历网格 section。
-     * 4.用 section.MaterialSlot 找到对应材质。
-     * 5.从材质中选择 pipeline 要求的 pass，例如 "Unlit"。
-     * 6.为该 section 生成一个绘制项。
-     */
+    PipelineContext& context, const SceneViewRequest& view, const SceneGpuView& objects,
+    render::RenderPass* pass, const RenderOutputInfo& output, std::string_view passName,
+    Nullable<const MaterialRenderData*> fallback, bool depthTest, Nullable<MaterialGpuState*> fallbackGpu) {
     RADRAY_PROFILE_SCOPE_N("SceneDraw::Prepare");
+    context.Renderer.GetPersistentConstants().Trim();
     const auto resolved = ResolveSceneView(view, output.Width, output.Height, context.Resources.GetDevice()->GetBackend());
-    auto scene = context.Scenes ? context.Scenes->GetSceneRT(view.Scene) : nullptr;
+    const auto scene = context.Scenes ? context.Scenes->GetSceneRT(view.Scene) : nullptr;
     if (!resolved || !scene) return std::nullopt;
-    PreparedSceneDraw result{*resolved, {}, {}};
-    const std::span<const byte> viewBytes = std::as_bytes(std::span{resolved->ViewProjection.data(), size_t{16}});
-    const std::span<const byte> views[]{viewBytes};
-    RasterMaterialValues values{.Views = views, .Objects = objects.Objects, .Parameters = objects.Parameters};
-    struct PreparedMaterial {
-        size_t Index;
-        const RasterMaterialPlan* Plan;
+    PruneScenes(*context.Scenes.Get());
+    PreparedSceneDraw result{*resolved, {}, {}, {}};
+    struct MaterialInfo {
+        const MaterialRenderData* Data;
+        Nullable<MaterialGpuState*> Gpu;
         const MaterialPass* Pass;
+        const RasterMaterialPlan* Plan;
+        vector<const SceneParameterStream*> Streams;
     };
-    unordered_map<const MaterialRenderData*, PreparedMaterial> materials;
-    struct Geometry {
-        array<render::GraphicsPipelineState*, 2> Pipelines;
+    vector<MaterialInfo> materials;
+    unordered_map<const MaterialRenderData*, size_t> materialIndices;
+    // All uniforms, layouts, viewport/scissor and scene/view/pass scope are fixed by one Prepare.
+    // Geometry identity covers immutable vertex/index streams and topology; section ranges stay explicit.
+    struct BatchKey {
+        const GpuMesh::DrawData* Geometry;
         size_t Material;
+        uint32_t Count, First;
+        int32_t VertexOffset;
+        uint32_t SortGroup, Order;
+        uint64_t Domain;
+        bool Reverse, Explicit;
+        bool operator==(const BatchKey&) const = default;
     };
-    unordered_map<SceneDrawKey, Geometry, SceneDrawKeyHash> geometryBindings;
+    struct BatchHash {
+        size_t operator()(const BatchKey& key) const noexcept {
+            HashCode hash;
+            hash.Add(key.Geometry);
+            hash.Add(key.Material);
+            hash.Add(key.Count);
+            hash.Add(key.First);
+            hash.Add(key.VertexOffset);
+            hash.Add(key.SortGroup);
+            hash.Add(key.Order);
+            hash.Add(key.Domain);
+            hash.Add(key.Reverse);
+            hash.Add(key.Explicit);
+            return hash.ToHashCode();
+        }
+    };
+    struct Candidate {
+        BatchKey Key;
+        uint32_t Slot;
+        bool Merge, Reorder;
+    };
+    vector<Candidate> candidates;
     const auto columns = scene->GetStaticMeshColumns();
-    if (_scene == view.Scene)
-        for (auto& record : _records)
-            if (record && !scene->ContainsShape(record->Id)) record.reset();
-    for (size_t row = 0; row < columns.Size(); ++row) {
-        const auto object = columns.Get(row);
-        const auto state = scene->GetDrawState(columns.Ids[row]);
-        if (!state || !(state->VisibilityMask & view.VisibilityMask)) continue;
-        const auto mesh = object.Mesh.GetRenderMesh();
-        if (!mesh) continue;
-        for (const auto& record : GetObjectRecords(view.Scene, *scene.Get(), columns.Ids[row])) {
-            const auto& section = *record.Section;
-            const auto data = record.Binding.Data ? record.Binding.Data : fallback;
-            if (!data) {
-                RADRAY_ERR_LOG("missing material slot {}", section.MaterialSlot);
+    candidates.reserve(columns.Size());
+    const auto planes = RasterFrustumPlanes(resolved->ViewProjection);
+    {
+        RADRAY_PROFILE_SCOPE_N("SceneDraw::CullAndSelect");
+        for (size_t row = 0; row < columns.Size(); ++row) {
+            const auto id = columns.Ids[row];
+            const auto state = scene->GetDrawState(id);
+            if (!state || !(state->VisibilityMask & view.VisibilityMask)) {
+                ++result.Stats.MaskCulled;
                 continue;
             }
-            const auto& draw = mesh->Draws[section.PrimitiveIndex];
-            const SceneDrawKey key{&draw, data.Get()};
-            auto geometry = geometryBindings.find(key);
-            if (geometry == geometryBindings.end()) {
-                auto material = materials.find(data.Get());
-                if (material == materials.end()) {
-                    const auto impl = std::find_if(data->Passes.begin(), data->Passes.end(), [&](const auto& p) { return p.Name == passName; });
-                    if (impl == data->Passes.end()) {
-                        RADRAY_ERR_LOG("material has no pass {}", passName);
+            const auto& bounds = columns.Bounds[row];
+            if (!RasterBoundsVisible(bounds.Min, bounds.Max, planes)) {
+                ++result.Stats.BoundsCulled;
+                continue;
+            }
+            for (const auto& primitive : GetObjectRecords(view.Scene, *scene.Get(), id)) {
+                const auto data = primitive.Binding.Data ? primitive.Binding.Data : fallback;
+                if (!data) {
+                    ++result.Stats.MissingMaterial;
+                    continue;
+                }
+                auto material = materialIndices.find(data.Get());
+                if (material == materialIndices.end()) {
+                    const auto selected = std::find_if(data->Passes.begin(), data->Passes.end(), [&](const auto& p) { return p.Name == passName; });
+                    if (selected == data->Passes.end()) {
+                        materialIndices.emplace(data.Get(), SIZE_MAX);
+                        ++result.Stats.MissingPass;
                         continue;
                     }
-                    auto plan = _draw.ResolveMaterial(context.Renderer, *impl);
-                    if (!plan) return std::nullopt;
-                    auto prepared = _draw.PrepareMaterial(context, *plan.Get(), *data.Get(), values);
-                    if (!prepared) return std::nullopt;
-                    const auto index = result.Materials.size();
-                    result.Materials.push_back(std::move(*prepared));
-                    material = materials.emplace(data.Get(), PreparedMaterial{index, plan.Get(), &*impl}).first;
+                    const auto plan = _draw.ResolveMaterial(context.Renderer, *selected);
+                    if (!plan || (plan->Push.IsValid() && !plan->SceneIndexOffset)) return std::nullopt;
+                    MaterialInfo info{data.Get(), primitive.Binding.Data ? primitive.Binding.Gpu : fallbackGpu, &*selected, plan.Get(), {}};
+                    for (const auto& binding : selected->Inputs) {
+                        if (binding.Source != MaterialInputSource::InstanceParameters) continue;
+                        if (binding.ValueIndex >= selected->ParameterLayouts.size()) return std::nullopt;
+                        const auto& layout = selected->ParameterLayouts[binding.ValueIndex];
+                        const auto stream = scene->GetParameterStreams().find(layout.Name);
+                        if (stream == scene->GetParameterStreams().end() || stream->second.Layout != layout) return std::nullopt;
+                        info.Streams.push_back(&stream->second);
+                    }
+                    const auto index = materials.size();
+                    materials.push_back(std::move(info));
+                    material = materialIndices.emplace(data.Get(), index).first;
                 }
-                auto state = *material->second.Pass;
+                if (material->second == SIZE_MAX) {
+                    ++result.Stats.MissingPass;
+                    continue;
+                }
+                const auto& info = materials[material->second];
+                for (const auto* stream : info.Streams)
+                    if (id.Index >= stream->Rows.size() || !stream->Rows[id.Index] || stream->Rows[id.Index]->Id != id) return std::nullopt;
+                const bool visible = info.Plan->InstanceAddressing == MaterialInstanceAddressing::VisibleSlots;
+                if (state->ExplicitInstancing && !visible) {
+                    ++result.Stats.ExplicitUnsupported;
+                    continue;
+                }
+                const bool ordered = info.Pass->Blend.has_value() || info.Pass->PreserveOrder;
+                const bool merge = visible && (state->ExplicitInstancing || (info.Pass->AllowAutomaticInstancing && !ordered));
+                if (!visible)
+                    ++result.Stats.DirectObjects;
+                else if (ordered && !state->ExplicitInstancing)
+                    ++result.Stats.OrderedObjects;
+                else if (!merge)
+                    ++result.Stats.AutomaticDisabled;
+                const auto& section = *primitive.Section;
+                candidates.push_back({{primitive.Draw, material->second, section.IndexCount, section.FirstIndex,
+                                       section.VertexOffset, state->SortGroup, state->Order, state->BatchDomain, bounds.ReverseCulling, state->ExplicitInstancing},
+                                      id.Index,
+                                      merge,
+                                      merge && !ordered});
+            }
+        }
+    }
+    struct Batch {
+        BatchKey Key;
+        uint32_t Count{0}, First{0}, Cursor{0};
+    };
+    vector<Batch> batches;
+    vector<size_t> assignment;
+    vector<uint32_t> slots;
+    {
+        RADRAY_PROFILE_SCOPE_N("SceneDraw::BuildBatches");
+        const auto before = [](const Candidate& a, const Candidate& b) {
+            return a.Key.SortGroup < b.Key.SortGroup || (a.Key.SortGroup == b.Key.SortGroup && a.Key.Order < b.Key.Order);
+        };
+        if (!std::is_sorted(candidates.begin(), candidates.end(), before)) std::stable_sort(candidates.begin(), candidates.end(), before);
+        assignment.reserve(candidates.size());
+        unordered_map<BatchKey, size_t, BatchHash> compatible;
+        for (const auto& candidate : candidates) {
+            if (!batches.empty() && (batches.back().Key.SortGroup != candidate.Key.SortGroup || batches.back().Key.Order != candidate.Key.Order)) compatible.clear();
+            size_t target = SIZE_MAX;
+            if (candidate.Reorder) {
+                const auto found = compatible.find(candidate.Key);
+                if (found != compatible.end() && batches[found->second].Count < UINT32_MAX) target = found->second;
+            } else {
+                compatible.clear();
+                if (candidate.Merge && !batches.empty() && batches.back().Key == candidate.Key && batches.back().Count < UINT32_MAX) target = batches.size() - 1;
+            }
+            if (target == SIZE_MAX) {
+                target = batches.size();
+                batches.push_back({candidate.Key});
+                if (candidate.Reorder) compatible.insert_or_assign(candidate.Key, target);
+            }
+            ++batches[target].Count;
+            assignment.push_back(target);
+        }
+        uint64_t total = 0;
+        for (auto& batch : batches) {
+            if (materials[batch.Key.Material].Plan->InstanceAddressing != MaterialInstanceAddressing::VisibleSlots) continue;
+            if (total + batch.Count > UINT32_MAX) {
+                RADRAY_ERR_LOG("Visible instance list exceeds uint32 addressing");
+                return std::nullopt;
+            }
+            batch.First = static_cast<uint32_t>(total);
+            total += batch.Count;
+        }
+        slots.resize(static_cast<size_t>(total));
+        for (size_t i = 0; i < candidates.size(); ++i) {
+            auto& batch = batches[assignment[i]];
+            if (materials[batch.Key.Material].Plan->InstanceAddressing == MaterialInstanceAddressing::VisibleSlots)
+                slots[batch.First + batch.Cursor++] = candidates[i].Slot;
+            else
+                batch.First = candidates[i].Slot;
+        }
+    }
+    if (batches.empty()) return result;
+    RasterMaterialValues values{.Objects = objects.Objects, .Parameters = objects.Parameters};
+    RasterFrameBindingCache sharedGroups;
+    values.SharedGroups = &sharedGroups;
+    vector<render::ShaderBufferBinding> viewBuffers;
+    {
+        RADRAY_PROFILE_SCOPE_N("SceneDraw::PrepareBindings");
+        auto viewAllocation = context.Resources.AllocateConstants(64);
+        if (!viewAllocation.IsValid()) return std::nullopt;
+        std::memcpy(viewAllocation.Data(), resolved->ViewProjection.data(), 64);
+        const auto viewSlice = viewAllocation.Commit(64);
+        viewBuffers.push_back({viewSlice.Target, {viewSlice.Offset, viewSlice.Size}, 0});
+        values.ViewBuffers = viewBuffers;
+        if (!slots.empty()) {
+            const uint64_t size = uint64_t{slots.size()} * 4;
+            auto allocation = context.Resources.AllocateStorage(size);
+            if (!allocation.IsValid()) return std::nullopt;
+            std::memcpy(allocation.Data(), slots.data(), static_cast<size_t>(size));
+            const auto slice = allocation.Commit(size);
+            values.VisibleSlots = render::ShaderBufferBinding{slice.Target, {slice.Offset, slice.Size}, 4};
+        }
+        result.Materials.reserve(materials.size());
+        for (const auto& info : materials) {
+            auto prepared = _draw.PrepareMaterial(context, *info.Plan, *info.Data, values, info.Gpu, info.Pass);
+            if (!prepared) return std::nullopt;
+            result.Materials.push_back(std::move(*prepared));
+        }
+    }
+    {
+        RADRAY_PROFILE_SCOPE_N("SceneDraw::PrepareDraws");
+        result.Draws.reserve(batches.size());
+        // Different section ranges share a pipeline, while retaining different batch keys above.
+        struct Geometry {
+            array<render::GraphicsPipelineState*, 2> Pipelines{};
+        };
+        unordered_map<SceneDrawKey, Geometry, SceneDrawKeyHash> geometry;
+        for (const auto& batch : batches) {
+            const auto& info = materials[batch.Key.Material];
+            const auto& draw = *batch.Key.Geometry;
+            auto& pipeline = geometry[{&draw, info.Data}].Pipelines[batch.Key.Reverse ? 1 : 0];
+            if (!pipeline) {
+                auto state = *info.Pass;
                 if (!state.DepthStencil && output.Depth) {
                     state.DepthStencil = render::DepthStencilState::Default();
                     state.DepthStencil->DepthTestEnable = depthTest;
                     state.DepthStencil->DepthWriteEnable = depthTest;
                 }
-                Geometry binding{{}, material->second.Index};
-                for (uint32_t reverse = 0; reverse < 2; ++reverse) {
-                    auto pipeline = _draw.PreparePipeline(context, *material->second.Plan, state, draw.Layout, draw.Topology, pass, output, reverse != 0);
-                    if (!pipeline) return std::nullopt;
-                    binding.Pipelines[reverse] = pipeline.Get();
-                }
-                geometry = geometryBindings.emplace(key, binding).first;
+                const auto prepared = _draw.PreparePipeline(context, *info.Plan, state, draw.Layout, draw.Topology, pass, output, batch.Key.Reverse);
+                if (!prepared) return std::nullopt;
+                pipeline = prepared.Get();
             }
-            for (const auto& input : data->Passes)
-                for (const auto& binding : input.Inputs) {
-                    if (binding.Source != MaterialInputSource::InstanceParameters) continue;
-                    if (binding.ValueIndex >= input.ParameterLayouts.size()) return std::nullopt;
-                    const auto stream = scene->GetParameterStreams().find(input.ParameterLayouts[binding.ValueIndex].Name);
-                    const auto id = columns.Ids[row];
-                    if (stream == scene->GetParameterStreams().end() || id.Index >= stream->second.Rows.size() || !stream->second.Rows[id.Index] || stream->second.Rows[id.Index]->Id != id) return std::nullopt;
-                }
             PreparedRasterDraw prepared;
-            prepared.Pipeline = geometry->second.Pipelines[object.ReverseCulling ? 1 : 0];
+            prepared.Pipeline = pipeline;
             prepared.Vertices = draw.VertexBuffers;
             prepared.Indices = draw.Ibv;
-            prepared.Count = section.IndexCount;
-            prepared.First = section.FirstIndex;
-            prepared.VertexOffset = section.VertexOffset;
+            prepared.Count = batch.Key.Count;
+            prepared.First = batch.Key.First;
+            prepared.VertexOffset = batch.Key.VertexOffset;
+            prepared.Instances = batch.Count;
+            prepared.FirstInstance = 0;
             prepared.Viewport = resolved->Viewport;
             prepared.Scissor = resolved->Scissor;
-            if (result.Materials[geometry->second.Material].Push.IsValid()) {
-                const uint32_t slot = columns.Ids[row].Index;
-                const auto bytes = std::as_bytes(std::span{&slot, 1});
-                prepared.Push.assign(bytes.begin(), bytes.end());
+            if (info.Plan->Push.IsValid()) {
+                prepared.Push = info.Pass->ScenePushValues;
+                if (prepared.Push.empty()) prepared.Push.resize(info.Plan->PushSize);
+                std::memcpy(prepared.Push.data() + *info.Plan->SceneIndexOffset, &batch.First, 4);
             }
-            result.Draws.push_back({std::move(prepared), geometry->second.Material});
+            result.Draws.push_back({std::move(prepared), batch.Key.Material});
         }
     }
     return result;
@@ -164,6 +336,8 @@ void PreparedSceneDraw::Record(render::GraphicsCommandEncoder* encoder) const {
 UnlitRenderPipeline::UnlitRenderPipeline(ScenePipelineDescriptor descriptor) : _descriptor(std::move(descriptor)) {}
 PipelineRecordResult UnlitRenderPipeline::Record(PipelineContext& context, const RenderPipelineRequest& request) {
     PipelineRecordResult result;
+    context.Renderer.GetPersistentConstants().Trim();
+    if (context.Scenes) _draw.PruneScenes(*context.Scenes.Get());
     if (!request.Output) return result;
     const auto info = ValidateRenderOutput(*request.Output, *context.Resources.GetDevice());
     if (!info) {
@@ -205,10 +379,14 @@ PipelineRecordResult UnlitRenderPipeline::Record(PipelineContext& context, const
             continue;
         }
         auto draw = _draw.Prepare(context, view, *objects, pass.Get(), *info, _descriptor.PassName,
-                                  _descriptor.Fallback ? Nullable<const MaterialRenderData*>{&*_descriptor.Fallback} : nullptr, _descriptor.DepthTest);
+                                  _descriptor.Fallback ? Nullable<const MaterialRenderData*>{&*_descriptor.Fallback} : nullptr, _descriptor.DepthTest, &_fallbackGpu);
         if (!draw) {
             result.Status = PipelineRecordStatus::RecoverableFailure;
             continue;
+        }
+        if (draw->Stats.ExplicitUnsupported) {
+            RADRAY_ERR_LOG("Scene pass {} does not support {} explicit instances", _descriptor.PassName, draw->Stats.ExplicitUnsupported);
+            result.Status = PipelineRecordStatus::RecoverableFailure;
         }
         prepared.push_back(std::move(*draw));
     }

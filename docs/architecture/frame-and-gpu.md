@@ -188,12 +188,13 @@ semaphore、signal present semaphore 并 Present，必要时从统一命令池�
 成功 acquire 的帧不能通过析构取消；当前没有通用取消协议。原始平台 API 不受协程调度器
 管理，不能绕过 runtime 接口在渲染并发期间修改 HWND/NSWindow。
 
-runner 在准备槽位、完成回调、Update 与录制期间拒绝模态 Tick 重入，事件派发期间允许模态 Tick。
+runner 在准备槽位、完成回调、Update 与录制期间拒绝模态 Tick 重入，普通循环的事件派发期间允许模态 Tick。
 普通循环在 DispatchEvents 前保留一个已准备的逻辑帧；模态 Tick 优先消费它，不重复领取 writable
 槽位、重置 HostWrites、恢复完成批次或采样时间。事件派发期间出现模态活动后，外层跳过普通 Tick，
 不会再提交已被模态路径消费的帧；尚未消费的准备状态保留供后续 Tick 使用。
-同一次系统模态循环中的后续帧自行取得可写槽、收尾并开始计时，沿用系统已派发的输入，
-不递归调用 DispatchEvents。双线程模态路径仍先等待已发布的 CPU 录制结束，槽位不可写时跳过本次 Tick。
+单线程模态帧取得可写槽、收尾并开始计时后，在 Update 前派发完成回调期间新到达的输入；
+这次事件派发保持 runner 的 ticking guard，拒绝嵌套模态帧，避免 vblank 回调绕过正常帧的输入边界。
+一次模态活动可能产生多个 vblank 帧，不承诺只绘制一帧。双线程模态路径仍先等待已发布的 CPU 录制结束，槽位不可写时跳过本次 Tick。
 
 ### 窗口修改协程
 
@@ -409,10 +410,11 @@ runner 停止新帧、关闭窗口操作 → 消费并 join 已发布包
 WaitAndCleanupCompletedFlights：真实 GPU drain → 按 FrameSerial 发布完成 → S0 释放 owner
 terminal abandon：释放未发布 Scene 包，不生成成功 completion
 OnShutdown → 取消剩余通知 → WorldManager 显式 Shutdown → SceneManager
-释放 GPU 帧参数资源和未发布 raw frame owner → RenderSystem → AssetManager → FrameTimeline → AssetDatabase → GpuSystem → WindowManager
+释放 GPU 帧参数资源和未发布 raw frame owner → AssetManager → RenderSystem → FrameTimeline → AssetDatabase → GpuSystem → WindowManager
 ```
 
 加载任务与保守退休任务使用独立 scope；取消加载不会取消退休。AssetManager 的退休 scope 在完成排空后终止。
+Material 的持久 SPS 与常量 allocation 必须在 program/layout 服务退出前释放，因此 GPU drain 后先拆资产，再拆 RenderSystem。
 FrameTimeline 在 AssetManager 之后、GpuSystem 之前销毁：在飞退休任务先在时间线仍存活时收束，剩余等待者取消时 device 仍在。
 普通窗口维护通过 WaitAndRetireFlights 等待 GPU 并发布完成，随后在帧边界释放 owner，
 不 abandon writer 状态；abandon 后不能恢复正常发布。

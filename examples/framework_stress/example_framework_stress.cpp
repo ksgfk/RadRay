@@ -193,9 +193,12 @@ bool FrameworkStressApp::InitializeDrawing() {
     if (_options.Mode == StressMode::Draw && !_options.LegacyDraw) {
         MaterialPass material;
         material.Name = "Unlit";
-        material.Program.SourceName = "scene_sync.hlsl";
-        material.Inputs = {{"Objects", MaterialInputSource::SceneObjects}, {"ViewData", MaterialInputSource::ViewConstants}};
-        material.ObjectIndexPushConstant = "DrawData";
+        material.Program.SourceName = "scene_sync_instanced.hlsl";
+        material.Inputs = {{"Objects", MaterialInputSource::SceneObjects}, {"ViewData", MaterialInputSource::ViewConstants}, {"VisibleInstanceSlots", MaterialInputSource::VisibleInstanceSlots}};
+        material.PushConstant = "DrawData";
+        material.SceneIndexField = "VisibleBase";
+        material.InstanceAddressing = MaterialInstanceAddressing::VisibleSlots;
+        material.AllowAutomaticInstancing = true;
         MaterialRenderData fallback;
         fallback.Passes.push_back(std::move(material));
         _pipeline = make_unique<UnlitRenderPipeline>(ScenePipelineDescriptor{.Fallback = std::move(fallback)});

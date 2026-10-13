@@ -49,13 +49,16 @@ void SceneGpuData::Complete(uint32_t flightIndex, uint64_t serial, bool executed
     auto& flight = _flights.at(flightIndex);
     for (auto& [name, parameters] : flight.Parameters) {
         if (parameters.AttemptSerial != serial) continue;
-        if (executed) parameters.Initialized = true;
+        if (executed)
+            parameters.Initialized = true;
         else {
             const auto stream = scene.GetParameterStreams().find(name);
-            if (stream != scene.GetParameterStreams().end()) for (auto id : parameters.Attempt)
-                if (id.Index < stream->second.Rows.size() && stream->second.Rows[id.Index] && stream->second.Rows[id.Index]->Id == id) parameters.Pending.Add(id);
+            if (stream != scene.GetParameterStreams().end())
+                for (auto id : parameters.Attempt)
+                    if (id.Index < stream->second.Rows.size() && stream->second.Rows[id.Index] && stream->second.Rows[id.Index]->Id == id) parameters.Pending.Add(id);
         }
-        parameters.Attempt.clear(); parameters.AttemptSerial = 0;
+        parameters.Attempt.clear();
+        parameters.AttemptSerial = 0;
     }
     if (flight.AttemptSerial != serial || flight.AttemptGeneration != flight.Generation) return;
     if (executed) {
@@ -145,31 +148,53 @@ std::optional<SceneGpuView> SceneGpuData::Prepare(const RenderScene& scene, uint
         auto& parameters = flight.Parameters[name];
         if (parameters.AttemptSerial) RADRAY_ABORT("Instance buffer reused before completion feedback");
         const uint64_t bytes = uint64_t{stream.Rows.size()} * stream.Layout.Stride;
-        if (bytes > 64 * 1024 * 1024) return std::nullopt;
+        if (bytes > 64 * 1024 * 1024) {
+            RADRAY_ERR_LOG("Scene parameter stream {} exceeds the 64 MiB global-slot buffer limit", name);
+            return std::nullopt;
+        }
         if (!parameters.Buffer || parameters.Buffer->GetDesc().Size < bytes) {
             uint64_t capacity = parameters.Buffer ? parameters.Buffer->GetDesc().Size : stream.Layout.Stride;
             while (capacity < bytes) capacity *= 2;
             auto buffer = _device->CreateBuffer({capacity, render::MemoryType::Device, render::BufferUse::Resource | render::BufferUse::CopySource | render::BufferUse::CopyDestination});
             if (!buffer) return std::nullopt;
-            parameters.Buffer = buffer.Release(); ++parameters.Generation; parameters.Initialized = false;
+            parameters.Buffer = buffer.Release();
+            ++parameters.Generation;
+            parameters.Initialized = false;
         }
-        vector<ShapeId> dirty;
+        auto& dirty = parameters.Sorted;
+        dirty.clear();
         if (!parameters.Initialized) {
-            for (const auto& row : stream.Rows) if (row) dirty.push_back(row->Id);
-        } else dirty = parameters.Pending.Ids;
+            for (const auto& row : stream.Rows)
+                if (row) dirty.push_back(row->Id);
+        } else
+            dirty = parameters.Pending.Ids;
         std::sort(dirty.begin(), dirty.end(), [](ShapeId a, ShapeId b) { return a.Index < b.Index; });
-        vector<BufferUploadRequest> uploads;
+        auto& uploads = parameters.Uploads;
+        uploads.clear();
+        parameters.Packed.resize(dirty.size() * stream.Layout.Stride);
+        size_t packed = 0;
+        uint32_t previous = UINT32_MAX;
         for (auto id : dirty) {
             if (id.Index >= stream.Rows.size() || !stream.Rows[id.Index] || stream.Rows[id.Index]->Id != id) continue;
-            uploads.push_back({stream.Rows[id.Index]->Values, parameters.Buffer.get(), uint64_t{id.Index} * stream.Layout.Stride,
-                parameters.Initialized ? render::BufferState::ShaderRead : render::BufferState::Common, render::BufferState::ShaderRead});
+            const auto values = stream.GetValues(id.Index);
+            std::memcpy(parameters.Packed.data() + packed, values.data(), values.size());
+            if (!uploads.empty() && previous != UINT32_MAX && previous + 1 == id.Index)
+                uploads.back().SrcData = {uploads.back().SrcData.data(), uploads.back().SrcData.size() + values.size()};
+            else
+                uploads.push_back({std::span<const byte>{parameters.Packed.data() + packed, values.size()}, parameters.Buffer.get(), uint64_t{id.Index} * stream.Layout.Stride,
+                                   parameters.Initialized ? render::BufferState::ShaderRead : render::BufferState::Common, render::BufferState::ShaderRead});
+            previous = id.Index;
+            packed += values.size();
         }
         if (!uploads.empty()) {
             auto* command = allocator.Allocate();
             const bool recorded = uploader.TryUploadBufferRanges(command, uploads);
-            allocator.Return(std::span{&command, 1}); outCommands.push_back(command);
+            allocator.Return(std::span{&command, 1});
+            outCommands.push_back(command);
             if (!recorded) return std::nullopt;
-            parameters.Attempt = std::move(dirty); parameters.AttemptSerial = frameSerial; parameters.Pending.Clear();
+            parameters.Attempt.assign(dirty.begin(), dirty.end());
+            parameters.AttemptSerial = frameSerial;
+            parameters.Pending.Clear();
         }
         flight.ParameterViews.push_back({&stream.Layout, {parameters.Buffer.get(), {0, parameters.Buffer->GetDesc().Size}, stream.Layout.Stride}});
     }

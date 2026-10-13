@@ -62,6 +62,7 @@ artifact 不需要 compiler，开发期 JIT 通过配置开关接入 client。
 | ImGui 移除状态及旧设计 | [Runtime ImGui](runtime-imgui.md) |
 | RHI、后端、barrier 与同步 | [RHI 与后端](render-rhi.md) |
 | Application、多 World、场景同步、材质、Pipeline 与 shader 服务 | [Runtime 宿主](render-framework.md) |
+| 自动合批、稳定实例集合、native frame 数据与压测 | [实例绘制](../guide/instancing.md) |
 | Renderer foundation 移除状态 | [Renderer foundation](renderer-foundation.md) |
 | 重构前设计、依赖边界与历史附件 | [临时设计快照](../temp/render-framework-design.md) |
 | World 变换存储原型、性能对照与迁移代价 | [2026-09-24 实验快照](../temp/world-transform-store-benchmark-2026-09-24.md) |

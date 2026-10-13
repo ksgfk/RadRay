@@ -28,7 +28,7 @@ struct StaticMeshStateUpdate {
 
 struct ShapeMaterialUpdate {
     ShapeId Id;
-    vector<MaterialBinding> Materials;
+    MaterialBindings Materials;
 };
 
 struct ShapeTransformUpdate {
@@ -37,10 +37,18 @@ struct ShapeTransformUpdate {
 };
 struct ShapeDrawState {
     uint32_t VisibilityMask{UINT32_MAX}, SortGroup{1}, Order{0};
+    /// Zero is the ordinary automatic domain. Explicit collections reserve their own nonzero domain.
+    uint64_t BatchDomain{0};
+    bool ExplicitInstancing{false};
     friend bool operator==(const ShapeDrawState&, const ShapeDrawState&) = default;
 };
-struct ShapeDrawUpdate { ShapeId Id; ShapeDrawState State; };
-struct ShapeDrawRevision { uint64_t Geometry{0}, Materials{0}, Transform{0}, Parameters{0}, Order{0}; };
+struct ShapeDrawUpdate {
+    ShapeId Id;
+    ShapeDrawState State;
+};
+struct ShapeDrawRevision {
+    uint64_t Geometry{0}, Materials{0}, Transform{0}, Parameters{0}, Order{0};
+};
 
 static_assert(sizeof(ShapeTransformUpdate) == 56);
 

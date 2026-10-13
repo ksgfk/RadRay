@@ -5,9 +5,13 @@
 #include <radray/runtime/shader_program.h>
 #include <radray/runtime/graphics_pipeline_cache.h>
 #include <radray/runtime_type.h>
+#include <radray/runtime/gpu_resource.h>
 
 namespace radray {
 class ShaderProgramCache;
+struct RenderServiceGeneration {
+    bool Alive{true};
+};
 
 /// Device-scoped shader, graphics pipeline and render-pass services.
 class RenderSystem {
@@ -33,6 +37,8 @@ public:
     size_t GetShaderProgramCacheSize() const noexcept;
     size_t GetShaderArtifactCacheSize() const noexcept;
     bool InvalidateShaderSource(std::string_view sourceName);
+    const shared_ptr<RenderServiceGeneration>& GetGeneration() const noexcept { return _generation; }
+    PersistentCBufferArena& GetPersistentConstants() const noexcept { return *_persistentConstants; }
 
 private:
     render::Device* _device;
@@ -41,6 +47,8 @@ private:
     unique_ptr<render::RenderPassRegistry> _renderPassRegistry;
     unique_ptr<ShaderProgramCache> _shaderCache;
     unique_ptr<GraphicsPipelineCache> _graphicsPipelines;
+    shared_ptr<RenderServiceGeneration> _generation;
+    unique_ptr<PersistentCBufferArena> _persistentConstants;
 };
 
 template <>

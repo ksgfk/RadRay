@@ -1,6 +1,7 @@
 #include <radray/runtime/render_framework/render_asset_lifetime.h>
 
 #include <radray/logger.h>
+#include <limits>
 
 namespace radray {
 
@@ -11,6 +12,10 @@ RenderAssetLifetime::RenderAssetLifetime(uint32_t flightCount) : _retiredAssets(
 RenderAssetLifetime::~RenderAssetLifetime() noexcept = default;
 
 void RenderAssetLifetime::AddUse(const StreamingAssetRefAny& asset) {
+    AddUses(asset, 1);
+}
+void RenderAssetLifetime::AddUses(const StreamingAssetRefAny& asset, size_t count) {
+    if (!count) return;
     if (!asset.IsReady()) RADRAY_ABORT("Render binding requires a Ready asset");
     auto [it, inserted] = _uses.try_emplace(asset.GetAssetId());
     auto& use = it->second;
@@ -19,7 +24,8 @@ void RenderAssetLifetime::AddUse(const StreamingAssetRefAny& asset) {
     } else if (use.Owner != asset) {
         RADRAY_ABORT("Render asset identity changed");
     }
-    ++use.Count;
+    if (count > std::numeric_limits<size_t>::max() - use.Count) RADRAY_ABORT("Render asset use count exhausted");
+    use.Count += count;
 }
 
 void RenderAssetLifetime::RemoveUse(AssetId id) {

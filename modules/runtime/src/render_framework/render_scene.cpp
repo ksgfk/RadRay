@@ -47,10 +47,11 @@ void RenderScene::Apply(const SceneUpdateBatch& batch, Nullable<SceneApplyChange
         changes->Parameters.clear();
     }
     _transforms.BeginApply();
+    if (!batch.RemoveShapes.empty() || !batch.CreateShapes.empty() || !batch.MeshStates.empty() || !batch.Materials.empty()) ++_structureRevision;
     for (ShapeId id : batch.RemoveShapes) {
         if (!ContainsShape(id)) RADRAY_ABORT("Invalid shape removal");
         auto& slot = _shapes[id.Index];
-        for (auto& [name, stream] : _parameters) if (id.Index < stream.Rows.size()) stream.Rows[id.Index].reset();
+        for (auto& [name, stream] : _parameters) stream.Remove(id.Index);
         if (changes) changes->Removed.push_back(id);
         UnbindShape(id.Index);
         if (slot.MeshIndex != kNoMesh) {
@@ -80,7 +81,8 @@ void RenderScene::Apply(const SceneUpdateBatch& batch, Nullable<SceneApplyChange
         if (slot.Alive || id.Generation < slot.Generation) RADRAY_ABORT("Stale shape creation");
         slot.Generation = id.Generation;
         slot.Alive = true;
-        slot.Revision = {}; slot.Draw = {};
+        slot.Revision = {};
+        slot.Draw = {};
     }
     for (const auto& update : batch.MeshStates) {
         if (!ContainsShape(update.Id)) RADRAY_ABORT("Invalid static mesh state update");
@@ -117,23 +119,29 @@ void RenderScene::Apply(const SceneUpdateBatch& batch, Nullable<SceneApplyChange
         ++_shapes[update.Id.Index].Revision.Materials;
     }
     for (const auto& update : batch.Parameters) {
-        if (!ContainsShape(update.Id) || !update.Layout.IsValid() || update.Values.size() != update.Layout.Stride) RADRAY_ABORT("Invalid instance parameter update");
-        auto [it, inserted] = _parameters.try_emplace(update.Layout.Name);
+        const auto values = update.GetValues();
+        if (!ContainsShape(update.Id) || !update.Layout || !update.Layout->IsValid() || values.size() != update.Layout->Stride) RADRAY_ABORT("Invalid instance parameter update");
+        auto [it, inserted] = _parameters.try_emplace(update.Layout->Name);
         auto& stream = it->second;
-        if (inserted) stream.Layout = update.Layout;
-        else if (stream.Layout != update.Layout) RADRAY_ABORT("Instance schema changed within a scene generation");
+        if (inserted)
+            stream.Layout = *update.Layout;
+        else if (stream.Layout != *update.Layout)
+            RADRAY_ABORT("Instance schema changed within a scene generation");
         if (update.Id.Index >= stream.Rows.size()) stream.Rows.resize(size_t{update.Id.Index} + 1);
         auto& row = stream.Rows[update.Id.Index];
-        if (!row || row->Id != update.Id || row->Values != update.Values) {
-            row = SceneParameterStream::Row{update.Id, update.Values};
+        if (!row || row->Id != update.Id || !std::equal(values.begin(), values.end(), stream.GetValues(update.Id.Index).begin())) {
+            stream.Set(update.Id, values);
             ++_shapes[update.Id.Index].Revision.Parameters;
-            if (changes) changes->Parameters.push_back({update.Id, update.Layout.Name});
+            if (changes) changes->Parameters.push_back({update.Id, update.Layout->Name});
         }
     }
     for (const auto& update : batch.DrawStates) {
         if (!ContainsShape(update.Id)) RADRAY_ABORT("Invalid shape draw state");
         auto& slot = _shapes[update.Id.Index];
-        if (slot.Draw != update.State) { slot.Draw = update.State; ++slot.Revision.Order; }
+        if (slot.Draw != update.State) {
+            slot.Draw = update.State;
+            ++slot.Revision.Order;
+        }
     }
     const auto changed = _transforms.Evaluate();
     for (auto row : changed) {

@@ -12,6 +12,10 @@ struct RasterSortGroup {
 };
 bool RasterBoundsVisible(const Eigen::Vector3d& min, const Eigen::Vector3d& max,
                          const Eigen::Vector3d& camera, const Eigen::Matrix4f& clip) noexcept;
+/// World-space bounds and a full world-to-clip matrix, normalized to zero-to-one depth.
+array<Eigen::Vector4f, 6> RasterFrustumPlanes(const Eigen::Matrix4f& clip) noexcept;
+bool RasterBoundsVisible(const Eigen::Vector3f& min, const Eigen::Vector3f& max,
+                         const array<Eigen::Vector4f, 6>& planes) noexcept;
 /// Groups are indivisible, nonoverlapping, and contiguous in the input range.
 /// Domains keep their original relative order; sorting occurs within each contiguous domain.
 bool SortRasterIndices(std::span<const uint32_t> source, std::span<const RasterSortGroup> groups,

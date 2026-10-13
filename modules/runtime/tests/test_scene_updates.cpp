@@ -3,11 +3,161 @@
 
 #include <radray/runtime/components/primitive_component.h>
 #include <radray/runtime/components/static_mesh_component.h>
+#include <radray/runtime/components/instanced_static_mesh_component.h>
 #include <radray/runtime/game_framework/actor.h>
 #include <radray/runtime/game_framework/world.h>
 
 namespace radray {
 namespace {
+
+class SceneMaterialReadyGate {
+public:
+    ~SceneMaterialReadyGate() { Resume(); }
+    void Resume() {
+        auto handle = std::exchange(_handle, {});
+        if (handle) handle.resume();
+    }
+    struct Awaiter {
+        SceneMaterialReadyGate* Gate;
+        bool await_ready() const noexcept { return false; }
+        void await_suspend(std::coroutine_handle<> handle) const noexcept { Gate->_handle = handle; }
+        void await_resume() const noexcept {}
+    };
+    Awaiter Wait() noexcept { return {this}; }
+
+private:
+    std::coroutine_handle<> _handle{};
+};
+task<AssetLoadResult> LoadSceneMaterial(SceneMaterialReadyGate& gate) {
+    co_await gate.Wait();
+    MaterialPass pass;
+    pass.Name = "Unlit";
+    pass.Program.SourceName = "ready.hlsl";
+    co_return AssetLoadResult::Success(make_unique<Material>(vector{pass}, vector<vector<byte>>{}));
+}
+TEST(SceneUpdates, MaterialReadyAfterEmptyCapturePublishesTheFinalBinding) {
+    Application app;
+    AssetManager assets;
+    SceneMaterialReadyGate gate;
+    auto material = assets.Load<Material>({{9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}, LoadSceneMaterial(gate), "late material"});
+    assets.Pump();
+    SceneManager render{1};
+    test::ScopedWorld world;
+    test::ConnectWorld(world, render);
+    auto* component = world.SpawnActor()->AddComponent<StaticMeshComponent>();
+    component->SetMaterials({material});
+    SceneUpdateBatch batch;
+    test::CollectScene(world, render, batch);
+    ASSERT_EQ(batch.Materials.size(), 1u);
+    EXPECT_FALSE(batch.Materials[0].Materials[0].Data);
+    gate.Resume();
+    assets.Pump();
+    ASSERT_TRUE(material.IsReady());
+    test::CollectScene(world, render, batch);
+    ASSERT_EQ(batch.Materials.size(), 1u);
+    EXPECT_EQ(batch.Materials[0].Materials[0].Data.Get(), &material->GetRenderData());
+}
+TEST(SceneUpdates, ManualCollectionKeepsOneComponentAndStableHandlesAcrossCompactionAndReconnect) {
+    Application app;
+    SceneManager render{2};
+    test::ScopedWorld world;
+    test::ConnectWorld(world, render);
+    auto* actor = world.SpawnActor();
+    auto* component = actor->AddComponent<InstancedStaticMeshComponent>();
+    vector<InstanceInit> input(100000);
+    vector<InstanceHandle> handles(input.size());
+    for (size_t i = 0; i < input.size(); ++i) input[i].LocalToComponent(0, 3) = static_cast<float>(i);
+    ASSERT_TRUE(component->AddInstances(input, handles));
+    EXPECT_EQ(actor->GetOwnedComponents().size(), 1u);
+    EXPECT_EQ(world.GetActors().size(), 1u);
+    EXPECT_FALSE(component->GetShapeId(handles[50000]).IsValid());
+    ASSERT_TRUE(component->RemoveInstances(std::span{handles}.subspan(50000, 1)));
+    EXPECT_FALSE(component->Contains(handles[50000]));
+    EXPECT_TRUE(component->Contains(handles.back()));
+    SceneUpdateBatch batch;
+    test::CollectScene(world, render, batch);
+    EXPECT_EQ(batch.CreateShapes.size(), 99999u);
+    EXPECT_EQ(batch.MeshStates.size(), 99999u);
+    EXPECT_EQ(batch.CreateTransforms.size(), 1u);
+    const auto oldShape = component->GetShapeId(handles[50001]);
+    InstanceUpdate update{handles[50001], Eigen::Matrix4f::Identity()};
+    update.LocalToComponent(0, 3) = 17;
+    ASSERT_TRUE(component->UpdateInstances(std::span{&update, 1}));
+    test::CollectScene(world, render, batch);
+    ASSERT_EQ(batch.Transforms.size(), 1u);
+    EXPECT_EQ(batch.Transforms[0].Id, oldShape);
+    EXPECT_FLOAT_EQ(batch.Transforms[0].LocalToWorld(0, 3), 17);
+    EXPECT_TRUE(batch.MeshStates.empty());
+    EXPECT_TRUE(batch.Materials.empty());
+    InstanceParameterLayout layout{"Tint", 16, {{"Color", 0, 16, 0, 1, 1, 4}}};
+    array<byte, 16> color{};
+    color[0] = byte{7};
+    ASSERT_TRUE(component->SetInstanceParameters(std::span{&update.Handle, 1}, layout, color));
+    test::CollectScene(world, render, batch);
+    EXPECT_EQ(batch.Parameters.size(), 99999u);
+    color[0] = byte{8};
+    ASSERT_TRUE(component->SetInstanceParameters(std::span{&update.Handle, 1}, layout, color));
+    test::CollectScene(world, render, batch);
+    ASSERT_EQ(batch.Parameters.size(), 1u);
+    EXPECT_EQ(batch.Parameters[0].Id, oldShape);
+    EXPECT_TRUE(batch.Transforms.empty());
+    EXPECT_TRUE(batch.Materials.empty());
+    EXPECT_FALSE(component->RemoveInstances(array{handles[50001], handles[50001]}));
+    ASSERT_TRUE(component->RemoveInstances(std::span{handles}.subspan(40000, 1)));
+    test::CollectScene(world, render, batch);
+    EXPECT_EQ(batch.RemoveShapes.size(), 1u);
+    EXPECT_TRUE(batch.Transforms.empty());
+    EXPECT_TRUE(batch.Parameters.empty());
+    world.RequestReconnect();
+    test::CollectScene(world, render, batch);
+    EXPECT_TRUE(component->Contains(handles[50001]));
+    EXPECT_EQ(batch.CreateShapes.size(), 99998u);
+    ASSERT_TRUE(component->UpdateInstances(std::span{&update, 1}));
+    update.LocalToComponent(1, 3) = 23;
+    ASSERT_TRUE(component->UpdateInstances(std::span{&update, 1}));
+    test::CollectScene(world, render, batch);
+    ASSERT_EQ(batch.Transforms.size(), 1u);
+    EXPECT_EQ(batch.Transforms[0].Id, component->GetShapeId(handles[50001]));
+    EXPECT_FLOAT_EQ(batch.Transforms[0].LocalToWorld(1, 3), 23);
+    component->SetRelativeLocation({10, 0, 0});
+    test::CollectScene(world, render, batch);
+    EXPECT_EQ(batch.Transforms.size(), 99998u);
+    EXPECT_TRUE(batch.Parameters.empty());
+    test::CollectScene(world, render, batch);
+    EXPECT_TRUE(batch.Empty());
+}
+TEST(SceneUpdates, ManualCollectionCaptureCancellationAndLateMaterialUseTheFinalState) {
+    Application app;
+    AssetManager assets;
+    SceneMaterialReadyGate gate;
+    auto material = assets.Load<Material>({{11, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}, LoadSceneMaterial(gate), "manual late"});
+    assets.Pump();
+    SceneManager render{1};
+    test::ScopedWorld world;
+    const auto scene = test::ConnectWorld(world, render);
+    auto* component = world.SpawnActor()->AddComponent<InstancedStaticMeshComponent>();
+    component->SetMaterials({material});
+    const array<InstanceInit, 2> input{};
+    array<InstanceHandle, 2> handles;
+    ASSERT_TRUE(component->AddInstances(input, handles));
+    world.FinalizeWorldGT();
+    world.CollectRenderUpdates();
+    ASSERT_TRUE(component->RemoveInstances(std::span{handles}.first(1)));
+    world.CollectRenderUpdates();
+    render.SealFrameGT(0);
+    EXPECT_EQ(test::SceneBatch(render, scene, 0).CreateShapes.size(), 1u);
+    EXPECT_EQ(test::SceneBatch(render, scene, 0).MeshStates.size(), 1u);
+    EXPECT_TRUE(test::SceneBatch(render, scene, 0).RemoveShapes.empty());
+    test::ConsumeFrame(render, 0);
+    test::CompleteFrame(render, 0);
+    gate.Resume();
+    assets.Pump();
+    SceneUpdateBatch batch;
+    test::CollectScene(world, render, batch);
+    ASSERT_EQ(batch.Materials.size(), 1u);
+    EXPECT_EQ(batch.Materials[0].Materials[0].Data.Get(), &material->GetRenderData());
+    EXPECT_TRUE(batch.MeshStates.empty());
+}
 
 TEST(SceneUpdates, PackedTransformsSurviveGrowthAndBulkChangesPublishFinalValues) {
     Application app;

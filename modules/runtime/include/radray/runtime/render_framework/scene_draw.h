@@ -24,10 +24,16 @@ struct PreparedSceneDraw {
     SceneViewData View;
     vector<PreparedSceneMaterial> Materials;
     vector<Item> Draws;
+    /// Actual preparation diagnostics, suitable for producers deciding whether an explicit pass is supported.
+    struct Diagnostics {
+        size_t MaskCulled{0}, BoundsCulled{0}, MissingMaterial{0}, MissingPass{0};
+        size_t DirectObjects{0}, AutomaticDisabled{0}, OrderedObjects{0}, ExplicitUnsupported{0};
+    } Stats;
     void Record(render::GraphicsCommandEncoder* encoder) const;
 };
 class SceneDraw {
 public:
+    void PruneScenes(const SceneManager& scenes);
     struct PrimitiveRecord {
         const GpuMesh::DrawData* Draw;
         const StaticMeshSection* Section;
@@ -39,17 +45,31 @@ public:
     std::optional<PreparedSceneDraw> Prepare(
         PipelineContext& context, const SceneViewRequest& view, const SceneGpuView& objects,
         render::RenderPass* pass, const RenderOutputInfo& output, std::string_view passName,
-        Nullable<const MaterialRenderData*> fallback, bool depthTest);
+        Nullable<const MaterialRenderData*> fallback, bool depthTest, Nullable<MaterialGpuState*> fallbackGpu = nullptr);
 
 private:
     RasterDraw _draw;
     struct ObjectRecord {
-        ShapeId Id;
-        uint64_t Geometry, Materials;
-        vector<PrimitiveRecord> Items;
+        ShapeId Id{};
+        uint64_t Geometry{0}, Materials{0};
+        shared_ptr<const vector<PrimitiveRecord>> Items;
     };
-    SceneId _scene;
-    vector<unique_ptr<ObjectRecord>> _records;
+    struct TemplateKey {
+        const StaticMeshRenderData* Mesh;
+        const MaterialBinding* Materials;
+        size_t Count;
+        friend bool operator==(const TemplateKey&, const TemplateKey&) = default;
+    };
+    struct TemplateHash {
+        size_t operator()(const TemplateKey& key) const noexcept;
+    };
+    struct SceneCache {
+        uint64_t Revision{UINT64_MAX};
+        vector<ObjectRecord> Records;
+        vector<uint32_t> Active;
+        unordered_map<TemplateKey, shared_ptr<const vector<PrimitiveRecord>>, TemplateHash> Templates;
+    };
+    unordered_map<uint64_t, SceneCache> _scenes;
 };
 
 struct ScenePipelineDescriptor {
@@ -68,5 +88,6 @@ public:
 private:
     ScenePipelineDescriptor _descriptor;
     SceneDraw _draw;
+    MaterialGpuState _fallbackGpu;
 };
 }  // namespace radray
