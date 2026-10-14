@@ -3752,10 +3752,6 @@ void CommandAllocatorD3D12::Reset() noexcept {
     }
     for (auto* child : _children) {
         child->_keepAliveBuffers.clear();
-        if (child->_renderPass) {
-            child->_renderPass->ReadyScopes.clear();
-            if (++child->_renderPass->Epoch == 0) RADRAY_ABORT("render pass epoch exhausted");
-        }
         child->_used = false;
         child->_executable = false;
     }
@@ -3807,7 +3803,7 @@ void CmdListD3D12::Destroy() noexcept {
     _inRenderPass = false;
 #endif
     _keepAliveBuffers.clear();
-    _renderPass.reset();
+    _renderPassList.Reset();
     _cmdList = nullptr;
     _emptyRootSignature = nullptr;
 }
@@ -3977,45 +3973,47 @@ void CmdListD3D12::PopDebugGroup() noexcept {
 #endif
 }
 
-std::optional<RenderPassToken> CmdListD3D12::PrepareRenderPass(const RenderPassBeginDescriptor& desc) noexcept {
-    if (!_recording || _activeEncoder) RADRAY_ABORT("prepare pass requires recording outside an encoder");
+Nullable<unique_ptr<GraphicsCommandEncoder>> CmdListD3D12::BeginRenderPass(const RenderPassBeginDescriptor& desc) noexcept {
+    if (!_recording || _activeEncoder) return nullptr;
     const auto signature = ValidateRenderScope(desc, *_device);
-    if (!signature) return std::nullopt;
-    if (!_renderPass) {
-        auto state = make_unique<RenderPassState>();
-        const HRESULT result = _cmdList->QueryInterface(IID_PPV_ARGS(state->List.GetAddressOf()));
+    if (!signature) return nullptr;
+    if (!_renderPassList) {
+        const HRESULT result = _cmdList->QueryInterface(IID_PPV_ARGS(_renderPassList.GetAddressOf()));
         if (FAILED(result)) {
             RADRAY_ERR_LOG("D3D12 render pass interface failed: {}", result);
-            return std::nullopt;
+            return nullptr;
         }
-        _renderPass = std::move(state);
     }
-    ReadyScope ready;
-    ready.Signature = *signature;
+    vector<D3D12_RENDER_PASS_RENDER_TARGET_DESC> colors;
+    std::optional<D3D12_RENDER_PASS_DEPTH_STENCIL_DESC> depth;
+    std::optional<D3D12_RECT> area;
+    vector<D3D12_RENDER_PASS_RENDER_TARGET_DESC> rectClears;
+    D3D12_CLEAR_FLAGS depthClearFlags{};
+    D3D12_CLEAR_VALUE depthClear{};
     if (desc.RenderArea && (desc.RenderArea->X || desc.RenderArea->Y || desc.RenderArea->Width != desc.Width || desc.RenderArea->Height != desc.Height)) {
-        const auto& area = *desc.RenderArea;
-        ready.Area = {area.X, area.Y, area.X + static_cast<LONG>(area.Width), area.Y + static_cast<LONG>(area.Height)};
+        const auto& rect = *desc.RenderArea;
+        area = {rect.X, rect.Y, rect.X + static_cast<LONG>(rect.Width), rect.Y + static_cast<LONG>(rect.Height)};
     }
-    ready.Flags = desc.AllowUavWrites ? D3D12_RENDER_PASS_FLAG_ALLOW_UAV_WRITES : D3D12_RENDER_PASS_FLAG_NONE;
+    auto flags = desc.AllowUavWrites ? D3D12_RENDER_PASS_FLAG_ALLOW_UAV_WRITES : D3D12_RENDER_PASS_FLAG_NONE;
     for (const auto& color : desc.Colors) {
         auto* view = dynamic_cast<TextureViewD3D12*>(color.View);
-        if (!view || view->_device != _device) return std::nullopt;
+        if (!view || view->_device != _device) return nullptr;
         D3D12_RENDER_PASS_RENDER_TARGET_DESC rt{};
         rt.cpuDescriptor = view->_heapView.HandleCpu();
         rt.BeginningAccess.Type = MapType(color.Load);
         rt.EndingAccess.Type = MapType(color.Store);
         rt.BeginningAccess.Clear.ClearValue.Format = view->_rawFormat;
         for (uint32_t c = 0; c < 4; ++c) rt.BeginningAccess.Clear.ClearValue.Color[c] = color.Clear.Value[c];
-        if (ready.Area && color.Load == LoadAction::Clear) {
-            ready.RectClears.push_back(rt);
+        if (area && color.Load == LoadAction::Clear) {
+            rectClears.push_back(rt);
             rt.BeginningAccess.Type = D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_PRESERVE;
         }
-        ready.Colors.push_back(rt);
+        colors.push_back(rt);
     }
     if (desc.DepthStencil) {
         const auto& d = *desc.DepthStencil;
         auto* view = dynamic_cast<TextureViewD3D12*>(d.View);
-        if (!view || view->_device != _device) return std::nullopt;
+        if (!view || view->_device != _device) return nullptr;
         D3D12_RENDER_PASS_DEPTH_STENCIL_DESC ds{};
         ds.cpuDescriptor = view->_heapView.HandleCpu();
         ds.DepthBeginningAccess.Type = MapType(d.DepthLoad);
@@ -4028,43 +4026,33 @@ std::optional<RenderPassToken> CmdListD3D12::PrepareRenderPass(const RenderPassB
         ds.DepthBeginningAccess.Clear.ClearValue = clear;
         ds.StencilBeginningAccess.Clear.ClearValue = clear;
         if (d.ReadOnly) {
-            ready.Flags |= D3D12_RENDER_PASS_FLAG_BIND_READ_ONLY_DEPTH;
-            if (IsStencilFormatDXGI(view->_rawFormat)) ready.Flags |= D3D12_RENDER_PASS_FLAG_BIND_READ_ONLY_STENCIL;
+            flags |= D3D12_RENDER_PASS_FLAG_BIND_READ_ONLY_DEPTH;
+            if (IsStencilFormatDXGI(view->_rawFormat)) flags |= D3D12_RENDER_PASS_FLAG_BIND_READ_ONLY_STENCIL;
         }
-        if (ready.Area) {
-            ready.DepthClear = clear;
+        if (area) {
+            depthClear = clear;
             if (d.DepthLoad == LoadAction::Clear) {
-                ready.DepthClearFlags |= D3D12_CLEAR_FLAG_DEPTH;
+                depthClearFlags |= D3D12_CLEAR_FLAG_DEPTH;
                 ds.DepthBeginningAccess.Type = D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_PRESERVE;
             }
             if (IsStencilFormatDXGI(view->_rawFormat) && d.StencilLoad == LoadAction::Clear) {
-                ready.DepthClearFlags |= D3D12_CLEAR_FLAG_STENCIL;
+                depthClearFlags |= D3D12_CLEAR_FLAG_STENCIL;
                 ds.StencilBeginningAccess.Type = D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_PRESERVE;
             }
         }
-        ready.Depth = ds;
+        depth = ds;
     }
-    const auto index = static_cast<uint32_t>(_renderPass->ReadyScopes.size());
-    _renderPass->ReadyScopes.push_back(std::move(ready));
-    return MakeRenderPassToken(_renderPass->Epoch, index);
-}
-Nullable<unique_ptr<GraphicsCommandEncoder>> CmdListD3D12::BeginRenderPass(RenderPassToken token) noexcept {
-    if (!_recording || _activeEncoder || !_renderPass || !token.IsFrom(this, _renderPass->Epoch) || token.Index() >= _renderPass->ReadyScopes.size()) {
-        RADRAY_ERR_LOG("invalid D3D12 render pass prepare token");
-        return nullptr;
+    auto encoder = make_unique<CmdRenderPassD3D12>(this);
+    encoder->_attachmentSignature = *signature;
+    if (area) {
+        for (const auto& clear : rectClears) _cmdList->ClearRenderTargetView(clear.cpuDescriptor, clear.BeginningAccess.Clear.ClearValue.Color, 1, &*area);
+        if (depthClearFlags) _cmdList->ClearDepthStencilView(depth->cpuDescriptor, depthClearFlags,
+                                                         depthClear.DepthStencil.Depth, depthClear.DepthStencil.Stencil, 1, &*area);
     }
-    const auto& ready = _renderPass->ReadyScopes[token.Index()];
-    if (ready.Area) {
-        for (const auto& clear : ready.RectClears) _cmdList->ClearRenderTargetView(clear.cpuDescriptor, clear.BeginningAccess.Clear.ClearValue.Color, 1, &*ready.Area);
-        if (ready.DepthClearFlags) _cmdList->ClearDepthStencilView(ready.Depth->cpuDescriptor, ready.DepthClearFlags,
-                                                                   ready.DepthClear.DepthStencil.Depth, ready.DepthClear.DepthStencil.Stencil, 1, &*ready.Area);
-    }
-    _renderPass->List->BeginRenderPass(static_cast<UINT>(ready.Colors.size()), ready.Colors.data(), ready.Depth ? &*ready.Depth : nullptr, ready.Flags);
+    _renderPassList->BeginRenderPass(static_cast<UINT>(colors.size()), colors.data(), depth ? &*depth : nullptr, flags);
 #ifdef RADRAY_ENABLE_PROFILER
     _inRenderPass = true;
 #endif
-    auto encoder = make_unique<CmdRenderPassD3D12>(this);
-    encoder->_attachmentSignature = ready.Signature;
     _activeEncoder = encoder.get();
     return encoder;
 }
@@ -4072,13 +4060,7 @@ Nullable<unique_ptr<GraphicsCommandEncoder>> CmdListD3D12::BeginRenderPass(Rende
 void CmdListD3D12::EndRenderPass(unique_ptr<GraphicsCommandEncoder> encoder) noexcept {
     if (!_recording || !encoder || _activeEncoder.Get() != encoder.get()) RADRAY_ABORT("end pass requires its active encoder");
     _activeEncoder = nullptr;
-    ComPtr<ID3D12GraphicsCommandList4> cmdList4;
-    if (HRESULT hr = _cmdList->QueryInterface(IID_PPV_ARGS(cmdList4.GetAddressOf()));
-        FAILED(hr)) {
-        RADRAY_ABORT("ID3D12GraphicsCommandList::QueryInterface failed: {} {}", GetErrorName(hr), hr);
-        return;
-    }
-    cmdList4->EndRenderPass();
+    _renderPassList->EndRenderPass();
 #ifdef RADRAY_ENABLE_PROFILER
     _inRenderPass = false;
 #endif

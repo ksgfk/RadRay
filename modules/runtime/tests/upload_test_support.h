@@ -87,8 +87,7 @@ public:
     void PushDebugGroup(std::string_view) noexcept override {}
     void PopDebugGroup() noexcept override {}
     void ResourceBarrier(std::span<const render::ResourceBarrierDescriptor>) noexcept override { ++BarrierCalls; }
-    std::optional<render::RenderPassToken> PrepareRenderPass(const render::RenderPassBeginDescriptor&) noexcept override { return std::nullopt; }
-    Nullable<unique_ptr<render::GraphicsCommandEncoder>> BeginRenderPass(render::RenderPassToken) noexcept override { return nullptr; }
+    Nullable<unique_ptr<render::GraphicsCommandEncoder>> BeginRenderPass(const render::RenderPassBeginDescriptor&) noexcept override { return nullptr; }
     void EndRenderPass(unique_ptr<render::GraphicsCommandEncoder>) noexcept override {}
     Nullable<unique_ptr<render::ComputeCommandEncoder>> BeginComputePass() noexcept override { return nullptr; }
     void EndComputePass(unique_ptr<render::ComputeCommandEncoder>) noexcept override {}

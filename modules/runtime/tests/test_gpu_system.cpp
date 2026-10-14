@@ -197,11 +197,9 @@ void RunFinalFence(render::RenderBackend backend) {
     ASSERT_TRUE(target);
     auto* command = context.AllocateCommandBuffer();
     const render::RenderPassColorAttachment color{target->View, render::LoadAction::Clear, render::StoreAction::Store};
-    const auto ready = command->PrepareRenderPass({std::span{&color, 1}, {}, 8, 8, 1});
-    ASSERT_TRUE(ready);
     const render::ResourceBarrierDescriptor before = render::BarrierTextureDescriptor{target->Target, target->InitialState, render::TextureState::RenderTarget};
     command->ResourceBarrier(std::span{&before, 1});
-    auto encoder = command->BeginRenderPass(*ready);
+    auto encoder = command->BeginRenderPass({std::span{&color, 1}, {}, 8, 8, 1});
     ASSERT_TRUE(encoder);
     command->EndRenderPass(encoder.Release());
     render::Fence* signals[]{intermediate.get()};
@@ -271,15 +269,11 @@ void RunIndependentHosts(render::RenderBackend backend) {
     const auto record = [&](AppFrameContext& context, render::TextureStates before) {
         auto* command = context.AllocateCommandBuffer();
         const render::RenderPassColorAttachment color{view.get(), render::LoadAction::Clear, render::StoreAction::Store};
-        const auto ready = command->PrepareRenderPass({std::span{&color, 1}, {}, 8, 8, 1});
-        EXPECT_TRUE(ready);
-        if (ready) {
-            const render::ResourceBarrierDescriptor barrier = render::BarrierTextureDescriptor{texture.get(), before, render::TextureState::RenderTarget};
-            command->ResourceBarrier(std::span{&barrier, 1});
-            auto encoder = command->BeginRenderPass(*ready);
-            EXPECT_TRUE(encoder);
-            if (encoder) command->EndRenderPass(encoder.Release());
-        }
+        const render::ResourceBarrierDescriptor barrier = render::BarrierTextureDescriptor{texture.get(), before, render::TextureState::RenderTarget};
+        command->ResourceBarrier(std::span{&barrier, 1});
+        auto encoder = command->BeginRenderPass({std::span{&color, 1}, {}, 8, 8, 1});
+        EXPECT_TRUE(encoder);
+        if (encoder) command->EndRenderPass(encoder.Release());
         context.ReturnCommandBuffers({.CmdBuffers = std::span{&command, 1}});
         return command;
     };
@@ -748,11 +742,9 @@ void RunFrameTargetPool(render::RenderBackend backend, uint32_t flights) {
         auto* command = frame.AllocateCommandBuffer();
         expected[flight] = static_cast<uint8_t>(round + 1);
         const render::RenderPassColorAttachment color{target->View, render::LoadAction::Clear, render::StoreAction::Store, {{float(expected[flight]) / 255, 0, 0, 1}}};
-        const auto ready = command->PrepareRenderPass({std::span{&color, 1}, {}, 8, 8, 1});
-        ASSERT_TRUE(ready);
         const render::ResourceBarrierDescriptor before = render::BarrierTextureDescriptor{target->Target, target->InitialState, render::TextureState::RenderTarget};
         command->ResourceBarrier(std::span{&before, 1});
-        auto encoder = command->BeginRenderPass(*ready);
+        auto encoder = command->BeginRenderPass({std::span{&color, 1}, {}, 8, 8, 1});
         ASSERT_TRUE(encoder);
         command->EndRenderPass(encoder.Release());
         const render::ResourceBarrierDescriptor after = render::BarrierTextureDescriptor{target->Target, render::TextureState::RenderTarget, render::TextureState::CopySource};

@@ -159,7 +159,9 @@ TEST_P(DeviceCapabilitiesTest, ReportedAttachmentFormatsAndSamplesCreate) {
                 scope.DepthStencil = {view.Get(), LoadAction::Clear, StoreAction::Store, LoadAction::Clear, StoreAction::Store};
             else
                 scope.Colors = std::span{&color, 1};
-            ASSERT_TRUE(command->PrepareRenderPass(scope));
+            auto encoder = command->BeginRenderPass(scope);
+            ASSERT_TRUE(encoder);
+            command->EndRenderPass(encoder.Release());
             command->End();
             allocator->Reset();
         }

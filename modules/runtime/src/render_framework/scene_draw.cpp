@@ -307,15 +307,8 @@ PipelineRecordResult UnlitRenderPipeline::Record(PipelineContext& context, const
         prepared.push_back(std::move(*draw));
     }
     auto* command = context.Commands.Allocate();
-    const auto token = command->PrepareRenderPass({colors, depth, info->Width, info->Height, 1, {}, "Scene pipeline"});
-    if (!token) {
-        context.Commands.Return(std::span{&command, 1});
-        result.Commands.push_back(command);
-        result.Status = PipelineRecordStatus::RecoverableFailure;
-        return result;
-    }
     TransitionRenderOutput(command, *request.Output, *result.OutputState, false);
-    auto encoder = command->BeginRenderPass(*token);
+    auto encoder = command->BeginRenderPass({colors, depth, info->Width, info->Height, 1, {}, "Scene pipeline"});
     if (encoder) {
         for (const auto& draw : prepared) draw.Record(encoder.Get());
         command->EndRenderPass(encoder.Release());

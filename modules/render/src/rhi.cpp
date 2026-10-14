@@ -71,11 +71,6 @@ std::optional<AttachmentSignature> ValidateRenderScope(const RenderPassBeginDesc
     return signature;
 }
 
-Nullable<unique_ptr<GraphicsCommandEncoder>> CommandBuffer::BeginRenderPass(const RenderPassBeginDescriptor& desc) noexcept {
-    const auto ready = PrepareRenderPass(desc);
-    return ready ? BeginRenderPass(*ready) : nullptr;
-}
-
 uint32_t GetVertexFormatSizeInBytes(VertexFormat format) noexcept {
     switch (format) {
         case VertexFormat::UINT8X2:

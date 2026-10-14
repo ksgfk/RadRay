@@ -291,16 +291,10 @@ void MaterialSceneWorkload::PrepareAndRecord(AppFrameContext& frame) {
     }
     auto* commands = context.Commands.Allocate();
     const render::ColorClearValue clear{{0, 0, 0, 1}};
-    const auto ready = commands->PrepareRenderPass({array{render::RenderPassColorAttachment{view, render::LoadAction::Clear, render::StoreAction::Store, clear}}, {}, 256, 256, 1, {}, "MaterialSceneGPU"});
-    if (!ready) {
-        context.Commands.Discard(std::span{&commands, 1});
-        _error = "Render scope preparation failed";
-        return;
-    }
     commands->PushDebugGroup("MaterialSceneGPU");
     auto state = InitialRenderOutputState(output);
     TransitionRenderOutput(commands, output, state, false);
-    auto encoder = commands->BeginRenderPass(*ready);
+    auto encoder = commands->BeginRenderPass({array{render::RenderPassColorAttachment{view, render::LoadAction::Clear, render::StoreAction::Store, clear}}, {}, 256, 256, 1, {}, "MaterialSceneGPU"});
     if (!encoder) {
         commands->PopDebugGroup();
         context.Commands.Discard(std::span{&commands, 1});

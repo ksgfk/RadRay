@@ -61,7 +61,7 @@ protected:
     }
     void TearDown() override { EXPECT_EQ(Context.ValidationErrors.load(), 0u); }
 };
-TEST_P(RenderScopeTest, RejectsInvalidAttachmentsAndAreasBeforeNativePreparation) {
+TEST_P(RenderScopeTest, RejectsInvalidAttachmentsAndAreasBeforeNativeBegin) {
     auto texture = Context.Device->CreateTexture({.Dim = TextureDimension::Dim2D, .Width = 16, .Height = 16, .DepthOrArraySize = 1, .MipLevels = 1, .SampleCount = 1, .Format = TextureFormat::RGBA8_UNORM, .Usage = TextureUse::RenderTarget | TextureUse::Resource}).Unwrap();
     auto view = Context.Device->CreateTextureView({texture.get(), TextureDimension::Dim2D, TextureFormat::RGBA8_UNORM, {0, 1, 0, 1}, TextureViewUsage::RenderTarget}).Unwrap();
     auto sampled = Context.Device->CreateTextureView({texture.get(), TextureDimension::Dim2D, TextureFormat::RGBA8_UNORM, {0, 1, 0, 1}, TextureViewUsage::Resource}).Unwrap();
@@ -70,71 +70,82 @@ TEST_P(RenderScopeTest, RejectsInvalidAttachmentsAndAreasBeforeNativePreparation
     command->Begin();
     array<RenderPassColorAttachment, 2> colors{{{view.get(), LoadAction::Clear}, {view.get(), LoadAction::Load}}};
     RenderPassBeginDescriptor scope{std::span{colors.data(), 1}, {}, 16, 16, 1};
-    ASSERT_TRUE(command->PrepareRenderPass(scope));
+    {
+        auto encoder = command->BeginRenderPass(scope);
+        ASSERT_TRUE(encoder);
+        EXPECT_FALSE(command->BeginRenderPass(scope));
+        command->EndRenderPass(encoder.Release());
+    }
     scope.Colors = colors;
-    EXPECT_FALSE(command->PrepareRenderPass(scope));
+    EXPECT_FALSE(command->BeginRenderPass(scope));
     scope.Colors = std::span{colors.data(), 1};
     colors[0].View = sampled.get();
-    EXPECT_FALSE(command->PrepareRenderPass(scope));
+    EXPECT_FALSE(command->BeginRenderPass(scope));
     colors[0].View = view.get();
     colors[0].Load = static_cast<LoadAction>(-1);
-    EXPECT_FALSE(command->PrepareRenderPass(scope));
+    EXPECT_FALSE(command->BeginRenderPass(scope));
     colors[0].Load = LoadAction::Load;
     scope.Width = 17;
-    EXPECT_FALSE(command->PrepareRenderPass(scope));
+    EXPECT_FALSE(command->BeginRenderPass(scope));
     scope.Width = 16;
     scope.Layers = 2;
-    EXPECT_FALSE(command->PrepareRenderPass(scope));
+    EXPECT_FALSE(command->BeginRenderPass(scope));
     scope.Layers = 1;
     scope.RenderArea = Rect{-1, 0, 8, 8};
-    EXPECT_FALSE(command->PrepareRenderPass(scope));
+    EXPECT_FALSE(command->BeginRenderPass(scope));
     scope.RenderArea = Rect{9, 0, 8, 8};
-    EXPECT_FALSE(command->PrepareRenderPass(scope));
+    EXPECT_FALSE(command->BeginRenderPass(scope));
     scope.RenderArea = Rect{0, 0, 0, 8};
-    EXPECT_FALSE(command->PrepareRenderPass(scope));
+    EXPECT_FALSE(command->BeginRenderPass(scope));
     scope.RenderArea.reset();
     scope.Colors = {};
-    EXPECT_FALSE(command->PrepareRenderPass(scope));
+    EXPECT_FALSE(command->BeginRenderPass(scope));
     auto depth = Context.Device->CreateTexture({.Dim = TextureDimension::Dim2D, .Width = 16, .Height = 16, .DepthOrArraySize = 1, .MipLevels = 1, .SampleCount = 1, .Format = TextureFormat::D32_FLOAT, .Usage = TextureUse::DepthStencilRead}).Unwrap();
     auto depthView = Context.Device->CreateTextureView({depth.get(), TextureDimension::Dim2D, TextureFormat::D32_FLOAT, {0, 1, 0, 1}, TextureViewUsage::DepthRead}).Unwrap();
     scope.DepthStencil = RenderPassDepthStencilAttachment{depthView.get(), LoadAction::Load, StoreAction::Store, LoadAction::DontCare, StoreAction::Discard, true};
-    ASSERT_TRUE(command->PrepareRenderPass(scope));
+    {
+        auto encoder = command->BeginRenderPass(scope);
+        ASSERT_TRUE(encoder);
+        command->EndRenderPass(encoder.Release());
+    }
     scope.DepthStencil->DepthLoad = LoadAction::Clear;
-    EXPECT_FALSE(command->PrepareRenderPass(scope));
+    EXPECT_FALSE(command->BeginRenderPass(scope));
     scope.DepthStencil->DepthLoad = LoadAction::Load;
     scope.DepthStencil->DepthStore = StoreAction::Discard;
-    EXPECT_FALSE(command->PrepareRenderPass(scope));
+    EXPECT_FALSE(command->BeginRenderPass(scope));
     command->End();
     allocator->Reset();
 }
-TEST_P(RenderScopeTest, PreparedEpochClearReadbackAndForeignToken) {
+TEST_P(RenderScopeTest, BeginFailureRecoveryAndClearReadbackAcrossReset) {
     auto texture = Context.Device->CreateTexture({.Dim = TextureDimension::Dim2D, .Width = 8, .Height = 8, .DepthOrArraySize = 1, .MipLevels = 1, .SampleCount = 1, .Format = TextureFormat::RGBA8_UNORM, .Usage = TextureUse::RenderTarget | TextureUse::CopySource}).Unwrap();
     auto view = Context.Device->CreateTextureView({texture.get(), TextureDimension::Dim2D, TextureFormat::RGBA8_UNORM, {0, 1, 0, 1}, TextureViewUsage::RenderTarget}).Unwrap();
     auto allocator = Context.Device->CreateCommandAllocator(Context.Queue).Unwrap();
     auto command = Context.Device->CreateCommandBuffer(allocator.get()).Unwrap();
-    auto other = Context.Device->CreateCommandBuffer(allocator.get()).Unwrap();
     auto fence = Context.Device->CreateFence().Unwrap();
     const auto pitch = Align(uint64_t{32}, Context.Device->GetDetail().TextureDataPitchAlignment);
     auto readback = Context.Device->CreateBuffer({pitch * 8, MemoryType::ReadBack, BufferUse::CopyDestination | BufferUse::MapRead}).Unwrap();
-    RenderPassToken previous;
+    RenderPassColorAttachment color{view.get(), LoadAction::Clear, StoreAction::Store, {{.25f, .5f, .75f, 1}}};
+    const RenderPassBeginDescriptor scope{std::span{&color, 1}, {}, 8, 8, 1};
+    EXPECT_FALSE(command->BeginRenderPass(scope));
     for (uint64_t frame = 1; frame <= 4; ++frame) {
+        EXPECT_FALSE(command->BeginRenderPass(scope));
         command->Begin();
-        other->Begin();
-        if (frame > 1) EXPECT_FALSE(command->BeginRenderPass(previous));
-        RenderPassColorAttachment color{view.get(), LoadAction::Clear, StoreAction::Store, {{.25f, .5f, .75f, 1}}};
-        const auto token = command->PrepareRenderPass({std::span{&color, 1}, {}, 8, 8, 1});
-        ASSERT_TRUE(token);
-        EXPECT_FALSE(other->BeginRenderPass(*token));
-        other->End();
+        EXPECT_FALSE(command->BeginRenderPass({}));
+        auto compute = command->BeginComputePass();
+        ASSERT_TRUE(compute);
+        EXPECT_FALSE(command->BeginRenderPass(scope));
+        command->EndComputePass(compute.Release());
         const ResourceBarrierDescriptor before = BarrierTextureDescriptor{texture.get(), frame == 1 ? TextureState::Undefined : TextureState::CopySource, TextureState::RenderTarget};
         command->ResourceBarrier(std::span{&before, 1});
-        auto encoder = command->BeginRenderPass(*token);
+        auto encoder = command->BeginRenderPass(scope);
         ASSERT_TRUE(encoder);
+        EXPECT_FALSE(command->BeginRenderPass(scope));
         command->EndRenderPass(encoder.Release());
         const ResourceBarrierDescriptor after = BarrierTextureDescriptor{texture.get(), TextureState::RenderTarget, TextureState::CopySource};
         command->ResourceBarrier(std::span{&after, 1});
         command->CopyTextureToBuffer(readback.get(), 0, texture.get(), {0, 1, 0, 1});
         command->End();
+        EXPECT_FALSE(command->BeginRenderPass(scope));
         CommandBuffer* raw = command.get();
         Fence* f = fence.get();
         Context.Queue->Submit({.CmdBuffers = std::span{&raw, 1}, .SignalFences = std::span{&f, 1}, .SignalValues = std::span{&frame, 1}});
@@ -146,7 +157,6 @@ TEST_P(RenderScopeTest, PreparedEpochClearReadbackAndForeignToken) {
         EXPECT_NEAR(bytes[1], 128, 1);
         EXPECT_NEAR(bytes[2], 191, 1);
         readback->Unmap();
-        previous = *token;
         allocator->Reset();
     }
 }
@@ -160,18 +170,17 @@ TEST_P(RenderScopeTest, PartialAreaClearPreservesAttachmentContentsOutsideTheAre
     auto readback = Context.Device->CreateBuffer({pitch * 8, MemoryType::ReadBack, BufferUse::CopyDestination | BufferUse::MapRead}).Unwrap();
     command->Begin();
     RenderPassColorAttachment color{view.get(), LoadAction::Clear, StoreAction::Store, {{0, 0, 0, 1}}};
-    auto full = command->PrepareRenderPass({std::span{&color, 1}, {}, 8, 8, 1});
-    color.Clear.Value[0] = 1;
-    auto partial = command->PrepareRenderPass({std::span{&color, 1}, {}, 8, 8, 1, Rect{2, 2, 4, 4}});
-    ASSERT_TRUE(full && partial);
+    auto partialColor = color;
+    partialColor.Clear.Value[0] = 1;
+
     const ResourceBarrierDescriptor before = BarrierTextureDescriptor{texture.get(), TextureState::Undefined, TextureState::RenderTarget};
     command->ResourceBarrier(std::span{&before, 1});
-    auto encoder = command->BeginRenderPass(*full);
+    auto encoder = command->BeginRenderPass({std::span{&color, 1}, {}, 8, 8, 1});
     ASSERT_TRUE(encoder);
     command->EndRenderPass(encoder.Release());
     const ResourceBarrierDescriptor between = BarrierTextureDescriptor{texture.get(), TextureState::RenderTarget, TextureState::RenderTarget};
     command->ResourceBarrier(std::span{&between, 1});
-    encoder = command->BeginRenderPass(*partial);
+    encoder = command->BeginRenderPass({std::span{&partialColor, 1}, {}, 8, 8, 1, Rect{2, 2, 4, 4}});
     ASSERT_TRUE(encoder);
     command->EndRenderPass(encoder.Release());
     const ResourceBarrierDescriptor after = BarrierTextureDescriptor{texture.get(), TextureState::RenderTarget, TextureState::CopySource};
@@ -212,27 +221,26 @@ TEST_P(RenderScopeTest, MultipleColorsAndReadOnlyDepthPreserveStoredPixels) {
     array attachments{RenderPassColorAttachment{views[0].get(), LoadAction::Clear, StoreAction::Store, {{1, 0, 0, 1}}},
                       RenderPassColorAttachment{views[1].get(), LoadAction::Clear, StoreAction::Store, {{0, 1, 0, 1}}}};
     command->Begin();
-    const auto write = command->PrepareRenderPass({attachments, RenderPassDepthStencilAttachment{depthWrite.get(), LoadAction::Clear, StoreAction::Store, LoadAction::DontCare, StoreAction::Discard, false, {.25f, 0}},
-                                                   8, 8, 1});
-    ASSERT_TRUE(write);
-    for (auto& color : attachments) {
+
+    auto readAttachments = attachments;
+    for (auto& color : readAttachments) {
         color.Load = LoadAction::Load;
         color.Clear = {{0, 0, 1, 0}};
     }
-    const auto read = command->PrepareRenderPass({attachments, RenderPassDepthStencilAttachment{depthRead.get(), LoadAction::Load, StoreAction::Store, LoadAction::DontCare, StoreAction::Discard, true, {.75f, 0}},
-                                                  8, 8, 1});
-    ASSERT_TRUE(read);
+
     const array<ResourceBarrierDescriptor, 3> initial{
         BarrierTextureDescriptor{colors[0].get(), TextureState::Undefined, TextureState::RenderTarget},
         BarrierTextureDescriptor{colors[1].get(), TextureState::Undefined, TextureState::RenderTarget},
         BarrierTextureDescriptor{depth.get(), TextureState::Undefined, TextureState::DepthWrite}};
     command->ResourceBarrier(initial);
-    auto writer = command->BeginRenderPass(*write);
+    auto writer = command->BeginRenderPass({attachments, RenderPassDepthStencilAttachment{depthWrite.get(), LoadAction::Clear, StoreAction::Store, LoadAction::DontCare, StoreAction::Discard, false, {.25f, 0}},
+                                          8, 8, 1});
     ASSERT_TRUE(writer);
     command->EndRenderPass(writer.Release());
     const ResourceBarrierDescriptor depthToRead = BarrierTextureDescriptor{depth.get(), TextureState::DepthWrite, TextureState::DepthRead};
     command->ResourceBarrier(std::span{&depthToRead, 1});
-    auto reader = command->BeginRenderPass(*read);
+    auto reader = command->BeginRenderPass({readAttachments, RenderPassDepthStencilAttachment{depthRead.get(), LoadAction::Load, StoreAction::Store, LoadAction::DontCare, StoreAction::Discard, true, {.75f, 0}},
+                                          8, 8, 1});
     ASSERT_TRUE(reader);
     command->EndRenderPass(reader.Release());
     const array<ResourceBarrierDescriptor, 3> toCopy{
@@ -297,17 +305,15 @@ TEST_P(RenderScopeTest, ReadOnlyDepthStencilPreservesBothNativePlanes) {
 #endif
     auto readback = device.CreateBuffer({totalBytes, MemoryType::ReadBack, BufferUse::CopyDestination | BufferUse::MapRead}).Unwrap();
     command->Begin();
-    const auto write = command->PrepareRenderPass({{}, RenderPassDepthStencilAttachment{writeView.get(), LoadAction::Clear, StoreAction::Store, LoadAction::Clear, StoreAction::Store, false, {.25f, 83}}, 8, 8, 1});
-    const auto read = command->PrepareRenderPass({{}, RenderPassDepthStencilAttachment{readView.get(), LoadAction::Load, StoreAction::Store, LoadAction::Load, StoreAction::Store, true, {.75f, 0}}, 8, 8, 1});
-    ASSERT_TRUE(write && read);
+
     const ResourceBarrierDescriptor initial = BarrierTextureDescriptor{image.get(), TextureState::Undefined, TextureState::DepthWrite};
     command->ResourceBarrier(std::span{&initial, 1});
-    auto writer = command->BeginRenderPass(*write);
+    auto writer = command->BeginRenderPass({{}, RenderPassDepthStencilAttachment{writeView.get(), LoadAction::Clear, StoreAction::Store, LoadAction::Clear, StoreAction::Store, false, {.25f, 83}}, 8, 8, 1});
     ASSERT_TRUE(writer);
     command->EndRenderPass(writer.Release());
     const ResourceBarrierDescriptor toRead = BarrierTextureDescriptor{image.get(), TextureState::DepthWrite, TextureState::DepthRead};
     command->ResourceBarrier(std::span{&toRead, 1});
-    auto reader = command->BeginRenderPass(*read);
+    auto reader = command->BeginRenderPass({{}, RenderPassDepthStencilAttachment{readView.get(), LoadAction::Load, StoreAction::Store, LoadAction::Load, StoreAction::Store, true, {.75f, 0}}, 8, 8, 1});
     ASSERT_TRUE(reader);
     command->EndRenderPass(reader.Release());
     const ResourceBarrierDescriptor toCopy = BarrierTextureDescriptor{image.get(), TextureState::DepthRead, TextureState::CopySource};
@@ -372,18 +378,17 @@ TEST_P(RenderScopeTest, MultisampleResolvePreservesClearThroughCompatibleReload)
     auto readback = device.CreateBuffer({pitch * 8, MemoryType::ReadBack, BufferUse::CopyDestination | BufferUse::MapRead}).Unwrap();
     command->Begin();
     RenderPassColorAttachment color{view.get(), LoadAction::Clear, StoreAction::Store, {{0, 1, 1, 1}}};
-    const auto clear = command->PrepareRenderPass({std::span{&color, 1}, {}, 8, 8, 1});
-    ASSERT_TRUE(clear);
-    color.Load = LoadAction::Load;
-    color.Clear = {{1, 0, 0, 1}};
-    const auto reload = command->PrepareRenderPass({std::span{&color, 1}, {}, 8, 8, 1});
-    ASSERT_TRUE(reload);
+
+    auto reloadColor = color;
+    reloadColor.Load = LoadAction::Load;
+    reloadColor.Clear = {{1, 0, 0, 1}};
+
     const ResourceBarrierDescriptor initial = BarrierTextureDescriptor{multisample.get(), TextureState::Undefined, TextureState::RenderTarget};
     command->ResourceBarrier(std::span{&initial, 1});
-    auto writer = command->BeginRenderPass(*clear);
+    auto writer = command->BeginRenderPass({std::span{&color, 1}, {}, 8, 8, 1});
     ASSERT_TRUE(writer);
     command->EndRenderPass(writer.Release());
-    auto preserve = command->BeginRenderPass(*reload);
+    auto preserve = command->BeginRenderPass({std::span{&reloadColor, 1}, {}, 8, 8, 1});
     ASSERT_TRUE(preserve);
     command->EndRenderPass(preserve.Release());
     const array<ResourceBarrierDescriptor, 2> beforeResolve{
@@ -433,8 +438,16 @@ TEST_P(RenderScopeTest, VulkanNativeReusePinsBudgetAndLocalViewInvalidation) {
     const RenderPassBeginDescriptor scope{std::span{&color, 1}, {}, 16, 16, 1};
     ca->Begin();
     cb->Begin();
-    ASSERT_TRUE(ca->PrepareRenderPass(scope));
-    ASSERT_TRUE(cb->PrepareRenderPass(scope));
+    {
+        auto encoder = ca->BeginRenderPass(scope);
+        ASSERT_TRUE(encoder);
+        ca->EndRenderPass(encoder.Release());
+    }
+    {
+        auto encoder = cb->BeginRenderPass(scope);
+        ASSERT_TRUE(encoder);
+        cb->EndRenderPass(encoder.Release());
+    }
     auto* pass = va->_passPins.front().Get();
     auto* fb = va->_framebufferPins.front().Get();
     EXPECT_EQ(pass, vb->_passPins.front().Get());
@@ -443,15 +456,23 @@ TEST_P(RenderScopeTest, VulkanNativeReusePinsBudgetAndLocalViewInvalidation) {
     EXPECT_DEATH(view.reset(), "");
     EXPECT_DEATH(device->_renderPassCache->Clear(), "");
     color.Clear.Value[0] = .5f;
-    ASSERT_TRUE(ca->PrepareRenderPass(scope));
+    {
+        auto encoder = ca->BeginRenderPass(scope);
+        ASSERT_TRUE(encoder);
+        ca->EndRenderPass(encoder.Release());
+    }
     EXPECT_EQ(va->_passPins.size(), 1u);
     EXPECT_EQ(fb->Uses, 2u);
     color.Load = LoadAction::Load;
-    ASSERT_TRUE(ca->PrepareRenderPass(scope));
+    {
+        auto encoder = ca->BeginRenderPass(scope);
+        ASSERT_TRUE(encoder);
+        ca->EndRenderPass(encoder.Release());
+    }
     EXPECT_EQ(va->_passPins.size(), 2u);
     EXPECT_EQ(va->_framebufferPins.size(), 1u);
     color.Store = StoreAction::Discard;
-    EXPECT_FALSE(ca->PrepareRenderPass(scope));
+    EXPECT_FALSE(ca->BeginRenderPass(scope));
     ca->End();
     cb->End();
     a->Reset();
@@ -462,14 +483,18 @@ TEST_P(RenderScopeTest, VulkanNativeReusePinsBudgetAndLocalViewInvalidation) {
     color.Load = LoadAction::Clear;
     color.Store = StoreAction::Store;
     ca->Begin();
-    ASSERT_TRUE(ca->PrepareRenderPass(scope));
+    {
+        auto encoder = ca->BeginRenderPass(scope);
+        ASSERT_TRUE(encoder);
+        ca->EndRenderPass(encoder.Release());
+    }
     EXPECT_EQ(pass, va->_passPins.front().Get());
     EXPECT_EQ(fb, va->_framebufferPins.front().Get());
     ca->End();
     a->Reset();
     device->_renderPassCache->SetBudget({2, 0, 2, 0});
     ca->Begin();
-    EXPECT_FALSE(ca->PrepareRenderPass(scope));
+    EXPECT_FALSE(ca->BeginRenderPass(scope));
     EXPECT_TRUE(va->_passPins.empty());
     EXPECT_TRUE(va->_framebufferPins.empty());
     ca->End();
@@ -485,30 +510,50 @@ TEST_P(RenderScopeTest, VulkanNativeReusePinsBudgetAndLocalViewInvalidation) {
         *output = VK_NULL_HANDLE;
         return VK_ERROR_OUT_OF_DEVICE_MEMORY;
     };
-    EXPECT_FALSE(ca->PrepareRenderPass(scope));
+    EXPECT_FALSE(ca->BeginRenderPass(scope));
     device->_ftb.vkCreateFramebuffer = createFramebuffer;
     EXPECT_TRUE(va->_passPins.empty());
     EXPECT_TRUE(va->_framebufferPins.empty());
-    ASSERT_TRUE(ca->PrepareRenderPass(scope));
+    {
+        auto encoder = ca->BeginRenderPass(scope);
+        ASSERT_TRUE(encoder);
+        ca->EndRenderPass(encoder.Release());
+    }
     ca->End();
     a->Reset();
     device->_renderPassCache->SetBudget({2, 3, 2, 3});
     auto unrelated = Context.Device->CreateTextureView({texture.get(), TextureDimension::Dim2D, TextureFormat::RGBA8_UNORM, {0, 1, 0, 1}, TextureViewUsage::RenderTarget}).Unwrap();
     ca->Begin();
-    ASSERT_TRUE(ca->PrepareRenderPass(scope));
+    {
+        auto encoder = ca->BeginRenderPass(scope);
+        ASSERT_TRUE(encoder);
+        ca->EndRenderPass(encoder.Release());
+    }
     auto smaller = scope;
     smaller.Width = smaller.Height = 8;
-    ASSERT_TRUE(ca->PrepareRenderPass(smaller));
+    {
+        auto encoder = ca->BeginRenderPass(smaller);
+        ASSERT_TRUE(encoder);
+        ca->EndRenderPass(encoder.Release());
+    }
     EXPECT_EQ(va->_framebufferPins.size(), 2u);
     EXPECT_NE(va->_framebufferPins[0].Get(), va->_framebufferPins[1].Get());
     color.View = unrelated.get();
-    ASSERT_TRUE(ca->PrepareRenderPass(scope));
+    {
+        auto encoder = ca->BeginRenderPass(scope);
+        ASSERT_TRUE(encoder);
+        ca->EndRenderPass(encoder.Release());
+    }
     auto* unrelatedFramebuffer = va->_framebufferPins.back().Get();
     ca->End();
     a->Reset();
     view.reset();
     ca->Begin();
-    ASSERT_TRUE(ca->PrepareRenderPass(scope));
+    {
+        auto encoder = ca->BeginRenderPass(scope);
+        ASSERT_TRUE(encoder);
+        ca->EndRenderPass(encoder.Release());
+    }
     EXPECT_EQ(va->_framebufferPins.front().Get(), unrelatedFramebuffer);
     ca->End();
     a->Reset();

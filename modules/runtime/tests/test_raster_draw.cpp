@@ -286,13 +286,11 @@ struct Vertex { float4 Position : SV_Position; nointerpolation uint Slot : TEXCO
         const render::RenderPassColorAttachment color{ColorView.get(), render::LoadAction::Clear, render::StoreAction::Store, {{0, 0, 0, 1}}};
         std::optional<render::RenderPassDepthStencilAttachment> d;
         if (depth) d = {DepthView.get(), render::LoadAction::Clear, render::StoreAction::Store, render::LoadAction::DontCare, render::StoreAction::Discard, false, {clearDepth, 0}};
-        const auto token = commands->PrepareRenderPass({std::span{&color, 1}, d, 16, 16, 1});
-        if (!token) RADRAY_ABORT("raster test scope preparation failed");
         const render::ResourceBarrierDescriptor barriers[]{
             render::BarrierTextureDescriptor{.Target = Color.get(), .Before = render::TextureState::Undefined, .After = render::TextureState::RenderTarget},
             render::BarrierTextureDescriptor{.Target = Depth.get(), .Before = render::TextureState::Undefined, .After = render::TextureState::DepthWrite}};
         commands->ResourceBarrier(std::span{barriers, depth ? 2u : 1u});
-        return commands->BeginRenderPass(*token).Unwrap().release();
+        return commands->BeginRenderPass({std::span{&color, 1}, d, 16, 16, 1}).Unwrap().release();
     }
     vector<uint8_t> Read(render::CommandBuffer* commands, render::GraphicsCommandEncoder* encoder) {
         commands->EndRenderPass(unique_ptr<render::GraphicsCommandEncoder>{encoder});

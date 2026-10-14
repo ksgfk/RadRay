@@ -833,6 +833,7 @@ struct RenderPassColorAttachment {
     StoreAction Store{StoreAction::Store};
     ColorClearValue Clear{};
 };
+
 struct RenderPassDepthStencilAttachment {
     TextureView* View;
     LoadAction DepthLoad{LoadAction::DontCare};
@@ -842,7 +843,8 @@ struct RenderPassDepthStencilAttachment {
     bool ReadOnly{false};
     DepthStencilClearValue Clear{};
 };
-/// Views and operations borrowed during preparation; their owners survive the command epoch.
+
+/// Views and operations borrowed during BeginRenderPass; their owners survive the command epoch.
 struct RenderPassBeginDescriptor {
     std::span<const RenderPassColorAttachment> Colors{};
     std::optional<RenderPassDepthStencilAttachment> DepthStencil{};
@@ -851,26 +853,13 @@ struct RenderPassBeginDescriptor {
     std::string_view Name{};
     bool AllowUavWrites{false};
 };
+
 /// Single subpass, ordered color mapping, no input/resolve attachments or multiview.
 struct AttachmentSignature {
     vector<TextureFormat> Colors;
     std::optional<TextureFormat> DepthStencil;
     uint32_t Samples{1};
     friend bool operator==(const AttachmentSignature&, const AttachmentSignature&) noexcept = default;
-};
-std::optional<AttachmentSignature> ValidateRenderScope(const RenderPassBeginDescriptor& desc, Device& device) noexcept;
-
-class RenderPassToken {
-public:
-    RenderPassToken() noexcept = default;
-    bool IsFrom(const CommandBuffer* command, uint64_t epoch) const noexcept { return _command.Get() == command && _epoch == epoch; }
-    uint32_t Index() const noexcept { return _index; }
-
-private:
-    friend class CommandBuffer;
-    Nullable<const CommandBuffer*> _command{nullptr};
-    uint64_t _epoch{0};
-    uint32_t _index{0};
 };
 
 struct TextureDescriptor {
@@ -1174,7 +1163,6 @@ struct GraphicsPipelineStateDescriptor {
     MultiSampleState MultiSample{};
     std::span<const ColorTargetState> ColorTargets{};
 };
-AttachmentSignature GetAttachmentSignature(const GraphicsPipelineStateDescriptor& desc);
 
 struct ComputePipelineStateDescriptor {
     PipelineLayout* PipelineLayout{nullptr};
@@ -1381,20 +1369,9 @@ public:
 
     virtual void ResourceBarrier(std::span<const ResourceBarrierDescriptor> barriers) noexcept = 0;
 
-    virtual std::optional<RenderPassToken> PrepareRenderPass(const RenderPassBeginDescriptor& desc) noexcept = 0;
-    virtual Nullable<unique_ptr<GraphicsCommandEncoder>> BeginRenderPass(RenderPassToken token) noexcept = 0;
-    Nullable<unique_ptr<GraphicsCommandEncoder>> BeginRenderPass(const RenderPassBeginDescriptor& desc) noexcept;
+    /// Returns null on invalid recording state, invalid attachments or native acquisition failure, without recording a pass.
+    virtual Nullable<unique_ptr<GraphicsCommandEncoder>> BeginRenderPass(const RenderPassBeginDescriptor& desc) noexcept = 0;
 
-protected:
-    RenderPassToken MakeRenderPassToken(uint64_t epoch, uint32_t index) const noexcept {
-        RenderPassToken token;
-        token._command = this;
-        token._epoch = epoch;
-        token._index = index;
-        return token;
-    }
-
-public:
     virtual void EndRenderPass(unique_ptr<GraphicsCommandEncoder> encoder) noexcept = 0;
 
     virtual Nullable<unique_ptr<ComputeCommandEncoder>> BeginComputePass() noexcept = 0;
@@ -1712,6 +1689,8 @@ uint32_t GetIndexFormatSizeInBytes(IndexFormat format) noexcept;
 IndexFormat SizeInBytesToIndexFormat(uint32_t size) noexcept;
 uint32_t GetTextureFormatBytesPerPixel(TextureFormat format) noexcept;
 uint32_t GetVertexFormatSizeInBytes(VertexFormat format) noexcept;
+std::optional<AttachmentSignature> ValidateRenderScope(const RenderPassBeginDescriptor& desc, Device& device) noexcept;
+AttachmentSignature GetAttachmentSignature(const GraphicsPipelineStateDescriptor& desc);
 
 std::string_view format_as(RenderBackend v) noexcept;
 std::string_view format_as(TextureFormat v) noexcept;

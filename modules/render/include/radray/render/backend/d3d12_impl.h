@@ -522,9 +522,7 @@ public:
 
     void PopDebugGroup() noexcept override;
 
-    using CommandBuffer::BeginRenderPass;
-    std::optional<RenderPassToken> PrepareRenderPass(const RenderPassBeginDescriptor& desc) noexcept override;
-    Nullable<unique_ptr<GraphicsCommandEncoder>> BeginRenderPass(RenderPassToken token) noexcept override;
+    Nullable<unique_ptr<GraphicsCommandEncoder>> BeginRenderPass(const RenderPassBeginDescriptor& desc) noexcept override;
 
     void EndRenderPass(unique_ptr<GraphicsCommandEncoder> encoder) noexcept override;
 
@@ -564,21 +562,6 @@ public:
     ComPtr<ID3D12RootSignature> _emptyRootSignature;
     D3D12_COMMAND_LIST_TYPE _type;
     vector<unique_ptr<Buffer>> _keepAliveBuffers;
-    struct ReadyScope {
-        AttachmentSignature Signature;
-        vector<D3D12_RENDER_PASS_RENDER_TARGET_DESC> Colors;
-        std::optional<D3D12_RENDER_PASS_DEPTH_STENCIL_DESC> Depth;
-        D3D12_RENDER_PASS_FLAGS Flags{D3D12_RENDER_PASS_FLAG_NONE};
-        std::optional<D3D12_RECT> Area;
-        vector<D3D12_RENDER_PASS_RENDER_TARGET_DESC> RectClears;
-        D3D12_CLEAR_FLAGS DepthClearFlags{};
-        D3D12_CLEAR_VALUE DepthClear{};
-    };
-    struct RenderPassState {
-        ComPtr<ID3D12GraphicsCommandList4> List;
-        uint64_t Epoch{1};
-        vector<ReadyScope> ReadyScopes;
-    };
 #ifdef RADRAY_ENABLE_PROFILER
     // Profiler GPU zones opened by PushDebugGroup. D3D12 forbids query resolution inside a render pass, so
     // zones open only outside one, and pops issued while a render pass is recording are deferred to
@@ -589,7 +572,7 @@ public:
     uint32_t _deferredZonePops{0};
     uint32_t _suppressedZonePushes{0};
 #endif
-    unique_ptr<RenderPassState> _renderPass;
+    ComPtr<ID3D12GraphicsCommandList4> _renderPassList;
 };
 
 class CmdRenderPassD3D12 final : public GraphicsCommandEncoder {

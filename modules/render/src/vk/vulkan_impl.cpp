@@ -3651,11 +3651,9 @@ void CommandAllocatorVulkan::Reset() noexcept {
     }
     if (_hasRenderScopes) {
         for (auto* child : _children) {
-            if (!child->_readyScopes.empty()) {
-                child->_readyScopes.clear();
+            if (!child->_passPins.empty()) {
                 child->_framebufferPins.clear();
                 child->_passPins.clear();
-                if (++child->_renderPassEpoch == 0) RADRAY_ABORT("render pass epoch exhausted");
             }
         }
         _hasRenderScopes = false;
@@ -3721,7 +3719,6 @@ void CommandBufferVulkan::DestroyImpl() noexcept {
         _device->_ftb.vkFreeCommandBuffers(_device->_device, _cmdPool->_cmdPool, 1, &_cmdBuffer);
         _cmdBuffer = VK_NULL_HANDLE;
     }
-    _readyScopes.clear();
     _framebufferPins.clear();
     _passPins.clear();
 }
@@ -3877,10 +3874,10 @@ void CommandBufferVulkan::PopDebugGroup() noexcept {
 
 // == 编码器 / RenderPass / Framebuffer ==
 
-std::optional<RenderPassToken> CommandBufferVulkan::PrepareRenderPass(const RenderPassBeginDescriptor& desc) noexcept {
-    if (!_recording || _activeEncoder) RADRAY_ABORT("prepare pass requires recording outside an encoder");
+Nullable<unique_ptr<GraphicsCommandEncoder>> CommandBufferVulkan::BeginRenderPass(const RenderPassBeginDescriptor& desc) noexcept {
+    if (!_recording || _activeEncoder) return nullptr;
     const auto signature = ValidateRenderScope(desc, *_device);
-    if (!signature) return std::nullopt;
+    if (!signature) return nullptr;
     FramebufferKeyVulkan key{*signature, {}, desc.Width, desc.Height, desc.Layers};
     vector<VkImageView> views;
     const auto addView = [&](TextureView* raw) {
@@ -3891,13 +3888,13 @@ std::optional<RenderPassToken> CommandBufferVulkan::PrepareRenderPass(const Rend
         return true;
     };
     for (const auto& color : desc.Colors)
-        if (!addView(color.View)) return std::nullopt;
-    if (desc.DepthStencil && !addView(desc.DepthStencil->View)) return std::nullopt;
+        if (!addView(color.View)) return nullptr;
+    if (desc.DepthStencil && !addView(desc.DepthStencil->View)) return nullptr;
     auto pass = _device->_renderPassCache->Acquire(RenderPassExecutionKeyVulkan::Build(desc, *signature), desc.Name);
-    if (!pass) return std::nullopt;
+    if (!pass) return nullptr;
     auto framebuffer = _device->_renderPassCache->Acquire(key, pass->Native, views, desc.Name);
-    if (!framebuffer) return std::nullopt;
-    ReadyScope ready{pass.Get(), framebuffer.Get(), *signature, {}, {}};
+    if (!framebuffer) return nullptr;
+    vector<VkClearValue> clears;
     for (size_t i = 0; i < desc.Colors.size(); ++i) {
         const auto& value = desc.Colors[i].Clear;
         VkClearValue clear{};
@@ -3909,39 +3906,30 @@ std::optional<RenderPassToken> CommandBufferVulkan::PrepareRenderPass(const Rend
             else
                 clear.color.float32[c] = value.Value[c];
         }
-        ready.Clears.push_back(clear);
+        clears.push_back(clear);
     }
     if (desc.DepthStencil) {
         VkClearValue clear{};
         clear.depthStencil = {desc.DepthStencil->Clear.Depth, desc.DepthStencil->Clear.Stencil};
-        ready.Clears.push_back(clear);
+        clears.push_back(clear);
     }
     const auto area = desc.RenderArea.value_or(Rect{0, 0, desc.Width, desc.Height});
-    ready.Area = {{area.X, area.Y}, {area.Width, area.Height}};
+    auto encoder = make_unique<SimulateCommandEncoderVulkan>(_device, this);
+    encoder->_framebuffer = framebuffer.Get();
+    encoder->_attachmentSignature = *signature;
+    const auto nativePass = pass->Native;
+    const auto nativeFramebuffer = framebuffer->Native;
     if (std::none_of(_passPins.begin(), _passPins.end(), [&](const auto& pin) { return pin.Get() == pass.Get(); })) _passPins.push_back(std::move(pass));
     if (std::none_of(_framebufferPins.begin(), _framebufferPins.end(), [&](const auto& pin) { return pin.Get() == framebuffer.Get(); })) _framebufferPins.push_back(std::move(framebuffer));
-    const auto index = static_cast<uint32_t>(_readyScopes.size());
-    _readyScopes.push_back(std::move(ready));
     _cmdPool->_hasRenderScopes = true;
-    return MakeRenderPassToken(_renderPassEpoch, index);
-}
-Nullable<unique_ptr<GraphicsCommandEncoder>> CommandBufferVulkan::BeginRenderPass(RenderPassToken token) noexcept {
-    if (!_recording || _activeEncoder || !token.IsFrom(this, _renderPassEpoch) || token.Index() >= _readyScopes.size()) {
-        RADRAY_ERR_LOG("invalid Vulkan render pass prepare token");
-        return nullptr;
-    }
-    const auto& ready = _readyScopes[token.Index()];
     VkRenderPassBeginInfo info{};
     info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-    info.renderPass = ready.Pass->Native;
-    info.framebuffer = ready.Framebuffer->Native;
-    info.renderArea = ready.Area;
-    info.clearValueCount = static_cast<uint32_t>(ready.Clears.size());
-    info.pClearValues = ready.Clears.data();
+    info.renderPass = nativePass;
+    info.framebuffer = nativeFramebuffer;
+    info.renderArea = {{area.X, area.Y}, {area.Width, area.Height}};
+    info.clearValueCount = static_cast<uint32_t>(clears.size());
+    info.pClearValues = clears.data();
     _device->_ftb.vkCmdBeginRenderPass(_cmdBuffer, &info, VK_SUBPASS_CONTENTS_INLINE);
-    auto encoder = make_unique<SimulateCommandEncoderVulkan>(_device, this);
-    encoder->_framebuffer = ready.Framebuffer;
-    encoder->_attachmentSignature = ready.Signature;
     _activeEncoder = encoder.get();
     return encoder;
 }

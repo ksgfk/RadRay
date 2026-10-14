@@ -408,8 +408,7 @@ Device::CreateCommandAllocator(queue) → CommandAllocator
 Device::CreateCommandBuffer(allocator) → CommandBuffer
   Begin() / End()
   ResourceBarrier(span<ResourceBarrierDescriptor>)
-  PrepareRenderPass(附件描述) → 可空 token
-  BeginRenderPass(token) → unique_ptr<GraphicsCommandEncoder>
+  BeginRenderPass(附件描述) → 可空 unique_ptr<GraphicsCommandEncoder>
   EndRenderPass(unique_ptr<...>)          // 结束，epoch 仍保留引用
   拷贝 / resolve / query
 CommandAllocator::Reset()                // 真实完成后结束旧 epoch
@@ -418,7 +417,7 @@ CommandAllocator::Reset()                // 真实完成后结束旧 epoch
 D3D12 的逻辑 `CommandAllocator` 保存可扩展的 native allocator 集合，命令在 Begin 借出一项；
 Vulkan 逻辑 allocator 拥有共享 command pool。Begin 不结束旧 epoch，重复借出命令前必须 Reset。
 两个后端的 allocator Reset 都要求全部录制关闭、GPU 使用结束；Vulkan 先 reset native pool，
-再清理 prepare token、已结束编码器及去重的 RP/FB pin。runtime 在真实完成处理时调用一次 Reset，
+再清理已结束编码器及去重的 RP/FB pin。runtime 在真实完成处理时调用一次 Reset，
 下一次 BeginFrameRecord 不再次重置。
 
 graphics encoder 的 `DrawIndirect`/`DrawIndexedIndirect` 与 compute encoder 的 `DispatchIndirect` 消费
@@ -589,11 +588,17 @@ front-face winding 的影响不同。相机侧因此保持后端无关（见
 
 PSO 的 AttachmentSignature 从现有 ColorTargets、DepthStencil、MultiSample 字段派生，只含有序格式、depth/stencil 格式及共同 samples。load/store、clear、尺寸、area 和 name 不进入 PSO 兼容身份。绑定时检查当前 scope 的签名；只读 scope 仍要求 PSO 关闭写入。
 
-CommandBuffer::PrepareRenderPass 在 recording 且无 encoder 时准备原生对象，失败返回空，不录制半个 pass。返回 token 绑定 command 地址、record epoch 与准备索引，不能跨 command 或 Reset 使用。BeginRenderPass(token) 只使用已准备对象；直接 desc 重载是一次 Prepare/Begin 的便利路径。D3D12 在首次准备附件时分配该命令的 native attachment 状态，纯 copy 命令不分配或重置它；局部 area 的 clear 先用带 rect 的 Clear 再进入 preserve 的 native pass。Vulkan 使用 renderArea。
+`CommandBuffer::BeginRenderPass(desc)` 直接校验附件、获取原生对象并开始录制，无独立准备阶段或 token。
+未处于 recording、已有 active encoder、附件校验或原生对象获取失败时返回 `nullptr`，不录制 clear/Begin，
+不改变 active encoder，调用方可以修正描述后重试。描述及其 span 只借用到调用返回；附件 owner 仍须存活至命令真实完成。
+调用方在 BeginRenderPass 前录制附件 barrier，失败时仍负责处理这些已录制的状态转换。
+D3D12 首次 Begin 时缓存该命令的 `ID3D12GraphicsCommandList4`，附件描述仅在调用内保留；
+局部 area 的 clear 在所有校验完成后先用带 rect 的 Clear，再进入 preserve 的 native pass。Vulkan 使用 renderArea，
+只有 pass 和 framebuffer 均获取成功后才加入命令的去重引用。
 
 VulkanRenderPassCache 由 DeviceVulkan 独占，借用 device。execution key 包含格式、samples、load/store、depth read-only；depth-only 格式规范化无 stencil 的操作。framebuffer key 包含有序稳定 view ID、兼容签名及 extent/layers，不依赖某个 load/store 版本的 pass 指针。PSO 创建临时借用代表 pass，成功后不长期保留；framebuffer 也不保留创建 pass 的 owner。
 
-每条 command 在 epoch 内对 pass 和 framebuffer 去重持有 intrusive use。End、Return、CPU Submit 和取消通知都不解除引用；真实完成以后 native allocator Reset 才使录制失效并释放引用。缓存零引用条目进入 LRU，引用数表示使用而非缓存常驻。默认总预算 RP=256/FB=1024，闲置预算 RP=128/FB=256；压力只淘汰闲置条目，live 条目不可驱逐，到顶明确准备失败。缓存清理不等待 GPU idle。
+每条 command 在 epoch 内对 pass 和 framebuffer 去重持有 intrusive use。End、Return、CPU Submit 和取消通知都不解除引用；真实完成以后 native allocator Reset 才使录制失效并释放引用。缓存零引用条目进入 LRU，引用数表示使用而非缓存常驻。默认总预算 RP=256/FB=1024，闲置预算 RP=128/FB=256；压力只淘汰闲置条目，live 条目不可驱逐，到顶时 BeginRenderPass 返回空。缓存清理不等待 GPU idle。
 
 view ID 在该 device 内单调且不复用。view 析构按局部 reverse index 先检查所有相关 FB 没有 command use，再同步移除闲置 FB，最后调用 vkDestroyImageView。mutex 串行化 acquire/release/invalidate/trim，允许同 device 的多个独立宿主共同计数；缓存不持有业务 texture/view 或 device shared owner。
 
@@ -638,6 +643,6 @@ barrier → 编码器 → swapchain → 各对象类的收尾实现。
 | 套件 | 覆盖 |
 |---|---|
 | `RenderScopeKeys` | clear/load、attachment 顺序、兼容签名、无 stencil 规范化 |
-| `Backends/RenderScopeTest` | prepare token、GPU readback、局部 area、Vulkan 引用/预算/view 清理 |
+| `Backends/RenderScopeTest` | Begin 失败恢复、跨 Reset GPU readback、局部 area、Vulkan 引用/预算/view 清理 |
 
 无可用 device 时测试 SKIP 而非 FAIL。

@@ -226,12 +226,7 @@ void radray::benchmarking::RegisterCommandAllocatorBenchmarks() {
                         render::RenderPassColorAttachment color{targets[image].get(), variant == 2 && frame % 2 ? render::LoadAction::Load : render::LoadAction::Clear, variant == 2 && frame % 2 ? render::StoreAction::Discard : render::StoreAction::Store, {{float(frame % 17) / 17, 0, 0, 1}}};
                         if (variant == 0) color.Clear = {{0, 0, 0, 1}};
                         for (uint32_t view = 0; view < views; ++view) {
-                            const auto token = command->PrepareRenderPass({std::span{&color, 1}, {}, size, size, 1});
-                            if (!token) {
-                                command->End();
-                                return false;
-                            }
-                            auto encoder = command->BeginRenderPass(*token);
+                            auto encoder = command->BeginRenderPass({std::span{&color, 1}, {}, size, size, 1});
                             if (!encoder) {
                                 command->End();
                                 return false;
@@ -379,11 +374,9 @@ void radray::benchmarking::RegisterWindowSubmissionBenchmarks() {
                                 auto* commands = frame.AllocateCommandBuffer();
                                 const auto desc = texture->GetDesc();
                                 const render::RenderPassColorAttachment color{image.View.get(), render::LoadAction::Clear, render::StoreAction::Store};
-                                const auto token = commands->PrepareRenderPass({std::span{&color, 1}, {}, desc.Width, desc.Height, 1});
-                                if (!token) RADRAY_ABORT("window benchmark pass preparation failed");
                                 const render::ResourceBarrierDescriptor before = render::BarrierTextureDescriptor{texture, image.State, render::TextureState::RenderTarget};
                                 commands->ResourceBarrier(std::span{&before, 1});
-                                auto encoder = commands->BeginRenderPass(*token).Unwrap();
+                                auto encoder = commands->BeginRenderPass({std::span{&color, 1}, {}, desc.Width, desc.Height, 1}).Unwrap();
                                 commands->EndRenderPass(std::move(encoder));
                                 const render::ResourceBarrierDescriptor after = render::BarrierTextureDescriptor{texture, render::TextureState::RenderTarget, render::TextureState::Present};
                                 commands->ResourceBarrier(std::span{&after, 1});

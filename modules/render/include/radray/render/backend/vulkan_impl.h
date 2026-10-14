@@ -449,9 +449,7 @@ public:
 
     void PopDebugGroup() noexcept override;
 
-    using CommandBuffer::BeginRenderPass;
-    std::optional<RenderPassToken> PrepareRenderPass(const RenderPassBeginDescriptor& desc) noexcept override;
-    Nullable<unique_ptr<GraphicsCommandEncoder>> BeginRenderPass(RenderPassToken token) noexcept override;
+    Nullable<unique_ptr<GraphicsCommandEncoder>> BeginRenderPass(const RenderPassBeginDescriptor& desc) noexcept override;
 
     void EndRenderPass(unique_ptr<GraphicsCommandEncoder> encoder) noexcept override;
 
@@ -497,15 +495,6 @@ public:
     struct ProfilerZoneStack;
     unique_ptr<ProfilerZoneStack> _profilerZones;
 #endif
-    struct ReadyScope {
-        NativeRenderPassVulkan* Pass;
-        NativeFramebufferVulkan* Framebuffer;
-        AttachmentSignature Signature;
-        vector<VkClearValue> Clears;
-        VkRect2D Area;
-    };
-    uint64_t _renderPassEpoch{1};
-    vector<ReadyScope> _readyScopes;
     vector<IntrusivePtr<NativeRenderPassVulkan>> _passPins;
     vector<IntrusivePtr<NativeFramebufferVulkan>> _framebufferPins;
 };
